@@ -3,7 +3,7 @@
 set -eu
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 . "$R/tests/lib.sh"
-bound 30 python3 tests/source_layout_check.py
+bound 30 sh ./tests/cxbin tests/sourcelayoutcheck.cx
 ua_ready
 export UA
 bound 45 python3 tests/quotedincludecheck.py

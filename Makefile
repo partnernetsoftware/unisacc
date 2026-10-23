@@ -59,7 +59,7 @@ quick: ref
 	@./tests/diag.sh
 	@./tests/cli.sh
 	@./tests/layout.sh
-	@python3 tests/consts_check.py
+	@sh ./tests/cxbin tests/constscheck.cx
 	@python3 -m unisa acc
 
 test: ref

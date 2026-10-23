@@ -42,20 +42,22 @@
 #   bench       what the compiler costs, as a ratchet: the self-compile, a
 #               small probe, and the price of emitting unoptimised code
 #               [A-45]
-#   consts      the numbers lower.py derives and src/back_*.c hardcode
-#               are the same numbers [A-43]
+#   consts      the layout numbers exec/facts records and src/back_*.c
+#               hardcode are the same numbers [A-43] (tests/constscheck.cx)
 #   oracle      every question the model can be asked, through the cache,
 #               equals the net's own answer -- both orders [A-49]
 #   docs        the stage table in README.md
 #               are the generated ones, not copies that can drift [A-48]
-#   gold_audit  the type table against the system compiler, key by key:
+#   gold_audit  the type table against the system compiler, key by key
+#               (tests/hostreferee.cx type, gate referee-type):
 #               enumeration proves the net equals the gold, this asks
 #               whether the gold is C [A-50]
 #   prec_audit  the prec table against the system compiler: every ordered
 #               operator pair's grouping, by value (undetermined pairs listed)
 #   tyinfo_audit  each scalar type's size, signedness and narrowness
 #               against cc (representation-only rows listed as skipped)
-#   abi_audit   the syscall numbers against this machine's <sys/syscall.h>;
+#   abi_audit   the syscall numbers against this machine's <sys/syscall.h>
+#               (tests/hostreferee.cx abi, gate referee-abi);
 #               each host checks its own column [A-51]
 #   layout      the data layout ENUMERATED, not sampled: every tape of up to
 #               three data definitions, with and without a symbol defined
@@ -193,15 +195,15 @@ run c99        ./tests/c99.sh
 run fuzz       ./tests/fuzz.sh
 run hostile    ./tests/hostile.sh
 run bench      ./tests/bench.sh
-run consts     bash -c 'python3 tests/consts_check.py'
+run consts     sh ./tests/cxbin tests/constscheck.cx
 run oracle     bash -c '"${UA:-/tmp/ua_ref}" --check-oracle'
 run docs       ./tests/docs.sh
 run kernel     ./tests/kernel.sh
 run tsvbuild   ./tests/tsvbuild.sh
-run gold_audit bash -c 'python3 tests/gold_audit.py'
+run gold_audit sh ./tests/cxbin tests/hostreferee.cx type
 run prec_audit bash -c 'python3 tests/prec_audit.py'
 run tyinfo_audit bash -c 'python3 tests/tyinfo_audit.py'
-run abi_audit  bash -c 'python3 tests/abi_audit.py'
+run abi_audit  sh ./tests/cxbin tests/hostreferee.cx abi
 run layout     ./tests/layout.sh
 run datashape  ./tests/datashape.sh
 k=0

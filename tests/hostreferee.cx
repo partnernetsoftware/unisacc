@@ -1,0 +1,528 @@
+#!/usr/bin/env -S unisacc.com -run
+/* hostreferee.cx -- the external referees of the gold tables: the HOST decides, the committed table answers
+   (2026-10-23, unisa detachment W1-E; one runner for the four audits that were tests/gold_audit.py,
+   tests/abi_audit.py, tests/binsel_audit.py and tests/pfconv_audit.py, whose only use of the Python seed was to
+   enumerate its tables -- weights/gold/<net>.tsv is that enumeration, committed).
+   usage (from the repository root):  sh ./tests/cxbin tests/hostreferee.cx MODE      (gate: referee-MODE)
+                                      sh ./unisacc.com -run tests/hostreferee.cx -- MODE
+     type    [A-50] [S-15 A1] weights/gold/type.tsv, key by key, against the host C compiler.  Enumeration proves the
+             constructed net equals the table and can never prove the table is C (the signed rows once said
+             `int + int` is a long; table and net agreed and every suite was green).  For the 10 numeric types x 14
+             binary operators x 10 (1400 keys) one line of C asks cc, through C11 _Generic, for the result type; an
+             error on that line means illegal.  One compile collects the errors (clang -ferror-limit=0 or gcc
+             -fmax-errors=0, chosen from `cc -dM -E`), a second, with those lines commented out, answers the types.
+             tests/gold.knownfail lists keys where the table deliberately says something else (with the reason); a
+             listed key that starts AGREEING is red too, so the list cannot rot.
+     abi     [A-51] [S-15 A2] the syscall numbers of weights/gold/abi.tsv against this machine's <sys/syscall.h>:
+             a host vouches only for its own (os, arch) column (macOS osx, Linux lnx/arm64 or lnx/x86_64).  The
+             syscall ops are the abi ops with a syscall number on some (os, arch) row (the machine ops, syscall_gate
+             included, have none anywhere); `syscall` itself (the generic gate, R19-9) is skipped.  Where an op has no
+             syscall of its own on this OS the table must say none (the lowering refuses it) instead of borrowing a
+             number: the first run found macOS nanosleep mapped to 240, SYS_listxattr.  osx numbers carry the BSD
+             class 0x2000000 [C-2].  A host that is not a target, or whose cc cannot build against the header, is a
+             skip (rc 0), as before.
+     binsel  weights/gold/binsel.tsv: which C binary operators depend on signedness on 64-bit operands (C99
+             6.5.5-6.5.14).  A host-built program evaluates every operator on a = -7, b = 3 both as long long and as
+             unsigned long long (shift count 3); the table's unsigned key must name a flavour different from the
+             signed key's exactly where the host's two results differ (as 64-bit patterns), and no signed key may
+             name a flavour that an unsigned key uses for the difference.  32 keys, all decided by the host.
+     pfconv  weights/gold/pfconv.tsv: the host printf decides what each conversion letter prints; the routine class
+             the table assigns (int u32 hex HEX oct chr str) must match the shape of the host's output for a probe
+             value (decimal with sign, unsigned decimal of -1, lower or upper hex, octal, a character, a string).
+   The referee knowledge kept here -- the C spelling of each numeric type, each op's header symbol per OS, the probe
+   values -- is about C and the host, never a copy of a table row.  Output lines and exit codes are the .py
+   versions': rc 0 agree (or skip), 1 a disagreement, 2 usage or a broken referee (cc missing, probe crashed).
+   No #include: the prelude is built in. */
+
+static char WORK[4096];
+static const char *ME = "hostreferee";
+
+static void cleanup(void) {                      /* the probe directory, its own mkdtemp: through the one deletion guard */
+    if (!WORK[0]) return;
+    cx_rmtree(WORK); WORK[0] = 0;
+}
+static void die(const char *a, const char *b) {
+    fflush(stdout); fprintf(stderr, "%s: %s%s\n", ME, a, b ? b : ""); cleanup(); exit(2);
+}
+static void *xmalloc(size_t n) { void *p = malloc(n ? n : 1); if (!p) die("out of memory", 0); return p; }
+static char *xstrndup(const char *s, size_t n) { char *d = xmalloc(n + 1); memcpy(d, s, n); d[n] = 0; return d; }
+
+typedef struct { char *b; size_t n, cap; } Buf;
+static void bput(Buf *x, const char *s, size_t n) {
+    if (x->n + n + 1 > x->cap) { x->cap = (x->n + n + 1) * 2 + 256; x->b = realloc(x->b, x->cap); if (!x->b) die("out of memory", 0); }
+    memcpy(x->b + x->n, s, n); x->n += n; x->b[x->n] = 0;
+}
+static void bf(Buf *x, const char *fmt, ...) {
+    char t[2048]; va_list ap; int n;
+    va_start(ap, fmt); n = vsnprintf(t, sizeof t, fmt, ap); va_end(ap);
+    if (n < 0 || n >= (int)sizeof t) die("line too long", 0);
+    bput(x, t, (size_t)n);
+}
+
+/* ---------- a gold table: weights/gold/<net>.tsv ----------
+   '#field NAME v...' and '#head NAME kind c...' schema lines, other '#' lines are comments, the first other line
+   is the column header (fields, then '=> head' per head), every line after it is one key's row. */
+#define MAXCOL 256
+typedef struct { char *c[MAXCOL]; int n; } Row;
+typedef struct {
+    const char *path;
+    Row hdr; int hashdr;
+    Row *rows; int nrows;
+    Row fields[8]; int nfields;               /* fields[i].c[0] is the name, the rest its values */
+} Table;
+
+static void splittab(char *line, Row *r) {
+    char *p = line; r->n = 0;
+    for (;;) {
+        char *t = strchr(p, '\t');
+        if (r->n >= MAXCOL) die("too many columns in a table row: ", line);
+        r->c[r->n++] = p;
+        if (!t) break;
+        *t = 0; p = t + 1;
+    }
+}
+static void loadtable(Table *t, const char *path) {
+    size_t n; char *s = cx_read(path, &n), *p, *e; int cap = 0;
+    memset(t, 0, sizeof *t); t->path = path;
+    if (!s) die("cannot read ", path);
+    for (p = s; *p; p = e) {
+        char *line; e = strchr(p, '\n');
+        if (e) *e++ = 0; else e = p + strlen(p);
+        if (*p && p[strlen(p) - 1] == '\r') p[strlen(p) - 1] = 0;
+        line = p;
+        if (!*line) continue;
+        if (!strncmp(line, "#field\t", 7)) {
+            Row r; if (t->nfields >= 8) die("too many fields in ", path);
+            splittab(line + 7, &r); t->fields[t->nfields++] = r; continue;
+        }
+        if (line[0] == '#') continue;
+        if (!t->hashdr) { splittab(line, &t->hdr); t->hashdr = 1; continue; }
+        if (t->nrows >= cap) { cap = cap ? cap * 2 : 256; t->rows = realloc(t->rows, (size_t)cap * sizeof *t->rows); if (!t->rows) die("out of memory", 0); }
+        splittab(line, &t->rows[t->nrows]);
+        if (t->rows[t->nrows].n != t->hdr.n) die("a row's column count differs from the header in ", path);
+        t->nrows++;
+    }
+    if (!t->hashdr || !t->nrows) die("no rows in ", path);
+}
+static int column(Table *t, const char *name) {          /* "=> y" or a field name */
+    int i; char h[256];
+    for (i = 0; i < t->hdr.n; i++) {
+        if (!strcmp(t->hdr.c[i], name)) return i;
+        snprintf(h, sizeof h, "=> %s", name);
+        if (!strcmp(t->hdr.c[i], h)) return i;
+    }
+    die("no such column in the table: ", name); return -1;
+}
+static Row *field(Table *t, const char *name) {
+    int i;
+    for (i = 0; i < t->nfields; i++) if (!strcmp(t->fields[i].c[0], name)) return &t->fields[i];
+    die("no such #field in the table: ", name); return 0;
+}
+/* the value of column COL in the row whose first NK columns are K[0..NK); NULL when the key has no row */
+static const char *lookup(Table *t, const char **k, int nk, int col) {
+    int i, j;
+    for (i = 0; i < t->nrows; i++) {
+        for (j = 0; j < nk; j++) if (strcmp(t->rows[i].c[j], k[j])) break;
+        if (j == nk) return t->rows[i].c[col];
+    }
+    return 0;
+}
+
+/* ---------- the host: files and processes ---------- */
+static void mkwork(void) {
+    const char *tmp = getenv("TMPDIR");
+    if (!tmp || !*tmp) tmp = "/tmp";
+    snprintf(WORK, sizeof WORK, "%s/unisacc-hostreferee-XXXXXX", tmp);
+    if (!mkdtemp(WORK)) { WORK[0] = 0; die("cannot make a temporary directory under ", tmp); }
+}
+static char *wpath(const char *name) { static char p[8][4200]; static int k; k = (k + 1) % 8; snprintf(p[k], sizeof p[k], "%s/%s", WORK, name); return p[k]; }
+static void writefile(const char *path, Buf *b) { if (cx_write(path, b->b, b->n) != 0) die("cannot write ", path); }
+
+/* ARGV (execvp, stdin /dev/null) under a SECS watchdog; stdout into *out, stderr into *err (either may be NULL).
+   Exit code, 128+N on signal N, 124 on timeout (process group killed), 127 when ARGV[0] cannot run. */
+static int run(char *const argv[], int secs, char **out, char **err) {
+    char *op = wpath(".out"), *ep = wpath(".err"); long ticks = (long)secs * 100; int st = 0, rc, fo, fe; pid_t pid, w; size_t n;
+    fo = open(op, O_WRONLY | O_CREAT | O_TRUNC, 0600); fe = open(ep, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fo < 0 || fe < 0) die("cannot open the capture files in ", WORK);
+    pid = fork();
+    if (pid < 0) die("fork failed", 0);
+    if (pid == 0) {
+        int nul = open("/dev/null", O_RDONLY);
+        setpgid(0, 0);
+        if (nul >= 0) { dup2(nul, 0); close(nul); }
+        dup2(fo, 1); dup2(fe, 2); close(fo); close(fe);
+        execvp(argv[0], argv); _exit(127);
+    }
+    close(fo); close(fe);
+    for (;;) {
+        w = waitpid(pid, &st, WNOHANG);
+        if (w == pid) { rc = (st & 0x7f) ? 128 + (st & 0x7f) : (st >> 8) & 0xff; break; }
+        if (w < 0) { rc = -1; break; }
+        if (ticks-- <= 0) { kill(-pid, SIGKILL); kill(pid, SIGKILL); waitpid(pid, &st, 0); rc = 124; break; }
+        usleep(10000);
+    }
+    if (out) { *out = cx_read(op, &n); if (!*out) *out = xstrndup("", 0); }
+    if (err) { *err = cx_read(ep, &n); if (!*err) *err = xstrndup("", 0); }
+    cx_remove(op); cx_remove(ep);
+    return rc;
+}
+/* cc -std=STD -w [EXTRA] -o EXE SRC; NULL on success, else cc's stderr */
+static char *ccbuild(const char *std, const char *extra, const char *exe, const char *src) {
+    char *av[8], *err; int n = 0, rc;
+    av[n++] = "cc"; if (std) av[n++] = (char *)std; av[n++] = "-w"; if (extra) av[n++] = (char *)extra;
+    av[n++] = "-o"; av[n++] = (char *)exe; av[n++] = (char *)src; av[n] = 0;
+    rc = run(av, 30, 0, &err);
+    if (rc == 0) { free(err); return 0; }
+    if (!*err) { free(err); err = xstrndup("cc failed", 9); }
+    return err;
+}
+static char *probe(const char *exe) {             /* run a built probe, its stdout; a crash is a broken referee */
+    char *av[2], *out; int rc;
+    av[0] = (char *)exe; av[1] = 0;
+    rc = run(av, 10, &out, 0);
+    if (rc != 0) { char m[64]; snprintf(m, sizeof m, "the probe program exited %d", rc); die(m, 0); }
+    return out;
+}
+static char *hostword(const char *flag) {         /* `uname -s` / `uname -m`, one word */
+    char *av[3], *out, *e; av[0] = "uname"; av[1] = (char *)flag; av[2] = 0;
+    if (run(av, 5, &out, 0) != 0) die("uname failed", 0);
+    for (e = out; *e && *e != '\n' && *e != '\r'; e++) ;
+    *e = 0; return out;
+}
+
+/* ================= type [A-50] ================= */
+static const char *TN[] = { "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64" };
+/* spelled so cc means the same on every platform: plain char is unsigned on arm64 Linux (i8 is signed char), and
+   long is 64 bits on every target of this compiler */
+static const char *TC[] = { "signed char", "short", "int", "long", "unsigned char", "unsigned short", "unsigned int",
+                            "unsigned long", "float", "double" };
+/* _Generic's answer in the table's vocabulary; long long is i64 too (the table has one 64-bit signed type) */
+static const char GEN[] = "signed char: 1, short: 2, int: 3, long: 4, long long: 4, unsigned char: 5, unsigned short: 6, "
+                          "unsigned int: 7, unsigned long: 8, unsigned long long: 8, float: 13, double: 14, char: 1, default: 99";
+static const char *codename(int c) {
+    switch (c) { case 1: return "i8"; case 2: return "i16"; case 3: return "i32"; case 4: return "i64"; case 5: return "u8";
+                 case 6: return "u16"; case 7: return "u32"; case 8: return "u64"; case 13: return "f32"; case 14: return "f64"; }
+    return "other";
+}
+static const char *TOPS[] = { "+", "-", "*", "/", "%", "<", "==", "=", "&", ",", "|", "^", "<<", ">>" };
+#define NT 10
+#define NOP 14
+#define NCASE (NT * NOP * NT)
+
+static void typesource(Buf *b, const unsigned char *skip) {
+    int t, k = 0, a, o, c;
+    b->n = 0;
+    bf(b, "#include <stdio.h>\nint main(void) {\n    int r[%d];\n", NCASE);
+    for (t = 0; t < NT; t++) bf(b, "    %s v_%s = 0;\n", TC[t], TN[t]);
+    for (a = 0; a < NT; a++) for (o = 0; o < NOP; o++) for (c = 0; c < NT; c++, k++) {
+        char e[256];
+        if (!strcmp(TOPS[o], "=")) snprintf(e, sizeof e, "v_%s = (%s)1", TN[a], TC[c]);   /* needs an lvalue of type t1 */
+        else snprintf(e, sizeof e, "(%s)1 %s (%s)1", TC[a], TOPS[o], TC[c]);
+        if (k) bput(b, "\n", 1);
+        if (skip[k]) bf(b, "    /* illegal */");
+        else bf(b, "    r[%d] = _Generic((%s), %s);", k, e, GEN);
+    }
+    bf(b, "\n    for (int k = 0; k < %d; k++) printf(\"%%d\\n\", r[k]);\n    return 0;\n}\n", NCASE);
+}
+
+static int mode_type(void) {
+    Table t; int ky[3], k, a, o, c, agree = 0, differ = 0, knownn = 0, revived = 0, n;
+    static unsigned char illegal[NCASE]; static int got[NCASE];
+    const int first_line = 3 + NT + 1;            /* where r[0]'s line sits */
+    char *macros, *err, *out, *p; const char *errflag; Buf src = { 0, 0, 0 };
+    char *kf; size_t kn; char *known[64][4]; int nknown = 0, kuse[64];
+    loadtable(&t, "weights/gold/type.tsv");
+    ky[0] = column(&t, "t1"); ky[1] = column(&t, "op"); ky[2] = column(&t, "t2");
+    if (ky[0] != 0 || ky[1] != 1 || ky[2] != 2) die("weights/gold/type.tsv: the key columns are not t1 op t2", 0);
+    { char *av[7]; av[0] = "cc"; av[1] = "-dM"; av[2] = "-E"; av[3] = "-x"; av[4] = "c"; av[5] = "/dev/null"; av[6] = 0;
+      if (run(av, 15, &macros, &err) != 0) die("cannot identify the system compiler: ", err); }
+    if (strstr(macros, "#define __clang__ ")) errflag = "-ferror-limit=0";
+    else if (strstr(macros, "#define __GNUC__ ")) errflag = "-fmax-errors=0";
+    else die("unreviewed system compiler diagnostic format", 0);
+    memset(illegal, 0, sizeof illegal);
+    /* pass 1: which lines are errors */
+    typesource(&src, illegal); writefile(wpath("audit.c"), &src);
+    { char *av[7]; av[0] = "cc"; av[1] = "-std=c11"; av[2] = "-w"; av[3] = (char *)errflag; av[4] = "-fsyntax-only"; av[5] = wpath("audit.c"); av[6] = 0;
+      run(av, 30, 0, &err); }
+    for (p = err; (p = strstr(p, "audit.c:")) != 0; ) {
+        char *q = p + 8; long ln = 0; int digits = 0;
+        p = q;
+        while (*q >= '0' && *q <= '9') { ln = ln * 10 + (*q - '0'); q++; digits++; }
+        if (!digits || *q != ':') continue;
+        q++; digits = 0; while (*q >= '0' && *q <= '9') { q++; digits++; }
+        if (!digits || strncmp(q, ": error", 7)) continue;
+        k = (int)(ln - first_line);
+        if (k >= 0 && k < NCASE) illegal[k] = 1;
+    }
+    /* pass 2: the types of the rest */
+    typesource(&src, illegal); writefile(wpath("audit.c"), &src);
+    if ((err = ccbuild("-std=c11", 0, wpath("audit"), wpath("audit.c"))) != 0) {
+        printf("  FAIL the audit program itself did not build:\n%.600s\n", err); cleanup(); return 1;
+    }
+    out = probe(wpath("audit"));
+    for (n = 0, p = out; n < NCASE; n++) {
+        char *e; long v;
+        while (*p == '\n' || *p == ' ') p++;
+        if (!*p) break;
+        v = strtol(p, &e, 10); if (e == p) break;
+        got[n] = (int)v; p = e;
+    }
+    if (n != NCASE) die("audit probe returned an incomplete type list", 0);
+    /* tests/gold.knownfail: <t1> <op> <t2> <reason> */
+    if ((kf = cx_read("tests/gold.knownfail", &kn)) != 0) {
+        char *l = kf, *e;
+        for (; *l; l = e) {
+            int f = 0; char *s;
+            e = strchr(l, '\n'); if (e) *e++ = 0; else e = l + strlen(l);
+            for (s = l; *s == ' ' || *s == '\t'; s++) ;
+            if (!*s || l[0] == '#') continue;
+            if (nknown >= 64) die("tests/gold.knownfail: too many rows", 0);
+            while (f < 3) {
+                char *w = s; while (*s && *s != ' ' && *s != '\t') s++;
+                known[nknown][f++] = xstrndup(w, (size_t)(s - w));
+                while (*s == ' ' || *s == '\t') s++;
+            }
+            known[nknown][3] = s; kuse[nknown] = 0; nknown++;
+        }
+    }
+    k = 0;
+    for (a = 0; a < NT; a++) for (o = 0; o < NOP; o++) for (c = 0; c < NT; c++, k++) {
+        const char *key[3], *have, *want = illegal[k] ? "illegal" : codename(got[k]); int same, j, kn2 = -1;
+        key[0] = TN[a]; key[1] = TOPS[o]; key[2] = TN[c];
+        have = lookup(&t, key, 3, column(&t, "y"));
+        if (!have) die("weights/gold/type.tsv has no row for a numeric key", 0);
+        same = !strcmp(have, want);
+        for (j = 0; j < nknown; j++) if (!strcmp(known[j][0], key[0]) && !strcmp(known[j][1], key[1]) && !strcmp(known[j][2], key[2])) kn2 = j;
+        if (kn2 >= 0) {
+            if (same) { revived++; printf("  REVIVED %s %s %s agrees with cc now -- drop it from gold.knownfail\n", key[0], key[1], key[2]); }
+            else knownn++;
+            continue;
+        }
+        if (same) agree++;
+        else {
+            differ++;
+            if (differ <= 40) printf("  DIFF  (%s) %-2s (%s)   gold says %-7s  cc says %s\n", key[0], key[1], key[2], have, want);
+        }
+    }
+    printf("\ngold_audit  type keys checked %d   agree %d   differ %d   known deviations %d   (numeric operands, every binary operator)\n",
+           NCASE, agree, differ, knownn);
+    cleanup();
+    return (differ || revived || !agree) ? 1 : 0;
+}
+
+/* ================= abi [A-51] ================= */
+/* the header symbol(s) each op means, per OS, first defined wins; NONE: the OS has no syscall for it (the table
+   must say none).  Any op not listed is SYS_<op>. */
+typedef struct { const char *os, *op, *names[3]; } Sym;
+#define NONE "-"
+static const Sym SYMS[] = {
+    { "lnx", "open", { "SYS_open", "SYS_openat", 0 } }, { "lnx", "unlink", { "SYS_unlink", "SYS_unlinkat", 0 } },
+    { "lnx", "rename", { "SYS_rename", "SYS_renameat2", 0 } },
+    /* R18-10: Linux/arm64 has only the *at forms and ppoll */
+    { "lnx", "stat", { "SYS_stat", "SYS_newfstatat", 0 } }, { "lnx", "lstat", { "SYS_lstat", "SYS_newfstatat", 0 } },
+    { "lnx", "mkdir", { "SYS_mkdir", "SYS_mkdirat", 0 } }, { "lnx", "chmod", { "SYS_chmod", "SYS_fchmodat", 0 } },
+    { "lnx", "getdirentries64", { NONE, 0, 0 } }, { "lnx", "syscall", { NONE, 0, 0 } },
+    { "osx", "clock_gettime", { NONE, 0, 0 } }, { "osx", "nanosleep", { NONE, 0, 0 } }, { "osx", "getdents64", { NONE, 0, 0 } },
+    { "osx", "futex", { "SYS_ulock_wait", 0, 0 } }, { "osx", "clone", { "SYS_bsdthread_create", 0, 0 } },
+    /* R18-10: the 64-bit-inode forms; macOS has no ppoll */
+    { "osx", "stat", { "SYS_stat64", 0, 0 } }, { "osx", "lstat", { "SYS_lstat64", 0, 0 } }, { "osx", "fstat", { "SYS_fstat64", 0, 0 } },
+    { "osx", "ppoll", { NONE, 0, 0 } },
+    { 0, 0, { 0, 0, 0 } }
+};
+#define OSX_CLASS_BIT 0x02000000L                 /* [C-2] the BSD syscall class, on every arch */
+
+static int mode_abi(void) {
+    Table t; Row *ops; int i, cop, cos, carch, csys, ok = 0, bad = 0, nprobe = 0;
+    char *sys, *mach, *err, *out, *p; const char *os_ = 0, *arch = 0;
+    static int want[256], have_want[256]; Buf src = { 0, 0, 0 };
+    mkwork(); sys = hostword("-s"); mach = hostword("-m");
+    if (!strcmp(sys, "Darwin")) os_ = "osx"; else if (!strcmp(sys, "Linux")) os_ = "lnx";
+    if (!strcmp(mach, "arm64") || !strcmp(mach, "aarch64")) arch = "arm64";
+    else if (!strcmp(mach, "x86_64") || !strcmp(mach, "AMD64")) arch = "x86_64";
+    if (!os_ || !arch) { printf("  skip (not a platform this compiler targets)\n"); cleanup(); return 0; }
+    loadtable(&t, "weights/gold/abi.tsv");
+    cop = column(&t, "op"); cos = column(&t, "os"); carch = column(&t, "arch"); csys = column(&t, "sysno");
+    if (cop != 0 || cos != 1 || carch != 2) die("weights/gold/abi.tsv: the key columns are not op os arch", 0);
+    ops = field(&t, "op");
+    if (ops->n - 1 > 256) die("too many abi ops", 0);
+    bf(&src, "#include <stdio.h>\n#include <sys/syscall.h>\nint main(void) {\n");
+    for (i = 1; i < ops->n; i++) {
+        const char *op = ops->c[i], *names[3] = { 0, 0, 0 }; const Sym *s; int j, r; char sym[160];
+        for (r = 0; r < t.nrows; r++) if (!strcmp(t.rows[r].c[cop], op) && strcmp(t.rows[r].c[csys], "none")) break;
+        if (r == t.nrows) continue;               /* no syscall number anywhere: a machine op, not a syscall */
+        for (s = SYMS; s->os; s++) if (!strcmp(s->os, os_) && !strcmp(s->op, op)) { names[0] = s->names[0]; names[1] = s->names[1]; names[2] = s->names[2]; break; }
+        if (!s->os) { snprintf(sym, sizeof sym, "SYS_%s", op); names[0] = sym; }
+        have_want[i] = 1; want[i] = -1;
+        if (!strcmp(names[0], NONE)) { have_want[i] = 2; continue; }     /* want None */
+        /* the first spelling the headers define: open is SYS_openat on arm64 Linux, which has no SYS_open */
+        bf(&src, "    printf(\"%%s %%ld\\n\", \"%s\", (long)(", op);
+        { int nn = 0; while (nn < 3 && names[nn]) nn++;
+          for (j = 0; j < nn; j++) bf(&src, "\n#ifdef %s\n %s\n#else\n", names[j], names[j]);
+          bf(&src, " -1");
+          for (j = 0; j < nn; j++) bf(&src, "\n#endif\n"); }
+        bf(&src, "));\n");
+        nprobe++;
+    }
+    bf(&src, "    return 0;\n}\n");
+    writefile(wpath("a.c"), &src);
+    if ((err = ccbuild(0, 0, wpath("a"), wpath("a.c"))) != 0) {
+        printf("  skip (cannot build against <sys/syscall.h>: %.120s)\n", err); cleanup(); return 0;
+    }
+    out = probe(wpath("a"));
+    for (p = out; *p; ) {
+        char *e = strchr(p, '\n'), *sp; if (e) *e = 0;
+        if ((sp = strchr(p, ' ')) != 0) {
+            *sp = 0;
+            for (i = 1; i < ops->n; i++) if (have_want[i] == 1 && !strcmp(ops->c[i], p)) want[i] = (int)strtol(sp + 1, 0, 10);
+        }
+        if (!e) break; p = e + 1;
+    }
+    for (i = 1; i < ops->n; i++) {
+        const char *op = ops->c[i], *key[3], *have; char expect[64];
+        if (!have_want[i] || !strcmp(op, "syscall")) continue;   /* the generic gate (R19-9): its number comes at run time */
+        key[0] = op; key[1] = os_; key[2] = arch;
+        have = lookup(&t, key, 3, csys);
+        if (!have) die("weights/gold/abi.tsv: no row for this host and ", op);
+        if (have_want[i] == 2) {
+            if (!strcmp(have, "none")) ok++;
+            else { bad++; printf("  FAIL %-14s the catalog says %s, but %s/%s has no such syscall -- it must say none\n", op, have, os_, arch); }
+            continue;
+        }
+        if (want[i] < 0 && !strcmp(have, "none")) { ok++; continue; }   /* absent here, and the table agrees */
+        if (want[i] < 0) { bad++; printf("  FAIL %-14s the headers here define no syscall for it\n", op); continue; }
+        if (!strcmp(os_, "osx")) snprintf(expect, sizeof expect, "0x%lx", OSX_CLASS_BIT | (long)want[i]);
+        else snprintf(expect, sizeof expect, "%d", want[i]);
+        if (!strcmp(have, expect)) ok++;
+        else { bad++; printf("  FAIL %-14s the catalog says %s, <sys/syscall.h> says %s\n", op, have, expect); }
+    }
+    (void)nprobe;
+    printf("\nabi_audit  %s/%s  syscalls agree %d   wrong %d   (against this machine's <sys/syscall.h>)\n", os_, arch, ok, bad);
+    cleanup();
+    return (bad || !ok) ? 1 : 0;
+}
+
+/* ================= binsel ================= */
+static int mode_binsel(void) {
+    Table t; Row *ops; int i, nops, cy, checked = 0, nbad = 0, matters = 0; char *out, *err, *p;
+    static long long hs[64]; static unsigned long long hu[64]; static int seen[64];
+    Buf src = { 0, 0, 0 }, bad = { 0, 0, 0 };
+    loadtable(&t, "weights/gold/binsel.tsv");
+    if (column(&t, "op") != 0 || column(&t, "sign") != 1) die("weights/gold/binsel.tsv: the key columns are not op sign", 0);
+    cy = column(&t, "y"); ops = field(&t, "op"); nops = ops->n - 1;
+    if (nops > 64) die("too many binsel ops", 0);
+    /* operands: a negative-when-signed left operand and a small positive right one (shift count 3) */
+    bf(&src, "#include <stdio.h>\nint main(void){\n  long long a=-7, b=3; unsigned long long ua=(unsigned long long)-7, ub=3;\n");
+    for (i = 0; i < nops; i++) {
+        const char *op = ops->c[i + 1]; int sh = !strcmp(op, "<<") || !strcmp(op, ">>");
+        bf(&src, "  printf(\"%%d %%lld %%llu\\n\", %d, (long long)(a %s %s), (unsigned long long)(ua %s %s));\n",
+           i, op, sh ? "3" : "b", op, sh ? "3" : "ub");
+    }
+    bf(&src, "  return 0;\n}\n");
+    mkwork(); writefile(wpath("p.c"), &src);
+    if ((err = ccbuild("-std=c99", 0, wpath("p"), wpath("p.c"))) != 0) die("the host cc cannot build the probe: ", err);
+    out = probe(wpath("p"));
+    for (p = out; *p; ) {
+        char *e; long k = strtol(p, &e, 10);
+        if (e == p || k < 0 || k >= nops) die("unreadable probe output", 0);
+        hs[k] = strtoll(e, &e, 10); hu[k] = strtoull(e, &e, 10); seen[k] = 1;
+        while (*e == '\n' || *e == ' ') e++;
+        p = e;
+    }
+    for (i = 0; i < nops; i++) if (!seen[i]) die("the probe skipped an operator", 0);
+    for (i = 0; i < nops; i++) {
+        const char *op = ops->c[i + 1], *ks[2], *ku[2], *ls, *lu; int differs = (unsigned long long)hs[i] != hu[i], tdiff, j;
+        ks[0] = op; ks[1] = "s"; ku[0] = op; ku[1] = "u";
+        ls = lookup(&t, ks, 2, cy); lu = lookup(&t, ku, 2, cy);
+        if (!ls || !lu) die("weights/gold/binsel.tsv: a key has no row: ", op);
+        checked += 2; matters += differs;
+        /* a signed key may not name a flavour that some unsigned key uses for the difference */
+        for (j = 0; j < nops; j++) {
+            const char *a2[2], *b2[2], *s2, *u2; a2[0] = ops->c[j + 1]; a2[1] = "s"; b2[0] = ops->c[j + 1]; b2[1] = "u";
+            s2 = lookup(&t, a2, 2, cy); u2 = lookup(&t, b2, 2, cy);
+            if (s2 && u2 && strcmp(s2, u2) && !strcmp(ls, u2)) {
+                nbad++; bf(&bad, "  DISAGREE ('%s', 's', '%s', 'signed key mapped to an unsigned flavour')\n", op, ls); break;
+            }
+        }
+        tdiff = strcmp(ls, lu) != 0;
+        if (tdiff != differs) {
+            nbad++; bf(&bad, "  DISAGREE ('%s', 'u', '%s', 'host says signedness %s')\n", op, lu, differs ? "matters" : "does not matter");
+        }
+    }
+    printf("binsel referee: host cc decided %d operators, %d keys checked, %d operators where signedness matters, disagreements %d\n",
+           nops, checked, matters, nbad);
+    if (bad.n) fputs(bad.b, stdout);
+    cleanup();
+    return nbad ? 1 : 0;
+}
+
+/* ================= pfconv ================= */
+typedef struct { const char *conv, *probe; } Probe;
+static const Probe PROBES[] = { { "d", "-42" }, { "i", "-42" }, { "u", "(unsigned)-1" }, { "x", "255" }, { "X", "255" },
+                                { "o", "8" }, { "p", "(void*)0" }, { "c", "'Q'" }, { "s", "\"str\"" }, { 0, 0 } };
+static int lowerhex0x(const char *v) {            /* 0x[0-9a-f]+ */
+    if (strncmp(v, "0x", 2) || !v[2]) return 0;
+    for (v += 2; *v; v++) if (!((*v >= '0' && *v <= '9') || (*v >= 'a' && *v <= 'f'))) return 0;
+    return 1;
+}
+static int shape(const char *cls, const char *v) {    /* -1: a class this referee does not know */
+    if (!strcmp(cls, "int")) return !strcmp(v, "-42");
+    if (!strcmp(cls, "u32")) return !strcmp(v, "4294967295");
+    if (!strcmp(cls, "hex")) return !strcmp(v, "ff") || !strcmp(v, "0x0") || !strcmp(v, "0") || !strcmp(v, "(nil)") || lowerhex0x(v);
+    if (!strcmp(cls, "HEX")) return !strcmp(v, "FF");
+    if (!strcmp(cls, "oct")) return !strcmp(v, "10");
+    if (!strcmp(cls, "chr")) return !strcmp(v, "Q");
+    if (!strcmp(cls, "str")) return !strcmp(v, "str");
+    return -1;
+}
+static int mode_pfconv(void) {
+    Table t; int i, cy, nbad = 0; char *out, *err; Buf src = { 0, 0, 0 }, bad = { 0, 0, 0 };
+    static char *hostv[128];
+    loadtable(&t, "weights/gold/pfconv.tsv");
+    if (column(&t, "conv") != 0) die("weights/gold/pfconv.tsv: the key column is not conv", 0);
+    cy = column(&t, "y");
+    bf(&src, "#include <stdio.h>\nint main(void){\n");
+    for (i = 0; i < t.nrows; i++) {
+        const char *c = t.rows[i].c[0]; const Probe *pr;
+        for (pr = PROBES; pr->conv; pr++) if (!strcmp(pr->conv, c)) break;
+        if (!pr->conv) die("no probe value for the conversion letter ", c);
+        if (strlen(c) != 1) die("a conversion is not one letter: ", c);
+        bf(&src, "  printf(\"%s [%%%s]\\n\", %s);\n", c, c, pr->probe);
+    }
+    bf(&src, "  return 0;\n}\n");
+    mkwork(); writefile(wpath("p.c"), &src);
+    if ((err = ccbuild("-std=c99", 0, wpath("p"), wpath("p.c"))) != 0) die("the host cc cannot build the probe: ", err);
+    out = probe(wpath("p"));
+    {   /* lines 'L [VALUE]' */
+        char *p = out;
+        while (*p) {
+            char *e = strchr(p, '\n'); size_t n;
+            if (e) *e = 0;
+            n = strlen(p);
+            if (n >= 4 && p[1] == ' ' && p[2] == '[' && p[n - 1] == ']') hostv[(unsigned char)p[0] & 127] = xstrndup(p + 3, n - 4);
+            if (!e) break; p = e + 1;
+        }
+    }
+    for (i = 0; i < t.nrows; i++) {
+        const char *c = t.rows[i].c[0], *r = t.rows[i].c[cy], *v = hostv[(unsigned char)c[0] & 127]; int s;
+        if (!v) die("the host printed nothing for the conversion letter ", c);
+        s = shape(r, v);
+        if (s != 1) { nbad++; bf(&bad, "  DISAGREE ('%s', '%s', '%s')%s\n", c, r, v, s < 0 ? "  (unknown class)" : ""); }
+    }
+    printf("pfconv referee: host printf decided %d conversions, disagreements %d\n", t.nrows, nbad);
+    if (bad.n) fputs(bad.b, stdout);
+    cleanup();
+    return nbad ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    struct stat s; const char *m;
+    if (argc != 2) { fprintf(stderr, "usage: hostreferee.cx type|abi|binsel|pfconv (from the repository root)\n"); return 2; }
+    if (stat("weights/gold", &s) != 0) { fprintf(stderr, "%s: run from the repository root (no weights/gold)\n", ME); return 2; }
+    m = argv[1];
+    if (!strcmp(m, "type")) { mkwork(); return mode_type(); }
+    if (!strcmp(m, "abi")) return mode_abi();
+    if (!strcmp(m, "binsel")) return mode_binsel();
+    if (!strcmp(m, "pfconv")) return mode_pfconv();
+    fprintf(stderr, "usage: hostreferee.cx type|abi|binsel|pfconv (from the repository root)\n");
+    return 2;
+}

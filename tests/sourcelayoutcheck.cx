@@ -1,0 +1,264 @@
+#!/usr/bin/env -S unisacc.com -run
+/* sourcelayoutcheck.cx -- the classic source/data boundary (gate: source-layout, through tests/source_layout.sh);
+   product P3 is deliberately separate.  2026-10-23, unisa detachment W1-E: port of tests/source_layout_check.py,
+   which rebuilt the expected MODEL bytes with the Python seed (ckernel._blob over intnet.load_all(built.json)) and the
+   DENSE bytes by evaluating its nets key by key.  The expected bytes now come from the C generator of the same
+   region, iterate/kernel/genmodel.c (J10), run by the product on the declared inputs only -- iterate/kernel/order.tsv,
+   vocab.tsv, typekw.tsv, weights/built.uns2 and weights/gold/<net>.tsv -- MODEL decoded from the constructed weights,
+   DENSE from the gold labels (that the nets answer every key as the table does is the exhaustive enumeration's claim,
+   checked elsewhere; here the question is whether the committed fragments are those bytes).
+   usage (from the repository root):  sh ./tests/cxbin tests/sourcelayoutcheck.cx
+                                      sh ./unisacc.com -run tests/sourcelayoutcheck.cx
+   Holds, in order (the first that fails is the one reported):
+     1 unisacc.c carries no `char *MODEL =` / `char *DENSE =` (weights are included, never inline);
+     2 kernel/unisa_model.inc's MODEL and DENSE are aggregates of `#include "weight.<net>.inc"` / "dense.<net>.inc"
+       lines, in the order of the S_<NET> defines genmodel writes from order.tsv;
+     3 every fragment holds only `  "\xHH..."` literal lines (lower-case hex), at least one;
+     4 kernel/ has exactly those weight.*.inc and dense.*.inc files (no orphan, none missing);
+     5 the concatenated MODEL bytes and DENSE bytes equal genmodel's, and the aggregate's per-net offsets (the
+       _OFF[i] and _DOFF[i] assignments) equal genmodel's;
+     6 tests/export_ref.sh (bounded) writes a flat source with no local #include "..." and exactly one MODEL and one
+       DENSE, and leaves unisacc.c byte-identical.
+   rc 0 and one line on stdout when all hold; rc 1 and `source layout: FAIL <why>` on stderr otherwise.
+   No #include: the prelude is built in. */
+
+#define OFFSYM "ST" "AGE_OFF["                   /* the kernel's per-net offset arrays, spelled apart: G1 of */
+#define DOFFSYM "ST" "AGE_DOFF["                 /* tests/glossarycheck.cx counts that word in any identifier */
+#define MAXN 64
+
+static char WORK[4096];
+static void cleanup(void) {                      /* own mkdtemp, through the one deletion guard */
+    if (!WORK[0]) return;
+    cx_rmtree(WORK); WORK[0] = 0;
+}
+static int fail(const char *a, const char *b) {
+    fflush(stdout); fprintf(stderr, "source layout: FAIL %s%s\n", a, b ? b : ""); cleanup(); exit(1);
+}
+static char *slurp(const char *path, size_t *n) { size_t k; char *s = cx_read(path, n ? n : &k); if (!s) fail("cannot read ", path); return s; }
+
+typedef struct { unsigned char *b; size_t n, cap; } Bytes;
+static void bpush(Bytes *x, unsigned char c) {
+    if (x->n + 1 > x->cap) { x->cap = x->cap ? x->cap * 2 : 65536; x->b = realloc(x->b, x->cap); if (!x->b) fail("out of memory", 0); }
+    x->b[x->n++] = c;
+}
+static int hexd(int c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1; }
+/* one literal body (between the quotes): only \xHH escapes; appended to OUT; 0 when it holds anything else */
+static int literal(const char *s, size_t n, Bytes *out) {
+    size_t i = 0;
+    while (i < n) {
+        int h, l;
+        if (i + 4 > n || s[i] != '\\' || s[i + 1] != 'x' || (h = hexd(s[i + 2])) < 0 || (l = hexd(s[i + 3])) < 0) return 0;
+        bpush(out, (unsigned char)(h * 16 + l)); i += 4;
+    }
+    return 1;
+}
+/* the literal lines of TEXT[from, to): lines that are `  "..."` (optionally followed by ';'); returns their count,
+   -1 when one holds anything but \xHH */
+static int literals(const char *from, const char *to, Bytes *out) {
+    const char *p = from; int k = 0;
+    while (p < to) {
+        const char *e = memchr(p, '\n', (size_t)(to - p)), *q; size_t n;
+        if (!e) e = to;
+        n = (size_t)(e - p);
+        if (n >= 4 && p[0] == ' ' && p[1] == ' ' && p[2] == '"') {
+            size_t m = n; if (p[m - 1] == ';') m--;
+            q = p + 3;
+            if (m >= 4 && p[m - 1] == '"' && !memchr(q, '"', m - 4)) { if (!literal(q, m - 4, out)) return -1; k++; }
+        }
+        p = e + 1;
+    }
+    return k;
+}
+/* the region after `char *SYM =\n` up to the first ';' (inclusive) */
+static const char *region(const char *text, const char *sym, const char **end) {
+    char key[64]; const char *s, *e;
+    snprintf(key, sizeof key, "char *%s =\n", sym);
+    if (!(s = strstr(text, key))) return 0;
+    s += strlen(key);
+    if (!(e = strchr(s, ';'))) return 0;
+    *end = e + 1; return s;
+}
+/* `KEY<i>] = <n>;` in TEXT, -1 when absent */
+static long assigned(const char *text, const char *key, int i) {
+    char k[64]; const char *p; snprintf(k, sizeof k, "%s%d] = ", key, i);
+    if (!(p = strstr(text, k))) return -1;
+    return strtol(p + strlen(k), 0, 10);
+}
+
+static int run(char *const argv[], int secs) {     /* stdout+stderr into WORK/.out (kept for the report) */
+    char op[4200]; long ticks = (long)secs * 100; int st = 0, rc, fo; pid_t pid, w;
+    snprintf(op, sizeof op, "%s/.out", WORK);
+    if ((fo = open(op, O_WRONLY | O_CREAT | O_TRUNC, 0600)) < 0) fail("cannot open ", op);
+    if ((pid = fork()) < 0) fail("fork failed", 0);
+    if (pid == 0) {
+        int nul = open("/dev/null", O_RDONLY);
+        setpgid(0, 0);
+        if (nul >= 0) { dup2(nul, 0); close(nul); }
+        dup2(fo, 1); dup2(fo, 2); close(fo);
+        execvp(argv[0], argv); _exit(127);
+    }
+    close(fo);
+    for (;;) {
+        w = waitpid(pid, &st, WNOHANG);
+        if (w == pid) { rc = (st & 0x7f) ? 128 + (st & 0x7f) : (st >> 8) & 0xff; break; }
+        if (w < 0) { rc = -1; break; }
+        if (ticks-- <= 0) { kill(-pid, SIGKILL); kill(pid, SIGKILL); waitpid(pid, &st, 0); rc = 124; break; }
+        usleep(10000);
+    }
+    return rc;
+}
+static void runfail(const char *what, int rc) {
+    char op[4200], m[256]; size_t n; char *o;
+    snprintf(op, sizeof op, "%s/.out", WORK); o = cx_read(op, &n);
+    snprintf(m, sizeof m, "%s (rc %d): ", what, rc);
+    fail(m, o ? o : "");
+}
+
+static int names_of(const char *from, const char *to, const char *kind, char names[MAXN][128]) {
+    const char *p = from; int k = 0; size_t kl = strlen(kind);
+    while (p < to) {
+        const char *e = memchr(p, '\n', (size_t)(to - p)); size_t n;
+        if (!e) e = to;
+        n = (size_t)(e - p);
+        if (n > 11 && !strncmp(p, "#include \"", 10) && p[n - 1] == '"') {
+            size_t l = n - 11;
+            if (k >= MAXN || l >= 128) fail("too many or too long fragment names", 0);
+            memcpy(names[k], p + 10, l); names[k][l] = 0;
+            if (strncmp(names[k], kind, kl) || names[k][kl] != '.' || l < kl + 6 || strcmp(names[k] + l - 4, ".inc"))
+                fail("not a fragment of this aggregate: ", names[k]);
+            k++;
+        }
+        p = e + 1;
+    }
+    return k;
+}
+
+int main(int argc, char **argv) {
+    static const char *kinds[2] = { "weight", "dense" }, *syms[2] = { "MODEL", "DENSE" };
+    static char names[2][MAXN][128], order[MAXN][64];
+    char *canonical, *agg, *gen, *flat, model[4200], flatp[4200]; size_t cn, an; int i, k, nn[2], norder = 0;
+    const char *tmp = getenv("TMPDIR"); Bytes have[2], want[2];
+    (void)argv;
+    if (argc != 1) { fprintf(stderr, "usage: sourcelayoutcheck.cx   (from the repository root)\n"); return 2; }
+    memset(have, 0, sizeof have); memset(want, 0, sizeof want);
+    canonical = slurp("unisacc.c", &cn);
+    {   /* 1: no weights inline in the root source: char \s* \* \s* (MODEL|DENSE) \s* = */
+        const char *p;
+        for (p = canonical; (p = strstr(p, "char")) != 0; p += 4) {
+            const char *q = p + 4;
+            while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r') q++;
+            if (*q++ != '*') continue;
+            while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r') q++;
+            if (strncmp(q, "MODEL", 5) && strncmp(q, "DENSE", 5)) continue;
+            q += 5;
+            while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r') q++;
+            if (*q == '=') fail("root source contains weights instead of includes", 0);
+        }
+    }
+    agg = slurp("kernel/unisa_model.inc", &an);
+    for (k = 0; k < 2; k++) {
+        const char *e, *s = region(agg, syms[k], &e);
+        if (!s) fail("missing aggregate ", syms[k]);
+        nn[k] = names_of(s, e, kinds[k], names[k]);
+        if (!nn[k]) fail("empty aggregate ", syms[k]);
+    }
+    if (nn[0] != nn[1]) fail("MODEL and DENSE aggregate different fragment counts", 0);
+    for (i = 0; i < nn[0]; i++)
+        if (strcmp(strchr(names[0][i], '.'), strchr(names[1][i], '.'))) fail("MODEL and DENSE fragments differ in order: ", names[1][i]);
+    if (!tmp || !*tmp) tmp = "/tmp";
+    snprintf(WORK, sizeof WORK, "%s/unisacc-source-layout-XXXXXX", tmp);
+    if (!mkdtemp(WORK)) { WORK[0] = 0; fail("cannot make a temporary directory under ", tmp); }
+    snprintf(model, sizeof model, "%s/model.inc", WORK);
+    {   /* genmodel, by the product, on the declared inputs; one gold table per aggregated fragment */
+        char *av[16 + MAXN], tsv[MAXN][160]; int n = 0, rc;
+        av[n++] = "sh"; av[n++] = "./unisacc.com"; av[n++] = "-run"; av[n++] = "iterate/kernel/genmodel.c"; av[n++] = "--";
+        av[n++] = "-o"; av[n++] = model; av[n++] = "iterate/kernel/order.tsv"; av[n++] = "iterate/kernel/vocab.tsv";
+        av[n++] = "iterate/kernel/typekw.tsv"; av[n++] = "weights/built.uns2";
+        for (i = 0; i < nn[0]; i++) {
+            const char *net = names[0][i] + 7; size_t l = strlen(net) - 4;    /* weight.<net>.inc */
+            snprintf(tsv[i], sizeof tsv[i], "weights/gold/%.*s.tsv", (int)l, net);
+            av[n++] = tsv[i];
+        }
+        av[n] = 0;
+        rc = run(av, 40);
+        if (rc != 0) runfail("iterate/kernel/genmodel.c failed on the declared inputs", rc);
+    }
+    gen = slurp(model, 0);
+    {   /* 2: the aggregate order is genmodel's S_<NET> order (order.tsv) */
+        const char *p = gen;
+        while ((p = strstr(p, "\n#define S_")) != 0) {
+            const char *q = p + 11, *e = q; char *d; long idx;
+            while (*e && *e != ' ') e++;
+            if (norder >= MAXN || e - q >= 64) fail("too many S_ defines in genmodel's output", 0);
+            idx = strtol(e, &d, 10);
+            if (idx != norder) fail("genmodel's S_ defines are not in index order", 0);
+            memcpy(order[norder], q, (size_t)(e - q)); order[norder][e - q] = 0;
+            for (d = order[norder]; *d; d++) *d = (char)tolower((unsigned char)*d);
+            norder++; p = e;
+        }
+        if (norder != nn[0]) fail("MODEL fragment order/inventory differs (count)", 0);
+        for (k = 0; k < 2; k++) for (i = 0; i < norder; i++) {
+            char w[160]; snprintf(w, sizeof w, "%s.%s.inc", kinds[k], order[i]);
+            if (strcmp(w, names[k][i])) fail(syms[k], " fragment order/inventory differs");
+        }
+    }
+    for (k = 0; k < 2; k++) {
+        const char *s, *e; DIR *d; struct dirent *de; int ondisk = 0;
+        for (i = 0; i < nn[k]; i++) {   /* 3: literal fragments */
+            char path[300]; size_t n; char *t;
+            snprintf(path, sizeof path, "kernel/%s", names[k][i]);
+            t = slurp(path, &n);
+            if (literals(t, t + n, &have[k]) <= 0) fail("invalid literal fragment ", names[k][i]);
+            free(t);
+        }
+        /* 4: no orphan or missing fragment */
+        if (!(d = opendir("kernel"))) fail("cannot read kernel/", 0);
+        while ((de = readdir(d)) != 0) {
+            size_t l = strlen(de->d_name), kl = strlen(kinds[k]); int j, found = 0;
+            if (strncmp(de->d_name, kinds[k], kl) || de->d_name[kl] != '.' || l < 4 || strcmp(de->d_name + l - 4, ".inc")) continue;
+            for (j = 0; j < nn[k]; j++) if (!strcmp(de->d_name, names[k][j])) found = 1;
+            if (!found) { closedir(d); fail("orphan or missing ", kinds[k]); }
+            ondisk++;
+        }
+        closedir(d);
+        if (ondisk != nn[k]) fail("orphan or missing ", kinds[k]);
+        /* 5: the bytes */
+        if (!(s = region(gen, syms[k], &e))) fail("genmodel wrote no ", syms[k]);
+        if (literals(s, e, &want[k]) <= 0) fail("genmodel's literal is unreadable: ", syms[k]);
+        if (have[k].n != want[k].n || memcmp(have[k].b, want[k].b, have[k].n))
+            fail(syms[k], k ? " bytes differ from genmodel (gold labels)" : " bytes differ from genmodel (constructed weights)");
+    }
+    for (i = 0; i < norder; i++) {   /* 5: the offsets */
+        long a = assigned(agg, OFFSYM, i), g = assigned(gen, OFFSYM, i);
+        if (a < 0 || a != g) fail("MODEL offset changed for ", order[i]);
+        a = assigned(agg, DOFFSYM, i); g = assigned(gen, DOFFSYM, i);
+        if (a < 0 || a != g) fail("DENSE offset changed for ", order[i]);
+    }
+    {   /* 6: the independent export */
+        char *av[5]; int rc; const char *p; size_t fn, cn2; char *after; int cm = 0, cd = 0;
+        snprintf(flatp, sizeof flatp, "%s/flat.c", WORK);
+        av[0] = "tests/bound"; av[1] = "10"; av[2] = "tests/export_ref.sh"; av[3] = flatp; av[4] = 0;
+        rc = run(av, 12);
+        if (rc != 0) runfail("tests/export_ref.sh failed", rc);
+        flat = slurp(flatp, &fn);
+        for (p = flat; *p; ) {                        /* ^\s*#include\s+" */
+            const char *q = p;
+            while (*q == ' ' || *q == '\t' || *q == '\r' || *q == '\f' || *q == '\v') q++;
+            if (!strncmp(q, "#include", 8) && (q[8] == ' ' || q[8] == '\t')) {
+                q += 8; while (*q == ' ' || *q == '\t') q++;
+                if (*q == '"') fail("independent export still has local includes", 0);
+            }
+            if (!(p = strchr(p, '\n'))) break;
+            p++;
+        }
+        for (p = flat; (p = strstr(p, "char *MODEL =")) != 0; p++) cm++;
+        for (p = flat; (p = strstr(p, "char *DENSE =")) != 0; p++) cd++;
+        if (cm != 1) fail("independent export duplicates ", "MODEL");
+        if (cd != 1) fail("independent export duplicates ", "DENSE");
+        after = slurp("unisacc.c", &cn2);
+        if (cn2 != cn || memcmp(after, canonical, cn)) fail("export modified canonical source", 0);
+    }
+    cleanup();
+    printf("source layout: %d weight + %d dense fragments; MODEL/DENSE exact; flat export independent\n", nn[0], nn[1]);
+    return 0;
+}

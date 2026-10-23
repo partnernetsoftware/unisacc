@@ -678,8 +678,10 @@ job lib-callback-source-graph ./tests/modelcallbacksourcecheck.sh
 job lib-callable-mechanism tests/bound 58 sh ./unisacc.com -run tests/librarycallablescheck.cx   # (.cx port, 2026-10-23) callable ABI mechanism: librarycallablescheck.c built with host cc + real libffi, plain and ASan/UBSan, each under tests/bound 20
 job lib-carrier-model python3 ./tests/modelnativecarriercheck.py
 job lib-ordered-carrier-model python3 ./tests/modelnativebitfieldcheck.py
-job referee-binsel python3 ./tests/binsel_audit.py        # external referee: host cc decides signedness-dependence
-job referee-pfconv python3 ./tests/pfconv_audit.py        # external referee: host printf decides each conversion
+job referee-binsel tests/bound 58 sh ./tests/cxbin tests/hostreferee.cx binsel   # (.cx port, 2026-10-23, was binsel_audit.py) external referee: host cc decides signedness-dependence
+job referee-pfconv tests/bound 58 sh ./tests/cxbin tests/hostreferee.cx pfconv   # (.cx port, 2026-10-23, was pfconv_audit.py) external referee: host printf decides each conversion
+job referee-type tests/bound 58 sh ./tests/cxbin tests/hostreferee.cx type   # (.cx port, 2026-10-23, was gold_audit.py, newly gated) [A-50] type table vs host cc _Generic, 1400 keys
+job referee-abi tests/bound 58 sh ./tests/cxbin tests/hostreferee.cx abi   # (.cx port, 2026-10-23, was abi_audit.py, newly gated) [A-51] syscall numbers vs this host's <sys/syscall.h>
 job lib-ordered-carrier-host tests/bound 58 sh ./unisacc.com -run tests/libraryorderedcarriercheck.cx   # (.cx port, 2026-10-23)
 if [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ]; then
     job lib-ordered-carrier-native python3 ./tests/modelorderedbitfieldnativecheck.py --target osx/arm64

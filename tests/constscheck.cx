@@ -1,0 +1,141 @@
+#!/usr/bin/env -S unisacc.com -run
+/* constscheck.cx -- the numbers the back end hardcodes, against the committed layout facts [A-43]
+   (2026-10-23, unisa detachment W1-E: port of tests/consts_check.py, which read the same numbers out of the Python
+   seed's lower.py, tape.py and image/{elf,macho,pe}.py; those values were exported once into exec/facts/*.tsv,
+   which the delta nets read, so the facts are now the authority both sides answer to).
+   usage (from the repository root):  sh ./tests/cxbin tests/constscheck.cx        (tests/all.sh consts, make quick)
+                                      sh ./unisacc.com -run tests/constscheck.cx [-- --list]
+   The scratch-area layout is a chain of named constants (SCRATCH 144 ... PRINTMAX 24, WIN_HSTD = SCRATCH + PRINTMAX
+   ... WIN_EXTRA = WIN_ARGVA + 512).  src/back_*.c is a hand port that carries only the ANSWERS as bare literals
+   (`bk_hstd = base + 168`, `bk_zeros(776)`).  Changing one constant silently invalidates six C numbers, and the only
+   other thing that notices is an image-equality suite reporting a byte offset -- true, but it does not say why.
+   This says why: 30 numbers, each read out of src/back_{lower,encode,image}.c as text by a pattern with one capture
+   (the .py's regular expressions, as a small backtracking matcher: @N captures \d+, @n skips \d+, @s is \s*, @a is
+   [^\n]*, first match in the concatenated files wins as with re.search), compared with the value the facts give:
+     exec/facts/lower-code.tsv      =SYSA =SYSFP =SYSSP =WIN_HSTD =WIN_WRITTEN =WIN_SAVE =WIN_ARGVA
+     exec/facts/lower-data.tsv      =win_extra (WIN_EXTRA)  =posix_extra (SCRATCH + PRINTMAX)  =win_bss (WIN_STACK)
+     exec/facts/enc-address-bindings.tsv  DATA_BASE
+     exec/facts/enc-elf.tsv =VADDR;  enc-address-layout-lnx.tsv text - base (ELF header + program headers), -mask (PAGE)
+     exec/facts/enc-macho.tsv =VMADDR, -page_mask (PAGE);  exec/facts/enc-pe.tsv =IMAGEBASE =TEXT_RVA
+     exec/facts/enc-memorylayout-imports.tsv  its rows (len(IMPORTS))
+   plus the five scratch cells the C file spells as one line (8 16 24 48 56).  Nothing is generated: a generator would
+   put the C file's layout under someone else's control, and the point of the C back end is that it stands alone.
+   rc 0 every number agrees, 1 a FAIL line per disagreement or missing pattern, 2 a fact cannot be read.
+   No #include: the prelude is built in. */
+
+static void die(const char *a, const char *b) { fflush(stdout); fprintf(stderr, "constscheck: %s%s\n", a, b ? b : ""); exit(2); }
+
+static char *slurp(const char *path) { size_t n; char *s = cx_read(path, &n); if (!s) die("cannot read ", path); return s; }
+
+/* a fact: `=NAME<TAB>int<TAB>V` (export.py scalar rows) or `NAME<TAB>V` (name/value tables) */
+static long long fact(const char *path, const char *name) {
+    char *s = slurp(path), *p = s; size_t l = strlen(name);
+    while (*p) {
+        char *e = strchr(p, '\n'), *v = 0; if (e) *e = 0;
+        if (p[0] == '=' && !strncmp(p + 1, name, l) && p[1 + l] == '\t' && !strncmp(p + 2 + l, "int\t", 4)) v = p + 2 + l + 4;
+        else if (!strncmp(p, name, l) && p[l] == '\t') v = p + l + 1;
+        if (v) { char *q; long long x = strtoll(v, &q, 10); if (q == v) die("not an integer: ", name); free(s); return x; }
+        if (!e) break; p = e + 1;
+    }
+    fprintf(stderr, "constscheck: %s: no fact %s\n", path, name); exit(2);
+}
+static long long rows(const char *path) {          /* data rows of a TSV: lines that are neither empty nor '#' */
+    char *s = slurp(path), *p = s; long long n = 0;
+    while (*p) { char *e = strchr(p, '\n'); if (*p != '#' && *p != '\n') n++; if (!e) break; p = e + 1; }
+    free(s); return n;
+}
+
+/* the matcher: 1 when PAT matches at S (anchored), the @N capture in *cap */
+static int m(const char *pat, const char *s, long long *cap) {
+    if (!*pat) return 1;
+    if (pat[0] == '@' && (pat[1] == 'N' || pat[1] == 'n')) {
+        int k = 0, j;
+        while (s[k] >= '0' && s[k] <= '9') k++;
+        for (j = k; j >= 1; j--) if (m(pat + 2, s + j, cap)) {
+            if (pat[1] == 'N') { long long v = 0; int i; for (i = 0; i < j; i++) v = v * 10 + (s[i] - '0'); *cap = v; }
+            return 1;
+        }
+        return 0;
+    }
+    if (pat[0] == '@' && (pat[1] == 's' || pat[1] == 'a')) {
+        int k = 0, j;
+        if (pat[1] == 's') while (s[k] == ' ' || s[k] == '\t' || s[k] == '\n' || s[k] == '\r' || s[k] == '\f' || s[k] == '\v') k++;
+        else while (s[k] && s[k] != '\n') k++;
+        for (j = k; j >= 0; j--) if (m(pat + 2, s + j, cap)) return 1;
+        return 0;
+    }
+    if (*s && *s == *pat) return m(pat + 1, s + 1, cap);
+    return 0;
+}
+static int search(const char *pat, const char *text, long long *cap) {
+    const char *s;
+    for (s = text; *s; s++) if (m(pat, s, cap)) return 1;
+    return 0;
+}
+
+typedef struct { const char *name; long long want; const char *pat; } Check;
+
+int main(int argc, char **argv) {
+    static const char *back[] = { "src/back_lower.c", "src/back_encode.c", "src/back_image.c", 0 };
+    char *c; size_t total = 0; int i, n = 0, bad = 0, list = argc > 1 && !strcmp(argv[1], "--list");
+    const char *lc = "exec/facts/lower-code.tsv", *ld = "exec/facts/lower-data.tsv", *ll = "exec/facts/enc-address-layout-lnx.tsv";
+    long long vaddr, vmaddr, ibase, hdrs;
+    Check ck[40];
+    if (argc > 1 && !list) { fprintf(stderr, "usage: constscheck.cx [--list]   (from the repository root)\n"); return 2; }
+    {   /* the three back-end files, concatenated as the .py read them */
+        char *part[3]; size_t len[3], o = 0;
+        for (i = 0; back[i]; i++) { part[i] = cx_read(back[i], &len[i]); if (!part[i]) die("cannot read ", back[i]); total += len[i]; }
+        c = malloc(total + 1); if (!c) die("out of memory", 0);
+        for (i = 0; back[i]; i++) { memcpy(c + o, part[i], len[i]); o += len[i]; free(part[i]); }
+        c[total] = 0;
+    }
+    vaddr = fact("exec/facts/enc-elf.tsv", "VADDR");
+    vmaddr = fact("exec/facts/enc-macho.tsv", "VMADDR");
+    ibase = fact("exec/facts/enc-pe.tsv", "IMAGEBASE");
+    hdrs = fact(ll, "text") - fact(ll, "base");
+#define CK(N, W, P) do { ck[n].name = (N); ck[n].want = (W); ck[n].pat = (P); n++; } while (0)
+    CK("SYSA", fact(lc, "SYSA"), "bk_sysa = base + @N");
+    CK("SYSFP", fact(lc, "SYSFP"), "bk_sysfp = base + @N");
+    CK("SYSSP", fact(lc, "SYSSP"), "bk_syssp = base + @N");
+    CK("WIN_HSTD", fact(lc, "WIN_HSTD"), "bk_hstd = base + @N");
+    CK("WIN_WRITTEN", fact(lc, "WIN_WRITTEN"), "bk_written = base + @N");
+    CK("WIN_SAVE", fact(lc, "WIN_SAVE"), "bk_save = base + @N");
+    CK("WIN_ARGVA", fact(lc, "WIN_ARGVA"), "bk_argva = base + @N");
+    CK("DATA_BASE", fact("exec/facts/enc-address-bindings.tsv", "DATA_BASE"), "#define BK_DATA_BASE @N");
+    /* the two zero-fills: Windows reserves the whole extra area, every other OS only the scratch cells and the
+       print buffer */
+    CK("WIN_EXTRA", fact(ld, "win_extra"), "if (bkos == 2) bk_zeros(@N);");
+    CK("SCRATCH+PRINTMAX", fact(ld, "posix_extra"), "if (bkos == 2) bk_zeros(@n); else bk_zeros(@N);");
+    CK("WIN_STACK", fact(ld, "win_bss"), "bk_stacktop = base + @n + @N;");
+    CK("WIN_EXTRA (stacktop)", fact(ld, "win_extra"), "bk_stacktop = base + @N + @n;");
+    /* the three image writers.  C spells these in decimal (4294967296 is the Mach-O VMADDR 0x100000000), which is
+       exactly why a drift would be invisible to a reader: nobody recognises 5368709120 as 0x140000000 */
+    CK("elf.VADDR (text)", vaddr, "bk_textva = @N + h;@s\n@sbk_datava = @n + bk_round(h + bktlen, 4096)");
+    CK("elf.VADDR (data)", vaddr, "bk_datava = @N + bk_round(h + bktlen, 4096)");
+    CK("elf headers", hdrs, "int bk_elf_hdrs(void) { return bk_dyn ? @n : @N; }");   /* the static (non-forwarding) image */
+    CK("elf.PAGE", -fact(ll, "mask"), "bk_datava = 4194304 + bk_round(h + bktlen, @N)");
+    CK("elf entry", vaddr, "w64(@N + @n + bk_entry)");
+    CK("macho.VMADDR (text)", vmaddr, "bk_textva = @N + h;");
+    CK("macho.VMADDR (data)", vmaddr, "bk_datava = @N + bk_round(h + bktlen");
+    CK("macho.PAGE", -fact("exec/facts/enc-macho.tsv", "page_mask"), "bk_datava = @n + bk_round(h + bktlen, @N)");
+    CK("pe.IMAGEBASE (text)", ibase, "bk_textva = @N + 4096;");
+    CK("pe.TEXT_RVA", fact("exec/facts/enc-pe.tsv", "TEXT_RVA"), "bk_textva = @n + @N;@s\n@a\n@abk_datava = 5368709120");
+    CK("pe.IMAGEBASE (data)", ibase, "bk_datava = @N + rd");
+    CK("pe.IMAGEBASE (IAT)", ibase, "bk_imp[i] = @N + rd");
+    CK("len(pe.IMPORTS)", rows("exec/facts/enc-memorylayout-imports.tsv"), "#define BK_NIMP @N");
+    /* the scratch cells themselves, which the C file spells as one line of four:
+       `bk_scr0 = base; bk_scr1 = base + 8; bk_plen = base + 16; ...` */
+    CK("SCR1", 8, "bk_scr1 = base + @N");
+    CK("PRINTLEN", 16, "bk_plen = base + @N");
+    CK("PRINTBUF", 24, "bk_pbuf = base + @N");
+    CK("ARGC", 48, "bk_argc = base + @N");
+    CK("ARGV", 56, "bk_argv = base + @N");
+    for (i = 0; i < n; i++) {
+        long long got = 0;
+        if (!search(ck[i].pat, c, &got)) { printf("  FAIL %-22s no line matching %s\n", ck[i].name, ck[i].pat); bad++; continue; }
+        if (list) printf("  %-22s back end %lld   facts %lld\n", ck[i].name, got, ck[i].want);
+        if (got != ck[i].want) { printf("  FAIL %-22s back end says %lld, the facts say %lld\n", ck[i].name, got, ck[i].want); bad++; }
+    }
+    printf("\nconsts  agreed %d   differ %d   (exec/facts vs src/back_*.c)\n", n - bad, bad);
+    return bad ? 1 : 0;
+}

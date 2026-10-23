@@ -234,7 +234,7 @@ activation is always 0 or 1, so inference has no multiply and no float.
 function on a finite domain, so "the net equals the table" is decided by
 enumerating every key (the total is in the table above). That proves the net
 equals the *table*; whether the table is right about C is checked separately,
-against the system compiler (`tests/gold_audit.py`, `difftest`).
+against the system compiler (`tests/hostreferee.cx type`, `difftest`).
 
 ## Develop it (the Python seed)
 

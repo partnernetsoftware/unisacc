@@ -10,7 +10,7 @@
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 . "$R/tests/lib.sh"
-c=$(bound 20 python3 tests/tsv_contract.py 2>&1); crc=$?
+c=$(bound 20 sh ./tests/cxbin tests/tsvcontractcheck.cx 2>&1); crc=$?
 printf '%s\n' "$c" | sed 's/^/  /'
 if [ $crc -ne 0 ] || ! printf '%s\n' "$c" | grep -q 'contract  cases 6  wrong 0'; then
     echo "tsvbuild  FAIL: input contract check (rc $crc)"; exit 1
