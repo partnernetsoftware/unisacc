@@ -5,8 +5,8 @@
 ## 1. 现状
 
 - **0.0.43 终点线**（`plans/v0.0.43-finish-line.md`）：M0/M1/M3/M5/M6 已完成；静默错码已修（`(*x[N])[M]` 具名拒绝 9df1417c、bit-field 复合赋值 0fc2428b）。
-  - **F1 产品修复批**已在 scratch 构建并通过 `ident` 校验，补丁在 `plans/pending/f1/0001–0007`（6 刀自带 libc + `enum E;` 回归修复），**尚未落地**。
-  - F2–F6 未开始。M9（Draft/Latest/签名/公开）归主人。
+  - **F1 产品修复批已落地**：a21a7ed1..ffb1fdbf，根产品 SHA256 `4f0b493c7a83d73a4ae1b348c8400ea3b7eda0ea190051b54a84c712a6730eda`，ident verified；657 文件差分、E3/PP 重封与 seedmemory 键见 `research/c43-f1-evidence/README.md`。cx.h 与根产品同锁安装。
+  - F2 文档与探针迁移见 `research/c43-f2-evidence.md`；F3–F6 待验收。M9（Draft/Latest/签名/公开）归主人。
 - **零 Python**（prd.md §1 硬目标；台账 `tests/zeropython.cx`）：调用点 1789 / unisa 依赖 92 / `.py` 411（起点 2253 / 163 / 452）。剥离计划 `plans/unisa-detach.md`：W1 全部落地；W2 起未落。
 - **.cx**：内置前奏 edition 1（`include/cx.h`）、`#pragma unisa use` 模块（`src/cxmod.c`）、唯一删除守卫 `include/unisa_safedel.h`（台账 `tests/deletes.tsv`，闸 `deletecheck`）。
 - **flownet**：W0–W4 绿；W6 B1 收口已落（054855e0、bd73c837），验证未完成；W5 在作者本机 scratch 已完成未落。
@@ -14,7 +14,7 @@
 
 ## 2. 下一步（按优先级）
 
-1. **F1 落地**：在当前 HEAD 依次 `git am plans/pending/f1/0001…0007`；用仓内工具重生成派生文件（`kernel/unisa_headers.inc`、`exec/facts/{pp-autoinc-gen,k2-gen2,k2-libraryenv}.tsv`——目前只有 Python 生成器：unisa 的 emit-kernel 子命令与 `exec/facts/export.py`，命令行见 `tests/headerchain.cx` 第 1–2 步；它们是剥离 W3 的硬核项）；重建根产品；`.c` 语料（examples/ + tests/ 共 653 个）新旧差分只允许预期文件变化；重封 `tests/seals/exec-e3`（`tests/reseal-e3.sh`）与 `tests/seals/exec-pp-literals`（`tests/reseal-pp-literals.sh`）；更新 seedmemory 键（`tests/seedmemorykey.cx -- gen parse2`）；**新 `include/cx.h` 必须与新根一起落**（旧根编不了它）。
+1. **F1 已完成**：七个补丁逐刀提交，派生文件重生成、根产品重建及 ident、完整差分、双重封和键更新已完成；记录见上。下一步从 F2 验收继续。
 2. F2（M2 余项：spec TP-9 下划线句、`exec/tapecheck/README.md`、P4a 探针移入 tests/c）→ F3（CONTRACT 层全扫）→ F4（`tests/release.sh --com` 全量队列）→ F5（`research/r43-draft-notes.md` 填实）→ F6（候选构建 + comboot）。
 3. 长期轨道（不阻塞 0.0.43）：零 Python（剥离 W2→W3→W4；「闸即数据」：5 个通用 .cx 执行器取代逐个移植）、删除守卫第 3 轮加固（TOCTOU 改 fd 遍历、TMPDIR 祖先、天花板旗标、扫描器漏项、豁免行内容哈希）、flownet W5→W6 B2…→W7、CX2b 模块根、0.0.44 分段产品入口 `unisacc-{stage}.com`。
 

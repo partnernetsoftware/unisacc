@@ -71,10 +71,10 @@ The C raw reader's scanner accepts only decimal/hex; acceptance of binary/octal
 here does not claim C reader or target encoder coverage. `s` operands beginning with a sign/digit follow the C raw reader: validate them as
 word literals, retaining their spelling. `L` and nonnumeric `s` operands remain
 symbolic tokens, not rewritten or resolved against the host.
-Underscore spellings remain a registered model undercoverage: the fixed
-four `registered-underscore*` cases expects reference acceptance, model `not covered`,
-empty stdout and a line. The selftest reports it separately, never as product
-acceptance or matched refusal.
+Underscore integer spellings are registered refusal fixtures: the four
+`invalid-underscore*` cases require reference and model refusal, empty stdout,
+and an integer diagnostic with a physical line. Signed, displacement and
+second-line variants are also refusal fixtures; symbol-name underscores remain valid.
 
 cc's former 4301-digit disagreement exposed Python's implicit host conversion
 limit, not a Tape rule. It is now an ordinary refusal fixture: both implementations
@@ -104,8 +104,10 @@ cannot change either result.
   guard now prevents out-of-word literals from reaching those paths.
 
 The prior 418-case measurement above remains historical. The new fixed set is
-445 cases: 441 matched-decision fixtures plus four registered undercoverages, including
-all four bases' positive/negative boundaries and the two 4301-digit observations.
+445 cases at that checkpoint, including all four bases' positive/negative
+boundaries and the two 4301-digit observations. The current
+`tests/tapecheck-cases.tsv` additionally includes the underscore refusal regressions;
+the prior four registered-undercoverage classifications are obsolete.
 Post-integration fresh-product evidence is reported separately; Windows library
 mode still awaits its reference contract and native evidence.
 
@@ -130,7 +132,7 @@ whole queue was run.
 ## Integrated regression evidence
 
 Actually run on the fresh artifact above: all three model shards returned rc0
-(the final shard includes four registered underscore-integer forms), and the
+(the final shard included the historical underscore-integer fixtures), and the
 black-box product check returned rc0 for all 78 mode cases. cc independently ran
 `exec-driver-core-modes` with the original limit after bounded preparation warmed
 the existing content-keyed cache: rc0 in 24 seconds, all 27 mode/level matches.
