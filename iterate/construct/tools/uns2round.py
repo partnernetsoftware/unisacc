@@ -2,8 +2,7 @@
 
     python3 iterate/construct/tools/uns2round.py blob.uns2 weights/gold/prec.tsv ...
 
-The decoder is unisa/uns2.py `load` (the loader tests/artifacts.sh round-trips
-the shipped pack through); it rebuilds IntNets, deriving b1 from W1 as the
+The decoder is unisa/uns2.py `load`; it rebuilds IntNets, deriving b1 from W1 as the
 deployment does.  Inference is IntNet.predict, the deployed integer
 arithmetic (a unit ADDS its W2 once when hit + b1 > 0).  For every key of the
 original domain, from the TSV, and every head, predict must return the TSV

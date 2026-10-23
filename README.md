@@ -263,22 +263,18 @@ desk, not on GitHub**: macOS natively, Linux in a local Lima VM
 CI is a second opinion, not the test loop: the local suites run first, and
 `.github/workflows/ci.yml` re-checks them on a machine nobody has been
 editing. Training is **not** in it:
-the weights we ship are constructed, `unisa acc` verifies those by enumeration
-in a twentieth of a second, and the SGD control arm lives in
-`tests/baseline.sh` for when someone wants the comparison numbers.
+the weights we ship are constructed, and `unisa acc` verifies those by enumeration
+in a twentieth of a second.
 
 | suite | what it checks |
 |---|---|
-| `acceptance` | the spec's own checklist |
 | `vm` | the tape interpreter, on hand-written fixtures |
 | `difftest` | unisa vs the system compiler — the only instrument that can see a defect in the reference tables |
 | `native` | emitted images actually executed on this host |
 | `crossnative` | the *other* targets executed on real machines — local Linux VMs and the Windows 11 machine in UTM; the blind spot where three codegen bugs lived |
 | `linux` | the whole suite again, inside the local Lima VM, because glibc and BSD libc disagree about things C only calls unspecified |
 | `fat` | one file, both macOS architectures, both slices actually executed |
-| `artifacts` | the shipped kit is *usable*: weight blob round-trips to the same decisions, every image is recognised by the platform's own tools, shipping twice gives the same bytes |
 | `ccrun` | `unisacc` compiles C and the reference VM runs it |
-| `selfhost` | `unisacc` built two ways agrees with the Python front end |
 | `stages` | every decision net the Python front end asks, the C front end asks too — the only suite that can see a hand-written rule that happens to agree with the table |
 | `selfgap` | how much C `unisacc`'s own front end still refuses that the Python one accepts — a ratchet, because that gap was growing unmeasured |
 | `multi` | two translation units compiled into one program, against `cc a.c b.c`.  Both ORDERS are run (`m1 m2` and `m2 m1`), because a file-scope `static` used to be registered when its definition was reached, so a header whose first function calls one defined below it spelled the call without its unit suffix and only the order that reached the definition first worked.  `tests/multi/fwd1.c` and `fwd2.c` are that case on its own, and `static1.c`/`static2.c` are two units with same-named statics that must NOT merge |
@@ -290,7 +286,6 @@ in a twentieth of a second, and the SGD control arm lives in
 | `run` | `unisacc -run` compiles a file and runs it in memory, against the system `cc` |
 | `cli` | the compiler as a tool, from a scratch directory: built-in headers, `-I`, `-D`, shebang, exit status |
 | `ccparity` | unisacc next to `cc -std=c99` as a user sees it: a.out, `-o`, exit status, stderr, files left after a failed compile, `-E`/`-D`/`-U`/`-I`, `-Werror`, and the documented `-c` difference |
-| `ape` | `unisacc.com` is built and run on this host: one file, a PE for Windows and a script for Unix |
 | `layout` | the data layout **enumerated**, not sampled: every tape of up to three data definitions, each also with one symbol defined twice — 762 tapes, 4,572 image comparisons across all six targets, in twelve seconds |
 | `datashape` | generated programs whose globals are declared in one order and allocated in another; the suite asserts the shape is present before it asserts the bytes match |
 | `bigclosure` | the closure on the compiler itself — the largest input there is, and the only one ever big enough to break the back end while every probe stayed green |

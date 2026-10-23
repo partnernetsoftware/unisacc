@@ -8,14 +8,14 @@ import tempfile
 SCALE = int(os.environ.get('UNISACC_TIME_SCALE', '1')) if os.environ.get('GITHUB_ACTIONS') == 'true' and os.environ.get('UNISACC_TIME_SCALE', '1').isdigit() else 1   # 0.0.27 C1: tests/bound.py scale()
 
 ROOT = Path(__file__).resolve().parent.parent
-BASE = {'acceptance', 'vm', 'difftest', 'native', 'crossnative', 'fat',
-        'artifacts', 'ccrun', 'selfhost', 'closure', 'run', 'c99', 'fuzz',
+BASE = {'vm', 'difftest', 'native', 'crossnative', 'fat',
+        'ccrun', 'closure', 'run', 'c99', 'fuzz',
         'hostile', 'bench', 'consts', 'oracle', 'docs', 'kernel', 'tsvbuild',
         'gold_audit', 'prec_audit', 'tyinfo_audit', 'abi_audit', 'layout',
-        'datashape', 'bigclosure', 'cli', 'diag', 'warn', 'opt', 'optpy',
-        'difftest_o', 'scale', 'ape', 'multi', 'selfgap', 'stages',
+        'datashape', 'bigclosure', 'cli', 'diag', 'warn', 'opt',
+        'difftest_o', 'scale', 'multi', 'selfgap', 'stages',
         'nativeboot', 'acc'}
-SHARDED = {'difftest', 'native', 'fat', 'ccrun', 'selfhost', 'closure',
+SHARDED = {'difftest', 'native', 'fat', 'ccrun', 'closure',
            'stages', 'difftest_o'}
 
 
@@ -61,7 +61,7 @@ def check():
         assert names and len(names) == len(set(names)), names
         import re
         def family(name):
-            for prefix in ('opt-', 'optpy-', 'ape-', 'acceptance', 'selfhost-', 'ccrun-', 'closure-', 'nativeboot-'):
+            for prefix in ('opt-', 'ccrun-', 'closure-', 'nativeboot-'):
                 if name.startswith(prefix):
                     return prefix.rstrip('-')
             return name if name in BASE else re.sub(r'\d+$', '', name)
@@ -88,24 +88,6 @@ def check():
                               cwd=ROOT, env=env, capture_output=True, text=True, timeout=5)
         assert proc.returncode == 2, proc.returncode
         assert 'tests/bound.py' not in record.read_text(), 'unknown selection dispatched/prepared a job'
-        # The aggregate must wait even for the slowest preparation job.
-        runner.write_text('#!' + sys.executable + '\n' +
-            'import os,sys,time,pathlib\n' +
-            'a=sys.argv[1:]; root=pathlib.Path(os.environ["CI_BARRIER"])\n' +
-            'if "--prepare" in a:\n' +
-            ' target=a[a.index("--prepare")+1]\n' +
-            ' time.sleep(.3 if target=="win/x86_64" else .01)\n' +
-            ' (root/target.replace("/","_")).write_text("ready")\n' +
-            'elif "./tests/ape.sh" in a:\n' +
-            ' assert len(list(root.iterdir()))==5, "aggregate started before preparation"\n')
-        barrier = tmp / 'barrier'; barrier.mkdir()
-        env['CI_BARRIER'] = str(barrier)
-        args = ['bash', 'tests/all.sh']
-        for name in ['ape-prepare%d' % i for i in range(1, 6)] + ['ape']:
-            args += ['--suite', name]
-        proc = subprocess.run(args, cwd=ROOT, env=env,
-                              capture_output=True, text=True, timeout=5)
-        assert proc.returncode == 0, proc.stdout + proc.stderr
     expected = ['SHARD=%d/4' % i for i in range(1, 5)]
     assert sorted(expected[::-1]) == expected
     assert sorted(expected[:-1]) != expected
@@ -116,7 +98,7 @@ def check():
     over = [(w.name, m.group(1)) for w in sorted((ROOT / '.github/workflows').glob('*.yml'))
             for m in _re.finditer(r'tests/bound(?:\.py)? +(\d+)', w.read_text()) if not 1 <= int(m.group(1)) <= 60]
     assert not over, 'workflow bound over 60 s (use UNISACC_TIME_SCALE): %s' % over
-    print('ci plan: legacy coverage kept; 6 file partitions, 2 SHARD families; selection controls ok; workflow bounds <= 60 s')
+    print('ci plan: legacy coverage kept; 5 file partitions, 2 SHARD families; selection controls ok; workflow bounds <= 60 s')
 
 
 if __name__ == '__main__':

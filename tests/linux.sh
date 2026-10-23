@@ -119,7 +119,7 @@ tar -C "$R" -cf - --exclude=.git . | limactl shell "$VM" -- bash -lc "
     # the HOST, so a backtick runs there.)
     P=''
     case '$what' in
-        native|crossnative|fat|ccrun|selfhost|closure|stages)
+        native|crossnative|fat|ccrun|closure|stages)
             P='examples/*.c tests/c/*.c';;
     esac
     { if [ '$what' = all ]; then ./tests/all.sh $SEL

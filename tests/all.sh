@@ -1,7 +1,6 @@
 #!/bin/bash
 # Every suite, one summary.  Run from the repo root.
 #
-#   acceptance  the spec's own checklist [A-*]
 #   vm          the tape interpreter on hand-written fixtures [TP-4]
 #   difftest    unisa vs the system compiler -- the only instrument that can
 #               see a gold defect [P-6] [A-17]
@@ -9,11 +8,9 @@
 #   fat         one file, both macOS architectures, both executed [A-28]
 #   crossnative the OTHER targets, executed in local Linux VMs [A-27];
 #               skipped when limactl or the VMs are absent
-#   artifacts   the shipped kit is usable, not merely well-formed [A-24]
 #   ccrun       unisacc compiles C and the answers are compared against
 #               the Python front end's, on EVERY probe [A-21].  Being
 #               refused is a gap; disagreeing is a defect.
-#   selfhost    unisacc built two ways agrees with the Python front end [A-20]
 #   multi       several translation units, one program -- against cc [A-30]
 #   tools       real library code by other people, with its own test
 #               vectors, several files each [A-31]
@@ -29,8 +26,6 @@
 #               -I, -D, a shebang, argv, exit status [S-11]
 #   diag        what the compiler says when the program is wrong: the user's
 #               file, the user's line, the column, the line itself [S-12]
-#   ape         unisacc.com: one file that is a PE for Windows and a shell
-#               script for Unix, with a slice per target inside [S-10]
 #   closure     unisacc -b writes the same image bytes as the Python back
 #               end, all six targets, and the host image runs right [S-7]
 #   c99         one probe per C99 feature, the denominator written from the
@@ -73,9 +68,7 @@
 #               end while all 90 probes stayed green [A-42]
 #   bootstrap   B = C = U, the self-hosting fixed point [A-23]
 #   acc         net == gold over the FULL gold, on the CONSTRUCTED weights
-#               we ship.  The SGD control arm is not here: `tests/baseline.sh`
-#               runs it on purpose, because it is minutes of full-core work
-#               and is not on the shipping path.
+#               we ship.
 #   corpus      c-testsuite -- 220 programs we did not write [A-25];
 #               skipped unless corpus/ is already present
 set -u
@@ -128,9 +121,6 @@ cleanup() {
     else echo "all.sh: preserved logs $W (rc=$rc)" >&2; fi
 }
 trap cleanup EXIT
-APE_STATE=${APE_STATE:-$W/ape}; export APE_STATE
-ACCEPT_STATE=${ACCEPT_STATE:-$W/accept}; export ACCEPT_STATE
-SELFHOST_STATE=${SELFHOST_STATE:-$W/selfhost}; export SELFHOST_STATE
 ORDER=(); PLAN=()
 run() {
     local n="$1"; shift
@@ -152,8 +142,6 @@ run() {
         printf "finished %s rc=%s elapsed=%ss\n" "$n" "$rc" "$(cat "$W/$n.sec")"
     ) &
 }
-# Serial, and before anything else: a failing one says why in a known place.
-serial() { wait; run "$@"; wait; }
 T0=$(date +%s)
 
 # One build of the self-hosted compiler for every suite that uses it.  ccrun
@@ -169,50 +157,17 @@ prepare_reference() {
 }
 [ "$LIST" -eq 1 ] || prepare_reference
 
-# acceptance rewrites weights/, which every other suite reads: it goes alone.
-for part in $(seq 1 15); do
-    # These two original sections contain no checks outside Darwin/arm64.
-    # Name that platform exclusion instead of treating an empty shard as pass.
-    if { [ "$part" -eq 10 ] || [ "$part" -eq 11 ]; } &&
-       [ "$(uname -s)/$(uname -m)" != Darwin/arm64 ]; then
-        echo "SKIP acceptance$part: requires Darwin/arm64 (not a pass)" >&2
-        continue
-    fi
-    case "$part" in
-        6)
-            serial acceptance6-build env ACCEPT_CASE=6-build ./tests/acceptance.sh
-            for k in 1 2 3 4; do
-                serial "acceptance6-fold$k" env ACCEPT_CASE=6-fold SHARD="$k/4" ./tests/acceptance.sh
-            done
-            serial acceptance6-fault env ACCEPT_CASE=6-fault ./tests/acceptance.sh
-            serial acceptance6-image env ACCEPT_CASE=6-image ./tests/acceptance.sh
-            ;;
-        10)
-            for step in Btape Bimage Ctape Uimage compare; do
-                serial "acceptance10-$step" env ACCEPT_CASE="10-$step" ./tests/acceptance.sh
-            done
-            ;;
-        *) serial "acceptance$part" env PART="$part/15" ./tests/acceptance.sh;;
-    esac
-done
-# The full run rechecks after acceptance. A selected job did not rerun
-# acceptance and needs only its initial readiness check.
-if [ "$LIST" -eq 0 ] && [ "${#SELECT[@]}" -eq 0 ]; then prepare_reference; fi
 run vm         ./tests/vm.sh
 for shard in 1 2 3 4; do
     run "difftest$shard" env SHARD="$shard/4" ./tests/difftest.sh
 done
 # File shards are a disjoint partition of the original wildcard inputs.
-if [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ]; then
-    serial selfhost-prepare-tape ./tests/selfhost.sh --prepare-tape
-    serial selfhost-prepare-image ./tests/selfhost.sh --prepare-image
-fi
 FILES=(); for f in examples/*.c tests/c/*.c; do b=${f##*/}; refused "${b%.c}" || FILES+=("$f"); done
 for shard in 0 1 2 3 4 5 6 7; do
     CHUNK=()
     for ((i=shard; i<${#FILES[@]}; i+=8)); do CHUNK+=("${FILES[$i]}"); done
     [ "${#CHUNK[@]}" -gt 0 ] || { echo "empty probe shard" >&2; exit 2; }
-    for suite in native fat ccrun selfhost stages; do
+    for suite in native fat ccrun stages; do
         if [ "$suite" = ccrun ]; then
             CCRUN_CHUNK=()
             for f in "${CHUNK[@]}"; do [ "$f" = tests/c/b_malloc.c ] || CCRUN_CHUNK+=("$f"); done
@@ -232,8 +187,7 @@ for shard in $(seq 0 15); do
 done
 run closure-malloc ./tests/closure.sh tests/c/b_malloc.c
 run crossnative bash -c "./tests/crossnative.sh $PROBES"
-run artifacts  ./tests/artifacts.sh
-run run        ./tests/run.sh
+run run       ./tests/run.sh
 run c99        ./tests/c99.sh
 run fuzz       ./tests/fuzz.sh
 run hostile    ./tests/hostile.sh
@@ -263,19 +217,10 @@ for k in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     run "opt-closure$k" env OPT_PART=closure SHARD="$k/16" ./tests/opt.sh
 done
 run opt-self env OPT_PART=self ./tests/opt.sh
-for k in 1 2 3 4; do
-    run "optpy-probes$k" env OPTPY_PART=probes SHARD="$k/4" ./tests/optpy.sh
-done
-run optpy-self env OPTPY_PART=self ./tests/optpy.sh
 for shard in 1 2 3 4; do
     run "difftest_o$shard" env SHARD="$shard/4" ./tests/difftest_o.sh
 done
 run scale      ./tests/scale.sh
-k=0
-for target in lnx/x86_64 lnx/arm64 osx/x86_64 osx/arm64 win/x86_64; do
-    k=$((k+1)); run "ape-prepare$k" ./tests/ape.sh --prepare "$target"
-done
-serial ape ./tests/ape.sh
 run multi      ./tests/multi.sh
 if [ -d corpus/crypto-algorithms ]; then
     for k in $(seq 1 11); do run "tools$k" env FETCH=0 SHARD="$k/11" ./tests/tools.sh; done

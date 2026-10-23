@@ -49,7 +49,7 @@ try:
     reset()
     # N7/N8 related changes: content, mode, deletion, a new member of a declared tree
     for name, act in (('N7 content', lambda: open('unisa/vm.py', 'a').write('\n# x\n')),
-                      ('N8 mode', lambda: os.chmod('tests/volatilecomma.py', 0o755)),
+                      ('N8 mode', lambda: os.chmod('tests/volatilecomma.cx', 0o755)),
                       ('N8 delete', lambda: os.remove('unisa/fp.py')),
                       ('N8 new member', lambda: (pathlib.Path('unisa/k2bnew.py').write_text('x=1\n'), subprocess.run(['git', 'add', 'unisa/k2bnew.py'], check=True)))):
         act(); s, _ = fp()
@@ -102,7 +102,7 @@ try:
     state = T / 'state'; state.mkdir()
     q.atomic(state / 'results.json', {'results': {'volatile-comma': {'rc': 0, 'status': 'PASS', 'stamp': s0['volatile-comma']}}})
     ua = os.environ.get('K2B_UA', '/tmp/ua_ref')
-    run = subprocess.run(['bash', '-c', 'R=$PWD; . tests/lib.sh && ua_ready && python3 ./tests/volatilecomma.py'],
+    run = subprocess.run(['bash', '-c', 'R=$PWD; . tests/lib.sh && ua_ready && sh ./tests/cxbin tests/volatilecomma.cx'],
                          env=dict(os.environ, UA=ua), capture_output=True, timeout=50)
     actual = {'rc': run.returncode, 'status': 'PASS' if run.returncode == 0 else 'FAIL'}
     if actual['rc'] == 0: fail('N10 fixture: the broken undeclared dependency did not change the real run')

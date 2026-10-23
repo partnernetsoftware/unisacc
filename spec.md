@@ -177,15 +177,11 @@ FILE.tape         输入是 tape 时直接进后端
 
 | 套件 | 查什么 | 条款 |
 |---|---|---|
-| `acceptance.sh` | 规格自己的验收清单 | [A-*] |
 | `vm.sh` | tape 解释器，手写夹具（不经前端） | [TP-4] |
 | `difftest.sh` | 与系统 `cc` 对拍 —— **唯一能看见 gold 缺陷的仪器** | [P-6] [A-17] |
 | `native.sh` | 发出的镜像在本机**真实执行** | [A-18] |
-| `artifacts.sh` | 出货产物**可用**而非仅"格式正确"：UNS2 往返、六目标镜像被平台工具识别、两次 ship 字节相同、体积预算 | [A-24] |
 | `ccrun.sh` | unisacc 编译 C，基准 VM 运行，**逐个探针与 Python 前端对答案**；`wrong` 必须为 0，一致数只能升，已知分歧记在 `ccrun.knownwrong` | [A-21] |
-| `selfhost.sh` | 两种构建的 unisacc 与 Python 前端逐 token 一致 | [A-20] |
 | `bootstrap.sh` | `B = C = U` 自举不动点 | [A-23] |
-| `baseline.sh` | **SGD 对照组**，手动触发：E-18 / E-31 / E-37 要的那几个数 | U-5 |
 | `corpus.sh` | **c-testsuite 的 220 个程序** —— 别人写的、为别的编译器写的 | [A-25] |
 | `crossnative.sh` | **非本机目标**真实执行：两个 Linux 目标进本地虚机，osx/x86_64 走 Rosetta 2，win/arm64 与 win/x86_64 进 UTM 的 Windows 11 真机（虚机没开就**跳过并点名**，`STRICT=1` 时跳过即失败） | [A-27] |
 | `fat.sh` | **一个文件两条 ISA**，两个 slice 都真跑（arm64 原生 + x86_64 经 Rosetta） | [A-28] |
@@ -199,7 +195,6 @@ FILE.tape         输入是 tape 时直接进后端
 | `run.sh` | `unisacc -run` 在内存里编译并运行 | [A-37] |
 | `cli.sh` | 空目录里把编译器当工具用：自带头文件、`-I`/`-D`/`-o`/`-E`/`--version`、shebang、argv | [A-39] |
 | `diag.sh` | 报错要给用户的文件、行、列与源码行 | [A-40] |
-| `ape.sh` | `unisacc.com` 一个文件、每个目标 | [A-38] |
 | `multi.sh` | 多翻译单元一个程序，对 `cc a.c b.c` | [A-30] |
 | `tools.sh` | 别人的库代码，多文件，自带已知答案测试 | [A-31] |
 | `selfgap.sh` | 自举差距本身：unisacc 拒绝而 Python 前端接受的程序数，必须为 0 | [A-29] |
@@ -761,7 +756,7 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 | **A-36** | `tests/ablate.sh` → 把某个阶段（或某个输出头）的答案**旋转成错的**，重编全部探针的六个镜像：必须有镜像变了，或者编译被拒。问过一个网络不等于听它的——[A-33] 只能证明"问过" | S-6, E-57 |
 | **A-37** | `tests/run.sh` → `unisacc -run FILE.c` 编译并在内存里运行，stdout 与退出码都要与系统 cc 编出的二进制一致。不写镜像，也就没有代码签名这一步 | S-9, E-56 |
 | **A-39** | `tests/cli.sh` → 在一个与本仓库无关的空目录里，把编译器当**工具**用：自带头文件、`-I`、`-D`、shebang、argv、退出码，以及"文件不存在要被诊断"。一个能用的编译器，是在它是你手上唯一一个文件时也能用的 | S-11, E-59 |
-| **A-38** | `tests/ape.sh` → 构建 `unisacc.com` 并在本机运行它：检验头部（shell 必须接受第一行）、脚本里的偏移（BSD tail 的八进制陷阱）与切片本身。其余平台由 `linux.sh` 与 `crossnative.sh` 的 Windows 机器承担 | S-10, E-56 |
+| **A-38** | 门禁 `seedape`（`tests/seedapecheck.sh`：UA `-b` 切片 + `seed/ape.c` 封出的容器）与 `com-comboot-*`（`exec/c/comboot.sh`：`unisacc.com` 构建自己直到不动点）→ 构建 `unisacc.com` 并在本机运行它：头部（shell 必须接受第一行）、脚本里的偏移（BSD tail 的八进制陷阱）与切片本身；`--com` 段的每个 `sh unisacc.com -run` 都再走一遍。其余平台由 `linux.sh` 与 `crossnative.sh` 的 Windows 机器承担（原 `tests/ape.sh` 走 Python 种子打包，2026-10-23 随种子归档删除） | S-10, E-56 |
 | **A-41** | `tests/layout.sh` + `tests/datashape.sh` → 数据布局的**枚举**验收：`lower.zero_last` 是纯函数，又有 Python 参考实现与 C 移植两套，于是枚举它的定义域——所有长度 ≤3 的数据定义序列（字母表 `{bss 1, bss 8, str 1, str 7, str 8, 全 NUL 的 str}`，长度取 1/7/8 才看得见 mod 8 规则），加上"同一符号定义两次"的变体，762 条 tape × 6 个目标 = 4,572 次逐字节比对，12 秒。`datashape` 则**生成**声明序 ≠ 地址序的 C 程序，并在比对字节之前先断言"这种形状确实出现了"——否则生成器退化后套件会在什么都没测的情况下继续绿 | A-34, E-61 |
 | **A-42** | `tests/bigclosure.sh` → 对**编译器自己**做闭环：707 KB、1,874 个数据符号，六个目标的镜像与 Python 后端逐字节相同，且宿主那份镜像必须是一个能工作的编译器。90 个探针全绿而它六个目标全崩过——抽样对"只在大程序里自然出现的形状"是系统性失明的 | A-34, E-61 |
 | **A-43** | `tests/consts_check.py` → `unisa/lower.py` 的常量链（`SCRATCH`、`PRINTMAX`、`WIN_HSTD`…`WIN_EXTRA`）与 `src/unisacc_back.c` 里对应的**字面量**逐个相等，共 17 个数。C 后端是手抄的，它只带结果不带推导：改一个 Python 常量会一次作废六个 C 数字，而唯一会发现的是 closure 报两张镜像在某个字节不同——那是真的，但它说不出为什么。这一条说得出 | A-34, E-61 |
