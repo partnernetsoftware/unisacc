@@ -44,7 +44,8 @@ int main(void) {
     fflush(stdout);
 #ifndef _WIN32
     if (lseek(fd, 0, SEEK_END) != 0) bad |= 8;                      /* nothing reached descriptor 0 */
-    close(fd); unlink("vsnprintf_measure.tmp");
+    close(fd);
+    /* The caller owns the scratch fixture and removes it through its deletion guard. */
 #endif
     printf("vsnprintf bad=%d\n", bad);
     return bad;

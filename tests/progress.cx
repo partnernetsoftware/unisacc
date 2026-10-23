@@ -367,16 +367,47 @@ static int in_contract(const char *name) {
     if (n && n < strlen(base) && base[n - 1] == '-') { base[n - 1] = 0; for (i = 0; i < NCSET; i++) if (!strcmp(CSET[i], base)) return 1; }
     return 0;
 }
-typedef struct { int total, green, red, pending, unverified, waived; } QSum;
+typedef struct { int total, green, red, pending, unverified, waived, scope_errors; } QSum;
+/* A queue selection is evidence, not the universe: enumerate the current --com plan. */
+static int queue_has_job(const Queue *q, const char *name) {
+    int i; for (i = 0; i < q->njobs; i++) if (!strcmp(q->jobs[i], name)) return 1;
+    return 0;
+}
+static int parse_plan(const char *text, Queue *plan) {
+    const char *p = text, *e; char name[256]; size_t n, k;
+    queue_free(plan);
+    while (*p) {
+        e = strchr(p, '\n'); if (!e) e = p + strlen(p);
+        n = (size_t)(e - p);
+        if (!n || n >= sizeof name || plan->njobs == MAXJ) goto invalid;
+        for (k = 0; k < n; k++)
+            if (!isalnum((unsigned char)p[k]) && p[k] != '-' && p[k] != '_' && p[k] != '.') goto invalid;
+        memcpy(name, p, n); name[n] = 0;
+        if (queue_has_job(plan, name)) goto invalid;
+        plan->jobs[plan->njobs++] = xdup(name);
+        p = *e ? e + 1 : e;
+    }
+    return plan->njobs > 0;
+invalid:
+    queue_free(plan); return 0;
+}
+
 /* contract_only: count only the contract layer's jobs; waive: names whose red is excused */
-static void summarize(const Queue *q, int contract_only, const char **waive, int nwaive, QSum *s) {
+static void summarize_plan(const Queue *q, const Queue *plan, int contract_only, const char **waive, int nwaive, QSum *s) {
     int i, k;
     memset(s, 0, sizeof *s);
     for (i = 0; i < q->njobs; i++) {
-        const char *name = q->jobs[i]; const QJob *r = 0; int w = 0;
+        if (contract_only && !in_contract(q->jobs[i])) continue;
+        if (!queue_has_job(plan, q->jobs[i])) s->scope_errors++;
+        for (k = 0; k < i; k++) if (!strcmp(q->jobs[k], q->jobs[i])) { s->scope_errors++; break; }
+    }
+    for (i = 0; i < plan->njobs; i++) {
+        const char *name = plan->jobs[i]; const QJob *r = 0; int w = 0;
         if (contract_only && !in_contract(name)) continue;
         s->total++;
-        for (k = 0; k < q->nres; k++) if (!strcmp(q->res[k].name, name)) { r = &q->res[k]; break; }
+        /* Stray results cannot fill a job absent from this queue's declared selection. */
+        if (queue_has_job(q, name))
+            for (k = 0; k < q->nres; k++) if (!strcmp(q->res[k].name, name)) { r = &q->res[k]; break; }
         for (k = 0; k < nwaive; k++) if (!strcmp(waive[k], name)) w = 1;
         if (!r || r->rc < 0 || !strcmp(r->status, "INTERRUPTED")) s->pending++;
         else if (!strcmp(r->status, "UNVERIFIED")) s->unverified++;
@@ -385,10 +416,15 @@ static void summarize(const Queue *q, int contract_only, const char **waive, int
         else s->red++;
     }
 }
+/* Existing parser selftests can still summarize a self-contained fixture universe. */
+static void summarize(const Queue *q, int contract_only, const char **waive, int nwaive, QSum *s) {
+    summarize_plan(q, q, contract_only, waive, nwaive, s);
+}
 static const char *queue_state(const QSum *s) {
+
     if (s->total == 0) return "unknown";
     if (s->red) return "red";
-    if (s->pending || s->unverified) return "partial";
+    if (s->pending || s->unverified || s->scope_errors) return "partial";
     return "done";
 }
 
@@ -629,7 +665,7 @@ static void collect(const char *queue_dir, char *head, size_t headcap) {
     }
     hand_finish("F2", "F2 M2 remainder");
     {   /* F3, F4 */
-        Queue *q = calloc(1, sizeof *q); int have = 0; QSum s3, s4; const char *waive[64]; int nw = 0; char *gl;
+        Queue *q = calloc(1, sizeof *q), *plan = calloc(1, sizeof *plan); int have = 0, have_plan = 0; QSum s3, s4; const char *waive[64]; int nw = 0; char *gl;
         for (i = 0; i < NHAND && nw < 64; i++) if (!strcmp(HAND[i].id, "waive")) waive[nw++] = HAND[i].state;
         if (queue_dir && !safe_arg(queue_dir)) die("unsafe --queue path", queue_dir);
         if (queue_dir) {
@@ -639,20 +675,31 @@ static void collect(const char *queue_dir, char *head, size_t headcap) {
             if (path[0] && (json = cx_read(path, &n)) != 0) { have = parse_results(json, n, q); free(json); }
             free(path);
         }
-        gl = slurp("tests/gatelayers.py"); if (gl) { parse_contract(gl); free(gl); }
-        if (have && q->njobs) {
-            summarize(q, 1, waive, nw, &s3); summarize(q, 0, waive, nw, &s4);
-            snprintf(buf, sizeof buf, "contract-layer jobs: green %d/%d, red %d, pending %d, unverified %d, waived %d", s3.green, s3.total, s3.red, s3.pending, s3.unverified, s3.waived);
+        gl = slurp("tests/gatelayers.py");
+        if (gl) {
+            char *listed = 0; size_t listed_n = 0;
+            parse_contract(gl); free(gl);
+            if (have && q->njobs && NCSET > 0 &&
+                cx_run_timeout("sh ./tests/gate.sh --list --com", 15, &listed, &listed_n) == 0 && listed)
+                have_plan = parse_plan(listed, plan);
+            free(listed);
+        }
+        if (have && q->njobs && have_plan) {
+            summarize_plan(q, plan, 1, waive, nw, &s3); summarize_plan(q, plan, 0, waive, nw, &s4);
+            snprintf(buf, sizeof buf, "current contract plan: green %d/%d, red %d, pending %d, unverified %d, waived %d, scope errors %d", s3.green, s3.total, s3.red, s3.pending, s3.unverified, s3.waived, s3.scope_errors);
             snprintf(b2, sizeof b2, "%d/%d", s3.green, s3.total); addrow("F3 M4 contract sweep", b2, queue_state(&s3), buf);
-            snprintf(buf, sizeof buf, "all jobs: green %d/%d, red %d, pending %d, unverified %d, waived %d", s4.green, s4.total, s4.red, s4.pending, s4.unverified, s4.waived);
+            snprintf(buf, sizeof buf, "current full --com plan: green %d/%d, red %d, pending %d, unverified %d, waived %d, scope errors %d", s4.green, s4.total, s4.red, s4.pending, s4.unverified, s4.waived, s4.scope_errors);
             snprintf(b3, sizeof b3, "%d/%d", s4.green, s4.total); addrow("F4 M7 full queue", b3, queue_state(&s4), buf);
             if (!strcmp(queue_state(&s3), "done")) FINISH_DONE++;
             if (!strcmp(queue_state(&s4), "done")) FINISH_DONE++;
         } else {
-            addrow("F3 M4 contract sweep", "", "not run", queue_dir ? "no readable results.json under --queue" : "no --queue DIR given");
-            addrow("F4 M7 full queue", "", "not run", queue_dir ? "no readable results.json under --queue" : "no --queue DIR given");
+            const char *reason = !queue_dir ? "no --queue DIR given" :
+                (!have || !q->njobs) ? "no readable results.json under --queue" :
+                "current gate --list --com or contract declaration unavailable";
+            addrow("F3 M4 contract sweep", "", "not run", reason);
+            addrow("F4 M7 full queue", "", "not run", reason);
         }
-        queue_free(q); free(q);
+        queue_free(q); free(q); queue_free(plan); free(plan);
     }
     {   /* F5 */
         Hand *n = hand_row("F5.notes"); char *t = n && n->evidence[0] && n->evidence[0] != '-' ? slurp(n->evidence) : 0;
@@ -761,7 +808,25 @@ static int selftest(void) {
         queue_free(q);
         ck(!parse_results("{\"jobs\": {\"a\": ", 15, q), "a truncated results.json is refused");
         queue_free(q); free(q); }
+    /* A complete subset is not a complete current plan; missing jobs are pending even if waived. */
+    {   Queue *q = calloc(1, sizeof *q), *plan = calloc(1, sizeof *plan); QSum s;
+        const char *one = "{\"jobs\":{\"zeropython\":[]},\"results\":{\"zeropython\":{\"rc\":0},\"bound\":{\"rc\":0}}}";
+        const char *w[1] = { "bound" };
+        parse_contract("CONTRACT = set(\"\"\"zeropython bound\"\"\".split())\nCONTRACT_PREFIX = ()\n");
+        ck(parse_plan("zeropython\nbound\nc99\n", plan), "current plan parses");
+        ck(parse_results(one, strlen(one), q), "subset fixture parses");
+        summarize_plan(q, plan, 1, w, 1, &s);
+        cknum(s.total, 2, "full contract denominator"); cknum(s.pending, 1, "absent contract job remains pending despite stray result and waiver");
+        ckstr(queue_state(&s), "partial", "contract subset never done");
+        summarize_plan(q, plan, 0, w, 1, &s);
+        cknum(s.total, 3, "full plan denominator"); cknum(s.pending, 2, "missing full-plan jobs pending");
+        ckstr(queue_state(&s), "partial", "full queue subset never done");
+        queue_free(q);
+        ck(!parse_plan("bound\nbound\n", plan), "duplicate current plan refused");
+        ck(!parse_plan("", plan), "empty current plan refused");
+        queue_free(plan); free(plan); free(q); }
     /* time and rates */
+
     {   char iso[32], hdr[512], line[512], file[4096]; Snap *rows = malloc(sizeof(Snap) * (MAXKEEP + 1)); long v[NCOL]; int k, n; Rate r; char eta[64];
         cknum(iso_to_epoch("1970-01-01T00:00:00Z"), 0, "epoch zero"); cknum(iso_to_epoch("2026-10-23T10:00:00Z") - iso_to_epoch("2026-10-23T08:00:00Z"), 7200, "two hours");
         epoch_to_iso(iso_to_epoch("2026-10-23T10:31:07Z"), iso, sizeof iso); ckstr(iso, "2026-10-23T10:31:07Z", "iso round trip");

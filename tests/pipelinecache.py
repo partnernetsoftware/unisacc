@@ -23,7 +23,7 @@ with tempfile.TemporaryDirectory(prefix="t7-cache-") as directory:
                    "iterate/kernel", "cache/pipe")
     for name in directories:
         (root / name).mkdir(parents=True, exist_ok=True)
-    (root / "exec/stamp.sh").write_bytes((ROOT / "exec/stamp.sh").read_bytes())
+    subprocess.run(['sh', str(ROOT/'tests/fixturecopy.sh'), str(ROOT), str(root), 'tests/pipelinecache-files.tsv'], check=True)
     (root / "iterate/kernel/typekw.tsv").write_text("type\n")
     (root / "cache/ua_ref.stamp").write_text("reference\n")
     for name in ("pp", "lex", "lexcls", "lexword", "parse"):

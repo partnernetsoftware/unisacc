@@ -56,7 +56,7 @@ with tempfile.TemporaryDirectory() as td:
     # a job that had its early slot (0.0.37 rowcov) gets a full attempt, not endless deferrals
     jobs={'long':[sys.executable,'-c','import time; time.sleep(30)']}
     d=seed_state('redefer', {'stamp':stamp[0],'jobs':jobs,'exclusive':[],'results':{},'fullwindow':['long'],'stalled':2})
-    rc=run('redefer',55,('--parent-deadline',str(_t.monotonic()+9)))
+    rc=run('redefer',55,('--parent-deadline',str(_t.monotonic()+7)))
     st=json.loads((d/'results.json').read_text())
     # at a window's start a long job is a full attempt: it is retried alone, not deferred again
     assert rc==75 and 'long' in st.get('retried',[]) and not st.get('deferred'), (rc, st.get('retried'), st.get('deferred'))
@@ -84,7 +84,7 @@ with tempfile.TemporaryDirectory() as td:
     jobs={'toolong':[sys.executable,'-c','import time; time.sleep(60)']}
     seen=[]
     for _ in range(4):
-        rc=run('span',55,('--parent-deadline',str(_t.monotonic()+8))); seen.append(rc)
+        rc=run('span',55,('--parent-deadline',str(_t.monotonic()+7))); seen.append(rc)
         if rc!=75: break
     st=json.loads((t/'span/results.json').read_text())
     assert st['results'].get('toolong',{}).get('rc')==142 and not st.get('deferred'), (seen, st)
@@ -96,24 +96,24 @@ with tempfile.TemporaryDirectory() as td:
                                                'fullwindow':['hog'],'deferred':[{'name':'hog','limit':5}]})
     with patch.dict(os.environ,{'TMPDIR':str(d)}):   # private history: the estimate starts cold
         for _ in range(6):
-            dl=_t.monotonic()+8
+            dl=_t.monotonic()+7
             rc=run('combo',55,('--exclusive-suite','hog','--parent-deadline',str(dl)))
             st=json.loads((d/'results.json').read_text())
             if rc!=75: break
     assert rc==1 and st['results']['hog']['rc']==142 and st['results']['quick']['rc']==0, (rc, st)
-    assert all(r['limit']<=6 for r in st['results'].values()), 'a limit exceeded the parent span: %r'%st['results']
+    assert all(r['limit']<=4 for r in st['results'].values()), 'a limit exceeded the parent span: %r'%st['results']
     # full038b: four leftovers that ignore SIGTERM at the window's end are reaped within the tail budget;
     # the whole tail (reaping, saves, refingerprint) is measured and reserved for the next window
     stub='import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(120)'
     jobs={'deaf%d'%k:[sys.executable,'-c',stub] for k in range(4)}
-    t0=_t.monotonic(); rc=run('deaf',55,('--parent-deadline',str(_t.monotonic()+9))); took=_t.monotonic()-t0
+    t0=_t.monotonic(); rc=run('deaf',55,('--parent-deadline',str(_t.monotonic()+7))); took=_t.monotonic()-t0
     st=json.loads((t/'deaf/results.json').read_text())
-    assert took < 9+1, 'window overran its parent deadline: %.1fs'%took
+    assert took < 7+1, 'window overran its parent deadline: %.1fs'%took
     assert st.get('epilogue_max',0) > 0 and 'inflight' not in st or not st['inflight'], st.get('epilogue_max')
     # full038b rounding: a fractional span (x.9 s) admitted at the window's start is a full attempt --
     # recorded as such at admission -- so its timeout is a solo retry, not a tail-fill deferral
     jobs={'frac':[sys.executable,'-c','import time; time.sleep(60)']}
-    assert run('frac',55,('--parent-deadline',str(_t.monotonic()+7.9)))==75
+    assert run('frac',55,('--parent-deadline',str(_t.monotonic()+6.9)))==75
     st=json.loads((t/'frac/results.json').read_text())
     assert st.get('retried')==['frac'] and not st.get('deferred'), (st.get('retried'), st.get('deferred'))
     # full038c: memory-heavy suites never overlap each other; light jobs still fill the other slots
@@ -153,12 +153,12 @@ with tempfile.TemporaryDirectory() as td:
     if sys.platform.startswith('linux'):   # an incomplete reading admits nothing on Linux
         assert not json.loads((t/'memunk/results.json').read_text())['results'], 'unknown memory admitted a job'
     # a booking is held until the job exits, however late it allocates (no time-based release)
-    jobs={n:[sys.executable,'-c',code2,str(t/n),'2.5'] for n in ('b1','b2')}
+    jobs={n:[sys.executable,'-c',code2,str(t/n),'1.25'] for n in ('b1','b2')}
     q.mem_available_mib=lambda: 1000            # room for one floor only
     (t/'held-hist').mkdir()
     with patch.dict(os.environ,{'TMPDIR':str(t/'held-hist')}):   # private history: no estimate left by earlier runs
         for _ in range(3):
-            if run('held',55,('--jobs','4','--parent-deadline',str(_t.monotonic()+8)))!=75: break
+            if run('held',55,('--jobs','4','--parent-deadline',str(_t.monotonic()+7)))!=75: break
     s1,s2=(float((t/n).read_text()) for n in ('b1','b2')); e1=float((t/('b1' if s1<s2 else 'b2')).with_suffix('.end').read_text())
     assert max(s1,s2) >= e1, 'second job started before the first released its booking'
     # the real reading parses on this host (meminfo and, where limited, the cgroup path)

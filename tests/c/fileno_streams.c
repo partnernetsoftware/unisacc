@@ -17,7 +17,7 @@ int main(void) {
     {   char buf[8];
         if (lseek(fd, 0, SEEK_SET) != 0 || read(fd, buf, 3) != 3 || memcmp(buf, "abc", 3) != 0) bad |= 4; }
 #endif
-    fclose(f); remove("fileno_streams.tmp");
+    fclose(f); /* The caller removes its scratch fixture through the deletion guard. */
     printf("fileno bad=%d\n", bad);
     return bad;
 }

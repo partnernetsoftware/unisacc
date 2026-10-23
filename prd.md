@@ -615,3 +615,13 @@ F3 实测补充：k2b 的私有 tracked-only 夹具漏掉被忽略的根产品�
 K2b 后续实测：补齐产品后，原 N10 注入 unisa/vm.py 已不再影响迁移后的 C VM，断言诚实报红。只替换旧夹具的路径/注入文本常量（不增加 Python 逻辑、断言或调用点）：改为未声明的 include/cx.h 编译依赖。同时修 cxbin 缓存键漏记隐式前奏头的真实缺陷，使前奏头变更必须重新编译；K2b 仍须证明真实运行改变、漏跑标红及撤销。shell 夹具清除继承的 Git 定位变量并核验同代产品。
 
 K2b 候选已在索引导出和隔离中跑完原完整测试（rc0）；只读文件事件采证保留两边相同 stdout 摘要及结果，N10 真正编译拒绝后撤销/void 全部断言通过。冷缓存的门禁清单曾撞现有 10 秒限时，使用既有 --list 工具独立有界准备后通过，未提高任何限时。仍需 commitgate 与 F3 新状态全扫。
+
+### 0.0.43 F3 acceptance fixture repairs (2026-10-23)
+
+The first CONTRACT sweep on root 4f0b493c completed all 187 jobs: 162 green and 25 red, with no pending jobs. Preserve that evidence. Its Linux cleanup fixture expected the superseded guest layout; update the fixture to carry the real guard and test current owned scratch cleanup while retaining native watchdog assertions and Darwin ownership UNVERIFIED 77. The new vsnprintf and fileno probes must leave scratch removal to its caller's guard instead of using raw unlink.
+
+The pipeline cache fixture omits the guard tools used by both gen_inputs and real stamp.sh. Copy their existing tool/header closure into the fixture through a shared shell copier; keep production ROOT behavior and every cache assertion. A HERE-only production candidate was tested and rejected because stamp.sh still failed. The corrected fixture passed all original assertions. The scheduler fixture's deadline constants can be shortened while preserving admission margin, full/solo timeout settlement and booking serialization: nine numeric replacements, no Python logic/calls added, all assertions retained or tightened. It passed within the unchanged 44-second bound (35.121 seconds).
+
+Progress must enumerate the current complete --com job set and its CONTRACT subset; a selected queue is evidence, not the complete F4 universe. Missing declared jobs stay pending even with a stray result or waiver. No new host waiver or ROOT interface change is introduced. Raw fresh-order and edge-seal failures need separate causality proofs before recapture.
+
+The fixture copier's path set belongs in a plain data manifest: embedding the guard filename on a Python copy line is conservatively classified as a guard call by the deletion scanner. Use a shared manifest reader instead of adding a false deletion exemption/mutation row for a copy. The original actual deletion site remains guarded and registered.

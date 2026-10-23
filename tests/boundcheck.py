@@ -125,39 +125,7 @@ else:
         assert log.read_text()=='4242'
         print('term: owned window closes on success, failure, timeout and signal (mock UI)')
 
-# Run the real Linux wrapper against an isolated mock guest, including its tar
-# transfer and shell traps. This checks deletion scope, not VM compatibility.
-with tempfile.TemporaryDirectory(prefix='linux-cleanup-') as td:
-    base=pathlib.Path(td); fixture=base/'repo'; guest=base/'guest'; tools=base/'bin'
-    (fixture/'tests').mkdir(parents=True); (fixture/'corpus/c-testsuite/tests/single-exec').mkdir(parents=True)
-    guest.mkdir(); tools.mkdir()
-    (fixture/'tests/linux.sh').write_bytes((root/'linux.sh').read_bytes())
-    (fixture/'tests/probe.sh').write_text('#!/bin/sh\necho latest-failure\nexit 3\n');(fixture/'tests/probe.sh').chmod(0o755)
-    driver="""import os,subprocess,sys
-if sys.argv[1]=='list':
-    print('Running' if 'Status' in ' '.join(sys.argv) else ('aarch64' if os.uname().machine=='arm64' else os.uname().machine))
-elif '/proc/meminfo' in sys.argv: print('8000000')
-elif 'bash' not in sys.argv: print('yes')
-else:
-    env=dict(os.environ,HOME=os.environ['LINUX_TEST_HOME'])
-    raise SystemExit(subprocess.run(['/bin/bash','-c',sys.argv[-1]],env=env).returncode)
-"""
-    (tools/'limactl').write_text('#!'+sys.executable+'\n'+driver);(tools/'limactl').chmod(0o755)
-    env=dict(os.environ,PATH=str(tools)+os.pathsep+os.environ['PATH'],LINUX_TEST_HOME=str(guest),STRICT='1')
-    for name in ('unisa-linux','unisa-tmp'):
-        (guest/name).mkdir();(guest/name/'old-tree').write_text('old')
-    (guest/'unrelated').write_text('keep')
-    result=subprocess.run(['/bin/bash',str(fixture/'tests/linux.sh'),'probe'],env=env,capture_output=True,text=True,timeout=10)
-    assert result.returncode==3,(result.returncode,result.stderr,result.stdout)
-    assert (guest/'unisa-linux-last-failure.log').read_text()=='latest-failure\n'
-    assert (guest/'unrelated').read_text()=='keep'
-    for name in ('unisa-linux','unisa-tmp','.unisa-linux-lock','unisa-linux-current.log'):
-        try: (guest/name).stat()
-        except FileNotFoundError: pass
-        else: raise AssertionError(name)
-    (fixture/'tests/probe.sh').write_text('#!/bin/sh\necho success\n')
-    assert subprocess.run(['/bin/bash',str(fixture/'tests/linux.sh'),'probe'],env=env,capture_output=True,text=True,timeout=10).returncode==0
-    assert (guest/'unisa-linux-last-failure.log').read_text()=='latest-failure\n'
-    print('linux: old scratch cleared; failure tree removed; latest failure log retained (mock guest)')
+# Run the real Linux wrapper against a guarded mock guest; preserve the Darwin checks above.
+subprocess.run(['sh', str(root/'linuxcleanupcheck.sh')], check=True, timeout=30)
 if TERM_UNVERIFIED:
     sys.exit(77)   # UNVERIFIED (not a pass): the Terminal ownership cases were not run on this host
