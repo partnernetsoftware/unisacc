@@ -188,6 +188,7 @@ job finite-template python3 ./tests/finitetemplatecheck.py   # 0.0.23 K: paramet
 job decision-ledger tests/bound 58 sh ./tests/cxbin tests/decisionledger.cx   # (.cx port, 2026-10-23) 0.0.23 I: build-time Python control (direct transition sites) may only fall
 job zeropython tests/bound 58 sh ./tests/cxbin tests/zeropython.cx --check   # (2026-10-23) owner's hard goal, zero Python (prd.md §1): python call sites, unisa importers and .py files may only fall against tests/zeropython.tsv
 job zeropython-selftest tests/bound 58 sh ./tests/cxbin tests/zeropython.cx --selftest   # the matcher on fixed snippets; seeded rises (a file, a total, a new .py, a new data line) must fail
+job progress tests/bound 58 sh ./tests/cxbin tests/progress.cx --selftest   # (2026-10-23) plans/v0.0.43-finish-line.md section 4: the progress dashboard (finish line F1-F6 + every long-term ledger); its parsers, counters, queue scan and rate arithmetic on canned input
 job manifest-entries-pp tests/bound 58 sh ./tests/cxbin tests/manifestentries.cx --stage pp   # (.cx port, 2026-10-23)
 job manifest-entries-lex tests/bound 58 sh ./tests/cxbin tests/manifestentries.cx --stage lex
 job manifest-entries-parse2 tests/bound 58 sh ./tests/cxbin tests/manifestentries.cx --stage parse2

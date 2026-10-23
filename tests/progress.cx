@@ -1,0 +1,831 @@
+#!/usr/bin/env -S unisacc.com -run
+/* progress.cx -- the progress dashboard of plans/v0.0.43-finish-line.md section 4 (2026-10-23): the finish line F1..F6
+   (section 2) and every long-term ledger (section 3) in one compact table, plus a timestamped snapshot line and
+   measured rates, so that an estimate is a division and not a feeling.  Include-free .cx, read-only.
+   usage, from the repo root:
+     sh ./tests/cxbin tests/progress.cx                       the table (about 8 s; the three slow readers run side by side)
+     sh ./tests/cxbin tests/progress.cx --queue DIR           also F3/F4 from the newest gate-queue state under DIR
+     sh ./tests/cxbin tests/progress.cx --append FILE         the table, then ONE timestamped TSV line appended to FILE
+                                                              (a `#ts` header line first when FILE is new or empty)
+     sh ./tests/cxbin tests/progress.cx --rate FILE [--last N]  per-hour deltas over the last N snapshot lines (default 10)
+                                                              and a naive ETA to 0 for each ledger; reads FILE only
+     sh ./tests/cxbin tests/progress.cx --selftest            parsing, counting, queue scan and rate arithmetic on canned input
+   Only --append writes anything (that one FILE).  Nothing is deleted, nothing is built in the tree.  The three readers
+   it runs are the repository's own tools: tests/zeropython.cx --check, tests/cxinclude.cx --check and the product
+   identity check seed/ident.c on ./unisacc.com (run in memory by the product itself); a reader that fails to run
+   leaves its numbers unknown (-1 in the snapshot, `unknown` in the table), never a guess.  UNISACC_JOBS bounds how many
+   of the three run at once (default nproc/4, at least 1).
+   Finish line (tests/progress-finish.tsv, tests/progress-tracks.tsv; the formats are in their headers):
+     F1  derived: how many of the product fix cuts listed in the tsv (F1.cut rows) have a `fix` commit after F1.since
+         in git log, and whether ./unisacc.com still verifies against the tree (ident check)
+     F3, F4  derived from results.json of the newest gate-queue state when --queue DIR is given (F3: the jobs the
+         contract layer of tests/gatelayers.py names; F4: every job; `waive` rows of the tsv are excluded and counted);
+         without --queue they read `not run`
+     F5  derived: TODO lines left in the notes file the F5.notes row names
+     F2, F6 (and any derived row whose source is absent) are hand-kept rows; a `done` whose evidence commit or file
+         does not resolve is shown `unverified`.
+   Ledgers: zero-python (a)/(b)/(c) from tests/zeropython.cx; cxinclude files/lines/baseline from tests/cxinclude.cx;
+   deletion ledger guarded/exempt rows of tests/deletes.tsv; glossary whitelist total (sum of COUNT) of
+   tests/glossary-whitelist.tsv; flownet and .cx-module steps done/total from tests/progress-tracks.tsv; interpreter
+   job lines of tests/gate.sh (a `job` line naming the interpreter's versioned binary). */
+
+#define NCOL 15
+#define NF 6
+#define MAXJ 8192
+#define MAXROW 64
+
+enum { C_ZPA, C_ZPB, C_ZPC, C_CIF, C_CIL, C_DG, C_DE, C_GL, C_FD, C_FT, C_XD, C_XT, C_GP, C_GJ, C_FIN };
+static const char *COLS[NCOL] = { "zp_a", "zp_b", "zp_c", "cxinc_files", "cxinc_lines", "del_guarded", "del_exempt",
+    "gloss_total", "flownet_done", "flownet_total", "cxmod_done", "cxmod_total", "gate_py", "gate_jobs", "finish_done" };
+
+typedef struct { const char *label; int col; int total; } Target;   /* remaining = V[col], or V[total]-V[col]; total -2: NF-V[col] */
+static const Target TG[] = {
+    { "zero-python (a) call sites", C_ZPA, -1 }, { "zero-python (b) importers", C_ZPB, -1 },
+    { "zero-python (c) .py files", C_ZPC, -1 }, { "cxinclude include lines", C_CIL, -1 },
+    { "deletion ledger exempt", C_DE, -1 }, { "glossary whitelist total", C_GL, -1 },
+    { "interpreter gate lines", C_GP, -1 }, { "flownet steps left", C_FD, C_FT },
+    { "cx module steps left", C_XD, C_XT }, { "finish line steps left", C_FIN, -2 },
+};
+#define NTG ((int)(sizeof TG / sizeof TG[0]))
+
+/* ------------------------------------------------------------------ text helpers */
+static char ROOT[1024];
+
+static char *xdup(const char *s) { size_t n = strlen(s); char *p = malloc(n + 1); if (!p) { fputs("progress: out of memory\n", stderr); exit(2); } memcpy(p, s, n + 1); return p; }
+
+/* the next line of *pp (without its newline) into out; 0 at the end of the text */
+static int next_line(const char **pp, char *out, size_t cap) {
+    const char *p = *pp, *e; size_t n;
+    if (!*p) return 0;
+    e = strchr(p, '\n'); n = e ? (size_t)(e - p) : strlen(p);
+    if (n >= cap) n = cap - 1;
+    memcpy(out, p, n); out[n] = 0;
+    if (n && out[n - 1] == '\r') out[n - 1] = 0;
+    *pp = e ? e + 1 : p + strlen(p);
+    return 1;
+}
+/* the first line of TEXT that contains NEEDLE, into out; 0 when none */
+static int find_line(const char *text, const char *needle, char *out, size_t cap) {
+    const char *p = text; char line[2048];
+    while (next_line(&p, line, sizeof line)) if (strstr(line, needle)) { snprintf(out, cap, "%s", line); return 1; }
+    return 0;
+}
+/* the first run of digits after TAG on its line; -1 when none */
+static long num_after(const char *text, const char *tag) {
+    const char *p = strstr(text, tag);
+    if (!p) return -1;
+    p += strlen(tag);
+    while (*p && *p != '\n' && !isdigit((unsigned char)*p)) p++;
+    return isdigit((unsigned char)*p) ? atol(p) : -1;
+}
+/* the run of digits that ends right before TAG (blanks between allowed); -1 when none */
+static long num_before(const char *text, const char *tag) {
+    const char *p = strstr(text, tag);
+    if (!p || p == text) return -1;
+    p--;
+    while (p > text && *p == ' ') p--;
+    if (!isdigit((unsigned char)*p)) return -1;
+    while (p > text && isdigit((unsigned char)p[-1])) p--;
+    return atol(p);
+}
+/* the last run of digits on the line, -1 when none */
+static long num_last(const char *line) {
+    const char *p = line + strlen(line);
+    while (p > line && !isdigit((unsigned char)p[-1])) p--;
+    if (p == line) return -1;
+    while (p > line && isdigit((unsigned char)p[-1])) p--;
+    return atol(p);
+}
+static int split_tabs(char *line, char **f, int max) {
+    int n = 0; char *p = line;
+    for (;;) {
+        if (n < max) f[n++] = p;
+        p = strchr(p, '\t');
+        if (!p) break;
+        *p++ = 0;
+    }
+    return n;
+}
+static int is_hex(const char *s) {
+    size_t n = strlen(s), i;
+    if (n < 7 || n > 40) return 0;
+    for (i = 0; i < n; i++) if (!isxdigit((unsigned char)s[i])) return 0;
+    return 1;
+}
+static int icontains(const char *hay, const char *needle) {
+    size_t n = strlen(hay), m = strlen(needle), i, j;
+    if (!m) return 1;
+    for (i = 0; i + m <= n; i++) {
+        for (j = 0; j < m; j++) if (tolower((unsigned char)hay[i + j]) != tolower((unsigned char)needle[j])) break;
+        if (j == m) return 1;
+    }
+    return 0;
+}
+static int starts(const char *s, const char *p) { return strncmp(s, p, strlen(p)) == 0; }
+
+/* ------------------------------------------------------------------ ledger parsers (pure) */
+typedef struct { long a, b, c, raw, rises; } ZP;
+static void parse_zp(const char *text, ZP *z) {
+    char line[2048];
+    z->a = z->b = z->c = z->raw = z->rises = -1;
+    if (find_line(text, "(a)", line, sizeof line)) {
+        z->a = num_after(line, "(a)"); z->b = num_after(line, "(b)"); z->c = num_after(line, "(c)");
+        if (strstr(line, "[raw")) z->raw = num_last(line);
+    }
+    z->rises = num_before(text, " rise(s)");
+}
+typedef struct { long files, lines, base; } CI;
+static void parse_ci(const char *text, CI *c) {
+    char line[2048];
+    c->files = c->lines = c->base = -1;
+    if (find_line(text, " .cx files, ", line, sizeof line)) {
+        c->files = num_before(line, " .cx files"); c->lines = num_before(line, " include lines"); c->base = num_after(line, "(baseline ");
+    }
+}
+/* rows of a deletion ledger (7th column) */
+static void count_deletes(const char *tsv, long *guarded, long *exempt) {
+    const char *p = tsv; char line[4096], *f[16];
+    *guarded = *exempt = 0;
+    while (next_line(&p, line, sizeof line)) {
+        int n;
+        if (!line[0] || line[0] == '#') continue;
+        n = split_tabs(line, f, 16);
+        if (n < 7) continue;
+        if (!strcmp(f[6], "guarded")) ++*guarded; else if (!strcmp(f[6], "exempt")) ++*exempt;
+    }
+}
+/* glossary whitelist: sum of the COUNT column (3rd), and the number of rows */
+static void sum_gloss(const char *tsv, long *total, long *rows) {
+    const char *p = tsv; char line[4096], *f[8];
+    *total = *rows = 0;
+    while (next_line(&p, line, sizeof line)) {
+        if (!line[0] || line[0] == '#') continue;
+        if (split_tabs(line, f, 8) < 3 || !isdigit((unsigned char)f[2][0])) continue;
+        *total += atol(f[2]); ++*rows;
+    }
+}
+/* job lines of the gate script that name the interpreter's versioned binary (comments excluded).  The word is spelled
+   from two halves so that this file is itself free of it */
+static long count_gate(const char *text, long *jobs) {
+    const char *p = text; char line[8192], py[16]; long n = 0;
+    snprintf(py, sizeof py, "%s%s", "py", "thon3");
+    *jobs = 0;
+    while (next_line(&p, line, sizeof line)) {
+        const char *q = line; int isjob;
+        while (*q == ' ' || *q == '\t') q++;
+        if (*q == '#') continue;
+        isjob = starts(q, "job ") || strstr(q, "; do job ") || strstr(q, " do job ");
+        if (!isjob) continue;
+        ++*jobs;
+        if (strstr(q, py)) n++;
+    }
+    return n;
+}
+/* tracks table: TRACK STEP STATE NOTE */
+static void count_track(const char *tsv, const char *track, long *done, long *total) {
+    const char *p = tsv; char line[2048], *f[8];
+    *done = *total = 0;
+    while (next_line(&p, line, sizeof line)) {
+        if (!line[0] || line[0] == '#') continue;
+        if (split_tabs(line, f, 8) < 3 || strcmp(f[0], track)) continue;
+        ++*total;
+        if (!strcmp(f[2], "done")) ++*done;
+    }
+}
+
+/* ------------------------------------------------------------------ finish-line rows */
+typedef struct { char id[24]; char state[80]; char evidence[160]; char note[240]; } Hand;
+static Hand HAND[MAXROW]; static int NHAND;
+static void parse_hand(const char *tsv) {
+    const char *p = tsv; char line[2048], *f[8];
+    NHAND = 0;
+    while (next_line(&p, line, sizeof line)) {
+        int n;
+        if (!line[0] || line[0] == '#' || NHAND >= MAXROW) continue;
+        n = split_tabs(line, f, 8);
+        if (n < 3) continue;
+        { Hand *h = &HAND[NHAND];
+          snprintf(h->id, sizeof h->id, "%s", f[0]); snprintf(h->state, sizeof h->state, "%s", f[1]);
+          snprintf(h->evidence, sizeof h->evidence, "%s", f[2]); snprintf(h->note, sizeof h->note, "%s", n > 3 ? f[3] : ""); }
+        NHAND++;
+    }
+}
+static Hand *hand_row(const char *id) { int i; for (i = 0; i < NHAND; i++) if (!strcmp(HAND[i].id, id)) return &HAND[i]; return 0; }
+
+/* a stated `done` needs evidence that resolves */
+static const char *vet_state(const char *state, int evidence_ok) {
+    if (!strcmp(state, "done") && !evidence_ok) return "unverified";
+    return state;
+}
+
+/* cuts: of the keywords (each the label of one product fix), which appear in a `fix` subject line */
+static int count_cuts(const char *subjects, const char **kw, int nkw, int *found) {
+    int k, hits = 0;
+    for (k = 0; k < nkw; k++) {
+        const char *p = subjects; char line[1024]; found[k] = 0;
+        while (next_line(&p, line, sizeof line)) if (starts(line, "fix") && icontains(line, kw[k])) { found[k] = 1; break; }
+        hits += found[k];
+    }
+    return hits;
+}
+static const char *f1_state(int hits, int total, int ident) {   /* ident: 1 verified, 0 not, -1 unknown */
+    if (total > 0 && hits == total && ident == 1) return "done";
+    if (hits == 0) return "todo";
+    return "partial";
+}
+
+/* ------------------------------------------------------------------ gate-queue state (results.json) */
+typedef struct { const char *s; size_t n, i; } Js;
+static void jws(Js *j) { while (j->i < j->n && isspace((unsigned char)j->s[j->i])) j->i++; }
+static int jstr(Js *j, char *out, size_t cap) {   /* "..." with escapes kept raw except \" and \\ */
+    size_t o = 0;
+    jws(j);
+    if (j->i >= j->n || j->s[j->i] != '"') return 0;
+    j->i++;
+    while (j->i < j->n && j->s[j->i] != '"') {
+        char c = j->s[j->i++];
+        if (c == '\\' && j->i < j->n) c = j->s[j->i++];
+        if (o + 1 < cap) out[o++] = c;
+    }
+    if (j->i >= j->n) return 0;
+    j->i++; out[o] = 0; return 1;
+}
+static int jskip(Js *j) {
+    jws(j);
+    if (j->i >= j->n) return 0;
+    if (j->s[j->i] == '"') { char t[8]; return jstr(j, t, sizeof t); }
+    if (j->s[j->i] == '{' || j->s[j->i] == '[') {
+        int depth = 0;
+        while (j->i < j->n) {
+            char c = j->s[j->i];
+            if (c == '"') { char t[8]; if (!jstr(j, t, sizeof t)) return 0; continue; }
+            j->i++;
+            if (c == '{' || c == '[') depth++;
+            else if (c == '}' || c == ']') { if (--depth == 0) return 1; }
+        }
+        return 0;
+    }
+    while (j->i < j->n && !strchr(",}] \t\r\n", j->s[j->i])) j->i++;
+    return 1;
+}
+static int jcolon(Js *j) { jws(j); if (j->i >= j->n || j->s[j->i] != ':') return 0; j->i++; jws(j); return 1; }
+typedef struct { char *name; long rc; char status[24]; } QJob;   /* rc -1: no result (or null) */
+typedef struct { char *jobs[MAXJ]; int njobs; QJob res[MAXJ]; int nres; } Queue;
+/* one result object: its rc and status */
+static int parse_one(Js *j, QJob *r) {
+    char k[256];
+    if (j->i >= j->n || j->s[j->i] != '{') return jskip(j);
+    j->i++;
+    for (;;) {
+        jws(j);
+        if (j->i < j->n && j->s[j->i] == '}') { j->i++; return 1; }
+        if (j->i < j->n && j->s[j->i] == ',') { j->i++; continue; }
+        if (!jstr(j, k, sizeof k) || !jcolon(j)) return 0;
+        if (!strcmp(k, "rc") && j->i < j->n && (isdigit((unsigned char)j->s[j->i]) || j->s[j->i] == '-')) r->rc = atol(j->s + j->i);
+        else if (!strcmp(k, "status") && j->i < j->n && j->s[j->i] == '"') {
+            char t[64]; if (!jstr(j, t, sizeof t)) return 0;
+            snprintf(r->status, sizeof r->status, "%s", t); continue;
+        }
+        if (!jskip(j)) return 0;
+    }
+}
+static int parse_results(const char *text, size_t n, Queue *q) {
+    Js j; char key[256], k2[256];
+    j.s = text; j.n = n; j.i = 0; q->njobs = q->nres = 0;
+    jws(&j);
+    if (j.i >= j.n || j.s[j.i] != '{') return 0;
+    j.i++;
+    for (;;) {
+        jws(&j);
+        if (j.i >= j.n) return 0;
+        if (j.s[j.i] == '}') return 1;
+        if (j.s[j.i] == ',') { j.i++; continue; }
+        if (!jstr(&j, key, sizeof key) || !jcolon(&j)) return 0;
+        if ((!strcmp(key, "jobs") || !strcmp(key, "results")) && j.i < j.n && j.s[j.i] == '{') {
+            int isres = !strcmp(key, "results");
+            j.i++;
+            for (;;) {
+                jws(&j);
+                if (j.i >= j.n) return 0;
+                if (j.s[j.i] == '}') { j.i++; break; }
+                if (j.s[j.i] == ',') { j.i++; continue; }
+                if (!jstr(&j, k2, sizeof k2) || !jcolon(&j)) return 0;
+                if (!isres) {
+                    if (q->njobs < MAXJ) q->jobs[q->njobs++] = xdup(k2);
+                    if (!jskip(&j)) return 0;
+                } else if (q->nres < MAXJ) {
+                    QJob *r = &q->res[q->nres++];
+                    r->name = xdup(k2); r->rc = -1; r->status[0] = 0;
+                    if (!parse_one(&j, r)) return 0;
+                } else if (!jskip(&j)) return 0;
+            }
+        } else if (!jskip(&j)) return 0;
+    }
+}
+static void queue_free(Queue *q) {
+    int i;
+    for (i = 0; i < q->njobs; i++) free(q->jobs[i]);
+    for (i = 0; i < q->nres; i++) free(q->res[i].name);
+    q->njobs = q->nres = 0;
+}
+/* the contract layer of tests/gatelayers.py: the words of CONTRACT = set("""...""".split()) and CONTRACT_PREFIX */
+static char *CSET[MAXJ]; static int NCSET; static char *CPRE[64]; static int NCPRE;
+static void parse_contract(const char *text) {
+    const char *a = strstr(text, "CONTRACT = set(\"\"\""), *b, *c, *d;
+    int i;
+    for (i = 0; i < NCSET; i++) free(CSET[i]);
+    for (i = 0; i < NCPRE; i++) free(CPRE[i]);
+    NCSET = NCPRE = 0;
+    if (a) {
+        a += strlen("CONTRACT = set(\"\"\"");
+        b = strstr(a, "\"\"\"");
+        while (b && a < b) {
+            while (a < b && isspace((unsigned char)*a)) a++;
+            c = a; while (c < b && !isspace((unsigned char)*c)) c++;
+            if (c > a && NCSET < MAXJ) { CSET[NCSET] = malloc((size_t)(c - a) + 1); memcpy(CSET[NCSET], a, (size_t)(c - a)); CSET[NCSET][c - a] = 0; NCSET++; }
+            a = c;
+        }
+    }
+    a = strstr(text, "CONTRACT_PREFIX = (");
+    if (a) {
+        d = strchr(a, ')');
+        a += strlen("CONTRACT_PREFIX = (");
+        while (d && (a = strchr(a, '"')) && a < d) {
+            c = strchr(a + 1, '"');
+            if (!c || c > d) break;
+            if (NCPRE < 64) { CPRE[NCPRE] = malloc((size_t)(c - a)); memcpy(CPRE[NCPRE], a + 1, (size_t)(c - a - 1)); CPRE[NCPRE][c - a - 1] = 0; NCPRE++; }
+            a = c + 1;
+        }
+    }
+}
+static int in_contract(const char *name) {
+    char base[256]; int i; size_t n;
+    for (i = 0; i < NCSET; i++) if (!strcmp(CSET[i], name)) return 1;
+    for (i = 0; i < NCPRE; i++) if (starts(name, CPRE[i])) return 1;
+    snprintf(base, sizeof base, "%s", name); n = strlen(base);
+    while (n && isdigit((unsigned char)base[n - 1])) n--;      /* a shard suffix -N */
+    if (n && n < strlen(base) && base[n - 1] == '-') { base[n - 1] = 0; for (i = 0; i < NCSET; i++) if (!strcmp(CSET[i], base)) return 1; }
+    return 0;
+}
+typedef struct { int total, green, red, pending, unverified, waived; } QSum;
+/* contract_only: count only the contract layer's jobs; waive: names whose red is excused */
+static void summarize(const Queue *q, int contract_only, const char **waive, int nwaive, QSum *s) {
+    int i, k;
+    memset(s, 0, sizeof *s);
+    for (i = 0; i < q->njobs; i++) {
+        const char *name = q->jobs[i]; const QJob *r = 0; int w = 0;
+        if (contract_only && !in_contract(name)) continue;
+        s->total++;
+        for (k = 0; k < q->nres; k++) if (!strcmp(q->res[k].name, name)) { r = &q->res[k]; break; }
+        for (k = 0; k < nwaive; k++) if (!strcmp(waive[k], name)) w = 1;
+        if (!r || r->rc < 0 || !strcmp(r->status, "INTERRUPTED")) s->pending++;
+        else if (!strcmp(r->status, "UNVERIFIED")) s->unverified++;
+        else if (r->rc == 0) s->green++;
+        else if (w) s->waived++;
+        else s->red++;
+    }
+}
+static const char *queue_state(const QSum *s) {
+    if (s->total == 0) return "unknown";
+    if (s->red) return "red";
+    if (s->pending || s->unverified) return "partial";
+    return "done";
+}
+
+/* ------------------------------------------------------------------ time, snapshot lines, rates */
+static long days_from_civil(long y, long m, long d) {
+    long era, yoe, doy, doe;
+    y -= m <= 2; era = (y >= 0 ? y : y - 399) / 400; yoe = y - era * 400;
+    doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1; doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+static long iso_to_epoch(const char *s) {
+    int Y, M, D, h, m, sec;
+    if (sscanf(s, "%d-%d-%dT%d:%d:%dZ", &Y, &M, &D, &h, &m, &sec) != 6) return -1;
+    return days_from_civil(Y, M, D) * 86400L + h * 3600L + m * 60L + sec;
+}
+static void epoch_to_iso(long t, char *out, size_t cap) {
+    long days = t / 86400, rem = t % 86400, z, era, doe, yoe, y, doy, mp, d, m;   /* civil_from_days (H. Hinnant), t >= 0 */
+    z = days + 719468; era = z / 146097; doe = z - era * 146097; yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    y = yoe + era * 400; doy = doe - (365 * yoe + yoe / 4 - yoe / 100); mp = (5 * doy + 2) / 153;
+    d = doy - (153 * mp + 2) / 5 + 1; m = mp < 10 ? mp + 3 : mp - 9; y += m <= 2;
+    snprintf(out, cap, "%04ld-%02ld-%02ldT%02ld:%02ld:%02ldZ", y, m, d, rem / 3600, rem % 3600 / 60, rem % 60);
+}
+static void snapshot_header(char *out, size_t cap) {
+    int k; size_t o = (size_t)snprintf(out, cap, "#ts\thead");
+    for (k = 0; k < NCOL; k++) o += (size_t)snprintf(out + o, cap - o, "\t%s", COLS[k]);
+}
+static void snapshot_line(const char *ts, const char *head, const long *v, char *out, size_t cap) {
+    int k; size_t o = (size_t)snprintf(out, cap, "%s\t%s", ts, head);
+    for (k = 0; k < NCOL; k++) o += (size_t)snprintf(out + o, cap - o, "\t%ld", v[k]);
+}
+typedef struct { long t; long v[NCOL]; } Snap;
+#define MAXKEEP 4096
+/* the snapshot lines of a file's text, columns found by the `#ts` header's names (the default order without one);
+   returns how many valid rows were read into rows[] (at most MAXKEEP; more is refused by the caller) */
+static int read_snaps(const char *text, Snap *rows) {
+    const char *p = text; char line[4096], *f[64]; int map[NCOL], k, n = 0, i;
+    for (k = 0; k < NCOL; k++) map[k] = 2 + k;
+    while (next_line(&p, line, sizeof line)) {
+        int nf;
+        if (!line[0]) continue;
+        if (starts(line, "#ts")) {
+            nf = split_tabs(line, f, 64);
+            for (k = 0; k < NCOL; k++) { map[k] = -1; for (i = 0; i < nf; i++) if (!strcmp(f[i], COLS[k])) map[k] = i; }
+            continue;
+        }
+        if (line[0] == '#') continue;
+        nf = split_tabs(line, f, 64);
+        if (nf < 3 || iso_to_epoch(f[0]) < 0) continue;
+        if (n >= MAXKEEP) return MAXKEEP + 1;
+        rows[n].t = iso_to_epoch(f[0]);
+        for (k = 0; k < NCOL; k++) rows[n].v[k] = (map[k] >= 0 && map[k] < nf && (isdigit((unsigned char)f[map[k]][0]) || f[map[k]][0] == '-')) ? atol(f[map[k]]) : -1;
+        n++;
+    }
+    return n;
+}
+static long remaining(const long *v, const Target *t) {
+    if (v[t->col] < 0) return -1;
+    if (t->total == -1) return v[t->col];
+    if (t->total == -2) return NF - v[t->col];
+    return v[t->total] < 0 ? -1 : v[t->total] - v[t->col];
+}
+typedef struct { int ok; double per_hour; long left; double eta_h; int kind; } Rate;   /* kind: 0 n/a, 1 reached, 2 eta, 3 no progress */
+static Rate rate_of(const Snap *first, const Snap *last, const Target *t) {
+    Rate r; long a = remaining(first->v, t), b = remaining(last->v, t); double hours = (double)(last->t - first->t) / 3600.0;
+    memset(&r, 0, sizeof r);
+    r.left = b;
+    if (a < 0 || b < 0 || hours <= 0) { r.kind = 0; return r; }
+    r.ok = 1; r.per_hour = (double)(b - a) / hours;
+    if (b == 0) r.kind = 1;
+    else if (r.per_hour < 0) { r.kind = 2; r.eta_h = (double)b / -r.per_hour; }
+    else r.kind = 3;
+    return r;
+}
+static void fmt_eta(const Rate *r, char *out, size_t cap) {
+    if (r->kind == 0) snprintf(out, cap, "n/a");
+    else if (r->kind == 1) snprintf(out, cap, "reached");
+    else if (r->kind == 3) snprintf(out, cap, "no progress (rate >= 0)");
+    else if (r->eta_h < 48) snprintf(out, cap, "%.1f h", r->eta_h);
+    else snprintf(out, cap, "%.1f d", r->eta_h / 24.0);
+}
+
+/* ------------------------------------------------------------------ the table */
+typedef struct { char item[48]; char now[24]; char state[16]; char detail[420]; } TRow;
+static TRow TAB[48]; static int NTAB;
+static void addrow(const char *item, const char *now, const char *state, const char *detail) {
+    TRow *r = &TAB[NTAB++];
+    snprintf(r->item, sizeof r->item, "%s", item); snprintf(r->now, sizeof r->now, "%s", now);
+    snprintf(r->state, sizeof r->state, "%s", state); snprintf(r->detail, sizeof r->detail, "%s", detail);
+}
+static void print_table(const char *title) {
+    int i, wi = 4, wn = 3, ws = 5;
+    for (i = 0; i < NTAB; i++) {
+        if ((int)strlen(TAB[i].item) > wi) wi = (int)strlen(TAB[i].item);
+        if ((int)strlen(TAB[i].now) > wn) wn = (int)strlen(TAB[i].now);
+        if ((int)strlen(TAB[i].state) > ws) ws = (int)strlen(TAB[i].state);
+    }
+    printf("%s\n", title);
+    printf("%-*s  %*s  %-*s  %s\n", wi, "ITEM", wn, "NOW", ws, "STATE", "DETAIL");
+    for (i = 0; i < NTAB; i++) printf("%-*s  %*s  %-*s  %s\n", wi, TAB[i].item, wn, TAB[i].now, ws, TAB[i].state, TAB[i].detail);
+}
+static void numstr(long v, char *out, size_t cap) { if (v < 0) snprintf(out, cap, "?"); else snprintf(out, cap, "%ld", v); }
+
+/* ------------------------------------------------------------------ collection (the only impure part) */
+static void die(const char *what, const char *arg) { fflush(stdout); fprintf(stderr, "progress: %s%s%s\n", what, arg ? ": " : "", arg ? arg : ""); exit(2); }
+static char *slurp(const char *path) { size_t n; return cx_read(path, &n); }
+static int jobs_width(void) {
+    const char *e = getenv("UNISACC_JOBS"); long n = e ? atol(e) : 0;
+    if (n < 1) { char *o = 0; size_t k; if (cx_run("nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null", &o, &k) == 0 && o) n = atol(o) / 4; free(o); }
+    return n < 1 ? 1 : (int)n;
+}
+/* run the three readers, W at a time; output: lines `L<TAB>name<TAB>text` and `RC<TAB>name<TAB>code` */
+static char *run_readers(int width) {
+    static const char *names[3] = { "zp", "ci", "id" };
+    static const char *cmds[3] = {
+        "sh tests/cxbin tests/zeropython.cx --check",
+        "sh tests/cxbin tests/cxinclude.cx --check",
+        "sh ./unisacc.com -run seed/ident.c -- \"$PWD\" check \"$PWD/unisacc.com\"" };
+    char script[4096], *out = 0; size_t o, n; int i;
+    o = (size_t)snprintf(script, sizeof script,
+        "T=; command -v timeout >/dev/null 2>&1 && T='timeout 14'\n"
+        "r() { n=$1; shift; p=$(printf 'L\\t%%s\\t' \"$n\"); o=$($T \"$@\" 2>&1 </dev/null); c=$?;"
+        " b=$(printf '%%s\\n' \"$o\" | tail -n 8 | sed \"s|^|$p|\"; printf 'RC\\t%%s\\t%%s\\n' \"$n\" \"$c\"); printf '%%s\\n' \"$b\"; }\n");
+    for (i = 0; i < 3; i++) {
+        o += (size_t)snprintf(script + o, sizeof script - o, "r %s %s &\n", names[i], cmds[i]);
+        if ((i + 1) % width == 0 || i == 2) o += (size_t)snprintf(script + o, sizeof script - o, "wait\n");
+    }
+    if (cx_run(script, &out, &n) < 0 || !out) die("cannot run the readers", 0);
+    return out;
+}
+/* the text of tag NAME's lines in the readers' output, and its exit code (-1 when absent) */
+static char *tagged(const char *all, const char *name, long *rc) {
+    const char *p = all; char line[4096], pre[16]; size_t cap = strlen(all) + 1, o = 0; char *buf = malloc(cap);
+    snprintf(pre, sizeof pre, "L\t%s\t", name); *rc = -1; buf[0] = 0;
+    while (next_line(&p, line, sizeof line)) {
+        if (starts(line, pre)) o += (size_t)snprintf(buf + o, cap - o, "%s\n", line + strlen(pre));
+        else if (starts(line, "RC\t")) { char *t = strchr(line + 3, '\t'); if (t && (size_t)(t - line - 3) == strlen(name) && !strncmp(line + 3, name, strlen(name))) *rc = atol(t + 1); }
+    }
+    return buf;
+}
+static char *shell(const char *cmd) { char *o = 0; size_t n; if (cx_run(cmd, &o, &n) < 0) { free(o); return xdup(""); } return o ? o : xdup(""); }
+static void chomp(char *s) { size_t n = strlen(s); while (n && (s[n - 1] == '\n' || s[n - 1] == '\r')) s[--n] = 0; }
+/* does the evidence resolve: a commit in git, or a file that exists; "-" is none */
+static int evidence_ok(const char *ev) {
+    char cmd[512], *o; int ok;
+    if (!ev[0] || !strcmp(ev, "-")) return 0;
+    if (is_hex(ev)) { snprintf(cmd, sizeof cmd, "git cat-file -e %s^{commit} 2>/dev/null && echo y || echo n", ev); o = shell(cmd); ok = o[0] == 'y'; free(o); return ok; }
+    { char *t = slurp(ev); ok = t != 0; free(t); }
+    return ok;
+}
+static int safe_arg(const char *s) { for (; *s; s++) if (!(isalnum((unsigned char)*s) || strchr("/._-+", *s))) return 0; return 1; }
+
+static long V[NCOL];
+static int FINISH_DONE;
+
+static void hand_finish(const char *id, const char *item) {
+    Hand *h = hand_row(id); char buf[512];
+    if (h) {
+        int ok = evidence_ok(h->evidence); const char *st = vet_state(h->state, ok);
+        snprintf(buf, sizeof buf, "hand: %s [evidence %s]", h->note, h->evidence);
+        addrow(item, "", st, buf);
+        if (!strcmp(st, "done")) FINISH_DONE++;
+    } else addrow(item, "", "unknown", "no row in tests/progress-finish.tsv");
+}
+
+static void collect(const char *queue_dir, char *head, size_t headcap) {
+    char *readers, *trk_tsv, *tx; long rc; ZP z; CI c; char buf[512], b2[64], b3[64];
+    int i, width = jobs_width(), ident = -1;
+    for (i = 0; i < NCOL; i++) V[i] = -1;
+    readers = run_readers(width);
+    /* --- ledgers */
+    tx = tagged(readers, "zp", &rc); parse_zp(tx, &z);
+    V[C_ZPA] = z.a; V[C_ZPB] = z.b; V[C_ZPC] = z.c;
+    {   char a[24], bq[24], cq[24];
+        numstr(z.a, a, sizeof a); numstr(z.b, bq, sizeof bq); numstr(z.c, cq, sizeof cq);
+        snprintf(buf, sizeof buf, "ratchet %s (rc %ld), %ld rise(s); raw grep figure %ld", rc == 0 ? "ok" : (rc < 0 ? "unknown" : "RED"), rc, z.rises, z.raw);
+        addrow("zero-python (a) call sites", a, z.a < 0 ? "unknown" : (rc == 0 ? "ok" : "red"), buf);
+        addrow("zero-python (b) importers", bq, z.b < 0 ? "unknown" : (rc == 0 ? "ok" : "red"), "unisa dependencies of the tracked tree");
+        addrow("zero-python (c) .py files", cq, z.c < 0 ? "unknown" : (rc == 0 ? "ok" : "red"), "tracked interpreter files");
+    }
+    free(tx);
+    tx = tagged(readers, "ci", &rc); parse_ci(tx, &c);
+    V[C_CIF] = c.files; V[C_CIL] = c.lines;
+    numstr(c.lines, b2, sizeof b2);
+    snprintf(buf, sizeof buf, "%ld .cx files, baseline %ld; ratchet rc %ld", c.files, c.base, rc);
+    addrow("cxinclude include lines", b2, c.lines < 0 ? "unknown" : (rc == 0 ? "ok" : "red"), buf);
+    free(tx);
+    tx = tagged(readers, "id", &rc);
+    ident = rc == 0 ? 1 : ((rc < 0 || rc == 124 || strstr(tx, "no build record") || strstr(tx, "cannot")) ? -1 : 0);
+    free(tx);
+    /* --- files */
+    tx = slurp("tests/deletes.tsv");
+    if (tx) { long g, e; count_deletes(tx, &g, &e); V[C_DG] = g; V[C_DE] = e; free(tx); }
+    numstr(V[C_DE], b2, sizeof b2);
+    snprintf(buf, sizeof buf, "guarded %ld, exempt %ld (rows of tests/deletes.tsv; exempt is the one to shrink)", V[C_DG], V[C_DE]);
+    addrow("deletion ledger exempt", b2, V[C_DE] < 0 ? "unknown" : "-", buf);
+    tx = slurp("tests/glossary-whitelist.tsv");
+    if (tx) {
+        long t, r; sum_gloss(tx, &t, &r); V[C_GL] = t;
+        snprintf(buf, sizeof buf, "%ld rows of tests/glossary-whitelist.tsv (a ratchet that only goes down)", r); free(tx);
+    } else snprintf(buf, sizeof buf, "tests/glossary-whitelist.tsv missing");
+    numstr(V[C_GL], b2, sizeof b2);
+    addrow("glossary whitelist total", b2, V[C_GL] < 0 ? "unknown" : "-", buf);
+    trk_tsv = slurp("tests/progress-tracks.tsv");
+    if (trk_tsv) {
+        long d, t;
+        count_track(trk_tsv, "flownet", &d, &t); V[C_FD] = d; V[C_FT] = t;
+        count_track(trk_tsv, "cxmod", &d, &t); V[C_XD] = d; V[C_XT] = t;
+        free(trk_tsv);
+    }
+    snprintf(b2, sizeof b2, "%ld/%ld", V[C_FD], V[C_FT]);
+    addrow("flownet steps done", V[C_FD] < 0 ? "?" : b2, "hand", "W0..W7 of plans/m4-flownet-cx-module.md (tests/progress-tracks.tsv)");
+    snprintf(b2, sizeof b2, "%ld/%ld", V[C_XD], V[C_XT]);
+    addrow("cx module steps done", V[C_XD] < 0 ? "?" : b2, "hand", "CX0..CX4 of plans/cx-modules.md (tests/progress-tracks.tsv)");
+    tx = slurp("tests/gate.sh");
+    if (tx) { long jobs; V[C_GP] = count_gate(tx, &jobs); V[C_GJ] = jobs; free(tx); }
+    numstr(V[C_GP], b2, sizeof b2);
+    snprintf(buf, sizeof buf, "of %ld job lines in tests/gate.sh", V[C_GJ]);
+    addrow("interpreter gate lines", b2, V[C_GP] < 0 ? "unknown" : "-", buf);
+    /* --- head */
+    tx = shell("git rev-parse --short=8 HEAD 2>/dev/null"); chomp(tx); snprintf(head, headcap, "%s", tx[0] ? tx : "unknown"); free(tx);
+    /* --- finish line */
+    tx = slurp("tests/progress-finish.tsv");
+    if (tx) parse_hand(tx); else NHAND = 0;
+    free(tx);
+    {   /* F1 */
+        const char *kw[16]; char lab[16][80]; int found[16], nkw = 0, hits; Hand *since = hand_row("F1.since");
+        char cmd[256], *subj, line[600], names[600] = "";
+        for (i = 0; i < NHAND && nkw < 16; i++) if (!strcmp(HAND[i].id, "F1.cut")) { snprintf(lab[nkw], sizeof lab[0], "%s", HAND[i].state); kw[nkw] = lab[nkw]; nkw++; }
+        if (since && is_hex(since->evidence)) snprintf(cmd, sizeof cmd, "git log --format=%%s %s..HEAD 2>/dev/null", since->evidence);
+        else snprintf(cmd, sizeof cmd, "git log -n 3000 --format=%%s 2>/dev/null");
+        subj = shell(cmd); hits = count_cuts(subj, kw, nkw, found); free(subj);
+        for (i = 0; i < nkw; i++) { size_t o = strlen(names); snprintf(names + o, sizeof names - o, "%s%s%s", i ? " " : "", kw[i], found[i] ? "+" : "-"); }
+        snprintf(line, sizeof line, "fix cuts %d/%d [%s] since %s; product identity %s", hits, nkw, names, since ? since->evidence : "(all)",
+                 ident == 1 ? "verified" : (ident == 0 ? "MISMATCH" : "unknown"));
+        snprintf(b2, sizeof b2, "%d/%d", hits, nkw);
+        addrow("F1 product fix batch", b2, nkw ? f1_state(hits, nkw, ident) : "unknown", line);
+        if (nkw && !strcmp(f1_state(hits, nkw, ident), "done")) FINISH_DONE++;
+    }
+    hand_finish("F2", "F2 M2 remainder");
+    {   /* F3, F4 */
+        Queue *q = calloc(1, sizeof *q); int have = 0; QSum s3, s4; const char *waive[64]; int nw = 0; char *gl;
+        for (i = 0; i < NHAND && nw < 64; i++) if (!strcmp(HAND[i].id, "waive")) waive[nw++] = HAND[i].state;
+        if (queue_dir && !safe_arg(queue_dir)) die("unsafe --queue path", queue_dir);
+        if (queue_dir) {
+            char cmd[1200], *path, *json; size_t n;
+            snprintf(cmd, sizeof cmd, "ls -t '%s/results.json' '%s'/*/results.json 2>/dev/null | head -n 1", queue_dir, queue_dir);
+            path = shell(cmd); chomp(path);
+            if (path[0] && (json = cx_read(path, &n)) != 0) { have = parse_results(json, n, q); free(json); }
+            free(path);
+        }
+        gl = slurp("tests/gatelayers.py"); if (gl) { parse_contract(gl); free(gl); }
+        if (have && q->njobs) {
+            summarize(q, 1, waive, nw, &s3); summarize(q, 0, waive, nw, &s4);
+            snprintf(buf, sizeof buf, "contract-layer jobs: green %d/%d, red %d, pending %d, unverified %d, waived %d", s3.green, s3.total, s3.red, s3.pending, s3.unverified, s3.waived);
+            snprintf(b2, sizeof b2, "%d/%d", s3.green, s3.total); addrow("F3 M4 contract sweep", b2, queue_state(&s3), buf);
+            snprintf(buf, sizeof buf, "all jobs: green %d/%d, red %d, pending %d, unverified %d, waived %d", s4.green, s4.total, s4.red, s4.pending, s4.unverified, s4.waived);
+            snprintf(b3, sizeof b3, "%d/%d", s4.green, s4.total); addrow("F4 M7 full queue", b3, queue_state(&s4), buf);
+            if (!strcmp(queue_state(&s3), "done")) FINISH_DONE++;
+            if (!strcmp(queue_state(&s4), "done")) FINISH_DONE++;
+        } else {
+            addrow("F3 M4 contract sweep", "", "not run", queue_dir ? "no readable results.json under --queue" : "no --queue DIR given");
+            addrow("F4 M7 full queue", "", "not run", queue_dir ? "no readable results.json under --queue" : "no --queue DIR given");
+        }
+        queue_free(q); free(q);
+    }
+    {   /* F5 */
+        Hand *n = hand_row("F5.notes"); char *t = n && n->evidence[0] && n->evidence[0] != '-' ? slurp(n->evidence) : 0;
+        if (t) {
+            long todo = 0; const char *p = t; char line[4096];
+            while (next_line(&p, line, sizeof line)) if (strstr(line, "TODO")) todo++;
+            snprintf(buf, sizeof buf, "%ld line(s) with TODO in %s (owner items not excluded)", todo, n->evidence);
+            snprintf(b2, sizeof b2, "%ld", todo); addrow("F5 release notes", b2, todo == 0 ? "done" : "partial", buf);
+            if (todo == 0) FINISH_DONE++;
+            free(t);
+        } else hand_finish("F5", "F5 release notes");
+    }
+    hand_finish("F6", "F6 candidate + comboot");
+    V[C_FIN] = FINISH_DONE;
+    free(readers);
+}
+
+/* ------------------------------------------------------------------ rate report */
+static int do_rate(const char *file, int last) {
+    char *tx = slurp(file); Snap *rows; int n, from, k; char eta[64];
+    if (!tx) die("cannot read", file);
+    rows = malloc(sizeof(Snap) * (MAXKEEP + 1));
+    n = read_snaps(tx, rows); free(tx);
+    if (n > MAXKEEP) die("too many snapshot lines", file);
+    if (n < 2) { printf("rate: %d usable snapshot line(s) in %s; need 2\n", n, file); free(rows); return 0; }
+    from = n > last ? n - last : 0;
+    printf("rate over %d snapshot(s), %.2f h (%s)\n", n - from, (double)(rows[n - 1].t - rows[from].t) / 3600.0, file);
+    printf("%-30s  %6s  %6s  %10s  %s\n", "LEDGER", "FIRST", "NOW", "PER HOUR", "ETA TO 0");
+    for (k = 0; k < NTG; k++) {
+        Rate r = rate_of(&rows[from], &rows[n - 1], &TG[k]); long a = remaining(rows[from].v, &TG[k]);
+        fmt_eta(&r, eta, sizeof eta);
+        if (r.ok) printf("%-30s  %6ld  %6ld  %+10.2f  %s\n", TG[k].label, a, r.left, r.per_hour, eta);
+        else printf("%-30s  %6s  %6ld  %10s  %s\n", TG[k].label, "?", r.left, "?", eta);
+    }
+    free(rows);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ selftest */
+static int FAILS;
+static void ck(int cond, const char *what) { if (!cond) FAILS++; printf("selftest %s %s\n", cond ? "ok  " : "FAIL", what); }
+static void cknum(long got, long want, const char *what) {
+    char m[200]; snprintf(m, sizeof m, "%s (%ld, want %ld)", what, got, want); ck(got == want, m);
+}
+static void ckstr(const char *got, const char *want, const char *what) {
+    char m[300]; snprintf(m, sizeof m, "%s ('%s', want '%s')", what, got, want); ck(!strcmp(got, want), m);
+}
+static int selftest(void) {
+    char py[16], text[8192];
+    snprintf(py, sizeof py, "%s%s", "py", "thon3");
+    /* zero-python reader output */
+    {   ZP z; const char *t = "zeropython: (a) CALLS 1835 (real 1802, data 33)  (b) importers 116  (c) .py files 416   [raw lines outside *.json/*.inc: 2080]\n"
+            "zeropython: baseline real 1802 data 33 unisa 116 py 416; 0 rise(s), 3 drop(s)\n";
+        parse_zp(t, &z);
+        cknum(z.a, 1835, "zp (a)"); cknum(z.b, 116, "zp (b)"); cknum(z.c, 416, "zp (c)"); cknum(z.raw, 2080, "zp raw"); cknum(z.rises, 0, "zp rises");
+        parse_zp("garbage\n", &z); cknum(z.a, -1, "zp unparsable is unknown"); }
+    /* cxinclude reader output: a decoy line with the same words comes first */
+    {   CI c; const char *t = "cxinclude: tests/k6frozen.cx has 1 include lines and no baseline row (a new .cx must have 0)\n"
+            "cxinclude: FAIL: 250 .cx files, 87 include lines (baseline 91); 1 above baseline, 1 below (--write ratchets down)\n";
+        parse_ci(t, &c); cknum(c.files, 250, "ci files"); cknum(c.lines, 87, "ci lines"); cknum(c.base, 91, "ci baseline");
+        parse_ci("nothing\n", &c); cknum(c.lines, -1, "ci unparsable is unknown"); }
+    /* deletion ledger, glossary whitelist */
+    {   long g, e, t, r;
+        count_deletes("# comment\n# file\tline\tlang\tprimitive\tklass\trisk\tstatus\treason\na.sh\t1\tsh\tx\tother\tlow\tguarded\tr\nb.c\t2\tc\tx\tother\tlow\texempt\tr\n"
+                      "c.c\t3\tc\tx\tother\tlow\tguarded\tr\nshort\trow\n", &g, &e);
+        cknum(g, 2, "deletes guarded"); cknum(e, 1, "deletes exempt");
+        sum_gloss("# c\nG1\ta.cx\t6\treason\nG2\tb.cx\t4\treason\nbad row\n", &t, &r);
+        cknum(t, 10, "glossary total"); cknum(r, 2, "glossary rows"); }
+    /* interpreter job lines: jobs and for-loop jobs count once, comments and non-job lines never */
+    {   long jobs, n;
+        snprintf(text, sizeof text, "# job a %s x\njob b %s y\njob c sh z\nfor k in 1 2; do job d-$k %s w; done\n  job e sh %s\necho %s\n", py, py, py, py, py);
+        n = count_gate(text, &jobs); cknum(n, 3, "gate interpreter lines"); cknum(jobs, 4, "gate job lines"); }
+    /* tracks and hand rows */
+    {   long d, t; count_track("# c\nflownet\tW0\tdone\tx\nflownet\tW1\tpartial\ty\ncxmod\tCX0\tdone\tz\nflownet\tW2\tdone\n", "flownet", &d, &t);
+        cknum(d, 2, "track done"); cknum(t, 3, "track total");
+        parse_hand("# c\nF2\tdone\t-\tnote\nF1.cut\tenum\t-\tlabel\nwaive\tlibffi\t-\thost\nshort\n");
+        cknum(NHAND, 3, "hand rows"); ck(hand_row("F2") != 0 && !strcmp(hand_row("F2")->state, "done"), "hand row lookup");
+        ckstr(vet_state("done", 0), "unverified", "done without evidence is unverified"); ckstr(vet_state("done", 1), "done", "done with evidence stays");
+        ckstr(vet_state("todo", 0), "todo", "todo needs no evidence"); }
+    /* fix cuts */
+    {   const char *kw[3] = { "enum", "vsnprintf", "fileno" }; int f[3], h;
+        h = count_cuts("fix(e3): enum E; forward declaration\nfeat: fileno everywhere\nfix(libc): vsnprintf(NULL,0) returns the length\ndocs: x\n", kw, 3, f);
+        cknum(h, 2, "cuts found"); ck(f[0] && f[1] && !f[2], "a non-fix subject does not count");
+        ckstr(f1_state(2, 7, 1), "partial", "f1 partial"); ckstr(f1_state(7, 7, 1), "done", "f1 done"); ckstr(f1_state(7, 7, 0), "partial", "f1 all cuts but a stale product");
+        ckstr(f1_state(0, 7, 1), "todo", "f1 todo"); ckstr(f1_state(0, 7, -1), "todo", "f1 todo with the identity unknown"); }
+    /* gate-queue state: compact and indented JSON, contract subset, waived red, pending, unverified */
+    {   Queue *q = calloc(1, sizeof *q); QSum s; const char *w[1] = { "libffi" };
+        const char *compact = "{\"jobs\":{\"zeropython\":\"cmd\",\"libffi\":\"c\",\"c99\":\"c\",\"manifest-entries-pp\":\"c\",\"later\":\"c\",\"odd\":\"c\"},"
+            "\"results\":{\"zeropython\":{\"rc\":0,\"seconds\":1.5,\"limit\":58},\"libffi\":{\"rc\":1,\"seconds\":2},\"c99\":{\"rc\":1,\"x\":{\"rc\":0}},"
+            "\"manifest-entries-pp\":{\"rc\":0},\"odd\":{\"rc\":null,\"status\":\"INTERRUPTED\"}},\"stamp\":{\"a\":[1,2]}}";
+        const char *indented = "{\n  \"jobs\": {\n    \"x1\": {\n      \"command\": [\"a\", \"b\"]\n    },\n    \"x2\": \"s\"\n  },\n  \"results\": {\n    \"x1\": {\n      \"rc\": 0,\n      \"seconds\": 0.5\n    },\n"
+            "    \"x2\": {\n      \"rc\": 0,\n      \"status\": \"UNVERIFIED\"\n    }\n  }\n}\n";
+        parse_contract("CONTRACT = set(\"\"\"\nzeropython libffi\nbound qprefix\n\"\"\".split())\nCONTRACT_PREFIX = (\"manifest-entries-\", \"fresh-order-\")\n");
+        cknum(NCSET, 4, "contract words"); cknum(NCPRE, 2, "contract prefixes");
+        ck(in_contract("zeropython") && in_contract("manifest-entries-pp") && in_contract("bound-3") && !in_contract("c99") && !in_contract("bounded"), "contract membership (exact, prefix, shard suffix)");
+        ck(parse_results(compact, strlen(compact), q), "compact results.json parses");
+        cknum(q->njobs, 6, "queue jobs"); cknum(q->nres, 5, "queue results");
+        summarize(q, 0, w, 1, &s);
+        cknum(s.green, 2, "all: green"); cknum(s.red, 1, "all: red (c99)"); cknum(s.waived, 1, "all: waived (libffi)"); cknum(s.pending, 2, "all: pending (no result, null rc)");
+        ckstr(queue_state(&s), "red", "queue state red");
+        summarize(q, 1, w, 1, &s);
+        cknum(s.total, 3, "contract subset total"); cknum(s.green, 2, "contract subset green"); cknum(s.waived, 1, "contract subset waived"); ckstr(queue_state(&s), "done", "queue state done with a waiver");
+        queue_free(q);
+        ck(parse_results(indented, strlen(indented), q), "indented results.json parses");
+        summarize(q, 0, w, 0, &s); cknum(s.total, 2, "indented jobs"); cknum(s.green, 1, "indented green"); cknum(s.unverified, 1, "indented unverified"); ckstr(queue_state(&s), "partial", "queue state partial");
+        queue_free(q);
+        ck(!parse_results("{\"jobs\": {\"a\": ", 15, q), "a truncated results.json is refused");
+        queue_free(q); free(q); }
+    /* time and rates */
+    {   char iso[32], hdr[512], line[512], file[4096]; Snap *rows = malloc(sizeof(Snap) * (MAXKEEP + 1)); long v[NCOL]; int k, n; Rate r; char eta[64];
+        cknum(iso_to_epoch("1970-01-01T00:00:00Z"), 0, "epoch zero"); cknum(iso_to_epoch("2026-10-23T10:00:00Z") - iso_to_epoch("2026-10-23T08:00:00Z"), 7200, "two hours");
+        epoch_to_iso(iso_to_epoch("2026-10-23T10:31:07Z"), iso, sizeof iso); ckstr(iso, "2026-10-23T10:31:07Z", "iso round trip");
+        cknum(iso_to_epoch("2026-03-01T00:00:00Z") - iso_to_epoch("2026-02-28T00:00:00Z"), 86400, "no leap day in 2026");
+        for (k = 0; k < NCOL; k++) v[k] = 0;
+        v[C_ZPA] = 1000; v[C_ZPB] = 100; v[C_GL] = 50; v[C_FD] = 5; v[C_FT] = 8; v[C_FIN] = 1; v[C_CIL] = 10;
+        snapshot_header(hdr, sizeof hdr); snapshot_line("2026-10-23T08:00:00Z", "aaaaaaaa", v, line, sizeof line);
+        snprintf(file, sizeof file, "%s\n%s\n", hdr, line);
+        v[C_ZPA] = 800; v[C_FD] = 6; v[C_CIL] = 0;
+        snapshot_line("2026-10-23T10:00:00Z", "bbbbbbbb", v, line, sizeof line);
+        { size_t o = strlen(file); snprintf(file + o, sizeof file - o, "%s\nbroken line\n", line); }
+        n = read_snaps(file, rows); cknum(n, 2, "snapshot rows read"); cknum(rows[0].v[C_ZPA], 1000, "snapshot column by name"); cknum(rows[1].t - rows[0].t, 7200, "snapshot times");
+        r = rate_of(&rows[0], &rows[1], &TG[0]); fmt_eta(&r, eta, sizeof eta);
+        ck(r.ok && r.per_hour > -100.001 && r.per_hour < -99.999, "rate -100/h"); ckstr(eta, "8.0 h", "ETA 800 / 100 per hour");
+        r = rate_of(&rows[0], &rows[1], &TG[1]); fmt_eta(&r, eta, sizeof eta); ckstr(eta, "no progress (rate >= 0)", "flat ledger has no ETA");
+        r = rate_of(&rows[0], &rows[1], &TG[3]); fmt_eta(&r, eta, sizeof eta); ckstr(eta, "reached", "ledger at 0");
+        r = rate_of(&rows[0], &rows[1], &TG[7]); fmt_eta(&r, eta, sizeof eta); ck(r.left == 2 && r.kind == 2, "steps-left uses total minus done");
+        r = rate_of(&rows[0], &rows[0], &TG[0]); fmt_eta(&r, eta, sizeof eta); ckstr(eta, "n/a", "one snapshot has no rate");
+        v[C_ZPA] = -1; snapshot_line("2026-10-23T12:00:00Z", "cccccccc", v, line, sizeof line);
+        { size_t o = strlen(file); snprintf(file + o, sizeof file - o, "%s\n", line); }
+        n = read_snaps(file, rows); cknum(n, 3, "an unknown value keeps its row");
+        r = rate_of(&rows[1], &rows[2], &TG[0]); fmt_eta(&r, eta, sizeof eta); ckstr(eta, "n/a", "an unknown value gives no rate");
+        free(rows); }
+    printf("progress selftest: %s (%d failure(s))\n", FAILS ? "FAIL" : "ok", FAILS);
+    return FAILS ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------ main */
+int main(int argc, char **argv) {
+    const char *append = 0, *rate = 0, *queue = 0; int i, self = 0, last = 10;
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--selftest")) self = 1;
+        else if (!strcmp(argv[i], "--append") && i + 1 < argc) append = argv[++i];
+        else if (!strcmp(argv[i], "--rate") && i + 1 < argc) rate = argv[++i];
+        else if (!strcmp(argv[i], "--last") && i + 1 < argc) last = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--queue") && i + 1 < argc) queue = argv[++i];
+        else { fprintf(stderr, "progress: unknown argument %s\nusage: progress.cx [--queue DIR] [--append FILE] | --rate FILE [--last N] | --selftest\n", argv[i]); return 2; }
+    }
+    if (self) return selftest();
+    if (last < 2) last = 2;
+    if (rate) return do_rate(rate, last);
+    {   char here[1024], t[1100], *slash, head[32], now[32], title[160];
+        snprintf(here, sizeof here, "%s", __FILE__);
+        slash = strrchr(here, '/');
+        if (slash) *slash = 0; else snprintf(here, sizeof here, ".");
+        snprintf(t, sizeof t, "%s/..", here);
+        if (!realpath(t, ROOT)) die("cannot resolve the repository root", t);
+        if (chdir(ROOT)) die("cannot enter", ROOT);
+        collect(queue, head, sizeof head);
+        {   char *e = shell("date -u +%s"); epoch_to_iso(atol(e), now, sizeof now); free(e); }
+        snprintf(title, sizeof title, "unisacc progress  %s  HEAD %s  finish line %ld/%d", now, head, V[C_FIN], NF);
+        print_table(title);
+        if (append) {
+            char hdr[512], line[512], *old = slurp(append); FILE *f;
+            int fresh = !old || !old[0];
+            free(old);
+            snapshot_header(hdr, sizeof hdr); snapshot_line(now, head, V, line, sizeof line);
+            f = fopen(append, "a");
+            if (!f) die("cannot append to", append);
+            if (fresh) fprintf(f, "%s\n", hdr);
+            fprintf(f, "%s\n", line);
+            if (fclose(f)) die("write failed", append);
+            printf("appended 1 line to %s\n", append);
+        }
+    }
+    return 0;
+}
