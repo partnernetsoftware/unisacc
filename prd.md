@@ -150,6 +150,14 @@ F1 第2刀 dup2/fopen 修剪：kernel/facts/ABI 已重生成，PP 四步重采�
 
 第5刀 PP 正式重采四步全 rc0，最大31.54秒，封件目录摘要7062d665e66d0ddaccf069935eb2f7460e8014e9b1a65b06dd95986fc7b717fb；保留旧目录及README，现进入逐刀commitgate。
 
+第6刀采用原0007 enum E; 表修复并补 tests/c/b_enum_bare.c；除裸/重复裸标签外，同时直接验证原 R11 enum_forward.c 的 typedef、函数指针、局部枚举、位域结果。不修改 Tape/枚举域的拒绝边界；PP输入不变，保留第5刀有效封件。
+
+第6刀实际验证：b_enum_bare 在模型与经典参考均rc0；原 enum_forward.c 在模型、经典参考、宿主cc三路rc0且输出完全相同（7 7 7 7 4 / 3 7 4 / 8 7 -2 4）。ABI 523项成功；gen/parse2 键7fb1eaf41cfcdf89/289b42a4ad9b85db，同步后进入寄存器、单元解析与派生门禁。
+
+第6刀组合闸首轮外层142，未提交。保留日志定位到 exec-unitparse 冷准备：unitparse-ref 已按fresh协议构建并有stamp，parse2 JSON仍在生成，其他步骤未结证。按原脚本的fresh命令在同一index导出逐步限时准备JSON与dump，再重跑全部命名闸；不抬看门狗、不伪造stamp、不裁掉该套件。
+
+第6刀按原fresh协议分步准备已成功：parse2 10209 states、unitparse-ref及token dump均有正常产物与stamp，每步独立≤58秒；保留首轮外层142证据。现在在同一index导出重跑原全部命名套件，没有修改套件、输入或缓存协议。
+
 ### 版本状态与可核验进度
 
 | 项 | 当前口径 | 核验来源/限制 |
