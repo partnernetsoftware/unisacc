@@ -1,0 +1,470 @@
+#!/usr/bin/env -S unisacc.com -run
+/* unitlocationcheck.cx -- exec/parse2/unitlocationcheck.py in C (2026-10-23, the py->cx port wave; no Python): located
+   unit framing -- independent bytes, reference diagnostics, bad extents.  usage (from the repository root):
+     sh ./tests/cxbin exec/parse2/unitlocationcheck.cx    (or sh ./unisacc.com -run exec/parse2/unitlocationcheck.cx)
+   No options (the .py read none); the reference compiler is $UA (default /tmp/ua_ref).  The four stream-stage models
+   -- pp --osx --arm64 --locations, lex --locations, parse2/units --locations, parse2 --warnings -- are constructed by
+   the C99 seed constructors seed/gen.c, tbl.c, net.c (byte-identical to exec/build/gen.py, exec/c/tbl.py,
+   exec/c/net.py, which the .py ran one after another: its gen.py parse2 --warnings alone takes ~40 s), three at a
+   time; exec/c/run.c is built by $EXEC_CC (default cc).  Two units (first-<UTF-8>.c, second.c) go through E2 and E1;
+   the units network must join their frames into exactly the bytes an independent serializer here writes
+   (UNITOK2, the maps, the merged @-stream); the warning parser on the joined stream must give the reference's tape,
+   diagnostics and rc 0; 10 corrupted maps and 7 corrupted input frames must each be rc 1 with no stdout; then the
+   summary line; rc 0.  Every child is bounded at 60 s and captured.  A failed assertion, a timeout or an OS error is
+   the .py's uncaught exception: its traceback's last line on stderr, rc 1.
+   Work area: no TemporaryDirectory (a port deletes nothing): ${TMPDIR:-/tmp}/unisacc-parse2loc-UID/unit-locations-K
+   (the first of K = 0..7 no other run holds, fcntl-locked), overwritten by every run, its model files emptied on exit;
+   the seed constructors are built once per source digest (host cc, as exec/c/compilercheck.sh prep-1/2) into
+   ${TMPDIR:-/tmp}/unisacc-parse2loc-UID/seed-DIGEST16.  The units' paths are in that slot, so the diagnostics name
+   them there (the .py's were in its temporary directory; both sides of every comparison use the same paths).
+   ROOT is the grandparent of this file's directory.
+   Prelude gap: <time.h> (clock_gettime) is included -- cx.h edition 1 leaves time.h explicit. */
+#include <time.h>
+
+/* ---- shared frame (the same block in exec/parse2/f1attributescheck.cx, locationcheck.cx, unitlocationcheck.cx:
+   `#pragma unisa use` resolves beside the using file only, so these exec/parse2 ports cannot reach tests/cxlib) ---- */
+#define PN 4096
+static char ROOT[PN], BASE[PN], SLOT[PN], TOOLS[PN];
+static int SLOTFD = -1;
+static const char *const *BIGFILES;   /* names in SLOT emptied on exit (the stream-stage models: tens of MB each) */
+
+typedef struct buf { unsigned char *p; size_t n, cap; } buf;
+static void leave(int rc);
+static void die(const char *line) {   /* the .py's uncaught exception: the traceback's last line, rc 1 */
+    fflush(stdout); fputs(line, stderr); fputc('\n', stderr); leave(1);
+}
+static void *xmalloc(size_t n) { void *p = malloc(n ? n : 1); if (!p) die("MemoryError"); return p; }
+static void bgrow(buf *b, size_t extra) {
+    if (b->n + extra + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 256; unsigned char *g;
+        while (c < b->n + extra + 1) c *= 2;
+        g = realloc(b->p, c); if (!g) die("MemoryError");
+        b->p = g; b->cap = c;
+    }
+}
+static void bput(buf *b, const void *s, size_t n) { bgrow(b, n); if (n) memcpy(b->p + b->n, s, n); b->n += n; b->p[b->n] = 0; }
+static void bstr(buf *b, const char *s) { bput(b, s, strlen(s)); }
+static void bbyte(buf *b, int c) { unsigned char x = (unsigned char)c; bput(b, &x, 1); }
+static void bnum(buf *b, long long v) {
+    char t[32]; int k = 0; unsigned long long u = v < 0 ? 0ULL - (unsigned long long)v : (unsigned long long)v;
+    do { t[k++] = (char)('0' + u % 10); u /= 10; } while (u);
+    if (v < 0) t[k++] = '-';
+    while (k) bbyte(b, t[--k]);
+}
+static void bu32(buf *b, unsigned long v) {
+    unsigned char x[4]; x[0] = v & 255; x[1] = (v >> 8) & 255; x[2] = (v >> 16) & 255; x[3] = (v >> 24) & 255; bput(b, x, 4);
+}
+static unsigned long getu32(const unsigned char *p) { return p[0] | (unsigned long)p[1] << 8 | (unsigned long)p[2] << 16 | (unsigned long)p[3] << 24; }
+static int has(const unsigned char *s, size_t n, const char *w) {   /* bytes `W in S` */
+    size_t l = strlen(w), i;
+    for (i = 0; i + l <= n; i++) if (!memcmp(s + i, w, l)) return 1;
+    return 0;
+}
+static char *cat2(const char *a, const char *b) { size_t n = strlen(a) + strlen(b) + 2; char *p = xmalloc(n); snprintf(p, n, "%s/%s", a, b); return p; }
+
+/* Python reprs, for the assertion lines */
+static void repr_q(buf *o, const unsigned char *s, size_t n, int isbytes) {
+    size_t i; int q = '\'';
+    if (memchr(s, '\'', n) && !memchr(s, '"', n)) q = '"';
+    if (isbytes) bbyte(o, 'b');
+    bbyte(o, q);
+    for (i = 0; i < n; i++) {
+        int c = s[i];
+        if (c == '\\' || c == q) { bbyte(o, '\\'); bbyte(o, c); }
+        else if (c == '\n') bstr(o, "\\n");
+        else if (c == '\r') bstr(o, "\\r");
+        else if (c == '\t') bstr(o, "\\t");
+        else if (c < 32 || c == 127 || (isbytes && c > 127)) { char t[8]; snprintf(t, sizeof t, "\\x%02x", c); bstr(o, t); }
+        else bbyte(o, c);
+    }
+    bbyte(o, q);
+}
+static void repr_bytes(buf *o, const void *s, size_t n) { repr_q(o, s, n, 1); }
+static void repr_str(buf *o, const char *s) { repr_q(o, (const unsigned char *)s, strlen(s), 0); }
+static void repr_path(buf *o, const char *s) { bstr(o, "PosixPath("); repr_str(o, s); bbyte(o, ')'); }
+/* repr of an argument list; bit k of PATHS: argument k was a pathlib.Path in the .py */
+static void repr_args(buf *o, char *const argv[], unsigned long paths) {
+    int k; bbyte(o, '[');
+    for (k = 0; argv[k]; k++) { if (k) bstr(o, ", "); if (k < 32 && (paths >> k & 1)) repr_path(o, argv[k]); else repr_str(o, argv[k]); }
+    bbyte(o, ']');
+}
+static void oserror(buf *o, int err, const char *path) {   /* FileNotFoundError: [Errno 2] No such file or directory: 'P' */
+    const char *cls = err == ENOENT ? "FileNotFoundError" : err == EACCES || err == EPERM ? "PermissionError" :
+                      err == ENOTDIR ? "NotADirectoryError" : err == EISDIR ? "IsADirectoryError" : "OSError";
+    const char *txt = err == ENOENT ? "No such file or directory" : err == EACCES ? "Permission denied" :
+                      err == EPERM ? "Operation not permitted" : err == ENOTDIR ? "Not a directory" :
+                      err == EISDIR ? "Is a directory" : err == ENAMETOOLONG ? "File name too long" :
+                      err == ELOOP ? "Too many levels of symbolic links" : err == ENOEXEC ? "Exec format error" :
+                      err == ETXTBSY ? "Text file busy" : err == ENOSPC ? "No space left on device" : strerror(err);
+    bstr(o, cls); bstr(o, ": [Errno "); bnum(o, err); bstr(o, "] "); bstr(o, txt); bstr(o, ": "); repr_str(o, path);
+}
+
+/* the repository root: the grandparent of this file's directory (__FILE__ as the gate spells it, cwd-relative) */
+static void find_root(void) {
+    char here[PN], t[PN + 8], *s;
+    snprintf(here, sizeof here, "%s", __FILE__);
+    s = strrchr(here, '/');
+    if (s) *s = 0; else snprintf(here, sizeof here, ".");
+    snprintf(t, sizeof t, "%s/../..", here);
+    if (!realpath(t, ROOT)) die("FileNotFoundError: cannot resolve the repository root");
+}
+
+/* ---- the work area.  No deletion: the .py's TemporaryDirectory becomes a persistent per-user slot,
+   ${TMPDIR:-/tmp}/unisacc-parse2loc-UID/NAME-K (K = 0..7, the first one no other run holds; an fcntl lock), whose
+   files are overwritten by every run and the large ones emptied on exit (BIGFILES). ---- */
+static int lockfile(const char *path, int wait) {
+    struct flock fl; int fd = open(path, O_RDWR | O_CREAT, 0600);
+    if (fd < 0) return -1;
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+    memset(&fl, 0, sizeof fl); fl.l_type = F_WRLCK; fl.l_whence = SEEK_SET;
+    if (fcntl(fd, wait ? F_SETLKW : F_SETLK, &fl) == 0) return fd;
+    close(fd); return -1;
+}
+static void owned_dir(const char *d) {
+    struct stat st; buf m = {0, 0, 0};
+    if (mkdir(d, 0700) != 0 && errno != EEXIST) { oserror(&m, errno, d); die((char *)m.p); }
+    if (lstat(d, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != getuid()) {
+        bstr(&m, "PermissionError: "); repr_str(&m, d); bstr(&m, " is not a directory owned by this user (refused)"); die((char *)m.p);
+    }
+}
+static void work_init(const char *name) {
+    static const char *const env[3] = { "TMPDIR", "TEMP", "TMP" };
+    const char *d = 0; struct stat st; int i, k; char lk[PN + 8];
+    for (i = 0; i < 3 && !d; i++) {
+        const char *v = getenv(env[i]);
+        if (v && *v && stat(v, &st) == 0 && S_ISDIR(st.st_mode) && access(v, W_OK | X_OK) == 0) d = v;
+    }
+    if (!d) d = "/tmp";
+    snprintf(BASE, sizeof BASE, "%s/unisacc-parse2loc-%ld", d, (long)getuid());
+    owned_dir(BASE);
+    for (k = 0; k < 8 && SLOTFD < 0; k++) {
+        snprintf(SLOT, sizeof SLOT, "%s/%s-%d", BASE, name, k); snprintf(lk, sizeof lk, "%s.lock", SLOT);
+        SLOTFD = lockfile(lk, 0);
+    }
+    if (SLOTFD < 0) {
+        snprintf(SLOT, sizeof SLOT, "%s/%s-0", BASE, name); snprintf(lk, sizeof lk, "%s.lock", SLOT);
+        SLOTFD = lockfile(lk, 1);
+        if (SLOTFD < 0) { buf m = {0, 0, 0}; oserror(&m, errno, lk); die((char *)m.p); }
+    }
+    owned_dir(SLOT);
+}
+static void leave(int rc) {
+    static int once;
+    fflush(stdout); fflush(stderr);
+    if (!once && SLOTFD >= 0 && BIGFILES) {
+        int i; once = 1;
+        for (i = 0; BIGFILES[i]; i++) {
+            char p[PN + 64]; int fd;
+            snprintf(p, sizeof p, "%s/%s", SLOT, BIGFILES[i]);
+            fd = open(p, O_WRONLY | O_TRUNC);
+            if (fd >= 0) close(fd);
+        }
+    }
+    exit(rc);
+}
+
+/* ---- children: subprocess.run(ARGV, capture_output=True, timeout=SECS, cwd=CWD).  ERRCAP 0: stderr inherited
+   (check_output).  Captures go through SLOT/cap-TAG.{out,err}.  0, or -1 with WHY the exception's line. ---- */
+typedef struct res { int rc; unsigned char *out, *err; size_t outn, errn; } res;
+static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (double)t.tv_sec + (double)t.tv_nsec / 1e9; }
+static unsigned char *slurp(const char *p, size_t *n) {
+    unsigned char *b = (unsigned char *)cx_read(p, n);
+    if (!b) { b = xmalloc(1); b[0] = 0; *n = 0; }
+    return b;
+}
+static int runcap(char *const argv[], const char *cwd, int secs, int errcap, const char *tag, res *r, buf *why) {
+    char op[PN + 64], ep[PN + 64]; int of, ef = -1, pfd[2], st = 0, msg[2] = { 0, 0 }; pid_t pid; ssize_t k; double deadline;
+    r->rc = 0; r->out = r->err = 0; r->outn = r->errn = 0;
+    snprintf(op, sizeof op, "%s/cap-%s.out", SLOT, tag); snprintf(ep, sizeof ep, "%s/cap-%s.err", SLOT, tag);
+    of = open(op, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (errcap) ef = open(ep, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (of < 0 || (errcap && ef < 0) || pipe(pfd) != 0) { bstr(why, "OSError: cannot capture a child's output"); return -1; }
+    fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
+    fflush(stdout); fflush(stderr);
+    deadline = now() + secs;
+    pid = fork();
+    if (pid < 0) { bstr(why, "OSError: fork failed"); return -1; }
+    if (pid == 0) {
+        int fd = open("/dev/null", O_RDONLY);
+        close(pfd[0]);
+        if (fd >= 0) { dup2(fd, 0); close(fd); }
+        dup2(of, 1); close(of);
+        if (errcap) { dup2(ef, 2); close(ef); }
+        if (cwd && chdir(cwd) != 0) { msg[0] = 1; msg[1] = errno; k = write(pfd[1], msg, sizeof msg); _exit(255); }
+        execvp(argv[0], argv);
+        msg[0] = 2; msg[1] = errno; k = write(pfd[1], msg, sizeof msg); (void)k;
+        _exit(255);
+    }
+    close(pfd[1]);
+    k = read(pfd[0], msg, sizeof msg);
+    close(pfd[0]);
+    if (k == (ssize_t)sizeof msg) {
+        waitpid(pid, &st, 0); close(of); if (errcap) close(ef);
+        oserror(why, msg[1], msg[0] == 1 ? cwd : argv[0]);
+        return -1;
+    }
+    for (;;) {
+        pid_t w = waitpid(pid, &st, WNOHANG);
+        if (w == pid) break;
+        if (w < 0) { close(of); if (errcap) close(ef); bstr(why, "ChildProcessError: wait failed"); return -1; }
+        if (now() >= deadline) {
+            kill(pid, SIGKILL); waitpid(pid, &st, 0); close(of); if (errcap) close(ef);
+            bstr(why, "subprocess.TimeoutExpired: Command '"); repr_args(why, argv, 0);
+            bstr(why, "' timed out after "); bnum(why, secs); bstr(why, " seconds");
+            return -1;
+        }
+        usleep(1000);
+    }
+    close(of); if (errcap) close(ef);
+    r->rc = WIFSIGNALED(st) ? -WTERMSIG(st) : WEXITSTATUS(st);
+    r->out = slurp(op, &r->outn);
+    if (errcap) r->err = slurp(ep, &r->errn); else { r->err = xmalloc(1); r->err[0] = 0; }
+    return 0;
+}
+static void resfree(res *r) { free(r->out); free(r->err); r->out = r->err = 0; }
+/* run(): an OSError or timeout is the uncaught exception */
+static res runx(char *const argv[], const char *cwd, int secs, int errcap, const char *tag) {
+    res r; buf why = {0, 0, 0};
+    if (runcap(argv, cwd, secs, errcap, tag, &r, &why)) die((char *)why.p);
+    return r;
+}
+/* call(): run() that must exit 0: `AssertionError: (ARGS, RC, STDERR[-1500:])` otherwise; MSG 0 means die, else
+   the line is left in MSG (the parallel stream-stage constructions report from a child) */
+static int callx(char *const argv[], const char *cwd, unsigned long paths, const char *tag, res *out, buf *msg) {
+    res r; buf why = {0, 0, 0};
+    if (runcap(argv, cwd, 60, 1, tag, &r, &why)) { if (!msg) die((char *)why.p); bput(msg, why.p, why.n); return -1; }
+    if (r.rc != 0) {
+        buf m = {0, 0, 0}; size_t t = r.errn > 1500 ? r.errn - 1500 : 0;
+        bstr(&m, "AssertionError: ("); repr_args(&m, argv, paths); bstr(&m, ", "); bnum(&m, r.rc); bstr(&m, ", ");
+        repr_bytes(&m, r.err + t, r.errn - t); bbyte(&m, ')');
+        if (!msg) die((char *)m.p);
+        bput(msg, m.p, m.n); resfree(&r); return -1;
+    }
+    if (out) *out = r; else resfree(&r);
+    return 0;
+}
+
+/* ---- the C99 seed constructors (seed/gen.c, tbl.c, net.c: byte-identical to exec/build/gen.py, exec/c/tbl.py,
+   exec/c/net.py -- gate jobs seedgen-*, seedparse2-*, seed-construct-*), built once per source digest with the host
+   cc into BASE/seed-DIGEST16 under BASE/seed.lock, the way exec/c/compilercheck.sh prep-1/2 builds them ---- */
+static void tools_init(void) {
+    static const char *const src[] = { "seed/gen.c", "seed/json.h", "seed/facts.h", "seed/tbl.c", "seed/net.c", "exec/c/core.h", 0 };
+    static const char *const tool[] = { "gen", "tbl", "net", 0 };
+    buf key = {0, 0, 0}; char hex[65], lk[PN + 16], ready[PN + 16]; int i, fd; struct stat st;
+    for (i = 0; src[i]; i++) {
+        char *p = cat2(ROOT, src[i]); size_t n; char *b = cx_read(p, &n);
+        if (!b) { buf m = {0, 0, 0}; oserror(&m, ENOENT, p); die((char *)m.p); }
+        bstr(&key, src[i]); bbyte(&key, 0); bnum(&key, (long long)n); bbyte(&key, 0); bput(&key, b, n);
+        free(b); free(p);
+    }
+    cx_sha256_hex(key.p, key.n, hex); hex[16] = 0; free(key.p);
+    snprintf(TOOLS, sizeof TOOLS, "%s/seed-%s", BASE, hex);
+    snprintf(lk, sizeof lk, "%s/seed.lock", BASE); snprintf(ready, sizeof ready, "%s/ready", TOOLS);
+    fd = lockfile(lk, 1);
+    if (fd < 0) { buf m = {0, 0, 0}; oserror(&m, errno, lk); die((char *)m.p); }
+    if (stat(ready, &st) != 0) {
+        owned_dir(TOOLS);
+        for (i = 0; tool[i]; i++) {
+            char s[64], *o = cat2(TOOLS, tool[i]);
+            char *argv[] = { "cc", "-std=c99", "-O2", "-w", "-Iseed", s, "-o", o, 0 };
+            snprintf(s, sizeof s, "seed/%s.c", tool[i]);
+            callx(argv, ROOT, 0, "seedcc", 0, 0);
+            free(o);
+        }
+        if (cx_write(ready, "ok\n", 3)) { buf m = {0, 0, 0}; oserror(&m, errno, ready); die((char *)m.p); }
+    }
+    close(fd);
+}
+
+static int GEN_ONLY;   /* construct only NAME.json (f1attributescheck reads the delta itself) */
+/* one stream-stage model: SLOT/NAME.json by seed gen (cwd ROOT, as compilerpack's --seed-tools), then .tbl, .net */
+static int construct(const char *name, const char *const flags[], buf *msg) {
+    char *json, *tbl, *net, *gen = cat2(TOOLS, "gen"), *tb = cat2(TOOLS, "tbl"), *nt = cat2(TOOLS, "net"), f[256];
+    char *argv[12]; int k = 0, i;
+    snprintf(f, sizeof f, "%s.json", name); json = cat2(SLOT, f);
+    snprintf(f, sizeof f, "%s.tbl", name); tbl = cat2(SLOT, f);
+    snprintf(f, sizeof f, "%s.net", name); net = cat2(SLOT, f);
+    argv[k++] = gen; argv[k++] = (char *)flags[0]; argv[k++] = json;
+    for (i = 1; flags[i] && k < 11; i++) argv[k++] = (char *)flags[i];
+    argv[k] = 0;
+    if (callx(argv, ROOT, 0, name, 0, msg)) return -1;
+    if (GEN_ONLY) return 0;
+    { char *a[] = { tb, json, tbl, 0 }; if (callx(a, 0, 0, name, 0, msg)) return -1; }
+    { char *a[] = { nt, tbl, net, 0 }; if (callx(a, 0, 0, name, 0, msg)) return -1; }
+    free(json); free(tbl); free(net); free(gen); free(tb); free(nt);
+    return 0;
+}
+/* the models in parallel (at most 3 at once, as the .py's ThreadPoolExecutor(max_workers=3)); the first failure in
+   list order is the exception pool.map raises */
+typedef struct spec { const char *name; const char *flags[6]; } spec;
+static void construct_all(const spec *m, int n) {
+    pid_t *pid = xmalloc(sizeof(pid_t) * n); int *done = xmalloc(sizeof(int) * n), i, next = 0, live = 0, st;
+    for (i = 0; i < n; i++) done[i] = 0;
+    fflush(stdout); fflush(stderr);
+    while (next < n || live) {
+        while (next < n && live < 3) {
+            { char f[256]; char *p; snprintf(f, sizeof f, "%s.fail", m[next].name); p = cat2(SLOT, f); cx_write(p, "", 0); free(p); }
+            pid[next] = fork();
+            if (pid[next] < 0) die("OSError: fork failed");
+            if (pid[next] == 0) {
+                buf msg = {0, 0, 0}; char f[256]; char *p;
+                if (construct(m[next].name, m[next].flags, &msg) == 0) _exit(0);
+                snprintf(f, sizeof f, "%s.fail", m[next].name); p = cat2(SLOT, f);
+                cx_write(p, msg.p, msg.n); _exit(1);
+            }
+            next++; live++;
+        }
+        { pid_t w = waitpid(-1, &st, 0);
+          if (w < 0) die("ChildProcessError: wait failed");
+          for (i = 0; i < next; i++) if (pid[i] == w) { done[i] = WIFEXITED(st) && WEXITSTATUS(st) == 0 ? 1 : 2; live--; } }
+    }
+    for (i = 0; i < n; i++) if (done[i] != 1) {
+        char f[256]; char *p, *b; size_t k;
+        snprintf(f, sizeof f, "%s.fail", m[i].name); p = cat2(SLOT, f); b = cx_read(p, &k);
+        if (b && k) { char *z = xmalloc(k + 1); memcpy(z, b, k); z[k] = 0; die(z); }
+        die("ChildProcessError: a stream-stage construction died");
+    }
+    free(pid); free(done);
+}
+
+static void write_file(const char *path, const void *p, size_t n) {
+    if (cx_write(path, p, n)) { buf m = {0, 0, 0}; oserror(&m, errno, path); die((char *)m.p); }
+}
+static const char *const BIG[] = { "pp.json", "pp.tbl", "pp.net", "lex.json", "lex.tbl", "lex.net", "units.json", "units.tbl",
+    "units.net", "parse.json", "parse.tbl", "parse.net", 0 };
+/* r=run(a); assert r.returncode==0,(a,r.returncode,r.stderr[-1200:]) -- A holds pathlib.Path arguments (bit k of PATHS) */
+static res call(char *const argv[], unsigned long paths) {
+    res r; buf why = {0, 0, 0};
+    if (runcap(argv, 0, 60, 1, "main", &r, &why)) die((char *)why.p);
+    if (r.rc != 0) {
+        buf m = {0, 0, 0}; size_t t = r.errn > 1200 ? r.errn - 1200 : 0;
+        bstr(&m, "AssertionError: ("); repr_args(&m, argv, paths); bstr(&m, ", "); bnum(&m, r.rc); bstr(&m, ", ");
+        repr_bytes(&m, r.err + t, r.errn - t); bbyte(&m, ')'); die((char *)m.p);
+    }
+    return r;
+}
+static void index_error(void) { die("IndexError: index out of range"); }
+
+int main(int argc, char **argv) {
+    char *p, *run, *inc, *files[2], *framed, *dest, *ppf, *ppnet, *lexnet, *unitsnet, *parsenet;
+    static const char *const text[2] = {
+        "static inline int h(int * restrict p){return *p;}\nint f(void){int unused;int n=0;return h(&n); }\n",
+        "int f(void);int main(void){return f();}\n" };
+    buf frames[2], maps[2], stream = {0, 0, 0}, all = {0, 0, 0}, expected = {0, 0, 0};
+    res joined, r, ref; unsigned long pos = 0; int i, k;
+    (void)argc; (void)argv;
+    find_root();
+    work_init("unit-locations");
+    BIGFILES = BIG;
+    tools_init();
+    p = SLOT; run = cat2(p, "run"); inc = cat2(ROOT, "include");
+    {   const char *cc = getenv("EXEC_CC"); char *rc = cat2(ROOT, "exec/c/run.c");
+        char *a[] = { (char *)(cc ? cc : "cc"), "-O2", rc, "-o", run, 0 };
+        res x = call(a, 1UL << 2 | 1UL << 4); resfree(&x); free(rc); }
+    {   static const spec models[4] = {
+            { "pp", { "pp", "--osx", "--arm64", "--locations", 0 } }, { "lex", { "lex", "--locations", 0 } },
+            { "units", { "parse2/units", "--locations", 0 } }, { "parse", { "parse2", "--warnings", 0 } } };
+        construct_all(models, 4); }
+    files[0] = cat2(p, "first-\xe6\x96\x87\xe4\xbb\xb6.c"); files[1] = cat2(p, "second.c");
+    write_file(files[0], text[0], strlen(text[0])); write_file(files[1], text[1], strlen(text[1]));
+    ppf = cat2(p, "pp"); ppnet = cat2(p, "pp.net"); lexnet = cat2(p, "lex.net"); unitsnet = cat2(p, "units.net"); parsenet = cat2(p, "parse.net");
+    memset(frames, 0, sizeof frames); memset(maps, 0, sizeof maps);
+    for (i = 0; i < 2; i++) {
+        res pp, tok; unsigned long n; size_t at, end, nl = strlen(files[i]); const unsigned char *tk; buf payload = {0, 0, 0};
+        { char *a[] = { run, ppnet, files[i], files[i], inc, 0 }; pp = call(a, 0x1f); }
+        write_file(ppf, pp.out, pp.outn);
+        { char *a[] = { run, lexnet, ppf, 0 }; tok = call(a, 7); }
+        tk = tok.out;
+        if (!(tok.outn >= 8 && !memcmp(tk, "UNITOK1\0", 8))) die("AssertionError");
+        if (tok.outn < 12) {
+            buf m = {0, 0, 0}; bstr(&m, "struct.error: unpack_from requires a buffer of at least 12 bytes for unpacking 4 bytes at offset 8 (actual buffer size is ");
+            bnum(&m, (long long)tok.outn); bbyte(&m, ')'); die((char *)m.p);
+        }
+        n = getu32(tk + 8);
+        {   size_t a = 12 < tok.outn ? 12 : tok.outn, z = 12 + n < tok.outn ? 12 + n : tok.outn;
+            if (!(z - a == pp.outn && !memcmp(tk + a, pp.out, pp.outn))) die("AssertionError"); }
+        bu32(&payload, (unsigned long)nl); bstr(&payload, files[i]); bput(&payload, tk, tok.outn);
+        bu32(&frames[i], (unsigned long)payload.n); bput(&frames[i], payload.p, payload.n);
+        bu32(&maps[i], (unsigned long)nl); bstr(&maps[i], files[i]); bu32(&maps[i], n); bput(&maps[i], pp.out, pp.outn);
+        bbyte(&stream, '@'); bu32(&stream, (unsigned long)i); bu32(&stream, 0); bstr(&stream, i == 0 ? "\n@unit0\n" : "\n@unit+\n");
+        at = 12 + n;
+        for (;;) {
+            if (at >= tok.outn) index_error();
+            if (tk[at] != 64) die("AssertionError");
+            if (at + 5 >= tok.outn) index_error();
+            if (tk[at + 5] != 10) die("AssertionError");
+            pos = getu32(tk + at + 1);
+            for (end = at + 6; end < tok.outn && tk[end] != '\n'; end++) ;
+            if (end >= tok.outn) die("ValueError: subsection not found");
+            if (end - (at + 6) == 3 && !memcmp(tk + at + 6, "eof", 3)) break;
+            bbyte(&stream, '@'); bu32(&stream, (unsigned long)i); bput(&stream, tk + at + 1, end + 1 - (at + 1));
+            at = end + 1;
+        }
+        if (i == 1) { bbyte(&stream, '@'); bu32(&stream, (unsigned long)i); bu32(&stream, pos); bstr(&stream, "\neof\n"); }
+        resfree(&pp); resfree(&tok); free(payload.p);
+    }
+    framed = cat2(p, "framed");
+    bput(&all, frames[0].p, frames[0].n); bput(&all, frames[1].p, frames[1].n);
+    write_file(framed, all.p, all.n);
+    { char *a[] = { run, unitsnet, framed, 0 }; joined = call(a, 7); }
+    bstr(&expected, "UNITOK2"); bbyte(&expected, 0); bu32(&expected, 2);
+    bput(&expected, maps[0].p, maps[0].n); bput(&expected, maps[1].p, maps[1].n); bput(&expected, stream.p, stream.n);
+    if (!(joined.outn == expected.n && !memcmp(joined.out, expected.p, expected.n)))
+        die("AssertionError: located unit bytes differ from independent serializer");
+    dest = cat2(p, "joined"); write_file(dest, joined.out, joined.outn);
+    { char *a[] = { run, parsenet, dest, files[0], 0 }; r = runx(a, 0, 60, 1, "main"); }
+    {   const char *ua = getenv("UA");
+        char *a[] = { (char *)(ua ? ua : "/tmp/ua_ref"), files[0], files[1], "-Wall", "-t", "osx/arm64", "-o", "-", 0 };
+        ref = runx(a, 0, 60, 1, "ref"); }
+    if (!(r.rc == ref.rc && ref.rc == 0 && r.outn == ref.outn && !memcmp(r.out, ref.out, r.outn) &&
+          r.errn == ref.errn && !memcmp(r.err, ref.err, r.errn))) {
+        buf m = {0, 0, 0}; bstr(&m, "AssertionError: ("); repr_bytes(&m, r.err, r.errn); bstr(&m, ", "); repr_bytes(&m, ref.err, ref.errn);
+        bbyte(&m, ')'); die((char *)m.p);
+    }
+    resfree(&r); resfree(&ref);
+    {   const unsigned char *j = joined.out; size_t L = joined.outn, start = 12 + maps[0].n + maps[1].n; buf bad[10];
+#define SL(B, A, Z) do { size_t a_ = (A) < L ? (A) : L, z_ = (Z) < L ? (Z) : L; if (a_ < z_) bput(B, j + a_, z_ - a_); else bput(B, "", 0); } while (0)
+        memset(bad, 0, sizeof bad);
+        bput(&bad[0], "", 0);
+        SL(&bad[1], 0, 7);
+        SL(&bad[2], 0, 11);
+        SL(&bad[3], 0, 8); bu32(&bad[3], 0); SL(&bad[3], 12, L);
+        SL(&bad[4], 0, 8); bu32(&bad[4], 65); SL(&bad[4], 12, L);
+        SL(&bad[5], 0, 8); bu32(&bad[5], 3); SL(&bad[5], 12, L);
+        SL(&bad[6], 0, 12); bu32(&bad[6], 0); SL(&bad[6], 16, L);
+        SL(&bad[7], 0, start + 1); bu32(&bad[7], 2); SL(&bad[7], start + 5, L);
+        SL(&bad[8], 0, start + 5); bu32(&bad[8], 0x80000000UL); SL(&bad[8], start + 9, L);
+        SL(&bad[9], 0, L >= 2 ? L - 2 : 0);
+        for (k = 0; k < 10; k++) {
+            res x;
+            write_file(dest, bad[k].p, bad[k].n);
+            { char *a[] = { run, parsenet, dest, files[0], 0 }; x = runx(a, 0, 60, 1, "main"); }
+            if (!(x.rc == 1 && x.outn == 0)) {
+                buf m = {0, 0, 0}; bstr(&m, "AssertionError: ("); bnum(&m, x.rc); bstr(&m, ", "); repr_bytes(&m, x.err, x.errn); bbyte(&m, ')'); die((char *)m.p);
+            }
+            resfree(&x);
+        }
+    }
+    {   buf bad[7];
+        memset(bad, 0, sizeof bad);
+        bput(&bad[0], "", 0);
+        bbyte(&bad[1], 1);
+        bu32(&bad[2], 0);
+        bput(&bad[3], frames[0].p, frames[0].n - 1);
+        bput(&bad[4], frames[0].p, frames[0].n); bput(&bad[4], frames[1].p, frames[1].n); bbyte(&bad[4], 1);
+        bu32(&bad[5], 5); bu32(&bad[5], 0); bbyte(&bad[5], 'x');
+        for (k = 0; k < 65; k++) bput(&bad[6], frames[0].p, frames[0].n);
+        for (k = 0; k < 7; k++) {
+            res x;
+            write_file(framed, bad[k].p, bad[k].n);
+            { char *a[] = { run, unitsnet, framed, 0 }; x = runx(a, 0, 60, 1, "main"); }
+            if (!(x.rc == 1 && x.outn == 0)) {
+                buf m = {0, 0, 0}; bstr(&m, "AssertionError: ("); bnum(&m, x.rc); bstr(&m, ", "); repr_bytes(&m, x.err, x.errn); bbyte(&m, ')'); die((char *)m.p);
+            }
+            resfree(&x);
+        }
+    }
+    printf("located units: independent serialized bytes, UTF-8 filenames, reference tape/diagnostics; 10 map and 7 input-frame rejects\n");
+    leave(0);
+    return 0;
+}

@@ -1,0 +1,1249 @@
+#!/usr/bin/env -S unisacc.com -run
+/* f1attributescheck.cx -- exec/parse2/f1attributescheck.py in C (2026-10-23, the py->cx port wave; no Python): F1
+   attribute marks -- the E1 sidecar and the E3 tape against the C reference.  usage (from the repository root):
+     sh ./tests/cxbin exec/parse2/f1attributescheck.cx --require-cached --ua UA
+   Options as the .py's argparse (Python 3.14 text: -h/--help on stdout rc 0; usage errors on stderr rc 2 -- --ua is
+   required; unique prefixes, --opt=value, the last --ua wins).  UA is resolved as Path.resolve() does; a missing one
+   is `NEED_PREPARE F1 attributes: reference UA missing: PATH` on stderr, rc 75.
+   The three stream-stage deltas -- warnpp-shared (pp --locations --shared-predefines), warnlex (lex --locations),
+   errorparse (parse2 --errors) -- are constructed by the C99 seed constructor seed/gen.c (byte-identical to
+   exec/build/gen.py: the gate's seedgen-* and seedparse2-* jobs, and exec/c/compilercheck.sh prep-f1json already writes
+   these three JSONs with it); the .py copied them from compilerpack's content-keyed model cache, whose key is
+   computed by Python (sys.version, the generator closure), so this port has no use for that cache: --require-cached
+   is accepted and changes nothing, and the gate job no longer depends on exec-driver-core-prep-f1json.
+   The deltas run in exec/pp/sim.py's executor, ported here (load(): every state, the HALT sink the .py adds, E1's INC
+   rewritten to ALUI add; run(): the store W, reader frames, blobs, intern, the string builder, the attributed
+   output, every action, Python's indexing and int32/int64 arithmetic), with the .py's file dictionaries
+   (\0predefines/... from exec/facts/pp-gen.tsv predefres and \0cli/target osx/arm64 for E2, \0cli/f1 for E1,
+   \0cli/attributes for E3; then sim.Files over ROOT/include, cwd-relative, as sim.py reads the disk).  For
+   small.c (two marks) and tests/c/f1_ctor_dtor.c (three): E2 must accept, E1 must accept with a USLATTR1 frame of the
+   expected mark count, E3 must accept, and its tape must equal `UA -S SOURCE` (stderr inherited, 30 s); each prints
+   `F1 attributes: NAME N marks, tape byte equal`; rc 0.  A failed assertion, a timeout, an OS error or an executor
+   fault is the .py's uncaught exception: its traceback's last line on stderr, rc 1.  A delta outside what this
+   executor represents (a number beyond 64 bits, an argument that is neither a string nor an integer) is refused by
+   name (`f1attributescheck: not covered: ...`, rc 1), never answered differently.
+   Work area: no TemporaryDirectory (a port deletes nothing): ${TMPDIR:-/tmp}/unisacc-parse2loc-UID/f1-attributes-K
+   (the first of K = 0..7 no other run holds, fcntl-locked), overwritten by every run, its delta files emptied on
+   exit; seed/gen.c (with tbl.c, net.c) is built once per source digest (host cc, as compilercheck.sh prep-f1json)
+   into ${TMPDIR:-/tmp}/unisacc-parse2loc-UID/seed-DIGEST16.  small.c lives in that slot (the .py's in its
+   temporary directory).  ROOT is the grandparent of this file's directory.
+   Prelude gap: <time.h> (clock_gettime) is included -- cx.h edition 1 leaves time.h explicit. */
+#include <time.h>
+
+/* ---- shared frame (the same block in exec/parse2/f1attributescheck.cx, locationcheck.cx, unitlocationcheck.cx:
+   `#pragma unisa use` resolves beside the using file only, so these exec/parse2 ports cannot reach tests/cxlib) ---- */
+#define PN 4096
+static char ROOT[PN], BASE[PN], SLOT[PN], TOOLS[PN];
+static int SLOTFD = -1;
+static const char *const *BIGFILES;   /* names in SLOT emptied on exit (the stream-stage models: tens of MB each) */
+
+typedef struct buf { unsigned char *p; size_t n, cap; } buf;
+static void leave(int rc);
+static void die(const char *line) {   /* the .py's uncaught exception: the traceback's last line, rc 1 */
+    fflush(stdout); fputs(line, stderr); fputc('\n', stderr); leave(1);
+}
+static void *xmalloc(size_t n) { void *p = malloc(n ? n : 1); if (!p) die("MemoryError"); return p; }
+static void bgrow(buf *b, size_t extra) {
+    if (b->n + extra + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 256; unsigned char *g;
+        while (c < b->n + extra + 1) c *= 2;
+        g = realloc(b->p, c); if (!g) die("MemoryError");
+        b->p = g; b->cap = c;
+    }
+}
+static void bput(buf *b, const void *s, size_t n) { bgrow(b, n); if (n) memcpy(b->p + b->n, s, n); b->n += n; b->p[b->n] = 0; }
+static void bstr(buf *b, const char *s) { bput(b, s, strlen(s)); }
+static void bbyte(buf *b, int c) { unsigned char x = (unsigned char)c; bput(b, &x, 1); }
+static void bnum(buf *b, long long v) {
+    char t[32]; int k = 0; unsigned long long u = v < 0 ? 0ULL - (unsigned long long)v : (unsigned long long)v;
+    do { t[k++] = (char)('0' + u % 10); u /= 10; } while (u);
+    if (v < 0) t[k++] = '-';
+    while (k) bbyte(b, t[--k]);
+}
+static void bu32(buf *b, unsigned long v) {
+    unsigned char x[4]; x[0] = v & 255; x[1] = (v >> 8) & 255; x[2] = (v >> 16) & 255; x[3] = (v >> 24) & 255; bput(b, x, 4);
+}
+static unsigned long getu32(const unsigned char *p) { return p[0] | (unsigned long)p[1] << 8 | (unsigned long)p[2] << 16 | (unsigned long)p[3] << 24; }
+static int has(const unsigned char *s, size_t n, const char *w) {   /* bytes `W in S` */
+    size_t l = strlen(w), i;
+    for (i = 0; i + l <= n; i++) if (!memcmp(s + i, w, l)) return 1;
+    return 0;
+}
+static char *cat2(const char *a, const char *b) { size_t n = strlen(a) + strlen(b) + 2; char *p = xmalloc(n); snprintf(p, n, "%s/%s", a, b); return p; }
+
+/* Python reprs, for the assertion lines */
+static void repr_q(buf *o, const unsigned char *s, size_t n, int isbytes) {
+    size_t i; int q = '\'';
+    if (memchr(s, '\'', n) && !memchr(s, '"', n)) q = '"';
+    if (isbytes) bbyte(o, 'b');
+    bbyte(o, q);
+    for (i = 0; i < n; i++) {
+        int c = s[i];
+        if (c == '\\' || c == q) { bbyte(o, '\\'); bbyte(o, c); }
+        else if (c == '\n') bstr(o, "\\n");
+        else if (c == '\r') bstr(o, "\\r");
+        else if (c == '\t') bstr(o, "\\t");
+        else if (c < 32 || c == 127 || (isbytes && c > 127)) { char t[8]; snprintf(t, sizeof t, "\\x%02x", c); bstr(o, t); }
+        else bbyte(o, c);
+    }
+    bbyte(o, q);
+}
+static void repr_bytes(buf *o, const void *s, size_t n) { repr_q(o, s, n, 1); }
+static void repr_str(buf *o, const char *s) { repr_q(o, (const unsigned char *)s, strlen(s), 0); }
+static void repr_path(buf *o, const char *s) { bstr(o, "PosixPath("); repr_str(o, s); bbyte(o, ')'); }
+/* repr of an argument list; bit k of PATHS: argument k was a pathlib.Path in the .py */
+static void repr_args(buf *o, char *const argv[], unsigned long paths) {
+    int k; bbyte(o, '[');
+    for (k = 0; argv[k]; k++) { if (k) bstr(o, ", "); if (k < 32 && (paths >> k & 1)) repr_path(o, argv[k]); else repr_str(o, argv[k]); }
+    bbyte(o, ']');
+}
+static void oserror(buf *o, int err, const char *path) {   /* FileNotFoundError: [Errno 2] No such file or directory: 'P' */
+    const char *cls = err == ENOENT ? "FileNotFoundError" : err == EACCES || err == EPERM ? "PermissionError" :
+                      err == ENOTDIR ? "NotADirectoryError" : err == EISDIR ? "IsADirectoryError" : "OSError";
+    const char *txt = err == ENOENT ? "No such file or directory" : err == EACCES ? "Permission denied" :
+                      err == EPERM ? "Operation not permitted" : err == ENOTDIR ? "Not a directory" :
+                      err == EISDIR ? "Is a directory" : err == ENAMETOOLONG ? "File name too long" :
+                      err == ELOOP ? "Too many levels of symbolic links" : err == ENOEXEC ? "Exec format error" :
+                      err == ETXTBSY ? "Text file busy" : err == ENOSPC ? "No space left on device" : strerror(err);
+    bstr(o, cls); bstr(o, ": [Errno "); bnum(o, err); bstr(o, "] "); bstr(o, txt); bstr(o, ": "); repr_str(o, path);
+}
+
+/* the repository root: the grandparent of this file's directory (__FILE__ as the gate spells it, cwd-relative) */
+static void find_root(void) {
+    char here[PN], t[PN + 8], *s;
+    snprintf(here, sizeof here, "%s", __FILE__);
+    s = strrchr(here, '/');
+    if (s) *s = 0; else snprintf(here, sizeof here, ".");
+    snprintf(t, sizeof t, "%s/../..", here);
+    if (!realpath(t, ROOT)) die("FileNotFoundError: cannot resolve the repository root");
+}
+
+/* ---- the work area.  No deletion: the .py's TemporaryDirectory becomes a persistent per-user slot,
+   ${TMPDIR:-/tmp}/unisacc-parse2loc-UID/NAME-K (K = 0..7, the first one no other run holds; an fcntl lock), whose
+   files are overwritten by every run and the large ones emptied on exit (BIGFILES). ---- */
+static int lockfile(const char *path, int wait) {
+    struct flock fl; int fd = open(path, O_RDWR | O_CREAT, 0600);
+    if (fd < 0) return -1;
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+    memset(&fl, 0, sizeof fl); fl.l_type = F_WRLCK; fl.l_whence = SEEK_SET;
+    if (fcntl(fd, wait ? F_SETLKW : F_SETLK, &fl) == 0) return fd;
+    close(fd); return -1;
+}
+static void owned_dir(const char *d) {
+    struct stat st; buf m = {0, 0, 0};
+    if (mkdir(d, 0700) != 0 && errno != EEXIST) { oserror(&m, errno, d); die((char *)m.p); }
+    if (lstat(d, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != getuid()) {
+        bstr(&m, "PermissionError: "); repr_str(&m, d); bstr(&m, " is not a directory owned by this user (refused)"); die((char *)m.p);
+    }
+}
+static void work_init(const char *name) {
+    static const char *const env[3] = { "TMPDIR", "TEMP", "TMP" };
+    const char *d = 0; struct stat st; int i, k; char lk[PN + 8];
+    for (i = 0; i < 3 && !d; i++) {
+        const char *v = getenv(env[i]);
+        if (v && *v && stat(v, &st) == 0 && S_ISDIR(st.st_mode) && access(v, W_OK | X_OK) == 0) d = v;
+    }
+    if (!d) d = "/tmp";
+    snprintf(BASE, sizeof BASE, "%s/unisacc-parse2loc-%ld", d, (long)getuid());
+    owned_dir(BASE);
+    for (k = 0; k < 8 && SLOTFD < 0; k++) {
+        snprintf(SLOT, sizeof SLOT, "%s/%s-%d", BASE, name, k); snprintf(lk, sizeof lk, "%s.lock", SLOT);
+        SLOTFD = lockfile(lk, 0);
+    }
+    if (SLOTFD < 0) {
+        snprintf(SLOT, sizeof SLOT, "%s/%s-0", BASE, name); snprintf(lk, sizeof lk, "%s.lock", SLOT);
+        SLOTFD = lockfile(lk, 1);
+        if (SLOTFD < 0) { buf m = {0, 0, 0}; oserror(&m, errno, lk); die((char *)m.p); }
+    }
+    owned_dir(SLOT);
+}
+static void leave(int rc) {
+    static int once;
+    fflush(stdout); fflush(stderr);
+    if (!once && SLOTFD >= 0 && BIGFILES) {
+        int i; once = 1;
+        for (i = 0; BIGFILES[i]; i++) {
+            char p[PN + 64]; int fd;
+            snprintf(p, sizeof p, "%s/%s", SLOT, BIGFILES[i]);
+            fd = open(p, O_WRONLY | O_TRUNC);
+            if (fd >= 0) close(fd);
+        }
+    }
+    exit(rc);
+}
+
+/* ---- children: subprocess.run(ARGV, capture_output=True, timeout=SECS, cwd=CWD).  ERRCAP 0: stderr inherited
+   (check_output).  Captures go through SLOT/cap-TAG.{out,err}.  0, or -1 with WHY the exception's line. ---- */
+typedef struct res { int rc; unsigned char *out, *err; size_t outn, errn; } res;
+static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (double)t.tv_sec + (double)t.tv_nsec / 1e9; }
+static unsigned char *slurp(const char *p, size_t *n) {
+    unsigned char *b = (unsigned char *)cx_read(p, n);
+    if (!b) { b = xmalloc(1); b[0] = 0; *n = 0; }
+    return b;
+}
+static int runcap(char *const argv[], const char *cwd, int secs, int errcap, const char *tag, res *r, buf *why) {
+    char op[PN + 64], ep[PN + 64]; int of, ef = -1, pfd[2], st = 0, msg[2] = { 0, 0 }; pid_t pid; ssize_t k; double deadline;
+    r->rc = 0; r->out = r->err = 0; r->outn = r->errn = 0;
+    snprintf(op, sizeof op, "%s/cap-%s.out", SLOT, tag); snprintf(ep, sizeof ep, "%s/cap-%s.err", SLOT, tag);
+    of = open(op, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (errcap) ef = open(ep, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (of < 0 || (errcap && ef < 0) || pipe(pfd) != 0) { bstr(why, "OSError: cannot capture a child's output"); return -1; }
+    fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
+    fflush(stdout); fflush(stderr);
+    deadline = now() + secs;
+    pid = fork();
+    if (pid < 0) { bstr(why, "OSError: fork failed"); return -1; }
+    if (pid == 0) {
+        int fd = open("/dev/null", O_RDONLY);
+        close(pfd[0]);
+        if (fd >= 0) { dup2(fd, 0); close(fd); }
+        dup2(of, 1); close(of);
+        if (errcap) { dup2(ef, 2); close(ef); }
+        if (cwd && chdir(cwd) != 0) { msg[0] = 1; msg[1] = errno; k = write(pfd[1], msg, sizeof msg); _exit(255); }
+        execvp(argv[0], argv);
+        msg[0] = 2; msg[1] = errno; k = write(pfd[1], msg, sizeof msg); (void)k;
+        _exit(255);
+    }
+    close(pfd[1]);
+    k = read(pfd[0], msg, sizeof msg);
+    close(pfd[0]);
+    if (k == (ssize_t)sizeof msg) {
+        waitpid(pid, &st, 0); close(of); if (errcap) close(ef);
+        oserror(why, msg[1], msg[0] == 1 ? cwd : argv[0]);
+        return -1;
+    }
+    for (;;) {
+        pid_t w = waitpid(pid, &st, WNOHANG);
+        if (w == pid) break;
+        if (w < 0) { close(of); if (errcap) close(ef); bstr(why, "ChildProcessError: wait failed"); return -1; }
+        if (now() >= deadline) {
+            kill(pid, SIGKILL); waitpid(pid, &st, 0); close(of); if (errcap) close(ef);
+            bstr(why, "subprocess.TimeoutExpired: Command '"); repr_args(why, argv, 0);
+            bstr(why, "' timed out after "); bnum(why, secs); bstr(why, " seconds");
+            return -1;
+        }
+        usleep(1000);
+    }
+    close(of); if (errcap) close(ef);
+    r->rc = WIFSIGNALED(st) ? -WTERMSIG(st) : WEXITSTATUS(st);
+    r->out = slurp(op, &r->outn);
+    if (errcap) r->err = slurp(ep, &r->errn); else { r->err = xmalloc(1); r->err[0] = 0; }
+    return 0;
+}
+static void resfree(res *r) { free(r->out); free(r->err); r->out = r->err = 0; }
+/* run(): an OSError or timeout is the uncaught exception */
+static res runx(char *const argv[], const char *cwd, int secs, int errcap, const char *tag) {
+    res r; buf why = {0, 0, 0};
+    if (runcap(argv, cwd, secs, errcap, tag, &r, &why)) die((char *)why.p);
+    return r;
+}
+/* call(): run() that must exit 0: `AssertionError: (ARGS, RC, STDERR[-1500:])` otherwise; MSG 0 means die, else
+   the line is left in MSG (the parallel stream-stage constructions report from a child) */
+static int callx(char *const argv[], const char *cwd, unsigned long paths, const char *tag, res *out, buf *msg) {
+    res r; buf why = {0, 0, 0};
+    if (runcap(argv, cwd, 60, 1, tag, &r, &why)) { if (!msg) die((char *)why.p); bput(msg, why.p, why.n); return -1; }
+    if (r.rc != 0) {
+        buf m = {0, 0, 0}; size_t t = r.errn > 1500 ? r.errn - 1500 : 0;
+        bstr(&m, "AssertionError: ("); repr_args(&m, argv, paths); bstr(&m, ", "); bnum(&m, r.rc); bstr(&m, ", ");
+        repr_bytes(&m, r.err + t, r.errn - t); bbyte(&m, ')');
+        if (!msg) die((char *)m.p);
+        bput(msg, m.p, m.n); resfree(&r); return -1;
+    }
+    if (out) *out = r; else resfree(&r);
+    return 0;
+}
+
+/* ---- the C99 seed constructors (seed/gen.c, tbl.c, net.c: byte-identical to exec/build/gen.py, exec/c/tbl.py,
+   exec/c/net.py -- gate jobs seedgen-*, seedparse2-*, seed-construct-*), built once per source digest with the host
+   cc into BASE/seed-DIGEST16 under BASE/seed.lock, the way exec/c/compilercheck.sh prep-1/2 builds them ---- */
+static void tools_init(void) {
+    static const char *const src[] = { "seed/gen.c", "seed/json.h", "seed/facts.h", "seed/tbl.c", "seed/net.c", "exec/c/core.h", 0 };
+    static const char *const tool[] = { "gen", "tbl", "net", 0 };
+    buf key = {0, 0, 0}; char hex[65], lk[PN + 16], ready[PN + 16]; int i, fd; struct stat st;
+    for (i = 0; src[i]; i++) {
+        char *p = cat2(ROOT, src[i]); size_t n; char *b = cx_read(p, &n);
+        if (!b) { buf m = {0, 0, 0}; oserror(&m, ENOENT, p); die((char *)m.p); }
+        bstr(&key, src[i]); bbyte(&key, 0); bnum(&key, (long long)n); bbyte(&key, 0); bput(&key, b, n);
+        free(b); free(p);
+    }
+    cx_sha256_hex(key.p, key.n, hex); hex[16] = 0; free(key.p);
+    snprintf(TOOLS, sizeof TOOLS, "%s/seed-%s", BASE, hex);
+    snprintf(lk, sizeof lk, "%s/seed.lock", BASE); snprintf(ready, sizeof ready, "%s/ready", TOOLS);
+    fd = lockfile(lk, 1);
+    if (fd < 0) { buf m = {0, 0, 0}; oserror(&m, errno, lk); die((char *)m.p); }
+    if (stat(ready, &st) != 0) {
+        owned_dir(TOOLS);
+        for (i = 0; tool[i]; i++) {
+            char s[64], *o = cat2(TOOLS, tool[i]);
+            char *argv[] = { "cc", "-std=c99", "-O2", "-w", "-Iseed", s, "-o", o, 0 };
+            snprintf(s, sizeof s, "seed/%s.c", tool[i]);
+            callx(argv, ROOT, 0, "seedcc", 0, 0);
+            free(o);
+        }
+        if (cx_write(ready, "ok\n", 3)) { buf m = {0, 0, 0}; oserror(&m, errno, ready); die((char *)m.p); }
+    }
+    close(fd);
+}
+
+static int GEN_ONLY;   /* construct only NAME.json (f1attributescheck reads the delta itself) */
+/* one stream-stage model: SLOT/NAME.json by seed gen (cwd ROOT, as compilerpack's --seed-tools), then .tbl, .net */
+static int construct(const char *name, const char *const flags[], buf *msg) {
+    char *json, *tbl, *net, *gen = cat2(TOOLS, "gen"), *tb = cat2(TOOLS, "tbl"), *nt = cat2(TOOLS, "net"), f[256];
+    char *argv[12]; int k = 0, i;
+    snprintf(f, sizeof f, "%s.json", name); json = cat2(SLOT, f);
+    snprintf(f, sizeof f, "%s.tbl", name); tbl = cat2(SLOT, f);
+    snprintf(f, sizeof f, "%s.net", name); net = cat2(SLOT, f);
+    argv[k++] = gen; argv[k++] = (char *)flags[0]; argv[k++] = json;
+    for (i = 1; flags[i] && k < 11; i++) argv[k++] = (char *)flags[i];
+    argv[k] = 0;
+    if (callx(argv, ROOT, 0, name, 0, msg)) return -1;
+    if (GEN_ONLY) return 0;
+    { char *a[] = { tb, json, tbl, 0 }; if (callx(a, 0, 0, name, 0, msg)) return -1; }
+    { char *a[] = { nt, tbl, net, 0 }; if (callx(a, 0, 0, name, 0, msg)) return -1; }
+    free(json); free(tbl); free(net); free(gen); free(tb); free(nt);
+    return 0;
+}
+/* the models in parallel (at most 3 at once, as the .py's ThreadPoolExecutor(max_workers=3)); the first failure in
+   list order is the exception pool.map raises */
+typedef struct spec { const char *name; const char *flags[6]; } spec;
+static void construct_all(const spec *m, int n) {
+    pid_t *pid = xmalloc(sizeof(pid_t) * n); int *done = xmalloc(sizeof(int) * n), i, next = 0, live = 0, st;
+    for (i = 0; i < n; i++) done[i] = 0;
+    fflush(stdout); fflush(stderr);
+    while (next < n || live) {
+        while (next < n && live < 3) {
+            { char f[256]; char *p; snprintf(f, sizeof f, "%s.fail", m[next].name); p = cat2(SLOT, f); cx_write(p, "", 0); free(p); }
+            pid[next] = fork();
+            if (pid[next] < 0) die("OSError: fork failed");
+            if (pid[next] == 0) {
+                buf msg = {0, 0, 0}; char f[256]; char *p;
+                if (construct(m[next].name, m[next].flags, &msg) == 0) _exit(0);
+                snprintf(f, sizeof f, "%s.fail", m[next].name); p = cat2(SLOT, f);
+                cx_write(p, msg.p, msg.n); _exit(1);
+            }
+            next++; live++;
+        }
+        { pid_t w = waitpid(-1, &st, 0);
+          if (w < 0) die("ChildProcessError: wait failed");
+          for (i = 0; i < next; i++) if (pid[i] == w) { done[i] = WIFEXITED(st) && WEXITSTATUS(st) == 0 ? 1 : 2; live--; } }
+    }
+    for (i = 0; i < n; i++) if (done[i] != 1) {
+        char f[256]; char *p, *b; size_t k;
+        snprintf(f, sizeof f, "%s.fail", m[i].name); p = cat2(SLOT, f); b = cx_read(p, &k);
+        if (b && k) { char *z = xmalloc(k + 1); memcpy(z, b, k); z[k] = 0; die(z); }
+        die("ChildProcessError: a stream-stage construction died");
+    }
+    free(pid); free(done);
+}
+
+/* ==== exec/pp/sim.py: load() and run() over a decoded delta JSON ==== */
+
+/* ---- byte-string symbols: names, labels, operation words (one table for every loaded delta) ---- */
+typedef struct bmap { unsigned char **k; size_t *kn; int *v; size_t cap, n; } bmap;
+static unsigned long long bhash(const unsigned char *s, size_t n) {
+    unsigned long long h = 1469598103934665603ULL; size_t i;
+    for (i = 0; i < n; i++) { h ^= s[i]; h *= 1099511628211ULL; }
+    return h;
+}
+static void bmap_grow(bmap *m) {
+    size_t oc = m->cap, i, nc = oc ? oc * 2 : 1024;
+    unsigned char **ok = m->k; size_t *okn = m->kn; int *ov = m->v;
+    m->k = xmalloc(sizeof(unsigned char *) * nc); m->kn = xmalloc(sizeof(size_t) * nc); m->v = xmalloc(sizeof(int) * nc);
+    for (i = 0; i < nc; i++) m->k[i] = 0;
+    m->cap = nc;
+    for (i = 0; i < oc; i++) if (ok[i]) {
+        size_t j = bhash(ok[i], okn[i]) & (nc - 1);
+        while (m->k[j]) j = (j + 1) & (nc - 1);
+        m->k[j] = ok[i]; m->kn[j] = okn[i]; m->v[j] = ov[i];
+    }
+    free(ok); free(okn); free(ov);
+}
+/* the value of key S, or -1; with ADD >= 0 a missing key gets value ADD */
+static int bmap_get(bmap *m, const unsigned char *s, size_t n, int add) {
+    size_t j;
+    if (!m->cap || (add >= 0 && (m->n + 1) * 2 > m->cap)) bmap_grow(m);
+    j = bhash(s, n) & (m->cap - 1);
+    while (m->k[j]) {
+        if (m->kn[j] == n && !memcmp(m->k[j], s, n)) return m->v[j];
+        j = (j + 1) & (m->cap - 1);
+    }
+    if (add < 0) return -1;
+    m->k[j] = xmalloc(n + 1); if (n) memcpy(m->k[j], s, n); m->k[j][n] = 0; m->kn[j] = n; m->v[j] = add; m->n++;
+    return add;
+}
+static bmap SYMMAP; static unsigned char **SYM; static size_t *SYMN; static int NSYM, CAPSYM;
+static int sym(const unsigned char *s, size_t n) {
+    int v = bmap_get(&SYMMAP, s, n, NSYM);
+    if (v == NSYM) {
+        if (NSYM == CAPSYM) {
+            CAPSYM = CAPSYM ? CAPSYM * 2 : 4096;
+            SYM = realloc(SYM, sizeof(unsigned char *) * CAPSYM); SYMN = realloc(SYMN, sizeof(size_t) * CAPSYM);
+            if (!SYM || !SYMN) die("MemoryError");
+        }
+        SYM[NSYM] = xmalloc(n + 1); if (n) memcpy(SYM[NSYM], s, n); SYM[NSYM][n] = 0; SYMN[NSYM] = n; NSYM++;
+    }
+    return v;
+}
+static int symz(const char *s) { return sym((const unsigned char *)s, strlen(s)); }
+
+/* ---- the delta ---- */
+enum { O_UNKNOWN, O_ADV, O_MARK, O_JUMP, O_COPYT, O_COPY, O_OUT, O_LDI, O_COPYW, O_ALU, O_ALUI, O_CMP, O_CMPI, O_A64,
+       O_A64I, O_C64, O_C64U, O_RLD, O_LDX, O_STX, O_OUTW, O_SPAN, O_SPANT, O_SPAN2, O_OLAST, O_ODROP, O_OLEN, O_OCUT,
+       O_ORES, O_OFILL, O_OCLR, O_OSEL, O_SETOT, O_XATTR, O_PUSH, O_POP, O_INTERN, O_SBINTERN, O_BLOBSAVE, O_SBSAVE,
+       O_INPUSH, O_INPUSHX, O_INPUSHXE, O_INPOP, O_SBCLR, O_SBOUT, O_SBSPAN, O_SBBLOB, O_SBFIND, O_BYTE, O_XLEN, O_BLEN,
+       O_DIVMOD10, O_SWAP, O_ACCEPT, O_REJECT, O_COUNT };
+static const char *const OPNAME[O_COUNT] = { "", "ADV", "MARK", "JUMP", "COPYT", "COPY", "OUT", "LDI", "COPYW", "ALU",
+    "ALUI", "CMP", "CMPI", "A64", "A64I", "C64", "C64U", "RLD", "LDX", "STX", "OUTW", "SPAN", "SPANT", "SPAN2", "OLAST",
+    "ODROP", "OLEN", "OCUT", "ORES", "OFILL", "OCLR", "OSEL", "SETOT", "XATTR", "PUSH", "POP", "INTERN", "SBINTERN",
+    "BLOBSAVE", "SBSAVE", "INPUSH", "INPUSHX", "INPUSHXE", "INPOP", "SBCLR", "SBOUT", "SBSPAN", "SBBLOB", "SBFIND",
+    "BYTE", "XLEN", "BLEN", "DIVMOD10", "SWAP", "ACCEPT", "REJECT" };
+enum { AT_NONE, AT_STR, AT_INT };
+typedef struct act { int op, opsym, na; unsigned char at[4]; int as[4]; long long av[4]; } act;
+typedef struct seq { act *a; int n; } seq;
+typedef struct trans { int tgt; int seq; } trans;   /* tgt -1: None (no edge) */
+typedef struct tent { int key; trans t; } tent;
+typedef struct state { int name, mode; trans *row; tent *tl; int ntl, captl; } state;   /* mode 'b', 't' or 'r' */
+typedef struct delta { state *st; int nst, capst; seq *sq; int nsq; int start; } delta;
+
+typedef struct jp { const unsigned char *s; size_t n, i; const char *what; } jp;
+static void jfail(jp *p, const char *msg) {
+    buf m = {0, 0, 0}; size_t i, line = 1, col = 1;
+    for (i = 0; i < p->i && i < p->n; i++) { if (p->s[i] == '\n') { line++; col = 1; } else col++; }
+    bstr(&m, "json.decoder.JSONDecodeError: "); bstr(&m, msg); bstr(&m, ": line "); bnum(&m, (long long)line);
+    bstr(&m, " column "); bnum(&m, (long long)col); bstr(&m, " (char "); bnum(&m, (long long)p->i); bbyte(&m, ')');
+    die((char *)m.p);
+}
+static void jws_(jp *p) { while (p->i < p->n) { unsigned c = p->s[p->i]; if (c == ' ' || c == '\n' || c == '\t' || c == '\r') p->i++; else break; } }
+static void jexpect(jp *p, int c) { jws_(p); if (p->i >= p->n || p->s[p->i] != c) { char t[40]; snprintf(t, sizeof t, "Expecting '%c' delimiter", c); jfail(p, t); } p->i++; }
+static int jpeek(jp *p) { jws_(p); return p->i < p->n ? p->s[p->i] : -1; }
+static void utf8put(buf *o, unsigned long c) {
+    if (c < 0x80) bbyte(o, (int)c);
+    else if (c < 0x800) { bbyte(o, 0xC0 | (int)(c >> 6)); bbyte(o, 0x80 | (int)(c & 63)); }
+    else if (c < 0x10000) { bbyte(o, 0xE0 | (int)(c >> 12)); bbyte(o, 0x80 | (int)((c >> 6) & 63)); bbyte(o, 0x80 | (int)(c & 63)); }
+    else { bbyte(o, 0xF0 | (int)(c >> 18)); bbyte(o, 0x80 | (int)((c >> 12) & 63)); bbyte(o, 0x80 | (int)((c >> 6) & 63)); bbyte(o, 0x80 | (int)(c & 63)); }
+}
+static int hex4(jp *p, size_t at, unsigned long *v) {
+    size_t k; *v = 0;
+    if (at + 4 > p->n) return 0;
+    for (k = 0; k < 4; k++) {
+        int c = p->s[at + k], d = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+        if (d < 0) return 0;
+        *v = *v * 16 + (unsigned long)d;
+    }
+    return 1;
+}
+/* a JSON string, decoded to UTF-8 in O (cleared first) */
+static void jstring(jp *p, buf *o) {
+    o->n = 0; bgrow(o, 0); o->p[0] = 0;
+    jws_(p);
+    if (p->i >= p->n || p->s[p->i] != '"') jfail(p, "Expecting value");
+    p->i++;
+    for (;;) {
+        size_t st = p->i;
+        while (p->i < p->n && p->s[p->i] != '"' && p->s[p->i] != '\\' && p->s[p->i] >= 32) p->i++;
+        if (p->i > st) bput(o, p->s + st, p->i - st);
+        if (p->i >= p->n) jfail(p, "Unterminated string starting at");
+        if (p->s[p->i] == '"') { p->i++; return; }
+        if (p->s[p->i] < 32) jfail(p, "Invalid control character at");
+        p->i++;
+        if (p->i >= p->n) jfail(p, "Unterminated string starting at");
+        switch (p->s[p->i]) {
+        case '"': bbyte(o, '"'); break; case '\\': bbyte(o, '\\'); break; case '/': bbyte(o, '/'); break;
+        case 'b': bbyte(o, 8); break; case 'f': bbyte(o, 12); break; case 'n': bbyte(o, 10); break;
+        case 'r': bbyte(o, 13); break; case 't': bbyte(o, 9); break;
+        case 'u': {
+            unsigned long c, d;
+            if (!hex4(p, p->i + 1, &c)) jfail(p, "Invalid \\uXXXX escape");
+            p->i += 4;
+            if (c >= 0xD800 && c <= 0xDBFF && p->i + 2 < p->n && p->s[p->i + 1] == '\\' && p->s[p->i + 2] == 'u' &&
+                hex4(p, p->i + 3, &d) && d >= 0xDC00 && d <= 0xDFFF) { c = 0x10000 + ((c - 0xD800) << 10) + (d - 0xDC00); p->i += 6; }
+            utf8put(o, c);
+            break; }
+        default: jfail(p, "Invalid \\escape");
+        }
+        p->i++;
+    }
+}
+/* an integer; 1 when it is one that fits in 64 bits, 0 for any other number (refused by the caller) */
+static int jint(jp *p, long long *v) {
+    int neg = 0, ok = 1; unsigned long long u = 0; size_t st;
+    jws_(p); st = p->i;
+    if (p->i < p->n && p->s[p->i] == '-') { neg = 1; p->i++; }
+    if (p->i >= p->n || p->s[p->i] < '0' || p->s[p->i] > '9') { p->i = st; jfail(p, "Expecting value"); }
+    while (p->i < p->n && p->s[p->i] >= '0' && p->s[p->i] <= '9') {
+        unsigned d = p->s[p->i++] - '0';
+        if (u > (18446744073709551615ULL - d) / 10) ok = 0; else u = u * 10 + d;
+    }
+    if (p->i < p->n && (p->s[p->i] == '.' || p->s[p->i] == 'e' || p->s[p->i] == 'E')) {
+        ok = 0; p->i++;
+        while (p->i < p->n && strchr("0123456789+-eE", p->s[p->i])) p->i++;
+    }
+    if (neg ? u > 9223372036854775808ULL : u > 9223372036854775807ULL) ok = 0;
+    *v = neg ? (long long)(0ULL - u) : (long long)u;
+    return ok;
+}
+static void jskip(jp *p) {
+    int c = jpeek(p);
+    if (c == '"') { buf t = {0, 0, 0}; jstring(p, &t); free(t.p); return; }
+    if (c == '{' || c == '[') {
+        int close = c == '{' ? '}' : ']';
+        p->i++;
+        if (jpeek(p) == close) { p->i++; return; }
+        for (;;) {
+            if (close == '}') { buf t = {0, 0, 0}; jstring(p, &t); free(t.p); jexpect(p, ':'); }
+            jskip(p);
+            c = jpeek(p);
+            if (c == ',') { p->i++; continue; }
+            if (c == close) { p->i++; return; }
+            jfail(p, close == '}' ? "Expecting ',' delimiter" : "Expecting ',' delimiter");
+        }
+    }
+    if (c == '-' || (c >= '0' && c <= '9')) { long long v; jint(p, &v); return; }
+    if (p->i + 4 <= p->n && !memcmp(p->s + p->i, "true", 4)) { p->i += 4; return; }
+    if (p->i + 5 <= p->n && !memcmp(p->s + p->i, "false", 5)) { p->i += 5; return; }
+    if (p->i + 4 <= p->n && !memcmp(p->s + p->i, "null", 4)) { p->i += 4; return; }
+    jfail(p, "Expecting value");
+}
+static void notcovered(const char *what) {
+    buf m = {0, 0, 0}; bstr(&m, "f1attributescheck: not covered: "); bstr(&m, what); die((char *)m.p);
+}
+static int op_of(const unsigned char *s, size_t n) {
+    int k;
+    for (k = 1; k < O_COUNT; k++) if (strlen(OPNAME[k]) == n && !memcmp(OPNAME[k], s, n)) return k;
+    return O_UNKNOWN;
+}
+static void parse_seqs(jp *p, delta *d, int lex) {
+    buf t = {0, 0, 0}; int cap = 0;
+    jexpect(p, '[');
+    if (jpeek(p) == ']') { p->i++; return; }
+    for (;;) {
+        seq s; int capa = 0;
+        s.a = 0; s.n = 0;
+        jexpect(p, '[');
+        if (jpeek(p) == ']') p->i++;
+        else for (;;) {
+            act a; int k = 0, c;
+            memset(&a, 0, sizeof a);
+            jexpect(p, '[');
+            if (jpeek(p) != '"') notcovered("an action whose first item is not a name");
+            jstring(p, &t); a.op = op_of(t.p, t.n); a.opsym = sym(t.p, t.n);
+            while ((c = jpeek(p)) == ',') {
+                p->i++; c = jpeek(p);
+                if (k >= 4) { jskip(p); k++; continue; }
+                if (c == '"') { jstring(p, &t); a.at[k] = AT_STR; a.as[k] = sym(t.p, t.n); }
+                else if (c == '-' || (c >= '0' && c <= '9')) { long long v; if (!jint(p, &v)) notcovered("a number beyond 64 bits in an action"); a.at[k] = AT_INT; a.av[k] = v; }
+                else notcovered("an action argument that is not a string or an integer");
+                k++;
+            }
+            jexpect(p, ']');
+            a.na = k > 4 ? 4 : k;
+            if (lex && SYMN[a.opsym] == 3 && !memcmp(SYM[a.opsym], "INC", 3)) {   /* ["ALUI","add",a[1],a[1],1] */
+                if (a.na < 1) die("IndexError: list index out of range");
+                a.op = O_ALUI; a.opsym = symz("ALUI");
+                a.at[2] = a.at[0]; a.as[2] = a.as[0]; a.av[2] = a.av[0];
+                a.at[1] = a.at[0]; a.as[1] = a.as[0]; a.av[1] = a.av[0];
+                a.at[0] = AT_STR; a.as[0] = symz("add");
+                a.at[3] = AT_INT; a.av[3] = 1; a.na = 4;
+            }
+            if (s.n == capa) { capa = capa ? capa * 2 : 4; s.a = realloc(s.a, sizeof(act) * capa); if (!s.a) die("MemoryError"); }
+            s.a[s.n++] = a;
+            c = jpeek(p);
+            if (c == ',') { p->i++; continue; }
+            jexpect(p, ']'); break;
+        }
+        if (d->nsq == cap) { cap = cap ? cap * 2 : 1024; d->sq = realloc(d->sq, sizeof(seq) * cap); if (!d->sq) die("MemoryError"); }
+        d->sq[d->nsq++] = s;
+        if (jpeek(p) == ',') { p->i++; continue; }
+        jexpect(p, ']'); break;
+    }
+    free(t.p);
+}
+/* row targets and sequence numbers are kept raw (target symbol, JSON integer) until the seqs are known */
+typedef struct rawt { int key; int tgt; long long seq; } rawt;
+typedef struct rawst { int name, mode; rawt *e; int n, cap; } rawst;
+static int state_index(delta *d, int name) {
+    int k; for (k = 0; k < d->nst; k++) if (d->st[k].name == name) return k;
+    return -1;
+}
+static delta *load_delta(const char *path, int lex) {
+    size_t n; unsigned char *s = (unsigned char *)cx_read(path, &n);
+    jp P; delta *d = xmalloc(sizeof(delta)); rawst *rs = 0; int nrs = 0, caprs = 0, start = -1, k, *ix, halt;
+    buf t = {0, 0, 0};
+    if (!s) { buf m = {0, 0, 0}; oserror(&m, errno ? errno : ENOENT, path); die((char *)m.p); }
+    memset(d, 0, sizeof *d);
+    P.s = s; P.n = n; P.i = 0; P.what = path;
+    jexpect(&P, '{');
+    if (jpeek(&P) != '}') for (;;) {
+        jstring(&P, &t); jexpect(&P, ':');
+        if (t.n == 5 && !memcmp(t.p, "start", 5)) {
+            if (jpeek(&P) != '"') notcovered("a start that is not a name");
+            jstring(&P, &t); start = sym(t.p, t.n);
+        } else if (t.n == 4 && !memcmp(t.p, "seqs", 4)) {
+            d->nsq = 0; parse_seqs(&P, d, lex);
+        } else if (t.n == 6 && !memcmp(t.p, "states", 6)) {
+            jexpect(&P, '{');
+            if (jpeek(&P) != '}') for (;;) {
+                int name, j; rawst *r = 0;
+                jstring(&P, &t); name = sym(t.p, t.n);
+                for (j = 0; j < nrs; j++) if (rs[j].name == name) { r = &rs[j]; r->n = 0; break; }   /* dict: last value, first place */
+                if (!r) {
+                    if (nrs == caprs) { caprs = caprs ? caprs * 2 : 1024; rs = realloc(rs, sizeof(rawst) * caprs); if (!rs) die("MemoryError"); }
+                    r = &rs[nrs++]; memset(r, 0, sizeof *r); r->name = name;
+                }
+                jexpect(&P, ':'); jexpect(&P, '[');
+                jstring(&P, &t); r->mode = t.n == 1 && t.p[0] == 'b' ? 'b' : t.n == 1 && t.p[0] == 't' ? 't' : 'r';
+                jexpect(&P, ','); jexpect(&P, '{');
+                if (jpeek(&P) != '}') for (;;) {
+                    rawt e;
+                    jstring(&P, &t);
+                    if (r->mode == 't') e.key = sym(t.p, t.n);
+                    else {   /* int(k) */
+                        size_t q = 0; int neg = 0; long long v = 0;
+                        if (q < t.n && (t.p[q] == '-' || t.p[q] == '+')) { neg = t.p[q] == '-'; q++; }
+                        if (q >= t.n) goto badkey;
+                        for (; q < t.n; q++) { if (t.p[q] < '0' || t.p[q] > '9' || v > 100000) goto badkey; v = v * 10 + (t.p[q] - '0'); }
+                        if (neg) v = -v;
+                        if (v < -257 || v > 256) die("IndexError: list assignment index out of range");
+                        e.key = (int)(v < 0 ? v + 257 : v);
+                        goto goodkey;
+                      badkey:
+                        { buf m = {0, 0, 0}; bstr(&m, "ValueError: invalid literal for int() with base 10: "); repr_str(&m, (char *)t.p); die((char *)m.p); }
+                      goodkey:;
+                    }
+                    jexpect(&P, ':'); jexpect(&P, '[');
+                    if (jpeek(&P) != '"') notcovered("a target that is not a name");
+                    jstring(&P, &t); e.tgt = sym(t.p, t.n);
+                    jexpect(&P, ',');
+                    if (!jint(&P, &e.seq)) notcovered("a sequence number beyond 64 bits");
+                    while (jpeek(&P) == ',') { P.i++; jskip(&P); }
+                    jexpect(&P, ']');
+                    if (r->n == r->cap) { r->cap = r->cap ? r->cap * 2 : 8; r->e = realloc(r->e, sizeof(rawt) * r->cap); if (!r->e) die("MemoryError"); }
+                    r->e[r->n++] = e;
+                    if (jpeek(&P) == ',') { P.i++; continue; }
+                    jexpect(&P, '}'); break;
+                }
+                else P.i++;
+                while (jpeek(&P) == ',') { P.i++; jskip(&P); }
+                jexpect(&P, ']');
+                if (jpeek(&P) == ',') { P.i++; continue; }
+                jexpect(&P, '}'); break;
+            }
+            else P.i++;
+        } else jskip(&P);
+        if (jpeek(&P) == ',') { P.i++; continue; }
+        jexpect(&P, '}'); break;
+    }
+    free(s);
+    /* delta["states"]["HALT"] = ["b", {}] */
+    halt = symz("HALT");
+    {   int j, found = 0;
+        for (j = 0; j < nrs; j++) if (rs[j].name == halt) { rs[j].mode = 'b'; rs[j].n = 0; found = 1; }
+        if (!found) {
+            if (nrs == caprs) { caprs = caprs ? caprs * 2 : 4; rs = realloc(rs, sizeof(rawst) * caprs); if (!rs) die("MemoryError"); }
+            memset(&rs[nrs], 0, sizeof(rawst)); rs[nrs].name = halt; rs[nrs].mode = 'b'; nrs++;
+        } }
+    /* load(): names, rows */
+    ix = xmalloc(sizeof(int) * (size_t)(NSYM + 1));
+    for (k = 0; k < NSYM; k++) ix[k] = -1;
+    for (k = 0; k < nrs; k++) ix[rs[k].name] = k;
+    d->st = xmalloc(sizeof(state) * (size_t)(nrs ? nrs : 1)); d->nst = nrs;
+    for (k = 0; k < nrs; k++) {
+        state *q = &d->st[k]; int j;
+        q->name = rs[k].name; q->mode = rs[k].mode; q->row = 0; q->tl = 0; q->ntl = 0;
+        if (q->mode != 't') { q->row = xmalloc(sizeof(trans) * 257); for (j = 0; j < 257; j++) q->row[j].tgt = -1; }
+        else q->tl = xmalloc(sizeof(tent) * (size_t)(rs[k].n ? rs[k].n : 1));
+        for (j = 0; j < rs[k].n; j++) {
+            rawt *e = &rs[k].e[j]; trans tr; long long sv = e->seq;
+            if (ix[e->tgt] < 0) { buf m = {0, 0, 0}; bstr(&m, "KeyError: "); repr_str(&m, (char *)SYM[e->tgt]); die((char *)m.p); }
+            if (sv < 0) sv += d->nsq;
+            if (sv < 0 || sv >= d->nsq) die("IndexError: list index out of range");
+            tr.tgt = ix[e->tgt]; tr.seq = (int)sv;
+            if (q->mode != 't') q->row[e->key] = tr;
+            else {
+                int u; for (u = 0; u < q->ntl; u++) if (q->tl[u].key == e->key) break;
+                q->tl[u].key = e->key; q->tl[u].t = tr; if (u == q->ntl) q->ntl++;
+            }
+        }
+        free(rs[k].e);
+    }
+    free(rs);
+    if (start < 0) die("KeyError: 'start'");
+    if (ix[start] < 0) { buf m = {0, 0, 0}; bstr(&m, "KeyError: "); repr_str(&m, (char *)SYM[start]); die((char *)m.p); }
+    d->start = ix[start];
+    free(ix); free(t.p);
+    return d;
+}
+
+/* ---- run() ---- */
+typedef struct i64map { long long *k, *v; unsigned char *used; size_t cap, n; } i64map;
+static size_t i64slot(i64map *m, long long key) {
+    unsigned long long h = (unsigned long long)key * 0x9E3779B97F4A7C15ULL; size_t j = (size_t)(h >> 20) & (m->cap - 1);
+    while (m->used[j] && m->k[j] != key) j = (j + 1) & (m->cap - 1);
+    return j;
+}
+static long long i64get(i64map *m, long long key) {
+    size_t j; if (!m->cap) return 0;
+    j = i64slot(m, key); return m->used[j] ? m->v[j] : 0;
+}
+static void i64set(i64map *m, long long key, long long v) {
+    size_t j;
+    if (!m->cap || (m->n + 1) * 2 > m->cap) {
+        i64map o = *m; size_t i;
+        m->cap = o.cap ? o.cap * 2 : 1024; m->n = 0;
+        m->k = xmalloc(sizeof(long long) * m->cap); m->v = xmalloc(sizeof(long long) * m->cap); m->used = xmalloc(m->cap);
+        memset(m->used, 0, m->cap);
+        for (i = 0; i < o.cap; i++) if (o.used[i]) { j = i64slot(m, o.k[i]); m->used[j] = 1; m->k[j] = o.k[i]; m->v[j] = o.v[i]; m->n++; }
+        free(o.k); free(o.v); free(o.used);
+    }
+    j = i64slot(m, key);
+    if (!m->used[j]) { m->used[j] = 1; m->k[j] = key; m->n++; }
+    m->v[j] = v;
+}
+
+typedef struct blob { unsigned char *p; size_t n; } blob;
+typedef struct frame { const unsigned char *d; size_t dn; const long long *at; size_t an; long long cur, end; } frame;
+typedef struct lvec { long long *p; size_t n, cap; } lvec;
+static void lpush(lvec *v, long long x) {
+    if (v->n == v->cap) { v->cap = v->cap ? v->cap * 2 : 1024; v->p = realloc(v->p, sizeof(long long) * v->cap); if (!v->p) die("MemoryError"); }
+    v->p[v->n++] = x;
+}
+/* Files.get(KEY): the bytes, or 0 for None */
+typedef blob *(*files_fn)(const unsigned char *key, size_t n);
+
+typedef struct simres { int verdict; buf out; int rejk_at; int rejk_s; long long rejk_v; const char *rejk_c; buf e; } simres;   /* 'a' 'r' 't' */
+
+static long long *W; static i64map MEM;
+static void idx_error(void) { die("IndexError: index out of range"); }
+static long long getw(const act *a, int k) {
+    if (k >= a->na) die("IndexError: tuple index out of range");
+    return a->at[k] == AT_STR ? W[a->as[k]] : i64get(&MEM, a->av[k]);
+}
+static void setw(const act *a, int k, long long v) {
+    if (k >= a->na) die("IndexError: tuple index out of range");
+    if (a->at[k] == AT_STR) W[a->as[k]] = v; else i64set(&MEM, a->av[k], v);
+}
+static long long imm(const act *a, int k) {
+    if (k >= a->na) die("IndexError: tuple index out of range");
+    if (a->at[k] != AT_INT) notcovered("a string where the action takes a number");
+    return a->av[k];
+}
+static long long w32(long long v) { unsigned long long u = (unsigned long long)v & 0xFFFFFFFFULL; return u & 0x80000000ULL ? (long long)u - 0x100000000LL : (long long)u; }
+static long long sar64(long long a, int s) { return a < 0 ? ~((~a) >> s) : a >> s; }
+static long long alu(const act *x, long long a, long long b) {
+    const unsigned char *op = SYM[x->as[0]]; size_t n = SYMN[x->as[0]];
+    if (x->at[0] != AT_STR) notcovered("an ALU operation that is not a name");
+    a = w32(a); b = w32(b);
+#define IS(W_) (n == sizeof(W_) - 1 && !memcmp(op, W_, n))
+    if (IS("add")) return w32(a + b);
+    if (IS("sub")) return w32(a - b);
+    if (IS("mul")) return w32((long long)((unsigned long long)a * (unsigned long long)b));
+    if (IS("div") || IS("rem")) {
+        long long q;
+        if (b == 0) return 0;
+        q = (a < 0 ? -a : a) / (b < 0 ? -b : b);
+        q = (a < 0) == (b < 0) ? q : -q;
+        if (IS("div")) return w32(q);
+        q = w32(q); return w32(a - q * b);
+    }
+    if (IS("and")) return w32(a & b);
+    if (IS("or")) return w32(a | b);
+    if (IS("xor")) return w32(a ^ b);
+    if (IS("shl")) return w32((long long)((unsigned long long)a << (b & 31)));
+    if (IS("sar")) return w32(sar64(a, (int)(b & 31)));
+    { buf m = {0, 0, 0}; bstr(&m, "ValueError: "); bstr(&m, (char *)op); die((char *)m.p); }
+    return 0;
+}
+static long long alu64(const act *x, long long a, long long b, int *dz) {
+    const unsigned char *op = SYM[x->as[0]]; size_t n = SYMN[x->as[0]];
+    unsigned long long ua = (unsigned long long)a, ub = (unsigned long long)b;
+    if (x->at[0] != AT_STR) notcovered("an A64 operation that is not a name");
+    *dz = 0;
+    if (IS("sdiv") || IS("srem") || IS("udiv") || IS("urem")) {
+        if (b == 0) { *dz = 1; return 0; }
+        if (op[0] == 'u') return (long long)(IS("udiv") ? ua / ub : ua % ub);
+        {   unsigned long long ma = a < 0 ? 0ULL - ua : ua, mb = b < 0 ? 0ULL - ub : ub, q = ma / mb, r = ma % mb;
+            if (IS("sdiv")) return (long long)((a < 0) == (b < 0) ? q : 0ULL - q);
+            return (long long)(a < 0 ? 0ULL - r : r); }
+    }
+    if (IS("add")) return (long long)(ua + ub);
+    if (IS("sub")) return (long long)(ua - ub);
+    if (IS("mul")) return (long long)(ua * ub);
+    if (IS("and")) return (long long)(ua & ub);
+    if (IS("or")) return (long long)(ua | ub);
+    if (IS("xor")) return (long long)(ua ^ ub);
+    if (IS("not")) return (long long)~ua;
+    if (IS("shl")) return (long long)(ua << (b & 63));
+    if (IS("shr")) return (long long)(ua >> (b & 63));
+    if (IS("sar")) return sar64(a, (int)(b & 63));
+#undef IS
+    { buf m = {0, 0, 0}; bstr(&m, "KeyError: "); repr_str(&m, (char *)op); die((char *)m.p); }
+    return 0;
+}
+static int pyix(long long i, size_t n, size_t *out) {   /* Python seq[i]: negative counts from the end */
+    if (i < 0) i += (long long)n;
+    if (i < 0 || (unsigned long long)i >= n) return 0;
+    *out = (size_t)i; return 1;
+}
+static void slice(const unsigned char *d, size_t dn, long long s0, long long s1, const unsigned char **p, size_t *n) {
+    /* d[s0:s1] for 0 <= s0 < s1 */
+    size_t a = (unsigned long long)s0 < dn ? (size_t)s0 : dn, z = (unsigned long long)s1 < dn ? (size_t)s1 : dn;
+    *p = d + a; *n = z > a ? z - a : 0;
+}
+static void putbyte(buf *b, long long c) { if (c < 0 || c > 255) die("ValueError: byte must be in range(0, 256)"); bbyte(b, (int)c); }
+
+static void sim_run(delta *dl, const unsigned char *x0, size_t xn0, const char *srcpath, files_fn files, long long maxsteps, simres *res) {
+    int q = dl->start, osel = 0, BOT = symz("BOT"); long long r = 0, OT = 0, steps = 0;
+    blob *blobs = 0; size_t nblob = 0, capblob = 0;
+    bmap blobid, intern; frame *fr; frame *frames = 0; size_t nfr = 0, capfr = 0;
+    const unsigned char *x = x0; size_t xn = xn0; long long *xattr;
+    buf o = {0, 0, 0}, e = {0, 0, 0}, sb = {0, 0, 0}; lvec oattr = {0, 0, 0}; int *stack = 0; size_t nst = 0, capst = 0;
+    memset(&blobid, 0, sizeof blobid); memset(&intern, 0, sizeof intern);
+    free(W); W = xmalloc(sizeof(long long) * (size_t)(NSYM ? NSYM : 1)); memset(W, 0, sizeof(long long) * (size_t)NSYM);
+    free(MEM.k); free(MEM.v); free(MEM.used); memset(&MEM, 0, sizeof MEM);
+#define BLOB(P, N) do { if (nblob == capblob) { capblob = capblob ? capblob * 2 : 64; blobs = realloc(blobs, sizeof(blob) * capblob); if (!blobs) die("MemoryError"); } \
+                        blobs[nblob].p = xmalloc((N) + 1); if (N) memcpy(blobs[nblob].p, (P), (N)); blobs[nblob].n = (N); nblob++; } while (0)
+#define PUSHFR(D, DN, AT, AN, CUR, END) do { if (nfr == capfr) { capfr = capfr ? capfr * 2 : 16; frames = realloc(frames, sizeof(frame) * capfr); if (!frames) die("MemoryError"); } \
+                        frames[nfr].d = (D); frames[nfr].dn = (DN); frames[nfr].at = (AT); frames[nfr].an = (AN); frames[nfr].cur = (CUR); frames[nfr].end = (END); fr = &frames[nfr]; nfr++; } while (0)
+    BLOB("", 0);
+    {   /* blob 1: the source path, bytes(srcpath, "latin-1") */
+        buf sp = {0, 0, 0}; const unsigned char *s = (const unsigned char *)srcpath; size_t i, n = strlen(srcpath);
+        bput(&sp, "", 0);
+        for (i = 0; i < n; i++) {
+            if (s[i] < 0x80) bbyte(&sp, s[i]);
+            else if ((s[i] & 0xE0) == 0xC0 && i + 1 < n && (s[i] == 0xC2 || s[i] == 0xC3)) { bbyte(&sp, ((s[i] & 3) << 6) | (s[i + 1] & 63)); i++; }
+            else die("UnicodeEncodeError: 'latin-1' codec can't encode characters in the source path");
+        }
+        BLOB(sp.p, sp.n); free(sp.p);
+    }
+    bmap_get(&blobid, (const unsigned char *)"\0cli/source", 11, 1);
+    xattr = xmalloc(sizeof(long long) * (xn ? xn : 1)); memset(xattr, 0, sizeof(long long) * xn);
+    PUSHFR(x, xn, xattr, xn, 0, (long long)xn);
+    for (;;) {
+        state *s; const trans *tr = 0; seq *sq; int k;
+        steps++;
+        if (maxsteps && steps > maxsteps) { res->verdict = 't'; res->e = e; res->out = o; return; }
+        s = &dl->st[q];
+        if (s->mode == 'b') {
+            int key;
+            if (fr->cur < fr->end) { size_t i; if (!pyix(fr->cur, fr->dn, &i)) idx_error(); key = fr->d[i]; } else key = 256;
+            tr = &s->row[key];
+        } else if (s->mode == 't') {
+            int key = nst ? stack[nst - 1] : BOT, u;
+            for (u = 0; u < s->ntl; u++) if (s->tl[u].key == key) { tr = &s->tl[u].t; break; }
+            if (!tr) { buf m = {0, 0, 0}; bstr(&m, "KeyError: "); repr_str(&m, (char *)SYM[key]); die((char *)m.p); }
+        } else tr = &s->row[r >= 0 && r <= 256 ? (int)r : 256];
+        if (tr->tgt < 0) die("TypeError: cannot unpack non-iterable NoneType object");
+        q = tr->tgt; sq = &dl->sq[tr->seq];
+        for (k = 0; k < sq->n; k++) {
+            const act *a = &sq->a[k];
+            switch (a->op) {
+            case O_ADV: fr->cur++; break;
+            case O_MARK: setw(a, 0, fr->cur); break;
+            case O_JUMP: fr->cur = getw(a, 0); break;
+            case O_COPYT: case O_COPY:
+                if (fr->cur < fr->end) {
+                    size_t i; if (!pyix(fr->cur, fr->dn, &i)) idx_error();
+                    if (a->op == O_COPYT) { if (osel == 0) { bbyte(&o, fr->d[i]); lpush(&oattr, OT); } else bbyte(&e, fr->d[i]); }
+                    else if (osel == 0) {
+                        bbyte(&o, fr->d[i]);
+                        if (fr->at) { size_t j; if (!pyix(fr->cur, fr->an, &j)) die("IndexError: list index out of range"); lpush(&oattr, fr->at[j]); }
+                        else lpush(&oattr, OT);
+                    } else bbyte(&e, fr->d[i]);
+                }
+                break;
+            case O_OUT: if (osel == 0) { putbyte(&o, imm(a, 0)); lpush(&oattr, OT); } else putbyte(&e, imm(a, 0)); break;
+            case O_LDI: setw(a, 0, imm(a, 1)); break;
+            case O_COPYW: setw(a, 0, getw(a, 1)); break;
+            case O_ALU: setw(a, 1, alu(a, getw(a, 2), getw(a, 3))); break;
+            case O_ALUI: setw(a, 1, alu(a, getw(a, 2), imm(a, 3))); break;
+            case O_CMP: case O_CMPI: { long long u = getw(a, 0), v = a->op == O_CMP ? getw(a, 1) : imm(a, 1); r = u < v ? 0 : u == v ? 1 : 2; break; }
+            case O_A64: case O_A64I: { int dz; long long v = alu64(a, getw(a, 2), a->op == O_A64 ? getw(a, 3) : imm(a, 3), &dz); setw(a, 1, v); r = dz; break; }
+            case O_C64: { long long u = getw(a, 0), v = getw(a, 1); r = u < v ? 0 : u == v ? 1 : 2; break; }
+            case O_C64U: { unsigned long long u = (unsigned long long)getw(a, 0), v = (unsigned long long)getw(a, 1); r = u < v ? 0 : u == v ? 1 : 2; break; }
+            case O_RLD: { long long v = getw(a, 0); r = v >= 0 && v <= 256 ? v : 256; break; }
+            case O_LDX: setw(a, 0, i64get(&MEM, getw(a, 1) + imm(a, 2))); break;
+            case O_STX: i64set(&MEM, getw(a, 0) + imm(a, 1), getw(a, 2)); break;
+            case O_OUTW: { long long c = getw(a, 0) & 255; if (osel == 0) { bbyte(&o, (int)c); lpush(&oattr, OT); } else bbyte(&e, (int)c); break; }
+            case O_SPAN: case O_SPANT: case O_SPAN2: {
+                long long s0 = getw(a, 0), s1; if (s0 < 0) s0 = 0;
+                s1 = a->op == O_SPAN2 ? getw(a, 1) : fr->cur;
+                if (s1 > fr->end) s1 = fr->end;
+                if (s0 < s1) {
+                    const unsigned char *p; size_t n;
+                    slice(fr->d, fr->dn, s0, s1, &p, &n);
+                    if (osel == 1) bput(&e, p, n);
+                    else {
+                        bput(&o, p, n);
+                        if (a->op == O_SPANT || !fr->at) { long long c; for (c = 0; c < s1 - s0; c++) lpush(&oattr, OT); }
+                        else { size_t i, a0 = (unsigned long long)s0 < fr->an ? (size_t)s0 : fr->an, z = (unsigned long long)s1 < fr->an ? (size_t)s1 : fr->an; for (i = a0; i < z; i++) lpush(&oattr, fr->at[i]); }
+                    }
+                }
+                break; }
+            case O_OLAST: r = o.n ? o.p[o.n - 1] : 256; break;
+            case O_ODROP: if (o.n) { o.n--; oattr.n--; } break;
+            case O_OLEN: setw(a, 0, (long long)o.n); break;
+            case O_OCUT: {
+                long long s0 = getw(a, 1); if (s0 > (long long)o.n) s0 = (long long)o.n; if (s0 < 0) s0 = 0;
+                BLOB(o.p + s0, o.n - (size_t)s0); setw(a, 0, (long long)nblob - 1);
+                o.n = (size_t)s0; if (oattr.n > (size_t)s0) oattr.n = (size_t)s0;
+                break; }
+            case O_ORES: { long long c, w = imm(a, 1); setw(a, 0, (long long)o.n); for (c = 0; c < w; c++) { bbyte(&o, ' '); lpush(&oattr, OT); } break; }
+            case O_OFILL: {
+                buf t = {0, 0, 0}; long long w = imm(a, 2), at = getw(a, 0);
+                bnum(&t, getw(a, 1));
+                if (at < 0 || at + w > (long long)o.n) die("RuntimeError: fill past the reservation");
+                if ((long long)t.n <= w) { memset(o.p + at, ' ', (size_t)(w - (long long)t.n)); memcpy(o.p + at + (w - (long long)t.n), t.p, t.n); }
+                else { res->verdict = 'r'; res->rejk_c = "field overflow"; res->e = e; res->out = o; free(t.p); return; }
+                free(t.p); break; }
+            case O_OCLR: o.n = 0; oattr.n = 0; break;
+            case O_OSEL: osel = imm(a, 0) == 0 ? 0 : imm(a, 0) == 1 ? 1 : 2; break;
+            case O_SETOT: OT = getw(a, 0); break;
+            case O_XATTR: {
+                long long v = 0;
+                if (fr->at && fr->cur < fr->end) { size_t j; if (!pyix(fr->cur, fr->an, &j)) die("IndexError: list index out of range"); v = fr->at[j]; }
+                setw(a, 0, v); break; }
+            case O_PUSH:
+                if (a->na < 1) die("IndexError: tuple index out of range");
+                if (a->at[0] != AT_STR) notcovered("a PUSH label that is not a name");
+                if (nst == capst) { capst = capst ? capst * 2 : 64; stack = realloc(stack, sizeof(int) * capst); if (!stack) die("MemoryError"); }
+                stack[nst++] = a->as[0]; break;
+            case O_POP: if (!nst) die("RuntimeError: pop of an empty stack"); nst--; break;
+            case O_INTERN: case O_SBINTERN: case O_BLOBSAVE: case O_SBSAVE: {
+                const unsigned char *p = (const unsigned char *)""; size_t n = 0; int v;
+                if (a->op == O_INTERN || a->op == O_BLOBSAVE) {
+                    long long s0 = getw(a, 1), s1 = getw(a, 2); if (s0 < 0) s0 = 0; if (s1 > fr->end) s1 = fr->end;
+                    if (s0 < s1) slice(fr->d, fr->dn, s0, s1, &p, &n);
+                } else { p = sb.p ? sb.p : (const unsigned char *)""; n = sb.n; }
+                if (a->op == O_INTERN || a->op == O_SBINTERN) { v = bmap_get(&intern, p, n, (int)intern.n + 1); setw(a, 0, v); }
+                else { BLOB(p, n); setw(a, 0, (long long)nblob - 1); }
+                break; }
+            case O_INPUSH: { size_t i; if (!pyix(getw(a, 0), nblob, &i)) die("IndexError: list index out of range");
+                PUSHFR(blobs[i].p, blobs[i].n, 0, 0, 0, (long long)blobs[i].n); break; }
+            case O_INPUSHX: PUSHFR(x, xn, xattr, xn, getw(a, 0), (long long)xn); break;
+            case O_INPUSHXE: { long long c = getw(a, 0), z = getw(a, 1); if (z > (long long)xn) z = (long long)xn; PUSHFR(x, xn, xattr, xn, c, z); break; }
+            case O_INPOP: if (!nfr) die("IndexError: pop from empty list"); nfr--; if (!nfr) die("IndexError: list index out of range"); fr = &frames[nfr - 1]; break;
+            case O_SBCLR: sb.n = 0; break;
+            case O_SBOUT: putbyte(&sb, imm(a, 0)); break;
+            case O_SBSPAN: { long long s0 = getw(a, 0), s1 = getw(a, 1); if (s0 < 0) s0 = 0; if (s1 > fr->end) s1 = fr->end;
+                if (s0 < s1) { const unsigned char *p; size_t n; slice(fr->d, fr->dn, s0, s1, &p, &n); bput(&sb, p, n); } break; }
+            case O_SBBLOB: { size_t i; if (!pyix(getw(a, 0), nblob, &i)) die("IndexError: list index out of range"); bput(&sb, blobs[i].p, blobs[i].n); break; }
+            case O_SBFIND: {
+                const unsigned char *kp = sb.p ? sb.p : (const unsigned char *)""; int v = bmap_get(&blobid, kp, sb.n, -1);
+                if (v < 0) {
+                    blob *f = files(kp, sb.n);
+                    if (!f) v = 0; else { BLOB(f->p, f->n); v = (int)nblob - 1; }
+                    bmap_get(&blobid, kp, sb.n, v);
+                }
+                setw(a, 0, v); break; }
+            case O_BYTE: { long long v = 0; if (fr->cur < fr->end) { size_t i; if (!pyix(fr->cur, fr->dn, &i)) idx_error(); v = fr->d[i]; } setw(a, 0, v); break; }
+            case O_XLEN: setw(a, 0, fr->end); break;
+            case O_BLEN: { size_t i; if (!pyix(getw(a, 1), nblob, &i)) die("IndexError: list index out of range"); setw(a, 0, (long long)blobs[i].n); break; }
+            case O_DIVMOD10: { long long v = getw(a, 0) & 0xFFFFFFFFLL; setw(a, 0, v / 10); r = v % 10 + (v / 10 == 0 ? 10 : 0); break; }
+            case O_SWAP: {
+                unsigned char *nx = xmalloc(o.n + 1); if (o.n) memcpy(nx, o.p, o.n);
+                x = nx; xn = o.n; xattr = oattr.p ? oattr.p : xmalloc(sizeof(long long));
+                o.n = 0; oattr.p = 0; oattr.n = 0; oattr.cap = 0;
+                nfr = 0; PUSHFR(x, xn, xattr, xn, 0, (long long)xn);
+                break; }
+            case O_ACCEPT: res->verdict = 'a'; res->out = o; res->e = e; return;
+            case O_REJECT:
+                res->verdict = 'r'; res->out = o; res->e = e; res->rejk_c = 0;
+                if (a->na < 1) die("IndexError: tuple index out of range");
+                res->rejk_at = a->at[0]; res->rejk_s = a->as[0]; res->rejk_v = a->av[0];
+                return;
+            default: { buf m = {0, 0, 0}; bstr(&m, "ValueError: "); bstr(&m, (char *)SYM[a->opsym]); die((char *)m.p); }
+            }
+        }
+    }
+#undef BLOB
+#undef PUSHFR
+}
+/* repr of run()'s second value: bytes for accept, (k, bytes) for reject, None for timeout */
+static void repr_simval(buf *m, simres *s) {
+    if (s->verdict == 'a') { repr_bytes(m, s->out.p ? s->out.p : (unsigned char *)"", s->out.n); return; }
+    if (s->verdict == 't') { bstr(m, "None"); return; }
+    bbyte(m, '(');
+    if (s->rejk_c) repr_str(m, s->rejk_c);
+    else if (s->rejk_at == AT_STR) repr_str(m, (char *)SYM[s->rejk_s]);
+    else bnum(m, s->rejk_v);
+    bstr(m, ", "); repr_bytes(m, s->e.p ? s->e.p : (unsigned char *)"", s->e.n); bbyte(m, ')');
+}
+static const char *verdict_word(simres *s) { return s->verdict == 'a' ? "accept" : s->verdict == 'r' ? "reject" : "timeout"; }
+
+/* ==== the check ==== */
+static const char *const BIG[] = { "warnpp-shared.json", "warnlex.json", "errorparse.json", 0 };
+static const char *USAGE = "usage: f1attributescheck.py [-h] [--require-cached] --ua UA\n";
+static void argerror(const char *msg, const char *x) {
+    fflush(stdout); fputs(USAGE, stderr);
+    fprintf(stderr, "f1attributescheck.py: error: %s%s\n", msg, x ? x : "");
+    leave(2);
+}
+static int negnum(const char *s) {   /* argparse's '^-\d+$|^-\d*\.\d+$' */
+    const char *p = s + 1; int d = 0, dot = 0;
+    if (s[0] != '-') return 0;
+    for (; *p; p++) { if (*p >= '0' && *p <= '9') d++; else if (*p == '.' && !dot) dot = 1; else return 0; }
+    return d > 0 && (!dot || p[-1] != '.');
+}
+/* argparse: -h/--help, --require-cached (store_true), --ua UA (required) */
+static const char *UA; static int REQUIRE_CACHED;
+static void parse_args(int argc, char **argv) {
+    static const char *const longs[3] = { "--help", "--require-cached", "--ua" };
+    char cls[256]; int i, n = argc - 1, which[256]; const char *expl[256]; buf extras = {0, 0, 0}; int nextras = 0;
+    if (n > 250) argerror("too many arguments", 0);
+    for (i = 0; i < n; i++) {   /* classify every argument first, as _parse_known_args does */
+        const char *a = argv[i + 1]; const char *eq; size_t pl; int k, hits = 0, hit = -1;
+        expl[i] = 0; which[i] = -1;
+        if (!strcmp(a, "--")) { for (; i < n; i++) { cls[i] = 'A'; expl[i] = 0; which[i] = -1; } break; }
+        if (a[0] != '-' || !a[1]) { cls[i] = 'A'; continue; }
+        if (!strcmp(a, "-h") || !strcmp(a, "--help")) { cls[i] = 'O'; which[i] = 0; continue; }
+        if (!strcmp(a, "--require-cached")) { cls[i] = 'O'; which[i] = 1; continue; }
+        if (!strcmp(a, "--ua")) { cls[i] = 'O'; which[i] = 2; continue; }
+        if (negnum(a)) { cls[i] = 'A'; continue; }
+        eq = strchr(a, '=');
+        if (eq) {
+            size_t l = (size_t)(eq - a);
+            for (k = 0; k < 3; k++) if (strlen(longs[k]) == l && !strncmp(a, longs[k], l)) { hit = k; break; }
+            if (hit < 0 && l == 2 && !strncmp(a, "-h", 2)) hit = 0;
+            if (hit >= 0) { cls[i] = 'O'; which[i] = hit; expl[i] = eq + 1; continue; }
+        }
+        if (a[1] == '-') {
+            pl = eq ? (size_t)(eq - a) : strlen(a);
+            for (k = 0; k < 3; k++) if (!strncmp(longs[k], a, pl)) { hits++; hit = k; }
+            if (hits > 1) {
+                buf m = {0, 0, 0}; int first = 1;
+                bstr(&m, a); bstr(&m, " could match ");
+                for (k = 0; k < 3; k++) if (!strncmp(longs[k], a, pl)) { if (!first) bstr(&m, ", "); bstr(&m, longs[k]); first = 0; }
+                argerror("ambiguous option: ", (char *)m.p);
+            }
+            if (hits == 1) { cls[i] = 'O'; which[i] = hit; expl[i] = eq ? eq + 1 : 0; continue; }
+        }
+        cls[i] = strchr(a, ' ') ? 'A' : 'O';
+    }
+    for (i = 0; i < n; i++) {
+        const char *a = argv[i + 1];
+        if (cls[i] == 'O' && which[i] == 0) {
+            if (expl[i]) { buf m = {0, 0, 0}; bstr(&m, "ignored explicit argument "); repr_str(&m, expl[i]); argerror("argument -h/--help: ", (char *)m.p); }
+            fputs(USAGE, stdout);
+            fputs("\nF1 attribute marks: E1 sidecar and E3 tape against the C reference.\n\noptions:\n"
+                  "  -h, --help        show this help message and exit\n  --require-cached\n  --ua UA\n", stdout);
+            leave(0);
+        }
+        if (cls[i] == 'O' && which[i] == 1) {
+            if (expl[i]) { buf m = {0, 0, 0}; bstr(&m, "ignored explicit argument "); repr_str(&m, expl[i]); argerror("argument --require-cached: ", (char *)m.p); }
+            REQUIRE_CACHED = 1; continue;
+        }
+        if (cls[i] == 'O' && which[i] == 2) {
+            if (expl[i]) { UA = expl[i]; continue; }
+            if (i + 1 < n && cls[i + 1] == 'A' && strcmp(argv[i + 2], "--")) { UA = argv[i + 2]; i++; continue; }
+            argerror("argument --ua: expected one argument", 0);
+        }
+        if (nextras++) bbyte(&extras, ' ');
+        bstr(&extras, a);
+    }
+    if (!UA) argerror("the following arguments are required: --ua", 0);
+    if (nextras) argerror("unrecognized arguments: ", (char *)extras.p);
+}
+
+/* Path(P).resolve() (strict=False): symlinks resolved as far as the path exists, the rest normalised lexically */
+static void resolve_path(const char *p, char *out, size_t cap) {
+    char full[PN * 2], *comp[512]; int nc = 0, k, j; buf o = {0, 0, 0};
+    if (p[0] == '/') snprintf(full, sizeof full, "%s", p);
+    else { char cwd[PN]; if (!getcwd(cwd, sizeof cwd)) die("FileNotFoundError: [Errno 2] No such file or directory"); snprintf(full, sizeof full, "%s/%s", cwd, p); }
+    { char *s = full, *t;
+      while (s) { t = s; s = strchr(s, '/'); if (s) *s++ = 0; if (*t && strcmp(t, ".") && nc < 512) comp[nc++] = t; } }
+    for (k = nc; k >= 0; k--) {   /* the longest existing prefix, resolved */
+        char pre[PN * 2], res[PN]; size_t l = 0;
+        pre[0] = 0;
+        for (j = 0; j < k; j++) l += (size_t)snprintf(pre + l, sizeof pre - l, "/%s", comp[j]);
+        if (!k) snprintf(pre, sizeof pre, "/");
+        if (realpath(pre, res)) {
+            bstr(&o, res);
+            for (j = k; j < nc; j++) {
+                if (!strcmp(comp[j], "..")) { unsigned char *sl = (unsigned char *)strrchr((char *)o.p, '/'); if (sl && sl != o.p) { o.n = (size_t)(sl - o.p); o.p[o.n] = 0; } else { o.n = 1; o.p[1] = 0; } continue; }
+                if (o.n > 1) bbyte(&o, '/'); else if (o.n == 0) bbyte(&o, '/');
+                bstr(&o, comp[j]);
+            }
+            snprintf(out, cap, "%s", (char *)o.p); free(o.p);
+            return;
+        }
+    }
+    snprintf(out, cap, "%s", full);
+}
+
+/* ---- the file dictionaries ---- */
+static blob RES[16]; static unsigned char *RESK[16]; static size_t RESKN[16]; static int NRES;
+static void res_clear(void) { NRES = 0; }
+static void res_add(const void *k, size_t kn, const void *v, size_t vn) {
+    if (NRES == 16) die("f1attributescheck: too many resources");
+    RESK[NRES] = xmalloc(kn + 1); memcpy(RESK[NRES], k, kn); RESKN[NRES] = kn;
+    RES[NRES].p = xmalloc(vn + 1); if (vn) memcpy(RES[NRES].p, v, vn); RES[NRES].n = vn; NRES++;
+}
+static char INCLUDE[PN];
+static blob DISKBLOB;
+/* sim.Files(ROOT/include).get(PATH): latin-1 decode, \0inc/q/ \0inc/a/ stripped, \0hdr/ under include/; an absent
+   path (ENOENT, or a NUL byte) is None; any other OSError propagates.  The str is encoded as the file system would
+   (UTF-8): a byte 0x80..0xFF of the key is two bytes on disk */
+static blob *disk_get(const unsigned char *k, size_t n) {
+    buf p = {0, 0, 0}; size_t i = 0; struct stat st; int fd; size_t got;
+    if (n >= 7 && (!memcmp(k, "\0inc/q/", 7) || !memcmp(k, "\0inc/a/", 7))) i = 7;
+    if (n - i >= 5 && !memcmp(k + i, "\0hdr/", 5)) {
+        i += 5;
+        if (!(i < n && k[i] == '/')) { bstr(&p, INCLUDE); bbyte(&p, '/'); }
+    }
+    for (; i < n; i++) {
+        if (!k[i]) { free(p.p); return 0; }
+        if (k[i] < 0x80) bbyte(&p, k[i]); else { bbyte(&p, 0xC0 | (k[i] >> 6)); bbyte(&p, 0x80 | (k[i] & 63)); }
+    }
+    bput(&p, "", 0);
+    if (stat((char *)p.p, &st) != 0) {
+        if (errno == ENOENT) { free(p.p); return 0; }
+        { buf m = {0, 0, 0}; oserror(&m, errno, (char *)p.p); die((char *)m.p); }
+    }
+    if (S_ISDIR(st.st_mode)) { buf m = {0, 0, 0}; oserror(&m, EISDIR, (char *)p.p); die((char *)m.p); }
+    fd = open((char *)p.p, O_RDONLY);
+    if (fd < 0) { buf m = {0, 0, 0}; oserror(&m, errno, (char *)p.p); die((char *)m.p); }
+    {   buf d = {0, 0, 0}; unsigned char chunk[65536]; ssize_t r;
+        while ((r = read(fd, chunk, sizeof chunk)) > 0) bput(&d, chunk, (size_t)r);
+        close(fd); got = d.n;
+        if (r < 0) { buf m = {0, 0, 0}; oserror(&m, errno, (char *)p.p); die((char *)m.p); }
+        bput(&d, "", 0);
+        DISKBLOB.p = d.p; DISKBLOB.n = got; }
+    free(p.p);
+    return &DISKBLOB;
+}
+static blob *files_get(const unsigned char *k, size_t n) {   /* the .py's Files: its values first, then the disk */
+    int i;
+    for (i = 0; i < NRES; i++) if (RESKN[i] == n && !memcmp(RESK[i], k, n)) return &RES[i];
+    return disk_get(k, n);
+}
+
+/* assemble.load_facts("pp-gen")["predefres"] (exec/facts/pp-gen.tsv: `=predefres<TAB>json<TAB>{...}`) as resources */
+static void add_predefines(void) {
+    char *path = cat2(ROOT, "exec/facts/pp-gen.tsv"), *t, *line, *e, *cell = 0; size_t n;
+    t = cx_read(path, &n);
+    if (!t) { buf m = {0, 0, 0}; oserror(&m, errno ? errno : ENOENT, path); die((char *)m.p); }
+    for (line = t; line && *line; line = e ? e + 1 : 0) {
+        e = strchr(line, '\n'); if (e) *e = 0;
+        if (e && e > line && e[-1] == '\r') e[-1] = 0;
+        if (!strncmp(line, "=predefres\t", 11)) {
+            char *k = strchr(line + 11, '\t');
+            if (!k || strncmp(line + 11, "json\t", 5)) die("ValueError: fact type of predefres");
+            cell = k + 1;
+        }
+    }
+    if (!cell) die("KeyError: 'predefres'");
+    {   jp P; buf k = {0, 0, 0}, v = {0, 0, 0}, key = {0, 0, 0};
+        P.s = (unsigned char *)cell; P.n = strlen(cell); P.i = 0; P.what = "predefres";
+        jexpect(&P, '{');
+        if (jpeek(&P) != '}') for (;;) {
+            jstring(&P, &k); jexpect(&P, ':');
+            if (jpeek(&P) != '"') notcovered("a predefres value that is not a string");
+            jstring(&P, &v);
+            key.n = 0; bput(&key, "\0predefines/", 12); bput(&key, k.p, k.n);
+            res_add(key.p, key.n, v.p, v.n);
+            if (jpeek(&P) == ',') { P.i++; continue; }
+            jexpect(&P, '}'); break;
+        }
+        free(k.p); free(v.p); free(key.p);
+    }
+    free(t); free(path);
+}
+
+static void assert_fail3(const char *src, const char *verdict, simres *s) {
+    buf m = {0, 0, 0};
+    bstr(&m, "AssertionError: ("); repr_path(&m, src); bstr(&m, ", "); repr_str(&m, verdict); bstr(&m, ", ");
+    repr_simval(&m, s); bbyte(&m, ')'); die((char *)m.p);
+}
+static const char *signame(int s) {
+    switch (s) { case 1: return "SIGHUP"; case 2: return "SIGINT"; case 3: return "SIGQUIT"; case 4: return "SIGILL";
+    case 5: return "SIGTRAP"; case 6: return "SIGABRT"; case 7: return "SIGBUS"; case 8: return "SIGFPE"; case 9: return "SIGKILL";
+    case 10: return "SIGUSR1"; case 11: return "SIGSEGV"; case 12: return "SIGUSR2"; case 13: return "SIGPIPE";
+    case 14: return "SIGALRM"; case 15: return "SIGTERM"; default: return 0; }
+}
+
+int main(int argc, char **argv) {
+    char ref[PN], small[PN + 16], *srcs[2]; int expected[2] = { 2, 3 }, s;
+    delta *e2, *e1, *e3;
+    parse_args(argc, argv);
+    find_root();
+    work_init("f1-attributes");
+    BIGFILES = BIG;
+    resolve_path(UA, ref, sizeof ref);
+    {   struct stat st;
+        if (stat(ref, &st) != 0) {
+            if (errno == ENOENT) { fflush(stdout); fprintf(stderr, "NEED_PREPARE F1 attributes: reference UA missing: %s\n", ref); leave(75); }
+            { buf m = {0, 0, 0}; oserror(&m, errno, ref); die((char *)m.p); }
+        } }
+    tools_init();
+    GEN_ONLY = 1;
+    {   static const spec models[3] = {
+            { "warnpp-shared", { "pp", "--locations", "--shared-predefines", 0 } }, { "warnlex", { "lex", "--locations", 0 } },
+            { "errorparse", { "parse2", "--errors", 0 } } };
+        construct_all(models, 3); }
+    {   char *p;
+        p = cat2(SLOT, "warnpp-shared.json"); e2 = load_delta(p, 0); free(p);
+        p = cat2(SLOT, "warnlex.json"); e1 = load_delta(p, 1); free(p);
+        p = cat2(SLOT, "errorparse.json"); e3 = load_delta(p, 0); free(p); }
+    snprintf(INCLUDE, sizeof INCLUDE, "%s/include", ROOT);
+    snprintf(small, sizeof small, "%s/small.c", SLOT);
+    {   const char *txt = "int x;\n__attribute__((constructor)) void boot(void){x=1;}\n"
+                          "__attribute__((destructor)) void bye(void){x=2;}\nint main(void){return x;}\n";
+        if (cx_write(small, txt, strlen(txt))) { buf m = {0, 0, 0}; oserror(&m, errno, small); die((char *)m.p); } }
+    srcs[0] = small; srcs[1] = cat2(ROOT, "tests/c/f1_ctor_dtor.c");
+    for (s = 0; s < 2; s++) {
+        const char *source = srcs[s], *base = strrchr(source, '/') ? strrchr(source, '/') + 1 : source;
+        size_t xn; unsigned char *x = (unsigned char *)cx_read(source, &xn);
+        simres pp, fr, tp; unsigned long count, token_len; const unsigned char *marks, *tokens; size_t nmarks, ntokens, i;
+        buf attrs = {0, 0, 0}; res reference;
+        if (!x) { buf m = {0, 0, 0}; oserror(&m, errno ? errno : ENOENT, source); die((char *)m.p); }
+        memset(&pp, 0, sizeof pp); memset(&fr, 0, sizeof fr); memset(&tp, 0, sizeof tp);
+        res_clear(); add_predefines(); res_add("\0cli/target", 11, "osx/arm64", 9);
+        sim_run(e2, x, xn, source, files_get, 5000000, &pp);
+        if (pp.verdict != 'a') assert_fail3(source, verdict_word(&pp), &pp);
+        res_clear(); res_add("\0cli/f1", 7, "\1", 1);
+        sim_run(e1, pp.out.p ? pp.out.p : (unsigned char *)"", pp.out.n, source, files_get, 5000000, &fr);
+        if (!(fr.verdict == 'a' && fr.out.n >= 8 && !memcmp(fr.out.p, "USLATTR1", 8))) { buf m = {0, 0, 0}; bstr(&m, "AssertionError: "); bstr(&m, source); die((char *)m.p); }
+        if (fr.out.n < 16) {
+            buf m = {0, 0, 0}; bstr(&m, "struct.error: unpack_from requires a buffer of at least 16 bytes for unpacking 8 bytes at offset 8 (actual buffer size is ");
+            bnum(&m, (long long)fr.out.n); bbyte(&m, ')'); die((char *)m.p);
+        }
+        count = getu32(fr.out.p + 8); token_len = getu32(fr.out.p + 12);
+        if (count != (unsigned long)expected[s]) {
+            buf m = {0, 0, 0}; bstr(&m, "AssertionError: ("); repr_path(&m, source); bstr(&m, ", "); bnum(&m, (long long)count); bbyte(&m, ')'); die((char *)m.p);
+        }
+        {   size_t a = 16 < fr.out.n ? 16 : fr.out.n, z = 16 + 5 * count < fr.out.n ? 16 + 5 * count : fr.out.n;
+            marks = fr.out.p + a; nmarks = z - a; tokens = fr.out.p + z; ntokens = fr.out.n - z; }
+        if (token_len != ntokens) die("AssertionError");
+        bu32(&attrs, count);
+        for (i = 0; i < count; i++) {
+            size_t a = 5 * i < nmarks ? 5 * i : nmarks, z = 5 * i + 5 < nmarks ? 5 * i + 5 : nmarks;
+            bu32(&attrs, 0); bput(&attrs, marks + a, z - a);
+        }
+        res_clear(); res_add("\0cli/attributes", 15, attrs.p, attrs.n);
+        sim_run(e3, tokens, ntokens, source, files_get, 10000000, &tp);
+        if (tp.verdict != 'a') assert_fail3(source, verdict_word(&tp), &tp);
+        {   char *a[] = { ref, "-S", (char *)source, 0 }; buf why = {0, 0, 0};
+            if (runcap(a, 0, 30, 0, "ref", &reference, &why)) {
+                if (has(why.p, why.n, "timed out after")) {
+                    buf m = {0, 0, 0}; bstr(&m, "subprocess.TimeoutExpired: Command '"); repr_args(&m, a, 0); bstr(&m, "' timed out after 30 seconds"); die((char *)m.p);
+                }
+                die((char *)why.p);
+            }
+            if (reference.rc != 0) {
+                buf m = {0, 0, 0};
+                bstr(&m, "subprocess.CalledProcessError: Command '"); repr_args(&m, a, 0); bstr(&m, "' ");
+                if (reference.rc < 0 && signame(-reference.rc)) { bstr(&m, "died with <Signals."); bstr(&m, signame(-reference.rc)); bstr(&m, ": "); bnum(&m, -reference.rc); bstr(&m, ">."); }
+                else { bstr(&m, "returned non-zero exit status "); bnum(&m, reference.rc); bbyte(&m, '.'); }
+                die((char *)m.p);
+            } }
+        if (!(tp.out.n == reference.outn && !memcmp(tp.out.p ? tp.out.p : (unsigned char *)"", reference.out, reference.outn))) {
+            buf m = {0, 0, 0}; bstr(&m, "AssertionError: ("); repr_path(&m, source); bstr(&m, ", "); bnum(&m, (long long)tp.out.n);
+            bstr(&m, ", "); bnum(&m, (long long)reference.outn); bbyte(&m, ')'); die((char *)m.p);
+        }
+        printf("F1 attributes: %s %lu marks, tape byte equal\n", base, count); fflush(stdout);
+        resfree(&reference); free(x); free(attrs.p);
+    }
+    (void)REQUIRE_CACHED;
+    leave(0);
+    return 0;
+}

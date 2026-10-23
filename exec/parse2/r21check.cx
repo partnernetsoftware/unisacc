@@ -1,0 +1,519 @@
+#!/usr/bin/env -S unisacc.com -run
+/* r21check.cx -- exec/parse2/r21check.py in C (2026-10-23, the py->cx port wave; the owner's direction: the
+   toolchain moves off Python).  0.0.21 reference front-end fixes against product E3: reference tape bytes or a named
+   refusal ("not covered: ..."), never accepted-with-different-bytes.
+   usage: sh ./unisacc.com -run exec/parse2/r21check.cx            (no arguments; extra ones are ignored, as the .py did)
+   Each probe isolates one construct the reference fixed in 0.0.21 (the a_* and hosthdr/ccinterop probes).
+   Whole-program probes compare the E3 route's tape with `UA FILE -S -o -`.  Object probes (\0cli/object) cannot be
+   compared on tape (the reference writes its interop thunks only into objects), so the reference must accept them
+   (`UA -c -b lnx/x86_64`); unsupported signatures refuse by name, and the integer-call probe separately checks its
+   ABI thunk contract.  Verdicts are printed; full implementation is 0.0.22 work.
+   The flow is the .py's.  In a fresh directory TMPDIR (TEMP, TMP, /tmp)/e3-r21-XXXXXX: exec/c/run.c is built with
+   $EXEC_CC (default cc) -O2; the three stream-stage models pp, lex --typed and parse2 are constructed and turned
+   into flat tables and threshold networks -- the .py ran exec/build/gen.py, exec/c/tbl.py and exec/c/net.py, here
+   seed/gen.c, seed/tbl.c and seed/net.c (byte-identical to them on these three models; built with $SEED_GEN_CC,
+   default cc, -std=c99 -O2 -w; gen runs in ROOT, whose exec/ manifests it reads); `run --check-net` on the parse
+   table and network is printed.  Two packages carry the route c (e2 source->pp, e1 pp->tokens, e3 tokens->tape)
+   with the mounts \0cli/ (error-limit, and for the object package object=\1) and \0hdr/ (ROOT/include): the .py
+   wrote them with exec/c/pack.py build(cache=False), here an uncompressed P2 package is written directly (the same
+   header, stream-stage rows, models and resources in pack.py's order; the models are the network text as is, without
+   pack.py's optional Q-prefix compaction, which the runtime expands back to the same actions).  Then every case
+   runs as the .py ran it: the reference (UA, default /tmp/ua_ref) and `run --bundle PKG c F F ROOT/include` in the
+   scratch directory, each with stdout and stderr captured and a 30 s limit; every build child has a 55 s limit.
+   The independent builds (four tools), the three model constructions, tables and networks run in parallel.
+   Output: the check-net line, one `r21 item ...` line per case, the ccx-call line, the summary; rc 0.  A failed
+   check is the .py's uncaught AssertionError: one `AssertionError: ...` line on stderr (the traceback frames are not
+   reproduced), rc 1; a child past its limit is the `subprocess.TimeoutExpired: ...` line, rc 1.
+   Module note: `#pragma unisa use` resolves beside the using file only, so tests/cxlib/pytempfile.cx is reached
+   through the exec/parse2/cxlib/ symlink (the exec/c/cxlib/ precedent); the scratch removal goes through its
+   ptf_rmtree, guarded here (only the directory this run created with mkdtemp, by its e3-r21- name).  ROOT is the
+   grandparent of this file's directory. */
+#pragma unisa use cxlib.pytempfile
+
+#define PATHN 4096
+static char ROOT[PATHN], TD[PATHN], UA[PATHN];
+static int TD_MADE;
+
+/* ---------- scratch: removal of the directory this run made (guarded; ptf_rmtree does the deleting) ---------- */
+static void scratch_remove(void) {
+    const char *base;
+    if (!TD_MADE || TD[0] != '/') return;
+    base = strrchr(TD, '/'); base = base ? base + 1 : TD;
+    if (strncmp(base, "e3-r21-", 7) || strlen(base) != 13) return;
+    TD_MADE = 0;
+    ptf_rmtree(TD);
+}
+static void quit(int rc) { fflush(stdout); fflush(stderr); scratch_remove(); exit(rc); }
+static void fail(const char *line) {   /* an uncaught Python exception: its last line */
+    fflush(stdout);
+    fprintf(stderr, "%s\n", line);
+    quit(1);
+}
+static void *xmalloc(size_t n) { void *p = malloc(n ? n : 1); if (!p) fail("MemoryError"); return p; }
+
+/* ---------- bytes ---------- */
+typedef struct Buf { unsigned char *p; size_t n, cap; } Buf;
+static void bput(Buf *b, const void *s, size_t n) {
+    if (b->n + n + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 256;
+        while (c < b->n + n + 1) c *= 2;
+        b->p = realloc(b->p, c);
+        if (!b->p) fail("MemoryError");
+        b->cap = c;
+    }
+    if (n) memcpy(b->p + b->n, s, n);
+    b->n += n; b->p[b->n] = 0;
+}
+static void bstr(Buf *b, const char *s) { bput(b, s, strlen(s)); }
+static int has(const char *s, size_t n, const char *needle) {
+    size_t m = strlen(needle), i;
+    if (m > n) return 0;
+    for (i = 0; i + m <= n; i++) if (!memcmp(s + i, needle, m)) return 1;
+    return 0;
+}
+static char *path2(const char *a, const char *b) {
+    size_t n = strlen(a) + strlen(b) + 2; char *p = xmalloc(n); snprintf(p, n, "%s/%s", a, b); return p;
+}
+static char *readall(const char *path, size_t *n) {
+    char *s = cx_read(path, n);
+    if (!s) { char line[PATHN + 80]; snprintf(line, sizeof line, "FileNotFoundError: [Errno 2] No such file or directory: '%s'", path); fail(line); }
+    return s;
+}
+static void putfile(const char *path, const void *p, size_t n) {
+    if (cx_write(path, p, n)) { char line[PATHN + 64]; snprintf(line, sizeof line, "OSError: cannot write '%s'", path); fail(line); }
+}
+/* Path.read_text(): universal newlines (\r\n and \r become \n) */
+static char *read_text(const char *path, size_t *n) {
+    size_t m, i, k = 0; char *s = readall(path, &m), *o = xmalloc(m + 1);
+    for (i = 0; i < m; i++) {
+        if (s[i] == '\r') { o[k++] = '\n'; if (i + 1 < m && s[i + 1] == '\n') i++; }
+        else o[k++] = s[i];
+    }
+    o[k] = 0; free(s); *n = k; return o;
+}
+/* repr(bytes) */
+static void repr_bytes(Buf *b, const char *str, size_t n) {
+    const unsigned char *s = (const unsigned char *)str; size_t i; int sq = 0, dq = 0; char q, t[8];
+    for (i = 0; i < n; i++) { if (s[i] == '\'') sq = 1; if (s[i] == '"') dq = 1; }
+    q = sq && !dq ? '"' : '\'';
+    bput(b, "b", 1); bput(b, &q, 1);
+    for (i = 0; i < n; i++) {
+        unsigned c = s[i];
+        if (c == (unsigned char)q || c == '\\') { t[0] = '\\'; t[1] = (char)c; bput(b, t, 2); }
+        else if (c == '\t') bput(b, "\\t", 2);
+        else if (c == '\n') bput(b, "\\n", 2);
+        else if (c == '\r') bput(b, "\\r", 2);
+        else if (c < 0x20 || c >= 0x7F) { snprintf(t, sizeof t, "\\x%02x", c); bput(b, t, 4); }
+        else { t[0] = (char)c; bput(b, t, 1); }
+    }
+    bput(b, &q, 1);
+}
+static void repr_tail(Buf *b, const char *s, size_t n, size_t keep) {   /* repr(s[-keep:]) */
+    if (n > keep) { s += n - keep; n = keep; }
+    repr_bytes(b, s, n);
+}
+/* repr(list(map(str, args))) for plain words; PATHS: repr(args) as call() held them, an absolute path (after the
+   first word when the first is the compiler, a str) being a PosixPath */
+static void repr_args_as(Buf *b, char *const argv[], int paths) {
+    int i;
+    bstr(b, "[");
+    for (i = 0; argv[i]; i++) {
+        int p = paths && argv[i][0] == '/' && (i || paths == 2);
+        if (i) bstr(b, ", ");
+        if (p) bstr(b, "PosixPath(");
+        bstr(b, "'"); bstr(b, argv[i]); bstr(b, "'");
+        if (p) bstr(b, ")");
+    }
+    bstr(b, "]");
+}
+static void repr_args(Buf *b, char *const argv[]) { repr_args_as(b, argv, 0); }
+
+/* ---------- children: stdout and stderr captured into files of the scratch directory, a time limit ---------- */
+typedef struct Res { int rc; char *out; size_t outn; char *err; size_t errn; } Res;
+typedef struct Job { char **argv; const char *cwd; int secs; pid_t pid; long ticks; int done, st, killed; } Job;
+static void res_free(Res *r) { free(r->out); free(r->err); r->out = r->err = 0; }
+static void start(Job *j, int k) {
+    char op[PATHN], ep[PATHN]; int of, ef;
+    snprintf(op, sizeof op, "%s/.out-%d", TD, k); snprintf(ep, sizeof ep, "%s/.err-%d", TD, k);
+    of = open(op, O_WRONLY | O_CREAT | O_TRUNC, 0600); ef = open(ep, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (of < 0 || ef < 0) fail("OSError: cannot capture output");
+    fflush(stdout); fflush(stderr);
+    j->pid = fork(); j->done = 0; j->killed = 0; j->ticks = (long)j->secs * 1000;
+    if (j->pid < 0) fail("OSError: fork failed");
+    if (j->pid == 0) {
+        int nul = open("/dev/null", O_RDONLY);
+        if (nul >= 0) { dup2(nul, 0); close(nul); }
+        dup2(of, 1); dup2(ef, 2); close(of); close(ef);
+        if (j->cwd && chdir(j->cwd)) _exit(127);
+        execvp(j->argv[0], j->argv);
+        _exit(127);
+    }
+    close(of); close(ef);
+}
+/* run N jobs at once; RES[k] for each (rc as Python reports it); a job past its limit is killed (TimeoutExpired) */
+static void run_jobs(Job *jobs, int n, Res *res) {
+    int k, left = n;
+    for (k = 0; k < n; k++) start(&jobs[k], k);
+    while (left) {
+        for (k = 0; k < n; k++) {
+            pid_t w;
+            if (jobs[k].done) continue;
+            w = waitpid(jobs[k].pid, &jobs[k].st, WNOHANG);
+            if (w == jobs[k].pid) { jobs[k].done = 1; left--; continue; }
+            if (w < 0 && errno != EINTR) fail("ChildProcessError: wait failed");
+            if (--jobs[k].ticks <= 0) {
+                kill(jobs[k].pid, SIGKILL); waitpid(jobs[k].pid, &jobs[k].st, 0);
+                jobs[k].done = 1; jobs[k].killed = 1; left--;
+            }
+        }
+        if (left) usleep(1000);
+    }
+    for (k = 0; k < n; k++) {
+        char op[PATHN], ep[PATHN];
+        if (jobs[k].killed) {
+            Buf b = { 0, 0, 0 }; char t[64];
+            bstr(&b, "subprocess.TimeoutExpired: Command '"); repr_args(&b, jobs[k].argv);
+            snprintf(t, sizeof t, "' timed out after %d seconds", jobs[k].secs); bstr(&b, t);
+            fail((char *)b.p);
+        }
+        res[k].rc = WIFSIGNALED(jobs[k].st) ? -WTERMSIG(jobs[k].st) : WEXITSTATUS(jobs[k].st);
+        snprintf(op, sizeof op, "%s/.out-%d", TD, k); snprintf(ep, sizeof ep, "%s/.err-%d", TD, k);
+        res[k].out = cx_read(op, &res[k].outn); res[k].err = cx_read(ep, &res[k].errn);
+        if (!res[k].out) { res[k].out = xmalloc(1); res[k].outn = 0; }
+        if (!res[k].err) { res[k].err = xmalloc(1); res[k].errn = 0; }
+        if (res[k].rc == 127 && !res[k].outn && !res[k].errn) {
+            char line[PATHN + 80]; snprintf(line, sizeof line, "FileNotFoundError: [Errno 2] No such file or directory: '%s'", jobs[k].argv[0]);
+            fail(line);
+        }
+    }
+}
+static Res run1(char **argv, const char *cwd, int secs) {
+    Job j; Res r; j.argv = argv; j.cwd = cwd; j.secs = secs;
+    run_jobs(&j, 1, &r); return r;
+}
+/* call(args): captured, 55 s, assert returncode == 0, (args, returncode, stderr[-2000:]) */
+static void called(char **argv, const Res *r) {
+    if (r->rc) {
+        Buf b = { 0, 0, 0 }; char t[32];
+        bstr(&b, "AssertionError: ("); repr_args_as(&b, argv, argv[0][0] == '/' && strstr(argv[0], TD) == argv[0] ? 2 : 1); snprintf(t, sizeof t, ", %d, ", r->rc); bstr(&b, t);
+        repr_tail(&b, r->err, r->errn, 2000); bstr(&b, ")");
+        fail((char *)b.p);
+    }
+}
+static void call_all(char ***argvs, int n, const char *cwd) {
+    Job jobs[8]; Res res[8]; int k;
+    for (k = 0; k < n; k++) { jobs[k].argv = argvs[k]; jobs[k].cwd = cwd; jobs[k].secs = 55; }
+    run_jobs(jobs, n, res);
+    for (k = 0; k < n; k++) { called(argvs[k], &res[k]); res_free(&res[k]); }
+}
+
+/* ---------- the P2 package: pack.py build(manifests, mounts, cache=False), uncompressed ---------- */
+typedef struct Resource { char *key; size_t kn; char *data; size_t dn; } Resource;
+static Resource *RESV; static size_t RESN, RESCAP;
+static const char *MOUNT_ROOT; static const unsigned char *MOUNT_PREFIX; static size_t MOUNT_PREFIXN;
+static int add_resource(const char *path, void *ctx) {
+    size_t rl = strlen(MOUNT_ROOT), i, dn; char *key, *data; (void)ctx;
+    data = readall(path, &dn);
+    key = xmalloc(MOUNT_PREFIXN + strlen(path + rl + 1) + 1);
+    memcpy(key, MOUNT_PREFIX, MOUNT_PREFIXN); strcpy(key + MOUNT_PREFIXN, path + rl + 1);
+    for (i = 0; i < RESN; i++)
+        if (RESV[i].kn == MOUNT_PREFIXN + strlen(path + rl + 1) && !memcmp(RESV[i].key, key, RESV[i].kn)) {
+            if (RESV[i].dn != dn || memcmp(RESV[i].data, data, dn)) fail("ValueError: conflicting resource");
+            free(key); free(data); return 0;
+        }
+    if (RESN == RESCAP) { RESCAP = RESCAP ? 2 * RESCAP : 64; RESV = realloc(RESV, RESCAP * sizeof *RESV); if (!RESV) fail("MemoryError"); }
+    RESV[RESN].key = key; RESV[RESN].kn = MOUNT_PREFIXN + strlen(path + rl + 1); RESV[RESN].data = data; RESV[RESN].dn = dn; RESN++;
+    return 0;
+}
+static void mount(const unsigned char *prefix, size_t pn, const char *dir) {
+    size_t before = RESN; struct stat st;
+    if (stat(dir, &st) || !S_ISDIR(st.st_mode)) { char l[PATHN + 64]; snprintf(l, sizeof l, "ValueError: resource mount is not a directory: %s", dir); fail(l); }
+    MOUNT_ROOT = dir; MOUNT_PREFIX = prefix; MOUNT_PREFIXN = pn;
+    if (cx_walk(dir, add_resource, 0) < 0) { char l[PATHN + 64]; snprintf(l, sizeof l, "OSError: cannot read %s", dir); fail(l); }
+    if (RESN == before) { char l[PATHN + 64]; snprintf(l, sizeof l, "ValueError: empty resource mount: %s", dir); fail(l); }
+}
+/* the manifest ROUTE (route stream-stage in out model, model paths relative to it); the resources are in RESV */
+static void package(const char *route, const char *out) {
+    char *text, *line, *save = 0, dir[PATHN], *slash, hdr[128];
+    char *rows[16][5]; char *models[16]; size_t modeln[16]; int nrows = 0, nmodels = 0, idx[16], i, k; size_t n;
+    Buf p = { 0, 0, 0 };
+    snprintf(dir, sizeof dir, "%s", route); slash = strrchr(dir, '/'); if (slash) *slash = 0;
+    text = readall(route, &n);
+    for (line = text; line && *line; line = save) {
+        char *f[5], *s = line; int c = 0; size_t mn; char *m;
+        save = strchr(line, '\n'); if (save) *save++ = 0;
+        if (!*line || *line == '#') continue;
+        while (c < 5) { f[c++] = s; s = strchr(s, '\t'); if (!s) break; *s++ = 0; }
+        if (c != 5 || s || nrows == 16) fail("ValueError: expected five columns and valid names");
+        m = readall(path2(dir, f[4]), &mn);
+        if (mn < 2 || m[0] != 'N' || m[1] != ' ' || m[mn - 1] != '\n') fail("ValueError: expected canonical network text");
+        for (k = 0; k < nmodels; k++) if (modeln[k] == mn && !memcmp(models[k], m, mn)) break;
+        if (k == nmodels) { models[nmodels] = m; modeln[nmodels++] = mn; } else free(m);
+        for (i = 0; i < 5; i++) rows[nrows][i] = f[i];
+        idx[nrows++] = k;
+    }
+    if (!nrows) fail("ValueError: empty package");
+    snprintf(hdr, sizeof hdr, RESN ? "P 2 %d %d %lu\n" : "P 1 %d %d\n", nmodels, nrows, (unsigned long)RESN); bstr(&p, hdr);
+    for (i = 0; i < nrows; i++) {
+        bstr(&p, "D "); for (k = 0; k < 4; k++) { bstr(&p, rows[i][k]); bstr(&p, " "); }
+        snprintf(hdr, sizeof hdr, "%d\n", idx[i]); bstr(&p, hdr);
+    }
+    for (k = 0; k < nmodels; k++) { snprintf(hdr, sizeof hdr, "M %lu\n", (unsigned long)modeln[k]); bstr(&p, hdr); bput(&p, models[k], modeln[k]); free(models[k]); }
+    for (i = 0; i < (int)RESN; i++) {
+        snprintf(hdr, sizeof hdr, "F %lu %lu\n", (unsigned long)RESV[i].kn, (unsigned long)RESV[i].dn); bstr(&p, hdr);
+        bput(&p, RESV[i].key, RESV[i].kn); bput(&p, RESV[i].data, RESV[i].dn);
+    }
+    putfile(out, p.p, p.n);
+    free(p.p); free(text);
+}
+static void resources_clear(void) {
+    size_t i; for (i = 0; i < RESN; i++) { free(RESV[i].key); free(RESV[i].data); }
+    RESN = 0;
+}
+
+/* ---------- the probes ---------- */
+#define TD_ "typedef long jb[8];\n"
+#define FP_ "typedef int (*F)(int); struct G { F f; int u; }; static int inc(int x){return x+1;}\n"
+#define PT_ "typedef struct T { long a, b, c, d; } T;\n"
+typedef struct Probe { int item; const char *name, *src; } Probe;
+static const Probe PROBES[] = {
+ {1, "td-global", TD_ "jb g; int main(void){ g[1]=3; return (int)g[1] + (int)sizeof g; }\n"},
+ {1, "td-local", TD_ "int main(void){ jb l; l[1]=3; return (int)l[1]; }\n"},
+ {1, "td-static", TD_ "int main(void){ static jb s; s[2]=4; return (int)s[2]; }\n"},
+ {1, "td-member", TD_ "struct S { int x; jb b; int y; }; int main(void){ struct S s; s.y=2; return s.y + (int)sizeof(struct S); }\n"},
+ {1, "td-param", TD_ "static long f(jb e){ return e[0] + (long)sizeof e; } int main(void){ long a[8]; a[0]=1; return (int)f(a); }\n"},
+ {1, "td-sizeof", TD_ "int main(void){ return (int)sizeof(jb); }\n"},
+ {2, "late-sizeof", "typedef struct CI CI; struct CI { long a, b; CI *next; }; int main(void){ return (int)sizeof(CI); }\n"},
+ {3, "extern-array-defined", "extern int arr[];\nstatic int other[] = {1, 2, 3, 4, 5, 6, 7, 8, 9};\nint arr[3] = {7, 8, 9};\nint main(void){ return arr[2] + (int)sizeof other; }\n"},
+ {3, "extern-array-undefined", "extern int arr[];\nint main(void){ return 0; }\n"},
+ {3, "extern-arrays-then-definitions", "extern const char a[];\nextern int b[];\nconst char a[] = \"xy\";\nint b[] = { 1, 2 };\nint main(void){return b[1]+(int)sizeof a;}\n"},
+ {3, "extern-array-then-object", "extern int t[];\nint z;\nint t[] = {1,2,3};\nint main(void){return t[2]+z;}\n"},
+ {3, "extern-array-then-function", "extern int t[];\nint f(void){ int q = 2; return t[0]+q; }\nint t[3] = {1,2,3};\nint main(void){return f();}\n"},
+ {3, "tentative-array", "int arr[];\nint main(void){ return arr[0]; }\n"},
+ {3, "flexible-member", "struct S { int n; int d[]; };\nint main(void){ int x = 1; return (int)sizeof(struct S) + x; }\n"},
+ {4, "ptrptr-member", "typedef struct TS { long a, b, c, d; } TS; typedef struct st { TS **hash; int n; } st; int main(void){ TS *v[8]; st t; st *tb=&t; TS x; t.hash=v; tb->hash[5]=&x; return v[5]==&x; }\n"},
+ {5, "fp-member-star", FP_ "int main(void){ struct G g; struct G *p=&g; g.f=inc; return (*p->f)(4); }\n"},
+ {5, "fp-member-arrow", FP_ "int main(void){ struct G g; struct G *p=&g; g.f=inc; return p->f(4); }\n"},
+ {6, "ptr2d-local", PT_ "int main(void){ T t={1,2,3,4}; T *m[3][2]; m[2][1]=&t; return (int)m[2][1]->c; }\n"},
+ {6, "ptr2d-member", PT_ "struct G { int x; T *c[3][2]; }; int main(void){ static struct G g; T t={1,2,3,4}; g.c[1][1]=&t; return (int)g.c[1][1]->d; }\n"},
+ {7, "member-specifier-leak", "typedef int (*CF)(void *L); typedef struct Reg { const char *name; CF func; } Reg; int main(void){ Reg r; r.name=0; return (int)sizeof(Reg) + (int)sizeof r; }\n"},
+ {8, "paren-name-static", "static int (inc)(int x); static int inc(int x){return x+1;} int main(void){ return inc(2); }\n"},
+ {8, "paren-name-fptypedef", "typedef int (*CF)(int); static int inc(int x){return x+1;}\nextern CF (getf) (int which);\nint use(void){ CF f = getf(0); return f(4); }\nCF getf (int which) { return inc; }\nint main(void){ return use(); }\n"},
+ {9, "builtin-offsetof", "struct L { int a; long x; char c[3]; }; int main(void){ return (int)__builtin_offsetof(struct L, x); }\n"},
+ {9, "offsetof", "#include <stddef.h>\nstruct L { int a; long x; char c[3]; }; int main(void){ return (int)offsetof(struct L, c[2]); }\n"},
+ {10, "setjmp", "#include <setjmp.h>\nstatic jmp_buf b; int main(void){ if (setjmp(b) == 0) longjmp(b, 3); return 1; }\n"},
+ {10, "setjmp-member", "#include <setjmp.h>\nstruct lj { struct lj *prev; jmp_buf b; int s; };\nint main(void){ struct lj l; l.s = 0; if (_setjmp(l.b) == 0) _longjmp(l.b, 2); return l.s; }\n"},
+ {11, "comma-if", "int main(void){ int a=0,b=1; if (a++, b) return a; return 9; }\n"},
+ {11, "comma-while", "int main(void){ int a=0,b=3; while ((void)(a++), b-- > 0) ; return a; }\n"},
+ {11, "comma-for", "int main(void){ int a=0,i; for (i=0; a++, i<3; i++) ; return a; }\n"},
+ {11, "comma-do", "int main(void){ int a=0,b=3; do ; while (a++, b-- > 0); return a; }\n"},
+ {0, "hostcall-r2", "long f(void){ long a[10] = {0}; return __hostcall(__hostaddr3(), a); }\nint main(void){ return (int)f(); }\n"},   /* sysargs zero-fills r2 (found by e3self) */
+ {12, "stale-struct-mark", "struct S { long a; double d; }; static double ld(struct S *s){ return s->d; } int main(void){ struct S s; s.d=370.5; if (ld(&s) != 370.5) return 1; return 0; }\n"},
+};
+typedef struct Object { int item; const char *name, *src, *refusal; } Object;
+static const Object OBJECTS[] = {
+ {13, "ccx-address", "int h(int);\nint main(void){return h==0;}\n", "not covered: cc interop external function address"},
+ {13, "ccx-call-address", "int h(int);\nint main(void){return h(1)+(h==0);}\n", "not covered: cc interop external function address"},
+ {13, "ccw-export", "extern int f(int);\nint f(int x){return x+1;}\nint main(void){return f(1);}\n", "not covered: cc interop export"},
+ {13, "ccx-call-float", "int h(float);\nint main(void){return h(1.0f); }\n", "not covered: cc interop call"},
+};
+static const Probe FILES[] = {
+ {1, "a_tdarr", 0}, {2, "a_tdlate", 0}, {5, "a_fpmemb", 0}, {6, "a_ptr2d", 0}, {4, "a_ptrptrmemb", 0},
+ {7, "a_regtab", 0}, {3, "a_externarr", 0}, {3, "fb12-13-extern-incomplete-array", 0}, {8, "a_parenfn", 0}, {12, "a_callres", 0},
+ {10, "a_setjmp_nested", 0}, {14, "a_strlit_subaddr", 0}, {14, "a_addr_parmember", 0}, {14, "a_addr_postmember", 0}, {14, "a_addr_premember", 0},
+ {14, "a_fpstar_stmt", 0},
+};
+#define NPROBES ((int)(sizeof PROBES / sizeof PROBES[0]))
+#define NFILES ((int)(sizeof FILES / sizeof FILES[0]))
+#define NOBJECTS ((int)(sizeof OBJECTS / sizeof OBJECTS[0]))
+static const char *THUNK = "h:\n  .frame 8\n  store64 [r7+0], r6\n  mov r6, r7\n  .frame 48\n"
+    "  store64 [r6-48], r0\n  imm r2, 48\n  sub64 r1, r6, r2\n  .lea r0, __ccx_h\n"
+    "  imm r2, 0\n  .hostcall r0, r1\n  imm r2, 32\n  shl64 r0, r0, r2\n"
+    "  shr64 r0, r0, r2\n  mov r7, r6\n  load64 r6, [r7+0]\n  .frame -8\n  ret\n";
+
+static char *PKG[2], *RUN, *INC;
+static Res e3(int object, const char *f) {   /* run --bundle PKG c F F ROOT/include, cwd = the scratch directory */
+    char *argv[] = { RUN, "--bundle", PKG[object], "c", (char *)f, (char *)f, INC, 0 };
+    return run1(argv, TD, 30);
+}
+static void assertion(Buf *b) { fail((char *)b->p); }
+#define BATCH 4
+static Job BJ[2 * BATCH]; static Res BR[2 * BATCH];
+static void repr_name(Buf *b, const char *s) { bstr(b, "'"); bstr(b, s); bstr(b, "'"); }
+
+int main(int argc, char **argv) {
+    char here[PATHN], *slash, line[PATHN]; const char *tmp, *ua; int i, k, equal = 0, refused = 0, ncases;
+    Probe *cases; char **srcs; size_t *srcn;
+    static const char *NAMES[3] = { "pp", "lex", "parse" };
+    (void)argc; (void)argv;
+
+    /* R = Path(__file__).resolve().parents[2]; UA = os.environ.get('UA', '/tmp/ua_ref') */
+    snprintf(here, sizeof here, "%s", __FILE__);
+    slash = strrchr(here, '/');
+    if (slash) *slash = 0; else snprintf(here, sizeof here, ".");
+    { char t[PATHN]; snprintf(t, sizeof t, "%s/../..", here); if (!realpath(t, ROOT)) fail("FileNotFoundError: cannot resolve the repository root"); }
+    ua = getenv("UA"); snprintf(UA, sizeof UA, "%s", ua ? ua : "/tmp/ua_ref");
+
+    /* tempfile.TemporaryDirectory(prefix='e3-r21-') */
+    tmp = getenv("TMPDIR");
+    if (!tmp || !*tmp || access(tmp, W_OK)) tmp = getenv("TEMP");
+    if (!tmp || !*tmp || access(tmp, W_OK)) tmp = getenv("TMP");
+    if (!tmp || !*tmp || access(tmp, W_OK)) tmp = "/tmp";
+    { char t[PATHN]; snprintf(t, sizeof t, "%s/e3-r21-XXXXXX", tmp); if (!mkdtemp(t)) fail("OSError: cannot create the temporary directory");
+      if (!realpath(t, TD)) fail("OSError: cannot resolve the temporary directory"); TD_MADE = 1; }
+    RUN = path2(TD, "run"); INC = path2(ROOT, "include");
+
+    {   /* the runner and the three seed tools, built at once */
+        const char *scc = getenv("SEED_GEN_CC"), *ecc = getenv("EXEC_CC"); char *seed = path2(ROOT, "seed");
+        char *a0[] = { (char *)(ecc ? ecc : "cc"), "-O2", path2(ROOT, "exec/c/run.c"), "-o", RUN, 0 };
+        char *a1[] = { (char *)(scc && *scc ? scc : "cc"), "-std=c99", "-O2", "-w", "-I", seed, path2(ROOT, "seed/gen.c"), "-o", path2(TD, "seed-gen"), 0 };
+        char *a2[] = { a1[0], "-std=c99", "-O2", "-w", "-I", seed, path2(ROOT, "seed/tbl.c"), "-o", path2(TD, "seed-tbl"), 0 };
+        char *a3[] = { a1[0], "-std=c99", "-O2", "-w", "-I", seed, path2(ROOT, "seed/net.c"), "-o", path2(TD, "seed-net"), 0 };
+        char **all[4]; all[0] = a0; all[1] = a1; all[2] = a2; all[3] = a3;
+        call_all(all, 4, 0);
+    }
+    {   /* pp, lex --typed, parse2: the delta (gen), the flat table (tbl), the threshold network (net) */
+        char *g0[] = { path2(TD, "seed-gen"), "pp", path2(TD, "pp.json"), 0 };
+        char *g1[] = { g0[0], "lex", path2(TD, "lex.json"), "--typed", 0 };
+        char *g2[] = { g0[0], "parse2", path2(TD, "parse.json"), 0 };
+        char **gens[3], **tbls[3], **nets[3];
+        gens[0] = g0; gens[1] = g1; gens[2] = g2;
+        call_all(gens, 3, ROOT);
+        for (i = 0; i < 3; i++) {
+            char *json = gens[i][2], *t = path2(TD, i == 0 ? "pp.tbl" : i == 1 ? "lex.tbl" : "parse.tbl");
+            char *n = path2(TD, i == 0 ? "pp.net" : i == 1 ? "lex.net" : "parse.net");
+            tbls[i] = xmalloc(4 * sizeof(char *)); tbls[i][0] = path2(TD, "seed-tbl"); tbls[i][1] = json; tbls[i][2] = t; tbls[i][3] = 0;
+            nets[i] = xmalloc(4 * sizeof(char *)); nets[i][0] = path2(TD, "seed-net"); nets[i][1] = t; nets[i][2] = n; nets[i][3] = 0;
+        }
+        call_all(tbls, 3, 0);
+        call_all(nets, 3, 0);
+        (void)NAMES;
+    }
+    {   /* print(call([run, '--check-net', parse.tbl, parse.net]).decode().strip()) */
+        char *a[] = { RUN, "--check-net", path2(TD, "parse.tbl"), path2(TD, "parse.net"), 0 };
+        Res r = run1(a, 0, 55); size_t s = 0, e;
+        called(a, &r);
+        e = r.outn;
+        while (s < e && strchr(" \t\n\r\v\f", r.out[s])) s++;
+        while (e > s && strchr(" \t\n\r\v\f", r.out[e - 1])) e--;
+        printf("%.*s\n", (int)(e - s), r.out + s);
+        res_free(&r);
+    }
+    {   /* route.tsv, the two resource directories, the two packages */
+        static const unsigned char CLI[] = { 0, 'c', 'l', 'i', '/' }, HDR[] = { 0, 'h', 'd', 'r', '/' };
+        char *route = path2(TD, "route.tsv"); int mode;
+        const char *rt = "c\te2\tsource\tpp\tpp.net\nc\te1\tpp\ttokens\tlex.net\nc\te3\ttokens\ttape\tparse.net\n";
+        putfile(route, rt, strlen(rt));
+        for (mode = 0; mode < 2; mode++) {
+            char *res = path2(TD, mode ? "res-object" : "res-program");
+            if (mkdir(res, 0777)) { snprintf(line, sizeof line, "FileExistsError: [Errno 17] File exists: '%s'", res); fail(line); }
+            putfile(path2(res, "error-limit"), "", 0);   /* default limit; a mount may not be empty */
+            if (mode) putfile(path2(res, "object"), "\1", 1);
+            PKG[mode] = path2(TD, mode ? "pkg-object" : "pkg-program");
+            mount(CLI, 5, res); mount(HDR, 5, INC);
+            package(route, PKG[mode]);
+            resources_clear();
+        }
+    }
+    /* cases = PROBES + FILES (tests/c/NAME.c) + hosthdr-setjmp */
+    ncases = NPROBES + NFILES + 1;
+    cases = xmalloc(ncases * sizeof *cases); srcs = xmalloc(ncases * sizeof *srcs); srcn = xmalloc(ncases * sizeof *srcn);
+    for (i = 0; i < NPROBES; i++) { cases[i] = PROBES[i]; srcs[i] = (char *)PROBES[i].src; srcn[i] = strlen(PROBES[i].src); }
+    for (k = 0; k < NFILES; k++, i++) {
+        char rel[256]; snprintf(rel, sizeof rel, "tests/c/%s.c", FILES[k].name);
+        cases[i] = FILES[k]; srcs[i] = read_text(path2(ROOT, rel), &srcn[i]);
+    }
+    cases[i].item = 10; cases[i].name = "hosthdr-setjmp"; srcs[i] = read_text(path2(ROOT, "tests/hosthdr/setjmp.c"), &srcn[i]);
+    for (i = 0; i < ncases; i++) {
+        Res *r;
+        if (i % BATCH == 0) {   /* the next BATCH cases run at once (reference and e3 each); verdicts stay in order */
+            int b, nb = ncases - i < BATCH ? ncases - i : BATCH;
+            for (b = 0; b < nb; b++) {
+                char *f, **ref = xmalloc(6 * sizeof(char *)), **run = xmalloc(8 * sizeof(char *));
+                snprintf(line, sizeof line, "%s.c", cases[i + b].name); f = path2(TD, line);
+                putfile(f, srcs[i + b], srcn[i + b]);
+                ref[0] = UA; ref[1] = f; ref[2] = "-S"; ref[3] = "-o"; ref[4] = "-"; ref[5] = 0;
+                run[0] = RUN; run[1] = "--bundle"; run[2] = PKG[0]; run[3] = "c"; run[4] = run[5] = f; run[6] = INC; run[7] = 0;
+                BJ[2 * b].argv = ref; BJ[2 * b].cwd = 0; BJ[2 * b].secs = 30;
+                BJ[2 * b + 1].argv = run; BJ[2 * b + 1].cwd = TD; BJ[2 * b + 1].secs = 30;
+            }
+            run_jobs(BJ, 2 * nb, BR);
+        }
+        r = &BR[2 * (i % BATCH)];
+        if (r[0].rc) {
+            Buf b = { 0, 0, 0 }; bstr(&b, "AssertionError: ("); repr_name(&b, cases[i].name); bstr(&b, ", 'reference rejects', ");
+            repr_tail(&b, r[0].err, r[0].errn, 500); bstr(&b, ")"); assertion(&b);
+        }
+        if (r[1].rc == 0) {
+            if (r[1].outn != r[0].outn || memcmp(r[1].out, r[0].out, r[0].outn)) {
+                Buf b = { 0, 0, 0 }; char t[32]; snprintf(t, sizeof t, "AssertionError: (%d, ", cases[i].item); bstr(&b, t);
+                repr_name(&b, cases[i].name); bstr(&b, ", 'E3 accepted with different tape bytes')"); assertion(&b);
+            }
+            printf("r21 item %d %s: reference tape identical\n", cases[i].item, cases[i].name);
+            equal++;
+        } else {
+            size_t s = 0, e = r[1].errn, l; const char *last, *nc;
+            if (!(r[1].rc == 1 && has(r[1].err, r[1].errn, "not covered: ") && !r[1].outn)) {
+                Buf b = { 0, 0, 0 }; char t[48]; snprintf(t, sizeof t, "AssertionError: (%d, ", cases[i].item); bstr(&b, t);
+                repr_name(&b, cases[i].name); snprintf(t, sizeof t, ", %d, ", r[1].rc); bstr(&b, t);
+                repr_tail(&b, r[1].err, r[1].errn, 500); bstr(&b, ")"); assertion(&b);
+            }
+            /* stderr.decode().strip().splitlines()[-1].split('not covered: ', 1)[1] */
+            while (s < e && strchr(" \t\n\r\v\f", r[1].err[s])) s++;
+            while (e > s && strchr(" \t\n\r\v\f", r[1].err[e - 1])) e--;
+            for (l = e; l > s && r[1].err[l - 1] != '\n' && r[1].err[l - 1] != '\r'; l--) ;
+            last = r[1].err + l; nc = 0;
+            { size_t j; for (j = 0; l + j + 13 <= e; j++) if (!memcmp(last + j, "not covered: ", 13)) { nc = last + j + 13; break; } }
+            if (!nc) fail("IndexError: list index out of range");
+            printf("r21 item %d %s: refused: %.*s\n", cases[i].item, cases[i].name, (int)(r[1].err + e - nc), nc);
+            refused++;
+        }
+        fflush(stdout);
+        res_free(&r[0]); res_free(&r[1]);
+    }
+    for (i = 0; i < NOBJECTS; i++) {
+        char *f, *o; Job jobs[2]; Res r[2]; char *ref[] = { UA, "-c", "-b", "lnx/x86_64", 0, "-o", 0, 0 };
+        char *run[] = { RUN, "--bundle", PKG[1], "c", 0, 0, INC, 0 };
+        snprintf(line, sizeof line, "%s.c", OBJECTS[i].name); f = path2(TD, line);
+        snprintf(line, sizeof line, "%s.o", OBJECTS[i].name); o = path2(TD, line);
+        putfile(f, OBJECTS[i].src, strlen(OBJECTS[i].src));
+        ref[4] = f; ref[6] = o; run[4] = run[5] = f;
+        jobs[0].argv = ref; jobs[0].cwd = 0; jobs[0].secs = 30;
+        jobs[1].argv = run; jobs[1].cwd = TD; jobs[1].secs = 30;
+        run_jobs(jobs, 2, r);
+        if (r[0].rc) {
+            Buf b = { 0, 0, 0 }; bstr(&b, "AssertionError: ("); repr_name(&b, OBJECTS[i].name); bstr(&b, ", 'reference object rejects', ");
+            repr_tail(&b, r[0].err, r[0].errn, 500); bstr(&b, ")"); assertion(&b);
+        }
+        if (!(r[1].rc == 1 && has(r[1].err, r[1].errn, OBJECTS[i].refusal) && !r[1].outn)) {
+            Buf b = { 0, 0, 0 }; char t[48]; snprintf(t, sizeof t, "AssertionError: (%d, ", OBJECTS[i].item); bstr(&b, t);
+            repr_name(&b, OBJECTS[i].name); snprintf(t, sizeof t, ", %d, ", r[1].rc); bstr(&b, t);
+            repr_tail(&b, r[1].err, r[1].errn, 500); bstr(&b, ")"); assertion(&b);
+        }
+        refused++;
+        printf("r21 item %d %s: object refused: %s\n", OBJECTS[i].item, OBJECTS[i].name, OBJECTS[i].refusal + strlen("not covered: "));
+        fflush(stdout);
+        res_free(&r[0]); res_free(&r[1]);
+    }
+    {   /* the ccx integer thunk */
+        const char *src = "int h(int);\nint main(void){return h(1); }\n"; char *f = path2(TD, "object-call.c"); Res r; size_t tn = strlen(THUNK);
+        putfile(f, src, strlen(src));
+        r = e3(1, f);
+        if (!(r.rc == 0 && r.outn >= tn && !memcmp(r.out + r.outn - tn, THUNK, tn))) {
+            Buf b = { 0, 0, 0 }; char t[48]; snprintf(t, sizeof t, "AssertionError: ('ccx integer thunk', %d, ", r.rc); bstr(&b, t);
+            repr_tail(&b, r.err, r.errn, 500); bstr(&b, ")"); assertion(&b);
+        }
+        res_free(&r);
+        printf("r21 ccx-call: integer ABI thunk contract identical\n"); fflush(stdout);
+    }
+    {   /* a plain object stays accepted */
+        const char *src = "static int g(int x){return x+1;}\nint main(void){return g(1);}\n"; char *f = path2(TD, "object-plain.c"); Res r;
+        putfile(f, src, strlen(src));
+        r = e3(1, f);
+        if (r.rc != 0) fail("AssertionError: a plain object must stay accepted");
+        res_free(&r);
+    }
+    printf("r21: %d reference-identical, %d refused by name, 0 accepted with different bytes (networks)\n", equal, refused);
+    quit(0);
+    return 0;
+}

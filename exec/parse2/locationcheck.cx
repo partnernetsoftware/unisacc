@@ -1,0 +1,686 @@
+#!/usr/bin/env -S unisacc.com -run
+/* locationcheck.cx -- exec/parse2/locationcheck.py in C (2026-10-23, the py->cx port wave; no Python): the E2 -> E1
+   -> E3 location framing leaves the generated tape unchanged.  usage (from the repository root):
+     sh ./tests/cxbin exec/parse2/locationcheck.cx        (or sh ./unisacc.com -run exec/parse2/locationcheck.cx)
+   No options (the .py read none).  The five stream-stage models -- pp --locations, lex --locations, lex --typed,
+   parse2 --locations, plain parse2 -- are constructed by the C99 seed constructors seed/gen.c, tbl.c, net.c
+   (byte-identical to exec/build/gen.py, exec/c/tbl.py, exec/c/net.py, which the .py ran; the gate's seedgen-*,
+   seedparse2-* and seed-construct-* jobs hold that equality), three at a time as the .py's thread pool, and
+   exec/c/run.c is built by $EXEC_CC (default cc).  The probe model is parse.json with every DL.ready edge sent to
+   PROBE.fields and the PROBE.* states that write each retained map field (exec/facts/tokenlocations.tsv SPLICES,
+   INCLUDE_LINE, INCLUDE_LINES, INCLUDE_NAME) back out -- the same probe.json bytes the .py's json round trip writes.
+   Then for ten sources (eight inline, examples/fib.c, tests/c/b_strderef.c): the located parser's tape equals the
+   plain parser's on the joined text, the probe gives back the E2 frame, and `located parser NAME tape unchanged` is
+   printed; ten perturbed joined frames must each be rejected (rc 1, no stdout, `malformed token locations`); the
+   summary line; rc 0.  Every child is bounded at 60 s and captured.  A failed assertion, a timeout or an OS error is
+   the .py's uncaught exception: its traceback's last line on stderr (`AssertionError: small`, `AssertionError:
+   ([ARGV], RC, b'STDERR')`, ...), rc 1.
+   Work area: no TemporaryDirectory (a port deletes nothing): ${TMPDIR:-/tmp}/unisacc-parse2loc-UID/parse-locations-K
+   (the first of K = 0..7 no other run holds, fcntl-locked), overwritten by every run, its model files emptied on exit;
+   the seed constructors are built once per source digest (host cc, as exec/c/compilercheck.sh prep-1/2) into
+   ${TMPDIR:-/tmp}/unisacc-parse2loc-UID/seed-DIGEST16.  ROOT is the grandparent of this file's directory.
+   Prelude gap: <time.h> (clock_gettime) is included -- cx.h edition 1 leaves time.h explicit. */
+#include <time.h>
+
+/* ---- shared frame (the same block in exec/parse2/f1attributescheck.cx, locationcheck.cx, unitlocationcheck.cx:
+   `#pragma unisa use` resolves beside the using file only, so these exec/parse2 ports cannot reach tests/cxlib) ---- */
+#define PN 4096
+static char ROOT[PN], BASE[PN], SLOT[PN], TOOLS[PN];
+static int SLOTFD = -1;
+static const char *const *BIGFILES;   /* names in SLOT emptied on exit (the stream-stage models: tens of MB each) */
+
+typedef struct buf { unsigned char *p; size_t n, cap; } buf;
+static void leave(int rc);
+static void die(const char *line) {   /* the .py's uncaught exception: the traceback's last line, rc 1 */
+    fflush(stdout); fputs(line, stderr); fputc('\n', stderr); leave(1);
+}
+static void *xmalloc(size_t n) { void *p = malloc(n ? n : 1); if (!p) die("MemoryError"); return p; }
+static void bgrow(buf *b, size_t extra) {
+    if (b->n + extra + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 256; unsigned char *g;
+        while (c < b->n + extra + 1) c *= 2;
+        g = realloc(b->p, c); if (!g) die("MemoryError");
+        b->p = g; b->cap = c;
+    }
+}
+static void bput(buf *b, const void *s, size_t n) { bgrow(b, n); if (n) memcpy(b->p + b->n, s, n); b->n += n; b->p[b->n] = 0; }
+static void bstr(buf *b, const char *s) { bput(b, s, strlen(s)); }
+static void bbyte(buf *b, int c) { unsigned char x = (unsigned char)c; bput(b, &x, 1); }
+static void bnum(buf *b, long long v) {
+    char t[32]; int k = 0; unsigned long long u = v < 0 ? 0ULL - (unsigned long long)v : (unsigned long long)v;
+    do { t[k++] = (char)('0' + u % 10); u /= 10; } while (u);
+    if (v < 0) t[k++] = '-';
+    while (k) bbyte(b, t[--k]);
+}
+static void bu32(buf *b, unsigned long v) {
+    unsigned char x[4]; x[0] = v & 255; x[1] = (v >> 8) & 255; x[2] = (v >> 16) & 255; x[3] = (v >> 24) & 255; bput(b, x, 4);
+}
+static unsigned long getu32(const unsigned char *p) { return p[0] | (unsigned long)p[1] << 8 | (unsigned long)p[2] << 16 | (unsigned long)p[3] << 24; }
+static int has(const unsigned char *s, size_t n, const char *w) {   /* bytes `W in S` */
+    size_t l = strlen(w), i;
+    for (i = 0; i + l <= n; i++) if (!memcmp(s + i, w, l)) return 1;
+    return 0;
+}
+static char *cat2(const char *a, const char *b) { size_t n = strlen(a) + strlen(b) + 2; char *p = xmalloc(n); snprintf(p, n, "%s/%s", a, b); return p; }
+
+/* Python reprs, for the assertion lines */
+static void repr_q(buf *o, const unsigned char *s, size_t n, int isbytes) {
+    size_t i; int q = '\'';
+    if (memchr(s, '\'', n) && !memchr(s, '"', n)) q = '"';
+    if (isbytes) bbyte(o, 'b');
+    bbyte(o, q);
+    for (i = 0; i < n; i++) {
+        int c = s[i];
+        if (c == '\\' || c == q) { bbyte(o, '\\'); bbyte(o, c); }
+        else if (c == '\n') bstr(o, "\\n");
+        else if (c == '\r') bstr(o, "\\r");
+        else if (c == '\t') bstr(o, "\\t");
+        else if (c < 32 || c == 127 || (isbytes && c > 127)) { char t[8]; snprintf(t, sizeof t, "\\x%02x", c); bstr(o, t); }
+        else bbyte(o, c);
+    }
+    bbyte(o, q);
+}
+static void repr_bytes(buf *o, const void *s, size_t n) { repr_q(o, s, n, 1); }
+static void repr_str(buf *o, const char *s) { repr_q(o, (const unsigned char *)s, strlen(s), 0); }
+static void repr_path(buf *o, const char *s) { bstr(o, "PosixPath("); repr_str(o, s); bbyte(o, ')'); }
+/* repr of an argument list; bit k of PATHS: argument k was a pathlib.Path in the .py */
+static void repr_args(buf *o, char *const argv[], unsigned long paths) {
+    int k; bbyte(o, '[');
+    for (k = 0; argv[k]; k++) { if (k) bstr(o, ", "); if (k < 32 && (paths >> k & 1)) repr_path(o, argv[k]); else repr_str(o, argv[k]); }
+    bbyte(o, ']');
+}
+static void oserror(buf *o, int err, const char *path) {   /* FileNotFoundError: [Errno 2] No such file or directory: 'P' */
+    const char *cls = err == ENOENT ? "FileNotFoundError" : err == EACCES || err == EPERM ? "PermissionError" :
+                      err == ENOTDIR ? "NotADirectoryError" : err == EISDIR ? "IsADirectoryError" : "OSError";
+    const char *txt = err == ENOENT ? "No such file or directory" : err == EACCES ? "Permission denied" :
+                      err == EPERM ? "Operation not permitted" : err == ENOTDIR ? "Not a directory" :
+                      err == EISDIR ? "Is a directory" : err == ENAMETOOLONG ? "File name too long" :
+                      err == ELOOP ? "Too many levels of symbolic links" : err == ENOEXEC ? "Exec format error" :
+                      err == ETXTBSY ? "Text file busy" : err == ENOSPC ? "No space left on device" : strerror(err);
+    bstr(o, cls); bstr(o, ": [Errno "); bnum(o, err); bstr(o, "] "); bstr(o, txt); bstr(o, ": "); repr_str(o, path);
+}
+
+/* the repository root: the grandparent of this file's directory (__FILE__ as the gate spells it, cwd-relative) */
+static void find_root(void) {
+    char here[PN], t[PN + 8], *s;
+    snprintf(here, sizeof here, "%s", __FILE__);
+    s = strrchr(here, '/');
+    if (s) *s = 0; else snprintf(here, sizeof here, ".");
+    snprintf(t, sizeof t, "%s/../..", here);
+    if (!realpath(t, ROOT)) die("FileNotFoundError: cannot resolve the repository root");
+}
+
+/* ---- the work area.  No deletion: the .py's TemporaryDirectory becomes a persistent per-user slot,
+   ${TMPDIR:-/tmp}/unisacc-parse2loc-UID/NAME-K (K = 0..7, the first one no other run holds; an fcntl lock), whose
+   files are overwritten by every run and the large ones emptied on exit (BIGFILES). ---- */
+static int lockfile(const char *path, int wait) {
+    struct flock fl; int fd = open(path, O_RDWR | O_CREAT, 0600);
+    if (fd < 0) return -1;
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+    memset(&fl, 0, sizeof fl); fl.l_type = F_WRLCK; fl.l_whence = SEEK_SET;
+    if (fcntl(fd, wait ? F_SETLKW : F_SETLK, &fl) == 0) return fd;
+    close(fd); return -1;
+}
+static void owned_dir(const char *d) {
+    struct stat st; buf m = {0, 0, 0};
+    if (mkdir(d, 0700) != 0 && errno != EEXIST) { oserror(&m, errno, d); die((char *)m.p); }
+    if (lstat(d, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != getuid()) {
+        bstr(&m, "PermissionError: "); repr_str(&m, d); bstr(&m, " is not a directory owned by this user (refused)"); die((char *)m.p);
+    }
+}
+static void work_init(const char *name) {
+    static const char *const env[3] = { "TMPDIR", "TEMP", "TMP" };
+    const char *d = 0; struct stat st; int i, k; char lk[PN + 8];
+    for (i = 0; i < 3 && !d; i++) {
+        const char *v = getenv(env[i]);
+        if (v && *v && stat(v, &st) == 0 && S_ISDIR(st.st_mode) && access(v, W_OK | X_OK) == 0) d = v;
+    }
+    if (!d) d = "/tmp";
+    snprintf(BASE, sizeof BASE, "%s/unisacc-parse2loc-%ld", d, (long)getuid());
+    owned_dir(BASE);
+    for (k = 0; k < 8 && SLOTFD < 0; k++) {
+        snprintf(SLOT, sizeof SLOT, "%s/%s-%d", BASE, name, k); snprintf(lk, sizeof lk, "%s.lock", SLOT);
+        SLOTFD = lockfile(lk, 0);
+    }
+    if (SLOTFD < 0) {
+        snprintf(SLOT, sizeof SLOT, "%s/%s-0", BASE, name); snprintf(lk, sizeof lk, "%s.lock", SLOT);
+        SLOTFD = lockfile(lk, 1);
+        if (SLOTFD < 0) { buf m = {0, 0, 0}; oserror(&m, errno, lk); die((char *)m.p); }
+    }
+    owned_dir(SLOT);
+}
+static void leave(int rc) {
+    static int once;
+    fflush(stdout); fflush(stderr);
+    if (!once && SLOTFD >= 0 && BIGFILES) {
+        int i; once = 1;
+        for (i = 0; BIGFILES[i]; i++) {
+            char p[PN + 64]; int fd;
+            snprintf(p, sizeof p, "%s/%s", SLOT, BIGFILES[i]);
+            fd = open(p, O_WRONLY | O_TRUNC);
+            if (fd >= 0) close(fd);
+        }
+    }
+    exit(rc);
+}
+
+/* ---- children: subprocess.run(ARGV, capture_output=True, timeout=SECS, cwd=CWD).  ERRCAP 0: stderr inherited
+   (check_output).  Captures go through SLOT/cap-TAG.{out,err}.  0, or -1 with WHY the exception's line. ---- */
+typedef struct res { int rc; unsigned char *out, *err; size_t outn, errn; } res;
+static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (double)t.tv_sec + (double)t.tv_nsec / 1e9; }
+static unsigned char *slurp(const char *p, size_t *n) {
+    unsigned char *b = (unsigned char *)cx_read(p, n);
+    if (!b) { b = xmalloc(1); b[0] = 0; *n = 0; }
+    return b;
+}
+static int runcap(char *const argv[], const char *cwd, int secs, int errcap, const char *tag, res *r, buf *why) {
+    char op[PN + 64], ep[PN + 64]; int of, ef = -1, pfd[2], st = 0, msg[2] = { 0, 0 }; pid_t pid; ssize_t k; double deadline;
+    r->rc = 0; r->out = r->err = 0; r->outn = r->errn = 0;
+    snprintf(op, sizeof op, "%s/cap-%s.out", SLOT, tag); snprintf(ep, sizeof ep, "%s/cap-%s.err", SLOT, tag);
+    of = open(op, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (errcap) ef = open(ep, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (of < 0 || (errcap && ef < 0) || pipe(pfd) != 0) { bstr(why, "OSError: cannot capture a child's output"); return -1; }
+    fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
+    fflush(stdout); fflush(stderr);
+    deadline = now() + secs;
+    pid = fork();
+    if (pid < 0) { bstr(why, "OSError: fork failed"); return -1; }
+    if (pid == 0) {
+        int fd = open("/dev/null", O_RDONLY);
+        close(pfd[0]);
+        if (fd >= 0) { dup2(fd, 0); close(fd); }
+        dup2(of, 1); close(of);
+        if (errcap) { dup2(ef, 2); close(ef); }
+        if (cwd && chdir(cwd) != 0) { msg[0] = 1; msg[1] = errno; k = write(pfd[1], msg, sizeof msg); _exit(255); }
+        execvp(argv[0], argv);
+        msg[0] = 2; msg[1] = errno; k = write(pfd[1], msg, sizeof msg); (void)k;
+        _exit(255);
+    }
+    close(pfd[1]);
+    k = read(pfd[0], msg, sizeof msg);
+    close(pfd[0]);
+    if (k == (ssize_t)sizeof msg) {
+        waitpid(pid, &st, 0); close(of); if (errcap) close(ef);
+        oserror(why, msg[1], msg[0] == 1 ? cwd : argv[0]);
+        return -1;
+    }
+    for (;;) {
+        pid_t w = waitpid(pid, &st, WNOHANG);
+        if (w == pid) break;
+        if (w < 0) { close(of); if (errcap) close(ef); bstr(why, "ChildProcessError: wait failed"); return -1; }
+        if (now() >= deadline) {
+            kill(pid, SIGKILL); waitpid(pid, &st, 0); close(of); if (errcap) close(ef);
+            bstr(why, "subprocess.TimeoutExpired: Command '"); repr_args(why, argv, 0);
+            bstr(why, "' timed out after "); bnum(why, secs); bstr(why, " seconds");
+            return -1;
+        }
+        usleep(1000);
+    }
+    close(of); if (errcap) close(ef);
+    r->rc = WIFSIGNALED(st) ? -WTERMSIG(st) : WEXITSTATUS(st);
+    r->out = slurp(op, &r->outn);
+    if (errcap) r->err = slurp(ep, &r->errn); else { r->err = xmalloc(1); r->err[0] = 0; }
+    return 0;
+}
+static void resfree(res *r) { free(r->out); free(r->err); r->out = r->err = 0; }
+/* run(): an OSError or timeout is the uncaught exception */
+static res runx(char *const argv[], const char *cwd, int secs, int errcap, const char *tag) {
+    res r; buf why = {0, 0, 0};
+    if (runcap(argv, cwd, secs, errcap, tag, &r, &why)) die((char *)why.p);
+    return r;
+}
+/* call(): run() that must exit 0: `AssertionError: (ARGS, RC, STDERR[-1500:])` otherwise; MSG 0 means die, else
+   the line is left in MSG (the parallel stream-stage constructions report from a child) */
+static int callx(char *const argv[], const char *cwd, unsigned long paths, const char *tag, res *out, buf *msg) {
+    res r; buf why = {0, 0, 0};
+    if (runcap(argv, cwd, 60, 1, tag, &r, &why)) { if (!msg) die((char *)why.p); bput(msg, why.p, why.n); return -1; }
+    if (r.rc != 0) {
+        buf m = {0, 0, 0}; size_t t = r.errn > 1500 ? r.errn - 1500 : 0;
+        bstr(&m, "AssertionError: ("); repr_args(&m, argv, paths); bstr(&m, ", "); bnum(&m, r.rc); bstr(&m, ", ");
+        repr_bytes(&m, r.err + t, r.errn - t); bbyte(&m, ')');
+        if (!msg) die((char *)m.p);
+        bput(msg, m.p, m.n); resfree(&r); return -1;
+    }
+    if (out) *out = r; else resfree(&r);
+    return 0;
+}
+
+/* ---- the C99 seed constructors (seed/gen.c, tbl.c, net.c: byte-identical to exec/build/gen.py, exec/c/tbl.py,
+   exec/c/net.py -- gate jobs seedgen-*, seedparse2-*, seed-construct-*), built once per source digest with the host
+   cc into BASE/seed-DIGEST16 under BASE/seed.lock, the way exec/c/compilercheck.sh prep-1/2 builds them ---- */
+static void tools_init(void) {
+    static const char *const src[] = { "seed/gen.c", "seed/json.h", "seed/facts.h", "seed/tbl.c", "seed/net.c", "exec/c/core.h", 0 };
+    static const char *const tool[] = { "gen", "tbl", "net", 0 };
+    buf key = {0, 0, 0}; char hex[65], lk[PN + 16], ready[PN + 16]; int i, fd; struct stat st;
+    for (i = 0; src[i]; i++) {
+        char *p = cat2(ROOT, src[i]); size_t n; char *b = cx_read(p, &n);
+        if (!b) { buf m = {0, 0, 0}; oserror(&m, ENOENT, p); die((char *)m.p); }
+        bstr(&key, src[i]); bbyte(&key, 0); bnum(&key, (long long)n); bbyte(&key, 0); bput(&key, b, n);
+        free(b); free(p);
+    }
+    cx_sha256_hex(key.p, key.n, hex); hex[16] = 0; free(key.p);
+    snprintf(TOOLS, sizeof TOOLS, "%s/seed-%s", BASE, hex);
+    snprintf(lk, sizeof lk, "%s/seed.lock", BASE); snprintf(ready, sizeof ready, "%s/ready", TOOLS);
+    fd = lockfile(lk, 1);
+    if (fd < 0) { buf m = {0, 0, 0}; oserror(&m, errno, lk); die((char *)m.p); }
+    if (stat(ready, &st) != 0) {
+        owned_dir(TOOLS);
+        for (i = 0; tool[i]; i++) {
+            char s[64], *o = cat2(TOOLS, tool[i]);
+            char *argv[] = { "cc", "-std=c99", "-O2", "-w", "-Iseed", s, "-o", o, 0 };
+            snprintf(s, sizeof s, "seed/%s.c", tool[i]);
+            callx(argv, ROOT, 0, "seedcc", 0, 0);
+            free(o);
+        }
+        if (cx_write(ready, "ok\n", 3)) { buf m = {0, 0, 0}; oserror(&m, errno, ready); die((char *)m.p); }
+    }
+    close(fd);
+}
+
+static int GEN_ONLY;   /* construct only NAME.json (f1attributescheck reads the delta itself) */
+/* one stream-stage model: SLOT/NAME.json by seed gen (cwd ROOT, as compilerpack's --seed-tools), then .tbl, .net */
+static int construct(const char *name, const char *const flags[], buf *msg) {
+    char *json, *tbl, *net, *gen = cat2(TOOLS, "gen"), *tb = cat2(TOOLS, "tbl"), *nt = cat2(TOOLS, "net"), f[256];
+    char *argv[12]; int k = 0, i;
+    snprintf(f, sizeof f, "%s.json", name); json = cat2(SLOT, f);
+    snprintf(f, sizeof f, "%s.tbl", name); tbl = cat2(SLOT, f);
+    snprintf(f, sizeof f, "%s.net", name); net = cat2(SLOT, f);
+    argv[k++] = gen; argv[k++] = (char *)flags[0]; argv[k++] = json;
+    for (i = 1; flags[i] && k < 11; i++) argv[k++] = (char *)flags[i];
+    argv[k] = 0;
+    if (callx(argv, ROOT, 0, name, 0, msg)) return -1;
+    if (GEN_ONLY) return 0;
+    { char *a[] = { tb, json, tbl, 0 }; if (callx(a, 0, 0, name, 0, msg)) return -1; }
+    { char *a[] = { nt, tbl, net, 0 }; if (callx(a, 0, 0, name, 0, msg)) return -1; }
+    free(json); free(tbl); free(net); free(gen); free(tb); free(nt);
+    return 0;
+}
+/* the models in parallel (at most 3 at once, as the .py's ThreadPoolExecutor(max_workers=3)); the first failure in
+   list order is the exception pool.map raises */
+typedef struct spec { const char *name; const char *flags[6]; } spec;
+static void construct_all(const spec *m, int n) {
+    pid_t *pid = xmalloc(sizeof(pid_t) * n); int *done = xmalloc(sizeof(int) * n), i, next = 0, live = 0, st;
+    for (i = 0; i < n; i++) done[i] = 0;
+    fflush(stdout); fflush(stderr);
+    while (next < n || live) {
+        while (next < n && live < 3) {
+            { char f[256]; char *p; snprintf(f, sizeof f, "%s.fail", m[next].name); p = cat2(SLOT, f); cx_write(p, "", 0); free(p); }
+            pid[next] = fork();
+            if (pid[next] < 0) die("OSError: fork failed");
+            if (pid[next] == 0) {
+                buf msg = {0, 0, 0}; char f[256]; char *p;
+                if (construct(m[next].name, m[next].flags, &msg) == 0) _exit(0);
+                snprintf(f, sizeof f, "%s.fail", m[next].name); p = cat2(SLOT, f);
+                cx_write(p, msg.p, msg.n); _exit(1);
+            }
+            next++; live++;
+        }
+        { pid_t w = waitpid(-1, &st, 0);
+          if (w < 0) die("ChildProcessError: wait failed");
+          for (i = 0; i < next; i++) if (pid[i] == w) { done[i] = WIFEXITED(st) && WEXITSTATUS(st) == 0 ? 1 : 2; live--; } }
+    }
+    for (i = 0; i < n; i++) if (done[i] != 1) {
+        char f[256]; char *p, *b; size_t k;
+        snprintf(f, sizeof f, "%s.fail", m[i].name); p = cat2(SLOT, f); b = cx_read(p, &k);
+        if (b && k) { char *z = xmalloc(k + 1); memcpy(z, b, k); z[k] = 0; die(z); }
+        die("ChildProcessError: a stream-stage construction died");
+    }
+    free(pid); free(done);
+}
+
+/* ---- path.read_text() (strict UTF-8, universal newlines) ---- */
+static int utf8_bad(const unsigned char *s, size_t n, size_t *at) {
+    size_t i = 0;
+    while (i < n) {
+        unsigned c = s[i], k, need; unsigned long v;
+        if (c < 0x80) { i++; continue; }
+        if (c >= 0xC2 && c <= 0xDF) { need = 1; v = c & 31; }
+        else if (c >= 0xE0 && c <= 0xEF) { need = 2; v = c & 15; }
+        else if (c >= 0xF0 && c <= 0xF4) { need = 3; v = c & 7; }
+        else { *at = i; return 1; }
+        for (k = 1; k <= need; k++) {
+            if (i + k >= n || (s[i + k] & 0xC0) != 0x80) { *at = i; return 1; }
+            v = v << 6 | (s[i + k] & 63);
+        }
+        if ((need == 2 && (v < 0x800 || (v >= 0xD800 && v <= 0xDFFF))) || (need == 3 && (v < 0x10000 || v > 0x10FFFF))) { *at = i; return 1; }
+        i += need + 1;
+    }
+    return 0;
+}
+static char *read_text(const char *path, size_t *outn) {
+    size_t n, i, j, at; unsigned char *b = (unsigned char *)cx_read(path, &n); char *o;
+    if (!b) { buf m = {0, 0, 0}; oserror(&m, errno ? errno : ENOENT, path); die((char *)m.p); }
+    if (utf8_bad(b, n, &at)) {
+        buf m = {0, 0, 0}; char t[16];
+        bstr(&m, "UnicodeDecodeError: 'utf-8' codec can't decode byte "); snprintf(t, sizeof t, "0x%02x", b[at]); bstr(&m, t);
+        bstr(&m, " in position "); bnum(&m, (long long)at); bstr(&m, ": invalid start byte"); die((char *)m.p);
+    }
+    o = xmalloc(n + 1);
+    for (i = j = 0; i < n; i++) {
+        if (b[i] == '\r') { o[j++] = '\n'; if (i + 1 < n && b[i + 1] == '\n') i++; }
+        else o[j++] = (char)b[i];
+    }
+    o[j] = 0; *outn = j; free(b);
+    return o;
+}
+static void write_file(const char *path, const void *p, size_t n) {
+    if (cx_write(path, p, n)) { buf m = {0, 0, 0}; oserror(&m, errno, path); die((char *)m.p); }
+}
+
+/* ---- exec/facts/load.py facts(STEM): {name: value} of a two-column table, the value cell as written ---- */
+typedef struct fact { char *name, *value; } fact;
+static fact *FACTS; static int NFACTS;
+static void load_facts(const char *stem) {
+    char rel[256], *p, *t, *line, *e; size_t n; int ncol = 0, namecol = -1, valcol = -1, i;
+    snprintf(rel, sizeof rel, "exec/facts/%s.tsv", stem);
+    p = cat2(ROOT, rel); t = read_text(p, &n);
+    line = t; e = strchr(line, '\n'); if (e) *e = 0;
+    while (*line == '#') line++;
+    while (*line == ' ' || *line == '\t') line++;
+    {   char *h = line, *x;
+        for (i = 0;; i++) {
+            x = strchr(h, '\t'); if (x) *x = 0;
+            { char *a = h, *z = h + strlen(h); while (z > a && (z[-1] == ' ' || z[-1] == '\n')) *--z = 0;
+              if (!strcmp(a, "name")) namecol = i; if (!strcmp(a, "value")) valcol = i; }
+            ncol++;
+            if (!x) break; h = x + 1;
+        } }
+    FACTS = xmalloc(sizeof(fact) * (n / 2 + 2)); NFACTS = 0;
+    while (e) {
+        char *cell[64]; int nc = 0;
+        line = e + 1; e = strchr(line, '\n'); if (e) *e = 0;
+        if (!*line || *line == '#') continue;
+        cell[nc++] = line;
+        { char *x = line; while ((x = strchr(x, '\t')) && nc < 64) { *x++ = 0; cell[nc++] = x; } }
+        if (namecol < 0 || valcol < 0 || namecol >= nc || valcol >= nc) continue;
+        FACTS[NFACTS].name = cell[namecol]; FACTS[NFACTS].value = cell[valcol]; NFACTS++;
+    }
+    (void)ncol;
+}
+static const char *factval(const char *name) {   /* the last row of a repeated name wins, as the .py's dict */
+    int i; const char *v = 0;
+    for (i = 0; i < NFACTS; i++) if (!strcmp(FACTS[i].name, name)) v = FACTS[i].value;
+    if (!v) { buf m = {0, 0, 0}; bstr(&m, "KeyError: "); repr_str(&m, name); die((char *)m.p); }
+    return v;
+}
+/* json.dumps of a fact cell: an integer cell as its digits, any other cell as a JSON string */
+static void fact_json(buf *o, const char *v) {
+    const char *s = v; int ok = *s != 0;
+    if (*s == '-') s++;
+    if (!*s) ok = 0;
+    for (; *s; s++) if (*s < '0' || *s > '9') ok = 0;
+    if (ok && (v[0] == '0' || (v[0] == '-' && v[1] == '0')) && strlen(v) > (size_t)(v[0] == '-' ? 2 : 1)) ok = 0;
+    if (ok) { bstr(o, v); return; }
+    bbyte(o, '"');
+    for (s = v; *s; s++) {
+        unsigned c = (unsigned char)*s;
+        if (c == '"' || c == '\\') { bbyte(o, '\\'); bbyte(o, (int)c); }
+        else if (c < 32 || c > 126) { char t[8]; snprintf(t, sizeof t, "\\u%04x", c); bstr(o, t); }
+        else bbyte(o, (int)c);
+    }
+    bbyte(o, '"');
+}
+
+/* ---- the probe model: parse.json with every DL.ready edge sent to PROBE.fields and the PROBE.* states that write
+   each retained map field back out (the .py's state()/branch()/word(), serialised as its json.dumps(separators=
+   (',',':')) would; the rest of parse.json is kept byte for byte, which is what that round trip writes) ---- */
+static size_t jstr_end(const unsigned char *s, size_t n, size_t i) {
+    i++;
+    while (i < n && s[i] != '"') { if (s[i] == '\\') i++; i++; }
+    return i + 1;
+}
+static size_t jws(const unsigned char *s, size_t n, size_t i) { while (i < n && (s[i] == ' ' || s[i] == '\n' || s[i] == '\t' || s[i] == '\r')) i++; return i; }
+static size_t jvalue_end(const unsigned char *s, size_t n, size_t i) {
+    int d = 0;
+    if (i < n && s[i] == '"') return jstr_end(s, n, i);
+    if (i < n && s[i] != '{' && s[i] != '[') { while (i < n && s[i] != ',' && s[i] != '}' && s[i] != ']') i++; return i; }
+    while (i < n) {
+        int c = s[i];
+        if (c == '"') { i = jstr_end(s, n, i); continue; }
+        if (c == '{' || c == '[') d++;
+        else if (c == '}' || c == ']') { d--; if (!d) return i + 1; }
+        i++;
+    }
+    return n;
+}
+static int jkeyis(const unsigned char *s, size_t ks, size_t ke, const char *name) {
+    size_t l = strlen(name);
+    return ke - ks == l + 2 && !memcmp(s + ks + 1, name, l);
+}
+static void malformed(void) { die("json.decoder.JSONDecodeError: parse.json is not the generator's compact delta"); }
+static int NSEQ0;
+static const char *F_SPLICES, *F_LINE, *F_LINES, *F_NAME;   /* exec/facts/tokenlocations.tsv */
+static void word(buf *o, const char *reg) {
+    static const int sh[4] = { 0, 8, 16, 24 }; int k;
+    for (k = 0; k < 4; k++) {
+        bstr(o, ",[\"ALUI\",\"sar\",\"probe_byte\",\""); bstr(o, reg); bstr(o, "\","); bnum(o, sh[k]); bstr(o, "]");
+        bstr(o, ",[\"OUTW\",\"probe_byte\"]");
+    }
+}
+static void pstate(buf *st, buf *sq, int *nseq, const char *name, const char *nxt, buf *acts) {
+    int k, ix = (*nseq)++;
+    bstr(sq, ",["); bput(sq, acts->p + 1, acts->n - 1); bbyte(sq, ']');   /* acts->p starts with a ',' */
+    bstr(st, ",\""); bstr(st, name); bstr(st, "\":[\"b\",{");
+    for (k = 0; k < 257; k++) { if (k) bbyte(st, ','); bbyte(st, '"'); bnum(st, k); bstr(st, "\":[\""); bstr(st, nxt); bstr(st, "\","); bnum(st, ix); bbyte(st, ']'); }
+    bstr(st, "}]");
+    acts->n = 0;
+}
+static void pbranch(buf *st, buf *sq, int *nseq, const char *name, const char *c0, const char *c12) {
+    int ix = *nseq;
+    bstr(st, ",\""); bstr(st, name); bstr(st, "\":[\"r\",{\"0\":[\""); bstr(st, c0); bstr(st, "\","); bnum(st, ix);
+    bstr(st, "],\"1\":[\""); bstr(st, c12); bstr(st, "\","); bnum(st, ix); bstr(st, "],\"2\":[\""); bstr(st, c12);
+    bstr(st, "\","); bnum(st, ix); bstr(st, "]}]");
+    bstr(sq, ",[]"); (*nseq)++;
+}
+static void build_probe(const char *in, const char *out) {
+    size_t n, i, ks, ke, vs, ve, states_s = 0, states_e = 0, seqs_s = 0, seqs_e = 0, row_s = 0, row_e = 0;
+    unsigned char *s = (unsigned char *)cx_read(in, &n);
+    int nstates = 0, nseq = 0, have_dl = 0;
+    buf st = {0, 0, 0}, sq = {0, 0, 0}, acts = {0, 0, 0}, row = {0, 0, 0}, o = {0, 0, 0};
+    if (!s) { buf m = {0, 0, 0}; oserror(&m, errno ? errno : ENOENT, in); die((char *)m.p); }
+    i = jws(s, n, 0); if (i >= n || s[i] != '{') malformed();
+    i++;
+    for (;;) {   /* the top-level object: find "states" and "seqs" */
+        i = jws(s, n, i); if (i < n && s[i] == '}') break;
+        if (i >= n || s[i] != '"') malformed();
+        ks = i; ke = jstr_end(s, n, i); i = jws(s, n, ke); if (i >= n || s[i] != ':') malformed();
+        vs = jws(s, n, i + 1); ve = jvalue_end(s, n, vs);
+        if (jkeyis(s, ks, ke, "states")) { states_s = vs; states_e = ve; }
+        if (jkeyis(s, ks, ke, "seqs")) { seqs_s = vs; seqs_e = ve; }
+        i = jws(s, n, ve); if (i < n && s[i] == ',') { i++; continue; }
+        if (i < n && s[i] == '}') break;
+        malformed();
+    }
+    if (!states_e || s[states_s] != '{' || !seqs_e || s[seqs_s] != '[') {
+        buf m = {0, 0, 0}; bstr(&m, "KeyError: "); repr_str(&m, !states_e ? "states" : "seqs"); die((char *)m.p);
+    }
+    i = states_s + 1;
+    for (;;) {   /* the states: find DL.ready; a PROBE.* state already there is not what the .py appends */
+        i = jws(s, n, i); if (s[i] == '}') break;
+        ks = i; ke = jstr_end(s, n, i); i = jws(s, n, ke); if (s[i] != ':') malformed();
+        vs = jws(s, n, i + 1); ve = jvalue_end(s, n, vs); nstates++;
+        if (ke - ks > 8 && !memcmp(s + ks, "\"PROBE.", 7)) die("AssertionError: parse.json already has a PROBE.* state (not covered)");
+        if (jkeyis(s, ks, ke, "DL.ready")) {   /* ["MODE",{KEY:[TARGET,SEQ],...}] */
+            size_t j = jws(s, n, vs + 1); have_dl = 1;
+            j = jvalue_end(s, n, j); j = jws(s, n, j); if (s[j] != ',') malformed();
+            j = jws(s, n, j + 1); if (s[j] != '{') malformed();
+            row_s = j; row_e = jvalue_end(s, n, j);
+            bbyte(&row, '{'); j++;
+            for (;;) {
+                size_t a, b, t0, t1;
+                j = jws(s, n, j); if (s[j] == '}') break;
+                a = j; b = jstr_end(s, n, j); j = jws(s, n, b); if (s[j] != ':') malformed();
+                j = jws(s, n, j + 1); if (s[j] != '[') malformed();
+                t0 = jws(s, n, j + 1); t1 = jvalue_end(s, n, t0);
+                if (!(t1 - t0 == 7 && !memcmp(s + t0, "\"START\"", 7))) die("AssertionError");
+                if (row.n > 1) bbyte(&row, ',');
+                bput(&row, s + a, b - a); bstr(&row, ":[\"PROBE.fields\"");
+                j = jvalue_end(s, n, j); bput(&row, s + t1, j - t1);
+                j = jws(s, n, j); if (s[j] == ',') j++;
+            }
+            bbyte(&row, '}');
+        }
+        i = jws(s, n, ve); if (s[i] == ',') i++;
+    }
+    if (!have_dl) die("KeyError: 'DL.ready'");
+    i = seqs_s + 1;
+    for (;;) {
+        i = jws(s, n, i); if (s[i] == ']') break;
+        i = jvalue_end(s, n, i); NSEQ0++;
+        i = jws(s, n, i); if (s[i] == ',') i++;
+    }
+    nseq = NSEQ0;
+    {   static const unsigned char magic[7] = { 'U', 'N', 'I', 'P', 'P', '1', 0 };
+        static const char *const fields[5] = { "diag_textlen", "diag_forced", "diag_auto", "diag_nsplice", "diag_ninclude" };
+        int k;
+        for (k = 0; k < 7; k++) { bstr(&acts, ",[\"OUT\","); bnum(&acts, magic[k]); bbyte(&acts, ']'); }
+        for (k = 0; k < 5; k++) word(&acts, fields[k]);
+        bstr(&acts, ",[\"LDI\",\"probe_i\",0],[\"CMP\",\"probe_i\",\"diag_nsplice\"]");
+        pstate(&st, &sq, &nseq, "PROBE.fields", "PROBE.sp", &acts);
+        pbranch(&st, &sq, &nseq, "PROBE.sp", "PROBE.splice", "PROBE.inc0");
+        bstr(&acts, ",[\"LDX\",\"probe_v\",\"probe_i\","); fact_json(&acts, F_SPLICES); bbyte(&acts, ']');
+        word(&acts, "probe_v");
+        bstr(&acts, ",[\"ALUI\",\"add\",\"probe_i\",\"probe_i\",1],[\"CMP\",\"probe_i\",\"diag_nsplice\"]");
+        pstate(&st, &sq, &nseq, "PROBE.splice", "PROBE.sp", &acts);
+        bstr(&acts, ",[\"LDI\",\"probe_i\",0],[\"CMP\",\"probe_i\",\"diag_ninclude\"]");
+        pstate(&st, &sq, &nseq, "PROBE.inc0", "PROBE.inc", &acts);
+        pbranch(&st, &sq, &nseq, "PROBE.inc", "PROBE.include", "PROBE.text");
+        bstr(&acts, ",[\"LDX\",\"probe_v\",\"probe_i\","); fact_json(&acts, F_LINE); bbyte(&acts, ']');
+        word(&acts, "probe_v");
+        bstr(&acts, ",[\"LDX\",\"probe_v\",\"probe_i\","); fact_json(&acts, F_LINES); bbyte(&acts, ']');
+        word(&acts, "probe_v");
+        bstr(&acts, ",[\"LDX\",\"probe_name\",\"probe_i\","); fact_json(&acts, F_NAME); bbyte(&acts, ']');
+        bstr(&acts, ",[\"BLEN\",\"probe_v\",\"probe_name\"]");
+        word(&acts, "probe_v");
+        bstr(&acts, ",[\"LDI\",\"probe_zero\",0],[\"INPUSH\",\"probe_name\"],[\"SPAN2\",\"probe_zero\",\"probe_v\"],[\"INPOP\"]"
+                    ",[\"ALUI\",\"add\",\"probe_i\",\"probe_i\",1],[\"CMP\",\"probe_i\",\"diag_ninclude\"]");
+        pstate(&st, &sq, &nseq, "PROBE.include", "PROBE.inc", &acts);
+        bstr(&acts, ",[\"LDI\",\"probe_zero\",0],[\"INPUSH\",\"diag_source\"],[\"SPAN2\",\"probe_zero\",\"diag_textlen\"],[\"INPOP\"],[\"ACCEPT\"]");
+        pstate(&st, &sq, &nseq, "PROBE.text", "DEAD", &acts);
+    }
+    {   /* splice: the DL.ready row, the new states before the states' '}', the new seqs before the seqs' ']' */
+        size_t at[3], to[3]; buf *with[3]; int ord[3] = { 0, 1, 2 }, a, b; size_t pos = 0;
+        size_t sc = states_e - 1, qc = seqs_e - 1;
+        buf st2 = {0, 0, 0}, sq2 = {0, 0, 0};
+        bput(&st2, nstates ? st.p : st.p + 1, nstates ? st.n : st.n - 1);
+        bput(&sq2, NSEQ0 ? sq.p : sq.p + 1, NSEQ0 ? sq.n : sq.n - 1);
+        at[0] = row_s; to[0] = row_e; with[0] = &row;
+        at[1] = sc; to[1] = sc; with[1] = &st2;
+        at[2] = qc; to[2] = qc; with[2] = &sq2;
+        for (a = 0; a < 3; a++) for (b = a + 1; b < 3; b++) if (at[ord[b]] < at[ord[a]]) { int t = ord[a]; ord[a] = ord[b]; ord[b] = t; }
+        for (a = 0; a < 3; a++) { int k = ord[a]; bput(&o, s + pos, at[k] - pos); bput(&o, with[k]->p, with[k]->n); pos = to[k]; }
+        bput(&o, s + pos, n - pos);
+    }
+    write_file(out, o.p, o.n);
+    free(s); free(o.p); free(st.p); free(sq.p); free(acts.p); free(row.p);
+}
+
+static const char *const BIG[] = { "pp.json", "pp.tbl", "pp.net", "lex.json", "lex.tbl", "lex.net", "typed.json", "typed.tbl",
+    "typed.net", "parse.json", "parse.tbl", "parse.net", "plain.json", "plain.tbl", "plain.net", "probe.json", "probe.tbl",
+    "probe.net", 0 };
+
+static res callp(char *const argv[]) { res r; callx(argv, 0, 0, "main", &r, 0); return r; }
+static void put(const char *name, const void *p, size_t n) { char *f = cat2(SLOT, name); write_file(f, p, n); free(f); }
+
+typedef struct kase { const char *name; char *src; size_t n; } kase;
+
+int main(int argc, char **argv) {
+    char *t, *run, *inc, *src_c;
+    kase cases[16]; int nc = 0, i;
+    res pp = {0, 0, 0, 0, 0}, tokens = {0, 0, 0, 0, 0};
+    unsigned long n = 0;
+    (void)argc; (void)argv;
+    find_root();
+    work_init("parse-locations");
+    BIGFILES = BIG;
+    tools_init();
+    t = SLOT; run = cat2(t, "run"); inc = cat2(ROOT, "include"); src_c = cat2(t, "source.c");
+    {   const char *cc = getenv("EXEC_CC"); char *rc = cat2(ROOT, "exec/c/run.c");
+        char *a[] = { (char *)(cc ? cc : "cc"), "-O2", rc, "-o", run, 0 };
+        callx(a, 0, 0, "main", 0, 0); free(rc); }
+    {   static const spec models[5] = {
+            { "pp", { "pp", "--locations", 0 } }, { "lex", { "lex", "--locations", 0 } }, { "typed", { "lex", "--typed", 0 } },
+            { "parse", { "parse2", "--locations", 0 } }, { "plain", { "parse2", 0 } } };
+        construct_all(models, 5); }
+    load_facts("tokenlocations");
+    F_SPLICES = factval("SPLICES"); F_LINE = factval("INCLUDE_LINE"); F_LINES = factval("INCLUDE_LINES"); F_NAME = factval("INCLUDE_NAME");
+    {   char *pj = cat2(t, "parse.json"), *pr = cat2(t, "probe.json"), *pt = cat2(t, "probe.tbl"), *pn = cat2(t, "probe.net");
+        char *tb = cat2(TOOLS, "tbl"), *nt = cat2(TOOLS, "net");
+        build_probe(pj, pr);
+        { char *a[] = { tb, pr, pt, 0 }; callx(a, 0, 0, "main", 0, 0); }
+        { char *a[] = { nt, pt, pn, 0 }; callx(a, 0, 0, "main", 0, 0); } }
+    put("local.h", "static int twice(int n){return n*2;}\n", 37);
+#define CASE(N, S) do { cases[nc].name = N; cases[nc].src = S; cases[nc].n = strlen(S); nc++; } while (0)
+    CASE("small", "int main(void){return 3;}\n");
+    CASE("macro", "#define VALUE 12345\nint main(void){return VALUE;}\n");
+    CASE("splice", "int main(void){return 1+\\\n2;}\n");
+    CASE("header", "#include \"local.h\"\nint main(void){return twice(3);}\n");
+    CASE("strings", "int main(void){char a[4]=\"xy\"; char *p=\"a\" \"b\";return a[1]+p[0];}\n");
+    CASE("printf", "int main(void){printf(\"%d %s\\n\",3,\"ok\");return 0;}\n");
+    CASE("static-ordinals", "int f(void){static int x=3;return x++;} int main(void){static int y=7;return f()+y;}\n");
+    CASE("paren-declarator", "int (twice)(int x){return x*2;} int (value)=5; int main(void){return twice(21)+value;}\n");
+    {   static const char *const files[2][2] = { { "fib", "examples/fib.c" }, { "b_strderef", "tests/c/b_strderef.c" } };
+        int k;
+        for (k = 0; k < 2; k++) { char *p = cat2(ROOT, files[k][1]); cases[nc].name = files[k][0]; cases[nc].src = read_text(p, &cases[nc].n); nc++; } }
+    {   char *ppnet = cat2(t, "pp.net"), *lexnet = cat2(t, "lex.net"), *typednet = cat2(t, "typed.net"), *plainnet = cat2(t, "plain.net"),
+             *parsenet = cat2(t, "parse.net"), *probenet = cat2(t, "probe.net"), *ppf = cat2(t, "pp"), *tokf = cat2(t, "tokens"),
+             *textf = cat2(t, "text"), *plainf = cat2(t, "plain");
+        for (i = 0; i < nc; i++) {
+            res plain, want, got, probe;
+            resfree(&pp); resfree(&tokens);
+            write_file(src_c, cases[i].src, cases[i].n);
+            { char *a[] = { run, ppnet, src_c, src_c, inc, 0 }; pp = callp(a); }
+            write_file(ppf, pp.out, pp.outn);
+            { char *a[] = { run, lexnet, ppf, 0 }; tokens = callp(a); }
+            write_file(tokf, tokens.out, tokens.outn);
+            if (pp.outn < 11) {
+                buf m = {0, 0, 0}; bstr(&m, "struct.error: unpack_from requires a buffer of at least 11 bytes for unpacking 4 bytes at offset 7 (actual buffer size is ");
+                bnum(&m, (long long)pp.outn); bbyte(&m, ')'); die((char *)m.p);
+            }
+            n = getu32(pp.out + 7);
+            if (n) write_file(textf, pp.out + (n > pp.outn ? 0 : pp.outn - n), n > pp.outn ? pp.outn : n);
+            else write_file(textf, "", 0);
+            { char *a[] = { run, typednet, textf, 0 }; plain = callp(a); }
+            write_file(plainf, plain.out, plain.outn);
+            { char *a[] = { run, plainnet, plainf, 0 }; want = callp(a); }
+            { char *a[] = { run, parsenet, tokf, 0 }; got = callp(a); }
+            if (got.outn != want.outn || memcmp(got.out, want.out, got.outn)) { buf m = {0, 0, 0}; bstr(&m, "AssertionError: "); bstr(&m, cases[i].name); die((char *)m.p); }
+            { char *a[] = { run, probenet, tokf, 0 }; probe = callp(a); }
+            if (probe.outn != pp.outn || memcmp(probe.out, pp.out, pp.outn)) {
+                buf m = {0, 0, 0}; bstr(&m, "AssertionError: ("); repr_str(&m, cases[i].name); bstr(&m, ", 'retained map')"); die((char *)m.p);
+            }
+            printf("located parser %s tape unchanged\n", cases[i].name); fflush(stdout);
+            resfree(&plain); resfree(&want); resfree(&got); resfree(&probe);
+        }
+        {   /* perturb a valid joined frame: errors are rejected, with no partial tape */
+            const unsigned char *tk = tokens.out; size_t L = tokens.outn, ppstart = 12, ppend = ppstart + pp.outn;
+            buf bad[10]; char *badf = cat2(t, "bad"); int k;
+#define SL(B, A, Z) do { size_t a_ = (A) < L ? (A) : L, z_ = (Z) < L ? (Z) : L; if (a_ < z_) bput(B, tk + a_, z_ - a_); else bput(B, "", 0); } while (0)
+            memset(bad, 0, sizeof bad);
+            bput(&bad[0], "", 0);
+            SL(&bad[1], 0, 7);
+            SL(&bad[2], 0, 11);
+            bstr(&bad[3], "BADMAG!!"); SL(&bad[3], 8, L);
+            SL(&bad[4], 0, 8); bu32(&bad[4], (unsigned long)L); SL(&bad[4], 12, L);
+            SL(&bad[5], 0, ppstart); bstr(&bad[5], "BADMAG!"); SL(&bad[5], ppstart + 7, L);
+            SL(&bad[6], 0, ppstart + 7); bu32(&bad[6], 0x80000000UL); SL(&bad[6], ppstart + 11, L);
+            SL(&bad[7], 0, ppend); bbyte(&bad[7], '!'); SL(&bad[7], ppend + 1, L);
+            if (n + 1 > 0xFFFFFFFFUL) die("struct.error: 'I' format requires 0 <= number <= 4294967295");
+            SL(&bad[8], 0, ppend + 1); bu32(&bad[8], n + 1); SL(&bad[8], ppend + 5, L);
+            SL(&bad[9], 0, ppend + 5); bbyte(&bad[9], '!'); SL(&bad[9], ppend + 6, L);
+            for (k = 0; k < 10; k++) {
+                res p;
+                write_file(badf, bad[k].p, bad[k].n);
+                { char *a[] = { run, parsenet, badf, 0 }; p = runx(a, 0, 60, 1, "main"); }
+                if (!(p.rc == 1 && p.outn == 0 && has(p.err, p.errn, "malformed token locations"))) {
+                    buf m = {0, 0, 0}; bstr(&m, "AssertionError: ("); bnum(&m, k); bstr(&m, ", "); bnum(&m, p.rc); bstr(&m, ", ");
+                    repr_bytes(&m, p.err, p.errn); bbyte(&m, ')'); die((char *)m.p);
+                }
+                resfree(&p);
+            }
+        }
+    }
+    printf("located parser: %d tape comparisons, 10 malformed frames rejected\n", nc);
+    leave(0);
+    return 0;
+}

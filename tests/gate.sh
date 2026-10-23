@@ -368,7 +368,7 @@ job exec-pp-literals tests/bound 58 sh ./unisacc.com -run exec/pp/literalcheck.c
 job exec-pp-pragmas tests/bound 58 sh ./tests/cxbin exec/pp/pragmacheck.cx   # (.cx port, 2026-10-23) push_macro/pop_macro stacks: network tokens = host cc -E -P -nostdinc tokens, 2 named refusals, both formats
 job exec-pp-object tests/bound 58 sh ./tests/cxbin exec/pp/objectpredefinecheck.cx   # (.cx port, 2026-10-23) object-mode and standard predefines, each case's resources handed to the flat table as a run --package; three variants check-net
 job exec-pp-directives tests/bound 58 sh ./unisacc.com -run exec/pp/directivecheck.cx   # (.cx port, 2026-10-23) R21: live #error, #include limit, stray #endif/#else, string prefixes = reference or named refusal
-job exec-r21-e3 python3 ./exec/parse2/r21check.py   # R21: E3 on this week's reference fixes = reference bytes or named refusal (never different bytes)
+job exec-r21-e3 tests/bound 58 sh ./tests/cxbin exec/parse2/r21check.cx   # R21: E3 on this week's reference fixes = reference bytes or named refusal (never different bytes); (.cx port, 2026-10-23) seed gen/tbl/net + run.c, no Python
 job exec-pploc tests/bound 58 sh ./unisacc.com -run exec/pp/locationcheck.cx   # (.cx port, 2026-10-23) source-position metadata from actual preprocessing
 job exec-lexpos tests/bound 58 sh ./unisacc.com -run exec/lex/positioncheck.cx tests/cxlib/lexdelta.cx   # (.cx port, 2026-10-23) token offsets against reference tpos
 job exec-lexloc tests/bound 58 sh ./unisacc.com -run exec/lex/locationcheck.cx tests/cxlib/lexdelta.cx   # (.cx port, 2026-10-23) E2/E1 location envelope
@@ -379,8 +379,8 @@ job exec-modelobject python3 ./tests/modelobjectcheck.py       # two ELF archite
 job exec-objectfacts python3 ./tests/objectfactscheck.py       # object tape facts in delta
 job exec-elfobject python3 ./tests/elfobjectdeltacheck.py        # independent ET_REL layout oracle
 job exec-unitparse sh ./tests/unitparsecheck.sh              # separate-unit delta and network parity
-job exec-parseloc python3 ./exec/parse2/locationcheck.py         # E3 retained maps and tape parity
-job exec-f1-attributes python3 ./exec/parse2/f1attributescheck.py --require-cached --ua "$UA" # marked definitions against reference tape
+job exec-parseloc tests/bound 58 sh ./tests/cxbin exec/parse2/locationcheck.cx   # (.cx port, 2026-10-23) E3 retained maps and tape parity; models by seed/gen.c+tbl.c+net.c (= gen.py/tbl.py/net.py bytes), no Python
+job exec-f1-attributes tests/bound 58 sh ./tests/cxbin exec/parse2/f1attributescheck.cx --require-cached --ua "$UA"   # (.cx port, 2026-10-23) marked definitions against reference tape; exec/pp/sim.py executor in C, deltas by seed/gen.c (no model cache: --require-cached accepted, no effect)
 job exec-diag python3 ./exec/parse2/diagnosticcheck.py           # actual reference diagnostic rendering
 # Cold parse2 models (30-45 s each) moved out of the seven warning/error checks below:
 # warnprep fills the shared content-keyed cache (compilerpack.built_model, digest-checked
@@ -634,7 +634,7 @@ for shard in 1 2; do job exec-driver-language-$shard ./exec/c/compilercheck.sh l
 for driver in cc asm; do job exec-warningdriver-$driver ./exec/c/warningcheck.sh "$driver"; done
 for flag in Wall Wextra Werror; do job exec-warningdriver-ua-$flag ./exec/c/warningcheck.sh ua "$flag"; done
 job exec-multiwarn ./exec/c/multiwarningcheck.sh
-job exec-unitlocations python3 ./exec/parse2/unitlocationcheck.py
+job exec-unitlocations tests/bound 58 sh ./tests/cxbin exec/parse2/unitlocationcheck.cx   # (.cx port, 2026-10-23) located unit framing vs independent serializer + $UA tape/diagnostics; models by seed tools, no Python
 for kind in cc ua asm; do
     for pair in m n pool; do
         for order in forward reverse; do job exec-multi-$kind-$pair-$order env DRIVER_KIND=$kind MULTI_PART=tapes-$pair-$order ./exec/c/multicheck.sh; done
@@ -1076,7 +1076,7 @@ job gate-select python3 tests/gateselectcheck.py   # offline selector contracts;
 # tsv.  all.sh is deliberately unchanged.
 job exec-elfdata-bridge   python3 ./exec/enc/librarysymbolscheck.py
 job exec-lex-sourcefacts tests/bound 58 sh ./unisacc.com -run exec/lex/sourcefactscheck.cx tests/cxlib/lexdelta.cx   # (.cx port, 2026-10-23) E1 provenance framing (USLFACT1)
-job exec-parse2-libimports python3 ./exec/parse2/libraryimportscheck.py
+job exec-parse2-libimports tests/bound 58 sh ./tests/cxbin exec/parse2/libraryimportscheck.cx   # (.cx port, 2026-10-23) seed gen/tbl/net + run.c replace gen.py + exec/pp/sim.py
 for m in 0 1 2 3 4 5 6 7 8; do job fresh-order-$m tests/bound 58 sh ./unisacc.com -run tests/freshordercheck.cx -- $m; done   # T1d: global fresh order = tests/freshorder.tsv; (.cx port, 0.0.43) seed/gen.c + tests/freshorderhook.h, not gen.py (--errors modes ran 63-76 s)
 job lib-bindings-registry python3 ./tests/librarybindingscheck.py
 job tsv-build-account     python3 ./tests/tsvbuild_check.py
