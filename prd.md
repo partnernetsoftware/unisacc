@@ -683,3 +683,5 @@ source-only 冷准备在原 55 秒看门狗内实际成功；具名 gate 的冷�
 - exec-chain 索引首次九项闸八绿一红：新 .cx 的旧 stages 标识与 stage_environment 键违反术语规则。改用 nets 与 construction_environment，不加豁免；身份变化后重新冷预建和九项实跑。原 v6 日志仅证明术语修正前候选，保持原证据不冒充新源码。
 
 - 2026-10-24 cxbin 缓存闭包缺口：原键仅绑定主 .cx 和头文件，未绑定 use 模块正文，直接或传递模块正文修改可错误复用旧二进制。以原产品 -cx-plan 枚举全部编译单元，逐个绑定实际文件完整 SHA256；计划、缺失文件和哈希失败均拒绝。保留 safedel 的系统 cc bootstrap，不依赖产品计划；不改核心或 F6 产品。
+
+- 2026-10-24 新增 exec-chain-model-prepare 的全量枚举实际1120项、CONTRACT188项；gatelayers --check 实际红因 stagemap 漏映射。该项仅构造默认模型输入，精确归现 build 轴；五分片完整对拍仍归 chain。只增加一个精确名，不扩通配或改层级口径；原红与stderr保留，重新实际 gate-layers 验收。
