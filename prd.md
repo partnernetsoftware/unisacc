@@ -637,3 +637,11 @@ The nine fresh-order dependency declarations still name the removed checker file
 All twelve rejected edge leaves now have paired replay evidence on the same source/probe/gold tables: privately mounting the original 8b82f76d include tree restores every frozen body byte-for-byte. Current headers change query counts, add one sizeof parser key, one sizeof scope key and six type keys, remove no keys, and change no answer for a common key. Pointer-equality queries also cause the reference parser's existing auxiliary '+' signedness lookup; its illegal labels are retained, not replaced. Re-record these measured surfaces with the existing deterministic producer and retain every negative gate.
 
 The stage-contract e3 model pin is exactly the old 4fbfdad2 root's extracted model ac5f7703. The new 4f0b493c root extracts 2bbfe160, byte-identical to the native packer's encoding of this candidate's errorparse.net. Re-capturing the complete accept directory from the matching package leaves every file unchanged. The lower model remains byte-identical at 3f4c80e2. Update only the e3 model/pin and its provenance; keep both boundary fixtures' positive/negative assertions and all UNKNOWN cases.
+
+### 0.0.43 F3/F6 实证收口（2026-10-23）
+
+构建上下文1a26da09、F1最终根4f0b493c上，完整CONTRACT187项实际执行完毕：186 PASS、0失败、1 UNVERIFIED，原队列rc4。唯一未验证为bound的Darwin Terminal归属子项；本机退出、信号、派生进程预算及Linux清理断言通过。按终点线F3宿主例外单列，不增加全局豁免、不改写为PASS。完整日志、输入pin和现有出口表见research/c43-f3-final-evidence/。
+
+F6正常候选构建、stage2/stage3及官方fixedpoint实际完成；seed、stage2、stage3三个实际文件SHA均为4f0b493c7a83d73a4ae1b348c8400ea3b7eda0ea190051b54a84c712a6730eda，完整产品收据一致，根与候选双ident通过。证据见research/c43-f6-final-evidence/。此为构建固定点，不代表F4或公开验收。
+
+F4仍待完成。原全量队列前11项中3 PASS、8红：三个arm64大闭包及准备步骤获25秒而超时，两项前置失败、两个seedparse2分片缺memory证据；不扩大R11或覆盖原红。真实profile定位指纹重复JSON/路径规约/哈希开销；原生原型旧哈希对照和纯数据基准通过，但UTF8拒绝和FD继承仍需补证，未接入生产。原型只留scratch out，不增加Python逻辑。当前刀只落F3/F6证据与仪表板F6行；后续正式队列按新输入重新建state，旧结果保留。

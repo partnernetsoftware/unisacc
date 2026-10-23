@@ -6,7 +6,7 @@
 
 - **0.0.43 终点线**（`plans/v0.0.43-finish-line.md`）：M0/M1/M3/M5/M6 已完成；静默错码已修（`(*x[N])[M]` 具名拒绝 9df1417c、bit-field 复合赋值 0fc2428b）。
   - **F1 产品修复批已落地**：a21a7ed1..ffb1fdbf，根产品 SHA256 `4f0b493c7a83d73a4ae1b348c8400ea3b7eda0ea190051b54a84c712a6730eda`，ident verified；657 文件差分、E3/PP 重封与 seedmemory 键见 `research/c43-f1-evidence/README.md`。cx.h 与根产品同锁安装。
-  - F2 文档与探针迁移见 `research/c43-f2-evidence.md`；F3–F6 待验收。M9（Draft/Latest/签名/公开）归主人。
+  - F2 已完成：文档与探针迁移见 `research/c43-f2-evidence.md`。F3 完整187项：186 PASS、0失败、1 Darwin 宿主未验证；按终点线宿主例外单列，原 rc4 保留，见 `research/c43-f3-final-evidence/README.md`。F6 候选与三阶段 comboot 实际同 SHA、官方 fixedpoint 和双 ident 通过，见 `research/c43-f6-final-evidence/README.md`。F4 全量1118项队列仍待完成；F5 说明仍待最终闸计数。M9（Draft/Latest/签名/公开）归主人。
 - **零 Python**（prd.md §1 硬目标；台账 `tests/zeropython.cx`）：调用点 1789 / unisa 依赖 92 / `.py` 411（起点 2253 / 163 / 452）。剥离计划 `plans/unisa-detach.md`：W1 全部落地；W2 起未落。
 - **.cx**：内置前奏 edition 1（`include/cx.h`）、`#pragma unisa use` 模块（`src/cxmod.c`）、唯一删除守卫 `include/unisa_safedel.h`（台账 `tests/deletes.tsv`，闸 `deletecheck`）。
 - **flownet**：W0–W4 绿；W6 B1 收口已落（054855e0、bd73c837），验证未完成；W5 在作者本机 scratch 已完成未落。
