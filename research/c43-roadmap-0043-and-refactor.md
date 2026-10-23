@@ -236,7 +236,7 @@
 | tools-2 分片的 `python3 -m unisa compile`（`tests/tools.sh:92`） | 闸作业，正在超时 | 改成用产品跑；同时能给超时债销账 |
 | CI runner 上的 `unisa` 参考、comdemo、winsuite；`macosbundle.py`；`draftfetch.py` | S11、S16、S17 | 不在本机的约束范围内，排在最后 |
 
-**保留**：Python seed（`unisa/`）继续当 oracle。tdesc 审计实测它在所有探针上都正确。重构不新增 Python，但 R3 改 k2 常量时仍会运行现有的 `export.py`。这一点已声明，在替换顺序第 4 项消掉。
+**目标是 100% 零 Python 依赖（主人 2026-10-23 重申硬目标；原「保留当 oracle」作废）：** 当前基线：`python3` 调用点 **2253**（`tests/gate.sh` 占 183）、`import unisa` 的文件 **86**、剩余 `.py` **452**。Python seed（`unisa/`）只是过渡参考物，这三项同时清零后才移入 `archive/`（不删，仅人工参考，不参与构建、闸与验证链，也不充当“裁判”）。现存 86 个文件仍 `import unisa`（`abi_audit.py`、`gold_audit.py`、`consts_check.py`、`layout_check.py`、`modelsignature3check.py` 等），这是 py2cx 的真正尾巴：逐个改为由产品自身判定或迁 `.cx`。`export.py` 在 R3 期间的临时用途按替换顺序第 4 项消掉；原文“R3 改 k2 常量时仍会运行现有的 `export.py`”仅限于 R3 那一刀，不构成保留理由。
 
 ---
 

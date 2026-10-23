@@ -1,0 +1,55 @@
+From 7e6a4615eb06d5a4428d5df9b6581a05bc41b7ac Mon Sep 17 00:00:00 2001
+From: x <x@x>
+Date: Fri, 23 Oct 2026 10:53:26 +0800
+Subject: [PATCH 6/8] fix(cx): cx_read of a directory is NULL, as its contract
+ and Python's open() say
+
+---
+ include/cx.h   | 7 ++++++-
+ tests/cx_k0.cx | 4 +++-
+ 2 files changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/include/cx.h b/include/cx.h
+index 7acd1f2..826d123 100644
+--- a/include/cx.h
++++ b/include/cx.h
+@@ -52,11 +52,16 @@ static char *_cx_slurp(FILE *__u_f, size_t *__u_len) {
+ }
+ #endif
+ 
++/* the whole file, as _cx_slurp; NULL when it cannot be opened or a read fails -- a directory
++   included (fopen "rb" opens one on POSIX and the first read fails with EISDIR; it was an empty
++   buffer until 0.0.43, where Python's open() raises) */
+ #if !__UNISA_FTRIM_LIBC || __UN_cx_read
+ static char *cx_read(const char *__u_path, size_t *__u_len) {
+     FILE *__u_f = fopen(__u_path, "rb"); char *__u_b;
+     if (!__u_f) return 0;
+-    __u_b = _cx_slurp(__u_f, __u_len); fclose(__u_f); return __u_b;
++    __u_b = _cx_slurp(__u_f, __u_len);
++    if (__u_b && ferror(__u_f)) { free(__u_b); __u_b = 0; if (__u_len) *__u_len = 0; }
++    fclose(__u_f); return __u_b;
+ }
+ #endif
+ 
+diff --git a/tests/cx_k0.cx b/tests/cx_k0.cx
+index b0a2e80..6785411 100644
+--- a/tests/cx_k0.cx
++++ b/tests/cx_k0.cx
+@@ -1,5 +1,5 @@
+ #!/usr/bin/env -S unisacc.com -run
+-/* 0.0.35 K0: cx_runv_timeout (argv, no shell; exit, timeout, missing program) and cx_walk */
++/* 0.0.35 K0: cx_runv_timeout (argv, no shell; exit, timeout, missing program) and cx_walk; 0.0.43: cx_read */
+ 
+ static int cnt(const char *p, void *c) { (void)p; ++*(int *)c; return 0; }
+ int main(void) {
+@@ -11,5 +11,7 @@ int main(void) {
+     if (cx_runv_timeout(a4, 1, 0, 0) != 127) bad |= 8;
+     if (cx_walk("include/sys", cnt, &k) || k < 5) bad |= 16;
+     if (cx_walk("/nonexistent", cnt, &k) != -1) bad |= 32;
++    if (cx_read("include/sys", &n) != 0 || n != 0) bad |= 64;            /* a directory is an error (0.0.43) */
++    if (!(o = cx_read("include/cx.h", &n)) || n < 100 || strncmp(o, "/* cx.h", 7)) bad |= 128;
+     printf("k0 bad=%d files=%d\n", bad, k); return bad;
+ }
+-- 
+2.34.1
+

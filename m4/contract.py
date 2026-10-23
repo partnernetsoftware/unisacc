@@ -10,7 +10,7 @@
 口径是否改由政委定；本文件只如实记录。
 """
 
-# 10 张网，与 ujs.seed.construct.gold.STAGES 同名同序。
+# 10 张网，与 ujs.seed.construct.gold.STAGES（即 ujs 的网注册表）同名同序。
 NETS = ("lex", "parse", "type", "scope", "shape", "irsel", "ic", "isel", "enc", "reloc")
 
 # 4 流：名字 → 决策网。流 1+2 在 ujs 前端里是同一次 compile，运行时按阶段记账。

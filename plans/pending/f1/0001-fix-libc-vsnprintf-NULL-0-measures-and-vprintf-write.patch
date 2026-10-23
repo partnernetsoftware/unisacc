@@ -1,0 +1,115 @@
+From 1486d5f8a5f71023b13647c68a4f3e7f74716e1c Mon Sep 17 00:00:00 2001
+From: x <x@x>
+Date: Fri, 23 Oct 2026 10:53:25 +0800
+Subject: [PATCH 1/8] fix(libc): vsnprintf(NULL, 0) measures and vprintf writes
+ to stdout -- neither sends bytes to descriptor 0
+
+---
+ include/stdio.h             | 11 ++++++--
+ tests/c/vsnprintf_measure.c | 51 +++++++++++++++++++++++++++++++++++++
+ 2 files changed, 60 insertions(+), 2 deletions(-)
+ create mode 100644 tests/c/vsnprintf_measure.c
+
+diff --git a/include/stdio.h b/include/stdio.h
+index c8fcca4..6409fb7 100644
+--- a/include/stdio.h
++++ b/include/stdio.h
+@@ -370,7 +370,7 @@ static int getchar(void) { return fgetc(stdin); }
+ 
+ #if !__UNISA_FTRIM_LIBC || __UN_vprintf
+ static int vprintf(const char *__u_fmt, va_list __u_ap) {
+-    return _u_vfmt(NULL, 0 - 1, NULL, __u_fmt, __u_ap);
++    return _u_vfmt(NULL, 0, stdout, __u_fmt, __u_ap);
+ }
+ #endif
+ 
+@@ -861,6 +861,10 @@ static int _u_ffmt(char *__u_out, unsigned long __u_bits, int __u_c, int __u_pre
+ }
+ #endif
+ 
++/* _u_vfmt writes to the buffer OUT (capacity CAP, -1 for unbounded) or, when OUT is NULL, to the stream F:
++   exactly one of them.  A caller with neither -- vsnprintf(NULL, 0, ...) measuring, vprintf before 0.0.43 --
++   sent its bytes to FILE * 0, which is descriptor 0 (stdin): a blocked write when nobody reads it, the hang the
++   .cx ports met, and a lost vprintf line.  The measuring callers pass a one-byte buffer of capacity 0 instead. */
+ #if !__UNISA_FTRIM_LIBC || __UN__u_vfmt
+ static int _u_vfmt(char *__u_out, long __u_cap, FILE *__u_f, const char *__u_fmt, va_list __u_ap) {
+     long __u_n;
+@@ -1045,6 +1049,8 @@ static int vsprintf(char *__u_b, const char *__u_fmt, va_list __u_ap) {
+ #endif
+ #if !__UNISA_FTRIM_LIBC || __UN_vsnprintf
+ static int vsnprintf(char *__u_b, long __u_cap, const char *__u_fmt, va_list __u_ap) {
++    char __u_z;
++    if (__u_b == NULL) { __u_b = &__u_z; __u_cap = 0; }   /* measure only (C99 7.19.6.12p2) */
+     return _u_vfmt(__u_b, __u_cap, NULL, __u_fmt, __u_ap);
+ }
+ #endif
+@@ -1064,7 +1070,8 @@ static int sprintf(char *__u_b, const char *__u_fmt, ...) {
+ #endif
+ #if !__UNISA_FTRIM_LIBC || __UN_snprintf
+ static int snprintf(char *__u_b, long __u_cap, const char *__u_fmt, ...) {
+-    va_list __u_ap; int __u_r;
++    va_list __u_ap; int __u_r; char __u_z;
++    if (__u_b == NULL) { __u_b = &__u_z; __u_cap = 0; }   /* measure only (C99 7.19.6.5p2) */
+     va_start(__u_ap, __u_fmt);
+     __u_r = _u_vfmt(__u_b, __u_cap, NULL, __u_fmt, __u_ap);
+     va_end(__u_ap);
+diff --git a/tests/c/vsnprintf_measure.c b/tests/c/vsnprintf_measure.c
+new file mode 100644
+index 0000000..688c240
+--- /dev/null
++++ b/tests/c/vsnprintf_measure.c
+@@ -0,0 +1,51 @@
++/* vsnprintf(NULL, 0, fmt, ap) only measures, and vprintf writes to stdout.  The carried
++   libc decided on the buffer, not the stream: with no buffer the bytes went to FILE * 0,
++   descriptor 0 -- a write to stdin, which blocked when nobody read it (the reported hang
++   once the string reached a few hundred bytes) and lost vprintf's output.  Descriptor 0
++   is a file here (open takes the lowest free descriptor), so any stray byte is seen;
++   a lost vprintf line shows against the reference's output. */
++#include <stdio.h>
++#include <stdarg.h>
++#include <string.h>
++#ifndef _WIN32   /* the descriptor trap is POSIX; Windows keeps the value checks */
++#include <fcntl.h>
++#include <unistd.h>
++#endif
++static int measure(const char *fmt, ...) {
++    va_list ap; int n;
++    va_start(ap, fmt); n = vsnprintf(NULL, 0, fmt, ap); va_end(ap);
++    return n;
++}
++static int into(char *b, long cap, const char *fmt, ...) {
++    va_list ap; int n;
++    va_start(ap, fmt); n = vsnprintf(b, cap, fmt, ap); va_end(ap);
++    return n;
++}
++static void say(const char *fmt, ...) {
++    va_list ap;
++    va_start(ap, fmt); vprintf(fmt, ap); va_end(ap);
++}
++int main(void) {
++    static char s[1001]; char small[8]; const char *fmt = "%s|%d"; int bad = 0, n, k;
++#ifndef _WIN32
++    int fd;
++    close(0);
++    fd = open("vsnprintf_measure.tmp", O_RDWR | O_CREAT | O_TRUNC, 0600);
++    if (fd < 0) return 99;
++#endif
++    memset(s, 'x', 1000); s[1000] = 0;
++    for (k = 250; k <= 1000; k += 250) { s[k] = 0; if (measure("%s", s) != k) bad |= 1; s[k] = 'x'; }
++    s[1000] = 0;
++    if (snprintf(NULL, 0, fmt, s, 42) != 1003) bad |= 2;        /* a run-time format */
++    n = into(small, sizeof small, "%s", s);
++    if (n != 1000 || strcmp(small, "xxxxxxx") != 0) bad |= 4;
++    if (into(small, 0, "%d", 12345) != 5) bad |= 4;
++    say("vprintf %d %s\n", 7, "ok");
++    fflush(stdout);
++#ifndef _WIN32
++    if (lseek(fd, 0, SEEK_END) != 0) bad |= 8;                      /* nothing reached descriptor 0 */
++    close(fd); unlink("vsnprintf_measure.tmp");
++#endif
++    printf("vsnprintf bad=%d\n", bad);
++    return bad;
++}
+-- 
+2.34.1
+

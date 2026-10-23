@@ -59,7 +59,7 @@
 | 新增 `.cx` 模块 | 一律 `net` / `stream` / `segment` / `book phase`；禁止用 `stage` 指网 |
 | 迁移现有 `.py` → `.cx` | **在迁移那一刀定名**：`gold.py STAGES` → `net.cx` 的 `net_*`；`segment.py` → `segment.cx`；`control/net.py`（神经网）→ `model.cx` |
 | 已存在 `.cx` 里的错用 | 顺带修：`adapter/ujswasm/ujsgold.cx` 注释 "one per stage" 说的是**网** → 改 "one per net"；`tests/copycontractcheck.cx` 的 `stage` 变量实为构建目标名 → 改 `target` |
-| `unisa/` 下的 Python（自举已完成，N22） | **定位是归档参考，不是活 oracle**（主人 2026-10-23）：自举完成后移入 `archive/`，不删，只作人工参考，不参与构建 / 闸 / 验证链。现存 **43 个 `tests/` 文件仍 `import unisa`**，逐个改为由产品自身判定或迁 `.cx`；迁移前不做任何重命名 |
+| `unisa/` 下的 Python | **目标是 100% 零依赖**（主人 2026-10-23 重申：这是硬目标，不是“保留 oracle”）。基线：`python3` 调用点 **2253**、`import unisa` 文件 **86**、剩余 `.py` **452**。三者清零后 `unisa/` 移入 `archive/`（不删，仅人工参考）；迁移前不做任何重命名 |
 | 文档 | 已落 `prd.md §0` + 本文件；新文档按 §0 用词 |
 
 **不动的**：`image-stages.tsv` 的 `stage` 列（它确实指流）、`flownet` 的 `flow`/`phase` 字段名、C/.cx 里的既有符号语义。
