@@ -1,5 +1,5 @@
 #!/usr/bin/env -S unisacc.com -run
-/* tapebinnegcheck.cx PRODUCT: the Tapebin binary route's refusal domain,
+/* tapebinnegcheck.cx PRODUCT UA: the Tapebin binary route's refusal domain,
    target lnx/x86_64 (TP-7/TP-8 discipline on the binary carrier; the raw text
    route is tapedomaincheck.cx, the positive six-target route is com-tapebin-*).
    Controls first, or "everything is refused" would pass:
@@ -7,6 +7,11 @@
      to the text route (pure product round trip);
    - a reference-encoded Tapebin carrying origin_target=lnx/x86_64 is accepted
      on that target, image byte-equal to the text route.
+   "Reference-encoded" carriers (origin, unit2, torture) are the archived Python
+   codec's bytes, frozen 2026-10-23 in tests/fixtures/tapebin/frozen.tsv and
+   read through tests/cxlib/tapebinfix.cx; the reference compiler is the
+   classic C reference UA (tests/build_ref.sh; the gate passes $UA).  Until
+   2026-10-23 both were the archived Python seed (plans/unisa-detach.md W1-G).
    Negatives, each one corruption of an accepted carrier: bad magic, truncation,
    a flipped digest byte, trailing garbage, and the valid origin carrier built
    for osx/arm64 (origin mismatch).  Each corruption is refused in all four
@@ -15,7 +20,8 @@
    absent, an existing file byte for byte unchanged -- and the named refusal
    on stderr ("invalid tapebin or origin target mismatch"); timeouts and
    signals are not refusals. */
-static char D[4096], P[4096];
+#pragma unisa use cxlib.tapebinfix
+static char D[4096], P[4096], U[4096];
 static int checks, bad;
 static const char *TAPE = "_start:\n  imm r0, 0\n  ret\n";
 static char *slurp(const char *name, size_t *n) {
@@ -93,12 +99,13 @@ static int bytes_equal(const char *name, const char *x, const char *y) {
 }
 int main(int argc,char **argv) {
     char own[4096],cwd[4096],cmd[16384],*b;size_t n;int rc;
-    if(argc!=2)return 2;
+    if(argc!=3)return 2;
     snprintf(own, sizeof own, "%s/tapebinXXXXXX", getenv("TMPDIR") && *getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");   /* under the temp root: deleted through the one guard (cx_remove) */
     if(!getcwd(cwd,sizeof cwd) || !mkdtemp(own))return 2;
     snprintf(D,sizeof D,"%s",own);
     if(argv[1][0]=='/')snprintf(P,sizeof P,"%s",argv[1]);else snprintf(P,sizeof P,"%s/%s",cwd,argv[1]);
-    if(strchr(P,39)||strchr(D,39))return 2;
+    if(argv[2][0]=='/')snprintf(U,sizeof U,"%s",argv[2]);else snprintf(U,sizeof U,"%s/%s",cwd,argv[2]);
+    if(strchr(P,39)||strchr(D,39)||strchr(U,39))return 2;
     if(save("in.tape",TAPE,strlen(TAPE)))return 2;
     /* text route image: the yardstick for both carriers */
     snprintf(cmd,sizeof cmd,"%s'%s' '%s/in.tape' -b lnx/x86_64 -o '%s/text.img' 2>'%s/text.err'",
@@ -122,12 +129,9 @@ int main(int argc,char **argv) {
     bytes_equal("decode-fixpoint","re.tapebin","own.tapebin");
     build("ctl-decoded","decoded.tape","lnx/x86_64",0);
     bytes_equal("decoded-img","ctl-decoded.img","text.img");
-    /* reference-encoded carrier with an explicit origin */
-    snprintf(cmd,sizeof cmd,
-        "python3 -c \"from unisa.tapebin import encode,target_id;import sys;"
-        "t=open('%s/in.tape').read();sys.stdout.buffer.write(encode(t,target_id('lnx/x86_64')))\""
-        " > '%s/origin.tapebin' 2>'%s/enc.err'",D,D,D);
-    if(note("ref-encode",cx_run_timeout(cmd,25,0,0)==0))return 1;
+    /* reference-encoded carrier with an explicit origin (frozen) */
+    snprintf(cmd,sizeof cmd,"%s/origin.tapebin",D);
+    if(note("ref-carrier",tbf_fixture("origin-lnx-x86_64",TAPE,cmd)==0))return 1;
     build("ctl-origin","origin.tapebin","lnx/x86_64",0);
     bytes_equal("origin-bytes","ctl-origin.img","text.img");
     /* one corruption each of the accepted own.tapebin */
@@ -160,11 +164,9 @@ int main(int argc,char **argv) {
       snprintf(cmd,sizeof cmd,"%s'%s' '%s/unit2.tape' --tapebin -c -o '%s/unit2.tapebin' 2>'%s/u2.err'",
           strstr(P,".com") ? "sh " : "",P,D,D,D);
       note("unit2-emit",cx_run_timeout(cmd,15,0,0)==0);
-      snprintf(cmd,sizeof cmd,
-          "python3 -c \"from unisa.tapebin import encode;import sys;"
-          "sys.stdout.buffer.write(encode(open('%s/unit2.tape').read()))\" > '%s/unit2-py.tapebin' 2>/dev/null",D,D);
-      note("unit2-ref-encode",cx_run_timeout(cmd,25,0,0)==0);
-      bytes_equal("unit2-parity","unit2.tapebin","unit2-py.tapebin");
+      snprintf(cmd,sizeof cmd,"%s/unit2-ref.tapebin",D);
+      note("unit2-ref-carrier",tbf_fixture("unit2",UNIT2,cmd)==0);
+      bytes_equal("unit2-parity","unit2.tapebin","unit2-ref.tapebin");
       snprintf(cmd,sizeof cmd,"%s'%s' '%s/unit2.tapebin' -S -o '%s/unit2-dec.tape' 2>'%s/u2d.err'",
           strstr(P,".com") ? "sh " : "",P,D,D,D);
       note("unit2-decode",cx_run_timeout(cmd,15,0,0)==0);
@@ -203,11 +205,9 @@ int main(int argc,char **argv) {
       snprintf(cmd,sizeof cmd,"%s'%s' '%s/tort.tape' --tapebin -c -o '%s/tort.tapebin' 2>'%s/to.err'",
           strstr(P,".com") ? "sh " : "",P,D,D,D);
       note("tort-emit",cx_run_timeout(cmd,15,0,0)==0);
-      snprintf(cmd,sizeof cmd,
-          "python3 -c \"from unisa.tapebin import encode;import sys;"
-          "sys.stdout.buffer.write(encode(open('%s/tort.tape').read()))\" > '%s/tort-py.tapebin' 2>/dev/null",D,D);
-      note("tort-ref-encode",cx_run_timeout(cmd,25,0,0)==0);
-      bytes_equal("tort-parity","tort.tapebin","tort-py.tapebin");
+      snprintf(cmd,sizeof cmd,"%s/tort-ref.tapebin",D);
+      note("tort-ref-carrier",tbf_fixture("torture",TORT,cmd)==0);
+      bytes_equal("tort-parity","tort.tapebin","tort-ref.tapebin");
       snprintf(cmd,sizeof cmd,"%s'%s' '%s/tort.tapebin' -S -o '%s/tort-dec.tape' 2>/dev/null && "
           "%s'%s' '%s/tort-dec.tape' --tapebin -c -o '%s/tort-re.tapebin' 2>/dev/null",
           strstr(P,".com") ? "sh " : "",P,D,D,
@@ -218,9 +218,9 @@ int main(int argc,char **argv) {
       build("tort-bin","tort.tapebin","lnx/x86_64",0);
       bytes_equal("tort-route-img","tort-text.img","tort-bin.img");
       snprintf(cmd,sizeof cmd,
-          "python3 -m unisa compile '%s/tort.tape' --from-tape -o '%s/tort.pyimg' --target lnx/x86_64 --drive built >/dev/null 2>&1",D,D);
+          "'%s' '%s/tort.tape' -b lnx/x86_64 -o '%s/tort.uaimg' >/dev/null 2>&1",U,D,D);
       note("tort-ref-img",cx_run_timeout(cmd,25,0,0)==0);
-      bytes_equal("tort-ref-bytes","tort-text.img","tort.pyimg");
+      bytes_equal("tort-ref-bytes","tort-text.img","tort.uaimg");
     }
     printf("tapebin checks %d bad %d\n",checks,bad);
     return bad?1:0;

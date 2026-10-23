@@ -1,12 +1,19 @@
 #!/usr/bin/env -S unisacc.com -run
-/* hostaddrnegcheck.cx PRODUCT: .hostaddr index refusal domain, target osx/x86_64
+/* hostaddrnegcheck.cx PRODUCT UA: .hostaddr index refusal domain, target osx/x86_64
    (research/c43-lower-refusal-domain-proposal.md 04:58: HOSTADDR-CONTROL/-NEG-LOW/-NEG-HIGH).
-   Control: product and Python reference both accept, images byte-identical.
+   Control: product and the classic C reference UA (tests/build_ref.sh; the gate
+   passes $UA) both accept, images byte-identical.
    Negatives (index -1 and 4, only the index changed): product rc1, empty stdout,
    no output file, stderr names "hostaddr index must be 0..3" with the line;
-   reference refuses at the same check point (unisa/lower.py).  Timeouts, signals
-   and wrapper errors are not refusals: any unexpected shape is a FAIL, not KNOWN. */
-static char D[4096], P[4096];
+   the reference refuses at the same check point with the same naming (src/
+   back end).  Timeouts, signals and wrapper errors are not refusals: any
+   unexpected shape is a FAIL, not KNOWN.  (Until 2026-10-23 the reference was
+   the archived Python seed and the carriers were encoded by its codec per run;
+   plans/unisa-detach.md W1-G: control = UA, carriers frozen in
+   tests/fixtures/tapebin/frozen.tsv rows hostaddr-*, read through
+   tests/cxlib/tapebinfix.cx.) */
+#pragma unisa use cxlib.tapebinfix
+static char D[4096], P[4096], U[4096];
 static int checks;
 static char *slurp(const char *name, size_t *n) {
     char path[8192];snprintf(path,sizeof path,"%s/%s",D,name);return cx_read(path,n);
@@ -44,23 +51,24 @@ static int product(const char *name, const char *tape, int expect_rc) {
 }
 static int reference(const char *name, const char *tape, int expect_rc) {
     char cmd[16384],*out=0,*err=0;size_t on=0,en=0;int rc,ok;
-    snprintf(cmd,sizeof cmd,"python3 -m unisa compile '%s/%s' --from-tape -o '%s/%s.py.img' --target osx/x86_64 --drive built 2>'%s/%s.py.err'",
-        D,tape,D,name,D,name);
+    snprintf(cmd,sizeof cmd,"'%s' '%s/%s' -b osx/x86_64 -o '%s/%s.ua.img' 2>'%s/%s.ua.err'",
+        U,D,tape,D,name,D,name);
     rc=cx_run_timeout(cmd,25,&out,&on);
-    { char e[8192];snprintf(e,sizeof e,"%s.py.err",name);err=slurp(e,&en); }
-    if (expect_rc==0) ok=rc==0;
-    else ok=rc!=0 && err && strstr(err,"hostaddr index must be 0..3");
+    { char e[8192];snprintf(e,sizeof e,"%s.ua.err",name);err=slurp(e,&en); }
+    if (expect_rc==0) ok=rc==0 && on==0;
+    else ok=rc==1 && on==0 && err && strstr(err,"hostaddr index must be 0..3");
     printf("hostaddr %-16s %s\n",name,ok ? "pass" : "FAIL");
     if(!ok)return fail(name,rc,out,err);
     free(out);free(err);checks++;return 0;
 }
 int main(int argc,char **argv) {
     char own[]="/tmp/hostaddrXXXXXX",cwd[4096],ha[65],hb[65],*a,*b;size_t an,bn;int bad=0;
-    if(argc!=2)return 2;
+    if(argc!=3)return 2;
     if(!getcwd(cwd,sizeof cwd) || !mkdtemp(own))return 2;
     snprintf(D,sizeof D,"%s",own);
     if(argv[1][0]=='/')snprintf(P,sizeof P,"%s",argv[1]);else snprintf(P,sizeof P,"%s/%s",cwd,argv[1]);
-    if(strchr(P,39)||strchr(D,39))return 2;
+    if(argv[2][0]=='/')snprintf(U,sizeof U,"%s",argv[2]);else snprintf(U,sizeof U,"%s/%s",cwd,argv[2]);
+    if(strchr(P,39)||strchr(D,39)||strchr(U,39))return 2;
     if(put("ctl.tape","_start:\n.hostaddr r0, 2\nret\n") ||
        put("low.tape","_start:\n.hostaddr r0, -1\nret\n") ||
        put("high.tape","_start:\n.hostaddr r0, 4\nret\n"))return 2;
@@ -73,24 +81,20 @@ int main(int argc,char **argv) {
     /* Carrier route parity: the same tapes as Tapebin carriers keep the same
        refusal owner, diagnostic and line (prd: raw Tape and Tapebin pass the
        same validation model). */
-    { char cmd[16384];
-      snprintf(cmd,sizeof cmd,
-        "python3 -c \"from unisa.tapebin import encode;import sys;"
-        "sys.stdout.buffer.write(encode(open('%s/'+sys.argv[1]).read()))\" ctl.tape > '%s/ctl.tapebin' 2>/dev/null && "
-        "python3 -c \"from unisa.tapebin import encode;import sys;"
-        "sys.stdout.buffer.write(encode(open('%s/'+sys.argv[1]).read()))\" high.tape > '%s/high.tapebin' 2>/dev/null",
-        D,D,D,D);
-      if(cx_run_timeout(cmd,25,0,0)==0){
+    { char ctl[8192],high[8192];
+      snprintf(ctl,sizeof ctl,"%s/ctl.tapebin",D);snprintf(high,sizeof high,"%s/high.tapebin",D);
+      if(tbf_fixture("hostaddr-2","_start:\n.hostaddr r0, 2\nret\n",ctl)==0 &&
+         tbf_fixture("hostaddr-4","_start:\n.hostaddr r0, 4\nret\n",high)==0){
         bad+=product("control-bin", "ctl.tapebin",0);
         bad+=product("neg-high-bin","high.tapebin",1);
         a=slurp("control.img",&an);b=slurp("control-bin.img",&bn);
         if(a&&b&&an==bn&&!memcmp(a,b,an)){printf("hostaddr %-16s pass\n","route-bytes");checks++;}
         else{printf("hostaddr %-16s FAIL\n","route-bytes");bad++;}
         free(a);free(b);
-      } else { printf("hostaddr %-16s FAIL (encode)\n","carrier");bad++; }
+      } else { printf("hostaddr %-16s FAIL (frozen carrier)\n","carrier");bad++; }
     }
     /* The accepted control must mean the same thing in both implementations. */
-    a=slurp("control.img",&an);b=slurp("control-ref.py.img",&bn);
+    a=slurp("control.img",&an);b=slurp("control-ref.ua.img",&bn);
     if(a&&b&&an==bn&&!memcmp(a,b,an)){
         cx_sha256_hex(a,an,ha);cx_sha256_hex(b,bn,hb);
         printf("hostaddr %-16s pass (%zu B sha256 %.16s)\n","control-bytes",an,ha);checks++;

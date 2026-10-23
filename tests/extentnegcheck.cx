@@ -1,16 +1,24 @@
 #!/usr/bin/env -S unisacc.com -run
-/* extentnegcheck.cx PRODUCT: tape data-extent refusal domain, target lnx/x86_64
+/* extentnegcheck.cx PRODUCT UA: tape data-extent refusal domain, target lnx/x86_64
    (research/c43-lower-refusal-domain-proposal.md family 2; cases from
    exec/lower/sparsecheck.py, which pairs only the model executors).
    Control: a sparse 610000200-byte virtual region with one stored byte is
-   accepted by product and Python reference, images byte-identical (4097 B ELF).
+   accepted by product and the classic C reference UA (tests/build_ref.sh; the
+   gate passes $UA), images byte-identical (4097 B ELF).
    Negatives (single .bss 2147483648; cumulative 2000000000+1000000000): the
    product refuses rc1, empty stdout, no output file, stderr names
-   "not covered: tape data directive".  The Python reference ACCEPTS both today
-   (rc0): that divergence is registered here on purpose, same discipline as the
-   tapecheck underscore registrations -- if the reference starts refusing, this
-   leaf goes red and the registration is revisited, never silently widened. */
-static char D[4096], P[4096];
+   "not covered: tape data directive".  The reference's side is REGISTERED, not
+   endorsed: UA refuses the single 2^31 region rc1 ("back end: malformed tape")
+   and ACCEPTS the cumulative one (rc0) -- same discipline as the tapecheck
+   underscore registrations: if either moves, this leaf goes red and the
+   registration is revisited, never silently widened.  (Until 2026-10-23 the
+   reference was the archived Python seed, which accepted both;
+   plans/unisa-detach.md W1-G: control = UA.)
+   The Tapebin carriers are the archived Python codec's bytes, frozen in
+   tests/fixtures/tapebin/frozen.tsv (rows extent-*), read through
+   tests/cxlib/tapebinfix.cx. */
+#pragma unisa use cxlib.tapebinfix
+static char D[4096], P[4096], U[4096];
 static int checks;
 static char *slurp(const char *name, size_t *n) {
     char path[8192];snprintf(path,sizeof path,"%s/%s",D,name);return cx_read(path,n);
@@ -44,25 +52,34 @@ static int product_named(const char *name, const char *tape, const char *refusal
 static int product(const char *name, const char *tape, int expect_rc) {
     return product_named(name,tape,expect_rc ? "not covered: tape data directive" : NULL);
 }
-/* expect_rc is today's registered reference behaviour, not an endorsement. */
+/* expect_rc is today's registered reference behaviour, not an endorsement;
+   a registered refusal is rc1 with the back end's own naming (the classic
+   reference leaves an empty output file behind; not asserted either way). */
 static int reference(const char *name, const char *tape, int expect_rc) {
-    char cmd[16384],*out=0;size_t on=0;int rc,ok;
-    snprintf(cmd,sizeof cmd,"python3 -m unisa compile '%s/%s' --from-tape -o '%s/%s.py.img' --target lnx/x86_64 --drive built >/dev/null 2>'%s/%s.py.err'",
-        D,tape,D,name,D,name);
+    char cmd[16384],img[16384],*out=0,*err;size_t on=0,en=0;int rc,ok;
+    snprintf(img,sizeof img,"%s/%s.ua.img",D,name);
+    snprintf(cmd,sizeof cmd,"'%s' '%s/%s' -b lnx/x86_64 -o '%s' >/dev/null 2>'%s/%s.ua.err'",
+        U,D,tape,img,D,name);
     rc=cx_run_timeout(cmd,25,&out,&on);
-    ok=expect_rc==0 ? rc==0 : rc!=0;
+    { char e[8192];snprintf(e,sizeof e,"%s.ua.err",name);err=slurp(e,&en); }
+    ok=expect_rc==0 ? rc==0 : (rc==1 && err && strstr(err,"back end: malformed tape"));
     printf("extent %-20s %s\n",name,ok ? "pass" : "FAIL");
-    if(!ok){char e[8192],*err;size_t en;snprintf(e,sizeof e,"%s.py.err",name);err=slurp(e,&en);
-        fprintf(stderr,"rc=%d stderr=%s\n",rc,err?err:"<missing>");free(err);}
-    free(out);checks++;return ok?0:1;
+    if(!ok)fprintf(stderr,"rc=%d stderr=%s\n",rc,err?err:"<missing>");
+    free(err);free(out);checks++;return ok?0:1;
+}
+/* a frozen carrier (tests/fixtures/tapebin/frozen.tsv row ROW, source text TEXT) as D/FILE */
+static int carrier(const char *row, const char *text, const char *file) {
+    char path[8192];snprintf(path,sizeof path,"%s/%s",D,file);
+    return tbf_fixture(row,text,path);
 }
 int main(int argc,char **argv) {
     char own[]="/tmp/extentXXXXXX",cwd[4096],ha[65],*a,*b;size_t an,bn;int bad=0;
-    if(argc!=2)return 2;
+    if(argc!=3)return 2;
     if(!getcwd(cwd,sizeof cwd) || !mkdtemp(own))return 2;
     snprintf(D,sizeof D,"%s",own);
     if(argv[1][0]=='/')snprintf(P,sizeof P,"%s",argv[1]);else snprintf(P,sizeof P,"%s/%s",cwd,argv[1]);
-    if(strchr(P,39)||strchr(D,39))return 2;
+    if(argv[2][0]=='/')snprintf(U,sizeof U,"%s",argv[2]);else snprintf(U,sizeof U,"%s/%s",cwd,argv[2]);
+    if(strchr(P,39)||strchr(D,39)||strchr(U,39))return 2;
     if(put("ctl.tape",".bss huge 610000000\n.str text \"x\\x00\"\n.bss tail 17\n.str final \"\"\n_start:\n  ret\n") ||
        put("one.tape",".bss a 2147483648\n_start:\n  ret\n") ||
        put("sum.tape",".bss a 2000000000\n.bss b 1000000000\n_start:\n  ret\n"))return 2;
@@ -70,7 +87,7 @@ int main(int argc,char **argv) {
     bad+=product("neg-single",     "one.tape",1);
     bad+=product("neg-cumulative", "sum.tape",1);
     bad+=reference("control-ref",       "ctl.tape",0);
-    bad+=reference("neg-single-ref",    "one.tape",0);   /* registered reference acceptance */
+    bad+=reference("neg-single-ref",    "one.tape",1);   /* registered reference refusal */
     bad+=reference("neg-cumulative-ref","sum.tape",0);   /* registered reference acceptance */
     /* Carrier route: at the representable edge (2^31-1) the Tapebin route
        keeps the same refusal owner as the text route ('tape data directive');
@@ -78,29 +95,20 @@ int main(int argc,char **argv) {
        to 2^63-1 (non-negative signed-64, the classic reader's word), so 2^31
        on the carrier route refuses with lower's own 'tape data directive' too;
        2^63 is outside the carrier's representable length on both C readers
-       ('invalid tapebin', the reference codec alone encodes it) -- registered. */
-    { char cmd[16384];
-      snprintf(cmd,sizeof cmd,
-        "python3 -c \"from unisa.tapebin import encode;import sys;"
-        "sys.stdout.buffer.write(encode(open('%s/'+sys.argv[1]).read()))\" one.tape > '%s/one.tapebin' 2>/dev/null && "
-        "printf '.bss a 2147483647\\n_start:\\n  ret\\n' > '%s/max.tape' && "
-        "python3 -c \"from unisa.tapebin import encode;import sys;"
-        "sys.stdout.buffer.write(encode(open('%s/'+sys.argv[1]).read()))\" max.tape > '%s/max.tapebin' 2>/dev/null",
-        D,D,D,D,D);
-      if(cx_run_timeout(cmd,25,0,0)==0){
+       ('invalid tapebin', the archived reference codec alone encoded it: its
+       frozen carrier is the only way to build one) -- registered. */
+    if(put("max.tape",".bss a 2147483647\n_start:\n  ret\n"))return 2;
+    if(carrier("extent-bss-2p31",".bss a 2147483648\n_start:\n  ret\n","one.tapebin")==0 &&
+       carrier("extent-bss-2p31m1",".bss a 2147483647\n_start:\n  ret\n","max.tapebin")==0){
         bad+=product_named("neg-max-text","max.tape","not covered: tape data directive");
         bad+=product_named("neg-max-bin","max.tapebin","not covered: tape data directive");
         bad+=product_named("neg-single-bin","one.tapebin","not covered: tape data directive");
-        snprintf(cmd,sizeof cmd,
-            "printf '.bss a 9223372036854775808\\n_start:\\n  ret\\n' > '%s/p63.tape' && "
-            "python3 -c \"from unisa.tapebin import encode;import sys;"
-            "sys.stdout.buffer.write(encode(open('%s/'+sys.argv[1]).read()))\" p63.tape > '%s/p63.tapebin' 2>/dev/null",D,D,D);
-        if(cx_run_timeout(cmd,25,0,0)==0)bad+=product_named("neg-2p63-bin","p63.tapebin","invalid tapebin or origin target mismatch");
-        else { printf("extent %-20s FAIL (encode)\n","carrier-2p63");bad++; }
-      } else { printf("extent %-20s FAIL (encode)\n","carrier");bad++; }
-    }
+        if(carrier("extent-bss-2p63",".bss a 9223372036854775808\n_start:\n  ret\n","p63.tapebin")==0)
+            bad+=product_named("neg-2p63-bin","p63.tapebin","invalid tapebin or origin target mismatch");
+        else { printf("extent %-20s FAIL (frozen carrier)\n","carrier-2p63");bad++; }
+    } else { printf("extent %-20s FAIL (frozen carrier)\n","carrier");bad++; }
     /* The accepted control must mean the same thing in both implementations. */
-    a=slurp("control.img",&an);b=slurp("control-ref.py.img",&bn);
+    a=slurp("control.img",&an);b=slurp("control-ref.ua.img",&bn);
     if(a&&b&&an==bn&&!memcmp(a,b,an)){
         cx_sha256_hex(a,an,ha);
         printf("extent %-20s pass (%zu B sha256 %.16s)\n","control-bytes",an,ha);checks++;

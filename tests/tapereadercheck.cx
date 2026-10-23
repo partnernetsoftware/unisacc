@@ -1,0 +1,227 @@
+#!/usr/bin/env -S unisacc.com -run
+/* tapereadercheck.cx UA: the text tape reader's bounds and its conservative prune / binary interfaces.  Ported from
+   tests/tapereadercheck.py (2026-10-23, plans/unisa-detach.md W1-G: the archived Python codec's outputs are frozen,
+   the referee is the classic C reference UA).
+   usage, from the repository root:  sh ./tests/cxbin tests/tapereadercheck.cx UA
+   UA is the classic reference compiler (tests/build_ref.sh; the gate passes $UA, which tests/lib.sh ua_ready keeps
+   current) -- the .py built a private one per run.  The same 22 text tapes (7 valid, 15 malformed) as the .py, each
+   held to its row of tests/tapereader.matrix.tsv (third line the header `name backend prune tapebin`; the rows must
+   cover exactly the probes, no duplicates):
+     backend  every valid tape builds with UA -b lnx/x86_64, from its text and from its Tapebin carrier, to the same
+              image; every malformed tape is refused rc1 with "back end: malformed tape" on stderr, and the malformed
+              linkage tapes are refused by UA's --tapebin -c text encoder (rc1) as well;
+     prune    tests/tapeprune_harness.c (cc -O2 -std=c99) answers P (pass) or R (rewrite) as the row says for a valid
+              tape; a malformed tape is passed through untouched (stdout P + its bytes);
+     tapebin  the column is the archived Python text encoder's verdict, frozen.  It now judges the two live text
+              encoders: the product's (./unisacc.com TAPE --tapebin -c) must agree on every row; the reference's (UA)
+              too, except bad-string-hex, which UA's encoder ACCEPTS (registered divergence: its own back end refuses
+              that tape; if the encoder starts refusing, the registration goes red and is removed).
+   The Tapebin carrier of each valid tape is the archived codec's frozen bytes (tests/fixtures/tapebin/frozen.tsv rows
+   reader-*, read through tests/cxlib/tapebinfix.cx, which also checks the text is the one frozen).  For the linkage
+   tape, UA's --tapebin -c must write exactly those bytes (C/frozen encoder parity) and the product adapter (exec/c/
+   run.c + tapebin.h + tapebin_emit.h: tbc_decode then tbc_encode_product, built with cc -O2) must give them back
+   unchanged.  Output: `tape reader: 7 text/binary image pairs, 15 malformed tapes rejected; prune preserves malformed
+   input`, rc 0; a failure is one `tapereadercheck: ...` line on stderr, rc 1; usage or setup trouble rc 2. */
+#pragma unisa use cxlib.tapebinfix
+
+static char ROOT[4096], U[4096], TMP[4096];
+
+static void cleanup(void) {
+    if (TMP[0]) { cx_rmtree(TMP); TMP[0] = 0; }          /* own mkdtemp, through the one deletion guard */
+}
+static void die(const char *name, const char *why) {
+    fflush(stdout); cleanup();
+    fprintf(stderr, "tapereadercheck: %s%s%s\n", name ? name : "", name ? ": " : "", why);
+    exit(1);
+}
+
+typedef struct { const char *name; const char *text; } Probe;
+static const Probe VALID[] = {
+    { "linkage", ".global\t_start\n.extern external.name\n.global payload\n.str payload \"x\"\n_start:\n  imm r0, 0\n  .exit r0\n" },
+    { "minimal", "_start:\n  imm r0, 0\n  .exit r0\n" },
+    { "data", ".str payload \"A\\x00\"\n.bss zeros 8\n_start:\n  imm r0, 0\n  .exit r0\n" },
+    { "comments", ".str payload \"a;b\" ; outside string\n_start: ; entry\n  imm r0, 0 ; value\n  .exit r0\n" },
+    { "crlf", "_start:\r\n  imm r0, 0\r\n  .exit r0\r\n" },
+    { "signed-min", "_start:\n  imm r0, -9223372036854775808\n  .exit r0\n" },
+    { "unsigned-max", "_start:\n  imm r0, 18446744073709551615\n  .exit r0\n" },
+    { 0, 0 } };
+static const Probe INVALID[] = {
+    { "linkage-missing", ".global\n" },
+    { "linkage-extra", ".extern foo bar\n" },
+    { "linkage-name", ".global 12bad\n" },
+    { "empty-hex", "_start:\n  imm r0, 0x\n  .exit r0\n" },
+    { "junk-number", "_start:\n  imm r0, 12q\n  .exit r0\n" },
+    { "overflow", "_start:\n  imm r0, 18446744073709551616\n  .exit r0\n" },
+    { "negative-overflow", "_start:\n  imm r0, -9223372036854775809\n  .exit r0\n" },
+    { "bad-register", "_start:\n  imm r9, 1\n  .exit r0\n" },
+    { "missing-operand", "_start:\n  imm r0\n  .exit r0\n" },
+    { "extra-operand", "_start:\n  imm r0, 1, r2\n  .exit r0\n" },
+    { "short-bss", ".bss x\n_start:\n  .exit r0\n" },
+    { "short-string", ".str x\n_start:\n  .exit r0\n" },
+    { "unterminated-string", ".str x \"abc\n_start:\n  .exit r0\n" },
+    { "bad-string-hex", ".str x \"\\xGG\"\n_start:\n  .exit r0\n" },
+    { "string-capacity", 0 },   /* .str x "a...a" (1050000 a) -- built at run time */
+    { 0, 0 } };
+static const char *UA_ENCODER_ACCEPTS = "bad-string-hex";   /* registered divergence, see the header */
+
+/* ---- the matrix ---- */
+#define MAXROWS 64
+static struct { char name[64], backend[16], prune[16], tapebin[16]; } M[MAXROWS];
+static int nm;
+static int row_of(const char *name) { int i; for (i = 0; i < nm; i++) if (!strcmp(M[i].name, name)) return i; return -1; }
+static void read_matrix(void) {
+    size_t n, i = 0; int line = 0; char *d = cx_read("tests/tapereader.matrix.tsv", &n);
+    if (!d) die("tests/tapereader.matrix.tsv", "cannot read");
+    while (i < n) {
+        size_t s = i, e; char *f[4]; int k = 0;
+        while (i < n && d[i] != '\n') i++;
+        e = i; if (i < n) i++;
+        d[e] = 0; line++;
+        if (line == 3) { if (strcmp(d + s, "name\tbackend\tprune\ttapebin")) die(0, "tape reader matrix header changed"); continue; }
+        if (line < 3) continue;
+        f[0] = d + s;
+        for (k = 1; k < 4; k++) { char *t = strchr(f[k - 1], '\t'); if (!t) die(d + s, "matrix row does not have four fields"); *t = 0; f[k] = t + 1; }
+        if (strchr(f[3], '\t')) die(f[0], "matrix row has more than four fields");
+        if (row_of(f[0]) >= 0) die(f[0], "duplicate tape reader matrix row");
+        if (nm == MAXROWS || strlen(f[0]) >= 64 || strlen(f[1]) >= 16 || strlen(f[2]) >= 16 || strlen(f[3]) >= 16) die(f[0], "matrix row too long");
+        strcpy(M[nm].name, f[0]); strcpy(M[nm].backend, f[1]); strcpy(M[nm].prune, f[2]); strcpy(M[nm].tapebin, f[3]); nm++;
+    }
+    if (line < 3) die(0, "tape reader matrix header changed");
+    {   int i2, count = 0;
+        for (i2 = 0; VALID[i2].name; i2++) { count++; if (row_of(VALID[i2].name) < 0) die(0, "tape reader matrix does not cover all probes"); }
+        for (i2 = 0; INVALID[i2].name; i2++) { count++; if (row_of(INVALID[i2].name) < 0) die(0, "tape reader matrix does not cover all probes"); }
+        if (count != nm) die(0, "tape reader matrix does not cover all probes"); }
+}
+
+/* ---- processes: CMD (a shell line) with stdout to OUT and stderr to ERR under TMP; its rc, OUT/ERR slurped ---- */
+typedef struct { int rc; char *out, *err; size_t nout, nerr; } Res;
+static Res sh(const char *cmd, int secs) {
+    Res r = {0}; char line[32768], o[4200], e[4200];
+    snprintf(o, sizeof o, "%s/.out", TMP); snprintf(e, sizeof e, "%s/.err", TMP);
+    snprintf(line, sizeof line, "cd '%s' && %s >'%s' 2>'%s'", ROOT, cmd, o, e);
+    r.rc = cx_run_timeout(line, secs, 0, 0);
+    r.out = cx_read(o, &r.nout); r.err = cx_read(e, &r.nerr);
+    if (!r.out) { r.out = calloc(1, 1); r.nout = 0; }
+    if (!r.err) { r.err = calloc(1, 1); r.nerr = 0; }
+    return r;
+}
+static void rfree(Res *r) { free(r->out); free(r->err); }
+static char *path(const char *name, const char *suffix) {
+    static char b[16][4400]; static int k; char *p = b[k++ & 15];
+    snprintf(p, 4400, "%s/%s%s", TMP, name, suffix); return p;
+}
+static int same_files(const char *a, const char *b) {
+    size_t an, bn; char *x = cx_read(a, &an), *y = cx_read(b, &bn); int same = x && y && an == bn && !memcmp(x, y, an);
+    free(x); free(y); return same;
+}
+
+/* the two live text encoders against the frozen Python encoder verdict */
+static void check_encoder(const char *name, const char *tape) {
+    char cmd[16384]; const char *want = M[row_of(name)].tapebin; Res r; int ua_accepts;
+    snprintf(cmd, sizeof cmd, "sh ./unisacc.com '%s' --tapebin -c -o '%s'", tape, path(name, ".prod.tapebin"));
+    r = sh(cmd, 10);
+    if (strcmp(r.rc == 0 ? "accept" : "reject", want)) die(name, "tapebin text encoder contract changed (product)");
+    rfree(&r);
+    snprintf(cmd, sizeof cmd, "'%s' '%s' --tapebin -c -o '%s'", U, tape, path(name, ".ua.tapebin"));
+    r = sh(cmd, 10); ua_accepts = r.rc == 0; rfree(&r);
+    if (!strcmp(name, UA_ENCODER_ACCEPTS)) {
+        if (!ua_accepts) die(name, "the reference text encoder now refuses: remove its registered divergence");
+    } else if (strcmp(ua_accepts ? "accept" : "reject", want)) die(name, "tapebin text encoder contract changed (reference)");
+}
+
+int main(int argc, char **argv) {
+    char cmd[16384], prune[4400], adapter[4400], adapter_c[4400], src[8192]; int i, nvalid = 0, ninvalid = 0;
+    char *capacity;
+    if (argc != 2) { fprintf(stderr, "usage: tapereadercheck.cx UA\n"); return 2; }
+    if (!getcwd(ROOT, sizeof ROOT)) return 2;
+    if (argv[1][0] == '/') snprintf(U, sizeof U, "%s", argv[1]); else snprintf(U, sizeof U, "%s/%s", ROOT, argv[1]);
+    if (access(U, X_OK) != 0) { fprintf(stderr, "tapereadercheck: reference compiler %s is not executable\n", U); return 2; }
+    {   const char *t = getenv("TMPDIR"); snprintf(TMP, sizeof TMP, "%s/unisacc-tapereader-XXXXXX", t && *t ? t : "/tmp");
+        if (!mkdtemp(TMP)) { TMP[0] = 0; fprintf(stderr, "tapereadercheck: mkdtemp failed\n"); return 2; } }
+    if (strchr(ROOT, '\'') || strchr(U, '\'') || strchr(TMP, '\'')) die(0, "a quote in a path");
+    read_matrix();
+    /* string-capacity: a 1050000-byte string literal */
+    {   size_t k, n = 1050000; capacity = malloc(n + 64); if (!capacity) die(0, "out of memory");
+        strcpy(capacity, ".str x \""); for (k = 0; k < n; k++) capacity[8 + k] = 'a';
+        strcpy(capacity + 8 + n, "\"\n_start:\n  .exit r0\n"); }
+    snprintf(prune, sizeof prune, "%s/prune", TMP);
+    snprintf(cmd, sizeof cmd, "cc -O2 -std=c99 -o '%s' tests/tapeprune_harness.c", prune);
+    { Res r = sh(cmd, 20); if (r.rc) die("cc", "tests/tapeprune_harness.c did not build"); rfree(&r); }
+    snprintf(adapter_c, sizeof adapter_c, "%s/adapter.c", TMP); snprintf(adapter, sizeof adapter, "%s/adapter", TMP);
+    snprintf(src, sizeof src,
+        "#define UNISA_RUNTIME_LIBRARY\n#include \"%s/exec/c/run.c\"\n#include \"%s/exec/c/tapebin.h\"\n#include \"%s/exec/c/tapebin_emit.h\"\n"
+        "int main(void){Buf b={0};int c;while((c=getchar())!=EOF)bput(&b,c,0);Buf t={0};if(tbc_decode(b.b,b.n,0,0,&t))return 1;"
+        "if(tbc_encode_product(&t,0))return 2;return fwrite(t.b,1,t.n,stdout)==(size_t)t.n?0:3;}\n", ROOT, ROOT, ROOT);
+    if (cx_write(adapter_c, src, strlen(src))) die(0, "cannot write the adapter source");
+    snprintf(cmd, sizeof cmd, "cc -O2 -o '%s' '%s'", adapter, adapter_c);
+    { Res r = sh(cmd, 20); if (r.rc) die("cc", "the product adapter did not build"); rfree(&r); }
+
+    for (i = 0; VALID[i].name; i++) {
+        const char *name = VALID[i].name, *text = VALID[i].text; int k = row_of(name); char *plain = path(name, ".tape"), *binary = path(name, ".tapebin");
+        char fixture[64]; char *images[2]; int s; Res r;
+        if (strcmp(M[k].backend, "accept")) die(name, "backend matrix status changed");
+        if (cx_write(plain, text, strlen(text))) die(name, "cannot write the tape");
+        check_encoder(name, plain);
+        snprintf(fixture, sizeof fixture, "reader-%s", name);
+        if (tbf_fixture(fixture, text, binary)) die(name, "frozen carrier unavailable");
+        if (!strcmp(name, "linkage")) {
+            char *encoded = path(name, ".c.tapebin");
+            snprintf(cmd, sizeof cmd, "'%s' '%s' --tapebin -o '%s'", U, plain, encoded);
+            r = sh(cmd, 10);
+            if (r.rc || !same_files(encoded, binary)) die(name, "C/frozen encoder differs");
+            rfree(&r);
+            snprintf(cmd, sizeof cmd, "'%s' < '%s'", adapter, binary);
+            r = sh(cmd, 10);
+            {   size_t bn; char *b = cx_read(binary, &bn);
+                if (r.rc || !b || r.nout != bn || memcmp(r.out, b, bn)) die(0, "product adapter linkage roundtrip differs");
+                free(b); }
+            rfree(&r);
+        }
+        for (s = 0; s < 2; s++) {
+            images[s] = path(name, s ? ".binary.elf" : ".text.elf");
+            snprintf(cmd, sizeof cmd, "'%s' '%s' -b lnx/x86_64 -o '%s'", U, s ? binary : plain, images[s]);
+            r = sh(cmd, 10);
+            if (r.rc || access(images[s], F_OK) != 0) {
+                char why[512]; snprintf(why, sizeof why, "%s build rc %d: %.120s", s ? ".tapebin" : ".tape", r.rc, r.err);
+                die(name, why);
+            }
+            rfree(&r);
+        }
+        if (!same_files(images[0], images[1])) die(name, "text/binary image differs");
+        /* The conservative pruner declines unsigned immediates above LONG_MAX; the reader still accepts their 64-bit
+           bit pattern. */
+        snprintf(cmd, sizeof cmd, "'%s' < '%s'", prune, plain);
+        r = sh(cmd, 10);
+        if (r.rc || r.nout < 1 || r.out[0] != (!strcmp(M[k].prune, "pass") ? 'P' : 'R')) die(name, "unexpected prune decision");
+        rfree(&r);
+        nvalid++;
+    }
+    for (i = 0; INVALID[i].name; i++) {
+        const char *name = INVALID[i].name, *text = INVALID[i].text ? INVALID[i].text : capacity; int k = row_of(name);
+        char *plain = path(name, ".tape"); size_t tn = strlen(text); Res r;
+        if (strcmp(M[k].backend, "reject")) die(name, "backend matrix status changed");
+        if (cx_write(plain, text, tn)) die(name, "cannot write the tape");
+        check_encoder(name, plain);
+        if (!strncmp(name, "linkage-", 8)) {
+            snprintf(cmd, sizeof cmd, "'%s' '%s' --tapebin -o '%s'", U, plain, path("bad", ".tapebin"));
+            r = sh(cmd, 10);
+            if (r.rc != 1) die(name, "C encoder accepted malformed linkage");
+            rfree(&r);
+        }
+        snprintf(cmd, sizeof cmd, "'%s' '%s' -b lnx/x86_64 -o '%s'", U, plain, path(name, ".elf"));
+        r = sh(cmd, 10);
+        if (r.rc != 1 || !strstr(r.err, "back end: malformed tape")) {
+            char why[512]; snprintf(why, sizeof why, "rc %d, stderr %.160s", r.rc, r.err); die(name, why);
+        }
+        rfree(&r);
+        snprintf(cmd, sizeof cmd, "'%s' < '%s'", prune, plain);
+        r = sh(cmd, 10);
+        if (strcmp(M[k].prune, "pass") || r.rc || r.nout != tn + 1 || r.out[0] != 'P' || memcmp(r.out + 1, text, tn))
+            die(name, "malformed tape was changed by prune");
+        rfree(&r);
+        ninvalid++;
+    }
+    cleanup();
+    printf("tape reader: %d text/binary image pairs, %d malformed tapes rejected; prune preserves malformed input\n", nvalid, ninvalid);
+    return 0;
+}

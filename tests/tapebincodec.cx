@@ -1,0 +1,218 @@
+#!/usr/bin/env -S unisacc.com -run
+/* tapebincodec.cx UA: the classic C reference's Tapebin codec against the archived Python codec's frozen verdicts
+   (gate suite tapebin-roundtrip-codec).  Replaces `tests/tapebin.py codec` (2026-10-23, plans/unisa-detach.md W1-G):
+   that run compared the reference's encoder with the seed codec's encode on tapes from the Python front end; the codec
+   and that front end are archived, so their outputs were captured once (tests/tapebin-expected.tsv,
+   tests/fixtures/tapebin/frozen.tsv, both read through tests/cxlib/tapebinfix.cx) and the tapes are the reference's.
+   usage, from the repository root:  sh ./tests/cxbin tests/tapebincodec.cx UA
+   UA is the classic reference compiler (tests/build_ref.sh; the gate passes $UA, kept current by tests/lib.sh
+   ua_ready).  Steps, each red at its first failure (one `tapebincodec: ...` line on stderr, rc 1; usage rc 2):
+     codec    frozen.tsv rows codec-unit2 / codec-linkage / codec-relabel (the .py's own unit, linkage and repeated-label
+              tapes): UA TAPE --tapebin -c writes exactly the frozen carrier; UA CARRIER -S, re-encoded, gives it back
+              (fixpoint); the carrier less its last byte, and with byte 64 flipped, is refused by UA's decoder (rc != 0)
+     units    the four malformed unit tapes the .py fed its encoder (.gdef first, .unit 1, .unit after a record, two
+              .unit lines) are refused by UA's text encoder, rc 1
+     probes   examples/*.c and every tests/c name of exec/c/chain.knownfail: UA PROBE -t lnx/x86_64 must be the frozen
+              tape (text sha), its carrier (UA TAPE --tapebin -c, no origin) the frozen `zero` bytes, UA PROBE -t
+              lnx/x86_64 --tapebin (origin set) the frozen `origin` bytes, and UA -b lnx/x86_64 must build the same
+              image from the tape and from the no-origin carrier
+     targets  examples/hello.c on all six targets: the same three pins per target (text, origin, zero), the same image
+              from tape and origin carrier with -b TARGET; the win/arm64 carrier is refused for
+              lnx/x86_64 (rc != 0, no output file); on the host (osx/arm64 on Darwin, else lnx/x86_64) -run of the
+              carrier and of the tape agree on exit status and stdout
+   A probe whose tape moved since the capture (a compiler change) is red: the frozen verdict no longer judges it.  The
+   message carries the row the C reference would give; pasting it re-pins that probe deliberately (it then stops being
+   an independent codec verdict) -- never done by this program.
+   Output: `tapebin codec: 3 frozen codec fixtures (fixpoint, damage refused), 4 malformed unit tapes refused, N frozen
+   reference tapes, 6 target images, origin guard, C run`. */
+#pragma unisa use cxlib.tapebinfix
+
+static char ROOT[4096], U[4096], TMP[4096];
+static const char *TARGETS[6] = { "lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64" };
+
+static void cleanup(void) {
+    if (TMP[0]) { cx_rmtree(TMP); TMP[0] = 0; }          /* own mkdtemp, through the one deletion guard */
+}
+static void die(const char *name, const char *why) {
+    fflush(stdout); cleanup();
+    fprintf(stderr, "tapebincodec: %s%s%s\n", name ? name : "", name ? ": " : "", why);
+    exit(1);
+}
+static char *path(const char *name, const char *suffix) {
+    static char b[16][4400]; static int k; char *p = b[k++ & 15];
+    snprintf(p, 4400, "%s/%s%s", TMP, name, suffix); return p;
+}
+/* a shell line from the root with stdout and stderr captured; its rc */
+typedef struct { int rc; char *out, *err; size_t nout, nerr; } Res;
+static Res sh(const char *cmd) {
+    Res r = {0}; char line[32768], o[4400], e[4400];
+    snprintf(o, sizeof o, "%s/.out", TMP); snprintf(e, sizeof e, "%s/.err", TMP);
+    snprintf(line, sizeof line, "cd '%s' && %s >'%s' 2>'%s'", ROOT, cmd, o, e);
+    r.rc = cx_run_timeout(line, 20, 0, 0);
+    r.out = cx_read(o, &r.nout); r.err = cx_read(e, &r.nerr);
+    if (!r.out) { r.out = calloc(1, 1); r.nout = 0; }
+    if (!r.err) { r.err = calloc(1, 1); r.nerr = 0; }
+    return r;
+}
+static void ok_or_die(const char *name, const char *cmd) {
+    Res r = sh(cmd);
+    if (r.rc) { char why[512]; snprintf(why, sizeof why, "rc %d from the reference: %.200s", r.rc, r.err); die(name, why); }
+    free(r.out); free(r.err);
+}
+static char *slurp(const char *p, size_t *n) { char *d = cx_read(p, n); if (!d) die(p, "cannot read"); return d; }
+static int same_files(const char *a, const char *b) {
+    size_t an, bn; char *x = slurp(a, &an), *y = slurp(b, &bn); int same = an == bn && !memcmp(x, y, an);
+    free(x); free(y); return same;
+}
+static void sha32_file(const char *p, char out[33]) { size_t n; char *d = slurp(p, &n); tbf_sha32(d, n, out); free(d); }
+
+static void codec_fixture(const char *row, const char *text) {
+    char cmd[16384], *tape = path(row, ".tape"), *frozen = path(row, ".frozen.tapebin"), *enc = path(row, ".tapebin"),
+         *dec = path(row, ".dec.tape"), *re = path(row, ".re.tapebin"), *bad = path(row, ".bad.tapebin");
+    size_t n; char *b; Res r; int k;
+    if (cx_write(tape, text, strlen(text))) die(row, "cannot write the tape");
+    if (tbf_fixture(row, text, frozen)) die(row, "frozen carrier unavailable");
+    snprintf(cmd, sizeof cmd, "'%s' '%s' --tapebin -c -o '%s'", U, tape, enc); ok_or_die(row, cmd);
+    if (!same_files(enc, frozen)) die(row, "the reference encoder differs from the frozen codec");
+    snprintf(cmd, sizeof cmd, "'%s' '%s' -S -o '%s'", U, frozen, dec); ok_or_die(row, cmd);
+    snprintf(cmd, sizeof cmd, "'%s' '%s' --tapebin -c -o '%s'", U, dec, re); ok_or_die(row, cmd);
+    if (!same_files(re, frozen)) die(row, "decode + re-encode is not a fixpoint of the frozen carrier");
+    b = slurp(frozen, &n);
+    if (n < 66) die(row, "frozen carrier shorter than its header");
+    for (k = 0; k < 2; k++) {
+        if (k == 0 ? cx_write(bad, b, n - 1) : (b[64] ^= 1, cx_write(bad, b, n))) die(row, "cannot write the damaged carrier");
+        snprintf(cmd, sizeof cmd, "'%s' '%s' -S -o '%s'", U, bad, path(row, ".bad.tape"));
+        r = sh(cmd);
+        if (r.rc == 0) die(row, k == 0 ? "a truncated carrier was decoded" : "a carrier with byte 64 flipped was decoded");
+        free(r.out); free(r.err);
+    }
+    free(b);
+}
+
+/* the frozen row of (NAME, TARGET) must still describe the reference's tape */
+static void expect(const char *name, const char *target, const char *tape, const char *zero_bin, const char *origin_bin,
+                   char want_origin[33], char want_zero[33]) {
+    char text[33], o[33], z[33], got_text[33], got_o[33] = "-", got_z[33] = "-";
+    if (tbf_expected(name, target, text, o, z)) {
+        char why[256]; snprintf(why, sizeof why, "no row for target %s in tests/tapebin-expected.tsv", target); die(name, why);
+    }
+    sha32_file(tape, got_text);
+    if (zero_bin) sha32_file(zero_bin, got_z);
+    if (origin_bin) sha32_file(origin_bin, got_o);
+    if (strcmp(got_text, text)) {
+        fflush(stdout);
+        fprintf(stderr, "tapebincodec: %s %s: the reference's tape moved since the frozen capture (text %s, frozen %s): the "
+                "archived codec's verdict no longer judges it.  Revert, or re-pin deliberately with the C reference's row "
+                "(not an independent codec verdict):\n%s\t%s\t%s\t%s\t%s\n", name, target, got_text, text, name, target,
+                got_text, got_o, got_z);
+        cleanup(); exit(1);
+    }
+    memcpy(want_origin, o, 33); memcpy(want_zero, z, 33);
+}
+
+int main(int argc, char **argv) {
+    static const char *UNITS[] = { ".gdef g_a\n", ".unit 1\n", ".global g_a\n.unit 2\n", ".unit 2\n.unit 2\n", 0 };
+    char cmd[16384], o[33], z[33], got[33]; int i, nprobes = 0; const char *host; char *sys = 0; size_t sn;
+    if (argc != 2) { fprintf(stderr, "usage: tapebincodec.cx UA\n"); return 2; }
+    if (!getcwd(ROOT, sizeof ROOT)) return 2;
+    if (argv[1][0] == '/') snprintf(U, sizeof U, "%s", argv[1]); else snprintf(U, sizeof U, "%s/%s", ROOT, argv[1]);
+    if (access(U, X_OK) != 0) { fprintf(stderr, "tapebincodec: reference compiler %s is not executable\n", U); return 2; }
+    {   const char *t = getenv("TMPDIR"); snprintf(TMP, sizeof TMP, "%s/unisacc-tapebincodec-XXXXXX", t && *t ? t : "/tmp");
+        if (!mkdtemp(TMP)) { TMP[0] = 0; fprintf(stderr, "tapebincodec: mkdtemp failed\n"); return 2; } }
+    if (strchr(ROOT, '\'') || strchr(U, '\'') || strchr(TMP, '\'')) die(0, "a quote in a path");
+    cx_run("uname -s", &sys, &sn);
+    host = sys && !strncmp(sys, "Darwin", 6) ? "osx/arm64" : "lnx/x86_64";
+
+    codec_fixture("codec-unit2", ".unit 2\n.global g_a\n.bss g_a 4\n.gdef g_a\n.extern g_b\n");
+    codec_fixture("codec-linkage", ".global exported\n.extern imported\nexported:\n  ret\n");
+    codec_fixture("codec-relabel", "L:\n  nop\n.bss z 24\n.str a \"x\"\nL:\n.str a \"y\"\n  call L\n");
+    for (i = 0; UNITS[i]; i++) {
+        char nm[32]; Res r; snprintf(nm, sizeof nm, "unit-%d", i);
+        if (cx_write(path(nm, ".tape"), UNITS[i], strlen(UNITS[i]))) die(nm, "cannot write the tape");
+        snprintf(cmd, sizeof cmd, "'%s' '%s' --tapebin -c -o '%s'", U, path(nm, ".tape"), path(nm, ".tapebin"));
+        r = sh(cmd);
+        if (r.rc != 1) die(nm, "a malformed unit tape was encoded");
+        free(r.out); free(r.err);
+    }
+
+    /* probes: examples/*.c (sorted) and the chain.knownfail names under tests/c */
+    {   char **names = 0; size_t nn = 0, cap = 0, k; DIR *d = opendir("examples"); struct dirent *e;
+        size_t kn; char *kf = cx_read("exec/c/chain.knownfail", &kn);
+        if (!d) die("examples", "cannot list");
+        while ((e = readdir(d))) {
+            size_t l = strlen(e->d_name);
+            if (l < 2 || strcmp(e->d_name + l - 2, ".c")) continue;
+            if (nn == cap) { cap = cap ? cap * 2 : 32; names = realloc(names, cap * sizeof *names); }
+            names[nn] = malloc(l + 10); snprintf(names[nn], l + 10, "examples/%s", e->d_name); nn++;
+        }
+        closedir(d);
+        for (k = 1; k < nn; k++) { size_t j = k; while (j && strcmp(names[j - 1], names[j]) > 0) { char *t = names[j]; names[j] = names[j - 1]; names[j - 1] = t; j--; } }
+        if (kf) {   /* NAME REASON lines; blank and # lines skipped */
+            char *p = kf, *end = kf + kn;
+            while (p < end) {
+                char *q = memchr(p, '\n', (size_t)(end - p)), *s = p, *w; if (!q) q = end;
+                while (s < q && (*s == ' ' || *s == '\t')) s++;
+                if (s < q && *s != '#' && *s != '\r') {
+                    for (w = s; w < q && *w != ' ' && *w != '\t' && *w != '\r'; w++) ;
+                    if (nn == cap) { cap = cap ? cap * 2 : 32; names = realloc(names, cap * sizeof *names); }
+                    names[nn] = malloc((size_t)(w - s) + 10); snprintf(names[nn], (size_t)(w - s) + 10, "tests/c/%.*s", (int)(w - s), s); nn++;
+                }
+                p = q + 1;
+            }
+            free(kf);
+        }
+        if (!nn) die(0, "no C inputs");
+        for (k = 0; k < nn; k++) {
+            const char *probe = names[k], *base = strrchr(probe, '/') + 1;
+            char *tape = path("probe", ".tape"), *bin = path("probe", ".tapebin"), *obin = path("probe", ".origin.tapebin"),
+                 *img0 = path("probe", ".text.img"), *img1 = path("probe", ".bin.img");
+            snprintf(cmd, sizeof cmd, "'%s' '%s' -t lnx/x86_64 -o '%s'", U, probe, tape); ok_or_die(probe, cmd);
+            snprintf(cmd, sizeof cmd, "'%s' '%s' --tapebin -c -o '%s'", U, tape, bin); ok_or_die(probe, cmd);
+            snprintf(cmd, sizeof cmd, "'%s' '%s' -t lnx/x86_64 --tapebin -o '%s'", U, probe, obin); ok_or_die(probe, cmd);
+            expect(base, "lnx/x86_64", tape, bin, obin, o, z);
+            sha32_file(bin, got);
+            if (strcmp(got, z)) die(probe, "the reference encoder differs from the frozen codec (no-origin carrier)");
+            sha32_file(obin, got);
+            if (strcmp(got, o)) die(probe, "the reference encoder differs from the frozen codec (origin carrier)");
+            snprintf(cmd, sizeof cmd, "'%s' '%s' -b lnx/x86_64 -o '%s'", U, tape, img0); ok_or_die(probe, cmd);
+            snprintf(cmd, sizeof cmd, "'%s' '%s' -b lnx/x86_64 -o '%s'", U, bin, img1); ok_or_die(probe, cmd);
+            if (!same_files(img0, img1)) die(probe, "the reference image from the carrier differs from the image from the tape");
+            nprobes++;
+        }
+    }
+
+    /* hello.c on all six targets */
+    for (i = 0; i < 6; i++) {
+        const char *tg = TARGETS[i]; char *tape = path("hello", ".tape"), *bin = path("hello", ".tapebin"),
+             *zbin = path("hello", ".zero.tapebin"), *img0 = path("hello", ".text.img"), *img1 = path("hello", ".bin.img");
+        snprintf(cmd, sizeof cmd, "'%s' examples/hello.c -t %s -o '%s'", U, tg, tape); ok_or_die(tg, cmd);
+        snprintf(cmd, sizeof cmd, "'%s' examples/hello.c -t %s --tapebin -o '%s'", U, tg, bin); ok_or_die(tg, cmd);
+        snprintf(cmd, sizeof cmd, "'%s' '%s' --tapebin -c -o '%s'", U, tape, zbin); ok_or_die(tg, cmd);
+        expect("hello.c", tg, tape, zbin, bin, o, z);
+        sha32_file(bin, got);
+        if (strcmp(got, o)) die(tg, "the reference encoder differs from the frozen codec (origin carrier of hello.c)");
+        sha32_file(zbin, got);
+        if (strcmp(got, z)) die(tg, "the reference encoder differs from the frozen codec (no-origin carrier of hello.c)");
+        snprintf(cmd, sizeof cmd, "'%s' '%s' -b %s -o '%s'", U, tape, tg, img0); ok_or_die(tg, cmd);
+        snprintf(cmd, sizeof cmd, "'%s' '%s' -b %s -o '%s'", U, bin, tg, img1); ok_or_die(tg, cmd);
+        if (!same_files(img0, img1)) die(tg, "the reference image from the carrier differs from the image from the tape");
+    }
+    {   /* the last carrier is win/arm64's: refused for another target, nothing written */
+        char *wrong = path("wrong-origin", ""); Res r;
+        snprintf(cmd, sizeof cmd, "'%s' '%s' -b lnx/x86_64 -o '%s'", U, path("hello", ".tapebin"), wrong);
+        r = sh(cmd);
+        if (r.rc == 0 || access(wrong, F_OK) == 0) die("origin", "origin mismatch was accepted");
+        free(r.out); free(r.err);
+    }
+    {   Res a, b; char *tape = path("host", ".tape"), *bin = path("host", ".tapebin");
+        snprintf(cmd, sizeof cmd, "'%s' examples/hello.c -t %s -o '%s'", U, host, tape); ok_or_die(host, cmd);
+        snprintf(cmd, sizeof cmd, "'%s' examples/hello.c -t %s --tapebin -o '%s'", U, host, bin); ok_or_die(host, cmd);
+        snprintf(cmd, sizeof cmd, "'%s' -run '%s'", U, tape); a = sh(cmd);
+        snprintf(cmd, sizeof cmd, "'%s' -run '%s'", U, bin); b = sh(cmd);
+        if (a.rc != b.rc || a.nout != b.nout || memcmp(a.out, b.out, a.nout)) die(host, "C reference run differs");
+        free(a.out); free(a.err); free(b.out); free(b.err);
+    }
+    cleanup();
+    printf("tapebin codec: 3 frozen codec fixtures (fixpoint, damage refused), 4 malformed unit tapes refused, %d frozen reference tapes, 6 target images, origin guard, C run\n", nprobes);
+    return 0;
+}

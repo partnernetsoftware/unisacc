@@ -426,7 +426,7 @@ static char *extra[] = {
     "E3", "com-tapedomain", "lower",
     /* com-hostaddr-neg: .hostaddr索引0..3拒绝域（control与参考逐字节同，-1/4双方具名拒绝）; tests/gate.sh */
     "lower", "com-hostaddr-neg", "meta",
-    /* com-extent-neg: tape数据extent拒绝域（稀疏control逐字节同；2^31单项/累计产品具名拒绝，参考接受已登记）; tests/gate.sh */
+    /* com-extent-neg: tape数据extent拒绝域（稀疏control与经典参考UA逐字节同；2^31单项/累计产品具名拒绝，UA拒单项、收累计已登记）; tests/gate.sh */
     "lower", "com-extent-neg", "meta",
     /* com-bindings-neg: .librarycall拒绝归属（缺bindings归绑定层、坏寄存器/操作数归tape域；plain与lnx .hostcall控制件逐字节同）; tests/gate.sh */
     "lower", "com-bindings-neg", "meta",

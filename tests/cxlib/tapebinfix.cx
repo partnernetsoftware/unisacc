@@ -1,0 +1,99 @@
+/* tapebinfix.cx -- the frozen side of the Tapebin carrier checks, as a .cx module (2026-10-23, plans/unisa-detach.md
+   W1-G).  The seed's Python codec (its tapebin.py, archived with the seed) used to be called per run as the third, independent codec;
+   its outputs were captured once while it was live and are read here instead.
+   Use it with `#pragma unisa use cxlib.tapebinfix` from a .cx file in tests/; paths are relative to the repository
+   root, which is the working directory of every gate job.
+     tbf_fixture(NAME, TEXT, PATH)       row NAME of tests/fixtures/tapebin/frozen.tsv: its hex must hash to the row's
+                                         bytes_sha256 and TEXT (the calling check's own source literal; 0 skips the
+                                         test) to its text_sha256; the carrier is written to PATH.  0, or 1 with one
+                                         `tapebinfix: ...` line on stderr
+     tbf_expected(NAME, TARGET, T, O, Z) row (NAME, TARGET) of tests/tapebin-expected.tsv: its text, origin and zero
+                                         columns (32 hex digits each, buffers of 33).  0, or 1 when the table has no
+                                         such row (silent)
+     tbf_sha32(DATA, N, OUT)             the first 32 hex digits of sha256(DATA), the width of tapebin-expected.tsv
+   No exported objects or macros (CXIF v0). */
+#pragma unisa module tapebinfix
+
+void tbf_sha32(const void *data, size_t n, char out[33]) {
+    char hex[65];
+    cx_sha256_hex(data, n, hex);
+    memcpy(out, hex, 32); out[32] = 0;
+}
+
+/* field I (0-based) of the tab-separated line [s, e) into OUT (truncated to CAP-1); 1 when the line has it */
+static int tbf_field(const char *s, const char *e, int i, char *out, size_t cap) {
+    const char *f = s, *g; size_t n;
+    while (i-- > 0) { while (f < e && *f != '\t') f++; if (f == e) return 0; f++; }
+    for (g = f; g < e && *g != '\t'; g++) ;
+    n = (size_t)(g - f); if (n >= cap) n = cap - 1;
+    memcpy(out, f, n); out[n] = 0;
+    return 1;
+}
+
+/* the data line of FILE whose first field is KEY1 (and second KEY2 when given): [*s, *e); 0 when none */
+static char *tbf_cache_name, *tbf_cache;
+static size_t tbf_cache_n;
+static int tbf_line(const char *file, const char *key1, const char *key2, const char **s, const char **e) {
+    const char *p, *end, *q; size_t k1 = strlen(key1), k2 = key2 ? strlen(key2) : 0;
+    if (!tbf_cache_name || strcmp(tbf_cache_name, file)) {
+        free(tbf_cache); free(tbf_cache_name);
+        tbf_cache = cx_read(file, &tbf_cache_n);
+        tbf_cache_name = malloc(strlen(file) + 1);
+        if (!tbf_cache_name) return 0;
+        memcpy(tbf_cache_name, file, strlen(file) + 1);
+    }
+    if (!tbf_cache) return 0;
+    for (p = tbf_cache, end = tbf_cache + tbf_cache_n; p < end; p = q + 1) {
+        for (q = p; q < end && *q != '\n'; q++) ;
+        if (*p == '#' || q == p) continue;
+        if ((size_t)(q - p) > k1 && !memcmp(p, key1, k1) && p[k1] == '\t'
+            && (!key2 || ((size_t)(q - p) > k1 + 1 + k2 && !memcmp(p + k1 + 1, key2, k2) && p[k1 + 1 + k2] == '\t'))) {
+            *s = p; *e = q; return 1;
+        }
+        if (q == end) break;
+    }
+    return 0;
+}
+
+static int tbf_nib(int c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1; }
+
+int tbf_fixture(const char *name, const char *text, const char *path) {
+    static const char *F = "tests/fixtures/tapebin/frozen.tsv";
+    const char *s, *e, *h; char want_text[65], want_bytes[65], got[65]; unsigned char *b; size_t n, i;
+    if (!tbf_line(F, name, 0, &s, &e)) { fprintf(stderr, "tapebinfix: %s: no row %s\n", F, name); return 1; }
+    if (!tbf_field(s, e, 2, want_text, sizeof want_text) || !tbf_field(s, e, 3, want_bytes, sizeof want_bytes)) {
+        fprintf(stderr, "tapebinfix: %s: row %s is short\n", F, name); return 1;
+    }
+    for (h = s, i = 0; i < 4; i++) { while (h < e && *h != '\t') h++; h++; }
+    if (h > e || (size_t)(e - h) % 2) { fprintf(stderr, "tapebinfix: %s: row %s has no even hex field\n", F, name); return 1; }
+    if (text) {
+        cx_sha256_hex(text, strlen(text), got);
+        if (strcmp(got, want_text)) {
+            fprintf(stderr, "tapebinfix: %s: the check's source text for %s is not the frozen one (sha256 %.16s, frozen %.16s)\n", F, name, got, want_text);
+            return 1;
+        }
+    }
+    n = (size_t)(e - h) / 2;
+    b = malloc(n ? n : 1);
+    if (!b) return 1;
+    for (i = 0; i < n; i++) {
+        int hi = tbf_nib((unsigned char)h[2 * i]), lo = tbf_nib((unsigned char)h[2 * i + 1]);
+        if (hi < 0 || lo < 0) { free(b); fprintf(stderr, "tapebinfix: %s: row %s: bad hex\n", F, name); return 1; }
+        b[i] = (unsigned char)(hi << 4 | lo);
+    }
+    cx_sha256_hex(b, n, got);
+    if (strcmp(got, want_bytes)) {
+        free(b); fprintf(stderr, "tapebinfix: %s: row %s: carrier sha256 %.16s is not the frozen %.16s\n", F, name, got, want_bytes);
+        return 1;
+    }
+    if (cx_write(path, b, n)) { free(b); fprintf(stderr, "tapebinfix: cannot write %s\n", path); return 1; }
+    free(b);
+    return 0;
+}
+
+int tbf_expected(const char *name, const char *target, char *text, char *origin, char *zero) {
+    const char *s, *e;
+    if (!tbf_line("tests/tapebin-expected.tsv", name, target, &s, &e)) return 1;
+    if (!tbf_field(s, e, 2, text, 33) || !tbf_field(s, e, 3, origin, 33) || !tbf_field(s, e, 4, zero, 33)) return 1;
+    return 0;
+}

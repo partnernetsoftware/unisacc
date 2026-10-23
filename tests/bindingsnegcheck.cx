@@ -1,21 +1,26 @@
 #!/usr/bin/env -S unisacc.com -run
-/* bindingsnegcheck.cx PRODUCT: library-call refusal domain and ownership, target
+/* bindingsnegcheck.cx PRODUCT UA: library-call refusal domain and ownership, target
    lnx/x86_64 (research/c43-lower-refusal-domain-proposal.md family 4; the model
    executors are paired by exec/lower/libraryimportscheck.py -- this leaf is the
    product-side witness, with the empty-stdout + named-stderr strength the
    proposal says the model check still lacks).
    Controls: a plain tape and a lnx .hostcall tape are accepted by product and
-   Python reference, images byte-identical each.
+   the classic C reference UA (tests/build_ref.sh; the gate passes $UA), images
+   byte-identical each.  (Until 2026-10-23 the control side was the archived
+   Python seed's compile --from-tape; plans/unisa-detach.md W1-G: control = UA.)
    Negatives and their owners:
    - .librarycall with no bindings: the product refuses rc1, empty stdout, no
      output file, named "not covered: library import binding or signature"
-     (binding layer).  The reference refuses too since the option-A landing
-     (2026-10-22): its compile route has no bindings channel, named
-     "librarycall requires library bindings".
+     (binding layer).
    - .librarycall r8 (bad register) and .librarycall r1 (wrong operand count):
-     owned by the tape domain, NOT the binding layer; both sides refuse at the
-     same check point, the product names the owner and the line. */
-static char D[4096], P[4096];
+     owned by the tape domain, NOT the binding layer; the product names the
+     owner and the line.
+   The reference refuses all three, rc1, at one earlier point: the classic back
+   end has no .librarycall op at all ("back end: unknown tape op").  That is
+   REGISTERED as today's reference behaviour (the archived Python reference
+   named three different owners); if UA ever learns the op, this leaf goes red
+   and the registration is revisited, never silently widened. */
+static char D[4096], P[4096], U[4096];
 static int checks;
 static char *slurp(const char *name, size_t *n) {
     char path[8192];snprintf(path,sizeof path,"%s/%s",D,name);return cx_read(path,n);
@@ -47,14 +52,14 @@ static int product(const char *name, const char *tape, const char *refusal, cons
     if(!ok)fprintf(stderr,"rc=%d stdout(%zu)=%s stderr=%s\n",rc,on,out?out:"",err?err:"<missing>");
     free(out);free(err);checks++;return !ok;
 }
-/* refusal==NULL: today's registered reference acceptance or a plain accept. */
+/* refusal==NULL: a plain accept; otherwise today's registered reference refusal. */
 static int reference(const char *name, const char *tape, const char *refusal) {
     char cmd[16384],*out=0,*err=0;size_t on=0,en=0;int rc,ok;
-    snprintf(cmd,sizeof cmd,"python3 -m unisa compile '%s/%s' --from-tape -o '%s/%s.py.img' --target lnx/x86_64 --drive built >/dev/null 2>'%s/%s.py.err'",
-        D,tape,D,name,D,name);
+    snprintf(cmd,sizeof cmd,"'%s' '%s/%s' -b lnx/x86_64 -o '%s/%s.ua.img' >/dev/null 2>'%s/%s.ua.err'",
+        U,D,tape,D,name,D,name);
     rc=cx_run_timeout(cmd,25,&out,&on);
-    { char e[8192];snprintf(e,sizeof e,"%s.py.err",name);err=slurp(e,&en); }
-    ok=!refusal ? rc==0 : (rc!=0 && err && strstr(err,refusal));
+    { char e[8192];snprintf(e,sizeof e,"%s.ua.err",name);err=slurp(e,&en); }
+    ok=!refusal ? rc==0 : (rc==1 && err && strstr(err,refusal));
     printf("bindings %-22s %s\n",name,ok ? "pass" : "FAIL");
     if(!ok)fprintf(stderr,"rc=%d stderr=%s\n",rc,err?err:"<missing>");
     free(out);free(err);checks++;return !ok;
@@ -69,11 +74,12 @@ static int bytes_equal(const char *name, const char *prod, const char *ref) {
 }
 int main(int argc,char **argv) {
     char own[]="/tmp/bindingsXXXXXX",cwd[4096];int bad=0;
-    if(argc!=2)return 2;
+    if(argc!=3)return 2;
     if(!getcwd(cwd,sizeof cwd) || !mkdtemp(own))return 2;
     snprintf(D,sizeof D,"%s",own);
     if(argv[1][0]=='/')snprintf(P,sizeof P,"%s",argv[1]);else snprintf(P,sizeof P,"%s/%s",cwd,argv[1]);
-    if(strchr(P,39)||strchr(D,39))return 2;
+    if(argv[2][0]=='/')snprintf(U,sizeof U,"%s",argv[2]);else snprintf(U,sizeof U,"%s/%s",cwd,argv[2]);
+    if(strchr(P,39)||strchr(D,39)||strchr(U,39))return 2;
     if(put("plain.tape","_start:\n  ret\n") ||
        put("hostcall.tape","_start:\n.hostcall r1, r0\nret\n") ||
        put("nobind.tape","f:\n.librarycall r1, r0\nret\n_start:\n  ret\n") ||
@@ -86,11 +92,11 @@ int main(int argc,char **argv) {
     bad+=product("neg-operands",    "badops.tape","tape domain: wrong operand count","line 2");
     bad+=reference("control-plain-ref",   "plain.tape",NULL);
     bad+=reference("control-hostcall-ref","hostcall.tape",NULL);
-    bad+=reference("neg-no-bindings-ref", "nobind.tape","librarycall requires library bindings");
-    bad+=reference("neg-register-ref",    "badreg.tape","is not a register");
-    bad+=reference("neg-operands-ref",    "badops.tape","wrong operand count");
-    bad+=bytes_equal("plain-bytes",   "control-plain.img",   "control-plain-ref.py.img");
-    bad+=bytes_equal("hostcall-bytes","control-hostcall.img","control-hostcall-ref.py.img");
+    bad+=reference("neg-no-bindings-ref", "nobind.tape","back end: unknown tape op");   /* registered */
+    bad+=reference("neg-register-ref",    "badreg.tape","back end: unknown tape op");   /* registered */
+    bad+=reference("neg-operands-ref",    "badops.tape","back end: unknown tape op");   /* registered */
+    bad+=bytes_equal("plain-bytes",   "control-plain.img",   "control-plain-ref.ua.img");
+    bad+=bytes_equal("hostcall-bytes","control-hostcall.img","control-hostcall-ref.ua.img");
     printf("bindings checks %d bad %d\n",checks,bad);
     return bad?1:0;
 }

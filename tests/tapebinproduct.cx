@@ -1,8 +1,10 @@
 #!/usr/bin/env -S unisacc.com -run
-/* tapebinproduct.cx -- the shipped model product reads tapebin bytes itself on all six targets: the fixed-cost part
-   (TAPEBIN_PART=six) and the cover part (TAPEBIN_PART=cover).  Ported from tests/tapebinproduct.py (2026-10-23, the
-   owner's direction: the toolchain moves off Python); PARTIAL port, see "Not ported" below.
+/* tapebinproduct.cx -- the shipped model product reads tapebin bytes itself on all six targets: the file slices
+   (TAPEBIN_SHARD=K/6, the default part), the fixed-cost part (TAPEBIN_PART=six) and the cover part
+   (TAPEBIN_PART=cover).  Ported from tests/tapebinproduct.py (2026-10-23, the owner's direction: the toolchain moves
+   off Python; the shard part 2026-10-23 too, plans/unisa-detach.md W1-G, the .py deleted).
    usage (from the repository root, which is ROOT):
+     MODEL_COM=PRODUCT TAPEBIN_SHARD=K/6  sh ./tests/cxbin tests/tapebinproduct.cx
      MODEL_COM=PRODUCT TAPEBIN_PART=six   sh ./tests/cxbin tests/tapebinproduct.cx
      MODEL_COM=PRODUCT TAPEBIN_PART=cover sh ./tests/cxbin tests/tapebinproduct.cx
    PRODUCT defaults to unisacc.com and is resolved to its real path; its sha256 names the state directory
@@ -23,8 +25,27 @@
      STATE/six.json = json.dumps({"host", "part", "targets"}, indent=1, sort_keys=True) + "\n" and
      `tapebin product six: 6 targets, host run, origin guard`.
      The calls package and its canonical text are the bytes unisa.tapebin.encode("entry:\n  callr r5\n  callm
-     [r5+0]\n  ret\n") and decode(...).to_canonical_text() give (computed by unisa/tapebin.py on 2026-10-23 and fixed
-     here as CALLS_HEX / CALLS_TEXT; the record layout and opcodes 30/31/37 are stable tape format v1).
+     [r5+0]\n  ret\n") and decode(...).to_canonical_text() give (computed by the seed's archived Python codec on
+     2026-10-23: the package is row `calls` of tests/fixtures/tapebin/frozen.tsv, read through tests/cxlib/tapebinfix.cx,
+     the text fixed here as CALLS_TEXT; the record layout and opcodes 30/31/37 are stable tape format v1).
+   shard (TAPEBIN_SHARD=K/6, default 1/6; anything else than 1 <= K <= 6 with /6 is `AssertionError: bad TAPEBIN_SHARD
+     V (need k/6)`): the reference is located as for six; files[K-1::6] of the cover file list (below), each with the
+     host target H:
+     - the reference's and the product's PROBE -t H --tapebin packages: a name in tests/product-refusals.knownfail must
+       be accepted by the reference and refused by the product (verdict `refused`); otherwise both accept (acceptance
+       differing, or both refusing, is red);
+     - their tapes (PROBE -t H); the reference's must be the one frozen in tests/tapebin-expected.tsv (row PROBE H,
+       text column).  A tape that moved since the capture is red: the frozen codec verdict no longer judges it; the
+       message gives the row the C codecs would write, for a deliberate re-pin (never done here);
+     - the reference's package must be the frozen `origin` bytes (the archived Python codec's encode(text,
+       origin_target=H), captured once while it was live: before 2026-10-23 recomputed per run), and so must the
+       product's when the two tapes are equal;
+     - the product's tape fed back to both (--tapebin from the .tape, no origin): the two packages must be equal, and
+       equal to the frozen `zero` bytes when the tapes are equal (three codecs, one of them frozen);
+     - tapes that differ are an upstream difference (verdict `known`; the set observed in the slice must be exactly
+       the exec/c/chain.knownfail names in it); equal tapes with different packages are red; else `matched`.
+     Then STATE/shard-K-of-6.json = json.dumps({"files", "k", "known", "n", "verdicts"}, indent=1, sort_keys=True) +
+     "\n" and `tapebin product shard K/6: F files, M equal-source packages, D known upstream tape diffs`.
    cover: examples/*.c + tests/c/*.c (each sorted, dot names too) must be nonempty with unique names; STATE/shard-K-of-6.json
      for K = 1..6 must exist with n == 6 and k == K; STATE/six.json must exist; the shards' files must be exactly the
      file set; exec/c/chain.knownfail (tests/knownfail.py's read(): blank and # lines skipped, NAME REASON, unique
@@ -35,12 +56,10 @@
    `json.decoder.JSONDecodeError: ...`; the frames above it name the .py's own lines and are not reproduced); a run
    that times out (20 s) is `subprocess.TimeoutExpired: Command '[...]' timed out after 20 seconds`.  Return codes of
    signalled children are negative, as Python reports them.  The temporary directory is removed either way.
-   Not ported (stays tests/tapebinproduct.py): TAPEBIN_PART=shard (the default) with TAPEBIN_SHARD=K/6 -- each probe
-   is compared against unisa.tapebin.encode(unisa.tape.parse(text)), the Python tape codec as the third independent
-   implementation; porting it means a fourth codec (tape parser + v1 encoder with the fp opcode table), so this
-   program refuses that part with rc 2.  TAPEBIN_PART values other than six/cover/shard follow the .py (state dir,
-   locate, then `AssertionError: bad TAPEBIN_PART X`). */
+   TAPEBIN_PART values other than six/cover/shard follow the .py (state dir, locate, then `AssertionError: bad
+   TAPEBIN_PART X`). */
 #pragma unisa use cxlib.pyjson
+#pragma unisa use cxlib.tapebinfix
 
 #define SHARDS 6
 /* a whole scratch tree through the one deletion guard (include/unisa_safedel.h, in the cx.h prelude; commissar ruling
@@ -52,10 +71,7 @@ static int scratch_rmtree(const char *p) {
     return rc;
 }
 static const char *TARGETS[6] = { "lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64" };
-static const char *CALLS_HEX =
-    "555441504542494e010000000100000000000000030000004000000057868176a4461072b1760ae7bae758f8722aa7f98389bddd25e9929c"
-    "e7a65bed000000000100010088000000000000000700000000000000010000000200010090000000000000000100000000000000000000000"
-    "300010098000000000000000d00000000000000040000000105656e747279000000000000000000040000031ef5031ff500000325";
+static const char *CALLS_SOURCE = "entry:\n  callr r5\n  callm [r5+0]\n  ret\n";
 static const char *CALLS_TEXT = "entry:\n  callr   r5\n  callm   [r5+0]\n  ret\n";
 
 static char TMPD[4096];   /* the run's temporary directory, removed by die() and at the end */
@@ -280,7 +296,6 @@ static char *locate(void) {
 }
 
 /* ---- six ---- */
-static int unhex(int c) { return c <= '9' ? c - '0' : c - 'a' + 10; }
 static int same_file(const char *path, const char *data, size_t n) {
     size_t k; char *d = read_or_fail(path, &k); int same = k == n && !memcmp(d, data, n); free(d); return same;
 }
@@ -289,14 +304,13 @@ static int same_files(const char *a, const char *b) {
 }
 static void six_part(const char *product, const char *ref, const char *host) {
     char calls[4300], decoded[4300], binary[4300], classic[4300], output[4300];
-    unsigned char blob[512]; size_t i, nb = strlen(CALLS_HEX) / 2; int t;
+    int t;
     char *pp = path_arg(product), *pr = path_arg(ref), *pcalls, *pdec, *pbin, *pcls, *pout;
     snprintf(calls, sizeof calls, "%s/calls.tapebin", TMPD); snprintf(decoded, sizeof decoded, "%s/calls.tape", TMPD);
     snprintf(binary, sizeof binary, "%s/hello.tapebin", TMPD); snprintf(classic, sizeof classic, "%s/classic.tapebin", TMPD);
     snprintf(output, sizeof output, "%s/image", TMPD);
     pcalls = path_arg(calls); pdec = path_arg(decoded); pbin = path_arg(binary); pcls = path_arg(classic); pout = path_arg(output);
-    for (i = 0; i < nb; i++) blob[i] = (unsigned char)(unhex(CALLS_HEX[2 * i]) << 4 | unhex(CALLS_HEX[2 * i + 1]));
-    if (cx_write(calls, blob, nb)) fail("OSError: cannot write calls.tapebin");
+    if (tbf_fixture("calls", CALLS_SOURCE, calls)) fail("OSError: cannot write calls.tapebin (frozen row calls)");
     { char *a[] = { "sh", pp, pcalls, "-t", "lnx/arm64", "-o", pdec, 0 }; run(a); }
     if (!same_file(decoded, CALLS_TEXT, strlen(CALLS_TEXT))) assertion("model tapebin reader confuses callr and callm");
     for (t = 0; t < 6; t++) {
@@ -456,14 +470,143 @@ static void cover(const char *state) {
            (unsigned long)seen.n, SHARDS, counts[0], counts[1], counts[2], (unsigned long)known.n);
 }
 
+/* ---- shard ---- */
+static void all_paths(Strs *paths) {
+    Strs ex = {0}, tc = {0}, names = {0}; size_t i;
+    all_files(&names);   /* nonempty, unique names */
+    glob_c("examples", &ex); glob_c("tests/c", &tc);
+    for (i = 0; i < ex.n; i++) { Buf b = {0}; bputs(&b, "examples/"); bputs(&b, ex.v[i]); spush(paths, b.b); free(b.b); }
+    for (i = 0; i < tc.n; i++) { Buf b = {0}; bputs(&b, "tests/c/"); bputs(&b, tc.v[i]); spush(paths, b.b); free(b.b); }
+}
+static void sha32_path(const char *p, char out[33]) { size_t n; char *d = read_or_fail(p, &n); tbf_sha32(d, n, out); free(d); }
+static void path_assert(const char *path, const char *msg) {
+    Buf b = {0}; bputc(&b, '('); repr_str(&b, path); bputs(&b, ", "); repr_str(&b, msg); bputc(&b, ')'); assertion(b.b);
+}
+static void shard_part(const char *product, const char *ref, const char *host, const char *state) {
+    const char *v = getenv("TAPEBIN_SHARD"); int k = 0, n = 0, used = 0; size_t i, j, nmine = 0;
+    char classic[4300], product_bin[4300], shared[4300], shared_ref[4300], shared_prod[4300];
+    char *pp = path_arg(product), *pr = path_arg(ref), *pcls, *ppb, *psh, *psr, *psp;
+    Kf refused, kf; Strs known_all = {0}, paths = {0}, mine = {0}, known_here = {0}, observed = {0}, vk = {0}, vv = {0};
+    long matched = 0;
+    if (!v) v = "1/6";
+    {   /* int(x) for x in v.split("/"): two decimal fields */
+        const char *q = v; int f = 0, digits;
+        for (f = 0; f < 2; f++) {
+            int x = 0; digits = 0;
+            while (*q >= '0' && *q <= '9' && digits < 6) { x = x * 10 + (*q++ - '0'); digits++; }
+            if (!digits) break;
+            if (f == 0) k = x; else n = x;
+            if (f == 0) { if (*q != '/') break; q++; }
+        }
+        used = f == 2 && !*q;
+    }
+    if (!used || !(1 <= k && k <= n) || n != SHARDS) {
+        Buf b = {0}; char t[32]; bputs(&b, "bad TAPEBIN_SHARD "); bputs(&b, v); snprintf(t, sizeof t, " (need k/%d)", SHARDS); bputs(&b, t); assertion(b.b);
+    }
+    snprintf(classic, sizeof classic, "%s/classic.tapebin", TMPD); snprintf(product_bin, sizeof product_bin, "%s/product.tapebin", TMPD);
+    snprintf(shared, sizeof shared, "%s/shared.tape", TMPD);
+    snprintf(shared_ref, sizeof shared_ref, "%s/shared-ref.tapebin", TMPD); snprintf(shared_prod, sizeof shared_prod, "%s/shared-product.tapebin", TMPD);
+    pcls = path_arg(classic); ppb = path_arg(product_bin); psh = path_arg(shared); psr = path_arg(shared_ref); psp = path_arg(shared_prod);
+    refused = knownfail_read("tests/product-refusals.knownfail");
+    kf = knownfail_read("exec/c/chain.knownfail");
+    for (i = 0; i < kf.n; i++) {
+        if (strncmp(kf.reason[i], "R14-8 P1 ", 9)) { Buf b = {0}; bputs(&b, "bad tapebin knownfail line: "); bputs(&b, kf.name[i]); assertion(b.b); }
+        spush(&known_all, kf.name[i]);
+    }
+    all_paths(&paths);
+    for (i = (size_t)(k - 1); i < paths.n; i += (size_t)n) {
+        const char *name = strrchr(paths.v[i], '/') + 1;
+        spush(&mine, paths.v[i]);
+        if (shas(&known_all, name)) spush(&known_here, name);
+    }
+    nmine = mine.n;
+    for (i = 0; i < nmine; i++) {
+        const char *path = mine.v[i], *name = strrchr(path, '/') + 1; char *ppath = path_arg(path);
+        Res a, b, ct, pt; int listed = 0; char T[33], O[33], Z[33], got_t[33], got_o[33], got_z[33], got[33];
+        cx_remove(classic); cx_remove(product_bin);
+        { char *x[] = { pr, ppath, "-t", (char *)host, "--tapebin", "-o", pcls, 0 }; a = prun(x, 20, 1, 1, 1); }
+        { char *x[] = { "sh", pp, ppath, "-t", (char *)host, "--tapebin", "-o", ppb, 0 }; b = prun(x, 20, 1, 1, 1); }
+        for (j = 0; j < refused.n; j++) if (!strcmp(refused.name[j], name)) listed = 1;
+        if (listed) {
+            if (a.rc || !b.rc) path_assert(path, "listed in tests/product-refusals.knownfail but not (reference accepts, product refuses): delete or fix its line");
+            spush(&vk, name); spush(&vv, "refused"); continue;
+        }
+        if (!a.rc != !b.rc) {
+            Buf m = {0}; bputc(&m, '('); repr_str(&m, path); bputs(&m, ", 'reference/product acceptance differs', ");
+            repr_text(&m, a.err, a.nerr > 160 ? 160 : a.nerr, 1); bputs(&m, ", "); repr_text(&m, b.err, b.nerr > 160 ? 160 : b.nerr, 1); bputc(&m, ')');
+            assertion(m.b);
+        }
+        if (a.rc) { Buf m = {0}; bputs(&m, "previously compiling probe now refused: "); bputs(&m, path); assertion(m.b); }
+        { char *x[] = { pr, ppath, "-t", (char *)host, 0 }; ct = run(x); }
+        { char *x[] = { "sh", pp, ppath, "-t", (char *)host, 0 }; pt = run(x); }
+        if (cx_write(shared, pt.out, pt.nout)) fail("OSError: cannot write shared.tape");
+        { char *x[] = { pr, psh, "-t", (char *)host, "--tapebin", "-o", psr, 0 }; run(x); }
+        { char *x[] = { "sh", pp, psh, "-t", (char *)host, "--tapebin", "-o", psp, 0 }; run(x); }
+        tbf_sha32(ct.out, ct.nout, got_t); sha32_path(classic, got_o); sha32_path(shared_ref, got_z);
+        if (tbf_expected(name, host, T, O, Z)) {
+            Buf m = {0}; bputs(&m, "no frozen row for "); bputs(&m, name); bputc(&m, ' '); bputs(&m, host); bputs(&m, " in tests/tapebin-expected.tsv");
+            assertion(m.b);
+        }
+        if (strcmp(got_t, T)) {
+            int same = ct.nout == pt.nout && !memcmp(ct.out, pt.out, ct.nout);
+            fflush(stdout);
+            fprintf(stderr, "tapebin-expected.tsv: %s %s: the reference's tape moved since the frozen capture (text %s, frozen %s): "
+                    "the archived codec's verdict no longer judges it.  Revert, or re-pin deliberately with the C codecs' row "
+                    "(not an independent codec verdict):\n%s\t%s\t%s\t%s\t%s\n", name, host, got_t, T, name, host, got_t, got_o,
+                    same ? got_z : "-");
+            { Buf m = {0}; bputs(&m, "frozen tape moved for "); bputs(&m, path); assertion(m.b); }
+        }
+        if (strcmp(got_o, O)) { Buf m = {0}; bputs(&m, "reference codec differs from the frozen codec for "); bputs(&m, path); assertion(m.b); }
+        if (ct.nout == pt.nout && !memcmp(ct.out, pt.out, ct.nout)) {
+            sha32_path(product_bin, got);
+            if (strcmp(got, O)) { Buf m = {0}; bputs(&m, "product codec differs from the frozen codec for "); bputs(&m, path); assertion(m.b); }
+            sha32_path(shared_prod, got);
+            if (strcmp(got_z, Z) || strcmp(got, Z)) { Buf m = {0}; bputs(&m, "same-input three-codec comparison differs for "); bputs(&m, path); assertion(m.b); }
+            if (!same_files(classic, product_bin)) { Buf m = {0}; bputs(&m, "product and reference tapebin differ for "); bputs(&m, path); assertion(m.b); }
+            matched++; spush(&vk, name); spush(&vv, "matched");
+        } else {
+            /* an upstream tape difference: the product's tape has no frozen row; the two live codecs must agree on it */
+            if (!same_files(shared_ref, shared_prod)) { Buf m = {0}; bputs(&m, "same-input codec comparison differs for "); bputs(&m, path); assertion(m.b); }
+            spush(&observed, name); spush(&vk, name); spush(&vv, "known");
+        }
+        free(a.out); free(a.err); free(b.out); free(b.err); free(ct.out); free(ct.err); free(pt.out); free(pt.err);
+    }
+    {
+        int same = observed.n == known_here.n;
+        for (i = 0; i < observed.n && same; i++) if (!shas(&known_here, observed.v[i])) same = 0;
+        if (!same) {
+            Buf m = {0};
+            if (observed.n) qsort(observed.v, observed.n, sizeof *observed.v, scmp);
+            bputs(&m, "('upstream tape difference set changed', "); repr_strlist(&m, observed.v, observed.n); bputc(&m, ')');
+            assertion(m.b);
+        }
+    }
+    {
+        char p[4500], *js; size_t jn; pj_value *rec = pj_dict(), *files = pj_list(), *known = pj_list(), *verdicts = pj_dict();
+        Strs names = {0}, kn = {0}; Buf b = {0};
+        for (i = 0; i < nmine; i++) spush(&names, strrchr(mine.v[i], '/') + 1);
+        if (names.n) qsort(names.v, names.n, sizeof *names.v, scmp);
+        for (i = 0; i < names.n; i++) {
+            pj_append(files, pj_strz(names.v[i]));
+            for (j = 0; j < vk.n; j++) if (!strcmp(vk.v[j], names.v[i])) pj_set(verdicts, names.v[i], pj_strz(vv.v[j]));
+        }
+        for (i = 0; i < observed.n; i++) spush(&kn, observed.v[i]);
+        if (kn.n) qsort(kn.v, kn.n, sizeof *kn.v, scmp);
+        for (i = 0; i < kn.n; i++) pj_append(known, pj_strz(kn.v[i]));
+        pj_set(rec, "files", files); pj_set(rec, "k", pj_int(k)); pj_set(rec, "known", known);
+        pj_set(rec, "n", pj_int(n)); pj_set(rec, "verdicts", verdicts);
+        pj_dumps(rec, 1, &js, &jn); bput(&b, js, jn); bputc(&b, '\n');
+        snprintf(p, sizeof p, "%s/shard-%d-of-%d.json", state, k, n);
+        if (cx_write(p, b.b, b.n)) fail("OSError: cannot write the shard record");
+    }
+    printf("tapebin product shard %d/%d: %lu files, %ld equal-source packages, %lu known upstream tape diffs\n",
+           k, n, (unsigned long)nmine, matched, (unsigned long)known_here.n);
+}
+
 int main(void) {
     const char *part = getenv("TAPEBIN_PART"), *mc = getenv("MODEL_COM"), *host;
     char product[4096], hex[65], key[65], state[4400], *ref, *sys = 0; size_t n; char *data;
     if (!part) part = "shard";
-    if (!strcmp(part, "shard")) {
-        fprintf(stderr, "tapebinproduct.cx: TAPEBIN_PART=shard is not ported (it compares the product against the Python tape codec unisa/tapebin.py): run python3 ./tests/tapebinproduct.py\n");
-        return 2;
-    }
     if (!mc) mc = "unisacc.com";
     if (!realpath(mc, product)) {
         char cwd[4096]; if (!getcwd(cwd, sizeof cwd)) return 1;
@@ -493,6 +636,7 @@ int main(void) {
         fflush(stdout); cleanup();
         return 0;
     }
+    if (!strcmp(part, "shard")) { shard_part(product, ref, host, state); fflush(stdout); cleanup(); return 0; }
     { Buf b = {0}; bputs(&b, "bad TAPEBIN_PART "); bputs(&b, part); assertion(b.b); }
     return 1;
 }
