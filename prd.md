@@ -158,6 +158,14 @@ F1 第2刀 dup2/fopen 修剪：kernel/facts/ABI 已重生成，PP 四步重采�
 
 第6刀按原fresh协议分步准备已成功：parse2 10209 states、unitparse-ref及token dump均有正常产物与stamp，每步独立≤58秒；保留首轮外层142证据。现在在同一index导出重跑原全部命名套件，没有修改套件、输入或缓存协议。
 
+F1 最后刀：应用原0006后，以已实测的精确补修替换 cx_read POSIX 路径，直接检查新开描述符 read 返回值，覆盖8路stdio状态占满边界；Windows原路径保留。同步已验证的K0容量回归，重生成派生并以最终候选源指纹/字节身份核对，再整体提升 main 与根产品，不再混入其他轨道。
+
+最后刀重生成已成功：gen/parse2键为最终1aba99c3d52243aa/289b42a4ad9b85db，源指纹c4618639cc3fcfac4f8ce52a11df3bdab93b2c9376eecee63fd70e6550adc57f与已验证候选完全相同，ident确认4f0b493c7a83d73a4ae1b348c8400ea3b7eda0ea190051b54a84c712a6730eda为fresh，K0 bad=0 files=18。同步精确同输入的最终双封及657份差分证据，接续封件负例与提交闸，不重新训练或改动其他轨道。
+
+F1 最终材料转移后检查已通过：E3 gate含负例、PP core与负例均rc0；原657份证据独立重算再次通过（628 SAME/29 DIFF，双产品ident与全部输入pin通过），落地树产品输入与该证据源指纹完全相同。进入最后刀index提交闸；main与根产品整体提升成功之前仍不计F1正式完成。
+
+最后刀首次提交被输入声明分类器正确拒绝：已有 e3-seal gate 未登记到 gatedeps。补齐 refreshgatedeps.cx 中该已有套件的命令与依赖（334条实测依赖均落在7个产品源树，另声明封件树、检查器、bound及根产品对和cc/sh工具），通过landlock --derive生成仅本项及本刀快照的JSON变化；不移除E3检查、不改seal判据。
+
 ### 版本状态与可核验进度
 
 | 项 | 当前口径 | 核验来源/限制 |
@@ -597,3 +605,5 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 - [发布与开发历史](archive/prd-release-and-development-history-20261001.md)：逐版发布身份及旧验收。
 - [早期PRD](archive/prd-history.md)、[迁移日志](archive/s17-migration-log-20260928.md)、[R9/R10回执](archive/prd-r9-r10-receipts-20260929.md)、[问题发现编号](archive/prd-findings-20260929.md)。
 - [R17过程](archive/prd-r17-notes-20261001.md)、[0.0.21后旧条目](archive/prd-notes-20261002.md)、[旧计划](archive/plans/)。
+
+F1 落地补充：现有 glossarycheck 闸扫描全部受跟踪的新文件，须在 gatedeps 中声明受跟踪顶层目录和根文件；只补输入声明，不改规则或豁免。

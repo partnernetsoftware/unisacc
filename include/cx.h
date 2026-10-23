@@ -52,11 +52,36 @@ static char *_cx_slurp(FILE *__u_f, size_t *__u_len) {
 }
 #endif
 
+/* the whole file, as _cx_slurp; NULL when it cannot be opened or a read fails -- a directory
+   included (fopen "rb" opens one on POSIX and the first read fails with EISDIR; it was an empty
+   buffer until 0.0.43, where Python's open() raises) */
 #if !__UNISA_FTRIM_LIBC || __UN_cx_read
 static char *cx_read(const char *__u_path, size_t *__u_len) {
     FILE *__u_f = fopen(__u_path, "rb"); char *__u_b;
     if (!__u_f) return 0;
-    __u_b = _cx_slurp(__u_f, __u_len); fclose(__u_f); return __u_b;
+#ifndef _WIN32
+    /* A freshly opened stream has no buffered bytes.  Inspect the descriptor
+       result directly: the carried stdio has only eight error-state slots. */
+    {   size_t __u_n = 0, __u_cap = 4096; long __u_k; char *__u_t;
+        __u_b = malloc(__u_cap);
+        if (!__u_b) { fclose(__u_f); return 0; }
+        while ((__u_k = read(fileno(__u_f), __u_b + __u_n, __u_cap - __u_n - 1)) > 0) {
+            __u_n += __u_k;
+            if (__u_cap - __u_n < 2) {
+                __u_t = realloc(__u_b, __u_cap * 2);
+                if (!__u_t) { free(__u_b); fclose(__u_f); return 0; }
+                __u_b = __u_t; __u_cap *= 2;
+            }
+        }
+        if (__u_k < 0) { free(__u_b); __u_b = 0; __u_n = 0; }
+        else __u_b[__u_n] = 0;
+        if (__u_len) *__u_len = __u_n;
+    }
+#else
+    __u_b = _cx_slurp(__u_f, __u_len);
+    if (__u_b && ferror(__u_f)) { free(__u_b); __u_b = 0; if (__u_len) *__u_len = 0; }
+#endif
+    fclose(__u_f); return __u_b;
 }
 #endif
 

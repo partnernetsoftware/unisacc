@@ -28,3 +28,7 @@
 逐项变化只有 `dependencies.tsv` 中 builder `exec/finite_rules.py`：长度38371→38562、SHA4a8151fa…→2a858163…，原因是通用 split-at 可选owner-prefix。全部case输入/输出/错误/源名、两个model产物、resources/streams/closure.expected/identity/measurement均逐字节不变。原件实际93依赖（上方91是历史说明），6收38拒/两模型/core/output-proof保持原值。没有手填新identity或放宽seal，也不授复用。
 
 仓外保留 source.json、12步build-steps.json、raw trace、reseal.tsv、file-comparison.json；保存于仓外本轮 `2c3/joint/pp-reseal/`，不把宿主绝对路径放入封存输入。
+
+## 0.0.43 F1 同源重采
+
+本轮以七补丁与 cx_read 容量边界补修后的根产品 `4f0b493c7a83d73a4ae1b348c8400ea3b7eda0ea190051b54a84c712a6730eda` 正式重采，四步均 rc0，最大单步31.17秒；内容变异负例均拒绝。93依赖、6接受、38拒绝、两模型。采集器现接受strace对齐空白，见 research/c43-ppcapture-padding.md；实际凭据见 research/c43-f1-evidence/pp-reseal.tsv。原始trace留scratch仓外目录，封件不含观测文件；本README为手写历史说明，不在capture目录摘要之内。不授复用、不声明发布。
