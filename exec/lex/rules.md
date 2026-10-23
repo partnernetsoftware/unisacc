@@ -3,7 +3,8 @@
 `gen.py --typed OUT.json` reads declarations, expands finite rules and builds
 tries. `exec/c/tbl.py` encodes the result; `exec/c/net.py` constructs threshold
 weights. The production candidate evaluates those weights at runtime.
-`exec/lex/net.py` is an older, separate UNS2/DENSE experiment.
+The older, separate UNS2/DENSE experiment (`exec/lex/net.py`, `stage.py`) was
+deleted on 2026-10-23 (it built on the archived seed's construction).
 
 ## Inputs
 

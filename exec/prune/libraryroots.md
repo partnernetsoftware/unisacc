@@ -19,7 +19,9 @@ remaining bytes using unsigned comparison; no truncated read or length addition
 overflow can succeed. Bad input rejects, never invokes conservative FALLBACK.
 
 Without the resource, original prune output is unchanged. libraryrootscheck.py
-requires private prepared JSON/TBL/NET/core inputs and compares C network with
+(an ungated Python referee on the archived seed's prune; deleted 2026-10-23 in the
+seed detachment, record below kept as history) required private prepared
+JSON/TBL/NET/core inputs and compared C network with
 Python simulator, checks the complete finite net domain, keeps unsupported
 public functions, removes an internal dead function, preserves init/address
 roots, and checks all resource prefix truncations plus malformed fields.
