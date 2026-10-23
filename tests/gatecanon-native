@@ -1,0 +1,29 @@
+#!/bin/sh
+# Build the CPython host adapter once per importing process. No artifact reuse:
+# every compilation reads the current compiler, Python and transitive C headers.
+# Outputs stay in the owned scratch cache for later guarded cleanup.
+set -eu
+fail() { echo "gatecanon-native: $*" >&2; exit 2; }
+[ "$#" = 1 ] || fail 'expected the importing interpreter development include directory'
+headers=$1
+case "$headers" in /*) ;; *) fail 'development include directory must be absolute';; esac
+[ -f "$headers/Python.h" ] || fail 'TOOL_MISSING: matching development headers not found'
+root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+base=${CXBIN_CACHE:-${TMPDIR:-/tmp}/unisacc-cxbin-$(id -u)}
+case "$base" in /*) ;; *) fail 'cache must be absolute';; esac
+case "$base" in /|/tmp|/home|"${HOME:-/home}") fail 'unsafe cache base';; esac
+umask 077
+[ -d "$base" ] || mkdir -p "$base"
+[ ! -L "$base" ] && [ -O "$base" ] || fail 'cache is not an owned directory'
+build=$(mktemp -d "$base/gatecanon-native.XXXXXXXX")
+case $(uname -s) in
+ Linux) set -- -shared -fPIC;;
+ Darwin) set -- -bundle -undefined dynamic_lookup;;
+ *) fail 'TOOL_MISSING: native stamp needs Linux or Darwin';;
+esac
+cd "$root"
+if ! tests/bound 25 cc -std=c11 -O2 "$@" -I"$headers" tests/gatecanon_native.c -o "$build/_gatecanon.so" -lm > "$build/build.log" 2>&1; then
+ cat "$build/build.log" >&2
+ fail 'native adapter build failed'
+fi
+printf '%s\n' "$build/_gatecanon.so"

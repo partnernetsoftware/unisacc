@@ -96,7 +96,7 @@ try:
     subprocess.run(['git', 'add', '-A'], check=True); subprocess.run(['git', 'commit', '-q', '-m', 'underdeclared'], check=True, env=env)
     s0, p = fp()
     if k(p) != 'narrow': fail('N10 fixture not narrow: %s' % k(p))
-    p_vm = pathlib.Path('include/cx.h'); p_vm.write_text(p_vm.read_text() + '\n#error K2b undeclared dependency\n')
+    p_vm = pathlib.Path('include/stdio.h'); p_vm.write_text(p_vm.read_text() + '\n#error K2b undeclared dependency\n')
     s1, _ = fp()
     if s1['volatile-comma'] != s0['volatile-comma']: fail('N10 fixture: the undeclared change should be invisible to the narrow stamp')
     state = T / 'state'; state.mkdir()

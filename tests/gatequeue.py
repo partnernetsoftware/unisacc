@@ -7,11 +7,17 @@ input invalidation. Model preparation may
 be shared separately. Each window is <=55 s, leaving cleanup inside the 60 s
 outer watchdog. Long jobs go first; shorter jobs fill remaining slots.
 """
-import argparse, bisect, re, fcntl, hashlib, json, os, pathlib, platform, shutil, stat, subprocess, sys, time
+import argparse, importlib.util, sysconfig, bisect, re, fcntl, hashlib, json, os, pathlib, platform, shutil, stat, subprocess, sys, time
 from gatelayers import LAYERS, select as select_layers
 import gatedecl
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+# Native stamp binding only; the canonical/Merkle algorithm and cache live in C.
+_native_path = subprocess.check_output(['sh', str(ROOT/'tests/gatecanon-native'),
+                                        sysconfig.get_path('include')], text=True, timeout=30).strip()
+_native_spec = importlib.util.spec_from_file_location('_gatecanon', _native_path)
+_native_stamp = importlib.util.module_from_spec(_native_spec)
+_native_spec.loader.exec_module(_native_stamp)
 # comboot records its stages in ROOT/out/comboot/stages.json: a seed result from another
 # checkout does not put stage 1 there (0.0.21: stage2/3 "recorded before stage 1")
 LOCATION_BOUND = ('com-comboot-',)
@@ -285,11 +291,19 @@ def fingerprint(jobs, parts=None, revoked=()):
         root_product = [{n: digest(n) for n in ('unisacc.com', 'unisacc.com.build.json')}]
     common = [provider_inputs, seed_inputs, execution_environment(), platform.platform(), platform.machine(), sys.version,
               str(pathlib.Path(sys.executable).resolve()), tools,
-              {'tests/gatequeue.py':contract_digest('tests/gatequeue.py'), 'tests/bound.py':digest('tests/bound.py')}, gate_runner()] + root_product
+              {'tests/gatequeue.py':contract_digest('tests/gatequeue.py'), 'tests/bound.py':digest('tests/bound.py'),
+               'native-stamp-binary':digest(_native_path),
+               'tests/gatecanon-native':digest('tests/gatecanon-native'),
+               'tests/gatecanon_native.c':digest('tests/gatecanon_native.c'),
+               'tests/cxlib/gatecanon.cx':digest('tests/cxlib/gatecanon.cx'),
+               'tests/cxlib/pyjson.cx':digest('tests/cxlib/pyjson.cx'),
+               'include/cx.h':digest('include/cx.h'),
+               'include/unisa_sha256.h':digest('include/unisa_sha256.h'),
+               'include/unisa_safedel.h':digest('include/unisa_safedel.h')}, gate_runner()] + root_product
     # 0.0.29 P7': gate.sh's job lines and gatedeps.json are no longer global identities -- a job's own
     # command, declared inputs and guards are in its stamp already, so editing one job line or refreshing
     # another suite's declaration keeps every other result (0.0.28 measured 0% reuse because of these two)
-    def stamp(value): return hashlib.sha256(portable(json.dumps(value, sort_keys=True)).encode()).hexdigest()
+    stamp = _native_stamp.stamper(portable, 'auto')
     global_inputs = None
     # 0.0.40 K2b (机房主任 18:55, K2b-0=b): a declared, guard-matching suite narrows its stamp to its declared
     # inputs ONLY when it is on the named whitelist (tests/k2b-whitelist.tsv: suite, declaration sha256,

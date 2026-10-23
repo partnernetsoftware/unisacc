@@ -645,3 +645,17 @@ The stage-contract e3 model pin is exactly the old 4fbfdad2 root's extracted mod
 F6正常候选构建、stage2/stage3及官方fixedpoint实际完成；seed、stage2、stage3三个实际文件SHA均为4f0b493c7a83d73a4ae1b348c8400ea3b7eda0ea190051b54a84c712a6730eda，完整产品收据一致，根与候选双ident通过。证据见research/c43-f6-final-evidence/。此为构建固定点，不代表F4或公开验收。
 
 F4仍待完成。原全量队列前11项中3 PASS、8红：三个arm64大闭包及准备步骤获25秒而超时，两项前置失败、两个seedparse2分片缺memory证据；不扩大R11或覆盖原红。真实profile定位指纹重复JSON/路径规约/哈希开销；原生原型旧哈希对照和纯数据基准通过，但UTF8拒绝和FD继承仍需补证，未接入生产。原型只留scratch out，不增加Python逻辑。当前刀只落F3/F6证据与仪表板F6行；后续正式队列按新输入重新建state，旧结果保留。
+
+### F4 原生 stamp 接线裁决（2026-10-23）
+
+在同一4a7be9b1输入上实测1118项身份采集：原实现12.4768秒；C原型完整函数含析构3.6886秒。去重开关两侧1118个新协议摘要逐字节相等，逐文件parts保留。历史真实JSON的旧SHA及Unicode/浮点/整数对拍、回调引用、异常传播、heap type GC均已实跑通过。
+
+本刀只将既有stamp算法迁入C，保留原收集与K2b审计逻辑；Python仅加载模块、绑定callable，不增加Python缓存或另一套算法。数组身份统一使用版本化Merkle域，scope仍由原组件数组与parts字段表达；reviewed inventory字典保留旧哈希。对象与可达值在一次采集期间不可变，C缓存强持引用，浅字典去重必须完整比较键内容与值指针。
+
+采用每个解释器进程新编译一次宿主适配器，不做跨进程编译缓存；实际适配器字节和固定源码闭包进入common身份，临时输出路径不入身份。额外依赖是匹配的CPython开发头与宿主cc，Linux/Darwin支持，未证明脱离Python运行时。编译输出只留在受限scratch缓存目录，不未经守卫删除。接线后需原有K2b、队列、诊断及完整F3/F4重新验证；旧红和旧state保留，不批量重盖摘要，不放宽时间或扩大R11。
+
+N10受控漏声明负例改用自带stdio.h：新适配器真实读取cx.h，后者现为common输入，不能再把它冒充未声明依赖。隔离单文件挂载#error到自带stdio.h已实际使原volatilecomma编译具名拒绝，宿主适配器仍用系统stdio；仅替换原测试的一个文件名常量，所有漏跑RED、撤销与保留断言不变。
+
+头目录由导入解释器的sysconfig.get_path元数据直接交给宿主构建器，不在shell猜测CPython安装布局；构建器不调用解释器。未新增或扩展Python算法。
+
+原生门禁控制器的构建参数来自解释器安装自带的 shell 配置工具；它不执行解释器。G5 对该工具名称的三处命中以具名例外登记，零 Python 台账不变；不扩展为任何解释器调用豁免。

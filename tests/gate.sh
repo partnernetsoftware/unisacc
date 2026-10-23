@@ -1037,6 +1037,7 @@ job seed-matrix-win-x86_64 sh ./tests/cxbin tests/seedconstructmatrix.cx win/x86
 job seed-matrix-object sh ./tests/cxbin tests/seedconstructmatrix.cx object
 job gate-infra python3 ./tests/queuecheck.py
 job gate-infra-38 python3 ./tests/queuecheck38.py   # 0.0.38 scheduler controls (split to keep both under 60 s)
+job native-stamp tests/bound 50 sh ./tests/gatecanoncheck.sh   # C stamp adapter: legacy JSON/SHA, callback lifetime, cache references and GC
 job gate-layers python3 ./tests/gatelayers.py --check
 job gate-select python3 tests/gateselectcheck.py   # offline selector contracts; never executes gate jobs
 # R12-0 ③b: checks that were in no gate at all (tests/ungated-checks.tsv).
