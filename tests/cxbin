@@ -7,6 +7,11 @@
 # this tests/ directory), FILE.cx and uname -m.  The binary gets ARG... as its argv and the caller's stdin, stdout
 # and stderr; its exit status is the result.  Fail closed: a missing FILE.cx or unisacc.com, a cache directory that
 # is not ours, or a failed compile is rc 2 with one `cxbin: ...` line on stderr, and nothing is run.
+# One exception: tests/safedel.cx, the deletion guard's CLI (include/unisa_safedel.h, commissar ruling 2026-10-23),
+# must not depend on the product it helps build (make com/seed-com, exec/c/comboot.sh, tests/build_ref.sh run before
+# there is one, and an older root product carries an older guard or none), so where a system cc exists it is built by
+# that cc oracle from this tree's headers (cc -std=c99 -x c -include include/cx.h), keyed by uname -m, the prelude
+# headers and the source; without cc, by unisacc.com as any other program.
 # The cache is ${CXBIN_CACHE:-${TMPDIR:-/tmp}/unisacc-cxbin-UID} (mode 0700; the same trust as tests/bound's).
 set -eu
 case "$0" in
@@ -18,9 +23,17 @@ com=$here/../unisacc.com
 [ $# -ge 1 ] || { echo 'cxbin: usage: cxbin FILE.cx [ARG...]' >&2; exit 2; }
 src=$1; shift
 [ -f "$src" ] || { echo "cxbin: no such source: $src" >&2; exit 2; }
-[ -f "$com" ] || { echo "cxbin: no compiler: $com" >&2; exit 2; }
+oracle=
+case ${src##*/} in
+    safedel.cx) if command -v cc >/dev/null 2>&1 || [ ! -f "$com" ]; then oracle=$here/../include/cx.h; fi ;;
+esac
+[ -n "$oracle" ] || [ -f "$com" ] || { echo "cxbin: no compiler: $com" >&2; exit 2; }
 if [ -x /usr/bin/openssl ]; then hashcmd=/usr/bin/openssl; else hashcmd=openssl; fi
-digest=$({ uname -m; cat "$com" "$src"; } | "$hashcmd" dgst -sha256) || { echo 'cxbin: cannot hash the inputs' >&2; exit 2; }
+if [ -n "$oracle" ]; then
+    digest=$({ uname -m; echo cc-oracle; cat "$oracle" "$here/../include/unisa_sha256.h" "$here/../include/unisa_safedel.h" "$src"; } | "$hashcmd" dgst -sha256) || { echo 'cxbin: cannot hash the inputs' >&2; exit 2; }
+else
+    digest=$({ uname -m; cat "$com" "$src"; } | "$hashcmd" dgst -sha256) || { echo 'cxbin: cannot hash the inputs' >&2; exit 2; }
+fi
 key=${digest##* }
 case "$key" in *[!0123456789abcdef]*|'') echo 'cxbin: invalid cache digest' >&2; exit 2;; esac
 cache=${CXBIN_CACHE:-${TMPDIR:-/tmp}/unisacc-cxbin-$(id -u)}
@@ -29,9 +42,18 @@ cache=${CXBIN_CACHE:-${TMPDIR:-/tmp}/unisacc-cxbin-$(id -u)}
 bin=$cache/$key
 if [ ! -x "$bin" ]; then
     temporary=$cache/.$key.$$
-    trap 'rm -f "$temporary"' EXIT HUP INT TERM
+    # a failed compile's leftover goes through the deletion guard; when the guard itself is what failed to build,
+    # the leftover stays (in the private cache, under a dot name) -- nothing deletes without the guard
+    case ${src##*/} in
+        safedel.cx) trap : EXIT HUP INT TERM ;;
+        *) trap 'sh "$here/cxbin" "$here/safedel.cx" --purge -- "${temporary:?}" || :' EXIT HUP INT TERM ;;
+    esac
     # stdin is the caller's (the hook pipes paths to the program): the compile must not read it
-    if ! sh "$com" -o "$temporary" "$src" < /dev/null >&2 || [ ! -s "$temporary" ]; then
+    if [ -n "$oracle" ]; then
+        if ! cc -std=c99 -w -x c -include "$oracle" -o "$temporary" "$src" < /dev/null >&2 || [ ! -s "$temporary" ]; then
+            echo "cxbin: compiling $src with the system cc oracle failed" >&2; exit 2
+        fi
+    elif ! sh "$com" -o "$temporary" "$src" < /dev/null >&2 || [ ! -s "$temporary" ]; then
         echo "cxbin: compiling $src failed" >&2; exit 2
     fi
     chmod 700 "$temporary" && mv -f "$temporary" "$bin" || { echo "cxbin: cannot install $bin" >&2; exit 2; }

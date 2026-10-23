@@ -32,6 +32,9 @@ static void cx_sha256(const void *__u_buf, size_t __u_len, unsigned char __u_md[
 static void cx_sha256_hex(const void *__u_buf, size_t __u_len, char __u_hex[65]);
 static int cx_runv_timeout(char *const __u_argv[], int __u_secs, char **__u_out, size_t *__u_len);
 static int cx_walk(const char *__u_dir, int (*__u_fn)(const char *__u_path, void *__u_ctx), void *__u_ctx);
+static int cx_remove(const char *__u_path);
+static int cx_rmtree(const char *__u_path);
+static int cx_trash(const char *__u_path);
 
 /* the whole stream into a malloc'd, NUL-terminated buffer; NULL on error */
 #if !__UNISA_FTRIM_LIBC || __UN__cx_slurp
@@ -216,5 +219,28 @@ static int cx_walk(const char *__u_dir, int (*__u_fn)(const char *__u_path, void
 #include <sys/types.h>
 #include <fcntl.h>
 extern char **environ;
+#endif
+/* Deletion goes through the one guard, include/unisa_safedel.h (commissar ruling 2026-10-23): refused unless the
+   target lies strictly under $TMPDIR (or /tmp) or a repository's out/ or .trash/, is no home, cwd, repository or
+   ancestor of them, holds no .git and is within the entry ceiling.  0 on success (a missing path included), else the
+   guard's code (3 refused, 1 failed) with one `cx_...: why` line on stderr.  cx_remove: a file, a link or an empty
+   directory, for good; cx_rmtree: a tree, for good; cx_trash: a tree moved into the .trash of its root.  After the
+   edition 1 headers, so a tool's library bodies keep their order. */
+#include "unisa_safedel.h"
+#if !__UNISA_FTRIM_LIBC || __UN__cx_del
+static int _cx_del(const char *__u_who, const char *__u_path, unsigned __u_flags) {
+    char __u_why[600]; int __u_rc = unisa_safedel(__u_path, __u_flags, 0, __u_why, (int)sizeof __u_why);
+    if (__u_rc) fprintf(stderr, "%s: %s\n", __u_who, __u_why);
+    return __u_rc;
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_cx_remove
+static int cx_remove(const char *__u_path) { return _cx_del("cx_remove", __u_path, SAFEDEL_PURGE); }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_cx_rmtree
+static int cx_rmtree(const char *__u_path) { return _cx_del("cx_rmtree", __u_path, SAFEDEL_PURGE | SAFEDEL_RECURSIVE); }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_cx_trash
+static int cx_trash(const char *__u_path) { return _cx_del("cx_trash", __u_path, SAFEDEL_TRASH | SAFEDEL_RECURSIVE); }
 #endif
 #endif

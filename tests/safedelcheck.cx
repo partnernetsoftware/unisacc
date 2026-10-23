@@ -1,0 +1,333 @@
+/* safedelcheck: mutation and property tests of the one deletion guard, include/unisa_safedel.h, through its CLI
+   tests/safedel.cx (argv only, never a shell) and in process (unisa_safedel, cx_remove/cx_rmtree/cx_trash).
+     sh unisacc.com -run tests/safedelcheck.cx -- --com unisacc.com [--src tests/safedel.cx]   (compiles the CLI)
+     safedelcheck --bin BUILT_CLI                                                               (a CLI built elsewhere)
+   Everything happens in a sandbox B = mkdtemp($TMPDIR or /tmp); the CLI runs with TMPDIR=S/wl, HOME=S/home and its cwd
+   in S (S = B/s).  Each refusal case runs three times (--dry-run, the default trash, --purge), the latter two only
+   after the dry run refused, and the full-tree checksum of S (every path, type, mode, size, content and link target)
+   must not change.  Refused: "", ".", "..", "/", "//", "~", "~/", $HOME, the cwd, a fake repository root, the same
+   with the cwd inside it, its parent, a directory holding a nested .git, a path inside .git, a repository file outside
+   out/, a symlink into the fake repository (with and without a trailing slash), a symlink to $HOME, an escape from the
+   whitelist via .. and via a symlinked parent (landing in a second fake repository), a path ending in .., the temp
+   root itself (and /tmp), a path outside both temp roots ($TMPDIR, /tmp) when TMPDIR is relative or an ancestor of
+   $HOME (under /tmp the fake $HOME makes /tmp no temp root: refused all the same), the ceiling without --force-count,
+   a list holding one bad path.  Works: a temp
+   tree to the trash (default) and purged (--purge), a repository out/ tree to the repository's .trash, a dry run that
+   changes nothing, a link removed as a link (its destination intact), a tree holding links out of it, the ceiling with
+   --force-count, a missing path, names with shell metacharacters taken literally, --purge-trash by age and ceiling,
+   a /tmp path purged while TMPDIR points elsewhere (both temp roots are whitelisted).
+   Kill switches of the argv parsing: rc 2 and no change.  The sandbox goes through the guard too (its fake .git
+   entries are renamed away first: the guard never deletes a .git). */
+static char B[4096], S[4096], BIN[4096], ERRF[4096];
+static int passes, fails, UNDERTMP;   /* UNDERTMP: the sandbox lies under realpath(/tmp), a temp root of its own */
+static char *at(const char *rel) {   /* S/rel in one of 16 rotating buffers */
+    static char buf[16][4096]; static int k; char *b = buf[k++ & 15];
+    if (!rel || !rel[0]) snprintf(b, 4096, "%s", S); else snprintf(b, 4096, "%s/%s", S, rel);
+    return b;
+}
+static void mkdirs(const char *p) {
+    char t[4096]; size_t i, n = strlen(p);
+    if (n >= sizeof t) return;
+    memcpy(t, p, n + 1);
+    for (i = 1; i <= n; i++) if (t[i] == '/' || t[i] == 0) { char c = t[i]; t[i] = 0; mkdir(t, 0755); t[i] = c; }
+}
+static void put(const char *rel, const char *text) {
+    char d[4096]; char *p = at(rel), *s;
+    snprintf(d, sizeof d, "%s", p); s = strrchr(d, '/'); if (s) { *s = 0; mkdirs(d); }
+    if (cx_write(p, text, strlen(text)) != 0) { printf("FAIL setup: cannot write %s\n", p); fails++; }
+}
+static void link_to(const char *dest, const char *rel) { if (symlink(dest, at(rel)) != 0) { printf("FAIL setup: symlink %s\n", rel); fails++; } }
+static int exists(const char *p) { struct stat st; return lstat(p, &st) == 0; }
+/* the tree checksum: sorted walk, lstat only */
+struct buf { char *p; size_t n, cap; };
+static void add(struct buf *b, const char *s) {
+    size_t l = strlen(s);
+    if (b->n + l + 1 > b->cap) { b->cap = (b->n + l + 1) * 2; b->p = realloc(b->p, b->cap); if (!b->p) exit(2); }
+    memcpy(b->p + b->n, s, l); b->n += l; b->p[b->n] = 0;
+}
+static int cmpname(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+static void tree(struct buf *b, const char *p, const char *rel) {
+    struct stat st; char line[9000];
+    if (lstat(p, &st) != 0) { snprintf(line, sizeof line, "? %s\n", rel); add(b, line); return; }
+    if (S_ISLNK(st.st_mode)) {
+        char t[4096]; long n = (long)readlink(p, t, sizeof t - 1); if (n < 0) n = 0; t[n] = 0;
+        snprintf(line, sizeof line, "L %s -> %s\n", rel, t); add(b, line);
+    } else if (S_ISDIR(st.st_mode)) {
+        DIR *d = opendir(p); struct dirent *e; char **v = 0; size_t n = 0, i;
+        snprintf(line, sizeof line, "D %s %o\n", rel, (unsigned)(st.st_mode & 07777)); add(b, line);
+        if (!d) { add(b, "unreadable\n"); return; }
+        while ((e = readdir(d))) {
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            v = realloc(v, (n + 1) * sizeof *v); if (!v) exit(2);
+            v[n] = malloc(strlen(e->d_name) + 1); if (!v[n]) exit(2); memcpy(v[n], e->d_name, strlen(e->d_name) + 1); n++;
+        }
+        closedir(d);
+        if (n) qsort(v, n, sizeof *v, cmpname);
+        for (i = 0; i < n; i++) {
+            char cp[4096], cr[4096];
+            snprintf(cp, sizeof cp, "%s/%s", p, v[i]); snprintf(cr, sizeof cr, "%s/%s", rel, v[i]);
+            tree(b, cp, cr); free(v[i]);
+        }
+        free(v);
+    } else {
+        size_t len = 0; char *c = cx_read(p, &len), hex[65];
+        cx_sha256_hex(c ? c : "", c ? len : 0, hex); free(c);
+        snprintf(line, sizeof line, "F %s %o %ld %s\n", rel, (unsigned)(st.st_mode & 07777), (long)st.st_size, hex); add(b, line);
+    }
+}
+static void sum(const char *p, char hex[65]) {
+    struct buf b = {0, 0, 0}; add(&b, ""); tree(&b, p, "."); cx_sha256_hex(b.p, b.n, hex); free(b.p);
+}
+/* run the CLI with ARGS (NULL-terminated) in CWD, TMPDIR=TMP (NULL: unset), HOME=HOME_; stderr into ERRF; the exit code.
+   The environment goes through env(1) as argv: the carried libc's setenv does not reach a child's environ. */
+static char OUT[65536], ERRS[65536];
+static int cli(const char *cwd, const char *tmp, const char *home, const char **args) {
+    const char *argv[72]; char te[4200], he[4200]; int n = 0, rc, save, fd; char *out = 0; size_t len = 0, el = 0; char *e;
+    argv[n++] = "env";
+    if (tmp) { snprintf(te, sizeof te, "TMPDIR=%s", tmp); argv[n++] = te; } else { argv[n++] = "-u"; argv[n++] = "TMPDIR"; }
+    snprintf(he, sizeof he, "HOME=%s", home); argv[n++] = he;
+    argv[n++] = BIN;
+    while (*args && n < 70) argv[n++] = *args++;
+    argv[n] = 0;
+    if (chdir(cwd) != 0) { printf("FAIL setup: chdir %s\n", cwd); fails++; return -1; }
+    fflush(stdout); fflush(stderr);
+    save = dup(2); fd = open(ERRF, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (save < 0 || fd < 0) { printf("FAIL setup: stderr capture\n"); fails++; return -1; }
+    dup2(fd, 2); close(fd);
+    rc = cx_runv_timeout((char *const *)argv, 20, &out, &len);
+    dup2(save, 2); close(save);
+    snprintf(OUT, sizeof OUT, "%s", out ? out : ""); free(out);
+    e = cx_read(ERRF, &el); snprintf(ERRS, sizeof ERRS, "%s", e ? e : ""); free(e);
+    return rc;
+}
+static void verdict(int ok, const char *what, const char *name) {
+    if (ok) { passes++; printf("ok   %s %s\n", what, name); }
+    else { fails++; printf("FAIL %s %s\n  stdout: %s  stderr: %s\n", what, name, OUT, ERRS); }
+}
+static const char *A_[64];
+/* a refusal: the dry run, then (only when it refused) the trash and the purge; rc 3 each time, S unchanged */
+static void refuse_in(const char *name, const char *cwd, const char *tmp, const char *home, const char *expect, const char *a0, const char *a1) {
+    static const char *modes[3] = {"--dry-run", 0, "--purge"};
+    char before[65], after[65]; int m, ok = 1;
+    sum(S, before);
+    for (m = 0; m < 3 && ok; m++) {
+        int n = 0, rc;
+        if (modes[m]) A_[n++] = modes[m];
+        A_[n++] = "--"; A_[n++] = a0; if (a1) A_[n++] = a1; A_[n] = 0;
+        rc = cli(cwd, tmp, home, A_);
+        if (rc != 3 || !strstr(ERRS, "refused") || (expect && !strstr(ERRS, expect))) ok = 0;
+    }
+    sum(S, after);
+    verdict(ok && !strcmp(before, after), "refuse", name);
+}
+static void refuse(const char *name, const char *a0, const char *expect) { refuse_in(name, at("wl/cwd"), at("wl"), at("home"), expect, a0, 0); }
+/* an argv kill switch: rc 2, S unchanged */
+static void usage_case(const char *name, const char **args) {
+    char before[65], after[65]; int rc;
+    sum(S, before); rc = cli(at("wl/cwd"), at("wl"), at("home"), args); sum(S, after);
+    verdict(rc == 2 && !strcmp(before, after), "usage", name);
+}
+static int trash_holds(const char *trash, const char *name) {   /* some TRASH/<stamp>/NAME exists */
+    DIR *d = opendir(trash); struct dirent *e; char p[4096]; int hit = 0;
+    if (!d) return 0;
+    while ((e = readdir(d))) {
+        if (e->d_name[0] == '.') continue;
+        snprintf(p, sizeof p, "%s/%s/%s", trash, e->d_name, name);
+        if (exists(p)) hit = 1;
+    }
+    closedir(d);
+    return hit;
+}
+static void setup(void) {
+    int i; char nm[64];
+    put("home/notes", "home\n");
+    put("outside/f", "outside\n");
+    put("xrepo/.git/HEAD", "ref: refs/heads/main\n"); put("xrepo/f", "a second repository, outside the temp root\n");
+    put("wl/cwd/~/x", "tilde dir\n");
+    put("wl/cwd/-v", "dash file\n");
+    put("wl/proj/repo/.git/HEAD", "ref: refs/heads/main\n");
+    put("wl/proj/repo/src/a.c", "int a;\n");
+    put("wl/proj/repo/out/build/obj.o", "obj\n");
+    put("wl/proj/README", "parent of the repo\n");
+    put("wl/nested/a/b/.git/config", "[core]\n");
+    put("wl/nested/a/file", "nested\n");
+    put("wl/victim/a/b/f", "victim\n"); put("wl/victim/g", "g\n");
+    put("wl/victim2/x/y", "victim2\n");
+    put("wl/victim3/z", "victim3\n");
+    put("wl/keep/k", "keep\n");
+    put("wl/meta/a b; touch PWNED", "1\n"); put("wl/meta/$(touch PWNED2)", "2\n"); put("wl/meta/*", "3\n");
+    put("wl/withlinks/plain", "p\n");
+    mkdirs(at("wl/emptydir"));
+    for (i = 0; i < 30; i++) { snprintf(nm, sizeof nm, "wl/many/f%02d", i); put(nm, "m\n"); }
+    link_to(at("wl/proj/repo/src"), "wl/linkrepo");
+    link_to(at("home"), "wl/linkhome");
+    link_to(at("xrepo"), "wl/linkparent");
+    link_to(at("wl/keep"), "wl/lnkkeep");
+    link_to(at("outside/f"), "wl/lnkout");
+    link_to(at("outside"), "wl/withlinks/out");
+    link_to(at("wl/proj/repo"), "wl/withlinks/repo");
+}
+int main(int argc, char **argv) {
+    const char *com = 0, *src = "tests/safedel.cx", *tmp0 = getenv("TMPDIR"), *home0 = getenv("HOME");
+    char srcabs[4096], cwd0[4096], h0[65], h1[65], base[4096]; int i, rc;
+    char savetmp[4096], savehome[4096]; int hadtmp = tmp0 != 0;
+    snprintf(savetmp, sizeof savetmp, "%s", tmp0 ? tmp0 : ""); snprintf(savehome, sizeof savehome, "%s", home0 ? home0 : "");
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--com") && i + 1 < argc) com = argv[++i];
+        else if (!strcmp(argv[i], "--bin") && i + 1 < argc) snprintf(BIN, sizeof BIN, "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--src") && i + 1 < argc) src = argv[++i];
+        else { fprintf(stderr, "usage: safedelcheck (--com UNISACC.COM [--src tests/safedel.cx] | --bin SAFEDEL)\n"); return 2; }
+    }
+    if (!com && !BIN[0]) { fprintf(stderr, "safedelcheck: --com or --bin\n"); return 2; }
+    if (!getcwd(cwd0, sizeof cwd0)) return 2;
+    snprintf(base, sizeof base, "%s/safedelcheck-XXXXXX", tmp0 && tmp0[0] ? tmp0 : "/tmp");
+    if (!mkdtemp(base) || !realpath(base, B)) { fprintf(stderr, "safedelcheck: no sandbox\n"); return 2; }
+    snprintf(S, sizeof S, "%s/s", B); snprintf(ERRF, sizeof ERRF, "%s/stderr", B);
+    if (com) {
+        char comabs[4096]; const char *cc[6]; char *o = 0; size_t ol = 0;
+        if (!realpath(com, comabs) || !realpath(src, srcabs)) { fprintf(stderr, "safedelcheck: no %s or %s\n", com, src); return 2; }
+        snprintf(BIN, sizeof BIN, "%s/safedel", B);
+        cc[0] = "sh"; cc[1] = comabs; cc[2] = "-o"; cc[3] = BIN; cc[4] = srcabs; cc[5] = 0;
+        if (cx_runv_timeout((char *const *)cc, 50, &o, &ol) != 0) { fprintf(stderr, "safedelcheck: compiling %s failed\n", src); return 2; }
+        free(o);
+    } else if (BIN[0] != '/') {
+        char t[4096]; if (!realpath(BIN, t)) { fprintf(stderr, "safedelcheck: no %s\n", BIN); return 2; }
+        snprintf(BIN, sizeof BIN, "%s", t);
+    }
+    {   char t[4096], *r = realpath("/tmp", 0); size_t n = r ? strlen(r) : 0;
+        snprintf(t, sizeof t, "%s", B);
+        UNDERTMP = r && n > 1 && !strncmp(t, r, n) && t[n] == '/';
+        free(r); }
+    setup();
+
+    /* 1. refusals, zero damage */
+    refuse("empty", "", "empty path");
+    refuse("dot", ".", "ends in . or ..");
+    refuse("dotdot", "..", "ends in . or ..");
+    refuse("root", "/", "is /");
+    refuse("slashes", "//", "is /");
+    refuse("tilde", "~", "~");
+    refuse("tilde-slash", "~/", "~");
+    refuse("home", at("home"), "$HOME");
+    refuse("cwd", at("wl/cwd"), "cwd");
+    refuse("cwd-slash", "./", "ends in . or ..");
+    refuse("fake-repo-root", at("wl/proj/repo"), "repository root");
+    refuse_in("repo-root-from-inside", at("wl/proj/repo/src"), at("wl"), at("home"), "ancestor", at("wl/proj/repo"), 0);
+    refuse_in("repo-parent-from-inside", at("wl/proj/repo/src"), at("wl"), at("home"), "ancestor", at("wl/proj"), 0);
+    refuse("repo-parent", at("wl/proj"), ".git");
+    refuse("nested-git", at("wl/nested"), ".git");
+    refuse("inside-git", at("wl/proj/repo/.git/HEAD"), ".git");
+    refuse("repo-file", at("wl/proj/repo/src/a.c"), "outside its out/");
+    refuse("link-into-repo", at("wl/linkrepo"), "symlink");
+    refuse("link-into-repo-slash", "../linkrepo/", "outside its out/");
+    refuse("link-to-home", at("wl/linkhome"), "symlink");
+    refuse("escape-dotdot", at("wl/victim/../../xrepo/f"), "outside its out/");
+    refuse("escape-symlinked-parent", at("wl/linkparent/f"), "outside its out/");
+    refuse("ends-dotdot", at("wl/victim/.."), "ends in . or ..");
+    refuse("temp-root", at("wl"), "ancestor");
+    refuse_in("temp-root-from-elsewhere", S, at("wl"), at("home"), "temp root", at("wl"), 0);
+    /* under /tmp the sandbox's fake HOME lies below /tmp, so /tmp is no temp root there ($HOME's ancestor) */
+    refuse("slash-tmp-itself", "/tmp", UNDERTMP ? "$HOME" : "temp root");
+    refuse("outside-absent", at("outside/nothing-here"), "whitelisted");
+    refuse_in("tmpdir-relative", at("wl/cwd"), "wl", at("home"), UNDERTMP ? "no temp root" : "whitelisted", at("wl/victim"), 0);
+    refuse_in("tmpdir-above-home", at("wl/cwd"), S, at("home"), UNDERTMP ? "no temp root" : "whitelisted", at("wl/victim"), 0);
+    refuse_in("one-bad-in-list", at("wl/cwd"), at("wl"), at("home"), "repository root", at("wl/victim"), at("wl/proj/repo"));
+    {   const char *a[] = {"--max-files", "10", at("wl/many"), 0}; char x[65], y[65]; int r;
+        sum(S, x); r = cli(at("wl/cwd"), at("wl"), at("home"), a); sum(S, y);
+        verdict(r == 3 && strstr(ERRS, "ceiling") && !strcmp(x, y), "refuse", "ceiling");
+        { const char *b[] = {"--max-files", "10", "--force-count", "20", at("wl/many"), 0}; sum(S, x); r = cli(at("wl/cwd"), at("wl"), at("home"), b); sum(S, y); }
+        verdict(r == 3 && strstr(ERRS, "ceiling") && !strcmp(x, y), "refuse", "force-count-too-small"); }
+
+    /* 2. in process: the cx.h wrappers and the API */
+    {   char x[65], y[65], w[600]; int r1, r2, r3, r4, r5;
+        if (chdir(at("wl/proj/repo/src")) != 0) return 2;
+        setenv("TMPDIR", at("wl"), 1); setenv("HOME", at("home"), 1);
+        fflush(stdout); sum(S, x);
+        r1 = cx_rmtree(""); r2 = cx_rmtree("."); r3 = cx_trash(at("wl/proj/repo")); r4 = cx_remove(at("wl/proj/repo"));
+        r5 = unisa_safedel(at("wl/victim3"), SAFEDEL_PURGE, 0, w, (int)sizeof w);   /* a tree without SAFEDEL_RECURSIVE */
+        sum(S, y);
+        verdict(r1 == 3 && r2 == 3 && r3 == 3 && r4 == 3 && r5 == 3 && strstr(w, "not recursive") && !strcmp(x, y), "refuse", "in-process-wrappers");
+        r1 = cx_remove(at("wl/emptydir")); r2 = cx_trash(at("wl/victim3")); r3 = cx_remove(at("wl/no-such-file"));
+        verdict(r1 == 0 && r2 == 0 && r3 == 0 && !exists(at("wl/emptydir")) && !exists(at("wl/victim3")) && trash_holds(at("wl/.trash"), "victim3"), "work", "in-process-wrappers"); }
+
+    /* 3. kill switches of the argv parsing */
+    {   const char *a1[] = {0}; const char *a2[] = {"--bogus", at("wl/victim"), 0}; const char *a3[] = {at("wl/victim"), "--max-files", 0};
+        const char *a4[] = {"--max-files", "abc", at("wl/victim"), 0}; const char *a5[] = {"--max-files", "-5", at("wl/victim"), 0};
+        const char *a6[] = {"--max-files", "0", at("wl/victim"), 0}; const char *a7[] = {"--force-count", "1x", at("wl/victim"), 0};
+        const char *a8[] = {"--older-than", "5", at("wl/victim"), 0}; const char *a9[] = {"--purge-trash", at("wl"), 0};
+        const char *a10[] = {"--purge-trash", at("wl"), "--older-than", "1", at("wl/victim"), 0}; const char *a11[] = {"--", 0};
+        const char *a12[] = {"--max-files", "99999999999999999999", at("wl/victim"), 0}; const char *a13[] = {"-x", 0};
+        const char *a14[] = {"--purge-trash", at("wl"), "--older-than", "1", "--purge", 0}; const char *a15[] = {"--dry-run", 0};
+        usage_case("no-args", a1); usage_case("unknown-option", a2); usage_case("missing-count", a3); usage_case("count-letters", a4);
+        usage_case("count-negative", a5); usage_case("count-zero", a6); usage_case("count-suffix", a7); usage_case("older-than-alone", a8);
+        usage_case("purge-trash-no-age", a9); usage_case("purge-trash-with-path", a10); usage_case("only-dashdash", a11);
+        usage_case("count-overflow", a12); usage_case("short-unknown", a13); usage_case("purge-trash-purge", a14); usage_case("options-only", a15); }
+
+    /* 4. what works */
+    {   const char *a[] = {"--dry-run", at("wl/victim"), 0}; char x[65], y[65], ox[65], oy[65], rx[65], ry[65]; int r;
+        sum(S, x); r = cli(at("wl/cwd"), at("wl"), at("home"), a); sum(S, y);
+        verdict(r == 0 && strstr(OUT, "would trash 5 entries") && !strcmp(x, y), "work", "dry-run-changes-nothing");
+        sum(at("outside"), ox); sum(at("wl/proj"), rx);
+        { const char *b[] = {at("wl/victim"), 0}; r = cli(at("wl/cwd"), at("wl"), at("home"), b); }
+        verdict(r == 0 && !exists(at("wl/victim")) && trash_holds(at("wl/.trash"), "victim/a/b/f"), "work", "trash-default");
+        { const char *b[] = {"--purge", at("wl/victim2"), 0}; r = cli(at("wl/cwd"), at("wl"), at("home"), b); }
+        verdict(r == 0 && !exists(at("wl/victim2")) && !trash_holds(at("wl/.trash"), "victim2"), "work", "purge");
+        { const char *b[] = {at("wl/proj/repo/out/build"), 0}; r = cli(at("wl/cwd"), at("wl"), at("home"), b); }
+        verdict(r == 0 && !exists(at("wl/proj/repo/out/build")) && trash_holds(at("wl/proj/repo/.trash"), "build/obj.o"), "work", "repo-out-to-repo-trash");
+        sum(at("wl/keep"), x);
+        { const char *b[] = {"--purge", at("wl/lnkkeep"), at("wl/lnkout"), 0}; r = cli(at("wl/cwd"), at("wl"), at("home"), b); }
+        sum(at("wl/keep"), y); sum(at("outside"), oy);
+        verdict(r == 0 && !exists(at("wl/lnkkeep")) && !exists(at("wl/lnkout")) && !strcmp(x, y) && !strcmp(ox, oy), "work", "links-removed-as-links");
+        sum(at("wl/proj/repo/src"), x);
+        { const char *b[] = {"--purge", at("wl/withlinks"), 0}; r = cli(at("wl/cwd"), at("wl"), at("home"), b); }
+        sum(at("wl/proj/repo/src"), y); sum(at("outside"), oy);
+        verdict(r == 0 && !exists(at("wl/withlinks")) && !strcmp(x, y) && !strcmp(ox, oy) && exists(at("wl/proj/repo/.git/HEAD")), "work", "tree-with-links-out");
+        { const char *b[] = {"--max-files", "10", "--force-count", "31", "--purge", at("wl/many"), 0}; r = cli(at("wl/cwd"), at("wl"), at("home"), b); }
+        verdict(r == 0 && !exists(at("wl/many")), "work", "ceiling-with-force-count");
+        { const char *b[] = {at("wl/never-there"), at("wl/also/not/there"), 0}; sum(S, x); r = cli(at("wl/cwd"), at("wl"), at("home"), b); sum(S, y); }
+        verdict(r == 0 && !strcmp(x, y), "work", "missing-paths");
+        { const char *b[] = {"--purge", "--", "a b; touch PWNED", "$(touch PWNED2)", "*", 0}; r = cli(at("wl/meta"), at("wl"), at("home"), b); }
+        verdict(r == 0 && exists(at("wl/meta")) && !exists(at("wl/meta/a b; touch PWNED")) && !exists(at("wl/meta/*")) && !exists(at("wl/meta/PWNED"))
+                && !exists(at("wl/meta/PWNED2")) && !exists(at("wl/cwd/PWNED")), "work", "shell-metacharacters-literal");
+        { const char *b[] = {"--purge", "--", "-v", 0}; r = cli(at("wl/cwd"), at("wl"), at("home"), b); }
+        verdict(r == 0 && !exists(at("wl/cwd/-v")), "work", "dash-path-after-dashdash");
+        sum(at("wl/proj"), ry); (void)rx; (void)ry;
+        if (!UNDERTMP) {   /* /tmp is whitelisted while TMPDIR points elsewhere (the gate's UA=/tmp/ua_ref with TMPDIR set) */
+            char tp[4096], tf[4200]; snprintf(tp, sizeof tp, "/tmp/safedelcheck-XXXXXX");
+            if (mkdtemp(tp)) {
+                snprintf(tf, sizeof tf, "%s/f", tp); cx_write(tf, "t\n", 2);
+                { const char *b[] = {"--purge", tp, 0}; r = cli(at("wl/cwd"), at("wl"), at("home"), b); }
+                verdict(r == 0 && !exists(tp), "work", "slash-tmp-whitelisted-with-tmpdir-elsewhere");
+            } else printf("skip work slash-tmp-whitelisted-with-tmpdir-elsewhere (no writable /tmp)\n");
+        } }
+
+    /* 5. --purge-trash: age and ceiling */
+    {   char x[65], y[65]; int r, i2; char nm[128];
+        for (i2 = 0; i2 < 30; i2++) { snprintf(nm, sizeof nm, "wl/.trash/20200101T000000Z-1-0/old/f%02d", i2); put(nm, "o\n"); }
+        chmod(at("wl/.trash/20200101T000000Z-1-0"), 0700);
+        { const char *b[] = {"--purge-trash", at("wl"), "--older-than", "1", "--max-files", "5", 0}; sum(S, x); r = cli(at("wl/cwd"), at("wl"), at("home"), b); sum(S, y); }
+        verdict(r == 3 && strstr(ERRS, "ceiling") && !strcmp(x, y), "refuse", "purge-trash-ceiling");
+        { const char *b[] = {"--purge-trash", at("wl"), "--older-than", "1", "--dry-run", 0}; sum(S, x); r = cli(at("wl/cwd"), at("wl"), at("home"), b); sum(S, y); }
+        verdict(r == 0 && strstr(OUT, "would purge 1 expired") && !strcmp(x, y), "work", "purge-trash-dry-run");
+        { const char *b[] = {"--purge-trash", at("outside"), "--older-than", "0", 0}; sum(S, x); r = cli(at("wl/cwd"), at("wl"), at("home"), b); sum(S, y); }
+        verdict(r == 3 && !strcmp(x, y), "refuse", "purge-trash-not-a-home");
+        { const char *b[] = {"--purge-trash", "", "--older-than", "0", 0}; sum(S, x); r = cli(at("wl/cwd"), at("wl"), at("home"), b); sum(S, y); }
+        verdict(r == 3 && !strcmp(x, y), "refuse", "purge-trash-empty-home");
+        { const char *b[] = {"--purge-trash", at("wl"), "--older-than", "1", "--max-files", "5", "--force-count", "40", 0}; r = cli(at("wl/cwd"), at("wl"), at("home"), b); }
+        verdict(r == 0 && !exists(at("wl/.trash/20200101T000000Z-1-0")) && trash_holds(at("wl/.trash"), "victim"), "work", "purge-trash-by-age");
+        { const char *b[] = {"--purge-trash", at("wl/proj/repo"), "--older-than", "0", 0}; r = cli(at("wl/cwd"), at("wl"), at("home"), b); }
+        verdict(r == 0 && !trash_holds(at("wl/proj/repo/.trash"), "build") && exists(at("wl/proj/repo/src/a.c")), "work", "purge-trash-repo-home"); }
+
+    /* the sandbox itself, through the guard: the fake .git entries are renamed away first */
+    if (chdir(cwd0) != 0) return 2;
+    if (hadtmp) setenv("TMPDIR", savetmp, 1); else unsetenv("TMPDIR");
+    if (savehome[0]) setenv("HOME", savehome, 1); else unsetenv("HOME");
+    rename(at("wl/proj/repo/.git"), at("wl/proj/repo/dotgit-fixture"));
+    rename(at("wl/nested/a/b/.git"), at("wl/nested/a/b/dotgit-fixture"));
+    rename(at("xrepo/.git"), at("xrepo/dotgit-fixture"));
+    sum(S, h0); (void)h1;
+    rc = cx_rmtree(B);
+    if (rc != 0 || exists(B)) { printf("FAIL cleanup: the sandbox %s stays (rc %d)\n", B, rc); fails++; }
+    printf("safedelcheck: %d passed, %d failed\n", passes, fails);
+    return fails ? 1 : 0;
+}

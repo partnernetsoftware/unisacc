@@ -23,7 +23,8 @@ C_SHA='c1be454cf86c7d4c01af985d437c21116e5f69b880bd763b370a1461ae426187'
 # 2026-10-22 classic capacity refusals (src/front_pp.c feeds k2-gen2) and facts re-export: keys moved; old e8432bb0c559184e / 6d292549649be6b8 kept for history
 # 2026-10-23 M3 (*x[N])[M] refusal table rows: keys moved (computed by tests/seedmemorykey.cx); old bbcbf5972420a266 / 5335a4d5352e305b kept for history
 # 2026-10-23 fix(e3) bit-field compound assignment in the promoted type (update-result/update-fresh): keys moved (tests/seedmemorykey.cx); old 2038728cd6430a99 / 5b42b1f017337ff6 kept for history
-REFERENCE_KEYS={'gen': '8626ac25a443b2a1', 'parse2': '0760706112577648'}
+# 2026-10-23 deletion guard: include/unisa_safedel.h joins the carried headers, exec/facts/pp-autoinc-gen.tsv moves the gen key (tests/seedmemorykey.cx); old gen 8626ac25a443b2a1 kept for history
+REFERENCE_KEYS={'gen': 'e20db32db228461d', 'parse2': '0760706112577648'}
 BINARY_SHA='96cf5ebbc66e5f2092cc5b68c4bf29695c8c7fdb0d110c15c9e2f12a23ec7fc7'
 # Historical host-adapter receipt; cc independently confirmed both flag sets
 # construct this exact binary. No other argv is assumed equivalent.
