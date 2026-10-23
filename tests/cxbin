@@ -3,8 +3,8 @@
 # `sh unisacc.com -run FILE.cx -- ARG...` compiles on every call (about 3.4 s for tests/shipclassify.cx, whose run
 # is 2 ms); the commit path (release/tools/commitgate.sh, release/tools/hooks/pre-commit) calls its classifier on
 # every commit and tests/commitgatecheck.sh calls commitgate.sh about thirty times, so the compile is done once per
-# (compiler, source, machine): `sh unisacc.com -o BIN FILE.cx`, keyed by the sha256 of unisacc.com (the one beside
-# this tests/ directory), FILE.cx and uname -m.  The binary gets ARG... as its argv and the caller's stdin, stdout
+# (compiler, source, prelude headers, machine): `sh unisacc.com -o BIN FILE.cx`, keyed by the sha256 of unisacc.com (the one beside
+# this tests/ directory), FILE.cx, the top-level include/*.h files and uname -m.  The binary gets ARG... as its argv and the caller's stdin, stdout
 # and stderr; its exit status is the result.  Fail closed: a missing FILE.cx or unisacc.com, a cache directory that
 # is not ours, or a failed compile is rc 2 with one `cxbin: ...` line on stderr, and nothing is run.
 # One exception: tests/safedel.cx, the deletion guard's CLI (include/unisa_safedel.h, commissar ruling 2026-10-23),
@@ -32,7 +32,14 @@ if [ -x /usr/bin/openssl ]; then hashcmd=/usr/bin/openssl; else hashcmd=openssl;
 if [ -n "$oracle" ]; then
     digest=$({ uname -m; echo cc-oracle; cat "$oracle" "$here/../include/unisa_sha256.h" "$here/../include/unisa_safedel.h" "$src"; } | "$hashcmd" dgst -sha256) || { echo 'cxbin: cannot hash the inputs' >&2; exit 2; }
 else
-    digest=$({ uname -m; cat "$com" "$src"; } | "$hashcmd" dgst -sha256) || { echo 'cxbin: cannot hash the inputs' >&2; exit 2; }
+    digest=$({ uname -m; cat "$com" "$src";
+        # The compiler reads the implicit prelude from this tree on every build.
+        # A cached executable must follow changes to those headers as well.
+        for header in "$here/../include/"*.h; do
+            printf '%s\n' "${header##*/}"
+            cat "$header"
+        done
+    } | "$hashcmd" dgst -sha256) || { echo 'cxbin: cannot hash the inputs' >&2; exit 2; }
 fi
 key=${digest##* }
 case "$key" in *[!0123456789abcdef]*|'') echo 'cxbin: invalid cache digest' >&2; exit 2;; esac

@@ -222,7 +222,7 @@ job identity-include-consumer-negative tests/bound 58 sh ./unisacc.com -run test
 job identity-prep-negative tests/bound 58 sh ./tests/cxbin tests/identitynegativecheck.cx prep --ua "${UA:-/tmp/ua_ref}"   # (.cx port, 2026-10-23)
 job checkrun ./tests/checkruncheck.sh   # 0.0.39: check status never taken from a pipe
 job commitgate ./tests/commitgatecheck.sh   # 0.0.39: red gate leaves no commit (scratch repo)
-job k2b K2B_UA=${UA:-/tmp/ua_ref} python3 ./tests/k2bcheck.py   # 0.0.40 K2b: narrow whitelist, whole-tree fallbacks, missed-run RED (scratch copy)
+job k2b K2B_UA=${UA:-/tmp/ua_ref} sh ./tests/withproduct.sh python3 ./tests/k2bcheck.py   # 0.0.40 K2b: narrow whitelist, whole-tree fallbacks, missed-run RED (scratch copy)
 job precommithook ./tests/precommithookcheck.sh   # 0.0.40-prep: local pre-commit routes shipping paths through commitgate (scratch repo)
 job queuestart ./tests/queuestartcheck.sh   # 0.0.40: default fresh refuses backup auto-restore; resume is explicit+receipt-bound (fixture)
 job queuestart-strict python3 ./tests/queuestartcheck.py   # 0.0.40: fresh refuses a live state, resume refuses malformed/foreign/unknown sources, no half copy

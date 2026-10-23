@@ -90,13 +90,13 @@ try:
     if rn['k2b'].get('tree_stamp') != rt['k2b'].get('stamp'): fail('real narrow run whole-tree stamp != real whole-tree run stamp (same inputs)')
     r = subprocess.run([sys.executable, 'tests/gatequeue.py', '--k2b-compare', str(T / 'rn'), str(T / 'rt')], capture_output=True, text=True, timeout=30)
     if r.returncode != 0: fail('real same-input narrow vs whole-tree compare not ok: %s' % r.stdout)
-    # N10 controlled missing declaration: unisa/ removed from the declaration (and re-whitelisted), so a real
+    # N10 controlled missing declaration: include/ removed from the declaration (and re-whitelisted), so a real
     # dependency changes while the narrow stamp stays -> the reused result is compared with a real run
-    whitelist(lambda m: m['suites']['volatile-comma'].__setitem__('trees', [t for t in m['suites']['volatile-comma']['trees'] if t != 'unisa']))
+    whitelist(lambda m: m['suites']['volatile-comma'].__setitem__('trees', [t for t in m['suites']['volatile-comma']['trees'] if t != 'include']))
     subprocess.run(['git', 'add', '-A'], check=True); subprocess.run(['git', 'commit', '-q', '-m', 'underdeclared'], check=True, env=env)
     s0, p = fp()
     if k(p) != 'narrow': fail('N10 fixture not narrow: %s' % k(p))
-    p_vm = pathlib.Path('unisa/vm.py'); p_vm.write_text(p_vm.read_text() + '\nraise SystemExit(3)\n')
+    p_vm = pathlib.Path('include/cx.h'); p_vm.write_text(p_vm.read_text() + '\n#error K2b undeclared dependency\n')
     s1, _ = fp()
     if s1['volatile-comma'] != s0['volatile-comma']: fail('N10 fixture: the undeclared change should be invisible to the narrow stamp')
     state = T / 'state'; state.mkdir()
