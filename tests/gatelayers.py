@@ -57,7 +57,7 @@ flownet-baseline-acc flownet-baseline-out1 flownet-baseline-out2 flownet-baselin
 flownet-w2-parity flownet-w2-refuse flownet-w2-negative flownet-w2-accepts flownet-w2-tables
 flownet-w3-d3-1 flownet-w3-d3-2 flownet-w3-flow-1 flownet-w3-flow-2 flownet-w3-flow-3 flownet-w3-d4-tdesc flownet-w3-d4-adapter
 flownet-w4-selftest-1 flownet-w4-selftest-2 flownet-w4-selftest-3 flownet-w4-selftest-4 flownet-w4-unconsumed
-flownet-w6-b1-inject-1 flownet-w6-b1-inject-2 flownet-w6-b1-proof-1 flownet-w6-b1-proof-2 flownet-w6-b1-proof-3
+flownet-w6-b1-inject-1 flownet-w6-b1-inject-2 flownet-w6-b1-proof-1 flownet-w6-b1-proof-2 flownet-w6-b1-proof-3 flownet-w6-b1-proof-4
 """.split())
 PIPELINE_PREFIX = ("stages-", "corpus-", "difftest-", "difftest_o-", "csmithdiff-",
                    "ccrun-", "opt-run-", "closure-", "declmatrix-", "com-",

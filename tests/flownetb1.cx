@@ -9,21 +9,35 @@
            tests/tdescprobe/ (contract.tsv and the gold of each net its contract names, read from ROOT).  The control
            (the tables as they are) must be green.  Then every key row of every gold table is perturbed, one at a time:
            relabelled to each other class of its table, and deleted -- the tables are flownet's only source of the
-           algebra, injected through fn_label_source, so every such run must differ from the control (rc, stdout,
-           stderr) and be either judged (rc 1, the emit hook's MISMATCH against cc) or refused by name (rc 2, one
-           "tdescprobe: " line: flownet's label-source or books refusal, or the consumer's).  A flownet that answered
-           any key from a copy of its own would give the control's output for that key's perturbations: red, by key.
+           algebra, injected through fn_label_source.  Every such run must
+             (a) differ from the control (rc, stdout, stderr) -- else red: the key's answer does not come from the table;
+             (b) be judged (rc 1, the emit hook's MISMATCH against cc) or refused by name (rc 2, one "tdescprobe: " line);
+             (c) if a relabel (to a class the table lists), not be refused at label load ("flownet: label source ..."):
+                 flownet takes any listed class from its label source, so such a refusal is a check against a copy;
+             (d) equal its row of the book tests/flownet-b1-inject.tsv: the honest flownet's outcome of that perturbation
+                 (judged/refused, the first 16 hex of the sha256 of the whole run, the named line).
+           (a) catches a flownet that answers a key from a copy it carries; (b) to (d) one that cross-checks the injected
+           label against a copy and refuses a disagreement itself (the verifier's X1, attempt 2 of the closure): its runs
+           differ from the control and are refused by name, but not as the honest flownet's are.  Matching the book under
+           all perturbations means flownet behaves on them exactly as the honest one, i.e. its answers are the table's.
            The keys are counted from the tables (46 today: adj 12, ap 20, sz 14 -- W3 fix 3 cut the old 80-key domain to
            the keys the derivation asks, so no key exists whose perturbation could not show), K/2 is a half of the
            perturbations (every other class and the deletion of every key, in table order).
-       sh ./unisacc.com -run tests/flownetb1.cx -- inject ROOT proof K/3
-           the proof proves itself: three flownet copies (ROOT/flownet with nets.cx edited once, exactly) that ask the
-           injected label source as before and then answer from a copy they carry -- 1/3: every table, as data written
-           from the consumer's gold; 2/3: the verifier's G7, an X-macro of adj, verbatim; 3/3: one key of the last
-           table -- each passes tdescprobe's own gate (the control, --oracle cc, green; G7 also passes the text guard,
-           research/flownet-w6-b1.md); under one relabel per key each must be red naming exactly the keys its copy
-           holds (46, the 12 adj keys, 1).  A copy flownet carries but never answers from changes no output: that is
-           the pin's (any byte of flownet/ changed changes the manifest in a reviewed commit), not a behaviour's.
+       sh ./unisacc.com -run tests/flownetb1.cx -- inject ROOT record K/2
+           the book's rows of half K as the honest ROOT/flownet gives them, on stdout (half 1 with the book's head):
+           record 1/2 > tests/flownet-b1-inject.tsv, then record 2/2 >> it; review every changed row before committing.
+           rc 1 and nothing worth keeping when (a) to (c) fail.
+       sh ./unisacc.com -run tests/flownetb1.cx -- inject ROOT proof K/4
+           the proof proves itself: four flownet copies (ROOT/flownet with nets.cx edited once, exactly) that ask the
+           injected label source as before and then use a copy they carry -- 1/4: every table, as data written from the
+           consumer's gold; 2/4: the verifier's G7, an X-macro of adj, verbatim; 3/4: one key of the last table; each
+           answers from its copy; 4/4: the verifier's X1, verbatim: G7's rows cross-check the injected adj label and a
+           disagreement becomes no label, which flownet refuses by name.  Each passes tdescprobe's own gate (the control,
+           --oracle cc, green; G7 and X1 also pass the text guard, research/flownet-w6-b1.md); under one relabel per key
+           the keys whose run differs from the book must be exactly the keys its copy holds (46, the 12 adj keys, 1, the
+           12 adj keys -- X1's twelve changed and refused by name, so (a) alone would pass it).  A copy flownet carries
+           but whose use changes no run of the proof (never used, or used only on inputs no single-row perturbation
+           makes) is the pin's (any byte of flownet/ changed changes the manifest in a reviewed commit), not a behaviour's.
        sh ./unisacc.com -run tests/flownetb1.cx -- pin ROOT
            the pin: ROOT/flownet's file set and every file's bytes equal tests/flownet-manifest.tsv (file rows: name,
            size, sha256), flownet/ holds regular files only, and every directory a consumer reaches flownet through (reach
@@ -31,7 +45,8 @@
            name, one for every pinned .cx.  Any change of flownet/'s content must change the manifest in the same,
            reviewed commit.  The check proves itself first on scratch copies: a byte changed, a file added, removed or
            renamed, a link or a directory in flownet/, a reach link redirected to a copy, a regular file in a reach
-           directory -- each red, by name; the copy as it is green.
+           directory -- each red, by name; the copy as it is green.  The pin is a review control, not a judge: it cannot tell
+           a hidden copy (X1 included) from a legitimate change; it makes every change of flownet/ visible in a diff.
        sh ./unisacc.com -run tests/flownetb1.cx -- pin ROOT write
            the manifest of ROOT/flownet as it is, on stdout (review every changed row before committing it).
    Every scratch directory is made by ptf_mkdtemp under the temporary directory and removed by ptf_rmtree only when its
@@ -258,25 +273,59 @@ static int green_control(const Job *c) {
     return c->rc == 0 && a && strstr(a + 1, ", 0 mismatches against cc\n") && !*c->err;
 }
 static int same(const Job *a, const Job *b) { return a->rc == b->rc && is(a->out, b->out) && is(a->err, b->err); }
-/* how a perturbed run P differs from the control C: "judged LINE" or "refused LINE" (allocated), 0 when it does not
-   differ, "unnamed ..." when it differs without a judged mismatch or a named refusal */
+/* how a perturbed run P differs from the control C, as a book field triple KIND\tH\tLINE (allocated): "judged" (rc 1,
+   LINE the emit hook's first MISMATCH) or "refused" (rc 2, LINE the one "tdescprobe: " refusal), H the first 16 hex of
+   the sha256 of the whole run (rc, stdout, stderr); "unchanged" when the run equals the control, "unnamed" when it differs
+   without a judged mismatch or a named refusal */
 static char *outcome(const Job *p, const Job *c) {
-    const char *m;
-    if (same(p, c)) return 0;
-    if (p->rc == 1 && (m = strstr(p->out, "tdescprobe oracle: MISMATCH ")) != 0) { char *l = first_line(m), *o = fmt("judged\t%s", l); free(l); return o; }
-    if (p->rc == 2 && !strncmp(p->err, "tdescprobe: ", 12)) { char *l = first_line(p->err), *o = fmt("refused\t%s", l); free(l); return o; }
-    {   char *l = first_line(*p->err ? p->err : p->out), *o = fmt("unnamed\trc %d: %s", p->rc, l); free(l); return o; }
+    const char *m; char *all, hex[65], *l, *o;
+    if (same(p, c)) return fmt("unchanged\t-\tthe run equals the control");
+    all = fmt("rc %d\n%s\n-- stderr\n%s", p->rc, p->out, p->err); cx_sha256_hex(all, strlen(all), hex); hex[16] = 0; free(all);
+    if (p->rc == 1 && (m = strstr(p->out, "tdescprobe oracle: MISMATCH ")) != 0) { l = first_line(m); o = fmt("judged\t%s\t%s", hex, l); }
+    else if (p->rc == 2 && !strncmp(p->err, "tdescprobe: ", 12)) { l = first_line(p->err); o = fmt("refused\t%s\t%s", hex, l); }
+    else { l = first_line(*p->err ? p->err : p->out); o = fmt("unnamed\t%s\trc %d: %s", hex, p->rc, l); }
+    free(l); return o;
 }
 
-static int cmd_inject(const char *rootarg, const char *part, const char *pk) {   /* PK: the half of the proof */
-    char *root = absroot(rootarg), *bin, *cdir; Job *J; int i, lo, hi, k, half = 0, nj, judged = 0, refused = 0, unchanged = 0, unnamed = 0, K;
-    if (is(part, "1/2")) half = 1; else if (is(part, "2/2")) half = 2; else if (!is(part, "proof") || !pk || (!is(pk, "1/3") && !is(pk, "2/3") && !is(pk, "3/3"))) { fprintf(stderr, "flownetb1: inject wants 1/2, 2/2 or proof K/3\n"); return 2; }
+/* ---------- the book: tests/flownet-b1-inject.tsv, the honest outcome of every perturbation ---------- */
+static const char *BOOK = "tests/flownet-b1-inject.tsv";
+enum { MAXBOOK = 2048 };
+static char *BK[MAXBOOK]; static int nbk;
+static void read_book(const char *root) {   /* its rows ('#' and blank lines skipped); none if it is absent */
+    char *p = fmt("%s/%s", root, BOOK), *t = slurp(p), **ln; int n, i;
+    nbk = 0;
+    if (!*t) { free(p); return; }
+    if (!(ln = malloc(2 * MAXBOOK * sizeof *ln))) die("out of memory");
+    if ((n = lines_of(t, ln, 2 * MAXBOOK)) < 0) { char *w = fmt("%s: too long or no final newline", BOOK); die(w); }
+    for (i = 0; i < n; i++) if (*ln[i] && *ln[i] != '#') { if (nbk == MAXBOOK) die("the book has too many rows"); BK[nbk++] = ln[i]; }
+    free(p); free(t); free(ln);
+}
+static const char *book_row(const char *name) {   /* the row of perturbation NAME (NET\tKEY\tFROM>TO), 0 if none */
+    size_t L = strlen(name); int i;
+    for (i = 0; i < nbk; i++) if (!strncmp(BK[i], name, L) && BK[i][L] == '\t') return BK[i];
+    return 0;
+}
+
+/* the verifier's adj rows as an X-macro (its G7), shared by two proof copies */
+#define MAYROWS \
+    "#define MAY_TABLE(X) \\\n" \
+    "    X(P, P, ok) \\\n    X(P, A3, ok) \\\n    X(P, F, ok) \\\n    X(P, int, ok) \\\n" \
+    "    X(A3, P, ok) \\\n    X(A3, A3, ok) \\\n    X(A3, F, bad) \\\n    X(A3, int, ok) \\\n" \
+    "    X(F, P, ok) \\\n    X(F, A3, bad) \\\n    X(F, F, bad) \\\n    X(F, int, ok) \\\n" \
+    "    /* end */\n"
+
+static int cmd_inject(const char *rootarg, const char *part, const char *pk, int record) {   /* PK: the part of the proof */
+    char *root = absroot(rootarg), *bin, *cdir; Job *J; int i, lo, hi, k, half = 0, nj, judged = 0, refused = 0, unchanged = 0, unnamed = 0, differ = 0, loadref = 0, matched = 0, K;
+    if (is(part, "1/2")) half = 1; else if (is(part, "2/2")) half = 2;
+    else if (record || !is(part, "proof") || !pk || strlen(pk) != 3 || pk[0] < '1' || pk[0] > '4' || strcmp(pk + 1, "/4")) { fprintf(stderr, "flownetb1: inject wants 1/2, 2/2, record 1/2, record 2/2 or proof K/4\n"); return 2; }
     read_tables(root); K = nkeys();
+    if (!record) read_book(root);
     scratch();
     if (half) {
         Job cj;
         perturbations(0);
         lo = half == 1 ? 0 : npt / 2; hi = half == 1 ? npt / 2 : npt;
+        if (!record && nbk != npt) { red(BOOK, fmt("%d rows, the tables give %d perturbations: regenerate it (inject ROOT record 1/2, record 2/2) and review every changed row", nbk, npt)); goto done; }
         bin = compile_jobs_prep(root, 0, 0, &cj); run_jobs(&cj, 1, 1, 55);
         if (!compiled(bin)) { char *l = first_line(*cj.err ? cj.err : cj.out); red("tdescprobe", fmt("does not compile beside ROOT/flownet: %s", l)); goto done; }
         nj = hi - lo + 1;
@@ -285,21 +334,40 @@ static int cmd_inject(const char *rootarg, const char *part, const char *pk) {  
         for (i = lo; i < hi; i++) { char *d = fmt("%s/t%d", SD, i); write_tables(d, &PT[i]); oracle_job(&J[i - lo + 1], bin, d); free(d); }
         run_jobs(J, nj, 8, 30);
         if (!green_control(&J[0])) { char *l = first_line(*J[0].err ? J[0].err : J[0].out); red("control (the tables as they are)", fmt("tdescprobe --oracle cc is not green: rc %d: %s", J[0].rc, l)); goto done; }
-        printf("control\ttdescprobe --oracle cc on the tables as they are: %s", J[0].out);
+        if (record && half == 1)
+            printf("# %s -- the book of the B1 perturbed-injection proof (plans/m4-flownet-cx-module.md section 9, B1 closure;\n"
+                   "# research/flownet-w6-b1.md).  One row per perturbation of tdescprobe's injected tables tests/tdescprobe (one key row\n"
+                   "# relabelled to another class of its table, or deleted): NET, KEY, FROM>TO, what the honest flownet's run led to --\n"
+                   "# judged (rc 1, the emit hook's first MISMATCH against cc) or refused (rc 2, the one 'tdescprobe: ' line) -- the\n"
+                   "# first 16 hex of the sha256 of the whole run (rc, stdout, stderr), and that line.  tests/flownetb1.cx inject 1/2, 2/2\n"
+                   "# (gates flownet-w6-b1-inject-1/-2) require every run to equal its row: a flownet that answers a key from a copy it\n"
+                   "# carries differs here whether it gives the control's output or refuses on a disagreement with the injected table\n"
+                   "# (the verifier's X1; proof 4/4).  Regenerate (each half in its own step), then review every changed row:\n"
+                   "#   sh ./unisacc.com -run tests/flownetb1.cx -- inject . record 1/2 >  tests/flownet-b1-inject.tsv\n"
+                   "#   sh ./unisacc.com -run tests/flownetb1.cx -- inject . record 2/2 >> tests/flownet-b1-inject.tsv\n", BOOK);
+        if (!record) printf("control\ttdescprobe --oracle cc on the tables as they are: %s", J[0].out);
         for (i = lo; i < hi; i++) {
-            Job *j = &J[i - lo + 1]; char *nm = pert_name(&PT[i]), *o = outcome(j, &J[0]);
-            if (!o) { unchanged++; red(nm, "the run equals the control: this key's answer does not come from the injected table"); }
-            else if (!strncmp(o, "unnamed", 7)) { unnamed++; red(nm, fmt("changed, but neither judged nor refused by name (%s)", o + 8)); }
-            else { if (o[0] == 'j') judged++; else refused++; printf("changed\t%s\t%s\n", nm, o); }
-            free(nm); free(o);
+            Job *j = &J[i - lo + 1]; char *nm = pert_name(&PT[i]), *o = outcome(j, &J[0]), *row = fmt("%s\t%s", nm, o);
+            if (o[0] == 'u' && o[2] == 'c') { unchanged++; red(nm, "the run equals the control: this key's answer does not come from the injected table"); }
+            else if (o[0] == 'u') { unnamed++; red(nm, fmt("changed, but neither judged nor refused by name (%s)", o + 8)); }
+            else if (PT[i].to && strstr(o, "\ttdescprobe: flownet: label source ")) { refused++; loadref++; red(nm, fmt("a relabel to a class its table lists, refused at label load (%s): flownet takes any listed class from the label source, so this answer is checked against a copy", o + 8)); }
+            else {
+                if (o[0] == 'j') judged++; else refused++;
+                if (record) printf("%s\n", row);
+                else if (!is(row, BK[i])) { differ++; red(nm, fmt("the run is not the one %s records: got '%s', the book has '%s' (an answer that does not come from the injected table alone)", BOOK, o, BK[i] + strlen(nm) + 1)); }
+                else { matched++; printf("book\t%s\n", row); }
+            }
+            free(nm); free(o); free(row);
         }
-        printf("flownetb1 inject %s: perturbations %d-%d of %d (every other class and the deletion of each of the %d keys of", part, lo + 1, hi, npt, K);
+        printf("%sflownetb1 inject %s%s: perturbations %d-%d of %d (every other class and the deletion of each of the %d keys of", record ? "# " : "", record ? "record " : "", part, lo + 1, hi, npt, K);
         for (k = 0; k < ng; k++) printf(" %s %d%s", G[k].name, G[k].nkey, k + 1 < ng ? "," : "");
-        printf("): changed %d/%d (judged %d, refused %d), unchanged %d, unnamed %d\n", judged + refused, hi - lo, judged, refused, unchanged, unnamed);
+        printf("): changed %d/%d (judged %d, refused %d), unchanged %d, unnamed %d, relabels refused at label load %d", judged + refused - loadref, hi - lo, judged, refused - loadref, unchanged, unnamed, loadref);
+        if (record) printf("\n"); else printf("; as %s records %d/%d, differ %d\n", BOOK, matched, hi - lo, differ);
     } else {
-        /* three flownet copies that answer from a copy they carry, after asking the label source as flownet does */
+        /* four flownet copies that answer from a copy they carry, after asking the label source as flownet does */
         static const char *AT = "        lab = label(ctx, N->name, N->nf, k);\n";
         static const char *TO = "        lab = own_(N->name, N->nf, k, label(ctx, N->name, N->nf, k));\n";
+        static const char *XTO = "        lab = label(ctx, N->name, N->nf, k);\n        lab = xcheck_(N->name, N->nf, k, lab);\n";
         static const char *BEFORE = "static int load_source(";
         static const char *LOOKUP =
             "static char own_buf_[64];\n"
@@ -313,21 +381,27 @@ static int cmd_inject(const char *rootarg, const char *part, const char *pk) {  
             "    return own_buf_;\n"
             "}\n";
         static const char *G7 =      /* the verifier's G7 (an X-macro copy of adj), verbatim, and its use */
-            "#define MAY_TABLE(X) \\\n"
-            "    X(P, P, ok) \\\n    X(P, A3, ok) \\\n    X(P, F, ok) \\\n    X(P, int, ok) \\\n"
-            "    X(A3, P, ok) \\\n    X(A3, A3, ok) \\\n    X(A3, F, bad) \\\n    X(A3, int, ok) \\\n"
-            "    X(F, P, ok) \\\n    X(F, A3, bad) \\\n    X(F, F, bad) \\\n    X(F, int, ok) \\\n"
-            "    /* end */\n"
+            MAYROWS
             "static const char *own_(const char *net, int nk, const char *const *k, const char *lab) {   /* B1 proof mutant */\n"
             "#define X(a, b, c) if (!strcmp(net, \"adj\") && nk == 2 && !strcmp(k[0], #a) && !strcmp(k[1], #b)) return #c;\n"
             "    MAY_TABLE(X)\n"
             "#undef X\n"
             "    return lab;\n"
             "}\n";
-        const char *who[3] = { "a copy of every table, as data", "the verifier's G7: an X-macro copy of adj", "a copy of one key" };
-        char *nets, *want[3], *body[3], *bins[3], *own; Job cj[3]; int m, nk = 0, m0 = pk[0] - '1', m1 = m0 + 1;   /* K/3: copy K */
+        static const char *X1 =      /* the verifier's X1, verbatim: G7's rows cross-check the injected label, a disagreement is no label */
+            MAYROWS
+            "static const char *xcheck_(const char *net, int nk, const char *const *k, const char *lab) {\n"
+            "#define X(a, b, c) if (lab && !strcmp(net, \"adj\") && nk == 2 && !strcmp(k[0], #a) && !strcmp(k[1], #b)) return strcmp(lab, #c) ? 0 : #c;\n"
+            "    MAY_TABLE(X)\n"
+            "#undef X\n"
+            "    return lab;\n"
+            "}\n";
+        const char *who[4] = { "a copy of every table, as data", "the verifier's G7: an X-macro copy of adj", "a copy of one key",
+                               "the verifier's X1: G7's adj cross-checks the injected label, flownet refuses a disagreement by name" };
+        char *nets, *want[4], *body[4], *bins[4], *own; Job cj[4]; int m, nk = 0, m0 = pk[0] - '1', m1 = m0 + 1;   /* K/4: copy K */
         size_t L;
         perturbations(1);
+        if (!nbk) { red(BOOK, "absent or empty: the proof judges each copy against it"); goto done; }
         nets = slurp(fmt("%s/flownet/nets.cx", root));
         {   const char *a = strstr(nets, AT), *b = strstr(nets, BEFORE);
             if (!a || strstr(a + 1, AT) || !b || strstr(b + 1, BEFORE)) { red("proof", "flownet/nets.cx: the label ask or load_source is not there exactly once (flownet changed: update the mutants)"); goto done; } }
@@ -341,17 +415,18 @@ static int cmd_inject(const char *rootarg, const char *part, const char *pk) {  
             char *ins, *t, *u; const Gold *lg = &G[ng - 1];
             if (m == 0) ins = fmt("%s%s", own, LOOKUP);
             else if (m == 1) ins = fmt("%s", G7);
-            else ins = fmt("static const char *OWN_ = \"\\n%s\\t%s\\t%s\\n\";\n%s", lg->name, lg->keytext[lg->nkey - 1], lg->label[lg->nkey - 1], LOOKUP);
+            else if (m == 2) ins = fmt("static const char *OWN_ = \"\\n%s\\t%s\\t%s\\n\";\n%s", lg->name, lg->keytext[lg->nkey - 1], lg->label[lg->nkey - 1], LOOKUP);
+            else ins = fmt("%s", X1);
             {   const char *a = strstr(nets, BEFORE); t = fmt("%.*s%s%s", (int)(a - nets), nets, ins, a); }
-            {   const char *a = strstr(t, AT); u = fmt("%.*s%s%s", (int)(a - t), t, TO, a + strlen(AT)); }
+            {   const char *a = strstr(t, AT); u = fmt("%.*s%s%s", (int)(a - t), t, m == 3 ? XTO : TO, a + strlen(AT)); }
             body[m] = u; free(t); free(ins);
             if (m == 0) { want[m] = fmt("%s", ""); for (i = 0; i < ng; i++) for (k = 0; k < G[i].nkey; k++) { char *w2 = fmt("%s%s %s;", want[m], G[i].name, G[i].keytext[k]); free(want[m]); want[m] = w2; } }
-            else if (m == 1) { want[m] = fmt("%s", ""); for (i = 0; i < ng; i++) if (is(G[i].name, "adj")) for (k = 0; k < G[i].nkey; k++) { char *w2 = fmt("%s%s %s;", want[m], G[i].name, G[i].keytext[k]); free(want[m]); want[m] = w2; } }
+            else if (m == 1 || m == 3) { want[m] = fmt("%s", ""); for (i = 0; i < ng; i++) if (is(G[i].name, "adj")) for (k = 0; k < G[i].nkey; k++) { char *w2 = fmt("%s%s %s;", want[m], G[i].name, G[i].keytext[k]); free(want[m]); want[m] = w2; } }
             else want[m] = fmt("%s %s;", lg->name, lg->keytext[lg->nkey - 1]);
             bins[m] = compile_jobs_prep(root, m, body[m], &cj[m]);
         }
-        run_jobs(cj + m0, m1 - m0, 3, 55);
-        nj = 3 * (npt + 1);
+        run_jobs(cj + m0, m1 - m0, 4, 55);
+        nj = 4 * (npt + 1);
         if (!(J = calloc((size_t)nj, sizeof *J))) die("out of memory");
         cdir = fmt("%s/t", SD); write_tables(cdir, 0);
         for (i = 0; i < npt; i++) { char *d = fmt("%s/t%d", SD, i); write_tables(d, &PT[i]); free(d); }
@@ -369,19 +444,30 @@ static int cmd_inject(const char *rootarg, const char *part, const char *pk) {  
             for (m = m0; m < m1; m++) if (compiled(bins[m])) for (x = 0; x <= npt; x++) J[m * (npt + 1) + x] = R[nr++];
             free(R); }
         for (m = m0; m < m1; m++) {
-            Job *c = &J[m * (npt + 1)]; char *got = fmt("%s", ""); int nu = 0;
+            Job *c = &J[m * (npt + 1)]; char *got = fmt("%s", ""); int nu = 0, ns = 0, nr2 = 0;
             if (!compiled(bins[m])) continue;
             if (!green_control(c)) { char *l = first_line(*c->err ? c->err : c->out); red(who[m], fmt("its own gate (tdescprobe --oracle cc on the tables as they are) is not green: rc %d: %s", c->rc, l)); continue; }
-            for (i = 0; i < npt; i++) if (same(&J[m * (npt + 1) + 1 + i], c)) {
-                char *w2 = fmt("%s%s %s;", got, G[PT[i].gi].name, G[PT[i].gi].keytext[PT[i].r]); free(got); got = w2; nu++; }
-            if (!is(got, want[m])) red(who[m], fmt("the keys whose perturbation left the run unchanged are '%s', want exactly '%s'", got, want[m]));
-            else { printf("caught\t%s\tits own gate green; %d of %d keys unchanged under the perturbed injection, exactly the keys it carries: %s\n", who[m], nu, npt, got); nk++; }
+            for (i = 0; i < npt; i++) {
+                Job *j = &J[m * (npt + 1) + 1 + i]; char *nm = pert_name(&PT[i]), *o = outcome(j, c), *row = fmt("%s\t%s", nm, o); const char *b = book_row(nm);
+                if (!b) { red(BOOK, fmt("no row for %s: regenerate it and review", nm)); free(nm); free(o); free(row); continue; }
+                if (!is(row, b)) {
+                    char *w2 = fmt("%s%s %s;", got, G[PT[i].gi].name, G[PT[i].gi].keytext[PT[i].r]); free(got); got = w2; nu++;
+                    if (o[0] == 'u' && o[2] == 'c') ns++; else if (o[0] == 'r') nr2++;
+                }
+                free(nm); free(o); free(row);
+            }
+            if (!is(got, want[m])) red(who[m], fmt("the keys whose perturbed run differs from %s are '%s', want exactly '%s'", BOOK, got, want[m]));
+            else { printf("caught\t%s\tits own gate green; %d of %d keys differ from the book under the perturbed injection (%d of them the control's output, %d refused by name), exactly the keys it carries: %s\n", who[m], nu, npt, ns, nr2, got); nk++; }
             free(got);
         }
-        printf("flownetb1 inject proof %s: %d/%d copies that answer from a copy they carry caught, each naming exactly its keys (%d keys, one relabel each)\n", pk, nk, m1 - m0, npt);
+        printf("flownetb1 inject proof %s: %d/%d copies that answer from a copy they carry caught, each naming exactly its keys (%d keys, one relabel each, judged against %s)\n", pk, nk, m1 - m0, npt, BOOK);
     }
 done:
     scratch_rm();
+    if (record) {
+        if (fails) { fprintf(stderr, "flownetb1 inject record %s: RED (%d): nothing to record\n", part, fails); return 1; }
+        return 0;
+    }
     if (fails) { printf("flownetb1 inject %s%s%s: RED (%d)\n", part, pk ? " " : "", pk ? pk : "", fails); return 1; }
     printf("flownetb1 inject %s%s%s: PASS\n", part, pk ? " " : "", pk ? pk : "");
     return 0;
@@ -586,10 +672,11 @@ out:
 }
 
 int main(int argc, char **argv) {
-    if (argc == 4 && is(argv[1], "inject")) return cmd_inject(argv[2], argv[3], 0);
-    if (argc == 5 && is(argv[1], "inject")) return cmd_inject(argv[2], argv[3], argv[4]);
+    if (argc == 4 && is(argv[1], "inject")) return cmd_inject(argv[2], argv[3], 0, 0);
+    if (argc == 5 && is(argv[1], "inject") && is(argv[3], "record")) return cmd_inject(argv[2], argv[4], 0, 1);
+    if (argc == 5 && is(argv[1], "inject")) return cmd_inject(argv[2], argv[3], argv[4], 0);
     if (argc == 3 && is(argv[1], "pin")) return cmd_pin(argv[2], 0);
     if (argc == 4 && is(argv[1], "pin") && is(argv[3], "write")) return cmd_pin(argv[2], 1);
-    fprintf(stderr, "usage: flownetb1.cx inject ROOT 1/2|2/2|proof K/3 | pin ROOT [write]\n");
+    fprintf(stderr, "usage: flownetb1.cx inject ROOT [record] 1/2|2/2 | inject ROOT proof K/4 | pin ROOT [write]\n");
     return 2;
 }
