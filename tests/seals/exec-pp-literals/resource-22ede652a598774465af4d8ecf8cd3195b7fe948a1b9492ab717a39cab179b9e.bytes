@@ -1297,6 +1297,14 @@ static FILE *fdopen(int __u_fd, const char *__u_mode) {
     return (FILE *)(long)__u_fd;
 }
 #endif
+/* fileno (POSIX), 0.0.43: fdopen's inverse -- the descriptor the FILE * stands for, 0..2 for
+   the standard streams; a null stream is EBADF (glibc would fault) */
+#if !__UNISA_FTRIM_LIBC || __UN_fileno
+static int fileno(FILE *__u_f) {
+    if (__u_f == NULL) { errno = 9; return -1; }   /* EBADF */
+    return _unisa_fd(__u_f);
+}
+#endif
 /* popen/pclose (POSIX), 0.0.34: a pipe (socketpair on macOS, as pipe() in unistd.h), a fork, and
    /bin/sh -c in the child with the pipe end on fd 0 or 1 -- the raw calls system() uses, so this
    header still needs no <unistd.h>.  pclose waits for the child and returns its wait status. */
