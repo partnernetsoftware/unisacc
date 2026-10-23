@@ -128,6 +128,18 @@ F1 第2刀 dup2/fopen 修剪：kernel/facts/ABI 已重生成，PP 四步重采�
 
 第2刀首轮提交被声明覆盖检查正确拒绝：libneed 不覆盖 exec/facts/pp-autoinc-gen.tsv，facts-export/pp-leaf-seal 属合同检查，不能代替产品套件声明。补点 exec-pp-literals（其树声明覆盖 exec/include/seed），保留所有原有派生闸，不修改覆盖表。
 
+路径纪律冲突待主人澄清：本轮禁止任何工具接收点或仓库根作路径，而指定 ident/seal 接口及现行 gate/seed-com 内有 ROOT/点参数。已询问是否仅写入/删除目标禁用；未获答复前不启动后续依赖该接口的验收。第2刀已结证并 bundle 备份，第三刀仅推进源码及不依赖该接口的准备。
+
+第3刀准备发现旧根已无法编译新环境头上的 ABI 工具（undefined _unisa_envfind），不能沿用“直到最后都以旧根载工具”的设想。决定仅在隔离 scratch 内提前采用已验最终根作工具载体；中间树不作该产品的 ident/PASS 声明，活检出继续保留原根，最终仍由 cx_read 刀与新根一起提升。旧工具根及 sidecar 保存在 out，未再重建 model-com。
+
+第3刀经典参考专项实测：environ bad=0，system/popen/execvp 子环境 bad=0；用最终根作工具载体后 ABI writer 523项成功。测得 gen/parse2 键为9d231357170a6825/74bdabd1919010b1，同步常量。PP 重采与提交门禁尚未启动，等待 ROOT 参数纪律口径，未计第3刀落地。
+
+政委新指示解堵（2026-10-23）：HANDOFF §3 路径禁项针对活检出；scratch 导出根作为 ident/seal/--check-core 的 ROOT 是规定做法，允许，保留接口不做无ROOT改造。恢复 F1→F6，Draft/Latest/签名/公开仍禁。另授权本次推送当前 main 的 ahead；实际 git push origin main:main 返回 Everything up-to-date，main与origin/main均d59cecd99，后续新提交不据此自动推送。
+
+第三刀首轮 PP 四步虽均 rc0，但 HANDOFF 口径补录与末步检查重叠；按套件运行不改树纪律，不计此轮最终验收。文档与源码固定后，以 cut3-pp2 新目录完整重采；不覆盖或删除原始记录。
+
+第3刀固定树 PP 重采 cut3-pp2 四步全 rc0，最大31.85秒，封件目录摘要746fabe6daa656c16608ddf8c1e155427e81d1e1936023446acf5aa7172295c7；采用这轮进入逐刀提交门禁。此前经典参考 environ/子环境专项均 bad=0，ABI 523项及两实现键同步已完成。F1 仍待其余四补丁与最终整体落地。
+
 ### 版本状态与可核验进度
 
 | 项 | 当前口径 | 核验来源/限制 |

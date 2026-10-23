@@ -1309,9 +1309,15 @@ static FILE *fdopen(int __u_fd, const char *__u_mode) {
 #if !__UNISA_FTRIM_LIBC || __UN_popen || __UN_pclose
 static int _u_po_fd[16]; static long _u_po_pid[16]; static int _u_po_n;
 #endif
+/* the child gets environ (<stdlib.h>'s _unisa_env, one object for the program, which a constructor
+   there fills before main); a program with no unit including <stdlib.h> has none, and the child gets
+   the block the kernel left after argv */
+#if !__UNISA_FTRIM_LIBC || __UN_popen
+char **_unisa_env;
+#endif
 #if !__UNISA_FTRIM_LIBC || __UN_popen
 static FILE *popen(const char *__u_cmd, const char *__u_mode) {
-    static char *__u_env[512]; char *__u_argv[4]; int __u_p[2]; long __u_pid; long __u_me; long __u_r;
+    static char *__u_envv[512]; char **__u_env; char *__u_argv[4]; int __u_p[2]; long __u_pid; long __u_me; long __u_r;
     int __u_k; int __u_n; int __u_rd; int __u_mine; int __u_kid;
     __u_rd = __u_mode[0] == 114;
     if ((!__u_rd && __u_mode[0] != 119) || _u_po_n >= 16) { errno = 22; return NULL; }
@@ -1325,9 +1331,12 @@ static FILE *popen(const char *__u_cmd, const char *__u_mode) {
     if (__u_r < 0) { errno = (int)(0 - __u_r); return NULL; }
     __u_mine = __u_rd ? __u_p[0] : __u_p[1]; __u_kid = __u_rd ? __u_p[1] : __u_p[0];
     __u_argv[0] = "sh"; __u_argv[1] = "-c"; __u_argv[2] = (char *)__u_cmd; __u_argv[3] = 0;
-    __u_n = 0; __u_k = __argc() + 1;
-    while (__u_n < 511 && __argv(__u_k) != 0) { __u_env[__u_n] = __argv(__u_k); __u_n = __u_n + 1; __u_k = __u_k + 1; }
-    __u_env[__u_n] = 0;
+    __u_env = _unisa_env;
+    if (!__u_env) {
+        __u_n = 0; __u_k = __argc() + 1;
+        while (__u_n < 511 && __argv(__u_k) != 0) { __u_envv[__u_n] = __argv(__u_k); __u_n = __u_n + 1; __u_k = __u_k + 1; }
+        __u_envv[__u_n] = 0; __u_env = __u_envv;
+    }
     _u_st_flushall();
 #ifdef __APPLE__
     __u_me = __syscall6(_U_PO_SC(20), 0, 0, 0, 0, 0);

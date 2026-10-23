@@ -21,6 +21,7 @@
 ## 3. 必守的运行纪律（今天付出了代价）
 
 - 工具与测试只在 scratch 导出（`git -c tar.umask=022 archive HEAD | tar -x`）里跑，**不在活检出里跑**；任何工具都不得收到 `''`、`.`、`/`、仓库根、`$HOME` 作路径参数（05:22 `warnprep.py --tools=` → `rmtree('.')` 清空过整个检出）。
+- **政委补充口径（2026-10-23）**：上条路径禁项针对活检出；工具仍只在 scratch 导出中跑，scratch 导出根作为现有 ident/seal/`--check-core` 的 ROOT 是规定做法，允许。保留现有接口，不改无 ROOT 接口、不再询问此口径。
 - 破坏性测试只在隔离命名空间里跑（`unshare -rm`，用空 tmpfs 遮住家目录与 `/tmp`，只把沙箱挂回）。
 - 共享文件（`tests/gate.sh`、`gatelayers.py`、`stagemap.c`、`INVENTORY.md`、`gatedeps.json`、`zeropython.tsv`）只打自己的补丁块；落地用：
   `tests/landlock sh -c 'git apply --cached P && git apply P && tests/landlock --derive && release/tools/commitgate.sh --index -m MSG --suite S… -- 路径… tests/INVENTORY.md tests/gatedeps.json tests/zeropython.tsv'`

@@ -662,29 +662,18 @@ static int atexit(void (*__u_fn)(void)) {
 #endif
 
 /* The environment is where a Unix kernel leaves it: after argv's NULL.
-   `__argv(k)` reads that array itself, so the walk starts past argc.  On
-   Unix setenv/unsetenv keep a small override table consulted first (16
-   names, 255 bytes each; overflow answers ENOMEM).  On Windows the process
-   environment block is the store: GetEnvironmentVariableA /
-   SetEnvironmentVariableA through kernel32 (0.0.21 batch 3); getenv's answer
-   lives in one of four rotating static buffers. [S-15 D2] */
+   `__argv(k)` reads that array itself, so the walk starts past argc.  It is
+   copied once into environ (below), and environ is the one store: getenv
+   reads it, setenv/unsetenv edit it in place (POSIX), and every child --
+   execv/execvp/execl*, system, popen -- is handed it, so a variable set
+   here is what a child sees (it was a 16-name override table of 255 bytes
+   each that only getenv consulted, until 0.0.43). [S-15 D2] */
 #ifdef _WIN32
 #endif
-static char _unisa_envk[16][256];   /* "NAME=VALUE" (Unix overrides) */
-static int _unisa_envf[16];         /* 0 free, 1 set, 2 unset */
-#if !__UNISA_FTRIM_LIBC || __UN__unisa_envslot
-static int _unisa_envslot(const char *__u_name, int __u_make) {
-    int __u_k; int __u_i; int __u_free;
-    __u_free = -1;
-    for (__u_k = 0; __u_k < 16; __u_k++) {
-        if (!_unisa_envf[__u_k]) { if (__u_free < 0) __u_free = __u_k; continue; }
-        __u_i = 0;
-        while (__u_name[__u_i] && _unisa_envk[__u_k][__u_i] == __u_name[__u_i]) __u_i = __u_i + 1;
-        if (__u_name[__u_i] == 0 && _unisa_envk[__u_k][__u_i] == 61) return __u_k;
-    }
-    return __u_make ? __u_free : -1;
-}
-#endif
+/* retired with the override table (0.0.43); kept unreferenced so a program that calls no
+   environment function keeps its bytes -- delete together with the next bss change */
+static char _unisa_envk[16][256];
+static int _unisa_envf[16];
 /* 0.0.31 H1'': the process environment, one `char **` for the whole program: external linkage,
    a tentative definition in every unit, merged at link (C99 6.9.2).  <unistd.h> names it `environ`.
    A constructor fills it before main from the block the kernel left after argv (0.0.28 F1);
@@ -703,53 +692,71 @@ __attribute__((constructor)) static void _unisa_environ_init(void) {
 #endif
 /* Windows reads the real environment through the host channel in 0.0.22,
    when the product lowers it (the compiler itself must not need it yet). */
-#if !__UNISA_FTRIM_LIBC || __UN_getenv
-static char *getenv(const char *__u_name) {
-    int __u_k; int __u_i; char *__u_e;
-    __u_k = _unisa_envslot(__u_name, 0);
-    if (__u_k >= 0) {
-        if (_unisa_envf[__u_k] == 2) return 0;
-        __u_i = 0; while (_unisa_envk[__u_k][__u_i] != 61) __u_i = __u_i + 1;
-        return _unisa_envk[__u_k] + __u_i + 1;
-    }
+/* the index in environ of the entry "NAME=...", or -1 (NAME holds no '=') */
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_envfind
+static long _unisa_envfind(const char *__u_name) {
+    long __u_k; int __u_i; char *__u_e;
     if (!_unisa_env) _unisa_environ_init();   /* called from a constructor that ran first */
     for (__u_k = 0; (__u_e = _unisa_env[__u_k]) != 0; __u_k++) {
         __u_i = 0;
         while (__u_name[__u_i] && __u_e[__u_i] == __u_name[__u_i]) __u_i = __u_i + 1;
-        if (__u_name[__u_i] == 0 && __u_e[__u_i] == 61) return __u_e + __u_i + 1;
+        if (__u_name[__u_i] == 0 && __u_e[__u_i] == 61) return __u_k;
     }
-    return 0;
+    return -1;
 }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_getenv
+static char *getenv(const char *__u_name) {
+    long __u_k; int __u_i;
+    __u_k = _unisa_envfind(__u_name);
+    if (__u_k < 0) return 0;
+    __u_i = 0; while (_unisa_env[__u_k][__u_i] != 61) __u_i = __u_i + 1;
+    return _unisa_env[__u_k] + __u_i + 1;
+}
+#endif
+/* setenv: "NAME=VALUE" in one malloc'd string, any length, put in environ in place of
+   NAME's entry or appended.  An entry is never freed: a pointer getenv returned stays
+   valid, as glibc and the BSDs keep them.  Appending past the kernel's copy (or past an
+   array the program assigned to environ) moves environ to a malloc'd array twice as big. */
+#if !__UNISA_FTRIM_LIBC || __UN_setenv
+static char **_unisa_envheap; static long _unisa_envcap;
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_setenv
 static int setenv(const char *__u_name, const char *__u_val, int __u_over) {
-    int __u_k; int __u_i; int __u_j;
+    long __u_k; long __u_n; long __u_i; long __u_j; char *__u_s; char **__u_a;
     if (!__u_name || !__u_name[0]) { errno = EINVAL; return -1; }
     for (__u_i = 0; __u_name[__u_i]; __u_i++) if (__u_name[__u_i] == 61) { errno = EINVAL; return -1; }
-    if (!__u_over && getenv(__u_name)) return 0;
-    __u_k = _unisa_envslot(__u_name, 1);
-    if (__u_k < 0) { errno = ENOMEM; return -1; }
-    __u_i = 0; while (__u_name[__u_i]) __u_i = __u_i + 1;
+    __u_k = _unisa_envfind(__u_name);
+    if (__u_k >= 0 && !__u_over) return 0;
     __u_j = 0; while (__u_val[__u_j]) __u_j = __u_j + 1;
-    if (__u_i + __u_j + 2 > 256) { errno = ENOMEM; return -1; }
-    for (__u_j = 0; __u_name[__u_j]; __u_j++) _unisa_envk[__u_k][__u_j] = __u_name[__u_j];
-    _unisa_envk[__u_k][__u_i] = 61;
-    for (__u_j = 0; __u_val[__u_j]; __u_j++) _unisa_envk[__u_k][__u_i + 1 + __u_j] = __u_val[__u_j];
-    _unisa_envk[__u_k][__u_i + 1 + __u_j] = 0;
-    _unisa_envf[__u_k] = 1;
+    __u_s = (char *)malloc(__u_i + __u_j + 2);
+    if (!__u_s) { errno = ENOMEM; return -1; }
+    for (__u_j = 0; __u_name[__u_j]; __u_j++) __u_s[__u_j] = __u_name[__u_j];
+    __u_s[__u_i] = 61;
+    for (__u_j = 0; __u_val[__u_j]; __u_j++) __u_s[__u_i + 1 + __u_j] = __u_val[__u_j];
+    __u_s[__u_i + 1 + __u_j] = 0;
+    if (__u_k >= 0) { _unisa_env[__u_k] = __u_s; return 0; }
+    __u_n = 0; while (_unisa_env[__u_n]) __u_n = __u_n + 1;
+    if (!((_unisa_env == _unisa_envv && __u_n + 1 < 4096) || (_unisa_env == _unisa_envheap && __u_n + 1 < _unisa_envcap))) {
+        __u_a = (char **)malloc((2 * __u_n + 16) * sizeof(char *));
+        if (!__u_a) { free(__u_s); errno = ENOMEM; return -1; }
+        for (__u_k = 0; __u_k < __u_n; __u_k++) __u_a[__u_k] = _unisa_env[__u_k];
+        if (_unisa_env == _unisa_envheap) free(_unisa_envheap);
+        _unisa_envheap = __u_a; _unisa_envcap = 2 * __u_n + 16; _unisa_env = __u_a;
+    }
+    _unisa_env[__u_n] = __u_s; _unisa_env[__u_n + 1] = 0;
     return 0;
 }
 #endif
+/* unsetenv: every "NAME=..." entry leaves environ, the rest keep their order */
 #if !__UNISA_FTRIM_LIBC || __UN_unsetenv
 static int unsetenv(const char *__u_name) {
-    int __u_k; int __u_i;
+    long __u_k; long __u_m; int __u_i;
     if (!__u_name || !__u_name[0]) { errno = EINVAL; return -1; }
     for (__u_i = 0; __u_name[__u_i]; __u_i++) if (__u_name[__u_i] == 61) { errno = EINVAL; return -1; }
-    __u_k = _unisa_envslot(__u_name, 1);
-    if (__u_k < 0) { errno = ENOMEM; return -1; }
-    for (__u_i = 0; __u_name[__u_i]; __u_i++) _unisa_envk[__u_k][__u_i] = __u_name[__u_i];
-    _unisa_envk[__u_k][__u_i] = 61; _unisa_envk[__u_k][__u_i + 1] = 0;
-    _unisa_envf[__u_k] = 2;
+    while ((__u_k = _unisa_envfind(__u_name)) >= 0) {
+        __u_m = __u_k; while (_unisa_env[__u_m]) { _unisa_env[__u_m] = _unisa_env[__u_m + 1]; __u_m = __u_m + 1; }
+    }
     return 0;
 }
 #endif
@@ -760,12 +767,11 @@ static int unsetenv(const char *__u_name) {
 #if !defined(_WIN32) && !defined(__UNISA_PYFRONT)   /* the Python front end keeps every body and folds one tape across targets */
 #if !__UNISA_FTRIM_LIBC || __UN_system
 static int system(const char *__u_cmd) {
-    static char *__u_env[512]; char *__u_argv[4]; long __u_pid; long __u_me; int __u_st; int __u_k; int __u_n;
+    char **__u_env; char *__u_argv[4]; long __u_pid; long __u_me; int __u_st;
     if (__u_cmd == 0) return 1;
     __u_argv[0] = "sh"; __u_argv[1] = "-c"; __u_argv[2] = (char *)__u_cmd; __u_argv[3] = 0;
-    __u_n = 0; __u_k = __argc() + 1;
-    while (__u_n < 511 && __argv(__u_k) != 0) { __u_env[__u_n] = __argv(__u_k); __u_n = __u_n + 1; __u_k = __u_k + 1; }
-    __u_env[__u_n] = 0;
+    if (!_unisa_env) _unisa_environ_init();   /* the child gets environ as it stands now */
+    __u_env = _unisa_env;
 #ifdef __APPLE__
 #ifdef __x86_64__
     __u_me = __syscall6(0x2000000L + 20, 0, 0, 0, 0, 0);
