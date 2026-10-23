@@ -10,6 +10,8 @@ trap 'sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${flat:?}" "${source
 "$R/tests/export_ref.sh" "$flat"
 cat "$R/tests/refshim.h" "$flat" "$R/tests/reffoot.h" > "$source.$$"
 mv -f "$source.$$" "$source"
+# Optional third argument: emit the identical wrapped C source without an unused compiler.
+[ "${3:-}" != --source-only ] || exit 0
 # -O2, and it is not a detail: the reference binary is what every suite
 # runs, thousands of times.  Unoptimised it compiles unisacc.c in 3.86s,
 # at -O2 in 0.46s, and the whole suite is dominated by it.  The output is

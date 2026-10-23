@@ -41,7 +41,7 @@ def main():
    assert len(sys.argv)==1
    model,runtime,dumper=t/'e3.json',t/'run',t/'dump'
   if prepared is None and (len(sys.argv)==1 or (len(sys.argv)==3 and sys.argv[1]=='--prepare')):
-   cmd(ROOT/'tests/bound',20,ROOT/'tests/build_ref.sh',t/'ref.c',t/'ref')
+   cmd(ROOT/'tests/bound',20,ROOT/'tests/build_ref.sh',t/'ref.c',t/'ref','--source-only')
    (t/'dump.c').write_bytes(dump_source((t/'ref.c').read_bytes()))
    cmd(ROOT/'tests/bound',20,'cc','-w','-std=c99','-O0',t/'dump.c','-o',dumper)
    cmd(ROOT/'tests/bound',20,'cc','-O2',ROOT/'exec/c/run.c','-o',runtime)

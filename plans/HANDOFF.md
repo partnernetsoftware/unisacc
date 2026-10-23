@@ -16,6 +16,8 @@
 
 1. **F1 已完成**：七个补丁逐刀提交，派生文件重生成、根产品重建及 ident、完整差分、双重封和键更新已完成；记录见上。下一步从 F2 验收继续。
 2. F2（M2 余项：spec TP-9 下划线句、`exec/tapecheck/README.md`、P4a 探针移入 tests/c）→ F3（CONTRACT 层全扫）→ F4（`tests/release.sh --com` 全量队列）→ F5（`research/r43-draft-notes.md` 填实）→ F6（候选构建 + comboot）。
+   - F4 的 carrier import 输入需先在同一冻结 scratch 环境单独执行 `tests/bound 55 sh tests/cxbin tests/carrierimportprepared.cx --prepare`，再开 fresh `tests/release.sh --com` 完整队列；这是有界预建，不是套件通过。正式 prepare 仍核完整缓存身份和八项输出，两个消费者必须实际执行。`gate.sh` 默认的 `UNISA_JOBS=2` 会产生另一键，不得把不同环境的预建收据混用。保留旧 full41 超时；source-only 导出字节与原包装源码相同，仅省未消费的 ref 编译。
+
 3. 长期轨道（不阻塞 0.0.43）：零 Python（剥离 W2→W3→W4；「闸即数据」：5 个通用 .cx 执行器取代逐个移植）、删除守卫第 3 轮加固（TOCTOU 改 fd 遍历、TMPDIR 祖先、天花板旗标、扫描器漏项、豁免行内容哈希）、flownet W5→W6 B2…→W7、CX2b 模块根、0.0.44 分段产品入口 `unisacc-{stage}.com`。
 
 ## 3. 必守的运行纪律（今天付出了代价）
