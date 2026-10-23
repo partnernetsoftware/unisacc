@@ -406,22 +406,22 @@ static char *extra[] = {
     "E6", "unisa-ape", "build",
     /* unisa-vm: gate注释vm run点程序执行参考，不计宿主文件/syscall闭包; tests/gate.sh:740 */
     "E6", "unisa-vm", "meta",
-    /* unisa-gold-prec: gate注释prec/type/parse/scope label有限域源码提取，不计front全流水线; tests/gate.sh:741 */
-    "E3", "unisa-gold-prec", "build",
+    /* gold-label-prec: the prec net, frozen table weights/gold/prec.tsv vs rule form seed/gold_prec_label.c (W1-C; was unisa-gold-prec); not the whole stage */
+    "E3", "gold-label-prec", "build",
     /* unisa-emit-arm-nwmem: gate注释emit_arm指令字段/N/movimm/mem有限域，不计完整encode/reloc; tests/gate.sh:742 */
     "E5", "unisa-emit-arm-nwmem", "lower",
-    /* unisa-gold-lex-label: gate注释lex_label有限域源码提取，不计全lex; tests/gate.sh:743 */
-    "E1", "unisa-gold-lex-label", "build",
-    /* unisa-gold-type-label: gate注释prec/type/parse/scope label有限域源码提取，不计front全流水线; tests/gate.sh:744 */
-    "E3", "unisa-gold-type-label", "build",
-    /* unisa-gold-peep-label: gate注释peep_label有限域源码提取; tests/gate.sh:747 */
-    "E4", "unisa-gold-peep-label", "build",
-    /* unisa-gold-scope-label: gate注释prec/type/parse/scope label有限域源码提取，不计front全流水线; tests/gate.sh:748 */
-    "E3", "unisa-gold-scope-label", "build",
-    /* unisa-gold-pp-label: gate注释pp_label有限域源码提取，不计全pp; tests/gate.sh:749 */
-    "E2", "unisa-gold-pp-label", "build",
-    /* unisa-gold-parse-label: gate注释prec/type/parse/scope label有限域源码提取，不计front全流水线; tests/gate.sh:752 */
-    "E3", "unisa-gold-parse-label", "build",
+    /* gold-label-lex: the lex net, frozen table weights/gold/lex.tsv vs rule form seed/gold_lex_label.c (W1-C; was unisa-gold-lex-label); not the whole stage */
+    "E1", "gold-label-lex", "build",
+    /* gold-label-type: the type net, frozen table weights/gold/type.tsv vs rule form seed/gold_type_label.c (W1-C; was unisa-gold-type-label); not the whole stage */
+    "E3", "gold-label-type", "build",
+    /* gold-label-peep: the peep net, frozen table weights/gold/peep.tsv vs rule form seed/gold_peep_label.c (W1-C; was unisa-gold-peep-label); not the whole stage */
+    "E4", "gold-label-peep", "build",
+    /* gold-label-scope: the scope net, frozen table weights/gold/scope.tsv vs rule form seed/gold_scope_label.c (W1-C; was unisa-gold-scope-label); not the whole stage */
+    "E3", "gold-label-scope", "build",
+    /* gold-label-pp: the pp net, frozen table weights/gold/pp.tsv vs rule form seed/gold_pp_label.c (W1-C; was unisa-gold-pp-label); not the whole stage */
+    "E2", "gold-label-pp", "build",
+    /* gold-label-parse: the parse net, frozen table weights/gold/parse.tsv vs rule form seed/gold_parse_label.c (W1-C; was unisa-gold-parse-label); not the whole stage */
+    "E3", "gold-label-parse", "build",
     /* com-tapedomain: raw Tape域前置拒绝，--S/-c不得写成功输出; tests/gate.sh:831 */
     "E3", "com-tapedomain", "lower",
     /* com-hostaddr-neg: .hostaddr索引0..3拒绝域（control与参考逐字节同，-1/4双方具名拒绝）; tests/gate.sh */
@@ -480,14 +480,14 @@ static char *extra[] = {
     "build", "unisa-catalog", "-",
     /* unisa-fp: op2/op3浮点运算位模式C参考迁移; tests/unisafpcheck.sh:2–6; unisa/front/lex.py:46; unisa/front/parse.py:1707; unisa/vm.py:8 */
     "build", "unisa-fp", "-",
-    /* unisa-gold-binsel-label: C运算符/符号性→Tape ALU flavor；front parse调用Emitter; unisa/ir.py:206–214; unisa/front/parse.py:8; unisa/gold.py:440–454; tests/unisagoldbinsellabelcheck.sh:2–10 */
-    "E3", "unisa-gold-binsel-label", "build",
-    /* unisa-gold-opinfo-label: 优化器消费Tape op类别，opinfo oracle; unisa/opt.py:39–44; unisa/gold.py:391–408; tests/unisagoldopinfolabelcheck.sh:2–10 */
-    "E4", "unisa-gold-opinfo-label", "build",
-    /* unisa-gold-reloc-label: lower针对jump/jumpz/call查询reloc字段并交encoder; unisa/lower.py:437–443; unisa/emit_arm.py:328–335; tests/unisagoldreloclabelcheck.sh:2–8 */
-    "lower", "unisa-gold-reloc-label", "build",
-    /* unisa-gold-irsel-label: front Tape emitter查询family/flavor recipe; unisa/ir.py:1–12,78–87; unisa/front/parse.py:8; tests/unisagoldirsellabelcheck.sh:2–8 */
-    "E3", "unisa-gold-irsel-label", "build",
+    /* gold-label-binsel: the binsel net, frozen table weights/gold/binsel.tsv vs rule form seed/gold_binsel_label.c (W1-C; was unisa-gold-binsel-label); not the whole stage */
+    "E3", "gold-label-binsel", "build",
+    /* gold-label-opinfo: the opinfo net, frozen table weights/gold/opinfo.tsv vs rule form seed/gold_opinfo_label.c (W1-C; was unisa-gold-opinfo-label); not the whole stage */
+    "E4", "gold-label-opinfo", "build",
+    /* gold-label-reloc: the reloc net, frozen table weights/gold/reloc.tsv vs rule form seed/gold_reloc_label.c (W1-C; was unisa-gold-reloc-label); not the whole stage */
+    "lower", "gold-label-reloc", "build",
+    /* gold-label-irsel: the irsel net, frozen table weights/gold/irsel.tsv vs rule form seed/gold_irsel_label.c (W1-C; was unisa-gold-irsel-label); not the whole stage */
+    "E3", "gold-label-irsel", "build",
     /* gate-select: selector mechanism invariant checker, next registration step; not product execution; cc step2 dispatch; tests/gateselectcheck.py warehouse draft */
     "meta", "gate-select", "-",
     0

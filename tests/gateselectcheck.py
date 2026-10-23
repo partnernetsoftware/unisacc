@@ -15,7 +15,7 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 # Synthetic replacement is confined to fixtures; production table keeps its unresolved role.
 POLICY_TEXT = (B / "tests/gateselect.tsv").read_text().replace("stage-contract-e1e3", "sc1-control").replace("com-iquote", "product-control").replace("staticimage", "abi").replace("com-cli", "image")
-POLICY_TEXT = POLICY_TEXT.replace("suite.unisa-gold-opinfo-label", "suite.lex").replace("suite.unisa-gold-irsel-label", "suite.lower")
+POLICY_TEXT = POLICY_TEXT.replace("suite.gold-label-opinfo", "suite.lex").replace("suite.gold-label-irsel", "suite.lower")
 P = m.parse_policy(POLICY_TEXT)
 
 

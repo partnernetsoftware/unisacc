@@ -1,0 +1,261 @@
+#!/usr/bin/env -S unisacc.com -run
+/* goldlabelcheck.cx -- the gold label nets judged twice (2026-10-23, plans/unisa-detach.md W1-C; replaces the eleven
+   K6-18..29 harnesses tests/unisagold*check.sh, which compared seed/unisa_gold_*.c with the Python seed's gold.py).
+   The frozen authority of a label net is its table weights/gold/NET.tsv; its rule form is the C99 program
+   seed/gold_NET_label.c, written independently of the table.  Each must reproduce the other.
+   usage: sh ./tests/cxbin tests/goldlabelcheck.cx NET            one net (gate jobs gold-label-NET)
+          sh ./tests/cxbin tests/goldlabelcheck.cx --all          all eleven, in the order below
+          sh ./unisacc.com -run tests/goldlabelcheck.cx -- NET    the same without the binary cache
+   Run from the repository root.  rc 0 green, 1 red (first red stops, one `goldlabel NET: ...` line says why),
+   2 usage / not at the root / I/O.
+   For one net:
+     T  the table itself: its #field lines are the key domains, its first non-# line the column header (the key
+        field names, then `=> HEAD` per label column), every #head line the value set of one label column.  The
+        data rows must be exactly the Cartesian product of the key domains in odometer order (the last field
+        fastest), and each label cell must be a value of its #head.  So the table is total over its domain.
+     C  the rule form, compiled by the product (sh ./unisacc.com -o; no host cc): `table` run twice, rc 0, the two
+        outputs equal and byte-equal to the table's data rows (keys and labels, in order).  On a difference the
+        first differing row is printed from both sides.
+     P  points through the second entry `call KEY...`: the first row, the last row and the first row of every
+        distinct label (each label class answered once), each must print the row's labels joined by one blank.
+     N  refusals (rc 1..123, stdout empty): `call` with the last key missing, an unknown mode (`build`), and per
+        net the refusal its rule has (an unknown first key for lex, binsel, irsel, parse).
+     M  the comparison is not vacuous: the table with one label cell changed (a middle row, to another value of
+        its #head) must differ from the C output at exactly that row.
+   Every child runs under a bound (compile 58 s, a run 10 s).  Scratch files live in one mkdtemp directory under
+   ${TMPDIR:-/tmp}, removed at exit.
+   No #include: the prelude is built in. */
+
+#define MAXF 8          /* key fields + label columns of one net */
+#define MAXV 512        /* values of one domain */
+
+static const char *NETS[] = { "prec", "lex", "type", "binsel", "opinfo", "peep", "scope", "pp", "reloc", "irsel",
+                              "parse", 0 };
+/* the refusal of each rule that has one: NET, then argv after the program name */
+static const char *const REFUSE[][4] = {
+    { "lex", "call", "bogus", "slash" }, { "binsel", "call", "&&", "s" }, { "irsel", "call", "nosuch", "add" },
+    { "parse", "call", "bogus", "eof" }, { 0, 0, 0, 0 } };
+
+static char TMPD[256];
+static char BIN[400];
+static const char *NET;
+
+static void cleanup(void) {
+    if (!TMPD[0]) return;
+    cx_rmtree(TMPD); TMPD[0] = 0;                       /* own mkdtemp, through the one deletion guard */
+}
+static void red(const char *a, const char *b) {
+    fflush(stdout); printf("goldlabel %s: %s%s\n", NET ? NET : "-", a, b ? b : ""); cleanup(); exit(1);
+}
+static void die2(const char *a, const char *b) {
+    fflush(stdout); fprintf(stderr, "goldlabel: %s%s\n", a, b ? b : ""); cleanup(); exit(2);
+}
+static void *xmalloc(size_t n) { void *p = malloc(n ? n : 1); if (!p) die2("out of memory", 0); return p; }
+static char *xstrndup(const char *s, size_t n) { char *d = xmalloc(n + 1); memcpy(d, s, n); d[n] = 0; return d; }
+
+/* split S (modified) at SEP into at most MAX pieces; returns the count, -1 when there are more */
+static int split(char *s, int sep, char **out, int max) {
+    int n = 0; char *p = s;
+    for (;;) {
+        char *q = strchr(p, sep);
+        if (n == max) return -1;
+        out[n++] = p;
+        if (!q) return n;
+        *q = 0; p = q + 1;
+    }
+}
+
+/* ---- the table ---- */
+typedef struct { char *name; char *v[MAXV]; int n; } Dom;
+static Dom keyd[MAXF], headd[MAXF];
+static int nkey, nhead;
+static char **row;          /* data rows, without the newline */
+static int nrow;
+static char *want;          /* the data rows joined, each with its newline */
+static size_t wantn;
+
+static void read_table(const char *path) {
+    size_t len, i; char *buf = cx_read(path, &len), *p, *line; int header = 0, k; long expect = 1;
+    if (!buf) die2("cannot read ", path);
+    nkey = nhead = nrow = 0;
+    row = xmalloc(sizeof *row * (len / 2 + 1));
+    want = xmalloc(len + 1); wantn = 0;
+    for (p = buf; *p; ) {
+        char *e = strchr(p, '\n');
+        if (!e) red("table does not end in a newline: ", path);
+        line = xstrndup(p, (size_t)(e - p)); p = e + 1;
+        if (!strncmp(line, "#field\t", 7) || !strncmp(line, "#head\t", 6)) {
+            int field = line[1] == 'f'; char *cell[MAXV + 3]; int n = split(line + (field ? 7 : 6), '\t', cell, MAXV + 2);
+            Dom *d;
+            if (header) red("#field or #head after the column header in ", path);
+            if (n < 2) red("short #field/#head line in ", path);
+            if (field ? nkey == MAXF : nhead == MAXF) red("too many columns in ", path);
+            d = field ? &keyd[nkey++] : &headd[nhead++];
+            d->name = cell[0];
+            if (field) { for (k = 1; k < n; k++) d->v[k - 1] = cell[k]; d->n = n - 1; }
+            else {      /* #head NAME - V...: the '-' separates the name from the values */
+                if (n < 3 || strcmp(cell[1], "-")) red("#head without its '-' in ", path);
+                for (k = 2; k < n; k++) d->v[k - 2] = cell[k]; d->n = n - 2;
+            }
+            continue;
+        }
+        if (line[0] == '#') continue;
+        if (!header) {      /* the column header: the key field names, then => HEAD per label column */
+            char *cell[MAXF * 2 + 1]; int n = split(line, '\t', cell, MAXF * 2);
+            header = 1;
+            if (!nkey || !nhead) red("no #field or no #head lines in ", path);
+            if (n != nkey + nhead) red("column header width differs from #field + #head in ", path);
+            for (k = 0; k < nkey; k++) if (strcmp(cell[k], keyd[k].name)) red("column header names a key not in #field order: ", cell[k]);
+            for (k = 0; k < nhead; k++)
+                if (strncmp(cell[nkey + k], "=> ", 3) || strcmp(cell[nkey + k] + 3, headd[k].name)) red("column header label not in #head order: ", cell[nkey + k]);
+            continue;
+        }
+        row[nrow++] = line;
+        memcpy(want + wantn, line, strlen(line)); wantn += strlen(line); want[wantn++] = '\n';
+    }
+    want[wantn] = 0;
+    for (k = 0; k < nkey; k++) expect *= keyd[k].n;
+    if (nrow != expect) { char m[96]; snprintf(m, sizeof m, "%d rows, the key domains give %ld", nrow, expect); red("table is not total: ", m); }
+    {   /* odometer order, and every label a value of its head */
+        int idx[MAXF] = { 0 };
+        for (i = 0; i < (size_t)nrow; i++) {
+            char *copy = xstrndup(row[i], strlen(row[i])), *cell[MAXF + 1]; int n = split(copy, '\t', cell, MAXF), j, ok;
+            if (n != nkey + nhead) red("row width differs from the header: ", row[i]);
+            for (k = 0; k < nkey; k++) if (strcmp(cell[k], keyd[k].v[idx[k]])) red("row out of key order: ", row[i]);
+            for (k = 0; k < nhead; k++) {
+                for (ok = 0, j = 0; j < headd[k].n && !ok; j++) ok = !strcmp(cell[nkey + k], headd[k].v[j]);
+                if (!ok) red("label not in its #head: ", row[i]);
+            }
+            free(copy);
+            for (k = nkey - 1; k >= 0; k--) { if (++idx[k] < keyd[k].n) break; idx[k] = 0; }
+        }
+    }
+}
+
+/* ---- the rule form ---- */
+static int run(char *const argv[], int secs, char **out, size_t *len) {
+    int rc = cx_runv_timeout(argv, secs, out, len);
+    if (rc < 0) die2("cannot run ", argv[0]);
+    return rc;
+}
+static int refused(int rc) { return rc > 0 && rc < 124; }
+
+/* first line where A and B differ (1-based); 0 when equal */
+static int first_diff(const char *a, size_t an, const char *b, size_t bn, char **la, char **lb) {
+    size_t i = 0, s = 0; int line = 1;
+    while (i < an && i < bn && a[i] == b[i]) { if (a[i] == '\n') { line++; s = i + 1; } i++; }
+    if (i == an && i == bn) return 0;
+    {   size_t ea = s, eb = s;
+        while (ea < an && a[ea] != '\n') ea++;
+        while (eb < bn && b[eb] != '\n') eb++;
+        *la = xstrndup(a + s, s < an ? ea - s : 0); *lb = xstrndup(b + s, s < bn ? eb - s : 0); }
+    return line;
+}
+
+static void check_net(const char *net) {
+    char tsv[128], src[128], m[512], *out = 0, *out2 = 0, *la, *lb; size_t on = 0, on2 = 0;
+    int rc, k, i, points = 0, negs = 0, d;
+    NET = net;
+    snprintf(tsv, sizeof tsv, "weights/gold/%s.tsv", net);
+    snprintf(src, sizeof src, "seed/gold_%s_label.c", net);
+    read_table(tsv);                                                                        /* T */
+    {   char *cc[] = { "sh", "./unisacc.com", "-o", BIN, src, 0 };                          /* C */
+        cx_remove(BIN);
+        rc = run(cc, 58, 0, 0);
+        if (rc) { snprintf(m, sizeof m, "%s (rc %d)", src, rc); red("the product does not compile ", m); } }
+    {   char *tb[] = { BIN, "table", 0 };
+        rc = run(tb, 10, &out, &on);
+        if (rc) { snprintf(m, sizeof m, "%d", rc); red("`table` failed, rc ", m); }
+        rc = run(tb, 10, &out2, &on2);
+        if (rc || on != on2 || memcmp(out, out2, on)) red("`table` is not deterministic", 0); }
+    if ((d = first_diff(want, wantn, out, on, &la, &lb))) {
+        snprintf(m, sizeof m, "row %d: table [%s] rule [%s]", d, la, lb); red("rule form differs from the table at ", m);
+    }
+    {   /* M: one label cell changed must show at exactly that row */
+        int r = nrow / 2, col = nkey, j; char *copy = xstrndup(row[r], strlen(row[r])), *cell[MAXF + 1], *alt = 0, *mut;
+        size_t mn = 0, before = 0; Dom *h = &headd[0];
+        split(copy, '\t', cell, MAXF);
+        for (j = 0; j < h->n && !alt; j++) if (strcmp(h->v[j], cell[col])) alt = h->v[j];
+        if (!alt) red("mutation control: the first #head has one value", 0);
+        for (i = 0; i < r; i++) before += strlen(row[i]) + 1;
+        mut = xmalloc(wantn + strlen(alt) + 2);
+        memcpy(mut, want, before); mn = before;
+        for (k = 0; k < nkey; k++) { memcpy(mut + mn, cell[k], strlen(cell[k])); mn += strlen(cell[k]); mut[mn++] = '\t'; }
+        memcpy(mut + mn, alt, strlen(alt)); mn += strlen(alt);
+        for (k = nkey + 1; k < nkey + nhead; k++) { mut[mn++] = '\t'; memcpy(mut + mn, cell[k], strlen(cell[k])); mn += strlen(cell[k]); }
+        mut[mn++] = '\n';
+        memcpy(mut + mn, want + before + strlen(row[r]) + 1, wantn - before - strlen(row[r]) - 1); mn += wantn - before - strlen(row[r]) - 1;
+        if (first_diff(mut, mn, out, on, &la, &lb) != r + 1) red("mutation control: a changed label cell was not found at its row", 0);
+        free(mut); free(copy);
+    }
+    for (i = 0; i < nrow; i++) {                                                            /* P */
+        char *copy, *cell[MAXF + 1], *argv[MAXF + 3], expect[512]; int j, first = i == 0 || i == nrow - 1;
+        size_t en = 0;
+        const char *lab = strchr(row[i], '\t');
+        for (k = 1; k < nkey; k++) lab = strchr(lab + 1, '\t');
+        if (!first) {   /* the first row of this label tuple? */
+            for (first = 1, j = 0; j < i && first; j++) {
+                const char *o = strchr(row[j], '\t'); for (k = 1; k < nkey; k++) o = strchr(o + 1, '\t');
+                if (!strcmp(o, lab)) first = 0;
+            }
+        }
+        if (!first) continue;
+        copy = xstrndup(row[i], strlen(row[i])); split(copy, '\t', cell, MAXF);
+        argv[0] = BIN; argv[1] = "call";
+        for (k = 0; k < nkey; k++) argv[2 + k] = cell[k];
+        argv[2 + nkey] = 0;
+        for (k = 0; k < nhead; k++) { size_t l = strlen(cell[nkey + k]); if (en + l + 2 > sizeof expect) red("label too long", 0); if (k) expect[en++] = ' '; memcpy(expect + en, cell[nkey + k], l); en += l; }
+        expect[en++] = '\n'; expect[en] = 0;
+        free(out); out = 0;
+        rc = run(argv, 10, &out, &on);
+        if (rc || on != en || memcmp(out, expect, en)) {
+            snprintf(m, sizeof m, "%s (rc %d, printed [%.*s])", row[i], rc, (int)(on && out[on - 1] == '\n' ? on - 1 : on), out ? out : "");
+            red("`call` disagrees with the table row ", m);
+        }
+        points++; free(copy);
+    }
+    {   /* N */
+        char *copy = xstrndup(row[0], strlen(row[0])), *cell[MAXF + 1], *argv[MAXF + 3], *bad[] = { BIN, "build", 0 };
+        split(copy, '\t', cell, MAXF);
+        argv[0] = BIN; argv[1] = "call";
+        for (k = 0; k + 1 < nkey; k++) argv[2 + k] = cell[k];
+        argv[1 + nkey] = 0;
+        free(out); out = 0;
+        rc = run(argv, 10, &out, &on);
+        if (!refused(rc) || on) { snprintf(m, sizeof m, "rc %d, %zu bytes out", rc, on); red("`call` with the last key missing was not refused: ", m); }
+        negs++;
+        free(out); out = 0;
+        rc = run(bad, 10, &out, &on);
+        if (!refused(rc) || on) { snprintf(m, sizeof m, "rc %d, %zu bytes out", rc, on); red("unknown mode `build` was not refused: ", m); }
+        negs++;
+        for (i = 0; REFUSE[i][0]; i++) {
+            char *nv[] = { BIN, (char *)REFUSE[i][1], (char *)REFUSE[i][2], (char *)REFUSE[i][3], 0 };
+            if (strcmp(REFUSE[i][0], net)) continue;
+            free(out); out = 0;
+            rc = run(nv, 10, &out, &on);
+            if (!refused(rc) || on) { snprintf(m, sizeof m, "%s %s (rc %d, %zu bytes out)", nv[2], nv[3], rc, on); red("the rule's refusal was not kept: call ", m); }
+            negs++;
+        }
+        free(copy);
+    }
+    cx_remove(BIN);
+    printf("goldlabel %-6s rows %4d  table byte-equal (%d keys x %d labels)  points %d  neg %d  mutation found  ok\n",
+           net, nrow, nkey, nhead, points, negs);
+    fflush(stdout);
+    free(out); free(out2);
+}
+
+int main(int argc, char **argv) {
+    const char *tmp = getenv("TMPDIR"); int i, all;
+    struct stat st;
+    if (argc != 2) die2("usage: goldlabelcheck.cx NET | --all", 0);
+    all = !strcmp(argv[1], "--all");
+    if (!all) { for (i = 0; NETS[i] && strcmp(NETS[i], argv[1]); i++) ; if (!NETS[i]) die2("unknown net: ", argv[1]); }
+    if (stat("weights/gold", &st) || stat("unisacc.com", &st)) die2("run from the repository root (weights/gold, unisacc.com)", 0);
+    snprintf(TMPD, sizeof TMPD, "%s/goldlabel.XXXXXX", tmp && tmp[0] ? tmp : "/tmp");
+    if (!mkdtemp(TMPD)) { TMPD[0] = 0; die2("mkdtemp failed", 0); }
+    snprintf(BIN, sizeof BIN, "%s/bin", TMPD);
+    for (i = 0; NETS[i]; i++) if (all || !strcmp(NETS[i], argv[1])) check_net(NETS[i]);
+    cleanup();
+    return 0;
+}

@@ -72,11 +72,10 @@ seed-matrix-shared-prepare seed-matrix-shared-e2 seed-matrix-shared-e1 seed-matr
 seed-matrix-object seedgen seedgen-let-exit copy-contract ri-snapshot-overlay ri-snapshot-core seedape seedpack exec-bridge-linux warn diag target-package prevheaders
 unisa-bits unisa-hostabi unisa-peversion unisa-padded unisa-zdata unisa-linalg unisa-libneed unisa-uns1
 unisa-catalog unisa-fp unisa-tape unisa-tapebin unisa-tapebin-shape unisa-image-fat unisa-image-elf
-unisa-image-macho unisa-image-pe unisa-ape unisa-vm unisa-gold-prec unisa-emit-arm-nwmem
-unisa-gold-lex-label unisa-gold-type-label unisa-gold-binsel-label unisa-gold-opinfo-label
-unisa-gold-peep-label unisa-gold-scope-label unisa-gold-pp-label unisa-gold-reloc-label
-unisa-gold-irsel-label unisa-gold-parse-label
-""".split())   # c42: the 0.0.41 K6 C-reference vs Python point-sample checks: one subsystem each, not a route or target
+unisa-image-macho unisa-image-pe unisa-ape unisa-vm unisa-emit-arm-nwmem
+gold-label-prec gold-label-lex gold-label-type gold-label-binsel gold-label-opinfo gold-label-peep gold-label-scope
+gold-label-pp gold-label-reloc gold-label-irsel gold-label-parse
+""".split())   # c42: the 0.0.41 K6 C-reference vs Python point-sample checks: one subsystem each, not a route or target; gold-label-*: one label net each (W1-C)
 STAGE_PREFIX = ("tapecheck-model-", "exec-", "lib-", "rowcov-", "seed-construct-", "seed-matrix-features-",
                 "warn-", "diag-", "referee-", "shared-e2-", "seedgen-")
 
