@@ -12,6 +12,8 @@ X=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-hook-scratch.XXXXXX") || exit 2
 trap '[ -z "$X" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$X"' EXIT
 fail() { echo "precommithook: $*"; exit 1; }
 cd "$T" && git init -q . && mkdir -p tests release/tools/hooks && cp "$R/tests/shipclassify.cx" "$R/tests/cxbin" tests/ && ln -s "$R/unisacc.com" unisacc.com && cp "$R/release/tools/hooks/pre-commit" release/tools/hooks/ && cp "$R/release/tools/install_hooks.sh" release/tools/
+mkdir -p "$T/include" || fail "cannot create fixture include directory"
+cp "$R"/include/*.h "$T/include/" || fail "cannot copy fixture headers"
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 git add -A && git commit -q -m base && release/tools/install_hooks.sh > /dev/null || fail "install failed"
 release/tools/install_hooks.sh > /dev/null || fail "reinstall of the same hook refused"
