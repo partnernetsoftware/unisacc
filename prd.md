@@ -120,6 +120,10 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 2026-10-23 F1 重封前置修复：隔离短路径触发 strace 对齐空白，PP 采集器原固定 `) = ` 匹配遗漏头流 EOF。已改空格/制表符解析并补三类自测；scratch 正式重封四步与内容变异负例均通过（详见 research/c43-ppcapture-padding.md）。本次仅落采集器修复，F1 产品批与重封件尚未落地，不计 F1 完成。
 
+F1 落地执行口径：每刀在 archive 导出的独立 main 中经 landlock、commitgate --index 创建自洽提交，逐刀补齐受影响派生和 PP 测量，再持锁快进活检出；活检出不运行工具或测试。cx_read 刀置最后，与最终根产品及 sidecar 同锁安装；中间刀不重建 model-com。每次创建及提升提交均 bundle 备份。此为执行顺序，不是全闸通过声明。
+
+F1 第1刀 vsnprintf/vprintf：scratch 已重生成 kernel/facts（30表无差异）、ABI manifest 523项；gen/parse2 键未变。正式 PP 重采四步全 rc0，最大30.66秒。根产品仍为旧根，仅作工具载体；本刀尚非最终产品验收。
+
 ### 版本状态与可核验进度
 
 | 项 | 当前口径 | 核验来源/限制 |

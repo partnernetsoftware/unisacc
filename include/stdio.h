@@ -370,7 +370,7 @@ static int getchar(void) { return fgetc(stdin); }
 
 #if !__UNISA_FTRIM_LIBC || __UN_vprintf
 static int vprintf(const char *__u_fmt, va_list __u_ap) {
-    return _u_vfmt(NULL, 0 - 1, NULL, __u_fmt, __u_ap);
+    return _u_vfmt(NULL, 0, stdout, __u_fmt, __u_ap);
 }
 #endif
 
@@ -861,6 +861,10 @@ static int _u_ffmt(char *__u_out, unsigned long __u_bits, int __u_c, int __u_pre
 }
 #endif
 
+/* _u_vfmt writes to the buffer OUT (capacity CAP, -1 for unbounded) or, when OUT is NULL, to the stream F:
+   exactly one of them.  A caller with neither -- vsnprintf(NULL, 0, ...) measuring, vprintf before 0.0.43 --
+   sent its bytes to FILE * 0, which is descriptor 0 (stdin): a blocked write when nobody reads it, the hang the
+   .cx ports met, and a lost vprintf line.  The measuring callers pass a one-byte buffer of capacity 0 instead. */
 #if !__UNISA_FTRIM_LIBC || __UN__u_vfmt
 static int _u_vfmt(char *__u_out, long __u_cap, FILE *__u_f, const char *__u_fmt, va_list __u_ap) {
     long __u_n;
@@ -1045,6 +1049,8 @@ static int vsprintf(char *__u_b, const char *__u_fmt, va_list __u_ap) {
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_vsnprintf
 static int vsnprintf(char *__u_b, long __u_cap, const char *__u_fmt, va_list __u_ap) {
+    char __u_z;
+    if (__u_b == NULL) { __u_b = &__u_z; __u_cap = 0; }   /* measure only (C99 7.19.6.12p2) */
     return _u_vfmt(__u_b, __u_cap, NULL, __u_fmt, __u_ap);
 }
 #endif
@@ -1064,7 +1070,8 @@ static int sprintf(char *__u_b, const char *__u_fmt, ...) {
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_snprintf
 static int snprintf(char *__u_b, long __u_cap, const char *__u_fmt, ...) {
-    va_list __u_ap; int __u_r;
+    va_list __u_ap; int __u_r; char __u_z;
+    if (__u_b == NULL) { __u_b = &__u_z; __u_cap = 0; }   /* measure only (C99 7.19.6.5p2) */
     va_start(__u_ap, __u_fmt);
     __u_r = _u_vfmt(__u_b, __u_cap, NULL, __u_fmt, __u_ap);
     va_end(__u_ap);
