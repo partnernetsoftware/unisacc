@@ -71,7 +71,7 @@ static char *dupn(const char *p, size_t n) {
 static void flush_out(Str *o) { if (o->n) fwrite(o->p, 1, o->n, stdout); }
 
 /* ---- SHA-256 (FIPS 180-4); K and H0 are the fractional parts of the cube and square roots of the
- *      first primes, checked by tests/unisatapebincheck.sh against python's hashlib ---- */
+ *      first primes, checked against python's hashlib when tests/k6/tapebin.tsv was captured ---- */
 static const uint32_t SK[64] = {
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
     0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,

@@ -6,7 +6,7 @@
  *       Python ValueError set, or a short/truncated read) exits 1 with the reason on stderr and
  *       writes nothing to OUT.  NAME must be printable ASCII (out of the sampled domain otherwise).
  *
- * Point-sample equivalence only: the cases in tests/unisapeversioncheck.sh.  Not a product
+ * Point-sample equivalence only: the cases in tests/k6/peversion.tsv (tests/k6frozen.cx).  Not a product
  * closure member; the product keeps unisa/peversion.py.
  */
 #include <stdint.h>

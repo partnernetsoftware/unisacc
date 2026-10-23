@@ -386,30 +386,30 @@ static char *extra[] = {
     "meta", "script-inventory-self", "-",
     /* inventory-derived: 作业入口测登记/构造器平价/队列/证据/身份或工具合同，不测单个编译阶段; tests/gate.sh:690 */
     "meta", "inventory-derived", "-",
-    /* unisa-peversion: gate注释具名image/PE/APE write/build参考点样本，不计目标执行; tests/gate.sh:724 */
-    "E6", "unisa-peversion", "build",
-    /* unisa-tape: gate注释具名Tape表示/编码/形状参考点样本，不计parse/type全阶段; tests/gate.sh:732 */
-    "E3", "unisa-tape", "meta",
-    /* unisa-tapebin: gate注释具名Tape表示/编码/形状参考点样本，不计parse/type全阶段; tests/gate.sh:733 */
-    "E3", "unisa-tapebin", "meta",
-    /* unisa-tapebin-shape: gate注释具名Tape表示/编码/形状参考点样本，不计parse/type全阶段; tests/gate.sh:734 */
-    "E3", "unisa-tapebin-shape", "meta",
-    /* unisa-image-fat: gate注释具名image/PE/APE write/build参考点样本，不计目标执行; tests/gate.sh:735 */
-    "E6", "unisa-image-fat", "build",
-    /* unisa-image-elf: gate注释具名image/PE/APE write/build参考点样本，不计目标执行; tests/gate.sh:736 */
-    "E6", "unisa-image-elf", "build",
-    /* unisa-image-macho: gate注释具名image/PE/APE write/build参考点样本，不计目标执行; tests/gate.sh:737 */
-    "E6", "unisa-image-macho", "build",
-    /* unisa-image-pe: gate注释具名image/PE/APE write/build参考点样本，不计目标执行; tests/gate.sh:738 */
-    "E6", "unisa-image-pe", "build",
-    /* unisa-ape: gate注释具名image/PE/APE write/build参考点样本，不计目标执行; tests/gate.sh:739 */
-    "E6", "unisa-ape", "build",
-    /* unisa-vm: gate注释vm run点程序执行参考，不计宿主文件/syscall闭包; tests/gate.sh:740 */
-    "E6", "unisa-vm", "meta",
+    /* k6-peversion: gate注释具名image/PE/APE write/build参考点样本，不计目标执行; tests/gate.sh:724 */
+    "E6", "k6-peversion", "build",
+    /* k6-tape: gate注释具名Tape表示/编码/形状参考点样本，不计parse/type全阶段; tests/gate.sh:732 */
+    "E3", "k6-tape", "meta",
+    /* k6-tapebin: gate注释具名Tape表示/编码/形状参考点样本，不计parse/type全阶段; tests/gate.sh:733 */
+    "E3", "k6-tapebin", "meta",
+    /* k6-tapebin-shape: gate注释具名Tape表示/编码/形状参考点样本，不计parse/type全阶段; tests/gate.sh:734 */
+    "E3", "k6-tapebin-shape", "meta",
+    /* k6-image-fat: gate注释具名image/PE/APE write/build参考点样本，不计目标执行; tests/gate.sh:735 */
+    "E6", "k6-image-fat", "build",
+    /* k6-image-elf: gate注释具名image/PE/APE write/build参考点样本，不计目标执行; tests/gate.sh:736 */
+    "E6", "k6-image-elf", "build",
+    /* k6-image-macho: gate注释具名image/PE/APE write/build参考点样本，不计目标执行; tests/gate.sh:737 */
+    "E6", "k6-image-macho", "build",
+    /* k6-image-pe: gate注释具名image/PE/APE write/build参考点样本，不计目标执行; tests/gate.sh:738 */
+    "E6", "k6-image-pe", "build",
+    /* k6-ape: gate注释具名image/PE/APE write/build参考点样本，不计目标执行; tests/gate.sh:739 */
+    "E6", "k6-ape", "build",
+    /* k6-vm: gate注释vm run点程序执行参考，不计宿主文件/syscall闭包; tests/gate.sh:740 */
+    "E6", "k6-vm", "meta",
     /* gold-label-prec: the prec net, frozen table weights/gold/prec.tsv vs rule form seed/gold_prec_label.c (W1-C; was unisa-gold-prec); not the whole stage */
     "E3", "gold-label-prec", "build",
-    /* unisa-emit-arm-nwmem: gate注释emit_arm指令字段/N/movimm/mem有限域，不计完整encode/reloc; tests/gate.sh:742 */
-    "E5", "unisa-emit-arm-nwmem", "lower",
+    /* k6-emit-arm-nwmem: gate注释emit_arm指令字段/N/movimm/mem有限域，不计完整encode/reloc; tests/gate.sh:742 */
+    "E5", "k6-emit-arm-nwmem", "lower",
     /* gold-label-lex: the lex net, frozen table weights/gold/lex.tsv vs rule form seed/gold_lex_label.c (W1-C; was unisa-gold-lex-label); not the whole stage */
     "E1", "gold-label-lex", "build",
     /* gold-label-type: the type net, frozen table weights/gold/type.tsv vs rule form seed/gold_type_label.c (W1-C; was unisa-gold-type-label); not the whole stage */
@@ -462,24 +462,24 @@ static char *extra[] = {
     "E2", "com-forceinclude", "E3",
     /* com-iquote: quoted include搜索顺序产品路径; tests/gate.sh:836 */
     "E2", "com-iquote", "meta",
-    /* unisa-bits: 共享MASK64/round_up叶子C参考对拍，未测单个流阶段; tests/unisabitscheck.sh:2–5; research/c41-k6-inventory-cut.md:146–152 */
-    "build", "unisa-bits", "-",
-    /* unisa-hostabi: 宿主桥指令常量TSV点采样的C参考迁移；未运行ABI桥; tests/unisahostabicheck.sh:2–5; unisa/emit_arm.py:130; unisa/emit_x86.py:472 */
-    "build", "unisa-hostabi", "-",
-    /* unisa-padded: Padded前缀/逻辑长度可观察值参考点采样; tests/unisapaddedcheck.sh:2–5; unisa/lower.py:156; unisa/image/__init__.py:55 */
-    "build", "unisa-padded", "-",
-    /* unisa-zdata: ZData段脚本操作/读写/copy_into参考迁移; tests/unisazdatacheck.sh:2–5; unisa/tape.py:13; unisa/lower.py:156 */
-    "build", "unisa-zdata", "-",
-    /* unisa-linalg: gemv/relu/argmax/margin有限样本C参考迁移; tests/unisalinalgcheck.sh:2–6; unisa/construct.py:26; unisa/oracle.py:16; unisa/control/net.py:14 */
-    "build", "unisa-linalg", "-",
-    /* unisa-libneed: scratch微incdir中guard/bodies/table/roots参考迁移; tests/unisalibneedcheck.sh:2–6; unisa/ckernel.py:172–189 */
-    "build", "unisa-libneed", "-",
-    /* unisa-uns1: 模型张量序列化dumps/loads/pad4参考迁移; tests/unisauns1check.sh:2–6; unisa/__main__.py:527–544; unisa/control/uns1.py:89,117 */
-    "build", "unisa-uns1", "-",
-    /* unisa-catalog: OS/ARCH/sysno/form/reg等目录事实C参考点采样; tests/unisacatalogcheck.sh:2–6; unisa/lower.py:11; unisa/emit_arm.py:40; unisa/gold.py:8 */
-    "build", "unisa-catalog", "-",
-    /* unisa-fp: op2/op3浮点运算位模式C参考迁移; tests/unisafpcheck.sh:2–6; unisa/front/lex.py:46; unisa/front/parse.py:1707; unisa/vm.py:8 */
-    "build", "unisa-fp", "-",
+    /* k6-bits: 共享MASK64/round_up叶子C参考对拍，未测单个流阶段; tests/k6/bits.tsv:2; research/c41-k6-inventory-cut.md:146–152 */
+    "build", "k6-bits", "-",
+    /* k6-hostabi: 宿主桥指令常量TSV点采样的C参考迁移；未运行ABI桥; tests/k6/hostabi.tsv:2; unisa/emit_arm.py:130; unisa/emit_x86.py:472 */
+    "build", "k6-hostabi", "-",
+    /* k6-padded: Padded前缀/逻辑长度可观察值参考点采样; tests/k6/padded.tsv:2; unisa/lower.py:156; unisa/image/__init__.py:55 */
+    "build", "k6-padded", "-",
+    /* k6-zdata: ZData段脚本操作/读写/copy_into参考迁移; tests/k6/zdata.tsv:2; unisa/tape.py:13; unisa/lower.py:156 */
+    "build", "k6-zdata", "-",
+    /* k6-linalg: gemv/relu/argmax/margin有限样本C参考迁移; tests/k6/linalg.tsv:2; unisa/construct.py:26; unisa/oracle.py:16; unisa/control/net.py:14 */
+    "build", "k6-linalg", "-",
+    /* k6-libneed: scratch微incdir中guard/bodies/table/roots参考迁移; tests/k6/libneed.tsv:2; unisa/ckernel.py:172–189 */
+    "build", "k6-libneed", "-",
+    /* k6-uns1: 模型张量序列化dumps/loads/pad4参考迁移; tests/k6/uns1.tsv:2; unisa/__main__.py:527–544; unisa/control/uns1.py:89,117 */
+    "build", "k6-uns1", "-",
+    /* k6-catalog: OS/ARCH/sysno/form/reg等目录事实C参考点采样; tests/k6/catalog.tsv:2; unisa/lower.py:11; unisa/emit_arm.py:40; unisa/gold.py:8 */
+    "build", "k6-catalog", "-",
+    /* k6-fp: op2/op3浮点运算位模式C参考迁移; tests/k6/fp.tsv:2; unisa/front/lex.py:46; unisa/front/parse.py:1707; unisa/vm.py:8 */
+    "build", "k6-fp", "-",
     /* gold-label-binsel: the binsel net, frozen table weights/gold/binsel.tsv vs rule form seed/gold_binsel_label.c (W1-C; was unisa-gold-binsel-label); not the whole stage */
     "E3", "gold-label-binsel", "build",
     /* gold-label-opinfo: the opinfo net, frozen table weights/gold/opinfo.tsv vs rule form seed/gold_opinfo_label.c (W1-C; was unisa-gold-opinfo-label); not the whole stage */

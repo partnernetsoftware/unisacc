@@ -110,26 +110,7 @@ job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
           exec-native-*) req='native-posix|host|cc|cdx|native-network-runtime';;
           seedgen-let-exit) req='native-posix|host|cc,python3|cdx2|seed-let-exit-byte-pair';;
           seedgen-opt) req='native-posix|host|cc,python3|cdx|seed-gen-opt-byte-pair';;
-          unisa-bits) req='native-posix|host|cc,python3|cdx|unisa-bits-byte-pair';;
-          unisa-hostabi) req='native-posix|host|cc,python3|cdx|unisa-hostabi-tsv-sample';;
-          unisa-peversion) req='native-posix|host|cc,python3|cdx|unisa-peversion-point-sample';;
-          unisa-padded) req='native-posix|host|cc,python3|cdx|unisa-padded-point-sample';;
-          unisa-zdata) req='native-posix|host|cc,python3|cdx|unisa-zdata-script-sample';;
-          unisa-linalg) req='native-posix|host|cc,python3|cdx|unisa-linalg-point-sample';;
-          unisa-libneed) req='native-posix|host|cc,python3|cdx|unisa-libneed-point-sample';;
-          unisa-uns1) req='native-posix|host|cc,python3|cdx|unisa-uns1-point-sample';;
-          unisa-catalog) req='native-posix|host|cc,python3|cdx|unisa-catalog-point-sample';;
-          unisa-fp) req='native-posix|host|cc,python3|cdx|unisa-fp-point-sample';;
-          unisa-tape) req='native-posix|host|cc,python3|cdx|unisa-tape-point-sample';;
-          unisa-tapebin) req='native-posix|host|cc,python3|cdx|unisa-tapebin-point-sample';;
-          unisa-tapebin-shape) req='native-posix|host|cc,python3|cdx|unisa-tapebin-shape-point-sample';;
-          unisa-image-fat) req='native-posix|host|cc,python3|cdx|unisa-image-fat-point-sample';;
-          unisa-image-elf) req='native-posix|host|cc,python3|cdx|unisa-image-elf-point-sample';;
-          unisa-image-macho) req='native-posix|host|cc,python3|cdx|unisa-image-macho-point-sample';;
-          unisa-image-pe) req='native-posix|host|cc,python3|cdx|unisa-image-pe-point-sample';;
-          unisa-ape) req='native-posix|host|cc,python3|cdx|unisa-ape-point-sample';;
-          unisa-vm) req='native-posix|host|cc,python3|cdx|unisa-vm-point-sample';;
-          unisa-emit-arm-nwmem) req='native-posix|host|cc,python3|cdx|unisa-emit-arm-nwmem-point-sample';;
+          k6-*) req='native-posix|host|cc|cdx|k6-frozen-point-sample';;
           seedgen-pp-1|seedgen-pp-2) req='native-posix|host|cc,python3|cdx|seed-gen-pp-byte-pair';;
           seedgen-ppconsumer-1-*|seedgen-ppconsumer-2-*) req='native-posix|host|cc,python3|cdx|seed-gen-pp-consumer';;
           seedgen-ppchain-1|seedgen-ppchain-1-*|seedgen-ppchain-2|seedgen-ppchain-3) req='native-posix|host|cc,python3|cdx|seed-gen-pp-chain';;
@@ -984,27 +965,12 @@ job seedparse2-key ./tests/seedparse2check.sh --key-selftest   # 0.0.43: the par
 job seedgen ./tests/seedgencheck.sh e2 e1 e3 e4 o1 prune nativeabi enc-elf enc-macho enc-pe arm-elf arm-macho arm-pe
 job seedgen-2 ./tests/seedgencheck.sh lower-lnx-x lower-lnx-a lower-osx-x lower-osx-a lower-win-x lower-win-a obj-lower-x obj-lower-a obj-enc-x obj-enc-a
 job seedgen-opt sh ./tests/seedoptcheck.sh   # 0.0.40 K5-1 (机房主任 23:36/23:41): opt seed/gen.c = gen.py, scratch tree only
-job unisa-bits sh ./tests/unisabitscheck.sh   # 0.0.41 K6-1: unisa.bits C ref vs bits.py byte-pair; keep Python
-job unisa-hostabi sh ./tests/unisahostabicheck.sh   # 0.0.41 K6-2: unisa.hostabi C ref vs hostabi.py on the TSV (point sample); keep Python
-job unisa-peversion sh ./tests/unisapeversioncheck.sh   # 0.0.41 K6-3: unisa.peversion C ref vs peversion.py on sampled PE heads (point sample); keep Python
-job unisa-padded sh ./tests/unisapaddedcheck.sh   # 0.0.41 K6-4: unisa.padded.Padded C ref vs padded.py observable values (point sample; ZData is K6-4b); keep Python
-job unisa-zdata sh ./tests/unisazdatacheck.sh   # 0.0.41 K6-4b: unisa.padded.ZData C ref vs padded.py on scripted op sequences (point sample); keep Python
-job unisa-linalg sh ./tests/unisalinalgcheck.sh   # 0.0.41 K6-5: unisa.linalg gemv/relu/argmax/margin C ref vs linalg.py (point sample); keep Python
-job unisa-libneed sh ./tests/unisalibneedcheck.sh   # 0.0.41 K6-6: unisa.libneed consts/guard/bodies/table/roots C ref vs libneed.py on scratch micro incdir (point sample); keep Python
-job unisa-uns1 sh ./tests/unisauns1check.sh   # 0.0.41 K6-7: unisa.control.uns1 dumps/loads/pad4 C ref vs uns1.py (point sample; i8+f32; q4/q2/f16 out of scope); keep Python
-job unisa-catalog sh ./tests/unisacatalogcheck.sh   # 0.0.41 K6-8: unisa.catalog OS/ARCH/TARGETS + sampled sysno/form/symbol/gate/argregs C ref vs catalog.py (point sample; full table is K6-8b); keep Python
-job unisa-fp sh ./tests/unisafpcheck.sh   # 0.0.41 K6-9: unisa.fp op3/op2 (binary64/32 arithmetic, compares, conversions, sqrt) C ref vs fp.py (point sample; dec_to_f32 out of C domain); keep Python
-job unisa-tape sh ./tests/unisatapecheck.sh   # 0.0.41 K6-10: unisa.tape build/emit/string/to_text/to_canonical_text + parse round trips C ref vs tape.py (point sample; not gold/vm/layout); keep Python
-job unisa-tapebin sh ./tests/unisatapebincheck.sh   # 0.0.41 K6-11: unisa.tapebin encode/decode (canonical LEB128, pools, sections, SHA-256 digest, target_id, check_origin) C ref vs tapebin.py (point sample; tapebin_shape out of scope); keep Python
-job unisa-tapebin-shape sh ./tests/unisatapebinshapecheck.sh   # 0.0.41 K6-11b: unisa.tapebin_shape render/records/c (71 opcodes incl. fp) C ref vs tapebin_shape.py, read-only against docs/*.tsv and src/tapebin_shape.inc; no --write; keep Python
-job unisa-image-fat sh ./tests/unisaimagefatcheck.sh   # 0.0.41 K6-12: unisa.image.fat write() (fat header, descriptors, page-aligned slices) C ref vs fat.py (point sample; elf/macho/pe/ape out of scope); keep Python
-job unisa-image-elf sh ./tests/unisaimageelfcheck.sh   # 0.0.41 K6-13: unisa.image.elf static write() (ELF64 header, two PT_LOAD, page-aligned data, signed entry) C ref vs elf.py (point sample; dynamic=True not claimed; macho/pe/ape out of scope); keep Python
-job unisa-image-macho sh ./tests/unisaimagemachocheck.sh   # 0.0.41 K6-14: unisa.image.macho write() (Mach-O 64 load commands, DYLD_INFO binds, ad-hoc SuperBlob with per-page SHA-256) C ref vs macho.py (point sample; not loadable/codesign closure; pe/ape out of scope); keep Python
-job unisa-image-pe sh ./tests/unisaimagepecheck.sh   # 0.0.41 K6-15: unisa.image.pe write() static path (stub empty, dynamic False: PE32+ headers, import section, load config, .reloc) C ref vs pe.py (point sample; dynamic/stub/ape not claimed); keep Python
-job unisa-ape sh ./tests/unisaapecheck.sh   # 0.0.41 K6-16: unisa.ape build() script/two-pass layout, gzip Unix members (zlib), PE stub split, UNIPKG1 payload trailer; fixture compile_target (not a product target; not loadable/multi-platform); keep Python
-job unisa-vm sh ./tests/unisavmcheck.sh   # 0.0.41 K6-17: unisa.vm run() point programs (integer arithmetic and div/mod, shifts, loop/call/ret, store/load, print gate clobber, halts 124/136/139, narrow ld/st) C ref vs vm.py (point sample; not full opcode sweep; no syscall/file closure); keep Python
+# 0.0.41 K6 C references seed/unisa_*.c (18 + libneed and tapebin-shape, which W3-E/W3-D promote to generators):
+# one generic runner over frozen tables (2026-10-23, unisa/ detach W1-D).  tests/k6/NAME.tsv was captured from the old
+# tests/unisa*check.sh harness while its Python side was live (every call byte-equal to it; scope and identity in the
+# table header); the reference is built with host cc and every recorded call must reproduce rc, stdout, stderr, files.
+for k6n in bits hostabi peversion padded zdata linalg libneed uns1 catalog fp tape tapebin tapebin-shape image-fat image-elf image-macho image-pe ape vm emit-arm-nwmem; do job k6-$k6n tests/bound 58 sh ./tests/cxbin tests/k6frozen.cx $k6n; done
 job gold-label-prec tests/bound 58 sh ./tests/cxbin tests/goldlabelcheck.cx prec   # W1-C (2026-10-23): frozen weights/gold/prec.tsv (total over its #field domains) == seed/gold_prec_label.c table, compiled by unisacc.com; call points per label + refusals; was K6-18 unisa-gold-prec (C ref vs gold.py)
-job unisa-emit-arm-nwmem sh ./tests/unisaemitarmnwmemcheck.sh   # 0.0.41 K6-19: unisa.emit_arm N/w/movimm/mem legal domain (scaled, unscaled, sp, IP0 far path) + refusal points, C ref vs emit_arm.py (point sample; no encode/reloc/WinAPI/fp); keep Python
 job gold-label-lex tests/bound 58 sh ./tests/cxbin tests/goldlabelcheck.cx lex   # W1-C (2026-10-23): frozen weights/gold/lex.tsv (total over its #field domains) == seed/gold_lex_label.c table, compiled by unisacc.com; call points per label + refusals; was K6-20 unisa-gold-lex-label (C ref vs gold.py)
 job gold-label-type tests/bound 58 sh ./tests/cxbin tests/goldlabelcheck.cx type   # W1-C (2026-10-23): frozen weights/gold/type.tsv (total over its #field domains) == seed/gold_type_label.c table, compiled by unisacc.com; call points per label + refusals; was K6-21 unisa-gold-type-label (C ref vs gold.py)
 job gold-label-binsel tests/bound 58 sh ./tests/cxbin tests/goldlabelcheck.cx binsel   # W1-C (2026-10-23): frozen weights/gold/binsel.tsv (total over its #field domains) == seed/gold_binsel_label.c table, compiled by unisacc.com; call points per label + refusals; was K6-22 unisa-gold-binsel-label (C ref vs gold.py)

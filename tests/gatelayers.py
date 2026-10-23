@@ -70,12 +70,12 @@ exec-librarycallback-wiring-prepare
 exec-librarycallsite-reader-model exec-librarycallsitelower-model-1 exec-librarycallsitelower-model-2 exec-librarycallsitelower-model-3 exec-librarycallsitelower-model-4 exec-librarytypedlower-model-1 exec-librarytypedlower-model-2 exec-librarytypedlower-model-3 exec-librarytypedlower-model-4 exec-libraryfn-model exec-librarydata-model exec-libraryfunctionimports-model exec-librarytypedreader-model exec-librarypartition-model strconvert-host libneed apps-structure seed-construct seedfacts seedparse2-1 seedparse2-2 seed-matrix-shared
 seed-matrix-shared-prepare seed-matrix-shared-e2 seed-matrix-shared-e1 seed-matrix-shared-e3 seed-matrix-shared-e4 seed-matrix-shared-o1 seed-matrix-shared-prune seed-matrix-shared-nativeabi
 seed-matrix-object seedgen seedgen-let-exit copy-contract ri-snapshot-overlay ri-snapshot-core seedape seedpack exec-bridge-linux warn diag target-package prevheaders
-unisa-bits unisa-hostabi unisa-peversion unisa-padded unisa-zdata unisa-linalg unisa-libneed unisa-uns1
-unisa-catalog unisa-fp unisa-tape unisa-tapebin unisa-tapebin-shape unisa-image-fat unisa-image-elf
-unisa-image-macho unisa-image-pe unisa-ape unisa-vm unisa-emit-arm-nwmem
+k6-bits k6-hostabi k6-peversion k6-padded k6-zdata k6-linalg k6-libneed k6-uns1
+k6-catalog k6-fp k6-tape k6-tapebin k6-tapebin-shape k6-image-fat k6-image-elf
+k6-image-macho k6-image-pe k6-ape k6-vm k6-emit-arm-nwmem
 gold-label-prec gold-label-lex gold-label-type gold-label-binsel gold-label-opinfo gold-label-peep gold-label-scope
 gold-label-pp gold-label-reloc gold-label-irsel gold-label-parse
-""".split())   # c42: the 0.0.41 K6 C-reference vs Python point-sample checks: one subsystem each, not a route or target; gold-label-*: one label net each (W1-C)
+""".split())   # c42: the 0.0.41 K6 C-reference checks (k6-*: frozen tables since W1-D): one subsystem each, not a route or target; gold-label-*: one label net each (W1-C)
 STAGE_PREFIX = ("tapecheck-model-", "exec-", "lib-", "rowcov-", "seed-construct-", "seed-matrix-features-",
                 "warn-", "diag-", "referee-", "shared-e2-", "seedgen-")
 
