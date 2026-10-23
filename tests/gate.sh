@@ -348,7 +348,8 @@ job exec-lexloc tests/bound 58 sh ./unisacc.com -run exec/lex/locationcheck.cx t
 job exec-f1-sidecar tests/bound 58 sh ./unisacc.com -run exec/lex/f1sidecarcheck.cx tests/cxlib/lexdelta.cx   # (.cx port, 2026-10-23) constructor/destructor mark framing
 job exec-objectplan python3 ./tests/objectplancheck.py         # ordered ELF symbol plan
 job exec-objectpack python3 ./tests/objectpackcheck.py         # target-scoped route declarations
-job exec-modelobject python3 ./tests/modelobjectcheck.py       # two ELF architectures against C reference
+for part in reference runtime x86_64-prune x86_64-lower x86_64-elf arm64-prune arm64-lower arm64-elf; do job exec-modelobject-prepare-$part sh ./tests/cxbin tests/modelobjectprepared.cx --prepare --part "$part"; done   # preparation only; no dependency ordering is inferred from this declaration
+job exec-modelobject sh ./tests/cxbin tests/modelobjectcheck.cx   # two ELF architectures against C reference; all six network checks and 22 object comparisons execute
 job exec-objectfacts python3 ./tests/objectfactscheck.py       # object tape facts in delta
 job exec-elfobject python3 ./tests/elfobjectdeltacheck.py        # independent ET_REL layout oracle
 job exec-unitparse sh ./tests/unitparsecheck.sh              # separate-unit delta and network parity

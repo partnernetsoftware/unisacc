@@ -48,7 +48,7 @@ static char *rules[] = {
              " exec-multi-* multi fb12-multi realprog luatests* sqlspeed* minicon apps-* bigclosure",
     "lib", "lib-*",
     "build", "host-triple-* seed* exec-*self* exec-selfprep-* exec-bootstrap-* nativeboot-* comboot-* exec-driver-*"
-             " exec-tableself exec-prepare-* exec-chain-model-prepare",
+             " exec-tableself exec-prepare-* exec-chain-model-prepare exec-modelobject-prepare-*",
     0
 };
 /* Exact additions are the sole stage records for formerly unclassified suites.

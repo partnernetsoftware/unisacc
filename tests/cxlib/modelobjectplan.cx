@@ -1,0 +1,80 @@
+/* Model-object recipe reader; uses cxlib.seedprep.
+ * This is a data reader/argv binder, not an attesting producer. It never runs a
+ * constructor, copies artifacts, publishes manifests or claims a cache HIT.
+ * mo_plan(path, part, root, work, cc, python) returns ordered steps:
+ * [{label, outputs:[leaf...], argv:[word...], limit:30}, ...].
+ * The seedprep producer hashes this file + TSV as actors, uses the same
+ * basis for all parts, and publishes only verified per-part/final manifests.
+ */
+#pragma unisa module modelobjectplan
+#pragma unisa use seedprep
+static void mo_bad(const char *s) { sp_raise_line(s); }
+int mo_part(const char *s) {
+    static const char *const names[]={"reference","runtime","x86_64-prune","x86_64-lower","x86_64-elf","arm64-prune","arm64-lower","arm64-elf",0};
+    int i;for(i=0;names[i];i++)if(!strcmp(s,names[i]))return 1;return 0;
+}
+static char *mo_bind(const char *s,const char *root,const char *work,const char *cc,const char *python) {
+    if(!strcmp(s,"{CC}"))return sp_xstrdup("cc");
+    if(!strcmp(s,"{PYTHON}"))return sp_xstrdup(python);
+    if(!strncmp(s,"{ROOT}/",7))return sp_pjoin(root,s+7);
+    if(!strncmp(s,"{WORK}/",7))return sp_pjoin(work,s+7);
+    if(strchr(s,'{')||strchr(s,'}'))mo_bad("ValueError: unrecognised modelobject recipe placeholder");
+    return sp_xstrdup(s);
+}
+static sp_json *mo_strings(const char *text,int output) {
+    size_t i;sp_json *v=sp_jloads(text,strlen(text));
+    if(!v||v->t!=SP_JARR||!v->n)mo_bad("ValueError: modelobject recipe needs nonempty string array");
+    for(i=0;i<(size_t)v->n;i++) {
+        sp_json *s=v->v[i];
+        if(s->t!=SP_JSTR||!s->sn||memchr(s->s,0,s->sn))mo_bad("ValueError: invalid modelobject recipe word");
+        if(output&&(strchr(s->s,'/')||strchr(s->s,'\\')||strstr(s->s,"..")))mo_bad("ValueError: non-leaf modelobject output");
+    }
+    return v;
+}
+sp_json *mo_plan(const char *path,const char *part,const char *root,const char *work,const char *cc,const char *python) {
+    char *text,*line,*next;size_t n;int rows=0,selected=0,counts[8]={0};sp_json *plan=sp_jnew(SP_JARR),*seen=sp_jnew(SP_JARR);
+    const char *header="part\tstep\toutputs_json\targv_json\tlimit";
+    if(!mo_part(part)||!root||root[0]!='/'||!work||work[0]!='/'||!cc||cc[0]!='/'||!python||python[0]!='/')mo_bad("ValueError: modelobject part and absolute tool paths required");
+    text=sp_read_text(path,&n);if(!text)sp_crash();
+    if(memchr(text,0,n))mo_bad("ValueError: NUL in modelobject recipe table");
+    line=text;next=strchr(line,'\n');if(!next)mo_bad("ValueError: no modelobject recipe header");
+    *next=0;if(strcmp(line,header))mo_bad("ValueError: wrong modelobject recipe header");line=next+1;
+    while(*line) {
+        char *f[5],*p;int k,i,j;sp_json *outputs,*argv,*row,*bound;
+        next=strchr(line,'\n');if(next)*next=0;
+        if(!*line||strchr(line,'\r'))mo_bad("ValueError: blank or CR recipe row");
+        f[0]=line;p=line;
+        for(k=1;k<5;k++){p=strchr(p,'\t');if(!p)mo_bad("ValueError: short modelobject recipe row");*p++=0;f[k]=p;}
+        if(strchr(f[4],'\t')||!mo_part(f[0])||!*f[1]||strcmp(f[4],"30"))mo_bad("ValueError: malformed modelobject recipe row");
+        outputs=mo_strings(f[2],1);argv=mo_strings(f[3],0);rows++;
+        {
+          static const char *const parts[]={"reference","runtime","x86_64-prune","x86_64-lower","x86_64-elf","arm64-prune","arm64-lower","arm64-elf"};
+          static const char *const labels[]={"json","table","network"},*const suffix[]={".json",".tbl",".net"};
+          int pi=0,step;char *expected;
+          while(pi<8&&strcmp(f[0],parts[pi]))pi++;
+          if(pi==8)mo_bad("ValueError: unknown recipe part");step=counts[pi]++;
+          if(pi<2){
+            if(step||strcmp(f[1],pi?"build-run":"build-ref")||outputs->n!=(pi?1:2)||strcmp(outputs->v[0]->s,pi?"run":"ref.c")||(!pi&&strcmp(outputs->v[1]->s,"ref")))mo_bad("ValueError: wrong singleton recipe graph");
+          }else{
+            if(step>=3||strcmp(f[1],labels[step])||outputs->n!=1)mo_bad("ValueError: wrong JSON/table/network recipe graph");
+            expected=sp_cat(parts[pi],suffix[step]);if(strcmp(outputs->v[0]->s,expected))mo_bad("ValueError: wrong model output name");free(expected);
+          }
+        }
+        for(i=0;i<outputs->n;i++) {
+            for(j=0;j<seen->n;j++)if(!strcmp(outputs->v[i]->s,seen->v[j]->s))mo_bad("ValueError: duplicate modelobject output");
+            sp_apush(seen,sp_jstr(outputs->v[i]->s));
+        }
+        if(!strcmp(f[0],part)) {
+            selected++;row=sp_jnew(SP_JOBJ);bound=sp_jnew(SP_JARR);
+            for(i=0;i<argv->n;i++){char *s=mo_bind(argv->v[i]->s,root,work,cc,python);sp_apush(bound,sp_jstr(s));free(s);}
+            sp_oset(row,"label",sp_jstr(f[1]));sp_oset(row,"outputs",outputs);sp_oset(row,"argv",bound);
+            sp_oset(row,"limit",sp_jloads("30",2));sp_apush(plan,row);
+        }
+        if(!next)break;line=next+1;
+    }
+    free(text);
+    {int i;for(i=0;i<8;i++)if(counts[i]!=(i<2?1:3))mo_bad("ValueError: incomplete per-part recipe graph");}
+    /* Exact recipe graph: 2 singleton builds + six JSON/table/network triples. */
+    if(rows!=20||seen->n!=21||selected!=(!strcmp(part,"reference")||!strcmp(part,"runtime")?1:3))mo_bad("ValueError: incomplete modelobject recipe graph");
+    return plan;
+}

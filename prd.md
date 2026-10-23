@@ -685,3 +685,9 @@ source-only 冷准备在原 55 秒看门狗内实际成功；具名 gate 的冷�
 - 2026-10-24 cxbin 缓存闭包缺口：原键仅绑定主 .cx 和头文件，未绑定 use 模块正文，直接或传递模块正文修改可错误复用旧二进制。以原产品 -cx-plan 枚举全部编译单元，逐个绑定实际文件完整 SHA256；计划、缺失文件和哈希失败均拒绝。保留 safedel 的系统 cc bootstrap，不依赖产品计划；不改核心或 F6 产品。
 
 - 2026-10-24 新增 exec-chain-model-prepare 的全量枚举实际1120项、CONTRACT188项；gatelayers --check 实际红因 stagemap 漏映射。该项仅构造默认模型输入，精确归现 build 轴；五分片完整对拍仍归 chain。只增加一个精确名，不扩通配或改层级口径；原红与stderr保留，重新实际 gate-layers 验收。
+
+- 2026-10-24 modelobject 原 Python 闸拟由自有 .cx 消费者替换，保留两架构、unit/whole 的22对象逐字节比较与六网络全域校验；八份构造输入独立预建，不缓存通过结论。只有独立原配方21项字节证明、负控和新索引实跑全部完成后才落地。原 .py 保留完整字节和SHA移入 out/retired-source 后从跟踪运行域退役，非改后缀冒充移植；原冷40超时仍保留。构造仍调用旧生成器，只记消费者/包装迁移，未宣称完全脱离解释器。
+
+- modelobject 首次derive真实拒绝：把原配方对拍脚本复制为新增research执行器会新增18个解释器调用点。撤销该新增执行器跟踪、将副本原字节保留out，仅提交原路径与SHA、真实执行日志；不改后缀、不改扫描规则。原消费者退出本身应自然下降，以下以重新derive真实结果为准。
+
+- modelobject 首次14项索引闸13绿，消费者内命令30s红；同index随后直接bound40热跑22对象0。实际-cx-plan与cxbin trace证实：相对准备入口与消费者绝对入口的三单元路径/缓存键不同，导致消费者重复冷编译。sp_init只设ROOT不chdir；sp_spawn子进程会chdir ROOT。最小修复显式checked chdir(ROOT)，准备源统一相对tests/modelobjectprepared.cx，保持绝对wrapper、完整路径/文件SHA闭包及30s预算；不能仅用热0当修复，重新八份独立构造/21cmp和14项闸。

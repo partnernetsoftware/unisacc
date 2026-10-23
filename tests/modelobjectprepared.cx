@@ -1,0 +1,198 @@
+#!/usr/bin/env -S unisacc.com -run
+/* Eight-part preparation and verified 21-file materialization.
+ * Constructors retain original30s, caller outer55. Cache is preparation only.
+ * Common source/header/actors/tool/environment basis is shared across all parts.
+ * Runtime argv retains literal cc, with PATH lookup and real entity both bound.
+ */
+#pragma unisa use cxlib.seedprep
+#pragma unisa use cxlib.modelobjectplan
+#define MO_SELF "tests/modelobjectprepared.cx"
+static const char *const MO_SEEDS[]={MO_SELF,"tests/modelobject-prep.tsv","tests/modelobjectcheck.cx","tests/cxlib/modelobjectplan.cx","tests/cxlib/netpack.cx","tests/cxlib/seedprep.cx","tests/build_ref.sh","tests/export_ref.sh","tests/refshim.h","tests/reffoot.h","exec/c/run.c","exec/c/pack.py","exec/build/gen.py","exec/c/tbl.py","exec/c/net.py","tests/bound","tests/bound.c","tests/cxbin","tests/safedel.cx",0};
+static const char *const MO_ENV[]={"PATH","CC","CFLAGS","CPPFLAGS","LDFLAGS","CPATH","C_INCLUDE_PATH","CPLUS_INCLUDE_PATH","OBJC_INCLUDE_PATH","LIBRARY_PATH","COMPILER_PATH","GCC_EXEC_PREFIX","SOURCE_DATE_EPOCH","PYTHONPATH","PYTHONHOME","PYTHONHASHSEED","PYTHONPYCACHEPREFIX","PYTHONUSERBASE","LD_LIBRARY_PATH","LD_PRELOAD","LD_AUDIT","LANG","LC_ALL","LC_CTYPE","TZ","TMPDIR","TMP","TEMP",0};
+static const char *const MO_PARTS[]={"reference","runtime","x86_64-prune","x86_64-lower","x86_64-elf","arm64-prune","arm64-lower","arm64-elf",0};
+static const char *MO_PART;static char *MO_CC,*MO_PY,*MO_FLIGHT,*MO_WORK,*MO_PROBE,*MO_CACHE,*MO_BASE;static int MO_PREP;
+static const char *MO_REQUIRED[16],*MO_EXECS[3];static sp_json *MO_PLAN;
+static void mo_cleanup(void){if(MO_FLIGHT){struct stat st;char *p=MO_FLIGHT;MO_FLIGHT=0;sp_scratch_forget();if(!lstat(p,&st))sp_rmtree(p);else if(errno!=ENOENT)fprintf(stderr,"modelobject: cannot inspect flight cleanup: %s\n",p);}}
+static void mo_need(const char *s){fflush(stdout);fprintf(stderr,"NEED_PREPARE modelobject: %s\n",s);mo_cleanup();exit(75);}
+static void mo_hook(const char *c,const char *m){(void)c;mo_need(m);}
+static void mo_assert(int b,const char *s){if(!b)mo_need(s);}
+static char *mo_sha(const char *p){char h[65];if(sp_sha_file(p,h))sp_crash();return sp_xstrdup(h);}
+static const char *const *mo_required(void){return MO_REQUIRED;}
+static const char *const *mo_execs(void){return MO_EXECS;}
+static void mo_select(const char *part){
+ int i,j,k=0;MO_PART=part;
+ MO_PLAN=mo_plan(sp_pjoin(sp_root(),"tests/modelobject-prep.tsv"),part,sp_root(),MO_WORK,MO_CC,MO_PY);
+ for(i=0;i<MO_PLAN->n;i++){sp_json *o=sp_getitem(MO_PLAN->v[i],"outputs");for(j=0;j<o->n;j++)MO_REQUIRED[k++]=o->v[j]->s;}
+ for(i=0;i<MO_PLAN->n;i++){const char *label=sp_getitem(MO_PLAN->v[i],"label")->s;MO_REQUIRED[k++]=sp_cat(label,".receipt.json");}
+ MO_REQUIRED[k]=0;MO_EXECS[0]=!strcmp(part,"reference")?"ref":!strcmp(part,"runtime")?"run":0;MO_EXECS[1]=0;
+}
+static void mo_step(const char *label,char **cmd){
+    char *a[24],*log=sp_pjoin(MO_WORK,sp_cat(label,".log"));int i,k=0,fd,rc;double start=sp_now();sp_json *row=sp_jnew(SP_JOBJ),*args=sp_jnew(SP_JARR);sp_buf out={0,0,0};
+    a[k++]=sp_pjoin(sp_root(),"tests/bound");a[k++]="30";
+    for(i=0;cmd[i];i++){mo_assert(k<23,"constructor argv too long");a[k++]=cmd[i];sp_apush(args,sp_jstr(cmd[i]));}a[k]=0;
+    fd=open(log,O_WRONLY|O_CREAT|O_EXCL,0600);if(fd<0){sp_throw_os(errno,log);sp_crash();}
+    rc=sp_call(a,fd,-2,0);if(close(fd)){sp_throw_os(errno,log);sp_crash();}
+    sp_oset(row,"label",sp_jstr(label));sp_oset(row,"argv",args);
+    {char n[32];sp_json *r;snprintf(n,sizeof n,"%d",rc);r=sp_jloads(n,strlen(n));sp_oset(row,"rc",r);}
+    {sp_json *f=sp_jnew(SP_JFLOAT);f->f=sp_now()-start;sp_oset(row,"seconds",f);}
+    sp_oset(row,"log_sha256",sp_jstr(mo_sha(log)));sp_jdump(&out,row,0,1);sp_bch(&out,'\n');
+    fprintf(stderr,"MODEL_PREP_STEP %s",out.s);
+    {char *p=sp_pjoin(MO_WORK,sp_cat(label,".receipt.json"));if(cx_write(p,out.s,out.n))mo_need("cannot write step receipt");}
+    if(rc){size_t n;char *s=sp_read_file(log,&n);if(s)fwrite(s,1,n,stderr);sp_exit(rc);}
+}
+static sp_json *mo_cc_version(const char *cc){
+    char *a[]={(char *)cc,"--version",0},*o=0,*e=0;size_t on=0,en=0;int rc=sp_spawn(a,5,&o,&on,&e,&en);sp_json *v=sp_jnew(SP_JOBJ);
+    mo_assert(!rc,"cc --version failed");sp_oset(v,"stdout",sp_jstrn(o,on));sp_oset(v,"stderr",sp_jstrn(e,en));free(o);free(e);return v;
+}
+/* Normalise ONLY the transient generated source role; retain every system header
+   absolute path/resolution/hash and every command word/flag otherwise. */
+static sp_json *mo_headers(const char *cc,int reference){
+    sp_json *raw,*norm,*files,*dest,*cmds,*commands;char *rf[]={"-w","-std=c99","-O2",0};char *rr[]={"-O2",0};const char *src=reference?MO_PROBE:sp_pjoin(sp_root(),"exec/c/run.c");int i,j;
+    if(sp_cc_read_set(cc,src,reference?rf:rr,&raw))sp_crash();
+    /* The helper canonicalises cc; prove its dependency result equals the
+       actual original literal-cc invocation before trusting that read set. */
+    {
+      char *a[16],*b[16],*ao=0,*ae=0,*bo=0,*be=0;size_t an,en,bn,ben;int k=0,r1,r2;char **f=reference?rf:rr;
+      a[k++]="cc";for(i=0;f[i];i++)a[k++]=f[i];a[k++]="-M";a[k++]="-MT";a[k++]="__checklib_readset__";a[k++]=(char *)src;a[k]=0;
+      for(i=0;i<=k;i++)b[i]=a[i];b[0]=sp_realpath_ns(cc);
+      r1=sp_spawn(a,30,&ao,&an,&ae,&en);r2=sp_spawn(b,30,&bo,&bn,&be,&ben);
+      mo_assert(!r1&&!r2&&an==bn&&en==ben&&!memcmp(ao,bo,an)&&!memcmp(ae,be,en),"cc invocation/canonical dependency scans differ");
+      free(ao);free(ae);free(bo);free(be);
+      /* Record the actual compiler argv alongside the proven resolved helper. */
+      {sp_json *v=sp_jnew(SP_JARR);for(i=0;a[i];i++)sp_apush(v,sp_jstr(reference&&!strcmp(a[i],MO_PROBE)?"{GENERATED_REF}":a[i]));sp_oset(raw,"actual_cc_argv",v);}
+    }
+    if(!reference)return raw;
+    norm=sp_jnew(SP_JOBJ);files=sp_getitem(raw,"files");dest=sp_jnew(SP_JOBJ);
+    for(i=0;i<raw->n;i++)if(strcmp(raw->k[i],"files")&&strcmp(raw->k[i],"commands"))sp_oset(norm,raw->k[i],raw->v[i]);
+    for(i=0;i<files->n;i++){
+        sp_json *f=files->v[i],*r=sp_getitem(f,"resolved");
+        if(!strcmp(r->s,MO_PROBE)) {sp_json *g=sp_jnew(SP_JOBJ);sp_oset(g,"resolved",sp_jstr("{GENERATED_REF}"));sp_oset(g,"sha256",sp_getitem(f,"sha256"));sp_oset(dest,"{GENERATED_REF}",g);}
+        else sp_oset(dest,files->k[i],f);
+    }
+    mo_assert(sp_getitem(dest,"{GENERATED_REF}")!=0,"generated source omitted from header scan");
+    cmds=sp_getitem(raw,"commands");commands=sp_jnew(SP_JARR);
+    for(i=0;i<cmds->n;i++){sp_json *a=sp_jnew(SP_JARR);for(j=0;j<cmds->v[i]->n;j++){const char *s=cmds->v[i]->v[j]->s;sp_apush(a,sp_jstr(!strcmp(s,MO_PROBE)?"{GENERATED_REF}":s));}sp_apush(commands,a);}
+    sp_oset(norm,"files",dest);sp_oset(norm,"commands",commands);return norm;
+}
+static sp_json *mo_basis(void){
+    sp_json *b=sp_jnew(SP_JOBJ),*actors,*edges,*env=sp_jnew(SP_JOBJ),*host=sp_jnew(SP_JARR),*cc=sp_jnew(SP_JOBJ);int i;char *which=sp_which("cc"),*entity;extern char **environ;
+    mo_assert(which!=0,"cc unavailable");entity=sp_realpath_ns(which);
+    sp_actor_closure(MO_SEEDS,&actors,&edges);
+    mo_assert(sp_getitem(actors,MO_SELF)&&sp_getitem(actors,"tests/cxlib/seedprep.cx")&&sp_getitem(actors,"tests/modelobject-prep.tsv"),"producer actor closure incomplete");
+    sp_oset(b,"schema",sp_jstr("modelobject-common-native-v2"));
+    sp_oset(b,"sources",sp_jstr(sp_source_digest()));sp_oset(b,"actors",actors);sp_oset(b,"actor_edges",edges);
+    sp_oset(cc,"resolved",sp_jstr(entity));sp_oset(cc,"sha256",sp_jstr(mo_sha(entity)));sp_oset(cc,"version",mo_cc_version(entity));sp_oset(cc,"invocation_version",mo_cc_version("cc"));sp_oset(b,"compiler",cc);
+    sp_oset(cc,"invocation",sp_jstr("cc"));sp_oset(cc,"path_lookup",sp_jstr(which));
+    sp_oset(b,"reference_header_readset",mo_headers(which,1));sp_oset(b,"runtime_header_readset",mo_headers(which,0));
+    sp_oset(b,"interpreter",sp_jstr(sp_realpath_ns(sp_python())));sp_oset(b,"interpreter_sha256",sp_jstr(mo_sha(sp_realpath_ns(sp_python()))));
+    sp_apush(host,sp_jstr(sp_uname_field("-s")));sp_apush(host,sp_jstr(sp_uname_field("-m")));sp_oset(b,"host",host);
+    for(i=0;MO_ENV[i];i++){const char *v=getenv(MO_ENV[i]);sp_oset(env,MO_ENV[i],v?sp_jstr(v):sp_jnew(SP_JNULL));}
+    for(i=0;environ[i];i++){
+        const char *eq=strchr(environ[i],'=');static const char *const prefixes[]={"UNISA_","UNISACC_","E1","E2","E3","E4","SEED_","DYLD_",0};int j;
+        if(!eq)continue;
+        if((size_t)(eq-environ[i])==strlen("UNISACC_BOUND_DEADLINE_MONO")&&!memcmp(environ[i],"UNISACC_BOUND_DEADLINE_MONO",strlen("UNISACC_BOUND_DEADLINE_MONO")))continue;
+        for(j=0;prefixes[j];j++)if((size_t)(eq-environ[i])>=strlen(prefixes[j])&&!strncmp(environ[i],prefixes[j],strlen(prefixes[j]))){sp_osetn(env,environ[i],(size_t)(eq-environ[i]),sp_jstr(eq+1));break;}
+    }
+    sp_oset(b,"environment",env);
+    sp_oset(b,"recipe_table_sha256",sp_jstr(mo_sha(sp_pjoin(sp_root(),"tests/modelobject-prep.tsv"))));
+    return b;
+}
+static sp_json *mo_part_basis(sp_json *common){
+ sp_json *b=sp_jnew(SP_JOBJ),*plan=mo_plan(sp_pjoin(sp_root(),"tests/modelobject-prep.tsv"),MO_PART,sp_root(),"/MODEL_WORK",MO_CC,MO_PY);
+ sp_oset(b,"common",common);sp_oset(b,"sources",sp_getitem(common,"sources"));sp_oset(b,"part",sp_jstr(MO_PART));sp_oset(b,"recipes",plan);return b;
+}
+static void mo_key(sp_json *b){sp_buf t={0};char h[65];sp_jdump(&t,b,0,1);cx_sha256_hex(t.s,t.n,h);MO_CACHE=sp_pjoin(MO_BASE,sp_cat("modelobject-part-",h));free(t.s);}
+static int mo_valid(sp_json *basis){
+ int i;
+ if(sp_valid_manifest(MO_CACHE,basis,mo_required(),mo_execs(),"modelobject part identity/output mismatch"))return 0;
+ /* Raw successful compiler logs may legitimately have zero bytes. Their
+    authenticated nonempty receipts bind SHA and rc; do not subject logs to
+    seedprep artifact-nonempty semantics or manufacture compiler output. */
+ for(i=0;i<MO_PLAN->n;i++){
+  const char *label=sp_getitem(MO_PLAN->v[i],"label")->s;char *rp=sp_pjoin(MO_CACHE,sp_cat(label,".receipt.json")),*lp=sp_pjoin(MO_CACHE,sp_cat(label,".log"));
+  size_t n;char *text=sp_read_text(rp,&n),h[65];sp_json *r,*rc,*sha,*name,*argv;struct stat st;
+  if(!text)return 0;r=sp_jloads(text,n);free(text);if(!r||r->t!=SP_JOBJ)return 0;
+  rc=sp_getitem(r,"rc");sha=sp_getitem(r,"log_sha256");name=sp_getitem(r,"label");argv=sp_getitem(r,"argv");
+  if(!rc||rc->t!=SP_JINT||strcmp(rc->s,"0")||!sha||sha->t!=SP_JSTR||sha->sn!=64||!name||name->t!=SP_JSTR||strcmp(name->s,label)||!argv||argv->t!=SP_JARR||!argv->n)return 0;
+  if(lstat(lp,&st)||!S_ISREG(st.st_mode)||sp_sha_file(lp,h)||strcmp(h,sha->s))return 0;
+ }
+ return 1;
+}
+static void mo_write_doc(const char *dir,sp_json *basis){
+    const char *const *names=mo_required();sp_json *doc=sp_jnew(SP_JOBJ),*outputs=sp_jnew(SP_JOBJ);sp_buf text={0,0,0};char *manifest=sp_pjoin(dir,"manifest.json");int i;
+    for(i=0;names[i];i++)sp_oset(outputs,names[i],sp_jstr(mo_sha(sp_pjoin(dir,names[i]))));
+    sp_oset(doc,"basis",basis);sp_oset(doc,"outputs",outputs);sp_jdump(&text,doc,0,1);sp_bch(&text,'\n');
+    if(cx_write(manifest,text.s,text.n))mo_need("cannot write manifest");sp_prov_write(manifest,sp_getitem(basis,"sources")->s);
+}
+static void mo_publish(sp_json *basis){
+    struct stat st;const char *const *names=mo_required();int i;
+    for(i=0;names[i];i++){char *p=sp_pjoin(MO_WORK,names[i]);mo_assert(!lstat(p,&st)&&S_ISREG(st.st_mode),"output missing or not regular");}
+    if(!strcmp(MO_PART,"reference"))mo_assert(!strcmp(mo_sha(sp_pjoin(MO_WORK,"ref.c")),mo_sha(MO_PROBE)),"build_ref source changed from readset preflight");
+    mo_assert(sp_jeq(sp_getitem(basis,"common"),mo_basis()),"full input identity changed during construction");mo_write_doc(MO_WORK,basis);
+    /* Validate staging before publication, with the identical final basis. */
+    {char *saved=MO_CACHE;MO_CACHE=MO_WORK;mo_assert(mo_valid(basis),"invalid constructed part");MO_CACHE=saved;}
+    if(!lstat(MO_CACHE,&st)){if(cx_trash(MO_CACHE))mo_need("old cache guard refusal");}else if(errno!=ENOENT)mo_need("cache lstat failed");
+    if(rename(MO_WORK,MO_CACHE)){sp_throw_os(errno,MO_WORK);sp_crash();}
+    mo_assert(mo_valid(basis),"published part invalid");
+}
+static sp_json *mo_manifest_outputs(void){
+    char *p=sp_pjoin(MO_CACHE,"manifest.json"),*s;size_t n;sp_json *doc;
+    s=sp_read_text(p,&n);if(!s)sp_crash();doc=sp_jloads(s,n);if(!doc)sp_crash();return sp_getitem(doc,"outputs");
+}
+static void mo_copy_one(const char *name,const char *dest,sp_json *expected){
+    char *parent,*slash,*src;struct stat st;char *data;size_t n,pos=0;int fd;char h[65];
+    mo_assert(dest&&dest[0]=='/'&&strcmp(dest,"/")&&strcmp(dest,sp_root()),"absolute private destination required");
+    parent=sp_xstrdup(dest);slash=strrchr(parent,'/');mo_assert(slash&&slash[1]&&strcmp(slash+1,".")&&strcmp(slash+1,".."),"invalid destination leaf");*slash=0;
+    mo_assert(!lstat(parent,&st)&&S_ISDIR(st.st_mode)&&st.st_uid==getuid()&&!(st.st_mode&0077),"destination parent must be owned private directory");
+    if(!lstat(dest,&st))mo_need("destination exists");mo_assert(errno==ENOENT,"destination lstat failed");
+    src=sp_pjoin(MO_CACHE,name);mo_assert(!lstat(src,&st)&&S_ISREG(st.st_mode),"source must be regular");
+    data=sp_read_file(src,&n);if(!data)sp_crash();cx_sha256_hex(data,n,h);mo_assert(!strcmp(h,expected->s),"cached output changed before copy");
+    fd=open(dest,O_WRONLY|O_CREAT|O_EXCL,0600);if(fd<0)mo_need("copy destination create failed");
+    while(pos<n){ssize_t k=write(fd,data+pos,n-pos);if(k<0&&errno==EINTR)continue;if(k<=0){close(fd);mo_need("copy write failed");}pos+=(size_t)k;}
+    {int mode_rc=fchmod(fd,(!strcmp(name,"ref")||!strcmp(name,"run"))?0755:0644);int close_rc=close(fd);if(mode_rc||close_rc)mo_need("copy mode/close failed");}
+    mo_assert(!strcmp(mo_sha(dest),expected->s),"copied output hash differs");
+    if(!strcmp(name,"ref")||!strcmp(name,"run"))mo_assert(!access(dest,X_OK),"copied executable mode missing");
+    free(data);free(src);free(parent);
+}
+static void mo_preflight(void){
+ char *probe=sp_pjoin(MO_FLIGHT,"probe.c"),*old=MO_WORK;
+ char *cmd[]={sp_pjoin(sp_root(),"tests/build_ref.sh"),probe,sp_pjoin(MO_FLIGHT,"unused-ref"),"--source-only",0};
+ MO_WORK=MO_FLIGHT;mo_step("source-preflight",cmd);MO_WORK=old;MO_PROBE=probe;
+}
+static void mo_private(const char *dest){struct stat st;
+ mo_assert(dest&&dest[0]=='/'&&strcmp(dest,"/")&&strcmp(dest,sp_root())&&(!getenv("HOME")||strcmp(dest,getenv("HOME")))&&strcmp(dest,sp_gettempdir()),"absolute private directory required");
+ mo_assert(!lstat(dest,&st)&&S_ISDIR(st.st_mode)&&st.st_uid==getuid()&&!(st.st_mode&0077),"destination must be owned private directory");
+}
+int main(int argc,char **argv){
+ int materialize=0,require=0,i,j;const char *dest=0;char *which;sp_json *common,*basis,*bases[8],*outputs;struct stat st;
+ if(argc==4&&(!strcmp(argv[1],"--prepare")||!strcmp(argv[1],"--require-cached"))&&!strcmp(argv[2],"--part")){MO_PART=argv[3];MO_PREP=!strcmp(argv[1],"--prepare");require=!MO_PREP;}
+ else if(argc==3&&!strcmp(argv[1],"--materialize")){materialize=1;dest=argv[2];MO_PART="reference";}
+ else mo_need("supported: --prepare/--require-cached --part PART or --materialize PRIVATE_DIR");
+ mo_assert(mo_part(MO_PART),"unknown part");
+ {const char *v=getenv("CC");mo_assert(!v||!*v||!strcmp(v,"cc"),"CC override unsupported");v=getenv("CFLAGS");mo_assert(!v||!*v||!strcmp(v,"-O2"),"nondefault CFLAGS unsupported");}
+ sp_init(__FILE__);atexit(mo_cleanup);sp_set_raise_hook(mo_hook);which=sp_which("cc");mo_assert(which!=0,"cc missing");MO_CC=which;MO_PY=sp_realpath_ns(sp_python());
+ {const char *v=getenv("UNISACC_MODEL_CACHE");MO_BASE=v?sp_ppath(v):sp_pjoin(sp_gettempdir(),"unisacc-model-cache");}
+ mo_assert(MO_BASE[0]=='/'&&strcmp(MO_BASE,"/")&&strcmp(MO_BASE,sp_root())&&(!getenv("HOME")||strcmp(MO_BASE,getenv("HOME"))),"invalid cache root");
+ sp_mkdirs(MO_BASE);MO_FLIGHT=sp_realpath_ns(sp_mkdtemp_py(MO_BASE,"modelobject-flight-"));MO_WORK=sp_pjoin(MO_FLIGHT,"part");mo_assert(!mkdir(MO_WORK,0700),"private part mkdir failed");
+ mo_preflight();common=mo_basis();
+ if(materialize){
+  mo_private(dest);
+  /* Acquire the complete set in stable part order before copying anything. */
+  for(i=0;i<8;i++){mo_select(MO_PARTS[i]);bases[i]=mo_part_basis(common);mo_key(bases[i]);sp_lock(sp_cat(MO_CACHE,".lock"));mo_assert(mo_valid(bases[i]),"required part missing/stale/corrupt");}
+  for(i=0;i<8;i++){mo_select(MO_PARTS[i]);mo_key(bases[i]);mo_assert(mo_valid(bases[i]),"part changed before materialization");outputs=mo_manifest_outputs();
+   {int q;for(j=0;j<MO_PLAN->n;j++){sp_json *names=sp_getitem(MO_PLAN->v[j],"outputs");for(q=0;q<names->n;q++){const char *n=names->v[q]->s;mo_copy_one(n,sp_pjoin(dest,n),sp_getitem(outputs,n));}}}
+  }
+  mo_assert(sp_jeq(common,mo_basis()),"full identity changed during materialization");
+  for(i=0;i<8;i++){mo_select(MO_PARTS[i]);mo_key(bases[i]);mo_assert(mo_valid(bases[i]),"part changed during materialization");}
+  printf("MODEL_OBJECT_MATERIALIZED 21\n");
+ }else{
+  mo_select(MO_PART);basis=mo_part_basis(common);mo_key(basis);sp_lock(sp_cat(MO_CACHE,".lock"));
+  if(MO_PREP&&!mo_valid(basis)){
+   for(i=0;i<MO_PLAN->n;i++){sp_json *r=MO_PLAN->v[i],*a=sp_getitem(r,"argv");char *cmd[24];mo_assert(a->n<24,"recipe argv too long");for(j=0;j<a->n;j++)cmd[j]=a->v[j]->s;cmd[j]=0;mo_step(sp_getitem(r,"label")->s,cmd);}
+   mo_publish(basis);
+  }
+  mo_assert(sp_jeq(common,mo_basis())&&mo_valid(basis),"part missing/stale/corrupt or inputs changed");
+  if(require)printf("%s\n",MO_CACHE);else printf("MODEL_OBJECT_PART_READY %s %s\n",MO_PART,MO_CACHE);
+ }
+ (void)st;mo_cleanup();return 0;
+}

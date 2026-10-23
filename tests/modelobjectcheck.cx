@@ -1,0 +1,118 @@
+/* Native model-object verification; preparation never supplies a cached test verdict. */
+#pragma unisa use cxlib.seedprep
+#pragma unisa use cxlib.netpack
+
+static const char *names[] = {"function","global","external","main","pointer","bytes"};
+static const char *sources[] = {
+ "int twice(int x){return x*2;}\n",
+ "int count=3; static int hidden; int get(void){return count+hidden;}\n",
+ "extern int count; int twice(int); int get(void){return twice(count); }\n",
+ "int main(void){return 7;}\n",
+ "int f(void){return 3;} int (*p)(void)=f; int main(void){return p();}\n",
+ "char a[5]=\"x\"; int z[3]; int main(void){return a[0]+z[2];}\n"
+};
+/* Transitional producer still uses old generators; this test itself adds no Python. */
+static void put(const char *p,const void *b,size_t n) {
+ FILE *f=fopen(p,"wb"); int ok;
+ if(!f){sp_throw_os(errno,p);sp_crash();}
+ ok=fwrite(b,1,n,f)==n; if(fclose(f))ok=0;
+ if(!ok)sp_raise_line("OSError: modelobject write failed");
+}
+/* Evidence may only be an existing, canonical owned directory beneath ROOT/out.
+   O_EXCL below refuses reuse of any existing evidence file. */
+static char *evidence_dir(const char *p) {
+ char *r,*prefix;struct stat st;size_t n;
+ if(!p||p[0]!='/')sp_raise_line("ValueError: evidence needs absolute out directory");
+ r=sp_realpath_ns(p);prefix=sp_cat(sp_root(),"/out/");n=strlen(prefix);
+ if(strcmp(r,p)||strncmp(r,prefix,n)||!r[n]||lstat(r,&st)||!S_ISDIR(st.st_mode)||st.st_uid!=geteuid())
+  sp_raise_line("ValueError: unsafe evidence directory");
+ free(prefix);return r;
+}
+static void put_new(const char *p,const void *bytes,size_t n) {
+ int fd=open(p,O_WRONLY|O_CREAT|O_EXCL,0600);size_t at=0;ssize_t k;
+ if(fd<0){sp_throw_os(errno,p);sp_crash();}
+ while(at<n){k=write(fd,(const char *)bytes+at,n-at);if(k<0&&errno==EINTR)continue;
+  if(k<=0){close(fd);sp_raise_line("OSError: evidence write failed");}at+=(size_t)k;}
+ if(close(fd))sp_raise_line("OSError: evidence close failed");
+}
+static char *cmd(char **a,size_t *n) {
+ char *o=0,*e=0;size_t en=0;int k=0,j;char *v[40];int rc;
+ v[k++]=sp_pjoin(sp_root(),"tests/bound");v[k++]="30";
+ for(j=0;a[j];j++){if(k>=39)sp_raise_line("AssertionError: command argv overflow");v[k++]=a[j];}v[k]=0;
+ rc=sp_spawn(v,30,&o,n,&e,&en);
+ if(rc){fprintf(stderr,"modelobject command rc=%d: %s\n",rc,a[0]);
+   if(e)fwrite(e+(en>2000?en-2000:0),1,en>2000?2000:en,stderr);
+   free(o);free(e);sp_raise_line("AssertionError: modelobject command failed");}
+ free(e);return o;
+}
+int main(int argc,char **argv) {
+ const char *archs[]={"x86_64","arm64"},*nets[]={"prune","lower","elf"};
+ char *t,*ref,*run,*routes,*resources,*pkgs[2],*ev=0;sp_buf rows={0},proof={0};int a,s,u,c,count=0;
+ sp_init(__FILE__);atexit(sp_scratch_remove);
+ if(chdir(sp_root())){sp_throw_os(errno,sp_root());sp_crash();}
+ if(argc==3&&!strcmp(argv[1],"--evidence"))ev=argv[2];
+ else if(argc!=1)sp_raise_line("ValueError: usage modelobjectcheck.cx [--evidence ABS_EXISTING_OUT_DIR]");
+ if(!ev)ev=getenv("UNISACC_OBJECT_EVIDENCE");
+ if(ev&&*ev)ev=evidence_dir(ev);else ev=0;
+ sp_bstr(&proof,"arch\tunit\tcase\tactual_sha256\texpected_sha256\n");
+ t=sp_xstrdup(sp_mkdtemp_py(sp_gettempdir(),"model-object-"));
+ ref=sp_pjoin(t,"ref");run=sp_pjoin(t,"run");routes=sp_pjoin(t,"routes");
+ {char *v[]={"sh",sp_pjoin(sp_root(),"tests/cxbin"),
+   "tests/modelobjectprepared.cx","--materialize",t,0};
+  size_t n;char *o=cmd(v,&n);free(o);}
+ for(a=0;a<2;a++)for(s=0;s<3;s++) {
+  char *base=sp_cat(archs[a],sp_cat("-",nets[s]));
+  char *table=sp_pjoin(t,sp_cat(base,".tbl")),*net=sp_pjoin(t,sp_cat(base,".net"));
+  char *v[]={run,"--check-net",table,net,0};size_t n;char *o=cmd(v,&n);if(ev)put_new(sp_pjoin(ev,sp_cat("netcheck-",sp_cat(base,".log"))),o,n);free(o);
+  sp_bstr(&rows,"lnx/");sp_bstr(&rows,archs[a]);sp_bstr(&rows,"/object/O0\t");
+  sp_bstr(&rows,nets[s]);sp_bch(&rows,'\t');
+  sp_bstr(&rows,s==2?"target.text":"tape.text");sp_bch(&rows,'\t');
+  sp_bstr(&rows,s==0?"tape.text":s==1?"target.text":"object.bytes");
+  sp_bch(&rows,'\t');sp_bstr(&rows,net);sp_bch(&rows,'\n');
+ }
+ put(routes,rows.s,rows.n);free(rows.s);
+ resources=sp_pjoin(t,"resources");sp_mkdirs(resources);put(sp_pjoin(resources,"funit"),"1",1);
+ for(u=0;u<2;u++) {
+  const char *ms[]={routes},*prefix[]={"00636c692f"},*dirs[]={resources};
+  np_buf out={0};char why[2048];
+  if(np_pack_build(ms,1,prefix,dirs,u,&out,why,sizeof why)){
+    fprintf(stderr,"%s\n",why);sp_raise_line("AssertionError: pack failed");}
+  pkgs[u]=sp_pjoin(t,u?"unit.pkg":"whole.pkg");put(pkgs[u],out.p,out.n);if(ev)put_new(sp_pjoin(ev,u?"unit.pkg":"whole.pkg"),out.p,out.n);free(out.p);
+ }
+ for(a=0;a<2;a++)for(u=0;u<2;u++)for(c=0;c<6;c++) {
+  char *src,*tape,*expected,*route,*target,*raw,*actual,*want;size_t rn,an,wn;
+  if(c==2&&!u)continue;
+  src=sp_pjoin(t,sp_cat(names[c],".c"));tape=sp_pjoin(t,sp_cat(names[c],".tape"));
+  expected=sp_pjoin(t,"expected.o");target=sp_cat("lnx/",archs[a]);route=sp_cat(target,"/object/O0");
+  {sp_buf b={0};sp_bstr(&b,sources[c]);
+   if(!u&&(c==0||c==1))sp_bstr(&b,"int main(void){return 0;}\n");
+   put(src,b.s,b.n);free(b.s);}
+  {char *v[9];int k=0;v[k++]=ref;v[k++]=src;v[k++]="-S";
+   if(u)v[k++]="-funit";v[k++]="-o";v[k++]="-";v[k]=0;raw=cmd(v,&rn);}
+  put(tape,raw,rn);free(raw);
+  {char *v[11];int k=0;v[k++]=ref;v[k++]=tape;v[k++]="-c";v[k++]="-b";v[k++]=target;
+   if(u)v[k++]="-funit";v[k++]="-o";v[k++]=expected;v[k]=0;
+   raw=cmd(v,&rn);free(raw);}
+  {char *v[]={run,"--bundle",pkgs[u],route,tape,0};actual=cmd(v,&an);}
+  want=sp_must_read(expected,&wn);
+  if(ev){char ah[65],wh[65];char *ap=sp_pjoin(t,"actual.o");
+   put(ap,actual,an);if(sp_sha_file(ap,ah)||sp_sha_file(expected,wh))sp_crash();
+   sp_bstr(&proof,archs[a]);sp_bstr(&proof,u?"\t1\t":"\t0\t");sp_bstr(&proof,names[c]);
+   sp_bch(&proof,'\t');sp_bstr(&proof,ah);sp_bch(&proof,'\t');sp_bstr(&proof,wh);sp_bch(&proof,'\n');}
+  if(an!=wn||memcmp(actual,want,an)) {
+   size_t first=0,tn;char *tb;
+   while(first<an&&first<wn&&actual[first]==want[first])first++;
+   if(ev){put_new(sp_pjoin(ev,"actual.o"),actual,an);
+    put_new(sp_pjoin(ev,"expected.o"),want,wn);tb=sp_must_read(tape,&tn);
+    put_new(sp_pjoin(ev,"input.tape"),tb,tn);free(tb);
+    put_new(sp_pjoin(ev,"objects.tsv"),proof.s,proof.n);}
+   fprintf(stderr,"object mismatch arch=%s unit=%d case=%s actual=%zu expected=%zu first=%zu\n",
+     archs[a],u,names[c],an,wn,first);sp_raise_line("AssertionError: model object bytes differ");
+  }
+  free(actual);free(want);count++;
+ }
+ if(ev)put_new(sp_pjoin(ev,"objects.tsv"),proof.s,proof.n);free(proof.s);
+ if(count!=22)sp_raise_line("AssertionError: incomplete object coverage");
+ printf("model object: %d real ELF tapes byte-identical, two architectures, unit/whole; all-domain net=table\n",count);
+ return 0;
+}
