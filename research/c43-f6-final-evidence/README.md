@@ -8,4 +8,6 @@ comboot-final-proof.log 的官方 fixedpoint 返回0。实际 seed、根产品�
 
 此证据满足构建固定点判据，不代表 F3、F4 或 F5 已验收。随后以完整第三阶段候选及同代 compiler.pkg 冻结验收输入；accept-inputs.sha256 保留实际哈希。
 
-`steps.tsv` 和 steps/ 保存实际二十四个标记及其证明文件；compiler.pkg 体积较大，仅保存实际摘要，不复制包。每个标记的来源和证明 SHA 均重新只读核对。`window-status.tsv` 明确是父会话工具返回值的人工转录，原窗口日志不改写；空的超时窗口不作为成功证据。`final-proof.txt` 保存父会话实际执行的证明命令，`review.md` 标明独立只读文件核对与未独立执行的边界。
+`steps.tsv.gz` 和 steps/ 保存实际二十四个标记及其证明文件；compiler.pkg 体积较大，仅保存实际摘要，不复制包。每个标记的来源和证明 SHA 均重新只读核对。`window-status.tsv` 明确是父会话工具返回值的人工转录，原窗口日志不改写；空的超时窗口不作为成功证据。`final-proof.txt` 保存父会话实际执行的证明命令，`review.md` 标明独立只读文件核对与未独立执行的边界。
+
+步骤表按原始字节无损压缩保存；解压后的 SHA256 为 `5091b6de877cd575134062f2e718a88e9b593edea0db83e7756a6fc3a254f04e`。其中路径是当时执行位置的原始记录，证明文件保存在本目录 steps/；这些临时路径不是当前源树依赖。
