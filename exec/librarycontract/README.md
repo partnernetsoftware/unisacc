@@ -3,7 +3,8 @@
 This finite stage validates a complete canonical declaration stream. It does not
 resolve providers, compare ABI signatures, or change any existing consumer.
 The shared integer executor runs the generated network; no native parser is the
-model implementation. `unisa/librarycontract.py` is the observation reference.
+model implementation. The reference is the frozen expected-bytes column of
+tests/librarycontract-cases.tsv, captured once from the Python seed (W1-F, 2026-10-23).
 
 Input: `USLDEC1\n`, target byte 1..4, version byte 1, two zero reserved bytes,
 then count u32 little endian (maximum 4096). Output: identical bytes except magic

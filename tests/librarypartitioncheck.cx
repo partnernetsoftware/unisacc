@@ -1,19 +1,19 @@
-/* 2b ownership model selftest: the product is an observer, not a fresh product witness. */
-static int equal_files(const char *a,const char *b){size_t n,m;char*x=cx_read(a,&n),*y=cx_read(b,&m);int ok=x&&y&&n==m&&!memcmp(x,y,n);free(x);free(y);return ok;}
+/* 2b ownership model selftest: the product is an observer, not a fresh product witness.
+   Reference = the frozen expected-bytes column of tests/librarypartition-cases.tsv (captured once from the Python
+   seed reference, W1-F); no interpreter runs here. */
 int main(int argc,char **argv){
- if(argc!=2)return 2;char in[4096],mo[4096],me[4096],ro[4096],re[4096],cmd[16384];size_t n;
- snprintf(in,sizeof in,"%s/input",argv[1]);snprintf(mo,sizeof mo,"%s/model.out",argv[1]);snprintf(me,sizeof me,"%s/model.err",argv[1]);snprintf(ro,sizeof ro,"%s/reference.out",argv[1]);snprintf(re,sizeof re,"%s/reference.err",argv[1]);
+ if(argc!=2)return 2;char in[4096],mo[4096],me[4096],cmd[16384];size_t n;
+ snprintf(in,sizeof in,"%s/input",argv[1]);snprintf(mo,sizeof mo,"%s/model.out",argv[1]);snprintf(me,sizeof me,"%s/model.err",argv[1]);
  char *list=cx_read("tests/librarypartition-cases.tsv",&n);if(!list)return 2;int accepted=0,refused=0;
  for(char*p=list;*p;){char*end=strchr(p,'\n');if(!end)return 2;*end=0;if(*p!='#'){
   char*hex=strchr(p,'\t');if(!hex)return 2;*hex++=0;char*code=strchr(hex,'\t');if(!code)return 2;*code++=0;char*expected=strchr(code,'\t'),*why=0;if(expected){*expected++=0;why=strchr(expected,'\t');if(why)*why++=0;}int want=atoi(code);size_t hn=strlen(hex);if(hn%2)return 2;
+  if(!want&&(!expected||!*expected)){printf("MECHANISM %s accepted row without frozen expected bytes\n",p);return 2;}
   unsigned char*b=malloc(hn/2+1);if(!b)return 2;for(size_t i=0;i<hn;i+=2){unsigned v;if(sscanf(hex+i,"%2x",&v)!=1)return 2;b[i/2]=(unsigned char)v;}
   if(cx_write(in,b,hn/2))return 2;free(b);
-  snprintf(cmd,sizeof cmd,"python3 -c 'import sys;from unisa.librarypartition import produce;sys.stdout.buffer.write(produce(open(sys.argv[1],\"rb\").read()))' '%s' >'%s' 2>'%s'",in,ro,re);
-  int r=cx_run_timeout(cmd,3,0,0);
   snprintf(cmd,sizeof cmd,"'%s/run' '%s/model.net' '%s' >'%s' 2>'%s'",argv[1],argv[1],in,mo,me);int m=cx_run_timeout(cmd,3,0,0);
-  if(r!=want||m!=want){printf("CONTRACT_RED %s model=%d reference=%d expected=%d\n",p,m,r,want);return 1;}
-  if(!want){if(expected){size_t on;char*output=cx_read(mo,&on);size_t en=strlen(expected);if(!output||en!=on*2){printf("CONTRACT_RED %s expected ownership length\n",p);return 1;}for(size_t oi=0;oi<on;oi++){unsigned v;if(sscanf(expected+2*oi,"%2x",&v)!=1||(unsigned char)output[oi]!=(unsigned char)v){printf("CONTRACT_RED %s expected ownership bytes\n",p);return 1;}}free(output);}if(!equal_files(mo,ro)){printf("CONTRACT_RED %s output differs\n",p);return 1;}accepted++;}
+  if(m!=want){printf("CONTRACT_RED %s model=%d expected=%d\n",p,m,want);return 1;}
+  if(!want){size_t on;char*output=cx_read(mo,&on);size_t en=strlen(expected);if(!output||en!=on*2){printf("CONTRACT_RED %s expected ownership length\n",p);return 1;}for(size_t oi=0;oi<on;oi++){unsigned v;if(sscanf(expected+2*oi,"%2x",&v)!=1||(unsigned char)output[oi]!=(unsigned char)v){printf("CONTRACT_RED %s expected ownership bytes\n",p);return 1;}}free(output);accepted++;}
   else{size_t mn,en;char*x=cx_read(mo,&mn),*e=cx_read(me,&en);int ok=x&&mn==0&&e&&strstr(e,"library partition")&&(!why||!*why||strstr(e,why));free(x);free(e);if(!ok){printf("CONTRACT_RED %s empty/named refusal fails\n",p);return 1;}refused++;}
  }p=end+1;}
- free(list);printf("librarypartition-model: accept=%d refuse=%d exact reference bytes; named empty refusals\n",accepted,refused);return 0;
+ free(list);printf("librarypartition-model: accept=%d refuse=%d exact frozen reference bytes; named empty refusals\n",accepted,refused);return 0;
 }

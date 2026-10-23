@@ -1,20 +1,24 @@
 #include <cx.h>
 #include <stdint.h>
-/* Model-only. Dynamic C owns verdicts; native executor and Python are observers. */
+/* Model-only. Dynamic C owns verdicts; the native executor is an observer.  References are frozen (W1-F): target 1
+   uses the fragment field of tests/librarytypedlower-cases.tsv, targets 2..4 the rows of tests/librarytypedlower-reference.tsv,
+   both captured from the Python seed lower oracle at HEAD e3c4b123; no interpreter runs here. */
 static uint64_t u64(const unsigned char*p){uint64_t n=0;for(int j=0;j<8;j++)n|=(uint64_t)p[j]<<(8*j);return n;}
 static unsigned u32(const unsigned char*p){unsigned n=0;for(int j=0;j<4;j++)n|=(unsigned)p[j]<<(8*j);return n;}
 static int puthex(const char*p,const char*h){if(!strcmp(h,"-"))return cx_write(p,"",0);size_t n=strlen(h);if(n%2)return 1;unsigned char*b=malloc(n/2+1);if(!b)return 1;for(size_t i=0;i<n;i+=2){unsigned v;if(sscanf(h+i,"%2x",&v)!=1)return 1;b[i/2]=v;}int r=cx_write(p,b,n/2);free(b);return r;}
 static int same(const char*a,const char*b){size_t n,m;char*x=cx_read(a,&n),*y=cx_read(b,&m);int ok=x&&y&&n==m&&!memcmp(x,y,n);free(x);free(y);return ok;}
+/* Frozen fragment of NAME at TARGET (2..4) from the reference ledger, written to OUT: 0 found, 1 absent, 2 mechanism. */
+static int frozen_fragment(const char*led,const char*name,int target,const char*out){size_t nl=strlen(name);for(const char*p=led;*p;){const char*e=strchr(p,'\n');if(!e)e=p+strlen(p);if(*p!='#'&&!strncmp(p,name,nl)&&p[nl]=='\t'&&p[nl+1]=='0'+target&&p[nl+2]=='\t'){const char*h=p+nl+3;size_t hn=(size_t)(e-h);char*t=malloc(hn+1);if(!t)return 2;memcpy(t,h,hn);t[hn]=0;int r=puthex(out,t);free(t);return r?2:0;}p=*e?e+1:e;}return 1;}
 static int frame(const unsigned char*p,size_t n){if(n<20||memcmp(p,"UNILOW1\n",8))return 1;uint64_t z=u64(p+8);unsigned c=u32(p+16);if(z>n-20||c>(n-20-z)/20||n!=20+z+20*c)return 1;uint64_t end=0;for(unsigned i=0;i<c;i++){const unsigned char*r=p+20+z+20*i;uint64_t at=u64(r);if(u32(r+8)!=1||at>=z||at<end||p[20+at]!='0'||u32(r+12)<256||u32(r+16))return 1;end=at+1;}return 0;}
 static int baseline(const char*p){size_t n;char*b=cx_read(p,&n);if(!b)return 2;const char*h="call\tlibrarytyped\t-\tfact:librarytyped\t-\t-\t-\t-\t-\n";char*q=strstr(b,h);if(!q||strstr(q+strlen(h),h)){free(b);return 1;}size_t off=q-b,hn=strlen(h);memmove(q,q+hn,n-off-hn);int rc=cx_write(p,b,n-hn);free(b);return rc;}
 int main(int argc,char**argv){
  if(argc==3&&!strcmp(argv[1],"--baseline"))return baseline(argv[2]);
- if(argc!=4&&argc!=5)return 2;int smoke=argc==5;int shard=atoi(argv[2]),target=atoi(argv[3]),index=0;if(shard<0||shard>3)return 2;size_t n;char*l=cx_read("tests/librarytypedlower-cases.tsv",&n);if(!l)return 2;
+ if(argc!=4&&argc!=5)return 2;int smoke=argc==5;int shard=atoi(argv[2]),target=atoi(argv[3]),index=0;if(shard<0||shard>3)return 2;size_t n;char*l=cx_read("tests/librarytypedlower-cases.tsv",&n);if(!l)return 2;size_t ledn;char*led=cx_read("tests/librarytypedlower-reference.tsv",&ledn);if(!led)return 2;
  const char*names[]={"input","contract","selection","legacy","expected","baseline","out","err","oracle","oracle.err","replay"};char path[11][4096],cmd[24000];for(int i=0;i<11;i++)snprintf(path[i],4096,"%s/%s",argv[1],names[i]);int count=0;
  for(char*p=l;*p;){char*e=strchr(p,'\n');if(!e)return 2;*e=0;if(*p!='#'&&(smoke||(index++%4)==shard)){
   char*f[10];f[0]=p;int k=1;for(char*q=p;*q;q++)if(*q=='\t'){*q=0;if(k==10)return 2;f[k++]=q+1;}if(k!=10)return 2;if(smoke&&strcmp(f[0],"fixed-two-int")&&strcmp(f[0],"cli")&&strcmp(f[0],"overwrite")&&strcmp(f[0],"label")&&strcmp(f[0],"jump")&&strcmp(f[0],"callkind-0")&&strcmp(f[0],"signature-version-2")&&strcmp(f[0],"owner-2")&&strcmp(f[0],"nargs-low-3")){p=e+1;continue;}
   for(int i=0;i<4;i++)if(puthex(path[i],f[i+1]))return 2;if(puthex(path[4],f[8])||puthex(path[5],f[9]))return 2;size_t cn;char*cb=cx_read(path[1],&cn);if(!cb||cn<16)return 2;cb[8]=(char)(target?target:1);if(cx_write(path[1],cb,cn))return 2;free(cb);int want=target?atoi(f[6]):1;
-  snprintf(cmd,sizeof cmd,"python3 exec/lower/librarytyped-oracle.py '%s' '%s' '%s' %d %s '%s/abi-oracle' >'%s' 2>'%s'",path[0],path[1],path[2],target,f[5],argv[1],path[8],path[9]);int ref=cx_run_timeout(cmd,3,0,0);if(ref!=0&&ref!=1){printf("MECHANISM reference rc=%d\n",ref);return ref==124||ref==142?142:2;}if(ref!=want||(!ref&&target==1&&!same(path[8],path[4]))){printf("CONTRACT_RED %s frozen/reference rc%d want%d\n",f[0],ref,want);return 1;}
+  const char*refpath=path[4];if(!want&&target!=1){int fr=frozen_fragment(led,f[0],target,path[8]);if(fr==2)return 2;if(fr){printf("CONTRACT_RED %s no frozen reference for target %d\n",f[0],target);return 1;}refpath=path[8];}
 
   for(int format=0;format<2;format++){
    snprintf(cmd,sizeof cmd,"'%s/runner' '%s/model.%s' '%s' '%s' '%s' %s '%s' unused >'%s' 2>'%s'",argv[1],argv[1],format?"net":"tbl",path[0],path[1],path[2],f[5],path[3],path[6],path[7]);int rc=cx_run_timeout(cmd,3,0,0);size_t on,en;unsigned char*o=(unsigned char*)cx_read(path[6],&on);char*err=cx_read(path[7],&en);if(!o||!err)return 2;
@@ -22,9 +26,9 @@ int main(int argc,char**argv){
    if(!rc){
     char*redir=strstr(cmd," >");if(!redir)return 2;*redir=0;char replay[28000];snprintf(replay,sizeof replay,"cd /var/tmp && env UNISA_OBSERVATION_VARIANT=changed TMPDIR=/var/tmp %s >'%s' 2>'%s/replay.err'",cmd,path[10],argv[1]);if(cx_run_timeout(replay,3,0,0)||!same(path[6],path[10]))return 1;
     if(on<24||memcmp(o,"USLOWP1\n",8))return 1;uint64_t a=u64(o+8),b=u64(o+16);if(a>on-24||b!=on-24-a||frame(o+24,(size_t)a)||frame(o+24+a,(size_t)b))return 1;
-    size_t rn;char*r=cx_read(path[8],&rn);if(!r||rn!=b||memcmp(r,o+24+a,b)){printf("CONTRACT_RED %s fragment/reference\n",f[0]);return 1;}free(r);
+    size_t rn;char*r=cx_read(refpath,&rn);if(!r||rn!=b||memcmp(r,o+24+a,b)){printf("CONTRACT_RED %s fragment/reference\n",f[0]);return 1;}free(r);
     if(strcmp(f[9],"-")&&!same(path[5],path[6])){printf("CONTRACT_RED %s legacy baseline\n",f[0]);return 1;}
    }free(o);free(err);
   }count++;
- }p=e+1;}free(l);printf("librarytypedlower-model: %d fixtures; tbl/net; fragment/reference exact; provenance NEG; legacy baseline; cwd/env replay\n",count);return count?0:1;
+ }p=e+1;}free(l);free(led);printf("librarytypedlower-model: %d fixtures; tbl/net; fragment/frozen reference exact; provenance NEG; legacy baseline; cwd/env replay\n",count);return count?0:1;
 }

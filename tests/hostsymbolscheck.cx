@@ -1,18 +1,20 @@
 #include "../exec/c/bind.h"
 /* LB-1 model selftest. Old product is only the dynamic-C observation runner.
-   Lower replay is a narrow frozen-model witness, not new product freshness. */
+   Lower replay is a narrow frozen-model witness, not new product freshness.
+   References are frozen (W1-F): accepted-row bytes in tests/hostsymbols-cases.tsv column 4, and the host-bind
+   reference results below, both captured once from the Python seed reference at HEAD e3c4b123. */
+static int hex_equal_file(const char*hex,const char*path){size_t n;char*x=cx_read(path,&n);if(!x)return 0;int ok=strlen(hex)==2*n;for(size_t i=0;ok&&i<n;i++){unsigned v;if(sscanf(hex+2*i,"%2x",&v)!=1||(unsigned char)x[i]!=(unsigned char)v)ok=0;}free(x);return ok;}
 static int same(const char*a,const char*b){size_t x,y;char*p=cx_read(a,&x),*q=cx_read(b,&y);int ok=p&&q&&x==y&&!memcmp(p,q,x);free(p);free(q);return ok;}
 static int bad(const char*s){fprintf(stderr,"hostsymbolscheck FAIL: %s\n",s);return 1;}
 int main(int argc,char**argv){
- if(argc!=2)return 2;char listpath[4096],in[4096],mo[4096],me[4096],ro[4096],re[4096],cmd[16384];size_t n;int yes=0,no=0;
+ if(argc!=2)return 2;char listpath[4096],in[4096],mo[4096],me[4096],cmd[16384];size_t n;int yes=0,no=0;
  snprintf(listpath,sizeof listpath,"tests/hostsymbols-cases.tsv");char*list=cx_read(listpath,&n);if(!list)return 2;
- snprintf(in,sizeof in,"%s/input",argv[1]);snprintf(mo,sizeof mo,"%s/model.out",argv[1]);snprintf(me,sizeof me,"%s/model.err",argv[1]);snprintf(ro,sizeof ro,"%s/reference.out",argv[1]);snprintf(re,sizeof re,"%s/reference.err",argv[1]);
+ snprintf(in,sizeof in,"%s/input",argv[1]);snprintf(mo,sizeof mo,"%s/model.out",argv[1]);snprintf(me,sizeof me,"%s/model.err",argv[1]);
  for(char*p=list;*p;){char*e=strchr(p,'\n');if(!e)return 2;*e=0;if(*p!='#'){
- char*hex=strchr(p,'\t');if(!hex)return 2;*hex++=0;char*rcs=strchr(hex,'\t');if(!rcs)return 2;*rcs++=0;int want=atoi(rcs);size_t hn=strlen(hex);if(hn%2)return 2;unsigned char*b=malloc(hn/2+1);for(size_t k=0;k<hn;k+=2){unsigned v;if(sscanf(hex+k,"%2x",&v)!=1)return 2;b[k/2]=v;}if(cx_write(in,b,hn/2))return 2;free(b);
- snprintf(cmd,sizeof cmd,"python3 -c 'import sys;from unisa.hostsymbols import produce;sys.stdout.buffer.write(produce(open(sys.argv[1],\"rb\").read()))' '%s' >'%s' 2>'%s'",in,ro,re);int r=cx_run_timeout(cmd,3,0,0);
+ char*hex=strchr(p,'\t');if(!hex)return 2;*hex++=0;char*rcs=strchr(hex,'\t');if(!rcs)return 2;*rcs++=0;char*expected=strchr(rcs,'\t');if(expected)*expected++=0;int want=atoi(rcs);if(!want&&(!expected||!*expected)){printf("MECHANISM %s accepted row without frozen expected bytes\n",p);return 2;}size_t hn=strlen(hex);if(hn%2)return 2;unsigned char*b=malloc(hn/2+1);for(size_t k=0;k<hn;k+=2){unsigned v;if(sscanf(hex+k,"%2x",&v)!=1)return 2;b[k/2]=v;}if(cx_write(in,b,hn/2))return 2;free(b);
  snprintf(cmd,sizeof cmd,"'%s/run' '%s/hostsymbols.net' '%s' >'%s' 2>'%s'",argv[1],argv[1],in,mo,me);int m=cx_run_timeout(cmd,3,0,0);
- if(r!=want||m!=want){printf("CONTRACT_RED %s model=%d reference=%d expected=%d\n",p,m,r,want);return 1;}
- if(!want){if(!same(mo,ro))return bad("reference/model bytes differ");yes++;}
+ if(m!=want){printf("CONTRACT_RED %s model=%d expected=%d\n",p,m,want);return 1;}
+ if(!want){if(!hex_equal_file(expected,mo))return bad("frozen reference/model bytes differ");yes++;}
  else {char*x=cx_read(mo,&n);if(!x||n)return bad("refusal emitted output");free(x);x=cx_read(me,&n);if(!x||!strstr(x,"lower symbols:")||strstr(x,"unreachable"))return bad("refusal diagnostic");free(x);no++;}
  }p=e+1;}free(list);
  /* Actual provider address bytes differ; package inputs to frozen lower differ.
@@ -47,12 +49,12 @@ int main(int argc,char**argv){
  snprintf(cmd,sizeof cmd,"'%s/driver' --models '%s/tapecheck-missing.pkg' '%s' -MD %s --emit-host-symbols '%s' >'%s' 2>'%s'",argv[1],argv[1],in,j==1?"-MF receipt -o image":"",dest,mo,me);
  if(cx_run_timeout(cmd,3,0,0)!=1)return bad("destination alias did not refuse");char*x=cx_read(me,&n);if(!x||!strstr(x,"same path"))return bad("destination alias ownership");free(x);x=cx_read(dest,&n);if(!x||n!=4||memcmp(x,"keep",4))return bad("destination alias changed sentinel");free(x);}
  if(chdir(cwd))return 2;
- /* Existing reference oracle agrees on host-side binding, not model inputs. */
- if(cx_write(in,contract,sizeof contract))return 2;
- snprintf(cmd,sizeof cmd,"python3 -c 'import sys;from unisa.hostbind import bind;bind(open(sys.argv[1],\"rb\").read(),1,2,15,[287454020,287454021,287454022,287454023],13)' '%s' >'%s' 2>'%s'",in,ro,re);
- if(cx_run_timeout(cmd,3,0,0)!=1)return bad("reference missing-provider verdict");char*referr=cx_read(re,&n);if(!referr||!strstr(referr,"missing-provider symbol 2 slot 1"))return bad("reference missing-provider diagnostic");free(referr);
- snprintf(cmd,sizeof cmd,"python3 -c 'import sys;from unisa.hostbind import bind;x=bind(open(sys.argv[1],\"rb\").read(),1,2,15,[287454020,287454021,287454022,287454023]);assert x==(1,2,3,(287454020,287454021,287454022,287454023))' '%s' >'%s' 2>'%s'",in,ro,re);
- if(cx_run_timeout(cmd,3,0,0))return bad("reference binding control");
- printf("host-bind adapter: native controls=2 missing-provider=1 malformed-filter=1; TP-7 domain exclusions=2; missing-stage routes=2; reference binding controls=2; early-output-aliases=3\n");
- if(!yes||!no)return bad("empty coverage");printf("hostsymbols-model: accept=%d refuse=%d reference/network byte matches; provider-A/B lower and contract unchanged (frozen lower witness only)\n",yes,no);return 0;
+ /* Frozen host-side binding reference (captured once from the Python seed bind(): filter 13 refuses with
+    "unisacc: bind: missing-provider symbol 2 slot 1"; filter 15 binds (target 1, kind 2, mask 3, the four provider
+    addresses)); the native adapter must reproduce both results exactly. */
+ if(host_bind(&req,&pa,13,&ba,error,sizeof error)!=1||strcmp(error,"unisacc: bind: missing-provider symbol 2 slot 1"))return bad("frozen reference missing-provider verdict");
+ {static const uint64_t frozen_address[4]={287454020,287454021,287454022,287454023};
+ if(host_bind(&req,&pa,15,&ba,error,sizeof error)||ba.target!=1||ba.kind!=2||ba.mask!=3||memcmp(ba.address,frozen_address,sizeof frozen_address))return bad("frozen reference binding control");}
+ printf("host-bind adapter: native controls=2 missing-provider=1 malformed-filter=1; TP-7 domain exclusions=2; missing-stage routes=2; frozen reference binding controls=2; early-output-aliases=3\n");
+ if(!yes||!no)return bad("empty coverage");printf("hostsymbols-model: accept=%d refuse=%d frozen reference/network byte matches; provider-A/B lower and contract unchanged (frozen lower witness only)\n",yes,no);return 0;
 }

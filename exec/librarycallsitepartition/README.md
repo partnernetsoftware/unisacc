@@ -35,9 +35,10 @@ are intentionally explicit so every expected refusal/output is reviewable.
 
 Eight fresh selftests construct C and Python models independently, compare
 JSON, make table/network, check the complete transition observation domain,
-then run the dynamic-C verdict checker. Python is observation-only and runs
-once per shard to emit a reference ledger bound to the complete TSV SHA256.
-C checks every selected model rc, exact output and both sides' named refusal;
+then run the dynamic-C verdict checker against the frozen expected rc, bytes and
+named refusal columns of the cases TSV (they equalled the Python seed's ledger at
+HEAD e3c4b123; that ledger no longer runs, W1-F).  C checks every selected model
+rc, exact output and the named refusal;
 crash/signal/timeout is never refusal. Batched reference startup does not drop
 cases. Every setup command is bounded15s, observer53s, whole named job58s.
 

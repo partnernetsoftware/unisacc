@@ -25,9 +25,10 @@ mode0..7; mode8..15 is a deliberate capability-gated extension, not a rewrite of
 generator, product and signature hashes in signature-provenance.json. Old fixture
 bytes remain compatibility/framing observations, never retroactive ABI proofs.
 
-The dynamic C judge checks exact accepted bytes and both model/reference named
-refusal reasons, with the existing cx.h I/O/bound mechanisms. Python is only the
-batched observation oracle; its ledger binds the complete fixture SHA. Timeout,
+The dynamic C judge checks exact accepted bytes and the named refusal reasons
+against the frozen columns of the cases TSV, with the existing cx.h I/O/bound
+mechanisms (they equalled the Python seed's batched ledger at HEAD e3c4b123;
+that ledger no longer runs, W1-F). Timeout,
 signal and missing artifacts are mechanism/host failures, never semantic refusal.
 `check.sh 1..16` constructs C/P independently, compares full JSON, builds table/net,
 checks the complete transition observation domain, then runs one bounded shard.

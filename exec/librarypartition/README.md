@@ -1,7 +1,9 @@
 # 2b declaration ownership model (first independently verifiable component)
 
 No E3, lower, provider, or library consumer has been connected in this commit.
-The existing product is only the dynamic-C observer. Python is the reference.
+The existing product is only the dynamic-C observer. The reference is the frozen
+expected-bytes column of tests/librarypartition-cases.tsv (captured once from the
+Python seed, W1-F, 2026-10-23).
 Core input never contains a provider address or availability decision.
 
 Input `USLPAR1\n` followed by the canonical USLDEC1 declaration layout (see

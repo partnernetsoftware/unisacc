@@ -16,7 +16,9 @@ are explicit. Provider-A/B resources contain different addresses: both side-stre
 bytes and a digest-bound historical lower model's main output remain unchanged.
 That lower observation is narrow frozen evidence, not current-product freshness.
 
-Python unisa/hostsymbols.py is only the reference oracle. New behavior is a model
+The reference is frozen: the expected bytes in tests/hostsymbols-cases.tsv and the
+binding results in tests/hostsymbolscheck.cx, captured once from the Python seed
+oracle (W1-F, 2026-10-23); no interpreter runs in the check. New behavior is a model
 selftest run by the old product as a dynamic-C observation tool; no integrated
 product green is claimed. A fresh product is required after driver/package wiring.
 
