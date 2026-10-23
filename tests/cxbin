@@ -4,7 +4,7 @@
 # is 2 ms); the commit path (release/tools/commitgate.sh, release/tools/hooks/pre-commit) calls its classifier on
 # every commit and tests/commitgatecheck.sh calls commitgate.sh about thirty times, so the compile is done once per
 # (compiler, source, prelude headers, machine): `sh unisacc.com -o BIN FILE.cx`, keyed by the sha256 of unisacc.com (the one beside
-# this tests/ directory), FILE.cx, the top-level include/*.h files and uname -m.  The binary gets ARG... as its argv and the caller's stdin, stdout
+# this tests/ directory), all -cx-plan source units (including module bodies), top-level include/*.h files and uname -m.  The binary gets ARG... as its argv and the caller's stdin, stdout
 # and stderr; its exit status is the result.  Fail closed: a missing FILE.cx or unisacc.com, a cache directory that
 # is not ours, or a failed compile is rc 2 with one `cxbin: ...` line on stderr, and nothing is run.
 # One exception: tests/safedel.cx, the deletion guard's CLI (include/unisa_safedel.h, commissar ruling 2026-10-23),
@@ -29,18 +29,44 @@ case ${src##*/} in
 esac
 [ -n "$oracle" ] || [ -f "$com" ] || { echo "cxbin: no compiler: $com" >&2; exit 2; }
 if [ -x /usr/bin/openssl ]; then hashcmd=/usr/bin/openssl; else hashcmd=openssl; fi
+# Bind actual source bytes, including every direct/transitive use module body.
+# CXIF names alone describe interfaces and cannot identify implementation changes.
+inputs=$(uname -m) || { echo 'cxbin: cannot identify the machine' >&2; exit 2; }
+add_input() {
+    [ -f "$1" ] || { echo "cxbin: missing input: $1" >&2; exit 2; }
+    file_digest=$("$hashcmd" dgst -sha256 "$1") || { echo "cxbin: cannot hash input: $1" >&2; exit 2; }
+    file_key=${file_digest##* }
+    case "$file_key" in *[!0123456789abcdef]*|'') echo 'cxbin: invalid input digest' >&2; exit 2;; esac
+    [ "${#file_key}" -eq 64 ] || { echo 'cxbin: incomplete input digest' >&2; exit 2; }
+    inputs="$inputs
+$1
+$file_key"
+}
 if [ -n "$oracle" ]; then
-    digest=$({ uname -m; echo cc-oracle; cat "$oracle" "$here/../include/unisa_sha256.h" "$here/../include/unisa_safedel.h" "$src"; } | "$hashcmd" dgst -sha256) || { echo 'cxbin: cannot hash the inputs' >&2; exit 2; }
+    inputs="$inputs
+cc-oracle"
+    add_input "$oracle"
+    add_input "$here/../include/unisa_sha256.h"
+    add_input "$here/../include/unisa_safedel.h"
+    add_input "$src"
 else
-    digest=$({ uname -m; cat "$com" "$src";
-        # The compiler reads the implicit prelude from this tree on every build.
-        # A cached executable must follow changes to those headers as well.
-        for header in "$here/../include/"*.h; do
-            printf '%s\n' "${header##*/}"
-            cat "$header"
-        done
-    } | "$hashcmd" dgst -sha256) || { echo 'cxbin: cannot hash the inputs' >&2; exit 2; }
+    add_input "$com"
+    plan=$(sh "$com" -cx-plan "$src" < /dev/null) || { echo "cxbin: dependency plan failed: $src" >&2; exit 2; }
+    [ -n "$plan" ] || { echo 'cxbin: empty dependency plan' >&2; exit 2; }
+    tab=$(printf '\t')
+    units=0
+    while IFS="$tab" read -r number unit forced; do
+        case "$number" in *[!0123456789]*|'') echo 'cxbin: invalid dependency plan index' >&2; exit 2;; esac
+        [ -n "$unit" ] || { echo 'cxbin: missing dependency plan path' >&2; exit 2; }
+        add_input "$unit"
+        units=$((units + 1))
+    done <<CXBIN_PLAN
+$plan
+CXBIN_PLAN
+    [ "$units" -gt 0 ] || { echo 'cxbin: no dependency units' >&2; exit 2; }
+    for header in "$here/../include/"*.h; do add_input "$header"; done
 fi
+digest=$(printf '%s\n' "$inputs" | "$hashcmd" dgst -sha256) || { echo 'cxbin: cannot hash the input identities' >&2; exit 2; }
 key=${digest##* }
 case "$key" in *[!0123456789abcdef]*|'') echo 'cxbin: invalid cache digest' >&2; exit 2;; esac
 cache=${CXBIN_CACHE:-${TMPDIR:-/tmp}/unisacc-cxbin-$(id -u)}
