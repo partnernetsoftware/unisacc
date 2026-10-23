@@ -691,3 +691,5 @@ source-only 冷准备在原 55 秒看门狗内实际成功；具名 gate 的冷�
 - modelobject 首次derive真实拒绝：把原配方对拍脚本复制为新增research执行器会新增18个解释器调用点。撤销该新增执行器跟踪、将副本原字节保留out，仅提交原路径与SHA、真实执行日志；不改后缀、不改扫描规则。原消费者退出本身应自然下降，以下以重新derive真实结果为准。
 
 - modelobject 首次14项索引闸13绿，消费者内命令30s红；同index随后直接bound40热跑22对象0。实际-cx-plan与cxbin trace证实：相对准备入口与消费者绝对入口的三单元路径/缓存键不同，导致消费者重复冷编译。sp_init只设ROOT不chdir；sp_spawn子进程会chdir ROOT。最小修复显式checked chdir(ROOT)，准备源统一相对tests/modelobjectprepared.cx，保持绝对wrapper、完整路径/文件SHA闭包及30s预算；不能仅用热0当修复，重新八份独立构造/21cmp和14项闸。
+
+- 2026-10-24 消费者监督清理补刀：modelobject cmd外sp_spawn原30会早于内bound30既有N+2清理截止杀父，挂起setsid后代存在漏清风险。本刀仅外监督32.25=命令30+既有清理2+.25调度余量，命令/整suite预算不变，通用bound/seedprep不动，须真实30秒父孙挂起负控与PID消失证明。exec-chain已有cd R，prepared源也统一相对以复用job同入口；保留完整路径和源SHA缓存键，原cxbin修复前340证据不能代替新树验收。

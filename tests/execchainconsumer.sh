@@ -55,7 +55,7 @@ done
 b() { "$_BOUND" "$@"; }
 # Materialization validates the complete prepared identity and each copied output.
 # A missing/stale preparation exits 75; the consumer never builds on a miss.
-sh "$R/tests/cxbin" "$R/tests/execchainprepared.cx" --materialize "$T" || exit $?
+sh "$R/tests/cxbin" tests/execchainprepared.cx --materialize "$T" || exit $?
 MODEL=net
 for s in e2 e1 e3; do
     b 60 "$T/run" --check-net "$T/$s.tbl" "$T/$s.net" || exit 1

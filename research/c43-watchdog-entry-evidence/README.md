@@ -1,0 +1,9 @@
+# 监督清理与准备入口：实际证据
+
+2026-10-24 scratch 空home/tmp命名空间隔离实际执行。modelobject命令仍为bound30；外sp_spawn仅32.25，覆盖原bound既有N+2清理与0.25余量，不增加命令或整套件预算。通用bound/seedprep未改。
+
+负控从实际tests/modelobjectcheck.cx精确复制cmd函数（SHA随附）运行真实30秒：父进程与setsid孙进程均忽略TERM并pause；内bound返回142，原cmd按设计抛出非0，外部原生C检查器waitpid回收probe并确认两个挂起PID均ESRCH。真实监督耗时30.081099秒，小于32.25；result/command/cleanup.trace原字节收录。replay.sh仅调用仓内产品与C编译器；只在scratch隔离运行，保留新out材料，不删除。
+
+exec-chain准备源与job统一相对入口，其脚本已先cd R；绝对wrapper和全部路径/实际源SHA缓存身份不变。旧cxbin修复前340比较不冒充本树证明；本树需要独立index预建与全部五分片真实通过。模型对象同样需要本树八份独立有界准备、21输出与原配方字节比较及新具名闸。所有新收据区分准备命中与测试结果，不缓存PASS，不改裁定。
+
+本树index的modelobject八份各独立bound55实际0，共同身份6839106e42b528c3dd5ecdcebfb16acca751513f376a26b2a2eb54174121d762一致；21实际文件与原配方全SAME。消费者无效参数预编译预期1，仅工具预编译。chain独立bound55冷准备实际0，11输出与原配方全SAME。随后冻结同一index，两批具名闸（chain六项、model十四项加chain准备）均须实际通过；此处准备结果不记作测试PASS。真实执行平台Linux x86_64，未声称Darwin/Windows负控证明。
