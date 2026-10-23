@@ -331,7 +331,7 @@ printf '%s\n' 'int main(void){int n;register int*p=&n;return &p==0;}' > "$T/reg_
 printf '%s\n' 'int main(void){register int n=3;return &n==0;}' > "$T/reg_rej_scalar.c"
 printf '%s\n' 'struct S{int a[2];};int main(void){register struct S s;return &s.a[0]==0;}' > "$T/reg_rej_struct_array_member.c"
 for f in "$T"/reg_rej_*.c; do
-    rm -f "$T/reg.bin"; "$_BOUND" 20 "$UA" "$f" -b lnx/x86_64 -o "$T/reg.bin" > "$T/reg.out" 2>&1; rc=$?
+    sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T/reg.bin" || exit 3; "$_BOUND" 20 "$UA" "$f" -b lnx/x86_64 -o "$T/reg.bin" > "$T/reg.out" 2>&1; rc=$?
     if [ "$rc" -eq 1 ] && [ ! -e "$T/reg.bin" ] && grep -q "error:.*C99 6.5.3.2p1" "$T/reg.out"; then ok=$((ok+1))
     else bad=$((bad+1)); printf "  FAIL %-28s rc=%s want the 6.5.3.2p1 rejection: %s\n" "${f##*/}" "$rc" "$(head -1 "$T/reg.out" | cut -c1-80)"; fi
 done

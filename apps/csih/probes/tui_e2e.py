@@ -6,6 +6,9 @@ SRCS = sys.argv[3]
 # concurrent runs (check.sh runs this probe, and a person may run it too) write
 # the same file, so one would delete the other's evidence mid-assertion.
 TR  = os.path.join(sys.argv[4], "tui-e2e.jsonl")
+# Deletions go through the one deletion guard's argv CLI (include/unisa_safedel.h, tests/safedel.cx).
+SAFEDEL = ["sh", os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../tests/cxbin"),
+           os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../tests/safedel.cx"), "--purge", "--"]
 fail = 0
 
 # How long to wait for the FIRST FRAME before typing. unisacc compiles the
@@ -121,7 +124,7 @@ for label, per_char in (("bulk (whole line in one write)", False), ("per-charact
 
 # One TUI process, three CLI lines. The frame must show the shell line and
 # the file the later read printed. This is the CLI entry driving the TUI.
-HAND = "/tmp/csih-e2e-hand.txt"
+HAND = os.path.join(sys.argv[4], "csih-e2e-hand.txt")   # per run, as TR: under the caller's temp dir (the guard's whitelist)
 rc, screen, up = run([
     "sh echo csih-hand",
     "write %s from-cli" % HAND,
@@ -138,7 +141,7 @@ else:
         print("  FAIL  cli hand: screen missing tool output: %s"
               % " ".join(screen.split())[:240])
         fail += 1
-if os.path.exists(HAND): os.remove(HAND)
+if os.path.exists(HAND): subprocess.run(SAFEDEL + [HAND], check=True)
 
 # Every line must still be valid JSON, with the user text in it.
 bad = 0
@@ -156,5 +159,5 @@ else:
     else:
         fail += 1
 
-if os.path.exists(TR): os.remove(TR)
+if os.path.exists(TR): subprocess.run(SAFEDEL + [TR], check=True)
 sys.exit(1 if fail else 0)

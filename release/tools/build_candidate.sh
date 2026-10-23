@@ -28,7 +28,8 @@ for step in shared osx/arm64 osx/x86_64 lnx/arm64 lnx/x86_64 win/arm64 win/x86_6
   tests/bound --status $D/status-${step//\//-} ${STEP_BOUND:-58} make model-com MODEL_DIR=$D MODEL_STEP=$step > $log 2>&1; rc=$?
   step_report "$step" "$rc" "$s0" "$D/status-${step//\//-}"; [ $rc -eq 0 ] || exit $rc
 done
-rm -rf $D/model-cache   # fresh construction per candidate
+# fresh construction per candidate: the old cache moves into the .trash of its root through the one guard (tests/safedel.cx)
+[ -n "$D" ] && sh "$R/tests/cxbin" "$R/tests/safedel.cx" -- "$D/model-cache" || { echo "build_candidate: $D/model-cache not cleared (refused)"; exit 3; }
 for step in pack-prep-1 pack-prep-2 pack-prep-3 pack-models pack-driver; do
   s0=$(monotonic_ms)
   tests/bound --status $D/status-$step ${STEP_BOUND:-58} make model-com MODEL_DIR=$D MODEL_STEP=$step UA=$UA > $D/step-$step.log 2>&1; rc=$?

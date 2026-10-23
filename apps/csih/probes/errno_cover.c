@@ -2,6 +2,7 @@
  *   unisacc probes/errno_cover.c probes/u_run.c
  * Exit 0 only when every name below prints a number. No gcc.
  */
+#include "../../../include/unisa_safedel.h"   /* the one deletion guard (commissar ruling 2026-10-23) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,12 +29,12 @@ static int is_num(const char *s) {
 
 int main(void) {
     const char *u = getenv("UNISACC");
-    char dir[64], src[80], body[160], out[512];
+    char dir[4096], src[4200], body[160], out[512], why[600]; const char *td = getenv("TMPDIR");
     int i, n, rc, have = 0, miss = 0;
     FILE *f;
     if (!u || !u[0]) u = "/Users/wjc/repos/unisacc/unisacc.com";
     n = (int)(sizeof names / sizeof names[0]);
-    snprintf(dir, sizeof dir, "/tmp/cdsh-errno-%d", (int)getpid());
+    snprintf(dir, sizeof dir, "%s/cdsh-errno-%d", td && td[0] ? td : "/tmp", (int)getpid());   /* the guard's temp root */
     if (mkdir(dir, 0700) != 0) { printf("no temp\n"); return 2; }
     snprintf(src, sizeof src, "%s/c.c", dir);
     printf("MISSING:");
@@ -50,7 +51,7 @@ int main(void) {
         if (rc == 0 && is_num(out)) have++;
         else { miss++; printf(" %s", names[i]); }
     }
-    remove(src); rmdir(dir);
+    if (unisa_safedel(dir, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 0, why, (int)sizeof why)) fprintf(stderr, "errno_cover: %s\n", why);
     printf("\nunisacc errno coverage: %d defined, %d missing (of %d)\n", have, miss, n);
     return miss ? 1 : 0;
 }

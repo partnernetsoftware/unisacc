@@ -28,12 +28,15 @@ root_sha256='5367f20c7ade0e2bca790915056d086b720c33c1fa2a2661acf787e3292e1270'
 tsa_url='https://www.microsoft.com/pkiops/certs/Microsoft%20Public%20RSA%20Timestamping%20CA%202020.crt'
 tsa_sha256='36e731cfa9bfd69dafb643809f6dec500902f7197daeaad86ea0159a2268a2b8'
 
+# every removal goes through the one deletion guard: argv CLI tests/safedel.cx over include/unisa_safedel.h (a
+# staged file outside its whitelist -- $TMPDIR, <repo>/out -- is refused and left in place, with a message)
+_SD="$(cd -- "$(dirname -- "$0")/.." && pwd)/tests"
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/microsoft-artifact-signing-trust.XXXXXX")
 staged=$(mktemp "$output_parent/.microsoft-artifact-signing-trust.XXXXXX")
 cleanup() {
-  rm -rf -- "$scratch"
+  sh "$_SD/cxbin" "$_SD/safedel.cx" --purge -- "${scratch:?}"
   if [[ -n "${staged:-}" && -f "$staged" ]]; then
-    rm -f -- "$staged"
+    sh "$_SD/cxbin" "$_SD/safedel.cx" --purge -- "$staged"
   fi
 }
 trap cleanup EXIT

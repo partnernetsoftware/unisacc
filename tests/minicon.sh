@@ -3,8 +3,8 @@
 # shipped unisacc.com (product route) and, when UA is set, the reference compiler; every build must
 # behave like cc on the loader's own contract: exit codes, payload argv/exit/signal pass-through,
 # and no extract directory left behind.
-cd "$(dirname "$0")/.." || exit 1
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+R=$(cd "$(dirname "$0")/.." && pwd) && cd "$R" || exit 1
+T=$(mktemp -d); trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT
 case "$(uname -s)/$(uname -m)" in
   Darwin/arm64) cell=osx-aarch64;; Darwin/x86_64) cell=osx-x86_64;;
   Linux/aarch64) cell=lnx-aarch64;; Linux/x86_64) cell=lnx-x86_64;;

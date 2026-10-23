@@ -3,6 +3,7 @@
  * Calls sit in a never-taken branch so execvp does not run. No gcc.
  * Exit 1 if any errno name or function is missing.
  */
+#include "../../../include/unisa_safedel.h"   /* the one deletion guard (commissar ruling 2026-10-23) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -49,12 +50,12 @@ static int is_num(const char *s) {
 
 int main(void) {
     const char *u = getenv("UNISACC");
-    char dir[64], src[80], body[1200], out[800];
+    char dir[4096], src[4200], body[1200], out[800], why[600]; const char *td = getenv("TMPDIR");
     int i, n, rc, miss = 0, have = 0, fmiss = 0;
     FILE *f;
     char *args[1];
     if (!u || !u[0]) u = "/Users/wjc/repos/unisacc/unisacc.com";
-    snprintf(dir, sizeof dir, "/tmp/cdsh-libc-%d", (int)getpid());
+    snprintf(dir, sizeof dir, "%s/cdsh-libc-%d", td && td[0] ? td : "/tmp", (int)getpid());   /* the guard's temp root */
     if (mkdir(dir, 0700) != 0) { printf("no temp\n"); return 2; }
     snprintf(src, sizeof src, "%s/c.c", dir);
     args[0] = src;
@@ -95,6 +96,6 @@ int main(void) {
     }
     printf("Functions listed: %d. Missing: %d. Errno missing: %d.\n",
            (int)(sizeof fn / sizeof fn[0]), fmiss, miss);
-    remove(src); rmdir(dir);
+    if (unisa_safedel(dir, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 0, why, (int)sizeof why)) fprintf(stderr, "libc_cover: %s\n", why);
     return (miss || fmiss) ? 1 : 0;
 }

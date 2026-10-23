@@ -15,8 +15,8 @@ R=$(cd "$here/.." && pwd)
 (cd "$R" && . ./tests/lib.sh && ua_ready) || exit 2
 P="$here/ccinterop"
 B="python3 $here/bound.py"
-tmp=$(mktemp -d /tmp/ccinterop.XXXXXX)
-trap 'rm -rf "$tmp"' EXIT
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/ccinterop.XXXXXX")   # under the deletion guard's temp root (tests/safedel.cx)
+trap 'sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${tmp:?}"' EXIT
 ok=0; wrong=0; skipped=0; why=
 pass() { ok=$((ok + 1)); echo "ccinterop  ok     $1"; }
 fail() { wrong=$((wrong + 1)); echo "ccinterop  WRONG  $1"; }
@@ -73,8 +73,12 @@ lnx() {   # arch vm name a b
     d="$tmp/lnx-$1-$3"; mkdir -p "$d"
     if ! $B 20 "$UA" -c -b "lnx/$1" "$P/$4.c" -o "$d/a.o"; then fail "$3 lnx/$1 (compile)"; return; fi
     cp "$P/$4.c" "$d/a.c"; cp "$P/$5.c" "$d/b.c"
-    r=$( (cd "$d" && tar cf - a.o a.c b.c) | $B 55 limactl shell "$2" -- sh -c \
-        'rm -rf /tmp/ccinterop && mkdir /tmp/ccinterop && cd /tmp/ccinterop && tar xf - && cc -O1 -fno-stack-protector -c b.c && cc -nostdlib -nostartfiles -static -o p a.o b.o && ./p > got && cc -o r a.c b.c && ./r > want && cmp -s got want && echo SAME' 2>&1); rc=$?
+    # the guest works in a fresh mkdtemp dir and removes it through the deletion guard, which travels in the
+    # tarball (g/: tests/cxbin builds tests/safedel.cx with the guest's cc) -- no rm in the guest (commissar ruling)
+    mkdir -p "$d/g/tests" "$d/g/include"
+    cp "$R/tests/cxbin" "$R/tests/safedel.cx" "$d/g/tests/"; cp "$R/include/cx.h" "$R/include/unisa_sha256.h" "$R/include/unisa_safedel.h" "$d/g/include/"
+    r=$( (cd "$d" && tar cf - a.o a.c b.c g) | $B 55 limactl shell "$2" -- sh -c \
+        'w=$(mktemp -d "${TMPDIR:-/tmp}/ccinterop.XXXXXX") || exit 1; cd "$w" && tar xf - && cc -O1 -fno-stack-protector -c b.c && cc -nostdlib -nostartfiles -static -o p a.o b.o && ./p > got && cc -o r a.c b.c && ./r > want && cmp -s got want && echo SAME; s=$?; cd / && sh "$w/g/tests/cxbin" "$w/g/tests/safedel.cx" --purge -- "$w"; exit $s' 2>&1); rc=$?
     case "$r" in
         *SAME*) pass "$3 lnx/$1" ;;
         *) if [ $rc -eq 124 ] || [ $rc -eq 137 ] || [ $rc -eq 142 ]; then skip "$3 lnx/$1 (VM $2 did not answer in time)"; else fail "$3 lnx/$1 ($(echo "$r" | tail -3 | tr '\n' ' '))"; fi ;;

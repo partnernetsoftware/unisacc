@@ -11,6 +11,7 @@
  * FAIL and is never hashed: every output is removed first and written through tmp-NAME, renamed only
  * on success, so a stale file cannot pass.  RUN runs what this host can run (osx/arm64,
  * osx/x86_64 under Rosetta).  Every compile and run is bounded by tests/bound. */
+#include "../../include/unisa_safedel.h"   /* the one deletion guard (commissar ruling 2026-10-23); first: its feature macro */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,6 +23,12 @@ static char *CC, *OUT;
 static int bad;
 
 static void dash(char *o, char *t) { strcpy(o, t); o[strcspn(o, "/")] = '-'; }
+
+/* P (a file) through the guard, never a shell string; a refusal or failure is reported, not fatal */
+static void gone(char *p) {
+    char why[600];
+    if (unisa_safedel(p, SAFEDEL_PURGE, 0, why, (int)sizeof why)) fprintf(stderr, "accept: %s\n", why);
+}
 
 static int sh(char *cmd) { int r = system(cmd); if (r) fprintf(stderr, "accept: rc %d: %s\n", r, cmd); return r; }
 
@@ -39,10 +46,10 @@ static void build(char *kind, char *tag, char *src, char *flags, char *name) {
     char out[1024], tmp[1024], cmd[4096];   /* tmp keeps the extension: -S writes text only to *.s */
     snprintf(out, sizeof out, "%s/%s", OUT, name);
     snprintf(tmp, sizeof tmp, "%s/tmp-%s", OUT, name);
-    remove(out);
-    snprintf(cmd, sizeof cmd, "rm -f '%s' && tests/bound 30 '%s' '%s' %s -o '%s' && mv '%s' '%s'",
-             tmp, CC, src, flags, tmp, tmp, out);
-    if (sh(cmd)) { printf("%s\t%s\tFAIL compile\n", kind, tag); bad = 1; remove(out); return; }
+    gone(out); gone(tmp);
+    snprintf(cmd, sizeof cmd, "tests/bound 30 '%s' '%s' %s -o '%s' && mv '%s' '%s'",
+             CC, src, flags, tmp, tmp, out);
+    if (sh(cmd)) { printf("%s\t%s\tFAIL compile\n", kind, tag); bad = 1; gone(out); return; }
     sha(kind, tag, out);
 }
 
@@ -58,9 +65,10 @@ static int fill(char *tmpl, char *dst, char *nr, char *anon) {
 }
 
 static void run(char *t, char *name, char *expect) {
-    char cmd[4096], n[64];
+    char cmd[4096], n[64], fout[1024];
     dash(n, t);
-    snprintf(cmd, sizeof cmd, "f='%s/%s'; [ -f \"$f\" ] && rm -f \"$f.out\" && tests/bound 10 \"$f\" > \"$f.out\" && cmp -s \"$f.out\" '%s/%s'",
+    snprintf(fout, sizeof fout, "%s/%s.out", OUT, name); gone(fout);
+    snprintf(cmd, sizeof cmd, "f='%s/%s'; [ -f \"$f\" ] && tests/bound 10 \"$f\" > \"$f.out\" && cmp -s \"$f.out\" '%s/%s'",
              OUT, name, D, expect);
     if (sh(cmd)) { printf("run\t%s:%s\tFAIL\n", t, name); bad = 1; } else printf("run\t%s:%s\tok\n", t, name);
 }

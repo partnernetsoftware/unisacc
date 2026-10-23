@@ -79,10 +79,10 @@ if a.prepare:
    # Never publish an in-flight source change as this key.
    assert provenance.source_digest()==basis['sources']
    actors_now,_=actor_closure(ROOT,['tests/closure.sh','tests/closureprepared.py','tests/knownfail.sh','tests/knownfail.py','tests/par.sh','tests/lib.sh','tests/bound','tests/bound.py','exec/c/provenance.py']);assert actors_now==actors
-   shutil.rmtree(capture)
+   subprocess.run(['sh',str(ROOT/'tests/cxbin'),str(ROOT/'tests/safedel.cx'),'--purge','--max-files','100000','--',str(capture)],check=True)   # the one deletion guard (commissar ruling 2026-10-23)
    try:cache.stat()
    except FileNotFoundError:pass
-   else:shutil.rmtree(cache)
+   else:subprocess.run(['sh',str(ROOT/'tests/cxbin'),str(ROOT/'tests/safedel.cx'),'--max-files','100000','--',str(cache)],check=True)   # the replaced cache entry: into the trash
    work.rename(cache)
  print(json.dumps({'status':'PREPARED','identity':key,'cache':str(cache),'targets':TARGETS,'ordered_files':files,'actors':actors},sort_keys=True));raise SystemExit(0)
 folder=verify(a.target)

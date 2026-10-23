@@ -46,20 +46,11 @@ char *sp_xstrdup(const char *s) { return sp_xstrndup(s, strlen(s)); }
 char *sp_cat(const char *a, const char *b) { sp_buf x = {0, 0, 0}; sp_bstr(&x, a); sp_bstr(&x, b); return x.s ? x.s : sp_xstrdup(""); }
 
 /* ---------- scratch tree (tempfile.TemporaryDirectory) and uncaught exceptions ---------- */
-void sp_rmtree(const char *p) {
-    struct stat s; DIR *d; struct dirent *e;
-    if (lstat(p, &s)) return;
-    if (S_ISDIR(s.st_mode)) {
-        if ((d = opendir(p))) {
-            while ((e = readdir(d))) {
-                char *q;
-                if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-                q = sp_xmalloc(strlen(p) + strlen(e->d_name) + 2); sprintf(q, "%s/%s", p, e->d_name); sp_rmtree(q); free(q);
-            }
-            closedir(d);
-        }
-        rmdir(p);
-    } else unlink(p);
+/* the module API name kept as a thin wrapper over the one deletion guard (unisa_safedel, include/cx.h prelude; commissar
+   ruling 2026-10-23): refused, with one `cx_rmtree: why` line, unless under the temp root or a repository's out/ */
+void sp_rmtree(const char *p) {   /* scratch trees and prepared cache entries: an explicit ceiling above SAFEDEL_MAX_FILES */
+    char why[700];
+    if (unisa_safedel(p, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 200000L, why, (int)sizeof why)) fprintf(stderr, "cx_rmtree: %s\n", why);
 }
 /* the scratch tree of sp_mkdtemp_py (a TemporaryDirectory): removed on every exit path that leaves the block */
 void sp_scratch_remove(void) { if (TD[0]) { sp_rmtree(TD); TD[0] = 0; } }
@@ -992,7 +983,7 @@ static int tmpfd(void) {
     p = sp_cat(d, "/seedprep-capXXXXXX"); fd = mkstemp(p);
     if (fd < 0) { free(p); p = sp_xstrdup("/tmp/seedprep-capXXXXXX"); fd = mkstemp(p); }
     if (fd < 0) sp_raise_line("OSError: cannot capture a child's output");
-    unlink(p); free(p); return fd;
+    cx_remove(p); free(p); return fd;
 }
 /* spawn ARGV in ROOT; stdout captured into *OUT (when OUT), stderr captured into *ERR (when ERR) or inherited.
    Returns the Popen returncode (negative N for signal N); -1000 on timeout; raises when it cannot start. */

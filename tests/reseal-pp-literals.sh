@@ -25,7 +25,8 @@ run strace-literalcheck "$O/trace" exec/pp/literalcheck.py \
 run capture "$O/capture" tests/ppleafcapture.cx \
   tests/bound 58 sh "$P" -run tests/ppleafcapture.cx -- "$O/trace" "$ROOT" "$O/capture" || exit 1
 # 2b. observation files the README keeps out of the repo (not checked; not sealed)
-rm -f "$O/capture/directories.tsv" "$O/capture/tools.tsv" "$O/capture/queries.tsv" "$O/capture/observation.tsv"
+#    (through the one deletion guard's argv CLI, commissar ruling 2026-10-23)
+sh "$ROOT/tests/cxbin" "$ROOT/tests/safedel.cx" --purge -- "$O/capture/directories.tsv" "$O/capture/tools.tsv" "$O/capture/queries.tsv" "$O/capture/observation.tsv" || exit 1
 # 3. writer: the repo checker's formal subcommand --write-seal (same checks, then measurement.tsv and identity.tsv
 #    are written; the values come from the capture, not from a hand-typed number)
 run writer "$O/capture" tests/ppleafseal.cx \

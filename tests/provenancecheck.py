@@ -30,7 +30,7 @@ with tempfile.TemporaryDirectory() as td:
         output.write_text('generated v2')
         assert p.source_digest()==start, 'generated build output invalidated source identity'
         p.verify(binary)
-        output.unlink(); assert p.source_digest()==start
+        subprocess.run(['sh', str(ROOT/'tests/cxbin'), str(ROOT/'tests/safedel.cx'), '--purge', '--', str(output)], check=True); assert p.source_digest()==start
         new_output=output.parent/'nested/model.json'; new_output.parent.mkdir(); new_output.write_text('{}')
         assert p.source_digest()==start, 'new generated output invalidated source identity'
         for source in (header, asm, source, generator):

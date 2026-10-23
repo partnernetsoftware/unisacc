@@ -30,23 +30,11 @@ static void say(const char *line) {   /* print(line) */
     memcpy(PEND + PN, line, n); PEND[PN + n] = '\n'; PN += n + 1;
 }
 
-static void rmtree(const char *d) {
-    DIR *dp = opendir(d); struct dirent *e; char p[8192]; struct stat st;
-    if (dp) {
-        while ((e = readdir(dp))) {
-            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-            snprintf(p, sizeof p, "%s/%s", d, e->d_name);
-            if (lstat(p, &st) == 0 && S_ISDIR(st.st_mode)) rmtree(p); else unlink(p);
-        }
-        closedir(dp);
-    }
-    rmdir(d);
-}
 /* the .py's uncaught exception: stdout as printed so far, one message on stderr, the directory removed, rc 1 */
 static void fail(const char *kind, const char *a, const char *b) {
     fprintf(stderr, "librarysig2hostcheck: %s: %s%s%s\n", kind, a, b && *b ? "\n" : "", b ? b : "");
     fflush(stderr);
-    if (TD[0]) { rmtree(TD); TD[0] = 0; }
+    if (TD[0]) { cx_rmtree(TD); TD[0] = 0; }
     out_flush();   /* Python flushes its pending prints at exit, after the traceback */
     exit(1);
 }
@@ -130,15 +118,15 @@ static int run_captured(const char *exe, const char *f, char **err, size_t *en) 
     argv[0] = bound; argv[1] = "20"; argv[2] = (char *)exe; argv[3] = (char *)f; argv[4] = 0;
     snprintf(of, sizeof of, "%s/.cap-out-XXXXXX", TD); snprintf(ef, sizeof ef, "%s/.cap-err-XXXXXX", TD);
     if ((ofd = mkstemp(of)) < 0) fail("OSError", "cannot create a capture file under", TD);
-    if ((efd = mkstemp(ef)) < 0) { close(ofd); unlink(of); fail("OSError", "cannot create a capture file under", TD); }
+    if ((efd = mkstemp(ef)) < 0) { close(ofd); cx_remove(of); fail("OSError", "cannot create a capture file under", TD); }
     pid = fork();
-    if (pid < 0) { close(ofd); close(efd); unlink(of); unlink(ef); fail("OSError", "fork failed for", bound); }
+    if (pid < 0) { close(ofd); close(efd); cx_remove(of); cx_remove(ef); fail("OSError", "fork failed for", bound); }
     if (pid == 0) { dup2(ofd, 1); dup2(efd, 2); close(ofd); close(efd); execv(argv[0], argv); _exit(127); }
     close(ofd); close(efd);
     rc = waitrc(pid, bound);
     *err = cx_read(ef, en);
     if (!*err) { *err = calloc(1, 1); *en = 0; }
-    unlink(of); unlink(ef);
+    cx_remove(of); cx_remove(ef);
     return rc;
 }
 static int contains(const char *h, size_t hn, const char *needle) {
@@ -265,7 +253,7 @@ int main(int argc, char **argv) {
         say("sig2 malformed layout/extent/parameters/payload controls rejected");
     }
     say("sig2 host: native + ASan/UBSan passed");
-    rmtree(TD); TD[0] = 0;
+    cx_rmtree(TD); TD[0] = 0;
     out_flush();
     return ferror(stdout) ? 1 : 0;
 }

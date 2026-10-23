@@ -46,7 +46,7 @@ def run_check(case_name, raw_text, expect_code, expect_ok, why_substr):
                 return False, "%s: want '%s' | %s" % (case_name, why_substr, out)
         return True, "%s: exit %d %s" % (case_name, p.returncode, out)
     finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        subprocess.run(["sh", os.path.join(ROOT, "tests/cxbin"), os.path.join(ROOT, "tests/safedel.cx"), "--purge", "--", tmpdir])
 
 def base(**over):
     """A minimal valid state; override fields via kwargs."""
@@ -164,7 +164,7 @@ def main():
     try:
         return run_all()
     finally:
-        shutil.rmtree(bindir, ignore_errors=True)
+        subprocess.run(["sh", os.path.join(ROOT, "tests/cxbin"), os.path.join(ROOT, "tests/safedel.cx"), "--purge", "--", bindir])
 
 def run_all():
     all_cases = cases() + cases2()

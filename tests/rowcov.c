@@ -21,6 +21,7 @@
  * fails when covered rows fall below it.  A log line for another model, an unknown state id, or a
  * malformed line is an error, never skipped: a coverage number from a mixed log is not a number.
  */
+#include "unisa_safedel.h"   /* the one deletion guard (commissar ruling 2026-10-23); include/ is the product's */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -191,7 +192,9 @@ static int selftest(void) {
         if (rc) { fprintf(stderr, "rowcov selftest: floor 2 failed\n"); return 1; }
         if (report("selftest", 3, 0) != 1) { fprintf(stderr, "rowcov selftest: floor 3 must fail\n"); return 1; }
     }
-    for (i = 0; i < 5; i++) remove(b[i]);
+    {   char why[600];
+        for (i = 0; i < 5; i++) if (unisa_safedel(b[i], SAFEDEL_PURGE, 0, why, (int)sizeof why)) { fprintf(stderr, "rowcov selftest: %s\n", why); return 1; }
+    }
     printf("rowcov selftest: ok (log and seen routes, BOT key -1, rejection not counted, synthetic rows excluded, floor)\n");
     return 0;
 }

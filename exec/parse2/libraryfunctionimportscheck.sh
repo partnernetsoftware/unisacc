@@ -8,7 +8,7 @@ key(){ { rg --files exec unisa seed include weights | LC_ALL=C sort | rg '\.(tsv
 K=$(key);D=${TMPDIR:-/tmp}/unisacc-libraryfunctionimports-$K
 if [ ! -r "$D/artifacts.sha256" ] || ! (cd "$D" && sha256sum -c --status artifacts.sha256);then
  T=$(mktemp -d "${TMPDIR:-/tmp}/libraryfunctionimports-prep.XXXXXX")
- trap 'rm -rf "$T"' EXIT HUP INT TERM
+ trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT HUP INT TERM
  b cc -std=c99 -O2 -w -Iseed seed/gen.c -o "$T/gen"
  b "$T/gen" parse2 "$T/c.json"
  b python3 exec/build/gen.py parse2 "$T/model.json"
@@ -19,10 +19,10 @@ if [ ! -r "$D/artifacts.sha256" ] || ! (cd "$D" && sha256sum -c --status artifac
  [ "$(key)" = "$K" ] || { echo 'libraryfunctionimports: preparation inputs changed' >&2; exit 2; }
  (cd "$T" && sha256sum model.json model.tbl model.net runner > artifacts.sha256)
  mkdir -p "$D";cp "$T/model.json" "$T/model.tbl" "$T/model.net" "$T/runner" "$T/artifacts.sha256" "$D/"
- rm -rf "$T";trap - EXIT HUP INT TERM
+ [ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T";trap - EXIT HUP INT TERM
 fi
 case ${1:-check} in --prepare) echo "libraryfunctionimports: prepared $K";exit 0;; check) ;; *) exit 2;; esac
 T=$(mktemp -d "${TMPDIR:-/tmp}/libraryfunctionimports-check.XXXXXX")
-trap 'rm -rf "$T"' EXIT HUP INT TERM
+trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT HUP INT TERM
 cp "$D/model.net" "$D/model.tbl" "$D/runner" "$T/";cp tests/libraryfunctionimports-cases.tsv "$T/cases.tsv"
 "$R/tests/bound" 35 sh "${MODEL_COM:-./unisacc.com}" -run tests/libraryfunctionimportscheck.cx -- "$T"

@@ -7,7 +7,8 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 BOUND=${BOUND:-$HERE/bound}
 BOUND=$(cd "$(dirname "$BOUND")" && pwd)/$(basename "$BOUND")
 T=$(mktemp -d)
-trap 'rm -rf "$T"' EXIT HUP INT TERM
+_SD=$HERE   # the one deletion guard: argv CLI tests/safedel.cx over include/unisa_safedel.h
+trap 'cd "$_SD" && sh "$_SD/cxbin" "$_SD/safedel.cx" --purge -- "${T:?}"' EXIT HUP INT TERM
 mkdir -p "$T/apps/csih"
 printf '/* forced */\n' > "$T/apps/csih/h.h"
 # time() is undefined here → forward stub → second compile of /tmp unit

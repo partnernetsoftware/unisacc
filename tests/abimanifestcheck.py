@@ -10,7 +10,7 @@
 
 Reads sources only; never builds or runs the product.  Exit 0 same, 1 different or underivable.
 """
-import pathlib, shutil, sys, tempfile
+import pathlib, shutil, subprocess, sys, tempfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import abimanifest
@@ -108,7 +108,7 @@ def selftest():
             ('changed table hash', 'changed  table ' + table,
              lambda r: (pathlib.Path(r) / table).write_bytes((pathlib.Path(r) / table).read_bytes() + b'#\n')),
             ('removed table', 'removed  table ' + table,
-             lambda r: (pathlib.Path(r) / table).unlink()),
+             lambda r: subprocess.run(['sh',str(ROOT/'tests/cxbin'),str(ROOT/'tests/safedel.cx'),'--purge','--',str(pathlib.Path(r) / table)],check=True)),
             ('MAP_FIXED no longer rejected', 'changed  guard library_mmap/posix',
              lambda r: edit(r, 'exec/c/libunisacc.c', 'if (!active || length<=0 || (flags&MAP_FIXED)) return -EINVAL;', 'if (!active || length<=0) return -EINVAL;')),
             ('munmap range test changed', 'changed  callback-fn library_munmap',
@@ -122,7 +122,7 @@ def selftest():
             ('hand-edited manifest', 'changed  export us_new',
              lambda r: edit(r, MANIFEST, 'export\tus_new\tus_context*(const char*)', 'export\tus_new\tus_context*(void)')),
             ('missing manifest', 'no committed manifest',
-             lambda r: (pathlib.Path(r) / MANIFEST).unlink()),
+             lambda r: subprocess.run(['sh',str(ROOT/'tests/cxbin'),str(ROOT/'tests/safedel.cx'),'--purge','--',str(pathlib.Path(r) / MANIFEST)],check=True)),
             ('elif loader branch', 'added    dlslot #elif ALT after',
              lambda r: edit(r, 'src/host_dl.h', '#if defined(__linux__) && !defined(__UNISA__)',
                             '#if FIRST\n#elif ALT\n    if (i == 9) return alternate;\n#elif LAST')),

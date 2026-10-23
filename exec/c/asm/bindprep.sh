@@ -32,7 +32,7 @@ mkdir -p "$E"
 b() { "$_BOUND" 60 "$@"; }
 
 if [ "$PART" = first ] || [ "$PART" = all ]; then
-rm -f "$D/first.done" "$D/images.done" "$D/prep.done"
+sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${D:?}/first.done" "${D:?}/images.done" "${D:?}/prep.done"
 # The seed blob and the carried kernels are indexed by ISA, so each arch gets
 # its own pair under the same $X.  blobs are rebuilt by fresh(), not by hand.
 b python3 exec/c/asm/blob.py "$ARCH" "$D/kernel.blob"
@@ -65,7 +65,7 @@ if [ ! -f "$D/first.done" ]; then
     echo "bind prep $ARCH: first part is incomplete" >&2
     exit 1
 fi
-rm -f "$D/images.done" "$D/prep.done"
+sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${D:?}/images.done" "${D:?}/prep.done"
 export CORE_ASM_ARCH=$ARCH UNISA_KERNEL="$D/kernel.blob"
 export EXEC_CC="$R/exec/c/asm/blobcc.sh" TARGET="osx/$ARCH"
 # A second elf.sh call reuses the same content-addressed models.  Restore its
@@ -83,7 +83,7 @@ if [ ! -f "$D/images.done" ]; then
     echo "bind prep $ARCH: image part is incomplete" >&2
     exit 1
 fi
-rm -f "$D/prep.done"
+sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${D:?}/prep.done"
 export CORE_ASM_ARCH=$ARCH UNISA_KERNEL="$D/kernel.blob"
 export EXEC_CC="$R/exec/c/asm/blobcc.sh" TARGET="osx/$ARCH"
 UNISACC_MODEL_CACHE="$D/model-cache" b python3 exec/c/compilerpack.py --prepare-only --part 1/3 --o1 "$D/o1.net" --include include -o /dev/null "$E/route.tsv"

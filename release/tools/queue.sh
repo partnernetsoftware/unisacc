@@ -70,12 +70,15 @@ Q=${QUEUE_STATE:-$D.queue}
 # windows (no gatequeue alive, nothing half-written).  0.0.40: default QUEUE_START=fresh never
 # auto-restores that backup (B.5 16:09:40 mis-restore); resume is explicit and receipt-bound.
 # gatequeue still re-checks every stamp, so a resumed result is reused only for identical inputs.
-B=${QUEUE_BACKUP:-$HOME/.unisacc/queue-backup/$(basename "$D")-$(shasum -a 256 "$D/unisacc-next.com" | cut -c1-12)}
+# 2026-10-23 (commissar ruling: deletions only under a whitelisted root): the default backup moved from
+# ~/.unisacc/queue-backup to the main checkout's out/queue-backup -- still outside the candidate dir and /tmp, and its
+# rotation below deletes through tests/safedel.cx (a backup holds about 1100 files: --force-count)
+B=${QUEUE_BACKUP:-$M/out/queue-backup/$(basename "$D")-$(shasum -a 256 "$D/unisacc-next.com" | cut -c1-12)}
 "$R/release/tools/queuestart.sh" "$Q" "$B" "$D" "${QUEUE_START:-fresh}" || exit $?
 mkdir -p "$Q"
 backup() {   # swap only after a complete copy: a failed copy keeps the previous backup
-  mkdir -p "$B" && rm -rf "$B/state.new" && cp -pR "$Q" "$B/state.new" && cp -p "$D/unisacc-next.com.build.json" "$B/" \
-    && rm -rf "$B/state.old" && { [ ! -d "$B/state" ] || mv "$B/state" "$B/state.old"; } && mv "$B/state.new" "$B/state" && rm -rf "$B/state.old" \
+  mkdir -p "$B" && sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge --force-count 20000 -- "${B:?}/state.new" && cp -pR "$Q" "$B/state.new" && cp -p "$D/unisacc-next.com.build.json" "$B/" \
+    && sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge --force-count 20000 -- "${B:?}/state.old" && { [ ! -d "$B/state" ] || mv "$B/state" "$B/state.old"; } && mv "$B/state.new" "$B/state" && sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge --force-count 20000 -- "${B:?}/state.old" \
     || echo "queue: backup to $B failed (previous copy kept)" >> "$LOG"; }
 LOG=$Q/release-queue.log; [ -f "$LOG" ] && echo "--- restart $(date +%H:%M:%S)" >> "$LOG" || : > "$LOG"
 [ -z "$sid" ] || st end --id "$sid" --execution-status setup >/dev/null; sid=

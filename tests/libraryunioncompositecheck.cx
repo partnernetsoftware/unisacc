@@ -86,21 +86,7 @@ static char *xstrdup(const char *s) { return xstrndup(s, strlen(s)); }
 static char *fmt2(const char *a, const char *b) { Buf o = {0}; bputs(&o, a); bputs(&o, b); return o.p; }
 
 /* ---- cleanup and fatal paths ---- */
-static void rmtree(const char *p) {
-    struct stat s; DIR *d; struct dirent *e;
-    if (lstat(p, &s) != 0) return;
-    if (!S_ISDIR(s.st_mode)) { unlink(p); return; }
-    if ((d = opendir(p))) {
-        while ((e = readdir(d))) {
-            char c[8192];
-            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-            snprintf(c, sizeof c, "%s/%s", p, e->d_name); rmtree(c);
-        }
-        closedir(d);
-    }
-    rmdir(p);
-}
-static void cleanup(void) { if (TD[0]) { rmtree(TD); TD[0] = 0; } }
+static void cleanup(void) { if (TD[0]) { cx_rmtree(TD); TD[0] = 0; } }
 /* the original's uncaught exception: its last traceback line on stderr, rc 1 (the temporary directory goes, as the
    with-block's cleanup did) */
 static void fatal(const char *kind, const char *msg) {
@@ -474,10 +460,10 @@ static void spawn(char **argv, int secs, int filter, Res *r) {
     memset(r, 0, sizeof *r);
     snprintf(op, sizeof op, "%s/.ucc-out-XXXXXX", BASE); snprintf(ep, sizeof ep, "%s/.ucc-err-XXXXXX", BASE);
     if ((ofd = mkstemp(op)) < 0) fatal("OSError", "cannot create a capture file");
-    if ((efd = mkstemp(ep)) < 0) { close(ofd); unlink(op); fatal("OSError", "cannot create a capture file"); }
+    if ((efd = mkstemp(ep)) < 0) { close(ofd); cx_remove(op); fatal("OSError", "cannot create a capture file"); }
     fflush(stdout); fflush(stderr);
     pid = fork();
-    if (pid < 0) { close(ofd); close(efd); unlink(op); unlink(ep); fatal("OSError", "fork failed"); }
+    if (pid < 0) { close(ofd); close(efd); cx_remove(op); cx_remove(ep); fatal("OSError", "fork failed"); }
     if (pid == 0) {
         dup2(ofd, 1); dup2(efd, 2); close(ofd); close(efd);
         if (filter) {
@@ -502,7 +488,7 @@ static void spawn(char **argv, int secs, int filter, Res *r) {
     r->out = cx_read(op, &r->on); r->err = cx_read(ep, &r->en);
     if (!r->out) { r->out = calloc(1, 1); r->on = 0; }
     if (!r->err) { r->err = calloc(1, 1); r->en = 0; }
-    unlink(op); unlink(ep);
+    cx_remove(op); cx_remove(ep);
 }
 static char *uname_field(char *flag) {
     char *a[] = { "uname", flag, 0 }, *out = 0; size_t n = 0;

@@ -8,7 +8,11 @@ _BOUND=$("$_BOUND" --helper) || exit 2
 # ../tests/build_ref.sh into build/.
 set -u
 cd "$(dirname "$0")"
-B=build; mkdir -p $B/cases
+R=$(cd .. && pwd)
+B=build; mkdir -p $B
+# the cases are per run, in a private directory (no stale c* to delete; deletion goes through the guard, tests/safedel.cx)
+C=$(mktemp -d "${TMPDIR:-/tmp}/exec-check-cases.XXXXXX") || exit 1
+trap '[ -z "$C" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$C"' EXIT
 bound() { "$_BOUND" "$@"; }
 UA=${UA:-$B/ua_ref}
 if [ ! -x "$UA" ]; then
@@ -23,9 +27,8 @@ for x in cc ua; do
   bound 20 ./$B/exec_$x -dump toy/toy.tbl > $B/dump_$x || { echo "dump $x failed"; exit 1; }
   printf 'T1 %s: ' $x; bound 30 python3 toy/gen.py check $B/dump_$x || fail=1
 done
-rm -f $B/cases/c*
 i=0
-mk() { i=$((i+1)); printf '%s' "$1" > $B/cases/c$i; }
+mk() { i=$((i+1)); printf '%s' "$1" > "$C/c$i"; }
 for s in '' '1' '1+2' '1*2' '1+2*3' '(1+2)*3' '((((7))))' '1+2+3+4' '2*3*4+5*(6+7)' \
          '(' ')' '1+' '+1' '1**2' '(1+2' '1+2)' '12' 'a' '1 +2' '()' '9*(8+(7*(6+5)))'; do
   mk "$s"
@@ -38,10 +41,10 @@ mk "${p}1${q}"; mk "${p}1+2${q}*3"; mk "${p}1${q})"; mk "${p}1"; mk "${p}${q}"
 s=''; k=0; while [ $k -lt 500 ]; do s="${s}1+"; k=$((k+1)); done
 mk "${s}1"; mk "$s"
 n=0
-for f in $B/cases/c*; do
-  bound 10 python3 toy/ref.py $f > $B/r.out 2> $B/r.err; rr=$?
+for f in "$C"/c*; do
+  bound 10 python3 toy/ref.py "$f" > $B/r.out 2> $B/r.err; rr=$?
   for x in cc ua; do
-    bound 10 ./$B/exec_$x toy/toy.tbl $f > $B/e.out 2> $B/e.err; er=$?
+    bound 10 ./$B/exec_$x toy/toy.tbl "$f" > $B/e.out 2> $B/e.err; er=$?
     if [ $er != $rr ] || ! cmp -s $B/e.out $B/r.out || ! cmp -s $B/e.err $B/r.err; then
       echo "DIFF $x $f: exit $er vs $rr: $(cat $B/e.err) | $(cat $B/r.err)"; fail=1
     fi

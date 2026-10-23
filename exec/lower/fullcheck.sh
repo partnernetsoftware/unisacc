@@ -3,9 +3,12 @@ _BOUND=$(cd "$(dirname "$0")/../.." && pwd)/tests/bound
 _BOUND=$("$_BOUND" --helper) || exit 2
 set -eu
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+_SD="$R"/tests   # the one deletion guard: argv CLI tests/safedel.cx over include/unisa_safedel.h
+T=$(mktemp -d); trap 'sh "$_SD/cxbin" "$_SD/safedel.cx" --purge -- "${T:?}"' EXIT
 b() { "$_BOUND" 60 "$@"; }
 UA=${UA:-/tmp/ua_ref}; . ./tests/lib.sh; ua_ready
+# tests/lib.sh replaced the trap above: one trap for both scratch directories, through the one deletion guard
+trap 'sh "$_SD/cxbin" "$_SD/safedel.cx" --purge -- "${T:?}" "${_LIB_TMP:?}"' EXIT
 b cc -O2 -o "$T/run" exec/c/run.c
 b python3 exec/build/gen.py lower "$T/d.json" --full
 b python3 exec/c/tbl.py "$T/d.json" "$T/d.tbl"

@@ -17,7 +17,8 @@ set -u
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 D=$1; shift
 [ $# -gt 0 ] || { echo "no input files"; exit 1; }
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+_SD="$R"/tests   # the one deletion guard: argv CLI tests/safedel.cx over include/unisa_safedel.h
+T=$(mktemp -d); trap 'sh "$_SD/cxbin" "$_SD/safedel.cx" --purge -- "${T:?}"' EXIT
 b() { "$_BOUND" "$@"; }
 b 60 cc -O2 -std=c99 -w -o "$T/run" exec/c/run.c || { echo "exec/c: cc failed"; exit 1; }
 b 60 python3 exec/c/tbl.py "$D" "$T/d.tbl" || { echo "exec/c: tbl.py failed"; exit 1; }

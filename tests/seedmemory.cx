@@ -282,18 +282,6 @@ static void normpath_abs(const char *s, char *out, size_t cap) {      /* pathlib
     if (strlen(full) < cap) strcpy(out, full); else *out = 0;
     free(full);
 }
-static void rm_tree(const char *dir) {
-    DIR *d = opendir(dir); struct dirent *e;
-    if (!d) { unlink(dir); return; }
-    while ((e = readdir(d))) {
-        char *p; struct stat st;
-        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-        p = cat3(dir, "/", e->d_name);
-        if (lstat(p, &st) == 0 && S_ISDIR(st.st_mode)) rm_tree(p); else unlink(p);
-        free(p);
-    }
-    closedir(d); rmdir(dir);
-}
 static const char *temp_base(void) {                                 /* tempfile.gettempdir() candidates */
     static const char *env[] = { "TMPDIR", "TEMP", "TMP", 0 }, *fixed[] = { "/tmp", "/var/tmp", "/usr/tmp", 0 };
     int i; struct stat st; const char *v;
@@ -310,7 +298,7 @@ static int spawn(char *const argv[], const char *cwd, int secs, int quiet, char 
     if (fd < 0) { free(tmp); return -1; }
     fflush(stdout); fflush(stderr);
     pid = fork();
-    if (pid < 0) { close(fd); unlink(tmp); free(tmp); return -1; }
+    if (pid < 0) { close(fd); cx_remove(tmp); free(tmp); return -1; }
     if (pid == 0) {
         int i, k, ne = 0, na = 0; char **v;
         setpgid(0, 0); dup2(fd, 1); close(fd);
@@ -335,7 +323,7 @@ static int spawn(char *const argv[], const char *cwd, int secs, int quiet, char 
         if (secs > 0 && ticks-- <= 0) { kill(-pid, SIGKILL); kill(pid, SIGKILL); waitpid(pid, &st, 0); rc = 124; break; }
         usleep(10000);
     }
-    *out = cx_read(tmp, len); unlink(tmp); free(tmp);
+    *out = cx_read(tmp, len); cx_remove(tmp); free(tmp);
     return rc;
 }
 static int execution_identity_real(const char *family, Identity *id) {
@@ -363,7 +351,7 @@ static int execution_identity_real(const char *family, Identity *id) {
     if (!mkdtemp(td)) { free(td); return 0; }
     argv[0] = cc; argv[1] = "--version"; argv[2] = 0;
     rc = spawn(argv, td, 5, 1, 0, &out, &n);
-    rm_tree(td); free(td);
+    cx_rmtree(td); free(td);
     if (rc || !out) { free(out); return 0; }
     for (i = 0; i < n; i++) if (strchr("\n\r\v\f\x1c\x1d\x1e", out[i]) && out[i]) break;
     if (!n) { free(out); return 0; }                                 /* no stdout lines */
@@ -629,7 +617,7 @@ static void st_touch_json(const char *cache, const char *key, const char *name) 
 static char *st_capture_main(int argc, char **argv, int *rc) {
     char *d = st_tmp(), *p = st_join(d, "out"), *text; FILE *f = fopen(p, "w");
     *rc = run_main(argc, argv, f); fclose(f);
-    text = cx_read(p, 0); rm_tree(d); free(d); free(p); return text;
+    text = cx_read(p, 0); cx_rmtree(d); free(d); free(p); return text;
 }
 static char *sh_quote(const char *s) {
     size_t n = 3; const char *p; char *r, *q;
@@ -647,15 +635,15 @@ static void case_low_mem_and_cgroup_and_parent(void) {
         char *d = st_tmp(), *p[3]; long long got = -7;
         st_fake(d, t[i].mem, t[i].x, t[i].u, t[i].parent, p);
         CHECK(available_paths(p[0], p[1], p[2], &got) == AV_OK && got == t[i].want, "available() value");
-        rm_tree(d); free(d);
+        cx_rmtree(d); free(d);
     }
 }
 static void case_missing_membership_is_unknown_not_unlimited(void) {
     char *d = st_tmp(), *p[3], *m; long long got;
     st_fake(d, "100", "max", "0", "max", p);
-    m = st_join(d, "cg/a/b/memory.max"); unlink(m); free(m);
+    m = st_join(d, "cg/a/b/memory.max"); cx_remove(m); free(m);
     CHECK(available_paths(p[0], p[1], p[2], &got) == AV_UNKNOWN, "missing member memory.max must raise FileNotFoundError");
-    rm_tree(d); free(d);
+    cx_rmtree(d); free(d);
 }
 static void case_unknown_never_becomes_77(void) {
     long long need, obs; char b[1024];
@@ -681,7 +669,7 @@ static void case_known_group_with_warm_cache_and_cold_unknown(void) {
     CHECK(requirement_real("gen", n, d, b) == peak + 512 * MIB, "warm group requirement");
     fx_key = "changed";
     CHECK(requirement_real("gen", st_names(N_TP), d, b) < 0, "changed key is UNKNOWN");
-    rm_tree(d); free(d); free(c);
+    cx_rmtree(d); free(d); free(c);
 }
 static void case_changed_gen_key_is_unknown_before_resource_admission(void) {
     long long need, obs; char b[1024];
@@ -702,9 +690,9 @@ static void case_all_measured_parse2_flags_still_require_warm_reference(void) {
     c = st_join(d, "unisacc-seedparse2"); mkdir(c, 0755);
     for (i = 0; i < n.n; i++) st_touch_json(c, REF_PARSE2, n.v[i]);
     CHECK(requirement_real("parse2", n, d, b) >= 0, "warm measured parse2 flags are known");
-    f = cat3(c, "/py-", REF_PARSE2); { char *g = cat3(f, "-locations.json", ""); unlink(g); free(g); } free(f);
+    f = cat3(c, "/py-", REF_PARSE2); { char *g = cat3(f, "-locations.json", ""); cx_remove(g); free(g); } free(f);
     CHECK(requirement_real("parse2", n, d, b) < 0, "one cold flag set is UNKNOWN");
-    rm_tree(d); free(d); free(c);
+    cx_rmtree(d); free(d); free(c);
 }
 static void case_gate_low_memory_exits_before_generator(void) {
     int low; char cwd[4096], py[4096], tr[4096];
@@ -712,7 +700,10 @@ static void case_gate_low_memory_exits_before_generator(void) {
     {   char *o, *argv[4]; size_t n;                                 /* shutil.which('true') and the real python3 */
         argv[0] = "/bin/sh"; argv[1] = "-c"; argv[2] = "command -v python3; command -v true"; argv[3] = 0;
         if (spawn(argv, 0, 10, 1, 0, &o, &n) || !o || sscanf(o, "%4095s %4095s", py, tr) != 2) { CHECK(0, "python3/true not found"); free(o); return; }
-        free(o); }
+        free(o);
+        /* `command -v true` names the shell builtin as plain `true`: UA must be a path, or the nested gate's ua_ready
+           builds a reference compiler named ./true in the repository root (and the guard keeps its build leftovers) */
+        if (!strchr(tr, '/')) { struct stat ts; snprintf(tr, sizeof tr, "%s", stat("/bin/true", &ts) == 0 ? "/bin/true" : "/usr/bin/true"); } }
     for (low = 0; low <= 1; low++) {
         char *d = st_tmp(), *p[3], *cache, *tools, *w, *body, *q[4], *out, *envset[9], *prov, *path, *argv[8]; size_t n; int rc, i, row = 0, sub_before;
         const char *kib = low ? "33554432" : "1"; char inj[8192];
@@ -767,7 +758,7 @@ static void case_gate_low_memory_exits_before_generator(void) {
         if (st_fail > sub_before) st_subfail++;
         free(out); free(envset[0]); free(envset[1]); free(envset[2]); free(envset[3]); free(envset[7]);
         for (i = 0; i < 3; i++) free(q[i]);
-        if (rc != 4 || !row) fprintf(stderr, "kept %s\n", d); else rm_tree(d);
+        if (rc != 4 || !row) fprintf(stderr, "kept %s\n", d); else cx_rmtree(d);
         free(d); free(cache); free(tools);
     }
 }
@@ -790,7 +781,7 @@ static void case_fake_cc_entity_with_same_version_is_rejected(void) {
     st_write(cc, t); chmod(cc, 0755); free(t);
     g_which = cc;
     CHECK(execution_identity_real("gen", &id) == 0, "unreviewed wrappers are rejected before execution");
-    rm_tree(d); free(d); free(cc);
+    cx_rmtree(d); free(d); free(cc);
 }
 static void case_named_launcher_route_and_changed_launcher_target_flags_env(void) {
     static const char *body = "#!/bin/sh\nfor arg do\n    case \"$arg\" in seed/compilerpack.c|*/seed/compilerpack.c) exec /usr/bin/cc -D_XOPEN_SOURCE=700 \"$@\";; esac\ndone\nexec /usr/bin/cc \"$@\"\n";
@@ -816,7 +807,7 @@ static void case_named_launcher_route_and_changed_launcher_target_flags_env(void
     st_write(other, body); g_which = other; CHECK(execution_identity_real("gen", &v) == 0, "launcher bytes at another path");
     for (i = 0, k = ENV_KEYS; *k; k++, i++) if (savedenv[i]) { setenv(*k, savedenv[i], 1); free(savedenv[i]); }
     EV = saved; LAUNCHER_PATH = sp; LAUNCHER_TARGET = stt;
-    rm_tree(d); free(d); free(launcher); free(target); free(other); free(tb);
+    cx_rmtree(d); free(d); free(launcher); free(target); free(other); free(tb);
 }
 static void case_binary_gate_rejects_changed_or_missing_binary(void) {
     char *d = st_tmp(), *p = st_join(d, "gen"), *m = st_join(d, "missing"), hex[65]; const char *saved = BINARY_SHA;
@@ -825,7 +816,7 @@ static void case_binary_gate_rejects_changed_or_missing_binary(void) {
     st_write(p, "changed"); CHECK(verify_binary_real(p) == 2, "changed binary is rc 2");
     BINARY_SHA = saved;
     CHECK(verify_binary_real(m) == 2, "missing binary is rc 2");
-    rm_tree(d); free(d); free(p); free(m);
+    cx_rmtree(d); free(d); free(p); free(m);
 }
 static void case_postbuild_identity_is_rechecked(void) {
     char *argv[] = { "gen", "tokenpp", "--verify-binary", "fake", 0 }, *out; int rc;
@@ -876,7 +867,7 @@ static void case_reference_key_reads_only_listed_files(void) {
     t = st_join(d, "exec/lower/armfuse-byte.tsv"); st_write(t, "changed"); free(t);
     CHECK(reference_key_real("gen", after) && strcmp(before, after), "a listed file moves the key");
     g_root = ""; free(rootslash);
-    rm_tree(d); free(d);
+    cx_rmtree(d); free(d);
 }
 static int st_failed_cases;
 static void st_run(const char *name, int before) { if (st_subfail) st_failed_cases += st_subfail; else if (st_fail > before) st_failed_cases++; st_count++; (void)name; }

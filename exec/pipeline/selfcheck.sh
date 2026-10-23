@@ -28,17 +28,17 @@ case $SELF_PART in
         mkdir -p "$T"
         SELF="$T/unisacc.c"
         if [ "$SELF_PART" = stages1 ]; then
-            rm -f "$T/.ready"
+            sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${T:?}/.ready"
             b python3 tests/sourceflat.py "$SELF"
         else
             [ -s "$T/.ready" ] || { echo 'missing stages1 proof' >&2; exit 1; }
             b python3 tests/sourceflat.py "$T/unisacc.current.c"
             cmp "$T/unisacc.current.c" "$SELF" || { echo 'stale stages1 source' >&2; exit 1; }
-            rm "$T/unisacc.current.c"
+            sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${T:?}/unisacc.current.c"
         fi
         ;;
     *)
-        T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+        T=$(mktemp -d); trap 'sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${T:?}"' EXIT
         b python3 tests/sourceflat.py "$T/unisacc.c"
         SELF="$T/unisacc.c"
         ;;

@@ -60,7 +60,7 @@ def run(gen, args, tmp):
                        cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     if p.returncode or not out.exists():
         return 'FAIL:%d:%s' % (p.returncode, p.stderr.decode(errors='replace').strip().splitlines()[-1:] or '')
-    h = hashlib.sha256(out.read_bytes()).hexdigest(); out.unlink()
+    h = hashlib.sha256(out.read_bytes()).hexdigest(); subprocess.run(['sh', str(ROOT / 'tests/cxbin'), str(ROOT / 'tests/safedel.cx'), '--purge', '--', str(out)], check=True)   # the one deletion guard
     return h
 
 

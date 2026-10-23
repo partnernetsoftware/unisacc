@@ -289,14 +289,14 @@ def main():
                         elif fault=='session':
                             bad=dict(fresh,session='other');fresh_notice_path.write_text(json.dumps(bad))
                         else:
-                            backup=session/'own-notice-backup';backup.write_bytes(original_notice);backup.chmod(0o600);fresh_notice_path.unlink();fresh_notice_path.symlink_to(backup)
+                            backup=session/'own-notice-backup';backup.write_bytes(original_notice);backup.chmod(0o600);subprocess.run(['sh',str(ROOT/'tests/cxbin'),str(ROOT/'tests/safedel.cx'),'--purge','--',str(fresh_notice_path)],check=True);fresh_notice_path.symlink_to(backup)
                         count=len(requests);type_line('CONTEXT_FAULT_'+fault)
                         until=min(deadline,time.monotonic()+5)
                         while len(requests)<count+1:assert time.monotonic()<until,'fault request deadline';pump()
                         pause(.3);assert len(requests)==count+1
                         task,bad_packet=context(requests[-1]);assert bad_packet['status'].startswith('unavailable:') and bad_packet['notice_total']==-1 and bad_packet['notices']==[],bad_packet
                         faults.append(dict(fault=fault,packet=bad_packet))
-                        if fault=='symlink':fresh_notice_path.unlink();backup.unlink()
+                        if fault=='symlink':subprocess.run(['sh',str(ROOT/'tests/cxbin'),str(ROOT/'tests/safedel.cx'),'--purge','--',str(fresh_notice_path),str(backup)],check=True)
                         fresh_notice_path.write_bytes(original_notice);fresh_notice_path.chmod(0o600)
                     result['context_faults']=faults;result['model_POST_count']=len(requests);assert len(requests)==11
             type_line('/exit')

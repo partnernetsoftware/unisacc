@@ -32,7 +32,8 @@ for f in "$@"; do
     if grep -Fxq "$name" "$OUT/inputs"; then echo "duplicate output name: $name" >&2; exit 2; fi
     printf '%s\n' "$name" >> "$OUT/inputs"
     export UNISA_ATTRIBUTES="$OUT/$name.attributes"
-    if [ "$STAGE_FROM" = e2 ]; then rm -f "$UNISA_ATTRIBUTES"; fi
+    # OUTPUT_DIR is argv: the removal goes through the one deletion guard (argv CLI tests/safedel.cx)
+    if [ "$STAGE_FROM" = e2 ]; then sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${UNISA_ATTRIBUTES:?}"; fi
     in=$f; previous=; running=0; finished=0
     for s in $STAGES; do
         if [ "$s" = "$STAGE_FROM" ]; then

@@ -41,7 +41,7 @@ for w in 1 2 3; do
         3) wt=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-warm.XXXXXX")
            if [ -n "$wtg" ]; then (cd "$R" && TARGET=$wtg python3 "$R/tests/bound.py" 50 ./exec/pipeline/elf.sh "$wt" examples/hello.c >/dev/null 2>&1) || wrc=$?
            else wrc=2; fi
-           rm -rf "$wt";;
+           sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${wt:?}";;
     esac
     # step 3 counts as built only if the cache under the real key is valid afterwards -- decided before
     # the stage event ends, so the event's rc is the final one

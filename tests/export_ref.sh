@@ -7,7 +7,8 @@ R=$(cd "$(dirname "$0")/.." && pwd)
 case "$1" in /*) out=$1;; *) out="$PWD/$1";; esac
 [ "$out" != "$R/unisacc.c" ] || { echo 'export_ref: refusing root source overwrite' >&2; exit 2; }
 tmp="$out.$$"
-trap 'rm -f "$tmp"' EXIT HUP INT TERM
+# a leftover partial output goes through the one guard's argv CLI (commissar ruling 2026-10-23)
+trap '[ ! -e "$tmp" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$tmp"' EXIT HUP INT TERM
 cd "$R"
 awk '
 function emit(file,    line, child, base, rc) {

@@ -9,7 +9,7 @@ _BOUND=$("$_BOUND" --helper) || exit 2
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd)
 . "$R/tests/lib.sh"; ua_ready
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d); trap 'sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${T:?}"' EXIT
 HOSTT=$(host_target)
 ok=0; bad=0
 for f in "$R"/tests/malloc/*.c; do

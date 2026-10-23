@@ -61,7 +61,8 @@ finish() {
         [ -z "$EV" ] || printf 'EVIDENCE INCOMPLETE status %s scratch %s\n' "$st" "$S" >> "$EV/lines.txt" 2>/dev/null
         [ "$st" -ne 0 ] || st=3
     else
-        rm -rf "$S"
+        # the tree is a git-archive export (~1.8k files) plus outputs: a site ceiling of 20000 entries; cwd leaves it first
+        cd "$R" && sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge --max-files 20000 -- "$S" || { echo "$(basename "$0" .sh): scratch kept at $S (refused)" >&2; [ "$st" -ne 0 ] || st=3; }
     fi
     exit "$st"
 }
@@ -85,7 +86,7 @@ no() { echo "DIFF $1"; evw "DIFF $1"; bad=$((bad + 1)); }
 refused() { [ "$1" -ne 0 ] && [ "$1" -ne 124 ] && [ "$1" -lt 128 ]; }
 
 for g in $GROUPS_; do   # C vs Python, then a second C run (determinism)
-    f=$(flags "$g"); rm -f "$S/c-$g.json" "$S/py-$g.json" "$S/c-$g-b.json"
+    f=$(flags "$g"); sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$S/c-$g.json" "$S/py-$g.json" "$S/c-$g-b.json" || exit 3
     "$B" 55 "$G" pp "$S/c-$g.json" $f 2>"$S/c-$g.err"; c=$?
     [ "$c" -eq 0 ] || { no "$g (C rc=$c) $(tail -1 "$S/c-$g.err")"; continue; }
     "$B" 55 python3 exec/build/gen.py pp "$S/py-$g.json" $f 2>"$S/py-$g.err"; p=$?
@@ -108,7 +109,7 @@ if len(lines) < 2 or lines[1].startswith("#") or "\t" not in lines[1]:
 lines[1] = "\t".join(lines[1].rstrip("\n").split("\t")[:-1]) + "\n"
 p.write_text("".join(lines))
 PY
-rm -f "$S/neg-py.json" "$S/neg-c.json"
+sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$S/neg-py.json" "$S/neg-c.json" || exit 3
 "$B" 55 python3 exec/build/gen.py pp "$S/neg-py.json" 2>"$S/neg-py.err"; py_rc=$?
 "$B" 55 "$G" pp "$S/neg-c.json" 2>"$S/neg-c.err"; c_rc=$?
 neg0=$bad
@@ -122,7 +123,7 @@ evw "NEG-tsv rc py=$py_rc c=$c_rc"
 tar -x -C "$W" -f "$S/tree.tar" "$NEG" || exit 2   # restore the scratch copy
 
 # negative 2: --osx --win. Both constructors name the manifest semantic exclusion.
-rm -f "$S/ow-py.json" "$S/ow-c.json"
+sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$S/ow-py.json" "$S/ow-c.json" || exit 3
 "$B" 55 python3 exec/build/gen.py pp "$S/ow-py.json" --osx --win 2>"$S/ow-py.err"; py_rc=$?
 "$B" 55 "$G" pp "$S/ow-c.json" --osx --win 2>"$S/ow-c.err"; c_rc=$?
 neg0=$bad
@@ -136,8 +137,8 @@ evw "NEG-osxwin rc py=$py_rc c=$c_rc  kind py=semantic-exclusion c=semantic-excl
 
 # exec/pp/gen-delta.sh (the scratch copy): flags, no silent fallback, 0/1 only
 D=$W/exec/pp/gen-delta.sh
-gd() { out=$1; shift; rm -f "$out"; env "$@" sh "$D" "$out" 2>"$S/gd.err"; }
-gda() { out=$1; shift; rm -f "$out"; env SEED_GEN=1 SEED_GEN_BIN="$G" sh "$D" "$out" "$@" 2>"$S/gd.err"; }
+gd() { out=$1; shift; sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$out" || exit 3; env "$@" sh "$D" "$out" 2>"$S/gd.err"; }
+gda() { out=$1; shift; sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$out" || exit 3; env SEED_GEN=1 SEED_GEN_BIN="$G" sh "$D" "$out" "$@" 2>"$S/gd.err"; }
 for bad_flags in "--o2" "--osx --osx" "--osx --win" "--win --osx" "--win --arm64 --osx" "--osx --arm64 --win" "osx"; do
     gda "$S/bf.json" $bad_flags; r=$?
     { [ "$r" -eq 2 ] && [ ! -e "$S/bf.json" ]; } && ok "helper refuses '$bad_flags'" || no "helper did not refuse '$bad_flags' (rc=$r)"
@@ -178,8 +179,8 @@ d=sys.argv[1]
 for f in sorted(os.listdir(d)):
     st=os.stat(os.path.join(d,f)); print(f, st.st_ino, st.st_mtime_ns, hashlib.sha256(open(os.path.join(d,f),"rb").read()).hexdigest())' "${1:-$S/seedbin}"; }
 snap "$S/no-such-dir" >/dev/null 2>&1 && no "snapshot of a missing directory did not fail" || ok "snapshot failure is visible"
-dg() { out=$1; rm -f "$out"; env -u SEED_GEN_BIN SEED_GEN=1 SEED_GEN_DIR="$S/seedbin" sh "$D" "$out" --arm64 2>"$S/gd.err"; }
-rm -rf "$S/seedbin"
+dg() { out=$1; sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$out" || exit 3; env -u SEED_GEN_BIN SEED_GEN=1 SEED_GEN_DIR="$S/seedbin" sh "$D" "$out" --arm64 2>"$S/gd.err"; }
+sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$S/seedbin" || exit 3
 dg "$S/cold.json"; r=$?
 { [ "$r" -eq 0 ] && [ "$(nbin)" -eq 1 ] && [ "$(nsid)" -eq 1 ] && cmp -s "$S/cold.json" "$S/py-arm64.json"; } && ok "default-route cold build" || no "default-route cold build (rc=$r bins $(nbin) sidecars $(nsid))"
 hit_ok() {

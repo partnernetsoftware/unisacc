@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Real P3 six-target closure and exact shard recombination/corruption gate."""
 import pathlib
+import subprocess
 import sys
 import tempfile
 ROOT=pathlib.Path(__file__).resolve().parents[1]
@@ -21,7 +22,7 @@ def check(path):
         assert import_shards(td)==raw
         n=manifest['networks'][0]['sha256']+'.network';p=td/n;stored=p.read_bytes()
         p.write_bytes(stored[:-1]);rejected(lambda:import_shards(td));p.write_bytes(stored)
-        p.unlink();rejected(lambda:import_shards(td));p.write_bytes(stored)
+        subprocess.run(['sh',str(ROOT/'tests/cxbin'),str(ROOT/'tests/safedel.cx'),'--purge','--',str(p)],check=True);rejected(lambda:import_shards(td));p.write_bytes(stored)
         for target in TARGETS:
             data,ledger=select_target(raw,target);p=read_package(data)
             wanted=[r for r in source['rows'] if r[1].startswith((target+'/').encode()) or

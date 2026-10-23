@@ -10,6 +10,9 @@ if [ "${1:-}" = host ]; then
 fi
 UA=${1:?same-source reference}
 bad=0
+# check logs in one private directory; deletion goes through the guard (tests/safedel.cx)
+P=$(mktemp -d "${TMPDIR:-/tmp}/precheck.XXXXXX") || exit 2
+trap '[ -z "$P" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$P"' EXIT
 t0=$(date +%s); python3 tests/bound.py 55 python3 -m unisa build-weights >/dev/null 2>&1 || bad=1; t=$(( $(date +%s) - t0 ))
 echo "build-weights ${t}s (local budget 19 s: release-check runs it under 55 s on a runner about twice as slow)"; [ "$t" -le 19 ] || { echo "  FAIL: hosted runners take about twice as long"; bad=1; }
 [ -z "$(git status --porcelain -- weights)" ] || { echo "  FAIL: build-weights changed weights/ (commit the construction first)"; bad=1; }
@@ -17,18 +20,14 @@ echo "build-weights ${t}s (local budget 19 s: release-check runs it under 55 s o
 # precheck runs after the version commit (freezecheck needs it), so ledgercheck's default
 # (version.h + 1) already names the next plan: check the version being released.
 V=$(sed -n 's/.*UNISACC_VERSION "\(.*\)".*/\1/p' src/version.h)
-python3 tests/bound.py 20 python3 tests/ledgercheck.py --final "plans/v$V.md" > /tmp/precheck-lg.$$ 2>&1 || { cat /tmp/precheck-lg.$$; echo "  FAIL: settle the deferral ledger in the plan first"; bad=1; }
-rm -f /tmp/precheck-lg.$$
+python3 tests/bound.py 20 python3 tests/ledgercheck.py --final "plans/v$V.md" > "$P/lg" 2>&1 || { cat "$P/lg"; echo "  FAIL: settle the deferral ledger in the plan first"; bad=1; }
 # 0.0.25 P1: after the version commit only `fix:` commits may touch the product closure.
-tests/bound 20 sh ./unisacc.com -run tests/freezecheck.cx > /tmp/precheck-fz.$$ 2>&1 || { cat /tmp/precheck-fz.$$; echo "  FAIL: new work inside the freeze window (move it to the next version, or mark a red fix with fix:)"; bad=1; }
-rm -f /tmp/precheck-fz.$$
+tests/bound 20 sh ./unisacc.com -run tests/freezecheck.cx > "$P/fz" 2>&1 || { cat "$P/fz"; echo "  FAIL: new work inside the freeze window (move it to the next version, or mark a red fix with fix:)"; bad=1; }
 # 0.0.24: a header change (kill, ttyname) left exec/facts/pp-autoinc-gen.tsv stale; the candidate
 # had to be rebuilt.  Exported fact tables must match their generators before freezing.
-python3 tests/bound.py 30 python3 exec/facts/export.py --check > /tmp/precheck-ex.$$ 2>&1 || { tail -3 /tmp/precheck-ex.$$; echo "  FAIL: exported facts stale (run exec/facts/export.py, re-record graphhash)"; bad=1; }
-rm -f /tmp/precheck-ex.$$
+python3 tests/bound.py 30 python3 exec/facts/export.py --check > "$P/ex" 2>&1 || { tail -3 "$P/ex"; echo "  FAIL: exported facts stale (run exec/facts/export.py, re-record graphhash)"; bad=1; }
 # 0.0.21 R21-14: the two reworks of the 0.0.20 release, caught before freezing
-python3 tests/bound.py 30 python3 tests/subtractsafety.py > /tmp/precheck-ss.$$ 2>&1 || { tail -3 /tmp/precheck-ss.$$; echo "  FAIL: subtract-safety (a live file names an archived one)"; bad=1; }
-rm -f /tmp/precheck-ss.$$
+python3 tests/bound.py 30 python3 tests/subtractsafety.py > "$P/ss" 2>&1 || { tail -3 "$P/ss"; echo "  FAIL: subtract-safety (a live file names an archived one)"; bad=1; }
 if [ -f unisacc.com ] && [ -f unisacc.com.build.json ]; then
     want=$(python3 -c "import json;print(json.load(open('unisacc.com.build.json'))['artifact_sha256'])" 2>/dev/null)
     have=$(shasum -a 256 unisacc.com | cut -d' ' -f1)
@@ -71,6 +70,6 @@ done
 cq=$(mktemp -d "${TMPDIR:-/tmp}/precheck-contract.XXXXXX"); crc=75; w=0
 while [ "$crc" -eq 75 ] && [ "$w" -lt 10 ]; do w=$((w+1)); ./tests/term.sh env ${UA:+"UA=$UA"} ${MODEL_COM:+"MODEL_COM=$MODEL_COM"} ${SEED_DIR:+"SEED_DIR=$SEED_DIR"} ${UNISACC_FFI_X86_PROVIDER:+"UNISACC_FFI_X86_PROVIDER=$UNISACC_FFI_X86_PROVIDER"} python3 tests/gatequeue.py --layer contract --state "$cq" --jobs 2 > "$cq/w$w.log" 2>&1; crc=$?; done
 if [ "$crc" -ne 0 ]; then grep '^DONE' "$cq"/w*.log | grep -v ' rc=0 ' | cut -c1-200; tail -1 "$cq/w$w.log"; echo "  FAIL: contract layer (rc=$crc after $w windows; logs $cq)"; bad=1
-else echo "contract layer: passed in $w window(s)"; rm -rf "$cq"; fi
+else echo "contract layer: passed in $w window(s)"; sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$cq"; fi
 echo "precheck $([ $bad -eq 0 ] && echo passed || echo FAILED: fix before freezing)"
 exit $bad

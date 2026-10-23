@@ -11,6 +11,8 @@ _BOUND=$("$_BOUND" --helper) || exit 2
 #   run        verifies .ready (source, inputs, tables, executor) and runs the three deltas against UA -S
 set -eu
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
+_SD="$R"/tests   # the one deletion guard: argv CLI tests/safedel.cx over include/unisa_safedel.h (this trap replaces
+# tests/lib.sh's, so it removes lib.sh's scratch $_LIB_TMP too)
 E3_PART=${E3_PART:-all}
 case $E3_PART in all|construct|run) ;; *) echo "unknown e3 selfcheck part: $E3_PART" >&2; exit 2;; esac
 UA=${UA:-/tmp/ua_ref}; . ./tests/lib.sh; ua_ready
@@ -21,7 +23,7 @@ inputs() {
         | LC_ALL=C sort | xargs shasum -a 256 | shasum -a 256 | cut -d' ' -f1
 }
 if [ "$E3_PART" = all ]; then
-    T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+    T=$(mktemp -d); trap 'sh "$_SD/cxbin" "$_SD/safedel.cx" --purge -- "${T:?}" "${_LIB_TMP:?}"' EXIT
 else
     state_root=${E3_STAGE_DIR:-${GATE_STATE:-${TMPDIR:-/tmp}}}
     T="$state_root/exec-e3self-$(printf '%s' "$R" | cksum | cut -d' ' -f1)"
@@ -32,11 +34,11 @@ if [ "$E3_PART" = run ]; then
     [ -s "$T/.ready" ] || { echo 'missing e3self construct proof (run exec-e3self-1 first)' >&2; exit 1; }
     b python3 tests/sourceflat.py "$T/unisacc-flat.current.c"
     cmp "$T/unisacc-flat.current.c" "$SELF" || { echo 'stale e3self construct source' >&2; exit 1; }
-    rm "$T/unisacc-flat.current.c"
+    sh "$_SD/cxbin" "$_SD/safedel.cx" --purge -- "${T:?}/unisacc-flat.current.c"
     shasum -a 256 -c "$T/.ready" >/dev/null || { echo 'stale e3self construct tables or executor' >&2; exit 1; }
     [ "$(cat "$T/inputs")" = "$(inputs)" ] || { echo 'stale e3self construct inputs' >&2; exit 1; }
 else
-    rm -f "$T/.ready"
+    sh "$_SD/cxbin" "$_SD/safedel.cx" --purge -- "${T:?}/.ready"
     b python3 tests/sourceflat.py "$SELF"
     b cc -O2 -o "$T/run" exec/c/run.c
     b cc -std=c99 -O2 -w -Iseed seed/gen.c -o "$T/seed-gen"
@@ -55,7 +57,7 @@ else
     fi
 fi
 export UNISA_ATTRIBUTES="$T/attributes"
-rm -f "$UNISA_ATTRIBUTES"
+sh "$_SD/cxbin" "$_SD/safedel.cx" --purge -- "${UNISA_ATTRIBUTES:?}"
 b "$T/run" "$T/pp.tbl" "$SELF" "$SELF" "$R/include" > "$T/pp"
 b "$T/run" "$T/lex.tbl" "$T/pp" "$SELF" > "$T/lex"
 b "$T/run" "$T/parse.tbl" "$T/lex" "$SELF" > "$T/tape"

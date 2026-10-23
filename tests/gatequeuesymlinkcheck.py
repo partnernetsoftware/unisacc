@@ -3,7 +3,7 @@
 
 Cases: symlink to a directory, to a regular file, dangling; each identity is stable across calls and changes when the
 target string changes; a real non-regular entry (FIFO) is still refused by name; a missing path is 'missing'."""
-import hashlib, os, pathlib, sys, tempfile
+import hashlib, os, pathlib, subprocess, sys, tempfile
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import gatequeue as gq
 
@@ -22,7 +22,7 @@ try:
     check(gq.file_identity('to_file') == [0o120000, sha('file.txt')], 'symlink to regular file: identity is the target string, not the content')
     check(gq.file_identity('dangling') == [0o120000, sha('nowhere')], 'dangling symlink: still a link, identity is the target string')
     check(gq.file_identity('to_dir') == gq.file_identity('to_dir'), 'symlink identity is stable across calls')
-    os.remove('to_dir'); os.symlink('other', 'to_dir')
+    subprocess.run(['sh', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cxbin'), os.path.join(os.path.dirname(os.path.abspath(__file__)), 'safedel.cx'), '--purge', '--', 'to_dir'], check=True); os.symlink('other', 'to_dir')   # the one deletion guard
     check(gq.file_identity('to_dir') == [0o120000, sha('other')], 'changing the link target changes the identity')
     check(gq.file_identity('file.txt')[0] == 0o100644, 'regular file keeps the git mode rule (0644 without execute bit)')
     check(gq.file_identity('absent') == ['missing'], 'missing path is an identity (missing)')

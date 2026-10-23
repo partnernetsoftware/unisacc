@@ -18,7 +18,7 @@
       order or never bound, and > FOLD_MAX rows after folding.
 The caller runs assemble.run(manifest, E, P, flags, env=<install str/int kwargs>).
 """
-import difflib, importlib.abc, importlib.util, inspect, itertools, json, os, re, runpy, sys
+import difflib, importlib.abc, importlib.util, inspect, itertools, json, os, re, runpy, subprocess, sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -215,7 +215,7 @@ def record(outdir, tag, gen, args, modules):
     except SystemExit as e:
         if e.code not in (0, None):
             raise
-    os.unlink(sys.argv[1])
+    subprocess.run(['sh',str(ROOT/'tests/cxbin'),str(ROOT/'tests/safedel.cx'),'--purge','--',sys.argv[1]],check=True)
     st = set(getattr(graph[0], "st", None) or ())
     for stem, t in traces.items():
         t["states"] = sorted(x for x in _strings(t["calls"]) if x in st)

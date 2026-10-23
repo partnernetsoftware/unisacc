@@ -1,0 +1,466 @@
+/* deletecheck: the deletion ledger's gate (commissar ruling 2026-10-23, items 1, 6, 7 and 8).
+     sh unisacc.com -run tests/deletecheck.cx [-- --list | --selftest]          (from the repository root)
+   Every tracked file (git ls-files) in a language that can delete -- C (.c .h .cx .cxif), Python (.py, a python
+   shebang), shell (.sh .bash .mk, Makefile*, a sh shebang, .github/ *.yml) -- is scanned for the deletion
+   primitives:
+     C       unlink( rmdir( remove( unlinkat( nftw( in code (comments and literals blanked; not a member or a longer
+             name), and `shell-rm` -- an rm command inside a string literal (a shell string: system, cx_run, sh -c);
+     Python  shutil.rmtree, os.remove/unlink/rmdir/removedirs, Path.unlink/rmdir (.unlink( .rmdir(), an argv "rm",
+             and `shell-rm` (an rm command in the line's text);
+     shell   rm, rmdir, unlink as a command word (also inside quotes: trap '...', sh -c '...'), find ... -delete,
+             xargs rm; whole-line and trailing comments are skipped.
+   A line that calls the guard -- the CLI tests/safedel.cx, cx_remove/cx_rmtree/cx_trash, unisa_safedel() -- holds
+   none of those (the guard's own names are longer identifiers).  Red when:
+     1. a file's raw hits of a primitive outnumber its `exempt` rows for that primitive in tests/deletes.tsv: a new
+        deletion that bypasses the guard (or fewer: a stale exemption -- the ledger is exact);
+     2. an exempt `shell-rm` is neither product-internal nor corpus: shell-concatenated rm is allowed only in product
+        bytes (the shipped launcher's own text) and never-run archive text, never in a tool;
+     3. a ledger row is malformed: 8 fields, status guarded|exempt, a known klass and risk, a reason;
+     4. the `guarded` rows and tests/deletemut.tsv (the mutation table) differ as (file, line) sets: every guarded
+        site has its mutation row and the reverse;
+     5. a file holds more guard calls (lines) than guarded rows: a new guarded site without a mutation row, or
+        guarded rows in a file that no longer calls the guard.
+   The guard's own implementation (include/unisa_safedel.h) and this checker (its patterns) are not scanned.
+   --list prints every raw hit (file, line, lang, primitive) and every guard line (file, line, lang, `guard`) as
+   TSV, for writing the ledger.  --selftest seeds each red case into a private tree and requires it red, and the
+   clean tree green.  rc 0 green, 1 red, 2 usage or I/O. */
+
+/* a malloc'd copy (not strdup: the product forwards strdup to the host C library, whose block its own free must not get) */
+static char *dupstr(const char *s) { size_t n = strlen(s) + 1; char *d = (char *)malloc(n); if (d) memcpy(d, s, n); return d; }
+enum { L_NONE, L_C, L_PY, L_SH };
+static const char *LANGN[] = { "-", "c", "py", "sh" };
+static const char PYNAME[] = { 'p', 'y', 't', 'h', 'o', 'n', 0 };   /* a #! line naming the interpreter */
+static const char *SELF[] = { "include/unisa_safedel.h", "tests/deletecheck.cx", 0 };
+
+struct hit { char *file; int line, lang; const char *prim; };
+static struct hit *H; static int NH, CH;
+static void addhit(const char *file, int line, int lang, const char *prim) {
+    if (NH == CH) { CH = CH ? 2 * CH : 256; H = (struct hit *)realloc(H, (size_t)CH * sizeof *H); if (!H) exit(2); }
+    H[NH].file = dupstr(file); H[NH].line = line; H[NH].lang = lang; H[NH].prim = prim; NH++;
+}
+static int fails, QUIET;
+static char MSG[1 << 16]; static size_t MSGN;
+static void red(const char *fmt, const char *a, const char *b, int n) {
+    char line[2048]; int k = snprintf(line, sizeof line, fmt, a, b, n);
+    fails++;
+    if (k > 0 && MSGN + (size_t)k + 8 < sizeof MSG) { memcpy(MSG + MSGN, "FAIL ", 5); MSGN += 5; memcpy(MSG + MSGN, line, (size_t)k); MSGN += (size_t)k; MSG[MSGN++] = '\n'; MSG[MSGN] = 0; }
+}
+
+static int idch(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
+static int sp(int c) { return c == ' ' || c == '\t'; }
+static int endswith(const char *s, const char *t) { size_t a = strlen(s), b = strlen(t); return a >= b && !strcmp(s + a - b, t); }
+
+static int lang_of(const char *root, const char *f) {
+    const char *b = strrchr(f, '/'), *x; b = b ? b + 1 : f; x = strrchr(b, '.');
+    if (x && (!strcmp(x, ".c") || !strcmp(x, ".h") || !strcmp(x, ".cx") || !strcmp(x, ".cxif"))) return L_C;
+    if (x && !strcmp(x, ".py")) return L_PY;
+    if (x && (!strcmp(x, ".sh") || !strcmp(x, ".bash") || !strcmp(x, ".mk"))) return L_SH;
+    if (!strcmp(b, "Makefile") || !strcmp(b, "GNUmakefile") || !strncmp(b, "Makefile.", 9)) return L_SH;
+    if (x && (!strcmp(x, ".yml") || !strcmp(x, ".yaml")) && (!strncmp(f, ".github/", 8) || strstr(f, "/.github/"))) return L_SH;
+    if (!x) {
+        char p[4300], buf[200]; FILE *fp; size_t n;
+        snprintf(p, sizeof p, "%s/%s", root, f);
+        if (!(fp = fopen(p, "rb"))) return L_NONE;
+        n = fread(buf, 1, sizeof buf - 1, fp); fclose(fp); buf[n] = 0;
+        if (n > 2 && buf[0] == '#' && buf[1] == '!') {
+            char *e = strchr(buf, '\n'); if (e) *e = 0;
+            if (strstr(buf, PYNAME)) return L_PY;
+            if (strstr(buf, "sh")) return L_SH;
+        }
+    }
+    return L_NONE;
+}
+
+/* an rm command at S (S points at "rm"): the word stands alone and an operand follows (- " ' $ / . or a name) */
+static int rm_cmd(const char *base, const char *s) {
+    char c = s > base ? s[-1] : ' '; const char *q = s + 2;
+    if (!(s == base || sp(c) || c == ';' || c == '&' || c == '|' || c == '(' || c == '{' || c == '`' || c == '\'' || c == '"')) return 0;
+    if (!sp(*q)) return 0;
+    while (sp(*q)) q++;
+    return *q == '-' || *q == '"' || *q == '\'' || *q == '$' || *q == '/' || *q == '.' || *q == '~';
+}
+static int has_shell_rm(const char *s) {
+    const char *p = s;
+    while ((p = strstr(p, "rm")) != 0) { if (rm_cmd(s, p)) return 1; p += 2; }
+    return 0;
+}
+
+/* C: blank comments and literals (kept per line in STR), then look for the calls */
+static void scan_c(const char *file, char *t) {
+    static const char *fn[] = { "unlink", "rmdir", "remove", "unlinkat", "nftw", 0 };
+    size_t n = strlen(t), i; int st = 0, line = 1, sline = 0; char *code = dupstr(t), *s0 = 0;
+    if (!code) exit(2);
+    for (i = 0; i < n; i++) {
+        char c = t[i];
+        if (st == 0) {
+            if (c == '/' && t[i + 1] == '*') { st = 1; code[i] = code[i + 1] = ' '; i++; continue; }
+            if (c == '/' && t[i + 1] == '/') { st = 2; code[i] = ' '; continue; }
+            if (c == '"') { st = 3; s0 = t + i; sline = line; continue; }
+            if (c == '\'') { st = 4; continue; }
+            if (c == '\n') line++;
+            continue;
+        }
+        if (st == 1) { if (c == '*' && t[i + 1] == '/') { st = 0; code[i] = code[i + 1] = ' '; i++; continue; } if (c == '\n') line++; else code[i] = ' '; continue; }
+        if (st == 2) { if (c == '\n') { st = 0; line++; } else code[i] = ' '; continue; }
+        if (c == '\\') { code[i] = ' '; if (i + 1 < n && t[i + 1] != '\n') code[i + 1] = ' '; i++; continue; }
+        if (c == '\n') { st = 0; line++; continue; }
+        if ((st == 3 && c == '"') || (st == 4 && c == '\'')) {
+            if (st == 3) {   /* the literal's text (between the quotes) */
+                size_t k = (size_t)(t + i - s0 - 1); char *lit = (char *)malloc(k + 1);
+                if (!lit) exit(2);
+                memcpy(lit, s0 + 1, k); lit[k] = 0;
+                if (has_shell_rm(lit)) addhit(file, sline, L_C, "shell-rm");
+                free(lit);
+            }
+            st = 0; continue;
+        }
+        code[i] = ' ';
+    }
+    {   char *p = code, *e; line = 0;
+        for (; *p; p = e ? e + 1 : p + strlen(p)) {
+            int k; e = strchr(p, '\n'); if (e) *e = 0; line++;
+            for (k = 0; fn[k]; k++) {
+                const char *q = p; size_t l = strlen(fn[k]);
+                while ((q = strstr(q, fn[k])) != 0) {
+                    const char *r = q + l; char b = q > p ? q[-1] : ' ';
+                    while (sp(*r)) r++;
+                    if (*r == '(' && !idch((unsigned char)b) && b != '.' && b != '>' && !idch((unsigned char)q[l])) addhit(file, line, L_C, fn[k]);
+                    q += l;
+                }
+            }
+            if (!e) break;
+        }
+    }
+    free(code);
+}
+static void scan_py(const char *file, char *t) {
+    char *p = t, *e; int line = 0;
+    for (; *p; p = e ? e + 1 : p + strlen(p)) {
+        const char *s = p, *q; e = strchr(p, '\n'); if (e) *e = 0; line++;
+        while (sp(*s)) s++;
+        if (*s != '#') {
+            if (strstr(s, "shutil.rmtree")) addhit(file, line, L_PY, "shutil.rmtree");
+            for (q = s; (q = strstr(q, "os.")) != 0; q += 3) {
+                const char *r = q + 3;
+                if (q > s && (idch((unsigned char)q[-1]) && q[-1] != '_')) continue;
+                if ((!strncmp(r, "remove", 6) || !strncmp(r, "unlink", 6) || !strncmp(r, "rmdir", 5) || !strncmp(r, "removedirs", 10))) {
+                    while (idch((unsigned char)*r)) r++;
+                    while (sp(*r)) r++;
+                    if (*r == '(') addhit(file, line, L_PY, "os.remove");
+                }
+            }
+            for (q = s; (q = strchr(q, '.')) != 0; q++) {
+                const char *r = q + 1; int l = !strncmp(r, "unlink", 6) ? 6 : !strncmp(r, "rmdir", 5) ? 5 : 0;
+                if (!l || idch((unsigned char)r[l])) continue;
+                r += l; while (sp(*r)) r++;
+                if (*r != '(') continue;
+                if (q >= s + 2 && q[-1] == 's' && q[-2] == 'o' && (q == s + 2 || !idch((unsigned char)q[-3]) || q[-3] == '_')) continue;   /* os.unlink */
+                addhit(file, line, L_PY, "Path.unlink");
+            }
+            if (strstr(s, "'rm',") || strstr(s, "\"rm\",") || strstr(s, "'rm' ,") || strstr(s, "\"rm\" ,")) addhit(file, line, L_PY, "argv rm");
+            if (has_shell_rm(s)) addhit(file, line, L_PY, "shell-rm");
+        }
+        if (!e) break;
+    }
+}
+/* shell: the line without a trailing comment (a # after a blank, outside quotes) */
+static void uncomment_sh(char *s) {
+    int sq = 0, dq = 0; char *p;
+    for (p = s; *p; p++) {
+        if (*p == '\\' && !sq && p[1]) { p++; continue; }
+        if (*p == '\'' && !dq) sq = !sq;
+        else if (*p == '"' && !sq) dq = !dq;
+        else if (*p == '#' && !sq && !dq && (p == s || sp(p[-1]))) { *p = 0; return; }
+    }
+}
+static void scan_sh(const char *file, char *t) {
+    static const char *cmd[] = { "rm", "rmdir", "unlink", 0 };
+    char *p = t, *e; int line = 0;
+    for (; *p; p = e ? e + 1 : p + strlen(p)) {
+        char *s = p; int k; e = strchr(p, '\n'); if (e) *e = 0; line++;
+        while (sp(*s)) s++;
+        if (*s != '#') {
+            char *c = dupstr(s); if (!c) exit(2);
+            uncomment_sh(c);
+            for (k = 0; cmd[k]; k++) {
+                const char *q = c; size_t l = strlen(cmd[k]);
+                while ((q = strstr(q, cmd[k])) != 0) {
+                    char b = q > c ? q[-1] : ' ';
+                    if ((q == c || sp(b) || b == ';' || b == '&' || b == '|' || b == '(' || b == ')' || b == '{' || b == '}' || b == '`' || b == '\'' || b == '"') && sp(q[l]))
+                        addhit(file, line, L_SH, cmd[k]);
+                    q += l;
+                }
+            }
+            if (strstr(c, "find") && strstr(c, "-delete")) {
+                const char *f = strstr(c, "find"), *d = strstr(c, "-delete");
+                if (f < d && (f == c || !idch((unsigned char)f[-1])) && !idch((unsigned char)d[7])) addhit(file, line, L_SH, "find -delete");
+            }
+            {   const char *x = strstr(c, "xargs");
+                if (x && (x == c || !idch((unsigned char)x[-1])) && strstr(x, "rm")) {
+                    const char *r = x; int hit = 0;
+                    while ((r = strstr(r + 1, "rm")) != 0) if (!idch((unsigned char)r[-1]) && !idch((unsigned char)r[2])) { hit = 1; break; }
+                    if (hit) addhit(file, line, L_SH, "xargs rm");
+                } }
+            free(c);
+        }
+        if (!e) break;
+    }
+}
+/* the guard calls of a file: lines (code only) */
+static int guard_lines(const char *file, int lang, char *t, int *lines, int cap) {
+    static const char *g[] = { "cx_remove", "cx_rmtree", "cx_trash", "unisa_safedel", "unisa_safedel_purge_trash", 0 };
+    char *p = t, *e; int line = 0, n = 0, inblock = 0; (void)file;
+    for (; *p; p = e ? e + 1 : p + strlen(p)) {
+        char *s = p; int hit = 0, k; e = strchr(p, '\n'); if (e) *e = 0; line++;
+        while (sp(*s)) s++;
+        if (lang == L_C) {
+            char *c = dupstr(s), *q; if (!c) exit(2);
+            /* drop comments on the line (block state carried across lines) */
+            for (q = c; *q; q++) {
+                if (inblock) { if (q[0] == '*' && q[1] == '/') { inblock = 0; q[0] = q[1] = ' '; q++; } else *q = ' '; continue; }
+                if (q[0] == '/' && q[1] == '*') { inblock = 1; q[0] = q[1] = ' '; q++; continue; }
+                if (q[0] == '/' && q[1] == '/') { *q = 0; break; }
+            }
+            for (k = 0; g[k] && !hit; k++) {
+                const char *r = c; size_t l = strlen(g[k]);
+                while ((r = strstr(r, g[k])) != 0) {
+                    const char *a = r + l;
+                    while (sp(*a)) a++;
+                    if (*a == '(' && (r == c || !idch((unsigned char)r[-1]))) { hit = 1; break; }
+                    r += l;
+                }
+            }
+            free(c);
+        } else if (*s != '#') {
+            char *c = dupstr(s); if (!c) exit(2);
+            if (lang == L_SH) uncomment_sh(c);   /* a trailing comment naming the CLI is no call */
+            if (strstr(c, "safedel.cx")) hit = 1;
+            free(c);
+        }
+        if (hit) { if (n < cap) lines[n] = line; n++; }
+        if (!e) break;
+    }
+    return n;
+}
+
+/* ---- the ledger and the mutation table ---- */
+struct row { char *f[8]; int line; };
+static int split(char *line, char **f, int max) { int n = 0; char *p = line; f[n++] = p; while (*p && n < max) { if (*p == '\t') { *p = 0; f[n++] = p + 1; } p++; } return n; }
+static const char *KLASS[] = { "own-mkdtemp", "own-mkstemp", "arg-derived", "env-derived", "fixed-repo-path", "fixture-repo",
+                               "product-internal", "corpus", "guard", "other", 0 };
+static int inlist(const char *s, const char **l) { int i; for (i = 0; l[i]; i++) if (!strcmp(s, l[i])) return 1; return 0; }
+
+/* the whole check over ROOT with FILES (n), LEDGER and MUT texts (modified in place) */
+static int check(const char *root, char **files, int nf, char *ledger, char *mut) {
+    struct row *L = 0; int nl = 0, cl = 0, i, j; char *p, *e; int lineno = 0;
+    char **mf = 0; int *ml = 0, nm = 0, cm = 0;
+    NH = 0;
+    for (i = 0; i < nf; i++) {
+        int lang, s; char path[4300], *t; size_t n; struct stat st;
+        for (s = 0; SELF[s] && strcmp(SELF[s], files[i]); s++) ;
+        if (SELF[s]) continue;
+        snprintf(path, sizeof path, "%s/%s", root, files[i]);
+        if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+        if (!(lang = lang_of(root, files[i]))) continue;
+        if (!(t = cx_read(path, &n))) { red("%s: unreadable%s", files[i], "", 0); continue; }
+        if (lang == L_C) scan_c(files[i], t); else if (lang == L_PY) scan_py(files[i], t); else scan_sh(files[i], t);
+        free(t);
+    }
+    /* the ledger */
+    for (p = ledger; *p; p = e ? e + 1 : p + strlen(p)) {
+        char *f[9]; int n; e = strchr(p, '\n'); if (e) *e = 0; lineno++;
+        if (*p == '#' || !*p) { if (!e) break; continue; }
+        n = split(p, f, 9);
+        if (n != 8) { char w[32]; snprintf(w, sizeof w, "%d", lineno); red("tests/deletes.tsv:%s: not 8 fields%s", w, "", 0); if (!e) break; continue; }
+        if (strcmp(f[6], "guarded") && strcmp(f[6], "exempt")) red("tests/deletes.tsv: %s: status %s (guarded|exempt)", f[0], f[6], 0);
+        if (!inlist(f[4], KLASS)) red("tests/deletes.tsv: %s: unknown klass %s", f[0], f[4], 0);
+        if (strcmp(f[5], "low") && strcmp(f[5], "medium") && strcmp(f[5], "high")) red("tests/deletes.tsv: %s: risk %s (low|medium|high)", f[0], f[5], 0);
+        if (!f[7][0] || !strcmp(f[7], "-")) red("tests/deletes.tsv: %s:%s: no reason", f[0], f[1], 0);
+        if (!strcmp(f[6], "exempt") && !strcmp(f[3], "shell-rm") && strcmp(f[4], "product-internal") && strcmp(f[4], "corpus"))
+            red("%s:%s: shell-concatenated rm is exempt only as product bytes (the shipped launcher) or never-run corpus/archive text, never in a tool", f[0], f[1], 0);
+        if (nl == cl) { cl = cl ? 2 * cl : 256; L = (struct row *)realloc(L, (size_t)cl * sizeof *L); if (!L) exit(2); }
+        for (j = 0; j < 8; j++) L[nl].f[j] = f[j];
+        L[nl].line = atoi(f[1]); nl++;
+        if (!e) break;
+    }
+    /* 1: raw hits against the exempt rows, per (file, primitive) */
+    for (i = 0; i < NH; i++) {
+        int hits = 0, ex = 0, first = 1;
+        for (j = 0; j < i; j++) if (!strcmp(H[j].file, H[i].file) && !strcmp(H[j].prim, H[i].prim)) { first = 0; break; }
+        if (!first) continue;
+        for (j = i; j < NH; j++) if (!strcmp(H[j].file, H[i].file) && !strcmp(H[j].prim, H[i].prim)) hits++;
+        for (j = 0; j < nl; j++) if (!strcmp(L[j].f[6], "exempt") && !strcmp(L[j].f[0], H[i].file) && !strcmp(L[j].f[3], H[i].prim)) ex++;
+        if (hits > ex) {
+            for (j = i; j < NH; j++) if (!strcmp(H[j].file, H[i].file) && !strcmp(H[j].prim, H[i].prim)) {
+                int k, listed = 0;
+                for (k = 0; k < nl; k++) if (!strcmp(L[k].f[6], "exempt") && !strcmp(L[k].f[0], H[j].file) && !strcmp(L[k].f[3], H[j].prim) && L[k].line == H[j].line) listed = 1;
+                if (!listed) red("%s:%s: a raw deletion (%d) that bypasses the guard and is not exempt in tests/deletes.tsv", H[j].file, H[j].prim, H[j].line);
+            }
+        } else if (hits < ex) red("%s: %s: stale exemption(s) in tests/deletes.tsv (%d more rows than sites)", H[i].file, H[i].prim, ex - hits);
+    }
+    for (j = 0; j < nl; j++) if (!strcmp(L[j].f[6], "exempt")) {   /* exempt rows with no hit at all */
+        int k, any = 0;
+        for (k = 0; k < NH; k++) if (!strcmp(H[k].file, L[j].f[0]) && !strcmp(H[k].prim, L[j].f[3])) { any = 1; break; }
+        if (!any) red("%s: %s: stale exemption (no such raw deletion in the file)", L[j].f[0], L[j].f[3], 0);
+    }
+    /* 4: guarded rows against the mutation table */
+    for (p = mut, lineno = 0; *p; p = e ? e + 1 : p + strlen(p)) {
+        char *f[6]; int n; e = strchr(p, '\n'); if (e) *e = 0;
+        if (*p == '#' || !*p) { if (!e) break; continue; }
+        n = split(p, f, 6);
+        if (n != 5) { red("tests/deletemut.tsv: %s: not 5 fields%s", f[0], "", 0); if (!e) break; continue; }
+        if (nm == cm) { cm = cm ? 2 * cm : 256; mf = (char **)realloc(mf, (size_t)cm * sizeof *mf); ml = (int *)realloc(ml, (size_t)cm * sizeof *ml); if (!mf || !ml) exit(2); }
+        mf[nm] = f[0]; ml[nm] = atoi(f[1]); nm++;
+        if (!e) break;
+    }
+    for (j = 0; j < nl; j++) if (!strcmp(L[j].f[6], "guarded")) {
+        int k, hit = 0; for (k = 0; k < nm; k++) if (ml[k] == L[j].line && !strcmp(mf[k], L[j].f[0])) { hit = 1; break; }
+        if (!hit) red("%s:%s: a guarded site without a mutation row in tests/deletemut.tsv", L[j].f[0], L[j].f[1], 0);
+    }
+    for (i = 0; i < nm; i++) {
+        int hit = 0; for (j = 0; j < nl; j++) if (!strcmp(L[j].f[6], "guarded") && L[j].line == ml[i] && !strcmp(L[j].f[0], mf[i])) { hit = 1; break; }
+        if (!hit) { char w[16]; snprintf(w, sizeof w, "%d", ml[i]); red("%s:%s: a mutation row without a guarded row in tests/deletes.tsv", mf[i], w, 0); }
+    }
+    /* 5: guard calls per file against the guarded rows */
+    for (i = 0; i < nf; i++) {
+        int lang, s, g, rows = 0, lines[4]; char path[4300], *t; size_t n; struct stat st;
+        for (s = 0; SELF[s] && strcmp(SELF[s], files[i]); s++) ;
+        if (SELF[s] || !strcmp(files[i], "include/cx.h") || !strcmp(files[i], "tests/safedel.cx") || !strcmp(files[i], "tests/safedelcheck.cx")
+            || !strcmp(files[i], "tests/deletemutcheck.cx")) continue;   /* the guard, its CLI and its checkers */
+        snprintf(path, sizeof path, "%s/%s", root, files[i]);
+        if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode) || !(lang = lang_of(root, files[i]))) continue;
+        for (j = 0; j < nl; j++) if (!strcmp(L[j].f[6], "guarded") && !strcmp(L[j].f[0], files[i])) rows++;
+        if (!(t = cx_read(path, &n))) continue;
+        g = guard_lines(files[i], lang, t, lines, 4);
+        free(t);
+        if (g > rows) {
+            char w[128]; snprintf(w, sizeof w, "%d guard call line(s) (the first at line %d), %d guarded row(s)", g, lines[0], rows);
+            red("%s: %s: a guarded site without its mutation row (tests/deletemut.tsv) and ledger row", files[i], w, 0);
+        }
+        if (!g && rows) red("%s: guarded rows but no guard call left in the file%s", files[i], "", 0);
+    }
+    for (j = 0; j < nl; j++) if (!strcmp(L[j].f[6], "guarded")) {   /* a guarded row's file must still be tracked */
+        int k, hit = 0; for (k = 0; k < nf; k++) if (!strcmp(files[k], L[j].f[0])) { hit = 1; break; }
+        if (!hit) red("%s:%s: a guarded row for an untracked file", L[j].f[0], L[j].f[1], 0);
+    }
+    if (!QUIET) {   int ng = 0, ne = 0; for (j = 0; j < nl; j++) { if (!strcmp(L[j].f[6], "guarded")) ng++; else ne++; }
+        printf("deletecheck: %d raw deletion sites (all exempt with a reason: %s), %d ledger rows (%d guarded, %d exempt), %d mutation rows\n",
+               NH, fails ? "NO" : "yes", nl, ng, ne, nm); }
+    free(L); free(mf); free(ml);
+    return fails;
+}
+
+/* the tracked files: git ls-files -z in ROOT */
+static char **tracked(const char *root, int *nf) {
+    char *argv[] = { "git", "-C", (char *)root, "ls-files", "-z", 0 }, *out = 0, **v = 0, *p; size_t n = 0; int k = 0, cap = 0;
+    if (cx_runv_timeout(argv, 50, &out, &n) != 0 || !out) { free(out); return 0; }
+    for (p = out; p < out + n; p += strlen(p) + 1) {
+        if (!*p) continue;
+        if (k == cap) { cap = cap ? 2 * cap : 4096; v = (char **)realloc(v, (size_t)cap * sizeof *v); if (!v) exit(2); }
+        v[k++] = p;
+    }
+    *nf = k; return v;
+}
+static char *readrel(const char *root, const char *rel) { char p[4300]; size_t n; snprintf(p, sizeof p, "%s/%s", root, rel); return cx_read(p, &n); }
+
+/* --selftest: each red case seeded into a private tree must be red; the clean tree green */
+static char SB[4096];
+static void sput(const char *rel, const char *text) {
+    char p[4300], d[4300], *s; snprintf(p, sizeof p, "%s/%s", SB, rel); snprintf(d, sizeof d, "%s", p);
+    for (s = d + strlen(SB) + 1; (s = strchr(s, '/')) != 0; s++) { *s = 0; mkdir(d, 0755); *s = '/'; }
+    if (cx_write(p, text, strlen(text))) { fprintf(stderr, "deletecheck: cannot write %s\n", p); exit(2); }
+}
+static const char *CLEAN_LEDGER =
+    "# file\tline\tlang\tprimitive\tklass\trisk\tstatus\treason\n"
+    "a.sh\t3\tsh\trm\town-mkdtemp\tlow\texempt\ta fixture exemption\n"
+    "g.sh\t2\tsh\tsafedel --purge\town-mkdtemp\tlow\tguarded\tits own mkdtemp\n"
+    "g.cx\t2\tc\tcx_rmtree\town-mkdtemp\tlow\tguarded\tits own mkdtemp\n"
+    "l.c\t1\tc\tshell-rm\tproduct-internal\tlow\texempt\tthe launcher's own text\n";
+static const char *CLEAN_MUT = "g.sh\t2\tsafedel --purge -- {X}\town mkdtemp\tsafedel.cx\ng.cx\t2\tcx_rmtree {X}\town mkdtemp\tcx_rmtree(d)\n";
+static int clean_tree(void) {
+    sput("a.sh", "#!/bin/sh\n# rm -rf \"$T\" in a comment is no site\nrm -rf \"$T\"\necho done   # rm -f x: a trailing comment\n");
+    sput("g.sh", "T=$(mktemp -d)\nsh \"$R/tests/cxbin\" \"$R/tests/safedel.cx\" --purge -- \"${T:?}\"\n");
+    sput("g.cx", "/* cx_rmtree(x) in a comment */\nint main(void) { char *d = 0; cx_rmtree(d); return 0; }\n");
+    sput("l.c", "const char *L = \"t=x; rm -f \\\"$t.$$\\\"; exit 1\";\n");
+    sput("ok.py", "# shutil.rmtree(x) in a comment\nimport os\nprint('the rm command')\n");
+    sput("ok.c", "struct s { int (*remove)(void); }; int f(struct s *p) { return p->remove() + my_unlink(0); } /* unlink(p) */\n");
+    return 0;
+}
+static int run_case(const char *name, const char *rel, const char *text, const char *ledger_add, const char *mut_add, int want_red) {
+    char *files[16]; int nf = 0, r; char led[8192], mut[4096]; static const char *base[] = { "a.sh", "g.sh", "g.cx", "l.c", "ok.py", "ok.c", 0 };
+    char p[4300];
+    for (r = 0; base[r]; r++) files[nf++] = (char *)base[r];
+    if (rel) { sput(rel, text); files[nf++] = (char *)rel; }
+    snprintf(led, sizeof led, "%s%s", CLEAN_LEDGER, ledger_add ? ledger_add : "");
+    snprintf(mut, sizeof mut, "%s%s", CLEAN_MUT, mut_add ? mut_add : "");
+    fails = 0; MSGN = 0; MSG[0] = 0;
+    QUIET = 1; r = check(SB, files, nf, led, mut); QUIET = 0;
+    if (rel) { snprintf(p, sizeof p, "%s/%s", SB, rel); cx_remove(p); }
+    if ((r != 0) != want_red) { printf("FAIL selftest %s: want %s, got %s\n%s", name, want_red ? "red" : "green", r ? "red" : "green", MSG); return 1; }
+    printf("ok   selftest %s: %s\n", name, want_red ? "red" : "green");
+    return 0;
+}
+static int selftest(void) {
+    const char *t = getenv("TMPDIR"); int bad = 0;
+    snprintf(SB, sizeof SB, "%s/deletecheck-XXXXXX", t && *t ? t : "/tmp");
+    if (!mkdtemp(SB)) { fprintf(stderr, "deletecheck: no sandbox\n"); return 2; }
+    clean_tree();
+    bad += run_case("clean-tree", 0, 0, 0, 0, 0);
+    bad += run_case("new-raw-rm", "b.sh", "rm -rf \"$OUT\"\n", 0, 0, 1);
+    bad += run_case("new-raw-rm-exempted", "b.sh", "rm -rf \"$OUT\"\n", "b.sh\t1\tsh\trm\targ-derived\tmedium\texempt\ta reason\n", 0, 0);
+    bad += run_case("exempt-without-reason", "b.sh", "rm -rf \"$OUT\"\n", "b.sh\t1\tsh\trm\targ-derived\tmedium\texempt\t\n", 0, 1);
+    bad += run_case("trap-rm-in-quotes", "c.sh", "trap 'rm -rf \"$T\"' EXIT\n", 0, 0, 1);
+    bad += run_case("find-delete", "c.sh", "find \"$D\" -name '*.o' -delete\n", 0, 0, 1);
+    bad += run_case("xargs-rm", "c.sh", "ls | xargs rm\n", "c.sh\t1\tsh\trm\tother\tlow\texempt\tthe rm word alone\n", 0, 1);
+    bad += run_case("makefile-recipe", "Makefile", "clean:\n\trm -f unisacc.com\n", 0, 0, 1);
+    bad += run_case("py-shutil-rmtree", "t.py", "import shutil\nshutil.rmtree(p)\n", 0, 0, 1);
+    bad += run_case("py-os-remove", "t.py", "import os\nos.remove(p)\n", 0, 0, 1);
+    bad += run_case("py-path-unlink", "t.py", "p.unlink(missing_ok=True)\n", 0, 0, 1);
+    bad += run_case("py-argv-rm", "t.py", "subprocess.run(['rm', '-rf', p])\n", 0, 0, 1);
+    bad += run_case("c-unlink", "t.c", "int f(const char *p) { return unlink(p); }\n", 0, 0, 1);
+    bad += run_case("c-rmdir-nftw", "t.cx", "int f(const char *p) { rmdir(p); return nftw(p, 0, 4, 0); }\n", 0, 0, 1);
+    bad += run_case("c-shell-concatenated-rm", "t.c", "int f(void) { return system(\"rm -rf \" \"/x\"); }\n", 0, 0, 1);
+    bad += run_case("shell-rm-exempt-as-a-tool", "t.c", "int f(void) { return system(\"rm -rf /x\"); }\n", "t.c\t1\tc\tshell-rm\town-mkdtemp\tlow\texempt\ta tool's own temp\n", 0, 1);
+    bad += run_case("cx-run-shell-rm", "t.cx", "int f(char *o) { return cx_run(\"rm -f out.bin\", &o, 0); }\n", 0, 0, 1);
+    bad += run_case("stale-exemption", 0, 0, "zz.sh\t1\tsh\trm\tother\tlow\texempt\tgone\n", 0, 1);
+    bad += run_case("guard-call-without-row", "h.cx", "int f(char *d) { return cx_remove(d); }\n", 0, 0, 1);
+    bad += run_case("guarded-row-without-mutation", "h.cx", "int f(char *d) { return cx_remove(d); }\n", "h.cx\t1\tc\tcx_remove\town-mkdtemp\tlow\tguarded\tits own\n", 0, 1);
+    bad += run_case("guarded-with-mutation", "h.cx", "int f(char *d) { return cx_remove(d); }\n", "h.cx\t1\tc\tcx_remove\town-mkdtemp\tlow\tguarded\tits own\n", "h.cx\t1\tcx_remove {X}\town\tcx_remove(d)\n", 0);
+    bad += run_case("mutation-without-guarded-row", 0, 0, 0, "g.cx\t9\tcx_rmtree {X}\town\tcx_rmtree(d)\n", 1);
+    bad += run_case("bad-status", 0, 0, "a.sh\t3\tsh\trm\town-mkdtemp\tlow\tmaybe\tx\n", 0, 1);
+    if (cx_rmtree(SB)) { printf("FAIL selftest cleanup: %s stays\n", SB); bad++; }
+    printf("deletecheck selftest: %s\n", bad ? "FAIL" : "PASS");
+    return bad ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    char root[4096], **files, *ledger, *mut; int nf = 0, i, list = 0;
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--selftest")) return selftest();
+        else if (!strcmp(argv[i], "--list")) list = 1;
+        else { fprintf(stderr, "usage: deletecheck [--list | --selftest]   (from the repository root)\n"); return 2; }
+    }
+    if (!getcwd(root, sizeof root)) return 2;
+    if (!(files = tracked(root, &nf)) || !nf) { fprintf(stderr, "deletecheck: git ls-files failed (run from the repository root)\n"); return 2; }
+    if (list) {
+        int j;
+        fails = 0; NH = 0;
+        { static char none1[1], none2[1]; QUIET = 1; check(root, files, nf, none1, none2); QUIET = 0; }
+        for (j = 0; j < NH; j++) printf("%s\t%d\t%s\t%s\n", H[j].file, H[j].line, LANGN[H[j].lang], H[j].prim);
+        for (j = 0; j < nf; j++) {
+            int lang, s, g, k, lines[4096]; char path[4300], *t; size_t n; struct stat st;
+            for (s = 0; SELF[s] && strcmp(SELF[s], files[j]); s++) ;
+            if (SELF[s]) continue;
+            snprintf(path, sizeof path, "%s/%s", root, files[j]);
+            if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode) || !(lang = lang_of(root, files[j])) || !(t = cx_read(path, &n))) continue;
+            g = guard_lines(files[j], lang, t, lines, 4096); free(t);
+            for (k = 0; k < g && k < 4096; k++) printf("%s\t%d\t%s\tguard\n", files[j], lines[k], LANGN[lang]);
+        }
+        return 0;
+    }
+    if (!(ledger = readrel(root, "tests/deletes.tsv"))) { fprintf(stderr, "deletecheck: no tests/deletes.tsv\n"); return 2; }
+    if (!(mut = readrel(root, "tests/deletemut.tsv"))) { fprintf(stderr, "deletecheck: no tests/deletemut.tsv\n"); return 2; }
+    check(root, files, nf, ledger, mut);
+    if (MSGN) fputs(MSG, stdout);
+    return fails ? 1 : 0;
+}

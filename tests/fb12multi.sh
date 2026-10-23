@@ -55,7 +55,8 @@ R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 UC=${MODEL_COM:-${UA:-$R/unisacc.com}}
 [ -x "$UC" ] || { echo "fb12multi: no compiler at $UC" >&2; exit 2; }
 KNOWN=$R/tests/fb12.knownfail
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+_SD="$R"/tests   # the one deletion guard: argv CLI tests/safedel.cx over include/unisa_safedel.h
+T=$(mktemp -d); trap 'sh "$_SD/cxbin" "$_SD/safedel.cx" --purge -- "${T:?}"' EXIT
 . "$R/tests/knownfail.sh"
 knownfail_load "$KNOWN" "$T/known.keys" || exit 1
 isknown() { knownfail_has "$1"; }
@@ -75,7 +76,7 @@ for name in $SET; do
     # (AGENTS.md: 60 s a run, and this suite must stay under it overall).
     build_rc=0
     if [ -f "$d/build" ]; then
-        "$_BOUND" 45 sh -c "cd '$d' && UC='$UC' && $(cat "$d/build")" >/tmp/fb12-$name.build 2>&1
+        "$_BOUND" 45 sh -c "cd '$d' && UC='$UC' && $(cat "$d/build")" >"$T/fb12-$name.build" 2>&1
         build_rc=$?
         [ "$build_rc" -eq 0 ] || {
             # A build that fails is a defect like any other, and a listed one
@@ -89,11 +90,11 @@ for name in $SET; do
             else
                 fail=$((fail+1))
                 printf "  FAIL  %-32s build rc=%s\n" "$name" "$build_rc"
-                printf "        %s\n" "$(head -1 /tmp/fb12-$name.build | cut -c1-100)"
+                printf "        %s\n" "$(head -1 "$T/fb12-$name.build" | cut -c1-100)"
             fi
             continue; }
     fi
-    got=$("$_BOUND" 45 sh -c "cd '$d' && UC='$UC' && $(cat "$d/run")" 2>/tmp/fb12-$name.err)
+    got=$("$_BOUND" 45 sh -c "cd '$d' && UC='$UC' && $(cat "$d/run")" 2>"$T/fb12-$name.err")
     rc=$?
     want=$(cat "$d/expect.txt")
     if [ "$rc" = "$want_rc" ] && [ "$got" = "$want" ]; then
@@ -115,7 +116,7 @@ for name in $SET; do
             "$(printf '%s' "$want" | head -2 | tr '\n' '|')"
     fi
 done
-rm -f /tmp/fb12-*.err /tmp/fb12-*.build
+# the per-case logs live in $T (removed through the one deletion guard on exit), not in the shared /tmp
 echo
 echo "fb12-multi $((pass+fail+known))   pass $pass   wrong $fail   knownwrong $known   revived $revived"
 # A suite that checked nothing is not green -- but "checked something" here

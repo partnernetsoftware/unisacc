@@ -85,7 +85,7 @@ def gen_inputs(cmd):
         os.replace(temporary, path)
     finally:
         try:
-            os.unlink(temporary)
+            subprocess.run(["sh", os.path.join(ROOT, "tests", "cxbin"), os.path.join(ROOT, "tests", "safedel.cx"), "--purge", "--", temporary], check=True)   # the one deletion guard (commissar ruling 2026-10-23)
         except FileNotFoundError:
             pass
     return [path, os.path.join(X, "ua_ref.stamp")]
@@ -189,7 +189,7 @@ def main():
             print("%s: input fails %s check: %s" % (n, fmt, bad))
             return 1
         if gen and os.path.exists(s["delta"] + ".stamp"):
-            os.unlink(s["delta"] + ".stamp")
+            subprocess.run(["sh", os.path.join(ROOT, "tests", "cxbin"), os.path.join(ROOT, "tests", "safedel.cx"), "--purge", "--", s["delta"] + ".stamp"], check=True)   # the one deletion guard
         r, e = fresh(s["delta"], shlex.split(s["gen"].format(delta=s["delta"])), gen_inputs(s["gen"]))
         if True:
             if r != 0:

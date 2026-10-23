@@ -13,13 +13,13 @@ R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 Q=${REALPROG_CACHE:-$R/corpus}/sqlite
 [ -f "$Q/sqlite3.c" ] && [ -f "$Q/shell.c" ] || { echo "sqlspeed: corpus/sqlite absent (run tests/realprog.sh once)"; exit 1; }
 mode=${1:-ref}
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d); trap 'sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${T:?}"' EXIT
 SRCSHA=$(cat "$Q/sqlite3.c" "$Q/shell.c" | shasum -a 256 | cut -c1-16)
 build() {   # build NAME KEY COMMAND... -> $T/NAME, cached by KEY
     local name=$1 key=$2; shift 2
     local C=${TMPDIR:-/tmp}/unisacc-sqlspeed-$name-$key
     if [ ! -x "$C" ]; then
-        (cd "$Q" && "$_BOUND" 58 "$@" -o "$C.part") > "$T/$name.err" 2>&1 || { rm -f "$C.part"; echo "sqlspeed: $name build failed: $(head -1 "$T/$name.err")"; return 1; }
+        (cd "$Q" && "$_BOUND" 58 "$@" -o "$C.part") > "$T/$name.err" 2>&1 || { sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${C:?}.part"; echo "sqlspeed: $name build failed: $(head -1 "$T/$name.err")"; return 1; }
         mv -f "$C.part" "$C"
     fi
     cp "$C" "$T/$name"

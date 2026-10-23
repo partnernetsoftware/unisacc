@@ -254,7 +254,7 @@ def main(argv):
             uo = tmp / 'use_lnx.o'
             r = run([ua, usrc, '-c', '-b', 'lnx/arm64', '-o', uo]); assert r.returncode == 0, r.stderr
             tar = run(['tar', '-C', tmp, '-cf', '-', 'banner.c', 'use_lnx.o']).stdout
-            r = run(['limactl', 'shell', vm, '--', 'sh', '-c', 'rm -rf /tmp/ia && mkdir /tmp/ia && cd /tmp/ia && tar xf - && gcc -c -o banner.o banner.c && ld -o prog use_lnx.o banner.o && ./prog'], input=tar, timeout=40)
+            r = run(['limactl', 'shell', vm, '--', 'sh', '-c', 'd=$(mktemp -d /tmp/ia.XXXXXX) && cd "$d" && tar xf - && gcc -c -o banner.o banner.c && ld -o prog use_lnx.o banner.o && ./prog'], input=tar, timeout=40)
             assert r.stdout == want, ('interop elf', r.stdout, r.stderr[-300:])
             print('elfobj  interop (a): our ELF object reads gcc-defined data symbols, linked by GNU ld in %s' % vm)
         # the product's Linux object route (cdx 7f72206) writes the reference's bytes
@@ -288,7 +288,7 @@ def main(argv):
                     files = ['hello.arm64.o', 'hello.arm64.img', 'fact.arm64.o', 'fact.arm64.img']
                     if ('hello', 'arm64') in linked: files += [linked[('hello', 'arm64')].name]
                     tar = run(['tar', '-C', tmp, '-cf', '-'] + files).stdout
-                    script = ('rm -rf /tmp/elfobj && mkdir /tmp/elfobj && cd /tmp/elfobj && tar xf - && '
+                    script = ('d=$(mktemp -d /tmp/elfobj.XXXXXX) && cd "$d" && tar xf - && '   # a fresh VM directory: no shell rm
                               'for s in hello fact; do ld -o $s.gnu $s.arm64.o && chmod +x $s.arm64.img && '
                               './$s.gnu > $s.gnu.out; echo "$s gnu rc=$?"; ./$s.arm64.img > $s.img.out; echo "$s img rc=$?"; '
                               'cmp $s.gnu.out $s.img.out && echo "$s SAME"; done; '
@@ -299,7 +299,7 @@ def main(argv):
                     if ('hello', 'arm64') in linked: assert 'lld SAME' in out, out
                     print('elfobj  arm64 programs linked by GNU ld%s run in %s and print what the image prints' % (' and ld.lld' if ('hello', 'arm64') in linked else '', vm))
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        subprocess.run(['sh', str(ROOT / 'tests/cxbin'), str(ROOT / 'tests/safedel.cx'), '--purge', '--', str(tmp)])   # the one deletion guard
     for s in skips: print('elfobj  SKIP ' + s)
     print('elfobj  objects %d   relocations %d   linked %d   skipped %d' % (nobj, nrel, len(linked), len(skips)))
     if skips and strict:

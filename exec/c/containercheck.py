@@ -45,7 +45,7 @@ src=isolated/'hello.c';src.write_bytes((root/'examples/hello.c').read_bytes())
 env=dict(os.environ);env.pop('UNISA_KERNEL',None);env.pop('UNISA_CONTAINER',None)
 # Make the loose package and kernel paths disappear, so neither the bridge nor
 # shell launcher can accidentally obtain data outside the final container.
-if not explicit: shutil.rmtree(p/'build')
+if not explicit: subprocess.run(['sh',str(root/'tests/cxbin'),str(root/'tests/safedel.cx'),'--purge','--',str(p/'build')],check=True)   # the one deletion guard
 targets=[os_+'/'+arch for os_ in ('lnx','osx','win') for arch in ('arm64','x86_64')]
 for target in targets:
     assert (target+'/image/O2').encode() in routes

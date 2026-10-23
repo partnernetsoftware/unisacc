@@ -11,6 +11,9 @@
 # the global checks on), GLOBAL=1/0 forces them on/off.  A selection that
 # checks nothing, or names an unknown stage, fails with exit 2.
 set -u
+# every deletion goes through the one guard (include/unisa_safedel.h) via its argv CLI (commissar ruling 2026-10-23)
+SDR=$(cd "$(dirname "$0")/../.." && pwd) || exit 2
+safedel() { sh "$SDR/tests/cxbin" "$SDR/tests/safedel.cx" "$@"; }
 # THE stage list: name, UNS2 blob tag, trace (t/-), invariant negatives (i/-).
 # Every per-stage loop below is derived from this table.
 TABLE='prec single - i
@@ -175,7 +178,7 @@ if [ "${1:-}" = --batches ]; then
         if [ -n "$mis$ext$dup" ]; then bf=1; echo "batches: receipt union WRONG: missing [${mis}] extra [${ext}] duplicate [${dup}]"
         else echo "batches: receipt union = all $(echo $ALL | wc -w | tr -d ' ') stages + $(echo $GLOBALS | wc -w | tr -d ' ') global checks + $(echo $PACKS | wc -w | tr -d ' ') pack items, each exactly once ($(wc -l < "$W/gotall" | tr -d ' ') receipts)"; fi
     fi
-    rm -rf "$W"
+    safedel --purge -- "$W"
     [ $bf = 0 ] && echo "construct check batches: ok" || echo "construct check batches: FAILED"
     exit $bf
 fi
@@ -705,7 +708,7 @@ NST=$(echo $ALL | wc -w | tr -d ' ')
 if psel py || psel ship || psel round; then
     for b in cc ua san; do
         B 60 "$T/c_$b" -u "$T/pack.$b.uns2" $PF > "$T/pack.$b.out" 2>&1; rc=$?
-        if [ $rc -ne 0 ] || grep -q 'runtime error' "$T/pack.$b.out"; then echo "pack $b construct FAILED (rc $rc): $(head -1 "$T/pack.$b.out")"; fail=1; rm -f "$T/pack.$b.uns2"
+        if [ $rc -ne 0 ] || grep -q 'runtime error' "$T/pack.$b.out"; then echo "pack $b construct FAILED (rc $rc): $(head -1 "$T/pack.$b.out")"; fail=1; safedel --purge -- "$T/pack.$b.uns2"
         else echo "pack $b: one process, $NST stages, $(wc -c < "$T/pack.$b.uns2" | tr -d ' ') B"; fi
     done
 fi
@@ -791,7 +794,7 @@ if psel wfail; then
             else echo "write negative $t $b WRONG (rc $rc, want $r): $(head -1 "$o")"; fail=1; fi
         done
         if [ -e "$T/wf.dup.uns2" ] || [ -e "$T/wf.maxs.uns2" ]; then echo "write negative $b: a rejected pack left an output file"; fail=1; fi
-        rm -f "$T"/wf.*.uns2
+        safedel --purge -- "$T"/wf.*.uns2
     done
 fi
 # summary: built from the pass marks (results), not from the selection.
@@ -837,6 +840,6 @@ done
 echo "summary: attempted $((np + nf)), passed $np, failed $nf, skipped $ns"
 [ $nf = 0 ] || fail=1    # self-check: an attempted item without a receipt fails this run too
 cat "$T/rcpt"
-rm -rf "$T"
+safedel --purge -- "$T"
 [ $fail = 0 ] && echo "construct check: ok" || echo "construct check: FAILED"
 exit $fail

@@ -152,10 +152,14 @@ static int check_frozen(const char *leaf, const char *root, Manifest *m, int rep
         return 0;
     }
     {
-        char base[] = "/tmp/eabl-b-XXXXXX", abl[] = "/tmp/eabl-a-XXXXXX";
-        char bp[64], ap[64];
-        int rc0, rc1;
-        int f0 = mkstemp(base), f1 = mkstemp(abl);
+        /* under the temp root ($TMPDIR, else /tmp): the images are deleted through the one guard (cx_remove) */
+        const char *td = getenv("TMPDIR");
+        char base[4096], abl[4096];
+        char bp[4200], ap[4200];
+        int rc0, rc1, f0, f1;
+        snprintf(base, sizeof base, "%s/eabl-b-XXXXXX", td && *td ? td : "/tmp");
+        snprintf(abl, sizeof abl, "%s/eabl-a-XXXXXX", td && *td ? td : "/tmp");
+        f0 = mkstemp(base); f1 = mkstemp(abl);
         if (f0 < 0 || f1 < 0) return fail("tmp");
         close(f0);
         close(f1);
@@ -163,18 +167,18 @@ static int check_frozen(const char *leaf, const char *root, Manifest *m, int rep
         snprintf(ap, sizeof ap, "%s.img", abl);
         rc0 = compile_ablate(root, m, 0, bp);
         rc1 = compile_ablate(root, m, m->net, ap);
-        if (rc0 != 0) { unlink(bp); unlink(ap); return fail("baseline compile"); }
-        if (need_raise && rc1 == 0) { unlink(bp); unlink(ap); return fail("expected refusal"); }
+        if (rc0 != 0) { cx_remove(bp); cx_remove(ap); cx_remove(base); cx_remove(abl); return fail("baseline compile"); }
+        if (need_raise && rc1 == 0) { cx_remove(bp); cx_remove(ap); cx_remove(base); cx_remove(abl); return fail("expected refusal"); }
         if (need_art && rc1 == 0) {
             char h0[65], h1[65];
             if (sha_path(bp, h0) || sha_path(ap, h1) || !strcmp(h0, h1)) {
-                unlink(bp);
-                unlink(ap);
+                cx_remove(bp);
+                cx_remove(ap); cx_remove(base); cx_remove(abl);
                 return fail("artifact unchanged");
             }
         }
-        unlink(bp);
-        unlink(ap);
+        cx_remove(bp);
+        cx_remove(ap); cx_remove(base); cx_remove(abl);
     }
     printf("edgeablate: edge %s->%s PASS probe %s (%d samples)\n", m->flow, m->net, m->probe, nr);
     return 0;

@@ -4,7 +4,7 @@ set -eu
 R=$(cd "$(dirname "$0")/../.." && pwd);cd "$R"
 case ${1:-} in 1|2|3|4|5|6|7|8) shard=$((${1}-1));; *) echo 'usage: check.sh 1..8' >&2;exit 2;; esac
 T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-librarycallsitepartition.XXXXXX")
-trap 'rm -rf "$T"' EXIT HUP INT TERM
+trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT HUP INT TERM
 B=$("$R/tests/bound" --helper)
 b(){ "$B" 15 "$@"; }
 b cc -O2 -w -Iseed seed/gen.c -o "$T/gen"

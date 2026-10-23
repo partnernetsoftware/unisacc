@@ -38,7 +38,7 @@ def main():
   rdir=t/'resources';rdir.mkdir();source=t/'input';pkg=t/'m.pkg'
   def check(tape,values):
    status,out,_=simulate(d,tape,'input',files=Resources(values),loaded=loaded,maxsteps=200000)
-   for p in rdir.iterdir():p.unlink()
+   for p in rdir.iterdir():subprocess.run(['sh',str(ROOT/'tests/cxbin'),str(ROOT/'tests/safedel.cx'),'--purge','--',str(p)],check=True)
    for k,v in values.items(): (rdir/k.split(b'/')[-1].decode()).write_bytes(v)
    pkg.write_bytes(build([manifest],[('006c6962726172792f',rdir)],cache=False));source.write_bytes(tape)
    p=subprocess.run([runtime,'--bundle',str(pkg),'test',str(source)],capture_output=True,timeout=10)

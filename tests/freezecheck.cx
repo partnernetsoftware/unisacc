@@ -274,7 +274,7 @@ static int st_case(const char *name, int want, const char *want_text) {
     }
     if (waitpid(pid, &st, 0) != pid || (st & 0x7f)) { printf("freezecheck selftest: FAIL %s: child died\n", name); return 1; }
     got = (st >> 8) & 0xff;
-    b = cx_read(out, &n); unlink(out);
+    b = cx_read(out, &n); cx_remove(out);
     if (got != want || (want_text && (!b || !strstr(b, want_text)))) {
         printf("freezecheck selftest: FAIL %s: rc %d (want %d)%s%s\n--- output\n%s", name, got, want,
                want_text ? ", want text: " : "", want_text ? want_text : "", b ? b : "");
@@ -321,7 +321,13 @@ static int selftest(void) {
     bad += st_case("released version", 0, "v0.0.99 is already released; not in a freeze window");
 #undef C
 done:
-    {   char cmd[4200]; snprintf(cmd, sizeof cmd, "rm -rf '%s'", ST_DIR); cx_run_timeout(cmd, 20, 0, 0); }
+    {   /* the one deletion guard (include/unisa_safedel.h), never a shell rm.  The guard never deletes a .git, so the
+           scratch repository this selftest made under mkdtemp is disarmed first (its .git renamed, as tests/safedelcheck.cx) */
+        char g[4200], d[4200];
+        snprintf(g, sizeof g, "%s/.git", ST_DIR); snprintf(d, sizeof d, "%s/dotgit-scratch", ST_DIR);
+        rename(g, d);
+        if (cx_rmtree(ST_DIR)) bad++;
+    }
     if (bad) { printf("freezecheck selftest: %d problem(s)\n", bad); return 1; }
     puts("freezecheck selftest: PASS (prefix table; no row -> rc 0; fix:/fix(cx): ok; feat: in window -> rc 1; waiver; fix (cx): refused; tag)");
     return 0;

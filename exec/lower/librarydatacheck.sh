@@ -24,7 +24,7 @@ case ${1:-check} in
   case "$r" in full) set -- --full;; arm) set -- --full --arm64;; object) set -- --full --object;; *) exit 2;; esac
   if ready "$r";then echo "librarydata: prepared $r $K";exit 0;fi
   T=$(mktemp -d "${TMPDIR:-/tmp}/librarydata-prep.XXXXXX")
-  trap 'rm -rf "$T"' EXIT HUP INT TERM
+  trap 'sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${T:?}"' EXIT HUP INT TERM
   b cc -O2 -w seed/gen.c -o "$T/gen"
   b "$T/gen" lower "$T/c.json" "$@"
   b python3 exec/build/gen.py lower "$T/model.json" "$@"
@@ -43,7 +43,7 @@ case ${1:-check} in
 esac
 for r in full arm object;do ready "$r" || { echo "librarydata: NEED_PREPARE $r: tests/bound 55 sh exec/lower/librarydatacheck.sh --prepare $r" >&2;exit 75; };done
 T=$(mktemp -d "${TMPDIR:-/tmp}/librarydata-check.XXXXXX")
-trap 'rm -rf "$T"' EXIT HUP INT TERM
+trap 'sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${T:?}"' EXIT HUP INT TERM
 for r in full arm object;do
  cp "$D/$r/model.tbl" "$T/model.$r.tbl"
  cp "$D/$r/model.net" "$T/model.$r.net"

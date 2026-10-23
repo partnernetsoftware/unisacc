@@ -7,7 +7,7 @@
 #   142 then 0                                                  -> rc 0 only because a later window completed
 # No real gate runs and nothing waits on a real timeout (each fake window returns at once).
 set -u
-R=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-qtimeout.XXXXXX"); trap 'rm -rf "$T"' EXIT
+R=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-qtimeout.XXXXXX"); trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT
 fail() { echo "queuetimeout: $*"; exit 1; }
 # macOS has no GNU timeout(1); in-repo tests/bound is the watchdog (1..60s), as in queuestartlaunchcheck (e2e961d1)
 _BOUND=$("$R/tests/bound" --helper) || { echo "queuetimeout: need tests/bound (native watchdog)"; exit 2; }
@@ -24,9 +24,9 @@ for a in "$@"; do case $a in GATE_STATE=*) GS=${a#GATE_STATE=};; esac; done
 [ -f "$GS/results.json" ] || printf '{"stamp":{"a":"s"},"results":{"a":{"rc":0}}}\n' > "$GS/results.json"
 rc=$(sed -n "${n}p" "$T/rcs"); [ -n "$rc" ] || rc=$(tail -1 "$T/rcs"); exit "$rc"
 SH
-sed -i.bak "s#__T__#$T#" "$W/tests/term.sh" && rm -f "$W/tests/term.sh.bak"; chmod +x "$W/tests/term.sh"
+sed -i.bak "s#__T__#$T#" "$W/tests/term.sh" && sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$W/tests/term.sh.bak" || exit 3; chmod +x "$W/tests/term.sh"
 run() {   # run RCS WINDOWS NAME -> prints "rc launches"; state in $T/q-NAME
-  rm -f "$T/launches"; printf '%s\n' $1 > "$T/rcs"; Q=$T/q-$3
+  sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T/launches" || exit 3; printf '%s\n' $1 > "$T/rcs"; Q=$T/q-$3
   env -u QUEUE_START -u QUEUE_STATE -u QUEUE_BACKUP QUEUE_SELFTEST=1 STAGELOG_RUN=0 QUEUE_WORKTREE="$W" QUEUE_BACKUP="$T/bak-$3" QUEUE_STATE="$Q" \
     QUEUE_WINDOWS="$2" UNISACC_FFI_X86_PROVIDER=/nonexistent "$_BOUND" 50 "$R/release/tools/queue.sh" "$D" "$T/ua" "$S" > "$T/out" 2>&1; qrc=$?
   cp "$T/out" "$T/out-$3" || { echo "copy-failed 0"; return; }
@@ -35,7 +35,7 @@ run() {   # run RCS WINDOWS NAME -> prints "rc launches"; state in $T/q-NAME
 # go RCS WINDOWS NAME: sets $1 (queue rc) and $2 (launches); a helper that printed fewer than two words is a clear failure
 # an unrelated live gatequeue.py (outside the fixture worktree) must neither be waited on nor killed by a selftest queue.sh
 mkdir -p "$T/stub/tests"; printf 'import time\ntime.sleep(60)\n' > "$T/stub/tests/gatequeue.py"
-python3 "$T/stub/tests/gatequeue.py" & stub=$!; trap 'kill $stub 2>/dev/null; rm -rf "$T"' EXIT
+python3 "$T/stub/tests/gatequeue.py" & stub=$!; trap 'kill $stub 2>/dev/null; [ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT
 go() { local o; o=$(run "$@"); set -- $o; [ $# -ge 2 ] || fail "helper run $* gave no 'rc launches' result ($o): $(cat "$T/out" 2>/dev/null)"; RC=$1; NL=$2; }
 kept() { python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d['results'].get('a')=={'rc':0} else 1)" "$T/q-$1/results.json"; }
 go "142" 1 one;   [ "$RC" = 142 ] && [ "$NL" = 1 ] || fail "one window, 142: rc=$RC launches=$NL (want 142/1, no second window)"
@@ -53,8 +53,8 @@ go "142 0" 5 late;     [ "$RC" = 0 ] && [ "$NL" = 2 ] || fail "142 then 0: rc=$R
 go "75 142 1" 5 red;  [ "$RC" = 1 ] && [ "$NL" = 3 ] || fail "75,142 then a red window: rc=$RC launches=$NL (want 1/3)"
 # the singleton guard itself still bites without the selftest override (a live queue.sh on the host)
 mkdir -p "$T/release/tools"; printf '#!/bin/sh\nsleep 40\n' > "$T/release/tools/queue.sh"; chmod +x "$T/release/tools/queue.sh"
-"$T/release/tools/queue.sh" & dummy=$!; trap 'kill $dummy $stub 2>/dev/null; rm -rf "$T"' EXIT; sleep 1
-rm -f "$T/launches"; printf '0\n' > "$T/rcs"
+"$T/release/tools/queue.sh" & dummy=$!; trap 'kill $dummy $stub 2>/dev/null; [ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT; sleep 1
+sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T/launches" || exit 3; printf '0\n' > "$T/rcs"
 env -u QUEUE_START -u QUEUE_SELFTEST QUEUE_WORKTREE="$W" QUEUE_BACKUP="$T/bak-g" QUEUE_STATE="$T/q-g" UNISACC_FFI_X86_PROVIDER=/nonexistent "$_BOUND" 50 "$R/release/tools/queue.sh" "$D" "$T/ua" "$S" > "$T/out-g" 2>&1; grc=$?
 [ "$grc" = 2 ] && grep -q 'another queue.sh is running' "$T/out-g" || fail "singleton guard did not refuse beside a live queue.sh: rc=$grc $(cat "$T/out-g")"
 kill -0 $stub 2>/dev/null || fail "an unrelated gatequeue.py was killed by a selftest queue.sh"

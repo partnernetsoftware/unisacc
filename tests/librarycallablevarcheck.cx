@@ -14,25 +14,18 @@
    run, the captured streams in Python's bytes repr.  The temporary directory is removed either way.
    Include-free: everything used comes with the cx.h prelude. */
 
+/* a whole scratch tree through the one deletion guard (include/unisa_safedel.h, in the cx.h prelude; commissar ruling
+   2026-10-23) with an explicit ceiling: these trees hold copied sources and build outputs, beyond SAFEDEL_MAX_FILES */
+static int scratch_rmtree(const char *p) {
+    char why[700]; int rc = unisa_safedel(p, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 200000L, why, (int)sizeof why);
+    if (rc) fprintf(stderr, "cx_rmtree: %s\n", why);
+    return rc;
+}
 static char ROOT[4096], TD[4200];
 
-static void rmtree(const char *p) {
-    struct stat s; DIR *d; struct dirent *e;
-    if (lstat(p, &s) != 0) return;
-    if (!S_ISDIR(s.st_mode)) { unlink(p); return; }
-    if ((d = opendir(p))) {
-        while ((e = readdir(d))) {
-            char c[8192];
-            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-            snprintf(c, sizeof c, "%s/%s", p, e->d_name); rmtree(c);
-        }
-        closedir(d);
-    }
-    rmdir(p);
-}
 static void die(const char *fmt, const char *a) {   /* what Python raised outside the assertions */
     fflush(stdout); fprintf(stderr, fmt, a); fputc('\n', stderr);
-    if (TD[0]) rmtree(TD);
+    if (TD[0]) scratch_rmtree(TD);
     exit(1);
 }
 
@@ -75,7 +68,7 @@ static int run_capture(char **args, char **out, size_t *on, char **err, size_t *
     *on = *en = 0;
     if (!(*out = cx_read(po, on))) die("librarycallablevarcheck: cannot read %s", po);
     if (!(*err = cx_read(pe, en))) die("librarycallablevarcheck: cannot read %s", pe);
-    unlink(po); unlink(pe);
+    cx_remove(po); cx_remove(pe);
     return WIFEXITED(st) ? WEXITSTATUS(st) : WIFSIGNALED(st) ? -WTERMSIG(st) : 1;
 }
 
@@ -121,7 +114,7 @@ int main(void) {
                 fflush(stdout);
                 fprintf(stderr, "AssertionError: ('%s', %s, ", arch, san ? "True" : "False");
                 repr_bytes(stderr, (unsigned char *)err, en); fputs(")\n", stderr);
-                rmtree(TD); return 1;
+                scratch_rmtree(TD); return 1;
             }
             free(out); free(err);
             if (darwin && !strcmp(arch, "x86_64")) { r[j++] = "arch"; r[j++] = "-x86_64"; }
@@ -132,7 +125,7 @@ int main(void) {
                 fprintf(stderr, "AssertionError: ('%s', %s, ", arch, san ? "True" : "False");
                 repr_bytes(stderr, (unsigned char *)out, on); fputs(", ", stderr);
                 repr_bytes(stderr, (unsigned char *)err, en); fputs(")\n", stderr);
-                rmtree(TD); return 1;
+                scratch_rmtree(TD); return 1;
             }
             for (s = 0; s < on && ws((unsigned char)out[s]); s++) {}   /* p.stdout.decode().strip() */
             for (e = on; e > s && ws((unsigned char)out[e - 1]); e--) {}
@@ -141,6 +134,6 @@ int main(void) {
             free(out); free(err);
         }
     }
-    rmtree(TD);
+    scratch_rmtree(TD);
     return 0;
 }

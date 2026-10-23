@@ -162,7 +162,7 @@ case "$rc" in
     *) echo "local acceptance FAILED (rc=$rc); release NOT ready" >&2; exit "$rc";;
 esac
 python3 - "$GATE_STATE" "$MODEL_COM" "$before" "${RELEASE_OUT:-}" <<'CHECK'
-import hashlib,json,pathlib,re,shutil,sys,tempfile
+import hashlib,json,pathlib,re,shutil,subprocess,sys,tempfile
 state,source,digest,out=sys.argv[1:]
 p=pathlib.Path(state); data=json.loads((p/'results.json').read_text())
 jobs,results=data['jobs'],data['results']
@@ -208,7 +208,8 @@ if out:
         if sha(tmp)!=digest or sha(source)!=digest:raise SystemExit('release: copy hash mismatch')
         tmp.replace(dest/'unisacc.com')
         shutil.copyfile(pathlib.Path(str(source)+'.build.json'), dest/'unisacc.com.build.json')
-    finally:tmp.unlink(missing_ok=True)
+    finally:   # the error path only (a done copy was renamed away): through the one deletion guard, best effort
+        if tmp.exists():subprocess.run(["sh","tests/cxbin","tests/safedel.cx","--purge","--",str(tmp)])
     print('local-tested candidate copied:',dest/'unisacc.com','sha256',digest)
 print('LOCAL gate passed for candidate sha256',digest)
 print('release NOT ready: external six-platform model execution/bootstrap evidence remains unverified here')

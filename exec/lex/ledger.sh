@@ -11,11 +11,11 @@ _BOUND=$("$_BOUND" --helper) || exit 2
 #     memory; table load and output write are in the subtracted run);
 #     reference = lex() only (UA_LEXREP; tokens into arrays, no printing).
 set -u
-cd "$(dirname "$0")/../.."
+R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 bound() { "$_BOUND" "$@"; }
 . exec/stamp.sh
 bound 58 ./exec/lex/run.sh gen || exit 1
-B=$(mktemp -d); trap 'rm -rf "$B"' EXIT HUP INT TERM
+B=$(mktemp -d); trap 'sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${B:?}"' EXIT HUP INT TERM
 PRE="$X/ua_pre"; REF="$X/ua_ref"; SELF="$B/unisacc.c"
 bound 10 python3 tests/sourceflat.py "$SELF" || exit 1
 bound 50 python3 exec/lex/tbl.py "$X/e1delta.json" "$B/e1.tbl" || exit 1

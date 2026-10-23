@@ -3,7 +3,8 @@
 # before any window: a fake window launcher (QUEUE_WORKTREE/tests/term.sh) records every launch.  Refusals must
 # exit 2 with zero launches and the state dir untouched; a clean fresh start must launch.  No real gate runs.
 set -u
-R=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-qlaunch.XXXXXX"); trap 'rm -rf "$T"' EXIT
+R=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-qlaunch.XXXXXX"); trap 'sh "$_SD/cxbin" "$_SD/safedel.cx" --purge -- "${T:?}"' EXIT
+_SD="$R"/tests   # the one deletion guard: argv CLI tests/safedel.cx over include/unisa_safedel.h
 fail() { echo "queuestartlaunch: $*"; exit 1; }
 D=$T/cand; S=$T/seed; W=$T/wt; B=$T/bak; mkdir -p "$D" "$S" "$W/tests" "$B/state"
 cp "$R/unisacc.com" "$D/unisacc-next.com"   # real product bytes: queue.sh pre-flights the static-image contract on the candidate
@@ -52,6 +53,6 @@ Q=$T/q-fresh; export QUEUE_START=resume; rc=$(q "$Q"); unset QUEUE_START
 [ "$rc" = 0 ] && [ "$(launches)" -ge 1 ] || fail "clean fresh start: rc=$rc launches=$(launches) $(cat "$T/out")"
 grep -q '^restored=no$' "$Q/start-receipt.txt" && [ ! -e "$Q/results.json" ] || fail "fresh start imported the backup"
 # 5. a failing window after a clean start is not a green queue (the positive cannot hide a red launch)
-printf '#!/bin/sh\necho launched >> "%s/launches"\nexit 1\n' "$T" > "$W/tests/term.sh"; rm -f "$T/launches"
+printf '#!/bin/sh\necho launched >> "%s/launches"\nexit 1\n' "$T" > "$W/tests/term.sh"; sh "$_SD/cxbin" "$_SD/safedel.cx" --purge -- "${T:?}/launches"
 rc=$(q "$T/q-red"); [ "$rc" != 0 ] && [ "$(launches)" -ge 1 ] || fail "a failing window gave rc=$rc launches=$(launches)"
 echo "queuestartlaunch  real queue.sh entry: fresh-into-live, foreign-backup resume and unknown mode exit 2 with zero window launches, state untouched/not created, refusal logged; a clean default start (even with QUEUE_START=resume inherited) exits 0 and launches without importing the backup; a failing window is not rc 0; snapshots cover members, modes and bytes"

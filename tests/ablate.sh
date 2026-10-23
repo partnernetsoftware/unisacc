@@ -26,7 +26,8 @@ ABL=${ABL:-"pp lex parse prec type scope irsel binsel enc reloc regmap abi.sysno
 if [ -n "${SHARD:-}" ]; then
     ABL=$(echo $ABL | tr ' ' '\n' | awk -v k="${SHARD%/*}" -v n="${SHARD#*/}" '(NR-1)%n==k-1' | tr '\n' ' ')
 fi
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+_SD="$R"/tests   # the one deletion guard: argv CLI tests/safedel.cx over include/unisa_safedel.h
+T=$(mktemp -d); trap 'sh "$_SD/cxbin" "$_SD/safedel.cx" --purge -- "${T:?}"' EXIT
 
 images() {   # images <tag> -> one line per probe/target: sha or REFUSED
     hung=0

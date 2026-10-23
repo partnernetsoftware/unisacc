@@ -12,7 +12,7 @@ UA=${MODEL_COM:-$R/unisacc.com}
 if [ "${1:-}" = --selftest ];then
  part=${2:?part};case $part in 1|2|3|4) ;;*) exit 2;;esac
  O=$(mktemp -d "${TMPDIR:-/tmp}/callback-entry-selftest.XXXXXX")
- trap 'rm -rf "$O"' EXIT HUP INT TERM
+ trap '[ -z "$O" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$O"' EXIT HUP INT TERM
  python3 tests/bound.py 55 python3 tests/librarycallbackproduce.py --root "$R" --product "$UA" --out "$O" --part "$part" --selftest
  exit $?
 fi
@@ -77,7 +77,7 @@ ready "$D/tools" || { echo 'NEED_PREPARE callback tools' >&2;exit 75; }
 # Fixture producer owns an explicit hash-bound case plan; never guess a ledger,
 # synthesize ABSENT or report an empty plan as PASS.
 [ -f tests/seals/librarycallbacklower/cases.json ] || { echo 'NEED_PREPARE paired callback fixture/producer' >&2;exit 75; }
-T=$(mktemp -d "${TMPDIR:-/tmp}/callback-model-check.XXXXXX");trap 'rm -rf "$T"' EXIT HUP INT TERM
+T=$(mktemp -d "${TMPDIR:-/tmp}/callback-model-check.XXXXXX");trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT HUP INT TERM
 # All twelve pairs are explicitly prepared/hash-bound, three per verdict shard.
 for v in lnx-x lnx-a osx-x osx-a win-x win-a obj-lnx-x obj-lnx-a obj-osx-x obj-osx-a obj-win-x obj-win-a;do
  ready "$D/off12/$v" || { echo "NEED_PREPARE callback off $v" >&2;exit 75; }

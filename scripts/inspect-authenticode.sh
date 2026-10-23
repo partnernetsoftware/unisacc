@@ -48,7 +48,8 @@ fi
 
 failed=0
 probe_root=$(mktemp -d "${TMPDIR:-/tmp}/inspect-authenticode.XXXXXX")
-trap 'rm -rf -- "$probe_root"' EXIT
+repo_root=$(cd "$(dirname "$0")/.." && pwd)
+trap '[ -z "$probe_root" ] || sh "$repo_root/tests/cxbin" "$repo_root/tests/safedel.cx" --purge -- "$probe_root"' EXIT
 index=0
 for file in "$@"; do
   index=$((index + 1))

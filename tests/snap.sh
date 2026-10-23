@@ -16,7 +16,8 @@ _BOUND=$("$_BOUND" --helper) || exit 2
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd)
 S=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-snap.XXXXXX")
-trap 'rm -rf "$S"' EXIT
+# the copy is the whole tree minus .git (~6.5k files) plus suite outputs: a site ceiling; cwd (inside it) leaves first
+trap 'cd / && [ -n "$S" ] && sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge --max-files 100000 -- "$S"' EXIT
 (cd "$R" && tar cf - --exclude=.git --exclude=corpus --exclude=ujs .) | (cd "$S" && tar xf -)
 [ -d "$R/corpus" ] && ln -s "$R/corpus" "$S/corpus"
 cd "$S"

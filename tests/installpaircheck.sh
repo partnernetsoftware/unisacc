@@ -4,7 +4,7 @@
 # (idempotent); other bytes, another source or a damaged receipt fall back to the candidate pair.
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd)
-T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-installpair.XXXXXX"); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-installpair.XXXXXX"); trap 'sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${T:?}"' EXIT
 fail() { echo "installpair: $*"; exit 1; }
 I="$R/release/tools/installpair.sh"
 mk() {  # dir name bytes commit sources

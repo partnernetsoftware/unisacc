@@ -6,7 +6,7 @@ _BOUND=$("$_BOUND" --helper) || exit 2
 # exec/pp/sim.py (bad table / unreadable file: 2; reject: 1).
 set -u
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d); trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT
 b() { "$_BOUND" "$@"; }
 b 60 "${EXEC_CC:-cc}" -O2 -std=c99 -w -o "$T/run" exec/c/run.c || { echo "neg: cc failed"; exit 1; }
 printf 'x' > "$T/in"

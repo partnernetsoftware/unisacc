@@ -59,8 +59,7 @@ def check():
                 for k,v in vals.items():files.cache[b'\0'+k.encode()]=struct.pack('<Q',v)
                 f=resources/'library/symbols';f.parent.mkdir(exist_ok=True)
                 if flag is None:
-                    try:f.unlink()
-                    except FileNotFoundError:pass
+                    subprocess.run(['sh',str(ROOT/'tests/cxbin'),str(ROOT/'tests/safedel.cx'),'--purge','--',str(f)],check=True)   # the one deletion guard (a missing file is rc 0)
                 else:files.cache[b'\0library/symbols']=flag;f.write_bytes(flag)
                 inp.write_bytes(content);pkg=d/'route.pkg';pkg.write_bytes(build([manifest],[('00',resources)] if vals or flag is not None else [],cache=False))
                 verdict,out,_=sim.run(delta,content,'fixture',files,maxsteps=1000000,loaded=loaded)
@@ -87,7 +86,7 @@ def check():
             collision=x.replace(b'g_counter',b'g_main')
             r,_,_=execute(collision,struct.pack('<Q',1));assert r!='accept'
             saved=dict(vals);vals.clear()
-            for key in saved:(resources/key).unlink()
+            subprocess.run(['sh',str(ROOT/'tests/cxbin'),str(ROOT/'tests/safedel.cx'),'--purge','--',*(str(resources/key) for key in saved)],check=True)
             file_input=x.replace(b'@argc 256\n@argv 264\n',b'')
             r,filebytes,_=execute(file_input,None);assert r=='accept' and filebytes[:4]==b'\x7fELF'
             r,_,_=execute(file_input,struct.pack('<Q',1));assert r!='accept'

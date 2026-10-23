@@ -35,7 +35,7 @@ if [ -n "$EV" ]; then
 fi
 finish() {
     st=$1
-    if [ "$keep" -ne 0 ] || [ "$st" -ne 0 ]; then echo "chainfirstred: scratch kept at $S" >&2; else rm -rf "$S"; fi
+    if [ "$keep" -ne 0 ] || [ "$st" -ne 0 ]; then echo "chainfirstred: scratch kept at $S" >&2; else cd "$R" && sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge --force-count 50000 -- "${S:?}"; fi   # the scratch holds a tree export: --force-count; out of it first (the guard refuses the cwd's ancestors)
     exit "$st"
 }
 trap 'finish $?' EXIT
@@ -118,7 +118,7 @@ chmod +x "$S/shim/sh" "$S/shim/python3" "$S/shim/cc" "$S/shim/ua_ref" || exit 2
 # ---- reference binary for UA, built once in the scratch (not via the shim) ----
 ( cd "$W" && "$W/tests/bound" 40 "$REALSH" tests/build_ref.sh "$S/ua/ua_ref.c" "$S/ua/ua_ref.bin" >"$S/ua/build.out" 2>&1 )
 ua_rc=$?
-rm -f "$S/ua/ua_ref.c"
+sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${S:?}/ua/ua_ref.c"
 [ "$ua_rc" -eq 0 ] && [ -x "$S/ua/ua_ref.bin" ] || { echo "chainfirstred: UA reference build failed rc $ua_rc (see $S/ua/build.out)"; keep=1; exit 2; }
 printf 'tests/c/a_char.c\n' > "$S/keep.txt"
 

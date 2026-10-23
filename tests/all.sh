@@ -115,9 +115,10 @@ JOBS=${JOBS:-2}
 case "$JOBS" in *[!0-9]*|"") echo "JOBS must be positive" >&2; exit 2;; esac
 [ "$JOBS" -ge 1 ] || { echo "JOBS must be positive" >&2; exit 2; }
 W=$(mktemp -d)
+SDR=$(cd "$(dirname "$0")/.." && pwd)   # the one deletion guard's CLI (commissar ruling 2026-10-23)
 cleanup() {
     local rc=$?
-    if [ "$rc" -eq 0 ]; then rm -rf "$W";
+    if [ "$rc" -eq 0 ]; then [ -z "$W" ] || sh "$SDR/tests/cxbin" "$SDR/tests/safedel.cx" --purge -- "$W";
     else echo "all.sh: preserved logs $W (rc=$rc)" >&2; fi
 }
 trap cleanup EXIT

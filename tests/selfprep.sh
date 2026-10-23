@@ -6,6 +6,6 @@
 #   usage: tests/selfprep.sh TARGET [NETWORK]
 set -eu
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d); trap 'sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${T:?}"' EXIT
 TARGET=$1 tests/bound 58 python3 exec/pipeline/models.py "$T" "$1" "${2:-1}" "${EXEC_CC:-cc}" > "$T/log" 2>&1 || { cat "$T/log"; exit 1; }
 tail -1 "$T/log"

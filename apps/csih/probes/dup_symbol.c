@@ -10,6 +10,7 @@
  * exits non-zero, two mains say "multiple definitions", and statics stay
  * isolated. Anything else prints STILL BROKEN and exits 1.
  */
+#include "../../../include/unisa_safedel.h"   /* the one deletion guard (commissar ruling 2026-10-23); first: its feature macro */
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -83,15 +84,20 @@ static void first_line(const char *src, char *dst, size_t n) {
     if (i == 0) snprintf(dst, n, "<no output>");
 }
 
+/* P (a tree) through the one guard, never a raw unlink/rmdir; a refusal is reported, the probe's verdict stands */
+static void sd_gone(const char *p) {
+    char why[600];
+    if (unisa_safedel(p, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 0, why, (int)sizeof why)) fprintf(stderr, "probe: %s\n", why);
+}
 int main(void) {
     const char *u = getenv("UNISACC");
-    char dir[64];
-    char p1[64], p2[64], pk[64], m1[64], m2[64], d1[64], d2[64];
+    char dir[1024];
+    char p1[1100], p2[1100], pk[1100], m1[1100], m2[1100], d1[1100], d2[1100];
     char line[512];
     char *srcs[2];
     int rc, bad = 0;
     if (!u || !u[0]) u = "/Users/wjc/repos/unisacc/unisacc.com";
-    snprintf(dir, sizeof dir, "/tmp/cdsh-dup-%d", (int)getpid());
+    snprintf(dir, sizeof dir, "%s/cdsh-dup-%d", getenv("TMPDIR") && *getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp", (int)getpid());   /* the guard's temp root */
     if (mkdir(dir, 0700) != 0) { printf("no temp dir\n"); return 2; }
     snprintf(p1, sizeof p1, "%s/h1.c", dir);
     snprintf(p2, sizeof p2, "%s/h2.c", dir);
@@ -170,8 +176,7 @@ int main(void) {
         printf("   → statics isolated\n");
     }
 
-    /* best-effort cleanup; ignore failures */
-    remove(p1); remove(p2); remove(pk); remove(m1); remove(m2); remove(d1); remove(d2);
-    rmdir(dir);
+    /* best-effort cleanup through the guard (the probe's files all lie in DIR) */
+    sd_gone(dir);
     return bad ? 1 : 0;
 }

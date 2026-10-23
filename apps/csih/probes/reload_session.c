@@ -24,6 +24,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
+#include "unisa_safedel.h"
 #include <unistd.h>
 
 #include "csih_flat.h"
@@ -183,12 +184,14 @@ static const char *const TOK_FALSE[] = { BASE_TOKENS, "\"loop_on\":false", "\"lo
 static const char *const TOK_ZERO[] = { BASE_TOKENS, "\"loop_on\":true", "\"loop_left\":0", NULL };
 
 int main(void) {
-    char tmpl[] = "/tmp/csih-session-loop-XXXXXX";
+    char tmpl[1024];   /* under the temp root: the deletion guard's whitelist */
     char *tmp;
     static char raw[4096], buf[4096];
     unsigned long long before[8];
     int rc = 1;
 
+    {   const char *td = getenv("TMPDIR"); if (!td || !td[0]) td = "/tmp";
+        snprintf(tmpl, sizeof tmpl, "%s/csih-session-loop-XXXXXX", td); }
     hashes_take(before);
     tmp = mkdtemp(tmpl);
     if (!tmp) { puts("FAIL mkdtemp"); return 1; }
@@ -221,8 +224,8 @@ int main(void) {
 
     printf("TOTAL: %d passed, %d failed\n", passed, failed);
     rc = (failed == 0 && passed == 12) ? 0 : 1;
-    unlink(FIX);
-    rmdir(tmp);
+    {   char why[700];   /* the one deletion guard (include/unisa_safedel.h; commissar ruling 2026-10-23) */
+        if (unisa_safedel(tmp, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 0, why, (int)sizeof why)) fprintf(stderr, "safedel: %s\n", why); }
     if (!hashes_same(before)) { printf("FAIL: source/compiler changed during probe\n"); rc = 1; }
     else if (rc == 0) printf("source/compiler hashes unchanged\n");
     printf("RESULT %s reload_session\n", rc == 0 ? "PASS" : "FAIL");

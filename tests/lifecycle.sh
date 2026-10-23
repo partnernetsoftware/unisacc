@@ -9,7 +9,7 @@ _BOUND=$("$_BOUND" --helper) || exit 2
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 . ./tests/lib.sh; ua_ready
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d); trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT
 CASES="ret0 ret7 ret255 ret256 exit3 atexit pending abort raise handled segv"
 "$_BOUND" 30 cc -std=c99 -w -o "$T/cc" tests/life/cases.c || { echo "lifecycle  cc failed"; exit 1; }
 "$_BOUND" 30 "$UA" -o "$T/ref" tests/life/cases.c || { echo "lifecycle  reference build failed"; exit 1; }

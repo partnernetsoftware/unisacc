@@ -23,6 +23,7 @@ if [ "$(uname -s)" != Darwin ] || [ "${TERM_SH:-1}" = 0 ] || [ -n "${TERM_SH_INS
     exec python3 "$(dirname "$0")/bound.py" "$TERM_SH_ALARM" "$@"
 fi
 BOUND=$(cd "$(dirname "$0")" && pwd)/bound.py
+R=$(cd "$(dirname "$0")/.." && pwd)   # the deletion guard: tests/safedel.cx
 d=$(mktemp -d); q=""
 watcher=""
 cleanup() {
@@ -86,7 +87,7 @@ python3 "$BOUND" 5 osascript -e 'tell application "Terminal"' \
     -e "do script \"'$d/run.sh'; exit\" in ownedTab" \
     -e 'return ownedWindow' -e 'end tell' > "$d/window" 2>/dev/null || {
     cleanup
-    rm -rf "$d"
+    sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${d:?}"
     # A silent fallback changes the execution environment under a queue and
     # invalidated every stored gate result three times (2026-09-29). With
     # TERM_SH_NOFALLBACK=1 a refused handoff is reported and retried instead.
@@ -150,5 +151,5 @@ rc=$?
 watcher=""
 cleanup
 # Preserve failed logs for diagnosis; successful handoffs need no temporary tree.
-[ "$rc" != 0 ] || rm -rf "$d"
+[ "$rc" != 0 ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${d:?}"
 exit "$rc"

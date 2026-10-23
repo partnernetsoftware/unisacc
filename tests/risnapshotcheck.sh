@@ -10,7 +10,7 @@
 set -eu
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 B() { "$R/tests/bound" 55 "$@"; }
-W=$(mktemp -d "${TMPDIR:-/tmp}/risnapshotcheck.XXXXXX"); trap 'rm -rf "$W"' EXIT HUP INT TERM
+W=$(mktemp -d "${TMPDIR:-/tmp}/risnapshotcheck.XXXXXX"); trap '[ -z "$W" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$W"' EXIT HUP INT TERM
 B cc -O2 -w exec/c/run.c -o "$W/run" || { echo "risnapshotcheck: run build failed"; exit 1; }
 B cc -O2 -w -I exec/c tests/ri-snapshot-fromledger.c -o "$W/snapfrom" || { echo "risnapshotcheck: helper build failed"; exit 1; }
 M=tests/seals/middleflow-step0/e3

@@ -124,10 +124,10 @@ if part in ('all','core','core-dependencies'):
     for exe in drivers:
         base=[exe,'--models',p/'compiler.pkg','-b',target]
         for switch in ['-MD','-MMD']:
-            dep_file.unlink(missing_ok=True)
+            subprocess.run(['sh',str(pathlib.Path(__file__).resolve().parents[2]/'tests/cxbin'),str(pathlib.Path(__file__).resolve().parents[2]/'tests/safedel.cx'),'--purge','--',str(dep_file)],check=True)
             ok([*base,dep_src,switch,'-S','-o',dep_out])
             assert dep_file.read_bytes()==dep_want,(exe,dep_file.read_bytes(),dep_want)
-        explicit=p/'explicit.d';explicit.unlink(missing_ok=True)
+        explicit=p/'explicit.d';subprocess.run(['sh',str(pathlib.Path(__file__).resolve().parents[2]/'tests/cxbin'),str(pathlib.Path(__file__).resolve().parents[2]/'tests/safedel.cx'),'--purge','--',str(explicit)],check=True)
         ok([*base,'-MF',explicit,'-MD',dep_src,'-S','-o',dep_out])
         assert explicit.read_bytes()==dep_want
         saved=dep_src.read_text()
@@ -180,7 +180,7 @@ if part in ('all','core','core-dependencies'):
     for exe in [ua,*drivers]:
         base=[exe] if exe==ua else [exe,'--models',p/'compiler.pkg','-b',target]
         for flags,file,want in cases:
-            for f in ('x.d','y.d','m.d','out/m.d','out dir/x$1.d'): (g/f).unlink(missing_ok=True)
+            subprocess.run(['sh',str(pathlib.Path(__file__).resolve().parents[2]/'tests/cxbin'),str(pathlib.Path(__file__).resolve().parents[2]/'tests/safedel.cx'),'--purge','--',*(str(g/f) for f in ('x.d','y.d','m.d','out/m.d','out dir/x$1.d'))],check=True)
             got=ok([*base,*flags],cwd=g)
             if file is None: assert got==want.encode(),(exe,flags,got,want)
             else:

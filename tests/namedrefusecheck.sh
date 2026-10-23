@@ -4,7 +4,7 @@
 # refusal at only some levels fails; agreeing everywhere is REVIVED and fails.  No product build is needed.
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
-T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-namedrefuse.XXXXXX"); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-namedrefuse.XXXXXX"); trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT
 P=tests/c/fb12-31-unused-static-refs-undefined.c
 printf 'fb12-31-unused-static-refs-undefined\tnot covered: a branch to an undefined label\ttest\n' > "$T/refuse"
 cat > "$T/ua" <<'UA'

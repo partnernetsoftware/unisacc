@@ -443,26 +443,6 @@ static void collect(const char *base, const char *rel, slist *out) {
     closedir(d);
 }
 static int cmpstr(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
-static void rmtree(const char *path) {
-    struct stat st;
-    if (lstat(path, &st) != 0) return;
-    if (S_ISDIR(st.st_mode)) {
-        DIR *d = opendir(path);
-        struct dirent *e;
-        if (d) {
-            while ((e = readdir(d)) != NULL) {
-                char sub[1100];
-                if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-                snprintf(sub, sizeof sub, "%s/%s", path, e->d_name);
-                rmtree(sub);
-            }
-            closedir(d);
-        }
-        rmdir(path);
-    } else {
-        unlink(path);
-    }
-}
 
 /* Byte snapshot of the freeze set: src files under APP, unisacc.com, this probe. */
 typedef struct { char *path; char *data; size_t n; int ok; } snapent;

@@ -31,11 +31,19 @@ static int copydir(const char *from, const char *to) {
     closedir(d); return 0;
 }
 static void row(const char *name, int ok, const char *detail) { printf("%-11s %s %s\n", name, ok ? "PASS" : "FAIL", detail); }
+/* DIR/NAME through the one deletion guard (cx.h prelude): 0, or the guard's code with its reason on stderr */
+static int gone(const char *dir, const char *name) {
+    char q[4096];
+    if (snprintf(q, sizeof q, "%s/%s", dir, name) >= (int)sizeof q) return 3;
+    return cx_remove(q);
+}
 int main(int argc, char **argv) {
     const char *P = argc > 1 ? argv[1] : "./unisacc.com";
     const char *B = argc > 2 ? argv[2] : 0;
-    char tmp[] = "/tmp/resourceflow-XXXXXX", cmd[8192], rc[4096], p[4096], p2[4096], w[4096], W[4096];
+    char tmp[4096], cmd[8192], rc[4096], p[4096], p2[4096], w[4096], W[4096];
     int r, bad = 0;
+    const char *td = getenv("TMPDIR");   /* the deletion guard's temp root ($TMPDIR, else /tmp) */
+    snprintf(tmp, sizeof tmp, "%s/resourceflow-XXXXXX", td && *td ? td : "/tmp");
     if (!mkdtemp(tmp)) return fail("temporary directory");
     snprintf(w, sizeof w, "%s/src", tmp); mkdir(w, 0700);
     snprintf(p, sizeof p, "%s/prog.c", w);
@@ -91,7 +99,8 @@ int main(int argc, char **argv) {
         snprintf(line, sizeof line, "%s/miss/resources.tsv", tmp);
         snprintf(cmd, sizeof cmd, "grep -v '^%s\t' '%s' > '%s/miss/r.tmp' && mv '%s/miss/r.tmp' '%s'", key, line, tmp, tmp, line);
         run_rc(cmd, rc);
-        snprintf(cmd, sizeof cmd, "cd '%s' && rm -f miss.tape && sh '%s' --strict-resource-flow --resource-ledger '%s/miss' -S prog.c -o miss.tape > '%s/miss.log' 2>&1", w, P, tmp, tmp);
+        if (gone(w, "miss.tape")) return fail("the deletion guard refused miss.tape");
+        snprintf(cmd, sizeof cmd, "cd '%s' && sh '%s' --strict-resource-flow --resource-ledger '%s/miss' -S prog.c -o miss.tape > '%s/miss.log' 2>&1", w, P, tmp, tmp);
         r = run_rc(cmd, rc);
         snprintf(p, sizeof p, "%s/miss.log", tmp); snprintf(line, sizeof line, "MISSING_EXPLICIT_RESOURCE %s", key);
         snprintf(p2, sizeof p2, "%s/miss.tape", w);
@@ -111,7 +120,8 @@ int main(int argc, char **argv) {
     snprintf(p, sizeof p, "%s/len", tmp); { char capd[4096]; snprintf(capd, sizeof capd, "%s/cap", W); copydir(capd, p); }
     snprintf(cmd, sizeof cmd, "awk -F'\\t' 'BEGIN{OFS=\"\\t\"} NR>1 && $2==1 && !d {$4=$4+1; d=1} {print}' '%s/len/resources.tsv' > '%s/len/r.tmp' && mv '%s/len/r.tmp' '%s/len/resources.tsv'", tmp, tmp, tmp, tmp);
     run_rc(cmd, rc);
-    snprintf(cmd, sizeof cmd, "cd '%s' && rm -f '%s/len.tape' && sh '%s' --strict-resource-flow --resource-ledger '%s/len' -S prog.c -o '%s/len.tape' > '%s/len.log' 2>&1", w, tmp, P, tmp, tmp, tmp);
+    if (gone(tmp, "len.tape")) return fail("the deletion guard refused len.tape");
+    snprintf(cmd, sizeof cmd, "cd '%s' && sh '%s' --strict-resource-flow --resource-ledger '%s/len' -S prog.c -o '%s/len.tape' > '%s/len.log' 2>&1", w, P, tmp, tmp, tmp);
     r = run_rc(cmd, rc);
     snprintf(p, sizeof p, "%s/len.tape", tmp);
     {   int ok = r == 2 && size_of(p) < 0;
@@ -172,19 +182,22 @@ int main(int argc, char **argv) {
     /* RF-STAGE: a ledger captured from another program must be refused by name (INTERFACE_ERROR, rc 2, no primary output);
        a silent reuse is red, even when the bytes happen to match */
     snprintf(cmd, sizeof cmd, "mkdir -p '%s/w2' '%s/cap2' && printf 'int main(void){return 7;}\\n' > '%s/w2/prog.c' && cd '%s/w2' && UNISACC_RF_CAPTURE='%s/cap2' sh '%s' -S prog.c -o cap2.tape > /dev/null 2>&1", tmp, tmp, tmp, tmp, tmp, P); run_rc(cmd, rc);
-    snprintf(cmd, sizeof cmd, "cd '%s' && rm -f '%s/stage.tape' && sh '%s' --strict-resource-flow --resource-ledger '%s/cap2' -S prog.c -o '%s/stage.tape' > '%s/stage.log' 2>&1", w, tmp, P, tmp, tmp, tmp); int sg = run_rc(cmd, rc);
+    if (gone(tmp, "stage.tape")) return fail("the deletion guard refused the earlier tape");
+    snprintf(cmd, sizeof cmd, "cd '%s' && sh '%s' --strict-resource-flow --resource-ledger '%s/cap2' -S prog.c -o '%s/stage.tape' > '%s/stage.log' 2>&1", w, P, tmp, tmp, tmp); int sg = run_rc(cmd, rc);
     snprintf(p, sizeof p, "%s/stage.log", tmp); snprintf(p2, sizeof p2, "%s/stage.tape", tmp);
     {   int ok = sg == 2 && size_of(p2) < 0 && has(p, "INTERFACE_ERROR");
         row("RF-STAGE", ok, ok ? "foreign-stage ledger: rc 2, INTERFACE_ERROR named, no primary output" : "foreign-stage ledger silently reused or refused without the interface name; equal bytes do not pass");
         if (!ok) bad++; }
     /* RF-TARGET: the ledger is bound to its run's target; a strict run for another target is a named refusal, no output */
-    snprintf(cmd, sizeof cmd, "cd '%s' && rm -f '%s/tgt.tape' && sh '%s' --strict-resource-flow --resource-ledger '%s/cap' -b lnx/arm64 -S prog.c -o '%s/tgt.tape' > '%s/tgt.log' 2>&1", w, tmp, P, W, tmp, tmp); int tg = run_rc(cmd, rc);
+    if (gone(tmp, "tgt.tape")) return fail("the deletion guard refused tgt.tape");
+    snprintf(cmd, sizeof cmd, "cd '%s' && sh '%s' --strict-resource-flow --resource-ledger '%s/cap' -b lnx/arm64 -S prog.c -o '%s/tgt.tape' > '%s/tgt.log' 2>&1", w, P, W, tmp, tmp); int tg = run_rc(cmd, rc);
     snprintf(p, sizeof p, "%s/tgt.log", tmp); snprintf(p2, sizeof p2, "%s/tgt.tape", tmp);
     {   int ok = tg == 2 && size_of(p2) < 0 && has(p, "INTERFACE_ERROR") && has(p, "resource-identity-mismatch stage");
         row("RF-TARGET", ok, ok ? "ledger from lnx/x86_64 refused for lnx/arm64 by name (rc 2, no output)" : "cross-target ledger not refused by name");
         if (!ok) bad++; }
     /* RF-ROUTE: strict and capture cover the tape route only; another mode is a named refusal, no output */
-    snprintf(cmd, sizeof cmd, "cd '%s' && rm -f '%s/route.s' && sh '%s' --strict-resource-flow --resource-ledger '%s/cap' -o '%s/route.s' prog.c > '%s/route.log' 2>&1", w, tmp, P, W, tmp, tmp); int rt = run_rc(cmd, rc);
+    if (gone(tmp, "route.s")) return fail("the deletion guard refused route.s");
+    snprintf(cmd, sizeof cmd, "cd '%s' && sh '%s' --strict-resource-flow --resource-ledger '%s/cap' -o '%s/route.s' prog.c > '%s/route.log' 2>&1", w, P, W, tmp, tmp); int rt = run_rc(cmd, rc);
     snprintf(p, sizeof p, "%s/route.log", tmp); snprintf(p2, sizeof p2, "%s/route.s", tmp);
     {   int ok = rt == 2 && size_of(p2) < 0 && has(p, "resource-route-unsupported");
         row("RF-ROUTE", ok, ok ? "non-tape route refused by name (rc 2, no output)" : "non-tape route not refused by name");

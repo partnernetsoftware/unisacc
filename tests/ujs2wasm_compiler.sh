@@ -23,7 +23,7 @@ ujs_gate_prelude
 command -v node >/dev/null || { echo "needs node"; exit 1; }
 OUT="${TMPDIR:-/tmp}/ujs2wasm-compiler.$$"
 mkdir -p "$OUT"
-trap 'rm -rf "$OUT"' EXIT
+trap 'sh "$ROOT/tests/cxbin" "$ROOT/tests/safedel.cx" --purge -- "${OUT:?}"' EXIT
 
 if [[ -n "${TINYVM:-}" ]]; then
   echo "tinyvm: $TINYVM (fold+ship module validate; not execute twin)"
@@ -110,7 +110,7 @@ for name in str_empty str_lit7 str_lit8 str_lit32 str_lit255 str_cat_long dict_k
 done
 for neg in str_lit256 str_escape str_nonascii str_nul dict_key9; do
   src="tests/ujs2wasm/neg/${neg}.ujs"
-  rm -f "$OUT/${neg}.wasm" "$OUT/${neg}_s0.wasm"
+  sh "$ROOT/tests/cxbin" "$ROOT/tests/safedel.cx" --purge -- "${OUT:?}/${neg}.wasm" "${OUT:?}/${neg}_s0.wasm"
   set +e
   "$_BOUND" 30 node ujs/compile.mjs "$src" -o "$OUT/${neg}.wasm" >"$OUT/${neg}_core.err" 2>&1
   ec=$?

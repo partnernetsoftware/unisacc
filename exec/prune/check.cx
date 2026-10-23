@@ -857,7 +857,8 @@ done:
 typedef struct { char *v[64]; int path[64]; int n; } Cmd;   /* path: the .py passed a Path (repr PosixPath(...)) */
 static void ca(Cmd *c, const char *s, int path) { c->v[c->n] = xstrdup(s); c->path[c->n++] = path; c->v[c->n] = 0; }
 static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (double)t.tv_sec + (double)t.tv_nsec / 1e9; }
-static int tmpfile_fd(char *name) { strcpy(name, "/tmp/unisacc-prune-cxXXXXXX"); return mkstemp(name); }
+/* under the temp root ($TMPDIR, else /tmp): the one deletion guard removes it afterwards (commissar ruling 2026-10-23) */
+static int tmpfile_fd(char *name) { snprintf(name, 4096, "%s/unisacc-prune-cxXXXXXX", (getenv("TMPDIR") && *getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp")); return mkstemp(name); }
 static void cmd_repr_str(Buf *b, const Cmd *c) {   /* str(list(map(str, cmd))) */
     int i;
     bputc(b, '[');
@@ -865,7 +866,7 @@ static void cmd_repr_str(Buf *b, const Cmd *c) {   /* str(list(map(str, cmd))) *
     bputc(b, ']');
 }
 static int spawn(const Cmd *c, int cwd_root, int limit, unsigned char **out, size_t *outn, unsigned char **err, size_t *errn) {
-    char on[64], en[64]; int ofd = tmpfile_fd(on), efd = tmpfile_fd(en), ep[2], st = 0, rc, e = 0; pid_t pid; double t0 = now();
+    char on[4096], en[4096]; int ofd = tmpfile_fd(on), efd = tmpfile_fd(en), ep[2], st = 0, rc, e = 0; pid_t pid; double t0 = now();
     long nap = 200;
     if (ofd < 0 || efd < 0 || pipe(ep) != 0) raise_os(errno, 0);
     fcntl(ep[1], F_SETFD, FD_CLOEXEC);
@@ -883,14 +884,14 @@ static int spawn(const Cmd *c, int cwd_root, int limit, unsigned char **out, siz
     close(ep[1]); close(ofd); close(efd);
     if (read(ep[0], &e, sizeof e) != (ssize_t)sizeof e) e = 0;
     close(ep[0]);
-    if (e) { waitpid(pid, &st, 0); unlink(on); unlink(en); raise_os(e, e == ENOENT && !cwd_root ? c->v[0] : c->v[0]); }
+    if (e) { waitpid(pid, &st, 0); cx_remove(on); cx_remove(en); raise_os(e, e == ENOENT && !cwd_root ? c->v[0] : c->v[0]); }
     for (;;) {
         pid_t w = waitpid(pid, &st, WNOHANG);
         if (w == pid) break;
-        if (w < 0) { unlink(on); unlink(en); raise_os(errno, 0); }
+        if (w < 0) { cx_remove(on); cx_remove(en); raise_os(errno, 0); }
         if (now() - t0 > (double)limit) {
             Buf m = { 0 }; char t[48];
-            kill(pid, SIGKILL); waitpid(pid, &st, 0); unlink(on); unlink(en);
+            kill(pid, SIGKILL); waitpid(pid, &st, 0); cx_remove(on); cx_remove(en);
             bputs(&m, "Command '"); cmd_repr_str(&m, c); snprintf(t, sizeof t, "' timed out after %d seconds", limit); bputs(&m, t);
             raise_("subprocess.TimeoutExpired", m.p);
         }
@@ -898,7 +899,7 @@ static int spawn(const Cmd *c, int cwd_root, int limit, unsigned char **out, siz
     }
     rc = WIFSIGNALED(st) ? -WTERMSIG(st) : WEXITSTATUS(st);
     *out = read_bytes(on, outn); *err = read_bytes(en, errn);
-    unlink(on); unlink(en);
+    cx_remove(on); cx_remove(en);
     return rc;
 }
 

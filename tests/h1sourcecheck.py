@@ -57,7 +57,7 @@ try:
         'own row and declaration': ('0.0.40', '| H1 | 超时：tools-2 |\n' + inherit(good), OLD),
     }
     for why, (ver, plan, old) in bad.items():
-        u = t / 'neg'; shutil.rmtree(u, ignore_errors=True); u.mkdir()
+        u = t / 'neg'; subprocess.run(['sh',str(ROOT/'tests/cxbin'),str(ROOT/'tests/safedel.cx'),'--purge','--',str(u)],check=False); u.mkdir()
         rc, calls, made, out = run(scratch(u, ver, plan, old))
         assert rc == 2 and calls == 0 and not made and 'h1source: REFUSED' in out, (why, rc, calls, made, out)
     # mutation: the same negative through a build_candidate without the h1source line reaches make -- the line is the gate
@@ -66,7 +66,7 @@ try:
     rc, calls, made, out = run(scratch(u, '0.0.40', '# plan without H1\n'), m)
     assert calls >= 1, ('mutant did not reach make: the negative proves nothing', rc, calls, out)
 finally:
-    shutil.rmtree(t, ignore_errors=True)
+    subprocess.run(['sh',str(ROOT/'tests/cxbin'),str(ROOT/'tests/safedel.cx'),'--purge','--',str(t)],check=False)
 print('h1source  positives (inherit+sha, own row, explicit EMPTY) reach the make stub after the H1 line; no declaration/'
       'no plan/wrong sha/missing target/target without row/malformed/nameless row/structureless row/EMPTY beside a name/unclosed row or EMPTY/both refused rc 2 with 0 make calls and no '
       'candidate dir; without the gate line the same negative reaches make')

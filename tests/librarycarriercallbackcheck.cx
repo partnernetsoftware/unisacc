@@ -25,6 +25,13 @@
    instead of the full Unicode database; copied headers keep their mode but not their timestamps.
    Include-free: everything used comes with the cx.h prelude. */
 
+/* a whole scratch tree through the one deletion guard (include/unisa_safedel.h, in the cx.h prelude; commissar ruling
+   2026-10-23) with an explicit ceiling: these trees hold copied sources and build outputs, beyond SAFEDEL_MAX_FILES */
+static int scratch_rmtree(const char *p) {
+    char why[700]; int rc = unisa_safedel(p, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 200000L, why, (int)sizeof why);
+    if (rc) fprintf(stderr, "cx_rmtree: %s\n", why);
+    return rc;
+}
 static const char *PROG = "librarycarriercallbackcheck.py";
 static const char *USAGE = "usage: librarycarriercallbackcheck.py [-h] [--arch {arm64,x86_64}]\n"
                            "                                      [--evidence EVIDENCE]\n";
@@ -46,25 +53,11 @@ static void bstr(Buf *o, const char *s) { bput(o, s, strlen(s)); }
 
 static Buf PEND;   /* what print() put into Python's stdout buffer, flushed at exit and before a traceback */
 
-static void rmtree(const char *p) {
-    struct stat s; DIR *d; struct dirent *e;
-    if (lstat(p, &s) != 0) return;
-    if (!S_ISDIR(s.st_mode)) { unlink(p); return; }
-    if ((d = opendir(p))) {
-        while ((e = readdir(d))) {
-            char c[8192];
-            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-            snprintf(c, sizeof c, "%s/%s", p, e->d_name); rmtree(c);
-        }
-        closedir(d);
-    }
-    rmdir(p);
-}
 static void flush_pending(void) { if (PEND.n) fwrite(PEND.b, 1, PEND.n, stdout); PEND.n = 0; fflush(stdout); }
 static void die(const char *fmt, const char *a) {   /* what Python raised outside the assertion: rc 1 */
     flush_pending();   /* Python flushes stdout before it prints the traceback */
     fprintf(stderr, fmt, a); fputc('\n', stderr); fflush(stderr);
-    if (TD[0]) rmtree(TD);
+    if (TD[0]) scratch_rmtree(TD);
     exit(1);
 }
 static void usage_error(const char *msg, const char *a) {
@@ -182,7 +175,7 @@ static Rec *run_step(char **command, int san) {
     if (waitpid(pid, &st, 0) != pid) die("librarycarriercallbackcheck: wait failed for %s", bound);
     if (!(out = cx_read(po, &on))) die("librarycarriercallbackcheck: cannot read %s", po);
     if (!(err = cx_read(pe, &en))) die("librarycarriercallbackcheck: cannot read %s", pe);
-    unlink(po); unlink(pe);
+    cx_remove(po); cx_remove(pe);
     r->rc = WIFEXITED(st) ? WEXITSTATUS(st) : WIFSIGNALED(st) ? -WTERMSIG(st) : 1;
     r->out = text(out, on, "stdout"); r->err = text(err, en, "stderr");
     r->san = san;
@@ -389,13 +382,13 @@ int main(int argc, char **argv) {
                 if (ev) evidence(ev, 0, probe);
                 flush_pending();
                 assertion();
-                rmtree(TD);
+                scratch_rmtree(TD);
                 return 1;
             }
         }
     }
     if (ev) evidence(ev, 1, probe);
-    rmtree(TD);
+    scratch_rmtree(TD);
     snprintf(line, sizeof line, "paired carrier callbacks normal + ASan/UBSan passed on %s\n", arch);
     bstr(&PEND, line);
     flush_pending();

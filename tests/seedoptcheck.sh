@@ -7,6 +7,8 @@
 # content hash (not gen.c mtime); a json.h-only edit in the scratch must rebuild.  usage: tests/seedoptcheck.sh
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R" || exit 2
+# every deletion goes through the one guard (include/unisa_safedel.h) via its argv CLI (commissar ruling 2026-10-23)
+safedel() { sh "$R/tests/cxbin" "$R/tests/safedel.cx" "$@"; }
 S=$(mktemp -d "${TMPDIR:-/tmp}/seedopt.XXXXXX") || exit 2
 # 0.0.40 (机房主任 00:04): SEEDOPT_EVIDENCE=DIR (a new or empty directory outside the scratch) keeps the evidence
 # the scratch would lose: every SAME/DIFF line, the o1/o2 JSON sha256s and the monotonic start/end (ns), written
@@ -50,7 +52,8 @@ finish() {
         [ -z "$EV" ] || printf 'EVIDENCE INCOMPLETE status %s scratch %s\n' "$st" "$S" >> "$EV/lines.txt" 2>/dev/null
         [ "$st" -ne 0 ] || st=3
     else
-        rm -rf "$S"
+        cd "$R" || :   # the guard refuses the cwd and its ancestors, and an early exit leaves us in $W under $S
+        safedel --purge --max-files 50000 -- "$S"   # S holds an archived tree (exec seed unisa ...)
     fi
     exit "$st"
 }
@@ -77,7 +80,7 @@ refused() { [ "$1" -ne 0 ] && [ "$1" -ne 124 ] && [ "$1" -lt 128 ]; }
 
 run_pair() {   # run_pair LABEL [--o2]
     label=$1; shift
-    rm -f "$S/c-$label.json" "$S/py-$label.json"
+    safedel --purge -- "$S/c-$label.json" "$S/py-$label.json"
     "$B" 55 "$G" opt "$S/c-$label.json" "$@" 2>"$S/c-$label.err"; c=$?
     [ "$c" -eq 0 ] || { no "$label (C rc=$c) $(tail -1 "$S/c-$label.err")"; return 0; }
     "$B" 55 python3 exec/build/gen.py opt "$S/py-$label.json" "$@" 2>"$S/py-$label.err"; p=$?
@@ -89,7 +92,7 @@ run_pair o2 --o2
 
 # deterministic double-run (C)
 for l in o1 o2; do
-    rm -f "$S/c-$l-b.json"
+    safedel --purge -- "$S/c-$l-b.json"
     if [ "$l" = o2 ]; then "$B" 55 "$G" opt "$S/c-$l-b.json" --o2 2>"$S/c-$l-b.err"; else "$B" 55 "$G" opt "$S/c-$l-b.json" 2>"$S/c-$l-b.err"; fi
     r=$?
     if [ "$r" -ne 0 ]; then no "$l-det (second run rc=$r)"
@@ -110,7 +113,7 @@ else:
     raise SystemExit("no data row to mutate")
 p.write_text("".join(lines))
 PY
-rm -f "$S/neg-py.json" "$S/neg-c.json"
+safedel --purge -- "$S/neg-py.json" "$S/neg-c.json"
 "$B" 55 python3 exec/build/gen.py opt "$S/neg-py.json" 2>"$S/neg-py.err"; py_rc=$?
 "$B" 55 "$G" opt "$S/neg-c.json" 2>"$S/neg-c.err"; c_rc=$?
 neg0=$bad
@@ -126,7 +129,7 @@ tar -x -C "$W" -f "$S/tree.tar" "$NEG" || exit 2   # restore the scratch copy fo
 
 # gen-delta.sh (the scratch copy, so its R is the scratch tree): no silent fallback, 0/1 only, no extra flags
 D=$W/exec/opt/gen-delta.sh
-gd() { out=$1; shift; rm -f "$out"; env "$@" sh "$D" "$out" 2>"$S/gd.err"; }
+gd() { out=${1:?}; shift; safedel --purge -- "$out"; env "$@" sh "$D" "$out" 2>"$S/gd.err"; }
 gd "$S/fb.json" SEED_GEN=1 SEED_GEN_BIN=/nonexistent/seed-gen-k5-missing; r=$?
 { [ "$r" -ne 0 ] && [ ! -e "$S/fb.json" ]; } && ok "no-fallback missing BIN" || no "missing BIN fell back (rc=$r)"
 printf '#!/bin/sh\necho seed-gen-red >&2\nexit 3\n' > "$S/red-gen"; chmod +x "$S/red-gen"
@@ -136,19 +139,19 @@ for v in 2 yes ''; do
     gd "$S/sv.json" SEED_GEN="$v"; r=$?
     { [ "$r" -eq 2 ] && [ ! -e "$S/sv.json" ]; } && ok "SEED_GEN='$v' refused" || no "SEED_GEN='$v' not refused (rc=$r)"
 done
-rm -f "$S/xf.json"; env SEED_GEN=1 SEED_GEN_BIN="$G" sh "$D" "$S/xf.json" --o2 --extra 2>"$S/gd.err"; r=$?
+safedel --purge -- "$S/xf.json"; env SEED_GEN=1 SEED_GEN_BIN="$G" sh "$D" "$S/xf.json" --o2 --extra 2>"$S/gd.err"; r=$?
 { [ "$r" -eq 2 ] && [ ! -e "$S/xf.json" ]; } && ok "extra flag refused" || no "extra flag not refused (rc=$r)"
 gd "$S/py-only.json" SEED_GEN=0; r=$?
 { [ "$r" -eq 0 ] && cmp -s "$S/py-only.json" "$S/py-o1.json"; } && ok "SEED_GEN=0 reaches Python" || no "SEED_GEN=0 (rc=$r)"
 for l in o1 o2; do
-    rm -f "$S/h-$l.json"
+    safedel --purge -- "$S/h-$l.json"
     if [ "$l" = o2 ]; then env SEED_GEN=1 SEED_GEN_BIN="$G" sh "$D" "$S/h-$l.json" --o2; else env SEED_GEN=1 SEED_GEN_BIN="$G" sh "$D" "$S/h-$l.json"; fi
     r=$?; { [ "$r" -eq 0 ] && cmp -s "$S/h-$l.json" "$S/py-$l.json"; } && ok "helper-$l" || no "helper-$l (rc=$r)"
 done
 # the default route: SEED_GEN_BIN removed from the environment, so gen-delta must build its own keyed seed-gen
 # into a fresh private directory (exactly one seed-gen-KEY with its .sha256 appears) and match the reference
 for l in o1 o2; do
-    rm -rf "$S/seedbin-$l" "$S/dflt-$l.json"
+    safedel --purge -- "$S/seedbin-$l" "$S/dflt-$l.json"
     if [ "$l" = o2 ]; then env -u SEED_GEN_BIN SEED_GEN=1 SEED_GEN_DIR="$S/seedbin-$l" sh "$D" "$S/dflt-$l.json" --o2
     else env -u SEED_GEN_BIN SEED_GEN=1 SEED_GEN_DIR="$S/seedbin-$l" sh "$D" "$S/dflt-$l.json"; fi
     r=$?; n=$(ls "$S/seedbin-$l" 2>/dev/null | grep -c '^seed-gen-[0-9a-f]\{16\}$')
@@ -167,8 +170,8 @@ for f in sorted(os.listdir(d)):
     st=os.stat(os.path.join(d,f)); print(f, st.st_ino, st.st_mtime_ns, hashlib.sha256(open(os.path.join(d,f),"rb").read()).hexdigest())' "${1:-$S/seedbin}"; }
 # the snapshot's own failure must be visible: a missing directory gives a non-zero status (controlled stub)
 snap "$S/no-such-dir" >/dev/null 2>&1 && no "snapshot of a missing directory did not fail" || ok "snapshot failure is visible"
-dg() { out=$1; rm -f "$out"; env -u SEED_GEN_BIN SEED_GEN=1 SEED_GEN_DIR="$S/seedbin" sh "$D" "$out" 2>"$S/gd.err"; }
-rm -rf "$S/seedbin"
+dg() { out=${1:?}; safedel --purge -- "$out"; env -u SEED_GEN_BIN SEED_GEN=1 SEED_GEN_DIR="$S/seedbin" sh "$D" "$out" 2>"$S/gd.err"; }
+safedel --purge -- "$S/seedbin"
 dg "$S/cold.json"; r=$?
 { [ "$r" -eq 0 ] && [ "$(nbin)" -eq 1 ] && [ "$(nsid)" -eq 1 ] && cmp -s "$S/cold.json" "$S/py-o1.json"; } && ok "default-route cold build" || no "default-route cold build (rc=$r bins $(nbin) sidecars $(nsid))"
 # hit_ok SNAP ACTION: both snapshots stored with their own status; red on a non-zero snapshot, a non-zero action,

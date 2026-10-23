@@ -57,6 +57,7 @@ for step in tools base-c off-c off-p typed-c typed-reference on-c on-p tables ne
 done
 cmp "$D/base-c.json" "$D/off-c.json";cmp "$D/off-c.json" "$D/off-p.json"
 cmp "$D/typed-c.json" "$D/typed-reference.json"
-T=$(mktemp -d "${TMPDIR:-/tmp}/callsite-e3.XXXXXX");trap 'rm -rf "$T"' EXIT HUP INT TERM
+_SD="$R"/tests   # the one deletion guard: argv CLI tests/safedel.cx over include/unisa_safedel.h
+T=$(mktemp -d "${TMPDIR:-/tmp}/callsite-e3.XXXXXX");trap 'sh "$_SD/cxbin" "$_SD/safedel.cx" --purge -- "${T:?}"' EXIT HUP INT TERM
 cp "$D/runner" "$D/model.tbl" "$D/model.net" "$T/"
 b sh "$UA" -run exec/parse2/librarycallsitecheck.cx -- "$T"

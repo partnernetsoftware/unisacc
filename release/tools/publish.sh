@@ -7,7 +7,7 @@
 # these signed bytes, or nothing is touched (0.0.38 published while the signing receipt said false).
 set -u
 TAG=${1:?tag}; WANT=${2:?signed sha256}; ACC=${3:?release acceptance receipt (research/r<N>-release-acceptance.json)}
-cd "$(dirname "$0")/../.." || exit 1          # gh needs the repository (0.0.19 published once with uploads failing outside it)
+R=$(cd "$(dirname "$0")/../.." && pwd) && cd "$R" || exit 1          # gh needs the repository (0.0.19 published once with uploads failing outside it)
 required=$(python3 - "$ACC" "$WANT" "$TAG" <<'PY'
 import json,re,sys
 acc,want,tag=sys.argv[1:4]
@@ -43,7 +43,7 @@ have=$(gh release view "$TAG" --json assets -q '[.assets[].name]|join(" ")') || 
 for a in $required; do
   case " $have " in *" $a "*) ;; *) echo "refused: no receipt asset $a on $TAG yet"; exit 1;; esac
 done
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d); trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT
 # a draft's asset needs the authenticated client (0.0.20: plain curl of the asset URL failed)
 mkdir "$T/d" && gh release download "$TAG" --pattern unisacc.com -D "$T/d" >/dev/null || { echo "draft download failed"; exit 1; }
 mv "$T/d/unisacc.com" "$T/draft-unisacc.com"

@@ -4,7 +4,7 @@
 # UBSan alignment checks on the host cc, and the shipped .com runs the same probe.
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R" || exit 2
-B=$R/tests/bound; T=${TMPDIR:-/tmp}/unisacc-memalign.$$; mkdir -p "$T"; trap 'rm -rf "$T"' EXIT
+B=$R/tests/bound; T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-memalign.XXXXXX") || exit 2; trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT
 python3 - "$T/ma.c" <<'PY' || { echo "memalign: cannot extract"; exit 1; }
 import sys
 s = open('include/string.h').read()

@@ -28,7 +28,7 @@ def main():
             # Resample once if a concurrent authorized edit prevented a coherent copy.
             for attempt in range(2):
                 before=hashes()
-                if attempt:shutil.rmtree(app);app.mkdir(parents=True,mode=0o700)
+                if attempt:subprocess.run(['sh',str(ROOT/'tests/cxbin'),str(ROOT/'tests/safedel.cx'),'--purge','--',str(app)],check=True);app.mkdir(parents=True,mode=0o700)
                 for srcpath in before:
                     src=pathlib.Path(srcpath)
                     if src.suffix in ('.c','.h','.inc','.cx'):

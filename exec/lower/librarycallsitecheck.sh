@@ -71,7 +71,7 @@ esac
 ready tools || { echo 'callsite lower: NEED_PREPARE tools' >&2;exit 75; }
 case $shard in 0) variants='lnx-x osx-x obj-osx-x';;1) variants='lnx-a win-x obj-win-x';;2) variants='osx-a obj-lnx-x obj-osx-a';;3) variants='win-a obj-lnx-a obj-win-a';;esac
 for v in lnx-x $variants;do ready "$v" || { echo "callsite lower: NEED_PREPARE $v" >&2;exit 75; };done
-T=$(mktemp -d "${TMPDIR:-/tmp}/callsitelower-check.XXXXXX");trap 'rm -rf "$T"' EXIT HUP INT TERM
+T=$(mktemp -d "${TMPDIR:-/tmp}/callsitelower-check.XXXXXX");trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT HUP INT TERM
 cp "$D/tools/runner" "$D/tools/abi-oracle" "$T/"
 cp "$D/lnx-x/model.tbl" "$D/lnx-x/model.net" "$T/"
 b sh "$UA" -run tests/librarycallsitelowercheck.cx -- "$T" "$shard" 1

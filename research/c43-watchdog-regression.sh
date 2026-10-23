@@ -4,7 +4,8 @@
 #     gone shortly after the outer bound times out.  R2: a caller reading the bound's stdout through a pipe must
 #     see EOF promptly, i.e. no escaped descendant still holds the pipe.  Both bounds: 3 s outer, <= 8 s total.
 B=$1; [ -f "$B" ] || { echo "no bound.py at $B"; exit 2; }
-T=$(mktemp -d "${TMPDIR:-/tmp}/c43wd.XXXXXX"); trap 'rm -rf "$T"' EXIT
+R=$(cd "$(dirname "$0")/.." && pwd)
+T=$(mktemp -d "${TMPDIR:-/tmp}/c43wd.XXXXXX"); trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT
 fail=0
 # R1: the marker is the unique sleep length 37, so no other process can match it
 st=$(date +%s)

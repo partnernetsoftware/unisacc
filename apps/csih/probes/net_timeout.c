@@ -14,6 +14,7 @@
  * Temp base: CSIH_PROBE_TMP, else TMPDIR (one of them must be set).
  * Server: 127.0.0.1:19002 (forked child).
  */
+#include "../../../include/unisa_safedel.h"   /* the one deletion guard (commissar ruling 2026-10-23); first: its feature macro */
 #include <arpa/inet.h>
 #include <dirent.h>
 #include <fcntl.h>
@@ -185,24 +186,10 @@ static void mkdir_p(const char *path) {
     mkdir(tmp, 0755);
 }
 
-static void rm_rf(const char *path) {
-    struct stat st;
-    if (lstat(path, &st) != 0) return;
-    if (!S_ISDIR(st.st_mode)) { unlink(path); return; }
-    {
-        DIR *d = opendir(path);
-        struct dirent *e;
-        if (d) {
-            while ((e = readdir(d)) != NULL) {
-                char full[4200];
-                if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
-                snprintf(full, sizeof full, "%s/%s", path, e->d_name);
-                rm_rf(full);
-            }
-            closedir(d);
-        }
-    }
-    rmdir(path);
+/* P (a tree) through the one guard, never a raw unlink/rmdir; a refusal is reported, the probe's verdict stands */
+static void sd_gone(const char *p) {
+    char why[600];
+    if (unisa_safedel(p, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 0, why, (int)sizeof why)) fprintf(stderr, "probe: %s\n", why);
 }
 
 /* Whole seconds. unisacc's gettimeofday tv_usec is not usable, so sub-second
@@ -543,7 +530,7 @@ static const char *probe(void) {
 out:
     if (srv > 0) { kill(srv, SIGKILL); waitpid(srv, &st, 0); }
     if (lfd >= 0) close(lfd);
-    if (PRIV[0]) rm_rf(PRIV);
+    if (PRIV[0]) sd_gone(PRIV);
     free(netdata);
     {
         Snap after;

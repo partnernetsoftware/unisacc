@@ -7,6 +7,8 @@ from pathlib import Path
 import tempfile,struct,hashlib,json,shutil
 import subprocess,sys,fcntl,re
 from pack import build
+_GUARD=Path(__file__).resolve().parents[2]/'tests'   # every deletion: the one guard's CLI, argv only (commissar ruling 2026-10-23)
+def _safedel(*paths): subprocess.run(['sh',str(_GUARD/'cxbin'),str(_GUARD/'safedel.cx'),'--purge','--',*map(str,paths)],check=True)
 
 # Tests rebuild packages many times from identical inputs; the shipped build
 # (buildcompiler.sh) passes --no-model-cache and constructs every model afresh.
@@ -142,9 +144,9 @@ def built_model(td,name,script,args,env=None,want_json=False):
         try:
             _construct(script,args,env,work/'m.json',work/'m.tbl',work/'m.net',trace=work)
             stamp=None if SEED_TOOLS else _readset(root,work)   # untraced C tools: the whole-closure key (it covers seed/)
-            for k in ('read0.json','read1.json','read2.json'): (work/k).unlink(missing_ok=True)
+            _safedel(*(work/k for k in ('read0.json','read1.json','read2.json')))
             artifacts=('m.tbl','m.net','m.json') if want_json else ('m.tbl','m.net')
-            if not want_json: (work/'m.json').unlink()
+            if not want_json: _safedel(work/'m.json')
             (work/'manifest.json').write_text(json.dumps({k:_digest(work/k) for k in artifacts},sort_keys=True))
             cache=base/('pack-'+(wholekey if stamp is None else readkey(stamp)))
             if want_json and _valid(cache):
@@ -153,14 +155,14 @@ def built_model(td,name,script,args,env=None,want_json=False):
                         raise ValueError('model %s optional-json changed %s'%(name,artifact))
             try: cache.stat()
             except FileNotFoundError: pass
-            else: shutil.rmtree(cache)
+            else: _safedel(cache)
             work.rename(cache)
             if stamp is not None and sorted(stamp) not in seen:
                 seen.append(sorted(stamp)); tmp=index.with_suffix('.tmp'); tmp.write_text(json.dumps(seen)); tmp.replace(index)
         finally:
             try: work.stat()
             except FileNotFoundError: pass
-            else: shutil.rmtree(work)
+            else: _safedel(work)
         if not copy_cached(cache): raise ValueError('model %s prepared-without-json'%name)
     return n
 
@@ -169,7 +171,7 @@ def retain_models(directory, rows):
     directory=Path(directory)
     directory.mkdir(parents=True,exist_ok=True)
     record=directory/'models.json'
-    record.unlink(missing_ok=True)
+    _safedel(record)
     models={}
     for row in rows:
         network=Path(row.split('\t')[4]); table=network.with_suffix('.tbl')

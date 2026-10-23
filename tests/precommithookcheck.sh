@@ -3,9 +3,15 @@
 # commitgate is refused and leaves no commit; commitgate's marker, the logged emergency skip and non-shipping
 # paths pass; an unclassifiable state fails closed.
 set -u
-R=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-hook.XXXXXX"); trap 'rm -rf "$T"' EXIT
+R=$(cd "$(dirname "$0")/.." && pwd)
+# L holds the scratch clones (T and three fresh ones) and is left in place: the one deletion guard (tests/safedel.cx)
+# refuses any tree holding .git, by design, so no step here deletes inside or of a clone -- the product is linked,
+# not copied, to keep what stays small.  X (no .git) holds the fixture files and is purged through the guard.
+L=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-hook.XXXXXX") || exit 2; T=$L/repo; mkdir "$T" || exit 2
+X=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-hook-scratch.XXXXXX") || exit 2
+trap '[ -z "$X" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$X"' EXIT
 fail() { echo "precommithook: $*"; exit 1; }
-cd "$T" && git init -q . && mkdir -p tests release/tools/hooks && cp "$R/tests/shipclassify.cx" "$R/tests/cxbin" tests/ && cp "$R/unisacc.com" . && cp "$R/release/tools/hooks/pre-commit" release/tools/hooks/ && cp "$R/release/tools/install_hooks.sh" release/tools/
+cd "$T" && git init -q . && mkdir -p tests release/tools/hooks && cp "$R/tests/shipclassify.cx" "$R/tests/cxbin" tests/ && ln -s "$R/unisacc.com" unisacc.com && cp "$R/release/tools/hooks/pre-commit" release/tools/hooks/ && cp "$R/release/tools/install_hooks.sh" release/tools/
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 git add -A && git commit -q -m base && release/tools/install_hooks.sh > /dev/null || fail "install failed"
 release/tools/install_hooks.sh > /dev/null || fail "reinstall of the same hook refused"
@@ -15,24 +21,23 @@ git commit -q -m x 2> /dev/null; [ $? -ne 0 ] && [ "$(git rev-parse HEAD)" = "$b
 UNISACC_COMMITGATE_SKIP=1 git commit -q -m skip 2> err; [ $? -eq 0 ] && grep -q WITHOUT err || fail "emergency skip not honoured/logged"
 echo y > src/a.c && git add src/a.c && UNISACC_COMMITGATE_RUN=1 git commit -q -m gated || fail "commitgate marker refused"
 # the real chain: commitgate's own git commit passes through the installed hook
-printf '#!/bin/sh\nexit 0\n' > green; chmod +x green; echo w > src/a.c && git add src/a.c; before=$(git rev-parse HEAD)
-COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$T/green "$R/release/tools/commitgate.sh" -m chain --suite difftest_o-1 -- src/a.c > /dev/null 2>&1 && [ "$(git rev-parse HEAD)" != "$before" ] || fail "commitgate commit was blocked by the hook"
-rm -f green
+printf '#!/bin/sh\nexit 0\n' > "$X/green"; chmod +x "$X/green"; echo w > src/a.c && git add src/a.c; before=$(git rev-parse HEAD)
+COMMITGATE_SELFTEST=1 COMMITGATE_GATE=$X/green "$R/release/tools/commitgate.sh" -m chain --suite difftest_o-1 -- src/a.c > /dev/null 2>&1 && [ "$(git rev-parse HEAD)" != "$before" ] || fail "commitgate commit was blocked by the hook"
 mkdir -p research && echo n > research/n.md && git add research/n.md && git commit -q -m doc || fail "non-shipping commit refused"
 echo z > src/a.c && git add src/a.c && # rename of a shipping file out of the closure is still seen (the deleted source end)
 git reset -q src/a.c; git checkout -q -- src/a.c; mkdir -p research; git mv src/a.c research/a.md
 before=$(git rev-parse HEAD); git commit -q -m mv 2> /dev/null; [ $? -ne 0 ] && [ "$(git rev-parse HEAD)" = "$before" ] || fail "renaming a shipping file out was not caught"
 git mv research/a.md src/a.c; echo z > src/a.c && git add src/a.c
 # an upstream git failure inside the hook pipeline fails closed (pipefail)
-mkdir -p shim && printf '#!/bin/sh\n[ "$1" = diff ] && exit 7\nexec /usr/bin/env -u PATH %s "$@"\n' "$(command -v git)" > shim/git && chmod +x shim/git
-before=$(git rev-parse HEAD); PATH=$PWD/shim:$PATH .git/hooks/pre-commit 2> /dev/null; [ $? -ne 0 ] || fail "a failing git diff in the hook was not fail-closed"
-rm -rf shim
+mkdir -p "$X/shim" && printf '#!/bin/sh\n[ "$1" = diff ] && exit 7\nexec /usr/bin/env -u PATH %s "$@"\n' "$(command -v git)" > "$X/shim/git" && chmod +x "$X/shim/git"
+before=$(git rev-parse HEAD); PATH=$X/shim:$PATH .git/hooks/pre-commit 2> /dev/null; [ $? -ne 0 ] || fail "a failing git diff in the hook was not fail-closed"
 mv tests/shipclassify.cx tests/sc.bak
 before=$(git rev-parse HEAD); git commit -q -m x 2> /dev/null; [ $? -ne 0 ] && [ "$(git rev-parse HEAD)" = "$before" ] || fail "unclassifiable state did not fail closed"
 mv tests/sc.bak tests/shipclassify.cx; echo other > .git/hooks/pre-commit
 release/tools/install_hooks.sh > /dev/null 2>&1 && fail "a different existing hook was overwritten"
-rm .git/hooks/pre-commit; (cd / && "$T/release/tools/install_hooks.sh" > /dev/null) && [ -x "$T/.git/hooks/pre-commit" ] || fail "install from another cwd did not land in this clone"
-rm .git/hooks/pre-commit; ln -s /dev/null .git/hooks/pre-commit; release/tools/install_hooks.sh > /dev/null 2>&1 && fail "a symlinked hook was replaced"
-rm .git/hooks/pre-commit; git config core.hooksPath elsewhere; release/tools/install_hooks.sh > /dev/null 2>&1 && fail "install reported success under a custom core.hooksPath"
-git config --unset core.hooksPath
+# each installer case in a fresh clone of the sandbox (no hook yet), instead of deleting the hook
+fresh() { git clone -q "$T" "$L/$1" && (cd "$L/$1" && [ ! -e .git/hooks/pre-commit ]) || fail "cannot make a fresh clone $1"; }
+fresh c2; (cd / && "$L/c2/release/tools/install_hooks.sh" > /dev/null) && [ -x "$L/c2/.git/hooks/pre-commit" ] || fail "install from another cwd did not land in this clone"
+fresh c3; ln -s /dev/null "$L/c3/.git/hooks/pre-commit"; "$L/c3/release/tools/install_hooks.sh" > /dev/null 2>&1 && fail "a symlinked hook was replaced"
+fresh c4; git -C "$L/c4" config core.hooksPath elsewhere; "$L/c4/release/tools/install_hooks.sh" > /dev/null 2>&1 && fail "install reported success under a custom core.hooksPath"
 echo "precommithook  shipping path outside commitgate refused, no commit; commitgate marker, real commitgate chain and logged skip pass; non-shipping passes; unclassifiable fails closed; rename out caught; failing git diff fails closed; installer: other cwd lands here, never overwrites a different or symlinked hook, refuses custom core.hooksPath"

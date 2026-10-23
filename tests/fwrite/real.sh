@@ -8,7 +8,7 @@ _BOUND=$("$_BOUND" --helper) || exit 2
 # usage: tests/fwrite/real.sh [ref-compiler]   (default /tmp/ua_ref)
 UA=${1:-/tmp/ua_ref}
 D=$(cd "$(dirname "$0")" && pwd); R=$(cd "$D/../.." && pwd)
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d); trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT
 b() { "$_BOUND" "$@"; }
 b 30 "$UA" "$D/real.c" -b osx/arm64 -o "$T/real" >/dev/null 2>&1 || { echo "FAIL build"; exit 1; }
 bad=0

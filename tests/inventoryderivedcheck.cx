@@ -74,26 +74,17 @@ static void oserr(Str *b, int e, const char *path) {
     if (path) { sputs(b, ": "); repr(b, path); }
 }
 
-/* ---- removal of the snapshot (TemporaryDirectory cleanup) ---- */
-static void rmtree(const char *p) {
-    struct stat st; DIR *d; struct dirent *e;
-    if (lstat(p, &st) != 0) return;
-    if (!S_ISDIR(st.st_mode)) { unlink(p); return; }
-    chmod(p, 0700);
-    if ((d = opendir(p))) {
-        while ((e = readdir(d))) {
-            char c[PMAX];
-            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-            snprintf(c, sizeof c, "%s/%s", p, e->d_name); rmtree(c);
-        }
-        closedir(d);
-    }
-    rmdir(p);
-}
+/* ---- removal of the snapshot (TemporaryDirectory cleanup), through the one deletion guard (include/unisa_safedel.h).
+   The snapshot copies tests/, exec/ and .github/workflows (4278 entries on 2026-10-23), past the default ceiling, so
+   its force count is explicit. ---- */
 static void cleanup(void) {
-    if (OUTF[0]) { unlink(OUTF); OUTF[0] = 0; }
-    if (ERRF[0]) { unlink(ERRF); ERRF[0] = 0; }
-    if (TREE[0]) { rmtree(TREE); TREE[0] = 0; }
+    char why[600];
+    if (OUTF[0]) { cx_remove(OUTF); OUTF[0] = 0; }
+    if (ERRF[0]) { cx_remove(ERRF); ERRF[0] = 0; }
+    if (TREE[0]) {
+        if (unisa_safedel(TREE, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 100000L, why, (int)sizeof why)) fprintf(stderr, "inventoryderivedcheck: %s\n", why);
+        TREE[0] = 0;
+    }
 }
 /* except (OSError, subprocess.TimeoutExpired): one line on stderr, exit 2 */
 static void mechanism(Str *msg) {
@@ -425,7 +416,7 @@ static int run_inventory(const char *cc) {
         if (err) fwrite(err, 1, ne, stderr);
         free(out); free(err);
     }
-    unlink(OUTF); OUTF[0] = 0; unlink(ERRF); ERRF[0] = 0;
+    cx_remove(OUTF); OUTF[0] = 0; cx_remove(ERRF); ERRF[0] = 0;
     return rc;
 }
 

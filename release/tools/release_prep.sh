@@ -1,9 +1,10 @@
 #!/bin/bash
 # release_prep.sh CAND_DIR VERSION  -- stage the release inputs from a verified candidate: unsigned zip + receipt skeleton + Apple bundle build.
-# Nothing here signs or publishes; each phase is a separate, reviewable step.  All work under /tmp/r<minor>-release.
-set -eu; C=$1; V=${2:?version}; W=/tmp/r${V##*.}-release; mkdir -p $W/windows $W/apple
+# Nothing here signs or publishes; each phase is a separate, reviewable step.  All work under ${TMPDIR:-/tmp}/r<minor>-release (the temp root, so the one deletion guard accepts it).
+set -eu; C=$1; V=${2:?version}; R=$(cd "$(dirname "$0")/../.." && pwd); W=${TMPDIR:-/tmp}; W=${W%/}/r${V##*.}-release; mkdir -p $W/windows $W/apple
 cp "$C/unisacc-next.com" $W/unisacc.com; cp "$C/unisacc-next.com.build.json" $W/unisacc.com.build.json
-( cd $W && rm -f windows/unisacc-unsigned.zip && zip -X -j windows/unisacc-unsigned.zip unisacc.com >/dev/null )
+sh "$R/tests/cxbin" "$R/tests/safedel.cx" -- "$W/windows/unisacc-unsigned.zip"
+( cd "$W" && zip -X -j windows/unisacc-unsigned.zip unisacc.com >/dev/null )
 SHA=$(shasum -a 256 $W/unisacc.com | cut -c1-64); ZSHA=$(shasum -a 256 $W/windows/unisacc-unsigned.zip | cut -c1-64); BYTES=$(wc -c < $W/unisacc.com | tr -d ' ')
 echo "unisacc.com sha256=$SHA bytes=$BYTES"; echo "zip sha256=$ZSHA"
 # 0.0.31: the signing workflow finds the draft by tag; a missing draft failed qualification ("release not found")

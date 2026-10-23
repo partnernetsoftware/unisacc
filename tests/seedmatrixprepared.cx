@@ -80,30 +80,15 @@ static char *xstrdup(const char *s) { return xstrndup(s, strlen(s)); }
 static char *cat(const char *a, const char *b) { Buf x = {0, 0, 0}; bstr(&x, a); bstr(&x, b); return x.s ? x.s : xstrdup(""); }
 
 /* ---------- scratch tree (tempfile.TemporaryDirectory) and uncaught exceptions ---------- */
-static void rmtree(const char *p) {
-    struct stat s; DIR *d; struct dirent *e;
-    if (lstat(p, &s)) return;
-    if (S_ISDIR(s.st_mode)) {
-        if ((d = opendir(p))) {
-            while ((e = readdir(d))) {
-                char *q;
-                if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-                q = xmalloc(strlen(p) + strlen(e->d_name) + 2); sprintf(q, "%s/%s", p, e->d_name); rmtree(q); free(q);
-            }
-            closedir(d);
-        }
-        rmdir(p);
-    } else unlink(p);
-}
 /* the traceback's last line on stderr, rc 1; the TemporaryDirectory is removed first */
 static void raise_line(const char *line) {
     fflush(stdout);
-    if (TD[0]) { rmtree(TD); TD[0] = 0; }
+    if (TD[0]) { cx_rmtree(TD); TD[0] = 0; }
     fprintf(stderr, "%s\n", line); fflush(stderr); exit(1);
 }
 static void need(const char *reason) {
     fflush(stdout);
-    if (TD[0]) { rmtree(TD); TD[0] = 0; }
+    if (TD[0]) { cx_rmtree(TD); TD[0] = 0; }
     fprintf(stderr, "NEED_PREPARE seed matrix: %s\n", reason); fflush(stderr); exit(75);
 }
 
@@ -1008,7 +993,7 @@ static int tmpfd(void) {
     p = cat(d, "/seed-matrix-capXXXXXX"); fd = mkstemp(p);
     if (fd < 0) { free(p); p = xstrdup("/tmp/seed-matrix-capXXXXXX"); fd = mkstemp(p); }
     if (fd < 0) raise_line("OSError: cannot capture a child's output");
-    unlink(p); free(p); return fd;
+    cx_remove(p); free(p); return fd;
 }
 /* spawn ARGV in ROOT; stdout captured into *OUT (when OUT), stderr captured into *ERR (when ERR) or inherited.
    Returns the Popen returncode (negative N for signal N); -1000 on timeout; raises when it cannot start. */
@@ -1428,7 +1413,7 @@ int main(int argc, char **argv) {
         jdump(&man, doc, 0, 0); bch(&man, '\n');
         if (cx_write(m, man.s, man.n)) { throw_os(errno ? errno : EIO, m); crash(); }
         prov_write(m, sources);
-        if (stat(CACHE, &s) == 0) rmtree(CACHE);
+        if (stat(CACHE, &s) == 0) cx_rmtree(CACHE);
         if (rename(work, CACHE)) { throw_os(errno, work); crash(); }
         TD[0] = 0;
         if (!valid()) raise_line("AssertionError");
@@ -1460,7 +1445,7 @@ int main(int argc, char **argv) {
         if (stat(c, &s)) { throw_os(errno, c); crash(); }
         printf("seed matrix shared/%s: byte-identical tables and networks; %lld\n", name, (long long)s.st_size);
         fflush(stdout);
-        rmtree(TD); TD[0] = 0;
+        cx_rmtree(TD); TD[0] = 0;
     }
     return 0;
 }

@@ -53,7 +53,7 @@ if kind in ('all','cc') and shard in ('all','1/3'):
         # Same actual base, one-pass data placement must match the retained
         # explicit text/data binding byte for byte, not merely run hello.
         reserve=2147467264
-        (resources/'memory/data').unlink()
+        subprocess.run(['sh',str(pathlib.Path(__file__).resolve().parents[2]/'tests/cxbin'),str(pathlib.Path(__file__).resolve().parents[2]/'tests/safedel.cx'),'--purge','--',str(resources/'memory/data')],check=True)
         (resources/'memory/reserve').write_bytes(struct.pack('<Q',reserve))
         one=sim.Files()
         for key,v in vals.items():
@@ -76,7 +76,7 @@ if kind in ('all','cc') and shard in ('all','1/3'):
         assert verdict=='accept' and once==expect,(f,'one-pass binding differs',hex(tb),hex(db),hex(d1))
         (p/'bound.pkg').write_bytes(build([manifest],[('00',resources)]))
         assert ok([p/'run','--bundle',p/'bound.pkg','memory',p/'lowered'])==once,(f,'reserved network differs from one-pass')
-        (resources/'memory/reserve').unlink()
+        subprocess.run(['sh',str(pathlib.Path(__file__).resolve().parents[2]/'tests/cxbin'),str(pathlib.Path(__file__).resolve().parents[2]/'tests/safedel.cx'),'--purge','--',str(resources/'memory/reserve')],check=True)
         (resources/'memory/data').write_bytes(struct.pack('<Q',db))
         print('bound native bytes:',f,'reference = explicit binding = reserved binding = network')
     # Binding context is atomic: a half-specified base or absent process context
@@ -89,7 +89,7 @@ if kind in ('all','cc') and shard in ('all','1/3'):
             if key not in missing: files.cache[b'\0'+key.encode()]=struct.pack('<Q',v)
         r,_,_=sim.run(enc,lowered,'bad-context',files,maxsteps=50000000,loaded=el)
         assert r!='accept',missing
-        for key in missing: (resources/key).unlink()
+        for key in missing: subprocess.run(['sh',str(pathlib.Path(__file__).resolve().parents[2]/'tests/cxbin'),str(pathlib.Path(__file__).resolve().parents[2]/'tests/safedel.cx'),'--purge','--',str(resources/key)],check=True)
         (p/'bound.pkg').write_bytes(build([manifest],[('00',resources)]))
         rejected=run([p/'run','--bundle',p/'bound.pkg','memory',p/'lowered'])
         assert rejected.returncode!=0 and not rejected.stdout,(missing,rejected.returncode)
@@ -106,13 +106,13 @@ if kind in ('all','cc') and shard in ('all','1/3'):
         bad.cache[b'\0memory/reserve']=struct.pack('<Q',capacity & ((1<<64)-1))
         verdict,_,_=sim.run(enc,lowered,'bad-reserve',bad,maxsteps=50000000,loaded=el)
         assert verdict!='accept',(capacity,drop,mixed)
-        if not mixed: (resources/'memory/data').unlink()
-        if drop: (resources/'memory/text').unlink()
+        if not mixed: subprocess.run(['sh',str(pathlib.Path(__file__).resolve().parents[2]/'tests/cxbin'),str(pathlib.Path(__file__).resolve().parents[2]/'tests/safedel.cx'),'--purge','--',str(resources/'memory/data')],check=True)
+        if drop: subprocess.run(['sh',str(pathlib.Path(__file__).resolve().parents[2]/'tests/cxbin'),str(pathlib.Path(__file__).resolve().parents[2]/'tests/safedel.cx'),'--purge','--',str(resources/'memory/text')],check=True)
         (resources/'memory/reserve').write_bytes(bad.cache[b'\0memory/reserve'])
         (p/'bound.pkg').write_bytes(build([manifest],[('00',resources)]))
         rejected=run([p/'run','--bundle',p/'bound.pkg','memory',p/'lowered'])
         assert rejected.returncode!=0 and not rejected.stdout,(capacity,drop,mixed,rejected.returncode)
-        (resources/'memory/reserve').unlink()
+        subprocess.run(['sh',str(pathlib.Path(__file__).resolve().parents[2]/'tests/cxbin'),str(pathlib.Path(__file__).resolve().parents[2]/'tests/safedel.cx'),'--purge','--',str(resources/'memory/reserve')],check=True)
         for key in ('memory/text','memory/data'):
             (resources/key).write_bytes(struct.pack('<Q',vals[key]))
     print('memory context: missing bases/process/loader slots and five malformed reserve bindings rejected by both executors')

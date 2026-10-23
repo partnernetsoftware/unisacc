@@ -5,7 +5,7 @@ _BOUND=$("$_BOUND" --helper) || exit 2
 # subtracting unrelated executables. No source edits or cached model answers.
 set -eu
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d); trap 'sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${T:?}"' EXIT
 b() { "$_BOUND" 60 "$@"; }
 b env CORE_EXTERNAL=1 python3 exec/c/netcheck.py
 if [ "$(uname -s)" = Darwin ]; then

@@ -68,10 +68,10 @@ def prepared_gen():
             # the one compile, bounded by this step alone (the shards' own run() limit is unchanged)
             run("sh", str(ROOT / "unisacc.com"), *GEN_FLAGS, "seed/gen.c", "-o", str(stage / "seed-gen"), timeout=45)
             (stage / "manifest.json").write_text(json.dumps({"seed-gen": sha_file(stage / "seed-gen"), "key": key}) + "\n")
-            shutil.rmtree(entry, ignore_errors=True)
+            subprocess.run(["sh", str(ROOT / "tests/cxbin"), str(ROOT / "tests/safedel.cx"), "--", str(entry)], check=True)   # a stale cache entry: into the trash (the one deletion guard)
             os.rename(stage, entry)
         finally:
-            shutil.rmtree(stage, ignore_errors=True)
+            subprocess.run(["sh", str(ROOT / "tests/cxbin"), str(ROOT / "tests/safedel.cx"), "--purge", "--", str(stage)], check=True)
         assert gen_valid(entry), "prepared seed-gen failed its digest check"
         return entry / "seed-gen", False
 

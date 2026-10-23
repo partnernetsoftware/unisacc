@@ -5,8 +5,9 @@
 #  3. json / csih_message 两个 fuzz 在 ASan+UBSan 下无报告，且解码成功路径被覆盖
 ROOT=$(CDPATH= cd -- "$(dirname "$0")" && pwd) || exit 1
 cd "$ROOT" || exit 1
+R=$(cd "$ROOT/../.." && pwd) || exit 1
 TMP=$(mktemp -d) || exit 1
-trap 'rm -rf "$TMP"' EXIT
+trap '[ -z "$TMP" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$TMP"' EXIT
 rc=0
 ITERS=${ITERS:-200000}
 CFLAGS="-std=c99 -g -O1 -fsanitize=address,undefined -fno-sanitize-recover=undefined -w -I$ROOT"

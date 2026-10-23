@@ -26,6 +26,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include "csih_flat.h"
+#include "unisa_safedel.h"
 
 #define LB_UNISACC CSIH_ROOT "/unisacc.com"
 #define LB_PORT_LO 19100
@@ -225,24 +226,13 @@ static const char *tmpbase(void) {
     return (t && t[0]) ? t : "/tmp";
 }
 
-static void rm_rf(const char *path) {
-    struct stat st;
-    if (lstat(path, &st) != 0) return;
-    if (S_ISDIR(st.st_mode)) {
-        DIR *d = opendir(path);
-        struct dirent *e;
-        while (d && (e = readdir(d)) != NULL) {
-            char child[4096];
-            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-            snprintf(child, sizeof child, "%s/%s", path, e->d_name);
-            rm_rf(child);
-        }
-        if (d) closedir(d);
-        rmdir(path);
-    } else {
-        unlink(path);
-    }
+/* every deletion goes through the one guard (include/unisa_safedel.h, embedded in unisacc.com; commissar ruling
+   2026-10-23): refused, with its one-line reason on stderr, unless under the temp root or a repository's out/ */
+static void safedel_purge(const char *p) {
+    char why[700];
+    if (unisa_safedel(p, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 0, why, (int)sizeof why)) fprintf(stderr, "safedel: %s\n", why);
 }
+static void rm_rf(const char *path) { safedel_purge(path); }
 
 static int read_int(const char *path) {
     FILE *f = fopen(path, "r");
@@ -272,7 +262,7 @@ static int build_bin(const char *out_bin) {
     if (rc != 0 || timed) return -1;
     e = read_file(errp, &elen);
     if (e) { free(e); if (elen) return -1; }
-    unlink(errp);
+    safedel_purge(errp);
     return 0;
 }
 

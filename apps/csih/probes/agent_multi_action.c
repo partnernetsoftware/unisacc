@@ -12,6 +12,7 @@
  * Verdict: last line "PASS agent multi-action" or "FAIL agent multi-action"; rc 0/1.
  * Optional argv: case names. Temp dirs use $TMPDIR (fallback /tmp).
  */
+#include "../../../include/unisa_safedel.h"   /* the one deletion guard (commissar ruling 2026-10-23) */
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -278,23 +279,11 @@ static const char *tmpbase(void) {
     return (t && t[0]) ? t : "/tmp";
 }
 
+/* every removal goes through the one deletion guard (include/unisa_safedel.h); the private tree is a mkdtemp under
+   tmpbase(), the guard's temp root */
 static void rm_rf(const char *path) {
-    struct stat st;
-    if (lstat(path, &st) != 0) return;
-    if (S_ISDIR(st.st_mode)) {
-        DIR *d = opendir(path);
-        struct dirent *e;
-        while (d && (e = readdir(d)) != NULL) {
-            char child[4096];
-            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-            snprintf(child, sizeof child, "%s/%s", path, e->d_name);
-            rm_rf(child);
-        }
-        if (d) closedir(d);
-        rmdir(path);
-    } else {
-        unlink(path);
-    }
+    char why[600];
+    if (unisa_safedel(path, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 0, why, (int)sizeof why)) fprintf(stderr, "agent_multi_action: %s\n", why);
 }
 
 static int read_int(const char *path) {
@@ -728,7 +717,7 @@ int main(int argc, char **argv) {
     e = read_file(errp, &cl);
     if (e && cl) die("multi-action build wrote stderr");
     free(e);
-    unlink(errp);
+    rm_rf(errp);
 
     memset(&priv_before, 0, sizeof priv_before);
     walk(&priv_before, source, 0);

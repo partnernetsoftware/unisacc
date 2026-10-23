@@ -43,7 +43,8 @@ def make_case(root, name, files):
 
 def product_requests(product, d, flags, capdir):
     """The product's requests for this case: (cli inputs {key: bytes|None}, [(include key, present)])."""
-    shutil.rmtree(capdir, ignore_errors=True)
+    # WORK may be argv: an old capture moves into its root's .trash through the one deletion guard (refusal raises)
+    subprocess.run(['sh', str(ROOT / 'tests/cxbin'), str(ROOT / 'tests/safedel.cx'), '--', str(capdir)], check=True)
     capdir.mkdir(parents=True)
     env = dict(os.environ, UNISACC_RF_CAPTURE=str(capdir))
     result = subprocess.run(['sh', product] + flags + ['-S', 'm.c', '-o', str(capdir / 'out.tape')], cwd=d, env=env,

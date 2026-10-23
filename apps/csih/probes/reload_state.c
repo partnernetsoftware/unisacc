@@ -12,6 +12,7 @@
  *     and values, which is what the cases test;
  *   - stdout and stderr are merged into one stream, as Python's (stdout+stderr).
  */
+#include "../../../include/unisa_safedel.h"   /* the one deletion guard (commissar ruling 2026-10-23); first: its feature macro */
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -131,12 +132,18 @@ static void rep(char *dst, size_t cap, char c, size_t count) {
     dst[count] = 0;
 }
 
+/* P (a tree) through the one guard, never a raw unlink/rmdir; a refusal is reported, the probe's verdict stands */
+static void sd_gone(const char *p) {
+    char why[600];
+    if (unisa_safedel(p, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 0, why, (int)sizeof why)) fprintf(stderr, "probe: %s\n", why);
+}
 int main(void) {
-    char tmpl[] = "/tmp/csih-state-XXXXXX";
+    char tmpl[1100];
     char *tmp;
     char buf[8192], goal4095[4200], goal4096[4200], q8[512], q9[512], raw[8192];
     int rc = 0;
 
+    snprintf(tmpl, sizeof tmpl, "%s/csih-state-XXXXXX", getenv("TMPDIR") && *getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");   /* the guard's temp root */
     tmp = mkdtemp(tmpl);
     if (!tmp) { puts("FAIL: mkdtemp"); return 1; }
     strcpy(DIR, tmp);
@@ -210,10 +217,7 @@ int main(void) {
 done:
     /* remove fixture and binary */
     {
-        char p[1100];
-        snprintf(p, sizeof p, "%s/state.json", DIR); unlink(p);
-
-        rmdir(DIR);
+        sd_gone(DIR);   /* state.json lies in DIR */
     }
     printf("RESULT %s reload_state\n", rc == 0 ? "PASS" : "FAIL");
     return rc;

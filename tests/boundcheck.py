@@ -114,11 +114,11 @@ else:
         env=dict(os.environ,PATH=str(mock)+os.pathsep+os.environ['PATH'],TERM_TEST_CLOSED=str(log),TERM_SH='1',TERM_SH_NOFALLBACK='1',TERM_SH_ALARM='3')
         env.pop('TERM_SH_INSIDE',None)
         for command,want in (([sys.executable,'-c','print("done")'],0),([sys.executable,'-c','raise SystemExit(2)'],2),([sys.executable,'-c','import time;time.sleep(30)'],142)):
-            log.unlink(missing_ok=True)
+            subprocess.run(['sh',str(root/'cxbin'),str(root/'safedel.cx'),'--purge','--',str(log)],check=True)   # the one deletion guard (commissar ruling 2026-10-23)
             result=subprocess.run([str(root/'term.sh'),*command],env=env,capture_output=True,text=True,timeout=10)
             assert result.returncode==want,(result.returncode,result.stderr)
             assert log.read_text()=='4242'
-        log.unlink(missing_ok=True)
+        subprocess.run(['sh',str(root/'cxbin'),str(root/'safedel.cx'),'--purge','--',str(log)],check=True)
         process=subprocess.Popen([str(root/'term.sh'),sys.executable,'-c','import time;time.sleep(30)'],env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
         time.sleep(.5);process.terminate()
         assert process.wait(timeout=7)==143

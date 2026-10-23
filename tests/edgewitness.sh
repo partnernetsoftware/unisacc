@@ -31,7 +31,7 @@ observe() {   # observe OUTDIR: compile + run, write asked / out.bin / exit
 
 case $mode in
 --produce)
-    A=$(mktemp -d); B=$(mktemp -d); trap 'rm -rf "$A" "$B"' EXIT
+    A=$(mktemp -d); B=$(mktemp -d); trap 'sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${A:?}" "${B:?}"' EXIT
     observe "$A" || exit 1
     observe "$B" || exit 1
     cmp -s "$A/witness.tsv" "$B/witness.tsv" && cmp -s "$A/out.bin" "$B/out.bin" \
@@ -56,7 +56,7 @@ PY
     [ "$(sha "$R/$probe")" = "$(mf probe_sha256 manifest.tsv)" ] || { echo "edgewitness: FAIL probe $probe changed since recording"; exit 1; }
     [ "$(sha "$R/weights/gold/$net.tsv")" = "$(mf table_sha256 manifest.tsv)" ] || { echo "edgewitness: FAIL gold table $net.tsv evolved; re-record"; exit 1; }
     [ "$(sha "$L/out.bin")" = "$(mf out_sha256 manifest.tsv)" ] || { echo "edgewitness: FAIL out.bin does not match manifest out_sha256"; exit 1; }
-    W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
+    W=$(mktemp -d); trap 'sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${W:?}"' EXIT
     observe "$W" || exit 1
     live_asked=$(awk -F'\t' '$1=="asked"{print $2}' "$W/witness.tsv")
     [ "$live_asked" != 0 ] || { echo "edgewitness: FAIL probe never crossed edge (net $net asked 0; nothing checked)"; exit 1; }

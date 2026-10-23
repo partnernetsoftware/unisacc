@@ -9,6 +9,8 @@ case $step in all|shared|pack|pack-prep-1|pack-prep-2|pack-prep-3|pack-models|pa
 case $(uname -s) in Darwin|Linux) ;; *) echo 'kernel seed assembler requires Darwin or Linux' >&2; exit 2;; esac
 mkdir -p "$1"; T=$(cd "$1" && pwd)
 b() { "$R/tests/bound" 50 "$@"; }   # the native watchdog (0.0.32 B5: no python3 for the bound itself)
+# every deletion goes through the one guard (include/unisa_safedel.h) via its argv CLI (commissar ruling 2026-10-23)
+safedel() { sh "$R/tests/cxbin" "$R/tests/safedel.cx" "$@"; }
 # 0.0.25 B3: SEED_C=1 turns delta JSON -> table -> network into the C99 seed tools (seed/tbl.c,
 # seed/net.c) built by the installed previous release, unisacc.com, instead of exec/c/tbl.py and
 # net.py.  Both routes give the same bytes (tests/seedconstructmatrix.py; 0.0.25 B3 built byte-identical
@@ -94,7 +96,7 @@ PYCODE
 }
 start() {
     mkdir -p "$T/$1"
-    rm -f "$T/$1/manifest.json"
+    safedel --purge -- "$T/${1:?}/manifest.json"
     manifest identity "$1" > "$T/$1/input.sha256"
 }
 shared() {
@@ -165,7 +167,7 @@ modeljob() {   # modeljob NAME: one compilerpack model job into $T/models/NAME.{
     mkdir -p "$T/models"; n=$1; st=$2; shift 2
     gen "$st" "$T/models/$n.json" "$@"
     tn "$T/models/$n.json" "$T/models/$n.tbl" "$T/models/$n.net"
-    rm -f "$T/models/$n.json"
+    safedel --purge -- "$T/models/${n:?}.json"
 }
 pack_prep() {
     # Part $1 of the model construction (compilerpack.py PREP_PARTS) into this
@@ -212,7 +214,7 @@ pack_models() {
     # Cache hits re-check the product digests.
     if [ "${SEED_GEN:-1}" = 1 ]; then
         seedtool compilerpack seed/compilerpack.c; seedtool pack seed/pack.c -lz
-        rm -rf "$T/pack-routes"
+        safedel --purge -- "$T/pack-routes"
         b "$T/seedbin/compilerpack" "$T/pack-routes" --o1 "$T/shared/o1.net" --e2 "$T/shared/e2.net" --nativeabi "$T/shared/nativeabi.net" --models "$T/models" --kernels "$T/kernels" --audit-dir "$T/model-audit" "$@"
         [ "$codec_flag" = --compressed ] || codec_flag=
         b "$T/seedbin/pack" $codec_flag -o "$T/compiler.pkg" --mount 006864722f include --mount 006b65726e656c2f "$T/kernels" --mount 00707265646566696e65732f "$T/pack-routes/predefines" "$T/pack-routes/routes.tsv"

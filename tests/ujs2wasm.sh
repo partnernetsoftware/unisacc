@@ -17,7 +17,7 @@ export UJS2WASM_RUNNER="$ROOT/tests/ujs2wasm/run_wasm.mjs"
 OUT="${TMPDIR:-/tmp}/ujs2wasm-suite.$$"
 mkdir -p "$OUT"
 export UJS2WASM_OUT="$OUT"
-trap 'rm -rf "$OUT"' EXIT
+trap '[ -z "$OUT" ] || sh "$ROOT/tests/cxbin" "$ROOT/tests/safedel.cx" --purge -- "$OUT"' EXIT   # the one deletion guard (commissar ruling 2026-10-23)
 
 find_tinyvm() {
   if command -v tinyvm >/dev/null 2>&1; then command -v tinyvm; return; fi

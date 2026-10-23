@@ -26,6 +26,7 @@
 #include <unistd.h>
 
 #include "csih_flat.h"
+#include "unisa_safedel.h"   /* the one deletion guard */
 
 #define ROOT_BIN CSIH_ROOT "/unisacc.com"
 #define OWN_CLI  "reload_owner_cli.c"
@@ -161,25 +162,11 @@ static int is_dir(const char *path) {
 }
 
 /* Remove a private tree without following symlinks. */
+/* through the one deletion guard (include/unisa_safedel.h): this probe's own mkdtemp tree (a site ceiling) or one
+   file in it; a refusal is reported and nothing is deleted */
 static void rm_rf(const char *path) {
-    struct stat st;
-    if (lstat(path, &st) != 0) return;
-    if (S_ISDIR(st.st_mode)) {
-        DIR *d = opendir(path);
-        struct dirent *e;
-        if (d) {
-            while ((e = readdir(d)) != NULL) {
-                char child[1024];
-                if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-                snprintf(child, sizeof child, "%s/%s", path, e->d_name);
-                rm_rf(child);
-            }
-            closedir(d);
-        }
-        rmdir(path);
-    } else {
-        unlink(path);
-    }
+    char why[1400];
+    if (unisa_safedel(path, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 20000L, why, (int)sizeof why)) fprintf(stderr, "rm_rf: %s\n", why);
 }
 
 /* One CLI case. reason==NULL: expect rc 0 and exact expected text. */
@@ -214,7 +201,7 @@ static int cli(const char *mode, const char *path, const char *reason,
 
 int main(void) {
     unsigned long long before[8];
-    char tmpl[] = "/tmp/csih-owner-XXXXXX";
+    char tmpl[1024];   /* under the temp root: the one deletion guard deletes only there */
     char *tmp;
     char lock[1024], bad[1024], link_p[1024], dirp[1024], unsafe[1024];
     char unsafe_lock[1024], parent_link[1024], parent_lock[1024], rel[64];
@@ -226,6 +213,7 @@ int main(void) {
     int ncases = 0;
 
     hashes_take(before);
+    snprintf(tmpl, sizeof tmpl, "%s/csih-owner-XXXXXX", getenv("TMPDIR") && getenv("TMPDIR")[0] ? getenv("TMPDIR") : "/tmp");
     tmp = mkdtemp(tmpl);
     if (!tmp) { puts("FAIL: mkdtemp"); return 1; }
     snprintf(lock, sizeof lock, "%s/owner.lock", tmp);

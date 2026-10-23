@@ -6,7 +6,7 @@ _BOUND=$("$_BOUND" --helper) || exit 2
 set -eu
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 . ./tests/lib.sh; ua_ready
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d); trap 'sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${T:?}"' EXIT
 b() { "$_BOUND" 10 "$@"; }
 cat > "$T/read.c" <<'SRC'
 int f(int k) { int n = k; static int m = n; return m; }

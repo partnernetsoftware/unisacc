@@ -45,6 +45,8 @@ part() {   # part P...: the whole shard runs, or the selected part is one of P
 }
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R" || exit 2
+# every deletion goes through the one guard (include/unisa_safedel.h) via its argv CLI (commissar ruling 2026-10-23)
+safedel() { sh "$R/tests/cxbin" "$R/tests/safedel.cx" "$@"; }
 S=$(mktemp -d "${TMPDIR:-/tmp}/seedppc.XXXXXX") || exit 2
 # 0.0.40 (机房主任 00:04): SEEDPPC_EVIDENCE=DIR (a new or empty directory outside the scratch) keeps the evidence
 # the scratch would lose: every SAME/DIFF line, the o1/o2 JSON sha256s and the monotonic start/end (ns), written
@@ -89,7 +91,8 @@ finish() {
         [ -z "$EV" ] || printf 'EVIDENCE INCOMPLETE status %s scratch %s\n' "$st" "$S" >> "$EV/lines.txt" 2>/dev/null
         [ "$st" -ne 0 ] || st=3
     else
-        rm -rf "$S"
+        cd "$R" || :   # the guard refuses the cwd and its ancestors, and an early exit leaves us in $W under $S
+        safedel --purge --max-files 50000 -- "$S"   # S holds an archived tree (exec seed unisa ...)
     fi
     exit "$st"
 }
@@ -188,7 +191,7 @@ flags() { case $1 in lnx/x86_64) ;; lnx/arm64) echo --arm64;; osx/x86_64) echo -
 slug() { echo "$1" | tr / -; }
 prep() {   # prep TARGET OUT LOG [SCRIPT] [ENV...]: run prepare.sh under the shims; prints its rc
     t=$1; o=$2; l=$3; sc=${4:-$PREP}; shift 4 2>/dev/null || shift $#
-    rm -rf "$o"; mkdir -p "$o"; : > "$l"
+    safedel --purge --max-files 20000 -- "${o:?}" || exit 2; mkdir -p "$o"; : > "$l"
     env -u SEED_GEN -u SEED_GEN_BIN -u SEED_GEN_CC -u SEED_GEN_DIR PATH="$S/shim:$PATH" SHIMLOG="$l" "$@" \
         sh "$sc" "$o" "$t" 0 cc > "$l.out" 2>&1; echo $?
 }
@@ -215,7 +218,7 @@ for t in $TARGETS; do
     [ "$r" -eq 0 ] || { no "$t prepare rc=$r $(tail -1 "$l.out")"; continue; }
     via_helper "$o" "$l" && ok "$t pp through gen-delta (private keyed seed-gen, no direct gen.py pp)" || no "$t pp not through the helper"
     g=$(ls "$o/.seed-gen-cache"/seed-gen-* 2>/dev/null | grep -v '\.sha256$' | head -1)
-    rm -f "$S/ref-$s.json"
+    safedel --purge -- "$S/ref-$s.json"
     [ -n "$g" ] && "$W/tests/bound" 55 "$g" pp "$S/ref-$s.json" $(flags "$t") 2>/dev/null && cmp -s "$o/e2.json" "$S/ref-$s.json" \
         && ok "$t e2 = seed-gen pp $(flags "$t")" || no "$t e2 differs from seed-gen with the expected flags"
     f=$(flags "$t")

@@ -3,5 +3,6 @@
 set -eu
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 case ${1:-plain} in plain) flag=;; located) flag=--locations;; tokens) flag=--no-autoinc;; *) echo 'usage: sharede2.sh [plain|located|tokens]' >&2;exit 2;; esac
-T=$(mktemp -d);trap 'rm -rf "$T"' EXIT
+_SD="$R"/tests   # the one deletion guard: argv CLI tests/safedel.cx over include/unisa_safedel.h
+T=$(mktemp -d);trap 'sh "$_SD/cxbin" "$_SD/safedel.cx" --purge -- "${T:?}"' EXIT
 python3 tests/bound.py 55 python3 exec/pp/sharedcheck.py $flag --output "$T"

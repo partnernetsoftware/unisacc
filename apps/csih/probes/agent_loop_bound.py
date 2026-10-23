@@ -115,7 +115,7 @@ def run_case(name, responses, prompt, expect_reqs, expect_rc, pre=None, extra_en
         print("   reasons:", "; ".join(reasons))
     if not ok and out:
         print(s[:1500])
-    shutil.rmtree(cwd)
+    subprocess.run(['sh',str(pathlib.Path(__file__).resolve().parents[3]/'tests/cxbin'),str(pathlib.Path(__file__).resolve().parents[3]/'tests/safedel.cx'),'--purge','--',str(cwd)],check=True)   # the one deletion guard
     return dict(name=name, ok=ok, rc=rc, requests=reqs, expected_requests=expect_reqs, expected_rc=expect_rc, stdout=s, reasons=reasons, records=records)
 
 EXEC = '{"act":"exec","cmd":"true","why":"x"}'

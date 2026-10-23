@@ -48,6 +48,7 @@ need() {
     integ) echo "integ mixed=shipped"; echo "integ closure"; echo "integ nativeboot" ;;
     esac
 }
+R=$(cd "$(dirname "$0")/../.." && pwd)   # the guard CLI (tests/safedel.cx) is found from here; line 88 re-checks the cwd
 B() { perl -e 'alarm shift; exec @ARGV' "$@"; }
 now() { perl -MTime::HiRes=time -e 'printf "%.3f", time'; }
 if [ "${1:-}" = --batches ]; then
@@ -75,7 +76,7 @@ if [ "${1:-}" = --batches ]; then
         if cmp -s "$W/wantall" "$W/gotall"; then echo "batches: receipt union = all $(echo $CHECKS_ALL | wc -w | tr -d ' ') checks, each exactly once"
         else bf=1; echo "batches: receipt union WRONG"; fi
     fi
-    rm -rf "$W"
+    sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${W:?}"
     [ $bf = 0 ] && echo "kernel check batches: ok" || echo "kernel check batches: FAILED"
     exit $bf
 fi
@@ -195,7 +196,7 @@ if sel oracle; then
     # kernel/unisa_model.inc is the MIXED file, then --check-oracle
     O=$T/tree; mkdir -p "$O/kernel" "$O/tests" "$O/src"
     cp kernel/unisa_headers.inc kernel/unisa_core.c "$O/kernel/"; cp src/*.c "$O/src/"
-    cp tests/build_ref.sh tests/refshim.h tests/reffoot.h "$O/tests/"
+    cp tests/build_ref.sh tests/refshim.h tests/reffoot.h tests/cxbin tests/safedel.cx "$O/tests/"; mkdir -p "$O/include"; cp include/cx.h include/unisa_sha256.h include/unisa_safedel.h "$O/include/"   # build_ref.sh deletes through the guard (cxbin: the cc oracle, no unisacc.com here)
     mix "$T/base.cc" "$O/kernel/unisa_model.inc"
     ( cd "$O" && B 60 sh tests/build_ref.sh "$O/ua.c" "$O/ua" ) > "$T/ob" 2>&1; rc=$?
     if [ $rc = 0 ] && [ -x "$O/ua" ] && grep -qxF '/* S_<stage>: the stage order of order.tsv */' "$O/ua.c" && grep -qxF '/* TOKV: gold TSV parse #field tok */' "$O/ua.c"; then
@@ -254,7 +255,7 @@ if sel neg; then
             tsvtwice) set -- $K/order.tsv weights/built.uns2 $(echo "$GOLD" | grep -v '/reloc.tsv$') weights/gold/prec.tsv ;;
             tsvunk) set -- $K/order.tsv weights/built.uns2 $noprec "$N/tu/prec.tsv" ;;
             esac
-            rm -f "$N/out"
+            sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${N:?}/out"
             gm $b "$N/out" "$@" > "$N/o" 2>&1; rc=$?
             if [ $rc = 1 ] && grep -qF "$want" "$N/o" && [ ! -e "$N/out" ] && ! grep -q 'runtime error\|AddressSanitizer' "$N/o"; then
                 echo "neg $n $b: rc 1, no output: $(head -1 "$N/o")"; P "neg $n $b"
@@ -271,7 +272,7 @@ if sel neg; then
     for b in cc ua san; do
         for n in hm15 hm17; do
             v=${n#hm}
-            rm -f "$N/out"
+            sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${N:?}/out"
             gm $b "$N/out" "$N/$n.tsv" weights/built.uns2 $GOLD > "$N/o" 2>&1; rc=$?
             want="heads_max $v, the kernel's STAGE_NCLS stride is 16"
             if [ $rc = 8 ] && grep -qF "$want" "$N/o" && [ ! -e "$N/out" ] && ! grep -q 'runtime error\|AddressSanitizer' "$N/o"; then
@@ -296,7 +297,7 @@ if sel wfail; then
         [ $rc = 7 ] && grep -q "write: cannot open" "$T/w.o" && { echo "wfail nodir $b: rc 7: $(head -1 "$T/w.o")"; P "wfail nodir $b"; } || echo "wfail nodir $b: FAILED (rc $rc): $(head -1 "$T/w.o")"
         # a real short write: file size limit 1 block, SIGXFSZ ignored so
         # write(2) returns EFBIG; the ~200 KB output must not come back whole
-        rm -f "$T/wf/big.inc"
+        sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${T:?}/wf/big.inc"
         B 30 sh -c 'ulimit -f 1; trap "" XFSZ; exec "$@"' sh "$T/gm.$b" -o "$T/wf/big.inc" $K/order.tsv $K/vocab.tsv $K/typekw.tsv weights/built.uns2 $GOLD > "$T/w.o" 2>&1; rc=$?
         [ $rc = 7 ] && grep -q -e "short write" -e "close failed" "$T/w.o" && { echo "wfail rlimit $b: rc 7: $(head -1 "$T/w.o")"; P "wfail rlimit $b"; } || echo "wfail rlimit $b: FAILED (rc $rc): $(head -1 "$T/w.o")"
     done
@@ -441,7 +442,7 @@ if sel vneg; then
             oct0|oct7) voc=$K/vocab.tsv; set -- $K/order.tsv weights/built.uns2 $noparse "$V/$n/parse.tsv" ;;
             *) voc="$V/$n.tsv"; set -- $K/order.tsv weights/built.uns2 $GOLD ;;
             esac
-            rm -f "$V/out"
+            sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${V:?}/out"
             VOC=$voc; gm $b "$V/out" "$@" > "$V/o" 2>&1; rc=$?; unset VOC   # a function call keeps a prefix assignment in sh: set and unset
             if [ $rc = 1 ] && grep -qF "$want" "$V/o" && [ ! -e "$V/out" ] && ! grep -q 'runtime error\|AddressSanitizer' "$V/o"; then
                 echo "vneg $n $b: rc 1, no output: $(head -1 "$V/o" | LC_ALL=C tr -c '\n -~' '?')"; P "vneg $n $b"
@@ -459,7 +460,7 @@ if sel vpos; then
         d=${n#oct}; mkdir -p "$V/$n"
         ren if ${d}if weights/gold/parse.tsv "$V/$n/parse.tsv" || echo "vpos: rename did not apply"
         for b in cc ua san; do
-            rm -f "$V/out"
+            sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${V:?}/out"
             gm $b "$V/out" $K/order.tsv weights/built.uns2 $noparse "$V/$n/parse.tsv" > "$V/o" 2>&1; rc=$?
             { grep '^char \*TOKV = ' "$V/out"; echo 'int puts(const char *); int main(void) { char *p = TOKV; int i; for (i = 0; i < 5; i = i + 1) while (*p++) ; puts(p); return 0; }'; } > "$V/x.c" 2>/dev/null
             B 60 cc -w -o "$V/x" "$V/x.c" > /dev/null 2>&1 && got=$(B 10 "$V/x") || got="(no build)"
@@ -549,7 +550,7 @@ fi
 # ================================================ typekw slice: TYPEV
 # tk <awk program> <name>: a modified copy of typekw.tsv (ENVIRON, no escapes)
 tk() { LC_ALL=C awk -F'\t' -v OFS='\t' "$1" $K/typekw.tsv > "$TK/$2.tsv"; }
-tkrun() { b=$1; o=$2; tf=$3; voc=$4; rm -f "$o"; VOC=$voc; TKW=$tf; gm $b "$o" > "$TK/o" 2>&1; r=$?; unset VOC TKW; return $r; }
+tkrun() { b=$1; o=$2; tf=$3; voc=$4; sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${o:?}"; VOC=$voc; TKW=$tf; gm $b "$o" > "$TK/o" 2>&1; r=$?; unset VOC TKW; return $r; }
 if sel tneg; then
     TK=$T/tn; mkdir -p "$TK"
     tk '$2 == "long" { $2 = "char" } { print }' dup
@@ -643,6 +644,6 @@ done
 [ $nf = 0 ] || fail=1
 cat "$T/rcpt"
 echo "total $(perl -e "printf '%.1f', $(now) - $t0") s"
-rm -rf "$T"
+sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge --force-count 20000 -- "${T:?}"   # holds a copy of the tree (integ: about 5200 files)
 [ $fail = 0 ] && echo "kernel check: ok" || echo "kernel check: FAILED"
 exit $fail

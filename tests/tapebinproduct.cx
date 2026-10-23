@@ -43,6 +43,14 @@
 #pragma unisa use cxlib.pyjson
 
 #define SHARDS 6
+/* a whole scratch tree through the one deletion guard (include/unisa_safedel.h, in the cx.h prelude; commissar ruling
+   2026-10-23) with an explicit ceiling: these trees hold copied sources and build outputs, beyond SAFEDEL_MAX_FILES */
+static const char *gettempdir(void);
+static int scratch_rmtree(const char *p) {
+    char why[700]; int rc = unisa_safedel(p, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 200000L, why, (int)sizeof why);
+    if (rc) fprintf(stderr, "cx_rmtree: %s\n", why);
+    return rc;
+}
 static const char *TARGETS[6] = { "lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64" };
 static const char *CALLS_HEX =
     "555441504542494e010000000100000000000000030000004000000057868176a4461072b1760ae7bae758f8722aa7f98389bddd25e9929c"
@@ -63,7 +71,7 @@ static void bputc(Buf *x, int c) { char ch = (char)c; bput(x, &ch, 1); }
 static char *xstrdup(const char *s) { size_t n = strlen(s); char *d = malloc(n + 1); if (!d) exit(1); memcpy(d, s, n + 1); return d; }
 
 static void cleanup(void) {
-    if (TMPD[0]) { char cmd[4200]; snprintf(cmd, sizeof cmd, "rm -rf '%s'", TMPD); system(cmd); TMPD[0] = 0; }
+    if (TMPD[0]) { scratch_rmtree(TMPD); TMPD[0] = 0; }   /* the one deletion guard (include/cx.h), never a shell rm */
 }
 /* the traceback's last line, rc 1 */
 static void fail(const char *line) { fflush(stdout); cleanup(); fprintf(stderr, "%s\n", line); exit(1); }
@@ -119,8 +127,8 @@ static char *slurp_fd(int fd, size_t *n) {
 }
 static int tmpfile_fd(void) {
     char t[4200]; int fd;
-    snprintf(t, sizeof t, "%s/.capXXXXXX", TMPD[0] ? TMPD : "/tmp");
-    fd = mkstemp(t); if (fd >= 0) unlink(t);
+    snprintf(t, sizeof t, "%s/.capXXXXXX", TMPD[0] ? TMPD : gettempdir());   /* under the temp root: the deletion guard's whitelist */
+    fd = mkstemp(t); if (fd >= 0) cx_remove(t);
     return fd;
 }
 static Res prun(char **argv, int secs, int cap_out, int cap_err, int str_repr) {
@@ -232,10 +240,10 @@ static void ref_key(char key[65]) {
     argv[0] = "tests/export_ref.sh"; argv[1] = flat; argv[2] = 0;
     { char root[4096], ex[4200]; if (!getcwd(root, sizeof root)) fail("OSError: getcwd"); snprintf(ex, sizeof ex, "%s/tests/export_ref.sh", root); argv[0] = ex;
       r = prun(argv, 30, 0, 0, 1);
-      if (r.rc) { char cmd[4400]; snprintf(cmd, sizeof cmd, "rm -rf '%s'", tmp); system(cmd); argv[0] = ex; run_check(argv, 30, 0); } }
+      if (r.rc) { scratch_rmtree(tmp); argv[0] = ex; run_check(argv, 30, 0); } }
     out = read_or_fail(flat, &n);
     cx_sha256_hex(out, n, h[0]); free(out);
-    unlink(flat); rmdir(tmp);
+    cx_remove(flat); cx_remove(tmp);
     file_sha("tests/refshim.h", h[1]); file_sha("tests/reffoot.h", h[2]); file_sha("tests/build_ref.sh", h[3]);
     cflags = getenv("CFLAGS"); if (!cflags) cflags = "-O2";
     r = run_check(cc, 10, 1);

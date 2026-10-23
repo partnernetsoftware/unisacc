@@ -13,6 +13,9 @@ _BOUND=$("$_BOUND" --helper) || exit 2
 # Skipped, not failed, when the VMs are absent -- this is a dev-machine
 # instrument, and CI covers lnx/x86_64 directly.
 set -u
+# every host deletion goes through the one guard (include/unisa_safedel.h) via its argv CLI (commissar ruling 2026-10-23)
+SDR=$(cd "$(dirname "$0")/.." && pwd) || exit 2
+safedel() { [ -n "$1" ] && sh "$SDR/tests/cxbin" "$SDR/tests/safedel.cx" --purge -- "$1"; }
 U="python3 -m unisa"
 DRIVE=${DRIVE:-built}
 command -v limactl >/dev/null || { echo "crossnative skipped (no limactl)"; exit 0; }
@@ -32,7 +35,7 @@ run_target() {   # run_target <vm> <target> <files...>
         echo "$b" >> "$d/.list"
     done
     tar cf - -C "$d" . | base64 | limactl shell "$vm" sh -c '
-        rm -rf /tmp/unisa_cn; mkdir -p /tmp/unisa_cn; cd /tmp/unisa_cn
+        cd "$(mktemp -d /tmp/unisa_cn.XXXXXX)" || exit 1   # a fresh guest directory: no rm in a shell string (commissar ruling 2026-10-23)
         base64 -d | tar xf - 2>/dev/null; chmod +x * 2>/dev/null
         p=0; f=0
         while read b; do
@@ -47,7 +50,7 @@ run_target() {   # run_target <vm> <target> <files...>
 $(limactl shell "$vm" cat /tmp/unisa_cn.score 2>/dev/null || echo "0 0")
 EOF2
     printf "  %-12s ok %s   mismatch %s\n" "$target" "$p" "$f"
-    rm -rf "$d"
+    safedel "$d"
     [ "${f:-1}" -eq 0 ] || bad=$((bad+1))
 }
 
@@ -78,7 +81,7 @@ run_rosetta() {
         else f=$((f+1)); printf "  FAIL %-12s native [%s] vs interp [%s]\n" \
             "$b" "$got" "$want"; fi
     done
-    rm -rf "$d"
+    safedel "$d"
     printf "  %-12s ok %s   mismatch %s\n" osx/x86_64 "$p" "$f"
     [ "$f" -eq 0 ] || bad=$((bad+1))
 }
@@ -123,7 +126,7 @@ run_windows() {
     } | "$UTM" file push "$vm" "$G" 2>/dev/null
     # `--hide` makes utmctl exec fail with OSStatus -10004 (2026-09-29); the batch is
     # non-interactive, and a failed exec must not be silent.
-    "$UTM" exec "$vm" --cmd "cmd.exe" -- /c "$G" >/dev/null 2>&1 || { echo "  $target guest exec refused"; rm -rf "$d"; return 1; }
+    "$UTM" exec "$vm" --cmd "cmd.exe" -- /c "$G" >/dev/null 2>&1 || { echo "  $target guest exec refused"; safedel "$d"; return 1; }
     i=0
     while [ $i -lt 150 ]; do
         case "$("$UTM" file pull "$vm" "$D" 2>&1)" in *done*) break;; esac
@@ -142,12 +145,12 @@ run_windows() {
         diff "$d/.w" "$d/.got" | head -8
         bad=$((bad+1))
     fi
-    rm -rf "$d"
+    safedel "$d"
 }
 
 # The targets are independent machines, so they run side by side; each job
 # counts its own failures and the reports are printed in the fixed order.
-O=$(mktemp -d); trap 'rm -rf "$O"' EXIT
+O=$(mktemp -d); trap 'safedel "$O"' EXIT
 # A skipped target is not a passing target.  This suite reported "failing
 # targets 0" while every VM was stopped and nothing at all had run, which
 # reads as green in the summary -- the same vacuous pass closure.sh had.

@@ -23,14 +23,14 @@ cachekey() {   # cachekey DIR: the parse2 read-set key of the files under DIR; r
 }
 refpath() { echo "$1/py-$2-$3.json"; }   # refpath CACHE KEY VARIANT: where run() looks for the Python reference
 if [ "${1:-}" = --key-selftest ]; then
-    W=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-seedparse2-key.XXXXXX") || exit 2; trap 'rm -rf "$W"' EXIT
+    W=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-seedparse2-key.XXXXXX") || exit 2; trap '[ -z "$W" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge --max-files 20000 -- "$W"' EXIT   # seven copies of the read set: a site ceiling
     awk -F '\t' 'NR > 1 && $1 == "parse2" { print $2 }' tests/seedmemory-reads.tsv > "$W/list"
     { cat "$W/list"; echo tests/seedmemory-reads.tsv; } > "$W/files"
     p=$(grep -m1 '^exec/parse/' "$W/list"); m=$(grep -m1 '^exec/model' "$W/list")
     probes="exec/finite_rules.py exec/facts/load.py ${p:-exec/parse/NONE} ${m:-exec/model-NONE} exec/parse2/gen-manifest.tsv"
     i=0; for c in same $probes gone; do   # one private copy per case, keyed in parallel
         mkdir "$W/$i" && tar -cf - -T "$W/files" | (cd "$W/$i" && tar -xf -) || { echo "seedparse2-key: cannot copy the read set"; exit 2; }
-        case $c in same) ;; gone) rm "$W/$i/exec/finite_rules.py";; *) [ -f "$W/$i/$c" ] && printf '\n' >> "$W/$i/$c";; esac
+        case $c in same) ;; gone) sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$W/$i/exec/finite_rules.py" || exit 3;; *) [ -f "$W/$i/$c" ] && printf '\n' >> "$W/$i/$c";; esac
         { cachekey "$W/$i" || echo none; } > "$W/k$i" & i=$((i + 1))
     done
     k0=$(cachekey "$R") || { echo "seedparse2-key: no key for the checkout"; exit 1; }; wait

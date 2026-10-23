@@ -7,6 +7,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "unisa_safedel.h"
 
 int u_spawn(const char *bin, char **args, int nargs, const char *cwd,
             char *out, int cap, int *rc);
@@ -25,11 +26,13 @@ static int one(const char *u, const char *path, char *out, int cap, int *rc) {
 int main(void) {
     const char *u = getenv("UNISACC");
     const char *headers[] = { "sys/socket.h", "netdb.h", "arpa/inet.h", "netinet/in.h", "sys/select.h" };
-    char dir[64], src[80], body[80], out[2048];
+    char dir[1024], src[1100], body[80], out[2048];
+    const char *td = getenv("TMPDIR");
     int i, rc, fail = 0;
     FILE *f;
     if (!u || !u[0]) u = "/Users/wjc/repos/unisacc/unisacc.com";
-    snprintf(dir, sizeof dir, "/tmp/cdsh-net-%d", (int)getpid());
+    if (!td || !td[0]) td = "/tmp";
+    snprintf(dir, sizeof dir, "%s/cdsh-net-%d", td, (int)getpid());   /* under the temp root: the guard's whitelist */
     if (mkdir(dir, 0700) != 0) { printf("no temp\n"); return 2; }
     snprintf(src, sizeof src, "%s/h.c", dir);
     printf("headers\n");
@@ -65,6 +68,7 @@ int main(void) {
     if (strstr(out, "127.0.0.1")) printf("  ok    localhost\n");
     else { printf("  FAIL  localhost DNS\n"); fail = 1; }
 
-    remove(src); rmdir(dir);
+    {   char why[700];   /* the one deletion guard (include/unisa_safedel.h; commissar ruling 2026-10-23) */
+        if (unisa_safedel(dir, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 0, why, (int)sizeof why)) fprintf(stderr, "safedel: %s\n", why); }
     return fail ? 1 : 0;
 }

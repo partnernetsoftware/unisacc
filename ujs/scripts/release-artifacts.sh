@@ -29,7 +29,12 @@ done
 
 VER=$(python3 -c 'import json; print(json.load(open("ujs/package.json"))["version"])')
 OUT_DIR="$ROOT/dist"
-STAGE="$OUT_DIR/ujs-$VER-stage"
+# the stage and the zip are built in a private scratch under the temp root and only the finished zip is renamed into
+# dist/: dist/ lies outside out/, where the deletion guard (tests/safedel.cx, commissar ruling 2026-10-23) removes
+# nothing, so nothing in dist/ is ever deleted -- a rename replaces the previous zip
+SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/ujs-release.XXXXXX")
+trap 'sh "$ROOT/tests/cxbin" "$ROOT/tests/safedel.cx" --purge --force-count 20000 -- "${SCRATCH:?}"' EXIT
+STAGE="$SCRATCH/ujs-$VER-stage"
 ZIP="$OUT_DIR/ujs-$VER-artifacts.zip"
 CORE="$ROOT/ujs/core"
 UJS="$ROOT/ujs"
@@ -71,7 +76,6 @@ for name, meta in b["artifacts"].items():
 print("fingerprint OK", b["version"], b.get("git"))
 PY
 
-rm -rf "$STAGE"
 mkdir -p "$STAGE/core" "$OUT_DIR"
 
 for f in index.js wasm_run.js compiler.js jspi.js README.md BUILD.json \
@@ -119,8 +123,8 @@ note = {
 )
 PY
 
-rm -f "$ZIP"
-( cd "$OUT_DIR" && zip -r -q "$(basename "$ZIP")" "$(basename "$STAGE")" )
+( cd "$SCRATCH" && zip -r -q "$(basename "$ZIP")" "$(basename "$STAGE")" )
+mv -f "$SCRATCH/$(basename "$ZIP")" "$ZIP"
 # flatten: zip contains ujs-VER-stage/... — rename inner for nicer extract
 # Actually keep stage name clear. Also write checksum of zip.
 (
@@ -128,7 +132,6 @@ rm -f "$ZIP"
   shasum -a 256 "$(basename "$ZIP")" > "$(basename "$ZIP").sha256"
 )
 
-rm -rf "$STAGE"
 echo "wrote $ZIP"
 echo "wrote $ZIP.sha256"
 ls -la "$ZIP" "$ZIP.sha256"

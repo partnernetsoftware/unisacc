@@ -11,7 +11,7 @@ PART=${MULTI_PART:-all}
 case $PART in all|tapes-m-forward|tapes-m-reverse|tapes-n-forward|tapes-n-reverse|tapes-pool-forward|tapes-pool-reverse|isolation|static|frame) ;; *) echo 'unknown MULTI_PART' >&2; exit 2;; esac
 [ "$PART" != frame ] || [ "$KIND" = cc ] || [ "$KIND" = all ] || { echo 'frame requires cc driver kind' >&2; exit 2; }
 export DRIVER_KIND MULTI_PART
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d); trap 'sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${T:?}"' EXIT
 b() { "$_BOUND" 60 "$@"; }
 case $(uname -s) in Darwin) OS=osx;; Linux) OS=lnx;; *) exit 1;; esac
 case $(uname -m) in arm64|aarch64) ARCH=arm64;; x86_64) ARCH=x86_64;; *) exit 1;; esac

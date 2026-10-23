@@ -34,6 +34,9 @@
  * injected key source, so the part that would normally need a human at a
  * keyboard is exercised in CI.
  */
+/* the one deletion guard (commissar ruling 2026-10-23): the selftest's removals go through unisa_safedel(); its
+   fixtures live under the temp root ($TMPDIR, or /tmp), the guard's whitelist */
+#include "../../include/unisa_safedel.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2266,6 +2269,14 @@ static const char *csih_env(const char *neu, const char *old) {
 #include "context_index.h"
 int agent_context_packet(const char *packet);
 
+/* selftest fixtures: under the temp root, removed through the one deletion guard (include/unisa_safedel.h) */
+static const char *tui_selftest_tmp(void) { const char *t = getenv("TMPDIR"); return t && t[0] ? t : "/tmp"; }
+static int tui_selftest_rm(const char *path, unsigned flags) {
+    char why[600]; int rc = unisa_safedel(path, SAFEDEL_PURGE | flags, 0, why, (int)sizeof why);
+    if (rc) printf("FAIL selftest cleanup: %s\n", why);
+    return rc;
+}
+
 static int tui_run_prompt(tui_state *st, const char *source_prompt, int clear_manual_input) {
     const char *endpoint = csih_env("CSIH_ENDPOINT", "CDSH_ENDPOINT");
     const char *model    = csih_env("CSIH_MODEL", "CDSH_MODEL");
@@ -2710,11 +2721,11 @@ int main(int argc, char **argv) {
                 "/help", "/status", "/clear", "/goal", "/loop", "/reload",
                 "/reload-code", "/export-state", "/exit", "/quit"
             };
-            char journal[96], bytes[64];
+            char journal[4096], bytes[64];
             const char *audit = "audit unchanged\n";
             FILE *f;
             int i, j, found, n, bad = 0;
-            snprintf(journal, sizeof journal, "csih-command-selftest-%ld.jsonl", (long)getpid());
+            snprintf(journal, sizeof journal, "%s/csih-command-selftest-%ld.jsonl", tui_selftest_tmp(), (long)getpid());
             f = fopen(journal, "wb");
             if (!f) bad = 1;
             else {
@@ -2771,7 +2782,7 @@ int main(int argc, char **argv) {
                 if (strcmp(bytes, audit)) bad = 1;
                 fclose(f);
             }
-            unlink(journal);
+            if (tui_selftest_rm(journal, 0)) bad = 1;
             if (bad) { printf("FAIL native help/status/clear invariants\n"); failures++; }
             else printf("  ok   native commands preserve journal, pending, loop and exclude history\n");
             tui_state_init(&h, NULL); h.mode = 1; h.busy = 1;
@@ -2863,13 +2874,13 @@ int main(int argc, char **argv) {
             {
                 static reload_session_state before_metadata, expected, prepared;
                 static reload_io_token token, old_token, zero_token;
-                char dir[160];
-                char path[4096], journal[4096];
+                char dir[4096];
+                char path[4200], journal[4200];
                 const char *line = "中文日志\n";
                 FILE *f;
                 int fixture_ok = 0, seq;
                 for (seq = 0; seq < 100; seq++) {
-                    snprintf(dir, sizeof dir, "/tmp/csih-reload-bridge-%ld-%d", (long)getpid(), seq);
+                    snprintf(dir, sizeof dir, "%s/csih-reload-bridge-%ld-%d", tui_selftest_tmp(), (long)getpid(), seq);
                     if (mkdir(dir, 0700) == 0) { fixture_ok = 1; break; }
                 }
                 snprintf(path, sizeof path, "%s/state.json", dir);
@@ -2933,11 +2944,7 @@ int main(int argc, char **argv) {
                         printf("FAIL reload bridge changed journal retains file %s\n", why); failures++;
                     }
                 }
-                if (fixture_ok) {
-                    unlink(path);
-                    unlink(journal);
-                    rmdir(dir);
-                }
+                if (fixture_ok && tui_selftest_rm(dir, SAFEDEL_RECURSIVE)) failures++;
             }
         }
 
@@ -3438,19 +3445,20 @@ int main(int argc, char **argv) {
             {
                 static tui_state mind;
                 r_frame mf;
-                char oldhome[512];
+                char oldhome[512], fh[4096], fp2[4200];
                 const char *home = getenv("HOME");
                 int k, in_at = -1, hint_at = -1, sysn = 0, rules = 0, head = 0, paired = 0, tee = 0, labeled = 0, bars = 0, collapsed = 0;
                 FILE *fp;
                 if (home) snprintf(oldhome, sizeof oldhome, "%s", home);
                 else oldhome[0] = '\0';
-                mkdir("/tmp/cdsh-frame-home", 0750);
-                mkdir("/tmp/cdsh-frame-home/.cdsh", 0750);
-                fp = fopen("/tmp/cdsh-frame-home/.cdsh/思维树.md", "w");
+                snprintf(fh, sizeof fh, "%s/cdsh-frame-home", tui_selftest_tmp());
+                mkdir(fh, 0750);
+                snprintf(fp2, sizeof fp2, "%s/.cdsh", fh); mkdir(fp2, 0750);
+                snprintf(fp2, sizeof fp2, "%s/.cdsh/思维树.md", fh); fp = fopen(fp2, "w");
                 if (fp) { fputs("# 思维树\n甲\n乙\n丙\n", fp); fclose(fp); }
-                fp = fopen("/tmp/cdsh-frame-home/.cdsh/记忆宫殿.md", "w");
+                snprintf(fp2, sizeof fp2, "%s/.cdsh/记忆宫殿.md", fh); fp = fopen(fp2, "w");
                 if (fp) { fputs("```mermaid\nflowchart LR\n# 记忆宫殿\n子\n丑\n```\n", fp); fclose(fp); }
-                setenv("HOME", "/tmp/cdsh-frame-home", 1);
+                setenv("HOME", fh, 1);
                 tui_state_init(&mind, NULL);
                 mind.mode = 1;
                 mind.rows = 24;
@@ -3594,12 +3602,16 @@ int main(int argc, char **argv) {
                     mind.sys_top = 0;
                     mind.rows = 24;
                 }
-                fp = fopen("/tmp/cdsh-frame-home/.cdsh/记忆宫殿.md", "w");
+                fp = fopen(fp2, "w");
                 if (fp) fclose(fp);
                 if (!tui_frame_has(&mind, "(空)")) {
                     printf("FAIL empty palace page\n"); failures++;
                 } else printf("  ok   empty palace shows (空)\n");
-                remove("/tmp/cdsh-frame-home/.cdsh/记忆宫殿.md");
+                /* the guard refuses everything while $HOME is the fixture under the temp root (the temp root is then an
+                   ancestor of $HOME): the real HOME is back for the removal only */
+                if (oldhome[0]) setenv("HOME", oldhome, 1); else unsetenv("HOME");
+                if (tui_selftest_rm(fp2, 0)) failures++;
+                setenv("HOME", fh, 1);
                 if (!tui_frame_has(&mind, "(无)")) {
                     printf("FAIL missing palace page\n"); failures++;
                 } else printf("  ok   missing palace shows (无)\n");
@@ -3615,7 +3627,8 @@ int main(int argc, char **argv) {
             tool_result via_cli;
             char line[1024];
             size_t i;
-            const char *path = "/tmp/cdsh-tui-cli.txt";
+            char path[4096], cmd[4200];
+            snprintf(path, sizeof path, "%s/cdsh-tui-cli.txt", tui_selftest_tmp());
             tui_state_init(&hand, NULL);
             tui_type(&hand, "sh echo cdsh-hand");
             via_cli = tool_run("sh echo cdsh-hand");
@@ -3635,9 +3648,9 @@ int main(int argc, char **argv) {
                 printf("FAIL cli echo did not land on the tui frame\n");
                 failures++;
             } else printf("  ok   cli echo matches tui frame\n");
-            tui_type(&hand, "write /tmp/cdsh-tui-cli.txt from-cli");
-            tui_type(&hand, "read /tmp/cdsh-tui-cli.txt");
-            via_cli = tool_run("read /tmp/cdsh-tui-cli.txt");
+            snprintf(cmd, sizeof cmd, "write %s from-cli", path); tui_type(&hand, cmd);
+            snprintf(cmd, sizeof cmd, "read %s", path); tui_type(&hand, cmd);
+            via_cli = tool_run(cmd);
             i = 0;
             while (via_cli.out[i] && via_cli.out[i] != '\n' && i + 1 < sizeof line) {
                 line[i] = via_cli.out[i];
@@ -3650,7 +3663,7 @@ int main(int argc, char **argv) {
                 printf("FAIL cli read did not land on the tui frame\n");
                 failures++;
             } else printf("  ok   cli read matches tui frame\n");
-            remove(path);
+            if (tui_selftest_rm(path, 0)) failures++;
         }
 
         printf("%s\n", failures ? "SELFTEST FAILED" : "selftest ok");

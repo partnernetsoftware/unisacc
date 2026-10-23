@@ -3,7 +3,8 @@
 set -eu
 R=$(cd "$(dirname "$0")/../.." && pwd);cd "$R"
 T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-librarypartition.XXXXXX")
-trap 'rm -rf "$T"' EXIT HUP INT TERM
+_SD="$R"/tests   # the one deletion guard: argv CLI tests/safedel.cx over include/unisa_safedel.h
+trap 'sh "$_SD/cxbin" "$_SD/safedel.cx" --purge -- "${T:?}"' EXIT HUP INT TERM
 b(){ "$R/tests/bound" 15 "$@"; }
 b cc -std=c99 -O2 -w -Iseed seed/gen.c -o "$T/gen"
 b "$T/gen" librarypartition/gen "$T/c.json"

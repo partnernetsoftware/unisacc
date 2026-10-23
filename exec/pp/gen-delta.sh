@@ -57,10 +57,10 @@ PY
     sha() { python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$1"; }
     # a cached binary is used only with its recorded sha; anything else is rebuilt
     if [ ! -x "$G" ] || [ ! -f "$G.sha256" ] || [ "$(sha "$G" 2>/dev/null)" != "$(cat "$G.sha256")" ]; then
-        rm -f "$G" "$G.sha256"
+        sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${G:?}" "$G.sha256" || exit 1   # the one deletion guard
         "$B" 55 "$CC" $FLAGS -I"$R/seed" "$R/seed/gen.c" -o "$G.$$" \
             && sha "$G.$$" > "$G.sha256.$$" && mv -f "$G.$$" "$G" && mv -f "$G.sha256.$$" "$G.sha256" \
-            || { rm -f "$G.$$" "$G.sha256.$$"; echo "exec/pp/gen-delta.sh: seed-gen build failed" >&2; exit 1; }
+            || { sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$G.$$" "$G.sha256.$$"; echo "exec/pp/gen-delta.sh: seed-gen build failed" >&2; exit 1; }
     fi
 fi
 # prefer seed-gen; failure is failure (no Python masquerade)

@@ -1,0 +1,369 @@
+/* deletemutcheck: the mutation tests of every deletion call site routed through the one deletion guard
+   include/unisa_safedel.h (commissar ruling 2026-10-23, item 7), one row per site in tests/deletemut.tsv.
+     sh unisacc.com -run tests/deletemutcheck.cx -- [--com PRODUCT] [--bin SAFEDEL] [--tsv FILE] [--shard K/N]
+   (from the repository root).  Per row FILE LINE ARGV INJECT ANCHOR (TAB separated):
+     1. ANCHOR occurs in FILE: the site still goes through the guard (a row whose site was edited back to a raw
+        deletion, or rewritten, goes red here; LINE is where the ledger tests/deletes.tsv saw it);
+     2. ARGV runs with its target {X} injected as "", "." and the sandbox repository root, the cwd being that root:
+        `safedel ...`           the argv CLI tests/safedel.cx (built once with PRODUCT, or --bin);
+        `cx_remove|cx_rmtree|cx_trash T`, `unisa_safedel T FLAGS MAX`   in process;
+        `tool ...`              the real tool (env TMPDIR = the sandbox base, {ROOT} the checkout, {COM} PRODUCT);
+        `sh|shp|make VARS`      ANCHOR itself is the call, run by sh -c with each VARS name (comma separated; a digit:
+                                $1) bound to the injection and R = ROOT = the sandbox repository (its tests/cxbin,
+                                tests/safedel.cx and unisacc.com link to this checkout's); make: $$ is $; shp: the
+                                variables only prefix the targets (VAR/SUFFIX), and each such SUFFIX is first made as a
+                                file inside the sandbox repository so "." and the root name a file that must survive;
+        `none`                  a site that no longer deletes, or names fixed paths only (step 1 alone).
+        {X} is the injection, {ROOT} the checkout, {COM} the product, \s a space inside one word.  For the guard
+        forms a target that is "", relative (inside the repository), outside the sandbox or inside the repository
+        outside its out/ must be refused (rc 3); any other (a sibling of the repository under the sandbox) is allowed
+        and absent (rc 0).  A refused target inside the sandbox is seeded first (a file, or a directory holding one
+        for a recursive form), so a deletion would show.  sh forms must stop with the guard's refusal or the shell's
+        ${VAR:?} (shp: rc 0 is allowed where no fixture was made: a sibling of the root).  The sandbox's full-tree
+        listing (path, type, mode, size, content digest, link target) must not change; a tool may add entries, never
+        lose or change one.
+   The sandbox is a mkdtemp under $TMPDIR (or /tmp) holding a fake repository (a .git entry, out/, sources); it is
+   removed through the guard at the end (its .git renamed away first: the guard never deletes a .git).
+   rc 0 every row held, 1 a row failed, 2 usage or setup.  Raw deletions outside the guard are tests/deletecheck.cx's. */
+/* a malloc'd copy (not strdup: the product forwards strdup to the host C library, whose block its own free must not get) */
+static char *dupstr(const char *s) { size_t n = strlen(s) + 1; char *d = (char *)malloc(n); if (d) memcpy(d, s, n); return d; }
+static char ROOT[4096], COM[4096], TSV[4096], B[4096], S[4096], REPO[4096], BIN[4200], ERRF[4200];
+static int passes, fails, cases, SK = 1, SN = 1;
+
+static int exists(const char *p) { struct stat st; return lstat(p, &st) == 0; }
+static void mkdirs(const char *p) {
+    char t[4096]; size_t i, n = strlen(p);
+    if (n >= sizeof t) return;
+    memcpy(t, p, n + 1);
+    for (i = 1; i <= n; i++) if (t[i] == '/' || t[i] == 0) { char c = t[i]; t[i] = 0; mkdir(t, 0755); t[i] = c; }
+}
+static int put(const char *p, const char *text) {
+    char d[4096]; char *s;
+    snprintf(d, sizeof d, "%s", p); s = strrchr(d, '/'); if (s && s != d) { *s = 0; mkdirs(d); }
+    return cx_write(p, text, strlen(text));
+}
+/* the tree listing: one line per entry, sorted walk, lstat only */
+struct buf { char *p; size_t n, cap; };
+static void add(struct buf *b, const char *s) {
+    size_t l = strlen(s);
+    if (b->n + l + 1 > b->cap) { b->cap = (b->n + l + 1) * 2; b->p = realloc(b->p, b->cap); if (!b->p) exit(2); }
+    memcpy(b->p + b->n, s, l); b->n += l; b->p[b->n] = 0;
+}
+static int cmpname(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+static void tree(struct buf *b, const char *p, const char *rel) {
+    struct stat st; char line[9000];
+    if (lstat(p, &st) != 0) return;
+    if (S_ISLNK(st.st_mode)) {
+        char t[4096]; long n = (long)readlink(p, t, sizeof t - 1); if (n < 0) n = 0; t[n] = 0;
+        snprintf(line, sizeof line, "L %s -> %s\n", rel, t); add(b, line);
+    } else if (S_ISDIR(st.st_mode)) {
+        DIR *d = opendir(p); struct dirent *e; char **v = 0; size_t n = 0, i;
+        snprintf(line, sizeof line, "D %s %o\n", rel, (unsigned)(st.st_mode & 07777)); add(b, line);
+        if (!d) return;
+        while ((e = readdir(d))) {
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            v = realloc(v, (n + 1) * sizeof *v); if (!v) exit(2);
+            v[n] = malloc(strlen(e->d_name) + 1); if (!v[n]) exit(2); memcpy(v[n], e->d_name, strlen(e->d_name) + 1); n++;
+        }
+        closedir(d);
+        if (n) qsort(v, n, sizeof *v, cmpname);
+        for (i = 0; i < n; i++) {
+            char cp[4200], cr[4200];
+            snprintf(cp, sizeof cp, "%s/%s", p, v[i]); snprintf(cr, sizeof cr, "%s/%s", rel, v[i]);
+            tree(b, cp, cr); free(v[i]);
+        }
+        free(v);
+    } else {
+        size_t len = 0; char *c = cx_read(p, &len), hex[65];
+        cx_sha256_hex(c ? c : "", c ? len : 0, hex); free(c);
+        snprintf(line, sizeof line, "F %s %o %ld %s\n", rel, (unsigned)(st.st_mode & 07777), (long)st.st_size, hex); add(b, line);
+    }
+}
+static char *listing(void) { struct buf b = {0, 0, 0}; add(&b, ""); tree(&b, S, "."); return b.p; }
+/* every line of A is a line of B */
+static int included(const char *a, const char *b) {
+    const char *p = a, *e;
+    while (*p) {
+        char line[9100]; size_t n; e = strchr(p, '\n'); n = e ? (size_t)(e - p + 1) : strlen(p);
+        if (n >= sizeof line) return 0;
+        memcpy(line, p, n); line[n] = 0;
+        {   /* a whole line of B */
+            const char *q = b; int hit = 0;
+          while ((q = strstr(q, line))) { if (q == b || q[-1] == '\n') { hit = 1; break; } q++; }
+          if (!hit) return 0; }
+        p += n;
+    }
+    return 1;
+}
+
+/* a target the guard must refuse (see the header) */
+static int protected_target(const char *t) {
+    size_t nb = strlen(B), nr = strlen(REPO); char o[4300];
+    if (!t[0] || t[0] != '/') return 1;
+    if (strncmp(t, B, nb) || (t[nb] != '/' && t[nb] != 0)) return 1;
+    if (!strncmp(t, REPO, nr) && (t[nr] == 0 || t[nr] == '/')) {
+        snprintf(o, sizeof o, "%s/out/", REPO);
+        return strncmp(t, o, strlen(o)) != 0;
+    }
+    return 0;
+}
+/* the guard treats a target whose parent directory is missing as absent (rc 0, nothing to delete) before its policy
+   runs: such a target counts as refused when nothing changed (counted in the summary) */
+static int ABSENT;
+static int parent_missing(const char *t) {
+    char p[4300], *s;
+    if (!t[0]) return 0;
+    if (t[0] == '/') snprintf(p, sizeof p, "%s", t); else snprintf(p, sizeof p, "%s/%s", REPO, t);
+    s = strrchr(p, '/'); if (!s || s == p) return 0;
+    *s = 0; return !exists(p);
+}
+/* a refused target inside the sandbox gets a seed, so a deletion would change the listing */
+static void seed(const char *t, int dir) {
+    char p[4300];
+    if (!t[0]) return;
+    if (t[0] == '/') snprintf(p, sizeof p, "%s", t); else snprintf(p, sizeof p, "%s/%s", REPO, t);
+    if (strncmp(p, S, strlen(S)) || exists(p)) return;
+    if (dir) { char f[4400]; snprintf(f, sizeof f, "%s/seed.txt", p); put(f, "seed\n"); }
+    else put(p, "seed\n");
+}
+
+/* run ARGV with stderr into ERRF, cwd REPO; the exit code */
+static int run(char *const argv[], int secs) {   /* stdin is /dev/null: a tool never waits on the checker's input */
+    int save, save0, fd, nul, rc; char *out = 0; size_t len = 0;
+    if (chdir(REPO) != 0) return -1;
+    fflush(stdout); fflush(stderr);
+    save = dup(2); save0 = dup(0); fd = open(ERRF, O_WRONLY | O_CREAT | O_APPEND, 0600); nul = open("/dev/null", O_RDONLY);
+    if (save < 0 || save0 < 0 || fd < 0 || nul < 0) return -1;
+    dup2(fd, 2); close(fd); dup2(nul, 0); close(nul);
+    rc = cx_runv_timeout(argv, secs, &out, &len);
+    dup2(save, 2); close(save); dup2(save0, 0); close(save0); free(out);
+    return rc;
+}
+static int quiet(int (*fn)(const char *), const char *t) {   /* an in-process guard call, its why line into ERRF */
+    int save, fd, rc;
+    fflush(stderr); save = dup(2); fd = open(ERRF, O_WRONLY | O_CREAT | O_APPEND, 0600);
+    if (save < 0 || fd < 0) return -1;
+    dup2(fd, 2); close(fd);
+    rc = fn(t);
+    fflush(stderr); dup2(save, 2); close(save);
+    return rc;
+}
+
+/* split S on spaces into V (at most 31 words); returns the count */
+static int words(char *s, char **v) {
+    int n = 0; char *p = s;
+    while (*p && n < 31) { while (*p == ' ') p++; if (!*p) break; v[n++] = p; while (*p && *p != ' ') p++; if (*p) *p++ = 0; }
+    v[n] = 0; return n;
+}
+/* W with {X}, {ROOT}, {COM} replaced, into OUT */
+static void subst(const char *w, const char *x, char *out, size_t cap) {
+    size_t o = 0; const char *p = w;
+    while (*p && o + 1 < cap) {
+        const char *r = 0; size_t k = 0;
+        if (!strncmp(p, "{X}", 3)) { r = x; k = 3; } else if (!strncmp(p, "{ROOT}", 6)) { r = ROOT; k = 6; } else if (!strncmp(p, "{COM}", 5)) { r = COM; k = 5; }
+        if (r) { size_t l = strlen(r); if (o + l >= cap) break; memcpy(out + o, r, l); o += l; p += k; }
+        else if (p[0] == '\\' && p[1] == 's') { out[o++] = ' '; p += 2; }
+        else out[o++] = *p++;
+    }
+    out[o] = 0;
+}
+static unsigned flagbits(const char *s) {
+    unsigned f = 0;
+    if (strstr(s, "PURGE")) f |= SAFEDEL_PURGE;
+    if (strstr(s, "RECURSIVE")) f |= SAFEDEL_RECURSIVE;
+    if (strstr(s, "DRYRUN")) f |= SAFEDEL_DRYRUN;
+    return f;
+}
+
+/* tool runs are memoized: the same command line and target run once */
+static char *MEMO_K[64]; static int MEMO_V[64], NMEMO;
+
+/* TEXT with every "$$" made "$" (make recipes) */
+static char *unmake(const char *t) {
+    char *r = (char *)malloc(strlen(t) + 1), *o = r; if (!r) exit(2);
+    while (*t) { if (t[0] == '$' && t[1] == '$') t++; *o++ = *t++; }
+    *o = 0; return r;
+}
+/* shp: every "/SUFFIX" a variable prefixes in TEXT is made as a file inside the sandbox repository, so "." and the
+   root name an existing repository file that must be refused; 1 when one was made (then every injection is strict) */
+static int fixtures(const char *text) {
+    const char *a = strstr(text, " -- "), *p; int made = 0;
+    if (!a) a = text;
+    for (p = a; (p = strchr(p, '$')) != 0; p++) {
+        const char *q = p + 1, *e; char suf[1024], path[4400], *s; size_t n;
+        if (*q == '{') { q = strchr(q, '}'); if (!q) break; q++; } else while (*q == '_' || isalnum((unsigned char)*q)) q++;
+        if (*q != '/') continue;
+        e = strchr(q, '"'); if (!e) continue;
+        n = (size_t)(e - q); if (n >= sizeof suf) continue;
+        memcpy(suf, q, n); suf[n] = 0;
+        if (strchr(suf, '$') || strstr(suf, "..")) continue;
+        snprintf(path, sizeof path, "%s%s", REPO, suf);
+        for (s = path + strlen(REPO) + 1; (s = strchr(s, '/')) != 0; s++) { *s = 0; mkdir(path, 0755); *s = '/'; }
+        if (exists(path) || put(path, "a repository file the injection must not reach\n") == 0) made = 1;
+    }
+    return made;
+}
+/* a sh|shp|make row: ANCHOR run with VARS bound to X; 1 ok, 0 red */
+static int one_sh(const char *kind, const char *vars, const char *text, const char *x, int k, char *why, size_t wl) {
+    char *argv[40], cmd[16384], envs[16][4400], name[64], pos[8] = "", *out = 0, *before, *after, *body; size_t n = 0, ln;
+    int a = 0, ne = 0, rc, ok, strict = 1; const char *p;
+    if (!strcmp(kind, "shp")) strict = fixtures(text) || k == 0;
+    before = listing();
+    body = !strcmp(kind, "make") ? unmake(text) : dupstr(text);
+    argv[a++] = "env";
+    snprintf(envs[ne], sizeof envs[ne], "R=%s", REPO); argv[a++] = envs[ne++];
+    snprintf(envs[ne], sizeof envs[ne], "ROOT=%s", REPO); argv[a++] = envs[ne++];
+    snprintf(envs[ne], sizeof envs[ne], "here=%s/tests", REPO); argv[a++] = envs[ne++];
+    snprintf(envs[ne], sizeof envs[ne], "TMPDIR=%s", B); argv[a++] = envs[ne++];
+    for (p = vars; *p && ne < 15; ) {
+        ln = strcspn(p, ","); if (ln >= sizeof name) ln = sizeof name - 1;
+        memcpy(name, p, ln); name[ln] = 0; p += ln; if (*p == ',') p++;
+        if (name[0] >= '0' && name[0] <= '9') { snprintf(pos, sizeof pos, "%s", name); continue; }
+        snprintf(envs[ne], sizeof envs[ne], "%s=%s", name, x); argv[a++] = envs[ne++];
+    }
+    snprintf(cmd, sizeof cmd, "exec 2>&1; %s", body); free(body);
+    argv[a++] = "sh"; argv[a++] = "-c"; argv[a++] = cmd;
+    if (pos[0]) { argv[a++] = "deletemut"; argv[a++] = (char *)x; }   /* $1 = the injection */
+    argv[a] = 0;
+    if (chdir(REPO) != 0) { free(before); snprintf(why, wl, "chdir"); return 0; }
+    rc = cx_runv_timeout(argv, 30, &out, &n);
+    after = listing();
+    ok = !strcmp(before, after) && rc != 124
+         && ((rc != 0 && out && (strstr(out, "refused") || strstr(out, "parameter"))) || (!strict && rc == 0));
+    if (!ok) snprintf(why, wl, "rc %d (want a refusal%s), listing %s; output: %.200s", rc, strict ? "" : " or 0",
+                      strcmp(before, after) ? "CHANGED" : "unchanged", out ? out : "");
+    free(before); free(after); free(out);
+    return ok;
+}
+
+/* one row, one injected X: 1 ok, 0 red */
+static int one(const char *argv0, const char *x, char *why, size_t wl) {
+    char a[2048], *w[32], sub[32][4400]; int n, i, rc = -1, want = 0, tool = 0, recursive;
+    char *before, *after; int ok;
+    snprintf(a, sizeof a, "%s", argv0);
+    n = words(a, w);
+    if (n < 2) { snprintf(why, wl, "malformed argv"); return 0; }
+    recursive = strstr(argv0, "rmtree") || strstr(argv0, "cx_trash") || strstr(argv0, "RECURSIVE") || !strncmp(argv0, "safedel", 7);
+    for (i = 0; i < n; i++) subst(w[i], x, sub[i], sizeof sub[i]);
+    if (!strcmp(w[0], "tool")) tool = 1;
+    else {   /* the targets: every word holding {X} */
+        for (i = 1; i < n; i++) if (strstr(w[i], "{X}")) { if (protected_target(sub[i])) want = 1; }
+        for (i = 1; i < n; i++) if (strstr(w[i], "{X}") && protected_target(sub[i])) seed(sub[i], recursive);
+    }
+    before = listing();
+    if (chdir(REPO) != 0) { free(before); snprintf(why, wl, "chdir"); return 0; }
+    if (!strcmp(w[0], "safedel")) {
+        char *v[34]; int k = 0; v[k++] = BIN;
+        for (i = 1; i < n; i++) v[k++] = sub[i];
+        v[k] = 0; rc = run(v, 20);
+    } else if (!strcmp(w[0], "cx_remove")) rc = quiet(cx_remove, sub[1]);
+    else if (!strcmp(w[0], "cx_rmtree")) rc = quiet(cx_rmtree, sub[1]);
+    else if (!strcmp(w[0], "cx_trash")) rc = quiet(cx_trash, sub[1]);
+    else if (!strcmp(w[0], "unisa_safedel")) {
+        char wy[600];
+        rc = unisa_safedel(sub[1], flagbits(n > 2 ? w[2] : ""), n > 3 ? atol(w[3]) : 0, wy, (int)sizeof wy);
+    } else if (tool) {
+        char key[4096] = "", te[4300], *v[36]; int k = 0, m;
+        for (i = 1; i < n; i++) { strncat(key, sub[i], sizeof key - strlen(key) - 2); strcat(key, " "); }
+        for (m = 0; m < NMEMO; m++) if (!strcmp(MEMO_K[m], key)) break;
+        if (m < NMEMO) rc = MEMO_V[m];
+        else {
+            snprintf(te, sizeof te, "TMPDIR=%s", B);
+            v[k++] = "env"; v[k++] = te;
+            for (i = 1; i < n; i++) { if (i == 1 && !strcmp(sub[i], "env")) continue; v[k++] = sub[i]; }
+            v[k] = 0; rc = run(v, 40);
+            if (NMEMO < 64) { MEMO_K[NMEMO] = dupstr(key); MEMO_V[NMEMO++] = rc; }
+        }
+    } else { free(before); snprintf(why, wl, "unknown argv form %s", w[0]); return 0; }
+    after = listing();
+    if (tool) ok = included(before, after);
+    else {
+        int gone = 1;   /* every protected target has a missing parent */
+        for (i = 1; i < n; i++) if (strstr(w[i], "{X}") && protected_target(sub[i]) && !parent_missing(sub[i])) gone = 0;
+        ok = !strcmp(before, after) && (want ? rc == SAFEDEL_REFUSED || (rc == 0 && gone) : rc == 0);
+        if (ok && want && rc == 0) ABSENT++;
+    }
+    if (!ok) snprintf(why, wl, "rc %d (want %s), listing %s", rc, tool ? "any" : want ? "3" : "0",
+                      tool ? (included(before, after) ? "kept" : "LOST OR CHANGED ENTRIES") : (!strcmp(before, after) ? "unchanged" : "CHANGED"));
+    free(before); free(after);
+    return ok;
+}
+
+int main(int argc, char **argv) {
+    char *tsv, *line, *e; size_t n; int i, rowsn = 0, pass; long seq3[3] = {0, 0, 0}; char *tsv2 = 0; char given[4096] = "";
+    const char *td = getenv("TMPDIR"); static const char *inj[3];
+    snprintf(COM, sizeof COM, "./unisacc.com"); snprintf(TSV, sizeof TSV, "tests/deletemut.tsv");
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--com") && i + 1 < argc) snprintf(COM, sizeof COM, "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--tsv") && i + 1 < argc) snprintf(TSV, sizeof TSV, "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--bin") && i + 1 < argc) snprintf(given, sizeof given, "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--shard") && i + 1 < argc && sscanf(argv[i + 1], "%d/%d", &SK, &SN) == 2 && SN > 0 && SK >= 1 && SK <= SN) i++;
+        else { fprintf(stderr, "usage: deletemutcheck.cx [--com PRODUCT] [--bin SAFEDEL] [--tsv FILE] [--shard K/N]\n"); return 2; }
+    }
+    if (!getcwd(ROOT, sizeof ROOT) || !exists("tests/safedel.cx")) { fprintf(stderr, "deletemutcheck: run from the repository root\n"); return 2; }
+    if (COM[0] != '/') { char c[4200]; snprintf(c, sizeof c, "%s/%s", ROOT, COM); snprintf(COM, sizeof COM, "%s", c); }
+    if (!(tsv = cx_read(TSV, &n))) { fprintf(stderr, "deletemutcheck: cannot read %s\n", TSV); return 2; }
+    snprintf(B, sizeof B, "%s/deletemut-XXXXXX", td && *td ? td : "/tmp");
+    if (!mkdtemp(B)) { fprintf(stderr, "deletemutcheck: mkdtemp failed\n"); return 2; }
+    snprintf(S, sizeof S, "%s/s", B); snprintf(REPO, sizeof REPO, "%s/repo", S);
+    snprintf(BIN, sizeof BIN, "%s/safedel", B); snprintf(ERRF, sizeof ERRF, "%s/stderr", B);
+    put(ERRF, "");
+    {   char p[4300]; static const char *files[][2] = {
+            {".git/HEAD", "ref: refs/heads/main\n"}, {"README", "sandbox\n"}, {"src/a.c", "int a;\n"}, {"out/keep", "keep\n"},
+            {"models.json", "{}\n"}, {"attributes", "attr\n"}, {"tests/keep.sh", "#!/bin/sh\n"}, {0, 0} };
+        for (i = 0; files[i][0]; i++) { snprintf(p, sizeof p, "%s/%s", REPO, files[i][0]); put(p, files[i][1]); }
+        snprintf(p, sizeof p, "%s/home/notes", S); put(p, "home\n");
+        /* tool rows source tests/cxbin and tests/safedel.cx from the repository they run in */
+        snprintf(p, sizeof p, "%s/tests/cxbin", REPO); { char s2[4300]; snprintf(s2, sizeof s2, "%s/tests/cxbin", ROOT); symlink(s2, p); }
+        snprintf(p, sizeof p, "%s/tests/safedel.cx", REPO); { char s2[4300]; snprintf(s2, sizeof s2, "%s/tests/safedel.cx", ROOT); symlink(s2, p); }
+        snprintf(p, sizeof p, "%s/unisacc.com", REPO); symlink(COM, p);
+        /* tests/cxbin builds the guard CLI from include/ (the cc oracle): the checkout's headers */
+        snprintf(p, sizeof p, "%s/include", REPO); { char s2[4300]; snprintf(s2, sizeof s2, "%s/include", ROOT); symlink(s2, p); }
+    }
+    if (given[0]) { if (!realpath(given, BIN)) { printf("FAIL setup: no %s\n", given); fails++; goto done; } }
+    else {   char *a[] = { "sh", COM, "-o", BIN, "tests/safedel.cx", 0 }; char *o = 0; size_t ol = 0;
+        if (cx_runv_timeout(a, 50, &o, &ol) != 0 || !exists(BIN)) { free(o); printf("FAIL setup: cannot build the guard CLI with %s\n", COM); fails++; goto done; }
+        free(o);
+    }
+    inj[0] = ""; inj[1] = "."; inj[2] = REPO;
+    if (!(tsv2 = dupstr(tsv))) return 2;
+    /* two passes: the tool rows last (a tool may add files to the sandbox, which every later listing would digest) */
+    for (pass = 0; pass < 2; pass++)
+    for (line = pass ? tsv2 : tsv; *line; line = e ? e + 1 : line + strlen(line)) {
+        char *f[6]; int nf = 0; char *p = line; char why[600], src[4400], *body; size_t bl;
+        e = strchr(line, '\n'); if (e) *e = 0;
+        if (*line == '#' || !*line) { if (!e) break; continue; }
+        f[nf++] = p; while (*p && nf < 6) { if (*p == '\t') { *p = 0; f[nf++] = p + 1; } p++; }
+        if (nf != 5) { printf("FAIL %s: not 5 fields\n", line); fails++; if (!e) break; continue; }
+        {   /* --shard K/N: every Nth row from the Kth, counted per form (tool, sh, the rest) so the slow forms spread */
+            int form = !strncmp(f[2], "tool ", 5) ? 0 : (!strncmp(f[2], "sh ", 3) || !strncmp(f[2], "shp ", 4) || !strncmp(f[2], "make ", 5)) ? 1 : 2;
+            if ((form == 0) != pass) { if (!e) break; continue; }
+            if (seq3[form]++ % SN != SK - 1) { if (!e) break; continue; } }
+        rowsn++;
+        if (getenv("DELETEMUT_TRACE")) { fprintf(stderr, "row %d %s:%s %s\n", rowsn, f[0], f[1], f[2]); fflush(stderr); }
+        snprintf(src, sizeof src, "%s/%s", ROOT, f[0]);
+        body = cx_read(src, &bl);
+        if (!body || !strstr(body, f[4])) { printf("FAIL %s:%s: anchor not found (the site no longer goes through the guard): %s\n", f[0], f[1], f[4]); fails++; }
+        else passes++;
+        free(body);
+        if (!strcmp(f[2], "none")) { if (!e) break; continue; }
+        for (i = 0; i < 3; i++) {
+            int ok;
+            cases++;
+            if (!strncmp(f[2], "sh ", 3) || !strncmp(f[2], "shp ", 4) || !strncmp(f[2], "make ", 5)) {
+                char kind[8]; size_t kl = strcspn(f[2], " "); memcpy(kind, f[2], kl); kind[kl] = 0;
+                ok = one_sh(kind, f[2] + kl + 1, f[4], inj[i], i, why, sizeof why);
+            } else ok = one(f[2], inj[i], why, sizeof why);
+            if (ok) passes++;
+            else { printf("FAIL %s:%s %s with %s: %s\n", f[0], f[1], f[2], i == 0 ? "\"\"" : i == 1 ? "\".\"" : "the repository root", why); fails++; }
+        }
+        if (!e) break;
+    }
+done:
+    if (chdir(ROOT) != 0) return 2;
+    {   char g[4300], d[4300]; snprintf(g, sizeof g, "%s/.git", REPO); snprintf(d, sizeof d, "%s/dotgit-fixture", REPO); rename(g, d); }
+    if (cx_rmtree(B) || exists(B)) { printf("FAIL cleanup: the sandbox %s stays\n", B); fails++; }
+    printf("deletemutcheck: %d rows, %d injections (\"\", \".\", repository root), %d passed, %d failed (%d refusals were a missing parent: nothing there)\n", rowsn, cases, passes, fails, ABSENT);
+    free(tsv); free(tsv2);
+    return fails ? 1 : 0;
+}

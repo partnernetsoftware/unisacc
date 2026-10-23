@@ -9,6 +9,13 @@
    Arguments are ignored (as the .py did).  Exit 0 and one line on stdout when it holds; exit 1 with the reason
    on stderr otherwise.  ROOT is the current directory (the gate runs from the root); the .py took its own path. */
 
+/* a whole scratch tree through the one deletion guard (include/unisa_safedel.h, in the cx.h prelude; commissar ruling
+   2026-10-23) with an explicit ceiling: these trees hold copied sources and build outputs, beyond SAFEDEL_MAX_FILES */
+static int scratch_rmtree(const char *p) {
+    char why[700]; int rc = unisa_safedel(p, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 200000L, why, (int)sizeof why);
+    if (rc) fprintf(stderr, "cx_rmtree: %s\n", why);
+    return rc;
+}
 static char WORK[4096];
 
 /* the child's environment: os.environ plus overrides.  Built by hand because setenv() in the carried libc does
@@ -28,26 +35,13 @@ static void envset(const char *name, const char *value) {
     ENV[NENV++] = kv; ENV[NENV] = 0;
 }
 
-static void rmtree(const char *p) {              /* shutil.rmtree, quietly */
-    struct stat s; DIR *d; struct dirent *e; char c[4096];
-    if (lstat(p, &s) != 0) return;
-    if (!S_ISDIR(s.st_mode)) { unlink(p); return; }
-    if ((d = opendir(p)) != 0) {
-        while ((e = readdir(d)) != 0) {
-            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-            snprintf(c, sizeof c, "%s/%s", p, e->d_name); rmtree(c);
-        }
-        closedir(d);
-    }
-    rmdir(p);
-}
 
 static int fail(const char *what, int rc, const char *err) {   /* the .py's AssertionError: rc 1, reason on stderr */
     fprintf(stderr, "frontboundscheck: %s", what);
     if (rc != -999) fprintf(stderr, " (rc %d)", rc);
     fprintf(stderr, "\n");
     if (err && *err) fprintf(stderr, "%s%s", err, err[strlen(err) - 1] == '\n' ? "" : "\n");
-    if (WORK[0]) rmtree(WORK);
+    if (WORK[0]) scratch_rmtree(WORK);
     return 1;
 }
 
@@ -76,7 +70,7 @@ static int runcap(char *const argv[], int secs, const char *errpath, char **err)
         usleep(10000);
     }
     *err = cx_read(errpath, &n);
-    unlink(errpath);
+    cx_remove(errpath);
     return rc;
 }
 
@@ -116,7 +110,7 @@ int main(int argc, char **argv) {
     }
     if (stat(tape, &s) != 0) return fail("no tape written for the anonymous struct", -999, 0);
     if (!(s.st_size > 0)) return fail("empty tape for the anonymous struct", -999, 0);
-    rmtree(WORK);
+    scratch_rmtree(WORK);
     printf("front bounds: anonymous struct compiles without token underflow\n");
     return 0;
 }

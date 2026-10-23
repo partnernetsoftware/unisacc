@@ -1,10 +1,11 @@
 #!/bin/sh
 set -eu
 cd "$(dirname "$0")/.."
+R=$(pwd)
 mode=${1:-plain}
 case $mode in plain) flag=;; located) flag=--locations;; *) echo 'expected plain or located' >&2;exit 2;; esac
 T=$(mktemp -d "${TMPDIR:-/tmp}/r10-source-provenance.XXXXXX")
-trap 'rm -rf "$T"' EXIT HUP INT TERM
+trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT HUP INT TERM
 b() { ./tests/bound 20 "$@"; }
 bg() { ./tests/bound 55 "$@"; }   # gen2 alone is ~40 s
 b python3 exec/build/gen.py pp "$T/e2.json" --osx --arm64 $flag > "$T/e2.log"

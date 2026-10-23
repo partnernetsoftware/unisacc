@@ -10,7 +10,7 @@ set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R" || exit 2
 B=$R/tests/bound
 T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-unisaimagefat.XXXXXX") || exit 2
-trap 'rm -rf "$T"' EXIT
+trap 'sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${T:?}"' EXIT
 fail() { echo "unisaimagefat: $*"; exit 1; }
 H=$(git rev-parse --verify HEAD) || exit 2
 echo "unisaimagefat  tree $H"

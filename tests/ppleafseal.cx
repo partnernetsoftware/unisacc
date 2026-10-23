@@ -48,7 +48,10 @@ static int check(const char*data,const char*root,const char*override,int observe
  if(observer)puts("ppleafseal observation: NOT_RULED; archived host/tool identity is a separate record, neither PASS nor FAIL");
  printf("ppleafseal: %d dependencies; 6 accepts, 38 refusals, 2 models; core-inputs %s; output-proof %s; observer %s; review required/no reuse grant\n",nd,core,proof,observer?"checked":"separate");return 0;
 }
-static int negative(const char*data,const char*root){char*b,*p,*end;size_t n;char path[4096],dir[]="/tmp/ppleaf-negative-XXXXXX";Text t={0};int omitted=0,rc;
+static int negative(const char*data,const char*root){char*b,*p,*end;size_t n;char path[4096],dir[4096];Text t={0};int omitted=0,rc;
+ /* the scratch is a mkdtemp under $TMPDIR (or /tmp), removed through the one deletion guard (cx_rmtree); entries are
+    replaced with rename(2) from a sibling, so a link into the checkout is replaced, never written through */
+ {const char*td=getenv("TMPDIR");snprintf(dir,sizeof dir,"%s/ppleaf-negative-XXXXXX",td&&*td?td:"/tmp");}
  b=load(data,"dependencies.tsv",&n);if(!b||!mkdtemp(dir))return bad("negative setup");p=b;while(*p){end=strchr(p,'\n');if(!end)return bad("negative record truncated");if(!strncmp(p,"rule\texec/pp/",13)&&!omitted)omitted=1;else put(&t,p,end+1-p);p=end+1;}free(b);if(!omitted)return bad("no measured pp rule to omit");snprintf(path,sizeof path,"%s/dependencies.tsv",dir);cx_write(path,t.b,t.n);
  /* Override file is absolute only in this test's private loader, data remains immutable. */
  {char saved[4096];snprintf(saved,sizeof saved,"%s/negative.tsv",data);(void)saved;}
@@ -57,18 +60,18 @@ static int negative(const char*data,const char*root){char*b,*p,*end;size_t n;cha
  {DIR*d=opendir(data);struct dirent*e;char src[4096],dst[4096];while((e=readdir(d))){if(!strcmp(e->d_name,".")||!strcmp(e->d_name,"..")||!strcmp(e->d_name,"dependencies.tsv"))continue;snprintf(src,sizeof src,"%s/%s",data,e->d_name);snprintf(dst,sizeof dst,"%s/%s",dir,e->d_name);if(src[0]!='/'){char cwd[2048],full[4096];getcwd(cwd,sizeof cwd);snprintf(full,sizeof full,"%s/%s",cwd,src);symlink(full,dst);}else symlink(src,dst);}closedir(d);}
  rc=check(dir,root,0,0);if(!rc)return bad("omitted real rule escaped closure inventory");
  /* Restore dependencies; an observer-only mutation must not change the core input ID. */
- {char src[4096],cwd[2048];getcwd(cwd,sizeof cwd);snprintf(src,sizeof src,"%s%s%s/dependencies.tsv",data[0]=='/'?"":cwd,data[0]=='/'?"":"/",data);snprintf(path,sizeof path,"%s/dependencies.tsv",dir);unlink(path);symlink(src,path);}
+ {char src[4096],cwd[2048];getcwd(cwd,sizeof cwd);snprintf(src,sizeof src,"%s%s%s/dependencies.tsv",data[0]=='/'?"":cwd,data[0]=='/'?"":"/",data);snprintf(path,sizeof path,"%s/dependencies.tsv",dir);{char tmp[4200];snprintf(tmp,sizeof tmp,"%s.restored",path);if(symlink(src,tmp)||rename(tmp,path))return bad("restore link");}}
  if(check(dir,root,0,0))return bad("restored dependency baseline failed");
  /* Mutate real dependencies in a private root, never the shared checkout. */
  {char mirror[]="/tmp/ppleaf-root-XXXXXX",src[4096],dst[4096],cwd[2048];int j;const char*targets[]={"exec/pp/predefines.tsv","include/stdarg.h"};
  if(!mkdtemp(mirror)||!getcwd(cwd,sizeof cwd))return bad("private root setup");
  for(j=0;j<nd;j++){char*slash;snprintf(dst,sizeof dst,"%s/%s",mirror,deps[j].path);for(slash=dst+strlen(mirror)+1;*slash;slash++)if(*slash=='/'){*slash=0;mkdir(dst,0700);*slash='/';}snprintf(src,sizeof src,"%s%s%s/%s",root[0]=='/'?"":cwd,root[0]=='/'?"":"/",root,deps[j].path);if(symlink(src,dst))return bad("private dependency link");}
  if(check(data,mirror,0,0))return bad("private root baseline failed");
- for(j=0;j<2;j++){char*original;size_t size;snprintf(dst,sizeof dst,"%s/%s",mirror,targets[j]);original=cx_read(dst,&size);if(!original)return bad("mutation target absent");unlink(dst);Text changed={0};put(&changed,original,size);put(&changed,"\n",1);cx_write(dst,changed.b,changed.n);free(changed.b);free(original);if(!check(data,mirror,0,0))return bad("changed measured rule/header escaped");unlink(dst);snprintf(src,sizeof src,"%s%s%s/%s",root[0]=='/'?"":cwd,root[0]=='/'?"":"/",root,targets[j]);symlink(src,dst);}
+ for(j=0;j<2;j++){char*original;size_t size;snprintf(dst,sizeof dst,"%s/%s",mirror,targets[j]);original=cx_read(dst,&size);if(!original)return bad("mutation target absent");{char tmp[4200];Text changed={0};snprintf(tmp,sizeof tmp,"%s.mutated",dst);put(&changed,original,size);put(&changed,"\n",1);if(cx_write(tmp,changed.b,changed.n)||rename(tmp,dst))return bad("mutation write");free(changed.b);free(original);if(!check(data,mirror,0,0))return bad("changed measured rule/header escaped");snprintf(src,sizeof src,"%s%s%s/%s",root[0]=='/'?"":cwd,root[0]=='/'?"":"/",root,targets[j]);snprintf(tmp,sizeof tmp,"%s.restored",dst);if(symlink(src,tmp)||rename(tmp,dst))return bad("restore link");}}
  /* Symlinks and modified copies remain in the private diagnostic directory only. */
  }
  if(check(dir,root,0,0))return bad("restored core verification failed");
 
- {DIR*d=opendir(dir);struct dirent*e;while((e=readdir(d))){if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;snprintf(path,sizeof path,"%s/%s",dir,e->d_name);unlink(path);}closedir(d);rmdir(dir);}free(t.b);if(!rc)return bad("omitted real rule escaped closure inventory");puts("ppleafseal negative: PASS omission, predefines content change, included stdarg header content change rejected; shared inputs untouched");return 0;
+ if(cx_rmtree(dir))return bad("negative scratch removal");free(t.b);if(!rc)return bad("omitted real rule escaped closure inventory");puts("ppleafseal negative: PASS omission, predefines content change, included stdarg header content change rejected; shared inputs untouched");return 0;
 }
 int main(int argc,char**argv){if(argc==4&&!strcmp(argv[1],"--check-core"))return check(argv[2],argv[3],0,0);if(argc==4&&!strcmp(argv[1],"--write-seal")){writing=1;return check(argv[2],argv[3],0,0);}if(argc==4&&!strcmp(argv[1],"--check-observation")){puts("ppleafseal observation: NOT_RULED; record only, no core PASS/FAIL decision");return 0;}if(argc==4&&!strcmp(argv[1],"--negative"))return negative(argv[2],argv[3]);fprintf(stderr,"usage: ppleafseal.cx --check-core|--write-seal|--check-observation|--negative DATA ROOT\n");return 2;}

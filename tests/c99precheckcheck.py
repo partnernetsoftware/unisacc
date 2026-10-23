@@ -32,17 +32,17 @@ with tempfile.TemporaryDirectory() as tmp:
 with tempfile.TemporaryDirectory() as tmp:
     private = pathlib.Path(tmp); (private / 'examples').mkdir()
     (private / 'examples/probe.c').write_text('original')
-    child = """import pathlib, hashlib, subprocess
+    child = """import pathlib, hashlib, subprocess, sys
 root=pathlib.Path('.')
 def snapshot():
  return {str(p):hashlib.sha256(p.read_bytes()).hexdigest() for folder in ('examples','tests/c') for p in (root/folder).rglob('*') if p.is_file()}
 before=snapshot()
-r=subprocess.run(['bash','-c','f=$(mktemp); printf \"for f in examples/*.c; do :; done\\n\" > \"$f\"; . \"$f\"; rm -f \"$f\"; echo legacy-green'],capture_output=True,text=True,check=True)
+r=subprocess.run(['bash','-c','f=$(mktemp); printf \"for f in examples/*.c; do :; done\\n\" > \"$f\"; . \"$f\"; sh \"$1/tests/cxbin\" \"$1/tests/safedel.cx\" --purge -- \"$f\"; echo legacy-green','bash',sys.argv[1]],capture_output=True,text=True,check=True)
 print(r.stdout,flush=True)
 assert before==snapshot(), 'c99precheck modified repository inputs'
 """
     import sys
-    result = subprocess.run([sys.executable, '-c', child], cwd=private, capture_output=True, text=True)
+    result = subprocess.run([sys.executable, '-c', child, str(ROOT)], cwd=private, capture_output=True, text=True)
     assert result.returncode == 1 and 'legacy-green' in result.stdout and 'modified repository inputs' in result.stderr, result
 spec = importlib.util.spec_from_file_location('c99precheck_under_test', ROOT / 'release/tools/c99precheck.py')
 P = importlib.util.module_from_spec(spec); spec.loader.exec_module(P)
@@ -100,9 +100,9 @@ probe = 'tests/c/fb12-31-unused-static-refs-undefined.c'
 probe_suites = P.shard_of(probe)
 assert probe_suites is not None, 'precheck control probe missing'
 probe_k = probe_suites[0].removeprefix('difftest_o-')
-full = subprocess.run(['bash', '-e', '-c', 'wf1_list_tmp=$(mktemp); sed -n "/^FILES=()/,/^done/p" tests/difftest_o.sh > "$wf1_list_tmp"; . "$wf1_list_tmp"; rm -f "$wf1_list_tmp"; echo ${#FILES[@]}'], cwd=ROOT,
+full = subprocess.run(['bash', '-e', '-c', 'wf1_list_tmp=$(mktemp); sed -n "/^FILES=()/,/^done/p" tests/difftest_o.sh > "$wf1_list_tmp"; . "$wf1_list_tmp"; sh tests/cxbin tests/safedel.cx --purge -- "$wf1_list_tmp"; echo ${#FILES[@]}'], cwd=ROOT,
                       env=dict(os.environ, SH_N=str(P.SHARDS), SH_K=probe_k, PROBES='tests/c/fb12-31-unused-static-refs-undefined.c'), capture_output=True, text=True, check=True).stdout.strip()
-narrow = subprocess.run(['bash', '-e', '-c', 'wf1_list_tmp=$(mktemp); sed -n "/^FILES=()/,/^done/p" tests/difftest_o.sh > "$wf1_list_tmp"; . "$wf1_list_tmp"; rm -f "$wf1_list_tmp"; echo ${#FILES[@]}'], cwd=ROOT,
+narrow = subprocess.run(['bash', '-e', '-c', 'wf1_list_tmp=$(mktemp); sed -n "/^FILES=()/,/^done/p" tests/difftest_o.sh > "$wf1_list_tmp"; . "$wf1_list_tmp"; sh tests/cxbin tests/safedel.cx --purge -- "$wf1_list_tmp"; echo ${#FILES[@]}'], cwd=ROOT,
                         env=dict(os.environ, SH_N=str(P.SHARDS), SH_K=probe_k, WF1_PRECHECK='1', PROBES='tests/c/fb12-31-unused-static-refs-undefined.c'), capture_output=True, text=True, check=True).stdout.strip()
 assert int(full) > 1 and narrow == '1', (full, narrow)
 # Shell-internal failures cannot be hidden by a valid-looking final echo.
@@ -111,7 +111,7 @@ with tempfile.TemporaryDirectory() as tmp:
     fake_sed = private / 'sed'
     for body in ('#!/bin/sh\nexit 1\n', '#!/bin/sh\nprintf "false\\n"\n'):
         fake_sed.write_text(body); fake_sed.chmod(0o755)
-        failure = subprocess.run(['bash', '-e', '-c', 'wf1_list_tmp=$(mktemp); sed ignored > "$wf1_list_tmp"; . "$wf1_list_tmp"; rm -f "$wf1_list_tmp"; echo 1'],
+        failure = subprocess.run(['bash', '-e', '-c', 'wf1_list_tmp=$(mktemp); sed ignored > "$wf1_list_tmp"; . "$wf1_list_tmp"; sh tests/cxbin tests/safedel.cx --purge -- "$wf1_list_tmp"; echo 1'], cwd=ROOT,
             env=dict(os.environ, TMPDIR=str(private), PATH=str(private) + os.pathsep + os.environ['PATH']), capture_output=True, text=True)
         assert failure.returncode == 1 and failure.stdout.strip() != '1', failure
 # shard map = the bash loop in difftest_o.sh (glob order, host skipped, i % 4)

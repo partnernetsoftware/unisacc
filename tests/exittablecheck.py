@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """exittable controls (0.0.38 P1): each red lands in exactly one pre-authorised class; PASS,
 PENDING and the classes stay apart; an accepted class is never counted as PASS."""
-import contextlib, hashlib, importlib.util, io, json, pathlib, tempfile
+import contextlib, hashlib, importlib.util, io, json, pathlib, subprocess, tempfile
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('exittable_under_test', ROOT / 'release/tools/exittable.py')
 X = importlib.util.module_from_spec(spec); spec.loader.exec_module(X)
@@ -92,7 +92,7 @@ with tempfile.TemporaryDirectory() as m:
     decoy = '| H1 | 超时：other-suite | cc | x | 0 |\n'; (r / 'archive/plans/v0.0.37.md').write_text(decoy)
     def run(version, plan, extra=()):
         (r / 'src/version.h').write_text('#define UNISACC_VERSION "%s"\n' % version)
-        for f in (r / 'plans').iterdir(): f.unlink()
+        for f in (r / 'plans').iterdir(): subprocess.run(['sh', str(ROOT / 'tests/cxbin'), str(ROOT / 'tests/safedel.cx'), '--purge', '--', str(f)], check=True)
         if plan is not None: (r / ('plans/v%s.md' % version)).write_text(plan)
         return _run([str(r / 'q'), '--root', str(r), '--json', *extra])
     sha = hashlib.sha256(old.encode()).hexdigest()

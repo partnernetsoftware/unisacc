@@ -21,7 +21,7 @@ export T
 # a marker sleep per run: derived from this run's temporary directory, so a leftover from another run never matches
 d=$(( 100 + $(printf '%s' "$T" | cksum | cut -d' ' -f1) % 800 ))
 export d
-trap 'rm -rf "$T"' EXIT
+trap 'sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${T:?}"' EXIT
 # limit SECONDS SCRIPT: run the case in the background and kill it if it overruns (no coreutils timeout)
 limit() {
     sh "$2" &

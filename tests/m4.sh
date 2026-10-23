@@ -13,7 +13,7 @@ $B python3 -m m4 selftest
 
 # 可跑：m4 产出的模块在 Node 里实例化并求值，与 expect.json 的 fact=120 一致
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+trap '[ -z "$TMP" ] || sh "$ROOT/tests/cxbin" "$ROOT/tests/safedel.cx" --purge -- "$TMP"' EXIT
 $B python3 -m m4 build tests/ujs2wasm/corpus/fact.ujs -o "$TMP/fact.wasm" >/dev/null
 GOT="$($B node tests/ujs2wasm/run_wasm.mjs "$TMP/fact.wasm")"
 [ "$GOT" = "120" ] || { echo "m4 run: fact got '$GOT' want 120"; exit 1; }

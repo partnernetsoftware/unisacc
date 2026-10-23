@@ -26,6 +26,13 @@
              "# Checked by `sh ./unisacc.com -run tests/abimanifestcheck.cx -- --check`; Python is a bytewise reference.\n" \
              "# section\tkey\tvalue\n"
 
+/* a whole scratch tree through the one deletion guard (include/unisa_safedel.h, in the cx.h prelude; commissar ruling
+   2026-10-23) with an explicit ceiling: these trees hold copied sources and build outputs, beyond SAFEDEL_MAX_FILES */
+static int scratch_rmtree(const char *p) {
+    char why[700]; int rc = unisa_safedel(p, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 200000L, why, (int)sizeof why);
+    if (rc) fprintf(stderr, "cx_rmtree: %s\n", why);
+    return rc;
+}
 static const char *TABLE_DIRS[] = {"exec", "exec/lower", "exec/parse2", "exec/facts", "exec/enc", "exec/nativeabi", 0};
 static const char *TABLE_WORDS[] = {"library", "ccinterop", "codeprivate", "hostbridge", "abi", "syscall", "sysprep", "signature",
     "modelinput", "modelbindings", "modelcandidates", "modelgraphequality", "layoutfacts",
@@ -847,21 +854,6 @@ static void copy_in(const char *rel) {
     if (!b || cx_write(to, b, n)) { printf("selftest FAIL: cannot copy %s\n", rel); stfail = 1; }
     if (b) free(b);
 }
-static void rmtree(const char *dir) {
-    DIR *d = opendir(dir); struct dirent *e; struct stat st; Names v; long i; char path[4096];
-    memset(&v, 0, sizeof v);
-    if (d) {
-        while ((e = readdir(d))) if (strcmp(e->d_name, ".") && strcmp(e->d_name, "..")) push(&v, e->d_name);
-        closedir(d);
-    }
-    for (i = 0; i < v.n; i++) {
-        snprintf(path, sizeof path, "%s/%s", dir, v.v[i]);
-        if (lstat(path, &st) == 0 && S_ISDIR(st.st_mode)) rmtree(path); else unlink(path);
-        free(v.v[i]);
-    }
-    if (v.v) free(v.v);
-    rmdir(dir);
-}
 /* Replace the one occurrence of old in the scratch copy of rel. */
 static void edit(const char *rel, const char *old, const char *new_) {
     char path[4096]; size_t len = 0; char *b; long n, i, m = (long)strlen(old); Text o;
@@ -886,7 +878,7 @@ static void append(const char *rel, const char *more) {
 static void removefile(const char *rel) {
     char path[4096];
     snprintf(path, sizeof path, "%s/%s", scratch, rel);
-    if (unlink(path)) { printf("selftest FAIL: cannot remove %s\n", path); stfail = 1; }
+    if (cx_remove(path)) { printf("selftest FAIL: cannot remove %s\n", path); stfail = 1; }
     push(&dirty, rel);
 }
 
@@ -989,7 +981,7 @@ static int selftest(void) {
     }
     out.n = 0;
     if (!stfail && check(&out)) { printf("selftest FAIL: the restored scratch tree must pass again\n%s", out.b); stfail = 1; }
-    rmtree(scratch);
+    scratch_rmtree(scratch);
     if (stfail) { printf("abimanifestcheck.cx: SELFTEST FAILED\n"); return 1; }
     printf("abimanifestcheck.cx: unchanged tree passes; %d contract breaks each fail:", number);
     for (number = 0; case_name[number]; number++) printf("%s %s", number ? ";" : "", case_name[number]);

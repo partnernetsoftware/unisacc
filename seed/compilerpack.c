@@ -23,9 +23,10 @@
 #include <errno.h>
 #include "json.h"
 #include "sha256.h"
+#include "../include/unisa_safedel.h"   /* the one deletion guard (commissar ruling 2026-10-23) */
 
 static void die(const char *m, const char *a) { fprintf(stderr, "compilerpack: %s%s%s\n", m, a ? " " : "", a ? a : ""); exit(1); }
-static char *dup(const char *s) { size_t n = strlen(s) + 1; char *p = malloc(n); if (!p) die("out of memory", 0); return memcpy(p, s, n); }
+static char *sdup(const char *s) {   /* not dup: <unistd.h> (the deletion guard) declares dup(int) */ size_t n = strlen(s) + 1; char *p = malloc(n); if (!p) die("out of memory", 0); return memcpy(p, s, n); }
 static char *cat(const char *a, const char *b) { size_t x = strlen(a), y = strlen(b); char *p = malloc(x + y + 1); if (!p) die("out of memory", 0); memcpy(p, a, x); memcpy(p + x, b, y + 1); return p; }
 static unsigned char *slurp(const char *path, size_t *n) {
     FILE *f = fopen(path, "rb"); if (!f) die("cannot read", path);
@@ -37,7 +38,7 @@ static void spit(const char *path, const void *p, size_t n) {
     FILE *f = fopen(path, "wb"); if (!f || fwrite(p, 1, n, f) != n || fclose(f)) die("cannot write", path);
 }
 static void mkdirs(const char *path) {
-    char *p = dup(path);
+    char *p = sdup(path);
     for (char *s = p + 1; *s; s++) if (*s == '/') { *s = 0; if (mkdir(p, 0777) && errno != EEXIST) die("cannot create", p); *s = '/'; }
     if (mkdir(p, 0777) && errno != EEXIST) die("cannot create", p);
     free(p);
@@ -47,10 +48,10 @@ typedef struct { char *c[5]; } Row;
 typedef struct { Row *r; int n, cap; } Rows;
 static void add(Rows *rs, const char *a, const char *b, const char *c, const char *d, const char *e) {
     if (rs->n == rs->cap) { rs->cap = rs->cap ? rs->cap * 2 : 256; rs->r = realloc(rs->r, rs->cap * sizeof *rs->r); }
-    rs->r[rs->n++] = (Row){{dup(a), dup(b), dup(c), dup(d), dup(e)}};
+    rs->r[rs->n++] = (Row){{sdup(a), sdup(b), sdup(c), sdup(d), sdup(e)}};
 }
 static Rows copy(Rows *rs) { Rows o = {0}; for (int i = 0; i < rs->n; i++) add(&o, rs->r[i].c[0], rs->r[i].c[1], rs->r[i].c[2], rs->r[i].c[3], rs->r[i].c[4]); return o; }
-static void set(char **slot, const char *v) { *slot = dup(v); }
+static void set(char **slot, const char *v) { *slot = sdup(v); }
 
 typedef struct { char *suffix, *last, *opt; } Spec;
 typedef struct { char *name; Spec spec[32]; int nspec; char *stage[7][5]; } Target;
@@ -62,9 +63,9 @@ static int split_tabs(char *line, char **c, int max) {
 }
 static char *model(const char *dir, const char *name) { char *a = cat(dir, "/"), *b = cat(a, name), *c = cat(b, ".net"); free(a); free(b); return c; }
 static char *resolved(const char *base, const char *rel) {
-    char *p = rel[0] == '/' ? dup(rel) : cat(base, rel), buf[PATH_MAX];
+    char *p = rel[0] == '/' ? sdup(rel) : cat(base, rel), buf[PATH_MAX];
     if (!realpath(p, buf)) die("cannot resolve", p);
-    free(p); return dup(buf);
+    free(p); return sdup(buf);
 }
 static int tcmp(const void *a, const void *b) { return strcmp(((const Target *)a)->name, ((const Target *)b)->name); }
 static uint64_t le64(const unsigned char *p) { uint64_t v = 0; for (int i = 7; i >= 0; i--) v = v << 8 | p[i]; return v; }
@@ -89,7 +90,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "usage: compilerpack OUTDIR --o1 NET --e2 NET --nativeabi NET --models DIR [--kernels DIR] [--audit-dir DIR] ROUTE.tsv...\n"); return 2;
     }
     char rbuf[PATH_MAX];
-    if (!realpath(mdir, rbuf)) die("cannot resolve", mdir); mdir = dup(rbuf);
+    if (!realpath(mdir, rbuf)) die("cannot resolve", mdir); mdir = sdup(rbuf);
     char *o1r = resolved("", o1), *e2r = resolved("", e2), *abir = resolved("", abi);
     if (kern) {   /* the kernel directory holds exactly the two ISA blobs, UNIKERN1 headers intact */
         DIR *d = opendir(kern); struct dirent *e; int seen = 0, other = 0;
@@ -116,19 +117,19 @@ int main(int argc, char **argv) {
         for (char *s = strtok(t, "\n"); s; s = strtok(0, "\n")) {
             if (*s == '#') continue;
             char *c[4]; if (split_tabs(s, c, 3) != 3 || nspecs == 32) die("bad compiler-routes.tsv row", s);
-            specs[nspecs++] = (Spec){dup(c[0]), dup(c[1]), dup(c[2])};
+            specs[nspecs++] = (Spec){sdup(c[0]), sdup(c[1]), sdup(c[2])};
         }
     }
     Target tg[16]; int nt = 0; Rows rows = {0};
     static const char *const order[7] = {"e2", "e1", "e3", "e4", "prune", "lower", "elf"};
     for (int m = 0; m < nman; m++) {
         size_t n; char *t = (char *)slurp(man[m], &n), *dirend = strrchr(man[m], '/');
-        char *base = dirend ? cat(dup(man[m]), "") : dup("./"); if (dirend) base[dirend - man[m] + 1] = 0;
+        char *base = dirend ? cat(sdup(man[m]), "") : sdup("./"); if (dirend) base[dirend - man[m] + 1] = 0;
         Target *T = &tg[nt]; int ns = 0;
         for (char *s = strtok(t, "\n"); s; s = strtok(0, "\n")) {
             if (*s == '#') continue;
             char *c[6]; if (split_tabs(s, c, 5) != 5 || ns == 7) die("invalid source route", man[m]);
-            for (int j = 0; j < 5; j++) T->stage[ns][j] = dup(c[j]);
+            for (int j = 0; j < 5; j++) T->stage[ns][j] = sdup(c[j]);
             ns++;
         }
         if (!ns) die("invalid source route", man[m]);
@@ -262,10 +263,15 @@ int main(int argc, char **argv) {
     }
     if (audit) {   /* retain_models: each distinct network/table pair, keyed by both digests */
         mkdirs(audit);
-        char *rec = cat(audit, "/models.json"); remove(rec);
+        char *rec = cat(audit, "/models.json");
+        {   /* --audit-dir is argv: the stale record goes through the one deletion guard (include/unisa_safedel.h).  A
+               refusal (a directory outside $TMPDIR and <repo>/out) is reported and the record is rewritten below. */
+            char why[600];
+            if (unisa_safedel(rec, SAFEDEL_PURGE, 1, why, (int)sizeof why)) fprintf(stderr, "compilerpack: %s\n", why);
+        }
         Pair *pairs = calloc(rows.n, sizeof *pairs); int np = 0;
         for (int i = 0; i < rows.n; i++) {
-            char *net = rows.r[i].c[4], *tbl = dup(net), *dot = strrchr(tbl, '.'), *sl = strrchr(tbl, '/');
+            char *net = rows.r[i].c[4], *tbl = sdup(net), *dot = strrchr(tbl, '.'), *sl = strrchr(tbl, '/');
             if (!dot || (sl && dot < sl)) die("network without suffix", net);
             strcpy(dot, ".tbl");
             Pair p; sha_file(net, p.nh); sha_file(tbl, p.th); snprintf(p.key, sizeof p.key, "%s-%s", p.nh, p.th);

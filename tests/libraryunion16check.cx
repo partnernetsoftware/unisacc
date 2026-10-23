@@ -32,6 +32,13 @@
 #pragma unisa use cxlib.runtimecopy
 #pragma unisa use cxlib.pyjson
 
+/* a whole scratch tree through the one deletion guard (include/unisa_safedel.h, in the cx.h prelude; commissar ruling
+   2026-10-23) with an explicit ceiling: these trees hold copied sources and build outputs, beyond SAFEDEL_MAX_FILES */
+static int scratch_rmtree(const char *p) {
+    char why[700]; int rc = unisa_safedel(p, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 200000L, why, (int)sizeof why);
+    if (rc) fprintf(stderr, "cx_rmtree: %s\n", why);
+    return rc;
+}
 static const char *PROG = "libraryunion16check.py";
 static const char *USAGE =
     "usage: libraryunion16check.py [-h] [--package PACKAGE] [--arch {arm64,x86_64}]\n"
@@ -83,21 +90,7 @@ static void bcat(Buf *b, const Buf *c) { bput(b, c->p, c->n); }
 static char *xstrdup(const char *s) { size_t n = strlen(s); char *d = malloc(n + 1); if (!d) oom(); memcpy(d, s, n + 1); return d; }
 static char *xfmt2(const char *a, const char *b) { size_t n = strlen(a) + strlen(b) + 2; char *d = malloc(n); if (!d) oom(); snprintf(d, n, "%s/%s", a, b); return d; }
 
-static void rmtree(const char *p) {
-    struct stat s; DIR *d; struct dirent *e;
-    if (lstat(p, &s) != 0) return;
-    if (!S_ISDIR(s.st_mode)) { unlink(p); return; }
-    if ((d = opendir(p))) {
-        while ((e = readdir(d))) {
-            char c[8192];
-            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-            snprintf(c, sizeof c, "%s/%s", p, e->d_name); rmtree(c);
-        }
-        closedir(d);
-    }
-    rmdir(p);
-}
-static void cleanup(void) { if (TD[0]) { rmtree(TD); TD[0] = 0; } }
+static void cleanup(void) { if (TD[0]) { scratch_rmtree(TD); TD[0] = 0; } }
 /* an exception the .py did not catch: the traceback's last line, the temporary directory removed, rc 1 */
 static void uncaught(const char *line) {
     fflush(stdout); fprintf(stderr, "%s\n", line); fflush(stderr);
@@ -465,9 +458,9 @@ static int run(const char *stage, List *command, int *rcp, pj_value **outp) {
     snprintf(op, sizeof op, "%s/.stdout-XXXXXX", TD); snprintf(ep, sizeof ep, "%s/.stderr-XXXXXX", TD);
     fflush(stdout); fflush(stderr);
     if ((ofd = mkstemp(op)) < 0) { exc_oserror(errno, op); free(argv); return -1; }
-    if ((efd = mkstemp(ep)) < 0) { exc_oserror(errno, ep); close(ofd); unlink(op); free(argv); return -1; }
+    if ((efd = mkstemp(ep)) < 0) { exc_oserror(errno, ep); close(ofd); cx_remove(op); free(argv); return -1; }
     pid = fork();
-    if (pid < 0) { close(ofd); close(efd); unlink(op); unlink(ep); exc_oserror(errno, bound); free(argv); return -1; }
+    if (pid < 0) { close(ofd); close(efd); cx_remove(op); cx_remove(ep); exc_oserror(errno, bound); free(argv); return -1; }
     if (pid == 0) { dup2(ofd, 1); dup2(efd, 2); close(ofd); close(efd); execv(argv[0], argv); _exit(127); }
     close(ofd); close(efd);
     for (;;) {
@@ -478,7 +471,7 @@ static int run(const char *stage, List *command, int *rcp, pj_value **outp) {
         usleep(10000);
     }
     ob = cx_read(op, &on); eb = cx_read(ep, &en);
-    unlink(op); unlink(ep);
+    cx_remove(op); cx_remove(ep);
     if (!ob) { ob = calloc(1, 1); on = 0; }
     if (!eb) { eb = calloc(1, 1); en = 0; }
     if (rc == -999) { rc = 142; on = 0; ob[0] = 0; free(eb); eb = xstrdup("timeout"); en = 7; }   /* TimeoutExpired */

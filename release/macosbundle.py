@@ -94,7 +94,7 @@ def main():
             dmgroot=work/'dmgroot'
             try: dmgroot.stat()
             except FileNotFoundError: pass
-            else: shutil.rmtree(dmgroot)
+            else: subprocess.run(['sh',str(ROOT/'tests/cxbin'),str(ROOT/'tests/safedel.cx'),'--',str(dmgroot)],check=True)   # the one deletion guard: --work is argv, so the old tree moves to a .trash
             dmgroot.mkdir(); shutil.copytree(app,dmgroot/'Unisacc.app')
             rec['dmg_signature_kind']='ad-hoc rehearsal' if ns.identity=='-' else 'Developer ID requested'
             rec['dmg']=[run(['/usr/bin/hdiutil','create','-volname','Unisacc','-srcfolder',dmgroot,'-ov','-format','UDZO',dmg]),

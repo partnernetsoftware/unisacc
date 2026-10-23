@@ -4,7 +4,7 @@ set -eu
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 part=${1:?part 1..3}; case $part in 1) lo=0; hi=140;; 2) lo=140; hi=280;; 3) lo=280; hi=453;; *) exit 2;; esac
 T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-tapecheck.XXXXXX")
-trap 'rm -rf "$T"' EXIT HUP INT TERM
+trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT HUP INT TERM
 b() { "$R/tests/bound" 15 "$@"; }
 b cc -std=c99 -O2 -w -Iseed seed/gen.c -o "$T/gen"
 b "$T/gen" tapecheck "$T/c.json"

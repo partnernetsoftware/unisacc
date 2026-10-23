@@ -151,8 +151,9 @@ static int runcase(char *const argv[], int secs, const char *out, const char *er
 }
 /* the executor: ROOT/exec/c/run.c built once per process by the host cc (the measured chain's own route) */
 static int build_executor(const char *root) {
-    char dir[] = "/tmp/streamseal-exec-XXXXXX", src[4096]; char *argv[8]; int rc;
+    char dir[4096], src[4096]; char *argv[8]; int rc;
     if (executor[0]) return 0;
+    snprintf(dir, sizeof dir, "%s/streamseal-exec-XXXXXX", getenv("TMPDIR") && *getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");   /* under the temp root: deleted through the one guard */
     if (!mkdtemp(dir)) return bad("executor scratch");
     snprintf(src, sizeof src, "%s/exec/c/run.c", root); snprintf(executor, sizeof executor, "%s/run", dir);
     argv[0] = "cc"; argv[1] = "-O2"; argv[2] = "-w"; argv[3] = src; argv[4] = "-o"; argv[5] = executor; argv[6] = 0;
@@ -161,11 +162,12 @@ static int build_executor(const char *root) {
     return 0;
 }
 static void drop_executor(void) {
-    char *slash; if (!executor[0]) return; unlink(executor); slash = strrchr(executor, '/'); if (slash) { *slash = 0; rmdir(executor); } executor[0] = 0;
+    char *slash; if (!executor[0]) return; cx_remove(executor); slash = strrchr(executor, '/'); if (slash) { *slash = 0; cx_remove(executor); } executor[0] = 0;
 }
 /* run the sealed model on one frozen input; stdout/stderr/rc must equal the frozen record */
 static int replay(const char *data, const char *model, const char *input, unsigned long rc, Text *out, Text *err) {
-    char dir[] = "/tmp/streamseal-case-XXXXXX", o[4096], e[4096], m[4096], in[4096], cwd[2048]; char *argv[4]; int got, same; size_t n; char *b;
+    char dir[4096], o[4096], e[4096], m[4096], in[4096], cwd[2048]; char *argv[4]; int got, same; size_t n; char *b;
+    snprintf(dir, sizeof dir, "%s/streamseal-case-XXXXXX", getenv("TMPDIR") && *getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");   /* under the temp root: deleted through the one guard */
     if (!getcwd(cwd, sizeof cwd) || !mkdtemp(dir)) return bad("replay scratch");
     snprintf(o, sizeof o, "%s/out", dir); snprintf(e, sizeof e, "%s/err", dir);
     snprintf(m, sizeof m, "%s%s%s/%s", data[0] == '/' ? "" : cwd, data[0] == '/' ? "" : "/", data, model);
@@ -174,7 +176,7 @@ static int replay(const char *data, const char *model, const char *input, unsign
     got = runcase(argv, 20, o, e);
     b = cx_read(o, &n); same = b && n == out->n && !memcmp(b, out->b ? out->b : "", n); free(b);
     b = cx_read(e, &n); same = same && b && n == err->n && !memcmp(b, err->b ? err->b : "", n); free(b);
-    unlink(o); unlink(e); rmdir(dir);
+    cx_remove(o); cx_remove(e); cx_remove(dir);
     if (got != (int)rc) return bad2("replay rc differs from the frozen record", input);
     if (!same) return bad2("replay output differs from the frozen record", input);
     return 0;
@@ -243,33 +245,32 @@ static int linkall(const char *data, const char *dir, const char *skip) {
     }
     closedir(d); return 0;
 }
-static void rmtree(const char *dir) {
-    DIR *d = opendir(dir); struct dirent *e; char p[4096]; struct stat st;
-    if (!d) return;
-    while ((e = readdir(d))) { if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-        snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
-        if (!lstat(p, &st) && S_ISDIR(st.st_mode)) rmtree(p); else unlink(p); }
-    closedir(d); rmdir(dir);
-}
-/* one byte appended to NAME inside DIR (a symlink is replaced by a changed copy); SRC restores it */
+/* this run's own scratch trees, through the one deletion guard (cx_rmtree: links inside are removed as links) */
+static void rmtree(const char *dir) { cx_rmtree(dir); }
+/* one byte appended to NAME inside DIR (a symlink is replaced by a changed copy); SRC restores it.  The copy is written
+   beside it and renamed over it: no deletion, and nothing is ever written through the link (the deletion guard
+   refuses to delete a link into a repository, by design) */
 static int mutate(const char *dir, const char *name, const char *src) {
-    char dst[4096], *original; size_t size; Text changed = {0}; int rc;
-    snprintf(dst, sizeof dst, "%s/%s", dir, name);
+    char dst[4096], tmp[4200], *original; size_t size; Text changed = {0}; int rc;
+    snprintf(dst, sizeof dst, "%s/%s", dir, name); snprintf(tmp, sizeof tmp, "%s.mutate", dst);
     original = cx_read(dst, &size); if (!original) return bad2("mutation target absent", name);
-    unlink(dst); put(&changed, original, size); put(&changed, "\n", 1); rc = cx_write(dst, changed.b, changed.n); free(changed.b); free(original);
+    put(&changed, original, size); put(&changed, "\n", 1); rc = cx_write(tmp, changed.b, changed.n) || rename(tmp, dst); free(changed.b); free(original);
     (void)src; return rc ? bad("mutation write") : 0;
 }
 static int restore(const char *dir, const char *name, const char *srcdir) {
     char dst[4096], src[4096], cwd[2048]; if (!getcwd(cwd, sizeof cwd)) return 1;
-    snprintf(dst, sizeof dst, "%s/%s", dir, name); unlink(dst);
+    char tmp[4200];
+    snprintf(dst, sizeof dst, "%s/%s", dir, name); snprintf(tmp, sizeof tmp, "%s.restore", dst);
     snprintf(src, sizeof src, "%s%s%s/%s", srcdir[0] == '/' ? "" : cwd, srcdir[0] == '/' ? "" : "/", srcdir, name);
-    return symlink(src, dst) ? bad("restore link") : 0;
+    return symlink(src, tmp) || rename(tmp, dst) ? bad("restore link") : 0;   /* the link renamed over the changed copy */
 }
 static int negative(const char *data, const char *root) {
     if (load_cell(data)) return 1;
-    char *b, *p, *end; size_t n; char path[4096], scratch[] = "/tmp/streamseal-negative-XXXXXX", mirror[] = "/tmp/streamseal-root-XXXXXX", src[4096], dst[4096], cwd[2048];
+    char *b, *p, *end; size_t n; char path[4096], scratch[4096], mirror[4096], src[4096], dst[4096], cwd[2048];
     Text t = {0}; int omitted = 0, j, rc; const char *model = 0;
     /* 1. omission: the first measured exec/opt rule is dropped from a scratch dependency list */
+    snprintf(scratch, sizeof scratch, "%s/streamseal-negative-XXXXXX", getenv("TMPDIR") && *getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");   /* under the temp root: the guard deletes there */
+    snprintf(mirror, sizeof mirror, "%s/streamseal-root-XXXXXX", getenv("TMPDIR") && *getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");
     b = load(data, "dependencies.tsv", &n); if (!b || !mkdtemp(scratch) || !getcwd(cwd, sizeof cwd)) return bad("negative setup");
     p = b; while (*p) { end = strchr(p, '\n'); if (!end) return bad("negative record truncated");
         { char tag[160]; snprintf(tag, sizeof tag, "rule\t%s", cell.omit_rule_prefix);

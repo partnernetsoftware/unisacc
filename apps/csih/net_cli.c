@@ -44,6 +44,7 @@ int main(int argc, char **argv) {
 #include <stdlib.h>
 #include <time.h>
 #include <unistd.h>
+#include "unisa_safedel.h"   /* the one deletion guard */
 
 #define NET_REFUSED_URL (-2002)
 typedef struct {
@@ -128,13 +129,15 @@ static void run_selftest(void) {
     /* Bytes already on disk count before total_tokens exists. A new note
      * with no usage object drops the previous hit/miss. */
     {
-        char path[] = "/tmp/cdsh-net-progress";
+        /* under the temp root, deleted through the one guard (include/unisa_safedel.h) */
+        char path[1024], why[1400]; const char *td = getenv("TMPDIR");
         FILE *f;
         int sec = -1, tokens = -1, hit = 9, miss = 9, seen = 9;
         long got = -1;
         net_hit = 3;
         net_miss = 4;
         net_usage_seen = 1;
+        snprintf(path, sizeof path, "%s/cdsh-net-progress", td && td[0] ? td : "/tmp");
         f = fopen(path, "w");
         if (!f) expect(0, "progress fixture opens");
         else {
@@ -152,7 +155,7 @@ static void run_selftest(void) {
             net_progress(&sec, &tokens, 0, 0);
             net_cache(&hit, &miss, &seen);
             expect(tokens == 11 && seen == 1 && hit == 2 && miss == 3, "usage replaces the byte estimate");
-            unlink(path);
+            if (unisa_safedel(path, SAFEDEL_PURGE, 0, why, (int)sizeof why)) expect(0, why);
         }
     }
 

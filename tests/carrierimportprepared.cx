@@ -48,6 +48,13 @@
    No #include: the prelude (edition 1) provides everything; uname(2) is the uname command. */
 #pragma unisa use cxlib.pyjson
 
+/* a whole scratch tree through the one deletion guard (include/unisa_safedel.h, in the cx.h prelude; commissar ruling
+   2026-10-23) with an explicit ceiling: these trees hold copied sources and build outputs, beyond SAFEDEL_MAX_FILES */
+static int scratch_rmtree(const char *p) {
+    char why[700]; int rc = unisa_safedel(p, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 200000L, why, (int)sizeof why);
+    if (rc) fprintf(stderr, "cx_rmtree: %s\n", why);
+    return rc;
+}
 static const char *PROG = "carrierimportprepared.py";
 static const char *USAGE = "usage: carrierimportprepared.py [-h] [--prepare] [--require-cached]\n"
                            "                                [--part {import,package}]\n";
@@ -131,21 +138,7 @@ static int raise_os(int e, const char *path) {   /* OSError: [Errno N] text: 'pa
 
 /* ---- scratch directories removed on every exit (TemporaryDirectory) ---- */
 static SList TEMPS;
-static void rmtree(const char *p) {
-    struct stat s; DIR *d; struct dirent *e;
-    if (lstat(p, &s) != 0) return;
-    if (!S_ISDIR(s.st_mode)) { unlink(p); return; }
-    if ((d = opendir(p))) {
-        while ((e = readdir(d))) {
-            char *c;
-            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-            c = cat3(p, "/", e->d_name); rmtree(c); free(c);
-        }
-        closedir(d);
-    }
-    rmdir(p);
-}
-static void cleanup(void) { size_t i; for (i = 0; i < TEMPS.n; i++) if (TEMPS.v[i]) rmtree(TEMPS.v[i]); TEMPS.n = 0; }
+static void cleanup(void) { size_t i; for (i = 0; i < TEMPS.n; i++) if (TEMPS.v[i]) scratch_rmtree(TEMPS.v[i]); TEMPS.n = 0; }
 static void need(const char *reason) {
     fflush(stdout); fprintf(stderr, "NEED_PREPARE carrier import: %s\n", reason); cleanup(); exit(75);
 }
@@ -264,7 +257,7 @@ static char *gettempdir(void) {   /* tempfile.gettempdir() */
     for (i = 0; i < c.n; i++) {
         char *d = c.v[i][0] == '/' ? normpath(c.v[i]) : normpath(cat3(ROOT, "/", c.v[i])), *t = cat(d, "/.cxtmpXXXXXX");
         int fd = mkstemp(t);
-        if (fd >= 0) { close(fd); unlink(t); return TMPDIR_ = d; }
+        if (fd >= 0) { close(fd); cx_remove(t); return TMPDIR_ = d; }
     }
     return TMPDIR_ = sdup("/tmp");
 }
@@ -385,7 +378,7 @@ static int run(char *const argv[], int typespell, int secs, int capture, Proc *p
         char *a = cat(tmp, "/cxcapXXXXXX"), *b = cat(tmp, "/cxcapXXXXXX");
         of = mkstemp(a); ef = mkstemp(b);
         if (of < 0 || ef < 0) return raise_os(errno, tmp);
-        unlink(a); unlink(b); free(a); free(b);
+        cx_remove(a); cx_remove(b); free(a); free(b);
     }
     if (pipe(pe) != 0) return raise_os(errno, 0);
     fcntl(pe[1], F_SETFD, FD_CLOEXEC);
@@ -1010,7 +1003,7 @@ static pj_value *identity(void) {
       pj_set(files, "@generated/dump.c", g); }
     if (!(exp_sha = sha_file(ref))) return 0;
     gen = pj_dict(); pj_set(gen, "export_sha256", jstrz(exp_sha)); pj_set(gen, "dumper_sha256", jstrz(dump_sha)); pj_set(gen, "readset", scan);
-    rmtree(d); forget_temp(d);
+    scratch_rmtree(d); forget_temp(d);
     if (!(sources = source_digest())) return 0;
     if (!(ccsha = sha_file(cc))) return 0;
     if (!(pyres = resolve_strict(PY))) return 0;
@@ -1155,7 +1148,7 @@ int main(int argc, char **argv) {
             if (run(argv3, 0, 0, 1, &w)) uncaught();
             if (w.rc) { fflush(stdout); fwrite(bstr(&w.err), 1, w.err.n, stderr); cleanup(); return exit_code(w.rc); }
         }
-        if (stat(CACHE, &st) == 0) rmtree(CACHE);
+        if (stat(CACHE, &st) == 0) scratch_rmtree(CACHE);
         if (rename(work, CACHE) != 0) { raise_os(errno, work); uncaught(); }
         forget_temp(work);
         if (!valid(basis, 1)) { raise_assert(); uncaught(); }

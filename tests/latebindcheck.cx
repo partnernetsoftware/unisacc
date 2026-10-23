@@ -50,7 +50,8 @@ static void fail(const char *what) { printf("  FAIL %s\n", what); bad++; }
 static void ok(const char *what) { printf("  ok   %s\n", what); }
 static char *slurp(const char *name, size_t *n) { char p[4096]; snprintf(p, sizeof p, "%s/%s", D, name); return cx_read(p, n); }
 static int put(const char *name, const void *b, size_t n) { char p[4096]; snprintf(p, sizeof p, "%s/%s", D, name); return cx_write(p, b, n); }
-static void drop(const char *name) { char p[4096]; snprintf(p, sizeof p, "%s/%s", D, name); unlink(p); }
+/* SCRATCH may come from argv: every removal goes through the one deletion guard (include/unisa_safedel.h) */
+static void drop(const char *name) { char p[4096]; snprintf(p, sizeof p, "%s/%s", D, name); cx_remove(p); }
 static int present(const char *name) { char p[4096]; struct stat st; snprintf(p, sizeof p, "%s/%s", D, name); return stat(p, &st) == 0; }
 static int same(const char *a, const char *b) {
     size_t an, bn; char *x = slurp(a, &an), *y = slurp(b, &bn); int r = x && y && an == bn && !memcmp(x, y, an);
@@ -83,14 +84,15 @@ static int stream_slots(const char *name, int target) {
 }
 
 int main(int argc, char **argv) {
-    char own[] = "/tmp/latebindXXXXXX", *args3[3], src[8192], *out, *err; size_t on, en; int rc, target, mask;
+    char own[4096], *args3[3], src[8192], *out, *err; size_t on, en; int rc, target, mask;
     if (argc != 2 && argc != 3) { fprintf(stderr, "usage: latebindcheck.cx PRODUCT [SCRATCH]\n"); return 2; }
     if (argc == 2) {
-        static const char *LEFT[] = {"ctl.c", "sym", "sym2", "sym13", "p15", "p13", "pbad", "img", "imge", "img15", "out.bin", "ran", "neg.tape", "plain.c", "plainimg", "err", 0}; const char **l;
+        const char *td = getenv("TMPDIR");
+        snprintf(own, sizeof own, "%s/latebindXXXXXX", td && *td ? td : "/tmp");   /* the deletion guard's temp root */
         if (!mkdtemp(own)) { fprintf(stderr, "cannot make a scratch directory\n"); return 2; }
         args3[0] = argv[0]; args3[1] = argv[1]; args3[2] = own; rc = main(3, args3);
-        D = own; for (l = LEFT; *l; l++) drop(*l);
-        rmdir(own); return rc;
+        if (cx_rmtree(own) && !rc) rc = 1;
+        return rc;
     }
     P = argv[1]; D = argv[2];
     rc = cx_run_timeout("uname -sm", 5, &out, &on);

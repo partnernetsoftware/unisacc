@@ -53,6 +53,6 @@ for source in ['examples/hello.c','tests/c/b_funcptr.c']:
  print(target,source,'bound code/imports/data/entry: assembler = action oracle = network',flush=True)
 missing='process/import/'+DLL.decode().lower()+'/'+IMPORTS[0]
 r,_,_=sim.run(enc,lowered,'missing-import',context(missing),maxsteps=50000000,loaded=el);assert r!='accept'
-(resources/missing).unlink();(p/'winmemory.pkg').write_bytes(build([manifest],[('00',resources)]))
+subprocess.run(['sh',str(pathlib.Path(__file__).resolve().parents[2]/'tests/cxbin'),str(pathlib.Path(__file__).resolve().parents[2]/'tests/safedel.cx'),'--purge','--',str(resources/missing)],check=True);(p/'winmemory.pkg').write_bytes(build([manifest],[('00',resources)]))
 r=run([p/'run','--bundle',p/'winmemory.pkg','memory',p/'winlowered']);assert r.returncode==1 and not r.stdout
 print(target,'missing process import refused by both executors',flush=True)

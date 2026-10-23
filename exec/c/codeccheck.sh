@@ -4,8 +4,8 @@ set -eu
 R=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 cd "$R"
 . ./tests/lib.sh
-D=$(mktemp -d /tmp/unisacc-codec.XXXXXX)
-trap 'rm -rf "$D"' EXIT HUP INT TERM
+D=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-codec.XXXXXX")
+trap '[ -z "$D" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$D"' EXIT HUP INT TERM
 # Never use the shared reference default when this gate is invoked alone.
 if [ "$UA" = /tmp/ua_ref ]; then UA="$D/ref"; fi
 ua_ready

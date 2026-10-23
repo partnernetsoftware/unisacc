@@ -132,11 +132,13 @@ if [ "$MODE" = stage ]; then
         fi; } | sha | cut -c1-64)
     SB=${UNISACC_MODEL_CACHE:-${TMPDIR:-/tmp}/unisacc-model-cache}; mkdir -p "$SB"
     REFD=$SB/tools-ref-$SNAME-$refid; BLDD=$SB/tools-build-$SNAME-$buildid
+    # removals go through the one deletion guard (argv CLI tests/safedel.cx over include/unisa_safedel.h): this run's
+    # staging directory is purged, the previously published entry moves into its root's .trash
     publish() {   # publish DEST ID FILE...: manifest, then one atomic rename into place
-        tmp=$1.tmp.$$; rm -rf "$tmp"; mkdir -p "$tmp"; d=$1 id=$2; shift 2
+        tmp=${1:?}.tmp.$$; sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$tmp" || return 1; mkdir -p "$tmp"; d=$1 id=$2; shift 2
         cp -p "$@" "$tmp/"; echo "$id" > "$tmp/key"
         (cd "$tmp" && for f in "$@"; do sha "$(basename "$f")"; done; sha key) > "$tmp/ready.tmp"
-        mv "$tmp/ready.tmp" "$tmp/ready"; rm -rf "$d"; mv "$tmp" "$d"
+        mv "$tmp/ready.tmp" "$tmp/ready"; sh "$R/tests/cxbin" "$R/tests/safedel.cx" -- "${d:?}" || return 1; mv "$tmp" "$d"
     }
     need() {      # need DIR ID STEP: the handoff exists for exactly this content, byte for byte
         [ -s "$1/ready" ] && [ "$(cat "$1/key" 2>/dev/null)" = "$2" ] ||

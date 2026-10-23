@@ -6,7 +6,7 @@
 # and retries; a second failure settles COLD by name; Darwin steps 1-2 run one per window.
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd)
-T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-warmup.XXXXXX"); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-warmup.XXXXXX"); trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT
 fail() { echo "warmup: $*"; exit 1; }
 mkdir -p "$T/root/tests" "$T/root/exec/c/asm" "$T/root/exec/pipeline" "$T/root/release/tools" "$T/s1" "$T/s2" "$T/s3" "$T/s4"
 bound_files=$(python3 "$R/tests/bound.py" --deployment-files) || exit $?

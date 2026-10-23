@@ -8,7 +8,7 @@ set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 . ./tests/lib.sh; ua_ready
 _BOUND=$("$R/tests/bound" --helper) || exit 2
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d); trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT
 UTM=/Applications/UTM.app/Contents/MacOS/utmctl
 if [ -z "$("$UTM" ip-address "${WINVM:-minicon-win-arm-64}" 2>/dev/null | head -1)" ]; then
     # 0.0.25 X7: these probes run on real Windows runners in release-check (tests/winsuite.py);

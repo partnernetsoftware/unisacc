@@ -3,7 +3,7 @@
 set -eu
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-hostsymbols.XXXXXX")
-trap 'rm -rf "$T"' EXIT HUP INT TERM
+trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT HUP INT TERM
 b() { "$R/tests/bound" 15 "$@"; }
 b cc -std=c99 -O2 -w -Iseed seed/gen.c -o "$T/gen"
 b "$T/gen" lower/hostsymbols "$T/c.json"

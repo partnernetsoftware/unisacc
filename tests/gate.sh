@@ -78,10 +78,11 @@ fi
 JOBS=${JOBS:-4}
 UA=${UA:-/tmp/ua_ref}; export UA
 . "$R/tests/lib.sh"; [ "$LIST" != 0 ] || ua_ready
-O=$(mktemp -d); trap 'rm -rf "$O"' EXIT
+O=$(mktemp -d); trap 'sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge --force-count 5000 -- "${O:?}"' EXIT   # one result per job (about 700): above the guard's default ceiling
 # Timing sidecars live in $O.timing (outside $O, which holds exactly the job results, so gate counts stay right).
 # Lifecycle: the gate never deletes $O.timing; it outlives the run, like $O.timing from an earlier run, and is
-# removed by hand (rm -rf "$O.timing" for the run, or rm -rf /tmp/tmp.*.timing). Keep it only while diagnosing.
+# removed by hand through the deletion guard (sh tests/cxbin tests/safedel.cx --purge -- "$O.timing", one per run).
+# Keep it only while diagnosing.
 # Snapshots (<job>.snapshot: ps -eo pid,stat,etime,args + uptime) are diagnostics: they list other processes
 # and their arguments.  Never upload them as CI artifacts and never send them outside the host.
 TD="$O.timing"; mkdir -p "$TD"   # timing sidecars: outside $O, which holds exactly the job results
@@ -184,7 +185,7 @@ job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
       printf '%-14s rc=%-3s %3ss :: %s\n' "$name" "$rc" "$(awk "BEGIN{printf \"%d\", $tb - $t0}")" \
           "$(printf '%s' "$out" | grep -v '^ *$' | tail -1)" > "$f"
       printf 'start=%s bound_return=%s bound_rc=%s subshell_end=%s wall_start=%s wall_return=%s\n' "$t0" "$tb" "$rc" "$(mono)" "$w0" "$wb" > "$TD/$tb_.timing"
-      rm -f "$tmp" ) &
+      sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${tmp:?}" ) &
     PIDS="$PIDS $!"
 }
 T0=$(mono)
@@ -921,6 +922,9 @@ job cxinclude tests/bound 58 sh ./unisacc.com -run tests/cxinclude.cx -- --check
 job glossarycheck tests/bound 58 sh ./unisacc.com -run tests/glossarycheck.cx   # docs/glossary.md section 6: tracked .cx and new .md (not in tests/glossary-baseline.tsv) hold prd.md section 0 -- no bare stage, PHASES, STAGE_NETS, net name as flow, bare 4 streams; any new file: no Python invocation (G5); exceptions ratcheted in tests/glossary-whitelist.tsv
 job glossarycheck-selftest tests/bound 58 sh ./unisacc.com -run tests/glossarycheck.cx -- --selftest   # seeded G1-G7 violations are caught, clean controls pass, whitelist above-count / no-reason / no-row are refused
 job safedel-selftest tests/bound 58 sh "${MODEL_COM:-./unisacc.com}" -run tests/safedelcheck.cx -- --com "${MODEL_COM:-./unisacc.com}"   # commissar ruling 2026-10-23: the one deletion guard (include/unisa_safedel.h) and its argv CLI tests/safedel.cx -- "", ".", "..", "/", ~, $HOME, cwd, repo root/ancestors, .git, a temp root itself, symlink and .. escapes refused with zero damage; $TMPDIR and /tmp both whitelisted; trash, purge, dry run, ceiling, --purge-trash; argv kill switches
+job deletecheck tests/bound 58 sh ./unisacc.com -run tests/deletecheck.cx   # commissar ruling items 1, 6, 8: every raw deletion primitive in the tracked tree (rm/rmdir/unlink/find -delete/xargs rm; shutil.rmtree/os.remove/Path.unlink; unlink/rmdir/remove/unlinkat/nftw; shell-concatenated rm) is exempt with a reason in the ledger tests/deletes.tsv, every guard call has its guarded row and mutation row
+job deletecheck-selftest tests/bound 58 sh ./unisacc.com -run tests/deletecheck.cx -- --selftest   # seeded raw rm/find -delete/xargs rm/shutil.rmtree/os.remove/Path.unlink/unlink/nftw/shell-concatenated rm, stale and reasonless exemptions, a guard call without its mutation row: all red; the clean tree green
+for k in 1 2 3 4; do job deletemut-$k tests/bound 58 sh "${MODEL_COM:-./unisacc.com}" -run tests/deletemutcheck.cx -- --com "${MODEL_COM:-./unisacc.com}" --shard $k/4; done   # commissar ruling item 7: every guarded deletion site in tests/deletemut.tsv still stands (its anchor) and its guard form, run with the target "", "." and a sandbox repository root, is refused with zero files damaged (full-tree listing)
 job cxmodule-neg tests/bound 58 sh ./unisacc.com -run tests/cxmodcheck.cx -- --neg "${MODEL_COM:-./unisacc.com}"   # CX2a (research/cx2-module-design.md 4): #pragma unisa use refusals by name -- no file, cycle, bad name, unknown pragma, exported object, macro in an exported declaration, two exporters, main in a module, std.X, misplaced pragma, undefined prototype, export under #if, reserved prefix, a name both defined and imported, a type from two modules -- and a consumer without its use goes red (N11)
 job cxmodule-pos tests/bound 58 sh ./unisacc.com -run tests/cxmodcheck.cx -- --pos "${MODEL_COM:-./unisacc.com}"   # CX2a: a module by name, a diamond (one copy), a module also on the command line, the derived interface deterministic and equal to tests/cx/p1mod.cxif, -o bytes independent of TMPDIR, self-contained interfaces, the system cc oracle (-cx-plan rows, cc -include include/cx.h -include CXIF), a .c unit never scanned, -ftrim-libc kept
 job cxmodule-classic tests/bound 58 sh ./unisacc.com -run tests/cxmodcheck.cx -- "$UA"   # CX2a: the same refusals and positives against the classic reference (src/main.c, src/front_parse.c fe_load; both drivers share src/cxmod.c)

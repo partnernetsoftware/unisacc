@@ -69,7 +69,7 @@ for f in "$@"; do
             "$b" "$got" "$gcode" "$want" "$wcode"
     fi
 done
-rm -rf "$T"
+sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${T:?}"
 echo; echo "native $pass   mismatch $fail   known $known   revived $revived"
 # A suite that checked nothing is not green: `closure.sh` with no
 # probes once printed `identical 0 differ 0` and exited 0.

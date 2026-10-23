@@ -4,7 +4,7 @@ _BOUND=$("$_BOUND" --helper) || exit 2
 # One carried model package and two carried ISA cores, no external kernel.
 set -eu
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d); trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT
 b() { "$_BOUND" 60 "$@"; }
 if [ "${MODEL_COM+x}" = x ]; then
     [ -n "$MODEL_COM" ] && [ -f "$MODEL_COM" ] && [ -x "$MODEL_COM" ] || {

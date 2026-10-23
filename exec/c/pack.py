@@ -122,8 +122,8 @@ def compressed_model(text, cache=True):
                 with os.fdopen(fd,'wb') as f: f.write(blob)
                 os.replace(name,target)
             finally:
-                try: pathlib.Path(name).unlink()
-                except FileNotFoundError: pass
+                if os.path.lexists(name):   # the one deletion guard (commissar ruling 2026-10-23)
+                    __import__('subprocess').run(['sh',str(pathlib.Path(__file__).resolve().parents[2]/'tests/cxbin'),str(pathlib.Path(__file__).resolve().parents[2]/'tests/safedel.cx'),'--purge','--',name],check=True)
     return blob, len(raw), checksum
 
 

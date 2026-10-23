@@ -125,10 +125,10 @@ lock() {   # mkdir lock with the owner's pid; a dead owner's lock is taken over
     LOCK=$1.lock; mkdir -p "$(dirname "$LOCK")"
     if mkdir "$LOCK" 2>/dev/null; then echo $$ > "$LOCK/pid"; return 0; fi
     owner=$(cat "$LOCK/pid" 2>/dev/null || :)
-    if [ -z "$owner" ] || ! kill -0 "$owner" 2>/dev/null; then rm -rf "$LOCK"; lock "$1"; return 0; fi
+    if [ -z "$owner" ] || ! kill -0 "$owner" 2>/dev/null; then sh "$ROOT/tests/cxbin" "$ROOT/tests/safedel.cx" --purge -- "${LOCK:?}" || die "comboot: cannot remove the stale lock $LOCK (tests/safedel.cx refused or failed)"; lock "$1"; return 0; fi
     die "comboot: $2 is being built by another run ($LOCK); invoke this shard again once it is done"
 }
-unlock() { [ -n "$LOCK" ] && rm -rf "$LOCK"; LOCK=; }
+unlock() { [ -n "$LOCK" ] && sh "$ROOT/tests/cxbin" "$ROOT/tests/safedel.cx" --purge -- "$LOCK"; LOCK=; }
 seed_ready() {
     side=$SEED.build.json
     [ -e "$side" ] || die "comboot: $SEED has no build.json sidecar; rebuild the seed with \`make seed-com SEED_DIR=$SEED_DIR\`"

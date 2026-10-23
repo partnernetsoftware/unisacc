@@ -15,7 +15,8 @@ command -v wat2wasm >/dev/null || { echo "ujs2wasm_step needs wat2wasm"; exit 1;
 
 OUT="${TMPDIR:-/tmp}/ujs2wasm-step.$$"
 mkdir -p "$OUT"
-trap 'rm -rf "$OUT"' EXIT
+_SD="$ROOT"/tests   # the one deletion guard: argv CLI tests/safedel.cx over include/unisa_safedel.h
+trap 'sh "$_SD/cxbin" "$_SD/safedel.cx" --purge -- "${OUT:?}"' EXIT
 
 # Bound the command and all descendants with the shared watchdog.
 run_alarm() {

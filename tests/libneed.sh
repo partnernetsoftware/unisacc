@@ -10,7 +10,9 @@ R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 . ./tests/lib.sh; ua_ready
 b() { bound 15 "$@"; }
 b python3 unisa/libneed.py > /dev/null || { echo "ftrim-libc: headers not fully guarded"; python3 unisa/libneed.py; exit 1; }
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+_SD="$R"/tests   # the one deletion guard: argv CLI tests/safedel.cx over include/unisa_safedel.h (this trap replaces
+# tests/lib.sh's, so it removes lib.sh's scratch $_LIB_TMP too)
+T=$(mktemp -d); trap 'sh "$_SD/cxbin" "$_SD/safedel.cx" --purge -- "${T:?}" "${_LIB_TMP:?}"' EXIT
 same=0; bad=0; smaller=0
 for f in examples/apps/calc.c examples/apps/bf.c examples/apps/wordfreq.c examples/apps/life.c \
          examples/apps/queens.c examples/apps/dijkstra.c examples/apps/colorpack.c \

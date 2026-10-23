@@ -2,8 +2,10 @@
 """Freeze observed E3 capture+independent control references; existing shared producer owns execution/SC1.
 No resource parser, signature serializer or model evaluation here. Incomplete/failed captures never emit cases.
 """
-import argparse,hashlib,json,pathlib,shutil
+import argparse,hashlib,json,pathlib,shutil,subprocess
 P=pathlib.Path
+# a partial cases.json goes through the one deletion guard's argv CLI (include/unisa_safedel.h); --out is argv
+SAFEDEL=['sh',str(P(__file__).resolve().parents[1]/'tests/cxbin'),str(P(__file__).resolve().parents[1]/'tests/safedel.cx'),'--purge','--']
 p=argparse.ArgumentParser();p.add_argument('--spec',type=P,required=True);p.add_argument('--out',type=P,required=True);p.add_argument('--seal-prefix',default='tests/seals/librarycallbacke3');p.add_argument('--family',choices=('e3','lower','control'),default='e3');a=p.parse_args();spec=json.loads(a.spec.read_text());O=a.out.resolve();O.mkdir(parents=True,exist_ok=False)
 if a.family=='e3' and (spec.get('format')!='CALLBACK_E3_FREEZE_SPEC1' or not spec.get('cases')):raise SystemExit('INTERFACE_ERROR empty/malformed freeze specification')
 def sha(q):return hashlib.sha256(q.read_bytes()).hexdigest()
@@ -61,7 +63,7 @@ if a.family=='lower':
   (O/'cases.json').write_text(json.dumps({'format':'CALLBACK_LOWER_CASES1','cases':rows},indent=2)+'\n')
   print('frozen lower relative cases',len(rows),'rows; no full-lower/ABI claim')
  except Exception:
-  (O/'cases.json').unlink(missing_ok=True);raise
+  subprocess.run(SAFEDEL+[str(O/'cases.json')],check=True);raise
  raise SystemExit(0)
 
 rows=[];index=[];seen=set();reasons=set();accepted=False
@@ -94,5 +96,5 @@ try:
  (O/'cases.json').write_text(json.dumps({'format':'CALLBACK_LOWER_CASES1','cases':rows},indent=2)+'\n')
  print('frozen case plan',len(rows),'rows; replay still required, not runtime/ABI')
 except Exception:
- (O/'cases.json').unlink(missing_ok=True)
+ subprocess.run(SAFEDEL+[str(O/'cases.json')],check=True)
  raise

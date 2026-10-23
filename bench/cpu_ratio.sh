@@ -7,7 +7,7 @@
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 UA=${UA:-./unisacc.com}; RUNS=${RUNS:-3}
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d); trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT
 progs=${*:-fib sieve matmul hash qsort}
 median() { sort -n | awk '{a[NR]=$1} END {print a[int((NR+1)/2)]}'; }
 utime() { { /usr/bin/time -p "$@" > /dev/null; } 2>&1 | awk '/^user/ {print $2}'; }

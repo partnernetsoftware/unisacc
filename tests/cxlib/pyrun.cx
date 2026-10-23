@@ -18,7 +18,8 @@
      pr_monotonic()            time.monotonic()
      pr_tempdir(PREFIX, out, outlen)  tempfile.TemporaryDirectory(prefix=PREFIX).name: a fresh 0700 directory
                                under TMPDIR, TEMP, TMP or /tmp (the first one set), absolute; 0, or -1 with errno
-     pr_rmtree(PATH)           shutil.rmtree, errors ignored (the TemporaryDirectory cleanup)
+     pr_rmtree(PATH)           shutil.rmtree, errors ignored (the TemporaryDirectory cleanup), through the one
+                               deletion guard (cx_rmtree, include/unisa_safedel.h): a refusal is one stderr line
    Prelude gap: <time.h> (clock_gettime, CLOCK_MONOTONIC) is included -- cx.h edition 1 leaves time.h explicit.
    No exported objects or macros (CXIF v0). */
 #pragma unisa module pyrun
@@ -130,25 +131,14 @@ int pr_tempdir(const char *prefix, char *out, size_t outlen) {
     snprintf(out, outlen, "%s", tmpl);
     return 0;
 }
-void pr_rmtree(const char *d) {
-    DIR *dp = opendir(d); struct dirent *e; char p[8192]; struct stat st;
-    if (dp) {
-        while ((e = readdir(dp))) {
-            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-            snprintf(p, sizeof p, "%s/%s", d, e->d_name);
-            if (lstat(p, &st) == 0 && S_ISDIR(st.st_mode)) pr_rmtree(p); else unlink(p);
-        }
-        closedir(dp);
-    }
-    rmdir(d);
-}
+void pr_rmtree(const char *d) { cx_rmtree(d); }
 
 /* ---- subprocess.run ------------------------------------------------------------------------------------------- */
 static int pr_tmpfile(void) {
     char t[4096]; const char *d = getenv("TMPDIR"); int fd;
     snprintf(t, sizeof t, "%s/pyrunXXXXXX", d && *d ? d : "/tmp");
     fd = mkstemp(t);
-    if (fd >= 0) unlink(t);
+    if (fd >= 0) cx_remove(t);
     return fd;
 }
 static char *pr_slurp_fd(int fd, size_t *n) {

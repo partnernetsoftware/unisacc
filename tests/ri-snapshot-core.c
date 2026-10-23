@@ -2,6 +2,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include "resourceledger.h"
+#include "../include/unisa_safedel.h"   /* the one deletion guard (tests/risnapshotcore.sh builds with -I exec/c only) */
 static int fails = 0;
 #define CHECK(c, m) do { if (!(c)) { printf("FAIL %s\n", m); fails++; } else printf("ok   %s\n", m); } while (0)
 int main(int argc, char **argv) {
@@ -18,7 +19,7 @@ int main(int argc, char **argv) {
     snprintf(dir, sizeof dir, "%s/snap-half", root);
     { char p[512]; FILE *f; snprintf(p, sizeof p, "%s/resources.tsv", root); (void)p; (void)f; }
     CHECK(rl_snapshot_write(dir, "lower:lnx/x86_64/run/O0", input, (int)strlen((char *)input), b, 2, err, sizeof err) == 0, "write second snapshot");
-    { char p[1024]; snprintf(p, sizeof p, "%s/COMMIT", dir); CHECK(remove(p) == 0, "simulate interrupted commit: COMMIT removed"); }
+    { char p[1024], why[1400]; snprintf(p, sizeof p, "%s/COMMIT", dir); CHECK(unisa_safedel(p, SAFEDEL_PURGE, 0, why, (int)sizeof why) == 0, "simulate interrupted commit: COMMIT removed"); }
     CHECK(rl_snapshot_load(dir, "lower:lnx/x86_64/run/O0", &L, 0, err, sizeof err) != 0 && strstr(err, "no COMMIT") != NULL, "no COMMIT: incomplete snapshot not recognised");
 
     /* capacity: 1000 small blobs overflow the COMMIT buffer: named refusal, nothing published */

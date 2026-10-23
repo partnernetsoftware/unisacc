@@ -4,7 +4,9 @@ _BOUND=$("$_BOUND" --helper) || exit 2
 set -eu
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 . ./tests/lib.sh; ua_ready
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+_SD="$R"/tests   # the one deletion guard: argv CLI tests/safedel.cx over include/unisa_safedel.h (this trap replaces
+# tests/lib.sh's, so it removes lib.sh's scratch $_LIB_TMP too)
+T=$(mktemp -d); trap 'sh "$_SD/cxbin" "$_SD/safedel.cx" --purge -- "${T:?}" "${_LIB_TMP:?}"' EXIT
 "$_BOUND" 60 python3 - "$UA" "$T" <<'PYTEST'
 import subprocess,sys,pathlib
 ua,tmp=sys.argv[1:]; prefix=(['sh'] if ua.endswith('.com') else [])+[ua]

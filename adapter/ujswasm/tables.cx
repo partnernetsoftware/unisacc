@@ -215,10 +215,11 @@ static void put(const char *dir, const char *name, Buf *b) {
 }
 
 static int make(const char *root, const char *out, int with_nets) {
-    Buf b; int s; char *name, tmp[] = "/tmp/fnujsXXXXXX", *bwdir, *jsonp;
+    Buf b; int s; char *name, *tmp, *bwdir, *jsonp; const char *td = getenv("TMPDIR");
     J *root_j = 0;
     if (with_nets) {
         char *argv[8], *o = 0; size_t n = 0; int rc; char *txt;
+        tmp = xf("%s/fnujsXXXXXX", td && *td ? td : "/tmp");   /* the guard's temp root */
         if (!mkdtemp(tmp)) die("cannot make a scratch directory", 0);
         bwdir = xf("%s/bw", tmp);
         argv[0] = "python3"; argv[1] = "-m"; argv[2] = "ujs"; argv[3] = "build-weights"; argv[4] = "--out"; argv[5] = bwdir; argv[6] = 0;
@@ -231,7 +232,8 @@ static int make(const char *root, const char *out, int with_nets) {
         jp = txt; jpath = jsonp;
         root_j = jval();
         if (root_j->t != 4) die("built.json is not an object", 0);
-        unlink(jsonp); rmdir(bwdir); rmdir(tmp);
+        if (cx_rmtree(tmp)) die("cannot remove the scratch directory ", tmp);   /* include/unisa_safedel.h */
+        free(tmp);
     }
     memset(&b, 0, sizeof b); bs(&b, CONTRACT); put(out, "contract.tsv", &b);
     for (s = 0; s < NNETS; s++) {
@@ -255,7 +257,7 @@ static int same(const char *a, const char *b) {
 
 int main(int argc, char **argv) {
     const char *mode = argc > 1 ? argv[1] : "", *root = argc > 2 ? argv[2] : ".";
-    char *dir, tmp[] = "/tmp/fntabXXXXXX", *a, *c, *name, *rootabs;
+    char *dir, *tmp, *a, *c, *name, *rootabs; const char *td = getenv("TMPDIR");
     int s, k, bad = 0, nets = !eq(mode, "--check-gold");
     if (!eq(mode, "--write") && !eq(mode, "--check") && !eq(mode, "--check-gold"))
         die("usage: tables.cx -- --write|--check|--check-gold [ROOT]", 0);
@@ -266,6 +268,7 @@ int main(int argc, char **argv) {
         printf("ujswasm-tables: wrote %s (contract + %d nets x gold, net)\n", TDIR, NNETS);
         return 0;
     }
+    tmp = xf("%s/fntabXXXXXX", td && *td ? td : "/tmp");
     if (!mkdtemp(tmp)) die("cannot make a scratch directory", 0);
     make(rootabs, tmp, nets);
     for (s = -1; s < NNETS; s++)
@@ -273,9 +276,9 @@ int main(int argc, char **argv) {
             name = s < 0 ? xf("contract.tsv") : xf("%s.%s.tsv", ST(s).name, k ? "net" : "gold");
             a = xf("%s/%s", dir, name); c = xf("%s/%s", tmp, name);
             if (!same(a, c)) { fprintf(stderr, "ujswasm-tables: %s/%s: differs from a fresh make (or is missing)\n", TDIR, name); bad++; }
-            unlink(c); free(a); free(c); free(name);
+            free(a); free(c); free(name);
         }
-    rmdir(tmp);
+    if (cx_rmtree(tmp)) die("cannot remove the scratch directory ", tmp);
     if (bad) return 1;
     printf("ujswasm-tables: %s: contract + %d gold%s tables identical to a fresh make%s\n", TDIR, NNETS,
            nets ? " + net" : "", nets ? " (oracle: python3 -m ujs build-weights)" : " (no Python)");

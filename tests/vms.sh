@@ -73,7 +73,7 @@ down() {
               echo "  vm $vm stopped ($("$UTM" status "$vm" 2>/dev/null))";;
         esac
     done < "$STATE"
-    rm -f "$STATE"
+    sh "$R/tests/cxbin" "$R/tests/safedel.cx" -- "${STATE:?}"   # the one deletion guard: VMS_STATE is env, so into a .trash
 }
 
 case "${1:-}" in

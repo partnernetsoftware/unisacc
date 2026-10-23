@@ -8,5 +8,5 @@ cd "$(dirname "$0")/.." || exit 2
 d=$(mktemp -d "${TMPDIR:-/tmp}/includekey.XXXXXX") || exit 2
 sh exec/pp/gen-delta.sh "$d/d.json"; r=$?
 [ "$r" -eq 0 ] && python3 tests/includekeycheck.py "$1" "$d/d.json" "$d/work"; r=$?
-rm -rf "$d"
+sh tests/cxbin tests/safedel.cx --purge -- "$d"
 exit "$r"

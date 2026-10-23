@@ -55,7 +55,7 @@ def main():
     for f in files:
         rc, out, err = sh([REF, "-dump-tokens", f])
         if os.path.exists(buf):
-            os.unlink(buf)
+            subprocess.run(["sh", os.path.join(HERE, "..", "..", "tests", "cxbin"), os.path.join(HERE, "..", "..", "tests", "safedel.cx"), "--purge", "--", buf], check=True)   # the one deletion guard (commissar ruling 2026-10-23)
         rc2, _, _ = sh([PRE, "-dump-tokens", f], {"UA_LEXIN": buf})
         if not os.path.exists(buf):
             prelex += 1

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Real native context helper; no model/network/TTY or deployment."""
-import hashlib,json,os,pathlib,shutil,sys,tempfile,time,traceback
+import hashlib,json,os,pathlib,shutil,subprocess,sys,tempfile,time,traceback
 from agent_multi_action import APP,ROOT,bounded
 sys.path.insert(0,str(APP))
 from reload_candidate import SOURCES
@@ -45,9 +45,9 @@ def main():
             for fault in ('schema','other-session','symlink'):
                 if fault=='schema':f.write_bytes(b'{bad')
                 elif fault=='other-session':v=json.loads(original);v['session']='other';f.write_text(json.dumps(v))
-                else:backup=root/'backup';backup.write_bytes(original);backup.chmod(0o600);f.unlink();f.symlink_to(backup)
+                else:backup=root/'backup';backup.write_bytes(original);backup.chmod(0o600);subprocess.run(['sh',str(ROOT/'tests/cxbin'),str(ROOT/'tests/safedel.cx'),'--purge','--',str(f)],check=True);f.symlink_to(backup)
                 bad=run();assert bad['status'].startswith('unavailable:') and bad['notice_total']==-1 and bad['notices']==[];faults.append(dict(fault=fault,packet=bad))
-                if f.is_symlink():f.unlink()
+                if f.is_symlink():subprocess.run(['sh',str(ROOT/'tests/cxbin'),str(ROOT/'tests/safedel.cx'),'--purge','--',str(f)],check=True)   # the one deletion guard (commissar ruling 2026-10-23)
                 f.write_bytes(original);f.chmod(0o600)
             report.update(faults=faults,passed=True)
     except Exception as e:report.update(passed=False,error=repr(e),traceback=traceback.format_exc())

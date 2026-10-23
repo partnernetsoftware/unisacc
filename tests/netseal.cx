@@ -242,15 +242,17 @@ static int build_cell(const char *root, const char *dir, const Shape *s, Text *m
     if (rc) return bad("one-net kernel build (cc -O2 self.c)");
     return 0;
 }
-static void drop_cell(const char *dir) {
-    const char *names[] = {"self", "self.c", "unisa_model.inc", "unisa_core.c", 0}; char p[4096]; int i;
-    for (i = 0; names[i]; i++) { snprintf(p, sizeof p, "%s/%s", dir, names[i]); unlink(p); }
-    snprintf(p, sizeof p, "%s/weight.%s.inc", dir, shape.net); unlink(p); rmdir(dir);
+/* every scratch directory is a mkdtemp under $TMPDIR (or /tmp) and is removed through the one deletion guard
+   (include/unisa_safedel.h, cx_rmtree) */
+static void scratch_template(char *buf, size_t n, const char *name) {
+    const char *td = getenv("TMPDIR"); snprintf(buf, n, "%s/%s", td && *td ? td : "/tmp", name);
 }
+static void drop_cell(const char *dir) { cx_rmtree(dir); }
 static void drop_harness(void) { if (harness[0]) { char *slash = strrchr(harness, '/'); if (slash) { *slash = 0; drop_cell(harness); } harness[0] = 0; } }
 /* run the one-net kernel on the frozen cases; stdout/stderr/rc must equal the frozen record */
 static int replay(const char *data, const char *input, unsigned long rc, Text *out, Text *err) {
-    char dir[] = "/tmp/netseal-case-XXXXXX", o[4096], e[4096], in[4096], cwd[2048]; char *argv[3]; int got, same; size_t n; char *b;
+    char dir[4096], o[4096], e[4096], in[4096], cwd[2048]; char *argv[3]; int got, same; size_t n; char *b;
+    scratch_template(dir, sizeof dir, "netseal-case-XXXXXX");
     if (!getcwd(cwd, sizeof cwd) || !mkdtemp(dir)) return bad("replay scratch");
     snprintf(o, sizeof o, "%s/out", dir); snprintf(e, sizeof e, "%s/err", dir);
     snprintf(in, sizeof in, "%s%s%s/%s", data[0] == '/' ? "" : cwd, data[0] == '/' ? "" : "/", data, input);
@@ -258,7 +260,7 @@ static int replay(const char *data, const char *input, unsigned long rc, Text *o
     got = runcase(argv, 20, o, e);
     b = cx_read(o, &n); same = b && n == out->n && !memcmp(b, out->b ? out->b : "", n); free(b);
     b = cx_read(e, &n); same = same && b && n == err->n && !memcmp(b, err->b ? err->b : "", n); free(b);
-    unlink(o); unlink(e); rmdir(dir);
+    if (cx_rmtree(dir)) return bad("replay scratch removal");
     if (got != (int)rc) return bad2("replay rc differs from the frozen record", input);
     if (!same) return bad2("replay output differs from the frozen record", input);
     return 0;
@@ -286,7 +288,8 @@ static int check(const char *data, const char *root, const char *override) {
     derived.H = H;
     { Text t = {0}, u = {0}; int same; shape_text(&derived, &t); shape_text(&shape, &u); same = t.n == u.n && !memcmp(t.b, u.b, t.n); free(t.b); free(u.b);
       if (!same) return bad("derived shape (gold table + weight literal) differs from the frozen net.tsv"); }
-    if (!harness[0] || strcmp(harness_root, root)) { char dir[] = "/tmp/netseal-cell-XXXXXX"; Text again = {0}; drop_harness();
+    if (!harness[0] || strcmp(harness_root, root)) { char dir[4096]; Text again = {0}; drop_harness();
+        scratch_template(dir, sizeof dir, "netseal-cell-XXXXXX");
         if (!mkdtemp(dir)) return bad("cell scratch");
         if (build_cell(root, dir, &derived, &again)) { drop_cell(dir); return 1; } free(again.b);
         snprintf(harness, sizeof harness, "%s/self", dir); snprintf(harness_root, sizeof harness_root, "%s", root); }
@@ -336,31 +339,27 @@ static int linkall(const char *data, const char *dir, const char *skip) {
     }
     closedir(d); return 0;
 }
-static void rmtree(const char *dir) {
-    DIR *d = opendir(dir); struct dirent *e; char p[4096]; struct stat st;
-    if (!d) return;
-    while ((e = readdir(d))) { if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-        snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
-        if (!lstat(p, &st) && S_ISDIR(st.st_mode)) rmtree(p); else unlink(p); }
-    closedir(d); rmdir(dir);
-}
-/* one byte appended to NAME inside DIR (a symlink is replaced by a changed copy); restore relinks the original */
+/* one byte appended to NAME inside DIR (a symlink is replaced by a changed copy); restore relinks the original.
+   Both replace the entry with rename(2) from a sibling: the link itself is replaced, never followed and never
+   written through (the links point into the checkout), and nothing is deleted. */
 static int mutate(const char *dir, const char *name) {
-    char dst[4096], *original; size_t size; Text changed = {0}; int rc;
-    snprintf(dst, sizeof dst, "%s/%s", dir, name);
+    char dst[4096], tmp[4200], *original; size_t size; Text changed = {0}; int rc;
+    snprintf(dst, sizeof dst, "%s/%s", dir, name); snprintf(tmp, sizeof tmp, "%s.mutated", dst);
     original = cx_read(dst, &size); if (!original) return bad2("mutation target absent", name);
-    unlink(dst); put(&changed, original, size); put(&changed, "\n", 1); rc = cx_write(dst, changed.b, changed.n); free(changed.b); free(original);
+    put(&changed, original, size); put(&changed, "\n", 1); rc = cx_write(tmp, changed.b, changed.n); free(changed.b); free(original);
+    if (!rc) rc = rename(tmp, dst);
     return rc ? bad("mutation write") : 0;
 }
 static int restore(const char *dir, const char *name, const char *srcdir) {
-    char dst[4096], src[4096], cwd[2048]; if (!getcwd(cwd, sizeof cwd)) return 1;
-    snprintf(dst, sizeof dst, "%s/%s", dir, name); unlink(dst);
+    char dst[4096], tmp[4200], src[4096], cwd[2048]; if (!getcwd(cwd, sizeof cwd)) return 1;
+    snprintf(dst, sizeof dst, "%s/%s", dir, name); snprintf(tmp, sizeof tmp, "%s.restored", dst);
     snprintf(src, sizeof src, "%s%s%s/%s", srcdir[0] == '/' ? "" : cwd, srcdir[0] == '/' ? "" : "/", srcdir, name);
-    return symlink(src, dst) ? bad("restore link") : 0;
+    return symlink(src, tmp) || rename(tmp, dst) ? bad("restore link") : 0;
 }
 static int negative(const char *data, const char *root) {
-    char *b, *p, *end; size_t n; char path[4096], scratch[] = "/tmp/netseal-negative-XXXXXX", mirror[] = "/tmp/netseal-root-XXXXXX", src[4096], dst[4096], cwd[2048];
+    char *b, *p, *end; size_t n; char path[4096], scratch[4096], mirror[4096], src[4096], dst[4096], cwd[2048];
     Text t = {0}; int omitted = 0, j, rc; const char *model = 0; char weight[256], gold[256], input[256], stdoutname[256];
+    scratch_template(scratch, sizeof scratch, "netseal-negative-XXXXXX"); scratch_template(mirror, sizeof mirror, "netseal-root-XXXXXX");
     /* 1. omission: the kernel row is dropped from a scratch dependency list */
     b = load(data, "dependencies.tsv", &n); if (!b || !mkdtemp(scratch) || !getcwd(cwd, sizeof cwd)) return bad("negative setup");
     p = b; while (*p) { end = strchr(p, '\n'); if (!end) return bad("negative record truncated");
@@ -396,7 +395,7 @@ static int negative(const char *data, const char *root) {
           if (!check(scratch, root, 0)) return bad2("changed frozen record escaped", targets[j]);
           if (restore(scratch, targets[j], data)) return 1; } }
     if (check(scratch, root, 0)) return bad("restored scratch seal failed");
-    rmtree(scratch); rmtree(mirror);
+    if (cx_rmtree(scratch) || cx_rmtree(mirror)) return bad("negative scratch removal");
     printf("netseal %s negative: PASS omitted kernel row, changed unisa_core.c / weight literal / gold table, changed cases / decisions / model rejected; shared inputs untouched\n", shape.net);
     return 0;
 }

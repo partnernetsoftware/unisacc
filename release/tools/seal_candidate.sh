@@ -13,4 +13,4 @@ ver=__import__('re').findall(r'"([0-9.]+)"',open('src/version.h').read())[0]
 rec={'schema':1,'version':ver,'ref':f'ghcr.io/partnernetsoftware/unisacc-candidate@{digest}','tag':f'ghcr.io/partnernetsoftware/unisacc-candidate:{tag}','unisacc_com_sha256':b['artifact_sha256'],'bytes':len(raw),'sources_sha256':b['sources_sha256'],'sealed_from_commit':subprocess.check_output(['git','rev-parse','HEAD']).decode().strip(),'members':['unisacc.com','unisacc.com.build.json','models.json'],'note':note}
 pathlib.Path('release/candidate.json').write_text(json.dumps(rec,indent=2)+'\n');print(json.dumps(rec)[:300])
 PY
-rm -rf $T
+[ -n "$T" ] && sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"   # the one guard (commissar ruling 2026-10-23)

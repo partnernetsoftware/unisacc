@@ -5,7 +5,8 @@
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R" || exit 2
 B=$R/tests/bound
-T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-seedape.XXXXXX"); trap 'rm -rf "$T"' EXIT
+_SD="$R"/tests   # the one deletion guard: argv CLI tests/safedel.cx over include/unisa_safedel.h
+T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-seedape.XXXXXX"); trap 'sh "$_SD/cxbin" "$_SD/safedel.cx" --purge -- "${T:?}"' EXIT
 fail() { echo "seedape: $*"; exit 1; }
 "$B" 50 tests/build_ref.sh "$T/ref.c" "$T/ua" >/dev/null 2>&1 || fail "same-source reference does not build"
 "$B" 30 cc -std=c99 -O2 -w -DAPE_ZLIB -o "$T/ape" seed/ape.c -lz || fail "ape.c does not build"

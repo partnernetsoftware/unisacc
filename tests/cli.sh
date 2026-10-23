@@ -156,10 +156,10 @@ say "--version" "a version" "$got"
 # No mode at all: RUN (owner decision 2026-10-01, R17-10) -- deliberately not
 # cc's silent a.out; a file is written only with -o / -b / -S / -c / -E.
 printf '#include <stdio.h>\nint main(void){puts("plain build");return 0;}\n' > "$T/plain.c"
-rm -f "$T/a.out"
+sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T/a.out" || exit 3
 say "FILE.c alone runs" "plain build" "$( (cd "$T" && bound 60 "$UA_RUN" plain.c) 2>&1)"
 say "FILE.c alone leaves no a.out" "none" "$([ -e "$T/a.out" ] && echo left || echo none)"
-rm -f "$T/runout" "$T/runs" "$T/runc" "$T/rune" "$T/runb"
+sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T/runout" "$T/runs" "$T/runc" "$T/rune" "$T/runb" || exit 3
 (cd "$T" && bound 20 "$UA_RUN" plain.c -run -o runout >/dev/null 2>&1)
 say "-run -o leaves no file" "none" "$([ -e "$T/runout" ] && echo left || echo none)"
 (cd "$T" && bound 20 "$UA_RUN" plain.c -run -S -o runs >/dev/null 2>&1)
@@ -419,7 +419,7 @@ say "FILE.c -o names it" "plain build" "$( (cd "$T" && bound 10 ./plainx) 2>&1)"
 say "-dump-tokens" "6 tokens" "$( (cd "$T" && printf 'int x = 1;\n' > tk.c && bound 20 "$UA_RUN" -dump-tokens tk.c) | tail -1)"
 
 # a failed compile leaves nothing behind; a missing input is named on stderr
-printf 'int main(void){ int x = ; }\n' > "$T/bad.c"; rm -f "$T/a.out"
+printf 'int main(void){ int x = ; }\n' > "$T/bad.c"; sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T/a.out" || exit 3
 (cd "$T" && bound 60 "$UA_RUN" bad.c >/dev/null 2>&1)
 say "error leaves no a.out" "none" "$([ -e "$T/a.out" ] && echo left || echo none)"
 say "missing input on stderr" "unisacc: error: cannot open nope.c" \

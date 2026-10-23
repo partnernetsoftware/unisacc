@@ -44,7 +44,8 @@ check)
  ready "$D/models/on" || { echo 'NEED_PREPARE callback E3 on models' >&2;exit 75; }
  (cd "$D/tools" && sha256sum -c --status runner.sha256)
  [ -f tests/seals/librarycallbacke3/cases.json ] || { echo 'NEED_PREPARE hash-bound callback E3 cases, not PASS' >&2;exit 75; }
- O=$(mktemp -d "${TMPDIR:-/tmp}/callback-e3-check.XXXXXX");trap 'rm -rf "$O"' EXIT HUP INT TERM
+ _SD="$R"/tests   # the one deletion guard: argv CLI tests/safedel.cx over include/unisa_safedel.h
+ O=$(mktemp -d "${TMPDIR:-/tmp}/callback-e3-check.XXXXXX");trap 'sh "$_SD/cxbin" "$_SD/safedel.cx" --purge -- "${O:?}"' EXIT HUP INT TERM
  b python3 tests/librarycallbackproduce.py --root "$R" --product "$UA" --cache "$D" --out "$O" --part 1 --cases tests/seals/librarycallbacke3/cases.json --checker tests/librarycallbacke3check.cx --run;;
 *) echo 'usage: --selftest | --cache-dir | --prepare-gen/runner/capture | --prepare-c/python/tbl/net/check off|on | check' >&2;exit 2;;
 esac

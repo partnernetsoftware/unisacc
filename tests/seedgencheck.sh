@@ -11,7 +11,8 @@ sh "$R/tests/cxbin" "$R/tests/seedmemory.cx" gen "$@" || exit $?
 B=$R/tests/bound
 T=${TMPDIR:-/tmp}/unisacc-seedgen; mkdir -p "$T"
 key=$(cat exec/assemble.py exec/finite_rules.py exec/build/*.py exec/*/*.tsv exec/facts/*.tsv weights/gold/*.tsv 2>/dev/null | shasum | cut -c1-16)
-G=$T/gen.$$; trap 'rm -f "$G"' EXIT   # per run: gate shards build concurrently
+_SD="$R"/tests   # the one deletion guard: argv CLI tests/safedel.cx over include/unisa_safedel.h
+G=$T/gen.$$; trap 'sh "$_SD/cxbin" "$_SD/safedel.cx" --purge -- "${G:?}"' EXIT   # per run: gate shards build concurrently
 "$B" 55 cc $GEN_CC_FLAGS -o "$G" seed/gen.c || { echo "seedgen: gen.c does not build"; exit 1; }
 sh "$R/tests/cxbin" "$R/tests/seedmemory.cx" gen "$@" --verify-binary "$G" || exit $?
 spec() { case $1 in
@@ -36,8 +37,8 @@ run() {
     [ -s "$py" ] || { echo "DIFF $n (python reference failed)"; return; }
     # a fresh output each run, and only a zero exit may compare: a timed-out or failed
     # generator must not be judged by a c-$n.json some earlier run left behind
-    rm -f "$T/c-$n.json"
-    "$B" 55 "$G" "$st" "$T/c-$n.json.$$" "$@" 2> "$T/c-$n.err" || { echo "DIFF $n (C generator rc=$?) $(tail -1 "$T/c-$n.err")"; rm -f "$T/c-$n.json.$$"; return; }
+    sh "$_SD/cxbin" "$_SD/safedel.cx" --purge -- "${T:?}/c-$n.json" || { echo "DIFF $n (stale output not removed)"; return; }
+    "$B" 55 "$G" "$st" "$T/c-$n.json.$$" "$@" 2> "$T/c-$n.err" || { echo "DIFF $n (C generator rc=$?) $(tail -1 "$T/c-$n.err")"; sh "$_SD/cxbin" "$_SD/safedel.cx" --purge -- "$T/c-$n.json.$$"; return; }
     mv "$T/c-$n.json.$$" "$T/c-$n.json"
     if cmp -s "$T/c-$n.json" "$py"; then echo "SAME $n"; else echo "DIFF $n $(tail -1 "$T/c-$n.err")"; fi
 }

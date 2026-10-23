@@ -9,7 +9,7 @@ _BOUND=$("$_BOUND" --helper) || exit 2
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 . ./tests/lib.sh; ua_ready
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d); trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT
 ok=0; bad=0; skip=0
 if [ "$(uname -s)" != Darwin ]; then
     echo "  skip forward (macOS only in 0.0.19)"; echo; echo "forward  ok 0   wrong 0   skipped 1"
@@ -42,12 +42,13 @@ for f in tests/forward/*.c; do
         if [ "$got" = "$want" ]; then ok=$((ok+1)); echo "  ok   $b ($HOST image)"; else bad=$((bad+1)); echo "  FAIL $b ($HOST image): got [$got] want [$want]"; fi
     else bad=$((bad+1)); echo "  FAIL $b ($HOST image): $(head -1 "$T/err")"; fi
 done
+# guest side: a fresh mktemp directory per probe and no deletion (the deletion guard does not run in the guest; its /tmp is the VM's)
 VM=${LIMA_VM:-default}
 if command -v limactl >/dev/null && [ "$(limactl list "$VM" --format '{{.Status}}' 2>/dev/null)" = Running ] && [ "$(limactl list "$VM" --format '{{.Arch}}' 2>/dev/null)" = aarch64 ]; then
     for f in tests/forward/*.c; do
         b=$(basename "$f" .c); [ "$b" = win ] && continue
         "$_BOUND" 30 "$UA" "$f" -b lnx/arm64 -o "$T/$b.lnx" 2>/dev/null || { bad=$((bad+1)); echo "  FAIL $b lnx/arm64 compile"; continue; }
-        out=$(tar -C "$T" -cf - "$b.lnx" -C "$R/tests/forward" "$b.c" | "$_BOUND" 40 limactl shell "$VM" -- sh -c "rm -rf /tmp/fw_$b && mkdir -p /tmp/fw_$b && cd /tmp/fw_$b && tar xf - && chmod +x $b.lnx && ./$b.lnx > a.txt 2>&1; gcc -w -o ref $b.c -lm && ./ref > b.txt 2>&1; cmp -s a.txt b.txt && echo SAME || diff b.txt a.txt | head -4")
+        out=$(tar -C "$T" -cf - "$b.lnx" -C "$R/tests/forward" "$b.c" | "$_BOUND" 40 limactl shell "$VM" -- sh -c "d=\$(mktemp -d /tmp/fw_$b.XXXXXX) && cd \"\$d\" && tar xf - && chmod +x $b.lnx && ./$b.lnx > a.txt 2>&1; gcc -w -o ref $b.c -lm && ./ref > b.txt 2>&1; cmp -s a.txt b.txt && echo SAME || diff b.txt a.txt | head -4")
         case "$out" in SAME) ok=$((ok+1)); echo "  ok   $b lnx/arm64 image";; *) bad=$((bad+1)); echo "  FAIL $b lnx/arm64 image"; echo "$out";; esac
     done
 else skip=$((skip+1)); echo "  skip lnx/arm64 images (Lima $VM not running)"; fi

@@ -19,7 +19,7 @@ case ${1:-check} in
 --prepare-authprobe) b cc -O1 -w -I. tests/librarycallbackauthprobe.c "$ASM" -lffi -ldl -o "$D/tools/auth-probe";(cd "$D/tools" && sha256sum auth-probe >probe.sha256);;
 check)
  (cd "$D/tools" && sha256sum -c --status signature.sha256 && sha256sum -c --status probe.sha256)
- O=$(mktemp -d "${TMPDIR:-/tmp}/callback-auth-check.XXXXXX");trap 'rm -rf "$O"' EXIT HUP INT TERM
+ O=$(mktemp -d "${TMPDIR:-/tmp}/callback-auth-check.XXXXXX");trap 'sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${O:?}"' EXIT HUP INT TERM
  b python3 tests/librarycallbackproduce.py --root "$R" --product "$UA" --out "$O" --part 1 --checker tests/librarycallbackauthcheck.cx --auth "$D/tools/auth-probe" "$D/tools/signature-capture" tests/fixtures/librarycallback/auth-A.c tests/fixtures/librarycallback/auth-B.c;;
 *) echo 'usage: --selftest | --cache-dir | --prepare-signaturecapture/authprobe | check' >&2;exit 2;;
 esac

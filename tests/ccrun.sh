@@ -8,7 +8,7 @@ _BOUND=$("$R/tests/bound" --helper) || exit 2
 UA=${UA:-/tmp/ua_ref}
 BASE=$R/tests/ccrun.baseline
 KNOWN=$R/tests/ccrun.knownwrong
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d) || exit 2; trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT
 pass=0; fail=0; uns=0; known=0; revived=0
 : > "$T/passing"
 PYFRONT=$R/tests/pyfront.knownfail   # Python-front-end gaps, shared with fat.sh/native.sh
@@ -18,9 +18,9 @@ knownfail_load_many "$T/known.keys" "$KNOWN" "$PYFRONT" "$REFUSED" || exit 1
 isknown() { knownfail_has "$1"; }
 for f in "$@"; do
     b=$(basename "$f" .c)
-    rm -f "$T/ref.status"
+    sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T/ref.status" || exit 3
     case $f in /*) fa=$f;; *) fa=$PWD/$f;; esac
-    rm -rf "$T/rd" "$T/vd"; mkdir "$T/rd" "$T/vd"
+    sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T/rd" "$T/vd" || exit 3; mkdir "$T/rd" "$T/vd"
     # Independent VM routes overlap; the full allocator churn stays intact.  Each side runs in its own
     # directory: probes that write a file (stream_wbuf.tmp, u_probe.txt) raced each other in one cwd.
     (cd "$T/rd" && PYTHONPATH="$R${PYTHONPATH:+:$PYTHONPATH}" "$_BOUND" --status "$T/ref.status" 45 python3 -m unisa run "$fa" --drive built >"$T/ref.out" 2>"$T/ref.err"; echo $? >"$T/ref.rc") & refpid=$!
@@ -29,7 +29,7 @@ for f in "$@"; do
         uns=$((uns+1))
         printf "  UNS  %-12s %s\n" "$b" "$(head -1 "$T/$b.err"|cut -c1-48)"; continue
     fi
-    rm -f "$T/vm.status"
+    sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T/vm.status" || exit 3
     got=$(cd "$T/vd" && PYTHONPATH="$R${PYTHONPATH:+:$PYTHONPATH}" "$_BOUND" --status "$T/vm.status" 45 python3 -m unisa vm "$T/$b.tape" 2>"$T/vm.err"); grc=$?
     wait "$refpid"
     want=$(cat "$T/ref.out"); wrc=$(cat "$T/ref.rc")

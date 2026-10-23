@@ -16,14 +16,14 @@ UA=${UA:-/tmp/ua_ref}; . ./tests/lib.sh; ua_ready
 b() { "$_BOUND" 55 "$@"; }
 # Cache producer callback: reuse the original preparation, with already-built models.
 if [ "${1:-}" = --build-prepared ]; then
- T=${2:?prepared models directory}; U=$(mktemp -d); trap 'rm -rf "$U"' EXIT
+ T=${2:?prepared models directory}; U=$(mktemp -d); trap '[ -z "$U" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$U"' EXIT
  b env STAGE_MODELS_READY=1 EXEC_CC=cc NETWORK=1 TARGET="$TARGET" ./exec/pipeline/elf.sh "$T" exec/c/run.c > "$U/log" 2>&1 || { cat "$U/log"; exit 1; }
  b python3 tests/sourceflat.py "$U/unisacc.c"
  b "$UA" -O2 "$U/unisacc.c" -o "$U/compiler"
  b "$U/compiler" -O2 exec/c/run.c -o "$T/run-ua"
  exit 0
 fi
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d); trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT
 PART=${NATIVE_PART:-all}
 case $PART in
  all|stages) INPUTS="examples/hello.c examples/fib.c tests/c/b_toknames.c exec/c/run.c";;
@@ -62,7 +62,7 @@ if part in ('all', 'stages'):
         run([ua,'--check-net',p/(stage+'.tbl'),p/(stage+'.net')])
     for src in ['examples/hello.c','examples/fib.c','tests/c/b_toknames.c']:
         name=pathlib.Path(src).stem;inp=pathlib.Path(src)
-        attrs=p/(name+'.ua.attributes');attrs.unlink(missing_ok=True)
+        attrs=p/(name+'.ua.attributes');subprocess.run(["sh",str(root/"tests/cxbin"),str(root/"tests/safedel.cx"),"--purge","--",str(attrs)],check=True)
         os.environ['UNISA_ATTRIBUTES']=str(attrs)
         for stage in ['e2','e1','e3','e4','prune','lower','elf']:
             got=run([ua,p/(stage+'.net'),inp,src,root/'include'])
@@ -76,7 +76,7 @@ if part in ('all', 'stages'):
     for stage in ['e2','e1','e3','e4','prune','lower','elf']:
         run([netrun,'--check-net',p/(stage+'.tbl'),p/(stage+'.net')])
     src='exec/c/run.c';inp=pathlib.Path(src)
-    attrs=p/'run.net.attributes';attrs.unlink(missing_ok=True)
+    attrs=p/'run.net.attributes';subprocess.run(["sh",str(root/"tests/cxbin"),str(root/"tests/safedel.cx"),"--purge","--",str(attrs)],check=True)
     os.environ['UNISA_ATTRIBUTES']=str(attrs)
     for stage in ['e2','e1','e3','e4','prune','lower','elf']:
         got=run([netrun,p/(stage+'.net'),inp,src,root/'include'])

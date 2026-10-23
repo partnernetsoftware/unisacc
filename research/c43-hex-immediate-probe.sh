@@ -6,7 +6,8 @@
 # refused by both, with empty stdout. Exit 0 only when every case matches; each run is bounded by the caller.
 set -u
 P=$1; R=$2; T=$(mktemp -d "${TMPDIR:-/tmp}/c43hex.XXXXXX") || exit 2
-trap 'rm -rf "$T"' EXIT
+_SD="$(cd "$(dirname "$0")/.." && pwd)"/tests   # the one deletion guard: argv CLI tests/safedel.cx over include/unisa_safedel.h
+trap 'sh "$_SD/cxbin" "$_SD/safedel.cx" --purge -- "${T:?}"' EXIT
 fail=0; n=0
 tape() { printf '_start:\n  imm r2, %s\n  ret\n' "$1" > "$T/$2.tape"; }
 tape 31 dec; tape 0x1f hex; tape -0x10 neghex; tape 0x7fffffffffffffff hi64; tape -0x8000000000000000 lo64

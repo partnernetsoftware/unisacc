@@ -42,7 +42,7 @@ def main():
         if checks['ffi']['stdout']!='10\n':raise RuntimeError(checks['ffi'])
         clone=d/'Unisacc.app';shutil.copytree(app,clone)
         centry=clone/'Contents/MacOS/unisacc';payload=clone/'Contents/Resources/unisacc.com'
-        original=payload.read_bytes();payload.unlink()
+        original=payload.read_bytes();subprocess.run(['sh',str(ROOT/'tests/cxbin'),str(ROOT/'tests/safedel.cx'),'--purge','--',str(payload)],check=True)   # the one deletion guard (commissar ruling 2026-10-23)
         checks['missing_resource']=call([centry,*tail],d,126)
         payload.write_bytes(original+b'\n')
         checks['tampered_seal']=call([centry,*tail],d,126)
@@ -51,7 +51,7 @@ def main():
         payload.write_bytes(original)
         manifest=clone/'Contents/Resources/payload.sha256';manifest.write_text('0'*64+'\n')
         checks['tampered_manifest']=call([centry,*tail],d,126)
-        shutil.rmtree(clone);shutil.copytree(app,clone)
+        subprocess.run(['sh',str(ROOT/'tests/cxbin'),str(ROOT/'tests/safedel.cx'),'--purge','--max-files','100000','--',str(clone)],check=True);shutil.copytree(app,clone)
         checks['quarantine_mark']=call(['/usr/bin/xattr','-w','com.apple.quarantine','0083;00000000;UnisaccQualification;',clone],d)
         checks['quarantined_gatekeeper']=call(['/usr/sbin/spctl','-a','-t','exec','-vv',clone],d,None)
     digest=hashlib.sha256((app/'Contents/Resources/unisacc.com').read_bytes()).hexdigest()

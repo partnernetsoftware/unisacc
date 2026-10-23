@@ -21,7 +21,7 @@ ready() {
     # sources and the helper are inputs: an edited seed header rebuilds d.json.
     _sgcc=${SEED_GEN_CC:-cc}
     _sgenv="SEED_GEN=${SEED_GEN-<unset>} SEED_GEN_BIN=${SEED_GEN_BIN-<unset>} SEED_GEN_CC=${SEED_GEN_CC-<unset>} cc=$(command -v "$_sgcc" || echo '<none>')"
-    fresh $T/d.json $B sh -c 'd=$(mktemp -d "${TMPDIR:-/tmp}/seedgen-pprun.XXXXXX") || exit 2; SEED_GEN_DIR="$d" sh exec/pp/gen-delta.sh "$1"; r=$?; rm -rf "$d"; exit $r' "$_sgenv" $T/d.json -- exec/finite_rules.py exec/assemble.py exec/build/*.py exec/pp/*.py exec/pp/*.tsv exec/facts/pp-*.tsv weights/gold/pp.tsv $PYSRC $T/ua_ref.stamp exec/pp/gen-delta.sh seed/*.c seed/*.h
+    fresh $T/d.json $B sh -c 'd=$(mktemp -d "${TMPDIR:-/tmp}/seedgen-pprun.XXXXXX") || exit 2; SEED_GEN_DIR="$d" sh exec/pp/gen-delta.sh "$1"; r=$?; sh tests/cxbin tests/safedel.cx --purge -- "$d"; exit $r' "$_sgenv" $T/d.json -- exec/finite_rules.py exec/assemble.py exec/build/*.py exec/pp/*.py exec/pp/*.tsv exec/facts/pp-*.tsv weights/gold/pp.tsv $PYSRC $T/ua_ref.stamp exec/pp/gen-delta.sh seed/*.c seed/*.h
 }
 case "$1" in
 gen)      ready || exit 1 ;;   # 0.0.40 K5-1e: a failed ready is a failed gen (it ended 0 through the next case)
@@ -31,9 +31,9 @@ case "$1" in
 ex.*)     # the list is rebuilt when the probe set changes: a cached one
          # silently skipped three probes added after it was written
          ls examples/*.c tests/c/*.c > "$T/ex.new"
-         cmp -s "$T/ex.new" "$T/ex.txt" || { mv "$T/ex.new" "$T/ex.txt"; rm -f "$T"/ex.a?; split -l 20 "$T/ex.txt" "$T/ex."; }
+         cmp -s "$T/ex.new" "$T/ex.txt" || { sh tests/cxbin tests/safedel.cx -- "$T"/ex.a? || exit 1; mv "$T/ex.new" "$T/ex.txt"; split -l 20 "$T/ex.txt" "$T/ex."; }
           $B python3 exec/pp/compare.py "$T/d.json" "@$T/$1" ;;
 corpus.*) find "${CORPUS:-../../corpus}" -name '*.c' | sort > "$T/corpus.new"
-          cmp -s "$T/corpus.new" "$T/corpus.txt" || { mv "$T/corpus.new" "$T/corpus.txt"; rm -f "$T"/corpus.a?; split -l 40 "$T/corpus.txt" "$T/corpus."; }
+          cmp -s "$T/corpus.new" "$T/corpus.txt" || { sh tests/cxbin tests/safedel.cx -- "$T"/corpus.a? || exit 1; mv "$T/corpus.new" "$T/corpus.txt"; split -l 40 "$T/corpus.txt" "$T/corpus."; }
           $B python3 exec/pp/compare.py "$T/d.json" "@$T/$1" ;;
 esac

@@ -55,7 +55,7 @@ for f in examples/*.c tests/c/*.c tests/c99/*.c corpus/c-testsuite/tests/single-
         if grep -Fxqs "$(basename "$f" .c)" "$TAPE_REFUSE_KEYS"; then
             fail "$f $o: listed in opt.tape-refuse but the tape build passed (delete its line)"; valid=0; continue
         fi
-        rm -f "$T/status$o"
+        sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T/status$o"   # the one guard (commissar ruling 2026-10-23)
         (cd "$T" && "$_BOUND" --status "$T/status$o" 5 "$UA" $o -I "$d" "$R/$f" -run > "$T/out$o" 2>&1 </dev/null
          echo "rc=$?" >> "$T/out$o")
     done

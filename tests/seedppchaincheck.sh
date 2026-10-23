@@ -4,7 +4,7 @@
 # consumer check -- not exec-chain acceptance:
 #  * scratch tree from one commit; python3/cc shims log every call (pass-through known; refuse unknown rc 97)
 #  * harness-only: chain's EXIT trap is extended in the scratch copy to snapshot e2.json / e2-gen.err /
-#    .seed-gen-cache into $CHAINCAP before rm (production trap unchanged on disk under test for the gen line)
+#    .seed-gen-cache into $CHAINCAP before the guard purges T (production trap unchanged on disk under test for the gen line)
 #  * positive: CHAINSHARD=1/1 NETWORK=0 one tiny probe; chain rc 0; via helper; e2 SAME as independent
 #    seed-gen and gen.py pp (no flags); no direct gen.py pp; lex reached after E2
 #  * NEG-red / NEG-missing / NEG-badsg: chain rc 1 ("E2 gen failed"); no lex; no pass-gen-pp; helper_rc 3/2/2
@@ -74,7 +74,7 @@ finish() {
         [ -z "$EV" ] || printf 'EVIDENCE INCOMPLETE status %s scratch %s\n' "$st" "$S" >> "$EV/lines.txt" 2>/dev/null
         [ "$st" -ne 0 ] || st=3
     else
-        rm -rf "$S"
+        cd "$R" && sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge --force-count 50000 -- "${S:?}"   # a tree export inside: --force-count; out of it first (the guard refuses the cwd's ancestors)
     fi
     exit "$st"
 }
@@ -98,6 +98,12 @@ cd "$W" || exit 2
 cp -f "$R/exec/c/chain.sh" "$W/exec/c/chain.sh" || exit 2
 cp -f "$R/exec/pp/gen-delta.sh" "$W/exec/pp/gen-delta.sh" || exit 2
 cp -f "$R/exec/parse2gen/gen-delta.sh" "$W/exec/parse2gen/gen-delta.sh" || exit 2
+# the deletion guard the scratch chain calls (tests/safedel.cx through tests/cxbin, commissar ruling 2026-10-23): no
+# unisacc.com here, so tests/cxbin builds it with the system cc -- now, before the shims own PATH (the cc shim refuses
+# anything but its two recipes); every later call is a cache hit
+mkdir -p "$W/include" && cp -f "$R/tests/cxbin" "$R/tests/safedel.cx" "$W/tests/" \
+    && cp -f "$R/include/cx.h" "$R/include/unisa_sha256.h" "$R/include/unisa_safedel.h" "$W/include/" || exit 2
+sh "$W/tests/cxbin" "$W/tests/safedel.cx" --dry-run -- "$S/guard-warm" > /dev/null || { echo "seedppch: the deletion guard does not build"; exit 2; }
 BOUND_CACHE=$S/boundcache; export BOUND_CACHE
 REALPY=$(command -v python3) && REALCC=$(command -v cc) && REALSH=$(command -v sh) || { echo "seedppch: python3, cc or sh missing"; exit 2; }
 mkdir "$S/shim"
@@ -207,12 +213,12 @@ PARSE2_PY=bogus "$S/shim/python3" exec/build/gen.py parse2 "$S/x.json" >/dev/nul
 fi
 unset SHIMLOG
 
-# harness: extend EXIT trap in the scratch chain only (capture before rm)
+# harness: extend EXIT trap in the scratch chain only (capture before the guard purges T)
 python3 - "$CHAIN" <<'PY' || { echo "seedppch: trap harness failed"; exit 2; }
 import sys
 p = sys.argv[1]
 s = open(p).read()
-old = "trap 'rm -rf \"$T\"' EXIT"
+old = "trap 'sh \"$R/tests/cxbin\" \"$R/tests/safedel.cx\" --purge -- \"${T:?}\"' EXIT"
 new = ("trap 'mkdir -p \"$CHAINCAP\"; "
        "cp -f \"$T/e2.json\" \"$CHAINCAP/e2.json\" 2>/dev/null; "
        "cp -f \"$T/e1.json\" \"$CHAINCAP/e1.json\" 2>/dev/null; "
@@ -220,8 +226,8 @@ new = ("trap 'mkdir -p \"$CHAINCAP\"; "
        "cp -f \"$T/e3-gen.err\" \"$CHAINCAP/e3-gen.err\" 2>/dev/null; "
        "cp -f \"$T/e2-gen.err\" \"$CHAINCAP/e2-gen.err\" 2>/dev/null; "
        "cp -f \"$T/e2-gen.out\" \"$CHAINCAP/e2-gen.out\" 2>/dev/null; "
-       "rm -rf \"$CHAINCAP/cache\"; cp -a \"$T/.seed-gen-cache\" \"$CHAINCAP/cache\" 2>/dev/null; "
-       "rm -rf \"$T\"' EXIT")
+       "sh \"$R/tests/cxbin\" \"$R/tests/safedel.cx\" --purge -- \"${CHAINCAP:?}/cache\"; cp -a \"$T/.seed-gen-cache\" \"$CHAINCAP/cache\" 2>/dev/null; "
+       "sh \"$R/tests/cxbin\" \"$R/tests/safedel.cx\" --purge -- \"${T:?}\"' EXIT")
 if s.count(old) != 1:
     raise SystemExit("trap line not found exactly once")
 open(p, "w").write(s.replace(old, new))
@@ -247,7 +253,7 @@ via_helper() {   # via_helper CAP LOG: keyed seed-gen in captured cache, no dire
 }
 run_chain() {   # run_chain CAP LOG [ENV...]: run scratch chain; prints rc; CAP gets snapshots
     cap=$1; log=$2; shift 2
-    rm -rf "$cap" "$cap.snap"; mkdir -p "$cap" "$cap.snap"; : > "$log"
+    sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${cap:?}" "${cap:?}.snap"; mkdir -p "$cap" "$cap.snap"; : > "$log"
     env -u SEED_GEN -u SEED_GEN_BIN -u SEED_GEN_CC -u SEED_GEN_DIR -u NEG_PARSE2_BIN -u PARSE2_PY -u SEEDPPCH_STOP_AFTER_E3 \
         PATH="$S/shim:$PATH" SHIMLOG="$log" CHAINCAP="$cap" SNAPDIR="$cap.snap" UA="$S/ua" \
         CHAINSHARD=1/1 NETWORK=0 "$@" \
@@ -266,7 +272,7 @@ hasclass "$log" pass-lex && ok "positive reaches lex after E2" || no "positive l
 [ -f "$cap/e2.json" ] || { no "positive missing captured e2.json"; }
 # independent refs
 g=$(ls "$cap/cache"/seed-gen-* 2>/dev/null | grep -v '\.sha256$' | head -1)
-rm -f "$S/e2-c-ref.json" "$S/e2-py.json"
+sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${S:?}/e2-c-ref.json" "${S:?}/e2-py.json"
 if [ -n "$PART" ]; then
     cp "$SEEDPPCH_PREPARED/e2-c-ref.json" "$S/e2-c-ref.json" && cp "$SEEDPPCH_PREPARED/e2-py.json" "$S/e2-py.json" || exit 75
 else
@@ -295,7 +301,7 @@ evw "POS snap_rc pp=$(cat "$sd/after-pp.rc" 2>/dev/null || echo none) parse2=$(c
     && ok "positive after-pp = after-parse2: one binary and its sidecar, same inode/mtime/sha (parse2 reused it)" \
     || no "positive cache snapshots differ or are not exactly two members"
 { ! hasclass "$log" pass-parse2 && ! hasclass "$log" short-parse2; } && ok "positive no Python parse2" || no "positive Python parse2 called"
-rm -f "$S/e3-c-ref.json"; rr=none
+sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${S:?}/e3-c-ref.json"; rr=none
 if [ -n "$PART" ]; then
     cp "$SEEDPPCH_PREPARED/e3-c-ref.json" "$S/e3-c-ref.json"; rr=$?
 else

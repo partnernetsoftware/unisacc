@@ -61,20 +61,7 @@ static char ROOT[PATHN];
 
 /* ---------- process exit: temporary directories go first ---------- */
 static char *TMPS[16]; static int NTMPS;
-static void rmtree(const char *d) {
-    DIR *dp; struct dirent *e; char p[PATHN]; struct stat st;
-    if (lstat(d, &st) != 0) return;
-    if (!S_ISDIR(st.st_mode)) { unlink(d); return; }
-    if ((dp = opendir(d))) {
-        while ((e = readdir(dp))) {
-            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-            snprintf(p, sizeof p, "%s/%s", d, e->d_name);
-            rmtree(p);
-        }
-        closedir(dp);
-    }
-    rmdir(d);
-}
+static void rmtree(const char *d) { cx_rmtree(d); }   /* through the one deletion guard (prelude cx_rmtree), errors ignored */
 static void cleanup(void) { while (NTMPS > 0) { NTMPS--; if (TMPS[NTMPS]) rmtree(TMPS[NTMPS]); } }
 static void leave(int rc) { fflush(stdout); fflush(stderr); cleanup(); exit(rc); }
 /* the .py's uncaught exception: one line on stderr, rc 1 */
@@ -556,7 +543,7 @@ static void run_proc(char *const argv[], char *const envp[], const char *cwd, in
     int fo = mkstemp(to), fe = mkstemp(te), st = 0; long ticks = (long)secs * 100; pid_t pid, w;
     memset(p, 0, sizeof *p);
     if (fo < 0 || fe < 0) fail("OSError", oserr(errno, gettempdir()));
-    unlink(to); unlink(te);
+    cx_remove(to); cx_remove(te);
     fflush(stdout); fflush(stderr);
     pid = fork();
     if (pid < 0) fail("OSError", "fork failed");
@@ -1042,7 +1029,9 @@ static int lock_folder(const char *base, const char *folder) {   /* with locked(
     free(lp); return fd;
 }
 static void publish(const char *work, const char *dest) {
-    if (exists(dest)) rmtree(dest);
+    /* the stale entry under $UNISACC_MODEL_CACHE moves into the .trash of its root through the one deletion guard;
+       a refusal (cx_trash says why on stderr) fails the step */
+    if (exists(dest) && cx_trash(dest)) fail("OSError", "the deletion guard refused the stale cache entry");
     if (rename(work, dest)) fail("OSError", oserr(errno, work));
 }
 

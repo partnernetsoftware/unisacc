@@ -170,7 +170,7 @@ def main():
     if what == 'all':
         # one gate run under 60 s: side table (~3 s), 8 shards 4 at a time (~15 s each), merge
         side = out / (stage + '.rows.tsv')
-        side.unlink(missing_ok=True)
+        subprocess.run(['sh', str(ROOT / 'tests/cxbin'), str(ROOT / 'tests/safedel.cx'), '--purge', '--', str(side)], check=True)   # the one deletion guard (commissar ruling 2026-10-23)
         if stage != 'pp': build()
         sc = build(side)
         if sc.read_bytes() != dj.read_bytes():

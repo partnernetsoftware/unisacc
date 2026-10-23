@@ -34,7 +34,7 @@ fresh() {
     _w=$( { printf '%s\n' "$_c" "$@"; cat "$@"; } | cksum)
     [ -e "$_o" ] && [ "$(cat "$_o.stamp" 2>/dev/null)" = "$_w" ] && return 0
     echo "fresh: (re)building $_o" >&2
-    rm -f "$_o.stamp"
+    sh "$_SR/tests/cxbin" "$_SR/tests/safedel.cx" --purge -- "${_o:?}.stamp" || return 1   # the one deletion guard
     eval "$_c" || return $?
     printf '%s\n' "$_w" > "$_o.stamp"
 }

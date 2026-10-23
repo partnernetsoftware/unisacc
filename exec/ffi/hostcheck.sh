@@ -3,7 +3,7 @@
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 task_tmp=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-ffi-host.XXXXXX")
-trap 'rm -rf "$task_tmp"' EXIT HUP INT TERM
+trap '[ -z "$task_tmp" ] || sh "$root/tests/cxbin" "$root/tests/safedel.cx" --purge -- "$task_tmp"' EXIT HUP INT TERM
 cd "$root"
 python3 tests/bound.py 30 cc -DUFFI_HOST_SHIM -Wall -Wextra -Wno-unused-function exec/ffi/probe.c -lffi -o "$task_tmp/probe"
 python3 tests/bound.py 10 "$task_tmp/probe" > "$task_tmp/out"

@@ -31,9 +31,9 @@ def main():
             result['cases']['death-release']=attempt(unit);assert result['cases']['death-release']['rc']==0 and lock.stat().st_ino==inode
             lock.chmod(0o644);before=lock.read_bytes();result['cases']['bad-permission']=attempt(unit);assert result['cases']['bad-permission']['rc']==1 and lock.read_bytes()==before and stat.S_IMODE(lock.stat().st_mode)==0o644
             # Only our private fixture is replaced, never production/others' locks.
-            lock.unlink();target=unit/'target';target.write_bytes(b'UNCHANGED');target.chmod(0o600);lock.symlink_to(target)
+            assert command(['sh',str(ROOT/'tests/cxbin'),str(ROOT/'tests/safedel.cx'),'--purge','--',str(lock)],30)['rc']==0;target=unit/'target';target.write_bytes(b'UNCHANGED');target.chmod(0o600);lock.symlink_to(target)
             result['cases']['symlink']=attempt(unit);assert result['cases']['symlink']['rc']==1 and lock.is_symlink() and target.read_bytes()==b'UNCHANGED'
-            lock.unlink();lock.mkdir(mode=0o700);result['cases']['directory']=attempt(unit);assert result['cases']['directory']['rc']==1 and lock.is_dir()
+            assert command(['sh',str(ROOT/'tests/cxbin'),str(ROOT/'tests/safedel.cx'),'--purge','--',str(lock)],30)['rc']==0;lock.mkdir(mode=0o700);result['cases']['directory']=attempt(unit);assert result['cases']['directory']['rc']==1 and lock.is_dir()
             candidates=root/'candidates';candidates.mkdir(mode=0o700);session=root/'session';session.mkdir(mode=0o700)
             result['build']=command([sys.executable,str(APP/'reload_candidate.py'),'build',str(APP),str(ROOT/'unisacc.com'),str(candidates)],55);assert result['build']['rc']==0,result['build']
             info=json.loads(result['build']['stdout']);module.candidate.verify(info['candidate_dir'])

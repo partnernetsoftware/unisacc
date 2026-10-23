@@ -9,7 +9,7 @@ set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R" || exit 2
 B=$R/tests/bound
 T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-unisalibneed.XXXXXX") || exit 2
-trap 'rm -rf "$T"' EXIT
+trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT
 fail() { echo "unisalibneed: $*"; exit 1; }
 H=$(git rev-parse --verify HEAD) || exit 2
 echo "unisalibneed  tree $H"

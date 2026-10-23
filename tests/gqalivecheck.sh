@@ -5,7 +5,7 @@
 # Controlled fixture processes.
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-gqalive.XXXXXX"); pids=()
-trap 'kill ${pids[@]+"${pids[@]}"} 2>/dev/null; rm -rf "$T"' EXIT
+trap 'kill ${pids[@]+"${pids[@]}"} 2>/dev/null; [ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT
 fail() { echo "gqalive: $*"; exit 1; }
 mkdir -p "$T/a" "$T/b"; printf 'import time\ntime.sleep(40)\n' > "$T/a/gatequeue.py"; cp "$T/a/gatequeue.py" "$T/b/notgatequeue.py"
 python3 -u "$T/a/gatequeue.py" & pids+=($!); real_u=$!
@@ -40,16 +40,19 @@ PY
 mkdir -p "$T/shim"; printf '#!/bin/sh\nexit 1\n' > "$T/shim/ps"; chmod +x "$T/shim/ps"
 GQALIVE_TABLE=ps PATH="$T/shim:$PATH" python3 "$R/release/tools/gqalive.py" >/dev/null 2>&1; [ $? = 2 ] || fail "an unreadable process table was not exit 2"
 # queue.sh accepts only 0 (running) and 1 (none) from the helper: 2, 127, 137 refuse the window (helper stubbed)
-mkdir -p "$T/q/release/tools" "$T/q/tests"; cp "$R/release/tools/queue.sh" "$T/q/release/tools/"
-for f in queuestart.py queuestart.sh installpair.sh stagelog.py; do cp "$R/release/tools/$f" "$T/q/release/tools/"; done
-(cd "$T/q" && git init -q . && git -c user.name=t -c user.email=t@t commit -q --allow-empty -m b)
+# the queue.sh fixture is a git clone of its own (Q) and is left in place: the one deletion guard (tests/safedel.cx)
+# refuses any tree holding .git, by design; it holds five small scripts and an empty commit.  T is purged.
+Q=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-gqalive-q.XXXXXX") || exit 2
+mkdir -p "$Q/release/tools" "$Q/tests"; cp "$R/release/tools/queue.sh" "$Q/release/tools/"
+for f in queuestart.py queuestart.sh installpair.sh stagelog.py; do cp "$R/release/tools/$f" "$Q/release/tools/"; done
+(cd "$Q" && git init -q . && git -c user.name=t -c user.email=t@t commit -q --allow-empty -m b)
 D=$T/cand; W=$T/wt; mkdir -p "$D" "$W/tests" "$T/seed"; printf c > "$D/unisacc-next.com"; printf s > "$T/seed/unisacc-seed.com"
 printf '{"artifact_sha256":"%s"}\n' "$(shasum -a 256 "$D/unisacc-next.com" | cut -d' ' -f1)" > "$D/unisacc-next.com.build.json"
 printf '#!/bin/sh\nexit 0\n' > "$T/ua"; chmod +x "$T/ua"; printf '#!/bin/sh\necho x >> "%s/launched"\nexit 0\n' "$T" > "$W/tests/term.sh"; chmod +x "$W/tests/term.sh"
 for code in 2 127 137; do
-  printf 'import sys\nsys.exit(%s)\n' "$code" > "$T/q/release/tools/gqalive.py"; rm -f "$T/launched"
+  printf 'import sys\nsys.exit(%s)\n' "$code" > "$Q/release/tools/gqalive.py"; sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T/launched" || exit 3
   env -u QUEUE_START STAGELOG_RUN=0 QUEUE_WORKTREE="$W" QUEUE_STATE="$T/qs$code" QUEUE_BACKUP="$T/qb$code" QUEUE_WINDOWS=1 UNISACC_FFI_X86_PROVIDER=/x \
-    bash "$T/q/release/tools/queue.sh" "$D" "$T/ua" "$T/seed" > "$T/out" 2>&1; rc=$?
+    bash "$Q/release/tools/queue.sh" "$D" "$T/ua" "$T/seed" > "$T/out" 2>&1; rc=$?
   [ "$rc" = 2 ] && [ ! -e "$T/launched" ] || fail "helper exit $code: queue rc=$rc, launched=$([ -e "$T/launched" ] && echo yes || echo no) $(cat "$T/out")"
 done
 echo "gqalive  python3 -u and -B -X dev gatequeue.py found (proc and ps tables); Python.app/.../Python argv0 (macOS) matches case-insensitively; notgatequeue.py and a live shell whose text mentions gatequeue.py not counted; a failing ps is exit 2; a trailing -X/-W never crashes the classifier; queue.sh refuses the window on helper exit 2/127/137"

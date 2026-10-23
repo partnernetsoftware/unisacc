@@ -51,8 +51,7 @@ def main():
    status,out,_=run(d,original,'carrier',files=Files(target),loaded=loaded,maxsteps=2000000)
    if target is not None:(rd/'cli/target').write_bytes(target)
    else:
-    try:(rd/'cli/target').unlink()
-    except FileNotFoundError:pass
+    subprocess.run(['sh',str(ROOT/'tests/cxbin'),str(ROOT/'tests/safedel.cx'),'--purge','--',str(rd/'cli/target')],check=True)   # the one deletion guard (missing: rc 0)
    pkg.write_bytes(build([routes],[('00',rd)],cache=False));src.write_bytes(original)
    p=subprocess.run([str(runtime),'--bundle',str(pkg),'carrier',str(src)],capture_output=True,timeout=20)
    assert (status=='accept')==(p.returncode==0),(status,p.returncode,p.stderr)

@@ -55,7 +55,7 @@ def main(names):
             f.write(profile(files, trees)); sb = f.name
         r = subprocess.run(bound_cmd(55, 'sandbox-exec', '-f', sb, *command),
                            cwd=ROOT, capture_output=True, text=True)
-        os.unlink(sb)
+        subprocess.run(['sh', str(ROOT / 'tests/cxbin'), str(ROOT / 'tests/safedel.cx'), '--purge', '--', sb], check=True)   # the one deletion guard
         out = r.stdout + r.stderr
         log = pathlib.Path(tempfile.gettempdir()) / ('gateaudit-%s.log' % name); log.write_text(out)
         denied = 'Operation not permitted' in out

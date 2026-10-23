@@ -6,7 +6,8 @@
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R" || exit 2
 B=$R/tests/bound
-T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-seedpack.XXXXXX"); trap 'rm -rf "$T"' EXIT
+_SD="$R"/tests   # the one deletion guard: argv CLI tests/safedel.cx over include/unisa_safedel.h
+T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-seedpack.XXXXXX"); trap 'sh "$_SD/cxbin" "$_SD/safedel.cx" --purge -- "${T:?}"' EXIT
 fail() { echo "seedpack: $*"; exit 1; }
 "$B" 50 cc -std=c99 -O2 -w -o "$T/pack" seed/pack.c -lz || fail "pack.c does not build"
 "$B" 50 cc -std=c99 -O2 -w -Iseed -o "$T/gen" seed/gen.c || fail "gen.c does not build"

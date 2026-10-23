@@ -25,6 +25,9 @@
 UA_RUN=${UA_RUN:-$UA}
 # callers set R (the repo root) first; BASH_SOURCE is a bashism dash rejects
 _LIB_R=${R:-$(cd "$(dirname "$0")/.." && pwd)}
+# _lib_safedel ARG... -- every deletion here goes through the one guard (include/unisa_safedel.h) via its
+# argv CLI tests/safedel.cx (commissar ruling 2026-10-23): refused unless under the temp root or out/.
+_lib_safedel() { sh "$_LIB_R/tests/cxbin" "$_LIB_R/tests/safedel.cx" "$@"; }
 
 # ua_ready -- the self-hosted compiler exists, or build it.
 ua_rebuild_to() {   # ua_rebuild_to <final-path> <stamp-value-or-empty>
@@ -34,12 +37,12 @@ ua_rebuild_to() {   # ua_rebuild_to <final-path> <stamp-value-or-empty>
     # of either.  Writing in place is what produced the 270-image divergence.
     local tmp="$1.tmp.$$"
     bound 30 "$_LIB_R/tests/build_ref.sh" "$tmp.c" "$tmp" >/dev/null || {
-        rm -f "$tmp" "$tmp.c"
+        _lib_safedel --purge -- "$tmp" "$tmp.c"
         echo "  FAIL could not build the reference compiler ($1)"; exit 1; }
-    rm -f "$tmp.c" || :              # the export is 1.3 MB per build; it must not
+    _lib_safedel --purge -- "$tmp.c" || :   # the export is 1.3 MB per build; it must not
                                      # survive -- a per-pid name is never reused,
                                      # so unlike the old fixed $UA.c it accumulates
-    mv -f "$tmp" "$1" || { rm -f "$tmp"; echo "  FAIL could not install $1"; exit 1; }
+    mv -f "$tmp" "$1" || { _lib_safedel --purge -- "$tmp"; echo "  FAIL could not install $1"; exit 1; }
     [ -n "$2" ] && printf '%s\n' "$2" > "$1.stamp.tmp.$$" && mv -f "$1.stamp.tmp.$$" "$1.stamp"
     return 0
 }
@@ -69,7 +72,7 @@ ua_ready() {
     else
         local owner; owner=$(cat "$lock/pid" 2>/dev/null || :)
         if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
-            rm -rf "$lock"                     # holder died; take it over
+            _lib_safedel -- "$lock"            # holder died; take it over (its lock goes to the trash)
             mkdir "$lock" 2>/dev/null && { held=1; printf '%s\n' "$$" > "$lock/pid"; }
         fi
     fi
@@ -80,7 +83,7 @@ ua_ready() {
         done
     fi
     ua_rebuild_to "$UA" "$want"
-    [ "$held" = 1 ] && rm -rf "$lock"
+    [ "$held" = 1 ] && _lib_safedel --purge -- "$lock"
     return 0
 }
 
@@ -108,7 +111,7 @@ host_target() {
 # deleted the directory before the caller could write a file into it, and
 # five diag cases failed with "cannot open input".
 _LIB_TMP=$(mktemp -d)
-trap 'rm -rf "$_LIB_TMP"' EXIT INT TERM
+trap '[ -z "$_LIB_TMP" ] || _lib_safedel --purge --max-files 20000 -- "$_LIB_TMP"' EXIT INT TERM   # suites keep every probe's outputs here
 _LIB_N=0
 scratch() {
     _LIB_N=$((_LIB_N + 1))
@@ -133,13 +136,13 @@ ratchet() {
     if [ ! -f "$base" ]; then
         echo "$count" > "$base"; cp "$sorted" "$base.list"
         echo "  baseline recorded: $count"
-        rm -f "$sorted"; return 0
+        _lib_safedel --purge -- "$sorted"; return 0
     fi
     prev=$(cat "$base")
     if [ "$count" -lt "$prev" ]; then
         echo "  REGRESSION: $count < baseline $prev"
         comm -13 "$sorted" "$base.list" 2>/dev/null | head -20 | sed 's/^/    lost /'
-        rm -f "$sorted"; return 1
+        _lib_safedel --purge -- "$sorted"; return 1
     fi
     if [ "$count" -gt "$prev" ]; then
         echo "  baseline $prev -> $count (run with RATCHET=1 to record)"
@@ -147,5 +150,5 @@ ratchet() {
             echo "$count" > "$base"; cp "$sorted" "$base.list"; echo "  recorded."
         fi
     fi
-    rm -f "$sorted"; return 0
+    _lib_safedel --purge -- "$sorted"; return 0
 }

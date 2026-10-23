@@ -2,7 +2,8 @@
 # checkruncheck: checkrun.sh exits with the check's status even when the check's log ends in a success-looking
 # line, and keeps the whole log; a passing check exits 0.
 set -u
-R=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-checkrun.XXXXXX"); trap 'rm -rf "$T"' EXIT
+R=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-checkrun.XXXXXX"); trap 'sh "$_SD/cxbin" "$_SD/safedel.cx" --purge -- "${T:?}"' EXIT
+_SD="$R"/tests   # the one deletion guard: argv CLI tests/safedel.cx over include/unisa_safedel.h
 fail() { echo "checkrun: $*"; exit 1; }
 "$R/release/tools/checkrun.sh" "$T/a" -- sh -c 'echo early; echo "rc=0  all green"; exit 1' > "$T/out" 2>/dev/null
 [ $? -eq 1 ] || fail "a red check with a green-looking log tail did not exit 1"

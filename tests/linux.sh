@@ -79,11 +79,20 @@ LOGF=$(mktemp)
 tar -C "$R" -cf - --exclude=.git . | limactl shell "$VM" -- bash -lc "
     set -u
     command -v cc >/dev/null || { echo 'linux: no cc in the VM'; exit 1; }
-    LOCK=\$HOME/.unisa-linux-lock
-    mkdir \"\$LOCK\" 2>/dev/null || { echo 'linux: another guest run owns the temporary tree'; exit 2; }
-    W=\$HOME/unisa-linux
-    export TMPDIR=\$HOME/unisa-tmp
-    LOG=\$HOME/unisa-linux-current.log
+    # 2026-10-23 (commissar ruling): every guest deletion goes through the guard, tests/safedel.cx of the tree just
+    # unpacked (tests/cxbin builds it in the guest; without unisacc.com with the system cc), argv only.  The guest
+    # scratch root S is the guard's temp root (TMPDIR=S for its calls): this run's tree W and the suites' TMPDIR are
+    # fresh mkdtemp dirs under it, unpacked BEFORE the lock (nothing shared is touched), and a dead run's linux.*
+    # and tmp.* are purged under the lock by this run's guard.  The tree holds the whole checkout: --force-count.
+    S=\$HOME/unisa-scratch
+    mkdir -p \"\$S\" && cd \"\$S\" || exit 1
+    W=\$(mktemp -d \"\$S/linux.XXXXXX\") || exit 1
+    tar -C \"\$W\" -xf - || { echo 'linux: cannot unpack the tree in the guest'; exit 1; }
+    LOCK=\$S/lock
+    mkdir \"\$LOCK\" 2>/dev/null || { echo 'linux: another guest run owns the scratch root'; TMPDIR=\$S sh \"\$W/tests/cxbin\" \"\$W/tests/safedel.cx\" --purge --force-count 200000 -- \"\$W\"; exit 2; }
+    T=\$(mktemp -d \"\$S/tmp.XXXXXX\") || { TMPDIR=\$S sh \"\$W/tests/cxbin\" \"\$W/tests/safedel.cx\" --purge --force-count 200000 -- \"\$W\" \"\$LOCK\"; exit 1; }
+    export TMPDIR=\$T
+    LOG=\$S/current.log
     cleanup_guest() {
         rc=\$?
         trap - EXIT HUP INT TERM
@@ -94,23 +103,23 @@ tar -C "$R" -cf - --exclude=.git . | limactl shell "$VM" -- bash -lc "
                 echo \"linux: setup interrupted or failed, rc=\$rc\" > \"\$HOME/unisa-linux-last-failure.log\"
             fi
         fi
-        rm -rf \"\$W\" \"\$TMPDIR\"
-        rm -f \"\$LOG\"
-        rmdir \"\$LOCK\"
+        cd \"\$S\" || exit \"\$rc\"
+        TMPDIR=\$S sh \"\$W/tests/cxbin\" \"\$W/tests/safedel.cx\" --purge --force-count 200000 -- \"\$W\" \"\$T\" \"\$LOG\" \"\$LOCK\"
         exit \"\$rc\"
     }
     trap cleanup_guest EXIT
     trap 'exit 129' HUP
     trap 'exit 130' INT
     trap 'exit 143' TERM
-    rm -rf \"\$W\" \"\$TMPDIR\"
-    mkdir -p \"\$W\" \"\$TMPDIR\"
-    tar -C \$W -xf -
-    cd \$W
+    for d in \"\$S\"/linux.* \"\$S\"/tmp.*; do
+        [ -d \"\$d\" ] && [ \"\$d\" != \"\$W\" ] && [ \"\$d\" != \"\$T\" ] || continue
+        TMPDIR=\$S sh \"\$W/tests/cxbin\" \"\$W/tests/safedel.cx\" --purge --force-count 200000 -- \"\$d\" || echo \"linux: a stale guest tree was not purged: \$d\"
+    done
+    cd \"\$W\"
     export FETCH=0
     # Guest /tmp is a RAM tmpfs (~4 GB); all.sh's preserved logs and the bigclosure/ape images
     # filled it mid-run in 0.0.23 (27 false reds).  Work on the guest disk instead.
-    # Dedicated guest scratch was cleaned before unpacking.
+    # A dead run's guest scratch was purged above (this run's tree and TMPDIR are its own).
     export SUITE_LIMIT='$LIMIT' TRY_ALARM='$TRY' JOBS='${JOBS:-4}'
     # Some suites take the probe list; run without it they test NOTHING --
     # closure printed 'identical 0 differ 0' and ccrun reported 90 lost
@@ -139,10 +148,10 @@ if [ "$rc" -ne 0 ] && [ "${STRICT:-0}" != 1 ]; then
     done
     if [ -n "$reds" ] && [ -z "$other" ]; then
         echo "linux: only guest-known reds (guest RAM ${GUEST_MEM_KB:-?} kB, clang $GUEST_CLANG):$known"
-        rm -f "$LOGF"; exit 0
+        sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${LOGF:?}"; exit 0
     fi
     [ -n "$known" ] && echo "linux: guest-known reds:$known"
     [ -n "$other" ] && echo "linux: compiler reds:$other"
 fi
-rm -f "$LOGF"
+sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${LOGF:?}"
 exit "$rc"

@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "unisa_safedel.h"   /* the one deletion guard */
 
 /* ── the slice of session.c/json.c this CLI uses (types restated) ───────── */
 typedef struct {
@@ -63,13 +64,15 @@ static void expect(int cond, const char *what) {
     if (!cond) { printf("FAIL %s\n", what); failures++; }
 }
 
-static void rm_file(const char *p) { remove(p); }
+/* through the one deletion guard (include/unisa_safedel.h); a refusal is a failed case */
+static void rm_file(const char *p) { char why[1400]; if (unisa_safedel(p, SAFEDEL_PURGE, 0, why, (int)sizeof why)) expect(0, why); }
 
 /* Returns 0 when all cases pass. */
 int session_run_selftest(void) {
-    const char *tmp = "/tmp/cdsh-session-selftest.jsonl";
+    char tmpbuf[1024]; const char *td = getenv("TMPDIR"), *tmp = tmpbuf;   /* under the temp root (the guard deletes only there) */
     session_records r;
 
+    snprintf(tmpbuf, sizeof tmpbuf, "%s/cdsh-session-selftest.jsonl", td && td[0] ? td : "/tmp");
     rm_file(tmp);
 
     /* Append three, read three. */

@@ -23,7 +23,7 @@ set -u
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 [ $# -gt 0 ] || { echo "no input files"; exit 1; }
 UA=${UA:-/tmp/ua_ref}; . "$R/tests/lib.sh"; ua_ready
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d); trap 'sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${T:?}"' EXIT
 # Gate passes the historical keep set plus the complete C probe glob.  Count
 # each path once, while keeping the fixed keep list as a non-regression floor.
 : > "$T/inputs"
@@ -71,7 +71,7 @@ for f in "$@"; do
     stage=""; rc=0; why=""
     in=$f
     # 0.0.28 F1: E1's constructor/destructor records reach E3 through this file (exec/c/run.c)
-    export UNISA_ATTRIBUTES="$T/attributes"; rm -f "$UNISA_ATTRIBUTES"
+    export UNISA_ATTRIBUTES="$T/attributes"; sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${UNISA_ATTRIBUTES:?}"
     for s in e2 e1 e3; do
         case $s in
         e2) b 10 "$T/run" "$T/e2.$MODEL" "$in" "$f" "$R/include" > "$T/$s.out" 2> "$T/$s.err"; rc=$? ;;

@@ -35,8 +35,7 @@ def summarize(argv):
     ap=argparse.ArgumentParser();ap.add_argument('--root',type=pathlib.Path,required=True);ap.add_argument('--out',type=pathlib.Path,required=True)
     a=ap.parse_args(argv);root=a.root.resolve(strict=True);out=a.out.resolve(strict=True)
     # Only this producer's derived drafts: never expose stale constants after a failed re-summary.
-    for name in ('seedmemory-reads.tsv','seedmemory-constants.json','seedmemory-constants.py.txt'):
-        (out/name).unlink(missing_ok=True)
+    subprocess.run(['sh',str(pathlib.Path(__file__).resolve().parent/'cxbin'),str(pathlib.Path(__file__).resolve().parent/'safedel.cx'),'--purge','--',*(str(out/name) for name in ('seedmemory-reads.tsv','seedmemory-constants.json','seedmemory-constants.py.txt'))],check=True)
     (out/'summary.json').write_text(json.dumps({'status':'INCOMPLETE','reason':'aggregation in progress'})+'\n')
     spec=importlib.util.spec_from_file_location('seedmemory_consumer',root/'tests/seedmemory.py');consumer=importlib.util.module_from_spec(spec);spec.loader.exec_module(consumer)
     records=[json.loads(p.read_text()) for p in sorted(out.glob('*.result.json'))];source=digest(root/'seed/gen.c')

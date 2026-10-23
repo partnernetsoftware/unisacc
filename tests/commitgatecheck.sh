@@ -3,7 +3,9 @@
 # a green gate commits exactly the given path, missing paths/message are refused, and the gate override is
 # refused without the self-test flag.
 set -u
-R=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-commitgate.XXXXXX"); trap 'rm -rf "$T"' EXIT
+# T becomes a fixture git repository.  The one deletion guard (tests/safedel.cx, commissar ruling 2026-10-23) refuses any
+# directory that is or holds a .git by rule, so nothing here deletes it: it stays under $TMPDIR (unisacc-commitgate.*)
+R=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-commitgate.XXXXXX")
 fail() { echo "commitgate: $*"; exit 1; }
 cd "$T" && git init -q . && git -c user.name=t -c user.email=t@t commit -q --allow-empty -m base
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t

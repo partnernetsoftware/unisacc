@@ -7,6 +7,7 @@
  *
  * Usage: blob ROOT ARCH OUTPUT
  */
+#include "../include/unisa_safedel.h"   /* the one deletion guard (commissar ruling 2026-10-23); first: its feature macro */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,11 +20,13 @@ static const char *const UNITS[] = {"transition", "arith", "buffer", "memory", "
                                     "format", "stack", "action", "run", "bridge"};
 static const char *const IMPORTS[] = {"calloc", "realloc", "free", "memcpy", "memcmp", "memset",
                                       "strlen", "core_host_fetch", "core_host_panic"};
-static char dir[256];
+static char dir[4096];
 
+/* the scratch directory through the guard, never a shell string; a refusal is reported, not fatal */
 static void cleanup(void) {
-    char cmd[400];
-    if (dir[0]) { snprintf(cmd, sizeof cmd, "rm -rf '%s'", dir); if (system(cmd)) { } }
+    char why[600];
+    if (dir[0] && unisa_safedel(dir, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 0, why, (int)sizeof why)) fprintf(stderr, "blob: %s\n", why);
+    dir[0] = 0;
 }
 static void die(const char *why) { fprintf(stderr, "blob: %s\n", why); cleanup(); exit(1); }
 static void run(const char *cmd) { if (system(cmd) != 0) { fprintf(stderr, "blob: %s\n", cmd); die("command failed"); } }
@@ -38,7 +41,8 @@ int main(int argc, char **argv) {
     uint64_t textva = 0, end = 0, entry = 0, slot = 0; int fe = 0, fs = 0;
     if (argc != 4 || (strcmp(argv[2], "arm64") && strcmp(argv[2], "x86_64"))) die("usage: blob ROOT arm64|x86_64 OUTPUT");
     root = argv[1]; arch = argv[2]; out = argv[3];
-    strcpy(dir, "/tmp/unisa-kernel-XXXXXX");
+    {   const char *t = getenv("TMPDIR");   /* the guard's temp root: $TMPDIR, else /tmp */
+        if (snprintf(dir, sizeof dir, "%s/unisa-kernel-XXXXXX", t && *t ? t : "/tmp") >= (int)sizeof dir) { dir[0] = 0; die("TMPDIR too long"); } }
     if (!mkdtemp(dir)) { dir[0] = 0; die("mkdtemp failed"); }
     for (i = 0; i < sizeof UNITS / sizeof *UNITS; i++) {
         int c = snprintf(cmd, sizeof cmd, "sh '%s/exec/c/asm/machocc.sh' %s compile", root, arch);

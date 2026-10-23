@@ -5,7 +5,7 @@ set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R" || exit 2
 sh "$R/tests/cxbin" "$R/tests/seedmemory.cx" com "$@" || exit $?
 B=$R/tests/bound; COM=${MODEL_COM:-$R/unisacc.com}
-T=${TMPDIR:-/tmp}/unisacc-seedgencom.$$; mkdir -p "$T"; trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-seedgencom.XXXXXX") || exit 2; trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT
 "$B" 55 sh "$COM" -O2 -Iseed seed/gen.c -o "$T/gcom" || { echo "seedgencom: .com does not build gen.c"; exit 1; }
 "$B" 55 cc -std=c99 -O2 -Iseed -o "$T/gcc" seed/gen.c || { echo "seedgencom: cc does not build gen.c"; exit 1; }
 "$B" 30 "$T/gcc" parse2 "$T/cc.json" >/dev/null || { echo "seedgencom: cc parse2 failed"; exit 1; }

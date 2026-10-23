@@ -4,7 +4,9 @@ set -e
 R=$(cd "$(dirname "$0")/.." && pwd)
 source=${1:-/tmp/ua_ref.c}
 flat="$source.flat.$$"
-trap 'rm -f "$flat" "$source.$$"' EXIT HUP INT TERM
+# deletions go through the guard (tests/safedel.cx; without unisacc.com tests/cxbin builds it with the system cc);
+# a refused cleanup (a path outside every whitelisted root) is reported by the guard and does not fail the build
+trap 'sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${flat:?}" "${source:?}.$$" || :' EXIT HUP INT TERM
 "$R/tests/export_ref.sh" "$flat"
 cat "$R/tests/refshim.h" "$flat" "$R/tests/reffoot.h" > "$source.$$"
 mv -f "$source.$$" "$source"
@@ -18,5 +20,5 @@ mv -f "$source.$$" "$source"
 # P7': link under the final basename in a private dir -- the ad-hoc codesign Identifier is the
 # output's basename, so a PID-bearing temp name made same-source UAs differ by ~53 bytes
 out="${2:-/tmp/ua_ref}"; tdir=$(mktemp -d "$(dirname "$out")/.ua_ref.XXXXXX") || exit 2
-cc -w -std=c99 ${CFLAGS:--O2} -o "$tdir/$(basename "$out")" "${1:-/tmp/ua_ref.c}" || { rm -rf "$tdir"; exit 1; }
-mv -f "$tdir/$(basename "$out")" "$out"; rm -rf "$tdir"
+cc -w -std=c99 ${CFLAGS:--O2} -o "$tdir/$(basename "$out")" "${1:-/tmp/ua_ref.c}" || { sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${tdir:?}" || :; exit 1; }
+mv -f "$tdir/$(basename "$out")" "$out"; sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${tdir:?}" || :

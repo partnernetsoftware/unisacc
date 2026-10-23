@@ -11,4 +11,4 @@ for p in "tent_a tent_b" "init1 tentm" "tentm init1" "initm init2" "init2 initm"
   echo "-- linked"; $B "$UA" "$T/$1.o" "$T/$2.o" 2>&1; echo "rc=$?"
   echo "-- one-step"; $B "$UA" "$D/$1.c" "$D/$2.c" 2>&1; echo "rc=$?"
 done
-rm -rf "$T"
+[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"   # the one guard (commissar ruling 2026-10-23)

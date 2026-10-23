@@ -4,7 +4,7 @@
 # sleeps longer than TERM_SH_ALARM.  bound.py must kill it (rc 142 from the inner watchdog, not an outer 124), the queue
 # must stop after exactly one window with that rc, never print a pass, and never record a start refusal.
 set -u
-R=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-qtimer.XXXXXX"); trap '[ -n "${QUEUETIMER_KEEP:-}" ] && cp -pR "$T" "$QUEUETIMER_KEEP"; rm -rf "$T"' EXIT
+R=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-qtimer.XXXXXX"); trap '[ -n "${QUEUETIMER_KEEP:-}" ] && cp -pR "$T" "$QUEUETIMER_KEEP"; [ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT
 fail() { echo "queuetimer: $*"; exit 1; }
 ALARM=${QUEUETIMER_ALARM:-4}
 _BOUND=$("$R/tests/bound" --helper) || { echo "queuetimer: need tests/bound"; exit 2; }

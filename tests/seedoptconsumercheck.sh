@@ -68,7 +68,7 @@ finish() {
         [ -z "$EV" ] || printf 'EVIDENCE INCOMPLETE status %s scratch %s\n' "$st" "$S" >> "$EV/lines.txt" 2>/dev/null
         [ "$st" -ne 0 ] || st=3
     else
-        rm -rf "$S"
+        cd "$R" && sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge --force-count 50000 -- "${S:?}"   # a tree export inside: --force-count; out of it first (the guard refuses the cwd's ancestors)
     fi
     exit "$st"
 }
@@ -82,6 +82,12 @@ echo "seedoptc  tree $H"
 git archive -o "$S/tree.tar" "$H" exec seed unisa include tests/bound tests/bound.c tests/bound.py tests/checklib.py || { echo "seedoptc: git archive failed"; exit 2; }
 tar -x -C "$W" -f "$S/tree.tar" || { echo "seedoptc: scratch tree failed"; exit 2; }
 cd "$W" || exit 2
+# the deletion guard the scratch scripts call (tests/safedel.cx through tests/cxbin, commissar ruling 2026-10-23): no
+# unisacc.com here, so tests/cxbin builds it with the system cc -- now, before the shims own PATH (the cc shim refuses
+# anything but its recipes); every later call is a cache hit
+mkdir -p "$W/include" && cp -f "$R/tests/cxbin" "$R/tests/safedel.cx" "$W/tests/" \
+    && cp -f "$R/include/cx.h" "$R/include/unisa_sha256.h" "$R/include/unisa_safedel.h" "$W/include/" || exit 2
+sh "$W/tests/cxbin" "$W/tests/safedel.cx" --dry-run -- "$S/guard-warm" > /dev/null || { echo "seedoptc: the deletion guard does not build"; exit 2; }
 BOUND_CACHE=$S/boundcache; export BOUND_CACHE
 REALPY=$(command -v python3) && REALCC=$(command -v cc) && REALSH=$(command -v sh) || { echo "seedoptc: python3, cc or sh missing"; exit 2; }
 mkdir "$S/shim"
@@ -164,7 +170,7 @@ prep() {   # prep NAME [SCRIPT [ENV...]]: prepare.sh OUT lnx/x86_64 0 cc under t
     [ $# -ge 1 ] && [ -n "$1" ] || { echo "seedoptc: prep needs a NAME" >&2; exit 2; }
     n=$1; shift
     sc=$PREP; if [ $# -gt 0 ]; then sc=$1; shift; fi
-    o=$S/out-$n; rm -rf "$o" "$S/snap-$n"; mkdir -p "$o" "$S/snap-$n"; : > "$S/log-$n"
+    o=$S/out-$n; sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${o:?}" "${S:?}/snap-$n"; mkdir -p "$o" "$S/snap-$n"; : > "$S/log-$n"
     env -u SEED_GEN -u SEED_GEN_BIN -u SEED_GEN_CC -u SEED_GEN_DIR -u NEG_OPT_BIN PATH="$S/shim:$PATH" SHIMLOG="$S/log-$n" SNAPDIR="$S/snap-$n" \
         "$@" "$S/shim/sh" "$sc" "$o" lnx/x86_64 0 cc > "$S/log-$n.out" 2>&1; echo $?
 }
@@ -219,7 +225,7 @@ evw "POS snap_rc$src snapend_rc=$se"
     || no "cache snapshots differ or failed ($src snapend=$se)"
 { ! hasclass "$l" pass-gen-opt && ! hasclass "$l" pass-gen-prune && ! hasclass "$l" pass-gen-pp; } && ok "no direct gen.py opt / prune / pp" || no "direct Python generator call"
 g=$(ls "$o/.seed-gen-cache"/seed-gen-* 2>/dev/null | grep -v '\.sha256$' | head -1)
-rm -f "$S/ref-e4.json"
+sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${S:?}/ref-e4.json"
 rr=none; [ -n "$g" ] && { "$W/tests/bound" 55 "$g" opt "$S/ref-e4.json" --o2 2>"$S/ref-e4.err"; rr=$?; }
 evw "POS ref_rc=$rr"
 { [ "$rr" = 0 ] && cmp -s "$o/e4.json" "$S/ref-e4.json"; } && ok "e4.json = seed-gen opt --o2 (reference rc 0)" || no "e4.json vs seed-gen opt --o2 (reference rc=$rr)"

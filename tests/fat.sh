@@ -11,7 +11,7 @@ set -u
 U="python3 -m unisa"
 DRIVE=${DRIVE:-built}
 [ "$(uname -s)" = "Darwin" ] || { echo "fat skipped (macOS only)"; exit 0; }
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+R=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); trap 'sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${T:?}"' EXIT
 pass=0; fail=0
 bound() { "$_BOUND" 60 "$@"; }
 PAR_WAIT=4   # mostly the first-launch scan: waiting, not computing

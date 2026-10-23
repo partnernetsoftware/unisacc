@@ -7,7 +7,7 @@ set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R" || exit 2
 B=$R/tests/bound
 T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-unisapeversion.XXXXXX") || exit 2
-trap 'rm -rf "$T"' EXIT
+trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT
 fail() { echo "unisapeversion: $*"; exit 1; }
 H=$(git rev-parse --verify HEAD) || exit 2
 echo "unisapeversion  tree $H"
@@ -53,7 +53,7 @@ PY
 same=0
 case_pt() {   # case_pt HEAD NAME VERSION
     head=$1; name=$2; version=$3; tag=$(echo "$head.$name.$version" | tr -c 'A-Za-z0-9' '_')
-    rm -f "$T/c-$tag.pe" "$T/p-$tag.pe"
+    sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T/c-$tag.pe" "$T/p-$tag.pe" || exit 3
     "$B" 10 "$T/peversion" "$T/$head.pe" "$T/c-$tag.pe" "$name" "$version" 2>"$T/c-$tag.err"; c=$?
     [ "$c" -eq 0 ] || fail "C refused a sampled point $head $name $version rc=$c $(cat "$T/c-$tag.err")"
     "$B" 10 "$T/peversion" "$T/$head.pe" "$T/c2-$tag.pe" "$name" "$version" 2>/dev/null || fail "C second run rc!=0 $head $name $version"
@@ -70,7 +70,7 @@ case_pt base "Unisacc Test App" 0.0.1
 refused() { [ "$1" -ne 0 ] && [ "$1" -ne 124 ] && [ "$1" -lt 128 ]; }
 neg() {   # neg NAME HEAD NAME VERSION -- both sides must refuse and write nothing
     nm=$1; head=$2; name=$3; version=$4; tag=neg-$nm
-    rm -f "$T/$tag-c.pe" "$T/$tag-p.pe"
+    sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T/$tag-c.pe" "$T/$tag-p.pe" || exit 3
     "$B" 10 "$T/peversion" "$T/$head.pe" "$T/$tag-c.pe" "$name" "$version" 2>"$T/$tag-c.err"; c=$?
     PYTHONPATH="$R" "$B" 10 python3 "$T/pyadd.py" "$T/$head.pe" "$T/$tag-p.pe" "$name" "$version" 2>"$T/$tag-p.err"; p=$?
     refused "$c" || fail "NEG-$nm C accepted (rc=$c): first red"

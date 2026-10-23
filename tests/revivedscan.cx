@@ -36,21 +36,9 @@ static int pyspace(int c) {
 /* Python str.splitlines boundaries */
 static int pybreak(int c) { return c == '\n' || c == '\r' || c == 0x0B || c == 0x0C || c == 0x1C || c == 0x1D || c == 0x1E || c == 0x85 || c == 0x2028 || c == 0x2029; }
 
-static void rmtree(const char *d) {
-    DIR *dp = opendir(d); struct dirent *e; char p[8192]; struct stat st;
-    if (dp) {
-        while ((e = readdir(dp))) {
-            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-            snprintf(p, sizeof p, "%s/%s", d, e->d_name);
-            if (lstat(p, &st) == 0 && S_ISDIR(st.st_mode)) rmtree(p); else unlink(p);
-        }
-        closedir(dp);
-    }
-    rmdir(d);
-}
 static void die(const char *fmt, const char *a) {   /* the .py's uncaught exception: stdout so far, a message, rc 1 */
     fflush(stdout); fprintf(stderr, fmt, a); fputc('\n', stderr);
-    if (TD[0]) rmtree(TD);
+    if (TD[0]) cx_rmtree(TD);
     exit(1);
 }
 
@@ -63,7 +51,7 @@ static int runp(char *const argv[], const char *cwd, int t, int quiet_err, char 
     if ((fd = mkstemp(tmp)) < 0) die("revivedscan: cannot create a capture file under %s", base);
     fflush(stdout); fflush(stderr);
     pid = fork();
-    if (pid < 0) { close(fd); unlink(tmp); die("revivedscan: fork failed for %s", argv[0]); }
+    if (pid < 0) { close(fd); cx_remove(tmp); die("revivedscan: fork failed for %s", argv[0]); }
     if (pid == 0) {
         if (cwd && chdir(cwd) != 0) _exit(127);
         dup2(fd, 1); close(fd);
@@ -75,13 +63,13 @@ static int runp(char *const argv[], const char *cwd, int t, int quiet_err, char 
         w = waitpid(pid, &st, WNOHANG);
         if (w == pid) { rc = WIFEXITED(st) ? WEXITSTATUS(st) : WIFSIGNALED(st) ? -WTERMSIG(st) : 1; break; }
         if (w < 0) { rc = -1; break; }
-        if (t > 0 && ticks-- <= 0) { kill(pid, SIGKILL); waitpid(pid, &st, 0); unlink(tmp); if (out) { *out = 0; *len = 0; } return 142; }
+        if (t > 0 && ticks-- <= 0) { kill(pid, SIGKILL); waitpid(pid, &st, 0); cx_remove(tmp); if (out) { *out = 0; *len = 0; } return 142; }
         usleep(10000);
     }
     f = fopen(tmp, "rb");
     if (f) { char *b = _cx_slurp(f, len); fclose(f); if (out) *out = b; else free(b); }
     else if (out) { *out = 0; *len = 0; }
-    unlink(tmp);
+    cx_remove(tmp);
     return rc;
 }
 
@@ -171,6 +159,6 @@ int main(int argc, char **argv) {
         free(text);
     }
     printf("revivedscan  excused probes run %d   revived %d\n", checked, revived);
-    rmtree(TD);
+    cx_rmtree(TD);
     return revived ? 1 : 0;
 }

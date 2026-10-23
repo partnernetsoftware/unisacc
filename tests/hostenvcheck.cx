@@ -33,7 +33,7 @@ static const char *P, *D;
 /* run one compilation under ENV ("" for none); fingerprint = rc, stdout, stderr, output file */
 static void fingerprint(const char *env, const char *args, char hex[65]) {
     char a[4096], cmd[16384], path[4096], *out, *err, *file; size_t on = 0, en = 0, fn = 0; int rc; char *all; size_t n;
-    snprintf(path, sizeof path, "%s/out", D); unlink(path);
+    snprintf(path, sizeof path, "%s/out", D); cx_remove(path);
     snprintf(a, sizeof a, args, D, D);
     snprintf(cmd, sizeof cmd, "env %s sh '%s' %s 2>'%s/err'", env, P, a, D);
     rc = cx_run_timeout(cmd, 20, &out, &on);
@@ -49,10 +49,11 @@ static void fingerprint(const char *env, const char *args, char hex[65]) {
 }
 
 int main(int argc, char **argv) {
-    char own[] = "/tmp/hostenvXXXXXX", base[8][65], hex[65], env[512];
+    char own[4096], base[8][65], hex[65], env[512]; const char *td = getenv("TMPDIR");
     const struct var *v; int r, k, nruns, influences = 0;
     if (argc != 2) { fprintf(stderr, "usage: hostenvcheck.cx PRODUCT\n"); return 2; }
     P = argv[1];
+    snprintf(own, sizeof own, "%s/hostenvXXXXXX", td && *td ? td : "/tmp");   /* the deletion guard's temp root */
     if (!mkdtemp(own)) return 2;
     D = own;
     {
@@ -81,11 +82,7 @@ int main(int argc, char **argv) {
             influences += changed;
         }
     }
-    {
-        char p[4096]; static const char *LEFT[] = {"plain.c", "fwd.c", "out", "err", 0}; const char **l;
-        for (l = LEFT; *l; l++) { snprintf(p, sizeof p, "%s/%s", D, *l); unlink(p); }
-        rmdir(D);
-    }
-    printf("hostenvcheck  %d variable settings change a result  %s\n", influences, influences ? "FAIL" : "PASS");
-    return influences ? 1 : 0;
+    r = cx_rmtree(D);   /* the one deletion guard (include/unisa_safedel.h); a refusal is red */
+    printf("hostenvcheck  %d variable settings change a result  %s\n", influences, influences || r ? "FAIL" : "PASS");
+    return influences || r ? 1 : 0;
 }

@@ -8,6 +8,7 @@
  *
  * CLI takes SUBCOMMANDS, not dash-options (unisacc reserves the dashes).
  */
+#include "../../include/unisa_safedel.h"   /* the one deletion guard (commissar ruling 2026-10-23) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -62,9 +63,10 @@ static void expect(int cond, const char *what) {
 }
 
 static void run_selftest(void) {
-    const char *path = "/tmp/cdsh-chat-selftest.jsonl";
+    char path[4096], why[600]; const char *td = getenv("TMPDIR");
     chat_turn t;
     FILE *f;
+    snprintf(path, sizeof path, "%s/cdsh-chat-selftest.jsonl", td && td[0] ? td : "/tmp");   /* the guard's temp root */
 
     /* start from nothing, so the "first turn has no transcript" path is taken */
     f = fopen(path, "w"); if (f) fclose(f);
@@ -116,7 +118,7 @@ static void run_selftest(void) {
         session_free(&recs);
     }
 
-    remove(path);
+    expect(unisa_safedel(path, SAFEDEL_PURGE, 0, why, (int)sizeof why) == 0, "the transcript is removed through the deletion guard");
 }
 
 int chat_run_selftest(void) {

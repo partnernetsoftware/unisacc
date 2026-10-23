@@ -1,6 +1,6 @@
 """The gold .tsv input contract [J10]: a damaged table must be REJECTED,
 not built into a net that looks exact.  Each case breaks prec.tsv one way."""
-import sys, os, shutil, tempfile
+import sys, os, shutil, subprocess, tempfile
 R = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, R)
 from unisa import tsvgold
@@ -27,7 +27,7 @@ for name, lines in cases.items():
     want = 'accepted' if name == 'ok' else 'rejected'
     if not r.startswith(want):
         wrong.append(name)
-shutil.rmtree(d)
+subprocess.run(['sh',os.path.join(os.path.dirname(os.path.abspath(__file__)),'cxbin'),os.path.join(os.path.dirname(os.path.abspath(__file__)),'safedel.cx'),'--purge','--',d],check=True)
 badn = sum(1 for n in cases if n != 'ok')
 print('contract  cases %d  wrong %d' % (len(cases), len(wrong)))
 sys.exit(1 if wrong else 0)

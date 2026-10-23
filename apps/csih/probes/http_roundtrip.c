@@ -2,6 +2,7 @@
  *   unisacc probes/http_roundtrip.c probes/u_run.c
  * python only serves the file. The client under test is unisacc. No gcc.
  */
+#include "../../../include/unisa_safedel.h"   /* the one deletion guard (commissar ruling 2026-10-23); first: its feature macro */
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <signal.h>
@@ -34,15 +35,20 @@ static int wait_port(int port) {
     return -1;
 }
 
+/* P (a tree) through the one guard, never a raw unlink/rmdir; a refusal is reported, the probe's verdict stands */
+static void sd_gone(const char *p) {
+    char why[600];
+    if (unisa_safedel(p, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 0, why, (int)sizeof why)) fprintf(stderr, "probe: %s\n", why);
+}
 int main(void) {
     const char *u = getenv("UNISACC");
-    char dir[64], www[80], idx[96], port[16], url[80], out[2048];
+    char dir[1024], www[1100], idx[1200], port[16], url[80], out[2048];
     char *pav[10], *args[4];
     int rc, st;
     pid_t pid;
     FILE *f;
     if (!u || !u[0]) u = "/Users/wjc/repos/unisacc/unisacc.com";
-    snprintf(dir, sizeof dir, "/tmp/cdsh-http-%d", (int)getpid());
+    snprintf(dir, sizeof dir, "%s/cdsh-http-%d", getenv("TMPDIR") && *getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp", (int)getpid());   /* the guard's temp root */
     snprintf(www, sizeof www, "%s/www", dir);
     snprintf(idx, sizeof idx, "%s/index.txt", www);
     if (mkdir(dir, 0700) || mkdir(www, 0700)) { printf("no temp\n"); return 2; }
@@ -68,6 +74,6 @@ int main(void) {
     printf("  ok    the response body is the served file\n");
     if (!strstr(out, "status 200")) { printf("  FAIL  status\n"); return 1; }
     printf("  ok    status 200\n");
-    remove(idx); rmdir(www); rmdir(dir);
+    sd_gone(dir);   /* idx and www lie in DIR */
     return 0;
 }

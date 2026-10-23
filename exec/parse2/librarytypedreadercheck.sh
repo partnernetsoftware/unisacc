@@ -38,7 +38,7 @@ case ${1:-check} in
 --prepare-base-reference)
  (cd "$D" && sha256sum -c --status base-off.sha256)
  T=$(mktemp -d "${TMPDIR:-/tmp}/reader-base.XXXXXX")
- trap 'rm -rf "$T"' EXIT HUP INT TERM
+ trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge --max-files 10000 -- "$T"' EXIT HUP INT TERM   # T holds a copy of exec/ (~1700 entries)
  cp -R exec "$T/exec"
  check --baseline "$T/exec/parse2/libraryimports-manifest.tsv"
  (cd "$T" && b python3 exec/build/gen.py parse2 "$D/base.json")
@@ -92,7 +92,7 @@ check)
   fi
  done
  T=$(mktemp -d "${TMPDIR:-/tmp}/librarytypedreader-check.XXXXXX")
- trap 'rm -rf "$T"' EXIT HUP INT TERM
+ trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT HUP INT TERM
  cp "$D/runner" "$D/model.tbl" "$D/model.net" "$D/audit.net" "$T/"
  cp tests/librarytypedreader-cases.tsv "$T/cases.tsv"
  mkdir "$T/A" "$T/B"

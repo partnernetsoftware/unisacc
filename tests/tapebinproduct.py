@@ -166,8 +166,7 @@ def main():
         for path in mine:
             classic = base / "classic.tapebin"
             product_bin = base / "product.tapebin"
-            for f in (classic, product_bin):
-                f.unlink(missing_ok=True)
+            subprocess.run(['sh',str(pathlib.Path(__file__).resolve().parents[1]/'tests/cxbin'),str(pathlib.Path(__file__).resolve().parents[1]/'tests/safedel.cx'),'--purge','--',str(classic),str(product_bin)],check=True)
             a = subprocess.run([str(ref), str(path), "-t", host, "--tapebin", "-o", str(classic)],
                                capture_output=True, timeout=20)
             b = subprocess.run(["sh", str(product), str(path), "-t", host, "--tapebin", "-o", str(product_bin)],

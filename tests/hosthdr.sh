@@ -12,7 +12,7 @@ _BOUND=$("$_BOUND" --helper) || exit 2
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 . ./tests/lib.sh; ua_ready
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d); trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT
 # 0.0.34 X1: the system compiler sees cx.h alone (its other includes stay the system's)
 mkdir -p "$T/cxinc" && cp include/cx.h "$T/cxinc/"
 ok=0; bad=0; skip=0
@@ -40,12 +40,13 @@ for f in tests/hosthdr/*.c; do
     got=$(cd "$T/u.$b" && "$_BOUND" 10 ./p </dev/null 2>&1); want=$(cd "$T/c.$b" && "$_BOUND" 10 ./p </dev/null 2>&1)
     if [ "$got" = "$want" ]; then ok=$((ok+1)); echo "  ok   $b $HOST"; else bad=$((bad+1)); echo "  FAIL $b $HOST"; diff <(echo "$want") <(echo "$got") 2>/dev/null | head -4; fi
 done
+# guest side: a fresh mktemp directory per probe and no deletion (the deletion guard does not run in the guest; its /tmp is the VM's)
 VM=${LIMA_VM:-default}
 if command -v limactl >/dev/null && [ "$(limactl list "$VM" --format '{{.Status}}' 2>/dev/null)" = Running ] && [ "$(limactl list "$VM" --format '{{.Arch}}' 2>/dev/null)" = aarch64 ]; then
     for f in tests/hosthdr/*.c; do
         b=$(basename "$f" .c)
         "$_BOUND" 30 "$UA" "$f" -b lnx/arm64 -o "$T/$b.lnx" 2>/dev/null || { bad=$((bad+1)); echo "  FAIL $b lnx/arm64 compile"; continue; }
-        out=$(tar -C "$T" -cf - "$b.lnx" -C "$R/tests/hosthdr" "$b.c" -C "$R/include" cx.h | "$_BOUND" 40 limactl shell "$VM" -- sh -c "rm -rf /tmp/hh_$b && mkdir -p /tmp/hh_$b/u /tmp/hh_$b/c && cd /tmp/hh_$b && tar xf - && chmod +x $b.lnx && (cd u && ../$b.lnx </dev/null > ../a.txt 2>&1); gcc -w -I. -o ref $b.c && (cd c && ../ref </dev/null > ../b.txt 2>&1); cmp -s a.txt b.txt && echo SAME || diff b.txt a.txt | head -4")
+        out=$(tar -C "$T" -cf - "$b.lnx" -C "$R/tests/hosthdr" "$b.c" -C "$R/include" cx.h | "$_BOUND" 40 limactl shell "$VM" -- sh -c "d=\$(mktemp -d /tmp/hh_$b.XXXXXX) && mkdir \"\$d/u\" \"\$d/c\" && cd \"\$d\" && tar xf - && chmod +x $b.lnx && (cd u && ../$b.lnx </dev/null > ../a.txt 2>&1); gcc -w -I. -o ref $b.c && (cd c && ../ref </dev/null > ../b.txt 2>&1); cmp -s a.txt b.txt && echo SAME || diff b.txt a.txt | head -4")
         case "$out" in SAME) ok=$((ok+1)); echo "  ok   $b lnx/arm64";; *) bad=$((bad+1)); echo "  FAIL $b lnx/arm64"; echo "$out";; esac
     done
 else

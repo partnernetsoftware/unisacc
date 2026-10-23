@@ -58,7 +58,9 @@ finish() {
         [ -z "$EV" ] || printf 'EVIDENCE INCOMPLETE status %s scratch %s\n' "$st" "$S" >> "$EV/lines.txt" 2>/dev/null
         [ "$st" -ne 0 ] || st=3
     else
-        rm -rf "$S"
+        # the one deletion guard (include/unisa_safedel.h); S holds a git archive of exec seed unisa kernel src
+        # include (1991 entries on 2026-10-23), past the default ceiling, so the force count is explicit
+        sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge --force-count 50000 -- "${S:?}"
     fi
     exit "$st"
 }
@@ -125,7 +127,7 @@ evw "COLD rc=$r"
 s0=$(stampsha "$S/e2-base/d.json.stamp")
 cp -a "$S/e2-base" "$S/tmpl" || { echo "seedpprun: template copy failed"; exit 2; }
 restore() {   # back to the warm template, on the same path
-    rm -rf "$S/e2-base" || return 1
+    sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${S:?}/e2-base" || return 1
     mkdir "$S/e2-base" && cp -a "$S/tmpl/." "$S/e2-base/" || return 1
 }
 control() {   # control NAME: restored and unchanged -> nothing rebuilt, stamp unchanged, helper not started

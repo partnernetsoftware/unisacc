@@ -10,7 +10,9 @@ KIND=${DRIVER_KIND:-all}
 case $KIND in all|cc|ua|asm) ;; *) echo 'unknown DRIVER_KIND' >&2; exit 2;; esac
 export DRIVER_KIND
 case ${MEMORY_SHARD:-all} in all|1/3|2/3|3/3) ;; *) echo 'unknown MEMORY_SHARD' >&2; exit 2;; esac
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+# every deletion goes through the one guard (include/unisa_safedel.h) via its argv CLI (commissar ruling 2026-10-23)
+safedel() { sh "$R/tests/cxbin" "$R/tests/safedel.cx" "$@"; }
+T=$(mktemp -d); trap '[ -z "$T" ] || safedel --purge -- "$T"' EXIT
 b() { "$_BOUND" 60 "$@"; }
 b python3 tests/sourceflat.py "$T/unisacc-flat.c"
 SELF="$T/unisacc-flat.c"
@@ -43,19 +45,19 @@ C=${TMPDIR:-/tmp}/unisacc-memprep-$KEY
 # A cold cache under a parallel queue: the first job takes the lock and builds, the rest wait for it
 # (at most 40 s, then build themselves) instead of all building at once.  A lock older than 120 s is stale.
 if [ -n "$KEY" ] && [ ! -f "$C/ok" ] && ! mkdir "$C.lock" 2>/dev/null; then
-    if [ -n "$(find "$C.lock" -maxdepth 0 -mmin +2 2>/dev/null)" ]; then rm -rf "$C.lock"; fi
+    if [ -n "$(find "$C.lock" -maxdepth 0 -mmin +2 2>/dev/null)" ]; then safedel -- "$C.lock"; fi   # a stale lock of another job: into the trash
     w=0; while [ $w -lt 80 ] && [ ! -f "$C/ok" ] && [ -d "$C.lock" ]; do sleep 0.5; w=$((w+1)); done
     MINE=
 else
     MINE=$KEY
 fi
 if [ -n "$KEY" ] && [ -f "$C/ok" ]; then
-    cp -R "$C/." "$T/"; rm -f "$T/ok"; [ -z "$MINE" ] || rm -rf "$C.lock"
+    cp -R "$C/." "$T/"; safedel --purge -- "$T/ok"; [ -z "$MINE" ] || safedel --purge -- "$C.lock"
 else
     prep
     if [ -n "$MINE" ]; then
-        rm -rf "$C.tmp.$$"; cp -R "$T" "$C.tmp.$$" && rm -f "$C.tmp.$$/unisacc-flat.c" && touch "$C.tmp.$$/ok" \
-            && { [ -d "$C" ] || mv "$C.tmp.$$" "$C"; }; rm -rf "$C.tmp.$$" "$C.lock"
+        safedel --purge -- "$C.tmp.$$"; cp -R "$T" "$C.tmp.$$" && safedel --purge -- "$C.tmp.$$/unisacc-flat.c" && touch "$C.tmp.$$/ok" \
+            && { [ -d "$C" ] || mv "$C.tmp.$$" "$C"; }; safedel --purge -- "$C.tmp.$$" "$C.lock"
     fi
 fi
 if [ "$KIND" = all ] || [ "$KIND" = cc ]; then hostcc -O2 exec/c/compiler.c -o "$T/driver-cc"; fi

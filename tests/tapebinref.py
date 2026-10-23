@@ -25,6 +25,10 @@ def _sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def _purge(*paths):   # the one deletion guard's argv CLI (include/unisa_safedel.h, tests/safedel.cx)
+    subprocess.run(['sh', str(R / 'tests/cxbin'), str(R / 'tests/safedel.cx'), '--purge', '--', *map(str, paths)], check=True)
+
+
 def _file_sha(path):
     return _sha(pathlib.Path(path).read_bytes())
 
@@ -49,9 +53,7 @@ def key():
     try:
         flat = _exported(tmp)
     finally:
-        for p in tmp.glob('*'):
-            p.unlink()
-        tmp.rmdir()
+        _purge(tmp)
     parts = [
         'tapebin-ref-v1', _sha(flat), _file_sha(R / 'tests/refshim.h'), _file_sha(R / 'tests/reffoot.h'),
         _file_sha(R / 'tests/build_ref.sh'), _cflags(), _cc_version(),
@@ -87,17 +89,13 @@ def prepare():
         manifest = {'key': k, 'ref_sha256': _file_sha(ref), 'bytes': ref.stat().st_size, 'cc': _cc_version(),
                     'cflags': _cflags()}
         (tmp / ENTRY).write_text(json.dumps(manifest, indent=1, sort_keys=True) + '\n')
-        flat.unlink(); source.unlink()
+        _purge(flat, source)
         if not entry.exists():
             os.rename(tmp, entry)
         else:
-            for p in tmp.glob('*'):
-                p.unlink()
-            tmp.rmdir()
+            _purge(tmp)
     except BaseException:
-        for p in tmp.glob('*'):
-            p.unlink()
-        tmp.rmdir()
+        _purge(tmp)
         raise
     if not _valid(entry):
         raise SystemExit('tapebinref: prepared entry does not verify')

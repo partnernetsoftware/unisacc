@@ -36,7 +36,7 @@ static int probe(const char *name, const char *flags, const char *body,
     return !ok;
 }
 int main(int argc, char **argv) {
-    char own[]="/tmp/forceincludeXXXXXX", cwd[4096], path[8192]; int fail=0;
+    char own[4096], cwd[4096], path[8192]; int fail=0; const char *td=getenv("TMPDIR");
     const char *head=
         "static int eq(const char *a,const char *b){if(a[0]=='.' && a[1]=='/')a+=2;while(*a && *a==*b){a++;b++;}return *a==*b;}\n";
     char plain[8192],forward[8192],single[8192],normal[8192],mapped[8192],spliced[8192];
@@ -44,6 +44,8 @@ int main(int argc, char **argv) {
     const char *condition="eq(w1,\"sub/h.h\") && l1==2 && eq(w2,\"sub/h2.h\") && l2==3 && (eq(wn,\"nested.h\") || eq(wn,\"sub/nested.h\")) && ln==2 && eq(wmain,\"main.c\") && lmain==2";
     if (argc<2 || argc>3 || (argc==3 && strcmp(argv[2],"--cc"))) return 2;
     systemcc=argc==3;
+    /* under the deletion guard's temp root; a short name: absolute -include paths past 64 bytes fail here (2026-10-23) */
+    snprintf(own,sizeof own,"%s/fiXXXXXX",td&&*td?td:"/tmp");
     if (!getcwd(cwd,sizeof cwd) || !mkdtemp(own)) return 2;
     snprintf(D,sizeof D,"%s",own);
     if (argv[1][0]=='/') snprintf(P,sizeof P,"%s",argv[1]);
@@ -85,10 +87,6 @@ red:
 cleanup:
     /* Preserve the first failing scratch for diagnosis; remove successful probes. */
     if (fail) fprintf(stderr,"scratch %s\n",D);
-    else {
-        const char *files[]={"sub/h.h","sub/h2.h","sub/nested.h","sub/bad.h","sub/relative.h","main.c","out","err",0};int i;
-        for(i=0;files[i];i++){snprintf(path,sizeof path,"%s/%s",D,files[i]);unlink(path);}
-        snprintf(path,sizeof path,"%s/sub",D);rmdir(path);rmdir(D);
-    }
+    else if (cx_rmtree(D)) fail=1;   /* the one deletion guard (include/unisa_safedel.h) */
     return fail;
 }

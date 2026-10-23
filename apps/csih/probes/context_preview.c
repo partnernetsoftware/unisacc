@@ -27,6 +27,7 @@
 #include <unistd.h>
 #include <utime.h>
 #include "csih_flat.h"
+#include "unisa_safedel.h"   /* the one deletion guard */
 
 #define CP_UNISACC CSIH_ROOT "/unisacc.com"
 #define CP_SELF CSIH_APP "/probes/context_preview.c"
@@ -262,23 +263,11 @@ static const char *tmpbase(void) {
     return (t && t[0]) ? t : "/tmp";
 }
 
+/* through the one deletion guard (include/unisa_safedel.h): this probe's own mkdtemp tree (a site ceiling) or one
+   file in it; a refusal is reported and nothing is deleted */
 static void rm_rf(const char *path) {
-    struct stat st;
-    if (lstat(path, &st) != 0) return;
-    if (S_ISDIR(st.st_mode)) {
-        DIR *d = opendir(path);
-        struct dirent *e;
-        while (d && (e = readdir(d)) != NULL) {
-            char child[4096];
-            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-            snprintf(child, sizeof child, "%s/%s", path, e->d_name);
-            rm_rf(child);
-        }
-        if (d) closedir(d);
-        rmdir(path);
-    } else {
-        unlink(path);
-    }
+    char why[1400];
+    if (unisa_safedel(path, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 20000L, why, (int)sizeof why)) fprintf(stderr, "rm_rf: %s\n", why);
 }
 
 static double now_s(void) {
@@ -449,7 +438,7 @@ static int run_packet(const char *binary, const char *session, const char *home,
     if (rc != 0) { *why = "rc != 0"; free(e); return 0; }
     if (e && el) { *why = "stderr not empty"; free(e); return 0; }
     free(e);
-    unlink(errp);
+    rm_rf(errp);
     return 1;
 }
 
@@ -519,7 +508,7 @@ int main(void) {
         unsigned char *e = read_file(errp, &el);
         if (e && el) die("context build wrote stderr");
         free(e);
-        unlink(errp);
+        rm_rf(errp);
     }
 
     memset(&priv_before, 0, sizeof priv_before);
@@ -650,7 +639,7 @@ int main(void) {
                 write_file(file8, other, strlen(other), 0600);
             } else {
                 write_file(backup, orig, olen, 0600);
-                unlink(file8);
+                rm_rf(file8);
                 symlink(backup, file8);
             }
             if (!run_packet(binary, session, home, source, bad, sizeof bad, &why)) {
@@ -664,7 +653,7 @@ int main(void) {
                 run_check(v && *v == '[' && v[1] == ']', reasons, sizeof reasons, "notices not empty on fault");
             }
             /* restore notice 8 */
-            if (i == 2) unlink(file8);
+            if (i == 2) rm_rf(file8);
             write_file(file8, orig, olen, 0600);
         }
         free(orig);

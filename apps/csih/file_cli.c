@@ -5,6 +5,7 @@
  *
  * CLI takes SUBCOMMANDS, not dash-options (unisacc reserves the dashes).
  */
+#include "../../include/unisa_safedel.h"   /* the one deletion guard (commissar ruling 2026-10-23) */
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -68,9 +69,10 @@ static void expect(int cond, const char *what) {
 }
 
 static void run_selftest(void) {
-    const char *base = "/tmp/cdsh-file-selftest";
-    char path[512], buf[4096];
+    char base[400], path[512], buf[4096], why[600]; const char *td = getenv("TMPDIR");
     file_result r;
+
+    snprintf(base, sizeof base, "%s/cdsh-file-selftest", td && td[0] ? td : "/tmp");   /* the guard's temp root */
 
     mkdir(base, 0755);
 
@@ -95,7 +97,8 @@ static void run_selftest(void) {
     expect(r.bytes == 13, "and reports the real size so the caller can retry");
 
     /* --- a missing file is an error with a reason ---------------------- */
-    r = file_read("/tmp/cdsh-file-selftest/definitely-not-here", buf, sizeof buf);
+    snprintf(path, sizeof path, "%s/definitely-not-here", base);
+    r = file_read(path, buf, sizeof buf);
     expect(r.ok == 0, "a missing file fails");
     expect(r.err == ENOENT, "and reports ENOENT");
 
@@ -135,7 +138,7 @@ static void run_selftest(void) {
 
     /* --- append -------------------------------------------------------- */
     snprintf(path, sizeof path, "%s/log.jsonl", base);
-    remove(path);
+    expect(unisa_safedel(path, SAFEDEL_PURGE, 0, why, (int)sizeof why) == 0, "a stale log is removed through the deletion guard");
     expect(file_append_line(path, "one").ok == 1, "append creates the file");
     expect(file_append_line(path, "two\n").ok == 1, "append adds a second line");
     r = file_read(path, buf, sizeof buf);
@@ -149,11 +152,7 @@ static void run_selftest(void) {
     expect(r.ok == 0, "~ is not expanded (there is no such literal directory)");
 
     /* clean up */
-    remove("/tmp/cdsh-file-selftest/a.txt");
-    remove("/tmp/cdsh-file-selftest/big.txt");
-    remove("/tmp/cdsh-file-selftest/c.txt");
-    remove("/tmp/cdsh-file-selftest/log.jsonl");
-    rmdir(base);   /* available as of unisacc 0.0.19 */
+    expect(unisa_safedel(base, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 0, why, (int)sizeof why) == 0, "the fixture is removed through the deletion guard");
 }
 
 int file_run_selftest(void) {

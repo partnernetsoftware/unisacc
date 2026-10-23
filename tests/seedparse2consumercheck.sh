@@ -33,6 +33,8 @@ set -u
 case "${1:-}" in 1|2|3|prepare) SLICE=$1;; *) echo "usage: tests/seedparse2consumercheck.sh 1|2|3|prepare"; exit 2;; esac
 case $SLICE in 1) JSONS="out-pos/e3.json";; 2|prepare) JSONS=;; 3) JSONS="out-sg0/e3.json c3/e3.json";; esac
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R" || exit 2
+# every deletion goes through the one guard (include/unisa_safedel.h) via its argv CLI (commissar ruling 2026-10-23)
+safedel() { sh "$R/tests/cxbin" "$R/tests/safedel.cx" "$@"; }
 _td=${TMPDIR:-/tmp}; S=$(mktemp -d "${_td%/}/seedp2c.XXXXXX") || exit 2   # TMPDIR=/tmp/ would leave // in $W and the trajectory
 # 0.0.40 (机房主任 00:04): SEEDP2C_EVIDENCE=DIR (a new or empty directory outside the scratch) keeps the evidence
 # the scratch would lose: every SAME/DIFF line, the o1/o2 JSON sha256s and the monotonic start/end (ns), written
@@ -76,7 +78,8 @@ finish() {
         [ -z "$EV" ] || printf 'EVIDENCE INCOMPLETE status %s scratch %s\n' "$st" "$S" >> "$EV/lines.txt" 2>/dev/null
         [ "$st" -ne 0 ] || st=3
     else
-        rm -rf "$S"
+        cd "$R" || :   # the guard refuses the cwd and its ancestors, and an early exit leaves us in $W under $S
+        safedel --purge --max-files 50000 -- "$S"   # S holds an archived tree (exec seed unisa ...)
     fi
     exit "$st"
 }
@@ -171,7 +174,7 @@ prep() {   # prep NAME [SCRIPT [ENV...]]: prepare.sh OUT lnx/x86_64 0 cc under t
     [ $# -ge 1 ] && [ -n "$1" ] || { echo "seedp2c: prep needs a NAME" >&2; exit 2; }
     n=$1; shift
     sc=$PREP; if [ $# -gt 0 ]; then sc=$1; shift; fi
-    o=$S/out-$n; rm -rf "$o" "$S/snap-$n"; mkdir -p "$o" "$S/snap-$n"; : > "$S/log-$n"
+    o=$S/out-$n; safedel --purge --max-files 20000 -- "$o" "$S/snap-$n" || exit 2; mkdir -p "$o" "$S/snap-$n"; : > "$S/log-$n"
     env -u SEED_GEN -u SEED_GEN_BIN -u SEED_GEN_CC -u SEED_GEN_DIR -u NEG_PARSE2_BIN -u PARSE2_PY PATH="$S/shim:$PATH" SHIMLOG="$S/log-$n" \
         SNAPDIR="$S/snap-$n" "$@" "$S/shim/sh" "$sc" "$o" lnx/x86_64 0 cc > "$S/log-$n.out" 2>&1; echo $?
 }
@@ -216,7 +219,7 @@ if [ "$SLICE" = prepare ]; then
 if refok; then ok "SEED_GEN=0 parse2 reference warm for key $RK (not re-run)"
 else
     mkdir -p "$SB" || exit 2
-    tmp=$P2D.tmp.$$; rm -rf "$tmp"; mkdir "$tmp" || exit 2
+    tmp=$P2D.tmp.$$; safedel --purge -- "$tmp" || exit 2; mkdir "$tmp" || exit 2
     t0=$(mono)
     # the helper itself under the python3 / cc shims: published only when it really ran gen.py parse2 OUT, once,
     # with no compile and no other generator call
@@ -231,11 +234,11 @@ else
         && ok "SEED_GEN=0 helper ran python3 gen.py parse2 OUT once; no compile, no other generator" \
         || { no "SEED_GEN=0 helper did not run exactly python3 gen.py parse2 OUT ($(awk -F '\t' '$1 != "pass" { printf "%s; ", $0 }' "$l"))"; rr=${rr}-route; }
     if [ "$rr" = 0 ] && [ -s "$tmp/e3.json" ] && echo "$RK" > "$tmp/key" && cp "$S/refkey.txt" "$tmp/refkey.txt" \
-        && h=$(shaf "$tmp/e3.json") && [ "$h" != none ] && echo "$h" > "$tmp/ready" && rm -rf "$P2D" && mv "$tmp" "$P2D"; then
+        && h=$(shaf "$tmp/e3.json") && [ "$h" != none ] && echo "$h" > "$tmp/ready" && safedel -- "$P2D" && mv "$tmp" "$P2D"; then
         ok "SEED_GEN=0 parse2 reference built (helper -> python3 gen.py parse2, rc 0, $(( (t1 - t0) / 1000000 )) ms) and published for key $RK"
-        find "$SB" -maxdepth 1 -name 'seedp2c-sg0-*' ! -name "seedp2c-sg0-$RK" -mmin +1440 -exec rm -rf {} + 2>/dev/null
+        find "$SB" -maxdepth 1 -name 'seedp2c-sg0-*' ! -name "seedp2c-sg0-$RK" -mmin +1440 -exec sh "$R/tests/cxbin" "$R/tests/safedel.cx" -- {} + 2>/dev/null   # expired entries: into the trash
     else
-        rm -rf "$tmp"; no "SEED_GEN=0 parse2 reference (helper rc=$rr) $(tail -1 "$S/ref.err")"
+        safedel --purge -- "$tmp"; no "SEED_GEN=0 parse2 reference (helper rc=$rr) $(tail -1 "$S/ref.err")"
     fi
 fi
 evw "REF_E3_SHA $(cat "$P2D/ready" 2>/dev/null || echo none)"
@@ -270,7 +273,7 @@ evw "POS snap_rc parse2=$(cat "$sd/after-parse2.rc" 2>/dev/null || echo none) op
     || no "cache snapshots differ or are not exactly two members"
 nopy "$l" && ok "no Python generator call" || no "Python generator called"
 g=$(ls "$o/.seed-gen-cache"/seed-gen-* 2>/dev/null | grep -v '\.sha256$' | head -1)
-rr=none; rm -f "$S/ref-e3.json"
+rr=none; safedel --purge -- "$S/ref-e3.json"
 [ -n "$g" ] && { "$W/tests/bound" 55 "$g" parse2 "$S/ref-e3.json" 2>"$S/ref-e3.err"; rr=$?; }
 evw "POS ref_rc=$rr"
 { [ "$rr" = 0 ] && cmp -s "$o/e3.json" "$S/ref-e3.json"; } && ok "e3.json = seed-gen parse2 (reference rc 0)" || no "e3.json vs seed-gen parse2 (reference rc=$rr)"
@@ -309,16 +312,16 @@ done
 # 3 helper argument and SEED_GEN refusals (scratch copy; outputs cleared first)
 D=$W/exec/parse2gen/gen-delta.sh
 for args in "--locations" "--warnings" "--errors" "--x"; do
-    rm -f "$S/ha.json"; env -u SEED_GEN -u SEED_GEN_DIR SEED_GEN_BIN="$S/red-gen" "$REALSH" "$D" "$S/ha.json" $args 2>/dev/null; r=$?
+    safedel --purge -- "$S/ha.json"; env -u SEED_GEN -u SEED_GEN_DIR SEED_GEN_BIN="$S/red-gen" "$REALSH" "$D" "$S/ha.json" $args 2>/dev/null; r=$?
     { [ "$r" -eq 2 ] && [ ! -e "$S/ha.json" ]; } && ok "helper refuses OUT $args (rc 2, no output)" || no "helper did not refuse OUT $args (rc=$r)"
 done
 env -u SEED_GEN "$REALSH" "$D" 2>/dev/null; r=$?
 [ "$r" -eq 2 ] && ok "helper refuses no argument (rc 2)" || no "helper did not refuse no argument (rc=$r)"
 for v in 2 yes; do
-    rm -f "$S/sv.json"; env SEED_GEN="$v" "$REALSH" "$D" "$S/sv.json" 2>/dev/null; r=$?
+    safedel --purge -- "$S/sv.json"; env SEED_GEN="$v" "$REALSH" "$D" "$S/sv.json" 2>/dev/null; r=$?
     { [ "$r" -eq 2 ] && [ ! -e "$S/sv.json" ]; } && ok "helper refuses SEED_GEN='$v'" || no "helper did not refuse SEED_GEN='$v' (rc=$r)"
 done
-rm -f "$S/sv.json"; env SEED_GEN= "$REALSH" "$D" "$S/sv.json" 2>/dev/null; r=$?
+safedel --purge -- "$S/sv.json"; env SEED_GEN= "$REALSH" "$D" "$S/sv.json" 2>/dev/null; r=$?
 { [ "$r" -eq 2 ] && [ ! -e "$S/sv.json" ]; } && ok "helper refuses SEED_GEN set but empty (unset is the default route, slice 1)" || no "helper did not refuse empty SEED_GEN (rc=$r)"
 fi
 

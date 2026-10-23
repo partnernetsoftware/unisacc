@@ -136,7 +136,7 @@ for f in $FILES; do
         fail=$((fail+1)); printf "  FAIL %-14s got %-18s want %s\n" "$b" "'$got'($gcode)" "'$want'($wcode)"
     fi
 done
-rm -rf "$T"
+[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge --max-files 20000 -- "$T"   # the one guard (commissar ruling 2026-10-23); T holds every probe's outputs
 echo
 echo "match $pass   wrong $fail   unsupported $unsup   knownwrong $known   revived $revived"
 # A suite that checked nothing is not green: `closure.sh` with no

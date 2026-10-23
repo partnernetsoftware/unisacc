@@ -3,7 +3,8 @@
 # result line, never a number that appears later in a suite's own output.  Fixture result files in the exact
 # format gate.sh writes ('%-14s rc=%-3s %3ss :: %s') go through tests/gatesummary.sh.
 set -u
-R=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-gatesum.XXXXXX"); trap 'rm -rf "$T"' EXIT
+R=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-gatesum.XXXXXX"); trap 'sh "$_SD/cxbin" "$_SD/safedel.cx" --purge -- "${T:?}"' EXIT
+_SD="$R"/tests   # the one deletion guard: argv CLI tests/safedel.cx over include/unisa_safedel.h
 fail() { echo "gatesummary: $*"; exit 1; }
 case_() {   # case_ NAME WANT_RC WANT_FAILED WANT_UNVERIFIED LINE...
   local name=$1 want=$2 wf=$3 wu=$4; shift 4; local d=$T/$name; mkdir -p "$d"; local i=0

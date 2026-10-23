@@ -36,6 +36,7 @@ self)    $B python3 tests/sourceflat.py "$X/e1-self.c" &&
          $B python3 exec/lex/compare.py "$D" "$X/e1-self.c" ;;
 corpus.*) # the list is rebuilt when the corpus changes (a cached one skips files)
          find "${CORPUS:-../../corpus}" -name '*.c' | sort > $X/e1corp.new
-         cmp -s $X/e1corp.new $X/e1corp.txt || { mv $X/e1corp.new $X/e1corp.txt; rm -f $X/e1corp.a?; split -l 63 $X/e1corp.txt $X/e1corp.; }
+         # the stale shard lists go through the one deletion guard (argv CLI tests/safedel.cx; an unmatched glob is absent: rc 0)
+         cmp -s $X/e1corp.new $X/e1corp.txt || { mv $X/e1corp.new $X/e1corp.txt; sh tests/cxbin tests/safedel.cx --purge -- "${X:?}"/e1corp.a? || exit 1; split -l 63 $X/e1corp.txt $X/e1corp.; }
          $B python3 exec/lex/compare.py $D @$X/e1corp.${1#corpus.} ;;
 esac

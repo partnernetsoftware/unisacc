@@ -28,6 +28,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "unisa_safedel.h"   /* the one deletion guard */
 
 /* ── the slice of llm.c this CLI uses (types restated so this file compiles
  *    on its own; see header note) ─────────────────────────────────────────── */
@@ -155,10 +156,12 @@ int llm_run_selftest(void) {
      * both backends (session.c's own selftest uses it) — so no mkstemp, which
      * unisacc does NOT provide. */
     {
-        const char *tp = "/tmp/cdsh-llm-selftest.jsonl";
-        remove(tp);
+        /* under the temp root, deleted through the one guard (include/unisa_safedel.h) */
+        char tp[1024], why[1400]; const char *td = getenv("TMPDIR");
+        snprintf(tp, sizeof tp, "%s/cdsh-llm-selftest.jsonl", td && td[0] ? td : "/tmp");
+        unisa_safedel(tp, SAFEDEL_PURGE, 0, why, (int)sizeof why);
         llm_expect(session_append(tp, "{\"role\":\"model\",\"text\":\"x\",\"p\":0.5000}") == 0, "model record appends to a real transcript");
-        remove(tp);
+        if (unisa_safedel(tp, SAFEDEL_PURGE, 0, why, (int)sizeof why)) llm_expect(0, why);
     }
 
     if (llm_failures) { printf("llm: %d FAILED\n", llm_failures); return 1; }

@@ -90,12 +90,12 @@ def main():
                 sys.stderr.write(r.stdout.decode(errors='replace')[-400:] + r.stderr.decode(errors='replace')[-400:])
                 return r.returncode
             names = measured_names(log, work)
-            (work / 'strace.log').unlink()
+            subprocess.run(['sh',str(ROOT/'tests/cxbin'),str(ROOT/'tests/safedel.cx'),'--purge','--',str(work / 'strace.log')],check=True)   # the one deletion guard (commissar ruling 2026-10-23)
             stamp = cp._stamp(ROOT, set(names))
             cache = BASE / ('ape-' + readkey(stamp))
             (work / 'manifest.json').write_text(json.dumps({'driver.com': cp._digest(work / 'driver.com')}, sort_keys=True))
             if cache.exists():
-                shutil.rmtree(cache)
+                subprocess.run(['sh',str(ROOT/'tests/cxbin'),str(ROOT/'tests/safedel.cx'),'--',str(cache)],check=True)   # the replaced cache entry: into the trash
             work.rename(cache)
             if names not in seen:
                 seen.append(names)
@@ -105,7 +105,7 @@ def main():
             return 0
         finally:
             if work.exists():
-                shutil.rmtree(work, ignore_errors=True)
+                subprocess.run(['sh',str(ROOT/'tests/cxbin'),str(ROOT/'tests/safedel.cx'),'--purge','--',str(work)],check=True)
 
 
 if __name__ == '__main__':

@@ -74,7 +74,7 @@ jobs={} if mode=='empty' else {'com-probe':['true']}
     def delete_result(state):
         q=state/'results.json';obj=json.loads(q.read_text());del obj['results']['com-run'];q.write_text(json.dumps(obj))
     scopecheck('missing-result',1,delete_result)
-    scopecheck('missing-log',1,lambda state:(state/'run.log').unlink())
+    scopecheck('missing-log',1,lambda state:subprocess.run(['sh',str(ROOT/'tests/cxbin'),str(ROOT/'tests/safedel.cx'),'--purge','--',str(state/'run.log')],check=True))   # the one deletion guard
     scopecheck('empty-log',1,lambda state:(state/'run.log').write_text(''))
     scopecheck('notice-only',1,lambda state:(state/'run.log').write_text(run_notice+'\n'))
     scopecheck('wrong-suite',1,lambda state:(state/'nativeboot.log').write_text('passed\n'+run_notice+'\n'))

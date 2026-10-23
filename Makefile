@@ -92,10 +92,10 @@ com:
 	    out="$(if $(MODEL_DIR),$(MODEL_DIR),out/model-com)"; \
 	    dst="$(COM_OUT)"; \
 	    ./exec/c/buildcompiler.sh "$$out"; \
-	    tmp=$$(mktemp ./"$$dst".XXXXXX); \
-	    trap "rm -f \"$$tmp\"" EXIT HUP INT TERM; \
+	    case "$$dst" in */*) tmp=$$(mktemp "$$dst".XXXXXX);; *) mkdir -p out; tmp=$$(mktemp out/."$$dst".XXXXXX);; esac; \
+	    trap "sh tests/cxbin tests/safedel.cx --purge -- \"$$tmp\" || :" EXIT HUP INT TERM; \
 	    cp "$$out/unisacc-next.com" "$$tmp"; chmod +x "$$tmp"; \
-	    mv -f "$$tmp" "$$dst"; \
+	    mv -f "$$tmp" "$$dst"; trap - EXIT HUP INT TERM; \
 	    cp "$$out/unisacc-next.com.build.json" "$$dst.build.json"; \
 	    if [ -x "$$out/seedbin/ident" ]; then "$$out/seedbin/ident" . check "$$dst"; else python3 exec/c/provenance.py check "$$dst"; fi'
 
@@ -114,9 +114,9 @@ seed-com:
 	    [ -s "$(SEED_DIR)/unisacc-next.com" ] || { echo "seed-com: no artifact" >&2; exit 1; }; \
 	    dst="$(SEED_DIR)/unisacc-seed.com"; \
 	    tmp=$$(mktemp "$$dst".XXXXXX); \
-	    trap "rm -f \"$$tmp\"" EXIT HUP INT TERM; \
+	    trap "sh tests/cxbin tests/safedel.cx --purge -- \"$$tmp\" || :" EXIT HUP INT TERM; \
 	    cp "$(SEED_DIR)/unisacc-next.com" "$$tmp"; chmod +x "$$tmp"; \
-	    mv -f "$$tmp" "$$dst"; \
+	    mv -f "$$tmp" "$$dst"; trap - EXIT HUP INT TERM; \
 	    cp "$(SEED_DIR)/unisacc-next.com.build.json" "$$dst.build.json"; \
 	    if [ -x "$(SEED_DIR)/seedbin/ident" ]; then "$(SEED_DIR)/seedbin/ident" . check "$$dst"; else python3 exec/c/provenance.py check "$$dst"; fi; \
 	    sh exec/c/comboot.sh stage 1 "$$dst"'; \
@@ -176,10 +176,14 @@ release:
 linux:
 	@./tests/linux.sh
 
+# Deletions go through the one guard, tests/safedel.cx (commissar ruling 2026-10-23).  The product beside the sources is
+# outside every whitelisted root, so it is moved into .trash/ (named as the guard names its entries; later removed by
+# `sh tests/cxbin tests/safedel.cx --purge-trash . --older-than HOURS`), never deleted here.
 clean:
-	@rm -f unisacc.com unisacc.com.build.json .release.log
-	@rm -rf /tmp/ua_ref /tmp/ua_ref.c
-	@echo "  removed the built artifacts (unisacc.c is generated and tracked)"
+	@sh tests/cxbin tests/safedel.cx --purge -- /tmp/ua_ref /tmp/ua_ref.c || echo "  kept /tmp/ua_ref and /tmp/ua_ref.c (refused by the deletion guard)"
+	@mkdir -m 700 -p .trash && d=.trash/$$(date -u +%Y%m%dT%H%M%SZ)-$$$$-clean && mkdir -m 700 "$$d" \
+	    && for f in unisacc.com unisacc.com.build.json .release.log; do [ ! -e "$$f" ] || mv -f "$$f" "$$d/" || exit 1; done \
+	    && echo "  moved the built artifacts into $$d (unisacc.c is generated and tracked)"
 
 # Independent export for VM transfer and single-file self-hosting.
 .PHONY: export-ref

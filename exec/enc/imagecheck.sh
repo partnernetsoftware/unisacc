@@ -3,8 +3,8 @@ _BOUND=$(cd "$(dirname "$0")/../.." && pwd)/tests/bound
 _BOUND=$("$_BOUND" --helper) || exit 2
 # Separate bounded batch: same generic executor, an ELF-output delta.
 set -eu
-cd "$(dirname "$0")/../.."
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
+T=$(mktemp -d); trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT
 b() { "$_BOUND" 60 "$@"; }
 b cc -O2 -o "$T/run" exec/c/run.c
 b python3 exec/build/gen.py enc "$T/elf.json" --elf

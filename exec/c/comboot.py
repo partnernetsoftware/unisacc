@@ -318,8 +318,7 @@ def lock(path, name):
             owner = int((lk / 'pid').read_text())
             os.kill(owner, 0)
         except (FileNotFoundError, ValueError, ProcessLookupError):
-            for f in lk.iterdir(): f.unlink()
-            lk.rmdir()
+            subprocess.run(['sh', str(ROOT / 'tests/cxbin'), str(ROOT / 'tests/safedel.cx'), '--', str(lk)], check=True)   # a stale lock: into the trash (the one deletion guard, commissar ruling 2026-10-23)
             return lock(path, name)
         except PermissionError:
             pass
@@ -385,8 +384,7 @@ def shard(name):
             build_model(model_dir)
             install(model_dir, STAGE2)
         finally:
-            for f in lk.iterdir(): f.unlink()
-            lk.rmdir()
+            subprocess.run(['sh', str(ROOT / 'tests/cxbin'), str(ROOT / 'tests/safedel.cx'), '--purge', '--', str(lk)], check=True)   # our own lock (the one deletion guard)
         if not STAGE2.exists():
             raise SystemExit('comboot-shard stage2: no %s after the build' % STAGE2)
         stage(2, STAGE2)
@@ -417,8 +415,7 @@ def shard(name):
             build_model(model_dir)
             install(model_dir, STAGE3)
         finally:
-            for f in lk.iterdir(): f.unlink()
-            lk.rmdir()
+            subprocess.run(['sh', str(ROOT / 'tests/cxbin'), str(ROOT / 'tests/safedel.cx'), '--purge', '--', str(lk)], check=True)   # our own lock (the one deletion guard)
         if not STAGE3.exists():
             raise SystemExit('comboot-shard stage3: no %s after the build' % STAGE3)
         stage(3, STAGE3)

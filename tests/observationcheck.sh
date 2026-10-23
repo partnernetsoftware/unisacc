@@ -3,7 +3,7 @@
 # before any warm-up or scheduling when its scope is wrong.  Every refusal exits 66 and leaves no scheduler state;
 # a formal run refuses a state that an observation wrote.  Fixture candidate/UA/seed; no gate suite runs here.
 set -u
-R=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-observe.XXXXXX"); trap 'rm -rf "$T"' EXIT
+R=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-observe.XXXXXX"); trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT
 fail() { echo "observation: $*"; exit 1; }
 printf '#!/bin/sh\nexit 0\n' > "$T/model"; cp "$T/model" "$T/ua"; chmod +x "$T/model" "$T/ua"; mkdir -p "$T/seed"; printf s > "$T/seed/unisacc-seed.com"
 rel() {   # rel STATE [ENV...] -> rc
@@ -40,7 +40,7 @@ D=$T/cand; W=$T/wt; mkdir -p "$D" "$W/tests"; cp "$R/unisacc.com" "$D/unisacc-ne
 printf '{"artifact_sha256":"%s"}\n' "$(shasum -a 256 "$D/unisacc-next.com" | cut -d' ' -f1)" > "$D/unisacc-next.com.build.json"
 # a process whose command TEXT mentions gatequeue.py (not running it) must not make queue.sh wait
 bash -c 'sleep 40; echo tests/gatequeue.py --com >/dev/null' & mention=$!   # two commands: the shell (and its text) stays alive
-trap 'kill $mention 2>/dev/null; rm -rf "$T"' EXIT
+trap 'kill $mention 2>/dev/null; [ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT
 for want in 65 66; do
   printf '#!/bin/sh\necho x >> "%s/launches-%s"\nexit %s\n' "$T" "$want" "$want" > "$W/tests/term.sh"; chmod +x "$W/tests/term.sh"
   env -u QUEUE_START QUEUE_SELFTEST=1 STAGELOG_RUN=0 QUEUE_WORKTREE="$W" QUEUE_STATE="$T/q$want" QUEUE_BACKUP="$T/b$want" QUEUE_SUITES=checkrun QUEUE_WINDOWS=5 \

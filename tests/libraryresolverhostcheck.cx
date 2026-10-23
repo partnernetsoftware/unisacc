@@ -36,23 +36,11 @@ static void put(Buf *b, const char *s, size_t n) {
 }
 static void puts_(Buf *b, const char *s) { put(b, s, strlen(s)); }
 
-static void rmtree(const char *d) {
-    DIR *dp = opendir(d); struct dirent *e; char p[8192]; struct stat st;
-    if (dp) {
-        while ((e = readdir(dp))) {
-            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-            snprintf(p, sizeof p, "%s/%s", d, e->d_name);
-            if (lstat(p, &st) == 0 && S_ISDIR(st.st_mode)) rmtree(p); else unlink(p);
-        }
-        closedir(dp);
-    }
-    rmdir(d);
-}
 /* the .py's uncaught exception: nothing printed yet (the JSON is printed last), a message, the directory removed, rc 1 */
 static void fail(const char *kind, const char *a, const char *b) {
     fflush(stdout);
     fprintf(stderr, "libraryresolverhostcheck: %s: %s%s%s\n", kind, a, b && *b ? "\n" : "", b ? b : "");
-    if (TD[0]) rmtree(TD);
+    if (TD[0]) cx_rmtree(TD);
     exit(1);
 }
 
@@ -131,7 +119,7 @@ static void command(Buf *runs, int first, char **args, const char *closelog) {
     fflush(stdout); fflush(stderr);
     t0 = now();
     pid = fork();
-    if (pid < 0) { close(ofd); close(efd); unlink(of); unlink(ef); fail("OSError", "fork failed for", args[0]); }
+    if (pid < 0) { close(ofd); close(efd); cx_remove(of); cx_remove(ef); fail("OSError", "fork failed for", args[0]); }
     if (pid == 0) {
         if (chdir(TD) != 0) _exit(127);
         dup2(ofd, 1); dup2(efd, 2); close(ofd); close(efd);
@@ -150,13 +138,13 @@ static void command(Buf *runs, int first, char **args, const char *closelog) {
         w = waitpid(pid, &st, WNOHANG);
         if (w == pid) { rc = WIFEXITED(st) ? WEXITSTATUS(st) : WIFSIGNALED(st) ? -WTERMSIG(st) : 1; break; }
         if (w < 0) { rc = -1; break; }
-        if (ticks-- <= 0) { kill(pid, SIGKILL); waitpid(pid, &st, 0); unlink(of); unlink(ef); fail("TimeoutExpired", args[0], "timed out after 20 seconds"); }
+        if (ticks-- <= 0) { kill(pid, SIGKILL); waitpid(pid, &st, 0); cx_remove(of); cx_remove(ef); fail("TimeoutExpired", args[0], "timed out after 20 seconds"); }
         usleep(1000);
     }
     secs = now() - t0;
     if ((f = fopen(of, "rb"))) { out = _cx_slurp(f, &on); fclose(f); }
     if ((f = fopen(ef, "rb"))) { err = _cx_slurp(f, &en); fclose(f); }
-    unlink(of); unlink(ef);
+    cx_remove(of); cx_remove(ef);
     if (!out) { out = calloc(1, 1); on = 0; }
     if (!err) { err = calloc(1, 1); en = 0; }
     if (rc != 0) {
@@ -366,7 +354,7 @@ int main(int argc, char **argv) {
     puts_(&js, "}, \"all_candidates\": 8, \"runs\": [");
     put(&js, runs.p ? runs.p : "", runs.n);
     puts_(&js, "]}\n");
-    rmtree(TD); TD[0] = 0;
+    cx_rmtree(TD); TD[0] = 0;
     fwrite(js.p, 1, js.n, stdout);
     return fflush(stdout) ? 1 : 0;
 }

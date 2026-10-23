@@ -29,7 +29,7 @@ esac
 [ "$MODE" = check ] && { echo "seal-modules: check-only ok"; exit 0; }
 
 TMP=$(mktemp -d) || exit 2
-trap 'rm -rf "$TMP"' EXIT
+trap 'sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${TMP:?}"' EXIT
 
 list_jobs() {
     case "$MODE" in
@@ -62,7 +62,7 @@ while IFS='|' read -r kind leaf checker; do
             pid=${f##*.}
             if ! kill -0 "$pid" 2>/dev/null; then
                 wait "$pid" || bad=$((bad + 1))
-                rm -f "$f"
+                sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${f:?}"
             fi
         done
         sleep 0.05

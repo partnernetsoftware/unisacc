@@ -7,6 +7,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "unisa_safedel.h"   /* the one deletion guard */
 
 int u_spawn(const char *bin, char **args, int nargs, const char *cwd,
             char *out, int cap, int *rc);
@@ -41,12 +42,14 @@ static const char *expect[] = {
 
 int main(void) {
     const char *u = getenv("UNISACC");
-    char base[64], dir[80], src[96], out[1024], line[160];
+    char base[1024], dir[1100], src[1200], out[1024], line[160], why[1400];
+    const char *td = getenv("TMPDIR");
     int i, n, rc, red = 0, same = 0;
     FILE *f;
     if (!u || !u[0]) u = "/Users/wjc/repos/unisacc/unisacc.com";
     n = (int)(sizeof expect / sizeof expect[0]);
-    snprintf(base, sizeof base, "/tmp/cdsh-f22-%d", (int)getpid());
+    /* under the temp root: every snippet directory is deleted through the one guard (include/unisa_safedel.h) */
+    snprintf(base, sizeof base, "%s/cdsh-f22-%d", td && td[0] ? td : "/tmp", (int)getpid());
     if (mkdir(base, 0700) != 0) { printf("no temp\n"); return 2; }
     for (i = 0; i < n; i++) {
         char *args[1];
@@ -69,10 +72,9 @@ int main(void) {
             red++;
             printf("  red     want=%s got=%s\n", expect[i], line[0] ? line : "<no output>");
         }
-        remove(src);
-        rmdir(dir);
+        if (unisa_safedel(dir, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 0, why, (int)sizeof why)) printf("  cleanup %s\n", why);
     }
-    rmdir(base);
+    if (unisa_safedel(base, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 0, why, (int)sizeof why)) printf("  cleanup %s\n", why);
     printf("\n  %d same, %d red\n", same, red);
     return red ? 1 : 0;
 }

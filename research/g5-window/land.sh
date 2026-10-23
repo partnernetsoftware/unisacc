@@ -2,7 +2,7 @@
 # Apply the seven parked reference patches in their verified order (window only).
 # --check: dry run on the current tree; no files are changed.
 set -e
-cd "$(dirname "$0")/../.."
+R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 mode=; [ "$1" = --check ] && mode=--check
 for p in research/g5-typedef-leak/typedef-reset.patch research/g5-unsized-rows/unsized-rows.patch \
          research/g5-str3d-init/str3d-refuse.patch research/g5-bkscr/bkscr-bound.patch \
@@ -18,6 +18,6 @@ if [ -n "$mode" ]; then
            research/g5-window/l1prime-multiunit.patch; do
     (cd "$t" && git apply "$OLDPWD/$p") && echo "ok $p"
   done
-  rm -rf "$t"
+  [ -n "$t" ] && sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$t"   # the one guard (commissar ruling 2026-10-23)
 fi
 echo "next: export --check, re-export, diff facts, gates"

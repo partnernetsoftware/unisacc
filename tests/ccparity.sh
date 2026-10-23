@@ -19,6 +19,8 @@ set -u
 R=$(cd "$(dirname "$0")/.." && pwd)
 . "$R/tests/lib.sh"; ua_ready
 CC=${CC:-cc}
+# del FILE...: removal through the one deletion guard (argv CLI tests/safedel.cx over include/unisa_safedel.h)
+del() { sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$@"; }
 T=$(scratch); cd "$T"
 ok=0; bad=0; kn=0
 say() {   # say <name> <want> <got> [defect note]
@@ -40,8 +42,8 @@ has() { [ -s "$1" ] && echo text || echo empty; }
 ex() { [ -e "$1" ] && echo yes || echo no; }
 both() {  # both <name> ARGS... -- same exit class and same a.out existence
     local a c
-    rm -f a.out; cc_ "${@:2}"; a=$?; local fa; fa=$(ex a.out)
-    rm -f a.out; ua "${@:2}"; c=$?; local fu; fu=$(ex a.out)
+    del a.out; cc_ "${@:2}"; a=$?; local fa; fa=$(ex a.out)
+    del a.out; ua "${@:2}"; c=$?; local fu; fu=$(ex a.out)
     say "$1" "$(nz $a) a.out=$fa" "$(nz $c) a.out=$fu"
 }
 
@@ -86,12 +88,12 @@ printf 'int main(void) { int unused; return 0; }\n' > warn.c
 # --- the default output --------------------------------------------------
 # The one DOCUMENTED difference from cc: with no flag unisacc RUNS the program
 # (owner decision 2026-10-01, R17-10) and writes nothing; cc writes a.out.
-rm -f a.out; ua hello.c; say "no flag: runs, prints" "hello" "$(cat o.ua 2>/dev/null | tr -d '\n')"
+del a.out; ua hello.c; say "no flag: runs, prints" "hello" "$(cat o.ua 2>/dev/null | tr -d '\n')"
 say "no flag: no a.out"         "no" "$(ex a.out)"
-rm -f prog a.out; ua -o prog hello.c; say "-o NAME" "yes hello" "$(ex prog) $(rb ./prog)"
+del prog a.out; ua -o prog hello.c; say "-o NAME" "yes hello" "$(ex prog) $(rb ./prog)"
 say "-o NAME: no a.out"         "no" "$(ex a.out)"
-rm -f p1 p2; cc_ -o p1 -o p2 hello.c; w="$(ex p1) $(ex p2)"
-rm -f p1 p2; ua  -o p1 -o p2 hello.c; say "two -o: last wins" "$w" "$(ex p1) $(ex p2)"
+del p1 p2; cc_ -o p1 -o p2 hello.c; w="$(ex p1) $(ex p2)"
+del p1 p2; ua  -o p1 -o p2 hello.c; say "two -o: last wins" "$w" "$(ex p1) $(ex p2)"
 cc_ -o nodir/x hello.c; w=$(nz $?); ua -o nodir/x hello.c
 say "-o missing dir: exit"      "$w" "$(nz $?)"
 say "-o missing dir: stderr"  "text empty" "$(has e.ua) $(has o.ua)" \
@@ -105,13 +107,13 @@ both "file without main"        nomain.c
 both "syntax error"             bad.c
 ua bad.c; say "syntax: diag on stderr" "text empty" "$(has e.ua) $(has o.ua)"
 say "syntax: diag names line"   "yes" "$(grep -q 'bad.c:1:' e.ua && echo yes || echo no)"
-rm -f out.x; ua -o out.x bad.c; say "syntax: -o not created" "no" "$(ex out.x)"
+del out.x; ua -o out.x bad.c; say "syntax: -o not created" "no" "$(ex out.x)"
 # cc leaves a pre-existing a.out untouched when the compile fails; so must we
 echo keep > a.out; cc_ bad.c; w=$(cat a.out)
 echo keep > a.out; ua bad.c;  say "syntax: old a.out kept" "$w" "$(cat a.out)"
 
 # --- the built program ----------------------------------------------------
-rm -f a.out; ua -o a.out st.c          # R17-10: a file only on request
+del a.out; ua -o a.out st.c          # R17-10: a file only on request
 for s in 0 3 255; do rb ./a.out $s; say "binary exit $s" "$s" "$?"; done
 for s in 0 3 255; do bound 20 "$UA_RUN" -run st.c $s >/dev/null 2>&1; say "-run exit $s" "$s" "$?"; done
 cc_ -o io.cc io.c; ua -o io.ua io.c
@@ -123,12 +125,12 @@ say "program stderr apart"      "to-stderr" "$(rb ./io.ua </dev/null 2>&1 >/dev/
 say "program stdout apart"      "argc=1 n=0" "$(rb ./io.ua </dev/null 2>/dev/null)"
 
 # --- several inputs, and stdin as one -------------------------------------
-cc_ -o mm m1.c m2.c; w=$(rb ./mm); rm -f mm
+cc_ -o mm m1.c m2.c; w=$(rb ./mm); del mm
 ua -o mm m1.c m2.c; say "two input files" "$w" "$(rb ./mm 2>&1)"
 # DIFFERENCE: clang refuses a bare `-` without -x c; unisacc reads it as C,
 # which is what `-x c -` means to cc.  Compare against `cc -x c -`.
-rm -f sa; cc_ -x c -o sa - < st.c; w="$(nz $?) $(rb ./sa 3; echo $?)"
-rm -f sa; ua -o sa - < st.c;       say "'-' reads stdin" "$w" "$(nz $?) $(rb ./sa 3; echo $?)"
+del sa; cc_ -x c -o sa - < st.c; w="$(nz $?) $(rb ./sa 3; echo $?)"
+del sa; ua -o sa - < st.c;       say "'-' reads stdin" "$w" "$(nz $?) $(rb ./sa 3; echo $?)"
 
 # --- the preprocessor ------------------------------------------------------
 # token spacing in -E output is not specified; compare the tokens
@@ -137,7 +139,7 @@ cc_ -E -DON=1 -Iinc pp.c; w=$(norm o.cc)
 ua  -E -DON=1 -Iinc pp.c; say "-E to stdout, -D, -I" "$w" "$(norm o.ua)"
 cc_ -E -DON -DOFF -UOFF -Iinc pp.c; w=$(norm o.cc)
 ua  -E -DON -DOFF -UOFF -Iinc pp.c; say "-U after -D" "$w" "$(norm o.ua)"
-rm -f x.i; ua -E -Iinc -o x.i pp.c
+del x.i; ua -E -Iinc -o x.i pp.c
 say "-E -o file, stdout quiet"  "yes empty" "$(ex x.i) $(has o.ua)"
 cc_ -E -Iinc pp.c; say "-E -o file content" "$(norm o.cc)" "$(norm x.i)"
 
@@ -215,19 +217,19 @@ both "#if division by zero" ppdiv.c
 both "#if unevaluated 1/0"  ppdivok.c -o a.out
 
 # --- warnings --------------------------------------------------------------
-cc_ -Wall warn.c; w=$(nz $?); rm -f a.out
+cc_ -Wall warn.c; w=$(nz $?); del a.out
 ua -Wall warn.c -o a.out; say "warning keeps exit 0" "$w a.out=yes" "$(nz $?) a.out=$(ex a.out)"
 say "warning on stderr"         "text" "$(has e.ua)"
-rm -f a.out; cc_ -Wall -Werror warn.c; w="$(nz $?) a.out=$(ex a.out)"
-rm -f a.out; ua  -Wall -Werror warn.c
+del a.out; cc_ -Wall -Werror warn.c; w="$(nz $?) a.out=$(ex a.out)"
+del a.out; ua  -Wall -Werror warn.c
 say "-Werror fails the build" "$w" "$(nz $?) a.out=$(ex a.out)" \
     "-Werror is accepted and ignored: warning printed, exit 0, a.out written"
 
 # --- options ----------------------------------------------------------------
 ua --version; say "--version exit 0" "0 text" "$? $(has o.ua)"
 say "--version names unisacc"   "yes" "$(grep -q '^unisacc ' o.ua && echo yes || echo no)"
-rm -f a.out; cc_ --bogus hello.c; w=$(nz $?)
-rm -f a.out; ua --bogus hello.c; say "unknown option: exit" "$w a.out=no" "$(nz $?) a.out=$(ex a.out)"
+del a.out; cc_ --bogus hello.c; w=$(nz $?)
+del a.out; ua --bogus hello.c; say "unknown option: exit" "$w a.out=no" "$(nz $?) a.out=$(ex a.out)"
 say "unknown option: stderr"  "text empty" "$(has e.ua) $(has o.ua)" \
     "'unknown option' is printed on stdout, not stderr"
 ua; say "no input: exit nonzero" "nonzero" "$(nz $?)"
@@ -236,15 +238,16 @@ say "no input: usage on stderr" "text empty" "$(has e.ua) $(has o.ua)" \
 
 # --- the documented non-cc boundary: -c ------------------------------------
 # DIFFERENCE (README "Not a cc drop-in"): -c writes the tape, not hello.o.
-rm -f hello.o; ua -c hello.c; rc=$?
+del hello.o; ua -c hello.c; rc=$?
 say "-c: exit 0, no .o"         "0 no" "$rc $(ex hello.o)"
 say "-c: tape text on stdout"   "yes" "$(grep -q '^_start:' o.ua && echo yes || echo no)"
-rm -f t.s; ua -c -o t.s hello.c; say "-c -o: tape in file" "yes empty" \
+del t.s; ua -c -o t.s hello.c; say "-c -o: tape in file" "yes empty" \
     "$(grep -q '^_start:' t.s && echo yes || echo no) $(has o.ua)"
 # A cc user typing `-c` gets a screenful of tape and no word about it.
 known "-c: says it is not a .o" "text" "$(has e.ua)" \
     "-c silently dumps the tape to stdout; only --usage mentions it is not an object file"
 
+cd "$R" || exit 1   # out of the scratch: tests/lib.sh removes it on exit, and the guard refuses the cwd
 echo
 echo "ccparity  ok $ok   wrong $bad   known $kn"
 [ "$bad" -eq 0 ] && [ "$ok" -gt 0 ]

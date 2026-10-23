@@ -21,6 +21,13 @@
 #include <time.h>
 
 typedef struct { char *b; size_t n, cap; } Buf;
+/* a whole scratch tree through the one deletion guard (include/unisa_safedel.h, in the cx.h prelude; commissar ruling
+   2026-10-23) with an explicit ceiling: these trees hold copied sources and build outputs, beyond SAFEDEL_MAX_FILES */
+static int scratch_rmtree(const char *p) {
+    char why[700]; int rc = unisa_safedel(p, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 200000L, why, (int)sizeof why);
+    if (rc) fprintf(stderr, "cx_rmtree: %s\n", why);
+    return rc;
+}
 static void put(Buf *s, const char *p, size_t n) {
     if (s->n + n + 1 > s->cap) {
         size_t c = s->cap ? s->cap : 256; char *g;
@@ -35,19 +42,7 @@ static void puts_(Buf *s, const char *p) { put(s, p, strlen(p)); }
 static char TMP[4096];        /* the TemporaryDirectory; removed on every exit */
 static char PROG[1024];
 
-static void rmtree(const char *d) {
-    DIR *dp = opendir(d); struct dirent *e; char p[8192]; struct stat st;
-    if (dp) {
-        while ((e = readdir(dp))) {
-            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-            snprintf(p, sizeof p, "%s/%s", d, e->d_name);
-            if (lstat(p, &st) == 0 && S_ISDIR(st.st_mode)) rmtree(p); else unlink(p);
-        }
-        closedir(dp);
-    }
-    rmdir(d);
-}
-static void cleanup(void) { if (TMP[0]) { rmtree(TMP); TMP[0] = 0; } }
+static void cleanup(void) { if (TMP[0]) { scratch_rmtree(TMP); TMP[0] = 0; } }
 static void die(const char *what, const char *detail) {   /* the .py's uncaught exception: no stdout, rc 1 */
     fflush(stdout);
     fprintf(stderr, "identityincludeconsumercheck: %s%s%s\n", what, detail ? ": " : "", detail ? detail : "");
@@ -295,9 +290,11 @@ static void find_python(void) {   /* sys.executable of `python3 ./tests/...`: th
 }
 /* subprocess.run(argv, capture stdout and stderr, timeout): rc; *out/*err malloc'd */
 static int run(char **argv, int secs, const char *cwd, char **out, size_t *on, char **err, size_t *en) {
-    char tmpl[] = "/tmp/cxerrXXXXXX", here[4096]; int fd = mkstemp(tmpl), saved, rc; struct stat st;
+    char tmpl[4096], here[4096]; int fd, saved, rc; struct stat st;
+    snprintf(tmpl, sizeof tmpl, "%s/cxerrXXXXXX", (getenv("TMPDIR") && *getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp"));   /* under the temp root: the deletion guard's whitelist */
+    fd = mkstemp(tmpl);
     if (fd < 0) die("mkstemp failed", 0);
-    unlink(tmpl);
+    cx_remove(tmpl);
     fflush(stdout); fflush(stderr);
     if (cwd) { if (!getcwd(here, sizeof here)) die("getcwd", 0); if (chdir(cwd)) die("chdir", cwd); }
     saved = dup(2); dup2(fd, 2);
@@ -440,7 +437,7 @@ int main(int argc, char **argv) {
                 "print(\"STAGING_COMPLETE_STOP_BEFORE_COMPILATION\",file=sys.stderr)\nraise SystemExit(86)\n");
     if (cx_write(SENTINEL, sen.b, sen.n)) die("cannot write", SENTINEL);
 
-    if (unlink(HEADER)) die("unlink", HEADER);
+    if (cx_remove(HEADER)) die("unlink", HEADER);
     rc = invoke("missing", &err, &en, &on);
     {
         Buf want = {0};

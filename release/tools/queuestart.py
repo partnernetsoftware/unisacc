@@ -10,13 +10,15 @@ before any window runs.  0.0.39 B.5 (16:09:40) silently restored a same-artifact
 Every start writes Q/start-receipt.json (mode, restored, source, artifact, checks).  A refusal exits 2 and leaves
 Q exactly as it was (never half-copied); the refusal reason is printed and appended to BACKUP/start-refusals.log
 when the backup directory exists."""
-import hashlib, json, os, pathlib, shutil, sys, time
+import hashlib, json, os, pathlib, shutil, subprocess, sys, time
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tests'))
 import env_pin
 
 def sha(p): return hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()
+# every deletion goes through the one deletion guard's argv CLI (include/unisa_safedel.h); errors ignored as before
+def safedel(*a): subprocess.run(['sh', str(ROOT / 'tests/cxbin'), str(ROOT / 'tests/safedel.cx'), *a])
 
 RECEIPTS = ('start-receipt.json', 'start-receipt.txt')
 START_META = RECEIPTS + ('env-pin.json',)   # written at queue start; not live results
@@ -106,10 +108,10 @@ def main(argv):
         bad = state_ok(src)
         if not (src / 'results.json').exists(): continue
         if bad: return refuse('backup generation %s: %s' % (src, bad))
-        tmp = Q.with_name(Q.name + '.resume-tmp'); shutil.rmtree(tmp, ignore_errors=True)
+        tmp = Q.with_name(Q.name + '.resume-tmp'); safedel('--purge', '--', str(tmp))
         try: shutil.copytree(src, tmp, symlinks=True)
         except OSError as e:
-            shutil.rmtree(tmp, ignore_errors=True)
+            safedel('--purge', '--', str(tmp))
             return refuse('copy of %s failed (%s); nothing restored' % (src, type(e).__name__))
         aside = Q.with_name(Q.name + '.resume-old')
         try:
@@ -117,9 +119,9 @@ def main(argv):
             tmp.replace(Q)
         except OSError as e:
             if aside.is_dir() and not Q.exists(): aside.replace(Q)   # roll back: the old Q exactly as it was
-            shutil.rmtree(tmp, ignore_errors=True)
+            safedel('--purge', '--', str(tmp))
             return refuse('could not install %s as %s (%s); old state kept, nothing restored' % (src, Q, type(e).__name__))
-        shutil.rmtree(aside, ignore_errors=True)
+        safedel('--', str(aside))   # the previous whole queue state: into the .trash of its root, not purged
         return receipt(True, str(src), ['backup build.json artifact matches', 'results.json well-formed', 'copied whole then renamed'])
     return refuse('backup %s has no complete state generation to resume' % B)
 

@@ -12,7 +12,8 @@ set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R" || exit 2
 B=$R/tests/bound
 T=$(mktemp -d "${TMPDIR:-/tmp}/unisacc-unisagoldtype.XXXXXX") || exit 2
-trap 'rm -rf "$T"' EXIT
+_SD="$R"/tests   # the one deletion guard: argv CLI tests/safedel.cx over include/unisa_safedel.h
+trap 'sh "$_SD/cxbin" "$_SD/safedel.cx" --purge -- "${T:?}"' EXIT
 fail() { echo "unisagoldtype: $*"; exit 1; }
 H=$(git rev-parse --verify HEAD) || exit 2
 echo "unisagoldtype  tree $H"

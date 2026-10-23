@@ -155,7 +155,8 @@ for n in range(1,int(a.phase[-1])+1 if a.phase!='u0' else 1):
     run([executable,u0/'self.c','-O2','-b',target],HOST_TRIPLE_INNER_BOUND,stdout=work/(name+'.exe')) if WINDOWS else run(['bash',ROOT/'tests/nativeboot.sh','--host-triple-build',u0/'self.c',executable,work/name],HOST_TRIPLE_INNER_BOUND)
     if digest(executable)!=execution_sha:raise SystemExit('host-triple execution copy changed during compilation')
     (work/(name+'.execution.json')).write_text(json.dumps({'parent_sha256':before,'execution_sha256':execution_sha,'target':target,'original_and_execution_copy_separate':True},sort_keys=True)+'\n')
-    executable.unlink()
+    if WINDOWS:executable.unlink()   # EXEMPT: on Windows the deletion guard refuses every call (fail closed); own TemporaryDirectory file
+    else:subprocess.run(['sh',str(ROOT/'tests/cxbin'),str(ROOT/'tests/safedel.cx'),'--purge','--',str(executable)],check=True)
     if digest(previous)!=before:raise SystemExit('host-triple parent changed during compilation')
     if stage=='n3':
      if WINDOWS:

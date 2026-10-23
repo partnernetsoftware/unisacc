@@ -25,9 +25,11 @@ if [ ! -d "$SRC" ]; then
     # one shard wins and the others use its tree (0.0.23 queue: "File exists" x3).
     mkdir -p "$(dirname "$DIR")"; tmp=$(mktemp -d "$DIR.fetch.XXXXXX")
     bound 30 git clone -q --depth 1 https://github.com/c-testsuite/c-testsuite.git "$tmp/c" \
-        || { rm -rf "$tmp"; echo "clone failed -- corpus not tested"; exit 1; }
-    python3 -c 'import os,sys; os.rename(sys.argv[1], sys.argv[2])' "$tmp/c" "$DIR" 2>/dev/null || [ -d "$SRC" ] || { rm -rf "$tmp"; echo "corpus fetch lost a race and found no tree"; exit 1; }
-    rm -rf "$tmp"
+        || { echo "clone failed -- corpus not tested (partial clone left at $tmp)"; exit 1; }
+    python3 -c 'import os,sys; os.rename(sys.argv[1], sys.argv[2])' "$tmp/c" "$DIR" 2>/dev/null || [ -d "$SRC" ] || { echo "corpus fetch lost a race and found no tree (clone left at $tmp)"; exit 1; }
+    # no deletion here: $tmp sits beside $DIR inside the checkout and may hold a git clone, both refused by the one
+    # deletion guard (tests/safedel.cx: inside a repository only out/ and .trash/; never a tree holding .git).  The
+    # fetch runs once per checkout; what it leaves is the emptied $DIR.fetch.* (or a lost race's clone).
 fi
 
 pass=0; wrong=0; unsup=0; known=0; revived=0; slow=0
@@ -68,7 +70,7 @@ if [ -n "$CORPUS_UA" ]; then
 else
     echo "corpus driver: Python --drive $DRIVE"
 fi
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d); trap '[ -z "$T" ] || sh "$REPO/tests/cxbin" "$REPO/tests/safedel.cx" --purge -- "$T"' EXIT
 R=$REPO
 . "$R/tests/knownfail.sh"
 knownfail_load "$KNOWN" "$T/known.keys" || exit 1

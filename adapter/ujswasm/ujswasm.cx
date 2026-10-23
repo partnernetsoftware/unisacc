@@ -79,16 +79,18 @@ static void bi(Buf *b, long v) { char *t = xf("%ld", v); bs(b, t); free(t); }
 
 /* ---------- refusal: rc 1, stdout untouched, no output file, reason and position on stderr ---------- */
 static const char *g_src = "?";       /* the source being built, for positions */
-#define TMPL_BUILD "/tmp/ujswasmXXXXXX"
-static char g_tmpdir[19];             /* bounded: the 18-byte mkdtemp template and its NUL (checked where it is filled); the scratch of this build, removed on any exit path through here */
+static char *g_tmpdir;                /* the scratch of this build (xf, under tmproot()), or 0; removed on any exit path through here */
 static char *g_errpath;               /* wat2wasm's captured stderr, inside g_tmpdir, or 0 */
+/* the temp root, read as the one deletion guard (include/unisa_safedel.h) reads it: $TMPDIR, else /tmp -- every scratch
+   lives there, so cx_remove may delete it */
+static const char *tmproot(void) { const char *t = getenv("TMPDIR"); return t && *t ? t : "/tmp"; }
 static void cleanup(void) {
     char *p;
-    if (!g_tmpdir[0]) return;
-    p = xf("%s/p.wat", g_tmpdir); unlink(p); free(p);
-    p = xf("%s/p.wasm", g_tmpdir); unlink(p); free(p);
-    if (g_errpath) { unlink(g_errpath); free(g_errpath); g_errpath = 0; }
-    rmdir(g_tmpdir); g_tmpdir[0] = 0;
+    if (!g_tmpdir) return;
+    p = xf("%s/p.wat", g_tmpdir); cx_remove(p); free(p);
+    p = xf("%s/p.wasm", g_tmpdir); cx_remove(p); free(p);
+    if (g_errpath) { cx_remove(g_errpath); free(g_errpath); g_errpath = 0; }
+    cx_remove(g_tmpdir); free(g_tmpdir); g_tmpdir = 0;
 }
 static void refuse_at(int line, const char *why) {
     cleanup();
@@ -2050,9 +2052,8 @@ static int ujs_flows(void *ctx) {
 static int ujs_emit(void *ctx, const char *wat, long wn) {
     char *wp, *op, *argv[6], *o = 0; size_t on = 0; int rc, saved, efd;
     (void)ctx;
-    if (strlen(TMPL_BUILD) + 1 != sizeof g_tmpdir) refuse_at(0, "internal: the scratch template does not fit its buffer");
-    memcpy(g_tmpdir, TMPL_BUILD, sizeof g_tmpdir);
-    if (!mkdtemp(g_tmpdir)) { g_tmpdir[0] = 0; refuse_at(0, "cannot make a scratch directory"); }
+    g_tmpdir = xf("%s/ujswasmXXXXXX", tmproot());
+    if (!mkdtemp(g_tmpdir)) { free(g_tmpdir); g_tmpdir = 0; refuse_at(0, "cannot make a scratch directory"); }
     wp = xf("%s/p.wat", g_tmpdir); op = xf("%s/p.wasm", g_tmpdir);
     if (cx_write(wp, wat, (size_t)wn)) refuse_at(0, "cannot write the WAT");
     argv[0] = "wat2wasm"; argv[1] = wp; argv[2] = "-o"; argv[3] = op; argv[4] = 0;
@@ -2114,12 +2115,12 @@ static int cmd_build(int argc, char **argv) {
     }
     if (!src || !out) { fprintf(stderr, "ujswasm: usage: build SRC -o OUT [--tables DIR] [--wat FILE]\n"); return 2; }
     g_src = src;
-    unlink(out);                              /* OUT exists afterwards only if this build succeeded */
+    unlink(out);   /* OUT exists afterwards only if this build succeeded; EXEMPT from the deletion guard: unlink(2) of the -o OUT this build writes (a non-directory entry the write replaces anyway; OUT may live anywhere) */
     if (!g_keep_tables && open_tables(tables)) refuse_at(0, fn_error());
     if (fn_drive(drive)) refuse_at(0, fn_error());
     data = read_source(src, &n);
     run_flows(data, n, watout);
-    if (cx_write(out, g_wasm, g_wasm_len)) { unlink(out); refuse2(0, "cannot write ", out); }
+    if (cx_write(out, g_wasm, g_wasm_len)) { unlink(out); /* EXEMPT as above: the partial -o OUT */ refuse2(0, "cannot write ", out); }
     cx_sha256_hex(g_wasm, g_wasm_len, hex);
     printf("out\t%s\t%d\t%s\n", out, g_wasm_len, hex);
     print_trace(stdout);
@@ -2138,7 +2139,7 @@ typedef struct { int rc; char *out; size_t nout; char *err; size_t nerr; } Child
 typedef struct { pid_t pid; char *so, *se; int limited; } Pend;   /* a started child: its stdout/stderr files */
 static Pend child_start(const char *src, const char *outpath, const char *tables, const char *drive) {
     Pend q; int fo, fe; pid_t p;
-    q.so = xf("/tmp/ujswasmoXXXXXX"); q.se = xf("/tmp/ujswasmeXXXXXX"); q.limited = !tables;
+    q.so = xf("%s/ujswasmoXXXXXX", tmproot()); q.se = xf("%s/ujswasmeXXXXXX", tmproot()); q.limited = !tables;
     fo = mkstemp(q.so); fe = mkstemp(q.se);
     fflush(stdout); fflush(stderr);
     p = fork();
@@ -2149,7 +2150,7 @@ static Pend child_start(const char *src, const char *outpath, const char *tables
         if (tables) { av[k++] = "--tables"; av[k++] = (char *)tables; }
         else g_keep_tables = 1;
         av[k++] = "--drive"; av[k++] = (char *)drive; av[k] = 0;
-        g_tmpdir[0] = 0;
+        g_tmpdir = 0;   /* the parent's scratch, not this child's to remove */
         exit(cmd_build(k, av));
     }
     close(fo); close(fe);
@@ -2174,7 +2175,7 @@ static Child child_finish(Pend q) {
     r.out = cx_read(q.so, &r.nout); r.err = cx_read(q.se, &r.nerr);
     if (!r.out) { r.out = sdup(""); r.nout = 0; }
     if (!r.err) { r.err = sdup(""); r.nerr = 0; }
-    unlink(q.so); unlink(q.se); free(q.so); free(q.se);
+    cx_remove(q.so); cx_remove(q.se); free(q.so); free(q.se);
     return r;
 }
 static Child build_child(const char *src, const char *outpath, const char *tables, const char *drive) {
@@ -2262,7 +2263,7 @@ static char *role_list(const char *role) {
 }
 
 static int cmd_check(const char *root) {
-    char *outp, tmp[] = "/tmp/ujswasmcXXXXXX"; int r, k, nprog = 0, same = 0, i, nacc = 0, accok = 0;
+    char *outp, *tmp; int r, k, nprog = 0, same = 0, i, nacc = 0, accok = 0;
     const char *tables = DEFAULT_TABLES;
     load_baseline(root);
     if (chdir(root)) { fprintf(stderr, "ujswasm-check: cannot enter %s\n", root); return 1; }
@@ -2304,6 +2305,7 @@ static int cmd_check(const char *root) {
             free(l); free(o);
         }
     }
+    tmp = xf("%s/ujswasmcXXXXXX", tmproot());
     if (!mkdtemp(tmp)) { fprintf(stderr, "ujswasm-check: no scratch\n"); return 1; }
     outp = xf("%s/o.wasm", tmp);
     /* every recorded program: bytes, sha256 and the whole trace equal the m4 record */
@@ -2347,13 +2349,13 @@ static int cmd_check(const char *root) {
             neg++;
             c = build_child(path, outp, tables, "built");
             if (!strcmp(w->f[1], "reject")) {
-                if (!c.rc) { badf("%s: accepted, the record says refused (%s)", path, w->f[3]); unlink(outp); continue; }
+                if (!c.rc) { badf("%s: accepted, the record says refused (%s)", path, w->f[3]); cx_remove(outp); continue; }
                 d5(path, &c, outp, path);
                 if (!has_position(c.err, path)) badf("%s: refusal without a position: %s", path, c.err);
                 rej++;
             } else {
                 if (c.rc) { badf("%s: refused, the record says accepted: %s", path, c.err); continue; }
-                acc++; unlink(outp);
+                acc++; cx_remove(outp);
             }
         }
         for (i = 0; i < nrows; i++) if (!strcmp(rows[i].f[0], "check") && !strcmp(rows[i].f[1], "summary")) break;
@@ -2361,7 +2363,7 @@ static int cmd_check(const char *root) {
                accok, nacc, same, nprog, neg, rej, acc);
         if (nacc != 10 || !nprog || same != nprog || neg != 9) badf("want 10 acc rows (%d), every recorded program (%d) the same, 9 negatives (%d)", nacc, nprog, neg);
     }
-    rmdir(tmp); free(outp);
+    cx_remove(tmp); free(tmp); free(outp);
     (void)k;
     if (fails) { fprintf(stderr, "ujswasm-check: %d failure(s)\n", fails); return 1; }
     printf("ujswasm-check: PASS (D2: %d/%d programs byte-identical to the ujs gold record, acc %d/10, gold fallbacks 0)\n", same, nprog, accok);
@@ -2400,12 +2402,12 @@ static Buf long_source(int e) {
    imported): both accept and the bytes are equal */
 static int same_as_oracle(const char *src, const char *label, const char *mine, const char *ref) {
     Child c; char *av[8], *o = 0, *x, *y; size_t on = 0, a = 0, b = 0; int rc, ok;
-    unlink(mine);
+    cx_remove(mine);
     c = build_child(src, mine, DEFAULT_TABLES, "built");
     if (c.rc) { badf("%s: refused: %s", label, c.err); free(c.out); free(c.err); return 0; }
     free(c.out); free(c.err);
     av[0] = "python3"; av[1] = "-m"; av[2] = "m4"; av[3] = "build"; av[4] = (char *)src; av[5] = "-o"; av[6] = (char *)ref; av[7] = 0;
-    unlink(ref);
+    cx_remove(ref);
     rc = cx_runv_timeout(av, 20, &o, &on); free(o);
     if (rc) { badf("%s: the m4 oracle failed (rc %d)", label, rc); return 0; }
     x = cx_read(mine, &a); y = cx_read(ref, &b);
@@ -2420,9 +2422,10 @@ static int same_as_oracle(const char *src, const char *label, const char *mine, 
    and through the m4 oracle (`python3 -m m4 build SRC -o OUT`, run as a child; nothing of it is imported) and the bytes
    must be equal.  This is the only Python step of the adapter's checks; flownet/ itself never runs it. */
 static int cmd_accepts(const char *root) {
-    char tmp[] = "/tmp/ujswasmaXXXXXX", *mine, *ref; int r, n = 0, ok = 0, nedge = 0, edgeok = 0, e;
+    char *tmp, *mine, *ref; int r, n = 0, ok = 0, nedge = 0, edgeok = 0, e;
     load_baseline(root);
     if (chdir(root)) { fprintf(stderr, "ujswasm-accepts: cannot enter %s\n", root); return 1; }
+    tmp = xf("%s/ujswasmaXXXXXX", tmproot());
     if (!mkdtemp(tmp)) return 1;
     mine = xf("%s/mine.wasm", tmp); ref = xf("%s/ref.wasm", tmp);
     for (r = 0; r < nrows; r++) {
@@ -2444,9 +2447,9 @@ static int cmd_accepts(const char *root) {
         free(body.s);
         nedge++;
         if (same_as_oracle(path, LONGS[e].name, mine, ref)) edgeok++;
-        unlink(path); free(path);
+        cx_remove(path); free(path);
     }
-    unlink(mine); unlink(ref); rmdir(tmp); free(mine); free(ref);
+    cx_remove(mine); cx_remove(ref); cx_remove(tmp); free(tmp); free(mine); free(ref);
     if (fails || n != 5 || nedge != NLONG) { fprintf(stderr, "ujswasm-accepts: %d failure(s), %d/%d the same (want the 5 recorded accepts), generated %d/%d\n", fails, ok, n, edgeok, nedge); return 1; }
     printf("ujswasm-accepts: PASS (%d/%d known accepts and %d/%d generated accepts -- 2 literal boundaries, 4 long texts -- byte-identical to python3 -m m4 build)\n", ok, n, edgeok, nedge);
     return 0;
@@ -2496,8 +2499,8 @@ static int refuse_wat2wasm_cases(const char *tmp, const char *outp) {
         printf("refused\t%s\t%s", what, c.err);
         n++;
     }
-    body = xf("%s/x.wat", bin); unlink(body); free(body);
-    unlink(stub); rmdir(bin); unlink(src);
+    body = xf("%s/x.wat", bin); cx_remove(body); free(body);
+    cx_remove(stub); cx_remove(bin); cx_remove(src);
     free(stub); free(bin); free(src); free(real);
     return n;
 }
@@ -2545,8 +2548,9 @@ static int cmd_refuse(const char *root) {
         { "float_inf.ujs", "return %s.0;\n", "rounds to infinity" },
         { "float_tie.ujs", "let y = 2;\n\nreturn y * 000%s.000;\n", "rounds to infinity" },
         { 0, 0, 0 } };
-    char tmp[] = "/tmp/ujswasmrXXXXXX", *src, *outp; int k, n = 0, npos = 0;
+    char *tmp, *src, *outp; int k, n = 0, npos = 0;
     if (chdir(root)) { fprintf(stderr, "ujswasm-refuse: cannot enter %s\n", root); return 1; }
+    tmp = xf("%s/ujswasmrXXXXXX", tmproot());
     if (!mkdtemp(tmp)) return 1;
     outp = xf("%s/o.wasm", tmp);
     for (k = 0; CASES[k][0]; k++) {
@@ -2559,7 +2563,7 @@ static int cmd_refuse(const char *root) {
         if (!strstr(c.err, CASES[k][2])) badf("%s: reason not named (want '%s'): %s", CASES[k][0], CASES[k][2], c.err);
         if (!has_position(c.err, src)) badf("%s: no position: %s", CASES[k][0], c.err); else npos++;
         printf("refused\t%s\t%s", CASES[k][0], c.err);
-        unlink(src); free(src); n++;
+        cx_remove(src); free(src); n++;
     }
     for (k = 0; FLOATS[k][0]; k++) {
         Child c; char *body = xf(FLOATS[k][1], F64_INF_FROM);
@@ -2572,7 +2576,7 @@ static int cmd_refuse(const char *root) {
         if (!strstr(c.err, FLOATS[k][2])) badf("%s: reason not named (want '%s'): %s", FLOATS[k][0], FLOATS[k][2], c.err);
         if (!has_position(c.err, src)) badf("%s: no position: %s", FLOATS[k][0], c.err); else npos++;
         printf("refused\t%s\t%s", FLOATS[k][0], c.err);
-        unlink(src); free(src); n++;
+        cx_remove(src); free(src); n++;
     }
     /* long texts refused: the reason and the position survive whole, and a long name is named whole (no message
        buffer cuts it); a 6000-digit integer or float literal is shown by an explicit abbreviation and its count */
@@ -2593,7 +2597,7 @@ static int cmd_refuse(const char *root) {
         printf("refused\t%s\t", LONGREF[k][0]);
         if (got > 200) printf("%.*s ... (%ld bytes)\n", 120, c.err, (long)got);   /* the gate log only; checked whole above */
         else printf("%s", c.err);
-        unlink(src); free(src); n++;
+        cx_remove(src); free(src); n++;
     }
     n += refuse_wat2wasm_cases(tmp, outp); npos++;   /* the wat2wasm rejection names the WAT line:col */
     {   /* a missing source and a directory as the source */
@@ -2607,7 +2611,7 @@ static int cmd_refuse(const char *root) {
         if (!strstr(c.err, "not a regular file")) bad("directory source: reason not named: ", c.err);
         n += 2; free(src);
     }
-    unlink(outp); rmdir(tmp); free(outp);
+    cx_remove(outp); cx_remove(tmp); free(tmp); free(outp);
     if (fails) { fprintf(stderr, "ujswasm-refuse: %d failure(s)\n", fails); return 1; }
     printf("ujswasm-refuse: PASS (%d uncovered inputs, each rc 1, stdout empty, no output file, one stderr line naming the reason; "
            "%d with a position -- the rest are a missing/directory source and a missing wat2wasm)\n", n, npos);
@@ -2648,9 +2652,10 @@ static const char *flipped_label(void *ctx, const char *net, int nk, const char 
 }
 
 static int cmd_negative(const char *root) {
-    char tmp[] = "/tmp/ujswasmnXXXXXX", *outp, *p; int e, t, red = 0, total = 0; Child c;
+    char *tmp, *outp, *p; int e, t, red = 0, total = 0; Child c;
     const char *prog = "tests/ujs2wasm/corpus/arith.ujs";
     if (chdir(root)) { fprintf(stderr, "ujswasm-negative: cannot enter %s\n", root); return 1; }
+    tmp = xf("%s/ujswasmnXXXXXX", tmproot());
     if (!mkdtemp(tmp)) return 1;
     outp = xf("%s/o.wasm", tmp);
     /* 1. clean copy: acc exact and the program builds (the mutations below are what turn it red) */
@@ -2665,7 +2670,7 @@ static int cmd_negative(const char *root) {
     /* 3. a missing net table: named, rc 1 */
     total++;
     p = xf("%s/enc.net.tsv", tmp);
-    { size_t n; char *keep = cx_read(p, &n); unlink(p);
+    { size_t n; char *keep = cx_read(p, &n); cx_remove(p);
       c = build_child(prog, outp, tmp, "built");
       if (c.rc == 1 && strstr(c.err, "enc.net.tsv") && strstr(c.err, "cannot read")) { red++; printf("red\tmissing table\t%s", c.err); } else bad("negative: missing table not named: ", c.err);
       cx_write(p, keep, n); free(keep); free(p); }
@@ -2712,10 +2717,10 @@ static int cmd_negative(const char *root) {
     copy_tables(tmp);
     {
         int i; static const char *N[10] = { "lex", "parse", "type", "scope", "shape", "irsel", "ic", "isel", "enc", "reloc" };
-        for (i = 0; i < 20; i++) { p = xf("%s/%s.%s.tsv", tmp, N[i / 2], i % 2 ? "net" : "gold"); unlink(p); free(p); }
-        p = xf("%s/contract.tsv", tmp); unlink(p); free(p);
+        for (i = 0; i < 20; i++) { p = xf("%s/%s.%s.tsv", tmp, N[i / 2], i % 2 ? "net" : "gold"); cx_remove(p); free(p); }
+        p = xf("%s/contract.tsv", tmp); cx_remove(p); free(p);
     }
-    unlink(outp); rmdir(tmp); free(outp);
+    cx_remove(outp); cx_remove(tmp); free(tmp); free(outp);
     if (fails || red != total) { fprintf(stderr, "ujswasm-negative: %d failure(s), %d/%d mutations red\n", fails, red, total); return 1; }
     printf("ujswasm-negative: PASS (%d/%d mutations red: gold drive, missing table, isel acc + build, lex build, gold label in the file, label in the injected source)\n", red, total);
     return 0;
@@ -2955,7 +2960,7 @@ static int st_judge(int k, Child c, const char *outp, char **why) {
             else { *why = xf("accepted with other bytes: %ld bytes sha256 %s, recorded %s bytes %s", (long)wl, hex, st_prog[k]->f[4], st_prog[k]->f[5]); r = 2; }
         }
     }
-    free(c.out); free(c.err); unlink(outp);
+    free(c.out); free(c.err); cx_remove(outp);
     return r;
 }
 
@@ -2964,7 +2969,7 @@ static int st_judge(int k, Child c, const char *outp, char **why) {
 enum { ST_PAR = 6 };
 static int st_batch(int from, const char *outp, int *r, char **why) {
     Pend q[ST_PAR]; char *op[ST_PAR]; int i, n = st_nprog - from < ST_PAR ? st_nprog - from : ST_PAR;
-    for (i = 0; i < n; i++) { op[i] = xf("%s.%d", outp, i); unlink(op[i]); q[i] = child_start(st_prog[from + i]->f[2], op[i], 0, "built"); }
+    for (i = 0; i < n; i++) { op[i] = xf("%s.%d", outp, i); cx_remove(op[i]); q[i] = child_start(st_prog[from + i]->f[2], op[i], 0, "built"); }
     for (i = 0; i < n; i++) { r[i] = st_judge(from + i, child_finish(q[i]), op[i], &why[i]); free(op[i]); }
     return n;
 }
@@ -3019,11 +3024,11 @@ static void st_choose(const char *dir) {
         free(o);
     }
     printf("selftest\tchoose\teq i64_cmp|f64_cmp bytes differ (%ld, %ld bytes), both run 100\n", (long)gn, (long)an);
-    unlink(gp); unlink(ap); free(g); free(a); free(gp); free(ap);
+    cx_remove(gp); cx_remove(ap); free(g); free(a); free(gp); free(ap);
 }
 
 static int cmd_selftest(const char *root, const char *part) {
-    char tmp[] = "/tmp/ujswasmsXXXXXX", *outp, *ctp; size_t cn = 0; int r, i, nn = 0, K = 0, N = 0, changed = 0;
+    char *tmp = xf("%s/ujswasmsXXXXXX", tmproot()), *outp, *ctp; size_t cn = 0; int r, i, nn = 0, K = 0, N = 0, changed = 0;
     const char *names[NSELF];
     load_baseline(root);
     if (chdir(root)) { fprintf(stderr, "ujswasm-selftest: cannot enter %s\n", root); return 1; }
@@ -3094,7 +3099,7 @@ static int cmd_selftest(const char *root, const char *part) {
         free(got);
     }
     if (K && K == N) st_choose(tmp);
-    unlink(outp); rmdir(tmp); free(outp);
+    cx_remove(outp); cx_remove(tmp); free(tmp); free(outp);
     if (changed) badf("selftest: %d net(s) decide otherwise than EXPECT_W4", changed);
     if (fails) { printf("selftest\tverdict\tFAIL\n"); fprintf(stderr, "ujswasm-selftest: %d failure(s)\n", fails); return 1; }
     printf("selftest\tverdict\tPASS\n");

@@ -84,7 +84,7 @@ with tempfile.TemporaryDirectory(prefix='procenum-private-') as temp:
         for name in ('1','900001'):
             (fake/name/'status').write_text('Name:\tprobe-'+name+'\nPPid:\t0\nVmRSS:\t12 kB\n')
         (fake/'900002'/'status').write_text('Name:\tvanished\n')
-        (fake/'900002'/'status').unlink()
+        subprocess.run(['sh',str(ROOT/'tests/cxbin'),str(ROOT/'tests/safedel.cx'),'--purge','--',str(fake/'900002'/'status')],check=True)
         proc=d/'procview.c';proc.write_text(source)
         run(['cc','-D_GNU_SOURCE','-std=c99','-include',d/'shim.h','-I',d,
              '-DPROCVIEW_PROC_ROOT="'+str(fake)+'"',proc,'-o',d/'procview'])

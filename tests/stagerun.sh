@@ -10,20 +10,23 @@ if [ "${1:-}" = --plan-only ]; then plan_only=1; shift; fi
 [ $# -ge 1 ] || { echo 'usage: tests/stagerun.sh [--plan-only] STAGE...' >&2; exit 2; }
 # Preserve the user's stage arguments before the original mapper replaces argv.
 stage_args=$(mktemp "${TMPDIR:-/tmp}/stagerun-stages.XXXXXX") || exit 2
-trap 'rm -f "$stage_args"' EXIT
+here=$(cd "$(dirname "$0")/.." && pwd) || exit 2
+trap '[ -z "$stage_args" ] || sh "$here/tests/cxbin" "$here/tests/safedel.cx" --purge -- "$stage_args"' EXIT
 printf '%s\n' "$@" > "$stage_args"
 
 R=$(cd "$(dirname "$0")/.." && pwd); head=$(git -C "$R" rev-parse HEAD) || exit 2
 snap=${TMPDIR:-/tmp}/unisacc-stage-$(echo "$head" | cut -c1-12)
 if [ ! -d "$snap/.git" ]; then
-    rm -rf "$snap.part"; git clone -q --shared --no-checkout "$R" "$snap.part" && git -C "$snap.part" checkout -q "$head" || exit 2
+    # a private part directory per attempt: no deletion (a stale part holds .git, which the deletion guard refuses)
+    part=$(mktemp -d "$snap.part.XXXXXX") || exit 2
+    git clone -q --shared --no-checkout "$R" "$part" && git -C "$part" checkout -q "$head" || exit 2
     for f in unisacc.com unisacc.com.build.json unisacc-seed.com unisacc-seed.com.build.json; do
-        [ -f "$R/$f" ] && cp -p "$R/$f" "$snap.part/"
+        [ -f "$R/$f" ] && cp -p "$R/$f" "$part/"
     done
     # the corpus is gitignored, so a clone has none: link it per entry as release/tools/queue.sh does
     # (without it diag saw 0 damaged-corpus programs and warn read nothing from cc)
-    for c in "$R"/corpus/*; do [ -e "$c" ] && { mkdir -p "$snap.part/corpus"; ln -s "$c" "$snap.part/corpus/${c##*/}"; }; done
-    mv "$snap.part" "$snap"
+    for c in "$R"/corpus/*; do [ -e "$c" ] && { mkdir -p "$part/corpus"; ln -s "$c" "$part/corpus/${c##*/}"; }; done
+    mv "$part" "$snap"
 fi
 cd "$snap" || exit 2
 com=${MODEL_COM:-$snap/unisacc.com}

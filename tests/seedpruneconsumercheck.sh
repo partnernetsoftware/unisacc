@@ -65,7 +65,8 @@ finish() {
         [ -z "$EV" ] || printf 'EVIDENCE INCOMPLETE status %s scratch %s\n' "$st" "$S" >> "$EV/lines.txt" 2>/dev/null
         [ "$st" -ne 0 ] || st=3
     else
-        rm -rf "$S"
+        # the tree is a git-archive export (~1.8k files) plus outputs: a site ceiling of 20000 entries; cwd leaves it first
+        cd "$R" && sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge --max-files 20000 -- "$S" || { echo "$(basename "$0" .sh): scratch kept at $S (refused)" >&2; [ "$st" -ne 0 ] || st=3; }
     fi
     exit "$st"
 }
@@ -153,7 +154,7 @@ prep() {   # prep NAME [SCRIPT [ENV...]]: prepare.sh OUT lnx/x86_64 0 cc under t
     [ $# -ge 1 ] && [ -n "$1" ] || { echo "seedprunec: prep needs a NAME" >&2; exit 2; }
     n=$1; shift
     sc=$PREP; if [ $# -gt 0 ]; then sc=$1; shift; fi
-    o=$S/out-$n; rm -rf "$o" "$S/snap-$n"; mkdir -p "$o" "$S/snap-$n"; : > "$S/log-$n"
+    o=$S/out-$n; sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$o" "$S/snap-$n" || exit 3; mkdir -p "$o" "$S/snap-$n"; : > "$S/log-$n"
     env -u SEED_GEN -u SEED_GEN_BIN -u SEED_GEN_CC -u SEED_GEN_DIR -u NEG_PRUNE_BIN PATH="$S/shim:$PATH" SHIMLOG="$S/log-$n" \
         SNAPDIR="$S/snap-$n" "$@" "$S/shim/sh" "$sc" "$o" lnx/x86_64 0 cc > "$S/log-$n.out" 2>&1; echo $?
 }
@@ -198,7 +199,7 @@ evw "POS snap_rc parse2=$(cat "$sd/after-parse2.rc" 2>/dev/null || echo none) op
     || no "cache snapshots differ or are not exactly two members"
 { ! hasclass "$l" pass-gen-opt && ! hasclass "$l" pass-gen-prune && ! hasclass "$l" pass-gen-pp; } && ok "no Python generator call" || no "Python generator called"
 g=$(ls "$o/.seed-gen-cache"/seed-gen-* 2>/dev/null | grep -v '\.sha256$' | head -1)
-rr=none; rm -f "$S/ref-prune.json"
+rr=none; sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$S/ref-prune.json" || exit 3
 [ -n "$g" ] && { "$W/tests/bound" 55 "$g" prune "$S/ref-prune.json" 2>"$S/ref-prune.err"; rr=$?; }
 evw "POS ref_rc=$rr"
 { [ "$rr" = 0 ] && cmp -s "$o/prune.json" "$S/ref-prune.json"; } && ok "prune.json = seed-gen prune (reference rc 0)" || no "prune.json vs seed-gen prune (reference rc=$rr)"
@@ -226,16 +227,16 @@ done
 # 3 helper argument refusals (scratch copy; outputs cleared first)
 D=$W/exec/prune/gen-delta.sh
 for args in "--x" "--o2"; do
-    rm -f "$S/ha.json"; env -u SEED_GEN -u SEED_GEN_DIR SEED_GEN_BIN="$S/red-gen" "$REALSH" "$D" "$S/ha.json" $args 2>/dev/null; r=$?
+    sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$S/ha.json" || exit 3; env -u SEED_GEN -u SEED_GEN_DIR SEED_GEN_BIN="$S/red-gen" "$REALSH" "$D" "$S/ha.json" $args 2>/dev/null; r=$?
     { [ "$r" -eq 2 ] && [ ! -e "$S/ha.json" ]; } && ok "helper refuses OUT $args (rc 2, no output)" || no "helper did not refuse OUT $args (rc=$r)"
 done
 env -u SEED_GEN "$REALSH" "$D" 2>/dev/null; r=$?
 [ "$r" -eq 2 ] && ok "helper refuses no argument (rc 2)" || no "helper did not refuse no argument (rc=$r)"
 for v in 2 yes; do
-    rm -f "$S/sv.json"; env SEED_GEN="$v" "$REALSH" "$D" "$S/sv.json" 2>/dev/null; r=$?
+    sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$S/sv.json" || exit 3; env SEED_GEN="$v" "$REALSH" "$D" "$S/sv.json" 2>/dev/null; r=$?
     { [ "$r" -eq 2 ] && [ ! -e "$S/sv.json" ]; } && ok "helper refuses SEED_GEN='$v'" || no "helper did not refuse SEED_GEN='$v' (rc=$r)"
 done
-rm -f "$S/sv.json"; env SEED_GEN= "$REALSH" "$D" "$S/sv.json" 2>/dev/null; r=$?
+sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$S/sv.json" || exit 3; env SEED_GEN= "$REALSH" "$D" "$S/sv.json" 2>/dev/null; r=$?
 { [ "$r" -eq 2 ] && [ ! -e "$S/sv.json" ]; } && ok "helper refuses SEED_GEN set but empty (unset is the default route, covered by the positive)" || no "helper did not refuse empty SEED_GEN (rc=$r)"
 
 fi

@@ -5,7 +5,7 @@ _BOUND=$("$_BOUND" --helper) || exit 2
 # Checks sext/immediate fusion, liveness and real programs.
 set -eu
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d); trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT
 b() { "$_BOUND" 60 "$@"; }
 UA=${UA:-/tmp/ua_ref}; . ./tests/lib.sh; ua_ready
 b cc -O2 -o "$T/run" exec/c/run.c

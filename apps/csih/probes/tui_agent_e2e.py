@@ -5,6 +5,7 @@ SRC = ["tui.c","render.c","term.c","chat.c","clock.c","tools.c","file.c",
 EP = "http://127.0.0.1:%d/v1/chat/completions" % PORT
 TEXT = "build the feature, then report"
 ROOT = os.path.dirname(HERE)
+_SDR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..")   # the repository: the one deletion guard's CLI
 fail = 0
 # unisacc compiles in-process; measured ~24s for this list on an idle machine.
 FIRST_FRAME_S = 180
@@ -14,10 +15,8 @@ def run():
     tr   = os.path.join(D, "tr.jsonl")
     os.makedirs(work, exist_ok=True)
     for name in ("思维树.md", "记忆宫殿.md"):
-        try: os.remove(os.path.join(work, name))
-        except OSError: pass
-    try: os.remove(tr)
-    except OSError: pass
+        subprocess.run(["sh", os.path.join(_SDR, "tests", "cxbin"), os.path.join(_SDR, "tests", "safedel.cx"), "--purge", "--", os.path.join(work, name)], check=True)
+    subprocess.run(["sh", os.path.join(_SDR, "tests", "cxbin"), os.path.join(_SDR, "tests", "safedel.cx"), "--purge", "--", tr], check=True)
 
     env = dict(os.environ)
     env["CSIH_ENDPOINT"]   = EP

@@ -9,7 +9,7 @@ set -u
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 [ $# -gt 0 ] || { echo "no input files"; exit 1; }
 UA=${UA:-/tmp/ua_ref}; . "$R/tests/lib.sh"; ua_ready
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d); trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT
 . "$R/tests/knownfail.sh"
 knownfail_load "$R/tests/difftest.knownfail" "$T/known.keys" || exit 1
 b() { "$_BOUND" "$@"; }

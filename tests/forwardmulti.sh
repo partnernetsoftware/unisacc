@@ -7,7 +7,7 @@ set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 . ./tests/lib.sh; ua_ready
 _BOUND=$("$R/tests/bound" --helper) || exit 2
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d); trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT
 [ "$(uname -s)" = Darwin ] || [ "$(uname -s)" = Linux ] || { echo "forwardmulti: POSIX hosts only"; exit 2; }
 printf 'long sysconf(int);\nint side(void);\nint main(void){ return sysconf(29) > 0 && side() == 7 ? 0 : 3; }\n' > "$T/m1.c"
 printf 'int side(void){ return 7; }\n' > "$T/m2.c"

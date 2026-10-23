@@ -3,6 +3,7 @@
 explicit and bound to the candidate; every wrong, malformed or unknown source is refused (rc 2) with Q untouched."""
 import hashlib, json, os, pathlib, shutil, subprocess, sys, tempfile
 TOOL = pathlib.Path(__file__).resolve().parents[1] / 'release/tools/queuestart.py'
+R = pathlib.Path(__file__).resolve().parents[1]   # the one deletion guard's CLI lives under it (commissar ruling 2026-10-23)
 def fail(m): print('queuestart: ' + m); sys.exit(1)
 T = pathlib.Path(tempfile.mkdtemp(prefix='unisacc-queuestart.'))
 def run(Q, B, D, mode):
@@ -33,10 +34,10 @@ try:
     if rc or json.loads((Q / 'start-receipt.json').read_text())['restored'] is not False: fail('continuing a bound state failed: %s' % out)
     for label, setup in (
             ('backup for another artifact', lambda b: (b / 'unisacc-next.com.build.json').write_text(json.dumps({'artifact_sha256': '0' * 64}))),
-            ('backup without build.json', lambda b: (b / 'unisacc-next.com.build.json').unlink()),
+            ('backup without build.json', lambda b: subprocess.run(['sh', str(R / 'tests/cxbin'), str(R / 'tests/safedel.cx'), '--purge', '--', str(b / 'unisacc-next.com.build.json')], check=True)),   # the one deletion guard
             ('malformed results.json', lambda b: (b / 'state/results.json').write_text('{not json')),
             ('results.json whose results is not a map', lambda b: (b / 'state/results.json').write_text(json.dumps({'results': []}))),
-            ('no state generation', lambda b: shutil.rmtree(b / 'state'))):
+            ('no state generation', lambda b: subprocess.run(['sh', str(R / 'tests/cxbin'), str(R / 'tests/safedel.cx'), '--purge', '--', str(b / 'state')], check=True))):
         b = T / ('b-' + label.replace(' ', '-')); shutil.copytree(B, b); setup(b)
         Q = T / ('q-' + label.replace(' ', '-')); rc, out = run(Q, b, D, 'resume')
         if rc != 2 or Q.exists(): fail('%s not refused or Q touched: %s' % (label, out))
@@ -95,4 +96,4 @@ try:
     if run(T / 'q7', B, D, 'auto')[0] != 2: fail('unknown mode accepted')
     print('queuestart  fresh never restores (backup for the same artifact present); fresh into a non-empty state refused untouched; explicit resume restores a bound generation with receipt, continues only a bound state; other-artifact/no build.json/malformed/non-map results/no generation/unknown-origin/other-candidate sources refused with Q untouched and logged; failed copy restores nothing; receipt-only Q resumes atomically; non-object (array/null/scalar) or field-less/mistyped build.json/receipt (each refusal reported; receipt and build.json refusals each logged) and bound-receipt-plus-foreign-files refused; a failed install rename rolls back to the old Q exactly')
 finally:
-    shutil.rmtree(T, ignore_errors=True)
+    subprocess.run(['sh', str(R / 'tests/cxbin'), str(R / 'tests/safedel.cx'), '--purge', '--max-files', '100000', '--', str(T)], check=True)

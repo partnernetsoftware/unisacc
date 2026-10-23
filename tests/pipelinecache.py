@@ -5,6 +5,7 @@ A tiny graph emitter isolates caching from compiler generation. It reads a real
 stage table snapshot; no checkout inputs or shared cache are mutated.
 """
 import importlib.util
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -64,7 +65,7 @@ with tempfile.TemporaryDirectory(prefix="t7-cache-") as directory:
         path.write_text("new fact\n")
         assert fresh()[1], relative
         assert not fresh()[1], relative
-        path.unlink()
+        subprocess.run(['sh',str(ROOT/'tests/cxbin'),str(ROOT/'tests/safedel.cx'),'--purge','--',str(path)],check=True)
         assert fresh()[1], relative
     print("pipeline cache: parse/lex additions and removals invalidate")
 

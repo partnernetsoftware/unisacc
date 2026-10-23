@@ -63,7 +63,7 @@ def prepare_tools(out):
             write(work/'ref',before)
             try:out.stat()
             except FileNotFoundError:pass
-            else:shutil.rmtree(out)
+            else:subprocess.run(['sh',str(R/'tests/cxbin'),str(R/'tests/safedel.cx'),'--',str(out)],check=True)   # into the .trash of its root, through the one deletion guard
             work.rename(out)
         print('warning tools: prepared',out,flush=True)
 
