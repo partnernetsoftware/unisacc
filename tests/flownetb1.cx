@@ -1,0 +1,595 @@
+#!/usr/bin/env -S unisacc.com -run
+/* flownetb1.cx -- the closure of B1 (plans/m4-flownet-cx-module.md section 9: mechanism and domain apart), behavioural.
+   A text scan of flownet/ cannot prove that no consumer table hides there (tests/flownetw6.cx b1 is kept as a heuristic;
+   its limits, the verifier's mutants G1-G7, are in research/flownet-w6-b1.md).  B1 is closed by two checks instead:
+     usage (repository root):
+       sh ./unisacc.com -run tests/flownetb1.cx -- inject ROOT K/2
+           the perturbed-injection proof.  tests/tdescprobe.cx (flownet's second consumer) is compiled once beside a
+           link to ROOT/flownet and run (--oracle cc) in scratch directories that hold only its tables
+           tests/tdescprobe/ (contract.tsv and the gold of each net its contract names, read from ROOT).  The control
+           (the tables as they are) must be green.  Then every key row of every gold table is perturbed, one at a time:
+           relabelled to each other class of its table, and deleted -- the tables are flownet's only source of the
+           algebra, injected through fn_label_source, so every such run must differ from the control (rc, stdout,
+           stderr) and be either judged (rc 1, the emit hook's MISMATCH against cc) or refused by name (rc 2, one
+           "tdescprobe: " line: flownet's label-source or books refusal, or the consumer's).  A flownet that answered
+           any key from a copy of its own would give the control's output for that key's perturbations: red, by key.
+           The keys are counted from the tables (46 today: adj 12, ap 20, sz 14 -- W3 fix 3 cut the old 80-key domain to
+           the keys the derivation asks, so no key exists whose perturbation could not show), K/2 is a half of the
+           perturbations (every other class and the deletion of every key, in table order).
+       sh ./unisacc.com -run tests/flownetb1.cx -- inject ROOT proof K/3
+           the proof proves itself: three flownet copies (ROOT/flownet with nets.cx edited once, exactly) that ask the
+           injected label source as before and then answer from a copy they carry -- 1/3: every table, as data written
+           from the consumer's gold; 2/3: the verifier's G7, an X-macro of adj, verbatim; 3/3: one key of the last
+           table -- each passes tdescprobe's own gate (the control, --oracle cc, green; G7 also passes the text guard,
+           research/flownet-w6-b1.md); under one relabel per key each must be red naming exactly the keys its copy
+           holds (46, the 12 adj keys, 1).  A copy flownet carries but never answers from changes no output: that is
+           the pin's (any byte of flownet/ changed changes the manifest in a reviewed commit), not a behaviour's.
+       sh ./unisacc.com -run tests/flownetb1.cx -- pin ROOT
+           the pin: ROOT/flownet's file set and every file's bytes equal tests/flownet-manifest.tsv (file rows: name,
+           size, sha256), flownet/ holds regular files only, and every directory a consumer reaches flownet through (reach
+           rows: tests/flownet, adapter/ujswasm/flownet) holds only links that resolve to the pinned file of the same
+           name, one for every pinned .cx.  Any change of flownet/'s content must change the manifest in the same,
+           reviewed commit.  The check proves itself first on scratch copies: a byte changed, a file added, removed or
+           renamed, a link or a directory in flownet/, a reach link redirected to a copy, a regular file in a reach
+           directory -- each red, by name; the copy as it is green.
+       sh ./unisacc.com -run tests/flownetb1.cx -- pin ROOT write
+           the manifest of ROOT/flownet as it is, on stdout (review every changed row before committing it).
+   Every scratch directory is made by ptf_mkdtemp under the temporary directory and removed by ptf_rmtree only when its
+   name is that of one this run made; nothing under ROOT is written.  rc 0 PASS, 1 red (each finding named), 2 usage
+   or I/O.  No #include: the prelude is built in. */
+#pragma unisa use cxlib.pytempfile
+
+static int fails;
+static void red(const char *what, const char *why) { fails++; printf("FAIL %s: %s\n", what, why); }
+static void scratch_rm(void);
+static void die(const char *why) { fprintf(stderr, "flownetb1: %s\n", why); scratch_rm(); exit(2); }
+static char *fmt(const char *f, ...) {
+    va_list ap; size_t cap = 256; int n; char *p = 0;
+    for (;;) {
+        char *g = realloc(p, cap);
+        if (!g) { free(p); die("out of memory"); }
+        p = g; va_start(ap, f); n = vsnprintf(p, cap, f, ap); va_end(ap);
+        if (n < 0) die("cannot format");
+        if ((size_t)n < cap) return p;
+        cap = (size_t)n + 1;
+    }
+}
+static char *slurp(const char *path) { size_t n; char *b = cx_read(path, &n); return b ? b : fmt("%s", ""); }
+static char *first_line(const char *s) { size_t k = strcspn(s, "\n"); return fmt("%.*s", (int)k, s); }
+static int is(const char *a, const char *b) { return !strcmp(a, b); }
+
+/* ---------- scratch: made here, removed only by its own name ---------- */
+static char SD[4200];
+static void scratch(void) {
+    if (ptf_mkdtemp(0, "flownetb1-", SD, sizeof SD)) die("cannot make a scratch directory under the temporary directory");
+}
+static void scratch_rm(void) {
+    const char *b = strrchr(SD, '/');
+    if (SD[0] != '/' || !b || strncmp(b + 1, "flownetb1-", 10) || strlen(b + 1) != 18) return;   /* only what scratch() made */
+    ptf_rmtree(SD);
+}
+static void mk(const char *d) { if (mkdir(d, 0755) && errno != EEXIST) { char *w = fmt("cannot make %s", d); die(w); } }
+static void put(const char *path, const char *text) { if (cx_write(path, text, strlen(text))) { char *w = fmt("cannot write %s", path); die(w); } }
+static char *absroot(const char *root) {
+    char *r = realpath(root, 0);
+    if (!r) { fprintf(stderr, "flownetb1: %s: no such directory\n", root); exit(2); }
+    return r;
+}
+
+/* ---------- jobs: argv in a directory, stdout and stderr to files, at most PAR at once, each at most SECS ---------- */
+typedef struct { char *cwd, **argv, *op, *ep, *out, *err; pid_t pid; int rc, done, ticks; } Job;
+static int njobid;
+static void job_init(Job *j, const char *cwd, char **argv) {
+    memset(j, 0, sizeof *j);
+    j->cwd = fmt("%s", cwd); j->argv = argv; njobid++;
+    j->op = fmt("%s/job%d.out", SD, njobid); j->ep = fmt("%s/job%d.err", SD, njobid);
+}
+static void job_start(Job *j, int secs) {
+    fflush(stdout); fflush(stderr);
+    j->ticks = secs * 200;
+    j->pid = fork();
+    if (j->pid < 0) die("fork failed");
+    if (j->pid == 0) {
+        if (!freopen(j->op, "wb", stdout) || !freopen(j->ep, "wb", stderr) || chdir(j->cwd)) _exit(126);
+        setpgid(0, 0);
+        execvp(j->argv[0], j->argv); _exit(127);
+    }
+}
+static void run_jobs(Job *J, int n, int par, int secs) {
+    int started = 0, running = 0, finished = 0, i;
+    while (finished < n) {
+        while (running < par && started < n) { job_start(&J[started++], secs); running++; }
+        for (i = 0; i < started; i++) {
+            Job *j = &J[i]; int st = 0; pid_t w;
+            if (j->done) continue;
+            w = waitpid(j->pid, &st, WNOHANG);
+            if (w == j->pid) j->rc = (st & 0x7f) ? 128 + (st & 0x7f) : (st >> 8) & 0xff;
+            else if (w < 0) j->rc = -1;
+            else if (j->ticks-- <= 0) { kill(-j->pid, SIGKILL); kill(j->pid, SIGKILL); waitpid(j->pid, &st, 0); j->rc = 124; }
+            else continue;
+            j->done = 1; running--; finished++;
+        }
+        usleep(5000);
+    }
+    for (i = 0; i < n; i++) { J[i].out = slurp(J[i].op); J[i].err = slurp(J[i].ep); unlink(J[i].op); unlink(J[i].ep); }
+}
+
+/* ---------- the consumer's tables: ROOT/tests/tdescprobe ---------- */
+static const char *TABLES = "tests/tdescprobe";
+enum { MAXNET = 8, MAXLINE = 512, MAXCLS = 64 };
+typedef struct {
+    char *name, *path;               /* the net; its table, relative to a root */
+    char *line[MAXLINE]; int nline;  /* the table's lines, as read */
+    int key[MAXLINE], nkey;          /* the line of each key row */
+    char *keytext[MAXLINE], *label[MAXLINE];   /* a key row's field values joined by ',', and its class */
+    char *cls[MAXCLS]; int ncls;     /* the class row */
+} Gold;
+static Gold G[MAXNET]; static int ng;
+static char *contract;               /* contract.tsv, as read */
+/* the lines of TEXT (each a copy, no newline); TEXT must end in a newline */
+static int lines_of(const char *text, char **line, int max) {
+    int n = 0; const char *p = text;
+    while (*p) {
+        const char *nl = strchr(p, '\n');
+        if (!nl || n == max) return -1;
+        line[n++] = fmt("%.*s", (int)(nl - p), p);
+        p = nl + 1;
+    }
+    return n;
+}
+static int split_tab(char *s, char **f, int max) {   /* in place */
+    int n = 0; char *t;
+    f[n++] = s;
+    while ((t = strchr(s, '\t')) != 0) { if (n == max) return -1; *t = 0; s = t + 1; f[n++] = s; }
+    return n;
+}
+static void read_tables(const char *root) {
+    char *src = fmt("%s/tests/tdescprobe.cx", root), *body = slurp(src), *cl[64], *path, *w; int n, i;
+    if (!strstr(body, "static const char *TABLES = \"tests/tdescprobe\";")) die("tests/tdescprobe.cx no longer reads its tables from tests/tdescprobe: update this gate");
+    path = fmt("%s/%s/contract.tsv", root, TABLES); contract = slurp(path);
+    if (!*contract || (n = lines_of(contract, cl, 64)) < 0) { w = fmt("%s: empty, too long or no final newline", path); die(w); }
+    for (i = 0; i < n; i++) if (!strncmp(cl[i], "net\t", 4)) {
+        char *f[MAXNET + 2]; int k = split_tab(cl[i], f, MAXNET + 1), j;
+        if (k < 2) die("contract.tsv: a net row with no net");
+        for (j = 1; j < k; j++) { memset(&G[ng], 0, sizeof G[ng]); G[ng].name = f[j]; ng++; }
+    }
+    if (!ng) die("contract.tsv names no net");
+    for (i = 0; i < ng; i++) {
+        Gold *g = &G[i]; char *t, *full; int r;
+        g->path = fmt("%s/%s.gold.tsv", TABLES, g->name);
+        full = fmt("%s/%s", root, g->path); t = slurp(full);
+        if (!*t || (g->nline = lines_of(t, g->line, MAXLINE)) < 0) { w = fmt("%s: empty, too long or no final newline", full); die(w); }
+        for (r = 0; r < g->nline; r++) {
+            char *l = g->line[r], *c, *f[16]; int k, j;
+            if (!*l || *l == '#' || !strncmp(l, "net\t", 4) || !strncmp(l, "field\t", 6)) continue;
+            c = fmt("%s", l);
+            if ((k = split_tab(c, f, 16)) < 2) { w = fmt("%s:%d: a row of one field", g->path, r + 1); die(w); }
+            if (is(f[0], "class")) { for (j = 1; j < k && g->ncls < MAXCLS; j++) g->cls[g->ncls++] = f[j]; continue; }
+            g->key[g->nkey] = r; g->label[g->nkey] = f[k - 1];
+            {   char *kt = fmt("%s", f[0]); for (j = 1; j < k - 1; j++) { char *u = fmt("%s,%s", kt, f[j]); free(kt); kt = u; } g->keytext[g->nkey] = kt; }
+            g->nkey++;
+        }
+        if (g->ncls < 2 || !g->nkey) { w = fmt("%s: no class row of two classes, or no key row", g->path); die(w); }
+        free(full); free(t);
+    }
+    free(src); free(body);
+}
+static int nkeys(void) { int i, n = 0; for (i = 0; i < ng; i++) n += G[i].nkey; return n; }
+
+/* a perturbation: key row R of table GI relabelled TO, or deleted (TO 0) */
+typedef struct { int gi, r; const char *to; } Pert;
+static Pert *PT; static int npt;
+static void perturbations(int one) {   /* ONE: the first other class of every key only */
+    int i, r, c, cap = 0;
+    npt = 0;
+    for (i = 0; i < ng; i++) for (r = 0; r < G[i].nkey; r++) {
+        for (c = 0; c <= G[i].ncls; c++) {
+            const char *to = c < G[i].ncls ? G[i].cls[c] : 0;
+            if (to && is(to, G[i].label[r])) continue;
+            if (npt == cap) { cap = cap ? cap * 2 : 256; if (!(PT = realloc(PT, (size_t)cap * sizeof *PT))) die("out of memory"); }
+            PT[npt].gi = i; PT[npt].r = r; PT[npt].to = to; npt++;
+            if (one) break;
+        }
+    }
+}
+static char *pert_name(const Pert *p) {
+    const Gold *g = &G[p->gi];
+    return fmt("%s\t%s\t%s>%s", g->name, g->keytext[p->r], g->label[p->r], p->to ? p->to : "(row deleted)");
+}
+/* DIR/tests/tdescprobe: the tables, with perturbation P applied (0: as they are) */
+static void write_tables(const char *dir, const Pert *p) {
+    char *t = fmt("%s/tests", dir), *d = fmt("%s/%s", dir, TABLES), *f; int i, l;
+    mk(dir); mk(t); mk(d);
+    f = fmt("%s/contract.tsv", d); put(f, contract); free(f);
+    for (i = 0; i < ng; i++) {
+        const Gold *g = &G[i]; size_t cap = 1; char *b, *q;
+        for (l = 0; l < g->nline; l++) cap += strlen(g->line[l]) + MAXCLS + 2;
+        if (!(b = malloc(cap))) die("out of memory");
+        q = b; *q = 0;
+        for (l = 0; l < g->nline; l++) {
+            if (p && p->gi == i && l == g->key[p->r]) {
+                if (!p->to) continue;                                    /* deleted */
+                {   const char *s = strrchr(g->line[l], '\t'); size_t k = (size_t)(s - g->line[l]) + 1;   /* relabelled */
+                    memcpy(q, g->line[l], k); q += k; q += sprintf(q, "%s\n", p->to); }
+                continue;
+            }
+            q += sprintf(q, "%s\n", g->line[l]);
+        }
+        f = fmt("%s/%s.gold.tsv", d, g->name); put(f, b); free(f); free(b);
+    }
+    free(t); free(d);
+}
+
+static int entries(const char *dir, char **name, int max);
+
+/* ---------- compiling tdescprobe beside a flownet: a link to ROOT/flownet, or a copy with nets.cx replaced ---------- */
+static char *compile_jobs_prep(const char *root, int k, const char *nets, Job *j) {   /* the binary's path */
+    char *dir = fmt("%s/c%d", SD, k), *src = fmt("%s/tdescprobe.cx", dir), *fdir = fmt("%s/flownet", dir), *bin = fmt("%s/c%d.bin", SD, k);
+    char *tsrc = fmt("%s/tests/tdescprobe.cx", root), *body = slurp(tsrc), **a;
+    mk(dir); put(src, body);
+    if (!nets) { char *target = fmt("%s/flownet", root); if (symlink(target, fdir)) die("cannot link flownet"); free(target); }
+    else {
+        char *fd = fmt("%s/flownet", root), *M[256]; int i, n = entries(fd, M, 256);   /* every module of flownet/, nets.cx replaced */
+        mk(fdir);
+        for (i = 0; i < n; i++) {
+            size_t L = strlen(M[i]); char *from, *to, *t;
+            if (L < 4 || !is(M[i] + L - 3, ".cx")) continue;
+            from = fmt("%s/%s", fd, M[i]); to = fmt("%s/%s", fdir, M[i]); t = slurp(from);
+            put(to, is(M[i], "nets.cx") ? nets : t); free(from); free(to); free(t);
+        }
+        free(fd);
+    }
+    if (!(a = malloc(6 * sizeof *a))) die("out of memory");
+    a[0] = "sh"; a[1] = fmt("%s/unisacc.com", root); a[2] = "-o"; a[3] = bin; a[4] = src; a[5] = 0;
+    job_init(j, root, a);
+    free(dir); free(fdir); free(tsrc); free(body);
+    return bin;
+}
+static int compiled(const char *bin) { struct stat st; return stat(bin, &st) == 0 && st.st_size > 0; }
+/* the --oracle cc run of BIN in DIR (the work directory relative, so that no path differs between runs) */
+static void oracle_job(Job *j, const char *bin, const char *dir) {
+    char **a = malloc(8 * sizeof *a);
+    if (!a) die("out of memory");
+    a[0] = "env"; a[1] = "-u"; a[2] = "FLOWNET_SWEEP"; a[3] = (char *)bin; a[4] = "--oracle"; a[5] = "cc"; a[6] = "w"; a[7] = 0;
+    job_init(j, dir, a);
+}
+static int green_control(const Job *c) {
+    const char *a = strstr(c->out, " probes, 0 mismatches against cc\n");
+    return c->rc == 0 && a && strstr(a + 1, ", 0 mismatches against cc\n") && !*c->err;
+}
+static int same(const Job *a, const Job *b) { return a->rc == b->rc && is(a->out, b->out) && is(a->err, b->err); }
+/* how a perturbed run P differs from the control C: "judged LINE" or "refused LINE" (allocated), 0 when it does not
+   differ, "unnamed ..." when it differs without a judged mismatch or a named refusal */
+static char *outcome(const Job *p, const Job *c) {
+    const char *m;
+    if (same(p, c)) return 0;
+    if (p->rc == 1 && (m = strstr(p->out, "tdescprobe oracle: MISMATCH ")) != 0) { char *l = first_line(m), *o = fmt("judged\t%s", l); free(l); return o; }
+    if (p->rc == 2 && !strncmp(p->err, "tdescprobe: ", 12)) { char *l = first_line(p->err), *o = fmt("refused\t%s", l); free(l); return o; }
+    {   char *l = first_line(*p->err ? p->err : p->out), *o = fmt("unnamed\trc %d: %s", p->rc, l); free(l); return o; }
+}
+
+static int cmd_inject(const char *rootarg, const char *part, const char *pk) {   /* PK: the half of the proof */
+    char *root = absroot(rootarg), *bin, *cdir; Job *J; int i, lo, hi, k, half = 0, nj, judged = 0, refused = 0, unchanged = 0, unnamed = 0, K;
+    if (is(part, "1/2")) half = 1; else if (is(part, "2/2")) half = 2; else if (!is(part, "proof") || !pk || (!is(pk, "1/3") && !is(pk, "2/3") && !is(pk, "3/3"))) { fprintf(stderr, "flownetb1: inject wants 1/2, 2/2 or proof K/3\n"); return 2; }
+    read_tables(root); K = nkeys();
+    scratch();
+    if (half) {
+        Job cj;
+        perturbations(0);
+        lo = half == 1 ? 0 : npt / 2; hi = half == 1 ? npt / 2 : npt;
+        bin = compile_jobs_prep(root, 0, 0, &cj); run_jobs(&cj, 1, 1, 55);
+        if (!compiled(bin)) { char *l = first_line(*cj.err ? cj.err : cj.out); red("tdescprobe", fmt("does not compile beside ROOT/flownet: %s", l)); goto done; }
+        nj = hi - lo + 1;
+        if (!(J = calloc((size_t)nj, sizeof *J))) die("out of memory");
+        cdir = fmt("%s/t", SD); write_tables(cdir, 0); oracle_job(&J[0], bin, cdir);
+        for (i = lo; i < hi; i++) { char *d = fmt("%s/t%d", SD, i); write_tables(d, &PT[i]); oracle_job(&J[i - lo + 1], bin, d); free(d); }
+        run_jobs(J, nj, 8, 30);
+        if (!green_control(&J[0])) { char *l = first_line(*J[0].err ? J[0].err : J[0].out); red("control (the tables as they are)", fmt("tdescprobe --oracle cc is not green: rc %d: %s", J[0].rc, l)); goto done; }
+        printf("control\ttdescprobe --oracle cc on the tables as they are: %s", J[0].out);
+        for (i = lo; i < hi; i++) {
+            Job *j = &J[i - lo + 1]; char *nm = pert_name(&PT[i]), *o = outcome(j, &J[0]);
+            if (!o) { unchanged++; red(nm, "the run equals the control: this key's answer does not come from the injected table"); }
+            else if (!strncmp(o, "unnamed", 7)) { unnamed++; red(nm, fmt("changed, but neither judged nor refused by name (%s)", o + 8)); }
+            else { if (o[0] == 'j') judged++; else refused++; printf("changed\t%s\t%s\n", nm, o); }
+            free(nm); free(o);
+        }
+        printf("flownetb1 inject %s: perturbations %d-%d of %d (every other class and the deletion of each of the %d keys of", part, lo + 1, hi, npt, K);
+        for (k = 0; k < ng; k++) printf(" %s %d%s", G[k].name, G[k].nkey, k + 1 < ng ? "," : "");
+        printf("): changed %d/%d (judged %d, refused %d), unchanged %d, unnamed %d\n", judged + refused, hi - lo, judged, refused, unchanged, unnamed);
+    } else {
+        /* three flownet copies that answer from a copy they carry, after asking the label source as flownet does */
+        static const char *AT = "        lab = label(ctx, N->name, N->nf, k);\n";
+        static const char *TO = "        lab = own_(N->name, N->nf, k, label(ctx, N->name, N->nf, k));\n";
+        static const char *BEFORE = "static int load_source(";
+        static const char *LOOKUP =
+            "static char own_buf_[64];\n"
+            "static const char *own_(const char *net, int nk, const char *const *k, const char *lab) {   /* B1 proof mutant */\n"
+            "    char key[256]; const char *p; size_t m; int i;\n"
+            "    m = (size_t)snprintf(key, sizeof key, \"\\n%s\\t\", net);\n"
+            "    for (i = 0; i < nk; i++) m += (size_t)snprintf(key + m, sizeof key - m, \"%s%s\", i ? \",\" : \"\", k[i]);\n"
+            "    m += (size_t)snprintf(key + m, sizeof key - m, \"\\t\");\n"
+            "    if (!(p = strstr(OWN_, key))) return lab;\n"
+            "    p += m; m = strcspn(p, \"\\n\"); memcpy(own_buf_, p, m); own_buf_[m] = 0;\n"
+            "    return own_buf_;\n"
+            "}\n";
+        static const char *G7 =      /* the verifier's G7 (an X-macro copy of adj), verbatim, and its use */
+            "#define MAY_TABLE(X) \\\n"
+            "    X(P, P, ok) \\\n    X(P, A3, ok) \\\n    X(P, F, ok) \\\n    X(P, int, ok) \\\n"
+            "    X(A3, P, ok) \\\n    X(A3, A3, ok) \\\n    X(A3, F, bad) \\\n    X(A3, int, ok) \\\n"
+            "    X(F, P, ok) \\\n    X(F, A3, bad) \\\n    X(F, F, bad) \\\n    X(F, int, ok) \\\n"
+            "    /* end */\n"
+            "static const char *own_(const char *net, int nk, const char *const *k, const char *lab) {   /* B1 proof mutant */\n"
+            "#define X(a, b, c) if (!strcmp(net, \"adj\") && nk == 2 && !strcmp(k[0], #a) && !strcmp(k[1], #b)) return #c;\n"
+            "    MAY_TABLE(X)\n"
+            "#undef X\n"
+            "    return lab;\n"
+            "}\n";
+        const char *who[3] = { "a copy of every table, as data", "the verifier's G7: an X-macro copy of adj", "a copy of one key" };
+        char *nets, *want[3], *body[3], *bins[3], *own; Job cj[3]; int m, nk = 0, m0 = pk[0] - '1', m1 = m0 + 1;   /* K/3: copy K */
+        size_t L;
+        perturbations(1);
+        nets = slurp(fmt("%s/flownet/nets.cx", root));
+        {   const char *a = strstr(nets, AT), *b = strstr(nets, BEFORE);
+            if (!a || strstr(a + 1, AT) || !b || strstr(b + 1, BEFORE)) { red("proof", "flownet/nets.cx: the label ask or load_source is not there exactly once (flownet changed: update the mutants)"); goto done; } }
+        /* the data copy: every key row of every table, "\nNET\tKEY\tLABEL" */
+        L = 64; for (i = 0; i < ng; i++) for (k = 0; k < G[i].nkey; k++) L += strlen(G[i].keytext[k]) + strlen(G[i].label[k]) + 24;
+        if (!(own = malloc(L))) die("out of memory");
+        strcpy(own, "static const char *OWN_ = \"\\n");
+        for (i = 0; i < ng; i++) for (k = 0; k < G[i].nkey; k++) sprintf(own + strlen(own), "%s\\t%s\\t%s\\n", G[i].name, G[i].keytext[k], G[i].label[k]);
+        strcat(own, "\";\n");
+        for (m = m0; m < m1; m++) {
+            char *ins, *t, *u; const Gold *lg = &G[ng - 1];
+            if (m == 0) ins = fmt("%s%s", own, LOOKUP);
+            else if (m == 1) ins = fmt("%s", G7);
+            else ins = fmt("static const char *OWN_ = \"\\n%s\\t%s\\t%s\\n\";\n%s", lg->name, lg->keytext[lg->nkey - 1], lg->label[lg->nkey - 1], LOOKUP);
+            {   const char *a = strstr(nets, BEFORE); t = fmt("%.*s%s%s", (int)(a - nets), nets, ins, a); }
+            {   const char *a = strstr(t, AT); u = fmt("%.*s%s%s", (int)(a - t), t, TO, a + strlen(AT)); }
+            body[m] = u; free(t); free(ins);
+            if (m == 0) { want[m] = fmt("%s", ""); for (i = 0; i < ng; i++) for (k = 0; k < G[i].nkey; k++) { char *w2 = fmt("%s%s %s;", want[m], G[i].name, G[i].keytext[k]); free(want[m]); want[m] = w2; } }
+            else if (m == 1) { want[m] = fmt("%s", ""); for (i = 0; i < ng; i++) if (is(G[i].name, "adj")) for (k = 0; k < G[i].nkey; k++) { char *w2 = fmt("%s%s %s;", want[m], G[i].name, G[i].keytext[k]); free(want[m]); want[m] = w2; } }
+            else want[m] = fmt("%s %s;", lg->name, lg->keytext[lg->nkey - 1]);
+            bins[m] = compile_jobs_prep(root, m, body[m], &cj[m]);
+        }
+        run_jobs(cj + m0, m1 - m0, 3, 55);
+        nj = 3 * (npt + 1);
+        if (!(J = calloc((size_t)nj, sizeof *J))) die("out of memory");
+        cdir = fmt("%s/t", SD); write_tables(cdir, 0);
+        for (i = 0; i < npt; i++) { char *d = fmt("%s/t%d", SD, i); write_tables(d, &PT[i]); free(d); }
+        for (m = m0; m < m1; m++) {
+            oracle_job(&J[m * (npt + 1)], bins[m], cdir);
+            for (i = 0; i < npt; i++) { char *d = fmt("%s/t%d", SD, i); oracle_job(&J[m * (npt + 1) + 1 + i], bins[m], d); free(d); }
+        }
+        for (m = m0; m < m1; m++) if (!compiled(bins[m])) {   /* not run: no binary */
+            char *l = first_line(*cj[m].err ? cj[m].err : cj[m].out); red(who[m], fmt("the copy does not compile: %s", l)); }
+        {   Job *R; int nr = 0, x;
+            if (!(R = calloc((size_t)nj, sizeof *R))) die("out of memory");
+            for (m = m0; m < m1; m++) if (compiled(bins[m])) for (x = 0; x <= npt; x++) R[nr++] = J[m * (npt + 1) + x];
+            run_jobs(R, nr, 8, 30);
+            nr = 0;
+            for (m = m0; m < m1; m++) if (compiled(bins[m])) for (x = 0; x <= npt; x++) J[m * (npt + 1) + x] = R[nr++];
+            free(R); }
+        for (m = m0; m < m1; m++) {
+            Job *c = &J[m * (npt + 1)]; char *got = fmt("%s", ""); int nu = 0;
+            if (!compiled(bins[m])) continue;
+            if (!green_control(c)) { char *l = first_line(*c->err ? c->err : c->out); red(who[m], fmt("its own gate (tdescprobe --oracle cc on the tables as they are) is not green: rc %d: %s", c->rc, l)); continue; }
+            for (i = 0; i < npt; i++) if (same(&J[m * (npt + 1) + 1 + i], c)) {
+                char *w2 = fmt("%s%s %s;", got, G[PT[i].gi].name, G[PT[i].gi].keytext[PT[i].r]); free(got); got = w2; nu++; }
+            if (!is(got, want[m])) red(who[m], fmt("the keys whose perturbation left the run unchanged are '%s', want exactly '%s'", got, want[m]));
+            else { printf("caught\t%s\tits own gate green; %d of %d keys unchanged under the perturbed injection, exactly the keys it carries: %s\n", who[m], nu, npt, got); nk++; }
+            free(got);
+        }
+        printf("flownetb1 inject proof %s: %d/%d copies that answer from a copy they carry caught, each naming exactly its keys (%d keys, one relabel each)\n", pk, nk, m1 - m0, npt);
+    }
+done:
+    scratch_rm();
+    if (fails) { printf("flownetb1 inject %s%s%s: RED (%d)\n", part, pk ? " " : "", pk ? pk : "", fails); return 1; }
+    printf("flownetb1 inject %s%s%s: PASS\n", part, pk ? " " : "", pk ? pk : "");
+    return 0;
+}
+
+/* ---------- the pin: tests/flownet-manifest.tsv ---------- */
+static const char *MANIFEST = "tests/flownet-manifest.tsv";
+enum { MAXPIN = 64, MAXREACH = 8 };
+typedef struct { char *name, *sha; long size; int seen; } Pin;
+static Pin PIN[MAXPIN]; static int npin;
+static char *REACH[MAXREACH]; static int nreach;
+static int nfind, quiet;
+static char *qlog; static size_t qlen;   /* the findings of a quiet check, "WHAT: WHY\n" each */
+static void finding(const char *what, const char *why) {
+    nfind++;
+    if (!quiet) { red(what, why); return; }
+    {   char *l = fmt("%s: %s\n", what, why), *t = fmt("%s%s", qlog ? qlog : "", l); free(qlog); qlog = t; qlen = strlen(t); free(l); }
+}
+/* some finding of the last quiet check starts with WHO and holds WHY */
+static int named(const char *who, const char *why) {
+    const char *p = qlog ? qlog : "";
+    while (*p) {
+        size_t k = strcspn(p, "\n"); char *l = fmt("%.*s", (int)k, p); int hit = !strncmp(l, who, strlen(who)) && strstr(l, why);
+        free(l);
+        if (hit) return 1;
+        p += k; if (*p) p++;
+    }
+    return 0;
+}
+static int parse_manifest(const char *text) {
+    char *ln[256], *f[8]; int n = lines_of(text, ln, 256), i, k;
+    npin = nreach = 0;
+    if (n < 0) { finding("manifest", "empty, too long, or no final newline"); return -1; }
+    for (i = 0; i < n; i++) {
+        if (!*ln[i] || *ln[i] == '#') continue;
+        k = split_tab(ln[i], f, 8);
+        if (k == 4 && is(f[0], "file") && npin < MAXPIN && *f[1] && !strchr(f[1], '/') && f[1][0] != '.' && strlen(f[3]) == 64) {
+            int j; for (j = 0; j < npin; j++) if (is(PIN[j].name, f[1])) break;
+            if (j < npin) { finding("manifest", fmt("line %d: %s pinned twice", i + 1, f[1])); continue; }
+            PIN[npin].name = f[1]; PIN[npin].size = atol(f[2]); PIN[npin].sha = f[3]; PIN[npin].seen = 0; npin++;
+        } else if (k == 2 && is(f[0], "reach") && nreach < MAXREACH && *f[1] && f[1][0] != '/' && !strstr(f[1], "..")) REACH[nreach++] = f[1];
+        else finding("manifest", fmt("line %d: want 'file NAME SIZE SHA256' or 'reach DIR'", i + 1));
+    }
+    if (!npin) finding("manifest", "pins no file");
+    return 0;
+}
+static int name_cmp(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+static int entries(const char *dir, char **name, int max) {   /* sorted, without . and .. */
+    DIR *d = opendir(dir); struct dirent *e; int n = 0;
+    if (!d) return -1;
+    while ((e = readdir(d))) { if (is(e->d_name, ".") || is(e->d_name, "..")) continue; if (n < max) name[n++] = fmt("%s", e->d_name); }
+    closedir(d);
+    qsort(name, (size_t)n, sizeof *name, name_cmp);
+    return n;
+}
+/* ROOT/flownet and the reach directories against the pins: the number of findings */
+static int pin_check(const char *root) {
+    char *fd = fmt("%s/flownet", root), *nm[256]; int n, i, j, r;
+    nfind = 0;
+    for (j = 0; j < npin; j++) PIN[j].seen = 0;
+    if ((n = entries(fd, nm, 256)) < 0) { finding("flownet/", "cannot read the directory"); return nfind; }
+    for (i = 0; i < n; i++) {
+        char *p = fmt("%s/%s", fd, nm[i]), *what = fmt("flownet/%s", nm[i]); struct stat st;
+        for (j = 0; j < npin && !is(PIN[j].name, nm[i]); j++) ;
+        if (lstat(p, &st)) finding(what, "cannot stat");
+        else if (!S_ISREG(st.st_mode)) finding(what, S_ISDIR(st.st_mode) ? "a directory: flownet/ holds pinned regular files only" : S_ISLNK(st.st_mode) ? "a link: flownet/ holds pinned regular files only" : "not a regular file");
+        else if (j == npin) finding(what, fmt("not in %s: a change of flownet/ updates the pin in the same commit", MANIFEST));
+        else {
+            size_t len; char *b = cx_read(p, &len), hex[65];
+            PIN[j].seen = 1;
+            if (!b) finding(what, "cannot read");
+            else {
+                cx_sha256_hex(b, len, hex);
+                if ((long)len != PIN[j].size || !is(hex, PIN[j].sha)) finding(what, fmt("%ld bytes, sha256 %s; %s pins %ld bytes, %s", (long)len, hex, MANIFEST, PIN[j].size, PIN[j].sha));
+                free(b);
+            }
+        }
+        free(p); free(what); free(nm[i]);
+    }
+    for (j = 0; j < npin; j++) if (!PIN[j].seen) {
+        char *w = fmt("flownet/%s", PIN[j].name); struct stat st; char *p = fmt("%s/%s", fd, PIN[j].name);
+        if (lstat(p, &st)) finding(w, fmt("pinned in %s but missing", MANIFEST));
+        free(w); free(p);
+    }
+    for (r = 0; r < nreach; r++) {          /* every reach directory: links to the pinned .cx, one each, nothing else */
+        char *rd = fmt("%s/%s", root, REACH[r]), *rn[256], *real_fd = realpath(fd, 0); int m = entries(rd, rn, 256), k;
+        if (m < 0) { finding(REACH[r], "a reach directory that cannot be read"); free(rd); free(real_fd); continue; }
+        for (k = 0; k < m; k++) {
+            char *p = fmt("%s/%s", rd, rn[k]), *what = fmt("%s/%s", REACH[r], rn[k]), *rp; struct stat st;
+            if (lstat(p, &st) || !S_ISLNK(st.st_mode)) finding(what, "not a link: a reach directory holds links to flownet/ only");
+            else if (!(rp = realpath(p, 0))) finding(what, "a link that does not resolve");
+            else {
+                char *want = real_fd ? fmt("%s/%s", real_fd, rn[k]) : fmt("%s", "");
+                for (j = 0; j < npin && !is(PIN[j].name, rn[k]); j++) ;
+                if (!is(rp, want) || j == npin) finding(what, fmt("resolves to %s, not to the pinned flownet/%s", rp, rn[k]));
+                free(want); free(rp);
+            }
+            free(p); free(what);
+        }
+        for (j = 0; j < npin; j++) {
+            size_t L = strlen(PIN[j].name);
+            if (L < 3 || !is(PIN[j].name + L - 3, ".cx")) continue;
+            for (k = 0; k < m && !is(rn[k], PIN[j].name); k++) ;
+            if (k == m) finding(fmt("%s/%s", REACH[r], PIN[j].name), "missing: a reach directory links every pinned .cx");
+        }
+        for (k = 0; k < m; k++) free(rn[k]);
+        free(rd); free(real_fd);
+    }
+    free(fd);
+    return nfind;
+}
+static void manifest_write(const char *root, int with_reach, const char *reach_text) {
+    char *fd = fmt("%s/flownet", root), *nm[256]; int n = entries(fd, nm, 256), i;
+    if (n < 0) die("cannot read ROOT/flownet");
+    printf("# %s -- the pin of flownet/ (plans/m4-flownet-cx-module.md section 9, B1 closure): every file of flownet/, its\n"
+           "# size and sha256, and every directory a consumer reaches flownet through (its links resolve to the pinned files).\n"
+           "# tests/flownetb1.cx pin (gate flownet-w6-b1-pin) holds flownet/ to these rows: any change of flownet/'s content\n"
+           "# updates this pin in the same, reviewed commit.  Regenerate, then review every changed row:\n"
+           "#   sh ./unisacc.com -run tests/flownetb1.cx -- pin . write > tests/flownet-manifest.tsv\n", MANIFEST);
+    for (i = 0; i < n; i++) {
+        char *p = fmt("%s/%s", fd, nm[i]), hex[65], *b; size_t len; struct stat st;
+        if (lstat(p, &st) || !S_ISREG(st.st_mode)) { char *w = fmt("flownet/%s is not a regular file: nothing written", nm[i]); die(w); }
+        if (!(b = cx_read(p, &len))) die("cannot read a flownet file");
+        cx_sha256_hex(b, len, hex);
+        printf("file\t%s\t%ld\t%s\n", nm[i], (long)len, hex);
+        free(b); free(p);
+    }
+    if (with_reach) printf("%s", reach_text);
+    free(fd);
+}
+static void copy_flownet(const char *root, const char *to) {   /* TO/flownet (regular files) and TO's reach links */
+    char *fd = fmt("%s/flownet", root), *td = fmt("%s/flownet", to), *nm[256]; int n = entries(fd, nm, 256), i, r;
+    mk(to); mk(td);
+    for (i = 0; i < n; i++) { char *a = fmt("%s/%s", fd, nm[i]), *b = fmt("%s/%s", td, nm[i]), *t = slurp(a); put(b, t); free(a); free(b); free(t); }
+    for (r = 0; r < nreach; r++) {
+        char *rd = fmt("%s/%s", to, REACH[r]), *q, *rn[256]; int m, k;
+        for (q = rd + strlen(to) + 1; (q = strchr(q, '/')) != 0; q++) { *q = 0; mk(rd); *q = '/'; }
+        mk(rd);
+        m = entries(fmt("%s/%s", root, REACH[r]), rn, 256);
+        for (k = 0; k < m; k++) {
+            char *l = fmt("%s/%s", rd, rn[k]), *t = fmt("%s/%s", td, rn[k]);
+            if (symlink(t, l)) die("cannot link a reach entry");
+            free(l); free(t);
+        }
+    }
+    free(fd); free(td);
+}
+static int cmd_pin(const char *rootarg, int write) {
+    char *root = absroot(rootarg), *mpath = fmt("%s/%s", root, MANIFEST), *mtext = slurp(mpath), *keep = fmt("%s", mtext);
+    int i, ok = 0;
+    if (write) {   /* the reach rows are carried over from the manifest as committed */
+        char *reach = fmt("%s", ""), *ln[256]; int n = *mtext ? lines_of(mtext, ln, 256) : 0;
+        for (i = 0; i < n; i++) if (!strncmp(ln[i], "reach\t", 6)) { char *t = fmt("%s%s\n", reach, ln[i]); free(reach); reach = t; }
+        if (!*reach) reach = fmt("reach\ttests/flownet\nreach\tadapter/ujswasm/flownet\n");   /* the first pin: the consumers' module links */
+        manifest_write(root, 1, reach); return 0;
+    }
+    if (!*mtext) { red("manifest", fmt("cannot read %s", MANIFEST)); goto out; }
+    parse_manifest(mtext);
+    if (nfind) goto out;
+    if (nreach < 1) { red("manifest", "no reach row (tests/flownet at least)"); goto out; }
+    if (pin_check(root)) goto out;      /* ROOT first, each finding named; the self-test below needs ROOT as pinned */
+    /* the check proves itself on scratch copies of ROOT: each mutation must give a finding naming what it changed */
+    {   static const char *MUT[] = { "as it is", "a byte changed", "a file added", "a file removed", "a file renamed", "a link in flownet/",
+                                     "a directory in flownet/", "a reach link redirected to a copy", "a regular file in a reach directory", 0 };
+        static const char *WANT[] = { 0, "bytes, sha256", "not in tests/flownet-manifest.tsv", "but missing", "not in tests/flownet-manifest.tsv", "a link:",
+                                      "a directory:", "not to the pinned", "not a link:" };
+        int m, lc;
+        for (lc = 0; lc < npin; lc++) { size_t L = strlen(PIN[lc].name); if (L > 3 && is(PIN[lc].name + L - 3, ".cx")) break; }   /* a pinned .cx */
+        if (lc == npin) { red("manifest", "pins no .cx"); goto out; }
+        scratch();
+        for (m = 0; MUT[m]; m++) {
+            char *c = fmt("%s/m%d", SD, m), *fd = fmt("%s/flownet", c), *first = fmt("%s/flownet/%s", c, PIN[0].name), *rd = fmt("%s/%s", c, REACH[0]), *who; int nf;
+            who = m == 0 ? fmt("%s", "") : m == 1 || m == 3 ? fmt("flownet/%s: ", PIN[0].name) : m == 2 ? fmt("flownet/notes.md: ") : m == 4 ? fmt("flownet/%s.old: ", PIN[0].name)
+                : m == 5 ? fmt("flownet/alias.cx: ") : m == 6 ? fmt("flownet/tables: ") : m == 7 ? fmt("%s/%s: ", REACH[0], PIN[lc].name)
+                : fmt("%s/extra.cx: ", REACH[0]);
+            copy_flownet(root, c);
+            if (m == 1) { size_t len; char *b = cx_read(first, &len); if (!b || !len) die("cannot read a copy"); b[len - 1] ^= 1; cx_write(first, b, len); free(b); }
+            if (m == 2) put(fmt("%s/notes.md", fd), "# notes\n");
+            if (m == 3) unlink(first);
+            if (m == 4) { char *t = fmt("%s/%s.old", fd, PIN[0].name); rename(first, t); free(t); }
+            if (m == 5) { char *t = fmt("%s/alias.cx", fd); if (symlink(first, t)) die("cannot link"); free(t); }
+            if (m == 6) { char *t = fmt("%s/tables", fd); mk(t); put(fmt("%s/x.md", t), "x\n"); free(t); }
+            if (m == 7) {   /* the first pinned .cx the reach directory links, redirected to a copy beside it */
+                char *l = fmt("%s/%s", rd, PIN[lc].name), *cp = fmt("%s/copy.cx", c), *t = slurp(fmt("%s/%s", fd, PIN[lc].name));
+                put(cp, t); unlink(l); if (symlink(cp, l)) die("cannot link"); free(l); free(cp); free(t);
+            }
+            if (m == 8) put(fmt("%s/extra.cx", rd), "/* not a link */\n");
+            quiet = 1; qlen = 0; if (qlog) qlog[0] = 0; nf = pin_check(c); quiet = 0;
+            if (m == 0 ? nf != 0 : !named(who, WANT[m])) red("pin self-test", fmt("%s: %d findings, want one naming '%s%s...': %s", MUT[m], nf, who, m ? WANT[m] : "", qlog ? qlog : ""));
+            else { printf("selftest\t%s\t%d finding%s%s%s%s\n", MUT[m], nf, nf == 1 ? "" : "s", m ? "\tnamed: " : "", m ? who : "", m ? WANT[m] : ""); ok++; }
+            free(c); free(fd); free(first); free(rd); free(who);
+        }
+        scratch_rm();
+        if (fails) goto out;
+        printf("flownetb1 pin: the check proves itself, %d/%d (the copy as it is green, every mutation red)\n", ok, m);
+        printf("flownetb1 pin: flownet/ == %s: %d files pinned (size, sha256), %d reach directories link exactly the pinned .cx\n", MANIFEST, npin, nreach);
+    }
+out:
+    if (fails) { printf("flownetb1 pin: RED (%d)\n", fails); return 1; }
+    printf("flownetb1 pin: PASS\n");
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc == 4 && is(argv[1], "inject")) return cmd_inject(argv[2], argv[3], 0);
+    if (argc == 5 && is(argv[1], "inject")) return cmd_inject(argv[2], argv[3], argv[4]);
+    if (argc == 3 && is(argv[1], "pin")) return cmd_pin(argv[2], 0);
+    if (argc == 4 && is(argv[1], "pin") && is(argv[3], "write")) return cmd_pin(argv[2], 1);
+    fprintf(stderr, "usage: flownetb1.cx inject ROOT 1/2|2/2|proof K/3 | pin ROOT [write]\n");
+    return 2;
+}

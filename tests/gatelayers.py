@@ -24,7 +24,7 @@ reviewed-trees finite-template decision-ledger zeropython zeropython-selftest ds
 pptruth package-footer ape-version proc-enum seedpy ledgercheck freezecheck freezecheck-selftest
 revivedscan facts-export docs tapebin-roundtrip tapebin-shape tape-reader envpin staticimage staticimage-selftest abi-manifest abi-manifest-selftest early-stage-seal-selftest pp-leaf-seal pp-leaf-seal-negative pp-leaf-capture-selftest lex-e1-seal e3-seal opt-e4-seal elf-seal prune-seal lower-seal net-prec-seal net-binsel-seal net-tyinfo-seal net-pfconv-seal net-regmap-seal net-lex-seal net-parse-seal net-type-seal net-scope-seal net-irsel-seal net-isel-seal net-enc-seal net-reloc-seal net-abi-seal net-combo-seal net-opinfo-seal net-peep-seal middle-flow-e3 middle-flow-lower-accept middle-flow-ledger seal-paradigm-audit seal-paradigm-selftest seal-modules edge-e4-peep-seal edge-e2-pp-seal edge-e1-lex-seal edge-e3-parse-seal edge-e2-pp-ablate edge-e3-parse-ablate regcheck regcheck-negative statecheck-tool statecheck-e3 statecheck-e3-warn statecheck-negative edge-e3-type-seal edge-e3-scope-seal edge-e3-irsel-seal edge-e3-tyinfo-seal edge-e3-binsel-seal edge-e3-prec-seal edge-e4-opinfo-seal edge-lower-abi-seal edge-lower-regmap-seal edge-lower-reloc-seal edge-lower-enc-seal edge-e3-pfconv-witness edge-elf-enc-witness
 script-inventory script-inventory-self inventory-derived subtract-safety subtract-safety-selftest c99-ledger cxinclude glossarycheck glossarycheck-selftest
-flownet-w0-module flownet-w0-module-negative flownet-baseline-file flownet-w2-d1 flownet-w2-tables-gold flownet-w6-b1
+flownet-w0-module flownet-w0-module-negative flownet-baseline-file flownet-w2-d1 flownet-w2-tables-gold flownet-w6-b1 flownet-w6-b1-pin
 publish-order front-bounds gate-infra gate-layers tsv-build-account pipeline-cache
 lib-bindings-registry
 hostcheck seedmemory stagelog exittable h1source warmup gate-infra-38 installpair attemptchain c99precheck rulingwait namedrefuse checkrun commitgate whyrerun draftfetch draftguard precommithook k2b queuestart queuestart-strict queuestart-launch queuetimeout gatesummary observation gqalive queuetimer docedit
@@ -57,6 +57,7 @@ flownet-baseline-acc flownet-baseline-out1 flownet-baseline-out2 flownet-baselin
 flownet-w2-parity flownet-w2-refuse flownet-w2-negative flownet-w2-accepts flownet-w2-tables
 flownet-w3-d3-1 flownet-w3-d3-2 flownet-w3-flow-1 flownet-w3-flow-2 flownet-w3-flow-3 flownet-w3-d4-tdesc flownet-w3-d4-adapter
 flownet-w4-selftest-1 flownet-w4-selftest-2 flownet-w4-selftest-3 flownet-w4-selftest-4 flownet-w4-unconsumed
+flownet-w6-b1-inject-1 flownet-w6-b1-inject-2 flownet-w6-b1-proof-1 flownet-w6-b1-proof-2 flownet-w6-b1-proof-3
 """.split())
 PIPELINE_PREFIX = ("stages-", "corpus-", "difftest-", "difftest_o-", "csmithdiff-",
                    "ccrun-", "opt-run-", "closure-", "declmatrix-", "com-",
