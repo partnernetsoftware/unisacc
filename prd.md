@@ -146,13 +146,13 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 0.0.43 公开发布
 ├─ 已完成：F1 产品修复；F2 文档与探针收口
 ├─ 已完成：F3 历史 CONTRACT 基线（187项：186 PASS、1宿主未核）
-├─ F6：E4新候选首阶段已构建并更新本机unisacc.com；正执行新候选三阶段固定点，旧固定点不迁用
+├─ 已完成：新F6三实际SHA相同且官方固定点通过；stage3复用同身份模型包，五代码切片均由stage2实际重编，原50秒界通过
 ├─ 正在执行：F4／M7 测试调度重构与受影响单元验证 ← 当前节点
 │  ├─ 当前冻结2079b31e：1309节点／944依赖；Windows原生控制器已提交，仍待定点通过
 │  ├─ 已实跑：七流独立工具链；native六叶；functionimports六准备＋20案例；callback12目标＋四片消费
 │  ├─ 已修复：typed/callsite完整材料命中及无关检查脚本触发失效；普通七流／native资源缓存拆层仍待做
 │  ├─ E4摘要模型同输入约30.5秒完成且与独立C字节相同；候选固定点及完整验收待完
-│  ├─ 并行：Windows原生准备控制／独立审查／self超时归因；父串行重测试，专职文档归档另行提交
+│  ├─ 并行：独立子代理实测25–29秒驱动切片的各流／加载／校验／写出耗时；父整理固定点收据，实验独占重活令牌
 │  ├─ 旧1142轮已停窗；原失败与未执行项保留，准备仅计PREPARED，不迁旧PASS
 │  └─ 完成判据：最终模块清单完整、PENDING=0、NEEDS_RULING=0、product_red=0、处置齐全
 ├─ 待完成：据终态结果收口发布说明 → 候选封存 → RC
@@ -162,7 +162,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 └─ 待完成：Draft资产核对 → Latest／公开 → 下载SHA与运行复核
 ```
 
-**下一动作：完成新模型候选固定点与受影响单元验证，并拆开普通七流模型和native附加资源缓存。** 旧`.net`在固定8,446,684字节输入上触41秒上限；私有采样约9秒记录1.41亿网络决策／1.74亿动作，热点为重复SCAN。d09bd1decb已提交块摘要复用：同输入通用C执行器约30.5秒完成，5,227,535字节与独立C输出逐字节相同；八个具名案例对拍通过，实际ISA内核同输入约33.3秒通过。首阶段新候选构建及hello／O2回归通过，固定点及完整验收仍待完成，不迁旧M7绿。不得以表参考超时推断纯NN速度。控制器-O2草案保存在仓外，暂停推进；NN、表参考、准备／校验各自记时与失败归属。 新 `.cx` 控制缓存、依赖和状态，旧独立对照留在原入口；不新增解释器依赖或绕过门禁。已通过的模块及证据见下表；尚无通用同身份续跑，不能把模块选择称为完整结果缓存。未知闭包禁用缓存，RESOURCE_UNKNOWN 保留 OPEN，H1 超时不算 PASS。完整 M7 后仍须候选封存、匹配候选的六平台 CI、签名及公开下载验证。文档清理首批3份旧稿已独立提交；过时过程留在 Git 与原始证据，不再堆入当前上下文。
+**下一动作：独立实测驱动切片各阶段耗时，重封受影响E4 seal并推进M7；普通七流模型和native附加资源缓存拆层仍待做。** 旧`.net`在固定8,446,684字节输入上触41秒上限；私有采样约9秒记录1.41亿网络决策／1.74亿动作，热点为重复SCAN。d09bd1decb已提交块摘要复用：同输入通用C执行器约30.5秒完成，5,227,535字节与独立C输出逐字节相同；八个具名案例对拍通过，实际ISA内核同输入约33.3秒通过。新候选构建、hello／O2回归、三阶段实际SHA与官方固定点均通过；完整M7仍待完成，不迁旧M7绿。不得以表参考超时推断纯NN速度。控制器-O2草案保存在仓外，暂停推进；NN、表参考、准备／校验各自记时与失败归属。 新 `.cx` 控制缓存、依赖和状态，旧独立对照留在原入口；不新增解释器依赖或绕过门禁。已通过的模块及证据见下表；尚无通用同身份续跑，不能把模块选择称为完整结果缓存。未知闭包禁用缓存，RESOURCE_UNKNOWN 保留 OPEN，H1 超时不算 PASS。完整 M7 后仍须候选封存、匹配候选的六平台 CI、签名及公开下载验证。文档清理首批3份旧稿已独立提交；过时过程留在 Git 与原始证据，不再堆入当前上下文。
 
 
 <a id="memory-palace"></a>
@@ -173,8 +173,10 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 | 入口厅：目标 | 公开发布0.0.43；当前节点F4/M7，不是重做F1。 | 上方思维树；[范围](plans/v0.0.43.md)、[终点线](plans/v0.0.43-finish-line.md)。旧未授描述不覆盖当前明确目标授权。 |
 | 工具间：能力 | 默认-run、tape→image、六目标、`.cx`模块已实现；经典UA与模型产品是不同实现。 | [能力速查](#implemented-usage)、[README](README.md)、已有用例。只验证具体输入的证据缺口，不重新研究入口是否存在。 |
 | 材料室：重复构造 | d09bd1decb修复typed/callsite完整缓存仍重建，以及无关exec检查脚本使typed缓存失效；typed实际工具和obj-win-x准备均HIT，仍执行独立比较及NN全域检查。尚存：pipeline的native_ua与七流模型共键；两个缓存原有24件逐项相同，添加原生资源仍重做七流。ROOT路径亦进入整体键，迁冻结目录会失效。 | 构造缓存按相关TSV、构造器、格式、目标及必要工具身份失效；哈希核验、加载和重新测试分开计量。拆基础模型与native资源键；保持prepared-only消费，缺失／损坏返回75；不得复用旧测试PASS。实际HIT日志：`/tmp/unisacc-c43-e4-summary-final-20261024/out/lower-material-reuse/`。 |
-| 身份室：候选 | E4新首阶段及本机unisacc.com SHA=`2974978e6deec45abf38bfac2ac24e3031969b1c65009798270491d8b1e6dd1f`；S=`c90f0002f02366d510e4c8c22d4757f934edf8c0719852e706b575a7137b47df`；配对侧车SHA=`b88e3a1c227e72e621cf810cc5975e0922ba34cf34aa9e51288142aaaf94480a`。版本／hello／O2摘要回归均rc0；新固定点与M7未完成。 | 冻结`/tmp/unisacc-c43-e4-summary-final-20261024` @d09bd1decb；`out/f6-e4-candidate`、`out/f6-e4-smoke-*`及`out/comboot/stages.json`。旧H0=4f0b493c…／S=c4618639…的[F6证据](research/c43-f6-final-evidence/)仅为历史；按源码、产物及配对侧车核对，不为刷新mtime重复构建。 |
-| 控制室：现场 | 当前冻结`/tmp/unisacc-c43-winphase-accept-20261024` @2079b31e，计划SHA `d133abaf…`，1309节点／944边；原工具准备34.334秒／JSON41秒rc142保留；cb393新摘要分支下工具9.783秒、JSON15.265秒、表10.261秒均PREPARED，完整消费已输出25拒绝但整项仍41秒rc142。控制器-O2草案已暂停；当前主线为E4新候选固定点与受影响验证，完整身份与原预算保留。700ece46冻结根`/tmp/unisacc-c43-suite-accept-20261024`保存此前结果：`out/callback-final-checks`：12次off严格检查、on检查、8种生产命中、完整消费1再次rc0；空on／截断off真实消费均拒绝75。`out/winlower-x86_64-run`保留41秒rc142；`out/winlower-x86_64-timing.*`为55秒诊断，不能迁成41秒PASS。Windows新拆分仍待验。 | 先读本轮results／summary和存活进程。ae9145四片callback通过范围见`/tmp/unisacc-c43-current-accept-20261024/out/current-callback-checks/scope.tsv`；native／functionimports原证据见旧冻结根`/tmp/unisacc-c43-pe-accept-20261024/out/{native-*-refactor-check,libraryimports-atomic-v4-run}`。旧1142轮停于083，日志及原失败不清空、不迁绿。 |
+| 自举间：驱动聚合 | 新候选作UA时，JOBS=1将五目标asmcompiler.c编译和打包串在一项，第二阶段窗口9触60秒。现已逐目标原50秒界完成十次代码编译、原封装和三阶段固定点；stage3模型材料复用经全哈希及七manifest核验。 | [F6收据](research/c43-f6-final-evidence/)。原聚合窗口仍为失败；不重构已完成的相同权重，也不迁用测试PASS。E4 seal三项规则依赖已变，须独立重封；edge-e4两seal不因这三项改动重录。 |
+| 性能室：独立实验 | 同一lnx/x86_64驱动切片，实际包ISA内核诊断总27.315秒，输出与原产品逐字节相同：E2执行3.970秒、E1 0.146、E3 6.011、E4 14.397、prune 0.097、lower 1.096、enc 0.766；两次tapecheck合0.634。包加载0.025秒，解压／CRC／模型解码仅毫秒；不能把阶段执行计时称为纯NN算子计时。 | 独立子代理仓外`/tmp/unisacc-c43-slice-phase/run.stderr`，保留单调时钟埋点和实际ISA；输出SHA=ace9f9ed…与stage2切片cmp相同。下一刀测E4实际分析轮数／状态动作／回跳；经典C的J9已有跨轮行事实复用，模型未见对应映射，这是待验证优化候选，不能由4轮上限推断跑满。 |
+| 身份室：候选 | E4新候选、本机及三阶段实际SHA=`2974978e6deec45abf38bfac2ac24e3031969b1c65009798270491d8b1e6dd1f`；S=`c90f0002f02366d510e4c8c22d4757f934edf8c0719852e706b575a7137b47df`；配对侧车SHA=`b88e3a1c227e72e621cf810cc5975e0922ba34cf34aa9e51288142aaaf94480a`。版本／hello／O2摘要回归、ident及官方固定点rc0；完整M7未完成。 | 冻结`/tmp/unisacc-c43-e4-summary-final-20261024` @d09bd1decb；`out/f6-e4-stage{2,3}-package.log`、逐切片真实argv/rc/时间/SHA、`out/comboot/stages.json`。stage3数据复用而代码切片重编，非模型构造器自举证明。按源码、产物及配对侧车核对，不为刷新mtime重复构建；[F6证据](research/c43-f6-final-evidence/)已原位更新。 |
+| 控制室：现场 | Windows单元历史冻结`/tmp/unisacc-c43-winphase-accept-20261024` @2079b31e，计划SHA `d133abaf…`，1309节点／944边；原工具准备34.334秒／JSON41秒rc142保留；cb393新摘要分支下工具9.783秒、JSON15.265秒、表10.261秒均PREPARED，完整消费已输出25拒绝但整项仍41秒rc142。控制器-O2草案已暂停；当前主线为E4新候选固定点与受影响验证，完整身份与原预算保留。700ece46冻结根`/tmp/unisacc-c43-suite-accept-20261024`保存此前结果：`out/callback-final-checks`：12次off严格检查、on检查、8种生产命中、完整消费1再次rc0；空on／截断off真实消费均拒绝75。`out/winlower-x86_64-run`保留41秒rc142；`out/winlower-x86_64-timing.*`为55秒诊断，不能迁成41秒PASS。Windows新拆分仍待验。 | 先读本轮results／summary和存活进程。ae9145四片callback通过范围见`/tmp/unisacc-c43-current-accept-20261024/out/current-callback-checks/scope.tsv`；native／functionimports原证据见旧冻结根`/tmp/unisacc-c43-pe-accept-20261024/out/{native-*-refactor-check,libraryimports-atomic-v4-run}`。旧1142轮停于083，日志及原失败不清空、不迁绿。 |
 | 出口室：分类 | RESOURCE_UNKNOWN保留OPEN义务；H1超时不算PASS；DEFER不等于终态失败。 | [资源处置](research/c43-resource-disposition.md)、[裁定](release/rulings.tsv)、[分类](release/preauth.tsv)及完整退出表。不补写结果或虚构平台绿。 |
 | 发布室：交付 | M7之后封存；候选CI、签名、最终字节和公开下载须真实收据。 | [发布流水线](release/RELEASE-PIPELINE.md)、[候选记录](release/candidate.json)；当前候选记录尚不是0.0.43封存证明。 |
 | 暂存室：边界 | 0.0.44登记.cx模块化／内存安全、自有工具链与测试改进；0.0.45登记流＋网模块外部调用及模块／权重共享；均不另作0.0.43前置。typed/callback迁移与广泛research归档保留后续范围。 | [0.0.44计划](plans/v0.0.44.md)、[0.0.45计划](plans/v0.0.45.md)、[路线](#5-路线)。新动态推进用`unisacc.com + .cx`，减少脚本，转调不算原生化。 |
@@ -530,7 +532,7 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 - 断言按 contract / stage / pipeline / platform 分账，见 [tests/GATE-LAYERS.md](tests/GATE-LAYERS.md)；局部绿不代全链，未覆盖不计通过。
 - 清单、来源身份、实际受试字节与原始结果分别可核；C99覆盖见 [tests/c99/clauses.tsv](tests/c99/clauses.tsv)，测试入口见 [tests/INVENTORY.md](tests/INVENTORY.md)。
 - 当前开发按具名差集及必要合同门推进，准备/构造与测量单列预算；不得因历史流水线描述自动全量打包、重封或恢复旧队列。
-- 发布流程权威入口：[release/RELEASE-PIPELINE.md](release/RELEASE-PIPELINE.md)、[release/README.md](release/README.md)及工作流。流程文档不等于执行授权；本轮1142项完整验收正在执行，终态待收口（见§2）。
+- 发布流程权威入口：[release/RELEASE-PIPELINE.md](release/RELEASE-PIPELINE.md)、[release/README.md](release/README.md)及工作流。当前目标已授权公开发布；新候选固定点与M7终态待收口，旧1142项队列已停窗，不能作为新候选验收（见§2）。
 
 ## 5. 路线
 

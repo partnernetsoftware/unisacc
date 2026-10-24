@@ -1,4 +1,4 @@
-Draft release notes for 0.0.43, updated 2026-10-24. The new E4 candidate has completed its first build; its fixed point is being checked. Full M7 acceptance, candidate sealing, platform CI, signing and publication remain pending. The changes below describe the implementation and recorded probes; final release claims must be tied to the final candidate and acceptance receipt.
+Draft release notes for 0.0.43, updated 2026-10-24. The new E4 candidate has passed its three-stage fixed point. Full M7 acceptance, candidate sealing, platform CI, signing and publication remain pending. The changes below describe the implementation and recorded probes; final release claims must be tied to the final candidate and acceptance receipt.
 
 ## What changed in the product
 
@@ -54,14 +54,14 @@ These are known defects, listed rather than fixed in 0.0.43. They are not regres
 
 ## Candidate identity and acceptance fields
 
-The first-stage E4 candidate is 2,670,411 bytes, SHA256 `2974978e6deec45abf38bfac2ac24e3031969b1c65009798270491d8b1e6dd1f`, product source digest `c90f0002f02366d510e4c8c22d4757f934edf8c0719852e706b575a7137b47df`, built from d09bd1decb. Its paired build-sidecar SHA256 is `b88e3a1c227e72e621cf810cc5975e0922ba34cf34aa9e51288142aaaf94480a`. Version, hello and O2-summary smoke checks passed. New stage2/stage3/fixedpoint checks are running in the frozen source tree; no completed fixed-point result is claimed here. Current evidence locations are indexed in `prd.md`'s identity room.
+The E4 candidate is 2,670,411 bytes, SHA256 `2974978e6deec45abf38bfac2ac24e3031969b1c65009798270491d8b1e6dd1f`, product source digest `c90f0002f02366d510e4c8c22d4757f934edf8c0719852e706b575a7137b47df`, built from d09bd1decb. Its paired build-sidecar SHA256 is `b88e3a1c227e72e621cf810cc5975e0922ba34cf34aa9e51288142aaaf94480a`. Version, hello and O2-summary smoke checks, native provenance checks and the official fixedpoint check passed. Stage2 and stage3 each compiled all five code slices with the preceding actual compiler under the original 50-second limit; stage3 reused hash-verified model data, without reconstructing unchanged weights. The three actual artifacts and paired sidecars match. Current evidence locations are indexed in `prd.md`'s identity room.
 
 These fields must be filled from the final receipts before publication:
 
 | Field | Current status / required receipt |
 |---|---|
-| Final candidate SHA256, source digest and paired sidecar | PENDING final F6 identity and provenance checks; the first-stage identity above is provisional |
-| Seed / stage2 / stage3 fixed point | PENDING three actual file hashes and official fixedpoint result |
+| Candidate SHA256, source digest and paired sidecar | F6 identity and provenance checks passed for the values above; registry sealing and release acceptance remain pending |
+| Seed / stage2 / stage3 fixed point | PASS: three actual artifacts have SHA256 `2974978e…`; official fixedpoint rc0. Immutable model data was reused; each stage's code slices were actually recompiled |
 | Complete M7 plan and local results | PENDING final inventory/hash, environment pin, total, PASS count, rc distribution and classified exit table; require PENDING=0, NEEDS_RULING=0, product_red=0 and all dispositions accounted for |
 | GHCR candidate digest / source commit / RC | PENDING 0.0.43 seal and `rc/v0.0.43`; `release/candidate.json` still names 0.0.42 |
 | Six-platform candidate CI | PENDING matching `release-check` run id/attempt, actual candidate pull/execution on six native cells, matrix comparison and Windows suite; skipped candidate steps are not evidence |
@@ -72,7 +72,7 @@ These fields must be filled from the final receipts before publication:
 
 ## Historical evidence retained for comparison
 
-- **Earlier F6 fixed point.** `research/c43-f6-final-evidence/` records the old `4f0b493c…` candidate and `c4618639…` source digest. It does not prove the new E4 candidate's fixed point or acceptance.
+- **Earlier F6 fixed point.** The old `4f0b493c…` / `c4618639…` evidence is retained in Git at b1abb0184f, under `research/c43-f6-final-evidence/`. That directory now records the new fixed point; neither fixed point alone proves complete release acceptance.
 - **Earlier CONTRACT sweep.** On that earlier product, all 187 F3 jobs completed: 186 PASS, no failures and one Darwin Terminal ownership item UNVERIFIED on Linux (queue rc4). Evidence: `research/c43-f3-final-evidence/`. These counts are historical; the final plan and its CONTRACT results must be measured on the final declared inputs, without importing old PASS results.
 - **What the checks measured so far** (on the root product of 2026-10-22/23, not on the candidate):
   - The M3 refusal: a differential of the product built before and after it over 647 `tests/` and `examples/` C files had 646 identical outputs; the one difference was the targeted probe.
