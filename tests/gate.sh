@@ -1017,8 +1017,9 @@ job com-memalign ./tests/memaligncheck.sh   # 0.0.32 D2: word-wise memcpy/memset
 job com-seedgen ./tests/seedgencomcheck.sh   # 0.0.32 D2: .com -O2 seed/gen.c parse2 == cc build, <= 10 s
 job seedpack ./tests/seedpackcheck.sh   # 0.0.32 B5: seed/pack.c + compilerpack.c == pack.py + compilerpack.py
 job seedape ./tests/seedapecheck.sh     # 0.0.32 B5: UA -b + seed/ape.c == unisa ape (product container)
-scparts=$(sh "$R/tests/cxbin" "$R/tests/seedconstructcheck.cx" --list) || scparts=""   # (.cx port, 2026-10-23: --list and --prep; --part stays Python)
-[ -n "$scparts" ] || job seed-construct-base sh -c 'echo "seedconstructcheck.cx --list failed or listed no part"; exit 1'   # 0.0.28 E14: never zero jobs and green
+job seed-metadata sh ./tests/seedmetadatacheck.sh
+scparts=$(sh "$R/tests/cxbin" "$R/tests/metadatalist.cx" "$R/tests/seedconstruct-parts.tsv") || { echo 'gate: invalid seed metadata' >&2; exit 2; }
+[ -n "$scparts" ] || { echo 'gate: seed metadata listed no part' >&2; exit 2; }   # Never return a partial plan as success.
 job seedgen-construct-prep tests/bound 58 sh ./tests/cxbin tests/seedconstructcheck.cx --prep   # one content-keyed build of seed/gen.c for every seed-construct shard (3 shards compiling it at once exceeded the 20 s compile limit under load); same cache, manifest and flock as the .py
 for p in $scparts; do job "seed-construct-$p" python3 ./tests/seedconstructcheck.py --part "$p"; done   # the in-process Python E3 oracle; not ported
 job seed-matrix-shared-prepare sh ./tests/cxbin tests/seedmatrixprepared.cx --prepare   # (.cx port, 2026-10-23)

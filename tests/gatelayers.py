@@ -18,7 +18,7 @@ LAYERS = ("contract", "stage", "pipeline", "platform")
 # Single declaration, format, inventory, and runner contracts.  They need no
 # whole-program behavior to establish their claim.
 CONTRACT = set("""
-gate-select native-stamp
+gate-select native-stamp seed-metadata
 identity-product-negative identity-include-negative identity-include-consumer-negative identity-prep-negative
 reviewed-trees finite-template decision-ledger zeropython zeropython-selftest dsl-ops modelbenchcheck bound qprefix
 pptruth package-footer ape-version proc-enum seedpy ledgercheck freezecheck freezecheck-selftest

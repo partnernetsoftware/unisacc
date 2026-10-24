@@ -1,0 +1,38 @@
+/* Small ordered name/auto TSV reader. No preparation or interpreter dependency. */
+#pragma unisa module metadata
+typedef struct md_table { char **names; int *automatic; size_t n; char source_sha256[65]; } md_table;
+static void md_fail(const char *s){fprintf(stderr,"metadata: %s\n",s);exit(2);}
+md_table *md_load(const char *path){
+ int fd;ssize_t k;char chunk[4096],*buf=0;size_t n=0,cap=0,at,i;struct stat st;md_table *t=calloc(1,sizeof *t);
+ if(!t)md_fail("out of memory");fd=open(path,O_RDONLY|O_NOFOLLOW);if(fd<0)md_fail("cannot open TSV");
+ if(fstat(fd,&st)||!S_ISREG(st.st_mode)){close(fd);md_fail("TSV is not regular");}
+ for(;;){k=read(fd,chunk,sizeof chunk);if(k<0&&errno==EINTR)continue;if(k<0){close(fd);md_fail("read failed");}if(!k)break;
+  if(n+(size_t)k+1>cap){char *g;cap=(n+(size_t)k+1)*2;g=realloc(buf,cap);if(!g){close(fd);md_fail("out of memory");}buf=g;}memcpy(buf+n,chunk,(size_t)k);n+=(size_t)k;}
+ if(close(fd))md_fail("close failed");if(n<10||memcmp(buf,"name\tauto\n",10))md_fail("bad header");
+ at=10;
+ while(at<n){size_t end=at,tab,len,j;char *name;char **names;int *flags;
+  while(end<n&&buf[end]!='\n')end++;tab=at;while(tab<end&&buf[tab]!='\t')tab++;len=tab-at;
+  if(!len||tab==end||end-tab!=2||(buf[tab+1]!='0'&&buf[tab+1]!='1'))md_fail("malformed row");
+  for(i=at;i<tab;i++)if(!((buf[i]>='a'&&buf[i]<='z')||(buf[i]>='0'&&buf[i]<='9')||buf[i]=='-'))md_fail("invalid name");
+  name=malloc(len+1);if(!name)md_fail("out of memory");memcpy(name,buf+at,len);name[len]=0;
+  for(j=0;j<t->n;j++)if(!strcmp(name,t->names[j]))md_fail("duplicate name");
+  names=realloc(t->names,(t->n+1)*sizeof *names);flags=realloc(t->automatic,(t->n+1)*sizeof *flags);if(!names||!flags)md_fail("out of memory");t->names=names;t->automatic=flags;t->names[t->n]=name;t->automatic[t->n]=buf[tab+1]-'0';t->n++;at=end<n?end+1:end;
+ }
+ cx_sha256_hex(buf,n,t->source_sha256);free(buf);if(!t->n)md_fail("empty row set");return t;
+}
+void md_list(md_table *t){size_t i;for(i=0;i<t->n;i++)if(t->automatic[i])printf("%s\n",t->names[i]);}
+
+/* Emit has no imported generated module: validated source data is sufficient. */
+void md_emit_module(md_table *t){size_t i;
+ printf("/* Derived from tests/seedconstruct-parts.tsv; sha256 %s. */\n",t->source_sha256);
+ puts("#pragma unisa module seedparts");
+ printf("size_t scp_count(void) { return %zu; }\n",t->n);
+ printf("const char *scp_source_sha256(void) { return \"%s\"; }\n",t->source_sha256);
+ puts("const char *scp_name(size_t i) {");
+ fputs(" static const char *names[] = {",stdout);
+ for(i=0;i<t->n;i++)printf("%s\"%s\"",i?",":"",t->names[i]);
+ puts("};");printf(" return i < %zu ? names[i] : 0;\n}\n",t->n);
+ puts("int scp_auto(size_t i) {");fputs(" static const unsigned char flags[] = {",stdout);
+ for(i=0;i<t->n;i++)printf("%s%d",i?",":"",t->automatic[i]);
+ puts("};");printf(" return i < %zu ? flags[i] : -1;\n}\n",t->n);
+}

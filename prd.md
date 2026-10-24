@@ -700,4 +700,8 @@ source-only 冷准备在原 55 秒看门狗内实际成功；具名 gate 的冷�
 
 - 2026-10-24 F4 R2 precommithook 实际首红：自测夹具只复制分类器与cxbin、链接同代产品，却没有include目录；原始err明确缺include/*.h，新cxbin完整SHA闭包因此正确拒绝，未到紧急跳过的日志分支。决定仅在夹具基础提交前复制真实顶层头文件，保留hook分类先于跳过、cxbin严格失败传播及全部既有断言；不以旧缓存或宿主裁定掩盖。原R2红原样保留，索引与新树验收须分别取真实证据，不能用原红或旧通过结论替代。
 
-- 2026-10-24 F4 新树复验：precommithook rc0；unitparse 的完整六项索引约束中，zeropython、docs、cxinclude、glossarycheck、gate-layers 均rc0，exec-unitparse 经既有 fresh 协议单独准备 ref/json/dump 后以消费者门禁rc0（17秒）完成。首次聚合冷启动在 60 秒外层窗中止，保留为准备时序证据，不调大限时。modelobject 八份独立准备均rc0（最长约41秒），随后 exec-modelobject 消费者 rc0（41秒）：六网全域校验及22个对象字节对拍均实际执行；不将准备结果冒充消费者通过。
+- 2026-10-24 F4 主检出诊断复验：precommithook rc0；unitparse 六项约束中的 zeropython、docs、cxinclude、glossarycheck、gate-layers 均rc0，exec-unitparse 经既有 fresh 协议准备后rc0（17秒）；modelobject 八份准备及消费者均rc0（消费者41秒）；exec-chain准备及五分片均rc0。这些运行发生在主检出，只作诊断，不是独立索引或正式F4验收。正式证据必须按HANDOFF在冻结scratch和隔离命名空间重新取得。旧冷路径60秒超时保留。
+
+- 2026-10-24 恢复到真实F4现场：冻结scratch的2db2366e队列保留1128项、env-pin及前20窗。K2b首红为私有新路径冷编译seedconstructcheck的--list导致原10秒plan超时；采用已留scratch候选，将45行part/manual数据集中为TSV，轻量读取器核原始SHA及派生模块逐行相等，CLI从派生模块读取。补派生检查与具名闸后再落地。五个种子测试仍缺本宿主内存准入证据，另有优化分片超时；不以主检出诊断覆盖冻结队列结果。
+
+- F4恢复环境核对：新会话继承en_US.UTF-8，而旧env-pin为C.UTF-8；语料排序和分片因此不同。第21/22窗的原日志保留，仅作诊断，不纳入旧队列验收；后续冻结运行显式恢复LC_ALL/LANG/LC_CTYPE/TZ及其余钉住变量。metadata冷枚举对拍只规约导出ROOT路径并扣除新增具名闸，其余原计划要求逐字节一致。
