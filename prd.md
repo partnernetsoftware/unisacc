@@ -152,7 +152,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 │  ├─ PE 两旧项分成四阶段；原41秒实跑均通过，其余1136项 argv 不变
 │  ├─ fresh 起跑；旧302项结果不迁绿，准备结果不算验收PASS
 │  ├─ 语料Git身份已修复并核验1885项内容／模式；本轮tools-1/2/3及regex准备均已正式rc0
-│  ├─ 未决：ccrun-8 单项40秒超时，末项stream_buf尚未完成；备选拆分补丁已备，未落树
+│  ├─ 未决：ccrun-8 原VM路径40秒超时；stream_buf双原生-run均5秒内完整且输出相同，不代VM通过；备选/tmp/unisacc-c43-ccrun8-split.patch未落树
 │  └─ 完成判据：清单完整、PENDING=0、NEEDS_RULING=0、product_red=0、处置齐全
 ├─ 待完成：据终态结果收口发布说明 → 候选封存 → RC
 ├─ 待完成：匹配候选的六平台 CI、Windows 原生与 Darwin 证据
