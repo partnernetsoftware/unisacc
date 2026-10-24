@@ -146,7 +146,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 0.0.43 公开发布
 ├─ 已完成：F1产品修复、F2文档／探针；F3历史基线187项=186 PASS＋1宿主未核
 ├─ 已完成：F6三实际编译器SHA相同；三阶段五代码切片实际重编、原50秒界通过
-├─ 当前：固定b09cbbf0b9的1317项正式M7已恢复；095窗6 PASS／1311待办，无未裁定红
+├─ 当前：固定b09cbbf0b9的1317项正式M7已恢复；103窗29 PASS／5资源UNKNOWN／1283待办，无未裁定红
 │  ├─ 070窗自然结束、2193已终止；旧冻结的结果仅保留诊断，不计有效正式PASS
 │  ├─ 清单1317项；原seedmemory严格17例=行为16＋真实新鲜度1，后者仍UNKNOWN／OPEN
 │  ├─ 固定env-pin；绑定新HEAD与真实非空Git闭包身份，禁止迁移旧绿或沿用旧闭包hash
@@ -157,7 +157,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 └─ 待完成：Draft资产核对 → Latest／公开 → 下载SHA与运行复核
 ```
 
-**下一动作：保持b09cbbf0b9验收副本及原env-pin固定，继续M7；并修Mac资格workflow的Bash3.2 staging语法后重跑无secret资格。** k2b两叶原40秒冷回归21.379／37.047秒rc0、四元数据闸及1317／954图已过，Python1744无升降。旧089状态完整存`out/m7-before-k2b-scopes/`，不迁未知闭包绿。Mac首轮40133626729两架构均通过固定候选拉取、配对／版本、原生default-run验源，staging嵌套case解析失败而未到builder；改四条直接cmp保留全部比较，原失败保留。主树后续发布工具改动不导入运行中副本，产品C90／2974978e…不变。
+**下一动作：保持b09cbbf0b9验收副本及原env-pin固定，继续M7；并提交真实version.h身份核验修复后重跑无secret Mac资格。** k2b两叶原40秒冷回归21.379／37.047秒rc0、四元数据闸及1317／954图已过，Python1744无升降。旧089状态完整存`out/m7-before-k2b-scopes/`，不迁未知闭包绿。Mac首轮40133626729两架构均通过固定候选拉取、配对／版本、原生default-run验源，staging嵌套case解析失败已修；第二轮40134154958两架构实际通过staging，builder因把带注释168字节version.h误当33字节单行而拒绝。已按真实version.h固定SHA核验；本机真实vendor文件四个精确原因拒绝均过（正确输入到达非Mac拒绝、坏版本、改header字节、坏payload SHA），均无work创建；下一刀重跑Mac；两轮原失败均保留。主树后续发布工具改动不导入运行中副本，产品C90／2974978e…不变。
 
 <a id="memory-palace"></a>
 ### 记忆宫殿
