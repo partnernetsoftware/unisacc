@@ -20,7 +20,7 @@ sh ./unisacc.com tests/suite/graph.cx -- out/suite.plan.nul tests/gateorder.json
 sh ./unisacc.com tests/suite/run.cx -- out/suite.plan.nul out/suite.catalog.tsv - --module e4 --graph out/suite.graph.tsv --order tests/gateorder.json --list
 ```
 
-必须先导入完整计划和图，再选择模块，不能先裁掉准备项。当前完整计划为1309节点、944条依赖边；导入证明目录完整，实际测试覆盖与通过状态以回执为准。
+必须先导入完整计划和图，再选择模块，不能先裁掉准备项。当前Windows消费拆片使完整计划增加5节点；实际节点／依赖边以重导出的完整计划和图为准；导入证明目录完整，实际测试覆盖与通过状态以回执为准。
 
 执行示例：
 
@@ -48,7 +48,7 @@ nativecheck.sh保留三次独立构建和compiler/network运行器逐字节相�
 
 阶段样例与全源self分开；链路样例、C self和network self分开。原stages/chain/all兼容入口仍保留。每单元保留原比较、输入和预算，准备/执行结果不混记。
 
-Windows lower 使用winlowerphase.cx默认-run控制五个准备节点（共享run／hello／fib、各架构JSON及表）与两个完整消费节点。准备按固定产物列表、上游seal及内容身份核验，单写锁保护原子发布；消费缺失／损坏返回75，不隐式构造，每次完整执行原fullcheck全部比较和系统调用拒绝，arm64的大输入检查亦保留。各叶仍须在原41秒预算验收，不继承旧聚合超时的通过状态。旧wincheck.sh无参／--arch兼容；旧独立对照由该入口继续持有，原生控制不代表其解释器依赖已消除。
+Windows lower 使用winlowerphase.cx默认-run控制五个准备节点（共享run／hello／fib、各架构JSON及表）与七个显式消费scope：x86_64的cases／refusals-1／refusals-2，以及arm64的cases／refusals-1／refusals-2／large。cases完整保留fixture、regnames、hello、fib（arm64另含immediate），refusals-1／refusals-2按原Windows缺失导入顺序的偶／奇索引分区（当前每目标13＋12项），每片断言非空，联合完整覆盖原25项；显式refusals CLI仍遍历全量，large实际执行原arm64大输入检查。七scope联合覆盖旧两目标完整消费；每片只报告部分覆盖。默认check ARCH及wincheck.sh --arch仍执行all。共享缓存锁不变，依赖图串行五准备及七消费；part不进入材料key，各片复用同一套完整核验材料。准备按固定产物列表、上游seal及内容身份核验，单写锁保护原子发布；消费缺失／损坏返回75，不隐式构造，各scope实际执行其原fullcheck断言，七scope联合保留全部比较、系统调用拒绝及arm64大输入检查。各叶仍须在原41秒预算验收，不继承旧聚合超时的通过状态。旧wincheck.sh无参／--arch兼容；旧独立对照由该入口继续持有，原生控制不代表其解释器依赖已消除。
 
 callback lower 的完整off9／on5产物必须为非空常规文件，固定完整清单的实际SHA输出须与artifacts.sha256逐字节相等，生产入口才可命中；缺失、损坏、截断或空清单会回到原生产路径。两个check入口每次执行原比较与全域NN检查。消费part1缺少或损坏on模型时提前返回75，part2～4不要求on模型。尚无通用同身份续跑：一次模块执行中断后不能把旧输出目录当成续跑状态。
 

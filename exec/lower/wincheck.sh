@@ -1,13 +1,20 @@
 #!/bin/sh
 # No option keeps the original two-target contract; a leaf selects one target.
 set -eu
-usage() { echo "usage: $0 [--arch x86_64|arm64] | --interpreter-info | --material-json ARCH OUT | --material-tbl JSON OUT | --material-check ARCH RUN TABLE JSON HELLO FIB" >&2; exit 2; }
+usage() { echo "usage: $0 [--arch x86_64|arm64] | --interpreter-info | --material-json ARCH OUT | --material-tbl JSON OUT | --material-check ARCH [--part cases|refusals|refusals-1|refusals-2|large] RUN TABLE JSON HELLO FIB" >&2; exit 2; }
 MATERIAL=
+PART=
 case ${1-} in
     --interpreter-info) [ $# = 1 ] || usage; MATERIAL=info;;
     --material-json) [ $# = 3 ] || usage; MATERIAL=json; ARCHES=$2; MATERIAL_OUT=$3;;
     --material-tbl) [ $# = 3 ] || usage; MATERIAL=tbl; MATERIAL_IN=$2; MATERIAL_OUT=$3;;
-    --material-check) [ $# = 7 ] || usage; MATERIAL=check; ARCHES=$2; shift 2;;
+    --material-check) [ $# = 7 ] || [ $# = 9 ] || usage; MATERIAL=check; ARCHES=$2; shift 2
+        if [ "${1-}" = --part ]; then
+            [ $# = 7 ] || usage
+            case $2 in cases|refusals|refusals-1|refusals-2|large) PART=$2;; *) usage;; esac
+            shift 2
+        fi
+        [ $# = 5 ] || usage;;
 esac
 if [ "$MATERIAL" = json ] || [ "$MATERIAL" = check ]; then
     case $ARCHES in x86_64|arm64) :;; *) usage;; esac
@@ -30,7 +37,9 @@ case $MATERIAL in
     json) case $ARCHES in arm64) legacy_interpreter exec/build/gen.py lower "$MATERIAL_OUT" --full --win --arm64;;
                          x86_64) legacy_interpreter exec/build/gen.py lower "$MATERIAL_OUT" --full --win;; esac; exit;;
     tbl) legacy_interpreter exec/c/tbl.py "$MATERIAL_IN" "$MATERIAL_OUT"; exit;;
-    check) export LOWER_TARGET=win/$ARCHES; legacy_interpreter exec/lower/fullcheck.py "$@"; exit;;
+    check) export LOWER_TARGET=win/$ARCHES
+           if [ -n "$PART" ]; then set -- --part "$PART" "$@"; fi
+           legacy_interpreter exec/lower/fullcheck.py "$@"; exit;;
 esac
 _SD="$R"/tests   # the one deletion guard: argv CLI tests/safedel.cx over include/unisa_safedel.h
 T=$(mktemp -d); trap 'sh "$_SD/cxbin" "$_SD/safedel.cx" --purge -- "${T:?}"' EXIT

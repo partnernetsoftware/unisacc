@@ -26,7 +26,18 @@ def check(raw,out,oracle):
 
 
 def main():
-    if len(sys.argv)<5:raise SystemExit('usage: fullcheck.py RUN TABLE JSON TAPE...')
+    part='all'
+    if len(sys.argv)>1 and sys.argv[1]=='--part':
+        if len(sys.argv)<3 or sys.argv[2] not in ('cases','refusals','refusals-1','refusals-2','large'):
+            raise SystemExit('usage: fullcheck.py [--part cases|refusals|refusals-1|refusals-2|large] RUN TABLE JSON TAPE...')
+        part=sys.argv[2]
+        sys.argv=sys.argv[:1]+sys.argv[3:]
+    if len(sys.argv)<5:raise SystemExit('usage: fullcheck.py [--part cases|refusals|refusals-1|refusals-2|large] RUN TABLE JSON TAPE...')
+    scope_target=os.environ.get('LOWER_TARGET','lnx/x86_64')
+    if part!='all' and scope_target not in ('win/x86_64','win/arm64'):
+        raise SystemExit('explicit Windows scope requires a Windows target')
+    if part=='large' and scope_target!='win/arm64':
+        raise SystemExit('large scope requires win/arm64')
     oracle=_oracle('built')
     with tempfile.TemporaryDirectory() as d:
         p=pathlib.Path(d)/'input'
@@ -64,7 +75,7 @@ def main():
         regnames=('r0:\n  ret\nr1:\n  ret\nr7:\n  ret\n_start:\n'
                   '  call r1\n  jump r0\n  jumpz r2, r7\n'
                   '  .lea r3, r1\n  ret\n')
-        cases=[('fixture',fixture),('regnames',regnames)]+[(f,pathlib.Path(f).read_text()) for f in sys.argv[4:]]
+        cases=[('fixture',fixture),('regnames',regnames)]+[(f,pathlib.Path(f).read_text()) for f in sys.argv[4:]] if part in ('all','cases') else []
         if os.environ.get('LOWER_TARGET','').endswith('/arm64'):
             # Immediate limits, power-of-two multiply, aliasing and liveness.
             chunks=['_start:']
@@ -79,7 +90,7 @@ def main():
             for count in (31,32):
                 chunks += ['imm r2, 3','add64 r0, r1, r2']+['mov r4, r5']*count+['imm r2, 9']
             chunks += ['ret']
-            cases.insert(1,('immediate','\n'.join(chunks)+'\n'))
+            if part in ('all','cases'):cases.insert(1,('immediate','\n'.join(chunks)+'\n'))
 
         for name,raw in cases:
             p.write_text(raw)
@@ -101,7 +112,11 @@ def main():
             print('lower full',name,n,'instructions equal; executors',len(commands),flush=True)
         # Planned API names with no declared import are refusals, not positives.
         # Keep every such entry checked; neither a crash nor an acceptance passes.
-        for op in unavailable:
+        refusal_ops=unavailable if part in ('all','refusals') else []
+        if part in ('refusals-1','refusals-2'):
+            refusal_ops=unavailable[0 if part=='refusals-1' else 1::2]
+            assert refusal_ops, 'refusal scope must be nonempty'
+        for op in refusal_ops:
             raw='_start:\n  .sys '+op+', r0, r1, r2\n  ret\n'
             try: lower(parse(raw),target,oracle,drive='built')
             except ValueError as error:
@@ -113,7 +128,8 @@ def main():
                 r=subprocess.run(cmd,capture_output=True,timeout=60)
                 assert r.returncode==1 and not r.stdout and r.stderr.startswith(b'reject: not covered:'), (op,r.returncode,r.stdout,r.stderr)
             print('lower unavailable',target,op,'reference + both executors rejected',flush=True)
-        if os.environ.get('LOWER_TARGET','').endswith('/arm64'):
+        if part in ('all','large') and os.environ.get('LOWER_TARGET','').endswith('/arm64'):
             subprocess.run([sys.executable, 'exec/lower/largecodecheck.py', sys.argv[1], sys.argv[2]],
                            check=True, timeout=45)
+        if part!='all':print('lower scope',scope_target,part,'PASS; partial coverage only',flush=True)
 if __name__=='__main__':main()
