@@ -106,12 +106,25 @@ if 'to close' in text:
     pathlib.Path(os.environ['TERM_TEST_CLOSED']).write_text('4242')
 else:
     match=re.search(r"'([^']+/run.sh)'",text);assert match,text
-    subprocess.Popen(['/bin/sh',match.group(1)],start_new_session=True)
+    # A real Terminal process does not inherit the short-lived osascript bound.
+    # Preserve outer test ownership while removing only this transport scope.
+    child_env=dict(os.environ)
+    chain=child_env['UNISACC_BOUND_CHAIN'].split();assert chain
+    if chain[:-1]: child_env['UNISACC_BOUND_CHAIN']=' '.join(chain[:-1])
+    else: child_env.pop('UNISACC_BOUND_CHAIN',None)
+    if child_env.pop('TERM_TEST_PARENT_DEADLINE_PRESENT')=='1':
+        child_env['UNISACC_BOUND_DEADLINE_MONO']=child_env.pop('TERM_TEST_PARENT_DEADLINE')
+    else:
+        child_env.pop('UNISACC_BOUND_DEADLINE_MONO',None)
+        child_env.pop('TERM_TEST_PARENT_DEADLINE',None)
+    subprocess.Popen(['/bin/sh',match.group(1)],start_new_session=True,env=child_env)
     print('4242')
 """
         (mock/'osascript').write_text('#!'+sys.executable+'\n'+script)
         for name in ('uname','osascript'): (mock/name).chmod(0o755)
         env=dict(os.environ,PATH=str(mock)+os.pathsep+os.environ['PATH'],TERM_TEST_CLOSED=str(log),TERM_SH='1',TERM_SH_NOFALLBACK='1',TERM_SH_ALARM='3')
+        env['TERM_TEST_PARENT_DEADLINE_PRESENT']='1' if 'UNISACC_BOUND_DEADLINE_MONO' in os.environ else '0'
+        env['TERM_TEST_PARENT_DEADLINE']=os.environ.get('UNISACC_BOUND_DEADLINE_MONO','')
         env.pop('TERM_SH_INSIDE',None)
         for command,want in (([sys.executable,'-c','print("done")'],0),([sys.executable,'-c','raise SystemExit(2)'],2),([sys.executable,'-c','import time;time.sleep(30)'],142)):
             subprocess.run(['sh',str(root/'cxbin'),str(root/'safedel.cx'),'--purge','--',str(log)],check=True)   # the one deletion guard (commissar ruling 2026-10-23)
