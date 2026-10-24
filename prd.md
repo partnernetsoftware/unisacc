@@ -147,7 +147,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 ├─ 已完成：F1 产品修复；F2 文档与探针收口
 ├─ 已完成：F3 历史 CONTRACT 基线（187项：186 PASS、1宿主未核）
 ├─ 已完成：新F6三实际SHA相同且官方固定点通过；stage3复用同身份模型包，五代码切片均由stage2实际重编，原50秒界通过
-├─ 正在执行：候选已封存并回读三件字节一致；提交候选记录，使CI与M7并行 ← 当前节点
+├─ 正在执行：候选已封存并回读三件字节一致；六平台CI与M7并行，修复Darwin结证首红 ← 当前节点
 │  ├─ 产品来源d09bd1decb／S=c90f0002…不变；开发完整图1315节点／954依赖，Windows全部分片原预算通过
 │  ├─ 已实跑：七流独立工具链；native六叶；functionimports六准备＋20案例；callback12目标＋四片消费
 │  ├─ 已修复：typed/callsite完整材料命中及无关检查脚本触发失效；普通七流／native资源缓存拆层仍待做
@@ -160,7 +160,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 │  ├─ 旧1142轮已停窗；原失败与未执行项保留，准备仅计PREPARED，不迁旧PASS
 │  └─ 完成判据：最终模块清单完整、PENDING=0、NEEDS_RULING=0、product_red=0、处置齐全
 ├─ 待完成：据终态结果收口发布说明 → RC
-├─ 待完成：匹配候选的六平台 CI、Windows 原生与 Darwin 证据
+├─ 已完成：匹配候选的六原生CI demo／严格矩阵及Windows双架构套件；Darwin专闸结证修复待真机复验
 ├─ 待完成：Apple／Windows签名、公证及最终字节验证
 │  └─ 独立外部待答事项：minicon Apple 服务具体接入授权
 └─ 待完成：Draft资产核对 → Latest／公开 → 下载SHA与运行复核
@@ -194,6 +194,8 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 | 出口室：分类 | 窗口022的seedparse2-1实际rc2，独立旧分类器已确认为RESOURCE_UNKNOWN，未执行义务仍OPEN，不能当PASS或77。后续同组拒绝依原分类记录后继续；其他红须先核分类，未裁定产品红停窗。H1超时不算PASS。 | 冻结根`out/m7-exit-window022.json`及原log；[资源处置](research/c43-resource-disposition.md)、[裁定](release/rulings.tsv)、[分类](release/preauth.tsv)。完整退出表仍待最终全清单，不改准入常量或阈值。 |
 | 发布室：交付 | 0.0.43候选已实际推送并按不可变digest回读，三件与F6逐字节相同：manifest=`8c667e0632c2f1f5f70a38fa7d6539e20c7f5d19ce0554b797809c45f721cb01`；封存来源93f00869ee，产品S不变。完整M7、匹配CI、签名及公开仍待完成。 | [发布流水线](release/RELEASE-PIPELINE.md)、[候选记录](release/candidate.json)；原始push JSON、readback日志和三件在忽略目录`out/c43-seal-*93f*`。本仓仅Azure凭据名已知；Apple阶段.cx草案未在macOS执行、未部署，具体跨仓接入仍待授权。 |
 | 发布室：并行决定 | 按发布流水线§9（封候选→提交推送→本地队列）调整此前“全M7后才封存”的自定顺序。F6同源三SHA已完成且产品不变，先核验三件实际候选并封不可变GHCR；提交候选记录后一次推送使匹配CI与M7并行。此时M7仅新窗1项，提前绑定最终候选记录，避免结尾再改源／重开。 | 只准备候选，release_eligible仍false；M7、当前各类OPEN义务、匹配六原生CI、签名和最终字节／下载检查全部仍须完成。此决定不授予未获答的跨仓Apple服务部署／读包权限，也不触发公开Latest。 |
+| Darwin室：结证首红 | Darwin专闸40122037341两架构均实际pull并核验2974978e…，首项bootstrap的N1=N2=N3、rc=0，但gate.sh嵌套引号的awk计时／printf产生语法错误及两行结果，单行契约正确拒绝；其余项未执行。修复独立计算elapsed／last，原formatter提取后在sh/bash下检验16组保持；原55秒界回归及完整生产入口均rc0，零Python／inventory-derived／gate-layers均rc0。同目录同环境完整NUL计划前后字节相同，SHA=740dc488…c6ad。 | 原artifact id=12571084254／12570709557，保留`out/c43-darwin-{arm64,x86}-artifacts/`。Linux不能复现系统bash3.2解析，不能声称真机已修；须推送后重跑Darwin。workflow改if捕获rc，保留失败并继续其余项，仍有红即失败。独立静态review无新增阻断。M7窗口027为3/1315通过，其余待办；改gate会按真实指纹失效。 |
+| CI室：六原生候选 | release-check 40121986516 attempt1／head=2e71fea2e4已实际成功；六格pull及demo步骤非skip，六份下载JSON均为2974978e…／2670411字节／0.0.43，实际宿主架构对应六目标、零failures；严格矩阵passed且精确六标签。Windows双架构suite、Linux x86_64互操作／生命周期成功。 | [精简收据](release/evidence/c43-candidate-ci.json)绑定不可变GHCR、S、run、attempt及七artifact id/digest；原报告`out/c43-candidate-demo-40121986516/`。这是签前候选smoke，不替代完整M7、Darwin专闸、签名或最终签后字节court。 |
 | 暂存室：边界 | 0.0.44登记.cx模块化／内存安全、自有工具链与测试改进；0.0.45登记流＋网模块外部调用及模块／权重共享；均不另作0.0.43前置。typed/callback迁移与广泛research归档保留后续范围。 | [0.0.44计划](plans/v0.0.44.md)、[0.0.45计划](plans/v0.0.45.md)、[路线](#5-路线)。新动态推进用`unisacc.com + .cx`，减少脚本，转调不算原生化。 |
 
 **动态维护规则**：进度、身份、阻塞、决定或下一动作变化时，同步原位更新思维树节点及对应房间；只把当前事实留在这里。每次恢复先读两者，派发任务引用当前节点和确切缺口。原始过程与旧失败保留在证据或Git历史中，不冒充当前状态。

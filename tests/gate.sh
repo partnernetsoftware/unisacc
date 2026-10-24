@@ -152,8 +152,11 @@ job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
       wait "$jp"; rc=$?; tb=$(mono); wb=$(date +%s)
       kill "$wp" 2>/dev/null; wait "$wp" 2>/dev/null
       out=$(cat "$tmp")
-      printf '%-14s rc=%-3s %3ss :: %s\n' "$name" "$rc" "$(awk "BEGIN{printf \"%d\", $tb - $t0}")" \
-          "$(printf '%s' "$out" | grep -v '^ *$' | tail -1)" > "$f"
+      # BEGIN gate result formatter (exercised directly by gatesummarycheck.sh)
+      elapsed=$(awk -v end="$tb" -v start="$t0" 'BEGIN {printf "%d", end - start}')
+      last=$(printf '%s' "$out" | grep -v '^ *$' | tail -1)
+      printf '%-14s rc=%-3s %3ss :: %s\n' "$name" "$rc" "$elapsed" "$last" > "$f"
+      # END gate result formatter
       printf 'start=%s bound_return=%s bound_rc=%s subshell_end=%s wall_start=%s wall_return=%s\n' "$t0" "$tb" "$rc" "$(mono)" "$w0" "$wb" > "$TD/$tb_.timing"
       sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "${tmp:?}" ) &
     PIDS="$PIDS $!"

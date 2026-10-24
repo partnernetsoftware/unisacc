@@ -14,6 +14,25 @@ case_() {   # case_ NAME WANT_RC WANT_FAILED WANT_UNVERIFIED LINE...
   echo "$out" | grep -q "failed $wf   unverified $wu " || fail "$name: summary '$out', want failed $wf unverified $wu"
 }
 L() { printf '%-14s rc=%-3s %3ss :: %s' "$1" "$2" "$3" "$4"; }
+# Exercise the production formatter, including the system /bin/sh on Darwin.
+# Nested quoted command substitutions previously broke there before the strict
+# reader saw the result. Keep the reader's malformed/multiline refusals below.
+{
+  printf '%s\n' 'name=$1; rc=$2; t0=$3; tb=$4; out=$5; f=$6'
+  awk '/# BEGIN gate result formatter/{on=1; next} /# END gate result formatter/{on=0} on' "$R/tests/gate.sh"
+} > "$T/formatter.sh"
+grep -q 'printf.*elapsed.*last' "$T/formatter.sh" || fail 'missing production formatter'
+for formatter_shell in /bin/sh /bin/bash; do
+  for formatter_rc in 0 1 77 142; do
+    formatter_last='bootstrap osx/arm64: reference N1=N2=N3 (stage selfcheck compares N1) rc=0 %s * "quoted"'
+    formatter_out=$(printf 'earlier diagnostic\n\n%s\n   \n' "$formatter_last")
+    "$formatter_shell" "$T/formatter.sh" exec-bootstrap-osxarm "$formatter_rc" 142.371 152.924 "$formatter_out" "$T/formatted" || fail "formatter execution: $formatter_shell"
+    [ "$(wc -l < "$T/formatted" | tr -d ' ')" = 1 ] || fail "formatter multiline: $formatter_shell"
+    [ "$(cat "$T/formatted")" = "$(L exec-bootstrap-osxarm "$formatter_rc" 10 "$formatter_last")" ] || fail "formatter bytes/rc: $formatter_shell/$formatter_rc"
+    "$formatter_shell" "$T/formatter.sh" empty "$formatter_rc" 1.9 2.0 '' "$T/formatted" || fail "empty formatter: $formatter_shell"
+    [ "$(cat "$T/formatted")" = "$(L empty "$formatter_rc" 0 '')" ] || fail "empty formatter bytes: $formatter_shell/$formatter_rc"
+  done
+done
 case_ pass            0 0 0 "$(L a 0 1 'ok')" "$(L b 0 2 'fine')"
 case_ red-tail-rc0    1 1 0 "$(L queuetimeout 1 0 'queuetimeout: one window, 142: rc=0 launches=1')"
 case_ red-tail-rc77   1 1 0 "$(L s 1 0 'expected rc=77 here')"
