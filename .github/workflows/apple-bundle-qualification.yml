@@ -135,13 +135,36 @@ jobs:
           b() { "$RUNNER_TEMP/bound" 10 "$@"; }
           app="$RUNNER_TEMP/app/Unisacc.app"
           b /usr/bin/xattr -w com.partnernetsoftware.unisacc.qualification own-marker-only "$app"
+          b /usr/bin/xattr -w com.partnernetsoftware.unisacc.qualification nested-marker-only "$app/Contents"
+          b /usr/bin/xattr -w com.partnernetsoftware.unisacc.qualification file-marker-only "$app/Contents/Resources/payload.sha256"
           b /usr/bin/xattr -lr "$app" > "$RUNNER_TEMP/qualification/source-xattrs.log"
-          b /usr/bin/env -u COPYFILE_DISABLE -u DITTONORSRC /usr/bin/ditto --rsrc --extattr -c -k --keepParent "$app" "$RUNNER_TEMP/bundle-qualification.zip"
+          b /bin/mkdir -m 700 "$RUNNER_TEMP/transport-parent"
+          test ! -e "$RUNNER_TEMP/transport-parent/Unisacc.app" && test ! -L "$RUNNER_TEMP/transport-parent/Unisacc.app"
+          b /usr/bin/env -u COPYFILE_DISABLE -u DITTONORSRC /usr/bin/ditto --rsrc --extattr "$app" "$RUNNER_TEMP/transport-parent/Unisacc.app"
+          b /usr/bin/xattr -lr "$RUNNER_TEMP/transport-parent/Unisacc.app" > "$RUNNER_TEMP/qualification/staged-xattrs.log"
+          test "$(b /usr/bin/xattr -p com.partnernetsoftware.unisacc.qualification "$RUNNER_TEMP/transport-parent/Unisacc.app")" = own-marker-only
+          test "$(b /usr/bin/xattr -p com.partnernetsoftware.unisacc.qualification "$RUNNER_TEMP/transport-parent/Unisacc.app/Contents")" = nested-marker-only
+          test "$(b /usr/bin/xattr -p com.partnernetsoftware.unisacc.qualification "$RUNNER_TEMP/transport-parent/Unisacc.app/Contents/Resources/payload.sha256")" = file-marker-only
+          b /usr/bin/env -u COPYFILE_DISABLE -u DITTONORSRC /usr/bin/ditto --rsrc --extattr -c -k "$RUNNER_TEMP/transport-parent" "$RUNNER_TEMP/bundle-qualification.zip"
           b /usr/bin/unzip -Z1 "$RUNNER_TEMP/bundle-qualification.zip" > "$RUNNER_TEMP/qualification/zip-members.log"
+          b /usr/bin/unzip -Zv "$RUNNER_TEMP/bundle-qualification.zip" > "$RUNNER_TEMP/qualification/zip-headers.log"
           b /bin/mkdir -m 700 "$RUNNER_TEMP/replay"
           b /usr/bin/env -u COPYFILE_DISABLE -u DITTONORSRC /usr/bin/ditto --rsrc --extattr -x -k "$RUNNER_TEMP/bundle-qualification.zip" "$RUNNER_TEMP/replay"
           b /usr/bin/xattr -lr "$RUNNER_TEMP/replay/Unisacc.app" > "$RUNNER_TEMP/qualification/replay-xattrs.log"
-          # Paired historical layout control; record its result without repairing attributes.
+          # Direct-root control isolates archive traversal context; never repair replay attributes.
+          b /usr/bin/env -u COPYFILE_DISABLE -u DITTONORSRC /usr/bin/ditto --rsrc --extattr -c -k --keepParent "$app" "$RUNNER_TEMP/direct-control.zip"
+          b /usr/bin/unzip -Z1 "$RUNNER_TEMP/direct-control.zip" > "$RUNNER_TEMP/qualification/direct-members.log"
+          b /bin/mkdir -m 700 "$RUNNER_TEMP/direct-replay"
+          b /usr/bin/env -u COPYFILE_DISABLE -u DITTONORSRC /usr/bin/ditto --rsrc --extattr -x -k "$RUNNER_TEMP/direct-control.zip" "$RUNNER_TEMP/direct-replay"
+          b /usr/bin/xattr -lr "$RUNNER_TEMP/direct-replay/Unisacc.app" > "$RUNNER_TEMP/qualification/direct-xattrs.log"
+          if b /usr/bin/xattr -p com.partnernetsoftware.unisacc.qualification "$RUNNER_TEMP/direct-replay/Unisacc.app" > "$RUNNER_TEMP/qualification/direct-marker.log" 2> "$RUNNER_TEMP/qualification/direct-marker.stderr"; then
+            direct_rc=0
+          else
+            direct_rc=$?
+          fi
+          printf '%s\n' "$direct_rc" > "$RUNNER_TEMP/qualification/direct-marker.status"
+          b /usr/bin/unzip -Zv "$RUNNER_TEMP/direct-control.zip" > "$RUNNER_TEMP/qualification/direct-headers.log"
+          # Historical sequestered layout control, also recorded without repairing attributes.
           b /usr/bin/env -u COPYFILE_DISABLE -u DITTONORSRC /usr/bin/ditto --rsrc --extattr -c -k --sequesterRsrc --keepParent "$app" "$RUNNER_TEMP/sequestered-control.zip"
           b /usr/bin/unzip -Z1 "$RUNNER_TEMP/sequestered-control.zip" > "$RUNNER_TEMP/qualification/sequestered-members.log"
           b /bin/mkdir -m 700 "$RUNNER_TEMP/sequestered-replay"
@@ -153,8 +176,24 @@ jobs:
             control_rc=$?
           fi
           printf '%s\n' "$control_rc" > "$RUNNER_TEMP/qualification/sequestered-marker.status"
+          b /usr/bin/unzip -Zv "$RUNNER_TEMP/sequestered-control.zip" > "$RUNNER_TEMP/qualification/sequestered-headers.log"
+          for layout in direct sequestered; do
+            for scope in nested file; do
+              target="$RUNNER_TEMP/$layout-replay/Unisacc.app/Contents"
+              if test "$scope" = file; then target="$target/Resources/payload.sha256"; fi
+              if b /usr/bin/xattr -p com.partnernetsoftware.unisacc.qualification "$target" > "$RUNNER_TEMP/qualification/$layout-$scope-marker.log" 2> "$RUNNER_TEMP/qualification/$layout-$scope-marker.stderr"; then
+                marker_rc=0
+              else
+                marker_rc=$?
+              fi
+              printf '%s\n' "$marker_rc" > "$RUNNER_TEMP/qualification/$layout-$scope-marker.status"
+            done
+          done
           test "$(b /usr/bin/xattr -p com.partnernetsoftware.unisacc.qualification "$RUNNER_TEMP/replay/Unisacc.app")" = own-marker-only
+          test "$(b /usr/bin/xattr -p com.partnernetsoftware.unisacc.qualification "$RUNNER_TEMP/replay/Unisacc.app/Contents")" = nested-marker-only
+          test "$(b /usr/bin/xattr -p com.partnernetsoftware.unisacc.qualification "$RUNNER_TEMP/replay/Unisacc.app/Contents/Resources/payload.sha256")" = file-marker-only
           b /usr/bin/cmp "$app/Contents/Resources/unisacc.com" "$RUNNER_TEMP/replay/Unisacc.app/Contents/Resources/unisacc.com"
+          b /usr/bin/cmp "$app/Contents/Resources/payload.sha256" "$RUNNER_TEMP/replay/Unisacc.app/Contents/Resources/payload.sha256"
           test "$(b "$RUNNER_TEMP/replay/Unisacc.app/Contents/MacOS/unisacc" --version)" = 'unisacc 0.0.43'
           printf '%s\n' 'Own xattr marker survived ditto ZIP/replay; NOT a signature, staple, notarization or quarantine proof. release_eligible=false' > "$RUNNER_TEMP/qualification/transport.log"
           SH
