@@ -179,6 +179,8 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 | Apple室：下一资格切面 | 将prepare所需旧Python bundle build迁为service-owned .cx，固定bootstrap默认-run；在unisacc自身准备无密钥Mac资格workflow，验证真实cc／lipo、bundle CLI默认-run及ditto xattr回放。仅产生资格夹具，不产出货编译器、不签名／公证，不冒充Developer ID或Gatekeeper验证。 | 私有bundle-build.cx先本机拒绝／静态审查，再落必要长期工具与无secret workflow；本地无法运行的Mac步骤由正式GitHub Mac runner核验。M7固定副本不导入此发布工具开发；minicon跨仓授权仍独立待答。 |
 | 发布室与后续边界 | Draft／Latest及签后完整court仍待办；源码push不等于发布。C44登记.cx模块化、内存安全、自有工具链与测试改进；C45登记流＋网外部调用及模块／权重共享，不另作0.0.43前置。 | [发布流程](release/RELEASE-PIPELINE.md)、[0.0.44计划](plans/v0.0.44.md)、[0.0.45计划](plans/v0.0.45.md)。详细历史以 `e89a17371d:prd.md` 追溯，不新增过程档案。 |
 
+**提速实证边界**：同1118输入的指纹采集12.4768→3.6886秒、摘要逐字节相同；计划生成的冷／热样本不可混作稳定提速。实际27.315460秒ISA切片中阶段执行27.184248秒，E4为14.396724秒；工程去重与E4算法优化须分别计量，不能承诺此样本两三秒。k2b正式097窗channel原40秒界36.02秒rc0；两叶分治不是总CPU加速证明。独立只读汇总位于`/tmp/unisacc-c43-engineering-cost-priorities.txt`。
+
 **提速调度决定**：分别测量准备、编排与真实执行；优先删除重复准备、修复缓存身份和收窄日常回归，保留完整输入校验与最终全覆盖。后台优化不阻塞0.0.43；小探针速度不外推完整E4速度。
 
 **动态维护规则**：进度、身份、阻塞、决定或下一动作变化时，同步原位更新思维树节点及对应房间；只把当前事实留在这里。每次恢复先读两者，派发任务引用当前节点和确切缺口。原始过程与旧失败保留在证据或Git历史中，不冒充当前状态。
