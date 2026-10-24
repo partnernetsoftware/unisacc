@@ -20,7 +20,7 @@ sh ./unisacc.com tests/suite/graph.cx -- out/suite.plan.nul tests/gateorder.json
 sh ./unisacc.com tests/suite/run.cx -- out/suite.plan.nul out/suite.catalog.tsv - --module e4 --graph out/suite.graph.tsv --order tests/gateorder.json --list
 ```
 
-必须先导入完整计划和图，再选择模块，不能先裁掉准备项。当前完整计划为1304节点、938条依赖边；导入证明目录完整，实际测试覆盖与通过状态以回执为准。
+必须先导入完整计划和图，再选择模块，不能先裁掉准备项。当前完整计划为1309节点、944条依赖边；导入证明目录完整，实际测试覆盖与通过状态以回执为准。
 
 执行示例：
 
@@ -48,7 +48,7 @@ nativecheck.sh保留三次独立构建和compiler/network运行器逐字节相�
 
 阶段样例与全源self分开；链路样例、C self和network self分开。原stages/chain/all兼容入口仍保留。每单元保留原比较、输入和预算，准备/执行结果不混记。
 
-Windows lower 的两个架构分别使用exec-winlower-x86_64和exec-winlower-arm64；wincheck.sh --arch严格选择一个架构，无参保留原双架构。每个叶保留原构造、完整比较及22项系统调用拒绝，不继承旧聚合超时的通过状态。
+Windows lower 使用winlowerphase.cx默认-run控制五个准备节点（共享run／hello／fib、各架构JSON及表）与两个完整消费节点。准备按固定产物列表、上游seal及内容身份核验，单写锁保护原子发布；消费缺失／损坏返回75，不隐式构造，每次完整执行原fullcheck全部比较和系统调用拒绝，arm64的大输入检查亦保留。各叶仍须在原41秒预算验收，不继承旧聚合超时的通过状态。旧wincheck.sh无参／--arch兼容；旧独立对照由该入口继续持有，原生控制不代表其解释器依赖已消除。
 
 callback lower 的完整off9／on5产物必须为非空常规文件，固定完整清单的实际SHA输出须与artifacts.sha256逐字节相等，生产入口才可命中；缺失、损坏、截断或空清单会回到原生产路径。两个check入口每次执行原比较与全域NN检查。消费part1缺少或损坏on模型时提前返回75，part2～4不要求on模型。尚无通用同身份续跑：一次模块执行中断后不能把旧输出目录当成续跑状态。
 

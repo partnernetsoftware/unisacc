@@ -148,15 +148,11 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 ├─ 已完成：F3 历史 CONTRACT 基线（187项：186 PASS、1宿主未核）
 ├─ 已完成：F6 候选构建、三阶段 SHA 固定点
 ├─ 正在执行：F4／M7 测试调度重构与受影响单元验证 ← 当前节点
-│  ├─ 冻结源码7122be5bb713209e8b46a35669d873a4032abdf5；产品S/H0仍与原候选相同
-│  ├─ 本次仅重分ccrun-8和exec-e4-3；原1140计划中其余1138项argv逐字节不变
-│  ├─ 原302项及修复前142/285项记录全保留，不迁新绿；准备结果不算验收PASS
-│  ├─ 语料Git已修复并核验1885项内容／模式；原1140轮tools与regex准备rc0，新轮仍须执行
-│  ├─ 本轮四组均已PASS：ccrun-8／stream-buf约34.30／8.09秒，exec-e4-3a／3b约22.04／25.02秒；原断言与裁定不变
-│  ├─ 分治已落地：tests/streams三源+说明；当前out/streams-v4七个单模型.com已构建，plain及count1 constructor两种链、七路并行重放、H0镜像逐字节及exit7、ELF越界拒绝均PASS；短属性文件已修为rc2拒绝且stdout0，各产物SHA前后复核
-│  ├─ 旧1142项于083自然停窗，485项已处置、657待办；保留全部原始失败，不迁绿
-│  ├─ 43准备组已展开为193原操作；严格核对其余1101项argv不变；调用点11项准备实跑全部完成
-│  ├─ lower原161项首红停记录保留：49项PREPARED；obj-win-a旧失败9操作全完成；callback-off12目标旧基线因果已闭合，原严格SHA／C/P／off／NN全域检查12/12 rc0；main新cache-key身份待核验
+│  ├─ 当前正式冻结700ece46：1304节点／938依赖；win准备／消费新拆分为1309节点草案，待验收
+│  ├─ 已实跑：七流独立工具链；native六叶；functionimports六准备＋20案例；callback12目标＋四片消费
+│  ├─ 当前首红：win/x86_64聚合41秒超时；准备约9.55秒＋完整消费约34.4秒，正在分离
+│  ├─ 并行：Windows原生准备控制／独立审查／self超时归因；父串行重测试，专职文档归档另行提交
+│  ├─ 旧1142轮已停窗；原失败与未执行项保留，准备仅计PREPARED，不迁旧PASS
 │  └─ 完成判据：最终模块清单完整、PENDING=0、NEEDS_RULING=0、product_red=0、处置齐全
 ├─ 待完成：据终态结果收口发布说明 → 候选封存 → RC
 ├─ 待完成：匹配候选的六平台 CI、Windows 原生与 Darwin 证据
@@ -165,7 +161,8 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 └─ 待完成：Draft资产核对 → Latest／公开 → 下载SHA与运行复核
 ```
 
-**下一动作：旧1142项冻结验收保持停窗；lower模块首红停：5项PASS、exec-winlower原41秒H1超时、186项NOT_RUN，冻结身份前后核验通过；lower准备层首红停：49项PREPARED、1项基线哈希失败、2项BLOCKED、109项NOT_RUN；已用输入回退复原旧JSON哈希，obj-win-x只因CRLF九个byte13转移改变；全部12目标旧JSON哈希已由旧三规则输入复原，C/P与off四JSON一致；12目标原严格检查均rc0（含非零全域NN观察），仅基线同步未删断言，旧/新摘要与非零域检查数固化在tests/seals/librarycallbacklower/refresh.tsv；新冻结ae9145主树真实缓存下，源码S／候选H0一致、四个准备工具字节相同；仅复用核验后的八类模型数据，未迁旧收据，12目标原严格SHA／C/P／off／全域NN检查已重新rc0；消费2／3／4各12行通过，消费1原缺on模型rc1保留；lnx-x cs0-cb1五个准备阶段完成后，完整消费1的12行off比较及8行on模型断言实际rc0，前后源码／候选身份相同；下一步按原41秒验收两个Windows lower叶和新版准备命中／缺准备拒绝，再补齐未执行验收；整套测试按独立单元调度，先解决准备阶段的聚合超时。下一刀把exec-winlower双架构拆为两个独立单元，保留每架构原断言／输入／预算；补callback-on缺准备的显式75拒绝；完整模型数据的精确清单命中可跳过重复生产，检查阶段仍每次执行原比较与NN，缺失／损坏／空清单不得命中。已知调度器尚无同冻结身份续跑、部分准备入口仍重做生产；二者是重构余项，不能把模块选择称为全量缓存完成。** 已提交原生目录、依赖图和模块选择执行；六个native单元均在原41秒内PASS（约19～38秒），旧超时不改写。新发现43个准备组捆绑193个操作共用外层额度，现展开为193个原参数单元；原789条依赖已验证全部仍可达，无环。libraryfunctionimports拆为六个独立准备阶段与只读消费；Python对照阶段独立20秒仍超时，定点使用40秒（外层41秒），其余构造20秒／消费35秒不变。主计划现为1304项，Windows lower原双架构入口拆成两叶，其余1302项argv逐字节不变；原1303项计划（含两个独立调度自测）、938条有效依赖已核验；1303相比1302项仅新增首红／层过滤回归入口；严格核对其余1101项argv逐字节不变；调度默认7场景28断言、首红／层过滤3场景86断言和functionimports20案例实际通过，数量增加表示拆分而非新增产品需求。未知依赖禁用缓存，保守归组不冒充单流覆盖。源码S及候选H0未变；准备声明改用.cx默认-run，减少Python调用。七流独立.com与plain/constructor链路证据见tests/streams；本轮原始日志、单元收据及现场会话见记忆宫殿。RESOURCE_UNKNOWN保留OPEN义务，H1超时不算PASS；只有完整处置和真实CI／签名／公开回执才能完成发布。
+**下一动作：完成 Windows lower 准备／完整消费拆分，在原41秒预算内定点验收；原 fullcheck 全部断言保留。** 新 `.cx` 控制缓存、依赖和状态，旧独立对照留在原入口；不新增解释器依赖或绕过门禁。并行子任务分别负责实现、独立审查和 self 超时归因，父持有同机重测试令牌。已通过的模块及证据见下表；尚无通用同身份续跑，不能把模块选择称为完整结果缓存。未知闭包禁用缓存，RESOURCE_UNKNOWN 保留 OPEN，H1 超时不算 PASS。完整 M7 后仍须候选封存、匹配候选的六平台 CI、签名及公开下载验证。文档清理首批3份旧稿已独立提交；过时过程留在 Git 与原始证据，不再堆入当前上下文。
+
 
 <a id="memory-palace"></a>
 ### 记忆宫殿
@@ -175,7 +172,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 | 入口厅：目标 | 公开发布0.0.43；当前节点F4/M7，不是重做F1。 | 上方思维树；[范围](plans/v0.0.43.md)、[终点线](plans/v0.0.43-finish-line.md)。旧未授描述不覆盖当前明确目标授权。 |
 | 工具间：能力 | 默认-run、tape→image、六目标、`.cx`模块已实现；经典UA与模型产品是不同实现。 | [能力速查](#implemented-usage)、[README](README.md)、已有用例。只验证具体输入的证据缺口，不重新研究入口是否存在。 |
 | 身份室：候选 | H0=`4f0b493c7a83d73a4ae1b348c8400ea3b7eda0ea190051b54a84c712a6730eda`；S=`c4618639cc3fcfac4f8ce52a11df3bdab93b2c9376eecee63fd70e6550adc57f`；用候选7298侧车。 | [F6证据](research/c43-f6-final-evidence/)。按源码摘要、产物及侧车SHA核对，mtime不单独决定新鲜度；不为刷新mtime重复构建。 |
-| 控制室：现场 | 本轮根`/tmp/unisacc-c43-pe-accept-20261024`；状态`out/f4-final-state`，窗口`out/f4-final-run`，原驱动日志`out/f4-driver.log`至029；v2日志`out/f4-driver-v2.log`自030；10241于054、88908于055均已实际76自然停窗；会话29323自056至083后已实际76自然停窗，日志out/f4-driver-v2-resume2.log，既有记录未清空。lower新调度首红停结果见out/suite-lower-current-run，前后身份检查均rc0；新runner另绑SHA7d6e28d96ad64826fdcd51758e62f581e19a02f42ca9825d467e0a63638a3060，1302计划SHA5c719178…；不迁旧绿。lower准备层会话47820实际rc1首红停，见out/suite-lower-preparation-run及harness.sha256，161项／runner584ccb10…；实际使用固定1302计划，main1303仅新增无关回归入口。原子调用点11项准备实际rc0，见out/suite-atomic-e3callsite-run；main out/callback-crlf-causal-stream.log证明obj-win-x仅九条CR转移变更且13等于既有9/32；冻结out/callback-baseline-cause-20261024保存原输入回退与新期望下完整检查（脚本仅适配R和基线文件位置），原失败保留，其余11目标旧参考矩阵、四JSON相等及原严格SHA／C/P／off／NN全域检查均实际通过；新冻结根/tmp/unisacc-c43-current-accept-20261024 @ ae9145中，真实新缓存12次原严格检查及四片消费已通过（消费1补齐五阶段on准备后含8行on断言）；out/current-callback-checks/scope.tsv限定身份与范围，原缺on rc1保留。新版完整数据命中和两个Windows lower叶尚待定点验收，仍不算完整M7。functionimports首个独立20秒超时仍保留，六阶段新验证全部完成，consumer20案例PASS、六项PREPARED，见out/libraryimports-atomic-v4-run。native定点见out/native-unit-refactor-check、native-chain-refactor-check、native-self-runtime-refactor-check（中间失败也保留）。旧67581/91453/35610亦已76，原记录保留不迁绿。 | 每轮读取实际结果与存活进程／会话，核fresh收据和env pin；锁或旧日志不能证明存活。瞬时计数以现场为准。 |
+| 控制室：现场 | 当前冻结`/tmp/unisacc-c43-suite-accept-20261024` @700ece46；计划SHA `594e5aad…`，1304节点／938边。`out/callback-final-checks`：12次off严格检查、on检查、8种生产命中、完整消费1再次rc0；空on／截断off真实消费均拒绝75。`out/winlower-x86_64-run`保留41秒rc142；`out/winlower-x86_64-timing.*`为55秒诊断，不能迁成41秒PASS。Windows新拆分仍待验。 | 先读本轮results／summary和存活进程。ae9145四片callback通过范围见`/tmp/unisacc-c43-current-accept-20261024/out/current-callback-checks/scope.tsv`；native／functionimports原证据见旧冻结根`/tmp/unisacc-c43-pe-accept-20261024/out/{native-*-refactor-check,libraryimports-atomic-v4-run}`。旧1142轮停于083，日志及原失败不清空、不迁绿。 |
 | 出口室：分类 | RESOURCE_UNKNOWN保留OPEN义务；H1超时不算PASS；DEFER不等于终态失败。 | [资源处置](research/c43-resource-disposition.md)、[裁定](release/rulings.tsv)、[分类](release/preauth.tsv)及完整退出表。不补写结果或虚构平台绿。 |
 | 发布室：交付 | M7之后封存；候选CI、签名、最终字节和公开下载须真实收据。 | [发布流水线](release/RELEASE-PIPELINE.md)、[候选记录](release/candidate.json)；当前候选记录尚不是0.0.43封存证明。 |
 | 暂存室：边界 | 0.0.44登记.cx模块化／内存安全、自有工具链与测试改进；0.0.45登记流＋网模块外部调用及模块／权重共享；均不另作0.0.43前置。typed/callback迁移与广泛research归档保留后续范围。 | [0.0.44计划](plans/v0.0.44.md)、[0.0.45计划](plans/v0.0.45.md)、[路线](#5-路线)。新动态推进用`unisacc.com + .cx`，减少脚本，转调不算原生化。 |
@@ -452,6 +449,12 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 **产品边界：转发与 cc 互调只走参考路线**（0.0.24 收口 0.0.23 A1/A2，两次顺延已满按原计划兜底砍掉）：产品对 Windows 目标的 `.hostcall/.hostaddr`（libc 转发）和 `__ccx_`/`__ccw_`（cc 互调）保持带位置的按名拒绝，这是正式行为，不再排期；参考编译器两者都支持，forward 与 ccinterop 门禁只测参考路线，所以不设 com-forward、com-ccinterop。
 
 **macOS 发布方案（0.0.13 起实行，每版公证并公开 dmg）**：采用 `unisacc.dmg → Unisacc.app → 签名的原生入口 → 同包封存 unisacc.com`，实际编译仍由 `.com` 完成，参数/退出状态应原样传递。先验证 quarantine/Gatekeeper、内层 APE 运行与解包缓存、`-run`/FFI，以及公证扫描能否接受整个 bundle。minicon 实际是先签内层 Mach-O，再签 app、公证并 staple app/dmg；不是给任意载荷加壳便完成信任。本方案若未过，不宣称 `.com` 已获得 Apple 签名，回报具体阻挡并评估同源原生内层，不静默更换编译路线。微软 Authenticode 与 Apple 分发链分别验，参见 R9-6。
+
+### 七流开发工具的外置模型方向
+
+设计约束（2026-10-24，尚未实现）：通用执行器`.com`与流配置、模型及资源分离。编译语义由模型数据表达；壳负责通用操作集、装载校验、输入输出协议和宿主适配。模型包包含转移、动作及权重，不只是一组数值。编译规则改变时独立重建受影响的模型包；操作码、数据格式、执行器ABI或宿主能力改变时才更新壳。当前七个开发`.com`仍附加各自模型，尚未达到物理分离。
+
+先复用P3的模型／资源身份与范围检查，增加显式外部包入口；流配置声明输入输出格式、模型及资源依赖。权重构造与测试可按模块并行演进：候选包和测试版本各自保持不可变身份，测试独立维护输入／断言／参考，合并时固定壳＋模型＋资源＋测试的配对。按依赖共享资源，缺包、错配或不兼容必须具名拒绝。测试绑定壳SHA、配置／模型／资源SHA及实际输入与环境，只复测受影响闭包，保持独立对照；模型数据命中不等于旧测试PASS可迁用。开发外置与正式单文件封装共用协议。完整外部共享能力在[0.0.45计划](plans/v0.0.45.md)细化，不把重做发行架构变成本版发布前置。
 
 ### 3.13 验证分层与当前证据
 
