@@ -1,4 +1,34 @@
-# M6: v0.0.43 plan item 4, baseline recheck (draft, 2026-10-23)
+# M6: v0.0.43 plan item 4 — current candidate and preserved baseline
+
+### Current candidate reconciliation (2026-10-24)
+
+This layer is the current status; the original 2026-10-23 observations below remain historical evidence for product3b17e191 and are not renamed as executions of the rebuilt candidate.
+
+Current product: SHA256 `4f0b493c7a83d73a4ae1b348c8400ea3b7eda0ea190051b54a84c712a6730eda`, 2670104 bytes; source digest `c4618639cc3fcfac4f8ce52a11df3bdab93b2c9376eecee63fd70e6550adc57f`. F6 proves the constructed seed/stage2/stage3 fixed point and matching provenance. F3 independently records187 CONTRACT jobs:186PASS, no failure, one Darwin UNVERIFIED, no pending; its rc4 is preserved. Current F4 is the full1129-job plan on frozen source62aa49e5a3 and is not yet complete. Sources below are recorded executions, unless explicitly marked read-only; this reconciliation itself did not rerun tests.
+
+| Baseline item | Current reconciliation and precise evidence | Remaining obligation |
+|---|---|---|
+| P4a array-pointer member/arith | **Probe integration DONE on this product.** `research/c43-f2-evidence.md` records byte-identical moves to`tests/c/a_array_pointer_member_store.c` and`tests/c/a_array_pointer_arith.c`, isolated `ccrun` NOBASE=1:2 passed/0wrong/0refused and default-network `exec/c/chain.sh` CHAINSHARD=1/1:2equal/0bad. The current files exist, both names are in`tests/ccrun.baseline.list`, count92. `tests/gate.sh` includes`tests/c/*.c` inccrun andexec-chain shards (read-only source verification). F1 corpus-results also lists both former candidate paths asSAME; it is supplementary differential evidence. | Do not repeat the move or leave “not gated” as current status. The final fullccrun/exec-chain shard results still come fromF4; direct two-probe F2 proof is not full-suite acceptance. |
+| P4b Windows library-mode L-4 | **OPEN/deferred byR10.** The oldWindows acceptance/reference disagreement remains a historical observation, not a current nativeWindows pass. | Final notes retain“win acceptance is not counted green”; six-platform ordinary demos do not close the explicit L-4 contract. |
+| P4c hex immediates | **OPEN/deferred byR10.** Existing named-refusal classification retained; no new current-candidate dedicated execution is claimed here. | Keep hex-A′ in knownlimitations; do not rewrite the old table as a rerun. |
+| P4d timeout debt | **Per-suite F4 disposition pending.** R11 distinguishes three accepted H1 timeout shapes from must-fix preparation/consumer debt; old runtime/load numbers remain history. | Use final original F4 rc/limit/first-error and exact current rulings; no blanket “timeout debt deferred” turns a newly red job into accepted status. |
+| P4e -include positions | Fix is already registered and current gate source names`com-forceinclude`. Old11-check result belongs to3b17e191. | Await current F4`com-forceinclude`rc/log; only then fill current PASS/check count. |
+| B6 ordinary/data late binding and embedded private addresses | F3 on4f0b493c:`latebind-p6`rc0,26sources/130artifacts match frozen lnx/x86_64 baseline; this proves its compatibility slice. Current M5 layer distinguishes fullordinary/data migration checks, default-disabled typed/callback and unchanged -run bridge. Source-only`_GNU_SOURCE`repair is already present before headers in`exec/c/libunisacc.c`; no unresolved choice of wrapper vs source repair remains. | Await named current M5/F4 rows. Host libffi remains required. Private/typed/variadic/callback/bridge address debt is not erased by P6 or a model-only PASS. |
+| B7 underscore integers | **Documentation correction DONE.** F2 explicitly records aligned TP-9 and TapeREADME. Current`spec.md`TP-9 says integer literals with underscores are rejected by reference/model with physical line and emptystdout;`exec/tapecheck/README.md`lines21–23 and75–77 match it; symbol-name underscores stay valid. F3`docs`rc0. | Do not add the sentence again or claim current docs remain stale. Current product domain modes require F4`com-tapedomain`; F2 records separate --com gate usage but does not contain a numerical success receipt for this item. |
+| B8 -iquote | Source fix926a8925 and current`com-iquote`gate are registered. | Current F4`com-iquote`pending; old14-check pass remains history. |
+| B9 gate-count basis | Current frozen F4`results.json`declares1129jobs; prior F3 CONTRACT count187 is separately proven. | On closing use the final actual full-plan inventory/results, not historical1051/1044 or CONTRACT count. |
+| B10 seedmemory keys | F3`seedmemory`rc0,18.490s; archived log says17selftests,OK. This verifies the admission contract/selftests, not memory sufficiency of every generator job. | F4 memory UNKNOWN/77 remain separate. Incomplete resource sampling cannot authorize new constants or seedgen PASS. |
+| B11 PP seal | F1`pp-reseal.tsv`records capture/write/check oncurrentSHA; F3`pp-leaf-seal`rc0(9.699s), negative rc0(14.717s), capture-selftest rc0(4.067s). | This current source/contract evidence is valid within its stated boundary; final F4 repetitions remain distinct. |
+| B12 derived/contract integration | F3`abi-manifest`rc0(5.515s),`facts-export`rc0(0.668s),`inventory-derived`rc0(17.188s) with original results/archive logs. | Avoid obsolete static “401 lines” or old tool-name claims. These checks do not mean every product behavior or future source change has been validated. |
+| follow-up .hostaddr indices | Current gate source names`com-hostaddr-neg`; old10-check pass remains historical. | Await current F4 log before writing new PASS. |
+| follow-up libraryimports assertions | Registered plan says assertion repaired, but this review did not run the private lower-model consumer. It remains ungated per historical scope. | Do not manufacture current-candidate execution from source inspection. Preserve exact limited status/UNVERIFIED where relevant. |
+| Tape-domain contract1–6 | Fix/contract already implemented; integer documentation correction above is current. | Await current F4`com-tapedomain`and related negative gates. Windows L-4 acceptance must remain separately uncounted, even if ordinary rawTape case-modes pass. |
+
+**Closed stale work items.** The former proposed edit1(move twoP4a probes) and edit5(TP-9/README correction) are completed byF2 and must not be scheduled again. The old proposal for `_GNU_SOURCE` alternatives is superseded by the actual runtime-source guard. The historical “Not verified” line about the two P4a probes having never run underccrun/chain is no longer the current two-probe status; F2 supplies those executions. Full final F4 acceptance remains an additional obligation.
+
+---
+
+## Historical evidence: 2026-10-23, product3b17e191 (preserved verbatim)
 
 Source table: `archive/plans/v0.0.43-baseline-20261014.md` (the item-4 table plus its "后续" list).
 Scope: roadmap M6 (`research/c43-roadmap-0043-and-refactor.md` A.1) under ruling R10 (`plans/v0.0.43.md` line 9).

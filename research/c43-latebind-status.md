@@ -1,5 +1,31 @@
 # 0.0.43 晚绑定分类状态表（M5）
 
+### 当前候选结证层（2026-10-24）
+
+本节取代下方历史表作为当前状态；下方2026-10-23采证原文完整保留，不把旧产品结果迁名为当前产品通过。
+
+**受试身份。** 当前产品SHA256为`4f0b493c7a83d73a4ae1b348c8400ea3b7eda0ea190051b54a84c712a6730eda`，2670104字节，产品来源摘要`c4618639cc3fcfac4f8ce52a11df3bdab93b2c9376eecee63fd70e6550adc57f`。F6的seed/stage2/stage3真实文件及完整收据相等，官方fixedpoint rc0、根与候选ident通过，见[c43-f6-final-evidence/README.md](c43-f6-final-evidence/README.md)、其`stages.json`、`accept-inputs.sha256`。构建固定点不是下列库/平台测试的通过证明。
+
+F3完整CONTRACT记录绑定同一SHA，187项全部执行、186PASS、1个Darwin Terminal归属子项UNVERIFIED、最终rc4；见[c43-f3-final-evidence/README.md](c43-f3-final-evidence/README.md)及`results.json`。该记录中`latebind-p6` rc0（16.596秒），原日志为“26 sources, 130 artifacts byte-identical to the frozen snapshots (lnx/x86_64, public API observers)”，保存于`logs.tar.gz`的`latebind-p6.log`，文件摘要见`log-sha256.tsv`。这是本候选已有的无类型库模式兼容性证据，不等于普通/data全项通过。
+
+现行F4以冻结源码`62aa49e5a3`、同一产品与同源参考运行全1129项；其最终状态须另按完成时收据填写。审查快照时下面待验具名项尚无完成结果，不以旧表或准备缓存补绿。
+
+| 类别 | 本候选现有证明 | 当前状态与待验边界 |
+|---|---|---|
+| 普通固定签名函数 | F3 `latebind-p6`：26源/130产物对冻结快照逐字节相同，lnx/x86_64 public-API observers | **兼容基线已验；完整迁移合同待F4**。等待`com-latebind`、`lib-latebind`、`com-bindings-neg`、`lib-resolver`及`exec-libraryfn-model`各自结果。P6不证明所有签名、所有控制流或整份lower都无宿主地址。 |
+| data | F3 `latebind-p6`不单独替代data的借用/写入/只读/extent/type/missing-provider断言；本层没有这组完整新产品日志 | **待F4**：`lib-latebind`中的2c1、`lib-latebind-W`、`lib-data`、`lib-resolver`、`exec-librarydata-model`分别结证。不得沿用3b17e191历史GREEN为4f0b493c的data PASS。 |
+| typed（fixed typed 2c2；variadic能力另分） | 源码只读：`compilerpack.py`的`--librarytyped`默认false，只有显式开启才附加typed parse/lower与ownership-fixedtyped；正常候选构造路径未声明该旗标 | **默认产品迁移UNVERIFIED/未启用，不声称迁移交付**。`exec-librarytyped{partition,lower,reader}-model*`即使模型侧通过，也只能记相应模型范围。`lib-typed-native`、`lib-sig2-native`、`lib-variadic-native`是旧路/宿主ABI证据，F4待验；不能据此宣称默认产品含2c2或全部变参ABI覆盖。 |
+| callback | 源码只读：`--librarycallback`默认false且要求`--librarytyped`；模型/候选专用路径与默认产品分离 | **默认产品迁移UNVERIFIED/未启用**。模型侧`exec-librarycallback*`与`lib-callback-candidate-auth`须独立列其专用候选、分片和实际结果。`lib-callback-native`、`lib-callback-forward`、`lib-callback-outcome`、`lib-bindings`及graph/plan等旧路/宿主合同等待F4各项结果；不得把它们变成默认产品callback迁移PASS。 |
+| 运行桥（-run宿主转发） | LB-4规定**保持旧路**；本版本没有迁移交付 | Linux当前控制/拒绝边界等待`com-latebind`及相应forward项。`com-forward`和`forward`的Darwin宿主转发需当前候选的Darwin远端具名rc0；本机77继续UNVERIFIED，六格comdemo也不能代全部forward断言。 |
+
+**宿主与源码现状（只读核对）。** `exec/c/libunisacc.c`现在在Linux且未定义时、首个头文件之前定义`_GNU_SOURCE`，因此历史表里的“RTLD_DEFAULT与strict C11的修复路径仍待决定”已过时；不得再要求使用旧cc wrapper作为唯一修法。`ffi.h`/libffi仍是宿主前置。F4环境使用的工具/头/库路径应在env-pin和收据中如实列出，不称为“裸宿主无需前置”通过。此源码核对自身不证明任何动态库测试已经通过。
+
+**未核项。** Windows `.hostcall`/`.hostaddr`仍按L-4分账，接受不计产品绿；普通/data尚未具备本候选F4全项证据，arm64/osx各格没有由本次Linux读审补验；typed/callback专用构造及其债项不由默认候选固定点证明。F4/远端结果到齐后仅据相应原日志更新本节，保留原非零/超时与UNVERIFIED，不改变全局裁定。
+
+---
+
+## 历史采证原文：2026-10-23，产品3b17e191（以下不是当前结论）
+
 性质：状态表草稿，供落 `research/c43-latebind-status.md`。每行标「实际跑过」（附命令与输出摘要）或「只读推断」。未核的行写 UNVERIFIED，不用旧日志补绿。依据：`spec.md` LB-1..LB-8、L-4；`plans/v0.0.43.md:12`；路线图 M5（`research/c43-roadmap-0043-and-refactor.md:37`）。
 
 ## 0. 受试身份与宿主（实际跑过）
