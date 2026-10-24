@@ -146,7 +146,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 0.0.43 公开发布
 ├─ 已完成：F1产品修复、F2文档／探针；F3历史基线187项=186 PASS＋1宿主未核
 ├─ 已完成：F6三实际编译器SHA相同；三阶段五代码切片实际重编、原50秒界通过
-├─ 当前：固定b09cbbf0b9的1317项正式M7已恢复；128窗245 PASS／6资源UNKNOWN／1066待办，2448继续；首个重试叶已实过
+├─ 当前：固定b09cbbf0b9的1317项正式M7已恢复；133窗259 PASS／6资源UNKNOWN／1052待办，2477继续，无未裁定红
 │  ├─ 070窗自然结束、2193已终止；旧冻结的结果仅保留诊断，不计有效正式PASS
 │  ├─ 清单1317项；原seedmemory严格17例=行为16＋真实新鲜度1，后者仍UNKNOWN／OPEN
 │  ├─ 固定env-pin；绑定新HEAD与真实非空Git闭包身份，禁止迁移旧绿或沿用旧闭包hash
@@ -157,7 +157,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 └─ 待完成：Draft资产核对 → Latest／公开 → 下载SHA与运行复核
 ```
 
-**下一动作：原b09／原env-pin继续第125窗起的完整M7，coordinator2448首红即停。** 124窗完整原state／五log已保存在`out/m7-exec-chain-prepare-race-124/`；原220 PASS及6资源项原字节不动，只将五个真实rc75重新置待执行。固定准备材料fresh require实际rc0、短恢复事务在原40秒界提交，未伪造PASS；125窗exec-chain-1实际69文件全部equal、rc0／21.89秒，其余四叶仍待实跑。主树五边修复已推e838a5efab，未导入冻结，不跨未知闭包迁绿。Mac两架构构造／默认-run／三处自建xattr及字节回放已全部通过，正式窄收据`release/evidence/c43-apple-bundle-ci.json`；完整M7、处置、生产准入、签名与公开仍未完成。
+**下一动作：固定b09／原env-pin，coordinator2477继续132–190窗完整M7，首红即停；不导入主树发布工具改动。** 131原warnprep-1 solo40.13秒超时及state已完整留档，按当前closure新key以已验证C工具准备两种不同模型，六材料SHA与旧独立参考完全相同；正式M7原warnprep-1／2在132窗各0.552秒rc0，未削断言／加时，也不把CPython冷构造或RSS改判通过。此前124五叶准备竞态原证据保留，主树五条依赖边已修e838a5efab；其余exec-chain分片须继续实际执行，不借首叶通过补绿。Mac两架构构造／默认-run／三处自建xattr及字节回放已全部通过（窄收据见release/evidence/c43-apple-bundle-ci.json）。完整M7／处置、生产准入、正式签名与公开仍未完成。
 
 <a id="memory-palace"></a>
 ### 记忆宫殿
@@ -170,6 +170,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 | M7室：固定身份 | 新冻结b09cbbf0b9的真实DECLARED摘要为`395fd5cadf74f8ad9c6e09d9287090842c8bd8c5650a459f7c76647125e6bde7`，不是产品S。F4内完整原NUL计划232484字节，SHA`04f26e7e56c82c257146380dab8cf02c20e7424359baa6948ad27c52653b276d`；1317项。 | `out/c43-m7-b09cbbf0b9.plan.nul`及状态head；旧a877计划保留诊断。正式M7固定 `CODEX_TOOL_CALL_ID=unisacc-c43-m7-final` 和原env-pin；winbatch-fixed仅属旧独立实验。`out/f4-final-env.sh`／`out/f4-final-config.sh`保持固定，不泛化忽略未知环境。 |
 | k2b室：已修首红 | 原wrapper与自测双重Git fixture准备挤爆40秒。两自然scope保持原失效／准入、真实双queue／CLI与字节／锁断言，独立冷测21.379／37.047秒rc0；共享footer与setup归属已独立静审。 | `/tmp/unisacc-c43-k2b-scopes-final-result.txt`、`/tmp/unisacc-c43-k2b-scope-review.txt`；原089／各次142及guard拒绝均保留。旧无消费者wrapper已按SHA不变移至忽略`out/archived-test-tools/`，未绕守卫删除源文件。新图与元数据见根`out/c43-k2b-*`；正式M7已固定b09继续，计数见思维树。 |
 | 资源室：完整义务 | 1317清单保留seedmemory两具名节点：functional原16行为断言，evidence原1真实freshness；legacy --selftest仍严格17聚合。真实计算键漂移为rc2 UNKNOWN required=memory／OPEN；坏文件／解析／权限输入仍真错误，不能借UNKNOWN吞掉。生产REF／RSS／常量不变，不重键套旧RSS。 | derived-map／gatelayers／stagemap必须完整保留两节点；functional绿不吞evidence执行，rc0提交合同不变。五生成器既有RESOURCE_UNKNOWN与H1超时均非PASS；须收集匹配测量或按既有合同整组裁定，不自授豁免。 |
+| 准备室：warnprep既有C方案 | 1/5=warnparse（--warnings --errors）、2/5=errorparse（--errors）必须分清；六材料已按旧独立parity实际核SHA相同。当前三seed actor与旧工具SHA匹配，canonical接口重算新wholekey；不复制旧key／伪造recipe。原cache控制入口仍是遗留Python，构造／转表／net实际走C；正式132窗两producer各0.552秒rc0，不冒称迁移完成或关闭RSS OPEN。 | 原完整命令见`/tmp/unisacc-c43-f4-cachefix-NqVxFpFN/out/warn-recovery-20261024c/run.sh`；当前F4用`/mnt/out/m7-warn-native-tools/{gen,tbl,net}`映射stage2/seedbin/seed-*，o1／e2／nativeabi及route取同stage2；当前日志`out/warnprep-{1,2}-native-{prepare,hit}.log`。131原失败及事务原state全部保留。 |
 | 工具间：已核与未核 | carrier、suite缓存／failfast、hostcheck现行七叶12例、seedmemory行为与隔离正反例、四元数据闸已有各自实跑证据；均不计作新冻结M7通过数。默认用unisacc.com＋.cx，不为测试改动重复构建产品。 | [能力速查](#implemented-usage)、[原生套件目录](tests/suite/README.md)；具体旧实验与失败见历史Git及私有报告。 |
 | E4室：私有地址实验 | 四个负64位地址区的JSON→table→net→包ISA探针六步实际rc0，首尾端点及旧区哨兵通过，stdout精确ADDR64；ISA子步0.044901秒。不是完整E4计时，未构造完整候选／验证接受域等价。 | `/tmp/unisacc-c43-e4-background/experiment/ACTUAL-ADDRESS-REPORT.txt`及原argv／SHA清单；下一重令牌才做候选构造和原定对拍，不挡0.0.43、不改出货候选、不宣称产品提速。 |
 | CI室：RC六原生与Darwin | RC `cd30109850f1d8958cc004d82821c36c46543db3`：release-check run40122497134 attempt1六原生及严格矩阵成功，Windows双架构套件、Linux x86_64互操作／生命周期成功；Darwin run40122511661 attempt1两架构16报告rc0。 | `release/evidence/c43-candidate-ci.json`、`release/evidence/c43-darwin-ci.json`、`out/c43-darwin-cd301-40122511661/`。旧Darwin畸形输出run40122037341失败保留；这些签前证据不代替M7或签后court。 |
