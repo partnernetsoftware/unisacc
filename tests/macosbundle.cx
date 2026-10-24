@@ -1,0 +1,44 @@
+#pragma unisa use cxlib.pyjson
+#include <time.h>
+/* Service-owned prepare-only builder. Never exec the payload; no signing/notary.
+   Actual macOS cc/lipo qualification remains required. */
+static double deadline;static pid_t active;static volatile sig_atomic_t halted;
+static void fail(const char*s){fprintf(stderr,"bundle-build refused: %s\n",s);exit(1);}
+static void need(int b,const char*s){if(!b)fail(s);}
+static void stop(int s){(void)s;halted=1;if(active>0){kill(-active,SIGKILL);kill(active,SIGKILL);}}
+/* Darwin own-header clock_gettime shim is wall time, not true monotonic time.
+   The caller's native bound is the hard wall-clock limit. */
+static double now(void){struct timespec t;need(!clock_gettime(CLOCK_MONOTONIC,&t),"clock_gettime");return t.tv_sec+t.tv_nsec/1000000000.;}
+static char*join(const char*a,const char*b){char*p=malloc(strlen(a)+strlen(b)+2);need(p!=0,"allocation");sprintf(p,"%s/%s",a,b);return p;}
+static int hex(const char*s,int n){int i;if(strlen(s)!=(size_t)n)return 0;for(i=0;i<n;i++)if(!((s[i]>='0'&&s[i]<='9')||(s[i]>='a'&&s[i]<='f')))return 0;return 1;}
+static char*readfile(const char*p,size_t*n){struct stat st;need(!lstat(p,&st)&&S_ISREG(st.st_mode)&&st.st_size>=0&&st.st_size<=64*1024*1024,"bounded regular file required");char*b=cx_read(p,n);need(b&&*n==(size_t)st.st_size,"complete file read");return b;}
+static char*hash(const char*p){size_t n;char*b=readfile(p,&n),*h=malloc(65);need(h!=0,"allocation");cx_sha256_hex(b,n,h);free(b);return h;}
+static void write_new(const char*p,const char*b,size_t n,int mode){int fd=open(p,O_WRONLY|O_CREAT|O_EXCL,mode);need(fd>=0,"new output required");size_t at=0;while(at<n){ssize_t z=write(fd,b+at,n-at);if(z<0&&errno==EINTR)continue;need(z>0,"write failed");at+=z;}int a=fsync(fd),c=close(fd);need(!a&&!c,"output flush");need(!chmod(p,mode),"output mode");}
+static void directory(const char*p,int mode){need(!mkdir(p,mode),"new directory required");need(!chmod(p,mode),"directory mode");struct stat st;need(!lstat(p,&st)&&S_ISDIR(st.st_mode)&&st.st_uid==getuid()&&(st.st_mode&0777)==mode,"directory owner/mode");}
+static void remove_capture(const char*p){need(!cx_remove(p),"capture cleanup guard refused; private capture retained");}
+static void field(pj_value*d,const char*k,const char*v){pj_set(d,k,pj_strz(v));}
+static pj_value*command(const char*work,int seq,char*const argv[]){
+ need(!halted,"interrupted");double left=deadline-now()-2,seconds=left<20?left:20;need(seconds>=1,"55-second total budget exhausted");
+ char a[64],b[64];snprintf(a,sizeof a,"capture-%d.stdout",seq);snprintf(b,sizeof b,"capture-%d.stderr",seq);char*op=join(work,a),*ep=join(work,b);
+ int of=open(op,O_WRONLY|O_CREAT|O_EXCL,0600),ef=open(ep,O_WRONLY|O_CREAT|O_EXCL,0600);need(of>=0&&ef>=0,"capture new files");pid_t pid=fork();need(pid>=0,"fork");
+ if(!pid){setpgid(0,0);if(dup2(of,1)<0||dup2(ef,2)<0)_exit(127);close(of);close(ef);execv(argv[0],argv);_exit(127);}close(of);close(ef);setpgid(pid,pid);active=pid;double end=now()+seconds;int st,timed=0;
+ for(;;){pid_t w=waitpid(pid,&st,WNOHANG);if(w==pid)break;need(w>=0||errno==EINTR,"waitpid");if(halted||now()>=end){timed=1;kill(-pid,SIGKILL);kill(pid,SIGKILL);while(waitpid(pid,&st,0)<0)need(errno==EINTR,"wait cleanup");break;}usleep(10000);}active=0;
+ size_t on,en;char*out=readfile(op,&on),*err=readfile(ep,&en);need(!timed&&!halted,"bounded external command interrupted/timed out; private captures retained");int rc=WIFEXITED(st)?WEXITSTATUS(st):128+WTERMSIG(st);
+ pj_value*r=pj_dict(),*av=pj_list();int i;for(i=0;argv[i];i++)pj_append(av,pj_strz(argv[i]));pj_set(r,"argv",av);pj_set(r,"returncode",pj_int(rc));field(r,"stdout",out);field(r,"stderr",err);free(out);free(err);if(rc){char*b;size_t n;need(!pj_dumps(r,2,&b,&n),"failure serialize");write_new(join(work,"command-failure.json"),b,n,0600);fail("external cc/lipo failed; argv/result and private captures retained");}remove_capture(op);remove_capture(ep);return r;
+}
+int main(int argc,char**argv){
+ if(argc==2&&!strcmp(argv[1],"--help")){puts("prepare-only: WORK PAYLOAD SHA256 SOURCE40 VERSION SERVICE; new0700 work; fixed /usr/bin/cc+lipo; never execute payload; never release eligible");return 0;}
+ need(argc==7,"expected WORK PAYLOAD SHA256 SOURCE40 VERSION SERVICE");deadline=now()+55;signal(SIGTERM,stop);signal(SIGINT,stop);signal(SIGHUP,stop);
+ const char*work=argv[1],*payload=argv[2],*sha=argv[3],*source=argv[4],*version=argv[5],*service=argv[6];need(hex(sha,64)&&hex(source,40),"exact payload/source SHA required");need(!strcmp(version,"0.0.43"),"fixed version0.0.43 required");
+ struct stat st;errno=0;need(lstat(work,&st)<0&&errno==ENOENT,"work must be new; never reuse previous artifacts");
+ need(!strcmp(hash(payload),sha),"source payload differs from exact SHA");size_t n;char*ver=readfile(join(service,"vendor/src/version.h"),&n);need(n==33&&!memcmp(ver,"#define UNISACC_VERSION \"0.0.43\"\n",33),"service source version mismatch");free(ver);
+ char*launcher=join(service,"vendor/release/macos-launcher.c");need(!strcmp(hash(launcher),"a2caee06d8264f93384bc9c042fc5187b05259cb8f9c6607401cbfe5e9f4615b"),"service launcher source changed");
+#if !defined(__APPLE__)
+ fail("actual macOS required; no cc/lipo fixture or launcher fabricated");
+#endif
+ directory(work,0700);char*app=join(work,"Unisacc.app"),*contents=join(app,"Contents"),*mac=join(contents,"MacOS"),*res=join(contents,"Resources");directory(app,0755);directory(contents,0755);directory(mac,0755);directory(res,0755);char*resource=join(res,"unisacc.com"),*entry=join(mac,"unisacc");char*data=readfile(payload,&n);write_new(resource,data,n,0755);free(data);char seal[66];snprintf(seal,sizeof seal,"%s\n",sha);write_new(join(res,"payload.sha256"),seal,65,0644);
+ const char*plist="<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>CFBundleDisplayName</key><string>Unisacc</string>\n<key>CFBundleExecutable</key><string>unisacc</string>\n<key>CFBundleIdentifier</key><string>com.partnernetsoftware.unisacc</string>\n<key>CFBundleName</key><string>Unisacc</string>\n<key>CFBundlePackageType</key><string>APPL</string>\n<key>CFBundleShortVersionString</key><string>0.0.43</string>\n<key>CFBundleVersion</key><string>0.0.43</string>\n<key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>\n<key>LSMinimumSystemVersion</key><string>11.0</string>\n</dict></plist>\n";write_new(join(contents,"Info.plist"),plist,strlen(plist),0644);
+ pj_value*steps=pj_list();char def[100];snprintf(def,sizeof def,"-DPAYLOAD_SHA256=\"%s\"",sha);char*arches[]={"arm64","x86_64"};int i;char*outs[2];for(i=0;i<2;i++){char name[64];snprintf(name,sizeof name,"launcher-%s",arches[i]);outs[i]=join(work,name);char*a[]={"/usr/bin/cc","-arch",arches[i],"-mmacosx-version-min=11.0","-O2","-Wall","-Wextra","-Wno-deprecated-declarations",def,launcher,"-o",outs[i],0};pj_append(steps,command(work,i,a));need(!chmod(outs[i],0755),"launcher architecture mode");}
+ char*lip[]={"/usr/bin/lipo","-create",outs[0],outs[1],"-output",entry,0};pj_append(steps,command(work,2,lip));need(!chmod(entry,0755),"universal launcher mode");need(!strcmp(hash(resource),sha)&&!strcmp(hash(payload),sha),"inner payload changed");
+ pj_value*r=pj_dict();pj_set(r,"schema",pj_int(1));field(r,"kind","unisacc-private-macos-qualification");pj_set(r,"release_eligible",pj_bool(0));field(r,"source_sha",source);field(r,"payload_source",payload);field(r,"payload_sha256",sha);pj_set(r,"payload_bytes",pj_int(n));field(r,"launcher_before_sha256",hash(entry));size_t en;data=readfile(entry,&en);free(data);pj_set(r,"launcher_before_bytes",pj_int(en));field(r,"launcher_source_sha256",hash(launcher));field(r,"builder_source_sha256",hash(join(service,"bundle-build.cx")));pj_set(r,"build",steps);field(r,"notarization","pending: no submission");field(r,"staple","pending");pj_set(r,"inner_ape_apple_signature",pj_bool(0));field(r,"scope","CLI bundle adapter; private qualification only");char*out;size_t len;need(!pj_dumps(r,2,&out,&len),"serialize receipt");write_new(join(work,"qualification.json"),out,len,0600);free(out);need(now()<deadline,"total55 deadline");puts("PREPARED private macOS bundle only; release_eligible=false inner_ape_apple_signature=false");return 0;
+}

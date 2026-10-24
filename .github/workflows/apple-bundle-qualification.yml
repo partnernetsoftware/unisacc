@@ -1,0 +1,156 @@
+name: Apple bundle qualification (no signing)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: read
+jobs:
+  bundle:
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: macos-15, arch: arm64, oras_arch: arm64}
+          - {runner: macos-15-intel, arch: x86_64, oras_arch: amd64}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955
+        timeout-minutes: 1
+      - name: Bootstrap existing native watchdog (no Python)
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          # This single infrastructure compile has the platform's exact60s
+          # step ceiling. It does not build a product compiler.
+          /usr/bin/cc -std=c99 -O2 -Wall -Wextra tests/bound.c -o "$RUNNER_TEMP/bound"
+      - name: Verify native architecture and reject Rosetta
+        timeout-minutes: 1
+        run: |
+          "$RUNNER_TEMP/bound" 50 /bin/bash -euo pipefail <<'SH'
+          "$RUNNER_TEMP/bound" 8 /usr/bin/uname -m > "$RUNNER_TEMP/native-arch"
+          test "$(cat "$RUNNER_TEMP/native-arch")" = '${{ matrix.arch }}'
+          translated=$("$RUNNER_TEMP/bound" 8 /usr/sbin/sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)
+          test "$translated" = 0
+          SH
+      - name: Install fixed ORAS version
+        timeout-minutes: 1
+        run: |
+          "$RUNNER_TEMP/bound" 50 /bin/bash -euo pipefail <<'SH'
+          b() { "$RUNNER_TEMP/bound" 40 "$@"; }
+          b /usr/bin/curl -fsSL --connect-timeout 10 --max-time 35 "https://github.com/oras-project/oras/releases/download/v1.2.0/oras_1.2.0_darwin_${{ matrix.oras_arch }}.tar.gz" -o "$RUNNER_TEMP/oras.tar.gz"
+          "$RUNNER_TEMP/bound" 8 /usr/bin/tar -xzf "$RUNNER_TEMP/oras.tar.gz" -C "$RUNNER_TEMP" oras
+          "$RUNNER_TEMP/bound" 8 /bin/chmod +x "$RUNNER_TEMP/oras"
+          SH
+      - name: Authenticate read-only package pull
+        timeout-minutes: 1
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" | "$RUNNER_TEMP/bound" 20 "$RUNNER_TEMP/oras" login ghcr.io -u '${{ github.actor }}' --password-stdin
+      - name: Pull immutable three-member candidate
+        timeout-minutes: 1
+        run: |
+          "$RUNNER_TEMP/bound" 50 /bin/bash -euo pipefail <<'SH'
+          ref=$("$RUNNER_TEMP/bound" 8 jq -er .ref release/candidate.json)
+          [[ "$ref" =~ ^ghcr\.io/partnernetsoftware/unisacc-candidate@sha256:[0-9a-f]{64}$ ]]
+          "$RUNNER_TEMP/bound" 40 "$RUNNER_TEMP/oras" pull "$ref" --output "$RUNNER_TEMP/candidate"
+          SH
+      - name: Verify bytes, paired sidecar, version and install bootstrap
+        timeout-minutes: 1
+        run: |
+          "$RUNNER_TEMP/bound" 50 /bin/bash -euo pipefail <<'SH'
+          b() { "$RUNNER_TEMP/bound" 8 "$@"; }
+          sha=2974978e6deec45abf38bfac2ac24e3031969b1c65009798270491d8b1e6dd1f
+          src=c90f0002f02366d510e4c8c22d4757f934edf8c0719852e706b575a7137b47df
+          b jq -e --arg sha "$sha" --arg src "$src" '.version=="0.0.43" and .bytes==2670411 and .unisacc_com_sha256==$sha and .sources_sha256==$src' release/candidate.json
+          for name in unisacc.com unisacc.com.build.json models.json; do
+            p="$RUNNER_TEMP/candidate/$name"; test -f "$p" && test -s "$p" && test ! -L "$p"
+          done
+          got=$(b /usr/bin/openssl dgst -sha256 "$RUNNER_TEMP/candidate/unisacc.com"); test "${got##* }" = "$sha"
+          b jq -e --arg sha "$sha" --arg src "$src" '.schema==1 and .artifact_sha256==$sha and .sources_sha256==$src and .bytes==2670411' "$RUNNER_TEMP/candidate/unisacc.com.build.json"
+          b jq -e 'type=="object"' "$RUNNER_TEMP/candidate/models.json"
+          size=$(b /usr/bin/wc -c < "$RUNNER_TEMP/candidate/unisacc.com"); test "${size//[[:space:]]/}" = 2670411
+          test ! -e unisacc.com && test ! -L unisacc.com
+          test ! -e unisacc.com.build.json && test ! -L unisacc.com.build.json
+          b /bin/cp "$RUNNER_TEMP/candidate/unisacc.com" unisacc.com
+          b /bin/cp "$RUNNER_TEMP/candidate/unisacc.com.build.json" unisacc.com.build.json
+          b /bin/chmod +x unisacc.com
+          test "$(b /bin/sh ./unisacc.com --version)" = 'unisacc 0.0.43'
+          SH
+      - name: Verify root product closure with native ident default-run
+        timeout-minutes: 1
+        run: |
+          "$RUNNER_TEMP/bound" 50 /bin/sh ./unisacc.com -Iseed seed/ident.c -- . check unisacc.com
+      - name: Stage only service-owned builder inputs
+        timeout-minutes: 1
+        run: |
+          "$RUNNER_TEMP/bound" 50 /bin/bash -euo pipefail <<'SH'
+          b() { "$RUNNER_TEMP/bound" 8 "$@"; }
+          service="$RUNNER_TEMP/service"
+          b /bin/mkdir -m 700 "$service"
+          b /bin/mkdir -m 700 "$service/cxlib" "$service/vendor" "$service/vendor/release" "$service/vendor/src" "$RUNNER_TEMP/qualification"
+          b /bin/cp tests/macosbundle.cx "$service/bundle-build.cx"
+          b /bin/cp tests/cxlib/pyjson.cx "$service/cxlib/pyjson.cx"
+          b /bin/cp release/macos-launcher.c "$service/vendor/release/macos-launcher.c"
+          b /bin/cp src/version.h "$service/vendor/src/version.h"
+          for p in bundle-build.cx cxlib/pyjson.cx vendor/release/macos-launcher.c vendor/src/version.h; do
+            b /usr/bin/cmp "$service/$p" "$(case "$p" in bundle-build.cx) echo tests/macosbundle.cx;; cxlib/pyjson.cx) echo tests/cxlib/pyjson.cx;; vendor/release/macos-launcher.c) echo release/macos-launcher.c;; *) echo src/version.h;; esac)"
+          done
+          b /usr/bin/git rev-parse HEAD > "$RUNNER_TEMP/qualification/source-head"
+          b /bin/cp release/candidate.json "$RUNNER_TEMP/qualification/candidate.json"
+          SH
+      - name: Build actual universal CLI bundle (prepare only)
+        timeout-minutes: 1
+        run: |
+          # Trust only the runner-owned temp root for existing cleanup guards.
+          TMPDIR="$RUNNER_TEMP" "$RUNNER_TEMP/bound" 50 /bin/bash -euo pipefail <<'SH'
+          source=$("$RUNNER_TEMP/bound" 8 /usr/bin/git rev-parse HEAD)
+          "$RUNNER_TEMP/bound" 45 /bin/sh ./unisacc.com "$RUNNER_TEMP/service/bundle-build.cx" -- "$RUNNER_TEMP/app" "$PWD/unisacc.com" 2974978e6deec45abf38bfac2ac24e3031969b1c65009798270491d8b1e6dd1f "$source" 0.0.43 "$RUNNER_TEMP/service" > "$RUNNER_TEMP/qualification/build.log" 2>&1
+          SH
+      - name: Exercise bundle CLI and own default-run marker
+        timeout-minutes: 1
+        run: |
+          "$RUNNER_TEMP/bound" 50 /bin/bash -euo pipefail <<'SH'
+          b() { "$RUNNER_TEMP/bound" 8 "$@"; }
+          entry="$RUNNER_TEMP/app/Unisacc.app/Contents/MacOS/unisacc"
+          b /usr/bin/plutil -lint "$RUNNER_TEMP/app/Unisacc.app/Contents/Info.plist"
+          test "$(b "$entry" --version)" = 'unisacc 0.0.43'
+          printf 'int main(void){puts("APPLE_BUNDLE_DEFAULT_RUN_OK");return 0;}\n' > "$RUNNER_TEMP/marker.cx"
+          b "$entry" "$RUNNER_TEMP/marker.cx" > "$RUNNER_TEMP/qualification/default-run.log"
+          test "$(cat "$RUNNER_TEMP/qualification/default-run.log")" = APPLE_BUNDLE_DEFAULT_RUN_OK
+          b /usr/bin/lipo -info "$entry" > "$RUNNER_TEMP/qualification/lipo.log"
+          b jq -e '.schema==1 and .release_eligible==false and .inner_ape_apple_signature==false and (.build|length)==3' "$RUNNER_TEMP/app/qualification.json"
+          b /bin/cp "$RUNNER_TEMP/app/qualification.json" "$RUNNER_TEMP/qualification/qualification.json"
+          SH
+      - name: ZIP and replay only a self-created xattr marker
+        timeout-minutes: 1
+        run: |
+          "$RUNNER_TEMP/bound" 50 /bin/bash -euo pipefail <<'SH'
+          b() { "$RUNNER_TEMP/bound" 10 "$@"; }
+          app="$RUNNER_TEMP/app/Unisacc.app"
+          b /usr/bin/xattr -w com.partnernetsoftware.unisacc.qualification own-marker-only "$app"
+          b /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$app" "$RUNNER_TEMP/bundle-qualification.zip"
+          b /bin/mkdir -m 700 "$RUNNER_TEMP/replay"
+          b /usr/bin/ditto -x -k "$RUNNER_TEMP/bundle-qualification.zip" "$RUNNER_TEMP/replay"
+          test "$(b /usr/bin/xattr -p com.partnernetsoftware.unisacc.qualification "$RUNNER_TEMP/replay/Unisacc.app")" = own-marker-only
+          b /usr/bin/cmp "$app/Contents/Resources/unisacc.com" "$RUNNER_TEMP/replay/Unisacc.app/Contents/Resources/unisacc.com"
+          test "$(b "$RUNNER_TEMP/replay/Unisacc.app/Contents/MacOS/unisacc" --version)" = 'unisacc 0.0.43'
+          printf '%s\n' 'Own xattr marker survived ditto ZIP/replay; NOT a signature, staple, notarization or quarantine proof. release_eligible=false' > "$RUNNER_TEMP/qualification/transport.log"
+          SH
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        timeout-minutes: 1
+        with:
+          name: apple-bundle-qualification-${{ matrix.arch }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/qualification/
+          if-no-files-found: warn
+          retention-days: 14
+# No environment, signing credentials, provider call, compiler build/upload,
+# notarization, release upload or publication. Actual Mac execution is pending.
+# Watchdog bootstrap and checkout/upload use platform60s step ceilings;
+# subsequent shell payloads have native bounds<=50s. No claim of55s action caps.

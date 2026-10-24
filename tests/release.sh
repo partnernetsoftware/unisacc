@@ -96,6 +96,8 @@ for s in seedparse2-1 seedparse2-2 seedgen seedgen-2; do exclusive+=(--exclusive
 # cloud host past the outer bound.  At most one runs at a time; light jobs keep the other slots.
 GATE_NAMES=$(./tests/gate.sh --list --com 2>/dev/null)
 for s in $(printf '%s\n' "$GATE_NAMES" | grep '^rowcov'); do exclusive+=(--heavy-suite "$s"); done
+# Guards can share with light jobs; channel's measured 37/40 s needs its own window.
+exclusive+=(--heavy-suite k2b-guards --exclusive-suite k2b-channel)
 # 0.0.43 timeout debt: the run step of a staged tools entry (tests/tools.sh --staged; regex2 ran 39 s
 # at load 8-10, one program that cannot be split) gets a window; its ref/build steps stay ordinary.
 for s in $(printf '%s\n' "$GATE_NAMES" | grep -E '^tools-.+-run$'); do exclusive+=(--exclusive-suite "$s"); done

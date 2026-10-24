@@ -113,7 +113,8 @@ static char *extra[] = {
     /* commitgate: 作业入口测登记/构造器平价/队列/证据/身份或工具合同，不测单个编译阶段; tests/gate.sh:237 */
     "meta", "commitgate", "-",
     /* k2b: 作业入口测登记/构造器平价/队列/证据/身份或工具合同，不测单个编译阶段; tests/gate.sh:238 */
-    "meta", "k2b", "-",
+    "meta", "k2b-guards", "-",
+    "meta", "k2b-channel", "-",
     /* precommithook: 作业入口测登记/构造器平价/队列/证据/身份或工具合同，不测单个编译阶段; tests/gate.sh:239 */
     "meta", "precommithook", "-",
     /* queuestart: 作业入口测登记/构造器平价/队列/证据/身份或工具合同，不测单个编译阶段; tests/gate.sh:240 */
