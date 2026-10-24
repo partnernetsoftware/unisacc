@@ -23,6 +23,10 @@ on:
   schedule:
     - cron: '17 3 * * 1'
 
+permissions:
+  contents: read
+  packages: read
+
 jobs:
   linux:
     # Both Linux architectures GitHub hosts run the full suite natively (R12-3 ③);
@@ -88,20 +92,42 @@ jobs:
             [ "$got" = "$want" ] || { echo "MISMATCH: want '$want'"; exit 1; }
           done
 
-      - name: pull the sealed candidate by digest (tools suites use it as TOOLS_UA)
-        continue-on-error: true
+      - name: install sealed candidate as native tool prerequisite
         env:
           GHCR_TOKEN: ${{ github.token }}
+          UNISACC_TIME_SCALE: '1'
         run: |
-          set -eu
-          [ -f release/candidate.json ] || exit 0
-          ref=$(python3 -c 'import json;print(json.load(open("release/candidate.json"))["ref"])')
-          sha=$(python3 -c 'import json;print(json.load(open("release/candidate.json"))["unisacc_com_sha256"])')
-          case "$(uname -m)" in aarch64|arm64) arch=arm64;; *) arch=amd64;; esac   # the arm runner cannot exec an amd64 oras (exit 126)
-          curl -sSL "https://github.com/oras-project/oras/releases/download/v1.2.0/oras_1.2.0_linux_${arch}.tar.gz" | tar -xz oras && chmod +x oras
-          printf '%s' "$GHCR_TOKEN" | ./oras login ghcr.io -u "${{ github.actor }}" --password-stdin
-          mkdir -p candidate && ./oras pull "$ref" --output candidate
-          [ "$(sha256sum candidate/unisacc.com | cut -d' ' -f1)" = "$sha" ] && chmod +x candidate/unisacc.com
+          set -euo pipefail
+          b() { tests/bound 45 "$@"; }
+          ref=$(b jq -er .ref release/candidate.json)
+          sha=$(b jq -er .unisacc_com_sha256 release/candidate.json)
+          src=$(b jq -er .sources_sha256 release/candidate.json)
+          bytes=$(b jq -er .bytes release/candidate.json)
+          version=$(b jq -er .version release/candidate.json)
+          [[ "$ref" =~ ^ghcr\.io/partnernetsoftware/unisacc-candidate@sha256:[0-9a-f]{64}$ ]]
+          [[ "$sha" =~ ^[0-9a-f]{64}$ && "$src" =~ ^[0-9a-f]{64}$ ]]
+          case "$(b uname -s)" in Linux) os=linux;; Darwin) os=darwin;; *) exit 2;; esac
+          case "$(b uname -m)" in aarch64|arm64) arch=arm64;; x86_64) arch=amd64;; *) exit 2;; esac
+          b curl -fsSL --connect-timeout 10 --max-time 40 \
+            "https://github.com/oras-project/oras/releases/download/v1.2.0/oras_1.2.0_${os}_${arch}.tar.gz" \
+            -o "$RUNNER_TEMP/oras.tar.gz"
+          b tar -xzf "$RUNNER_TEMP/oras.tar.gz" oras
+          b chmod +x oras
+          printf '%s' "$GHCR_TOKEN" | b ./oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+          b ./oras pull "$ref" --output candidate
+          for name in unisacc.com unisacc.com.build.json models.json; do test -s "candidate/$name" && test -f "candidate/$name" && test ! -L "candidate/$name"; done
+          got=$(b openssl dgst -sha256 candidate/unisacc.com); got=${got##* }
+          test "$got" = "$sha"
+          b jq -e --arg sha "$sha" --arg src "$src" --argjson bytes "$bytes" \
+            '.schema == 1 and .artifact_sha256 == $sha and .sources_sha256 == $src and .bytes == $bytes' candidate/unisacc.com.build.json
+          actual=$(b wc -c < candidate/unisacc.com); actual=${actual//[[:space:]]/}
+          test "$actual" = "$bytes"
+          test ! -e unisacc.com && test ! -L unisacc.com
+          test ! -e unisacc.com.build.json && test ! -L unisacc.com.build.json
+          b cp candidate/unisacc.com unisacc.com
+          b cp candidate/unisacc.com.build.json unisacc.com.build.json
+          b chmod +x unisacc.com candidate/unisacc.com
+          test "$(b sh ./unisacc.com --version)" = "unisacc $version"
       - name: suites
         run: |
           set -e
@@ -222,6 +248,43 @@ jobs:
           echo "--- lldb ---"
           python3 tests/bound.py 15 lldb --batch -o 'run' -o 'bt all' -o 'register read pc sp x0' \
                -o 'disassemble --pc --count 8' -o 'quit' /tmp/hello 2>&1 | head -60
+
+      - name: install sealed candidate as native tool prerequisite
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          UNISACC_TIME_SCALE: '1'
+        run: |
+          set -euo pipefail
+          b() { tests/bound 45 "$@"; }
+          ref=$(b jq -er .ref release/candidate.json)
+          sha=$(b jq -er .unisacc_com_sha256 release/candidate.json)
+          src=$(b jq -er .sources_sha256 release/candidate.json)
+          bytes=$(b jq -er .bytes release/candidate.json)
+          version=$(b jq -er .version release/candidate.json)
+          [[ "$ref" =~ ^ghcr\.io/partnernetsoftware/unisacc-candidate@sha256:[0-9a-f]{64}$ ]]
+          [[ "$sha" =~ ^[0-9a-f]{64}$ && "$src" =~ ^[0-9a-f]{64}$ ]]
+          case "$(b uname -s)" in Linux) os=linux;; Darwin) os=darwin;; *) exit 2;; esac
+          case "$(b uname -m)" in aarch64|arm64) arch=arm64;; x86_64) arch=amd64;; *) exit 2;; esac
+          b curl -fsSL --connect-timeout 10 --max-time 40 \
+            "https://github.com/oras-project/oras/releases/download/v1.2.0/oras_1.2.0_${os}_${arch}.tar.gz" \
+            -o "$RUNNER_TEMP/oras.tar.gz"
+          b tar -xzf "$RUNNER_TEMP/oras.tar.gz" oras
+          b chmod +x oras
+          printf '%s' "$GHCR_TOKEN" | b ./oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+          b ./oras pull "$ref" --output candidate
+          for name in unisacc.com unisacc.com.build.json models.json; do test -s "candidate/$name" && test -f "candidate/$name" && test ! -L "candidate/$name"; done
+          got=$(b openssl dgst -sha256 candidate/unisacc.com); got=${got##* }
+          test "$got" = "$sha"
+          b jq -e --arg sha "$sha" --arg src "$src" --argjson bytes "$bytes" \
+            '.schema == 1 and .artifact_sha256 == $sha and .sources_sha256 == $src and .bytes == $bytes' candidate/unisacc.com.build.json
+          actual=$(b wc -c < candidate/unisacc.com); actual=${actual//[[:space:]]/}
+          test "$actual" = "$bytes"
+          test ! -e unisacc.com && test ! -L unisacc.com
+          test ! -e unisacc.com.build.json && test ! -L unisacc.com.build.json
+          b cp candidate/unisacc.com unisacc.com
+          b cp candidate/unisacc.com.build.json unisacc.com.build.json
+          b chmod +x unisacc.com candidate/unisacc.com
+          test "$(b sh ./unisacc.com --version)" = "unisacc $version"
 
       - name: suites (macOS)
         env:
