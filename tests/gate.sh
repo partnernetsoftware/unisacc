@@ -244,7 +244,8 @@ for k in $(seq 1 40); do job csmithdiff-$k env -u MODEL_COM SEEDS=1-500 SHARD=$k
 # regressions found after 0.0.16's local queue was green came from here
 # (ccrun8: a Python-route bit-field value; opt-run1: c-testsuite 00204).
 CCRUNP=$(ls examples/*.c tests/c/*.c | grep -v '/b_malloc\.c$')
-for k in 1 2 3 4 5 6 7 8; do job ccrun-$k CCRUN_SHARD=1 ./tests/ccrun.sh $(echo "$CCRUNP" | awk -v k=$k 'NR%8==k%8'); done
+for k in 1 2 3 4 5 6 7 8; do job ccrun-$k CCRUN_SHARD=1 ./tests/ccrun.sh $(echo "$CCRUNP" | awk -v k=$k 'NR%8==k%8 && (k!=8 || $0!="tests/c/stream_buf.c")'); done
+job ccrun-stream-buf CCRUN_SHARD=1 ./tests/ccrun.sh tests/c/stream_buf.c
 job ccrun-malloc CCRUN_SHARD=1 ./tests/ccrun.sh tests/c/b_malloc.c
 for k in 1 2 3 4 5 6 7 8; do job opt-run-$k OPT_PART=run SHARD=$k/8 ./tests/opt.sh; done
 # The fixture directory suite (tests/fb12/, driver tests/fb12multi.sh) lives in
@@ -391,7 +392,11 @@ E4_C4_N=$(printf '%s\n' "$E4_C4" | wc -l)
 E4_C4_MID=$(( (E4_C4_N + 1) / 2 ))
 job exec-e4-4a  env E4STRICT=1 ./exec/opt/check.sh $(printf '%s\n' "$E4_C4" | awk -v n="$E4_C4_MID" 'NR<=n')
 job exec-e4-4b  env E4STRICT=1 ./exec/opt/check.sh $(printf '%s\n' "$E4_C4" | awk -v n="$E4_C4_MID" 'NR>n')
-job exec-e4-3   env E4STRICT=1 ./exec/opt/check.sh tests/c/[!ab]*.c
+E4_C3=$(printf '%s\n' tests/c/[!ab]*.c)
+E4_C3_N=$(printf '%s\n' "$E4_C3" | wc -l)
+E4_C3_MID=$(( (E4_C3_N + 1) / 2 ))
+job exec-e4-3a  env E4STRICT=1 ./exec/opt/check.sh $(printf '%s\n' "$E4_C3" | awk -v n="$E4_C3_MID" 'NR<=n')
+job exec-e4-3b  env E4STRICT=1 ./exec/opt/check.sh $(printf '%s\n' "$E4_C3" | awk -v n="$E4_C3_MID" 'NR>n')
 job exec-e4self env E4STRICT=1 ./exec/opt/check.sh unisacc.c                    # the compiler's own 3.9 MB tape
 job exec-prune-0 env PRUNE_PART=0 PRUNE_UA="$UA" tests/bound 58 sh ./tests/cxbin exec/prune/check.cx   # (.cx port, 2026-10-23)
 job exec-prune-1 env PRUNE_PART=1 PRUNE_UA="$UA" tests/bound 58 sh ./tests/cxbin exec/prune/check.cx
