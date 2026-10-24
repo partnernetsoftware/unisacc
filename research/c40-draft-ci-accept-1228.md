@@ -11,7 +11,7 @@
 - `archive/plans/v0.0.40.md`、`archive/plans/v0.0.39.md`（脚注）
 - `release/RELEASE-PIPELINE.md`、`release/README.md`
 - `AGENTS.md`
-- `research/c40-freeze-receipt.md`、`research/c40-darwin-cc1-toolchain.md`、`research/c40-first-observe/ruling-first-observe-close-ingest-1159.md`、`research/c39-carry-settlement-proposal.md`、`research/c40-gqalive-python-app-case.md`
+- `research/c40-freeze-receipt.md`、`research/c40-darwin-cc1-toolchain.md`、`research/c40-first-observe/ruling-first-observe-close-ingest-1159.md`、`archive/research/c39-carry-settlement-proposal.md`、`research/c40-gqalive-python-app-case.md`
 - `tests/gatedeps.json`（仅 AGENTS.md guards 哈希）
 
 ## 仓外
