@@ -381,7 +381,7 @@ def main():
             except ProcessLookupError:
                 pass
     except CleanupTimeout as error:
-        sys.stderr.write('bound: '+str(error)+' (not green)\n')
+        sys.stderr.write('bound: cleanup after normal exit unfinished: '+str(error)+' (not green)\n')
         return 142
     mark('normal exit: cleanup scan end')
     if time.monotonic() >= deadline:
