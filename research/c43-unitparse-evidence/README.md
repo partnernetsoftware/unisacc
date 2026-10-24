@@ -1,11 +1,14 @@
-# unitparse native consumer: actual candidate evidence
+# Unit-mode原生消费者摘要
 
-Scratch isolation actual candidate results: three original fresh constructors each bound55 rc0; native consumer in original bound40 rc0, five unit cases compare reference/simulator/native byte-for-byte, whole fib retains only the original simulator/reference comparison. Original Python consumer also rc0 in bound40. Full-domain network check and23 raw tapes/tokens plus status/length/SHA table accompany this proof. No whole native comparison is claimed.
+实际同源scratch：三份原构造各bound55成功；原生consumer在原bound40成功，五个unit案例reference/simulator/native逐字节相同。whole fib仍只比simulator/reference，未声称whole native。candidate-raw/tapes.tsv保留23份输出的长度、状态和SHA，重复原始tapes/tokens二进制副本已外置。
 
-Reference trailing-byte mutation actual consumer1 with simulator/reference mismatch; restored baseline0. Corrupt Net actual inner2 and consumer1; the first runner expected the wrong inner1 and stopped, its original red is retained; corrected v2 requires exact2 and restored baseline0. Independent original tbl/net/pack CLIs all0, package bytecmp0; large package retained out with exact SHA/size receipt. Historical replay scripts containing old interpreter calls remain out-only, no new tracked interpreter executable.
+参考尾字节变异使consumer拒绝，恢复后通过；损坏net被原校验拒绝。原Python消费者独立原预算通过；源码、identity、索引专项和完整新树F4不是同一份通过证据。
 
-Landed source only updates stale candidate header text; its compile key changes and final index must independently prepare the exact three original fresh commands and compile the native consumer. Candidate logs are not substituted for index gates or fresh full F3/F4. Old script SHA d8a91979bde810a03245e5901e44fb482f2f7b2de90d48ba104e2e2a2dcec442 is physically retained unchanged at scratch out/retired-source/unitparse-20261024-land/unitparsecheck.py and Git history; no purge or suffix trick. Existing generator calls remain transitional, no claim that the complete chain is interpreter-free.
+原始逐过程材料保留在公开Git提交 `033a45f9467bc8b3331b51a59443c80cf4a7ab38` 的同路径，可独立恢复，不依赖私人备份：
 
-Final index independently prepared the three original fresh commands in separate bound55 windows, each actual0; source and artifact hashes retained. Product -cx-plan actually enumerated six units, each declared with its real full-file SHA guard. The native consumer invalid-argument compile probe returned expected1 solely for compilation, not a test PASS. Final named gate and full F3/F4 are separately adjudicated.
+```sh
+EVIDENCE=$(mktemp -d)
+git archive 033a45f9467bc8b3331b51a59443c80cf4a7ab38 -- research/c43-unitparse-evidence | tar -x -C "$EVIDENCE"
+```
 
-Final index independently prepared the three original fresh commands in separate bound55 windows, each actual0; source and artifact hashes retained. Product -cx-plan actually enumerated six units, each declared with its real full-file SHA guard. The native consumer invalid-argument compile probe returned expected1 solely for compilation, not a test PASS. First six named gates had five green, including the actual16s native consumer, and one HANDOFF G5 documentation finding. Only the duplicated interpreter example in the document was removed; the wrapper, native code and constructor inputs stayed unchanged. Three current fresh requests were repeated and their real statuses retained in index-v2; cache hits remain preparation, not consumer PASS. Final named gates and full F3/F4 are separately adjudicated.
+公开复核先使用仓内 `./tests/gate.sh --list` 找到本摘要对应具名闸，并按release/RELEASE-PIPELINE.md的独立scratch/现行预算执行；原始操作配方可从上面的公开历史文件恢复。

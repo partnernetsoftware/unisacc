@@ -1,9 +1,14 @@
-# exec-chain 默认输入预建：实际证据
+# Exec-chain有界准备摘要
 
-2026-10-24 在 scratch 隔离中实际执行，非设计报告。原根产品与核心源闭包不变。v6 冷构建和不同父看门狗下的 HIT 均 rc0，键 `5b013454d23198807d299386b92567b29a1f92e51ccd296ae0b744e7417b59d7`。11 个模型/工具输出与原构造配方逐字节 SAME；五个消费者各 68 equal、bad/lost 0，合计 340。每个消费者仍实际执行全部三个网络校验和原比较、known/revived/keep 断言。
+Linux同源scratch实际v6冷准备与HIT均成功，key5b013454d23198807d299386b92567b29a1f92e51ccd296ae0b744e7417b59d7。11材料与原构造相同；五消费者各68 equal、bad/lost0，共340，仍实际执行三个net校验和原known/revived/keep断言。
 
-控制：缓存内容损坏拒绝75，目标碰撞拒绝1，11 项复制与恢复校验0；原始小日志和 rc 随附。v5 的其他负控针对较早源码，未作为 v6 证明收录。新索引树改变路径/环境身份，须独立冷预建与索引门禁；本目录的候选日志不代替最终全量 F3/F4。
+保留原构造bytecmp和正负结果表。缓存仅输入，完整源/actor/tools/头readset/环境均绑定，动态deadline只排除字节key而继续执行。原候选v6与后来术语修正的索引身份有别，必须重采；原始日志/rc/manifest已外置。
 
-缓存只保存输入，不保存测试通过；完整源闭包、执行器、生成器、编译器身份、头文件读取集、真实环境和11输出均纳入身份/校验。`UNISACC_BOUND_DEADLINE_MONO` 为每次运行动态预算，排除键但继续传递并执行。非默认构造配置回到原入口。既有 Python 生成器未扩展，迁移期限为 0.0.43 优先、最迟 0.0.44；无新增 .py。
+原始逐过程材料保留在公开Git提交 `033a45f9467bc8b3331b51a59443c80cf4a7ab38` 的同路径，可独立恢复，不依赖私人备份：
 
-首次索引九项实跑：准备和五分片、零 Python、docs 均0，glossarycheck因新准备器五处旧术语红。落地源码随后仅将 `stages` 标识改 `nets`、`stage_environment` 身份键改 `construction_environment`；上述 v6 原始日志仍为修正前候选证据，不冒充修正后源码。修正后的索引需重新冷预建和实际九项验收。
+```sh
+EVIDENCE=$(mktemp -d)
+git archive 033a45f9467bc8b3331b51a59443c80cf4a7ab38 -- research/c43-exec-chain-evidence | tar -x -C "$EVIDENCE"
+```
+
+公开复核先使用仓内 `./tests/gate.sh --list` 找到本摘要对应具名闸，并按release/RELEASE-PIPELINE.md的独立scratch/现行预算执行；原始操作配方可从上面的公开历史文件恢复。

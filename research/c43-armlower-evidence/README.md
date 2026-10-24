@@ -1,7 +1,14 @@
-# c43 ARM lowering target checks
+# ARM lowering两目标摘要
 
-The original41-second complete job timed out after Linux checks and during Darwin checks. The fixed-SHA adapter preserves all original source bytes in five validated blocks. Linux uses A+B+C+D; Darwin A+C+E. Both original41-second inclusive cxbin invocations passed, including complete fixture/immediate/regname and hello/fib comparisons plus125010 buffered mov rows and more than1000000 ARG slots. These are cross-target lowering checks on the recorded Linux host, not native Darwin execution evidence.
+原41秒job在Linux完成后、Darwin处理中超时。固定原SHA的A..E adapter保留全部源码：Linux=A+B+C+D，Darwin=A+C+E；两个完整target各在原41秒内通过。fixture/immediate/regnames/hello/fib、125010 buffered mov和超过1000000 ARG槽断言保持。此为Linux宿主跨目标lowering，不是Darwin原生执行。
 
-Unknown target, changed source SHA, NUL and missing source each refused with status1 before shell execution; original SHA restored. Captured scratch observers end in .txt and are not repository execution paths. Any .b64 file decodes to exact raw output including significant trailing spaces; encodings.json records its raw SHA256.
+保留源码覆盖/身份、完整计划对比和未知target/源SHA/NUL/缺文件拒绝短收据。过程trace/运输b64/临时observer/status已外置。exec-e4self按现行TIMEOUT/H1为RULED_BASELINE；其原执行器独立55诊断48.48秒完整相等，不替代正式41红，也不引入本版产品性能重构。
 
-The historical partial classification summary is explicitly incomplete. It confirms exec-e4self's existing TIMEOUT/H1 RULED_BASELINE; no new ruling or PASS was created. Its separate unchanged evaluator55 diagnostic completed in48.48 seconds and matched all5227535 reference bytes. This does not replace the original41-second failure. Product performance proposals remain private future work. Final current-tree full acceptance remains required.
+原始逐过程材料保留在公开Git提交 `033a45f9467bc8b3331b51a59443c80cf4a7ab38` 的同路径，可独立恢复，不依赖私人备份：
+
+```sh
+EVIDENCE=$(mktemp -d)
+git archive 033a45f9467bc8b3331b51a59443c80cf4a7ab38 -- research/c43-armlower-evidence | tar -x -C "$EVIDENCE"
+```
+
+公开复核先使用仓内 `./tests/gate.sh --list` 找到本摘要对应具名闸，并按release/RELEASE-PIPELINE.md的独立scratch/现行预算执行；原始操作配方可从上面的公开历史文件恢复。

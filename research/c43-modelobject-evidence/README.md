@@ -1,11 +1,14 @@
-# Model-object native consumer: actual candidate evidence
+# 模型对象原生验证摘要
 
-Scratch isolation actual results: eight cold preparation parts rc0 and one common identity; hot bound40 consumer rc0 executes six full-domain network/table checks and 22 byte-exact ELF comparisons (two architectures, unit/whole). The first bound40 rc142 remains recorded and is not waived. The compile-only invalid-argument probe is not a test PASS.
+保留最终current-parts、objects和original-21-bytecmp短表：八份有界准备、21个实际产物与原构造逐字节相等。whole.pkg SHA256为ab04343d9c29521937a77862fc2dd325e475bbfced7efb09236133f487c7185c，unit.pkg为1547593aa4c8a5d4a221334fd5852d0c8bc169ac59dcce15babc455e8c49bb86。
 
-Independent original constructors in three bounded chunks rc0; 21 outputs SAME, and two native packages byte-identical to original Python pack cache=False. Raw six network logs and22 object hashes accompany the small receipts; no large model/cache/package bytes or corrupt fixtures copied. Negative controls cover malformed content/raw-log/provenance/executable mode, environment/actor/header mutation, destination collision, expired deadline and missing final part; refused as recorded and restored controls actual0.
+原生消费者、头readset/工具/environment身份和缺失/损坏/路径负控仍由tests/modelobjectprepared.cx与相应闸执行；准备HIT不是测试PASS。多代索引日志、rc、临时runner与重复manifest已外置，不能将旧身份结果用于新树。
 
-The producer updates stale DRAFT header comments relative to the candidate. The consumer additionally checks chdir(ROOT) and uses the same relative prepared source as the prepare jobs, correcting the independently observed relative/absolute duplicate compile keys. That changes actor identity: candidate receipts are historical candidate evidence, never substituted for final index preparation and gate receipts. Existing Python generators remain transitional; only this runtime consumer is ported. Original script SHA256 79106046c438aff4be01689469df54d9837454fb2a6186d955b379ab3b3fc119 remains unchanged under scratch out/retired-source/modelobject-20261024-land/modelobjectcheck.py and Git history; no physical purge, suffix change or scanner exception. No claim of final full F3/F4 acceptance from these focused runs.
+原始逐过程材料保留在公开Git提交 `033a45f9467bc8b3331b51a59443c80cf4a7ab38` 的同路径，可独立恢复，不依赖私人备份：
 
-Final index preparation was independently repeated under UNISA_JOBS=2: all eight bound55 parts rc0, common identity equal across eight manifests, and all21 actual files byte-identical to the independent original-v2 outputs. The invalid-argument compile probe returned1 as expected and is only a cache warmup, not a test PASS. Index receipts under index/; final named gates are separately recorded by commitgate.
+```sh
+EVIDENCE=$(mktemp -d)
+git archive 033a45f9467bc8b3331b51a59443c80cf4a7ab38 -- research/c43-modelobject-evidence | tar -x -C "$EVIDENCE"
+```
 
-Final index preparation was independently repeated under UNISA_JOBS=2: all eight bound55 parts rc0, common identity equal across eight manifests, and all21 actual files byte-identical to the independent original-v2 outputs. The invalid-argument compile probe returned1 as expected and is only a cache warmup, not a test PASS. Final corrected-source receipts under index-v2/; earlier index/ receipts are historical before the first14 consumer command timeout. The first14 result was13 green and one consumer command timeout; a later warm direct run alone was not accepted as the fix. Full named gates are separately recorded by commitgate.
+公开复核先使用仓内 `./tests/gate.sh --list` 找到本摘要对应具名闸，并按release/RELEASE-PIPELINE.md的独立scratch/现行预算执行；原始操作配方可从上面的公开历史文件恢复。

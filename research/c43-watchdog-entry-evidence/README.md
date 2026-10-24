@@ -1,9 +1,14 @@
-# 监督清理与准备入口：实际证据
+# 监督清理与准备入口摘要
 
-2026-10-24 scratch 空home/tmp命名空间隔离实际执行。modelobject命令仍为bound30；外sp_spawn仅32.25，覆盖原bound既有N+2清理与0.25余量，不增加命令或整套件预算。通用bound/seedprep未改。
+Linux x86_64隔离实测：原modelobject内部bound30，外原生监督32.25覆盖既有清理余量；父/setsid孙进程忽略TERM负控均被回收，实际30.081099秒。未放宽原命令或套件预算，未改变通用bound/seedprep。
 
-负控从实际tests/modelobjectcheck.cx精确复制cmd函数（SHA随附）运行真实30秒：父进程与setsid孙进程均忽略TERM并pause；内bound返回142，原cmd按设计抛出非0，外部原生C检查器waitpid回收probe并确认两个挂起PID均ESRCH。真实监督耗时30.081099秒，小于32.25；result/command/cleanup.trace原字节收录。replay.sh仅调用仓内产品与C编译器；只在scratch隔离运行，保留新out材料，不删除。
+本树模型对象八份独立bound55准备通过，21实际输出与原配方全SAME，保留对应bytecmp短表；chain独立冷准备11输出相等。原五分片/模型消费者仍需具名闸实跑，不能将准备收据当PASS。过程trace、runner、日志/status已外置。
 
-exec-chain准备源与job统一相对入口，其脚本已先cd R；绝对wrapper和全部路径/实际源SHA缓存身份不变。旧cxbin修复前340比较不冒充本树证明；本树需要独立index预建与全部五分片真实通过。模型对象同样需要本树八份独立有界准备、21输出与原配方字节比较及新具名闸。所有新收据区分准备命中与测试结果，不缓存PASS，不改裁定。
+原始逐过程材料保留在公开Git提交 `033a45f9467bc8b3331b51a59443c80cf4a7ab38` 的同路径，可独立恢复，不依赖私人备份：
 
-本树index的modelobject八份各独立bound55实际0，共同身份6839106e42b528c3dd5ecdcebfb16acca751513f376a26b2a2eb54174121d762一致；21实际文件与原配方全SAME。消费者无效参数预编译预期1，仅工具预编译。chain独立bound55冷准备实际0，11输出与原配方全SAME。随后冻结同一index，两批具名闸（chain六项、model十四项加chain准备）均须实际通过；此处准备结果不记作测试PASS。真实执行平台Linux x86_64，未声称Darwin/Windows负控证明。
+```sh
+EVIDENCE=$(mktemp -d)
+git archive 033a45f9467bc8b3331b51a59443c80cf4a7ab38 -- research/c43-watchdog-entry-evidence | tar -x -C "$EVIDENCE"
+```
+
+公开复核先使用仓内 `./tests/gate.sh --list` 找到本摘要对应具名闸，并按release/RELEASE-PIPELINE.md的独立scratch/现行预算执行；原始操作配方可从上面的公开历史文件恢复。

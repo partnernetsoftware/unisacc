@@ -1,21 +1,16 @@
-# c43 independent preparation recovery
+# F4有界准备和完整消费者摘要
 
-Original formal F4 failures remain preserved in the private frozen queue. These receipts prove only the bounded recovery commands and their real consumers, not complete F4 or resource admission. The old CPython trace remains incomplete. Reference PyPy is an independent experiment, not a product dependency.
+原冻结F4源62aa49e5a37501368b6bb0741393dc9561626cf6，产品SHA256为4f0b493c7a83d73a4ae1b348c8400ea3b7eda0ea190051b54a84c712a6730eda。旧失败保留在原始记录中，不以这些专项结果声明完整F4或内存准入通过。
 
-Frozen F4 source 62aa49e5a37501368b6bb0741393dc9561626cf6; candidate SHA256 4f0b493c7a83d73a4ae1b348c8400ea3b7eda0ea190051b54a84c712a6730eda. Original environment wrappers, raw failed preparation attempts and all large models remain in the private evidence directories; this directory includes bounded commands, exact argv, parity hashes and statuses. Warn parity checked fresh JSON/table/network on both implementations before publication via the existing compilerpack CLI. Consumer rows are actual executions, not preparation-only cache checks.
+实际结果：E4原77源按39/38、另63源按32/31保持有序全集与严格断言，均在原41秒通过。E5正例30、拒绝16、两组运输各3、real/FP两子检查均在原41秒通过；完整FP实执行550例bad0。Decimal原生消费者保留166断言；原Python参考独立观察所得166个rc/stdout/stderr逐项相同，材料SHA与cache拒绝负例见保留结构收据。冷tools/harness各55秒、真实consumer41秒，不把prepare成功冒充consumer通过。
 
-E4 candidate splits only the original ordered77 sources into39+38 with original strictness and41-second bound, no missing/duplicate probes. Both actual runs passed. This does not install the candidate change or waive the original timeout.
+Warn模型JSON/table/net的C与未改参考字节相等，消费者argv/结果与材料SHA保留。PyPy只是独立参考实验，不能替代未完成的CPython45秒RSS协议。临时观察器、case bytes运输编码、逐命令日志和单字节status已外置，不再作为源码树中的过程材料。
 
-Decimal v2 candidate was compiled with the current candidate compiler; cold tools and harness each passed bound55, real consumer all166 passed bound41. The unchanged original Python checker was executed through a scratch-only delegating subprocess observer; all166 rc/stdout/stderr rows match exactly, as do constructive model/oracle artifacts. Four cache refusal negatives returned75 and restored the original artifact SHA. This directory retains tested-source SHA: landing source comment cleanup requires a fresh identity/preparation and verification. No old timeout is relabeled, and no full F4 success is asserted. Scratch observer scripts are evidence only, not repository execution dependencies.
+原始逐过程材料保留在公开Git提交 `033a45f9467bc8b3331b51a59443c80cf4a7ab38` 的同路径，可独立恢复，不依赖私人备份：
 
-Captured scratch scripts use .txt suffix and non-executable mode: they document observers/commands only and add no repository Python execution path.
+```sh
+EVIDENCE=$(mktemp -d)
+git archive 033a45f9467bc8b3331b51a59443c80cf4a7ab38 -- research/c43-f4-preparation-evidence | tar -x -C "$EVIDENCE"
+```
 
-The two exact raw case TSV witnesses are stored as base64 (.tsv.b64), preserving empty trailing stderr fields byte for byte. Decode before checking their original SHA256 in decimal-case-parity.sha256; both witnesses have166 rows and the same raw SHA256.
-
-The other original E4 source group63 timed out solo41 in window041. Its ordered32/31 split also passed both original41 runs (equal64/62, bad0); the original full-budget timeout is retained in the frozen queue.
-
-Final decimal source comment cleanup was followed by fresh compilation, tools/harness preparation55 and complete166 consumer41, all rc0. That pre-terminology source SHA256: 30dc2bea525aa29b3b5adac69ab53e10f3e9c81486eec801eeb9e8abc87196bc. This confirms the landing source under the original budgets; full current-tree F4 remains required.
-
-E5 source-routed v2 adapter preserves original complete shell blocks and fixed source SHA; only the six transport targets split in their original order3+3. Actual41-second inclusive cxbin runs all passed: positive30, negative16, transport3+3, real/FP2 successful sub-suites including550 FP execution cases. V1 unsplit transport41 timeout and original full F4 failure remain distinct. This routes original Python commands and is not a Python runtime removal. Four source/phase refusal negatives returned1 before shell execution: old phase, changed SHA, NUL and missing source; original SHA restored.
-
-Glossary G1 rejected six local identifier/temporary path names in the first index gate; no exception was added. A terminology-only rename was followed by fresh final source compilation, both55-second constructive phases and complete166 checks41, all rc0. Final exact source SHA256: d1ea2a819c9c2a1a3dc832c3a93f311cbe720d36eb6a6f861b8f50964036cffa. First rejection and detailed findings are retained.
+公开复核先使用仓内 `./tests/gate.sh --list` 找到本摘要对应具名闸，并按release/RELEASE-PIPELINE.md的独立scratch/现行预算执行；原始操作配方可从上面的公开历史文件恢复。

@@ -23,21 +23,14 @@ q() {   # q STATE_DIR [ENV...] -- one real queue.sh start; prints rc
     "$_BOUND" 50 "$R/release/tools/queue.sh" "$D" "$T/ua" "$S" > "$T/out" 2>&1; echo $?
 }
 launches() { [ -f "$T/launches" ] && wc -l < "$T/launches" | tr -d ' ' || echo 0; }
-snap() {   # every member (files, dirs, links) with its mode and bytes
-  python3 - "$1" <<'PY'
-import hashlib, os, sys
-r = sys.argv[1]
-if not os.path.lexists(r): print('absent'); sys.exit()
-for d, ds, fs in sorted(os.walk(r)):
-    for n in sorted(ds + fs):
-        p = os.path.join(d, n); st = os.lstat(p)
-        body = hashlib.sha256(open(p, 'rb').read()).hexdigest() if os.path.isfile(p) and not os.path.islink(p) else ''
-        print(os.path.relpath(p, r), oct(st.st_mode), body)
-PY
+snap() {   # every member (files, dirs, links) with its mode and bytes; native, read-only
+  sh "$R/unisacc.com" -run "$R/tests/queuesnapshot.cx" -- "$1"
 }
 # 1. fresh into a live state: refused at the entry, no window, state untouched
-Q=$T/q-live; mkdir -p "$Q"; printf '{"results":{"x":{"rc":0}}}\n' > "$Q/results.json"; before=$(snap "$Q")
-rc=$(q "$Q"); [ "$rc" = 2 ] && [ "$(launches)" = 0 ] && [ "$(snap "$Q")" = "$before" ] || fail "fresh into a live state: rc=$rc launches=$(launches) $(cat "$T/out")"
+Q=$T/q-live; mkdir -p "$Q"; printf '{"results":{"x":{"rc":0}}}\n' > "$Q/results.json"; before=$(snap "$Q") || fail "snapshot before queue launch failed"
+rc=$(q "$Q")
+after=$(snap "$Q") || fail "snapshot after queue launch failed"
+[ "$rc" = 2 ] && [ "$(launches)" = 0 ] && [ "$after" = "$before" ] || fail "fresh into a live state: rc=$rc launches=$(launches) $(cat "$T/out")"
 grep -q 'REFUSED (fresh start)' "$T/out" || fail "fresh refusal not reported: $(cat "$T/out")"
 # 2. resume from a backup for another artifact: refused, no window, Q not created, refusal logged
 printf '{"artifact_sha256":"%064d"}\n' 0 > "$B/unisacc-next.com.build.json"

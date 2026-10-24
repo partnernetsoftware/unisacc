@@ -1,7 +1,14 @@
-# cxbin 模块正文缓存身份：实际证据
+# Cxbin模块正文身份摘要
 
-2026-10-24 scratch 隔离实跑。旧键漏掉直接/传递 use 模块源正文。新实现使用原产品 `-cx-plan`，逐编译单元读取真实源文件完整 SHA256，并绑定路径；无模块普通源仍有效。计划、文件缺失和哈希失败显式拒绝，不把读取命令放进可掩盖失败的管道。系统 cc 构建删除守卫仍不依赖产品或模块计划。
+实际空格路径负控：direct-first/hit1，仅直接正文改动2；transitive-first3，叶正文改动4、hit4；missing-module2。状态为测试程序有意返回，runner成功；保留完整短结果表。
 
-空格路径下实际反例序列：direct-first=1、direct-hit=1、仅直接正文改动=2；传递首次=3、仅叶子正文改动=4、transitive-hit=4；missing-module=2。每次正文改动均增加新缓存二进制；两个 HIT 均完全相同的缓存文件集合。所有子执行分别 bound55，完整 runner 和 rc 表随附。此处数字是程序有意返回的状态，不是套件失败；runner 自身 rc0。bootstrap 与普通无模块源结果另附。
+测试代码现行实现以-cx-plan和每个源单元完整SHA绑定模块正文，缺计划/缺文件/哈希失败明确拒绝。原probe源、bootstrap日志和重复manifest已外置；非本轮正式全量F4证明。
 
-未修改产品核心、ROOT接口、限时、扫描规则或白名单；未新增 .py。索引回归与完整 F3/F4 分开采证。
+原始逐过程材料保留在公开Git提交 `033a45f9467bc8b3331b51a59443c80cf4a7ab38` 的同路径，可独立恢复，不依赖私人备份：
+
+```sh
+EVIDENCE=$(mktemp -d)
+git archive 033a45f9467bc8b3331b51a59443c80cf4a7ab38 -- research/c43-cxbin-closure-evidence | tar -x -C "$EVIDENCE"
+```
+
+公开重放可在恢复目录中阅读并运行原cxbin-module-probe.sh；它调用仓内产品和实际模块变异，不需要另造观察器。原probe只在独立scratch中运行。
