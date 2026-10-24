@@ -157,7 +157,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 └─ 待完成：Draft资产核对 → Latest／公开 → 下载SHA与运行复核
 ```
 
-**下一动作：2477已在147窗首红终止；固定b09／原env-pin，先解决winlower缓存锁，再按同源定点恢复受影响项，不导入主树发布工具改动。** 147窗三消费者rc75 busy/stale writer lock、两依赖BLOCKED，原state与日志保留；已分派独立只读定位与候选补丁，不把锁错误归因于NN推理，也不未经核验删除锁。 131原warnprep-1 solo40.13秒超时及state已完整留档，按当前closure新key以已验证C工具准备两种不同模型，六材料SHA与旧独立参考完全相同；正式M7原warnprep-1／2在132窗各0.552秒rc0，未削断言／加时，也不把CPython冷构造或RSS改判通过。此前124五叶准备竞态原证据保留，主树五条依赖边已修e838a5efab；其余exec-chain分片须继续实际执行，不借首叶通过补绿。Mac两架构构造／默认-run／三处自建xattr及字节回放已全部通过（窄收据见release/evidence/c43-apple-bundle-ci.json）。完整M7／处置、生产准入、正式签名与公开仍未完成。
+**下一动作：2477已在147窗首红终止；固定b09／原env-pin，先解决winlower缓存锁，再按同源定点恢复受影响项，不导入主树发布工具改动。** 147窗三消费者rc75 busy/stale writer lock、两依赖BLOCKED；已定位144尾窗超时遗留空目录锁，当前无活跃队列／消费者。原锁按同inode保留为lock.archived-window144-147；五prepare在原F4／RELEASE_BOUND=1重核原a72c键均rc0且complete seal verified，原证据完整存out/m7-winlower-lock-recovery-147。只定点重排三75与两BLOCKED，不记PASS。主树以共享／独占flock替代mkdir持锁，默认-run的12项微测及独立exec继承／退出释放检查通过；工具仅桥接flock宿主errno，Mac分支未实跑，正式冻结源保持不变。 131原warnprep-1 solo40.13秒超时及state已完整留档，按当前closure新key以已验证C工具准备两种不同模型，六材料SHA与旧独立参考完全相同；正式M7原warnprep-1／2在132窗各0.552秒rc0，未削断言／加时，也不把CPython冷构造或RSS改判通过。此前124五叶准备竞态原证据保留，主树五条依赖边已修e838a5efab；其余exec-chain分片须继续实际执行，不借首叶通过补绿。Mac两架构构造／默认-run／三处自建xattr及字节回放已全部通过（窄收据见release/evidence/c43-apple-bundle-ci.json）。完整M7／处置、生产准入、正式签名与公开仍未完成。
 
 <a id="memory-palace"></a>
 ### 记忆宫殿
