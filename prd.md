@@ -151,7 +151,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 │  ├─ 冻结源码：117e374653b036671b20f7b0d527cb73ee532baf
 │  ├─ PE 两旧项分成四阶段；原41秒实跑均通过，其余1136项 argv 不变
 │  ├─ fresh 起跑；旧302项结果不迁绿，准备结果不算验收PASS
-│  ├─ 当前环境修复：工具语料Git元数据遗漏，准备在窗口边界恢复固定仓库身份
+│  ├─ 已修复语料Git元数据遗漏；四仓隔离环境身份、1885项内容与模式前后均已核验
 │  └─ 完成判据：清单完整、PENDING=0、NEEDS_RULING=0、product_red=0、处置齐全
 ├─ 待完成：据终态结果收口发布说明 → 候选封存 → RC
 ├─ 待完成：匹配候选的六平台 CI、Windows 原生与 Darwin 证据
@@ -160,7 +160,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 └─ 待完成：Draft资产核对 → Latest／公开 → 下载SHA与运行复核
 ```
 
-**下一动作：在当前窗口边界停下，补齐工具语料仓库遗漏的Git元数据，核验固定身份及1885份内容后恢复正式验收。** 本轮tools失败已定位为准备遗漏，原失败与日志保留，不改写结果或新增豁免；已有16项同输入模型准备保留并由fresh入口复核。 旧分类红、短预算DEFER及已实现功能不重新立研究题；新的必要修复才改变调度。当前不再为通用优化、归档或新模板中断主线。F3历史基线、阶段独立实跑及缓存准备不替代完整F4。
+**下一动作：完成修复后的fresh启动并持续执行完整验收，非零项先按现有分类和裁定处理。** 修复前142项原记录完整保留在`out/f4-fixture-incident`，不迁新绿；16项同输入模型准备保留，fresh入口复核输入。语料复制必须包含所需的嵌套Git元数据，旧准备脚本的遗漏不能再次沿用。 旧分类红、短预算DEFER及已实现功能不重新立研究题；新的必要修复才改变调度。当前不再为通用优化、归档或新模板中断主线。F3历史基线、阶段独立实跑及缓存准备不替代完整F4。
 
 <a id="memory-palace"></a>
 ### 记忆宫殿
@@ -170,7 +170,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 | 入口厅：目标 | 公开发布0.0.43；当前节点F4/M7，不是重做F1。 | 上方思维树；[范围](plans/v0.0.43.md)、[终点线](plans/v0.0.43-finish-line.md)。旧未授描述不覆盖当前明确目标授权。 |
 | 工具间：能力 | 默认-run、tape→image、六目标、`.cx`模块已实现；经典UA与模型产品是不同实现。 | [能力速查](#implemented-usage)、[README](README.md)、已有用例。只验证具体输入的证据缺口，不重新研究入口是否存在。 |
 | 身份室：候选 | H0=`4f0b493c7a83d73a4ae1b348c8400ea3b7eda0ea190051b54a84c712a6730eda`；S=`c4618639cc3fcfac4f8ce52a11df3bdab93b2c9376eecee63fd70e6550adc57f`；用候选7298侧车。 | [F6证据](research/c43-f6-final-evidence/)。按源码摘要、产物及侧车SHA核对，mtime不单独决定新鲜度；不为刷新mtime重复构建。 |
-| 控制室：现场 | 本轮根`/tmp/unisacc-c43-pe-accept-20261024`；状态`out/f4-final-state`，窗口`out/f4-final-run`，驱动日志`out/f4-driver.log`；本线程会话35610。 | 每轮读取实际结果与存活进程／会话，核fresh收据和env pin；锁或旧日志不能证明存活。瞬时计数以现场为准。 |
+| 控制室：现场 | 本轮根`/tmp/unisacc-c43-pe-accept-20261024`；状态`out/f4-final-state`，窗口`out/f4-final-run`，驱动日志`out/f4-driver.log`；本线程会话91453；旧会话35610已按窗口边界返回76。 | 每轮读取实际结果与存活进程／会话，核fresh收据和env pin；锁或旧日志不能证明存活。瞬时计数以现场为准。 |
 | 出口室：分类 | RESOURCE_UNKNOWN保留OPEN义务；H1超时不算PASS；DEFER不等于终态失败。 | [资源处置](research/c43-resource-disposition.md)、[裁定](release/rulings.tsv)、[分类](release/preauth.tsv)及完整退出表。不补写结果或虚构平台绿。 |
 | 发布室：交付 | M7之后封存；候选CI、签名、最终字节和公开下载须真实收据。 | [发布流水线](release/RELEASE-PIPELINE.md)、[候选记录](release/candidate.json)；当前候选记录尚不是0.0.43封存证明。 |
 | 暂存室：边界 | 0.0.44登记.cx模块化／内存安全、自有工具链与测试改进；0.0.45登记流＋网模块外部调用及模块／权重共享；均不另作0.0.43前置。typed/callback迁移与广泛research归档保留后续范围。 | [0.0.44计划](plans/v0.0.44.md)、[0.0.45计划](plans/v0.0.45.md)、[路线](#5-路线)。新动态推进用`unisacc.com + .cx`，减少脚本，转调不算原生化。 |
