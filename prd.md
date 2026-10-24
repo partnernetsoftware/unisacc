@@ -147,7 +147,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 ├─ 已完成：F1 产品修复；F2 文档与探针收口
 ├─ 已完成：F3 历史 CONTRACT 基线（187项：186 PASS、1宿主未核）
 ├─ 已完成：新F6三实际SHA相同且官方固定点通过；stage3复用同身份模型包，五代码切片均由stage2实际重编，原50秒界通过
-├─ 正在执行：F4／M7 语料依赖、真实结证与启动修复已验证，收口新冻结 ← 当前节点
+├─ 正在执行：候选已封存并回读三件字节一致；提交候选记录，使CI与M7并行 ← 当前节点
 │  ├─ 产品来源d09bd1decb／S=c90f0002…不变；开发完整图1315节点／954依赖，Windows全部分片原预算通过
 │  ├─ 已实跑：七流独立工具链；native六叶；functionimports六准备＋20案例；callback12目标＋四片消费
 │  ├─ 已修复：typed/callsite完整材料命中及无关检查脚本触发失效；普通七流／native资源缓存拆层仍待做
@@ -155,17 +155,18 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 │  ├─ E4重封、Windows分片与元数据闸通过；截至023为32结证：21 PASS、5 RESOURCE_UNKNOWN、5 NEEDS_RULING、1 BLOCKED；1283待办
 │  ├─ 首红修复a936e98453的四默认-run节点已在正式M7全部rc0；tools／models均HIT，两个消费者重跑原断言
 │  ├─ 023后修复：四tools原33秒通过；最终退出／恢复／I/O异常回归原55秒通过；计划三模式逐字节相同，热计划0.824秒
+│  ├─ 窗口024已实证正式任务预算40秒（原33），首个bigclosure rc0；32旧结果指纹失效前已完整保存
 │  ├─ 后台E4性能研究仅私有设计／实验，不改当前候选、不作为0.0.43前置；前台不等待提速
 │  ├─ 旧1142轮已停窗；原失败与未执行项保留，准备仅计PREPARED，不迁旧PASS
 │  └─ 完成判据：最终模块清单完整、PENDING=0、NEEDS_RULING=0、product_red=0、处置齐全
-├─ 待完成：据终态结果收口发布说明 → 候选封存 → RC
+├─ 待完成：据终态结果收口发布说明 → RC
 ├─ 待完成：匹配候选的六平台 CI、Windows 原生与 Darwin 证据
 ├─ 待完成：Apple／Windows签名、公证及最终字节验证
 │  └─ 独立外部待答事项：minicon Apple 服务具体接入授权
 └─ 待完成：Draft资产核对 → Latest／公开 → 下载SHA与运行复核
 ```
 
-**下一动作：收口已验证的依赖／结证／启动修复及元数据，更新正式冻结并实跑长单元预算；随后完成M7、封存、CI、签名及公开。后台E4提速不作为前置。** 用户2026-10-25明确要求前台继续发布、后台慢慢改进。当前候选块摘要修复、八例对拍、大E4输入、hello／O2回归、三阶段实际SHA和官方固定点已通过；E4重封及Windows全部分片已收口，不为测试工具变化重建相同产品。J9缓存实验慢20.27%，不合入；后台下一方向是批量构造寄存器摘要，仅在私有副本研究。普通七流／native资源缓存拆层仍待做，非新增发布前置。NN、表参考、准备／校验分开计时；不新增解释器依赖、不放宽闸、不迁旧M7绿。未知闭包禁用结果缓存，RESOURCE_UNKNOWN保留OPEN，H1超时不算PASS。完整M7后仍须匹配候选的六平台CI、签名及公开下载验证；具体Apple接入仍待授权。历史过程留Git与原始证据，不再堆入当前上下文。
+**下一动作：提交并推送已回读验证的候选记录，使匹配六平台CI与最终冻结M7并行；随后完成签名及公开。后台E4提速不作为前置。** 用户2026-10-25明确要求前台继续发布、后台慢慢改进。当前候选块摘要修复、八例对拍、大E4输入、hello／O2回归、三阶段实际SHA和官方固定点已通过；E4重封及Windows全部分片已收口，不为测试工具变化重建相同产品。J9缓存实验慢20.27%，不合入；后台下一方向是批量构造寄存器摘要，仅在私有副本研究。普通七流／native资源缓存拆层仍待做，非新增发布前置。NN、表参考、准备／校验分开计时；不新增解释器依赖、不放宽闸、不迁旧M7绿。未知闭包禁用结果缓存，RESOURCE_UNKNOWN保留OPEN，H1超时不算PASS。完整M7后仍须匹配候选的六平台CI、签名及公开下载验证；具体Apple接入仍待授权。历史过程留Git与原始证据，不再堆入当前上下文。
 
 
 <a id="memory-palace"></a>
@@ -191,7 +192,8 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 | 工程室：本轮首红 | 原Python聚合55秒及首轮原生聚合33秒超时均保留。最终默认-run tools／models／import／package在原33秒界分别26.361／23.727／16.690／13.079秒rc0；八件（含dump/run）与原Python逐字节相同，消费者执行原断言。缺失／篡改工具均75，无隐式构造；独立静态审查未见新增阻断，四元数据闸最终均rc0。 | 单元冻结`/tmp/unisacc-c43-carrier-native-20261025/out/carrier-staged-*`，helper SHA=1d5901c7…87ae。工具五件SHA、三构造器cc-M系统头、精确recipe与完整basis绑定；模型持工具共享锁、起止核验，完整八件manifest才供消费者。新清单实导1315／950；`out/carrier-metadata-gates-v2.log`：零Python无增长、inventory无孤儿、派生字节相等、gate-layers通过。原生首轮与首次元数据失败原记录均保留。正式M7尚未完成；不迁旧PASS、不放宽限时。 |
 | 调度室：启动债 | 正式旧队列每窗导入gatequeue时，gatecanon-native无条件重编CPython适配模块，发生在t_begin之前；其耗时不进入prologue字段，却占父deadline。窗口010的prologue为8.324秒，子任务仅获33秒；预算差额还含收尾预留和取整，不能全称CPU耗时。 | `/tmp/unisacc-c43-m7-carrier-timeout-analysis.txt`、`tests/gatecanon-native`与`tests/gatequeue.py`。下一版继续原生队列事务迁移；若缓存适配器则绑定完整编译／链接工具、头文件、ABI及产物SHA，不以-x命中。不为此性能项中途改动正在验收的0.0.43冻结树。 |
 | 出口室：分类 | 窗口022的seedparse2-1实际rc2，独立旧分类器已确认为RESOURCE_UNKNOWN，未执行义务仍OPEN，不能当PASS或77。后续同组拒绝依原分类记录后继续；其他红须先核分类，未裁定产品红停窗。H1超时不算PASS。 | 冻结根`out/m7-exit-window022.json`及原log；[资源处置](research/c43-resource-disposition.md)、[裁定](release/rulings.tsv)、[分类](release/preauth.tsv)。完整退出表仍待最终全清单，不改准入常量或阈值。 |
-| 发布室：交付 | M7之后封存；候选CI、签名、最终字节和公开下载须真实收据。2026-10-25只读API核对：本仓release-signing环境仅三项Azure凭据名，未配置Apple凭据；minicon的macOS Court绑定自仓minicon-com成功run及其原生产物，不是可直接输入unisacc候选的通用接口。ORAS 1.3.5已下载并核对官方归档SHA f48a73ea…，本机version通过，未上传候选。 | [发布流水线](release/RELEASE-PIPELINE.md)、[候选记录](release/candidate.json)；工具在忽略目录`out/release-tools/oras-1.3.5/`。当前候选记录尚不是0.0.43封存证明。[已查服务接口](https://github.com/partnernetsoftware/minicon/blob/main/.github/workflows/macos-signing.yml)仍需具体适配与接入授权，不触发外仓签名或复制凭据。 |
+| 发布室：交付 | 0.0.43候选已实际推送并按不可变digest回读，三件与F6逐字节相同：manifest=`8c667e0632c2f1f5f70a38fa7d6539e20c7f5d19ce0554b797809c45f721cb01`；封存来源93f00869ee，产品S不变。完整M7、匹配CI、签名及公开仍待完成。 | [发布流水线](release/RELEASE-PIPELINE.md)、[候选记录](release/candidate.json)；原始push JSON、readback日志和三件在忽略目录`out/c43-seal-*93f*`。本仓仅Azure凭据名已知；Apple阶段.cx草案未在macOS执行、未部署，具体跨仓接入仍待授权。 |
+| 发布室：并行决定 | 按发布流水线§9（封候选→提交推送→本地队列）调整此前“全M7后才封存”的自定顺序。F6同源三SHA已完成且产品不变，先核验三件实际候选并封不可变GHCR；提交候选记录后一次推送使匹配CI与M7并行。此时M7仅新窗1项，提前绑定最终候选记录，避免结尾再改源／重开。 | 只准备候选，release_eligible仍false；M7、当前各类OPEN义务、匹配六原生CI、签名和最终字节／下载检查全部仍须完成。此决定不授予未获答的跨仓Apple服务部署／读包权限，也不触发公开Latest。 |
 | 暂存室：边界 | 0.0.44登记.cx模块化／内存安全、自有工具链与测试改进；0.0.45登记流＋网模块外部调用及模块／权重共享；均不另作0.0.43前置。typed/callback迁移与广泛research归档保留后续范围。 | [0.0.44计划](plans/v0.0.44.md)、[0.0.45计划](plans/v0.0.45.md)、[路线](#5-路线)。新动态推进用`unisacc.com + .cx`，减少脚本，转调不算原生化。 |
 
 **动态维护规则**：进度、身份、阻塞、决定或下一动作变化时，同步原位更新思维树节点及对应房间；只把当前事实留在这里。每次恢复先读两者，派发任务引用当前节点和确切缺口。原始过程与旧失败保留在证据或Git历史中，不冒充当前状态。

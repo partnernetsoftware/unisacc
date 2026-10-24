@@ -61,10 +61,10 @@ These fields must be filled from the final receipts before publication:
 
 | Field | Current status / required receipt |
 |---|---|
-| Candidate SHA256, source digest and paired sidecar | F6 identity and provenance checks passed for the values above; registry sealing and release acceptance remain pending |
+| Candidate SHA256, source digest and paired sidecar | F6 identity and provenance checks passed; all three GHCR members pulled by immutable digest and compared byte for byte. Release acceptance remains pending |
 | Seed / stage2 / stage3 fixed point | PASS: three actual artifacts have SHA256 `2974978e…`; official fixedpoint rc0. Immutable model data was reused; each stage's code slices were actually recompiled |
-| Complete M7 plan and local results | RUNNING at a936e98453: 1,315 nodes / 950 dependencies, environment pinned. PENDING final inventory/hash, PASS count, rc distribution and classified exit table; require PENDING=0, NEEDS_RULING=0, product_red=0 and all dispositions accounted for |
-| GHCR candidate digest / source commit / RC | PENDING 0.0.43 seal and `rc/v0.0.43`; `release/candidate.json` still names 0.0.42 |
+| Complete M7 plan and local results | 93f00869ee graph: 1,315 nodes / 954 dependencies; window024 proved 40-second job budget and one actual PASS. Candidate-record commit must be bound to the final freeze before continuing. PENDING final inventory/hash, PASS count, rc distribution and classified exit table; require PENDING=0, NEEDS_RULING=0, product_red=0 and all dispositions accounted for |
+| GHCR candidate digest / source commit / RC | SEALED: `sha256:8c667e0632c2f1f5f70a38fa7d6539e20c7f5d19ce0554b797809c45f721cb01`, sealed from `93f00869ee217e3d500569bc66c9d024a2249d76`, product source digest unchanged. Actual digest pull matched all three members; RC remains pending |
 | Six-platform candidate CI | PENDING matching `release-check` run id/attempt, actual candidate pull/execution on six native cells, matrix comparison and Windows suite; skipped candidate steps are not evidence |
 | Darwin acceptance | PENDING matching `darwin-gate` run and Darwin-only suite results |
 | Windows signing and Apple distribution | PENDING Windows qualification/company receipts, signed-byte SHA256, Apple signing/notarization/stapling and DMG assessment; specific cross-repository Apple-service access remains unresolved |
