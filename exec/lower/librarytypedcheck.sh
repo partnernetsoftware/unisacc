@@ -10,13 +10,38 @@ R=$(cd "$(dirname "$0")/../.." && pwd);cd "$R"
 B=$("$R/tests/bound" --helper)
 b(){ "$B" 55 "$@"; }
 UA=${MODEL_COM:-$R/unisacc.com}
-K=$({ rg --files exec seed unisa include weights | LC_ALL=C sort | rg '\.(tsv|py|c|h|sh|inc|json)$' | xargs sha256sum;sha256sum tests/librarytypedlowercheck.cx tests/librarytypedlower-cases.tsv "$UA";cc --version;python3 --version;uname -sm; } | sha256sum | cut -d' ' -f1)
+# Checker-only edits do not change materials. This owner and its baseline adapter do.
+K=$({ rg --files exec seed unisa include weights | LC_ALL=C sort | rg '\.(tsv|py|c|h|sh|inc|json)$' | rg -v '^exec/.*check\.(sh|py)$' | xargs sha256sum;sha256sum exec/lower/librarytypedcheck.sh tests/librarytypedlowercheck.cx "$UA";cc --version;python3 --version;uname -sm; } | sha256sum | cut -d' ' -f1)
 D=${TMPDIR:-/tmp}/unisacc-librarytypedlower-$K
 mkdir -p "$D"
-ready(){ [ -r "$D/$1/artifacts.sha256" ] && (cd "$D/$1" && sha256sum -c --status artifacts.sha256); }
+# Exact role manifests: an empty or partial checksum file is never ready.
+complete(){
+ (
+  model_dir=$1;role=$2
+  [ -d "$model_dir" ] && [ ! -L "$model_dir" ] || exit 1
+  case $role in
+   typed-tools) set -- gen runner abi-oracle run;;
+   callsite-tools) set -- gen run runner abi-oracle;;
+   typed-model) set -- off-c.json off.json base.json base.tbl base.net off.tbl off.net model-c.json model.json model.tbl model.net exhaustive.log;;
+   callsite-model) set -- model-c.json model.json model.tbl model.net base.json base.tbl base.net off-c.json off.json off.tbl off.net exhaustive.log;;
+   legacy) set -- base.json base.tbl base.net off-c.json off.json off.tbl off.net;;
+   *) exit 1;;
+  esac
+  seal=artifacts.sha256;[ "$role" != legacy ] || seal=legacy.sha256
+  [ -f "$model_dir/$seal" ] && [ ! -L "$model_dir/$seal" ] && [ -s "$model_dir/$seal" ] || exit 1
+  for model_file in "$@";do
+   [ -f "$model_dir/$model_file" ] && [ ! -L "$model_dir/$model_file" ] && [ -s "$model_dir/$model_file" ] || exit 1
+   case $role in *-tools) [ -x "$model_dir/$model_file" ] || exit 1;; esac
+  done
+  model_expected=$(cd "$model_dir" && sha256sum "$@") || exit 1
+  printf '%s\n' "$model_expected" | cmp -s "$model_dir/$seal" -
+ )
+}
+ready(){ case $1 in tools) complete "$D/$1" typed-tools;; *) complete "$D/$1" typed-model;; esac; }
 case ${1:-} in
  --cache-dir) printf '%s\n' "$D";exit 0;;
  --prepare-tools)
+  if ready tools;then echo 'typed lower: constructive HIT tools';exit 0;fi
   mkdir -p "$D/tools"
   b cc -std=c99 -O2 -Iseed seed/gen.c -o "$D/tools/gen"
   b cc -O2 -w exec/lower/librarytyped-observer.c -o "$D/tools/runner"
@@ -35,6 +60,17 @@ case ${1:-} in
    obj-win-x) set -- --full --object --win;;obj-win-a) set -- --full --object --win --arm64;;*) exit 2;;
   esac
   ready tools || { echo 'typed lower: NEED_PREPARE tools' >&2;exit 75; }
+  if ready "$name";then
+   T=$D/$name
+   echo "typed lower: constructive HIT $name"
+   b cmp "$T/off-c.json" "$T/off.json"
+   b cmp "$T/base.json" "$T/off.json"
+   b cmp "$T/model-c.json" "$T/model.json"
+   b cmp "$T/base.tbl" "$T/off.tbl";b cmp "$T/base.net" "$T/off.net"
+   b "$D/tools/run" --check-net "$T/model.tbl" "$T/model.net" >"$T/exhaustive.log"
+   (cd "$T" && sha256sum off-c.json off.json base.json base.tbl base.net off.tbl off.net model-c.json model.json model.tbl model.net exhaustive.log >artifacts.sha256)
+   exit 0
+  fi
   T=$(mktemp -d "${TMPDIR:-/tmp}/typedlower-prep.XXXXXX")
   trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge --max-files 10000 -- "$T"' EXIT HUP INT TERM   # T holds a copy of exec/ (~1700 entries)
   b "$D/tools/gen" lower/librarytyped-model "$T/off-c.json" "$@"

@@ -146,11 +146,11 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 0.0.43 公开发布
 ├─ 已完成：F1 产品修复；F2 文档与探针收口
 ├─ 已完成：F3 历史 CONTRACT 基线（187项：186 PASS、1宿主未核）
-├─ 已完成：F6 候选构建、三阶段 SHA 固定点
+├─ 已完成：旧F6候选构建、三阶段SHA固定点；E4规则改进后须重新构建封存
 ├─ 正在执行：F4／M7 测试调度重构与受影响单元验证 ← 当前节点
 │  ├─ 当前冻结2079b31e：1309节点／944依赖；Windows原生控制器已提交，仍待定点通过
 │  ├─ 已实跑：七流独立工具链；native六叶；functionimports六准备＋20案例；callback12目标＋四片消费
-│  ├─ 当前首红：win/x86_64聚合41秒超时；准备约9.55秒＋完整消费约34.4秒，正在分离
+│  ├─ 已定位：重复权重构造与E4重复SCAN；摘要模型同输入约30.5秒完成且与独立C字节相同，边界待验
 │  ├─ 并行：Windows原生准备控制／独立审查／self超时归因；父串行重测试，专职文档归档另行提交
 │  ├─ 旧1142轮已停窗；原失败与未执行项保留，准备仅计PREPARED，不迁旧PASS
 │  └─ 完成判据：最终模块清单完整、PENDING=0、NEEDS_RULING=0、product_red=0、处置齐全
@@ -161,7 +161,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 └─ 待完成：Draft资产核对 → Latest／公开 → 下载SHA与运行复核
 ```
 
-**下一动作：降低Windows原生控制器的大文件身份校验成本，再按原41秒预算验收准备／完整消费；原fullcheck全部断言与完整SHA校验保留。** 新 `.cx` 控制缓存、依赖和状态，旧独立对照留在原入口；不新增解释器依赖或绕过门禁。并行子任务分别负责实现、独立审查和 self 超时归因，父持有同机重测试令牌。已通过的模块及证据见下表；尚无通用同身份续跑，不能把模块选择称为完整结果缓存。未知闭包禁用缓存，RESOURCE_UNKNOWN 保留 OPEN，H1 超时不算 PASS。完整 M7 后仍须候选封存、匹配候选的六平台 CI、签名及公开下载验证。文档清理首批3份旧稿已独立提交；过时过程留在 Git 与原始证据，不再堆入当前上下文。
+**下一动作：修复重复权重构造，并将E4重复SCAN改为等价的块摘要复用。** 旧`.net`在固定8,446,684字节输入上触41秒上限；私有采样约9秒记录1.41亿网络决策／1.74亿动作，热点为重复SCAN。按经典C改出的块摘要模型已构造：同输入约30.5秒完成，5,227,535字节与独立C输出逐字节相同；尚待边界对拍和重新封装F6，不迁旧M7绿。不得以表参考超时推断纯NN速度。控制器-O2草案保存在仓外，暂停推进；NN、表参考、准备／校验各自记时与失败归属。 新 `.cx` 控制缓存、依赖和状态，旧独立对照留在原入口；不新增解释器依赖或绕过门禁。并行子任务分别负责实现、独立审查和 self 超时归因，父持有同机重测试令牌。已通过的模块及证据见下表；尚无通用同身份续跑，不能把模块选择称为完整结果缓存。未知闭包禁用缓存，RESOURCE_UNKNOWN 保留 OPEN，H1 超时不算 PASS。完整 M7 后仍须候选封存、匹配候选的六平台 CI、签名及公开下载验证。文档清理首批3份旧稿已独立提交；过时过程留在 Git 与原始证据，不再堆入当前上下文。
 
 
 <a id="memory-palace"></a>
@@ -172,7 +172,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 | 入口厅：目标 | 公开发布0.0.43；当前节点F4/M7，不是重做F1。 | 上方思维树；[范围](plans/v0.0.43.md)、[终点线](plans/v0.0.43-finish-line.md)。旧未授描述不覆盖当前明确目标授权。 |
 | 工具间：能力 | 默认-run、tape→image、六目标、`.cx`模块已实现；经典UA与模型产品是不同实现。 | [能力速查](#implemented-usage)、[README](README.md)、已有用例。只验证具体输入的证据缺口，不重新研究入口是否存在。 |
 | 身份室：候选 | H0=`4f0b493c7a83d73a4ae1b348c8400ea3b7eda0ea190051b54a84c712a6730eda`；S=`c4618639cc3fcfac4f8ce52a11df3bdab93b2c9376eecee63fd70e6550adc57f`；用候选7298侧车。 | [F6证据](research/c43-f6-final-evidence/)。按源码摘要、产物及侧车SHA核对，mtime不单独决定新鲜度；不为刷新mtime重复构建。 |
-| 控制室：现场 | 当前冻结`/tmp/unisacc-c43-winphase-accept-20261024` @2079b31e，计划SHA `d133abaf…`，1309节点／944边；工具准备34.334秒通过，JSON准备41秒rc142，下游BLOCKED，正在修完整身份摘要成本。700ece46冻结根`/tmp/unisacc-c43-suite-accept-20261024`保存此前结果：`out/callback-final-checks`：12次off严格检查、on检查、8种生产命中、完整消费1再次rc0；空on／截断off真实消费均拒绝75。`out/winlower-x86_64-run`保留41秒rc142；`out/winlower-x86_64-timing.*`为55秒诊断，不能迁成41秒PASS。Windows新拆分仍待验。 | 先读本轮results／summary和存活进程。ae9145四片callback通过范围见`/tmp/unisacc-c43-current-accept-20261024/out/current-callback-checks/scope.tsv`；native／functionimports原证据见旧冻结根`/tmp/unisacc-c43-pe-accept-20261024/out/{native-*-refactor-check,libraryimports-atomic-v4-run}`。旧1142轮停于083，日志及原失败不清空、不迁绿。 |
+| 控制室：现场 | 当前冻结`/tmp/unisacc-c43-winphase-accept-20261024` @2079b31e，计划SHA `d133abaf…`，1309节点／944边；原工具准备34.334秒／JSON41秒rc142保留；cb393新摘要分支下工具9.783秒、JSON15.265秒、表10.261秒均PREPARED，完整消费已输出25拒绝但整项仍41秒rc142。正在单独验证控制器-O2默认-run，完整身份与原预算保留。700ece46冻结根`/tmp/unisacc-c43-suite-accept-20261024`保存此前结果：`out/callback-final-checks`：12次off严格检查、on检查、8种生产命中、完整消费1再次rc0；空on／截断off真实消费均拒绝75。`out/winlower-x86_64-run`保留41秒rc142；`out/winlower-x86_64-timing.*`为55秒诊断，不能迁成41秒PASS。Windows新拆分仍待验。 | 先读本轮results／summary和存活进程。ae9145四片callback通过范围见`/tmp/unisacc-c43-current-accept-20261024/out/current-callback-checks/scope.tsv`；native／functionimports原证据见旧冻结根`/tmp/unisacc-c43-pe-accept-20261024/out/{native-*-refactor-check,libraryimports-atomic-v4-run}`。旧1142轮停于083，日志及原失败不清空、不迁绿。 |
 | 出口室：分类 | RESOURCE_UNKNOWN保留OPEN义务；H1超时不算PASS；DEFER不等于终态失败。 | [资源处置](research/c43-resource-disposition.md)、[裁定](release/rulings.tsv)、[分类](release/preauth.tsv)及完整退出表。不补写结果或虚构平台绿。 |
 | 发布室：交付 | M7之后封存；候选CI、签名、最终字节和公开下载须真实收据。 | [发布流水线](release/RELEASE-PIPELINE.md)、[候选记录](release/candidate.json)；当前候选记录尚不是0.0.43封存证明。 |
 | 暂存室：边界 | 0.0.44登记.cx模块化／内存安全、自有工具链与测试改进；0.0.45登记流＋网模块外部调用及模块／权重共享；均不另作0.0.43前置。typed/callback迁移与广泛research归档保留后续范围。 | [0.0.44计划](plans/v0.0.44.md)、[0.0.45计划](plans/v0.0.45.md)、[路线](#5-路线)。新动态推进用`unisacc.com + .cx`，减少脚本，转调不算原生化。 |

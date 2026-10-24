@@ -11,10 +11,34 @@ B=$("$R/tests/bound" --helper)
 b(){ "$B" 55 "$@"; }
 UA=${MODEL_COM:-$R/unisacc.com}
 BASE=$(sh exec/lower/librarytypedcheck.sh --cache-dir)
-K=$(sha256sum tests/librarycallsitelowercheck.cx tests/librarycallsitelower-cases.tsv | sha256sum | cut -d' ' -f1)
+# BASE binds model inputs and the typed owner; this constructive owner is separate.
+K=$(sha256sum exec/lower/librarycallsitecheck.sh | sha256sum | cut -d' ' -f1)
 D=$BASE/callsite-$K
 mkdir -p "$D"
-ready(){ [ -r "$D/$1/artifacts.sha256" ] && (cd "$D/$1" && sha256sum -c --status artifacts.sha256); }
+# Exact role manifests: an empty or partial checksum file is never ready.
+complete(){
+ (
+  model_dir=$1;role=$2
+  [ -d "$model_dir" ] && [ ! -L "$model_dir" ] || exit 1
+  case $role in
+   typed-tools) set -- gen runner abi-oracle run;;
+   callsite-tools) set -- gen run runner abi-oracle;;
+   typed-model) set -- off-c.json off.json base.json base.tbl base.net off.tbl off.net model-c.json model.json model.tbl model.net exhaustive.log;;
+   callsite-model) set -- model-c.json model.json model.tbl model.net base.json base.tbl base.net off-c.json off.json off.tbl off.net exhaustive.log;;
+   legacy) set -- base.json base.tbl base.net off-c.json off.json off.tbl off.net;;
+   *) exit 1;;
+  esac
+  seal=artifacts.sha256;[ "$role" != legacy ] || seal=legacy.sha256
+  [ -f "$model_dir/$seal" ] && [ ! -L "$model_dir/$seal" ] && [ -s "$model_dir/$seal" ] || exit 1
+  for model_file in "$@";do
+   [ -f "$model_dir/$model_file" ] && [ ! -L "$model_dir/$model_file" ] && [ -s "$model_dir/$model_file" ] || exit 1
+   case $role in *-tools) [ -x "$model_dir/$model_file" ] || exit 1;; esac
+  done
+  model_expected=$(cd "$model_dir" && sha256sum "$@") || exit 1
+  printf '%s\n' "$model_expected" | cmp -s "$model_dir/$seal" -
+ )
+}
+ready(){ case $1 in tools) complete "$D/$1" callsite-tools;; *) complete "$D/$1" callsite-model && complete "$D/$1" legacy;; esac; }
 flags(){
  case "$1" in
   lnx-x) FLAGS='--full';;lnx-a) FLAGS='--full --arm64';;
@@ -29,10 +53,11 @@ flags(){
 case ${1:-} in
  --cache-dir) printf '%s\n' "$D";exit 0;;
  --prepare-tools)
-  if ! { [ -r "$BASE/tools/artifacts.sha256" ] && (cd "$BASE/tools" && sha256sum -c --status artifacts.sha256); }; then
+  if ready tools;then echo 'callsite lower: constructive HIT tools';exit 0;fi
+  if ! complete "$BASE/tools" typed-tools;then
    b sh exec/lower/librarytypedcheck.sh --prepare-tools
   fi
-  (cd "$BASE/tools" && sha256sum -c --status artifacts.sha256)
+  complete "$BASE/tools" typed-tools
   mkdir -p "$D/tools";cp "$BASE/tools/gen" "$BASE/tools/run" "$D/tools/"
   b cc -O2 -w exec/lower/librarycallsite-observer.c -o "$D/tools/runner"
   b cc -O2 -w exec/lower/librarycallsite-oracle.c -lffi -o "$D/tools/abi-oracle"
@@ -44,12 +69,15 @@ case ${1:-} in
   step=$1;v=$2;flags "$v"
   ready tools || { echo 'callsite lower: NEED_PREPARE tools' >&2;exit 75; }
   mkdir -p "$D/$v"
+  case $step in --prepare-check) ;; *)
+   if ready "$v";then echo "callsite lower: constructive HIT $v";exit 0;fi;;
+  esac
   case $step in
    --prepare-legacy)
-    if ! { [ -r "$BASE/$v/artifacts.sha256" ] && (cd "$BASE/$v" && sha256sum -c --status artifacts.sha256); }; then
+    if ! complete "$BASE/$v" typed-model;then
      b sh exec/lower/librarytypedcheck.sh --prepare "$v"
     fi
-    (cd "$BASE/$v" && sha256sum -c --status artifacts.sha256)
+    complete "$BASE/$v" typed-model
     for name in base.json base.tbl base.net off-c.json off.json off.tbl off.net;do cp "$BASE/$v/$name" "$D/$v/$name";done
     (cd "$D/$v" && sha256sum base.json base.tbl base.net off-c.json off.json off.tbl off.net >legacy.sha256);;
    --prepare-on-c) b "$D/tools/gen" lower/librarycallsite-model "$D/$v/model-c.json" $FLAGS --librarytyped --librarycallsite;;
@@ -59,7 +87,7 @@ case ${1:-} in
    --prepare-tables) b python3 exec/c/tbl.py "$D/$v/model.json" "$D/$v/model.tbl";;
    --prepare-net) b python3 exec/c/net.py "$D/$v/model.tbl" "$D/$v/model.net";;
    --prepare-check)
-    (cd "$D/$v" && sha256sum -c --status legacy.sha256)
+    complete "$D/$v" legacy
     b "$D/tools/run" --check-net "$D/$v/model.tbl" "$D/$v/model.net" >"$D/$v/exhaustive.log"
     b cmp "$D/$v/model-c.json" "$D/$v/model.json"
     (cd "$D/$v" && sha256sum model-c.json model.json model.tbl model.net base.json base.tbl base.net off-c.json off.json off.tbl off.net exhaustive.log >artifacts.sha256);;
