@@ -709,3 +709,11 @@ source-only 冷准备在原 55 秒看门狗内实际成功；具名 gate 的冷�
 - metadata冷枚举修复已于b36d4bad29经隔离index提交闸落地：七项全rc0（含原始K2b全套，38秒），派生检查通过。完整冷计划4.82秒，原有NUL计划在规约ROOT并扣除新增seed-metadata闸后逐字节相等，原10秒限时保持；无效源数据使枚举rc2。现全量1129项、CONTRACT189项；后续正式F4按新源码建立fresh状态，既有五项内存准入UNKNOWN与旧红均保留待结证。证据见research/c43-seed-metadata-evidence/。
 
 - 内存证据采集原型的UTF-8首红已定因：seedparse2check.sh的ROOT相对产品引用使文本actor闭包递归到unisacc.com；其PE头第797字节为0x86。隔离导出中直接调用既有Python actor_closure，仅以该shell为种子，复现同位置UnicodeDecodeError；原生seedprep按同合同解码全部actor，故同样拒绝。这是采集原型把二进制送入文本actor机制的接口错配，不是内存准入证据。生成/产品字节须另作原始文件身份绑定，文本actor与二进制叶分账的候选方案待实现；暂不改通用闭包或准入判据。
+
+- 本宿主资源补证的更小切面：先在显式清除现有ENV_KEYS覆盖变量的隔离环境使用系统GCC11（SHA fb60c5945ce785d0cb2ef0303dac5249f25bd0d0324317a0734aae6aa24f609b）；已有Python构造器在该环境导入json/zlib实际成功。拟复用现有seedmemoryevidence.py的逐路线C/P trace与直接C RSS协议，先采小路线正控，再补全38路线的114份记录；不新增解释器算法，数据齐备前不更新准入常量。采集与正式队列分时占用重活令牌。COM构造/生成路线仍是独立未测义务，不能由这114份C路线记录推成通过。
+
+- 清环境正控实测：GCC11在-w/非-w原两组flags下编出的生成器逐字节相等，SHA cd3f947fa601cf17c789a4c0bf63a75f66057ce12ac66792ba07b7face20fc90。E4的C直接RSS、C trace、Python trace三项均rc0且输出SHA同为fd3cac964a1eb608f76401dc45da44c0c4392d0e69519c20e7ef3f1fc7e94b7e；直接C RSS 41280 KiB（含pre-exec residency）。8GiB cgroup上限只作控制，不当峰值。三份记录只完成114份中的3份，尚不授内存准入。
+
+- 种子缓存协议缺口已实证：当前seedgencheck.sh仍按旧glob内容的SHA1前缀写Python缓存（本树28a01f2255ab8b0d），准入器按seedmemory-reads.tsv路径与内容SHA256查找（同树1aba99c3d52243aa）。即使参考已生成，生产/消费文件名仍不相交；后续应让生产端调用现有统一gen键函数，补真实热缓存与变异拒绝验证。seedparse2现有生产端已用统一键；不通过搬改准入判据掩盖该缺口。
+
+- gen缓存键候选已改为调用现有seedmemorykey.cx，并严格校验gen族与16位小写十六进制；隔离实测使用采集中真实E4模型作热缓存，当前键1aba99c3d52243aa命中，修改实测read-set中的finite_rules.py后键变为96368058c8762335且缓存未命中，删除该输入后rc非零且stdout为空。此为键协议验证，不计seedgen全套通过；准入常量仍保持原值，完整资源采集独立继续。

@@ -1,8 +1,9 @@
 #!/bin/sh
 # 0.0.32 B5: seed/gen.c builds the product's shared deltas byte-identical to exec/build/gen.py --
 # the stages buildcompiler.sh's `shared` step constructs (e2 pp --shared-predefines, e1 lex --typed,
-# e3 parse2, e4 opt --o2, o1 opt, prune, nativeabi, enc per object format, lower --full per target, and compilerpack's model jobs).  Python references are cached by the hash of
-# exec/ inputs, so a gen.c edit reruns only the C side.     usage: tests/seedgencheck.sh [NAME...]
+# e3 parse2, e4 opt --o2, o1 opt, prune, nativeabi, enc per object format, lower --full per target, and compilerpack's model jobs).  Python references use the same measured read-set key as
+# seedmemory admission (tests/seedmemorykey.cx), so a gen.c edit reruns only the C side.
+# usage: tests/seedgencheck.sh [NAME...]
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R" || exit 2
 GEN_CC_FLAGS='-std=c99 -O2 -Iseed'
@@ -10,7 +11,10 @@ GEN_PARALLELISM=4
 sh "$R/tests/cxbin" "$R/tests/seedmemory.cx" gen "$@" || exit $?
 B=$R/tests/bound
 T=${TMPDIR:-/tmp}/unisacc-seedgen; mkdir -p "$T"
-key=$(cat exec/assemble.py exec/finite_rules.py exec/build/*.py exec/*/*.tsv exec/facts/*.tsv weights/gold/*.tsv 2>/dev/null | shasum | cut -c1-16)
+key=$("$B" 30 sh "$R/tests/cxbin" "$R/tests/seedmemorykey.cx" gen) || { echo "seedgen: no reference key" >&2; exit 2; }
+case $key in "gen "*) key=${key#gen };; *) echo "seedgen: invalid reference key family" >&2; exit 2;; esac
+case $key in *[!0123456789abcdef]*|'') echo "seedgen: invalid reference key" >&2; exit 2;; esac
+[ "${#key}" -eq 16 ] || { echo "seedgen: incomplete reference key" >&2; exit 2; }
 _SD="$R"/tests   # the one deletion guard: argv CLI tests/safedel.cx over include/unisa_safedel.h
 G=$T/gen.$$; trap 'sh "$_SD/cxbin" "$_SD/safedel.cx" --purge -- "${G:?}"' EXIT   # per run: gate shards build concurrently
 "$B" 55 cc $GEN_CC_FLAGS -o "$G" seed/gen.c || { echo "seedgen: gen.c does not build"; exit 1; }
