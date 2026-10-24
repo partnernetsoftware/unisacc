@@ -6,6 +6,7 @@
 
 - **[概念与术语](#0-概念与术语先读歧义以本节为准)**：§0，流 / 网 / 段 / 阶段四个词各只有一个意思；六条常见误解逐条对照。
 - **[流/网合同三表与可核验进度](#flow-net-contracts)**：七流、十八网、关系表及是否封存；有封不等于已冻。
+- **[思维树](#work-tree) → [记忆宫殿](#memory-palace)**：先取目标、当前节点、事实与下一动作。
 - **[已实现能力速查](#implemented-usage)**：默认动态执行、tape 输入、六目标镜像、`.cx` 依赖计划。
 - [当前版本与有效计划](#current-plans) · [当前架构](#pipeline-design)
 - [路线](#5-路线) · [未解决问题](#6-未解决问题) · [归档索引](#7-归档索引)
@@ -136,74 +137,46 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 <a id="current-plans"></a>
 ## 2. 当前版本与有效计划
 
-2026-10-23 F1 重封前置修复：隔离短路径触发 strace 对齐空白，PP 采集器原固定 `) = ` 匹配遗漏头流 EOF。已改空格/制表符解析并补三类自测；scratch 正式重封四步与内容变异负例均通过（详见 research/c43-ppcapture-padding.md）。本次仅落采集器修复，F1 产品批与重封件尚未落地，不计 F1 完成。
+<a id="work-tree"></a>
+### 思维树
 
-F1 落地执行口径：每刀在 archive 导出的独立 main 中经 landlock、commitgate --index 创建自洽提交，逐刀补齐受影响派生和 PP 测量，再持锁快进活检出；活检出不运行工具或测试。cx_read 刀置最后，与最终根产品及 sidecar 同锁安装；中间刀不重建 model-com。每次创建及提升提交均 bundle 备份。此为执行顺序，不是全闸通过声明。
+**目标：完成 unisacc 0.0.43 并公开发布。** 本节按实际进展原位动态更新，替换过时节点，不把过程不断追加到文末。当前用户目标已包含发布授权，跨仓 Apple 服务接入另待具体确认。2026-10-24 实际核对 Latest 仍为 v0.0.42，本版尚未公开。
 
-F1 第1刀 vsnprintf/vprintf：scratch 已重生成 kernel/facts（30表无差异）、ABI manifest 523项；gen/parse2 键未变。正式 PP 重采四步全 rc0，最大30.66秒。根产品仍为旧根，仅作工具载体；本刀尚非最终产品验收。
+```text
+0.0.43 公开发布
+├─ 已完成：F1 产品修复；F2 文档与探针收口
+├─ 已完成：F3 历史 CONTRACT 基线（187项：186 PASS、1宿主未核）
+├─ 已完成：F6 候选构建、三阶段 SHA 固定点
+├─ 正在执行：F4／M7 本轮 1140 项完整本地验收 ← 当前节点
+│  ├─ 冻结源码：117e374653b036671b20f7b0d527cb73ee532baf
+│  ├─ PE 两旧项分成四阶段；原41秒实跑均通过，其余1136项 argv 不变
+│  ├─ fresh 起跑；旧302项结果不迁绿，准备结果不算验收PASS
+│  └─ 完成判据：清单完整、PENDING=0、NEEDS_RULING=0、product_red=0、处置齐全
+├─ 待完成：据终态结果收口发布说明 → 候选封存 → RC
+├─ 待完成：匹配候选的六平台 CI、Windows 原生与 Darwin 证据
+├─ 待完成：Apple／Windows签名、公证及最终字节验证
+│  └─ 独立外部待答事项：minicon Apple 服务具体接入授权
+└─ 待完成：Draft资产核对 → Latest／公开 → 下载SHA与运行复核
+```
 
-F1 第2刀 dup2/fopen 修剪：kernel/facts/ABI 已重生成，PP 四步重采全 rc0（最大31.76秒）；gen 键变为624c68f6d0891b83、parse2未变，同步两实现常量。旧根的内嵌修剪图仍旧，直接跑专项返回1，不能记该旧根为新刀产品；本刀重建经典参考后两项返回0，最终模型专项亦已0。根只在第7刀安装。
+**下一动作：持续执行并消费本轮正式队列，非零项先查既有分类和裁定。** 旧分类红、短预算DEFER及已实现功能不重新立研究题；新的必要修复才改变调度。当前不再为通用优化、归档或新模板中断主线。F3历史基线、阶段独立实跑及缓存准备不替代完整F4。
 
-第2刀首轮提交被声明覆盖检查正确拒绝：libneed 不覆盖 exec/facts/pp-autoinc-gen.tsv，facts-export/pp-leaf-seal 属合同检查，不能代替产品套件声明。补点 exec-pp-literals（其树声明覆盖 exec/include/seed），保留所有原有派生闸，不修改覆盖表。
+<a id="memory-palace"></a>
+### 记忆宫殿
 
-路径纪律冲突待主人澄清：本轮禁止任何工具接收点或仓库根作路径，而指定 ident/seal 接口及现行 gate/seed-com 内有 ROOT/点参数。已询问是否仅写入/删除目标禁用；未获答复前不启动后续依赖该接口的验收。第2刀已结证并 bundle 备份，第三刀仅推进源码及不依赖该接口的准备。
-
-第3刀准备发现旧根已无法编译新环境头上的 ABI 工具（undefined _unisa_envfind），不能沿用“直到最后都以旧根载工具”的设想。决定仅在隔离 scratch 内提前采用已验最终根作工具载体；中间树不作该产品的 ident/PASS 声明，活检出继续保留原根，最终仍由 cx_read 刀与新根一起提升。旧工具根及 sidecar 保存在 out，未再重建 model-com。
-
-第3刀经典参考专项实测：environ bad=0，system/popen/execvp 子环境 bad=0；用最终根作工具载体后 ABI writer 523项成功。测得 gen/parse2 键为9d231357170a6825/74bdabd1919010b1，同步常量。PP 重采与提交门禁尚未启动，等待 ROOT 参数纪律口径，未计第3刀落地。
-
-政委新指示解堵（2026-10-23）：HANDOFF §3 路径禁项针对活检出；scratch 导出根作为 ident/seal/--check-core 的 ROOT 是规定做法，允许，保留接口不做无ROOT改造。恢复 F1→F6，Draft/Latest/签名/公开仍禁。另授权本次推送当前 main 的 ahead；实际 git push origin main:main 返回 Everything up-to-date，main与origin/main均d59cecd99，后续新提交不据此自动推送。
-
-第三刀首轮 PP 四步虽均 rc0，但 HANDOFF 口径补录与末步检查重叠；按套件运行不改树纪律，不计此轮最终验收。文档与源码固定后，以 cut3-pp2 新目录完整重采；不覆盖或删除原始记录。
-
-第3刀固定树 PP 重采 cut3-pp2 四步全 rc0，最大31.85秒，封件目录摘要746fabe6daa656c16608ddf8c1e155427e81d1e1936023446acf5aa7172295c7；采用这轮进入逐刀提交门禁。此前经典参考 environ/子环境专项均 bad=0，ABI 523项及两实现键同步已完成。F1 仍待其余四补丁与最终整体落地。
-
-逐刀工具缓存按独立 CXBIN_CACHE 目录运行：scratch 工具根提前采用最终根，后续隐式头仍会变化，因此不跨刀复用旧前奏编译的工具；缓存保留，不修改 cxbin 或门禁。第4刀只新增长值/多名字回归，不重生成未变化的头、facts、ABI 或封件。
-
-第4刀长值/多名字探针在本刀经典参考与模型工具载体上均 rc0、输出逐字节相等（bad=0）；现只提交该回归与实测说明，未改产品实现。完整终点线仍以最终新根的 F3/F4 为准。
-
-恢复后的范围收束：政委当前目标只有 F1→F6，W2-D1 等长期预检保留原始记录，不再占本轮调度。第4刀已提交1fb8967c并bundle备份；接续第5刀fileno，仍使用独立工具缓存与scratch隔离。
-
-第5刀 fileno：经典参考与模型探针均 rc0、fileno bad=0，输出相等；头/facts重生成、ABI writer 523项成功。测得 gen/parse2 键0312a3f7528020ac/5ee7ddf710199918，同步两个实现，随后固定树重采 PP，不复用第3刀封件。
-
-第5刀 PP 正式重采四步全 rc0，最大31.54秒，封件目录摘要7062d665e66d0ddaccf069935eb2f7460e8014e9b1a65b06dd95986fc7b717fb；保留旧目录及README，现进入逐刀commitgate。
-
-第6刀采用原0007 enum E; 表修复并补 tests/c/b_enum_bare.c；除裸/重复裸标签外，同时直接验证原 R11 enum_forward.c 的 typedef、函数指针、局部枚举、位域结果。不修改 Tape/枚举域的拒绝边界；PP输入不变，保留第5刀有效封件。
-
-第6刀实际验证：b_enum_bare 在模型与经典参考均rc0；原 enum_forward.c 在模型、经典参考、宿主cc三路rc0且输出完全相同（7 7 7 7 4 / 3 7 4 / 8 7 -2 4）。ABI 523项成功；gen/parse2 键7fb1eaf41cfcdf89/289b42a4ad9b85db，同步后进入寄存器、单元解析与派生门禁。
-
-第6刀组合闸首轮外层142，未提交。保留日志定位到 exec-unitparse 冷准备：unitparse-ref 已按fresh协议构建并有stamp，parse2 JSON仍在生成，其他步骤未结证。按原脚本的fresh命令在同一index导出逐步限时准备JSON与dump，再重跑全部命名闸；不抬看门狗、不伪造stamp、不裁掉该套件。
-
-第6刀按原fresh协议分步准备已成功：parse2 10209 states、unitparse-ref及token dump均有正常产物与stamp，每步独立≤58秒；保留首轮外层142证据。现在在同一index导出重跑原全部命名套件，没有修改套件、输入或缓存协议。
-
-F1 最后刀：应用原0006后，以已实测的精确补修替换 cx_read POSIX 路径，直接检查新开描述符 read 返回值，覆盖8路stdio状态占满边界；Windows原路径保留。同步已验证的K0容量回归，重生成派生并以最终候选源指纹/字节身份核对，再整体提升 main 与根产品，不再混入其他轨道。
-
-最后刀重生成已成功：gen/parse2键为最终1aba99c3d52243aa/289b42a4ad9b85db，源指纹c4618639cc3fcfac4f8ce52a11df3bdab93b2c9376eecee63fd70e6550adc57f与已验证候选完全相同，ident确认4f0b493c7a83d73a4ae1b348c8400ea3b7eda0ea190051b54a84c712a6730eda为fresh，K0 bad=0 files=18。同步精确同输入的最终双封及657份差分证据，接续封件负例与提交闸，不重新训练或改动其他轨道。
-
-F1 最终材料转移后检查已通过：E3 gate含负例、PP core与负例均rc0；原657份证据独立重算再次通过（628 SAME/29 DIFF，双产品ident与全部输入pin通过），落地树产品输入与该证据源指纹完全相同。进入最后刀index提交闸；main与根产品整体提升成功之前仍不计F1正式完成。
-
-最后刀首次提交被输入声明分类器正确拒绝：已有 e3-seal gate 未登记到 gatedeps。补齐 refreshgatedeps.cx 中该已有套件的命令与依赖（334条实测依赖均落在7个产品源树，另声明封件树、检查器、bound及根产品对和cc/sh工具），通过landlock --derive生成仅本项及本刀快照的JSON变化；不移除E3检查、不改seal判据。
-
-### 版本状态与可核验进度
-
-| 项 | 当前口径 | 核验来源/限制 |
+| 房间 | 当前事实／决定 | 证据与行动入口 |
 |---|---|---|
-| 开发版本 | **0.0.43** | [src/version.h](src/version.h) 的 UNISACC_VERSION |
-| Latest | **v0.0.42** | 2026-10-21 GitHub `/releases/latest` API 只读核对；[Release](https://github.com/partnernetsoftware/unisacc/releases/latest) |
-| 本轮闸 | **ABSENT** | 本次协调裁定；未附本轮有效闸收据，不能引用旧绿顶替 |
-| 发布链 | **约1/3，仅源码已推** | 三格口径见[可核验进度](#flow-net-progress)；非产品完成率 |
+| 入口厅：目标 | 公开发布0.0.43；当前节点F4/M7，不是重做F1。 | 上方思维树；[范围](plans/v0.0.43.md)、[终点线](plans/v0.0.43-finish-line.md)。旧未授描述不覆盖当前明确目标授权。 |
+| 工具间：能力 | 默认-run、tape→image、六目标、`.cx`模块已实现；经典UA与模型产品是不同实现。 | [能力速查](#implemented-usage)、[README](README.md)、已有用例。只验证具体输入的证据缺口，不重新研究入口是否存在。 |
+| 身份室：候选 | H0=`4f0b493c7a83d73a4ae1b348c8400ea3b7eda0ea190051b54a84c712a6730eda`；S=`c4618639cc3fcfac4f8ce52a11df3bdab93b2c9376eecee63fd70e6550adc57f`；用候选7298侧车。 | [F6证据](research/c43-f6-final-evidence/)。按源码摘要、产物及侧车SHA核对，mtime不单独决定新鲜度；不为刷新mtime重复构建。 |
+| 控制室：现场 | 本轮根`/tmp/unisacc-c43-pe-accept-20261024`；状态`out/f4-final-state`，窗口`out/f4-final-run`，驱动日志`out/f4-driver.log`；本线程会话35610。 | 每轮读取实际结果与存活进程／会话，核fresh收据和env pin；锁或旧日志不能证明存活。瞬时计数以现场为准。 |
+| 出口室：分类 | RESOURCE_UNKNOWN保留OPEN义务；H1超时不算PASS；DEFER不等于终态失败。 | [资源处置](research/c43-resource-disposition.md)、[裁定](release/rulings.tsv)、[分类](release/preauth.tsv)及完整退出表。不补写结果或虚构平台绿。 |
+| 发布室：交付 | M7之后封存；候选CI、签名、最终字节和公开下载须真实收据。 | [发布流水线](release/RELEASE-PIPELINE.md)、[候选记录](release/candidate.json)；当前候选记录尚不是0.0.43封存证明。 |
+| 暂存室：边界 | 全面零Python、通用队列优化、typed/callback迁移、广泛research归档不另作本版前置；新工具缺陷先入0.0.44。 | [0.0.44计划](plans/v0.0.44.md)、[路线](#5-路线)。新动态推进用`unisacc.com + .cx`，减少脚本，转调不算原生化。 |
 
-### 当前有效计划（唯一索引）
+**动态维护规则**：进度、身份、阻塞、决定或下一动作变化时，同步原位更新思维树节点及对应房间；只把当前事实留在这里。每次恢复先读两者，派发任务引用当前节点和确切缺口。原始过程与旧失败保留在证据或Git历史中，不冒充当前状态。
 
-| 计划 | 当前有效范围 | 不代表 |
-|---|---|---|
-| [v0.0.43执行计划](plans/v0.0.43.md) | 前级/库边界、晚绑定类别复用、Tape验域；具名范围与验收条件 | 已授事项不等于已实现，旧候选绿不等于本轮闸 |
-| [路线与退出条件（§5）](#5-路线) | 0.0.x自举工具链、有限库面、后续研究 | 旧版本时间表已实现，或自动开工 |
-
-0.0.37–0.0.42旧计划、旧路线图、门禁重叠清单和构想原稿按原字节归档（旧文内路径按原位置解读），统一见[archive/plans/](archive/plans/)；历史0.0.43基线亦在其中。已发布不等于旧计划每项完成，遗留义务须在本版具名核对，不默删。发布及逐日过程见§7。
-
-**产品命名（主人 2026-09-30 提醒，硬规则）**：两代产品只有两个名字——宿主构建的第一代叫 **`unisacc-seed.com`**，由它自举出来的最终产品叫 **`unisacc.com`**（发布物、GHCR 候选、README 与 N22 三阶段的文件名都按此；`unisacc-next.com` 只是构建目录里的中间名，不出仓）。
-
+**产品命名**：宿主构建第一代为`unisacc-seed.com`，自举最终产品为`unisacc.com`；`unisacc-next.com`只是构建目录中间名。
 
 <a id="pipeline-design"></a>
 ## 3. 当前架构：模型流水线（结构、功能与边界）
@@ -349,15 +322,15 @@ F1 最终材料转移后检查已通过：E3 gate含负例、PP core与负例均
 
 封存清点（tip `9722183c`，2026-10-21 18:30 AWST）：**流 7/7、网 18/18 有点名原件**——这是「有原件」计数，不是处理器完成比例，更不是覆盖率。**有封≠已冻**；余缺照列：① per-net cell 不覆盖该网在流内的运行时 ask（边级原件 **17/17 = 15 键答映射 + 2 产品侧见证**（`tests/edgeseal.py` 参考端规范化键答映射叶 + `tests/edgewitness.sh` 产品侧见证件——后者为 e3→pfconv（唯 `-nostdinc` 可达，参考侧永不问、stages 对它空真）与 elf→enc（elf 流 enc ask 产品侧独有）两条，强度弱于键答映射件、分类计数不混同；各叶双录/双观测判等、三重 sha 钉扎、负例必红；设计/考古/实测收据 research/c43-edge-freeze-design-r1.md），计数入闸 `tests/seal-edges.tsv`；但链条 gold≡weights（net-*-seal）≡DENSE（oracle-cache 闸，22694 问双向，负例实测一字节翻转即红）已闭，且 stages-1*–3* 闸比对 10 网「Python 问过则 C 必问过」（前端 8 网 + prec/binsel，-c -v 打印已扩），后端六边（opinfo/peep/abi/regmap/reloc/enc）由 stages-back 闸以全程路线比对（Python compile_file+optimise -O2+lower vs C 全构建 -v 的 askedline，两探针，负例实测旧源二进制即红）——16 张出货网的「问过」证据至此全部入闸；仍缺的是按探针冻结的边级封存原件（比对式≠冻结回放））；② e1/e4/prune/elf 流封只回放录制输入，elf 仅 lnx/x86_64 一个目标；③ 权重/DENSE 的语义链已闭（net-*-seal：weights≡gold；oracle-cache：DENSE≡weights；kernel 闸：kernel/* 全部 59 件对 emit-kernel 再生逐字节比对），构造工具 build-weights 在 CI 两处跑（ci.yml）；余下的只是 gold→built.json 构造没有本机闸、built.json 无点名封存原件——语义错误会被上述三闸抓住，此条降级为低风险；④ parse/type 等物理仍嵌 e3 未拆；⑤ pp 叶封的 STALE 风险（头/autoinc 耦合）未消。本次封件闸全量重验见 §3.0 开头。
 
-| 发布链三格（2026-10-21协调口径） | 状态 | 证据边界 |
+| 发布链三格（2026-10-24动态状态） | 状态 | 证据边界 |
 |---|---|---|
-| ① 文档/源码tip已推 | 已有 | Git远端分支可核；不等于产品发布 |
-| ② 本轮候选有效闸与收口收据 | **ABSENT** | 不用旧门绿、旧包或封存数量顶替 |
+| ① 源码与发布身份 | 历史源码已推；本轮候选封存／RC待完成 | 当前本地提交不冒充远端发布身份；按§2主线推进 |
+| ② 本轮候选有效闸与收口收据 | **RUNNING：1140项，终态待收口** | 见§2思维树及记忆宫殿现场入口；不以历史局部结果顶替 |
 | ③ 发行资产及正式发布 | 本轮未完成 | Latest仍v0.0.42；本轮0.0.43未因源码push而发布 |
 
 **根对现状（2026-10-22）**：开发已迁到新 Linux x86_64 宿主（16 核，内存充足，旧机 2.3G 内存压力导致的 seed-gen 卡死不再出现）。根部 `unisacc.com` 为工作树候选（本机由 `make model-com` 各步构建；宿主须有 clang/ld64.lld/llvm-nm 与 zlib 头，exec/c/BUILDING.md 未列，待补），每次表刀后按 `release/derived-map.tsv` + `release/tools/derivedcheck.py` 刷派生物、经 `release/tools/commitgate.sh` 提交。旧机第一至第七次根对重建/归位收据与宿主坑位已归档：[2026-10-22 过程归档](archive/prd-process-notes-20261022.md)。
 
-“约1/3”仅指上述三格已有第一格，不是模型覆盖率、时间完成率或发布授权。当前版本声明见[src/version.h](src/version.h)，Latest于2026-10-21通过GitHub releases/latest API只读核对。
+三格分别记录源码身份、验收及公开资产，不折算为完成率或剩余时间。当前版本见[src/version.h](src/version.h)；Latest于2026-10-24实际只读核对仍为v0.0.42。
 
 查看：[七流表](#seven-stream-contracts) · [十八网表](#eighteen-net-contracts) · [流×网关系及边级夹具](#flow-net-relation)。本节更新状态口径，不改三表原观测数据。
 
@@ -546,7 +519,7 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 - 断言按 contract / stage / pipeline / platform 分账，见 [tests/GATE-LAYERS.md](tests/GATE-LAYERS.md)；局部绿不代全链，未覆盖不计通过。
 - 清单、来源身份、实际受试字节与原始结果分别可核；C99覆盖见 [tests/c99/clauses.tsv](tests/c99/clauses.tsv)，测试入口见 [tests/INVENTORY.md](tests/INVENTORY.md)。
 - 当前开发按具名差集及必要合同门推进，准备/构造与测量单列预算；不得因历史流水线描述自动全量打包、重封或恢复旧队列。
-- 发布流程权威入口：[release/RELEASE-PIPELINE.md](release/RELEASE-PIPELINE.md)、[release/README.md](release/README.md)及工作流。流程文档不等于执行授权；本轮闸仍ABSENT。
+- 发布流程权威入口：[release/RELEASE-PIPELINE.md](release/RELEASE-PIPELINE.md)、[release/README.md](release/README.md)及工作流。流程文档不等于执行授权；本轮1140项闸正在执行，终态待收口（见§2）。
 
 ## 5. 路线
 
@@ -671,6 +644,10 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 
 F1 落地补充：现有 glossarycheck 闸扫描全部受跟踪的新文件，须在 gatedeps 中声明受跟踪顶层目录和根文件；只补输入声明，不改规则或豁免。
 
+## 8. 历史收口记录（不作当前调度入口）
+
+以下保留原先各拍的事实及边界；当前状态以§2动态思维树和记忆宫殿为准。旧记录的待办、计数与授权不直接用于当前调度。
+
 0.0.43 F1 于 ffb1fdbf 完成：七补丁逐刀提交，657 文件差分（628 相同、29 经逐项审查）、双重封、seedmemory 键及根产品身份校验通过，新根与 cx.h 同锁落地主检出。F2 按现有 TP-9 整数拒绝语义补文档，并将两个已修 P4a 探针移入正式 C 语料；只在新路径实测通过后提高 ccrun 基线，不改历史证据。
 
 F3 实测补充：k2b 的私有 tracked-only 夹具漏掉被忽略的根产品，迁移后的 volatile-comma 通过 cxbin 调用时无编译器。保留既有全部 K2b 断言及解释器实现，采用通用 shell 夹具执行器导出已提交树并显式带入同代根产品对；原调用点不增加解释器依赖。队列原红保留，修复后重新全扫。
@@ -733,7 +710,7 @@ F4 ca5b3603 的 carrier import 准备在完整 41 秒预算下超时；独立原
 
 source-only 冷准备在原 55 秒看门狗内实际成功；具名 gate 的冷准备也成功（51 秒），但首次并行消费者抢在缓存安装前返回 NEED_PREPARE，保留原失败。缓存身份包含 UNISA_JOBS 等完整执行环境；gate.sh 默认注入 2，直接 CX 与正式队列须用同一冻结环境预建，不能串用不同键。采用既有发布流程允许的有界预建：先在队列外单独 bound55 完成缓存，fresh 全量 F4 仍执行原 prepare 的完整 HIT/产物验证及两个真实消费者；旧正式 41 秒超时不改写，也不声称冷建41通过。
 
-## F4 snapshot 与优化夹具修补（2026-10-24）
+### 历史：F4 snapshot 与优化夹具修补（2026-10-24）
 
 正式2d冻结队列的原红保留。本批只修两处测试夹具：snapshot写失败用普通文件父路径代替只读目录，令所有uid都触发同一具名写失败；优化对拍对七个明确转发探针核完整Tape具名拒绝后，仍实际运行两优化级别，并同时要求原始子进程状态及看门狗自身退出码为零。其余语料非零比较、全部原断言、分片和限时不变。不改产品源码、资源裁定或根产物；独立archive已有正负控，落地以本次索引门禁实际结果为准，后续新正式队列不得借旧绿。
 
