@@ -147,7 +147,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 ├─ 已完成：F1 产品修复；F2 文档与探针收口
 ├─ 已完成：F3 历史 CONTRACT 基线（187项：186 PASS、1宿主未核）
 ├─ 已完成：新F6三实际SHA相同且官方固定点通过；stage3复用同身份模型包，五代码切片均由stage2实际重编，原50秒界通过
-├─ 正在执行：fbef22b6c5的063窗新首红停在hostcheck／seedmemory自测 ← 当前节点
+├─ 正在执行：7a063304f4修复冻结的正式M7分窗验收 ← 当前节点
 │  ├─ 产品来源d09bd1decb／S=c90f0002…不变；开发完整图1315节点／954依赖，Windows全部分片原预算通过
 │  ├─ 已实跑：七流独立工具链；native六叶；functionimports六准备＋20案例；callback12目标＋四片消费
 │  ├─ 已修复：typed/callsite完整材料命中及无关检查脚本触发失效；普通七流／native资源缓存拆层仍待做
@@ -155,8 +155,8 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 │  ├─ E4重封、Windows分片与元数据闸通过；023旧32项结证及全部失败已保存，不作为新冻结通过数
 │  ├─ 首红修复a936e98453的四默认-run节点已在正式M7全部rc0；tools／models均HIT，两个消费者重跑原断言
 │  ├─ 023后修复：四tools原33秒通过；最终退出／恢复／I/O异常回归原55秒通过；计划三模式逐字节相同，热计划0.824秒
-│  ├─ fbef22b6c5的063窗70项结证：63 PASS、5 RESOURCE_UNKNOWN、2 NEEDS_RULING、1245待办；首红停窗
-│  ├─ hostcheck旧聚合名断言已对齐七叶，独立原40秒预算12例全过（12.161秒）；尚未导入正式冻结
+│  ├─ 旧fbef的063窗70项及全部失败已备份；新064窗1/1316 PASS、1315待办，无未裁定红
+│  ├─ hostcheck七叶12例、seedmemory行为16例及18隔离正反例均实际通过；真实新鲜度独立非PASS／OPEN，未重键旧测量
 │  ├─ 后台E4性能研究仅私有设计／实验，不改当前候选、不作为0.0.43前置；前台不等待提速
 │  ├─ 旧1142轮已停窗；原失败与未执行项保留，准备仅计PREPARED，不迁旧PASS
 │  └─ 完成判据：最终模块清单完整、PENDING=0、NEEDS_RULING=0、product_red=0、处置齐全
@@ -167,7 +167,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 └─ 待完成：Draft资产核对 → Latest／公开 → 下载SHA与运行复核
 ```
 
-**下一动作：先修063两个自测首红，再按原时限续M7。** hostcheck独立12例已通过；seedmemory先验证低内存fixture隔离，再将16项行为与1项真实读集新鲜度分开具名结证，保留原17项严格入口和全部断言。新鲜度缺测只可保持非PASS／OPEN，坏输入仍报错；不得重键旧RSS或自授发布豁免。正式图及旧失败完整保留，受影响闭包按原指纹重新结证。候选仍为2974978e…／S=c90f0002…，六原生smoke及Darwin收据各保留真实源码和run身份。完整M7之后仍须签名、公证、最终签后字节court与公开下载核验；Apple跨仓服务／读包授权已向用户发问，尚未获答。
+**下一动作：固定7a063304f4验收副本，按原55秒窗口续M7，每窗分类后再前进，新未裁定红即停。** 064窗候选freshness与bigclosure-lnx-x86_64实际rc0；旧70项完整备份，不迁未知闭包的绿。新清单1316含行为16＋新鲜度1两具名节点，旧严格17项入口保留，真实缺测仍非PASS／OPEN，不重键旧RSS、不自授豁免。后续主树状态文档及私有后台准备不导入固定副本。候选仍为2974978e…／S=c90f0002…，六原生smoke及Darwin收据各保留真实源码和run身份。完整M7之后仍须签名、公证、最终签后字节court与公开下载核验；Apple跨仓服务／读包授权已向用户发问，尚未获答。
 
 
 <a id="memory-palace"></a>
@@ -186,12 +186,12 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 | 封存室：E4 | 新seal已写入主树：49真实依赖、21接受例、96原始对拍全部相等，与候选shared/e4.net字节相同；writer与原58秒官方gate均rc0，负例全通过。零Python棘轮／inventory／inventory-derived／gate-layers四项rc0，无新增解释器调用。 | 原trace未修改；临时材料在`/srv/tmp/e4-reseal-20261025`。OUTDIR必须在ROOT外且位于TMPDIR内；前两次路径错误的原失败保留，最终清单无临时路径，不手删依赖。只重封受影响E4，不重建产品或其他模型；完整M7仍未完成。 |
 | Windows室：分片 | 五准备＋七消费已在最终源码上全部原41秒界rc0：cases为9.409／11.580秒，四拒绝片为22.466／21.103／24.467／23.118秒，ARM large为8.053秒。每目标13＋12拒绝片与原25项有序列表逐项核对，无遗漏／重复。完整计划实导1314节点／949边，旧聚合超时保留。 | 调度、缓存、状态均为.cx；旧独立裁判仅显式scope选择，无新Python依赖／调用点。共享材料与锁保持、12节点串行。批摘要17项原函数注入／实际SHA对照通过；stagemap补齐lower族后gate-layers原预算rc0，零Python／inventory／derived均rc0。开发证据`/tmp/unisacc-c43-winbatch-20261025/out/win{halves,final}-*`，正式M7仍需新队列。 |
 | 身份室：候选 | E4新候选、本机及三阶段实际SHA=`2974978e6deec45abf38bfac2ac24e3031969b1c65009798270491d8b1e6dd1f`；S=`c90f0002f02366d510e4c8c22d4757f934edf8c0719852e706b575a7137b47df`；配对侧车SHA=`b88e3a1c227e72e621cf810cc5975e0922ba34cf34aa9e51288142aaaf94480a`。版本／hello／O2摘要回归、ident及官方固定点rc0；完整M7未完成。 | 冻结`/tmp/unisacc-c43-e4-summary-final-20261024` @d09bd1decb；`out/f6-e4-stage{2,3}-package.log`、逐切片真实argv/rc/时间/SHA、`out/comboot/stages.json`。stage3数据复用而代码切片重编，非模型构造器自举证明。按源码、产物及配对侧车核对，不为刷新mtime重复构建；[F6证据](research/c43-f6-final-evidence/)已原位更新。 |
-| 控制室：现场 | 测试冻结`/tmp/unisacc-c43-m7-final-20261025` @fbef22b6c5af2156783e858b12864c0a1abb4ad2，1315节点／954边，env-pin保持。063窗70项结证：63 PASS、5 RESOURCE_UNKNOWN、2 NEEDS_RULING、1245待办；当前停窗修复。同一产品2974978e…／S=c90f0002…。两自测修复及新清单验证后才更新冻结，保留旧状态、按原指纹重结证；每窗新未裁定红即停。 | 权威`out/m7-final-state/results.json`、`out/m7-exit-window063.json`及逐窗log/status。旧cd30109850的55项及失败保存在`out/m7-before-suite-native-fix/`，未知闭包失效，不迁旧PASS；旧32／8项亦保留。当前5资源拒绝均新结证，义务OPEN；无完整M7／发布结论。 |
+| 控制室：现场 | 测试冻结`/tmp/unisacc-c43-m7-final-20261025` @7a063304f45804a17ac58d492e7bcdc83446dbb1，1316节点，env-pin保持。064窗1 PASS、1315待办、无未裁定红；产品2974978e…／S=c90f0002…已核freshness。按原时限续窗，新未裁定红即停；后续主树状态和后台准备不导入。 | 权威`out/m7-final-state/results.json`、`out/m7-exit-window064.json`及逐窗log/status。旧fbef的70项含两首红完整保存于`out/m7-before-seedmemory-scope-fix/`，更旧55／32／8项亦保留；未知闭包按原指纹失效，不迁旧PASS。资源缺测义务仍OPEN；无完整M7／发布结论。 |
 | 语料室：准备依赖 | 023四tools读者的半clone竞争已加四条依赖修复；三仓固定提交及原检查保持。cd30109850正式038／039窗的tools构造及四读者全部rc0，corpus-3原断言也通过；040窗regex2-run在正式limit40下34.56秒rc0、与cc参考逐字节相同。 | 原33秒regex2-run失败、独立55秒35.262秒诊断均保留；当前正式`out/m7-window-040.log`与分类器确认通过。其主要耗时是故意最坏复杂度的原regex程序，不是NN推理；没有减少输入、覆盖或放宽外部限时。完整图仍1315节点／954边。 |
 | 调度室：真实结证 | 旧finally统一伪写142。修复改为先收集自然rc、统一回收其他进程、再共用真实结算；tail取消立即DEFER，未知full沿原中断恢复。observer只消费一次；结证I/O异常先完整回收并继续其他结证，末尾保留首异常，恢复admission／进展而不产绿。 | 最终q.py SHA=3b00a139…92dfb52；私有单位`out/queue-cleanup-policy-v2.log`与`queue-cleanup-state-v3.log`均原55秒rc0，含原真实OS deaf回收、普通0/1/77/142、清理143/-9/0/None、次窗新attempt及memory/atomic故障。独立审查报告与首版失败保留；无新增解释器依赖／调用。 |
 | 工具室：自测修复 | 原044窗40秒超时保留；55秒trace虽28断言／7例通过但总46.077秒。同一run.cx六次28.037秒，改为本轮fixture只构建一次、逐次核全输入／实际产物SHA。正式fbef冻结051窗普通自测40秒预算33.81秒rc0（28／7）；052窗failfast23.87秒rc0（86／3），首红已实际修复。 | 源SHA=3ca05cc8…1dcf87；正式`out/m7-window-051.log`、`052.log`；开发原40秒普通32.952／failfast23.898亦rc0。九类负例全过26.104秒，恶意compiler标记未写、漂移未到-cx-plan；原失败保留。未核实输入的错误路径用已加载自有删除守卫，健康清理仍默认-run；四元数据闸0。不迁旧PASS，完整M7仍未完成。 |
-| 自测室：063首红 | 正式仍为70结证：63 PASS、5 RESOURCE_UNKNOWN、2 NEEDS_RULING、1245待办。hostcheck对齐七叶后独立原40秒预算12例全过、总12.161秒。seedmemory只修显式低内存fixture后实际跑原严格17例，仅真实gen新鲜度1例失败，原两低内存子例已恢复。未见据此证明产品错误。 | `out/m7-window-063.log`、`out/m7-exit-window063.json`及两原log保留。独立副本`out/hostcheck-leaves-40.*`和`out/seedmemory-fixture-only-40.*`分别真实rc0／rc1。生产内存profile和准入常量不改、不将旧测量套到新生成器、不把RESOURCE_UNKNOWN转PASS。当前修复尚未导入正式冻结。 |
-| 证据室：gen身份变化 | 自有默认-run key实测gen=b68fcf149e16aaec、parse2仍289b42a4ad9b85db；三份已列E4输入的旧字节复现旧gen pin，非hash移植错误。当前cc为Ubuntu11.4／SHAfb60…，旧RSS身份为Debian14.2／SHAa23e…，不能复活旧profile。独立原40秒预算functional16例实际rc0；新evidence入口约4.4秒实际rc2／OPEN；旧严格17仍rc1。 | 默认-run一次编译的私有18正反例全过、0skip，含匹配／列入漂移／未列入变化、坏表／缺文件／ENOTDIR／目录／symlink／权限／注入拒绝；坏输入均rc1且无UNKNOWN。集合17=16+1已核，独立静态审查未见新阻断。四元数据闸最终全0：inventory首次陈旧原失败保留，经原生重生再逐字节核验通过；完整清单1316，Python1744无升降。derived-map保留两个入口，真实漂移仍非PASS／OPEN；生产准入／键／RSS不改，正式冻结尚未导入。 |
+| 自测室：063首红 | 旧冻结70项中两首红已定位并修复。hostcheck对齐七叶后独立原40秒预算12例全过、总12.161秒。seedmemory只修显式低内存fixture后实际跑原严格17例，仅真实gen新鲜度1例失败，原两低内存子例已恢复；分账后16行为实际全过。未见据此证明产品错误。 | `out/m7-window-063.log`、`out/m7-exit-window063.json`及两原log保留。独立副本`out/hostcheck-leaves-40.*`和`out/seedmemory-fixture-only-40.*`分别真实rc0／rc1；修复已进入7a063304f4冻结，正式结果须新结证。生产内存profile和准入常量不改、不将旧测量套到新生成器、不把RESOURCE_UNKNOWN转PASS。 |
+| 证据室：gen身份变化 | 自有默认-run key实测gen=b68fcf149e16aaec、parse2仍289b42a4ad9b85db；三份已列E4输入的旧字节复现旧gen pin，非hash移植错误。当前cc为Ubuntu11.4／SHAfb60…，旧RSS身份为Debian14.2／SHAa23e…，不能复活旧profile。独立原40秒预算functional16例实际rc0；新evidence入口约4.4秒实际rc2／OPEN；旧严格17仍rc1。 | 默认-run一次编译的私有18正反例全过、0skip，含匹配／列入漂移／未列入变化、坏表／缺文件／ENOTDIR／目录／symlink／权限／注入拒绝；坏输入均rc1且无UNKNOWN。集合17=16+1已核，独立静态审查未见新阻断。四元数据闸最终全0：inventory首次陈旧原失败保留，经原生重生再逐字节核验通过；完整清单1316，Python1744无升降。derived-map保留两个入口，真实漂移仍非PASS／OPEN；生产准入／键／RSS不改，修复已导入7a063304f4冻结；新正式结证仍待完成。 |
 | 调度室：启动预算 | 原计划4.287秒，单纯去重仅4.233秒。每次列表默认-run编译prepdecl.cx实测3.489497秒；现成身份校验工具缓存使热NUL计划0.824秒、list0.864秒、host-plan0.863秒，三输出与原相同。正式任务预算已从33恢复40，040窗34.56秒regex任务实际通过，55／60界不变。 | 私有单位`out/gate-hot-*`、`gate-before-*`及正式`out/m7-window-040.log`。每次仍核源码／模块／编译器身份并重读声明，不缓存测试verdict；动态控制优先默认-run。C3/C4六片只计算一次，metadatalist保留原缓存；已撤销的默认-run回退原测量保留。 |
 | 工程室：本轮首红 | 原Python聚合55秒及首轮原生聚合33秒超时均保留。最终默认-run tools／models／import／package在原33秒界分别26.361／23.727／16.690／13.079秒rc0；八件（含dump/run）与原Python逐字节相同，消费者执行原断言。缺失／篡改工具均75，无隐式构造；独立静态审查未见新增阻断，四元数据闸最终均rc0。 | 单元冻结`/tmp/unisacc-c43-carrier-native-20261025/out/carrier-staged-*`，helper SHA=1d5901c7…87ae。工具五件SHA、三构造器cc-M系统头、精确recipe与完整basis绑定；模型持工具共享锁、起止核验，完整八件manifest才供消费者。新清单实导1315／950；`out/carrier-metadata-gates-v2.log`：零Python无增长、inventory无孤儿、派生字节相等、gate-layers通过。原生首轮与首次元数据失败原记录均保留。正式M7尚未完成；不迁旧PASS、不放宽限时。 |
 | 调度室：启动债 | 正式旧队列每窗导入gatequeue时，gatecanon-native无条件重编CPython适配模块，发生在t_begin之前；其耗时不进入prologue字段，却占父deadline。窗口010的prologue为8.324秒，子任务仅获33秒；预算差额还含收尾预留和取整，不能全称CPU耗时。 | `/tmp/unisacc-c43-m7-carrier-timeout-analysis.txt`、`tests/gatecanon-native`与`tests/gatequeue.py`。下一版继续原生队列事务迁移；若缓存适配器则绑定完整编译／链接工具、头文件、ABI及产物SHA，不以-x命中。不为此性能项中途改动正在验收的0.0.43冻结树。 |
@@ -355,7 +355,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 | 发布链三格（2026-10-25动态状态） | 状态 | 证据边界 |
 |---|---|---|
 | ① 源码与发布身份 | 本轮候选已按不可变digest封存并回读；RC绑定cd30109850 | 源码、产品S、测试冻结和CI各身份明确绑定，后续本地提交不冒充远端RC |
-| ② 本轮候选有效闸与收口收据 | **旧冻结1315项：063窗63 PASS、5 RESOURCE_UNKNOWN、2 NEEDS_RULING、1245待办** | 两自测修复的独立验证通过；新完整清单1316项含独立新鲜度OPEN义务，尚未导入正式冻结／重结证，不迁旧绿 |
+| ② 本轮候选有效闸与收口收据 | **新冻结1316项：064窗1 PASS、1315待办，无未裁定红** | 两自测修复及四元数据闸通过；独立新鲜度义务仍OPEN，旧冻结70项及失败已完整备份，不迁旧绿 |
 | ③ 发行资产及正式发布 | 本轮未完成 | Latest仍v0.0.42；本轮0.0.43未因源码push而发布 |
 
 **根对现状（2026-10-22）**：开发已迁到新 Linux x86_64 宿主（16 核，内存充足，旧机 2.3G 内存压力导致的 seed-gen 卡死不再出现）。根部 `unisacc.com` 为工作树候选（本机由 `make model-com` 各步构建；宿主须有 clang/ld64.lld/llvm-nm 与 zlib 头，exec/c/BUILDING.md 未列，待补），每次表刀后按 `release/derived-map.tsv` + `release/tools/derivedcheck.py` 刷派生物、经 `release/tools/commitgate.sh` 提交。旧机第一至第七次根对重建/归位收据与宿主坑位已归档：[2026-10-22 过程归档](archive/prd-process-notes-20261022.md)。
