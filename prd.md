@@ -152,8 +152,8 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 │  ├─ 已实跑：七流独立工具链；native六叶；functionimports六准备＋20案例；callback12目标＋四片消费
 │  ├─ 已修复：typed/callsite完整材料命中及无关检查脚本触发失效；普通七流／native资源缓存拆层仍待做
 │  ├─ E4块摘要修复与新候选固定点已通过；完整M7仍待完成
-│  ├─ E4重封、Windows分片与元数据闸通过；env-pin保持，旧8项指纹失效已保留；截至窗口016为6/1315、0失败
-│  ├─ 首红修复已提交a936e98453：carrier默认-run四节点均原33秒界rc0，八件对拍相同、缺失／损坏均75；正式队列正逐窗执行
+│  ├─ E4重封、Windows分片与元数据闸通过；env-pin保持，旧8项指纹失效已保留；截至窗口021为11/1315、0失败
+│  ├─ 首红修复a936e98453的四默认-run节点已在正式M7全部rc0；tools／models均HIT，两个消费者重跑原断言
 │  ├─ 后台E4性能研究仅私有设计／实验，不改当前候选、不作为0.0.43前置；前台不等待提速
 │  ├─ 旧1142轮已停窗；原失败与未执行项保留，准备仅计PREPARED，不迁旧PASS
 │  └─ 完成判据：最终模块清单完整、PENDING=0、NEEDS_RULING=0、product_red=0、处置齐全
@@ -179,10 +179,11 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 | 自举间：驱动聚合 | 新候选作UA时，JOBS=1将五目标asmcompiler.c编译和打包串在一项，第二阶段窗口9触60秒。现已逐目标原50秒界完成十次代码编译、原封装和三阶段固定点；stage3模型材料复用经全哈希及七manifest核验。 | [F6收据](research/c43-f6-final-evidence/)。原聚合窗口仍为失败；不重构已完成的相同权重，也不迁用测试PASS。E4 seal三项规则依赖已变，须独立重封；edge-e4两seal不因这三项改动重录。 |
 | 性能室：独立实验 | 同一lnx/x86_64驱动切片，实际包ISA内核诊断总27.315秒，输出与原产品逐字节相同：E2执行3.970秒、E1 0.146、E3 6.011、E4 14.397、prune 0.097、lower 1.096、enc 0.766；两次tapecheck合0.634。包加载0.025秒，解压／CRC／模型解码仅毫秒。另一次通用C语义计数对照rc0且输出相同：E4有288,505,813次模型转移、362,348,127次动作、7次SWAP；结合三处SWAP规则，证明此输入实际4次stack＋4次peep。不能把通用C计时当ISA或阶段执行当纯NN算子计时。 | 独立报告`/tmp/unisacc-c43-slice-phase-experiment.txt`与仓外`/tmp/unisacc-c43-slice-phase/`；输出SHA=ace9f9ed…与stage2切片cmp相同。热点已定位为E4多轮算法；经典C的J9已有跨轮行事实复用，模型未见对应映射。下一刀按真实变更复用行事实的最小等价实验，保留原轮数／输出／拒绝；不预断能达到2–3秒。 |
 | 实验室：J9裁决 | 2026-10-25私有输出offset＋generation缓存仅复用原样COPYL的simple行。八例经典C／原NN／新NN及大输入均字节一致；同一实际ISA、包和8,446,684字节输入：原模型32.523秒、新模型39.114秒，慢20.27%。缓存增加的银行／动作成本未被收益抵消，完整接受域不别名证明亦未完成。 | **不合入**，产品仍为2974978e…／c90f0002…；报告`/tmp/unisacc-c43-e4-linefacts-prototype.txt`，补丁仅仓外审查材料。不能将经典C的数组缓存收益直接套到模型VM，也不能称J9思路整体不可行；后续需比较实际动作与内存成本，本轮回到当前候选验收。 |
+| 实验室：批摘要候选 | 私有mask摘要TSV已有341规则语法检查及补丁适用检查，未构造模型／跑ISA，不能合入或宣称提速。复用原四地址区的候选缺全域INTERN不别名证明；下一刀改用专属64位地址区，逐读写点核对地址来源、32位ALU截断与实际ISA承载，未完成证明仍保留缺口。 | `/tmp/unisacc-c43-e4-background/`，原`masked-summary.diff`与边界说明保留。只做私有轻活；前台M7持重令牌，不改冻结树，不以此作为0.0.43前置。 |
 | 封存室：E4 | 新seal已写入主树：49真实依赖、21接受例、96原始对拍全部相等，与候选shared/e4.net字节相同；writer与原58秒官方gate均rc0，负例全通过。零Python棘轮／inventory／inventory-derived／gate-layers四项rc0，无新增解释器调用。 | 原trace未修改；临时材料在`/srv/tmp/e4-reseal-20261025`。OUTDIR必须在ROOT外且位于TMPDIR内；前两次路径错误的原失败保留，最终清单无临时路径，不手删依赖。只重封受影响E4，不重建产品或其他模型；完整M7仍未完成。 |
 | Windows室：分片 | 五准备＋七消费已在最终源码上全部原41秒界rc0：cases为9.409／11.580秒，四拒绝片为22.466／21.103／24.467／23.118秒，ARM large为8.053秒。每目标13＋12拒绝片与原25项有序列表逐项核对，无遗漏／重复。完整计划实导1314节点／949边，旧聚合超时保留。 | 调度、缓存、状态均为.cx；旧独立裁判仅显式scope选择，无新Python依赖／调用点。共享材料与锁保持、12节点串行。批摘要17项原函数注入／实际SHA对照通过；stagemap补齐lower族后gate-layers原预算rc0，零Python／inventory／derived均rc0。开发证据`/tmp/unisacc-c43-winbatch-20261025/out/win{halves,final}-*`，正式M7仍需新队列。 |
 | 身份室：候选 | E4新候选、本机及三阶段实际SHA=`2974978e6deec45abf38bfac2ac24e3031969b1c65009798270491d8b1e6dd1f`；S=`c90f0002f02366d510e4c8c22d4757f934edf8c0719852e706b575a7137b47df`；配对侧车SHA=`b88e3a1c227e72e621cf810cc5975e0922ba34cf34aa9e51288142aaaf94480a`。版本／hello／O2摘要回归、ident及官方固定点rc0；完整M7未完成。 | 冻结`/tmp/unisacc-c43-e4-summary-final-20261024` @d09bd1decb；`out/f6-e4-stage{2,3}-package.log`、逐切片真实argv/rc/时间/SHA、`out/comboot/stages.json`。stage3数据复用而代码切片重编，非模型构造器自举证明。按源码、产物及配对侧车核对，不为刷新mtime重复构建；[F6证据](research/c43-f6-final-evidence/)已原位更新。 |
-| 控制室：现场 | 当前冻结`/tmp/unisacc-c43-m7-final-20261025` @a936e98453，1315节点／950边，env-pin及固定CODEX_TOOL_CALL_ID保持。原8项经指纹核验自动失效，原始状态与日志已保存到`out/m7-before-carrier-native/`。窗口011–016六目标bigclosure均rc0；仅Linux x86_64实际本机运行，其余为跨目标字节对拍。截至016为6/1315、0失败、1309待办，后续逐窗运行。 | 实时状态取`out/m7-final-state/results.json`及`out/m7-window-*.{log,status}`，本段为结证快照。旧010准备33秒rc142及55秒诊断保留，未覆盖为PASS。四默认-run修复单元及负例收据见工程室；完整M7仍未完成。 |
+| 控制室：现场 | 当前冻结`/tmp/unisacc-c43-m7-final-20261025` @a936e98453，1315节点／950边，env-pin及固定CODEX_TOOL_CALL_ID保持。旧8项指纹失效前完整保存到`out/m7-before-carrier-native/`。011–016六目标bigclosure均rc0，仅Linux x86_64本机运行；017 failfast通过86检查／3例；018–021 carrier四节点全部rc0，tools／models实际HIT（12.19／12.24秒），import／package重跑原断言（16.66／12.69秒）。截至021为11/1315、0失败、1304待办，后续逐窗运行。 | 实时状态取`out/m7-final-state/results.json`及`out/m7-window-*.{log,status}`，本段为结证快照。旧010准备33秒rc142及55秒诊断保留，未覆盖为PASS。完整M7仍未完成。 |
 | 工程室：本轮首红 | 原Python聚合55秒及首轮原生聚合33秒超时均保留。最终默认-run tools／models／import／package在原33秒界分别26.361／23.727／16.690／13.079秒rc0；八件（含dump/run）与原Python逐字节相同，消费者执行原断言。缺失／篡改工具均75，无隐式构造；独立静态审查未见新增阻断，四元数据闸最终均rc0。 | 单元冻结`/tmp/unisacc-c43-carrier-native-20261025/out/carrier-staged-*`，helper SHA=1d5901c7…87ae。工具五件SHA、三构造器cc-M系统头、精确recipe与完整basis绑定；模型持工具共享锁、起止核验，完整八件manifest才供消费者。新清单实导1315／950；`out/carrier-metadata-gates-v2.log`：零Python无增长、inventory无孤儿、派生字节相等、gate-layers通过。原生首轮与首次元数据失败原记录均保留。正式M7尚未完成；不迁旧PASS、不放宽限时。 |
 | 调度室：启动债 | 正式旧队列每窗导入gatequeue时，gatecanon-native无条件重编CPython适配模块，发生在t_begin之前；其耗时不进入prologue字段，却占父deadline。窗口010的prologue为8.324秒，子任务仅获33秒；预算差额还含收尾预留和取整，不能全称CPU耗时。 | `/tmp/unisacc-c43-m7-carrier-timeout-analysis.txt`、`tests/gatecanon-native`与`tests/gatequeue.py`。下一版继续原生队列事务迁移；若缓存适配器则绑定完整编译／链接工具、头文件、ABI及产物SHA，不以-x命中。不为此性能项中途改动正在验收的0.0.43冻结树。 |
 | 出口室：分类 | RESOURCE_UNKNOWN保留OPEN义务；H1超时不算PASS；DEFER不等于终态失败。 | [资源处置](research/c43-resource-disposition.md)、[裁定](release/rulings.tsv)、[分类](release/preauth.tsv)及完整退出表。不补写结果或虚构平台绿。 |
@@ -340,7 +341,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 | 发布链三格（2026-10-24动态状态） | 状态 | 证据边界 |
 |---|---|---|
 | ① 源码与发布身份 | 历史源码已推；本轮候选封存／RC待完成 | 当前本地提交不冒充远端发布身份；按§2主线推进 |
-| ② 本轮候选有效闸与收口收据 | **1315项：a936e98453冻结，窗口016为6终结／0失败** | 见§2思维树及记忆宫殿现场入口；旧失败及失效结果完整保留 |
+| ② 本轮候选有效闸与收口收据 | **1315项：a936e98453冻结，窗口021为11终结／0失败** | 见§2思维树及记忆宫殿现场入口；旧失败及失效结果完整保留 |
 | ③ 发行资产及正式发布 | 本轮未完成 | Latest仍v0.0.42；本轮0.0.43未因源码push而发布 |
 
 **根对现状（2026-10-22）**：开发已迁到新 Linux x86_64 宿主（16 核，内存充足，旧机 2.3G 内存压力导致的 seed-gen 卡死不再出现）。根部 `unisacc.com` 为工作树候选（本机由 `make model-com` 各步构建；宿主须有 clang/ld64.lld/llvm-nm 与 zlib 头，exec/c/BUILDING.md 未列，待补），每次表刀后按 `release/derived-map.tsv` + `release/tools/derivedcheck.py` 刷派生物、经 `release/tools/commitgate.sh` 提交。旧机第一至第七次根对重建/归位收据与宿主坑位已归档：[2026-10-22 过程归档](archive/prd-process-notes-20261022.md)。
