@@ -146,7 +146,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 0.0.43 公开发布
 ├─ 已完成：F1产品修复、F2文档／探针；F3历史基线187项=186 PASS＋1宿主未核
 ├─ 已完成：F6三实际编译器SHA相同；三阶段五代码切片实际重编、原50秒界通过
-├─ 当前：固定b09cbbf0b9的1317项正式M7已恢复；103窗29 PASS／5资源UNKNOWN／1283待办，无未裁定红
+├─ 当前：固定b09cbbf0b9的1317项正式M7已恢复；109窗85 PASS／6资源UNKNOWN／1226待办，无未裁定红
 │  ├─ 070窗自然结束、2193已终止；旧冻结的结果仅保留诊断，不计有效正式PASS
 │  ├─ 清单1317项；原seedmemory严格17例=行为16＋真实新鲜度1，后者仍UNKNOWN／OPEN
 │  ├─ 固定env-pin；绑定新HEAD与真实非空Git闭包身份，禁止迁移旧绿或沿用旧闭包hash
@@ -157,7 +157,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 └─ 待完成：Draft资产核对 → Latest／公开 → 下载SHA与运行复核
 ```
 
-**下一动作：保持b09cbbf0b9验收副本及原env-pin固定，继续M7；并提交真实version.h身份核验修复后重跑无secret Mac资格。** k2b两叶原40秒冷回归21.379／37.047秒rc0、四元数据闸及1317／954图已过，Python1744无升降。旧089状态完整存`out/m7-before-k2b-scopes/`，不迁未知闭包绿。Mac首轮40133626729两架构均通过固定候选拉取、配对／版本、原生default-run验源，staging嵌套case解析失败已修；第二轮40134154958两架构实际通过staging，builder因把带注释168字节version.h误当33字节单行而拒绝。已按真实version.h固定SHA核验；本机真实vendor文件四个精确原因拒绝均过（正确输入到达非Mac拒绝、坏版本、改header字节、坏payload SHA），均无work创建；下一刀重跑Mac；两轮原失败均保留。主树后续发布工具改动不导入运行中副本，产品C90／2974978e…不变。
+**下一动作：保持b09cbbf0b9验收副本及原env-pin固定，继续M7；并定位Mac ZIP回放丢失自建xattr的原因，保留原断言补证。** k2b两叶原40秒冷回归21.379／37.047秒rc0、四元数据闸及1317／954图已过，Python1744无升降。旧089状态完整存`out/m7-before-k2b-scopes/`，不迁未知闭包绿。Mac首轮40133626729两架构均通过固定候选拉取、配对／版本、原生default-run验源，staging嵌套case解析失败已修；第二轮40134154958两架构实际通过staging，builder因把带注释168字节version.h误当33字节单行而拒绝。已按真实version.h固定SHA核验；本机真实vendor文件四个精确原因拒绝均过（正确输入到达非Mac拒绝、坏版本、改header字节、坏payload SHA），均无work创建；第三轮40134450588两架构实际cc／lipo构造、plist、CLI版本及默认-run均过，仅ZIP回放丢自建app根xattr；下一最小实验同源比较两种ZIP布局：依据[Apple DTS分发建议](https://developer.apple.com/forums/thread/775923)，主资格移除sequesterRsrc，原app根xattr／payload cmp／CLI断言全部保留；旧sequestered布局另记真实rc作对照。两者显式rsrc／extattr并排除两个元数据抑制环境键，保存源／回放xattr与ZIP成员；原因与候选修复仍待真实Mac验证；各轮原失败均保留。主树后续发布工具改动不导入运行中副本，产品C90／2974978e…不变。
 
 <a id="memory-palace"></a>
 ### 记忆宫殿
@@ -175,8 +175,8 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 | CI室：RC六原生与Darwin | RC `cd30109850f1d8958cc004d82821c36c46543db3`：release-check run40122497134 attempt1六原生及严格矩阵成功，Windows双架构套件、Linux x86_64互操作／生命周期成功；Darwin run40122511661 attempt1两架构16报告rc0。 | `release/evidence/c43-candidate-ci.json`、`release/evidence/c43-darwin-ci.json`、`out/c43-darwin-cd301-40122511661/`。旧Darwin畸形输出run40122037341失败保留；这些签前证据不代替M7或签后court。 |
 | CI室：补充与安全网 | 后续head `ef7fb2e3bff5b4b4d74e2ca2f45207b0614c3c7c` 的release-check run40126270529十二job成功，六报告与matrix已下载核对；不可绑定成旧RC收据。新完整ci.yml run40126358606的五平台装根前置均成功；ARM job120968537890仍因native6 revived失败，不能宣称整轮绿。 | `out/c43-candidate-demo-40126270529/`；旧run40122511809／job120956934441原日志亦保留。native6的b_bitfield_compound仍缺两Python参考路输出及cc独立预期，不能因两路相同就删knownfail或称语义已修。额外安全网不替代已核RC release-check／Darwin证据。 |
 | 签名室：仍关闭 | Windows qualification／公司签名收据、Apple签名／公证／staple／DMG及最终字节下载核验仍待完成。minicon Apple具体接入／包读取权限未获答复，不部署、不读凭据、不执行签名。私有服务production_admission=false。 | `/tmp/unisacc-c43-apple-adapter/BOOTSTRAP.md`固定bootstrap有20项离线检查；`CLEANUP-GUARD.md`的controller守卫接线21项Node检查及默认-run树清理正／负例已过，Mac系统语义未跑。真实M7／资格验证／外部接线仍未完成，不称可部署服务。 |
-| Windows室：原生收据准备 | 私有receipt.cx已绑定固定1316计划／portable argv、env-pin、stamp／原log、真实rc2末行及规则来源；真实未完成／inflight拒绝已跑，未生成正式收据，正例发布路径未认证。 | `/tmp/unisacc-c43-unsigned-native/BINDING-REPORT.txt`。独立干净RC源码快照`/tmp/unisacc-c43-rc-source-cd301-20261025`已在main绑定cd301，native ident实得同一产品S；正例ROOT须用它，不能把测试冻结伪配RC；当前helper仍绑定旧a877／1316，须先更新为b09／1317并重新验证拒绝。M7完整结证后才生成并审核正式收据。 |
-| Apple室：下一资格切面 | 将prepare所需旧Python bundle build迁为service-owned .cx，固定bootstrap默认-run；在unisacc自身准备无密钥Mac资格workflow，验证真实cc／lipo、bundle CLI默认-run及ditto xattr回放。仅产生资格夹具，不产出货编译器、不签名／公证，不冒充Developer ID或Gatekeeper验证。 | 私有bundle-build.cx先本机拒绝／静态审查，再落必要长期工具与无secret workflow；本地无法运行的Mac步骤由正式GitHub Mac runner核验。M7固定副本不导入此发布工具开发；minicon跨仓授权仍独立待答。 |
+| Windows室：原生收据准备 | 私有receipt.cx已绑定b09固定1317计划／portable argv、env-pin及stamp；日志out_sha按固定q的lossless portable规则核，原bytes另核raw SHA并出版前重读。真实partial先通过全部已有plan／stamp／log后因inflight rc2拒绝，输出ENOENT；尚无正式收据，完整正例路径未认证。 | `/tmp/unisacc-c43-unsigned-native/B09-BINDING-REPORT.txt`（含实际生产log摘要对拍、CRLF／非UTF8／NUL尾与负例）。独立干净RC源码快照`/tmp/unisacc-c43-rc-source-cd301-20261025`已在main绑定cd301，native ident实得同一产品S；正例ROOT须用它，不能把测试冻结伪配RC；当前helper SHA3e0d638c7c8dd24f95f3866628ca51cad0be324730b1b0ff2802794b1b3c53dc；旧raw误比失败完整保留。M7完整结证后才生成并审核正式收据。 |
+| Apple室：下一资格切面 | 将prepare所需旧Python bundle build迁为service-owned .cx，固定bootstrap默认-run；在unisacc自身准备无密钥Mac资格workflow，验证真实cc／lipo、bundle CLI默认-run及ditto xattr回放。仅产生资格夹具，不产出货编译器、不签名／公证，不冒充Developer ID或Gatekeeper验证。 | 根tests/macosbundle.cx与私有bundle-build.cx实际cmp同SHAef542e6ec28b357efd1dc70339cdba5bedf8eeba71ce85a8c91f79cdc17d2103；40134450588两架构真实构造／CLI／默认-run成功，ZIP根xattr回放仍失败；原JSON／log已下载至out/c43-macqual-40134450588/，配对布局实验待下一Mac执行。M7固定副本不导入此发布工具开发；minicon跨仓授权仍独立待答。 |
 | 发布室与后续边界 | Draft／Latest及签后完整court仍待办；源码push不等于发布。C44登记.cx模块化、内存安全、自有工具链与测试改进；C45登记流＋网外部调用及模块／权重共享，不另作0.0.43前置。 | [发布流程](release/RELEASE-PIPELINE.md)、[0.0.44计划](plans/v0.0.44.md)、[0.0.45计划](plans/v0.0.45.md)。详细历史以 `e89a17371d:prd.md` 追溯，不新增过程档案。 |
 
 **提速实证边界**：同1118输入的指纹采集12.4768→3.6886秒、摘要逐字节相同；计划生成的冷／热样本不可混作稳定提速。实际27.315460秒ISA切片中阶段执行27.184248秒，E4为14.396724秒；工程去重与E4算法优化须分别计量，不能承诺此样本两三秒。k2b正式097窗channel原40秒界36.02秒rc0；两叶分治不是总CPU加速证明。独立只读汇总位于`/tmp/unisacc-c43-engineering-cost-priorities.txt`。
