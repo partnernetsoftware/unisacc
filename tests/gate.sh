@@ -412,7 +412,9 @@ job exec-machx86 env ARCH=x86_64 ./exec/enc/machocheck.sh         # x86 Mach-O/s
 job exec-sparse ./exec/lower/sparsecheck.sh                      # large zero storage, independent layout assertions
 job exec-lowdata ./exec/lower/check.sh                           # raw E4 tape data decoding/layout through delta
 job exec-lower ./exec/lower/fullcheck.sh                        # typed full Linux lowering comparison
-job exec-armlower ./exec/lower/armcheck.sh                     # ARM ABI, sext/immediate fusion and real tapes
+# Original ARM lowering checks, both complete target scopes, same suite budget.
+job exec-armlower-linux  sh ./tests/cxbin tests/armlowerphase.cx linux
+job exec-armlower-darwin sh ./tests/cxbin tests/armlowerphase.cx darwin
 job exec-winlower ./exec/lower/wincheck.sh                     # Windows typed setup, syscall preservation, both architectures
 job exec-x86win ./exec/enc/x86wincheck.sh                      # Deferred Windows x86 setup after relaxation
 job exec-armwin ./exec/enc/armwincheck.sh                      # Windows ARM setup/gates, real text bytes

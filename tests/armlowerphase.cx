@@ -1,0 +1,86 @@
+#!/usr/bin/env -S unisacc.com -run
+/* ARM lowering target routing only; no verdict/material cache. Caller bounds
+   cxbin plus this exec at the unchanged suite budget. Only byte slices of the
+   pinned original script execute; no new interpreter command is written here.
+   execvp preserves inherited environment/deadline/scope and original $0. */
+#define ARM_SOURCE "./exec/lower/armcheck.sh"
+#define ARM_SHA "5cfbe6bf6005744b46ee092f5a771056c518b820c31613881d92cef4969a28a3"
+static const char *const MARKERS[] = {
+    "b cc -O2 -o \"$T/run\" exec/c/run.c\n",
+    "b \"$UA\" -S examples/hello.c -o \"$T/hello\"\n",
+    "b \"$UA\" -O2 -S examples/fib.c -o \"$T/fib\"\n",
+    "# Darwin shares the lowering algorithm but selects its own ABI and carry rule.\n"
+};
+static const char *const PARTS[] = { "linux", "darwin" };
+/* A: preamble through runtime cc; B: Linux model construction;
+   C: both original UA commands; D: Linux full comparison;
+   E: Darwin comment and complete model/conversion/comparison tail.
+   A+B+C+D+E reconstructs original; linux=A+B+C+D, darwin=A+C+E. */
+static const int SELECT[2][5] = { {1,1,1,1,0}, {1,0,1,0,1} };
+
+static int fail(const char *why) {
+    fprintf(stderr, "armlowerphase: FAIL %s\n", why); return 1;
+}
+
+int main(int argc, char **argv) {
+    char *source, *marker[4], *rebuilt, *script;
+    char hex[65]; size_t n, offsets[6], lens[5], cursor, total;
+    int i, part = -1; char *command[5];
+    if (argc != 2) return fail("usage: armlowerphase.cx linux|darwin");
+    for (i=0; i<2; i++) if (!strcmp(argv[1],PARTS[i])) part=i;
+    if (part<0) return fail("unknown phase");
+    source=cx_read(ARM_SOURCE,&n);
+    if (!source) return fail("cannot read original source");
+    if (!n || n>16384 || memchr(source,0,n)) return fail("source length/NUL");
+    cx_sha256_hex(source,n,hex);
+    if (strcmp(hex,ARM_SHA)) return fail("original source SHA changed");
+    for (i=0; i<4; i++) {
+        marker[i]=strstr(source,MARKERS[i]);
+        if (!marker[i] || (marker[i]!=source && marker[i][-1]!='\n') ||
+            strstr(marker[i]+1,MARKERS[i])) return fail("missing/ambiguous/non-line marker");
+        if (i && marker[i]<=marker[i-1]) return fail("markers out of order");
+    }
+    if (marker[1]+strlen(MARKERS[1])!=marker[2]) return fail("UA pair not adjacent original lines");
+    offsets[0]=0;
+    offsets[1]=(size_t)(marker[0]-source)+strlen(MARKERS[0]);
+    offsets[2]=(size_t)(marker[1]-source);
+    offsets[3]=(size_t)(marker[2]-source)+strlen(MARKERS[2]);
+    offsets[4]=(size_t)(marker[3]-source);
+    offsets[5]=n;
+    rebuilt=malloc(n+1);
+    if (!rebuilt) return fail("allocation");
+    cursor=0;
+    for (i=0; i<5; i++) {
+        if (offsets[i+1]<=offsets[i]) return fail("empty/out-of-order block");
+        lens[i]=offsets[i+1]-offsets[i];
+        memcpy(rebuilt+cursor,source+offsets[i],lens[i]); cursor+=lens[i];
+    }
+    rebuilt[cursor]=0;
+    cx_sha256_hex(rebuilt,cursor,hex);
+    if (cursor!=n || memcmp(rebuilt,source,n) || strcmp(hex,ARM_SHA))
+        return fail("A+B+C+D+E does not reconstruct entire original");
+    /* Every target-specific block appears once; A/C are intentionally common.
+       Keep exact fixed selector rows, not arbitrary caller-supplied subsets. */
+    if (SELECT[0][0]!=1 || SELECT[1][0]!=1 ||
+        SELECT[0][2]!=1 || SELECT[1][2]!=1 ||
+        SELECT[0][1]!=1 || SELECT[1][1]!=0 ||
+        SELECT[0][3]!=1 || SELECT[1][3]!=0 ||
+        SELECT[0][4]!=0 || SELECT[1][4]!=1) return fail("invalid target partition");
+    total=0;
+    for (i=0; i<5; i++) if (SELECT[part][i]) total+=lens[i];
+    if (!total) return fail("empty selected script");
+    script=malloc(total+1);
+    if (!script) return fail("allocation");
+    cursor=0;
+    for (i=0; i<5; i++) if (SELECT[part][i]) {
+        memcpy(script+cursor,source+offsets[i],lens[i]); cursor+=lens[i];
+    }
+    script[cursor]=0;
+    if (cursor!=total) return fail("selection length");
+    printf("armlowerphase %s original-sha %s\n",PARTS[part],ARM_SHA);
+    fflush(stdout);
+    command[0]="sh"; command[1]="-c"; command[2]=script;
+    command[3]=ARM_SOURCE; command[4]=0;
+    execvp(command[0],command);
+    return fail("exec sh failed");
+}

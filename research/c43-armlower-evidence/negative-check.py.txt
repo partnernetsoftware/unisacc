@@ -1,0 +1,22 @@
+# Scratch-only source guard observer; never used as a repository execution path.
+import pathlib,subprocess,hashlib,json
+root=pathlib.Path('/mnt');src=root/'exec/lower/armcheck.sh';original=src.read_bytes();before=hashlib.sha256(original).hexdigest();rows=[]
+def probe(label,phase,expected):
+ p=subprocess.run(['tests/bound','5','out/armlowerphase',phase],capture_output=True)
+ (root/'out'/(label+'.log')).write_bytes(p.stdout+p.stderr)
+ assert p.returncode==1 and not p.stdout and expected.encode() in p.stderr,(label,p.returncode,p.stdout,p.stderr)
+ rows.append({'label':label,'rc':p.returncode,'stderr':p.stderr.decode()})
+probe('negative-phase','all','unknown phase')
+try:
+ src.write_bytes(original+b'\n# source identity negative\n');probe('negative-sha','linux','original source SHA changed')
+ corrupted=bytearray(original);corrupted[0]=0;src.write_bytes(corrupted);probe('negative-nul','darwin','source length/NUL')
+ src.write_bytes(original);backup=src.with_name('armcheck.sh.negative-backup')
+ try:backup.stat()
+ except FileNotFoundError:pass
+ else:raise AssertionError('backup exists')
+ src.rename(backup)
+ try:probe('negative-missing','linux','cannot read original source')
+ finally:backup.rename(src)
+finally:src.write_bytes(original)
+assert hashlib.sha256(src.read_bytes()).hexdigest()==before
+(root/'out/negative-results.json').write_text(json.dumps({'source_restored_sha256':before,'checks':rows},indent=2)+'\n');print('ARM source guards',len(rows),'all reject1; source restored',before)
