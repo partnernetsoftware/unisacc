@@ -25,15 +25,29 @@ class HostChecks(unittest.TestCase):
             self.assertEqual(declared['lib-windows-gp-native']['probe'],'native-msabi-bridge')
             self.assertEqual(declared['lib-windows-gp-native']['dependencies'],'clang-arch-x86_64')
             self.assertEqual(declared['lib-windows-imports']['required'],'native-posix')
-            self.assertEqual(declared['exec-native-chain']['target'],'host')
+            native_leaves={
+                'exec-native-resources-prep',
+                'exec-native-stages-examples', 'exec-native-stages-self',
+                'exec-native-chain-examples', 'exec-native-chain-self-c',
+                'exec-native-chain-self-network', 'exec-native-resources',
+            }
+            self.assertEqual({name for name in declared if name.startswith('exec-native-')},native_leaves)
+            for name in sorted(native_leaves):
+                with self.subTest(com=com,suite=name):
+                    self.assertEqual(declared[name]['target'],'host')
+                    self.assertEqual(declared[name]['required'],'native-posix')
+                    self.assertEqual(declared[name]['dependencies'],'cc')
+                    self.assertEqual(declared[name]['probe'],'native-network-runtime')
             self.assertEqual(declared['csmithdiff-40']['dependencies'],'csmith')
             for name in ('seedparse2-1','seedparse2-2','seedgen','seedgen-2','seedgen-3','seedgen-4','com-seedgen'):
                 self.assertEqual(declared[name]['dependencies'],'seed-memory:'+name)
             self.assertTrue(any(d['required']=='UNKNOWN' for d in declared.values()))
         self.assertIn('com-csmithdiff-40',h.declarations(True))
     def test_inventory_cannot_return_success_without_probes(self):
-        r=subprocess.run([sys.executable,str(h.ROOT/'tests/bound.py'),'15',sys.executable,str(h.ROOT/'tests/hostcheck.py'),'--inventory','--suite','exec-native-chain'],capture_output=True,text=True)
+        r=subprocess.run([sys.executable,str(h.ROOT/'tests/bound.py'),'15',sys.executable,str(h.ROOT/'tests/hostcheck.py'),'--inventory','--suite','exec-native-chain-examples'],capture_output=True,text=True)
         self.assertEqual(r.returncode,77,(r.stdout,r.stderr))
+        self.assertTrue(r.stdout.splitlines()[0].startswith('exec-native-chain-examples '))
+        self.assertIn('required=native-posix target=host',r.stdout)
         self.assertTrue(r.stdout.splitlines()[-1].startswith('UNVERIFIED:'))
     def test_missing_tool_and_missing_header(self):
         with patch.object(h.shutil,'which',return_value=None):
