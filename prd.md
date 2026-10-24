@@ -147,8 +147,8 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 ├─ 已完成：F1 产品修复；F2 文档与探针收口
 ├─ 已完成：F3 历史 CONTRACT 基线（187项：186 PASS、1宿主未核）
 ├─ 已完成：F6 候选构建、三阶段 SHA 固定点
-├─ 当前：F4／M7 两项预算修复已定点通过，准备1142项fresh验收 ← 当前节点
-│  ├─ 新脚本HEAD由本次提交后的启动收据绑定；产品S/H0仍与原117e374653候选相同
+├─ 正在执行：F4／M7 本轮1142项fresh完整验收 ← 当前节点
+│  ├─ 冻结源码7122be5bb713209e8b46a35669d873a4032abdf5；产品S/H0仍与原候选相同
 │  ├─ 本次仅重分ccrun-8和exec-e4-3；原1140计划中其余1138项argv逐字节不变
 │  ├─ 原302项及修复前142/285项记录全保留，不迁新绿；准备结果不算验收PASS
 │  ├─ 语料Git已修复并核验1885项内容／模式；原1140轮tools与regex准备rc0，新轮仍须执行
@@ -161,7 +161,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 └─ 待完成：Draft资产核对 → Latest／公开 → 下载SHA与运行复核
 ```
 
-**下一动作：完成派生与提交，固定新HEAD及1142项计划，复核未变准备后fresh启动。** 前者原VM路径超时；后者已打印61文件／122相等／bad0，但原41秒未正常返回，不能记PASS。exec-e4self匹配既有H1裁定，不加入新修复。保留旧证据和未变的模型准备，不放宽预算或补写结果。 修复前142项原记录完整保留在`out/f4-fixture-incident`，不迁新绿；16项同输入模型准备保留，fresh入口复核输入。语料复制必须包含所需的嵌套Git元数据，旧准备脚本的遗漏不能再次沿用。 旧分类红、短预算DEFER及已实现功能不重新立研究题；新的必要修复才改变调度。当前不再为通用优化、归档或新模板中断主线。F3历史基线、阶段独立实跑及缓存准备不替代完整F4。
+**下一动作：持续执行本轮1142项完整验收，非零项先按既有分类处理；只有真实终态及完整处置才能进入封存。** 前者原VM路径超时；后者已打印61文件／122相等／bad0，但原41秒未正常返回，不能记PASS。exec-e4self匹配既有H1裁定，不加入新修复。保留旧证据和未变的模型准备，不放宽预算或补写结果。 修复前142项原记录完整保留在`out/f4-fixture-incident`，不迁新绿；16项同输入模型准备保留，fresh入口复核输入。语料复制必须包含所需的嵌套Git元数据，旧准备脚本的遗漏不能再次沿用。 旧分类红、短预算DEFER及已实现功能不重新立研究题；新的必要修复才改变调度。当前不再为通用优化、归档或新模板中断主线。F3历史基线、阶段独立实跑及缓存准备不替代完整F4。
 
 <a id="memory-palace"></a>
 ### 记忆宫殿
@@ -171,7 +171,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 | 入口厅：目标 | 公开发布0.0.43；当前节点F4/M7，不是重做F1。 | 上方思维树；[范围](plans/v0.0.43.md)、[终点线](plans/v0.0.43-finish-line.md)。旧未授描述不覆盖当前明确目标授权。 |
 | 工具间：能力 | 默认-run、tape→image、六目标、`.cx`模块已实现；经典UA与模型产品是不同实现。 | [能力速查](#implemented-usage)、[README](README.md)、已有用例。只验证具体输入的证据缺口，不重新研究入口是否存在。 |
 | 身份室：候选 | H0=`4f0b493c7a83d73a4ae1b348c8400ea3b7eda0ea190051b54a84c712a6730eda`；S=`c4618639cc3fcfac4f8ce52a11df3bdab93b2c9376eecee63fd70e6550adc57f`；用候选7298侧车。 | [F6证据](research/c43-f6-final-evidence/)。按源码摘要、产物及侧车SHA核对，mtime不单独决定新鲜度；不为刷新mtime重复构建。 |
-| 控制室：现场 | 本轮根`/tmp/unisacc-c43-pe-accept-20261024`；状态`out/f4-final-state`，窗口`out/f4-final-run`，驱动日志`out/f4-driver.log`；旧会话91453和35610均已按窗口边界返回76；当前四组定点实跑通过，正在提交，完整队列尚未重启。 | 每轮读取实际结果与存活进程／会话，核fresh收据和env pin；锁或旧日志不能证明存活。瞬时计数以现场为准。 |
+| 控制室：现场 | 本轮根`/tmp/unisacc-c43-pe-accept-20261024`；状态`out/f4-final-state`，窗口`out/f4-final-run`，驱动日志`out/f4-driver.log`；当前本线程会话67581；旧91453与35610均已按窗口边界返回76，原记录归档不迁绿。 | 每轮读取实际结果与存活进程／会话，核fresh收据和env pin；锁或旧日志不能证明存活。瞬时计数以现场为准。 |
 | 出口室：分类 | RESOURCE_UNKNOWN保留OPEN义务；H1超时不算PASS；DEFER不等于终态失败。 | [资源处置](research/c43-resource-disposition.md)、[裁定](release/rulings.tsv)、[分类](release/preauth.tsv)及完整退出表。不补写结果或虚构平台绿。 |
 | 发布室：交付 | M7之后封存；候选CI、签名、最终字节和公开下载须真实收据。 | [发布流水线](release/RELEASE-PIPELINE.md)、[候选记录](release/candidate.json)；当前候选记录尚不是0.0.43封存证明。 |
 | 暂存室：边界 | 0.0.44登记.cx模块化／内存安全、自有工具链与测试改进；0.0.45登记流＋网模块外部调用及模块／权重共享；均不另作0.0.43前置。typed/callback迁移与广泛research归档保留后续范围。 | [0.0.44计划](plans/v0.0.44.md)、[0.0.45计划](plans/v0.0.45.md)、[路线](#5-路线)。新动态推进用`unisacc.com + .cx`，减少脚本，转调不算原生化。 |
@@ -327,7 +327,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 | 发布链三格（2026-10-24动态状态） | 状态 | 证据边界 |
 |---|---|---|
 | ① 源码与发布身份 | 历史源码已推；本轮候选封存／RC待完成 | 当前本地提交不冒充远端发布身份；按§2主线推进 |
-| ② 本轮候选有效闸与收口收据 | **READY：1142项待fresh启动，终态待收口** | 见§2思维树及记忆宫殿现场入口；不以历史局部结果顶替 |
+| ② 本轮候选有效闸与收口收据 | **RUNNING：1142项，终态待收口** | 见§2思维树及记忆宫殿现场入口；不以历史局部结果顶替 |
 | ③ 发行资产及正式发布 | 本轮未完成 | Latest仍v0.0.42；本轮0.0.43未因源码push而发布 |
 
 **根对现状（2026-10-22）**：开发已迁到新 Linux x86_64 宿主（16 核，内存充足，旧机 2.3G 内存压力导致的 seed-gen 卡死不再出现）。根部 `unisacc.com` 为工作树候选（本机由 `make model-com` 各步构建；宿主须有 clang/ld64.lld/llvm-nm 与 zlib 头，exec/c/BUILDING.md 未列，待补），每次表刀后按 `release/derived-map.tsv` + `release/tools/derivedcheck.py` 刷派生物、经 `release/tools/commitgate.sh` 提交。旧机第一至第七次根对重建/归位收据与宿主坑位已归档：[2026-10-22 过程归档](archive/prd-process-notes-20261022.md)。
@@ -521,7 +521,7 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 - 断言按 contract / stage / pipeline / platform 分账，见 [tests/GATE-LAYERS.md](tests/GATE-LAYERS.md)；局部绿不代全链，未覆盖不计通过。
 - 清单、来源身份、实际受试字节与原始结果分别可核；C99覆盖见 [tests/c99/clauses.tsv](tests/c99/clauses.tsv)，测试入口见 [tests/INVENTORY.md](tests/INVENTORY.md)。
 - 当前开发按具名差集及必要合同门推进，准备/构造与测量单列预算；不得因历史流水线描述自动全量打包、重封或恢复旧队列。
-- 发布流程权威入口：[release/RELEASE-PIPELINE.md](release/RELEASE-PIPELINE.md)、[release/README.md](release/README.md)及工作流。流程文档不等于执行授权；本轮1142项完整计划待fresh启动，终态待收口（见§2）。
+- 发布流程权威入口：[release/RELEASE-PIPELINE.md](release/RELEASE-PIPELINE.md)、[release/README.md](release/README.md)及工作流。流程文档不等于执行授权；本轮1142项完整验收正在执行，终态待收口（见§2）。
 
 ## 5. 路线
 
