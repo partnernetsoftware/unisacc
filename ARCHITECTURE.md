@@ -27,10 +27,10 @@
 
 | 身份 | 尺寸 / SHA256 / 验证边界 |
 |---|---|
-| 已发布版本及其字节 | **不在本文件重述**：权威表在 [README 的 artifact 行](README.md)与 [prd §2 计划索引](prd.md)，每个版本带签后大小、SHA-256 与验收收据（最新 v0.0.36） |
+| 已发布版本及其字节 | **不在本文件重述**：权威表在 [README 的 artifact 行](README.md)与 [prd §2 计划索引](prd.md#current-plans)，每个版本带签后大小、SHA-256 与验收收据 |
 
-六目标实跑：本机 osx/arm64 与 Rosetta 全量门禁；Lima lnx/arm64、lnx/x86_64 与 UTM win/arm64、win/x86_64 跑 examples（`tests/crossnative.sh`）并完成 Windows 双目标编译器自举。macOS/Rosetta 本地门禁不等于六平台全绿。完整身份、
-历史单次memory计时与收据见 [单次 memory 集成证据](archive/research/20260928/memory-once-integrated-bench-20260928.json)。
+平台验收按当前候选分别记证，完整状态见 [PRD 思维树](prd.md#work-tree)，发布证据边界见 [发布流水线](release/RELEASE-PIPELINE.md)。历史 macOS/Rosetta、Lima/UTM 实跑与 Windows 双目标自举只证明当时的输入与环境，不代表当前候选六平台通过。
+历史单次 memory 计时、身份与收据见 [单次 memory 集成证据](archive/research/20260928/memory-once-integrated-bench-20260928.json)及下列 S-17 迁移档案。
 共享网络数与阶段行数**不在此重述**：权威是 [prd 的模型字节账](prd.md#model-function-bytes)（生成自
 `research/model-bytes.json`）；模板、库源码、核与平台驱动另计，
 不能把引用数当网络物理份数，也不能把 CRC 当发行签名。
@@ -73,7 +73,7 @@ Windows Authenticode 单列验收。Mach-O ad-hoc 签名仅满足运行格式要
 
 | 位置 | 内容 | 由谁写出 |
 |---|---|---|
-| `weights/gold/<阶段>.tsv` | **真值表本身**，一行一个键：先是键的各字段值，然后是每个输出头的类。18 个阶段共 8,769 行 | `python3 -m unisa gold-export`（`build-weights` 会顺带执行） |
+| `weights/gold/<阶段>.tsv` | **真值表本身**，一行一个键：先是键的各字段值，然后是每个输出头的类。经典事实网的数量与键数见 [PRD 术语表](prd.md#0-概念与术语先读歧义以本节为准)及 [README 真值表](README.md) | `python3 -m unisa gold-export`（`build-weights` 会顺带执行） |
 | `weights/built.json` | 构造出的权重，JSON，便于阅读和调试 | `python3 -m unisa build-weights`（约 20 s） |
 | `weights/built.uns2` | 同一份经典参考权重的紧凑二进制 | 同上 |
 | `kernel/unisa_model.inc` | 权重、各阶段维度、词表、编码器操作码表的 C 形态，经典参考读取它 | `python3 -m unisa emit-kernel` |
