@@ -43,7 +43,8 @@
 
 `local_gate_complete` 是主人的本地构建/门禁声明字段，必须对应保留的证据；
 工作流验证封存声明和字节一致性，不会重新执行本机门禁。`upstream` 必须是
-本仓库 `.github/workflows/ci.yml` 在 `main` 上已经成功的精确 attempt。
+本仓库 `.github/workflows/release-check.yml` 在 `main` 上已经成功、与RC源码匹配的精确 attempt，
+以 `windows-signing.yml` 的真实校验为准。另行调度的 `ci.yml` 是源码安全网，不能替代封存候选的六原生pull／执行证据。
 **正式 Draft/发布验收以该 CI 成功 attempt 为准**（含 macos runner）；CI 不是发行二进制的生产者，但**替代**「须等私有 Darwin 宿主上线才开 Draft」的旧口径。
 `product_version` 必须精确等于源码 `src/version.h` 中唯一的 `UNISACC_VERSION`；
 未知版本或仅形状合法但不匹配的版本拒绝。ZIP原始名称必须没有NUL截断，成员只接受
