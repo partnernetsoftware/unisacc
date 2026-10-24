@@ -699,3 +699,5 @@ source-only 冷准备在原 55 秒看门狗内实际成功；具名 gate 的冷�
 - unitparse 首索引六项5绿，消费者16s真0；唯一G5红是HANDOFF新增复制原生成器调用文本（该文档在冻结术语baseline外）。改为引用现有wrapper三个fresh原声明与次序，不再新复制解释器可执行声明；不改运行代码、扫描器或白名单，原红日志保留并重跑原六项。
 
 - 2026-10-24 F4 R2 precommithook 实际首红：自测夹具只复制分类器与cxbin、链接同代产品，却没有include目录；原始err明确缺include/*.h，新cxbin完整SHA闭包因此正确拒绝，未到紧急跳过的日志分支。决定仅在夹具基础提交前复制真实顶层头文件，保留hook分类先于跳过、cxbin严格失败传播及全部既有断言；不以旧缓存或宿主裁定掩盖。原R2红原样保留，索引与新树验收须分别取真实证据，不能用原红或旧通过结论替代。
+
+- 2026-10-24 F4 新树复验：precommithook rc0；unitparse 的完整六项索引约束中，zeropython、docs、cxinclude、glossarycheck、gate-layers 均rc0，exec-unitparse 经既有 fresh 协议单独准备 ref/json/dump 后以消费者门禁rc0（17秒）完成。首次聚合冷启动在 60 秒外层窗中止，保留为准备时序证据，不调大限时。modelobject 八份独立准备均rc0（最长约41秒），随后 exec-modelobject 消费者 rc0（41秒）：六网全域校验及22个对象字节对拍均实际执行；不将准备结果冒充消费者通过。
