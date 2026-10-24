@@ -98,7 +98,7 @@ job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
     if [ "$LIST" = 3 ]; then
         # Executing host and emitted target are separate obligations.
         case $name in
-          hostcheck|stagelog|exittable|h1source|seedmemory|attemptchain|c99precheck|rulingwait|namedrefuse|checkrun|commitgate|queuestart|queuestart-strict|queuestart-launch|queuetimeout|gatesummary|observation|gqalive|queuetimer|docedit|whyrerun|draftfetch|draftguard) req='any|host|python3|cdx|selfcheck';;
+          hostcheck|stagelog|exittable|h1source|seedmemory|seedmemory-evidence|attemptchain|c99precheck|rulingwait|namedrefuse|checkrun|commitgate|queuestart|queuestart-strict|queuestart-launch|queuetimeout|gatesummary|observation|gqalive|queuetimer|docedit|whyrerun|draftfetch|draftguard) req='any|host|python3|cdx|selfcheck';;
           seedparse2-1|seedparse2-2|seedgen|seedgen-2|seedgen-3|seedgen-4|com-seedgen) req="native-posix|host|seed-memory:$name|cdx|fresh-memory-admission";;
           csmithdiff-*|com-csmithdiff-*) req='any|host|csmith|cdx|csmith-fixed-seed-compile';;
           lib-stack-arm) req='darwin-arm64|osx/arm64|cc-arch-arm64|cdx|native-stack-bridge';;
@@ -204,7 +204,8 @@ job dsl-ops python3 ./tests/dslops.py   # T2: one independent contract and mutat
 job declshape bash -c 'R=$PWD; export UA=${UA:-/tmp/ua_ref}; . tests/lib.sh && ua_ready && python3 ./tests/declshape.py'   # 0.0.22 (cdx): declarator metamorphisms -- equivalent spellings agree
 job volatile-comma bash -c 'R=$PWD; export UA=${UA:-/tmp/ua_ref}; . tests/lib.sh && ua_ready && tests/bound 58 sh ./tests/cxbin tests/volatilecomma.cx'   # (.cx port, 2026-10-23) V1 traced reads: six g_observed reads at -O0..-O2 in the reference tape VM (tests/cxlib/tapevm.cx) + system-cc load
 job hostcheck python3 ./tests/hostcheckcheck.py
-job seedmemory tests/bound 58 sh ./unisacc.com -run tests/seedmemory.cx -- --selftest   # (.cx port, 2026-10-23) resource admission negative cases (17 seedmemorycheck.py cases), never starts a generator; nested gate seedgen-3 must be rc=77
+job seedmemory tests/bound 58 sh ./unisacc.com -run tests/seedmemory.cx -- --selftest-functional   # original 16 behavior cases; strict --selftest still runs all 17
+job seedmemory-evidence tests/bound 58 sh ./unisacc.com -run tests/seedmemory.cx -- --evidence-check   # original live-key case: actual drift remains rc2 RESOURCE_UNKNOWN/OPEN, never PASS/77
 job seedgen-let-exit tests/bound 58 sh ./unisacc.com -run tests/seedletexitcheck.cx   # (.cx port, 2026-10-23) generic constructor exit before write, C/P byte parity
 job copy-contract tests/bound 58 sh ./unisacc.com -run tests/copycontractcheck.cx   # (.cx port, 2026-10-23) copy/copy-state/rule:MODE C/P parity over tests/cpparity/cases.tsv families copy,mode (drop-edge live); P = exec/build/gen.py + exec/c/tbl.py, C = seed/gen.c
 job ri-snapshot-overlay sh ./tests/risnapshotcheck.sh   # RI snapshot overlay: sealed E3 accept hit + fall-through visible in capture
