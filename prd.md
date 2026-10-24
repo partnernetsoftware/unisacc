@@ -147,13 +147,14 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 ├─ 已完成：F1 产品修复；F2 文档与探针收口
 ├─ 已完成：F3 历史 CONTRACT 基线（187项：186 PASS、1宿主未核）
 ├─ 已完成：新F6三实际SHA相同且官方固定点通过；stage3复用同身份模型包，五代码切片均由stage2实际重编，原50秒界通过
-├─ 正在执行：F4／M7 窗口023首红停窗，定位语料并发准备与尾窗记录 ← 当前节点
-│  ├─ 产品来源d09bd1decb／S=c90f0002…不变；开发计划实导1315节点／950依赖，Windows全部分片原预算通过
+├─ 正在执行：F4／M7 语料依赖、真实结证与启动修复已验证，收口新冻结 ← 当前节点
+│  ├─ 产品来源d09bd1decb／S=c90f0002…不变；开发完整图1315节点／954依赖，Windows全部分片原预算通过
 │  ├─ 已实跑：七流独立工具链；native六叶；functionimports六准备＋20案例；callback12目标＋四片消费
 │  ├─ 已修复：typed/callsite完整材料命中及无关检查脚本触发失效；普通七流／native资源缓存拆层仍待做
 │  ├─ E4块摘要修复与新候选固定点已通过；完整M7仍待完成
 │  ├─ E4重封、Windows分片与元数据闸通过；截至023为32结证：21 PASS、5 RESOURCE_UNKNOWN、5 NEEDS_RULING、1 BLOCKED；1283待办
 │  ├─ 首红修复a936e98453的四默认-run节点已在正式M7全部rc0；tools／models均HIT，两个消费者重跑原断言
+│  ├─ 023后修复：四tools原33秒通过；最终退出／恢复／I/O异常回归原55秒通过；计划三模式逐字节相同，热计划0.824秒
 │  ├─ 后台E4性能研究仅私有设计／实验，不改当前候选、不作为0.0.43前置；前台不等待提速
 │  ├─ 旧1142轮已停窗；原失败与未执行项保留，准备仅计PREPARED，不迁旧PASS
 │  └─ 完成判据：最终模块清单完整、PENDING=0、NEEDS_RULING=0、product_red=0、处置齐全
@@ -164,7 +165,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 └─ 待完成：Draft资产核对 → Latest／公开 → 下载SHA与运行复核
 ```
 
-**下一动作：修复tools语料并发准备缺口并单独验证受影响项，核查corpus-3尾窗重排后恢复M7；随后封存、CI、签名及公开，后台E4提速不作为前置。** 用户2026-10-25明确要求前台继续发布、后台慢慢改进。当前候选块摘要修复、八例对拍、大E4输入、hello／O2回归、三阶段实际SHA和官方固定点已通过；E4重封及Windows全部分片已收口，不为测试工具变化重建相同产品。J9缓存实验慢20.27%，不合入；后台下一方向是批量构造寄存器摘要，仅在私有副本研究。普通七流／native资源缓存拆层仍待做，非新增发布前置。NN、表参考、准备／校验分开计时；不新增解释器依赖、不放宽闸、不迁旧M7绿。未知闭包禁用结果缓存，RESOURCE_UNKNOWN保留OPEN，H1超时不算PASS。完整M7后仍须匹配候选的六平台CI、签名及公开下载验证；具体Apple接入仍待授权。历史过程留Git与原始证据，不再堆入当前上下文。
+**下一动作：收口已验证的依赖／结证／启动修复及元数据，更新正式冻结并实跑长单元预算；随后完成M7、封存、CI、签名及公开。后台E4提速不作为前置。** 用户2026-10-25明确要求前台继续发布、后台慢慢改进。当前候选块摘要修复、八例对拍、大E4输入、hello／O2回归、三阶段实际SHA和官方固定点已通过；E4重封及Windows全部分片已收口，不为测试工具变化重建相同产品。J9缓存实验慢20.27%，不合入；后台下一方向是批量构造寄存器摘要，仅在私有副本研究。普通七流／native资源缓存拆层仍待做，非新增发布前置。NN、表参考、准备／校验分开计时；不新增解释器依赖、不放宽闸、不迁旧M7绿。未知闭包禁用结果缓存，RESOURCE_UNKNOWN保留OPEN，H1超时不算PASS。完整M7后仍须匹配候选的六平台CI、签名及公开下载验证；具体Apple接入仍待授权。历史过程留Git与原始证据，不再堆入当前上下文。
 
 
 <a id="memory-palace"></a>
@@ -184,7 +185,9 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 | Windows室：分片 | 五准备＋七消费已在最终源码上全部原41秒界rc0：cases为9.409／11.580秒，四拒绝片为22.466／21.103／24.467／23.118秒，ARM large为8.053秒。每目标13＋12拒绝片与原25项有序列表逐项核对，无遗漏／重复。完整计划实导1314节点／949边，旧聚合超时保留。 | 调度、缓存、状态均为.cx；旧独立裁判仅显式scope选择，无新Python依赖／调用点。共享材料与锁保持、12节点串行。批摘要17项原函数注入／实际SHA对照通过；stagemap补齐lower族后gate-layers原预算rc0，零Python／inventory／derived均rc0。开发证据`/tmp/unisacc-c43-winbatch-20261025/out/win{halves,final}-*`，正式M7仍需新队列。 |
 | 身份室：候选 | E4新候选、本机及三阶段实际SHA=`2974978e6deec45abf38bfac2ac24e3031969b1c65009798270491d8b1e6dd1f`；S=`c90f0002f02366d510e4c8c22d4757f934edf8c0719852e706b575a7137b47df`；配对侧车SHA=`b88e3a1c227e72e621cf810cc5975e0922ba34cf34aa9e51288142aaaf94480a`。版本／hello／O2摘要回归、ident及官方固定点rc0；完整M7未完成。 | 冻结`/tmp/unisacc-c43-e4-summary-final-20261024` @d09bd1decb；`out/f6-e4-stage{2,3}-package.log`、逐切片真实argv/rc/时间/SHA、`out/comboot/stages.json`。stage3数据复用而代码切片重编，非模型构造器自举证明。按源码、产物及配对侧车核对，不为刷新mtime重复构建；[F6证据](research/c43-f6-final-evidence/)已原位更新。 |
 | 控制室：现场 | 当前冻结`/tmp/unisacc-c43-m7-final-20261025` @a936e98453，1315节点／950边，env-pin保持。018–021 carrier四节点正式rc0，tools／models HIT，消费者原断言重跑。023已自动停：32结证（21 PASS、5 RESOURCE_UNKNOWN、5 NEEDS_RULING、1 BLOCKED），1283待办。四tools项拒绝语料no commit；corpus-3尾窗limit12 rc142；regex2-run前置失败未运行。 | 原始`out/m7-window-023.log`、`out/m7-final-state/results.json`及`out/m7-exit-window023.json`。既有五RESOURCE_UNKNOWN仍OPEN；新五项未裁定不继续盲跑。旧8项状态另存`out/m7-before-carrier-native/`，所有原失败保留；无完整M7／发布结论。 |
-| 语料室：并发准备缺口 | tools-1/2/3与regex2-ref在023读到no commit；结窗后实际Git读取三个仓库HEAD已全为tools.sh固定提交，已核两仓tracked状态干净。tools.sh直接clone到共享目标，未完成目录即对并发者可见，符合本轮半成品竞争；regex2-build已rc0且其入口先核全部三仓。现有图只让run依赖ref/build，未约束其他初始读者。 | 下一刀优先修准备依赖／发布合同，只重跑受影响单元；不要清掉已完成且固定提交正确的语料再下载。corpus-3由队列finally以rc142保存但遗漏kind；现有加载逻辑按limit不足重排，尚未续跑实证，不把12秒尾窗当完整产品TIMEOUT。sourceS／产品字节不变，禁止挪成H1或PASS。 |
+| 语料室：准备依赖 | 023的四tools读者曾看到clone半成品；三仓现已为固定提交且检查干净。图新增四边，将tools-1/2/3及regex2-ref排在现有regex2-build之后；其入口先核全部三仓。完整图1315节点／954边无环，四受影响命令原33秒内分别15.286／9.722／9.906／13.855秒rc0。 | 私有单位`/tmp/unisacc-c43-carrier-native-20261025/out/tools-order-*`及主树`out/tools-order.graph.tsv`。原33秒regex2-run失败保留；独立55秒诊断35.262秒rc0、533字节与原参考相同，主要耗时为故意最坏复杂度的原程序。新正式预算仍待实跑，不降低覆盖或放宽限时。 |
+| 调度室：真实结证 | 旧finally统一伪写142。修复改为先收集自然rc、统一回收其他进程、再共用真实结算；tail取消立即DEFER，未知full沿原中断恢复。observer只消费一次；结证I/O异常先完整回收并继续其他结证，末尾保留首异常，恢复admission／进展而不产绿。 | 最终q.py SHA=3b00a139…92dfb52；私有单位`out/queue-cleanup-policy-v2.log`与`queue-cleanup-state-v3.log`均原55秒rc0，含原真实OS deaf回收、普通0/1/77/142、清理143/-9/0/None、次窗新attempt及memory/atomic故障。独立审查报告与首版失败保留；无新增解释器依赖／调用。 |
+| 调度室：启动预算 | 原计划4.287秒，单纯去重仅4.233秒。实际热点为每次列表默认-run编译prepdecl.cx（trace3.489497秒）；改用有实测依据的现成cxbin缓存后，冷计划4.276秒、热NUL计划0.824秒、list0.864秒、host-plan0.863秒，三种输出与原逐字节相同。C3/C4六片仅计算一次；metadatalist保留原缓存。 | 私有单位`out/gate-hot-*`、`gate-before-*`。复用工具字节，每次仍验证源码／模块／编译器身份并重新读声明，不缓存测试结论；动态控制仍默认-run。首次尝试将metadatalist改默认-run的7.6–8.0秒回退已撤销，原测量保留。须在完整正式窗口验证长单元预算，55／60界不变。 |
 | 工程室：本轮首红 | 原Python聚合55秒及首轮原生聚合33秒超时均保留。最终默认-run tools／models／import／package在原33秒界分别26.361／23.727／16.690／13.079秒rc0；八件（含dump/run）与原Python逐字节相同，消费者执行原断言。缺失／篡改工具均75，无隐式构造；独立静态审查未见新增阻断，四元数据闸最终均rc0。 | 单元冻结`/tmp/unisacc-c43-carrier-native-20261025/out/carrier-staged-*`，helper SHA=1d5901c7…87ae。工具五件SHA、三构造器cc-M系统头、精确recipe与完整basis绑定；模型持工具共享锁、起止核验，完整八件manifest才供消费者。新清单实导1315／950；`out/carrier-metadata-gates-v2.log`：零Python无增长、inventory无孤儿、派生字节相等、gate-layers通过。原生首轮与首次元数据失败原记录均保留。正式M7尚未完成；不迁旧PASS、不放宽限时。 |
 | 调度室：启动债 | 正式旧队列每窗导入gatequeue时，gatecanon-native无条件重编CPython适配模块，发生在t_begin之前；其耗时不进入prologue字段，却占父deadline。窗口010的prologue为8.324秒，子任务仅获33秒；预算差额还含收尾预留和取整，不能全称CPU耗时。 | `/tmp/unisacc-c43-m7-carrier-timeout-analysis.txt`、`tests/gatecanon-native`与`tests/gatequeue.py`。下一版继续原生队列事务迁移；若缓存适配器则绑定完整编译／链接工具、头文件、ABI及产物SHA，不以-x命中。不为此性能项中途改动正在验收的0.0.43冻结树。 |
 | 出口室：分类 | 窗口022的seedparse2-1实际rc2，独立旧分类器已确认为RESOURCE_UNKNOWN，未执行义务仍OPEN，不能当PASS或77。后续同组拒绝依原分类记录后继续；其他红须先核分类，未裁定产品红停窗。H1超时不算PASS。 | 冻结根`out/m7-exit-window022.json`及原log；[资源处置](research/c43-resource-disposition.md)、[裁定](release/rulings.tsv)、[分类](release/preauth.tsv)。完整退出表仍待最终全清单，不改准入常量或阈值。 |

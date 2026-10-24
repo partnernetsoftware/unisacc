@@ -165,4 +165,110 @@ with tempfile.TemporaryDirectory() as td:
     del q.mem_available_mib
     q=load('queue_under_test',ROOT/'tests/gatequeue.py'); q.plan=lambda com:jobs; q.fingerprint=lambda plan:stamp[0]
     v=q.mem_available_mib(); assert v is None or v>0, v
+    # Finally boundary: force a live tail into cleanup, preserving real wrapper outcomes.
+    # The fake supplies process events only; q.main executes actual admission/settlement/state I/O.
+    for tag, before_term, after_term in [('pre0',0,None), ('pre1',1,None), ('pre77',77,None),
+                                         ('pre142',142,None), ('term143',None,143), ('kill9',None,-9),
+                                         ('handler0',None,0), ('unreaped',None,None), ('full143',None,143)]:
+        clock=[0.0]; resume_mode=[False]; made=[]
+        class ControlledProcess:
+            def __init__(self, args, **kwargs):
+                self.name=args[-1]; self.returncode=None; self.polls=0
+                self.terminated=False; self.killed=False; self.memory_calls=0; made.append(self)
+                kwargs['stdout'].write(b'controlled cleanup boundary\n'); kwargs['stdout'].flush()
+            def poll(self):
+                if self.returncode is not None: return self.returncode
+                self.polls+=1
+                if self.name=='warm': clock[0]=10.0; self.returncode=0
+                elif resume_mode[0]: self.returncode=0
+                elif self.polls==1: clock[0]=100.0
+                elif not self.terminated and before_term is not None: self.returncode=before_term
+                return self.returncode
+            def terminate(self): self.terminated=True
+            def kill(self): self.killed=True
+            def wait(self, timeout=None):
+                if self.returncode is not None: return self.returncode
+                if after_term is None or (after_term==-9 and not self.killed):
+                    raise q.subprocess.TimeoutExpired('controlled',timeout)
+                self.returncode=after_term; return self.returncode
+            def memory_record(self):
+                self.memory_calls+=1
+                assert self.memory_calls==1, 'memory consumed twice'
+                return {'source':'controlled','peak_bytes':1234}
+        jobs={'warm':['controlled','warm'],'victim':['controlled','victim']}
+        if tag=='full143': jobs.pop('warm')
+        private_history=t/('cleanup-history-'+tag); private_history.mkdir()
+        with patch.dict(os.environ,{'TMPDIR':str(private_history)}), \
+             patch.object(q.time,'monotonic',lambda:clock[0]), \
+             patch.object(q,'MemoryObservedProcess',ControlledProcess), \
+             patch.object(q,'mem_available_mib',lambda:9000):
+            rc=run('cleanup-'+tag,55,('--jobs','1'))
+            d=t/('cleanup-'+tag); st=json.loads((d/'results.json').read_text())
+            victim=next(p for p in made if p.name=='victim')
+            assert victim.memory_calls==1
+            if tag=='full143':
+                assert rc==75 and 'victim' not in st['results'] and st['inflight']['victim']['kind']=='full'
+                attempt=st['memory_attempts'][-1]
+                assert attempt['actual_rc']==143 and attempt['kind']=='full' and st['window']['completed']==0
+                clock[0]=0.0; resume_mode[0]=True
+                assert run('cleanup-'+tag,55,('--jobs','1'))==3, 'existing no-progress interruption stops resume'
+                again=json.loads((d/'results.json').read_text())
+                assert again['interrupted']['victim']==1 and 'victim' not in again['results']
+                continue
+            if before_term in (0,1,77):
+                rec=st['results']['victim']
+                assert rec['rc']==before_term and rec['kind']=='tail' and not victim.terminated, rec
+                assert rec['memory']['peak_bytes']==1234 and rec['out_sha'] and rec['k2b']
+                if before_term==77: assert rec['status']=='UNVERIFIED'
+            else:
+                assert rc==75 and 'victim' not in st['results'], (tag,rc,st)
+                assert 'victim' in st['fullwindow']
+                attempt=next(a for a in st['memory_attempts'] if a['name']=='victim')
+                assert attempt['actual_rc']==(142 if before_term==142 else after_term), attempt
+                assert attempt['kind']=='tail' and attempt['limit']<51 and attempt['left']<53
+                assert attempt['memory']['peak_bytes']==1234 and attempt['out_sha'] and attempt['k2b']
+                if before_term is None:
+                    assert attempt['cleanup']['terminate_requested']
+                    assert attempt['cleanup']['kill_requested']==(after_term in (-9,None))
+                    assert attempt['cleanup']['unreaped']==(after_term is None)
+                assert st['window']['completed']==2, 'warm plus first deferral only'
+                # Same state resumes with a real new attempt, never a transplanted PASS.
+                clock[0]=0.0; resume_mode[0]=True
+                assert run('cleanup-'+tag,55,('--jobs','1'))==0
+                again=json.loads((d/'results.json').read_text())
+                assert again['results']['victim']['rc']==0 and again['results']['victim']['kind']=='full'
+                assert len([p for p in made if p.name=='victim'])==2
+
+    # An ordinary settlement I/O error cannot re-consume its process observer in finally.
+    for fault in ('memory','atomic'):
+        clock=[0.0]; resume_mode=[False]; made=[]; before_term=None; after_term=143
+        failure=OSError('injected ordinary '+fault); injected=[False]
+        class FaultProcess(ControlledProcess):
+            def memory_record(self):
+                record=super().memory_record()
+                if self.name=='warm' and fault=='memory': raise failure
+                return record
+        real_atomic=q.atomic
+        def fail_atomic(path,obj):
+            if fault=='atomic' and path.name.startswith('unisacc-gate-times-') and not injected[0]:
+                injected[0]=True; raise failure
+            return real_atomic(path,obj)
+        jobs={'warm':['controlled','warm'],'victim':['controlled','victim']}
+        private_history=t/('ordinary-fault-history-'+fault); private_history.mkdir()
+        with patch.dict(os.environ,{'TMPDIR':str(private_history)}), \
+             patch.object(q.time,'monotonic',lambda:clock[0]), \
+             patch.object(q,'MemoryObservedProcess',FaultProcess), \
+             patch.object(q,'mem_available_mib',lambda:9000), patch.object(q,'atomic',fail_atomic):
+            try:
+                run('ordinary-fault-'+fault,55,('--jobs','2'))
+                assert False, 'ordinary settlement failure was swallowed'
+            except OSError as error: assert error is failure
+        assert len(made)==2 and all(p.memory_calls==1 for p in made), [(p.name,p.memory_calls) for p in made]
+        victim=next(p for p in made if p.name=='victim')
+        assert victim.terminated and victim.returncode==143, 'live child not reaped after ordinary callback error'
+        st=json.loads((t/('ordinary-fault-'+fault)/'results.json').read_text())
+        assert not st['results'] and set(st['inflight'])=={'warm','victim'}, st
+        assert st['window']['completed']==0, 'failed settlement counted duplicate progress'
+        assert st['memory_attempts'][-1]['actual_rc']==143
+
     print('queue: UNVERIFIED rc77, parent deadline cap/unschedulable, outer-kill INTERRUPTED and stall controls pass')

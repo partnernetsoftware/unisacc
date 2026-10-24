@@ -35,5 +35,37 @@ stored = {'closure-c1': {'rc': 142, 'kind': 'solo', 'limit': 14}, 'full-ok': {'r
           'legacy': {'rc': 142, 'limit': SPAN - 3}, 'ok': {'rc': 0, 'kind': 'full', 'limit': 14}}
 check(gq.stored_142_pending(stored, jobs, SPAN) == ['closure-c1'], 'stored truncated 142 (solo, limit 14) is pending on load')
 check(gq.stored_142_pending(stored, {'full-ok': 1}, SPAN) == [], 'stored full-budget 142 stays terminal on load')
+
+# Exercise the real cleanup helper's natural-exit race and shared deadline without spawning work.
+class CleanupProbe:
+    def __init__(self, result): self.returncode=result; self.signals=[]
+    def poll(self): return self.returncode
+    def terminate(self): self.signals.append('TERM')
+    def wait(self, timeout=None): return self.returncode
+    def kill(self): self.signals.append('KILL')
+for code in (0,1,77,142):
+    proc=CleanupProbe(code); active={'p':(proc,None,0,12)}; got=[]
+    def settled(name, rc, cleanup=None):
+        got.append((name,rc,cleanup)); active.pop(name)
+    gq.cleanup_active(active,settled)
+    check(got==[('p',code,None)] and not proc.signals and not active,
+          'cleanup preserves natural pre-TERM rc %s without signaling'%code)
+
+# A callback failure must not prevent another live process from being reaped first.
+class LiveCleanupProbe(CleanupProbe):
+    def __init__(self): super().__init__(None); self.reaped=False
+    def wait(self, timeout=None): self.reaped=True; self.returncode=143; return 143
+done=CleanupProbe(0); live=LiveCleanupProbe(); active={'done':(done,None,0,12),'live':(live,None,0,12)}
+seen=[]; failure=OSError('injected settlement ENOSPC')
+def failed_settlement(name, rc, cleanup=None):
+    check(live.reaped and live.signals==['TERM'], 'all live jobs reaped before any settlement callback')
+    seen.append((name,rc)); active.pop(name)
+    if name=='done': raise failure
+try:
+    gq.cleanup_active(active,failed_settlement)
+    check(False,'settlement OSError must propagate')
+except OSError as error:
+    check(error is failure,'first settlement exception object preserved')
+check(seen==[('done',0),('live',143)] and not active,'remaining callbacks execute after first callback error')
 print('gatequeue timeout settlement: PASS' if fails == 0 else 'gatequeue timeout settlement: FAIL %d' % fails)
 sys.exit(1 if fails else 0)

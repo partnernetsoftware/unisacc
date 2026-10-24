@@ -273,52 +273,58 @@ job closure-c2b ./tests/closure.sh $(printf '%s\n' "$CLOSURE_C2" | awk -v n="$CL
 job closure-c2c ./tests/closure.sh $(printf '%s\n' "$CLOSURE_C2" | awk -v n="$CLOSURE_C2_N" 'NR>int(n*2/3) && NR<=int(n*3/3)')
 CLOSURE_C3=$(printf '%s\n' "$TC" | awk 'NR%4==3')
 CLOSURE_C3_N=$(printf '%s\n' "$CLOSURE_C3" | wc -l)
-job closure-c3a-prepare ./tests/closure.sh --prepare $(printf '%s\n' "$CLOSURE_C3" | awk -v n="$CLOSURE_C3_N" 'NR>int(n*0/3) && NR<=int(n*1/3)')
-job closure-c3a-lnx-x86_64 ./tests/closure.sh --target lnx/x86_64 --require-cached $(printf '%s\n' "$CLOSURE_C3" | awk -v n="$CLOSURE_C3_N" 'NR>int(n*0/3) && NR<=int(n*1/3)')
-job closure-c3a-lnx-arm64 ./tests/closure.sh --target lnx/arm64 --require-cached $(printf '%s\n' "$CLOSURE_C3" | awk -v n="$CLOSURE_C3_N" 'NR>int(n*0/3) && NR<=int(n*1/3)')
-job closure-c3a-osx-x86_64 ./tests/closure.sh --target osx/x86_64 --require-cached $(printf '%s\n' "$CLOSURE_C3" | awk -v n="$CLOSURE_C3_N" 'NR>int(n*0/3) && NR<=int(n*1/3)')
-job closure-c3a-osx-arm64 ./tests/closure.sh --target osx/arm64 --require-cached $(printf '%s\n' "$CLOSURE_C3" | awk -v n="$CLOSURE_C3_N" 'NR>int(n*0/3) && NR<=int(n*1/3)')
-job closure-c3a-win-x86_64 ./tests/closure.sh --target win/x86_64 --require-cached $(printf '%s\n' "$CLOSURE_C3" | awk -v n="$CLOSURE_C3_N" 'NR>int(n*0/3) && NR<=int(n*1/3)')
-job closure-c3a-win-arm64 ./tests/closure.sh --target win/arm64 --require-cached $(printf '%s\n' "$CLOSURE_C3" | awk -v n="$CLOSURE_C3_N" 'NR>int(n*0/3) && NR<=int(n*1/3)')
-job closure-c3b-prepare ./tests/closure.sh --prepare $(printf '%s\n' "$CLOSURE_C3" | awk -v n="$CLOSURE_C3_N" 'NR>int(n*1/3) && NR<=int(n*2/3)')
-job closure-c3b-lnx-x86_64 ./tests/closure.sh --target lnx/x86_64 --require-cached $(printf '%s\n' "$CLOSURE_C3" | awk -v n="$CLOSURE_C3_N" 'NR>int(n*1/3) && NR<=int(n*2/3)')
-job closure-c3b-lnx-arm64 ./tests/closure.sh --target lnx/arm64 --require-cached $(printf '%s\n' "$CLOSURE_C3" | awk -v n="$CLOSURE_C3_N" 'NR>int(n*1/3) && NR<=int(n*2/3)')
-job closure-c3b-osx-x86_64 ./tests/closure.sh --target osx/x86_64 --require-cached $(printf '%s\n' "$CLOSURE_C3" | awk -v n="$CLOSURE_C3_N" 'NR>int(n*1/3) && NR<=int(n*2/3)')
-job closure-c3b-osx-arm64 ./tests/closure.sh --target osx/arm64 --require-cached $(printf '%s\n' "$CLOSURE_C3" | awk -v n="$CLOSURE_C3_N" 'NR>int(n*1/3) && NR<=int(n*2/3)')
-job closure-c3b-win-x86_64 ./tests/closure.sh --target win/x86_64 --require-cached $(printf '%s\n' "$CLOSURE_C3" | awk -v n="$CLOSURE_C3_N" 'NR>int(n*1/3) && NR<=int(n*2/3)')
-job closure-c3b-win-arm64 ./tests/closure.sh --target win/arm64 --require-cached $(printf '%s\n' "$CLOSURE_C3" | awk -v n="$CLOSURE_C3_N" 'NR>int(n*1/3) && NR<=int(n*2/3)')
-job closure-c3c-prepare ./tests/closure.sh --prepare $(printf '%s\n' "$CLOSURE_C3" | awk -v n="$CLOSURE_C3_N" 'NR>int(n*2/3) && NR<=int(n*3/3)')
-job closure-c3c-lnx-x86_64-p1 ./tests/closure.sh --target lnx/x86_64 --require-cached --source-part 1/3 --source-cuts 10,20 $(printf '%s\n' "$CLOSURE_C3" | awk -v n="$CLOSURE_C3_N" 'NR>int(n*2/3) && NR<=int(n*3/3)')
-job closure-c3c-lnx-x86_64-p2 ./tests/closure.sh --target lnx/x86_64 --require-cached --source-part 2/3 --source-cuts 10,20 $(printf '%s\n' "$CLOSURE_C3" | awk -v n="$CLOSURE_C3_N" 'NR>int(n*2/3) && NR<=int(n*3/3)')
-job closure-c3c-lnx-x86_64-p3 ./tests/closure.sh --target lnx/x86_64 --require-cached --source-part 3/3 --source-cuts 10,20 $(printf '%s\n' "$CLOSURE_C3" | awk -v n="$CLOSURE_C3_N" 'NR>int(n*2/3) && NR<=int(n*3/3)')
-job closure-c3c-lnx-arm64 ./tests/closure.sh --target lnx/arm64 --require-cached $(printf '%s\n' "$CLOSURE_C3" | awk -v n="$CLOSURE_C3_N" 'NR>int(n*2/3) && NR<=int(n*3/3)')
-job closure-c3c-osx-x86_64 ./tests/closure.sh --target osx/x86_64 --require-cached $(printf '%s\n' "$CLOSURE_C3" | awk -v n="$CLOSURE_C3_N" 'NR>int(n*2/3) && NR<=int(n*3/3)')
-job closure-c3c-osx-arm64 ./tests/closure.sh --target osx/arm64 --require-cached $(printf '%s\n' "$CLOSURE_C3" | awk -v n="$CLOSURE_C3_N" 'NR>int(n*2/3) && NR<=int(n*3/3)')
-job closure-c3c-win-x86_64 ./tests/closure.sh --target win/x86_64 --require-cached $(printf '%s\n' "$CLOSURE_C3" | awk -v n="$CLOSURE_C3_N" 'NR>int(n*2/3) && NR<=int(n*3/3)')
-job closure-c3c-win-arm64 ./tests/closure.sh --target win/arm64 --require-cached $(printf '%s\n' "$CLOSURE_C3" | awk -v n="$CLOSURE_C3_N" 'NR>int(n*2/3) && NR<=int(n*3/3)')
+CLOSURE_C3_A_SOURCES=$(printf '%s\n' "$CLOSURE_C3" | awk -v n="$CLOSURE_C3_N" 'NR>int(n*0/3) && NR<=int(n*1/3)')
+CLOSURE_C3_B_SOURCES=$(printf '%s\n' "$CLOSURE_C3" | awk -v n="$CLOSURE_C3_N" 'NR>int(n*1/3) && NR<=int(n*2/3)')
+CLOSURE_C3_C_SOURCES=$(printf '%s\n' "$CLOSURE_C3" | awk -v n="$CLOSURE_C3_N" 'NR>int(n*2/3) && NR<=int(n*3/3)')
+job closure-c3a-prepare ./tests/closure.sh --prepare $CLOSURE_C3_A_SOURCES
+job closure-c3a-lnx-x86_64 ./tests/closure.sh --target lnx/x86_64 --require-cached $CLOSURE_C3_A_SOURCES
+job closure-c3a-lnx-arm64 ./tests/closure.sh --target lnx/arm64 --require-cached $CLOSURE_C3_A_SOURCES
+job closure-c3a-osx-x86_64 ./tests/closure.sh --target osx/x86_64 --require-cached $CLOSURE_C3_A_SOURCES
+job closure-c3a-osx-arm64 ./tests/closure.sh --target osx/arm64 --require-cached $CLOSURE_C3_A_SOURCES
+job closure-c3a-win-x86_64 ./tests/closure.sh --target win/x86_64 --require-cached $CLOSURE_C3_A_SOURCES
+job closure-c3a-win-arm64 ./tests/closure.sh --target win/arm64 --require-cached $CLOSURE_C3_A_SOURCES
+job closure-c3b-prepare ./tests/closure.sh --prepare $CLOSURE_C3_B_SOURCES
+job closure-c3b-lnx-x86_64 ./tests/closure.sh --target lnx/x86_64 --require-cached $CLOSURE_C3_B_SOURCES
+job closure-c3b-lnx-arm64 ./tests/closure.sh --target lnx/arm64 --require-cached $CLOSURE_C3_B_SOURCES
+job closure-c3b-osx-x86_64 ./tests/closure.sh --target osx/x86_64 --require-cached $CLOSURE_C3_B_SOURCES
+job closure-c3b-osx-arm64 ./tests/closure.sh --target osx/arm64 --require-cached $CLOSURE_C3_B_SOURCES
+job closure-c3b-win-x86_64 ./tests/closure.sh --target win/x86_64 --require-cached $CLOSURE_C3_B_SOURCES
+job closure-c3b-win-arm64 ./tests/closure.sh --target win/arm64 --require-cached $CLOSURE_C3_B_SOURCES
+job closure-c3c-prepare ./tests/closure.sh --prepare $CLOSURE_C3_C_SOURCES
+job closure-c3c-lnx-x86_64-p1 ./tests/closure.sh --target lnx/x86_64 --require-cached --source-part 1/3 --source-cuts 10,20 $CLOSURE_C3_C_SOURCES
+job closure-c3c-lnx-x86_64-p2 ./tests/closure.sh --target lnx/x86_64 --require-cached --source-part 2/3 --source-cuts 10,20 $CLOSURE_C3_C_SOURCES
+job closure-c3c-lnx-x86_64-p3 ./tests/closure.sh --target lnx/x86_64 --require-cached --source-part 3/3 --source-cuts 10,20 $CLOSURE_C3_C_SOURCES
+job closure-c3c-lnx-arm64 ./tests/closure.sh --target lnx/arm64 --require-cached $CLOSURE_C3_C_SOURCES
+job closure-c3c-osx-x86_64 ./tests/closure.sh --target osx/x86_64 --require-cached $CLOSURE_C3_C_SOURCES
+job closure-c3c-osx-arm64 ./tests/closure.sh --target osx/arm64 --require-cached $CLOSURE_C3_C_SOURCES
+job closure-c3c-win-x86_64 ./tests/closure.sh --target win/x86_64 --require-cached $CLOSURE_C3_C_SOURCES
+job closure-c3c-win-arm64 ./tests/closure.sh --target win/arm64 --require-cached $CLOSURE_C3_C_SOURCES
 CLOSURE_C4=$(printf '%s\n' "$TC" | awk 'NR%4==0')
 CLOSURE_C4_N=$(printf '%s\n' "$CLOSURE_C4" | wc -l)
-job closure-c4a-prepare ./tests/closure.sh --prepare $(printf '%s\n' "$CLOSURE_C4" | awk -v n="$CLOSURE_C4_N" 'NR>int(n*0/3) && NR<=int(n*1/3)')
-job closure-c4a-lnx-x86_64 ./tests/closure.sh --target lnx/x86_64 --require-cached $(printf '%s\n' "$CLOSURE_C4" | awk -v n="$CLOSURE_C4_N" 'NR>int(n*0/3) && NR<=int(n*1/3)')
-job closure-c4a-lnx-arm64 ./tests/closure.sh --target lnx/arm64 --require-cached $(printf '%s\n' "$CLOSURE_C4" | awk -v n="$CLOSURE_C4_N" 'NR>int(n*0/3) && NR<=int(n*1/3)')
-job closure-c4a-osx-x86_64 ./tests/closure.sh --target osx/x86_64 --require-cached $(printf '%s\n' "$CLOSURE_C4" | awk -v n="$CLOSURE_C4_N" 'NR>int(n*0/3) && NR<=int(n*1/3)')
-job closure-c4a-osx-arm64 ./tests/closure.sh --target osx/arm64 --require-cached $(printf '%s\n' "$CLOSURE_C4" | awk -v n="$CLOSURE_C4_N" 'NR>int(n*0/3) && NR<=int(n*1/3)')
-job closure-c4a-win-x86_64 ./tests/closure.sh --target win/x86_64 --require-cached $(printf '%s\n' "$CLOSURE_C4" | awk -v n="$CLOSURE_C4_N" 'NR>int(n*0/3) && NR<=int(n*1/3)')
-job closure-c4a-win-arm64 ./tests/closure.sh --target win/arm64 --require-cached $(printf '%s\n' "$CLOSURE_C4" | awk -v n="$CLOSURE_C4_N" 'NR>int(n*0/3) && NR<=int(n*1/3)')
-job closure-c4b-prepare ./tests/closure.sh --prepare $(printf '%s\n' "$CLOSURE_C4" | awk -v n="$CLOSURE_C4_N" 'NR>int(n*1/3) && NR<=int(n*2/3)')
-job closure-c4b-lnx-x86_64 ./tests/closure.sh --target lnx/x86_64 --require-cached $(printf '%s\n' "$CLOSURE_C4" | awk -v n="$CLOSURE_C4_N" 'NR>int(n*1/3) && NR<=int(n*2/3)')
-job closure-c4b-lnx-arm64 ./tests/closure.sh --target lnx/arm64 --require-cached $(printf '%s\n' "$CLOSURE_C4" | awk -v n="$CLOSURE_C4_N" 'NR>int(n*1/3) && NR<=int(n*2/3)')
-job closure-c4b-osx-x86_64 ./tests/closure.sh --target osx/x86_64 --require-cached $(printf '%s\n' "$CLOSURE_C4" | awk -v n="$CLOSURE_C4_N" 'NR>int(n*1/3) && NR<=int(n*2/3)')
-job closure-c4b-osx-arm64 ./tests/closure.sh --target osx/arm64 --require-cached $(printf '%s\n' "$CLOSURE_C4" | awk -v n="$CLOSURE_C4_N" 'NR>int(n*1/3) && NR<=int(n*2/3)')
-job closure-c4b-win-x86_64 ./tests/closure.sh --target win/x86_64 --require-cached $(printf '%s\n' "$CLOSURE_C4" | awk -v n="$CLOSURE_C4_N" 'NR>int(n*1/3) && NR<=int(n*2/3)')
-job closure-c4b-win-arm64 ./tests/closure.sh --target win/arm64 --require-cached $(printf '%s\n' "$CLOSURE_C4" | awk -v n="$CLOSURE_C4_N" 'NR>int(n*1/3) && NR<=int(n*2/3)')
-job closure-c4c-prepare ./tests/closure.sh --prepare $(printf '%s\n' "$CLOSURE_C4" | awk -v n="$CLOSURE_C4_N" 'NR>int(n*2/3) && NR<=int(n*3/3)')
-job closure-c4c-lnx-x86_64 ./tests/closure.sh --target lnx/x86_64 --require-cached $(printf '%s\n' "$CLOSURE_C4" | awk -v n="$CLOSURE_C4_N" 'NR>int(n*2/3) && NR<=int(n*3/3)')
-job closure-c4c-lnx-arm64 ./tests/closure.sh --target lnx/arm64 --require-cached $(printf '%s\n' "$CLOSURE_C4" | awk -v n="$CLOSURE_C4_N" 'NR>int(n*2/3) && NR<=int(n*3/3)')
-job closure-c4c-osx-x86_64 ./tests/closure.sh --target osx/x86_64 --require-cached $(printf '%s\n' "$CLOSURE_C4" | awk -v n="$CLOSURE_C4_N" 'NR>int(n*2/3) && NR<=int(n*3/3)')
-job closure-c4c-osx-arm64 ./tests/closure.sh --target osx/arm64 --require-cached $(printf '%s\n' "$CLOSURE_C4" | awk -v n="$CLOSURE_C4_N" 'NR>int(n*2/3) && NR<=int(n*3/3)')
-job closure-c4c-win-x86_64 ./tests/closure.sh --target win/x86_64 --require-cached $(printf '%s\n' "$CLOSURE_C4" | awk -v n="$CLOSURE_C4_N" 'NR>int(n*2/3) && NR<=int(n*3/3)')
-job closure-c4c-win-arm64 ./tests/closure.sh --target win/arm64 --require-cached $(printf '%s\n' "$CLOSURE_C4" | awk -v n="$CLOSURE_C4_N" 'NR>int(n*2/3) && NR<=int(n*3/3)')
+CLOSURE_C4_A_SOURCES=$(printf '%s\n' "$CLOSURE_C4" | awk -v n="$CLOSURE_C4_N" 'NR>int(n*0/3) && NR<=int(n*1/3)')
+CLOSURE_C4_B_SOURCES=$(printf '%s\n' "$CLOSURE_C4" | awk -v n="$CLOSURE_C4_N" 'NR>int(n*1/3) && NR<=int(n*2/3)')
+CLOSURE_C4_C_SOURCES=$(printf '%s\n' "$CLOSURE_C4" | awk -v n="$CLOSURE_C4_N" 'NR>int(n*2/3) && NR<=int(n*3/3)')
+job closure-c4a-prepare ./tests/closure.sh --prepare $CLOSURE_C4_A_SOURCES
+job closure-c4a-lnx-x86_64 ./tests/closure.sh --target lnx/x86_64 --require-cached $CLOSURE_C4_A_SOURCES
+job closure-c4a-lnx-arm64 ./tests/closure.sh --target lnx/arm64 --require-cached $CLOSURE_C4_A_SOURCES
+job closure-c4a-osx-x86_64 ./tests/closure.sh --target osx/x86_64 --require-cached $CLOSURE_C4_A_SOURCES
+job closure-c4a-osx-arm64 ./tests/closure.sh --target osx/arm64 --require-cached $CLOSURE_C4_A_SOURCES
+job closure-c4a-win-x86_64 ./tests/closure.sh --target win/x86_64 --require-cached $CLOSURE_C4_A_SOURCES
+job closure-c4a-win-arm64 ./tests/closure.sh --target win/arm64 --require-cached $CLOSURE_C4_A_SOURCES
+job closure-c4b-prepare ./tests/closure.sh --prepare $CLOSURE_C4_B_SOURCES
+job closure-c4b-lnx-x86_64 ./tests/closure.sh --target lnx/x86_64 --require-cached $CLOSURE_C4_B_SOURCES
+job closure-c4b-lnx-arm64 ./tests/closure.sh --target lnx/arm64 --require-cached $CLOSURE_C4_B_SOURCES
+job closure-c4b-osx-x86_64 ./tests/closure.sh --target osx/x86_64 --require-cached $CLOSURE_C4_B_SOURCES
+job closure-c4b-osx-arm64 ./tests/closure.sh --target osx/arm64 --require-cached $CLOSURE_C4_B_SOURCES
+job closure-c4b-win-x86_64 ./tests/closure.sh --target win/x86_64 --require-cached $CLOSURE_C4_B_SOURCES
+job closure-c4b-win-arm64 ./tests/closure.sh --target win/arm64 --require-cached $CLOSURE_C4_B_SOURCES
+job closure-c4c-prepare ./tests/closure.sh --prepare $CLOSURE_C4_C_SOURCES
+job closure-c4c-lnx-x86_64 ./tests/closure.sh --target lnx/x86_64 --require-cached $CLOSURE_C4_C_SOURCES
+job closure-c4c-lnx-arm64 ./tests/closure.sh --target lnx/arm64 --require-cached $CLOSURE_C4_C_SOURCES
+job closure-c4c-osx-x86_64 ./tests/closure.sh --target osx/x86_64 --require-cached $CLOSURE_C4_C_SOURCES
+job closure-c4c-osx-arm64 ./tests/closure.sh --target osx/arm64 --require-cached $CLOSURE_C4_C_SOURCES
+job closure-c4c-win-x86_64 ./tests/closure.sh --target win/x86_64 --require-cached $CLOSURE_C4_C_SOURCES
+job closure-c4c-win-arm64 ./tests/closure.sh --target win/arm64 --require-cached $CLOSURE_C4_C_SOURCES
 STAGES_ALL=$(printf '%s\n' examples/*.c tests/c/*.c)
 STAGES_1=$(printf '%s\n' "$STAGES_ALL" | awk '(NR-1)%3==0')
 STAGES_1_N=$(printf '%s\n' "$STAGES_1" | wc -l)
@@ -576,7 +582,7 @@ job exec-libraryfunctionimports-prepare-net ./exec/parse2/libraryfunctionimports
 job exec-libraryfunctionimports-prepare-runner ./exec/parse2/libraryfunctionimportscheck.sh --prepare-runner
 job exec-libraryfunctionimports-model ./exec/parse2/libraryfunctionimportscheck.sh --require-cached
 # Preparation declarations: validate original groups, schedule each bounded member.
-PREP_JOBS=$(sh ./unisacc.com tests/suite/prepdecl.cx -- tests/prepgroups.json) || exit 2
+PREP_JOBS=$(sh ./tests/cxbin tests/suite/prepdecl.cx tests/prepgroups.json) || exit 2
 eval "$PREP_JOBS"
 unset PREP_JOBS
 job exec-librarytypedreader-model ./exec/parse2/librarytypedreadercheck.sh --require-cached

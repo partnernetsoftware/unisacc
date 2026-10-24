@@ -707,6 +707,41 @@ class MemoryObservedProcess(subprocess.Popen):
             self.memory_group = None
         return result
 
+def cleanup_active(active, settle, prior_error=None):
+    """Stop/reap every process before any fallible settlement callback."""
+    collected = []
+    live = []
+    first_error = prior_error or (None, None, None)
+    for n, (p, _, _, _) in list(active.items()):
+        rc = p.poll()
+        if rc is not None: collected.append((n, rc, None))
+        else: live.append((n, p))
+    signals = {}
+    for n, p in live:
+        signals[n] = {'terminate_requested': True, 'kill_requested': False}
+        try: p.terminate()
+        except ProcessLookupError: pass
+    grace = time.monotonic() + 2
+    for n, p in live:
+        try: p.wait(timeout=max(0.05, grace - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            signals[n]['kill_requested'] = True
+            try: p.kill()
+            except ProcessLookupError: pass
+            try: p.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                print('queue: a killed job did not exit within 1 s', flush=True)
+        rc = p.poll()
+        signals[n]['unreaped'] = rc is None
+        collected.append((n, rc, signals[n]))
+    for n, rc, cleanup in collected:
+        try: settle(n, rc, cleanup)
+        except BaseException:
+            if first_error[1] is None: first_error = sys.exc_info()
+    if first_error[1] is not None:
+        raise first_error[1].with_traceback(first_error[2])
+
+
 def terminal_nonpass(results, jobs):
     """Only settled selected results; DEFER/retry attempts have no result."""
     return sorted(n for n, rec in results.items() if n in jobs and
@@ -894,7 +929,60 @@ def main():
     span = deadline - start
     def estimate(n): return min(span-2, max(2, (known(n) or cold())*1.3+1))
     # SCHEDULING-END
+    def settle(n, rc, cleanup=None):
+        p, log, t, limit = active.pop(n)
+        admission = dict(data.get('inflight', {}).get(n, {}))
+        completed_before = data['window'].get('completed', 0)
+        try:
+            log.close(); elapsed = time.monotonic()-t
+            admission = dict(data.get('inflight', {}).get(n, {}))
+            kind = admission.get('kind', 'full')
+            memory = p.memory_record()   # consumes optional cgroup state: exactly once
+            digest = k2b_output_digest(state/(n+'.log'))
+            scope = dict(data.get('k2b', {}).get(n, {}), stamp=stamp.get(n) if isinstance(stamp, dict) else None)
+            cancelled = cleanup is not None and rc != 142
+            truncated = not rc142_settles(kind, limit, span)
+            unknown_full = cancelled and not truncated
+            progress = True
+            if unknown_full:
+                # Preserve inflight for the existing first/second INTERRUPTED recovery.
+                # A queue signal is not evidence of a suite TIMEOUT or a successful exit.
+                progress = False
+            elif (cancelled and truncated) or (rc == 142 and truncated):
+                progress = n not in data.get('fullwindow', [])
+                if n not in pending: pending.append(n)
+                data.setdefault('deferred', []).append({'name': n, 'limit': limit})
+                if n not in data.setdefault('fullwindow', []): data['fullwindow'].append(n)
+                note(n, lb=elapsed*2)
+            elif rc == 142 and n not in data.setdefault('retried', []) and n not in exclusive:
+                pending.append(n); exclusive.add(n); data['retried'].append(n)
+                note(n, lb=elapsed)
+            else:
+                data['results'][n] = {'rc':rc, 'seconds':round(elapsed,3), 'limit':limit, 'kind':kind,
+                                      'memory':memory, 'out_sha':digest, 'k2b':scope}
+                if rc == 77: data['results'][n]['status'] = 'UNVERIFIED'
+                note(n, ok=elapsed)
+            if progress: data['window']['completed'] = data['window'].get('completed', 0) + 1
+            keep_inflight = unknown_full or (cleanup is not None and rc is None)
+            if not keep_inflight: data.get('inflight', {}).pop(n, None)
+            if cleanup is not None or n not in data['results']:
+                attempt = dict(admission, name=n, rc=rc, actual_rc=rc, kind=kind, limit=limit,
+                               seconds=round(elapsed,3), memory=memory, out_sha=digest, k2b=scope)
+                if cleanup is not None: attempt['cleanup'] = dict(cleanup)
+                data.setdefault('memory_attempts', []).append(attempt)
+            lines = (state/(n+'.log')).read_text(errors='replace').splitlines()
+            label = 'INTERRUPTED_PENDING' if unknown_full else ('DONE' if n in data['results'] else 'DEFER')
+            print(label,n,'rc='+str(rc),'%.2fs'%elapsed,lines[-1] if lines else '(no output)',flush=True)
+            # The results commit is last: earlier I/O failure leaves durable admission evidence.
+            atomic(histpath,history); atomic(path,data)
+        except BaseException:
+            data.setdefault('inflight', {})[n] = admission
+            data['results'].pop(n, None)
+            data['window']['completed'] = completed_before
+            raise
+
     mem_blocked = False
+    loop_error = None
     try:
         while pending or active:
             left = deadline-time.monotonic()
@@ -955,69 +1043,22 @@ def main():
             for n, (p, log, t, limit) in list(active.items()):
                 rc = p.poll()
                 if rc is None: continue
-                log.close(); elapsed = time.monotonic()-t
-                progress = True
-                kind = data.get('inflight', {}).get(n, {}).get('kind', 'full')
-                if rc == 142 and not rc142_settles(kind, limit, span):
-                    # A late fill used only the window remainder, not a full
-                    # attempt. Keep it pending and give it an early slot next.
-                    # 0.0.38 P3: deferring a job that already had its early slot is not progress
-                    progress = n not in data.get('fullwindow', [])
-                    pending.append(n)
-                    data.setdefault('deferred', []).append({'name':n,'limit':limit})
-                    if n not in data.setdefault('fullwindow', []): data['fullwindow'].append(n)
-                    note(n, lb=elapsed*2)
-                elif rc == 142 and n not in data.setdefault('retried', []) and n not in exclusive:
-                    # 0.0.32: a full attempt that timed out is retried once, alone (q10-q12: jobs that take
-                    # 24-45 s alone hit the watchdog beside three others); a second timeout is the result
-                    pending.append(n); exclusive.add(n); data['retried'].append(n)
-                    note(n, lb=elapsed)
-                else:
-                    data['results'][n] = {'rc':rc, 'seconds':round(elapsed,3),'limit':limit,'kind':kind}
-                    data['results'][n]['memory'] = p.memory_record()
-                    # 0.0.38 P7: rc 77 is a suite's UNVERIFIED (its host lacks a declared requirement):
-                    # neither PASS nor FAILED; the release check lists it and does not pass it
-                    if rc == 77: data['results'][n]['status'] = 'UNVERIFIED'
-                    # Q1 (0.0.33): rise at once, fall by halves -- a cache-warm 2 s run must not
-                    # admit the next cold 20 s run into a 6 s tail (cand33: 17% of slot time died as DEFER)
-                    note(n, ok=elapsed)
-                # a result, a first retry or a first deferral is progress; a repeated deferral is not
-                if progress: data['window']['completed'] = data['window'].get('completed', 0) + 1
-                data.get('inflight', {}).pop(n, None)
-                if n in data['results']:   # 0.0.40 K2b: an output digest so a missed run can be judged on output, not rc alone
-                    data['results'][n]['out_sha'] = k2b_output_digest(state/(n+'.log'))
-                    data['results'][n]['k2b'] = dict(data.get('k2b', {}).get(n, {}), stamp=stamp.get(n) if isinstance(stamp, dict) else None)   # this run's own scope, not the window's
-                atomic(path,data); atomic(histpath,history)
-                lines = (state/(n+'.log')).read_text(errors='replace').splitlines()
-                print('DONE' if n in data['results'] else 'DEFER',n,'rc='+str(rc),'%.2fs'%elapsed,lines[-1] if lines else '(no output)',flush=True)
-                if n not in data['results']:
-                    data.setdefault('memory_attempts', []).append({'name': n, 'rc': rc, 'kind': kind, 'memory': p.memory_record()})
-                del active[n]
+                settle(n, rc)
             # 0.0.38: nothing running and memory admits nothing -- end the window (the stall stop counts it)
             if args.stop_on_fail and not active and terminal_nonpass(data['results'], jobs): break
             if not active and mem_blocked: break
             if not active and (not pending or not any(estimate(n) <= deadline-time.monotonic()-1 for n in pending)): break
             if time.monotonic() >= deadline: break
             time.sleep(.05)
+    except BaseException:
+        loop_error = sys.exc_info()
+        raise
     finally:
         t_tail = time.monotonic()   # 0.0.38: the tail budget starts here, reaping included
         # A signal/exception/window ending cannot leave tests behind.  0.0.38 full038b: stop the leftovers
         # together within one 2 s grace, then kill and wait at most 1 s more each (bound.py reaps its own
         # process group); a 2 s wait per job in turn, raising on a slow one, overran the outer bound.
-        for p, log, _, _ in active.values(): p.terminate()
-        grace = time.monotonic() + 2
-        for p, log, _, _ in active.values():
-            try: p.wait(timeout=max(0.05, grace - time.monotonic()))
-            except subprocess.TimeoutExpired:
-                p.kill()
-                try: p.wait(timeout=1)
-                except subprocess.TimeoutExpired: print('queue: a killed job did not exit within 1 s', flush=True)
-        for n, (p, log, t, limit) in active.items():
-            log.close()
-            data['results'][n] = {'rc':142,'seconds':round(time.monotonic()-t,3),'limit':limit}
-            data['results'][n]['memory'] = p.memory_record()
-            data.get('inflight', {}).pop(n, None)
-            data['window']['completed'] = data['window'].get('completed', 0) + 1
+        cleanup_active(active, settle, loop_error)
         # 0.0.38 P3: three windows in a row without a legal completion stop the driver
         data['stalled'] = 0 if data['window'].get('completed') else data.get('stalled', 0) + 1
         atomic(path,data)
