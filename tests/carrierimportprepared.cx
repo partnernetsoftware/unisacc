@@ -4,12 +4,12 @@
    tests/carrierimportprepared.py (2026-10-23, the owner's direction: the toolchain moves off Python).
    usage: sh ./unisacc.com -run tests/carrierimportprepared.cx -- [-h] [--prepare] [--require-cached]
                                                                  [--part {import,package}]
-          (the gate runs it through tests/cxbin, the compile cache)
+          (the gate uses default-run for all stages; tests/cxbin remains compatible)
    Run from the repository root (ROOT is the working directory).  Exactly one of --prepare or
    --require-cached --part {import,package}; anything else is argparse's rc 2 (prog name carrierimportprepared.py,
    so the usage and error text are byte-identical to the original's).
-   The cache key is the sha256 of json.dumps(BASIS, sort_keys=True), BASIS being, as the original built it:
-     schema carrier-import-prepared-v1; sources (exec/c/provenance.py identity); actors and actor_edges (the
+   The cache key is the sha256 of json.dumps(BASIS, sort_keys=True), BASIS binding:
+     schema carrier-import-prepared-v3-staged; recipe native-staged-constructors-v1; sources (exec/c/provenance.py identity); actors and actor_edges (the
      conservative repository actor closure of SEEDS: tests/actorclosure.py's rules -- Python imports and quoted
      'tests/...' literals of a .py, $R/$ROOT/$_LIB_R/$here references of a .sh or tests/bound, quoted #include of a
      .c/.h -- plus, for a .cx, its quoted 'tests/...' literals and its `#pragma unisa use` modules; the first seed is
@@ -20,14 +20,21 @@
      generated (tests/export_ref.sh output between tests/refshim.h and tests/reffoot.h, the dumper source made from
      it, and its cc -w -std=c99 -O0 -M read set with the scratch path replaced by @generated/dump.c); environment
      (CC CFLAGS PATH CPATH ... LD_AUDIT, null when unset); stage_environment (E1* E2* E3* E4* UNISA_* DYLD_*);
-     UA_TYPESPELL "1"; host [uname -s, uname -m]; outputs.
+     constructor_readsets (cc -std=c99 -O2 -w, plus -Iseed for gen), tool_commands with @tools
+     paths, model_commands with @tools/@work paths, and the dumper transform; UA_TYPESPELL "1"; host [uname -s, uname -m]; outputs.
    The cache is ${UNISACC_MODEL_CACHE:-TMP/unisacc-model-cache}/carrier-import-KEY (TMP as tempfile.gettempdir());
    it is valid when exec/c/provenance.py check accepts its manifest.json, the manifest's basis equals BASIS, its
    outputs are exactly dump e3.json e3.net e3.tbl nc.json nc.net nc.tbl run and each is a nonempty regular file with
    the recorded sha256 (run and dump executable).
    --prepare: under an exclusive lock on CACHE.lock, a valid cache prints `carrier import prepare HIT KEY`; otherwise
-     `python3 tests/bound.py 55 python3 tests/modelnativecarrierimportcheck.py --prepare WORK` (WORK a fresh
-     BASE/carrier-import-prepare-XXXXXX; its rc, when nonzero, is the result), BASIS is recomputed and must not have
+     --prepare-tools publishes five verified tools in carrier-import-tools-KEY, under the same complete
+     BASIS and five SHA values. --prepare --models-only requires that verified tools cache or returns75;
+     it copies checked dump/run and runs only the six model commands. Unqualified --prepare prepares tools
+     then models for CLI compatibility; the formal gate uses separate nodes. Each stage uses a fresh WORK in
+     BASE; each bounded command failure remains the result. Constructors are hostcc-O2
+     seed/gen.c, seed/tbl.c and seed/net.c in the five-output tools cache, always SHA/basis verified. Their complete
+     compiler readsets and exact recipe bind the cache; the Python --prepare remains an independent oracle.
+     BASIS is recomputed and must not have
      changed, WORK/manifest.json is written (json.dumps({basis, outputs}, sort_keys=True)) and recorded with
      exec/c/provenance.py write, WORK replaces CACHE, and `carrier import PREPARED KEY` is printed.
    --require-cached --part P: an invalid cache is NEED_PREPARE (never a build); otherwise the result is that of
@@ -40,11 +47,9 @@
    CLI identity / check / write, so the record format has one author).  The dumper source edit is the consumer's
    dump_source(), repeated here byte for byte because the consumer is Python.  Files over 1 MiB, and each batch of
    actor/read-set files, are hashed by `openssl dgst -sha256` (the in-process sha256 is too slow for the 100+ MiB
-   interpreter); the digests are the same.  Run every mode through one runner (the gate uses tests/cxbin for all
-   three): `unisacc.com -run` exports UNISA_CONTAINER to the program and its children, and UNISA_* is part of
-   stage_environment, so a -run prepare and a cxbin consumer key different caches.  With the first seed set to
-   tests/carrierimportprepared.py this computes the original's key byte for byte (checked: identical NEED_PREPARE
-   lines under several environments, and the original accepts a cache this code wrote).
+   interpreter); the digests are the same.  Run every mode through one runner (the gate uses default-run for all stages): `unisacc.com -run` exports UNISA_CONTAINER to the program and its children, and UNISA_* is part of
+   stage_environment, so a -run prepare and a cxbin consumer key different caches.  The v2 recipe/readset domain intentionally differs from the original
+   Python preparation key; original consumer protocol assertions remain unchanged.
    No #include: the prelude (edition 1) provides everything; uname(2) is the uname command. */
 #pragma unisa use cxlib.pyjson
 
@@ -56,16 +61,19 @@ static int scratch_rmtree(const char *p) {
     return rc;
 }
 static const char *PROG = "carrierimportprepared.py";
-static const char *USAGE = "usage: carrierimportprepared.py [-h] [--prepare] [--require-cached]\n"
+static const char *USAGE = "usage: carrierimportprepared.py [-h] [--prepare] [--require-cached] [--prepare-tools] [--models-only]\n"
                            "                                [--part {import,package}]\n";
 static const char *SEEDS[] = { "tests/carrierimportprepared.cx", "tests/modelnativecarrierimportcheck.py", "tests/bound",
-                               "tests/bound.py", "tests/build_ref.sh", "tests/export_ref.sh", "exec/c/provenance.py" };
+                               "tests/bound.py", "tests/build_ref.sh", "tests/export_ref.sh", "exec/c/provenance.py",
+                               "seed/gen.c", "seed/tbl.c", "seed/net.c" };
 static const char *OUTPUTS[] = { "dump", "e3.json", "e3.net", "e3.tbl", "nc.json", "nc.net", "nc.tbl", "run" };   /* sorted */
 static const char *ENV_KEYS[] = { "CC", "CFLAGS", "PATH", "CPATH", "C_INCLUDE_PATH", "LIBRARY_PATH", "COMPILER_PATH",
                                   "GCC_EXEC_PREFIX", "SOURCE_DATE_EPOCH", "PYTHONPATH", "PYTHONHASHSEED", "LANG",
                                   "LC_ALL", "LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT" };
 #define NSEEDS (sizeof SEEDS / sizeof *SEEDS)
 #define NOUT 8
+static const char *TOOL_OUTPUTS[] = { ".seed-gen", ".seed-net", ".seed-tbl", "dump", "run" };
+#define NTOOLS 5
 static char *ROOT, *PY, *KEY;
 
 /* ---- buffers and strings ---- */
@@ -925,6 +933,93 @@ static int dump_source(Buf *s) {
     return replace_once(s, a2, b2);
 }
 
+/* Hostcc -O2 constructor builds are the measured construction-hotspot exception
+   already used by buildcompiler.sh; normal .cx control logic stays default-run.
+   The symbolic work path makes the exact bounded recipe part of cache identity. */
+static void recipe_command(pj_value *recipe, char *const *args) {
+    pj_value *cmd = pj_list(); size_t i;
+    for (i = 0; args[i]; i++) pj_append(cmd, jstrz(args[i]));
+    pj_append(recipe, cmd);
+}
+static pj_value *native_recipe(const char *work, const char *tools, const char *cc) {
+    pj_value *r = pj_list(); char *bound = cat(ROOT, "/tests/bound");
+    char *ref = joinp(work, "ref.c"), *dumpc = joinp(work, "dump.c");
+    char *dump = joinp(work, "dump"), *runtime = joinp(work, "run");
+    char *gen = joinp(tools, ".seed-gen"), *tbl = joinp(tools, ".seed-tbl"), *net = joinp(tools, ".seed-net");
+    char *e3j = joinp(work, "e3.json"), *e3t = joinp(work, "e3.tbl"), *e3n = joinp(work, "e3.net");
+    char *ncj = joinp(work, "nc.json"), *nct = joinp(work, "nc.tbl"), *ncn = joinp(work, "nc.net");
+    char *a[] = {bound, "20", cat(ROOT, "/tests/build_ref.sh"), ref, joinp(work, "ref"), "--source-only", 0};
+    char *b[] = {bound, "20", (char *)cc, "-w", "-std=c99", "-O0", dumpc, "-o", dump, 0};
+    char *c[] = {bound, "20", (char *)cc, "-O2", "exec/c/run.c", "-o", runtime, 0};
+    char *d[] = {bound, "20", (char *)cc, "-std=c99", "-O2", "-w", "-Iseed", "seed/gen.c", "-o", gen, 0};
+    char *e[] = {bound, "20", (char *)cc, "-std=c99", "-O2", "-w", "seed/tbl.c", "-o", tbl, 0};
+    char *f[] = {bound, "20", (char *)cc, "-std=c99", "-O2", "-w", "seed/net.c", "-o", net, 0};
+    char *g[] = {bound, "45", gen, "parse2", e3j, 0};
+    char *h[] = {bound, "45", tbl, e3j, e3t, 0};
+    char *i[] = {bound, "45", net, e3t, e3n, 0};
+    char *j[] = {bound, "45", gen, "nativeabi", ncj, 0};
+    char *k[] = {bound, "45", tbl, ncj, nct, 0};
+    char *l[] = {bound, "45", net, nct, ncn, 0};
+    recipe_command(r, a); recipe_command(r, b); recipe_command(r, c); recipe_command(r, d);
+    recipe_command(r, e); recipe_command(r, f); recipe_command(r, g); recipe_command(r, h);
+    recipe_command(r, i); recipe_command(r, j); recipe_command(r, k); recipe_command(r, l);
+    return r;
+}
+static pj_value *recipe_part(pj_value *all, size_t begin, size_t end) {
+    pj_value *r = pj_list(); size_t i;
+    for (i = begin; i < end; i++) pj_append(r, all->items[i]);
+    return r;
+}
+static int native_tools(const char *work, const char *cc) {
+    pj_value *recipe = native_recipe(work, work, cc); size_t i, j;
+    for (i = 0; i < 6; i++) {
+        pj_value *cmd = recipe->items[i]; char *args[16]; Proc p;
+        if (cmd->len >= sizeof args / sizeof *args) return raise_assert();
+        for (j = 0; j < cmd->len; j++) args[j] = cmd->items[j]->s;
+        args[cmd->len] = 0;
+        if (run(args, 1, 0, 0, &p)) return -1;
+        if (p.rc) return exit_code(p.rc);
+        if (i == 0) {
+            size_t n; char *ref = readfile(joinp(work, "ref.c"), &n); Buf src = {0};
+            if (!ref) return -1;
+            bput(&src, ref, n); free(ref);
+            if (dump_source(&src) || writefile(joinp(work, "dump.c"), src.p, src.n)) { free(src.p); return -1; }
+            free(src.p);
+        }
+    }
+    { const char *extra[] = { "ref.c", "dump.c" }; size_t k;
+      for (k = 0; k < 2; k++) {
+          char why[700], *path = joinp(work, extra[k]);
+          if (unisa_safedel(path, SAFEDEL_PURGE, 1L, why, (int)sizeof why))
+              return raise_value(cat("temporary preparation cleanup failed: ", why));
+          free(path);
+      }
+    }
+    return 0;
+}
+static int native_models(const char *work, const char *tools, const char *cc) {
+    pj_value *recipe = native_recipe(work, tools, cc); size_t i, j;
+    /* Caller holds a shared tools publication lock and has checked all five SHA values. */
+    for (i = 0; i < 2; i++) {
+        const char *name = i ? "run" : "dump"; char *from = joinp(tools, name), *to = joinp(work, name), *hash, *got, *s; size_t n;
+        if (!(hash = sha_file(from)) || !(s = readfile(from, &n))) return -1;
+        if (writefile(to, s, n)) return -1;
+        free(s);
+        if (chmod(to, 0700)) return raise_os(errno, to);
+        if (!(got = sha_file(to))) return -1;
+        if (strcmp(hash, got)) return raise_value(sdup("copied tool SHA mismatch"));
+    }
+    for (i = 6; i < recipe->len; i++) {
+        pj_value *cmd = recipe->items[i]; char *args[16]; Proc p;
+        if (cmd->len >= sizeof args / sizeof *args) return raise_assert();
+        for (j = 0; j < cmd->len; j++) args[j] = cmd->items[j]->s;
+        args[cmd->len] = 0;
+        if (run(args, 1, 0, 0, &p)) return -1;
+        if (p.rc) return exit_code(p.rc);
+    }
+    return 0;
+}
+
 /* ---- exec/c/provenance.py through its CLI ---- */
 static char *source_digest(void) {
     char *argv[4]; Proc p; char *e;
@@ -949,8 +1044,10 @@ static char *uname_(const char *flag) {
 /* ---- identity(): the cache basis; 0 with the exception pending (need() exits directly) ---- */
 static pj_value *identity(void) {
     const char *ccenv = getenv("CC"), *rf[] = { "-O2" }, *gf[] = { "-w", "-std=c99", "-O0" };
+    const char *cgf[] = { "-std=c99", "-O2", "-w", "-Iseed" }, *ctf[] = { "-std=c99", "-O2", "-w" };
     char *ccw, *cc, *d, *flat, *ref, *src, *srcres, *argv[8], *sources, *ccsha, *pyres, *pysha, *exp_sha, *dump_sha;
     pj_value *actors, *edges, *runtime, *scan, *files, *source, *cmds, *last, *gen, *b, *env, *stage, *host, *outs;
+    pj_value *constructors, *cr;
     Buf rb = {0}; Proc p; size_t n, i; char *part;
     if (ccenv && *ccenv && strcmp(ccenv, "cc")) need("unverified CC override; this recipe uses system cc");
     if (!(ccw = which("cc"))) need("system cc absent");
@@ -958,6 +1055,13 @@ static pj_value *identity(void) {
     if (!(cc = resolve_strict(ccw))) return 0;
     if (actor_closure(&actors, &edges)) return 0;
     if (!(runtime = readset(cc, "exec/c/run.c", rf, 1))) return 0;
+    constructors = pj_dict();
+    if (!(cr = readset(cc, "seed/gen.c", cgf, 4))) return 0;
+    pj_set(constructors, "gen", cr);
+    if (!(cr = readset(cc, "seed/tbl.c", ctf, 3))) return 0;
+    pj_set(constructors, "tbl", cr);
+    if (!(cr = readset(cc, "seed/net.c", ctf, 3))) return 0;
+    pj_set(constructors, "net", cr);
     if (!(d = mktempdir(gettempdir(), "carrier-import-readset-"))) return 0;
     ref = cat(d, "/ref.c"); flat = cat(d, "/flat.c"); src = cat(d, "/dump.c");
     argv[0] = PY; argv[1] = cat(ROOT, "/tests/bound.py"); argv[2] = "20"; argv[3] = "sh";
@@ -1022,7 +1126,13 @@ static pj_value *identity(void) {
     host = pj_list(); pj_append(host, jstrz(uname_("-s"))); pj_append(host, jstrz(uname_("-m")));
     outs = jlist((char *const *)OUTPUTS, NOUT);
     b = pj_dict();
-    pj_set(b, "schema", jstrz("carrier-import-prepared-v1")); pj_set(b, "sources", jstrz(sources));
+    pj_set(b, "schema", jstrz("carrier-import-prepared-v3-staged")); pj_set(b, "sources", jstrz(sources));
+    pj_set(b, "recipe", jstrz("native-staged-constructors-v1"));
+    pj_set(b, "constructor_readsets", constructors);
+    pj_set(b, "tool_commands", recipe_part(native_recipe("@tools", "@tools", cc), 0, 6));
+    pj_set(b, "model_commands", recipe_part(native_recipe("@work", "@tools", cc), 6, 12));
+    pj_set(b, "tool_outputs", jlist((char *const *)TOOL_OUTPUTS, NTOOLS));
+    pj_set(b, "dumper_transform", jstrz("modelnativecarrierimportcheck.dump_source"));
     pj_set(b, "actors", actors); pj_set(b, "actor_edges", edges);
     pj_set(b, "compiler", jstrz(cc)); pj_set(b, "compiler_sha256", jstrz(ccsha));
     pj_set(b, "python", jstrz(pyres)); pj_set(b, "python_sha256", jstrz(pysha));
@@ -1046,8 +1156,8 @@ static int verify_cached_file(const char *path, const pj_value *h, int executabl
     if (strcmp(got, h->s)) return raise_value(cat("cached artifact SHA mismatch: ", path));
     return 0;
 }
-static int valid_try(const pj_value *basis) {   /* 0 valid; -1 with the exception pending */
-    char *m = joinp(CACHE, "manifest.json"), *argv[5], *text, why[512]; Proc p; size_t n, i, k; pj_value *doc, *db, *outs;
+static int valid_try(const pj_value *basis, const char *cache, const char *const *names, size_t count) {   /* 0 valid; -1 with the exception pending */
+    char *m = joinp(cache, "manifest.json"), *argv[5], *text, why[512]; Proc p; size_t n, i, k; pj_value *doc, *db, *outs;
     argv[0] = PY; argv[1] = cat(ROOT, "/exec/c/provenance.py"); argv[2] = "check"; argv[3] = m; argv[4] = 0;
     if (run(argv, 0, 0, 1, &p)) return -1;
     if (p.rc) {
@@ -1077,23 +1187,23 @@ static int valid_try(const pj_value *basis) {   /* 0 valid; -1 with the exceptio
                     Buf o = {0}; bputs(&o, "unhashable type: '"); bputs(&o, pytype(x)); bputs(&o, "'");
                     return raise_("TypeError", bstr(&o), 1);
                 }
-                if (x->type == PJ_STR) for (k = 0; k < NOUT; k++) if (strlen(OUTPUTS[k]) == x->n && !memcmp(OUTPUTS[k], x->s, x->n)) { seen[k] = 1; hit = 1; }
+                if (x->type == PJ_STR) for (k = 0; k < count; k++) if (strlen(names[k]) == x->n && !memcmp(names[k], x->s, x->n)) { seen[k] = 1; hit = 1; }
                 if (!hit) ok = 0;
             }
-            for (k = 0; k < NOUT; k++) if (!seen[k]) ok = 0;
+            for (k = 0; k < count; k++) if (!seen[k]) ok = 0;
         }
         if (!ok) return raise_value(sdup("role/output set mismatch"));
         if (outs->type == PJ_ARR) { raise_("AttributeError", sdup("'list' object has no attribute 'items'"), 0); return -1; }
     }
     for (i = 0; i + 1 < outs->len; i += 2) {
-        const char *name = outs->items[i]->s; char *path = joinp(CACHE, name);
-        if (verify_cached_file(path, outs->items[i + 1], !strcmp(name, "run") || !strcmp(name, "dump"))) return -1;
+        const char *name = outs->items[i]->s; char *path = joinp(cache, name);
+        if (verify_cached_file(path, outs->items[i + 1], !strcmp(name, "run") || !strcmp(name, "dump") || count == NTOOLS)) return -1;
         free(path);
     }
     return 0;
 }
-static int valid(const pj_value *basis, int prepare) {
-    if (!valid_try(basis)) return 1;
+static int valid_set(const pj_value *basis, int prepare, const char *cache, const char *const *names, size_t count) {
+    if (!valid_try(basis, cache, names, count)) return 1;
     if (!ECAUGHT) uncaught();
     if (!prepare) { char *r = cat3("cache missing, changed or damaged ", KEY, ": "); need(cat(r, EMSG)); }
     return 0;
@@ -1109,9 +1219,68 @@ static int mkdir_p(const char *p) {   /* Path.mkdir(parents=True, exist_ok=True)
     return 0;
 }
 
+static int cache_lock(const char *cache, int exclusive) {
+    char *p = cat(cache, ".lock"); struct flock fl; int fd;
+    if ((fd = open(p, O_WRONLY | O_CREAT | O_APPEND, 0666)) < 0) { raise_os(errno, p); uncaught(); }
+    /* POSIX read locks require a readable descriptor. */
+    if (!exclusive) { close(fd); fd = open(p, O_RDONLY); if (fd < 0) { raise_os(errno, p); uncaught(); } }
+    memset(&fl, 0, sizeof fl); fl.l_type = exclusive ? F_WRLCK : F_RDLCK; fl.l_whence = SEEK_SET;
+    while (fcntl(fd, F_SETLKW, &fl) != 0) if (errno != EINTR) { raise_os(errno, p); uncaught(); }
+    free(p); return fd;
+}
+static int prepare_cache(const pj_value *basis, const char *json, size_t jn,
+                         const char *base, const char *cache, const char *tools, int tools_phase) {
+    const char *const *names = tools_phase ? TOOL_OUTPUTS : OUTPUTS;
+    size_t count = tools_phase ? NTOOLS : NOUT, i, mn; int fd, tfd = -1, rc;
+    char *work, *m, *mj; pj_value *doc, *outs, *again; struct stat st;
+    if (mkdir_p(base)) uncaught();
+    if (!tools_phase) {
+        tfd = cache_lock(tools, 0);
+        valid_set(basis, 0, tools, TOOL_OUTPUTS, NTOOLS);
+    }
+    fd = cache_lock(cache, 1);
+    if (valid_set(basis, 1, cache, names, count)) {
+        printf("carrier import %sprepare HIT %s\n", tools_phase ? "tools " : "", KEY);
+        close(fd); if (tfd >= 0) close(tfd); return 0;
+    }
+    if (!(work = mktempdir(base, tools_phase ? "carrier-import-tools-prepare-" : "carrier-import-prepare-"))) uncaught();
+    rc = tools_phase ? native_tools(work, pj_get(basis, "compiler")->s)
+                     : native_models(work, tools, pj_get(basis, "compiler")->s);
+    if (rc < 0) uncaught();
+    if (rc) { fflush(stdout); cleanup(); close(fd); if (tfd >= 0) close(tfd); return rc; }
+    if (!(again = identity())) uncaught();
+    { size_t an; char *aj = dumps_sorted(again, &an); if (an != jn || memcmp(aj, json, jn)) { raise_assert(); uncaught(); } }
+    /* Revalidate tools while still holding their shared publication lock. */
+    if (!tools_phase) valid_set(basis, 0, tools, TOOL_OUTPUTS, NTOOLS);
+    doc = pj_dict(); outs = pj_dict(); pj_set(doc, "basis", (pj_value *)basis);
+    for (i = 0; i < count; i++) { char *h, *op = joinp(work, names[i]); if (!(h = sha_file(op))) uncaught(); pj_set(outs, names[i], jstrz(h)); }
+    pj_set(doc, "outputs", outs);
+    m = joinp(work, "manifest.json"); mj = dumps_sorted(doc, &mn);
+    { Buf o = {0}; bput(&o, mj, mn); bputs(&o, "\n"); if (writefile(m, o.p, o.n)) uncaught(); }
+    { char *a[6]; Proc p;
+      a[0] = PY; a[1] = cat(ROOT, "/exec/c/provenance.py"); a[2] = "write"; a[3] = m; a[4] = pj_get(basis, "sources")->s; a[5] = 0;
+      if (run(a, 0, 0, 1, &p)) uncaught();
+      if (p.rc) { fflush(stdout); fwrite(bstr(&p.err), 1, p.err.n, stderr); cleanup(); return exit_code(p.rc); }
+    }
+    if (stat(cache, &st) == 0) { if (scratch_rmtree(cache)) { raise_value(sdup("cache replacement cleanup failed")); uncaught(); } }
+    else if (errno != ENOENT) { raise_os(errno, cache); uncaught(); }
+    if (rename(work, cache) != 0) { raise_os(errno, work); uncaught(); }
+    forget_temp(work);
+    if (!valid_set(basis, 1, cache, names, count)) { raise_assert(); uncaught(); }
+    close(fd); if (tfd >= 0) close(tfd);
+    printf("carrier import %sPREPARED %s\n", tools_phase ? "tools " : "", KEY);
+    return 0;
+}
+
 int main(int argc, char **argv) {
-    int prepare = 0, required = 0; const char *part = 0, *mc; char *base, *json; pj_value *basis; size_t jn; char cwd[4096];
-    parse(argc, argv, &prepare, &required, &part);
+    int prepare = 0, required = 0, tools_phase = 0, models_only = 0, i, ac = 1; const char *part = 0, *mc; char *base, *json, *tools; pj_value *basis; size_t jn; char cwd[4096];
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--prepare-tools")) { if (tools_phase) usage_error("duplicate --prepare-tools", 0); tools_phase = 1; argv[ac++] = "--prepare"; }
+        else if (!strcmp(argv[i], "--models-only")) { if (models_only) usage_error("duplicate --models-only", 0); models_only = 1; }
+        else argv[ac++] = argv[i];
+    }
+    parse(ac, argv, &prepare, &required, &part);
+    if ((tools_phase && models_only) || (models_only && !prepare)) usage_error("--models-only requires --prepare and excludes --prepare-tools", 0);
     if (prepare == required || (prepare && part) || (required && !part)) usage_error("choose --prepare or --require-cached --part NAME", 0);
     if (!getcwd(cwd, sizeof cwd)) { fputs("FileNotFoundError: [Errno 2] No such file or directory\n", stderr); return 1; }
     ROOT = sdup(cwd);
@@ -1123,40 +1292,16 @@ int main(int argc, char **argv) {
     mc = getenv("UNISACC_MODEL_CACHE");
     base = mc ? purenorm(mc) : cat(gettempdir(), "/unisacc-model-cache");
     { char *leaf = cat("carrier-import-", KEY); CACHE = joinp(base, leaf); free(leaf); }
+    tools = joinp(base, cat("carrier-import-tools-", KEY));
     if (prepare) {
-        char *lockp = cat(CACHE, ".lock"), *work, *argv2[8], *m, *mj; int fd; struct flock fl; Proc p; struct stat st;
-        pj_value *doc, *outs, *again; size_t i, mn;
-        if (mkdir_p(base)) uncaught();
-        if ((fd = open(lockp, O_WRONLY | O_CREAT | O_APPEND, 0666)) < 0) { raise_os(errno, lockp); uncaught(); }
-        memset(&fl, 0, sizeof fl); fl.l_type = F_WRLCK; fl.l_whence = SEEK_SET;
-        while (fcntl(fd, F_SETLKW, &fl) != 0) if (errno != EINTR) { raise_os(errno, 0); uncaught(); }
-        if (valid(basis, 1)) { printf("carrier import prepare HIT %s\n", KEY); return 0; }
-        if (!(work = mktempdir(base, "carrier-import-prepare-"))) uncaught();
-        argv2[0] = PY; argv2[1] = cat(ROOT, "/tests/bound.py"); argv2[2] = "55"; argv2[3] = PY;
-        argv2[4] = cat(ROOT, "/tests/modelnativecarrierimportcheck.py"); argv2[5] = "--prepare"; argv2[6] = work; argv2[7] = 0;
-        if (run(argv2, 0, 0, 0, &p)) uncaught();
-        if (p.rc) { fflush(stdout); cleanup(); return exit_code(p.rc); }
-        if (!(again = identity())) uncaught();
-        { size_t an; char *aj = dumps_sorted(again, &an); if (an != jn || memcmp(aj, json, jn)) { raise_assert(); uncaught(); } }
-        doc = pj_dict(); outs = pj_dict(); pj_set(doc, "basis", basis);
-        for (i = 0; i < NOUT; i++) { char *h, *op = joinp(work, OUTPUTS[i]); if (!(h = sha_file(op))) uncaught(); pj_set(outs, OUTPUTS[i], jstrz(h)); }
-        pj_set(doc, "outputs", outs);
-        m = joinp(work, "manifest.json"); mj = dumps_sorted(doc, &mn);
-        { Buf o = {0}; bput(&o, mj, mn); bputs(&o, "\n"); if (writefile(m, o.p, o.n)) uncaught(); }
-        {   char *argv3[6]; Proc w; char *srcs = pj_get(basis, "sources")->s;
-            argv3[0] = PY; argv3[1] = cat(ROOT, "/exec/c/provenance.py"); argv3[2] = "write"; argv3[3] = m; argv3[4] = srcs; argv3[5] = 0;
-            if (run(argv3, 0, 0, 1, &w)) uncaught();
-            if (w.rc) { fflush(stdout); fwrite(bstr(&w.err), 1, w.err.n, stderr); cleanup(); return exit_code(w.rc); }
+        int rc;
+        if (tools_phase || !models_only) {
+            rc = prepare_cache(basis, json, jn, base, tools, tools, 1);
+            if (rc || tools_phase) return rc;
         }
-        if (stat(CACHE, &st) == 0) scratch_rmtree(CACHE);
-        if (rename(work, CACHE) != 0) { raise_os(errno, work); uncaught(); }
-        forget_temp(work);
-        if (!valid(basis, 1)) { raise_assert(); uncaught(); }
-        close(fd);
-        printf("carrier import PREPARED %s\n", KEY);
-        return 0;
+        return prepare_cache(basis, json, jn, base, CACHE, tools, 0);
     }
-    valid(basis, 0);   /* metadata scan is allowed; no compiler build/model construction on miss */
+    valid_set(basis, 0, CACHE, OUTPUTS, NOUT);   /* metadata scan is allowed; no compiler build/model construction on miss */
     {   char *argv2[10]; Proc p;
         argv2[0] = PY; argv2[1] = cat(ROOT, "/tests/bound.py"); argv2[2] = "20"; argv2[3] = PY;
         argv2[4] = cat(ROOT, "/tests/modelnativecarrierimportcheck.py"); argv2[5] = "--cached"; argv2[6] = CACHE;

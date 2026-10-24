@@ -52,6 +52,8 @@ Windows lower 使用winlowerphase.cx默认-run控制五个准备节点（共享r
 
 callback lower 的完整off9／on5产物必须为非空常规文件，固定完整清单的实际SHA输出须与artifacts.sha256逐字节相等，生产入口才可命中；缺失、损坏、截断或空清单会回到原生产路径。两个check入口每次执行原比较与全域NN检查。消费part1缺少或损坏on模型时提前返回75，part2～4不要求on模型。尚无通用同身份续跑：一次模块执行中断后不能把旧输出目录当成续跑状态。
 
+carrier import 用默认-run分开准备工具与模型：prepare-tools封存dump／run及三个现有C构造器，prepare的models-only只消费已核验工具。完整basis绑定构造命令、源码、系统头readset、环境及工具身份；阶段不进入材料key，缺失／损坏返回75。两个消费者仍执行原import／package断言；准备成功不算测试通过，原Python准备入口保留独立材料对拍。
+
 libraryfunctionimports依次登记--prepare-gen/c-json/p-json/tbl/net/runner六阶段；消费入口使用--require-cached。各阶段核对完整前置seal，重复准备只复用已核验产物；缺失或损坏返回75要求准备，消费不偷偷重建。构造、C/Python比较和20案例消费断言仍保留。实际Python对照阶段约35秒，旧20秒限时会超时，仅此阶段定点调整为40秒，外层41秒；其余构造20秒、消费35秒不变。
 
 suite-tools-native通过默认-run运行check.cx：原声明恒等、依赖顺序、BLOCKED零执行、准备与测试分计、真实77/142失败、容器状态恢复、错误绑定拒绝等7场景28断言。独立tools-suite-failfast-run入口验证check.cx --fail-fast的3场景86断言：首红停止、已启动任务结证、NOT_RUN与跨层依赖补齐；两个入口各自限时55秒。按精确脚本路径确认的E3/lower单元归入对应模块，跨流或未知项保守integration。

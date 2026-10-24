@@ -751,9 +751,10 @@ job lib-carrier-native-plan sh ./unisacc.com -run tests/librarycarriernativeplan
 job lib-carrier-callback tests/bound 58 sh ./unisacc.com -run tests/librarycarriercallbackcheck.cx   # (.cx port, 2026-10-23)
 case "$(uname -s)" in
     Linux|Darwin)
-        job lib-carrier-import-model-prepare sh ./tests/cxbin tests/carrierimportprepared.cx --prepare   # (.cx port, 2026-10-23)
-        job lib-carrier-import-model-import sh ./tests/cxbin tests/carrierimportprepared.cx --require-cached --part import
-        job lib-carrier-import-model-package sh ./tests/cxbin tests/carrierimportprepared.cx --require-cached --part package
+        job lib-carrier-import-model-prepare-tools sh ./unisacc.com tests/carrierimportprepared.cx -- --prepare-tools
+        job lib-carrier-import-model-prepare sh ./unisacc.com tests/carrierimportprepared.cx -- --prepare --models-only
+        job lib-carrier-import-model-import sh ./unisacc.com tests/carrierimportprepared.cx -- --require-cached --part import
+        job lib-carrier-import-model-package sh ./unisacc.com tests/carrierimportprepared.cx -- --require-cached --part package
         ;;
     *)
         job lib-carrier-import-model python3 ./tests/modelnativecarrierimportcheck.py
