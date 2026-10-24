@@ -707,3 +707,5 @@ source-only 冷准备在原 55 秒看门狗内实际成功；具名 gate 的冷�
 - F4恢复环境核对：新会话继承en_US.UTF-8，而旧env-pin为C.UTF-8；语料排序和分片因此不同。第21/22窗的原日志保留，仅作诊断，不纳入旧队列验收；后续冻结运行显式恢复LC_ALL/LANG/LC_CTYPE/TZ及其余钉住变量。metadata冷枚举对拍只规约导出ROOT路径并扣除新增具名闸，其余原计划要求逐字节一致。
 
 - metadata冷枚举修复已于b36d4bad29经隔离index提交闸落地：七项全rc0（含原始K2b全套，38秒），派生检查通过。完整冷计划4.82秒，原有NUL计划在规约ROOT并扣除新增seed-metadata闸后逐字节相等，原10秒限时保持；无效源数据使枚举rc2。现全量1129项、CONTRACT189项；后续正式F4按新源码建立fresh状态，既有五项内存准入UNKNOWN与旧红均保留待结证。证据见research/c43-seed-metadata-evidence/。
+
+- 内存证据采集原型的UTF-8首红已定因：seedparse2check.sh的ROOT相对产品引用使文本actor闭包递归到unisacc.com；其PE头第797字节为0x86。隔离导出中直接调用既有Python actor_closure，仅以该shell为种子，复现同位置UnicodeDecodeError；原生seedprep按同合同解码全部actor，故同样拒绝。这是采集原型把二进制送入文本actor机制的接口错配，不是内存准入证据。生成/产品字节须另作原始文件身份绑定，文本actor与二进制叶分账的候选方案待实现；暂不改通用闭包或准入判据。
