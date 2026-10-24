@@ -20,7 +20,7 @@ sh ./unisacc.com tests/suite/graph.cx -- out/suite.plan.nul tests/gateorder.json
 sh ./unisacc.com tests/suite/run.cx -- out/suite.plan.nul out/suite.catalog.tsv - --module e4 --graph out/suite.graph.tsv --order tests/gateorder.json --list
 ```
 
-必须先导入完整计划和图，再选择模块，不能先裁掉准备项。原1142项计划的实测导入为1142节点、782条依赖边；这证明导入完整，不表示1142项已执行通过。
+必须先导入完整计划和图，再选择模块，不能先裁掉准备项。当前完整计划的实测导入为1303节点、938条依赖边；导入证明目录完整，实际测试覆盖与通过状态以回执为准。
 
 执行示例：
 
@@ -28,7 +28,7 @@ sh ./unisacc.com tests/suite/run.cx -- out/suite.plan.nul out/suite.catalog.tsv 
 sh ./unisacc.com tests/suite/run.cx -- out/suite.plan.nul out/suite.catalog.tsv out/suite.e4-run --module e4 --graph out/suite.graph.tsv --order tests/gateorder.json --jobs 1 --limit 55 --parent-container-unset
 ```
 
-可用--unit ID替代--module。默认仅list；零选择或旧输出目录会失败。--jobs范围1..4，默认1；各个子命令由原tests/bound限时1..55秒。共享状态或重活的并发资格仍须按原合同检查，不因同属一个模块就自动允许并发。
+可用--unit ID替代--module；--layer prepare可与二者求交集，随后仍自动补齐跨层前置；只有--layer时保持默认list。开发定位加--fail-fast：首次非零结果后停止启动新任务，已启动子任务正常结证；真实失败前置的下游记BLOCKED，其余未启动项记NOT_RUN，rc/elapsed为-且没有argv/stdout/stderr进程材料。summary及completion保留not_run计数，覆盖未完成时不会返回成功。默认仅list；零选择或旧输出目录会失败。--jobs范围1..4，默认1；各个子命令由原tests/bound限时1..55秒。共享状态或重活的并发资格仍须按原合同检查，不因同属一个模块就自动允许并发。
 
 default-run会注入自身UNISA_CONTAINER，执行时必须声明调用前的状态：上例假定原本unset；显式值使用--parent-container-value VALUE（空值也有效）。运行器在每个子命令前恢复该状态，随后原命令自己的环境赋值仍优先。列表模式不要求这个参数。
 
@@ -50,6 +50,6 @@ nativecheck.sh保留三次独立构建和compiler/network运行器逐字节相�
 
 libraryfunctionimports依次登记--prepare-gen/c-json/p-json/tbl/net/runner六阶段；消费入口使用--require-cached。各阶段核对完整前置seal，重复准备只复用已核验产物；缺失或损坏返回75要求准备，消费不偷偷重建。构造、C/Python比较和20案例消费断言仍保留。实际Python对照阶段约35秒，旧20秒限时会超时，仅此阶段定点调整为40秒，外层41秒；其余构造20秒、消费35秒不变。
 
-suite-tools-native通过默认-run运行check.cx：原声明恒等、依赖顺序、BLOCKED零执行、准备与测试分计、真实77/142失败、容器状态恢复、错误绑定拒绝等7场景28断言。按精确脚本路径确认的E3/lower单元归入对应模块，跨流或未知项保守integration。
+suite-tools-native通过默认-run运行check.cx：原声明恒等、依赖顺序、BLOCKED零执行、准备与测试分计、真实77/142失败、容器状态恢复、错误绑定拒绝等7场景28断言。独立tools-suite-failfast-run入口验证check.cx --fail-fast的3场景86断言：首红停止、已启动任务结证、NOT_RUN与跨层依赖补齐；两个入口各自限时55秒。按精确脚本路径确认的E3/lower单元归入对应模块，跨流或未知项保守integration。
 
 该入口尚未替代正式发布验收，也不表示全部旧oracle已经原生化。原断言中仍必需的Python如实保留；新增目录、依赖图和调度逻辑均为.cx。
