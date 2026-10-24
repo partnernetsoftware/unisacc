@@ -1,4 +1,13 @@
 #!/bin/sh
+# No option keeps the original two-target contract; a leaf selects one target.
+set -eu
+usage() { echo "usage: $0 [--arch x86_64|arm64]" >&2; exit 2; }
+case $# in
+    0) ARCHES='x86_64 arm64';;
+    2) [ "$1" = --arch ] || usage
+       case $2 in x86_64|arm64) ARCHES=$2;; *) usage;; esac;;
+    *) usage;;
+esac
 _BOUND=$(cd "$(dirname "$0")/../.." && pwd)/tests/bound
 _BOUND=$("$_BOUND" --helper) || exit 2
 set -eu
@@ -12,7 +21,7 @@ trap 'sh "$_SD/cxbin" "$_SD/safedel.cx" --purge -- "${T:?}" "${_LIB_TMP:?}"' EXI
 b cc -O2 -o "$T/run" exec/c/run.c
 b "$UA" -S examples/hello.c -o "$T/hello"
 b "$UA" -O2 -S examples/fib.c -o "$T/fib"
-for ARCH in x86_64 arm64; do
+for ARCH in $ARCHES; do
     case $ARCH in arm64) FLAG=--arm64;; *) FLAG=;; esac
     b python3 exec/build/gen.py lower "$T/d.json" --full --win $FLAG
     b python3 exec/c/tbl.py "$T/d.json" "$T/d.tbl"

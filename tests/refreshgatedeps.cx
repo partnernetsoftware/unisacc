@@ -829,6 +829,46 @@ static void native_unit_declarations(J *suites) {
     free(raw);
 }
 
+/* Derive Windows lowering leaves from the actual gate argv. Preserve the
+   complete former readset, including all guards and executable input identity. */
+static void winlower_leaf_declarations_from_plan(J *suites, J *jobs) {
+    J *base = oget(suites, "exec-winlower"); int i, seen = 0;
+    if (!base) base = oget(suites, "exec-winlower-x86_64");
+    if (!base || base->t != JOBJ || !oget(base, "files") || need(base, "files")->t != JARR ||
+            !need(base, "files")->n || !oget(base, "trees") || need(base, "trees")->t != JARR ||
+            !need(base, "trees")->n || !oget(base, "guards") || need(base, "guards")->t != JOBJ ||
+            !need(base, "guards")->n || !oget(base, "executable_inputs") ||
+            need(base, "executable_inputs")->t != JTRUE)
+        die("winlower leaves require a complete existing declaration", 0);
+    base = jcopy(base);
+    for (i = 0; i < jobs->n; i++) {
+        J *job = jobs->v[i], *name = need(job, "name"), *command = need(job, "command"), *entry;
+        char expected[96]; int bit;
+        if (command->t != JARR || !command->n) die("invalid gate command", 0);
+        if (!jstreq(command->v[0], "./exec/lower/wincheck.sh")) {
+            if (jstreq(name, "exec-winlower-x86_64") || jstreq(name, "exec-winlower-arm64"))
+                die("winlower leaf command owner mismatch", 0);
+            continue;
+        }
+        if (command->n != 3 || !jstreq(command->v[1], "--arch") ||
+                (!jstreq(command->v[2], "x86_64") && !jstreq(command->v[2], "arm64")))
+            die("winlower leaf architecture argv mismatch", 0);
+        bit = jstreq(command->v[2], "x86_64") ? 1 : 2;
+        snprintf(expected, sizeof expected, "exec-winlower-%s", command->v[2]->s);
+        if (!jstreq(name, expected) || (seen & bit)) die("winlower leaf name/argv mismatch", 0);
+        seen |= bit; entry = jcopy(base); oset(entry, "command", jcopy(command));
+        osetn(suites, name->s, name->sn, entry);
+    }
+    if (seen != 3) die("winlower leaf inventory changed", 0);
+    if (oget(suites, "exec-winlower")) odel(suites, "exec-winlower", strlen("exec-winlower"));
+}
+static void winlower_leaf_declarations(J *suites) {
+    char *a[] = { "sh", "tests/gate.sh", "--plan", 0 }; size_t n;
+    char *raw = run(a, 55, &n, 1);
+    winlower_leaf_declarations_from_plan(suites, parse_gate_plan(raw, n));
+    free(raw);
+}
+
 int main(int argc, char **argv) {
     J *d, *fams, *suites, *outside, *glist, *treeset, *o; Buf tb = {0}; char *blob, root[8192]; size_t bn; int i, f, t, k;
     char **av;
@@ -1128,6 +1168,9 @@ int main(int argc, char **argv) {
     changed("e5-phases", "declared all original encoder checks");
     native_unit_declarations(suites);
     changed("native-phases", "declared five native units with complete inherited family readsets");
+    winlower_leaf_declarations(suites);
+    changed("winlower-leaves", "declared two ARCH leaves with the complete original Windows lowering readset");
+
     /* 0.0.43 derived-consistency step 1 (research/c43-derived-consistency.md): facts-export and gate-layers */
     oset(suites, "facts-export", pylit("{\n"
             "'command': ['python3', './exec/facts/export.py', '--check'],\n"

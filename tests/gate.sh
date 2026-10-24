@@ -422,7 +422,8 @@ job exec-lower ./exec/lower/fullcheck.sh                        # typed full Lin
 # Original ARM lowering checks, both complete target scopes, same suite budget.
 job exec-armlower-linux  sh ./tests/cxbin tests/armlowerphase.cx linux
 job exec-armlower-darwin sh ./tests/cxbin tests/armlowerphase.cx darwin
-job exec-winlower ./exec/lower/wincheck.sh                     # Windows typed setup, syscall preservation, both architectures
+job exec-winlower-x86_64 ./exec/lower/wincheck.sh --arch x86_64  # Windows typed setup and all syscall refusals, x86_64
+job exec-winlower-arm64 ./exec/lower/wincheck.sh --arch arm64    # Same complete comparisons and refusals, arm64
 job exec-x86win ./exec/enc/x86wincheck.sh                      # Deferred Windows x86 setup after relaxation
 job exec-armwin ./exec/enc/armwincheck.sh                      # Windows ARM setup/gates, real text bytes
 job exec-pex86-base env PE_ARCH=x86_64 sh ./unisacc.com tests/pephase.cx -- base

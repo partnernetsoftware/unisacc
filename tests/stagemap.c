@@ -37,7 +37,7 @@ static char *rules[] = {
           " volatile-comma diag* c99 staticinit staticunits tagforward parserbounds hostile cli ccparity"
           " formatonce warn* seed-construct-parse2 seedparse2*",
     "E4", "opt-run exec-e4* exec-prune*",
-    "lower", "exec-lower exec-armlower exec-armlower-linux exec-armlower-darwin exec-winlower exec-lowdata exec-sparse rowcov-lower* forward*"
+    "lower", "exec-lower exec-armlower exec-armlower-linux exec-armlower-darwin exec-winlower exec-winlower-x86_64 exec-winlower-arm64 exec-lowdata exec-sparse rowcov-lower* forward*"
              " ccinterop ffi-* exec-bridge-linux windows-resolver-host exec-bind* libneed",
     "E5", "exec-e5 exec-e5-positive exec-e5-negative exec-e5-roundtrip-a exec-e5-roundtrip-b exec-e5-real-fp exec-arm exec-sha exec-asm* rowcov-enc* asmtext combo exec-memory-asm exec-memx86-asm",
     "E6", "exec-elf* exec-armelf exec-mach* exec-x86win exec-armwin exec-pe* exec-object* exec-modelobject"

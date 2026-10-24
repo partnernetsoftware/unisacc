@@ -23,6 +23,22 @@ K=$({ find tests/seals/librarycallbacklower -name '*.sha256' -type f -print | LC
 D=$BASE/callback-$K
 mkdir -p "$D"
 ready(){ [ -f "$1/artifacts.sha256" ] && (cd "$1" && sha256sum -c --status artifacts.sha256); }
+# Only part 1 consumes this on-model; require its complete preparation seal.
+complete_model(){
+ model_dir=$1
+ [ -d "$model_dir" ] && [ ! -L "$model_dir" ] && [ -f "$model_dir/artifacts.sha256" ] && [ ! -L "$model_dir/artifacts.sha256" ] || return 1
+ case $2 in
+  off) set -- base-c.json base-p.json base.tbl base.net off-c.json off-p.json off.tbl off.net exhaustive.log;;
+  on) set -- model-c.json model-p.json model.tbl model.net exhaustive.log;;
+  *) return 1;;
+ esac
+ for model_file in "$@";do
+  [ -f "$model_dir/$model_file" ] && [ ! -L "$model_dir/$model_file" ] && [ -s "$model_dir/$model_file" ] || return 1
+ done
+ model_expected=$(cd "$model_dir" && sha256sum "$@") || return 1
+ printf '%s\n' "$model_expected" | cmp -s "$model_dir/artifacts.sha256" -
+}
+ready_on(){ complete_model "$1" on; }
 flags(){
  case "$1" in
   lnx-x) FLAGS='--full';;lnx-a) FLAGS='--full --arm64';;osx-x) FLAGS='--full --osx';;osx-a) FLAGS='--full --osx --arm64';;
@@ -46,6 +62,9 @@ case ${1:-} in
   [ "$#" = 2 ] || exit 2;step=$1;v=$2;flags "$v";FLAGS="$FLAGS --librarytyped"
   ready "$D/tools" || { echo 'NEED_PREPARE callback tools' >&2;exit 75; }
   M=$D/off12/$v;mkdir -p "$M"
+  case $step in --prepare-off-check) ;; *)
+   if complete_model "$M" off;then echo "callback lower: constructive HIT off $v";exit 0;fi;;
+  esac
   case $step in
    --prepare-off-c) b "$D/tools/gen" lower/librarytyped-model "$M/base-c.json" $FLAGS;b "$D/tools/gen" lower/librarycallback-model "$M/off-c.json" $FLAGS;;
    --prepare-off-python) b python3 exec/build/gen.py lower/librarytyped-model "$M/base-p.json" $FLAGS;b python3 exec/build/gen.py lower/librarycallback-model "$M/off-p.json" $FLAGS;;
@@ -63,6 +82,9 @@ case ${1:-} in
   ready "$D/tools" || { echo 'NEED_PREPARE callback tools' >&2;exit 75; };flags "$v";FLAGS="$FLAGS --librarytyped"
   [ "$cs" = 0 ] || FLAGS="$FLAGS --librarycallsite";[ "$cb" = 0 ] || FLAGS="$FLAGS --librarycallback"
   M=$D/models/$v/cs$cs-cb$cb;mkdir -p "$M"
+  case $step in --prepare-check) ;; *)
+   if complete_model "$M" on;then echo "callback lower: constructive HIT $v cs$cs-cb$cb";exit 0;fi;;
+  esac
   case $step in
    --prepare-c) b "$D/tools/gen" lower/librarycallback-model "$M/model-c.json" $FLAGS;;
    --prepare-python) b python3 exec/build/gen.py lower/librarycallback-model "$M/model-p.json" $FLAGS;b cmp "$M/model-c.json" "$M/model-p.json";;
@@ -77,10 +99,13 @@ ready "$D/tools" || { echo 'NEED_PREPARE callback tools' >&2;exit 75; }
 # Fixture producer owns an explicit hash-bound case plan; never guess a ledger,
 # synthesize ABSENT or report an empty plan as PASS.
 [ -f tests/seals/librarycallbacklower/cases.json ] || { echo 'NEED_PREPARE paired callback fixture/producer' >&2;exit 75; }
+if [ "$part" = 1 ];then
+ ready_on "$D/models/lnx-x/cs0-cb1" || { echo 'NEED_PREPARE callback on lnx-x cs0-cb1' >&2;exit 75; }
+fi
 T=$(mktemp -d "${TMPDIR:-/tmp}/callback-model-check.XXXXXX");trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT HUP INT TERM
 # All twelve pairs are explicitly prepared/hash-bound, three per verdict shard.
 for v in lnx-x lnx-a osx-x osx-a win-x win-a obj-lnx-x obj-lnx-a obj-osx-x obj-osx-a obj-win-x obj-win-a;do
- ready "$D/off12/$v" || { echo "NEED_PREPARE callback off $v" >&2;exit 75; }
+ complete_model "$D/off12/$v" off || { echo "NEED_PREPARE callback off $v" >&2;exit 75; }
 done
 b python3 tests/librarycallbackproduce.py --root "$R" --product "$UA" --out "$T/off-cases" --part "$part" --off-artifacts "$D/off12"
 b python3 tests/librarycallbackproduce.py --root "$R" --product "$UA" --cache "$D" --out "$T/off-verdict" --part "$part" --cases "$T/off-cases/cases.json" --run

@@ -20,7 +20,7 @@ sh ./unisacc.com tests/suite/graph.cx -- out/suite.plan.nul tests/gateorder.json
 sh ./unisacc.com tests/suite/run.cx -- out/suite.plan.nul out/suite.catalog.tsv - --module e4 --graph out/suite.graph.tsv --order tests/gateorder.json --list
 ```
 
-必须先导入完整计划和图，再选择模块，不能先裁掉准备项。当前完整计划的实测导入为1303节点、938条依赖边；导入证明目录完整，实际测试覆盖与通过状态以回执为准。
+必须先导入完整计划和图，再选择模块，不能先裁掉准备项。当前完整计划为1304节点、938条依赖边；导入证明目录完整，实际测试覆盖与通过状态以回执为准。
 
 执行示例：
 
@@ -47,6 +47,10 @@ default-run会注入自身UNISA_CONTAINER，执行时必须声明调用前的状
 nativecheck.sh保留三次独立构建和compiler/network运行器逐字节相等断言。相同运行器字节、同显式输入且不查询自身路径的场景只执行两个不同内容类的代表；网络构建运行器的独有self路径和资源缺失负例仍实际执行。
 
 阶段样例与全源self分开；链路样例、C self和network self分开。原stages/chain/all兼容入口仍保留。每单元保留原比较、输入和预算，准备/执行结果不混记。
+
+Windows lower 的两个架构分别使用exec-winlower-x86_64和exec-winlower-arm64；wincheck.sh --arch严格选择一个架构，无参保留原双架构。每个叶保留原构造、完整比较及22项系统调用拒绝，不继承旧聚合超时的通过状态。
+
+callback lower 的完整off9／on5产物必须为非空常规文件，固定完整清单的实际SHA输出须与artifacts.sha256逐字节相等，生产入口才可命中；缺失、损坏、截断或空清单会回到原生产路径。两个check入口每次执行原比较与全域NN检查。消费part1缺少或损坏on模型时提前返回75，part2～4不要求on模型。尚无通用同身份续跑：一次模块执行中断后不能把旧输出目录当成续跑状态。
 
 libraryfunctionimports依次登记--prepare-gen/c-json/p-json/tbl/net/runner六阶段；消费入口使用--require-cached。各阶段核对完整前置seal，重复准备只复用已核验产物；缺失或损坏返回75要求准备，消费不偷偷重建。构造、C/Python比较和20案例消费断言仍保留。实际Python对照阶段约35秒，旧20秒限时会超时，仅此阶段定点调整为40秒，外层41秒；其余构造20秒、消费35秒不变。
 
