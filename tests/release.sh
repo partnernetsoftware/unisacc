@@ -111,8 +111,32 @@ mkdir -p "$GATE_STATE"
 # 0.0.17 lost 93/401 to a prd.md commit made mid-queue; say so at once.
 # R19-0: what invalidates the queue is a change to the declared inputs, not
 # any commit (0.0.18 lost a queue to a plans/ commit).  Compare their trees.
+# DECLARED-IDENTITY-BEGIN: checked independently; pipelines must not hide git failure.
 DECLARED="src exec tests include kernel weights unisa examples unisacc.c README.md ARCHITECTURE.md AGENTS.md prd.md release scripts Makefile"
-head_now=$(cd "$R" && git ls-tree HEAD -- $DECLARED 2>/dev/null | shasum -a 256 | cut -c1-64)
+if identity_bound=$("$R/tests/bound" --helper); then :; else
+    identity_rc=$?; echo "release: cannot resolve identity watchdog (rc $identity_rc)" >&2; exit "$identity_rc"
+fi
+if declared_tree=$("$identity_bound" 8 git -C "$R" ls-tree HEAD -- $DECLARED); then :; else
+    identity_rc=$?; echo "release: cannot read declared source tree (rc $identity_rc)" >&2; exit "$identity_rc"
+fi
+[ -n "$declared_tree" ] || { echo 'release: declared source tree is empty' >&2; exit 1; }
+# Command substitution removes ls-tree's final LF; the here-string restores it.
+if head_sum=$("$identity_bound" 8 shasum -a 256 <<< "$declared_tree"); then :; else
+    identity_rc=$?; echo "release: cannot hash declared source tree (rc $identity_rc)" >&2; exit "$identity_rc"
+fi
+head_now=${head_sum%% *}
+case "$head_now" in ''|*[!0123456789abcdef]*) echo 'release: invalid declared source digest' >&2; exit 1;; esac
+[ "${#head_now}" = 64 ] || { echo 'release: invalid declared source digest length' >&2; exit 1; }
+if dirty=$("$identity_bound" 8 git -C "$R" status --porcelain -- $DECLARED); then :; else
+    identity_rc=$?; echo "release: cannot inspect declared source status (rc $identity_rc)" >&2; exit "$identity_rc"
+fi
+if [ -n "$dirty" ]; then
+    if dirty_display=$("$identity_bound" 8 head -3 <<< "$dirty"); then :; else
+        identity_rc=$?; echo "release: cannot display dirty source status (rc $identity_rc)" >&2; exit "$identity_rc"
+    fi
+    printf 'release: declared inputs are modified in the working tree; the queue would be invalidated:\n%s\n' "$dirty_display" >&2
+    exit 1
+fi
 if [ -s "$GATE_STATE/head" ]; then
     head_was=$(cat "$GATE_STATE/head")
     if [ "$head_was" != "$head_now" ]; then
@@ -126,8 +150,7 @@ if [ -s "$GATE_STATE/head" ]; then
 else
     echo "$head_now" > "$GATE_STATE/head"
 fi
-dirty=$(cd "$R" && git status --porcelain -- $DECLARED 2>/dev/null | head -3)
-[ -z "$dirty" ] || { printf 'release: declared inputs are modified in the working tree; the queue would be invalidated:\n%s\n' "$dirty" >&2; exit 1; }
+# DECLARED-IDENTITY-END
 [ -z "${cid:-}" ] || sl end --id "$cid" --execution-status release-checks
 # 0.0.22/0.0.38: cache warm-ups, one step per window, markers only for a built cache (release/tools/warmup.sh)
 if [ -n "$OBS" ]; then

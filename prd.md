@@ -140,69 +140,40 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 <a id="work-tree"></a>
 ### 思维树
 
-**目标：完成 unisacc 0.0.43 并公开发布。** 本节按实际进展原位动态更新，替换过时节点，不把过程不断追加到文末。当前用户目标已包含发布授权，跨仓 Apple 服务接入另待具体确认。2026-10-24 实际核对 Latest 仍为 v0.0.42，本版尚未公开。
+**目标：完成 unisacc 0.0.43 并公开发布。** 发布目标已有授权；minicon Apple 跨仓接入的具体授权仍待答。2026-10-24 核对 Latest 为 v0.0.42，本版尚未公开。
 
 ```text
 0.0.43 公开发布
-├─ 已完成：F1 产品修复；F2 文档与探针收口
-├─ 已完成：F3 历史 CONTRACT 基线（187项：186 PASS、1宿主未核）
-├─ 已完成：新F6三实际SHA相同且官方固定点通过；stage3复用同身份模型包，五代码切片均由stage2实际重编，原50秒界通过
-├─ 正在执行：7a063304f4修复冻结的正式M7分窗验收 ← 当前节点
-│  ├─ 产品来源d09bd1decb／S=c90f0002…不变；开发完整图1315节点／954依赖，Windows全部分片原预算通过
-│  ├─ 已实跑：七流独立工具链；native六叶；functionimports六准备＋20案例；callback12目标＋四片消费
-│  ├─ 已修复：typed/callsite完整材料命中及无关检查脚本触发失效；普通七流／native资源缓存拆层仍待做
-│  ├─ E4块摘要修复与新候选固定点已通过；完整M7仍待完成
-│  ├─ E4重封、Windows分片与元数据闸通过；023旧32项结证及全部失败已保存，不作为新冻结通过数
-│  ├─ 首红修复a936e98453的四默认-run节点已在正式M7全部rc0；tools／models均HIT，两个消费者重跑原断言
-│  ├─ 023后修复：四tools原33秒通过；最终退出／恢复／I/O异常回归原55秒通过；计划三模式逐字节相同，热计划0.824秒
-│  ├─ 旧fbef的063窗70项及全部失败已备份；新064窗1/1316 PASS、1315待办，无未裁定红
-│  ├─ hostcheck七叶12例、seedmemory行为16例及18隔离正反例均实际通过；真实新鲜度独立非PASS／OPEN，未重键旧测量
-│  ├─ 后台E4性能研究仅私有设计／实验，不改当前候选、不作为0.0.43前置；前台不等待提速
-│  ├─ 旧1142轮已停窗；原失败与未执行项保留，准备仅计PREPARED，不迁旧PASS
-│  └─ 完成判据：最终模块清单完整、PENDING=0、NEEDS_RULING=0、product_red=0、处置齐全
-├─ 待完成：据终态结果收口发布说明与RC资格（源码绑定标签可先于M7）
-├─ 已完成：匹配候选的六原生CI demo／严格矩阵及Windows双架构套件；Darwin专闸两架构16项全部通过
-├─ 待完成：Apple／Windows签名、公证及最终字节验证
-│  └─ 独立外部待答事项：minicon Apple 服务具体接入授权
+├─ 已完成：F1产品修复、F2文档／探针；F3历史基线187项=186 PASS＋1宿主未核
+├─ 已完成：F6三实际编译器SHA相同；三阶段五代码切片实际重编、原50秒界通过
+├─ 当前：Git隔离对象已修复，release.sh身份失败即停已修复；等待新源码提交及正式M7新结证
+│  ├─ 070窗自然结束、2193已终止；旧冻结的结果仅保留诊断，不计有效正式PASS
+│  ├─ 清单1316项；原seedmemory严格17例=行为16＋真实新鲜度1，后者仍UNKNOWN／OPEN
+│  ├─ 固定env-pin；绑定新HEAD与真实非空Git闭包身份，禁止迁移旧绿或沿用旧闭包hash
+│  └─ 完成判据：最终清单／输入身份完整，PENDING=0、NEEDS_RULING=0、product_red=0，处置齐全
+├─ 已完成：指定RC候选六原生smoke／严格矩阵、Windows双架构；Darwin两架构16报告
+├─ 待完成：M7终态收口与RC资格（额外CI安全网尚有已知红项）
+├─ 待完成：Apple／Windows签名、公证及签后最终字节验证
 └─ 待完成：Draft资产核对 → Latest／公开 → 下载SHA与运行复核
 ```
 
-**下一动作：固定7a063304f4验收副本，按原55秒窗口续M7，每窗分类后再前进，新未裁定红即停。** 064窗候选freshness与bigclosure-lnx-x86_64实际rc0；旧70项完整备份，不迁未知闭包的绿。新清单1316含行为16＋新鲜度1两具名节点，旧严格17项入口保留，真实缺测仍非PASS／OPEN，不重键旧RSS、不自授豁免。后续主树状态文档及私有后台准备不导入固定副本。候选仍为2974978e…／S=c90f0002…，六原生smoke及Darwin收据各保留真实源码和run身份。完整M7之后仍须签名、公证、最终签后字节court与公开下载核验；Apple跨仓服务／读包授权已向用户发问，尚未获答。
-
+**下一动作：提交已核修复后，以实际新HEAD重新绑定冻结、env-pin及1316清单，开始新的正式M7结证。** 不因测试／文档修复重建未变产品，不以单元绿替代M7，不把真实缺测义务判为PASS。旧实验明细见 `git show e89a17371d:prd.md` 及下列原始证据；失败记录不删除。
 
 <a id="memory-palace"></a>
 ### 记忆宫殿
 
 | 房间 | 当前事实／决定 | 证据与行动入口 |
 |---|---|---|
-| 入口厅：目标 | 公开发布0.0.43；当前节点F4/M7，不是重做F1。 | 上方思维树；[范围](plans/v0.0.43.md)、[终点线](plans/v0.0.43-finish-line.md)。旧未授描述不覆盖当前明确目标授权。 |
-| 工具间：能力 | 默认-run、tape→image、六目标、`.cx`模块已实现；经典UA与模型产品是不同实现。 | [能力速查](#implemented-usage)、[README](README.md)、已有用例。只验证具体输入的证据缺口，不重新研究入口是否存在。 |
-| 材料室：重复构造 | d09bd1decb修复typed/callsite完整缓存仍重建，以及无关exec检查脚本使typed缓存失效；typed实际工具和obj-win-x准备均HIT，仍执行独立比较及NN全域检查。尚存：pipeline的native_ua与七流模型共键；两个缓存原有24件逐项相同，添加原生资源仍重做七流。ROOT路径亦进入整体键，迁冻结目录会失效。 | 构造缓存按相关TSV、构造器、格式、目标及必要工具身份失效；哈希核验、加载和重新测试分开计量。拆基础模型与native资源键；保持prepared-only消费，缺失／损坏返回75；不得复用旧测试PASS。实际HIT日志：`/tmp/unisacc-c43-e4-summary-final-20261024/out/lower-material-reuse/`。 |
-| 环境室：跨调用失效 | Windows材料键包含整个调用环境。批量摘要实验tools rc0后json返回75；独立key-only实测两份165617字节preimage只差CODEX_TOOL_CALL_ID一个字段，所有文件／工具／其他环境相同。固定该调用字段后两次preimage逐字节相同、KEY一致。 | 实验前缀固定`CODEX_TOOL_CALL_ID=winbatch-fixed`；最终分窗验收亦须固定／明确清除此执行工具元数据，再封env-pin。不删来源、文件、工具或全环境检查。旧未pin准备不迁用；报告`/tmp/unisacc-c43-winbatch-key-rootcause.txt`。本次证据不能泛化为忽略所有未知环境变量。 |
-| 自举间：驱动聚合 | 新候选作UA时，JOBS=1将五目标asmcompiler.c编译和打包串在一项，第二阶段窗口9触60秒。现已逐目标原50秒界完成十次代码编译、原封装和三阶段固定点；stage3模型材料复用经全哈希及七manifest核验。 | [F6收据](research/c43-f6-final-evidence/)。原聚合窗口仍为失败；不重构已完成的相同权重，也不迁用测试PASS。E4 seal三项规则依赖已变，须独立重封；edge-e4两seal不因这三项改动重录。 |
-| 性能室：独立实验 | 同一lnx/x86_64驱动切片，实际包ISA内核诊断总27.315秒，输出与原产品逐字节相同：E2执行3.970秒、E1 0.146、E3 6.011、E4 14.397、prune 0.097、lower 1.096、enc 0.766；两次tapecheck合0.634。包加载0.025秒，解压／CRC／模型解码仅毫秒。另一次通用C语义计数对照rc0且输出相同：E4有288,505,813次模型转移、362,348,127次动作、7次SWAP；结合三处SWAP规则，证明此输入实际4次stack＋4次peep。不能把通用C计时当ISA或阶段执行当纯NN算子计时。 | 独立报告`/tmp/unisacc-c43-slice-phase-experiment.txt`与仓外`/tmp/unisacc-c43-slice-phase/`；输出SHA=ace9f9ed…与stage2切片cmp相同。热点已定位为E4多轮算法；经典C的J9已有跨轮行事实复用，模型未见对应映射。下一刀按真实变更复用行事实的最小等价实验，保留原轮数／输出／拒绝；不预断能达到2–3秒。 |
-| 实验室：J9裁决 | 2026-10-25私有输出offset＋generation缓存仅复用原样COPYL的simple行。八例经典C／原NN／新NN及大输入均字节一致；同一实际ISA、包和8,446,684字节输入：原模型32.523秒、新模型39.114秒，慢20.27%。缓存增加的银行／动作成本未被收益抵消，完整接受域不别名证明亦未完成。 | **不合入**，产品仍为2974978e…／c90f0002…；报告`/tmp/unisacc-c43-e4-linefacts-prototype.txt`，补丁仅仓外审查材料。不能将经典C的数组缓存收益直接套到模型VM，也不能称J9思路整体不可行；后续需比较实际动作与内存成本，本轮回到当前候选验收。 |
-| 实验室：批摘要候选 | 原四地址区候选缺全域INTERN不别名证明，已保留。新私有候选使用同一memory的四个专属负64位地址区（约-2^40），基址仅经LDX/STX立即量；345规则／105条MS/ME语法及补丁适用检查通过。静态核对包括实际x86_64 action.S的movq/addq和tbl/net承载；尚未构造模型／跑实际包ISA，无等价或速度结论。 | `/tmp/unisacc-c43-e4-background/dedicated/{masked-dedicated.diff,ownership.txt}`。下一重令牌验证负基址的完整构造→实际包ISA链，之后才做等价／同条件计时；当前前台M7持令牌，不改主树或冻结，不作为0.0.43前置。 |
-| 封存室：E4 | 新seal已写入主树：49真实依赖、21接受例、96原始对拍全部相等，与候选shared/e4.net字节相同；writer与原58秒官方gate均rc0，负例全通过。零Python棘轮／inventory／inventory-derived／gate-layers四项rc0，无新增解释器调用。 | 原trace未修改；临时材料在`/srv/tmp/e4-reseal-20261025`。OUTDIR必须在ROOT外且位于TMPDIR内；前两次路径错误的原失败保留，最终清单无临时路径，不手删依赖。只重封受影响E4，不重建产品或其他模型；完整M7仍未完成。 |
-| Windows室：分片 | 五准备＋七消费已在最终源码上全部原41秒界rc0：cases为9.409／11.580秒，四拒绝片为22.466／21.103／24.467／23.118秒，ARM large为8.053秒。每目标13＋12拒绝片与原25项有序列表逐项核对，无遗漏／重复。完整计划实导1314节点／949边，旧聚合超时保留。 | 调度、缓存、状态均为.cx；旧独立裁判仅显式scope选择，无新Python依赖／调用点。共享材料与锁保持、12节点串行。批摘要17项原函数注入／实际SHA对照通过；stagemap补齐lower族后gate-layers原预算rc0，零Python／inventory／derived均rc0。开发证据`/tmp/unisacc-c43-winbatch-20261025/out/win{halves,final}-*`，正式M7仍需新队列。 |
-| 身份室：候选 | E4新候选、本机及三阶段实际SHA=`2974978e6deec45abf38bfac2ac24e3031969b1c65009798270491d8b1e6dd1f`；S=`c90f0002f02366d510e4c8c22d4757f934edf8c0719852e706b575a7137b47df`；配对侧车SHA=`b88e3a1c227e72e621cf810cc5975e0922ba34cf34aa9e51288142aaaf94480a`。版本／hello／O2摘要回归、ident及官方固定点rc0；完整M7未完成。 | 冻结`/tmp/unisacc-c43-e4-summary-final-20261024` @d09bd1decb；`out/f6-e4-stage{2,3}-package.log`、逐切片真实argv/rc/时间/SHA、`out/comboot/stages.json`。stage3数据复用而代码切片重编，非模型构造器自举证明。按源码、产物及配对侧车核对，不为刷新mtime重复构建；[F6证据](research/c43-f6-final-evidence/)已原位更新。 |
-| 控制室：现场 | 测试冻结`/tmp/unisacc-c43-m7-final-20261025` @7a063304f45804a17ac58d492e7bcdc83446dbb1，1316节点，env-pin保持。064窗1 PASS、1315待办、无未裁定红；产品2974978e…／S=c90f0002…已核freshness。按原时限续窗，新未裁定红即停；后续主树状态和后台准备不导入。 | 权威`out/m7-final-state/results.json`、`out/m7-exit-window064.json`及逐窗log/status。旧fbef的70项含两首红完整保存于`out/m7-before-seedmemory-scope-fix/`，更旧55／32／8项亦保留；未知闭包按原指纹失效，不迁旧PASS。资源缺测义务仍OPEN；无完整M7／发布结论。 |
-| 语料室：准备依赖 | 023四tools读者的半clone竞争已加四条依赖修复；三仓固定提交及原检查保持。cd30109850正式038／039窗的tools构造及四读者全部rc0，corpus-3原断言也通过；040窗regex2-run在正式limit40下34.56秒rc0、与cc参考逐字节相同。 | 原33秒regex2-run失败、独立55秒35.262秒诊断均保留；当前正式`out/m7-window-040.log`与分类器确认通过。其主要耗时是故意最坏复杂度的原regex程序，不是NN推理；没有减少输入、覆盖或放宽外部限时。完整图仍1315节点／954边。 |
-| 调度室：真实结证 | 旧finally统一伪写142。修复改为先收集自然rc、统一回收其他进程、再共用真实结算；tail取消立即DEFER，未知full沿原中断恢复。observer只消费一次；结证I/O异常先完整回收并继续其他结证，末尾保留首异常，恢复admission／进展而不产绿。 | 最终q.py SHA=3b00a139…92dfb52；私有单位`out/queue-cleanup-policy-v2.log`与`queue-cleanup-state-v3.log`均原55秒rc0，含原真实OS deaf回收、普通0/1/77/142、清理143/-9/0/None、次窗新attempt及memory/atomic故障。独立审查报告与首版失败保留；无新增解释器依赖／调用。 |
-| 工具室：自测修复 | 原044窗40秒超时保留；55秒trace虽28断言／7例通过但总46.077秒。同一run.cx六次28.037秒，改为本轮fixture只构建一次、逐次核全输入／实际产物SHA。正式fbef冻结051窗普通自测40秒预算33.81秒rc0（28／7）；052窗failfast23.87秒rc0（86／3），首红已实际修复。 | 源SHA=3ca05cc8…1dcf87；正式`out/m7-window-051.log`、`052.log`；开发原40秒普通32.952／failfast23.898亦rc0。九类负例全过26.104秒，恶意compiler标记未写、漂移未到-cx-plan；原失败保留。未核实输入的错误路径用已加载自有删除守卫，健康清理仍默认-run；四元数据闸0。不迁旧PASS，完整M7仍未完成。 |
-| 自测室：063首红 | 旧冻结70项中两首红已定位并修复。hostcheck对齐七叶后独立原40秒预算12例全过、总12.161秒。seedmemory只修显式低内存fixture后实际跑原严格17例，仅真实gen新鲜度1例失败，原两低内存子例已恢复；分账后16行为实际全过。未见据此证明产品错误。 | `out/m7-window-063.log`、`out/m7-exit-window063.json`及两原log保留。独立副本`out/hostcheck-leaves-40.*`和`out/seedmemory-fixture-only-40.*`分别真实rc0／rc1；修复已进入7a063304f4冻结，正式结果须新结证。生产内存profile和准入常量不改、不将旧测量套到新生成器、不把RESOURCE_UNKNOWN转PASS。 |
-| 证据室：gen身份变化 | 自有默认-run key实测gen=b68fcf149e16aaec、parse2仍289b42a4ad9b85db；三份已列E4输入的旧字节复现旧gen pin，非hash移植错误。当前cc为Ubuntu11.4／SHAfb60…，旧RSS身份为Debian14.2／SHAa23e…，不能复活旧profile。独立原40秒预算functional16例实际rc0；新evidence入口约4.4秒实际rc2／OPEN；旧严格17仍rc1。 | 默认-run一次编译的私有18正反例全过、0skip，含匹配／列入漂移／未列入变化、坏表／缺文件／ENOTDIR／目录／symlink／权限／注入拒绝；坏输入均rc1且无UNKNOWN。集合17=16+1已核，独立静态审查未见新阻断。四元数据闸最终全0：inventory首次陈旧原失败保留，经原生重生再逐字节核验通过；完整清单1316，Python1744无升降。derived-map保留两个入口，真实漂移仍非PASS／OPEN；生产准入／键／RSS不改，修复已导入7a063304f4冻结；新正式结证仍待完成。 |
-| 调度室：启动预算 | 原计划4.287秒，单纯去重仅4.233秒。每次列表默认-run编译prepdecl.cx实测3.489497秒；现成身份校验工具缓存使热NUL计划0.824秒、list0.864秒、host-plan0.863秒，三输出与原相同。正式任务预算已从33恢复40，040窗34.56秒regex任务实际通过，55／60界不变。 | 私有单位`out/gate-hot-*`、`gate-before-*`及正式`out/m7-window-040.log`。每次仍核源码／模块／编译器身份并重读声明，不缓存测试verdict；动态控制优先默认-run。C3/C4六片只计算一次，metadatalist保留原缓存；已撤销的默认-run回退原测量保留。 |
-| 工程室：本轮首红 | 原Python聚合55秒及首轮原生聚合33秒超时均保留。最终默认-run tools／models／import／package在原33秒界分别26.361／23.727／16.690／13.079秒rc0；八件（含dump/run）与原Python逐字节相同，消费者执行原断言。缺失／篡改工具均75，无隐式构造；独立静态审查未见新增阻断，四元数据闸最终均rc0。 | 单元冻结`/tmp/unisacc-c43-carrier-native-20261025/out/carrier-staged-*`，helper SHA=1d5901c7…87ae。工具五件SHA、三构造器cc-M系统头、精确recipe与完整basis绑定；模型持工具共享锁、起止核验，完整八件manifest才供消费者。新清单实导1315／950；`out/carrier-metadata-gates-v2.log`：零Python无增长、inventory无孤儿、派生字节相等、gate-layers通过。原生首轮与首次元数据失败原记录均保留。正式M7尚未完成；不迁旧PASS、不放宽限时。 |
-| 调度室：启动债 | 正式旧队列每窗导入gatequeue时，gatecanon-native无条件重编CPython适配模块，发生在t_begin之前；其耗时不进入prologue字段，却占父deadline。窗口010的prologue为8.324秒，子任务仅获33秒；预算差额还含收尾预留和取整，不能全称CPU耗时。 | `/tmp/unisacc-c43-m7-carrier-timeout-analysis.txt`、`tests/gatecanon-native`与`tests/gatequeue.py`。下一版继续原生队列事务迁移；若缓存适配器则绑定完整编译／链接工具、头文件、ABI及产物SHA，不以-x命中。不为此性能项中途改动正在验收的0.0.43冻结树。 |
-| 出口室：分类 | 窗口022的seedparse2-1实际rc2，独立旧分类器已确认为RESOURCE_UNKNOWN，未执行义务仍OPEN，不能当PASS或77。后续同组拒绝依原分类记录后继续；其他红须先核分类，未裁定产品红停窗。H1超时不算PASS。 | 冻结根`out/m7-exit-window022.json`及原log；[资源处置](research/c43-resource-disposition.md)、[裁定](release/rulings.tsv)、[分类](release/preauth.tsv)。完整退出表仍待最终全清单，不改准入常量或阈值。 |
-| 发布室：交付 | 0.0.43候选已推送并按不可变digest回读，三件与F6逐字节相同：manifest=`8c667e0632c2f1f5f70a38fa7d6539e20c7f5d19ce0554b797809c45f721cb01`；封存来源93f00869ee，产品S不变。签前六原生smoke已通过；完整M7、Darwin专闸、签名及公开仍待完成。 | [发布流水线](release/RELEASE-PIPELINE.md)、[候选记录](release/candidate.json)；原始push JSON、readback日志和三件在忽略目录`out/c43-seal-*93f*`。本仓仅Azure凭据名已知；Apple阶段.cx草案未在macOS执行、未部署，具体跨仓接入仍待授权。 |
-| 发布室：源码绑定 | 依流水线§9的5a，远端`rc/v0.0.43`已实际绑定cd30109850（tag object=bb343d5e03c98f50ffe6d0fe8e27eda44ee138c5）；ls-remote解引用已核对。该源码release-check40122497134 attempt1及Darwin40122511661均成功；封存来源93f00869ee为其祖先，产品S／候选不变。 | Windows签名真实workflow要求upstream为`release-check.yml`，不是`ci.yml`；后者是另行运行的源码安全网，不替代候选pull／执行证据。README旧入口据实纠正。冻结及签名upstream保持精确源码；main可继续状态文档更新。release_eligible=false，完整M7、签名、最终字节／下载义务不减，Apple跨仓接入仍待授权。 |
-| Apple室：可信bootstrap准备 | 私有服务草案将以服务policy固定选择已实证F6编译器2974978e…（S=c90f0002…、三阶段固定点及六原生已核）作为bootstrap候选。固定digest／SHA由服务代码选择，不能由dispatch输入替换；仅作为私有准备，不部署／授包权限／接触凭据，production_admission保持false。 | 本地已回读材料`out/c43-seal-readback-93f/`；实现继续放`/tmp/unisacc-c43-apple-adapter/`。先补实际bootstrap核验及无secret准入测试，再补artifact跨阶段传送和真实M7／CI绑定；跨仓服务与私有包读取授权已发问待答，M7未完成时仍拒绝。 |
-| Darwin室：实际结证 | 修复提交cd30109850的Darwin run40122511661两架构成功；下载原日志逐项核对arm64七项、x86_64九项，全部候选freshness=2974978e…、suite rc0、failed0／unverified0，无遗漏。含两个reference bootstrap、stack桥、forward/com-forward与三个watchdog；forward每格34 OK、0 WRONG、1合同内skip，未扩张成全域宿主功能覆盖。 | [精简收据](release/evidence/c43-darwin-ci.json)绑定run／attempt／源码及两artifact id/digest；原日志`out/c43-darwin-cd301-40122511661/`与16件SHA清单。旧run40122037341的畸形两行失败保留；修复不放宽严格单行拒绝。仍非完整M7或最终签后字节court。 |
-| CI室：六原生候选 | RC源码cd30109850的release-check40122497134 attempt1已成功。后续ef7fb2e3bf的run40126270529亦12个job全成功；已下载新六报告及matrix并严格核对精确六标签、SHA2974978e…／2670411字节／0.0.43／version rc0、零failures及problems。Windows双架构suite、Linux x86_64互操作／生命周期成功。 | [精简收据](release/evidence/c43-candidate-ci.json)仍精确绑定旧RC／run及七artifact身份，不把新ef7伪配旧RC；新原报告`out/c43-candidate-demo-40126270529/`作为补充实证。旧两轮原报告和Git收据均保留。签前smoke不替代M7、签名或最终签后court。 |
-| CI室：额外安全网 | 手动ci.yml run40122511809的LinuxARM job120956934441失败，未记绿。候选pull正确但只在candidate/，四原生工具找根.com失败。Linux／macOS同样前置修复已落树，真实封存材料离线核SHA／配对／装根／版本rc0；篡改侧车SHA在装根前rc1，两run脚本相同且Bash语法通过。 | 原日志`out/c43-full-ci-arm64-120956934441.log`、离线材料`/tmp/unisacc-c43-full-ci-repair/`。jq替换旧提取，主树真实Python调用1746→1744，native棘轮写入并0rise／0drop；运行中的fbef冻结仍保留原1746。未重建产品、未宣称重验源码闭包；实际CI复验待办。native6只属revived分类红，仍缺两参考路输出及cc独立预期，不盲删knownfail、不声明Python语义已修或全CI绿。 |
-| 暂存室：边界 | 0.0.44登记.cx模块化／内存安全、自有工具链与测试改进；0.0.45登记流＋网模块外部调用及模块／权重共享；均不另作0.0.43前置。typed/callback迁移与广泛research归档保留后续范围。 | [0.0.44计划](plans/v0.0.44.md)、[0.0.45计划](plans/v0.0.45.md)、[路线](#5-路线)。新动态推进用`unisacc.com + .cx`，减少脚本，转调不算原生化。 |
+| 产品室：固定身份 | 0.0.43候选2670411字节；产品SHA `2974978e6deec45abf38bfac2ac24e3031969b1c65009798270491d8b1e6dd1f`；产品S `c90f0002f02366d510e4c8c22d4757f934edf8c0719852e706b575a7137b47df`；侧车SHA `b88e3a1c227e72e621cf810cc5975e0922ba34cf34aa9e51288142aaaf94480a`。产品来源d09bd1decb，后续测试提交不冒充产品来源。 | `release/candidate.json`；GHCR immutable digest `8c667e0632c2f1f5f70a38fa7d6539e20c7f5d19ce0554b797809c45f721cb01`，封存源93f00869ee217e3d500569bc66c9d024a2249d76；`out/c43-seal-readback-93f/` 三件回读匹配。 |
+| F6室：实际固定点 | 三实际编译器SHA相同；stage3复用同身份模型包／七清单，但五代码切片由stage2实际重编。这不是模型构造器自举证明。 | `research/c43-f6-final-evidence/`、`/tmp/unisacc-c43-e4-summary-final-20261024`、`out/f6-e4-stage{2,3}-package.log`、`out/comboot/stages.json`；保留argv／rc／时间／SHA原收据。 |
+| M7室：环境缺陷与修复 | 旧私有冻结7a063304f45804a17ac58d492e7bcdc83446dbb1的Git alternates指向被隔离隐藏的/home对象，cat-file实际128；release.sh吞ls-tree失败，state/head误成空流SHA e3b0c442…。070已自然结束、2193已终止；旧结证不算有效正式PASS。现已复制565MB对象并清空alternates，隔离cat-file／status、fsck connectivity均rc0；release.sh fail-closed已落根，七例真实回归通过。 | `/tmp/unisacc-c43-m7-final-20261025/out/m7-final-state/`、`out/m7-window-070.*`及`out/m7-before-*/`保留失败／恢复历史。新修复提交身份尚待生成，须重新结证。 |
+| M7室：Git身份边界 | 修复后，冻结7a的同一DECLARED ls-tree隔离内外均rc0，979字节逐字节相同，SHA `b75096d3c13e13dabc4149b9a78001d5f98813014bc67691ed625c97ecbe0ffc`。这只证明7a环境修复；未来新HEAD必须实算其闭包hash，不能沿用。 | `out/c43-git-tree-{inside,outside}.txt`、`out/c43-git-independent-fsck.*`。正式M7固定 `CODEX_TOOL_CALL_ID=unisacc-c43-m7-final` 和原env-pin；winbatch-fixed仅属旧独立实验，不混用。参考 `out/f4-final-env-before-git-repair.sh`，不泛化忽略未知环境。 |
+| 资源室：完整义务 | 1316清单保留seedmemory两具名节点：functional原16行为断言，evidence原1真实freshness；legacy --selftest仍严格17聚合。真实计算键漂移为rc2 UNKNOWN required=memory／OPEN；坏文件／解析／权限输入仍真错误，不能借UNKNOWN吞掉。生产REF／RSS／常量不变，不重键套旧RSS。 | derived-map／gatelayers／stagemap必须完整保留两节点；functional绿不吞evidence执行，rc0提交合同不变。五生成器既有RESOURCE_UNKNOWN与H1超时均非PASS；须收集匹配测量或按既有合同整组裁定，不自授豁免。 |
+| 工具间：已核与未核 | carrier、suite缓存／failfast、hostcheck现行七叶12例、seedmemory行为与隔离正反例、四元数据闸已有各自实跑证据；均不计作新冻结M7通过数。默认用unisacc.com＋.cx，不为测试改动重复构建产品。 | [能力速查](#implemented-usage)、[原生套件目录](tests/suite/README.md)；具体旧实验与失败见历史Git及私有报告。后台E4实验不挡本轮、不改候选、不宣称产品提速。 |
+| CI室：RC六原生与Darwin | RC `cd30109850f1d8958cc004d82821c36c46543db3`：release-check run40122497134 attempt1六原生及严格矩阵成功，Windows双架构套件、Linux x86_64互操作／生命周期成功；Darwin run40122511661 attempt1两架构16报告rc0。 | `release/evidence/c43-candidate-ci.json`、`release/evidence/c43-darwin-ci.json`、`out/c43-darwin-cd301-40122511661/`。旧Darwin畸形输出run40122037341失败保留；这些签前证据不代替M7或签后court。 |
+| CI室：补充与安全网 | 后续head `ef7fb2e3bff5b4b4d74e2ca2f45207b0614c3c7c` 的release-check run40126270529十二job成功，六报告与matrix已下载核对；不可绑定成旧RC收据。新完整ci.yml run40126358606的五平台装根前置均成功；ARM job120968537890仍因native6 revived失败，不能宣称整轮绿。 | `out/c43-candidate-demo-40126270529/`；旧run40122511809／job120956934441原日志亦保留。native6的b_bitfield_compound仍缺两Python参考路输出及cc独立预期，不能因两路相同就删knownfail或称语义已修。额外安全网不替代已核RC release-check／Darwin证据。 |
+| 签名室：仍关闭 | Windows qualification／公司签名收据、Apple签名／公证／staple／DMG及最终字节下载核验仍待完成。minicon Apple具体接入／包读取权限未获答复，不部署、不读凭据、不执行签名。私有服务production_admission=false。 | `/tmp/unisacc-c43-apple-adapter/BOOTSTRAP.md`：固定service-owned SHA／S／OCI的bootstrap有20项离线检查；未在Apple生产环境运行。controller旧清理仍待迁移统一删除守卫，真实M7／资格验证／外部接线未完成；不称可部署服务。 |
+| 发布室与后续边界 | Draft／Latest及签后完整court仍待办；源码push不等于发布。C44登记.cx模块化、内存安全、自有工具链与测试改进；C45登记流＋网外部调用及模块／权重共享，不另作0.0.43前置。 | [发布流程](release/RELEASE-PIPELINE.md)、[0.0.44计划](plans/v0.0.44.md)、[0.0.45计划](plans/v0.0.45.md)。详细历史以 `e89a17371d:prd.md` 追溯，不新增过程档案。 |
 
 **动态维护规则**：进度、身份、阻塞、决定或下一动作变化时，同步原位更新思维树节点及对应房间；只把当前事实留在这里。每次恢复先读两者，派发任务引用当前节点和确切缺口。原始过程与旧失败保留在证据或Git历史中，不冒充当前状态。
 
@@ -354,9 +325,9 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 | 发布链三格（2026-10-25动态状态） | 状态 | 证据边界 |
 |---|---|---|
-| ① 源码与发布身份 | 本轮候选已按不可变digest封存并回读；RC绑定cd30109850 | 源码、产品S、测试冻结和CI各身份明确绑定，后续本地提交不冒充远端RC |
-| ② 本轮候选有效闸与收口收据 | **新冻结1316项：064窗1 PASS、1315待办，无未裁定红** | 两自测修复及四元数据闸通过；独立新鲜度义务仍OPEN，旧冻结70项及失败已完整备份，不迁旧绿 |
-| ③ 发行资产及正式发布 | 本轮未完成 | Latest仍v0.0.42；本轮0.0.43未因源码push而发布 |
+| ① 源码与发布身份 | 候选SHA／S及不可变封存不变；RC精确绑定cd30109850 | 后续测试／发布修复提交另记新HEAD，不冒充产品来源或旧RC |
+| ② 本轮候选有效闸与收口收据 | **Git隔离与身份fail-closed已修，正式M7须新结证** | 旧070及此前结果仅诊断；新HEAD／env-pin／1316清单重新绑定，真实新鲜度仍非PASS／OPEN，不迁旧绿 |
+| ③ 发行资产及正式发布 | 本轮未完成；签名／最终字节／公开仍待办 | Latest最后核对为v0.0.42；源码push与签前CI成功不等于0.0.43已发布 |
 
 **根对现状（2026-10-22）**：开发已迁到新 Linux x86_64 宿主（16 核，内存充足，旧机 2.3G 内存压力导致的 seed-gen 卡死不再出现）。根部 `unisacc.com` 为工作树候选（本机由 `make model-com` 各步构建；宿主须有 clang/ld64.lld/llvm-nm 与 zlib 头，exec/c/BUILDING.md 未列，待补），每次表刀后按 `release/derived-map.tsv` + `release/tools/derivedcheck.py` 刷派生物、经 `release/tools/commitgate.sh` 提交。旧机第一至第七次根对重建/归位收据与宿主坑位已归档：[2026-10-22 过程归档](archive/prd-process-notes-20261022.md)。
 
