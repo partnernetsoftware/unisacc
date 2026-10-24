@@ -33,13 +33,13 @@ static char *rules[] = {
     "E2", "exec-pp-* exec-pploc exec-macros pptruth shared-e2-* rowcov-pp* prevheaders",
     "E1", "exec-lex* exec-f1-sidecar strconvert-* rowcov-lex*",
     "E3", "exec-parse* exec-r21-e3 exec-unit* exec-diag exec-errors* exec-f1-attributes exec-*warn*"
-          " exec-neg exec-e3self* exec-decimal tapebin* tape-reader rowcov-parse2* declmatrix declshape"
+          " exec-neg exec-e3self* exec-decimal* tapebin* tape-reader rowcov-parse2* declmatrix declshape"
           " volatile-comma diag* c99 staticinit staticunits tagforward parserbounds hostile cli ccparity"
           " formatonce warn* seed-construct-parse2 seedparse2*",
     "E4", "opt-run exec-e4* exec-prune*",
     "lower", "exec-lower exec-armlower exec-winlower exec-lowdata exec-sparse rowcov-lower* forward*"
              " ccinterop ffi-* exec-bridge-linux windows-resolver-host exec-bind* libneed",
-    "E5", "exec-e5 exec-arm exec-sha exec-asm* rowcov-enc* asmtext combo exec-memory-asm exec-memx86-asm",
+    "E5", "exec-e5 exec-e5-positive exec-e5-negative exec-e5-roundtrip-a exec-e5-roundtrip-b exec-e5-real-fp exec-arm exec-sha exec-asm* rowcov-enc* asmtext combo exec-memory-asm exec-memx86-asm",
     "E6", "exec-elf* exec-armelf exec-mach* exec-x86win exec-armwin exec-pe* exec-object* exec-modelobject"
           " elfobj linkunits run fat exec-memory-* exec-memx86-* exec-memwin* exec-binaryio exec-crcllp64*"
           " malloc memalign hosthdr syscall6 winposix auditnet exec-container exec-package exec-net"

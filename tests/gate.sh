@@ -374,19 +374,35 @@ job exec-formatwarn1 tests/bound 58 sh ./tests/cxbin exec/parse2/returnwarningch
 # -1 constructs with seed/gen.c (= gen.py bytes), -2 checks the .ready proof by content and runs E1..E3
 job exec-e3self-1 env E3_PART=construct ./exec/parse2/selfcheck.sh
 job exec-e3self-2 env E3_PART=run ./exec/parse2/selfcheck.sh
-job exec-decimal ./exec/parse2/floatconstcheck.sh                # exact literal bits, table/net and host cc
+job exec-decimal-prepare-tools tests/bound 55 sh ./tests/cxbin tests/decimalcheck.cx --prepare --part tools
+job exec-decimal-prepare tests/bound 55 sh ./tests/cxbin tests/decimalcheck.cx --prepare --part harness
+job exec-decimal sh ./tests/cxbin tests/decimalcheck.cx --require-cached   # fresh host oracle, check-net and all166 exact checks
 job exec-neg    ./exec/c/neg.sh   # the executors' error paths agree (bad table 2, reject 1)
 # S-17 E4: -O1 and -O2 as deltas, four shards (the single job ran 48.8-49.1 s against 49)
 job exec-e4-1   env E4STRICT=1 ./exec/opt/check.sh examples/*.c tests/c/a_*.c
-job exec-e4-2   env E4STRICT=1 ./exec/opt/check.sh tests/c/b_[a-l]*.c
-job exec-e4-4   env E4STRICT=1 ./exec/opt/check.sh tests/c/b_[!a-l]*.c
+# Preserve the old ordered source union and every strict assertion in two bounded lanes.
+E4_C2=$(printf '%s\n' tests/c/b_[a-l]*.c)
+E4_C2_N=$(printf '%s\n' "$E4_C2" | wc -l)
+E4_C2_MID=$(( (E4_C2_N + 1) / 2 ))
+job exec-e4-2a  env E4STRICT=1 ./exec/opt/check.sh $(printf '%s\n' "$E4_C2" | awk -v n="$E4_C2_MID" 'NR<=n')
+job exec-e4-2b  env E4STRICT=1 ./exec/opt/check.sh $(printf '%s\n' "$E4_C2" | awk -v n="$E4_C2_MID" 'NR>n')
+E4_C4=$(printf '%s\n' tests/c/b_[!a-l]*.c)
+E4_C4_N=$(printf '%s\n' "$E4_C4" | wc -l)
+E4_C4_MID=$(( (E4_C4_N + 1) / 2 ))
+job exec-e4-4a  env E4STRICT=1 ./exec/opt/check.sh $(printf '%s\n' "$E4_C4" | awk -v n="$E4_C4_MID" 'NR<=n')
+job exec-e4-4b  env E4STRICT=1 ./exec/opt/check.sh $(printf '%s\n' "$E4_C4" | awk -v n="$E4_C4_MID" 'NR>n')
 job exec-e4-3   env E4STRICT=1 ./exec/opt/check.sh tests/c/[!ab]*.c
 job exec-e4self env E4STRICT=1 ./exec/opt/check.sh unisacc.c                    # the compiler's own 3.9 MB tape
 job exec-prune-0 env PRUNE_PART=0 PRUNE_UA="$UA" tests/bound 58 sh ./tests/cxbin exec/prune/check.cx   # (.cx port, 2026-10-23)
 job exec-prune-1 env PRUNE_PART=1 PRUNE_UA="$UA" tests/bound 58 sh ./tests/cxbin exec/prune/check.cx
 job exec-prune-2 env PRUNE_PART=2 PRUNE_UA="$UA" tests/bound 58 sh ./tests/cxbin exec/prune/check.cx
 job exec-prune-3 env PRUNE_PART=3 PRUNE_UA="$UA" tests/bound 58 sh ./tests/cxbin exec/prune/check.cx
-job exec-e5     ./exec/enc/check.sh                               # S-17 E5, first slice: x86 encoder on a fixture
+# E5: pinned original shell blocks; all phase assertions remain required.
+job exec-e5-positive sh ./tests/cxbin tests/e5phase.cx positive
+job exec-e5-negative sh ./tests/cxbin tests/e5phase.cx negative
+job exec-e5-roundtrip-a sh ./tests/cxbin tests/e5phase.cx roundtrip-a
+job exec-e5-roundtrip-b sh ./tests/cxbin tests/e5phase.cx roundtrip-b
+job exec-e5-real-fp sh ./tests/cxbin tests/e5phase.cx real-fp
 job exec-arm    ./exec/enc/armcheck.sh                            # ARM64 integer encoder on both runtimes
 job exec-elf    ./exec/enc/imagecheck.sh                          # S-17: complete Linux x86 ELF from lowering payload
 job exec-armelf ./exec/enc/armimagecheck.sh                      # shared ELF writer, ARM64 machine/byte labels

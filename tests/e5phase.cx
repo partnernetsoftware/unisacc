@@ -1,0 +1,117 @@
+#!/usr/bin/env -S unisacc.com -run
+/* E5 phase routing only: execute original shell bytes, never cache a verdict.
+   Caller must bound the whole cxbin invocation at the unchanged gate budget.
+   execvp preserves the inherited UNISACC_BOUND_DEADLINE_MONO and scope, so all
+   original b 60 commands still share that outer hard deadline. No new Python
+   algorithm/invocation is introduced: every command comes from the pinned file.
+   The actual original path is sh -c's $0; inserting a dummy $0 breaks ROOT. */
+#define E5_SOURCE "./exec/enc/check.sh"
+#define E5_SHA "2021e5ae1f7f86d94b22e3c57164de9b8439f0733d4531f6fbb9b7562c56aee2"
+
+static int fail(const char *why) {
+    fprintf(stderr, "e5phase: FAIL %s\n", why); return 1;
+}
+
+/* Full line markers, each occurring exactly once, include all comments in the
+   subsequent block. Reject a changed script rather than guessing boundaries. */
+static const char *const MARKERS[] = {
+    "for F in $D/x86-*.txt $D/br-*.txt; do\n",
+    "for F in $D/neg-*.txt; do     # must be rejected (exit 1 with a reason), on both executors\n",
+    "# Full TIns transport preserves lowering data/symbols/relocations/target as well as code; no encoding claimed\n",
+    "# No filtering: entire real lowering output, including the stdio implementation.\n",
+    "echo \"e5 x86  fixtures ok $ok   bad $bad\"\n"
+};
+static const char *const PARTS[] = {
+    "positive", "negative", "roundtrip-a", "roundtrip-b", "real-fp"
+};
+/* Explicit source segment map: 0 common, 1 positive, 2 negative, 3 roundtrip,
+   4 real-fp, 5 epilogue. A/B select the same original segment, only target data
+   differs; the old unsplit name is deliberately absent/rejected. */
+static const int PART_BLOCK[] = { 1, 2, 3, 3, 4 };
+#define RT_ALL "lnx/x86_64 lnx/arm64 osx/x86_64 osx/arm64 win/x86_64 win/arm64"
+#define RT_A "lnx/x86_64 lnx/arm64 osx/x86_64"
+#define RT_B "osx/arm64 win/x86_64 win/arm64"
+static const char *const RT_HEAD = "for target in " RT_ALL "; do\n";
+static const char *const RT_SUBHEAD[] = {
+    "for target in " RT_A "; do\n", "for target in " RT_B "; do\n"
+};
+
+int main(int argc, char **argv) {
+    char *source, *at, *again, *rebuilt, *script, *block, *head;
+    char hex[65], targets[256];
+    size_t n, offsets[7], lens[6], cursor, scriptn, blockn, prefixn, headn, subn;
+    int i, part = -1, segment;
+    char *command[5];
+    if (argc != 2) return fail("usage: e5phase.cx positive|negative|roundtrip-a|roundtrip-b|real-fp");
+    for (i = 0; i < 5; i++) if (!strcmp(argv[1], PARTS[i])) part = i;
+    if (part < 0) return fail("unknown phase");
+    source = cx_read(E5_SOURCE, &n);
+    if (!source) return fail("cannot read original source");
+    /* Bounded argv, no embedded NUL, and exact bytes, not normalized text. */
+    if (!n || n > 16384 || memchr(source, 0, n)) return fail("source length/NUL");
+    cx_sha256_hex(source, n, hex);
+    if (strcmp(hex, E5_SHA)) return fail("original source SHA changed");
+    offsets[0] = 0;
+    for (i = 0; i < 5; i++) {
+        at = strstr(source, MARKERS[i]);
+        if (!at || (at != source && at[-1] != '\n')) return fail("missing/non-line marker");
+        again = strstr(at + 1, MARKERS[i]);
+        if (again) return fail("ambiguous marker");
+        offsets[i + 1] = (size_t)(at - source);
+        if (offsets[i + 1] <= offsets[i]) return fail("empty/out-of-order block");
+    }
+    offsets[6] = n;
+    rebuilt = malloc(n + 1);
+    if (!rebuilt) return fail("allocation");
+    cursor = 0;
+    for (i = 0; i < 6; i++) {
+        if (offsets[i + 1] <= offsets[i]) return fail("empty segment");
+        lens[i] = offsets[i + 1] - offsets[i];
+        memcpy(rebuilt + cursor, source + offsets[i], lens[i]); cursor += lens[i];
+    }
+    rebuilt[cursor] = 0;
+    /* common + positive + negative + roundtrip + real-fp + epilogue = original,
+       byte-for-byte, with no dropped comments, overlap, gaps or empty segment. */
+    cx_sha256_hex(rebuilt, cursor, hex);
+    if (cursor != n || memcmp(rebuilt, source, n) || strcmp(hex, E5_SHA))
+        return fail("partition does not reconstruct original source");
+    /* Fixed data halves: their ordered concatenation is exactly the six original
+       targets, each appears once. No sorting, filtering or inferred target set. */
+    if (!RT_A[0] || !RT_B[0] ||
+        snprintf(targets, sizeof targets, "%s %s", RT_A, RT_B) != (int)strlen(RT_ALL) ||
+        strcmp(targets, RT_ALL)) return fail("target halves do not reconstruct ordered original");
+    head = strstr(source, RT_HEAD);
+    if (!head || strstr(head + 1, RT_HEAD) ||
+        (size_t)(head - source) < offsets[3] ||
+        (size_t)(head - source) + strlen(RT_HEAD) > offsets[4])
+        return fail("roundtrip for-head is not unique/in original block");
+    segment = PART_BLOCK[part];
+    block = source + offsets[segment]; blockn = lens[segment];
+    if (part == 2 || part == 3) {
+        /* Replace only the unique original for-header. Its leading comment,
+           complete loop body/call/arguments/checks and done remain original bytes. */
+        prefixn = (size_t)(head - block); headn = strlen(RT_HEAD);
+        subn = strlen(RT_SUBHEAD[part - 2]);
+        blockn = lens[segment] - headn + subn;
+        block = malloc(blockn + 1);
+        if (!block) return fail("allocation");
+        memcpy(block, source + offsets[segment], prefixn);
+        memcpy(block + prefixn, RT_SUBHEAD[part - 2], subn);
+        memcpy(block + prefixn + subn, head + headn,
+               lens[segment] - prefixn - headn);
+        block[blockn] = 0;
+    }
+    scriptn = lens[0] + blockn + lens[5];
+    script = malloc(scriptn + 1);
+    if (!script) return fail("allocation");
+    memcpy(script, source, lens[0]);
+    memcpy(script + lens[0], block, blockn);
+    memcpy(script + lens[0] + blockn, source + offsets[5], lens[5]);
+    script[scriptn] = 0;
+    printf("e5phase %s original-sha %s\n", PARTS[part], E5_SHA);
+    fflush(stdout);
+    command[0] = "sh"; command[1] = "-c"; command[2] = script;
+    command[3] = E5_SOURCE; command[4] = 0;
+    execvp(command[0], command);
+    return fail("exec sh failed");
+}

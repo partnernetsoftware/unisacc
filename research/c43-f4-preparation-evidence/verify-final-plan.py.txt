@@ -1,0 +1,18 @@
+import pathlib,json,hashlib
+r=pathlib.Path('/mnt');raw=(r/'out/final-plan.nul').read_bytes().split(b'\0');assert raw[-1]==b'';raw.pop();jobs={};i=0
+while i<len(raw):
+ name=raw[i].decode();count=int(raw[i+1]);i+=2;assert name not in jobs;jobs[name]=[x.decode() for x in raw[i:i+count]];i+=count
+assert i==len(raw)
+# Reuse the existing portable normalizer's exact AST, without importing the queue/host adapter.
+import ast,os
+tree=ast.parse((r/'tests/gatequeue.py').read_text());pathkeys=next(ast.literal_eval(n.value) for n in tree.body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='PATH_KEYS' for t in n.targets));function=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='portable');ns={'os':os,'pathlib':pathlib,'ROOT':r,'PATH_KEYS':pathkeys};exec(compile(ast.Module(body=[function],type_ignores=[]),'existing-queue-portable','exec'),ns);jobs={n:[ns['portable'](a) for a in argv] for n,argv in jobs.items()}
+old=json.loads((r/'out/original-f4-jobs.json').read_text());expected_removed={'exec-e4-2','exec-e4-4'};expected_added={'exec-e4-2a','exec-e4-2b','exec-e4-4a','exec-e4-4b','exec-decimal-prepare','exec-decimal-prepare-tools'}
+if 'exec-e5-positive' in jobs:
+ expected_removed.add('exec-e5');expected_added|={'exec-e5-positive','exec-e5-negative','exec-e5-roundtrip-a','exec-e5-roundtrip-b','exec-e5-real-fp'}
+assert set(old)-set(jobs)==expected_removed
+assert set(jobs)-set(old)==expected_added
+changed={n for n in set(old)&set(jobs) if old[n]!=jobs[n]};assert changed=={'exec-decimal'},changed
+for group in ['2','4']:
+ a=jobs['exec-e4-'+group+'a'];b=jobs['exec-e4-'+group+'b'];o=old['exec-e4-'+group];assert a[:3]==b[:3]==o[:3];assert a[3:]+b[3:]==o[3:];assert a[3:] and b[3:]
+record={'old_total':len(old),'new_total':len(jobs),'removed':sorted(expected_removed),'added':sorted(expected_added),'changed':sorted(changed),'other_commands_unchanged':True,'e4_ordered_union_equal':True,'plan_sha256':hashlib.sha256((r/'out/final-plan.nul').read_bytes()).hexdigest()}
+(r/'out/plan-comparison.json').write_text(json.dumps(record,indent=2)+'\n');print(json.dumps(record))
