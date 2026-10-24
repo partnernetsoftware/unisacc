@@ -1,5 +1,13 @@
 # exec-opt-e4: measured leaf seal of the opt cell (stage e4, -O2)
 
+Resealed 2026-10-25 for the block-summary model from d09bd1decb: 49 measured
+dependencies, 21 accepted sealed cases and 96 keep-elf comparisons. The sealed
+network SHA256 is `89f043d56aff0a488adaeb94586d6257eb01782b16f8ff3d1755910d6d25cfdc`,
+byte-equal to the new candidate's `shared/e4.net`. The official gate, including
+dependency/fixture/model negatives, passed under its original 58-second bound.
+Reseal working directories belong outside the source checkout and under TMPDIR;
+temporary inputs and generated artifacts must not become source dependencies.
+
 Scope: the opt cell alone -- stream e4, input **tape.text** (the -O0 tape), output **tape.text**
 (the -O2 tape) (exec/pipeline/image-stages.tsv row e4; formats in exec/pipeline/formats.md); the
 delta is `gen.py opt --o2`, the product's shared/e4.net.
@@ -21,7 +29,7 @@ Reference: `ua_ref -O2 -S -o - SOURCE` (tests/build_ref.sh export), the referenc
 exec/pipeline/run.py compares the -O2 tape with.  Every sealed case is accepted and byte-equal
 to it (`ref-equal=1`); the reseal's `corpus` step replays all 96 keep-elf sources the same way
 (recorded in the reseal's corpus.tsv, not sealed: 96 accepted / 0 refused / 96 byte-equal at
-the 2026-10-21 reseal).
+the 2026-10-25 reseal).
 
 Gate (tests/gate.sh job opt-e4-seal, tests/streamseal.cx --gate, leaf config `cell.tsv`): frozen bytes (dependencies
 against the checkout, closure.expected.tsv inventory, case input/stdout/stderr/model bytes,
