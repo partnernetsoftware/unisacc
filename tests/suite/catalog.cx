@@ -37,6 +37,26 @@ static void classify(Unit*u){
   for(i=0;nets[i];i++){char pat[64];snprintf(pat,sizeof pat,"net-%s net-%s-*",nets[i],nets[i]);if(matches(pat,s)){snprintf(netmods[i],sizeof netmods[i],"net-%s",nets[i]);hits++;chosen=8+i;}}
   if(hits==1){u->module=chosen<8?mods[chosen]:netmods[chosen-8];u->layer="unit";}else u->fallback=1;
  }
+ /* An unclassified name may inherit only an exact known script owner.
+  * Distinct e3/lower hits or explicit cross-flow owners remain integration. */
+ if(u->fallback){
+  static const char*e3owners[]={"exec/parse2/librarytypedreadercheck.sh",
+   "exec/parse2/librarycallsitecheck.sh","exec/parse2/libraryfunctionimportscheck.sh",
+   "tests/librarycallbacke3check.sh",0};
+  static const char*lowerowners[]={"exec/lower/librarytypedcheck.sh",
+   "exec/lower/librarycallsitecheck.sh","exec/lower/librarydatacheck.sh",
+   "tests/librarycallbacklowercheck.sh",0};
+  int e3hit=0,lowerhit=0,cross=0,j;size_t a;
+  if(!strcmp(u->id,"suite-tools-native")){u->module="infra";u->layer="infra";u->fallback=0;}
+  else{
+   for(a=0;a<u->argc;a++){const char*arg=u->argv[a];if(!strncmp(arg,"./",2))arg+=2;
+    for(j=0;e3owners[j];j++)if(!strcmp(arg,e3owners[j]))e3hit=1;
+    for(j=0;lowerowners[j];j++)if(!strcmp(arg,lowerowners[j]))lowerhit=1;
+    if(!strcmp(arg,"tests/librarycallbackwiringcheck.sh")||!strcmp(arg,"tests/librarycallbackauthcheck.sh"))cross=1;
+   }
+   if(!cross&&e3hit!=lowerhit){u->module=e3hit?"e3":"lower";u->layer="unit";u->fallback=0;}
+  }
+ }
  if(token(s,"prepare")||token(s,"prep"))u->layer="prepare";
 }
 static Plan parse(const char*path){Plan p={0};size_t at=0,i;struct stat st;if(lstat(path,&st)||!S_ISREG(st.st_mode))fail("plan not regular");p.raw=cx_read(path,&p.bytes);if(!p.raw||p.bytes!=(size_t)st.st_size||!p.bytes)fail("plan read/empty");cx_sha256_hex(p.raw,p.bytes,p.sha);

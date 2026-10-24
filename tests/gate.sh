@@ -187,6 +187,7 @@ for k in 1 2 3 4 5; do job declmatrix-$k SHARD=$k/5 sh ./tests/cxbin tests/declm
 job finite-template python3 ./tests/finitetemplatecheck.py   # 0.0.23 K: parameterised templates (chains, nested loops, rename rewrites PUSH)
 job decision-ledger tests/bound 58 sh ./tests/cxbin tests/decisionledger.cx   # (.cx port, 2026-10-23) 0.0.23 I: build-time Python control (direct transition sites) may only fall
 job zeropython tests/bound 58 sh ./tests/cxbin tests/zeropython.cx --check   # (2026-10-23) owner's hard goal, zero Python (prd.md §1): python call sites, unisa importers and .py files may only fall against tests/zeropython.tsv
+job suite-tools-native tests/bound 55 sh ./unisacc.com tests/suite/check.cx
 job zeropython-selftest tests/bound 58 sh ./tests/cxbin tests/zeropython.cx --selftest   # the matcher on fixed snippets; seeded rises (a file, a total, a new .py, a new data line) must fail
 job progress tests/bound 58 sh ./tests/cxbin tests/progress.cx --selftest   # (2026-10-23) plans/v0.0.43-finish-line.md section 4: the progress dashboard (finish line F1-F6 + every long-term ledger); its parsers, counters, queue scan and rate arithmetic on canned input
 job manifest-entries-pp tests/bound 58 sh ./tests/cxbin tests/manifestentries.cx --stage pp   # (.cx port, 2026-10-23)
@@ -555,22 +556,15 @@ job exec-librarycallbackpartition-model-13 ./exec/librarycallbackpartition/check
 job exec-librarycallbackpartition-model-14 ./exec/librarycallbackpartition/check.sh 14
 job exec-librarycallbackpartition-model-15 ./exec/librarycallbackpartition/check.sh 15
 job exec-librarycallbackpartition-model-16 ./exec/librarycallbackpartition/check.sh 16
-job exec-libraryfunctionimports-model ./exec/parse2/libraryfunctionimportscheck.sh
-# Preparation declarations: compose original producers with the existing job executor.
-PREP_JOBS=$(python3 - <<'PREP_DECL'
-import json,re,shlex
-p=json.load(open('tests/prepgroups.json'))
-assert p['version']==1
-seen=set()
-for row in p['groups']:
-    name=row['name']
-    assert re.fullmatch(r'exec-prepare-[a-z0-9-]+',name) and name not in seen
-    seen.add(name)
-    command=['sh','-ec','\n'.join(shlex.join(m['argv']) for m in row['members'])]
-    assert row['command']==command
-    print(shlex.join(['job',name,*command]))
-PREP_DECL
-) || exit 2
+job exec-libraryfunctionimports-prepare-gen ./exec/parse2/libraryfunctionimportscheck.sh --prepare-gen
+job exec-libraryfunctionimports-prepare-c-json ./exec/parse2/libraryfunctionimportscheck.sh --prepare-c-json
+job exec-libraryfunctionimports-prepare-p-json ./exec/parse2/libraryfunctionimportscheck.sh --prepare-p-json
+job exec-libraryfunctionimports-prepare-tbl ./exec/parse2/libraryfunctionimportscheck.sh --prepare-tbl
+job exec-libraryfunctionimports-prepare-net ./exec/parse2/libraryfunctionimportscheck.sh --prepare-net
+job exec-libraryfunctionimports-prepare-runner ./exec/parse2/libraryfunctionimportscheck.sh --prepare-runner
+job exec-libraryfunctionimports-model ./exec/parse2/libraryfunctionimportscheck.sh --require-cached
+# Preparation declarations: validate original groups, schedule each bounded member.
+PREP_JOBS=$(sh ./unisacc.com tests/suite/prepdecl.cx -- tests/prepgroups.json) || exit 2
 eval "$PREP_JOBS"
 unset PREP_JOBS
 job exec-librarytypedreader-model ./exec/parse2/librarytypedreadercheck.sh --require-cached

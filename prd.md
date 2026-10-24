@@ -73,7 +73,7 @@
 - **产品**：一个文件 `unisacc.com`（APE），在 {Linux, macOS, Windows} × {x86-64, arm64} 上运行，自己写出六个目标的可执行文件（ELF、Mach-O、PE；映像不经汇编器和链接器），0.0.17 起也写三种格式的可重定位 `.o` 并自带链接器与 `ar`（§3.15），并能自举：宿主构建的 `unisacc-seed.com` → 种子自建 → 再自建，三个 sha256 相等（N22）。两代产品只叫 `unisacc-seed.com` 与 `unisacc.com`。
 - **语言**：C99 = ISO/IEC 9899:1999 + TC1–TC3（WG14 N1256）。覆盖度来自逐条款账本 [tests/c99/clauses.tsv](tests/c99/clauses.tsv)（门禁 `c99-ledger`，README 表由账本生成），不作主张；缺口在 README 限制表逐条点名。
 - **方法**：编译器里每个表状决策（词法类、预处理指令、优先级、类型、指令选择、ABI、窥孔……）由**构造**出来的小整数网络回答，权重从真值表派生、在表的全部定义域上**穷举验证**（不是训练）；结构性粘合是经典代码。两条路线：C 参考编译器（`unisacc.c` + `src/`，行为裁判与回退）与模型产品（`exec/` 各阶段网络 + 通用执行器），逐字节对拍（`exec-chain`、`closure`、`stages`、difftest 两侧）。
-- **零 Python 依赖（硬目标；主人 2026-10-24 再次重申）**：构建、闸、验证链中 **100% 不依赖 Python**，牢固使用自己的 `unisacc.com + .cx` 体系；新增与修复路径优先原生实现，不新增 Python 算法或调用点。自举已完成（N22，三 sha256 相等），但依赖清零尚未完成：本轮 `tests/zeropython.tsv` 记调用点 **1780**（真实执行 1748、数据 32）、`import unisa` 文件 **92** 个、`.py` **409** 个。仅用 `.cx` 分批调用原 Python 只算调度改进，不算消除运行依赖；原生替换须实际自举运行，并保留完整行为与拒绝、恢复合同。三者同时清零后，`unisa/` 才移入 `archive/`（不删，仅作人工参考，不参与任何链）。
+- **零 Python 依赖（硬目标；主人 2026-10-24 再次重申）**：构建、闸、验证链中 **100% 不依赖 Python**，牢固使用自己的 `unisacc.com + .cx` 体系；新增与修复路径优先原生实现，不新增 Python 算法或调用点。自举已完成（N22，三 sha256 相等），但依赖清零尚未完成：本轮 `tests/zeropython.tsv` 记调用点 **1779**（真实执行 1747、数据 32）、`import unisa` 文件 **92** 个、`.py` **409** 个。仅用 `.cx` 分批调用原 Python 只算调度改进，不算消除运行依赖；原生替换须实际自举运行，并保留完整行为与拒绝、恢复合同。三者同时清零后，`unisa/` 才移入 `archive/`（不删，仅作人工参考，不参与任何链）。
 - **交付物**：签名的 `unisacc.com` 与公证的 macOS dmg（公开资产只有这两个，主人 2026-09-30 裁定）；中间形式 `.tape`/`.tapebin`（[docs/tapebin-v1.md](docs/tapebin-v1.md)，内容寻址、C/Python/产品三方编码逐字节同）。
 - **公开入口仓**（主人 2026-10-05，拟注册商标 UNISA）：[partnernetsoftware/unisa](https://github.com/partnernetsoftware/unisa)，只收副本：unisacc、ujs 的最终发行包（`releases/`，定期从本仓 release 抄过去），产品介绍（`docs/`）与论文（`papers/`，不定时抄）；以后做 unisacc 的包管理入口和 agenterm 的“插件与应用”入口。开发不在那里。
 
@@ -147,14 +147,16 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 ├─ 已完成：F1 产品修复；F2 文档与探针收口
 ├─ 已完成：F3 历史 CONTRACT 基线（187项：186 PASS、1宿主未核）
 ├─ 已完成：F6 候选构建、三阶段 SHA 固定点
-├─ 正在执行：F4／M7 本轮1142项fresh完整验收 ← 当前节点
+├─ 正在执行：F4／M7 测试调度重构与受影响单元验证 ← 当前节点
 │  ├─ 冻结源码7122be5bb713209e8b46a35669d873a4032abdf5；产品S/H0仍与原候选相同
 │  ├─ 本次仅重分ccrun-8和exec-e4-3；原1140计划中其余1138项argv逐字节不变
 │  ├─ 原302项及修复前142/285项记录全保留，不迁新绿；准备结果不算验收PASS
 │  ├─ 语料Git已修复并核验1885项内容／模式；原1140轮tools与regex准备rc0，新轮仍须执行
 │  ├─ 本轮四组均已PASS：ccrun-8／stream-buf约34.30／8.09秒，exec-e4-3a／3b约22.04／25.02秒；原断言与裁定不变
 │  ├─ 分治已落地：tests/streams三源+说明；当前out/streams-v4七个单模型.com已构建，plain及count1 constructor两种链、七路并行重放、H0镜像逐字节及exit7、ELF越界拒绝均PASS；短属性文件已修为rc2拒绝且stdout0，各产物SHA前后复核
-│  └─ 完成判据：清单完整、PENDING=0、NEEDS_RULING=0、product_red=0、处置齐全
+│  ├─ 旧1142项于083自然停窗，485项已处置、657待办；保留全部原始失败，不迁绿
+│  ├─ 43准备组已展开为193原操作；严格核对其余1101项argv不变；调用点11项准备实跑全部完成
+│  └─ 完成判据：最终模块清单完整、PENDING=0、NEEDS_RULING=0、product_red=0、处置齐全
 ├─ 待完成：据终态结果收口发布说明 → 候选封存 → RC
 ├─ 待完成：匹配候选的六平台 CI、Windows 原生与 Darwin 证据
 ├─ 待完成：Apple／Windows签名、公证及最终字节验证
@@ -162,7 +164,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 └─ 待完成：Draft资产核对 → Latest／公开 → 下载SHA与运行复核
 ```
 
-**下一动作：保留旧1142项冻结验收，继续完成尾部；按用户要求落地整套测试的原生目录、依赖图和模块选择执行。** 新主计划1145项，严格核对仅两项native入口拆为五项，其他1140项argv原字节不变；资源项代码虽变而argv相同，已另行实际重测。六个native单元均在原41秒内PASS（约19～38秒），旧超时不改写。新目录1145节点／782边，前置自动补全、失败下游BLOCKED且零执行；未知依赖禁用缓存，627项保守归组不冒充单流覆盖。源码S及候选H0已实际复核不变；未新增Python依赖。七流独立.com与plain/constructor链路证据见tests/streams；本轮原始日志、单元收据及现场会话见记忆宫殿。RESOURCE_UNKNOWN保留OPEN义务，H1超时不算PASS；只有完整处置和真实CI／签名／公开回执才能完成发布。
+**下一动作：旧1142项冻结验收自然停窗保留，先验证受影响单元再安排余项；整套测试按独立单元调度，先解决准备阶段的聚合超时。** 已提交原生目录、依赖图和模块选择执行；六个native单元均在原41秒内PASS（约19～38秒），旧超时不改写。新发现43个准备组捆绑193个操作共用外层额度，现展开为193个原参数单元；原789条依赖已验证全部仍可达，无环。libraryfunctionimports拆为六个独立准备阶段与只读消费；Python对照阶段独立20秒仍超时，定点使用40秒（外层41秒），其余构造20秒／消费35秒不变。新主计划1302项（含调度自测）、938条有效依赖已核验；严格核对其余1101项argv逐字节不变；调度7场景28断言和functionimports20案例实际通过，数量增加表示拆分而非新增产品需求。未知依赖禁用缓存，保守归组不冒充单流覆盖。源码S及候选H0未变；准备声明改用.cx默认-run，减少Python调用。七流独立.com与plain/constructor链路证据见tests/streams；本轮原始日志、单元收据及现场会话见记忆宫殿。RESOURCE_UNKNOWN保留OPEN义务，H1超时不算PASS；只有完整处置和真实CI／签名／公开回执才能完成发布。
 
 <a id="memory-palace"></a>
 ### 记忆宫殿
@@ -172,7 +174,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 | 入口厅：目标 | 公开发布0.0.43；当前节点F4/M7，不是重做F1。 | 上方思维树；[范围](plans/v0.0.43.md)、[终点线](plans/v0.0.43-finish-line.md)。旧未授描述不覆盖当前明确目标授权。 |
 | 工具间：能力 | 默认-run、tape→image、六目标、`.cx`模块已实现；经典UA与模型产品是不同实现。 | [能力速查](#implemented-usage)、[README](README.md)、已有用例。只验证具体输入的证据缺口，不重新研究入口是否存在。 |
 | 身份室：候选 | H0=`4f0b493c7a83d73a4ae1b348c8400ea3b7eda0ea190051b54a84c712a6730eda`；S=`c4618639cc3fcfac4f8ce52a11df3bdab93b2c9376eecee63fd70e6550adc57f`；用候选7298侧车。 | [F6证据](research/c43-f6-final-evidence/)。按源码摘要、产物及侧车SHA核对，mtime不单独决定新鲜度；不为刷新mtime重复构建。 |
-| 控制室：现场 | 本轮根`/tmp/unisacc-c43-pe-accept-20261024`；状态`out/f4-final-state`，窗口`out/f4-final-run`，原驱动日志`out/f4-driver.log`至029；v2日志`out/f4-driver-v2.log`自030；10241于054、88908于055均已实际76自然停窗；当前会话29323自056继续同一原状态，日志out/f4-driver-v2-resume2.log，既有记录未清空。native定点见out/native-unit-refactor-check、native-chain-refactor-check、native-self-runtime-refactor-check（中间失败也保留）。旧67581/91453/35610亦已76，原记录保留不迁绿。 | 每轮读取实际结果与存活进程／会话，核fresh收据和env pin；锁或旧日志不能证明存活。瞬时计数以现场为准。 |
+| 控制室：现场 | 本轮根`/tmp/unisacc-c43-pe-accept-20261024`；状态`out/f4-final-state`，窗口`out/f4-final-run`，原驱动日志`out/f4-driver.log`至029；v2日志`out/f4-driver-v2.log`自030；10241于054、88908于055均已实际76自然停窗；会话29323自056至083后已实际76自然停窗，日志out/f4-driver-v2-resume2.log，既有记录未清空。原子调用点11项准备实际rc0，见out/suite-atomic-e3callsite-run；functionimports首个独立20秒超时仍保留，六阶段新验证全部完成，consumer20案例PASS、六项PREPARED，见out/libraryimports-atomic-v4-run。native定点见out/native-unit-refactor-check、native-chain-refactor-check、native-self-runtime-refactor-check（中间失败也保留）。旧67581/91453/35610亦已76，原记录保留不迁绿。 | 每轮读取实际结果与存活进程／会话，核fresh收据和env pin；锁或旧日志不能证明存活。瞬时计数以现场为准。 |
 | 出口室：分类 | RESOURCE_UNKNOWN保留OPEN义务；H1超时不算PASS；DEFER不等于终态失败。 | [资源处置](research/c43-resource-disposition.md)、[裁定](release/rulings.tsv)、[分类](release/preauth.tsv)及完整退出表。不补写结果或虚构平台绿。 |
 | 发布室：交付 | M7之后封存；候选CI、签名、最终字节和公开下载须真实收据。 | [发布流水线](release/RELEASE-PIPELINE.md)、[候选记录](release/candidate.json)；当前候选记录尚不是0.0.43封存证明。 |
 | 暂存室：边界 | 0.0.44登记.cx模块化／内存安全、自有工具链与测试改进；0.0.45登记流＋网模块外部调用及模块／权重共享；均不另作0.0.43前置。typed/callback迁移与广泛research归档保留后续范围。 | [0.0.44计划](plans/v0.0.44.md)、[0.0.45计划](plans/v0.0.45.md)、[路线](#5-路线)。新动态推进用`unisacc.com + .cx`，减少脚本，转调不算原生化。 |

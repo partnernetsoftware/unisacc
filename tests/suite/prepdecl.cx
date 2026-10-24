@@ -1,0 +1,34 @@
+#!/usr/bin/env unisacc.com
+/* Atomic declarations only; never executes a producer or turns a group's
+ * measured sum into PASS. Original argv bytes are the NUL-plan authority.
+ * JSON -> shell-quoted job lines
+ * --plan JSON -> member STEP_ID/argc/argv NUL records
+ * --check JSON [PLAN_NUL] -> counts/SHA, optionally exact NUL comparison.
+ * Group command must be exactly sh -ec plus Python shlex.join-compatible
+ * member lines joined by one LF. No arbitrary shell equivalence is inferred. */
+#include "../cxlib/pyjson.cx"
+typedef struct {char*s;size_t n,cap;} PdBuf;
+typedef struct {PdBuf jobs,plan;size_t groups,steps;char json_sha[65],plan_sha[65];} PdResult;
+static void pd_fail(const char*s){fprintf(stderr,"prepdecl REFUSED %s\n",s);exit(2);}
+static void pd_emit(int f,const char*s,size_t n){while(n){ssize_t k=write(f,s,n);if(k>0){s+=k;n-=k;}else if(k<0&&errno==EINTR)continue;else pd_fail("write");}}
+static void pd_add(PdBuf*b,const char*s,size_t n){size_t need;if(n>(size_t)-1-b->n-1)pd_fail("buffer overflow");need=b->n+n+1;if(need>b->cap){size_t cap=b->cap?b->cap:256;while(cap<need){if(cap>(size_t)-1/2){cap=need;break;}cap*=2;}b->s=realloc(b->s,cap);if(!b->s)pd_fail("allocation");b->cap=cap;}if(n)memcpy(b->s+b->n,s,n);b->n+=n;b->s[b->n]=0;}
+static void pd_char(PdBuf*b,char c){pd_add(b,&c,1);}
+static void pd_textbuf(PdBuf*b,const char*s){pd_add(b,s,strlen(s));}
+static const char*pd_string(pj_value*v){if(!v||v->type!=PJ_STR||v->n!=strlen(v->s))pd_fail("expected string without NUL");return v->s;}
+static const char*pd_id(pj_value*v){const unsigned char*p=(const unsigned char*)pd_string(v);const char*s=(const char*)p;if(!*p)pd_fail("empty ID");for(;*p;p++)if(*p<32||*p==127)pd_fail("control byte in ID");return s;}
+static pj_value*pd_get(pj_value*o,const char*k,int type){pj_value*v=pj_get(o,k);if(!v||v->type!=type)pd_fail("missing/wrong-type field");return v;}
+/* Python shlex.quote's ASCII _find_unsafe set: [^\w@%+=:,./-]. */
+static int pd_plain(unsigned char c){return(c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||strchr("_@%+=:,./-",c)!=0;}
+static void pd_quote(PdBuf*b,const char*s){const unsigned char*p=(const unsigned char*)s;int plain=*p!=0;for(;*p;p++)if(!pd_plain(*p))plain=0;if(plain){pd_textbuf(b,s);return;}pd_char(b,39);for(p=(const unsigned char*)s;*p;p++){if(*p==39)pd_textbuf(b,"'\"'\"'");else pd_char(b,(char)*p);}pd_char(b,39);}
+static void pd_unique(char***names,size_t*n,const char*s){size_t i;for(i=0;i<*n;i++)if(!strcmp((*names)[i],s))pd_fail("duplicate group/member ID");*names=realloc(*names,(*n+1)*sizeof **names);if(!*names)pd_fail("ID allocation");(*names)[(*n)++]=(char*)s;}
+static char*pd_read(const char*path,size_t*n){struct stat st;char*s;if(lstat(path,&st)||!S_ISREG(st.st_mode))pd_fail("input must be regular non-symlink file");s=cx_read(path,n);if(!s||*n!=(size_t)st.st_size)pd_fail("input read");return s;}
+static void pd_stable(const char*path,const char*sha){size_t n;char*s=pd_read(path,&n),h[65];cx_sha256_hex(s,n,h);free(s);if(strcmp(h,sha))pd_fail("JSON changed while generating");}
+static PdResult pd_generate(const char*path){PdResult r={0};char*raw,why[512],**groups=0,**steps=0;size_t n,ng=0,ns=0,i,j,k;pj_value*doc,*version,*gs;raw=pd_read(path,&n);cx_sha256_hex(raw,n,r.json_sha);doc=pj_loads(raw,n,why,sizeof why);if(!doc){fprintf(stderr,"%s\n",why);pd_fail("invalid JSON");}if(doc->type!=PJ_OBJ)pd_fail("root object");version=pd_get(doc,"version",PJ_INT);if(strcmp(version->s,"1"))pd_fail("version must be integer1");gs=pd_get(doc,"groups",PJ_ARR);if(!gs->len)pd_fail("empty groups");
+ for(i=0;i<gs->len;i++){pj_value*g=gs->items[i],*cmd,*members;PdBuf joined={0};const char*gid;if(g->type!=PJ_OBJ)pd_fail("group object");gid=pd_id(pj_get(g,"name"));pd_unique(&groups,&ng,gid);cmd=pd_get(g,"command",PJ_ARR);members=pd_get(g,"members",PJ_ARR);if(cmd->len!=3||strcmp(pd_string(cmd->items[0]),"sh")||strcmp(pd_string(cmd->items[1]),"-ec"))pd_fail("group command must be sh -ec");pd_string(cmd->items[2]);if(!members->len)pd_fail("empty members");
+  for(j=0;j<members->len;j++){pj_value*m=members->items[j],*av;const char*step;char count[48];if(m->type!=PJ_OBJ)pd_fail("member object");step=pd_id(pj_get(m,"step"));pd_unique(&steps,&ns,step);av=pd_get(m,"argv",PJ_ARR);if(!av->len)pd_fail("empty argv");for(k=0;k<av->len;k++)pd_string(av->items[k]);if(!av->items[0]->n)pd_fail("empty executable");
+   if(j)pd_char(&joined,'\n');pd_textbuf(&r.jobs,"job ");pd_quote(&r.jobs,step);pd_add(&r.plan,step,strlen(step));pd_char(&r.plan,0);snprintf(count,sizeof count,"%lu",(unsigned long)av->len);pd_textbuf(&r.plan,count);pd_char(&r.plan,0);
+   for(k=0;k<av->len;k++){const char*a=av->items[k]->s;if(k)pd_char(&joined,' ');pd_quote(&joined,a);pd_char(&r.jobs,' ');pd_quote(&r.jobs,a);pd_add(&r.plan,a,av->items[k]->n);pd_char(&r.plan,0);}pd_char(&r.jobs,'\n');r.steps++;
+  }if(cmd->items[2]->n!=joined.n||memcmp(cmd->items[2]->s,joined.s,joined.n))pd_fail("group command differs from exact newline-joined member shlex argv");free(joined.s);r.groups++;
+ }
+ if(r.groups!=ng||r.steps!=ns)pd_fail("declaration coverage");cx_sha256_hex(r.plan.s,r.plan.n,r.plan_sha);pd_stable(path,r.json_sha);free(groups);free(steps);free(raw);return r;}
+int main(int argc,char**argv){int mode=0;const char*json,*plan=0;PdResult r;char counts[256];if(argc>=2&&!strcmp(argv[1],"--plan")){mode=1;if(argc!=3)pd_fail("usage --plan JSON");json=argv[2];}else if(argc>=2&&!strcmp(argv[1],"--check")){mode=2;if(argc!=3&&argc!=4)pd_fail("usage --check JSON [PLAN_NUL]");json=argv[2];if(argc==4)plan=argv[3];}else{if(argc!=2)pd_fail("usage JSON | --plan JSON | --check JSON [PLAN_NUL]");json=argv[1];}r=pd_generate(json);if(mode==2){if(plan){size_t n;char*s=pd_read(plan,&n);if(n!=r.plan.n||memcmp(s,r.plan.s,n))pd_fail("member NUL plan differs byte-for-byte");free(s);}snprintf(counts,sizeof counts,"groups\t%lu\nsteps\t%lu\njson_sha256\t%s\nplan_sha256\t%s\n",(unsigned long)r.groups,(unsigned long)r.steps,r.json_sha,r.plan_sha);pd_emit(1,counts,strlen(counts));}else if(mode==1)pd_emit(1,r.plan.s,r.plan.n);else pd_emit(1,r.jobs.s,r.jobs.n);return 0;}

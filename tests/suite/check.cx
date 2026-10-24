@@ -1,0 +1,41 @@
+#!/usr/bin/env unisacc.com
+/* Behavioral suite-tool regression only: no compiler corpus or producer.
+ * Run from root under tests/bound55. Children use bound8 (plus the existing
+ * cleanup reserve); fresh /tmp fixtures use the existing safedel contract. */
+#include <sys/time.h>
+static char SC_DIR[256];static int SC_SEQ,SC_CHECKS;static double SC_START;
+static void sc_write(int f,const char*s,size_t n){while(n){ssize_t k=write(f,s,n);if(k>0){s+=k;n-=k;}else if(k<0&&errno==EINTR)continue;else exit(2);}}
+static char*sc_path(const char*s){size_t n=strlen(SC_DIR)+strlen(s)+2;char*p=malloc(n);if(!p)exit(2);snprintf(p,n,"%s/%s",SC_DIR,s);return p;}
+static double sc_now(void){struct timeval t;if(gettimeofday(&t,0))exit(2);return t.tv_sec+t.tv_usec/1000000.0;}
+static int sc_child(char**a,const char*out,const char*err){pid_t p,w;int st,f=-1,e=-1;if(out){f=open(out,O_WRONLY|O_CREAT|O_EXCL,0600);e=open(err,O_WRONLY|O_CREAT|O_EXCL,0600);if(f<0||e<0)exit(2);}p=fork();if(p<0)exit(2);if(!p){if(f>=0){if(dup2(f,1)<0||dup2(e,2)<0)_exit(126);close(f);close(e);}execvp(a[0],a);_exit(127);}if(f>=0){close(f);close(e);}do{w=waitpid(p,&st,0);}while(w<0&&errno==EINTR);if(w!=p)return 255;return WIFEXITED(st)?WEXITSTATUS(st):WIFSIGNALED(st)?128+WTERMSIG(st):255;}
+static int sc_clean(void){int rc;char*a[]={"tests/bound","8","sh","./unisacc.com","tests/safedel.cx","--","--purge","--",SC_DIR,0};if(!*SC_DIR)return 0;rc=sc_child(a,0,0);if(!rc)*SC_DIR=0;return rc;}
+static void sc_no(const char*s){fprintf(stderr,"suite-check FAIL %s (fixture %s)\n",s,SC_DIR);sc_clean();exit(1);}
+static void sc_ok(int yes,const char*s){if(!yes)sc_no(s);SC_CHECKS++;}
+static void sc_put(const char*p,const char*s,size_t n){int f=open(p,O_WRONLY|O_CREAT|O_EXCL,0600);if(f<0)sc_no("exclusive fixture");sc_write(f,s,n);if(close(f))sc_no("fixture close");}
+static char*sc_load(const char*p){size_t n;char*s=cx_read(p,&n);if(!s||strlen(s)!=n)sc_no("fixture text read");return s;}
+static void sc_absent(const char*p){struct stat st;if(!lstat(p,&st)||errno!=ENOENT)sc_no("unexpected file/inspection failure");SC_CHECKS++;}
+static void sc_has(const char*p,const char*s){char*b=sc_load(p);sc_ok(strstr(b,s)!=0,s);free(b);}
+static int sc_call(char**a){char n[64];int rc;snprintf(n,sizeof n,"step-%02d.stdout",++SC_SEQ);{char*out=sc_path(n);snprintf(n,sizeof n,"step-%02d.stderr",SC_SEQ);rc=sc_child(a,out,sc_path(n));}if(sc_now()-SC_START>47)sc_no("selftest time budget");return rc;}
+typedef struct {char*s;size_t n,cap;} ScBuf;
+static void sc_add(ScBuf*b,const char*s,size_t n){if(b->n+n+1>b->cap){b->cap=(b->n+n+1)*2;b->s=realloc(b->s,b->cap);if(!b->s)exit(2);}memcpy(b->s+b->n,s,n);b->n+=n;b->s[b->n]=0;}
+static void sc_record(ScBuf*b,const char*id,int argc,const char**argv){char count[32];int i;sc_add(b,id,strlen(id)+1);snprintf(count,sizeof count,"%d",argc);sc_add(b,count,strlen(count)+1);for(i=0;i<argc;i++)sc_add(b,argv[i],strlen(argv[i])+1);}
+static int sc_run(const char*plan,const char*cat,const char*out,const char*selector,const char*value,const char*graph,const char*order,int container){char*a[32];int n=0;a[n++]="tests/bound";a[n++]="8";a[n++]="sh";a[n++]="./unisacc.com";a[n++]="tests/suite/run.cx";a[n++]="--";a[n++]=(char*)plan;a[n++]=(char*)cat;a[n++]=(char*)out;a[n++]=(char*)selector;a[n++]=(char*)value;a[n++]="--graph";a[n++]=(char*)graph;a[n++]="--order";a[n++]=(char*)order;a[n++]="--jobs";a[n++]="2";a[n++]="--limit";a[n++]=!strcmp(selector,"--module")?"1":"2";a[n++]=container?"--parent-container-value":"--parent-container-unset";if(container)a[n++]="suite-parent-value";a[n]=0;return sc_call(a);}
+int main(int argc,char**argv){ScBuf raw={0};char *plan,*cat,*order,*graph,*marker,*forbidden,*out,*s,*p,*q,*badgraph,*badorder;size_t n;char pattern[]="/tmp/unisacc-suite-check-XXXXXX";const char*av[5];int rc;(void)argv;if(argc!=1){fprintf(stderr,"usage: unisacc.com tests/suite/check.cx\n");return 2;}SC_START=sc_now();if(!mkdtemp(pattern))return 2;snprintf(SC_DIR,sizeof SC_DIR,"%s",pattern);
+ plan=sc_path("plan.nul");cat=sc_path("catalog.tsv");order=sc_path("order.json");graph=sc_path("graph.tsv");marker=sc_path("prepared");forbidden=sc_path("forbidden");
+ av[0]="/bin/sh";av[1]="-c";av[2]="printf ready > \"$1\"";av[3]="fixture";av[4]=marker;sc_record(&raw,"exec-prepare-suite",5,av);
+ av[2]="test \"$(cat \"$1\")\" = ready || exit 9; printf '%s:%s' \"\x24{UNISA_CONTAINER+x}\" \"\x24{UNISA_CONTAINER-}\"";sc_record(&raw,"suite-consumer",5,av);
+ av[2]="exit 3";sc_record(&raw,"exec-prepare-fails",3,av);
+ av[2]="printf forbidden > \"$1\"";av[4]=forbidden;sc_record(&raw,"suite-blocked",5,av);
+ av[2]="exit 77";sc_record(&raw,"exec-e4-rc77",3,av);
+ av[0]="/bin/sleep";av[1]="5";sc_record(&raw,"exec-e4-rc142",2,av);sc_put(plan,raw.s,raw.n);
+ s="{\"after\":{\"suite-consumer\":\"exec-prepare-suite\",\"suite-blocked\":\"exec-prepare-fails\"}}\n";sc_put(order,s,strlen(s));
+ {char*a[]={"tests/bound","8","sh","./unisacc.com","tests/suite/catalog.cx","--",plan,cat,0};sc_ok(sc_call(a)==0,"catalog fixture generation");}
+ {char*a[]={"tests/bound","8","sh","./unisacc.com","tests/suite/graph.cx","--",plan,order,graph,0};sc_ok(sc_call(a)==0,"graph fixture generation");}
+ {char*a[]={"tests/bound","8","sh","./unisacc.com","tests/suite/prepdecl.cx","--","--check","tests/prepgroups.json",0};sc_ok(sc_call(a)==0,"43 preparation groups validate without execution");sc_has(sc_path("step-03.stdout"),"groups\t43\nsteps\t193\n");}
+ out=sc_path("success-unset");sc_ok(sc_run(plan,cat,out,"--unit","suite-consumer",graph,order,0)==0,"dependency success");sc_has(sc_path("success-unset/identity.tsv"),"auto_added\t1\n");sc_has(sc_path("success-unset/summary.tsv"),"test_pass\t1\nprepared\t1\nfailed\t0\nblocked\t0\n");s=sc_load(sc_path("success-unset/results.tsv"));p=strstr(s,"exec-prepare-suite\t");q=strstr(s,"suite-consumer\t");sc_ok(p&&q&&p<q,"predecessor completed before consumer");sc_ok(strstr(s,"\tPREPARED\t0\t")&&strstr(s,"\tPASS\t0\t"),"PREPARED distinct from PASS");free(s);s=sc_load(sc_path("success-unset/00002.stdout"));sc_ok(!strcmp(s,":"),"parent UNISA_CONTAINER unset restored");free(s);
+ out=sc_path("success-value");sc_ok(sc_run(plan,cat,out,"--unit","suite-consumer",graph,order,1)==0,"dependency explicit-parent success");s=sc_load(sc_path("success-value/00002.stdout"));sc_ok(!strcmp(s,"x:suite-parent-value"),"parent UNISA_CONTAINER value restored");free(s);
+ out=sc_path("blocked");sc_ok(sc_run(plan,cat,out,"--unit","suite-blocked",graph,order,0)==1,"nonzero predecessor blocks consumer");sc_has(sc_path("blocked/summary.tsv"),"executed\t1\ntest_pass\t0\nprepared\t0\nfailed\t1\nblocked\t1\n");sc_has(sc_path("blocked/results.tsv"),"\tBLOCKED\t-\t-\t");sc_absent(forbidden);sc_absent(sc_path("blocked/00004.stdout"));sc_absent(sc_path("blocked/00004.stderr"));sc_absent(sc_path("blocked/00004.argv.nul"));
+ out=sc_path("real-nonzero");sc_ok(sc_run(plan,cat,out,"--module","e4",graph,order,0)==1,"rc77 and real watchdog timeout fail");sc_has(sc_path("real-nonzero/00005.rc"),"77\n");sc_has(sc_path("real-nonzero/00006.rc"),"142\n");sc_has(sc_path("real-nonzero/summary.tsv"),"test_pass\t0\nprepared\t0\nfailed\t2\nblocked\t0\n");
+ badgraph=sc_path("bad-graph.tsv");s=cx_read(graph,&n);if(!s)sc_no("graph read");p=strstr(s,"#plan_sha256\t");if(!p)sc_no("graph header");p+=13;*p=*p=='0'?'1':'0';sc_put(badgraph,s,n);free(s);out=sc_path("bad-graph-run");sc_ok(sc_run(plan,cat,out,"--unit","suite-consumer",badgraph,order,0)==2,"wrong graph plan binding rejected");sc_absent(out);
+ badorder=sc_path("bad-order.json");s="{\"after\":{}}\n";sc_put(badorder,s,strlen(s));out=sc_path("bad-order-run");sc_ok(sc_run(plan,cat,out,"--unit","suite-consumer",graph,badorder,0)==2,"wrong order binding rejected");sc_absent(out);
+ rc=sc_clean();if(rc){fprintf(stderr,"suite-check cleanup refused rc%d\n",rc);return 1;}sc_absent(pattern);{char msg[128];int z=snprintf(msg,sizeof msg,"suite-check PASS checks=%d cases=7\n",SC_CHECKS);sc_write(1,msg,z);}return 0;}

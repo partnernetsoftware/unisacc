@@ -2,10 +2,11 @@
 
 这是一套统一的开发测试入口，完整保留原gate计划的命令和断言。catalog按七流、网、构造、集成、平台和基础设施归组；无法明确归属的项保留integration，不据名称推定测试覆盖或依赖完整。
 
-三个工具都用unisacc.com默认-run，不调用旧Python队列：
+这些工具都用unisacc.com默认-run，不调用旧Python队列：
 - catalog.cx：严格导入原NUL计划，记录计划SHA和每项所属模块/层；--check核验完整一一对应。
 - graph.cx：读取既有gateorder.json.after，输出计划绑定的依赖图；拒绝环，报告不在当前计划的旧名称。
 - run.cx：按单元或模块选择，自动补全传递前置任务，按依赖并发；分别保存原argv、stdout、stderr、真实rc、耗时与输入摘要。
+- prepdecl.cx：核验原43组准备声明与193个成员参数完全一致，输出独立任务；每步保留原看门狗，不再让4～9个操作共用一个外层额度。gateorder保留组内顺序及原组间依赖。
 
 ## 从完整计划选择
 
@@ -46,5 +47,9 @@ default-run会注入自身UNISA_CONTAINER，执行时必须声明调用前的状
 nativecheck.sh保留三次独立构建和compiler/network运行器逐字节相等断言。相同运行器字节、同显式输入且不查询自身路径的场景只执行两个不同内容类的代表；网络构建运行器的独有self路径和资源缺失负例仍实际执行。
 
 阶段样例与全源self分开；链路样例、C self和network self分开。原stages/chain/all兼容入口仍保留。每单元保留原比较、输入和预算，准备/执行结果不混记。
+
+libraryfunctionimports依次登记--prepare-gen/c-json/p-json/tbl/net/runner六阶段；消费入口使用--require-cached。各阶段核对完整前置seal，重复准备只复用已核验产物；缺失或损坏返回75要求准备，消费不偷偷重建。构造、C/Python比较和20案例消费断言仍保留。实际Python对照阶段约35秒，旧20秒限时会超时，仅此阶段定点调整为40秒，外层41秒；其余构造20秒、消费35秒不变。
+
+suite-tools-native通过默认-run运行check.cx：原声明恒等、依赖顺序、BLOCKED零执行、准备与测试分计、真实77/142失败、容器状态恢复、错误绑定拒绝等7场景28断言。按精确脚本路径确认的E3/lower单元归入对应模块，跨流或未知项保守integration。
 
 该入口尚未替代正式发布验收，也不表示全部旧oracle已经原生化。原断言中仍必需的Python如实保留；新增目录、依赖图和调度逻辑均为.cx。

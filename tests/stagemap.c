@@ -25,7 +25,7 @@
 #include <stdlib.h>
 
 static char *rules[] = {
-    "meta", "identity-product-negative identity-include-negative identity-include-consumer-negative identity-prep-negative c99-ledger decision-ledger zeropython* ledgercheck finite-template dsl-ops manifest-entries-* script-inventory"
+    "meta", "identity-product-negative identity-include-negative identity-include-consumer-negative identity-prep-negative c99-ledger decision-ledger zeropython* suite-tools-native ledgercheck finite-template dsl-ops manifest-entries-* script-inventory"
             " subtract-safety* cxinclude glossarycheck* safedel-selftest deletecheck* deletemut-* progress freezecheck freezecheck-selftest revivedscan facts-export publish-order gate-infra gate-layers native-stamp"
             " tsv-build-account pipeline-cache docs kernel source-layout front-bounds bound boundreason boundstall-r7g boundnested-1 boundnested-2 boundnested-3 boundnested-4 boundnested-5 fresh-order* seed-metadata"
             " modelbenchcheck package-footer ape-version proc-enum qprefix full-signature referee-* tools tools-*-ref tools-*-build tools-*-run"
@@ -48,7 +48,7 @@ static char *rules[] = {
              " exec-multi-* multi fb12-multi realprog luatests* sqlspeed* minicon apps-* bigclosure",
     "lib", "lib-*",
     "build", "host-triple-* seed* exec-*self* exec-selfprep-* exec-bootstrap-* nativeboot-* comboot-* exec-driver-*"
-             " exec-tableself exec-prepare-* exec-chain-model-prepare exec-modelobject-prepare-*",
+             " exec-tableself exec-prepare-* exec-libraryfunctionimports-prepare-* exec-chain-model-prepare exec-modelobject-prepare-*",
     0
 };
 /* Exact additions are the sole stage records for formerly unclassified suites.

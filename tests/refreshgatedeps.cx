@@ -1196,93 +1196,123 @@ int main(int argc, char **argv) {
     oset(suites, "gate-select", pylit("{'command': ['python3', 'tests/gateselectcheck.py'], 'files': ['tests/gateselect.py', 'tests/gateselect.tsv', 'tests/gateselectcheck.py', 'tests/gatedecl.py', 'tests/gatelayers.py', 'tests/stagemap.c', 'tests/gate.sh', 'tests/gateorder.json', 'tests/gatedeps.json', 'tests/bound', 'tests/bound.py', 'tests/bound.c', 'release/derived-map.tsv', 'release/tools/derivedcheck.py', 'kernel/unisa_model.inc', 'release/tools/commitgate.sh', 'tests/stagerun.sh', 'tests/gatequeue.py', 'tests/env_pin.py'], 'tools': ['cc', 'git', 'python3', 'sh']}"));
     oset(suites, "commitgate", pylit("{'command': ['./tests/commitgatecheck.sh'], 'files': ['kernel/unisa_model.inc', 'release/derived-map.tsv', 'release/tools/checkrun.sh', 'release/tools/commitgate.sh', 'release/tools/derivedcheck.py', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'tests/commitgatecheck.sh', 'tests/shipclassify.cx', 'tests/cxbin', 'tests/gate.sh', 'tests/gatedecl.py', 'tests/gatedeps.json', 'tests/gatelayers.py', 'tests/gateorder.json', 'tests/gateselect.py', 'tests/gateselect.tsv', 'tests/gateselectcheck.py', 'tests/stagemap.c', 'tests/stagerun.sh', 'tests/gatequeue.py', 'tests/env_pin.py', 'tests/landlock', 'unisacc.com'], 'tools': ['bash', 'cc', 'flock', 'git', 'python3', 'sh', 'sha256sum']}"));
 
-    /* Preparation uses gate.sh's existing argv authority and the same parser as selection; declarations inherit the
-       conservative consumer input closure. */
+    /* Each original producer step is independently scheduled. Every step keeps
+       its former group's complete conservative declaration, never a smaller slice. */
     {   static const char *owners[] = { "exec/parse2/librarytypedreadercheck.sh", "exec/parse2/librarycallsitecheck.sh",
             "exec/lower/librarytypedcheck.sh", "exec/lower/librarycallsitecheck.sh", "exec/lower/librarydatacheck.sh",
             "tests/librarycallbacke3check.sh", "tests/librarycallbacklowercheck.sh", "tests/librarycallbackwiringcheck.sh",
             "tests/librarycallbackauthcheck.sh", 0 };
-        char *a[] = { "sh", "tests/gate.sh", "--plan", 0 }; size_t n; char *raw = run(a, 55, &n, 1);
-        J *jobs = parse_gate_plan(raw, n), *groups = need(jload("tests/prepgroups.json"), "groups"), *packed = jnew(JOBJ), *gl, *ls[2];
-        J *pg = jstr("tests/prepgroups.json"), *pgl = jnew(JARR);
-        apush(pgl, pg);
+        static const char *fields[] = { "files", "trees", "tools" };
+        char *a[] = { "sh", "tests/gate.sh", "--plan", 0 }; size_t n;
+        char *raw = run(a, 55, &n, 1);
+        J *jobs = parse_gate_plan(raw, n), *groups = need(jload("tests/prepgroups.json"), "groups");
+        J *active = jnew(JOBJ), *groupnames = jnew(JOBJ), *steps = jnew(JOBJ), *pgl = jnew(JARR), *ls[2];
+        int g, j, r, z, count = 0;
+        apush(pgl, jstr("tests/prepgroups.json")); apush(pgl, jstr("tests/suite/prepdecl.cx"));
+        apush(pgl, jstr("tests/cxlib/pyjson.cx"));
         if (groups->t != JARR) die("prepgroups groups is not a list", 0);
-        for (i = 0; i < groups->n; i++) { J *nm = need(groups->v[i], "name"); if (nm->t != JSTR) die("prepgroups name is not a str", 0); osetn(packed, nm->s, nm->sn, groups->v[i]); }
-        for (i = 0; i < suites->n; ) {
-            int active = 0, j;
-            if (startswith(suites->k[i], suites->kn[i], "exec-prepare-"))
-                for (j = 0; j < jobs->n && !active; j++) { J *jn = need(jobs->v[j], "name"); active = jn->sn == suites->kn[i] && !memcmp(jn->s, suites->k[i], jn->sn); }
-            if (startswith(suites->k[i], suites->kn[i], "exec-prepare-") && !active) odel(suites, xstrndup(suites->k[i], suites->kn[i]), suites->kn[i]);
-            else i++;
-        }
-        gl = need(suites, "gate-layers"); ls[0] = oget(gl, "files"); ls[1] = pgl;
-        oset(gl, "files", sorted_union(ls, 2));
         for (i = 0; i < jobs->n; i++) {
-            J *job = jobs->v[i], *name = need(job, "name"), *argvj = need(job, "command"); int matches = 0, j, r;
-            char *nm = xstrndup(name->s, name->sn);
-            for (r = 0; owners[r] && !matches; r++)
-                for (j = 0; j < argvj->n; j++) {
-                    J *x = argvj->v[j]; const char *s = x->s; size_t sn = x->sn;
-                    if (sn >= 2 && s[0] == '.' && s[1] == '/') { s += 2; sn -= 2; }
-                    if (sn == strlen(owners[r]) && !memcmp(s, owners[r], sn)) { matches = 1; break; }
-                }
-            if (startswith(name->s, name->sn, "exec-prepare-")) {
-                J *row = ogetn(packed, name->s, name->sn), *members, *expected, *entry, *guards; Buf sc = {0}; int ex = 0;
-                static const char *fields[] = { "files", "trees", "tools" };
-                char hex[65]; size_t pn; char *pb;
-                if (!row || !jeq(need(row, "command"), argvj)) die("preparation-declaration-owner-missing", nm);
-                members = need(row, "members");
-                if (members->t != JARR) die("members is not a list", nm);
+            J *nm = need(jobs->v[i], "name");
+            osetn(active, nm->s, nm->sn, need(jobs->v[i], "command"));
+        }
+        for (g = 0; g < groups->n; g++) {
+            J *nm = need(groups->v[g], "name");
+            if (nm->t != JSTR || ogetn(groupnames, nm->s, nm->sn)) die("duplicate or invalid preparation group", 0);
+            osetn(groupnames, nm->s, nm->sn, groups->v[g]);
+        }
+        for (g = 0; g < groups->n; g++) {
+            J *row = groups->v[g], *nm = need(row, "name"), *members = need(row, "members"), *base, *entry, *guards;
+            J **fl; int ex = 0; char *groupname = xstrndup(nm->s, nm->sn);
+            if (members->t != JARR || !members->n) die("empty or invalid preparation members", groupname);
+            base = ogetn(suites, nm->s, nm->sn);
+            if (!base) { J *first = need(members->v[0], "step"); base = ogetn(suites, first->s, first->sn); }
+            if (base && base->t != JOBJ) die("invalid inherited preparation declaration", groupname);
+            entry = base ? jcopy(base) : jnew(JOBJ);
+            if (truthy(oget(entry, "family"))) die("preparation-owner-family-needs-flattening", groupname);
+            ex = truthy(oget(entry, "executable_inputs"));
+            guards = oget(entry, "guards");
+            if (guards && guards->t != JOBJ) die("guards is not a dict", groupname);
+            guards = guards ? jcopy(guards) : jnew(JOBJ);
+            fl = xmalloc((size_t)(members->n + 1) * sizeof *fl);
+            for (r = 0; r < 3; r++) {
+                fl[0] = oget(entry, fields[r]);
                 for (j = 0; j < members->n; j++) {
-                    J *mv = need(members->v[j], "argv"); int z;
-                    if (mv->t != JARR) die("member argv is not a list", nm);
-                    if (j) bputc(&sc, '\n');
-                    for (z = 0; z < mv->n; z++) { if (mv->v[z]->t != JSTR) die("member argv is not str", nm); if (z) bputc(&sc, ' '); shquote(&sc, mv->v[z]->s, mv->v[z]->sn); }
+                    J *ow = need(members->v[j], "declaration_owner"), *owner;
+                    if (ow->t != JSTR || !(owner = ogetn(suites, ow->s, ow->sn))) die("preparation-declaration-owner-missing", groupname);
+                    if (owner->t != JOBJ || truthy(oget(owner, "family"))) die("preparation-owner-family-needs-flattening", groupname);
+                    fl[j + 1] = oget(owner, fields[r]);
                 }
-                expected = jnew(JARR); apush(expected, jstr("sh")); apush(expected, jstr("-ec")); apush(expected, jstrn(sc.b ? sc.b : "", sc.n));
-                if (!jeq(expected, argvj)) die("preparation-command-mismatch", nm);
-                {   J **entries = xmalloc((size_t)(members->n + 1) * sizeof *entries), **fl = xmalloc((size_t)(members->n + 2) * sizeof *fl);
-                    for (j = 0; j < members->n; j++) {
-                        J *ow = need(members->v[j], "declaration_owner");
-                        if (ow->t != JSTR) die("declaration_owner is not a str", nm);
-                        entries[j] = ogetn(suites, ow->s, ow->sn);
-                        if (!entries[j]) die("KeyError", ow->s);
-                        if (truthy(oget(entries[j], "executable_inputs"))) ex = 1;
-                    }
-                    entry = jnew(JOBJ); oset(entry, "command", argvj); oset(entry, "executable_inputs", jnew(ex ? JTRUE : JFALSE));
-                    for (r = 0; r < 3; r++) {
-                        int z; for (z = 0; z < members->n; z++) fl[z] = oget(entries[z], fields[r]);
-                        oset(entry, fields[r], sorted_union(fl, members->n));
-                    }
-                    ls[0] = oget(entry, "files"); ls[1] = pgl; oset(entry, "files", sorted_union(ls, 2));
-                    guards = jnew(JOBJ);
-                    for (j = 0; j < members->n; j++) {
-                        J *g = oget(entries[j], "guards"); int z;
-                        if (truthy(oget(entries[j], "family"))) die("preparation-owner-family-needs-flattening", nm);
-                        if (!g) continue;
-                        if (g->t != JOBJ) die("guards is not a dict", nm);
-                        for (z = 0; z < g->n; z++) {
-                            J *prev = ogetn(guards, g->k[z], g->kn[z]);
-                            if (prev && !jeq(prev, g->v[z])) { Buf m = {0}; bputs(&m, nm); bputc(&m, ' '); bput(&m, g->k[z], g->kn[z]); die("preparation-owner-guard-conflict", m.b); }
-                            osetn(guards, g->k[z], g->kn[z], g->v[z]);
-                        }
-                    }
-                    if (!(pb = cx_read("tests/prepgroups.json", &pn))) die("cannot read", "tests/prepgroups.json");
-                    cx_sha256_hex(pb, pn, hex); free(pb);
-                    oset(guards, "tests/prepgroups.json", jstr(hex));
-                    oset(entry, "guards", guards);
-                    osetn(suites, name->s, name->sn, entry);
-                    free(entries); free(fl);
+                oset(entry, fields[r], sorted_union(fl, members->n + 1));
+            }
+            for (j = 0; j < members->n; j++) {
+                J *ow = need(members->v[j], "declaration_owner"), *owner = need(suites, ow->s), *guard = oget(owner, "guards");
+                if (truthy(oget(owner, "executable_inputs"))) ex = 1;
+                if (!guard) continue;
+                if (guard->t != JOBJ) die("guards is not a dict", groupname);
+                for (z = 0; z < guard->n; z++) {
+                    J *prev = ogetn(guards, guard->k[z], guard->kn[z]);
+                    if (prev && !jeq(prev, guard->v[z])) die("preparation-owner-guard-conflict", groupname);
+                    osetn(guards, guard->k[z], guard->kn[z], guard->v[z]);
                 }
-                free(sc.b);
-            } else if (matches && ogetn(suites, name->s, name->sn)) {
-                int req = 0;
+            }
+            oset(entry, "executable_inputs", jnew(ex ? JTRUE : JFALSE));
+            ls[0] = oget(entry, "files"); ls[1] = pgl; oset(entry, "files", sorted_union(ls, 2));
+            for (r = 0; r < pgl->n; r++) {
+                size_t size; char hex[65], *bytes = cx_read(pgl->v[r]->s, &size);
+                if (!bytes) die("cannot read preparation declaration input", pgl->v[r]->s);
+                cx_sha256_hex(bytes, size, hex); free(bytes); oset(guards, pgl->v[r]->s, jstr(hex));
+            }
+            oset(entry, "guards", guards);
+            for (j = 0; j < members->n; j++) {
+                J *member = members->v[j], *step = need(member, "step"), *command = need(member, "argv"), *actual, *unit;
+                if (step->t != JSTR || command->t != JARR || !command->n || ogetn(steps, step->s, step->sn) || ogetn(groupnames, step->s, step->sn))
+                    die("duplicate or invalid preparation step", groupname);
+                for (z = 0; z < command->n; z++) if (command->v[z]->t != JSTR) die("member argv is not str", groupname);
+                actual = ogetn(active, step->s, step->sn);
+                if (!actual || !jeq(actual, command)) die("preparation-command-mismatch", step->s);
+                osetn(steps, step->s, step->sn, member);
+                unit = jcopy(entry); oset(unit, "command", jcopy(command)); osetn(suites, step->s, step->sn, unit); count++;
+            }
+            if (ogetn(suites, nm->s, nm->sn)) odel(suites, nm->s, nm->sn);
+            free(fl); free(groupname);
+        }
+        ls[0] = oget(need(suites, "gate-layers"), "files"); ls[1] = pgl;
+        oset(need(suites, "gate-layers"), "files", sorted_union(ls, 2));
+        /* Preserve consumer declarations; update only their already-prepared argv. */
+        for (i = 0; i < jobs->n; i++) {
+            J *job = jobs->v[i], *name = need(job, "name"), *argvj = need(job, "command"); int matches = 0, req = 0;
+            if (ogetn(steps, name->s, name->sn)) continue;
+            for (r = 0; owners[r] && !matches; r++) for (j = 0; j < argvj->n; j++) {
+                J *x = argvj->v[j]; const char *s = x->s; size_t sn = x->sn;
+                if (sn >= 2 && s[0] == '.' && s[1] == '/') { s += 2; sn -= 2; }
+                if (sn == strlen(owners[r]) && !memcmp(s, owners[r], sn)) { matches = 1; break; }
+            }
+            if (matches && ogetn(suites, name->s, name->sn)) {
                 for (j = 0; j < argvj->n; j++) if (jstreq(argvj->v[j], "--require-cached")) req = 1;
                 if (req) oset(ogetn(suites, name->s, name->sn), "command", argvj);
             }
-            free(nm);
         }
+        if (groups->n != 43 || count != 193) die("preparation member inventory changed", 0);
     }
+    changed("prep-member-units", "declared all193 original preparation argv with complete group readsets; removed43 packed groups");
+    {   static const char *phases[] = {"gen", "c-json", "p-json", "tbl", "net", "runner", 0};
+        J *consumer = need(suites, "exec-libraryfunctionimports-model"), *ls[2];
+        ls[0] = oget(consumer, "files"); ls[1] = pylit("['tests/cxbin', 'tests/safedel.cx']");
+        oset(consumer, "files", sorted_union(ls, 2));
+        ls[0] = oget(consumer, "tools"); ls[1] = pylit("['cat', 'mv', 'rmdir', 'openssl', 'uname', 'id', 'chmod']");
+        oset(consumer, "tools", sorted_union(ls, 2));
+        if (oget(suites, "exec-libraryfunctionimports-prepare")) odel(suites, "exec-libraryfunctionimports-prepare", strlen("exec-libraryfunctionimports-prepare"));
+        for (i = 0; phases[i]; i++) {
+            char name[128], flag[64]; J *prep = jcopy(consumer), *cmd = jnew(JARR);
+            snprintf(name, sizeof name, "exec-libraryfunctionimports-prepare-%s", phases[i]);
+            snprintf(flag, sizeof flag, "--prepare-%s", phases[i]);
+            apush(cmd, jstr("./exec/parse2/libraryfunctionimportscheck.sh")); apush(cmd, jstr(flag));
+            oset(prep, "command", cmd); oset(suites, name, prep);
+        }
+        oset(consumer, "command", pylit("['./exec/parse2/libraryfunctionimportscheck.sh', '--require-cached']"));
+    }
+    changed("libraryfunctionimports-preparation", "cloned complete consumer declaration for six atomic preparation phases");
+    oset(suites, "suite-tools-native", pylit("{'command': ['tests/bound', '55', 'sh', './unisacc.com', 'tests/suite/check.cx'], 'files': ['tests/suite/check.cx', 'tests/suite/run.cx', 'tests/suite/catalog.cx', 'tests/suite/graph.cx', 'tests/suite/prepdecl.cx', 'tests/cxlib/pyjson.cx', 'tests/prepgroups.json', 'tests/safedel.cx', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'unisacc.com', 'unisacc.com.build.json'], 'trees': ['include'], 'executable_inputs': True, 'tools': ['sleep', 'cat', 'mkdir', 'rm', 'mv', 'rmdir', 'chmod']}"));
     /* 0.0.44 (cc ruling): fixed declarations the derivation does not produce.  The two hard-coded declarations above
        (gate-layers, gate-select) omit files their gates read; they are added here from one table, never by a branch.
        Appended in table order; existing order and all other suites are untouched. */
