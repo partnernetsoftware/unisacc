@@ -1,0 +1,29 @@
+#!/usr/bin/env unisacc.com
+/* Scheduling graph, not test coverage or cached results.
+ * RAW_PLAN_NUL ORDER_JSON NEW_GRAPH_TSV
+ * Raw commands remain solely in the SHA-bound plan. Isolated nodes are kept
+ * by #nodes plus that complete plan binding; output contains only real edges.
+ * Unknown legacy IDs are reported and ignored exactly as the old scheduler.
+ * Duplicate JSON keys use the existing pyjson/Python last-value semantics. */
+#define main suite_catalog_unused_main
+#include "catalog.cx"
+#undef main
+#include "../cxlib/pyjson.cx"
+typedef struct {size_t after,pred;} Edge;
+static Edge *EDGES;static size_t NE,ECAP;
+static char **IGNORED;static size_t NI,ICAP;
+static long find_id(Plan*p,const char*id){size_t i;for(i=0;i<p->n;i++)if(!strcmp(p->u[i].id,id))return (long)i;return -1;}
+static const char*string(pj_value*v){if(!v||v->type!=PJ_STR||v->n!=strlen(v->s)||!safe(v->s))fail("order ID is not safe string");return v->s;}
+static void ignore(const char*s){size_t i;for(i=0;i<NI;i++)if(!strcmp(IGNORED[i],s))return;if(NI==ICAP){ICAP=ICAP?ICAP*2:32;IGNORED=realloc(IGNORED,ICAP*sizeof *IGNORED);if(!IGNORED)fail("ignored ID allocation");}IGNORED[NI++]=(char*)s;}
+static void edge(Plan*p,const char*after,const char*pred){long a=find_id(p,after),b=find_id(p,pred);size_t i;if(a<0)ignore(after);if(b<0)ignore(pred);if(a<0||b<0)return;for(i=0;i<NE;i++)if(EDGES[i].after==(size_t)a&&EDGES[i].pred==(size_t)b)return;if(NE==ECAP){ECAP=ECAP?ECAP*2:64;EDGES=realloc(EDGES,ECAP*sizeof *EDGES);if(!EDGES)fail("edge allocation");}EDGES[NE].after=(size_t)a;EDGES[NE++].pred=(size_t)b;}
+static void acyclic(Plan*p){size_t *indegree=calloc(p->n,sizeof *indegree),*q=malloc(p->n*sizeof *q),i,head=0,tail=0,done=0;if(!indegree||!q)fail("cycle check allocation");for(i=0;i<NE;i++)indegree[EDGES[i].after]++;for(i=0;i<p->n;i++)if(!indegree[i])q[tail++]=i;while(head<tail){size_t node=q[head++];done++;for(i=0;i<NE;i++)if(EDGES[i].pred==node){size_t a=EDGES[i].after;if(!indegree[a])fail("invalid indegree");if(!--indegree[a])q[tail++]=a;}}if(done!=p->n)fail("dependency cycle");free(indegree);free(q);}
+static void same_file(const char*path,const char*expected){char*s,h[65];size_t n;s=cx_read(path,&n);if(!s)fail("input reread failed");cx_sha256_hex(s,n,h);free(s);if(strcmp(h,expected))fail("input changed during graph generation");}
+int main(int argc,char**argv){Plan p;char*raw,why[512],oh[65],head[256],summary[256];size_t n,i,j;pj_value*doc,*after;int fd;struct stat st;
+ if(argc!=4)fail("usage RAW_PLAN_NUL ORDER_JSON NEW_GRAPH_TSV");
+ p=parse(argv[1]);if(lstat(argv[2],&st)||!S_ISREG(st.st_mode))fail("order must be regular non-symlink file");raw=cx_read(argv[2],&n);if(!raw||n!=(size_t)st.st_size)fail("order read");cx_sha256_hex(raw,n,oh);doc=pj_loads(raw,n,why,sizeof why);if(!doc){fprintf(stderr,"graph JSON: %s\n",why);fail("malformed order JSON");}if(doc->type!=PJ_OBJ)fail("order root must be object");after=pj_get(doc,"after");if(!after||after->type!=PJ_OBJ)fail("order.after must be object");
+ for(i=0;i<after->len;i+=2){const char*a=string(after->items[i]);pj_value*v=after->items[i+1];if(find_id(&p,a)<0)ignore(a);if(v->type==PJ_STR)edge(&p,a,string(v));else if(v->type==PJ_ARR){for(j=0;j<v->len;j++)edge(&p,a,string(v->items[j]));}else fail("after value must be string or array of strings");}
+ acyclic(&p);same_file(argv[1],p.sha);same_file(argv[2],oh);
+ /* Parse/type/ID/cycle validation completes before opening any output. */
+ fd=open(argv[3],O_WRONLY|O_CREAT|O_EXCL,0600);if(fd<0)fail("new graph exists/inaccessible");snprintf(head,sizeof head,"#plan_sha256\t%s\n#order_sha256\t%s\n#nodes\t%lu\n",p.sha,oh,(unsigned long)p.n);emit(fd,head,strlen(head));for(i=0;i<NE;i++){emit(fd,"edge\t",5);emit(fd,p.u[EDGES[i].after].id,strlen(p.u[EDGES[i].after].id));emit(fd,"\t",1);emit(fd,p.u[EDGES[i].pred].id,strlen(p.u[EDGES[i].pred].id));emit(fd,"\n",1);}if(fsync(fd)||close(fd))fail("graph close");
+ for(i=0;i<NI;i++){say("ignored-name\t");say(IGNORED[i]);say("\n");}snprintf(summary,sizeof summary,"nodes\t%lu\nedges\t%lu\nignored_names\t%lu\nplan_sha256\t%s\norder_sha256\t%s\n",(unsigned long)p.n,(unsigned long)NE,(unsigned long)NI,p.sha,oh);say(summary);free(raw);return 0;
+}

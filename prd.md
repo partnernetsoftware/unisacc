@@ -162,7 +162,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 └─ 待完成：Draft资产核对 → Latest／公开 → 下载SHA与运行复核
 ```
 
-**下一动作：持续执行本轮1142项完整验收，非零项先按既有分类处理；只有真实终态及完整处置才能进入封存。** 前者原VM路径超时；后者已打印61文件／122相等／bad0，但原41秒未正常返回，不能记PASS。exec-e4self虽匹配既有超时裁定，现按用户要求单独定位：历史单次C模型O2执行本身48.48秒，不能只替换Python准备或拆O1/O2就声称解决；五项资源UNKNOWN已定位到实际gcc11与旧gcc14身份、环境及warm参考／COM测量缺口，不能删除准入检查冒充修复。保留旧证据和未变的模型准备，不放宽预算或补写结果。 修复前142项原记录完整保留在`out/f4-fixture-incident`，不迁新绿；16项同输入模型准备保留，fresh入口复核输入。语料复制必须包含所需的嵌套Git元数据，旧准备脚本的遗漏不能再次沿用。 旧分类红、短预算DEFER及已实现功能不重新立研究题；新的必要修复才改变调度。本轮26窗实测：相邻完成间隔均89.16秒，queue打印均37.61秒，差额57.82%含外层复核及queue初始化；无相同argv重复项可直接删。决定优先保留同代结果优化私有编排：驻留校验复用原bound因prctl头及SIGSTOP缺定义两次实际rc1后停止，不移植看门狗；最小v2用前窗成功postcheck覆盖紧邻下窗precheck，保留首次precheck、每窗postcheck、原完整清单与55秒子树看门狗。六模式夹具与独立审查已过；旧驱动实际76、最后窗口029、274项原记录和原runner清单已保留，v2驱动会话10241从030继续，同state/env-pin/正式命令。现场交接收据out/f4-v2-handoff.json；实际首个连续间隔030→031为74秒，对照旧25间隔均89.16秒；测试组成不同，不承诺整轮同幅度。274项旧记录逐项未变、stamp及env-pin未变；禁止fresh重跑、迁绿或删断言。用户明确改进方向：按七流实际构建unisacc-stream1.com至7.com作独立阶段产物，允许落盘；各只携对应流模型并共享通用执行器，复用候选精确模型，先逐层输入输出对拍再集成，不把七份完整编译器副本冒充模块化。父负责runner，两个代理分别负责单流包裁剪和独立重放／链式测试；产物先在仓外，不改本轮冻结输入。归档与无关模板仍不进入主线。F3历史基线、阶段独立实跑及缓存准备不替代完整F4。
+**下一动作：保留旧1142项冻结验收，继续完成尾部；按用户要求落地整套测试的原生目录、依赖图和模块选择执行。** 新主计划1145项，严格核对仅两项native入口拆为五项，其他1140项argv原字节不变；资源项代码虽变而argv相同，已另行实际重测。六个native单元均在原41秒内PASS（约19～38秒），旧超时不改写。新目录1145节点／782边，前置自动补全、失败下游BLOCKED且零执行；未知依赖禁用缓存，627项保守归组不冒充单流覆盖。源码S及候选H0已实际复核不变；未新增Python依赖。七流独立.com与plain/constructor链路证据见tests/streams；本轮原始日志、单元收据及现场会话见记忆宫殿。RESOURCE_UNKNOWN保留OPEN义务，H1超时不算PASS；只有完整处置和真实CI／签名／公开回执才能完成发布。
 
 <a id="memory-palace"></a>
 ### 记忆宫殿
@@ -172,7 +172,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 | 入口厅：目标 | 公开发布0.0.43；当前节点F4/M7，不是重做F1。 | 上方思维树；[范围](plans/v0.0.43.md)、[终点线](plans/v0.0.43-finish-line.md)。旧未授描述不覆盖当前明确目标授权。 |
 | 工具间：能力 | 默认-run、tape→image、六目标、`.cx`模块已实现；经典UA与模型产品是不同实现。 | [能力速查](#implemented-usage)、[README](README.md)、已有用例。只验证具体输入的证据缺口，不重新研究入口是否存在。 |
 | 身份室：候选 | H0=`4f0b493c7a83d73a4ae1b348c8400ea3b7eda0ea190051b54a84c712a6730eda`；S=`c4618639cc3fcfac4f8ce52a11df3bdab93b2c9376eecee63fd70e6550adc57f`；用候选7298侧车。 | [F6证据](research/c43-f6-final-evidence/)。按源码摘要、产物及侧车SHA核对，mtime不单独决定新鲜度；不为刷新mtime重复构建。 |
-| 控制室：现场 | 本轮根`/tmp/unisacc-c43-pe-accept-20261024`；状态`out/f4-final-state`，窗口`out/f4-final-run`，原驱动日志`out/f4-driver.log`至029；v2日志`out/f4-driver-v2.log`自030；当前本线程会话10241；67581已实际76自然交接，旧91453与35610亦已76，原记录保留不迁绿。 | 每轮读取实际结果与存活进程／会话，核fresh收据和env pin；锁或旧日志不能证明存活。瞬时计数以现场为准。 |
+| 控制室：现场 | 本轮根`/tmp/unisacc-c43-pe-accept-20261024`；状态`out/f4-final-state`，窗口`out/f4-final-run`，原驱动日志`out/f4-driver.log`至029；v2日志`out/f4-driver-v2.log`自030；10241于054、88908于055均已实际76自然停窗；当前会话29323自056继续同一原状态，日志out/f4-driver-v2-resume2.log，既有记录未清空。native定点见out/native-unit-refactor-check、native-chain-refactor-check、native-self-runtime-refactor-check（中间失败也保留）。旧67581/91453/35610亦已76，原记录保留不迁绿。 | 每轮读取实际结果与存活进程／会话，核fresh收据和env pin；锁或旧日志不能证明存活。瞬时计数以现场为准。 |
 | 出口室：分类 | RESOURCE_UNKNOWN保留OPEN义务；H1超时不算PASS；DEFER不等于终态失败。 | [资源处置](research/c43-resource-disposition.md)、[裁定](release/rulings.tsv)、[分类](release/preauth.tsv)及完整退出表。不补写结果或虚构平台绿。 |
 | 发布室：交付 | M7之后封存；候选CI、签名、最终字节和公开下载须真实收据。 | [发布流水线](release/RELEASE-PIPELINE.md)、[候选记录](release/candidate.json)；当前候选记录尚不是0.0.43封存证明。 |
 | 暂存室：边界 | 0.0.44登记.cx模块化／内存安全、自有工具链与测试改进；0.0.45登记流＋网模块外部调用及模块／权重共享；均不另作0.0.43前置。typed/callback迁移与广泛research归档保留后续范围。 | [0.0.44计划](plans/v0.0.44.md)、[0.0.45计划](plans/v0.0.45.md)、[路线](#5-路线)。新动态推进用`unisacc.com + .cx`，减少脚本，转调不算原生化。 |

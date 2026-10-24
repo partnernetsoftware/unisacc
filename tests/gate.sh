@@ -432,7 +432,7 @@ job exec-pearm-forward env PE_ARCH=arm64 sh ./unisacc.com tests/pephase.cx -- fo
 job exec-winself env SELF_PART=stages TARGET=win/arm64 ./exec/pipeline/selfcheck.sh # full source PE, macros and reference bytes
 job exec-winself-package env SELF_PART=package TARGET=win/arm64 ./exec/pipeline/selfcheck.sh
 job exec-native-resources-prep env NATIVE_PART=resources ./exec/c/nativecheck.sh --prepare
-for part in stages chain; do job exec-native-$part env NATIVE_PART=$part ./exec/c/nativecheck.sh; done
+for part in stages-examples stages-self chain-examples chain-self-c chain-self-network; do job exec-native-$part env NATIVE_PART=$part ./exec/c/nativecheck.sh; done
 job exec-native-resources env NATIVE_PART=resources ./exec/c/nativecheck.sh --require-cached
 job exec-net python3 ./exec/c/netcheck.py
 job exec-codec ./exec/c/codeccheck.sh

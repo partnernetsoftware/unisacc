@@ -26,8 +26,8 @@ fi
 T=$(mktemp -d); trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT
 PART=${NATIVE_PART:-all}
 case $PART in
- all|stages) INPUTS="examples/hello.c examples/fib.c tests/c/b_toknames.c exec/c/run.c";;
- chain) INPUTS="examples/hello.c tests/c/b_toknames.c exec/c/run.c";;
+ all|stages|stages-examples|stages-self) INPUTS="examples/hello.c examples/fib.c tests/c/b_toknames.c exec/c/run.c";;
+ chain|chain-examples|chain-self|chain-self-c|chain-self-network) INPUTS="examples/hello.c tests/c/b_toknames.c exec/c/run.c";;
  resources) INPUTS="exec/c/run.c";;
  *) echo 'unknown NATIVE_PART' >&2; exit 2;;
 esac
@@ -43,7 +43,7 @@ b python3 tests/sourceflat.py "$T/unisacc.c"
 b "$UA" -O2 "$T/unisacc.c" -o "$T/compiler"
 b "$T/compiler" -O2 exec/c/run.c -o "$T/run-ua"
 fi
-if [ "$PART" = all ] || [ "$PART" = stages ]; then
+if [ "$PART" = all ] || [ "$PART" = stages ] || [ "$PART" = stages-examples ]; then
  b env EXEC_CC="$T/compiler" python3 exec/c/netcheck.py
  b env EXEC_CC="$T/compiler" ./exec/c/neg.sh
 fi
@@ -57,7 +57,7 @@ def run(cmd, cwd=None):
     return r.stdout
 part=sys.argv[3]; target=sys.argv[4]; image=sys.argv[5]; netrun=p/('run.'+image)
 assert netrun.read_bytes()==ua.read_bytes(), 'network runtime != compiler-built runtime'
-if part in ('all', 'stages'):
+if part in ('all', 'stages', 'stages-examples'):
     for stage in ['e2','e1','e3','e4','prune','lower','elf']:
         run([ua,'--check-net',p/(stage+'.tbl'),p/(stage+'.net')])
     for src in ['examples/hello.c','examples/fib.c','tests/c/b_toknames.c']:
@@ -71,10 +71,16 @@ if part in ('all', 'stages'):
             inp=p/(name+'.ua.'+stage);inp.write_bytes(got)
         print('native executor:',src,'seven stages equal')
     os.environ.pop('UNISA_ATTRIBUTES',None)
-    # The seven network stages now compile their own C runtime.  The resulting
-    # runtime repeats those stages on its own source, without Python processing it.
-    for stage in ['e2','e1','e3','e4','prune','lower','elf']:
-        run([netrun,'--check-net',p/(stage+'.tbl'),p/(stage+'.net')])
+if part in ('all', 'stages', 'stages-self'):
+    # All three runtimes were independently built above. The unconditional
+    # byte-equality assertion proves ua and netrun share the executor bytes.
+    # Only the combined path can reuse the preceding ua domain checks; a
+    # standalone self unit still executes all seven checks on netrun.
+    if part == 'stages-self':
+        for stage in ['e2','e1','e3','e4','prune','lower','elf']:
+            run([netrun,'--check-net',p/(stage+'.tbl'),p/(stage+'.net')])
+    # The resulting network-built runtime repeats the stages on its own
+    # complete source, without Python processing that source.
     src='exec/c/run.c';inp=pathlib.Path(src)
     attrs=p/'run.net.attributes';subprocess.run(["sh",str(root/"tests/cxbin"),str(root/"tests/safedel.cx"),"--purge","--",str(attrs)],check=True)
     os.environ['UNISA_ATTRIBUTES']=str(attrs)
@@ -83,17 +89,38 @@ if part in ('all', 'stages'):
         want=p/('run.'+(image if stage=='elf' else stage))
         if got!=want.read_bytes():raise SystemExit(f'network-built runtime self stage {stage}: differs')
         inp=p/('run.self.'+stage);inp.write_bytes(got)
-    print('network-built runtime: seven self stages and image equal; seven domain checks passed')
+    if part == 'stages-self':
+        print('network-built runtime: seven self stages and image equal; seven domain checks executed')
+    else:
+        print('network-built runtime: seven self stages and image equal; byte-identical executor domain checks reused')
     os.environ.pop('UNISA_ATTRIBUTES',None)
-if part in ('all', 'chain'):
+if part in ('all', 'chain', 'chain-examples', 'chain-self', 'chain-self-c', 'chain-self-network'):
     # The same stages also run within a single process, passing only bytes.
+    # The two unit source lists partition the unchanged combined source list.
+    if part == 'chain-examples':
+        sources=['examples/hello.c','tests/c/b_toknames.c']
+    elif part in ('chain-self', 'chain-self-c', 'chain-self-network'):
+        sources=['exec/c/run.c']
+    else:
+        sources=['examples/hello.c','tests/c/b_toknames.c','exec/c/run.c']
     models=[p/(stage+'.net') for stage in ['e2','e1','e3','e4','prune','lower','elf']]
-    for exe in [p/'run',ua,netrun]:
-        for src in ['examples/hello.c','tests/c/b_toknames.c','exec/c/run.c']:
+    if part == 'chain-self-c':
+        executors=[p/'run']
+    elif part == 'chain-self-network':
+        executors=[netrun]
+    else:
+        executors=[p/'run',netrun]
+    for exe in executors:
+        for src in sources:
             got=run([exe,'--chain',src,src,root/'include',*models])
             want=p/(pathlib.Path(src).stem+'.'+image)
             if got!=want.read_bytes():raise SystemExit(f'{exe} in-memory chain differs: {src}')
-    print('stream chain: three runtime builds, including network self-rebuild, equal')
+    if part == 'chain-self-c':
+        print('stream chain:',part,'three builds retained; byte-identical compiler/network pair verified; one C runtime representative executed')
+    elif part == 'chain-self-network':
+        print('stream chain:',part,'three builds retained; byte-identical compiler/network pair verified; one network-built runtime representative executed')
+    else:
+        print('stream chain:',part,'three builds retained; byte-identical compiler/network pair verified; C and network-built representatives executed')
 if part in ('all', 'resources'):
     isolated_root=p/'isolated'
     sys.path.insert(0,str(root/'tests'))
@@ -103,10 +130,10 @@ if part in ('all', 'resources'):
     shutil.copyfile(isolated/'run.c',isolated/'runtime.c')
     (p/'resource-runtime-inputs.json').write_text(__import__('json').dumps(copied,sort_keys=True,indent=2)+'\n')
     shutil.copyfile(p/'models.pkg',isolated/'models.pkg')
-    for exe in [p/'run',ua,netrun]:
+    for exe in [p/'run',netrun]:
         got=run([exe,'--bundle','models.pkg',target,'runtime.c','runtime.c'],cwd=isolated)
         if got!=netrun.read_bytes():raise SystemExit(f'{exe} resource-packaged self route differs')
-    print('resource package: three runtime builds reproduce self, local quoted-include closure, isolated cwd')
+    print('resource package: three builds retained; C and network-built representatives reproduce self, local quoted-include closure, isolated cwd')
     sys.path.insert(0,str(root/'exec/c'))
     from pack import build as package_build
     (isolated/'without-resources.pkg').write_bytes(package_build([p/'route.tsv']))
@@ -126,9 +153,9 @@ if part in ('all', 'resources'):
         resource.setrlimit(resource.RLIMIT_FSIZE,(1024,1024))
     model=p/'write.net';model.write_text('N 1 1 0 0 0 0\nQ 2049 '+'12 65 '*2048+'49\nH 0 0 256 0 0 0\n')
     empty=p/'empty';empty.write_bytes(b'')
-    for exe in [p/'run',ua,netrun]:
+    for exe in [p/'run',netrun]:
         with (p/'limited').open('wb') as out:
             r=subprocess.run([str(exe),str(model),str(empty)],stdout=out,stderr=subprocess.PIPE,preexec_fn=limit,timeout=60)
         assert r.returncode==2 and b'cannot write output' in r.stderr,(exe,r.returncode,r.stderr)
-    print('native executor resources: isolated packages and three real write failures passed')
+    print('native executor resources: isolated packages and C/network-built representatives passed two real write failures')
 PY
