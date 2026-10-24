@@ -6,9 +6,26 @@
 
 - **[概念与术语](#0-概念与术语先读歧义以本节为准)**：§0，流 / 网 / 段 / 阶段四个词各只有一个意思；六条常见误解逐条对照。
 - **[流/网合同三表与可核验进度](#flow-net-contracts)**：七流、十八网、关系表及是否封存；有封不等于已冻。
+- **[已实现能力速查](#implemented-usage)**：默认动态执行、tape 输入、六目标镜像、`.cx` 依赖计划。
 - [当前版本与有效计划](#current-plans) · [当前架构](#pipeline-design)
 - [路线](#5-路线) · [未解决问题](#6-未解决问题) · [归档索引](#7-归档索引)
 - [0.1.x：其他 C 编译器接入 `.cx`](#53-01x其他-c-编译器接入-cx)
+
+<a id="implemented-usage"></a>
+
+## 已实现能力速查
+
+下表是现有产品入口，不是待研究路线。开始工具开发、替代脚本或派发子代理前，先按这里选择现成用法；需要核对的是具体输入的结果与覆盖边界，不重复研究这些入口是否存在。
+
+| 动作 | 现成用法 | 说明与既有依据 |
+|---|---|---|
+| 动态执行 C／`.cx` 工具 | `./unisacc.com FILE.cx -- ARGS` | 默认就是 `-run`；`.c` 同样适用。见本篇§3.11、[README 用法](README.md)及[`.cx` 草案](docs/cx-spec-draft.md)。 |
+| 显式动态执行 | `./unisacc.com -run FILE.cx -- ARGS` | 保留的显式写法；日常推进直接执行源码。 |
+| 从 tape／tapebin 写目标镜像 | `./unisacc.com INPUT.tape -b OS/ARCH -o OUTPUT` | `.tapebin` 也有现成入口。支持域及具名拒绝仍生效；见 [README](README.md)、[驱动](exec/c/compiler.c)及[现有 tape 对拍](tests/bindingsnegcheck.cx)。 |
+| 写六目标程序 | `./unisacc.com FILE.c -b OS/ARCH -o OUTPUT` | 目标为 `lnx`／`osx`／`win` × `x86_64`／`arm64`；跨目标写出与目标机器原生执行分别记证。 |
+| 查看 `.cx` 模块依赖计划 | `./unisacc.com -cx-plan FILE.cx` | 复用现有模块入口与[模块用例](tests/cxmodcheck.cx)，不另造模块扫描器。 |
+
+新动态逻辑优先由 `unisacc.com + .cx` 完成，减少 `.sh`，不新增临时 `.py`。旧脚本尚未迁移的部分如实记为依赖，不把 `.cx` 转调脚本记成迁移完成。经典 C 参考与模型产品是不同实现；对拍前确认实际两端身份，不能笼统判成“对自身验证”。入口已实现不等于任意输入已验证，继续保留原断言、拒绝和预算。
 
 ## 0. 概念与术语（先读；歧义以本节为准）
 
