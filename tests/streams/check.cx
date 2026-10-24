@@ -6,11 +6,11 @@
  * UNISA_ATTRIBUTES explicitly, including bundle-mode E1 records.
  * Native default-run driver; all external steps have tests/bound55.
  * Replays are independent processes over saved chain input/attributes fixtures;
- * this proves replay determinism, not an independent semantic oracle per stage.
+ * this proves replay determinism, not an independent semantic oracle per stream.
  * End-to-end H0 image equality/exit7 is the independent route comparison.
  */
 #define EXPECT_H0 "4f0b493c7a83d73a4ae1b348c8400ea3b7eda0ea190051b54a84c712a6730eda"
-static const char *STAGE[]={"e2","e1","e3","e4","prune","lower","elf"};
+static const char *STREAM_UNITS[]={"e2","e1","e3","e4","prune","lower","elf"};
 static char *ROOTDIR,*OUT,*SOURCE,*INCLUDE,*MANIFEST;static int MF;
 static char *BIN[7],*BINHASH[7],*INPUT[7],*OUTPUT[7],*BEFORE[7],*AFTER[7];
 static int HAD_BEFORE[7],HAD_AFTER[7];
@@ -29,7 +29,7 @@ static int equal(const char*a,const char*b){size_t n,m;char*x=load_file(a,&n),*y
 static pid_t launch(char**args,const char*out,const char*err){int f=open(out,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600),e;pid_t p;if(f<0)fail("stdout log");e=open(err,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);if(e<0)fail("stderr log");p=fork();if(p<0)fail("fork");if(!p){if(dup2(f,1)<0||dup2(e,2)<0)_exit(126);close(f);close(e);if(MF>=0)close(MF);execvp(args[0],args);_exit(127);}if(close(f)||close(e))fail("log close");return p;}
 static int finish(pid_t p){pid_t w;int st;do{w=waitpid(p,&st,0);}while(w<0&&errno==EINTR);if(w!=p)fail("waitpid");if(WIFEXITED(st))return WEXITSTATUS(st);return WIFSIGNALED(st)?128+WTERMSIG(st):255;}
 static int run(char**a,const char*out,const char*err){return finish(launch(a,out,err));}
-static void record(const char*kind,int i,const char*input,const char*out,int rc,const char*attrs){char b[2048];char*ih=hash(input),*oh=hash(out),*ah=attrs&&exists(attrs)?hash(attrs):"-";int n=snprintf(b,sizeof b,"%s\t%s\t%s\t%s\t%d\t%s\n",kind,STAGE[i],ih,oh,rc,ah);if(n<0||(size_t)n>=sizeof b)fail("record overflow");emitfd(MF,b,n);free(ih);free(oh);if(strcmp(ah,"-"))free(ah);}
+static void record(const char*kind,int i,const char*input,const char*out,int rc,const char*attrs){char b[2048];char*ih=hash(input),*oh=hash(out),*ah=attrs&&exists(attrs)?hash(attrs):"-";int n=snprintf(b,sizeof b,"%s\t%s\t%s\t%s\t%d\t%s\n",kind,STREAM_UNITS[i],ih,oh,rc,ah);if(n<0||(size_t)n>=sizeof b)fail("record overflow");emitfd(MF,b,n);free(ih);free(oh);if(strcmp(ah,"-"))free(ah);}
 static unsigned u32(const unsigned char*p){return p[0]|(unsigned)p[1]<<8|(unsigned)p[2]<<16|(unsigned)p[3]<<24;}
 static void attributes(const char*p){size_t n;char*s=load_file(p,&n);unsigned count;if(n<4)fail("E1 attributes missing count");count=u32((unsigned char*)s);if(count>1000000||n!=4+9*(size_t)count)fail("malformed unit/ordinal/kind attributes");/* Require actual E1 records: plain0, constructor1. */if(count!=EXPECT_ATTRIBUTES)fail("unexpected attribute count for selected source");free(s);}
 int main(int argc,char**argv){char *attrs,*prev,*ref,*log,*err,*rout[7],*rerr[7],*rattr[7];pid_t replay[7];char name[128],line[256];size_t n;char*s;int i,rc,constructor=0;struct stat st;
@@ -37,11 +37,11 @@ int main(int argc,char**argv){char *attrs,*prev,*ref,*log,*err,*rout[7],*rerr[7]
  for(i=1;i<5;i++){const char*p=argv[i];if(*p!='/')fail("absolute paths required");for(;*p;p++)if(*p=='\n'||*p=='\t')fail("path delimiter");}
  ROOTDIR=argv[1];OUT=argv[4];if(chdir(ROOTDIR))fail("root cwd");if(!lstat(OUT,&st)||errno!=ENOENT)fail("new output must not exist");
  if(strcmp(hash(argv[3]),EXPECT_H0))fail("H0 identity");
- for(i=0;i<7;i++){snprintf(name,sizeof name,"unisacc-stream%d.com",i+1);BIN[i]=join(argv[2],name);if(!exists(BIN[i]))fail("missing stage artifact");BINHASH[i]=hash(BIN[i]);}
+ for(i=0;i<7;i++){snprintf(name,sizeof name,"unisacc-stream%d.com",i+1);BIN[i]=join(argv[2],name);if(!exists(BIN[i]))fail("missing stream artifact");BINHASH[i]=hash(BIN[i]);}
  if(mkdir(OUT,0700))fail("new output mkdir");SOURCE=join(OUT,"source.c");INCLUDE=join(ROOTDIR,"include");{const char*body=constructor?"int value; __attribute__((constructor)) void init(void){value=7;} int main(void){return value;}\n":"int main(void){return 7;}\n";put(SOURCE,body,strlen(body));}
- MANIFEST=join(OUT,"results.tsv");MF=open(MANIFEST,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);if(MF<0)fail("manifest open");emitfd(MF,"kind\tstage\tinput_sha256\toutput_sha256\trc\tattributes_sha256\n",strlen("kind\tstage\tinput_sha256\toutput_sha256\trc\tattributes_sha256\n"));
+ MANIFEST=join(OUT,"results.tsv");MF=open(MANIFEST,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);if(MF<0)fail("manifest open");emitfd(MF,"kind\tstream_unit\tinput_sha256\toutput_sha256\trc\tattributes_sha256\n",strlen("kind\tstream_unit\tinput_sha256\toutput_sha256\trc\tattributes_sha256\n"));
  attrs=join(OUT,"chain.attributes");prev=SOURCE;
- for(i=0;i<7;i++){char*a[11];snprintf(name,sizeof name,"%d-%s",i+1,STAGE[i]);INPUT[i]=join(OUT,binding(name,"input"));OUTPUT[i]=join(OUT,binding(name,"output"));BEFORE[i]=join(OUT,binding(name,"attrs-before"));AFTER[i]=join(OUT,binding(name,"attrs-after"));copy(prev,INPUT[i]);HAD_BEFORE[i]=exists(attrs);if(HAD_BEFORE[i])copy(attrs,BEFORE[i]);log=OUTPUT[i];err=join(OUT,binding(name,"stderr"));a[0]="tests/bound";a[1]="55";a[2]="env";a[3]=binding("UNISA_ATTRIBUTES",attrs);a[4]=BIN[i];a[5]=INPUT[i];a[6]=SOURCE;a[7]=INCLUDE;a[8]=0;rc=run(a,log,err);HAD_AFTER[i]=exists(attrs);if(HAD_AFTER[i])copy(attrs,AFTER[i]);record("chain",i,INPUT[i],OUTPUT[i],rc,attrs);if(rc)fail("stage rejected chain input (actual record saved)");if(i==1)attributes(attrs);prev=OUTPUT[i];}
+ for(i=0;i<7;i++){char*a[11];snprintf(name,sizeof name,"%d-%s",i+1,STREAM_UNITS[i]);INPUT[i]=join(OUT,binding(name,"input"));OUTPUT[i]=join(OUT,binding(name,"output"));BEFORE[i]=join(OUT,binding(name,"attrs-before"));AFTER[i]=join(OUT,binding(name,"attrs-after"));copy(prev,INPUT[i]);HAD_BEFORE[i]=exists(attrs);if(HAD_BEFORE[i])copy(attrs,BEFORE[i]);log=OUTPUT[i];err=join(OUT,binding(name,"stderr"));a[0]="tests/bound";a[1]="55";a[2]="env";a[3]=binding("UNISA_ATTRIBUTES",attrs);a[4]=BIN[i];a[5]=INPUT[i];a[6]=SOURCE;a[7]=INCLUDE;a[8]=0;rc=run(a,log,err);HAD_AFTER[i]=exists(attrs);if(HAD_AFTER[i])copy(attrs,AFTER[i]);record("chain",i,INPUT[i],OUTPUT[i],rc,attrs);if(rc)fail("stream rejected chain input (actual record saved)");if(i==1)attributes(attrs);prev=OUTPUT[i];}
  /* Independent saved-fixture replays: distinct attrs files, inputs immutable,
     all seven are launched before waiting. Each individual bound is55. */
  for(i=0;i<7;i++){char*a[11];snprintf(name,sizeof name,"replay-%d",i+1);rout[i]=join(OUT,binding(name,"output"));rerr[i]=join(OUT,binding(name,"stderr"));rattr[i]=join(OUT,binding(name,"attrs"));if(HAD_BEFORE[i])copy(BEFORE[i],rattr[i]);a[0]="tests/bound";a[1]="55";a[2]="env";a[3]=binding("UNISA_ATTRIBUTES",rattr[i]);a[4]=BIN[i];a[5]=INPUT[i];a[6]=SOURCE;a[7]=INCLUDE;a[8]=0;replay[i]=launch(a,rout[i],rerr[i]);}
@@ -52,5 +52,5 @@ int main(int argc,char**argv){char *attrs,*prev,*ref,*log,*err,*rout[7],*rerr[7]
     relocation57 extends beyond data. Its existing assertion is rc1 + no stdout
     + stderr containing ELF input or relocation. No guessed negative syntax. */
  {const char*raw="@target lnx/x86_64\n@data -\n@data_len 64\n@relocs 57\nret\n";char*input=join(OUT,"negative-elf-relocation-overrun.tins"),*emptyattrs=join(OUT,"negative.attributes"),*a[11];put(input,raw,strlen(raw));log=join(OUT,"negative.stdout");err=join(OUT,"negative.stderr");a[0]="tests/bound";a[1]="55";a[2]="env";a[3]=binding("UNISA_ATTRIBUTES",emptyattrs);a[4]=BIN[6];a[5]=input;a[6]=SOURCE;a[7]=INCLUDE;a[8]=0;rc=run(a,log,err);record("negative-elf-relocation-overrun",6,input,log,rc,emptyattrs);s=load_file(log,&n);free(s);if(rc!=1||n)fail("ELF extent negative return/output");s=load_file(err,&n);if(!strstr(s,"ELF input or relocation"))fail("ELF extent negative reason");free(s);}
- for(i=0;i<7;i++){char *now=hash(BIN[i]);if(strcmp(now,BINHASH[i]))fail("stage artifact changed during test");free(now);snprintf(line,sizeof line,"artifact\t%s\t-\t%s\t0\t-\n",STAGE[i],BINHASH[i]);emitfd(MF,line,strlen(line));}if(close(MF))fail("manifest close");MF=-1;say(constructor?"seven-stream constructor attributes1, chain, independent replays, H0 image/exit7 and named ELF refusal PASS\n":"seven-stream chain, independent replays, H0 image/exit7 and named ELF refusal PASS\n");return 0;
+ for(i=0;i<7;i++){char *now=hash(BIN[i]);if(strcmp(now,BINHASH[i]))fail("stream artifact changed during test");free(now);snprintf(line,sizeof line,"artifact\t%s\t-\t%s\t0\t-\n",STREAM_UNITS[i],BINHASH[i]);emitfd(MF,line,strlen(line));}if(close(MF))fail("manifest close");MF=-1;say(constructor?"seven-stream constructor attributes1, chain, independent replays, H0 image/exit7 and named ELF refusal PASS\n":"seven-stream chain, independent replays, H0 image/exit7 and named ELF refusal PASS\n");return 0;
 }

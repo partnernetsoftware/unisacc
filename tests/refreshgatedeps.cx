@@ -790,6 +790,45 @@ static J *parse_gate_plan(const char *raw, size_t n) {
 
 static int startswith(const char *s, size_t n, const char *p) { size_t l = strlen(p); return n >= l && !memcmp(s, p, l); }
 
+/* Native unit wire names and argv come from the existing gate authority.
+   Each command family inherits its complete legacy or examples declaration. */
+static void native_unit_declarations(J *suites) {
+    char *a[] = { "sh", "tests/gate.sh", "--plan", 0 }; size_t n;
+    char *raw = run(a, 55, &n, 1);
+    J *jobs = parse_gate_plan(raw, n), *groups = jnew(JOBJ); int i, count = 0;
+    for (i = 0; i < jobs->n; i++) {
+        J *job = jobs->v[i], *name = need(job, "name"), *command = need(job, "command"), *binding, *base, *entry;
+        const char *part, *dash; char groupname[128], fallback[160], expected[160]; size_t prefix;
+        if (command->n != 3 || !jstreq(command->v[0], "env") ||
+                !jstreq(command->v[2], "./exec/c/nativecheck.sh")) continue;
+        binding = command->v[1];
+        if (binding->t != JSTR || !startswith(binding->s, binding->sn, "NATIVE_PART=")) continue;
+        part = binding->s + strlen("NATIVE_PART="); dash = strchr(part, '-');
+        if (!dash || dash == part) continue;
+        prefix = (size_t)(dash - part);
+        if (snprintf(groupname, sizeof groupname, "exec-native-%.*s", (int)prefix, part) >= (int)sizeof groupname ||
+                snprintf(expected, sizeof expected, "exec-native-%s", part) >= (int)sizeof expected ||
+                !jstreq(name, expected)) die("native-unit wire name/command mismatch", 0);
+        base = oget(groups, groupname);
+        if (!base) {
+            base = oget(suites, groupname);
+            if (!base) {
+                if (snprintf(fallback, sizeof fallback, "%s-examples", groupname) >= (int)sizeof fallback)
+                    die("native-unit family name too long", 0);
+                base = oget(suites, fallback);
+            }
+            if (!base || base->t != JOBJ) die("native units require complete existing family declarations", groupname);
+            base = jcopy(base); oset(groups, groupname, base);
+        }
+        entry = jcopy(base); oset(entry, "command", jcopy(command));
+        osetn(suites, name->s, name->sn, entry); count++;
+    }
+    if (count != 5 || groups->n != 2) die("native-unit inventory changed", 0);
+    for (i = 0; i < groups->n; i++) if (ogetn(suites, groups->k[i], groups->kn[i]))
+        odel(suites, groups->k[i], groups->kn[i]);
+    free(raw);
+}
+
 int main(int argc, char **argv) {
     J *d, *fams, *suites, *outside, *glist, *treeset, *o; Buf tb = {0}; char *blob, root[8192]; size_t bn; int i, f, t, k;
     char **av;
@@ -1087,34 +1126,8 @@ int main(int argc, char **argv) {
     oset(suites, "exec-e5-roundtrip-b", pylit("{'command': ['sh', './tests/cxbin', 'tests/e5phase.cx', 'roundtrip-b'], 'files': ['exec/enc/check.sh', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'tests/build_ref.sh', 'tests/c/a_for.c', 'tests/checklib.py', 'tests/export_ref.sh', 'tests/knownfail.py', 'tests/knownfail.sh', 'tests/lib.sh', 'tests/reffoot.h', 'tests/refshim.h', 'unisacc.c', 'tests/e5phase.cx', 'tests/cxbin', 'unisacc.com', 'unisacc.com.build.json'], 'trees': ['examples', 'exec', 'include', 'iterate', 'kernel', 'src', 'tests/c', 'unisa', 'weights'], 'executable_inputs': True, 'tools': ['cc', 'sh']}"));
     oset(suites, "exec-e5-real-fp", pylit("{'command': ['sh', './tests/cxbin', 'tests/e5phase.cx', 'real-fp'], 'files': ['exec/enc/check.sh', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'tests/build_ref.sh', 'tests/c/a_for.c', 'tests/checklib.py', 'tests/export_ref.sh', 'tests/knownfail.py', 'tests/knownfail.sh', 'tests/lib.sh', 'tests/reffoot.h', 'tests/refshim.h', 'unisacc.c', 'tests/e5phase.cx', 'tests/cxbin', 'unisacc.com', 'unisacc.com.build.json'], 'trees': ['examples', 'exec', 'include', 'iterate', 'kernel', 'src', 'tests/c', 'unisa', 'weights'], 'executable_inputs': True, 'tools': ['cc', 'sh']}"));
     changed("e5-phases", "declared all original encoder checks");
-    /* Native units inherit the complete original declarations. Only commands
-       and names change; fallback to an existing new unit makes refresh repeatable. */
-    {
-        static const char *const parts[] = { "stages-examples", "stages-self",
-            "chain-examples", "chain-self-c", "chain-self-network" };
-        J *stage_base = oget(suites, "exec-native-stages");
-        J *chain_base = oget(suites, "exec-native-chain");
-        int i;
-        if (!stage_base) stage_base = oget(suites, "exec-native-stages-examples");
-        if (!chain_base) chain_base = oget(suites, "exec-native-chain-examples");
-        if (!stage_base || stage_base->t != JOBJ || !chain_base || chain_base->t != JOBJ)
-            die("native-phases require complete existing stage/chain declarations", 0);
-        stage_base = jcopy(stage_base); chain_base = jcopy(chain_base);
-        for (i = 0; i < 5; i++) {
-            J *entry = jcopy(i < 2 ? stage_base : chain_base), *command = jnew(JARR);
-            char name[96], binding[96];
-            snprintf(name, sizeof name, "exec-native-%s", parts[i]);
-            snprintf(binding, sizeof binding, "NATIVE_PART=%s", parts[i]);
-            apush(command, jstr("env")); apush(command, jstr(binding));
-            apush(command, jstr("./exec/c/nativecheck.sh"));
-            oset(entry, "command", command); oset(suites, name, entry);
-        }
-        if (oget(suites, "exec-native-stages"))
-            odel(suites, "exec-native-stages", strlen("exec-native-stages"));
-        if (oget(suites, "exec-native-chain"))
-            odel(suites, "exec-native-chain", strlen("exec-native-chain"));
-    }
-    changed("native-phases", "declared five native units with complete inherited stage/chain readsets");
+    native_unit_declarations(suites);
+    changed("native-phases", "declared five native units with complete inherited family readsets");
     /* 0.0.43 derived-consistency step 1 (research/c43-derived-consistency.md): facts-export and gate-layers */
     oset(suites, "facts-export", pylit("{\n"
             "'command': ['python3', './exec/facts/export.py', '--check'],\n"

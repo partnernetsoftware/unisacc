@@ -24,7 +24,7 @@ tests/bound 55 sh ./unisacc.com -O2 -fno-trim-libc tests/streams/runner.c -o out
 tests/bound 55 sh ./unisacc.com tests/streams/pack.cx -- out/stream-runner.com ./unisacc.com out/streams
 ```
 
-pack 的第二个输入也可以是独立P3 compiler.pkg；产品输入目前只支持未签名的末尾UNIPKG1 footer。streams.json记录源包、执行器、各模型原记录及产物SHA。
+pack 的第二个输入也可以是独立P3 compiler.pkg；产品输入目前只支持未签名的末尾UNIPKG1 footer。streams.json记录源包、执行器、各模型原记录及产物SHA。当前开发元数据为schema2，使用stream_units_in_source与stream_unit字段，results.tsv首列亦为stream_unit；P3与UNIPKG1字节协议不变。既有out/streams-v4的schema1保留为历史证据。
 
 ## 管道与逐层调试
 
