@@ -146,7 +146,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 0.0.43 公开发布
 ├─ 已完成：F1 产品修复；F2 文档与探针收口
 ├─ 已完成：F3 历史 CONTRACT 基线（187项：186 PASS、1宿主未核）
-├─ 已完成：旧F6候选构建、三阶段SHA固定点；E4规则改进后须重新构建封存
+├─ F6：E4新候选首阶段已构建并更新本机unisacc.com；正执行新候选三阶段固定点，旧固定点不迁用
 ├─ 正在执行：F4／M7 测试调度重构与受影响单元验证 ← 当前节点
 │  ├─ 当前冻结2079b31e：1309节点／944依赖；Windows原生控制器已提交，仍待定点通过
 │  ├─ 已实跑：七流独立工具链；native六叶；functionimports六准备＋20案例；callback12目标＋四片消费
@@ -173,8 +173,8 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 | 入口厅：目标 | 公开发布0.0.43；当前节点F4/M7，不是重做F1。 | 上方思维树；[范围](plans/v0.0.43.md)、[终点线](plans/v0.0.43-finish-line.md)。旧未授描述不覆盖当前明确目标授权。 |
 | 工具间：能力 | 默认-run、tape→image、六目标、`.cx`模块已实现；经典UA与模型产品是不同实现。 | [能力速查](#implemented-usage)、[README](README.md)、已有用例。只验证具体输入的证据缺口，不重新研究入口是否存在。 |
 | 材料室：重复构造 | d09bd1decb修复typed/callsite完整缓存仍重建，以及无关exec检查脚本使typed缓存失效；typed实际工具和obj-win-x准备均HIT，仍执行独立比较及NN全域检查。尚存：pipeline的native_ua与七流模型共键；两个缓存原有24件逐项相同，添加原生资源仍重做七流。ROOT路径亦进入整体键，迁冻结目录会失效。 | 构造缓存按相关TSV、构造器、格式、目标及必要工具身份失效；哈希核验、加载和重新测试分开计量。拆基础模型与native资源键；保持prepared-only消费，缺失／损坏返回75；不得复用旧测试PASS。实际HIT日志：`/tmp/unisacc-c43-e4-summary-final-20261024/out/lower-material-reuse/`。 |
-| 身份室：候选 | H0=`4f0b493c7a83d73a4ae1b348c8400ea3b7eda0ea190051b54a84c712a6730eda`；S=`c4618639cc3fcfac4f8ce52a11df3bdab93b2c9376eecee63fd70e6550adc57f`；用候选7298侧车。 | [F6证据](research/c43-f6-final-evidence/)。按源码摘要、产物及侧车SHA核对，mtime不单独决定新鲜度；不为刷新mtime重复构建。 |
-| 控制室：现场 | 当前冻结`/tmp/unisacc-c43-winphase-accept-20261024` @2079b31e，计划SHA `d133abaf…`，1309节点／944边；原工具准备34.334秒／JSON41秒rc142保留；cb393新摘要分支下工具9.783秒、JSON15.265秒、表10.261秒均PREPARED，完整消费已输出25拒绝但整项仍41秒rc142。正在单独验证控制器-O2默认-run，完整身份与原预算保留。700ece46冻结根`/tmp/unisacc-c43-suite-accept-20261024`保存此前结果：`out/callback-final-checks`：12次off严格检查、on检查、8种生产命中、完整消费1再次rc0；空on／截断off真实消费均拒绝75。`out/winlower-x86_64-run`保留41秒rc142；`out/winlower-x86_64-timing.*`为55秒诊断，不能迁成41秒PASS。Windows新拆分仍待验。 | 先读本轮results／summary和存活进程。ae9145四片callback通过范围见`/tmp/unisacc-c43-current-accept-20261024/out/current-callback-checks/scope.tsv`；native／functionimports原证据见旧冻结根`/tmp/unisacc-c43-pe-accept-20261024/out/{native-*-refactor-check,libraryimports-atomic-v4-run}`。旧1142轮停于083，日志及原失败不清空、不迁绿。 |
+| 身份室：候选 | E4新首阶段及本机unisacc.com SHA=`2974978e6deec45abf38bfac2ac24e3031969b1c65009798270491d8b1e6dd1f`；S=`c90f0002f02366d510e4c8c22d4757f934edf8c0719852e706b575a7137b47df`；配对侧车SHA=`b88e3a1c227e72e621cf810cc5975e0922ba34cf34aa9e51288142aaaf94480a`。版本／hello／O2摘要回归均rc0；新固定点与M7未完成。 | 冻结`/tmp/unisacc-c43-e4-summary-final-20261024` @d09bd1decb；`out/f6-e4-candidate`、`out/f6-e4-smoke-*`及`out/comboot/stages.json`。旧H0=4f0b493c…／S=c4618639…的[F6证据](research/c43-f6-final-evidence/)仅为历史；按源码、产物及配对侧车核对，不为刷新mtime重复构建。 |
+| 控制室：现场 | 当前冻结`/tmp/unisacc-c43-winphase-accept-20261024` @2079b31e，计划SHA `d133abaf…`，1309节点／944边；原工具准备34.334秒／JSON41秒rc142保留；cb393新摘要分支下工具9.783秒、JSON15.265秒、表10.261秒均PREPARED，完整消费已输出25拒绝但整项仍41秒rc142。控制器-O2草案已暂停；当前主线为E4新候选固定点与受影响验证，完整身份与原预算保留。700ece46冻结根`/tmp/unisacc-c43-suite-accept-20261024`保存此前结果：`out/callback-final-checks`：12次off严格检查、on检查、8种生产命中、完整消费1再次rc0；空on／截断off真实消费均拒绝75。`out/winlower-x86_64-run`保留41秒rc142；`out/winlower-x86_64-timing.*`为55秒诊断，不能迁成41秒PASS。Windows新拆分仍待验。 | 先读本轮results／summary和存活进程。ae9145四片callback通过范围见`/tmp/unisacc-c43-current-accept-20261024/out/current-callback-checks/scope.tsv`；native／functionimports原证据见旧冻结根`/tmp/unisacc-c43-pe-accept-20261024/out/{native-*-refactor-check,libraryimports-atomic-v4-run}`。旧1142轮停于083，日志及原失败不清空、不迁绿。 |
 | 出口室：分类 | RESOURCE_UNKNOWN保留OPEN义务；H1超时不算PASS；DEFER不等于终态失败。 | [资源处置](research/c43-resource-disposition.md)、[裁定](release/rulings.tsv)、[分类](release/preauth.tsv)及完整退出表。不补写结果或虚构平台绿。 |
 | 发布室：交付 | M7之后封存；候选CI、签名、最终字节和公开下载须真实收据。 | [发布流水线](release/RELEASE-PIPELINE.md)、[候选记录](release/candidate.json)；当前候选记录尚不是0.0.43封存证明。 |
 | 暂存室：边界 | 0.0.44登记.cx模块化／内存安全、自有工具链与测试改进；0.0.45登记流＋网模块外部调用及模块／权重共享；均不另作0.0.43前置。typed/callback迁移与广泛research归档保留后续范围。 | [0.0.44计划](plans/v0.0.44.md)、[0.0.45计划](plans/v0.0.45.md)、[路线](#5-路线)。新动态推进用`unisacc.com + .cx`，减少脚本，转调不算原生化。 |
