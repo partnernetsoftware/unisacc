@@ -705,3 +705,5 @@ source-only 冷准备在原 55 秒看门狗内实际成功；具名 gate 的冷�
 - 2026-10-24 恢复到真实F4现场：冻结scratch的2db2366e队列保留1128项、env-pin及前20窗。K2b首红为私有新路径冷编译seedconstructcheck的--list导致原10秒plan超时；采用已留scratch候选，将45行part/manual数据集中为TSV，轻量读取器核原始SHA及派生模块逐行相等，CLI从派生模块读取。补派生检查与具名闸后再落地。五个种子测试仍缺本宿主内存准入证据，另有优化分片超时；不以主检出诊断覆盖冻结队列结果。
 
 - F4恢复环境核对：新会话继承en_US.UTF-8，而旧env-pin为C.UTF-8；语料排序和分片因此不同。第21/22窗的原日志保留，仅作诊断，不纳入旧队列验收；后续冻结运行显式恢复LC_ALL/LANG/LC_CTYPE/TZ及其余钉住变量。metadata冷枚举对拍只规约导出ROOT路径并扣除新增具名闸，其余原计划要求逐字节一致。
+
+- metadata冷枚举修复已于b36d4bad29经隔离index提交闸落地：七项全rc0（含原始K2b全套，38秒），派生检查通过。完整冷计划4.82秒，原有NUL计划在规约ROOT并扣除新增seed-metadata闸后逐字节相等，原10秒限时保持；无效源数据使枚举rc2。现全量1129项、CONTRACT189项；后续正式F4按新源码建立fresh状态，既有五项内存准入UNKNOWN与旧红均保留待结证。证据见research/c43-seed-metadata-evidence/。
