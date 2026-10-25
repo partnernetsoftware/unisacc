@@ -150,52 +150,32 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 ```text
 0.0.43：完成开发、重建自身迭代体系与新验收（发布须另授）
-├─ 当前主刀：P53/S447的11/12固定点58、RI与源适配/14材料控制、snapshot265/library55/corecompat16/plan30均0；新--all原20秒rc3，98覆盖/59批、19完整缺口。真实P3 profile/固定P3 host链草稿待独立实跑
+├─ 当前主刀：P53/S447的真实P3四CASE各12/0，ELF退出0/0/7/7；宿主CC/C HOST首代完整产品与根同字节，后两代在构建。新4批登记待重解析，上次清单98覆盖/59批、19完整缺口，未收口
 ├─ R0 已归档：2529个旧测试路径原blob/模式完整保留；构造支持移tools，新旧入口分离；原生容器/驱动重建已实跑，构造依赖迁移仍待补
 ├─ R1 已有首批：新根产品smoke16断言0；旧Pa7e8的cx/owned551及私有状态拒绝仅历史证据，完整覆盖仍NOT_READY
 ├─ R2 旧启动器部分已证：七流原模型/74资源提取不重构；40断言0含constructor真管道/产品镜像同字节/返回7；完整独立合同仍待补
 ├─ R3 旧Pa7e8本机已证：18网8770键/22694真实infer、28868域边界拒绝及恢复、72适配拒绝、三反空跑控制0；非完整产品/跨平台资格
-├─ R4 部分已证：新根RI26、snapshot共享C源适配265/87故障点均0；事务失败清空/释放，完整消费者RI/Windows/预算待补
-├─ R5 部分已证：新根有限属性100、原生双代固定点58及smoke16均0；旧07优化241/193/16不转授，完整优化/属性/三阶段/外宿主待补
+├─ R4 部分已证：当前P53 RI30/15/8/17、C消费者45/capture18+7fatal、snapshot265/87fault与材料控制70+68均0；真实P3消费者/Windows/完整预算仍待补
+├─ R5 部分已证：当前P53的11/12原生固定点58及smoke16均0；有限属性100只属旧P46，旧07优化241/193/16不转授；完整属性/优化/三阶段/外宿主待补
 ├─ R6 部分已证：新根库/模块ABI55断言0；宿主FFI/provider/泄漏UAF/外宿主仍待补
 └─ R7 待完成：新清单全覆盖 → 同候选跨平台CI → 封存与授权发布
 ```
 
-**优化修复与证据：** -O3规范化为二级、-Os为一级，与经典src/main.c/src/opt.c的既有优化集合一致；源码修复4cd9fc75e3先进入07根Pb8eae71b；以下为07历史局部证据，不转授08。完整07候选原生语义241、六档直接-run193、Tape16均断言0，日志为out/c43-optimization-candidate-{native,run,tape}-07.log，并打印同一完整候选SHA。十四类手写字节预期/两运行时输入，含别名、除余/无符号边界、循环合流、短路、递归及结构复制；Tape另证默认/O0、O/Os/O1、O3/O2字节关系、真实改写及非法档拒绝。只证Linux x86_64局部合同，完整语料/域/自举/外宿主仍未完成。
+**当前产品身份：** 已装根P53e2cd1f669c92fda2c16dd93a9021cd4db97f05c57ab2d1acf9a835cbac9857（4911193B），源S447f794aeb8683492d73c520c163b45bac1d62e88dea2435b682a09772736bce，源提交589db6c39f；后续测试/文档提交不刷新二进制。11代由旧根P46构建并安装，12代由当前根独立完整重建，产品均同字节。旧builder及其记录保存在out/c43-native-kernel-11/bootstrap-before-install.com*。模型包保持1c6a503090ee8d4189d6326139fa4a18b5db14b9682f1db0949e8ee79519db3e；package-refresh双向核1241项，唯core.c精确空copy guard经corecompat批准且当前hash仍列入清单。
 
-**优化首红与窄验保留：** P375b7a09扩六档时173断言2失败，均为-O3/-Os被拒绝，原log为out/c43-optimization-02.log；最小默认-run为out/c43-opt-flags-repro.cx。修后Linux驱动先获242原生/194直接-run/17 Tape断言0（各多一个模型容器身份检查），随后完整07产品闭环。原失败未删除；未减少断言或宽放预算。
+**当前已实跑局部证据：** 新候选smoke16、RI四批30/15/8/17；新根capture18正例+7fatal（16父检查）、consumer45+strict-missing2（10父检查）、分离NN链17（含2 PRECONDITION）、native材料70及NN材料68控制、snapshot265/87分配故障点、库ABI55、corecompat16、plan parser30，均0。原30秒resources、原55秒各独立批次及2/3/8/18秒子限时保留。相应日志out/c43-ri-*-candidate-11.log、out/c43-ri-*-installed-11.log、out/c43-ri-*-control-*-11.log、out/c43-{snapshots,library,core-compat,plan}-installed-11.log。C源适配仍是C基础实现，不冒称CX重写；synthetic RES/两个小NN不替代真实P3消费者或通用内存安全证明。
 
-**SC2安装前的首红与开发记录：** 旧P46的混合a.cx+b.c、UNISA_JOBS=1实际capture/replay均rc0但Tape12778B→24856B，out/c43-ri-multi-red-02.log；首次01因空capture环境变量触无关拒绝，不能当此语义首红。另nonempty/repeat/write-failure三最小默认-run派生C基底红保留。新源新增#SC2顺序fetch trace，允许合法跨unit变答，保留SC1重复key拒绝/未用map行兼容；成功输出前须全部消费，metadata入口不绕过身份。POSIXcapture新/legacy空ledger初始化guard、mkdir+link无覆盖发布、nonblocking append与显式IO失败、无会话拒绝。新源窄ELF驱动三模式31/16/9断言0（各多1模型容器身份），真实混合TU严格逐字节及Tape→ELF返回7。完整新根尚未重建，不把旧P46/58固定点当新源资格；capture故障注入/实际consumer lookup与snapshot overlay正在补。core.c的NULL0零长memcpy已由实际C源适配hook复现rc86（out/c43-ri-consumers-null0-02.*），仅给原copy加if(n)，保留n+1分配/占槽/扩容；修后consumer-run04原55秒内10父断言/44fixture断言0且strict-missing两检查0，前后完整材料和native字节均核。初父runner03因给旧bootstrap注入空capture env而拒绝，改为unsetenv后重跑04通过，原红保留。corecompat只准唯一精确逆替换还原旧core全SHA，仍列1241当前hash，guard项显式收据/helperSHA；内存突变等16检查0（out/c43-core-compat-01.log）。package-refresh与完整新根尚未实跑，不宣称包复用/完整RI或一般内存安全已证。
+**当前自举边界：** out/c43-native-selfhost-12.log原30秒内58/0：11/12两架构各11份.s/.o、两kernel、五切片及完整APE逐字节相等；前后来源/1241材料/全部收据均核。只在单次校验内保留只读artifact字节，after另建context物理重读，不缓存PASS。旧Sb9历史源和原7f基线源未重演；unsigned receipts仅证一致性，product-context-v1未绑builder，不能冒充host-seed三阶段N22/外宿主。
 
-**SC2安装前的第二拍记录：** core guard及精确材料兼容器已分批提交56d9480a38。最终源S447f794aeb8683492d73c520c163b45bac1d62e88dea2435b682a09772736bce的窄ELF驱动四模式31/16/9/18均0（map-driver-03原30秒，trace/multi-driver-03与trace-output-driver-04原各55秒）。额外30秒窄驱动构建探针142且无产物，误接的依赖检查仅报native driver path2、未执行；原记录保留，按既有55构建单元完成driver03，测试限时不改。trace-output首稿错把USLSYM1输入头当输出，17/18实际通过；按既有research/c43-late-binding-step0.md改为完整12B UNISYM1空需求literal gold后18/18，原失败保留。只读审查发现standalone chain先写属性后查未消费事件：真实两阈值NN链首17项恰2个sidefile断言失败（out/c43-ri-standalone-red-01.log），改为全链/trace接受后只写一次最终ATTRS且写短仍close，开发复验17/0（green-02），非production E1/E3资格。为遵守材料/执行分离，NN准备器与纯读verify正在独立化；新父入口须再跑，不借该原型绿。10代仅内核材料完毕，属性出口修源后不沿用旧context；现11代全构建进行中。capture04的16父/18正例/7fatal为0；consumer04原44正例/strict-missing2为0，新增SC2 snapshot拒绝后45项仍待新材料实跑。最终注册数量待冻结后解析，未填PASS。
+**清单与未完成项：** out/c43-all-ri-installed-11.log原20秒实际rc3，smoke16/0；98覆盖项、59批、79已实现覆盖、19完整缺口。该聚合只执行smoke，58非smoke批/63已实现覆盖本次仍NOT_RUN，独立日志不自动转授为聚合PASS。完整RI、语料/拒绝、属性/资源/库、host-seed源重演与同候选六宿主仍待完成。旧1333队列保持停止，原失败与UNKNOWN不改PASS。
 
-**当前已装11代：** 589db6c39f产品源S447f794aeb8683492d73c520c163b45bac1d62e88dea2435b682a09772736bce完整重建后，本机根已替换为P53e2cd1f669c92fda2c16dd93a9021cd4db97f05c57ab2d1acf9a835cbac9857（4911193B）；out/c43-native-install-11.log和当前build.json绑定完整字节/源/提交，旧P46及记录保存在11代bootstrap-before-install。两架构内核、五切片/封装均完成；package-refresh实际双向核1241项，唯core.c经全文件精确guard兼容，当前hash仍在清单并显式记录helperSHA，所有其他输入相等，包仍1c6a503090ee8d4189d6326139fa4a18b5db14b9682f1db0949e8ee79519db3e；PREPARED不冒充测试PASS。封装后的新候选smoke16/0及四RI模式30/15/8/17均0（out/c43-smoke-candidate-11.log、out/c43-ri-*-candidate-11.log），resources原30秒保留。新根另已实际identity15/0（最小隔离树的construction-support-closure，不冒充全部发布来源证明）。当前根独立新备CLI03/capture05/consumer05材料（out/c43-ri-*-prepare-installed-11.log，PREPARED-only），各自实际55秒父批次capture16父/18fixture/7fatal、consumer10父/45fixture+strict-missing2、分离NN链17检查（含2PRECONDITION）均0，前后完整source/bootstrap/9输入/native与实际数据字节重读核；out/c43-ri-{capture,consumers,standalone}-installed-11.log。NN只在独立ri-chain prepare构造一次，固定两个完整NN pin/字节数、literal T、module/netpack/薄CLI及固定core.h action ABI，前后verify纯读不convert；原型17/0未充新父。C基底仍是C源适配，不叫CX重写。12代正从当前新根重建；材料负控及新固定点尚待实际执行，旧源/旧bootstrap材料不直接沿用。
+**真实P3消费者证据：** 已复用当前P53完整P3包，未重构权重/另写decoder；独立source-only prepare→默认trimming compile（COMPILED pending）→seal（PREPARED）均在原限时内完成。通用fno-trim两次20秒超时及原单步profile55秒超时保留，未放宽；拆步骤并由父直接module verify避免多层默认-run，当前flow-native=dec8638a3d79ae434a4f0f30af83570bd413bf912d96f4a2f80db671962dd990/232165B。独立DATA prepare20秒内0，只记PREPARED；四个实际P3模型CASE各55秒内12父检查/0，out/c43-ri-flow-{e3-empty,e3-absent,e3-missing,e3-to-lower}-01.log，前三fixture各8、lower9。E3实际SC2 fetch区分EMPTY存在len0、ABSENT不存在、MISSING回退到真实13B属性，实际ELF退出0/0/7；保留tapecheck的E3→lower链最终退出7。snapshot input是真E3 tokens，lower capture input是真prune后输入且SHA不同；lower attrs-fetch实际0，不假称lower消费属性。C library-guard source-adapter不是installed CLI集成，也不是完整RI/外宿主资格。新profile/完整DATA目录inventory负控待实跑。
 
-**当前新源固定点：** 从新根独立构建12代（out/c43-native-12-*.log），11/12两架构22个.s/22个.o、两kernel、五切片和完整APE逐字节相等；当前根与新代完整产品均P53e2cd1f。新selfhost在原30秒内58/0（out/c43-native-selfhost-12.log），前后来源/1241输入/所有材料收据均实际重读校验，after新context不借前置PASS。fresh-after logical1354/physical1341/retained13，只在一次校验内复用14997381B只读artifact，作用域结束释放。prior11实际builder是已存P46/Sb9，fresh12实际builder是根P53/S447；旧Sb9历史源未重演、原7f基线源未重演、无签名及product-context-v1缺bootstrap的限制仍明确，不转授host-seed三阶段N22或外宿主资格。未再安装12代或刷新根时间戳：当前产品已逐字节相同。
+**宿主来源链进展：** 宿主CC已独立编ident与C HOST；初始S测量依赖当前根，后续使用native helper实际测S。HOST产第一代五切片及wrap均成功，out/c43-hostseed-stage1-01/unisacc-seed.com与根完整字节相等P53e2cd1f（cmp0）；首Linux切片也与gen11同34cf321c...。第二/三代正分别由其实际父代构建，每步独立55秒且绑定builder/parent receipt/source/models/payload。NN/P3与ASM kernel仍声明二进制受信输入，未称完整host-seed/N22。CC告警mapping maybe-uninitialized只读控制流未见可达未初始化读；CLI过程资源依赖进程退出回收，不外推可复用library或全生命周期闭合。
 
-**当前新增验收（P53/S447）：** native材料7独立case共70检查/0（out/c43-ri-native-control-*-11.log），NN链材料7独立case共68/0（out/c43-ri-chain-control-*-11.log）；准确拒绝内容/flags/缺件/软链/真实FIFO，原材料字节前后核，未把PREPARED当执行。当前根受影响snapshot265/87分配故障点、library55、corecompat16、plan parser30均实际0（out/c43-{snapshots,library,core-compat,plan}-installed-11.log）。冻结表后新--all原20秒实际rc3，smoke16/0，metadata有效98覆盖/79已实现/19未收口、59批；本次聚合58非smoke批/63已实现覆盖仍NOT_RUN，不借独立批次日志缓存PASS（out/c43-all-ri-installed-11.log）。真实P3新source-adapter的通用fno-trim native编译原20秒超时保留；不放宽，现有library guard与默认trimming原20秒探针成功（232165B），新独立profile准确记录该flags，仍待profilebuild/材料/四CASE实跑，不宣称生产P3消费者已通过。
+**下一动作：** 保持产品源S447冻结，完成HOST后两代及新链验证、真实P3 profile/目录inventory负控，冻结新表后重跑plan/--all并分批提交。再补19完整缺口、真正NN/ASM源重演与同候选六宿主。C44-RUN-REUSE-01仍未实现未测；不签名/Draft/Latest/公开。
 
-**下一动作：** P53/S447源保持冻结；将通过的源适配/控制/新表分批提交。继续真实P3 E3三态及E3→lower独立材料与CASE（0/0/7/7待验），固定P3宿主CC→三代driver来源工具仅草稿，NN/ASM二进制仍是声明受信输入，不冒充完整host-seed/N22。再补完整语料/拒绝、真正host-seed源重演和同候选平台；19完整缺口保持NOT_READY。0.0.44启动复用仅设计、未实现未测。
-
-**当前自举事实与下一刀：** 当前P46cfa11a/Sb9c0f819的09代由真实根产品完整重建，输出与根及08代同SHA。out/c43-native-selfhost-09-retained-01.log在原default-run/30秒闸完整58断言0：原55断言不减，新增prior产物对应当前根、相同包身份、根native receipt对应已验prior。前后各核两代的完整来源/1241模型输入/全部材料收据，修复prior未校验缺口。source/bootstrap/实际产物绑定只证无签名收据一致性；v1 productcontext未绑定builder，prior旧源码及原7f冻结树未重演，不能称host-seed三阶段N22或外宿主通过。
-
-**Snapshot当前源合同：** 41ebdec154修复已进入当前源与08代驱动；新根P46cfa11a启动的shared-C源适配265断言0、87分配故障点，见out/c43-snapshots-installed-08.log。验证COMMIT最后/无覆盖、保留已校验字节不重读、身份/损坏/额外文件/进程本地callable拒绝、FIFO非阻塞/增长/路径/容量边界、链接/读目录/关闭/权限故障及恢复。失败输出为空，rl_clear释放行/键/值；故障路径heap/fd/FILE计数归零。首红wrong-stage曾残留rows1/live3，增长空文件曾被接受为有效前缀，原红保留。材料克隆baseline及body/receipt篡改控制均符预期；PREPARED/VERIFIED非PASS。仅实际共享C源合同，不扩大为standalone完整消费者链/Windows/外宿主资格；完整libunisacc宿主语法核验因缺ffi.h未完成，独立真实tracked_open两参上下文核验0。
-
-**Snapshot首红与当前刀：** 2026-10-26默认-run最小复现out/c43-snapshot-repro-material-01/snapshot.cx在合法零资源/二进制输入上返回1，具名resource-snapshot-unsupported-platform，见out/c43-snapshot-min-red-01.log。共享resourceledger.h把全部__UNISA__构建列为不支持，因为缺link包装；本版补POSIX原子无覆盖链接机制并恢复同目录身份检查，Windows独立缺口仍保留。tools/ledger-material.cx是有完整source/bootstrap/输入SHA的原C头转接，准备只记PREPARED，不冒充CX重写或功能通过。
-
-**有限属性与原生固定点新增证据：** bf677cb389的有限属性100断言0，40行手写字节gold逐行覆盖完整6×5旋转轴及4循环边界，O0/O2各只编译一次；拒绝坏argc/溢出/rotate32/loop33并核rc2空输出。09两架构/五切片完整实跑后全APE与根P46同SHA。新selfhost原default和-O2探针均在后置来源核验中触30秒142（日志保留），修后仅复用本次校验已读artifact字节/同buffer SHA，after新context物理重读，原30闸及58断言完整通过；不改模型、不缓存测试结论。原聚合20秒负控超时亦保留；修后14单点控制各20秒内0，另3项新context重读/篡改拒绝/恢复0，证据out/c43-rebuild-single-*-retained-01.log及out/c43-rebuild-new-context-retained-01.log。该58/0只属于旧P46/Sb9闭包；SC2/core guard变更后须重建新代核验，不能沿用。
-
-**并行旁路已证：** 库/模块ABI新根P46上55断言0/not_run0；只覆盖48库/布局观察、6模块ABI及候选不变，宿主FFI/provider、泄漏/UAF和外宿主仍NOT_COVERED。旧HANDOFF/finish-line原文归档409b91b5e8；README失效自举入口已由eb4d08ef1c修正。8895e1d84c将--list/--all接入严格批次/覆盖表，解析负控30断言0，新增gap/坏映射/缺表/伪smoke行均独立验证；元数据通过不等于执行。a71c35320d仅手动CI入场草稿，未触发或取得平台资格，入口变更后计划SHA须重新计算。
-
-**当前RI刀：** tests/resources.cx在新根实际26断言0：默认/捕获/严格重放、跨CWD、身份/重复键/缺失/坏行/路径拒绝、重复账本后项生效和后项坏表拒绝、空与二进制额外项及拒绝后恢复。每个拒绝核rc2、原因及空stdout。额外空/二进制项未被消费者请求，只证装载；完整消费者RI、预算和模型坏输入仍待补。
-
-**RI首红及修复闭环：** out/c43-resources-02.log保留旧Pa7e8的18断言中2失败：内嵌NUL的表头/行被rc0接受。共享解析器在转C字符串前按显式行长度memchr拒绝NUL，源码修复为78bf02dfab。06代完整候选及安装后根产品均实际24断言0；原始失败未删除。
-
-**RI验证边界：** 08完整候选及安装根各26断言0，见out/c43-resources-candidate-08.log和out/c43-resources-installed-08.log；新源窄Linux驱动27（多一个模型容器身份检查）。06/07的24及原02 NUL首红仅历史证据。snapshot265是共享C源适配，完整消费者链/跨平台/预算未完成，内部相位与冷/热耗时UNMEASURED。
-
-**新开发产品已安装：** 08根unisacc.com为4872921B／P46cfa11a8fe4ad05e450f87ae95fdf76bd1be541e89e62f74f2632724ebb4e2f，构建源Sb9c0f819b3ec011f2319b135c63268d7930210c36f6c191f543ceff2a9aa9f65，版本仍0.0.43。两架构各11对象/两内核、五平台驱动及完整APE由自身工具真实构建；模型包仍1c6a503090ee8d4189d6326139fa4a18b5db14b9682f1db0949e8ee79519db3e，1241输入核相等。候选/根RI各26，根snapshot源适配265、库ABI55、解析负控30、smoke16均0；根身份通过。Pb8eae71b及记录备份out/c43-native-kernel-08/bootstrap-before-install.com*；新build.json和.native.tsv绑定当前源/五切片。证据out/c43-native-install-08.log；仅本机开发资格，无签名/发布。
-
-**当前证据：** 根P46的RI26、snapshot共享C源适配265/87故障点、库ABI55、有限属性100、双代原生固定点58和smoke16均实际0；解析负控30只证元数据。冻结后重跑清单校验0、--all实际3（out/c43-all-selfhost-final-09.log），77覆盖/58已实现/19未完成、37批次和42已实现覆盖本次NOT_RUN。旧07优化及Pa7e8 owned/十八网/格式/固定点不转授新候选。完整清单、host-seed三阶段与实际外宿主待验。
+原红、历史候选、试验和阶段记录已原样移至[本拍历史记录](archive/prd-c43-pre-p3-host-lineage-20261026.md)，不继续冒充当前状态。
 
 ### 本版重构合同
 
@@ -224,16 +204,16 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 | 房间 | 当前事实／决定 | 证据与行动入口 |
 |---|---|---|
-| 产品室：新开发产品／旧基线分列 | 根P46cfa11a/Sb9c0f819，4872921B；08代安装及09代真实全量原生重建同SHA，Pb8备份保留。 | 原生双代固定点58/0、RI26/snapshot源适配265/库ABI55/有限属性100/smoke16均0；源/产物身份0。完整host-seed链/同候选平台待验。 |
+| 产品室：新开发产品／旧基线分列 | 根P53e2cd1f/S447f794a，4911193B；11代安装、12代由新根重建同字节。旧P46及记录保存在11代。 | 当前RI/源适配/控制/snapshot/库/固定点见上；完整19缺口与同候选平台未收口。 |
 | 十八网新合同室 | 旧Pa7e8默认-run一次进程执行18网/8770键/22694个key-head整数infer，28868字段边界拒绝及等量恢复、72适配拒绝；gold标签/唯一最大logit/词表映射均核；改gold、改模型及恢复三负控0。 | `out/c43-net-all-02.log`、`out/c43-net-controls-01.log`；tools/net-material.cx源派生+只读verify，未重构权重，未借DENSE或旧PASS。只证本机经典整数核合同，不外推P3每路线或六宿主。 |
 | 原生汇编室 | 新CX复用产品-E处理.S并展开宏；现存C编码器由有来源材料适配默认-run执行，189断言0；新ELF链接器16断言0。03代两架构各11对象已原生构建及链接为x86 7144B／ARM 7096B UNIKERN1，均已进入新根产品。 | `tools/kernels.md`、out/c43-native-kernel-execute-e4-01.*、out/c43-native-product-case0.*；x86真实E4同字节，完整编译ELF同字节且返回7。ARM真实执行及完整产品资格仍待验；PREPARED和功能分列。 |
 | 七流新合同室 | 原生stream-pack曾从旧P7裁七模型/74资源，共40断言0，含两源码链、真管道、镜像和具名拒绝；不转授新候选完整合同。 | out/c43-stream-contracts-03.log、tools/streams.md；当前根产品另已重建，完整RI/拒绝域/六目标仍待补。 |
 | CX所有权室 | 旧Pa7e8上的cx/owned使用真实模块隐私、固定4×8 i64存储和不回绕代际句柄；551断言0，外部直接访问data/slot各拒绝1。复制活句柄仍可别名，不是编译期所有权或通用堆。 | `make owned`、`cx/check_owned.cx`；只验证本机运行期设施，不代替七流十八网或完整库验收。 |
 | 旧套件封存室 | 旧1333队列保持停止，原F4/UNKNOWN不改PASS。当前冻结新表98覆盖/59批，19完整缺口保留。 | out/c43-all-ri-installed-11.log原20秒rc3，smoke16/0，58非smoke批/63已实现覆盖本次聚合NOT_RUN；不缓存PASS。 |
 | ujs 子项目 | 独立规格与进度只在 [`ujs/prd.md`](ujs/prd.md)（及 `ujs/ARCHITECTURE.md`）；根宫殿不重述 ujs.com 代际／语料。跨项目只记：底座为 `unisacc.com`+`.cx`，不 tip／Draft 除非另授。 | [`ujs/prd.md`](ujs/prd.md) |
-| 优化合同室 | 新P46的有限uint32属性100/0（6word×5rot、4loop，literal gold，O0/O2）；完整属性义务保留。07优化241/193/16不转授。 | tests/properties.cx及cases/properties.cx，out/c43-properties-01.log；broad properties/full-properties仍NOT_READY，完整优化语料/域/外宿主待验。 |
+| 优化合同室 | 有限uint32属性100/0属于旧P46，6word×5rot/4loop、literal gold、O0/O2各一次；未转授新P53。 | tests/properties.cx、out/c43-properties-01.log；完整属性/优化仍NOT_READY，07的241/193/16仅历史。 |
 | 新自举室 | 当前P53/S447的11/12原生两代固定点58/0，原30秒；当前根与12完整产品同字节，前后全核源/1241材料/收据。 | out/c43-native-selfhost-12.log；只复用单次校验只读字节，after物理重读；旧源未重演/无签名/v1缺builder限制保留，非host-seed三阶段或外宿主。 |
-| 资源与RI室 | P53候选RI30/15/8/17全0；新根capture18+7fatal、consumer45+严格missing、分离NN链17、材料70+68控制及snapshot265/87fault均0。真实生产P3切片仍待实跑。 | out/c43-ri-*-installed-11.log及control-*-11.log、c43-snapshots-installed-11.log；完整RI/预算/外宿主NOT_READY，C基底非CX重写，PREPARED非PASS。 |
+| 资源与RI室 | P53实际P3四CASE各12/0，真实E3三态与E3→lower图像退出0/0/7/7，链路保留tapecheck、分别绑定两端真实输入；lower attrsfetch0不claim消费。此前RI/源适配/控制/snapshot局部证据保留。 | out/c43-ri-flow-*-01.log；source-adapter非installedCLI或完整RI，profile/目录负控待跑，外宿主/全预算NOT_READY。 |
 | 资格与发布室 | 当前P53/S447有本机具名smoke/RI/源适配/11-12固定点；完整19缺口、host-seed链和外宿主仍待验。 | 未签名/Draft/Latest/公开；旧CI不转授，C44-RUN-REUSE-01仍未实现/未测，不报启动提速。 |
 
 旧M7/固定HEAD、旧CI/宿主交接、窗口计数与准备过程已移至[历史记忆快照](archive/prd-c43-pre-native-qualification-20261025.md)。本表只保留当前目标、能力、缺口和入口；原始身份、红/UNKNOWN与回退均未删除。

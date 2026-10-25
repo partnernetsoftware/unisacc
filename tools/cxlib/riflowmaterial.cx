@@ -1,0 +1,60 @@
+/* Split bounded profile: only seal creates a final PREPARED receipt. */
+#pragma unisa module riflowmaterial
+#pragma unisa use netpack
+static char root[4096],mat[4096],product[4400],generic[4400],bound[4400],source[4400],image[4400],receipt_path[4400],pending_path[4400],watched[6][4400],hashes[6][65],closure_hash[9][65],source_id[65];
+static const char *closure_paths[9]={"exec/c/run.c","exec/c/core.c","exec/c/core.h","exec/c/codec.h","exec/c/packagefooter.h","exec/c/resourceledger.h","include/unisa_sha256.h","tools/ri-material.cx","tests/cases/ri-flow.cx"};
+static const char *flags="-O2 -b lnx/x86_64 -o -";
+static void die(const char *s){fprintf(stderr,"ri-flow-material: REFUSE %s errno=%d\n",s,errno);exit(2);}
+static void path(char *p,const char *a,const char *b){int n=snprintf(p,4400,"%s/%s",a,b);if(n<0||n>=4400)die("path bound");}
+static char *load(const char *p,size_t *n){
+ struct stat a,b;errno=0;if(lstat(p,&a))die(errno==ENOENT?"input absent":"input stat failed");if(!S_ISREG(a.st_mode)||a.st_size<0||a.st_size>16777216)die("bounded regular input");
+ int fd=open(p,O_RDONLY|O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK);if(fd<0)die("input open");if(fstat(fd,&b)||!S_ISREG(b.st_mode)||a.st_dev!=b.st_dev||a.st_ino!=b.st_ino||a.st_size!=b.st_size){close(fd);die("input descriptor identity");}
+ *n=(size_t)a.st_size;char *s=malloc(*n+1);if(!s){close(fd);die("allocation");}size_t at=0;while(at<*n){ssize_t z=read(fd,s+at,*n-at);if(z<0&&errno==EINTR)continue;if(z<=0){free(s);close(fd);die("input extent");}at+=(size_t)z;}
+ char extra;ssize_t z;do{z=read(fd,&extra,1);}while(z<0&&errno==EINTR);int changed=fstat(fd,&b)||a.st_dev!=b.st_dev||a.st_ino!=b.st_ino||a.st_size!=b.st_size;int closed=close(fd);if(z||changed||closed){free(s);die("input changed or close");}s[*n]=0;return s;
+}
+static void digest(const char *p,char *h){size_t n;char *s=load(p,&n);cx_sha256_hex(s,n,h);free(s);}
+static int exists(const char *p){struct stat st;errno=0;if(lstat(p,&st)){if(errno==ENOENT)return 0;die("output existence stat");}if(!S_ISREG(st.st_mode))die("existing output is not regular");return 1;}
+static void stable(void){for(int i=0;i<6;i++){char h[65];digest(watched[i],h);if(strcmp(h,hashes[i])){fprintf(stderr,"changed input: %s\n",watched[i]);die("profile input changed");}}for(int i=0;i<9;i++){char p[4400],h[65];path(p,root,closure_paths[i]);digest(p,h);if(strcmp(h,closure_hash[i])){fprintf(stderr,"changed closure input: %s\n",p);die("nine-input C closure changed");}}}
+static void generic_verify(void){
+ if(unsetenv("UNISACC_RF_CAPTURE")||unsetenv("UNISA_ATTRIBUTES"))die("clear ambient resource state");char *v[]={bound,"18","sh",product,generic,"--","--verify",root,mat,"tests/cases/ri-flow.cx",0};np_result r;char why[1400];if(np_run(v,root,0,20,&r,why,sizeof why))die(why);const char *tail="VERIFIED\tri-material\tno-test-result\n";size_t n=strlen(tail);int ok=!r.rc&&!r.errn&&r.outn>=n&&!memcmp(r.out+r.outn-n,tail,n);if(!ok){fprintf(stderr,"generic source verify rc=%d\n",r.rc);if(r.errn)fwrite(r.err,1,r.errn,stderr);}np_free(&r);if(!ok)die("generic source material verification");
+}
+static unsigned long long little(const unsigned char *p,int n){unsigned long long v=0;for(int i=n-1;i>=0;i--)v=(v<<8)|p[i];return v;}
+/* Same format-admission scope as ri-material, not execution qualification. */
+static int elf(const unsigned char *p,size_t n){
+ if(n<64||memcmp(p,"\177ELF\2\1\1",7)||little(p+16,2)!=2||little(p+18,2)!=62||little(p+20,4)!=1||little(p+52,2)!=64||little(p+54,2)!=56)return 0;
+ unsigned long long ph=little(p+32,8),count=little(p+56,2),entry=little(p+24,8);if(!count||ph>n||count>(n-ph)/56)return 0;int executable=0;for(size_t i=0;i<(size_t)count;i++){const unsigned char *q=p+(size_t)ph+i*56;if(little(q,4)!=1)continue;unsigned long long off=little(q+8,8),va=little(q+16,8),files=little(q+32,8),mem=little(q+40,8);if(off>n||files>n-off||mem<files)return 0;if((little(q+4,4)&1)&&entry>=va&&entry-va<files)executable=1;}return executable;
+}
+static void write_new(const char *p,const char *s,size_t n,int mode){int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,mode);if(fd<0)die("exclusive profile output");struct stat st;if(fstat(fd,&st)||!S_ISREG(st.st_mode)||fchmod(fd,(mode_t)mode)){close(fd);die("output descriptor or mode");}size_t at=0;while(at<n){ssize_t z=write(fd,s+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0){close(fd);die("profile output write; partial retained");}at+=(size_t)z;}int synced=fsync(fd),closed=close(fd);if(synced||closed)die("profile output sync or close");}
+static np_buf record(const char *status,const char *h,size_t n){
+ np_buf b={0};np_puts(&b,"ri-flow-native-v2\nstatus\t");np_puts(&b,status);np_puts(&b,"\nscope\tsource-preserving-C-UNISA_RUNTIME_LIBRARY-flow-profile-not-installed-CLI-no-test-result\nroot\t");np_puts(&b,root);np_puts(&b,"\nrawroot\t");np_puts(&b,hashes[0]);np_puts(&b,"\nprofile-tool\t");np_puts(&b,hashes[1]);np_puts(&b,"\ngeneric-tool\t");np_puts(&b,hashes[2]);np_puts(&b,"\nruntime.c\t");np_puts(&b,hashes[3]);np_puts(&b,"\nmaterial.tsv\t");np_puts(&b,hashes[4]);np_puts(&b,"\nprofile-module\t");np_puts(&b,hashes[5]);np_puts(&b,"\nsource\t");np_puts(&b,source_id);np_puts(&b,"\n");
+ for(int i=0;i<9;i++){np_puts(&b,"C-input\t");np_puts(&b,closure_paths[i]);np_puts(&b,"\t");np_puts(&b,closure_hash[i]);np_puts(&b,"\n");}
+ np_puts(&b,"flags\t");np_puts(&b,flags);np_puts(&b,"\ntarget\tlnx/x86_64\nformat\tELF64-LE-EXEC-x86_64\nartifact\t");np_puts(&b,h);np_puts(&b,"\nbytes\t");np_putll(&b,(long long)n);np_puts(&b,"\n");
+ if(!strcmp(status,"PREPARED")){np_buf compiled=record("COMPILED",h,n);char pending_hash[65];cx_sha256_hex(compiled.p,compiled.n,pending_hash);free(compiled.p);np_puts(&b,"compiled-receipt\t");np_puts(&b,pending_hash);np_puts(&b,"\n");}
+ return b;
+}
+static void inspect(char h[65],size_t *n){char *s=load(image,n);int ok=elf((const unsigned char *)s,*n);cx_sha256_hex(s,*n,h);free(s);if(!ok)die("profile artifact is not ELF64-x86_64 executable");struct stat st;if(lstat(image,&st)||!S_ISREG(st.st_mode)||(st.st_mode&0777)!=0700)die("profile executable mode");}
+static void field(const char *s,size_t n,const char *name,char h[65]){
+ size_t at=0,k=strlen(name);int count=0;while(at<n){size_t end=at;while(end<n&&s[end]!='\n')end++;if(end==n)die("material metadata truncated");if(end-at>=k+1&&!memcmp(s+at,name,k)&&s[at+k]=='\t'){if(end-at!=k+65)die("material hash field shape");for(int i=0;i<64;i++){char c=s[at+k+1+(size_t)i];if(!((c>='0'&&c<='9')||(c>='a'&&c<='f')))die("material hash field digits");h[i]=c;}h[64]=0;count++;}at=end+1;}if(count!=1)die("material hash field missing or duplicate");
+}
+static void initialize(const char *root_arg,const char *mat_arg){
+ if(!root_arg||!mat_arg||!realpath(root_arg,root)||!realpath(mat_arg,mat))die("root or material path");struct stat st;if(lstat(mat,&st)||!S_ISDIR(st.st_mode))die("real material directory required");path(product,root,"unisacc.com");path(generic,root,"tools/ri-material.cx");path(bound,root,"tools/bound");path(source,mat,"runtime.c");path(image,mat,"flow-native");path(receipt_path,mat,"flow-native.tsv");path(pending_path,mat,"flow-native.pending.tsv");
+ strcpy(watched[0],product);path(watched[1],root,"tools/ri-flow-material.cx");strcpy(watched[2],generic);strcpy(watched[3],source);path(watched[4],mat,"material.tsv");path(watched[5],root,"tools/cxlib/riflowmaterial.cx");for(int i=0;i<6;i++)digest(watched[i],hashes[i]);
+ size_t n;char *meta=load(watched[4],&n);if(memchr(meta,0,n)||memchr(meta,'\r',n)||n<15||memcmp(meta,"ri-material-v1\n",15))die("generic source metadata wire");field(meta,n,"source",source_id);char h[65];field(meta,n,"bootstrap",h);if(strcmp(h,hashes[0]))die("material bootstrap differs from raw root");field(meta,n,"runtime.c",h);if(strcmp(h,hashes[3]))die("generated C differs from source receipt");for(int i=0;i<9;i++)field(meta,n,closure_paths[i],closure_hash[i]);free(meta);stable();
+}
+static void check_pair(const char *status,const char *file,const char *h,size_t n){char actual[65];size_t z;inspect(actual,&z);if(z!=n||strcmp(h,actual))die("profile artifact changed");np_buf expected=record(status,h,n);char *s=load(file,&z);int same=z==expected.n&&!memcmp(s,expected.p,z);free(s);free(expected.p);if(!same)die("profile phase receipt mismatch");}
+const char *rfm_flags(void){return flags;}
+int rfm_compile(const char *root_arg,const char *mat_arg,char artifact[65],size_t *bytes){
+ if(!artifact||!bytes)die("result arguments");initialize(root_arg,mat_arg);if(exists(image)||exists(pending_path)||exists(receipt_path))die("compile requires absent profile outputs");generic_verify();stable();
+ char *v[]={bound,"20","sh",product,"-O2","-b","lnx/x86_64",source,"-o","-",0};np_result r;char why[1400];if(np_run(v,root,0,23,&r,why,sizeof why))die(why);if(r.rc||r.errn||r.outn>16777216||!elf((const unsigned char *)r.out,r.outn)){fprintf(stderr,"actual default-trim compiler rc=%d bytes=%lu\n",r.rc,(unsigned long)r.outn);if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);die("actual compile failed or invalid ELF");}
+ /* Generic pre-verification proved these exact nine hashes. The direct post
+  * check avoids a second source-identity program in this bounded compile step. */
+ stable();cx_sha256_hex(r.out,r.outn,artifact);*bytes=r.outn;write_new(image,r.out,r.outn,0700);np_free(&r);char actual[65];size_t z;inspect(actual,&z);if(z!=*bytes||strcmp(actual,artifact))die("installed image differs from compiler bytes");np_buf pending=record("COMPILED",artifact,*bytes);write_new(pending_path,pending.p,pending.n,0600);free(pending.p);stable();check_pair("COMPILED",pending_path,artifact,*bytes);return 0;
+}
+int rfm_seal(const char *root_arg,const char *mat_arg,char artifact[65],size_t *bytes){
+ if(!artifact||!bytes)die("result arguments");initialize(root_arg,mat_arg);if(exists(receipt_path))die("seal refuses existing final receipt");inspect(artifact,bytes);check_pair("COMPILED",pending_path,artifact,*bytes);
+ /* Full source/bootstrap identity post-check belongs to this separate step. */
+ generic_verify();stable();check_pair("COMPILED",pending_path,artifact,*bytes);np_buf final=record("PREPARED",artifact,*bytes);write_new(receipt_path,final.p,final.n,0600);free(final.p);stable();check_pair("COMPILED",pending_path,artifact,*bytes);check_pair("PREPARED",receipt_path,artifact,*bytes);return 0;
+}
+int rfm_verify_native(const char *root_arg,const char *mat_arg,char artifact[65],size_t *bytes){
+ if(!artifact||!bytes)die("result arguments");initialize(root_arg,mat_arg);generic_verify();stable();inspect(artifact,bytes);check_pair("COMPILED",pending_path,artifact,*bytes);check_pair("PREPARED",receipt_path,artifact,*bytes);stable();check_pair("COMPILED",pending_path,artifact,*bytes);check_pair("PREPARED",receipt_path,artifact,*bytes);return 0;
+}

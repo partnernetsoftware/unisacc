@@ -1,0 +1,80 @@
+/* Actual production P3 models through the original C runtime.
+ * prepare PRODUCT NEW_DATA | verify PRODUCT DATA
+ * e3-empty|e3-absent|e3-missing|e3-to-lower PRODUCT DATA NEW_OUT
+ * Preparation is not PASS. No decoder, model conversion or synthetic network.
+ * Each execution uses a new process. All paths must be absolute.
+ */
+/* The existing library guard excludes the unrelated standalone CLI and
+ * table-vs-network enumerator. P3 loading/execution/RI/snapshot code remains
+ * the actual C implementation, with invocation-local process lifetime. */
+#define UNISA_RUNTIME_LIBRARY
+/* RUNTIME_BODY */
+static const char *rfl_literal="int value; __attribute__((constructor)) void init(void){value=7;} int main(void){return value;}\n";
+static const char *rfl_route="lnx/x86_64/image/O2",*rfl_up="e3:lnx/x86_64/image/O2",*rfl_low="lower:lnx/x86_64/image/O2";
+static char rfl_product[4096],rfl_data[4096],rfl_out[4096],rfl_native[4096];
+static int rfl_assertions,rfl_failures;
+static ResourceInput rfl_ri[4];static const unsigned char rfl_one=1,rfl_empty=0;
+static void rfl_die(const char *s){fprintf(stderr,"ri-flow: REFUSE %s errno=%d\n",s,errno);exit(90);}
+static void rfl_ck(int ok,const char *s){rfl_assertions++;if(!ok)rfl_failures++;printf("%s\tri-flow.%s\n",ok?"PASS":"FAIL",s);}
+static void rfl_join(char *p,const char *a,const char *b){int n=snprintf(p,4400,"%s/%s",a,b);if(n<0||n>=4400)rfl_die("path bound");}
+static unsigned char *rfl_read(const char *p,size_t *n){struct stat a,b;if(lstat(p,&a)||!S_ISREG(a.st_mode)||a.st_size<0||a.st_size>16777216)rfl_die("bounded regular input");int fd=open(p,O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC);if(fd<0||fstat(fd,&b)||a.st_dev!=b.st_dev||a.st_ino!=b.st_ino||a.st_size!=b.st_size)rfl_die("input descriptor");*n=(size_t)a.st_size;unsigned char *s=malloc(*n+1);if(!s)rfl_die("allocation");size_t at=0;while(at<*n){ssize_t z=read(fd,s+at,*n-at);if(z<0&&errno==EINTR)continue;if(z<=0)rfl_die("input extent");at+=(size_t)z;}unsigned char extra;ssize_t z;do{z=read(fd,&extra,1);}while(z<0&&errno==EINTR);int changed=fstat(fd,&b)||a.st_dev!=b.st_dev||a.st_ino!=b.st_ino||a.st_size!=b.st_size;int closed=close(fd);if(z||changed||closed)rfl_die("input changed");s[*n]=0;return s;}
+static void rfl_store(const char *p,const void *bytes,size_t n,int mode,int exclusive){int fd=open(p,O_WRONLY|O_NOFOLLOW|O_CLOEXEC|(exclusive?O_CREAT|O_EXCL:O_TRUNC),mode);if(fd<0)rfl_die("private output");struct stat st;if(fstat(fd,&st)||!S_ISREG(st.st_mode)||fchmod(fd,(mode_t)mode))rfl_die("output descriptor");size_t at=0;while(at<n){ssize_t z=write(fd,(const char *)bytes+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0)rfl_die("output extent");at+=(size_t)z;}int synced=fsync(fd),closed=close(fd);if(synced||closed)rfl_die("output close");}
+static void rfl_save(const char *name,const void *s,size_t n){char p[4400];rfl_join(p,rfl_data,name);rfl_store(p,s,n,0600,1);}
+static void rfl_hash(const char *p,char h[65]){size_t n;unsigned char *s=rfl_read(p,&n);unisa_sha256_hex(s,n,h);free(s);}
+/* Enumerate every nonroot directory (including empty ones) and regular leaf.
+ * Only the root material.tsv is excluded. No saved result is consulted. */
+typedef struct {char *path;int directory;} RflInventoryPath;
+static RflInventoryPath rfl_paths[256];static int rfl_count;
+static void rfl_inventory_add(const char *rel,int directory){
+ size_t n=strlen(rel);if(!n||n>=4400||strpbrk(rel,"\t\r\n"))rfl_die("inventory path");
+ if(rfl_count>=256)rfl_die("inventory capacity");char *s=strdup(rel);if(!s)rfl_die("inventory allocation");
+ rfl_paths[rfl_count].path=s;rfl_paths[rfl_count].directory=directory;rfl_count++;
+}
+static void rfl_walk(const char *rel){
+ char p[4400];if(*rel)rfl_join(p,rfl_data,rel);else strcpy(p,rfl_data);struct stat st;if(lstat(p,&st))rfl_die("inventory stat");
+ if(S_ISDIR(st.st_mode)){
+  if(*rel)rfl_inventory_add(rel,1); /* Count before descent: depth is bounded too. */
+  DIR *d=opendir(p);if(!d)rfl_die("inventory directory");
+  for(;;){errno=0;struct dirent *e=readdir(d);if(!e){int saved=errno,closed=closedir(d);if(saved||closed)rfl_die("inventory directory close");break;}
+   if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;char next[4400];
+   if(*rel)rfl_join(next,rel,e->d_name);else{if(strlen(e->d_name)>=sizeof next)rfl_die("inventory name");strcpy(next,e->d_name);}rfl_walk(next);
+  }
+ }else{if(!S_ISREG(st.st_mode))rfl_die("inventory nonregular leaf");if(!strcmp(rel,"material.tsv"))return;rfl_inventory_add(rel,0);}
+}
+static int rfl_cmp(const void *a,const void *b){return strcmp(((const RflInventoryPath *)a)->path,((const RflInventoryPath *)b)->path);}
+static void rfl_put(Buf *b,const char *s){size_t n=strlen(s);if(n>16777216||(size_t)b->n+n>16777216)rfl_die("record bound");b->b=xrealloc(b->b,(size_t)b->n+n+1);memcpy(b->b+b->n,s,n);b->n+=(int)n;b->b[b->n]=0;}
+static Buf rfl_record(void){
+ char ph[65],nh[65],lh[65],line[4800],p[4400];Buf b={0};rfl_hash(rfl_product,ph);rfl_hash(rfl_native,nh);unisa_sha256_hex(rfl_literal,strlen(rfl_literal),lh);
+ snprintf(line,sizeof line,"ri-flow-data-v1\nstatus\tPREPARED\nscope\tactual-production-P3-E1-E3-derived-data-no-test-result\nproduct\t%s\nruntime\t%s\nliteral\t%s\n",ph,nh,lh);rfl_put(&b,line);
+ rfl_count=0;rfl_walk("");qsort(rfl_paths,(size_t)rfl_count,sizeof *rfl_paths,rfl_cmp);
+ for(int i=0;i<rfl_count;i++){
+  int z;if(rfl_paths[i].directory)z=snprintf(line,sizeof line,"DIR\t%s\n",rfl_paths[i].path);
+  else{size_t n;rfl_join(p,rfl_data,rfl_paths[i].path);unsigned char *s=rfl_read(p,&n);char h[65];unisa_sha256_hex(s,n,h);free(s);z=snprintf(line,sizeof line,"file\t%s\t%lu\t%s\n",rfl_paths[i].path,(unsigned long)n,h);}
+  if(z<0||(size_t)z>=sizeof line)rfl_die("record row");rfl_put(&b,line);free(rfl_paths[i].path);rfl_paths[i].path=0;
+ }
+ return b;
+}
+static void rfl_verify(void){Buf expected=rfl_record();char p[4400];size_t n;rfl_join(p,rfl_data,"material.tsv");unsigned char *s=rfl_read(p,&n);int ok=n==(size_t)expected.n&&!memcmp(s,expected.b,n);free(s);free(expected.b);if(!ok)rfl_die("data identity or full inventory changed");}
+static void rfl_context(const unsigned char *attrs,int n){
+ rfl_ri[0]=(ResourceInput){(const unsigned char *)"\0cli/f1",7,&rfl_one,1};rfl_ri[1]=(ResourceInput){(const unsigned char *)"\0cli/attributes",15,attrs,n};rfl_ri[2]=(ResourceInput){(const unsigned char *)"\0cli/source",11,(const unsigned char *)"ri-flow.c",9};rfl_ri[3]=(ResourceInput){(const unsigned char *)"\0cli/target",11,(const unsigned char *)"lnx/x86_64",10};RI=rfl_ri;NRI=4;ATTR_SLOT=1;
+}
+static void rfl_open_product(void){package(rfl_product);const char *stages[]={"e2","e1","e3","tapecheck","e4","prune","lower","elf"};int at=0;for(int i=0;i<PS;i++)if(!strcmp(STAGES[i].route,rfl_route)){if(at==8||strcmp(STAGES[i].name,stages[at++]))rfl_die("actual P3 route order differs");}if(at!=8)rfl_die("complete actual P3 route required");INCDIR=0;RF_STRICT=0;rf_capture_set=0;}
+static void rfl_resign(const char *dir){char p[4400],h[65];rfl_join(p,dir,"resources.tsv");rfl_hash(p,h);rfl_join(p,dir,"COMMIT");size_t n;unsigned char *s=rfl_read(p,&n);size_t at=0;int hits=0;while(at<n){size_t end=at;while(end<n&&s[end]!='\n')end++;if(end==n)rfl_die("COMMIT line");if(end-at==79&&s[at+64]==' '&&s[at+65]==' '&&!memcmp(s+at+66,"resources.tsv",13)){memcpy(s+at,h,64);hits++;}at=end+1;}if(hits!=1)rfl_die("COMMIT table entry");rfl_store(p,s,n,0600,0);free(s);}
+static void rfl_snapshot(const char *name,int variant,const unsigned char *input,int n){char dir[4400],err[512];ResourceInput rows[4];int count=0;for(int i=0;i<4;i++){if(i==1&&variant>=2)continue;rows[count]=rfl_ri[i];if(i==1&&variant==1){rows[count].data=&rfl_empty;rows[count].len=0;}count++;}rfl_join(dir,rfl_data,name);if(rf_snapshot_write_ri(dir,rfl_up,input,n,rows,count,err,sizeof err)){fprintf(stderr,"%s\n",err);rfl_die("snapshot preparation");}if(variant==2){char p[4400];size_t tn;rfl_join(p,dir,"resources.tsv");unsigned char *s=rfl_read(p,&tn);const char *row="00636c692f61747472696275746573\t0\t-\t0\t-\n";size_t rn=strlen(row);s=xrealloc(s,tn+rn);memcpy(s+tn,row,rn);rfl_store(p,s,tn+rn,0600,0);free(s);rfl_resign(dir);}}
+static void rfl_prepare(void){char product_before[65],native_before[65],after[65];rfl_hash(rfl_product,product_before);rfl_hash(rfl_native,native_before);if(mkdir(rfl_data,0700))rfl_die("new data directory");rfl_open_product();rfl_context(&rfl_empty,0);Buf in={0};in.n=(int)strlen(rfl_literal);in.b=xrealloc(0,(size_t)in.n);memcpy(in.b,rfl_literal,(size_t)in.n);rfl_save("source.c",rfl_literal,strlen(rfl_literal));if(runroute_range(rfl_route,"e2","e2",&in,"ri-flow.c")||runroute_range(rfl_route,"e1","e1",&in,"ri-flow.c"))rfl_die("production E2/E1 preparation");
+ /* E1 output is stripped by the real attr_strip; preserve the exact E3 input
+  * before runroute_range transfers and frees its ownership. */
+ if(ATTRS.n!=13||!ATTRS.b||attr_u32(ATTRS.b)!=1)rfl_die("constructor E1 attribute precondition");rfl_save("e3-input.tokens",in.b,(size_t)in.n);rfl_save("attributes.bytes",ATTRS.b,(size_t)ATTRS.n);size_t token_n=(size_t)in.n;unsigned char *tokens=xrealloc(0,token_n);memcpy(tokens,in.b,token_n);if(runroute_range(rfl_route,"e3","e3",&in,"ri-flow.c"))rfl_die("production E3 preparation");rfl_save("e3-output.tape",in.b,(size_t)in.n);free(in.b);rfl_snapshot("snapshot-full",0,tokens,(int)token_n);rfl_snapshot("snapshot-empty",1,tokens,(int)token_n);rfl_snapshot("snapshot-absent",2,tokens,(int)token_n);rfl_snapshot("snapshot-missing",3,tokens,(int)token_n);free(tokens);rfl_hash(rfl_product,after);if(strcmp(product_before,after))rfl_die("product changed during preparation");rfl_hash(rfl_native,after);if(strcmp(native_before,after))rfl_die("runtime changed during preparation");Buf record=rfl_record();rfl_save("material.tsv",record.b,(size_t)record.n);free(record.b);unpackage();puts("PREPARED\tri-flow-data\tactual-production-P3\tno-test-result");}
+static int rfl_trace(const char *dir,const char *stage,const unsigned char *input,int n,int expected_presence,const unsigned char *expected,int expected_n,int require_attrs){RLLedger trace={0};char err[512];if(rl_load(dir,&trace,err,sizeof err))rfl_die("actual SC2 capture load");int valid=trace.trace&&trace.has_id&&!rl_check_identity(&trace,stage,input,n,err,sizeof err);rfl_ck(valid,"actual-SC2-consumer-input-identity");int count=0,ok=1;for(int i=0;i<trace.n;i++){RLRow *r=&trace.rows[i];if(r->kn==15&&!memcmp(r->key,"\0cli/attributes",15)){count++;if(require_attrs)ok=ok&&r->present==expected_presence&&r->vn==expected_n&&(!expected_n||!memcmp(r->value,expected,(size_t)expected_n));}}if(require_attrs)rfl_ck(count>0&&ok,"actual-E3-model-attributes-fetch-presence-and-bytes");else printf("OBSERVATION\tlower-attributes-fetches=%d\tno-attributes-consumption-claim\n",count);rl_clear(&trace);return valid;}
+static void rfl_consume(const char *mode){rfl_verify();rfl_ck(1,"data-before");if(mkdir(rfl_out,0700))rfl_die("new execution directory");rfl_open_product();char p[4400],snap[4400],cap[4400],err[512];size_t an;rfl_join(p,rfl_data,"attributes.bytes");unsigned char *attrs=rfl_read(p,&an);if(an>2147483647U)rfl_die("attribute extent");rfl_context(attrs,(int)an);int lower=!strcmp(mode,"e3-to-lower");const char *snapshot=lower?"snapshot-full":!strcmp(mode,"e3-empty")?"snapshot-empty":!strcmp(mode,"e3-absent")?"snapshot-absent":"snapshot-missing";rfl_join(snap,rfl_data,snapshot);int rc=rf_snapshot_load_ri(snap,rfl_up,&RI_SNAP,0,err,sizeof err);rfl_ck(!rc,"actual-snapshot-load");if(rc)rfl_die("snapshot load failed");RI_SNAP_ON=1;rfl_join(p,rfl_data,lower?"e3-output.tape":"e3-input.tokens");size_t n;Buf in={0};in.b=rfl_read(p,&n);if(n>2147483647U)rfl_die("execution extent");in.n=(int)n;
+ if(lower){rc=runroute_range(rfl_route,"tapecheck","prune",&in,"ri-flow.c");rfl_ck(!rc,"production-tapecheck-e4-prune-accept");if(rc)rfl_die("pre-lower production stages");}
+ size_t capture_n=(size_t)in.n;unsigned char *capture_input=xrealloc(0,capture_n?capture_n:1);if(capture_n)memcpy(capture_input,in.b,capture_n);const char *stage=lower?rfl_low:rfl_up;if(lower){size_t up_n;rfl_join(p,rfl_data,"e3-input.tokens");unsigned char *up=rfl_read(p,&up_n);rfl_ck(up_n!=capture_n||memcmp(up,capture_input,capture_n),"upstream-E3-and-consumer-lower-inputs-differ");free(up);}
+ rfl_join(cap,rfl_out,"capture");if(rf_capture_begin(cap,stage,capture_input,(int)capture_n,err,sizeof err))rfl_die("consumer capture begin");rf_capture_set=cap;rc=runroute_range(rfl_route,lower?"lower":"e3",lower?"lower":"e3",&in,"ri-flow.c");rf_capture_set=0;rfl_ck(!rc,lower?"production-lower-accept":"production-E3-accept");if(rc)rfl_die("production consumer refused");int present=strcmp(mode,"e3-absent")!=0;const unsigned char *want=!strcmp(mode,"e3-missing")?attrs:&rfl_empty;int wn=!strcmp(mode,"e3-missing")?(int)an:0;rfl_trace(cap,stage,capture_input,(int)capture_n,present,want,wn,!lower);free(capture_input);
+ rc=runroute_from(rfl_route,lower?"elf":"tapecheck",&in,"ri-flow.c");rfl_ck(!rc,"production-remaining-route-accept");if(rc)rfl_die("remaining production route refused");rfl_ck(in.n>=64&&!memcmp(in.b,"\177ELF\2\1\1",7)&&in.b[18]==62&&in.b[19]==0,"actual-ELF64-x86_64-output");rfl_join(p,rfl_out,"program");rfl_store(p,in.b,(size_t)in.n,0700,1);free(in.b);RI_SNAP_ON=0;rl_clear(&RI_SNAP);RI=0;NRI=0;free(attrs);unpackage();rfl_verify();rfl_ck(1,"data-after");puts("NOT_CLAIMED\tfull-RI-domain-production-CLI-route-integration-foreign-hosts-or-general-memory-safety");printf("RI_FLOW\tcase=%s\tassertions=%d\tfailed=%d\tscope=actual-production-P3-model-source-adapter\n",mode,rfl_assertions,rfl_failures);}
+int main(int argc,char **argv){
+#if !defined(__linux__) || !defined(__x86_64__)
+ fputs("NOT_RUN ri-flow requires Linux/x86_64\n",stderr);return 3;
+#endif
+ if((argc!=4&&argc!=5)||argv[2][0]!='/'||argv[3][0]!='/'||strlen(argv[2])>=sizeof rfl_product||strlen(argv[3])>=sizeof rfl_data||!realpath(argv[0],rfl_native))rfl_die("usage prepare|verify PRODUCT DATA or CASE PRODUCT DATA NEW_OUT");strcpy(rfl_product,argv[2]);strcpy(rfl_data,argv[3]);if(unsetenv("UNISACC_RF_CAPTURE")||unsetenv("UNISA_ATTRIBUTES"))rfl_die("clear ambient resource state");
+ if(argc==4&&!strcmp(argv[1],"prepare")){rfl_prepare();return 0;}if(argc==4&&!strcmp(argv[1],"verify")){rfl_verify();puts("VERIFIED\tri-flow-data\tno-test-result");return 0;}if(argc!=5||argv[4][0]!='/'||strlen(argv[4])>=sizeof rfl_out||(strcmp(argv[1],"e3-empty")&&strcmp(argv[1],"e3-absent")&&strcmp(argv[1],"e3-missing")&&strcmp(argv[1],"e3-to-lower")))rfl_die("one known case and new absolute output required");strcpy(rfl_out,argv[4]);rfl_consume(argv[1]);return rfl_failures?1:0;
+}
