@@ -805,12 +805,17 @@ job lib-union-scalar-1 sh ./tests/cxbin tests/libraryunionscalarcheck.cx --packa
 job lib-union-scalar-2 sh ./tests/cxbin tests/libraryunionscalarcheck.cx --package "${MODEL_COM:-./unisacc.com}" --cases double8,mixed2 --sanitize
 job lib-union-scalar-3 sh ./tests/cxbin tests/libraryunionscalarcheck.cx --package "${MODEL_COM:-./unisacc.com}" --cases mixed3,mixed-reordered --sanitize
 fi
-job lib-union-composite-direct-1 sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases mixed16,fp16 --sanitize   # (.cx port, 2026-10-23)
-job lib-union-composite-direct-2 sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases array2,array4 --sanitize
-job lib-union-composite-direct-3 sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases array5 --sanitize
-job lib-union-composite-callback-1 sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases mixed16,fp16 --sanitize --callback
-job lib-union-composite-callback-2 sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases array2,array4 --sanitize --callback
-job lib-union-composite-callback-3 sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases array5 --sanitize --callback
+COMPOSITE_REQUIRE=
+if [ "$(uname -s)/$(uname -m)" = Linux/x86_64 ]; then
+    COMPOSITE_REQUIRE=--require-cached
+    job lib-union-composite-runtime-ready sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --sanitize --prepare
+fi
+job lib-union-composite-direct-1 sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases mixed16,fp16 --sanitize $COMPOSITE_REQUIRE   # (.cx port, 2026-10-23)
+job lib-union-composite-direct-2 sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases array2,array4 --sanitize $COMPOSITE_REQUIRE
+job lib-union-composite-direct-3 sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases array5 --sanitize $COMPOSITE_REQUIRE
+job lib-union-composite-callback-1 sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases mixed16,fp16 --sanitize --callback $COMPOSITE_REQUIRE
+job lib-union-composite-callback-2 sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases array2,array4 --sanitize --callback $COMPOSITE_REQUIRE
+job lib-union-composite-callback-3 sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases array5 --sanitize --callback $COMPOSITE_REQUIRE
 # F3 (union-composite) split: one content-keyed runtime preparation, then require-cached variant shards by pressure; the original gates above stay
 job lib-union-composite-prepare sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --sanitize --prepare
 job lib-union-composite-direct-1-a sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases mixed16,fp16 --pressures plain,gp9
