@@ -1,0 +1,83 @@
+/* New carried-library and intra-product C ABI batch.
+ * Run: tools/bound 55 sh ./unisacc.com tests/library-abi.cx -- "$PWD"
+ * Scope is Linux x86_64 LP64, one explicitly hashed root product.
+ * The driver has literal hand-derived oracles, not a second library algorithm.
+ * C99 sources: N1256 6.5.2.2/6.7.2.1, 7.15/17, 7.19.6.5, 7.20.1/3/5, 7.21.
+ * https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1256.pdf
+ * Layout source: x86-64 psABI, Data Representation / Aggregates and Unions:
+ * https://gitlab.com/x86-psABIs/x86-64-ABI/-/blob/master/x86-64-ABI/low-level-sys-info.tex
+ * No host-FFI provider, Rust/static ownership, leak or foreign-host claim. */
+#pragma unisa use cases.library_abi
+
+static int assertions,failures,not_run;
+static const char *names[]={
+ "layout.size","layout.int-offset","layout.double-offset","layout.short-offset","layout.array-stride",
+ "qsort.item0","qsort.item1","qsort.item2","qsort.item3","qsort.item4","qsort.item5","qsort.callback-executed",
+ "bsearch.hit","bsearch.missing","bsearch.zero-elements",
+ "snprintf.truncated-length","snprintf.truncated-bytes","snprintf.outer-guards","snprintf.measure-only",
+ "snprintf.star-width-precision-and-i64-length","snprintf.star-width-precision-and-i64-bytes",
+ "memchr.embedded-zero","memchr.high-byte","memchr.missing","memcmp.unsigned-byte-order",
+ "strtol.hex-auto","strtol.hex-tail","strtol.no-conversion-value","strtol.no-conversion-pointer",
+ "strtoul.overflow-clamp","strtoul.overflow-errno","strtoul.overflow-tail","strtod.exact-value","strtod.tail",
+ "calloc.positive","calloc.zero-initialization","realloc.grow","realloc.grow-preserves-prefix",
+ "realloc.shrink","realloc.shrink-preserves-prefix","realloc.failure","realloc.failure-preserves-live-block",
+ "realloc.null-input","calloc.product-overflow","free.null-input","memmove.overlap-left",
+ "strcmp.less-than","strcmp.greater-than"
+};
+static const long expected[]={
+ 24,4,8,16,24,
+ -4,0,3,3,9,12,1,9,1,1,
+ 6,1,1,5,17,1,
+ 1,3,1,1,
+ -42,33,0,1,1,ERANGE,33,-25,116,
+ 1,1,1,120,1,28,1,28,1,1,1,1,-1,1
+};
+static void check(long actual,long wanted,const char *name){
+ assertions++;
+ if(actual==LONG_MIN){not_run++;printf("NOT_RUN\tlibrary-abi.%s\tblocked-by-setup\n",name);return;}
+ int ok=actual==wanted;if(!ok)failures++;
+ printf("%s\tlibrary-abi.%s\tactual=%ld\texpected=%ld\n",ok?"PASS":"FAIL",name,actual,wanted);
+}
+static int digest(const char *p,char hash[65]){
+ size_t n;char *s=cx_read(p,&n);if(!s)return 0;cx_sha256_hex(s,n,hash);free(s);return 1;
+}
+int main(int argc,char **argv){
+ char root[4096],product[4400],before[65],after[65];long actual[48];int i;
+ if(argc!=2||!realpath(argv[1],root)){fprintf(stderr,"usage: ROOT\n");return 2;}
+#if !defined(__linux__) || !defined(__x86_64__)
+ puts("NOT_RUN\tlibrary-abi.host\trequires-Linux-x86_64-LP64");return 3;
+#endif
+ if(sizeof(void *)!=8||sizeof(long)!=8||sizeof(int)!=4||sizeof(double)!=8){
+  puts("NOT_RUN\tlibrary-abi.data-model\trequires-LP64-int32-double64");return 3;
+ }
+ if(library_abi_count()!=48||sizeof expected/sizeof expected[0]!=48||sizeof names/sizeof names[0]!=48){
+  fprintf(stderr,"library-abi: fixture shape mismatch\n");return 2;
+ }
+ int n=snprintf(product,sizeof product,"%s/unisacc.com",root);
+ if(n<0||(size_t)n>=sizeof product||!digest(product,before)){fprintf(stderr,"library-abi: product identity unavailable\n");return 2;}
+ printf("CANDIDATE\tsha256=%s\n",before);
+ for(i=0;i<48;i++)actual[i]=LONG_MIN;
+ library_abi_values(actual);
+ for(i=0;i<48;i++)check(actual[i],expected[i],names[i]);
+
+ /* Hand sums: sum(k*k,k=1..8)=204; mixed exact binary fractions=110.
+  * Pair: (-4294967299)+5=-4294967294, 4294967298-5=4294967293.
+  * Promotions: 10-3+(1.5*4)+4294967297=4294967310.
+  * va_copy independent cursors: 2+7+10*2+7=36. */
+ check(library_abi_pressure(1,2,3,4,5,6,7,8),204,"module.eight-i64-arguments");
+ check(library_abi_mixed(2,1.5,7,2.25,-3,0.5,11,1.25)==110.0,1,"module.mixed-integer-double-arguments");
+ library_abi_pair pair;pair.first=4294967298LL;pair.second=-4294967299LL;
+ pair=library_abi_pair_adjust(pair,5);
+ check(pair.first,-4294967294LL,"module.aggregate-argument-and-return.first");
+ check(pair.second,4294967293LL,"module.aggregate-argument-and-return.second");
+ check(library_abi_variadic(10,(signed char)-3,(float)1.5,4294967297LL),4294967310LL,"module.variadic-default-promotions");
+ check(library_abi_va_copy(0,2,7),36,"module.va-copy-independent-cursors");
+ if(!digest(product,after)){fprintf(stderr,"library-abi: final identity unavailable\n");return 2;}
+ check(!strcmp(before,after),1,"candidate-unchanged");
+ puts("NOT_COVERED\tlibrary-abi.host-ffi-provider-signatures-native-callbacks");
+ puts("NOT_COVERED\tlibrary-abi.heap-leak-accounting-and-use-after-free-rejection");
+ puts("NOT_COVERED\tlibrary-abi.foreign-hosts-and-complete-library-domain");
+ puts("TIMING\tstartup_construction_loading_inference_output_validation=UNMEASURED\tcold_hot=UNMEASURED");
+ printf("LIBRARY_ABI\tassertions=%d\tfailed=%d\tnot_run=%d\tscope=carried-library-and-intra-product-C-ABI-Linux-x86_64-LP64\n",assertions,failures,not_run);
+ return failures?1:not_run?3:0;
+}
