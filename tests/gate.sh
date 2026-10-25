@@ -722,7 +722,7 @@ job lib-variadic-protocol ./tests/modelvariadicprotocolcheck.sh
 job lib-callback-graph-host tests/bound 58 sh ./unisacc.com -run tests/librarycallbackgraphcheck.cx   # (.cx port, 2026-10-23) exact USLSIG2 graph fixtures (tests/cxlib/libprobe.cx), native decoder oracle, normal + ASan/UBSan
 job lib-callback-graph-protocol ./tests/modelcallbackgraphcheck.sh
 job lib-callback-graph-equality ./tests/modelgraphequalitycheck.sh
-job lib-callback-source-graph ./tests/modelcallbacksourcecheck.sh
+job lib-callback-source-graph sh ./unisacc.com tests/modelcallbacksourcephase.cx
 job lib-callable-mechanism tests/bound 58 sh ./unisacc.com -run tests/librarycallablescheck.cx   # (.cx port, 2026-10-23) callable ABI mechanism: librarycallablescheck.c built with host cc + real libffi, plain and ASan/UBSan, each under tests/bound 20
 job lib-carrier-model python3 ./tests/modelnativecarriercheck.py
 job lib-ordered-carrier-model python3 ./tests/modelnativebitfieldcheck.py

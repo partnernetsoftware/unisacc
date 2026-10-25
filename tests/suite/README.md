@@ -60,6 +60,8 @@ suite-tools-native通过默认-run运行check.cx：原声明恒等、依赖顺�
 
 该入口尚未替代正式发布验收，也不表示全部旧oracle已经原生化。原断言中仍必需的Python如实保留；新增目录、依赖图和调度逻辑均为.cx。
 
+`lib-callback-source-graph`默认-run门面固定原shell SHA，仅免编未使用的ref可执行文件（仍由build_ref --source-only生成相同wrapped C），并从既有exec-chain-model-prepare的完整身份／产物SHA合同materialize e3.json。原cc -O2 runner、dump源码变换、完整sim／C／host解码断言和cleanup不变。门面先恢复原parent UNISA_CONTAINER unset；缺缓存75不隐式构造。显式前置只依赖准备节点，不复用任何测试verdict；原shell聚合CLI兼容，仍诚实保留独立Python裁判依赖。
+
 `target-package-1/2/3`默认-run门面分别选择Linux/macOS/Windows两架构，固定生产targetpackage.py源码SHA与完整六目标域；三片联合覆盖原六目标闭包。每片仍运行完整源重组、坏／缺分片、bad-target及缺另一target负例，wanted过滤始终使用全局六目标，只有目标执行循环选片。原Python独立裁判仍保留，原无参／单路径全六CLI兼容，分片输出准确2/6；这不是Python依赖消除。
 
 callback lower part1由`exec-librarycallbacklower-model-1-off`与`-1-on`两个默认-run单元联合覆盖：固定原脚本SHA，off保留原fixture生产及12行off verdict，on保留8行on verdict；两者均保留原12组off及on模型seal检查与cleanup。原`other11 on targets UNVERIFIED`完整保留，不代表其它目标已执行，也不声称完整lower ABI通过。原脚本part1聚合CLI兼容保留；模型key、原producer与seals不变，verdict每次真实执行。

@@ -1,0 +1,20 @@
+/* Source-fact callback graph: reuse prepared model bytes, never a test verdict.
+ * The unchanged legacy shell/checker remains the independent oracle. */
+#include <cx.h>
+#define SOURCE "tests/modelcallbacksourcecheck.sh"
+#define SOURCE_SHA "926b25754e42a009d64e6e529e5962f06282d4d4876ddf0e29572c4bfce9a3df"
+static int no(const char*s){fprintf(stderr,"modelcallbacksourcephase refused: %s\n",s);return 2;}
+static char*replace(char*s,const char*a,const char*b){char*p=strstr(s,a);if(!p||strstr(p+1,a))return 0;size_t k=p-s;char*t=malloc(strlen(s)+strlen(b)-strlen(a)+1);if(!t)return 0;memcpy(t,s,k);strcpy(t+k,b);strcpy(t+k+strlen(b),p+strlen(a));return t;}
+int main(int argc,char**argv){
+ /* Original gate executes the legacy shell with parent UNISA_CONTAINER unset.
+  * Restore that contract before the prepared tool computes its complete basis. */
+ if(unsetenv("UNISA_CONTAINER"))return no("restore original parent environment");
+ int inspect=argc==2&&!strcmp(argv[1],"--inspect");if(argc!=1&&!inspect)return no("no arguments or --inspect");
+ size_t n;char*s=cx_read(SOURCE,&n),h[65];if(!s||!n||n>16384||memchr(s,0,n))return no("source read/length/NUL");cx_sha256_hex(s,n,h);if(strcmp(h,SOURCE_SHA))return no("original shell source SHA changed");
+ char*script=replace(s,"bound 55 \"$R/tests/build_ref.sh\" \"$T/ref.c\" \"$T/ref\"\n","bound 55 \"$R/tests/build_ref.sh\" \"$T/ref.c\" \"$T/ref\" --source-only\n");if(!script)return no("unique original reference command");
+ const char*marker="\"$R/exec/build/gen.py\" parse2 \"$T/parse.json\"\n";char*p=strstr(script,marker);if(!p||strstr(p+1,marker))return no("unique original model command");char*start=p;while(start>script&&start[-1]!='\n')start--;char*end=p+strlen(marker);size_t at=start-script;
+ const char*prepared="mkdir -m 700 \"$T/prepared\"\nbound 20 sh \"$R/tests/cxbin\" \"$R/tests/execchainprepared.cx\" --materialize \"$T/prepared\"\ncp \"$T/prepared/e3.json\" \"$T/parse.json\"\ncmp \"$T/prepared/e3.json\" \"$T/parse.json\"\n";
+ size_t z=strlen(script)-(end-start)+strlen(prepared);char*out=malloc(z+1);if(!out)return no("allocation");memcpy(out,script,at);memcpy(out+at,prepared,strlen(prepared));strcpy(out+at+strlen(prepared),end);cx_sha256_hex(out,z,h);
+ if(inspect){printf("modelcallbacksourcephase source=%s script_sha256=%s; reference source-only and verified prepared e3 only; original runner flags, dump transform, assertions and cleanup retained; NOT PASS\n",SOURCE_SHA,h);return 0;}
+ char*a[]={"sh","-c",out,SOURCE,0};execvp(a[0],a);return no("exec original shell");
+}
