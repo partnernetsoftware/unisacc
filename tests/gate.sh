@@ -898,12 +898,12 @@ if [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ]; then
     job lib-variadic-resolver-rosetta tests/bound 58 sh ./unisacc.com -run tests/libraryvariadicresolvercheck.cx -- --arch x86_64
     job lib-variadic-native-rosetta tests/bound 58 sh ./tests/cxbin tests/libraryvariadicnativecheck.cx --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize
 fi
-job lib-artifacts python3 ./tests/libraryartifactcheck.py --package "${MODEL_COM:-./unisacc.com}"
+job lib-artifacts sh ./unisacc.com tests/libraryoracleprovider.cx -- artifacts --package "${MODEL_COM:-./unisacc.com}"
 job lib-native-exports tests/bound 58 sh ./tests/cxbin tests/libunisaccexportcheck.cx --package "${MODEL_COM:-./unisacc.com}"   # (.cx port, 2026-10-23)
 job lib-module-exports tests/bound 58 sh ./tests/cxbin tests/libunisaccexportcheck.cx --package "${MODEL_COM:-./unisacc.com}" --no-main
-job lib-bindings python3 ./tests/libunisaccbindingscheck.py --package "${MODEL_COM:-./unisacc.com}"
-job lib-data python3 ./tests/libunisaccdatacheck.py --package "${MODEL_COM:-./unisacc.com}"
-job lib-resolver python3 ./tests/libunisaccresolvercheck.py --package "${MODEL_COM:-./unisacc.com}"
+job lib-bindings sh ./unisacc.com tests/libraryoracleprovider.cx -- bindings --package "${MODEL_COM:-./unisacc.com}"
+job lib-data sh ./unisacc.com tests/libraryoracleprovider.cx -- data --package "${MODEL_COM:-./unisacc.com}"
+job lib-resolver sh ./unisacc.com tests/libraryoracleprovider.cx -- resolver --package "${MODEL_COM:-./unisacc.com}"
 job lib-latebind-W tests/bound 58 sh "${MODEL_COM:-./unisacc.com}" -run tests/liblatebindWcheck.cx -- "${MODEL_COM:-./unisacc.com}"   # W: private runtime + frozen r4 six snapshots; product is model/runner input
 job latebind-p6 tests/bound 58 sh "${MODEL_COM:-./unisacc.com}" -run tests/latebindp6check.cx -- "${MODEL_COM:-./unisacc.com}" tests/seals/latebind-p6-baseline   # P6: untyped library-mode baseline (26 WBASE1 snapshots, public-API observers); lnx/x86_64 else UNVERIFIED 77
 job resourceflow tests/bound 58 sh "${MODEL_COM:-$R/unisacc.com}" -run tests/resourceflowcheck.cx -- "${MODEL_COM:-$R/unisacc.com}"   # (H1: the product path must be absolute) S1: explicit-ledger strict resource flow on the product (C -> Tape); RF-LEGACY needs a base product and is not run here
@@ -916,7 +916,7 @@ job lib-windows-bridge python3 ./tests/windowslibrarybridgecheck.py
 job lib-windows-imports tests/bound 58 sh "${MODEL_COM:-./unisacc.com}" -run tests/librarywinimportscheck.cx   # (.cx port, 2026-10-23)
 job lib-windows-gp tests/bound 58 sh ./tests/cxbin exec/enc/windowshostbridgecheck.cx --part cross   # (.cx port, 2026-10-23)
 job lib-windows-gp-native tests/bound 58 sh ./tests/cxbin exec/enc/windowshostbridgecheck.cx --part native   # (.cx port, 2026-10-23)
-job lib-lifecycle python3 ./tests/libunisaccruncheck.py --package "${MODEL_COM:-./unisacc.com}" --iterations 1000
+job lib-lifecycle sh ./unisacc.com tests/libraryoracleprovider.cx -- lifecycle --package "${MODEL_COM:-./unisacc.com}" --iterations 1000
 job shared-e2-plain ./tests/sharede2.sh plain
 job shared-e2-located ./tests/sharede2.sh located
 job shared-e2-tokens ./tests/sharede2.sh tokens

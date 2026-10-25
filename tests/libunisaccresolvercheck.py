@@ -2,6 +2,7 @@
 Host C builds only the library adaptation and real shared-library fixtures.
 """
 from checklib import copy_runtime
+import os
 import argparse,ctypes,hashlib,json,pathlib,platform,shutil,subprocess,tempfile,re
 from libunisaccbindingscheck import Type,Signature,integer
 ROOT=pathlib.Path(__file__).resolve().parents[1]
@@ -21,7 +22,7 @@ def main():
   second=shared('second','long owned_only(long n){return n+20;} int owned_value=202; long layered(long n){return n+22;}')
   process=shared('process','long layered(long n){return n+3;}')
   process_handle=ctypes.CDLL(str(process),mode=ctypes.RTLD_GLOBAL)
-  lib=td/'library.dylib';command=['cc','-std=c11','-O2','-shared','-fPIC','-fvisibility=hidden',str(runtime/'libunisacc.c'),str(runtime/('librarycall_'+arch+'.S')),'-lffi','-o',str(lib)]
+  lib=td/'library.dylib';command=['cc','-std=c11','-O2','-shared','-fPIC','-fvisibility=hidden',str(runtime/'libunisacc.c'),str(runtime/('librarycall_'+arch+'.S')),os.environ.get('UNISACC_TEST_LIBFFI_LINK','-lffi'),'-o',str(lib)]
   if platform.system()=='Linux':command.append('-ldl')
   subprocess.run(command,check=True,timeout=25)
   L=ctypes.CDLL(str(lib));L.us_new.argtypes=[ctypes.c_char_p];L.us_new.restype=P

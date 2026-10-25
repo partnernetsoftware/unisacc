@@ -1,5 +1,6 @@
 """Real source -> model-declared imports -> host ABI calls, private contexts."""
 from checklib import copy_runtime
+import os
 import argparse,ctypes,concurrent.futures,pathlib,platform,shutil,subprocess,tempfile,json,hashlib
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 P=ctypes.c_void_p;Q=ctypes.c_uint64
@@ -15,7 +16,7 @@ def main():
  with tempfile.TemporaryDirectory(prefix='r10-host-injection-') as folder:
   td=pathlib.Path(folder);runtime=td/'exec/c';runtime.mkdir(parents=True);(td/'src').mkdir()
   copy_runtime(ROOT,td)
-  lib=td/'library.dylib';subprocess.run(['cc','-std=c11','-O2','-shared','-fPIC','-fvisibility=hidden',str(runtime/'libunisacc.c'),str(runtime/('librarycall_'+arch+'.S')),'-lffi','-o',str(lib)],check=True,timeout=20)
+  lib=td/'library.dylib';subprocess.run(['cc','-std=c11','-O2','-shared','-fPIC','-fvisibility=hidden',str(runtime/'libunisacc.c'),str(runtime/('librarycall_'+arch+'.S')),os.environ.get('UNISACC_TEST_LIBFFI_LINK','-lffi'),'-o',str(lib)],check=True,timeout=20)
   L=ctypes.CDLL(str(lib));L.us_new.argtypes=[ctypes.c_char_p];L.us_new.restype=P
   L.us_add_symbol.argtypes=[P,ctypes.c_char_p,P,ctypes.POINTER(Signature)]
   L.us_add_source.argtypes=[P,ctypes.c_char_p,ctypes.c_char_p];L.us_compile.argtypes=[P,ctypes.c_char_p,ctypes.c_int]

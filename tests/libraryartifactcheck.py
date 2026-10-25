@@ -59,7 +59,7 @@ if __name__=='__main__':
    sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]/'exec/c'))
    from buildlibrary import build
    with tempfile.TemporaryDirectory(prefix='unisacc-library-artifact-gate-') as name:
-    build(a.package,pathlib.Path(name),shlex.split(a.cc),shlex.split(os.environ.get('AR','ar')),[],['-lffi'])
+    build(a.package,pathlib.Path(name),shlex.split(a.cc),shlex.split(os.environ.get('AR','ar')),[],[os.environ.get('UNISACC_TEST_LIBFFI_LINK','-lffi')])
     evidence=check(pathlib.Path(name),shlex.split(a.cc))
   else:evidence=check(a.library_dir,shlex.split(a.cc))
   if a.evidence:a.evidence.write_text(json.dumps(evidence,indent=2)+'\n')

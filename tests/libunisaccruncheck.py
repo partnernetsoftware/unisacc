@@ -2,6 +2,7 @@
 This is host-native evidence, not a six-platform or full-signature claim.
 """
 from checklib import copy_runtime
+import os
 import argparse,ctypes,pathlib,shutil,subprocess,tempfile,time,json,concurrent.futures,hashlib
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 def main():
@@ -39,7 +40,7 @@ __attribute__((visibility("default"))) unsigned long long test_resident_bytes(vo
 __attribute__((visibility("default"))) int test_mapped(long p){unsigned char v;return !mincore((void*)p,(size_t)sysconf(_SC_PAGESIZE),&v);}
 #endif
 ''')
-  subprocess.run(['cc','-std=c11','-O2','-fvisibility=hidden','-shared','-fPIC',str(wrapper),str(runtime/('librarycall_'+('arm64' if __import__('platform').machine() in ('arm64','aarch64') else 'x86_64')+'.S')),'-lffi','-o',str(out)],check=True,timeout=30)
+  subprocess.run(['cc','-std=c11','-O2','-fvisibility=hidden','-shared','-fPIC',str(wrapper),str(runtime/('librarycall_'+('arm64' if __import__('platform').machine() in ('arm64','aarch64') else 'x86_64')+'.S')),os.environ.get('UNISACC_TEST_LIBFFI_LINK','-lffi'),'-o',str(out)],check=True,timeout=30)
   L=ctypes.CDLL(str(out));L.us_new.argtypes=[ctypes.c_char_p];L.us_new.restype=ctypes.c_void_p
   for n,args in [('us_add_source',[ctypes.c_void_p,ctypes.c_char_p,ctypes.c_char_p]),('us_compile',[ctypes.c_void_p,ctypes.c_char_p,ctypes.c_int]),('us_run_main',[ctypes.c_void_p,ctypes.c_int,ctypes.POINTER(ctypes.c_char_p),ctypes.POINTER(ctypes.c_int)])]:getattr(L,n).argtypes=args
   L.us_error.argtypes=[ctypes.c_void_p];L.us_error.restype=ctypes.c_char_p;L.us_free.argtypes=[ctypes.c_void_p]
