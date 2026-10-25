@@ -16,18 +16,20 @@
 
 | 版 | 状态 | 计划 |
 |---|---|---|
-| **0.0.1** | ✓ host1 基线（APE·28/0·六目标·`.cx`） | [`plans/v0.0.1.md`](plans/v0.0.1.md) |
-| **0.0.2** | **进行中** · 生产力合同（身份／预言／CLI／prd 收束） | [`plans/v0.0.2.md`](plans/v0.0.2.md) |
-| 0.0.3+ | 调度子功能 · 跑／验 · Paper B 最小补丁 … | [`plans/roadmap-0.0.x.md`](plans/roadmap-0.0.x.md) |
+| **0.0.1** | ✓ host1 基线 | [`plans/v0.0.1.md`](plans/v0.0.1.md) |
+| **0.0.2** | **进行中** · 生产力合同 | [`plans/v0.0.2.md`](plans/v0.0.2.md) |
+| 0.0.3+ | 调度 · 跑／验 · Paper B 最小补丁 | [`plans/roadmap-0.0.x.md`](plans/roadmap-0.0.x.md) |
 
-版号真源：`ujs.com --version` 与上表；**不**用根仓 `plans/v0.0.4x` 代替本系列。
+版号真源：`ujs.com --version`（现 **`ujs.com 0.0.2`**）与上表；**不**用根仓 `plans/v0.0.4x` 代替本系列。
+
+**两个名词**：**host image** = APE／六目标／`host1_package` 闸；**method emit** = 表／流→`\0asm`（`method_construct`，未卸完）。勿混。
 
 ### 0.1 出货主产物（主人 2026-10-25）
 
 | | |
 |---|---|
 | **主产物** | **`ujs.com`**——**ujs + wasm 类别的生产力工具**（跨架构单文件 `.com`；编／装／跑／自举收进同一壳） |
-| **状态** | **0.0.1 ✓**；当前 **0.0.2**（见 `plans/v0.0.2.md`）。host1 壳已齐；本刀收生产力合同，不把论文主张塞进古典 stage0 |
+| **状态** | **`ujs.com 0.0.2`**：预言 `host1-pass`／`host1-refuse`；套件 `tests/ujs/run.cx`；标签 `host1_package`。不把论文主张塞进古典 stage0 |
 | **不是主产物** | 单独的 `ujs2wasm` CLI、`wat2wasm`、`compile.mjs`、零散 `.wasm`——是 **`ujs.com` 的子功能／实践脊**，应收进或由它调度 |
 
 ### 0.1b 产品 · 论文 · unisacc 关系（主人 2026-10-25 定调）
@@ -324,7 +326,7 @@ compile(src: Uint8Array|string) →
 | **M3** | `compiler.ujs` 自举 | body≡stage0 → stage2≡stage1 | **v16✓** + fold logic/elseif/… on core |
 | **P0** | ship 无 web-build / 无 `engine.wasm`（A） | `ujs2wasm_compiler.sh` · `ship-engine` 拒 A 核 | **✓** |
 | **3** | 换核模板 | 按下表抄路径绿 | 骨架 ✓ |
-| **4** | 门禁即契约 | **语言/ujs2wasm/ship-js**：`tests/ujs.sh` + `ujs2wasm_compiler.sh` + `uxe_ship_js` ✓。**UXE 无人**（`npm run test:uxe:all` / ship CDP）另门，不并入 `all.sh`；探针偶发 `never ready` 时修 UXE 门，不挡语言绿 | 语言 ✓ · UXE 另门 |
+| **4** | 门禁即契约 | **host1**：`tests/ujs/run.cx`。实践脊／UXE 另门；旧 `ujs.sh` 见 `archive/testing-c43-legacy/` | host1 套件 ✓ · UXE 另门 |
 | **5–6** | Host / llm | 有玩法再开 | 搁置 |
 
 ### 换核模板（#3 可抄）
@@ -432,21 +434,23 @@ UXIN ══> host_input_read
 tests/ujs/run.cx ══调══> ujs/product/{build,corpus-host,complete}.cx
 ```
 
-## T3. 出货 DAG —— 两条路径（两脊）
+## T3. 出货 DAG —— host image vs 实践脊
 
 ```
 .ujs 源
  │
- ├──── 路径 A / 构造脊（方法 · 非 P0 ship）─────────────┐
- │    gold→IntNet · jtape · web-build → ujs_full       │
- │    ⟦门禁⟧ ./tests/ujs.sh（acc/fold/icfold/…）       │
+ ├──── host image（ujs.com · host1_package）───────────┐
+ │    stage0 → \\0asm；APE／六目标                       │
+ │    ⟦门禁⟧ tests/ujs/run.cx · host1-pass/refuse       │
  │                                                     │
- └──── 路径 B / M3 出货脊 ─────────────────────────────┤
-      compile.mjs → compiler_core → sim.wasm           │
-      ⟦门禁⟧ ./tests/ujs2wasm_compiler.sh · uxe_ship_js│
+ ├──── 实践脊 M3（m3_scaffold · 另门）─────────────────┤
+ │    compile.mjs → compiler_core → sim.wasm           │
+ │    旧门禁已归档；不挡 host1 版号                      │
+ │                                                     │
+ └──── 方法弧（method_construct · 另弧）───────────────┤
+      construct／m4；≠ host1 绿                        │
                                                        ▼
-                              npm run ship:pages → docs/
-                              ⟦门禁⟧ ship-js 合同；UXE 另门 test:uxe:all
+                              Pages／UXE 另门（npm test:uxe）
 ```
 
 ## T4. UXE 积木树
@@ -468,12 +472,11 @@ ship：index.html → engine.js + game.js + sim.wasm（directSim；无 engine.wa
 ## T5. 验收 DAG
 
 ```
-语言绿 ── ./tests/ujs.sh ──┬── acc / fold / icfold / difftest
-                           ├── front parity · in-page wasm_run
-                           └── ujs2wasm.sh（全量 corpus ≠ UJS-1_ship）
+host1 绿 ── tests/ujs/run.cx ──┬── --smoke（build + oracle）
+                               └── --complete（APE + oracle + six）
 
-出货绿 ── ujs2wasm_compiler.sh · uxe_ship_js.sh
-                           └── core bridge · stage2≡ · body≡ · 无 A 核
+实践另门 ── M3／uxe（归档脚本或 npm）；不挡 0.0.x 版号
+历史对照 ── archive/testing-c43-legacy/tests/ujs*.sh
 
 UXE 绿 ── test:uxe:all ────┬── CDP 探针 · snapshot 数（**另门**）
                            └── 禁代理猜 UI；不挡语言/出货绿

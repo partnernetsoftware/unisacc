@@ -1,20 +1,13 @@
 #!/usr/bin/env -S unisacc.com -run
-/* host1 stage0 corpus contract: known accept / known refuse.
-   No #include. Run: ./unisacc.com -run ujs/product/corpus-host.cx
+/* host1 oracle: tests/ujs/host1-pass.txt + host1-refuse.txt only.
+   Never opens expect.json or Node runners. Pure .cx.
+   ./unisacc.com -run ujs/product/corpus-host.cx
 */
-static const char *PASS[] = {
-    "arith.ujs", "branch.ujs", "dict.ujs", "dict_key8.ujs", "elseif.ujs",
-    "f64_arith.ujs", "fact.ujs", "globals_fold.ujs", "list.ujs", "list_f64.ujs",
-    "logic.ujs", "setidx.ujs", "setidx_loop.ujs", "str.ujs", "str_cat_long.ujs",
-    "str_empty.ujs", "str_lit7.ujs", "str_lit8.ujs", "str_lit32.ujs",
-    "forof.ujs", "nullish.ujs", "str_lit255.ujs", "switch.ujs", "ternary.ujs",
-    "unary_minus.ujs",
-    "arrow.ujs", "blockarrow.ujs", "sum.ujs",
-    0
-};
-static const char *REFUSE[] = {
-    0
-};
+enum { MAX_NAMES = 64, MAX_NAME = 64, EXPECT_PASS = 28 };
+
+static char pass_names[MAX_NAMES][MAX_NAME];
+static char refuse_names[MAX_NAMES][MAX_NAME];
+static int n_pass, n_refuse;
 
 static int exists(const char *p) {
     FILE *f = fopen(p, "rb");
@@ -27,6 +20,7 @@ static int enter_root(const char *argv0) {
     char dir[4096];
     size_t l;
     char *sl;
+    if (exists("./tests/ujs/host1-pass.txt")) return 0;
     if (!argv0 || !argv0[0]) return -1;
     l = strlen(argv0);
     if (l >= sizeof dir) return -1;
@@ -38,19 +32,52 @@ static int enter_root(const char *argv0) {
     return chdir("../..");
 }
 
-static int run_one(const char *base, int want_ok) {
-    char src[256], outp[256];
+/* Load basenames from a manifest; skip blank/# lines. */
+static int load_list(const char *path, char names[][MAX_NAME], int *out_n) {
+    FILE *f;
+    char line[256];
+    int n = 0;
+    size_t L;
+    f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "corpus-host.cx: cannot open %s\n", path);
+        return -1;
+    }
+    while (fgets(line, sizeof line, f)) {
+        L = strlen(line);
+        while (L && (line[L - 1] == '\n' || line[L - 1] == '\r')) line[--L] = 0;
+        if (!L || line[0] == '#') continue;
+        if (L >= MAX_NAME) {
+            fprintf(stderr, "corpus-host.cx: name too long in %s\n", path);
+            fclose(f);
+            return -1;
+        }
+        if (n >= MAX_NAMES) {
+            fprintf(stderr, "corpus-host.cx: too many names in %s\n", path);
+            fclose(f);
+            return -1;
+        }
+        memcpy(names[n], line, L + 1);
+        n++;
+    }
+    fclose(f);
+    *out_n = n;
+    return 0;
+}
+
+static int run_one(const char *dir, const char *base, int want_ok) {
+    char src[512], outp[512];
     char *av[6];
     char *cap = 0;
     size_t n = 0;
     int rc;
-    snprintf(src, sizeof src, "tests/ujs2wasm/corpus/%s", base);
+    snprintf(src, sizeof src, "%s/%s", dir, base);
     snprintf(outp, sizeof outp, "/tmp/ujs-corpus-%s.wasm", base);
     if (!exists(src)) {
         fprintf(stderr, "missing %s\n", src);
         return 1;
     }
-    /* native ELF: direct exec; APE (MZ): sh fallback after ENOEXEC/127 */
+    unlink(outp);
     av[0] = "./ujs/ujs.com";
     av[1] = src;
     av[2] = "-o";
@@ -85,20 +112,30 @@ static int run_one(const char *base, int want_ok) {
 int main(int argc, char **argv) {
     int i, bad = 0;
     (void)argc;
-    if (enter_root(argv[0]) != 0 && !exists("./ujs/ujs.com")) {
-        fprintf(stderr, "corpus-host.cx: need repo root with ujs/ujs.com\n");
+    if (enter_root(argv[0]) != 0) {
+        fprintf(stderr, "corpus-host.cx: need repo root\n");
         return 2;
     }
+    /* Ship oracle never opens tests/ujs2wasm/expect.json or *.mjs */
     if (!exists("./ujs/ujs.com")) {
         fprintf(stderr, "corpus-host.cx: build host first (build.cx)\n");
         return 2;
     }
-    for (i = 0; PASS[i]; i++) bad += run_one(PASS[i], 1);
-    for (i = 0; REFUSE[i]; i++) bad += run_one(REFUSE[i], 0);
+    if (load_list("tests/ujs/host1-pass.txt", pass_names, &n_pass) != 0) return 2;
+    if (load_list("tests/ujs/host1-refuse.txt", refuse_names, &n_refuse) != 0) return 2;
+    if (n_pass != EXPECT_PASS) {
+        fprintf(stderr, "corpus-host.cx: host1-pass count=%d want=%d\n", n_pass, EXPECT_PASS);
+        return 1;
+    }
+    for (i = 0; i < n_pass; i++)
+        bad += run_one("tests/ujs2wasm/corpus", pass_names[i], 1);
+    for (i = 0; i < n_refuse; i++)
+        bad += run_one("tests/ujs2wasm/neg", refuse_names[i], 0);
     if (bad) {
         fprintf(stderr, "corpus-host.cx: %d mismatches\n", bad);
         return 1;
     }
-    printf("corpus-host.cx: ok pass=28 refuse=0 (stage0-host)\n");
+    printf("corpus-host.cx: ok pass=%d refuse_catalog=%d unexpected_refuse_on_pass=0 (host1_package)\n",
+           n_pass, n_refuse);
     return 0;
 }

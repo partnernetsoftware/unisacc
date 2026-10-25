@@ -1,47 +1,34 @@
-# ujs.com — 产品宿主
+# ujs.com — 产品宿主（host image）
 
-> 规格：[`../prd.md`](../prd.md) §0.1  
-> **纪律**：只用根 **`unisacc.com` + `.cx`（`-run`）**；禁止产品链 `.c`／`.py`。
+> [`../prd.md`](../prd.md) · [`../plans/v0.0.2.md`](../plans/v0.0.2.md)  
+> 只用 **`unisacc.com` + `.cx`**。标签 **`host1_package`**。
 
-## 状态
+## 版本
 
-| 代 | 入口 | 状态 |
-|---|---|---|
-| **APE** | `build-ape.cx` + `ape-pack.cx` | **主产物形**；本机 `sh ./ujs/ujs.com` 烟测 |
-| **本机原生** | `build.cx` | 快迭代 |
-| **六目标原生** | `build-six.cx` | ELF／Mach-O／PE → 默认 `/tmp/ujs-six-out` |
-
-## 源（均无 `#include`）
-
-- `ujs_main.cx` — CLI
-- `../seed/stage0/compiler_min.cx` — `-DUJS_HOST` stage0 编译器
+`ujs.com 0.0.2`（`--version`；APE `--product ujs 0.0.2`）。
 
 ## 命令
 
 ```bash
-# 仓库根
-./unisacc.com -run ujs/product/complete.cx    # APE + corpus 28/0 + six
-./unisacc.com -run ujs/product/build-ape.cx
+./unisacc.com -run tests/ujs/run.cx -- --smoke
+./unisacc.com -run tests/ujs/run.cx -- --complete
 ./unisacc.com -run ujs/product/build.cx
+./unisacc.com -run ujs/product/build-ape.cx
 ./unisacc.com -run ujs/product/build-six.cx
-./unisacc.com -run ujs/product/corpus-host.cx # 28 PASS / 0 REFUSE
+./unisacc.com -run ujs/product/corpus-host.cx
 ```
 
-`build.sh` 仅转调 `build.cx`（兼容旧习惯）。
-
-套件入口：`./unisacc.com -run tests/ujs/run.cx -- --smoke|--complete`（见 [`../../tests/ujs/README.md`](../../tests/ujs/README.md)）。
-
-## 用法
+## CLI
 
 ```bash
-sh ./ujs/ujs.com --version          # APE 须经 sh；本机原生可直接 ./ujs/ujs.com
-sh ./ujs/ujs.com FILE.ujs -o OUT.wasm
+./ujs/ujs.com --help
+./ujs/ujs.com FILE.ujs              # -> FILE.wasm
+./ujs/ujs.com FILE.ujs -o OUT.wasm
 ```
 
 ## 诚实边界
 
-- **已收**：APE／六目标／`?:`／`switch`／`null??`／`for-of`／`+=`／arrow／`function`+`...rest`（调用点内联）
-- **未收**：嵌 `compiler_core` 全表；多参闭包／高阶传递的完整 ES 语义
-- **不冒充**：CX3／CX4 内存安全；跨机切片执行收据
+- **是**：APE／六目标／host1 预言／stage0（含 arrow／fn+rest 内联）
+- **不是**：`compiler_core`／IntNet／Pages 必经；method emit 另弧
 
-不 tip／不 Draft，除非另授。
+不 tip／Draft，除非另授。

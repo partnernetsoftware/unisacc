@@ -1,54 +1,46 @@
 # UJS — 开箱
 
-> 规格：[`prd.md`](prd.md) · **版本**：[`plans/`](plans/)（当前 [`plans/v0.0.2.md`](plans/v0.0.2.md)）  
+> 规格：[`prd.md`](prd.md) · **版本**：[`plans/v0.0.2.md`](plans/v0.0.2.md)  
 > 地图：[`ARCHITECTURE.md`](ARCHITECTURE.md) · Paper B：[`../research/ujs-paper.md`](../research/ujs-paper.md)
 
-## 出货：`ujs.com`
+## 出货：`ujs.com`（host image）
 
-产品链 **只许** 根目录 `unisacc.com` + `.cx`（默认 `-run`）。无产品链 `.c`／`.py`。
-
-```bash
-# 仓库根
-./unisacc.com -run ujs/product/complete.cx   # APE + 语料 28/0 + 六目标
-./unisacc.com -run ujs/product/build-ape.cx  # 只出 APE
-./unisacc.com -run ujs/product/build.cx      # 本机原生（快迭代）
-./unisacc.com -run ujs/product/build-six.cx  # 六目标原生 → /tmp
-
-sh ./ujs/ujs.com --version
-sh ./ujs/ujs.com FILE.ujs -o OUT.wasm
-```
-
-细则：[`product/README.md`](product/README.md)。`ujs/ujs.com` 为生成物（已 gitignore）。
-
-**stage0 语料合同**：`corpus-host.cx` — 28 PASS／0 REFUSE（含 arrow／function+rest）。
-
-**测试套件入口**：
+**ujs+wasm 生产力工具**。产品链只用 `unisacc.com` + `.cx`。  
+这是 **host image**（标签 `host1_package`），不是 M3／`compiler_core`，也不是构造 IntNet。
 
 ```bash
+# 仓库根 — 套件
 ./unisacc.com -run tests/ujs/run.cx -- --smoke
 ./unisacc.com -run tests/ujs/run.cx -- --complete
+
+# 或直接产品闸
+./unisacc.com -run ujs/product/build.cx
+./unisacc.com -run ujs/product/complete.cx
+
+./ujs/ujs.com --version          # ujs.com 0.0.2（原生）；APE 用 sh ./ujs/ujs.com
+./ujs/ujs.com --help
+./ujs/ujs.com FILE.ujs           # 默认写出 FILE.wasm
+./ujs/ujs.com FILE.ujs -o OUT.wasm
 ```
 
-见 [`../tests/ujs/README.md`](../tests/ujs/README.md)。
+预言：[`../tests/ujs/host1-pass.txt`](../tests/ujs/host1-pass.txt)（28）+ [`../tests/ujs/host1-refuse.txt`](../tests/ujs/host1-refuse.txt)。  
+`expect.json`／Node 探针为 archive_only，船闸不打开。
 
 ## 目录
 
 | 路径 | 角色 |
 |---|---|
-| [`product/`](product/) | **出货宿主**：`ujs_main.cx`、构建／APE／语料闸 |
-| [`seed/stage0/`](seed/stage0/) | host 编译器 `compiler_min.cx` |
-| [`seed/construct/`](seed/construct/) | 构造臂（Python；P1 后置） |
-| [`iterate/`](iterate/) | M3：`compiler.ujs`／`compiler_core`／`compile.mjs`（实践脊） |
-| [`practice/`](practice/) | Pages／UXE／path-A 实验场 |
-| [`weights/`](weights/) | 可复用表数据 |
-| `construct` `core` `uxe` `web` `compile.mjs` | **兼容符号链接** → 上表板块 |
+| [`product/`](product/) | 出货宿主 |
+| [`plans/`](plans/) | **0.0.x 版本计划** |
+| [`seed/stage0/`](seed/stage0/) | stage0 编译器 |
+| [`iterate/`](iterate/) | M3 实践脊（另标签） |
+| [`practice/`](practice/) | Pages／UXE |
+| [`seed/construct/`](seed/construct/) | 构造臂（P1 后置） |
 
-## 实践脊（非主产物名）
+## 实践脊（非 host image 品牌）
 
 ```bash
-node ujs/compile.mjs foo.ujs -o foo.wasm   # 默认 compiler_core
-python3 -m ujs ujs2wasm …                  # 构造／对照；非出货必经
-./tests/ujs2wasm_compiler.sh
+node ujs/compile.mjs foo.ujs -o foo.wasm   # compiler_core；m3_scaffold
 ```
 
 不 tip／Draft／签／公开，除非另授。
