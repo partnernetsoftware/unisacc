@@ -209,12 +209,12 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 | 原生汇编室 | 新CX复用产品-E处理.S并展开宏；现存C编码器由有来源材料适配默认-run执行，189断言0；新ELF链接器16断言0。03代两架构各11对象已原生构建及链接为x86 7144B／ARM 7096B UNIKERN1，均已进入新根产品。 | `tools/kernels.md`、out/c43-native-kernel-execute-e4-01.*、out/c43-native-product-case0.*；x86真实E4同字节，完整编译ELF同字节且返回7。ARM真实执行及完整产品资格仍待验；PREPARED和功能分列。 |
 | 七流新合同室 | 原生stream-pack曾从旧P7裁七模型/74资源，共40断言0，含两源码链、真管道、镜像和具名拒绝；不转授新候选完整合同。 | out/c43-stream-contracts-03.log、tools/streams.md；当前根产品另已重建，完整RI/拒绝域/六目标仍待补。 |
 | CX所有权室 | 旧Pa7e8上的cx/owned使用真实模块隐私、固定4×8 i64存储和不回绕代际句柄；551断言0，外部直接访问data/slot各拒绝1。复制活句柄仍可别名，不是编译期所有权或通用堆。 | `make owned`、`cx/check_owned.cx`；只验证本机运行期设施，不代替七流十八网或完整库验收。 |
-| 旧套件封存室 | 旧1333队列保持停止，原F4/UNKNOWN不改PASS。当前冻结新表98覆盖/59批，19完整缺口保留。 | out/c43-all-ri-installed-11.log原20秒rc3，smoke16/0，58非smoke批/63已实现覆盖本次聚合NOT_RUN；不缓存PASS。 |
+| 旧套件封存室 | 旧1333队列保持停止，原F4/UNKNOWN不改PASS。当前冻结新表103覆盖/75批，19完整缺口保留。 | out/c43-all-flow-controls-installed-11.log原20秒rc3，smoke16/0，74非smoke批/68已实现覆盖本次聚合NOT_RUN；不缓存PASS。 |
 | ujs 子项目 | 独立规格与进度只在 [`ujs/prd.md`](ujs/prd.md)（及 `ujs/ARCHITECTURE.md`）；根宫殿不重述 ujs.com 代际／语料。跨项目只记：底座为 `unisacc.com`+`.cx`，不 tip／Draft 除非另授。 | [`ujs/prd.md`](ujs/prd.md) |
-| 优化合同室 | 有限uint32属性100/0属于旧P46，6word×5rot/4loop、literal gold、O0/O2各一次；未转授新P53。 | tests/properties.cx、out/c43-properties-01.log；完整属性/优化仍NOT_READY，07的241/193/16仅历史。 |
-| 新自举室 | 当前P53/S447的11/12原生两代固定点58/0，原30秒；当前根与12完整产品同字节，前后全核源/1241材料/收据。 | out/c43-native-selfhost-12.log；只复用单次校验只读字节，after物理重读；旧源未重演/无签名/v1缺builder限制保留，非host-seed三阶段或外宿主。 |
-| 资源与RI室 | P53实际P3四CASE各12/0，真实E3三态与E3→lower图像退出0/0/7/7，链路保留tapecheck、分别绑定两端真实输入；lower attrsfetch0不claim消费。此前RI/源适配/控制/snapshot局部证据保留。 | out/c43-ri-flow-*-01.log；source-adapter非installedCLI或完整RI，profile/目录负控待跑，外宿主/全预算NOT_READY。 |
-| 资格与发布室 | 当前P53/S447有本机具名smoke/RI/源适配/11-12固定点；完整19缺口、host-seed链和外宿主仍待验。 | 未签名/Draft/Latest/公开；旧CI不转授，C44-RUN-REUSE-01仍未实现/未测，不报启动提速。 |
+| 优化合同室 | 有限uint32属性已在当前P53重跑100/0，6word×5rot/4loop、literal gold、O0/O2各一次。 | tests/properties.cx、out/c43-properties-installed-11.log；完整属性/优化仍NOT_READY，07的241/193/16仅历史。 |
+| 新自举室 | 当前P53/S447的11/12原生两代固定点58/0，原30秒；当前根与12完整产品同字节，前后全核源/1241材料/收据。 | out/c43-native-selfhost-12.log；只复用单次校验只读字节，after物理重读；旧源未重演/无签名/v1缺builder限制保留。另有固定P3宿主HOST→三代实际构建均P53、新链40/0；NN/ASM可信输入、初始根辅助S测量及宿主依赖限制保留，非完整源码N22或外宿主。 |
+| 资源与RI室 | P53实际P3四CASE各12/0，真实E3三态与E3→lower图像退出0/0/7/7，链路保留tapecheck、分别绑定两端真实输入；lower attrsfetch0不claim消费。此前RI/源适配/控制/snapshot局部证据保留。 | out/c43-ri-flow-*-01.log；source-adapter非installedCLI或完整RI，profile九项133/0、目录两项30/0（03/01日志，手工-O2控制器、原限时），外宿主/全预算NOT_READY。 |
+| 资格与发布室 | 当前P53/S447有本机具名smoke/RI/源适配/11-12固定点；完整19缺口、host-seed链和外宿主仍待验。 | 未签名/Draft/Latest/公开；旧CI不转授，C44-RUN-REUSE-01加速仍未实现；当前e2e首2.009s/重复中位2.027s，9/0；OS-cold/内部相位未测，不报启动提速。 |
 
 旧M7/固定HEAD、旧CI/宿主交接、窗口计数与准备过程已移至[历史记忆快照](archive/prd-c43-pre-native-qualification-20261025.md)。本表只保留当前目标、能力、缺口和入口；原始身份、红/UNKNOWN与回退均未删除。
 
