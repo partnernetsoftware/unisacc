@@ -105,17 +105,43 @@ jobs:
           b /usr/bin/git rev-parse HEAD > "$RUNNER_TEMP/qualification/source-head"
           b /bin/cp release/candidate.json "$RUNNER_TEMP/qualification/candidate.json"
           SH
+      - name: Prepare original native suite plan without provider prerequisites
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/bound" 50 /usr/bin/env GATE_BOUND=1 TERM_SH_INSIDE=1 /bin/sh tests/gate.sh --plan > "$RUNNER_TEMP/qualification/bound-plan.nul"
+      - name: Import complete plan through existing native catalog
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/bound" 50 /bin/sh ./unisacc.com tests/suite/catalog.cx -- "$RUNNER_TEMP/qualification/bound-plan.nul" "$RUNNER_TEMP/qualification/bound-catalog.tsv"
       - name: Check original watchdog and Terminal ownership assertions
         timeout-minutes: 1
         run: |
           set -euo pipefail
-          # Existing legacy oracle, including Darwin-only original assertions;
-          # this does not replace the native default-run bundle path.
-          "$RUNNER_TEMP/bound" 8 /usr/bin/shasum -a 256 tests/boundcheck.py tests/bound.py tests/bound.c tests/term.sh tests/cxbin tests/safedel.cx > "$RUNNER_TEMP/qualification/bound-inputs.sha256"
-          rc=0
-          "$RUNNER_TEMP/bound" 55 python3 tests/boundcheck.py > "$RUNNER_TEMP/qualification/bound.log" 2>&1 || rc=$?
-          printf '%s\n' "$rc" > "$RUNNER_TEMP/qualification/bound.status"
-          test "$rc" = 0
+          # Import the existing bound unit verbatim; all original Darwin assertions remain.
+          "$RUNNER_TEMP/bound" 8 /usr/bin/shasum -a 256 tests/boundcheck.py tests/bound.py tests/bound.c tests/term.sh tests/cxbin tests/safedel.cx tests/gate.sh tests/suite/catalog.cx tests/suite/run.cx > "$RUNNER_TEMP/qualification/bound-inputs.sha256"
+          out="$RUNNER_TEMP/qualification/bound-run"
+          runner_rc=0
+          "$RUNNER_TEMP/bound" 55 /bin/sh ./unisacc.com tests/suite/run.cx -- "$RUNNER_TEMP/qualification/bound-plan.nul" "$RUNNER_TEMP/qualification/bound-catalog.tsv" "$out" --unit bound --independent --limit 55 --parent-container-unset > "$RUNNER_TEMP/qualification/bound-runner.log" 2>&1 || runner_rc=$?
+          printf '%s\n' "$runner_rc" > "$RUNNER_TEMP/qualification/bound-runner.status"
+          printf '%s\n' "$runner_rc" > "$RUNNER_TEMP/qualification/bound.status"
+          : > "$RUNNER_TEMP/qualification/bound.log"
+          for stream in stdout stderr; do
+            set -- "$out"/*."$stream"
+            if test "$#" = 1 && test -f "$1"; then
+              cat "$1" >> "$RUNNER_TEMP/qualification/bound.log"
+            else
+              printf 'original bound %s unavailable; runner did not complete capture\n' "$stream" >> "$RUNNER_TEMP/qualification/bound.log"
+            fi
+          done
+          set -- "$out"/*.rc
+          test "$#" = 1 && test -f "$1"
+          read -r oracle_rc < "$1"
+          [[ "$oracle_rc" =~ ^[0-9]+$ ]] && test "$oracle_rc" -le 255
+          printf '%s\n' "$oracle_rc" > "$RUNNER_TEMP/qualification/bound.status"
+          test "$runner_rc" = 0
+          test "$oracle_rc" = 0
       - name: Build actual universal CLI bundle (prepare only)
         timeout-minutes: 1
         run: |
