@@ -16,6 +16,7 @@ Run each command separately from the repository root, with a new output director
 ```sh
 tools/bound 55 sh ./unisacc.com tools/kernel-build.cx -- "$PWD" "$PWD/out/kernel-fresh" bootstrap
 tools/bound 55 sh ./unisacc.com tools/kernel-build.cx -- "$PWD" "$PWD/out/kernel-fresh" prepare
+tools/bound 55 sh ./unisacc.com tools/kernel-build.cx -- "$PWD" "$PWD/out/kernel-fresh" prepare-assembler
 tools/bound 55 sh ./unisacc.com tools/kernel-build.cx -- "$PWD" "$PWD/out/kernel-fresh" preprocess-x86_64
 tools/bound 55 sh ./unisacc.com tools/kernel-build.cx -- "$PWD" "$PWD/out/kernel-fresh" assemble-x86_64
 tools/bound 55 sh ./unisacc.com tools/kernel-build.cx -- "$PWD" "$PWD/out/kernel-fresh" link-x86_64
@@ -48,6 +49,31 @@ match. Every later use hashes the helper before execution and binds it into the
 full source/tool/bootstrap context; source and artifact checks were retained.
 This is a measured construction-hotspot cache, not a test-result cache or the
 default way to execute CX logic.
+
+Generation 04, built by the new development product, exposed the same remaining
+loop cost: all eleven objects and both material verifications finished, but the
+outer 55-second bound expired during final identity work. That generation has
+no completed object receipt. Independent phase timing measured source identity
+at 1.172s, material verification at 7.069s, and product compilation of the
+assembler at 23.809s. `prepare-assembler` now constructs that executable once,
+binding its exact source, product/source/tool context, flags and artifact SHA.
+Both ISA assembly steps check the cache before and after execution, retain both
+material regenerations, and retain full source/input checks. The separate cache
+construction checks regenerated source before compiling and its exact digest
+plus source context afterwards. This avoids repeated compilation; no functional
+result is cached or accepted from the failed generation.
+
+Generation 05's cache construction completed in 38.824s. Its x86 assembly step
+then completed in 22.389s with all eleven objects and both material verifications,
+instead of reaching the 55-second bound as generation 04 did. The largest action
+object matched generation 03 byte-for-byte; the full rebuild comparison remains
+a separate test. The 38.824s cache preparation is a cold construction cost and
+must not be hidden in the faster per-ISA number.
+
+`tests/assembler-cache.cx ROOT GENERATION ABS_NEW_PRIVATE_DIR` copies only the
+required construction material, corrupts the private executable and checks a
+named digest refusal before any of the eleven object outputs is created. Both
+checks passed in generation 05 (18.606s); live generation inputs were untouched.
 
 The new x86 kernel accepted a real E4 model and produced the same 592 output
 bytes as the prior executor. The rebuilt Linux driver and refreshed model
