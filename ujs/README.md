@@ -21,6 +21,15 @@ sh ./ujs/ujs.com FILE.ujs -o OUT.wasm
 
 **stage0 语料合同**：`corpus-host.cx` — 28 PASS／0 REFUSE（含 arrow／function+rest）。
 
+**测试套件入口**：
+
+```bash
+./unisacc.com -run tests/ujs/run.cx -- --smoke
+./unisacc.com -run tests/ujs/run.cx -- --complete
+```
+
+见 [`../tests/ujs/README.md`](../tests/ujs/README.md)。
+
 ## 目录
 
 | 路径 | 角色 |

@@ -123,7 +123,7 @@
 | **构造 / jtape** | gold→IntNet→oracle；`acc` / fold / icfold；全表 `ujs2wasm` | 方法验收；表阶段仍欠全量 P-2 Lean（继承 Paper A） |
 | **M3 出货** | 手写 `compiler.ujs`→`compiler_core.wasm`；stage2≡ · body≡ · ship 无 python emit | **不是** IntNet；交付面 = **UJS-1_ship**（渐扩），≠ 全表 UJS-1 |
 
-写 Paper B / Release 时：出货写 core；`web-build` 是 path-A 开发/引擎残线；语言门 = `ujs.sh` + `ujs2wasm_compiler.sh` + `uxe_ship_js`，UXE 另门（§目标 #4）。
+写 Paper B / Release 时：出货写 **`ujs.com`**（host1）与／或 core（M3 实践）；`web-build` 是 path-A 残线；**host1 门** = `tests/ujs/run.cx`；UXE／Pages 另门；旧 `ujs.sh` 已归档。
 
 ```
 0 emit 齐 · 2a ship-js     ✓
@@ -323,10 +323,11 @@ compile(src: Uint8Array|string) →
 
 | 门 | 命令 |
 |---|---|
-| 语言 / 构造 / **ujs2wasm** | `./tests/ujs.sh`（含 `ujs2wasm.sh` → `ujs2wasm_step.sh`） |
-| **ship-js 合同** | `./tests/uxe_ship_js.sh` |
-| UXE 无人 | `cd ujs && npm run test:uxe:all` |
+| **`ujs.com` host1** | `./unisacc.com -run tests/ujs/run.cx -- --smoke`；发版材料另跑 `--complete` |
+| **ship-js 合同**（实践脊） | 旧 `uxe_ship_js`／Pages 另门（脚本或在 archive；不挡 host1） |
+| UXE 无人 | `cd ujs && npm run test:uxe:all`（另门） |
 | Pages | `npm run ship:pages` 后抽玩感 |
+| 旧语言／全表 | `archive/testing-c43-legacy/tests/ujs*.sh`（考古；非 host1 合同） |
 
 **工具（摘）**：`python3 -m ujs web-build` · `ujs2wasm` · `./ujs/scripts/release-artifacts.sh` · `ship-pages.sh` · `uxe-gate.sh`。  
 指纹：`core/BUILD.json`。二进制走 GitHub Release，不进主树。
@@ -406,7 +407,7 @@ ship B ══> compiler_core → sim.wasm  （无 engine.wasm / 无 python3 emit
 {app} ══只调══> host_*          （不知 canvas / fetch / key）
 UXEP ══一次一包══> host_gpu_submit
 UXIN ══> host_input_read
-tests/ujs.sh ══含══> tests/ujs2wasm.sh
+tests/ujs/run.cx ══调══> ujs/product/{build,corpus-host,complete}.cx
 ```
 
 ## T3. 出货 DAG —— 两条路径（两脊）
@@ -522,7 +523,7 @@ flowchart TD
 
     subgraph R6["哨所 · 观测与门禁"]
         F1["__UXE_SNAP__ 一帧 JSON"]
-        F2["分层门禁：ujs.sh · compiler · ship-js · uxe另门"]
+        F2["分层：tests/ujs/run.cx · UXE/Pages另门 · 旧脚本归档"]
         F3["截图非默认；人只审手感"]
         F1 --> F2 --> F3
     end
@@ -571,19 +572,19 @@ flowchart LR
 ```mermaid
 stateDiagram-v2
     [*] --> Lang
-    Lang: 语言/构造 ujs.sh
-    Product: ujs2wasm_compiler + uxe_ship_js
+    Host: tests/ujs/run.cx（ujs.com host1）
+    Practice: M3/core · uxe_ship_js（另门）
     Uxe: test:uxe:all（另门）
     Ship: ship:pages
     Feel: 人审手感
 
-    Lang --> Product: 构造绿后验出货脊
-    Product --> Ship: core/sim 合同绿
+    Host --> Feel: host1 绿即可推进产品
+    Practice --> Ship: Pages 实践脊
     Ship --> Feel: docs 可玩
     Feel --> [*]
-    Ship --> Uxe: UXE 另验，不挡语言/出货
+    Ship --> Uxe: UXE 另验，不挡 host1
 
-    Lang --> Lang: 卡住改语言/gold；勿训练填表；勿把 M3 当 IntNet
+    Host --> Host: 卡住改 stage0/.cx；勿训练填表；勿把 M3 当 IntNet
 ```
 
 ## 目标推进图
@@ -613,7 +614,7 @@ flowchart TD
 | **两脊** | 构造/jtape（IntNet）∥ M3 出货（`compiler_core`，非 IntNet） |
 | **A / B** | path-A `ujs_full` 演示 / path-B `sim.wasm` 出货步进 |
 | **UJS-1_ship** | M3 已交付子集 ⊂ 全表 UJS-1 |
-| **门禁** | `ujs.sh` · `ujs2wasm_compiler` · `uxe_ship_js` · UXE 另门 |
+| **门禁** | `tests/ujs/run.cx`（smoke／complete）· UXE／Pages 另门 · 旧 `ujs.sh` 已归档 |
 | **host_*** | 核唯一出入口；GPU/key 停 Host |
 | **UXEP / UXIN** | 一次一包提交 / 输入快照 |
 | **BUILD.json** | 与 Release 对指纹 |

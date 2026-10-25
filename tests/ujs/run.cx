@@ -1,0 +1,95 @@
+#!/usr/bin/env -S unisacc.com -run
+/* UJS product suite entry (unisacc.com + .cx only).
+   ./unisacc.com -run tests/ujs/run.cx -- --list
+   ./unisacc.com -run tests/ujs/run.cx -- --smoke     # native build + corpus 28/0
+   ./unisacc.com -run tests/ujs/run.cx -- --complete  # APE + corpus + six
+*/
+static int exists(const char *p) {
+    FILE *f = fopen(p, "rb");
+    if (!f) return 0;
+    fclose(f);
+    return 1;
+}
+
+static int enter_root(const char *argv0) {
+    char dir[4096];
+    size_t l;
+    char *sl;
+    if (exists("./ujs/product/complete.cx")) return 0;
+    if (!argv0 || !argv0[0]) return -1;
+    l = strlen(argv0);
+    if (l >= sizeof dir) return -1;
+    memcpy(dir, argv0, l + 1);
+    sl = strrchr(dir, '/');
+    if (!sl) return -1;
+    *sl = 0;
+    if (chdir(dir) != 0) return -1;
+    return chdir("../..");
+}
+
+static int run_gate(const char *cx, int timeout_s) {
+    char *av[5];
+    char *out = 0;
+    size_t n = 0;
+    int rc;
+    av[0] = "sh";
+    av[1] = "./unisacc.com";
+    av[2] = "-run";
+    av[3] = (char *)cx;
+    av[4] = 0;
+    rc = cx_runv_timeout(av, timeout_s, &out, &n);
+    if (out && n) fwrite(out, 1, n, stdout);
+    free(out);
+    return rc;
+}
+
+static void usage(void) {
+    fprintf(stderr, "usage: tests/ujs/run.cx -- --list | --smoke | --complete\n");
+}
+
+int main(int argc, char **argv) {
+    int rc;
+    if (enter_root(argv[0]) != 0) {
+        fprintf(stderr, "tests/ujs/run.cx: need repo root\n");
+        return 2;
+    }
+    if (argc != 2) {
+        usage();
+        return 2;
+    }
+    if (!strcmp(argv[1], "--list")) {
+        puts("GATE\tujs.product.smoke\tujs/product/build.cx + corpus-host.cx (28/0)");
+        puts("GATE\tujs.product.complete\tujs/product/complete.cx (APE+28/0+six)");
+        puts("FIXTURE\ttests/ujs2wasm/corpus\thost1 PASS list");
+        puts("FIXTURE\ttests/ujs2wasm/neg\tlegacy refuse probes (construct/M3)");
+        puts("LEGACY\tarchive/testing-c43-legacy/tests/ujs*.sh\tPython/Node historical");
+        puts("NOT_IN_SUITE\ttests/run.cx\tunisacc CX MVP (not ujs.com)");
+        puts("PRACTICE\tuxe_ship_js / npm test:uxe\tPages/UXE separate");
+        return 0;
+    }
+    if (!strcmp(argv[1], "--smoke")) {
+        rc = run_gate("ujs/product/build.cx", 60);
+        if (rc != 0) {
+            fprintf(stderr, "tests/ujs/run.cx: build.cx failed rc=%d\n", rc);
+            return 1;
+        }
+        rc = run_gate("ujs/product/corpus-host.cx", 60);
+        if (rc != 0) {
+            fprintf(stderr, "tests/ujs/run.cx: corpus-host failed rc=%d\n", rc);
+            return 1;
+        }
+        printf("tests/ujs/run.cx: ok smoke (build + corpus 28/0)\n");
+        return 0;
+    }
+    if (!strcmp(argv[1], "--complete")) {
+        rc = run_gate("ujs/product/complete.cx", 180);
+        if (rc != 0) {
+            fprintf(stderr, "tests/ujs/run.cx: complete.cx failed rc=%d\n", rc);
+            return 1;
+        }
+        printf("tests/ujs/run.cx: ok complete\n");
+        return 0;
+    }
+    usage();
+    return 2;
+}

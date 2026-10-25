@@ -1,6 +1,20 @@
-# New native test MVP
+# Tests
 
-This is a new batch, with no imported PASS records and no legacy runner dependencies.
+## UJS product (`ujs.com`)
+
+Host1 ship gates live under [`ujs/`](ujs/)（`unisacc.com` + `.cx` only）:
+
+```
+./unisacc.com -run tests/ujs/run.cx -- --list
+./unisacc.com -run tests/ujs/run.cx -- --smoke
+./unisacc.com -run tests/ujs/run.cx -- --complete
+```
+
+Fixtures: [`ujs2wasm/`](ujs2wasm/). Details: [`ujs/README.md`](ujs/README.md).
+
+## New native test MVP (unisacc CX)
+
+This is a separate batch, with no imported PASS records and no legacy runner dependencies. It does **not** gate `ujs.com`.
 
 From a checkout with unisacc.com:
 

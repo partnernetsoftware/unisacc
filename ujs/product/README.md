@@ -29,6 +29,8 @@
 
 `build.sh` 仅转调 `build.cx`（兼容旧习惯）。
 
+套件入口：`./unisacc.com -run tests/ujs/run.cx -- --smoke|--complete`（见 [`../../tests/ujs/README.md`](../../tests/ujs/README.md)）。
+
 ## 用法
 
 ```bash
