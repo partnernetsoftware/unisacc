@@ -61,6 +61,7 @@ suite-tools-native通过默认-run运行check.cx：原声明恒等、依赖顺�
 该入口尚未替代正式发布验收，也不表示全部旧oracle已经原生化。原断言中仍必需的Python如实保留；新增目录、依赖图和调度逻辑均为.cx。
 
 callback lower part1由`exec-librarycallbacklower-model-1-off`与`-1-on`两个默认-run单元联合覆盖：固定原脚本SHA，off保留原fixture生产及12行off verdict，on保留8行on verdict；两者均保留原12组off及on模型seal检查与cleanup。原`other11 on targets UNVERIFIED`完整保留，不代表其它目标已执行，也不声称完整lower ABI通过。原脚本part1聚合CLI兼容保留；模型key、原producer与seals不变，verdict每次真实执行。
+门面按固定原7939字节的prefix7497/off294/on148直接取块，并验证完整SHA及逐字节重建；C源不重复原命令，原脚本中的三个真实解释器调用及依赖仍保留。`--inspect`额外报告两段实际生成脚本SHA，可与旧H3门面逐字节对拍；这不替代新H6两个原40秒完整执行。
 
 source-to-ELF原第一片`ELF_SHARD=1/3`分为`exec-srcelf-1a`（1/6）与`exec-srcelf-1b`（4/6），两个有序子集不重叠且并集完整等于原第一片。第二、第三片不变；所有入口仍运行原check-elf.sh、原完整七阶段与独立C/Python参考比较，不复用verdict，不改变模型key或原40秒验收界。分组只提供联合覆盖，旧第一片超时保留。
 
