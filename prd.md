@@ -142,13 +142,13 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 <a id="work-tree"></a>
 ### 思维树
 
-**目标：完成 unisacc 0.0.43 并公开发布。** 发布目标已有授权；minicon Apple 跨仓接入的具体授权仍待答。2026-10-24 核对 Latest 为 v0.0.42，本版尚未公开。
+**目标：完成 unisacc 0.0.43 并公开发布。** 最终目标保留；当前主人明确禁止Draft／Latest／签名／公开，先完成技术收口，不能用此前一般发布授权越过最新禁令。minicon Apple跨仓具体授权仍待答；本版尚未公开。
 
 ```text
 0.0.43 公开发布
 ├─ 已完成：F1产品修复、F2文档／探针；F3历史基线187项=186 PASS＋1宿主未核
 ├─ 已完成：F6三实际编译器SHA相同；三阶段五代码切片实际重编、原50秒界通过
-├─ 当前：E4本版接main并通过当前F4主路径窄试；E3原融合因located cursor/tpos读字节不同REJECT并撤回；原H0停237，777 PASS／463待办
+├─ 当前：修复union16默认链接并补E4回退资格，随后冻结main＋新E4包，干净新state跑完整最终清单；旧H0停237仅留诊断，不先补其463待办、不迁777旧绿
 │  ├─ 070窗自然结束、2193已终止；旧冻结的结果仅保留诊断，不计有效正式PASS
 │  ├─ 清单1317项；原seedmemory严格17例=行为16＋真实新鲜度1，后者仍UNKNOWN／OPEN
 │  ├─ 固定env-pin；绑定新HEAD与真实非空Git闭包身份，禁止迁移旧绿或沿用旧闭包hash
@@ -159,7 +159,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 └─ 待完成：Draft资产核对 → Latest／公开 → 下载SHA与运行复核
 ```
 
-**下一动作：** E4单刀继续本版受影响路由及真实MS.fail／SOLVE.old回退资格；目前只有hello两模式实际shipping窄试，不算80路由全域通过，私有回退见证工具139亦不作产品失败。E3原刀已因located cursor／tpos差异REJECT，保留窄试与生成证据，撤回三源码，不另开CT研究或延期台账。冻结H0停237：777 PASS／463待办，6资源UNKNOWN、6宿主未核、19既有裁定、21 NEEDS_RULING、23 BLOCKED、2 HOST_TIMEOUT；union16-direct1仍待实际诊断。H13已结证20功能PASS／60 variants＋2 PREPARED（冷28.883秒／HIT11.682秒）。V5 union232私有1193补件／32源DATA＋真实4父／18notrun认证35.130秒；whole50、完整M7、owner未测。旧P297与新P7f709分别记证，不推进发布或签名。
+**下一动作：** union16已同F4／原body确诊nonPIC libffi.a的R_X86_64_PC32，默认PIC已使runtime_build为0、is8/plain三优化全0，随后原scope在is8/gp5fp7 O0的value/canary/prefix/tail/status复合断言实际rc1；先拆私有观测定位宿主ffi或产品桥接，不降压力或削断言。唯一重活令牌在该刀。随后E4真实MS.fail／SOLVE.old分支验证，冻结最终main＋E4完整包／新S及sidecar，另起干净state生成并执行完整最终清单。现行合同没有先补旧P297剩463项的前置；旧H0停237及所有OPEN／失败留作诊断，不迁旧绿、不扩大旧修复映射代替新候选资格。新候选全清单尚未启动，RC／六平台CI／owner／最终字节均须针对最终身份重取。现V5固定P297/c90不能换两个常量冒充新产品资格；先核现成纯新计划准入接口。旧6资源UNKNOWN／宿主未核仍是实际义务，DATA一致性不授发布资格。E3原刀REJECT撤回。Draft／Latest／签名／公开禁令保持。
 
 H2 reader七→十一、H3 callback一→二、H4 srcelf首片一→二均已实际结证。H6@a631445c23七项原40秒首次全0：callback off/on 21.492／34.606秒、context 8.355秒、typed 5.180秒、variadic 14.601秒、callback-plan 12.195秒、resolver 5.829秒，普通及sanitizer分支保留；原F4环境和工具树未改，P297／Sc90不变。context选择已存在PIC库，四个宿主探针补GNU特性声明；只绑定已观察的三个原rc1记录及原始日志SHA，不通放断言失败，也不虚构尚未执行的两项原失败。
 
