@@ -63,9 +63,11 @@ separate batches do not inherit a persisted PASS in the main runner.
 `sh ./unisacc.com tests/formats.cx -- ROOT ABS_NEW_OUT` is the separate six-image
 container batch. It checks architecture, bounded load/section headers and the
 Linux x86_64 return-7 oracle against the current root product; the other five
-native hosts are explicitly NOT_RUN. Fourteen checks passed on development
-product Pa7e8. This is partial format evidence; full object/boundary/host
-obligations remain NOT_READY in the main runner.
+native hosts are explicitly NOT_RUN. The earlier fourteen checks on Pa7e8 remain
+historical evidence. Current P53 was independently rerun with14/0 in
+`out/c43-formats-installed-11.log`, including actual Linux x86_64 execution;
+the other five native hosts remain NOT_RUN. This is partial format evidence;
+full object/boundary/host obligations remain NOT_READY in the main runner.
 
 The source tree is read-only while running. Apply a caller-owned watchdog of at most 30 seconds for this MVP; the runner performs no child process spawning and has no inner scheduling steps.
 
@@ -544,3 +546,80 @@ been tested. These finite refusals do not establish hermetic host dependencies,
 NN/ASM source reconstruction, historical process execution, complete host-seed
 N22 or foreign-host qualification. The 19 broad gaps remain open. Internal phase
 and cold/hot timing remain UNMEASURED.
+
+The nine `objects-*` batches register three finite obligations:
+`formats.linux-unit-objects`, `negative.unit-linker` and
+`negative.unit-unsupported-targets`. Their named `objects` material is prepared
+and verified independently; [tools/README.md](../tools/README.md) describes its
+recipe and identity boundaries:
+
+```sh
+tools/bound 55 sh ./unisacc.com tools/object-material.cx -- prepare ROOT NEW_ABS_MATERIAL
+tools/bound 20 sh ./unisacc.com tools/object-material.cx -- --verify ROOT MATERIAL
+tools/bound 55 sh ./unisacc.com tests/objects.cx -- ROOT MATERIAL NEW_ABS_OUT CASE
+```
+
+Use a fresh absolute output directory for each CASE: `link`, `mixed-target`,
+`missing-definition`, `duplicate-definition`, `old-unit-version`,
+`unsupported-osx-x86_64`, `unsupported-osx-arm64`,
+`unsupported-win-x86_64` or `unsupported-win-arm64`. Every batch is SOURCE,
+Linux x86_64, bounded at 55 seconds. The controller command above uses default
+compilation; no controller optimization option has been assumed or qualified.
+The material constructor's explicit `-O2 -c -funit` object flags are separate
+from controller compilation.
+
+The header-free `main.cx` references `object_value` and returns it, while
+`value.cx` defines it as 7. The constructor produces real product objects
+`main-x86_64.o`, `value-x86_64.o` and `value-arm64.o`. The parent never
+recompiles these source units. It independently checks literal ELF64 little
+endian ET_REL=1, machine62/183 and bounded section/name/symbol/RELA tables.
+ARM is a container-format observation only; native ARM execution remains NOT_RUN.
+The `link` CASE requires real product linking, an independently checked
+x86_64 executable and actual return7 with empty stdout/stderr.
+
+Four linker controls require exact rc1, empty stdout, the complete literal
+diagnostic and no created output: mixed Linux architectures, an undefined
+`object_value`, a duplicate definition and an old unit version. The last
+locates exactly one bounded UNISATAPE1 metadata section and its first
+`.unit 2` record before changing only the version byte in a private object;
+the original material and private mutation must remain unchanged by refusal.
+Four other controls require the exact unsupported object-target diagnostic for
+both architectures on macOS and Windows. Each negative CASE then links the
+valid x86_64 objects and executes return7 as recovery.
+
+Every parent verifies the material before and after, with two independent
+20-second child bounds. A negative target is bounded at 2 seconds; the recovery
+or positive link at 8 seconds and the generated executable at 2 seconds.
+The old-unit metadata mutation is a bounded private precondition, not an
+arbitrary whole-file first-match edit. Eleven original input hashes, including
+the product, constructor, controller, support/identity source, receipt, literal
+sources and objects, are checked before/after. Exact stdout/stderr, actual rc
+and argument vectors are retained for each child. Timeouts do not satisfy a
+refusal predicate.
+
+The actual `link01` parent completed20 assertions with zero failures using
+MAT02 within the original55-second limit, recorded in
+`out/c43-objects-link-01.log`. Its real product-linked x86_64 image returned7
+with empty stdout/stderr. The actual `mixed-target01`, `missing-definition01`
+and `duplicate-definition01` parents each completed22/0; `old-unit-version01`
+completed24/0. All five independent parents returned actual rc0 within their
+original55-second limits, totaling110 assertions with zero failures
+(20+22+22+22+24). Their logs are
+`out/c43-objects-{mixed-target,missing-definition,duplicate-definition,old-unit-version}-01.log`
+and the link log above. All four unsupported-target parents subsequently
+completed22/0 each with actual outer rc0 under the same55-second limit, in
+`out/c43-objects-unsupported-{osx-x86_64,osx-arm64,win-x86_64,win-arm64}-01.log`.
+All nine independent parents therefore completed198 assertions with zero
+failures (20+seven times22+24), using the unchanged MAT02 recipe and original
+budgets. Unsupported-target results are exact product refusals followed by
+Linux x86_64 return7 recovery; they are not macOS/Windows object generation or
+native execution. The earlier independent link probe is not parent evidence. MAT02 preparation and verification completed
+within the original 55/20-second limits, recorded in
+`out/c43-object-material-prepare-02.log` and
+`out/c43-object-material-verify-02.log`, solely as PREPARED/VERIFIED
+no-test-result observations. These material records do not establish any parent
+PASS. The three exact coverage rows describe code availability, not stored
+results. The 19 broad gaps remain open, including complete formats and negative
+domains. Mach-O/COFF unit objects, system-linker interoperability and foreign
+native execution are not qualified. Internal phase and cold/hot timings remain
+UNMEASURED.
