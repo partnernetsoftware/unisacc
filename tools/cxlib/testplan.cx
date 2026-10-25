@@ -8,6 +8,12 @@ typedef struct {
  int planned_missing_sources;int coverage_rows;int implemented_coverage;
  int unresolved_coverage;int unmapped_unresolved;int executed_batches;
 } tp_summary;
+/* Read-only borrowed views, valid only during their callback. All rows have
+ * passed the same complete validation before any callback occurs. Views and
+ * strings must not escape; this API neither executes nor prepares batches. */
+typedef struct {const char *id,*implementation,*layer,*source,*mode,*platform,*budget,*materials,*entry,*args,*coverage,*expect;int source_present;} tp_batch_view;
+typedef struct {const char *id,*layer,*implementation,*expected,*source;int mapped,implemented_batch;} tp_coverage_view;
+typedef struct {void (*batch)(const tp_batch_view *,void *);void (*coverage)(const tp_coverage_view *,void *);void *context;} tp_observer;
 
 static int tp_bad(char *why,size_t cap,const char *reason,int row,const char *id){snprintf(why,cap,"%s row=%d id=%.127s",reason,row,id?id:"-");return -1;}
 static int tp_name(const char *s){size_t i,n=strlen(s);if(!n||n>127||s[0]<'a'||s[0]>'z')return 0;for(i=1;i<n;i++)if(!((s[i]>='a'&&s[i]<='z')||(s[i]>='0'&&s[i]<='9')||s[i]=='-'||s[i]=='_'||s[i]=='.'))return 0;return 1;}
@@ -40,7 +46,7 @@ static int tp_expect(const char *s,int planned){size_t i;if(planned)return !strc
  * The root is borrowed; only regular primary .cx sources are checked here.
  * Material contents, transitive modules, actual host and candidate are not
  * qualified by this parser and no output command is ever executed. */
-int tp_analyze(const char *root,const char *registry,size_t rn,const char *coverage,size_t cn,int emit,tp_summary *out,char *why,size_t cap){
+static int tp_process(const char *root,const char *registry,size_t rn,const char *coverage,size_t cn,int emit,tp_summary *out,char *why,size_t cap,const tp_observer *observer){
  char *r=0,*c=0,**bf=0,**cf=0;int *mapped=0,*implemented=0,*last=0,*source_present=0;
  int nb=0,nc=0,i,j,rc=-1;tp_summary summary;memset(&summary,0,sizeof summary);if(out)memset(out,0,sizeof *out);if(why&&cap)why[0]=0;
  if(!root||!registry||!coverage||!out||!why||!cap||root[0]!='/'||strlen(root)>4095){if(why&&cap)tp_bad(why,cap,"arguments",0,0);return -1;}
@@ -77,5 +83,9 @@ int tp_analyze(const char *root,const char *registry,size_t rn,const char *cover
  summary.batches=nb;summary.coverage_rows=nc;*out=summary;rc=0;
  if(emit){for(i=0;i<nb;i++){char **v=bf+i*12;const char *state=!strcmp(v[1],"PLANNED")?"PLANNED":strcmp(v[7],"-")?"UNPREPARED":"NOT_RUN";printf("BATCH\t%s\t%s\timplementation=%s\tlayer=%s\tsource=%s\tsource_state=%s\tmode=%s\tplatform=%s\tbudget=%s\tmaterials=%s\tentry=%s\targs=%s\tcoverage=%s\texpect=%s\n",v[0],state,v[1],v[2],v[3],source_present[i]?"PRESENT":"MISSING",v[4],v[5],v[6],v[7],v[8],v[9],v[10],v[11]);}
   for(i=0;i<nc;i++)printf("COVERAGE\t%s\t%s\tmapped=%d\timplemented_batch=%d\toracle=%s\n",cf[i*5],cf[i*5+2],mapped[i],implemented[i],cf[i*5+3]);}
+ if(observer){for(i=0;i<nb;i++){char **v=bf+i*12;tp_batch_view view={v[0],v[1],v[2],v[3],v[4],v[5],v[6],v[7],v[8],v[9],v[10],v[11],source_present[i]};observer->batch(&view,observer->context);}for(i=0;i<nc;i++){char **v=cf+i*5;tp_coverage_view view={v[0],v[1],v[2],v[3],v[4],mapped[i],implemented[i]};observer->coverage(&view,observer->context);}}
  done:free(r);free(c);free(bf);free(cf);free(mapped);free(implemented);free(last);free(source_present);return rc;
 }
+
+int tp_analyze(const char *root,const char *registry,size_t rn,const char *coverage,size_t cn,int emit,tp_summary *out,char *why,size_t cap){return tp_process(root,registry,rn,coverage,cn,emit,out,why,cap,0);}
+int tp_visit(const char *root,const char *registry,size_t rn,const char *coverage,size_t cn,const tp_observer *observer,tp_summary *out,char *why,size_t cap){if(!observer||!observer->batch||!observer->coverage){if(out)memset(out,0,sizeof *out);if(why&&cap)tp_bad(why,cap,"observer-arguments",0,0);return -1;}return tp_process(root,registry,rn,coverage,cn,0,out,why,cap,observer);}
