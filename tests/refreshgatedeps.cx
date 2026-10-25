@@ -1459,6 +1459,36 @@ int main(int argc, char **argv) {
         oset(consumer, "command", pylit("['./exec/parse2/libraryfunctionimportscheck.sh', '--require-cached']"));
     }
     changed("libraryfunctionimports-preparation", "cloned complete consumer declaration for six atomic preparation phases");
+    /* ARM/Mach-O: retain the original complete oracle closure for material and check jobs. */
+    {
+        const char *originals[] = {"exec-arm", "exec-macharm"};
+        const char *helpers[] = {"tests/armphase.cx", "tests/machophase.cx"};
+        const char *checks[] = {"--all", "--check"};
+        J *enc_common = pylit("['tests/cxlib/seedprep.cx', 'tests/cxbin', 'tests/safedel.cx', 'tests/enc/tins.py', 'tests/checklib.py', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'exec/build/gen.py', 'exec/c/tbl.py', 'exec/c/run.c', 'unisacc.com', 'unisacc.com.build.json']");
+        J *enc_arm_sources = pylit("['exec/enc/armcheck.sh', 'exec/enc/armcheck.py', 'exec/enc/armmemcheck.py', 'exec/enc/armbranchcheck.py', 'exec/enc/armintcheck.py', 'exec/enc/armfpcheck.py', 'exec/enc/arminputcheck.py', 'exec/enc/armlayoutcheck.py', 'exec/enc/realcheck.py']");
+        J *enc_macho_sources = pylit("['exec/enc/machocheck.sh', 'exec/enc/machocheck.py']");
+        for (int family = 0; family < 2; family++) {
+            J *base = jcopy(need(suites, originals[family])), *extra[3], *paths, *hs, *guard_paths = jnew(JARR);
+            extra[0] = enc_common; extra[1] = family ? enc_macho_sources : enc_arm_sources; extra[2] = jnew(JARR); apush(extra[2], jstr(helpers[family]));
+            paths = sorted_union(extra, 3);
+            /* Generated product bytes are executable/file inputs, not absent Git-source guards. */
+            for (int f = 0; f < paths->n; f++) if (!jstreq(paths->v[f], "unisacc.com") && !jstreq(paths->v[f], "unisacc.com.build.json")) apush(guard_paths, jcopy(paths->v[f]));
+            hs = head_shas(guard_paths);
+            for (int prep = 0; prep < 2; prep++) {
+                J *unit = jcopy(base), *ls[2], *guards = oget(unit, "guards"), *cmd;
+                char name[80]; snprintf(name, sizeof name, "%s%s", originals[family], prep ? "-prepare" : "");
+                ls[0] = need(unit, "files"); ls[1] = paths; oset(unit, "files", sorted_union(ls, 2));
+                ls[0] = need(unit, "trees"); ls[1] = pylit("['seed']"); oset(unit, "trees", sorted_union(ls, 2));
+                ls[0] = oget(unit, "tools"); ls[1] = pylit("model_tools + ['env', 'uname', 'wc', 'codesign']"); oset(unit, "tools", sorted_union(ls, 2));
+                if (!guards) { guards = jnew(JOBJ); oset(unit, "guards", guards); }
+                for (int f = 0; f < hs->n; f++) oset(guards, hs->k[f], jcopy(hs->v[f]));
+                oset(unit, "executable_inputs", pylit("True"));
+                cmd = pylit("['tests/bound', '39', 'sh', './tests/cxbin']");
+                apush(cmd, jstr(helpers[family])); apush(cmd, jstr(prep ? "--prepare" : checks[family])); oset(unit, "command", cmd);
+                if (!jeq(oget(suites, name), unit)) { oset(suites, name, unit); changed(name, "original full oracle closure plus verified material helper"); }
+            }
+        }
+    }
     oset(suites, "suite-tools-native", pylit("{'command': ['tests/bound', '55', 'sh', './unisacc.com', 'tests/suite/check.cx'], 'files': ['tests/suite/check.cx', 'tests/suite/run.cx', 'tests/suite/catalog.cx', 'tests/suite/graph.cx', 'tests/suite/prepdecl.cx', 'tests/cxlib/pyjson.cx', 'tests/prepgroups.json', 'tests/safedel.cx', 'tests/bound', 'tests/bound.c', 'tests/bound.py', 'unisacc.com', 'unisacc.com.build.json'], 'trees': ['include'], 'executable_inputs': True, 'tools': ['sleep', 'cat', 'mkdir', 'rm', 'mv', 'rmdir', 'chmod', 'uname', 'sh']}"));
     { J *unit = jcopy(need(suites, "suite-tools-native"));
       oset(unit, "command", pylit("['tests/bound', '55', 'sh', './unisacc.com', 'tests/suite/check.cx', '--', '--fail-fast']"));
@@ -1687,6 +1717,23 @@ int main(int argc, char **argv) {
       }
     }
     changed("qualified-provider-transitive-inputs", "all shared-provider readers bind manifest verification module bodies");
+    /* Legacy interpreter facades import the native resolver body as a real input. */
+    {
+      J *facades = pylit("['tests/librarycontextcheck.cx', 'tests/libraryoracleprovider.cx', 'tests/targetpackagephase.cx']");
+      J *paths = pylit("['tests/cxlib/pyrun.cx']"), *hs = head_shas(paths);
+      for (int k = 0; k < suites->n; k++) {
+        J *unit = suites->v[k], *files = oget(unit, "files"); int uses = 0;
+        if (!files || files->t != JARR) continue;
+        for (int f = 0; f < facades->n; f++) if (lhas(files, facades->v[f])) uses = 1;
+        if (uses) {
+          J *ls[2], *guards = oget(unit, "guards"); ls[0] = files; ls[1] = paths;
+          oset(unit, "files", sorted_union(ls, 2));
+          if (!guards) { guards = jnew(JOBJ); oset(unit, "guards", guards); }
+          for (int f = 0; f < hs->n; f++) oset(guards, hs->k[f], jcopy(hs->v[f]));
+        }
+      }
+    }
+    changed("legacy-facade-interpreter-module", "context, oracle and target-pair callers bind the complete native interpreter resolver");
     jdump(&tb, d, 0); bputc(&tb, '\n');
     if (cx_write("tests/gatedeps.json", tb.b, tb.n)) die("cannot write", "tests/gatedeps.json");
     {   char **sa = xmalloc((size_t)(treeset->n + 5) * sizeof *sa); size_t n; char *s, *e;

@@ -64,9 +64,9 @@ prep-0)
     echo "prep-0: elf and o1 chain cached; second elf run hit"; exit 0 ;;
 prep-1|prep-2|prep-3|prep-4|prep-5)
     K=${1#prep-}
-    # 0.0.43: parts 1-2 (warnparse, errorparse: gen.py parse2 --errors alone runs 63-76 s) construct with the C seed tools
+    # 0.0.43: all five preparation groups use the C seed tools; cold traced Python construction can exceed a gate window.
     # (seed/gen.c, tbl.c, net.c by the host cc; byte-identical, as buildcompiler.sh's SEED_GEN=1), under the same cache key
-    ST=; case $K in 1|2) mkdir -p "$T/seedbin"; for t in gen tbl net; do b cc -std=c99 -O2 -w -Iseed "seed/$t.c" -o "$T/seedbin/$t"; done; ST="--seed-tools $T/seedbin";; esac
+    ST=; case $K in 1|2|3|4|5) mkdir -p "$T/seedbin"; for t in gen tbl net; do b cc -std=c99 -O2 -w -Iseed "seed/$t.c" -o "$T/seedbin/$t"; done; ST="--seed-tools $T/seedbin";; esac
     [ "$K" != 2 ] || ST="$ST --keep-json"   # errorparse: keep the seed-gen JSON for prep-f1json (F1), no gen.py rerun
     "$_BOUND" 55 python3 exec/c/compilerpack.py --prepare-only $ST --part "$K/5" --o1 "$T/o1.net" --include include -o /dev/null "$T/route.tsv" || exit 1
     "$_BOUND" 55 python3 exec/c/compilerpack.py --require-cached --prepare-only --part "$K/5" --o1 "$T/o1.net" --include include -o /dev/null "$T/route.tsv" || { echo "prep-$K: part $K not cached after preparation" >&2; exit 1; }

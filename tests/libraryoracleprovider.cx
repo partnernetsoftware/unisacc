@@ -2,17 +2,19 @@
 /* Configuration facade for five independent Python oracles; no algorithm migration.
  * Inherit the original gate's descendant watchdog and stdio; never create a process group. */
 #pragma unisa use cxlib.libffiprovider
+#pragma unisa use cxlib.pyrun
+/* Legacy external Python oracles remain; not migration. */
 static int no(const char*s){fprintf(stderr,"library oracle provider refused: %s\n",s);return 2;}
 int main(int argc,char**argv){
  if(argc==2&&(!strcmp(argv[1],"--help")||!strcmp(argv[1],"-h"))){puts("usage: libraryoracleprovider.cx bindings|data|resolver|lifecycle|artifacts [original oracle arguments...]");return 0;}
  const char*classes[]={"bindings","data","resolver","lifecycle","artifacts"};
- const char*scripts[]={"./tests/libunisaccbindingscheck.py","./tests/libunisaccdatacheck.py","./tests/libunisaccresolvercheck.py","./tests/libunisaccruncheck.py","./tests/libraryartifactcheck.py"};
+ const char*scripts[]={"tests/libunisaccbindingscheck.py","tests/libunisaccdatacheck.py","tests/libunisaccresolvercheck.py","tests/libunisaccruncheck.py","tests/libraryartifactcheck.py"};
  int k=-1;if(argc<2)return no("missing fixed oracle class");for(int i=0;i<5;i++)if(!strcmp(argv[1],classes[i]))k=i;if(k<0)return no("unknown fixed oracle class");
  ffip_provider p;if(ffip_select(&p))return no(ffip_error());
  if(setenv("UNISACC_TEST_LIBFFI_LINK",p.link,1)||unsetenv("UNISA_CONTAINER"))return no("restore link/original parent environment");
  if(ffip_verify(&p))return no(ffip_error());
  fprintf(stderr,"library oracle provider class=%s link=%s sha256=%s\n",classes[k],p.link,p.pic?p.sha256:"null");fflush(stderr);
- char**a=malloc((argc+1)*sizeof(char*));if(!a)return no("argv allocation");a[0]="python3";a[1]=(char*)scripts[k];for(int i=2;i<argc;i++)a[i]=argv[i];a[argc]=0;
+ char**a=malloc((argc+1)*sizeof(char*));if(!a)return no("argv allocation");char interpreter[4096]={0},script[4096];int unresolved=pr_python(interpreter,sizeof interpreter);struct stat script_st;if(unresolved&&!interpreter[0])return no("resolve original interpreter");if(!unresolved&&(!realpath(scripts[k],script)||stat(script,&script_st)||!S_ISREG(script_st.st_mode)))return no("resolve original oracle");a[0]=interpreter;a[1]=unresolved?(char*)scripts[k]:script;for(int i=2;i<argc;i++)a[i]=argv[i];a[argc]=0;
 #if defined(__linux__) || defined(__APPLE__)
  pid_t child=fork();if(child<0)return no("fork failed");if(!child){execvp(a[0],a);fprintf(stderr,"library oracle exec failed: %s\n",strerror(errno));_exit(127);}
  int st;pid_t r;do{r=waitpid(child,&st,0);}while(r<0&&errno==EINTR);if(r!=child)return no("waitpid failed");

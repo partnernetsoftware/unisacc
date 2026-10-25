@@ -464,7 +464,7 @@ static int finish(int rc) {
 /* ---- subprocesses ------------------------------------------------------------------------------------------- */
 /* subprocess.run([ROOT/tests/bound, '20', *COMMAND], capture_output=True, text=True, timeout=25); the record item
    appended to commands.  0 with *RC, or -1 when it raised (EXC set; nothing appended) */
-static int run(const char *stage, List *command, int *rcp, pj_value **outp) {
+static int run(const char *operation, List *command, int *rcp, pj_value **outp) {
     char bound[4200], op[4300], ep[4300], **argv; int i, k = 0, st = 0, ofd, efd, rc; pid_t pid; long ticks = 2500;
     char *ob, *eb; size_t on = 0, en = 0, s0, s1; const char *why; struct stat sb; pj_value *item, *cmd;
     snprintf(bound, sizeof bound, "%s/tests/bound", ROOT);
@@ -513,7 +513,7 @@ static int run(const char *stage, List *command, int *rcp, pj_value **outp) {
     }
     item = pj_dict(); cmd = pj_list();
     for (i = 0; argv[i]; i++) pj_append(cmd, pj_strz(argv[i]));
-    pj_set(item, "stage", pj_strz(stage)); pj_set(item, "command", cmd); pj_set(item, "rc", pj_int(rc));
+    pj_set(item, "stage", pj_strz(operation)); pj_set(item, "command", cmd); pj_set(item, "rc", pj_int(rc));
     pj_set(item, "stdout", pj_str(ob, on)); pj_set(item, "stderr", pj_str(eb, en));
     pj_append(COMMANDS, item);
     free(argv); free(eb);
@@ -605,7 +605,7 @@ static pj_value *provider_flags(const char *provider, const char *target, List *
  * modules, watchdog body and wrapper, this source, and the default-run driver.
  * The key additionally contains the copied runtime closure, compiler identity,
  * ambient tool environment, selected package and six qualified provider artifacts.
- * A record lock is kernel-released on death; unique unpublished stages remain evidence. */
+ * A record lock is kernel-released on death; unique unpublished directories remain evidence. */
 static pj_value *CACHE_READSET, *CACHE_DOC;
 static char CACHE_KEY[65], CACHE_DIR[4400], CACHE_PARENT[4300];
 static char CACHE_ART_SHA[65];
@@ -652,11 +652,11 @@ static int cache_verify(char*artifact){
     char*x,*y;size_t nx,ny;pj_value*doc=pj_get(m,"contract");if(!doc||pj_dumps(doc,-1,&x,&nx)||pj_dumps(CACHE_DOC,-1,&y,&ny)||nx!=ny||memcmp(x,y,nx))return cache_need("contract differs");
     snprintf(artifact,4600,"%s/library.so",CACHE_DIR);if(lstat(artifact,&st)||!S_ISREG(st.st_mode)||st.st_size<=0||rtc_sha_file(artifact,h,why,sizeof why)||!is_str(pj_get(m,"library.so"),h))return cache_need("artifact absent/corrupt");strcpy(CACHE_ART_SHA,h);return cache_stable();
 }
-static void cache_write(const char*p,const void*b,size_t n){int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,0600);if(fd<0)uncaught("OSError: cache stage open");const char*s=b;while(n){ssize_t k=write(fd,s,n);if(k<0&&errno==EINTR)continue;if(k<=0)uncaught("OSError: cache stage write");s+=k;n-=k;}if(fsync(fd)||close(fd))uncaught("OSError: cache stage fsync");}
+static void cache_write(const char*p,const void*b,size_t n){int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,0600);if(fd<0)uncaught("OSError: cache staging open");const char*s=b;while(n){ssize_t k=write(fd,s,n);if(k<0&&errno==EINTR)continue;if(k<=0)uncaught("OSError: cache staging write");s+=k;n-=k;}if(fsync(fd)||close(fd))uncaught("OSError: cache stage fsync");}
 static int cache_publish(const char*lib){
-    if(cache_stable())return 75;char stage[4600],p[4700],hex[65],why[8400];snprintf(stage,sizeof stage,"%s/.runtime-%s-XXXXXX",CACHE_PARENT,CACHE_KEY);if(!mkdtemp(stage))uncaught("OSError: cache stage mkdir");size_t n;char*b=cx_read(lib,&n);if(!b||!n)uncaught("OSError: cache source artifact");cx_sha256_hex(b,n,hex);snprintf(p,sizeof p,"%s/library.so",stage);cache_write(p,b,n);free(b);char check[65];if(rtc_sha_file(p,check,why,sizeof why)||strcmp(hex,check))uncaught("OSError: cache artifact readback");
-    pj_value*m=pj_dict();pj_set(m,"key",pj_strz(CACHE_KEY));pj_set(m,"contract",CACHE_DOC);pj_set(m,"library.so",pj_strz(hex));if(pj_dumps(m,-1,&b,&n))uncaught("ValueError: manifest encode");snprintf(p,sizeof p,"%s/manifest.json",stage);cache_write(p,b,n);free(b);if(cache_stable())return 75;
-    int fd=open(stage,O_RDONLY|O_DIRECTORY,0);if(fd<0||fsync(fd)||close(fd))uncaught("OSError: stage directory fsync");struct stat st;if(!lstat(CACHE_DIR,&st))return cache_need("invalid existing entry; retained for inspection");if(errno!=ENOENT)uncaught("OSError: destination stat");if(rename(stage,CACHE_DIR))uncaught("OSError: publish runtime");fd=open(CACHE_PARENT,O_RDONLY|O_DIRECTORY,0);if(fd<0||fsync(fd)||close(fd))uncaught("OSError: cache parent fsync");return cache_stable();
+    if(cache_stable())return 75;char pending_dir[4600],p[4700],hex[65],why[8400];snprintf(pending_dir,sizeof pending_dir,"%s/.runtime-%s-XXXXXX",CACHE_PARENT,CACHE_KEY);if(!mkdtemp(pending_dir))uncaught("OSError: cache stage mkdir");size_t n;char*b=cx_read(lib,&n);if(!b||!n)uncaught("OSError: cache source artifact");cx_sha256_hex(b,n,hex);snprintf(p,sizeof p,"%s/library.so",pending_dir);cache_write(p,b,n);free(b);char check[65];if(rtc_sha_file(p,check,why,sizeof why)||strcmp(hex,check))uncaught("OSError: cache artifact readback");
+    pj_value*m=pj_dict();pj_set(m,"key",pj_strz(CACHE_KEY));pj_set(m,"contract",CACHE_DOC);pj_set(m,"library.so",pj_strz(hex));if(pj_dumps(m,-1,&b,&n))uncaught("ValueError: manifest encode");snprintf(p,sizeof p,"%s/manifest.json",pending_dir);cache_write(p,b,n);free(b);if(cache_stable())return 75;
+    int fd=open(pending_dir,O_RDONLY|O_DIRECTORY,0);if(fd<0||fsync(fd)||close(fd))uncaught("OSError: stage directory fsync");struct stat st;if(!lstat(CACHE_DIR,&st))return cache_need("invalid existing entry; retained for inspection");if(errno!=ENOENT)uncaught("OSError: destination stat");if(rename(pending_dir,CACHE_DIR))uncaught("OSError: publish runtime");fd=open(CACHE_PARENT,O_RDONLY|O_DIRECTORY,0);if(fd<0||fsync(fd)||close(fd))uncaught("OSError: cache parent fsync");return cache_stable();
 }
 /* the try: body of the .py's main.  finish()'s value, or -1 when an exception was raised (EXC set) */
 static int body(const char *cc, List *flags, List *san, List *cf, List *lf, const char *arch, const char *host,
@@ -759,7 +759,7 @@ runtime_ready:
             lpush(&cmd, exe); lpush(&cmd, frozen); lpush(&cmd, TARGET); lpush(&cmd, sf);
             if (run("public_probe", &cmd, &rc, &stdoutv) != 0) return -1;
             pj_set(variant, "rc", pj_int(rc));
-            {   /* for line in stdout.splitlines(): json.loads, keep dicts with a 'stage' */
+            {   /* for line in stdout.splitlines(): json.loads, keep dictionaries carrying an event label */
                 const unsigned char *s = (const unsigned char *)stdoutv->s; size_t n = stdoutv->n, a = 0, j = 0;
                 while (a < n) {
                     size_t e = a, skip = 0; pj_value *ev;
