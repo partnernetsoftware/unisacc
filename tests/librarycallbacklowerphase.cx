@@ -1,0 +1,18 @@
+/* Private fixed part1 routing: original bytes/keys/flags/assertions/cleanup.
+ * Caller bounds complete default-run at40; no helper binary/verdict cache. */
+#include <cx.h>
+#define SOURCE "tests/librarycallbacklowercheck.sh"
+#define SOURCE_SHA "89ad337ef1898f66826892ebe7e7d3d8019f4a63e97afa4546bdcd0dbc560350"
+static int no(const char*s){fprintf(stderr,"callbacklowerphase refused: %s\n",s);return 2;}
+int main(int argc,char**argv){int part=-1,inspect=0;if(argc==2&&!strcmp(argv[1],"--inspect"))inspect=1;else if(argc==2&&!strcmp(argv[1],"off"))part=0;else if(argc==2&&!strcmp(argv[1],"on"))part=1;else return no("off|on|--inspect");
+ size_t n;char*s=cx_read(SOURCE,&n),h[65];if(!s||!n||n>20000||memchr(s,0,n))return no("source read/length/NUL");cx_sha256_hex(s,n,h);if(strcmp(h,SOURCE_SHA))return no("fixed source SHA changed");
+ const char*off="b python3 tests/librarycallbackproduce.py --root \"$R\" --product \"$UA\" --out \"$T/off-cases\" --part \"$part\" --off-artifacts \"$D/off12\"\n";
+ const char*on="if [ \"$part\" = 1 ];then\n b python3 tests/librarycallbackproduce.py --root \"$R\" --product \"$UA\" --cache \"$D\" --out \"$T/on-verdict\" --part 1 --run\nfi\n";
+ char*a=strstr(s,off),*b=strstr(s,on);if(!a||!b||a>=b||strstr(a+1,off)||strstr(b+1,on)||a==s||a[-1]!='\n'||b[-1]!='\n'||b+strlen(on)!=s+n)return no("exact unique ordered terminal blocks");
+ size_t pn=a-s,offn=b-a,onn=n-(b-s);char*rebuilt=malloc(n+1);if(!rebuilt)return no("allocation");memcpy(rebuilt,s,pn);memcpy(rebuilt+pn,a,offn);memcpy(rebuilt+pn+offn,b,onn);rebuilt[n]=0;cx_sha256_hex(rebuilt,n,h);if(memcmp(rebuilt,s,n)||strcmp(h,SOURCE_SHA))return no("partition does not reconstruct exact original");
+ const char*second="b python3 tests/librarycallbackproduce.py --root \"$R\" --product \"$UA\" --cache \"$D\" --out \"$T/off-verdict\" --part \"$part\" --cases \"$T/off-cases/cases.json\" --run\n";
+ if(offn!=strlen(off)+strlen(second)||memcmp(a+strlen(off),second,strlen(second)))return no("off must retain exactly two original calls");
+ if(inspect){printf("callbacklowerphase partition verified source=%s prefix=%zu off=%zu on=%zu total=%zu; off2calls/on1call; shared prefix repeats complete seals and original cleanup; NOT PASS\n",SOURCE_SHA,pn,offn,onn,n);return 0;}
+ size_t bn=part?onn:offn;char*script=malloc(pn+bn+1);if(!script)return no("allocation");memcpy(script,s,pn);memcpy(script+pn,part?b:a,bn);script[pn+bn]=0;
+ printf("callbacklowerphase part1/%s original-source=%s; fresh verdict execution, joint coverage only\n",argv[1],SOURCE_SHA);fflush(stdout);
+ char*av[]={"env","-u","UNISA_CONTAINER","sh","-c",script,SOURCE,"--require-cached","1",0};execvp(av[0],av);return no("exec env/sh");}

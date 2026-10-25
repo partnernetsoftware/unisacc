@@ -591,7 +591,8 @@ eval "$PREP_JOBS"
 unset PREP_JOBS
 job exec-librarytypedreader-model ./exec/parse2/librarytypedreadercheck.sh --require-cached
 job exec-librarycallback-reader-model sh tests/librarycallbacke3check.sh --require-cached check
-job exec-librarycallbacklower-model-1 sh tests/librarycallbacklowercheck.sh --require-cached 1
+job exec-librarycallbacklower-model-1-off sh ./unisacc.com tests/librarycallbacklowerphase.cx -- off
+job exec-librarycallbacklower-model-1-on sh ./unisacc.com tests/librarycallbacklowerphase.cx -- on
 job exec-librarycallbacklower-model-2 sh tests/librarycallbacklowercheck.sh --require-cached 2
 job exec-librarycallbacklower-model-3 sh tests/librarycallbacklowercheck.sh --require-cached 3
 job exec-librarycallbacklower-model-4 sh tests/librarycallbacklowercheck.sh --require-cached 4

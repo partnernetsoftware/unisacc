@@ -343,8 +343,9 @@ static char *extra[] = {
     "E3", "exec-librarytypedreader-model", "lib",
     /* exec-librarycallback-reader-model: librarycallbacke3check.sh构造parse2/librarycallbacke3并严格ledger回放; tests/gate.sh:402 */
     "E3", "exec-librarycallback-reader-model", "lib",
-    /* exec-librarycallbacklower-model-1: gate入口lower专属check.sh或callback lower wrapper，构造lower模型并比较片段/拒绝; tests/gate.sh:403 */
-    "lower", "exec-librarycallbacklower-model-1", "lib",
+    /* Fixed part1 off/on jointly execute the original callback-lower verdicts. */
+    "lower", "exec-librarycallbacklower-model-1-off", "lib",
+    "lower", "exec-librarycallbacklower-model-1-on", "lib",
     /* exec-librarycallbacklower-model-2: gate入口lower专属check.sh或callback lower wrapper，构造lower模型并比较片段/拒绝; tests/gate.sh:404 */
     "lower", "exec-librarycallbacklower-model-2", "lib",
     /* exec-librarycallbacklower-model-3: gate入口lower专属check.sh或callback lower wrapper，构造lower模型并比较片段/拒绝; tests/gate.sh:405 */

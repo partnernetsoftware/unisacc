@@ -59,3 +59,5 @@ libraryfunctionimports依次登记--prepare-gen/c-json/p-json/tbl/net/runner六�
 suite-tools-native通过默认-run运行check.cx：原声明恒等、依赖顺序、BLOCKED零执行、准备与测试分计、真实77/142失败、容器状态恢复、错误绑定拒绝等7场景28断言。独立tools-suite-failfast-run入口验证check.cx --fail-fast的3场景86断言：首红停止、已启动任务结证、NOT_RUN与跨层依赖补齐；两个入口各自限时55秒。按精确脚本路径确认的E3/lower单元归入对应模块，跨流或未知项保守integration。
 
 该入口尚未替代正式发布验收，也不表示全部旧oracle已经原生化。原断言中仍必需的Python如实保留；新增目录、依赖图和调度逻辑均为.cx。
+
+callback lower part1由`exec-librarycallbacklower-model-1-off`与`-1-on`两个默认-run单元联合覆盖：固定原脚本SHA，off保留原fixture生产及12行off verdict，on保留8行on verdict；两者均保留原12组off及on模型seal检查与cleanup。原`other11 on targets UNVERIFIED`完整保留，不代表其它目标已执行，也不声称完整lower ABI通过。原脚本part1聚合CLI兼容保留；模型key、原producer与seals不变，verdict每次真实执行。
