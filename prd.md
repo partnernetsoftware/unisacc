@@ -161,7 +161,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 H2 reader七→十一、H3 callback一→二、H4 srcelf首片一→二均已实际结证。H6@a631445c23七项原40秒首次全0：callback off/on 21.492／34.606秒、context 8.355秒、typed 5.180秒、variadic 14.601秒、callback-plan 12.195秒、resolver 5.829秒，普通及sanitizer分支保留；原F4环境和工具树未改，P297／Sc90不变。context选择已存在PIC库，四个宿主探针补GNU特性声明；只绑定已观察的三个原rc1记录及原始日志SHA，不通放断言失败，也不虚构尚未执行的两项原失败。
 
-私有V5已接170份H6及83份H7证据，共632固定补件、25项代码自有源码；profile显式host-target222-v5，active1325、retired15／retained1302；旧profile拒绝，224尚未接纳。改为外置清单SHA绑定，逐文件真实读验及64KiB上限保留。原549清单生成在15秒诊断界曾142且未产文件；新632材料准备21.580秒／深比21.890秒／恢复21.802秒均0，集成字节篡改拒绝2。新admission／receipt对真实743待办快照在原15秒界分别11.975／12.167秒拒绝2且无receipt文件；这不算正式测试或总50秒admission通过。真实partial仍应拒绝；终态导出、完整owner正例、64KiB序列化和总50秒尚待验证。生产开关false，Windows资格／签名、Apple签名／公证、最终字节验证及公开仍待完成。零Python原生门禁0（real1744／data32，基线未提高），运行依赖尚未清零。csr同BIG的E4窄域9.7%候选已核收据，记入0.0.44，不改变本版冻结产品。
+私有V5已绑定755固定补件、28项代码自有源码，profile显式host-target222-source224-v5；active1325、retired16／retained1301，231四PIC错误尚未接纳。外置清单逐文件真实深比及64KiB收据上限保留：755准备28.509秒／全深比28.207秒／恢复28.163秒均0，字节篡改／缺rc／旧profile均拒绝2。admission／receipt对真实743待办快照在原15秒界12.224／12.591秒拒绝2且无receipt输出；旧549诊断15秒142保留，不把DATA55准备当正式40／全准入50通过。终态导出、完整owner正例、64KiB序列化及总50秒仍待真实M7终态；production-v5候选正在按28源重封，真实policy与production_ready仍false。Windows资格／公司签名、Apple签名／公证、最终字节验证及公开待完成；具体minicon跨仓授权仍待答。最近零Python原生门禁0（real1744／data32、未抬基线），运行依赖尚未清零。E2/E3/E4优化证据分别记入各记忆房间及0.0.44计划，不改变本版冻结P297。
 
 <a id="memory-palace"></a>
 ### 记忆宫殿
