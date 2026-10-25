@@ -705,7 +705,9 @@ job multi       ./tests/multi.sh
 job diag        ./tests/diag.sh
 job hostile     ./tests/hostile.sh
 job source-layout ./tests/source_layout.sh
-job target-package python3 ./tests/targetpackagecheck.py "${MODEL_COM:-./unisacc.com}"
+for part in 1 2 3; do
+job target-package-$part sh ./unisacc.com tests/targetpackagephase.cx -- "$part" "${MODEL_COM:-./unisacc.com}"
+done
 job lib-context sh ./unisacc.com tests/librarycontextcheck.cx -- --package "${MODEL_COM:-./unisacc.com}"
 job lib-format python3 ./tests/libunisaccformatcheck.py
 job lib-stack-arm python3 ./exec/c/librarystackcheck.py "${MODEL_COM:-./unisacc.com}" arm64

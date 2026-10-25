@@ -60,6 +60,8 @@ suite-tools-native通过默认-run运行check.cx：原声明恒等、依赖顺�
 
 该入口尚未替代正式发布验收，也不表示全部旧oracle已经原生化。原断言中仍必需的Python如实保留；新增目录、依赖图和调度逻辑均为.cx。
 
+`target-package-1/2/3`默认-run门面分别选择Linux/macOS/Windows两架构，固定生产targetpackage.py源码SHA与完整六目标域；三片联合覆盖原六目标闭包。每片仍运行完整源重组、坏／缺分片、bad-target及缺另一target负例，wanted过滤始终使用全局六目标，只有目标执行循环选片。原Python独立裁判仍保留，原无参／单路径全六CLI兼容，分片输出准确2/6；这不是Python依赖消除。
+
 callback lower part1由`exec-librarycallbacklower-model-1-off`与`-1-on`两个默认-run单元联合覆盖：固定原脚本SHA，off保留原fixture生产及12行off verdict，on保留8行on verdict；两者均保留原12组off及on模型seal检查与cleanup。原`other11 on targets UNVERIFIED`完整保留，不代表其它目标已执行，也不声称完整lower ABI通过。原脚本part1聚合CLI兼容保留；模型key、原producer与seals不变，verdict每次真实执行。
 门面按固定原7939字节的prefix7497/off294/on148直接取块，并验证完整SHA及逐字节重建；C源不重复原命令，原脚本中的三个真实解释器调用及依赖仍保留。`--inspect`额外报告两段实际生成脚本SHA，可与旧H3门面逐字节对拍；这不替代新H6两个原40秒完整执行。
 

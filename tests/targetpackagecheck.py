@@ -14,7 +14,7 @@ def rejected(fn):
     except (ValueError,FileNotFoundError): return
     raise AssertionError('bad input accepted')
 
-def check(path):
+def check(path, selected=TARGETS):
     raw=package_bytes(path.read_bytes());source=read_package(raw)
     assert write_package(source)==raw
     with tempfile.TemporaryDirectory(prefix='unisacc-target-check-') as td:
@@ -23,7 +23,7 @@ def check(path):
         n=manifest['networks'][0]['sha256']+'.network';p=td/n;stored=p.read_bytes()
         p.write_bytes(stored[:-1]);rejected(lambda:import_shards(td));p.write_bytes(stored)
         subprocess.run(['sh',str(ROOT/'tests/cxbin'),str(ROOT/'tests/safedel.cx'),'--purge','--',str(p)],check=True);rejected(lambda:import_shards(td));p.write_bytes(stored)
-        for target in TARGETS:
+        for target in selected:
             data,ledger=select_target(raw,target);p=read_package(data)
             wanted=[r for r in source['rows'] if r[1].startswith((target+'/').encode()) or
                     not any(r[1].startswith((t+'/').encode()) for t in TARGETS)]
@@ -42,7 +42,7 @@ def check(path):
             print(target,ledger['networks'],ledger['package_bytes'],'bytes unchanged closure',flush=True)
         rejected(lambda:select_target(raw,'bad/x86_64'))
         only,_=select_target(raw,TARGETS[0]);rejected(lambda:select_target(only,TARGETS[-1]))
-    print('target package: six closures, exact recombination, corruption and missing shard reject')
+    print(f'target package: {len(selected)}/6 closures, exact recombination, corruption and missing shard reject')
 
 if __name__=='__main__':
-    check(pathlib.Path(sys.argv[1]) if len(sys.argv)==2 else ROOT/'unisacc.com')
+    check(pathlib.Path(sys.argv[1]) if len(sys.argv)>1 else ROOT/'unisacc.com', tuple(sys.argv[2:]) if len(sys.argv)>2 else TARGETS)
