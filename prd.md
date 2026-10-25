@@ -148,9 +148,9 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 0.0.43 公开发布
 ├─ 已完成：F1产品修复、F2文档／探针；F3历史基线187项=186 PASS＋1宿主未核
 ├─ 已完成：新E4/P7f709三实际编译器SHA相同；stage2/3五代码切片实际重编、原50秒界通过
-├─ 当前：新E4固定点已证；同源原33已恢复，原生定点重排6项已实际0／独立后核0，保留22rc0＋5资源UNKNOWN，原完整队列从028继续
+├─ 当前：新E4固定点已证；原队列定点重试已闭环见效，clone build及tools-1/2实跑全0，36/1333已结证（31rc0＋5资源UNKNOWN），继续原完整队列
 │  ├─ 070窗自然结束、2193已终止；旧冻结的结果仅保留诊断，不计有效正式PASS
-│  ├─ 完整计划1333项；定点重排后27已结证（22原rc0＋5真实UNKNOWN）/1306待办；未清零、未迁入预检绿
+│  ├─ 完整计划1333项；原队列window028已36结证（31rc0＋5真实UNKNOWN）/1297待办；原绿保留，无新产品红
 │  ├─ 固定env-pin；绑定新HEAD与真实非空Git闭包身份，禁止迁移旧绿或沿用旧闭包hash
 │  └─ 完成判据：最终清单／输入身份完整，PENDING=0、NEEDS_RULING=0、product_red=0，处置齐全
 ├─ 历史：旧P297指定RC六原生smoke／严格矩阵、Windows双架构及Darwin16报告；新E4候选须另取真实匹配证据
@@ -172,7 +172,7 @@ H2 reader七→十一、H3 callback一→二、H4 srcelf首片一→二均已实
 |---|---|---|
 | 产品室：当前开发／旧封存分列 | 根unisacc.com现2671169B，P7f709378fa84a36edac2fcf1c36a62a13d45c26d34e57f1f7b50af74b2de4d1a／Sd754b8afbfeff132cf1328806e8fe908ca5dec1847ecba058ea400291b73e972；sidecar1e9ef57c…，原生ident当前main check0，默认-run hello0。是开发产物，尚非新固定点／正式封存资格。 | `out/e4-local-install.log`、`out/e4-local-install/baseline-p297.com{,.build.json}`原pair；release/candidate.json及GHCR8c667e…仍是旧P297/Sc90封存，旧CI不可借给新开发包。新完整构造及封存须以实际最终P/S为准，不签不公开。 |
 | F6室：新E4固定点已证 | 新冻结0d25同源reference、完整模型包与stage1/2/3各五代码切片均实际构造；stage2/3由真实前阶段产品重编。三个产物2671169B、P7f709，侧车dae574a1…；官方fixedpoint0/report三SHA同，七manifest和ident全0。 | 新`/tmp/unisacc-c43-final-e4-20261025/out/final-reference/`逐操作日志/status，`out/comboot/stages.json`真实built_by链。stage3模型仅同源stage2按13域逐件三重hash复用，原聚合复制142保留于stage3-reuse01-partial；两stage-pack-driver proof仅真实封包/核验/固定点后记录。无聚合pack-driver重跑，未称最终M7已通过。 |
-| M7室：定点重试已实际生效 | 原33同源原路径/原lock/head/pin已恢复，整snapshot与原d0c99095…一致；fresh02完整保留另档。native retry014eda4a…经独立最终READY及实跑正／重复／锁／漂移／崩溃恢复控制；真实dry-run恰选clone1＋未执行BLOCKED5，绑定proposal9acac090…后apply0，原33→27。独立native后核全保留字段语义同、head/pin/startreceipt逐字节cmp0，22rc0及5rc2不变。 | `out/final-e4-narrow-retry-01`只读原始结果/失败log/receipt/前后state，before2938a474…、after3c304719…；`out/final-reference/original33-narrow-retry.*`实跑日志。正式仍完整1333项，从window028原命令续跑，不加selector，不重开fresh；首次实际重新执行尚待window结果。当前规则见AGENTS及PIPELINE§14。 |
+| M7室：定点重试已实际生效 | 同源原33/原lock/head/pin恢复，整snapshot与原d0c99095…同；native retry014eda4a…实际dry恰选6、apply0、独立后核仅删该6且22rc0＋5rc2全保留，head/pin/startreceipt cmp0。window028原完整队列实际执行：tools-regex2-build0/262821B，tools-1四例0、tools-2三例0；新增其他对拍任务全0，累计36结证/1297待办，五失败均已观察资源UNKNOWN。 | `out/final-e4-narrow-retry-01`封存原始结果/log/receipt，before2938a474…、after3c304719…；`out/final-reference/original33-narrow-retry.*`和final-window-028.log。tools-regex2-ref尾窗8.23秒DEFER，未settle不改PASS；tools-3/ref/run后续同原队列继续。无新fresh/selector/预检绿迁入，源码P/S未改。 |
 | M7室：固定身份 | 恢复原HEAD0d25b4b6d807b23b0676411328c548391b42f559，tree200c6fb0a6c8add86b8142e434a04aec89bf6807，P7f709/Sd754，sidecar dae574a1…；实际计划1333。原env-pin内部128eb61d…、文件efa28614…及原startreceipt全部原字节保留，不重钉新pin。fresh02的0734ee2e…仅历史。 | `out/final-e4-state`当前原队列；`out/final-e4-state-before-corpus`原33完整留本，`out/final-e4-state-fresh02-replay`不必要重放全记录。F4固定CODEX_TOOL_CALL_ID=unisacc-c43-final-e4-0d25，SEED_DIR=/mnt/out/final-e4-bootstrap，provider-first路径；同源原目录只定点恢复，旧b09/P297不借资格。 |
 | k2b室：已修首红 | 原wrapper与自测双重Git fixture准备挤爆40秒。两自然scope保持原失效／准入、真实双queue／CLI与字节／锁断言，独立冷测21.379／37.047秒rc0；共享footer与setup归属已独立静审。 | `/tmp/unisacc-c43-k2b-scopes-final-result.txt`、`/tmp/unisacc-c43-k2b-scope-review.txt`；原089／各次142及guard拒绝均保留。旧无消费者wrapper已按SHA不变移至忽略`out/archived-test-tools/`，未绕守卫删除源文件。新图与元数据见根`out/c43-k2b-*`；正式M7已固定b09继续，计数见思维树。 |
 | 资源室：完整义务 | 新1333计划保留seedmemory功能原16行为与evidence原1真实freshness；UNKNOWN required=memory保持OPEN、不能称PASS，坏文件／解析／权限仍真错，不重键套旧RSS。 | `release/preauth.tsv`及`research/c43-resource-disposition.md`已有整组classified处置：新候选须实际执行自己的拒绝、逐项收齐原日志，最终PENDING0/无未分类产品失败/处置齐全且公开披露，允许真实资源OPEN，不新加114测量框架。宿主未核及其他rc1/断言/超时各按现行具名合同，不能泛化为资源豁免。 |
