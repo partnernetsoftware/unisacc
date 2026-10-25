@@ -153,8 +153,8 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 ├─ 当前主刀：Source329固定；根P53/S447仅受信任bootstrap和历史候选，新Source329产品尚未构建
 ├─ R0 已归档：旧1333队列停止；Source447当前段/记忆原文另存archive，原红/UNKNOWN/局部绿不改写
 ├─ R1 待新候选：P53的smoke/RI/库/属性/优化等仍是旧候选证据，不能自动授给Source329
-├─ R2 新P3生产链：source-package原型列107jobs；仅旧CTX01 tool-gen01实际PREPARED，其他106未run
-│  └─ 阻塞：SEED_GEN_GENERIC按存在性改构造路径，原ctx/receipt未绑定；修raw-environ政策后重备CTX02，不能只靠外部unset冒充完整绑定
+├─ R2 新P3生产链：CTX03五工具＋前9模型组的27步骤均PREPARED/rc0，共32/107，尚余75未run
+│  └─ consumer5c7ad4...仅native编译0，所有消费路径NOT_RUN；下一步余模型→Source329 kernel→实际consumer→新候选
 ├─ R3 Source329机制：C数学核三处unsigned修复，经独立CX exporter再生两C，39个NN输入字节/provenance不变
 │  └─ 保存P53执行18网8770键/22694判定、28868字段拒绝及恢复、72适配拒绝全0；宿主shiftSan22694/0；永久words9/0、all-nets8/0
 ├─ R4 范围保留：以上复用旧NN数值，仅证明新经典数学机制；旧RI/P3消费者不转授，installedCLI/Windows/完整预算仍待
@@ -169,11 +169,11 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 **Source329已实际验证的机制：** 保存P53对新数学核的18网批次out/c43-nets-u64-bootstrap-all-01.log完成18模型/8770键/22694个真实infer判定，28868字段边界拒绝及等量恢复、72适配拒绝均0，词表/标签/唯一最大logit照核；材料仍复用旧NN参数，不是18网从gold重新构造。宿主C99/O2/shift sanitizer编译并执行当前kernel/unisa_self.c，out/c43-table-kernel-u64-host-run-01.stdout精确22694 decisions, 0 wrong，无san诊断。固定probe的bootstrap位型和宿主san运行也实际0。永久tests/table-mask.cx两独立模式原55秒words9/0、all-nets8/0（out/c43-table-mask-{words,all-nets}-01.log），函数从实际core原样抽取而非自写decoder；前后source/全部列明依赖/CC/root/保存bootstrap身份均核。宿主系统stdio、CC子工具和sanitizer/libc仍是声明Cfoundation依赖，不称hermetic或新Source329产品资格。
 
-**当前P3源码生产准备与阻塞：** tools/source-package.cx基础原型CTX01以当前Source329、保存的P53 bootstrap和宿主CC分列身份，prepare-context55实际0；保存P53以-O2 -b lnx/x86_64构建native coordinator25秒内0，native --list55实际0。旧profile out/c43-source-package-runner-01.tsv绑定源/工具/netpack/context/实际ELF，只是编译代码复用，不是NN或结果缓存。107个job来自5个native seed工具和34组gen/tbl/net；只有tool-gen01已有PREPARED，不能写107已run，routes/declaration/pack/seal/full verifier仍待闭环。QA核gen STAGE OUT flags、tbl JSON OUT、net TBL OUT的C CLI顺序，未发现确定整队参数错误，但seed/gen.c按SEED_GEN_GENERIC是否存在切换pp构造路径，空字符串也会变支；原ctx/receipt未绑定该输入，属于实质身份缺口。须在新工具中固定raw-environ过滤与收据政策，重备CTX02及native coordinator后再开队，旧1项工具job也按新身份重做；外部unset不能单独充作完整receipt绑定。Source329不因新tools/docs变化而重贴。宿主CC/header/linker/zlib、初始root辅助测S和受信任bootstrap限制仍在；这条P3源生产链不等于经典18张gold表网的参数源码重建。
+**当前P3源码生产准备与逐job执行：** tools/source-package.cx已固定为9c2e71ef2094773bcada4c27a39871f3d0f5947555eb3ebe338aaddf203427ba，raw-environ逐次移除SEED_GEN_GENERIC、SEED_GEN_TRACE、UNISACC_SEED_TRACE、UNISACC_RF_CAPTURE、UNISA_ATTRIBUTES五键，并将固定environment-policy写入context与job收据；按存在性变支及空字符串绕过的旧缺口已处理，不再是待修阻塞。Source329、保存的P53 bootstrap和宿主CC仍分列身份；新CTX02 prepare成功，native runner02构建成功，外部SEED_GEN_GENERIC=1、SEED_GEN_TRACE=1、UNISACC_SEED_TRACE=1条件下--verify-context实际VERIFIED/rc0，见out/c43-source-package-context-{prepare,verify}-02.log与out/c43-source-package-runner-build-02.log。107个job（5个native seed工具＋34组gen/tbl/net）现以新CTX03逐job实跑：tool-gen、tool-tbl、tool-net、tool-compilerpack、tool-pack五工具均PREPARED/实际rc0；前9组模型（七个shared及lnx-arm64-lower、lnx-arm64-elf）的27个gen/tbl/net步骤全部实际0，总计32/107 PREPARED，尚余75项未run。旧CTX02四工具成功与tool-pack缺zlib.h实际rc2的stderr保留为历史，不用新绿抹旧失败。Ubuntu jammy zlib1g-dev 1:1.2.11.dfsg-2ubuntu9.2已下载至out/c43-zlib-dev-01，并仅用dpkg-deb在本地解包，没有系统权限/安装修改。显式CC CX adapter源码out/c43-cc-zlib-driver-01.cx的SHA为91b3a50ce40cab8000cbffe4957051ccb095e686db8f5f06b553fdd0a28ce275，ELF SHA为699ee495860448b975c28f3046a393700987f0b5178223778fed6139ffcf69b4；每次调用核GCC、两头文件和静态libz.a SHA，用明确-I与绝对libz.a替换-lz。新CTX03 prepare实际0，复用同base9c2e71...的native runner02代码执行当前job；不需改贴Source329，也不缓存任务结果。旧CTX01/runner01与唯一tool-gen01 PREPARED保留为旧工具历史，不迁作新CTX03的已执行job。独立consumer tools/source-package-pack.cx的源码SHA为5c7ad479cdedb0bc726219825d1856da733e37a944c2d85c5ec41dea61bfa8b7，native -O2 -b lnx/x86_64编译实际0；全部消费路径仍NOT_RUN，包括prepare/model/route/declare/pack/seal/verify。编译成功不等于消费执行或整包验证，不称P3包、新Source329产品或完整N22通过。宿主CC/header/linker/zlib、初始root辅助测S、完整SID旧weights与受信任bootstrap边界不变；P3源生产链不等于经典18张gold表网参数源码重建。
 
 **历史证据不转授：** P53/S447的RI30/15/8/17、capture/consumer/snapshot/库、P3四CASE、profile133/目录30、objects198/formats14、固定点58、固定P3宿主链41/拒绝71、属性100/优化241/193/16，以及pp构造92/配方控制23均保留原事实和原限时。pp低mask域不因本次高bit缺陷被抹成失败，但旧MAT的完整SID与数学体身份不再代表Source329；旧RI/P3/自举和旧CI也不自动适用新候选。原文与身份/范围见[Source447证据快照](archive/prd-c43-source447-before-unsigned-math-20261026.md)。
 
-**清单与下一动作：** 清单最近实际重解析仍109覆盖/94批、90已实现覆盖、19完整缺口；Source447的out/c43-all-pp-source-installed-11.log原20秒rc3只含smoke16，其余聚合NOT_RUN，不计Source329资格。先修source-package环境身份、重建CTX02并逐job实跑，完成真实P3声明/包/seal/独立consumer，然后构建Source329新完整候选和同候选自举/功能/平台证据。classic十八网从gold的通用构造及ASM从源重演、完整RI/属性/资源/库和六宿主资格继续保留。C44-RUN-REUSE-01仍未实现；旧启动/对照测量归P53历史，内部相位/OS-cold未测，不宣称启动提速。当前不得签名、Draft、Latest或公开。
+**清单与下一动作：** 清单最近实际重解析仍109覆盖/94批、90已实现覆盖、19完整缺口；Source447的out/c43-all-pp-source-installed-11.log原20秒rc3只含smoke16，其余聚合NOT_RUN，不计Source329资格。完成CTX03剩余75个job并核收据，再构造Source329同root epoch的kernel generation，实际执行consumer的模型/路由/声明/pack/seal/verify，随后构建新完整候选和同候选自举/功能/平台证据。classic十八网从gold的通用构造及ASM从源重演、完整RI/属性/资源/库和六宿主资格继续保留。C44-RUN-REUSE-01仍未实现；旧启动/对照测量归P53历史，内部相位/OS-cold未测，不宣称启动提速。当前不得签名、Draft、Latest或公开。
 
 ### 本版重构合同
 
@@ -206,7 +206,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 | 数学核修复室 | mask64返回/v/lit三处unsigned；独立CX exporter再生两C，39 NN输入及旧provenance不变，非NN参数重构。 | out/c43-table-kernel-math-01/installed.tsv记录实际Source329与两artifact SHA；单文件原子rename，非整对事务。 |
 | 十八网机制室 | 新数学核由保存P53实际执行8770键/22694判定、28868字段拒绝及恢复、72适配拒绝全0；宿主shiftSan22694/0。 | out/c43-nets-u64-bootstrap-all-01.log、out/c43-table-kernel-u64-host-run-01.stdout；旧NN参数复用，不称新产品或全18源码重建。 |
 | 高位永久回归室 | words9/0、all-nets8/0各原55秒；真实core函数原样抽取，独立四位型，宿主san无诊断。 | tests/table-mask.cx、out/c43-table-mask-{words,all-nets}-01.log；Source329经典C机制资格，宿主Cfoundation非hermetic。旧signed宿主run1保留。 |
-| 新P3生产准备室 | source-package CTX01/native coordinator已准备，107job仅tool-gen01 PREPARED；其余未run。环境变量按存在性改构造路径而未绑收据，暂停队列。 | 固定raw-environ过滤/收据政策后重备CTX02和native artifact、重做旧工具job，再逐job→routes/pack/seal/consumer；编译artifact缓存不缓存结果。 |
+| 新P3生产准备室 | CTX03五工具＋前9组模型27步骤实际0，共32/107 PREPARED；余75未run。consumer源码5c7ad4...仅native -O2 lnx/x86_64编译0，全部消费路径NOT_RUN。 | 次序：余模型→Source329同root epoch kernel→实际consumer→新候选。CC adapter91b3a5.../699ee4...与依赖核验、无系统安装及旧CTX02四成功/一缺zlib红、CTX01历史均保留，不缓存结果。 |
 | pp独立参数室 | S447下六cube新142B构造92/0、配方控制23/0仍是有效低mask历史，未授Source329。 | out/c43-pp-{constructed,gold-controls}-01.log；.py文本依赖、SID旧weights与受信任bootstrap边界保留，全18/P3独立参数构造未完成。 |
 | RI／库／属性／对象室 | P53/S447局部RI/P3消费者/库ABI/属性优化/objects等结果原样保留，不转授新源码。 | [Source447快照](archive/prd-c43-source447-before-unsigned-math-20261026.md)含原始范围、限时和日志；完整合同仍待新候选。 |
 | 自举／原生构造室 | 旧P53的11/12固定点58、CTX02链41/拒绝71与旧ASM生成物是历史，不当Source329新来源链。 | 新源码兼容闭包不得靠删1241项或改贴SID绕过；新P3包与产品构建后再实际校验。宿主依赖、未签收据、root辅助来源边界保留。 |

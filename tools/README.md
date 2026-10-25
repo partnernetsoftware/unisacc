@@ -264,12 +264,128 @@ pass. These are classic-math mechanism checks on Source329 using trusted P53
 and a nonhermetic host C foundation. They neither reconstruct18 NN parameters
 nor qualify a new complete product. The old signed sanitizer failure remains.
 
-`source-package.cx` is currently a separate, incomplete source-P3 producer.
-Its CTX01 source observation and native coordinator construction/listing ran,
-but of107 planned native-tool/gen/tbl/net jobs only tool-gen01 is PREPARED.
-The shared pp generator branches on SEED_GEN_GENERIC presence, including an
-empty value; the initial context/receipt did not bind that input. Scheduling
-must wait for a fixed raw-environ filtering/receipt policy and fresh CTX02,
-rather than treating an external unset as full receipt binding. The compiled
-coordinator profile is code reuse, not a result cache; no complete P3 package,
-consumer qualification or Source329 product is inferred from context/list.
+The source-P3 pipeline has two distinct controllers:
+`source-package.cx` produces native seed tools and model jobs;
+`source-package-pack.cx` consumes their verified receipts and a separately
+prepared native kernel generation. The commands below document the available
+CLI and required order. They are not an execution-success report or a claim
+that the complete package/new product is qualified.
+
+Use canonical absolute paths for ROOT and all existing inputs; each NEW path
+must be a fresh private absolute directory. Keep source and construction inputs
+frozen while executing phases. Each command owns its own55-second watchdog;
+do not aggregate the107 jobs under one watchdog or relax individual budgets.
+
+```sh
+tools/bound 55 sh ./unisacc.com tools/source-package.cx -- prepare-context ROOT SAVED_BOOTSTRAP ABS_CC NEW_SOURCE_CTX
+tools/bound 55 sh ./unisacc.com tools/source-package.cx -- --verify-context ROOT SOURCE_CTX
+tools/bound 55 sh ./unisacc.com tools/source-package.cx -- --list ROOT SOURCE_CTX
+tools/bound 55 sh ./unisacc.com tools/source-package.cx -- job ROOT SOURCE_CTX JOB_ID
+```
+
+There are107 construction jobs: five `tool-gen`, `tool-tbl`,
+`tool-net`, `tool-compilerpack`, `tool-pack` jobs, then34 model recipes
+with three jobs each. After the corresponding native tool jobs, run
+`gen-RECIPE`, `tbl-RECIPE`, `net-RECIPE` in dependency order;
+`--list` supplies the exact34 recipe IDs. For example, shared-e2 uses
+`gen-shared-e2`, `tbl-shared-e2` and `net-shared-e2`.
+Generation invokes the actual C API as STAGE OUT.json FLAG..., table conversion
+as INPUT.json OUT.tbl, and threshold construction as INPUT.tbl OUT.net.
+Each job creates an exclusive job directory with its actual output, command
+argv/streams/rc and canonical dependency receipt. Normal generator/net diagnostic
+output is retained. Prior or partial outputs are refused and retained rather
+than overwritten. PREPARED jobs do not contain a saved functional verdict.
+
+The context binds source, saved bootstrap and its optional build record,
+current root product and its optional build record, CC path/binary/version,
+native identity helper, controller and support hashes. Its fixed raw-environ
+policy removes SEED_GEN_GENERIC, SEED_GEN_TRACE, UNISACC_SEED_TRACE,
+UNISACC_RF_CAPTURE and UNISA_ATTRIBUTES before child execution; both context
+and job receipts carry that policy. Presence of an empty environment value is
+also removed. A job retains a40-second native command plus two6-second source
+observations:52 explicit child seconds, with all controller/IO work still
+required to fit the unchanged55-second parent.
+
+The host CC is an explicit construction dependency. Native pack compilation
+requires the zlib development headers and library for its `-lz` argument.
+The host CC, system headers, linker, compiler subtools, runtime libraries and
+zlib remain declared nonhermetic host inputs. The local out/ CX CC adapter and
+downloaded/unpacked development package used during development are private
+host preparation artifacts; they are not an installed compiler feature,
+automatic dependency resolver or portable product capability.
+
+The pack consumer currently pins foundation source
+`9c2e71ef2094773bcada4c27a39871f3d0f5947555eb3ebe338aaddf203427ba`.
+A foundation change needs explicit consumer compatibility review and fresh
+identity material. Prepare KERNEL_GEN separately via
+[the native kernel steps](kernels.md), under the same current full source and
+root build epoch as SOURCE_CTX. It must contain digest-verified identity/helper
+and assembler material, both ISA source/object receipts and arm64/x86_64
+UNIKERN1 blobs. Old source-generation receipts are not renewed by renaming them.
+
+```sh
+tools/bound 55 sh ./unisacc.com tools/source-package-pack.cx -- prepare ROOT SOURCE_CTX KERNEL_GEN NEW_PACK_CTX
+tools/bound 55 sh ./unisacc.com tools/source-package-pack.cx -- model ROOT SOURCE_CTX PACK_CTX MODEL_RECIPE_ID
+tools/bound 55 sh ./unisacc.com tools/source-package-pack.cx -- route ROOT SOURCE_CTX PACK_CTX TARGET
+tools/bound 55 sh ./unisacc.com tools/source-package-pack.cx -- declare ROOT SOURCE_CTX PACK_CTX
+tools/bound 55 sh ./unisacc.com tools/source-package-pack.cx -- pack ROOT SOURCE_CTX PACK_CTX
+tools/bound 55 sh ./unisacc.com tools/source-package-pack.cx -- seal ROOT SOURCE_CTX PACK_CTX
+tools/bound 55 sh ./unisacc.com tools/source-package-pack.cx -- --verify ROOT SOURCE_CTX PACK_CTX
+```
+
+After pack-context preparation, run the model command once for each of the34
+recipe IDs, then the route command once for each of six TARGET values:
+`lnx-arm64`, `lnx-x86_64`, `osx-arm64`, `osx-x86_64`,
+`win-arm64`, `win-x86_64`. These CLI target IDs use hyphens;
+the resulting route rows use OS/ARCH names. Each model phase verifies its
+tool/gen/tbl/net ancestry and copies the actual paired table/network bytes into
+PACK_CTX/models without reconstructing weights. Route phases bind the actual
+image-stages declaration and seven verified stage models. The complete
+inventory requires exactly34 model pairs, six route files and two private
+kernel files, including directory/mode/full-content observations.
+
+Declare then executes native seed/compilerpack with the verified routes,
+shared O1/E2/nativeabi, model directory and kernels, writing declaration and
+audit material. Pack executes native seed/pack with compression and explicit
+header/kernel/predefine mounts, writing PACK_CTX/compiler.pkg. Each command
+has one40-second native child plus source6 before/after; prepare additionally
+uses the existing kernel-context check bound15. These bounds leave no promise
+that arbitrary inputs or maximum ancestry fit55 seconds. Each phase must
+actually complete under that same limit.
+
+Seal rereads all107 job dependencies,34 pairs, six routes, kernel construction
+receipts, actual declaration/pack command evidence, carried headers and full
+package bytes. It writes exclusive PACK_CTX/model-inputs.tsv and package.tsv
+with source-package-v1 identity. The consumer's final `--verify` is pure read,
+rechecking content/source endpoints without generating NN/package bytes.
+The foundation `--verify-context` checks context only; its own pack and
+package-level `--verify` entries remain NOT_READY. Use the consumer CLI for
+these later stages. This source-package path is separate from the pinned
+P7 package-refresh migration and does not invoke archived aggregation gates.
+
+The v1 root build epoch binds ROOT/unisacc.com and the presence/content of its
+.build.json as well as the saved bootstrap. Keep those bytes fixed through
+context, kernel-generation and pack verification. Installing another root
+product or changing its build record invalidates this epoch even when other
+source bytes match; begin new matching material instead of silently relabeling
+old receipts. Saved P53/S447 can bootstrap current Source329 while their
+identities remain separate. That use alone does not create a Source329 product.
+
+A precompiled native controller may avoid repeated controller compilation.
+Its code-cache identity must bind actual ELF bytes, compiler/options/bootstrap,
+controller/modules/source and the applicable context; revalidate this identity
+when reusing it. Every job/phase still executes and freshly validates its own
+inputs, output and dependency receipts. A listing, context verification or
+prior verdict cannot substitute for construction or functional execution.
+Endpoint-local digest observations are discarded before the next fresh
+endpoint; no PASS cache is provided.
+
+PREPARED/VERIFIED package status is content/source consistency evidence.
+Independent consumer behavior, source-to-model semantics, same-candidate
+product construction and platform qualification remain separate. The34
+delta-model recipes are distinct from the classic18 gold-table NN parameters,
+whose existing numeric artifacts and .py source files remain full-SID inputs.
+Trusted initial bootstrap, root-assisted initial measurement, unsigned
+receipts, host dependencies and remaining Python-source/construction debts
+must stay explicit; no complete N22, historical process proof, zero-Python
+chain, foreign-host execution or whole-source atomic snapshot is claimed.
