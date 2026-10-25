@@ -255,7 +255,7 @@ for k in $(seq 1 40); do job csmithdiff-$k env -u MODEL_COM SEEDS=1-500 SHARD=$k
 # regressions found after 0.0.16's local queue was green came from here
 # (ccrun8: a Python-route bit-field value; opt-run1: c-testsuite 00204).
 CCRUNP=$(ls examples/*.c tests/c/*.c | grep -v '/b_malloc\.c$')
-for k in 1 2 3 4 5 6 7 8; do job ccrun-$k CCRUN_SHARD=1 ./tests/ccrun.sh $(echo "$CCRUNP" | awk -v k=$k 'NR%8==k%8 && (k!=8 || $0!="tests/c/stream_buf.c")'); done
+for k in 1 2 3 4 5 6 7 8; do job ccrun-$k CCRUN_SHARD=1 ./tests/ccrun.sh $(echo "$CCRUNP" | awk -v k=$k 'NR%8==k%8 && $0!="tests/c/stream_buf.c"'); done
 job ccrun-stream-buf CCRUN_SHARD=1 ./tests/ccrun.sh tests/c/stream_buf.c
 job ccrun-malloc CCRUN_SHARD=1 ./tests/ccrun.sh tests/c/b_malloc.c
 for k in 1 2 3 4 5 6 7 8; do job opt-run-$k OPT_PART=run SHARD=$k/8 ./tests/opt.sh; done
