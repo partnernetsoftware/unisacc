@@ -1,7 +1,8 @@
 # UJS 论文（Paper B）—— 作者一页提纲
 
-> 规格真源：`ujs/prd.md` · 目录：`ujs/ARCHITECTURE.md`（seed / weights / iterate / practice）  
-> 伴生：Paper A = 方法核 + C 自举（Lean L0–L3 / §3.4）；本文 = **同一方法的迁移** × 闭合 JS × Web / M3 自举。
+> 规格真源：`ujs/prd.md`（§0.1b）· 目录：`ujs/ARCHITECTURE.md`  
+> **谱系**：B 陈述闭合 JS／wasm 问题类与理论；A／`unisacc.com` = **由 B 派生的 C 面实践与形式化**（勿写成 A 是 UJS 父产品）。  
+> **产品**：日用 **`ujs.com`（host1_package）**；M3／Pages = `m3_scaffold`；构造／m4 = `method_construct`。三标签勿混。
 
 ---
 
@@ -18,8 +19,8 @@
 - **方法迁移（不重证）**：P-8/3/5/1 与 P-2 样板在 A；B 只 [cite A] + 定理名；**无 UJS 专用 Lean**；不暗示 A 卸责自动覆盖 UJS walker / M3。
 - **两条脊**：构造/jtape（表→IntNet）∥ **M3 出货编译器**（手写子集、**mainBody** stage2≡ / body≡）——同纪律、不同产物；勿写成「Web 编译器 = 表网络」。
 - **UJS-1（规格）** vs **UJS-1_ship（M3 已交付面，v18）**：ASCII 字面量 0–255、无转义（拼接可更长）；缺 `fn`/转义/UTF-8 等须明说。
-- **产品面**：Pages/ship · `wasm_run` / UXE；默认 `compiler_core.wasm`；Python 非 ship 必经。
-- **门禁分层**（对齐 prd #4）：`ujs.sh` · `ujs2wasm_compiler.sh` · `uxe_ship_js` · UXE 另门；tinyvm 可选 **validate** 非执行孪生。
+- **产品面**：**`ujs.com`**（编／验 `\0asm`）为主产物；Pages／`compiler_core` 为实践脊；Python／`.c` 已迁出 `ujs/`（archive）。
+- **门禁分层**：host1 = `ujs/tests/run.cx`；M3／UXE 另门；旧 `ujs.sh` 归档。
 - **验收**：套件名 + 写明比较对象；**不编造数字**。
 
 ---

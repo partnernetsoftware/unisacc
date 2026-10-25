@@ -21,6 +21,7 @@ static void usage(FILE *f) {
   fprintf(f, "  ujs.com --version | -V\n");
   fprintf(f, "  ujs.com --help | -h\n");
   fprintf(f, "  ujs.com --verify FILE.wasm\n");
+  fprintf(f, "  ujs.com --verify-list MANIFEST PREFIX\n");
   fprintf(f, "  ujs.com FILE.ujs [-o OUT.wasm]\n");
   fprintf(f, "contract:\n");
   fprintf(f, "  compile closed UJS-1_ship subset to \\0asm (bridge=stage0-host)\n");
@@ -28,6 +29,7 @@ static void usage(FILE *f) {
   fprintf(f, "  out-of-table input: refuse (no wasm)\n");
   fprintf(f, "  --verify: walk sections; require type/func/memory/export/code\n");
   fprintf(f, "            and exports memory + main_export (tag=host1_package)\n");
+  fprintf(f, "  --verify-list: one process; paths = PREFIX + name + \".wasm\"\n");
   fprintf(f, "not this binary: M3/compiler_core, construct IntNet, Pages/UXE\n");
 }
 
@@ -100,8 +102,8 @@ static int read_uleb(const uint8_t *p, size_t n, size_t *ioff, uint32_t *out) {
   }
 }
 
-/* Structural host1 wasm check. Returns 0 ok, 1 bad. */
-static int verify_wasm_bytes(const uint8_t *p, size_t n, const char *path) {
+/* Structural host1 wasm check. Returns 0 ok, 1 bad. quiet=1 skips JSON line. */
+static int verify_wasm_bytes(const uint8_t *p, size_t n, const char *path, int quiet) {
   size_t i = 0;
   int has_type = 0, has_func = 0, has_mem = 0, has_export = 0, has_code = 0;
   int has_memory_name = 0, has_main_export = 0;
@@ -185,8 +187,9 @@ static int verify_wasm_bytes(const uint8_t *p, size_t n, const char *path) {
     fprintf(stderr, "ujs.com: verify missing required exports: %s\n", path);
     return 1;
   }
-  printf("{\"verify\":\"ok\",\"wasm\":\"%s\",\"bytes\":%u,\"tag\":\"host1_package\"}\n",
-         path, (unsigned)n);
+  if (!quiet)
+    printf("{\"verify\":\"ok\",\"wasm\":\"%s\",\"bytes\":%u,\"tag\":\"host1_package\"}\n",
+           path, (unsigned)n);
   return 0;
 }
 
@@ -198,9 +201,54 @@ static int cmd_verify(const char *path) {
     fprintf(stderr, "ujs.com: cannot read %s\n", path);
     return 1;
   }
-  rc = verify_wasm_bytes(buf, n, path);
+  rc = verify_wasm_bytes(buf, n, path, 0);
   free(buf);
   return rc;
+}
+
+/* MANIFEST basenames; path = prefix + name + ".wasm" */
+static int cmd_verify_list(const char *manifest, const char *prefix) {
+  FILE *f;
+  char line[256];
+  char path[512];
+  int ok = 0, bad = 0;
+  size_t L, plen;
+  plen = strlen(prefix);
+  f = fopen(manifest, "rb");
+  if (!f) {
+    fprintf(stderr, "ujs.com: cannot open %s\n", manifest);
+    return 1;
+  }
+  while (fgets(line, sizeof line, f)) {
+    uint8_t *buf = 0;
+    size_t n = 0;
+    L = strlen(line);
+    while (L && (line[L - 1] == '\n' || line[L - 1] == '\r')) line[--L] = 0;
+    if (!L || line[0] == '#') continue;
+    if (plen + L + 6 >= sizeof path) {
+      fprintf(stderr, "ujs.com: path too long for %s\n", line);
+      bad++;
+      continue;
+    }
+    memcpy(path, prefix, plen);
+    memcpy(path + plen, line, L);
+    memcpy(path + plen + L, ".wasm", 6);
+    if (!read_file(path, &buf, &n)) {
+      fprintf(stderr, "ujs.com: cannot read %s\n", path);
+      bad++;
+      continue;
+    }
+    if (verify_wasm_bytes(buf, n, path, 1) != 0) bad++;
+    else ok++;
+    free(buf);
+  }
+  fclose(f);
+  if (bad) {
+    fprintf(stderr, "ujs.com: verify-list bad=%d ok=%d\n", bad, ok);
+    return 1;
+  }
+  printf("{\"verify-list\":\"ok\",\"count\":%d,\"tag\":\"host1_package\"}\n", ok);
+  return 0;
 }
 
 static int cmd_compile(const char *src_path, const char *out_path) {
@@ -281,6 +329,13 @@ int main(int argc, char **argv) {
       return 2;
     }
     return cmd_verify(verify_path);
+  }
+  if (!strcmp(argv[1], "--verify-list")) {
+    if (argc != 4) {
+      fprintf(stderr, "ujs.com: --verify-list needs MANIFEST PREFIX\n");
+      return 2;
+    }
+    return cmd_verify_list(argv[2], argv[3]);
   }
 
   for (i = 1; i < argc; i++) {

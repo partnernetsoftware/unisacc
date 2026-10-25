@@ -135,7 +135,72 @@ int main(int argc, char **argv) {
         fprintf(stderr, "corpus-host.cx: %d mismatches\n", bad);
         return 1;
     }
-    printf("corpus-host.cx: ok pass=%d refuse_catalog=%d unexpected_refuse_on_pass=0 (host1_package)\n",
+    /* 一批验面：一次 ujs.com 进程（避免 28×fork） */
+    {
+        char *av[5];
+        char *cap = 0;
+        size_t n = 0;
+        int rc;
+        av[0] = "./ujs/ujs.com";
+        av[1] = "--verify-list";
+        av[2] = "ujs/tests/host1-pass.txt";
+        av[3] = "/tmp/ujs-corpus-";
+        av[4] = 0;
+        rc = cx_runv_timeout(av, 30, &cap, &n);
+        if (cap && n) fwrite(cap, 1, n, stdout);
+        free(cap); cap = 0; n = 0;
+        if (rc == 127) {
+            char *shav[6];
+            shav[0] = "sh";
+            shav[1] = "./ujs/ujs.com";
+            shav[2] = "--verify-list";
+            shav[3] = "ujs/tests/host1-pass.txt";
+            shav[4] = "/tmp/ujs-corpus-";
+            shav[5] = 0;
+            rc = cx_runv_timeout(shav, 30, &cap, &n);
+            if (cap && n) fwrite(cap, 1, n, stdout);
+            free(cap);
+        }
+        if (rc != 0) {
+            fprintf(stderr, "corpus-host.cx: verify-list failed rc=%d\n", rc);
+            return 1;
+        }
+    }
+    /* 冒充实文件必须拒绝 */
+    {
+        char *av[4];
+        char *cap = 0;
+        size_t n = 0;
+        int rc;
+        FILE *bf = fopen("/tmp/ujs-verify-bogus.wasm", "wb");
+        if (!bf) {
+            fprintf(stderr, "corpus-host.cx: cannot write bogus\n");
+            return 1;
+        }
+        fwrite("notwasm", 1, 7, bf);
+        fclose(bf);
+        av[0] = "./ujs/ujs.com";
+        av[1] = "--verify";
+        av[2] = "/tmp/ujs-verify-bogus.wasm";
+        av[3] = 0;
+        rc = cx_runv_timeout(av, 10, &cap, &n);
+        free(cap); cap = 0; n = 0;
+        if (rc == 127) {
+            char *shav[5];
+            shav[0] = "sh";
+            shav[1] = "./ujs/ujs.com";
+            shav[2] = "--verify";
+            shav[3] = "/tmp/ujs-verify-bogus.wasm";
+            shav[4] = 0;
+            rc = cx_runv_timeout(shav, 10, &cap, &n);
+            free(cap);
+        }
+        if (rc == 0) {
+            fprintf(stderr, "corpus-host.cx: bogus wasm should refuse\n");
+            return 1;
+        }
+    }
+    printf("corpus-host.cx: ok pass=%d refuse_catalog=%d verify_list=1 bogus_refuse=1 (host1_package)\n",
            n_pass, n_refuse);
     return 0;
 }

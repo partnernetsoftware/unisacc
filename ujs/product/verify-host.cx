@@ -1,13 +1,8 @@
 #!/usr/bin/env -S unisacc.com -run
-/* host1 wasm 验面闸：对 host1-pass 各产物跑 ujs.com --verify。
-   Pure .cx；不打开 expect.json / Node / Python。
+/* host1 验面闸：一批 --verify-list（复用 corpus 写出的 /tmp/ujs-corpus-*.wasm）
+   + 冒充实文件拒绝。须先跑 corpus-host（smoke／complete 已保证顺序）。
    ./unisacc.com -run ujs/product/verify-host.cx
 */
-enum { MAX_NAMES = 64, MAX_NAME = 64, EXPECT_PASS = 28 };
-
-static char pass_names[MAX_NAMES][MAX_NAME];
-static int n_pass;
-
 static int exists(const char *p) {
     FILE *f = fopen(p, "rb");
     if (!f) return 0;
@@ -31,33 +26,6 @@ static int enter_root(const char *argv0) {
     return chdir("../..");
 }
 
-static int load_list(const char *path, char names[][MAX_NAME], int *out_n) {
-    FILE *f;
-    char line[256];
-    int n = 0;
-    size_t L;
-    f = fopen(path, "rb");
-    if (!f) {
-        fprintf(stderr, "verify-host.cx: cannot open %s\n", path);
-        return -1;
-    }
-    while (fgets(line, sizeof line, f)) {
-        L = strlen(line);
-        while (L && (line[L - 1] == '\n' || line[L - 1] == '\r')) line[--L] = 0;
-        if (!L || line[0] == '#') continue;
-        if (L >= MAX_NAME || n >= MAX_NAMES) {
-            fprintf(stderr, "verify-host.cx: list overflow in %s\n", path);
-            fclose(f);
-            return -1;
-        }
-        memcpy(names[n], line, L + 1);
-        n++;
-    }
-    fclose(f);
-    *out_n = n;
-    return 0;
-}
-
 static int run_host(char **av, int timeout_s) {
     char *cap = 0;
     size_t n = 0;
@@ -66,7 +34,6 @@ static int run_host(char **av, int timeout_s) {
     if (cap && n) fwrite(cap, 1, n, stdout);
     free(cap);
     if (rc != 127) return rc;
-    /* APE without binfmt: sh ./ujs/ujs.com … */
     {
         char *shav[8];
         int i;
@@ -80,43 +47,6 @@ static int run_host(char **av, int timeout_s) {
         free(cap);
         return rc;
     }
-}
-
-static int compile_one(const char *base) {
-    char src[512], outp[512];
-    char *av[5];
-    snprintf(src, sizeof src, "ujs/tests/corpus/%s", base);
-    snprintf(outp, sizeof outp, "/tmp/ujs-verify-%s.wasm", base);
-    if (!exists(src)) {
-        fprintf(stderr, "verify-host.cx: missing %s\n", src);
-        return 1;
-    }
-    unlink(outp);
-    av[0] = "./ujs/ujs.com";
-    av[1] = src;
-    av[2] = "-o";
-    av[3] = outp;
-    av[4] = 0;
-    if (run_host(av, 30) != 0 || !exists(outp)) {
-        fprintf(stderr, "verify-host.cx: compile FAIL %s\n", base);
-        return 1;
-    }
-    return 0;
-}
-
-static int verify_one(const char *base) {
-    char outp[512];
-    char *av[4];
-    snprintf(outp, sizeof outp, "/tmp/ujs-verify-%s.wasm", base);
-    av[0] = "./ujs/ujs.com";
-    av[1] = "--verify";
-    av[2] = outp;
-    av[3] = 0;
-    if (run_host(av, 10) != 0) {
-        fprintf(stderr, "verify-host.cx: verify FAIL %s\n", base);
-        return 1;
-    }
-    return 0;
 }
 
 static int refuse_bogus(void) {
@@ -137,30 +67,30 @@ static int refuse_bogus(void) {
 }
 
 int main(int argc, char **argv) {
-    int i, bad = 0;
+    char *av[5];
     (void)argc;
     if (enter_root(argv[0]) != 0) {
         fprintf(stderr, "verify-host.cx: need repo root\n");
         return 2;
     }
     if (!exists("./ujs/ujs.com")) {
-        fprintf(stderr, "verify-host.cx: build host first (build.cx)\n");
+        fprintf(stderr, "verify-host.cx: build host first\n");
         return 2;
     }
-    if (load_list("ujs/tests/host1-pass.txt", pass_names, &n_pass) != 0) return 2;
-    if (n_pass != EXPECT_PASS) {
-        fprintf(stderr, "verify-host.cx: host1-pass count=%d want=%d\n", n_pass, EXPECT_PASS);
+    if (!exists("/tmp/ujs-corpus-arith.ujs.wasm")) {
+        fprintf(stderr, "verify-host.cx: missing corpus wasm (run corpus-host.cx first)\n");
+        return 2;
+    }
+    av[0] = "./ujs/ujs.com";
+    av[1] = "--verify-list";
+    av[2] = "ujs/tests/host1-pass.txt";
+    av[3] = "/tmp/ujs-corpus-";
+    av[4] = 0;
+    if (run_host(av, 30) != 0) {
+        fprintf(stderr, "verify-host.cx: verify-list failed\n");
         return 1;
     }
-    for (i = 0; i < n_pass; i++) {
-        if (compile_one(pass_names[i]) != 0) bad++;
-        else if (verify_one(pass_names[i]) != 0) bad++;
-    }
-    if (refuse_bogus() != 0) bad++;
-    if (bad) {
-        fprintf(stderr, "verify-host.cx: %d mismatches\n", bad);
-        return 1;
-    }
-    printf("verify-host.cx: ok pass=%d bogus_refuse=1 (host1_package verify)\n", n_pass);
+    if (refuse_bogus() != 0) return 1;
+    printf("verify-host.cx: ok verify-list + bogus_refuse (host1_package)\n");
     return 0;
 }

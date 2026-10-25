@@ -1,13 +1,14 @@
 # UJS: Exact-by-Construction Table Networks for a Closed JavaScript Subset on the Web
 
-**Status:** workshop / short-paper draft (companion to Paper A)  
+**Status:** workshop / short-paper draft — **needs lineage/product refresh** (see below; living product: `ujs/prd.md` §0.1b)  
 **Language:** English body; Chinese abstract optional  
-**Repo artifact:** `ujs/` (layout: `seed/` · `weights/` · `iterate/` · `practice/` — see `ujs/ARCHITECTURE.md`; legacy `construct`/`core`/`uxe` paths are compatibility symlinks)  
-**Gates (layered; see `ujs/prd.md` #4):**  
-- **Language / construct / path-B:** `./tests/ujs.sh` (includes `ujs2wasm` → step)  
-- **M3 / P0 product compile:** `./tests/ujs2wasm_compiler.sh`  
-- **Ship-js contract:** `./tests/uxe_ship_js.sh`  
-- **UXE unmanned:** `npm run test:uxe:*` — **separate** from language; flaky UXE must not block language green  
+**Repo artifact:** `ujs/` (`product/` host image · `seed/stage0` · `tests/` · `iterate/` · `practice/` — `ujs/ARCHITECTURE.md`). Construct `.py`／path-A `.c` live under `archive/ujs-legacy-py-c/` (not ship).  
+**Lineage (product ruling 2026-10-25):** **B → A derived** — Paper B states the closed-JS／wasm *problem class*; Paper A／`unisacc.com` are the C-side practice & formality that *answer* that class. Do **not** narrate A as UJS’s parent product.  
+**Gates (layered; see `ujs/prd.md`):**  
+- **host1 product (`ujs.com`, tag `host1_package`):** `./unisacc.com -run ujs/tests/run.cx -- --smoke|--complete`  
+- **M3／Pages scaffolding (tag `m3_scaffold`):** `compiler_core`／`compile.mjs` — separate from host1  
+- **method arc (tag `method_construct`):** construct／m4 — separate receipts; not discharged by host1 green  
+- **UXE unmanned:** `npm run test:uxe:*` — separate; flaky UXE must not block host1  
 **Method proofs:** live in Paper A [cite A] (`archive/research/formalization-roadmap.md`, Lean L0–L3)—this paper does not re-prove IntNet existence, and **ships no UJS-specific Lean**.
 
 ---
@@ -16,7 +17,9 @@
 
 We present **UJS**, a closed JavaScript subset (**UJS-1**) that *transfers* the construct-don't-train discipline of UNISA SH [cite A]: finite gold tables become an integer IntNet; exactness on table nets is checked by full key-space enumeration (`acc`). **Paper B’s claim center** is the **constructed IntNet / table nets / (target) stream-derivation pipeline** for closed JS → **`\0asm`** (gold → IntNet → flow → bytes; provisional **m4** contract in `research/m4-flow-net-contract-draft.md`). **Paper A owns the method kernel** (enumeration and Lean samples such as `naive_exact`, `decision_list_exact`, `cong_of_pointwise`, `asks_subset_K`). Paper B **cites** that kernel; it does **not** re-prove IntNet existence and does **not** claim that A’s discharges automatically transfer to every UJS walker.
 
-Where Paper A targets a C self-hosting shell, UJS applies the same oracle discipline on the **construct / jtape spine** (lex…irsel [+ IC], wasm lower when tables ship). The **M3 spine** (`compiler.ujs` → `compiler_core.wasm`, twin-tests in §5.2) is **product scaffolding / 旁路** for Pages ship—Python-free delivery evidence, **not** Paper B’s main contribution and **not** a claim that the shipping compiler is an IntNet. **现状出货 ≠ 主张中心** (Appendix D). Claims are suite names already in the repository; we invent no throughput numbers.
+**Product surface (2026-10):** the shipped day-to-day tool is **`ujs.com`** (APE／六目标／host1 oracle／`--verify` 验面; pure `unisacc.com`+`.cx`). That surface is **evidence of the productivity-tool class**, not proof that the method arc (IntNet／m4) is discharged. The **M3 spine** (`compiler.ujs` → `compiler_core.wasm`) remains **scaffolding** for Pages—**not** Paper B’s claim center and **not** an IntNet. Construct／jtape remains the **method** arm (`method_construct`). **现状出货 ≠ 主张中心** (Appendix D). Claims are suite names already in the repository; we invent no throughput numbers.
+
+**谱系提醒：** 旧稿「companion to A／A owns kernel, B cites」仍可用于方法核引用；**产品与问题派生方向**以 `ujs/prd.md` §0.1b 为准（B→A），改口时勿写成「UJS 挂在 unisacc 产品树下」。
 
 **摘要（可选）**  
 UJS 把 UNISA SH [cite A] 的构造法迁到闭合 JS：**主张中心** = 构造 IntNet / 表阶段 /（目标）流推导管线（闭合 JS→`\0asm`；见 `research/m4-flow-net-contract-draft.md`）。方法核在 A；B **引用**，**不**声称 A 卸责自动覆盖每张 UJS 表。**M3 出货**（`compiler_core`、**mainBody** 字节对照）= 工程旁路/脚手架，**不是**主贡献，也不是「Web 编译器 = 表网络」。**现状出货 ≠ 主张中心**。语言子集写 **UJS-1_ship**，勿与全表 UJS-1 等同。
