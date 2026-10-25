@@ -137,7 +137,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 <a id="current-plans"></a>
 ## 2. 当前版本与有效计划
 
-**2026-10-25 当前调度裁定：** csr／grk 的 E4 mask 与 E3 CT 融合收据进入同版0.0.43、当前F的窄刀接入队列，撤回延期0.0.44的安排。当前重活已结证、原H0停237，不抢杀Working；先核源与整包身份，再逐刀重建候选、验证主路径及回退。每刀只给实际接入或REJECT＋具体理由，不能登记下版代替处理。旧P297及冻结H0证据保留，候选变更不得继承旧产品的通过数。Draft／Latest／签名／公开全部禁止，直到新授权。
+**2026-10-25 当前调度裁定已执行：** E4 mask已在同版0.0.43接main（d1fa90e516），独立完整候选P7f709…／Sd754…在固定F4完成hello默认-run及完整image新旧字节同。E3 CT融合REJECT：located reader先MARK tpos再消费位置前缀，IX.new新BYTE读正文，旧JUMP读前缀，CT分支可异；撤回E3源码，私有加速收据保留但不作接受资格。两刀不延期0.0.44。旧P297／冻结H0不变，新候选不继承旧绿。Draft／Latest／签名／公开全部禁止，直到新授权。
 
 <a id="work-tree"></a>
 ### 思维树
@@ -148,7 +148,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 0.0.43 公开发布
 ├─ 已完成：F1产品修复、F2文档／探针；F3历史基线187项=186 PASS＋1宿主未核
 ├─ 已完成：F6三实际编译器SHA相同；三阶段五代码切片实际重编、原50秒界通过
-├─ 当前：原H0停237，777 PASS／463待办；重活已结证，立即在0.0.43当前F逐刀接入E4 mask与E3 CT融合；每刀实际接入或REJECT理由，禁止延期台账闭环
+├─ 当前：E4本版接main并通过当前F4主路径窄试；E3原融合因located cursor/tpos读字节不同REJECT并撤回；原H0停237，777 PASS／463待办
 │  ├─ 070窗自然结束、2193已终止；旧冻结的结果仅保留诊断，不计有效正式PASS
 │  ├─ 清单1317项；原seedmemory严格17例=行为16＋真实新鲜度1，后者仍UNKNOWN／OPEN
 │  ├─ 固定env-pin；绑定新HEAD与真实非空Git闭包身份，禁止迁移旧绿或沿用旧闭包hash
@@ -159,11 +159,11 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 └─ 待完成：Draft资产核对 → Latest／公开 → 下载SHA与运行复核
 ```
 
-**下一动作：** 先完成同版当前F的E4 mask／E3 CT融合主路径接入：E4独占重活令牌，E3并行核源码及原生可重现构造，逐刀验证整包身份、真实shipping路径、字节同与回退；可接入则交具体源码和候选，否则当面REJECT一句原因。冻结H0停237：777 PASS／463待办，6资源UNKNOWN、6宿主未核、19既有裁定、21 NEEDS_RULING、23 BLOCKED、2 HOST_TIMEOUT。H13已结证20功能PASS／60 variants＋2 PREPARED（冷28.883秒／HIT11.682秒）；union16-direct1原始构建红仍待实际诊断。原H0与P297保留，新候选不继承旧绿。V5 union232私有1193补件／32源已结证DATA＋真实4父／18notrun认证35.130秒，partial拒绝／末端漂移拒绝通过；whole50、完整M7、owner仍未测。接入试验期间不推进发布或签名。
+**下一动作：** E4单刀继续本版受影响路由及真实MS.fail／SOLVE.old回退资格；目前只有hello两模式实际shipping窄试，不算80路由全域通过，私有回退见证工具139亦不作产品失败。E3原刀已因located cursor／tpos差异REJECT，保留窄试与生成证据，撤回三源码，不另开CT研究或延期台账。冻结H0停237：777 PASS／463待办，6资源UNKNOWN、6宿主未核、19既有裁定、21 NEEDS_RULING、23 BLOCKED、2 HOST_TIMEOUT；union16-direct1仍待实际诊断。H13已结证20功能PASS／60 variants＋2 PREPARED（冷28.883秒／HIT11.682秒）。V5 union232私有1193补件／32源DATA＋真实4父／18notrun认证35.130秒；whole50、完整M7、owner未测。旧P297与新P7f709分别记证，不推进发布或签名。
 
 H2 reader七→十一、H3 callback一→二、H4 srcelf首片一→二均已实际结证。H6@a631445c23七项原40秒首次全0：callback off/on 21.492／34.606秒、context 8.355秒、typed 5.180秒、variadic 14.601秒、callback-plan 12.195秒、resolver 5.829秒，普通及sanitizer分支保留；原F4环境和工具树未改，P297／Sc90不变。context选择已存在PIC库，四个宿主探针补GNU特性声明；只绑定已观察的三个原rc1记录及原始日志SHA，不通放断言失败，也不虚构尚未执行的两项原失败。
 
-私有V5已绑定755固定补件、28项代码自有源码，profile显式host-target222-source224-v5；active1325、retired16／retained1301，231四PIC错误尚未接纳。外置清单逐文件真实深比及64KiB收据上限保留：755准备28.509秒／全深比28.207秒／恢复28.163秒均0，字节篡改／缺rc／旧profile均拒绝2。admission／receipt对真实743待办快照在原15秒界12.224／12.591秒拒绝2且无receipt输出；旧549诊断15秒142保留，不把DATA55准备当正式40／全准入50通过。终态导出、完整owner正例、64KiB序列化及总50秒仍待真实M7终态；production-v5候选正在按28源重封，真实policy与production_ready仍false。Windows资格／公司签名、Apple签名／公证、最终字节验证及公开待完成；具体minicon跨仓授权仍待答。最近零Python原生门禁0（real1744／data32、未抬基线），运行依赖尚未清零。E2/E3/E4优化证据分别记入各记忆房间及0.0.44计划，不改变本版冻结P297。
+私有V5 union232现绑定1193固定补件、32项自有源码，profile显式host-target222-source224-union232-v5；active1328／retired38／retained1279。完整1193 fresh pin与末端全重核保留，同类DATA＋真实4父／18notrun认证51.337→35.556秒，owned正控35.130秒；坏byte／缺rc／错边及末端漂移均实际拒绝2，恢复通过。32源表SHA3cf50818…／entry35e7a357…；真实partial admission／receipt仍拒绝且输出ENOENT。报告`/tmp/unisacc-c43-apple-adapter/V5-UNION232-PERFORMANCE-REPORT.txt`；Node contract未重pin，whole50／完整M7／owner未测，旧P297证据不授权新E4候选，生产开关仍false。
 
 <a id="memory-palace"></a>
 ### 记忆宫殿
@@ -178,9 +178,10 @@ H2 reader七→十一、H3 callback一→二、H4 srcelf首片一→二均已实
 | 资源室：完整义务 | 1317清单保留seedmemory两具名节点：functional原16行为断言，evidence原1真实freshness；legacy --selftest仍严格17聚合。真实计算键漂移为rc2 UNKNOWN required=memory／OPEN；坏文件／解析／权限输入仍真错误，不能借UNKNOWN吞掉。生产REF／RSS／常量不变，不重键套旧RSS。 | derived-map／gatelayers／stagemap必须完整保留两节点；functional绿不吞evidence执行，rc0提交合同不变。五生成器既有RESOURCE_UNKNOWN与H1超时均非PASS；须收集匹配测量或按既有合同整组裁定，不自授豁免。 |
 | 准备室：warnprep既有C方案 | 1/5=warnparse（--warnings --errors）、2/5=errorparse（--errors）必须分清；六材料已按旧独立parity实际核SHA相同。当前三seed actor与旧工具SHA匹配，canonical接口重算新wholekey；不复制旧key／伪造recipe。原cache控制入口仍是遗留Python，构造／转表／net实际走C；正式132窗两producer各0.552秒rc0，不冒称迁移完成或关闭RSS OPEN。 | 原完整命令见`/tmp/unisacc-c43-f4-cachefix-NqVxFpFN/out/warn-recovery-20261024c/run.sh`；当前F4用`/mnt/out/m7-warn-native-tools/{gen,tbl,net}`映射stage2/seedbin/seed-*，o1／e2／nativeabi及route取同stage2；当前日志`out/warnprep-{1,2}-native-{prepare,hit}.log`。131原失败及事务原state全部保留。 |
 | 工具间：已核与未核 | carrier、suite缓存／failfast、hostcheck现行七叶12例、seedmemory行为与隔离正反例、四元数据闸已有各自实跑证据；均不计作新冻结M7通过数。默认用unisacc.com＋.cx，不为测试改动重复构建产品。工具编写实测发现有效C的*(*q)++=0被拒（系统cc语法检查0、当前默认-run1），最小复现登记C44；本轮工具拆成赋值与递增继续，不扩大0.0.43。H11归档工具另遇C44-CX-SIZEOF-POSTFIX-01：函数实参里的sizeof ES[N].name合法C99，父独立cc -x c -std=c99 -Wall -Wextra -fsyntax-only为0、P297默认-run为1（not covered: argument list）；工具用既定字段界继续，语言修复留C44。CX头原生stat/open/read的errno沿自身syscall-image实现读取，勿混host __errno_location；共享libffiprovider已实际45项负控核ENOENT／ENOTDIR／EACCES／空／目录／FIFO／provider漂移及恢复。 | [能力速查](#implemented-usage)、[原生套件目录](tests/suite/README.md)；具体旧实验与失败见历史Git及私有报告。 |
-| E4室：0.0.43当前F接入中 | csr同BIG／runner／package32.186160→29.070179秒，5227535字节同；八正例及TIPPRE hello／fib／asme3字节同且加速。J9退化／COPYL无墙钟收益不采用。 | `/tmp/unisacc-c43-e4-accel-20261025/ACCEL-RECEIPT.txt`、`/tmp/unisacc-c43-e4-tippre-20261025/TIPPRE-RECEIPT.txt`；new.net SHA32dd5b82…。本版立即核源码差异、原生重封及完整主路径，保留SOLVE.old／轮次／64-cap。旧单网结果不冒充整包接入，最终接入或REJECT理由，不再延期C44。 |
-| E3室：0.0.43当前F接入中 | 包内O2 e3为errorparse（parse2 --errors）；CT融合切片ISA6.680→2.237秒（−66.5%），整图566242字节SHA ace9f9ed…同；fib及run.c字节同（run.c整图172553字节SHA21956baf…）。COUNT／ISA既有实验已收口，不再重派。 | `/tmp/unisacc-c43-e3-ct-fuse-20261025/RECEIPT.txt`、`ISA-RECEIPT.txt`、`RUNC-RECEIPT.txt`；私包SHA8a162b08…。仅errorparse look槽存字节、CT.pos=LDX＋RLD、CT.byte判59/123/125，TIX位置表与UD不动；不搬E4。立即补可再现原生构造、当前F整包身份／主路径与回退资格，接入或REJECT，不再延期C44。 |
-| E2室：COUNT采证／设计待验 | csr原收据：93003574 transitions／186418639 actions，ADV92213557占49.5%、COPY87289889占46.8%、COPYT占1.8%，JUMP43857、SWAP257；切片产物SHA ace9f9ed…一致。 | `/tmp/unisacc-c43-e2-count-20261025/RECEIPT.txt`；ISA3.970秒，hostcc附带3.702590秒。DESIGN候选为宏／体span复用、减少每扩展字节COPY/ADV；不搬E3回扫或E4 mask，未改模型。E2/E3/E4优化留C44，不新增C43前置；27秒样本执行E4约53%／E3约22%／E2约15%、装包写盘不足0.5%，须与套件准备开销分账。 |
+| E4室：本版已接入／窄试通过 | main d1fa90e516三表，经原生gen/tbl/net再生SHA32dd5b82…与csr候选同；完整候选P7f709…／Sd754…／独立schema1 sidecar核0，全部32M解压CRC及runner／D／其余31M／74F原字节保持。 | `out/e4-current-f/E4-CURRENT-F-RESULT.txt`；固定F4（H13 out）hello默认-run旧新双0／输出同，image双0／24618B／SHA3a0f10cc…同。80共享route清单已存；不冒充全域资格，真实fallback分支未资格，私有工具139已保留。csr既有BIG及多输入提速收据继续有效但范围独立；原P297不改，不签不公开。 |
+| ujs床：外来窄刀已REJECT | csr／grk转论文B仓外探索，不与7×18并表。网复用建议不迁入unisacc：出货直接加载包内模型且已有进程内复用，无逐文件重建IntNet热点；m4的verify=False是穷举构造验证开关，不能误称文件SHA校验。删侧路询问刀28份wasm字节同，但墙钟中位合计3.146→3.146秒，无加速，REJECT。 | `/tmp/ujs-accel-bed-20261025/KNIFE1-net-reuse-RECEIPT.txt`、`/tmp/grk-ujs-obs/RECEIPT.txt`（同伴收据）；不迁回、不预堆下版；ujs死问卫生另排，不改unisacc出货网或本轮E4结论。 |
+| E3室：原CT融合REJECT并已撤回 | 原生生成及E3／combined包构造曾完成；已启动F4 ctor新旧均rc3／main12与bye12同，未启动image／拒绝／combined主路径。阻断仍成立：errorparse启用locations，DL.prefix前MARK tpos、吃前缀后才IX.new；旧回扫读前缀64，新BYTE读token正文，分号／花括号时CT.nexttok与CT.skip可异。 | `/tmp/c43-e3-ctfuse-source-review.txt`、`out/e3-current-f/`；body-manifest恢复SHA91445eb7…，两新增表移ignored REJECTED存证，Git／index无E3改动。原ISA −66.5%及fib／run.c正例继续作为历史窄证；不把源码局部反例冒充端到端失败，不出货两候选，不推下版。 |
+| E2室：COUNT采证／设计待验 | csr COUNT：93003574 transitions／186418639 actions，ADV49.5%、COPY46.8%、COPYT1.8%，JUMP43857、SWAP257，切片SHA ace9f9ed…同。 | `/tmp/unisacc-c43-e2-count-20261025/RECEIPT.txt`；ISA3.970秒、附带hostcc3.703秒。宏／体span复用仍仅DESIGN；E2未改模型，E3／E4按本版裁定单独闭环，不混用各阶段热点。 |
 | CI室：RC六原生与Darwin | RC `cd30109850f1d8958cc004d82821c36c46543db3`：release-check run40122497134 attempt1六原生及严格矩阵成功，Windows双架构套件、Linux x86_64互操作／生命周期成功；Darwin run40122511661 attempt1两架构16报告rc0。 | `release/evidence/c43-candidate-ci.json`、`release/evidence/c43-darwin-ci.json`、`out/c43-darwin-cd301-40122511661/`。旧Darwin畸形输出run40122037341失败保留；这些签前证据不代替M7或签后court。 |
 | CI室：补充与安全网 | 后续head `ef7fb2e3bff5b4b4d74e2ca2f45207b0614c3c7c` 的release-check run40126270529十二job成功，六报告与matrix已下载核对；不可绑定成旧RC收据。新完整ci.yml run40126358606的五平台装根前置均成功；ARM job120968537890仍因native6 revived失败，不能宣称整轮绿。 | `out/c43-candidate-demo-40126270529/`；旧run40122511809／job120956934441原日志亦保留。native6的b_bitfield_compound仍缺两Python参考路输出及cc独立预期，不能因两路相同就删knownfail或称语义已修。额外安全网不替代已核RC release-check／Darwin证据。 |
 | 签名室：仍关闭 | Apple签名／公证／staple／DMG、Windows qualification／公司签名及最终下载核验待完成；具体minicon跨仓部署、私包读取与调度授权仍待答。生产开关false，不读凭据、不部署或签名。 | 私有`/tmp/unisacc-c43-apple-adapter/`：bootstrap20／ditto63／清理守卫21离线控通过，Mac密钥链系统语义未实测；初始化25＋producer独立HEAD11控制通过。源仓capsule exporter已提交2609916580、29离线控通过；原生ZIP packer实际6成员正例及9拒绝控通过。V5单进程入口与632外置补件已接，完整DATA读验及拒绝控通过，新production-v5候选封印25自有源、76项离线检查通过；真实policy和production_ready仍false，正式终态owner／总50秒／64KiB序列化／跨dispatch仍缺。真实partial和旧15秒超时均保留；详见H6-DATA-REPORT、V5-549-DATA-MANIFEST-REPORT、CAPSULE-STORE-REPORT、ADMISSION-CAPSULE-PRODUCER-REPORT。 |
