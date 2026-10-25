@@ -1,0 +1,41 @@
+/* One case per invocation: ROOT EXISTING_CHAIN_MAT NEW_ABS_OUT CASE_ID.
+ * Each child is tools/bound 8; caller tools/bound 55. Never constructs NN.
+ * Cases: valid NNflip tableflip receiptflip missingnet symlinknet FIFOreceipt.
+ * Only five small leaves are cloned. Original material is never mutated. */
+#pragma unisa use cxlib.netpack
+static char root[4096],material[4096],work[4096],copydir[4400],product[4400],tool[4400],bound[4400];
+static const char *leaves[]={"model0.tbl","model0.net","model1.tbl","model1.net","material.tsv"};
+static int assertions,failures;
+static void die(const char *s){fprintf(stderr,"ri-chain-controls: %s errno=%d\n",s,errno);exit(2);}
+static void ck(int ok,const char *name){assertions++;if(!ok)failures++;printf("%s\tri-chain-controls.%s\n",ok?"PASS":"FAIL",name);}
+static void path(char *p,const char *base,const char *name){int n=snprintf(p,4400,"%s/%s",base,name);if(n<0||n>=4400)die("path bound");}
+static char *load(const char *p,size_t *n){struct stat st;errno=0;if(lstat(p,&st))die(errno==ENOENT?"input absent":"input stat failed");if(!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>16777216)die("bounded regular input");char *s=cx_read(p,n);if(!s||*n!=(size_t)st.st_size)die("read extent");return s;}
+static void digest(const char *p,char *hash){size_t n;char *s=load(p,&n);cx_sha256_hex(s,n,hash);free(s);}
+static void write_(const char *p,const char *bytes,size_t n,int fresh){int flags=O_WRONLY|O_CLOEXEC|O_NOFOLLOW|(fresh?(O_CREAT|O_EXCL):O_TRUNC);int fd=open(p,flags,0600);if(fd<0)die("private output open");size_t at=0;while(at<n){ssize_t z=write(fd,bytes+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0){close(fd);die("private write");}at+=(size_t)z;}if(close(fd))die("private close");}
+static np_result verify(const char *dir,const char *label){if(unsetenv("UNISACC_RF_CAPTURE")||unsetenv("UNISA_ATTRIBUTES"))die("clear ambient capture/attributes");char *v[]={bound,"8","sh",product,tool,"--","--verify",root,(char *)dir,0};char why[1400],p[4400],name[140];np_result r;if(np_run(v,root,0,10,&r,why,sizeof why))die(why);snprintf(name,sizeof name,"%s.stdout",label);path(p,work,name);write_(p,r.out,r.outn,1);snprintf(name,sizeof name,"%s.stderr",label);path(p,work,name);write_(p,r.err,r.errn,1);return r;}
+static int accepted(np_result *r){const char *gold="VERIFIED\tri-chain-material\tno-test-result\n";return r->rc==0&&!r->errn&&r->outn==strlen(gold)&&!memcmp(r->out,gold,r->outn);}
+static void flip(const char *p){size_t n;char *s=load(p,&n);if(!n)die("nonempty mutation fixture");s[0]^=1;write_(p,s,n,0);free(s);}
+int main(int argc,char **argv){
+#if !defined(__linux__) || !defined(__x86_64__)
+ fputs("NOT_RUN ri-chain-controls fixtures require Linux/x86_64\n",stderr);return 3;
+#endif
+ if(argc!=5||!realpath(argv[1],root)||!realpath(argv[2],material)||argv[3][0]!='/'||strlen(argv[3])>=sizeof work)return 2;
+ const char *names[]={"valid","NNflip","tableflip","receiptflip","missingnet","symlinknet","FIFOreceipt"};int kind=-1;for(int i=0;i<7;i++)if(!strcmp(argv[4],names[i]))kind=i;if(kind<0)return 2;
+ strcpy(work,argv[3]);if(mkdir(work,0700))die("new private output required");path(copydir,work,"copy");if(mkdir(copydir,0700))die("private material copy");path(product,root,"unisacc.com");path(tool,root,"tools/ri-chain-material.cx");path(bound,root,"tools/bound");
+ char before[5][65],bootstrap[65],after[65],from[4400],to[4400];digest(product,bootstrap);for(int i=0;i<5;i++){path(from,material,leaves[i]);digest(from,before[i]);printf("ORIGINAL\t%s\tsha256=%s\n",leaves[i],before[i]);}
+ np_result base=verify(material,"original-verify");int valid=accepted(&base);ck(valid,"original-material-verified");if(!valid){if(base.errn)fwrite(base.err,1,base.errn,stderr);np_free(&base);die("original material prerequisite");}np_free(&base);
+ for(int i=0;i<5;i++){size_t n;path(from,material,leaves[i]);path(to,copydir,leaves[i]);char *s=load(from,&n),h[65];cx_sha256_hex(s,n,h);if(strcmp(h,before[i]))die("original changed while cloning");write_(to,s,n,1);free(s);}
+ const char *reason=0,*changed_leaf=0;
+ if(kind==1){changed_leaf="model0.net";reason="complete-NN-pin-mismatch";path(to,copydir,changed_leaf);flip(to);}
+ if(kind==2){changed_leaf="model0.tbl";reason="literal-table-recipe-mismatch";path(to,copydir,changed_leaf);flip(to);}
+ if(kind==3){changed_leaf="material.tsv";reason="material-receipt-mismatch";path(to,copydir,changed_leaf);flip(to);}
+ if(kind==4||kind==5){changed_leaf="model0.net";reason=kind==4?"input-absent":"bounded-regular-input";path(to,copydir,changed_leaf);if(unlink(to))die("private net remove");if(kind==5){path(from,material,changed_leaf);if(symlink(from,to))die("private net symlink");}}
+ if(kind==6){changed_leaf="material.tsv";reason="bounded-regular-input";path(to,copydir,changed_leaf);if(unlink(to))die("private receipt remove");
+  /* Linux x86_64 mknodat=259, FIFO type 010000; no host mkfifo tool.
+   * This creates an actual FIFO leaf, distinct from the symlink negative. */
+  long z=__syscall6(259,-100,(long)to,010000|0600,0,0);if(z<0){fprintf(stderr,"FIFO mknodat failed: %ld\n",z);die("private FIFO creation");}struct stat st;if(lstat(to,&st)||!S_ISFIFO(st.st_mode))die("FIFO fixture identity");
+ }
+ np_result result=verify(copydir,"copy-verify");if(!kind)ck(accepted(&result),"valid-private-clone-verified");else{np_buf prefix={0};np_puts(&prefix,"ri-chain-material: REFUSE ");np_puts(&prefix,reason);np_puts(&prefix," path=");path(to,copydir,changed_leaf);np_puts(&prefix,to);np_puts(&prefix," errno=");ck(result.rc==2,"mutated-copy-rc2");ck(!result.outn,"mutated-copy-empty-stdout");ck(result.errn>prefix.n&&!memcmp(result.err,prefix.p,prefix.n)&&result.err[result.errn-1]=='\n',"mutated-copy-exact-named-refusal");if(result.rc!=2&&result.errn)fwrite(result.err,1,result.errn,stderr);free(prefix.p);}np_free(&result);
+ for(int i=0;i<5;i++){path(from,material,leaves[i]);digest(from,after);char name[100];snprintf(name,sizeof name,"original-%s-unchanged",leaves[i]);ck(!strcmp(before[i],after),name);}digest(product,after);ck(!strcmp(bootstrap,after),"bootstrap-unchanged");
+ puts("NOT_CLAIMED\tNN-functional-execution-product-or-foreign-host-qualification");puts("TIMING\tstartup_read_verify_output_cold_hot=UNMEASURED");printf("RI_CHAIN_CONTROLS\tcase=%s\tassertions=%d\tfailed=%d\tscope=one-private-material-verification-control-no-NN-construction\n",argv[4],assertions,failures);return failures?1:0;
+}

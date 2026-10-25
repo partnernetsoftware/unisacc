@@ -82,6 +82,159 @@ packaged-product snapshots, full lifecycle/resource budgets and foreign hosts re
 The same optional argument also accepts a full packaged APE candidate, executing
 it directly through its launcher before installation, with its own model package.
 
+RI construction and execution are separate. [tools/ri.md](../tools/ri.md)
+describes SC2 ordered capture/replay, SC1 map compatibility and the original C
+substrate adapter. The registered `resources` batch retains its original
+30-second budget. The separate `ri-trace` and `ri-multi` batches each have a
+55-second budget and use distinct new output directories:
+
+```sh
+tools/bound 30 sh ./unisacc.com tests/resources.cx -- ROOT ABS_NEW_OUT
+tools/bound 55 sh ./unisacc.com tests/resources.cx -- ROOT ABS_NEW_OUT --trace
+tools/bound 55 sh ./unisacc.com tests/resources.cx -- ROOT ABS_NEW_OUT --multi
+tools/bound 55 sh ./unisacc.com tests/resources.cx -- ROOT ABS_NEW_OUT --trace-output
+```
+
+`ri-trace` covers event order, missing/surplus events, strict recapture, metadata
+refusal and constrained trace-to-map conversion. `ri-multi` checks mixed CX/C
+translation units whose replies change, exact SC2 replay and an independently
+executed return-7 image. These are separate obligations from the existing
+ledger replay/refusal/blob rows; none is dropped or replaced. The separate
+`ri-trace-output` batch retains its55-second budget and passed17 assertions
+on the actual P53 packaged candidate. It checks exact primary/symbol replay, rejects an
+unconsumed event before either output file exists, preserves SC1 --version/help
+compatibility and refuses conflicting routes in both flag orders. These three
+rows are supported by `out/c43-ri-trace-output-candidate-11.log`; registry
+availability by itself is never execution evidence.
+
+Prepare each C substrate once with the appropriate fixture, then execute its
+permanent parent runner. MATERIAL is the corresponding absolute output directory
+containing `runtime-native`, `runtime.c`, `material.tsv` and `native.tsv`:
+
+```sh
+tools/bound 55 sh ./unisacc.com tools/ri-material.cx -- --build ROOT NEW_ABS_CAPTURE_MATERIAL tests/cases/ri-fetch.cx
+tools/bound 55 sh ./unisacc.com tests/ri-capture.cx -- ROOT CAPTURE_MATERIAL NEW_ABS_CAPTURE_RUN
+tools/bound 55 sh ./unisacc.com tools/ri-material.cx -- --build ROOT NEW_ABS_CONSUMER_MATERIAL tests/cases/ri-consumers.cx
+tools/bound 55 sh ./unisacc.com tests/ri-consumers.cx -- ROOT CONSUMER_MATERIAL NEW_ABS_CONSUMER_RUN
+tools/bound 20 sh ./unisacc.com tests/core-compat.cx -- ROOT
+```
+
+`--build` records PREPARED material, not a functional PASS. It binds source,
+nine direct inputs, full bootstrap, generated C, explicit compile flags and
+actual ELF bytes, with checks around the real compilation. Both parent runners
+call `--verify-native` before and after execution, independently hash the binary,
+and retain each fresh process's stdout/stderr/status. Material verification is
+bounded to18 seconds per call; ordinary child cases to2 seconds, capture quota
+to8 seconds, and the whole parent invocation to55 seconds. The single compiled
+C substrate is reused; test outcomes are executed anew. Materials from changed
+inputs must be regenerated, never silently reused.
+
+`ri-capture` covers six positive groups with18 literal fixture assertions and
+seven fatal cases, including actual4096-event exhaustion and exact named
+refusals with empty stdout. `ri-consumers` covers45 fixture assertions for RI /
+synthetic RES / disk precedence, opaque keys and bytes, owned blob/cache slots,
+snapshot PRESENT/EMPTY/ABSENT/MISSING, strict SC1 map behavior, and the isolated
+zero-length-copy allocation/growth contract. Strict missing has two additional
+parent checks for rc2 and exact empty-stdout error. Synthetic RES lookup does
+not establish P3 loading; the narrow empty-copy guard does not establish general
+memory safety.
+
+The `core-compat` module batch checks16 assertions for one pinned full-file
+transition only: current guard is kind1, exact old reversal is kind0, and
+side-byte/allocation/capacity/guard mutations are refused. Its receipt contains
+the full current core and helper SHA. No old archived PASS is consumed.
+Root `P53e2cd1f/S447f794a` is installed. Its actual packaged candidate passed
+smoke16 and the four product-facing RI batches30/15/8/17, all with zero failures.
+Fresh current-root materials were then built and verified: capture16 parent
+checks /18 fixture assertions /7 fatal cases, consumer10 parent checks /45
+fixture assertions plus strict-missing2, and the separated NN chain17 checks
+(including2 PRECONDITION) all passed their original55-second outer bounds.
+The logs are `out/c43-ri-{capture,consumers,standalone}-installed-11.log`.
+These are actual new-root runs; the old capture04/consumer04 and repaired
+prototype results are retained separately and were not transferred. The
+core-compat module's16/0 source-eligibility observation is also separate from
+production execution. No foreign-host or general memory-safety qualification
+follows from these local checks.
+
+The `ri-standalone` batch requires two separate materials: the actual C runtime
+built from `tests/cases/ri-cli.cx` (`ri-cli`) and the static synthetic NN chain
+(`ri-chain`). Each preparation has its own bound and new directory:
+
+```sh
+tools/bound 55 sh ./unisacc.com tools/ri-material.cx -- --build ROOT NEW_ABS_CLI_MATERIAL tests/cases/ri-cli.cx
+tools/bound 12 sh ./unisacc.com tools/ri-chain-material.cx -- ROOT NEW_ABS_CHAIN_MATERIAL
+tools/bound 12 sh ./unisacc.com tools/ri-chain-material.cx -- --verify ROOT CHAIN_MATERIAL
+tools/bound 55 sh ./unisacc.com tests/ri-standalone.cx -- ROOT CLI_MATERIAL CHAIN_MATERIAL NEW_ABS_STANDALONE_RUN
+tools/bound 55 sh ./unisacc.com tests/ri-material-controls.cx -- ROOT CLI_MATERIAL tests/cases/ri-cli.cx NEW_ABS_CONTROL_RUN CASE_ID
+```
+
+Its exact `ri.standalone-attribute-commit` contract runs two private synthetic
+threshold NN models through the actual standalone C CLI. Valid replay must
+produce the expected attribute bytes; an unconsumed trace event must refuse
+before modifying an existing attribute sidefile or creating an absent one.
+This does not qualify production E1/E3 models. Chain construction records only
+PREPARED; its `--verify` is read-only and never converts the models again. The
+v1 NN profile binds its recipe/module, netpack and material CLI hashes plus the
+exact `exec/c/core.h` action ABI SHA256
+`9d1eaeec134834433ad11fdb62be27bfb03a9c9b28d8c7058b191ec6edbcfe30`.
+Both preparation and verification reject a changed action ABI; matching only
+the converter or recipe is insufficient. Preparation remains PREPARED-only.
+The parent verifies chain material directly through its module before and after
+execution. The two NN structure checks are PRECONDITION, not functional PASS
+assertions. Runtime verification remains two18-second calls, and each of the
+four case processes retains its3-second limit within the original55-second
+parent bound. Neither material preparation is folded into that parent budget.
+
+The original prototype first reported17 assertions with two sideeffect
+failures. A subsequent repaired development prototype completed17/0; that
+observation did not transfer to the new parent. The new parent with separate
+runtime/chain inputs was independently executed on the current root:17/0,
+`out/c43-ri-standalone-installed-11.log`. Production source feature commit589db6c39f is
+recorded separately; generation11 is installed as `P53e2cd1f/S447f794a`. Its current-root
+observations bind actual runtime, chain and bootstrap identities; full product
+and foreign-host qualification remain separate.
+
+Native-material controls use the same `ri-cli` material but run one CASE_ID per
+new output directory and55-second invocation: `control-valid`,
+`native-byte-flip`, `missing-native-receipt`, `symlink-native`, `fifo-receipt`,
+`corrupt-runtime.c`, or `corrupt-flags-receipt`. Seven separate registry batches
+map to `construction.ri-native-material-controls`; one successful case cannot
+qualify the other six. The runner first verifies the original material, copies
+actual bytes and native permissions into a private directory, mutates that copy,
+and requires the specific rejection reason with rc2 and empty stdout. Valid
+control requires exact verification output. All four original hashes are read
+again afterwards. Each tool invocation is bounded to18 seconds; the seven cases
+are not combined under an expanded timeout. All seven were actually executed
+on P53:70 checks with zero failures, `out/c43-ri-native-control-*-11.log`.
+The initial valid01 failed during setup because an empty inherited capture
+variable was rejected by the bootstrap; it did not reach a material mutation
+and supplies no semantic control evidence. The runner now clears that variable
+rather than injecting an empty value. Source, fixture, tool and bootstrap bytes
+must remain fixed during any control run.
+
+The seven `ri-chain-*` control batches separately run `valid`, `NNflip`,
+`tableflip`, `receiptflip`, `missingnet`, `symlinknet` and `FIFOreceipt`, each
+with a new private output directory and the unchanged55-second outer bound:
+
+```sh
+tools/bound 55 sh ./unisacc.com tests/ri-chain-controls.cx -- ROOT CHAIN_MATERIAL NEW_ABS_CHAIN_CONTROL CASE_ID
+```
+
+They share the exact `construction.ri-chain-material-controls` obligation;
+each case still needs its own execution evidence. Verification reads only,
+does not convert or prepare a new NN, and preserves the original five material
+hashes. All seven were actually executed on P53:68 checks with zero failures,
+`out/c43-ri-chain-control-*-11.log`. Native and chain control preparation or a
+single valid clone cannot stand in for the other negative controls.
+
+All new registrations describe available code, not qualification state.
+The metadata inventory labels named-material batches UNPREPARED; an operator
+must separately supply and verify the actual material. `--all` still lists
+separate batches as NOT_RUN rather than executing them. Broad `ri` and
+`resources` remain NOT_READY; full model routes,
+all resource budgets and foreign hosts are not qualified. Startup, construction,
+loading, inference, output, validation and cold/hot phases remain UNMEASURED.
+
 `tools/bound 55 sh ./unisacc.com tests/snapshots.cx -- ROOT ABS_NEW_OUT` runs
 the separate POSIX snapshot batch in a new absolute output directory. It prepares
 the actual shared C ledger through `tools/ledger-material.cx`, executes that
@@ -157,6 +310,8 @@ timing remain UNMEASURED.
 
 The local two-generation rebuild check is `tools/bound 30 sh ./unisacc.com tests/selfhost.cx -- ROOT PRIOR_GENERATION PRIOR_PACKAGE FRESH_GENERATION FRESH_PACKAGE`. Both generations must already be constructed. The prior builder is the explicit saved `PRIOR_GENERATION/bootstrap-before-install.com` and its record; the fresh builder is the current root product. The checker validates each generation's kernel/assembler/source/object/package/slice/wrap receipts and all 1241 model input identities before and after the original artifact comparisons. Each validation invocation owns a bounded set of actual artifact bytes for repeated receipt consumers, releases it on return, and starts the after-check with fresh physical reads. It retains no PASS or cross-phase identity cache.
 
-For installed `P46cfa11a/Sb9c0f819`, independently constructed generations08/09 passed all 58 assertions under the original 30-second bound: `out/c43-native-selfhost-09-retained-01.log`. The original 55 assertions remain, with three additional source/package/current-root receipt checks. Earlier default and -O2 probes timed out at30 seconds after the byte comparisons; their142 logs remain failures, and no limit or assertion was relaxed. The exact coverage ID is `bootstrap.native-two-generation`; the full-bootstrap obligation remains NOT_READY.
+For current `P53e2cd1f/S447f794a`, generations11/12 passed all58 assertions under the original30-second bound: `out/c43-native-selfhost-12.log`. Both complete products equal the installed root byte for byte. Source,1241 material inputs and construction receipts are checked before and after; the after-check starts a fresh context and physically rereads inputs. Unsigned receipts establish consistency; the original baseline and prior builder's historical source were not replayed, and product-context-v1 omits the bootstrap. This is not host-seed N22 or foreign-host qualification.
+
+The older `P46cfa11a/Sb9c0f819` generations08/09 also passed58 under30 seconds in `out/c43-native-selfhost-09-retained-01.log`; that evidence was not transferred to the new source. Their earlier142 failures remain failures. The exact coverage ID is `bootstrap.native-two-generation`; the full-bootstrap obligation remains NOT_READY.
 
 Receipts are unsigned consistency records, not proof of historical process execution; product-context-v1 does not bind its builder. The saved prior builder's historical source and the original frozen7f709 source tree were not reproduced. The09 wrapped candidate needs no installation record; absence is explicitly NOT_RECORDED while its real construction receipts remain mandatory. This is neither host-seed three-stage N22 nor foreign-host execution qualification. Internal phase and cold/hot timing remain UNMEASURED.
