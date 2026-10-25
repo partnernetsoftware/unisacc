@@ -59,13 +59,27 @@ There are exactly two product names, and they mean two different things:
 | `unisacc-seed.com` | the **first generation**: built by the host, with the host's compiler as the `--via` | no -- a seed is a build input |
 | `unisacc.com` | the **final product**: the compiler rebuilt by the seed, and then by itself | yes |
 
-`make seed-com` writes the seed into `SEED_DIR` (default `/tmp/unisacc-seed-com`,
-private, outside the repository); `make com COMB=1` builds the second generation
-with `--via unisacc-seed.com`; making the third generation from the second
-produces byte-identical output, which is the fixed point `make comboot` checks.
-`exec/c/buildcompiler.sh` spells the file it writes `unisacc-next.com` while it
-is being built -- that is a name inside a build directory, it never leaves one,
-and it is not what either product is called.
+The N22 bootstrap contract starts with a host-built `unisacc-seed.com`, rebuilds
+the compiler with that seed, then rebuilds it with the second generation; all
+three SHA-256 values must match. The [original N22 receipts](archive/plans/v0.0.13.md)
+retain the exact historical candidates, hashes and build lineage. They do not
+qualify the current candidate.
+
+Current bounded development steps are documented in [native kernel construction](tools/kernels.md)
+and [package refresh and product construction](tools/packages.md): run
+`tools/kernel-build.cx`, `tools/package-refresh.cx` and `tools/product-build.cx`
+through `sh ./unisacc.com FILE.cx -- ARGS` using their documented material and
+identity checks. `tests/selfhost.cx ROOT PRIOR_GENERATION FRESH_GENERATION`
+compares two native generations, including the complete product; it does not
+establish the host-seed three-stage chain or native foreign-host qualification.
+`unisacc-next.com` is only a build-directory output name.
+
+Package refresh still requires the pinned frozen model baseline and verifies
+constructor-input equality before retaining its model bytes. Host C bootstrap
+dependencies for the independent reference and watchdog, and Python construction
+coordination debt, remain; this development path does not establish their removal.
+The historical `exec/c/buildcompiler.sh` compatibility path is not the current
+acceptance entry point.
 
 Published versions, their sizes, SHA-256 and acceptance receipts:
 [GitHub releases](https://github.com/partnernetsoftware/unisacc/releases), with
