@@ -64,7 +64,7 @@ union native/scalar共享原生libffiprovider模块：Linux按既有LIBRARY_PATH
 
 scalar原六case×三pressure准备分为三个显式group（int8/float4、double8/mixed2、mixed3/mixed-reordered），均保留三pressure和sanitize。group1先产同一runtime，group2/3依赖group1；原full18 --prepare完整argv保留为验证barrier并依赖全部三组，原18消费者仍只在barrier后执行。各原40秒上限不变，准备仅记PREPARED，不冒充消费者PASS；分组并不借旧部分cache命中声称冷准备已通过。
 
-composite普通／cached路径同样复用libffiprovider，实际provider路径／SHA进入完整报告、runtime输入读集及v2 cache basis；原arch、sanitize及完整link recipe绑定，旧v1 key不复用。构建前后、缓存校验及拷贝后复核实际provider；原nested struct/array/union、direct/callback、三pressure及所有opt/counter/extent/alignment断言和flags不改。该族六noncached＋准备一项＋十三cached是二十个独立旧义务，准备成功不冒充功能通过。
+composite普通／cached路径同样复用libffiprovider，实际provider路径／SHA进入完整报告、runtime输入读集及v2 cache basis；原arch、sanitize及完整link recipe绑定，旧v1 key不复用。构建前后、缓存校验及拷贝后复核实际provider；原nested struct/array/union、direct/callback、三pressure及所有opt/counter/extent/alignment断言和flags不改。该族六noncached＋准备一项＋十四cached是二十一个独立旧义务，准备成功不冒充功能通过。
 
 `lib-callback-source-graph`默认-run门面固定原shell SHA，仅免编未使用的ref可执行文件（仍由build_ref --source-only生成相同wrapped C），并从既有exec-chain-model-prepare的完整身份／产物SHA合同materialize e3.json。原cc -O2 runner、dump源码变换、完整sim／C／host解码断言和cleanup不变。门面先恢复原parent UNISA_CONTAINER unset；缺缓存75不隐式构造。显式前置只依赖准备节点，不复用任何测试verdict；原shell聚合CLI兼容，仍诚实保留独立Python裁判依赖。
 
@@ -79,3 +79,5 @@ source-to-ELF原第一片`ELF_SHARD=1/3`分为`exec-srcelf-1a`（1/6）与`exec-
 `lib-typed-host`的Linux严格C99探针声明`_GNU_SOURCE`，普通与ASan/UBSan两次构建仍保留原六行为及USBIND3完整断言；两项完整资格待独立H5实跑。
 
 DRAFT callable门面：lib-callable-model仍完整独立执行原wire检查；var聚合三个原checker分别由-promoted、-wire、-native三scope完整执行，重复wire义务不合并。每片恢复parent UNISA_CONTAINER unset，仅source-only免编未用ref，并按既有exec-chain完整身份合同materialize相同parse2 JSON；原runner flags／dump变换／checker／cleanup保留，缺缓存75。原两sh聚合CLI不改；这只是待独立原40实跑的调度候选，不是消除Python依赖或完整通过声明。
+
+九个原生共享runtime scope（typed/sig2共用libnative、variadic、callable-variadic、callback native/forward/outcome及两exports）复用cxlib.libffiprovider选择Linux LIBRARY_PATH内实际PIC archive，并在shared构建前后复核路径/SHA；JSON绑定provider及runtime，传递模块body列入files/guards。host executable链接、Darwin -arch和sanitizer及全部原公共调用/ownership/loader/exports/并发断言保留；五个仍活跃Python入口本刀不改。此为待独立H13原40资格的接线，help/依赖轻检不代表完整通过。

@@ -28,6 +28,13 @@
 #include <pthread.h>
 #pragma unisa use cxlib.runtimecopy
 #pragma unisa use cxlib.pytempfile
+#pragma unisa use cxlib.libffiprovider
+#pragma unisa use cxlib.pyjson
+
+/* Actual shared-runtime provider; host executable links retain their original arguments. */
+static ffip_provider SR_FFI;
+static pj_value *sr_ffi_record(void){pj_value*j=pj_dict();pj_set(j,"link_arg",pj_strz(SR_FFI.link));pj_set(j,"sha256",SR_FFI.pic?pj_strz(SR_FFI.sha256):pj_null());pj_set(j,"source",pj_strz("tests/cxlib/libffiprovider.cx"));return j;}
+static char *sr_ffi_json(void){char*s;size_t n;if(pj_dumps(sr_ffi_record(),-1,&s,&n)){fputs("provider JSON failed\n",stderr);exit(1);}return s;}
 
 static const char *PROG = "libunisaccexportcheck.py";
 static const char *USAGE = "usage: libunisaccexportcheck.py [-h] --package PACKAGE [--no-main]\n";
@@ -380,8 +387,11 @@ int main(int argc, char **argv) {
     snprintf(lib, sizeof lib, "%s/library.dylib", TD);
     snprintf(src, sizeof src, "%s/libunisacc.c", runtime);
     snprintf(asmf, sizeof asmf, "%s/librarycall_%s.S", runtime, arch);
-    {   char *cc[] = { "cc", "-std=c11", "-O2", "-shared", "-fPIC", "-fvisibility=hidden", src, asmf, "-lffi", "-o", lib, 0 };
+    if (ffip_select(&SR_FFI)) uncaught(ffip_error());
+    {   char *cc[] = { "cc", "-std=c11", "-O2", "-shared", "-fPIC", "-fvisibility=hidden", src, asmf, SR_FFI.link, "-o", lib, 0 };
+        if (ffip_verify(&SR_FFI)) uncaught(ffip_error());
         check_call(cc, 20);
+        if (ffip_verify(&SR_FFI)) uncaught(ffip_error());
     }
     if (!(h = dlopen(lib, RTLD_NOW | RTLD_LOCAL))) { const char *e = dlerror(); snprintf(why, sizeof why, "OSError: %s", e ? e : lib); uncaught(why); }
     L.us_new = lib_sym(h, "us_new");
@@ -402,7 +412,10 @@ int main(int argc, char **argv) {
         for (i = 0; i < 4; i++) pthread_join(t[i], 0);
         for (i = 0; i < 4; i++) if (jobs[i].fail) uncaught(jobs[i].fail);
     }
-    printf("{\"platform\": \"%s\", \"contexts\": 4, \"E3_declared_native_exports\": true, \"initialisation_once\": true, "
+    if (ffip_verify(&SR_FFI)) uncaught(ffip_error());
+    { char h[65]; if (rtc_sha_file(lib,h,why,sizeof why)) uncaught(why);
+      printf("{\"libffi_provider\": %s, \"runtime_sha256\": \"%s\", ", sr_ffi_json(),h); }
+    printf("\"platform\": \"%s\", \"contexts\": 4, \"E3_declared_native_exports\": true, \"initialisation_once\": true, "
            "\"exit_recovery\": true, \"no_main_module\": %s, \"main_preserves_export_pointers\": %s, \"dynamic_process_slots\": true}\n",
            TARGET, NO_MAIN ? "true" : "false", NO_MAIN ? "false" : "true");
     fflush(stdout);

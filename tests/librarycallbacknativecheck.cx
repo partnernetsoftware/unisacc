@@ -28,6 +28,13 @@
 #pragma unisa use cxlib.runtimecopy
 #pragma unisa use cxlib.pyrun
 #pragma unisa use cxlib.pytempfile
+#pragma unisa use cxlib.libffiprovider
+#pragma unisa use cxlib.pyjson
+
+/* Actual shared-runtime provider; host executable links retain their original arguments. */
+static ffip_provider SR_FFI;
+static pj_value *sr_ffi_record(void){pj_value*j=pj_dict();pj_set(j,"link_arg",pj_strz(SR_FFI.link));pj_set(j,"sha256",SR_FFI.pic?pj_strz(SR_FFI.sha256):pj_null());pj_set(j,"source",pj_strz("tests/cxlib/libffiprovider.cx"));return j;}
+static char *sr_ffi_json(void){char*s;size_t n;if(pj_dumps(sr_ffi_record(),-1,&s,&n)){fputs("provider JSON failed\n",stderr);exit(1);}return s;}
 
 static const char *USAGE =
     "usage: librarycallbacknativecheck.py [-h] --package PACKAGE [--sanitize]\n"
@@ -92,8 +99,10 @@ static int check(const cbg_args *a, const char *host, const char *arch, int darw
     arg(&c, "-std=c11", 0); arg(&c, "-O2", 0); arg(&c, "-shared", 0); arg(&c, "-fPIC", 0); arg(&c, "-fvisibility=hidden", 0);
     arg(&c, join2(runtime, "libunisacc.c"), 1);
     snprintf(suffix, sizeof suffix, "librarycall_%s.S", arch); arg(&c, join2(runtime, suffix), 1);
-    arg(&c, "-lffi", 0); arg(&c, "-o", 0); arg(&c, lib, 1);
+    if (ffip_select(&SR_FFI)) return fail(ffip_error()); arg(&c, SR_FFI.link, 0); arg(&c, "-o", 0); arg(&c, lib, 1);
+    if (ffip_verify(&SR_FFI)) return fail(ffip_error());
     if (command(&c, &out)) return -1;
+    if (ffip_verify(&SR_FFI)) return fail(ffip_error());
     free(out);
     probe = join2(TD, "probe");
     c.n = 0;
@@ -126,7 +135,9 @@ static int check(const cbg_args *a, const char *host, const char *arch, int darw
     fputs(out, stdout); free(out);
     if (rtc_sha_file(package, pkghex, why, sizeof why)) return fail(why);
     if (rtc_sha_file(lib, libhex, why, sizeof why)) return fail(why);
-    printf("{\"target\": \"%s\", \"package_sha256\": \"%s\", \"runtime_sha256\": \"%s\", \"optimisation_levels\": [0, 1, 2], "
+    if (ffip_verify(&SR_FFI)) return fail(ffip_error());
+    printf("{\"libffi_provider\": %s, ", sr_ffi_json());
+    printf("\"target\": \"%s\", \"package_sha256\": \"%s\", \"runtime_sha256\": \"%s\", \"optimisation_levels\": [0, 1, 2], "
            "\"calls_per_level\": 100, \"scope\": \"%s\"}\n", target, pkghex, libhex, SCOPE);
     return 0;
 }

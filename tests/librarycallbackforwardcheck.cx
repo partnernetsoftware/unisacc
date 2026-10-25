@@ -28,6 +28,13 @@
 #pragma unisa use cxlib.runtimecopy
 #pragma unisa use cxlib.pyrun
 #pragma unisa use cxlib.pytempfile
+#pragma unisa use cxlib.libffiprovider
+#pragma unisa use cxlib.pyjson
+
+/* Actual shared-runtime provider; host executable links retain their original arguments. */
+static ffip_provider SR_FFI;
+static pj_value *sr_ffi_record(void){pj_value*j=pj_dict();pj_set(j,"link_arg",pj_strz(SR_FFI.link));pj_set(j,"sha256",SR_FFI.pic?pj_strz(SR_FFI.sha256):pj_null());pj_set(j,"source",pj_strz("tests/cxlib/libffiprovider.cx"));return j;}
+static char *sr_ffi_json(void){char*s;size_t n;if(pj_dumps(sr_ffi_record(),-1,&s,&n)){fputs("provider JSON failed\n",stderr);exit(1);}return s;}
 
 static const char *USAGE =
     "usage: librarycallbackforwardcheck.py [-h] --package PACKAGE [--sanitize]\n"
@@ -103,6 +110,7 @@ static void evidence(cbg_buf *o, const char *target, int sanitize, const Ev *e, 
     const char *nl = indent ? "\n  " : "", *sep = indent ? ",\n  " : ", ";
     char t[512];
     cbg_puts(o, "{"); cbg_puts(o, nl);
+    cbg_puts(o, "\"libffi_provider\": "); cbg_puts(o, sr_ffi_json()); cbg_puts(o, sep);
     snprintf(t, sizeof t, "\"target\": \"%s\"%s\"sanitize\": %s%s", target, sep, sanitize ? "true" : "false", sep); cbg_puts(o, t);
     snprintf(t, sizeof t, "\"package_sha256\": \"%s\"%s\"runtime_sha256\": \"%s\"%s", e->package, sep, e->runtime, sep); cbg_puts(o, t);
     snprintf(t, sizeof t, "\"runtime_source_sha256\": \"%s\"%s\"host_source_sha256\": \"%s\"%s", e->source, sep, e->host, sep); cbg_puts(o, t);
@@ -145,8 +153,10 @@ static int check(const cbg_args *a, const char *host, const char *arch, int darw
     cc_head(&c, a, arch, darwin);
     arg(&c, "-shared"); arg(&c, "-fPIC"); arg(&c, "-fvisibility=hidden"); arg(&c, join2(rt, "libunisacc.c"));
     snprintf(suffix, sizeof suffix, "librarycall_%s.S", arch); arg(&c, join2(rt, suffix));
-    arg(&c, "-lffi"); arg(&c, "-o"); arg(&c, lib);
+    if (ffip_select(&SR_FFI)) return fail(ffip_error()); arg(&c, SR_FFI.link); arg(&c, "-o"); arg(&c, lib);
+    if (ffip_verify(&SR_FFI)) return fail(ffip_error());
     if (run(&c, &out)) return -1;
+    if (ffip_verify(&SR_FFI)) return fail(ffip_error());
     free(out);
     cc_head(&c, a, arch, darwin);
     arg(&c, "-Wall"); arg(&c, "-Wextra"); arg(&c, "-I"); arg(&c, rt);
@@ -162,6 +172,7 @@ static int check(const cbg_args *a, const char *host, const char *arch, int darw
     { char *p = join2(rt, "libunisacc.c"); if (rtc_sha_file(p, e.source, why, sizeof why)) return fail(why); free(p); }
     { char *p = join2(rt, "librarycallablehost.h"); if (rtc_sha_file(p, e.host, why, sizeof why)) return fail(why); free(p); }
     {
+        if (ffip_verify(&SR_FFI)) return fail(ffip_error());
         cbg_buf o = { 0, 0, 0 };
         evidence(&o, target, a->sanitize, &e, 0); puts((char *)o.p); free(o.p);
     }

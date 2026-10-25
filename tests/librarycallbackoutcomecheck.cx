@@ -30,6 +30,13 @@
    usage text (prog name librarycallbackoutcomecheck.py, so the text is byte-identical).  Shared with
    tests/librarycallbackplancheck.cx: tests/cxlib/callbackcheck.cx. */
 #pragma unisa use cxlib.callbackcheck
+#pragma unisa use cxlib.libffiprovider
+#pragma unisa use cxlib.pyjson
+
+/* Actual shared-runtime provider; host executable links retain their original arguments. */
+static ffip_provider SR_FFI;
+static pj_value *sr_ffi_record(void){pj_value*j=pj_dict();pj_set(j,"link_arg",pj_strz(SR_FFI.link));pj_set(j,"sha256",SR_FFI.pic?pj_strz(SR_FFI.sha256):pj_null());pj_set(j,"source",pj_strz("tests/cxlib/libffiprovider.cx"));return j;}
+static char *sr_ffi_json(void){char*s;size_t n;if(pj_dumps(sr_ffi_record(),-1,&s,&n)){fputs("provider JSON failed\n",stderr);exit(1);}return s;}
 
 static char ROOT[4096], TD[4200];
 static const char *ARCH; static int ROSETTA;
@@ -154,9 +161,11 @@ int main(int argc, char **argv) {
             check(c, &r); cc_say(r.out, r.outn); pr_free(&r);
         }
         CC_HEAD();
-        c[n++] = "-shared"; c[n++] = "-fPIC"; c[n++] = "-fvisibility=hidden"; c[n++] = rtc; c[n++] = rts; c[n++] = "-lffi";
+        c[n++] = "-shared"; c[n++] = "-fPIC"; c[n++] = "-fvisibility=hidden"; c[n++] = rtc; c[n++] = rts; if (ffip_select(&SR_FFI)) fail(ffip_error()); c[n++] = SR_FFI.link;
         c[n++] = "-o"; c[n++] = lib; c[n] = 0;
+        if (ffip_verify(&SR_FFI)) fail(ffip_error());
         check(c, &r); pr_free(&r);
+        if (ffip_verify(&SR_FFI)) fail(ffip_error());
         CC_HEAD();
         c[n++] = "-Wall"; c[n++] = "-Wextra"; c[n++] = "-I"; c[n++] = rt; c[n++] = src; c[n++] = lib; c[n++] = "-o"; c[n++] = exe; c[n] = 0;
         check(c, &r); pr_free(&r);
@@ -177,6 +186,7 @@ int main(int argc, char **argv) {
             cc_say(r.out, r.outn);
         }
         pr_free(&r);
+        { char h[65]; if (ffip_verify(&SR_FFI)) fail(ffip_error()); if (rtc_sha_file(lib,h,why,sizeof why)) fail(why); char*j=sr_ffi_json(); cc_buf ev={0,0,0}; cc_str(&ev,"{\"libffi_provider\": "); cc_str(&ev,j); char tail[256]; snprintf(tail,sizeof tail,", \"target\": \"%s\", \"runtime_sha256\": \"%s\", \"sanitize\": %s}\n",target,h,san?"true":"false"); cc_str(&ev,tail); cc_say(ev.p,ev.n); }
     }
     pr_rmtree(TD); TD[0] = 0;
     {   char line[128];

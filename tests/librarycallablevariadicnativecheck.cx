@@ -35,6 +35,12 @@
 #pragma unisa use cxlib.runtimecopy
 #pragma unisa use cxlib.pytempfile
 #pragma unisa use cxlib.pyjson
+#pragma unisa use cxlib.libffiprovider
+
+/* Actual shared-runtime provider; host executable links retain their original arguments. */
+static ffip_provider SR_FFI;
+static pj_value *sr_ffi_record(void){pj_value*j=pj_dict();pj_set(j,"link_arg",pj_strz(SR_FFI.link));pj_set(j,"sha256",SR_FFI.pic?pj_strz(SR_FFI.sha256):pj_null());pj_set(j,"source",pj_strz("tests/cxlib/libffiprovider.cx"));return j;}
+static char *sr_ffi_json(void){char*s;size_t n;if(pj_dumps(sr_ffi_record(),-1,&s,&n)){fputs("provider JSON failed\n",stderr);exit(1);}return s;}
 
 static char ROOT[4096], T[4200];
 static void uncaught(const char *line) {   /* the traceback's last line, the directory removed, rc 1 */
@@ -194,10 +200,12 @@ int main(int argc, char **argv) {
         if (sanitize) { add(&c, "-fsanitize=address,undefined"); add(&c, "-fno-omit-frame-pointer"); }
         add(&c, "-std=c11"); add(&c, "-O2");
         if (!k) { add(&c, "-shared"); add(&c, "-fPIC"); add(&c, "-fvisibility=hidden"); add(&c, libsrc); add(&c, asmsrc);
-                  add(&c, "-lffi"); add(&c, "-o"); add(&c, lib); }
+                  if (ffip_select(&SR_FFI)) uncaught(ffip_error()); add(&c, SR_FFI.link); add(&c, "-o"); add(&c, lib); }
         else { add(&c, "-Wall"); add(&c, "-Wextra"); add(&c, "-I"); add(&c, rt); add(&c, fixture); add(&c, lib);
                add(&c, "-o"); add(&c, probe); }
+        if (!k && ffip_verify(&SR_FFI)) uncaught(ffip_error());
         free(run(&c, &outn));
+        if (!k && ffip_verify(&SR_FFI)) uncaught(ffip_error());
     }
     start(&c);
     if (!strcmp(host, "arm64") && !strcmp(arch, "x86_64")) { add(&c, "arch"); add(&c, "-x86_64"); }
@@ -207,6 +215,8 @@ int main(int argc, char **argv) {
 
     sha_of(package, pkghex); sha_of(lib, libhex); sha_of(fixture, fixhex);
     ev = pj_dict();
+    if (ffip_verify(&SR_FFI)) uncaught(ffip_error());
+    pj_set(ev, "libffi_provider", sr_ffi_record());
     pj_set(ev, "target", pj_strz(target));
     pj_set(ev, "sanitize", pj_bool(sanitize));
     pj_set(ev, "package_sha256", pj_strz(pkghex));

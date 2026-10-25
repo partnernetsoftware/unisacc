@@ -34,6 +34,13 @@
 #pragma unisa use cxlib.pyrun
 #pragma unisa use cxlib.runtimecopy
 #pragma unisa use cxlib.pytempfile
+#pragma unisa use cxlib.libffiprovider
+#pragma unisa use cxlib.pyjson
+
+/* Actual shared-runtime provider; host executable links retain their original arguments. */
+static ffip_provider SR_FFI;
+static pj_value *sr_ffi_record(void){pj_value*j=pj_dict();pj_set(j,"link_arg",pj_strz(SR_FFI.link));pj_set(j,"sha256",SR_FFI.pic?pj_strz(SR_FFI.sha256):pj_null());pj_set(j,"source",pj_strz("tests/cxlib/libffiprovider.cx"));return j;}
+static char *sr_ffi_json(void){char*s;size_t n;if(pj_dumps(sr_ffi_record(),-1,&s,&n)){fputs("provider JSON failed\n",stderr);exit(1);}return s;}
 
 static char ROOT[4096], TD[4200];
 static void uncaught(const char *line) {   /* the traceback's last line, the directory removed, rc 1 */
@@ -120,9 +127,11 @@ int main(int argc, char **argv) {
     add(&c, "cc", 0); if (darwin) { add(&c, "-arch", 0); add(&c, arch, 0); }
     if (sanitize) { add(&c, "-fsanitize=address,undefined", 0); add(&c, "-fno-omit-frame-pointer", 0); }
     add(&c, "-std=c11", 0); add(&c, "-O2", 0); add(&c, "-shared", 0); add(&c, "-fPIC", 0);
-    add(&c, "-fvisibility=hidden", 0); add(&c, libsrc, 1); add(&c, asmsrc, 1); add(&c, "-lffi", 0);
+    add(&c, "-fvisibility=hidden", 0); add(&c, libsrc, 1); add(&c, asmsrc, 1); if (ffip_select(&SR_FFI)) uncaught(ffip_error()); add(&c, SR_FFI.link, 0);
     add(&c, "-o", 0); add(&c, lib, 1);
+    if (ffip_verify(&SR_FFI)) uncaught(ffip_error());
     free(command(&c, &outn));
+    if (ffip_verify(&SR_FFI)) uncaught(ffip_error());
 
     snprintf(probe, sizeof probe, "%s/probe", TD);
     snprintf(src, sizeof src, "%s/tests/libraryabi/variadic_bidirectional.c", ROOT);
@@ -153,7 +162,9 @@ int main(int argc, char **argv) {
     fwrite(out, 1, outn, stdout); free(out);   /* print(output, end='') */
     if (rtc_sha_file(package, pkghex, why, sizeof why) != 0) uncaught(why);
     if (rtc_sha_file(lib, libhex, why, sizeof why) != 0) uncaught(why);
-    printf("{\"target\": \"%s\", \"package_sha256\": \"%s\", \"runtime_sha256\": \"%s\", \"optimisation_levels\": [0, 1, 2], "
+    if (ffip_verify(&SR_FFI)) uncaught(ffip_error());
+    printf("{\"libffi_provider\": %s, ", sr_ffi_json());
+    printf("\"target\": \"%s\", \"package_sha256\": \"%s\", \"runtime_sha256\": \"%s\", \"optimisation_levels\": [0, 1, 2], "
            "\"calls_per_level\": 100, \"scope\": \"actual public native->script->variadic native Pair return, promotion, "
            "nested expression, two concrete graphs; not full callback ABI\"}\n", target, pkghex, libhex);
     ptf_rmtree(TD); TD[0] = 0;

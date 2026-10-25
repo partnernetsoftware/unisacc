@@ -35,6 +35,13 @@
 #pragma unisa module libnative
 #pragma unisa use runtimecopy
 #pragma unisa use pyrun
+#pragma unisa use libffiprovider
+#pragma unisa use pyjson
+
+/* Actual shared-runtime provider; host executable links retain their original arguments. */
+static ffip_provider SR_FFI;
+static pj_value *sr_ffi_record(void){pj_value*j=pj_dict();pj_set(j,"link_arg",pj_strz(SR_FFI.link));pj_set(j,"sha256",SR_FFI.pic?pj_strz(SR_FFI.sha256):pj_null());pj_set(j,"source",pj_strz("tests/cxlib/libffiprovider.cx"));return j;}
+static char *sr_ffi_json(void){char*s;size_t n;if(pj_dumps(sr_ffi_record(),-1,&s,&n)){fputs("provider JSON failed\n",stderr);exit(1);}return s;}
 
 typedef struct ln_spec {
     const char *prog, *probe, *scope;
@@ -258,9 +265,11 @@ int ln_main(int argc, char **argv, const ln_spec *spec) {
     c.n = 0; c.v[0] = 0;
     ln_add(&c, "cc", 0); if (darwin) { ln_add(&c, "-arch", 0); ln_add(&c, arch, 0); }
     ln_add(&c, "-std=c11", 0); ln_add(&c, "-O2", 0); ln_add(&c, "-shared", 0); ln_add(&c, "-fPIC", 0);
-    ln_add(&c, "-fvisibility=hidden", 0); ln_add(&c, libsrc, 1); ln_add(&c, asmsrc, 1); ln_add(&c, "-lffi", 0);
+    ln_add(&c, "-fvisibility=hidden", 0); ln_add(&c, libsrc, 1); ln_add(&c, asmsrc, 1); if (ffip_select(&SR_FFI)) ln_uncaught(ffip_error()); ln_add(&c, SR_FFI.link, 0);
     ln_add(&c, "-o", 0); ln_add(&c, lib, 1);
+    if (ffip_verify(&SR_FFI)) ln_uncaught(ffip_error());
     free(ln_command(&c, &outn));
+    if (ffip_verify(&SR_FFI)) ln_uncaught(ffip_error());
     snprintf(probe, sizeof probe, "%s/probe", ln_TD);
     snprintf(src, sizeof src, "%s/%s", ROOT, spec->probe);
     c.n = 0; c.v[0] = 0;
@@ -277,7 +286,9 @@ int ln_main(int argc, char **argv, const ln_spec *spec) {
     fwrite(out, 1, outn, stdout); free(out);   /* print(output, end='') */
     if (rtc_sha_file(package, pkghex, why, sizeof why) != 0) ln_uncaught(why);
     if (rtc_sha_file(lib, libhex, why, sizeof why) != 0) ln_uncaught(why);
-    printf("{\"target\": \"%s\", \"package_sha256\": \"%s\", \"runtime_sha256\": \"%s\", \"optimisation_levels\": [0, 1, 2], "
+    if (ffip_verify(&SR_FFI)) ln_uncaught(ffip_error());
+    printf("{\"libffi_provider\": %s, ", sr_ffi_json());
+    printf("\"target\": \"%s\", \"package_sha256\": \"%s\", \"runtime_sha256\": \"%s\", \"optimisation_levels\": [0, 1, 2], "
            "\"calls_per_level\": 100, \"scope\": \"%s\"}\n", target, pkghex, libhex, spec->scope);
     ln_cleanup();
     fflush(stdout);
