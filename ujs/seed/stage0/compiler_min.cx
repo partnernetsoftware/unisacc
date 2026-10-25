@@ -142,6 +142,7 @@ static int64_t d_bits(double d) {
 /* ---- lex ---- */
 enum {
   T_EOF, T_NUM, T_FNUM, T_ID, T_LET, T_WHILE, T_RETURN, T_IF, T_ELSE,
+  T_SWITCH, T_CASE, T_DEFAULT,
   T_LP, T_RP, T_LB, T_RB, T_LS, T_RS, T_COMMA, T_COLON, T_DOT, T_SEMI, T_EQ,
   T_PLUS, T_MINUS, T_STAR, T_SLASH, T_PCT,
   T_LT, T_GT, T_LE, T_GE, T_EQEQ, T_NE, T_NOT, T_AND, T_OR, T_QMARK, T_STR, T_BAD
@@ -213,6 +214,9 @@ static void next(Lex *L) {
     else if (!strcmp(L->id,"return")) L->tok = T_RETURN;
     else if (!strcmp(L->id,"if")) L->tok = T_IF;
     else if (!strcmp(L->id,"else")) L->tok = T_ELSE;
+    else if (!strcmp(L->id,"switch")) L->tok = T_SWITCH;
+    else if (!strcmp(L->id,"case")) L->tok = T_CASE;
+    else if (!strcmp(L->id,"default")) L->tok = T_DEFAULT;
     else L->tok = T_ID;
     return;
   }
@@ -762,6 +766,42 @@ static int pstmt(Lex *L, Prog *P) {
       }
     }
     return emit(P, OP_IF2, 0);
+  }
+  /* switch (i64) { case N: … default: … } — no fallthrough; bodies usually return */
+  if (L->tok == T_SWITCH) {
+    int sc, ty;
+    next(L);
+    if (!expect(L, T_LP, P, "switch (")) return 0;
+    ty = pexpr(L, P); if (!ty) return 0;
+    if (ty != TY_I64) { P->err = "switch needs i64"; return 0; }
+    if (!expect(L, T_RP, P, "switch )")) return 0;
+    if (!expect(L, T_LB, P, "switch {")) return 0;
+    sc = ensure_lscratch(P); if (sc < 0) return 0;
+    if (!emit(P, OP_STORE, sc)) return 0;
+    while (L->tok == T_CASE) {
+      next(L);
+      if (L->tok != T_NUM) { P->err = "case int"; return 0; }
+      {
+        int64_t cv = L->num;
+        next(L);
+        if (!expect(L, T_COLON, P, "case :")) return 0;
+        if (!emit(P, OP_LOAD, sc)) return 0;
+        if (!emit(P, OP_CONST, cv)) return 0;
+        if (!emit(P, OP_EQ, 0)) return 0;
+        if (!emit(P, OP_IF0, 0)) return 0;
+        while (L->tok != T_CASE && L->tok != T_DEFAULT && L->tok != T_RB && L->tok != T_EOF)
+          if (!pstmt(L, P)) return 0;
+        if (!emit(P, OP_IF1, 0)) return 0;
+        if (!emit(P, OP_IF2, 0)) return 0;
+      }
+    }
+    if (L->tok == T_DEFAULT) {
+      next(L);
+      if (!expect(L, T_COLON, P, "default :")) return 0;
+      while (L->tok != T_RB && L->tok != T_EOF)
+        if (!pstmt(L, P)) return 0;
+    }
+    return expect(L, T_RB, P, "switch }");
   }
   if (L->tok == T_RETURN) {
     next(L);
