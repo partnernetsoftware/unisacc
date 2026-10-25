@@ -1,0 +1,42 @@
+/* Capturing witnesses use the actual C executor through ri-material. */
+static int rif_fail_open,rif_fail_flush,rif_fail_close,rif_fail_write;
+static FILE *rif_fopen(const char *p,const char *m){if(rif_fail_open&&strstr(p,"/bytes")){errno=EIO;return 0;}return fopen(p,m);}
+static int rif_fflush(FILE *f){int r=fflush(f);if(rif_fail_flush){errno=EIO;return EOF;}return r;}
+static int rif_fclose(FILE *f){int r=fclose(f);if(rif_fail_close){errno=EIO;return EOF;}return r;}
+static ssize_t rif_write(int f,const void *p,size_t n){if(rif_fail_write){errno=ENOSPC;return -1;}return write(f,p,n);}
+#define fopen rif_fopen
+#define fflush rif_fflush
+#define fclose rif_fclose
+#define write rif_write
+/* RUNTIME_BODY */
+#undef fopen
+#undef fflush
+#undef fclose
+#undef write
+static int assertions,failures;
+static void ck(int ok,const char *name){assertions++;if(!ok)failures++;printf("%s\tri-fetch.%s\n",ok?"PASS":"FAIL",name);}
+static void join(char *p,const char *a,const char *b){int n=snprintf(p,4096,"%s/%s",a,b);if(n<0||n>=4096)exit(90);}
+static void save(const char *p,const char *s){FILE *f=fopen(p,"wb");if(!f)exit(90);int bad=fputs(s,f)<0;if(fclose(f))bad=1;if(bad)exit(90);}
+static int missing(const char *p){struct stat st;errno=0;if(!lstat(p,&st))return 0;if(errno!=ENOENT)exit(90);return 1;}
+static void begin(const char *dir){char err[512];if(rf_capture_begin(dir,"lower:lnx/x86_64/image/O0",(const unsigned char *)"abc",3,err,sizeof err)){fprintf(stderr,"SETUP_ERROR %s\n",err);exit(90);}rf_capture_set=dir;}
+static void fetch(const unsigned char *key,int n){unsigned char *b=0;int len=0;int owned=core_host_fetch(key,n,&b,&len);if(owned!=1||len!=1||b[0]!='A')exit(90);}
+int main(int argc,char **argv){if(argc!=3)return 90;const char *mode=argv[1],*dir=argv[2];char err[512],p[4096];static const unsigned char key[]={'k',0,'x'};static ResourceInput rows[1];unsigned char *bytes=0;int n=0;
+ rows[0].name=key;rows[0].n=3;rows[0].data=(const unsigned char *)"A";rows[0].len=1;RI=rows;NRI=1;
+ if(!strcmp(mode,"nonempty")){if(mkdir(dir,0700))return 90;join(p,dir,"resource-000.bytes");save(p,"sentinel");int r=rf_capture_begin(dir,"lower:lnx/x86_64/image/O0",(const unsigned char *)"abc",3,err,sizeof err);ck(r!=0&&strstr(err,"capture-dir-not-empty"),"capture-rejects-nonempty");FILE *f=fopen(p,"rb");char b[9]={0};size_t z=f?fread(b,1,8,f):0;if(f)fclose(f);ck(z==8&&!memcmp(b,"sentinel",8),"sentinel-preserved");join(p,dir,"resources.tsv");ck(missing(p),"nonempty-no-ledger");join(p,dir,".capture-begin");ck(missing(p),"nonempty-guard-cleaned");}
+ else if(!strcmp(mode,"repeat")){begin(dir);fetch(key,3);fetch(key,3);rows[0].data=(const unsigned char *)"B";int r=core_host_fetch(key,3,&bytes,&n);ck(r==1&&n==1&&bytes[0]=='B',"changed-answer-still-returned");RLLedger L={0};if(rl_load(dir,&L,err,sizeof err))return 90;ck(L.trace&&L.n==3,"SC2-keeps-equal-and-changing-events");ck(L.rows[0].vn==1&&L.rows[1].vn==1&&L.rows[2].vn==1&&L.rows[0].value[0]=='A'&&L.rows[1].value[0]=='A'&&L.rows[2].value[0]=='B',"SC2-independent-event-byte-gold");ck(!rl_find(&L,key,3),"SC2-never-first-wins-map");rl_clear(&L);}
+ else if(!strcmp(mode,"legacy-empty")){if(mkdir(dir,0700))return 90;join(p,dir,"resources.tsv");save(p,"");begin(dir);fetch(key,3);RLLedger L={0};if(rl_load(dir,&L,err,sizeof err))return 90;ck(L.trace&&L.n==1&&L.rows[0].value[0]=='A',"legacy-empty-supported");rl_clear(&L);join(p,dir,".capture-begin");ck(missing(p),"legacy-empty-guard-cleaned");}
+ else if(!strcmp(mode,"fifo")){
+#if defined(__linux__) && defined(__x86_64__)
+ if(mkdir(dir,0700))return 90;join(p,dir,"resources.tsv");/* Linux syscall_64.tbl mknodat=259, actual private FIFO, no host utility. */
+ if(_unisa_ret(__syscall6(259,-100,(long)p,S_IFIFO|0600,0,0)))return 90;int r=rf_capture_begin(dir,"lower:lnx/x86_64/image/O0",(const unsigned char*)"abc",3,err,sizeof err);ck(r!=0&&strstr(err,"capture-ledger-not-regular"),"FIFO-quick-named-refusal");struct stat st;ck(!lstat(p,&st)&&S_ISFIFO(st.st_mode),"FIFO-not-replaced");join(p,dir,".capture-begin");ck(missing(p),"FIFO-guard-released");
+#else
+ fputs("NOT_COVERED FIFO fixture host\n",stderr);return 3;
+#endif
+}
+ else if(!strcmp(mode,"busy")){if(mkdir(dir,0700))return 90;join(p,dir,".capture-begin");if(mkdir(p,0700))return 90;int r=rf_capture_begin(dir,"lower:lnx/x86_64/image/O0",(const unsigned char *)"abc",3,err,sizeof err);ck(r!=0&&strstr(err,"capture-session-busy"),"busy-initializer-rejected");ck(!missing(p),"foreign-guard-preserved");join(p,dir,"resources.tsv");ck(missing(p),"busy-no-ledger");}
+ else if(!strcmp(mode,"session-reset")){char next[4096];begin(dir);fetch(key,3);join(next,dir,"unused");/* next capture is a distinct sibling, not inside a nonempty input */if(snprintf(next,sizeof next,"%s-next",dir)>=(int)sizeof next)return 90;begin(next);fetch(key,3);ck(RF_CAPC==1,"new-session-count-reset");RLLedger L={0};if(rl_load(next,&L,err,sizeof err))return 90;ck(L.trace&&L.n==1,"new-session-records-own-event");rl_clear(&L);}
+ else if(!strcmp(mode,"write-failure")){begin(dir);join(p,dir,"resource-000.bytes");if(mkdir(p,0700))return 90;fetch(key,3);return 89;}
+ else if(!strcmp(mode,"open-failure")||!strcmp(mode,"flush-failure")||!strcmp(mode,"close-failure")||!strcmp(mode,"append-failure")){begin(dir);rif_fail_open=!strcmp(mode,"open-failure");rif_fail_flush=!strcmp(mode,"flush-failure");rif_fail_close=!strcmp(mode,"close-failure");rif_fail_write=!strcmp(mode,"append-failure");fetch(key,3);return 89;}
+ else if(!strcmp(mode,"no-session")){rf_capture_set=dir;fetch(key,3);return 89;}
+ else if(!strcmp(mode,"quota")){begin(dir);for(int i=0;i<4096;i++)fetch(key,3);fetch(key,3);return 89;}
+ else return 90;printf("RI_FETCH\tassertions=%d\tfailed=%d\n",assertions,failures);return failures?1:0;}

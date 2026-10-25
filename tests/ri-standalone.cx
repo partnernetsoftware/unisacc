@@ -1,0 +1,43 @@
+/* Synthetic threshold-NN chain through the actual standalone C CLI.
+ * ROOT VERIFIED_RI_CLI_MATERIAL VERIFIED_CHAIN_MATERIAL ABS_NEW_OUT; tools/bound 55.
+ * Material fixture: tests/cases/ri-cli.cx (ri_original_main), not a CX rewrite.
+ * NN construction is separate: tools/ri-chain-material.cx prepares the static
+ * v1 recipe once. This runner only verifies and executes those exact bytes.
+ * They are private test material, not production E1/E3 models or PASS records. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.richain
+static char root[4096],material[4096],chain_material[4096],work[4096],runtime[4400],product[4400],tool[4400],bound[4400],inc[4400],input[4400],models[2][4400],capture[4400];
+static int assertions,failures;
+static const char *stage="e3:lnx/x86_64/tape/O2";
+static void die(const char *s){fprintf(stderr,"ri-standalone: %s errno=%d\n",s,errno);exit(2);}
+static void path(char *p,const char *a,const char *b){int n=snprintf(p,4400,"%s/%s",a,b);if(n<0||n>=4400)die("path bound");}
+static void ck(int ok,const char *s){assertions++;if(!ok)failures++;printf("%s\tri-standalone.%s\n",ok?"PASS":"FAIL",s);}
+static char *load(const char *p,size_t *n){struct stat st;if(lstat(p,&st)||!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>268435456)die("regular bounded input");char *s=cx_read(p,n);if(!s||*n!=(size_t)st.st_size)die("read extent");return s;}
+static void digest(const char *p,char *hash){size_t n;char *s=load(p,&n);cx_sha256_hex(s,n,hash);free(s);}
+static void save(const char *p,const void *data,size_t n){const char *bytes=data;int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0600);if(fd<0)die("exclusive output");size_t at=0;while(at<n){ssize_t z=write(fd,bytes+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0)die("output write");at+=(size_t)z;}if(close(fd))die("output close");}
+static int absent(const char *p){struct stat st;errno=0;if(!lstat(p,&st))return 0;if(errno!=ENOENT)die("existence check");return 1;}
+static np_result call(char **v,const char *attrs,int seconds,const char *label){char env[4600],why[1024],file[140],p[4400];if(unsetenv("UNISACC_RF_CAPTURE")||unsetenv("UNISA_ATTRIBUTES"))die("clear ambient capture/attributes");const char *adds[2]={0,0};if(attrs){snprintf(env,sizeof env,"UNISA_ATTRIBUTES=%s",attrs);adds[0]=env;}np_result r;if(np_run(v,root,attrs?adds:0,seconds+2,&r,why,sizeof why))die(why);snprintf(file,sizeof file,"%s.stdout",label);path(p,work,file);save(p,r.out,r.outn);snprintf(file,sizeof file,"%s.stderr",label);path(p,work,file);save(p,r.err,r.errn);return r;}
+static void verify(const char *label){char *v[]={bound,"18","sh",product,tool,"--","--verify-native",root,material,"tests/cases/ri-cli.cx",0};np_result r=call(v,0,18,label);const char *tail="VERIFIED\tri-material\tno-test-result\n";size_t n=strlen(tail);int ok=!r.rc&&!r.errn&&r.outn>=n&&!memcmp(r.out+r.outn-n,tail,n);ck(ok,label);if(!ok){if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);die("native material verification");}np_free(&r);}
+static void verify_chain(const char *label){char why[1400];if(rcm_verify(root,chain_material,why,sizeof why)){fprintf(stderr,"ri-standalone: chain material %s: %s\n",label,why);die("chain material prerequisite");}printf("VERIFIED\tri-chain-material\tphase=%s\tno-test-result\n",label);}
+static void nn_precondition(int which){const char *pins[]={"feb98a1591bc159e5713e9c0344d7fe0b7b13301a02dbe87d5adcd31d7f468cf","56e4c7b408b610ea7c996b4ee610e90cd668b09dedb009b8c601355e95b94ea1"};const size_t sizes[]={179,76};char h[65];size_t n;char *s=load(models[which],&n);cx_sha256_hex(s,n,h);int ok=n==sizes[which]&&n>2&&!memcmp(s,"N ",2)&&!strcmp(h,pins[which]);free(s);assertions++;if(!ok)failures++;printf("PRECONDITION\tri-standalone.model%d.NN-not-T\tvalid=%d\tno-functional-test-result\n",which,ok);if(!ok)die("complete NN pin prerequisite");}
+static np_result chain(const char *ledger,const char *out_capture,const char *attrs,const char *label){char *v[23];int n=0;v[n++]=bound;v[n++]="3";v[n++]=runtime;v[n++]="--stage";v[n++]=(char *)stage;if(ledger){v[n++]="--strict-resource-flow";v[n++]="--resource-ledger";v[n++]=(char *)ledger;}if(out_capture){v[n++]="--capture-out";v[n++]=(char *)out_capture;}v[n++]="--chain";v[n++]=input;v[n++]=input;v[n++]=inc;v[n++]=models[0];v[n++]=models[1];v[n]=0;return call(v,attrs,3,label);}
+int main(int argc,char **argv){
+#if !defined(__linux__) || !defined(__x86_64__)
+ fputs("ri-standalone: Linux x86_64 required\n",stderr);return 3;
+#endif
+ if(argc!=5||!realpath(argv[1],root)||!realpath(argv[2],material)||!realpath(argv[3],chain_material)||argv[4][0]!='/'||strlen(argv[4])>=sizeof work)return 2;strcpy(work,argv[4]);if(mkdir(work,0700))die("new output directory");path(runtime,material,"runtime-native");path(product,root,"unisacc.com");path(tool,root,"tools/ri-material.cx");path(bound,root,"tools/bound");path(inc,root,"include");path(input,work,"input.bytes");path(capture,work,"capture");
+ verify("material-before");char runtime_sha[65],after[65];digest(runtime,runtime_sha);printf("NATIVE\tsha256=%s\n",runtime_sha);
+ verify_chain("before");path(models[0],chain_material,"model0.net");path(models[1],chain_material,"model1.net");nn_precondition(0);nn_precondition(1);static const unsigned char gold[]={0,255,1};save(input,"a",1);
+ const char *sources[]={input,models[0],models[1]};char source_sha[3][65];for(int i=0;i<3;i++)digest(sources[i],source_sha[i]);
+ char first_attrs[4400],second_attrs[4400],sentinel[4400],missing[4400],p[4400],bad[4400];path(first_attrs,work,"capture.attributes");path(second_attrs,work,"replay.attributes");path(sentinel,work,"sentinel.attributes");path(missing,work,"absent.attributes");
+ np_result first=chain(0,capture,first_attrs,"capture-chain");int valid=!first.rc&&!first.errn&&first.outn==sizeof gold&&!memcmp(first.out,gold,sizeof gold);ck(valid,"actual-two-NN-chain-literal-binary-output");if(first.errn)fwrite(first.err,1,first.errn,stderr);if(!valid){np_free(&first);return 1;}np_free(&first);
+ static const unsigned char attr_gold[]={1,0,0,0,0,0,0,0,7,0,0,0,1};size_t an,tn;char *attrs=load(first_attrs,&an);ck(an==sizeof attr_gold&&!memcmp(attrs,attr_gold,sizeof attr_gold),"literal-final-attribute-record");path(p,capture,"resources.tsv");char *trace=load(p,&tn);const char *trace_gold="#SC2\tstage=e3:lnx/x86_64/tape/O2\tinput_sha256=ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb\n";ck(tn==strlen(trace_gold)&&!memcmp(trace,trace_gold,tn),"SC2-zero-fetch-trace-exact-header");
+ /* The sidefile is ALSO initial input: four zero bytes are a legal empty
+  * table. An ASCII sentinel could reject earlier and mask the output bug. */
+ static const unsigned char zero[4]={0,0,0,0};save(second_attrs,zero,4);np_result second=chain(capture,0,second_attrs,"valid-strict-chain");valid=!second.rc&&!second.errn&&second.outn==sizeof gold&&!memcmp(second.out,gold,sizeof gold);ck(valid,"valid-strict-chain-literal-output");if(second.errn)fwrite(second.err,1,second.errn,stderr);np_free(&second);if(!valid){free(attrs);free(trace);return 1;}size_t bn;char *again=load(second_attrs,&bn);ck(bn==an&&!memcmp(again,attrs,an)&&bn==sizeof attr_gold&&!memcmp(again,attr_gold,sizeof attr_gold),"valid-strict-final-attributes-same-gold");free(again);free(attrs);
+ path(bad,work,"trace-extra-event");if(mkdir(bad,0700))die("private ledger");np_buf extra={0};np_put(&extra,trace,tn);np_puts(&extra,"ff\t0\t-\t0\t-\n");path(p,bad,"resources.tsv");save(p,extra.p,extra.n);free(extra.p);free(trace);
+ save(sentinel,zero,4);np_result denied=chain(bad,0,sentinel,"unconsumed-sentinel");ck(denied.rc==2&&!denied.outn&&denied.errn&&strstr(denied.err,"resource-trace-unconsumed"),"unconsumed-sentinel-reason-before-stdout");np_free(&denied);again=load(sentinel,&bn);ck(bn==4&&!memcmp(again,zero,4),"unconsumed-preserves-existing-attribute-bytes");free(again);
+ denied=chain(bad,0,missing,"unconsumed-absent");ck(denied.rc==2&&!denied.outn&&denied.errn&&strstr(denied.err,"resource-trace-unconsumed"),"unconsumed-absent-reason-before-stdout");np_free(&denied);ck(absent(missing),"unconsumed-does-not-create-attribute-sidefile");
+ for(int i=0;i<3;i++){digest(sources[i],after);char name[80];snprintf(name,sizeof name,"input-or-model-%d-unchanged",i);ck(!strcmp(source_sha[i],after),name);}digest(runtime,after);ck(!strcmp(runtime_sha,after),"native-unchanged");verify_chain("after");verify("material-after");
+ puts("NOT_CLAIMED\tproduction-E1-E3-flow-or-full-product-and-foreign-host-qualification");puts("TIMING\tstartup_construction_loading_inference_output_validation_cold_hot=UNMEASURED");printf("RI_STANDALONE\tassertions=%d\tfailed=%d\tscope=synthetic-threshold-NN-chain-actual-C-CLI-final-attribute-output-boundary\n",assertions,failures);return failures?1:0;
+}

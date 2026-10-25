@@ -1,0 +1,52 @@
+#pragma unisa module richain
+#pragma unisa use netpack
+/* Static v1 recipe eligibility only. Runtime/source provenance is separately
+ * verified by ri-material. Verify never invokes the NN constructor. */
+static const char *rcm_tables[2]={
+ "T 1 2 0 0 0\nQ 1 49\nQ 23 12 85 12 83 12 76 12 65 12 84 12 84 12 82 12 49 12 1 12 0 12 0 12 0 12 1 12 0 12 0 12 0 12 7 12 0 12 0 12 0 12 1 12 98 49\nR 0 1 0 0 97 0 1\n",
+ "T 1 2 0 0 0\nQ 1 49\nQ 4 12 0 12 255 12 1 49\nR 0 1 0 0 98 0 1\n"
+};
+/* Complete byte pins independently observed equal in red-01 and green-02.
+ * They authorize this finite recipe only, not old functional test results. */
+static const char *rcm_pins[2]={"feb98a1591bc159e5713e9c0344d7fe0b7b13301a02dbe87d5adcd31d7f468cf","56e4c7b408b610ea7c996b4ee610e90cd668b09dedb009b8c601355e95b94ea1"};
+static const size_t rcm_sizes[2]={179,76};
+/* OUT=12 and ACCEPT=49 are valid only for this exact v1 action ABI.
+ * An ABI change needs a new reviewed recipe/pin, never automatic restamping. */
+static const char *rcm_action_abi="9d1eaeec134834433ad11fdb62be27bfb03a9c9b28d8c7058b191ec6edbcfe30";
+static const char *rcm_support[4]={"tools/cxlib/richain.cx","tools/cxlib/netpack.cx","tools/ri-chain-material.cx","exec/c/core.h"};
+typedef struct {char root[4096],out[4096],hashes[4][65];char *why;size_t cap;} RcmContext;
+static int rcm_bad(RcmContext *c,const char *reason,const char *p){snprintf(c->why,c->cap,"%s path=%.1023s errno=%d",reason,p?p:"-",errno);return -1;}
+static int rcm_path(RcmContext *c,char *p,const char *base,const char *name){int n=snprintf(p,4400,"%s/%s",base,name);return n<0||n>=4400?rcm_bad(c,"path-bound",name):0;}
+static char *rcm_read(RcmContext *c,const char *p,size_t *n){
+ struct stat before,st;errno=0;if(lstat(p,&before)){rcm_bad(c,errno==ENOENT?"input-absent":"input-stat-failed",p);return 0;}
+ if(!S_ISREG(before.st_mode)||before.st_size<0||before.st_size>16777216){rcm_bad(c,"bounded-regular-input",p);return 0;}
+ int fd=open(p,O_RDONLY|O_NONBLOCK|O_CLOEXEC|O_NOFOLLOW);if(fd<0){rcm_bad(c,"input-open",p);return 0;}
+ if(fstat(fd,&st)||!S_ISREG(st.st_mode)||st.st_dev!=before.st_dev||st.st_ino!=before.st_ino||st.st_size!=before.st_size){close(fd);rcm_bad(c,"input-open-identity",p);return 0;}
+ *n=(size_t)st.st_size;char *s=malloc(*n+1);if(!s){close(fd);rcm_bad(c,"allocation",p);return 0;}size_t at=0;
+ while(at<*n){ssize_t z=read(fd,s+at,*n-at);if(z<0&&errno==EINTR)continue;if(z<=0){free(s);close(fd);rcm_bad(c,"input-read",p);return 0;}at+=(size_t)z;}
+ char extra;ssize_t z;do{z=read(fd,&extra,1);}while(z<0&&errno==EINTR);int changed=fstat(fd,&st)||st.st_dev!=before.st_dev||st.st_ino!=before.st_ino||st.st_size!=before.st_size;int closed=close(fd);if(z!=0||changed||closed){free(s);rcm_bad(c,"input-changed-or-close",p);return 0;}s[*n]=0;return s;
+}
+static int rcm_init(RcmContext *c,const char *root,const char *out,char *why,size_t cap){memset(c,0,sizeof *c);if(!why||!cap)return -1;c->why=why;c->cap=cap;why[0]=0;if(!root||!out||!realpath(root,c->root)||out[0]!='/'||strlen(out)>=sizeof c->out)return rcm_bad(c,"usage-root-absolute-material",out);strcpy(c->out,out);return 0;}
+static int rcm_context(RcmContext *c,np_buf *receipt){
+ np_puts(receipt,"ri-chain-material-v1\nstatus\tPREPARED\nscope\tstatic-two-threshold-NN-recipe-only-no-full-source-bootstrap-or-runtime-qualification\nrecipe\tattribute-frame-a-to-b-then-b-to-00ff01-v1\nroot\t");np_puts(receipt,c->root);np_puts(receipt,"\n");
+ for(int i=0;i<4;i++){char p[4400];size_t n;if(rcm_path(c,p,c->root,rcm_support[i]))return -1;char *s=rcm_read(c,p,&n);if(!s)return -1;cx_sha256_hex(s,n,c->hashes[i]);free(s);if(i==3&&strcmp(c->hashes[i],rcm_action_abi))return rcm_bad(c,"v1-action-ABI-pin-mismatch",p);np_puts(receipt,rcm_support[i]);np_puts(receipt,"\t");np_puts(receipt,c->hashes[i]);np_puts(receipt,"\n");}
+ for(int i=0;i<2;i++){char name[40],h[65];size_t n=strlen(rcm_tables[i]);cx_sha256_hex(rcm_tables[i],n,h);snprintf(name,sizeof name,"model%d.tbl",i);np_puts(receipt,name);np_puts(receipt,"\t");np_putll(receipt,(long long)n);np_puts(receipt,"\t");np_puts(receipt,h);np_puts(receipt,"\n");snprintf(name,sizeof name,"model%d.net",i);np_puts(receipt,name);np_puts(receipt,"\t");np_putll(receipt,(long long)rcm_sizes[i]);np_puts(receipt,"\t");np_puts(receipt,rcm_pins[i]);np_puts(receipt,"\n");}return 0;
+}
+static int rcm_stable(RcmContext *c){for(int i=0;i<4;i++){char p[4400],h[65];size_t n;if(rcm_path(c,p,c->root,rcm_support[i]))return -1;char *s=rcm_read(c,p,&n);if(!s)return -1;cx_sha256_hex(s,n,h);free(s);if(i==3&&strcmp(h,rcm_action_abi))return rcm_bad(c,"v1-action-ABI-pin-mismatch",p);if(strcmp(h,c->hashes[i]))return rcm_bad(c,"support-changed-during-operation",p);}return 0;}
+static int rcm_expect(RcmContext *c,const np_buf *receipt){
+ struct stat st;errno=0;if(lstat(c->out,&st))return rcm_bad(c,errno==ENOENT?"material-directory-absent":"material-directory-stat",c->out);if(!S_ISDIR(st.st_mode))return rcm_bad(c,"material-directory-not-regular-directory",c->out);
+ for(int i=0;i<2;i++){char name[40],p[4400],h[65];size_t n;snprintf(name,sizeof name,"model%d.tbl",i);if(rcm_path(c,p,c->out,name))return -1;char *s=rcm_read(c,p,&n);if(!s)return -1;int same=n==strlen(rcm_tables[i])&&!memcmp(s,rcm_tables[i],n);free(s);if(!same)return rcm_bad(c,"literal-table-recipe-mismatch",p);
+  snprintf(name,sizeof name,"model%d.net",i);if(rcm_path(c,p,c->out,name))return -1;s=rcm_read(c,p,&n);if(!s)return -1;cx_sha256_hex(s,n,h);same=n==rcm_sizes[i]&&n>2&&!memcmp(s,"N ",2)&&!strcmp(h,rcm_pins[i]);free(s);if(!same)return rcm_bad(c,"complete-NN-pin-mismatch",p);
+ }
+ char p[4400];size_t n;if(rcm_path(c,p,c->out,"material.tsv"))return -1;char *s=rcm_read(c,p,&n);if(!s)return -1;int same=n==receipt->n&&!memcmp(s,receipt->p,n);free(s);return same?0:rcm_bad(c,"material-receipt-mismatch",p);
+}
+static int rcm_write(RcmContext *c,const char *name,const char *bytes,size_t n){char p[4400];if(rcm_path(c,p,c->out,name))return -1;int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(fd<0)return rcm_bad(c,"exclusive-output",p);size_t at=0;while(at<n){ssize_t z=write(fd,bytes+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0){close(fd);return rcm_bad(c,"write-partial-retained",p);}at+=(size_t)z;}int synced=fsync(fd),closed=close(fd);return synced||closed?rcm_bad(c,"output-sync-or-close",p):0;}
+int rcm_verify(const char *root,const char *out,char *why,size_t cap){RcmContext c;np_buf receipt={0};if(rcm_init(&c,root,out,why,cap))return -1;int rc=rcm_context(&c,&receipt);if(!rc)rc=rcm_expect(&c,&receipt);if(!rc)rc=rcm_stable(&c);if(!rc)rc=rcm_expect(&c,&receipt);free(receipt.p);return rc;}
+int rcm_prepare(const char *root,const char *out,char *why,size_t cap){
+ RcmContext c;np_buf receipt={0},nets[2]={{0},{0}};if(rcm_init(&c,root,out,why,cap))return -1;int rc=-1;if(rcm_context(&c,&receipt))goto done;
+ for(int i=0;i<2;i++){long long rows=0,units=0;char h[65];if(np_convert(rcm_tables[i],strlen(rcm_tables[i]),&nets[i],&rows,&units,why,cap))goto done;cx_sha256_hex(nets[i].p,nets[i].n,h);if(rows!=1||units!=2||nets[i].n!=rcm_sizes[i]||strcmp(h,rcm_pins[i])){rcm_bad(&c,"constructor-does-not-match-v1-complete-NN-pin",0);goto done;}}
+ if(rcm_stable(&c))goto done;if(mkdir(c.out,0700)){rcm_bad(&c,"new-output-directory-required",c.out);goto done;}
+ for(int i=0;i<2;i++){char name[40];snprintf(name,sizeof name,"model%d.tbl",i);if(rcm_write(&c,name,rcm_tables[i],strlen(rcm_tables[i])))goto done;snprintf(name,sizeof name,"model%d.net",i);if(rcm_write(&c,name,nets[i].p,nets[i].n))goto done;}
+ if(rcm_write(&c,"material.tsv",receipt.p,receipt.n)||rcm_expect(&c,&receipt)||rcm_stable(&c)||rcm_expect(&c,&receipt))goto done;rc=0;
+done:free(nets[0].p);free(nets[1].p);free(receipt.p);return rc;
+}

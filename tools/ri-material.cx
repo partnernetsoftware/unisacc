@@ -1,0 +1,110 @@
+/* Prepare the actual legacy C executor plus a header-free CX witness.
+ * ROOT NEW_OUT FIXTURE | --verify ROOT OUT FIXTURE
+ * --build ROOT NEW_OUT FIXTURE | --verify-native ROOT OUT FIXTURE
+ * Native build is a single product -O2/-fno-trim-libc Linux/x86_64 compile,
+ * bounded by an inner 20s watchdog and a caller-owned outer <=55s watchdog.
+ * Material/native preparation and verification never constitute a test PASS. */
+#pragma unisa use cxlib.netpack
+static char root[4096],out[4096],product[4400];
+static np_buf body,record;static char sid[65],boot[65],hashes[9][65],body_sha[65],record_sha[65];
+static const char *inputs[9];
+static char native_sha[65];static size_t native_bytes;static int has_native;
+static const char *native_flags="-O2 -fno-trim-libc -b lnx/x86_64 -o -";
+static void die(const char *s){fprintf(stderr,"ri-material: REFUSE %s errno=%d\n",s,errno);exit(2);}
+static void path(char *p,const char *a,const char *b){int n=snprintf(p,4400,"%s/%s",a,b);if(n<0||n>=4400)die("path");}
+static char *load(const char *p,size_t *n){
+ struct stat before,st;errno=0;if(lstat(p,&before))die(p);
+ if(!S_ISREG(before.st_mode)||before.st_size<0||before.st_size>16777216)die("bounded regular input required");
+ int fd=open(p,O_RDONLY|O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK);if(fd<0)die(p);
+ if(fstat(fd,&st)||!S_ISREG(st.st_mode)||st.st_dev!=before.st_dev||st.st_ino!=before.st_ino||st.st_size!=before.st_size){close(fd);die("input open identity");}
+ *n=(size_t)st.st_size;char *s=malloc(*n+1);if(!s){close(fd);die("input allocation");}
+ size_t at=0;while(at<*n){ssize_t z=read(fd,s+at,*n-at);if(z<0&&errno==EINTR)continue;if(z<=0){free(s);close(fd);die("input read extent");}at+=(size_t)z;}
+ char extra;ssize_t z;do{z=read(fd,&extra,1);}while(z<0&&errno==EINTR);
+ int changed=fstat(fd,&st)||st.st_dev!=before.st_dev||st.st_ino!=before.st_ino||st.st_size!=before.st_size;
+ int closed=close(fd);if(z!=0||changed||closed){free(s);die("input changed or close failed");}s[*n]=0;return s;
+}
+/* An existence probe never treats ENOTDIR/EACCES as absence. A present leaf
+ * must be regular; subsequent reads also use O_NOFOLLOW. */
+static int exists(const char *name){char p[4400];struct stat st;path(p,out,name);errno=0;if(lstat(p,&st)){if(errno==ENOENT)return 0;die(p);}if(!S_ISREG(st.st_mode))die("material leaf is not regular");return 1;}
+static void source(char h[65]){
+ char bound[4400],ident[4400],why[1024];path(bound,root,"tools/bound");path(ident,root,"seed/ident.c");
+ char *v[]={bound,"12","sh",product,ident,"--",root,0};np_result r;
+ if(np_run(v,root,0,14,&r,why,sizeof why))die(why);
+ int ok=!r.rc&&!r.errn&&r.outn==65&&r.out[64]=='\n';if(ok){memcpy(h,r.out,64);h[64]=0;}else if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);if(!ok)die("source identity");
+}
+static void output(const char *name,const char *bytes,size_t n,int verify,int mode){
+ char p[4400];path(p,out,name);
+ if(verify){size_t z;char *s=load(p,&z);int ok=z==n&&!memcmp(s,bytes,n);free(s);if(!ok)die("material changed");return;}
+ int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,mode);if(fd<0)die("exclusive material output");
+ struct stat st;if(fstat(fd,&st)||!S_ISREG(st.st_mode)||fchmod(fd,(mode_t)mode)){close(fd);die("output descriptor or permissions");}
+ size_t at=0;while(at<n){ssize_t z=write(fd,bytes+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0){close(fd);die("material write; partial output retained");}at+=(size_t)z;}
+ int synced=fsync(fd),closed=close(fd);if(synced||closed)die("material sync or close");
+}
+static void generate(const char *fixture){
+ const char *fixed[]={"exec/c/run.c","exec/c/core.c","exec/c/core.h","exec/c/codec.h","exec/c/packagefooter.h","exec/c/resourceledger.h","include/unisa_sha256.h","tools/ri-material.cx"};
+ int i;for(i=0;i<8;i++)inputs[i]=fixed[i];inputs[8]=fixture;
+ source(sid);size_t n;char *s=load(product,&n);cx_sha256_hex(s,n,boot);free(s);
+ np_puts(&record,"ri-material-v1\nstatus\tPREPARED\nscope\tsource-preserving-C-runtime-with-CX-witness\nsource\t");np_puts(&record,sid);np_puts(&record,"\nbootstrap\t");np_puts(&record,boot);np_puts(&record,"\n");
+ for(i=0;i<9;i++){
+  char p[4400];path(p,root,inputs[i]);s=load(p,&n);cx_sha256_hex(s,n,hashes[i]);np_puts(&record,inputs[i]);np_puts(&record,"\t");np_puts(&record,hashes[i]);np_puts(&record,"\n");
+  if(i==8){
+   if(memchr(s,0,n))die("fixture NUL");const char *mark="/* RUNTIME_BODY */";char *at=strstr(s,mark);if(!at||strstr(at+1,mark))die("one runtime delimiter");
+   np_puts(&body,"/* Generated C substrate; original executor and headers remain C. */\n#include <stdio.h>\n#include <stdlib.h>\n#include <stdint.h>\n#include <string.h>\n#include <errno.h>\n#include <sys/stat.h>\n#include <unistd.h>\n#include <fcntl.h>\n#include <dirent.h>\n");
+   size_t prefix=(size_t)(at-s);np_put(&body,s,prefix);np_puts(&body,"\n#define main ri_original_main\n#include \"");np_puts(&body,root);np_puts(&body,"/exec/c/run.c\"\n#undef main\n");np_put(&body,at+strlen(mark),n-prefix-strlen(mark));
+  }free(s);
+ }
+ cx_sha256_hex(body.p,body.n,body_sha);np_puts(&record,"runtime.c\t");np_puts(&record,body_sha);np_puts(&record,"\n");cx_sha256_hex(record.p,record.n,record_sha);
+}
+static void stable(const char *phase){
+ char now[65],p[4400],h[65];source(now);if(strcmp(sid,now)){fprintf(stderr,"ri-material: phase=%s\n",phase);die("source drift");}
+ size_t n;char *s=load(product,&n);cx_sha256_hex(s,n,h);free(s);if(strcmp(boot,h)){fprintf(stderr,"ri-material: phase=%s\n",phase);die("bootstrap drift");}
+ for(int i=0;i<9;i++){path(p,root,inputs[i]);s=load(p,&n);cx_sha256_hex(s,n,h);free(s);if(strcmp(h,hashes[i])){fprintf(stderr,"ri-material: phase=%s input=%s\n",phase,inputs[i]);die("input drift");}}
+}
+static void check_generated(void){output("runtime.c",body.p,body.n,1,0600);output("material.tsv",record.p,record.n,1,0600);}
+static unsigned long long little(const unsigned char *p,int n){unsigned long long v=0;for(int i=n-1;i>=0;i--)v=(v<<8)|p[i];return v;}
+/* Format admission only. Actual program behavior remains untested here. */
+static int native_elf(const unsigned char *p,size_t n){
+ if(n<64||memcmp(p,"\177ELF\2\1\1",7)||little(p+16,2)!=2||little(p+18,2)!=62||little(p+20,4)!=1||little(p+52,2)!=64||little(p+54,2)!=56)return 0;
+ unsigned long long ph=little(p+32,8),count=little(p+56,2),entry=little(p+24,8);if(!count||ph>n||count>(n-ph)/56)return 0;int executable=0;
+ for(size_t i=0;i<(size_t)count;i++){const unsigned char *q=p+(size_t)ph+i*56;if(little(q,4)!=1)continue;unsigned long long off=little(q+8,8),va=little(q+16,8),files=little(q+32,8),mem=little(q+40,8);if(off>n||files>n-off||mem<files)return 0;if((little(q+4,4)&1)&&entry>=va&&entry-va<files)executable=1;}
+ return executable;
+}
+static void native_record(np_buf *b,const char *artifact,size_t n){
+ char text[1200];int z=snprintf(text,sizeof text,"ri-native-v1\nstatus\tPREPARED\nscope\tsource-preserving-C-runtime-no-test-result\nsource\t%s\nbootstrap\t%s\nruntime.c\t%s\nmaterial.tsv\t%s\nflags\t%s\ntarget\tlnx/x86_64\nformat\tELF64-LE-EXEC-x86_64\nartifact\t%s\nbytes\t%lu\n",sid,boot,body_sha,record_sha,native_flags,artifact,(unsigned long)n);
+ if(z<0||(size_t)z>=sizeof text)die("native receipt bound");np_put(b,text,(size_t)z);
+}
+static void verify_native(int required){
+ int binary=exists("runtime-native"),receipt=exists("native.tsv");if(!binary&&!receipt&&!required)return;
+ if(!binary||!receipt)die("native artifact and receipt both required");char p[4400],h[65];size_t n;path(p,out,"runtime-native");char *s=load(p,&n);
+ if(!native_elf((const unsigned char *)s,n)){free(s);die("native artifact is not ELF64/x86_64 executable");}cx_sha256_hex(s,n,h);free(s);
+ np_buf expected={0};native_record(&expected,h,n);output("native.tsv",expected.p,expected.n,1,0600);free(expected.p);
+ strcpy(native_sha,h);native_bytes=n;has_native=1;
+}
+static void build_native(void){
+ if(exists("runtime-native")||exists("native.tsv"))die("native outputs must not exist");
+ /* All compilation inputs, the exact generated source and full bootstrap are
+  * freshly checked on both sides of the actual child compiler invocation. */
+ stable("before-native-compile");check_generated();
+ char bound[4400],src[4400],why[1024];path(bound,root,"tools/bound");path(src,out,"runtime.c");
+ char *v[]={bound,"20","sh",product,"-O2","-fno-trim-libc","-b","lnx/x86_64",src,"-o","-",0};np_result r;
+ if(np_run(v,root,0,23,&r,why,sizeof why))die(why);
+ if(r.rc||r.errn||r.outn>16777216||!native_elf((const unsigned char *)r.out,r.outn)){if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);die("native compiler failed or invalid ELF output");}
+ stable("after-native-compile");check_generated();
+ /* Capture stdout instead of allowing the compiler to fopen an output path.
+  * Each installed leaf is created here with EXCL/NOFOLLOW and fd permissions. */
+ char compiled_sha[65];size_t compiled_bytes=r.outn;cx_sha256_hex(r.out,r.outn,compiled_sha);
+ output("runtime-native",r.out,r.outn,0,0700);np_free(&r);
+ char p[4400],h[65];size_t n;path(p,out,"runtime-native");char *s=load(p,&n);if(!native_elf((const unsigned char *)s,n)){free(s);die("installed native ELF changed");}cx_sha256_hex(s,n,h);free(s);
+ if(n!=compiled_bytes||strcmp(h,compiled_sha))die("installed native differs from compiler bytes");
+ np_buf receipt={0};native_record(&receipt,h,n);output("native.tsv",receipt.p,receipt.n,0,0600);free(receipt.p);
+ verify_native(1);stable("after-native-install");check_generated();
+}
+int main(int argc,char **argv){
+ int action=0;if(argc==5){if(!strcmp(argv[1],"--verify"))action=1;else if(!strcmp(argv[1],"--build"))action=2;else if(!strcmp(argv[1],"--verify-native"))action=3;else die("unknown action");argc--;argv++;}
+ if(argc!=4||!realpath(argv[1],root)||argv[2][0]!='/'||strlen(argv[2])>=sizeof out||!argv[3][0]||argv[3][0]=='/'||strstr(argv[3],"..")||strpbrk(argv[2],"\r\n\t")||strpbrk(argv[3],"\\\r\n\t")||strpbrk(root,"\"\\\r\n\t"))die("usage ROOT NEW_OUT FIXTURE | --verify/--build/--verify-native ROOT OUT FIXTURE");
+ strcpy(out,argv[2]);path(product,root,"unisacc.com");generate(argv[3]);
+ if(action==1||action==3){struct stat d;if(lstat(out,&d)||!S_ISDIR(d.st_mode))die("verification output must be a real directory");check_generated();verify_native(action==3);stable("after-verification");}
+ else {if(mkdir(out,0700))die("new output directory required");output("runtime.c",body.p,body.n,0,0600);output("material.tsv",record.p,record.n,0,0600);if(action==2)build_native();else stable("after-preparation");}
+ if(has_native)printf("%s\tri-native\tartifact=%s\tbytes=%lu\tflags=%s\tno-test-result\n",action==1||action==3?"VERIFIED":"PREPARED",native_sha,(unsigned long)native_bytes,native_flags);
+ puts(action==1||action==3?"VERIFIED\tri-material\tno-test-result":"PREPARED\tri-material\tno-test-result");free(body.p);free(record.p);return 0;
+}
