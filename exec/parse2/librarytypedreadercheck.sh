@@ -35,6 +35,20 @@ prepare_typed_net(){
  (cd "$D" && sha256sum typed-tables.sha256 model.net >typed-net.sha256)
  (cd "$D" && sha256sum typed-c.json typed.json model.tbl model.net >typed.sha256)
 }
+prepare_base_reference_json(){
+ (cd "$D" && sha256sum -c --status base-off.sha256)
+ T=$(mktemp -d "${TMPDIR:-/tmp}/reader-base.XXXXXX")
+ trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge --max-files 10000 -- "$T"' EXIT HUP INT TERM
+ cp -R exec "$T/exec"
+ check --baseline "$T/exec/parse2/libraryimports-manifest.tsv"
+ (cd "$T" && b python3 exec/build/gen.py parse2 "$D/base.json")
+ (cd "$D" && sha256sum base-off.sha256 base.json >base-reference-json.sha256)
+}
+prepare_base_reference_compare(){
+ (cd "$D" && sha256sum -c --status base-off.sha256 && sha256sum -c --status base-reference-json.sha256)
+ check --same "$D/base.json" "$D/off.json" >"$D/base-off-json.log"
+ (cd "$D" && sha256sum base.json >base-reference.sha256)
+}
 case ${1:-check} in
 --cache-dir) printf '%s\n' "$D";;
 --prepare-tools)
@@ -57,15 +71,11 @@ case ${1:-check} in
  check --same "$D/off-c.json" "$D/off.json" >"$D/off-cp.log"
  (cd "$D" && sha256sum off.json >base-off.sha256)
  ;;
+--prepare-base-reference-json) prepare_base_reference_json ;;
+--prepare-base-reference-compare) prepare_base_reference_compare ;;
 --prepare-base-reference)
- (cd "$D" && sha256sum -c --status base-off.sha256)
- T=$(mktemp -d "${TMPDIR:-/tmp}/reader-base.XXXXXX")
- trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge --max-files 10000 -- "$T"' EXIT HUP INT TERM   # T holds a copy of exec/ (~1700 entries)
- cp -R exec "$T/exec"
- check --baseline "$T/exec/parse2/libraryimports-manifest.tsv"
- (cd "$T" && b python3 exec/build/gen.py parse2 "$D/base.json")
- check --same "$D/base.json" "$D/off.json" >"$D/base-off-json.log"
- (cd "$D" && sha256sum base.json >base-reference.sha256)
+ prepare_base_reference_json
+ prepare_base_reference_compare
  ;;
 --prepare-base-tables-base)
  (cd "$D" && sha256sum -c --status base-reference.sha256)
