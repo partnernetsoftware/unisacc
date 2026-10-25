@@ -1,5 +1,11 @@
 # Development and construction support
 
+The working source is Source329; installed P53 was built from S447 and is
+currently a trusted bootstrap, not a newly built Source329 product. Material,
+runtime and product qualifications below retain their named source identities.
+Old PP92/23 and RI/host/source material observations are not transferred merely
+because this checkout now contains the unsigned classic C math repair.
+
 `sourceflat.cx` is the native complete-source exporter:
 
 ```sh
@@ -196,7 +202,7 @@ body is extracted exactly from the raw `KERNEL_BODY` in
 `unisa/ckernel.py`, stopping before main. No Python interpreter or
 `np_convert` runs, and no old weight value supplies the new cube weights.
 
-MAT01's weight SHA is
+Source447 MAT01's weight SHA is
 `2fd7181593523ce306cbcf0825b2d6ebd5dde3f69cf17762e8beeb6ebf25e609`;
 the actual C math-body SHA is
 `463b02ddd20c31182cbf90458b7cf308992f903b931bbdd8d355d38edee52eb2`.
@@ -226,3 +232,44 @@ P3/product/generated sources remain unchanged. No equality with the old NN blob,
 all18-net reconstruction, atomic snapshot or foreign-host qualification is
 claimed. The19 broad qualification gaps and unmeasured internal/cold/hot phases
 remain.
+
+The unsigned classic table-math repair is exported by
+`table-kernel-export.cx`, independently of NN weight construction:
+
+```sh
+tools/bound 55 sh ./unisacc.com tools/table-kernel-export.cx -- prepare ROOT NEW_MATERIAL
+tools/bound 55 sh ./unisacc.com tools/table-kernel-export.cx -- --verify ROOT MATERIAL
+tools/bound 55 sh ./unisacc.com tools/table-kernel-export.cx -- install ROOT MATERIAL
+```
+
+All three actual01 commands completed0. The tool extracts the current raw C
+KERNEL_BODY, emits only core/self math with its own producer/template hashes,
+and preserves39 model/cases/header/weight/dense files byte-for-byte with their
+old producer provenance. Install admits exact old generated targets, records
+the actual before/after source identities and uses per-file exclusive sibling
+temporaries/fsync/rename. Two renames are not one atomic pair; partial failures
+retain explicit recovery evidence. It does not forge a new candidate or bypass
+the package constructor-input comparison.
+
+`out/c43-table-kernel-math-01/installed.tsv` records Source329 and new
+core/self hashes. The saved P53 ran all18 actual tables over8770 keys/22694
+decisions, with28868 field refusals/recoveries and72 adapter refusals, all0,
+in `out/c43-nets-u64-bootstrap-all-01.log`. Host C99/O2/shift sanitizer
+ran the generated self-test with exactly22694 decisions/0 wrong. Permanent
+`tests/table-mask.cx ROOT SAVED_BOOTSTRAP ABS_CC NEW_OUT words|all-nets`
+uses separate55-second commands: words9/0 and all-nets8/0, in the corresponding
+`out/c43-table-mask-*-01.log` records. The words mode extracts actual
+functions without forcing unsigned types; sanitizer errors or NOT_RUN cannot
+pass. These are classic-math mechanism checks on Source329 using trusted P53
+and a nonhermetic host C foundation. They neither reconstruct18 NN parameters
+nor qualify a new complete product. The old signed sanitizer failure remains.
+
+`source-package.cx` is currently a separate, incomplete source-P3 producer.
+Its CTX01 source observation and native coordinator construction/listing ran,
+but of107 planned native-tool/gen/tbl/net jobs only tool-gen01 is PREPARED.
+The shared pp generator branches on SEED_GEN_GENERIC presence, including an
+empty value; the initial context/receipt did not bind that input. Scheduling
+must wait for a fixed raw-environ filtering/receipt policy and fresh CTX02,
+rather than treating an external unset as full receipt binding. The compiled
+coordinator profile is code reuse, not a result cache; no complete P3 package,
+consumer qualification or Source329 product is inferred from context/list.

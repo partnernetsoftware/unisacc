@@ -1,0 +1,94 @@
+/* Math-only source exporter. prepare ROOT NEW_MAT | --verify ROOT MAT |
+ * install ROOT MAT. Caller bound55; each fresh SID subprocess bound8.
+ * No Python interpreter, model construction, product build, or test result.
+ * Only install mutates the two generated C targets; NN input bytes/provenance
+ * are retained. Two atomic renames are not an atomic pair. A partial install
+ * is explicit, retains pending/previous bytes, and requires reviewed recovery.
+ */
+#pragma unisa use cxlib.netpack
+typedef struct {char *name;char sha[65];size_t bytes;} Input;
+typedef struct {np_buf inputs,core,self,receipt;char prepared_sid[65],tool[65],template_sha[65],core_math[65],self_math[65];} Export;
+static char root[4096],mat[4096],self_path[4096],product[4400],bound[4400],ident[4400],kernel[4400],guard[4400],temporary[2][4400];
+static Input inputs[16384];static int count,guard_fd=-1,guard_owned,renamed,temp_owned[2];
+static const char *targets[]={"unisa_core.c","unisa_self.c"};
+static const char *previous[]={"previous-unisa_core.c","previous-unisa_self.c"};
+static const char *old_sha[]={"e11e3890c806d9396bd26183f86940da5cd2784673ef0baeca44ceb040828e16","fb389c64b8a462fc01c5e8621a9c26f45bd332c69783eb563c4c4e786ec7e990"};
+static void die(const char *s){int saved=errno;if(!renamed){for(int i=0;i<2;i++)if(temp_owned[i])unlink(temporary[i]);if(guard_owned)unlink(guard);}if(guard_fd>=0)close(guard_fd);fprintf(stderr,"table-kernel-export: REFUSE %s errno=%d renamed=%d\n",s,saved,renamed);exit(2);}
+static void path(char *p,const char *a,const char *b){int n=snprintf(p,4400,"%s/%s",a,b);if(n<0||n>=4400)die("path-bound");}
+static char *load(const char *p,size_t *n){struct stat a,b;errno=0;if(lstat(p,&a))die(errno==ENOENT?"input-absent":"input-stat");if(!S_ISREG(a.st_mode)||a.st_size<0||a.st_size>16777216)die("bounded-regular-input");int fd=open(p,O_RDONLY|O_CLOEXEC|O_NONBLOCK|O_NOFOLLOW);if(fd<0)die("input-open");if(fstat(fd,&b)||!S_ISREG(b.st_mode)||a.st_dev!=b.st_dev||a.st_ino!=b.st_ino||a.st_size!=b.st_size){close(fd);die("input-descriptor");}*n=(size_t)a.st_size;char *s=malloc(*n+1);if(!s){close(fd);die("allocation");}size_t at=0;while(at<*n){ssize_t z=read(fd,s+at,*n-at);if(z<0&&errno==EINTR)continue;if(z<=0){close(fd);free(s);die("input-extent");}at+=(size_t)z;}char extra;ssize_t z;do{z=read(fd,&extra,1);}while(z<0&&errno==EINTR);int changed=fstat(fd,&b)||a.st_dev!=b.st_dev||a.st_ino!=b.st_ino||a.st_size!=b.st_size;int closed=close(fd);if(z||changed||closed){free(s);die("input-changed-or-close");}s[*n]=0;return s;}
+static void digest(const char *p,char h[65]){size_t n;char *s=load(p,&n);cx_sha256_hex(s,n,h);free(s);}
+static void row(np_buf *b,const char *k,const char *v){np_puts(b,k);np_puts(b,"\t");np_puts(b,v);np_puts(b,"\n");}
+static void write_new(const char *p,const char *s,size_t n,int mode){int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,mode);if(fd<0)die("exclusive-output");for(int i=0;i<2;i++)if(temporary[i][0]&&!strcmp(p,temporary[i]))temp_owned[i]=1;struct stat st;if(fstat(fd,&st)||!S_ISREG(st.st_mode)||fchmod(fd,(mode_t)mode)){close(fd);die("output-mode");}size_t at=0;while(at<n){ssize_t z=write(fd,s+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0){close(fd);die("output-write");}at+=(size_t)z;}int synced=fsync(fd),closed=close(fd);if(synced||closed)die("output-sync-or-close");}
+static void save(const char *name,const np_buf *b){char p[4400];path(p,mat,name);write_new(p,b->p,b->n,0600);}
+static void equal(const char *p,const np_buf *b){size_t n;char *s=load(p,&n);int ok=n==b->n&&!memcmp(s,b->p,n);free(s);if(!ok)die("exact-artifact-or-receipt-mismatch");}
+static int absent(const char *p){struct stat st;errno=0;if(!lstat(p,&st))return 0;if(errno!=ENOENT)die("existence-stat");return 1;}
+static void source(char h[65]){if(unsetenv("UNISACC_RF_CAPTURE")||unsetenv("UNISA_ATTRIBUTES"))die("clear-ambient-resource-state");char *v[]={bound,"8","sh",product,ident,"--",root,0};np_result r;char why[1400];if(np_run(v,root,0,10,&r,why,sizeof why))die(why);int ok=!r.rc&&!r.errn&&r.outn==65&&r.out[64]=='\n';if(ok){memcpy(h,r.out,64);h[64]=0;for(int i=0;i<64;i++)if(!((h[i]>='0'&&h[i]<='9')||(h[i]>='a'&&h[i]<='f')))ok=0;}if(!ok&&r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);if(!ok)die("full-source-observation");}
+static int suffix(const char *p,const char *s){size_t a=strlen(p),b=strlen(s);return a>=b&&!strcmp(p+a-b,s);}
+static int selected(const char *rel){
+ if(!strcmp(rel,"kernel/unisa_core.c")||!strcmp(rel,"kernel/unisa_self.c"))return 0;
+ const char *ext=strrchr(rel,'.');if(!ext)return 0;
+ if(!strncmp(rel,"exec/c/asm/",11)&&!strchr(rel+11,'/')&&!strcmp(ext,".S"))return 1;
+ if(strcmp(ext,".py")&&strcmp(ext,".c")&&strcmp(ext,".h")&&strcmp(ext,".inc")&&strcmp(ext,".tsv")&&strcmp(ext,".json")&&strcmp(ext,".sh"))return 0;
+ if(!strncmp(rel,"seed/",5)){const char *base=strrchr(rel,'/')+1;const char *names[]={"tbl.c","net.c","json.h","gen.c","facts.h","ident.c","blob.c","sha256.h","pack.c","compilerpack.c","ape.c"};for(int i=0;i<11;i++)if(!strcmp(base,names[i]))return 1;return 0;}
+ if(!strncmp(rel,"exec/",5)&&(suffix(rel,"check.sh")||suffix(rel,"check.py")))return 0;
+ if((!strcmp(ext,".c")||!strcmp(ext,".h"))&&(!strncmp(rel,"probes/",7)||strstr(rel,"/probes/")))return 0;
+ if(!strncmp(rel,"exec/build/",11))return !strchr(rel+11,'/')&&!strcmp(ext,".py");
+ return 1;
+}
+static void add(const char *rel){if(count==16384||!rel[0]||strpbrk(rel,"\r\n\t"))die("manifest-capacity-or-path");for(int i=0;i<count;i++)if(!strcmp(inputs[i].name,rel))die("duplicate-manifest-input");char p[4400];path(p,root,rel);size_t n;char *s=load(p,&n);Input *e=&inputs[count++];e->name=strdup(rel);if(!e->name)die("allocation");e->bytes=n;cx_sha256_hex(s,n,e->sha);free(s);}
+static void walk(const char *rel,int depth){if(depth>64)die("source-directory-depth");if(!strncmp(rel,"exec/build/",11)&&strchr(rel+11,'/'))return;char p[4400];path(p,root,rel);struct stat st;if(lstat(p,&st))die("source-stat");if(!S_ISDIR(st.st_mode)){if(selected(rel))add(rel);return;}DIR *d=opendir(p);if(!d)die("source-directory-open");for(;;){errno=0;struct dirent *e=readdir(d);if(!e){int saved=errno,closed=closedir(d);if(saved||closed)die("source-directory-read-or-close");break;}if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;char child[4400];path(child,rel,e->d_name);walk(child,depth+1);}}
+static int compare(const void *a,const void *b){return strcmp(((const Input *)a)->name,((const Input *)b)->name);}
+static void require_input(const char *name){for(int i=0;i<count;i++)if(!strcmp(inputs[i].name,name))return;die("required-NN-input-absent");}
+static np_buf manifest(void){
+ for(int i=0;i<count;i++)free(inputs[i].name);count=0;const char *dirs[]={"exec","unisa","src","kernel","include","weights","seed"};for(int i=0;i<7;i++)walk(dirs[i],0);
+ add("iterate/kernel/typekw.tsv");const char *support[]={"tools/bound","tools/bound.c","tools/cxbin","tools/safedel.cx","tools/lib.sh","tools/build_ref.sh","tools/export_ref.sh","tools/refshim.h","tools/reffoot.h","tools/sourceflat.cx","tools/table-kernel-export.cx","tools/cxlib/netpack.cx","unisacc.com"};for(int i=0;i<13;i++)add(support[i]);
+ require_input("kernel/unisa_model.inc");require_input("kernel/unisa_cases.inc");require_input("kernel/unisa_headers.inc");
+ const char *stages[]={"pp","lex","parse","type","scope","irsel","enc","reloc","regmap","tyinfo","pfconv","peep","opinfo","prec","binsel","isel","abi","combo"};for(int i=0;i<18;i++){char name[120];snprintf(name,sizeof name,"kernel/weight.%s.inc",stages[i]);require_input(name);snprintf(name,sizeof name,"kernel/dense.%s.inc",stages[i]);require_input(name);}
+ qsort(inputs,(size_t)count,sizeof inputs[0],compare);np_buf b={0};np_puts(&b,"table-kernel-applicable-inputs-v1\nscope\tSID-selected-source-except-two-generated-math-targets-plus-explicit-producer-support\n");for(int i=0;i<count;i++){char size[40];snprintf(size,sizeof size,"%lu",(unsigned long)inputs[i].bytes);np_puts(&b,"input\t");np_puts(&b,inputs[i].name);np_puts(&b,"\t");np_puts(&b,size);np_puts(&b,"\t");np_puts(&b,inputs[i].sha);np_puts(&b,"\n");}return b;
+}
+static void stable_inputs(const np_buf *before){np_buf after=manifest();int ok=after.n==before->n&&!memcmp(after.p,before->p,before->n);free(after.p);if(!ok)die("applicable-source-or-NN-inputs-changed");}
+static char *unique(char *s,const char *tag){char *p=strstr(s,tag);if(!p||strstr(p+1,tag))die("unique-template-fragment");return p;}
+static void extract(Export *x,np_buf *core,np_buf *full){
+ char p[4400];path(p,root,"tools/table-kernel-export.cx");digest(p,x->tool);char actual[65];digest(self_path,actual);if(strcmp(actual,x->tool))die("producer-must-be-root-tool");path(p,root,"unisa/ckernel.py");size_t n;char *s=load(p,&n);cx_sha256_hex(s,n,x->template_sha);if(memchr(s,0,n)||memchr(s,'\r',n))die("template-wire");char *start=unique(s,"\nKERNEL_BODY = r'''")+strlen("\nKERNEL_BODY = r'''");char *end=strstr(start,"\n'''");if(!end)die("raw-kernel-body-end");char *main=unique(start,"\nint main(void) {");if(main>=end)die("main-outside-body");
+ np_put(full,start,(size_t)(end+1-start));np_put(core,start,(size_t)(main+1-start));
+ /* These are actual source fragments, not a textual replacement of signed
+  * output. Only a current unsigned template is eligible for math export. */
+ unique(core->p,"\nunsigned long mask64(int p) {");unique(core->p,"\n    unsigned long v; int k;");unique(core->p,"\n    unsigned long lit;");
+ if(strstr(core->p,"\nlong mask64(")||strstr(core->p,"\n    long v;")||strstr(core->p,"\n    long lit;")||strstr(full->p,"#include"))die("unsigned-no-model-include-template-required");
+ cx_sha256_hex(core->p,core->n,x->core_math);cx_sha256_hex(full->p,full->n,x->self_math);free(s);
+}
+static np_buf generated(const Export *x,const np_buf *body,int self){np_buf b={0};np_puts(&b,"/* GENERATED -- do not edit. table-kernel-export-v1 math-only.\n * producer tools/table-kernel-export.cx sha256=");np_puts(&b,x->tool);np_puts(&b,"\n * template unisa/ckernel.py sha256=");np_puts(&b,x->template_sha);np_puts(&b,"\n * NN/model/dense/weight/cases/headers retain original bytes and producer provenance.\n * This regenerates C math only, not eighteen NN sources or a product candidate.\n */\n#include \"unisa_model.inc\"\n");if(self)np_puts(&b,"#include \"unisa_cases.inc\"\n");np_puts(&b,"\n");np_put(&b,body->p,body->n);return b;}
+static void previous_ok(void){char p[4400],h[65];for(int i=0;i<2;i++){path(p,mat,previous[i]);digest(p,h);if(strcmp(h,old_sha[i]))die("previous-copy-not-pinned-normal-generated-source");}}
+static void current_targets(const Export *x,int phase){char p[4400],h[65],fresh[65];for(int i=0;i<2;i++){path(p,kernel,targets[i]);digest(p,h);const np_buf *b=i?&x->self:&x->core;cx_sha256_hex(b->p,b->n,fresh);int old=!strcmp(h,old_sha[i]),now=!strcmp(h,fresh);if((phase==0&&!old)||(phase==1&&!now)||(phase==2&&!old&&!now))die("target-not-approved-normal-old-or-this-export");}}
+static np_buf receipt(const Export *x){np_buf b={0};np_puts(&b,"table-kernel-export-v1\nstatus\tPREPARED\nscope\tmath-only-NN-numbers-and-old-producer-provenance-reused-no-test-result\n");row(&b,"root",root);row(&b,"source-at-prepare",x->prepared_sid);row(&b,"producer",x->tool);row(&b,"template",x->template_sha);row(&b,"core-math",x->core_math);row(&b,"self-math",x->self_math);char h[65];cx_sha256_hex(x->inputs.p,x->inputs.n,h);row(&b,"inputs.tsv",h);cx_sha256_hex(x->core.p,x->core.n,h);row(&b,"unisa_core.c",h);cx_sha256_hex(x->self.p,x->self.n,h);row(&b,"unisa_self.c",h);for(int i=0;i<2;i++)row(&b,previous[i],old_sha[i]);row(&b,"source-observation","fresh-endpoints-not-atomic-or-historical-proof");return b;}
+static void material_equal(const Export *x){char p[4400];path(p,mat,"inputs.tsv");equal(p,&x->inputs);path(p,mat,"unisa_core.c");equal(p,&x->core);path(p,mat,"unisa_self.c");equal(p,&x->self);path(p,mat,"material.tsv");equal(p,&x->receipt);previous_ok();}
+static void sid_field(char out[65]){char p[4400];path(p,mat,"material.tsv");size_t n;char *s=load(p,&n);const char *tag="\nsource-at-prepare\t";char *f=unique(s,tag)+strlen(tag);if(memchr(s,0,n)||!n||s[n-1]!='\n'||(size_t)(f-s)+64>=n||f[64]!='\n')die("prepared-source-field");for(int i=0;i<64;i++){char c=f[i];if(!((c>='0'&&c<='9')||(c>='a'&&c<='f')))die("prepared-source-hex");out[i]=c;}out[64]=0;free(s);}
+static Export load_export(void){Export x={0};sid_field(x.prepared_sid);x.inputs=manifest();np_buf core={0},full={0};extract(&x,&core,&full);x.core=generated(&x,&core,0);x.self=generated(&x,&full,1);free(core.p);free(full.p);x.receipt=receipt(&x);material_equal(&x);current_targets(&x,2);return x;}
+static void finish_export(Export *x){free(x->inputs.p);free(x->core.p);free(x->self.p);free(x->receipt.p);}
+static void stable_export(const Export *x,int target_phase){stable_inputs(&x->inputs);material_equal(x);current_targets(x,target_phase);}
+static void prepare(void){
+ Export x={0};source(x.prepared_sid);x.inputs=manifest();np_buf core={0},full={0};extract(&x,&core,&full);x.core=generated(&x,&core,0);x.self=generated(&x,&full,1);free(core.p);free(full.p);current_targets(&x,0);
+ for(int i=0;i<2;i++){char p[4400];path(p,kernel,targets[i]);size_t n;char *s=load(p,&n);np_buf b={0};np_put(&b,s,n);free(s);save(previous[i],&b);free(b.p);}
+ save("inputs.tsv",&x.inputs);save("unisa_core.c",&x.core);save("unisa_self.c",&x.self);previous_ok();stable_inputs(&x.inputs);current_targets(&x,0);char after[65];source(after);if(strcmp(after,x.prepared_sid))die("source-changed-during-prepare");stable_inputs(&x.inputs);x.receipt=receipt(&x);save("material.tsv",&x.receipt);material_equal(&x);current_targets(&x,0);finish_export(&x);puts("PREPARED\ttable-kernel-export\tmath-only-NN-inputs-reused\tno-test-result");
+}
+static void sync_kernel(void){int fd=open(kernel,O_RDONLY|O_DIRECTORY|O_CLOEXEC);if(fd<0)die("kernel-directory-open");int synced=fsync(fd),closed=close(fd);if(synced||closed)die("kernel-directory-sync-or-close");}
+static void install(Export *x,const char *before_sid){
+ char p[4400];path(guard,kernel,".table-kernel-export.lock");guard_fd=open(guard,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(guard_fd<0)die("exclusive-root-install-session");guard_owned=1;
+ current_targets(x,0);stable_export(x,0);path(p,mat,"install.pending.tsv");if(!absent(p))die("install-pending-already-exists");char finalpath[4400];path(finalpath,mat,"installed.tsv");if(!absent(finalpath))die("installed-receipt-already-exists");
+ np_buf pending={0};np_puts(&pending,"table-kernel-install-v1\nstatus\tPENDING\nscope\tmath-files-only-not-atomic-pair-not-product-candidate\n");row(&pending,"source-before",before_sid);char h[65];cx_sha256_hex(x->receipt.p,x->receipt.n,h);row(&pending,"prepared-receipt",h);row(&pending,"producer",x->tool);row(&pending,"template",x->template_sha);save("install.pending.tsv",&pending);
+ for(int i=0;i<2;i++){int n=snprintf(temporary[i],sizeof temporary[i],"%s/.table-kernel-export-%ld-%d.tmp",kernel,(long)getpid(),i);if(n<0||(size_t)n>=sizeof temporary[i]||!absent(temporary[i]))die("exclusive-sibling-temp-path");const np_buf *b=i?&x->self:&x->core;char target[4400];path(target,kernel,targets[i]);struct stat st;if(lstat(target,&st)||!S_ISREG(st.st_mode))die("normal-generated-target-required");write_new(temporary[i],b->p,b->n,(int)(st.st_mode&0777));temp_owned[i]=1;equal(temporary[i],b);}
+ stable_export(x,0);
+ for(int i=0;i<2;i++){char target[4400];path(target,kernel,targets[i]);/* Prior pinned target check, under our exclusive producer session. */if(rename(temporary[i],target))die(renamed?"partial-install-second-rename-failed-previous-copies-and-guard-retained":"first-generated-target-rename-failed");temp_owned[i]=0;renamed++;}sync_kernel();stable_export(x,1);
+ char after_sid[65];source(after_sid);stable_export(x,1);np_buf result={0};np_puts(&result,"table-kernel-install-v1\nstatus\tINSTALLED\nscope\tmath-files-only-NN-inputs-retained-no-product-candidate-no-test-result\n");row(&result,"source-before",before_sid);row(&result,"source-after",after_sid);row(&result,"prepared-receipt",h);row(&result,"producer",x->tool);row(&result,"template",x->template_sha);cx_sha256_hex(x->core.p,x->core.n,h);row(&result,"unisa_core.c",h);cx_sha256_hex(x->self.p,x->self.n,h);row(&result,"unisa_self.c",h);row(&result,"atomicity","each-file-temp-fsync-rename-not-atomic-pair");save("installed.tsv",&result);free(result.p);free(pending.p);
+ if(close(guard_fd))die("installed-but-guard-close-failed");guard_fd=-1;if(unlink(guard))die("installed-but-guard-remove-failed");guard_owned=0;sync_kernel();puts("INSTALLED\ttable-kernel-export\tmath-only-no-product-candidate\tno-test-result");
+}
+int main(int argc,char **argv){
+#if !defined(__linux__) || !defined(__x86_64__)
+ fputs("NOT_RUN table-kernel-export requires Linux/x86_64 LP64\n",stderr);return 3;
+#endif
+ if(argc!=4||(strcmp(argv[1],"prepare")&&strcmp(argv[1],"--verify")&&strcmp(argv[1],"install"))||sizeof(long)!=8||!realpath(argv[2],root)||argv[3][0]!='/'||strlen(argv[3])>=sizeof mat||strpbrk(argv[3],"\r\n\t")||!realpath(__FILE__,self_path))die("usage-prepare-or-verify-or-install-ROOT-MAT");strcpy(mat,argv[3]);path(product,root,"unisacc.com");path(bound,root,"tools/bound");path(ident,root,"seed/ident.c");path(kernel,root,"kernel");struct stat st;if(lstat(kernel,&st)||!S_ISDIR(st.st_mode))die("normal-kernel-directory-required");
+ if(!strcmp(argv[1],"prepare")){if(mkdir(mat,0700))die("fresh-material-directory");prepare();return 0;}
+ if(lstat(mat,&st)||!S_ISDIR(st.st_mode))die("normal-material-directory-required");char before[65];source(before);Export x=load_export();if(!strcmp(argv[1],"install")){install(&x,before);finish_export(&x);return 0;}
+ stable_export(&x,2);char after[65];source(after);if(strcmp(before,after))die("source-changed-during-verify");stable_export(&x,2);finish_export(&x);puts("VERIFIED\ttable-kernel-export\tmath-only-NN-inputs-reused\tno-test-result");return 0;
+}
+

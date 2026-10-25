@@ -442,8 +442,8 @@ KERNEL_BODY = r'''/* the kernel -- the deploy kernel. [K-1] [K-2] [K-5]
  */
 int getb(int i) { return MODEL[i] & 255; }
 
-long mask64(int p) {
-    long v; int k;
+unsigned long mask64(int p) {
+    unsigned long v; int k;
     v = 0;
     k = 7;
     while (k >= 0) { v = (v << 8) | getb(p + k); k = k - 1; }
@@ -455,7 +455,7 @@ int infer(int s, int *key, int head) {
     int m; int H; int off; int j; int f; int hit; int ne; int k;
     int p; int best; int bi; int u; int hh; int c; int w; int ncls;
     int any; int got; int wi; int mw; int q;
-    long lit;
+    unsigned long lit;
     m = STAGE_M[s]; H = STAGE_H[s]; off = STAGE_OFF[s]; mw = STAGE_MW[s];
     /* a key outside the table is never answered [P-2]: the net is only
        defined on the domain it was verified on.  -1 tells the caller. */

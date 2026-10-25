@@ -1,5 +1,12 @@
 # ResourceInput capture and consumer development checks
 
+Identity boundary: these recorded P53 results belong to Source447. The current
+working source is Source329, whose complete product has not been built; root
+P53 is presently a trusted bootstrap/historical candidate. None of the RI,
+runtime-material or fixed-P3 lineage results below is silently transferred to
+Source329. Current unsigned classic-math checks are recorded separately in
+[the PRD](../prd.md), not as RI qualification.
+
 These are local Linux/x86_64 checks. The product batch uses the actual driver;
 the two substrate batches compile the original C executor and headers with a
 header-free CX witness. That adaptation is not a CX rewrite of the C executor.

@@ -1,5 +1,13 @@
 # Tests
 
+Source identity boundary: the working source is now
+`329cdb7077891074f638634dc7abdcd59ee39c368ad6ba1c2fcf867c3c63de2e`.
+The installed P53 product was built from S447 and is currently a trusted
+bootstrap/historical candidate. No complete Source329 product has been built.
+P53/S447 results below, including PP92/23, RI and fixed-point observations, are
+not transferred to Source329. The PP low-mask observations remain valid within
+their original scope; they are not relabeled failures.
+
 ## UJS product (`ujs.com`) — **不在本目录**
 
 Host1 船闸在 **[`../ujs/tests/`](../ujs/tests/)**（与 unisacc 套件分离）：
@@ -681,7 +689,7 @@ nine directives and two defined states. It writes new142-byte mask/sparse-W2
 weights, an observation harness and an identity receipt. The real deploy C math
 is precisely extracted from `unisa/ckernel.py`'s raw `KERNEL_BODY` before
 its main; neither Python nor `np_convert` executes. No old weight values are
-used to construct the new NN. The current MAT01 weights SHA is
+used to construct the new NN. The Source447 MAT01 weights SHA is
 `2fd7181593523ce306cbcf0825b2d6ebd5dde3f69cf17762e8beeb6ebf25e609`;
 the extracted math-body SHA is
 `463b02ddd20c31182cbf90458b7cf308992f903b931bbdd8d355d38edee52eb2`.

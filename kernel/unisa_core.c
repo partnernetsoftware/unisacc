@@ -1,11 +1,9 @@
-/* GENERATED -- do not edit.  `python3 -m unisa emit-kernel` writes this
- * file; tests/kernel.sh fails when it differs from a fresh run.
- * The decision layer as C: the integer kernel [K-5], from KERNEL_BODY in
- * unisa/ckernel.py.  The model it reads is the file included below.
- * No softmax, no libm, no malloc, no multiply, no float.
- * Inputs (sha256, first 12 hex digits):
- *   unisa/ckernel.py             db184ffec275 */
-
+/* GENERATED -- do not edit. table-kernel-export-v1 math-only.
+ * producer tools/table-kernel-export.cx sha256=457e3099f640fd7d43ab74192944a859eb1b7ad7c87440e172e78d70638d2787
+ * template unisa/ckernel.py sha256=d3400bfb0d8dab72c8851eec67fba9c732815cb46ac90d9466791be027e5b9cc
+ * NN/model/dense/weight/cases/headers retain original bytes and producer provenance.
+ * This regenerates C math only, not eighteen NN sources or a product candidate.
+ */
 #include "unisa_model.inc"
 
 /* the kernel -- the deploy kernel. [K-1] [K-2] [K-5]
@@ -20,8 +18,8 @@
  */
 int getb(int i) { return MODEL[i] & 255; }
 
-long mask64(int p) {
-    long v; int k;
+unsigned long mask64(int p) {
+    unsigned long v; int k;
     v = 0;
     k = 7;
     while (k >= 0) { v = (v << 8) | getb(p + k); k = k - 1; }
@@ -33,7 +31,7 @@ int infer(int s, int *key, int head) {
     int m; int H; int off; int j; int f; int hit; int ne; int k;
     int p; int best; int bi; int u; int hh; int c; int w; int ncls;
     int any; int got; int wi; int mw; int q;
-    long lit;
+    unsigned long lit;
     m = STAGE_M[s]; H = STAGE_H[s]; off = STAGE_OFF[s]; mw = STAGE_MW[s];
     /* a key outside the table is never answered [P-2]: the net is only
        defined on the domain it was verified on.  -1 tells the caller. */
@@ -88,5 +86,4 @@ int infer(int s, int *key, int head) {
     while (c < ncls) { if (z[c] > best) { best = z[c]; bi = c; } c = c + 1; }
     return bi;
 }
-
 
