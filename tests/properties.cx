@@ -1,0 +1,67 @@
+/* Exact finite sub-contract, not a complete property/optimizer/host gate.
+ * ROOT ABS_NEW_OUT [FULL_APE_CANDIDATE]. Run with tools/bound 55.
+ * O0/O2 each compile once; each native image evaluates the complete finite
+ * domain in one runtime-argv invocation. No result or PASS cache is used. */
+#pragma unisa use cxlib.netpack
+static char root[4096],work[4096],product[4400],bound[4400],fixture[4400],driver[4400];
+static int assertions,failures;
+static const char *vectors[]={"00000000","00000001","80000000","ffffffff","12345678","aaaaaaaa","0","1","7","16","31","0","1","31","32"};
+/* Independent hand-derived bytes. Hex digit popcounts for 12345678 are
+ * 1+1+2+1+2+2+3+1=13. Rotating 0x80000000 moves its one bit to
+ * positions 31,0,6,15,30; alternating bits flip on odd rotations.
+ * 3*0x12345678+1=0x369d0369; 3*0xaaaaaaaa+1=0x1ffffffff.
+ * Loop masks contain exactly n low bits, including n=0 and n=32.
+ * No expression in this parent recomputes the fixture's arithmetic oracle. */
+static const char *gold[]={
+ "W0\t00000001\t00000000\t0\t1\t1\n",
+ "W1\t00000004\t01000000\t1\t1\t1\n",
+ "W2\t80000001\t00000080\t1\t1\t1\n",
+ "W3\tfffffffe\tffffffff\t32\t1\t1\n",
+ "W4\t369d0369\t78563412\t13\t1\t1\n",
+ "W5\tffffffff\taaaaaaaa\t16\t1\t1\n",
+ "R0.0\t00000000\t1\t1\n","R0.1\t00000000\t1\t1\n","R0.2\t00000000\t1\t1\n","R0.3\t00000000\t1\t1\n","R0.4\t00000000\t1\t1\n",
+ "R1.0\t00000001\t1\t1\n","R1.1\t00000002\t1\t1\n","R1.2\t00000080\t1\t1\n","R1.3\t00010000\t1\t1\n","R1.4\t80000000\t1\t1\n",
+ "R2.0\t80000000\t1\t1\n","R2.1\t00000001\t1\t1\n","R2.2\t00000040\t1\t1\n","R2.3\t00008000\t1\t1\n","R2.4\t40000000\t1\t1\n",
+ "R3.0\tffffffff\t1\t1\n","R3.1\tffffffff\t1\t1\n","R3.2\tffffffff\t1\t1\n","R3.3\tffffffff\t1\t1\n","R3.4\tffffffff\t1\t1\n",
+ "R4.0\t12345678\t1\t1\n","R4.1\t2468acf0\t1\t1\n","R4.2\t1a2b3c09\t1\t1\n","R4.3\t56781234\t1\t1\n","R4.4\t091a2b3c\t1\t1\n",
+ "R5.0\taaaaaaaa\t1\t1\n","R5.1\t55555555\t1\t1\n","R5.2\t55555555\t1\t1\n","R5.3\taaaaaaaa\t1\t1\n","R5.4\t55555555\t1\t1\n",
+ "L0\t00000000\t0\t1\t1\t1\n","L1\t00000001\t1\t1\t1\t1\n","L2\t7fffffff\t31\t1\t1\t1\n","L3\tffffffff\t32\t1\t1\t1\n"
+};
+static void die(const char *s){fprintf(stderr,"properties: %s\n",s);exit(2);}
+static void path(char *p,size_t cap,const char *a,const char *b){int n=snprintf(p,cap,"%s/%s",a,b);if(n<0||(size_t)n>=cap)die("path bound");}
+static void check(int ok,const char *name){assertions++;if(!ok)failures++;printf("%s\tproperties.%s\n",ok?"PASS":"FAIL",name);}
+static void digest(const char *p,char *h){size_t n;char *s=cx_read(p,&n);if(!s)die(p);cx_sha256_hex(s,n,h);free(s);}
+static void save(const char *name,const char *bytes,size_t n){char p[4400];path(p,sizeof p,work,name);int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);if(fd<0)die("exclusive evidence");while(n){ssize_t z=write(fd,bytes,n);if(z<0&&errno==EINTR)continue;if(z<=0)die("evidence write");bytes+=z;n-=(size_t)z;}if(close(fd))die("evidence close");}
+static np_result call(char **argv,int seconds,const char *label){np_result r;char why[1024],file[160];if(np_run(argv,root,0,seconds,&r,why,sizeof why))die(why);snprintf(file,sizeof file,"%s.stdout",label);save(file,r.out,r.outn);snprintf(file,sizeof file,"%s.stderr",label);save(file,r.err,r.errn);return r;}
+static void transcript(np_result *r,const char *level){char name[160];int valid=r->rc==0&&!r->errn;size_t at=0;snprintf(name,sizeof name,"%s.execution",level);check(valid,name);if(r->errn)fwrite(r->err,1,r->errn,stderr);
+ for(int i=0;i<40;i++){size_t n=strlen(gold[i]);int same=valid&&at<=r->outn&&n<=r->outn-at&&!memcmp(r->out+at,gold[i],n);snprintf(name,sizeof name,"%s.literal-row-%02d",level,i);check(same,name);at+=n;}
+ snprintf(name,sizeof name,"%s.exact-transcript-extent",level);check(valid&&at==r->outn,name);
+}
+static void refusal(const char *image,const char *level,int kind){char *v[21],name[160];int n=0;v[n++]=bound;v[n++]="1";v[n++]=(char *)image;
+ if(kind!=0)for(int i=0;i<15;i++)v[n++]=(char *)(i==0&&kind==1?"100000000":i==6&&kind==2?"32":i==11&&kind==3?"33":vectors[i]);
+ v[n]=0;snprintf(name,sizeof name,"%s.refuse-%s",level,kind==0?"argc":kind==1?"uint32-overflow":kind==2?"rotate32":"loop33");np_result r=call(v,2,name);check(r.rc==2&&!r.outn&&!r.errn,name);np_free(&r);
+}
+int main(int argc,char **argv){
+#if !defined(__linux__) || !defined(__x86_64__)
+ fputs("properties: Linux x86_64 host required\n",stderr);return 2;
+#endif
+ if((argc!=3&&argc!=4)||!realpath(argv[1],root)||argv[2][0]!='/'||strlen(argv[2])>=sizeof work)return 2;
+ strcpy(work,argv[2]);if(mkdir(work,0700))die("new output directory");path(product,sizeof product,root,"unisacc.com");path(bound,sizeof bound,root,"tools/bound");path(fixture,sizeof fixture,root,"tests/cases/properties.cx");path(driver,sizeof driver,root,"tests/properties.cx");
+ if(argc==4&&!realpath(argv[3],product))die("candidate path");
+ size_t size;char *bytes=cx_read(product,&size);if(!bytes)die("candidate read");int packaged=size>=16&&!memcmp(bytes+size-16,"UNIPKG1\n",8);free(bytes);if(!packaged)die("candidate must be a complete APE product");
+ char before[65],source_before[65],driver_before[65],after[65],images[2][4400],image_sha[2][65],label[160];digest(product,before);digest(fixture,source_before);digest(driver,driver_before);printf("CANDIDATE\tsha256=%s\nFIXTURE\tsha256=%s\n",before,source_before);
+ const char *options[]={"-O0","-O2"},*levels[]={"O0","O2"};int built[2]={0,0};np_result results[2];memset(results,0,sizeof results);
+ for(int i=0;i<2;i++){
+  char file[40];snprintf(file,sizeof file,"program-%s",levels[i]);path(images[i],sizeof images[i],work,file);
+  char *compile[]={bound,"12","sh",product,(char *)options[i],"-b","lnx/x86_64",fixture,"-o",images[i],0};snprintf(label,sizeof label,"%s.compile",levels[i]);np_result r=call(compile,14,label);built[i]=r.rc==0&&!r.outn&&!r.errn;check(built[i],label);if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);if(!built[i])continue;
+  digest(images[i],image_sha[i]);printf("IMAGE\t%s\tsha256=%s\n",levels[i],image_sha[i]);
+  char *run[21];int n=0;run[n++]=bound;run[n++]="2";run[n++]=images[i];for(int j=0;j<15;j++)run[n++]=(char *)vectors[j];run[n]=0;snprintf(label,sizeof label,"%s.domain",levels[i]);results[i]=call(run,3,label);transcript(&results[i],levels[i]);
+  for(int kind=0;kind<4;kind++)refusal(images[i],levels[i],kind);
+  digest(images[i],after);snprintf(label,sizeof label,"%s.image-unchanged",levels[i]);check(!strcmp(image_sha[i],after),label);
+ }
+ if(built[0]&&built[1]){np_result *a=&results[0],*b=&results[1];check(a->rc==0&&b->rc==0&&!a->errn&&!b->errn&&a->outn>0&&a->outn==b->outn&&!memcmp(a->out,b->out,a->outn),"O0-O2.same-domain-bytes");}
+ for(int i=0;i<2;i++)if(built[i])np_free(&results[i]);
+ digest(product,after);check(!strcmp(before,after),"candidate-unchanged");digest(fixture,after);check(!strcmp(source_before,after),"fixture-unchanged");digest(driver,after);check(!strcmp(driver_before,after),"driver-source-unchanged");
+ puts("NOT_COVERED\tproperties.outside-six-words-five-rotations-four-loop-bounds-full-properties-and-foreign-hosts");puts("TIMING\tstartup_construction_loading_inference_output_validation=UNMEASURED\tcold_hot=UNMEASURED");
+ printf("PROPERTIES\tassertions=%d\tfailed=%d\tscope=finite-u32-rotate-inverse-weight-affine-bytes-loop-boundaries-O0-O2-lnx-x86_64\n",assertions,failures);return failures?1:0;
+}

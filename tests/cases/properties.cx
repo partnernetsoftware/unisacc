@@ -1,0 +1,48 @@
+/* Finite unsigned-word properties, evaluated from runtime argv. No expected
+ * values live here. The parent supplies independent literal byte oracles.
+ * Interface: six hex words, five decimal rotations, four decimal loop bounds. */
+static int word_arg(const char *s,int base,uint32_t maximum,uint32_t *out){
+    const char *p=s;char *end;unsigned long value;
+    if(!*p)return 0;
+    for(;*p;p++)if(!((*p>='0'&&*p<='9')||(base==16&&((*p>='a'&&*p<='f')||(*p>='A'&&*p<='F')))))return 0;
+    errno=0;value=strtoul(s,&end,base);
+    if(errno||*end||value>(unsigned long)maximum)return 0;
+    *out=(uint32_t)value;return 1;
+}
+static uint32_t rotate_left(uint32_t x,unsigned int n){return n?(uint32_t)((x<<n)|(x>>(32u-n))):x;}
+static uint32_t rotate_right(uint32_t x,unsigned int n){return n?(uint32_t)((x>>n)|(x<<(32u-n))):x;}
+static unsigned int weight_shift(uint32_t x){unsigned int n=0;for(unsigned int i=0;i<32;i++)n+=(x>>i)&1u;return n;}
+static unsigned int weight_clear(uint32_t x){unsigned int n=0;while(x){x&=x-1u;n++;}return n;}
+static uint32_t reverse_bytes(uint32_t x){return (uint32_t)(((x&0x000000ffu)<<24)|((x&0x0000ff00u)<<8)|((x&0x00ff0000u)>>8)|((x&0xff000000u)>>24));}
+int main(int argc,char **argv){
+    uint32_t words[6],rotations[5],bounds[4];int failed=0;
+    if(sizeof(uint32_t)!=4||sizeof(unsigned int)!=4)return 3;
+    if(argc!=16)return 2;
+    /* Parse every argument before emitting bytes or entering a shift/loop. */
+    for(int i=0;i<6;i++)if(!word_arg(argv[1+i],16,0xffffffffu,&words[i]))return 2;
+    for(int i=0;i<5;i++)if(!word_arg(argv[7+i],10,31u,&rotations[i]))return 2;
+    for(int i=0;i<4;i++)if(!word_arg(argv[12+i],10,32u,&bounds[i]))return 2;
+    for(int i=0;i<6;i++){
+        uint32_t x=words[i],mapped=x*3u+1u,back=(mapped-1u)*0xaaaaaaabu,swapped=reverse_bytes(x);
+        /* 3*0xaaaaaaab = 2*2^32+1, so multiplication inverts modulo 2^32. */
+        int inverse=back==x,involution=reverse_bytes(swapped)==x;
+        if(!inverse||!involution)failed=1;
+        printf("W%d\t%08x\t%08x\t%u\t%d\t%d\n",i,(unsigned int)mapped,(unsigned int)swapped,weight_shift(x),inverse,involution);
+    }
+    for(int i=0;i<6;i++)for(int j=0;j<5;j++){
+        unsigned int n=(unsigned int)rotations[j];uint32_t x=words[i],y=rotate_left(x,n);
+        int inverse=rotate_right(y,n)==x,weight=weight_clear(y)==weight_shift(x);
+        if(!inverse||!weight)failed=1;
+        printf("R%d.%d\t%08x\t%d\t%d\n",i,j,(unsigned int)y,inverse,weight);
+    }
+    for(int j=0;j<4;j++){
+        unsigned int n=(unsigned int)bounds[j],visits=0,back_visits=0,k=n;uint32_t up=0,down=0;
+        for(unsigned int i=0;i<n;i++){up|=(uint32_t)1u<<i;visits++;}
+        while(k){k--;down|=(uint32_t)1u<<k;back_visits++;}
+        uint32_t closed=n==32u?0xffffffffu:((uint32_t)1u<<n)-1u;
+        int same=up==down&&up==closed,count=visits==n&&back_visits==n,weight=weight_clear(up)==n;
+        if(!same||!count||!weight)failed=1;
+        printf("L%d\t%08x\t%u\t%d\t%d\t%d\n",j,(unsigned int)up,visits,same,count,weight);
+    }
+    return failed?1:0;
+}

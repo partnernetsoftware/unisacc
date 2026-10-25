@@ -130,3 +130,25 @@ The three `out/c43-optimization-candidate-{native,run,tape}-07.log` records prin
 the same full candidate hash. The installed root also passed the 24-check RI
 batch and 16 smoke checks; `--all` remains rc3 with its full coverage gaps.
 This is local Linux x86_64 development evidence, not release qualification.
+
+`tools/bound 55 sh ./unisacc.com tests/properties.cx -- ROOT ABS_NEW_OUT [CANDIDATE]`
+runs the separate `properties.uint32-finite` batch. The optional candidate must
+be a complete APE product. O0 and O2 each compile the fixture once; each image
+then receives all domain axes through runtime argv and evaluates six uint32
+words `{0,1,0x80000000,0xffffffff,0x12345678,0xaaaaaaaa}` across all five
+rotations `{0,1,7,16,31}`, plus loop bounds `{0,1,31,32}`. Forty independent
+handwritten literal byte rows check modular affine inversion, byte-swap
+involution, rotate inversion and bit weight, and ascending/descending loop
+masks and visit counts. Invalid argc, uint32 overflow, rotation32 and loop33
+must return 2 with empty stdout/stderr before evaluation.
+
+`out/c43-properties-01.log` records an actual 100 assertions with zero failures
+on complete candidate `P46cfa11a` (SHA256
+`46cfa11a8fe4ad05e450f87ae95fdf76bd1be541e89e62f74f2632724ebb4e2f`).
+Both optimization levels matched the literal gold and each other; candidate,
+fixture, driver and generated image identities were checked for changes.
+This is an exact finite Linux x86_64 sub-contract. The broad `properties`
+obligation and its `full-properties` planned batch remain NOT_READY; full
+properties, optimization and other native hosts are not qualified. The main
+runner does not execute this separate batch. Internal phase and cold/hot
+timing remain UNMEASURED.
