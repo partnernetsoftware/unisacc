@@ -66,7 +66,7 @@ scalar原六case×三pressure准备分为三个显式group（int8/float4、doubl
 
 composite普通／cached路径同样复用libffiprovider，实际provider路径／SHA进入完整报告、runtime输入读集及v2 cache basis；原arch、sanitize及完整link recipe绑定，旧v1 key不复用。构建前后、缓存校验及拷贝后复核实际provider；原nested struct/array/union、direct/callback、三pressure及所有opt/counter/extent/alignment断言和flags不改。该族六noncached＋准备一项＋十四cached是二十一个独立旧义务，准备成功不冒充功能通过。
 
-Linux/x86_64另设composite-runtime-ready原生准备前置；六个旧完整功能单元仅改为require-cached，保留全部case、pressure和独立断言，旧prepare仍完整校验材料，十四cached不合并。其它host不列新前置、六条原argv不变；缺失前置按既有图合同忽略。准备只记PREPARED，全部二十个功能单元仍须实际执行。
+Linux/x86_64另设composite-runtime-prepare-ready原生准备前置；六个旧完整功能单元仅改为require-cached，保留全部case、pressure和独立断言，旧prepare仍完整校验材料，十四cached不合并。其它host不列新前置、六条原argv不变；缺失前置按既有图合同忽略。准备只记PREPARED，全部二十个功能单元仍须实际执行。
 
 `lib-callback-source-graph`默认-run门面固定原shell SHA，仅免编未使用的ref可执行文件（仍由build_ref --source-only生成相同wrapped C），并从既有exec-chain-model-prepare的完整身份／产物SHA合同materialize e3.json。原cc -O2 runner、dump源码变换、完整sim／C／host解码断言和cleanup不变。门面先恢复原parent UNISA_CONTAINER unset；缺缓存75不隐式构造。显式前置只依赖准备节点，不复用任何测试verdict；原shell聚合CLI兼容，仍诚实保留独立Python裁判依赖。
 

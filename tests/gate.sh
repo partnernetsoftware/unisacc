@@ -808,7 +808,7 @@ fi
 COMPOSITE_REQUIRE=
 if [ "$(uname -s)/$(uname -m)" = Linux/x86_64 ]; then
     COMPOSITE_REQUIRE=--require-cached
-    job lib-union-composite-runtime-ready sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --sanitize --prepare
+    job lib-union-composite-runtime-prepare-ready sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --sanitize --prepare
 fi
 job lib-union-composite-direct-1 sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases mixed16,fp16 --sanitize $COMPOSITE_REQUIRE   # (.cx port, 2026-10-23)
 job lib-union-composite-direct-2 sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases array2,array4 --sanitize $COMPOSITE_REQUIRE
