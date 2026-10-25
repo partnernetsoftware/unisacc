@@ -58,4 +58,11 @@ all eighteen nets locally, including three separate anti-vacuity controls. The
 default-run source adaptation and handwritten ISA byte/rejection oracles. These
 separate batches do not inherit a persisted PASS in the main runner.
 
+`sh ./unisacc.com tests/formats.cx -- ROOT ABS_NEW_OUT` is the separate six-image
+container batch. It checks architecture, bounded load/section headers and the
+Linux x86_64 return-7 oracle against the current root product; the other five
+native hosts are explicitly NOT_RUN. Fourteen checks passed on development
+product Pa7e8. This is partial format evidence; full object/boundary/host
+obligations remain NOT_READY in the main runner.
+
 The source tree is read-only while running. Apply a caller-owned watchdog of at most 30 seconds for this MVP; the runner performs no child process spawning and has no inner scheduling steps.

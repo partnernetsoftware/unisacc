@@ -7,7 +7,9 @@ construction and linking in generation `out/c43-native-kernel-03`: x86_64 produc
 a 7144-byte UNIKERN1 blob and ARM64 a 7096-byte blob. This establishes construction,
 not runtime correctness. The path is being qualified independently before
 wiring it into the original shared-model builder, which still has its old
-external assembly dependency. The root product has not yet been replaced.
+external assembly dependency. A development product using these fresh kernels
+and five rebuilt C driver slices was installed at the repository root on
+2026-10-25 23:06. It is not a fully qualified release.
 
 Run each command separately from the repository root, with a new output directory:
 
@@ -46,6 +48,15 @@ match. Every later use hashes the helper before execution and binds it into the
 full source/tool/bootstrap context; source and artifact checks were retained.
 This is a measured construction-hotspot cache, not a test-result cache or the
 default way to execute CX logic.
+
+The new x86 kernel accepted a real E4 model and produced the same 592 output
+bytes as the prior executor. The rebuilt Linux driver and refreshed model
+package then compiled a complete return-7 program to the identical ELF image,
+which actually returned 7. The packaged candidate passed default-run smoke (16),
+extended assembler contracts (189), the full eighteen-net gold batch, and the
+installed root product passed the 551-assertion owned-module batch. These are
+local development checks; ARM execution, all native hosts, the new complete
+acceptance list and the new same-source bootstrap fixed point remain unproved.
 
 The linker module owns all working storage for one call and returns typed status
 and image metadata; no internal mutable image pointer escapes. Its input paths
