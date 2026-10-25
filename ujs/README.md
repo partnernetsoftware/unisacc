@@ -1,6 +1,6 @@
 # UJS — 开箱
 
-> 规格：[`prd.md`](prd.md) · **版本**：[`plans/`](plans/)（**0.0.3**；下一刀 [`plans/v0.0.4.md`](plans/v0.0.4.md)）  
+> 规格：[`prd.md`](prd.md) · **版本**：[`plans/`](plans/)（**0.0.4**；下一刀路线 0.0.5）  
 > **`ujs/` 内无 `.c`／`.py`**；遗留：[`../archive/ujs-legacy-py-c/`](../archive/ujs-legacy-py-c/)  
 
 
@@ -20,10 +20,11 @@
 ./unisacc.com -run ujs/product/build.cx
 ./unisacc.com -run ujs/product/complete.cx
 
-./ujs/ujs.com --version          # ujs.com 0.0.3（原生）；APE 用 sh ./ujs/ujs.com
+./ujs/ujs.com --version          # ujs.com 0.0.4（原生）；APE 用 sh ./ujs/ujs.com
 ./ujs/ujs.com --help
 ./ujs/ujs.com FILE.ujs           # 默认写出 FILE.wasm
 ./ujs/ujs.com FILE.ujs -o OUT.wasm
+./ujs/ujs.com --verify OUT.wasm  # host1 \\0asm 结构验面
 ```
 
 预言：[`../tests/ujs/host1-pass.txt`](../tests/ujs/host1-pass.txt)（28）+ [`../tests/ujs/host1-refuse.txt`](../tests/ujs/host1-refuse.txt)。  

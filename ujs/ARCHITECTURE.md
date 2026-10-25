@@ -2,7 +2,7 @@
 
 与仓库根 [`ARCHITECTURE.md`](../ARCHITECTURE.md) 同口径（Paper C）：**造权重的脚本属种子，造出来的才是可复用权重**；自迭代用孪生字节脱离出货种子；实践是 Web 实验场。规格 [`prd.md`](prd.md)，**版本计划** [`plans/`](plans/)，论文 B [`../research/ujs-paper.md`](../research/ujs-paper.md)。
 
-**出货主产物**：**`ujs.com`（APE）**——`./unisacc.com -run ujs/product/complete.cx`（APE＋语料 28/0＋六目标）。源 [`product/ujs_main.cx`](product/ujs_main.cx)+[`seed/stage0/compiler_min.cx`](seed/stage0/compiler_min.cx)；打包 [`product/ape-pack.cx`](product/ape-pack.cx)。产品链 **只许 `unisacc.com`+`.cx`**。`compile.mjs`／`compiler_core` 为更全表实践脊（可选嵌入，非本代必经）。细则见 [`prd.md`](prd.md) §0.1。
+**出货主产物**：**`ujs.com`（APE）**——`./unisacc.com -run ujs/product/complete.cx`（APE＋预言＋**验面**＋六目标）。源 [`product/ujs_main.cx`](product/ujs_main.cx)+[`seed/stage0/compiler_min.cx`](seed/stage0/compiler_min.cx)；验面 [`product/verify-host.cx`](product/verify-host.cx)／`--verify`。产品链 **只许 `unisacc.com`+`.cx`**。细则见 [`prd.md`](prd.md) §0.1。
 
 **工具链纪律（主人 2026-10-25）**：ujs 内新动态逻辑／构造／验收胶水逐步走 **`unisacc.com` + `.cx`**（默认 `-run`），与根仓库零 Python 目标同向；逐步脱离 `python3 -m ujs` 日常依赖。`.cx` 转调 Python 不算完成。见 [`prd.md`](prd.md)「何时可弃 Python」。
 
@@ -16,7 +16,7 @@
                                  │ 编 .ujs
                                  ▼
   ┌── product/ ujs.com ──┐     ┌── 自迭代 iterate/ ──────────────────┐
-  │ APE · 六目标 · 预言   │     │ compiler.ujs · compiler_core.wasm   │
+  │ APE·六目标·预言·验面  │     │ compiler.ujs · compiler_core.wasm   │
   └──────────────────────┘     │ compile.mjs（实践脊 · 另标签）        │
                                └──────────────┬───────────────────────┘
                                               ▼

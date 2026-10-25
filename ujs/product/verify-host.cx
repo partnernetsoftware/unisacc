@@ -1,0 +1,166 @@
+#!/usr/bin/env -S unisacc.com -run
+/* host1 wasm 验面闸：对 host1-pass 各产物跑 ujs.com --verify。
+   Pure .cx；不打开 expect.json / Node / Python。
+   ./unisacc.com -run ujs/product/verify-host.cx
+*/
+enum { MAX_NAMES = 64, MAX_NAME = 64, EXPECT_PASS = 28 };
+
+static char pass_names[MAX_NAMES][MAX_NAME];
+static int n_pass;
+
+static int exists(const char *p) {
+    FILE *f = fopen(p, "rb");
+    if (!f) return 0;
+    fclose(f);
+    return 1;
+}
+
+static int enter_root(const char *argv0) {
+    char dir[4096];
+    size_t l;
+    char *sl;
+    if (exists("./tests/ujs/host1-pass.txt")) return 0;
+    if (!argv0 || !argv0[0]) return -1;
+    l = strlen(argv0);
+    if (l >= sizeof dir) return -1;
+    memcpy(dir, argv0, l + 1);
+    sl = strrchr(dir, '/');
+    if (!sl) return -1;
+    *sl = 0;
+    if (chdir(dir) != 0) return -1;
+    return chdir("../..");
+}
+
+static int load_list(const char *path, char names[][MAX_NAME], int *out_n) {
+    FILE *f;
+    char line[256];
+    int n = 0;
+    size_t L;
+    f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "verify-host.cx: cannot open %s\n", path);
+        return -1;
+    }
+    while (fgets(line, sizeof line, f)) {
+        L = strlen(line);
+        while (L && (line[L - 1] == '\n' || line[L - 1] == '\r')) line[--L] = 0;
+        if (!L || line[0] == '#') continue;
+        if (L >= MAX_NAME || n >= MAX_NAMES) {
+            fprintf(stderr, "verify-host.cx: list overflow in %s\n", path);
+            fclose(f);
+            return -1;
+        }
+        memcpy(names[n], line, L + 1);
+        n++;
+    }
+    fclose(f);
+    *out_n = n;
+    return 0;
+}
+
+static int run_host(char **av, int timeout_s) {
+    char *cap = 0;
+    size_t n = 0;
+    int rc;
+    rc = cx_runv_timeout(av, timeout_s, &cap, &n);
+    if (cap && n) fwrite(cap, 1, n, stdout);
+    free(cap);
+    if (rc != 127) return rc;
+    /* APE without binfmt: sh ./ujs/ujs.com … */
+    {
+        char *shav[8];
+        int i;
+        shav[0] = "sh";
+        for (i = 0; av[i] && i < 6; i++) shav[i + 1] = av[i];
+        shav[i + 1] = 0;
+        cap = 0;
+        n = 0;
+        rc = cx_runv_timeout(shav, timeout_s, &cap, &n);
+        if (cap && n) fwrite(cap, 1, n, stdout);
+        free(cap);
+        return rc;
+    }
+}
+
+static int compile_one(const char *base) {
+    char src[512], outp[512];
+    char *av[5];
+    snprintf(src, sizeof src, "tests/ujs2wasm/corpus/%s", base);
+    snprintf(outp, sizeof outp, "/tmp/ujs-verify-%s.wasm", base);
+    if (!exists(src)) {
+        fprintf(stderr, "verify-host.cx: missing %s\n", src);
+        return 1;
+    }
+    unlink(outp);
+    av[0] = "./ujs/ujs.com";
+    av[1] = src;
+    av[2] = "-o";
+    av[3] = outp;
+    av[4] = 0;
+    if (run_host(av, 30) != 0 || !exists(outp)) {
+        fprintf(stderr, "verify-host.cx: compile FAIL %s\n", base);
+        return 1;
+    }
+    return 0;
+}
+
+static int verify_one(const char *base) {
+    char outp[512];
+    char *av[4];
+    snprintf(outp, sizeof outp, "/tmp/ujs-verify-%s.wasm", base);
+    av[0] = "./ujs/ujs.com";
+    av[1] = "--verify";
+    av[2] = outp;
+    av[3] = 0;
+    if (run_host(av, 10) != 0) {
+        fprintf(stderr, "verify-host.cx: verify FAIL %s\n", base);
+        return 1;
+    }
+    return 0;
+}
+
+static int refuse_bogus(void) {
+    char *av[4];
+    FILE *f = fopen("/tmp/ujs-verify-bogus.wasm", "wb");
+    if (!f) return 1;
+    fwrite("notwasm", 1, 7, f);
+    fclose(f);
+    av[0] = "./ujs/ujs.com";
+    av[1] = "--verify";
+    av[2] = "/tmp/ujs-verify-bogus.wasm";
+    av[3] = 0;
+    if (run_host(av, 10) == 0) {
+        fprintf(stderr, "verify-host.cx: bogus wasm should refuse\n");
+        return 1;
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    int i, bad = 0;
+    (void)argc;
+    if (enter_root(argv[0]) != 0) {
+        fprintf(stderr, "verify-host.cx: need repo root\n");
+        return 2;
+    }
+    if (!exists("./ujs/ujs.com")) {
+        fprintf(stderr, "verify-host.cx: build host first (build.cx)\n");
+        return 2;
+    }
+    if (load_list("tests/ujs/host1-pass.txt", pass_names, &n_pass) != 0) return 2;
+    if (n_pass != EXPECT_PASS) {
+        fprintf(stderr, "verify-host.cx: host1-pass count=%d want=%d\n", n_pass, EXPECT_PASS);
+        return 1;
+    }
+    for (i = 0; i < n_pass; i++) {
+        if (compile_one(pass_names[i]) != 0) bad++;
+        else if (verify_one(pass_names[i]) != 0) bad++;
+    }
+    if (refuse_bogus() != 0) bad++;
+    if (bad) {
+        fprintf(stderr, "verify-host.cx: %d mismatches\n", bad);
+        return 1;
+    }
+    printf("verify-host.cx: ok pass=%d bogus_refuse=1 (host1_package verify)\n", n_pass);
+    return 0;
+}

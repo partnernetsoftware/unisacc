@@ -18,6 +18,10 @@
 | [`host1-pass.txt`](host1-pass.txt) | 必须接受（恰好 28）→ `tests/ujs2wasm/corpus/` |
 | [`host1-refuse.txt`](host1-refuse.txt) | 必须拒绝 → `tests/ujs2wasm/neg/` |
 
+## 验面（0.0.4）
+
+`ujs.com --verify`／`ujs/product/verify-host.cx`：对 pass 产物做 `\0asm` 节／必导出检查；冒充实文件必须拒绝。
+
 **船闸不可达**：`tests/ujs2wasm/expect.json`、`run_*.mjs`（archive_only／实践脊）。
 
 ## 身份标签

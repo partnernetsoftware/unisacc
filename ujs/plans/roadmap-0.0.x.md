@@ -11,8 +11,8 @@
 | **0.0.1** | host1：APE + 语料 28/0 + 六目标；`.cx` 产品链；`tests/ujs/run.cx` | 嵌 core；论文改口；tip |
 | **0.0.2** | ✓ 生产力合同：版号；身份；预言拆分；CLI；prd／套件 | 扩 stage0 闭包；m4；公开 |
 | **0.0.3** | ✓ `ujs/` 清空 `.py`／`.c`（迁 archive）；版号 0.0.3；闸绿 | 宣称 construct 已 `.cx` 化；公开 |
-| **0.0.4** | archive 真迁 `.cx` 切片 +／或跑验面 | 训模型；搬回 `ujs/`；转调冒充 |
-| **0.0.5** | 脚本／VM／权重生成器续迁或归档；Paper B 最小补丁 | 全篇重写；Draft |
+| **0.0.4** | ✓ host1 wasm 验面（`--verify`／`verify-host`）；版号；闸绿 | 宣称 construct 已迁；训模型；搬回 `ujs/` |
+| **0.0.5** | archive 真迁切片／跑面；脚本续迁或归档；Paper B 最小补丁 | 全篇重写；Draft |
 | **0.0.6+** | 子功能收敛、跨机 APE 收据；`git ls-files ujs/**/*.py` 趋零 | 未授权公开 |
 
 ## 退出 0.0.x（暂定）

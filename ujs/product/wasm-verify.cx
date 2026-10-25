@@ -1,0 +1,72 @@
+#!/usr/bin/env -S unisacc.com -run
+/* Thin entry: structural \\0asm verify via rebuilt host.
+   Usage (repo root):
+     ./unisacc.com -run ujs/product/wasm-verify.cx -- FILE.wasm
+   Implementation lives in ujs_main.cx (--verify); this is the -run face.
+*/
+static int exists(const char *p) {
+    FILE *f = fopen(p, "rb");
+    if (!f) return 0;
+    fclose(f);
+    return 1;
+}
+
+static int enter_root(const char *argv0) {
+    char dir[4096];
+    size_t l;
+    char *sl;
+    if (exists("./ujs/ujs.com") || exists("./ujs/product/ujs_main.cx")) return 0;
+    if (!argv0 || !argv0[0]) return -1;
+    l = strlen(argv0);
+    if (l >= sizeof dir) return -1;
+    memcpy(dir, argv0, l + 1);
+    sl = strrchr(dir, '/');
+    if (!sl) return -1;
+    *sl = 0;
+    if (chdir(dir) != 0) return -1;
+    return chdir("../..");
+}
+
+static int run_host(char **av, int timeout_s) {
+    char *cap = 0;
+    size_t n = 0;
+    int rc;
+    rc = cx_runv_timeout(av, timeout_s, &cap, &n);
+    if (cap && n) fwrite(cap, 1, n, stdout);
+    free(cap);
+    if (rc != 127) return rc;
+    {
+        char *shav[8];
+        int i;
+        shav[0] = "sh";
+        for (i = 0; av[i] && i < 6; i++) shav[i + 1] = av[i];
+        shav[i + 1] = 0;
+        cap = 0;
+        n = 0;
+        rc = cx_runv_timeout(shav, timeout_s, &cap, &n);
+        if (cap && n) fwrite(cap, 1, n, stdout);
+        free(cap);
+        return rc;
+    }
+}
+
+int main(int argc, char **argv) {
+    char *av[4];
+    if (enter_root(argv[0]) != 0) {
+        fprintf(stderr, "wasm-verify.cx: need repo root\n");
+        return 2;
+    }
+    if (argc != 2) {
+        fprintf(stderr, "usage: wasm-verify.cx -- FILE.wasm\n");
+        return 2;
+    }
+    if (!exists("./ujs/ujs.com")) {
+        fprintf(stderr, "wasm-verify.cx: missing ujs/ujs.com (run build.cx)\n");
+        return 2;
+    }
+    av[0] = "./ujs/ujs.com";
+    av[1] = "--verify";
+    av[2] = argv[1];
+    av[3] = 0;
+    return run_host(av, 10) == 0 ? 0 : 1;
+}
