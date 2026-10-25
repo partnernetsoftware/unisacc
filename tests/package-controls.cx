@@ -1,0 +1,15 @@
+/* Negative controls for the narrow native package migration. All damage is in
+ * a private copy; no live construction/source inputs are changed. */
+#pragma unisa use cxlib.netpack
+static int count,bad;static char root[4096],base[4096],dir[4096],gen[4400];
+static void die(const char *s){fprintf(stderr,"package-controls: %s\n",s);exit(2);}
+static void path(char *p,size_t cap,const char *a,const char *b){int n=snprintf(p,cap,"%s/%s",a,b);if(n<0||(size_t)n>=cap)die("path");}
+static char *pc_read(const char *p,size_t *n){char *s=cx_read(p,n);if(!s)die(p);return s;}
+static void save(const char *p,const char *s,size_t n,int mode){int f=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,mode);if(f<0)die("exclusive file");size_t at=0;while(at<n){ssize_t k=write(f,s+at,n-at);if(k<0&&errno==EINTR)continue;if(k<=0)die("write");at+=(size_t)k;}if(close(f))die("close");}
+static void check(int ok,const char *s){count++;if(!ok)bad++;printf("%s\tpackage.%s\n",ok?"PASS":"FAIL",s);}
+static np_result run(const char *name){char output[4400],watch[4400],product[4400],tool[4400],why[1024];path(output,sizeof output,dir,name);path(watch,sizeof watch,root,"tools/bound");path(product,sizeof product,root,"unisacc.com");path(tool,sizeof tool,root,"tools/package-refresh.cx");char *v[]={watch,"40","sh",product,tool,"--",root,base,gen,output,0};np_result r;if(np_run(v,root,0,45,&r,why,sizeof why))die(why);return r;}
+int main(int argc,char **argv){if(argc!=5||!realpath(argv[1],root)||!realpath(argv[2],base)||argv[4][0]!='/'||strlen(argv[4])>=sizeof dir)return 2;strcpy(dir,argv[4]);if(mkdir(dir,0700))die("new directory");path(gen,sizeof gen,dir,"generation");if(mkdir(gen,0700))die("generation");
+ const char *names[]={"identity-helper","identity-helper.sha256","context.sha256","arm64.kernel","x86_64.kernel","arm64-kernel.sha256","x86_64-kernel.sha256"};int i;char src[4400],dest[4400];size_t n;for(i=0;i<7;i++){path(src,sizeof src,argv[3],names[i]);path(dest,sizeof dest,gen,names[i]);char *s=pc_read(src,&n);save(dest,s,n,i==0?0700:0600);free(s);}
+ path(dest,sizeof dest,gen,"x86_64.kernel");char *original=pc_read(dest,&n);if(n<49)die("kernel extent");int f=open(dest,O_WRONLY|O_CLOEXEC);char changed=(char)(original[n-1]^1);if(f<0||lseek(f,(off_t)n-1,SEEK_SET)!=(off_t)n-1||write(f,&changed,1)!=1||close(f))die("damage private kernel");np_result r=run("damaged");check(r.rc==2&&strstr(r.err,"kernel digest receipt"),"damaged-kernel-refused");np_free(&r);char output[4400];struct stat st;path(output,sizeof output,dir,"damaged");errno=0;check(lstat(output,&st)<0&&errno==ENOENT,"refusal-creates-no-output");
+ f=open(dest,O_WRONLY|O_CLOEXEC);if(f<0||lseek(f,(off_t)n-1,SEEK_SET)!=(off_t)n-1||write(f,original+n-1,1)!=1||close(f))die("restore private kernel");free(original);r=run("restored");check(r.rc==0&&!r.errn&&strstr(r.out,"PREPARED\tpackage-refresh\tno-test-result"),"restored-kernel-prepares");np_free(&r);
+ printf("PACKAGE_CONTROLS\tassertions=%d\tfailed=%d\tscope=kernel-digest-refusal-and-recovery\n",count,bad);return bad?1:0;}

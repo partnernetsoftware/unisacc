@@ -19,6 +19,8 @@ identity/anti-vacuity controls. [assembly.md](assembly.md) tracks the native .S
 construction path, its real encoding checks and the remaining gaps.
 [kernels.md](kernels.md) specifies the new bounded construction steps and native
 ELF-to-UNIKERN1 linker contracts; it does not claim a completed product rebuild.
+[packages.md](packages.md) describes the pinned, source-checked migration of
+unchanged P3 models to freshly built native kernels and a rebuilt driver.
 
 The following support was separated from the archived test suite so that
 construction is not broken by its removal: `bound`, `bound.c`, `cxbin`,

@@ -1,0 +1,13 @@
+#pragma unisa module kernelcontext
+#pragma unisa use netpack
+/* CLI construction identity contract. All storage is invocation-owned; caller
+ * borrows a 65-byte result buffer. Failure terminates the construction process.
+ * This does not validate runtime behavior or claim a test result. */
+static void kc_die(const char *s){fprintf(stderr,"kernel-context: REFUSE %s\n",s);exit(2);}
+static void kc_path(char *p,size_t cap,const char *a,const char *b){int n=snprintf(p,cap,"%s/%s",a,b);if(n<0||(size_t)n>=cap)kc_die("path bound");}
+static char *kc_load(const char *p,size_t *n){struct stat st;if(lstat(p,&st)||!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>268435456)kc_die(p);char *s=cx_read(p,n);if(!s||*n!=(size_t)st.st_size)kc_die("read/size changed");return s;}
+void kc_check(const char *root,const char *dir,char *source_sha){
+ char p[4400],helper[4400],h[65],expected[65],why[1024],bound[4400];size_t n;kc_path(helper,sizeof helper,dir,"identity-helper");char *s=kc_load(helper,&n);cx_sha256_hex(s,n,h);free(s);kc_path(p,sizeof p,dir,"identity-helper.sha256");s=kc_load(p,&n);if(n!=64||memcmp(s,h,64))kc_die("identity helper digest");free(s);strcpy(expected,h);
+ kc_path(bound,sizeof bound,root,"tools/bound");char *v[]={bound,"15",helper,(char *)root,0};np_result r;if(np_run(v,root,0,20,&r,why,sizeof why))kc_die(why);if(r.rc||r.errn||r.outn!=65||r.out[64]!='\n')kc_die("source identity helper");memcpy(source_sha,r.out,64);source_sha[64]=0;np_buf b={0};np_puts(&b,"unisacc-native-kernel-context-v2\n");np_put(&b,r.out,65);np_free(&r);
+ const char *names[]={"tools/kernel-build.cx","tools/asm-source.cx","tools/asm-material.cx","tools/kernel-link.cx","tools/cxlib/netpack.cx","tools/cxlib/elfkernel.cx","tests/assembler.cx","tests/arm-assembler.cx","tests/asm-layout.cx","unisacc.com"};int i;for(i=0;i<10;i++){kc_path(p,sizeof p,root,names[i]);s=kc_load(p,&n);cx_sha256_hex(s,n,h);free(s);np_puts(&b,names[i]);np_puts(&b,"\t");np_puts(&b,h);np_puts(&b,"\n");}np_puts(&b,"identity-helper\t");np_puts(&b,expected);np_puts(&b,"\n");cx_sha256_hex(b.p,b.n,h);free(b.p);kc_path(p,sizeof p,dir,"context.sha256");s=kc_load(p,&n);if(n!=65||memcmp(s,h,64)||s[64]!='\n')kc_die("kernel source/tool/bootstrap context changed");free(s);
+}

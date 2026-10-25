@@ -1,0 +1,28 @@
+/* Install a locally qualified development candidate; no signing/publication.
+ * Kernel context must still describe the current bootstrap and source tree.
+ * The candidate's embedded package must exactly match the prepared package.
+ * This records provenance; it does not infer functional PASS from logs. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.kernelcontext
+static void die(const char *s){fprintf(stderr,"candidate-install: REFUSE %s\n",s);exit(2);}
+static void path(char *p,size_t cap,const char *a,const char *b){int n=snprintf(p,cap,"%s/%s",a,b);if(n<0||(size_t)n>=cap)die("path");}
+static char *load(const char *p,size_t *n){struct stat st;if(lstat(p,&st)||!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>268435456)die(p);char *s=cx_read(p,n);if(!s||*n!=(size_t)st.st_size)die("read/size changed");return s;}
+static void saved(const char *p,const char *s,size_t n,int mode){int f=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,mode);if(f<0)die("exclusive file");while(n){ssize_t k=write(f,s,n);if(k<0&&errno==EINTR)continue;if(k<=0)die("write; partial retained");s+=k;n-=(size_t)k;}if(fsync(f)||close(f))die("fsync/close");}
+static unsigned long long little(const char *p){unsigned long long n=0;int i;for(i=7;i>=0;i--)n=(n<<8)|(unsigned char)p[i];return n;}
+int main(int argc,char **argv){
+ if(argc!=5){fputs("usage: ROOT KERNEL_GENERATION CANDIDATE_COM PREPARED_PACKAGE\n",stderr);return 2;}char root[4096],candidate[4096],sha[65],after[65],hash[65],oldhash[65],p[4400],helper[4400],watch[4400],why[1024];if(!realpath(argv[1],root)||!realpath(argv[3],candidate))die("paths");kc_check(root,argv[2],sha);
+ size_t cn,pn,on,rn;char *c=load(candidate,&cn),*pkg=load(argv[4],&pn);if(cn<16||memcmp(c+cn-16,"UNIPKG1\n",8)||little(c+cn-8)!=pn||pn>cn-16||memcmp(c+cn-16-pn,pkg,pn))die("candidate/prepared package mismatch");free(pkg);cx_sha256_hex(c,cn,hash);
+ path(helper,sizeof helper,argv[2],"identity-helper");path(watch,sizeof watch,root,"tools/bound");char *v[]={watch,"15",helper,root,"write",candidate,sha,0};np_result r;if(np_run(v,root,0,20,&r,why,sizeof why))die(why);if(r.rc||r.errn)die("candidate provenance write");np_free(&r);int k=snprintf(p,sizeof p,"%s.build.json",candidate);if(k<0||(size_t)k>=sizeof p)die("record path");char *record=load(p,&rn);
+ /* The legacy source identity enumerates ten support paths. Bind the newer
+  * construction tools and exact code slices separately, without pretending
+  * they were present in that older source-identity domain. */
+ np_buf evidence={0};np_puts(&evidence,"native-development-construction-v1\nsource\t");np_puts(&evidence,sha);np_puts(&evidence,"\nartifact\t");np_puts(&evidence,hash);np_puts(&evidence,"\n");const char *support[]={"tools/package-refresh.cx","tools/cxlib/kernelcontext.cx","tools/candidate-install.cx","seed/ape.c"};int i;char h[65];size_t en;char *bytes;for(i=0;i<4;i++){path(p,sizeof p,root,support[i]);bytes=load(p,&en);cx_sha256_hex(bytes,en,h);free(bytes);np_puts(&evidence,support[i]);np_puts(&evidence,"\t");np_puts(&evidence,h);np_puts(&evidence,"\n");}
+ const char *material[]={"context.sha256","slice-win-x86_64","slice-lnx-x86_64","slice-lnx-arm64","slice-osx-x86_64","slice-osx-arm64"};for(i=0;i<6;i++){path(p,sizeof p,argv[2],material[i]);bytes=load(p,&en);cx_sha256_hex(bytes,en,h);free(bytes);np_puts(&evidence,material[i]);np_puts(&evidence,"\t");np_puts(&evidence,h);np_puts(&evidence,"\n");}bytes=load(argv[4],&en);cx_sha256_hex(bytes,en,h);free(bytes);np_puts(&evidence,"package\t");np_puts(&evidence,h);np_puts(&evidence,"\n");cx_sha256_hex(evidence.p,evidence.n,h);k=snprintf(p,sizeof p,"%s.native.tsv",candidate);if(k<0||(size_t)k>=sizeof p)die("native receipt path");saved(p,evidence.p,evidence.n,0600);free(evidence.p);
+ if(rn<3||memcmp(record+rn-3,"\n}\n",3))die("provenance shape");np_buf extended={0};np_put(&extended,record,rn-3);np_puts(&extended,",\n  \"native_construction_sha256\": \"");np_puts(&extended,h);np_puts(&extended,"\"\n}\n");free(record);record=extended.p;rn=extended.n;
+ path(p,sizeof p,root,"unisacc.com");char *old=load(p,&on);cx_sha256_hex(old,on,oldhash);path(p,sizeof p,argv[2],"bootstrap-before-install.com");saved(p,old,on,0700);free(old);path(p,sizeof p,root,"unisacc.com.build.json");old=load(p,&on);path(p,sizeof p,argv[2],"bootstrap-before-install.com.build.json");saved(p,old,on,0600);free(old);
+ char next[4400],nextrecord[4400],target[4400],targetrecord[4400];path(next,sizeof next,root,".unisacc-c43-native.next");path(nextrecord,sizeof nextrecord,root,".unisacc-c43-native.next.build.json");saved(next,c,cn,0700);saved(nextrecord,record,rn,0600);free(c);free(record);kc_check(root,argv[2],after);if(strcmp(sha,after))die("source changed during installation");path(target,sizeof target,root,"unisacc.com");path(targetrecord,sizeof targetrecord,root,"unisacc.com.build.json");
+ /* Atomic replacement of each regular file; exclusive backups are retained.
+  * A failure between renames is an installation error, never reported success. */
+ if(rename(next,target))die("replace product");if(rename(nextrecord,targetrecord))die("product replaced but provenance rename failed; backup retained");int fd=open(root,O_RDONLY|O_DIRECTORY|O_CLOEXEC);if(fd<0||fsync(fd)||close(fd))die("directory fsync");
+ printf("INSTALLED\tdevelopment-only\tno-release-qualification\nartifact\t%s\nsource\t%s\nprevious\t%s\nbytes\t%lu\n",hash,sha,oldhash,(unsigned long)cn);return 0;
+}
