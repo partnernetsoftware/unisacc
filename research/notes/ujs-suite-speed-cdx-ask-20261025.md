@@ -6,15 +6,15 @@
 
 ## 现象（本机实测）
 
-| 操作 | 墙钟 |
+| 操作 | 墙钟（2026-10-25 复测） |
 |---|---|
-| `./unisacc.com -run` 空 `main`（`puts("ok")`） | **~1.7 s／次**（连续两次同量级） |
-| `./ujs/ujs.com` 编译 `arith.ujs` | **~3 ms** |
-| `./ujs/ujs.com --verify` 同 wasm | **~2 ms** |
-| smoke 外层：`build.cx` + `corpus-host.cx` + `verify-host.cx` | 各一次 `-run` ≈ **3×1.7 s 固定税** |
-| 历史 `wasm-verify.cx -- FILE`（再包一层 `-run`） | **~2.9 s** 验一个已有 wasm |
+| `./unisacc.com -run` 空 `main` | **~1.74 s／次** |
+| `ujs/tests/run.cx -- --smoke` 全闸 | **~15.7 s** |
+| 其中 `build.cx`  alone | **~8.7 s** |
+| 其中 `corpus-host.cx` alone | **~3.7 s** |
+| `./ujs/ujs.com --verify-list`（28） | **~4 ms**（原生批验，已落地） |
 
-结论：**单次编译／验面本身很快**；套件墙钟被 **`unisacc.com -run` 每次进程冷启动／装载** 主导。UJS 侧可再削重复编译，但削不掉「每闸一次 `-run`」的底座税。
+结论：产品侧编译／批验已很快；smoke 仍被 **每次 `unisacc.com -run` ~1.7 s 冷启动** + build 内编译墙钟主导。UJS 已合并验面进 corpus、去掉多余 `-run`；**再砍需要底座**（少次 `-run` 或每次更便宜）。
 
 ## 问题（请 cdx 诊断）
 
@@ -32,11 +32,11 @@
 | **D. 批模式** | `unisacc.com -run-batch FILE.list`：一次进程跑多个 `.cx`（UJS smoke 可合成一闸） |
 | **E. 诚实文档** | 若 1.7 s 是硬下界，写进底座合同；UJS 闸改为少次 `-run` + 批合同 |
 
-## UJS 侧已／将自做（不挡底座）
+## UJS 侧已做（不挡底座）
 
-- 验面不再对 pass 语料 **整表重编译**（复用 `corpus-host` 写出的 wasm）。  
-- 减少无意义的「为验一个文件再 `-run` 一层包装」。  
-- 套件入口固定在 `ujs/tests/`。
+- `--verify-list` 一批验（~4 ms）；corpus-host 内完成验面＋冒充实拒绝。  
+- smoke＝`build`＋`corpus`（不再另挂 verify-host `-run`）。  
+- 套件在 `ujs/tests/`。提交：`203ba6511c`。
 
 ## 验收建议（底座）
 
