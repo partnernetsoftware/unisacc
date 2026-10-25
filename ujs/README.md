@@ -1,6 +1,7 @@
 # UJS — 开箱
 
-> 规格：[`prd.md`](prd.md) · **版本**：[`plans/v0.0.2.md`](plans/v0.0.2.md)  
+> 规格：[`prd.md`](prd.md) · **版本**：[`plans/`](plans/)（已交付 0.0.2；下一刀 [`plans/v0.0.3.md`](plans/v0.0.3.md)）  
+
 > 地图：[`ARCHITECTURE.md`](ARCHITECTURE.md) · Paper B：[`../research/ujs-paper.md`](../research/ujs-paper.md)
 
 ## 出货：`ujs.com`（host image）

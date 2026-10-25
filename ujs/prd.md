@@ -17,10 +17,11 @@
 | 版 | 状态 | 计划 |
 |---|---|---|
 | **0.0.1** | ✓ host1 基线 | [`plans/v0.0.1.md`](plans/v0.0.1.md) |
-| **0.0.2** | **进行中** · 生产力合同 | [`plans/v0.0.2.md`](plans/v0.0.2.md) |
-| 0.0.3+ | 调度 · 跑／验 · Paper B 最小补丁 | [`plans/roadmap-0.0.x.md`](plans/roadmap-0.0.x.md) |
+| **0.0.2** | ✓ 生产力合同（预言／CLI／身份） | [`plans/v0.0.2.md`](plans/v0.0.2.md) |
+| **0.0.3** | 下一刀 · 调度第一刀 | [`plans/v0.0.3.md`](plans/v0.0.3.md) |
+| 0.0.4+ | 跑／验 · Paper B 最小补丁 | [`plans/roadmap-0.0.x.md`](plans/roadmap-0.0.x.md) |
 
-版号真源：`ujs.com --version`（现 **`ujs.com 0.0.2`**）与上表；**不**用根仓 `plans/v0.0.4x` 代替本系列。
+版号真源：`ujs.com --version`（**`ujs.com 0.0.2`**）与上表；**不**用根仓 `plans/v0.0.4x` 代替本系列。
 
 **两个名词**：**host image** = APE／六目标／`host1_package` 闸；**method emit** = 表／流→`\0asm`（`method_construct`，未卸完）。勿混。
 
@@ -29,7 +30,7 @@
 | | |
 |---|---|
 | **主产物** | **`ujs.com`**——**ujs + wasm 类别的生产力工具**（跨架构单文件 `.com`；编／装／跑／自举收进同一壳） |
-| **状态** | **`ujs.com 0.0.2`**：预言 `host1-pass`／`host1-refuse`；套件 `tests/ujs/run.cx`；标签 `host1_package`。不把论文主张塞进古典 stage0 |
+| **状态** | **0.0.2 已交付**（`ujs.com 0.0.2`）：预言拆分 · CLI 日用 · `tests/ujs/run.cx` 绿 · 标签 `host1_package`。下一版 [`plans/v0.0.3.md`](plans/v0.0.3.md) |
 | **不是主产物** | 单独的 `ujs2wasm` CLI、`wat2wasm`、`compile.mjs`、零散 `.wasm`——是 **`ujs.com` 的子功能／实践脊**，应收进或由它调度 |
 
 ### 0.1b 产品 · 论文 · unisacc 关系（主人 2026-10-25 定调）
