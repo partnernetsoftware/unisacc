@@ -16,9 +16,21 @@
 
 | | |
 |---|---|
-| **主产物** | **`ujs.com`**——对齐 [`unisacc.com`](../README.md) 的**跨架构单文件可执行**（目标：{Linux, macOS, Windows} × {x86_64, arm64}；APE／自写出／自举合同对齐 Paper A 纪律，细则待钉） |
-| **状态** | **host1 彻底交付（本代）**：`complete.cx` = APE + 语料 **28/0** + 六目标原生；纯 `.cx`。stage0 含 arrow／function+rest（调用点内联）。未嵌 `compiler_core`（可选下一代）。未授权 tip／Draft／签／公开 |
-| **不是主产物** | 单独的 `ujs2wasm` CLI、`wat2wasm`、`compile.mjs`、零散 `.wasm` 文件——这些是 **`ujs.com` 的子功能／今日实践脊**，最终应收进或由 `ujs.com` 调度 |
+| **主产物** | **`ujs.com`**——**ujs + wasm 类别的生产力工具**（跨架构单文件 `.com`；编／装／跑／自举收进同一壳） |
+| **状态** | **host1 已交付**：`complete.cx` = APE + 语料 **28/0** + 六目标；纯 `.cx`。下一刀按**生产力工具**加深（调度子功能、稳定合同、可日用），而非把论文主张塞进古典 stage0 |
+| **不是主产物** | 单独的 `ujs2wasm` CLI、`wat2wasm`、`compile.mjs`、零散 `.wasm`——是 **`ujs.com` 的子功能／实践脊**，应收进或由它调度 |
+
+### 0.1b 产品 · 论文 · unisacc 关系（主人 2026-10-25 定调）
+
+> 与旧稿「B 只 cite A、出货脚注」并存时，**以本小节为准**；论文正文改口另裁，不挡 `ujs.com` 产品推进。
+
+| 层 | 角色 |
+|---|---|
+| **`ujs.com`（产品）** | 打造 **ujs+wasm 生产力工具**：日用入口、门禁、子功能收敛；证据标签 `host1_package`（及日后产品能力标签） |
+| **Paper B（理论）** | **对齐并阐述**该产品类别的底层理论（闭合子集 · 构造法确定性推理 · 表／流→`\0asm`）；主张服务产品可辩护性，不是反过来用产品绿冒充理论完成 |
+| **Paper A / `unisacc.com`** | **由 B 侧问题派生的 C 实践与形式化承载**；`unisacc.com` 的方向正确性是**同理论在另一语言面的佐证**，不是 UJS 的父产品。形式核／Lean 样本可仍落在 A 文，但**谱系叙述：B→A 派生，A 佐证回 B／unisacc** |
+
+**三面收据仍勿混用**（Grok 评审采纳）：`host1_package` ≠ `m3_scaffold` ≠ `method_construct`。生产力工具主线推 host1；方法弧（m4／构造）写进 B 时单独标 `method_construct`。
 
 **子功能 ↔ 今日入口（将收敛进 `ujs.com`）**
 
@@ -56,12 +68,12 @@
 别人能按模板交 `{app}`，外网可玩，验收无人。**主线夯 0–4；门禁先于功能。** 不开新门面游戏。
 
 **北极星（两层）**  
-1. **产品形**：交付 **`ujs.com`**（类 `unisacc.com`），子功能含编译／组装／运行／自举，而非「只有 ujs2wasm」。  
-2. **方法形**：UJS 自举——由 UJS 写的编译器把 UJS→wasm；**逐步脱离 Python**（今仅构造臂可忍）。  
+1. **产品形**：把 **`ujs.com`** 打成 **ujs+wasm 生产力工具**（编译／组装／运行／自举／调度），对标该类别的日用壳，而非「只有 ujs2wasm」。  
+2. **理论形**：Paper B 写清支撑该工具的底层理论；方法弧（构造／m4）可并行，**收据分标签**；不以 host1 绿宣称 B 主张中心已卸。  
 
-本应用 **unisacc** 作宿主/工具链底座与 APE 先例。主人 2026-10-25 钉：**ujs 内逐步依赖 `unisacc.com` + `.cx` 自有构型**，日常动态逻辑默认 `unisacc.com FILE.cx -- ARGS`（即 `-run`），**逐步脱离 Python**——与仓库根 AGENTS／零 Python 目标同向；`.cx` 只转调 Python **不算**消除依赖。
+**工具链底座**：日常仍用根 **`unisacc.com` + `.cx`（`-run`）** 造 `ujs.com`（先例与同仓宿主）；`.cx` 只转调 Python **不算**消除依赖。这是工程依赖，**不是**「UJS 从属于 Paper A 产品」。
 
-**域分工**：unisacc = C 实践 · ujs = JS+wasm 实践 · **同理论**（构造法确定性推理=编译）；**同产品形纪律**（跨架构单文件 `.com`）；**同工具链纪律**（`unisacc.com` + `.cx`，不新堆 Python 算法）。
+**域分工**：ujs／`ujs.com` = **JS+wasm 生产力主线** · unisacc／`unisacc.com` = **同理论的 C 佐证与工具链** · **同理论**（构造法确定性推理=编译）· **同产品形纪律**（跨架构 `.com`）· **同工具链纪律**（`unisacc.com`+`.cx`）。
 
 ### 自举阶梯
 
@@ -619,8 +631,9 @@ flowchart TD
 | **UXEP / UXIN** | 一次一包提交 / 输入快照 |
 | **BUILD.json** | 与 Release 对指纹 |
 | **构造不训练** | 出货权重由 gold 代数生成；M3 另用孪生字节门禁 |
-| **ujs.com** | **host1 彻底**：`complete.cx`=APE+28/0+六目标；未嵌 core（可选） |
-| **子功能** | `ujs2wasm`／`wat2wasm`／`compile.mjs`／`sim.wasm`… = 实践脊／全表对照 |
+| **ujs.com** | **ujs+wasm 生产力工具**（host1 已交付；继续收子功能） |
+| **Paper B** | 底层理论对齐该工具；谱系 B→A 派生，A／unisacc 佐证 |
+| **子功能** | `ujs2wasm`／`wat2wasm`／`compile.mjs`／`sim.wasm`… = 应收进壳的实践脊 |
 | **脱 Py** | 新胶水／构造迁 **`unisacc.com` + `.cx`（`-run`）**；只许缩 Python，不许转调冒充 |
 | **直出税** | 热语料大头曾是 `wat2wasm` spawn，非常驻后是 parseWat；网 ask 非主税。见「加速实证」 |
 
