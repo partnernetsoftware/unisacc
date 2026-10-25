@@ -144,7 +144,7 @@ enum {
   T_EOF, T_NUM, T_FNUM, T_ID, T_LET, T_WHILE, T_RETURN, T_IF, T_ELSE,
   T_LP, T_RP, T_LB, T_RB, T_LS, T_RS, T_COMMA, T_COLON, T_DOT, T_SEMI, T_EQ,
   T_PLUS, T_MINUS, T_STAR, T_SLASH, T_PCT,
-  T_LT, T_GT, T_LE, T_GE, T_EQEQ, T_NE, T_NOT, T_AND, T_OR, T_STR, T_BAD
+  T_LT, T_GT, T_LE, T_GE, T_EQEQ, T_NE, T_NOT, T_AND, T_OR, T_QMARK, T_STR, T_BAD
 };
 typedef struct {
   const char *src; uint32_t len, pos;
@@ -243,6 +243,7 @@ static void next(Lex *L) {
   }
   if (c=='&' && L->pos<L->len && L->src[L->pos]=='&'){ L->pos++; L->tok = T_AND; return; }
   if (c=='|' && L->pos<L->len && L->src[L->pos]=='|'){ L->pos++; L->tok = T_OR; return; }
+  if (c=='?'){ L->tok = T_QMARK; return; }
   L->tok = T_BAD;
 }
 
@@ -686,7 +687,29 @@ static int por(Lex *L, Prog *P) {
   }
   return ty;
 }
-static int pexpr(Lex *L, Prog *P) { return por(L, P); }
+/* cond ? then : else — i64 only (stage0); uses IF0/1/2 + scratch */
+static int pexpr(Lex *L, Prog *P) {
+  int ty = por(L, P); if (!ty) return 0;
+  if (L->tok != T_QMARK) return ty;
+  if (ty != TY_I64) { P->err = "?: cond needs i64"; return 0; }
+  {
+    int sc = ensure_lscratch(P); if (sc < 0) return 0;
+    int t1, t2;
+    next(L);
+    if (!emit(P, OP_IF0, 0)) return 0;
+    t1 = por(L, P); if (!t1) return 0;
+    if (t1 != TY_I64) { P->err = "?: then needs i64"; return 0; }
+    if (!emit(P, OP_STORE, sc)) return 0;
+    if (!expect(L, T_COLON, P, "expected :")) return 0;
+    if (!emit(P, OP_IF1, 0)) return 0;
+    t2 = por(L, P); if (!t2) return 0;
+    if (t2 != TY_I64) { P->err = "?: else needs i64"; return 0; }
+    if (!emit(P, OP_STORE, sc)) return 0;
+    if (!emit(P, OP_IF2, 0)) return 0;
+    if (!emit(P, OP_LOAD, sc)) return 0;
+    return TY_I64;
+  }
+}
 
 static int pblock(Lex *L, Prog *P) {
   if (!expect(L, T_LB, P, "expected {")) return 0;
