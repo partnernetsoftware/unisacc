@@ -10,6 +10,47 @@ sh ./unisacc.com tools/sourceflat.cx -- --verify out/unisacc-flat.c
 The export and provenance verification use the product directly. `export_ref.sh`
 is only a compatibility loader for existing construction callers.
 
+`object-material.cx` prepares three real product-generated Linux unit objects
+from two header-free CX sources. Preparation and verification are separate
+commands; preparation requires a fresh absolute directory:
+
+```sh
+tools/bound 55 sh ./unisacc.com tools/object-material.cx -- prepare ROOT NEW_ABS_MATERIAL
+tools/bound 20 sh ./unisacc.com tools/object-material.cx -- --verify ROOT MATERIAL
+```
+
+The literal sources are `extern int object_value; int main(void){return object_value;}`
+and `int object_value=7;`. Actual product invocations use
+`-O2 -c -funit -b TARGET INPUT -o OUTPUT`, producing `main-x86_64.o`,
+`value-x86_64.o` and `value-arm64.o` for Linux x86_64/x86_64/arm64 respectively.
+Each of the three compilation children is bounded at 8 seconds and must return
+0 with empty stdout/stderr. Preparation also makes two fresh full-source
+identity observations, each bounded at 8 seconds: explicit child budgets total
+40 seconds within the original 55-second parent. It records actual child
+arguments, rc and output streams as construction evidence.
+
+The exact `material.tsv` record binds the full source identity, raw product,
+tool and netpack module SHA, fixed flags/targets, both literal source files and
+all three object byte hashes. Preparation rechecks source identity and input
+content before recording PREPARED. Pure verification never compiles objects:
+it checks exact literal bytes and receipt/content identity, independently
+observes full source before and after, rereads the content record, and finally
+rereads the receipt itself. The two source children retain 8-second bounds
+within the original 20-second verify command. Neither repeated reads nor
+matching endpoints establish an atomic snapshot or detect every transient
+concurrent mutation; inputs must remain frozen during execution.
+
+`out/c43-object-material-prepare-02.log` and
+`out/c43-object-material-verify-02.log` record successful bounded MAT02
+preparation and verification, with exactly
+`PREPARED objects-material no-test-result` and
+`VERIFIED objects-material no-test-result` status lines (tab-separated).
+The tool SHA changed with the endpoint checks, so MAT01 evidence is not
+transferred to MAT02. These are material PREPARED/VERIFIED observations only.
+They establish no linked-program semantics, ARM execution, object refusal
+contract or functional PASS; no unexecuted parent CASE is registered here.
+Internal phase and cold/hot timing remain UNMEASURED.
+
 `run-startup-bench.cx` measures first-observed and repeated default-run
 end-to-end wall time on Linux/x86_64 LP64. It generates one header-free minimal
 CX program and starts four fresh processes with different argv; each must
