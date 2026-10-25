@@ -77,3 +77,5 @@ every consumer's presence/empty/absent behavior. An optional final native ELF
 driver argument supports a narrow pre-packaging check against the root model
 container. Both identities are checked for changes. This is partial RI evidence;
 snapshots, full lifecycle/resource budgets and foreign hosts remain NOT_READY.
+The same optional argument also accepts a full packaged APE candidate, executing
+it directly through its launcher before installation, with its own model package.
