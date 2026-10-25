@@ -1,0 +1,548 @@
+/* host1 \\0asm mini VM for stage0 product modules. Linked into ujs.com.
+ * No #include. No struct returns (unisacc limit). API: host1_wasm_run.
+ */
+enum {
+  H1_TAG_I64 = 2, H1_TAG_F64 = 3, H1_TAG_STR = 4,
+  H1_MEM_PAGES = 128, H1_PAGE = 65536, H1_MAX_FUNC = 64, H1_STK = 4096, H1_CALL = 256, H1_CTL = 256
+};
+enum { WK_I32 = 0, WK_I64 = 1, WK_F64 = 2 };
+
+typedef struct { int k; int32_t i32; int64_t i64; double f64; } WV;
+
+typedef struct {
+  const uint8_t *mod;
+  uint32_t mod_n;
+  uint8_t *mem;
+  uint32_t mem_n;
+  const uint8_t *body[H1_MAX_FUNC];
+  uint32_t body_n[H1_MAX_FUNC];
+  uint8_t nparam[H1_MAX_FUNC];
+  uint32_t nfunc;
+  int main_i, tag_i, i64_i, f64_i, sptr_i, slen_i;
+  WV stk[H1_STK];
+  int sp;
+  char err[128];
+} H1;
+
+typedef struct {
+  uint32_t start_ip; /* for loop: body start after blocktype */
+  uint32_t end_ip;   /* filled when known; else 0 */
+  uint8_t kind;      /* 0x02 block 0x03 loop 0x04 if */
+} CTL;
+
+static int h1_err(H1 *h, const char *m) {
+  size_t n = strlen(m);
+  if (n >= sizeof h->err) n = sizeof h->err - 1;
+  memcpy(h->err, m, n);
+  h->err[n] = 0;
+  return -1;
+}
+
+static int h1_uleb(const uint8_t *p, uint32_t n, uint32_t *io, uint32_t *o) {
+  uint32_t r = 0, s = 0, i = *io;
+  for (;;) {
+    uint8_t b;
+    if (i >= n) return 0;
+    b = p[i++];
+    r |= (uint32_t)(b & 0x7fu) << s;
+    if ((b & 0x80u) == 0) { *io = i; *o = r; return 1; }
+    s += 7;
+    if (s > 28) return 0;
+  }
+}
+
+static int h1_sleb64(const uint8_t *p, uint32_t n, uint32_t *io, int64_t *o) {
+  uint64_t r = 0;
+  unsigned s = 0;
+  uint32_t i = *io;
+  uint8_t b = 0;
+  for (;;) {
+    if (i >= n) return 0;
+    b = p[i++];
+    r |= (uint64_t)(b & 0x7fu) << s;
+    s += 7;
+    if ((b & 0x80u) == 0) break;
+    if (s > 63) return 0;
+  }
+  if (s < 64 && (b & 0x40u)) r |= (~(uint64_t)0) << s;
+  *io = i;
+  *o = (int64_t)r;
+  return 1;
+}
+
+static int h1_sleb32(const uint8_t *p, uint32_t n, uint32_t *io, int32_t *o) {
+  int64_t v;
+  if (!h1_sleb64(p, n, io, &v)) return 0;
+  *o = (int32_t)v;
+  return 1;
+}
+
+static void h1_push_i32(H1 *h, int32_t x) {
+  if (h->sp >= H1_STK) return;
+  h->stk[h->sp].k = WK_I32; h->stk[h->sp].i32 = x; h->stk[h->sp].i64 = 0; h->stk[h->sp].f64 = 0;
+  h->sp++;
+}
+static void h1_push_i64(H1 *h, int64_t x) {
+  if (h->sp >= H1_STK) return;
+  h->stk[h->sp].k = WK_I64; h->stk[h->sp].i32 = 0; h->stk[h->sp].i64 = x; h->stk[h->sp].f64 = 0;
+  h->sp++;
+}
+static void h1_push_f64(H1 *h, double x) {
+  if (h->sp >= H1_STK) return;
+  h->stk[h->sp].k = WK_F64; h->stk[h->sp].i32 = 0; h->stk[h->sp].i64 = 0; h->stk[h->sp].f64 = x;
+  h->sp++;
+}
+static void h1_push_copy(H1 *h, WV *v) {
+  if (h->sp >= H1_STK) return;
+  h->stk[h->sp] = *v;
+  h->sp++;
+}
+static void h1_pop_to(H1 *h, WV *o) {
+  o->k = WK_I32; o->i32 = 0; o->i64 = 0; o->f64 = 0;
+  if (h->sp > 0) { h->sp--; *o = h->stk[h->sp]; }
+}
+
+static int h1_skip_block(const uint8_t *b, uint32_t bn, uint32_t *ip, int stop_else) {
+  int depth = 1;
+  while (*ip < bn && depth) {
+    uint8_t o2 = b[(*ip)++];
+    if (o2 == 0x02 || o2 == 0x03 || o2 == 0x04) {
+      if (*ip < bn) (*ip)++;
+      depth++;
+    } else if (o2 == 0x05 && depth == 1 && stop_else) {
+      return 1; /* at else */
+    } else if (o2 == 0x0b) {
+      depth--;
+    } else if (o2 == 0x0c || o2 == 0x0d || o2 == 0x20 || o2 == 0x21 || o2 == 0x22 || o2 == 0x10) {
+      uint32_t x; if (!h1_uleb(b, bn, ip, &x)) return 0;
+    } else if (o2 == 0x41) {
+      int32_t x; if (!h1_sleb32(b, bn, ip, &x)) return 0;
+    } else if (o2 == 0x42) {
+      int64_t x; if (!h1_sleb64(b, bn, ip, &x)) return 0;
+    } else if (o2 == 0x44) {
+      if (*ip + 8 > bn) return 0;
+      *ip += 8;
+    } else if (o2 == 0x28 || o2 == 0x29 || o2 == 0x2b || o2 == 0x2d ||
+               o2 == 0x36 || o2 == 0x37 || o2 == 0x39 || o2 == 0x3a) {
+      uint32_t a, o; if (!h1_uleb(b, bn, ip, &a) || !h1_uleb(b, bn, ip, &o)) return 0;
+    }
+  }
+  return 1;
+}
+
+static int h1_parse(H1 *h, const uint8_t *p, uint32_t n) {
+  uint32_t i = 0, sid, sz, ne, k, nl, idx, nf, bs, j, t;
+  uint8_t kind;
+  uint32_t type_argc[64], type_retc[64];
+  uint32_t ntypes = 0;
+  uint32_t ftype[H1_MAX_FUNC];
+
+  h->mod = p; h->mod_n = n; h->sp = 0; h->err[0] = 0;
+  h->main_i = h->tag_i = h->i64_i = h->f64_i = h->sptr_i = h->slen_i = -1;
+  h->nfunc = 0; h->mem = 0;
+  memset(type_argc, 0, sizeof type_argc);
+  memset(type_retc, 0, sizeof type_retc);
+  memset(ftype, 0, sizeof ftype);
+
+  if (n < 8 || p[0] || p[1] != 0x61 || p[2] != 0x73 || p[3] != 0x6d) return h1_err(h, "not wasm");
+  if (p[4] != 1 || p[5] || p[6] || p[7]) return h1_err(h, "bad version");
+  i = 8;
+  while (i < n) {
+    sid = p[i++];
+    if (!h1_uleb(p, n, &i, &sz) || sz > n - i) return h1_err(h, "bad section");
+    j = i;
+    if (sid == 1) {
+      if (!h1_uleb(p, j + sz, &j, &ntypes) || ntypes > 64) return h1_err(h, "types");
+      for (t = 0; t < ntypes; t++) {
+        uint32_t na, nr, a;
+        if (j >= i + sz || p[j++] != 0x60) return h1_err(h, "functype");
+        if (!h1_uleb(p, i + sz, &j, &na)) return h1_err(h, "targc");
+        type_argc[t] = na;
+        for (a = 0; a < na; a++) j++;
+        if (!h1_uleb(p, i + sz, &j, &nr) || nr > 1) return h1_err(h, "tretc");
+        type_retc[t] = nr;
+        if (nr) j++;
+      }
+    } else if (sid == 3) {
+      if (!h1_uleb(p, j + sz, &j, &nf) || nf > H1_MAX_FUNC) return h1_err(h, "nfunc");
+      h->nfunc = nf;
+      for (t = 0; t < nf; t++) {
+        if (!h1_uleb(p, i + sz, &j, &ftype[t])) return h1_err(h, "ftype");
+        h->nparam[t] = (uint8_t)type_argc[ftype[t]];
+      }
+    } else if (sid == 7) {
+      if (!h1_uleb(p, j + sz, &j, &ne)) return h1_err(h, "exports");
+      for (k = 0; k < ne; k++) {
+        uint32_t jj;
+        if (!h1_uleb(p, i + sz, &j, &nl) || j + nl > i + sz) return h1_err(h, "ename");
+        kind = p[j + nl];
+        jj = j + nl + 1;
+        if (!h1_uleb(p, i + sz, &jj, &idx)) return h1_err(h, "eidx");
+        if (kind == 0) {
+          if (nl == 11 && !memcmp(p + j, "main_export", 11)) h->main_i = (int)idx;
+          if (nl == 13 && !memcmp(p + j, "tag_of_export", 13)) h->tag_i = (int)idx;
+          if (nl == 13 && !memcmp(p + j, "i64_of_export", 13)) h->i64_i = (int)idx;
+          if (nl == 13 && !memcmp(p + j, "f64_of_export", 13)) h->f64_i = (int)idx;
+          if (nl == 14 && !memcmp(p + j, "str_ptr_export", 14)) h->sptr_i = (int)idx;
+          if (nl == 14 && !memcmp(p + j, "str_len_export", 14)) h->slen_i = (int)idx;
+        }
+        j = jj;
+      }
+    } else if (sid == 10) {
+      if (!h1_uleb(p, j + sz, &j, &nf) || nf != h->nfunc) return h1_err(h, "code n");
+      for (t = 0; t < nf; t++) {
+        if (!h1_uleb(p, i + sz, &j, &bs) || j + bs > i + sz) return h1_err(h, "body");
+        h->body[t] = p + j;
+        h->body_n[t] = bs;
+        j += bs;
+      }
+    }
+    i += sz;
+  }
+  if (h->main_i < 0 || h->tag_i < 0) return h1_err(h, "missing exports");
+  h->mem_n = (uint32_t)H1_MEM_PAGES * (uint32_t)H1_PAGE;
+  h->mem = (uint8_t *)malloc(h->mem_n);
+  if (!h->mem) return h1_err(h, "oom");
+  memset(h->mem, 0, h->mem_n);
+  return 0;
+}
+
+static int h1_call(H1 *h, uint32_t fi, int depth);
+
+static int h1_exec(H1 *h, uint32_t fi, WV *locals, uint32_t nloc, int depth) {
+  const uint8_t *b = h->body[fi];
+  uint32_t bn = h->body_n[fi];
+  uint32_t ip = 0, ng, g, n;
+  CTL ctl[H1_CTL];
+  int csp = 0;
+  WV a, b2, v;
+
+  if (!h1_uleb(b, bn, &ip, &ng)) return h1_err(h, "locals");
+  for (g = 0; g < ng; g++) {
+    uint32_t cnt;
+    uint8_t ty;
+    if (!h1_uleb(b, bn, &ip, &cnt) || ip >= bn) return h1_err(h, "ldecl");
+    ty = b[ip++];
+    for (n = 0; n < cnt && nloc < 256; n++) {
+      locals[nloc].k = (ty == 0x7e) ? WK_I64 : (ty == 0x7c) ? WK_F64 : WK_I32;
+      locals[nloc].i32 = 0; locals[nloc].i64 = 0; locals[nloc].f64 = 0;
+      nloc++;
+    }
+  }
+
+  while (ip < bn) {
+    uint8_t op = b[ip++];
+    if (op == 0x0b) {
+      if (csp > 0) csp--;
+      else return 0;
+      continue;
+    }
+    if (op == 0x00) return h1_err(h, "unreachable");
+    if (op == 0x01) continue;
+    if (op == 0x1a) { h1_pop_to(h, &a); continue; } /* drop */
+    if (op == 0x1b) {
+      h1_pop_to(h, &v);
+      h1_pop_to(h, &b2);
+      h1_pop_to(h, &a);
+      if ((v.k == WK_I32) ? v.i32 : (int32_t)v.i64) h1_push_copy(h, &a);
+      else h1_push_copy(h, &b2);
+      continue;
+    }
+    if (op == 0x0f) return 0;
+    if (op == 0x02 || op == 0x03 || op == 0x04) {
+      uint8_t bt;
+      if (ip >= bn) return h1_err(h, "block");
+      bt = b[ip++];
+      (void)bt;
+      if (op == 0x04) {
+        h1_pop_to(h, &a);
+        if (!((a.k == WK_I32) ? a.i32 : (int32_t)a.i64)) {
+          if (!h1_skip_block(b, bn, &ip, 1)) return h1_err(h, "skip if");
+          /* now either at else body or past end */
+          if (csp < H1_CTL) {
+            ctl[csp].kind = 0x04; ctl[csp].start_ip = ip; ctl[csp].end_ip = 0;
+            csp++;
+          }
+          continue;
+        }
+      }
+      if (csp < H1_CTL) {
+        ctl[csp].kind = op;
+        ctl[csp].start_ip = ip;
+        ctl[csp].end_ip = 0;
+        csp++;
+      }
+      continue;
+    }
+    if (op == 0x05) {
+      /* taken then-branch hits else: skip to end */
+      if (!h1_skip_block(b, bn, &ip, 0)) return h1_err(h, "skip else");
+      if (csp > 0) csp--;
+      continue;
+    }
+    if (op == 0x0c || op == 0x0d) {
+      uint32_t L;
+      int take = 1;
+      if (!h1_uleb(b, bn, &ip, &L)) return h1_err(h, "br");
+      if (op == 0x0d) {
+        h1_pop_to(h, &a);
+        take = (a.k == WK_I32) ? (a.i32 != 0) : (a.i64 != 0);
+      }
+      if (!take) continue;
+      if ((int)L >= csp) return h1_err(h, "br depth");
+      {
+        int target = csp - 1 - (int)L;
+        uint8_t kind = ctl[target].kind;
+        csp = target + 1;
+        if (kind == 0x03) {
+          ip = ctl[target].start_ip; /* loop continue */
+          continue;
+        }
+        /* block/if break: skip to matching end from current ip — rewalk from frame start */
+        {
+          uint32_t sip = ctl[target].start_ip;
+          int depth_blk = 1;
+          ip = sip;
+          while (ip < bn && depth_blk) {
+            uint8_t o2 = b[ip++];
+            if (o2 == 0x02 || o2 == 0x03 || o2 == 0x04) { if (ip < bn) ip++; depth_blk++; }
+            else if (o2 == 0x0b) depth_blk--;
+            else if (o2 == 0x0c || o2 == 0x0d || o2 == 0x20 || o2 == 0x21 || o2 == 0x22 || o2 == 0x10) {
+              uint32_t x; h1_uleb(b, bn, &ip, &x);
+            } else if (o2 == 0x41) { int32_t x; h1_sleb32(b, bn, &ip, &x); }
+            else if (o2 == 0x42) { int64_t x; h1_sleb64(b, bn, &ip, &x); }
+            else if (o2 == 0x44) ip += 8;
+            else if (o2 == 0x28 || o2 == 0x29 || o2 == 0x2b || o2 == 0x2d ||
+                     o2 == 0x36 || o2 == 0x37 || o2 == 0x39 || o2 == 0x3a) {
+              uint32_t aa, oo; h1_uleb(b, bn, &ip, &aa); h1_uleb(b, bn, &ip, &oo);
+            } else if (o2 == 0x05) { /* else keeps same depth */ }
+          }
+          csp = target;
+          continue;
+        }
+      }
+    }
+    if (op == 0x10) {
+      uint32_t cal;
+      if (!h1_uleb(b, bn, &ip, &cal)) return h1_err(h, "call");
+      if (h1_call(h, cal, depth + 1) != 0) return -1;
+      continue;
+    }
+    if (op == 0x20) {
+      uint32_t li;
+      if (!h1_uleb(b, bn, &ip, &li) || li >= nloc) return h1_err(h, "local.get");
+      h1_push_copy(h, &locals[li]);
+      continue;
+    }
+    if (op == 0x21 || op == 0x22) {
+      uint32_t li;
+      if (!h1_uleb(b, bn, &ip, &li) || li >= nloc) return h1_err(h, "local.set");
+      h1_pop_to(h, &v);
+      locals[li] = v;
+      if (op == 0x22) h1_push_copy(h, &v);
+      continue;
+    }
+    if (op == 0x41) {
+      int32_t x;
+      if (!h1_sleb32(b, bn, &ip, &x)) return h1_err(h, "i32.const");
+      h1_push_i32(h, x);
+      continue;
+    }
+    if (op == 0x42) {
+      int64_t x;
+      if (!h1_sleb64(b, bn, &ip, &x)) return h1_err(h, "i64.const");
+      h1_push_i64(h, x);
+      continue;
+    }
+    if (op == 0x44) {
+      double d;
+      if (ip + 8 > bn) return h1_err(h, "f64.const");
+      memcpy(&d, b + ip, 8);
+      ip += 8;
+      h1_push_f64(h, d);
+      continue;
+    }
+    if (op == 0x28 || op == 0x29 || op == 0x2b || op == 0x2d) {
+      uint32_t align, offset, addr;
+      if (!h1_uleb(b, bn, &ip, &align) || !h1_uleb(b, bn, &ip, &offset)) return h1_err(h, "load");
+      h1_pop_to(h, &a);
+      addr = (uint32_t)((a.k == WK_I32 ? a.i32 : (int32_t)a.i64) + (int32_t)offset);
+      if (addr + 8 > h->mem_n) return h1_err(h, "load oob");
+      if (op == 0x28) { int32_t x; memcpy(&x, h->mem + addr, 4); h1_push_i32(h, x); }
+      else if (op == 0x29) { int64_t x; memcpy(&x, h->mem + addr, 8); h1_push_i64(h, x); }
+      else if (op == 0x2b) { double x; memcpy(&x, h->mem + addr, 8); h1_push_f64(h, x); }
+      else h1_push_i32(h, h->mem[addr]);
+      continue;
+    }
+    if (op == 0x36 || op == 0x37 || op == 0x39 || op == 0x3a) {
+      uint32_t align, offset, addr;
+      if (!h1_uleb(b, bn, &ip, &align) || !h1_uleb(b, bn, &ip, &offset)) return h1_err(h, "store");
+      h1_pop_to(h, &v);
+      h1_pop_to(h, &a);
+      addr = (uint32_t)((a.k == WK_I32 ? a.i32 : (int32_t)a.i64) + (int32_t)offset);
+      if (addr + 8 > h->mem_n) return h1_err(h, "store oob");
+      if (op == 0x36) { int32_t x = v.i32; memcpy(h->mem + addr, &x, 4); }
+      else if (op == 0x37) { int64_t x = v.i64; memcpy(h->mem + addr, &x, 8); }
+      else if (op == 0x39) { double x = v.f64; memcpy(h->mem + addr, &x, 8); }
+      else h->mem[addr] = (uint8_t)v.i32;
+      continue;
+    }
+    if (op == 0x45) { h1_pop_to(h, &a); h1_push_i32(h, a.i32 == 0); continue; }
+    if (op == 0x46) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.i32 == b2.i32); continue; }
+    if (op == 0x47) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.i32 != b2.i32); continue; }
+    if (op == 0x48) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.i32 < b2.i32); continue; }
+    if (op == 0x49) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, (uint32_t)a.i32 < (uint32_t)b2.i32); continue; }
+    if (op == 0x4a) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.i32 > b2.i32); continue; }
+    if (op == 0x4b) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, (uint32_t)a.i32 > (uint32_t)b2.i32); continue; }
+    if (op == 0x4c) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.i32 <= b2.i32); continue; }
+    if (op == 0x4d) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, (uint32_t)a.i32 <= (uint32_t)b2.i32); continue; }
+    if (op == 0x4e) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.i32 >= b2.i32); continue; }
+    if (op == 0x4f) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, (uint32_t)a.i32 >= (uint32_t)b2.i32); continue; }
+    if (op == 0x6a) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.i32 + b2.i32); continue; }
+    if (op == 0x6b) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.i32 - b2.i32); continue; }
+    if (op == 0x6c) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.i32 * b2.i32); continue; }
+    if (op == 0x6d) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, b2.i32 ? a.i32 / b2.i32 : 0); continue; }
+    if (op == 0x6f) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, b2.i32 ? (int32_t)((uint32_t)a.i32 / (uint32_t)b2.i32) : 0); continue; }
+    if (op == 0x71) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.i32 & b2.i32); continue; }
+    if (op == 0x72) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.i32 | b2.i32); continue; }
+    if (op == 0x73) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.i32 ^ b2.i32); continue; }
+    if (op == 0x74) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.i32 << (b2.i32 & 31)); continue; }
+    if (op == 0x75) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, (int32_t)((uint32_t)a.i32 >> (b2.i32 & 31))); continue; }
+    if (op == 0x76) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.i32 >> (b2.i32 & 31)); continue; }
+    if (op == 0x50) { h1_pop_to(h, &a); h1_push_i32(h, a.i64 == 0); continue; }
+    if (op == 0x51) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.i64 == b2.i64); continue; }
+    if (op == 0x52) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.i64 != b2.i64); continue; }
+    if (op == 0x53) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.i64 < b2.i64); continue; }
+    if (op == 0x55) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.i64 > b2.i64); continue; }
+    if (op == 0x57) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.i64 <= b2.i64); continue; }
+    if (op == 0x59) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.i64 >= b2.i64); continue; }
+    if (op == 0x7c) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i64(h, a.i64 + b2.i64); continue; }
+    if (op == 0x7d) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i64(h, a.i64 - b2.i64); continue; }
+    if (op == 0x7e) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i64(h, a.i64 * b2.i64); continue; }
+    if (op == 0xad) { h1_pop_to(h, &a); h1_push_i64(h, (uint32_t)a.i32); continue; }
+    if (op == 0xa7) { h1_pop_to(h, &a); h1_push_i32(h, (int32_t)a.i64); continue; }
+    if (op == 0xb9) { h1_pop_to(h, &a); h1_push_f64(h, (double)a.i64); continue; }
+    if (op == 0xa0) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_f64(h, a.f64 + b2.f64); continue; }
+    if (op == 0xa1) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_f64(h, a.f64 - b2.f64); continue; }
+    if (op == 0xa2) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_f64(h, a.f64 * b2.f64); continue; }
+    if (op == 0xa3) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_f64(h, a.f64 / b2.f64); continue; }
+    {
+      char msg[64];
+      snprintf(msg, sizeof msg, "op 0x%02x", op);
+      return h1_err(h, msg);
+    }
+  }
+  return 0;
+}
+
+static int h1_call(H1 *h, uint32_t fi, int depth) {
+  WV locals[256];
+  uint32_t np, i;
+  if (depth > H1_CALL) return h1_err(h, "call depth");
+  if (fi >= h->nfunc) return h1_err(h, "bad func");
+  np = h->nparam[fi];
+  if (h->sp < (int)np) return h1_err(h, "stack under");
+  for (i = 0; i < np; i++) h1_pop_to(h, &locals[np - 1 - i]);
+  for (i = np; i < 256; i++) {
+    locals[i].k = WK_I32; locals[i].i32 = 0; locals[i].i64 = 0; locals[i].f64 = 0;
+  }
+  return h1_exec(h, fi, locals, np, depth);
+}
+
+int host1_wasm_run(const uint8_t *wasm, uint32_t wasm_n, char *out, uint32_t out_cap) {
+  H1 h;
+  WV handle, tagv, val;
+  int tag;
+  memset(&h, 0, sizeof h);
+  if (h1_parse(&h, wasm, wasm_n) != 0) {
+    snprintf(out, out_cap, "{\"run\":\"fail\",\"err\":\"%s\"}", h.err);
+    free(h.mem);
+    return 1;
+  }
+  if (h1_call(&h, (uint32_t)h.main_i, 0) != 0) {
+    snprintf(out, out_cap, "{\"run\":\"fail\",\"err\":\"%s\"}", h.err[0] ? h.err : "exec");
+    free(h.mem);
+    return 1;
+  }
+  if (h.sp < 1) {
+    snprintf(out, out_cap, "{\"run\":\"fail\",\"err\":\"no result\"}");
+    free(h.mem);
+    return 1;
+  }
+  h1_pop_to(&h, &handle);
+  h1_push_copy(&h, &handle);
+  if (h1_call(&h, (uint32_t)h.tag_i, 0) != 0) {
+    snprintf(out, out_cap, "{\"run\":\"fail\",\"err\":\"tag:%s\"}", h.err);
+    free(h.mem);
+    return 1;
+  }
+  h1_pop_to(&h, &tagv);
+  tag = tagv.i32;
+  if (tag == H1_TAG_I64 && h.i64_i >= 0) {
+    h1_push_copy(&h, &handle);
+    if (h1_call(&h, (uint32_t)h.i64_i, 0) != 0) {
+      snprintf(out, out_cap, "{\"run\":\"fail\",\"err\":\"i64:%s\"}", h.err);
+      free(h.mem);
+      return 1;
+    }
+    h1_pop_to(&h, &val);
+    snprintf(out, out_cap,
+             "{\"run\":\"ok\",\"tag\":\"i64\",\"value\":%lld,\"bridge\":\"host1-vm\",\"tag_host1\":\"host1_package\"}",
+             (long long)val.i64);
+  } else if (tag == H1_TAG_F64 && h.f64_i >= 0) {
+    h1_push_copy(&h, &handle);
+    if (h1_call(&h, (uint32_t)h.f64_i, 0) != 0) {
+      snprintf(out, out_cap, "{\"run\":\"fail\",\"err\":\"f64:%s\"}", h.err);
+      free(h.mem);
+      return 1;
+    }
+    h1_pop_to(&h, &val);
+    snprintf(out, out_cap,
+             "{\"run\":\"ok\",\"tag\":\"f64\",\"value\":%.17g,\"bridge\":\"host1-vm\",\"tag_host1\":\"host1_package\"}",
+             val.f64);
+  } else if (tag == H1_TAG_STR && h.sptr_i >= 0 && h.slen_i >= 0) {
+    int32_t ptr, len, i;
+    char *buf;
+    char *w;
+    h1_push_copy(&h, &handle);
+    if (h1_call(&h, (uint32_t)h.sptr_i, 0) != 0) {
+      snprintf(out, out_cap, "{\"run\":\"fail\",\"err\":\"sptr\"}");
+      free(h.mem);
+      return 1;
+    }
+    h1_pop_to(&h, &val);
+    ptr = val.i32;
+    h1_push_copy(&h, &handle);
+    if (h1_call(&h, (uint32_t)h.slen_i, 0) != 0) {
+      snprintf(out, out_cap, "{\"run\":\"fail\",\"err\":\"slen\"}");
+      free(h.mem);
+      return 1;
+    }
+    h1_pop_to(&h, &val);
+    len = val.i32;
+    if (ptr < 0 || len < 0 || (uint32_t)ptr + (uint32_t)len > h.mem_n) {
+      snprintf(out, out_cap, "{\"run\":\"fail\",\"err\":\"str oob\"}");
+      free(h.mem);
+      return 1;
+    }
+    buf = (char *)malloc((size_t)len * 6 + 96);
+    if (!buf) { free(h.mem); return 1; }
+    w = buf;
+    w += sprintf(w, "{\"run\":\"ok\",\"tag\":\"str\",\"value\":\"");
+    for (i = 0; i < len; i++) {
+      unsigned char c = h.mem[ptr + i];
+      if (c == '"' || c == '\\') { *w++ = '\\'; *w++ = (char)c; }
+      else if (c >= 32 && c < 127) *w++ = (char)c;
+      else w += sprintf(w, "\\u%04x", c);
+    }
+    sprintf(w, "\",\"bridge\":\"host1-vm\",\"tag_host1\":\"host1_package\"}");
+    snprintf(out, out_cap, "%s", buf);
+    free(buf);
+  } else {
+    snprintf(out, out_cap,
+             "{\"run\":\"ok\",\"tag\":%d,\"handle\":%d,\"bridge\":\"host1-vm\",\"tag_host1\":\"host1_package\"}",
+             tag, handle.i32);
+  }
+  free(h.mem);
+  return 0;
+}

@@ -13,7 +13,8 @@ uint32_t err_len(void);
 void ujs_host_write(uint32_t off, const void *p, uint32_t n);
 const uint8_t *ujs_host_mem(void);
 
-static const char *VERSION = "ujs.com 0.0.4";
+static const char *VERSION = "ujs.com 0.0.5";
+int host1_wasm_run(const uint8_t *wasm, uint32_t wasm_n, char *out, uint32_t out_cap);
 
 static void usage(FILE *f) {
   fprintf(f, "ujs.com — ujs+wasm productivity tool (host image, stage0)\n");
@@ -22,14 +23,14 @@ static void usage(FILE *f) {
   fprintf(f, "  ujs.com --help | -h\n");
   fprintf(f, "  ujs.com --verify FILE.wasm\n");
   fprintf(f, "  ujs.com --verify-list MANIFEST PREFIX\n");
+  fprintf(f, "  ujs.com --run FILE.wasm\n");
   fprintf(f, "  ujs.com FILE.ujs [-o OUT.wasm]\n");
   fprintf(f, "contract:\n");
   fprintf(f, "  compile closed UJS-1_ship subset to \\0asm (bridge=stage0-host)\n");
   fprintf(f, "  default -o: same path with .ujs replaced by .wasm\n");
   fprintf(f, "  out-of-table input: refuse (no wasm)\n");
-  fprintf(f, "  --verify: walk sections; require type/func/memory/export/code\n");
-  fprintf(f, "            and exports memory + main_export (tag=host1_package)\n");
-  fprintf(f, "  --verify-list: one process; paths = PREFIX + name + \".wasm\"\n");
+  fprintf(f, "  --verify / --verify-list: structure + required exports\n");
+  fprintf(f, "  --run: host1 mini-VM execute main_export (tag=host1_package)\n");
   fprintf(f, "not this binary: M3/compiler_core, construct IntNet, Pages/UXE\n");
 }
 
@@ -336,6 +337,33 @@ int main(int argc, char **argv) {
       return 2;
     }
     return cmd_verify_list(argv[2], argv[3]);
+  }
+  if (!strcmp(argv[1], "--run")) {
+    uint8_t *buf = 0;
+    size_t n = 0;
+    char json[2048];
+    int rc;
+    if (argc != 3) {
+      fprintf(stderr, "ujs.com: --run needs FILE.wasm\n");
+      return 2;
+    }
+    if (!ends_with(argv[2], ".wasm")) {
+      fprintf(stderr, "ujs.com: --run expects .wasm\n");
+      return 2;
+    }
+    if (!read_file(argv[2], &buf, &n)) {
+      fprintf(stderr, "ujs.com: cannot read %s\n", argv[2]);
+      return 1;
+    }
+    if (n < 8 || buf[0] || buf[1] != 0x61 || buf[2] != 0x73 || buf[3] != 0x6d) {
+      fprintf(stderr, "ujs.com: --run not \\0asm\n");
+      free(buf);
+      return 1;
+    }
+    rc = host1_wasm_run(buf, (uint32_t)n, json, (uint32_t)sizeof json);
+    free(buf);
+    puts(json);
+    return rc != 0 ? 1 : 0;
   }
 
   for (i = 1; i < argc; i++) {

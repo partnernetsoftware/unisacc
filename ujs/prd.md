@@ -1,7 +1,7 @@
 # UJS —— 产品规格 v1.3
 
 > **唯一耦合活文档**（规格 · 目标 · 思维树 · 记忆宫殿）。与代码同会话更新。  
-> **版本计划**：[`plans/`](plans/)（`ujs.com` **0.0.4** ✓；下一刀 [`plans/v0.0.5.md`](plans/v0.0.5.md)）  
+> **版本计划**：[`plans/`](plans/)（`ujs.com` **0.0.5** ✓；下一刀 [`plans/v0.0.6.md`](plans/v0.0.6.md)）  
 > **目录板块**：[`ARCHITECTURE.md`](ARCHITECTURE.md) · 开箱：[`README.md`](README.md) · Host：[`uxe/HOST_ABI.md`](uxe/HOST_ABI.md)  
 > 归档：[`archive/`](archive/)
 
@@ -20,9 +20,10 @@
 | **0.0.2** | ✓ 生产力合同 | [`plans/v0.0.2.md`](plans/v0.0.2.md) |
 | **0.0.3** | ✓ **`ujs/` 无 `.c`／`.py`** | [`plans/v0.0.3.md`](plans/v0.0.3.md) |
 | **0.0.4** | ✓ **host1 wasm 验面** | [`plans/v0.0.4.md`](plans/v0.0.4.md) |
-| **0.0.5** | 下一刀 · **host1 跑面** | [`plans/v0.0.5.md`](plans/v0.0.5.md) |
+| **0.0.5** | ✓ **host1 跑面**（`--run`） | [`plans/v0.0.5.md`](plans/v0.0.5.md) |
+| **0.0.6** | 下一刀 · 日用收敛／construct 切片 | [`plans/v0.0.6.md`](plans/v0.0.6.md) |
 
-版号真源：`ujs.com --version`（**`ujs.com 0.0.4`**）。
+版号真源：`ujs.com --version`（**`ujs.com 0.0.5`**）。
 
 **两个名词**：**host image** = APE／六目标／验面／`host1_package`；**method emit** = 表／流→`\0asm`。勿混。
 
@@ -33,7 +34,7 @@
 | | |
 |---|---|
 | **主产物** | **`ujs.com`**——**ujs + wasm 类别的生产力工具**（跨架构单文件 `.com`；编／装／跑／自举收进同一壳） |
-| **状态** | **0.0.4 已交付**（`ujs.com 0.0.4`）：无 `.c`／`.py`；预言＋验面；`ujs/tests/` 自洽。下一刀 **0.0.5 跑面**（见 [`plans/v0.0.5.md`](plans/v0.0.5.md)） |
+| **状态** | **0.0.5 已交付**（`ujs.com 0.0.5`）：无 `.c`／`.py`；编／验／跑闭环；`ujs/tests/` 自洽。下一刀 **0.0.6**（见 [`plans/v0.0.6.md`](plans/v0.0.6.md)） |
 | **不是主产物** | 单独的 `ujs2wasm` CLI、`wat2wasm`、`compile.mjs`、零散 `.wasm`——是 **`ujs.com` 的子功能／实践脊**，应收进或由它调度 |
 
 ### 0.1b 产品 · 论文 · unisacc 关系（主人 2026-10-25 定调）
@@ -411,12 +412,12 @@ B (sim.wasm) ══directSim══> Pages
 ujs/                         ★ 树内无 .c／.py；套件在本树
 ├─ prd.md · README.md · ARCHITECTURE.md · plans/
 ├─ tests/                    ★ host1 产品套件（不在根 tests/）
-│   ├─ run.cx · host1-pass/refuse
+│   ├─ run.cx · host1-pass/refuse · host1-run-expect
 │   └─ corpus/ · neg/        语料夹具（自根 tests/ujs2wasm 迁入）
 ├─ product/                  ★ host image（unisacc.com + .cx）
-│   ├─ ujs_main.cx · build*.cx · ape-pack.cx · complete.cx
-│   ├─ corpus-host.cx · verify-host.cx · wasm-verify.cx
-│   └─ --verify              \\0asm 节／必导出
+│   ├─ ujs_main.cx · host1_vm.cx · build*.cx · ape-pack.cx · complete.cx
+│   ├─ corpus-host.cx · run-host.cx · verify-host.cx · wasm-verify.cx
+│   └─ --verify／--run       \\0asm 验面／迷你 VM 跑面
 ├─ seed/stage0/              host1 编译器（.cx）
 ├─ seed/construct|vm/        占位 README；源在 archive/ujs-legacy-py-c/
 ├─ iterate/                  M3 实践脊（另标签）
@@ -476,7 +477,7 @@ ship：index.html → engine.js + game.js + sim.wasm（directSim；无 engine.wa
 ## T5. 验收 DAG
 
 ```
-host1 绿 ── ujs/tests/run.cx ──┬── --smoke（build + oracle）
+host1 绿 ── ujs/tests/run.cx ──┬── --smoke（build + corpus/verify + run）
                                └── --complete（APE + oracle + six）
 
 实践另门 ── M3／uxe（归档脚本或 npm）；不挡 0.0.x 版号

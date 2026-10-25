@@ -1,0 +1,228 @@
+#!/usr/bin/env -S unisacc.com -run
+/* host1 run oracle: compile + --run vs ujs/tests/host1-run-expect.txt.
+   Never opens archive expect.json. Pure .cx.
+   ./unisacc.com -run ujs/product/run-host.cx
+*/
+enum { MAX_N = 64, MAX_NAME = 64, MAX_VAL = 512, EXPECT_PASS = 28 };
+
+static char names[MAX_N][MAX_NAME];
+static char tags[MAX_N][16];
+static char vals[MAX_N][MAX_VAL];
+static int n_exp;
+
+static int exists(const char *p) {
+    FILE *f = fopen(p, "rb");
+    if (!f) return 0;
+    fclose(f);
+    return 1;
+}
+
+static int enter_root(const char *argv0) {
+    char dir[4096];
+    size_t l;
+    char *sl;
+    if (exists("./ujs/tests/host1-run-expect.txt")) return 0;
+    if (!argv0 || !argv0[0]) return -1;
+    l = strlen(argv0);
+    if (l >= sizeof dir) return -1;
+    memcpy(dir, argv0, l + 1);
+    sl = strrchr(dir, '/');
+    if (!sl) return -1;
+    *sl = 0;
+    if (chdir(dir) != 0) return -1;
+    return chdir("../..");
+}
+
+static int load_expect(const char *path) {
+    FILE *f;
+    char line[1024];
+    int n = 0;
+    size_t L;
+    f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "run-host.cx: cannot open %s\n", path);
+        return -1;
+    }
+    while (fgets(line, sizeof line, f)) {
+        char *t1, *t2;
+        size_t nl, tl, vl;
+        L = strlen(line);
+        while (L && (line[L - 1] == '\n' || line[L - 1] == '\r')) line[--L] = 0;
+        if (!L || line[0] == '#') continue;
+        t1 = strchr(line, '\t');
+        if (!t1) {
+            fprintf(stderr, "run-host.cx: bad line (no tab): %s\n", line);
+            fclose(f);
+            return -1;
+        }
+        *t1 = 0;
+        t2 = strchr(t1 + 1, '\t');
+        if (!t2) {
+            fprintf(stderr, "run-host.cx: bad line (need 3 fields): %s\n", line);
+            fclose(f);
+            return -1;
+        }
+        *t2 = 0;
+        nl = strlen(line);
+        tl = strlen(t1 + 1);
+        vl = strlen(t2 + 1);
+        if (nl >= MAX_NAME || tl >= 16 || vl >= MAX_VAL || n >= MAX_N) {
+            fprintf(stderr, "run-host.cx: field too long or too many\n");
+            fclose(f);
+            return -1;
+        }
+        memcpy(names[n], line, nl + 1);
+        memcpy(tags[n], t1 + 1, tl + 1);
+        memcpy(vals[n], t2 + 1, vl + 1);
+        n++;
+    }
+    fclose(f);
+    n_exp = n;
+    return 0;
+}
+
+/* Extract "key":"str" or "key":num from one JSON line. */
+static int json_str(const char *j, const char *key, char *out, size_t out_n) {
+    char pat[64];
+    const char *p, *q;
+    size_t k;
+    snprintf(pat, sizeof pat, "\"%s\":\"", key);
+    p = strstr(j, pat);
+    if (!p) return 0;
+    p += strlen(pat);
+    q = strchr(p, '"');
+    if (!q) return 0;
+    k = (size_t)(q - p);
+    if (k >= out_n) return 0;
+    memcpy(out, p, k);
+    out[k] = 0;
+    return 1;
+}
+
+static int json_num(const char *j, const char *key, char *out, size_t out_n) {
+    char pat[64];
+    const char *p;
+    size_t i = 0;
+    snprintf(pat, sizeof pat, "\"%s\":", key);
+    p = strstr(j, pat);
+    if (!p) return 0;
+    p += strlen(pat);
+    if (*p == '"') return 0;
+    while (*p && *p != ',' && *p != '}' && i + 1 < out_n) out[i++] = *p++;
+    out[i] = 0;
+    return i > 0;
+}
+
+static int run_ujs(char **av, int nac, char **outp, size_t *np) {
+    int rc;
+    char *cap = 0;
+    size_t n = 0;
+    rc = cx_runv_timeout(av, 30, &cap, &n);
+    if (rc == 127) {
+        char *shav[8];
+        int i;
+        free(cap); cap = 0; n = 0;
+        shav[0] = "sh";
+        for (i = 0; i < nac && i < 6; i++) shav[i + 1] = av[i];
+        shav[nac + 1] = 0;
+        rc = cx_runv_timeout(shav, 30, &cap, &n);
+    }
+    *outp = cap;
+    *np = n;
+    return rc;
+}
+
+static int check_one(int ix) {
+    char src[512], outp[512];
+    char *av[6];
+    char *cap = 0;
+    size_t n = 0;
+    int rc;
+    char got_tag[16], got_val[MAX_VAL];
+    char line[2048];
+
+    snprintf(src, sizeof src, "ujs/tests/corpus/%s", names[ix]);
+    snprintf(outp, sizeof outp, "/tmp/ujs-run-%s.wasm", names[ix]);
+    if (!exists(src)) {
+        fprintf(stderr, "run-host.cx: missing %s\n", src);
+        return 1;
+    }
+    unlink(outp);
+    av[0] = "./ujs/ujs.com";
+    av[1] = src;
+    av[2] = "-o";
+    av[3] = outp;
+    av[4] = 0;
+    rc = run_ujs(av, 4, &cap, &n);
+    free(cap); cap = 0; n = 0;
+    if (rc != 0 || !exists(outp)) {
+        fprintf(stderr, "run-host.cx: compile fail %s rc=%d\n", names[ix], rc);
+        return 1;
+    }
+
+    av[0] = "./ujs/ujs.com";
+    av[1] = "--run";
+    av[2] = outp;
+    av[3] = 0;
+    rc = run_ujs(av, 3, &cap, &n);
+    if (rc != 0 || !cap || !n) {
+        fprintf(stderr, "run-host.cx: --run fail %s rc=%d\n", names[ix], rc);
+        free(cap);
+        return 1;
+    }
+    if (n >= sizeof line) n = sizeof line - 1;
+    memcpy(line, cap, n);
+    line[n] = 0;
+    free(cap);
+
+    if (!strstr(line, "\"run\":\"ok\"")) {
+        fprintf(stderr, "run-host.cx: not ok %s: %s\n", names[ix], line);
+        return 1;
+    }
+    if (!json_str(line, "tag", got_tag, sizeof got_tag)) {
+        fprintf(stderr, "run-host.cx: no tag %s: %s\n", names[ix], line);
+        return 1;
+    }
+    if (!strcmp(got_tag, "str")) {
+        if (!json_str(line, "value", got_val, sizeof got_val)) {
+            fprintf(stderr, "run-host.cx: no str value %s\n", names[ix]);
+            return 1;
+        }
+    } else {
+        if (!json_num(line, "value", got_val, sizeof got_val)) {
+            fprintf(stderr, "run-host.cx: no num value %s\n", names[ix]);
+            return 1;
+        }
+    }
+    if (strcmp(got_tag, tags[ix]) != 0 || strcmp(got_val, vals[ix]) != 0) {
+        fprintf(stderr, "run-host.cx: MISMATCH %s got %s/%s want %s/%s\n",
+                names[ix], got_tag, got_val, tags[ix], vals[ix]);
+        return 1;
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    int i, bad = 0;
+    (void)argc;
+    if (enter_root(argv[0]) != 0) {
+        fprintf(stderr, "run-host.cx: need repo root\n");
+        return 2;
+    }
+    if (!exists("./ujs/ujs.com")) {
+        fprintf(stderr, "run-host.cx: build host first (build.cx)\n");
+        return 2;
+    }
+    if (load_expect("ujs/tests/host1-run-expect.txt") != 0) return 2;
+    if (n_exp != EXPECT_PASS) {
+        fprintf(stderr, "run-host.cx: expect count=%d want=%d\n", n_exp, EXPECT_PASS);
+        return 1;
+    }
+    for (i = 0; i < n_exp; i++) bad += check_one(i);
+    if (bad) {
+        fprintf(stderr, "run-host.cx: %d mismatches\n", bad);
+        return 1;
+    }
+    printf("run-host.cx: ok run=%d (host1_package)\n", n_exp);
+    return 0;
+}

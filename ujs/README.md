@@ -1,8 +1,7 @@
 # UJS — 开箱
 
-> 规格：[`prd.md`](prd.md) · **版本**：[`plans/`](plans/)（**0.0.4**；下一刀 [`plans/v0.0.5.md`](plans/v0.0.5.md)）  
+> 规格：[`prd.md`](prd.md) · **版本**：[`plans/`](plans/)（**0.0.5**；下一刀 [`plans/v0.0.6.md`](plans/v0.0.6.md)）  
 > **`ujs/` 内无 `.c`／`.py`**；遗留：[`../archive/ujs-legacy-py-c/`](../archive/ujs-legacy-py-c/)  
-
 
 > 地图：[`ARCHITECTURE.md`](ARCHITECTURE.md) · Paper B：[`../research/ujs-paper.md`](../research/ujs-paper.md)
 
@@ -20,14 +19,15 @@
 ./unisacc.com -run ujs/product/build.cx
 ./unisacc.com -run ujs/product/complete.cx
 
-./ujs/ujs.com --version          # ujs.com 0.0.4（原生）；APE 用 sh ./ujs/ujs.com
+./ujs/ujs.com --version          # ujs.com 0.0.5（原生）；APE 用 sh ./ujs/ujs.com
 ./ujs/ujs.com --help
 ./ujs/ujs.com FILE.ujs           # 默认写出 FILE.wasm
 ./ujs/ujs.com FILE.ujs -o OUT.wasm
 ./ujs/ujs.com --verify OUT.wasm  # host1 \\0asm 结构验面
+./ujs/ujs.com --run OUT.wasm     # host1 迷你 VM 执行 main_export
 ```
 
-预言：[`tests/host1-pass.txt`](tests/host1-pass.txt)（28）+ [`tests/host1-refuse.txt`](tests/host1-refuse.txt)。  
+预言：[`tests/host1-pass.txt`](tests/host1-pass.txt)（28）+ [`tests/host1-refuse.txt`](tests/host1-refuse.txt) + [`tests/host1-run-expect.txt`](tests/host1-run-expect.txt)（跑金）。  
 套件：[`tests/`](tests/)（**在 `ujs/` 下**，不与根 `tests/` 混放）。  
 
 `expect.json`／Node 探针为 archive_only，船闸不打开。
