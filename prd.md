@@ -150,34 +150,34 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 ```text
 0.0.43：完成开发、重建自身迭代体系与新验收（发布须另授）
-├─ 新开发产品：P375b7a09/Sde6182b3已原生重建安装，RI NUL缺陷闭环；Pa7e8备份保留，新候选固定点待证
+├─ 新开发产品：Pb8eae71b/S5ae4d2fc已原生重建安装；RI NUL及-O3/-Os缺口闭环，P375b7a09备份保留，新固定点待证
 ├─ R0 已归档：2529个旧测试路径原blob/模式完整保留；构造支持移tools，新旧入口分离；原生容器/驱动重建已实跑，构造依赖迁移仍待补
 ├─ R1 已有首批：新候选原生产品16断言0；旧Pa7e8的cx/owned模块551断言0及私有状态/函数直接访问拒绝；源码导出同字节；完整覆盖仍NOT_READY
 ├─ R2 旧启动器部分已证：七流原模型/74资源提取不重构；40断言0含constructor真管道/产品镜像同字节/返回7；完整独立合同仍待补
 ├─ R3 旧Pa7e8本机已证：18网8770键/22694真实infer、28868域边界拒绝及恢复、72适配拒绝、三反空跑控制0；非完整产品/跨平台资格
 ├─ R4 部分已证：新根产品RI捕获/严格重放/具名拒绝/恢复24断言0；完整snapshot/生命周期/资源预算待补
-├─ R5 部分已证：新候选默认-run smoke16断言0；旧Pa7e8六目标镜像14/两代固定点55不转授新候选，完整优化/对象/宿主/自举待验
+├─ R5 部分已证：当前候选六档原生语义241/直接-run193/Tape16及smoke16断言0；完整优化语料/域/对象/宿主/自举待验，旧55固定点不转授
 ├─ R6 待迁移：库/FFI/回调/布局/生命周期等公共合同，逐项保留覆盖义务
 └─ R7 待完成：新清单全覆盖 → 同候选跨平台CI → 封存与授权发布
 ```
 
-**优化修复窄验：** exec/c/compiler.c补-O3→二级与-Os→一级的规范化接线，不重构权重；新Linux驱动+根模型包的六档语义242断言0，另Tape合同17断言0，含真实改写见证、别名同字节和无效档拒绝。证据out/c43-optimization-driver-03.log、out/c43-optimization-tape-driver-04.log。新增六档直接-run矩阵在新驱动上194断言0，使用手写字节预期，见out/c43-optimization-run-driver-05.log。仅驱动窄验，根产品仍P375b7a09，须完整重建；完整优化语料/域/自举/外宿主仍未完成。
+**优化修复与证据：** -O3规范化为二级、-Os为一级，与经典src/main.c/src/opt.c的既有优化集合一致；源码修复4cd9fc75e3已进入根产品Pb8eae71b。完整07候选原生语义241、六档直接-run193、Tape16均断言0，日志为out/c43-optimization-candidate-{native,run,tape}-07.log，并打印同一完整候选SHA。十四类手写字节预期/两运行时输入，含别名、除余/无符号边界、循环合流、短路、递归及结构复制；Tape另证默认/O0、O/Os/O1、O3/O2字节关系、真实改写及非法档拒绝。只证Linux x86_64局部合同，完整语料/域/自举/外宿主仍未完成。
 
-**优化首红：** 新tests/optimization.cx按规格六种优化拼写、两运行时输入对14类定义良好的C行为求值。P375b7a09上-O0/-O2及默认-run首批101断言0；扩六档后173断言2失败，均为-O3/-Os被驱动拒绝，见out/c43-optimization-02.log。最小默认-run为out/c43-opt-flags-repro.cx；src/main.c与src/opt.c表明经典参考-O3与-O2优化集合相同，-Os与-O1相同。先修驱动的规范化接线，再在本版重建；不能把参考接受、源码修复或旧候选绿称新根产品已修。
+**优化首红与窄验保留：** P375b7a09扩六档时173断言2失败，均为-O3/-Os被拒绝，原log为out/c43-optimization-02.log；最小默认-run为out/c43-opt-flags-repro.cx。修后Linux驱动先获242原生/194直接-run/17 Tape断言0（各多一个模型容器身份检查），随后完整07产品闭环。原失败未删除；未减少断言或宽放预算。
 
-**下一动作：** 先完成-O3/-Os驱动修复、六档语义窄验及完整产品重建。使用已安装P375b7a09/Sde6182b3默认-run继续0.0.43；补RI完整snapshot/生命周期、库/ABI及优化合同，并为新候选取得完整自举和同候选平台证据。06代两架构内核及五驱动均已真实构建，模型包与05代同SHA，未重构未变权重。旧候选固定点/CI不转授。0.0.44优先登记同程序再次-run启动加速，不在本刀实现。
+**下一动作：** 使用已安装Pb8eae71b/S5ae4d2fc默认-run继续0.0.43；补完整RI/snapshot/生命周期、库/ABI和优化语料/域，并为当前候选取得完整自举及同候选平台证据。07代两架构内核与五驱动均真实构建，1241模型输入双向相等，包SHA未变，未重复构造权重。0.0.44的启动复用提速已登记待实现。
 
-**当前自举事实与下一刀：** 旧Pa7e8/S7601的05代原生构建固定点55断言0保留为历史证据；RI共享解析器已改，根产品现为P375b7a09/Sde6182b3，因此不能继续称当前候选已获该固定点。06代已重新构建两架构全部内核、五驱动及APE并安装；新候选自身后续重建、完整三阶段链及外宿主仍待验。
+**当前自举事实与下一刀：** 旧Pa7e8/S7601的05代固定点55断言0仅为历史证据；RI与优化入口均已改源，根产品现为Pb8eae71b/S5ae4d2fc，07代已重新构建两架构内核、五驱动和APE。当前候选自身后续重建、完整三阶段链及外宿主仍待验，不借旧固定点。
 
 **当前RI刀：** tests/resources.cx以新根产品真实执行默认/捕获/严格重放、跨CWD、身份/重复键/缺失资源/坏行/路径拒绝、空与二进制额外账本项、拒绝后恢复，共24断言0；每个拒绝核rc2、原因及空stdout。额外空/二进制项未被消费者请求，只证账本装载，不扩成完整消费者RI语义。完整snapshot、生命周期、预算和模型坏输入仍待补。
 
 **RI首红及修复闭环：** out/c43-resources-02.log保留旧Pa7e8的18断言中2失败：内嵌NUL的表头/行被rc0接受。共享解析器在转C字符串前按显式行长度memchr拒绝NUL，源码修复为78bf02dfab。06代完整候选及安装后根产品均实际24断言0；原始失败未删除。
 
-**RI验证边界：** 新Linux驱动对原包的25断言0见out/c43-resources-driver-05.log；完整06候选及安装后根产品的24断言0分别见out/c43-resources-candidate-06.log和out/c43-resources-installed-06.log。原01驱动错误、02产品失败、03/04窄验日志均保留；25与24的差异是原生驱动另核模型容器身份。内部相位及冷/热耗时UNMEASURED。
+**RI验证边界：** 当前07根产品复验24断言0见out/c43-resources-installed-07.log。06代的新驱动25/完整产品24为历史局部证据，原01驱动错误及02产品失败保留；驱动多一个模型容器身份检查。额外空/二进制项只证账本装载，完整消费者RI语义、snapshot/生命周期/预算和模型坏输入仍待补。内部相位及冷/热耗时UNMEASURED。
 
-**新开发产品已安装：** 06代根unisacc.com为4757913B／P375b7a09dac47c2e564b7689da6b6869b7ccb171a0ea77cb24968ca0fa8dcc6f，当前源Sde6182b3e5f044ea4852c244c1a113a68b6ae49c963cb6bd372954a1893322e2，仍0.0.43。两架构各11对象及两内核、五平台驱动切片、完整APE均由自身原生工具实际构建；1241模型构造输入双向相等，包SHA仍1c6a503090ee8d4189d6326139fa4a18b5db14b9682f1db0949e8ee79519db3e。候选资源24及smoke16断言0；根资源24断言0，身份核验通过。原Pa7e8及build记录完整备份在out/c43-native-kernel-06/bootstrap-before-install.com*；新记录与补充收据绑定当前源和五切片。仅本机开发资格，未签名/发布。
+**新开发产品已安装：** 07代根unisacc.com为4757929B／Pb8eae71ba2651709dbd5c927dd4d774050c10b4cefed85da0ca3600dc79730e5，构建源S5ae4d2fc614e52794abc46eca17760bbed7a9ea5b356d11f5b99df42c6fc6f5e，仍0.0.43。两架构各11对象/两内核、五平台驱动切片及完整APE均由自身工具实际构建；模型包仍1c6a503090ee8d4189d6326139fa4a18b5db14b9682f1db0949e8ee79519db3e。完整候选原生241/直接-run193/Tape16断言0，安装后RI24及--all中的smoke16断言0，根身份核验通过。P375b7a09及原构建记录备份于out/c43-native-kernel-07/bootstrap-before-install.com*；新记录/补充收据绑定当前源及五切片。证据out/c43-native-install-07.log与根build.json；仅开发资格，未签名/发布。
 
-**当前证据：** 本候选资源24及smoke16为已实跑局部合同；--all仍返回3并保留19 NOT_READY/18 NOT_RUN。旧Pa7e8的owned551、十八网8770键/边界/恢复及14格式/55固定点证据不转授新候选；旧七流40也是旧启动器的局部合同。新清单完整RI、优化、格式/对象、库/ABI、自举和实际六宿主均未完成；不把局部绿称开发或发布完成。构造旧过程与Pa7e8基线已移至archive/prd-c43-pre-native-qualification-20261025.md。
+**当前证据：** 本候选原生优化241、六档直接-run193、Tape16、RI24和smoke16均为实际局部检查；--all仍返回3，保留19 NOT_READY/18 NOT_RUN。完整优化语料/域、RI、格式/对象、库/ABI、自举及实际六宿主未完成。旧Pa7e8的owned551/十八网/14格式/55固定点与旧启动器七流40不转授当前候选，不把局部绿称开发或发布完成。
 
 ### 本版重构合同
 
@@ -206,16 +206,17 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 | 房间 | 当前事实／决定 | 证据与行动入口 |
 |---|---|---|
-| 产品室：新开发产品／旧基线分列 | 根产品P375b7a09/Sde6182b3，4757913B；RI NUL修复已进入两架构/五驱动重建后的完整产品。旧Pa7e8及构建记录已完整备份。 | out/c43-native-install-06.log、根build.json及06代.native.tsv；候选资源24/smoke16、安装后资源24均0。仅开发资格，新固定点与同候选平台证据待验。 |
+| 产品室：新开发产品／旧基线分列 | 根Pb8eae71b/S5ae4d2fc，4757929B；RI NUL及优化别名缺口已进入两架构/五驱动重建后的完整产品；P375b7a09及其记录备份保留。 | out/c43-native-install-07.log、根build.json及07代.native.tsv；原生241/直接-run193/Tape16/根RI24/smoke16均0。仅开发资格，完整自举/同候选平台待验。 |
 | 十八网新合同室 | 旧Pa7e8默认-run一次进程执行18网/8770键/22694个key-head整数infer，28868字段边界拒绝及等量恢复、72适配拒绝；gold标签/唯一最大logit/词表映射均核；改gold、改模型及恢复三负控0。 | `out/c43-net-all-02.log`、`out/c43-net-controls-01.log`；tools/net-material.cx源派生+只读verify，未重构权重，未借DENSE或旧PASS。只证本机经典整数核合同，不外推P3每路线或六宿主。 |
 | 原生汇编室 | 新CX复用产品-E处理.S并展开宏；现存C编码器由有来源材料适配默认-run执行，189断言0；新ELF链接器16断言0。03代两架构各11对象已原生构建及链接为x86 7144B／ARM 7096B UNIKERN1，均已进入新根产品。 | `tools/kernels.md`、out/c43-native-kernel-execute-e4-01.*、out/c43-native-product-case0.*；x86真实E4同字节，完整编译ELF同字节且返回7。ARM真实执行及完整产品资格仍待验；PREPARED和功能分列。 |
 | 七流新合同室 | 原生stream-pack曾从旧P7裁七模型/74资源，共40断言0，含两源码链、真管道、镜像和具名拒绝；不转授新候选完整合同。 | out/c43-stream-contracts-03.log、tools/streams.md；当前根产品另已重建，完整RI/拒绝域/六目标仍待补。 |
 | CX所有权室 | 旧Pa7e8上的cx/owned使用真实模块隐私、固定4×8 i64存储和不回绕代际句柄；551断言0，外部直接访问data/slot各拒绝1。复制活句柄仍可别名，不是编译期所有权或通用堆。 | `make owned`、`cx/check_owned.cx`；只验证本机运行期设施，不代替七流十八网或完整库验收。 |
 | 旧套件封存室 | 主人已裁定旧1333项整套归档，不再调度。旧F4在window082止于327结证（314rc0、6资源UNKNOWN、7失败）/1006待办；失败未改PASS。 | archive/testing-c43-legacy保留旧源码和原工作规则；F4目录原样留存。新smoke16断言0、--all实际3且明确19 NOT_READY/18 NOT_RUN；旧数字不算新完成率。 |
 | ujs 子项目 | 独立规格与进度只在 [`ujs/prd.md`](ujs/prd.md)（及 `ujs/ARCHITECTURE.md`）；根宫殿不重述 ujs.com 代际／语料。跨项目只记：底座为 `unisacc.com`+`.cx`，不 tip／Draft 除非另授。 | [`ujs/prd.md`](ujs/prd.md) |
-| 新自举室 | 旧Pa7e8在05代完整重建并获两代固定点55断言0；RI改源后当前候选为P375b7a09，06代构建已完成，新固定点及完整三阶段链待验。 | out/c43-native-selfhost-05.log仅属旧候选；新候选构建见06代日志、tools/product-build.cx，不借旧资格。 |
-| 资源与RI室 | 新根产品捕获/严格重放/身份/缺失与坏账本拒绝/恢复24断言0；内嵌NUL原红已修。额外空/二进制项仅证账本装载，完整消费者语义、snapshot/生命周期与预算未完成。 | tests/resources.cx、out/c43-resources-installed-06.log及tests/coverage.tsv；旧资源UNKNOWN与原失败保留，不改PASS。 |
-| 资格与发布室 | P375b7a09当前只有Linux x86_64开发合同；完整新清单、自举和实际外宿主待验，未获签名/Draft/Latest/公开授权。0.0.44启动复用需求已登记。 | 旧CI不转授新候选；plans/v0.0.44.md的C44-RUN-REUSE-01仍待实现。 |
+| 优化合同室 | 六种拼写的原生241/直接-run193及Tape16断言0；手写字节预期、实际Tape改写和非法档拒绝均保留；完整语料/域/外宿主未覆盖。 | tests/optimization.cx及cases/optimization.cx；07代三日志打印同一候选SHA，不借旧PASS。 |
+| 新自举室 | 旧Pa7e8的05代固定点55仅属旧候选；当前Pb8eae71b的07代构建已完成，新固定点/完整三阶段链待验。 | out/c43-native-selfhost-05.log不转授；当前构建见07代日志、tools/product-build.cx。 |
+| 资源与RI室 | 07根产品捕获/严格重放/身份/缺失与坏账本拒绝/恢复24断言0；内嵌NUL原红保持修复。额外空/二进制项只证装载，完整消费者语义、snapshot/生命周期和预算未完成。 | tests/resources.cx、out/c43-resources-installed-07.log及tests/coverage.tsv；原失败/UNKNOWN保留，不改PASS。 |
+| 资格与发布室 | Pb8eae71b只有Linux x86_64具名开发合同；完整清单、自举及外宿主待验，签名/Draft/Latest/公开未授权。 | --all仍3；旧CI不转授。plans/v0.0.44.md的C44-RUN-REUSE-01待实现。 |
 
 旧M7/固定HEAD、旧CI/宿主交接、窗口计数与准备过程已移至[历史记忆快照](archive/prd-c43-pre-native-qualification-20261025.md)。本表只保留当前目标、能力、缺口和入口；原始身份、红/UNKNOWN与回退均未删除。
 

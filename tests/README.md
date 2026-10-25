@@ -103,3 +103,10 @@ resource domain, same-candidate bootstrap or foreign-host qualification. The
 broad optimization contract remains NOT_READY. All internal timing phases and
 cold/hot breakdowns are UNMEASURED; this is not a speed benchmark. Use separate
 new directories for each native, direct-run and Tape batch and a <=55-second watchdog.
+
+The complete development candidate `Pb8eae71b` (SHA256 `b8eae71ba2651709dbd5c927dd4d774050c10b4cefed85da0ca3600dc79730e5`) passed
+241 native, 193 explicit direct-run and 16 Tape assertions in generation 07.
+The three `out/c43-optimization-candidate-{native,run,tape}-07.log` records print
+the same full candidate hash. The installed root also passed the 24-check RI
+batch and 16 smoke checks; `--all` remains rc3 with its full coverage gaps.
+This is local Linux x86_64 development evidence, not release qualification.
