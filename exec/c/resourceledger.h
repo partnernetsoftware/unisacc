@@ -70,7 +70,11 @@ static int rl_load(const char *dir, RLLedger *L, char *err, size_t errn) {
         size_t L2;
         while (e < n && b[e] != '\n') e++;
         if (e == n) { free(b); snprintf(err, errn, "INTERFACE_ERROR resource-row-truncated"); return 1; }
-        L2 = e - at; line = malloc(L2 + 1); if (!line) { free(b); return 1; }
+        L2 = e - at;
+        /* Validate the complete byte row before C string parsing. Otherwise an
+           embedded NUL hides a suffix in either the identity or a data row. */
+        if (memchr(b + at, 0, L2)) { free(b); snprintf(err, errn, "INTERFACE_ERROR resource-row-nul"); return 1; }
+        line = malloc(L2 + 1); if (!line) { free(b); return 1; }
         memcpy(line, b + at, L2); line[L2] = 0; at = e + 1;
         if (!strncmp(line, "#SC1\t", 5)) {
             /* identity header: the first line only, at most once */
