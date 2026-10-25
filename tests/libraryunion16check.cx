@@ -31,6 +31,7 @@
    argparse errors are rc 2 with its usage text (prog name libraryunion16check.py, so the text is byte-identical). */
 #pragma unisa use cxlib.runtimecopy
 #pragma unisa use cxlib.pyjson
+#pragma unisa use cxlib.libffiprovider
 
 /* a whole scratch tree through the one deletion guard (include/unisa_safedel.h, in the cx.h prelude; commissar ruling
    2026-10-23) with an explicit ceiling: these trees hold copied sources and build outputs, beyond SAFEDEL_MAX_FILES */
@@ -65,6 +66,8 @@ static const char *HELP =
 static const char *SRC_SHA = "f3a3082a23b37c293a4fcd1053147b371f2ff91fa7ea1b2a52e335676bac82dc";
 
 static char ROOT[4096], SELF[4096], TD[4200];
+static ffip_provider DEFAULT_FFI;
+static int DEFAULT_FFI_ACTIVE;
 
 /* ---- small utilities ---------------------------------------------------------------------------------------- */
 typedef struct Buf { unsigned char *p; size_t n, cap; } Buf;
@@ -219,7 +222,7 @@ static Cls classify(const char *s) {
 }
 typedef struct Args {
     const char *package, *arch, *cases, *pressures, *evidence, *provider, *cflags, *ldflags;
-    int callback, sanitize, build_only;
+    int callback, sanitize, build_only, cflags_explicit, ldflags_explicit;
 } Args;
 static void parse(int argc, char **argv, Args *a) {
     Cls *cls = calloc((size_t)argc + 1, sizeof *cls); Buf extras = { 0 }; int i, dd = 0, nextra = 0;
@@ -269,8 +272,8 @@ static void parse(int argc, char **argv, Args *a) {
         case O_PRESSURES: a->pressures = v; break;
         case O_EVIDENCE: { static char ev[4200]; pathnorm(v, ev, sizeof ev); a->evidence = ev; break; }
         case O_PROVIDER: { static char pv[4200]; pathnorm(v, pv, sizeof pv); a->provider = pv; break; }
-        case O_CFLAGS: a->cflags = v; break;
-        case O_LDFLAGS: a->ldflags = v; break;
+        case O_CFLAGS: a->cflags = v; a->cflags_explicit = 1; break;
+        case O_LDFLAGS: a->ldflags = v; a->ldflags_explicit = 1; break;
         }
     }
     if (nextra) usage_error("unrecognized arguments: %s", (const char *)extras.p);
@@ -417,6 +420,7 @@ static int write_evidence(void) {
 /* finish(rc): the record's runner rc, the evidence, the stdout line.  rc, or -1 when it raised (EXC set) */
 static int finish(int rc) {
     pj_value *sum, *vs; size_t i, k; char *text; size_t n;
+    if (DEFAULT_FFI_ACTIVE && ffip_verify(&DEFAULT_FFI)) uncaught(ffip_error());
     pj_set(RECORD, "actual_runner_rc", pj_int(rc));
     if (A.evidence && write_evidence() != 0) return -1;
     sum = pj_dict(); vs = pj_list();
@@ -595,7 +599,9 @@ static int body(const char *cc, List *flags, List *san, List *cf, List *lf, cons
     { char p[4400]; snprintf(p, sizeof p, "%s/libunisacc.c", rt); lpush(&cmd, p); snprintf(p, sizeof p, "%s/librarycall_%s.S", rt, arch); lpush(&cmd, p); }
     for (i = 0; i < lf->n; i++) lpush(&cmd, lf->v[i]);
     lpush(&cmd, "-o"); lpush(&cmd, lib);
+    if (DEFAULT_FFI_ACTIVE && ffip_verify(&DEFAULT_FFI)) uncaught(ffip_error());
     if (run("runtime_build", &cmd, &rc, 0) != 0) return -1;
+    if (DEFAULT_FFI_ACTIVE && ffip_verify(&DEFAULT_FFI)) uncaught(ffip_error());
     if (rc) return finish(rc == 142 ? 142 : 1);
     {   char hex[65];
         if (rtc_sha_file(lib, hex, why, sizeof why) != 0) { exc_oserror(errno ? errno : ENOENT, lib); return -1; }
@@ -727,7 +733,9 @@ int main(int argc, char **argv) {
     {   const char *e;
         A.cases = "is8,si8,ss8,ii8,is4,si4,ss4,ii4,fpmix"; A.pressures = "plain,gp5fp7,gp6fp8,gp7fp7";
         A.cflags = (e = getenv("UNISACC_FFI_CFLAGS")) ? e : "";
+        A.cflags_explicit = e != 0;
         A.ldflags = (e = getenv("UNISACC_FFI_LDFLAGS")) ? e : "-lffi";
+        A.ldflags_explicit = e != 0;
     }
     parse(argc, argv, &A);
     Dd = descriptor(3, 8, 8, 0, 0, 0); Id = descriptor(1, 8, 8, 1, 0, 0); Fd = descriptor(3, 4, 4, 0, 0, 0); Jd = descriptor(1, 4, 4, 1, 0, 0);
@@ -760,6 +768,14 @@ int main(int argc, char **argv) {
         cf.n = 0; lf.n = 0;
         manifest = provider_flags(provider, TARGET, &cf, &lf);
     }
+#ifdef __linux__
+    /* Ordinary Linux default only: this PIC archive is not a qualified 3.5.2 provider directory. */
+    if (!provider && !A.cflags_explicit && !A.ldflags_explicit && !cf.n && lf.n == 1 && !strcmp(lf.v[0], "-lffi")) {
+        if (ffip_select(&DEFAULT_FFI)) uncaught(ffip_error());
+        DEFAULT_FFI_ACTIVE = 1;
+        lf.v[0] = DEFAULT_FFI.link;
+    }
+#endif
     /* explicit_files(ffi_ldflags) */
     files = pj_dict();
     for (i = 0; i < lf.n; i++) {
@@ -777,6 +793,12 @@ int main(int argc, char **argv) {
     pj_set(RECORD, "ffi_compile_flags", strlist(&cf));
     pj_set(RECORD, "ffi_link_flags", strlist(&lf));
     pj_set(RECORD, "ffi_explicit_files", files);
+    if (DEFAULT_FFI_ACTIVE) {
+        pj_value *selected = pj_dict();
+        pj_set(selected, "link_arg", pj_strz(DEFAULT_FFI.link));
+        pj_set(selected, "sha256", DEFAULT_FFI.pic ? pj_strz(DEFAULT_FFI.sha256) : pj_null());
+        pj_set(RECORD, "default_libffi_provider", selected);
+    }
     pj_set(RECORD, "schema", pj_int(1));
     pj_set(RECORD, "target", pj_strz(TARGET));
     pj_set(RECORD, "scope", pj_strz(A.build_only ? "build-only; no public calls" : "actual public natural union16 matrix; any rejection is failure"));
@@ -803,6 +825,10 @@ int main(int argc, char **argv) {
         if (copy2(ab, pc, why, sizeof why) != 0) uncaught(why);
         if (rtc_sha_file(SELF, hex, why, sizeof why) != 0) uncaught(why);
         pj_set(inputs, "tests/libraryunion16check.cx", pj_strz(hex));
+        { char module[4300]; snprintf(module, sizeof module, "%s/tests/cxlib/libffiprovider.cx", ROOT);
+          if (rtc_sha_file(module, hex, why, sizeof why) != 0) uncaught(why);
+          pj_set(inputs, "tests/cxlib/libffiprovider.cx", pj_strz(hex)); }
+        if (DEFAULT_FFI_ACTIVE && DEFAULT_FFI.pic) pj_set(inputs, DEFAULT_FFI.link, pj_strz(DEFAULT_FFI.sha256));
         if (rtc_sha_file(pc, hex, why, sizeof why) != 0) uncaught(why);
         pj_set(inputs, "tests/libraryabi/union16.c", pj_strz(hex));
         pj_set(RECORD, "source_closure", inputs);

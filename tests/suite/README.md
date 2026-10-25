@@ -85,3 +85,5 @@ DRAFT callable门面：lib-callable-model仍完整独立执行原wire检查；va
 九个原生共享runtime scope（typed/sig2共用libnative、variadic、callable-variadic、callback native/forward/outcome及两exports）复用cxlib.libffiprovider选择Linux LIBRARY_PATH内实际PIC archive，并在shared构建前后复核路径/SHA；JSON绑定provider及runtime，传递模块body列入files/guards。host executable链接、Darwin -arch和sanitizer及全部原公共调用/ownership/loader/exports/并发断言保留；五个仍活跃Python入口本刀不改。此为待独立H13原40资格的接线，help/依赖轻检不代表完整通过。
 
 五个Python oracle（bindings/data/resolver/lifecycle/artifacts）现由libraryoracleprovider.cx固定白名单门面选择实际PIC link/SHA，覆盖UNISACC_TEST_LIBFFI_LINK并恢复parent UNISA_CONTAINER unset；POSIX直接fork/exec/wait继承原stdout/stderr、argv和完整后代看门狗，执行前后复核provider，其他平台保原exec路径。只替原shared-runtime一个链接参数（artifact传现build ldflags）；原算法/循环/断言/参考/超时/host executable链接不变，Python运行依赖尚未迁移，完整H14资格未做。
+
+union16仅在Linux且CLI/环境均未显式配置FFI flags或qualified provider时选择实际PIC archive，前后核路径/SHA并记入source_closure；原qualified3.5.2完整manifest分支保留，普通archive不伪装该协议。原is8,si8四压力、O0/O1/O2和sanitizer全部断言不变。实际共享链接已0，但首次原40资格在is8/gp5fp7的O0值/复制/canary断言仍rc1，不能记整项通过。
