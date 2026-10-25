@@ -683,7 +683,8 @@ job exec-macxself-package env SELF_PART=package TARGET=osx/x86_64 ./exec/pipelin
 job exec-bootstrap-osxarm env SELF_PART=bootstrap TARGET=osx/arm64 ./exec/pipeline/selfcheck.sh
 job exec-bootstrap-osxx86 env SELF_PART=bootstrap TARGET=osx/x86_64 ./exec/pipeline/selfcheck.sh
 # the fixed source-to-ELF paths of exec/pipeline/keep-elf.txt (96 in 0.0.34), three shards
-job exec-srcelf-1 env ELF_SHARD=1/3 ./exec/pipeline/check-elf.sh
+job exec-srcelf-1a env ELF_SHARD=1/6 ./exec/pipeline/check-elf.sh
+job exec-srcelf-1b env ELF_SHARD=4/6 ./exec/pipeline/check-elf.sh
 job exec-srcelf-2 env ELF_SHARD=2/3 ./exec/pipeline/check-elf.sh
 job exec-srcelf-3 env ELF_SHARD=3/3 ./exec/pipeline/check-elf.sh
 for k in 1 2 3 4; do job difftest_o-$k SHARD=$k/4 ./tests/difftest_o.sh; done
