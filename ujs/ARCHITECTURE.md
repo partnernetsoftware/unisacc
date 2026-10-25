@@ -30,7 +30,8 @@
                                   └─────────────────────────────────────┘
 ```
 
-旧路径 `construct` · `core` · `uxe` · `web` · `compile.mjs` · `native/*` 为**兼容符号链接**，指向上述板块；新代码请写板块路径。
+**产品目录**：出货只认 [`product/`](product/) + [`seed/stage0/compiler_min.cx`](seed/stage0/compiler_min.cx)。  
+旧路径 `construct` · `core` · `uxe` · `web` · `compile.mjs` · `native/*` 为**兼容符号链接**；新代码写板块路径，勿在链接名下堆新逻辑。
 
 ## 1　可复用权重 `weights/`（数据）
 
