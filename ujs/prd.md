@@ -151,7 +151,7 @@
 | **构造 / jtape** | gold→IntNet→oracle；`acc` / fold / icfold；全表 `ujs2wasm` | 方法验收；表阶段仍欠全量 P-2 Lean（继承 Paper A） |
 | **M3 出货** | 手写 `compiler.ujs`→`compiler_core.wasm`；stage2≡ · body≡ · ship 无 python emit | **不是** IntNet；交付面 = **UJS-1_ship**（渐扩），≠ 全表 UJS-1 |
 
-写 Paper B / Release 时：出货写 **`ujs.com`**（host1）与／或 core（M3 实践）；`web-build` 是 path-A 残线；**host1 门** = `tests/ujs/run.cx`；UXE／Pages 另门；旧 `ujs.sh` 已归档。
+写 Paper B / Release 时：出货写 **`ujs.com`**（host1）与／或 core（M3 实践）；`web-build` 是 path-A 残线；**host1 门** = `ujs/tests/run.cx`；UXE／Pages 另门；旧 `ujs.sh` 已归档。
 
 ```
 0 emit 齐 · 2a ship-js     ✓
@@ -330,7 +330,7 @@ compile(src: Uint8Array|string) →
 | **M3** | `compiler.ujs` 自举 | body≡stage0 → stage2≡stage1 | **v16✓** + fold logic/elseif/… on core |
 | **P0** | ship 无 web-build / 无 `engine.wasm`（A） | `ujs2wasm_compiler.sh` · `ship-engine` 拒 A 核 | **✓** |
 | **3** | 换核模板 | 按下表抄路径绿 | 骨架 ✓ |
-| **4** | 门禁即契约 | **host1**：`tests/ujs/run.cx`。实践脊／UXE 另门；旧 `ujs.sh` 见 `archive/testing-c43-legacy/` | host1 套件 ✓ · UXE 另门 |
+| **4** | 门禁即契约 | **host1**：`ujs/tests/run.cx`。实践脊／UXE 另门；旧 `ujs.sh` 见 `archive/testing-c43-legacy/` | host1 套件 ✓ · UXE 另门 |
 | **5–6** | Host / llm | 有玩法再开 | 搁置 |
 
 ### 换核模板（#3 可抄）
@@ -351,7 +351,7 @@ compile(src: Uint8Array|string) →
 
 | 门 | 命令 |
 |---|---|
-| **`ujs.com` host1** | `./unisacc.com -run tests/ujs/run.cx -- --smoke`；发版材料另跑 `--complete` |
+| **`ujs.com` host1** | `./unisacc.com -run ujs/tests/run.cx -- --smoke`；发版材料另跑 `--complete` |
 | **ship-js 合同**（实践脊） | 旧 `uxe_ship_js`／Pages 另门（脚本或在 archive；不挡 host1） |
 | UXE 无人 | `cd ujs && npm run test:uxe:all`（另门） |
 | Pages | `npm run ship:pages` 后抽玩感 |
@@ -408,8 +408,10 @@ B (sim.wasm) ══directSim══> Pages
 ## T2. 目录树 —— 文件到职责
 
 ```
-ujs/                         ★ 0.0.3：树内无 .c／.py
+ujs/                         ★ 树内无 .c／.py；套件在本树
 ├─ prd.md · README.md · ARCHITECTURE.md · plans/
+├─ tests/                    ★ host1 产品套件（不在根 tests/）
+│   └─ run.cx · host1-pass/refuse
 ├─ product/                  ★ host image（unisacc.com + .cx）
 │   ├─ ujs_main.cx · build*.cx · ape-pack.cx · complete.cx
 │   ├─ corpus-host.cx · verify-host.cx · wasm-verify.cx
@@ -432,7 +434,7 @@ ship B ══> compiler_core → sim.wasm  （无 engine.wasm / 无 python3 emit
 {app} ══只调══> host_*          （不知 canvas / fetch / key）
 UXEP ══一次一包══> host_gpu_submit
 UXIN ══> host_input_read
-tests/ujs/run.cx ══调══> ujs/product/{build,corpus-host,complete}.cx
+ujs/tests/run.cx ══调══> ujs/product/{build,corpus-host,complete}.cx
 ```
 
 ## T3. 出货 DAG —— host image vs 实践脊
@@ -442,7 +444,7 @@ tests/ujs/run.cx ══调══> ujs/product/{build,corpus-host,complete}.cx
  │
  ├──── host image（ujs.com · host1_package）───────────┐
  │    stage0 → \\0asm；APE／六目标                       │
- │    ⟦门禁⟧ tests/ujs/run.cx · host1-pass/refuse       │
+ │    ⟦门禁⟧ ujs/tests/run.cx · host1-pass/refuse       │
  │                                                     │
  ├──── 实践脊 M3（m3_scaffold · 另门）─────────────────┤
  │    compile.mjs → compiler_core → sim.wasm           │
@@ -473,7 +475,7 @@ ship：index.html → engine.js + game.js + sim.wasm（directSim；无 engine.wa
 ## T5. 验收 DAG
 
 ```
-host1 绿 ── tests/ujs/run.cx ──┬── --smoke（build + oracle）
+host1 绿 ── ujs/tests/run.cx ──┬── --smoke（build + oracle）
                                └── --complete（APE + oracle + six）
 
 实践另门 ── M3／uxe（归档脚本或 npm）；不挡 0.0.x 版号
@@ -549,7 +551,7 @@ flowchart TD
 
     subgraph R6["哨所 · 观测与门禁"]
         F1["__UXE_SNAP__ 一帧 JSON"]
-        F2["分层：tests/ujs/run.cx · UXE/Pages另门 · 旧脚本归档"]
+        F2["分层：ujs/tests/run.cx · UXE/Pages另门 · 旧脚本归档"]
         F3["截图非默认；人只审手感"]
         F1 --> F2 --> F3
     end
@@ -598,7 +600,7 @@ flowchart LR
 ```mermaid
 stateDiagram-v2
     [*] --> Lang
-    Host: tests/ujs/run.cx（ujs.com host1）
+    Host: ujs/tests/run.cx（ujs.com host1）
     Practice: M3/core · uxe_ship_js（另门）
     Uxe: test:uxe:all（另门）
     Ship: ship:pages
@@ -640,7 +642,7 @@ flowchart TD
 | **两脊** | 构造/jtape（IntNet）∥ M3 出货（`compiler_core`，非 IntNet） |
 | **A / B** | path-A `ujs_full` 演示 / path-B `sim.wasm` 出货步进 |
 | **UJS-1_ship** | M3 已交付子集 ⊂ 全表 UJS-1 |
-| **门禁** | `tests/ujs/run.cx`（smoke／complete）· UXE／Pages 另门 · 旧 `ujs.sh` 已归档 |
+| **门禁** | `ujs/tests/run.cx`（smoke／complete）· UXE／Pages 另门 · 旧 `ujs.sh` 已归档 |
 | **host_*** | 核唯一出入口；GPU/key 停 Host |
 | **UXEP / UXIN** | 一次一包提交 / 输入快照 |
 | **BUILD.json** | 与 Release 对指纹 |
@@ -675,7 +677,7 @@ flowchart LR
 | [`plans/`](plans/) | **`ujs.com` 0.0.x 版本计划**（范围／判据／进度） |
 | [`uxe/HOST_ABI.md`](uxe/HOST_ABI.md) | Host 符号 / UXEP·UXIN |
 | [`README.md`](README.md) | 开箱与分发 |
-| [`product/README.md`](product/README.md) · [`../tests/ujs/README.md`](../tests/ujs/README.md) | 产品壳 · 套件入口 |
+| [`product/README.md`](product/README.md) · [`tests/README.md`](tests/README.md) | 产品壳 · 套件入口 |
 | [`archive/`](archive/) | 历史；不当真源 |
 
 升版：按 `plans/v0.0.N.md` 完成判据 bump `ujs.com` 版本串；破坏性语言/API 另记；旧活规格摘入 `archive/`。

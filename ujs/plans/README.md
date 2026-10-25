@@ -1,7 +1,7 @@
 # UJS 版本计划
 
 > 活规格：[`../prd.md`](../prd.md)  
-> 产品闸：`./unisacc.com -run tests/ujs/run.cx -- --smoke|--complete`
+> 产品闸：`./unisacc.com -run ujs/tests/run.cx -- --smoke|--complete`
 
 ## 规则
 

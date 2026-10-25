@@ -8,7 +8,7 @@
 
 | 版 | 必须完成（定义） | 明确不做 |
 |---|---|---|
-| **0.0.1** | host1：APE + 语料 28/0 + 六目标；`.cx` 产品链；`tests/ujs/run.cx` | 嵌 core；论文改口；tip |
+| **0.0.1** | host1：APE + 语料 28/0 + 六目标；`.cx` 产品链；`ujs/tests/run.cx` | 嵌 core；论文改口；tip |
 | **0.0.2** | ✓ 生产力合同：版号；身份；预言拆分；CLI；prd／套件 | 扩 stage0 闭包；m4；公开 |
 | **0.0.3** | ✓ `ujs/` 清空 `.py`／`.c`（迁 archive）；版号 0.0.3；闸绿 | 宣称 construct 已 `.cx` 化；公开 |
 | **0.0.4** | ✓ host1 wasm 验面（`--verify`／`verify-host`）；版号；闸绿 | 宣称 construct 已迁；训模型；搬回 `ujs/` |

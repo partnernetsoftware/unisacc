@@ -1,16 +1,16 @@
 # Tests
 
-## UJS product (`ujs.com`)
+## UJS product (`ujs.com`) — **不在本目录**
 
-Host1 ship gates live under [`ujs/`](ujs/)（`unisacc.com` + `.cx` only）:
+Host1 船闸在 **[`../ujs/tests/`](../ujs/tests/)**（与 unisacc 套件分离）：
 
 ```
-./unisacc.com -run tests/ujs/run.cx -- --list
-./unisacc.com -run tests/ujs/run.cx -- --smoke
-./unisacc.com -run tests/ujs/run.cx -- --complete
+./unisacc.com -run ujs/tests/run.cx -- --list
+./unisacc.com -run ujs/tests/run.cx -- --smoke
+./unisacc.com -run ujs/tests/run.cx -- --complete
 ```
 
-Fixtures: [`ujs2wasm/`](ujs2wasm/). Details: [`ujs/README.md`](ujs/README.md).
+语料夹具暂仍 [`ujs2wasm/`](ujs2wasm/)（expect.json 等为 archive_only）。说明：[`../ujs/tests/README.md`](../ujs/tests/README.md)。
 
 ## New native test MVP (unisacc CX)
 

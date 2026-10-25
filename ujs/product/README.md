@@ -10,8 +10,8 @@
 ## 命令
 
 ```bash
-./unisacc.com -run tests/ujs/run.cx -- --smoke
-./unisacc.com -run tests/ujs/run.cx -- --complete
+./unisacc.com -run ujs/tests/run.cx -- --smoke
+./unisacc.com -run ujs/tests/run.cx -- --complete
 ./unisacc.com -run ujs/product/build.cx
 ./unisacc.com -run ujs/product/build-ape.cx
 ./unisacc.com -run ujs/product/build-six.cx

@@ -13,8 +13,8 @@
 
 ```bash
 # 仓库根 — 套件
-./unisacc.com -run tests/ujs/run.cx -- --smoke
-./unisacc.com -run tests/ujs/run.cx -- --complete
+./unisacc.com -run ujs/tests/run.cx -- --smoke
+./unisacc.com -run ujs/tests/run.cx -- --complete
 
 # 或直接产品闸
 ./unisacc.com -run ujs/product/build.cx
@@ -27,7 +27,9 @@
 ./ujs/ujs.com --verify OUT.wasm  # host1 \\0asm 结构验面
 ```
 
-预言：[`../tests/ujs/host1-pass.txt`](../tests/ujs/host1-pass.txt)（28）+ [`../tests/ujs/host1-refuse.txt`](../tests/ujs/host1-refuse.txt)。  
+预言：[`tests/host1-pass.txt`](tests/host1-pass.txt)（28）+ [`tests/host1-refuse.txt`](tests/host1-refuse.txt)。  
+套件：[`tests/`](tests/)（**在 `ujs/` 下**，不与根 `tests/` 混放）。  
+
 `expect.json`／Node 探针为 archive_only，船闸不打开。
 
 ## 目录
@@ -35,6 +37,7 @@
 | 路径 | 角色 |
 |---|---|
 | [`product/`](product/) | 出货宿主 |
+| [`tests/`](tests/) | **host1 产品套件**（不在根 `tests/`） |
 | [`plans/`](plans/) | **0.0.x 版本计划** |
 | [`seed/stage0/`](seed/stage0/) | stage0 编译器 |
 | [`iterate/`](iterate/) | M3 实践脊（另标签） |

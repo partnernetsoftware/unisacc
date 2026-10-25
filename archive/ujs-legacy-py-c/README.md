@@ -11,6 +11,6 @@
 | `ujs/__init__.py`·`__main__.py` | 包入口遗骸 |
 | `practice/**/_selftest_run.py` | 自测遗骸 |
 
-**日用**：`./ujs/ujs.com` · `tests/ujs/run.cx`。  
+**日用**：`./ujs/ujs.com` · `ujs/tests/run.cx`。  
 **构造续迁**：见 `ujs/plans/cx-migration.md`（真迁 `.cx` 后可再删本档）。  
 仓外／m4 适配器若仍需旧 CLI，须自备 `PYTHONPATH` 指向本树并自担债；不得写回 `ujs/`。
