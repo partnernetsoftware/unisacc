@@ -1,0 +1,61 @@
+# Read an existing owner-reviewed Draft asset and export a private Actions artifact.
+# This workflow does not create or publish releases.
+name: Export owner-reviewed complete evidence capsule
+on:
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: Existing owner Draft release ID; never creates a release
+        type: string
+        required: true
+      asset_id:
+        description: Exact owner-uploaded evidence.zip asset ID
+        type: string
+        required: true
+      evidence_sha256:
+        description: Owner-reviewed raw evidence.zip SHA256
+        type: string
+        required: true
+      candidate_source_sha:
+        description: Fixed candidate RC source; distinct from this producer commit
+        type: string
+        required: true
+        default: cd30109850f1d8958cc004d82821c36c46543db3
+permissions:
+  contents: write # Existing private Draft assets are invisible to read-only tokens; this workflow ONLY reads.
+concurrency:
+  group: unisacc-c43-evidence-capsule-export
+  cancel-in-progress: false
+jobs:
+  export:
+    if: github.repository == 'partnernetsoftware/unisacc' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955
+        timeout-minutes: 1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Export approved capsule
+        timeout-minutes: 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CAPSULE_RELEASE_ID: ${{ inputs.release_id }}
+          CAPSULE_ASSET_ID: ${{ inputs.asset_id }}
+          CAPSULE_SHA256: ${{ inputs.evidence_sha256 }}
+          CANDIDATE_SOURCE_SHA: ${{ inputs.candidate_source_sha }}
+        run: node release/capsule-export.mjs export
+      - name: Upload opaque private capsule
+        timeout-minutes: 1
+        id: capsule
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: unisacc-complete-evidence-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/unisacc-evidence-capsule-output/evidence.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+# The single artifact member is evidence.zip. Use action output artifact-id and
+# artifact-digest to populate minicon's owned initial policy AFTER owner review.
+# This transport is not full M7/Windows qualification or owner receipt creation.
