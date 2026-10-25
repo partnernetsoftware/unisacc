@@ -1,0 +1,81 @@
+/* Metadata validation only: no child execution, material discovery, PASS cache,
+ * artifact qualification or hidden preparation. Each call owns and frees its
+ * parser buffers. Only scalar counts escape. Declared materials stay UNPREPARED
+ * until an actual executor explicitly verifies supplied material identities. */
+#pragma unisa module testplan
+typedef struct {
+ int batches;int implemented_batches;int planned_batches;int unprepared_batches;
+ int planned_missing_sources;int coverage_rows;int implemented_coverage;
+ int unresolved_coverage;int unmapped_unresolved;int executed_batches;
+} tp_summary;
+
+static int tp_bad(char *why,size_t cap,const char *reason,int row,const char *id){snprintf(why,cap,"%s row=%d id=%.127s",reason,row,id?id:"-");return -1;}
+static int tp_name(const char *s){size_t i,n=strlen(s);if(!n||n>127||s[0]<'a'||s[0]>'z')return 0;for(i=1;i<n;i++)if(!((s[i]>='a'&&s[i]<='z')||(s[i]>='0'&&s[i]<='9')||s[i]=='-'||s[i]=='_'||s[i]=='.'))return 0;return 1;}
+static int tp_path(const char *s){size_t at=0,n=strlen(s),i;if(!n||n>1023||s[0]=='/')return 0;while(at<n){size_t end=at;while(end<n&&s[end]!='/')end++;if(end==at||(end-at==1&&s[at]=='.')||(end-at==2&&s[at]=='.'&&s[at+1]=='.'))return 0;for(i=at;i<end;i++)if(!((s[i]>='a'&&s[i]<='z')||(s[i]>='A'&&s[i]<='Z')||(s[i]>='0'&&s[i]<='9')||s[i]=='-'||s[i]=='_'||s[i]=='.'))return 0;if(end==n)return 1;at=end+1;if(at==n)return 0;}return 0;}
+static int tp_source_path(const char *s){size_t n=strlen(s);return tp_path(s)&&n>3&&!strcmp(s+n-3,".cx")&&(!strncmp(s,"tests/",6)||!strncmp(s,"tools/",6)||!strncmp(s,"cx/",3));}
+static int tp_layer(const char *s){return !strcmp(s,"contract")||!strcmp(s,"product")||!strcmp(s,"library")||!strcmp(s,"interfaces")||!strcmp(s,"negative")||!strcmp(s,"properties")||!strcmp(s,"platform");}
+static int tp_platform(const char *s,int planned){return !strcmp(s,"lnx/x86_64")||!strcmp(s,"lnx/arm64")||!strcmp(s,"osx/x86_64")||!strcmp(s,"osx/arm64")||!strcmp(s,"win/x86_64")||!strcmp(s,"win/arm64")||(planned&&!strcmp(s,"all-six"));}
+static int tp_budget(const char *s){int n=0;if(!*s||*s=='0')return 0;while(*s){int d=*s++-'0';if(d<0||d>9||n>(55-d)/10)return 0;n=n*10+d;}return n>=1&&n<=55;}
+static int tp_implemented(const char *s){return !strcmp(s,"IMPLEMENTED")||!strcmp(s,"IMPLEMENTED_SEPARATE_BATCH");}
+static int tp_coverage_state(const char *s){return tp_implemented(s)||!strcmp(s,"NOT_READY")||!strcmp(s,"NOT_IMPLEMENTED")||!strcmp(s,"PLANNED");}
+static int tp_table(char *s,size_t n,const char *header,int cols,char **fields,int limit,int *rows,char *why,size_t cap){
+ size_t at,hn=strlen(header),i;int count=0;
+ if(!n||n>4194304||s[n-1]!='\n'||memchr(s,0,n)||memchr(s,'\r',n))return tp_bad(why,cap,"table-wire",0,0);
+ for(i=0;i<n;i++)if(((unsigned char)s[i]<32&&s[i]!='\t'&&s[i]!='\n')||(unsigned char)s[i]==127)return tp_bad(why,cap,"table-wire",0,0);
+ if(n<hn||memcmp(s,header,hn))return tp_bad(why,cap,"table-header",0,0);
+ at=hn;while(at<n){size_t end=at;int col=0;if(count==limit)return tp_bad(why,cap,"table-limit",count+1,0);while(end<n&&s[end]!='\n')end++;if(end==n||end==at||end-at>65535)return tp_bad(why,cap,"table-line",count+1,0);
+  fields[count*cols]=s+at;for(i=at;i<end;i++)if(s[i]=='\t'){s[i]=0;if(!*fields[count*cols+col]||++col>=cols)return tp_bad(why,cap,"field-count",count+1,0);fields[count*cols+col]=s+i+1;}s[end]=0;
+  if(col+1!=cols||!*fields[count*cols+col])return tp_bad(why,cap,"field-count",count+1,0);count++;at=end+1;
+ }
+ if(!count)return tp_bad(why,cap,"empty-table",0,0);*rows=count;return 0;
+}
+static int tp_materials(const char *s){const char *at=s;int count=0;if(!strcmp(s,"-"))return 1;while(*at){const char *end=strchr(at,',');size_t n=end?(size_t)(end-at):strlen(at);char name[128];const char *prior=s;if(!n||n>=sizeof name||++count>32)return 0;memcpy(name,at,n);name[n]=0;if(!tp_name(name)||!strcmp(name,"root")||!strcmp(name,"out")||!strcmp(name,"candidate"))return 0;while(prior<at){const char *pe=strchr(prior,',');size_t pn=pe?(size_t)(pe-prior):strlen(prior);if(pn==n&&!memcmp(prior,at,n))return 0;if(!pe)break;prior=pe+1;}if(!end)return 1;at=end+1;if(!*at)return 0;}return 0;}
+static int tp_has_material(const char *s,const char *name,size_t n){while(*s){const char *end=strchr(s,',');size_t z=end?(size_t)(end-s):strlen(s);if(z==n&&!memcmp(s,name,n))return 1;if(!end)return 0;s=end+1;}return 0;}
+static int tp_placeholder(const char *s,const char *materials,int allow_builtin){const char *end;size_t n;if(s[0]!='{')return 0;end=strchr(s,'}');if(!end)return 0;n=(size_t)(end-s-1);if(!n||n>127)return 0;int builtin=allow_builtin&&((n==4&&!memcmp(s+1,"root",4))||(n==3&&!memcmp(s+1,"out",3))||(n==9&&!memcmp(s+1,"candidate",9)));if(!builtin&&!tp_has_material(materials,s+1,n))return 0;if(!end[1])return 1;return end[1]=='/'&&tp_path(end+2);}
+static int tp_args(const char *s,const char *materials){const char *at=s;int count=0;if(!strcmp(s,"-"))return 1;while(*at){const char *end=strchr(at,';');size_t n=end?(size_t)(end-at):strlen(at);char token[2048];size_t i;if(!n||n>=sizeof token||++count>64)return 0;memcpy(token,at,n);token[n]=0;if(token[0]=='{'){if(!tp_placeholder(token,materials,1))return 0;}else{if(token[0]=='/'||strchr(token,'\\')||!strcmp(token,".")||!strcmp(token,".."))return 0;for(i=0;i<n;i++)if(!((token[i]>='a'&&token[i]<='z')||(token[i]>='A'&&token[i]<='Z')||(token[i]>='0'&&token[i]<='9')||token[i]=='-'||token[i]=='_'||token[i]=='.'||token[i]=='/'||token[i]=='='||token[i]==':'))return 0;if(strchr(token,'/')&&!tp_path(token))return 0;}if(!end)return 1;at=end+1;if(!*at)return 0;}return 0;}
+static int tp_expect(const char *s,int planned){size_t i;if(planned)return !strcmp(s,"NOT_READY");if(strncmp(s,"rc0:",4)||!s[4])return 0;for(i=4;s[i];i++)if(!((s[i]>='A'&&s[i]<='Z')||(s[i]>='0'&&s[i]<='9')||s[i]=='_'))return 0;return 1;}
+
+/* 0 means valid metadata, never functional PASS. why is set on every rejection.
+ * emit lists all declared batches and every coverage state, including gaps.
+ * The root is borrowed; only regular primary .cx sources are checked here.
+ * Material contents, transitive modules, actual host and candidate are not
+ * qualified by this parser and no output command is ever executed. */
+int tp_analyze(const char *root,const char *registry,size_t rn,const char *coverage,size_t cn,int emit,tp_summary *out,char *why,size_t cap){
+ char *r=0,*c=0,**bf=0,**cf=0;int *mapped=0,*implemented=0,*last=0,*source_present=0;
+ int nb=0,nc=0,i,j,rc=-1;tp_summary summary;memset(&summary,0,sizeof summary);if(out)memset(out,0,sizeof *out);if(why&&cap)why[0]=0;
+ if(!root||!registry||!coverage||!out||!why||!cap||root[0]!='/'||strlen(root)>4095){if(why&&cap)tp_bad(why,cap,"arguments",0,0);return -1;}
+ if(rn>4194304||cn>4194304)return tp_bad(why,cap,"table-limit",0,0);
+ r=malloc(rn+1);c=malloc(cn+1);bf=calloc(2048*12,sizeof *bf);cf=calloc(8192*5,sizeof *cf);mapped=calloc(8192,sizeof *mapped);implemented=calloc(8192,sizeof *implemented);last=calloc(8192,sizeof *last);source_present=calloc(2048,sizeof *source_present);
+ if(!r||!c||!bf||!cf||!mapped||!implemented||!last||!source_present){tp_bad(why,cap,"allocation",0,0);goto done;}
+ memcpy(r,registry,rn);r[rn]=0;memcpy(c,coverage,cn);c[cn]=0;
+ if(tp_table(r,rn,"id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\n",12,bf,2048,&nb,why,cap)||tp_table(c,cn,"id\tlayer\timplementation\texpected_or_gap\tsource\n",5,cf,8192,&nc,why,cap))goto done;
+ for(i=0;i<nc;i++){
+  char **v=cf+i*5;if(!tp_name(v[0])||!tp_layer(v[1])){tp_bad(why,cap,"coverage-shape",i+1,v[0]);goto done;}if(!tp_coverage_state(v[2])){tp_bad(why,cap,"coverage-state",i+1,v[0]);goto done;}
+  for(j=0;j<i;j++)if(!strcmp(v[0],cf[j*5])){tp_bad(why,cap,"duplicate-coverage",i+1,v[0]);goto done;}
+  if(tp_implemented(v[2]))summary.implemented_coverage++;else summary.unresolved_coverage++;
+ }
+ for(i=0;i<nb;i++){
+  char **v=bf+i*12;int planned=!strcmp(v[1],"PLANNED");char full[5200];struct stat st;
+  if(!tp_name(v[0])){tp_bad(why,cap,"batch-id",i+1,v[0]);goto done;}for(j=0;j<i;j++)if(!strcmp(v[0],bf[j*12])){tp_bad(why,cap,"duplicate-batch",i+1,v[0]);goto done;}
+  if(strcmp(v[1],"IMPLEMENTED")&&!planned){tp_bad(why,cap,"batch-state",i+1,v[0]);goto done;}
+  if(!tp_layer(v[2])||!tp_source_path(v[3])){tp_bad(why,cap,"source-path",i+1,v[0]);goto done;}
+  if(strcmp(v[4],"SOURCE")&&strcmp(v[4],"PREPARED")){tp_bad(why,cap,"batch-mode",i+1,v[0]);goto done;}
+  if(!tp_platform(v[5],planned)){tp_bad(why,cap,"batch-platform",i+1,v[0]);goto done;}
+  if(!tp_budget(v[6])){tp_bad(why,cap,"batch-budget",i+1,v[0]);goto done;}
+  if(!tp_materials(v[7])){tp_bad(why,cap,"batch-materials",i+1,v[0]);goto done;}
+  if(!strcmp(v[4],"SOURCE")){if(strcmp(v[8],v[3])){tp_bad(why,cap,"entry-source-mismatch",i+1,v[0]);goto done;}}
+  else if(!strcmp(v[7],"-")||!tp_placeholder(v[8],v[7],0)||!strstr(v[8],"}/")||strcmp(v[8]+strlen(v[8])-3,".cx")){tp_bad(why,cap,"prepared-entry",i+1,v[0]);goto done;}
+  if(!tp_args(v[9],v[7])){tp_bad(why,cap,"batch-args",i+1,v[0]);goto done;}
+  if(!tp_expect(v[11],planned)){tp_bad(why,cap,"batch-expect",i+1,v[0]);goto done;}
+  int z=snprintf(full,sizeof full,"%s/%s",root,v[3]);if(z<0||(size_t)z>=sizeof full){tp_bad(why,cap,"source-path",i+1,v[0]);goto done;}
+  errno=0;if(lstat(full,&st)){int e=errno;if(e!=ENOENT){snprintf(why,cap,"source-io row=%d id=%s errno=%d",i+1,v[0],e);goto done;}if(!planned){tp_bad(why,cap,"missing-implemented-source",i+1,v[0]);goto done;}summary.planned_missing_sources++;}
+  else{if(!S_ISREG(st.st_mode)){tp_bad(why,cap,"source-not-regular",i+1,v[0]);goto done;}source_present[i]=1;}
+  const char *at=v[10];while(*at){const char *end=strchr(at,',');size_t len=end?(size_t)(end-at):strlen(at);int found=-1;if(!len||len>127){tp_bad(why,cap,"coverage-list",i+1,v[0]);goto done;}for(j=0;j<nc;j++)if(strlen(cf[j*5])==len&&!memcmp(cf[j*5],at,len)){found=j;break;}if(found<0){tp_bad(why,cap,"unknown-coverage",i+1,v[0]);goto done;}if(last[found]==i+1){tp_bad(why,cap,"duplicate-batch-coverage",i+1,v[0]);goto done;}last[found]=i+1;mapped[found]=1;if(!planned)implemented[found]=1;if(!end)break;at=end+1;if(!*at){tp_bad(why,cap,"coverage-list",i+1,v[0]);goto done;}}
+  if(planned)summary.planned_batches++;else{summary.implemented_batches++;if(strcmp(v[7],"-"))summary.unprepared_batches++;}
+ }
+ for(i=0;i<nc;i++){if(tp_implemented(cf[i*5+2])&&!implemented[i]){tp_bad(why,cap,"implemented-coverage-unmapped",i+1,cf[i*5]);goto done;}if(!tp_implemented(cf[i*5+2])&&!mapped[i])summary.unmapped_unresolved++;}
+ summary.batches=nb;summary.coverage_rows=nc;*out=summary;rc=0;
+ if(emit){for(i=0;i<nb;i++){char **v=bf+i*12;const char *state=!strcmp(v[1],"PLANNED")?"PLANNED":strcmp(v[7],"-")?"UNPREPARED":"NOT_RUN";printf("BATCH\t%s\t%s\timplementation=%s\tlayer=%s\tsource=%s\tsource_state=%s\tmode=%s\tplatform=%s\tbudget=%s\tmaterials=%s\tentry=%s\targs=%s\tcoverage=%s\texpect=%s\n",v[0],state,v[1],v[2],v[3],source_present[i]?"PRESENT":"MISSING",v[4],v[5],v[6],v[7],v[8],v[9],v[10],v[11]);}
+  for(i=0;i<nc;i++)printf("COVERAGE\t%s\t%s\tmapped=%d\timplemented_batch=%d\toracle=%s\n",cf[i*5],cf[i*5+2],mapped[i],implemented[i],cf[i*5+3]);}
+ done:free(r);free(c);free(bf);free(cf);free(mapped);free(implemented);free(last);free(source_present);return rc;
+}
