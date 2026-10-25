@@ -66,3 +66,14 @@ product Pa7e8. This is partial format evidence; full object/boundary/host
 obligations remain NOT_READY in the main runner.
 
 The source tree is read-only while running. Apply a caller-owned watchdog of at most 30 seconds for this MVP; the runner performs no child process spawning and has no inner scheduling steps.
+
+`sh ./unisacc.com tests/resources.cx -- ROOT ABS_NEW_OUT` exercises the current
+product's resource capture and strict replay, checks exact output and CWD
+independence, then mutates private ledgers for identity, field, key, blob and
+embedded-NUL refusals. Each refusal requires rc2, its named reason and empty
+stdout; a fresh replay of the original capture must recover afterwards. Empty
+and NUL-valued extra entries check binary ledger loading; they do not prove
+every consumer's presence/empty/absent behavior. An optional final native ELF
+driver argument supports a narrow pre-packaging check against the root model
+container. Both identities are checked for changes. This is partial RI evidence;
+snapshots, full lifecycle/resource budgets and foreign hosts remain NOT_READY.
