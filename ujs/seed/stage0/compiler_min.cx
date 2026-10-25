@@ -5,7 +5,7 @@
 enum { TAG_I64 = 2, TAG_F64 = 3, TAG_STR = 4, TAG_LIST = 5, TAG_DICT = 6,
         HEAP0 = 4096, GBASE = 2048, SCRATCH0 = 1024,
         HOST_SCRATCH = 950000, MEM_PAGES = 128, MAXSTRLIT = 255 };
-enum { TY_ERR = 0, TY_I64 = 1, TY_F64 = 2, TY_LIST = 3, TY_DICT = 4, TY_STR = 5 };
+enum { TY_ERR = 0, TY_I64 = 1, TY_F64 = 2, TY_LIST = 3, TY_DICT = 4, TY_STR = 5, TY_FN = 7 };
 
 static uint8_t  g_heap[256 * 1024];
 static uint32_t g_bump;
@@ -142,14 +142,13 @@ static int64_t d_bits(double d) {
 /* ---- lex ---- */
 enum {
   T_EOF, T_NUM, T_FNUM, T_ID, T_LET, T_WHILE, T_RETURN, T_IF, T_ELSE,
-  T_SWITCH, T_CASE, T_DEFAULT, T_NULL, T_FOR, T_OF,
-
+  T_SWITCH, T_CASE, T_DEFAULT, T_NULL, T_FOR, T_OF, T_FUNCTION,
   T_LP, T_RP, T_LB, T_RB, T_LS, T_RS, T_COMMA, T_COLON, T_DOT, T_SEMI, T_EQ,
-  T_PLUS, T_MINUS, T_STAR, T_SLASH, T_PCT,
+  T_PLUS, T_MINUS, T_STAR, T_SLASH, T_PCT, T_ARROW, T_ELLIPSIS,
   T_LT, T_GT, T_LE, T_GE, T_EQEQ, T_NE, T_NOT, T_AND, T_OR, T_QMARK, T_QQ, T_STR, T_BAD
 };
 typedef struct {
-  const char *src; uint32_t len, pos;
+  const char *src; uint32_t len, pos, tok_start;
   int tok; int64_t num; double fnum; char id[64]; char str[256];
 } Lex;
 static int id0(char c) {
@@ -170,6 +169,7 @@ static void next(Lex *L) {
     break;
   }
   if (L->pos >= L->len) { L->tok = T_EOF; return; }
+  L->tok_start = L->pos;
   char c = L->src[L->pos];
   if (dig(c)) {
     int64_t iv = 0;
@@ -221,6 +221,7 @@ static void next(Lex *L) {
     else if (!strcmp(L->id,"null")) L->tok = T_NULL;
     else if (!strcmp(L->id,"for")) L->tok = T_FOR;
     else if (!strcmp(L->id,"of")) L->tok = T_OF;
+    else if (!strcmp(L->id,"function")) L->tok = T_FUNCTION;
     else L->tok = T_ID;
     return;
   }
@@ -230,7 +231,12 @@ static void next(Lex *L) {
   if (c=='['){L->tok=T_LS;return;} if (c==']'){L->tok=T_RS;return;}
   if (c==','){L->tok=T_COMMA;return;}
   if (c==':'){L->tok=T_COLON;return;}
-  if (c=='.'){L->tok=T_DOT;return;}
+  if (c=='.'){
+    if (L->pos + 1 < L->len && L->src[L->pos]=='.' && L->src[L->pos+1]=='.') {
+      L->pos += 2; L->tok = T_ELLIPSIS; return;
+    }
+    L->tok=T_DOT; return;
+  }
   if (c==';'){L->tok=T_SEMI;return;}
   if (c=='+'){L->tok=T_PLUS;return;} if (c=='*'){L->tok=T_STAR;return;}
   if (c=='/'){L->tok=T_SLASH;return;} if (c=='%'){L->tok=T_PCT;return;}
@@ -238,6 +244,7 @@ static void next(Lex *L) {
   if (c=='<'){ if (L->pos<L->len&&L->src[L->pos]=='='){L->pos++;L->tok=T_LE;} else L->tok=T_LT; return; }
   if (c=='>'){ if (L->pos<L->len&&L->src[L->pos]=='='){L->pos++;L->tok=T_GE;} else L->tok=T_GT; return; }
   if (c=='='){
+    if (L->pos<L->len&&L->src[L->pos]=='>'){ L->pos++; L->tok=T_ARROW; return; }
     if (L->pos<L->len&&L->src[L->pos]=='='){
       L->pos++;
       if (L->pos<L->len&&L->src[L->pos]=='=') L->pos++; /* === */
@@ -273,8 +280,18 @@ enum {
   OP_FLT, OP_FGT, OP_FLE, OP_FGE, OP_FEQ, OP_FNE,
   OP_RET, OP_FRET, OP_HRET
 };
-enum { MAXC = 16384, MAXL = 128, MAXG = 64, MAXN = 32, MAXSDATA = 8192 };
+enum { MAXC = 16384, MAXL = 128, MAXG = 64, MAXN = 32, MAXSDATA = 8192, MAXFN = 8 };
 typedef struct { uint8_t op; int64_t a; } Ins;
+/* stage0 fn: call-site inline (no extra wasm funcs). kind 0=expr arrow, 1=block. */
+typedef struct {
+  char name[MAXN];
+  char p0[MAXN];
+  char rest[MAXN];
+  int has_p0;   /* 1 if p0 used */
+  int has_rest;
+  int kind;
+  uint32_t off, len; /* body bytes in Prog.src */
+} FnDef;
 typedef struct {
   Ins code[MAXC]; int nc;
   char names[MAXL][MAXN]; uint8_t lty[MAXL]; uint8_t lety[MAXL]; int nl;
@@ -284,6 +301,11 @@ typedef struct {
   int fscratch; /* f64 temp for i64→f64 under, or -1 */
   int lscratch; /* i64 temp for && / || short-circuit, or -1 */
   int list_elem_ty; /* TY_I64/TY_F64 of last list literal */
+  const char *src; uint32_t srclen;
+  FnDef fns[MAXFN]; int nfn;
+  int in_fn; /* >0 while inlining a user fn body */
+  int fn_ret; /* local holding return value when in_fn, or -1 */
+  int fn_did_ret;
   const char *err;
 } Prog;
 
@@ -356,10 +378,162 @@ static int ensure_lscratch(Prog *P) {
 
 static int pexpr(Lex *L, Prog *P);
 static int pstmt(Lex *L, Prog *P);
+static int invoke_fn(Lex *L, Prog *P, int fi);
 
 static int expect(Lex *L, int t, Prog *P, const char *m) {
   if (L->tok != t) { P->err = m; return 0; }
   next(L); return 1;
+}
+
+static int find_fn(Prog *P, const char *name) {
+  int i;
+  for (i = 0; i < P->nfn; i++) if (!strcmp(P->fns[i].name, name)) return i;
+  return -1;
+}
+
+/* Capture body span starting at current token; leave L on terminator (SEMI or RB). */
+static int capture_expr_body(Lex *L, Prog *P, FnDef *F) {
+  int depth = 0;
+  uint32_t start = L->tok_start;
+  for (;;) {
+    if (L->tok == T_EOF) { P->err = "fn body"; return 0; }
+    if (L->tok == T_LP || L->tok == T_LB || L->tok == T_LS) depth++;
+    else if (L->tok == T_RP || L->tok == T_RB || L->tok == T_RS) {
+      if (depth) depth--;
+    } else if (L->tok == T_SEMI && depth == 0) break;
+    next(L);
+  }
+  F->off = start;
+  F->len = L->tok_start - start;
+  F->kind = 0;
+  return 1;
+}
+
+static int capture_block_body(Lex *L, Prog *P, FnDef *F) {
+  /* L at `{` */
+  int depth = 0;
+  uint32_t start;
+  if (!expect(L, T_LB, P, "fn {")) return 0;
+  start = L->tok_start; /* first token inside, or RB */
+  if (L->tok == T_RB) {
+    F->off = start; F->len = 0; F->kind = 1;
+    return 1; /* leave on RB */
+  }
+  depth = 1;
+  for (;;) {
+    if (L->tok == T_EOF) { P->err = "fn }"; return 0; }
+    if (L->tok == T_LB) depth++;
+    else if (L->tok == T_RB) {
+      depth--;
+      if (depth == 0) break;
+    }
+    next(L);
+  }
+  F->off = start;
+  F->len = L->tok_start - start;
+  F->kind = 1;
+  return 1; /* leave on RB */
+}
+
+static int register_fn(Prog *P, FnDef *tmp) {
+  if (P->nfn >= MAXFN) { P->err = "too many fns"; return -1; }
+  if (find_fn(P, tmp->name) >= 0) { P->err = "dup fn"; return -1; }
+  P->fns[P->nfn] = *tmp;
+  return P->nfn++;
+}
+
+static int invoke_fn(Lex *L, Prog *P, int fi) {
+  FnDef *F = &P->fns[fi];
+  int narg = 0, i, ty = 0, ret_local, scratch;
+  int aty[16];
+  /* L at `(` */
+  if (!expect(L, T_LP, P, "call (")) return 0;
+  if (L->tok != T_RP) {
+    for (;;) {
+      if (narg >= 16) { P->err = "too many args"; return 0; }
+      aty[narg] = pexpr(L, P); if (!aty[narg]) return 0;
+      /* stash each arg in a temp local — reverse order on stack, so store as we go */
+      {
+        char tn[MAXN];
+        int ti;
+        snprintf(tn, sizeof tn, "#arg%d", narg);
+        ti = loc(P, tn, 1); if (ti < 0) return 0;
+        P->lty[ti] = (uint8_t)aty[narg];
+        if (!emit(P, OP_STORE, ti)) return 0;
+      }
+      narg++;
+      if (L->tok == T_COMMA) { next(L); continue; }
+      break;
+    }
+  }
+  if (!expect(L, T_RP, P, "call )")) return 0;
+  /* bind params from #arg* */
+  if (F->has_p0) {
+    int pi, ai;
+    if (narg < 1) { P->err = "missing arg"; return 0; }
+    pi = loc(P, F->p0, 1); if (pi < 0) return 0;
+    ai = loc(P, "#arg0", 0); if (ai < 0) return 0;
+    P->lty[pi] = P->lty[ai];
+    if (!emit(P, OP_LOAD, ai)) return 0;
+    if (!emit(P, OP_STORE, pi)) return 0;
+  }
+  if (F->has_rest) {
+    int ri, rest_n = F->has_p0 ? (narg - 1) : narg;
+    int base = F->has_p0 ? 1 : 0;
+    if (rest_n < 0) rest_n = 0;
+    ri = loc(P, F->rest, 1); if (ri < 0) return 0;
+    scratch = ensure_scratch(P); if (scratch < 0) return 0;
+    if (!emit(P, OP_MKLIST, rest_n)) return 0;
+    if (!emit(P, OP_STORE, scratch)) return 0;
+    for (i = 0; i < rest_n; i++) {
+      char tn[MAXN];
+      int ai;
+      snprintf(tn, sizeof tn, "#arg%d", base + i);
+      ai = loc(P, tn, 0); if (ai < 0) return 0;
+      if (!emit(P, OP_LOAD, scratch)) return 0;
+      if (!emit(P, OP_LOAD, ai)) return 0;
+      if (P->lty[ai] == TY_F64) { if (!emit(P, OP_BOXF, 0)) return 0; }
+      else if (P->lty[ai] == TY_I64) { if (!emit(P, OP_BOXI, 0)) return 0; }
+      else { P->err = "rest elem"; return 0; }
+      if (!emit(P, OP_LSET, i)) return 0;
+    }
+    if (!emit(P, OP_LOAD, scratch)) return 0;
+    P->lty[ri] = TY_LIST;
+    P->lety[ri] = TY_I64;
+    P->list_elem_ty = TY_I64;
+    if (!emit(P, OP_STORE, ri)) return 0;
+  } else if (F->has_p0 && narg != 1) {
+    P->err = "arity"; return 0;
+  } else if (!F->has_p0 && !F->has_rest && narg != 0) {
+    P->err = "arity"; return 0;
+  }
+  ret_local = loc(P, "#fnret", 1); if (ret_local < 0) return 0;
+  P->lty[ret_local] = TY_I64;
+  P->fn_ret = ret_local;
+  P->fn_did_ret = 0;
+  P->in_fn++;
+  {
+    Lex B;
+    B.src = P->src + F->off;
+    B.len = F->len;
+    B.pos = 0;
+    next(&B);
+    if (F->kind == 0) {
+      ty = pexpr(&B, P); if (!ty) { P->in_fn--; return 0; }
+      P->lty[ret_local] = (uint8_t)ty;
+      if (!emit(P, OP_STORE, ret_local)) { P->in_fn--; return 0; }
+      P->fn_did_ret = 1;
+    } else {
+      while (B.tok != T_EOF) {
+        if (!pstmt(&B, P)) { P->in_fn--; return 0; }
+      }
+      if (!P->fn_did_ret) { P->err = "fn no return"; P->in_fn--; return 0; }
+      ty = P->lty[ret_local];
+    }
+  }
+  P->in_fn--;
+  if (!emit(P, OP_LOAD, ret_local)) return 0;
+  return ty ? ty : TY_I64;
 }
 
 static int bin_finish(Prog *P, int ty, int ty2, uint8_t oi, uint8_t of) {
@@ -535,19 +709,30 @@ static int pprim(Lex *L, Prog *P) {
       P->list_elem_ty = TY_I64;
       return TY_LIST;
     }
-    int i = loc(P, L->id, 0);
-    if (i >= 0) {
-      if (P->lty[i] == TY_LIST) P->list_elem_ty = P->lety[i];
-      if (!emit(P, OP_LOAD, i)) return 0; next(L); return P->lty[i];
+    {
+      char nbuf[MAXN];
+      int i, fi, g;
+      strncpy(nbuf, L->id, MAXN - 1); nbuf[MAXN - 1] = 0;
+      fi = find_fn(P, nbuf);
+      next(L);
+      if (L->tok == T_LP && fi >= 0) return invoke_fn(L, P, fi);
+      i = loc(P, nbuf, 0);
+      if (i >= 0) {
+        if (P->lty[i] == TY_FN && L->tok == T_LP) {
+          if (fi < 0) { P->err = "fn idx"; return 0; }
+          return invoke_fn(L, P, fi);
+        }
+        if (P->lty[i] == TY_LIST) P->list_elem_ty = P->lety[i];
+        if (!emit(P, OP_LOAD, i)) return 0;
+        return P->lty[i];
+      }
+      g = glob(P, nbuf, 1); if (g < 0) return 0;
+      if (L->tok == T_LS && P->gty[g] != TY_LIST && P->gty[g] != TY_DICT)
+        P->gty[g] = TY_LIST;
+      if (P->gty[g] == TY_LIST) P->list_elem_ty = P->glety[g] ? P->glety[g] : TY_F64;
+      if (!emit(P, OP_GLOAD, (int64_t)g | ((int64_t)P->gty[g] << 16))) return 0;
+      return P->gty[g];
     }
-    int g = glob(P, L->id, 1); if (g < 0) return 0;
-    /* peek: name[ → inject list */
-    next(L);
-    if (L->tok == T_LS && P->gty[g] != TY_LIST && P->gty[g] != TY_DICT)
-      P->gty[g] = TY_LIST;
-    if (P->gty[g] == TY_LIST) P->list_elem_ty = P->glety[g] ? P->glety[g] : TY_F64;
-    if (!emit(P, OP_GLOAD, (int64_t)g | ((int64_t)P->gty[g] << 16))) return 0;
-    return P->gty[g];
   }
   if (L->tok == T_LP) {
     next(L); int ty = pexpr(L, P); if (!ty) return 0;
@@ -739,17 +924,98 @@ static int pblock(Lex *L, Prog *P) {
 
 static int pstmt(Lex *L, Prog *P) {
   if (L->tok == T_BAD) { P->err = "bad token"; return 0; }
+  if (L->tok == T_FUNCTION) {
+    FnDef F;
+    int fi, li;
+    memset(&F, 0, sizeof F);
+    next(L);
+    if (L->tok != T_ID) { P->err = "fn name"; return 0; }
+    strncpy(F.name, L->id, MAXN - 1); F.name[MAXN - 1] = 0;
+    next(L);
+    if (!expect(L, T_LP, P, "fn (")) return 0;
+    if (L->tok == T_ELLIPSIS) {
+      next(L);
+      if (L->tok != T_ID) { P->err = "rest name"; return 0; }
+      strncpy(F.rest, L->id, MAXN - 1); F.rest[MAXN - 1] = 0;
+      F.has_rest = 1;
+      next(L);
+    } else if (L->tok == T_ID) {
+      strncpy(F.p0, L->id, MAXN - 1); F.p0[MAXN - 1] = 0;
+      F.has_p0 = 1;
+      next(L);
+      if (L->tok == T_COMMA) {
+        next(L);
+        if (L->tok != T_ELLIPSIS) { P->err = "only ...rest after param"; return 0; }
+        next(L);
+        if (L->tok != T_ID) { P->err = "rest name"; return 0; }
+        strncpy(F.rest, L->id, MAXN - 1); F.rest[MAXN - 1] = 0;
+        F.has_rest = 1;
+        next(L);
+      }
+    }
+    if (!expect(L, T_RP, P, "fn )")) return 0;
+    if (!capture_block_body(L, P, &F)) return 0;
+    if (!expect(L, T_RB, P, "fn }")) return 0;
+    fi = register_fn(P, &F); if (fi < 0) return 0;
+    li = loc(P, F.name, 1); if (li < 0) return 0;
+    P->lty[li] = TY_FN;
+    if (!emit(P, OP_CONST, fi)) return 0;
+    if (!emit(P, OP_STORE, li)) return 0;
+    return 1;
+  }
   if (L->tok == T_LET) {
     next(L);
     if (L->tok != T_ID) { P->err = "let name"; return 0; }
-    int i = loc(P, L->id, 1); if (i < 0) return 0;
-    next(L);
-    if (!expect(L, T_EQ, P, "expected =")) return 0;
-    int ty = pexpr(L, P); if (!ty) return 0;
-    P->lty[i] = (uint8_t)ty;
-    if (ty == TY_LIST) P->lety[i] = (uint8_t)P->list_elem_ty;
-    if (!emit(P, OP_STORE, i)) return 0;
-    return expect(L, T_SEMI, P, "expected ;");
+    {
+      char nm[MAXN];
+      int i;
+      strncpy(nm, L->id, MAXN - 1); nm[MAXN - 1] = 0;
+      next(L);
+      if (!expect(L, T_EQ, P, "expected =")) return 0;
+      /* let f = x => …  /  let f = x => { … } */
+      if (L->tok == T_ID) {
+        uint32_t save_pos = L->pos; int save_tok = L->tok;
+        int64_t save_num = L->num; double save_fnum = L->fnum;
+        uint32_t save_ts = L->tok_start;
+        char save_id[64]; strncpy(save_id, L->id, 64);
+        char pname[MAXN];
+        strncpy(pname, L->id, MAXN - 1); pname[MAXN - 1] = 0;
+        next(L);
+        if (L->tok == T_ARROW) {
+          FnDef F;
+          int fi, li;
+          memset(&F, 0, sizeof F);
+          strncpy(F.name, nm, MAXN - 1); F.name[MAXN - 1] = 0;
+          strncpy(F.p0, pname, MAXN - 1); F.p0[MAXN - 1] = 0;
+          F.has_p0 = 1;
+          next(L);
+          if (L->tok == T_LB) {
+            if (!capture_block_body(L, P, &F)) return 0;
+            if (!expect(L, T_RB, P, "arrow }")) return 0;
+            if (!expect(L, T_SEMI, P, "expected ;")) return 0;
+          } else {
+            if (!capture_expr_body(L, P, &F)) return 0;
+            if (!expect(L, T_SEMI, P, "expected ;")) return 0;
+          }
+          fi = register_fn(P, &F); if (fi < 0) return 0;
+          li = loc(P, nm, 1); if (li < 0) return 0;
+          P->lty[li] = TY_FN;
+          if (!emit(P, OP_CONST, fi)) return 0;
+          if (!emit(P, OP_STORE, li)) return 0;
+          return 1;
+        }
+        L->pos = save_pos; L->tok = save_tok; L->num = save_num; L->fnum = save_fnum;
+        L->tok_start = save_ts; strncpy(L->id, save_id, 64);
+      }
+      i = loc(P, nm, 1); if (i < 0) return 0;
+      {
+        int ty = pexpr(L, P); if (!ty) return 0;
+        P->lty[i] = (uint8_t)ty;
+        if (ty == TY_LIST) P->lety[i] = (uint8_t)P->list_elem_ty;
+        if (!emit(P, OP_STORE, i)) return 0;
+        return expect(L, T_SEMI, P, "expected ;");
+      }
+    }
   }
   if (L->tok == T_WHILE) {
     next(L);
@@ -867,11 +1133,20 @@ static int pstmt(Lex *L, Prog *P) {
   if (L->tok == T_RETURN) {
     next(L);
     int ty = pexpr(L, P); if (!ty) return 0;
-    uint8_t op = OP_RET;
-    if (ty == TY_F64) op = OP_FRET;
-    else if (ty == TY_LIST || ty == TY_DICT || ty == TY_STR) op = OP_HRET;
-    if (!emit(P, op, 0)) return 0;
-    return expect(L, T_SEMI, P, "expected ;");
+    if (P->in_fn > 0) {
+      if (P->fn_ret < 0) { P->err = "fn ret"; return 0; }
+      P->lty[P->fn_ret] = (uint8_t)ty;
+      if (!emit(P, OP_STORE, P->fn_ret)) return 0;
+      P->fn_did_ret = 1;
+      return expect(L, T_SEMI, P, "expected ;");
+    }
+    {
+      uint8_t op = OP_RET;
+      if (ty == TY_F64) op = OP_FRET;
+      else if (ty == TY_LIST || ty == TY_DICT || ty == TY_STR) op = OP_HRET;
+      if (!emit(P, op, 0)) return 0;
+      return expect(L, T_SEMI, P, "expected ;");
+    }
   }
   if (L->tok == T_ID) {
     char name[MAXN];
@@ -1977,6 +2252,7 @@ int32_t compile(uint32_t src_ptr, uint32_t src_len) {
 #endif
 
   Prog P; memset(&P, 0, sizeof P); P.scratch = -1; P.fscratch = -1; P.lscratch = -1;
+  P.src = src; P.srclen = src_len; P.fn_ret = -1;
   Lex L; L.src = src; L.len = src_len; L.pos = 0;
   next(&L);
   while (L.tok != T_EOF) {

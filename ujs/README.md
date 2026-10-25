@@ -19,7 +19,7 @@ sh ./ujs/ujs.com FILE.ujs -o OUT.wasm
 
 细则：[`product/README.md`](product/README.md)。`ujs/ujs.com` 为生成物（已 gitignore）。
 
-**stage0 语料合同**：`corpus-host.cx` — 25 PASS／3 REFUSE（拒：arrow／function+rest）。
+**stage0 语料合同**：`corpus-host.cx` — 28 PASS／0 REFUSE（含 arrow／function+rest）。
 
 ## 目录
 

@@ -17,7 +17,7 @@
 | | |
 |---|---|
 | **主产物** | **`ujs.com`**——对齐 [`unisacc.com`](../README.md) 的**跨架构单文件可执行**（目标：{Linux, macOS, Windows} × {x86_64, arm64}；APE／自写出／自举合同对齐 Paper A 纪律，细则待钉） |
-| **状态** | **host1 APE 产品形已交付**（纯 `.cx`：`build-ape.cx`／`complete.cx` 绿；六目标 `build-six.cx`）。语料合同 **25 PASS／3 REFUSE**（已收 `?:`／`switch`／`null??`／`for-of`／`+=`）。拒：**arrow／function+rest**（下一里程碑：stage0 多函数或嵌入 `compiler_core`，非本代冒充）。树已产品优先梳理。未授权 tip／Draft／签／公开 |
+| **状态** | **host1 APE 产品形已交付**（纯 `.cx`：`build-ape.cx`／`complete.cx`；六目标 `build-six.cx`）。语料合同 **28 PASS／0 REFUSE**（含 `?:`／`switch`／`null??`／`for-of`／`+=`／**arrow**／**function+rest**；调用点内联，非嵌 core）。树已产品优先梳理。未授权 tip／Draft／签／公开 |
 | **不是主产物** | 单独的 `ujs2wasm` CLI、`wat2wasm`、`compile.mjs`、零散 `.wasm` 文件——这些是 **`ujs.com` 的子功能／今日实践脊**，最终应收进或由 `ujs.com` 调度 |
 
 **子功能 ↔ 今日入口（将收敛进 `ujs.com`）**
@@ -384,7 +384,7 @@ ujs/
 ├─ README.md · ARCHITECTURE.md
 ├─ product/              ★出货宿主（unisacc.com + .cx）
 │   ├─ ujs_main.cx · build*.cx · ape-pack.cx · complete.cx
-│   └─ corpus-host.cx    25 PASS / 3 REFUSE
+│   └─ corpus-host.cx    28 PASS / 0 REFUSE
 ├─ seed/
 │   ├─ stage0/compiler_min.cx   host1 编译器
 │   ├─ construct/        构造臂（Python；P1 后置）
@@ -597,11 +597,12 @@ flowchart TD
     M2 --> M3["M3 core 自举 v16 ✓"]
     M3 --> P0["P0 无 A 核 ship ✓"]
     P0 --> HOST["ujs.com APE host1 ✓"]
-    HOST --> NEXT["下一：fn/arrow 或嵌入 core"]
+    HOST --> FN["stage0 arrow/fn+rest ✓"]
+    FN --> NEXT["可选：嵌 core · P1 construct"]
 
     classDef now fill:#064e3b,stroke:#34d399,color:#d1fae5
     classDef next fill:#1e3a5f,stroke:#60a5fa,color:#e0f2fe
-    class E0,SJS,M1,M2,M3,P0,HOST now
+    class E0,SJS,M1,M2,M3,P0,HOST,FN now
     class NEXT next
 ```
 
@@ -617,8 +618,8 @@ flowchart TD
 | **UXEP / UXIN** | 一次一包提交 / 输入快照 |
 | **BUILD.json** | 与 Release 对指纹 |
 | **构造不训练** | 出货权重由 gold 代数生成；M3 另用孪生字节门禁 |
-| **ujs.com** | **主产物已交付（host1 APE）**：`complete.cx`；stage0 语料 25/3；未嵌 core |
-| **子功能** | `ujs2wasm`／`wat2wasm`／`compile.mjs`／`sim.wasm`… = 实践脊；fn 全表仍靠它们 |
+| **ujs.com** | **主产物已交付（host1 APE）**：`complete.cx`；stage0 语料 **28/0**；未嵌 core |
+| **子功能** | `ujs2wasm`／`wat2wasm`／`compile.mjs`／`sim.wasm`… = 实践脊／全表对照 |
 | **脱 Py** | 新胶水／构造迁 **`unisacc.com` + `.cx`（`-run`）**；只许缩 Python，不许转调冒充 |
 | **直出税** | 热语料大头曾是 `wat2wasm` spawn，非常驻后是 parseWat；网 ask 非主税。见「加速实证」 |
 

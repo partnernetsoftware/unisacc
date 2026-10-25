@@ -23,7 +23,7 @@
 ./unisacc.com -run ujs/product/complete.cx    # APE + corpus-host
 ./unisacc.com -run ujs/product/build-ape.cx
 ./unisacc.com -run ujs/product/build.cx
-./unisacc.com -run ujs/product/corpus-host.cx # 25 PASS / 3 REFUSE
+./unisacc.com -run ujs/product/corpus-host.cx # 28 PASS / 0 REFUSE
 ```
 
 `build.sh` 仅转调 `build.cx`（兼容旧习惯）。
@@ -31,14 +31,14 @@
 ## 用法
 
 ```bash
-sh ./ujs/ujs.com --version          # APE 须经 sh
+sh ./ujs/ujs.com --version          # APE 须经 sh；本机原生可直接 ./ujs/ujs.com
 sh ./ujs/ujs.com FILE.ujs -o OUT.wasm
 ```
 
 ## 诚实边界
 
-- **已收**：APE／六目标／`?:`／`switch`／`null??`／`for-of`／`+=`
-- **未收**：用户函数、箭头、`...rest`（需多函数或嵌入 `compiler_core`）
+- **已收**：APE／六目标／`?:`／`switch`／`null??`／`for-of`／`+=`／arrow／`function`+`...rest`（调用点内联）
+- **未收**：嵌 `compiler_core` 全表；多参闭包／高阶传递的完整 ES 语义
 - **不冒充**：CX3／CX4 内存安全；跨机切片执行收据
 
 不 tip／不 Draft，除非另授。
