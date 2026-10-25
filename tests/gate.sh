@@ -778,6 +778,9 @@ job lib-union-native tests/bound 58 sh ./unisacc.com -run tests/libraryunionnati
 job lib-carrier-factory tests/bound 58 sh ./unisacc.com -run tests/libraryunionnativecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --sanitize --factory
 job lib-carrier-relay tests/bound 58 sh ./unisacc.com -run tests/libraryunionnativecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --sanitize --relay
 if [ "$(uname -s)/$(uname -m)" = Linux/x86_64 ]; then
+job lib-union-scalar-prepare-group1 sh ./tests/cxbin tests/libraryunionscalarcheck.cx --prepare --cases int8,float4 --pressures plain,gp9,fp9 --sanitize
+job lib-union-scalar-prepare-group2 sh ./tests/cxbin tests/libraryunionscalarcheck.cx --prepare --cases double8,mixed2 --pressures plain,gp9,fp9 --sanitize
+job lib-union-scalar-prepare-group3 sh ./tests/cxbin tests/libraryunionscalarcheck.cx --prepare --cases mixed3,mixed-reordered --pressures plain,gp9,fp9 --sanitize
 job lib-union-scalar-prepare sh ./tests/cxbin tests/libraryunionscalarcheck.cx --prepare --cases int8,float4,double8,mixed2,mixed3,mixed-reordered --pressures plain,gp9,fp9 --sanitize   # (.cx port, 2026-10-23)
 job lib-union-scalar-int8-plain sh ./tests/cxbin tests/libraryunionscalarcheck.cx --package "${MODEL_COM:-./unisacc.com}" --cases int8 --pressures plain --sanitize --require-cached
 job lib-union-scalar-int8-gp9 sh ./tests/cxbin tests/libraryunionscalarcheck.cx --package "${MODEL_COM:-./unisacc.com}" --cases int8 --pressures gp9 --sanitize --require-cached
