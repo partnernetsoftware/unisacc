@@ -1,6 +1,6 @@
 # UJS 地图：种子 · 可复用权重 · 自迭代 · 实践
 
-与仓库根 [`ARCHITECTURE.md`](../ARCHITECTURE.md) 同口径（Paper C）：**造权重的脚本属种子，造出来的才是可复用权重**；自迭代用孪生字节脱离出货种子；实践是 Web 实验场。规格 [`prd.md`](prd.md)，论文 B [`../research/ujs-paper.md`](../research/ujs-paper.md)。
+与仓库根 [`ARCHITECTURE.md`](../ARCHITECTURE.md) 同口径（Paper C）：**造权重的脚本属种子，造出来的才是可复用权重**；自迭代用孪生字节脱离出货种子；实践是 Web 实验场。规格 [`prd.md`](prd.md)，**版本计划** [`plans/`](plans/)，论文 B [`../research/ujs-paper.md`](../research/ujs-paper.md)。
 
 **出货主产物**：**`ujs.com`（APE）**——`./unisacc.com -run ujs/product/complete.cx`（APE＋语料 28/0＋六目标）。源 [`product/ujs_main.cx`](product/ujs_main.cx)+[`seed/stage0/compiler_min.cx`](seed/stage0/compiler_min.cx)；打包 [`product/ape-pack.cx`](product/ape-pack.cx)。产品链 **只许 `unisacc.com`+`.cx`**。`compile.mjs`／`compiler_core` 为更全表实践脊（可选嵌入，非本代必经）。细则见 [`prd.md`](prd.md) §0.1。
 

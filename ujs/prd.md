@@ -1,23 +1,33 @@
 # UJS —— 产品规格 v1.3
 
 > **唯一耦合活文档**（规格 · 目标 · 思维树 · 记忆宫殿）。与代码同会话更新。  
-> **目录板块**：[`ARCHITECTURE.md`](ARCHITECTURE.md)（种子 · 权重 · 自迭代 · 实践）  
-> Host 契约真源：[`uxe/HOST_ABI.md`](uxe/HOST_ABI.md) · 开箱：[`README.md`](README.md)  
-> 归档：[`archive/`](archive/)（旧条款 / 旧路线 / 旧地图）
+> **版本计划**：[`plans/`](plans/)（`ujs.com` **0.0.x**；当前推进 [`plans/v0.0.2.md`](plans/v0.0.2.md)）  
+> **目录板块**：[`ARCHITECTURE.md`](ARCHITECTURE.md) · 开箱：[`README.md`](README.md) · Host：[`uxe/HOST_ABI.md`](uxe/HOST_ABI.md)  
+> 归档：[`archive/`](archive/)
 
 ---
 
 ## 0. 一句话
 
-**UJS** = 尽量贴 ES 表面的**闭合**脚本子集 + **构造法确定性推理**（gold → IntNet，不训练填表）+ 产品 API／Host。  
-验收：门禁与可机读 snapshot；不以截图猜 UI。
+**UJS** = 闭合 JS 子集 + 构造法确定性推理（理论）+ **`ujs.com` 生产力工具**（产品）。  
+验收：版本计划门禁与可机读收据；不以截图猜 UI。
+
+### 0.0 版本（`ujs.com` 0.0.x）
+
+| 版 | 状态 | 计划 |
+|---|---|---|
+| **0.0.1** | ✓ host1 基线（APE·28/0·六目标·`.cx`） | [`plans/v0.0.1.md`](plans/v0.0.1.md) |
+| **0.0.2** | **进行中** · 生产力合同（身份／预言／CLI／prd 收束） | [`plans/v0.0.2.md`](plans/v0.0.2.md) |
+| 0.0.3+ | 调度子功能 · 跑／验 · Paper B 最小补丁 … | [`plans/roadmap-0.0.x.md`](plans/roadmap-0.0.x.md) |
+
+版号真源：`ujs.com --version` 与上表；**不**用根仓 `plans/v0.0.4x` 代替本系列。
 
 ### 0.1 出货主产物（主人 2026-10-25）
 
 | | |
 |---|---|
 | **主产物** | **`ujs.com`**——**ujs + wasm 类别的生产力工具**（跨架构单文件 `.com`；编／装／跑／自举收进同一壳） |
-| **状态** | **host1 已交付**：`complete.cx` = APE + 语料 **28/0** + 六目标；纯 `.cx`。下一刀按**生产力工具**加深（调度子功能、稳定合同、可日用），而非把论文主张塞进古典 stage0 |
+| **状态** | **0.0.1 ✓**；当前 **0.0.2**（见 `plans/v0.0.2.md`）。host1 壳已齐；本刀收生产力合同，不把论文主张塞进古典 stage0 |
 | **不是主产物** | 单独的 `ujs2wasm` CLI、`wat2wasm`、`compile.mjs`、零散 `.wasm`——是 **`ujs.com` 的子功能／实践脊**，应收进或由它调度 |
 
 ### 0.1b 产品 · 论文 · unisacc 关系（主人 2026-10-25 定调）
@@ -65,7 +75,7 @@
 
 ## 目标（按杠杆）
 
-别人能按模板交 `{app}`，外网可玩，验收无人。**主线夯 0–4；门禁先于功能。** 不开新门面游戏。
+**主线按 `plans/0.0.x` 推进 `ujs.com` 生产力工具**；Pages／`{app}` 仍要可玩，但是实践脊，不挡 0.0.x 产品版号。门禁先于功能。不开新门面游戏。
 
 **北极星（两层）**  
 1. **产品形**：把 **`ujs.com`** 打成 **ujs+wasm 生产力工具**（编译／组装／运行／自举／调度），对标该类别的日用壳，而非「只有 ujs2wasm」。  
@@ -631,9 +641,10 @@ flowchart TD
 | **UXEP / UXIN** | 一次一包提交 / 输入快照 |
 | **BUILD.json** | 与 Release 对指纹 |
 | **构造不训练** | 出货权重由 gold 代数生成；M3 另用孪生字节门禁 |
-| **ujs.com** | **ujs+wasm 生产力工具**（host1 已交付；继续收子功能） |
+| **ujs.com** | **ujs+wasm 生产力工具**；版号见 §0.0／`plans/` |
 | **Paper B** | 底层理论对齐该工具；谱系 B→A 派生，A／unisacc 佐证 |
-| **子功能** | `ujs2wasm`／`wat2wasm`／`compile.mjs`／`sim.wasm`… = 应收进壳的实践脊 |
+| **计划** | `ujs/plans/v0.0.N.md`；根仓 0.0.4x 是 unisacc 底座 |
+| **子功能** | `ujs2wasm`／`compile.mjs`／`sim.wasm`… = 应收进壳的实践脊 |
 | **脱 Py** | 新胶水／构造迁 **`unisacc.com` + `.cx`（`-run`）**；只许缩 Python，不许转调冒充 |
 | **直出税** | 热语料大头曾是 `wat2wasm` spawn，非常驻后是 parseWat；网 ask 非主税。见「加速实证」 |
 
@@ -656,10 +667,11 @@ flowchart LR
 
 | 文档 | 角色 |
 |---|---|
-| **本文件** | 规格 · 目标 · 思维树 · 记忆宫殿 |
-| [`uxe/HOST_ABI.md`](uxe/HOST_ABI.md) | Host 符号 / UXEP·UXIN / LLM 规划 |
+| **本文件** | 规格 · 目标 · 思维树 · 记忆宫殿 · **当前版号指针** |
+| [`plans/`](plans/) | **`ujs.com` 0.0.x 版本计划**（范围／判据／进度） |
+| [`uxe/HOST_ABI.md`](uxe/HOST_ABI.md) | Host 符号 / UXEP·UXIN |
 | [`README.md`](README.md) | 开箱与分发 |
-| 各层薄 README | `product/` · `seed/` · `iterate/` · `practice/`（旧链接名勿堆新逻辑） |
+| [`product/README.md`](product/README.md) · [`../tests/ujs/README.md`](../tests/ujs/README.md) | 产品壳 · 套件入口 |
 | [`archive/`](archive/) | 历史；不当真源 |
 
-升版：破坏性语言/API → bump；旧活规格摘入 `archive/`。
+升版：按 `plans/v0.0.N.md` 完成判据 bump `ujs.com` 版本串；破坏性语言/API 另记；旧活规格摘入 `archive/`。
