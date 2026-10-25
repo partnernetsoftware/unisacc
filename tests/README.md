@@ -12,7 +12,7 @@ Host1 船闸在 **[`../ujs/tests/`](../ujs/tests/)**（与 unisacc 套件分离�
 
 host1 语料在 [`../ujs/tests/corpus|neg`](../ujs/tests/)。本树 [`ujs2wasm/`](ujs2wasm/) 仅留 archive_only（expect.json 等）。
 
-## New native test MVP (unisacc CX)
+## Native test entry and explicit gaps (unisacc CX)
 
 This is a separate batch, with no imported PASS records and no legacy runner dependencies. It does **not** gate `ujs.com`.
 
@@ -26,9 +26,11 @@ sh ./unisacc.com tests/run.cx -- --all
 
 Neither .cx source uses an explicit #include directive. The runner imports cases.product using the implemented #pragma unisa use/module mechanism and relies on the existing automatic .cx edition prelude for carried library declarations. One compiler invocation builds both source units in memory, and one process computes all sixteen outcomes and compares them with hand-written expected values. It never invokes Python, Clang, shell algorithms, old suites, or child compilers, and writes no executable artifact or result cache. The shell in the command only loads unisacc.com.
 
-Exit status: smoke 0 means this local batch passed; 1 means an assertion failed; 2 means invalid usage or runner failure. --all runs the batch and exits 3 while mandatory contracts remain incomplete or unscheduled (1 takes priority if smoke fails). Its 19 broad gaps are NOT_READY; the eighteen implemented separate net batches are NOT_RUN in this entry. --list is inventory only, not evidence of execution.
+Exit status: smoke 0 means this local batch passed; 1 means an assertion failed; 2 means invalid usage, metadata or runner failure. --list and --all read coverage.tsv and batches.tsv through the same strict parser, resolving the checkout from the actual runner source path so another CWD is supported. --list validates and inventories metadata without executing batches. --all preserves the sixteen in-process smoke assertions, lists every other registered batch and implemented coverage item as NOT_RUN, and reports every unresolved obligation with its declared status. It returns 3 while this complete qualification is unavailable; a local smoke failure takes priority. Metadata errors are named refusals, not an empty inventory or a pass.
 
-coverage.tsv separates implemented assertions from missing obligations. IMPLEMENTED is code availability, not a persisted PASS. New source bytes must actually run for fresh evidence. No preparation result is treated as a test pass.
+coverage.tsv separates implemented assertions from missing obligations; batches.tsv binds sources, modes, platforms, named materials, argument templates and per-command budgets. IMPLEMENTED is code availability, not a persisted PASS. New source bytes must actually run for fresh evidence. No preparation result is treated as a test pass. The inventory does not execute templates or spawn separate batches, and cannot silently use old material or test results.
+
+The metadata-only commands are `tools/bound 20 sh ./unisacc.com tests/plan.cx -- --validate ROOT` and `tools/bound 20 sh ./unisacc.com tests/plan.cx -- --selftest ROOT`. The parser's 30 local assertions include malformed mappings, missing files, duplicate rows and borrowed-view callback lifetime controls. Metadata validity always reports executed_batches=0; it is not functional or host qualification.
 
 The batch covers basic functions, recursion, struct arrays and pointer mutation, callback execution, loops, short-circuit behavior, overlap memmove, snprintf bytes and length, strtol value and tail, allocation, a published SHA-256 known answer, and imported module private state. It provides basic product behavior evidence on the current local host only.
 
