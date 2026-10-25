@@ -79,3 +79,25 @@ container. Both identities are checked for changes. This is partial RI evidence;
 snapshots, full lifecycle/resource budgets and foreign hosts remain NOT_READY.
 The same optional argument also accepts a full packaged APE candidate, executing
 it directly through its launcher before installation, with its own model package.
+
+`sh ./unisacc.com tests/optimization.cx -- ROOT ABS_NEW_OUT [CANDIDATE]`
+compiles six Linux x86_64 images (-O0, -O1, -O, -O2, -O3, -Os), then executes
+each image with runtime inputs 7 and 11 and checks every row against hand-derived
+values. It also executes the same module through default-run for both inputs.
+Fourteen cases cover integer arithmetic, negative division/remainder, unsigned
+shift/wrap, narrow promotion, same/distinct pointer aliasing, loop control and
+induction, switch/loop joins, short circuit, recursion and struct copy. No signed
+overflow, invalid shifts or dangling pointers are used. A final `--tape` instead
+runs the separate bounded Tape contract: default equals O0, O/Os equal O1, O3
+equals O2; O1/O2 actually change the fixture; O4/Oz are named refusals.
+
+CANDIDATE may be an ELF driver using the root model container or a complete APE
+product tested before installation. Candidate/model bytes must remain unchanged.
+The semantic batch emits real native images specifically to exercise image
+construction and execution; it does not replace normal dynamic tool execution.
+The driver narrow checks passed 242 semantic and 17 Tape assertions. This is
+partial optimization evidence, not the full old corpus, optimizer closure,
+resource domain, same-candidate bootstrap or foreign-host qualification. The
+broad optimization contract remains NOT_READY. All internal timing phases and
+cold/hot breakdowns are UNMEASURED; this is not a speed benchmark. Use separate
+new directories for the semantic and Tape batches and a <=55-second watchdog.

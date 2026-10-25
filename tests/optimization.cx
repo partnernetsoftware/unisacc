@@ -1,0 +1,51 @@
+/* Linux x86_64 semantic contract, not an optimization speed benchmark.
+ * All six declared optimization spellings execute for both inputs; default-run too.
+ * Native output is required here to exercise the real image/link/run route. */
+#pragma unisa use cxlib.netpack
+static int assertions,failures;
+static char root[4096],work[4096],product[4400],bound[4400],program[4400],container[4400];
+static int native_driver;
+static const char *names[]={"arithmetic","signed-divrem","unsigned-shift","unsigned-wrap","narrow-promotion","same-pointer-alias","distinct-pointer-alias","loop-break-continue","induction-squares","switch-join","short-circuit","loop-phi","recursive-call","struct-copy"};
+/* Hand-derived for x=7 and x=11. Squares: sum(i*i,i=0..x-1)=91/385;
+ * triangular: x*(x+1)/2=28/66; alternating loop starts at 1 -> -2/-4.
+ * Negative division truncates toward zero, remainder has dividend's sign.
+ * uint32 addition wraps: (2^32-3)+x -> 4/8. No signed overflow occurs. */
+static const long expected[2][14]={{30,-43,36,4,243,7,4,19,91,52,80,-2,28,56},{42,-70,52,8,239,11,4,48,385,56,120,-4,66,88}};
+static void die(const char *s){fprintf(stderr,"optimization: %s\n",s);exit(2);}
+static void path(char *p,size_t cap,const char *a,const char *b){int n=snprintf(p,cap,"%s/%s",a,b);if(n<0||(size_t)n>=cap)die("path bound");}
+static void check(int ok,const char *s){assertions++;if(!ok)failures++;printf("%s\toptimization.%s\n",ok?"PASS":"FAIL",s);}
+static void digest(const char *p,char *h){size_t n;char *s=cx_read(p,&n);if(!s)die(p);cx_sha256_hex(s,n,h);free(s);}
+static void save(const char *name,const char *bytes,size_t n){char p[4400];path(p,sizeof p,work,name);int f=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);if(f<0)die("exclusive evidence");while(n){ssize_t k=write(f,bytes,n);if(k<0&&errno==EINTR)continue;if(k<=0)die("evidence write");bytes+=k;n-=(size_t)k;}if(close(f))die("evidence close");}
+static np_result call(char **v,const char *name){np_result r;char why[1024],file[160];if(np_run(v,root,0,16,&r,why,sizeof why))die(why);snprintf(file,sizeof file,"%s.stdout",name);save(file,r.out,r.outn);snprintf(file,sizeof file,"%s.stderr",name);save(file,r.err,r.errn);return r;}
+static int values(np_result *r,int input,const char *label){char name[160],row[80];int i;size_t at=0;int ok=r->rc==0&&!r->errn;snprintf(name,sizeof name,"%s.execution",label);check(ok,name);if(!ok&&r->errn)fwrite(r->err,1,r->errn,stderr);
+ for(i=0;i<14;i++){int n=snprintf(row,sizeof row,"%d\t%ld\n",i,expected[input][i]);int same=ok&&at<=r->outn&&(size_t)n<=r->outn-at&&!memcmp(r->out+at,row,(size_t)n);snprintf(name,sizeof name,"%s.%s",label,names[i]);check(same,name);at+=(size_t)n;}
+ snprintf(name,sizeof name,"%s.exact-transcript-extent",label);check(ok&&at==r->outn,name);return ok;
+}
+static int prefix(char **v){int n=0;v[n++]=bound;v[n++]="12";if(!native_driver)v[n++]="sh";v[n++]=product;if(native_driver){v[n++]="--models";v[n++]=container;}return n;}
+static int same_tape(np_result *a,np_result *b){return a->rc==0&&b->rc==0&&!a->errn&&!b->errn&&a->outn&&a->outn==b->outn&&!memcmp(a->out,b->out,a->outn);}
+static int tapes(const char *before,const char *container_before){
+ const char *flags[]={"-O0","-O1","-O","-O2","-O3","-Os",0},*levels[]={"O0","O1","O","O2","O3","Os","default"};np_result r[7];int i;char label[128],after[65];
+ for(i=0;i<7;i++){char *v[20];int vn=prefix(v);if(flags[i])v[vn++]=(char *)flags[i];v[vn++]="-b";v[vn++]="lnx/x86_64";v[vn++]="-S";v[vn++]=program;v[vn++]="-o";v[vn++]="-";v[vn]=0;snprintf(label,sizeof label,"tape.%s",levels[i]);r[i]=call(v,label);check(r[i].rc==0&&!r[i].errn&&r[i].outn>0,label);if(r[i].rc&&r[i].errn)fwrite(r[i].err,1,r[i].errn,stderr);}
+ check(same_tape(&r[0],&r[6]),"tape.default-is-O0");check(same_tape(&r[1],&r[2]),"tape.O-is-O1");check(same_tape(&r[1],&r[5]),"tape.Os-is-O1");check(same_tape(&r[3],&r[4]),"tape.O3-is-O2");
+ check(r[0].rc==0&&r[1].rc==0&&r[0].outn&&r[1].outn&&!same_tape(&r[0],&r[1]),"tape.O1-transforms-fixture");check(r[0].rc==0&&r[3].rc==0&&r[0].outn&&r[3].outn&&!same_tape(&r[0],&r[3]),"tape.O2-transforms-fixture");
+ for(i=0;i<7;i++)np_free(&r[i]);const char *bad[]={"-O4","-Oz"};for(i=0;i<2;i++){char *v[16];int vn=prefix(v);v[vn++]=(char *)bad[i];v[vn++]="-S";v[vn++]=program;v[vn]=0;snprintf(label,sizeof label,"tape.refuse-%s",bad[i]+1);np_result failure=call(v,label);check(failure.rc==1&&!failure.outn&&strstr(failure.err,"option not migrated"),label);np_free(&failure);}
+ digest(product,after);check(!strcmp(before,after),"candidate-unchanged");if(native_driver){digest(container,after);check(!strcmp(container_before,after),"model-container-unchanged");}
+ puts("TIMING\tstartup_construction_loading_inference_output_validation=UNMEASURED\tcold_hot=UNMEASURED");printf("OPTIMIZATION_TAPE\tassertions=%d\tfailed=%d\tscope=six-flags-default-aliases-transform-witness-and-invalid-flags-lnx-x86_64\n",assertions,failures);return failures?1:0;
+}
+int main(int argc,char **argv){
+ int tape_mode=argc>=4&&!strcmp(argv[argc-1],"--tape");if((argc<3||argc>5||(argc==5&&!tape_mode))||!realpath(argv[1],root)||argv[2][0]!='/'||strlen(argv[2])>=sizeof work)return 2;
+ strcpy(work,argv[2]);if(mkdir(work,0700))die("new work directory");
+ path(product,sizeof product,root,"unisacc.com");path(bound,sizeof bound,root,"tools/bound");path(program,sizeof program,root,"tests/optimization-program.cx");
+ path(container,sizeof container,root,"unisacc.com");if(argc==5||(argc==4&&!tape_mode)){if(!realpath(argv[3],product))die("candidate path");size_t size;char *bytes=cx_read(product,&size);if(!bytes)die("candidate read");if(size>=4&&!memcmp(bytes,"\177ELF",4))native_driver=1;else if(size>=16&&!memcmp(bytes+size-16,"UNIPKG1\n",8))strcpy(container,product);else die("expected ELF driver or packaged product");free(bytes);}
+ char container_before[65];digest(container,container_before);char before[65],after[65],images[6][4400],label[128];digest(product,before);if(tape_mode)return tapes(before,container_before);
+ const char *opts[]={"-O0","-O1","-O","-O2","-O3","-Os"},*levels[]={"O0","O1","O","O2","O3","Os"},*inputs[]={"7","11"};np_result runs[6][2];int built[6]={0,0,0,0,0,0},i,j;
+ for(i=0;i<6;i++){char file[40];snprintf(file,sizeof file,"program-%s",levels[i]);path(images[i],sizeof images[i],work,file);char *v[20];int vn=prefix(v);v[vn++]=(char *)opts[i];v[vn++]="-b";v[vn++]="lnx/x86_64";v[vn++]=program;v[vn++]="-o";v[vn++]=images[i];v[vn]=0;snprintf(label,sizeof label,"%s.compile",levels[i]);np_result r=call(v,label);built[i]=r.rc==0&&!r.errn&&!r.outn;check(built[i],label);if(!built[i]&&r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);if(!built[i])continue;
+  for(j=0;j<2;j++){char *run[]={bound,"3",images[i],(char *)inputs[j],0};snprintf(label,sizeof label,"%s.input%s",levels[i],inputs[j]);runs[i][j]=call(run,label);values(&runs[i][j],j,label);}
+ }
+ for(i=1;i<6;i++)if(built[0]&&built[i])for(j=0;j<2;j++){snprintf(label,sizeof label,"O0-%s.input%s.same-bytes",levels[i],inputs[j]);np_result *a=&runs[0][j],*b=&runs[i][j];check(a->rc==0&&b->rc==0&&!a->errn&&!b->errn&&a->outn==b->outn&&!memcmp(a->out,b->out,a->outn),label);}
+ for(j=0;j<2;j++){char *run[16];int vn=prefix(run);run[vn++]=program;run[vn++]="--";run[vn++]=(char *)inputs[j];run[vn]=0;snprintf(label,sizeof label,"default-run.input%s",inputs[j]);np_result r=call(run,label);values(&r,j,label);np_free(&r);}
+ for(i=0;i<6;i++)if(built[i])for(j=0;j<2;j++)np_free(&runs[i][j]);
+ digest(product,after);check(!strcmp(before,after),"candidate-unchanged");if(native_driver){digest(container,after);check(!strcmp(container_before,after),"model-container-unchanged");}
+ puts("TIMING\tstartup_construction_loading_inference_output_validation=UNMEASURED\tcold_hot=UNMEASURED");
+ printf("OPTIMIZATION\tassertions=%d\tfailed=%d\tscope=14-defined-C-cases-two-inputs-six-optimization-spellings-native-and-default-run-lnx-x86_64\n",assertions,failures);return failures?1:0;
+}

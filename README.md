@@ -96,7 +96,7 @@ machine). The C headers it needs travel inside it.
 ```
 
 - **Default mode is run:** `unisacc file.c [args]` with neither `-run` nor an output flag compiles and runs the program in memory (owner decision 2026-10-01; 0.0.17); this is deliberately unlike cc's silent `a.out`. Writing a file always takes `-o` (or `-b target`, `-S`, `-c`, `-E`). Releases up to 0.0.16 wrote `a.out` like cc.
-- **Flags:** `-O0`/`-O1`/`-O2`, `-o`, `-b os/arch`, `-run`, `-I`, `-D`,
+- **Flags:** `-O0`/`-O`/`-O1`/`-O2`/`-O3`/`-Os` (`-O3` uses the `-O2` pass set; `-O` and `-Os` use `-O1`), `-o`, `-b os/arch`, `-run`, `-I`, `-D`,
   `-include`, `-E`, `-M`/`-MM`/`-MD`/`-MMD`/`-MF`/`-MT`/`-MQ`/`-MP` (gcc's `.d` bytes; `-M` lists what `-MM` lists, the bundled headers are not files), `-nostdinc`, `-ftrim-libc`/`-fno-trim-libc`, `--version`; `-Wall`,
   `-Wextra`, `-g`, `-std=c99` are accepted. A `#!` first line is skipped.
 - **Headers:** the standard/compatibility headers (`assert

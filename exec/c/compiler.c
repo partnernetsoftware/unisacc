@@ -624,7 +624,10 @@ int main(int argc, char **argv) {
         else if (!strcmp(a,"-O")) level = 1;
         else if (!strcmp(a,"-O0")) level = 0;
         else if (!strcmp(a,"-O1")) level = 1;
-        else if (!strcmp(a,"-O2")) level = 2;
+        else if (!strcmp(a,"-O2") || !strcmp(a,"-O3")) level = 2;
+        /* Match the classic optimizer: >=2 enables the same local passes;
+           -Os uses level 1 (src/main.c and src/opt.c). Keep package routes canonical. */
+        else if (!strcmp(a,"-Os")) level = 1;
         else if (cxm_flag((char *)a)) { }           /* -cx-plan, -cx-interface (src/cxmod.c) */
         else if (a[0]=='-' && a[1]) return clierror(defrun && src ? "option not migrated (arguments for the program go after --: unisacc prog.c -- --flag)" : "option not migrated");
         else { sources[nsources++]=a; if (!src) src = a; }
