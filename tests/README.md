@@ -481,3 +481,66 @@ For current `P53e2cd1f/S447f794a`, generations11/12 passed all58 assertions unde
 The older `P46cfa11a/Sb9c0f819` generations08/09 also passed58 under30 seconds in `out/c43-native-selfhost-09-retained-01.log`; that evidence was not transferred to the new source. Their earlier142 failures remain failures. The exact coverage ID is `bootstrap.native-two-generation`; the full-bootstrap obligation remains NOT_READY.
 
 Receipts are unsigned consistency records, not proof of historical process execution; product-context-v1 does not bind its builder. The saved prior builder's historical source and the original frozen7f709 source tree were not reproduced. The09 wrapped candidate needs no installation record; absence is explicitly NOT_RECORDED while its real construction receipts remain mandatory. This is neither host-seed three-stage N22 nor foreign-host execution qualification. Internal phase and cold/hot timing remain UNMEASURED.
+
+The seven `hostseed-control-*` batches register the separate exact obligation
+`bootstrap.fixed-p3-lineage-refusals`. They require the same prepared context,
+full current terminal-P3 MODELS product, exact declared PAYLOAD and three distinct
+complete generation directories as `hostseed-fixed-p3`. Run one CASE per fresh
+absolute output directory:
+
+```sh
+tools/bound 55 sh ./unisacc.com -O2 tests/hostseed-controls.cx -- ROOT CTX MODELS PAYLOAD G1 G2 G3 NEW_ABS_OUT CASE
+```
+
+CASE is `duplicate-generation`, `swapped-generations`, `wrong-payload`,
+`raw-models`, `wrong-native-builder`, `wrong-parent` or `duplicate-step`.
+The controller performs exactly one target command bounded at 20 seconds,
+including that target's default-run compilation, plus two independent source
+identity observations bounded at 8 seconds each. The explicit child budgets
+total 36 seconds within the unchanged 55-second parent. No generation, HOST,
+compiler or weights are rebuilt.
+
+Before running the negative target, the controller reconstructs exact canonical
+context, HOST, stage and artifact receipts against the actual source, parent
+paths, parent receipt hashes and bytes. This positive prerequisite prevents an
+unrelated pre-existing invalid receipt from faking a mismatch rejection.
+Canonical receipts are checked again after the target. The controller also
+records complete sorted before/after manifests for the context and all three
+generation trees, including directories, regular-file hashes and modes, plus
+MODELS, PAYLOAD, raw product, tools, control/parent/identity sources, host CC and
+watchdog. Special input leaves are refused. The full raw source identity must
+remain unchanged. Actual target stdout, stderr, rc and argument vectors are
+retained. Each target must return 2, leave stdout empty and emit its exact named
+reason; a rejected new output must remain absent.
+
+`wrong-parent` clones the complete 13-leaf G2 generation and supplies the
+wrong actual parent builder. `duplicate-step` clones the complete 13-leaf G1
+generation and requests an already published step. Both writable probes target
+private copies only and compare complete private manifests afterward, preserving
+successful artifacts and receipts. Other cases leave original material read only.
+All seven independent cases completed with zero failures under the original
+55-second parent, 20-second target and two 8-second source-observation bounds:
+60 assertions in total (five cases with 8 each, plus `wrong-parent` and
+`duplicate-step` with 10 each). Actual logs are
+`out/c43-hostseed-control-{duplicate-generation,swapped-generations,wrong-payload,raw-models,wrong-native-builder,wrong-parent,duplicate-step}-01.log`.
+`duplicate-generation` used default-run compilation; the other six controllers
+used explicit manual `-O2`. Each target's expected refusal returned actual rc2
+with empty stdout and its exact named reason; each enclosing case returned rc0.
+The two private-copy cases also preserved their complete private manifests.
+
+The registry has no compilerflags field or executor. SOURCE entry remains the
+exact source path and args remains a runtime argument template; the controller
+`-O2` requirement is expressed by this manual command and coverage description,
+not encoded as a dispatcher feature.
+
+The single-step APE-parent preflight is weaker than the final canonical chain
+verifier: it does not reconstruct every parent receipt field. The fixture
+records a private wrap-builder-field mutation/invalid-step reproducer as
+NOT_RUN, beyond these seven vectors; it may reach a private stage-context write
+where the final chain's canonical receipt comparison would reject the receipt.
+This is an explicit admission limitation, not a proved bypass, an actual
+candidate-tampering result or evidence that all parent-field mutations have
+been tested. These finite refusals do not establish hermetic host dependencies,
+NN/ASM source reconstruction, historical process execution, complete host-seed
+N22 or foreign-host qualification. The 19 broad gaps remain open. Internal phase
+and cold/hot timing remain UNMEASURED.
