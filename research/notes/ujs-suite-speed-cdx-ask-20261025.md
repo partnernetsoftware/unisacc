@@ -1,7 +1,8 @@
-# 向 cdx：`unisacc.com -run` 拖慢 UJS host1 套件
+# 观测摘录：`unisacc.com -run` 固定启动税（UJS host1）
 
-**来源**：ujs.com 0.0.4 产品闸提速（`ujs/tests/run.cx`）  
-**标签**：底座性能／非 UJS 产品合同  
+**来源**：ujs.com 0.0.4 产品闸墙钟  
+**正式需求**：根 [`plans/v0.0.44.md`](../../plans/v0.0.44.md) **C44-RUN-REUSE-01**（主人已要求 cdx 在 0.0.44 尝试；类比 Python 同源编译缓存——第二次同身份应加速，仍真实执行）  
+**标签**：底座性能观测／非 UJS 产品合同催办  
 **日期**：2026-10-25
 
 ## 现象（本机实测）
