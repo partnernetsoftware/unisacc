@@ -53,3 +53,19 @@ The pair of renames is not one atomic transaction: a second-rename failure repor
 an installation error with the backup retained. Installation grants no new host,
 full-suite or release qualification. The old generation's context subsequently
 rejects further construction against the replaced bootstrap; start a fresh one.
+
+`product-build.cx ROOT KERNEL_GENERATION PACKAGE_DIR STEP` constructs each driver
+slice and the APE through default-run CX orchestration. Use separate bounded
+commands with steps `slice-win/x86_64`, `slice-lnx/x86_64`, `slice-lnx/arm64`,
+`slice-osx/x86_64`, `slice-osx/arm64`, then `wrap`. Each slice is actually rebuilt.
+Every step checks the kernel source/bootstrap context and binds the coordinator,
+package tools/module, seed APE writer and exact package material before/after.
+Its `.native-build.tsv` receipts contain the construction context and artifact
+SHA; wrap rehashes all five slices against their receipts before and after use.
+Existing or partial output is refused. These are PREPARED receipts, not tests.
+
+`tests/selfhost.cx ROOT PRIOR_GENERATION FRESH_GENERATION` compares all 22
+normalized sources, 22 objects, both kernels, five code slices and the full fresh
+product against the installed bootstrap. It checks the installed artifact/source
+record and current kernel context too. A successful two-generation comparison
+does not substitute for the required complete bootstrap chain or foreign hosts.

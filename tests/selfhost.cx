@@ -1,0 +1,17 @@
+/* Native rebuild equivalence: freshly produced objects, kernels, driver slices,
+ * and full product. This is a two-generation fixed point, not three stages or
+ * native execution on the foreign hosts. Run only after all construction steps.
+ */
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.kernelcontext
+static int assertions,failures;
+static void die(const char *s){fprintf(stderr,"selfhost: %s\n",s);exit(2);}
+static void path(char *p,size_t cap,const char *a,const char *b){int k=snprintf(p,cap,"%s/%s",a,b);if(k<0||(size_t)k>=cap)die("path");}
+static char *load(const char *p,size_t *n){struct stat st;if(lstat(p,&st)||!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>268435456)die(p);char *s=cx_read(p,n);if(!s||*n!=(size_t)st.st_size)die("read/size changed");return s;}
+static void check(int ok,const char *label){assertions++;if(!ok)failures++;printf("%s\t%s\n",ok?"PASS":"FAIL",label);}
+static void same(const char *a,const char *b,const char *label){size_t an,bn;char *av=load(a,&an),*bv=load(b,&bn);check(an==bn&&!memcmp(av,bv,an),label);free(av);free(bv);}
+static int field(const char *json,const char *name,const char *value){char key[100];snprintf(key,sizeof key,"\"%s\": \"",name);char *p=strstr(json,key);return p&&!strstr(p+1,key)&&strlen(p+strlen(key))>=65&&!memcmp(p+strlen(key),value,64)&&p[strlen(key)+64]=='\"';}
+int main(int argc,char **argv){if(argc!=4){fputs("usage: ROOT PRIOR_GENERATION FRESH_GENERATION\n",stderr);return 2;}char root[4096],source[65],after[65],a[4400],b[4400],rel[200],label[230];if(!realpath(argv[1],root))die("root");kc_check(root,argv[3],source);path(a,sizeof a,root,"unisacc.com.build.json");size_t n;char *record=load(a,&n);check(field(record,"sources_sha256",source),"same-current-source-identity");path(a,sizeof a,root,"unisacc.com");char *product=load(a,&n),hash[65];cx_sha256_hex(product,n,hash);free(product);check(field(record,"artifact_sha256",hash),"bootstrap-artifact-identity");free(record);
+ const char *arch[]={"x86_64","arm64"};const char *units[]={"transition","arith","buffer","memory","intern","bytes","format","stack","action","run","bridge"};const char *ext[]={"s","o"};int i,j,k;for(i=0;i<2;i++){for(j=0;j<11;j++)for(k=0;k<2;k++){snprintf(rel,sizeof rel,"%s/%s.%s",arch[i],units[j],ext[k]);path(a,sizeof a,argv[2],rel);path(b,sizeof b,argv[3],rel);snprintf(label,sizeof label,"rebuild.%s",rel);same(a,b,label);}snprintf(rel,sizeof rel,"%s.kernel",arch[i]);path(a,sizeof a,argv[2],rel);path(b,sizeof b,argv[3],rel);same(a,b,rel);}
+ const char *slices[]={"slice-win-x86_64","slice-lnx-x86_64","slice-lnx-arm64","slice-osx-x86_64","slice-osx-arm64"};for(i=0;i<5;i++){path(a,sizeof a,argv[2],slices[i]);path(b,sizeof b,argv[3],slices[i]);same(a,b,slices[i]);}
+ path(a,sizeof a,root,"unisacc.com");path(b,sizeof b,argv[3],"unisacc-next.com");same(a,b,"complete-product-fixed-point");kc_check(root,argv[3],after);check(!strcmp(source,after),"source-and-bootstrap-stable");printf("SELFHOST\tassertions=%d\tfailed=%d\tscope=native-two-generation-artifact-fixed-point\n",assertions,failures);return failures?1:0;}
