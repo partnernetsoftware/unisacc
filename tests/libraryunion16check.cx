@@ -28,7 +28,13 @@
    json.dumps(indent=2); its source_closure names this file (tests/libraryunion16check.cx) where the .py named itself.
    Failures the .py did not catch (bad arguments past argparse, a missing package or provider, a bad provider
    manifest, a missing runtime include) are rc 1 with the last line of Python's traceback on stderr and no stdout;
-   argparse errors are rc 2 with its usage text (prog name libraryunion16check.py, so the text is byte-identical). */
+   argparse errors are rc 2 with its usage text (prog name libraryunion16check.py).
+   Native Linux/x86_64 only: --prepare publishes runtime material (PREPARED, no public calls);
+   --require-cached verifies and copies it, with missing/bad material rc75. The separate
+   runtime key excludes cases/pressures/callback because every consumer still runs its
+   complete original signature/probe/three-opt assertions. A real explicit qualified
+   provider is required for material modes, so its six artifacts and manifest are bound.
+   Record locks release on process death; unpublished unique staging directories are retained. */
 #pragma unisa use cxlib.runtimecopy
 #pragma unisa use cxlib.pyjson
 #pragma unisa use cxlib.libffiprovider
@@ -48,7 +54,8 @@ static const char *USAGE =
     "                              [--build-only] [--evidence EVIDENCE]\n"
     "                              [--ffi-provider FFI_PROVIDER]\n"
     "                              [--ffi-cflags FFI_CFLAGS]\n"
-    "                              [--ffi-ldflags FFI_LDFLAGS]\n";
+    "                              [--ffi-ldflags FFI_LDFLAGS]\n"
+    "                              [--prepare | --require-cached] [--cache-root DIR]\n";
 static const char *HELP =
     "\noptions:\n"
     "  -h, --help            show this help message and exit\n"
@@ -62,12 +69,16 @@ static const char *HELP =
     "  --evidence EVIDENCE\n"
     "  --ffi-provider FFI_PROVIDER\n"
     "  --ffi-cflags FFI_CFLAGS\n"
-    "  --ffi-ldflags FFI_LDFLAGS\n";
+    "  --ffi-ldflags FFI_LDFLAGS\n"
+    "  --prepare             Linux/x86_64 runtime material only; PREPARED, no public calls\n"
+    "  --require-cached      verify runtime material; absent/bad inputs exit 75\n"
+    "  --cache-root DIR      material root (default UNISACC_MODEL_CACHE or temp cache)\n";
 static const char *SRC_SHA = "f3a3082a23b37c293a4fcd1053147b371f2ff91fa7ea1b2a52e335676bac82dc";
 
 static char ROOT[4096], SELF[4096], TD[4200];
 static ffip_provider DEFAULT_FFI;
 static int DEFAULT_FFI_ACTIVE;
+static int cache_stable(void);
 
 /* ---- small utilities ---------------------------------------------------------------------------------------- */
 typedef struct Buf { unsigned char *p; size_t n, cap; } Buf;
@@ -182,10 +193,10 @@ static void bytes_repr(Buf *o, const unsigned char *s, size_t n) {   /* repr(byt
 }
 
 /* ---- argparse ------------------------------------------------------------------------------------------------- */
-enum { O_HELP, O_PACKAGE, O_ARCH, O_CASES, O_CALLBACK, O_PRESSURES, O_SANITIZE, O_BUILD, O_EVIDENCE, O_PROVIDER, O_CFLAGS, O_LDFLAGS, O_N };
+enum { O_HELP, O_PACKAGE, O_ARCH, O_CASES, O_CALLBACK, O_PRESSURES, O_SANITIZE, O_BUILD, O_EVIDENCE, O_PROVIDER, O_CFLAGS, O_LDFLAGS, O_PREPARE, O_REQUIRE, O_CACHE, O_N };
 static const char *OPTNAME[O_N] = { "--help", "--package", "--arch", "--cases", "--callback", "--pressures", "--sanitize",
-                                    "--build-only", "--evidence", "--ffi-provider", "--ffi-cflags", "--ffi-ldflags" };
-static const int OPTVAL[O_N] = { 0, 1, 1, 1, 0, 1, 0, 0, 1, 1, 1, 1 };
+                                    "--build-only", "--evidence", "--ffi-provider", "--ffi-cflags", "--ffi-ldflags", "--prepare", "--require-cached", "--cache-root" };
+static const int OPTVAL[O_N] = { 0, 1, 1, 1, 0, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1 };
 static const char *ERRNAME(int o) { return o == O_HELP ? "-h/--help" : OPTNAME[o]; }
 typedef struct Cls { char kind; int opt; const char *explicit_arg; int sep, short_form; } Cls;
 /* _parse_optional: kind 'A' (a value), 'O' (an option; opt -1 when unknown), '-' (the '--') */
@@ -221,8 +232,8 @@ static Cls classify(const char *s) {
     return c;
 }
 typedef struct Args {
-    const char *package, *arch, *cases, *pressures, *evidence, *provider, *cflags, *ldflags;
-    int callback, sanitize, build_only, cflags_explicit, ldflags_explicit;
+    const char *package, *arch, *cases, *pressures, *evidence, *provider, *cflags, *ldflags, *cache_root;
+    int callback, sanitize, build_only, cflags_explicit, ldflags_explicit, prepare, require;
 } Args;
 static void parse(int argc, char **argv, Args *a) {
     Cls *cls = calloc((size_t)argc + 1, sizeof *cls); Buf extras = { 0 }; int i, dd = 0, nextra = 0;
@@ -250,6 +261,8 @@ static void parse(int argc, char **argv, Args *a) {
             if (c.opt == O_HELP) { fputs(USAGE, stdout); fputs(HELP, stdout); fflush(stdout); exit(0); }
             if (c.opt == O_CALLBACK) a->callback = 1;
             else if (c.opt == O_SANITIZE) a->sanitize = 1;
+            else if (c.opt == O_PREPARE) a->prepare = 1;
+            else if (c.opt == O_REQUIRE) a->require = 1;
             else a->build_only = 1;
             continue;
         }
@@ -274,6 +287,7 @@ static void parse(int argc, char **argv, Args *a) {
         case O_PROVIDER: { static char pv[4200]; pathnorm(v, pv, sizeof pv); a->provider = pv; break; }
         case O_CFLAGS: a->cflags = v; a->cflags_explicit = 1; break;
         case O_LDFLAGS: a->ldflags = v; a->ldflags_explicit = 1; break;
+        case O_CACHE: a->cache_root = v; break;
         }
     }
     if (nextra) usage_error("unrecognized arguments: %s", (const char *)extras.p);
@@ -421,12 +435,14 @@ static int write_evidence(void) {
 static int finish(int rc) {
     pj_value *sum, *vs; size_t i, k; char *text; size_t n;
     if (DEFAULT_FFI_ACTIVE && ffip_verify(&DEFAULT_FFI)) uncaught(ffip_error());
+    if ((A.prepare || A.require) && cache_stable()) return 75;
     pj_set(RECORD, "actual_runner_rc", pj_int(rc));
     if (A.evidence && write_evidence() != 0) return -1;
     sum = pj_dict(); vs = pj_list();
     pj_set(sum, "target", pj_strz(TARGET));
     pj_set(sum, "status", pj_get(RECORD, "status"));
     pj_set(sum, "actual_runner_rc", pj_int(rc));
+    if(A.prepare||A.require)pj_set(sum,"runtime_identity",pj_get(RECORD,"runtime_identity"));
     for (i = 0; i < VARIANTS->len; i++) {
         pj_value *v = VARIANTS->items[i], *ev = pj_get(v, "events"), *row = pj_dict(), *calls = pj_list();
         pj_set(row, "case", pj_get(v, "case")); pj_set(row, "pressure", pj_get(v, "pressure")); pj_set(row, "rc", pj_get(v, "rc"));
@@ -584,6 +600,64 @@ static pj_value *provider_flags(const char *provider, const char *target, List *
     return m;
 }
 
+/* Linux/x86_64 runtime material only. No fixture/public-call results are cached.
+ * The conservative actor set includes all carried include headers, the actual three
+ * modules, watchdog body and wrapper, this source, and the default-run driver.
+ * The key additionally contains the copied runtime closure, compiler identity,
+ * ambient tool environment, selected package and six qualified provider artifacts.
+ * A record lock is kernel-released on death; unique unpublished stages remain evidence. */
+static pj_value *CACHE_READSET, *CACHE_DOC;
+static char CACHE_KEY[65], CACHE_DIR[4400], CACHE_PARENT[4300];
+static char CACHE_ART_SHA[65];
+static int CACHE_LOCK = -1;
+static int cache_need(const char *why) { fflush(stdout); fprintf(stderr,"NEED_PREPARE union16 runtime: %s\n",why); fflush(stderr); return 75; }
+static void cache_add(List *paths,const char *p) { for(int i=0;i<paths->n;i++)if(!strcmp(paths->v[i],p))return; lpush(paths,p); }
+static int cache_cmp(const void*a,const void*b){return strcmp(*(char*const*)a,*(char*const*)b);}
+static void cache_headers(const char *dir,List *paths){
+    DIR*d=opendir(dir);struct dirent*e;if(!d)uncaught("OSError: actor header directory unreadable");
+    while((e=readdir(d))){if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;char p[4400];struct stat st;snprintf(p,sizeof p,"%s/%s",dir,e->d_name);if(lstat(p,&st))uncaught("OSError: actor header stat");if(S_ISDIR(st.st_mode))cache_headers(p,paths);else {size_t n=strlen(p);if(n>2&&!strcmp(p+n-2,".h")){if(!S_ISREG(st.st_mode))uncaught("ValueError: actor header must be regular");cache_add(paths,p);}}}closedir(d);
+}
+static int cache_stable(void){
+    if(!CACHE_READSET)return 0;
+    for(size_t i=0;i<CACHE_READSET->len;i+=2){char h[65],why[8400];pj_value*k=CACHE_READSET->items[i],*v=CACHE_READSET->items[i+1];if(rtc_sha_file(k->s,h,why,sizeof why)||!is_str(v,h))return cache_need("input read-set changed");}return 0;
+}
+static char *cache_cc(const char *cc){
+    char full[4200],real[4200];if(strchr(cc,'/')){if(!realpath(cc,real))uncaught("OSError: compiler resolve");return xstrdup(real);}
+    const char*s=getenv("PATH");if(!s)s="";for(;;){size_t n=strcspn(s,":");snprintf(full,sizeof full,"%.*s%s%s",(int)n,s,n?"/":"",cc);if(!access(full,X_OK)){if(!realpath(full,real))uncaught("OSError: compiler realpath");return xstrdup(real);}if(!s[n])break;s+=n+1;}uncaught("OSError: compiler absent");return 0;
+}
+static void cache_init(const char*cc,List*recipe,const char*provider,const char*package){
+    List paths={0};char path[4400],why[8400];pj_value*inputs=pj_get(RECORD,"source_closure"),*env=pj_dict(),*rec=pj_list();
+    for(size_t i=0;i<inputs->len;i+=2){const char*rel=inputs->items[i]->s;snprintf(path,sizeof path,"%s%s%s",rel[0]=='/'?"":ROOT,rel[0]=='/'?"":"/",rel);cache_add(&paths,path);}
+    const char*actors[]={"tests/cxlib/runtimecopy.cx","tests/cxlib/pyjson.cx","tests/cxlib/libffiprovider.cx","tests/bound","tests/bound.c","unisacc.com"};
+    for(int i=0;i<6;i++){snprintf(path,sizeof path,"%s/%s",ROOT,actors[i]);cache_add(&paths,path);}snprintf(path,sizeof path,"%s/include",ROOT);cache_headers(path,&paths);
+    const char*required[]={"manifest.json","lib/libffi.a","include/ffi.h","include/ffitarget.h","include/ffi/ffi.h","include/ffi/ffitarget.h","LICENSE"};char pdir[4200];if(rtc_resolve(provider,1,pdir,sizeof pdir,why,sizeof why))uncaught(why);
+    for(int i=0;i<7;i++){snprintf(path,sizeof path,"%s/%s",pdir,required[i]);cache_add(&paths,path);}cache_add(&paths,package);cache_add(&paths,cc);
+    qsort(paths.v,paths.n,sizeof(char*),cache_cmp);CACHE_READSET=pj_dict();
+    for(int i=0;i<paths.n;i++){char h[65];if(rtc_sha_file(paths.v[i],h,why,sizeof why))uncaught(why);pj_set(CACHE_READSET,paths.v[i],pj_strz(h));}
+    for(size_t i=0;i<inputs->len;i+=2){const char*rel=inputs->items[i]->s;snprintf(path,sizeof path,"%s%s%s",rel[0]=='/'?"":ROOT,rel[0]=='/'?"":"/",rel);pj_value*actual=pj_get(CACHE_READSET,path);if(!actual||!is_str(inputs->items[i+1],actual->s))uncaught("ValueError: copied runtime/actor changed before material key");}
+    { List cf={0},lf={0};pj_value*verified=provider_flags(provider,TARGET,&cf,&lf);char*x,*y;size_t nx,ny;if(pj_dumps(verified,-1,&x,&nx)||pj_dumps(pj_get(RECORD,"ffi_provider_manifest"),-1,&y,&ny)||nx!=ny||memcmp(x,y,nx))uncaught("ValueError: qualified provider changed before material key"); }
+    const char*names[]={"PATH","CPATH","C_INCLUDE_PATH","LIBRARY_PATH","COMPILER_PATH","GCC_EXEC_PREFIX","SOURCE_DATE_EPOCH","CFLAGS","CC","LANG","LC_ALL","SDKROOT","MACOSX_DEPLOYMENT_TARGET","UNISACC_FFI_X86_PROVIDER","UNISACC_FFI_CFLAGS","UNISACC_FFI_LDFLAGS"};
+    for(int i=0;i<16;i++){const char*v=getenv(names[i]);pj_set(env,names[i],v?pj_strz(v):pj_null());}
+    for(int i=0;i<recipe->n;i++){const char*s=recipe->v[i];if(!strncmp(s,TD,strlen(TD))){snprintf(path,sizeof path,"{WORK}%s",s+strlen(TD));s=path;}pj_append(rec,pj_strz(s));}
+    CACHE_DOC=pj_dict();pj_set(CACHE_DOC,"schema",pj_strz("union16-runtime-v1"));pj_set(CACHE_DOC,"target",pj_strz(TARGET));pj_set(CACHE_DOC,"readset",CACHE_READSET);pj_set(CACHE_DOC,"environment",env);pj_set(CACHE_DOC,"recipe",rec);pj_set(CACHE_DOC,"provider_manifest",pj_get(RECORD,"ffi_provider_manifest"));pj_set(CACHE_DOC,"package_sha256",pj_get(RECORD,"package_sha256"));
+    char*b;size_t n;if(pj_dumps(CACHE_DOC,-1,&b,&n))uncaught("ValueError: cache key serialization");cx_sha256_hex(b,n,CACHE_KEY);free(b);
+    const char*base=A.cache_root?A.cache_root:getenv("UNISACC_MODEL_CACHE");if(!base){static char d[4200];gettempdir(d,sizeof d);snprintf(CACHE_PARENT,sizeof CACHE_PARENT,"%s/unisacc-model-cache/union16",d);}else snprintf(CACHE_PARENT,sizeof CACHE_PARENT,"%s/union16",base);
+    snprintf(CACHE_DIR,sizeof CACHE_DIR,"%s/runtime-%s",CACHE_PARENT,CACHE_KEY);pj_set(RECORD,"runtime_identity",pj_strz(CACHE_KEY));pj_set(RECORD,"runtime_recipe",rec);pj_set(RECORD,"runtime_material_contract",CACHE_DOC);
+}
+static int cache_verify(char*artifact){
+    char p[4600],why[256],h[65];struct stat st;size_t n;char*b;pj_value*m;
+    if(cache_stable())return 75;
+    if(lstat(CACHE_DIR,&st)){if(errno!=ENOENT)uncaught("OSError: cache directory stat");return cache_need("absent key");}if(!S_ISDIR(st.st_mode))return cache_need("cache directory not regular directory");
+    snprintf(p,sizeof p,"%s/manifest.json",CACHE_DIR);if(lstat(p,&st)||!S_ISREG(st.st_mode))return cache_need("manifest absent/nonregular");b=cx_read(p,&n);m=b?pj_loads(b,n,why,sizeof why):0;if(!m||m->type!=PJ_OBJ||m->len!=6||!is_str(pj_get(m,"key"),CACHE_KEY))return cache_need("bad manifest");
+    char*x,*y;size_t nx,ny;pj_value*doc=pj_get(m,"contract");if(!doc||pj_dumps(doc,-1,&x,&nx)||pj_dumps(CACHE_DOC,-1,&y,&ny)||nx!=ny||memcmp(x,y,nx))return cache_need("contract differs");
+    snprintf(artifact,4600,"%s/library.so",CACHE_DIR);if(lstat(artifact,&st)||!S_ISREG(st.st_mode)||st.st_size<=0||rtc_sha_file(artifact,h,why,sizeof why)||!is_str(pj_get(m,"library.so"),h))return cache_need("artifact absent/corrupt");strcpy(CACHE_ART_SHA,h);return cache_stable();
+}
+static void cache_write(const char*p,const void*b,size_t n){int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,0600);if(fd<0)uncaught("OSError: cache stage open");const char*s=b;while(n){ssize_t k=write(fd,s,n);if(k<0&&errno==EINTR)continue;if(k<=0)uncaught("OSError: cache stage write");s+=k;n-=k;}if(fsync(fd)||close(fd))uncaught("OSError: cache stage fsync");}
+static int cache_publish(const char*lib){
+    if(cache_stable())return 75;char stage[4600],p[4700],hex[65],why[8400];snprintf(stage,sizeof stage,"%s/.runtime-%s-XXXXXX",CACHE_PARENT,CACHE_KEY);if(!mkdtemp(stage))uncaught("OSError: cache stage mkdir");size_t n;char*b=cx_read(lib,&n);if(!b||!n)uncaught("OSError: cache source artifact");cx_sha256_hex(b,n,hex);snprintf(p,sizeof p,"%s/library.so",stage);cache_write(p,b,n);free(b);char check[65];if(rtc_sha_file(p,check,why,sizeof why)||strcmp(hex,check))uncaught("OSError: cache artifact readback");
+    pj_value*m=pj_dict();pj_set(m,"key",pj_strz(CACHE_KEY));pj_set(m,"contract",CACHE_DOC);pj_set(m,"library.so",pj_strz(hex));if(pj_dumps(m,-1,&b,&n))uncaught("ValueError: manifest encode");snprintf(p,sizeof p,"%s/manifest.json",stage);cache_write(p,b,n);free(b);if(cache_stable())return 75;
+    int fd=open(stage,O_RDONLY|O_DIRECTORY,0);if(fd<0||fsync(fd)||close(fd))uncaught("OSError: stage directory fsync");struct stat st;if(!lstat(CACHE_DIR,&st))return cache_need("invalid existing entry; retained for inspection");if(errno!=ENOENT)uncaught("OSError: destination stat");if(rename(stage,CACHE_DIR))uncaught("OSError: publish runtime");fd=open(CACHE_PARENT,O_RDONLY|O_DIRECTORY,0);if(fd<0||fsync(fd)||close(fd))uncaught("OSError: cache parent fsync");return cache_stable();
+}
 /* the try: body of the .py's main.  finish()'s value, or -1 when an exception was raised (EXC set) */
 static int body(const char *cc, List *flags, List *san, List *cf, List *lf, const char *arch, const char *host,
                 List *cases, List *pressures, const char *frozen) {
@@ -599,10 +673,31 @@ static int body(const char *cc, List *flags, List *san, List *cf, List *lf, cons
     { char p[4400]; snprintf(p, sizeof p, "%s/libunisacc.c", rt); lpush(&cmd, p); snprintf(p, sizeof p, "%s/librarycall_%s.S", rt, arch); lpush(&cmd, p); }
     for (i = 0; i < lf->n; i++) lpush(&cmd, lf->v[i]);
     lpush(&cmd, "-o"); lpush(&cmd, lib);
+    if(A.prepare||A.require){
+        const char*provider=A.provider;if(!provider)provider=getenv("UNISACC_FFI_X86_PROVIDER");
+        if(!provider||!*provider)return cache_need("explicit qualified provider directory required");
+        cache_init(cc,&cmd,provider,pj_get(RECORD,"package_path")->s);
+        char artifact[4600];
+        if(A.prepare){
+            if(mkdirs(CACHE_PARENT))return -1;
+            char lockpath[4600];snprintf(lockpath,sizeof lockpath,"%s/.runtime-%s.lock",CACHE_PARENT,CACHE_KEY);
+            CACHE_LOCK=open(lockpath,O_RDWR|O_CREAT|O_NOFOLLOW|O_CLOEXEC,0600);if(CACHE_LOCK<0)uncaught("OSError: runtime lock open");struct flock lk;memset(&lk,0,sizeof lk);lk.l_type=F_WRLCK;lk.l_whence=SEEK_SET;
+            if(fcntl(CACHE_LOCK,F_SETLK,&lk)<0){if(errno==EAGAIN||errno==EACCES)return cache_need("producer busy");uncaught("OSError: runtime record lock");}
+            if(!cache_verify(artifact)){pj_set(RECORD,"status",pj_strz("PREPARED"));return finish(0);}
+        }else{
+            int v=cache_verify(artifact);if(v)return v;
+            if(copy2(artifact,lib,why,sizeof why))uncaught(why);
+            char expected[65],last[65];strcpy(expected,CACHE_ART_SHA);if(rtc_sha_file(lib,last,why,sizeof why)||strcmp(expected,last)||cache_verify(artifact)||strcmp(CACHE_ART_SHA,expected))return cache_need("artifact changed during copy");
+            pj_set(RECORD,"runtime_cached",pj_bool(1));
+            goto runtime_ready;
+        }
+    }
     if (DEFAULT_FFI_ACTIVE && ffip_verify(&DEFAULT_FFI)) uncaught(ffip_error());
     if (run("runtime_build", &cmd, &rc, 0) != 0) return -1;
     if (DEFAULT_FFI_ACTIVE && ffip_verify(&DEFAULT_FFI)) uncaught(ffip_error());
     if (rc) return finish(rc == 142 ? 142 : 1);
+    if(A.prepare){int v=cache_publish(lib);if(v)return v;pj_set(RECORD,"status",pj_strz("PREPARED"));return finish(0);}
+runtime_ready:
     {   char hex[65];
         if (rtc_sha_file(lib, hex, why, sizeof why) != 0) { exc_oserror(errno ? errno : ENOENT, lib); return -1; }
         pj_set(RECORD, "runtime_sha256", pj_strz(hex));
@@ -752,6 +847,8 @@ int main(int argc, char **argv) {
     host = (!strcmp(mach, "arm64") || !strcmp(mach, "aarch64")) ? "arm64" : "x86_64";
     arch = A.arch ? A.arch : host;
     darwin = !strcmp(sys, "Darwin");
+    if(A.prepare&&A.require)usage_error("%s","choose --prepare or --require-cached");
+    if((A.prepare||A.require)&&(strcmp(sys,"Linux")||strcmp(host,"x86_64")||strcmp(arch,"x86_64"))){printf("UNVERIFIED: union16 runtime material requires native Linux/x86_64\n");return 77;}
     if ((!darwin && strcmp(sys, "Linux")) || (strcmp(arch, host) && !darwin)) uncaught("RuntimeError: requires matching native platform runner");
     {   static char t[64]; snprintf(t, sizeof t, "%s/%s", darwin ? "osx" : "lnx", arch); TARGET = t; }
     if (darwin) { lpush(&flags, "-arch"); lpush(&flags, arch); }
@@ -801,7 +898,7 @@ int main(int argc, char **argv) {
     }
     pj_set(RECORD, "schema", pj_int(1));
     pj_set(RECORD, "target", pj_strz(TARGET));
-    pj_set(RECORD, "scope", pj_strz(A.build_only ? "build-only; no public calls" : "actual public natural union16 matrix; any rejection is failure"));
+    pj_set(RECORD, "scope", pj_strz(A.prepare ? "runtime preparation only; no public calls or ABI eligibility" : A.build_only ? "build-only; no public calls" : "actual public natural union16 matrix; any rejection is failure"));
     pj_set(RECORD, "package_path", pj_strz(package));
     pj_set(RECORD, "package_sha256", pj_strz(pkghex));
     pj_set(RECORD, "sanitize", pj_bool(A.sanitize));
@@ -838,6 +935,7 @@ int main(int argc, char **argv) {
         if (strcmp(hex, pkghex)) uncaught("AssertionError");
         if (A.sanitize) { lpush(&san, "-fsanitize=address,undefined"); lpush(&san, "-fno-omit-frame-pointer"); }
         cc = getenv("CC"); if (!cc) cc = "cc";
+        if(A.prepare||A.require)cc=cache_cc(cc);
         rc = body(cc, &flags, &san, &cf, &lf, arch, host, &cases, &pressures, fz);
         if (rc < 0) {   /* except Exception as exc: record['exception']=repr(exc); return finish(1) */
             pj_set(RECORD, "exception", pj_strz(EXC_REPR));

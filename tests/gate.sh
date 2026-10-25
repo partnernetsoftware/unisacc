@@ -46,6 +46,11 @@ done
 # run the hard requirement stands.
 # 0.0.37: only the Rosetta suites (listed on Darwin/arm64 alone) read the provider, so a
 # Linux host runs its whole list without one; on Darwin/arm64 the requirement is unchanged.
+# Capture real configuration before enumeration installs its non-provider placeholder.
+case ${UNISACC_FFI_X86_PROVIDER:-} in
+    ''|LIST|LIST-MODE-PLACEHOLDER) union16_provider_configured=0;;
+    *) union16_provider_configured=1;;
+esac
 if [ "$LIST" != 0 ] || [ "$(uname -s)/$(uname -m)" != Darwin/arm64 ]; then
     UNISACC_FFI_X86_PROVIDER=${UNISACC_FFI_X86_PROVIDER:-LIST-MODE-PLACEHOLDER}
 else
@@ -832,22 +837,28 @@ job lib-union-composite-direct-3-req sh ./unisacc.com -run tests/libraryunioncom
 job lib-union-composite-callback-3-plain sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases array5 --callback --pressures plain
 job lib-union-composite-callback-3-gp9 sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases array5 --callback --pressures gp9
 job lib-union-composite-callback-3-fp9 sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases array5 --callback --pressures fp9
+union16_cache_flag=
+if [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ] && [ "$union16_provider_configured" = 1 ]; then
+    union16_cache_flag=--require-cached
+    job lib-union16-runtime-prepare sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --sanitize --prepare
+fi
 if [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ]; then
     for union16_case in is8 si8; do
-        job lib-union16-direct-1-$union16_case sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases "$union16_case" --sanitize
+        job lib-union16-direct-1-$union16_case sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases "$union16_case" --sanitize $union16_cache_flag
     done
 else
 job lib-union16-direct-1 sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases is8,si8 --sanitize   # (.cx port, 2026-10-23)
 fi
-job lib-union16-callback-1 sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases is8,si8 --sanitize --callback
-job lib-union16-direct-2 sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases ss8,ii8 --sanitize
-job lib-union16-callback-2 sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases ss8,ii8 --sanitize --callback
-job lib-union16-direct-3 sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases is4,si4 --sanitize
-job lib-union16-callback-3 sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases is4,si4 --sanitize --callback
-job lib-union16-direct-4 sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases ss4,ii4 --sanitize
-job lib-union16-callback-4 sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases ss4,ii4 --sanitize --callback
-job lib-union16-direct-5 sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases fpmix --sanitize
-job lib-union16-callback-5 sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases fpmix --sanitize --callback
+job lib-union16-callback-1 sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases is8,si8 --sanitize --callback $union16_cache_flag
+job lib-union16-direct-2 sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases ss8,ii8 --sanitize $union16_cache_flag
+job lib-union16-callback-2 sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases ss8,ii8 --sanitize --callback $union16_cache_flag
+job lib-union16-direct-3 sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases is4,si4 --sanitize $union16_cache_flag
+job lib-union16-callback-3 sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases is4,si4 --sanitize --callback $union16_cache_flag
+job lib-union16-direct-4 sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases ss4,ii4 --sanitize $union16_cache_flag
+job lib-union16-callback-4 sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases ss4,ii4 --sanitize --callback $union16_cache_flag
+job lib-union16-direct-5 sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases fpmix --sanitize $union16_cache_flag
+job lib-union16-callback-5 sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases fpmix --sanitize --callback $union16_cache_flag
+unset union16_cache_flag
 job lib-callable-variadic-mechanism tests/bound 58 sh ./unisacc.com -run tests/librarycallablevarcheck.cx   # (.cx port, 2026-10-23) concrete variadic callable ABI, normal + ASan/UBSan
 job lib-callable-catalog tests/bound 58 sh ./unisacc.com -run tests/librarycallablecatalogcheck.cx   # (.cx port, 2026-10-23) USLCALL1/2/3 wire + context-owned graph transactions, normal + ASan/UBSan
 for scope in promoted wire native; do
