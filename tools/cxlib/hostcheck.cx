@@ -1,0 +1,73 @@
+/* hostcheck.cx -- the execution-host gate of tests/hostcheck.py (host(), matches(), require_host()) as a .cx module
+   (2026-10-23, the py->cx port wave; first users exec/c/librarystackcheck.cx and exec/enc/windowshostbridgecheck.cx).
+   A Book-phase check that needs a particular host (a Darwin runner for Mach-O stack bridges, Rosetta for x86_64) asks
+   here first and, on any other host, reports one UNVERIFIED line and rc 77 -- a host limit, not a wrong result.
+   Use it with `#pragma unisa use cxlib.hostcheck` from a .cx file in tests/.  `use` resolves beside the using file
+   only, so a port in exec/X/ reaches it through a symlink exec/X/cxlib/hostcheck.cx (exec/enc/cxlib/); it uses
+   nothing but the prelude.
+     hc_uname(FLAG, out, cap)      `uname FLAG` (-s: platform.system(), -m: platform.machine()), newline stripped;
+                                   '' when uname cannot run
+     hc_host(out, cap)             host(): SYSTEM/ARCH with ARCH arm64 for arm64/aarch64, else the raw machine
+     hc_matches(REQUIRED, ROOT)    matches(REQUIRED): any, native-posix (Linux or Darwin on x86_64/arm64),
+                                   darwin-arm64, darwin-x86_64 (Darwin/x86_64, or Darwin/arm64 when
+                                   `ROOT/tests/bound 5 /usr/bin/arch -x86_64 /usr/bin/true` exits 0 -- the .py ran
+                                   tests/bound.py with the same contract; its output is discarded as capture_output
+                                   did); anything else is no match
+     hc_require_host(REQUIRED, TARGET, ROOT)
+                                   require_host(): 0 on a match, else prints
+                                   `UNVERIFIED: required=REQUIRED observed=HOST missing=execution-host target=TARGET`
+                                   on stdout and returns 77
+   No exported objects or macros (CXIF v0). */
+#pragma unisa module hostcheck
+
+void hc_uname(const char *flag, char *out, size_t cap) {
+    char *argv[3], *o = 0; size_t n = 0;
+    argv[0] = "uname"; argv[1] = (char *)flag; argv[2] = 0;
+    if (cx_runv_timeout(argv, 10, &o, &n) != 0 || !o) n = 0;
+    while (n && (o[n - 1] == '\n' || o[n - 1] == '\r' || o[n - 1] == ' ')) n--;
+    if (cap) snprintf(out, cap, "%.*s", (int)n, o ? o : "");
+    free(o);
+}
+void hc_host(char *out, size_t cap) {
+    char sys[256], mach[256];
+    hc_uname("-s", sys, sizeof sys); hc_uname("-m", mach, sizeof mach);
+    snprintf(out, cap, "%s/%s", sys, !strcmp(mach, "arm64") || !strcmp(mach, "aarch64") ? "arm64" : mach);
+}
+/* `ROOT/tests/bound 5 /usr/bin/arch -x86_64 /usr/bin/true`, output discarded: 1 when it exits 0 */
+static int hc_rosetta(const char *root) {
+    char bound[4200]; pid_t pid; int st = 0;
+    snprintf(bound, sizeof bound, "%s/tools/bound", root);
+    fflush(stdout); fflush(stderr);
+    pid = fork();
+    if (pid < 0) return 0;
+    if (pid == 0) {
+        char *argv[7];
+        argv[0] = bound; argv[1] = "5"; argv[2] = "/usr/bin/arch"; argv[3] = "-x86_64"; argv[4] = "/usr/bin/true"; argv[5] = 0;
+        if (!freopen("/dev/null", "w", stdout) || !freopen("/dev/null", "w", stderr)) _exit(126);
+        execv(bound, argv); _exit(127);
+    }
+    if (waitpid(pid, &st, 0) != pid) return 0;
+    return !(st & 0x7f) && ((st >> 8) & 0xff) == 0;
+}
+int hc_matches(const char *required, const char *root) {
+    char h[600];
+    if (!strcmp(required, "any")) return 1;
+    hc_host(h, sizeof h);
+    if (!strcmp(required, "native-posix"))
+        return !strcmp(h, "Linux/x86_64") || !strcmp(h, "Linux/arm64") || !strcmp(h, "Darwin/x86_64") || !strcmp(h, "Darwin/arm64");
+    if (!strcmp(required, "darwin-arm64")) return !strcmp(h, "Darwin/arm64");
+    if (!strcmp(required, "darwin-x86_64")) {
+        if (!strcmp(h, "Darwin/x86_64")) return 1;
+        if (strcmp(h, "Darwin/arm64")) return 0;
+        return hc_rosetta(root);
+    }
+    return 0;
+}
+int hc_require_host(const char *required, const char *target, const char *root) {
+    char h[600];
+    if (hc_matches(required, root)) return 0;
+    hc_host(h, sizeof h);
+    printf("UNVERIFIED: required=%s observed=%s missing=execution-host target=%s\n", required, h, target);
+    fflush(stdout);
+    return 77;
+}

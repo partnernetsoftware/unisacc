@@ -1,0 +1,93 @@
+/* pytempfile.cx -- the parts of Python's tempfile and shutil.rmtree the checks rely on, as a .cx module
+   (2026-10-23, the py->cx port wave; first users tests/seedconstructcheck.cx and tests/libunisaccexportcheck.cx).
+   Use it with `#pragma unisa use cxlib.pytempfile` from a .cx file in tests/.
+     ptf_gettempdir(out, cap)                tempfile.gettempdir(): the first of $TMPDIR, $TEMP, $TMP, /tmp, /var/tmp,
+                                             /usr/tmp, then the working directory, that is a directory this process
+                                             can create a file in (Python probes by creating one; here access(W|X)),
+                                             made absolute as os.path.abspath does (no symlink resolution)
+     ptf_mkdtemp(DIR, PREFIX, out, cap)      tempfile.mkdtemp(prefix=PREFIX, dir=DIR): DIR/PREFIX + 8 characters of
+                                             [a-z0-9_], mode 0700, retried on a name that exists; DIR 0 means
+                                             gettempdir().  0, or -1 with errno set (the path tried is left in OUT)
+     ptf_rmtree(PATH)                        shutil.rmtree(PATH, ignore_errors=True) through the one deletion guard
+                                             (cx_rmtree: a refused PATH is left whole): symlinks are removed, never
+                                             followed
+     ptf_abspath(P, out, cap)                os.path.abspath(P): joined to the working directory, normalised
+   No exported objects or macros (CXIF v0). */
+#pragma unisa module pytempfile
+
+/* os.path.normpath of an absolute path: '' and '.' parts dropped, '..' pops (never above '/'); '//' kept as
+   POSIX allows exactly two leading slashes */
+void ptf_abspath(const char *p, char *out, size_t cap) {
+    char buf[8192], *part[1024], *s, *e; int n = 0, i, two = 0; size_t j = 0;
+    if (!cap) return;
+    if (p[0] == '/') snprintf(buf, sizeof buf, "%s", p);
+    else {
+        char cwd[4096];
+        if (!getcwd(cwd, sizeof cwd)) snprintf(cwd, sizeof cwd, "/");
+        snprintf(buf, sizeof buf, "%s/%s", cwd, p);
+    }
+    if (buf[0] == '/' && buf[1] == '/' && buf[2] != '/') two = 1;
+    for (s = buf; *s;) {
+        while (*s == '/') s++;
+        if (!*s) break;
+        for (e = s; *e && *e != '/'; e++) ;
+        if (*e) *e++ = 0;
+        if (!strcmp(s, "..")) { if (n) n--; }
+        else if (strcmp(s, ".") && n < 1024) part[n++] = s;
+        s = e;
+    }
+    out[j++] = '/';
+    if (two && j < cap - 1) out[j++] = '/';
+    for (i = 0; i < n; i++) {
+        size_t l = strlen(part[i]);
+        if (i && j < cap - 1) out[j++] = '/';
+        if (j + l >= cap) l = cap - 1 - j;
+        memcpy(out + j, part[i], l); j += l;
+    }
+    out[j < cap ? j : cap - 1] = 0;
+}
+
+static int ptf_usable(const char *d) {
+    struct stat s;
+    return stat(d, &s) == 0 && S_ISDIR(s.st_mode) && access(d, W_OK | X_OK) == 0;
+}
+void ptf_gettempdir(char *out, size_t cap) {
+    static const char *env[] = { "TMPDIR", "TEMP", "TMP" }, *fixed[] = { "/tmp", "/var/tmp", "/usr/tmp" };
+    int i;
+    for (i = 0; i < 3; i++) {
+        const char *v = getenv(env[i]);
+        if (v && *v && ptf_usable(v)) { ptf_abspath(v, out, cap); return; }
+    }
+    for (i = 0; i < 3; i++) if (ptf_usable(fixed[i])) { snprintf(out, cap, "%s", fixed[i]); return; }
+    ptf_abspath(".", out, cap);
+}
+
+static unsigned long ptf_seed;
+static unsigned ptf_next(void) {
+    if (!ptf_seed) {
+        FILE *f = fopen("/dev/urandom", "rb");
+        if (!f || fread(&ptf_seed, sizeof ptf_seed, 1, f) != 1) ptf_seed = (unsigned long)getpid() * 2654435761UL ^ (unsigned long)&ptf_seed;
+        if (f) fclose(f);
+        if (!ptf_seed) ptf_seed = 88172645463325252UL;
+    }
+    ptf_seed ^= ptf_seed << 13; ptf_seed ^= ptf_seed >> 7; ptf_seed ^= ptf_seed << 17;
+    return (unsigned)(ptf_seed >> 11);
+}
+int ptf_mkdtemp(const char *dir, const char *prefix, char *out, size_t cap) {
+    static const char C[] = "abcdefghijklmnopqrstuvwxyz0123456789_";
+    char base[4200], name[16]; int tries, k;
+    if (dir) ptf_abspath(dir, base, sizeof base); else ptf_gettempdir(base, sizeof base);
+    for (tries = 0; tries < 10000; tries++) {
+        for (k = 0; k < 8; k++) name[k] = C[ptf_next() % 37];
+        name[8] = 0;
+        snprintf(out, cap, "%s%s%s%s", base, strcmp(base, "/") ? "/" : "", prefix, name);
+        if (mkdir(out, 0700) == 0) return 0;
+        if (errno != EEXIST) return -1;
+    }
+    errno = EEXIST;
+    return -1;
+}
+
+/* a thin wrapper over the prelude's cx_rmtree: the one deletion guard (include/unisa_safedel.h) checks PATH first; a
+   refusal is one `cx_rmtree: ...` line on stderr and nothing deleted (ignore_errors) */
+void ptf_rmtree(const char *path) { (void)cx_rmtree(path); }

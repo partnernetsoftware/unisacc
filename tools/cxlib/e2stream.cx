@@ -1,0 +1,1241 @@
+/* e2stream.cx -- the shared parts of the E2 stream checks exec/pp/directivecheck.cx, exec/pp/literalcheck.cx and
+   exec/pp/locationcheck.cx (2026-10-23, the py->cx port wave: their .py originals ran exec/build/gen.py, exec/c/tbl.py,
+   exec/c/net.py, exec/c/refsource.py, exec/c/pack.py and exec/pp/sim.py; this module does the same work with no
+   Python).  E2 is the preprocessing stream-stage (prd.md 0.1 L1); its model is the threshold-network file pp.net.
+   Use it with `#pragma unisa use cxlib.e2stream`; a module resolves beside its user only, so the exec/pp checks reach
+   it through the symlinks exec/pp/cxlib/{e2stream,pytempfile,runtimecopy}.cx -> tests/cxlib/ (the tests/flownet
+   precedent; this module uses its siblings pytempfile and runtimecopy, each resolved beside the using path).
+     e2s_start(FILE, PREFIX, root, rootcap, td, tdcap)
+         ROOT := realpath(dirname(FILE)/../..) (Path(__file__).resolve().parents[2] of a check in exec/pp); TD := a
+         fresh tempfile.TemporaryDirectory(prefix=PREFIX) (cxlib.pytempfile ptf_mkdtemp), removed by e2s_exit
+     e2s_exit(RC)            flush, remove TD (cxlib.pytempfile ptf_rmtree: the only deletion), exit RC
+     e2s_raise(LINE)         an uncaught Python exception: LINE (the traceback's last line) on stderr, rc 1
+     e2s_fail(DETAIL)        `AssertionError` or `AssertionError: DETAIL`, rc 1
+     e2s_run(ARGV, CWD, SECS, &out, &outn, &err, &errn)
+         subprocess.run(ARGV, capture_output=True, timeout=SECS, cwd=CWD): the returncode (-N for signal N); stdout
+         and stderr are captured through TD/.capture-out and TD/.capture-err (rewritten per call, removed with TD);
+         an exec or cwd failure is the OSError Python raises, a child past SECS is SIGKILLed and is
+         subprocess.TimeoutExpired (e2s_raise).  SECS counts the 2 ms polls (<time.h> is not in the prelude), so the
+         caller's tests/bound stays the wall-clock bound
+     e2s_call(ARGV, CWD, SECS, TAIL, WITHRC, &n)
+         run, and `assert p.returncode == 0, (p.args[, p.returncode], p.stderr[-TAIL:])`: stdout
+     e2s_repr_bytes(S, N) / e2s_repr_str(S)     repr(bytes) / repr(str), malloc'd
+     e2s_read(PATH, &n) / e2s_write(PATH, S, N)  Path.read_bytes / write_bytes (an OSError is raised)
+     e2s_join(A, B)          A/B, malloc'd
+     e2s_reference_source(ROOT, TD, &n)
+         exec/c/refsource.source_text: tests/export_ref.sh into TD/refsource/ref.c (check=True, 30 s, output
+         captured), wrapped in tests/refshim.h and tests/reffoot.h
+     e2s_reference_build(ROOT, SRC, OUT, SECS, TAIL, WITHRC)
+         refsource.compile_command: cc -w -O1 -I ROOT/kernel -I ROOT/src SRC -o OUT
+     e2s_executor_build(CC, ROOT, OUT, SECS, TAIL, WITHRC)    CC -O2 ROOT/exec/c/run.c -o OUT
+     e2s_model(ROOT, TD, LOCATIONS, CHECKNET, SECS, TAIL, WITHRC)
+         the E2 stream model, off Python: the C99 seed constructors seed/gen.c (byte-identical to exec/build/gen.py),
+         seed/tbl.c (= exec/c/tbl.py) and seed/net.c (= exec/c/net.py), built once per TD by cc, write TD/pp.json
+         (`pp`, plus `--locations`), TD/pp.tbl and the threshold-network file TD/pp.net; CHECKNET adds
+         `TD/run --check-net TD/pp.tbl TD/pp.net`
+     e2s_envelope_skip(B, N)     literalcheck's strip of the UNIPP1 location envelope: the offset of the text
+                                 (struct.error and the length assertion as the .py raises them)
+     e2s_split_equal(A, AN, B, BN)    bytes.split() == bytes.split()
+     e2s_tokens_equal(A, AN, B, BN)   unisa.front.pp._pieces token lists (whitespace pieces dropped) equal, on the
+                                      UTF-8 decoded text (UnicodeDecodeError raised as Python does)
+     e2s_delta_load(PATH) / e2s_delta_run(D, X, XN, SRCPATH, BUNDLED, MAXSTEPS, &out, &outn)
+         exec/pp/sim.py load/run: the E2 delta JSON executed with the generic primitives only, independent of
+         exec/c/run.c (the location check's second oracle): 0 accept (OUT = the output), 1 reject, 2 timeout
+     e2s_package(MANIFEST, NMOUNT, PREFIXES, DIRS, &n)
+         exec/c/pack.py build(manifests=[MANIFEST], mounts) uncompressed (P1/P2, Q prefixes compacted as compact_q),
+         the bytes seed/pack.c writes without --compressed
+   No exported objects or macros (CXIF v0). */
+#pragma unisa module e2stream
+#pragma unisa use pytempfile
+#pragma unisa use runtimecopy
+
+typedef struct e2s_buf { char *p; size_t n, cap; } e2s_buf;
+static char E2S_TD[4096];
+
+static void e2s_put(e2s_buf *b, const void *s, size_t n) {
+    if (b->n + n + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 256; char *g;
+        while (c < b->n + n + 1) c *= 2;
+        g = realloc(b->p, c);
+        if (!g) { fputs("MemoryError\n", stderr); exit(1); }
+        b->p = g; b->cap = c;
+    }
+    if (n) memcpy(b->p + b->n, s, n);
+    b->n += n; b->p[b->n] = 0;
+}
+static void e2s_puts(e2s_buf *b, const char *s) { e2s_put(b, s, strlen(s)); }
+static void e2s_putl(e2s_buf *b, long long v) { char t[32]; snprintf(t, sizeof t, "%lld", v); e2s_puts(b, t); }
+static void *e2s_alloc(size_t n) { void *p = calloc(1, n ? n : 1); if (!p) { fputs("MemoryError\n", stderr); exit(1); } return p; }
+
+/* ---- process, failure, scratch -------------------------------------------------------------------------------- */
+void e2s_exit(int rc) {
+    fflush(stdout); fflush(stderr);
+    if (E2S_TD[0]) { ptf_rmtree(E2S_TD); E2S_TD[0] = 0; }
+    exit(rc);
+}
+void e2s_raise(const char *line) {
+    fflush(stdout);
+    fputs(line, stderr); fputc('\n', stderr);
+    e2s_exit(1);
+}
+void e2s_fail(const char *detail) {
+    e2s_buf b = { 0, 0, 0 };
+    e2s_puts(&b, "AssertionError");
+    if (detail && *detail) { e2s_puts(&b, ": "); e2s_puts(&b, detail); }
+    e2s_raise(b.p);
+}
+char *e2s_join(const char *a, const char *b) {
+    e2s_buf r = { 0, 0, 0 };
+    e2s_puts(&r, a); e2s_puts(&r, "/"); e2s_puts(&r, b);
+    return r.p;
+}
+void e2s_start(const char *file, const char *prefix, char *root, size_t rootcap, char *td, size_t tdcap) {
+    char up[8192], res[8192]; const char *sl = strrchr(file, '/');
+    if (sl) snprintf(up, sizeof up, "%.*s/../..", (int)(sl - file), file); else snprintf(up, sizeof up, "../..");
+    if (!realpath(up, res)) e2s_raise("FileNotFoundError: cannot resolve the repository root");
+    snprintf(root, rootcap, "%s", res);
+    if (ptf_mkdtemp(0, prefix, td, tdcap) != 0) e2s_raise("OSError: cannot create the temporary directory");
+    snprintf(E2S_TD, sizeof E2S_TD, "%s", td);
+}
+char *e2s_repr_bytes(const char *str, size_t n) {   /* repr(bytes): Python's quote choice and escapes */
+    const unsigned char *s = (const unsigned char *)str; e2s_buf b = { 0, 0, 0 }; size_t i; int sq = 0, dq = 0; char q, t[8];
+    for (i = 0; i < n; i++) { if (s[i] == '\'') sq = 1; if (s[i] == '"') dq = 1; }
+    q = sq && !dq ? '"' : '\'';
+    e2s_put(&b, "b", 1); e2s_put(&b, &q, 1);
+    for (i = 0; i < n; i++) {
+        unsigned c = s[i];
+        if (c == (unsigned char)q || c == '\\') { t[0] = '\\'; t[1] = (char)c; e2s_put(&b, t, 2); }
+        else if (c == '\t') e2s_put(&b, "\\t", 2);
+        else if (c == '\n') e2s_put(&b, "\\n", 2);
+        else if (c == '\r') e2s_put(&b, "\\r", 2);
+        else if (c < 0x20 || c >= 0x7F) { snprintf(t, sizeof t, "\\x%02x", c); e2s_put(&b, t, 4); }
+        else { t[0] = (char)c; e2s_put(&b, t, 1); }
+    }
+    e2s_put(&b, &q, 1);
+    return b.p;
+}
+char *e2s_repr_str(const char *s) {
+    size_t l = strlen(s), cap = 4 * l + 8; char *r = e2s_alloc(cap);
+    rtc_pyrepr(s, l, r, cap);
+    return r;
+}
+static char *e2s_args_repr(char *const argv[]) {   /* repr(list of str) */
+    e2s_buf b = { 0, 0, 0 }; size_t i;
+    e2s_puts(&b, "[");
+    for (i = 0; argv[i]; i++) { char *r = e2s_repr_str(argv[i]); if (i) e2s_puts(&b, ", "); e2s_puts(&b, r); free(r); }
+    e2s_puts(&b, "]");
+    return b.p;
+}
+static int e2s_capture(const char *name) {
+    char *p = e2s_join(E2S_TD, name); int fd = open(p, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) { char why[8192]; int e = errno; rtc_oserror(e, p, why, sizeof why); e2s_raise(why); }
+    free(p);
+    return fd;
+}
+static char *e2s_slurp_fd(int fd, size_t *n) {
+    e2s_buf b = { 0, 0, 0 }; char t[65536]; ssize_t k;
+    e2s_put(&b, "", 0);
+    lseek(fd, 0, SEEK_SET);
+    while ((k = read(fd, t, sizeof t)) > 0) e2s_put(&b, t, (size_t)k);
+    *n = b.n;
+    return b.p;
+}
+int e2s_run(char *const argv[], const char *cwd, double secs, char **out, size_t *outn, char **err, size_t *errn) {
+    int of = e2s_capture(".capture-out"), ef = e2s_capture(".capture-err"), pfd[2], st = 0, fail[2] = { 0, 0 };
+    pid_t pid; ssize_t k; long polls = 0, limit = (long)(secs * 500);
+    fflush(stdout); fflush(stderr);
+    if (pipe(pfd) != 0) e2s_raise("OSError: pipe failed");
+    fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
+    pid = fork();
+    if (pid < 0) e2s_raise("OSError: fork failed");
+    if (pid == 0) {
+        close(pfd[0]);
+        dup2(of, 1); dup2(ef, 2); close(of); close(ef);
+        if (cwd && chdir(cwd) != 0) { fail[0] = 1; fail[1] = errno; k = write(pfd[1], fail, sizeof fail); _exit(255); }
+        execvp(argv[0], argv);
+        fail[0] = 2; fail[1] = errno; k = write(pfd[1], fail, sizeof fail); (void)k;
+        _exit(255);
+    }
+    close(pfd[1]);
+    k = read(pfd[0], fail, sizeof fail);
+    close(pfd[0]);
+    if (k == (ssize_t)sizeof fail) {                   /* the child could not enter CWD or exec ARGV[0] */
+        char why[8192];
+        waitpid(pid, &st, 0); close(of); close(ef);
+        rtc_oserror(fail[1], fail[0] == 1 ? cwd : argv[0], why, sizeof why);
+        e2s_raise(why);
+    }
+    for (;;) {
+        pid_t w = waitpid(pid, &st, WNOHANG);
+        if (w == pid) break;
+        if (w < 0) e2s_raise("ChildProcessError: wait failed");
+        if (polls++ >= limit) {
+            e2s_buf m = { 0, 0, 0 }; char *l = e2s_args_repr(argv);
+            kill(pid, SIGKILL); waitpid(pid, &st, 0); close(of); close(ef);
+            e2s_puts(&m, "subprocess.TimeoutExpired: Command '"); e2s_puts(&m, l); e2s_puts(&m, "' timed out after ");
+            e2s_putl(&m, (long long)secs); e2s_puts(&m, " seconds");
+            e2s_raise(m.p);
+        }
+        usleep(2000);
+    }
+    *out = e2s_slurp_fd(of, outn); *err = e2s_slurp_fd(ef, errn);
+    close(of); close(ef);
+    return WIFSIGNALED(st) ? -WTERMSIG(st) : WEXITSTATUS(st);
+}
+char *e2s_call(char *const argv[], const char *cwd, double secs, size_t tail, int withrc, size_t *n) {
+    char *out, *err; size_t on, en; int rc = e2s_run(argv, cwd, secs, &out, &on, &err, &en);
+    if (rc != 0) {
+        e2s_buf b = { 0, 0, 0 }; char *a = e2s_args_repr(argv), *e;
+        size_t from = en > tail ? en - tail : 0;
+        e = e2s_repr_bytes(err + from, en - from);
+        e2s_puts(&b, "("); e2s_puts(&b, a);
+        if (withrc) { e2s_puts(&b, ", "); e2s_putl(&b, rc); }
+        e2s_puts(&b, ", "); e2s_puts(&b, e); e2s_puts(&b, ")");
+        e2s_fail(b.p);
+    }
+    free(err); *n = on;
+    return out;
+}
+static void e2s_oserror(const char *what, const char *path) {
+    char why[8192]; int e = errno;
+    rtc_oserror(e, path, why, sizeof why); (void)what;
+    e2s_raise(why);
+}
+char *e2s_read(const char *path, size_t *n) {
+    e2s_buf b = { 0, 0, 0 }; char t[65536]; ssize_t k; int fd = open(path, O_RDONLY);
+    if (fd < 0) e2s_oserror("read", path);
+    e2s_put(&b, "", 0);
+    while ((k = read(fd, t, sizeof t)) > 0) e2s_put(&b, t, (size_t)k);
+    if (k < 0) { close(fd); e2s_oserror("read", path); }
+    close(fd); *n = b.n;
+    return b.p;
+}
+void e2s_write(const char *path, const char *s, size_t n) {
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666); size_t at = 0;
+    if (fd < 0) e2s_oserror("write", path);
+    while (at < n) { ssize_t k = write(fd, s + at, n - at); if (k <= 0) { close(fd); e2s_oserror("write", path); } at += (size_t)k; }
+    close(fd);
+}
+
+/* ---- the reference compiler and the executor ------------------------------------------------------------------ */
+char *e2s_reference_source(const char *root, const char *td, size_t *n) {
+    char *dir = e2s_join(td, "refsource"), *flat, *sh = e2s_join(root, "tools/export_ref.sh"), *a, *b, *c, *out, *err;
+    size_t an, bn, cn, on, en; int rc; e2s_buf r = { 0, 0, 0 };
+    char *argv[3];
+    if (mkdir(dir, 0700) != 0) e2s_oserror("mkdir", dir);
+    flat = e2s_join(dir, "ref.c");
+    argv[0] = sh; argv[1] = flat; argv[2] = 0;
+    rc = e2s_run(argv, 0, 30, &out, &on, &err, &en);
+    if (rc != 0) {                                     /* subprocess.run(check=True) */
+        e2s_buf m = { 0, 0, 0 }; char *l = e2s_args_repr(argv);
+        e2s_puts(&m, "subprocess.CalledProcessError: Command '"); e2s_puts(&m, l);
+        e2s_puts(&m, "' returned non-zero exit status "); e2s_putl(&m, rc); e2s_puts(&m, ".");
+        e2s_raise(m.p);
+    }
+    free(out); free(err);
+    a = e2s_read(e2s_join(root, "tools/refshim.h"), &an); b = e2s_read(flat, &bn); c = e2s_read(e2s_join(root, "tools/reffoot.h"), &cn);
+    e2s_put(&r, a, an); e2s_put(&r, b, bn); e2s_put(&r, c, cn);
+    free(a); free(b); free(c);
+    *n = r.n;
+    return r.p;
+}
+void e2s_reference_build(const char *root, const char *src, const char *out, double secs, size_t tail, int withrc) {
+    char *argv[10]; size_t n; char *o;
+    argv[0] = "cc"; argv[1] = "-w"; argv[2] = "-O1"; argv[3] = "-I"; argv[4] = e2s_join(root, "kernel");
+    argv[5] = "-I"; argv[6] = e2s_join(root, "src"); argv[7] = (char *)src; argv[8] = "-o"; argv[9] = (char *)out;
+    { char *v[11]; int i; for (i = 0; i < 10; i++) v[i] = argv[i]; v[10] = 0; o = e2s_call(v, 0, secs, tail, withrc, &n); }
+    free(o);
+}
+void e2s_executor_build(const char *cc, const char *root, const char *out, double secs, size_t tail, int withrc) {
+    char *argv[6]; size_t n; char *o;
+    argv[0] = (char *)cc; argv[1] = "-O2"; argv[2] = e2s_join(root, "exec/c/run.c"); argv[3] = "-o"; argv[4] = (char *)out; argv[5] = 0;
+    o = e2s_call(argv, 0, secs, tail, withrc, &n); free(o);
+}
+
+/* ---- the E2 stream model: seed/gen.c -> seed/tbl.c -> seed/net.c ---------------------------------------------- */
+static void e2s_seed_tool(const char *root, const char *td, const char *name, const char *src, const char *opt, int seedinc,
+                          double secs, size_t tail, int withrc) {
+    char *bin = e2s_join(td, name), *argv[12]; int k = 0; size_t n; char *o;
+    if (access(bin, X_OK) == 0) { free(bin); return; }
+    argv[k++] = "cc"; argv[k++] = "-std=c99"; argv[k++] = (char *)opt; argv[k++] = "-w";
+    if (seedinc) { argv[k++] = "-I"; argv[k++] = e2s_join(root, "seed"); }
+    argv[k++] = e2s_join(root, src); argv[k++] = "-o"; argv[k++] = bin; argv[k] = 0;
+    o = e2s_call(argv, 0, secs, tail, withrc, &n); free(o);
+}
+void e2s_model(const char *root, const char *td, int locations, int checknet, double secs, size_t tail, int withrc) {
+    char *gen = e2s_join(td, "seed-gen"), *tbl = e2s_join(td, "seed-tbl"), *net = e2s_join(td, "seed-net");
+    char *json = e2s_join(td, "pp.json"), *t = e2s_join(td, "pp.tbl"), *nn = e2s_join(td, "pp.net"), *o; size_t n;
+    e2s_seed_tool(root, td, "seed-gen", "seed/gen.c", "-O0", 1, secs, tail, withrc);   /* -O0: the build dominates */
+    e2s_seed_tool(root, td, "seed-tbl", "seed/tbl.c", "-O1", 0, secs, tail, withrc);
+    e2s_seed_tool(root, td, "seed-net", "seed/net.c", "-O1", 0, secs, tail, withrc);
+    { char *a[5]; a[0] = gen; a[1] = "pp"; a[2] = json; a[3] = locations ? "--locations" : 0; a[4] = 0;
+      o = e2s_call(a, root, secs, tail, withrc, &n); free(o); }       /* seed-gen reads exec/... from the root */
+    { char *a[4]; a[0] = tbl; a[1] = json; a[2] = t; a[3] = 0; o = e2s_call(a, 0, secs, tail, withrc, &n); free(o); }
+    { char *a[4]; a[0] = net; a[1] = t; a[2] = nn; a[3] = 0; o = e2s_call(a, 0, secs, tail, withrc, &n); free(o); }
+    if (checknet) {
+        char *a[5]; a[0] = e2s_join(td, "run"); a[1] = "--check-net"; a[2] = t; a[3] = nn; a[4] = 0;
+        o = e2s_call(a, 0, secs, tail, withrc, &n); free(o);
+    }
+}
+
+/* ---- literalcheck's comparisons ------------------------------------------------------------------------------- */
+static unsigned e2s_u32(const char *b, size_t n, size_t at, int *ok) {
+    const unsigned char *u = (const unsigned char *)b;
+    if (at + 4 > n) { *ok = 0; return 0; }
+    return (unsigned)u[at] | (unsigned)u[at + 1] << 8 | (unsigned)u[at + 2] << 16 | (unsigned)u[at + 3] << 24;
+}
+size_t e2s_envelope_skip(const char *b, size_t n) {
+    int ok = 1; unsigned length, ns, ni, i; size_t start;
+    char msg[160];
+    if (n < 27) { snprintf(msg, sizeof msg, "struct.error: unpack_from requires a buffer of at least 27 bytes for unpacking 20 bytes at offset 7 (actual buffer size is %lu)", (unsigned long)n); e2s_raise(msg); }
+    length = e2s_u32(b, n, 7, &ok); ns = e2s_u32(b, n, 19, &ok); ni = e2s_u32(b, n, 23, &ok);
+    start = 27 + 4 * (size_t)ns;
+    for (i = 0; i < ni; i++) {
+        unsigned w = e2s_u32(b, n, start + 8, &ok);
+        if (!ok) { snprintf(msg, sizeof msg, "struct.error: unpack_from requires a buffer of at least %lu bytes for unpacking 4 bytes at offset %lu (actual buffer size is %lu)", (unsigned long)(start + 12), (unsigned long)(start + 8), (unsigned long)n); e2s_raise(msg); }
+        start += 12 + (size_t)w;
+    }
+    if ((start < n ? n - start : 0) != length) e2s_fail(0);
+    return start < n ? start : n;
+}
+static int e2s_bws(int c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == 11 || c == 12; }
+int e2s_split_equal(const char *a, size_t an, const char *b, size_t bn) {
+    size_t i = 0, j = 0;
+    for (;;) {
+        size_t i0, j0;
+        while (i < an && e2s_bws((unsigned char)a[i])) i++;
+        while (j < bn && e2s_bws((unsigned char)b[j])) j++;
+        if (i == an || j == bn) return i == an && j == bn;
+        i0 = i; j0 = j;
+        while (i < an && !e2s_bws((unsigned char)a[i])) i++;
+        while (j < bn && !e2s_bws((unsigned char)b[j])) j++;
+        if (i - i0 != j - j0 || memcmp(a + i0, b + j0, i - i0)) return 0;
+    }
+}
+
+/* _pieces: unisa/front/pp.py _PPTOK on the decoded text; one piece per call, its length in bytes, and whether
+   str.isspace() holds for it (those pieces are dropped by the comparison) */
+static int e2s_cplen(const unsigned char *s, size_t n, size_t i, long *cp) {   /* strict UTF-8 as bytes.decode() */
+    unsigned c = s[i]; int need, k; long v;
+    if (c < 0x80) { *cp = c; return 1; }
+    if (c >= 0xC2 && c <= 0xDF) { need = 1; v = c & 0x1F; }
+    else if (c >= 0xE0 && c <= 0xEF) { need = 2; v = c & 0x0F; }
+    else if (c >= 0xF0 && c <= 0xF4) { need = 3; v = c & 0x07; }
+    else return -1;
+    for (k = 1; k <= need; k++) {
+        if (i + (size_t)k >= n || (s[i + k] & 0xC0) != 0x80) return -1;
+        if (k == 1 && ((c == 0xE0 && s[i + 1] < 0xA0) || (c == 0xED && s[i + 1] > 0x9F) || (c == 0xF0 && s[i + 1] < 0x90) || (c == 0xF4 && s[i + 1] > 0x8F))) return -1;
+        v = (v << 6) | (s[i + k] & 0x3F);
+    }
+    *cp = v; return need + 1;
+}
+static int e2s_uspace(long c) {
+    return c == ' ' || (c >= 9 && c <= 13) || (c >= 0x1C && c <= 0x1F) || c == 0x85 || c == 0xA0 || c == 0x1680 ||
+           (c >= 0x2000 && c <= 0x200A) || c == 0x2028 || c == 0x2029 || c == 0x202F || c == 0x205F || c == 0x3000;
+}
+static int e2s_al(int c) { return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'); }
+static int e2s_dg(int c) { return c >= '0' && c <= '9'; }
+static int e2s_hx(int c) { return e2s_dg(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); }
+static size_t e2s_quoted(const unsigned char *s, size_t n, size_t i, int q) {   /* after the opening quote */
+    long cp;
+    while (i < n) {
+        if (s[i] == '\\') {
+            int l;
+            if (i + 1 >= n) break;
+            l = e2s_cplen(s, n, i + 1, &cp); i += 1 + (size_t)l; continue;
+        }
+        if (s[i] == q || s[i] == '\n') break;
+        i += (size_t)e2s_cplen(s, n, i, &cp);
+    }
+    if (i < n && s[i] == q) i++;
+    return i;
+}
+static size_t e2s_piece(const unsigned char *s, size_t n, size_t i, int *space) {
+    size_t j; long cp; int l;
+    *space = 0;
+    if (s[i] == 3) { for (j = i + 1; j < n && s[j] != 3; j++) ; if (j < n) return j + 1 - i; }
+    if (s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\f' || s[i] == '\v') {
+        for (j = i; j < n && (s[j] == ' ' || s[j] == '\t' || s[j] == '\r' || s[j] == '\f' || s[j] == '\v'); j++) ;
+        *space = 1; return j - i;
+    }
+    if (s[i] == '\n') { *space = 1; return 1; }
+    /* str: (u8|[LuU])?"...  then chr: [LuU]?'... */
+    j = i;
+    if (j + 2 < n && s[j] == 'u' && s[j + 1] == '8' && s[j + 2] == '"') return e2s_quoted(s, n, j + 3, '"') - i;
+    if ((s[j] == 'L' || s[j] == 'u' || s[j] == 'U') && j + 1 < n && s[j + 1] == '"') return e2s_quoted(s, n, j + 2, '"') - i;
+    if (s[j] == '"') return e2s_quoted(s, n, j + 1, '"') - i;
+    if ((s[j] == 'L' || s[j] == 'u' || s[j] == 'U') && j + 1 < n && s[j + 1] == '\'') return e2s_quoted(s, n, j + 2, '\'') - i;
+    if (s[j] == '\'') return e2s_quoted(s, n, j + 1, '\'') - i;
+    /* num: \.?[0-9](?:[eEpP][+-]|[A-Za-z0-9_.])* */
+    if (e2s_dg(s[j]) || (s[j] == '.' && j + 1 < n && e2s_dg(s[j + 1]))) {
+        j += s[j] == '.' ? 2 : 1;
+        for (;;) {
+            if (j + 1 < n && (s[j] == 'e' || s[j] == 'E' || s[j] == 'p' || s[j] == 'P') && (s[j + 1] == '+' || s[j + 1] == '-')) j += 2;
+            else if (j < n && (e2s_al(s[j]) || e2s_dg(s[j]) || s[j] == '_' || s[j] == '.')) j++;
+            else break;
+        }
+        return j - i;
+    }
+    /* id: [A-Za-z_](?:[A-Za-z0-9_]|\\u[0-9a-fA-F]{4}|\\U[0-9a-fA-F]{8})* */
+    if (e2s_al(s[j]) || s[j] == '_') {
+        j++;
+        for (;;) {
+            int k, w;
+            if (j < n && (e2s_al(s[j]) || e2s_dg(s[j]) || s[j] == '_')) { j++; continue; }
+            if (j + 1 < n && s[j] == '\\' && (s[j + 1] == 'u' || s[j + 1] == 'U')) {
+                w = s[j + 1] == 'u' ? 4 : 8;
+                for (k = 0; k < w && j + 2 + (size_t)k < n && e2s_hx(s[j + 2 + k]); k++) ;
+                if (k == w) { j += 2 + (size_t)w; continue; }
+            }
+            break;
+        }
+        return j - i;
+    }
+    {   static const char *P[] = { "...", "<<=", ">>=", "->", "++", "--", "<<", ">>", "<=", ">=", "==", "!=", "&&", "||", "##", 0 };
+        int k;
+        for (k = 0; P[k]; k++) {
+            size_t pl = strlen(P[k]);
+            if (k == 14 && j + 1 < n && s[j] && strchr("*/%+-&^|", s[j]) && s[j + 1] == '=') return 2;   /* [*\/%+\-&^|]= before ## */
+            if (j + pl <= n && !memcmp(s + j, P[k], pl)) return pl;
+        }
+    }
+    l = e2s_cplen(s, n, j, &cp);
+    *space = e2s_uspace(cp);
+    return (size_t)l;
+}
+static void e2s_utf8_check(const unsigned char *s, size_t n) {
+    size_t i = 0; long cp;
+    while (i < n) {
+        int l = e2s_cplen(s, n, i, &cp);
+        if (l < 0) {
+            char m[200];
+            snprintf(m, sizeof m, "UnicodeDecodeError: 'utf-8' codec can't decode byte 0x%02x in position %lu: invalid %s byte",
+                     s[i], (unsigned long)i, (s[i] & 0xC0) == 0x80 || s[i] >= 0xF5 || s[i] == 0xC0 || s[i] == 0xC1 ? "start" : "continuation");
+            e2s_raise(m);
+        }
+        i += (size_t)l;
+    }
+}
+int e2s_tokens_equal(const char *a, size_t an, const char *b, size_t bn) {
+    const unsigned char *x = (const unsigned char *)a, *y = (const unsigned char *)b;
+    size_t i = 0, j = 0, li = 0, lj = 0; int si, sj;
+    e2s_utf8_check(x, an); e2s_utf8_check(y, bn);
+    for (;;) {
+        while (i < an) { li = e2s_piece(x, an, i, &si); if (!si) break; i += li; }
+        while (j < bn) { lj = e2s_piece(y, bn, j, &sj); if (!sj) break; j += lj; }
+        if (i >= an || j >= bn) return i >= an && j >= bn;
+        if (li != lj || memcmp(x + i, y + j, li)) return 0;
+        i += li; j += lj;
+    }
+}
+
+/* ---- byte-string maps (intern ids, blob ids, symbols) --------------------------------------------------------- */
+typedef struct e2s_map { char **k; size_t *kn; long long *v; long *slot; size_t nslot, n, cap; } e2s_map;
+static unsigned long e2s_hash(const char *s, size_t n) { unsigned long h = 1469598103UL; size_t i; for (i = 0; i < n; i++) h = (h ^ (unsigned char)s[i]) * 16777619UL; return h; }
+static long e2s_mfind(e2s_map *m, const char *s, size_t n) {
+    size_t i;
+    if (!m->nslot) return -1;
+    for (i = e2s_hash(s, n) & (m->nslot - 1); m->slot[i] >= 0; i = (i + 1) & (m->nslot - 1))
+        if (m->kn[m->slot[i]] == n && !memcmp(m->k[m->slot[i]], s, n)) return m->slot[i];
+    return -1;
+}
+static long e2s_madd(e2s_map *m, const char *s, size_t n, long long v) {   /* the entry index; an existing key keeps v */
+    long f = e2s_mfind(m, s, n); size_t i;
+    if (f >= 0) return f;
+    if (2 * (m->n + 1) > m->nslot) {
+        size_t k; m->nslot = m->nslot ? m->nslot * 2 : 1024; free(m->slot); m->slot = e2s_alloc(m->nslot * sizeof *m->slot);
+        for (k = 0; k < m->nslot; k++) m->slot[k] = -1;
+        for (k = 0; k < m->n; k++) { i = e2s_hash(m->k[k], m->kn[k]) & (m->nslot - 1); while (m->slot[i] >= 0) i = (i + 1) & (m->nslot - 1); m->slot[i] = (long)k; }
+    }
+    if (m->n == m->cap) {
+        m->cap = m->cap ? m->cap * 2 : 1024;
+        m->k = realloc(m->k, m->cap * sizeof *m->k); m->kn = realloc(m->kn, m->cap * sizeof *m->kn); m->v = realloc(m->v, m->cap * sizeof *m->v);
+        if (!m->k || !m->kn || !m->v) { fputs("MemoryError\n", stderr); exit(1); }
+    }
+    m->k[m->n] = e2s_alloc(n + 1); memcpy(m->k[m->n], s, n); m->kn[m->n] = n; m->v[m->n] = v;
+    for (i = e2s_hash(s, n) & (m->nslot - 1); m->slot[i] >= 0; i = (i + 1) & (m->nslot - 1)) ;
+    m->slot[i] = (long)m->n;
+    return (long)m->n++;
+}
+/* int64 -> int64 with a 0 default: the integer keys of sim.py's W (LDX/STX addresses) */
+typedef struct e2s_imap { long long *k, *v; unsigned char *used; size_t nslot, n; } e2s_imap;
+static size_t e2s_ihash(long long k, size_t nslot) { unsigned long long h = (unsigned long long)k * 0x9E3779B97F4A7C15ULL; return (size_t)(h >> 17) & (nslot - 1); }
+static long long *e2s_islot(e2s_imap *m, long long k, int create) {
+    size_t i;
+    if (m->nslot) for (i = e2s_ihash(k, m->nslot); m->used[i]; i = (i + 1) & (m->nslot - 1)) if (m->k[i] == k) return &m->v[i];
+    if (!create) return 0;
+    if (2 * (m->n + 1) > m->nslot) {
+        e2s_imap g; size_t j;
+        g.nslot = m->nslot ? m->nslot * 2 : 1024; g.n = 0;
+        g.k = e2s_alloc(g.nslot * sizeof *g.k); g.v = e2s_alloc(g.nslot * sizeof *g.v); g.used = e2s_alloc(g.nslot);
+        for (j = 0; j < m->nslot; j++) if (m->used[j]) { for (i = e2s_ihash(m->k[j], g.nslot); g.used[i]; i = (i + 1) & (g.nslot - 1)) ; g.used[i] = 1; g.k[i] = m->k[j]; g.v[i] = m->v[j]; g.n++; }
+        free(m->k); free(m->v); free(m->used); *m = g;
+    }
+    for (i = e2s_ihash(k, m->nslot); m->used[i]; i = (i + 1) & (m->nslot - 1)) ;
+    m->used[i] = 1; m->k[i] = k; m->v[i] = 0; m->n++;
+    return &m->v[i];
+}
+
+/* ---- the delta (exec/pp/sim.py load) -------------------------------------------------------------------------- */
+enum { E2SO_ADV, E2SO_MARK, E2SO_JUMP, E2SO_COPYT, E2SO_COPY, E2SO_OUT, E2SO_LDI, E2SO_COPYW, E2SO_ALU, E2SO_ALUI, E2SO_CMP, E2SO_CMPI, E2SO_A64, E2SO_A64I, E2SO_C64,
+       E2SO_C64U, E2SO_RLD, E2SO_LDX, E2SO_STX, E2SO_OUTW, E2SO_SPAN, E2SO_SPANT, E2SO_SPAN2, E2SO_OLAST, E2SO_ODROP, E2SO_OLEN, E2SO_OCUT, E2SO_ORES, E2SO_OFILL,
+       E2SO_OCLR, E2SO_OSEL, E2SO_SETOT, E2SO_XATTR, E2SO_PUSH, E2SO_POP, E2SO_INTERN, E2SO_SBINTERN, E2SO_BLOBSAVE, E2SO_SBSAVE, E2SO_INPUSH, E2SO_INPUSHX,
+       E2SO_INPUSHXE, E2SO_INPOP, E2SO_SBCLR, E2SO_SBOUT, E2SO_SBSPAN, E2SO_SBBLOB, E2SO_SBFIND, E2SO_BYTE, E2SO_XLEN, E2SO_BLEN, E2SO_DIVMOD10, E2SO_SWAP,
+       E2SO_ACCEPT, E2SO_REJECT, E2SO_N };
+static const char *E2S_OPS[] = { "ADV", "MARK", "JUMP", "COPYT", "COPY", "OUT", "LDI", "COPYW", "ALU", "ALUI", "CMP", "CMPI",
+    "A64", "A64I", "C64", "C64U", "RLD", "LDX", "STX", "OUTW", "SPAN", "SPANT", "SPAN2", "OLAST", "ODROP", "OLEN", "OCUT",
+    "ORES", "OFILL", "OCLR", "OSEL", "SETOT", "XATTR", "PUSH", "POP", "INTERN", "SBINTERN", "BLOBSAVE", "SBSAVE", "INPUSH",
+    "INPUSHX", "INPUSHXE", "INPOP", "SBCLR", "SBOUT", "SBSPAN", "SBBLOB", "SBFIND", "BYTE", "XLEN", "BLEN", "DIVMOD10", "SWAP",
+    "ACCEPT", "REJECT" };
+static const char *E2S_ALU[] = { "add", "sub", "mul", "div", "rem", "and", "or", "xor", "shl", "sar", "sdiv", "srem", "udiv", "urem", "not", "shr", 0 };
+typedef struct e2s_arg { int str; long long v; } e2s_arg;          /* str: v is a symbol; otherwise the integer */
+typedef struct e2s_act { int op; int na; e2s_arg a[5]; int alu; } e2s_act;
+typedef struct e2s_seq { e2s_act *a; int n; } e2s_seq;
+typedef struct e2s_state { int mode; int *to, *seq; long nt; long *tsym; int *tto, *tseq; } e2s_state;
+typedef struct e2s_delta {
+    e2s_map sym; e2s_state *st; long nst; long *ix; e2s_seq *seqs; long nseq; long start, bot;
+} e2s_delta;
+typedef struct e2s_jp { const char *s; size_t n, i; } e2s_jp;
+
+static void e2s_jerr(e2s_jp *p, const char *what) {
+    char m[200]; snprintf(m, sizeof m, "json.decoder.JSONDecodeError: %s: char %lu", what, (unsigned long)p->i); e2s_raise(m);
+}
+static void e2s_jws(e2s_jp *p) { while (p->i < p->n && (p->s[p->i] == ' ' || p->s[p->i] == '\t' || p->s[p->i] == '\n' || p->s[p->i] == '\r')) p->i++; }
+static int e2s_jpeek(e2s_jp *p) { e2s_jws(p); return p->i < p->n ? (unsigned char)p->s[p->i] : -1; }
+static void e2s_jexpect(e2s_jp *p, int c) { if (e2s_jpeek(p) != c) e2s_jerr(p, "Expecting delimiter"); p->i++; }
+static void e2s_jutf8(e2s_buf *b, unsigned long c) {
+    char t[4];
+    if (c < 0x80) { t[0] = (char)c; e2s_put(b, t, 1); }
+    else if (c < 0x800) { t[0] = (char)(0xC0 | c >> 6); t[1] = (char)(0x80 | (c & 63)); e2s_put(b, t, 2); }
+    else if (c < 0x10000) { t[0] = (char)(0xE0 | c >> 12); t[1] = (char)(0x80 | (c >> 6 & 63)); t[2] = (char)(0x80 | (c & 63)); e2s_put(b, t, 3); }
+    else { t[0] = (char)(0xF0 | c >> 18); t[1] = (char)(0x80 | (c >> 12 & 63)); t[2] = (char)(0x80 | (c >> 6 & 63)); t[3] = (char)(0x80 | (c & 63)); e2s_put(b, t, 4); }
+}
+static unsigned long e2s_jhex4(e2s_jp *p) {
+    unsigned long v = 0; int k;
+    for (k = 0; k < 4; k++) {
+        int c = p->i < p->n ? (unsigned char)p->s[p->i] : 0;
+        if (!e2s_hx(c)) e2s_jerr(p, "Invalid \\uXXXX escape");
+        v = v * 16 + (unsigned long)(e2s_dg(c) ? c - '0' : (c | 32) - 'a' + 10); p->i++;
+    }
+    return v;
+}
+static void e2s_jstr(e2s_jp *p, e2s_buf *b) {
+    b->n = 0; e2s_put(b, "", 0);
+    if (e2s_jpeek(p) != '"') e2s_jerr(p, "Expecting value");
+    p->i++;
+    for (;;) {
+        size_t s = p->i;
+        while (p->i < p->n && p->s[p->i] != '"' && p->s[p->i] != '\\' && (unsigned char)p->s[p->i] >= 0x20) p->i++;
+        e2s_put(b, p->s + s, p->i - s);
+        if (p->i >= p->n) e2s_jerr(p, "Unterminated string");
+        if (p->s[p->i] == '"') { p->i++; return; }
+        if ((unsigned char)p->s[p->i] < 0x20) e2s_jerr(p, "Invalid control character");
+        p->i++;
+        if (p->i >= p->n) e2s_jerr(p, "Unterminated string");
+        switch (p->s[p->i++]) {
+        case '"': e2s_put(b, "\"", 1); break;
+        case '\\': e2s_put(b, "\\", 1); break;
+        case '/': e2s_put(b, "/", 1); break;
+        case 'b': e2s_put(b, "\b", 1); break;
+        case 'f': e2s_put(b, "\f", 1); break;
+        case 'n': e2s_put(b, "\n", 1); break;
+        case 'r': e2s_put(b, "\r", 1); break;
+        case 't': e2s_put(b, "\t", 1); break;
+        case 'u': {
+            unsigned long c = e2s_jhex4(p);
+            if (c >= 0xD800 && c <= 0xDBFF && p->i + 1 < p->n && p->s[p->i] == '\\' && p->s[p->i + 1] == 'u') {
+                size_t save = p->i; unsigned long d; p->i += 2; d = e2s_jhex4(p);
+                if (d >= 0xDC00 && d <= 0xDFFF) c = 0x10000 + ((c - 0xD800) << 10) + (d - 0xDC00); else p->i = save;
+            }
+            e2s_jutf8(b, c); break;
+        }
+        default: e2s_jerr(p, "Invalid \\escape");
+        }
+    }
+}
+static long long e2s_jint(e2s_jp *p) {
+    long long v = 0; int neg = 0; size_t s;
+    e2s_jws(p);
+    if (p->i < p->n && p->s[p->i] == '-') { neg = 1; p->i++; }
+    s = p->i;
+    while (p->i < p->n && e2s_dg((unsigned char)p->s[p->i])) { v = v * 10 + (p->s[p->i] - '0'); p->i++; }
+    if (p->i == s) e2s_jerr(p, "Expecting value");
+    if (p->i < p->n && (p->s[p->i] == '.' || p->s[p->i] == 'e' || p->s[p->i] == 'E')) e2s_jerr(p, "a non-integer number in the delta");
+    return neg ? -v : v;
+}
+static void e2s_jskip(e2s_jp *p) {
+    int c = e2s_jpeek(p); e2s_buf t = { 0, 0, 0 };
+    if (c == '"') { e2s_jstr(p, &t); free(t.p); return; }
+    if (c == '{' || c == '[') {
+        int close = c == '{' ? '}' : ']';
+        p->i++;
+        if (e2s_jpeek(p) == close) { p->i++; return; }
+        for (;;) {
+            if (c == '{') { e2s_jstr(p, &t); e2s_jexpect(p, ':'); }
+            e2s_jskip(p);
+            if (e2s_jpeek(p) == ',') { p->i++; continue; }
+            e2s_jexpect(p, close); free(t.p); return;
+        }
+    }
+    if (c == 't' && p->i + 4 <= p->n && !memcmp(p->s + p->i, "true", 4)) { p->i += 4; return; }
+    if (c == 'f' && p->i + 5 <= p->n && !memcmp(p->s + p->i, "false", 5)) { p->i += 5; return; }
+    if (c == 'n' && p->i + 4 <= p->n && !memcmp(p->s + p->i, "null", 4)) { p->i += 4; return; }
+    while (p->i < p->n && p->s[p->i] && strchr("+-0123456789.eE", p->s[p->i])) p->i++;
+}
+static long e2s_dsym(e2s_delta *d, const char *s, size_t n) { return e2s_madd(&d->sym, s, n, -1); }
+typedef struct e2s_row { long key; long to; long seq; } e2s_row;    /* key: the int key, or the symbol of a t-row */
+static void e2s_jstates(e2s_jp *p, e2s_delta *d) {
+    e2s_buf t = { 0, 0, 0 }; long cap = 0;
+    e2s_jexpect(p, '{');
+    if (e2s_jpeek(p) == '}') { p->i++; return; }
+    for (;;) {
+        long name, k; int mode; e2s_row *rows = 0; long nr = 0, rc = 0; e2s_state *s;
+        e2s_jstr(p, &t); name = e2s_dsym(d, t.p, t.n); e2s_jexpect(p, ':');
+        e2s_jexpect(p, '['); e2s_jstr(p, &t);
+        if (t.n != 1) e2s_jerr(p, "a state mode is one letter");
+        mode = t.p[0];
+        e2s_jexpect(p, ','); e2s_jexpect(p, '{');
+        if (e2s_jpeek(p) != '}') for (;;) {
+            e2s_row r;
+            e2s_jstr(p, &t);
+            if (mode == 't') r.key = e2s_dsym(d, t.p, t.n);
+            else {                                    /* int(k) */
+                char *e; long v = strtol(t.p, &e, 10);
+                if (!t.n || *e) e2s_raise("ValueError: invalid literal for int() with base 10");
+                if (v < -257 || v > 256) e2s_raise("IndexError: list assignment index out of range");
+                r.key = v < 0 ? v + 257 : v;
+            }
+            e2s_jexpect(p, ':'); e2s_jexpect(p, '['); e2s_jstr(p, &t); r.to = e2s_dsym(d, t.p, t.n);
+            e2s_jexpect(p, ','); r.seq = (long)e2s_jint(p); e2s_jexpect(p, ']');
+            if (nr == rc) { rc = rc ? rc * 2 : 64; rows = realloc(rows, (size_t)rc * sizeof *rows); if (!rows) exit(1); }
+            rows[nr++] = r;
+            if (e2s_jpeek(p) == ',') { p->i++; continue; }
+            break;
+        }
+        e2s_jexpect(p, '}'); e2s_jexpect(p, ']');
+        /* a repeated state name keeps its first position and takes the last value, as a dict does */
+        for (k = 0; k < d->nst && d->ix[k] != name; k++) ;
+        if (k == d->nst) {
+            if (d->nst == cap) { cap = cap ? cap * 2 : 1024; d->st = realloc(d->st, (size_t)cap * sizeof *d->st); d->ix = realloc(d->ix, (size_t)cap * sizeof *d->ix); if (!d->st || !d->ix) exit(1); }
+            d->ix[d->nst++] = name;
+        }
+        s = &d->st[k]; memset(s, 0, sizeof *s); s->mode = mode;
+        s->nt = nr; s->tsym = e2s_alloc((size_t)(nr + 1) * sizeof(long)); s->tto = e2s_alloc((size_t)(nr + 1) * sizeof(int)); s->tseq = e2s_alloc((size_t)(nr + 1) * sizeof(int));
+        for (k = 0; k < nr; k++) { s->tsym[k] = rows[k].key; s->tto[k] = (int)rows[k].to; s->tseq[k] = (int)rows[k].seq; }
+        free(rows);
+        if (e2s_jpeek(p) == ',') { p->i++; continue; }
+        e2s_jexpect(p, '}'); break;
+    }
+    free(t.p);
+}
+static void e2s_jseqs(e2s_jp *p, e2s_delta *d) {
+    e2s_buf t = { 0, 0, 0 }; long cap = 0;
+    e2s_jexpect(p, '[');
+    if (e2s_jpeek(p) == ']') { p->i++; return; }
+    for (;;) {
+        e2s_seq q; long acap = 0;
+        q.a = 0; q.n = 0;
+        e2s_jexpect(p, '[');
+        if (e2s_jpeek(p) != ']') for (;;) {
+            e2s_act a; int k;
+            memset(&a, 0, sizeof a); a.op = -1; a.alu = -1;
+            e2s_jexpect(p, '['); e2s_jstr(p, &t);
+            for (k = 0; k < E2SO_N; k++) if (strlen(E2S_OPS[k]) == t.n && !memcmp(E2S_OPS[k], t.p, t.n)) a.op = k;
+            while (e2s_jpeek(p) == ',') {
+                p->i++;
+                if (a.na == 5) e2s_jerr(p, "too many operands");
+                if (e2s_jpeek(p) == '"') {
+                    e2s_jstr(p, &t); a.a[a.na].str = 1; a.a[a.na].v = e2s_dsym(d, t.p, t.n);
+                    if (a.na == 0) for (k = 0; E2S_ALU[k]; k++) if (strlen(E2S_ALU[k]) == t.n && !memcmp(E2S_ALU[k], t.p, t.n)) a.alu = k;
+                } else { a.a[a.na].str = 0; a.a[a.na].v = e2s_jint(p); }
+                a.na++;
+            }
+            e2s_jexpect(p, ']');
+            if (q.n == acap) { acap = acap ? acap * 2 : 8; q.a = realloc(q.a, (size_t)acap * sizeof *q.a); if (!q.a) exit(1); }
+            q.a[q.n++] = a;
+            if (e2s_jpeek(p) == ',') { p->i++; continue; }
+            break;
+        }
+        e2s_jexpect(p, ']');
+        if (d->nseq == cap) { cap = cap ? cap * 2 : 1024; d->seqs = realloc(d->seqs, (size_t)cap * sizeof *d->seqs); if (!d->seqs) exit(1); }
+        d->seqs[d->nseq++] = q;
+        if (e2s_jpeek(p) == ',') { p->i++; continue; }
+        e2s_jexpect(p, ']'); break;
+    }
+    free(t.p);
+}
+void *e2s_delta_load(const char *path) {
+    size_t n; char *text = e2s_read(path, &n); e2s_jp p; e2s_delta *d = e2s_alloc(sizeof *d);
+    e2s_buf t = { 0, 0, 0 }; long *stix, k, startsym = -1;
+    p.s = text; p.n = n; p.i = 0;
+    e2s_jexpect(&p, '{');
+    if (e2s_jpeek(&p) != '}') for (;;) {
+        e2s_jstr(&p, &t); e2s_jexpect(&p, ':');
+        if (t.n == 5 && !memcmp(t.p, "start", 5)) { e2s_jstr(&p, &t); startsym = e2s_dsym(d, t.p, t.n); }
+        else if (t.n == 6 && !memcmp(t.p, "states", 6)) e2s_jstates(&p, d);
+        else if (t.n == 4 && !memcmp(t.p, "seqs", 4)) e2s_jseqs(&p, d);
+        else e2s_jskip(&p);
+        if (e2s_jpeek(&p) == ',') { p.i++; continue; }
+        break;
+    }
+    e2s_jexpect(&p, '}');
+    if (e2s_jpeek(&p) != -1) e2s_jerr(&p, "Extra data");
+    free(text);
+    if (startsym < 0) e2s_raise("KeyError: 'start'");
+    /* names -> state numbers (ix), rows resolved: sim.load */
+    stix = e2s_alloc((size_t)(d->sym.n + 1) * sizeof *stix);
+    for (k = 0; k < (long)d->sym.n; k++) stix[k] = -1;
+    for (k = 0; k < d->nst; k++) stix[d->ix[k]] = k;
+    if (stix[startsym] < 0) e2s_raise("KeyError: the start state");
+    d->start = stix[startsym];
+    d->bot = e2s_dsym(d, "BOT", 3);
+    for (k = 0; k < d->nst; k++) {
+        e2s_state *s = &d->st[k]; long r;
+        for (r = 0; r < s->nt; r++) {
+            if (stix[s->tto[r]] < 0) e2s_raise("KeyError: a row target that is not a state");
+            if (s->tseq[r] < 0 || s->tseq[r] >= d->nseq) e2s_raise("IndexError: list index out of range");
+            s->tto[r] = (int)stix[s->tto[r]];
+        }
+        if (s->mode != 't') {
+            s->to = e2s_alloc(257 * sizeof(int)); s->seq = e2s_alloc(257 * sizeof(int));
+            for (r = 0; r < 257; r++) s->to[r] = -1;
+            for (r = 0; r < s->nt; r++) { s->to[s->tsym[r]] = s->tto[r]; s->seq[s->tsym[r]] = s->tseq[r]; }
+        }
+    }
+    free(stix); free(t.p);
+    return d;
+}
+
+/* ---- the delta run (exec/pp/sim.py run) ----------------------------------------------------------------------- */
+static long long e2s_w32(long long v) { return (long long)(int)(unsigned)(unsigned long long)v; }
+static long long e2s_alu(int op, long long a, long long b) {
+    a = e2s_w32(a); b = e2s_w32(b);
+    switch (op) {
+    case 0: return e2s_w32(a + b);
+    case 1: return e2s_w32(a - b);
+    case 2: return e2s_w32((long long)((unsigned long long)a * (unsigned long long)b));
+    case 3: case 4: {
+        long long q;
+        if (b == 0) return 0;
+        q = (a < 0 ? -a : a) / (b < 0 ? -b : b);
+        q = (a < 0) == (b < 0) ? q : -q;
+        if (op == 3) return e2s_w32(q);
+        return e2s_w32(a - e2s_w32(q) * b);
+    }
+    case 5: return e2s_w32(a & b);
+    case 6: return e2s_w32(a | b);
+    case 7: return e2s_w32(a ^ b);
+    case 8: return e2s_w32((long long)((unsigned long long)a << (b & 31)));
+    case 9: return e2s_w32(a >> (b & 31));
+    }
+    e2s_raise("ValueError: an ALU operation sim.py does not know");
+    return 0;
+}
+static long long e2s_alu64(int op, long long a, long long b, int *dz) {
+    unsigned long long ua = (unsigned long long)a, ub = (unsigned long long)b;
+    *dz = 0;
+    switch (op) {
+    case 10: case 11: case 12: case 13: {
+        unsigned long long q, ma, mb;
+        if (b == 0) { *dz = 1; return 0; }
+        if (op == 12) return (long long)(ua / ub);
+        if (op == 13) return (long long)(ua % ub);
+        ma = a < 0 ? 0 - ua : ua; mb = b < 0 ? 0 - ub : ub;
+        q = ma / mb; if ((a < 0) != (b < 0)) q = 0 - q;
+        return op == 10 ? (long long)q : (long long)(ua - q * ub);
+    }
+    case 0: return (long long)(ua + ub);
+    case 1: return (long long)(ua - ub);
+    case 2: return (long long)(ua * ub);
+    case 5: return (long long)(ua & ub);
+    case 6: return (long long)(ua | ub);
+    case 7: return (long long)(ua ^ ub);
+    case 14: return (long long)~ua;
+    case 8: return (long long)(ua << (b & 63));
+    case 15: return (long long)(ua >> (b & 63));
+    case 9: return a >> (b & 63);
+    }
+    e2s_raise("KeyError: an A64 operation sim.py does not know");
+    return 0;
+}
+typedef struct e2s_frame { const unsigned char *b; long long *attr; long long cur, end, len; } e2s_frame;
+typedef struct e2s_bytes { unsigned char *p; long long *at; size_t n, cap; } e2s_bytes;
+static void e2s_bpush(e2s_bytes *o, int c, long long at, int attrs) {
+    if (o->n == o->cap) {
+        o->cap = o->cap ? o->cap * 2 : 4096;
+        o->p = realloc(o->p, o->cap); if (attrs) o->at = realloc(o->at, o->cap * sizeof *o->at);
+        if (!o->p || (attrs && !o->at)) { fputs("MemoryError\n", stderr); exit(1); }
+    }
+    o->p[o->n] = (unsigned char)c; if (attrs) o->at[o->n] = at; o->n++;
+}
+static size_t e2s_pyidx(long long i, long long len) {
+    if (i < 0) i += len;
+    if (i < 0 || i >= len) e2s_raise("IndexError: index out of range");
+    return (size_t)i;
+}
+typedef struct e2s_vm {
+    e2s_delta *d; long long *reg; e2s_imap mem;
+    unsigned char **blob; size_t *blen; size_t nblob, bcap; e2s_map blobid, intern; const char *bundled;
+} e2s_vm;
+static long long e2s_get(e2s_vm *m, e2s_arg a) { long long *s; if (a.str) return m->reg[a.v]; s = e2s_islot(&m->mem, a.v, 0); return s ? *s : 0; }
+static void e2s_set(e2s_vm *m, e2s_arg a, long long v) { if (a.str) m->reg[a.v] = v; else *e2s_islot(&m->mem, a.v, 1) = v; }
+static long long e2s_mget(e2s_vm *m, long long k) { long long *s = e2s_islot(&m->mem, k, 0); return s ? *s : 0; }
+static long e2s_addblob(e2s_vm *m, const unsigned char *s, size_t n) {
+    if (m->nblob == m->bcap) {
+        m->bcap = m->bcap ? m->bcap * 2 : 64;
+        m->blob = realloc(m->blob, m->bcap * sizeof *m->blob); m->blen = realloc(m->blen, m->bcap * sizeof *m->blen);
+        if (!m->blob || !m->blen) exit(1);
+    }
+    m->blob[m->nblob] = e2s_alloc(n + 1); if (n) memcpy(m->blob[m->nblob], s, n); m->blen[m->nblob] = n;
+    return (long)m->nblob++;
+}
+/* sim.Files.get: the read-only file dictionary; 0 when absent (ENOENT, or a path Python cannot pass to stat) */
+static unsigned char *e2s_file(e2s_vm *m, const unsigned char *key, size_t kn, size_t *n) {
+    e2s_buf p = { 0, 0, 0 }, q = { 0, 0, 0 }; size_t i, off = 0; struct stat st; char *data;
+    if (kn >= 7 && (!memcmp(key, "\0inc/q/", 7) || !memcmp(key, "\0inc/a/", 7))) off = 7;
+    if (kn - off >= 5 && !memcmp(key + off, "\0hdr/", 5)) {
+        const char *rest = (const char *)key + off + 5; size_t rn = kn - off - 5;
+        if (rn && rest[0] == '/') e2s_put(&p, rest, rn);
+        else { e2s_puts(&p, m->bundled); if (!*m->bundled || m->bundled[strlen(m->bundled) - 1] != '/') e2s_puts(&p, "/"); e2s_put(&p, rest, rn); }
+    } else e2s_put(&p, key + off, kn - off);
+    e2s_put(&q, "", 0);
+    for (i = 0; i < p.n; i++) {                        /* str (latin-1) -> the file system encoding (UTF-8) */
+        unsigned char c = (unsigned char)p.p[i];
+        if (!c) { free(p.p); free(q.p); return 0; }  /* ValueError: embedded null byte */
+        if (c < 0x80) { char ch = (char)c; e2s_put(&q, &ch, 1); }
+        else { char t2[2]; t2[0] = (char)(0xC0 | c >> 6); t2[1] = (char)(0x80 | (c & 63)); e2s_put(&q, t2, 2); }
+    }
+    free(p.p);
+    if (stat(q.p, &st) != 0) {
+        if (errno == ENOENT) { free(q.p); return 0; }
+        e2s_oserror("stat", q.p);
+    }
+    data = e2s_read(q.p, n);
+    free(q.p);
+    return (unsigned char *)data;
+}
+int e2s_delta_run(void *dv, const char *x0, size_t xn0, const char *srcpath, const char *bundled, long maxsteps, char **out, size_t *outn) {
+    e2s_delta *d = dv; e2s_vm vm; e2s_frame *fr0, *fr; long nfr = 1, frcap = 64; long q = d->start; long long r = 0;
+    e2s_bytes o = { 0, 0, 0, 0 }, e = { 0, 0, 0, 0 }; e2s_buf sb = { 0, 0, 0 };
+    long *stack = 0; long nstack = 0, stcap = 0; int osel = 0; long long OT = 0; long steps = 0;
+    const unsigned char *x; long long *xattr; long long xn = (long long)xn0;
+    memset(&vm, 0, sizeof vm); vm.d = d; vm.bundled = bundled;
+    vm.reg = e2s_alloc((d->sym.n + 1) * sizeof *vm.reg);
+    e2s_addblob(&vm, (const unsigned char *)"", 0); e2s_addblob(&vm, (const unsigned char *)srcpath, strlen(srcpath));
+    e2s_madd(&vm.blobid, "\0cli/source", 11, 1);
+    { unsigned char *xc = e2s_alloc(xn0 + 1); if (xn0) memcpy(xc, x0, xn0); x = xc; }
+    xattr = e2s_alloc((xn0 + 1) * sizeof *xattr);
+    fr0 = e2s_alloc((size_t)frcap * sizeof *fr0);
+    fr0[0].b = x; fr0[0].attr = xattr; fr0[0].cur = 0; fr0[0].end = xn; fr0[0].len = xn;
+    fr = &fr0[0];
+    e2s_put(&sb, "", 0);
+    for (;;) {
+        e2s_state *s; long key, to, sq, ai; e2s_seq *seq;
+        steps++;
+        if (maxsteps && steps > maxsteps) return 2;
+        s = &d->st[q];
+        if (s->mode == 'b') { long long i = fr->cur; key = i < fr->end ? fr->b[e2s_pyidx(i, fr->len)] : 256; }
+        else if (s->mode == 't') key = nstack ? stack[nstack - 1] : d->bot;
+        else key = r >= 0 && r <= 256 ? (long)r : 256;
+        if (s->mode == 't') {
+            long k; to = -1;
+            for (k = s->nt - 1; k >= 0; k--) if (s->tsym[k] == key) { to = s->tto[k]; sq = s->tseq[k]; break; }
+            if (to < 0) e2s_raise("KeyError: a control-stack top the state has no row for");
+        } else {
+            to = s->to[key]; sq = s->seq[key];
+            if (to < 0) e2s_raise("TypeError: cannot unpack non-iterable NoneType object");
+        }
+        q = to; seq = &d->seqs[sq];
+        for (ai = 0; ai < seq->n; ai++) {
+            e2s_act *a = &seq->a[ai]; e2s_arg *A = a->a;
+            switch (a->op) {
+            case E2SO_ADV: fr->cur++; break;
+            case E2SO_MARK: e2s_set(&vm, A[0], fr->cur); break;
+            case E2SO_JUMP: fr->cur = e2s_get(&vm, A[0]); break;
+            case E2SO_COPYT: {
+                long long i = fr->cur;
+                if (i < fr->end) { int c = fr->b[e2s_pyidx(i, fr->len)]; if (osel == 0) e2s_bpush(&o, c, OT, 1); else e2s_bpush(&e, c, 0, 0); }
+                break;
+            }
+            case E2SO_COPY: {
+                long long i = fr->cur;
+                if (i < fr->end) {
+                    size_t k = e2s_pyidx(i, fr->len);
+                    if (osel == 0) e2s_bpush(&o, fr->b[k], fr->attr ? fr->attr[k] : OT, 1); else e2s_bpush(&e, fr->b[k], 0, 0);
+                }
+                break;
+            }
+            case E2SO_OUT: if (osel == 0) e2s_bpush(&o, (int)(A[0].v & 255), OT, 1); else e2s_bpush(&e, (int)(A[0].v & 255), 0, 0); break;
+            case E2SO_LDI: e2s_set(&vm, A[0], A[1].v); break;
+            case E2SO_COPYW: e2s_set(&vm, A[0], e2s_get(&vm, A[1])); break;
+            case E2SO_ALU: e2s_set(&vm, A[1], e2s_alu(a->alu, e2s_get(&vm, A[2]), e2s_get(&vm, A[3]))); break;
+            case E2SO_ALUI: e2s_set(&vm, A[1], e2s_alu(a->alu, e2s_get(&vm, A[2]), A[3].v)); break;
+            case E2SO_CMP: case E2SO_CMPI: {
+                long long u = e2s_get(&vm, A[0]), v = a->op == E2SO_CMP ? e2s_get(&vm, A[1]) : A[1].v;
+                r = u < v ? 0 : u == v ? 1 : 2; break;
+            }
+            case E2SO_A64: case E2SO_A64I: {
+                int dz; long long v = e2s_alu64(a->alu, e2s_get(&vm, A[2]), a->op == E2SO_A64 ? e2s_get(&vm, A[3]) : A[3].v, &dz);
+                e2s_set(&vm, A[1], v); r = dz; break;
+            }
+            case E2SO_C64: case E2SO_C64U: {
+                long long u = e2s_get(&vm, A[0]), v = e2s_get(&vm, A[1]);
+                if (a->op == E2SO_C64U) r = (unsigned long long)u < (unsigned long long)v ? 0 : u == v ? 1 : 2;
+                else r = u < v ? 0 : u == v ? 1 : 2;
+                break;
+            }
+            case E2SO_RLD: { long long v = e2s_get(&vm, A[0]); r = v >= 0 && v <= 256 ? v : 256; break; }
+            case E2SO_LDX: e2s_set(&vm, A[0], e2s_mget(&vm, e2s_get(&vm, A[1]) + A[2].v)); break;
+            case E2SO_STX: *e2s_islot(&vm.mem, e2s_get(&vm, A[0]) + A[1].v, 1) = e2s_get(&vm, A[2]); break;
+            case E2SO_OUTW: { int c = (int)((unsigned long long)e2s_get(&vm, A[0]) & 255); if (osel == 0) e2s_bpush(&o, c, OT, 1); else e2s_bpush(&e, c, 0, 0); break; }
+            case E2SO_SPAN: case E2SO_SPANT: case E2SO_SPAN2: {
+                long long s0 = e2s_get(&vm, A[0]), s1 = a->op == E2SO_SPAN2 ? e2s_get(&vm, A[1]) : fr->cur, k;
+                if (s0 < 0) s0 = 0;
+                if (s1 > fr->end) s1 = fr->end;
+                if (s0 < s1) for (k = s0; k < s1 && k < fr->len; k++) {
+                    if (osel == 1) e2s_bpush(&e, fr->b[k], 0, 0);
+                    else e2s_bpush(&o, fr->b[k], a->op == E2SO_SPANT || !fr->attr ? OT : fr->attr[k], 1);
+                }
+                break;
+            }
+            case E2SO_OLAST: r = o.n ? o.p[o.n - 1] : 256; break;
+            case E2SO_ODROP: if (o.n) o.n--; break;
+            case E2SO_OLEN: e2s_set(&vm, A[0], (long long)o.n); break;
+            case E2SO_OCUT: {
+                long long s0 = e2s_get(&vm, A[1]);
+                if (s0 > (long long)o.n) s0 = (long long)o.n;
+                if (s0 < 0) s0 = 0;
+                e2s_set(&vm, A[0], e2s_addblob(&vm, o.p + s0, o.n - (size_t)s0));
+                o.n = (size_t)s0; break;
+            }
+            case E2SO_ORES: { long long k; e2s_set(&vm, A[0], (long long)o.n); for (k = 0; k < A[1].v; k++) e2s_bpush(&o, ' ', OT, 1); break; }
+            case E2SO_OFILL: {
+                char t[32]; long long w = A[2].v, at = e2s_get(&vm, A[0]); size_t tl;
+                snprintf(t, sizeof t, "%lld", e2s_get(&vm, A[1])); tl = strlen(t);
+                if (at < 0 || at + w > (long long)o.n) e2s_raise("RuntimeError: fill past the reservation");
+                if ((long long)tl <= w) { long long k; for (k = 0; k < w - (long long)tl; k++) o.p[at + k] = ' '; memcpy(o.p + at + w - (long long)tl, t, tl); }
+                else return 1;
+                break;
+            }
+            case E2SO_OCLR: o.n = 0; break;
+            case E2SO_OSEL: osel = (int)A[0].v; break;
+            case E2SO_SETOT: OT = e2s_get(&vm, A[0]); break;
+            case E2SO_XATTR: { long long i = fr->cur; e2s_set(&vm, A[0], fr->attr && i < fr->end ? fr->attr[e2s_pyidx(i, fr->len)] : 0); break; }
+            case E2SO_PUSH:
+                if (nstack == stcap) { stcap = stcap ? stcap * 2 : 64; stack = realloc(stack, (size_t)stcap * sizeof *stack); if (!stack) exit(1); }
+                stack[nstack++] = A[0].str ? (long)A[0].v : -2 - (long)A[0].v; break;
+            case E2SO_POP: if (!nstack) e2s_raise("RuntimeError: pop of an empty stack"); nstack--; break;
+            case E2SO_INTERN: case E2SO_SBINTERN: {
+                const char *k; size_t kn; long f;
+                if (a->op == E2SO_INTERN) {
+                    long long s0 = e2s_get(&vm, A[1]), s1 = e2s_get(&vm, A[2]);
+                    if (s0 < 0) s0 = 0;
+                    if (s1 > fr->end) s1 = fr->end;
+                    k = (const char *)fr->b + (s0 < s1 ? s0 : 0); kn = s0 < s1 ? (size_t)(s1 - s0) : 0;
+                } else { k = sb.p; kn = sb.n; }
+                f = e2s_madd(&vm.intern, k, kn, (long long)vm.intern.n + 1);
+                e2s_set(&vm, A[0], vm.intern.v[f]); break;
+            }
+            case E2SO_BLOBSAVE: case E2SO_SBSAVE: {
+                if (a->op == E2SO_BLOBSAVE) {
+                    long long s0 = e2s_get(&vm, A[1]), s1 = e2s_get(&vm, A[2]);
+                    if (s0 < 0) s0 = 0;
+                    if (s1 > fr->end) s1 = fr->end;
+                    e2s_set(&vm, A[0], e2s_addblob(&vm, fr->b + (s0 < s1 ? s0 : 0), s0 < s1 ? (size_t)(s1 - s0) : 0));
+                } else e2s_set(&vm, A[0], e2s_addblob(&vm, (const unsigned char *)sb.p, sb.n));
+                break;
+            }
+            case E2SO_INPUSH: case E2SO_INPUSHX: case E2SO_INPUSHXE: {
+                e2s_frame f;
+                if (a->op == E2SO_INPUSH) {
+                    size_t b = e2s_pyidx(e2s_get(&vm, A[0]), (long long)vm.nblob);
+                    f.b = vm.blob[b]; f.attr = 0; f.cur = 0; f.end = (long long)vm.blen[b]; f.len = f.end;
+                } else {
+                    f.b = x; f.attr = xattr; f.cur = e2s_get(&vm, A[0]); f.len = xn; f.end = xn;
+                    if (a->op == E2SO_INPUSHXE) { long long e2 = e2s_get(&vm, A[1]); if (e2 < f.end) f.end = e2; }
+                }
+                if (nfr == frcap) { frcap *= 2; fr0 = realloc(fr0, (size_t)frcap * sizeof *fr0); if (!fr0) exit(1); }
+                fr0[nfr++] = f; fr = &fr0[nfr - 1]; break;
+            }
+            case E2SO_INPOP: nfr--; if (nfr <= 0) e2s_raise("IndexError: list index out of range"); fr = &fr0[nfr - 1]; break;
+            case E2SO_SBCLR: sb.n = 0; break;
+            case E2SO_SBOUT: { char c = (char)(A[0].v & 255); e2s_put(&sb, &c, 1); break; }
+            case E2SO_SBSPAN: {
+                long long s0 = e2s_get(&vm, A[0]), s1 = e2s_get(&vm, A[1]);
+                if (s0 < 0) s0 = 0;
+                if (s1 > fr->end) s1 = fr->end;
+                if (s0 < s1) e2s_put(&sb, fr->b + s0, (size_t)(s1 - s0));
+                break;
+            }
+            case E2SO_SBBLOB: { size_t b = e2s_pyidx(e2s_get(&vm, A[0]), (long long)vm.nblob); e2s_put(&sb, vm.blob[b], vm.blen[b]); break; }
+            case E2SO_SBFIND: {
+                long f = e2s_mfind(&vm.blobid, sb.p, sb.n);
+                if (f < 0) {
+                    size_t fn; unsigned char *data = e2s_file(&vm, (const unsigned char *)sb.p, sb.n, &fn);
+                    f = e2s_madd(&vm.blobid, sb.p, sb.n, data ? e2s_addblob(&vm, data, fn) : 0);
+                    free(data);
+                }
+                e2s_set(&vm, A[0], vm.blobid.v[f]); break;
+            }
+            case E2SO_BYTE: { long long i = fr->cur; e2s_set(&vm, A[0], i < fr->end ? fr->b[e2s_pyidx(i, fr->len)] : 0); break; }
+            case E2SO_XLEN: e2s_set(&vm, A[0], fr->end); break;
+            case E2SO_BLEN: { size_t b = e2s_pyidx(e2s_get(&vm, A[1]), (long long)vm.nblob); e2s_set(&vm, A[0], (long long)vm.blen[b]); break; }
+            case E2SO_DIVMOD10: {
+                unsigned long long v = (unsigned long long)e2s_get(&vm, A[0]) & 0xFFFFFFFFULL;
+                e2s_set(&vm, A[0], (long long)(v / 10)); r = (long long)(v % 10) + (v / 10 == 0 ? 10 : 0); break;
+            }
+            case E2SO_SWAP: {
+                unsigned char *nx = e2s_alloc(o.n + 1); long long *na = e2s_alloc((o.n + 1) * sizeof *na);
+                if (o.n) { memcpy(nx, o.p, o.n); memcpy(na, o.at, o.n * sizeof *na); }
+                x = nx; xattr = na; xn = (long long)o.n; o.n = 0;
+                nfr = 1; fr0[0].b = x; fr0[0].attr = xattr; fr0[0].cur = 0; fr0[0].end = xn; fr0[0].len = xn; fr = &fr0[0];
+                break;
+            }
+            case E2SO_ACCEPT: {
+                char *res = e2s_alloc(o.n + 1); if (o.n) memcpy(res, o.p, o.n);
+                *out = res; *outn = o.n; return 0;
+            }
+            case E2SO_REJECT: return 1;
+            default: e2s_raise("ValueError: an action sim.py does not know");
+            }
+        }
+    }
+}
+
+/* ---- the package (exec/c/pack.py build, uncompressed; seed/pack.c without --compressed) ----------------------- */
+static const int E2S_ARITY[] = {0,1,1,2,2,4,4,2,2,1,3,3,1,1,0,0,1,1,2,0,0,1,2,2,3,0,1,1,1,1,0,3,3,1,1,2,0,0,1,2,1,1,1,1,2,1,1,1,0,0,1,4,4,2,2,1};
+#define E2S_NOPS ((int)(sizeof E2S_ARITY / sizeof E2S_ARITY[0]))
+typedef struct e2s_qact { long long *v; int n; } e2s_qact;
+typedef struct e2s_qseq { e2s_qact *a; int n; } e2s_qseq;
+typedef struct e2s_node { int parent, first; e2s_qact act; } e2s_node;
+typedef struct e2s_trie { e2s_node *nodes; int nn, ncap; int *slot; size_t nslot; } e2s_trie;
+static int e2s_aeq(e2s_qact x, e2s_qact y) { return x.n == y.n && !memcmp(x.v, y.v, (size_t)x.n * sizeof *x.v); }
+static size_t e2s_ahash(e2s_qact x, int parent, size_t mask) {
+    unsigned long long h = 1469598103934665603ULL ^ (unsigned long long)(long long)parent; int i;
+    for (i = 0; i < x.n; i++) { h ^= (unsigned long long)x.v[i]; h *= 1099511628211ULL; }
+    return (size_t)h & mask;
+}
+static int e2s_tfind(e2s_trie *t, int parent, e2s_qact a) {
+    size_t i;
+    if (!t->nslot) return -1;
+    for (i = e2s_ahash(a, parent, t->nslot - 1); t->slot[i] >= 0; i = (i + 1) & (t->nslot - 1))
+        if (t->nodes[t->slot[i]].parent == parent && e2s_aeq(t->nodes[t->slot[i]].act, a)) return t->slot[i];
+    return -1;
+}
+static int e2s_tadd(e2s_trie *t, int parent, e2s_qact a, int qi) {
+    int f = e2s_tfind(t, parent, a); size_t i;
+    if (f >= 0) return f;
+    if (2 * (size_t)(t->nn + 1) > t->nslot) {
+        int k; free(t->slot); t->nslot = t->nslot ? t->nslot * 2 : 1024; t->slot = e2s_alloc(t->nslot * sizeof *t->slot);
+        for (i = 0; i < t->nslot; i++) t->slot[i] = -1;
+        for (k = 0; k < t->nn; k++) { i = e2s_ahash(t->nodes[k].act, t->nodes[k].parent, t->nslot - 1); while (t->slot[i] >= 0) i = (i + 1) & (t->nslot - 1); t->slot[i] = k; }
+    }
+    if (t->nn == t->ncap) { t->ncap = t->ncap ? t->ncap * 2 : 1024; t->nodes = realloc(t->nodes, (size_t)t->ncap * sizeof *t->nodes); if (!t->nodes) exit(1); }
+    t->nodes[t->nn].parent = parent; t->nodes[t->nn].first = qi; t->nodes[t->nn].act = a;
+    for (i = e2s_ahash(a, parent, t->nslot - 1); t->slot[i] >= 0; i = (i + 1) & (t->nslot - 1)) ;
+    t->slot[i] = t->nn;
+    return t->nn++;
+}
+static void e2s_valerr(const char *m) { e2s_buf b = { 0, 0, 0 }; e2s_puts(&b, "ValueError: "); e2s_puts(&b, m); e2s_raise(b.p); }
+static int e2s_isws(int c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == 11 || c == 12; }
+static int e2s_words(const char *s, size_t n, const char ***w, size_t **wl, int *cap) {   /* bytes.split() */
+    int k = 0; size_t i = 0;
+    while (i < n) {
+        size_t j;
+        while (i < n && e2s_isws((unsigned char)s[i])) i++;
+        if (i >= n) break;
+        for (j = i; j < n && !e2s_isws((unsigned char)s[j]); j++) ;
+        if (k == *cap) { *cap = *cap ? *cap * 2 : 64; *w = realloc(*w, (size_t)*cap * sizeof **w); *wl = realloc(*wl, (size_t)*cap * sizeof **wl); if (!*w || !*wl) exit(1); }
+        (*w)[k] = s + i; (*wl)[k] = j - i; k++; i = j;
+    }
+    return k;
+}
+static long long e2s_num(const char *s, size_t n) {
+    char t[40], *e; long long v;
+    if (!n || n >= sizeof t) e2s_valerr("invalid literal for int() with base 10");
+    memcpy(t, s, n); t[n] = 0; v = strtoll(t, &e, 10);
+    if (*e) e2s_valerr("invalid literal for int() with base 10");
+    return v;
+}
+static void e2s_qacts(long long *flat, int nflat, long long count, e2s_qseq *out) {
+    int at = 0; long long c;
+    if (count < 0 || count > nflat) e2s_valerr("bad Q action count");
+    for (c = 0; c < count; c++) {
+        int end;
+        if (at >= nflat || flat[at] < 0 || flat[at] >= E2S_NOPS) e2s_valerr("bad Q opcode or truncated action");
+        end = at + 1 + E2S_ARITY[flat[at]];
+        if (end > nflat) e2s_valerr("truncated Q operands");
+        out->a[out->n].v = flat + at; out->a[out->n].n = end - at; out->n++; at = end;
+    }
+    if (at != nflat) e2s_valerr("extra Q operands");
+}
+static void e2s_compact_q(const char *d, size_t n, e2s_buf *out) {
+    size_t *ls = 0, *ll = 0, i; long nl = 0, lcap = 0, qi, nq, nstr, start;
+    const char **w = 0; size_t *wl = 0; int wcap = 0, k; e2s_qseq *seqs; e2s_trie t; e2s_buf cand = { 0, 0, 0 };
+    memset(&t, 0, sizeof t);
+    for (i = 0; i < n;) {
+        size_t j = i; while (j < n && d[j] != '\n') j++;
+        if (j < n) j++;
+        if (nl == lcap) { lcap = lcap ? lcap * 2 : 1024; ls = realloc(ls, (size_t)lcap * sizeof *ls); ll = realloc(ll, (size_t)lcap * sizeof *ll); if (!ls || !ll) exit(1); }
+        ls[nl] = i; ll[nl] = j - i; nl++; i = j;
+    }
+    if (!nl || d[n - 1] != '\n') e2s_valerr("truncated network");
+    k = e2s_words(d + ls[0], ll[0], &w, &wl, &wcap);
+    if (k != 7 || wl[0] != 1 || w[0][0] != 'N') e2s_valerr("bad network header");
+    nq = (long)e2s_num(w[2], wl[2]); nstr = (long)e2s_num(w[4], wl[4]); start = 1 + nstr;
+    if (nq <= 0 || nstr < 0 || start + nq > nl) e2s_valerr("bad network Q extent");
+    seqs = e2s_alloc((size_t)nq * sizeof *seqs);
+    for (qi = 0; qi < nq; qi++) {
+        long long *flat; e2s_qseq s; int m;
+        k = e2s_words(d + ls[start + qi], ll[start + qi], &w, &wl, &wcap);
+        if (k < 2) e2s_valerr("truncated Q record");
+        flat = e2s_alloc((size_t)(k + 1) * sizeof *flat); s.a = 0; s.n = 0;
+        if (wl[0] == 1 && w[0][0] == 'Q') {
+            for (m = 2; m < k; m++) flat[m - 2] = e2s_num(w[m], wl[m]);
+            s.a = e2s_alloc((size_t)(k + 1) * sizeof *s.a); e2s_qacts(flat, k - 2, e2s_num(w[1], wl[1]), &s);
+        } else if (wl[0] == 1 && w[0][0] == 'C') {
+            long long ref, pre;
+            if (k < 4) e2s_valerr("truncated Q record");
+            ref = e2s_num(w[1], wl[1]); pre = e2s_num(w[2], wl[2]);
+            if (ref < 0 || ref >= qi || pre <= 0 || pre > seqs[ref].n) e2s_valerr("bad Q prefix reference");
+            for (m = 4; m < k; m++) flat[m - 4] = e2s_num(w[m], wl[m]);
+            s.a = e2s_alloc((size_t)(pre + k + 1) * sizeof *s.a);
+            for (m = 0; m < pre; m++) s.a[s.n++] = seqs[ref].a[m];
+            e2s_qacts(flat, k - 4, e2s_num(w[3], wl[3]), &s);
+        } else e2s_valerr("unknown Q tag");
+        seqs[qi] = s;
+    }
+    for (qi = 0; qi < start; qi++) e2s_put(out, d + ls[qi], ll[qi]);
+    for (qi = 0; qi < nq; qi++) {
+        e2s_qseq s = seqs[qi]; int node = -1, ref = -1, pre = 0, ai, j;
+        const char *wire = d + ls[start + qi]; size_t wn = ll[start + qi];
+        for (ai = 0; ai < s.n; ai++) { int f = e2s_tfind(&t, node, s.a[ai]); if (f < 0) break; node = f; ref = t.nodes[f].first; pre = ai + 1; }
+        if (pre) {
+            cand.n = 0;
+            e2s_puts(&cand, "C "); e2s_putl(&cand, ref); e2s_puts(&cand, " "); e2s_putl(&cand, pre); e2s_puts(&cand, " "); e2s_putl(&cand, s.n - pre);
+            for (ai = pre; ai < s.n; ai++) for (j = 0; j < s.a[ai].n; j++) { e2s_puts(&cand, " "); e2s_putl(&cand, s.a[ai].v[j]); }
+            e2s_puts(&cand, "\n");
+            if (cand.n < wn) { wire = cand.p; wn = cand.n; }
+        }
+        e2s_put(out, wire, wn);
+        node = -1; for (ai = 0; ai < s.n; ai++) node = e2s_tadd(&t, node, s.a[ai], (int)qi);
+    }
+    for (qi = start + nq; qi < nl; qi++) e2s_put(out, d + ls[qi], ll[qi]);
+}
+typedef struct e2s_file { char *rel, *full; } e2s_file;
+static void e2s_walk(const char *dir, const char *rel, e2s_file **fs, long *nf, long *cap) {
+    DIR *dp = opendir(dir); struct dirent *e;
+    if (!dp) e2s_oserror("walk", dir);
+    while ((e = readdir(dp))) {
+        char *full, *r; struct stat ls, st;
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        full = e2s_join(dir, e->d_name);
+        if (*rel) r = e2s_join(rel, e->d_name); else { r = e2s_alloc(strlen(e->d_name) + 1); strcpy(r, e->d_name); }
+        if (lstat(full, &ls) != 0) e2s_oserror("lstat", full);
+        if (S_ISDIR(ls.st_mode)) { e2s_walk(full, r, fs, nf, cap); free(full); free(r); continue; }   /* rglob: no symlinked dirs */
+        if (stat(full, &st) == 0 && S_ISREG(st.st_mode)) {
+            if (*nf == *cap) { *cap = *cap ? *cap * 2 : 256; *fs = realloc(*fs, (size_t)*cap * sizeof **fs); if (!*fs) exit(1); }
+            (*fs)[*nf].rel = r; (*fs)[*nf].full = full; (*nf)++;
+        } else { free(full); free(r); }
+    }
+    closedir(dp);
+}
+static int e2s_partcmp(const void *x, const void *y) {   /* PurePath order: the lists of components */
+    const unsigned char *a = (const unsigned char *)((const e2s_file *)x)->rel, *b = (const unsigned char *)((const e2s_file *)y)->rel;
+    for (;;) {
+        int ea = !*a || *a == '/', eb = !*b || *b == '/';
+        if (ea && eb) { if (!*a && !*b) return 0; if (!*a) return -1; if (!*b) return 1; a++; b++; continue; }
+        if (ea) return -1;
+        if (eb) return 1;
+        if (*a != *b) return *a < *b ? -1 : 1;
+        a++; b++;
+    }
+}
+static int e2s_name_ok(const char *s) {
+    if (!*s) return 0;
+    for (; *s; s++) if (!(e2s_al((unsigned char)*s) || e2s_dg((unsigned char)*s) || (*s && strchr("_./-", *s)))) return 0;
+    return 1;
+}
+char *e2s_package(const char *manifest, int nmount, const char *const *prefix, const char *const *dir, size_t *outn) {
+    e2s_buf head = { 0, 0, 0 }; size_t n; char *text = e2s_read(manifest, &n), *s, *parent;
+    char **route = 0, **stg = 0, **fin = 0, **fout = 0; int *model = 0, nst = 0, stcap = 0;
+    char **mod = 0; size_t *modn = 0; int nmod = 0, line = 0, i, m;
+    e2s_map res; memset(&res, 0, sizeof res);
+    { const char *sl = strrchr(manifest, '/'); size_t pl = sl ? (size_t)(sl - manifest) : 1; parent = e2s_alloc(pl + 1); memcpy(parent, sl ? manifest : ".", pl); }
+    for (s = text; s < text + n;) {
+        char *e = memchr(s, '\n', (size_t)(text + n - s)), *c[6], *ln; int k = 0; char *data, *path; size_t dn;
+        if (!e) e = text + n;
+        *e = 0; line++; ln = s; s = e + 1;
+        if (!*ln || *ln == '#') continue;
+        c[k++] = ln;
+        { char *p; for (p = ln; *p; p++) if (*p == '\t') { *p = 0; if (k == 6) break; c[k++] = p + 1; } }
+        if (k != 5 || !e2s_name_ok(c[0]) || !e2s_name_ok(c[1]) || !e2s_name_ok(c[2]) || !e2s_name_ok(c[3])) {
+            e2s_buf b = { 0, 0, 0 }; e2s_puts(&b, manifest); e2s_puts(&b, ":"); e2s_putl(&b, line); e2s_puts(&b, ": expected five columns and valid names"); e2s_valerr(b.p);
+        }
+        for (i = 0; i < nst; i++) if (!strcmp(route[i], c[0]) && !strcmp(stg[i], c[1])) {
+            e2s_buf b = { 0, 0, 0 }; e2s_puts(&b, manifest); e2s_puts(&b, ":"); e2s_putl(&b, line); e2s_puts(&b, ": duplicate stream-stage "); e2s_puts(&b, c[0]); e2s_puts(&b, "/"); e2s_puts(&b, c[1]); e2s_valerr(b.p);
+        }
+        { const char *last = 0; for (i = 0; i < nst; i++) if (!strcmp(route[i], c[0])) last = fout[i];
+          if (last && strcmp(last, c[2])) { e2s_buf b = { 0, 0, 0 }; e2s_puts(&b, manifest); e2s_puts(&b, ":"); e2s_putl(&b, line); e2s_puts(&b, ": format mismatch "); e2s_puts(&b, last); e2s_puts(&b, " -> "); e2s_puts(&b, c[2]); e2s_valerr(b.p); } }
+        path = c[4][0] == '/' ? c[4] : e2s_join(parent, c[4]);
+        data = e2s_read(path, &dn);
+        if (dn < 2 || memcmp(data, "N ", 2) || data[dn - 1] != '\n') { e2s_buf b = { 0, 0, 0 }; e2s_puts(&b, manifest); e2s_puts(&b, ":"); e2s_putl(&b, line); e2s_puts(&b, ": expected canonical network text"); e2s_valerr(b.p); }
+        for (m = 0; m < nmod && !(modn[m] == dn && !memcmp(mod[m], data, dn)); m++) ;
+        if (m == nmod) { mod = realloc(mod, (size_t)(nmod + 1) * sizeof *mod); modn = realloc(modn, (size_t)(nmod + 1) * sizeof *modn); mod[nmod] = data; modn[nmod] = dn; nmod++; }
+        if (nst == stcap) {
+            stcap = stcap ? stcap * 2 : 16;
+            route = realloc(route, (size_t)stcap * sizeof *route); stg = realloc(stg, (size_t)stcap * sizeof *stg);
+            fin = realloc(fin, (size_t)stcap * sizeof *fin); fout = realloc(fout, (size_t)stcap * sizeof *fout); model = realloc(model, (size_t)stcap * sizeof *model);
+        }
+        route[nst] = c[0]; stg[nst] = c[1]; fin[nst] = c[2]; fout[nst] = c[3]; model[nst] = m; nst++;
+    }
+    if (!nst) e2s_valerr("empty package");
+    for (m = 0; m < nmount; m++) {
+        size_t hl = strlen(prefix[m]), j; char kp[256]; e2s_file *fs = 0; long nf = 0, fcap = 0, f; struct stat sb;
+        if (hl % 2 || hl / 2 > sizeof kp) e2s_valerr("non-hexadecimal number found in fromhex() arg");
+        for (j = 0; j < hl; j += 2) {
+            int a = e2s_hx((unsigned char)prefix[m][j]) ? (e2s_dg((unsigned char)prefix[m][j]) ? prefix[m][j] - '0' : (prefix[m][j] | 32) - 'a' + 10) : -1;
+            int b = e2s_hx((unsigned char)prefix[m][j + 1]) ? (e2s_dg((unsigned char)prefix[m][j + 1]) ? prefix[m][j + 1] - '0' : (prefix[m][j + 1] | 32) - 'a' + 10) : -1;
+            if (a < 0 || b < 0) e2s_valerr("non-hexadecimal number found in fromhex() arg");
+            kp[j / 2] = (char)(a * 16 + b);
+        }
+        if (stat(dir[m], &sb) != 0 || !S_ISDIR(sb.st_mode)) { e2s_buf b = { 0, 0, 0 }; e2s_puts(&b, "resource mount is not a directory: "); e2s_puts(&b, dir[m]); e2s_valerr(b.p); }
+        e2s_walk(dir[m], "", &fs, &nf, &fcap);
+        if (!nf) { e2s_buf b = { 0, 0, 0 }; e2s_puts(&b, "empty resource mount: "); e2s_puts(&b, dir[m]); e2s_valerr(b.p); }
+        qsort(fs, (size_t)nf, sizeof *fs, e2s_partcmp);
+        for (f = 0; f < nf; f++) {
+            e2s_buf key = { 0, 0, 0 }; size_t vn; char *v = e2s_read(fs[f].full, &vn); long at;
+            e2s_put(&key, kp, hl / 2); e2s_puts(&key, fs[f].rel);
+            at = e2s_mfind(&res, key.p, key.n);
+            if (at >= 0) {
+                size_t on = 0; char *ov = (char *)(size_t)res.v[at];
+                memcpy(&on, ov, sizeof on);
+                if (on != vn || memcmp(ov + sizeof on, v, vn)) { e2s_buf b = { 0, 0, 0 }; e2s_puts(&b, "conflicting resource "); e2s_puts(&b, e2s_repr_bytes(key.p, key.n)); e2s_valerr(b.p); }
+                free(v); free(key.p); continue;
+            }
+            { char *box = e2s_alloc(sizeof vn + vn + 1); memcpy(box, &vn, sizeof vn); memcpy(box + sizeof vn, v, vn); free(v);
+              e2s_madd(&res, key.p, key.n, (long long)(size_t)box); }
+            free(key.p);
+        }
+    }
+    if (res.n) { e2s_puts(&head, "P 2 "); e2s_putl(&head, nmod); e2s_puts(&head, " "); e2s_putl(&head, nst); e2s_puts(&head, " "); e2s_putl(&head, (long long)res.n); e2s_puts(&head, "\n"); }
+    else { e2s_puts(&head, "P 1 "); e2s_putl(&head, nmod); e2s_puts(&head, " "); e2s_putl(&head, nst); e2s_puts(&head, "\n"); }
+    for (i = 0; i < nst; i++) {
+        e2s_puts(&head, "D "); e2s_puts(&head, route[i]); e2s_puts(&head, " "); e2s_puts(&head, stg[i]); e2s_puts(&head, " ");
+        e2s_puts(&head, fin[i]); e2s_puts(&head, " "); e2s_puts(&head, fout[i]); e2s_puts(&head, " "); e2s_putl(&head, model[i]); e2s_puts(&head, "\n");
+    }
+    for (i = 0; i < nmod; i++) {
+        e2s_buf q = { 0, 0, 0 };
+        e2s_compact_q(mod[i], modn[i], &q);
+        e2s_puts(&head, "M "); e2s_putl(&head, (long long)q.n); e2s_puts(&head, "\n"); e2s_put(&head, q.p, q.n); free(q.p);
+    }
+    for (i = 0; i < (int)res.n; i++) {
+        size_t vn; char *box = (char *)(size_t)res.v[i];
+        memcpy(&vn, box, sizeof vn);
+        e2s_puts(&head, "F "); e2s_putl(&head, (long long)res.kn[i]); e2s_puts(&head, " "); e2s_putl(&head, (long long)vn); e2s_puts(&head, "\n");
+        e2s_put(&head, res.k[i], res.kn[i]); e2s_put(&head, box + sizeof vn, vn);
+    }
+    if (head.n >= (size_t)1 << 31) e2s_valerr("package exceeds runtime byte extent");
+    *outn = head.n;
+    return head.p;
+}

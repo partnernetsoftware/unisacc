@@ -22,6 +22,14 @@ cold path has been removed. A direct self-hosted run of the old watchdog source
 currently fails on the uncarried `sys/prctl.h`; this is an active migration gap.
 Existing model coordinators still containing Python are not described as native.
 
+`cxlib/` retains five native support modules still imported by exec/ callers.
+Eight exec/ module symlinks now point here instead of the archived tests tree.
+The host watchdog and reference-export paths inside the modules use tools/.
+These compatibility callers do not become the new test gate, and their historical
+PASS records are not imported. Four caller-family dependency plans and a six-check
+default-run support probe passed after relocation; complete historical suites
+were not run. Existing external-reference dependencies remain explicit debt.
+
 New `.cx` tools use module interfaces and the implicit runtime without manual
 `#include`. Compiled-artifact caching is reserved for measured setup hotspots;
 it must not be confused with caching test results.
