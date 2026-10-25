@@ -76,9 +76,29 @@ and NUL-valued extra entries check binary ledger loading; they do not prove
 every consumer's presence/empty/absent behavior. An optional final native ELF
 driver argument supports a narrow pre-packaging check against the root model
 container. Both identities are checked for changes. This is partial RI evidence;
-snapshots, full lifecycle/resource budgets and foreign hosts remain NOT_READY.
+packaged-product snapshots, full lifecycle/resource budgets and foreign hosts remain NOT_READY.
 The same optional argument also accepts a full packaged APE candidate, executing
 it directly through its launcher before installation, with its own model package.
+
+`tools/bound 55 sh ./unisacc.com tests/snapshots.cx -- ROOT ABS_NEW_OUT` runs
+the separate POSIX snapshot batch in a new absolute output directory. It prepares
+the actual shared C ledger through `tools/ledger-material.cx`, executes that
+source through default-run, then regenerates and verifies the material. The
+adapter retains the original C implementation and binds the complete source,
+bootstrap product and fixture SHA identities. PREPARED/VERIFIED material is
+not functional PASS evidence or a CX rewrite of the shared implementation.
+
+`out/c43-snapshots-07.log` records 265 assertions with zero failures and 87
+allocation fault points. The three exact coverage IDs are `ri.snapshot-commit`,
+`ri.snapshot-identity` and `ri.snapshot-lifecycle`: atomic no-replace publication
+with COMMIT last, retained verified bytes without reopening, heap/fd/FILE release,
+empty clearable output after failed transactions, and refusal/recovery for bad
+input, duplicates, corruption, paths, FIFO, growth, readdir, link, close,
+permissions and capacity boundaries. This is Linux x86_64 source-adapter evidence
+using root bootstrap Pb8eae71b; it does not qualify snapshot behavior in the
+installed product, a new rebuilt candidate, Windows or other native hosts.
+The broad `ri` obligation remains NOT_READY, and the main runner does not
+execute this separate batch. Internal phase and cold/hot timing are UNMEASURED.
 
 `sh ./unisacc.com tests/optimization.cx -- ROOT ABS_NEW_OUT [CANDIDATE]`
 compiles six Linux x86_64 images (-O0, -O1, -O, -O2, -O3, -Os), then executes
