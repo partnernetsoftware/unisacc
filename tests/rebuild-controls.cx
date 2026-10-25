@@ -1,0 +1,168 @@
+/* Reproducible, one-case construction-metadata controls. No product rebuild.
+ * tools/bound 20 sh ./unisacc.com tests/rebuild-controls.cx --
+ *   ROOT GENERATION PACKAGE BUILDER ABS_NEW_OUT CASE
+ *
+ * Run baseline separately for each input tuple before its negative cases.
+ * A named negative refusal does not establish a valid starting tuple. Each
+ * invocation makes complete private material copies; it never changes inputs.
+ * There is no aggregate/all mode and no cached test verdict. The caller owns
+ * the 20-second process-tree watchdog; rb_verify also bounds its native helper.
+ * Results belong to the actual case/input tuple, not earlier ignored probes. */
+#pragma unisa use cxlib.rebuildcontext
+
+typedef struct {
+ char root[4096],input_gen[4096],input_pkg[4096],input_builder[4096];
+ char out[4400],gen[4400],pkg[4400],builder[4400];
+ size_t copied_bytes;int copied_files,assertions,failures;
+} control_context;
+enum {C_BASELINE,C_CONTEXT,C_OBJECT,C_ASM,C_CACHE,C_SLICE,C_PACKAGE,
+ C_BOOTSTRAP,C_SCHEMA,C_FRESH_BUILDER,C_PRIOR_BUILDER,C_MODEL_OMISSION,
+ C_MODEL_DUPLICATE,C_NO_INSTALL,C_RECOVERY,C_NEW_CONTEXT};
+static const char *case_names[]={"baseline","context","object","asm","cache",
+ "slice","package","bootstrap","schema","fresh-builder","prior-builder",
+ "model-omission","model-duplicate","no-install-metadata","recovery","new-context"};
+
+static void refuse(const char *reason,const char *path){
+ fprintf(stderr,"REFUSE\trebuild-controls.%s\tpath=%s\terrno=%d\n",reason,path?path:"-",errno);exit(2);
+}
+static void path(char *p,const char *a,const char *b){
+ int n=snprintf(p,4400,"%s/%s",a,b);if(n<0||n>=4400)refuse("path-bound",b);
+}
+static void record_path(char *p,const char *artifact){
+ int n=snprintf(p,4400,"%s.build.json",artifact);if(n<0||n>=4400)refuse("record-path-bound",artifact);
+}
+static int inside(const char *p,const char *base){
+ if(!strcmp(base,"/"))return p[0]=='/';
+ size_t n=strlen(base);return !strncmp(p,base,n)&&(!p[n]||p[n]=='/');
+}
+static void clean_path(const char *p){if(strpbrk(p,"\t\r\n"))refuse("path-control-character",p);}
+static char *load(const char *p,size_t *n){
+ struct stat before,opened,after;errno=0;
+ if(lstat(p,&before))refuse("input-io",p);
+ if(!S_ISREG(before.st_mode)||before.st_size<0||before.st_size>268435456)refuse("regular-bounded-input",p);
+ int fd=open(p,O_RDONLY|O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK);if(fd<0)refuse("input-open",p);
+ if(fstat(fd,&opened)||!S_ISREG(opened.st_mode)||opened.st_dev!=before.st_dev||opened.st_ino!=before.st_ino||opened.st_size!=before.st_size){close(fd);refuse("input-open-identity",p);}
+ *n=(size_t)opened.st_size;char *s=malloc(*n+1);if(!s){close(fd);refuse("allocation",p);}
+ size_t at=0;while(at<*n){ssize_t z=read(fd,s+at,*n-at);if(z<0&&errno==EINTR)continue;if(z<=0){free(s);close(fd);refuse("input-read-extent",p);}at+=(size_t)z;}
+ char extra;ssize_t z;do{z=read(fd,&extra,1);}while(z<0&&errno==EINTR);
+ if(z!=0||fstat(fd,&after)||after.st_dev!=opened.st_dev||after.st_ino!=opened.st_ino||after.st_size!=opened.st_size){free(s);close(fd);refuse("input-changed",p);}
+ if(close(fd)){free(s);refuse("input-close",p);}s[*n]=0;return s;
+}
+static void write_bytes(const char *p,const char *s,size_t n,int exclusive,int mode){
+ int flags=O_WRONLY|O_CLOEXEC|O_NOFOLLOW|(exclusive?O_CREAT|O_EXCL:O_TRUNC);
+ int fd=open(p,flags,mode);if(fd<0)refuse("private-output-open",p);
+ size_t at=0;while(at<n){ssize_t z=write(fd,s+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0){close(fd);refuse("private-output-write",p);}at+=(size_t)z;}
+ if(close(fd))refuse("private-output-close",p);
+}
+static void copy_file(control_context *c,const char *source,const char *dest){
+ struct stat st;if(lstat(source,&st))refuse("copy-input-io",source);
+ if(!S_ISREG(st.st_mode))refuse("copy-input-not-regular",source);
+ size_t n;char *s=load(source,&n);
+ if(c->copied_files>=32768||n>536870912-c->copied_bytes){free(s);refuse("complete-copy-budget",source);}
+ write_bytes(dest,s,n,1,0600);free(s);
+ if(chmod(dest,st.st_mode&0777))refuse("private-copy-mode",dest);
+ c->copied_files++;c->copied_bytes+=n;
+}
+static void clone(control_context *c,const char *source,const char *dest,int depth){
+ if(depth>64)refuse("complete-copy-depth",source);
+ struct stat st;if(lstat(source,&st)||!S_ISDIR(st.st_mode))refuse("copy-directory",source);
+ if(mkdir(dest,0700))refuse("new-private-directory",dest);
+ DIR *d=opendir(source);if(!d)refuse("copy-directory-open",source);
+ struct dirent *e;errno=0;while((e=readdir(d))){
+  if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;
+  clean_path(e->d_name);char a[4400],b[4400];path(a,source,e->d_name);path(b,dest,e->d_name);
+  if(lstat(a,&st)){closedir(d);refuse("copy-entry-io",a);}
+  if(S_ISDIR(st.st_mode))clone(c,a,b,depth+1);else copy_file(c,a,b);
+  errno=0;
+ }
+ if(errno){closedir(d);refuse("copy-directory-read",source);}if(closedir(d))refuse("copy-directory-close",source);
+}
+static void new_output(control_context *c,const char *requested){
+ if(requested[0]!='/'||strlen(requested)>=4096)refuse("absolute-new-output-required",requested);
+ clean_path(requested);char parent[4096],resolved[4096];strcpy(parent,requested);
+ char *last=strrchr(parent,'/');if(!last||!last[1]||!strcmp(last+1,".")||!strcmp(last+1,".."))refuse("output-basename",requested);
+ char name[4096];strcpy(name,last+1);if(last==parent)last[1]=0;else *last=0;
+ if(!realpath(parent,resolved))refuse("output-parent-realpath",parent);
+ clean_path(resolved);
+ path(c->out,!strcmp(resolved,"/")?"":resolved,name);
+ if(inside(c->out,c->input_gen)||inside(c->out,c->input_pkg))refuse("output-inside-input",c->out);
+ struct stat st;errno=0;if(!lstat(c->out,&st)||errno!=ENOENT)refuse("new-output-exists-or-io",c->out);
+ if(mkdir(c->out,0700))refuse("new-output-create",c->out);
+}
+static void prepare(control_context *c,const char *output){
+ new_output(c,output);path(c->gen,c->out,"generation");path(c->pkg,c->out,"package");path(c->builder,c->out,"builder.com");
+ clone(c,c->input_gen,c->gen,0);clone(c,c->input_pkg,c->pkg,0);
+ copy_file(c,c->input_builder,c->builder);char source[4400],dest[4400];record_path(source,c->input_builder);record_path(dest,c->builder);copy_file(c,source,dest);
+ printf("PRIVATE_COPY\tfiles=%d\tbytes=%lu\troot=%s\tgeneration=%s\tpackage=%s\tbuilder=%s\n",c->copied_files,(unsigned long)c->copied_bytes,c->root,c->gen,c->pkg,c->builder);
+}
+static void check(control_context *c,int ok,const char *name){c->assertions++;if(!ok)c->failures++;printf("%s\trebuild-controls.%s\n",ok?"PASS":"FAIL",name);}
+static int zero_result(const rb_result *r){const unsigned char *p=(const unsigned char *)r;size_t i;for(i=0;i<sizeof *r;i++)if(p[i])return 0;return 1;}
+static int expected_refusal(int rc,const char *why,const char *reason,const rb_result *r){
+ size_t n=strlen(reason);return rc==-1&&!strncmp(why,reason,n)&&why[n]==' '&&zero_result(r);
+}
+static int verify(control_context *c,const char *builder,int current,rb_result *r,char why[1400]){
+ memset(r,165,sizeof *r);return rb_verify(c->root,c->gen,c->pkg,builder,current,r,why,1400);
+}
+static int accepted(int rc,const rb_result *r){return !rc&&r->files>0&&r->model_inputs>0&&r->physical_reads>0&&r->files==r->physical_reads+r->retained_hits;}
+static void observation(const rb_result *r){
+ printf("VERIFIED_METADATA\tsource=%s\tbootstrap=%s\tbootstrap_record_source=%s\tproduct=%s\tpackage=%s\tmodel_inputs=%d\tlogical=%d\tphysical=%d\tretained_hits=%d\tretained_bytes=%lu\tproduct_record=%d\tnative_record=%d\n",r->source,r->bootstrap,r->bootstrap_record_source,r->product,r->package,r->model_inputs,r->files,r->physical_reads,r->retained_hits,(unsigned long)r->retained_bytes,r->has_product_record,r->has_native);
+}
+static void flip(const char *p,size_t at){size_t n;char *s=load(p,&n);if(at>=n){free(s);refuse("mutation-extent",p);}s[at]^=1;write_bytes(p,s,n,0,0600);free(s);}
+static int same_bytes(const char *p,const char *wanted,size_t wn){size_t n;char *s=load(p,&n);int ok=n==wn&&!memcmp(s,wanted,n);free(s);return ok;}
+static void duplicate_schema(const char *p){
+ size_t n;char *s=load(p,&n);const char *extra="  \"schema\": 2,\n";size_t z=strlen(extra);
+ if(n<2||memcmp(s,"{\n",2)){free(s);refuse("schema-mutation-precondition",p);}char *b=malloc(n+z);if(!b){free(s);refuse("allocation",p);}
+ memcpy(b,s,2);memcpy(b+2,extra,z);memcpy(b+2+z,s+2,n-2);write_bytes(p,b,n+z,0,0600);free(b);free(s);
+}
+static void model_edit(const char *p,int duplicate){
+ size_t n;char *s=load(p,&n),*end=strchr(s,'\n');if(!end){free(s);refuse("model-row-precondition",p);}size_t first=(size_t)(end-s)+1;
+ if(duplicate){char *b=malloc(n+first);if(!b){free(s);refuse("allocation",p);}memcpy(b,s,n);memcpy(b+n,s,first);write_bytes(p,b,n+first,0,0600);free(b);}
+ else write_bytes(p,s+first,n-first,0,0600);free(s);
+}
+static void remove_optional(const char *p){struct stat st;errno=0;if(lstat(p,&st)){if(errno==ENOENT)return;refuse("optional-input-io",p);}if(!S_ISREG(st.st_mode)||unlink(p))refuse("remove-private-optional",p);}
+static int same_artifact(const char *a,const char *b){size_t an,bn;char *x=load(a,&an),*y=load(b,&bn);int same=an==bn&&!memcmp(x,y,an);free(x);free(y);return same;}
+static int run_case(control_context *c,int selected){
+ rb_result r;char why[1400],p[4400],alternate[4400];const char *reason=0,*builder=c->builder;int current=0;
+ if(selected==C_NEW_CONTEXT){
+  int rc=verify(c,builder,0,&r,why);check(c,accepted(rc,&r),"new-phase-baseline");if(rc){fprintf(stderr,"baseline: %s\n",why);return 1;}observation(&r);
+  path(p,c->gen,"x86_64/transition.o");size_t n;char *original=load(p,&n);if(n<65){free(original);refuse("mutation-extent",p);}flip(p,64);
+  rc=verify(c,builder,0,&r,why);check(c,expected_refusal(rc,why,"kernel-files-receipt",&r),"new-context-physically-rereads-changed-object");printf("REFUSAL_OBSERVED\trc=%d\twhy=%s\tresult_zero=%d\n",rc,why,zero_result(&r));
+  write_bytes(p,original,n,0,0600);check(c,same_bytes(p,original,n),"private-object-restored-byte-exact");free(original);return c->failures?1:0;
+ }
+ if(selected==C_CONTEXT){path(p,c->gen,"context.sha256");flip(p,0);reason="kernel-context-source-tools-bootstrap";}
+ else if(selected==C_OBJECT){path(p,c->gen,"x86_64/transition.o");flip(p,64);reason="kernel-files-receipt";}
+ else if(selected==C_ASM){path(p,c->gen,"assembler/contracts.cx");flip(p,16);reason="assembler-material-receipt";}
+ else if(selected==C_CACHE){path(p,c->gen,"assembler-native.tsv");flip(p,0);reason="assembler-cache-receipt";}
+ else if(selected==C_SLICE){path(p,c->gen,"slice-osx-arm64.native-build.tsv");flip(p,0);reason="product-context-slice-wrap-receipt";}
+ else if(selected==C_PACKAGE){path(p,c->pkg,"compiler.pkg");flip(p,0);reason="package-P3-counts";}
+ else if(selected==C_BOOTSTRAP){flip(c->builder,0);reason="build-record-identity-or-settings";}
+ else if(selected==C_SCHEMA){record_path(p,c->builder);duplicate_schema(p);reason="build-record-identity-or-settings";}
+ else if(selected==C_FRESH_BUILDER||selected==C_PRIOR_BUILDER){
+  path(p,c->root,"unisacc.com");if(same_artifact(c->builder,p)){printf("NOT_RUN\trebuild-controls.%s\trequires-builder-artifact-distinct-from-current-root\n",case_names[selected]);return 3;}
+  if(selected==C_FRESH_BUILDER){current=1;reason="fresh-bootstrap-is-not-current-root";}
+  else {path(alternate,c->out,"current-root-builder.com");copy_file(c,p,alternate);char a[4400],b[4400];record_path(a,p);record_path(b,alternate);copy_file(c,a,b);builder=alternate;reason="kernel-context-source-tools-bootstrap";}
+ }
+ else if(selected==C_MODEL_OMISSION||selected==C_MODEL_DUPLICATE){path(p,c->pkg,"model-inputs.tsv");model_edit(p,selected==C_MODEL_DUPLICATE);reason=selected==C_MODEL_DUPLICATE?"model-inputs-path-hash-duplicate":"model-input-omitted";}
+ else if(selected==C_NO_INSTALL){path(p,c->gen,"unisacc-next.com.build.json");remove_optional(p);path(p,c->gen,"unisacc-next.com.native.tsv");remove_optional(p);}
+ else if(selected==C_RECOVERY){
+  path(p,c->gen,"x86_64/transition.o");size_t n;char *original=load(p,&n);if(n<65){free(original);refuse("mutation-extent",p);}flip(p,64);check(c,!same_bytes(p,original,n),"recovery-mutation-is-real");write_bytes(p,original,n,0,0600);check(c,same_bytes(p,original,n),"recovery-byte-exact");free(original);
+ }
+ int rc=verify(c,builder,current,&r,why),ok=reason?expected_refusal(rc,why,reason,&r):accepted(rc,&r);
+ if(selected==C_NO_INSTALL)ok=ok&&!r.has_product_record&&!r.has_native;
+ check(c,ok,case_names[selected]);if(reason)printf("REFUSAL_OBSERVED\texpected=%s\trc=%d\twhy=%s\tresult_zero=%d\n",reason,rc,why,zero_result(&r));else if(!rc)observation(&r);else fprintf(stderr,"unexpected refusal: %s\n",why);
+ return c->failures?1:0;
+}
+int main(int argc,char **argv){
+ if(argc!=7){fprintf(stderr,"usage: ROOT GENERATION PACKAGE BUILDER ABS_NEW_OUT CASE\ncases: baseline context object asm cache slice package bootstrap schema fresh-builder prior-builder model-omission model-duplicate no-install-metadata recovery new-context\n");return 2;}
+ int selected=-1,i;for(i=0;i<16;i++)if(!strcmp(argv[6],case_names[i]))selected=i;if(selected<0)refuse("unknown-case-no-aggregate-mode",argv[6]);
+ control_context c;memset(&c,0,sizeof c);if(!realpath(argv[1],c.root)||!realpath(argv[2],c.input_gen)||!realpath(argv[3],c.input_pkg)||!realpath(argv[4],c.input_builder))refuse("input-realpath",0);
+ clean_path(c.root);clean_path(c.input_gen);clean_path(c.input_pkg);clean_path(c.input_builder);
+ struct stat st;char input_record[4400];record_path(input_record,c.input_builder);
+ if(lstat(c.input_gen,&st)||!S_ISDIR(st.st_mode))refuse("generation-directory",c.input_gen);
+ if(lstat(c.input_pkg,&st)||!S_ISDIR(st.st_mode))refuse("package-directory",c.input_pkg);
+ if(lstat(c.input_builder,&st)||!S_ISREG(st.st_mode))refuse("builder-regular-file",c.input_builder);
+ if(lstat(input_record,&st)||!S_ISREG(st.st_mode))refuse("builder-record-regular-file",input_record);
+ prepare(&c,argv[5]);
+ printf("CONTROL_SCOPE\tcase=%s\tbudget_seconds=20\twatchdog=caller-tools-bound\tproduct_builds=0\tqualification=NOT_CLAIMED\n",case_names[selected]);
+ int rc=run_case(&c,selected);printf("REBUILD_CONTROLS\tcase=%s\tassertions=%d\tfailed=%d\tstatus=%s\tproduct_builds=0\n",case_names[selected],c.assertions,c.failures,rc==3?"NOT_RUN":rc?"FAIL":"COMPLETE");return rc;
+}
