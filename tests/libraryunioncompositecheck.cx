@@ -18,8 +18,8 @@
    Every step runs under `tests/bound 20` (25 s limit) with stdout/stderr captured.
    --prepare / --require-cached (native lnx/x86_64 only, else `UNVERIFIED: ...` rc 77): the runtime library is
    content-keyed in CACHE (--cache-root, else $UNISACC_MODEL_CACHE, else TMP/unisacc-model-cache)/composite/
-   composite-KEY, KEY = sha256 of json.dumps(sort_keys) of {schema composite-lib-v1, package sha256, arch,
-   sanitize, ffi flags, provenance (exec/c/provenance.py's source_digest), actors (this checker's own conservative
+   composite-KEY, KEY = sha256 of json.dumps(sort_keys) of {schema composite-lib-v2-pic-provider, package sha256, arch,
+   sanitize, actual libffi provider path/SHA and complete runtime recipe, ffi flags, provenance (exec/c/provenance.py's source_digest), actors (this checker's own conservative
    closure: this file, tests/libraryabi/union_composite.c and tests/bound, following quoted includes, `#pragma unisa
    use`, literal tests/ paths, shell $ROOT/$here references and Python imports), runtime_inputs (the copied
    exec/c closure), tool (cc path/sha256/--version, CFLAGS, PATH CPATH C_INCLUDE_PATH LIBRARY_PATH COMPILER_PATH
@@ -32,7 +32,9 @@
    "rc", "calls_100"}]}; rc 0 on passed/built_only/prepared, else 1.  --evidence PATH writes the full record
    (json.dumps(indent=2) + newline).  Usage errors follow argparse (rc 2; the prog name stays the original's so the
    text is byte-identical); an uncaught exception of the original is one `Class: message` line on stderr, rc 1.
-   No #include: the prelude provides everything used here. */
+   Shared test link provider is a .cx module; production headers are unchanged. */
+#pragma unisa use cxlib.libffiprovider
+static ffip_provider FFI;
 
 static const char *PROG = "libraryunioncompositecheck.py";
 static const char *USAGE =
@@ -947,6 +949,7 @@ static int finish(int rc) {
         if (cx_write(A.evidence, t.p, t.n) != 0) fatal("OSError", fmt2("cannot write ", A.evidence));
     }
     oset(sum, "target", jstr(TARGET)); oset(sum, "status", oget(RECORD, "status")); oset(sum, "actual_runner_rc", jint(rc));
+    oset(sum, "libffi_provider", oget(RECORD, "libffi_provider")); oset(sum, "runtime_identity", jstr(KEY)); oset(sum, "runtime_recipe", oget(RECORD, "runtime_recipe"));
     for (i = 0; i < variants->n; i++) {
         J *v = variants->v[i], *s = jnew(JOBJ), *calls = jnew(JARR), *ev = oget(v, "events");
         oset(s, "case", oget(v, "case")); oset(s, "pressure", oget(v, "pressure")); oset(s, "rc", oget(v, "rc"));
@@ -988,11 +991,13 @@ static int run_step(const char *stage, char **command, J **item, int *rc) {
     return 0;
 }
 static long long item_rc(J *it) { return strtoll(oget(it, "rc")->s, 0, 10); }
+static J *provider_record(void) { J *p = jnew(JOBJ); oset(p, "link_arg", jstr(FFI.link)); oset(p, "sha256", FFI.pic ? jstr(FFI.sha256) : jnew(JNULL)); return p; }
 
 /* _verify_cache(): 0 with the artifact path, else the NEED_PREPARE line printed and 75 */
 static int need(const char *why) { fflush(stdout); fprintf(stderr, "NEED_PREPARE composite runtime: %s\n", why); fflush(stderr); return 75; }
 static int verify_cache(char *artifact) {
     char mp[8400], f[8400]; size_t n; char *text; J *m, *h; struct stat st, lst; char hex[65]; int i;
+    if (ffip_verify(&FFI)) return need(ffip_error());
     snprintf(mp, sizeof mp, "%s/manifest.json", CACHE_DIR);
     if (stat(mp, &st) == 0 && S_ISDIR(st.st_mode)) {
         Buf r = {0}; bputs(&r, "[Errno 21] Is a directory: "); pyrepr(&r, mp, strlen(mp)); fatal("IsADirectoryError", r.p);
@@ -1019,6 +1024,7 @@ static int verify_cache(char *artifact) {
     if (stat(f, &st) != 0 || !S_ISREG(st.st_mode) || lstat(f, &lst) != 0 || S_ISLNK(lst.st_mode) || st.st_size == 0)
         return need("artifact absent, not regular, or empty");
     if (!sha_file(f, hex) || strcmp(hex, h->s)) return need("artifact corrupt");
+    if (ffip_verify(&FFI)) return need(ffip_error());
     snprintf(artifact, 8400, "%s", f);
     return 0;
 }
@@ -1069,6 +1075,7 @@ int main(int argc, char **argv) {
     }
     sha_or_die(package, pkg_sha);
     if (A.sanitize) { san[nsan++] = "-fsanitize=address,undefined"; san[nsan++] = "-fno-omit-frame-pointer"; }
+    if (ffip_select(&FFI)) fatal("OSError", ffip_error());
 
     /* COMPOSITE_KEY */
     {   const char *seeds[] = { SELF, "tests/libraryabi/union_composite.c", "tests/bound" }; Res r; char *va[3]; char *keytext;
@@ -1091,9 +1098,14 @@ int main(int argc, char **argv) {
         env = jnew(JOBJ);
         for (i = 0; i < 7; i++) { const char *v = getenv(envnames[i]); oset(env, envnames[i], v ? jstr(v) : jnew(JNULL)); }
         oset(tool, "environment", env);
-        ffi = jnew(JARR); apush(ffi, jnew(JARR)); ffl = jnew(JARR); apush(ffl, jstr("-lffi")); apush(ffi, ffl);
+        if (FFI.pic) oset(inputs, FFI.link, jstr(FFI.sha256));
+        ffi = jnew(JARR); apush(ffi, jnew(JARR)); ffl = jnew(JARR); apush(ffl, jstr(FFI.link)); apush(ffi, ffl);
         keydoc = jnew(JOBJ);
-        oset(keydoc, "schema", jstr("composite-lib-v1")); oset(keydoc, "package", jstr(pkg_sha)); oset(keydoc, "arch", jstr(arch));
+        oset(keydoc, "schema", jstr("composite-lib-v2-pic-provider")); oset(keydoc, "package", jstr(pkg_sha)); oset(keydoc, "arch", jstr(arch));
+        oset(keydoc, "libffi_provider", provider_record());
+        { J *recipe = jnew(JARR); apush(recipe, jstr(cc_path)); for (i = 0; i < nflags; i++) apush(recipe, jstr(flags[i])); for (i = 0; i < nsan; i++) apush(recipe, jstr(san[i]));
+          const char *fixed[] = {"-std=c11", "-O2", "-shared", "-fPIC", "-fvisibility=hidden", "{WORK}/exec/c/libunisacc.c", 0};
+          for (i = 0; fixed[i]; i++) apush(recipe, jstr(fixed[i])); char asmp[100]; snprintf(asmp, sizeof asmp, "{WORK}/exec/c/librarycall_%s.S", arch); apush(recipe, jstr(asmp)); apush(recipe, jstr(FFI.link)); apush(recipe, jstr("-o")); apush(recipe, jstr("{WORK}/library.so")); oset(keydoc, "runtime_recipe", recipe); }
         oset(keydoc, "sanitize", jbool(A.sanitize)); oset(keydoc, "ffi", ffi); oset(keydoc, "provenance", jstr(sd));
         oset(keydoc, "actors", actors); oset(keydoc, "runtime_inputs", inputs); oset(keydoc, "tool", tool);
         keytext = dumps(keydoc, -1, 1);
@@ -1109,7 +1121,7 @@ int main(int argc, char **argv) {
     }
     if (A.prepare) {
         char art[8400];
-        if (verify_cache(art) == 0) { printf("{\"status\": \"HIT\", \"key\": \"%s\"}\n", KEY); fflush(stdout); return 0; }
+        if (verify_cache(art) == 0) { J *hit = jnew(JOBJ); oset(hit, "status", jstr("HIT")); oset(hit, "key", jstr(KEY)); oset(hit, "libffi_provider", provider_record()); printf("%s\n", dumps(hit, -1, 0)); fflush(stdout); return 0; }
     }
 
     /* the record */
@@ -1122,6 +1134,7 @@ int main(int argc, char **argv) {
         oset(RECORD, "package_path", jstr(package)); oset(RECORD, "package_sha256", jstr(pkg_sha)); oset(RECORD, "sanitize", jbool(A.sanitize));
         oset(RECORD, "cases", cl); oset(RECORD, "pressures", pl); oset(RECORD, "commands", jnew(JARR)); oset(RECORD, "variants", jnew(JARR));
         oset(RECORD, "status", jstr("failed"));
+        oset(RECORD, "libffi_provider", provider_record()); oset(RECORD, "runtime_identity", jstr(KEY)); oset(RECORD, "runtime_recipe", oget(keydoc, "runtime_recipe"));
     }
     {   char rt[4400], probe[4400], probesrc[4400], frozen[4400], lib[4400], sf[4400], exe[4400], hex[65], cc_env[4096], asmf[4500], libc[4500];
         J *inputs; int rc;
@@ -1130,6 +1143,7 @@ int main(int argc, char **argv) {
         snprintf(rt, sizeof rt, "%s/exec/c", TD); mkdirs(rt);
         { char s[4400]; snprintf(s, sizeof s, "%s/src", TD); mkdir(s, 0777); }
         inputs = copy_runtime(TD);
+        if (FFI.pic) oset(inputs, FFI.link, jstr(FFI.sha256));
         snprintf(probesrc, sizeof probesrc, "%s/tests/libraryabi/union_composite.c", ROOT);
         snprintf(probe, sizeof probe, "%s/probe.c", TD);
         if (copy2(probesrc, probe) != 0) { Buf m = {0}; bputs(&m, "[Errno 2] No such file or directory: "); pyrepr(&m, probesrc, strlen(probesrc)); fatal("FileNotFoundError", m.p); }
@@ -1146,13 +1160,16 @@ int main(int argc, char **argv) {
             char art[8400]; int v = verify_cache(art);
             if (v) return v;
             if (copy2(art, lib) != 0) return raise_exc("OSError()");
+            if (ffip_verify(&FFI)) return raise_exc(fmt2("provider changed: ", ffip_error()));
         } else {
             char *cmd[32]; int n = 0; J *it;
             snprintf(libc, sizeof libc, "%s/libunisacc.c", rt); snprintf(asmf, sizeof asmf, "%s/librarycall_%s.S", rt, arch);
             cmd[n++] = cc_env; for (i = 0; i < nflags; i++) cmd[n++] = flags[i]; for (i = 0; i < nsan; i++) cmd[n++] = san[i];
             cmd[n++] = "-std=c11"; cmd[n++] = "-O2"; cmd[n++] = "-shared"; cmd[n++] = "-fPIC"; cmd[n++] = "-fvisibility=hidden";
-            cmd[n++] = libc; cmd[n++] = asmf; cmd[n++] = "-lffi"; cmd[n++] = "-o"; cmd[n++] = lib; cmd[n] = 0;
+            cmd[n++] = libc; cmd[n++] = asmf; cmd[n++] = FFI.link; cmd[n++] = "-o"; cmd[n++] = lib; cmd[n] = 0;
+            if (ffip_verify(&FFI)) return raise_exc(fmt2("provider changed: ", ffip_error()));
             if (run_step("runtime_build", cmd, &it, &rc)) return rc;
+            if (ffip_verify(&FFI)) return raise_exc(fmt2("provider changed: ", ffip_error()));
             if (item_rc(it)) return finish(1);
         }
         if (!sha_file(lib, hex)) return raise_exc(fmt2("FileNotFoundError(2, 'No such file or directory') ", lib));
