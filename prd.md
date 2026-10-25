@@ -137,7 +137,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 <a id="current-plans"></a>
 ## 2. 当前版本与有效计划
 
-**2026-10-25 当前调度裁定已执行：** E4 mask已在同版0.0.43接main（d1fa90e516），独立完整候选P7f709…／Sd754…在固定F4完成hello默认-run及完整image新旧字节同。E3 CT融合REJECT：located reader先MARK tpos再消费位置前缀，IX.new新BYTE读正文，旧JUMP读前缀，CT分支可异；撤回E3源码，私有加速收据保留但不作接受资格。两刀不延期0.0.44。旧P297／冻结H0不变，新候选不继承旧绿。Draft／Latest／签名／公开全部禁止，直到新授权。
+**2026-10-25 当前调度裁定已执行：** E4 mask已在同版0.0.43接main（d1fa90e516），独立完整候选P7f709…／Sd754…在固定F4完成hello默认-run及完整image新旧字节同。E3 CT融合REJECT：located reader先MARK tpos再消费位置前缀，IX.new新BYTE读正文，旧JUMP读前缀，CT分支可异；撤回E3源码，私有加速收据保留但不作接受资格。两刀不延期0.0.44。旧P297另行归档、冻结H0不变；经原生ident当前源校验后更新本地主线E4开发产物，仍不继承旧绿，正式固定点和新全清单尚待完成。Draft／Latest／签名／公开全部禁止，直到新授权。
 
 <a id="work-tree"></a>
 ### 思维树
@@ -148,7 +148,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 0.0.43 公开发布
 ├─ 已完成：F1产品修复、F2文档／探针；F3历史基线187项=186 PASS＋1宿主未核
 ├─ 已完成：F6三实际编译器SHA相同；三阶段五代码切片实际重编、原50秒界通过
-├─ 当前：修复union16默认链接并补E4回退资格，随后冻结main＋新E4包，干净新state跑完整最终清单；旧H0停237仅留诊断，不先补其463待办、不迁777旧绿
+├─ 当前：本地unisacc.com已更新E4开发包P7f709/Sd754；宿主FFI及union16 runtime重复构造已修，冻结新源后先预检完整union16家族，再做新候选固定点与干净最终全清单
 │  ├─ 070窗自然结束、2193已终止；旧冻结的结果仅保留诊断，不计有效正式PASS
 │  ├─ 清单1317项；原seedmemory严格17例=行为16＋真实新鲜度1，后者仍UNKNOWN／OPEN
 │  ├─ 固定env-pin；绑定新HEAD与真实非空Git闭包身份，禁止迁移旧绿或沿用旧闭包hash
@@ -159,7 +159,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 └─ 待完成：Draft资产核对 → Latest／公开 → 下载SHA与运行复核
 ```
 
-**下一动作：** 构建并实测隔离的libffi3.5.2头／归档配对：官方tar已actualSHA f3a3082a…82dc核同，原生.cx按configure／make／install各50秒进行。union16红已被无模型／无us_*最小oracle复现：native直调全对、当前F4 ffi_call仅f0=21→40；模型slots5与ffi前owned values5都21、15逻辑值及carrier布局正确，因此不误改模型。新provider须先过同oracle及原is8/si8压力scope，不能伪造manifest或称PIC修好即全绿；旧H0／host不改。E4自然guard／正常控制已actual0，不再重复。随后钉最终main＋完整E4包／S／sidecar及固定点，干净newstate完整跑最终清单；旧H0停237仅留诊断、不补其463后再重跑、不迁旧绿。新owner复用既有unsplit canonical实现而非1193旧替代附件；资源／宿主OPEN仍真测或合法具名裁定。Draft／Latest／签名／公开禁令保持。
+**下一动作：** 本地根unisacc.com已由原生default-run工具更新为2671169B/P7f709/Sd754，ident当前源check0、默认-run hello0；旧P297精确pair归档out/e4-local-install且H0不动。代码97b1261ee2已把真实provider模式的union16重复31秒runtime拆为PREPARED→11完整功能消费者，原冷prepare40及双case完整cached40实际全0，坏/缺/锁/owner-death控过；普通未配置provider保持原无缓存路径。源依赖1a79a7b363已统一更新，真实配置全plan1333／991、inventory0／Python0增长。下一步钉干净新源/配对provider-first CPATH，先预检新P下完整union16家族（其余case/callback尚未资格），随后按原生runbook完整构造／固定点，再另起newstate跑最终实际清单；不补旧H0剩463、不迁旧绿。正式RC／CI／owner仍待最终身份与技术资格，Draft／Latest／签名／公开禁止。
 
 H2 reader七→十一、H3 callback一→二、H4 srcelf首片一→二均已实际结证。H6@a631445c23七项原40秒首次全0：callback off/on 21.492／34.606秒、context 8.355秒、typed 5.180秒、variadic 14.601秒、callback-plan 12.195秒、resolver 5.829秒，普通及sanitizer分支保留；原F4环境和工具树未改，P297／Sc90不变。context选择已存在PIC库，四个宿主探针补GNU特性声明；只绑定已观察的三个原rc1记录及原始日志SHA，不通放断言失败，也不虚构尚未执行的两项原失败。
 
@@ -170,8 +170,8 @@ H2 reader七→十一、H3 callback一→二、H4 srcelf首片一→二均已实
 
 | 房间 | 当前事实／决定 | 证据与行动入口 |
 |---|---|---|
-| 产品室：固定身份 | 0.0.43候选2670411字节；产品SHA `2974978e6deec45abf38bfac2ac24e3031969b1c65009798270491d8b1e6dd1f`；产品S `c90f0002f02366d510e4c8c22d4757f934edf8c0719852e706b575a7137b47df`；侧车SHA `b88e3a1c227e72e621cf810cc5975e0922ba34cf34aa9e51288142aaaf94480a`。产品来源d09bd1decb，后续测试提交不冒充产品来源。 | `release/candidate.json`；GHCR immutable digest `8c667e0632c2f1f5f70a38fa7d6539e20c7f5d19ce0554b797809c45f721cb01`，封存源93f00869ee217e3d500569bc66c9d024a2249d76；`out/c43-seal-readback-93f/` 三件回读匹配。 |
-| F6室：实际固定点 | 三实际编译器SHA相同；stage3复用同身份模型包／七清单，但五代码切片由stage2实际重编。这不是模型构造器自举证明。 | `research/c43-f6-final-evidence/`、`/tmp/unisacc-c43-e4-summary-final-20261024`、`out/f6-e4-stage{2,3}-package.log`、`out/comboot/stages.json`；保留argv／rc／时间／SHA原收据。 |
+| 产品室：当前开发／旧封存分列 | 根unisacc.com现2671169B，P7f709378fa84a36edac2fcf1c36a62a13d45c26d34e57f1f7b50af74b2de4d1a／Sd754b8afbfeff132cf1328806e8fe908ca5dec1847ecba058ea400291b73e972；sidecar1e9ef57c…，原生ident当前main check0，默认-run hello0。是开发产物，尚非新固定点／正式封存资格。 | `out/e4-local-install.log`、`out/e4-local-install/baseline-p297.com{,.build.json}`原pair；release/candidate.json及GHCR8c667e…仍是旧P297/Sc90封存，旧CI不可借给新开发包。新完整构造及封存须以实际最终P/S为准，不签不公开。 |
+| F6室：旧固定点已证／新产物待证 | 旧P297三个实际编译器相同，stage2/3五目标代码切片真重编、模型数据仅同S复用；这不证明新P7f709固定点。 | 旧`research/c43-f6-final-evidence/`及`/tmp/unisacc-c43-e4-summary-final-20261024`留证；新执行单`/tmp/c43-final-e4-native-build-runbook.txt`仅准备，按实际native模型／包／五目标代码各原50秒逐步执行，不重开失败的聚合pack-driver。 |
 | M7室：环境缺陷与修复 | 旧Git alternates指向被隔离隐藏的/home对象，cat-file实际128；旧release.sh吞失败，head误成空流SHA。旧070自然结束后停止2193，全部旧结证仅作诊断。现565MB对象已本地独立、alternates为空，隔离cat-file／status／fsck均rc0；a8778570dff0f79491f47bafd936aaaef672a8f4的失败即停七例回归通过，官方observation及inventory-derived亦rc0。 | 新正式状态 `/tmp/unisacc-c43-m7-final-20261025/out/m7-final-state/`；旧状态`out/m7-before-git-object-repair/`及更早备份、原log均保留，不迁旧绿；失效说明`out/m7-before-git-object-repair-meta/invalidity.json`。当前计数见上方思维树及最新退出表。准备竞态、warnprep与两次遗留锁原证据分别保留out/m7-exec-chain-prepare-race-124/、m7-warnprep-1-retry-131/、m7-winlower-retry-{147,151}/；不迁移旧绿，不把恢复动作记PASS。222窗target-package聚合超时保留，H7三个双目标组首跑全0、其余1322条原记录不变，原队列从223续跑；H2／H3／H4／H6局部结证与原H0分类分别保存，不迁移或改写原非PASS。当前vsnprintf_measure.tmp为探针留给caller的0字节夹具（tests/c/vsnprintf_measure.c）；不在套件运行中移动，完整队列结束后保留字节归档out/再核干净树，不能绕删除守卫。 |
 | M7室：固定身份 | 新冻结b09cbbf0b9的真实DECLARED摘要为`395fd5cadf74f8ad9c6e09d9287090842c8bd8c5650a459f7c76647125e6bde7`，不是产品S。F4内完整原NUL计划232484字节，SHA`04f26e7e56c82c257146380dab8cf02c20e7424359baa6948ad27c52653b276d`；1317项。 | `out/c43-m7-b09cbbf0b9.plan.nul`及状态head；旧a877计划保留诊断。正式M7固定 `CODEX_TOOL_CALL_ID=unisacc-c43-m7-final` 和原env-pin；winbatch-fixed仅属旧独立实验。`out/f4-final-env.sh`／`out/f4-final-config.sh`保持固定，不泛化忽略未知环境。 |
 | k2b室：已修首红 | 原wrapper与自测双重Git fixture准备挤爆40秒。两自然scope保持原失效／准入、真实双queue／CLI与字节／锁断言，独立冷测21.379／37.047秒rc0；共享footer与setup归属已独立静审。 | `/tmp/unisacc-c43-k2b-scopes-final-result.txt`、`/tmp/unisacc-c43-k2b-scope-review.txt`；原089／各次142及guard拒绝均保留。旧无消费者wrapper已按SHA不变移至忽略`out/archived-test-tools/`，未绕守卫删除源文件。新图与元数据见根`out/c43-k2b-*`；正式M7已固定b09继续，计数见思维树。 |
@@ -179,7 +179,7 @@ H2 reader七→十一、H3 callback一→二、H4 srcelf首片一→二均已实
 | 准备室：warnprep既有C方案 | 1/5=warnparse（--warnings --errors）、2/5=errorparse（--errors）必须分清；六材料已按旧独立parity实际核SHA相同。当前三seed actor与旧工具SHA匹配，canonical接口重算新wholekey；不复制旧key／伪造recipe。原cache控制入口仍是遗留Python，构造／转表／net实际走C；正式132窗两producer各0.552秒rc0，不冒称迁移完成或关闭RSS OPEN。 | 原完整命令见`/tmp/unisacc-c43-f4-cachefix-NqVxFpFN/out/warn-recovery-20261024c/run.sh`；当前F4用`/mnt/out/m7-warn-native-tools/{gen,tbl,net}`映射stage2/seedbin/seed-*，o1／e2／nativeabi及route取同stage2；当前日志`out/warnprep-{1,2}-native-{prepare,hit}.log`。131原失败及事务原state全部保留。 |
 | 工具间：已核与未核 | carrier、suite缓存／failfast、hostcheck现行七叶12例、seedmemory行为与隔离正反例、四元数据闸已有各自实跑证据；均不计作新冻结M7通过数。默认用unisacc.com＋.cx，不为测试改动重复构建产品。工具编写实测发现有效C的*(*q)++=0被拒（系统cc语法检查0、当前默认-run1），最小复现登记C44；本轮工具拆成赋值与递增继续，不扩大0.0.43。H11归档工具另遇C44-CX-SIZEOF-POSTFIX-01：函数实参里的sizeof ES[N].name合法C99，父独立cc -x c -std=c99 -Wall -Wextra -fsyntax-only为0、P297默认-run为1（not covered: argument list）；工具用既定字段界继续，语言修复留C44。CX头原生stat/open/read的errno沿自身syscall-image实现读取，勿混host __errno_location；共享libffiprovider已实际45项负控核ENOENT／ENOTDIR／EACCES／空／目录／FIFO／provider漂移及恢复。 | [能力速查](#implemented-usage)、[原生套件目录](tests/suite/README.md)；具体旧实验与失败见历史Git及私有报告。 |
 | E4室：本版已接入／guard回退已实测 | main d1fa90e516原生再生net32dd5b82…；完整候选P7f709…／Sd754…及sidecar已核，root用现成ident对当前main再次check0。固定F4 hello默认-run／image新旧同；80共享route清单留存。自然空IR旧／精确新网输出同，observer实际@G1F0O1；24B正常控制实际@G0F0O1，marker去尾后输出／stderr严格同。 | `out/e4-current-f/E4-CURRENT-F-RESULT.txt`、`/tmp/unisacc-c43-e4-fallback-prepared/`；空IR三次约0.047秒，全原gen/tbl/net／ISA及compare0，只加私有观察标记、不改guard阈值／solver。已见guard→SOLVE.old，不把F0称为MS.fail池溢出覆盖；最终新候选全清单／固定点仍待执行，原P297不改、不迁旧绿。 |
-| union16室：已锁定宿主FFI边界 | main23fad4e784默认PIC修复已落，保留显式CLI／env／qualified分支。实际slots5与ffi_call前owned values5均为21、union载荷(35,40)及15逻辑值正确；当前F4宿主只收到f0=40，其余prefix／U／tails／guards／status均对。无模型／us_*的同CC＋归档直接oracle复现：native union/carrier直调0，ffi_call union/carrier都错同一f0，不能归咎模型。 | `out/union16-h14/oracle.stdout`、`/tmp/unisacc-c43-union16-h14-20261025/out/union16-h14/observe-boundary.json`；官方3.5.2 tar已核f3a3082a…82dc，现做隔离头／库真实构造及同oracle对照，不改旧host、不伪造资格；原完整压力scope仍待通过。 |
+| union16室：宿主FFI与runtime税已定点修复 | 旧fe417由无模型oracle复现f0=21→40；官方3.5.2真头3c583…/库2162fedc…原生构造及oracle全0，provider-first CPATH实际预处理选新两头。2309075611严格选真实provider并每次核manifest+六件，113+原45metadata控0。97b1261ee2准备runtime仅PREPARED，原双case四压力／三opt／100调用+san cached原40全0。 | `out/union16-h14/REPORT.txt`、`/tmp/c43-qualified-ffi-header-selection.txt`；原聚合40超时保留，证明31秒在runtime构造，非推理死循环。缺/坏材料75、busy75、kill-owner后重获锁0。真provider计划1333/991、未配1332/980；其余union16/callback须在新候选实际预检，不能把direct1绿冒全族。 |
 | ujs床：C--jobs对拍／点名--asm | 论文B仓外（不并表）。grk C `--jobs=8 --hot=0` 独立对拍 cold≈0.75s、28/28 同、arith SHA 0b99b103…；jobs=1 仍≈3.5s。H 常驻已点名接到 C：`--asm=wabtjs`（daemon.js）。WAT 缓存 REJECT；front 不拆。已短馈 cdx：H 对七流十八网倾向 REJECT（无 fork 组装），收按相计量范式。Draft／签／tip 禁。 | grk `C-batch/run.py`；csr 对拍 `C-jobs8-VERIFY-RECEIPT.txt`；H-bed-run.py／H/daemon.js；不预堆 0.0.44。 |
 | E3室：原CT融合REJECT并已撤回 | 原生生成及E3／combined包构造曾完成；已启动F4 ctor新旧均rc3／main12与bye12同，未启动image／拒绝／combined主路径。阻断仍成立：errorparse启用locations，DL.prefix前MARK tpos、吃前缀后才IX.new；旧回扫读前缀64，新BYTE读token正文，分号／花括号时CT.nexttok与CT.skip可异。 | `/tmp/c43-e3-ctfuse-source-review.txt`、`out/e3-current-f/`；body-manifest恢复SHA91445eb7…，两新增表移ignored REJECTED存证，Git／index无E3改动。原ISA −66.5%及fib／run.c正例继续作为历史窄证；不把源码局部反例冒充端到端失败，不出货两候选，不推下版。 |
 | E2室：COUNT采证／设计待验 | csr COUNT：93003574 transitions／186418639 actions，ADV49.5%、COPY46.8%、COPYT1.8%，JUMP43857、SWAP257，切片SHA ace9f9ed…同。 | `/tmp/unisacc-c43-e2-count-20261025/RECEIPT.txt`；ISA3.970秒、附带hostcc3.703秒。宏／体span复用仍仅DESIGN；E2未改模型，E3／E4按本版裁定单独闭环，不混用各阶段热点。 |
