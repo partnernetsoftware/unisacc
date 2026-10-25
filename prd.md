@@ -146,7 +146,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 0.0.43 公开发布
 ├─ 已完成：F1产品修复、F2文档／探针；F3历史基线187项=186 PASS＋1宿主未核
 ├─ 已完成：F6三实际编译器SHA相同；三阶段五代码切片实际重编、原50秒界通过
-├─ 当前：固定b09cbbf0b9的1317项原闸已完成223窗；768 PASS／510待办，另6资源UNKNOWN、12既有基线裁定、6宿主未核、5 BLOCKED、8 NEEDS_RULING、2 HOST_TIMEOUT；H6七项及H7三组原40秒通过，现从223续原队列
+├─ 当前：固定b09cbbf0b9的1317项原闸在224窗停；768 PASS／509待办，另6资源UNKNOWN、12既有基线裁定、6宿主未核、5 BLOCKED、9 NEEDS_RULING、2 HOST_TIMEOUT；H6七项及H7三组原40秒通过，新增callback-source聚合超时正在分段计时
 │  ├─ 070窗自然结束、2193已终止；旧冻结的结果仅保留诊断，不计有效正式PASS
 │  ├─ 清单1317项；原seedmemory严格17例=行为16＋真实新鲜度1，后者仍UNKNOWN／OPEN
 │  ├─ 固定env-pin；绑定新HEAD与真实非空Git闭包身份，禁止迁移旧绿或沿用旧闭包hash
@@ -157,7 +157,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 └─ 待完成：Draft资产核对 → Latest／公开 → 下载SHA与运行复核
 ```
 
-**下一动作：** 固定H0原闸已完成223窗：768 PASS／510待办，另6资源UNKNOWN、12既有基线裁定、6宿主未核、5 BLOCKED、8 NEEDS_RULING、2 HOST_TIMEOUT。新阻点是`target-package`六目标聚合在完成3/6后耗尽原40秒；e74b44f1ef已提交三个固定双目标组，独立H7@e74b44f1ef三组首跑36.898790／36.204536／35.682547秒全0，仍限原40秒，完整TARGETS路由筛选与全部共享负例保留。完整新计划1325项SHA030c047f…，除原target一→三外，其余1322条有序raw记录逐字节相同；已从223窗继续原H0；原超时及日志不改写。
+**下一动作：** 固定H0原闸在224窗停：768 PASS／509待办，另6资源UNKNOWN、12既有基线裁定、6宿主未核、5 BLOCKED、9 NEEDS_RULING、2 HOST_TIMEOUT。新`lib-callback-source-graph`聚合原40秒超时，独立副本正分开计量参考/runner编译、模型准备及sim+C+host解码，尚不把无summary警告日志归因NN。新阻点是`target-package`六目标聚合在完成3/6后耗尽原40秒；e74b44f1ef已提交三个固定双目标组，独立H7@e74b44f1ef三组首跑36.898790／36.204536／35.682547秒全0，仍限原40秒，完整TARGETS路由筛选与全部共享负例保留。完整新计划1325项SHA030c047f…，除原target一→三外，其余1322条有序raw记录逐字节相同；已从223窗继续原H0；原超时及日志不改写。
 
 H2 reader七→十一、H3 callback一→二、H4 srcelf首片一→二均已实际结证。H6@a631445c23七项原40秒首次全0：callback off/on 21.492／34.606秒、context 8.355秒、typed 5.180秒、variadic 14.601秒、callback-plan 12.195秒、resolver 5.829秒，普通及sanitizer分支保留；原F4环境和工具树未改，P297／Sc90不变。context选择已存在PIC库，四个宿主探针补GNU特性声明；只绑定已观察的三个原rc1记录及原始日志SHA，不通放断言失败，也不虚构尚未执行的两项原失败。
 
