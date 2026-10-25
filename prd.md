@@ -22,9 +22,9 @@
 |---|---|---|
 | 动态执行 C／`.cx` 工具 | `./unisacc.com FILE.cx -- ARGS` | 默认就是 `-run`；`.c` 同样适用。见本篇§3.11、[README 用法](README.md)及[`.cx` 草案](docs/cx-spec-draft.md)。 |
 | 显式动态执行 | `./unisacc.com -run FILE.cx -- ARGS` | 保留的显式写法；日常推进直接执行源码。 |
-| 从 tape／tapebin 写目标镜像 | `./unisacc.com INPUT.tape -b OS/ARCH -o OUTPUT` | `.tapebin` 也有现成入口。支持域及具名拒绝仍生效；见 [README](README.md)、[驱动](exec/c/compiler.c)及[现有 tape 对拍](tests/bindingsnegcheck.cx)。 |
+| 从 tape／tapebin 写目标镜像 | `./unisacc.com INPUT.tape -b OS/ARCH -o OUTPUT` | `.tapebin` 也有现成入口。支持域及具名拒绝仍生效；见 [README](README.md)、[驱动](exec/c/compiler.c)及[当前优化Tape合同](tests/optimization.cx)。 |
 | 写六目标程序 | `./unisacc.com FILE.c -b OS/ARCH -o OUTPUT` | 目标为 `lnx`／`osx`／`win` × `x86_64`／`arm64`；跨目标写出与目标机器原生执行分别记证。 |
-| 查看 `.cx` 模块依赖计划 | `./unisacc.com -cx-plan FILE.cx` | 复用现有模块入口与[模块用例](tests/cxmodcheck.cx)，不另造模块扫描器。 |
+| 查看 `.cx` 模块依赖计划 | `./unisacc.com -cx-plan FILE.cx` | 复用现有模块入口与[当前模块ABI用例](tests/library-abi.cx)，不另造模块扫描器。 |
 
 新动态逻辑优先由 `unisacc.com + .cx` 完成，减少 `.sh`，不新增临时 `.py`。旧脚本尚未迁移的部分如实记为依赖，不把 `.cx` 转调脚本记成迁移完成。经典 C 参考与模型产品是不同实现；对拍前确认实际两端身份，不能笼统判成“对自身验证”。入口已实现不等于任意输入已验证，继续保留原断言、拒绝和预算。
 
@@ -75,9 +75,9 @@
 ## 1. 命题与产品
 
 - **产品**：一个文件 `unisacc.com`（APE），在 {Linux, macOS, Windows} × {x86-64, arm64} 上运行，自己写出六个目标的可执行文件（ELF、Mach-O、PE；映像不经汇编器和链接器），0.0.17 起也写三种格式的可重定位 `.o` 并自带链接器与 `ar`（§3.15），并能自举：宿主构建的 `unisacc-seed.com` → 种子自建 → 再自建，三个 sha256 相等（N22）。两代产品只叫 `unisacc-seed.com` 与 `unisacc.com`。
-- **语言**：C99 = ISO/IEC 9899:1999 + TC1–TC3（WG14 N1256）。覆盖度来自逐条款账本 [tests/c99/clauses.tsv](tests/c99/clauses.tsv)（门禁 `c99-ledger`，README 表由账本生成），不作主张；缺口在 README 限制表逐条点名。
+- **语言**：C99 = ISO/IEC 9899:1999 + TC1–TC3（WG14 N1256）。覆盖度来自逐条款账本 [归档条款账本](archive/testing-c43-legacy/tests/c99/clauses.tsv)（仅历史覆盖义务，不再调旧gate；当前入口见[新清单](tests/coverage.tsv)），不作主张；缺口在 README 限制表逐条点名。
 - **方法**：编译器里每个表状决策（词法类、预处理指令、优先级、类型、指令选择、ABI、窥孔……）由**构造**出来的小整数网络回答，权重从真值表派生、在表的全部定义域上**穷举验证**（不是训练）；结构性粘合是经典代码。两条路线：C 参考编译器（`unisacc.c` + `src/`，行为裁判与回退）与模型产品（`exec/` 各阶段网络 + 通用执行器），逐字节对拍（`exec-chain`、`closure`、`stages`、difftest 两侧）。
-- **零 Python 依赖（硬目标；主人 2026-10-24 再次重申）**：构建、闸、验证链中 **100% 不依赖 Python**，牢固使用自己的 `unisacc.com + .cx` 体系；新增与修复路径优先原生实现，不新增 Python 算法或调用点。自举已完成（N22，三 sha256 相等），但依赖清零尚未完成：本轮 `tests/zeropython.tsv` 记直接调用声明 **1771**（真实执行标记1739、数据32；解析入口复用使静态标记少4，原外部参考依赖未消除）、`import unisa` 文件 **92** 个、`.py` **409** 个。仅用 `.cx` 分批调用原 Python 只算调度改进，不算消除运行依赖；原生替换须实际自举运行，并保留完整行为与拒绝、恢复合同。三者同时清零后，`unisa/` 才移入 `archive/`（不删，仅作人工参考，不参与任何链）。
+- **零 Python 依赖（硬目标；主人 2026-10-24 再次重申）**：构建、闸、验证链中 **100% 不依赖 Python**，牢固使用自己的 `unisacc.com + .cx` 体系；新增与修复路径优先原生实现，不新增 Python 算法或调用点。历史候选曾完成N22三SHA相等；当前重构候选完整三阶段链仍待验，依赖清零也尚未完成：归档依赖审计 `archive/testing-c43-legacy/tests/zeropython.tsv` 记直接调用声明 **1771**（真实执行标记1739、数据32；解析入口复用使静态标记少4，原外部参考依赖未消除）、`import unisa` 文件 **92** 个、`.py` **409** 个。仅用 `.cx` 分批调用原 Python 只算调度改进，不算消除运行依赖；原生替换须实际自举运行，并保留完整行为与拒绝、恢复合同。三者同时清零后，`unisa/` 才移入 `archive/`（不删，仅作人工参考，不参与任何链）。
 - **交付物**：签名的 `unisacc.com` 与公证的 macOS dmg（公开资产只有这两个，主人 2026-09-30 裁定）；中间形式 `.tape`/`.tapebin`（[docs/tapebin-v1.md](docs/tapebin-v1.md)，内容寻址、C/Python/产品三方编码逐字节同）。
 - **公开入口仓**（主人 2026-10-05，拟注册商标 UNISA）：[partnernetsoftware/unisa](https://github.com/partnernetsoftware/unisa)，只收副本：unisacc、ujs 的最终发行包（`releases/`，定期从本仓 release 抄过去），产品介绍（`docs/`）与论文（`papers/`，不定时抄）；以后做 unisacc 的包管理入口和 agenterm 的“插件与应用”入口。开发不在那里。
 
@@ -150,40 +150,40 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 ```text
 0.0.43：完成开发、重建自身迭代体系与新验收（发布须另授）
-├─ 新开发产品：Pb8eae71b/S5ae4d2fc已原生重建安装；RI NUL及-O3/-Os缺口闭环，P375b7a09备份保留，新固定点待证
+├─ 新开发产品：P46cfa11a/Sb9c0f819已08代原生重建安装；RI/snapshot生命周期修复进入源与驱动，Pb8备份保留，新固定点待证
 ├─ R0 已归档：2529个旧测试路径原blob/模式完整保留；构造支持移tools，新旧入口分离；原生容器/驱动重建已实跑，构造依赖迁移仍待补
-├─ R1 已有首批：新候选原生产品16断言0；旧Pa7e8的cx/owned模块551断言0及私有状态/函数直接访问拒绝；源码导出同字节；完整覆盖仍NOT_READY
+├─ R1 已有首批：新根产品smoke16断言0；旧Pa7e8的cx/owned551及私有状态拒绝仅历史证据，完整覆盖仍NOT_READY
 ├─ R2 旧启动器部分已证：七流原模型/74资源提取不重构；40断言0含constructor真管道/产品镜像同字节/返回7；完整独立合同仍待补
 ├─ R3 旧Pa7e8本机已证：18网8770键/22694真实infer、28868域边界拒绝及恢复、72适配拒绝、三反空跑控制0；非完整产品/跨平台资格
-├─ R4 部分已证：根RI24；新源Linux驱动RI27、snapshot源适配265/87故障点均0；修复待完整08产品重建，完整RI/Windows/预算仍待补
-├─ R5 部分已证：当前候选六档原生语义241/直接-run193/Tape16及smoke16断言0；完整优化语料/域/对象/宿主/自举待验，旧55固定点不转授
-├─ R6 待迁移：库/FFI/回调/布局/生命周期等公共合同，逐项保留覆盖义务
+├─ R4 部分已证：新根RI26、snapshot共享C源适配265/87故障点均0；事务失败清空/释放，完整消费者RI/Windows/预算待补
+├─ R5 部分已证：旧07优化原生241/直接-run193/Tape16不转授新08；当前smoke16，完整优化语料/域/格式/自举待验
+├─ R6 部分已证：新根库/模块ABI55断言0；宿主FFI/provider/泄漏UAF/外宿主仍待补
 └─ R7 待完成：新清单全覆盖 → 同候选跨平台CI → 封存与授权发布
 ```
 
-**优化修复与证据：** -O3规范化为二级、-Os为一级，与经典src/main.c/src/opt.c的既有优化集合一致；源码修复4cd9fc75e3已进入根产品Pb8eae71b。完整07候选原生语义241、六档直接-run193、Tape16均断言0，日志为out/c43-optimization-candidate-{native,run,tape}-07.log，并打印同一完整候选SHA。十四类手写字节预期/两运行时输入，含别名、除余/无符号边界、循环合流、短路、递归及结构复制；Tape另证默认/O0、O/Os/O1、O3/O2字节关系、真实改写及非法档拒绝。只证Linux x86_64局部合同，完整语料/域/自举/外宿主仍未完成。
+**优化修复与证据：** -O3规范化为二级、-Os为一级，与经典src/main.c/src/opt.c的既有优化集合一致；源码修复4cd9fc75e3先进入07根Pb8eae71b；以下为07历史局部证据，不转授08。完整07候选原生语义241、六档直接-run193、Tape16均断言0，日志为out/c43-optimization-candidate-{native,run,tape}-07.log，并打印同一完整候选SHA。十四类手写字节预期/两运行时输入，含别名、除余/无符号边界、循环合流、短路、递归及结构复制；Tape另证默认/O0、O/Os/O1、O3/O2字节关系、真实改写及非法档拒绝。只证Linux x86_64局部合同，完整语料/域/自举/外宿主仍未完成。
 
 **优化首红与窄验保留：** P375b7a09扩六档时173断言2失败，均为-O3/-Os被拒绝，原log为out/c43-optimization-02.log；最小默认-run为out/c43-opt-flags-repro.cx。修后Linux驱动先获242原生/194直接-run/17 Tape断言0（各多一个模型容器身份检查），随后完整07产品闭环。原失败未删除；未减少断言或宽放预算。
 
-**下一动作：** 使用已安装Pb8eae71b/S5ae4d2fc默认-run继续0.0.43；补完整RI/snapshot/生命周期、库/ABI和优化语料/域，并为当前候选取得完整自举及同候选平台证据。07代两架构内核与五驱动均真实构建，1241模型输入双向相等，包SHA未变，未重复构造权重。0.0.44的启动复用提速已登记待实现。
+**下一动作：** 使用P46cfa11a/Sb9c0f819默认-run继续0.0.43；先补当前候选原生固定点及完整三阶段链的来源合同，再补新清单19个覆盖缺口与同候选平台证据。08代两架构内核/五驱动真实构建，1241模型输入双向相等、包SHA未变，未重构权重。36个非smoke批次不会由--all假装执行；0.0.44启动复用1917119cd5仅设计，未实现/未测。
 
-**当前自举事实与下一刀：** 旧Pa7e8/S7601的05代固定点55断言0仅为历史证据；RI与优化入口均已改源，根产品现为Pb8eae71b/S5ae4d2fc，07代已重新构建两架构内核、五驱动和APE。当前候选自身后续重建、完整三阶段链及外宿主仍待验，不借旧固定点。
+**当前自举事实与下一刀：** 根P46cfa11a/Sb9c0f819的08代完整构建已完成；05代旧Pa7e8固定点55仅为历史证据。tests/selfhost.cx只证原生两代产物相等，且prior-generation来源校验仍有缺口；不能改叫宿主种子三阶段N22。新候选后续重建、完整来源链及外宿主仍待验。
 
-**Snapshot当前源合同：** tests/snapshots.cx在Pb8启动的shared-C源适配上07代265断言0、87分配故障点，见out/c43-snapshots-07.log；实际验证COMMIT最后/无覆盖、保留已校验字节而不重读、身份/损坏/额外文件/进程本地callable拒绝、FIFO非阻塞/增长/路径/容量边界、链接/读目录/关闭/权限故障及恢复。失败事务输出为空，rl_clear释放行/键/值；故障路径heap/fd/FILE计数归零。新源Linux驱动另27断言0含重复--resource-ledger后项生效及后项拒绝，out/c43-resources-driver-08.log。完整根产品尚未重建，不把源适配或窄驱动绿转授当前根；Windows no-replace/外宿主和完整消费者RI仍NOT_COVERED。
+**Snapshot当前源合同：** 41ebdec154修复已进入当前源与08代驱动；新根P46cfa11a启动的shared-C源适配265断言0、87分配故障点，见out/c43-snapshots-installed-08.log。验证COMMIT最后/无覆盖、保留已校验字节不重读、身份/损坏/额外文件/进程本地callable拒绝、FIFO非阻塞/增长/路径/容量边界、链接/读目录/关闭/权限故障及恢复。失败输出为空，rl_clear释放行/键/值；故障路径heap/fd/FILE计数归零。首红wrong-stage曾残留rows1/live3，增长空文件曾被接受为有效前缀，原红保留。材料克隆baseline及body/receipt篡改控制均符预期；PREPARED/VERIFIED非PASS。仅实际共享C源合同，不扩大为standalone完整消费者链/Windows/外宿主资格；完整libunisacc宿主语法核验因缺ffi.h未完成，独立真实tracked_open两参上下文核验0。
 
 **Snapshot首红与当前刀：** 2026-10-26默认-run最小复现out/c43-snapshot-repro-material-01/snapshot.cx在合法零资源/二进制输入上返回1，具名resource-snapshot-unsupported-platform，见out/c43-snapshot-min-red-01.log。共享resourceledger.h把全部__UNISA__构建列为不支持，因为缺link包装；本版补POSIX原子无覆盖链接机制并恢复同目录身份检查，Windows独立缺口仍保留。tools/ledger-material.cx是有完整source/bootstrap/输入SHA的原C头转接，准备只记PREPARED，不冒充CX重写或功能通过。
 
-**并行旁路已证：** 库/模块ABI新批次在根Pb8eae71b上02代55断言0/not_run0，e5808040bb；只覆盖48库/布局观察、6模块ABI及候选不变，宿主FFI/provider、堆泄漏/UAF和外宿主仍NOT_COVERED。旧HANDOFF/finish-line已由409b91b5e8原文完整归档，旧gate/旧公开授权失效。67f27254b8新增数据驱动批次表/解析入口，结构负控27断言0；只验证元数据，尚未接入tests/run.cx，不算运行或完整资格。
+**并行旁路已证：** 库/模块ABI新根P46上55断言0/not_run0；只覆盖48库/布局观察、6模块ABI及候选不变，宿主FFI/provider、泄漏/UAF和外宿主仍NOT_COVERED。旧HANDOFF/finish-line原文归档409b91b5e8；README失效自举入口已由eb4d08ef1c修正。8895e1d84c将--list/--all接入严格批次/覆盖表，解析负控30断言0，新增gap/坏映射/缺表/伪smoke行均独立验证；元数据通过不等于执行。a71c35320d仅手动CI入场草稿，未触发或取得平台资格，入口变更后计划SHA须重新计算。
 
-**当前RI刀：** tests/resources.cx以新根产品真实执行默认/捕获/严格重放、跨CWD、身份/重复键/缺失资源/坏行/路径拒绝、空与二进制额外账本项、拒绝后恢复，共24断言0；每个拒绝核rc2、原因及空stdout。额外空/二进制项未被消费者请求，只证账本装载，不扩成完整消费者RI语义。完整snapshot、生命周期、预算和模型坏输入仍待补。
+**当前RI刀：** tests/resources.cx在新根实际26断言0：默认/捕获/严格重放、跨CWD、身份/重复键/缺失/坏行/路径拒绝、重复账本后项生效和后项坏表拒绝、空与二进制额外项及拒绝后恢复。每个拒绝核rc2、原因及空stdout。额外空/二进制项未被消费者请求，只证装载；完整消费者RI、预算和模型坏输入仍待补。
 
 **RI首红及修复闭环：** out/c43-resources-02.log保留旧Pa7e8的18断言中2失败：内嵌NUL的表头/行被rc0接受。共享解析器在转C字符串前按显式行长度memchr拒绝NUL，源码修复为78bf02dfab。06代完整候选及安装后根产品均实际24断言0；原始失败未删除。
 
-**RI验证边界：** 当前07根产品复验24断言0见out/c43-resources-installed-07.log。06代的新驱动25/完整产品24为历史局部证据，原01驱动错误及02产品失败保留；驱动多一个模型容器身份检查。额外空/二进制项只证账本装载，完整消费者RI语义、snapshot/生命周期/预算和模型坏输入仍待补。内部相位及冷/热耗时UNMEASURED。
+**RI验证边界：** 08完整候选及安装根各26断言0，见out/c43-resources-candidate-08.log和out/c43-resources-installed-08.log；新源窄Linux驱动27（多一个模型容器身份检查）。06/07的24及原02 NUL首红仅历史证据。snapshot265是共享C源适配，完整消费者链/跨平台/预算未完成，内部相位与冷/热耗时UNMEASURED。
 
-**新开发产品已安装：** 07代根unisacc.com为4757929B／Pb8eae71ba2651709dbd5c927dd4d774050c10b4cefed85da0ca3600dc79730e5，构建源S5ae4d2fc614e52794abc46eca17760bbed7a9ea5b356d11f5b99df42c6fc6f5e，仍0.0.43。两架构各11对象/两内核、五平台驱动切片及完整APE均由自身工具实际构建；模型包仍1c6a503090ee8d4189d6326139fa4a18b5db14b9682f1db0949e8ee79519db3e。完整候选原生241/直接-run193/Tape16断言0，安装后RI24及--all中的smoke16断言0，根身份核验通过。P375b7a09及原构建记录备份于out/c43-native-kernel-07/bootstrap-before-install.com*；新记录/补充收据绑定当前源及五切片。证据out/c43-native-install-07.log与根build.json；仅开发资格，未签名/发布。
+**新开发产品已安装：** 08根unisacc.com为4872921B／P46cfa11a8fe4ad05e450f87ae95fdf76bd1be541e89e62f74f2632724ebb4e2f，构建源Sb9c0f819b3ec011f2319b135c63268d7930210c36f6c191f543ceff2a9aa9f65，版本仍0.0.43。两架构各11对象/两内核、五平台驱动及完整APE由自身工具真实构建；模型包仍1c6a503090ee8d4189d6326139fa4a18b5db14b9682f1db0949e8ee79519db3e，1241输入核相等。候选/根RI各26，根snapshot源适配265、库ABI55、解析负控30、smoke16均0；根身份通过。Pb8eae71b及记录备份out/c43-native-kernel-08/bootstrap-before-install.com*；新build.json和.native.tsv绑定当前源/五切片。证据out/c43-native-install-08.log；仅本机开发资格，无签名/发布。
 
-**当前证据：** 本候选原生优化241、六档直接-run193、Tape16、RI24和smoke16均为实际局部检查；--all仍返回3，保留19 NOT_READY/18 NOT_RUN。完整优化语料/域、RI、格式/对象、库/ABI、自举及实际六宿主未完成。旧Pa7e8的owned551/十八网/14格式/55固定点与旧启动器七流40不转授当前候选，不把局部绿称开发或发布完成。
+**当前证据：** 根P46的RI26、snapshot共享C源适配265/87故障点、库ABI55、smoke16均实际0；解析负控30只证元数据。--all实际rc3，75覆盖/56已实现/19未完成，36非smoke批次和40已实现覆盖本次NOT_RUN，不缓存旧PASS。07的优化241/193/16、旧Pa7e8的owned551/十八网/14格式/55固定点均不转授新候选；完整清单/来源自举/实际六宿主待验。
 
 ### 本版重构合同
 
@@ -212,17 +212,17 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 | 房间 | 当前事实／决定 | 证据与行动入口 |
 |---|---|---|
-| 产品室：新开发产品／旧基线分列 | 根Pb8eae71b/S5ae4d2fc，4757929B；RI NUL及优化别名缺口已进入两架构/五驱动重建后的完整产品；P375b7a09及其记录备份保留。 | out/c43-native-install-07.log、根build.json及07代.native.tsv；原生241/直接-run193/Tape16/根RI24/smoke16均0。仅开发资格，完整自举/同候选平台待验。 |
+| 产品室：新开发产品／旧基线分列 | 根P46cfa11a/Sb9c0f819，4872921B；08代两架构/五驱动/APE已完整原生构建安装，Pb8及记录备份保留。 | out/c43-native-install-08.log、根build.json及08.native.tsv；根RI26/snapshot源适配265/库ABI55/smoke16均0，身份核验0。完整来源自举/同候选平台待验。 |
 | 十八网新合同室 | 旧Pa7e8默认-run一次进程执行18网/8770键/22694个key-head整数infer，28868字段边界拒绝及等量恢复、72适配拒绝；gold标签/唯一最大logit/词表映射均核；改gold、改模型及恢复三负控0。 | `out/c43-net-all-02.log`、`out/c43-net-controls-01.log`；tools/net-material.cx源派生+只读verify，未重构权重，未借DENSE或旧PASS。只证本机经典整数核合同，不外推P3每路线或六宿主。 |
 | 原生汇编室 | 新CX复用产品-E处理.S并展开宏；现存C编码器由有来源材料适配默认-run执行，189断言0；新ELF链接器16断言0。03代两架构各11对象已原生构建及链接为x86 7144B／ARM 7096B UNIKERN1，均已进入新根产品。 | `tools/kernels.md`、out/c43-native-kernel-execute-e4-01.*、out/c43-native-product-case0.*；x86真实E4同字节，完整编译ELF同字节且返回7。ARM真实执行及完整产品资格仍待验；PREPARED和功能分列。 |
 | 七流新合同室 | 原生stream-pack曾从旧P7裁七模型/74资源，共40断言0，含两源码链、真管道、镜像和具名拒绝；不转授新候选完整合同。 | out/c43-stream-contracts-03.log、tools/streams.md；当前根产品另已重建，完整RI/拒绝域/六目标仍待补。 |
 | CX所有权室 | 旧Pa7e8上的cx/owned使用真实模块隐私、固定4×8 i64存储和不回绕代际句柄；551断言0，外部直接访问data/slot各拒绝1。复制活句柄仍可别名，不是编译期所有权或通用堆。 | `make owned`、`cx/check_owned.cx`；只验证本机运行期设施，不代替七流十八网或完整库验收。 |
-| 旧套件封存室 | 主人已裁定旧1333项整套归档，不再调度。旧F4在window082止于327结证（314rc0、6资源UNKNOWN、7失败）/1006待办；失败未改PASS。 | archive/testing-c43-legacy保留旧源码和原工作规则；F4目录原样留存。新smoke16断言0、--all实际3且明确19 NOT_READY/18 NOT_RUN；旧数字不算新完成率。 |
+| 旧套件封存室 | 旧1333项套件停止调度，原F4在window082保留327结证/1006待办，失败与UNKNOWN不改PASS。 | 新--all读真实75覆盖/37批次，smoke16/0且rc3；19未完成、36非smoke批次未跑。旧计数不代表新完成率。 |
 | ujs 子项目 | 独立规格与进度只在 [`ujs/prd.md`](ujs/prd.md)（及 `ujs/ARCHITECTURE.md`）；根宫殿不重述 ujs.com 代际／语料。跨项目只记：底座为 `unisacc.com`+`.cx`，不 tip／Draft 除非另授。 | [`ujs/prd.md`](ujs/prd.md) |
-| 优化合同室 | 六种拼写的原生241/直接-run193及Tape16断言0；手写字节预期、实际Tape改写和非法档拒绝均保留；完整语料/域/外宿主未覆盖。 | tests/optimization.cx及cases/optimization.cx；07代三日志打印同一候选SHA，不借旧PASS。 |
-| 新自举室 | 旧Pa7e8的05代固定点55仅属旧候选；当前Pb8eae71b的07代构建已完成，新固定点/完整三阶段链待验。 | out/c43-native-selfhost-05.log不转授；当前构建见07代日志、tools/product-build.cx。 |
-| 资源与RI室 | 根07 RI24；新源Linux驱动RI27、snapshot源适配265/87分配故障点均0，事务失败空输出、保留校验字节、堆/fd/FILE释放。完整08产品重建待做；Windows/完整消费者RI/预算仍未覆盖。 | out/c43-snapshots-07.log、out/c43-resources-driver-08.log；首红/UNKNOWN保留。tools/ledger-material.cx只准备原C源，非CX重写或PASS缓存。 |
-| 资格与发布室 | Pb8eae71b只有Linux x86_64具名开发合同；完整清单、自举及外宿主待验，签名/Draft/Latest/公开未授权。 | --all仍3；旧CI不转授。plans/v0.0.44.md的C44-RUN-REUSE-01待实现。 |
+| 优化合同室 | 07候选六种拼写原生241/直接-run193/Tape16是旧Pb8局部证据，不转授08。 | tests/optimization.cx及cases/optimization.cx；当前P46完整优化语料/域/外宿主仍待验。 |
+| 新自举室 | P46的08代构建已完成；当前候选两代固定点/完整host-seed三阶段来源链未证，不能沿用旧05的55。 | tests/selfhost.cx有prior来源验证缺口，README已修正N22定义/失效入口；下一刀补来源与新重建。 |
+| 资源与RI室 | 新根RI26、snapshot共享C源适配265/87分配故障点均0；事务失败空输出，保留校验字节，堆/fd/FILE释放。Windows/完整消费者RI/预算仍未覆盖。 | out/c43-resources-installed-08.log、out/c43-snapshots-installed-08.log；原红保留，材料仅PREPARED，未冒充CX重写。 |
+| 资格与发布室 | P46只有Linux x86_64具名局部合同；完整清单、自举、实际外宿主待验；CI只是手动入场草稿。 | --all仍3；未签名/未Draft/未Latest/未公开。C44-RUN-REUSE-01仅设计，当前无启动提速结论。 |
 
 旧M7/固定HEAD、旧CI/宿主交接、窗口计数与准备过程已移至[历史记忆快照](archive/prd-c43-pre-native-qualification-20261025.md)。本表只保留当前目标、能力、缺口和入口；原始身份、红/UNKNOWN与回退均未删除。
 
@@ -244,7 +244,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 <a id="flow-net-contracts"></a>
 ### 3.0 流/网合同三表与进度
 
-七流真源：[exec/pipeline/image-stages.tsv](exec/pipeline/image-stages.tsv)；十八网真源：[unisa/gold.py 的 STAGES](unisa/gold.py)，金表位于 weights/gold/。逻辑完整输入与拆分方案以[tests/STAGE-IDENTITIES.md](tests/STAGE-IDENTITIES.md)为准，本节汇总现有物理管道及观测。
+七流真源：[exec/pipeline/image-stages.tsv](exec/pipeline/image-stages.tsv)；十八网真源：[unisa/gold.py 的 STAGES](unisa/gold.py)，金表位于 weights/gold/。逻辑完整输入与拆分方案保留在[归档身份义务](archive/testing-c43-legacy/tests/STAGE-IDENTITIES.md)，不作为当前执行入口，本节汇总现有物理管道及观测。
 
 **逻辑边界不等于物理嵌套。** parse/type等逻辑阶段目前集成于e3，enc/image集成于elf，不声称已有独立产物。七流模型并非十八张ask事实网的简单一对一替换；下表消费关系含经典ask定位与产品归属，不能只因同名pp就把有限金表的叶证据当完整E2验证。流级封不推出内嵌每张网有独立封存。出货闸模块口径：**网格** `tests/netseal.cx`，**流格** `tests/streamseal.cx` + 叶内 `cell.tsv`（详见 `tests/SEAL-MODULES.md`）；e1/e4/prune/elf 已挂 streamseal，e2/e3/lower/pp 见该文「暂不合形状」。聚合测套 `./tests/seal-modules.sh`（闸 job `seal-modules`，contract 层，~25s）：manifest+x流×y网适用性检查 + 4 流封 + 17 网封回放；登记表 `tests/seal-modules.manifest.tsv`。
 
@@ -574,10 +574,10 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 
 ## 4. 质量体系
 
-- 断言按 contract / stage / pipeline / platform 分账，见 [tests/GATE-LAYERS.md](tests/GATE-LAYERS.md)；局部绿不代全链，未覆盖不计通过。
-- 清单、来源身份、实际受试字节与原始结果分别可核；C99覆盖见 [tests/c99/clauses.tsv](tests/c99/clauses.tsv)，测试入口见 [tests/INVENTORY.md](tests/INVENTORY.md)。
+- 新合同按网、流、接口、产品、库/ABI和平台分账，当前覆盖见[tests/coverage.tsv](tests/coverage.tsv)，批次见[tests/batches.tsv](tests/batches.tsv)；[归档层次](archive/testing-c43-legacy/tests/GATE-LAYERS.md)只保留历史义务。局部绿不代全链，未覆盖不计通过。
+- 清单、来源身份、实际受试字节与原始结果分别可核；旧C99条款与原失败见[归档条款账本](archive/testing-c43-legacy/tests/c99/clauses.tsv)，当前入口是 `sh ./unisacc.com tests/run.cx -- --smoke|--all|--list`。[旧清单](archive/testing-c43-legacy/tests/INVENTORY.md)不恢复调度。
 - 当前开发按具名差集及必要合同门推进，准备/构造与测量单列预算；不得因历史流水线描述自动全量打包、重封或恢复旧队列。
-- 发布流程权威入口：[release/RELEASE-PIPELINE.md](release/RELEASE-PIPELINE.md)、[release/README.md](release/README.md)及工作流。当前目标已授权公开发布；新候选固定点与M7终态待收口，旧1142项队列已停窗，不能作为新候选验收（见§2）。
+- 发布流程材料见[release/RELEASE-PIPELINE.md](release/RELEASE-PIPELINE.md)、[release/README.md](release/README.md)。当前明确禁止签名、Draft、Latest及公开；历史授权不沿用。先完成新清单与同候选平台证据，再按明确新授权处理发布；旧队列不恢复（见§2）。
 
 ## 5. 路线
 
