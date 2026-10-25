@@ -227,6 +227,172 @@ hashes. All seven were actually executed on P53:68 checks with zero failures,
 `out/c43-ri-chain-control-*-11.log`. Native and chain control preparation or a
 single valid clone cannot stand in for the other negative controls.
 
+The four `ri-flow-*` batches use actual current P53 production P3 models, with
+two explicit materials (`ri-flow-runtime`, `ri-flow-data`) and one CASE per
+55-second parent command. [tools/ri.md](../tools/ri.md) describes their full
+scope and identity contract. Prepare source, compile, seal and derive data as
+separate bounded commands:
+
+```sh
+tools/bound 55 sh ./unisacc.com tools/ri-material.cx -- ROOT NEW_RUNTIME tests/cases/ri-flow.cx
+tools/bound 55 sh ./unisacc.com tools/ri-flow-material.cx -- compile ROOT RUNTIME
+tools/bound 55 sh ./unisacc.com tools/ri-flow-material.cx -- seal ROOT RUNTIME
+tools/bound 20 RUNTIME/flow-native prepare ROOT/unisacc.com NEW_DATA
+tools/bound 55 sh ./unisacc.com tests/ri-flow.cx -- ROOT RUNTIME DATA NEW_ABS_RUN CASE_ID
+```
+
+The initial generic command prepares source only; do not replace it with the
+generic `--build`. Profile `compile` records COMPILED pending material, and
+only `seal` records PREPARED. This profile uses default libc trimming with
+explicit `-O2 -b lnx/x86_64 -o -` flags. DATA preparation runs the actual E2,
+E1 and E3 models and binds all derived bytes and directory inventory, raw
+product, native runtime and literal source identities. It constructs no new
+weights and adds no P3 decoder. None of these preparation states is a test PASS.
+
+Select `e3-empty`, `e3-absent`, `e3-missing` or `e3-to-lower`, each with a fresh
+run directory. The first three share `ri.production-e3-presence`, which requires
+all three cases: actual E3 SC2 events must show PRESENT-empty, explicit ABSENT
+or MISSING fallback to real E1 attributes, followed by native exit oracles
+0/0/7. The fourth maps to `ri.production-e3-lower-binding`: upstream snapshot
+identity uses real E3 tokens, while lower capture uses the distinct actual
+lower input after tapecheck/e4/prune. The final constructor image must exit7;
+lower is not assumed to fetch attributes. Runtime module verification, complete
+data identity and input/product/runtime hashes are checked before and after.
+
+Profile compile and seal each completed within55 seconds and DATA preparation
+within20 seconds. All four independent parents completed12 checks with zero
+failures each under their original55-second bounds:
+`out/c43-ri-flow-{e3-empty,e3-absent,e3-missing,e3-to-lower}-01.log`.
+The generated ELF programs actually exited0/0/7/7. The first three runs checked
+the real E3 attributes fetch: PRESENT with length0, ABSENT with length0, and
+MISSING fallback PRESENT with length13 and exact E1 bytes. Lower capture
+observed zero attributes fetches; its case proves the actual input identity
+and production chain, not lower consumption of attributes. These functional
+observations remain separate from preparation. The adapter retains actual C P3/model,
+RI and snapshot implementation under its existing library guard, excluding the
+standalone CLI. This is production-model consumer evidence, not installed CLI
+integration, complete RI qualification or foreign-host execution. The broad
+`ri` obligation remains NOT_READY. The separately registered fixed-P3 HOST chain
+below does not turn this local RI evidence into complete N22 or foreign-host
+qualification. Internal phases remain UNMEASURED.
+
+The eleven independent flow-material control batches use the same separately
+prepared materials above. Each command owns a fresh absolute output directory
+and its own55-second limit; there is no aggregate invocation:
+
+```sh
+tools/bound 55 sh ./unisacc.com -O2 tests/ri-flow-controls.cx -- ROOT RUNTIME NEW_ABS_PROFILE_CONTROL CASE
+tools/bound 55 sh ./unisacc.com tests/ri-flow-data-controls.cx -- ROOT RUNTIME DATA NEW_ABS_DATA_CONTROL CASE
+```
+
+The nine profile CASEs are `valid`, `unsealed`, `elf-flip`, `pending-flip`,
+`final-flip`, `closure-field`, `old-v1`, `recompile` and `reseal`.
+The required `ri-flow-runtime` material is a successfully sealed v2 profile:
+`runtime.c`, `material.tsv`, `flow-native`, `flow-native.pending.tsv`
+and `flow-native.tsv`. Pending COMPILED output alone and old single-step
+receipts are ineligible. The test clones these five leaves, verifies the original,
+then verifies or requests an immediately rejected compile/seal on the private
+copy. It checks precise refusal names, empty stdout, unchanged originals and
+unchanged private leaves after each command, including an absent final receipt.
+It does not successfully compile, seal or execute a model.
+
+Profile controls import the actual profile module and run its functions in a
+child reexecution of the live test ELF. Linux `/proc` access is required.
+The still-live parent's `/proc/PID/exe` is bound to `/proc/self/exe` by
+device/inode/size, and each child checks the full executing-image SHA. Passing
+literal `/proc/self/exe` through the watchdog would select the watchdog image.
+This avoids recompiling a thin CLI for each child; it caches no artifact or
+verdict. Both child commands retain18-second bounds. Each child writes
+`original.status` or `control.status` alongside stdout/stderr, containing
+the actual rc; a runner error without a reliable rc records UNAVAILABLE and
+fails. The original valid01 failure and separate O2 probe remain development
+failures with incomplete rc evidence; their precise causes are not established.
+The live-image valid02 completed13 checks with zero failures within55 seconds,
+with original/control rc0. The O0 elf-flip02 run subsequently failed its original
+material prerequisite with actual rc142 and empty stderr, retained in its
+original.status; it reached no negative-control assertion and is not a PASS.
+All nine03 cases, explicitly invoking the controller with -O2 as above, then
+completed133 assertions with zero failures (13 valid plus eight times15), each
+within the original55-second parent and18-second child bounds. Their status
+files retain actual original/control rc0/0 for valid and rc0/2 for refusals.
+This optimization applies to the controller and its reused live ELF; no profile
+tool, module, material or deadline was changed.
+
+The twelve-column batch schema has no compilerflags field. SOURCE entry must
+remain exactly the source path, and args describes runtime arguments. The table
+is metadata without an executor, so -O2 is documented in this manual command
+and the exact coverage description; it is not inserted into entry or args.
+No future default dispatch configuration or automatic -O2 execution is claimed.
+
+DATA CASEs are `extra-empty` and `declared-empty-remove`. Both require the
+same sealed runtime plus separately PREPARED `ri-flow-data`. They clone every
+regular file and directory, including empty directories, and reject special
+leaves. The second case first establishes a valid private receipt containing
+an explicit empty DIR row. An added undeclared directory or removal of the
+declared directory must then yield rc90, empty stdout and the exact
+`data identity or full inventory changed` reason; restoring only the directory
+state must verify successfully. Three native verify calls each retain an8-second
+bound. Original DATA tree, all five runtime leaves and raw product hashes are
+checked before/after. Each DATA case completed15 checks with zero failures
+within55 seconds in `out/c43-ri-flow-data-control-{extra-empty,declared-empty-remove}-01.log`.
+
+The exact IDs are `construction.ri-flow-profile-eligibility` and
+`construction.ri-flow-data-dir-inventory`. All nine and both cases respectively
+belong to their finite obligations. These are material identity/refusal controls;
+they do not add NN/RI functional coverage, installed CLI or foreign-host
+qualification. The19 broad unresolved obligations remain open. Internal phase
+and cold/hot timing remain UNMEASURED.
+
+The `hostseed-fixed-p3` batch registers only
+`bootstrap.fixed-p3-driver-lineage`, with explicit context, models, payload and
+three-generation material inputs. Preparation uses one step per command and
+one new context; all paths supplied to these tools must be absolute:
+
+```sh
+tools/bound 55 sh ./unisacc.com tools/hostseed-step.cx -- --bootstrap-ident ROOT NEW_CONTEXT /usr/bin/cc
+tools/bound 55 sh ./unisacc.com tools/hostseed-step.cx -- --bootstrap-host ROOT CONTEXT
+tools/bound 55 sh ./unisacc.com tools/hostseed-step.cx -- ROOT CONTEXT native CONTEXT/HOST MODELS PAYLOAD STAGE1 slice-lnx/x86_64
+tools/bound 55 sh ./unisacc.com tools/hostseed-step.cx -- ROOT CONTEXT native CONTEXT/HOST MODELS PAYLOAD STAGE1 wrap
+tools/bound 55 sh ./unisacc.com tools/hostseed-step.cx -- ROOT CONTEXT ape STAGE1/unisacc-seed.com MODELS PAYLOAD STAGE2 slice-lnx/x86_64
+tools/bound 55 sh ./unisacc.com tools/hostseed-step.cx -- ROOT CONTEXT ape STAGE2/unisacc-seed.com MODELS PAYLOAD STAGE3 slice-lnx/x86_64
+tools/bound 55 sh ./unisacc.com tests/hostseed-chain.cx -- ROOT CONTEXT MODELS PAYLOAD STAGE1 STAGE2 STAGE3 NEW_ABS_CHECK
+```
+
+Before each generation's wrap, run all five independent slice steps:
+`slice-win/x86_64`, `slice-lnx/x86_64`, `slice-lnx/arm64`,
+`slice-osx/x86_64`, `slice-osx/arm64`. The abbreviated commands above show the
+Linux slice only; every generation also needs its own `wrap`, using that
+generation's indicated builder. No wrapper aggregates the five compilations
+under a relaxed timeout. Ident compilation has a15-second child bound, native
+C HOST compilation35 seconds, each slice or wrap40 seconds; parent commands
+retain55 seconds. The checker uses bounded read-only verification, not builds.
+
+The native HOST is compiled by the explicitly resolved host CC from current
+`exec/c/compiler.c`, using the C core with no ASM defines. Each five-target
+driver is built from `exec/c/asmcompiler.c` at `-O2`; wrap executes `seed/ape.c`
+through the actual builder's default-run, without `APE_ZLIB`. New receipts bind
+full source identity, CC path/version/binary SHA, helper source/binary SHA,
+actual builder kind/path/full SHA and its parent wrap receipt. They also bind
+MODELS and PAYLOAD: the payload must exactly match the declared current P53
+product's terminal P3 bytes. These are preparation receipts, not saved PASS.
+
+`out/c43-hostseed-chain-01.log` records40 assertions with zero failures.
+HOST-to-stage1, stage1-to-stage2 and stage2-to-stage3 were actually constructed;
+all three full products are P53. The checker reverified the source and actual
+parent edges before/after, compared all five stage2/3 slices and complete wraps,
+and compared stage3 against the declared current candidate, preserving all input
+identities. This is separate from the earlier two-generation58-check contract.
+
+NN models and packaged ASM kernel binaries remain explicit trusted inputs;
+their source construction was not replayed. The initial full-source observation
+uses the installed root before the new CC-built identity helper independently
+remeasures it. Host CC subtools, linker, system headers and libraries remain
+declared dependencies, not a hermetic toolchain proof. Unsigned receipts establish
+consistency, not independent historical execution proof. The broad `bootstrap`
+and planned `full-bootstrap` obligations remain NOT_READY: this finite fixed-P3
+driver chain is not complete host-seed/N22 or same-candidate foreign-host
+qualification. Internal phase and cold/hot timing remain UNMEASURED.
+
 All new registrations describe available code, not qualification state.
 The metadata inventory labels named-material batches UNPREPARED; an operator
 must separately supply and verify the actual material. `--all` still lists

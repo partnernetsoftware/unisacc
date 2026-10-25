@@ -1,0 +1,47 @@
+/* ROOT RUNTIME_MAT DATA_MAT NEW_ABS_OUT CASE. Caller bound 55.
+ * CASE extra-empty | declared-empty-remove. Three native verify children,
+ * each bound 8. Copies prepared data, never constructs or evaluates NN. */
+#pragma unisa use cxlib.netpack
+typedef struct {char *name;int directory;size_t bytes;char hash[65];} Entry;
+static Entry entries[512];static int count,assertions,failures;
+static char root[4096],runtime[4096],data[4096],work[4096],copydir[4400],product[4400],native[4400],bound[4400];
+static void die(const char *s){fprintf(stderr,"ri-flow-data-controls: %s errno=%d\n",s,errno);exit(2);}
+static void ck(int ok,const char *s){assertions++;if(!ok)failures++;printf("%s\tri-flow-data-controls.%s\n",ok?"PASS":"FAIL",s);}
+static void path(char *p,const char *a,const char *b){int z=snprintf(p,4400,"%s/%s",a,b);if(z<0||z>=4400)die("path bound");}
+static char *load(const char *p,size_t *n){struct stat a,b;errno=0;if(lstat(p,&a))die(errno==ENOENT?"input absent":"input stat");if(!S_ISREG(a.st_mode)||a.st_size<0||a.st_size>16777216)die("bounded regular input");int fd=open(p,O_RDONLY|O_CLOEXEC|O_NONBLOCK|O_NOFOLLOW);if(fd<0)die("input open");if(fstat(fd,&b)||!S_ISREG(b.st_mode)||a.st_dev!=b.st_dev||a.st_ino!=b.st_ino||a.st_size!=b.st_size){close(fd);die("input identity");}*n=(size_t)a.st_size;char *s=malloc(*n+1);if(!s){close(fd);die("allocation");}size_t at=0;while(at<*n){ssize_t z=read(fd,s+at,*n-at);if(z<0&&errno==EINTR)continue;if(z<=0){close(fd);free(s);die("input extent");}at+=(size_t)z;}char extra;ssize_t z;do{z=read(fd,&extra,1);}while(z<0&&errno==EINTR);int changed=fstat(fd,&b)||a.st_dev!=b.st_dev||a.st_ino!=b.st_ino||a.st_size!=b.st_size;int closed=close(fd);if(z||changed||closed){free(s);die("input changed or close");}s[*n]=0;return s;}
+static void digest(const char *p,char h[65]){size_t n;char *s=load(p,&n);cx_sha256_hex(s,n,h);free(s);}
+static void put(const char *p,const char *s,size_t n,int fresh){int fd=open(p,O_WRONLY|O_CLOEXEC|O_NOFOLLOW|(fresh?(O_CREAT|O_EXCL):O_TRUNC),0600);if(fd<0)die("private output open");size_t at=0;while(at<n){ssize_t z=write(fd,s+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0){close(fd);die("private write");}at+=(size_t)z;}if(close(fd))die("private close");}
+static int inside(const char *p,const char *d){size_t n=strlen(d);return !strncmp(p,d,n)&&(!p[n]||p[n]=='/');}
+static void newout(const char *arg){if(arg[0]!='/'||strlen(arg)>=sizeof work||strpbrk(arg,"\r\n\t"))die("absolute new output");char tmp[4096],parent[4096],leaf[4096];strcpy(tmp,arg);char *s=strrchr(tmp,'/');if(!s||!s[1]||!strcmp(s+1,".")||!strcmp(s+1,".."))die("output leaf");strcpy(leaf,s+1);if(s==tmp)s[1]=0;else *s=0;if(!realpath(tmp,parent))die("output parent");int z=snprintf(work,sizeof work,"%s%s%s",parent,strcmp(parent,"/")?"/":"",leaf);if(z<0||(size_t)z>=sizeof work||inside(work,data)||inside(work,runtime))die("output overlaps input");if(mkdir(work,0700))die("fresh output required");}
+static int compare(const void *a,const void *b){return strcmp(((const Entry *)a)->name,((const Entry *)b)->name);}
+static void walk(const char *base,const char *rel,int depth){if(depth>24)die("tree depth");char p[4400];if(*rel)path(p,base,rel);else{if(strlen(base)>=sizeof p)die("tree base bound");strcpy(p,base);}struct stat st;if(lstat(p,&st))die("tree stat");if(!S_ISDIR(st.st_mode)&&!S_ISREG(st.st_mode))die("tree special leaf");if(*rel){if(count==512||strpbrk(rel,"\r\n\t"))die("tree inventory bound or wire");Entry *e=&entries[count++];e->name=strdup(rel);if(!e->name)die("entry allocation");e->directory=S_ISDIR(st.st_mode);if(!e->directory){size_t n;char *s=load(p,&n);e->bytes=n;cx_sha256_hex(s,n,e->hash);free(s);}}
+ if(S_ISDIR(st.st_mode)){DIR *d=opendir(p);if(!d)die("tree directory open");for(;;){errno=0;struct dirent *ent=readdir(d);if(!ent){int saved=errno;int closed=closedir(d);if(saved||closed)die("tree directory read or close");break;}if(!strcmp(ent->d_name,".")||!strcmp(ent->d_name,".."))continue;char child[4400];int z=snprintf(child,sizeof child,"%s%s%s",rel,*rel?"/":"",ent->d_name);if(z<0||(size_t)z>=sizeof child){closedir(d);die("tree relative path bound");}walk(base,child,depth+1);}}
+}
+static void collect(const char *base){for(int i=0;i<count;i++)free(entries[i].name);count=0;walk(base,"",0);qsort(entries,(size_t)count,sizeof entries[0],compare);}
+static void treehash(const char *base,char h[65]){collect(base);np_buf b={0};for(int i=0;i<count;i++){Entry *e=&entries[i];np_puts(&b,e->directory?"DIR\t":"file\t");np_puts(&b,e->name);if(!e->directory){np_puts(&b,"\t");np_putll(&b,(long long)e->bytes);np_puts(&b,"\t");np_puts(&b,e->hash);}np_puts(&b,"\n");}cx_sha256_hex(b.p,b.n,h);free(b.p);}
+static void clone(void){char a[4400],b[4400];for(int i=0;i<count;i++){Entry *e=&entries[i];path(a,data,e->name);path(b,copydir,e->name);if(e->directory){if(mkdir(b,0700))die("clone directory");}else{size_t n;char *s=load(a,&n),h[65];cx_sha256_hex(s,n,h);if(n!=e->bytes||strcmp(h,e->hash))die("original changed while copying");put(b,s,n,1);free(s);}}}
+static np_result verify(const char *label){if(unsetenv("UNISACC_RF_CAPTURE")||unsetenv("UNISA_ATTRIBUTES"))die("clear ambient resources");char *v[]={bound,"8",native,"verify",product,copydir,0};np_result r;char why[1400],p[4400],name[100];if(np_run(v,root,0,10,&r,why,sizeof why))die(why);snprintf(name,sizeof name,"%s.stdout",label);path(p,work,name);put(p,r.out,r.outn,1);snprintf(name,sizeof name,"%s.stderr",label);path(p,work,name);put(p,r.err,r.errn,1);return r;}
+static int accepted(np_result *r){const char *s="VERIFIED\tri-flow-data\tno-test-result\n";return !r->rc&&!r->errn&&r->outn==strlen(s)&&!memcmp(r->out,s,r->outn);}
+static int refused(np_result *r){const char *s="ri-flow: REFUSE data identity or full inventory changed errno=";size_t n=strlen(s);if(r->errn<=n+1||memcmp(r->err,s,n)||r->err[r->errn-1]!='\n')return 0;for(size_t i=n;i+1<r->errn;i++)if(r->err[i]<'0'||r->err[i]>'9')return 0;return 1;}
+int main(int argc,char **argv){
+#if !defined(__linux__) || !defined(__x86_64__)
+ fputs("NOT_RUN ri-flow-data-controls requires Linux/x86_64\n",stderr);return 3;
+#endif
+ if(argc!=6||!realpath(argv[1],root)||!realpath(argv[2],runtime)||!realpath(argv[3],data))return 2;int declared=!strcmp(argv[5],"declared-empty-remove");if(!declared&&strcmp(argv[5],"extra-empty"))return 2;
+ newout(argv[4]);path(copydir,work,"copy");if(mkdir(copydir,0700))die("private clone directory");path(product,root,"unisacc.com");path(native,runtime,"flow-native");path(bound,root,"tools/bound");
+ const char *watch[]={"runtime.c","material.tsv","flow-native","flow-native.pending.tsv","flow-native.tsv"};char before[5][65],bootstrap[65],datahash[65],after[65],p[4400];digest(product,bootstrap);for(int i=0;i<5;i++){path(p,runtime,watch[i]);digest(p,before[i]);}treehash(data,datahash);clone();char copied[65];treehash(copydir,copied);ck(!strcmp(datahash,copied),"full-data-clone-including-directories");
+ char empty[4400],receipt[4400];const char *leaf="zz-empty-control";path(empty,copydir,leaf);struct stat st;errno=0;if(!lstat(empty,&st)||errno!=ENOENT)die("control directory must be absent");path(receipt,copydir,"material.tsv");
+ if(declared){
+  /* The private control receipt declares this genuine empty directory. Require
+   * lexical-last placement instead of assuming a future recipe's file names. */
+  collect(copydir);for(int i=0;i<count;i++)if(strcmp(entries[i].name,leaf)>=0)die("control DIR must sort after every original entry");
+  if(mkdir(empty,0700))die("declared control directory");size_t n;char *s=load(receipt,&n);if(!n||s[n-1]!='\n'||memchr(s,0,n))die("control receipt wire");np_buf b={0};np_put(&b,s,n);np_puts(&b,"DIR\tzz-empty-control\n");put(receipt,b.p,b.n,0);free(s);free(b.p);
+ }
+ char baselinehash[65],recovered[65];treehash(copydir,baselinehash);np_result r=verify("baseline");int valid=accepted(&r);ck(valid,declared?"declared-empty-DIR-valid-baseline":"original-inventory-valid-baseline");if(!valid){if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);die("valid copied-data prerequisite");}np_free(&r);
+ if(declared){if(rmdir(empty))die("remove declared empty directory");}else if(mkdir(empty,0700))die("add undeclared empty directory");
+ char mutationhash[65];treehash(copydir,mutationhash);r=verify("negative");ck(r.rc==90,"inventory-mutation-rc90");ck(!r.outn,"inventory-mutation-empty-stdout");ck(refused(&r),"inventory-mutation-exact-reason");np_free(&r);treehash(copydir,after);ck(!strcmp(mutationhash,after),"rejection-has-no-data-side-effect");
+ if(declared){if(mkdir(empty,0700))die("restore declared empty directory");}else if(rmdir(empty))die("remove undeclared empty directory");
+ r=verify("recovery");ck(accepted(&r),"restored-directory-state-verified");np_free(&r);treehash(copydir,recovered);ck(!strcmp(baselinehash,recovered),"restored-full-private-inventory");
+ treehash(data,after);ck(!strcmp(datahash,after),"original-data-full-tree-unchanged");for(int i=0;i<5;i++){path(p,runtime,watch[i]);digest(p,after);char label[120];snprintf(label,sizeof label,"original-%s-unchanged",watch[i]);ck(!strcmp(before[i],after),label);}digest(product,after);ck(!strcmp(bootstrap,after),"raw-root-unchanged");
+ puts("TIMING\tstartup_read_verify_output_cold_hot=UNMEASURED");printf("RI_FLOW_DATA_CONTROLS\tcase=%s\tassertions=%d\tfailed=%d\tscope=prepared-data-directory-inventory-no-NN-evaluation\n",argv[5],assertions,failures);return failures?1:0;
+}

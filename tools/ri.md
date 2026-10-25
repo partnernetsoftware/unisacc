@@ -26,7 +26,7 @@ Use new output directories for each command. The root product must be rebuilt
 after production inputs change; an old root can still serve as a named bootstrap.
 
 ```sh
-tools/bound 55 sh ./unisacc.com tests/resources.cx -- "$PWD" "$PWD/out/ri-map-new"
+tools/bound 30 sh ./unisacc.com tests/resources.cx -- "$PWD" "$PWD/out/ri-map-new"
 tools/bound 55 sh ./unisacc.com tests/resources.cx -- "$PWD" "$PWD/out/ri-trace-new" --trace
 tools/bound 55 sh ./unisacc.com tests/resources.cx -- "$PWD" "$PWD/out/ri-multi-new" --multi
 tools/bound 55 sh ./unisacc.com tests/resources.cx -- "$PWD" "$PWD/out/ri-output-new" --trace-output
@@ -88,6 +88,118 @@ and helper SHA explicitly, and preserves model and non-kernel resource bytes.
 It does not authorize arbitrary runtime changes or establish ABI equivalence.
 The rebuild verifier checks current source and receipt consistency; it does
 not independently reread the frozen baseline tree used by package refresh.
+
+The `ri-flow` adapter adds four separate production-model consumer cases over
+the current full P53 P3 package. It uses the actual C package loader and model
+executor, without another decoder or weight construction. Its existing
+`UNISA_RUNTIME_LIBRARY` guard excludes the unrelated standalone CLI and model
+enumerator; this is a source adapter, not installed CLI integration.
+
+Preparation is deliberately split. The generic material command below writes
+source only. Profile compilation uses default libc trimming with explicit
+`-O2 -b lnx/x86_64 -o -`, emits COMPILED pending material, and cannot claim
+PREPARED until a separate seal verifies it. Use a new runtime directory and
+new DATA directory, then a new run directory for every CASE:
+
+```sh
+tools/bound 55 sh ./unisacc.com tools/ri-material.cx -- "$PWD" "$PWD/out/ri-flow-runtime-new" tests/cases/ri-flow.cx
+tools/bound 55 sh ./unisacc.com tools/ri-flow-material.cx -- compile "$PWD" "$PWD/out/ri-flow-runtime-new"
+tools/bound 55 sh ./unisacc.com tools/ri-flow-material.cx -- seal "$PWD" "$PWD/out/ri-flow-runtime-new"
+tools/bound 20 "$PWD/out/ri-flow-runtime-new/flow-native" prepare "$PWD/unisacc.com" "$PWD/out/ri-flow-data-new"
+tools/bound 55 sh ./unisacc.com tests/ri-flow.cx -- "$PWD" "$PWD/out/ri-flow-runtime-new" "$PWD/out/ri-flow-data-new" "$PWD/out/ri-flow-empty-new" e3-empty
+```
+
+The other CASE_IDs are `e3-absent`, `e3-missing` and `e3-to-lower`, each as its
+own55-second command. DATA is derived by the real production E2/E1/E3 stages:
+literal constructor source yields actual E1 tokens and attributes, then E3
+tape and snapshots. The material inventory binds every file and directory,
+including empty directories, plus the full product/runtime and literal-source
+hashes. PREPARED DATA contains no saved test verdict.
+
+The three E3 cases require real model fetches observed through SC2, rather
+than added C lookup probes. PRESENT-empty and explicit ABSENT each mask the
+lower RI attributes; MISSING falls back to the attributes actually produced by
+E1. Their final native exit oracles are0/0/7. A legal ABSENT row is re-signed in
+COMMIT; the production snapshot writer is not changed. In `e3-to-lower`, the
+upstream snapshot binds actual E3 tokens. Tapecheck, E4 and prune remain in the
+route, and only the actual lower invocation is captured against its real input,
+whose bytes must differ from the upstream input. The final constructor image
+must exit7. Its observed lower attributes-fetch count does not justify a claim
+that lower consumes that key. Each parent directly verifies the runtime profile
+before/after, and the child verifies the entire DATA identity before/after.
+
+The profile compile/seal commands each completed under55 seconds and DATA
+preparation under20 seconds. All four independent parents completed12 checks
+with zero failures each under the unchanged55-second bound. Their actual logs
+are `out/c43-ri-flow-{e3-empty,e3-absent,e3-missing,e3-to-lower}-01.log`, and
+the generated ELF exits were0/0/7/7. Actual E3 fetches respectively showed
+PRESENT/length0, ABSENT/length0 and MISSING fallback PRESENT/length13 with exact
+E1 attribute bytes. Lower capture observed attributes-fetch count0: that case
+proves the true lower input identity and production route, not consumption of
+the attributes key. None of these results turns preparation or broad RI into
+PASS. The exact
+coverage IDs are `ri.production-e3-presence` and
+`ri.production-e3-lower-binding`. All four independent cases are required;
+this remains local source-adapter evidence over the named current package.
+
+Flow-profile eligibility and DATA-directory inventory controls are separate
+from the four functional parents. After the existing source/compile/seal/data
+preparation, use new private output directories and run one CASE per55-second
+command:
+
+```sh
+tools/bound 55 sh ./unisacc.com -O2 tests/ri-flow-controls.cx -- ROOT RUNTIME NEW_PROFILE_CONTROL CASE
+tools/bound 55 sh ./unisacc.com tests/ri-flow-data-controls.cx -- ROOT RUNTIME DATA NEW_DATA_CONTROL CASE
+```
+
+Profile CASEs: `valid`, `unsealed`, `elf-flip`, `pending-flip`,
+`final-flip`, `closure-field`, `old-v1`, `recompile`, `reseal`.
+All require the sealed v2 five-leaf runtime, not pending-only output. Original
+verification and the private control each use an18-second child. The child
+reexecutes the live parent ELF through Linux `/proc/PID/exe` and directly calls
+the actual profile module; parent file identity and full child executable SHA
+are checked. Linux proc access is a precondition. No thin CLI recompilation,
+successful profile construction, NN evaluation or verdict cache is involved.
+Actual child rc/stdout/stderr are retained in `original.status`/`control.status`
+and corresponding stream files; unavailable rc is explicit and fails.
+The old valid01 failure and separate O2 probe retain incomplete rc evidence,
+with precise causes uncertain. New valid02 passed13/0 with both child rc0.
+The later O0 elf-flip02 failed at original-material prerequisite rc142 with empty
+stderr, saved in original.status; no negative-control assertion ran, so that
+failure is not negative-control PASS evidence. All nine03 cases using manual
+-O2 controller invocation above passed133 assertions with zero failures
+(13 plus eight times15), each under the unchanged55/18-second parent/child
+limits. Actual original/control status files show rc0/0 for valid and rc0/2
+for refusals. Only the controller compilation option changed; profile tools,
+modules and prepared inputs were unchanged.
+
+The batch table has no compilerflags column and currently no executor. SOURCE
+entry is an exact source path; args is a runtime-argument template. The manual
+-O2 command and exact coverage description express this requirement without
+misplacing flags in entry/args or claiming future dispatcher support.
+
+DATA CASEs `extra-empty` and `declared-empty-remove` require the same runtime
+and separately prepared DATA. Both copy all regular leaves and directories,
+prove a valid baseline, demand exact rc90/empty stdout on the directory-only
+inventory mutation, and restore a valid state. The explicitly declared empty
+DIR case first proves its private modified receipt valid. Each of three native
+verify calls is bound8. Both cases actually passed15/0 within55; no NN is
+executed. Original DATA/full runtime/raw product hashes remain unchanged.
+
+The exact finite IDs are `construction.ri-flow-profile-eligibility` and
+`construction.ri-flow-data-dir-inventory`; [tests/README.md](../tests/README.md)
+documents all cases and evidence. Material controls do not clear the19 broad
+qualification gaps or turn PREPARED into functional PASS. Phase timings remain
+UNMEASURED.
+
+The separate `bootstrap.fixed-p3-driver-lineage` contract is now registered in
+[tests/README.md](../tests/README.md). Its actual HOST-to-stage1-to-stage2-to-stage3
+run completed40 checks with zero failures, and all three full products are P53.
+It binds actual parent receipts and preserves a fixed declared P3 payload; it
+does not reconstruct the NN or packaged ASM kernel sources. Initial source
+measurement remains root-assisted and host-toolchain dependencies are not
+hermetic. This evidence neither replaces RI consumers nor clears broad
+`bootstrap`/complete host-seed/N22 or native foreign-host qualification.
 
 Full RI/model-route coverage, all resource budgets, native foreign hosts and
 general memory safety remain separate qualification obligations. Phase timings
