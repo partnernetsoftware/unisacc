@@ -832,7 +832,13 @@ job lib-union-composite-direct-3-req sh ./unisacc.com -run tests/libraryunioncom
 job lib-union-composite-callback-3-plain sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases array5 --callback --pressures plain
 job lib-union-composite-callback-3-gp9 sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases array5 --callback --pressures gp9
 job lib-union-composite-callback-3-fp9 sh ./unisacc.com -run tests/libraryunioncompositecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --sanitize --require-cached --cases array5 --callback --pressures fp9
+if [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ]; then
+    for union16_case in is8 si8; do
+        job lib-union16-direct-1-$union16_case sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases "$union16_case" --sanitize
+    done
+else
 job lib-union16-direct-1 sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases is8,si8 --sanitize   # (.cx port, 2026-10-23)
+fi
 job lib-union16-callback-1 sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases is8,si8 --sanitize --callback
 job lib-union16-direct-2 sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases ss8,ii8 --sanitize
 job lib-union16-callback-2 sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases ss8,ii8 --sanitize --callback
