@@ -378,15 +378,35 @@ actual builder kind/path/full SHA and its parent wrap receipt. They also bind
 MODELS and PAYLOAD: the payload must exactly match the declared current P53
 product's terminal P3 bytes. These are preparation receipts, not saved PASS.
 
-`out/c43-hostseed-chain-01.log` records40 assertions with zero failures.
-HOST-to-stage1, stage1-to-stage2 and stage2-to-stage3 were actually constructed;
-all three full products are P53. The checker reverified the source and actual
-parent edges before/after, compared all five stage2/3 slices and complete wraps,
-and compared stage3 against the declared current candidate, preserving all input
-identities. This is separate from the earlier two-generation58-check contract.
+The current tool SHA is
+`293e069e71de8bdc8b27a62a70dbb8d452cdd47e9d192334840716f8c7080b1f`.
+Its CTX02 identity helper and HOST were actually rebuilt, then all18 independent
+slice/wrap steps of HOST-to-stage1-to-stage2-to-stage3 completed rc0 under the
+unchanged55-second parent. All three full products are P53. The strengthened
+checker in `out/c43-hostseed-chain-03.log` completed41 assertions with zero
+failures: source and actual parent edges are reverified before/after, all five
+stage2/3 slices and complete wraps are compared, and both stage1 and stage3
+are compared byte-for-byte with the current root product. CTX02 chain02's40
+checks and old CTX01 chain01's40 checks remain historical evidence; none is
+silently upgraded to41. This is separate from the two-generation58 contract.
+
+Single-step APE-parent admission now reads stage fields only to find ancestors,
+then reconstructs canonical stage bytes and all six actual artifact/full receipts
+from the context HOST forward. It binds source/context/HOST, actual parent edges,
+models/payload, builder identities and exact flags. Two independent physical
+reads and fresh source/dependency observations precede any new stage output;
+the actual step's completion rereads the ancestry and compares its full witness.
+Canonical-path, cycle and64-generation depth guards are implemented; cycle and
+depth refusals have not been independently tested. These endpoint observations
+do not establish atomicity or resistance to changes restored between reads.
+The explicit child maxima are40 plus three source observations of6 seconds,
+totalling58 before controller overhead, exceeding the outer55 hard bound. Actual
+success of the18 finite steps does not promise that every permitted64-generation
+ancestry or every combination of child maxima completes within55. The timeout
+has not been raised, and no assertions were removed.
 
 NN models and packaged ASM kernel binaries remain explicit trusted inputs;
-their source construction was not replayed. The initial full-source observation
+their Python NN/source and ASM construction was not replayed. The initial full-source observation
 uses the installed root before the new CC-built identity helper independently
 remeasures it. Host CC subtools, linker, system headers and libraries remain
 declared dependencies, not a hermetic toolchain proof. Unsigned receipts establish
@@ -484,7 +504,7 @@ The older `P46cfa11a/Sb9c0f819` generations08/09 also passed58 under30 seconds i
 
 Receipts are unsigned consistency records, not proof of historical process execution; product-context-v1 does not bind its builder. The saved prior builder's historical source and the original frozen7f709 source tree were not reproduced. The09 wrapped candidate needs no installation record; absence is explicitly NOT_RECORDED while its real construction receipts remain mandatory. This is neither host-seed three-stage N22 nor foreign-host execution qualification. Internal phase and cold/hot timing remain UNMEASURED.
 
-The seven `hostseed-control-*` batches register the separate exact obligation
+The eight `hostseed-control-*` batches register the separate exact obligation
 `bootstrap.fixed-p3-lineage-refusals`. They require the same prepared context,
 full current terminal-P3 MODELS product, exact declared PAYLOAD and three distinct
 complete generation directories as `hostseed-fixed-p3`. Run one CASE per fresh
@@ -495,7 +515,8 @@ tools/bound 55 sh ./unisacc.com -O2 tests/hostseed-controls.cx -- ROOT CTX MODEL
 ```
 
 CASE is `duplicate-generation`, `swapped-generations`, `wrong-payload`,
-`raw-models`, `wrong-native-builder`, `wrong-parent` or `duplicate-step`.
+`raw-models`, `wrong-native-builder`, `wrong-parent`, `duplicate-step` or
+`parent-receipt-builder-field`.
 The controller performs exactly one target command bounded at 20 seconds,
 including that target's default-run compilation, plus two independent source
 identity observations bounded at 8 seconds each. The explicit child budgets
@@ -519,8 +540,14 @@ reason; a rejected new output must remain absent.
 wrong actual parent builder. `duplicate-step` clones the complete 13-leaf G1
 generation and requests an already published step. Both writable probes target
 private copies only and compare complete private manifests afterward, preserving
-successful artifacts and receipts. Other cases leave original material read only.
-All seven independent cases completed with zero failures under the original
+successful artifacts and receipts. The new `parent-receipt-builder-field` case
+copies all13 G1 leaves, changes only its private wrap receipt's unique builder
+hash to64 zeroes, and requests `invalid-probe` through that private product. It
+requires exact `receipt-bytes-mismatch` before any new stage exists, plus complete
+preservation of both original materials and the private already-mutated copy.
+No compiler executes for `invalid-probe`.
+
+The old CTX01 seven01 cases completed with zero failures under the original
 55-second parent, 20-second target and two 8-second source-observation bounds:
 60 assertions in total (five cases with 8 each, plus `wrong-parent` and
 `duplicate-step` with 10 each). Actual logs are
@@ -528,21 +555,32 @@ All seven independent cases completed with zero failures under the original
 `duplicate-generation` used default-run compilation; the other six controllers
 used explicit manual `-O2`. Each target's expected refusal returned actual rc2
 with empty stdout and its exact named reason; each enclosing case returned rc0.
-The two private-copy cases also preserved their complete private manifests.
+The two historical private-copy cases also preserved their complete manifests.
+Those60 assertions are historical and do not qualify the new tool/context.
+New-tool CTX02 `parent-receipt-builder-field`02 completed11/0 before the
+chain checker's source changed to add its41st assertion; it remains that earlier
+observation. All eight current-checker03 cases have now independently returned
+actual outer rc0 with71 assertions and zero failures (five times8, twice10 and
+one11), using tool
+`293e069e71de8bdc8b27a62a70dbb8d452cdd47e9d192334840716f8c7080b1f`.
+All eight controllers used explicit manual `-O2`, with unchanged55-second
+parents, 20-second targets and two8-second source observations. Logs are
+`out/c43-hostseed-control-{duplicate-generation,swapped-generations,wrong-payload,raw-models,wrong-native-builder,wrong-parent,duplicate-step,parent-receipt-builder-field}-03.log`.
+These71 checks are fresh CTX02/current-checker evidence, separate from the
+historical60/0 and earlier field-only11/0. The current CTX02 chain03 result is
+41/0, including the first generation's full bytes versus the root; none of the
+old chain40 results is silently upgraded.
 
 The registry has no compilerflags field or executor. SOURCE entry remains the
 exact source path and args remains a runtime argument template; the controller
 `-O2` requirement is expressed by this manual command and coverage description,
 not encoded as a dispatcher feature.
 
-The single-step APE-parent preflight is weaker than the final canonical chain
-verifier: it does not reconstruct every parent receipt field. The fixture
-records a private wrap-builder-field mutation/invalid-step reproducer as
-NOT_RUN, beyond these seven vectors; it may reach a private stage-context write
-where the final chain's canonical receipt comparison would reject the receipt.
-This is an explicit admission limitation, not a proved bypass, an actual
-candidate-tampering result or evidence that all parent-field mutations have
-been tested. These finite refusals do not establish hermetic host dependencies,
+Current single-step admission canonically verifies the complete parent chain
+before writing a new stage; the earlier weak-preflight limitation belongs to
+the historical tool, not this current contract. The new field-mutation case
+tests that precise former gap. Other parent-field mutations and the cycle/depth
+guards are not claimed independently tested. These finite refusals do not establish hermetic host dependencies,
 NN/ASM source reconstruction, historical process execution, complete host-seed
 N22 or foreign-host qualification. The 19 broad gaps remain open. Internal phase
 and cold/hot timing remain UNMEASURED.
@@ -623,3 +661,67 @@ results. The 19 broad gaps remain open, including complete formats and negative
 domains. Mach-O/COFF unit objects, system-linker interoperability and foreign
 native execution are not qualified. Internal phase and cold/hot timings remain
 UNMEASURED.
+
+Two separate PP batches now use the explicit `pp-gold` material:
+`pp-source-constructed` maps to `net.pp-source-constructed`, and
+`pp-gold-controls` maps to `construction.pp-gold-recipe-refusal`. Both are
+SOURCE/Linux x86_64 commands with independent55-second limits and fresh
+absolute output directories. Prepare once, verify separately, then execute
+each parent independently:
+
+```sh
+tools/bound 55 sh ./unisacc.com tools/pp-gold-material.cx -- prepare ROOT NEW_PP_MATERIAL
+tools/bound 20 sh ./unisacc.com tools/pp-gold-material.cx -- --verify ROOT PP_MATERIAL
+tools/bound 55 sh ./unisacc.com tests/pp-constructed.cx -- ROOT PP_MATERIAL NEW_PP_RUN
+tools/bound 55 sh ./unisacc.com tests/pp-gold-controls.cx -- ROOT PP_MATERIAL NEW_PP_CONTROL
+```
+
+The constructor derives six disjoint cubes from the fixed pp rule source for
+nine directives and two defined states. It writes new142-byte mask/sparse-W2
+weights, an observation harness and an identity receipt. The real deploy C math
+is precisely extracted from `unisa/ckernel.py`'s raw `KERNEL_BODY` before
+its main; neither Python nor `np_convert` executes. No old weight values are
+used to construct the new NN. The current MAT01 weights SHA is
+`2fd7181593523ce306cbcf0825b2d6ebd5dde3f69cf17762e8beeb6ebf25e609`;
+the extracted math-body SHA is
+`463b02ddd20c31182cbf90458b7cf308992f903b931bbdd8d355d38edee52eb2`.
+
+The functional parent owns independent handwritten18-label and72-score oracles.
+A single8-second default-run observation child calls the actual extracted
+`infer()` for all18 keys, all four logits and unique winning classes,22 field
+refusals/recoveries and four stage/head refusals/recoveries. It reports raw
+results without PASS labels. In the same process it loads a separate private,
+structurally valid candidate with one W2 changed from1 to2 and must actually
+produce scores `{2,0,0,0}`, versus baseline `{1,0,0,0}`; a receipt refusal
+is not inference-sensitivity evidence. The parent checks actual loaded-model
+SHA, exact rows, no extra output, lifecycle and input identities. Before/after
+material verification each retains its20-second child bound.
+
+The material control first verifies an exact private three-leaf clone, changes
+only its first sparse W2 to2 and synchronizes the private receipt's unique
+model-SHA field. Verification must still return2 with empty stdout and the exact
+canonical-unit/class/weight reason, preserving both originals and private
+mutated bytes. Its two verify children retain20-second bounds and its final
+fresh source observation8 seconds. Baseline verify is pure read: it checks every
+one of the142 bytes against the fixed six-cube mask/count/unit/head/class/W2=1
+fields, repeats source/content endpoints and rereads the receipt; it does not
+call the constructor or reconstruct weights. W2=2 is a valid NN for the separate
+inference experiment, but is not this canonical baseline recipe.
+
+On P53/S447, MAT01 prepare55 and verify20 completed rc0 in
+`out/c43-pp-gold-material-{prepare,verify}-01.log`, solely as PREPARED/VERIFIED
+no-test-result material observations. The actual functional parent completed
+92 assertions with zero failures in `out/c43-pp-constructed-01.log`; the
+separate recipe control completed23/0 in `out/c43-pp-gold-controls-01.log`.
+Both enclosing commands returned0 within their original55-second limits;
+child budgets were not relaxed or assertions removed.
+
+Python files remain text dependencies for the gold rules and C math. Full source
+identity observation hashes the existing closure, including old weight files;
+the startup product remains trusted and may carry existing models. Thus new PP
+weight-value construction is independent of old weight values, while the entire
+execution closure is not claimed Python-source-free or globally model-unread.
+No P3/product/generated-kernel source was changed. Neither byte equality with old
+weights, all18 NN source reconstruction, foreign-host qualification nor atomic
+snapshot/ABA protection is claimed. The19 broad gaps remain open. Internal
+phase and cold/hot timings remain UNMEASURED.
