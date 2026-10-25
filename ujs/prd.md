@@ -18,8 +18,10 @@
 |---|---|---|
 | **0.0.1** | ✓ host1 基线 | [`plans/v0.0.1.md`](plans/v0.0.1.md) |
 | **0.0.2** | ✓ 生产力合同（预言／CLI／身份） | [`plans/v0.0.2.md`](plans/v0.0.2.md) |
-| **0.0.3** | 下一刀 · 调度第一刀 | [`plans/v0.0.3.md`](plans/v0.0.3.md) |
-| 0.0.4+ | 跑／验 · Paper B 最小补丁 | [`plans/roadmap-0.0.x.md`](plans/roadmap-0.0.x.md) |
+| **0.0.3** | 下一刀 · **`.py`／`.c`→`.cx` 优先** + 调度 | [`plans/v0.0.3.md`](plans/v0.0.3.md) · [`plans/cx-migration.md`](plans/cx-migration.md) |
+| 0.0.4+ | 构造续迁 · 跑／验 · Paper B 补丁 | [`plans/roadmap-0.0.x.md`](plans/roadmap-0.0.x.md) |
+
+**残余语言债（非 product/）**：树内仍有构造臂 `.py`、path-A `.c`、薄 `.sh`——**已提优先**，按 `cx-migration.md` 波次压；`ujs/product/` 产品链已无 `.c`／`.py`。
 
 版号真源：`ujs.com --version`（**`ujs.com 0.0.2`**）与上表；**不**用根仓 `plans/v0.0.4x` 代替本系列。
 
