@@ -10,45 +10,35 @@
 
 ```
   ┌──────────── 种子 seed/ ─────────────────────────────────────────────┐
-  │  construct/   Python：catalog·gold·oracle·front·jtape·emit·build…    │
-  │  stage0/      compiler_min.cx（host）· iterate/compiler.wasm（已提交） │
-  │  vm/          ujs_vm.c 等 path-A VM 源                              │
-  └──────┬───────────────────────────────┬──────────────────────────────┘
-         │ build-weights / emit ic_c     │ 编 compiler.ujs
-         ▼                               ▼
-  ┌── 可复用 weights/ ──┐         ┌── 自迭代 iterate/ ──────────────────┐
-  │ ujs_ic_net.c        │         │ compiler.ujs · compiler_core.wasm   │
-  │ (built.json 可写入) │         │ compile.mjs · run-compiler-core…    │
-  └─────────────────────┘         │ stage2≡stage1 · body≡stage0         │
-                                  └──────────────┬──────────────────────┘
-                                                 │ 编 sim.ujs
-                                                 ▼
-                                  ┌── 实践 practice/ ───────────────────┐
-                                  │ core/  wasm_run · ujs_full（path-A）│
-                                  │ uxe/   Host · ship · sim.wasm       │
-                                  │ web/   playground · Three 对照      │
-                                  └─────────────────────────────────────┘
+  │  stage0/      compiler_min.cx（host1）                               │
+  │  construct/ · vm/   占位；.py/.c 已迁 archive/ujs-legacy-py-c/       │
+  └──────────────────────────────┬──────────────────────────────────────┘
+                                 │ 编 .ujs
+                                 ▼
+  ┌── product/ ujs.com ──┐     ┌── 自迭代 iterate/ ──────────────────┐
+  │ APE · 六目标 · 预言   │     │ compiler.ujs · compiler_core.wasm   │
+  └──────────────────────┘     │ compile.mjs（实践脊 · 另标签）        │
+                               └──────────────┬───────────────────────┘
+                                              ▼
+                               ┌── 实践 practice/ ───────────────────┐
+                               │ core · uxe · web                    │
+                               └─────────────────────────────────────┘
 ```
 
 **产品目录**：出货只认 [`product/`](product/) + [`seed/stage0/compiler_min.cx`](seed/stage0/compiler_min.cx)。  
-旧路径 `construct` · `core` · `uxe` · `web` · `compile.mjs` · `native/*` 为**兼容符号链接**；新代码写板块路径，勿在链接名下堆新逻辑。
+**`ujs/` 内无 `.c`／`.py`（0.0.3）**；遗留见 [`../archive/ujs-legacy-py-c/`](../archive/ujs-legacy-py-c/)。  
+旧链接 `core`·`uxe`·`web`·`compile.mjs` 仍指向实践脊；**`construct` 链接已删**。
 
-## 1　可复用权重 `weights/`（数据）
+## 1　可复用权重 `weights/`
 
-| 文件 | 内容 | 由谁写出 |
-|---|---|---|
-| [`weights/ujs_ic_net.c`](weights/ujs_ic_net.c) | IC 阶段扁平表（`IC_TABLE`） | `construct/build/ic_c.py` |
-| （可选）`weights/built.json` | `ujs build-weights` 构造网快照 | `python3 -m ujs build-weights` |
+IC 表 `.c` 生成物已迁 archive。新权重经 `.cx` 路径（续迁）；共享底座仍可用根 `weights/built.uns2`。
 
-共享底座仍用仓库根 `weights/built.uns2`（Paper A）；UJS 表阶段经 `unisa.intnet` 构造。
-
-## 2　种子 `seed/`（第 0 代程序）
+## 2　种子 `seed/`
 
 | 位置 | 作用 |
 |---|---|
-| [`seed/construct/`](seed/construct/) | 表规格、走查、emit、`web-build`、`ujs2wasm` CLI（`python3 -m ujs`） |
-| [`seed/stage0/`](seed/stage0/) | `compiler_min.cx`（host）+ 已提交 `iterate/compiler.wasm`；`build-compiler-wasm.cx` 只验产物 |
-| [`seed/vm/`](seed/vm/) | path-A C VM / 遗留游戏核源 |
+| [`seed/stage0/`](seed/stage0/) | host1 `compiler_min.cx` |
+| [`seed/construct/`](seed/construct/) · [`seed/vm/`](seed/vm/) | 占位 README；源在 archive |
 
 ## 3　自迭代 `iterate/`（M3 出货编译器）
 

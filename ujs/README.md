@@ -1,6 +1,8 @@
 # UJS — 开箱
 
-> 规格：[`prd.md`](prd.md) · **版本**：[`plans/`](plans/)（已交付 0.0.2；下一刀 [`plans/v0.0.3.md`](plans/v0.0.3.md)）  
+> 规格：[`prd.md`](prd.md) · **版本**：[`plans/`](plans/)（**0.0.3**；下一刀 [`plans/v0.0.4.md`](plans/v0.0.4.md)）  
+> **`ujs/` 内无 `.c`／`.py`**；遗留：[`../archive/ujs-legacy-py-c/`](../archive/ujs-legacy-py-c/)  
+
 
 > 地图：[`ARCHITECTURE.md`](ARCHITECTURE.md) · Paper B：[`../research/ujs-paper.md`](../research/ujs-paper.md)
 
@@ -18,7 +20,7 @@
 ./unisacc.com -run ujs/product/build.cx
 ./unisacc.com -run ujs/product/complete.cx
 
-./ujs/ujs.com --version          # ujs.com 0.0.2（原生）；APE 用 sh ./ujs/ujs.com
+./ujs/ujs.com --version          # ujs.com 0.0.3（原生）；APE 用 sh ./ujs/ujs.com
 ./ujs/ujs.com --help
 ./ujs/ujs.com FILE.ujs           # 默认写出 FILE.wasm
 ./ujs/ujs.com FILE.ujs -o OUT.wasm

@@ -1,11 +1,11 @@
 # ujs.com — 产品宿主（host image）
 
-> [`../prd.md`](../prd.md) · [`../plans/v0.0.2.md`](../plans/v0.0.2.md)  
+> [`../prd.md`](../prd.md) · [`../plans/v0.0.3.md`](../plans/v0.0.3.md)  
 > 只用 **`unisacc.com` + `.cx`**。标签 **`host1_package`**。
 
 ## 版本
 
-`ujs.com 0.0.2`（`--version`；APE `--product ujs 0.0.2`）。
+`ujs.com 0.0.3`（`--version`；APE `--product ujs 0.0.3`）。
 
 ## 命令
 

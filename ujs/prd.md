@@ -1,7 +1,7 @@
 # UJS —— 产品规格 v1.3
 
 > **唯一耦合活文档**（规格 · 目标 · 思维树 · 记忆宫殿）。与代码同会话更新。  
-> **版本计划**：[`plans/`](plans/)（`ujs.com` **0.0.x**；当前推进 [`plans/v0.0.2.md`](plans/v0.0.2.md)）  
+> **版本计划**：[`plans/`](plans/)（`ujs.com` **0.0.3** ✓；下一刀 [`plans/v0.0.4.md`](plans/v0.0.4.md)）  
 > **目录板块**：[`ARCHITECTURE.md`](ARCHITECTURE.md) · 开箱：[`README.md`](README.md) · Host：[`uxe/HOST_ABI.md`](uxe/HOST_ABI.md)  
 > 归档：[`archive/`](archive/)
 
@@ -17,22 +17,23 @@
 | 版 | 状态 | 计划 |
 |---|---|---|
 | **0.0.1** | ✓ host1 基线 | [`plans/v0.0.1.md`](plans/v0.0.1.md) |
-| **0.0.2** | ✓ 生产力合同（预言／CLI／身份） | [`plans/v0.0.2.md`](plans/v0.0.2.md) |
-| **0.0.3** | 下一刀 · **`.py`／`.c`→`.cx` 优先** + 调度 | [`plans/v0.0.3.md`](plans/v0.0.3.md) · [`plans/cx-migration.md`](plans/cx-migration.md) |
-| 0.0.4+ | 构造续迁 · 跑／验 · Paper B 补丁 | [`plans/roadmap-0.0.x.md`](plans/roadmap-0.0.x.md) |
+| **0.0.2** | ✓ 生产力合同 | [`plans/v0.0.2.md`](plans/v0.0.2.md) |
+| **0.0.3** | ✓ **`ujs/` 无 `.c`／`.py`** | [`plans/v0.0.3.md`](plans/v0.0.3.md) |
+| **0.0.4** | 下一刀 · archive→真 `.cx` | [`plans/v0.0.4.md`](plans/v0.0.4.md) |
+| 0.0.5+ | 续迁 · Paper B 补丁 | [`plans/roadmap-0.0.x.md`](plans/roadmap-0.0.x.md) |
 
-**残余语言债（非 product/）**：树内仍有构造臂 `.py`、path-A `.c`、薄 `.sh`——**已提优先**，按 `cx-migration.md` 波次压；`ujs/product/` 产品链已无 `.c`／`.py`。
+版号真源：`ujs.com --version`（**`ujs.com 0.0.3`**）。
 
-版号真源：`ujs.com --version`（**`ujs.com 0.0.2`**）与上表；**不**用根仓 `plans/v0.0.4x` 代替本系列。
+**两个名词**：**host image** = APE／六目标／`host1_package`；**method emit** = 表／流→`\0asm`。勿混。
 
-**两个名词**：**host image** = APE／六目标／`host1_package` 闸；**method emit** = 表／流→`\0asm`（`method_construct`，未卸完）。勿混。
+**语言债**：`ujs/` 内 `.c`／`.py` = **0**；遗留 [`archive/ujs-legacy-py-c/`](../archive/ujs-legacy-py-c/)；续迁 [`plans/cx-migration.md`](plans/cx-migration.md)。
 
 ### 0.1 出货主产物（主人 2026-10-25）
 
 | | |
 |---|---|
 | **主产物** | **`ujs.com`**——**ujs + wasm 类别的生产力工具**（跨架构单文件 `.com`；编／装／跑／自举收进同一壳） |
-| **状态** | **0.0.2 已交付**（`ujs.com 0.0.2`）：预言拆分 · CLI 日用 · `tests/ujs/run.cx` 绿 · 标签 `host1_package`。下一版 [`plans/v0.0.3.md`](plans/v0.0.3.md) |
+| **状态** | **0.0.3 已交付**（`ujs.com 0.0.3`）：`ujs/` 无 `.c`／`.py`；预言／套件绿；遗留在 archive。下一版 [`plans/v0.0.4.md`](plans/v0.0.4.md) |
 | **不是主产物** | 单独的 `ujs2wasm` CLI、`wat2wasm`、`compile.mjs`、零散 `.wasm`——是 **`ujs.com` 的子功能／实践脊**，应收进或由它调度 |
 
 ### 0.1b 产品 · 论文 · unisacc 关系（主人 2026-10-25 定调）
@@ -51,9 +52,9 @@
 
 | 子功能 | 今日怎么用 | 将来在 `ujs.com` 里 |
 |---|---|---|
-| 编 `.ujs`→`\0asm` | `python3 -m ujs ujs2wasm` · `node compile.mjs` · `compiler_core` | 子命令／默认驱动（如 `ujs.com FILE.ujs -o out.wasm`） |
-| WAT→二进制 | 外部 **`wat2wasm`** 或常驻 wabt（仓外床实证） | **内部子步骤**，用户不直接当产品；可进程内或自带组装 |
-| 跑／fold／acc | `python3 -m ujs run\|fold\|acc\|…` | 子命令或 `-run` 类动态路径 |
+| 编 `.ujs`→`\0asm` | **`ujs.com FILE.ujs`**（host1）· `node compile.mjs`／`compiler_core`（m3） | 默认驱动已进 `ujs.com`；全表 emit 见 archive／0.0.4+ |
+| WAT→二进制 | 外部 **`wat2wasm`** 或常驻 wabt（仓外床实证） | **内部子步骤**，用户不直接当产品 |
+| 跑／fold／acc | archive 遗留 CLI；日用走 `ujs.com`／`unisacc.com -run` | 子命令或 `-run` 类动态路径 |
 | path-A 演示核 | `web-build` → `ujs_full.wasm` | 可选子产物，非 ship 必经 |
 | 玩法步进核 | **`sim.wasm`** + Pages Host | 由 `ujs.com` 写出或加载的应用核；Pages 仍可吃 `.wasm` |
 | UXE Host | `engine.js` + `{app}` | 浏览器侧不变；桌面侧由 `ujs.com` 提供工具链 |
@@ -407,23 +408,19 @@ B (sim.wasm) ══directSim══> Pages
 ## T2. 目录树 —— 文件到职责
 
 ```
-ujs/
-├─ prd.md                ★本文件（进度只写这里）
-├─ README.md · ARCHITECTURE.md
-├─ product/              ★出货宿主（unisacc.com + .cx）
+ujs/                         ★ 0.0.3：树内无 .c／.py
+├─ prd.md · README.md · ARCHITECTURE.md · plans/
+├─ product/                  ★ host image（unisacc.com + .cx）
 │   ├─ ujs_main.cx · build*.cx · ape-pack.cx · complete.cx
-│   └─ corpus-host.cx    28 PASS / 0 REFUSE
-├─ seed/
-│   ├─ stage0/compiler_min.cx   host1 编译器
-│   ├─ construct/        构造臂（Python；P1 后置）
-│   └─ vm/               path-A C VM 源
-├─ iterate/              M3：compiler.ujs · compiler_core · compile.mjs
-├─ practice/             core · uxe · web（实验场）
-├─ weights/              可复用表
-├─ package.json          npm（Pages／UXE）
-├─ construct→seed/construct · core→practice/core · …  兼容链接
-├─ scripts/              release-artifacts · ship-pages · uxe-gate
-└─ archive/              旧规格
+│   └─ corpus-host.cx        28 PASS + refuse 目录
+├─ seed/stage0/              host1 编译器（.cx）
+├─ seed/construct|vm/        占位 README；源在 archive/ujs-legacy-py-c/
+├─ iterate/                  M3 实践脊（另标签）
+├─ practice/ · weights/      实验／表位（无 .c／.py）
+├─ ujs.com                   本机构建产物
+└─ archive/                  旧规格文稿（非 legacy 源）
+
+仓外：archive/ujs-legacy-py-c/   0.0.3 迁出的 .py／.c 考古
 ```
 
 **易错 DAG**
