@@ -1,0 +1,29 @@
+/* Test shared-runtime link provider only; no product/runtime policy change. */
+#pragma unisa module libffiprovider
+#include <cx.h>
+#include <fcntl.h>
+typedef struct { char *link; char sha256[65]; int pic; } ffip_provider;
+static char FFIP_ERROR[256];
+const char*ffip_error(void){return FFIP_ERROR;}
+static int ffip_no(const char*s){snprintf(FFIP_ERROR,sizeof FFIP_ERROR,"%s",s);return -1;}
+static int ffip_hash(const char*path,char h[65]){
+ struct stat s,t;if(stat(path,&s))return ffip_no("provider stat failed");if(!S_ISREG(s.st_mode)||s.st_size<=0)return ffip_no("provider must be nonempty regular file");
+ int fd=open(path,O_RDONLY|O_NONBLOCK);if(fd<0)return ffip_no("provider open failed");if(fstat(fd,&t)||!S_ISREG(t.st_mode)||s.st_dev!=t.st_dev||s.st_ino!=t.st_ino||s.st_size!=t.st_size){close(fd);return ffip_no("provider open identity changed");}
+ size_t n=(size_t)s.st_size,k=0;char*b=malloc(n+1),extra;if(!b){close(fd);return ffip_no("provider allocation failed");}
+ while(k<n){ssize_t r=read(fd,b+k,n-k);if(r<0){
+ if(errno==EINTR)continue;
+ }if(r<=0){free(b);close(fd);return ffip_no("provider read failed");}k+=r;}
+ int bad=read(fd,&extra,1)!=0||fstat(fd,&t)||!S_ISREG(t.st_mode)||s.st_dev!=t.st_dev||s.st_ino!=t.st_ino||s.st_size!=t.st_size||s.st_mtime!=t.st_mtime||s.st_ctime!=t.st_ctime;
+ if(close(fd))bad=1;if(bad){free(b);return ffip_no("provider changed during read");}cx_sha256_hex(b,n,h);free(b);return 0;
+}
+static int ffip_select_impl(ffip_provider*p){p->link="-lffi";p->sha256[0]=0;p->pic=0;
+#ifdef __linux__
+ const char*list=getenv("LIBRARY_PATH");if(list){const char*a=list;for(;;){const char*e=strchr(a,':');size_t n=e?(size_t)(e-a):strlen(a);char*path=malloc(n+32);if(!path)return ffip_no("provider allocation failed");if(!n)strcpy(path,"./libffi_pic.a");else if(*a=='/')snprintf(path,n+32,"%.*s/libffi_pic.a",(int)n,a);else snprintf(path,n+32,"./%.*s/libffi_pic.a",(int)n,a);struct stat s;
+ if(stat(path,&s)){int err=errno;free(path);if(err!=ENOENT)return ffip_no("LIBRARY_PATH stat failed (only ENOENT may skip)");}
+ else{if(!S_ISREG(s.st_mode)||s.st_size<=0){free(path);return ffip_no("provider must be nonempty regular file");}if(ffip_hash(path,p->sha256)){free(path);return -1;}p->link=path;p->pic=1;return 0;}
+ if(!e)break;a=e+1;}}
+#endif
+ return 0;
+}
+int ffip_select(ffip_provider*p){return ffip_select_impl(p);}
+int ffip_verify(const ffip_provider*p){ffip_provider now;if(ffip_select_impl(&now))return -1;int bad=now.pic!=p->pic||strcmp(now.link,p->link)||strcmp(now.sha256,p->sha256);if(now.pic)free(now.link);return bad?ffip_no("selected provider changed"):0;}

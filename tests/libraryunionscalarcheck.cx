@@ -50,6 +50,7 @@
    binary (tests/cxbin), the current directory. */
 #include <fcntl.h>
 #include <time.h>
+#pragma unisa use cxlib.libffiprovider
 
 extern char **environ;
 
@@ -916,7 +917,9 @@ static void split_commas(const char *s, List *l) {
 static Args A;
 static char *EVIDENCE;   /* str(a.evidence), or 0 for None */
 static const char *SANFLAGS[] = {"-fsanitize=address,undefined", "-fno-omit-frame-pointer"};
-typedef struct { char *base, *key, *cc, *sources; J *basis; } Ctx;
+typedef struct { char *base, *key, *cc, *sources; J *basis; ffip_provider ffi; } Ctx;
+static ffip_provider FFI;
+static J *ffi_record(const ffip_provider *p) { J *r = jnew(JOBJ); oset(r, "link_arg", jstr(p->link)); oset(r, "sha256", p->pic ? jstr(p->sha256) : jnew(JNULL)); return r; }
 static char *which(const char *cmd) {   /* shutil.which */
     const char *path = getenv("PATH"), *p, *q; struct stat st;
     if (strchr(cmd, '/')) return (!access(cmd, X_OK) && !stat(cmd, &st) && !S_ISDIR(st.st_mode)) ? xstrdup(cmd) : 0;
@@ -952,7 +955,12 @@ static void tool_context(const char *arch, int sanitize, Ctx *c) {
     c->sources = source_digest();
     if (sha_file(c->cc, hex)) fail("OSError", oserr(errno, c->cc));
     c->basis = jnew(JOBJ);
-    oset(c->basis, "schema", jstr("union-scalar-tools-v2"));
+    oset(c->basis, "schema", jstr("union-scalar-tools-v3-pic-provider"));
+    if (ffip_select(&c->ffi)) fail("OSError", ffip_error());
+    oset(c->basis, "libffi_provider", ffi_record(&c->ffi));
+    { J *recipe = jnew(JARR); apush(recipe, jstr(c->cc)); if (sanitize) for (int sf = 0; sf < 2; sf++) apush(recipe, jstr(SANFLAGS[sf]));
+      static const char *fixed[] = {"-std=c11", "-O2", "-shared", "-fPIC", "-fvisibility=hidden", "-Wl,-soname," LIBNAME, "{WORK}/exec/c/libunisacc.c", 0};
+      for (int f = 0; fixed[f]; f++) apush(recipe, jstr(fixed[f])); apush(recipe, jstr(fmt("{WORK}/exec/c/librarycall_%s.S", arch))); apush(recipe, jstr(c->ffi.link)); apush(recipe, jstr("-o")); apush(recipe, jstr("{WORK}/" LIBNAME)); oset(c->basis, "runtime_recipe", recipe); }
     oset(c->basis, "loader_policy", jstr("remove-LD_-and-GLIBC_TUNABLES; verify actual loader init path and runtime SHA"));
     oset(c->basis, "sources", jstr(c->sources));
     oset(c->basis, "actors", actors); oset(c->basis, "actor_edges", edges);
@@ -1062,6 +1070,7 @@ static void command(const char *stage, List *args) {
     oset(row, "state", jstr("DONE")); oset(row, "rc", jint(p.rc)); oset(row, "seconds_monotonic", jfloat(monotonic() - t0));
     oset(row, "stdout", jstrn(p.out, p.on)); oset(row, "stderr", jstrn(p.err, p.en));
     journal(row);
+    if (!strcmp(stage, "runtime_build") && ffip_verify(&FFI)) fail("OSError", ffip_error());
     if (p.rc) fail("RuntimeError", dumps(row, -1, 0));
 }
 static void ladd(List *l, const char *s) { lpush(l, xstrdup(s)); }
@@ -1081,7 +1090,9 @@ static void tools_for(List *cases, List *pressures, const char *arch, int saniti
             in = copy_runtime(w);
             ladd(&a, ctx.cc); if (sanitize) for (s = 0; s < 2; s++) ladd(&a, SANFLAGS[s]);
             ladd(&a, "-std=c11"); ladd(&a, "-O2"); ladd(&a, "-shared"); ladd(&a, "-fPIC"); ladd(&a, "-fvisibility=hidden"); ladd(&a, "-Wl,-soname," LIBNAME);
-            lpush(&a, pjoin(rt, "libunisacc.c")); lpush(&a, fmt("%s/librarycall_%s.S", rt, arch)); ladd(&a, "-lffi"); ladd(&a, "-o"); ladd(&a, wl);
+            lpush(&a, pjoin(rt, "libunisacc.c")); lpush(&a, fmt("%s/librarycall_%s.S", rt, arch)); ladd(&a, ctx.ffi.link); ladd(&a, "-o"); ladd(&a, wl);
+            if (ctx.ffi.pic) oset(in, ctx.ffi.link, jstr(ctx.ffi.sha256));
+            if (ffip_verify(&ctx.ffi)) fail("OSError", ffip_error());
             command("runtime_build", &a);
             tool_context(arch, sanitize, &again);
             tool_attest(wl, again.sources, ctx.sources, role, in);
@@ -1246,15 +1257,18 @@ int main(int argc, char **argv) {
     TARGET = fmt("%s%s", !strcmp(SYSNAME, "Darwin") ? "osx/" : "lnx/", arch);
     if (!strcmp(SYSNAME, "Darwin")) { ladd(&flags, "-arch"); ladd(&flags, arch); }
     if (A.prepare && A.require_cached) usage_error("choose prepare or require-cached");
+    if (ffip_select(&FFI)) fail("OSError", ffip_error());
 
     if (A.prepare) {
         char *lib, *key, *s; J *inputs, *result, *probes;
         EVENTS = jnew(JARR);
         tools_for(&cases, &pressures, arch, A.sanitize, 1, &lib, &inputs, &key);
+        if (ffip_verify(&FFI)) fail("OSError", ffip_error());
         result = jnew(JOBJ); probes = jnew(JOBJ);
         for (k = 0; k < NPROBES; k++) oset(probes, fmt("%s/%s", PROBES[k].c->name, PRESSURES[PROBES[k].pressure]), jstr(PROBES[k].exe));
         oset(result, "status", jstr("PREPARED_UNION_SCALAR_TOOLS")); oset(result, "identity", jstr(key)); oset(result, "runtime", jstr(lib));
         oset(result, "probes", probes); oset(result, "source_closure", inputs); oset(result, "events", EVENTS);
+        oset(result, "libffi_provider", ffi_record(&FFI));
         oset(result, "scope", jstr("native lnx/x86_64 pilot; preparation, not public calls"));
         oset(result, "evidence_path", jstr(EVIDENCE ? EVIDENCE : "None"));
         if (EVIDENCE) { char *t; s = dumps(result, 2, 0); t = fmt("%s\n", s); write_text(EVIDENCE, t); free(s); free(t); }
@@ -1269,6 +1283,7 @@ int main(int argc, char **argv) {
     oset(RECORD, "package_path", jstr(package));
     if (sha_file(package, pkg_hex)) fail("OSError", oserr(errno, package));
     oset(RECORD, "package_sha256", jstr(pkg_hex)); oset(RECORD, "sanitize", jbool(A.sanitize));
+    oset(RECORD, "libffi_provider", ffi_record(&FFI));
     { J *l = jnew(JARR); for (i = 0; i < cases.n; i++) apush(l, jstr(cases.v[i])); oset(RECORD, "cases", l); }
     { J *l = jnew(JARR); for (i = 0; i < pressures.n; i++) apush(l, jstr(pressures.v[i])); oset(RECORD, "pressures", l); }
     oset(RECORD, "commands", jnew(JARR)); oset(RECORD, "variants", jnew(JARR)); oset(RECORD, "status", jstr("failed"));
@@ -1287,6 +1302,8 @@ int main(int argc, char **argv) {
             oset(inputs, "tests/libraryabi/union_scalar.c", jstr(hx));
         }
         oset(RECORD, "source_closure", inputs);
+        if (FFI.pic) oset(inputs, FFI.link, jstr(FFI.sha256));
+        if (ffip_verify(&FFI)) fail("OSError", ffip_error());
         frozen = pjoin(t, "compiler.pkg"); copy2(package, frozen);
         if (sha_file(frozen, frozen_hex) || strcmp(frozen_hex, pkg_hex)) fail("AssertionError", "");
         IN_TRY = 1;
@@ -1295,8 +1312,10 @@ int main(int argc, char **argv) {
             lib = pjoin(t, "library.so");
             ladd(&a, cc); for (s = 0; s < flags.n; s++) ladd(&a, flags.v[s]); if (A.sanitize) for (s = 0; s < 2; s++) ladd(&a, SANFLAGS[s]);
             ladd(&a, "-std=c11"); ladd(&a, "-O2"); ladd(&a, "-shared"); ladd(&a, "-fPIC"); ladd(&a, "-fvisibility=hidden");
-            lpush(&a, pjoin(rt, "libunisacc.c")); lpush(&a, fmt("%s/librarycall_%s.S", rt, arch)); ladd(&a, "-lffi"); ladd(&a, "-o"); ladd(&a, lib);
-            if (rc_of(run_stage("runtime_build", &a, 0))) leave(finish(1));
+            lpush(&a, pjoin(rt, "libunisacc.c")); lpush(&a, fmt("%s/librarycall_%s.S", rt, arch)); ladd(&a, FFI.link); ladd(&a, "-o"); ladd(&a, lib);
+            int build_rc = rc_of(run_stage("runtime_build", &a, 0));
+            if (ffip_verify(&FFI)) fail("OSError", ffip_error());
+            if (build_rc) leave(finish(1));
         }
         {   char hx[65]; if (sha_file(lib, hx)) raise_exc("FileNotFoundError", oserr(errno, lib)); oset(RECORD, "runtime_sha256", jstr(hx)); }
         for (ci = 0; ci < cases.n; ci++) {

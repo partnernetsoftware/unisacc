@@ -60,6 +60,8 @@ suite-tools-native通过默认-run运行check.cx：原声明恒等、依赖顺�
 
 该入口尚未替代正式发布验收，也不表示全部旧oracle已经原生化。原断言中仍必需的Python如实保留；新增目录、依赖图和调度逻辑均为.cx。
 
+union native/scalar共享原生libffiprovider模块：Linux按既有LIBRARY_PATH选非空常规libffi_pic.a，实际path/SHA进入原报告及输入读集，并在构建前后复核；仅ENOENT可跳，目录／空文件／ENOTDIR／权限等错误拒绝，其它host或无匹配保留原-lffi。scalar准备和无cache两条构建路径一致；v3缓存basis明确绑定provider path/SHA及含sanitize／soname／arch的原命令recipe，旧nonPIC缓存不复用。所有原普通／sanitizer断言、loader核验和准备／消费者区分保持；新准备不代表18消费者已通过。
+
 `lib-callback-source-graph`默认-run门面固定原shell SHA，仅免编未使用的ref可执行文件（仍由build_ref --source-only生成相同wrapped C），并从既有exec-chain-model-prepare的完整身份／产物SHA合同materialize e3.json。原cc -O2 runner、dump源码变换、完整sim／C／host解码断言和cleanup不变。门面先恢复原parent UNISA_CONTAINER unset；缺缓存75不隐式构造。显式前置只依赖准备节点，不复用任何测试verdict；原shell聚合CLI兼容，仍诚实保留独立Python裁判依赖。
 
 `target-package-1/2/3`默认-run门面分别选择Linux/macOS/Windows两架构，固定生产targetpackage.py源码SHA与完整六目标域；三片联合覆盖原六目标闭包。每片仍运行完整源重组、坏／缺分片、bad-target及缺另一target负例，wanted过滤始终使用全局六目标，只有目标执行循环选片。原Python独立裁判仍保留，原无参／单路径全六CLI兼容，分片输出准确2/6；这不是Python依赖消除。

@@ -44,6 +44,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <time.h>
+#pragma unisa use cxlib.libffiprovider
 
 static const char *USAGE =
     "usage: libraryunionnativecheck.py [-h] [--package PACKAGE]\n"
@@ -949,7 +950,7 @@ int main(int argc, char **argv) {
     Args A = {0, 0, 0, 0, 0, 0, 0};
     const char *host, *arch, *mode; char *mach, *sys; int darwin, i;
     char cwd[4096], defpkg[4200], package[8192], target[64], runtime[4700], tmp[4800], probe_c[4700], frozen[4700];
-    char lib[4700], exe[4700], signature[4700], *pkgsha; J *inputs, *item;
+    char lib[4700], exe[4700], signature[4700], *pkgsha; J *inputs, *item; ffip_provider ffi;
     INF = strtod("1e400", 0);
     if (!getcwd(cwd, sizeof cwd) || !realpath(cwd, ROOT)) return 2;
     snprintf(defpkg, sizeof defpkg, "%s/unisacc.com", ROOT);
@@ -977,6 +978,8 @@ int main(int argc, char **argv) {
     jset(REC, "commands", COMMANDS);
     jset(REC, "events", EVENTS);
     jset(REC, "status", jstr("failed"));
+    if (ffip_select(&ffi)) fatal(ffip_error());
+    { J *provider = jnew(J_OBJ); jset(provider, "link_arg", jstr(ffi.link)); jset(provider, "sha256", ffi.pic ? jstr(ffi.sha256) : jnew(J_NULL)); jset(REC, "libffi_provider", provider); }
 
     make_td();
     snprintf(runtime, sizeof runtime, "%s/exec/c", TD);
@@ -988,6 +991,7 @@ int main(int argc, char **argv) {
     snprintf(probe_c, sizeof probe_c, "%s/probe.c", TD);
     copy2(tmp, probe_c);
     jset(inputs, "tests/libraryabi/union_native.c", jstr(sha_or_die(probe_c)));
+    if (ffi.pic) jset(inputs, ffi.link, jstr(ffi.sha256));
     snprintf(frozen, sizeof frozen, "%s/models.pkg", TD);
     copy2(package, frozen);
     if (strcmp(sha_or_die(frozen), pkgsha)) fatal("AssertionError: package changed while snapshotting");
@@ -1007,9 +1011,11 @@ int main(int argc, char **argv) {
             if (darwin) { b[k++] = "-arch"; b[k++] = (char *)arch; }
             if (A.sanitize) { b[k++] = "-fsanitize=address,undefined"; b[k++] = "-fno-omit-frame-pointer"; }
             b[k++] = "-std=c11"; b[k++] = "-O2"; b[k++] = "-shared"; b[k++] = "-fPIC"; b[k++] = "-fvisibility=hidden";
-            b[k++] = rt_c; b[k++] = rt_s; b[k++] = "-lffi"; b[k++] = "-o"; b[k++] = lib; b[k] = 0;
+            b[k++] = rt_c; b[k++] = rt_s; b[k++] = ffi.link; b[k++] = "-o"; b[k++] = lib; b[k] = 0;
         }
+        if (ffip_verify(&ffi)) fatal(ffip_error());
         if (!(item = run("runtime_build", b))) return raised();
+        if (ffip_verify(&ffi)) fatal(ffip_error());
         if (irc(item)) return finish(irc(item));
         {
             size_t n = 0; int err = 0; char *d = slurp(lib, &n, &err), h[65];
