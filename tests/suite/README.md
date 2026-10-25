@@ -22,6 +22,10 @@ sh ./unisacc.com tests/suite/run.cx -- out/suite.plan.nul out/suite.catalog.tsv 
 
 必须先导入完整计划和图，再选择模块，不能先裁掉准备项。当前Windows消费拆片使完整计划增加5节点；实际节点／依赖边以重导出的完整计划和图为准；导入证明目录完整，实际测试覆盖与通过状态以回执为准。
 
+Linux/x86_64 的 union16 direct1 按 is8、si8 两个自然 case 调度，完整保留各自四种压力、三种优化、sanitizer 和每种优化100次调用。配置真实 `UNISACC_FFI_X86_PROVIDER` 时，`lib-union16-runtime-prepare` 只准备内容核验的 runtime 材料，11个功能单元通过前置边等待并使用 `--require-cached`；不缓存测试结论。未配置 provider 时保留原无缓存调用路径，其它平台保留原参数。准备成功只记 PREPARED，材料缺失、损坏或锁忙返回75，不能记功能通过。
+
+Linux 显式 provider 的原生选择器每次核验 manifest 与六件材料，并在操作后复核完整身份；未配置或空值保留既有选择规则。测试环境还须把已配对 provider 的 `include` 放到 `CPATH` 首位：核验头文件内容不等于编译器已选中该头。当前实际固定F4已用 `cc -E -H` 核过两个头的路径和SHA；最终环境须绑定自己的实际路径与内容。
+
 执行示例：
 
 ```bash
