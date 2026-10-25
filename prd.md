@@ -146,7 +146,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 0.0.43 公开发布
 ├─ 已完成：F1产品修复、F2文档／探针；F3历史基线187项=186 PASS＋1宿主未核
 ├─ 已完成：F6三实际编译器SHA相同；三阶段五代码切片实际重编、原50秒界通过
-├─ 当前：固定b09cbbf0b9的1317项原闸在222窗停；760 PASS／518待办，另6资源UNKNOWN、12既有基线裁定、6宿主未核、5 BLOCKED、8 NEEDS_RULING、2 HOST_TIMEOUT；H6七项原40秒通过，H7正验证target-package三组拆分
+├─ 当前：固定b09cbbf0b9的1317项原闸在222窗停；760 PASS／518待办，另6资源UNKNOWN、12既有基线裁定、6宿主未核、5 BLOCKED、8 NEEDS_RULING、2 HOST_TIMEOUT；H6七项及H7三组原40秒通过，现从223续原队列
 │  ├─ 070窗自然结束、2193已终止；旧冻结的结果仅保留诊断，不计有效正式PASS
 │  ├─ 清单1317项；原seedmemory严格17例=行为16＋真实新鲜度1，后者仍UNKNOWN／OPEN
 │  ├─ 固定env-pin；绑定新HEAD与真实非空Git闭包身份，禁止迁移旧绿或沿用旧闭包hash
@@ -157,11 +157,11 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 └─ 待完成：Draft资产核对 → Latest／公开 → 下载SHA与运行复核
 ```
 
-**下一动作：** 固定H0原闸在222窗停：760 PASS／518待办，另6资源UNKNOWN、12既有基线裁定、6宿主未核、5 BLOCKED、8 NEEDS_RULING、2 HOST_TIMEOUT。新阻点是`target-package`六目标聚合在完成3/6后耗尽原40秒；e74b44f1ef已提交三个固定双目标组，独立H7正在同F4环境验证，每组仍限40秒，完整TARGETS路由筛选与全部共享负例保留。H7通过并证明其余1322条raw记录不变后，才从223窗继续原H0；原超时及日志不改写。
+**下一动作：** 固定H0原闸在222窗停：760 PASS／518待办，另6资源UNKNOWN、12既有基线裁定、6宿主未核、5 BLOCKED、8 NEEDS_RULING、2 HOST_TIMEOUT。新阻点是`target-package`六目标聚合在完成3/6后耗尽原40秒；e74b44f1ef已提交三个固定双目标组，独立H7@e74b44f1ef三组首跑36.898790／36.204536／35.682547秒全0，仍限原40秒，完整TARGETS路由筛选与全部共享负例保留。完整新计划1325项SHA030c047f…，除原target一→三外，其余1322条有序raw记录逐字节相同；已从223窗继续原H0；原超时及日志不改写。
 
 H2 reader七→十一、H3 callback一→二、H4 srcelf首片一→二均已实际结证。H6@a631445c23七项原40秒首次全0：callback off/on 21.492／34.606秒、context 8.355秒、typed 5.180秒、variadic 14.601秒、callback-plan 12.195秒、resolver 5.829秒，普通及sanitizer分支保留；原F4环境和工具树未改，P297／Sc90不变。context选择已存在PIC库，四个宿主探针补GNU特性声明；只绑定已观察的三个原rc1记录及原始日志SHA，不通放断言失败，也不虚构尚未执行的两项原失败。
 
-私有V5已接170份H6证据，共549固定补件；改为外置清单SHA绑定，逐文件真实读验及64KiB上限保留。完整清单生成在原15秒诊断界曾142且未产文件，现独立限55秒做DATA准备；这不算正式测试或总50秒admission通过。真实partial仍应拒绝；终态导出、完整owner正例、64KiB序列化和总50秒尚待验证。生产开关false，Windows资格／签名、Apple签名／公证、最终字节验证及公开仍待完成。零Python原生门禁0（real1744／data32，基线未提高），运行依赖尚未清零。csr同BIG的E4窄域9.7%候选已核收据，记入0.0.44，不改变本版冻结产品。
+私有V5已接170份H6证据，共549固定补件；改为外置清单SHA绑定，逐文件真实读验及64KiB上限保留。完整清单生成在原15秒诊断界曾142且未产文件；后独立限55秒准备实际17.563秒rc0，549全读深比及恢复正控0、字节／缺文件／清单SHA篡改均拒绝2；这不算正式测试或总50秒admission通过。真实partial仍应拒绝；终态导出、完整owner正例、64KiB序列化和总50秒尚待验证。生产开关false，Windows资格／签名、Apple签名／公证、最终字节验证及公开仍待完成。零Python原生门禁0（real1744／data32，基线未提高），运行依赖尚未清零。csr同BIG的E4窄域9.7%候选已核收据，记入0.0.44，不改变本版冻结产品。
 
 <a id="memory-palace"></a>
 ### 记忆宫殿
@@ -170,7 +170,7 @@ H2 reader七→十一、H3 callback一→二、H4 srcelf首片一→二均已实
 |---|---|---|
 | 产品室：固定身份 | 0.0.43候选2670411字节；产品SHA `2974978e6deec45abf38bfac2ac24e3031969b1c65009798270491d8b1e6dd1f`；产品S `c90f0002f02366d510e4c8c22d4757f934edf8c0719852e706b575a7137b47df`；侧车SHA `b88e3a1c227e72e621cf810cc5975e0922ba34cf34aa9e51288142aaaf94480a`。产品来源d09bd1decb，后续测试提交不冒充产品来源。 | `release/candidate.json`；GHCR immutable digest `8c667e0632c2f1f5f70a38fa7d6539e20c7f5d19ce0554b797809c45f721cb01`，封存源93f00869ee217e3d500569bc66c9d024a2249d76；`out/c43-seal-readback-93f/` 三件回读匹配。 |
 | F6室：实际固定点 | 三实际编译器SHA相同；stage3复用同身份模型包／七清单，但五代码切片由stage2实际重编。这不是模型构造器自举证明。 | `research/c43-f6-final-evidence/`、`/tmp/unisacc-c43-e4-summary-final-20261024`、`out/f6-e4-stage{2,3}-package.log`、`out/comboot/stages.json`；保留argv／rc／时间／SHA原收据。 |
-| M7室：环境缺陷与修复 | 旧Git alternates指向被隔离隐藏的/home对象，cat-file实际128；旧release.sh吞失败，head误成空流SHA。旧070自然结束后停止2193，全部旧结证仅作诊断。现565MB对象已本地独立、alternates为空，隔离cat-file／status／fsck均rc0；a8778570dff0f79491f47bafd936aaaef672a8f4的失败即停七例回归通过，官方observation及inventory-derived亦rc0。 | 新正式状态 `/tmp/unisacc-c43-m7-final-20261025/out/m7-final-state/`；旧状态`out/m7-before-git-object-repair/`及更早备份、原log均保留，不迁旧绿；失效说明`out/m7-before-git-object-repair-meta/invalidity.json`。当前计数见上方思维树及最新退出表。准备竞态、warnprep与两次遗留锁原证据分别保留out/m7-exec-chain-prepare-race-124/、m7-warnprep-1-retry-131/、m7-winlower-retry-{147,151}/；不迁移旧绿，不把恢复动作记PASS。当前222窗target-package聚合超时，H7正在独立验证三个双目标组；H2／H3／H4／H6局部结证与原H0分类分别保存，不迁移或改写原非PASS。当前vsnprintf_measure.tmp为探针留给caller的0字节夹具（tests/c/vsnprintf_measure.c）；不在套件运行中移动，完整队列结束后保留字节归档out/再核干净树，不能绕删除守卫。 |
+| M7室：环境缺陷与修复 | 旧Git alternates指向被隔离隐藏的/home对象，cat-file实际128；旧release.sh吞失败，head误成空流SHA。旧070自然结束后停止2193，全部旧结证仅作诊断。现565MB对象已本地独立、alternates为空，隔离cat-file／status／fsck均rc0；a8778570dff0f79491f47bafd936aaaef672a8f4的失败即停七例回归通过，官方observation及inventory-derived亦rc0。 | 新正式状态 `/tmp/unisacc-c43-m7-final-20261025/out/m7-final-state/`；旧状态`out/m7-before-git-object-repair/`及更早备份、原log均保留，不迁旧绿；失效说明`out/m7-before-git-object-repair-meta/invalidity.json`。当前计数见上方思维树及最新退出表。准备竞态、warnprep与两次遗留锁原证据分别保留out/m7-exec-chain-prepare-race-124/、m7-warnprep-1-retry-131/、m7-winlower-retry-{147,151}/；不迁移旧绿，不把恢复动作记PASS。222窗target-package聚合超时保留，H7三个双目标组首跑全0、其余1322条原记录不变，原队列从223续跑；H2／H3／H4／H6局部结证与原H0分类分别保存，不迁移或改写原非PASS。当前vsnprintf_measure.tmp为探针留给caller的0字节夹具（tests/c/vsnprintf_measure.c）；不在套件运行中移动，完整队列结束后保留字节归档out/再核干净树，不能绕删除守卫。 |
 | M7室：固定身份 | 新冻结b09cbbf0b9的真实DECLARED摘要为`395fd5cadf74f8ad9c6e09d9287090842c8bd8c5650a459f7c76647125e6bde7`，不是产品S。F4内完整原NUL计划232484字节，SHA`04f26e7e56c82c257146380dab8cf02c20e7424359baa6948ad27c52653b276d`；1317项。 | `out/c43-m7-b09cbbf0b9.plan.nul`及状态head；旧a877计划保留诊断。正式M7固定 `CODEX_TOOL_CALL_ID=unisacc-c43-m7-final` 和原env-pin；winbatch-fixed仅属旧独立实验。`out/f4-final-env.sh`／`out/f4-final-config.sh`保持固定，不泛化忽略未知环境。 |
 | k2b室：已修首红 | 原wrapper与自测双重Git fixture准备挤爆40秒。两自然scope保持原失效／准入、真实双queue／CLI与字节／锁断言，独立冷测21.379／37.047秒rc0；共享footer与setup归属已独立静审。 | `/tmp/unisacc-c43-k2b-scopes-final-result.txt`、`/tmp/unisacc-c43-k2b-scope-review.txt`；原089／各次142及guard拒绝均保留。旧无消费者wrapper已按SHA不变移至忽略`out/archived-test-tools/`，未绕守卫删除源文件。新图与元数据见根`out/c43-k2b-*`；正式M7已固定b09继续，计数见思维树。 |
 | 资源室：完整义务 | 1317清单保留seedmemory两具名节点：functional原16行为断言，evidence原1真实freshness；legacy --selftest仍严格17聚合。真实计算键漂移为rc2 UNKNOWN required=memory／OPEN；坏文件／解析／权限输入仍真错误，不能借UNKNOWN吞掉。生产REF／RSS／常量不变，不重键套旧RSS。 | derived-map／gatelayers／stagemap必须完整保留两节点；functional绿不吞evidence执行，rc0提交合同不变。五生成器既有RESOURCE_UNKNOWN与H1超时均非PASS；须收集匹配测量或按既有合同整组裁定，不自授豁免。 |
