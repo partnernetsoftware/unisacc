@@ -17,7 +17,7 @@
 | | |
 |---|---|
 | **主产物** | **`ujs.com`**——对齐 [`unisacc.com`](../README.md) 的**跨架构单文件可执行**（目标：{Linux, macOS, Windows} × {x86_64, arm64}；APE／自写出／自举合同对齐 Paper A 纪律，细则待钉） |
-| **状态** | **APE `ujs.com` 可构建**（纯 `.cx`）。语料 **23 PASS／5 REFUSE**（含 `?:`／`switch`）。拒：arrow／forof／rest／nullish（core 表）。未授权 tip／Draft／签／公开 |
+| **状态** | **APE `ujs.com` 可构建**（纯 `.cx`：`build-ape.cx`／`complete.cx`）。语料 **25 PASS／3 REFUSE**（已收 `?:`／`switch`／`null??`／`for-of`／`+=`）。拒：**arrow／function+rest**（需多函数／core）。未授权 tip／Draft／签／公开 |
 | **不是主产物** | 单独的 `ujs2wasm` CLI、`wat2wasm`、`compile.mjs`、零散 `.wasm` 文件——这些是 **`ujs.com` 的子功能／今日实践脊**，最终应收进或由 `ujs.com` 调度 |
 
 **子功能 ↔ 今日入口（将收敛进 `ujs.com`）**

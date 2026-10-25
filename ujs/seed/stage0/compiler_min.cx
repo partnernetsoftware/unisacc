@@ -142,10 +142,11 @@ static int64_t d_bits(double d) {
 /* ---- lex ---- */
 enum {
   T_EOF, T_NUM, T_FNUM, T_ID, T_LET, T_WHILE, T_RETURN, T_IF, T_ELSE,
-  T_SWITCH, T_CASE, T_DEFAULT,
+  T_SWITCH, T_CASE, T_DEFAULT, T_NULL, T_FOR, T_OF,
+
   T_LP, T_RP, T_LB, T_RB, T_LS, T_RS, T_COMMA, T_COLON, T_DOT, T_SEMI, T_EQ,
   T_PLUS, T_MINUS, T_STAR, T_SLASH, T_PCT,
-  T_LT, T_GT, T_LE, T_GE, T_EQEQ, T_NE, T_NOT, T_AND, T_OR, T_QMARK, T_STR, T_BAD
+  T_LT, T_GT, T_LE, T_GE, T_EQEQ, T_NE, T_NOT, T_AND, T_OR, T_QMARK, T_QQ, T_STR, T_BAD
 };
 typedef struct {
   const char *src; uint32_t len, pos;
@@ -217,6 +218,9 @@ static void next(Lex *L) {
     else if (!strcmp(L->id,"switch")) L->tok = T_SWITCH;
     else if (!strcmp(L->id,"case")) L->tok = T_CASE;
     else if (!strcmp(L->id,"default")) L->tok = T_DEFAULT;
+    else if (!strcmp(L->id,"null")) L->tok = T_NULL;
+    else if (!strcmp(L->id,"for")) L->tok = T_FOR;
+    else if (!strcmp(L->id,"of")) L->tok = T_OF;
     else L->tok = T_ID;
     return;
   }
@@ -247,7 +251,10 @@ static void next(Lex *L) {
   }
   if (c=='&' && L->pos<L->len && L->src[L->pos]=='&'){ L->pos++; L->tok = T_AND; return; }
   if (c=='|' && L->pos<L->len && L->src[L->pos]=='|'){ L->pos++; L->tok = T_OR; return; }
-  if (c=='?'){ L->tok = T_QMARK; return; }
+  if (c=='?'){
+    if (L->pos < L->len && L->src[L->pos] == '?') { L->pos++; L->tok = T_QQ; return; }
+    L->tok = T_QMARK; return;
+  }
   L->tok = T_BAD;
 }
 
@@ -691,9 +698,17 @@ static int por(Lex *L, Prog *P) {
   }
   return ty;
 }
-/* cond ? then : else — i64 only (stage0); uses IF0/1/2 + scratch */
+/* cond ? then : else — i64 only (stage0); uses IF0/1/2 + scratch.
+   null ?? e — stage0: only literal null on the left (corpus). */
 static int pexpr(Lex *L, Prog *P) {
-  int ty = por(L, P); if (!ty) return 0;
+  int ty;
+  if (L->tok == T_NULL) {
+    next(L);
+    if (L->tok != T_QQ) { P->err = "null needs ??"; return 0; }
+    next(L);
+    return pexpr(L, P);
+  }
+  ty = por(L, P); if (!ty) return 0;
   if (L->tok != T_QMARK) return ty;
   if (ty != TY_I64) { P->err = "?: cond needs i64"; return 0; }
   {
@@ -745,6 +760,52 @@ static int pstmt(Lex *L, Prog *P) {
     if (!expect(L, T_RP, P, "while )")) return 0;
     if (!emit(P, OP_WCOND, 0)) return 0;
     if (!pblock(L, P)) return 0;
+    return emit(P, OP_WEND, 0);
+  }
+  /* for (let x of listExpr) { … } → while index walk (no iterator protocol) */
+  if (L->tok == T_FOR) {
+    static int fo_gen;
+    char an[MAXN], in[MAXN], xn[MAXN];
+    int xa, ia, va, ty, et;
+    next(L);
+    if (!expect(L, T_LP, P, "for (")) return 0;
+    if (!expect(L, T_LET, P, "for let")) return 0;
+    if (L->tok != T_ID) { P->err = "for name"; return 0; }
+    strncpy(xn, L->id, MAXN - 1); xn[MAXN - 1] = 0;
+    next(L);
+    if (!expect(L, T_OF, P, "for of")) return 0;
+    ty = pexpr(L, P); if (!ty) return 0;
+    if (ty != TY_LIST) { P->err = "for-of list"; return 0; }
+    et = P->list_elem_ty ? P->list_elem_ty : TY_I64;
+    if (!expect(L, T_RP, P, "for )")) return 0;
+    snprintf(an, sizeof an, "#a%d", fo_gen);
+    snprintf(in, sizeof in, "#i%d", fo_gen);
+    fo_gen++;
+    xa = loc(P, an, 1); if (xa < 0) return 0;
+    ia = loc(P, in, 1); if (ia < 0) return 0;
+    va = loc(P, xn, 1); if (va < 0) return 0;
+    P->lty[xa] = TY_LIST; P->lety[xa] = (uint8_t)et;
+    P->lty[ia] = TY_I64;
+    P->lty[va] = (uint8_t)et;
+    if (!emit(P, OP_STORE, xa)) return 0;
+    if (!emit(P, OP_CONST, 0)) return 0;
+    if (!emit(P, OP_STORE, ia)) return 0;
+    if (!emit(P, OP_WBEGIN, 0)) return 0;
+    if (!emit(P, OP_LOAD, ia)) return 0;
+    if (!emit(P, OP_LOAD, xa)) return 0;
+    if (!emit(P, OP_LEN, 0)) return 0;
+    if (!emit(P, OP_LT, 0)) return 0;
+    if (!emit(P, OP_WCOND, 0)) return 0;
+    if (!emit(P, OP_LOAD, xa)) return 0;
+    if (!emit(P, OP_LOAD, ia)) return 0;
+    P->list_elem_ty = et;
+    if (!emit(P, OP_IDXGET, et == TY_F64 ? 1 : 0)) return 0;
+    if (!emit(P, OP_STORE, va)) return 0;
+    if (!pblock(L, P)) return 0;
+    if (!emit(P, OP_LOAD, ia)) return 0;
+    if (!emit(P, OP_CONST, 1)) return 0;
+    if (!emit(P, OP_ADD, 0)) return 0;
+    if (!emit(P, OP_STORE, ia)) return 0;
     return emit(P, OP_WEND, 0);
   }
   if (L->tok == T_IF) {
@@ -850,28 +911,49 @@ static int pstmt(Lex *L, Prog *P) {
       if (!emit(P, OP_IDXSET, 0)) return 0;
       return expect(L, T_SEMI, P, "expected ;");
     }
-    if (L->tok != T_EQ) { P->err = "expected ="; return 0; }
-    int is_g = 0;
-    int i = loc(P, name, 0);
-    if (i < 0) {
-      i = glob(P, name, 1); if (i < 0) return 0;
-      is_g = 1;
-    }
-    next(L);
-    int ty = pexpr(L, P); if (!ty) return 0;
-    if (is_g) {
-      P->gty[i] = (uint8_t)ty;
-      if (ty == TY_LIST) P->glety[i] = (uint8_t)P->list_elem_ty;
-    } else {
-      /* inject list elems are f64; allow trunc into i64 locals (char codes) */
-      if (ty == TY_F64 && (int)P->lty[i] == TY_I64) {
-        if (!emit(P, OP_F2I, 0)) return 0;
+    {
+      int plus_eq = 0;
+      int is_g = 0;
+      int i, ty;
+      if (L->tok == T_PLUS) {
+        next(L);
+        if (L->tok != T_EQ) { P->err = "expected ="; return 0; }
+        plus_eq = 1;
+      } else if (L->tok != T_EQ) { P->err = "expected ="; return 0; }
+      i = loc(P, name, 0);
+      if (i < 0) {
+        i = glob(P, name, 1); if (i < 0) return 0;
+        is_g = 1;
+      }
+      next(L);
+      if (plus_eq) {
+        if (is_g) {
+          if (!emit(P, OP_GLOAD, (int64_t)i | ((int64_t)P->gty[i] << 16))) return 0;
+        } else {
+          if (!emit(P, OP_LOAD, i)) return 0;
+        }
+      }
+      ty = pexpr(L, P); if (!ty) return 0;
+      if (plus_eq) {
+        if (ty != TY_I64) { P->err = "+= needs i64"; return 0; }
+        if (!is_g && (int)P->lty[i] != TY_I64) { P->err = "+= needs i64"; return 0; }
+        if (is_g && P->gty[i] != TY_I64) { P->err = "+= needs i64"; return 0; }
+        if (!emit(P, OP_ADD, 0)) return 0;
         ty = TY_I64;
-      } else if (ty != (int)P->lty[i]) { P->err = "assign type"; return 0; }
+      } else if (is_g) {
+        P->gty[i] = (uint8_t)ty;
+        if (ty == TY_LIST) P->glety[i] = (uint8_t)P->list_elem_ty;
+      } else {
+        /* inject list elems are f64; allow trunc into i64 locals (char codes) */
+        if (ty == TY_F64 && (int)P->lty[i] == TY_I64) {
+          if (!emit(P, OP_F2I, 0)) return 0;
+          ty = TY_I64;
+        } else if (ty != (int)P->lty[i]) { P->err = "assign type"; return 0; }
+      }
+      if (!emit(P, is_g ? OP_GSTORE : OP_STORE,
+                is_g ? ((int64_t)i | ((int64_t)P->gty[i] << 16)) : (int64_t)i)) return 0;
+      return expect(L, T_SEMI, P, "expected ;");
     }
-    if (!emit(P, is_g ? OP_GSTORE : OP_STORE,
-              is_g ? ((int64_t)i | ((int64_t)P->gty[i] << 16)) : (int64_t)i)) return 0;
-    return expect(L, T_SEMI, P, "expected ;");
   }
   P->err = "bad stmt"; return 0;
 }

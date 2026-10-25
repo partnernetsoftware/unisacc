@@ -57,7 +57,7 @@
 ./unisacc.com -run ujs/product/complete.cx   # APE 重建 + 语料 21/7
 ```
 
-**已完成产品形**：APE 单文件 + 六目标原生 + stage0 编译合同 + 纯 `.cx` 链。  
-**诚实未收**：`compiler_core` 全表嵌入；win/arm64 进 APE 五片布局外的跨机执行收据。
+**已完成产品形**：APE + 六目标 + stage0 语料 **25/3** + 纯 `.cx` 链。  
+**诚实未收**：用户函数／箭头／rest（core）；跨机切片收据；`compiler_core` 嵌入。
 
 不 tip／不 Draft，除非另授。
