@@ -8,9 +8,9 @@ step=${2:-all}
 case $step in all|shared|pack|pack-prep-1|pack-prep-2|pack-prep-3|pack-models|pack-driver|lnx/arm64|lnx/x86_64|osx/arm64|osx/x86_64|win/arm64|win/x86_64) ;; *) echo "unknown build step: $step" >&2; exit 2;; esac
 case $(uname -s) in Darwin|Linux) ;; *) echo 'kernel seed assembler requires Darwin or Linux' >&2; exit 2;; esac
 mkdir -p "$1"; T=$(cd "$1" && pwd)
-b() { "$R/tests/bound" 50 "$@"; }   # the native watchdog (0.0.32 B5: no python3 for the bound itself)
+b() { "$R/tools/bound" 50 "$@"; }   # the native watchdog (0.0.32 B5: no python3 for the bound itself)
 # every deletion goes through the one guard (include/unisa_safedel.h) via its argv CLI (commissar ruling 2026-10-23)
-safedel() { sh "$R/tests/cxbin" "$R/tests/safedel.cx" "$@"; }
+safedel() { sh "$R/tools/cxbin" "$R/tools/safedel.cx" "$@"; }
 # 0.0.25 B3: SEED_C=1 turns delta JSON -> table -> network into the C99 seed tools (seed/tbl.c,
 # seed/net.c) built by the installed previous release, unisacc.com, instead of exec/c/tbl.py and
 # net.py.  Both routes give the same bytes (tests/seedconstructmatrix.py; 0.0.25 B3 built byte-identical
@@ -204,8 +204,8 @@ pack_models() {
         done
     done
     # Only packaging needs the classic seed; never race its creation in target jobs.
-    . ./tests/lib.sh
-    b sh -c 'R=$1; . "$R/tests/lib.sh"; ua_ready' seed "$R" # caller-selected UA honored
+    . ./tools/lib.sh
+    b sh -c 'R=$1; . "$R/tools/lib.sh"; ua_ready' seed "$R" # caller-selected UA honored
     codec_flag=
     case ${PACK_COMPRESSED:-1} in 0) codec_flag=--legacy-package;; 1) codec_flag=--compressed;; *) echo "PACK_COMPRESSED must be 0 or 1" >&2; exit 2;; esac
     # Fresh construction per candidate: the model cache lives inside this build's own
@@ -232,8 +232,8 @@ pack_driver() {
     [ -s "$T/compiler.pkg" ] && [ -s "$T/compiler.pkg.source" ] || { echo "pack-driver: run pack-models first" >&2; exit 1; }
     source_start=$(cat "$T/compiler.pkg.source")
     [ "$(ident)" = "$source_start" ] || { echo "pack-driver: sources changed since pack-models" >&2; exit 1; }
-    . ./tests/lib.sh
-    b sh -c 'R=$1; . "$R/tests/lib.sh"; ua_ready' seed "$R"
+    . ./tools/lib.sh
+    b sh -c 'R=$1; . "$R/tools/lib.sh"; ua_ready' seed "$R"
     product_version=$(awk -F'"' '/^#define UNISACC_VERSION "[0-9.]+"/ { n++; v = $2 } END { if (n != 1) exit 1; print v }' src/version.h)
     if [ "${SEED_GEN:-1}" = 1 ]; then
         # 0.0.32 B5: UA -b writes the five images (byte-equal to unisa ape's Python lowering of UA's
@@ -264,7 +264,7 @@ pack() { pack_models; pack_driver; }
 case $step in
     all)
         # One process-tree budget for the entire build, including all children.
-        "$R/tests/bound" 55 sh -c '
+        "$R/tools/bound" 55 sh -c '
             set -eu
             script=$1; out=$2
             pair() {

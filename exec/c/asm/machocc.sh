@@ -5,7 +5,7 @@ set -eu
 R=$(cd "$(dirname "$0")/../../.." && pwd)
 arch=${1:?architecture}; mode=${2:?compile|link|nm}; shift 2
 case $arch in arm64|x86_64) ;; *) echo 'unsupported kernel ISA' >&2; exit 2;; esac
-b="$R/tests/bound"
+b="$R/tools/bound"
 # bound 20: a timeout (alarm, rc 142) is named on stderr; any other failure keeps its own status.
 bounded() { rc=0; "$b" 20 "$@" || rc=$?; [ "$rc" -ne 142 ] || echo "machocc: $mode timed out after 20 s (bound 20): $1" >&2; exit "$rc"; }
 case $(uname -s) in

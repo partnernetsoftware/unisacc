@@ -1,8 +1,8 @@
 #!/bin/sh
-_BOUND=$(cd "$(dirname "$0")/../.." && pwd)/tests/bound
+_BOUND=$(cd "$(dirname "$0")/../.." && pwd)/tools/bound
 _BOUND=$("$_BOUND" --helper) || exit 2
 b() { "$_BOUND" "$@"; }
-# Build /tmp/ua_pre: the reference (/tmp/ua_ref.c from tests/build_ref.sh)
+# Build /tmp/ua_pre: the reference (/tmp/ua_ref.c from tools/build_ref.sh)
 # with two harness hooks on the -dump-tokens path, right where lex() is
 # called.  Nothing in src/ changes; the patch is applied to the generated
 # single-file copy.

@@ -8,11 +8,11 @@ set -u
 cd "$(dirname "$0")/../.."
 . exec/stamp.sh
 T=${E2TMP:-$X/e2}; mkdir -p "$T"
-B="tests/bound 58"
+B="tools/bound 58"
 export E2REF=$T/ua_ref E2NOAUTO=$T/ua_noauto
 ready() {
     # 0.0.40 K5-1e: each step stops ready on its own failure (the old && chain ended at the d.json step)
-    fresh $T/ua_ref $B ./tests/build_ref.sh $T/ua_ref.c $T/ua_ref -- $REFSRC || return 1
+    fresh $T/ua_ref $B ./tools/build_ref.sh $T/ua_ref.c $T/ua_ref -- $REFSRC || return 1
     fresh $T/ua_noauto $B exec/pp/mknoauto.sh $T/ua_ref.c $T/ua_noauto -- $T/ua_ref.c exec/pp/mknoauto.sh || return 1
     # 0.0.40 K5-1e (机房主任 02:59): pp δ through exec/pp/gen-delta.sh (seed-gen first, no Python fallback).  The
     # seed-gen cache is a one-time directory made inside the command, so its random path never enters the fresh
@@ -21,7 +21,7 @@ ready() {
     # sources and the helper are inputs: an edited seed header rebuilds d.json.
     _sgcc=${SEED_GEN_CC:-cc}
     _sgenv="SEED_GEN=${SEED_GEN-<unset>} SEED_GEN_BIN=${SEED_GEN_BIN-<unset>} SEED_GEN_CC=${SEED_GEN_CC-<unset>} cc=$(command -v "$_sgcc" || echo '<none>')"
-    fresh $T/d.json $B sh -c 'd=$(mktemp -d "${TMPDIR:-/tmp}/seedgen-pprun.XXXXXX") || exit 2; SEED_GEN_DIR="$d" sh exec/pp/gen-delta.sh "$1"; r=$?; sh tests/cxbin tests/safedel.cx --purge -- "$d"; exit $r' "$_sgenv" $T/d.json -- exec/finite_rules.py exec/assemble.py exec/build/*.py exec/pp/*.py exec/pp/*.tsv exec/facts/pp-*.tsv weights/gold/pp.tsv $PYSRC $T/ua_ref.stamp exec/pp/gen-delta.sh seed/*.c seed/*.h
+    fresh $T/d.json $B sh -c 'd=$(mktemp -d "${TMPDIR:-/tmp}/seedgen-pprun.XXXXXX") || exit 2; SEED_GEN_DIR="$d" sh exec/pp/gen-delta.sh "$1"; r=$?; sh tools/cxbin tools/safedel.cx --purge -- "$d"; exit $r' "$_sgenv" $T/d.json -- exec/finite_rules.py exec/assemble.py exec/build/*.py exec/pp/*.py exec/pp/*.tsv exec/facts/pp-*.tsv weights/gold/pp.tsv $PYSRC $T/ua_ref.stamp exec/pp/gen-delta.sh seed/*.c seed/*.h
 }
 case "$1" in
 gen)      ready || exit 1 ;;   # 0.0.40 K5-1e: a failed ready is a failed gen (it ended 0 through the next case)
@@ -31,9 +31,9 @@ case "$1" in
 ex.*)     # the list is rebuilt when the probe set changes: a cached one
          # silently skipped three probes added after it was written
          ls examples/*.c tests/c/*.c > "$T/ex.new"
-         cmp -s "$T/ex.new" "$T/ex.txt" || { sh tests/cxbin tests/safedel.cx -- "$T"/ex.a? || exit 1; mv "$T/ex.new" "$T/ex.txt"; split -l 20 "$T/ex.txt" "$T/ex."; }
+         cmp -s "$T/ex.new" "$T/ex.txt" || { sh tools/cxbin tools/safedel.cx -- "$T"/ex.a? || exit 1; mv "$T/ex.new" "$T/ex.txt"; split -l 20 "$T/ex.txt" "$T/ex."; }
           $B python3 exec/pp/compare.py "$T/d.json" "@$T/$1" ;;
 corpus.*) find "${CORPUS:-../../corpus}" -name '*.c' | sort > "$T/corpus.new"
-          cmp -s "$T/corpus.new" "$T/corpus.txt" || { sh tests/cxbin tests/safedel.cx -- "$T"/corpus.a? || exit 1; mv "$T/corpus.new" "$T/corpus.txt"; split -l 40 "$T/corpus.txt" "$T/corpus."; }
+          cmp -s "$T/corpus.new" "$T/corpus.txt" || { sh tools/cxbin tools/safedel.cx -- "$T"/corpus.a? || exit 1; mv "$T/corpus.new" "$T/corpus.txt"; split -l 40 "$T/corpus.txt" "$T/corpus."; }
           $B python3 exec/pp/compare.py "$T/d.json" "@$T/$1" ;;
 esac

@@ -10,11 +10,11 @@
 set -u
 cd "$(dirname "$0")/../.."
 . exec/stamp.sh
-B="tests/bound 58"
+B="tools/bound 58"
 D=$X/e1delta.json
 export E1REF=$X/ua_ref E1PRE=$X/ua_pre
 ready() {
-    fresh $X/ua_ref $B ./tests/build_ref.sh $X/ua_ref.c $X/ua_ref -- $REFSRC &&
+    fresh $X/ua_ref $B ./tools/build_ref.sh $X/ua_ref.c $X/ua_ref -- $REFSRC &&
     fresh $X/ua_pre $B exec/lex/mkpre.sh $X/ua_ref.c $X/ua_pre -- $X/ua_ref.c exec/lex/mkpre.sh &&
     $B python3 exec/lex/declcheck.py >/dev/null && fresh $D $B python3 exec/build/gen.py lex $D -- exec/finite_rules.py exec/assemble.py exec/build/*.py exec/facts/lex-*.tsv exec/lex/*.py exec/lex/*.tsv weights/gold/lex*.tsv weights/gold/parse.tsv iterate/kernel/typekw.tsv kernel/unisa_model.inc src/front_pp.c src/front_parse.c $PYSRC
 }
@@ -32,11 +32,11 @@ xbuild)  mkdir -p $X/e1x && $B python3 exec/lex/tbl.py $D $X/e1x/e1.tbl &&
          done ;;
 lexdiff) $B python3 exec/lex/compare.py $D examples/*.c tests/c/*.c ;;
 probes)  $B python3 exec/lex/compare.py $D exec/lex/probes/*.c ;;
-self)    $B python3 tests/sourceflat.py "$X/e1-self.c" &&
+self)    $B sh ./unisacc.com tools/sourceflat.cx -- "$X/e1-self.c" &&
          $B python3 exec/lex/compare.py "$D" "$X/e1-self.c" ;;
 corpus.*) # the list is rebuilt when the corpus changes (a cached one skips files)
          find "${CORPUS:-../../corpus}" -name '*.c' | sort > $X/e1corp.new
-         # the stale shard lists go through the one deletion guard (argv CLI tests/safedel.cx; an unmatched glob is absent: rc 0)
-         cmp -s $X/e1corp.new $X/e1corp.txt || { mv $X/e1corp.new $X/e1corp.txt; sh tests/cxbin tests/safedel.cx --purge -- "${X:?}"/e1corp.a? || exit 1; split -l 63 $X/e1corp.txt $X/e1corp.; }
+         # the stale shard lists go through the one deletion guard (argv CLI tools/safedel.cx; an unmatched glob is absent: rc 0)
+         cmp -s $X/e1corp.new $X/e1corp.txt || { mv $X/e1corp.new $X/e1corp.txt; sh tools/cxbin tools/safedel.cx --purge -- "${X:?}"/e1corp.a? || exit 1; split -l 63 $X/e1corp.txt $X/e1corp.; }
          $B python3 exec/lex/compare.py $D @$X/e1corp.${1#corpus.} ;;
 esac

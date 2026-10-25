@@ -1,8 +1,8 @@
 #!/bin/sh
-_BOUND=$(cd "$(dirname "$0")/../.." && pwd)/tests/bound
+_BOUND=$(cd "$(dirname "$0")/../.." && pwd)/tools/bound
 _BOUND=$("$_BOUND" --helper) || exit 2
 b() { "$_BOUND" "$@"; }
-# Build /tmp/ua_tdump: the reference (/tmp/ua_ref.c from tests/build_ref.sh)
+# Build /tmp/ua_tdump: the reference (/tmp/ua_ref.c from tools/build_ref.sh)
 # with one harness hook on the -dump-tokens path.  Nothing in src/ changes;
 # the patch is applied to the generated single-file copy (as exec/lex/mkpre.sh).
 #   UA_TYPESPELL=1   a `type` token is printed `type=SPELLING` (its source

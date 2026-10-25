@@ -4,7 +4,7 @@
 # list, an old /tmp/ua_pre and /tmp/e1delta.json).  Every generated artefact
 # now goes through `fresh`, which rebuilds it when its sources changed, and
 # lives under a directory private to this checkout, so parallel worktrees do
-# not overwrite each other's (tests/lib.sh ua_ready is the same idea for UA).
+# not overwrite each other's (tools/lib.sh ua_ready is the same idea for UA).
 #
 # Run from the repo root (the scripts cd there first).
 # Sourced:  . exec/stamp.sh   ->  $X (the artefact dir), $REFSRC, fresh()
@@ -20,8 +20,8 @@ _SR=$(pwd)
 if [ -n "${UNISACC_EXEC_TMP:-}" ]; then X=$UNISACC_EXEC_TMP
 else X="${TMPDIR:-/tmp}"; X="${X%/}/unisacc-exec/$(printf %s "$_SR" | cksum | cut -d' ' -f1)"; fi
 mkdir -p "$X"
-# what tests/build_ref.sh builds the reference compiler from
-REFSRC="$(ls kernel/*.inc kernel/*.c src/*.c src/*.h | tr '\n' ' ')unisacc.c tests/export_ref.sh tests/sourceflat.py tests/refshim.h tests/reffoot.h tests/build_ref.sh"
+# what tools/build_ref.sh builds the reference compiler from
+REFSRC="$(ls kernel/*.inc kernel/*.c src/*.c src/*.h | tr '\n' ' ')unisacc.c tools/export_ref.sh tools/sourceflat.cx tools/refshim.h tools/reffoot.h tools/build_ref.sh"
 # what a delta generator reads besides its own directory
 PYSRC="$(find unisa -type f \( -name '*.py' -o -name '*.tsv' \) | sort | tr '\n' ' ')"
 
@@ -34,7 +34,7 @@ fresh() {
     _w=$( { printf '%s\n' "$_c" "$@"; cat "$@"; } | cksum)
     [ -e "$_o" ] && [ "$(cat "$_o.stamp" 2>/dev/null)" = "$_w" ] && return 0
     echo "fresh: (re)building $_o" >&2
-    sh "$_SR/tests/cxbin" "$_SR/tests/safedel.cx" --purge -- "${_o:?}.stamp" || return 1   # the one deletion guard
+    sh "$_SR/tools/cxbin" "$_SR/tools/safedel.cx" --purge -- "${_o:?}.stamp" || return 1   # the one deletion guard
     eval "$_c" || return $?
     printf '%s\n' "$_w" > "$_o.stamp"
 }

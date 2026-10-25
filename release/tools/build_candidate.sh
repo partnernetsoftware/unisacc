@@ -1,6 +1,6 @@
 #!/bin/bash
 # build_candidate.sh DIR UA -- shared, six targets, pack-prep-1..3, pack-models, pack-driver; each step bounded 58 s; stops at
-# the first failure.  UA must be a same-source reference (tests/build_ref.sh SRC OUT from this tree).
+# the first failure.  UA must be a same-source reference (tools/build_ref.sh SRC OUT from this tree).
 set -u; D=${1:?candidate dir}; UA=${2:?same-source reference}; R=$(cd "$(dirname "$0")/../.." && pwd); cd "${ROOT:-$R}"
 # All elapsed displays use one monotonic millisecond clock; wall-clock adjustments do not affect them.
 monotonic_ms() { python3 -c 'import time; print(time.monotonic_ns() // 1000000)'; }
@@ -25,14 +25,14 @@ for f in unisacc.com unisacc.com.build.json; do [ -f "$f" ] || { echo "build_can
 fi
 for step in shared osx/arm64 osx/x86_64 lnx/arm64 lnx/x86_64 win/arm64 win/x86_64; do
   log=$D/step-${step//\//-}.log; s0=$(monotonic_ms)
-  tests/bound --status $D/status-${step//\//-} ${STEP_BOUND:-58} make model-com MODEL_DIR=$D MODEL_STEP=$step > $log 2>&1; rc=$?
+  tools/bound --status $D/status-${step//\//-} ${STEP_BOUND:-58} make model-com MODEL_DIR=$D MODEL_STEP=$step > $log 2>&1; rc=$?
   step_report "$step" "$rc" "$s0" "$D/status-${step//\//-}"; [ $rc -eq 0 ] || exit $rc
 done
-# fresh construction per candidate: the old cache moves into the .trash of its root through the one guard (tests/safedel.cx)
-[ -n "$D" ] && sh "$R/tests/cxbin" "$R/tests/safedel.cx" -- "$D/model-cache" || { echo "build_candidate: $D/model-cache not cleared (refused)"; exit 3; }
+# fresh construction per candidate: the old cache moves into the .trash of its root through the one guard (tools/safedel.cx)
+[ -n "$D" ] && sh "$R/tools/cxbin" "$R/tools/safedel.cx" -- "$D/model-cache" || { echo "build_candidate: $D/model-cache not cleared (refused)"; exit 3; }
 for step in pack-prep-1 pack-prep-2 pack-prep-3 pack-models pack-driver; do
   s0=$(monotonic_ms)
-  tests/bound --status $D/status-$step ${STEP_BOUND:-58} make model-com MODEL_DIR=$D MODEL_STEP=$step UA=$UA > $D/step-$step.log 2>&1; rc=$?
+  tools/bound --status $D/status-$step ${STEP_BOUND:-58} make model-com MODEL_DIR=$D MODEL_STEP=$step UA=$UA > $D/step-$step.log 2>&1; rc=$?
   step_report "$step" "$rc" "$s0" "$D/status-$step"; [ $rc -eq 0 ] || exit $rc
 done
 # Sum only the bounded model steps above, excluding setup, identity checks and seed build.

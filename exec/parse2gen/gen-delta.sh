@@ -11,7 +11,7 @@ R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 usage() { echo "usage: exec/parse2gen/gen-delta.sh OUT.json" >&2; exit 2; }
 [ $# -eq 1 ] || usage
 OUT=$1; shift
-B=$R/tests/bound
+B=$R/tools/bound
 case "${SEED_GEN-1}" in
     0) exec "$B" 55 python3 exec/build/gen.py parse2 "$OUT";;
     1) ;;
@@ -47,10 +47,10 @@ PY
     sha() { python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$1"; }
     # a cached binary is used only with its recorded sha; anything else is rebuilt
     if [ ! -x "$G" ] || [ ! -f "$G.sha256" ] || [ "$(sha "$G" 2>/dev/null)" != "$(cat "$G.sha256")" ]; then
-        sh "$R/tests/cxbin" "$R/tests/safedel.cx" -- "$G" "$G.sha256"   # a stale cache entry: into the trash (the one guard, commissar ruling 2026-10-23)
+        sh "$R/tools/cxbin" "$R/tools/safedel.cx" -- "$G" "$G.sha256"   # a stale cache entry: into the trash (the one guard, commissar ruling 2026-10-23)
         "$B" 55 "$CC" $FLAGS -I"$R/seed" "$R/seed/gen.c" -o "$G.$$" \
             && sha "$G.$$" > "$G.sha256.$$" && mv -f "$G.$$" "$G" && mv -f "$G.sha256.$$" "$G.sha256" \
-            || { sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$G.$$" "$G.sha256.$$"; echo "exec/parse2gen/gen-delta.sh: seed-gen build failed" >&2; exit 1; }
+            || { sh "$R/tools/cxbin" "$R/tools/safedel.cx" --purge -- "$G.$$" "$G.sha256.$$"; echo "exec/parse2gen/gen-delta.sh: seed-gen build failed" >&2; exit 1; }
     fi
 fi
 # prefer seed-gen; failure is failure (no Python masquerade)

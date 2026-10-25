@@ -1,5 +1,5 @@
 #!/bin/sh
-_BOUND=$(cd "$(dirname "$0")/../.." && pwd)/tests/bound
+_BOUND=$(cd "$(dirname "$0")/../.." && pwd)/tools/bound
 _BOUND=$("$_BOUND" --helper) || exit 2
 # Cold model preparation. Called by models.py under a content-addressed lock.
 set -eu

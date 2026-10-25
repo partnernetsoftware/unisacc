@@ -9,14 +9,14 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def source_text(root=ROOT):
-    """Use the same include expansion as tests/build_ref.sh."""
+    """Use the same include expansion as tools/build_ref.sh."""
     with tempfile.TemporaryDirectory(prefix='unisacc-refsource-') as td:
         flat = Path(td) / 'ref.c'
-        subprocess.run([str(root / 'tests/export_ref.sh'), str(flat)],
+        subprocess.run([str(root / 'tools/export_ref.sh'), str(flat)],
                        check=True, capture_output=True, timeout=30)
-        return ((root / 'tests/refshim.h').read_text()
+        return ((root / 'tools/refshim.h').read_text()
                 + flat.read_text()
-                + (root / 'tests/reffoot.h').read_text())
+                + (root / 'tools/reffoot.h').read_text())
 
 
 def compile_command(root, source, output):

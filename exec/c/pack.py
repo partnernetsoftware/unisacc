@@ -123,7 +123,7 @@ def compressed_model(text, cache=True):
                 os.replace(name,target)
             finally:
                 if os.path.lexists(name):   # the one deletion guard (commissar ruling 2026-10-23)
-                    __import__('subprocess').run(['sh',str(pathlib.Path(__file__).resolve().parents[2]/'tests/cxbin'),str(pathlib.Path(__file__).resolve().parents[2]/'tests/safedel.cx'),'--purge','--',name],check=True)
+                    __import__('subprocess').run(['sh',str(pathlib.Path(__file__).resolve().parents[2]/'tools/cxbin'),str(pathlib.Path(__file__).resolve().parents[2]/'tools/safedel.cx'),'--purge','--',name],check=True)
     return blob, len(raw), checksum
 
 

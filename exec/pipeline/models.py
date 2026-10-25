@@ -41,6 +41,12 @@ def closure(h):
     path = ROOT / 'iterate/kernel/typekw.tsv'
     h.update(path.relative_to(ROOT).as_posix().encode() + b'\0')
     h.update(bytes.fromhex(digest(path)))
+    # Product construction support moved out of the retired test tree.
+    for name in ('bound', 'bound.c', 'cxbin', 'safedel.cx', 'lib.sh',
+                 'build_ref.sh', 'export_ref.sh', 'refshim.h', 'reffoot.h'):
+        path = ROOT / 'tools' / name
+        h.update(path.relative_to(ROOT).as_posix().encode() + b'\0')
+        h.update(bytes.fromhex(digest(path)))
     return h
 
 def identity(target, network, compiler, native_ua=None):
@@ -49,9 +55,9 @@ def identity(target, network, compiler, native_ua=None):
     h = hashlib.sha256(json.dumps([str(ROOT), target, network, str(exe), digest(exe),
                                   platform.platform(), sys.version, version.stdout.hex()]).encode())
     if native_ua is not None:
-        for path in (pathlib.Path(native_ua).resolve(strict=True), ROOT/'exec/c/nativecheck.sh', ROOT/'tests/sourceflat.py', ROOT/'tests/export_ref.sh'):
+        for path in (pathlib.Path(native_ua).resolve(strict=True), ROOT/'exec/c/nativecheck.sh', ROOT/'tools/sourceflat.cx', ROOT/'tools/export_ref.sh', ROOT/'unisacc.com'):
             h.update(str(path).encode()+b'\0'+bytes.fromhex(digest(path)))
-        h.update(b'native-resources-preparation-v1')
+        h.update(b'native-resources-preparation-v2-sourceflat-cx')
     return closure(h).hexdigest()
 
 def valid(cache, network, native_ua=None, target=None):
@@ -95,24 +101,24 @@ def prepare(out, target, network, compiler, native_ua=None, require_cached=False
         if not hit:
             work = pathlib.Path(tempfile.mkdtemp(prefix=key + '.build-', dir=base))
             try:
-                subprocess.run(['python3', str(ROOT / 'tests/bound.py'), '60', 'sh',
+                subprocess.run([str(ROOT / 'tools/bound'), '60', 'sh',
                                 str(ROOT / 'exec/pipeline/prepare.sh'), str(work),
                                 target, network, compiler], cwd=ROOT, check=True)
                 if native_ua is not None:
-                    subprocess.run(['python3', str(ROOT/'tests/bound.py'),'55','sh',str(ROOT/'exec/c/nativecheck.sh'),'--build-prepared',str(work)],cwd=ROOT,env=dict(os.environ,UA=str(pathlib.Path(native_ua).resolve()),TARGET=target),check=True)
+                    subprocess.run([str(ROOT/'tools/bound'),'55','sh',str(ROOT/'exec/c/nativecheck.sh'),'--build-prepared',str(work)],cwd=ROOT,env=dict(os.environ,UA=str(pathlib.Path(native_ua).resolve()),TARGET=target),check=True)
                     keep={'run','run-ua','models.pkg','route.tsv','run.'+('pe' if target.startswith('win/') else 'macho' if target.startswith('osx/') else 'elf')}|{x+'.'+ext for x in ('e2','e1','e3','e4','prune','lower','elf') for ext in ('json','tbl','net')}
                     for path in work.iterdir():
-                        if path.is_file() and path.name not in keep:subprocess.run(['sh',str(ROOT/'tests/cxbin'),str(ROOT/'tests/safedel.cx'),'--purge','--',str(path)],check=True)
+                        if path.is_file() and path.name not in keep:subprocess.run(['sh',str(ROOT/'tools/cxbin'),str(ROOT/'tools/safedel.cx'),'--purge','--',str(path)],check=True)
                 manifest = {p.name: digest(p) for p in sorted(work.iterdir()) if p.is_file()}
                 (work / 'manifest.json').write_text(json.dumps(manifest, sort_keys=True))
                 try: cache.stat()
                 except FileNotFoundError: pass
-                else: subprocess.run(['sh',str(ROOT/'tests/cxbin'),str(ROOT/'tests/safedel.cx'),'--',str(cache)],check=True)   # a stale cache entry: into the .trash of its root
+                else: subprocess.run(['sh',str(ROOT/'tools/cxbin'),str(ROOT/'tools/safedel.cx'),'--',str(cache)],check=True)   # a stale cache entry: into the .trash of its root
                 work.rename(cache)
             finally:
                 try: work.stat()
                 except FileNotFoundError: pass
-                else: subprocess.run(['sh',str(ROOT/'tests/cxbin'),str(ROOT/'tests/safedel.cx'),'--purge','--max-files','20000','--',str(work)],check=True)   # own mkdtemp build tree: a site ceiling
+                else: subprocess.run(['sh',str(ROOT/'tools/cxbin'),str(ROOT/'tools/safedel.cx'),'--purge','--max-files','20000','--',str(work)],check=True)   # own mkdtemp build tree: a site ceiling
         out.mkdir(parents=True, exist_ok=True)
         for name in manifest:
             shutil.copy2(cache / name, out / name)

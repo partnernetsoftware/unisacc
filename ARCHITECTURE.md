@@ -1,5 +1,11 @@
 # 仓库地图
 
+**0.0.43当前入口（2026-10-25重规划）：** 旧测试树与旧门禁已移入
+`archive/testing-c43-legacy/`。新套件由`tests/run.cx`直接默认-run；当前smoke
+只有16项局部断言，完整验收仍明确NOT_READY。产品构造支持独立在`tools/`，
+其中`tools/sourceflat.cx`已原生替代源码导出逻辑。下文涉及历史探针的条目仅描述来源，
+不能据此恢复旧队列或借用旧通过结果。
+
 **产品**是 C99 编译器 `unisacc.com`（C99 = ISO/IEC 9899:1999 含 TC1–TC3，文本 WG14 N1256；条款覆盖账本见 archive/plans/v0.0.14.md R14-6；`#line` 主文件内已支持（0.0.14）；随带 C 库是有清单的子集，见 README 限制表）（六目标单文件）及随带的 `include/`。当前模型路线的驱动、通用执行器与推理核在 `exec/c/`，各阶段声明与构造器在 `exec/` 对应目录；`unisacc.c`（引用 `kernel/` + `src/` 的经典入口）是经典参考与显式回退。编译与运行不需要 Python，离线构造和容器打包仍用 Python。下面区分产品、参考、数据与开发工具：
 
 | 类别 | 位置 | 说明 |
@@ -7,7 +13,7 @@
 | 模型产品 | `exec/c/`、各阶段声明/构造器、`include/`、`unisacc.com` | 构造网络、通用运行核与用户使用的编译器 |
 | 种子与参考实现 | `unisa/`、`src/`、`kernel/`、`unisacc.c` | Python 种子、经典 C 参考/回退、生成静态事实与容器打包；与模型路线对照 |
 | 静态输入与数据 | `weights/`（`built.uns2`、`gold/*.tsv`）、`include/*.h` | 构造与生成的输入；真值表的数据形态 |
-| 开发工具与参考裁判 | `iterate/`（C 写的权重构造器与 kernel 数据生成器，**不属于产品**）、`tests/`、各 `*_check.py` | 验证与复现，不进用户流程 |
+| 开发工具与参考裁判 | `tools/`构造支持、`tests/`新原生合同、`iterate/`构造器；旧套件在`archive/testing-c43-legacy/` | 工具与测试分离；现有Python协调器的债务不因迁目录消失 |
 | 文档、计划与历史 | `docs/`（`tapebin-v1.md` 格式契约、`tape-vs-wasm.md`、`dogfood-targets.md`；`docs/uxe/` 与 `docs/index.html` 属 ujs 子项目，不在本产品范围）、[prd.md](prd.md)（唯一主入口；[§2当前计划](prd.md#current-plans)、[§3七流/十八网/进度](prd.md#flow-net-contracts)、§5路线、§6问题）与 `spec.md`（条款全文，编号稳定）、`plans/v0.0.43.md`（当前执行计划，唯一索引在 `prd.md` §2；路线/构想摘要合入 §5，旧稿归 `archive/plans/`）、`tests/INVENTORY.md`（每个测试/检查脚本在哪个门禁，`script-inventory` 门禁保证无孤儿）、`research/`（论文与仍被引用的证据）、`archive/`（已发布版本的计划、prd 叙事与证据，按版本分目录） | 只读参考；发布后把本版计划与证据移入 `archive/` |
 
 `.tapebin` 的格式见 [v1 契约](docs/tapebin-v1.md)：`unisa/tapebin.py`
@@ -143,13 +149,13 @@ Windows Authenticode 单列验收。Mach-O ad-hoc 签名仅满足运行格式要
 
 | 位置 | 作用 |
 |---|---|
-| [`tests/`](tests/) | 套件：`all.sh` 汇总；`snap.sh` 在冻结快照上后台跑；单次 ≤ 60 s（AGENTS.md） |
-| [`examples/`](examples/) · `tests/c/` · `tests/c99/` | 探针程序 |
+| [`tests/`](tests/) | 全新模块化CX合同入口`run.cx`；`--smoke`局部，`--all`缺覆盖时拒绝；单次≤60秒 |
+| [`examples/`](examples/) · `archive/testing-c43-legacy/tests/c/` · `archive/testing-c43-legacy/tests/c99/` | 示例与历史探针；历史夹具须按合同迁移 |
 | `corpus/` | 外部语料（c-testsuite、工具库），只读 |
 | [`Makefile`](Makefile) | `make`（快检）、`make test`、`make com`、`make release` |
-| README 里的阶段表 | `python3 -m unisa docs` 生成，`tests/docs.sh` 检查 |
+| README 里的阶段表 | 旧生成/检查入口已归档；原生一致性合同待实现 |
 | [`archive/`](archive/) | 旧版 prd，只作历史 |
-| `dist/` | `tests/release.sh --com` 保留的 `unisacc.com`（不提交） |
+| `dist/` | 发行材料，不提交；新发布收据和跨平台闸仍待重建 |
 
 ## 5　布局上的取舍
 

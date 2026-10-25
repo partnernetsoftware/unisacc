@@ -142,13 +142,13 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 <a id="work-tree"></a>
 ### 思维树
 
-**目标：完成 unisacc 0.0.43 并公开发布。** 当前公开、Draft、Latest和签名仍须遵守既有明确边界；重构不代表发布已获资格。
+**目标：开发unisacc.com 0.0.43直到完成。** 尽可能用unisacc.com＋.cx持续迭代，不手写include，学习Rust的模块化、所有权及内存安全，有合理进展及时提交Git。发布仍受既有授权边界约束，不把局部smoke当开发完成。
 
 ```text
 0.0.43：重建自身迭代体系并发布
 ├─ 保留基线：当前P7f709/Sd754产品可默认-run；同源三阶段固定点已证
-├─ R0 进行：归档旧测试树、旧队列与入口，区分产品构建支持与测试本身
-├─ R1 待验证：原生开发入口；一次启动批量用例，构造/执行/校验分别计时
+├─ R0 已归档：2529个旧测试路径原blob/模式完整保留；构造支持移tools，新旧入口分离，完整重建待验
+├─ R1 已有首批：无include原生模块入口16断言实跑0；源码导出2,946,745B同字节；完整覆盖仍NOT_READY
 ├─ R2 待实现：七流独立合同、stdin/stdout边界与相邻流组合对拍
 ├─ R3 待实现：十八网真实gold/域外拒绝；构造一次、按内容身份复用
 ├─ R4 待实现：完整RI、属性和资源边界；未知不变PASS，拒绝有明确原因
@@ -157,7 +157,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 └─ R7 待完成：新清单全覆盖 → 同候选跨平台CI → 封存与授权发布
 ```
 
-**下一动作：** 先完成旧套件的实际归档和构建支持脱离，再运行新套件第一批真实原生用例；同时实现可复用的原生工具入口。新进度按上述交付物与已验证合同报告，不再报旧队列分子。未实现的合同必须明确缺口，新套件不完整时不能宣称全量通过。
+**下一动作：** 继续补七流/十八网、流间接口和内存安全合同。归档已逐blob/模式核2529路径无丢失；新smoke16项0，--all3明确37项合同未就绪；原生源码导出及构造source-only已实际成功。新CX不写include，模块导入已用，运行期所有权原型另已551断言0但尚未接入产品，不冒充Rust编译期安全。构造输入已变化，现P7只作启动器，新产品重建与完整新验收仍待完成。
 
 ### 本版重构合同
 
@@ -188,7 +188,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 |---|---|---|
 | 产品室：当前开发／旧封存分列 | 根unisacc.com现2671169B，P7f709378fa84a36edac2fcf1c36a62a13d45c26d34e57f1f7b50af74b2de4d1a／Sd754b8afbfeff132cf1328806e8fe908ca5dec1847ecba058ea400291b73e972；sidecar1e9ef57c…，原生ident当前main check0，默认-run hello0。是开发产物，新F6三阶段固定点已证，尚无正式新封存资格。 | `out/e4-local-install.log`、`out/e4-local-install/baseline-p297.com{,.build.json}`原pair；release/candidate.json及GHCR8c667e…仍是旧P297/Sc90封存，旧CI不可借给新开发包。新完整构造及封存须以实际最终P/S为准，不签不公开。 |
 | F6室：新E4固定点已证 | 新冻结0d25同源reference、完整模型包与stage1/2/3各五代码切片均实际构造；stage2/3由真实前阶段产品重编。三个产物2671169B、P7f709，侧车dae574a1…；官方fixedpoint0/report三SHA同，七manifest和ident全0。 | 新`/tmp/unisacc-c43-final-e4-20261025/out/final-reference/`逐操作日志/status，`out/comboot/stages.json`真实built_by链。stage3模型仅同源stage2按13域逐件三重hash复用，原聚合复制142保留于stage3-reuse01-partial；两stage-pack-driver proof仅真实封包/核验/固定点后记录。无聚合pack-driver重跑，未称最终M7已通过。 |
-| M7室：原队列319结证／五修复DATA及R6未解 | window079累计319：307rc0、6资源UNKNOWN、6原失败；1014待办。R5现成分段原39前9.011329/后37.088074秒完整0并已提交79ad138a71。R6整包原solo40超时；诊断55下完整原bundle39.876701秒0、独立ref逐字节同，但正式consumer预算未过。 | 前五修复bridge/tmp/c43-current-four/bridge-five.cx（545f4960…）父实跑0/改源拒绝2，原失败不改，输出明确R6未处理和PENDING；尚非终态。main计划1336/1002边，1329原argv不变、4修复/3材料新增，无删除、完整旧readset继承。R6保留完整--bundle试材料前置，不能以替代range或放宽时限算通过；报告/tmp/c43-package-selfcheck-next.txt。 |
+| 旧套件封存室 | 主人已裁定旧1333项整套归档，不再调度。旧F4在window082止于327结证（314rc0、6资源UNKNOWN、7失败）/1006待办；失败未改PASS。 | archive/testing-c43-legacy保留旧源码和原工作规则；F4目录原样留存。新tests/run.cx已16断言0、--all明确3/37NOT_READY；旧数字不算新完成率。 |
 | M7室：固定身份 | 恢复原HEAD0d25b4b6d807b23b0676411328c548391b42f559，tree200c6fb0a6c8add86b8142e434a04aec89bf6807，P7f709/Sd754，sidecar dae574a1…；实际计划1333。原env-pin内部128eb61d…、文件efa28614…及原startreceipt全部原字节保留，不重钉新pin。fresh02的0734ee2e…仅历史。 | `out/final-e4-state`当前原队列；`out/final-e4-state-before-corpus`原33完整留本，`out/final-e4-state-fresh02-replay`不必要重放全记录。F4固定CODEX_TOOL_CALL_ID=unisacc-c43-final-e4-0d25，SEED_DIR=/mnt/out/final-e4-bootstrap，provider-first路径；同源原目录只定点恢复，旧b09/P297不借资格。 |
 | k2b室：已修首红 | 原wrapper与自测双重Git fixture准备挤爆40秒。两自然scope保持原失效／准入、真实双queue／CLI与字节／锁断言，独立冷测21.379／37.047秒rc0；共享footer与setup归属已独立静审。 | `/tmp/unisacc-c43-k2b-scopes-final-result.txt`、`/tmp/unisacc-c43-k2b-scope-review.txt`；原089／各次142及guard拒绝均保留。旧无消费者wrapper已按SHA不变移至忽略`out/archived-test-tools/`，未绕守卫删除源文件。新图与元数据见根`out/c43-k2b-*`；该房间记录历史修复；当前正式M7为0d25，计数见思维树。 |
 | 资源室：完整义务 | 新1333计划保留seedmemory功能原16行为与evidence原1真实freshness；UNKNOWN required=memory保持OPEN、不能称PASS，坏文件／解析／权限仍真错，不重键套旧RSS。 | `release/preauth.tsv`及`research/c43-resource-disposition.md`已有整组classified处置：新候选须实际执行自己的拒绝、逐项收齐原日志，最终PENDING0/无未分类产品失败/处置齐全且公开披露，允许真实资源OPEN，不新加114测量框架。宿主未核及其他rc1/断言/超时各按现行具名合同，不能泛化为资源豁免。 |

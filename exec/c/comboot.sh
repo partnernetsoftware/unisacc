@@ -10,7 +10,7 @@
 #   comboot.sh report          the three sha256 values
 # Step markers hold "<source identity> <sha256 of the step's proof file>", the identity being seed/ident.c's
 # (= exec/c/provenance.py source_digest, what build.json records), so markers from either tool agree.
-# Every make is bounded by the native tests/bound 55.  See comboot.py for the design notes (N22).
+# Every make is bounded by the native tools/bound 55.  See comboot.py for the design notes (N22).
 set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 OUT=$ROOT/out/comboot; REC=$OUT/stages.json
@@ -20,7 +20,7 @@ HELLO=$ROOT/examples/hello.c; SEED_PROBE='hello from C99'
 BUDGET=${COMBOOT_BUDGET:-40}; T0=$(date +%s)
 STEP_LIST="shared lnx/arm64 lnx/x86_64 osx/arm64 osx/x86_64 win/arm64 win/x86_64 pack-prep-1 pack-prep-2 pack-prep-3 pack-models pack-driver"
 STRICT=${STRICT:-0}
-B=$ROOT/tests/bound
+B=$ROOT/tools/bound
 die() { printf '%s\n' "$*" >&2; exit 1; }
 sha() { shasum -a 256 "$1" | cut -d' ' -f1; }
 size() { wc -c < "$1" | tr -d ' '; }
@@ -125,10 +125,10 @@ lock() {   # mkdir lock with the owner's pid; a dead owner's lock is taken over
     LOCK=$1.lock; mkdir -p "$(dirname "$LOCK")"
     if mkdir "$LOCK" 2>/dev/null; then echo $$ > "$LOCK/pid"; return 0; fi
     owner=$(cat "$LOCK/pid" 2>/dev/null || :)
-    if [ -z "$owner" ] || ! kill -0 "$owner" 2>/dev/null; then sh "$ROOT/tests/cxbin" "$ROOT/tests/safedel.cx" --purge -- "${LOCK:?}" || die "comboot: cannot remove the stale lock $LOCK (tests/safedel.cx refused or failed)"; lock "$1"; return 0; fi
+    if [ -z "$owner" ] || ! kill -0 "$owner" 2>/dev/null; then sh "$ROOT/tools/cxbin" "$ROOT/tools/safedel.cx" --purge -- "${LOCK:?}" || die "comboot: cannot remove the stale lock $LOCK (tools/safedel.cx refused or failed)"; lock "$1"; return 0; fi
     die "comboot: $2 is being built by another run ($LOCK); invoke this shard again once it is done"
 }
-unlock() { [ -n "$LOCK" ] && sh "$ROOT/tests/cxbin" "$ROOT/tests/safedel.cx" --purge -- "$LOCK"; LOCK=; }
+unlock() { [ -n "$LOCK" ] && sh "$ROOT/tools/cxbin" "$ROOT/tools/safedel.cx" --purge -- "$LOCK"; LOCK=; }
 seed_ready() {
     side=$SEED.build.json
     [ -e "$side" ] || die "comboot: $SEED has no build.json sidecar; rebuild the seed with \`make seed-com SEED_DIR=$SEED_DIR\`"

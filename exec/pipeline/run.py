@@ -57,10 +57,10 @@ def fresh(out, cmd, inputs):
 
 
 def refs():
-    b = [sys.executable, os.path.join(ROOT, "tests", "bound.py"), "58"]
+    b = [os.path.join(ROOT, "tools", "bound"), "58"]
     src = subprocess.run(["sh", "-c", '. exec/stamp.sh; echo $REFSRC'], cwd=ROOT,
                          capture_output=True, text=True).stdout.split()
-    r, e = fresh(os.path.join(X, "ua_ref"), b + ["./tests/build_ref.sh", os.path.join(X, "ua_ref.c"),
+    r, e = fresh(os.path.join(X, "ua_ref"), b + ["./tools/build_ref.sh", os.path.join(X, "ua_ref.c"),
                                                   os.path.join(X, "ua_ref")], src)
     if r == 0:
         r, e = fresh(os.path.join(X, "ua_tdump"), b + ["exec/parse/mkdump.sh", os.path.join(X, "ua_ref.c"),
@@ -85,7 +85,7 @@ def gen_inputs(cmd):
         os.replace(temporary, path)
     finally:
         try:
-            subprocess.run(["sh", os.path.join(ROOT, "tests", "cxbin"), os.path.join(ROOT, "tests", "safedel.cx"), "--purge", "--", temporary], check=True)   # the one deletion guard (commissar ruling 2026-10-23)
+            subprocess.run(["sh", os.path.join(ROOT, "tools", "cxbin"), os.path.join(ROOT, "tools", "safedel.cx"), "--purge", "--", temporary], check=True)   # the one deletion guard (commissar ruling 2026-10-23)
         except FileNotFoundError:
             pass
     return [path, os.path.join(X, "ua_ref.stamp")]
@@ -189,7 +189,7 @@ def main():
             print("%s: input fails %s check: %s" % (n, fmt, bad))
             return 1
         if gen and os.path.exists(s["delta"] + ".stamp"):
-            subprocess.run(["sh", os.path.join(ROOT, "tests", "cxbin"), os.path.join(ROOT, "tests", "safedel.cx"), "--purge", "--", s["delta"] + ".stamp"], check=True)   # the one deletion guard
+            subprocess.run(["sh", os.path.join(ROOT, "tools", "cxbin"), os.path.join(ROOT, "tools", "safedel.cx"), "--purge", "--", s["delta"] + ".stamp"], check=True)   # the one deletion guard
         r, e = fresh(s["delta"], shlex.split(s["gen"].format(delta=s["delta"])), gen_inputs(s["gen"]))
         if True:
             if r != 0:

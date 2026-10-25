@@ -41,7 +41,7 @@ A shard whose prerequisite is absent prints ONE `skipped:` line and exits 0, so
 an empty SEED_DIR is a green checklist rather than a failure -- the pipeline
 that was supposed to produce the seed has simply not run yet.  `STRICT=1` turns
 those skips into failures, for a caller that needs the whole bootstrap proven.
-Every `make` stays on its own `tests/bound.py 55`.
+Every `make` stays on its own `tools/bound 55`.
 """
 import hashlib
 import json
@@ -137,12 +137,12 @@ def cmp2(a, b):
 
 
 def capture(cmd, secs=55):
-    """One bounded step; `tests/bound.py` is the project's watchdog.
+    """One bounded step; `tools/bound` is the project's watchdog.
 
     Returns (rc, tail) rather than just the code, because the callers here
     judge a compiler by what it prints as well as by what it exits with.
     """
-    r = subprocess.run([sys.executable, str(ROOT / 'tests' / 'bound.py'), str(secs)] + cmd,
+    r = subprocess.run([str(ROOT / 'tools' / 'bound'), str(secs)] + cmd,
                        cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     text = r.stdout.decode('utf-8', 'replace')
     return r.returncode, text
@@ -254,7 +254,7 @@ def build_step(st, model_dir):
     """ONE bounded buildcompiler step, and the only place `make` is called.
 
     The whole watchdog contract of this file lives here: every `make` gets its
-    own `tests/bound.py 55`, so no single unit of work is ever unbounded, and
+    own `tools/bound 55`, so no single unit of work is ever unbounded, and
     the step markers make a re-run pick up where the last one stopped instead
     of starting over.
     """
@@ -318,7 +318,7 @@ def lock(path, name):
             owner = int((lk / 'pid').read_text())
             os.kill(owner, 0)
         except (FileNotFoundError, ValueError, ProcessLookupError):
-            subprocess.run(['sh', str(ROOT / 'tests/cxbin'), str(ROOT / 'tests/safedel.cx'), '--', str(lk)], check=True)   # a stale lock: into the trash (the one deletion guard, commissar ruling 2026-10-23)
+            subprocess.run(['sh', str(ROOT / 'tools/cxbin'), str(ROOT / 'tools/safedel.cx'), '--', str(lk)], check=True)   # a stale lock: into the trash (the one deletion guard, commissar ruling 2026-10-23)
             return lock(path, name)
         except PermissionError:
             pass
@@ -384,7 +384,7 @@ def shard(name):
             build_model(model_dir)
             install(model_dir, STAGE2)
         finally:
-            subprocess.run(['sh', str(ROOT / 'tests/cxbin'), str(ROOT / 'tests/safedel.cx'), '--purge', '--', str(lk)], check=True)   # our own lock (the one deletion guard)
+            subprocess.run(['sh', str(ROOT / 'tools/cxbin'), str(ROOT / 'tools/safedel.cx'), '--purge', '--', str(lk)], check=True)   # our own lock (the one deletion guard)
         if not STAGE2.exists():
             raise SystemExit('comboot-shard stage2: no %s after the build' % STAGE2)
         stage(2, STAGE2)
@@ -415,7 +415,7 @@ def shard(name):
             build_model(model_dir)
             install(model_dir, STAGE3)
         finally:
-            subprocess.run(['sh', str(ROOT / 'tests/cxbin'), str(ROOT / 'tests/safedel.cx'), '--purge', '--', str(lk)], check=True)   # our own lock (the one deletion guard)
+            subprocess.run(['sh', str(ROOT / 'tools/cxbin'), str(ROOT / 'tools/safedel.cx'), '--purge', '--', str(lk)], check=True)   # our own lock (the one deletion guard)
         if not STAGE3.exists():
             raise SystemExit('comboot-shard stage3: no %s after the build' % STAGE3)
         stage(3, STAGE3)

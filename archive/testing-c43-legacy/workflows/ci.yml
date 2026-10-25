@@ -1,0 +1,337 @@
+name: ci
+
+# The point of the Linux job is not "the tests pass" -- it is that the ELF we
+# emit is a REAL program on a platform we cannot test from the dev machine.
+# Until this ran, five of the six targets were only ever verified structurally.
+
+# This repository is PUBLIC, so hosted runners are free -- which is why it is
+# public.  It was parked for a while when it was private: a push-triggered
+# matrix of one Linux and two macOS jobs, the macOS ones billing at ten times
+# the Linux rate, exhausted the organisation's Actions budget in a single
+# session.
+#
+# It is a SAFETY NET, not the test loop.  Test here first -- `tests/all.sh`
+# covers macOS natively, `tests/linux.sh` runs the whole suite in the local
+# Linux VM, and the Windows targets execute in the local UTM machine via
+# `tests/crossnative.sh` -- and let CI be the second opinion on a machine
+# nobody has been editing.
+# Since v0.0.10 this full matrix is a scheduled/manual safety net only. Pushes run the
+# fast release-check.yml; local gates stay the authority. (The owner ruled 2026-09-29
+# that a 30-minute full matrix must never sit between a sealed candidate and signing.)
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * 1'
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  linux:
+    # Both Linux architectures GitHub hosts run the full suite natively (R12-3 ③);
+    # the sealed candidate (TOOLS_UA) is pulled by digest on each.
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    env:
+      UNISACC_TIME_SCALE: '4'   # 0.0.27 C1: tests/bound and bound.py stretch every bound 4x on hosted runners
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # warn/diag require real corpus input, including in a fresh checkout.
+      - name: prepare pinned external C corpus
+        run: |
+          # The child shell expands its own variables.
+          # shellcheck disable=SC2016
+          python3 tests/bound.py 45 sh -eu -c '
+            git init -q corpus/c-testsuite
+            git -C corpus/c-testsuite remote add origin https://github.com/c-testsuite/c-testsuite.git
+            python3 tests/bound.py 30 git -C corpus/c-testsuite fetch -q --depth 1 origin 5c7275656d751de0e68b2d340a95b5681858ed07
+            git -C corpus/c-testsuite checkout -q --detach FETCH_HEAD
+            test "$(git -C corpus/c-testsuite rev-parse HEAD)" = 5c7275656d751de0e68b2d340a95b5681858ed07
+          '
+
+      - name: prepare pinned external library fixtures
+        run: |
+          # Each library fetch is independently bounded; tests do not fetch.
+          for spec in 'crypto-algorithms|https://github.com/B-Con/crypto-algorithms.git|cfbde48414baacf51fc7c74f275190881f037d32' 'tiny-AES-c|https://github.com/kokke/tiny-AES-c.git|23856752fbd139da0b8ca6e471a13d5bcc99a08d' 'tiny-regex-c|https://github.com/kokke/tiny-regex-c.git|f2632c6d9ed25272987471cdb8b70395c2460bdb'; do
+            # shellcheck disable=SC2016
+            python3 tests/bound.py 45 sh -eu -c '
+              name=${1%%|*}; rest=${1#*|}; url=${rest%%|*}; commit=${rest##*|}
+              git init -q "corpus/$name"
+              git -C "corpus/$name" remote add origin "$url"
+              python3 tests/bound.py 30 git -C "corpus/$name" fetch -q --depth 1 origin "$commit"
+              git -C "corpus/$name" checkout -q --detach FETCH_HEAD
+              test "$(git -C "corpus/$name" rev-parse HEAD)" = "$commit"
+            ' _ "$spec"
+          done
+
+      - name: construct weights and check every stage
+        run: |
+          python3 tests/bound.py 55 python3 -m unisa build-weights
+          python3 tests/bound.py 55 python3 -m unisa acc
+
+      - name: the emitted ELF actually runs
+        run: |
+          set -e
+          case "$(uname -m)" in aarch64|arm64) T=lnx/arm64;; *) T=lnx/x86_64;; esac   # the runner's own architecture
+          echo "target $T"
+          for e in hello fact fib ptr struct 'do' switch; do
+            python3 tests/bound.py 30 python3 -m unisa compile examples/$e.c -o /tmp/$e \
+              --target $T --drive built
+            chmod +x /tmp/$e
+            got=$(python3 tests/bound.py 8 /tmp/$e); code=$?
+            want=$(python3 tests/bound.py 15 python3 -m unisa run examples/$e.c --target $T --drive built)
+            echo "  $e -> '$got' (exit $code)"
+            [ "$got" = "$want" ] || { echo "MISMATCH: want '$want'"; exit 1; }
+          done
+
+      - name: install sealed candidate as native tool prerequisite
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          UNISACC_TIME_SCALE: '1'
+        run: |
+          set -euo pipefail
+          b() { tests/bound 45 "$@"; }
+          ref=$(b jq -er .ref release/candidate.json)
+          sha=$(b jq -er .unisacc_com_sha256 release/candidate.json)
+          src=$(b jq -er .sources_sha256 release/candidate.json)
+          bytes=$(b jq -er .bytes release/candidate.json)
+          version=$(b jq -er .version release/candidate.json)
+          [[ "$ref" =~ ^ghcr\.io/partnernetsoftware/unisacc-candidate@sha256:[0-9a-f]{64}$ ]]
+          [[ "$sha" =~ ^[0-9a-f]{64}$ && "$src" =~ ^[0-9a-f]{64}$ ]]
+          case "$(b uname -s)" in Linux) os=linux;; Darwin) os=darwin;; *) exit 2;; esac
+          case "$(b uname -m)" in aarch64|arm64) arch=arm64;; x86_64) arch=amd64;; *) exit 2;; esac
+          b curl -fsSL --connect-timeout 10 --max-time 40 \
+            "https://github.com/oras-project/oras/releases/download/v1.2.0/oras_1.2.0_${os}_${arch}.tar.gz" \
+            -o "$RUNNER_TEMP/oras.tar.gz"
+          b tar -xzf "$RUNNER_TEMP/oras.tar.gz" oras
+          b chmod +x oras
+          printf '%s' "$GHCR_TOKEN" | b ./oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+          b ./oras pull "$ref" --output candidate
+          for name in unisacc.com unisacc.com.build.json models.json; do test -s "candidate/$name" && test -f "candidate/$name" && test ! -L "candidate/$name"; done
+          got=$(b openssl dgst -sha256 candidate/unisacc.com); got=${got##* }
+          test "$got" = "$sha"
+          b jq -e --arg sha "$sha" --arg src "$src" --argjson bytes "$bytes" \
+            '.schema == 1 and .artifact_sha256 == $sha and .sources_sha256 == $src and .bytes == $bytes' candidate/unisacc.com.build.json
+          actual=$(b wc -c < candidate/unisacc.com); actual=${actual//[[:space:]]/}
+          test "$actual" = "$bytes"
+          test ! -e unisacc.com && test ! -L unisacc.com
+          test ! -e unisacc.com.build.json && test ! -L unisacc.com.build.json
+          b cp candidate/unisacc.com unisacc.com
+          b cp candidate/unisacc.com.build.json unisacc.com.build.json
+          b chmod +x unisacc.com candidate/unisacc.com
+          test "$(b sh ./unisacc.com --version)" = "unisacc $version"
+      - name: suites
+        run: |
+          set -e
+          python3 tests/bound.py 30 python3 tests/ciplancheck.py
+          python3 tests/bound.py 30 python3 tests/ci_shard_plan.py
+          python3 tests/bound.py 30 python3 tests/opt_partition_check.py
+          # Acceptance entries remain first and serial: they write weights.
+          # Every later entry has the same bounded, explicit input shard.
+          python3 tests/bound.py 10 ./tests/all.sh --list > /tmp/unisacc-ci-plan
+          logs=$(mktemp -d); pids=(); batch=(); bad=0
+          export APE_STATE="$logs/ape" ACCEPT_STATE="$logs/accept" SELFHOST_STATE="$logs/selfhost"
+          # tools* compile third-party libraries; with a sealed candidate the product does
+          # it in milliseconds (tools11 alone took 41–50 s through the Python front end).
+          if [ -f candidate/unisacc.com ]; then export TOOLS_UA="$PWD/candidate/unisacc.com"; fi
+          drain() {
+            for pid in "${pids[@]}"; do wait "$pid" || true; done
+            for name in "${batch[@]}"; do
+              cat "$logs/$name.log"
+              [ "$(cat "$logs/$name.rc")" = 0 ] || bad=1
+            done
+            pids=(); batch=()
+          }
+          while IFS= read -r suite; do
+            # Acceptance modifies generated inputs and must stay serial.
+            case "$suite" in acceptance*|ape|selfhost-prepare-*) drain;; esac
+            (
+              # 55 s per suite, stretched by UNISACC_TIME_SCALE on hosted runners (tests/bound.py scale())
+              set +e
+              python3 tests/bound.py 60 env SUITE_LIMIT=55 JOBS=1 FETCH=0 ./tests/all.sh --suite "$suite" >"$logs/$suite.log" 2>&1
+              echo "$?" >"$logs/$suite.rc"
+            ) &
+            pids+=("$!"); batch+=("$suite")
+            case "$suite" in acceptance*|ape|selfhost-prepare-*) drain;;
+              *) [ "${#pids[@]}" -lt 2 ] || drain;; esac
+          done < /tmp/unisacc-ci-plan
+          drain
+          [ "$bad" -eq 0 ]
+
+      - name: an external corpus we did not write
+        run: |
+          for shard in 1 2 3 4; do
+            python3 tests/bound.py 60 env FETCH=0 SHARD="$shard/4" ./tests/corpus.sh
+          done
+
+      - name: real library code by other people
+        run: |
+          for shard in $(seq 1 11); do
+            python3 tests/bound.py 60 env FETCH=0 SHARD="$shard/11" ./tests/tools.sh
+          done
+
+  macos:
+    # macos-14/15 are Darwin 23/24 against the dev machine's Darwin 25, which
+    # is how the dyld crash in I-15 was pinned down.  (macos-13 would cover
+    # osx/x86_64 natively, but the Intel queue never drains; Rosetta covers
+    # that target from the dev machine instead -- tests/crossnative.sh.)
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-14, macos-15, macos-15-intel]   # macos-15-intel: osx/x86_64 natively, not through Rosetta
+    runs-on: ${{ matrix.runner }}
+    env:
+      UNISACC_TIME_SCALE: '4'   # 0.0.27 C1: tests/bound and bound.py stretch every bound 4x on hosted runners
+    # Owner ruling 2026-09-30 (0.0.14 R14-2 (6)): the Intel runner runs the Python reference about
+    # 4x slower and times out a dozen suites at the 55 s per-suite limit that every other runner and the
+    # local queue meet; loosening the limit would break the 60 s rule, so its verdict is informative.
+    continue-on-error: ${{ matrix.runner == 'macos-15-intel' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # warn/diag require real corpus input, including in a fresh checkout.
+      - name: prepare pinned external C corpus
+        run: |
+          # The child shell expands its own variables.
+          # shellcheck disable=SC2016
+          python3 tests/bound.py 45 sh -eu -c '
+            git init -q corpus/c-testsuite
+            git -C corpus/c-testsuite remote add origin https://github.com/c-testsuite/c-testsuite.git
+            python3 tests/bound.py 30 git -C corpus/c-testsuite fetch -q --depth 1 origin 5c7275656d751de0e68b2d340a95b5681858ed07
+            git -C corpus/c-testsuite checkout -q --detach FETCH_HEAD
+            test "$(git -C corpus/c-testsuite rev-parse HEAD)" = 5c7275656d751de0e68b2d340a95b5681858ed07
+          '
+      - name: prepare pinned external library fixtures
+        run: |
+          # Each library fetch is independently bounded; tests do not fetch.
+          for spec in 'crypto-algorithms|https://github.com/B-Con/crypto-algorithms.git|cfbde48414baacf51fc7c74f275190881f037d32' 'tiny-AES-c|https://github.com/kokke/tiny-AES-c.git|23856752fbd139da0b8ca6e471a13d5bcc99a08d' 'tiny-regex-c|https://github.com/kokke/tiny-regex-c.git|f2632c6d9ed25272987471cdb8b70395c2460bdb'; do
+            # shellcheck disable=SC2016
+            python3 tests/bound.py 45 sh -eu -c '
+              name=${1%%|*}; rest=${1#*|}; url=${rest%%|*}; commit=${rest##*|}
+              git init -q "corpus/$name"
+              git -C "corpus/$name" remote add origin "$url"
+              python3 tests/bound.py 30 git -C "corpus/$name" fetch -q --depth 1 origin "$commit"
+              git -C "corpus/$name" checkout -q --detach FETCH_HEAD
+              test "$(git -C "corpus/$name" rev-parse HEAD)" = "$commit"
+            ' _ "$spec"
+          done
+
+      # The weights are tracked and reconstructed+checked on the ubuntu and arm64 jobs of the
+      # same commit; the Intel runner is too slow for a 55 s reconstruction, so it runs the
+      # suites on the tracked weights instead.
+      - if: matrix.runner != 'macos-15-intel'
+        run: python3 tests/bound.py 55 python3 -m unisa build-weights
+
+      - name: what this host thinks of our Mach-O
+        continue-on-error: true
+        run: |
+          sw_vers; uname -m
+          python3 tests/bound.py 30 python3 -m unisa compile examples/hello.c -o /tmp/hello \
+            --target osx/arm64 --drive built
+          chmod +x /tmp/hello
+          python3 tests/bound.py 8 codesign -f -s - /tmp/hello
+          set +e
+          python3 tests/bound.py 8 /tmp/hello; echo "plain exit=$?"
+          echo "--- dyld ---"
+          DYLD_PRINT_SEGMENTS=1 DYLD_PRINT_LIBRARIES=1 python3 tests/bound.py 8 /tmp/hello 2>&1 | head -40
+          echo "--- lldb ---"
+          python3 tests/bound.py 15 lldb --batch -o 'run' -o 'bt all' -o 'register read pc sp x0' \
+               -o 'disassemble --pc --count 8' -o 'quit' /tmp/hello 2>&1 | head -60
+
+      - name: install sealed candidate as native tool prerequisite
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          UNISACC_TIME_SCALE: '1'
+        run: |
+          set -euo pipefail
+          b() { tests/bound 45 "$@"; }
+          ref=$(b jq -er .ref release/candidate.json)
+          sha=$(b jq -er .unisacc_com_sha256 release/candidate.json)
+          src=$(b jq -er .sources_sha256 release/candidate.json)
+          bytes=$(b jq -er .bytes release/candidate.json)
+          version=$(b jq -er .version release/candidate.json)
+          [[ "$ref" =~ ^ghcr\.io/partnernetsoftware/unisacc-candidate@sha256:[0-9a-f]{64}$ ]]
+          [[ "$sha" =~ ^[0-9a-f]{64}$ && "$src" =~ ^[0-9a-f]{64}$ ]]
+          case "$(b uname -s)" in Linux) os=linux;; Darwin) os=darwin;; *) exit 2;; esac
+          case "$(b uname -m)" in aarch64|arm64) arch=arm64;; x86_64) arch=amd64;; *) exit 2;; esac
+          b curl -fsSL --connect-timeout 10 --max-time 40 \
+            "https://github.com/oras-project/oras/releases/download/v1.2.0/oras_1.2.0_${os}_${arch}.tar.gz" \
+            -o "$RUNNER_TEMP/oras.tar.gz"
+          b tar -xzf "$RUNNER_TEMP/oras.tar.gz" oras
+          b chmod +x oras
+          printf '%s' "$GHCR_TOKEN" | b ./oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+          b ./oras pull "$ref" --output candidate
+          for name in unisacc.com unisacc.com.build.json models.json; do test -s "candidate/$name" && test -f "candidate/$name" && test ! -L "candidate/$name"; done
+          got=$(b openssl dgst -sha256 candidate/unisacc.com); got=${got##* }
+          test "$got" = "$sha"
+          b jq -e --arg sha "$sha" --arg src "$src" --argjson bytes "$bytes" \
+            '.schema == 1 and .artifact_sha256 == $sha and .sources_sha256 == $src and .bytes == $bytes' candidate/unisacc.com.build.json
+          actual=$(b wc -c < candidate/unisacc.com); actual=${actual//[[:space:]]/}
+          test "$actual" = "$bytes"
+          test ! -e unisacc.com && test ! -L unisacc.com
+          test ! -e unisacc.com.build.json && test ! -L unisacc.com.build.json
+          b cp candidate/unisacc.com unisacc.com
+          b cp candidate/unisacc.com.build.json unisacc.com.build.json
+          b chmod +x unisacc.com candidate/unisacc.com
+          test "$(b sh ./unisacc.com --version)" = "unisacc $version"
+
+      - name: suites (macOS)
+        env:
+          # 1417/1413: always stage bootstrap files under runner.temp; upload only on failure (below).
+          # bootstrap.sh is env-gated: local runs without UNISACC_DIAG_OUT are unchanged.
+          UNISACC_DIAG_OUT: ${{ runner.temp }}/unisacc-diag
+        run: |
+          set -e
+          python3 tests/bound.py 30 python3 tests/ciplancheck.py
+          python3 tests/bound.py 30 python3 tests/ci_shard_plan.py
+          python3 tests/bound.py 30 python3 tests/opt_partition_check.py
+          # Acceptance entries remain first and serial: they write weights.
+          # Every later entry has the same bounded, explicit input shard.
+          python3 tests/bound.py 10 ./tests/all.sh --list > /tmp/unisacc-ci-plan
+          logs=$(mktemp -d); pids=(); batch=(); bad=0
+          export APE_STATE="$logs/ape" ACCEPT_STATE="$logs/accept" SELFHOST_STATE="$logs/selfhost"
+          # tools* compile third-party libraries; with a sealed candidate the product does
+          # it in milliseconds (tools11 alone took 41–50 s through the Python front end).
+          if [ -f candidate/unisacc.com ]; then export TOOLS_UA="$PWD/candidate/unisacc.com"; fi
+          drain() {
+            for pid in "${pids[@]}"; do wait "$pid" || true; done
+            for name in "${batch[@]}"; do
+              cat "$logs/$name.log"
+              [ "$(cat "$logs/$name.rc")" = 0 ] || bad=1
+            done
+            pids=(); batch=()
+          }
+          while IFS= read -r suite; do
+            # Acceptance modifies generated inputs and must stay serial.
+            case "$suite" in acceptance*|ape|selfhost-prepare-*) drain;; esac
+            (
+              # 55 s per suite, stretched by UNISACC_TIME_SCALE on hosted runners (tests/bound.py scale())
+              set +e
+              python3 tests/bound.py 60 env SUITE_LIMIT=55 JOBS=1 FETCH=0 ./tests/all.sh --suite "$suite" >"$logs/$suite.log" 2>&1
+              echo "$?" >"$logs/$suite.rc"
+            ) &
+            pids+=("$!"); batch+=("$suite")
+            case "$suite" in acceptance*|ape|selfhost-prepare-*) drain;;
+              *) [ "${#pids[@]}" -lt 2 ] || drain;; esac
+          done < /tmp/unisacc-ci-plan
+          drain
+          [ "$bad" -eq 0 ]
+      - name: upload macOS bootstrap diagnostic (1417; failure job only)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: darwin-diag-${{ matrix.runner }}-a${{ github.run_attempt }}
+          path: ${{ runner.temp }}/unisacc-diag
+          if-no-files-found: warn
+          retention-days: 5

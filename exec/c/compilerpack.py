@@ -7,7 +7,7 @@ from pathlib import Path
 import tempfile,struct,hashlib,json,shutil
 import subprocess,sys,fcntl,re
 from pack import build
-_GUARD=Path(__file__).resolve().parents[2]/'tests'   # every deletion: the one guard's CLI, argv only (commissar ruling 2026-10-23)
+_GUARD=Path(__file__).resolve().parents[2]/'tools'   # every deletion: the one guard's CLI, argv only (commissar ruling 2026-10-23)
 def _safedel(*paths): subprocess.run(['sh',str(_GUARD/'cxbin'),str(_GUARD/'safedel.cx'),'--purge','--',*map(str,paths)],check=True)
 
 # Tests rebuild packages many times from identical inputs; the shipped build

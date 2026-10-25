@@ -1,4 +1,6 @@
 #!/bin/sh
+echo 'RETIRED: bindprep.sh belongs to the archived assembly binding validation; use exec/c/buildcompiler.sh for product construction' >&2
+exit 2
 _BOUND=$(cd "$(dirname "$0")/../../.." && pwd)/tests/bound
 _BOUND=$("$_BOUND" --helper) || exit 2
 # The preparation part of the assembly binding check.  bindingcheck.sh is one

@@ -1,5 +1,12 @@
 #!/bin/sh
-_BOUND=$(cd "$(dirname "$0")/../.." && pwd)/tests/bound
+# The legacy validation modes depended on the retired tests tree.  Only the
+# product cache producer remains an active entrypoint until tests are redesigned.
+if [ "${1:-}" != --build-prepared ]; then
+ echo 'RETIRED: nativecheck validation modes; only --build-prepared remains available for product construction' >&2
+ exit 2
+fi
+[ "$#" -eq 2 ] || { echo 'usage: nativecheck.sh --build-prepared MODELS_DIR' >&2; exit 2; }
+_BOUND=$(cd "$(dirname "$0")/../.." && pwd)/tools/bound
 _BOUND=$("$_BOUND" --helper) || exit 2
 # The same network/action runtime compiled by cc and by unisacc.
 # Models are freshly constructed; every stage's bytes and status must agree.
@@ -12,18 +19,18 @@ case "$(uname -s)/$(uname -m)" in
  Darwin/x86_64) TARGET=osx/x86_64; IMAGE=macho;;
  *) printf 'UNVERIFIED: required=native-posix observed=%s missing=execution-host target=host\n' "$(uname -s)/$(uname -m)"; exit 77;;
 esac
-UA=${UA:-/tmp/ua_ref}; . ./tests/lib.sh; ua_ready
+UA=${UA:-/tmp/ua_ref}; . ./tools/lib.sh; ua_ready
 b() { "$_BOUND" 55 "$@"; }
 # Cache producer callback: reuse the original preparation, with already-built models.
 if [ "${1:-}" = --build-prepared ]; then
- T=${2:?prepared models directory}; U=$(mktemp -d); trap '[ -z "$U" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$U"' EXIT
+ T=${2:?prepared models directory}; U=$(mktemp -d); trap '[ -z "$U" ] || sh "$R/tools/cxbin" "$R/tools/safedel.cx" --purge -- "$U"' EXIT
  b env STAGE_MODELS_READY=1 EXEC_CC=cc NETWORK=1 TARGET="$TARGET" ./exec/pipeline/elf.sh "$T" exec/c/run.c > "$U/log" 2>&1 || { cat "$U/log"; exit 1; }
- b python3 tests/sourceflat.py "$U/unisacc.c"
+ b sh ./unisacc.com tools/sourceflat.cx -- "$U/unisacc.c"
  b "$UA" -O2 "$U/unisacc.c" -o "$U/compiler"
  b "$U/compiler" -O2 exec/c/run.c -o "$T/run-ua"
  exit 0
 fi
-T=$(mktemp -d); trap '[ -z "$T" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$T"' EXIT
+T=$(mktemp -d); trap '[ -z "$T" ] || sh "$R/tools/cxbin" "$R/tools/safedel.cx" --purge -- "$T"' EXIT
 PART=${NATIVE_PART:-all}
 case $PART in
  all|stages|stages-examples|stages-self) INPUTS="examples/hello.c examples/fib.c tests/c/b_toknames.c exec/c/run.c";;
@@ -39,7 +46,7 @@ if [ "$PART" = resources ]; then
  esac
 else
 b env EXEC_CC=cc NETWORK=1 TARGET="$TARGET" ./exec/pipeline/elf.sh "$T" $INPUTS > "$T/log" 2>&1 || { cat "$T/log"; exit 1; }
-b python3 tests/sourceflat.py "$T/unisacc.c"
+b sh ./unisacc.com tools/sourceflat.cx -- "$T/unisacc.c"
 b "$UA" -O2 "$T/unisacc.c" -o "$T/compiler"
 b "$T/compiler" -O2 exec/c/run.c -o "$T/run-ua"
 fi
@@ -62,7 +69,7 @@ if part in ('all', 'stages', 'stages-examples'):
         run([ua,'--check-net',p/(stage+'.tbl'),p/(stage+'.net')])
     for src in ['examples/hello.c','examples/fib.c','tests/c/b_toknames.c']:
         name=pathlib.Path(src).stem;inp=pathlib.Path(src)
-        attrs=p/(name+'.ua.attributes');subprocess.run(["sh",str(root/"tests/cxbin"),str(root/"tests/safedel.cx"),"--purge","--",str(attrs)],check=True)
+        attrs=p/(name+'.ua.attributes');subprocess.run(["sh",str(root/"tools/cxbin"),str(root/"tools/safedel.cx"),"--purge","--",str(attrs)],check=True)
         os.environ['UNISA_ATTRIBUTES']=str(attrs)
         for stage in ['e2','e1','e3','e4','prune','lower','elf']:
             got=run([ua,p/(stage+'.net'),inp,src,root/'include'])
@@ -82,7 +89,7 @@ if part in ('all', 'stages', 'stages-self'):
     # The resulting network-built runtime repeats the stages on its own
     # complete source, without Python processing that source.
     src='exec/c/run.c';inp=pathlib.Path(src)
-    attrs=p/'run.net.attributes';subprocess.run(["sh",str(root/"tests/cxbin"),str(root/"tests/safedel.cx"),"--purge","--",str(attrs)],check=True)
+    attrs=p/'run.net.attributes';subprocess.run(["sh",str(root/"tools/cxbin"),str(root/"tools/safedel.cx"),"--purge","--",str(attrs)],check=True)
     os.environ['UNISA_ATTRIBUTES']=str(attrs)
     for stage in ['e2','e1','e3','e4','prune','lower','elf']:
         got=run([netrun,p/(stage+'.net'),inp,src,root/'include'])
