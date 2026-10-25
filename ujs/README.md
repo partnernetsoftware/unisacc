@@ -1,6 +1,6 @@
 # UJS — 开箱
 
-> 规格：[`prd.md`](prd.md) · **版本**：[`plans/`](plans/)（**0.0.4**；下一刀路线 0.0.5）  
+> 规格：[`prd.md`](prd.md) · **版本**：[`plans/`](plans/)（**0.0.4**；下一刀 [`plans/v0.0.5.md`](plans/v0.0.5.md)）  
 > **`ujs/` 内无 `.c`／`.py`**；遗留：[`../archive/ujs-legacy-py-c/`](../archive/ujs-legacy-py-c/)  
 
 

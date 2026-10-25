@@ -1,7 +1,7 @@
 # UJS —— 产品规格 v1.3
 
 > **唯一耦合活文档**（规格 · 目标 · 思维树 · 记忆宫殿）。与代码同会话更新。  
-> **版本计划**：[`plans/`](plans/)（`ujs.com` **0.0.4** ✓；下一刀路线 [`plans/roadmap-0.0.x.md`](plans/roadmap-0.0.x.md) **0.0.5**）  
+> **版本计划**：[`plans/`](plans/)（`ujs.com` **0.0.4** ✓；下一刀 [`plans/v0.0.5.md`](plans/v0.0.5.md)）  
 > **目录板块**：[`ARCHITECTURE.md`](ARCHITECTURE.md) · 开箱：[`README.md`](README.md) · Host：[`uxe/HOST_ABI.md`](uxe/HOST_ABI.md)  
 > 归档：[`archive/`](archive/)
 
@@ -20,7 +20,7 @@
 | **0.0.2** | ✓ 生产力合同 | [`plans/v0.0.2.md`](plans/v0.0.2.md) |
 | **0.0.3** | ✓ **`ujs/` 无 `.c`／`.py`** | [`plans/v0.0.3.md`](plans/v0.0.3.md) |
 | **0.0.4** | ✓ **host1 wasm 验面** | [`plans/v0.0.4.md`](plans/v0.0.4.md) |
-| **0.0.5** | 下一刀 · archive 续迁／跑面 | [`plans/roadmap-0.0.x.md`](plans/roadmap-0.0.x.md) |
+| **0.0.5** | 下一刀 · 跑面／续迁切片 | [`plans/v0.0.5.md`](plans/v0.0.5.md) |
 
 版号真源：`ujs.com --version`（**`ujs.com 0.0.4`**）。
 
@@ -411,7 +411,8 @@ B (sim.wasm) ══directSim══> Pages
 ujs/                         ★ 树内无 .c／.py；套件在本树
 ├─ prd.md · README.md · ARCHITECTURE.md · plans/
 ├─ tests/                    ★ host1 产品套件（不在根 tests/）
-│   └─ run.cx · host1-pass/refuse
+│   ├─ run.cx · host1-pass/refuse
+│   └─ corpus/ · neg/        语料夹具（自根 tests/ujs2wasm 迁入）
 ├─ product/                  ★ host image（unisacc.com + .cx）
 │   ├─ ujs_main.cx · build*.cx · ape-pack.cx · complete.cx
 │   ├─ corpus-host.cx · verify-host.cx · wasm-verify.cx

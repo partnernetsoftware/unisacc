@@ -2,7 +2,7 @@
 
 > 规格：[`../prd.md`](../prd.md) · 版本：[`../plans/`](../plans/)  
 > 纪律：只用 **`unisacc.com` + `.cx`**。  
-> **位置**：套件在 **`ujs/tests/`**（不与根 `tests/` 的 unisacc 套件混放）。
+> **位置**：全部在 **`ujs/tests/`**（不与根 `tests/` 的 unisacc 套件混放）。
 
 ## 入口
 
@@ -12,18 +12,18 @@
 ./unisacc.com -run ujs/tests/run.cx -- --complete
 ```
 
-## 预言（船闸只开这两份）
+## 预言与夹具
 
 | 文件 | 角色 |
 |---|---|
-| [`host1-pass.txt`](host1-pass.txt) | 必须接受（恰好 28）→ [`../../tests/ujs2wasm/corpus/`](../../tests/ujs2wasm/corpus/) |
-| [`host1-refuse.txt`](host1-refuse.txt) | 必须拒绝 → [`../../tests/ujs2wasm/neg/`](../../tests/ujs2wasm/neg/) |
+| [`host1-pass.txt`](host1-pass.txt) | 必须接受（恰好 28）→ [`corpus/`](corpus/) |
+| [`host1-refuse.txt`](host1-refuse.txt) | 必须拒绝 → [`neg/`](neg/) |
 
 ## 验面（0.0.4）
 
-`ujs.com --verify`／`ujs/product/verify-host.cx`：对 pass 产物做 `\0asm` 节／必导出检查；冒充实文件必须拒绝。
+`ujs.com --verify`／`../product/verify-host.cx`：对 pass 产物做 `\0asm` 节／必导出检查；冒充实文件必须拒绝。
 
-**船闸不可达**：`tests/ujs2wasm/expect.json`、`run_*.mjs`（archive_only／实践脊）。
+**船闸不可达**：根 `tests/ujs2wasm/expect.json`、`run_*.mjs`（archive_only／实践脊）。
 
 ## 身份标签
 

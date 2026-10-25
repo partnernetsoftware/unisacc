@@ -10,7 +10,7 @@ Host1 船闸在 **[`../ujs/tests/`](../ujs/tests/)**（与 unisacc 套件分离�
 ./unisacc.com -run ujs/tests/run.cx -- --complete
 ```
 
-语料夹具暂仍 [`ujs2wasm/`](ujs2wasm/)（expect.json 等为 archive_only）。说明：[`../ujs/tests/README.md`](../ujs/tests/README.md)。
+host1 语料在 [`../ujs/tests/corpus|neg`](../ujs/tests/)。本树 [`ujs2wasm/`](ujs2wasm/) 仅留 archive_only（expect.json 等）。
 
 ## New native test MVP (unisacc CX)
 
