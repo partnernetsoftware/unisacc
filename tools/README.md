@@ -14,6 +14,10 @@ is only a compatibility loader for existing construction callers.
 existing model bytes. Its shared runtime and the new partial contracts are
 documented in [streams.md](streams.md). Preparation never records a test PASS.
 
+[nets.md](nets.md) describes the native full-gold integer-kernel batch and its
+identity/anti-vacuity controls. [assembly.md](assembly.md) tracks the native .S
+construction path, its real encoding checks and the remaining gaps.
+
 The following support was separated from the archived test suite so that
 construction is not broken by its removal: `bound`, `bound.c`, `cxbin`,
 `safedel.cx`, `lib.sh`, `build_ref.sh`, `refshim.h` and `reffoot.h`.

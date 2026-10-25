@@ -266,11 +266,13 @@ int at_xreg(char *s, int n, int *cls, int *hi) {
 #define XO_MEM 3
 #define XO_TGT 4
 #define XO_IND 5                                /* *%reg */
+#define XO_IMEM 6                               /* *memory: call/jmp only */
 int xo_k[4]; int xo_cls[4]; int xo_r[4]; int xo_hi[4]; us_i64 xo_imm[4];
 int xo_base[4]; int xo_idx[4]; int xo_sc[4]; int xo_rip[4];
 char *xo_xn[4]; int xo_xl[4]; us_i64 xo_xa[4]; int xo_got[4];   /* displacement / target expression */
 int at_xop(int i, char *s, int n) {
-    int k; int cls; int hi; int r;
+    int k; int cls; int hi; int r; int indmem;
+    indmem = 0;
     xo_base[i] = 0 - 1; xo_idx[i] = 0 - 1; xo_sc[i] = 1; xo_rip[i] = 0; xo_xn[i] = s; xo_xl[i] = 0; xo_xa[i] = 0; xo_got[i] = 0;
     if (n >= 2 && s[0] == 37) {
         r = at_xreg(s + 1, n - 1, &cls, &hi); if (r < 0) return 0;
@@ -280,7 +282,9 @@ int at_xop(int i, char *s, int n) {
         r = at_xreg(s + 2, n - 2, &cls, &hi); if (r < 0 || cls != 64) return 0;
         xo_k[i] = XO_IND; xo_cls[i] = cls; xo_r[i] = r; return 1;
     }
+    if (n > 1 && s[0] == 42) { indmem = 1; s = s + 1; n = n - 1; }
     if (n >= 2 && s[0] == 36) {
+        if (indmem) return 0;
         if (!at_num(s + 1, n - 1, &xo_imm[i])) return 0;
         xo_k[i] = XO_IMM; return 1;
     }
@@ -292,7 +296,7 @@ int at_xop(int i, char *s, int n) {
         if (!at_expr(s, ke)) return 0;
     }
     xo_xn[i] = at_xn; xo_xl[i] = at_xl; xo_xa[i] = at_xa;
-    if (k == n) { xo_k[i] = XO_TGT; return 1; }
+    if (k == n) { if (indmem) return 0; xo_k[i] = XO_TGT; return 1; }
     if (s[n - 1] != 41) return 0;
     {   char *p; int m; int c; int a; int j; int part;
         p = s + k + 1; m = n - k - 2; part = 0; a = 0;
@@ -320,7 +324,7 @@ int at_xop(int i, char *s, int n) {
         if (xo_rip[i] && xo_idx[i] >= 0) return 0;
         if (xo_rip[i] == 0 && xo_base[i] < 0) return 0;     /* absolute addresses: not in the subset */
     }
-    xo_k[i] = XO_MEM;
+    xo_k[i] = indmem ? XO_IMEM : XO_MEM;
     return 1;
 }
 /* forms */
@@ -338,13 +342,13 @@ int at_xop(int i, char *s, int n) {
 #define XF_J8 11
 #define XF_J32 12
 #define XF_CALL 13
-#define XF_IND 14       /* call *%r64 */
+#define XF_IND 14       /* call/jmp *%r64 or *memory */
 #define XF_XX 15        /* op %xmm_s, %xmm_d   (reg = d) */
 #define XF_XXI 16       /* same, then a fixed imm8 (cmpXXsd) */
 #define XF_GX 17        /* op %gpr, %xmm       (reg = xmm) */
 #define XF_XG 18        /* op %xmm, %gpr       (reg = gpr) */
 #define XF_XGR 19       /* op %xmm, %gpr       (reg = xmm, rm = gpr: 66 0F 7E) */
-#define XF_I8RMU 20     /* movb $imm8, rm (unsigned byte) */
+#define XF_I8RMU 20     /* raw imm8; C1 shifts require an unsigned count */
 struct at_xrow { char *mn; int pfx; int w; int op; int op2; int ext; int form; int sz; int sz2; int imm; };
 struct at_xrow at_xt[] = {
     { "retq", 0, 0, 0xC3, -1, -1, XF_NONE, 0, 0, 0 }, { "nop", 0, 0, 0x90, -1, -1, XF_NONE, 0, 0, 0 },
@@ -408,6 +412,77 @@ struct at_xrow at_xt[] = {
     { "jl", 0, 0, 0x0F, 0x8C, -1, XF_J32, 0, 0, 0 }, { "jge", 0, 0, 0x0F, 0x8D, -1, XF_J32, 0, 0, 0 },
     { "jle", 0, 0, 0x0F, 0x8E, -1, XF_J32, 0, 0, 0 }, { "jg", 0, 0, 0x0F, 0x8F, -1, XF_J32, 0, 0, 0 },
     { "jmp", 0, 0, 0xE9, -1, -1, XF_J32, 0, 0, 0 }, { "callq", 0, 0, 0xE8, -1, -1, XF_CALL, 0, 0, 0 },
+    /* Kernel GAS spellings and width variants. Keep established rows first,
+       so compiler-produced assembly retains its canonical encodings. */
+    { "ret", 0, 0, 0xC3, -1, -1, XF_NONE, 0, 0, 0 },
+    { "cltd", 0, 0, 0x99, -1, -1, XF_NONE, 0, 0, 0 },
+    { "cltq", 0, 1, 0x98, -1, -1, XF_NONE, 0, 0, 0 },
+    { "call", 0, 0, 0xE8, -1, -1, XF_CALL, 0, 0, 0 },
+    { "call", 0, 0, 0xFF, -1, 2, XF_IND, 64, 0, 0 },
+    { "jmp", 0, 0, 0xFF, -1, 4, XF_IND, 64, 0, 0 },
+    { "leal", 0, 0, 0x8D, -1, -1, XF_MR, 32, 32, 0 },
+    { "movb", 0, 0, 0x8A, -1, -1, XF_RMR, 8, 8, 0 },
+    { "movl", 0, 0, 0xC7, -1, 0, XF_I32RM, 32, 0, 0 },
+    { "addb", 0, 0, 0x00, -1, -1, XF_RRM, 8, 8, 0 },
+    { "cmpb", 0, 0, 0x38, -1, -1, XF_RRM, 8, 8, 0 },
+    { "addb", 0, 0, 0x80, -1, 0, XF_I8RMU, 8, 0, 0 },
+    { "cmpb", 0, 0, 0x80, -1, 7, XF_I8RMU, 8, 0, 0 },
+    { "addl", 0, 0, 0x01, -1, -1, XF_RRM, 32, 32, 0 },
+    { "subl", 0, 0, 0x29, -1, -1, XF_RRM, 32, 32, 0 },
+    { "andl", 0, 0, 0x21, -1, -1, XF_RRM, 32, 32, 0 },
+    { "orl", 0, 0, 0x09, -1, -1, XF_RRM, 32, 32, 0 },
+    { "addl", 0, 0, 0x03, -1, -1, XF_RMR, 32, 32, 0 },
+    { "subl", 0, 0, 0x2B, -1, -1, XF_RMR, 32, 32, 0 },
+    { "andl", 0, 0, 0x23, -1, -1, XF_RMR, 32, 32, 0 },
+    { "orl", 0, 0, 0x0B, -1, -1, XF_RMR, 32, 32, 0 },
+    { "xorl", 0, 0, 0x33, -1, -1, XF_RMR, 32, 32, 0 },
+    { "cmpl", 0, 0, 0x3B, -1, -1, XF_RMR, 32, 32, 0 },
+    { "addq", 0, 1, 0x03, -1, -1, XF_RMR, 64, 64, 0 },
+    { "subq", 0, 1, 0x2B, -1, -1, XF_RMR, 64, 64, 0 },
+    { "andq", 0, 1, 0x23, -1, -1, XF_RMR, 64, 64, 0 },
+    { "orq", 0, 1, 0x0B, -1, -1, XF_RMR, 64, 64, 0 },
+    { "xorq", 0, 1, 0x33, -1, -1, XF_RMR, 64, 64, 0 },
+    { "cmpq", 0, 1, 0x3B, -1, -1, XF_RMR, 64, 64, 0 },
+    { "imull", 0, 0, 0x0F, 0xAF, -1, XF_RMR, 32, 32, 0 },
+    { "idivl", 0, 0, 0xF7, -1, 7, XF_RM, 32, 0, 0 },
+    { "incl", 0, 0, 0xFF, -1, 0, XF_RM, 32, 0, 0 },
+    { "decl", 0, 0, 0xFF, -1, 1, XF_RM, 32, 0, 0 },
+    { "addl", 0, 0, 0x83, -1, 0, XF_I8RM, 32, 0, 0 },
+    { "orl", 0, 0, 0x83, -1, 1, XF_I8RM, 32, 0, 0 },
+    { "andl", 0, 0, 0x83, -1, 4, XF_I8RM, 32, 0, 0 },
+    { "subl", 0, 0, 0x83, -1, 5, XF_I8RM, 32, 0, 0 },
+    { "xorl", 0, 0, 0x83, -1, 6, XF_I8RM, 32, 0, 0 },
+    { "cmpl", 0, 0, 0x83, -1, 7, XF_I8RM, 32, 0, 0 },
+    { "addl", 0, 0, 0x81, -1, 0, XF_I32RM, 32, 0, 0 },
+    { "orl", 0, 0, 0x81, -1, 1, XF_I32RM, 32, 0, 0 },
+    { "andl", 0, 0, 0x81, -1, 4, XF_I32RM, 32, 0, 0 },
+    { "subl", 0, 0, 0x81, -1, 5, XF_I32RM, 32, 0, 0 },
+    { "xorl", 0, 0, 0x81, -1, 6, XF_I32RM, 32, 0, 0 },
+    { "cmpl", 0, 0, 0x81, -1, 7, XF_I32RM, 32, 0, 0 },
+    { "shll", 0, 0, 0xD3, -1, 4, XF_CLRM, 32, 0, 0 },
+    { "shrl", 0, 0, 0xD3, -1, 5, XF_CLRM, 32, 0, 0 },
+    { "sarl", 0, 0, 0xD3, -1, 7, XF_CLRM, 32, 0, 0 },
+    { "shll", 0, 0, 0xD1, -1, 4, XF_RM, 32, 0, 0 },
+    { "shrl", 0, 0, 0xD1, -1, 5, XF_RM, 32, 0, 0 },
+    { "sarl", 0, 0, 0xD1, -1, 7, XF_RM, 32, 0, 0 },
+    { "shll", 0, 0, 0xC1, -1, 4, XF_I8RMU, 32, 0, 0 },
+    { "shrl", 0, 0, 0xC1, -1, 5, XF_I8RMU, 32, 0, 0 },
+    { "sarl", 0, 0, 0xC1, -1, 7, XF_I8RMU, 32, 0, 0 },
+    { "shlq", 0, 1, 0xC1, -1, 4, XF_I8RMU, 64, 0, 0 },
+    { "shrq", 0, 1, 0xC1, -1, 5, XF_I8RMU, 64, 0, 0 },
+    { "sarq", 0, 1, 0xC1, -1, 7, XF_I8RMU, 64, 0, 0 },
+    { "cmova", 0, 1, 0x0F, 0x47, -1, XF_RMR, 64, 64, 0 },
+    { "cmova", 0, 0, 0x0F, 0x47, -1, XF_RMR, 32, 32, 0 },
+    { "cmove", 0, 1, 0x0F, 0x44, -1, XF_RMR, 64, 64, 0 },
+    { "cmove", 0, 0, 0x0F, 0x44, -1, XF_RMR, 32, 32, 0 },
+    { "cmovg", 0, 1, 0x0F, 0x4F, -1, XF_RMR, 64, 64, 0 },
+    { "cmovg", 0, 0, 0x0F, 0x4F, -1, XF_RMR, 32, 32, 0 },
+    { "cmovne", 0, 1, 0x0F, 0x45, -1, XF_RMR, 64, 64, 0 },
+    { "cmovne", 0, 0, 0x0F, 0x45, -1, XF_RMR, 32, 32, 0 },
+    { "cmovs", 0, 1, 0x0F, 0x48, -1, XF_RMR, 64, 64, 0 },
+    { "cmovs", 0, 0, 0x0F, 0x48, -1, XF_RMR, 32, 32, 0 },
+    { "cmovgel", 0, 0, 0x0F, 0x4D, -1, XF_RMR, 32, 32, 0 },
+    { "cmovll", 0, 0, 0x0F, 0x4C, -1, XF_RMR, 32, 32, 0 },
     { "addsd", 0xF2, 0, 0x0F, 0x58, -1, XF_XX, 0, 0, 0 }, { "mulsd", 0xF2, 0, 0x0F, 0x59, -1, XF_XX, 0, 0, 0 },
     { "subsd", 0xF2, 0, 0x0F, 0x5C, -1, XF_XX, 0, 0, 0 }, { "divsd", 0xF2, 0, 0x0F, 0x5E, -1, XF_XX, 0, 0, 0 },
     { "sqrtsd", 0xF2, 0, 0x0F, 0x51, -1, XF_XX, 0, 0, 0 }, { "cvtsd2ss", 0xF2, 0, 0x0F, 0x5A, -1, XF_XX, 0, 0, 0 },
@@ -541,7 +616,14 @@ int at_xtry(struct at_xrow *r, us_i64 addr, int forcelong) {
                 if (xo_k[0] != XO_IMM) return 0; imm = xo_imm[0];
                 if (f == XF_I8RM && !at_fits8(imm)) return 0;
                 if (f == XF_I8RMU && !(imm >= -128 && imm <= 255)) return 0;
-                if (f == XF_I32RM && !at_fits32(imm)) return 0;
+                /* A shift count is an unsigned encoded byte. A dword
+                   immediate admits its complete bit pattern; qword ALU
+                   immediates remain sign-extended signed32 operands. */
+                if (f == XF_I8RMU && r->op == 0xC1 && imm < 0) return 0;
+                if (f == XF_I32RM) {
+                    if (r->sz == 32) { if (imm < -2147483648L || imm > 4294967295L) return 0; }
+                    else { if (!at_fits32(imm)) return 0; }
+                }
             }
         }
         if (!at_rmcls(rm, r->sz)) return 0;
@@ -572,12 +654,16 @@ int at_xtry(struct at_xrow *r, us_i64 addr, int forcelong) {
         return 1;
     }
     if (f == XF_IND) {
-        if (at_nop != 1 || xo_k[0] != XO_IND) return 0;
-        xo_k[0] = XO_REG;
+        int saved; int ok;
+        if (at_nop != 1 || (xo_k[0] != XO_IND && xo_k[0] != XO_IMEM)) return 0;
+        saved = xo_k[0];
+        if (saved == XO_IND && xo_cls[0] != 64) return 0;
+        xo_k[0] = saved == XO_IND ? XO_REG : XO_MEM;
         at_xrexw(0, 0, 0, 0 - 1, 0);
-        at_eb(r->op); at_xmodrm(r->ext, 0);
-        xo_k[0] = XO_IND;
-        return 1;
+        at_eb(r->op); ok = at_xmodrm(r->ext, 0);
+        if (ok) ok = at_xrip(0, addr);
+        xo_k[0] = saved;
+        return ok;
     }
     if (f == XF_J8 || f == XF_J32 || f == XF_CALL) {
         us_i64 d; int n;
@@ -747,7 +833,6 @@ int at_xdec(us_i64 off) {
                 modrm = p[kk] & 255; kk = kk + 1;
                 mod = modrm >> 6; reg = ((modrm >> 3) & 7) | ((rex & 4) << 1); rm = modrm & 7;
                 if (t->ext >= 0 && ((modrm >> 3) & 7) != t->ext) { m = m + 1; continue; }
-                if (f == XF_IND && mod != 3) { m = m + 1; continue; }
                 /* operands, printed into a scratch area then assembled in AT&T order */
                 {   char a1[160]; int l1; char a2[160]; int l2; int save; us_i64 imm; int fo;
                     l1 = 0; l2 = 0; fo = 0 - 1; imm = 0;
@@ -761,7 +846,8 @@ int at_xdec(us_i64 off) {
                         if (f == XF_IND) at_lc(42);
                         at_xname(cls, rr, rex != 0);
                     } else {
-                        if (f == XF_XX || f == XF_XXI || f == XF_XG || f == XF_GX || f == XF_XGR || f == XF_IND) { m = m + 1; continue; }
+                        if (f == XF_XX || f == XF_XXI || f == XF_XG || f == XF_GX || f == XF_XGR) { m = m + 1; continue; }
+                        if (f == XF_IND) at_lc(42);
                         ok = 1;
                         fo = at_xmemprint(p, len, &kk, mod, rm, rex, &ok);
                         if (ok == 0) return 0;
@@ -776,6 +862,7 @@ int at_xdec(us_i64 off) {
                     if (ripf >= 0) {
                         us_i64 d; d = (int)at_rd(p + ripf, 4);
                         at_ln = 0;
+                        if (f == XF_IND) at_lc(42);
                         if (at_drel && at_drelo == off + ripf) {
                             if ((at_dtype != 2 && at_dtype != 9) || d != 0) return 0;
                             at_ltgt(at_dsym, at_dadd + (kk - ripf));

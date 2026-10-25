@@ -1,0 +1,41 @@
+/* Appended to the source-preserved assembler by tools/asm-material.cx.
+ * Handwritten ISA byte oracles; one compilation/start for the complete batch. */
+static int asm_checks,asm_failed;
+static void asm_check(int ok,const char *name){asm_checks++;if(!ok)asm_failed++;printf("%s\tassembler.%s\n",ok?"PASS":"FAIL",name);}
+static void asm_bytes(const char *name,int arch,const char *text,const unsigned char *want,size_t wn){
+ char *src=strdup(text);if(!src)exit(2);am_object_n=0;int rc=at_asm(src,strlen(src),arch);asm_check(!rc,name);
+ if(!rc){int valid=am_object_n>=64&&!memcmp(am_object,"\177ELF\2\1",6);unsigned long long sh=valid?at_rd(am_object+40,8):0;
+  valid=valid&&sh<=am_object_n&&am_object_n-sh>=128;unsigned long long off=valid?at_rd(am_object+sh+64+24,8):0,n=valid?at_rd(am_object+sh+64+32,8):0;
+  valid=valid&&off<=am_object_n&&n<=am_object_n-off&&n==wn&&(int)at_rd(am_object+18,2)==(arch?183:62);
+  asm_check(valid&&!memcmp(am_object+off,want,wn),name);
+ }else fprintf(stderr,"DETAIL\t%s\tline=%d\terror=%s\n",name,at_lineno,at_err?at_err:"-");free(src);
+}
+static void asm_refuse(const char *name,const char *text){char *src=strdup(text);if(!src)exit(2);am_object_n=0;int rc=at_asm(src,strlen(src),0);asm_check(rc!=0&&!am_object_n,name);free(src);}
+int main(void){
+ asm_bytes("ret-alias",0,".text\nret\n",(const unsigned char *)"\xc3",1);
+ asm_bytes("add32",0,".text\naddl %ecx,%edx\n",(const unsigned char *)"\x01\xca",2);
+ asm_bytes("reverse-memory-add64",0,".text\naddq (%r10),%r9\n",(const unsigned char *)"\x4d\x03\x0a",3);
+ asm_bytes("mov32-into-memory",0,".text\nmovl $7,(%rsp)\n",(const unsigned char *)"\xc7\x04\x24\x07\x00\x00\x00",7);
+ asm_bytes("mov32-high-bit",0,".text\nmovl $0x80000000,%eax\n",(const unsigned char *)"\xb8\x00\x00\x00\x80",5);
+ asm_bytes("cmp32-high-bit",0,".text\ncmpl $0x80000000,%eax\n",(const unsigned char *)"\x81\xf8\x00\x00\x00\x80",6);
+ asm_bytes("shift32-imm",0,".text\nshrl $3,%eax\n",(const unsigned char *)"\xc1\xe8\x03",3);
+ asm_bytes("shift64-imm255",0,".text\nshlq $255,%rax\n",(const unsigned char *)"\x48\xc1\xe0\xff",4);
+ asm_bytes("cmov32",0,".text\ncmovgel %r11d,%ebx\n",(const unsigned char *)"\x41\x0f\x4d\xdb",4);
+ asm_bytes("cmov64",0,".text\ncmovg %rax,%r8\n",(const unsigned char *)"\x4c\x0f\x4f\xc0",4);
+ asm_bytes("indirect-memory-call",0,".text\ncall *(%rax)\n",(const unsigned char *)"\xff\x10",2);
+ asm_bytes("indirect-memory-jump",0,".text\njmp *8(%r10)\n",(const unsigned char *)"\x41\xff\x62\x08",4);
+ asm_bytes("indirect-register-jump",0,".text\njmp *%rax\n",(const unsigned char *)"\xff\xe0",2);
+ asm_bytes("cltq",0,".text\ncltq\n",(const unsigned char *)"\x48\x98",2);
+ asm_bytes("idiv32",0,".text\nidivl %ecx\n",(const unsigned char *)"\xf7\xf9",2);
+ asm_bytes("byte-load-extended-base",0,".text\nmovb (%r8),%al\n",(const unsigned char *)"\x41\x8a\x00",3);
+ asm_bytes("byte-cmp-raw255",0,".text\ncmpb $255,(%rax)\n",(const unsigned char *)"\x80\x38\xff",3);
+ asm_bytes("arm-existing-mov",1,".text\nmov x0,#7\nret x30\n",(const unsigned char *)"\xe0\x00\x80\xd2\xc0\x03\x5f\xd6",8);
+ asm_refuse("reject-shift256",".text\nshlq $256,%rax\n");
+ asm_refuse("reject-q-positive-overflow",".text\nmovq $2147483648,(%rax)\n");
+ asm_refuse("reject-q-negative-overflow",".text\nmovq $-2147483649,(%rax)\n");
+ asm_refuse("reject-indirect32",".text\njmp *%eax\n");
+ asm_refuse("reject-cmov-memory-destination",".text\ncmovg %rax,(%rbx)\n");
+ asm_refuse("reject-cmov-width-mismatch",".text\ncmovg %eax,%rbx\n");
+ asm_refuse("reject-unknown-op",".text\nunknown_opcode %rax\n");
+ printf("ASSEMBLER\tassertions=%d\tfailed=%d\tscope=x86-extension-and-arm-baseline\n",asm_checks,asm_failed);return asm_failed?1:0;
+}

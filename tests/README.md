@@ -26,7 +26,7 @@ sh ./unisacc.com tests/run.cx -- --all
 
 Neither .cx source uses an explicit #include directive. The runner imports cases.product using the implemented #pragma unisa use/module mechanism and relies on the existing automatic .cx edition prelude for carried library declarations. One compiler invocation builds both source units in memory, and one process computes all sixteen outcomes and compares them with hand-written expected values. It never invokes Python, Clang, shell algorithms, old suites, or child compilers, and writes no executable artifact or result cache. The shell in the command only loads unisacc.com.
 
-Exit status: smoke 0 means this local batch passed; 1 means an assertion failed; 2 means invalid usage or runner failure. --all runs the batch and exits 3 with NOT_READY while any mandatory contract remains unimplemented (1 takes priority if smoke fails). --list is inventory only, not evidence of execution.
+Exit status: smoke 0 means this local batch passed; 1 means an assertion failed; 2 means invalid usage or runner failure. --all runs the batch and exits 3 while mandatory contracts remain incomplete or unscheduled (1 takes priority if smoke fails). Its 19 broad gaps are NOT_READY; the eighteen implemented separate net batches are NOT_RUN in this entry. --list is inventory only, not evidence of execution.
 
 coverage.tsv separates implemented assertions from missing obligations. IMPLEMENTED is code availability, not a persisted PASS. New source bytes must actually run for fresh evidence. No preparation result is treated as a test pass.
 
@@ -41,11 +41,21 @@ A separate reusable runtime module lives in cx/owned.cx. Run `make owned` for it
 bounds, stale handles, move/drop, capacity and generation exhaustion. This is
 additional partial library coverage, not a completed library or ownership gate.
 
-No seven-stream, eighteen-net, framing, adjacent-stream oracle, full RI, resource qualification, negative compiler diagnostics, six-target format, actual-host, self-bootstrap, complete library/ABI or candidate CI obligation is claimed complete. All remain visible as NOT_READY under --all. This MVP is not release qualification.
+Complete stream/interface, RI/resource, compiler diagnostics, six-target/host,
+bootstrap, library/ABI and candidate CI obligations remain unfinished. The
+separate eighteen-net local kernel contract is implemented; the main --all
+entry marks it NOT_RUN until it is scheduled there. This MVP is not release qualification.
 
 The separate `streams.cx` batch now covers part of the seven-stream and framing
 obligations, with no imported legacy PASS records. Preparation, commands, actual
 coverage and limits are documented in [tools/streams.md](../tools/streams.md).
 Its 40 local assertions do not clear the remaining broad NOT_READY obligations.
+
+The [eighteen-net batch](../tools/nets.md) uses the actual integer infer kernel,
+strict full gold input and contextual field-boundary refusal/recovery. It passed
+all eighteen nets locally, including three separate anti-vacuity controls. The
+[assembly batch](../tools/assembly.md) checks the extended C encoder with native
+default-run source adaptation and handwritten ISA byte/rejection oracles. These
+separate batches do not inherit a persisted PASS in the main runner.
 
 The source tree is read-only while running. Apply a caller-owned watchdog of at most 30 seconds for this MVP; the runner performs no child process spawning and has no inner scheduling steps.

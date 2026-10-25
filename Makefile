@@ -14,8 +14,11 @@ STREAM_DIR ?=
 STREAM_OUT ?=
 IDENT_BINARY ?=
 IDENT_OUT ?=
+NET_MATERIAL ?=
+NET_CONTROL_OUT ?=
+ASM_MATERIAL ?=
 
-.PHONY: identity streams owned help smoke quick test list export-ref ref com model-com release comboot-seed-step comboot-stage2-step comboot-stage3-step
+.PHONY: nets net-verify net-controls assembler identity streams owned help smoke quick test list export-ref ref com model-com release comboot-seed-step comboot-stage2-step comboot-stage3-step
 help:
 	@echo 'smoke / quick: native product batch, partial coverage only'
 	@echo 'test: complete contract gate; NOT_READY is a failure'
@@ -23,6 +26,18 @@ help:
 	@echo 'export-ref OUT=...: native complete source export'
 	@echo 'streams STREAM_DIR=... STREAM_OUT=...: partial seven-stream contracts, fresh output required'
 	@echo 'model-com MODEL_DIR=... MODEL_STEP=...: one bounded construction step'
+nets:
+	@test -n "$(NET_MATERIAL)" || { echo 'set NET_MATERIAL; prepare and verify it first' >&2; exit 2; }
+	@tools/bound 55 sh "$(UNISACC)" "$(NET_MATERIAL)/nets.cx" -- "$(CURDIR)"
+net-verify:
+	@test -n "$(NET_MATERIAL)" || { echo 'set NET_MATERIAL' >&2; exit 2; }
+	@tools/bound 25 sh "$(UNISACC)" tools/net-material.cx -- --verify "$(CURDIR)" "$(abspath $(NET_MATERIAL))"
+net-controls:
+	@test -n "$(NET_MATERIAL)" -a -n "$(NET_CONTROL_OUT)" || { echo 'set NET_MATERIAL and a new NET_CONTROL_OUT' >&2; exit 2; }
+	@tools/bound 55 sh "$(UNISACC)" tests/net-controls.cx -- "$(CURDIR)" "$(abspath $(NET_MATERIAL))" "$(abspath $(NET_CONTROL_OUT))"
+assembler:
+	@test -n "$(ASM_MATERIAL)" || { echo 'set ASM_MATERIAL; prepare and verify it first' >&2; exit 2; }
+	@tools/bound 55 sh "$(UNISACC)" "$(ASM_MATERIAL)/contracts.cx"
 identity:
 	@test -n "$(IDENT_BINARY)" -a -n "$(IDENT_OUT)" || { echo 'set IDENT_BINARY and a new IDENT_OUT' >&2; exit 2; }
 	@tools/bound 40 sh "$(UNISACC)" tests/identity.cx -- "$(CURDIR)" "$(abspath $(IDENT_BINARY))" "$(abspath $(IDENT_OUT))"

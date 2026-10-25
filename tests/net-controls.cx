@@ -1,0 +1,22 @@
+/* Isolated anti-vacuity controls for the new deploy-kernel batch and material.
+ * ROOT MATERIAL NEW_ABSOLUTE_FIXTURE. It never changes gold/model source inputs. */
+#pragma unisa use cxlib.netpack
+static char root[4096],material[4096],fixture[4096],module_path[4400];
+static char *original;static size_t original_n;
+static void restore(void){if(original&&cx_write(module_path,original,original_n)){fprintf(stderr,"RESTORE_FAILED\t%s\n",module_path);exit(2);}}
+static void fail(const char *s){restore();fprintf(stderr,"net-controls: %s\n",s);exit(2);}
+static void path(char *p,size_t cap,const char *base,const char *name){int n=snprintf(p,cap,"%s/%s",base,name);if(n<0||(size_t)n>=cap)fail("path length");}
+static np_result run(char **v){np_result r;char why[1024];if(np_run(v,root,0,30,&r,why,sizeof why))fail(why);return r;}
+int main(int argc,char **argv){
+ if(argc!=4)return 2;if(!realpath(argv[1],root)||!realpath(argv[2],material))return 2;
+ if(argv[3][0]!='/'||strlen(argv[3])>=sizeof fixture)return 2;strcpy(fixture,argv[3]);if(mkdir(fixture,0700))return 2;
+ char p[4400],source[4400],bound[4400],product[4400],batch[4400],tool[4400];
+ path(p,sizeof p,fixture,"weights");if(mkdir(p,0700))fail("mkdir weights");path(p,sizeof p,fixture,"weights/gold");if(mkdir(p,0700))fail("mkdir gold");path(source,sizeof source,root,"weights/gold/pp.tsv");size_t n;char *s=cx_read(source,&n);if(!s)fail("read gold");
+ char *label=strstr(s,"\nifdef\t0\tskip\n");if(!label||strstr(label+1,"\nifdef\t0\tskip\n"))fail("gold mutation precondition");memcpy(label+9,"take",4);path(p,sizeof p,fixture,"weights/gold/pp.tsv");if(cx_write(p,s,n))fail("write changed gold");free(s);
+ path(bound,sizeof bound,root,"tools/bound");path(product,sizeof product,root,"unisacc.com");path(batch,sizeof batch,material,"nets.cx");path(tool,sizeof tool,root,"tools/net-material.cx");
+ char *a[]={bound,"25","sh",product,batch,"--",fixture,"pp",0};np_result r=run(a);int gold_ok=r.rc==2&&strstr(r.err,"gold label mismatch");printf("%s\tnet-controls.changed-gold-refused\n",gold_ok?"PASS":"FAIL");np_free(&r);
+ path(module_path,sizeof module_path,material,"netcore.cx");original=cx_read(module_path,&original_n);if(!original)fail("read material module");s=malloc(original_n+1);if(!s)fail("alloc");memcpy(s,original,original_n);s[original_n]=0;label=strstr(s,"\\x20");if(!label)fail("model mutation precondition");label[3]='1';if(cx_write(module_path,s,original_n))fail("write changed model");free(s);
+ char *b[]={bound,"25","sh",product,tool,"--","--verify",root,material,0};r=run(b);int model_ok=r.rc==2&&strstr(r.err,"prepared material differs");printf("%s\tnet-controls.changed-model-identity-refused\n",model_ok?"PASS":"FAIL");np_free(&r);restore();free(original);original=0;
+ r=run(b);int recovered=r.rc==0&&strstr(r.out,"VERIFIED");printf("%s\tnet-controls.material-restoration\n",recovered?"PASS":"FAIL");np_free(&r);
+ printf("NET_CONTROLS\tchecks=3\tfailed=%d\n",(!gold_ok)+(!model_ok)+(!recovered));return gold_ok&&model_ok&&recovered?0:1;
+}

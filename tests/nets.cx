@@ -1,0 +1,138 @@
+/* Native deploy-kernel contract batch. Material preparation copies this file
+   beside netcore.cx; run: sh ./unisacc.com out/MATERIAL/nets.cx -- ROOT [NAME].
+   Gold is an independent label input, not an external C semantics oracle.
+   No subprocesses, DENSE lookups, generated expected labels or result cache. */
+#pragma unisa use netcore
+
+static const char *names[]={"pp","lex","parse","type","scope","irsel","enc","reloc","regmap","tyinfo","pfconv","peep","opinfo","prec","binsel","isel","abi","combo"};
+static const int keycounts[]={18,144,340,4275,30,420,522,6,16,16,9,1632,73,19,32,174,522,522};
+static const int headcounts[]={1,1,1,1,1,1,1,1,1,3,1,1,3,1,1,2,13,15};
+static const char *fieldnames[]={"dir defined","c peek","nt tok","t1 op t2","ctx kind","family flavor","op os arch","kind arch","treg arch","t","conv","a b rel","op","op","op sign","op arch","op os arch","op os arch"};
+static const char *headnames[]={"y","y","y","y","y","y","y","y","y","size uns narrow","y","y","simple acls bcls","y","y","form symbol","sysno arg0 arg1 arg2 arg3 arg4 arg5 ret gate nrreg argshape retconv winimp","form symbol sysno arg0 arg1 arg2 arg3 arg4 arg5 ret gate nrreg argshape retconv winimp"};
+static char *fv[4][512],*cv[16][512],*fn[4],*hn[16];
+static int vn[4],cn[16],seen[4275],labels[68400];
+static int stage,line_no,nf,nh;
+static long total_keys,total_decisions,total_refusals,total_recoveries,total_adapter;
+
+static void bad(const char *reason){fprintf(stderr,"FAIL\tnet.%s\tline=%d\t%s\n",names[stage],line_no,reason);exit(2);}
+static void unmapped(const char *kind,int a,int b){fprintf(stderr,"MAPPING_NOT_READY\tnet.%s\t%s=%d\tentry=%d\n",names[stage],kind,a,b);exit(3);}
+static int word_is(const char *spec,int index,const char *actual){
+ const char *p=spec,*q;int k=0;size_t n;
+ while(*p){q=p;while(*q&&*q!=' ')q++;if(k==index){n=(size_t)(q-p);return strlen(actual)==n&&!memcmp(actual,p,n);}k++;p=*q?q+1:q;}
+ return 0;
+}
+static int columns(char *line,char **out){
+ int n=1;char *p=line;out[0]=p;
+ if(!*p)bad("empty line");
+ while(*p){if(*p=='\r')bad("CR is not canonical gold TSV");if(*p=='\t'){*p=0;if(!*out[n-1])bad("empty TSV cell");if(n==520)bad("too many TSV columns");out[n++]=p+1;}p++;}
+ if(!*out[n-1])bad("empty final TSV cell");return n;
+}
+static int lookup(char **words,int count,const char *text){int i;for(i=0;i<count;i++)if(!strcmp(words[i],text))return i;return -1;}
+static void unique(char **words,int count){int i,j;for(i=0;i<count;i++)for(j=0;j<i;j++)if(!strcmp(words[i],words[j]))bad("duplicate vocabulary entry");}
+static int ask(int s,int *key,int h){return nk_predict(s,key[0],key[1],key[2],key[3],h);}
+static void valid(int *key,int h,int expected){
+ int got,c,score,other;
+ got=ask(stage,key,h);
+ if(got!=expected){fprintf(stderr,"DETAIL\tkey=%d,%d,%d,%d\thead=%d\tactual=%d\texpected=%d\n",key[0],key[1],key[2],key[3],h,got,expected);bad("gold label mismatch");}
+ score=nk_score(stage,h,got);
+ if(score==(-2147483647-1))bad("missing valid inference logits");
+ for(c=0;c<cn[h];c++){other=nk_score(stage,h,c);if(other==(-2147483647-1))bad("missing class logit");if(c!=got&&other>=score)bad("winner is not unique maximum");}
+}
+static void decode(int ordinal,int *key){int f;for(f=0;f<4;f++)key[f]=0;for(f=nf-1;f>=0;f--){key[f]=ordinal%vn[f];ordinal/=vn[f];}}
+static void schema(void){
+ int f,h,i;const char *text;
+ if(nf!=nk_fields(stage)||nh!=nk_heads(stage)||nh!=headcounts[stage])bad("model/schema dimensions differ");
+ for(f=0;f<nf;f++){
+  if(vn[f]!=nk_values(stage,f))bad("field domain size differs");
+  for(i=0;i<vn[f];i++){text=nk_field_text(stage,f,i);if(!text)unmapped("field",f,i);if(strcmp(text,fv[f][i]))bad("field semantic mapping differs");}
+ }
+ for(h=0;h<nh;h++){
+  if(cn[h]!=nk_classes(stage,h))bad("class domain size differs");
+  for(i=0;i<cn[h];i++){text=nk_class_text(stage,h,i);if(!text)unmapped("head",h,i);if(strcmp(text,cv[h][i]))bad("class semantic mapping differs");}
+ }
+}
+static void one(const char *root,int s){
+ char path[4096],prefix[256],hash[65],afterhash[65],*raw,*after,*line,*end,*cell[520];
+ size_t bytes,afterbytes,i;struct stat st;int count,f,h,c,j,product=1,rows=0,header=0,key[4],id,expected,started=0,got;
+ long decisions=0,refusals=0,recoveries=0,adapter=0,expected_refusals=0;const char *share;
+ stage=s;line_no=0;nf=0;nh=0;
+ memset(seen,0,sizeof seen);memset(labels,0,sizeof labels);
+ if(!nk_name(s)||strcmp(nk_name(s),names[s]))bad("fixed model order/name differs");
+ if(snprintf(path,sizeof path,"%s/weights/gold/%s.tsv",root,names[s])>=(int)sizeof path)bad("gold path too long");
+ if(lstat(path,&st)||!S_ISREG(st.st_mode)||st.st_size<=0||st.st_size>4194304)bad("gold must be a bounded regular file");
+ raw=cx_read(path,&bytes);if(!raw||bytes!=(size_t)st.st_size)bad("gold read/size failed");
+ if(memchr(raw,0,bytes)||raw[bytes-1]!='\n')bad("NUL or truncated final line");
+ cx_sha256_hex(raw,bytes,hash);
+ line=raw;
+ for(i=0;i<bytes;i++)if(raw[i]=='\n'){
+  end=raw+i;*end=0;line_no++;
+  if(!started){
+   if(snprintf(prefix,sizeof prefix,"# stage %s: %d keys,",names[s],keycounts[s])>=(int)sizeof prefix)bad("stage prefix overflow");
+   if(strncmp(line,prefix,strlen(prefix)))bad("stage header/name/key count mismatch");started=1;line=end+1;continue;
+  }
+  count=columns(line,cell);
+  if(!strcmp(cell[0],"#field")){
+   if(header||nh||nf==4||count<3||count>514)bad("field declaration order/size");
+   if(!word_is(fieldnames[s],nf,cell[1]))bad("fixed field name/order differs");
+   for(j=0;j<nf;j++)if(!strcmp(fn[j],cell[1]))bad("duplicate field name");
+   fn[nf]=cell[1];vn[nf]=count-2;
+   for(j=0;j<vn[nf];j++)fv[nf][j]=cell[j+2];unique(fv[nf],vn[nf]);nf++;
+  }else if(!strcmp(cell[0],"#head")){
+   if(header||!nf||nh==16||count<4||count>515)bad("head declaration order/size");
+   if(!word_is(headnames[s],nh,cell[1]))bad("fixed head name/order differs");
+   for(j=0;j<nh;j++)if(!strcmp(hn[j],cell[1]))bad("duplicate head name");
+   share="-";if(s>=16&&((strlen(cell[1])==4&&!memcmp(cell[1],"arg",3)&&cell[1][3]>='0'&&cell[1][3]<='5')||!strcmp(cell[1],"ret")))share="reg";
+   if(strcmp(cell[2],share))bad("head shared vocabulary declaration differs");
+   hn[nh]=cell[1];cn[nh]=count-3;
+   for(j=0;j<cn[nh];j++)cv[nh][j]=cell[j+3];unique(cv[nh],cn[nh]);nh++;
+  }else if(!header){
+   if(!nf||!nh||count!=nf+nh)bad("missing schema or wrong column header size");
+   schema();
+   for(f=0;f<nf;f++){if(strcmp(cell[f],fn[f]))bad("field column header differs");if(product>4275/vn[f])bad("gold Cartesian product too large");product*=vn[f];}
+   if(product!=keycounts[s])bad("gold Cartesian product differs from fixed key count");
+   for(h=0;h<nh;h++){if(strncmp(cell[nf+h],"=> ",3)||strcmp(cell[nf+h]+3,hn[h]))bad("head column header differs");}
+   header=1;
+  }else{
+   if(count!=nf+nh)bad("wrong data column count");id=0;
+   for(f=0;f<4;f++)key[f]=0;
+   for(f=0;f<nf;f++){key[f]=lookup(fv[f],vn[f],cell[f]);if(key[f]<0)bad("unknown key text");id=id*vn[f]+key[f];}
+   if(id<0||id>=product||seen[id])bad("duplicate/out-of-range gold key");seen[id]=1;rows++;
+   for(h=0;h<nh;h++){expected=lookup(cv[h],cn[h],cell[nf+h]);if(expected<0)bad("unknown gold label");labels[id*16+h]=expected;valid(key,h,expected);decisions++;}
+  }
+  line=end+1;
+ }
+ if(!header||rows!=product||rows!=keycounts[s]||decisions!=(long)keycounts[s]*headcounts[s])bad("incomplete gold execution");
+ for(id=0;id<product;id++)if(!seen[id])bad("missing gold Cartesian key");
+ for(f=0;f<nf;f++){
+  expected_refusals+=2L*(product/vn[f])*nh;
+  for(id=0;id<product;id++){
+   decode(id,key);if(key[f])continue;
+   for(c=0;c<2;c++)for(h=0;h<nh;h++){
+    key[f]=c?vn[f]:-1;
+    if(ask(stage,key,h)!=-1)bad("raw infer did not refuse field boundary");refusals++;
+    key[f]=0;valid(key,h,labels[id*16+h]);recoveries++;
+   }
+  }
+ }
+ if(refusals!=expected_refusals||recoveries!=refusals)bad("incomplete field boundary/recovery execution");
+ decode(0,key);
+ for(c=0;c<4;c++){
+  if(c==0)got=ask(-1,key,0);else if(c==1)got=ask(18,key,0);else if(c==2)got=ask(stage,key,-1);else got=ask(stage,key,nh);
+  if(got!=-2)bad("adapter failed invalid stage/head refusal");adapter++;
+  for(h=0;h<nh;h++)valid(key,h,labels[h]);
+ }
+ after=cx_read(path,&afterbytes);if(!after||afterbytes!=bytes)bad("gold changed during execution");cx_sha256_hex(after,afterbytes,afterhash);free(after);if(strcmp(hash,afterhash))bad("gold identity changed during execution");
+ printf("PASS\tnet.%s\tkeys=%d\tdecisions=%ld\tfield_refusals=%ld\trecoveries=%ld\tadapter_refusals=%ld\tgold_sha256=%s\n",names[s],rows,decisions,refusals,recoveries,adapter,hash);
+ total_keys+=rows;total_decisions+=decisions;total_refusals+=refusals;total_recoveries+=recoveries;total_adapter+=adapter;free(raw);
+}
+int main(int argc,char **argv){
+ int s,selected=-1,ran=0;
+ if(argc<2||argc>3){fprintf(stderr,"usage: nets.cx ROOT [NAME]\n");return 2;}
+ if(argc==3){for(s=0;s<18;s++)if(!strcmp(argv[2],names[s]))selected=s;if(selected<0){fprintf(stderr,"unknown net selection\n");return 2;}}
+ if(nk_init()){fprintf(stderr,"FAIL\tnet-adapter.init\n");return 2;}
+ for(s=0;s<18;s++)if(selected<0||selected==s){one(argv[1],s);ran++;}
+ if(selected<0&&(ran!=18||total_keys!=8770||total_decisions!=22694)){fprintf(stderr,"FAIL\tincomplete fixed eighteen-net batch\n");return 2;}
+ printf("NETS\tmodels=%d\tkeys=%ld\tdecisions=%ld\tfield_refusals=%ld\trecoveries=%ld\tadapter_refusals=%ld\tscope=%s\n",ran,total_keys,total_decisions,total_refusals,total_recoveries,total_adapter,selected<0?"eighteen-deploy-kernel-gold":"selected-deploy-kernel-gold");
+ puts("TIMING\tstartup=UNMEASURED\tconstruction=UNMEASURED\tloading=UNMEASURED\tinference=UNMEASURED\toutput=UNMEASURED\tvalidation=UNMEASURED\tcold_hot=UNMEASURED");
+ return 0;
+}

@@ -146,20 +146,22 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 ```text
 0.0.43：完成开发、重建自身迭代体系与新验收（发布须另授）
-├─ 保留基线：当前P7f709/Sd754产品可默认-run；同源三阶段固定点已证
+├─ 保留基线：P7f709/Sd754产品可默认-run；历史同源三阶段固定点已证，当前源码须重建
 ├─ R0 已归档：2529个旧测试路径原blob/模式完整保留；构造支持移tools，新旧入口分离，完整重建待验
 ├─ R1 已有首批：原生产品16断言0；cx/owned模块551断言0及私有状态/函数直接访问拒绝；源码导出同字节；完整覆盖仍NOT_READY
 ├─ R2 部分已证：七流原模型/74资源提取不重构；40断言0含constructor真管道/产品镜像同字节/返回7；完整独立合同仍待补
-├─ R3 待实现：十八网真实gold/域外拒绝；构造一次、按内容身份复用
+├─ R3 本机已证：18网8770键/22694真实infer、28868域边界拒绝及恢复、72适配拒绝、三反空跑控制0；非完整产品/跨平台资格
 ├─ R4 待实现：完整RI、属性和资源边界；未知不变PASS，拒绝有明确原因
 ├─ R5 待实现：产品-run、优化、六目标格式、实际宿主执行与自举
 ├─ R6 待迁移：库/FFI/回调/布局/生命周期等公共合同，逐项保留覆盖义务
 └─ R7 待完成：新清单全覆盖 → 同候选跨平台CI → 封存与授权发布
 ```
 
-**下一动作：** 在独占新目录`out/c43-native-rebuild/`推进逐步产品重建。当前产品已构建seed-gen和修复后的ident；原生身份已补齐10个tools输入（含sourceflat.cx），新CX隔离合同15项0，逐个变更失效/恢复及缺失/目录拒绝已实跑。兼容Python输入清单同步，未执行Python对拍。十八网已定位8770键/22694次真实infer；新全键合同待实现，不用稠密查表替代NN求值。
+**下一动作：** 主人新裁定「缺什么造什么，包括.S」，本版补齐原生内核汇编/链接与必要构造能力，不以复用旧blob作为最终完成。现有-E/as已复用；新asm-source三个规范化探针0，x86编码首刀已改源码并默认-run实跑43个手写ISA/拒绝断言0，transition已产真实ELF对象。继续补A64编码、对齐、跳转表及跨单元重定位，再重建产品；完整decoder回归亦待验。原共享构造因Clang缺失1中止，不冒称重建成功；旧复用原型仅留out。十八网材料保留原infer和权重，未走DENSE，全键/全部head/边界与三反空跑控制均0。根目录两个异常名称零字节临时文件已可逆移到out隔离并记原名十六进制，未删除。
 
-**当前证据：** 新smoke16断言0、owned551断言0、七流40断言0；七流仅Linux x86_64/O2局部合同，完整独立预期、RI/资源、十八网、六目标及自举仍未完成。旧2529测试路径原blob/模式已核无丢失；8个cxlib断链已修，四族计划及默认-run支撑检查通过。原生源码导出及构造source-only成功。根P7仍是启动器；owned仅运行期设施，未用于编译器内部，不声称Rust编译期安全。`--all`仍以3/37 NOT_READY退出，旧CI/旧固定点不借给重构后候选。
+**构造身份修复：** 当前产品已构建seed-gen、blob和修复后的ident；原生身份补齐10个tools输入（含sourceflat.cx），新CX隔离合同15项0，逐个变更失效/恢复及缺失/目录拒绝均实跑。兼容Python输入清单同步，未执行Python对拍。
+
+**当前证据：** 新smoke16断言0、owned551断言0、七流40断言0；七流仅Linux x86_64/O2局部合同，完整独立预期、RI/资源、十八网与产品路线绑定、六目标及自举仍未完成。旧2529测试路径原blob/模式已核无丢失；8个cxlib断链已修，四族计划及默认-run支撑检查通过。原生源码导出及构造source-only成功。根P7仍是启动器；owned仅运行期设施，未用于编译器内部，不声称Rust编译期安全。`--all`仍非零：19项NOT_READY、18网在该入口尚未调度故NOT_RUN，旧CI/旧固定点不借给重构后候选。
 
 ### 本版重构合同
 
@@ -188,11 +190,13 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 | 房间 | 当前事实／决定 | 证据与行动入口 |
 |---|---|---|
-| 产品室：当前开发／旧封存分列 | 根unisacc.com现2671169B，P7f709378fa84a36edac2fcf1c36a62a13d45c26d34e57f1f7b50af74b2de4d1a／Sd754b8afbfeff132cf1328806e8fe908ca5dec1847ecba058ea400291b73e972；sidecar1e9ef57c…，原生ident当前main check0，默认-run hello0。是开发产物，新F6三阶段固定点已证，尚无正式新封存资格。 | `out/e4-local-install.log`、`out/e4-local-install/baseline-p297.com{,.build.json}`原pair；release/candidate.json及GHCR8c667e…仍是旧P297/Sc90封存，旧CI不可借给新开发包。新完整构造及封存须以实际最终P/S为准，不签不公开。 |
-| F6室：新E4固定点已证 | 新冻结0d25同源reference、完整模型包与stage1/2/3各五代码切片均实际构造；stage2/3由真实前阶段产品重编。三个产物2671169B、P7f709，侧车dae574a1…；官方fixedpoint0/report三SHA同，七manifest和ident全0。 | 新`/tmp/unisacc-c43-final-e4-20261025/out/final-reference/`逐操作日志/status，`out/comboot/stages.json`真实built_by链。stage3模型仅同源stage2按13域逐件三重hash复用，原聚合复制142保留于stage3-reuse01-partial；两stage-pack-driver proof仅真实封包/核验/固定点后记录。无聚合pack-driver重跑，未称最终M7已通过。 |
+| 产品室：启动器／当前源码分列 | 根unisacc.com仍2671169B、P7f709378fa84a36edac2fcf1c36a62a13d45c26d34e57f1f7b50af74b2de4d1a，旧记录源Sd754b8afbfeff132cf1328806e8fe908ca5dec1847ecba058ea400291b73e972。当前main已改源码与身份工具，旧pair不证明当前源码新鲜；须完成原生构造后重建。 | 本轮默认-run旧冻结seed/ident.c重新计算仍为Sd754，匹配其旧记录；新NN与汇编测试使用P7启动器。root未更新，未签名/公开，旧CI不借给新候选。 |
+| 历史F6室：旧源码固定点 | 冻结0d25同源reference、完整模型包与stage1/2/3各五代码切片当时实际构造；stage2/3由前阶段产品重编，三个产物2671169B/P7f709相同，官方fixedpoint0及七manifest/ident当时0。 | `/tmp/unisacc-c43-final-e4-20261025/out/final-reference/`、`out/comboot/stages.json`保留原built_by链及原失败；这些不是当前main新固定点证据。 |
+| 十八网新合同室 | 新默认-run一次进程执行18网/8770键/22694个key-head整数infer，28868字段边界拒绝及等量恢复、72适配拒绝；gold标签/唯一最大logit/词表映射均核；改gold、改模型及恢复三负控0。 | `out/c43-net-all-02.log`、`out/c43-net-controls-01.log`；tools/net-material.cx源派生+只读verify，未重构权重，未借DENSE或旧PASS。只证本机经典整数核合同，不外推P3每路线或六宿主。 |
+| 原生汇编室 | 新CX复用产品-E处理.S并展开宏；现存C编码器由有来源材料适配默认-run执行。x86首刀43断言0，transition实际ELF对象；ARM桥仅规范化成功，完整内核链接尚缺。 | `tools/assembly.md`、`out/c43-assembler-contracts-01.log`、`out/c43-native-transition.o`；材料和功能分开，旧blob不算完成。根产品仍P7启动器，源码修复须进入后续新候选。 |
 | 七流新合同室 | 原生模块化tools/stream-pack.cx从P7产品裁七模型、保留74资源，不重构权重；共享C执行器由产品构建，默认2e8步。tests/streams.cx两源码链/真管道/镜像对拍/返回7及具名拒绝共40断言0。 | `out/c43-streams-native-01/streams.json`、`out/c43-stream-contracts-03.log`；可复现命令见tools/streams.md。属于新局部合同，未覆盖完整RI/拒绝域/六目标，未获发布资格；主产品未重建。 |
 | CX所有权室 | cx/owned使用真实模块隐私、固定4×8 i64存储和不回绕代际句柄；551断言0，外部直接访问data/slot各拒绝1。复制活句柄仍可别名，不是编译期所有权或通用堆。 | `make owned`、`cx/check_owned.cx`；只验证本机运行期设施，不代替七流十八网或完整库验收。 |
-| 旧套件封存室 | 主人已裁定旧1333项整套归档，不再调度。旧F4在window082止于327结证（314rc0、6资源UNKNOWN、7失败）/1006待办；失败未改PASS。 | archive/testing-c43-legacy保留旧源码和原工作规则；F4目录原样留存。新tests/run.cx已16断言0、--all明确3/37NOT_READY；旧数字不算新完成率。 |
+| 旧套件封存室 | 主人已裁定旧1333项整套归档，不再调度。旧F4在window082止于327结证（314rc0、6资源UNKNOWN、7失败）/1006待办；失败未改PASS。 | archive/testing-c43-legacy保留旧源码和原工作规则；F4目录原样留存。新smoke16断言0、--all实际3且明确19 NOT_READY/18 NOT_RUN；旧数字不算新完成率。 |
 | M7室：固定身份 | 恢复原HEAD0d25b4b6d807b23b0676411328c548391b42f559，tree200c6fb0a6c8add86b8142e434a04aec89bf6807，P7f709/Sd754，sidecar dae574a1…；实际计划1333。原env-pin内部128eb61d…、文件efa28614…及原startreceipt全部原字节保留，不重钉新pin。fresh02的0734ee2e…仅历史。 | `out/final-e4-state`当前原队列；`out/final-e4-state-before-corpus`原33完整留本，`out/final-e4-state-fresh02-replay`不必要重放全记录。F4固定CODEX_TOOL_CALL_ID=unisacc-c43-final-e4-0d25，SEED_DIR=/mnt/out/final-e4-bootstrap，provider-first路径；同源原目录只定点恢复，旧b09/P297不借资格。 |
 | k2b室：已修首红 | 原wrapper与自测双重Git fixture准备挤爆40秒。两自然scope保持原失效／准入、真实双queue／CLI与字节／锁断言，独立冷测21.379／37.047秒rc0；共享footer与setup归属已独立静审。 | `/tmp/unisacc-c43-k2b-scopes-final-result.txt`、`/tmp/unisacc-c43-k2b-scope-review.txt`；原089／各次142及guard拒绝均保留。旧无消费者wrapper已按SHA不变移至忽略`out/archived-test-tools/`，未绕守卫删除源文件。新图与元数据见根`out/c43-k2b-*`；该房间记录历史修复；当前正式M7为0d25，计数见思维树。 |
 | 资源室：完整义务 | 新1333计划保留seedmemory功能原16行为与evidence原1真实freshness；UNKNOWN required=memory保持OPEN、不能称PASS，坏文件／解析／权限仍真错，不重键套旧RSS。 | `release/preauth.tsv`及`research/c43-resource-disposition.md`已有整组classified处置：新候选须实际执行自己的拒绝、逐项收齐原日志，最终PENDING0/无未分类产品失败/处置齐全且公开披露，允许真实资源OPEN，不新加114测量框架。宿主未核及其他rc1/断言/超时各按现行具名合同，不能泛化为资源豁免。 |
