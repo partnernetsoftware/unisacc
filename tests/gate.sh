@@ -706,7 +706,7 @@ job diag        ./tests/diag.sh
 job hostile     ./tests/hostile.sh
 job source-layout ./tests/source_layout.sh
 job target-package python3 ./tests/targetpackagecheck.py "${MODEL_COM:-./unisacc.com}"
-job lib-context python3 ./tests/libunisacccheck.py --package "${MODEL_COM:-./unisacc.com}"
+job lib-context sh ./unisacc.com tests/librarycontextcheck.cx -- --package "${MODEL_COM:-./unisacc.com}"
 job lib-format python3 ./tests/libunisaccformatcheck.py
 job lib-stack-arm python3 ./exec/c/librarystackcheck.py "${MODEL_COM:-./unisacc.com}" arm64
 job lib-stack-x86 python3 ./exec/c/librarystackcheck.py "${MODEL_COM:-./unisacc.com}" x86_64

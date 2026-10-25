@@ -1,0 +1,15 @@
+/* Default-run link-provider facade only. The independent Python context oracle
+ * and all its assertions/references/timeouts remain in libunisacccheck.py. */
+#include <cx.h>
+static void lc_fail(const char*s){fprintf(stderr,"lib-context provider refused: %s (errno=%d)\n",s,errno);exit(2);}
+static char*lc_provider(void){
+#ifdef __linux__
+ const char*list=getenv("LIBRARY_PATH");if(list){const char*p=list;for(;;){const char*e=strchr(p,':');size_t z=e?(size_t)(e-p):strlen(p);char*path=malloc(z+32);if(!path)lc_fail("allocation");if(!z)strcpy(path,"./libffi_pic.a");else if(*p=='/')snprintf(path,z+32,"%.*s/libffi_pic.a",(int)z,p);else snprintf(path,z+32,"./%.*s/libffi_pic.a",(int)z,p);
+  struct stat s,t;if(stat(path,&s)){int error=errno;if(error!=ENOENT){errno=error;lc_fail("LIBRARY_PATH entry stat");}}else{
+   if(!S_ISREG(s.st_mode)||s.st_size<=0)lc_fail("PIC provider must be a nonempty regular file");
+   int fd=open(path,O_RDONLY|O_NONBLOCK);if(fd<0)lc_fail("PIC provider open");if(fstat(fd,&t)||!S_ISREG(t.st_mode)||t.st_dev!=s.st_dev||t.st_ino!=s.st_ino||t.st_size!=s.st_size)lc_fail("PIC provider identity");size_t n=(size_t)s.st_size,k=0;char*b=malloc(n+1),extra,h[65];if(!b)lc_fail("provider allocation");while(k<n){ssize_t r=read(fd,b+k,n-k);if(r<0&&errno==EINTR)continue;if(r<=0)lc_fail("provider read");k+=r;}if(read(fd,&extra,1)!=0||fstat(fd,&t)||t.st_size!=s.st_size||t.st_mtime!=s.st_mtime||t.st_ctime!=s.st_ctime||close(fd))lc_fail("provider changed/close");cx_sha256_hex(b,n,h);free(b);fprintf(stderr,"lib-context provider=%s sha256=%s\n",path,h);return path;
+  }free(path);if(!e)break;p=e+1;}}
+#endif
+ fputs("lib-context provider=-lffi (original default; no selected Linux LIBRARY_PATH PIC archive)\n",stderr);return "-lffi";
+}
+int main(int argc,char**argv){char*provider=lc_provider();if(setenv("UNISACC_TEST_LIBFFI_LINK",provider,1)||unsetenv("UNISA_CONTAINER"))lc_fail("provider/original child environment");char**a=malloc((argc+2)*sizeof(char*));if(!a)lc_fail("argv allocation");a[0]="python3";a[1]="./tests/libunisacccheck.py";for(int i=1;i<argc;i++)a[i+1]=argv[i];a[argc+1]=0;fflush(stderr);execvp(a[0],a);lc_fail("exec original context oracle");return 2;}
