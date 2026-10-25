@@ -501,6 +501,7 @@ static int forward_exec(const Buf *image,char **argv) {
 #endif
 
 int main(int argc, char **argv) {
+    RF_TRACE_STARTED = 0;
     /* S step 1 (opt-in, non-stable CLI): --strict-resource-flow --resource-ledger DIR are taken out of argv first, so the
        option loops below never see the ledger directory as a source. */
     {   int w = 1;
@@ -526,9 +527,9 @@ int main(int argc, char **argv) {
     int warnings=0; Buf werror={0}, errorlimit={0};
     const char **sources=xrealloc(0,argc*sizeof(char *)); int nsources=0;
     Buf defs={0}, undefs={0}, forced={0}, incdir={0}, quotedir={0}, nostd={0}, libneed={0}, notrim={0};
-    if (argc>=2 && !strcmp(argv[1],"ar")) return product_ar(argc,argv);   /* R17-3 */
-    if (argc>=2 && !strcmp(argv[1],"as")) return product_as(argc,argv);   /* R18-1 */
-    if (argc>=2 && (!strcmp(argv[1],"nm") || !strcmp(argv[1],"objdump"))) return product_view(argc,argv);   /* R18-4 */
+    if (argc>=2 && !strcmp(argv[1],"ar")) { if(rf_trace_finish())return 2;return product_ar(argc,argv); }   /* R17-3 */
+    if (argc>=2 && !strcmp(argv[1],"as")) { if(rf_trace_finish())return 2;return product_as(argc,argv); }   /* R18-1 */
+    if (argc>=2 && (!strcmp(argv[1],"nm") || !strcmp(argv[1],"objdump"))) { if(rf_trace_finish())return 2;return product_view(argc,argv); }   /* R18-4 */
     int sawS=0;
     Buf srcres={0};                   /* \0cli/source: the main source path */
     /* Default mode is RUN (owner 2026-10-01, 0.0.17 R17-10): no mode or output
@@ -546,7 +547,7 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (!strcmp(a,"--version") || !strcmp(a,"-version")) {
-            printf("unisacc %s\n",UNISACC_VERSION); return 0;
+            if(rf_trace_finish())return 2;printf("unisacc %s\n",UNISACC_VERSION); return 0;
         }
         else if (!strcmp(a,"-Wall") || !strcmp(a,"-Wextra")) warnings=1;
         else if (!strcmp(a,"-Werror")) { warnings=1; if (!werror.n) bput(&werror,1,0); }
@@ -570,7 +571,7 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(a,"--emit-host-symbols")) { if(host_symbols_path||++i>=argc)return clierror("invalid --emit-host-symbols argument");host_symbols_path=argv[i]; }
         else if (!strcmp(a,"--host-provider")) { if(host_provider_path||++i>=argc)return clierror("invalid --host-provider argument");host_provider_path=argv[i]; }
-        else if (!strcmp(a,"--help")) { puts("unisacc FILE [-S|-c|-o FILE|-run]\nDiagnostic, non-stable: --emit-host-symbols FILE (-S/-c/-o, not -run)\nDiagnostic, non-stable: --host-provider FILE (12-byte capability filter; no addresses)");return 0; }
+        else if (!strcmp(a,"--help")) { if(rf_trace_finish())return 2;puts("unisacc FILE [-S|-c|-o FILE|-run]\nDiagnostic, non-stable: --emit-host-symbols FILE (-S/-c/-o, not -run)\nDiagnostic, non-stable: --host-provider FILE (12-byte capability filter; no addresses)");return 0; }
         else if (!strcmp(a,"-MP")) depphony=1;
         else if (!strcmp(a,"-MF")) {
             if (++i>=argc) return clierror("missing dependency output"); deps=argv[i];
@@ -636,7 +637,7 @@ int main(int argc, char **argv) {
     if (!src) return clierror("expected a C source file");
     /* CX2a: a .cx unit's `#pragma unisa use` adds the module's unit after the command-line sources (src/cxmod.c);
        .c units are never scanned.  -cx-interface prints one module's interface, -cx-plan the units and their lists. */
-    if (cxm_wantif) return cxm_interface((char *)src);
+    if (cxm_wantif) { if(rf_trace_finish())return 2;return cxm_interface((char *)src); }
     cxm_on=0;
     if (!object_path(src) && !tapebin_path(src) && !tape_path(src)) {
         int anycx=cxm_wantplan;
@@ -649,6 +650,7 @@ int main(int argc, char **argv) {
         }
     }
     if (cxm_wantplan) {
+        if(rf_trace_finish())return 2;
         const char **opt=xrealloc(0,(forced.n+1)*sizeof(char *)); int nopt=0;
         for (int k=0;k<forced.n;k++) if (!k || !forced.b[k-1]) opt[nopt++]=(const char *)forced.b+k;
         cxm_planprint((char **)opt,nopt); free(opt); return 0;
@@ -982,7 +984,7 @@ int main(int argc, char **argv) {
         av[j]=0; fwd_second=1;
         return main(j,av);
     }
-    if(!rc&&mode==2&&host_symbols_path){Buf symbols={0};HostRequirements requirements;rc=host_symbol_stream(route,&in,src,&host_context,&symbols,&requirements);if(!rc)rc=host_side_write(host_symbols_path,&symbols);free(symbols.b);}
+    if(!rc&&mode==2&&host_symbols_path){Buf symbols={0};HostRequirements requirements;rc=host_symbol_stream(route,&in,src,&host_context,&symbols,&requirements);if(!rc)rc=rf_trace_finish();if(!rc)rc=host_side_write(host_symbols_path,&symbols);free(symbols.b);}
     MemoryImage plan; MemoryMap mapping;
     if (!rc && runit) {
         snprintf(route,sizeof route,"%s/memory",target);
@@ -1020,6 +1022,7 @@ int main(int argc, char **argv) {
     free(srcres.b); free(srcres.at);
     free(werror.b); free(werror.at);
     if (rc) return rc;
+    if(rf_trace_finish())return 2;
     if(emitbin&&tbc_encode_product(&in,tape_input ? 0 : tapebin_target(target)))
         return clierror("cannot encode tapebin");
     if (deps && (deponly || (mode!=1 && mode!=4 && !runit))) {

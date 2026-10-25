@@ -24,7 +24,7 @@
 #include "../../include/unisa_sha256.h"
 
 typedef struct { unsigned char *key; int kn; int present; unsigned char *value; int vn; char blob[64]; } RLRow;
-typedef struct { RLRow *rows; int n; int has_id; char stage[128]; char input_hex[65]; } RLLedger;
+typedef struct { RLRow *rows; int n; int has_id; int trace, cursor; char stage[128]; char input_hex[65]; } RLLedger;
 typedef struct { const char *name; const unsigned char *bytes; size_t n; } RLFileView;
 /* Clear only zeroed or loader-produced ledgers. Rows returned by rl_find are
  * borrowed until this call; failure outputs are always empty and clearable. */
@@ -124,7 +124,7 @@ static int rl_parse_identity(const char *line, RLLedger *L) {
 /* 0: loaded; otherwise err holds the named reason (INTERFACE_ERROR <reason> ...) */
 static int rl_load_parse(const char *dir, const RLFileView *views, int count, RLLedger *L, char *err, size_t errn) {
     unsigned char *b; size_t n = 0, at = 0; int cap = 0;
-    L->rows = 0; L->n = 0; L->has_id = 0; L->stage[0] = 0; L->input_hex[0] = 0;
+    L->rows = 0; L->n = 0; L->has_id = 0; L->trace = 0; L->cursor = 0; L->stage[0] = 0; L->input_hex[0] = 0;
     b = rl_file_bytes(dir, "resources.tsv", views, count, &n);
     if (!b) { snprintf(err, errn, errno == ENOENT ? "INTERFACE_ERROR resource-ledger-absent %s" : errno == ENOMEM ? "INTERFACE_ERROR resource-ledger-allocation-failed %s" : "INTERFACE_ERROR resource-ledger-read-failed %s errno=%d", dir, errno); return 1; }
     while (at < n) {
@@ -138,9 +138,10 @@ static int rl_load_parse(const char *dir, const RLFileView *views, int count, RL
         if (memchr(b + at, 0, L2)) { free(b); snprintf(err, errn, "INTERFACE_ERROR resource-row-nul"); return 1; }
         line = malloc(L2 + 1); if (!line) { free(b); return 1; }
         memcpy(line, b + at, L2); line[L2] = 0; at = e + 1;
-        if (!strncmp(line, "#SC1\t", 5)) {
+        if (!strncmp(line, "#SC1\t", 5) || !strncmp(line, "#SC2\t", 5)) {
             /* identity header: the first line only, at most once */
             int ok = e == L2 && !L->has_id && rl_parse_identity(line, L);
+            if (ok) L->trace = line[3] == '2';
             free(line);
             if (!ok) { free(b); snprintf(err, errn, "INTERFACE_ERROR resource-identity-malformed"); return 1; }
             continue;
@@ -152,8 +153,8 @@ static int rl_load_parse(const char *dir, const RLFileView *views, int count, RL
             if (!kl || kl % 2) { free(line); free(b); snprintf(err, errn, "INTERFACE_ERROR resource-key-malformed"); return 1; }
             kb = malloc(kl / 2); if (!kb) { free(line); free(b); return 1; }
             for (q = 0; q < kl; q += 2) { int hi = rl_hexv((unsigned char)f[0][q]), lo = rl_hexv((unsigned char)f[0][q+1]); if (hi < 0 || lo < 0) { free(kb); free(line); free(b); snprintf(err, errn, "INTERFACE_ERROR resource-key-malformed"); return 1; } kb[q/2] = (unsigned char)(hi * 16 + lo); }
-            /* duplicate key: named refusal, never first-entry-wins */
-            { int j; for (j = 0; j < L->n; j++) if (L->rows[j].kn == (int)(kl / 2) && !memcmp(L->rows[j].key, kb, kl / 2)) { free(kb); free(line); free(b); snprintf(err, errn, "INTERFACE_ERROR duplicate-resource-key %s", f[0]); return 1; } }
+            /* SC1 duplicate keys are refused; SC2 preserves the ordered queries. */
+            { int j; if (!L->trace) for (j = 0; j < L->n; j++) if (L->rows[j].kn == (int)(kl / 2) && !memcmp(L->rows[j].key, kb, kl / 2)) { free(kb); free(line); free(b); snprintf(err, errn, "INTERFACE_ERROR duplicate-resource-key %s", f[0]); return 1; } }
             if (L->n == cap) { RLRow *grown; cap = cap ? cap * 2 : 16; grown = realloc(L->rows, (size_t)cap * sizeof *L->rows); if (!grown) { free(kb); free(line); free(b); return 1; } L->rows = grown; }
             L->rows[L->n].key = kb; L->rows[L->n].kn = (int)(kl / 2); L->rows[L->n].present = 0; L->rows[L->n].value = 0; L->rows[L->n].vn = 0;
             L->n++;
@@ -225,7 +226,7 @@ static void rl_write_identity(FILE *f, const char *stage, const unsigned char *i
 }
 /* exact key lookup: the row, or NULL when the ledger does not list the key (MISSING for the caller) */
 static const RLRow *rl_find(const RLLedger *L, const unsigned char *key, int kn) {
-    int j;
+    int j; if (L->trace) return 0; /* SC2 is ordered, never a first-entry map. */
     for (j = 0; j < L->n; j++) if (L->rows[j].kn == kn && !memcmp(L->rows[j].key, key, (size_t)kn)) return &L->rows[j];
     return 0;
 }
@@ -462,6 +463,7 @@ static inline int rl_snapshot_load_parse(const char *dir, const char *upstream_s
       if (closedir(d)) RL_SNAP_LFAIL("snapshot-dir-close");
     }
     if (rl_load_views(dir, files, nl, L, err, errn)) goto done;
+    if (L->trace) RL_SNAP_LFAIL("snapshot-trace-ledger-not-map");
     if (rl_check_identity(L, upstream_stage_label, files[input].bytes, (int)files[input].n, err, errn)) goto done;
     for (i = 0; i < L->n; i++) {
         int j, found = -1;

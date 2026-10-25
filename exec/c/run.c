@@ -614,56 +614,116 @@ static void record_file_read(const char *path) {
 UNISA_RUNTIME_STATE int RF_STRICT=0, RF_LOADED=0;
 UNISA_RUNTIME_STATE RLLedger RF_LEDGER;
 static int rf_default_fetch(const unsigned char *p,int n,unsigned char **bytes,int *len);
-/* capture (fixture building only; env UNISACC_RF_CAPTURE=DIR): every key the default path answers is written to DIR as a
-   ledger row (first answer wins, repeats are checked for agreement); the default answer itself is unchanged. */
-static const char *rf_capture_set = 0;   /* standalone --capture-out: held here, not round-tripped through the environment (C99-clean) */
-static const char *rf_capture_dir(void) { static int init = 0; static const char *d = 0; if (rf_capture_set) return rf_capture_set; if (!init) { init = 1; d = getenv("UNISACC_RF_CAPTURE"); } return d; }
-static unsigned char *RF_CAPK[4096]; static int RF_CAPKN[4096]; static int RF_CAPC = 0;
-static void rf_capture_record(const unsigned char *p,int n,int owned,unsigned char *bytes,int len) {
-    char path[4096], hex[1025], sha[65]; FILE *f; int i;
-    for (i = 0; i < RF_CAPC; i++) if (RF_CAPKN[i] == n && !memcmp(RF_CAPK[i], p, n)) return;
-    if (RF_CAPC >= 4096 || n > 512) return;
-    RF_CAPK[RF_CAPC] = malloc(n ? n : 1); memcpy(RF_CAPK[RF_CAPC], p, n); RF_CAPKN[RF_CAPC] = n; RF_CAPC++;
-    for (i = 0; i < n; i++) { hex[2*i] = "0123456789abcdef"[p[i] >> 4]; hex[2*i+1] = "0123456789abcdef"[p[i] & 15]; } hex[2*n] = 0;
-    snprintf(path, sizeof path, "%s/resources.tsv", rf_capture_dir());
-    f = fopen(path, "a"); if (!f) return;
-    if (!owned) fprintf(f, "%s\t0\t-\t0\t-\n", hex);
-    else {
-        char name[64]; snprintf(name, sizeof name, "resource-%03d.bytes", RF_CAPC - 1);
-        snprintf(path, sizeof path, "%s/%s", rf_capture_dir(), name);
-        { FILE *g = fopen(path, "wb"); if (g) { if (len) fwrite(bytes, 1, (size_t)len, g); fclose(g); } }
-        unisa_sha256_hex(bytes, (size_t)len, sha);
-        fprintf(f, "%s\t1\t%s\t%d\t%s\n", hex, name, len, sha);
+UNISA_RUNTIME_STATE int RF_TRACE_STARTED;
+static int rf_trace_finish(void) {
+    if (RF_STRICT && RF_LEDGER.trace) {
+        if (!RF_TRACE_STARTED) { fprintf(stderr,"unisacc: INTERFACE_ERROR resource-trace-not-started\n");return 2; }
+        if (RF_LEDGER.cursor != RF_LEDGER.n) { fprintf(stderr,"unisacc: INTERFACE_ERROR resource-trace-unconsumed event=%d remaining=%d\n",RF_LEDGER.cursor,RF_LEDGER.n-RF_LEDGER.cursor);return 2; }
     }
-    fclose(f);
-}
-/* SC1 identity (exec/c/resourceledger.h): the stage label and the input bytes this run runs on.  The label is the run's own
-   route (target/format/level, as the driver builds it), prefixed by the stage name: the strict and capture route is the tape
-   route only, so any other mode is refused by name.  A capture writes the header first; a strict run checks it against this
-   run and refuses by name (rc 2, no output).  Default runs (no --strict-resource-flow, no capture) never reach this. */
-/* the one capture-header writer: rf_identity_gate and rf_capture_begin both call it.  The ledger file must hold no rows
-   before the header (an empty or missing file is fine); the header is the identity line of the caller's stage label and its
-   input bytes (rl_write_identity).  No directory listing: UA's libc has no dirent, and fopen "x" is not honoured by UA (it
-   would truncate), so the no-overwrite check is an existence read ("rb" + fgetc) before the "wb" create, on UA and host alike. */
-static int rf_identity_write_capture(const char *dir, const char *stage, const unsigned char *input, int n, char *err, size_t errn) {
-#if defined(__UNISA__) && defined(_WIN32)
-    (void)stage; (void)input; (void)n;   /* UA on Windows: no mkdir in this libc surface; refused by name, as the snapshot stubs are */
-    snprintf(err, errn, "INTERFACE_ERROR capture-unsupported-platform %s", dir); return 1;
-#else
-    char path[4096]; FILE *f; int c;
-    if (mkdir(dir, 0700) && errno != EEXIST) { snprintf(err, errn, "INTERFACE_ERROR capture-dir-create %s", dir); return 1; }
-    snprintf(path, sizeof path, "%s/resources.tsv", dir);
-    f = fopen(path, "rb");
-    if (f) {
-        c = fgetc(f);
-        fclose(f);
-        if (c != EOF) { snprintf(err, errn, "INTERFACE_ERROR capture-ledger-rows-before-identity %s", path); return 1; }
-    }
-    f = fopen(path, "wb");
-    if (!f) { snprintf(err, errn, "INTERFACE_ERROR capture-ledger-create %s", path); return 1; }
-    rl_write_identity(f, stage, input, n);
-    if (fclose(f)) { snprintf(err, errn, "INTERFACE_ERROR capture-ledger-write %s", path); return 1; }
     return 0;
+}
+UNISA_RUNTIME_STATE const char *rf_capture_set = 0;
+static const char *rf_capture_dir(void) {
+    UNISA_RUNTIME_STATE int init=0;UNISA_RUNTIME_STATE const char *d=0;
+    if (rf_capture_set && *rf_capture_set) return rf_capture_set;
+    if (!init) {init=1;d=getenv("UNISACC_RF_CAPTURE");if(d&&!*d)d=0;}return d;
+}
+/* SC2 is an ordered host-fetch trace. Repeated keys may legitimately answer
+ * differently in another execution/unit. No answer or test verdict is cached. */
+UNISA_RUNTIME_STATE int RF_CAPC,RF_CAPACTIVE;
+UNISA_RUNTIME_STATE long RF_CAPOWNER;
+UNISA_RUNTIME_STATE char RF_CAPDIR[4096];
+static int rf_cap_path(char *p, size_t cap, const char *dir, const char *name, char *err, size_t errn) {
+    int z = snprintf(p, cap, "%s/%s", dir, name);
+    if (z < 0 || (size_t)z >= cap) { snprintf(err, errn, "INTERFACE_ERROR capture-path-too-long"); return 1; }
+    return 0;
+}
+#ifndef _WIN32
+/* Existing files are never opened for truncation. A private mkdir reserves the
+ * staging name and link publishes each new file without replacing a target. */
+static int rf_cap_new_file(const char *dir, const char *name, const unsigned char *bytes, size_t n, char *err, size_t errn) {
+    char tmp[4096], from[4096], to[4096]; FILE *f; int bad = 0, saved = 0;
+    int z = snprintf(tmp, sizeof tmp, "%s/.capture-%ld", dir, (long)getpid());
+    if (z < 0 || (size_t)z >= sizeof tmp || rf_cap_path(from,sizeof from,tmp,"bytes",err,errn) || rf_cap_path(to,sizeof to,dir,name,err,errn)) {
+        snprintf(err,errn,"INTERFACE_ERROR capture-path-too-long"); return 1;
+    }
+    if (mkdir(tmp,0700)) { snprintf(err,errn,"INTERFACE_ERROR capture-staging-create"); return 1; }
+    f = fopen(from,"wb");
+    if (!f) bad = 1;
+    else {
+        if (n && fwrite(bytes,1,n,f) != n) bad = 1;
+        if (fflush(f)) bad = 1;
+        if (fclose(f)) bad = 1;
+    }
+    if (bad) snprintf(err,errn,"INTERFACE_ERROR capture-file-write %s",name);
+    else if (rl_snap_link(from,to)) { saved = errno; bad = 1; snprintf(err,errn,saved == EEXIST ? "INTERFACE_ERROR capture-target-exists %s" : "INTERFACE_ERROR capture-publish-failed %s",name); }
+    if (unlink(from) && !bad) { bad = 1; snprintf(err,errn,"INTERFACE_ERROR capture-staging-cleanup"); }
+    if (rmdir(tmp) && !bad) { bad = 1; snprintf(err,errn,"INTERFACE_ERROR capture-staging-cleanup"); }
+    return bad;
+}
+static int rf_cap_append(const char *path, const unsigned char *bytes, size_t n, int require_empty, char *err, size_t errn) {
+    struct stat st; size_t at = 0;
+    int fd = open(path,O_WRONLY|O_APPEND|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC);
+    if (fd < 0) { snprintf(err,errn,"INTERFACE_ERROR capture-ledger-open"); return 1; }
+    if (fstat(fd,&st) || !S_ISREG(st.st_mode) || (require_empty && st.st_size != 0)) {
+        close(fd); snprintf(err,errn,"INTERFACE_ERROR capture-ledger-not-empty-regular"); return 1;
+    }
+    while (at < n) {
+        ssize_t z = write(fd,bytes+at,n-at);
+        if (z < 0 && errno == EINTR) continue;
+        if (z <= 0) { close(fd); snprintf(err,errn,"INTERFACE_ERROR capture-ledger-write"); return 1; }
+        at += (size_t)z;
+    }
+    if (close(fd)) { snprintf(err,errn,"INTERFACE_ERROR capture-ledger-close"); return 1; }
+    return 0;
+}
+#endif
+static void rf_capture_record(const unsigned char *p,int n,int owned,unsigned char *bytes,int len) {
+#ifdef _WIN32
+    (void)p;(void)n;(void)owned;(void)bytes;(void)len;die("INTERFACE_ERROR capture-unsupported-platform");
+#else
+    char path[4096],hex[1025],sha[65],name[64],row[1280],err[512];int z,present=owned!=0;const char *dir=rf_capture_dir();
+    if (!dir || !RF_CAPACTIVE || strcmp(dir,RF_CAPDIR) || RF_CAPOWNER!=(long)getpid()) die("INTERFACE_ERROR capture-session-not-initialized");
+    if (n<=0||n>512||!p) die("INTERFACE_ERROR capture-key-length");
+    if (owned<0||owned>2||len<0||(present&&len>0&&!bytes)) die("INTERFACE_ERROR capture-answer-invalid");
+    if (RF_CAPC>=4096) die("INTERFACE_ERROR capture-capacity-exceeded");
+    for(int i=0;i<n;i++){hex[2*i]="0123456789abcdef"[p[i]>>4];hex[2*i+1]="0123456789abcdef"[p[i]&15];}hex[2*n]=0;
+    if(present){
+        unisa_sha256_hex(bytes,(size_t)len,sha);snprintf(name,sizeof name,"resource-%03d.bytes",RF_CAPC);
+        if(rf_cap_new_file(dir,name,bytes,(size_t)len,err,sizeof err))die(err);
+        z=snprintf(row,sizeof row,"%s\t1\t%s\t%d\t%s\n",hex,name,len,sha);
+    }else z=snprintf(row,sizeof row,"%s\t0\t-\t0\t-\n",hex);
+    if(z<0||(size_t)z>=sizeof row)die("INTERFACE_ERROR capture-row-too-long");
+    if(rf_cap_path(path,sizeof path,dir,"resources.tsv",err,sizeof err)||rf_cap_append(path,(const unsigned char*)row,(size_t)z,0,err,sizeof err))die(err);
+    RF_CAPC++;
+#endif
+}
+/* SC2 captures actual answers, not a snapshot map. Its initialization guard
+ * owns the legacy-empty-file check through close, then is removed. It is not
+ * a whole-ledger COMMIT or a durable filesystem transaction. */
+static int rf_identity_write_capture(const char *dir,const char *stage,const unsigned char *input,int n,char *err,size_t errn){
+#ifdef _WIN32
+    (void)dir;(void)stage;(void)input;(void)n;snprintf(err,errn,"INTERFACE_ERROR capture-unsupported-platform");return 1;
+#else
+    char path[4096],guard[4096],line[512],hex[65];struct stat st;int empty=0,bad=1;
+    if(!dir||!stage||n<0||(n>0&&!input)){snprintf(err,errn,"INTERFACE_ERROR capture-bad-arguments");return 1;}
+    if(rf_cap_path(path,sizeof path,dir,"resources.tsv",err,errn)||rf_cap_path(guard,sizeof guard,dir,".capture-begin",err,errn))return 1;
+    if(mkdir(dir,0700)&&errno!=EEXIST){snprintf(err,errn,"INTERFACE_ERROR capture-dir-create");return 1;}
+    if(mkdir(guard,0700)){snprintf(err,errn,"INTERFACE_ERROR capture-session-busy");return 1;}
+    errno=0;if(!lstat(path,&st)){
+        if(!S_ISREG(st.st_mode)){snprintf(err,errn,"INTERFACE_ERROR capture-ledger-not-regular");goto done;}
+        if(st.st_size!=0){snprintf(err,errn,"INTERFACE_ERROR capture-ledger-rows-before-identity");goto done;}empty=1;
+    }else if(errno!=ENOENT){snprintf(err,errn,"INTERFACE_ERROR capture-ledger-stat");goto done;}
+    {DIR *d=opendir(dir);struct dirent *e;if(!d){snprintf(err,errn,"INTERFACE_ERROR capture-dir-open");goto done;}
+     for(;;){errno=0;e=readdir(d);if(!e){int saved=errno,closed=closedir(d);if(saved||closed){snprintf(err,errn,"INTERFACE_ERROR capture-dir-read-close");goto done;}break;}
+      if(!strcmp(e->d_name,".")||!strcmp(e->d_name,"..")||!strcmp(e->d_name,".capture-begin")||(empty&&!strcmp(e->d_name,"resources.tsv")))continue;
+      closedir(d);snprintf(err,errn,"INTERFACE_ERROR capture-dir-not-empty");goto done;}}
+    rl_input_hex(input,n,hex);if(!rl_identity_line(line,sizeof line,stage,hex)){snprintf(err,errn,"INTERFACE_ERROR capture-stage-label");goto done;}line[3]='2';
+    bad=empty?rf_cap_append(path,(const unsigned char*)line,strlen(line),1,err,errn):rf_cap_new_file(dir,"resources.tsv",(const unsigned char*)line,strlen(line),err,errn);
+done:
+    if(rmdir(guard)&&!bad){bad=1;snprintf(err,errn,"INTERFACE_ERROR capture-session-cleanup");}
+    if(!bad){strcpy(RF_CAPDIR,dir);RF_CAPC=0;RF_CAPOWNER=(long)getpid();RF_CAPACTIVE=1;}
+    return bad;
 #endif
 }
 /* Shared identity label constructor. Both the gate and witnesses use the
@@ -676,10 +736,11 @@ static int rf_stage_label(char *dst,size_t cap,const char *stage_name,const char
 }
 static int rf_identity_gate(const unsigned char *input,int n,int mode,const char *route,const char *stage_name) {
     char err[512], stage[160];
-    if (mode != 2) { fprintf(stderr, "unisacc: INTERFACE_ERROR resource-route-unsupported %s (strict and capture cover the tape route only)\n", route); return 2; }
+    if (mode != 2 || !route || !strstr(route,"/tape/O")) { fprintf(stderr, "unisacc: INTERFACE_ERROR resource-route-unsupported %s (strict and capture cover the tape route only)\n", route?route:"-"); return 2; }
     if (!rf_stage_label(stage,sizeof stage,stage_name,route)) { fprintf(stderr,"unisacc: INTERFACE_ERROR capture-stage-label\n"); return 2; }
-    if (rf_capture_dir() && rf_identity_write_capture(rf_capture_dir(), stage, input, n, err, sizeof err)) { fprintf(stderr, "unisacc: %s\n", err); return 2; }
     if (RF_STRICT && rl_check_identity(&RF_LEDGER, stage, input, n, err, sizeof err)) { fprintf(stderr, "unisacc: %s\n", err); return 2; }
+    if (rf_capture_dir() && rf_identity_write_capture(rf_capture_dir(), stage, input, n, err, sizeof err)) { fprintf(stderr, "unisacc: %s\n", err); return 2; }
+    if (RF_STRICT) { RF_LEDGER.cursor = 0; RF_TRACE_STARTED = 1; }
     return 0;
 }
 /* SC1 multi-source identity input: the source frame, per source in order: u32le name length, name, u32le byte count, bytes.
@@ -716,27 +777,37 @@ static inline int rf_snapshot_load_ri(const char *dir, const char *upstream_stag
 /* capture header for an independent consumer (standalone lower): the directory must be absent or empty; the header is the
    consumer's own identity (its label and its real input bytes), written by the same identity writer as the e3 gate */
 static inline int rf_capture_begin(const char *dir, const char *stage_label, const unsigned char *input, int inputn, char *err, size_t errn) {
+    if (!stage_label || inputn < 0 || (inputn > 0 && !input)) { snprintf(err,errn,"INTERFACE_ERROR capture-bad-arguments");return 1; }
     if (!rl_stage_label_ok(stage_label)) { snprintf(err, errn, "INTERFACE_ERROR capture-stage-label %s", stage_label); return 1; }
     return rf_identity_write_capture(dir, stage_label, input, inputn, err, errn);
 }
 int core_host_fetch(const unsigned char *p,int n,unsigned char **bytes,int *len) {
-    if (RF_STRICT) {
-        static char msg[1200]; char h[1025]; int i;
-        if (n > 512) die("resource key too long");
-        for (i = 0; i < n; i++) { h[2*i] = "0123456789abcdef"[p[i] >> 4]; h[2*i+1] = "0123456789abcdef"[p[i] & 15]; } h[2*n] = 0;
-        const RLRow *r = rl_find(&RF_LEDGER, p, n);
-        if (!r) { snprintf(msg, sizeof msg, "MISSING_EXPLICIT_RESOURCE %s", h); die(msg); }
-        if (!r->present) return 0;
-        *bytes = r->value; *len = r->vn; return 1;
+    static const unsigned char empty[1]={0};
+    if(n<0||(!p&&n>0)||!bytes||!len)die("INTERFACE_ERROR resource-fetch-bad-arguments");
+    if(!p)p=empty;*bytes=0;*len=0;
+    if(RF_STRICT){
+        static char msg[1280];char h[1025];const RLRow *r=0;
+        if(n>512)die("resource key too long");
+        for(int i=0;i<n;i++){h[2*i]="0123456789abcdef"[p[i]>>4];h[2*i+1]="0123456789abcdef"[p[i]&15];}h[2*n]=0;
+        if(RF_LEDGER.trace){
+            if(!RF_TRACE_STARTED)die("INTERFACE_ERROR resource-trace-not-started");
+            if(RF_LEDGER.cursor>=RF_LEDGER.n){snprintf(msg,sizeof msg,"MISSING_EXPLICIT_RESOURCE %s event=%d",h,RF_LEDGER.cursor);die(msg);}
+            r=&RF_LEDGER.rows[RF_LEDGER.cursor];
+            if(r->kn!=n||memcmp(r->key,p,(size_t)n)){snprintf(msg,sizeof msg,"INTERFACE_ERROR resource-trace-key-mismatch %s event=%d",h,RF_LEDGER.cursor);die(msg);}
+            RF_LEDGER.cursor++;
+        }else r=rl_find(&RF_LEDGER,p,n);
+        if(!r){snprintf(msg,sizeof msg,"MISSING_EXPLICIT_RESOURCE %s",h);die(msg);}
+        if(r->present){*bytes=r->value;*len=r->vn;}
+        if(rf_capture_dir())rf_capture_record(p,n,r->present,*bytes,*len);
+        return r->present?1:0;
     }
-    if (RI_SNAP_ON) {   /* overlay: a snapshot key answers; an unknown key is not inferred absent and falls through */
-        const RLRow *sr = rl_find(&RI_SNAP, p, n);
-        if (sr) { if (!sr->present) { if (rf_capture_dir()) rf_capture_record(p,n,0,0,0); return 0; } *bytes = sr->value; *len = sr->vn; if (rf_capture_dir()) rf_capture_record(p,n,1,*bytes,*len); return 1; }
+    if(RI_SNAP_ON){
+        const RLRow *r=rl_find(&RI_SNAP,p,n);
+        if(r){if(r->present){*bytes=r->value;*len=r->vn;}if(rf_capture_dir())rf_capture_record(p,n,r->present,*bytes,*len);return r->present?1:0;}
     }
-    {   int owned = rf_default_fetch(p,n,bytes,len);
-        if (rf_capture_dir()) rf_capture_record(p,n,owned,*bytes,*len);
-        return owned;
-    }
+    int owned=rf_default_fetch(p,n,bytes,len);
+    if(rf_capture_dir())rf_capture_record(p,n,owned,*bytes,*len);
+    return owned;
 }
 static int rf_default_fetch(const unsigned char *p,int n,unsigned char **bytes,int *len) {
     for (int j=0;j<NRI;j++) if (RI[j].n==n && !memcmp(RI[j].name,p,n)) {
@@ -874,21 +945,27 @@ static int runroute(const char *route, Buf *in, const char *src) {
 #ifndef UNISA_RUNTIME_LIBRARY
 int main(int argc, char **argv) {
     /* standalone options (leading, each takes a value): --package PRODUCT --ri-snapshot SNAP --upstream-stage LABEL --stage LABEL --capture-out OUT */
-    int k = 1, run_observe = 0; const char *run_pkg = 0, *run_snap = 0, *run_ul = 0, *run_stage = 0, *run_out = 0;
-    while (k < argc && !strcmp(argv[k], "--observe-callables")) { run_observe = 1; k++; }   /* a flag: observation or same-ledger replay */
-    while (k < argc && !strncmp(argv[k], "--", 2) && (!strcmp(argv[k], "--package") || !strcmp(argv[k], "--ri-snapshot") || !strcmp(argv[k], "--upstream-stage") || !strcmp(argv[k], "--stage") || !strcmp(argv[k], "--capture-out"))) {
-        if (k + 1 >= argc) { fprintf(stderr, "run: %s needs a value\n", argv[k]); return 2; }
-        if (!strcmp(argv[k], "--package")) run_pkg = argv[k+1]; else if (!strcmp(argv[k], "--ri-snapshot")) run_snap = argv[k+1];
-        else if (!strcmp(argv[k], "--upstream-stage")) run_ul = argv[k+1]; else if (!strcmp(argv[k], "--stage")) run_stage = argv[k+1]; else run_out = argv[k+1];
-        k += 2;
+    int k=1,run_observe=0;const char *run_pkg=0,*run_snap=0,*run_ul=0,*run_stage=0,*run_out=0,*run_ledger=0;
+    RF_TRACE_STARTED=0;
+    while(k<argc){
+        if(!strcmp(argv[k],"--observe-callables")){run_observe=1;k++;continue;}
+        if(!strcmp(argv[k],"--strict-resource-flow")){RF_STRICT=1;k++;continue;}
+        if(strcmp(argv[k],"--package")&&strcmp(argv[k],"--ri-snapshot")&&strcmp(argv[k],"--upstream-stage")&&strcmp(argv[k],"--stage")&&strcmp(argv[k],"--capture-out")&&strcmp(argv[k],"--resource-ledger"))break;
+        if(k+1>=argc){fprintf(stderr,"run: %s needs a value\n",argv[k]);return 2;}
+        if(!strcmp(argv[k],"--package"))run_pkg=argv[k+1];else if(!strcmp(argv[k],"--ri-snapshot"))run_snap=argv[k+1];
+        else if(!strcmp(argv[k],"--upstream-stage"))run_ul=argv[k+1];else if(!strcmp(argv[k],"--stage"))run_stage=argv[k+1];
+        else if(!strcmp(argv[k],"--resource-ledger"))run_ledger=argv[k+1];else run_out=argv[k+1];k+=2;
     }
+    if(run_ledger){char err[512];rl_clear(&RF_LEDGER);RF_LOADED=0;if(rl_load(run_ledger,&RF_LEDGER,err,sizeof err)){fprintf(stderr,"run: %s\n",err);return 2;}RF_LOADED=1;}
+    if(RF_STRICT&&(!RF_LOADED||!run_stage||run_snap)){fprintf(stderr,"run: INTERFACE_ERROR strict-replay-needs-ledger-stage-and-no-overlay\n");return 2;}
+    if(run_ledger&&!RF_STRICT){fprintf(stderr,"run: INTERFACE_ERROR ledger-needs-strict-resource-flow\n");return 2;}
     if (k > 1) {   /* options were given: the remaining argv is copied into a heap array; without options argv is untouched */
         char **nargv = malloc(sizeof(char *) * (size_t)(argc - k + 2)); int m = 1;
         if (!nargv) { fprintf(stderr, "run: out of memory\n"); return 2; }
         nargv[0] = argv[0]; for (; k < argc; k++) nargv[m++] = argv[k];
         argc = m; argv = nargv;
     }
-    if (argc == 4 && !strcmp(argv[1], "--check-net")) return checknet(argv[2], argv[3]);
+    if (argc == 4 && !strcmp(argv[1], "--check-net")) { if(RF_STRICT){fprintf(stderr,"run: INTERFACE_ERROR strict-replay-needs-execution-input\n");return 2;}return checknet(argv[2], argv[3]); }
     int chain = argc > 1 && !strcmp(argv[1], "--chain");
     int embedded = argc > 1 && !strcmp(argv[1], "--embedded");
     int bundled = embedded || (argc > 1 && !strcmp(argv[1], "--bundle"));
@@ -924,6 +1001,8 @@ int main(int argc, char **argv) {
         if (rf_snapshot_load_ri(run_snap, run_ul, &RI_SNAP, run_observe, err, sizeof err)) {   /* the upstream identity is verified inside the snapshot (header vs its own input.bin); the consumer INPUT is its own identity and is not compared with it */ fprintf(stderr, "run: %s\n", err); return 2; }
         RI_SNAP_ON = 1;
     }
+    if(RF_STRICT){char err[512];if(rl_check_identity(&RF_LEDGER,run_stage,in.b,in.n,err,sizeof err)){fprintf(stderr,"run: %s\n",err);return 2;}RF_LEDGER.cursor=0;RF_TRACE_STARTED=1;}
+    if(!run_out&&rf_capture_dir())run_out=rf_capture_dir();
     if (run_out) {   /* consumer capture: a new (empty) directory, distinct from the snapshot, with the consumer's own header */
         char err[512];
         if (!run_stage) { fprintf(stderr, "run: --capture-out needs --stage\n"); return 2; }
@@ -937,6 +1016,7 @@ int main(int argc, char **argv) {
         if (rf_capture_begin(run_out, run_stage, in.b, in.n, err, sizeof err)) { fprintf(stderr, "run: %s\n", err); return 2; }
         rf_capture_set = run_out;
     }
+    int run_attributes = 0; /* Attribute output commits only after the whole chain accepts. */
     if (bundled) {
         int rc = runroute(argv[routearg], &in, src); unpackage();
         if (rc) return rc;
@@ -945,13 +1025,19 @@ int main(int argc, char **argv) {
         for (int i = first; i < end; i++) {
             load(argv[i]);
             Buf out = {0}; int rc = execute(in.b, in.n, src, &out);
-            if (!rc && attr_strip(&out)) {
-                const char *ap = getenv("UNISA_ATTRIBUTES");
-                if (ap && *ap) { FILE *af = fopen(ap, "wb"); if (!af || fwrite(ATTRS.b, 1, ATTRS.n, af) != (size_t)ATTRS.n || fclose(af)) die("cannot write UNISA_ATTRIBUTES"); }
-            }
+            if (!rc && attr_strip(&out)) run_attributes = 1;
             unload(); free(in.b);
             if (rc) return rc;
             in.b = out.b; in.n = out.n;
+        }
+    }
+    if(rf_trace_finish())return 2;
+    if (run_attributes) {
+        const char *ap = getenv("UNISA_ATTRIBUTES");
+        if (ap && *ap) {
+            FILE *af = fopen(ap, "wb"); int bad = !af;
+            if (af) { if (fwrite(ATTRS.b,1,ATTRS.n,af)!=(size_t)ATTRS.n) bad=1; if(fclose(af)) bad=1; }
+            if(bad)die("cannot write UNISA_ATTRIBUTES");
         }
     }
     if (fwrite(in.b, 1, in.n, stdout) != (size_t)in.n || fclose(stdout)) die("cannot write output");
