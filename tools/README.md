@@ -26,6 +26,22 @@ cold path has been removed. A direct self-hosted run of the old watchdog source
 currently fails on the uncarried `sys/prctl.h`; this is an active migration gap.
 Existing model coordinators still containing Python are not described as native.
 
+The construction source identity includes the ten support inputs bound, bound.c,
+cxbin, safedel.cx, lib.sh, build_ref.sh, export_ref.sh, refshim.h, reffoot.h and
+sourceflat.cx under tools/. The native seed/ident.c and compatibility coordinator
+declare the same ordered list. A native isolated-tree regression independently
+assembles path-NUL plus binary SHA256 payloads and checks each input mutation,
+restoration, and missing/directory refusal (15 checks). Run it after constructing
+the native identity tool:
+
+```
+tools/bound 40 sh ./unisacc.com -O2 -fno-trim-libc seed/ident.c -o out/ident
+make identity IDENT_BINARY=out/ident IDENT_OUT=out/identity-fresh
+```
+
+This regression checks support-source binding, not the complete build pipeline or
+Python runtime parity. Changed source identities invalidate old build manifests.
+
 `cxlib/` retains five native support modules still imported by exec/ callers.
 Eight exec/ module symlinks now point here instead of the archived tests tree.
 The host watchdog and reference-export paths inside the modules use tools/.

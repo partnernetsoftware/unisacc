@@ -43,7 +43,7 @@ def closure(h):
     h.update(bytes.fromhex(digest(path)))
     # Product construction support moved out of the retired test tree.
     for name in ('bound', 'bound.c', 'cxbin', 'safedel.cx', 'lib.sh',
-                 'build_ref.sh', 'export_ref.sh', 'refshim.h', 'reffoot.h'):
+                 'build_ref.sh', 'export_ref.sh', 'refshim.h', 'reffoot.h', 'sourceflat.cx'):
         path = ROOT / 'tools' / name
         h.update(path.relative_to(ROOT).as_posix().encode() + b'\0')
         h.update(bytes.fromhex(digest(path)))

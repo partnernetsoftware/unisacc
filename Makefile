@@ -12,8 +12,10 @@ COMB ?= 0
 OUT ?= out/unisacc-flat.c
 STREAM_DIR ?=
 STREAM_OUT ?=
+IDENT_BINARY ?=
+IDENT_OUT ?=
 
-.PHONY: streams owned help smoke quick test list export-ref ref com model-com release comboot-seed-step comboot-stage2-step comboot-stage3-step
+.PHONY: identity streams owned help smoke quick test list export-ref ref com model-com release comboot-seed-step comboot-stage2-step comboot-stage3-step
 help:
 	@echo 'smoke / quick: native product batch, partial coverage only'
 	@echo 'test: complete contract gate; NOT_READY is a failure'
@@ -21,6 +23,9 @@ help:
 	@echo 'export-ref OUT=...: native complete source export'
 	@echo 'streams STREAM_DIR=... STREAM_OUT=...: partial seven-stream contracts, fresh output required'
 	@echo 'model-com MODEL_DIR=... MODEL_STEP=...: one bounded construction step'
+identity:
+	@test -n "$(IDENT_BINARY)" -a -n "$(IDENT_OUT)" || { echo 'set IDENT_BINARY and a new IDENT_OUT' >&2; exit 2; }
+	@tools/bound 40 sh "$(UNISACC)" tests/identity.cx -- "$(CURDIR)" "$(abspath $(IDENT_BINARY))" "$(abspath $(IDENT_OUT))"
 streams:
 	@test -n "$(STREAM_DIR)" -a -n "$(STREAM_OUT)" || { echo 'set STREAM_DIR and a new STREAM_OUT' >&2; exit 2; }
 	@tools/bound 55 sh "$(UNISACC)" tests/streams.cx -- "$(CURDIR)" "$(abspath $(STREAM_DIR))" "$(abspath $(STREAM_OUT))"

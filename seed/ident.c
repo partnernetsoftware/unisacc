@@ -105,6 +105,14 @@ static void identity(char hex[65]) {
     }
     for (i = 0; i < npaths; i++) file_entry(&h, paths[i]);
     file_entry(&h, "iterate/kernel/typekw.tsv");
+    {   /* Keep parity with models.closure: construction adapters affect inputs.
+           The bootstrap product itself is recorded separately, not a source. */
+        static const char *const support[] = {"bound", "bound.c", "cxbin", "safedel.cx", "lib.sh",
+            "build_ref.sh", "export_ref.sh", "refshim.h", "reffoot.h", "sourceflat.cx"};
+        for (j = 0; j < 10; j++) {
+            char path[128]; snprintf(path, sizeof path, "tools/%s", support[j]); file_entry(&h, path);
+        }
+    }
     first = npaths;
     {   DIR *d = opendir("exec/c/asm"); struct dirent *e;
         if (!d) die("cannot open directory", "exec/c/asm");
