@@ -161,7 +161,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 └─ R7 待完成：新清单全覆盖 → 同候选跨平台CI → 封存与授权发布
 ```
 
-**优化修复窄验：** exec/c/compiler.c补-O3→二级与-Os→一级的规范化接线，不重构权重；新Linux驱动+根模型包的六档语义242断言0，另Tape合同17断言0，含真实改写见证、别名同字节和无效档拒绝。证据out/c43-optimization-driver-03.log、out/c43-optimization-tape-driver-04.log。仅驱动窄验，根产品仍P375b7a09，须完整重建；完整优化语料/域/自举/外宿主仍未完成。
+**优化修复窄验：** exec/c/compiler.c补-O3→二级与-Os→一级的规范化接线，不重构权重；新Linux驱动+根模型包的六档语义242断言0，另Tape合同17断言0，含真实改写见证、别名同字节和无效档拒绝。证据out/c43-optimization-driver-03.log、out/c43-optimization-tape-driver-04.log。新增六档直接-run矩阵在新驱动上194断言0，使用手写字节预期，见out/c43-optimization-run-driver-05.log。仅驱动窄验，根产品仍P375b7a09，须完整重建；完整优化语料/域/自举/外宿主仍未完成。
 
 **优化首红：** 新tests/optimization.cx按规格六种优化拼写、两运行时输入对14类定义良好的C行为求值。P375b7a09上-O0/-O2及默认-run首批101断言0；扩六档后173断言2失败，均为-O3/-Os被驱动拒绝，见out/c43-optimization-02.log。最小默认-run为out/c43-opt-flags-repro.cx；src/main.c与src/opt.c表明经典参考-O3与-O2优化集合相同，-Os与-O1相同。先修驱动的规范化接线，再在本版重建；不能把参考接受、源码修复或旧候选绿称新根产品已修。
 

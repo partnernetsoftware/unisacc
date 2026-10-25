@@ -83,7 +83,7 @@ it directly through its launcher before installation, with its own model package
 `sh ./unisacc.com tests/optimization.cx -- ROOT ABS_NEW_OUT [CANDIDATE]`
 compiles six Linux x86_64 images (-O0, -O1, -O, -O2, -O3, -Os), then executes
 each image with runtime inputs 7 and 11 and checks every row against hand-derived
-values. It also executes the same module through default-run for both inputs.
+literal byte oracles. It also executes the same module through default-run for both inputs.
 Fourteen cases cover integer arithmetic, negative division/remainder, unsigned
 shift/wrap, narrow promotion, same/distinct pointer aliasing, loop control and
 induction, switch/loop joins, short circuit, recursion and struct copy. No signed
@@ -95,9 +95,11 @@ CANDIDATE may be an ELF driver using the root model container or a complete APE
 product tested before installation. Candidate/model bytes must remain unchanged.
 The semantic batch emits real native images specifically to exercise image
 construction and execution; it does not replace normal dynamic tool execution.
-The driver narrow checks passed 242 semantic and 17 Tape assertions. This is
+A final `--run` instead executes all six explicit flag spellings directly in
+memory, with both runtime inputs, as its own <=55-second batch. The driver
+narrow checks passed 242 native semantic, 194 direct-run and 17 Tape assertions. This is
 partial optimization evidence, not the full old corpus, optimizer closure,
 resource domain, same-candidate bootstrap or foreign-host qualification. The
 broad optimization contract remains NOT_READY. All internal timing phases and
 cold/hot breakdowns are UNMEASURED; this is not a speed benchmark. Use separate
-new directories for the semantic and Tape batches and a <=55-second watchdog.
+new directories for each native, direct-run and Tape batch and a <=55-second watchdog.
