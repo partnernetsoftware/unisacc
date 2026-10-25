@@ -10,6 +10,45 @@ sh ./unisacc.com tools/sourceflat.cx -- --verify out/unisacc-flat.c
 The export and provenance verification use the product directly. `export_ref.sh`
 is only a compatibility loader for existing construction callers.
 
+`run-startup-bench.cx` measures first-observed and repeated default-run
+end-to-end wall time on Linux/x86_64 LP64. It generates one header-free minimal
+CX program and starts four fresh processes with different argv; each must
+return0, have empty stderr and match its exact distinct stdout:
+
+```sh
+tools/bound 55 sh ./unisacc.com tools/run-startup-bench.cx -- "$PWD" "$PWD/out/run-startup-new"
+```
+
+NEW_OUT must be a new absolute directory. Each target process has an8-second
+watchdog; full raw-source identity is separately measured before/after with
+two8-second controls. All child budgets total48 seconds under the55-second
+parent bound. The tool also checks product, identity-source, benchmark-source
+and generated-fixture SHA before/after, and saves each sample's stdout, stderr,
+rc and duration plus `samples.tsv`. Failed semantic or identity checks invalidate
+the aggregate observation; there is no speed threshold or cached test verdict.
+
+The current P53e2cd1f/S447f794a run,
+`out/c43-run-startup-bench-01.log`, completed9 assertions with zero failures:
+
+| Sample | End-to-end ns |
+|---|---:|
+| first | 2008658900 |
+| repeat1 | 2007829223 |
+| repeat2 | 2076205842 |
+| repeat3 | 2026560291 |
+| repeat median3 | 2026560291 |
+
+The existing Linux `CLOCK_MONOTONIC` syscall supplies the timestamps; ns is a
+representation unit, with clock resolution UNMEASURED. The measured interval
+includes watchdog/spawn, compilation, execution and pipe capture, while output
+checks and evidence writes occur afterward. Source-identity controls can warm
+product/OS state, so first is not an OS-cold or cache-cleared observation.
+Startup, preprocessing/modules, construction, loading, binding, inference,
+user execution, output, validation and cleanup are not measured separately;
+all remain UNMEASURED. Four samples do not estimate p95. This supplies the
+current baseline for [C44-RUN-REUSE-01](../plans/v0.0.44.md), not a cache-hit,
+phase-cost or acceleration claim. The run-reuse mechanism remains unimplemented.
+
 `stream-pack.cx` prepares seven isolated stream artifacts from a candidate's
 existing model bytes. Its shared runtime and the new partial contracts are
 documented in [streams.md](streams.md). Preparation never records a test PASS.

@@ -1,0 +1,43 @@
+/* ROOT NEW_ABS_OUT. Linux/x86_64 LP64 only; caller tools/bound 55.
+ * Four fresh default-run processes (8s each), one unchanged header-free CX.
+ * Two independent source-identity observations also have 8s bounds: the
+ * explicit child budgets total48s, leaving the outer55s as a hard limit.
+ * No benchmark is executed at preparation time; no output/verdict cache.
+ * The first target observation is NOT an OS-cold/cache-cleared measurement.
+ */
+#pragma unisa use cxlib.netpack
+static char root[4096],work[4096],product[4400],bound[4400],identity[4400],bench[4096],fixture[4400];
+static const char *program="int main(int argc,char **argv){if(argc!=2)return 2;printf(\"ARG\\t%s\\n\",argv[1]);return 0;}\n";
+static const char *labels[]={"first","repeat1","repeat2","repeat3"};
+static const char *arguments[]={"alpha-7","bravo-11","charlie-19","delta-23"};
+static const char *expected[]={"ARG\talpha-7\n","ARG\tbravo-11\n","ARG\tcharlie-19\n","ARG\tdelta-23\n"};
+static int assertions,failures;static long long clock_previous;static int clock_seen;
+static void die(const char *s){fprintf(stderr,"run-startup-bench: REFUSE %s errno=%d\n",s,errno);exit(2);}
+static void path(char *p,const char *a,const char *b){int n=snprintf(p,4400,"%s/%s",a,b);if(n<0||n>=4400)die("path bound");}
+static void ck(int ok,const char *s){assertions++;if(!ok)failures++;printf("%s\trun-startup-bench.%s\n",ok?"PASS":"FAIL",s);}
+/* Same existing generic syscall gate and Linux clock ABI as time.h:56-58.
+ * struct timespec and _unisa_ret already come from the CX edition1 prelude.
+ * time.h itself is not implicitly imported, and is not hand-included here.
+ * Nanoseconds are the representation, not a claim about clock resolution. */
+static long long now_ns(void){struct timespec t={0};long rc=__syscall6(228,1,(long)&t,0,0,0);if(_unisa_ret(rc)||t.tv_sec<0||t.tv_nsec<0||t.tv_nsec>=1000000000L)die("CLOCK_MONOTONIC read or extent");if((unsigned long long)t.tv_sec>(unsigned long long)(LLONG_MAX-t.tv_nsec)/1000000000ULL)die("clock integer overflow");long long n=(long long)t.tv_sec*1000000000LL+t.tv_nsec;if(clock_seen&&n<clock_previous)die("CLOCK_MONOTONIC moved backward");clock_seen=1;clock_previous=n;return n;}
+static char *load(const char *p,size_t *n){struct stat a,b;errno=0;if(lstat(p,&a))die("input stat");if(!S_ISREG(a.st_mode)||a.st_size<0||a.st_size>134217728)die("bounded regular input");int fd=open(p,O_RDONLY|O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK);if(fd<0||fstat(fd,&b)||a.st_dev!=b.st_dev||a.st_ino!=b.st_ino||a.st_size!=b.st_size)die("input descriptor");*n=(size_t)a.st_size;char *s=malloc(*n+1);if(!s)die("allocation");size_t at=0;while(at<*n){ssize_t z=read(fd,s+at,*n-at);if(z<0&&errno==EINTR)continue;if(z<=0)die("input extent");at+=(size_t)z;}char extra;ssize_t z;do{z=read(fd,&extra,1);}while(z<0&&errno==EINTR);int bad=fstat(fd,&b)||a.st_dev!=b.st_dev||a.st_ino!=b.st_ino||a.st_size!=b.st_size;int closed=close(fd);if(z||bad||closed)die("input changed");s[*n]=0;return s;}
+static void digest(const char *p,char h[65]){size_t n;char *s=load(p,&n);cx_sha256_hex(s,n,h);free(s);}
+static void save(const char *name,const char *s,size_t n){char p[4400];path(p,work,name);int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0600);if(fd<0)die("exclusive evidence");size_t at=0;while(at<n){ssize_t z=write(fd,s+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0)die("evidence write");at+=(size_t)z;}int synced=fsync(fd),closed=close(fd);if(synced||closed)die("evidence close");}
+static void transcript(const char *label,const np_result *r,long long duration){char name[100],status[100];snprintf(name,sizeof name,"%s.stdout",label);save(name,r->out,r->outn);snprintf(name,sizeof name,"%s.stderr",label);save(name,r->err,r->errn);int n=duration<0?snprintf(status,sizeof status,"rc\t%d\nduration_ns\tUNMEASURED\n",r->rc):snprintf(status,sizeof status,"rc\t%d\nduration_ns\t%lld\n",r->rc,duration);snprintf(name,sizeof name,"%s.status",label);save(name,status,(size_t)n);}
+static void clear_ambient(void){if(unsetenv("UNISACC_RF_CAPTURE")||unsetenv("UNISA_ATTRIBUTES"))die("clear ambient capture");}
+/* These are identity controls outside all four timed target intervals. They
+ * can warm OS/product state; therefore 'first' means first observed target
+ * process only. This does not estimate fresh boot/page-cache performance. */
+static void source_identity(char h[65],const char *label){char *v[]={bound,"8","sh",product,identity,"--",root,0};char why[1024];np_result r;clear_ambient();if(np_run(v,root,0,10,&r,why,sizeof why))die(why);transcript(label,&r,-1);int ok=!r.rc&&!r.errn&&r.outn==65&&r.out[64]=='\n';if(ok){memcpy(h,r.out,64);h[64]=0;for(int i=0;i<64;i++)if(!((h[i]>='0'&&h[i]<='9')||(h[i]>='a'&&h[i]<='f')))ok=0;}if(!ok&&r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);if(!ok)die("full raw source identity");}
+int main(int argc,char **argv){
+#if !defined(__linux__) || !defined(__x86_64__)
+ fputs("NOT_RUN run-startup-bench requires Linux/x86_64\n",stderr);return 3;
+#endif
+ if(argc!=3||!realpath(argv[1],root)||argv[2][0]!='/'||strlen(argv[2])>=sizeof work||strpbrk(argv[2],"\t\r\n")||!realpath(__FILE__,bench))die("usage ROOT NEW_ABS_OUT");if(sizeof(long)!=8||sizeof(void *)!=8||sizeof(struct timespec)!=16)die("Linux x86_64 LP64 clock layout required");
+ char parent[4096],base[4096],leaf[4096];strcpy(parent,argv[2]);char *slash=strrchr(parent,'/');if(!slash||!slash[1]||!strcmp(slash+1,".")||!strcmp(slash+1,".."))die("new output leaf");strcpy(leaf,slash+1);if(slash==parent)slash[1]=0;else *slash=0;if(!realpath(parent,base))die("output parent");int z=snprintf(work,sizeof work,"%s%s%s",base,!strcmp(base,"/")?"":"/",leaf);if(z<0||(size_t)z>=sizeof work||mkdir(work,0700))die("new output directory required");path(product,root,"unisacc.com");path(bound,root,"tools/bound");path(identity,root,"seed/ident.c");path(fixture,work,"program.cx");save("program.cx",program,strlen(program));
+ const char *watched[]={product,identity,bench,fixture};char hashes[4][65],raw_before[65],raw_after[65],after[65];for(int i=0;i<4;i++)digest(watched[i],hashes[i]);source_identity(raw_before,"source-before");printf("IDENTITY\tproduct=%s\trawsource=%s\tbench=%s\tsourcefixture=%s\n",hashes[0],raw_before,hashes[2],hashes[3]);puts("CLOCK\tLinux-clock_gettime-syscall228-CLOCK_MONOTONIC1\tunit=ns\tresolution=UNMEASURED");puts("SCOPE\tspawn-to-exit-e2e-includes-watchdog-compilation-runtime-and-pipe-capture\tfirst-observed-target-not-OS-cold\tprocess=lnx/x86_64");
+ np_buf table={0};np_puts(&table,"sample\targv\trc\tduration_ns\texact_output\n");long long durations[4];
+ for(int i=0;i<4;i++){char *v[]={bound,"8","sh",product,fixture,"--",(char *)arguments[i],0};char why[1024];np_result r;clear_ambient();long long start=now_ns();int error=np_run(v,root,0,10,&r,why,sizeof why);long long end=now_ns();if(error){char name[100];snprintf(name,sizeof name,"%s.error",labels[i]);save(name,why,strlen(why));die(why);}durations[i]=end-start;transcript(labels[i],&r,durations[i]);int ok=!r.rc&&!r.errn&&r.outn==strlen(expected[i])&&!memcmp(r.out,expected[i],r.outn);char name[100];snprintf(name,sizeof name,"%s.exact-runtime-argv-output",labels[i]);ck(ok,name);if(!ok&&r.errn)fwrite(r.err,1,r.errn,stderr);char row[240];int n=snprintf(row,sizeof row,"%s\t%s\t%d\t%lld\t%s\n",labels[i],arguments[i],r.rc,durations[i],ok?"MATCH":"MISMATCH");np_put(&table,row,(size_t)n);printf("SAMPLE\t%s\targv=%s\trc=%d\te2e_ns=%lld\toutput=%s\n",labels[i],arguments[i],r.rc,durations[i],ok?"MATCH":"MISMATCH");np_free(&r);}
+ save("samples.tsv",table.p,table.n);free(table.p);source_identity(raw_after,"source-after");ck(!strcmp(raw_before,raw_after),"rawsource-unchanged");for(int i=0;i<4;i++){digest(watched[i],after);char name[100];snprintf(name,sizeof name,"input-%d-unchanged",i);ck(!strcmp(hashes[i],after),name);}long long sorted[3]={durations[1],durations[2],durations[3]};for(int i=0;i<3;i++)for(int j=i+1;j<3;j++)if(sorted[j]<sorted[i]){long long swap=sorted[i];sorted[i]=sorted[j];sorted[j]=swap;}
+ if(!failures)printf("OBSERVATION\tfirst_ns=%lld\trepeat1_ns=%lld\trepeat_median3_ns=%lld\tno-speed-threshold\n",durations[0],durations[1],sorted[1]);else puts("OBSERVATION\tINVALID-functional-or-identity-check-failed\tno-summary");puts("TIMING\tstartup_preprocessing_module_construction_loading_binding_inference_user_execution_output_validation_cleanup=UNMEASURED\tOS-cold-cache=UNMEASURED\tp95=NOT_ESTIMATED");puts("NOT_CLAIMED\tstartup-only-cost-phase-attribution-cache-hit-or-run-acceleration-implementation");printf("RUN_STARTUP_BENCH\tsamples=4\tassertions=%d\tfailed=%d\tscope=first-and-repeated-default-run-e2e-only\n",assertions,failures);return failures?1:0;
+}
