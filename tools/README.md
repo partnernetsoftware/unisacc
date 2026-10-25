@@ -17,6 +17,8 @@ documented in [streams.md](streams.md). Preparation never records a test PASS.
 [nets.md](nets.md) describes the native full-gold integer-kernel batch and its
 identity/anti-vacuity controls. [assembly.md](assembly.md) tracks the native .S
 construction path, its real encoding checks and the remaining gaps.
+[kernels.md](kernels.md) specifies the new bounded construction steps and native
+ELF-to-UNIKERN1 linker contracts; it does not claim a completed product rebuild.
 
 The following support was separated from the archived test suite so that
 construction is not broken by its removal: `bound`, `bound.c`, `cxbin`,

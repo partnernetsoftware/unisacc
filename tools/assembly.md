@@ -2,9 +2,12 @@
 
 The current product already has C preprocessing and an ELF assembler. This work
 extends that implementation to build the repository's handwritten kernel sources
-without an external Clang/Mach-O assembler. Full native kernel construction is
-still incomplete: AArch64 forms, alignment, jump tables and cross-unit linking
-remain required. Reusing old kernel blobs is only a comparison aid.
+without an external Clang/Mach-O assembler. Both architectures' eleven real units
+have now been constructed and linked; native execution remains to be qualified.
+AArch64 forms, alignment, jump tables and the CX linker have now been implemented
+with focused contracts; remaining corpus gaps are fixed from real unit failures.
+Reusing old kernel blobs is only a comparison aid. See [kernels.md](kernels.md)
+for bounded native construction steps and their identity/qualification rules.
 
 Run the native source adapter on individual units:
 
@@ -32,11 +35,15 @@ the same core snapshot and the handwritten tests/assembler.cx batch. Receipts
 bind actual inputs, bootstrap product and both outputs; --verify is read-only.
 No handwritten new CX contains an include directive.
 
-The x86 extension adds needed width variants, memory direction, conditional moves,
-immediate shifts and indirect calls/jumps while retaining the existing preferred
-encodings. Handwritten ISA byte oracles and invalid-operand checks passed 43 local
-assertions in one default-run batch, including an existing AArch64 baseline.
+The encoder extension adds width variants, indexed/writeback/pair addressing,
+conditional operations, immediate shifts, direct tails and indirect calls/jumps.
+Constant arithmetic is checked, text alignment is represented during layout, and
+same-section differences are resolved after labels settle. Handwritten ISA bytes,
+invalid operands and object disassembly/reassembly passed 189 local assertions in
+one default-run batch. This includes new AArch64 and generic layout cases.
 The newly encoded transition unit is an x86_64 ELF relocatable object. No external
 C compiler or assembler is used in these commands after the existing watchdog is
 available. This is not yet evidence for all units, full decoder round trips,
-linking, native kernel execution or a freshly rebuilt root product.
+native kernel execution or a freshly rebuilt root product. Generated CLI accepts
+multiple input/output pairs for one architecture to amortize compilation/startup;
+material receipt v3 binds the core, adapter, bootstrap and all three test fragments.

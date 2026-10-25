@@ -1,0 +1,43 @@
+/* ISA-derived word oracles; appended after assembler helpers before main. */
+static void asm_arm_refuse(const char *name,const char *text){char *src=strdup(text);if(!src)exit(2);am_object_n=0;int rc=at_asm(src,strlen(src),1);asm_check(rc!=0&&!am_object_n,name);free(src);}
+static void asm_arm_relocs(void){
+ char *src=strdup(".text\nb external_tail\nldr x0,[x1,:lo12:external_slot]\n");if(!src)exit(2);am_object_n=0;int rc=at_asm(src,strlen(src),1);asm_check(!rc,"arm-reloc-assemble");
+ if(!rc){unsigned long long sh=am_object_n>=64?at_rd(am_object+40,8):am_object_n;int ok=sh<=am_object_n&&am_object_n-sh>=320;unsigned long long off=ok?at_rd(am_object+sh+256+24,8):0,n=ok?at_rd(am_object+sh+256+32,8):0;
+  ok=ok&&n==48&&off<=am_object_n&&n<=am_object_n-off;
+  asm_check(ok&&at_rd(am_object+off,8)==0&&(at_rd(am_object+off+8,8)&0xffffffff)==282&&at_rd(am_object+off+24,8)==4&&(at_rd(am_object+off+32,8)&0xffffffff)==286,"arm-jump26-and-abs-lo12-reloc-types");
+ }free(src);
+}
+static void asm_arm_contracts(void){
+ asm_arm_relocs();
+ asm_bytes("arm-add32",1,".text\nadd w0,w1,w2\n",(const unsigned char *)"\x20\x00\x02\x0b",4);
+ asm_bytes("arm-subs32-imm",1,".text\nsubs w0,w1,#7\n",(const unsigned char *)"\x20\x1c\x00\x71",4);
+ asm_bytes("arm-msub32",1,".text\nmsub w0,w1,w2,w3\n",(const unsigned char *)"\x20\x8c\x02\x1b",4);
+ asm_bytes("arm-asrv32",1,".text\nasrv w0,w1,w2\n",(const unsigned char *)"\x20\x28\xc2\x1a",4);
+ asm_bytes("arm-lsl32-zero",1,".text\nlsl w0,w1,#0\n",(const unsigned char *)"\x20\x7c\x00\x53",4);
+ asm_bytes("arm-mov-shifted",1,".text\nmov x0,#65536\n",(const unsigned char *)"\x20\x00\xa0\xd2",4);
+ /* MOVN W9,#0xc000,LSL #16 gives 0x3fffffff; MOVN precedes ORR. */
+ asm_bytes("arm-mov-mask32",1,".text\nmov w9,#0x3fffffff\n",(const unsigned char *)"\x09\x00\xb8\x12",4);
+ asm_bytes("arm-pair-pre",1,".text\nstp x29,x30,[sp,#-432]!\n",(const unsigned char *)"\xfd\x7b\xa5\xa9",4);
+ asm_bytes("arm-pair-post",1,".text\nldp x29,x30,[sp],#432\n",(const unsigned char *)"\xfd\x7b\xdb\xa8",4);
+ asm_bytes("arm-pair-w",1,".text\nldp w8,w9,[x0,#8]\n",(const unsigned char *)"\x08\x24\x41\x29",4);
+ asm_bytes("arm-ldrsw-post",1,".text\nldrsw x15,[x12],#4\n",(const unsigned char *)"\x8f\x45\x80\xb8",4);
+ asm_bytes("arm-ldrb-pre",1,".text\nldrb w6,[x3,#-1]!\n",(const unsigned char *)"\x66\xfc\x5f\x38",4);
+ asm_bytes("arm-strb-post",1,".text\nstrb w3,[x2],#1\n",(const unsigned char *)"\x43\x14\x00\x38",4);
+ asm_bytes("arm-ldr-uxtw",1,".text\nldr w0,[x1,w2,uxtw #2]\n",(const unsigned char *)"\x20\x58\x62\xb8",4);
+ asm_bytes("arm-ldrsw-lsl",1,".text\nldrsw x0,[x1,x2,lsl #2]\n",(const unsigned char *)"\x20\x78\xa2\xb8",4);
+ asm_bytes("arm-byte-index",1,".text\nldrb w0,[x1,x2]\n",(const unsigned char *)"\x20\x68\x62\x38",4);
+ asm_bytes("arm-tbz",1,".text\ntbz x0,#32,Lend\nLend: ret\n",(const unsigned char *)"\x20\x00\x00\xb6\xc0\x03\x5f\xd6",8);
+ asm_bytes("arm-csel",1,".text\ncsel w0,w1,w2,eq\n",(const unsigned char *)"\x20\x00\x82\x1a",4);
+ asm_bytes("arm-cinc",1,".text\ncinc x0,x1,ne\n",(const unsigned char *)"\x20\x04\x81\x9a",4);
+ asm_bytes("arm-neg",1,".text\nneg w0,w1\n",(const unsigned char *)"\xe0\x03\x01\x4b",4);
+ asm_bytes("arm-cmn-immediate",1,".text\ncmn x9,#1\n",(const unsigned char *)"\x3f\x05\x00\xb1",4);
+ asm_bytes("arm-uxtw",1,".text\nuxtw x0,w1\n",(const unsigned char *)"\x20\x7c\x40\xd3",4);
+ asm_arm_refuse("arm-reject-pair-range",".text\nstp x0,x1,[sp,#512]\n");
+ asm_arm_refuse("arm-reject-pair-align",".text\nldp x0,x1,[sp,#7]\n");
+ asm_arm_refuse("arm-reject-writeback-overlap",".text\nldr x0,[x0],#8\n");
+ asm_arm_refuse("arm-reject-writeback-range",".text\nldr x0,[x1],#256\n");
+ asm_arm_refuse("arm-reject-width-mix",".text\nadd w0,w1,x2\n");
+ asm_arm_refuse("arm-reject-shift32",".text\nlsl w0,w1,#32\n");
+ asm_arm_refuse("arm-reject-index-scale",".text\nldr w0,[x1,w2,uxtw #3]\n");
+ asm_arm_refuse("arm-reject-tb-bit32",".text\ntbz w0,#32,Lend\nLend: ret\n");
+}

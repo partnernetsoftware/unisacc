@@ -4,8 +4,8 @@
  * ROOT NEW_ABSOLUTE_OUTDIR | --verify ROOT OUTDIR. No compiler is invoked here. */
 #pragma unisa use cxlib.netpack
 typedef struct {const char *path;char hash[65];size_t bytes;} AmInput;
-enum {AM_INPUTS=5};
-static AmInput inputs[AM_INPUTS]={{"src/asmtext.c"},{"src/internal_types.h"},{"tools/asm-material.cx"},{"unisacc.com"},{"tests/assembler.cx"}};
+enum {AM_INPUTS=7};
+static AmInput inputs[AM_INPUTS]={{"src/asmtext.c"},{"src/internal_types.h"},{"tools/asm-material.cx"},{"unisacc.com"},{"tests/assembler.cx"},{"tests/arm-assembler.cx"},{"tests/asm-layout.cx"}};
 static char root[4096],outdir[4096];
 static np_buf assembler,contracts,receipt;
 static void die(const char *s){fprintf(stderr,"asm-material: REFUSE %s\n",s);exit(2);}
@@ -29,26 +29,29 @@ static const char *prefix=
  "}\n";
 static const char *suffix=
  "\n/* End of the source-preserved C assembler; root CLI adapter follows. */\n"
- "int main(int argc,char **argv){\n"
- " int arch,fd;size_t n,at=0;char *src;struct stat st;\n"
- " if(argc!=4||(strcmp(argv[1],\"arm64\")&&strcmp(argv[1],\"x86_64\"))){fputs(\"usage: arm64|x86_64 INPUT.s OUTPUT.o\\n\",stderr);return 2;}\n"
- " arch=!strcmp(argv[1],\"arm64\");\n"
- " if(stat(argv[2],&st)||!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>=33554432){fprintf(stderr,\"assembler: %s: bounded regular source required\\n\",argv[2]);return 2;}\n"
- " src=cx_read(argv[2],&n);if(!src||n!=(size_t)st.st_size||memchr(src,0,n)){fprintf(stderr,\"assembler: %s: read/size/NUL error\\n\",argv[2]);return 2;}\n"
- " if(at_asm(src,(us_i64)n,arch)){fprintf(stderr,\"assembler: %s:%d: %s\\n\",argv[2],at_lineno,at_err?at_err:\"assembly error\");free(src);free(am_object);return 1;}\n"
- " if(at_arch!=arch){fprintf(stderr,\"assembler: %s:%d: source target conflicts with explicit architecture\\n\",argv[2],at_lineno);return 1;}\n"
- " if(am_object_n<64||memcmp(am_object,\"\\177ELF\",4)){fputs(\"assembler: missing ELF output\\n\",stderr);return 2;}\n"
- " fd=open(argv[3],O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(fd<0){fprintf(stderr,\"assembler: %s: exclusive output create failed\\n\",argv[3]);return 2;}\n"
+ "static int am_pair(int arch,char *input_path,char *output_path){\n"
+ " int fd;size_t n,at=0;char *src;struct stat st;am_object_n=0;\n"
+ " if(lstat(input_path,&st)||!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>=33554432){fprintf(stderr,\"assembler: %s: bounded regular source required (no symlink)\\n\",input_path);return 2;}\n"
+ " src=cx_read(input_path,&n);if(!src||n!=(size_t)st.st_size||memchr(src,0,n)){fprintf(stderr,\"assembler: %s: read/size/NUL error\\n\",input_path);free(src);return 2;}\n"
+ " if(at_asm(src,(us_i64)n,arch)){fprintf(stderr,\"assembler: %s:%d: %s\\n\",input_path,at_lineno,at_err?at_err:\"assembly error\");free(src);return 1;}free(src);\n"
+ " if(at_arch!=arch){fprintf(stderr,\"assembler: %s:%d: source target conflicts with explicit architecture\\n\",input_path,at_lineno);return 1;}\n"
+ " if(am_object_n<64||memcmp(am_object,\"\\177ELF\\2\\1\",6)||at_rd(am_object+18,2)!=(arch?183:62)){fputs(\"assembler: missing/mismatched ELF64 output\\n\",stderr);return 2;}\n"
+ " fd=open(output_path,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(fd<0){fprintf(stderr,\"assembler: %s: exclusive output create failed\\n\",output_path);return 2;}\n"
+ " if(fstat(fd,&st)||!S_ISREG(st.st_mode)){fputs(\"assembler: output must be regular; created file retained\\n\",stderr);close(fd);return 2;}\n"
  " while(at<am_object_n){ssize_t k=write(fd,am_object+at,am_object_n-at);if(k<0&&errno==EINTR)continue;if(k<=0){fputs(\"assembler: output write failed; partial file retained\\n\",stderr);close(fd);return 2;}at+=(size_t)k;}\n"
- " if(fsync(fd)||close(fd)){fputs(\"assembler: output sync/close failed\\n\",stderr);return 2;}free(src);free(am_object);return 0;\n"
+ " if(fsync(fd)){fputs(\"assembler: output sync failed; file retained\\n\",stderr);close(fd);return 2;}if(close(fd)){fputs(\"assembler: output close failed; file retained\\n\",stderr);return 2;}return 0;\n"
+ "}\n"
+ "int main(int argc,char **argv){\n"
+ " int arch,i,rc;if(argc<4||(argc%2)||(strcmp(argv[1],\"arm64\")&&strcmp(argv[1],\"x86_64\"))){fputs(\"usage: arm64|x86_64 INPUT.s OUTPUT.o [INPUT.s OUTPUT.o...]\\n\",stderr);return 2;}arch=!strcmp(argv[1],\"arm64\");\n"
+ " for(i=2;i<argc;i+=2){rc=am_pair(arch,argv[i],argv[i+1]);if(rc){fprintf(stderr,\"assembler: stopped at pair %d; completed outputs and any partial current output retained\\n\",i/2);free(am_object);return rc;}}free(am_object);return 0;\n"
  "}\n";
-static void generate(const char *src,size_t n,const char *test,size_t tn){const char *needle="#include \"internal_types.h\"\n";size_t k=strlen(needle);if(memchr(src,0,n))die("NUL in assembler C source");if(!tn||memchr(test,0,tn))die("empty/NUL assembler contract source");if(np_count(src,n,needle,k)!=1)die("expected exactly one internal_types include line");const char *p=strstr(src,needle);if(!p||(p!=src&&p[-1]!='\n'))die("internal_types include must be an exact line");np_puts(&assembler,prefix);np_put(&assembler,src,(size_t)(p-src));np_put(&assembler,p+k,n-(size_t)(p-src)-k);
+static void generate(const char *src,size_t n,const char *test,size_t tn,const char *arm,size_t an,const char *layout,size_t ln){const char *needle="#include \"internal_types.h\"\n",*mainneedle="int main(void){";size_t k=strlen(needle);if(memchr(src,0,n))die("NUL in assembler C source");if(!tn||memchr(test,0,tn)||!an||memchr(arm,0,an)||!ln||memchr(layout,0,ln))die("empty/NUL assembler contract source");if(np_count(test,tn,mainneedle,strlen(mainneedle))!=1)die("expected exactly one assembler contract main");const char *mainp=strstr(test,mainneedle);if(!mainp||(mainp!=test&&mainp[-1]!='\n'))die("assembler contract main must start a line");if(np_count(src,n,needle,k)!=1)die("expected exactly one internal_types include line");const char *p=strstr(src,needle);if(!p||(p!=src&&p[-1]!='\n'))die("internal_types include must be an exact line");np_puts(&assembler,prefix);np_put(&assembler,src,(size_t)(p-src));np_put(&assembler,p+k,n-(size_t)(p-src)-k);
  /* Both roots share this exact in-memory source snapshot, before either main. */
- np_put(&contracts,assembler.p,assembler.n);np_puts(&contracts,"\n");np_put(&contracts,test,tn);np_puts(&assembler,suffix);}
+ np_put(&contracts,assembler.p,assembler.n);np_puts(&contracts,"\n");np_put(&contracts,test,(size_t)(mainp-test));np_puts(&contracts,"\n");np_put(&contracts,arm,an);np_puts(&contracts,"\n");np_put(&contracts,layout,ln);np_puts(&contracts,"\n");np_put(&contracts,mainp,tn-(size_t)(mainp-test));np_puts(&assembler,suffix);}
 static void material_record(const char *name,np_buf *b){char hash[65];cx_sha256_hex(b->p,b->n,hash);np_puts(&receipt,"material\t");np_puts(&receipt,name);np_puts(&receipt,"\t");np_putll(&receipt,(long long)b->n);np_puts(&receipt,"\t");np_puts(&receipt,hash);np_puts(&receipt,"\n");}
-static void receipt_build(void){int i;np_puts(&receipt,"unisacc-asm-material-v2\nstatus\tPREPARED\nscope\tsource-preserving-C-assembler-transition\nroot\t");np_puts(&receipt,root);np_puts(&receipt,"\n");for(i=0;i<AM_INPUTS;i++){np_puts(&receipt,i==3?"compiler-input\t":"source-input\t");np_puts(&receipt,inputs[i].path);np_puts(&receipt,"\t");np_putll(&receipt,(long long)inputs[i].bytes);np_puts(&receipt,"\t");np_puts(&receipt,inputs[i].hash);np_puts(&receipt,"\n");}material_record("assembler.cx",&assembler);material_record("contracts.cx",&contracts);}
+static void receipt_build(void){int i;np_puts(&receipt,"unisacc-asm-material-v3\nstatus\tPREPARED\nscope\tsource-preserving-C-assembler-transition\nroot\t");np_puts(&receipt,root);np_puts(&receipt,"\n");for(i=0;i<AM_INPUTS;i++){np_puts(&receipt,i==3?"compiler-input\t":"source-input\t");np_puts(&receipt,inputs[i].path);np_puts(&receipt,"\t");np_putll(&receipt,(long long)inputs[i].bytes);np_puts(&receipt,"\t");np_puts(&receipt,inputs[i].hash);np_puts(&receipt,"\n");}material_record("assembler.cx",&assembler);material_record("contracts.cx",&contracts);}
 static void same(const char *name,np_buf *expected){char p[4096];size_t n;join(p,outdir,name);char *b=read_regular(p,&n);if(n!=expected->n||memcmp(b,expected->p,n))die("prepared output/receipt differs from regenerated material");free(b);}
 static void save(const char *name,np_buf *b){char p[4096];size_t at=0;join(p,outdir,name);int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(fd<0)die("exclusive material output create");while(at<b->n){ssize_t k=write(fd,b->p+at,b->n-at);if(k<0&&errno==EINTR)continue;if(k<=0)die("material write; partial generation retained");at+=(size_t)k;}if(fsync(fd)||close(fd))die("material fsync/close");}
-int main(int argc,char **argv){int verify=argc==4&&!strcmp(argv[1],"--verify"),i;if(verify){argc--;argv++;}if(argc!=3)die("usage ROOT NEW_ABSOLUTE_OUTDIR | --verify ROOT OUTDIR");if(!realpath(argv[1],root))die("ROOT resolution");if(strchr(root,'\t')||strchr(root,'\n')||strchr(root,'\r'))die("root contains receipt control character");if(argv[2][0]!='/'||strlen(argv[2])>=sizeof outdir)die("absolute output directory required");strcpy(outdir,argv[2]);size_t n,tn;char *src=input(0,0,&n),*test=input(4,0,&tn);generate(src,n,test,tn);free(src);free(test);for(i=1;i<4;i++){src=input(i,0,&n);free(src);}receipt_build();for(i=0;i<AM_INPUTS;i++){src=input(i,1,&n);free(src);}
+int main(int argc,char **argv){int verify=argc==4&&!strcmp(argv[1],"--verify"),i;if(verify){argc--;argv++;}if(argc!=3)die("usage ROOT NEW_ABSOLUTE_OUTDIR | --verify ROOT OUTDIR");if(!realpath(argv[1],root))die("ROOT resolution");if(strchr(root,'\t')||strchr(root,'\n')||strchr(root,'\r'))die("root contains receipt control character");if(argv[2][0]!='/'||strlen(argv[2])>=sizeof outdir)die("absolute output directory required");strcpy(outdir,argv[2]);size_t n,tn,an,ln;char *src=input(0,0,&n),*test=input(4,0,&tn),*arm=input(5,0,&an),*layout=input(6,0,&ln);generate(src,n,test,tn,arm,an,layout,ln);free(src);free(test);free(arm);free(layout);for(i=1;i<4;i++){src=input(i,0,&n);free(src);}receipt_build();for(i=0;i<AM_INPUTS;i++){src=input(i,1,&n);free(src);}
  if(verify){same("assembler.cx",&assembler);same("contracts.cx",&contracts);same("material.tsv",&receipt);for(i=0;i<AM_INPUTS;i++){src=input(i,1,&n);free(src);}puts("VERIFIED\tasm-material\tno-test-result\tsource-preserving-C-transition");}
  else {if(mkdir(outdir,0700))die("NEW_OUTDIR must not exist");save("assembler.cx",&assembler);save("contracts.cx",&contracts);save("material.tsv",&receipt);int fd=open(outdir,O_RDONLY|O_DIRECTORY|O_CLOEXEC);if(fd<0||fsync(fd)||close(fd))die("output directory sync/close");puts("PREPARED\tasm-material\tno-test-result\tsource-preserving-C-transition");}return 0;}

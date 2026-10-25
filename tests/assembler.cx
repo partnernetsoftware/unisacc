@@ -2,16 +2,23 @@
  * Handwritten ISA byte oracles; one compilation/start for the complete batch. */
 static int asm_checks,asm_failed;
 static void asm_check(int ok,const char *name){asm_checks++;if(!ok)asm_failed++;printf("%s\tassembler.%s\n",ok?"PASS":"FAIL",name);}
+static void asm_roundtrip(const char *name,int arch){
+ size_t n=am_object_n;char *object=malloc(n);if(!object)exit(2);memcpy(object,am_object,n);am_object_n=0;
+ int rc=at_dis(object,n);if(rc){asm_check(0,name);fprintf(stderr,"DETAIL\t%s\tdisassemble=%s\n",name,at_err?at_err:"-");free(object);return;}
+ size_t sn=am_object_n;char *text=malloc(sn+1);if(!text)exit(2);memcpy(text,am_object,sn);text[sn]=0;am_object_n=0;
+ rc=at_asm(text,sn,arch);asm_check(!rc&&am_object_n==n&&!memcmp(am_object,object,n),name);free(text);free(object);
+}
 static void asm_bytes(const char *name,int arch,const char *text,const unsigned char *want,size_t wn){
  char *src=strdup(text);if(!src)exit(2);am_object_n=0;int rc=at_asm(src,strlen(src),arch);asm_check(!rc,name);
  if(!rc){int valid=am_object_n>=64&&!memcmp(am_object,"\177ELF\2\1",6);unsigned long long sh=valid?at_rd(am_object+40,8):0;
   valid=valid&&sh<=am_object_n&&am_object_n-sh>=128;unsigned long long off=valid?at_rd(am_object+sh+64+24,8):0,n=valid?at_rd(am_object+sh+64+32,8):0;
   valid=valid&&off<=am_object_n&&n<=am_object_n-off&&n==wn&&(int)at_rd(am_object+18,2)==(arch?183:62);
-  asm_check(valid&&!memcmp(am_object+off,want,wn),name);
+  asm_check(valid&&!memcmp(am_object+off,want,wn),name);asm_roundtrip(name,arch);
  }else fprintf(stderr,"DETAIL\t%s\tline=%d\terror=%s\n",name,at_lineno,at_err?at_err:"-");free(src);
 }
 static void asm_refuse(const char *name,const char *text){char *src=strdup(text);if(!src)exit(2);am_object_n=0;int rc=at_asm(src,strlen(src),0);asm_check(rc!=0&&!am_object_n,name);free(src);}
 int main(void){
+ asm_arm_contracts();asm_layout_contracts();
  asm_bytes("ret-alias",0,".text\nret\n",(const unsigned char *)"\xc3",1);
  asm_bytes("add32",0,".text\naddl %ecx,%edx\n",(const unsigned char *)"\x01\xca",2);
  asm_bytes("reverse-memory-add64",0,".text\naddq (%r10),%r9\n",(const unsigned char *)"\x4d\x03\x0a",3);
@@ -37,5 +44,5 @@ int main(void){
  asm_refuse("reject-cmov-memory-destination",".text\ncmovg %rax,(%rbx)\n");
  asm_refuse("reject-cmov-width-mismatch",".text\ncmovg %eax,%rbx\n");
  asm_refuse("reject-unknown-op",".text\nunknown_opcode %rax\n");
- printf("ASSEMBLER\tassertions=%d\tfailed=%d\tscope=x86-extension-and-arm-baseline\n",asm_checks,asm_failed);return asm_failed?1:0;
+ printf("ASSEMBLER\tassertions=%d\tfailed=%d\tscope=native-instruction-layout-relocation\n",asm_checks,asm_failed);return asm_failed?1:0;
 }

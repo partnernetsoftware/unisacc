@@ -78,26 +78,60 @@ int at_ldec(us_i64 v) {
     return 0;
 }
 
-/* ---- numbers and symbol expressions: [name][+|-number] or number ---- */
-int at_num(char *s, int n, us_i64 *v) {          /* the whole of s[0..n) is a number */
-    int k; int neg; us_u64 x; int d;
-    k = 0; neg = 0; x = 0;
-    if (n > 0 && s[0] == 45) { neg = 1; k = 1; }
-    if (n > 0 && s[0] == 43) k = 1;
-    if (k >= n) return 0;
-    if (n - k > 2 && s[k] == 48 && (s[k + 1] == 120 || s[k + 1] == 88)) {
-        k = k + 2; if (k >= n) return 0;
-        while (k < n) {
-            d = s[k];
-            if (d >= 48 && d <= 57) d = d - 48; else { if (d >= 97 && d <= 102) d = d - 87; else { if (d >= 65 && d <= 70) d = d - 55; else return 0; } }
-            x = (x << 4) | d; k = k + 1;
-        }
-    } else {
-        while (k < n) { d = s[k]; if (d < 48 || d > 57) return 0; x = x * 10 + (d - 48); k = k + 1; }
-    }
-    *v = neg ? (us_i64)((us_u64)0 - x) : (us_i64)x;
-    return 1;
+/* ---- checked numbers and constant +/- expressions ---- */
+int at_iadd(us_i64 a, us_i64 b, us_i64 *v) {
+    if ((b > 0 && a > 9223372036854775807LL - b) ||
+        (b < 0 && a < (-9223372036854775807LL - 1) - b)) return 0;
+    *v = a + b; return 1;
 }
+int at_isub(us_i64 a, us_i64 b, us_i64 *v) {
+    if ((b > 0 && a < (-9223372036854775807LL - 1) + b) ||
+        (b < 0 && a > 9223372036854775807LL + b)) return 0;
+    *v = a - b; return 1;
+}
+int at_lit(char *s, int n, us_i64 *v) {
+    int k; int neg; int base; int d; us_u64 x; us_u64 limit;
+    while (n > 0 && at_sp(s[0])) { s++; n--; }
+    while (n > 0 && at_sp(s[n-1])) n--;
+    k = 0; neg = 0; x = 0; base = 10;
+    if (k < n && (s[k] == '-' || s[k] == '+')) { neg = s[k] == '-'; k++; }
+    if (k >= n) return 0;
+    if (n-k > 2 && s[k] == '0' && (s[k+1] == 'x' || s[k+1] == 'X')) { base = 16; k += 2; }
+    if (k >= n) return 0;
+    limit = ~(us_u64)0;
+    while (k < n) {
+        d = s[k++];
+        if (d >= '0' && d <= '9') d -= '0';
+        else if (d >= 'a' && d <= 'f') d -= 'a'-10;
+        else if (d >= 'A' && d <= 'F') d -= 'A'-10;
+        else return 0;
+        if (d >= base || x > (limit - (us_u64)d) / (us_u64)base) return 0;
+        x = x * (us_u64)base + (us_u64)d;
+    }
+    if (neg && x > ((us_u64)1 << 63)) return 0;
+    *v = neg ? (us_i64)((us_u64)0-x) : (us_i64)x; return 1;
+}
+int at_num(char *s, int n, us_i64 *v) {
+    int start; int end; int scan; int op; us_i64 value; us_i64 term;
+    start = 0;
+    while (start < n && at_sp(s[start])) start++;
+    scan = start;
+    if (scan < n && (s[scan] == '+' || s[scan] == '-')) scan++;
+    end = scan; while (end < n && s[end] != '+' && s[end] != '-') end++;
+    if (!at_lit(s+start,end-start,&value)) return 0;
+    while (end < n) {
+        op = s[end]; start = end+1;
+        while (start < n && at_sp(s[start])) start++;
+        scan = start;
+        if (scan < n && (s[scan] == '+' || s[scan] == '-')) scan++;
+        end = scan; while (end < n && s[end] != '+' && s[end] != '-') end++;
+        if (!at_lit(s+start,end-start,&term)) return 0;
+        if (op == '+') { if (!at_iadd(value,term,&value)) return 0; }
+        else if (!at_isub(value,term,&value)) return 0;
+    }
+    *v = value; return 1;
+}
+
 /* expression: name (may be empty) and addend */
 char *at_xn; int at_xl; us_i64 at_xa;
 int at_expr(char *s, int n) {
@@ -170,7 +204,7 @@ int at_resolve(void) {
             if (at_xl - 2 > 20) return 0;
             tmp[0] = 48; tmp[1] = 120; k = 2; while (k < at_xl) { tmp[k] = at_xn[k]; k = k + 1; }
             if (!at_num(tmp, at_xl, &v)) return 0;
-            at_rsect = 1; at_rval = v + at_xa; return 1;
+            at_rsect = 1; return at_iadd(v,at_xa,&at_rval);
         }
         at_rsect = 0; at_rval = at_xa; return 1;
     }
@@ -178,11 +212,11 @@ int at_resolve(void) {
     if (j < 0) return 0;
     at_sref[j] = 1;
     if (at_sdef[j]) {
-        at_rsect = at_ssect[j]; at_rval = at_sval[j] + at_xa;
+        at_rsect = at_ssect[j]; if (!at_iadd(at_sval[j],at_xa,&at_rval)) return 0;
         if (at_ssect[j] == 1) {
             if (!at_splaced[j]) at_unk = 1;
             /* a label ahead, placed last round, has moved at least as far as we have */
-            else { if (at_splaced[j] != at_lround) at_rval = at_rval + at_fwd; }
+            else { if (at_splaced[j] != at_lround && !at_iadd(at_rval,at_fwd,&at_rval)) return 0; }
         }
         return 1;
     }
@@ -322,7 +356,7 @@ int at_xop(int i, char *s, int n) {
             part = part + 1; a = j + 1;
         }
         if (xo_rip[i] && xo_idx[i] >= 0) return 0;
-        if (xo_rip[i] == 0 && xo_base[i] < 0) return 0;     /* absolute addresses: not in the subset */
+        if (xo_rip[i] == 0 && xo_base[i] < 0 && xo_idx[i] < 0) return 0; /* require a base or scaled index */
     }
     xo_k[i] = indmem ? XO_IMEM : XO_MEM;
     return 1;
@@ -534,6 +568,11 @@ int at_xmodrm(int reg, int i) {
     if (xo_xl[i]) return 0;                     /* a symbol in a base+disp operand */
     d = xo_xa[i]; b = xo_base[i];
     if (!at_fits32(d)) return 0;
+    if (b < 0) {
+        int s; if (xo_idx[i] < 0) return 0;
+        s=xo_sc[i]==1?0:(xo_sc[i]==2?1:(xo_sc[i]==4?2:3));
+        at_eb(((reg&7)<<3)|4); at_eb((s<<6)|((xo_idx[i]&7)<<3)|5); at_e32(d); return 1;
+    }
     if (d == 0 && (b & 7) != 5) mod = 0; else { if (at_fits8(d)) mod = 1; else mod = 2; }
     if (xo_idx[i] >= 0) {
         int s; s = xo_sc[i] == 1 ? 0 : (xo_sc[i] == 2 ? 1 : (xo_sc[i] == 4 ? 2 : 3));
@@ -670,9 +709,10 @@ int at_xtry(struct at_xrow *r, us_i64 addr, int forcelong) {
         if (at_nop != 1 || xo_k[0] != XO_TGT) return 0;
         at_xn = xo_xn[0]; at_xl = xo_xl[0]; at_xa = xo_xa[0];
         if (!at_resolve()) return 0;
-        if (at_rsect == 0) {                    /* a name defined elsewhere: calls only */
-            if (f != XF_CALL) return 0;
-            at_eb(0xE8); at_addrel(1, 4, at_rval - 4); at_e32(0);   /* R_X86_64_PLT32 */
+        if (at_rsect == 0) {                    /* external calls or unconditional tails */
+            if (f != XF_CALL && !(f == XF_J32 && r->op == 0xE9)) return 0;
+            if (!at_isub(at_rval,4,&d)) return 0;
+            at_eb(f == XF_CALL ? 0xE8 : 0xE9); at_addrel(1,4,d); at_e32(0);
             return 1;
         }
         if (at_rsect != 1) return 0;
@@ -761,7 +801,7 @@ int at_xmemprint(char *p, int len, int *k, int mod, int rm, int rex, int *ok) {
         sib = p[*k] & 255; *k = *k + 1;
         sc = 1 << (sib >> 6); idx = ((sib >> 3) & 7) | ((rex & 2) << 2); b = (sib & 7) | ((rex & 1) << 3);
         if (idx == 4) idx = 0 - 1;
-        if ((sib & 7) == 5 && mod == 0) { *ok = 0; return 0; }
+        if ((sib & 7) == 5 && mod == 0) { if (idx < 0) { *ok=0; return 0; } b=-1; }
     } else { b = rm | ((rex & 1) << 3); idx = 0 - 1; sc = 1; }
     if (mod == 0 && rm == 5) {                  /* rip */
         us_i64 fo; fo = *k;
@@ -771,10 +811,11 @@ int at_xmemprint(char *p, int len, int *k, int mod, int rm, int rex, int *ok) {
         *ok = 2; return (int)fo;
     }
     d = 0;
+    if (b < 0) { if (*k+4 > len) { *ok=0; return 0; } d=(int)at_rd(p+*k,4); *k+=4; }
     if (mod == 1) { if (*k >= len) { *ok = 0; return 0; } d = (signed char)p[*k]; *k = *k + 1; }
     if (mod == 2) { if (*k + 4 > len) { *ok = 0; return 0; } d = (int)at_rd(p + *k, 4); *k = *k + 4; }
     if (d) at_lnum(d);
-    at_lc(40); at_xname(64, b, 1);
+    at_lc(40); if (b >= 0) at_xname(64,b,1);
     if (idx >= 0) { at_lc(44); at_xname(64, idx, 1); at_lc(44); at_ldec(sc); }
     at_lc(41);
     return 0;
@@ -814,7 +855,7 @@ int at_xdec(us_i64 off) {
                     else {
                         if (kk + 4 > len) return 0;
                         if (at_drel && at_drelo == off + kk) {          /* call to a name defined elsewhere */
-                            if (f != XF_CALL || at_dtype != 4 || at_dadd != -4 || at_dsym < 4) return 0;
+                            if ((f != XF_CALL && !(f == XF_J32 && t->op == 0xE9)) || at_dtype != 4 || at_dadd != -4 || at_dsym < 4) return 0;
                             at_ls(t->mn); at_lc(9); at_lsn(at_dsnm[at_dsym], at_dsnl[at_dsym]); at_ls("@PLT");
                             return kk + 4;
                         }
@@ -1053,6 +1094,11 @@ int at_amem(char *s, int n, int kind) {
     at_mo = 0; at_mm = 0 - 1;
     if (k == n) return kind != 82;
     q = s + k + 1; ql = n - k - 1; while (ql > 0 && at_sp(q[0])) { q = q + 1; ql = ql - 1; }
+    if (ql > 6 && at_is(q, 6, ":lo12:")) {
+        if (kind != 71 || !at_expr(q + 6, ql - 6) || !at_xl || !at_resolve()) return 0;
+        at_addrel(0, 286, at_rval);
+        return 1;
+    }
     if (ql > 10 && at_is(q, 10, ":got_lo12:")) {    /* ldr xd, [xn, :got_lo12:name] */
         if (kind != 71 || !at_expr(q + 10, ql - 10) || at_xl == 0 || !at_resolve() || at_rsect != 0) return 0;
         at_addrel(0, 312, at_rval);
@@ -1143,8 +1189,8 @@ int at_atry(struct at_arow *r, us_i64 addr) {
             us_i64 d; int bits;
             if (!at_expr(o, ol) || at_xl == 0) return 0;
             if (!at_resolve()) return 0;
-            if (at_rsect == 0 && c == 76 && r->match == 0x94000000) {   /* bl to a name defined elsewhere */
-                at_addrel(0, 283, at_rval);
+            if (at_rsect == 0 && c == 76 && (r->match == 0x94000000 || r->match == 0x14000000)) {
+                at_addrel(0, r->match == 0x94000000 ? 283 : 282, at_rval);
             } else {
                 if (at_rsect != 1) return 0;
                 d = at_unk ? 0 : at_rval - addr;
@@ -1183,10 +1229,172 @@ int at_atry(struct at_arow *r, us_i64 addr) {
     at_aw = w;
     return 1;
 }
+/* Additional native-source A64 forms. Width is checked before encoding. */
+int at_axreg(int i, int width) {
+    if (i >= at_nop) return -1;
+    return at_areg(at_op[i], at_opl[i], width ? 120 : 119);
+}
+int at_axcond(int i) {
+    int c = 0;
+    while (c < 14 && !at_is(at_op[i], at_opl[i], at_cond[c])) c++;
+    return c < 14 ? c : -1;
+}
+int at_axenc(us_i64 addr) {
+    int sf, d, n, m, a, i, j, c, size, load, pair, mode, base, ix, option, scaled;
+    unsigned int w, fld;
+    us_i64 v, shift;
+    char *q; int ql, end, comma;
+    if (!at_nop) return 0;
+    sf = at_opl[0] > 0 && at_op[0][0] == 120;
+    d = at_axreg(0, sf);
+    if (d < 0) return 0;
+    n = at_axreg(1, sf); m = at_axreg(2, sf);
+    if (at_is(at_mn,at_mnl,"mov") && at_nop == 2 && at_aimm(at_op[1],at_opl[1],&v)) {
+        us_u64 u = (us_u64)v, mask = sf ? ~(us_u64)0 : 0xffffffff;
+        if (!sf && (v < -2147483648LL || v > 4294967295LL)) return -1;
+        u &= mask;
+        for (i=0;i<(sf?4:2);i++) {
+            if (!(u & ~(0xffffULL << (i*16)))) {at_aw=(sf?0xd2800000:0x52800000)|((unsigned int)i<<21)|((unsigned int)(u>>(i*16))<<5)|d;return 1;}
+            if (!((~u & mask) & ~(0xffffULL << (i*16)))) {at_aw=(sf?0x92800000:0x12800000)|((unsigned int)i<<21)|((unsigned int)((~u & mask)>>(i*16))<<5)|d;return 1;}
+        }
+        if (at_bmenc(sf?u:(u|(u<<32)),&fld) && (sf || !(fld & (1U<<22)))) {at_aw=(sf?0xb20003e0:0x320003e0)|fld|d;return 1;}
+        return -1;
+    }
+    if (at_is(at_mn,at_mnl,"tbz") || at_is(at_mn,at_mnl,"tbnz")) {
+        if(at_nop!=3||!at_aimm(at_op[1],at_opl[1],&v)||v<0||v>(sf?63:31))return -1;
+        if(!at_expr(at_op[2],at_opl[2])||!at_xl||!at_resolve()||at_rsect!=1)return -1;
+        shift=at_unk?0:at_rval-addr;if((shift&3)||shift < -32768||shift>32764)return -1;
+        at_aw=0x36000000|(at_is(at_mn,at_mnl,"tbnz")?0x1000000:0)|((unsigned int)(v>>5)<<31)|((unsigned int)(v&31)<<19)|((unsigned int)((shift>>2)&0x3fff)<<5)|d;return 1;
+    }
+    if (at_is(at_mn,at_mnl,"csel") || at_is(at_mn,at_mnl,"cinc")) {
+        int inc=at_is(at_mn,at_mnl,"cinc");
+        if(at_nop!=(inc?3:4)||n<0||(!inc&&m<0))return -1;
+        c=at_axcond(inc?2:3);if(c<0)return -1;
+        at_aw=(sf?0x9a800000:0x1a800000)|(inc?0x400:0)|((unsigned int)(inc?n:m)<<16)|((unsigned int)(inc?(c^1):c)<<12)|(n<<5)|d;return 1;
+    }
+    if (at_is(at_mn,at_mnl,"uxtw")) {
+        n=at_axreg(1,0);if(!sf||at_nop!=2||n<0)return -1;at_aw=0xd3407c00|(n<<5)|d;return 1;
+    }
+    if (at_is(at_mn,at_mnl,"neg") || at_is(at_mn,at_mnl,"mvn")) {
+        if(at_nop!=2||n<0)return -1;at_aw=(at_is(at_mn,at_mnl,"neg")?0x4b0003e0:0x2a2003e0)|(sf?0x80000000:0)|(n<<16)|d;return 1;
+    }
+    /* Pair and single memory forms: post-index is a separate operand. */
+    pair=at_is(at_mn,at_mnl,"ldp")||at_is(at_mn,at_mnl,"stp");
+    load=at_is(at_mn,at_mnl,"ldr")||at_is(at_mn,at_mnl,"ldrb")||at_is(at_mn,at_mnl,"ldrsw");
+    if(pair||load||at_is(at_mn,at_mnl,"str")||at_is(at_mn,at_mnl,"strb")) {
+        int mi=pair?2:1;
+        if(pair)load=at_is(at_mn,at_mnl,"ldp");
+        size=sf?8:4;
+        if(at_is(at_mn,at_mnl,"ldrsw")){if(!sf)return -1;size=4;}
+        if(at_is(at_mn,at_mnl,"ldrb")||at_is(at_mn,at_mnl,"strb")){if(sf)return -1;size=1;}
+        if(at_nop<=mi||at_nop>mi+2||(pair&&n<0))return -1;
+        q=at_op[mi];ql=at_opl[mi];mode=0;
+        if(ql&&q[ql-1]==33){mode=3;ql--;}
+        if(ql<4||q[0]!=91||q[ql-1]!=93)return -1;
+        if(at_nop==mi+2){if(mode)return -1;mode=1;}
+        end=ql-1;comma=1;while(comma<end&&q[comma]!=44)comma++;
+        j=comma;while(j>1&&at_sp(q[j-1]))j--;
+        base=at_areg(q+1,j-1,88);if(base<0)return -1;
+        i=comma+1;while(i<end&&at_sp(q[i]))i++;
+        v=0;
+        if(comma<end) {
+            if(q[i]==35){if(!at_aimm(q+i,end-i,&v))return 0;}
+            else if(!pair&&!mode) {
+                /* Relocation operands belong to the established memory encoder. */
+                if ((end-i>=6 && at_is(q+i,6,":lo12:")) || (end-i>=10 && at_is(q+i,10,":got_lo12:"))) return 0;
+                j=i;while(j<end&&q[j]!=44)j++;
+                c=j;while(c>i&&at_sp(q[c-1]))c--;
+                option=3;ix=at_areg(q+i,c-i,120);
+                if(ix<0){option=2;ix=at_areg(q+i,c-i,119);}
+                if(ix<0)return -1;scaled=0;
+                if(j<end){i=j+1;while(i<end&&at_sp(q[i]))i++;
+                    if(end-i>=4&&at_is(q+i,4,"lsl ")&&option==3)i+=4;
+                    else if(end-i>=4&&at_is(q+i,4,"uxtw")&&option==2){i+=4;}
+                    else return -1;
+                    while(i<end&&at_sp(q[i]))i++;
+                    if(i<end){if(!at_aimm(q+i,end-i,&shift)||shift<0||shift!=(size==8?3:size==4?2:0))return -1;scaled=1;}
+                }else if(option==2)return -1;
+                w=size==8?0xf8200800:size==4?0xb8200800:0x38200800;
+                if(at_is(at_mn,at_mnl,"ldrsw"))w=0xb8a00800;else if(load)w|=0x400000;
+                at_aw=w|(ix<<16)|(option<<13)|(scaled<<12)|(base<<5)|d;return 1;
+            }else return -1;
+        }
+        if(mode==1){if(comma<end||!at_aimm(at_op[mi+1],at_opl[mi+1],&v))return -1;}
+        if(mode && base!=31 && (base==d||(pair&&base==n)))return -1;
+        if(pair) {
+            if(load&&d==n)return -1;
+            if(v%size||v/size < -64||v/size >63)return -1;
+            w=(sf?0xa9000000:0x29000000)|(load?0x400000:0);
+            if(mode==1)w-=0x800000;else if(mode==3)w+=0x800000;
+            at_aw=w|((unsigned int)((v/size)&127)<<15)|(n<<10)|(base<<5)|d;return 1;
+        }
+        if(mode){if(v < -256||v>255)return -1;
+            w=size==8?0xf8000000:size==4?0xb8000000:0x38000000;
+            if(at_is(at_mn,at_mnl,"ldrsw"))w=0xb8800000;else if(load)w|=0x400000;
+            at_aw=w|((unsigned int)(v&511)<<12)|(mode<<10)|(base<<5)|d;return 1;
+        }
+        return 0; /* Existing scaled unsigned and relocation operands. */
+    }
+    /* Width-matched register and immediate arithmetic. */
+    if(at_nop==2&&n>=0&&at_is(at_mn,at_mnl,"mov")){at_aw=(sf?0xaa0003e0:0x2a0003e0)|(n<<16)|d;return 1;}
+    if(at_is(at_mn,at_mnl,"cmp")||at_is(at_mn,at_mnl,"cmn")) {
+        n=d;m=at_axreg(1,sf);d=31;
+        if(at_nop==2&&at_aimm(at_op[1],at_opl[1],&v)) {
+            if(v<0||v>4095)return -1;
+            at_aw=(at_is(at_mn,at_mnl,"cmp")?0x71000000:0x31000000)|(sf?0x80000000:0)|((unsigned int)v<<10)|(n<<5)|d;return 1;
+        }
+        if(at_nop!=2||m<0)return 0;
+        at_aw=(at_is(at_mn,at_mnl,"cmp")?0x6b000000:0x2b000000)|(sf?0x80000000:0)|(m<<16)|(n<<5)|d;return 1;
+    }
+    if(at_nop<3||n<0)return 0;
+    w=0;
+    if(at_is(at_mn,at_mnl,"add"))w=0x0b000000;
+    if(at_is(at_mn,at_mnl,"sub"))w=0x4b000000;
+    if(at_is(at_mn,at_mnl,"subs"))w=0x6b000000;
+    if(w&&at_aimm(at_op[2],at_opl[2],&v)) {
+        if(at_nop!=3||v<0||v>4095)return -1;
+        at_aw=(0x11000000|(w&0x60000000))|(sf?0x80000000:0)|((unsigned int)v<<10)|(n<<5)|d;return 1;
+    }
+    if(at_is(at_mn,at_mnl,"and"))w=0x0a000000;
+    if(at_is(at_mn,at_mnl,"orr"))w=0x2a000000;
+    if(at_is(at_mn,at_mnl,"eor"))w=0x4a000000;
+    if(w&&m>=0){shift=0;if(at_nop==4&&!at_alsl(at_op[3],at_opl[3],&shift))return -1;
+        if(at_nop>4||shift<0||shift>(sf?63:31))return -1;
+        at_aw=w|(sf?0x80000000:0)|(m<<16)|((unsigned int)shift<<10)|(n<<5)|d;return 1;}
+    w=0;
+    if(at_is(at_mn,at_mnl,"mul"))w=0x1b007c00;
+    if(at_is(at_mn,at_mnl,"sdiv"))w=0x1ac00c00;
+    if(at_is(at_mn,at_mnl,"udiv"))w=0x1ac00800;
+    if(at_is(at_mn,at_mnl,"lslv")||at_is(at_mn,at_mnl,"lsl"))w=0x1ac02000;
+    if(at_is(at_mn,at_mnl,"lsrv")||at_is(at_mn,at_mnl,"lsr"))w=0x1ac02400;
+    if(at_is(at_mn,at_mnl,"asrv")||at_is(at_mn,at_mnl,"asr"))w=0x1ac02800;
+    if(at_is(at_mn,at_mnl,"msub")){a=at_axreg(3,sf);if(at_nop!=4||m<0||a<0)return -1;at_aw=0x1b008000|(sf?0x80000000:0)|(m<<16)|(a<<10)|(n<<5)|d;return 1;}
+    if(w&&at_nop==3&&m>=0){at_aw=w|(sf?0x80000000:0)|(m<<16)|(n<<5)|d;return 1;}
+    if(!sf&&at_nop==3&&at_aimm(at_op[2],at_opl[2],&v)) {
+        if(at_is(at_mn,at_mnl,"lsl")||at_is(at_mn,at_mnl,"lsr")||at_is(at_mn,at_mnl,"asr")) {
+            if(v<0||v>31)return -1;
+            w=at_is(at_mn,at_mnl,"asr")?0x13007c00:0x53007c00;
+            if(at_is(at_mn,at_mnl,"lsl"))w=0x53000000|((unsigned int)((32-v)&31)<<16)|((31-(unsigned int)v)<<10);
+            else w|=(unsigned int)v<<16;
+            at_aw=w|(n<<5)|d;return 1;
+        }
+        if(at_is(at_mn,at_mnl,"and")||at_is(at_mn,at_mnl,"orr")||at_is(at_mn,at_mnl,"eor")) {
+            us_u64 u=(us_u64)v&0xffffffff;
+            if(v < -2147483648LL||v>4294967295LL||!at_bmenc(u|(u<<32),&fld)||(fld&(1U<<22)))return -1;
+            w=at_is(at_mn,at_mnl,"and")?0x12000000:at_is(at_mn,at_mnl,"orr")?0x32000000:0x52000000;
+            at_aw=w|fld|(n<<5)|d;return 1;
+        }
+    }
+    return 0;
+}
 int at_aenc(char *s, int n, us_i64 addr, char *out) {
     int k;
     at_eo = out; at_el = 0; at_unk = 0;
     if (!at_split(s, n) || at_rex) return 0 - 1;
+    at_nr = 0;
+    k = at_axenc(addr);
+    if (k < 0) return -1;
+    if (k > 0) { at_e32(at_aw); return 4; }
     k = 0;
     while (at_at[k].mn) {
         if (at_atry(&at_at[k], addr)) {
@@ -1556,9 +1764,40 @@ int at_deflabel(char *s, int n, us_i64 val) {
     at_sdef[j] = 1; at_ssect[j] = at_cursec; at_sval[j] = val;
     return 0;
 }
+/* Section alignment cannot exceed the 16-byte ELF section contract. */
+int at_alignment(char *s, int n, us_i64 *a) {
+    int k; int x; us_i64 value;
+    k = 0; while (k < n && !at_sp(s[k])) k++;
+    x = k; while (x < n && at_sp(s[x])) x++;
+    if (!at_num(s+x,n-x,&value)) return 0;
+    if (at_is(s,k,".p2align")) {
+        if (value < 0 || value > 4) return 0;
+        value = (us_i64)1 << value;
+    }
+    if (value < 1 || value > 16 || (value & (value-1))) return 0;
+    *a = value; return 1;
+}
+
 /* data directives: bytes into buf at *len */
 int at_datadir(char *s, int n, char *buf, us_i64 *len, int nobits) {
     int k; k = 0; while (k < n && !at_sp(s[k])) k = k + 1;
+    if (at_is(s,k,".quad") || at_is(s,k,".long") || at_is(s,k,".word")) {
+        int width; int a; int b; int j; us_i64 v;
+        if (nobits) return at_aerr("as: initialized word in .bss");
+        width = at_is(s,k,".quad") ? 8 : (at_is(s,k,".word") && !at_arch ? 2 : 4);
+        a = k; while (a < n && at_sp(s[a])) a++;
+        if (a == n) return at_aerr("as: empty word directive");
+        while (a < n) {
+            b = a; while (b < n && s[b] != ',') b++;
+            if (!at_num(s+a,b-a,&v)) return at_aerr("as: word requires a numeric constant");
+            if ((width == 2 && (v < -32768 || v > 65535)) ||
+                (width == 4 && (v < -2147483648LL || v > 4294967295LL))) return at_aerr("as: word constant out of range");
+            if (*len > AT_MAXT-width) return at_aerr("as: section too large");
+            for (j = 0; j < width; j++) buf[(*len)++] = ((us_u64)v >> (j*8)) & 255;
+            a = b+1; if (a == n) return at_aerr("as: trailing word comma");
+        }
+        return 0;
+    }
     if (at_is(s, k, ".byte")) {
         char *p; int pl; int a; int b;
         if (nobits) return at_aerr("as: .byte in .bss");
@@ -1574,7 +1813,7 @@ int at_datadir(char *s, int n, char *buf, us_i64 *len, int nobits) {
     }
     if (at_is(s, k, ".zero") || at_is(s, k, ".skip") || at_is(s, k, ".space")) {
         us_i64 v; int x; x = k; while (x < n && at_sp(s[x])) x = x + 1;
-        if (!at_num(s + x, n - x, &v) || v < 0 || *len + v >= AT_MAXT) return at_aerr("as: bad .zero size");
+        if (!at_num(s + x, n - x, &v) || v < 0 || v >= AT_MAXT - *len) return at_aerr("as: bad .zero size");
         if (!nobits) { us_i64 q; q = 0; while (q < v) { buf[*len + q] = 0; q = q + 1; } }
         *len = *len + v; return 0;
     }
@@ -1595,17 +1834,14 @@ int at_datadir(char *s, int n, char *buf, us_i64 *len, int nobits) {
             buf[*len] = c; *len = *len + 1; x = x + 1;
         }
         if (x >= n) return at_aerr("as: unterminated string");
-        if (z) { buf[*len] = 0; *len = *len + 1; }
+        x++; while (x < n && at_sp(s[x])) x++;
+        if (x != n) return at_aerr("as: trailing string tokens");
+        if (z) { if (*len >= AT_MAXT) return at_aerr("as: section too large"); buf[*len] = 0; *len = *len + 1; }
         return 0;
     }
-    if (at_is(s, k, ".p2align") || at_is(s, k, ".balign") || at_is(s, k, ".align")) {
-        us_i64 v; us_i64 a; int x; int e; x = k; while (x < n && at_sp(s[x])) x = x + 1;
-        e = x; while (e < n && s[e] != 44) e = e + 1;
-        { int y; y = e; while (y > x && at_sp(s[y - 1])) y = y - 1; if (!at_num(s + x, y - x, &v)) return at_aerr("as: bad alignment"); }
-        a = at_is(s, k, ".p2align") ? ((us_i64)1 << v) : v;
-        if (a <= 0 || a > 4096 || (a & (a - 1))) return at_aerr("as: bad alignment");
-        if (a > 16) return at_aerr("as: alignment above 16 is not in the subset");
-        while (*len % a) { if (!nobits) buf[*len] = 0; *len = *len + 1; }
+    if (at_is(s,k,".p2align") || at_is(s,k,".balign") || at_is(s,k,".align")) {
+        us_i64 a; if (!at_alignment(s,n,&a)) return at_aerr("as: bad alignment");
+        while (*len % a) { if (*len >= AT_MAXT) return at_aerr("as: section too large"); if (!nobits) buf[*len]=0; (*len)++; }
         return 0;
     }
     return at_aerr("as: directive not in the subset");
@@ -1675,13 +1911,14 @@ int at_parse(char *src, us_i64 n) {
             if (at_is(s, k, ".type") || at_is(s, k, ".size") || at_is(s, k, ".file") || at_is(s, k, ".ident")) continue;
             if (at_is(s, k, ".p2align") || at_is(s, k, ".balign") || at_is(s, k, ".align")) {
                 if (at_cursec == 1) {
-                    /* text alignment: only at offset 0 (the section is 16-aligned) */
-                    int q; q = 0; while (q < at_ni) { if (at_ik[q] != 2) return at_aerr("as: alignment inside .text is not in the subset"); q = q + 1; }
+                    us_i64 a; if (!at_alignment(s,l,&a)) return at_aerr("as: bad text alignment");
+                    if (at_ni >= AT_MAXI) return at_aerr("as: too many lines");
+                    at_iline[at_ni]=at_lineno; at_ik[at_ni]=3; at_il[at_ni]=s; at_ilen[at_ni]=l; at_ni++;
                     continue;
                 }
             }
             if (at_cursec == 1) {
-                if (at_is(s, k, ".byte") || (at_arch == 1 && at_is(s, k, ".inst"))) {
+                if (at_is(s,k,".byte") || at_is(s,k,".long") || at_is(s,k,".word") || at_is(s,k,".quad") || (at_arch == 1 && at_is(s,k,".inst"))) {
                     if (at_ni >= AT_MAXI) return at_aerr("as: too many lines");
                     at_iline[at_ni] = at_lineno; at_ik[at_ni] = 1; at_il[at_ni] = s; at_ilen[at_ni] = l; at_ni = at_ni + 1;
                     continue;
@@ -1699,27 +1936,59 @@ int at_parse(char *src, us_i64 n) {
     }
     return 0;
 }
-/* raw text bytes from a `.byte` / `.inst` item */
+/* Numeric value or a same-section symbol difference. Forward text labels
+   have fixed-size items and are evaluated again after layout has settled. */
+int at_difference(char *s, int n, us_i64 *v) {
+    int k; int left; int right; int begin;
+    while (n > 0 && at_sp(s[0])) { s++; n--; }
+    while (n > 0 && at_sp(s[n-1])) n--;
+    if (at_num(s,n,v)) return 1;
+    k = 0; while (k < n && at_idc(s[k])) k++;
+    if (!k || (s[0] >= '0' && s[0] <= '9')) return 0;
+    left = at_sym(s,k); if (left < 0) return 0;
+    while (k < n && at_sp(s[k])) k++;
+    if (k >= n || s[k++] != '-') return 0;
+    while (k < n && at_sp(s[k])) k++;
+    begin = k; while (k < n && at_idc(s[k])) k++;
+    if (k == begin || (s[begin] >= '0' && s[begin] <= '9')) return 0;
+    right = at_sym(s+begin,k-begin); if (right < 0) return 0;
+    while (k < n && at_sp(s[k])) k++;
+    if (k != n || !at_sdef[left] || !at_sdef[right] ||
+        at_ssect[left] != at_ssect[right]) return 0;
+    return at_isub(at_sval[left],at_sval[right],v);
+}
 int at_rawitem(int i, char *out) {
-    char *s; int l; int k; int n;
-    s = at_il[i]; l = at_ilen[i]; k = 0; while (k < l && !at_sp(s[k])) k = k + 1;
-    if (at_is(s, k, ".inst")) {
-        us_i64 v; int x; x = k; while (x < l && at_sp(s[x])) x = x + 1;
-        if (!at_num(s + x, l - x, &v)) return 0 - 1;
-        out[0] = v & 255; out[1] = (v >> 8) & 255; out[2] = (v >> 16) & 255; out[3] = (v >> 24) & 255;
-        return 4;
-    }
-    n = 0;
-    {   int a; int b; a = k;
-        while (a < l) {
-            us_i64 v; b = a; while (b < l && s[b] != 44) b = b + 1;
-            { int x; int y; x = a; y = b; while (x < y && at_sp(s[x])) x = x + 1; while (y > x && at_sp(s[y - 1])) y = y - 1;
-              if (!at_num(s + x, y - x, &v) || v < -128 || v > 255 || n >= 32) return 0 - 1; }
-            out[n] = v & 255; n = n + 1; a = b + 1;
-        }
+    char *s; int l; int k; int width; int at; int end; int n; int j; us_i64 v;
+    s = at_il[i]; l = at_ilen[i]; k = 0;
+    while (k < l && !at_sp(s[k])) k++;
+    width = at_is(s,k,".byte") ? 1 :
+        (at_is(s,k,".quad") ? 8 : (at_is(s,k,".word") && !at_arch ? 2 : 4));
+    at = k; n = 0;
+    while (at < l && at_sp(s[at])) at++;
+    if (at == l) return -1;
+    while (at < l) {
+        end = at; while (end < l && s[end] != ',') end++;
+        if (!at_difference(s+at,end-at,&v) || n+width > 64) return -1;
+        if (width == 1 && (v < -128 || v > 255)) return -1;
+        if (width == 2 && (v < -32768 || v > 65535)) return -1;
+        if (width == 4 && (v < -2147483648LL || v > 4294967295LL)) return -1;
+        for (j = 0; j < width; j++) out[n++] = ((us_u64)v >> (j*8)) & 255;
+        at = end+1; if (at == l) return -1;
     }
     return n;
 }
+int at_alignitem(int i, us_i64 addr, char *out) {
+    us_i64 a; int n; int k;
+    if (!at_alignment(at_il[i],at_ilen[i],&a)) return -1;
+    n = (int)((a-addr%a)%a);
+    if (at_arch && (n & 3)) return -1;
+    k = 0; while (k < n) {
+        if (at_arch) { out[k++] = 0x1f; out[k++] = 0x20; out[k++] = 3; out[k++] = 0xd5; }
+        else out[k++] = 0x90;
+    }
+    return n;
+}
+
 /* lay out .text until stable, then write it with its relocations */
 int at_layout(void) {
     int changed; int round; int i; us_i64 addr; char buf[64];
@@ -1748,8 +2017,10 @@ int at_layout(void) {
             }
             at_fwd = round == 1 ? 0 : addr - at_iaddr[i];
             at_iaddr[i] = addr;
-            if (at_ik[i] == 1) len = at_rawitem(i, buf);
+            if (at_ik[i] == 3) len = at_alignitem(i,addr,buf);
+            else if (at_ik[i] == 1) len = at_rawitem(i,buf);
             else {
+                if (at_arch && (addr & 3)) { at_lineno=at_iline[i]; return at_aerr("as: unaligned A64 instruction"); }
                 if (at_arch) len = at_aenc(at_il[i], at_ilen[i], addr, buf);
                 else {
                     len = at_xenc(at_il[i], at_ilen[i], addr, at_ilong[i], buf);
@@ -1768,7 +2039,8 @@ int at_layout(void) {
     while (i < at_ni) {
         int len; int k;
         if (at_ik[i] == 2) { i = i + 1; continue; }
-        if (at_ik[i] == 1) { len = at_rawitem(i, at_ttext + at_tn); at_nr = 0; }
+        if (at_ik[i] == 3) { len = at_alignitem(i,at_tn,at_ttext+at_tn); at_nr=0; }
+        else if (at_ik[i] == 1) { len = at_rawitem(i, at_ttext + at_tn); at_nr = 0; }
         else {
             if (at_arch) len = at_aenc(at_il[i], at_ilen[i], at_tn, at_ttext + at_tn);
             else len = at_xenc(at_il[i], at_ilen[i], at_tn, at_ilong[i], at_ttext + at_tn);

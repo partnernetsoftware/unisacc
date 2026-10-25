@@ -1,0 +1,272 @@
+/* ELF64 ET_REL -> UNIKERN1. No host linker or runtime relocation dependency.
+ * Deliberate limits: 64MiB/input and image, 4096 sections, 256 units.
+ * Unsupported ELF semantics are refused, never silently discarded.
+ * All working state is invocation-owned; no mutable exported state or buffers.
+ */
+#pragma unisa module elfkernel
+
+typedef enum ek_status { EK_OK = 0, EK_REJECT = 1, EK_IO = 2 } ek_status;
+typedef struct ek_result { ek_status status; unsigned long long length, entry, slot; } ek_result;
+typedef struct ek_sec { unsigned long long off, size, flags, align, base, entsize; unsigned type, link, info, name; } ek_sec;
+typedef struct ek_sym { const char *name; unsigned sh, bind, type; unsigned long long val, size, addr; } ek_sym;
+typedef struct ek_unit { unsigned char *p; size_t n; ek_sec *sec; unsigned ns, symsec; ek_sym *sym; size_t ny; } ek_unit;
+
+static unsigned long long ek_get(const unsigned char *p, unsigned n) {
+    unsigned i; unsigned long long v = 0;
+    for (i = 0; i < n; i++) v |= (unsigned long long)p[i] << (i * 8);
+    return v;
+}
+static void ek_put(unsigned char *p, unsigned n, unsigned long long v) {
+    unsigned i; for (i = 0; i < n; i++) p[i] = (unsigned char)(v >> (i * 8));
+}
+static int ek_extent(unsigned long long off, unsigned long long len, unsigned long long n) { return off <= n && len <= n - off; }
+static int ek_power(unsigned long long a) { return a && !(a & (a - 1)); }
+static const char *ek_string(ek_unit *u, ek_sec *s, unsigned long long pos) {
+    unsigned long long i;
+    if (pos >= s->size) return 0;
+    for (i = pos; i < s->size; i++) if (!u->p[s->off + i]) return (const char *)(u->p + s->off + pos);
+    return 0;
+}
+static int ek_bad(char *why, size_t cap, const char *msg) { snprintf(why, cap, "%s", msg); return 0; }
+static int ek_read(const char *path, ek_unit *u, unsigned long long *budget, char *why, size_t cap) {
+    int fd; size_t got = 0; ssize_t n; struct stat st, opened;
+    /* lstat before open prevents FIFO/device blocking; symlinks are refused.
+     * Inputs must remain unchanged for the invocation (as with test inputs). */
+    if (lstat(path, &st)) return ek_bad(why, cap, "input lstat failed");
+    if (!S_ISREG(st.st_mode) || st.st_size < 0 || st.st_size >= 67108864 || (unsigned long long)st.st_size > *budget)
+        return ek_bad(why, cap, "input not regular or cumulative 64MiB input budget exceeded");
+    *budget -= (unsigned long long)st.st_size;
+    /* Nonblocking open plus fstat also protects the lstat/open replacement
+     * window from a FIFO; require the same regular file and measured size. */
+    fd = open(path, O_RDONLY | O_NONBLOCK);
+    if (fd < 0) return ek_bad(why, cap, "input open failed");
+    if (fstat(fd, &opened) || !S_ISREG(opened.st_mode) || opened.st_dev != st.st_dev || opened.st_ino != st.st_ino || opened.st_size != st.st_size) {
+        close(fd); return ek_bad(why, cap, "input identity/type/size changed during open");
+    }
+    u->n = (size_t)st.st_size; u->p = malloc(u->n ? u->n : 1);
+    if (!u->p) { close(fd); return ek_bad(why, cap, "input allocation failed"); }
+    while (got < u->n) {
+        n = read(fd, u->p + got, u->n - got);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { close(fd); return ek_bad(why, cap, "input read failed"); }
+        got += (size_t)n;
+    }
+    if (close(fd)) return ek_bad(why, cap, "input close failed");
+    return 1;
+}
+static int ek_parse(ek_unit *u, unsigned machine, char *why, size_t cap) {
+    unsigned char *p = u->p; unsigned i; unsigned long long shoff; ek_sec *names;
+    if (u->n < 64 || memcmp(p, "\177ELF", 4) || p[4] != 2 || p[5] != 1 || p[6] != 1 ||
+        ek_get(p + 16, 2) != 1 || ek_get(p + 18, 2) != machine || ek_get(p + 20, 4) != 1 ||
+        ek_get(p + 24, 8) || ek_get(p + 32, 8) || ek_get(p + 48, 4) ||
+        ek_get(p + 52, 2) != 64 || ek_get(p + 56, 2) || ek_get(p + 58, 2) != 64)
+        return ek_bad(why, cap, "expected supported little-endian ELF64 ET_REL header");
+    shoff = ek_get(p + 40, 8); u->ns = (unsigned)ek_get(p + 60, 2);
+    i = (unsigned)ek_get(p + 62, 2);
+    if (!u->ns || u->ns > 4096 || !i || i >= u->ns || !ek_extent(shoff, (unsigned long long)u->ns * 64, u->n))
+        return ek_bad(why, cap, "invalid section table or extended section indices");
+    u->sec = calloc(u->ns, sizeof *u->sec);
+    if (!u->sec) return ek_bad(why, cap, "section allocation failed");
+    for (i = 0; i < u->ns; i++) {
+        unsigned char *q = p + shoff + (unsigned long long)i * 64; ek_sec *s = &u->sec[i];
+        s->name = (unsigned)ek_get(q, 4); s->type = (unsigned)ek_get(q + 4, 4); s->flags = ek_get(q + 8, 8);
+        s->off = ek_get(q + 24, 8); s->size = ek_get(q + 32, 8); s->link = (unsigned)ek_get(q + 40, 4);
+        s->info = (unsigned)ek_get(q + 44, 4); s->align = ek_get(q + 48, 8); s->entsize = ek_get(q + 56, 8);
+        if (ek_get(q + 16, 8) || (s->align && !ek_power(s->align)) || s->align > 67108864 ||
+            (s->type != 8 && !ek_extent(s->off, s->size, u->n)) ||
+            (s->type == 8 && s->off > u->n) || (s->type != 8 && s->align > 1 && s->off % s->align))
+            return ek_bad(why, cap, "invalid section address/extent/alignment");
+        if (!i && (s->type || s->name || s->flags || s->off || s->size || s->link || s->info || s->align || s->entsize))
+            return ek_bad(why, cap, "non-null section zero");
+        if (s->flags & 2) {
+            if ((s->type != 1 && s->type != 8) || (s->flags & ~7ULL))
+                return ek_bad(why, cap, "unsupported allocated section semantics");
+        } else if (i && s->type != 1 && s->type != 2 && s->type != 3 && s->type != 4)
+            return ek_bad(why, cap, "unsupported metadata section type");
+        if (s->type == 2) {
+            if (u->symsec) return ek_bad(why, cap, "multiple symbol tables");
+            u->symsec = i;
+        }
+    }
+    names = &u->sec[(unsigned)ek_get(p + 62, 2)];
+    if (names->type != 3 || !names->size || p[names->off] || p[names->off + names->size - 1])
+        return ek_bad(why, cap, "invalid section-name string table");
+    for (i = 0; i < u->ns; i++) if (!ek_string(u, names, u->sec[i].name)) return ek_bad(why, cap, "unterminated section name");
+    if (!u->symsec) return ek_bad(why, cap, "missing symbol table");
+    {
+        ek_sec *s = &u->sec[u->symsec], *str; size_t j;
+        if (s->entsize != 24 || s->size % 24 || !s->size || !s->link || s->link >= u->ns || s->info > s->size / 24)
+            return ek_bad(why, cap, "invalid symtab shape/link/local boundary");
+        str = &u->sec[s->link];
+        if (str->type != 3 || !str->size || p[str->off] || p[str->off + str->size - 1]) return ek_bad(why, cap, "invalid symbol string table");
+        u->ny = (size_t)(s->size / 24); u->sym = calloc(u->ny, sizeof *u->sym);
+        if (!u->sym) return ek_bad(why, cap, "symbol allocation failed");
+        for (j = 0; j < u->ny; j++) {
+            unsigned char *q = p + s->off + j * 24; ek_sym *y = &u->sym[j];
+            y->name = ek_string(u, str, ek_get(q, 4)); y->bind = q[4] >> 4; y->type = q[4] & 15;
+            y->sh = (unsigned)ek_get(q + 6, 2); y->val = ek_get(q + 8, 8); y->size = ek_get(q + 16, 8);
+            if (!y->name || q[5] || y->bind > 1 || y->type > 3 || (j < s->info ? y->bind != 0 : y->bind != 1))
+                return ek_bad(why, cap, "invalid symbol name/binding/type/visibility/order");
+            if (!j) {
+                if (*y->name || y->bind || y->type || y->sh || y->val || y->size) return ek_bad(why, cap, "non-null symbol zero");
+            } else if (!y->sh) {
+                if (y->bind != 1 || !*y->name || y->val || y->size) return ek_bad(why, cap, "invalid undefined symbol");
+            } else {
+                if (y->sh >= u->ns || !(u->sec[y->sh].flags & 2) || !ek_extent(y->val, y->size, u->sec[y->sh].size))
+                    return ek_bad(why, cap, "symbol outside allocated section (ABS/COMMON unsupported)");
+                if (y->bind && !*y->name) return ek_bad(why, cap, "empty global definition");
+                if (y->type == 3 && (y->bind || y->val || y->size)) return ek_bad(why, cap, "invalid section symbol");
+            }
+        }
+    }
+    for (i = 1; i < u->ns; i++) {
+        ek_sec *s = &u->sec[i];
+        if (s->type == 4 && (s->entsize != 24 || s->size % 24 || s->link != u->symsec || !s->info || s->info >= u->ns || !(u->sec[s->info].flags & 2)))
+            return ek_bad(why, cap, "invalid RELA shape/link/target");
+        if (s->type == 4) {
+            unsigned k;
+            for (k = 1; k < i; k++) if (u->sec[k].type == 4 && u->sec[k].info == s->info)
+                return ek_bad(why, cap, "multiple RELA sections for one target");
+        }
+    }
+    return 1;
+}
+/* Adds signed RELA addend without signed overflow or unsigned wrap. The
+ * bounded image also bounds meaningful address expressions to signed64. */
+static int ek_add(unsigned long long s, unsigned long long raw, long long *out) {
+    unsigned long long mag;
+    if (raw >> 63) {
+        mag = (~raw) + 1;
+        if (mag <= s) *out = (long long)(s - mag);
+        else {
+            mag -= s;
+            *out = mag == 9223372036854775808ULL ? (-9223372036854775807LL - 1) : -(long long)mag;
+        }
+    } else {
+        if (raw > 9223372036854775807ULL - s) return 0;
+        *out = (long long)(s + raw);
+    }
+    return 1;
+}
+static int ek_reloc(ek_unit *u, unsigned arch, unsigned char *image, unsigned long long total, char *why, size_t cap) {
+    unsigned i; size_t j;
+    for (i = 1; i < u->ns; i++) if (u->sec[i].type == 4) {
+        ek_sec *r = &u->sec[i], *t = &u->sec[r->info];
+        for (j = 0; j < r->size / 24; j++) {
+            unsigned char *q = u->p + r->off + j * 24; unsigned long long off = ek_get(q, 8), info = ek_get(q + 8, 8);
+            unsigned type = (unsigned)info; unsigned long long sy = info >> 32, place, word; long long target, d; unsigned char *patch;
+            if (sy >= u->ny || !sy || !ek_extent(off, 4, t->size)) return ek_bad(why, cap, "relocation symbol/patch outside extent");
+            {
+                size_t k;
+                for (k = 0; k < j; k++) {
+                    unsigned long long prev = ek_get(u->p + r->off + k * 24, 8);
+                    if (off >= prev ? off - prev < 4 : prev - off < 4)
+                        return ek_bad(why, cap, "overlapping relocation patches");
+                }
+            }
+            place = t->base + off; patch = image + place;
+            if (!ek_add(u->sym[sy].addr, ek_get(q + 16, 8), &target)) return ek_bad(why, cap, "relocation address arithmetic overflow/underflow");
+            if (target < (-9223372036854775807LL - 1) + (long long)place) return ek_bad(why, cap, "relocation displacement overflow");
+            d = target - (long long)place;
+            if (arch == 2) {
+                if (type != 2 && type != 4) return ek_bad(why, cap, "unsupported x86 relocation");
+                /* Blob-kernel subset: PC-relative fields have the assembler's
+                 * -4 addend convention. S+A+4 is the effective referenced
+                 * image address; arbitrary ELF PC32 expressions are refused. */
+                if (target < -4 || target > (long long)total - 4)
+                    return ek_bad(why, cap, "x86 effective PC32 target outside image");
+                if (d < -2147483648LL || d > 2147483647LL) return ek_bad(why, cap, "x86 PC32 out of range");
+                ek_put(patch, 4, (unsigned long long)d);
+            } else {
+                if (target < 0 || (unsigned long long)target > total) return ek_bad(why, cap, "A64 target outside image");
+                if (place % 4) return ek_bad(why, cap, "unaligned A64 relocation patch");
+                word = ek_get(patch, 4);
+                if (type == 282 || type == 283) {
+                    if ((word & 0xfc000000ULL) != (type == 282 ? 0x14000000ULL : 0x94000000ULL) || d % 4 || d < -134217728LL || d > 134217724LL)
+                        return ek_bad(why, cap, "A64 branch opcode/alignment/range");
+                    word = (word & 0xfc000000ULL) | ((unsigned long long)(d / 4) & 0x3ffffffULL);
+                } else if (type == 275) {
+                    long long pages = target / 4096 - (long long)(place / 4096);
+                    if ((word & 0x9f000000ULL) != 0x90000000ULL || pages < -1048576LL || pages > 1048575LL)
+                        return ek_bad(why, cap, "A64 ADRP opcode/range");
+                    word = (word & 0x9f00001fULL) | (((unsigned long long)pages & 3) << 29) | ((((unsigned long long)pages >> 2) & 0x7ffffULL) << 5);
+                } else if (type == 277) {
+                    if ((word & 0xffc00000ULL) != 0x91000000ULL) return ek_bad(why, cap, "A64 ADD_LO12 opcode/shift");
+                    word = (word & ~0x003ffc00ULL) | (((unsigned long long)target & 4095) << 10);
+                } else if (type == 286) {
+                    if ((word & 0xff800000ULL) != 0xf9000000ULL || target % 8) return ek_bad(why, cap, "A64 LDST64 opcode/scale");
+                    word = (word & ~0x003ffc00ULL) | ((((unsigned long long)target & 4095) / 8) << 10);
+                } else return ek_bad(why, cap, "unsupported A64 relocation");
+                ek_put(patch, 4, word);
+            }
+        }
+    }
+    return 1;
+}
+
+ek_result ek_link(unsigned arch, const char *output, const char *const *paths, int count, char *why, size_t cap) {
+    ek_result result = { EK_REJECT, 0, 0, 0 }; ek_unit *u = 0; unsigned char *image = 0; unsigned char header[40];
+    unsigned long long total = 0, entry = 0, slot = 0, budget = 67108864; int a, b, fd = -1, have_entry = 0, have_slot = 0; unsigned i; size_t j, k;
+    if (cap) why[0] = 0;
+    if ((arch != 1 && arch != 2) || count < 1 || count > 256) { ek_bad(why, cap, "architecture/unit count refused"); return result; }
+    u = calloc((size_t)count, sizeof *u);
+    if (!u) { ek_bad(why, cap, "unit allocation failed"); return result; }
+    for (a = 0; a < count; a++) {
+        if (!ek_read(paths[a], &u[a], &budget, why, cap) || !ek_parse(&u[a], arch == 1 ? 183 : 62, why, cap)) goto done;
+        for (i = 1; i < u[a].ns; i++) if (u[a].sec[i].flags & 2) {
+            ek_sec *s = &u[a].sec[i]; unsigned long long align = s->align ? s->align : 1, pad = (align - total % align) % align;
+            if (pad > 67108864 - total || s->size > 67108864 - total - pad) { ek_bad(why, cap, "image exceeds 64MiB"); goto done; }
+            total += pad; s->base = total; total += s->size;
+        }
+        for (j = 1; j < u[a].ny; j++) if (u[a].sym[j].sh) u[a].sym[j].addr = u[a].sec[u[a].sym[j].sh].base + u[a].sym[j].val;
+    }
+    if (!total) { ek_bad(why, cap, "empty image"); goto done; }
+    for (a = 0; a < count; a++) for (j = 1; j < u[a].ny; j++) {
+        ek_sym *s = &u[a].sym[j]; int matches = 0; unsigned long long addr = 0;
+        if (!s->bind) continue;
+        for (b = 0; b < count; b++) for (k = 1; k < u[b].ny; k++) {
+            ek_sym *t = &u[b].sym[k];
+            if (t->bind && t->sh && !strcmp(s->name, t->name)) { matches++; addr = t->addr; }
+        }
+        if (matches != 1) { ek_bad(why, cap, matches ? "duplicate global definition" : "undefined global symbol"); goto done; }
+        s->addr = addr;
+        if (s->sh && !strcmp(s->name, "_kernel_entry")) {
+            if (!(u[a].sec[s->sh].flags & 4) || s->val >= u[a].sec[s->sh].size) {
+                ek_bad(why, cap, "kernel entry outside executable section bytes"); goto done;
+            }
+            entry = addr; have_entry++;
+        }
+        if (s->sh && !strcmp(s->name, "_kernel_service")) { slot = addr; have_slot++; }
+    }
+    if (have_entry != 1 || have_slot != 1 || entry >= total || slot % 8 || !ek_extent(slot, 8, total)) { ek_bad(why, cap, "missing/invalid _kernel_entry or _kernel_service"); goto done; }
+    image = calloc((size_t)total, 1);
+    if (!image) { ek_bad(why, cap, "image allocation failed"); goto done; }
+    for (a = 0; a < count; a++) for (i = 1; i < u[a].ns; i++) {
+        ek_sec *s = &u[a].sec[i]; if ((s->flags & 2) && s->type == 1 && s->size) memcpy(image + s->base, u[a].p + s->off, (size_t)s->size);
+    }
+    for (a = 0; a < count; a++) if (!ek_reloc(&u[a], arch, image, total, why, cap)) goto done;
+    for (i = 0; i < 8; i++) if (image[slot + i]) { ek_bad(why, cap, "kernel service slot is not zero"); goto done; }
+    memcpy(header, "UNIKERN1", 8); ek_put(header + 8, 8, arch); ek_put(header + 16, 8, entry); ek_put(header + 24, 8, slot); ek_put(header + 32, 8, total);
+    fd = open(output, O_WRONLY | O_CREAT | O_EXCL, 0644);
+    if (fd < 0) { result.status = EK_IO; ek_bad(why, cap, "exclusive output open failed"); goto done; }
+    {
+        size_t at = 0; ssize_t n;
+        while (at < 40) { n = write(fd, header + at, 40 - at); if (n < 0 && errno == EINTR) continue; if (n <= 0) break; at += (size_t)n; }
+        if (at != 40) { ek_bad(why, cap, "header write failed"); result.status = EK_IO; goto failed_output; }
+        at = 0;
+        while (at < total) { n = write(fd, image + at, (size_t)total - at); if (n < 0 && errno == EINTR) continue; if (n <= 0) break; at += (size_t)n; }
+        if (at != total) { ek_bad(why, cap, "image write failed"); result.status = EK_IO; goto failed_output; }
+    }
+    if (fsync(fd)) { ek_bad(why, cap, "output fsync failed (partial retained)"); result.status = EK_IO; goto failed_output; }
+    if (close(fd)) { fd = -1; ek_bad(why, cap, "output close failed (partial retained)"); result.status = EK_IO; goto done; }
+    fd = -1; result.status = EK_OK; result.length = total; result.entry = entry; result.slot = slot; goto done;
+failed_output:
+    /* Preserve our exclusively created partial artifact for review. Never
+     * unlink the caller's pathname, which may have been replaced meanwhile. */
+    close(fd); fd = -1;
+done:
+    if (fd >= 0) close(fd);
+    free(image);
+    if (u) for (a = 0; a < count; a++) { free(u[a].p); free(u[a].sec); free(u[a].sym); }
+    free(u); return result;
+}

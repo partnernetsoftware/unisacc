@@ -1,0 +1,41 @@
+/* Handwritten layout, constant, data-width and relocation contracts. */
+static void asm_tail_reloc(void){
+ char *src=strdup(".text\njmp external_tail\n");if(!src)exit(2);am_object_n=0;int rc=at_asm(src,strlen(src),0);asm_check(!rc,"external-tail-assemble");
+ if(!rc){us_u64 sh=am_object_n>=64?at_rd(am_object+40,8):am_object_n;int ok=sh<=am_object_n&&am_object_n-sh>=320;us_u64 off=ok?at_rd(am_object+sh+256+24,8):0,n=ok?at_rd(am_object+sh+256+32,8):0;
+  ok=ok&&n==24&&off<=am_object_n&&n<=am_object_n-off;
+  asm_check(ok&&at_rd(am_object+off,8)==1&&(at_rd(am_object+off+8,8)&0xffffffff)==4&&at_rd(am_object+off+16,8)==~(us_u64)3,"external-tail-PLT32-addend-minus4");
+ }free(src);
+}
+static void asm_layout_contracts(void){
+ asm_bytes("index-only-sib",0,".text\nleaq 8(,%rbp,8),%rsi\n",(const unsigned char *)"\x48\x8d\x34\xed\x08\x00\x00\x00",8);
+ asm_bytes("index-only-extended",0,".text\nleaq -4(,%r12,4),%r9\n",(const unsigned char *)"\x4e\x8d\x0c\xa5\xfc\xff\xff\xff",8);
+ asm_refuse("reject-stack-index",".text\nleaq 8(,%rsp,8),%rax\n");
+ asm_refuse("reject-index-displacement-overflow",".text\nleaq 2147483648(,%rax,8),%rax\n");
+ asm_bytes("interior-align-x86",0,".text\n.byte 170\n.p2align 2\nret\n",(const unsigned char *)"\xaa\x90\x90\x90\xc3",5);
+ asm_bytes("interior-align-arm",1,".text\n.inst 0xd503201f\n.p2align 3\nret x30\n",(const unsigned char *)"\x1f\x20\x03\xd5\x1f\x20\x03\xd5\xc0\x03\x5f\xd6",12);
+ asm_bytes("forward-symbol-difference",0,".text\nLbase:\n.long Lforward-Lbase\n.byte 170\nLforward: ret\n",(const unsigned char *)"\x05\x00\x00\x00\xaa\xc3",6);
+ asm_bytes("backward-symbol-difference",0,".text\nLfirst: .byte 0\nLsecond: .long Lfirst-Lsecond\n",(const unsigned char *)"\x00\xff\xff\xff\xff",5);
+ asm_bytes("numeric-plus-minus",0,".text\n.long 16 + 8 - 1\n",(const unsigned char *)"\x17\x00\x00\x00",4);
+ asm_bytes("word-x86-width2",0,".text\n.word 0x1234\n",(const unsigned char *)"\x34\x12",2);
+ asm_bytes("word-arm-width4",1,".text\n.word 0x1234\n",(const unsigned char *)"\x34\x12\x00\x00",4);
+ asm_bytes("quad-full-bit-pattern",0,".text\n.quad 18446744073709551615\n",(const unsigned char *)"\xff\xff\xff\xff\xff\xff\xff\xff",8);
+ asm_bytes("data-service-slot",0,".text\nret\n.data\n.p2align 3\n.globl _slot\n_slot: .quad 0\n",(const unsigned char *)"\xc3",1);
+ {
+  char text[300];unsigned char expected[56];int at=0,i;at+=snprintf(text+at,sizeof text-at,".text\n.byte ");
+  for(i=0;i<56;i++){expected[i]=(unsigned char)i;at+=snprintf(text+at,sizeof text-at,"%s%d",i?",":"",i);}strcpy(text+at,"\n");
+  asm_bytes("full-action-arity-byte-line",0,text,expected,56);
+ }
+ asm_tail_reloc();
+ asm_refuse("reject-negative-alignment",".text\n.p2align -1\nret\n");
+ asm_refuse("reject-over-contract-alignment",".text\n.p2align 5\nret\n");
+ asm_refuse("reject-non-power-alignment",".text\n.balign 3\nret\n");
+ asm_refuse("reject-unsigned-literal-overflow",".text\n.quad 18446744073709551616\n");
+ asm_refuse("reject-negative-literal-overflow",".text\n.quad -9223372036854775809\n");
+ asm_refuse("reject-addition-overflow",".text\n.quad 9223372036854775807+1\n");
+ asm_refuse("reject-subtraction-overflow",".text\n.quad -9223372036854775808-1\n");
+ asm_refuse("reject-cross-section-difference",".data\nD: .byte 0\n.text\nT: .long D-T\n");
+ asm_refuse("reject-undefined-difference",".text\nT: .long missing-T\n");
+ asm_refuse("reject-empty-byte-item",".text\n.byte\n");
+ asm_refuse("reject-trailing-word-comma",".text\n.long 1,\n");
+ asm_refuse("reject-oversize-bss-zero",".bss\n.zero 9223372036854775807\n");
+}

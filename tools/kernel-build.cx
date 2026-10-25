@@ -1,0 +1,54 @@
+/* Bounded native kernel construction steps; no external assembler or linker.
+ * ROOT ABS_OUT prepare | preprocess-ISA | assemble-ISA | link-ISA
+ * Each step is a separate <=55-second scheduling unit. Receipts are material
+ * identities, never cached test results. Failed partial output is retained. */
+#pragma unisa use cxlib.netpack
+static const char *units[]={"transition","arith","buffer","memory","intern","bytes","format","stack","action","run","bridge"};
+static char root[4096],out[4096],watchdog[4400],product[4400],identity_tool[4400];
+static void die(const char *s){fprintf(stderr,"kernel-build: REFUSE %s\n",s);exit(2);}
+static void path(char *p,size_t cap,const char *a,const char *b){int n=snprintf(p,cap,"%s/%s",a,b);if(n<0||(size_t)n>=cap)die("path length");}
+static void call(char **v){np_result r;char why[1024];if(np_run(v,root,0,45,&r,why,sizeof why))die(why);if(r.outn)fwrite(r.out,1,r.outn,stdout);if(r.errn)fwrite(r.err,1,r.errn,stderr);int rc=r.rc;np_free(&r);if(rc)exit(rc<0?128-rc:rc);}
+static char *read_regular(const char *p,size_t *n){struct stat st;if(lstat(p,&st)||!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>16777216)die("bounded regular input required");char *s=cx_read(p,n);if(!s||*n!=(size_t)st.st_size)die(p);return s;}
+static void save(const char *name,const char *s,size_t n){char p[4400];path(p,sizeof p,out,name);int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(fd<0)die("exclusive receipt create");size_t at=0;while(at<n){ssize_t k=write(fd,s+at,n-at);if(k<0&&errno==EINTR)continue;if(k<=0)die("receipt write; partial retained");at+=(size_t)k;}if(fsync(fd)||close(fd))die("receipt close");}
+static void digest(const char *p,char *sha){size_t n;char *s=read_regular(p,&n);cx_sha256_hex(s,n,sha);free(s);}
+static void source_id(char *sha,int native){
+ char ident[4400],why[1024],expected_path[4400],h[65];char *v[12];int n=0;
+ v[n++]=watchdog;v[n++]=native?"15":"20";
+ if(native){
+  size_t size;path(expected_path,sizeof expected_path,out,"identity-helper.sha256");char *expected=read_regular(expected_path,&size);digest(identity_tool,h);
+  int ok=size==64&&!memcmp(expected,h,64);free(expected);if(!ok)die("identity helper changed; use a new output directory");
+  v[n++]=identity_tool;v[n++]=root;
+ }else{path(ident,sizeof ident,root,"seed/ident.c");v[n++]="sh";v[n++]=product;v[n++]=ident;v[n++]="--";v[n++]=root;}
+ v[n]=0;np_result r;if(np_run(v,root,0,25,&r,why,sizeof why))die(why);
+ if(r.rc||r.errn||r.outn!=65||r.out[64]!='\n'){if(r.errn)fwrite(r.err,1,r.errn,stderr);die("source identity failed");}
+ memcpy(sha,r.out,64);sha[64]=0;np_free(&r);
+}
+static void context(char *sha){
+ char sid[65];source_id(sid,1);np_buf b={0};np_puts(&b,"unisacc-native-kernel-context-v2\n");np_puts(&b,sid);np_puts(&b,"\n");
+ const char *extra[]={"tools/kernel-build.cx","tools/asm-source.cx","tools/asm-material.cx","tools/kernel-link.cx","tools/cxlib/netpack.cx","tools/cxlib/elfkernel.cx","tests/assembler.cx","tests/arm-assembler.cx","tests/asm-layout.cx","unisacc.com"};int i;char p[4400],h[65];
+ for(i=0;i<10;i++){path(p,sizeof p,root,extra[i]);digest(p,h);np_puts(&b,extra[i]);np_puts(&b,"\t");np_puts(&b,h);np_puts(&b,"\n");}
+ digest(identity_tool,h);np_puts(&b,"identity-helper\t");np_puts(&b,h);np_puts(&b,"\n");cx_sha256_hex(b.p,b.n,sha);free(b.p);
+}
+static void require_context(char *before){char p[4400];size_t n;context(before);path(p,sizeof p,out,"context.sha256");char *s=read_regular(p,&n);int ok=n==65&&!memcmp(s,before,64)&&s[64]=='\n';free(s);if(!ok)die("source/bootstrap/tool context changed; use a new output directory");}
+static void stable(const char *before){char now[65];context(now);if(strcmp(now,before))die("inputs changed during step");}
+static void verify_material(void){char tool[4400],dir[4400];path(tool,sizeof tool,root,"tools/asm-material.cx");path(dir,sizeof dir,out,"assembler");char *v[]={watchdog,"20","sh",product,tool,"--","--verify",root,dir,0};call(v);}
+static void files_receipt(const char *arch,const char *ext,const char *name,int verify){np_buf b={0};char p[4600],file[200],h[65];int i;np_puts(&b,"unisacc-native-kernel-files-v1\n");for(i=0;i<11;i++){snprintf(file,sizeof file,"%s/%s.%s",arch,units[i],ext);path(p,sizeof p,out,file);digest(p,h);np_puts(&b,file);np_puts(&b,"\t");np_puts(&b,h);np_puts(&b,"\n");}if(verify){size_t n;path(p,sizeof p,out,name);char *s=read_regular(p,&n);if(n!=b.n||memcmp(s,b.p,n))die("stage material changed or incomplete");free(s);}else save(name,b.p,b.n);free(b.p);}
+int main(int argc,char **argv){
+ if(argc!=4){fprintf(stderr,"usage: ROOT ABS_OUT bootstrap|prepare|preprocess-ISA|assemble-ISA|link-ISA\n");return 2;}if(!realpath(argv[1],root)||argv[2][0]!='/'||strlen(argv[2])>=sizeof out)die("root/output");strcpy(out,argv[2]);path(watchdog,sizeof watchdog,root,"tools/bound");path(product,sizeof product,root,"unisacc.com");path(identity_tool,sizeof identity_tool,out,"identity-helper");char before[65],tool[4400],dir[4400],receipt[100];
+ if(!strcmp(argv[3],"bootstrap")){
+  source_id(before,0);if(mkdir(out,0700))die("bootstrap needs a new directory");
+  path(tool,sizeof tool,root,"seed/ident.c");char *v[]={watchdog,"30","sh",product,"-O2","-fno-trim-libc",tool,"-o",identity_tool,0};call(v);
+  char h[65],after[65];digest(identity_tool,h);save("identity-helper.sha256",h,64);source_id(after,1);if(strcmp(before,after))die("source changed during identity-helper construction");
+  context(before);before[64]='\n';save("context.sha256",before,65);puts("PREPARED\tnative-identity-helper\tproduct-built\tno-test-result");return 0;
+ }
+ if(!strcmp(argv[3],"prepare")){require_context(before);path(tool,sizeof tool,root,"tools/asm-material.cx");path(dir,sizeof dir,out,"assembler");char *v[]={watchdog,"25","sh",product,tool,"--",root,dir,0};call(v);stable(before);puts("PREPARED\tnative-kernel-tools\tno-test-result");return 0;}
+ const char *arch;int mode;if(!strncmp(argv[3],"preprocess-",11)){mode=0;arch=argv[3]+11;}else if(!strncmp(argv[3],"assemble-",9)){mode=1;arch=argv[3]+9;}else if(!strncmp(argv[3],"link-",5)){mode=2;arch=argv[3]+5;}else die("unknown step");if(strcmp(arch,"arm64")&&strcmp(arch,"x86_64"))die("unknown architecture");require_context(before);
+ char src[11][4600],dest[11][4600],rel[256];char *v[40];int n=0,i;
+ if(mode==0){path(dir,sizeof dir,out,arch);if(mkdir(dir,0700))die("preprocess needs a new architecture directory");path(tool,sizeof tool,root,"tools/asm-source.cx");v[n++]=watchdog;v[n++]="40";v[n++]="sh";v[n++]=product;v[n++]=tool;v[n++]="--";v[n++]=root;v[n++]=(char *)arch;
+  for(i=0;i<11;i++){snprintf(rel,sizeof rel,"exec/c/asm/%s_%s.S",units[i],arch);path(src[i],sizeof src[i],root,rel);snprintf(rel,sizeof rel,"%s/%s.s",arch,units[i]);path(dest[i],sizeof dest[i],out,rel);v[n++]=src[i];v[n++]=dest[i];}v[n]=0;call(v);stable(before);snprintf(receipt,sizeof receipt,"%s-sources.tsv",arch);files_receipt(arch,"s",receipt,0);
+ }else if(mode==1){snprintf(receipt,sizeof receipt,"%s-sources.tsv",arch);files_receipt(arch,"s",receipt,1);verify_material();path(tool,sizeof tool,out,"assembler/assembler.cx");v[n++]=watchdog;v[n++]="40";v[n++]="sh";v[n++]=product;v[n++]=tool;v[n++]="--";v[n++]=(char *)arch;
+  for(i=0;i<11;i++){snprintf(rel,sizeof rel,"%s/%s.s",arch,units[i]);path(src[i],sizeof src[i],out,rel);snprintf(rel,sizeof rel,"%s/%s.o",arch,units[i]);path(dest[i],sizeof dest[i],out,rel);v[n++]=src[i];v[n++]=dest[i];}v[n]=0;call(v);verify_material();stable(before);snprintf(receipt,sizeof receipt,"%s-sources.tsv",arch);files_receipt(arch,"s",receipt,1);snprintf(receipt,sizeof receipt,"%s-objects.tsv",arch);files_receipt(arch,"o",receipt,0);
+ }else{snprintf(receipt,sizeof receipt,"%s-objects.tsv",arch);files_receipt(arch,"o",receipt,1);path(tool,sizeof tool,root,"tools/kernel-link.cx");snprintf(rel,sizeof rel,"%s.kernel",arch);path(dir,sizeof dir,out,rel);v[n++]=watchdog;v[n++]="40";v[n++]="sh";v[n++]=product;v[n++]=tool;v[n++]="--";v[n++]=(char *)arch;v[n++]=dir;
+  for(i=0;i<11;i++){snprintf(rel,sizeof rel,"%s/%s.o",arch,units[i]);path(src[i],sizeof src[i],out,rel);v[n++]=src[i];}v[n]=0;call(v);stable(before);snprintf(receipt,sizeof receipt,"%s-objects.tsv",arch);files_receipt(arch,"o",receipt,1);char h[65];digest(dir,h);snprintf(receipt,sizeof receipt,"%s-kernel.sha256",arch);save(receipt,h,64);
+ }printf("PREPARED\tnative-kernel-step\t%s\tno-test-result\n",argv[3]);return 0;
+}
