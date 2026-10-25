@@ -927,7 +927,7 @@ int main(int argc, char **argv) {
     if (run_out) {   /* consumer capture: a new (empty) directory, distinct from the snapshot, with the consumer's own header */
         char err[512];
         if (!run_stage) { fprintf(stderr, "run: --capture-out needs --stage\n"); return 2; }
-#if !defined(_WIN32) && !defined(__UNISA__)
+#if !defined(_WIN32)
         /* Same platform contract as rl_snapshot_load: unsupported builds have
            already returned its named refusal before reaching this guard. */
         { struct stat sa, sb;

@@ -509,6 +509,7 @@ int main(int argc, char **argv) {
             if (!strcmp(argv[i],"--resource-ledger")) {
                 char err[512];
                 if (i + 1 >= argc) { fprintf(stderr, "unisacc: --resource-ledger needs DIR\n"); return 2; }
+                rl_clear(&RF_LEDGER); RF_LOADED = 0;
                 if (rl_load(argv[++i], &RF_LEDGER, err, sizeof err)) { fprintf(stderr, "unisacc: %s\n", err); return 2; }
                 RF_LOADED = 1; continue;
             }

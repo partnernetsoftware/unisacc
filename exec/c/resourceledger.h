@@ -13,6 +13,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+#ifndef _WIN32
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 #if !(defined(__UNISA__) && defined(_WIN32))   /* UA on Windows: sys/stat.h pulls sys/_win.h, which breaks compiler.c (include order); capture refuses by name there */
 #include <sys/stat.h>
 #endif
@@ -20,6 +25,14 @@
 
 typedef struct { unsigned char *key; int kn; int present; unsigned char *value; int vn; char blob[64]; } RLRow;
 typedef struct { RLRow *rows; int n; int has_id; char stage[128]; char input_hex[65]; } RLLedger;
+typedef struct { const char *name; const unsigned char *bytes; size_t n; } RLFileView;
+/* Clear only zeroed or loader-produced ledgers. Rows returned by rl_find are
+ * borrowed until this call; failure outputs are always empty and clearable. */
+static void rl_clear(RLLedger *L) {
+    int i; if (!L) return;
+    for (i = 0; i < L->n; i++) { free(L->rows[i].key); free(L->rows[i].value); }
+    free(L->rows); memset(L, 0, sizeof *L);
+}
 
 static int rl_hexv(int c) {
     if (c >= '0' && c <= '9') return c - '0';
@@ -35,12 +48,62 @@ static int rl_length(const char *s, int *out) {
     *out = (int)v; return 1;
 }
 static unsigned char *rl_readfile(const char *path, size_t *n) {
-    FILE *f = fopen(path, "rb"); unsigned char *b; long sz;
-    if (!f) return 0;
-    if (fseek(f, 0, SEEK_END) || (sz = ftell(f)) < 0 || fseek(f, 0, SEEK_SET)) { fclose(f); return 0; }
-    b = malloc((size_t)sz + 1); if (!b) { fclose(f); return 0; }
-    if (sz && fread(b, 1, (size_t)sz, f) != (size_t)sz) { fclose(f); free(b); return 0; }
-    fclose(f); *n = (size_t)sz; return b;
+    unsigned char *b; int saved;
+#ifndef _WIN32
+    int fd; struct stat st; size_t size, at = 0;
+    errno = 0; fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) return 0;
+    if (fstat(fd, &st)) { saved = errno ? errno : EIO; close(fd); errno = saved; return 0; }
+    if (!S_ISREG(st.st_mode)) { saved = S_ISDIR(st.st_mode) ? EISDIR : EINVAL; close(fd); errno = saved; return 0; }
+    if (st.st_size < 0 || st.st_size > 2147483647L) { close(fd); errno = EFBIG; return 0; }
+    size = (size_t)st.st_size; b = malloc(size + 1);
+    if (!b) { close(fd); errno = ENOMEM; return 0; }
+    while (at < size) {
+        ssize_t z = read(fd, b + at, size - at);
+        if (z < 0 && errno == EINTR) continue;
+        if (z <= 0) { saved = z < 0 && errno ? errno : EIO; close(fd); free(b); errno = saved; return 0; }
+        at += (size_t)z;
+    }
+    /* A file that grew after fstat must not be accepted as a valid prefix. */
+    for (;;) { unsigned char extra; ssize_t z = read(fd, &extra, 1);
+        if (z < 0 && errno == EINTR) continue;
+        if (z != 0) { saved = z < 0 && errno ? errno : EIO; close(fd); free(b); errno = saved; return 0; }
+        break;
+    }
+    if (close(fd)) { saved = errno ? errno : EIO; free(b); errno = saved; return 0; }
+    *n = size; return b;
+#else
+    FILE *f; long sz;
+    errno = 0; f = fopen(path, "rb"); if (!f) return 0;
+    if (fseek(f, 0, SEEK_END) || (sz = ftell(f)) < 0 || fseek(f, 0, SEEK_SET)) {
+        saved = errno ? errno : EIO; fclose(f); errno = saved; return 0;
+    }
+    if (sz > 2147483647L) { fclose(f); errno = EFBIG; return 0; }
+    b = malloc((size_t)sz + 1); if (!b) { fclose(f); errno = ENOMEM; return 0; }
+    if (sz && fread(b, 1, (size_t)sz, f) != (size_t)sz) {
+        saved = errno ? errno : EIO; fclose(f); free(b); errno = saved; return 0;
+    }
+    if (fclose(f)) { saved = errno ? errno : EIO; free(b); errno = saved; return 0; }
+    *n = (size_t)sz; return b;
+#endif
+}
+/* Snapshot views are verified, invocation-owned bytes. Copying them gives each
+ * returned ledger its own storage; neither scratch pointers nor file addresses escape. */
+static unsigned char *rl_file_bytes(const char *dir, const char *name,
+                                    const RLFileView *views, int count, size_t *n) {
+    char path[4096]; int i, z; unsigned char *b;
+    if (views) {
+        for (i = 0; i < count; i++) if (!strcmp(name, views[i].name)) {
+            b = malloc(views[i].n + 1);
+            if (!b) { errno = ENOMEM; return 0; }
+            if (views[i].n) memcpy(b, views[i].bytes, views[i].n);
+            *n = views[i].n; return b;
+        }
+        errno = ENOENT; return 0;
+    }
+    z = snprintf(path, sizeof path, "%s/%s", dir, name);
+    if (z < 0 || (size_t)z >= sizeof path) { errno = ENAMETOOLONG; return 0; }
+    return rl_readfile(path, n);
 }
 /* the header line  #SC1<TAB>stage=ID<TAB>input_sha256=HEX  (ID: no TAB, 1..127 bytes; HEX: 64 lowercase digits) */
 static int rl_parse_identity(const char *line, RLLedger *L) {
@@ -59,12 +122,11 @@ static int rl_parse_identity(const char *line, RLLedger *L) {
     return 1;
 }
 /* 0: loaded; otherwise err holds the named reason (INTERFACE_ERROR <reason> ...) */
-static int rl_load(const char *dir, RLLedger *L, char *err, size_t errn) {
-    char path[4096]; unsigned char *b; size_t n = 0, at = 0; int cap = 0;
+static int rl_load_parse(const char *dir, const RLFileView *views, int count, RLLedger *L, char *err, size_t errn) {
+    unsigned char *b; size_t n = 0, at = 0; int cap = 0;
     L->rows = 0; L->n = 0; L->has_id = 0; L->stage[0] = 0; L->input_hex[0] = 0;
-    snprintf(path, sizeof path, "%s/resources.tsv", dir);
-    b = rl_readfile(path, &n);
-    if (!b) { snprintf(err, errn, "INTERFACE_ERROR resource-ledger-absent %s", path); return 1; }
+    b = rl_file_bytes(dir, "resources.tsv", views, count, &n);
+    if (!b) { snprintf(err, errn, errno == ENOENT ? "INTERFACE_ERROR resource-ledger-absent %s" : errno == ENOMEM ? "INTERFACE_ERROR resource-ledger-allocation-failed %s" : "INTERFACE_ERROR resource-ledger-read-failed %s errno=%d", dir, errno); return 1; }
     while (at < n) {
         size_t e = at; char f[5][4096]; int nf = 0, k; char *line;
         size_t L2;
@@ -83,16 +145,16 @@ static int rl_load(const char *dir, RLLedger *L, char *err, size_t errn) {
             if (!ok) { free(b); snprintf(err, errn, "INTERFACE_ERROR resource-identity-malformed"); return 1; }
             continue;
         }
-        { char *p = line; for (k = 0; k < 5; k++) { char *t = strchr(p, '\t'); if (k < 4 && !t) { nf = -1; break; } if (k == 4 && strchr(p, '\t')) { nf = -2; break; } snprintf(f[k], sizeof f[k], "%.*s", (int)(t ? (size_t)(t - p) : strlen(p)), p); p = t ? t + 1 : p + strlen(p); } nf = nf < 0 ? nf : 5; }
-        if (nf != 5) { free(line); free(b); snprintf(err, errn, "INTERFACE_ERROR resource-row-fields"); return 1; }
+        { char *p = line; for (k = 0; k < 5; k++) { char *t = strchr(p, '\t'); if (k < 4 && !t) { nf = -1; break; } if (k == 4 && strchr(p, '\t')) { nf = -2; break; } size_t width = t ? (size_t)(t - p) : strlen(p); if (width >= sizeof f[k]) { nf = -3; break; } memcpy(f[k], p, width); f[k][width] = 0; p = t ? t + 1 : p + strlen(p); } nf = nf < 0 ? nf : 5; }
+        if (nf != 5) { free(line); free(b); snprintf(err, errn, nf == -3 ? "INTERFACE_ERROR resource-row-field-too-long" : "INTERFACE_ERROR resource-row-fields"); return 1; }
         {   /* key */
             size_t kl = strlen(f[0]); unsigned char *kb; size_t q;
             if (!kl || kl % 2) { free(line); free(b); snprintf(err, errn, "INTERFACE_ERROR resource-key-malformed"); return 1; }
-            kb = malloc(kl / 2);
+            kb = malloc(kl / 2); if (!kb) { free(line); free(b); return 1; }
             for (q = 0; q < kl; q += 2) { int hi = rl_hexv((unsigned char)f[0][q]), lo = rl_hexv((unsigned char)f[0][q+1]); if (hi < 0 || lo < 0) { free(kb); free(line); free(b); snprintf(err, errn, "INTERFACE_ERROR resource-key-malformed"); return 1; } kb[q/2] = (unsigned char)(hi * 16 + lo); }
             /* duplicate key: named refusal, never first-entry-wins */
             { int j; for (j = 0; j < L->n; j++) if (L->rows[j].kn == (int)(kl / 2) && !memcmp(L->rows[j].key, kb, kl / 2)) { free(kb); free(line); free(b); snprintf(err, errn, "INTERFACE_ERROR duplicate-resource-key %s", f[0]); return 1; } }
-            if (L->n == cap) { cap = cap ? cap * 2 : 16; L->rows = realloc(L->rows, (size_t)cap * sizeof *L->rows); if (!L->rows) { free(kb); free(line); free(b); return 1; } }
+            if (L->n == cap) { RLRow *grown; cap = cap ? cap * 2 : 16; grown = realloc(L->rows, (size_t)cap * sizeof *L->rows); if (!grown) { free(kb); free(line); free(b); return 1; } L->rows = grown; }
             L->rows[L->n].key = kb; L->rows[L->n].kn = (int)(kl / 2); L->rows[L->n].present = 0; L->rows[L->n].value = 0; L->rows[L->n].vn = 0;
             L->n++;
             {   RLRow *r = &L->rows[L->n - 1]; int len = 0;
@@ -102,11 +164,11 @@ static int rl_load(const char *dir, RLLedger *L, char *err, size_t errn) {
                 if (!r->present) {
                     if (strcmp(f[2], "-") || len != 0 || strcmp(f[4], "-")) { free(line); free(b); snprintf(err, errn, "INTERFACE_ERROR resource-absent-malformed"); return 1; }
                 } else {
-                    char bp[4096], hex[65]; size_t bl = 0; unsigned char *v;
-                    if (!strcmp(f[2], "-") || strchr(f[2], '/') || !strcmp(f[2], "..") || strlen(f[4]) != 64) { free(line); free(b); snprintf(err, errn, "INTERFACE_ERROR resource-blob-malformed"); return 1; }
-                    snprintf(bp, sizeof bp, "%s/%s", dir, f[2]);
-                    v = rl_readfile(bp, &bl);
-                    if (!v || (int)bl != len) { free(v); free(line); free(b); snprintf(err, errn, "INTERFACE_ERROR resource-bytes-absent %s", f[0]); return 1; }
+                    char hex[65]; size_t bl = 0; unsigned char *v;
+                    if (!strcmp(f[2], "-") || strchr(f[2], '/') || !strcmp(f[2], "..") || strlen(f[2]) >= sizeof r->blob || strlen(f[4]) != 64) { free(line); free(b); snprintf(err, errn, "INTERFACE_ERROR resource-blob-malformed"); return 1; }
+                    v = rl_file_bytes(dir, f[2], views, count, &bl);
+                    if (!v) { int saved = errno; free(line); free(b); snprintf(err, errn, saved == ENOENT ? "INTERFACE_ERROR resource-bytes-absent %s" : saved == ENOMEM ? "INTERFACE_ERROR resource-ledger-allocation-failed %s" : "INTERFACE_ERROR resource-bytes-read-failed %s errno=%d", f[0], saved); return 1; }
+                    if (bl != (size_t)len) { free(v); free(line); free(b); snprintf(err, errn, "INTERFACE_ERROR resource-bytes-length-mismatch %s", f[0]); return 1; }
                     unisa_sha256_hex(v, bl, hex);
                     if (strcmp(hex, f[4])) { free(v); free(line); free(b); snprintf(err, errn, "INTERFACE_ERROR resource-hash-mismatch %s", f[0]); return 1; }
                     r->value = v; r->vn = (int)bl; snprintf(r->blob, sizeof r->blob, "%s", f[2]);
@@ -117,6 +179,28 @@ static int rl_load(const char *dir, RLLedger *L, char *err, size_t errn) {
     }
     free(b);
     return 0;
+}
+/* Output may be fresh/uninitialized or previously cleared. A live ledger must
+ * be released before reuse. Every failure produces an empty, clearable output;
+ * rl_find borrows a row only until rl_clear. No compile-time ownership claim. */
+static int rl_load_views(const char *dir, const RLFileView *views, int count,
+                         RLLedger *L, char *err, size_t errn) {
+    RLLedger next = {0}; int rc;
+    if (!L || !dir) {
+        if (L) *L = next;
+        if (err && errn) snprintf(err, errn, "INTERFACE_ERROR resource-ledger-bad-arguments");
+        return 1;
+    }
+    if (err && errn) err[0] = 0;
+    rc = rl_load_parse(dir, views, count, &next, err, errn);
+    if (rc) {
+        rl_clear(&next);
+        if (err && errn && !err[0]) snprintf(err, errn, "INTERFACE_ERROR resource-ledger-allocation-failed");
+    }
+    *L = next; return rc;
+}
+static int rl_load(const char *dir, RLLedger *L, char *err, size_t errn) {
+    return rl_load_views(dir, 0, 0, L, err, errn);
 }
 /* SC1 identity of a run: the ledger's stage and input must be this run's stage label and this run's input bytes */
 static void rl_input_hex(const unsigned char *input, int inputn, char hex[65]) {
@@ -147,7 +231,11 @@ static const RLRow *rl_find(const RLLedger *L, const unsigned char *key, int kn)
 }
 
 typedef struct { const unsigned char *key; int kn; const unsigned char *data; int len; } RLBlob;
+#ifdef _WIN32
 #define RL_SNAP_MAX 1024
+#else
+#define RL_SNAP_MAX 999
+#endif
 /* stage labels: "<stage>:<route>", stage in the registered table.  The route is the driver's own shape (compiler.c:674-677,889;
    the only grammar authority): "<target>/<arch>/[warn/][multi/]<format>/O<digit>", target lnx|osx|win, arch x86_64|arm64,
    format tape|image|run|object, warn before multi.  A prefix before the target is not a driver shape and is refused. */
@@ -175,20 +263,18 @@ static inline int rl_stage_label_ok(const char *label) {
     r = q + 1;
     return r[0] == 'O' && r[1] >= '0' && r[1] <= '9' && r[2] == 0;
 }
-#if defined(_WIN32) || defined(__UNISA__)   /* debt: the Windows no-replace commit (MoveFileEx without REPLACE_EXISTING) is not implemented yet; UA's libc has no link(), so a UA-built product refuses snapshots by name too */
+#if defined(_WIN32)   /* Windows no-replace commit remains a separate platform contract. */
 static inline int rl_snapshot_write(const char *dir, const char *stage_label, const unsigned char *input, int inputn,
                                     const RLBlob *b, int nb, char *err, size_t errn) {
     (void)dir; (void)stage_label; (void)input; (void)inputn; (void)b; (void)nb;
     snprintf(err, errn, "INTERFACE_ERROR resource-snapshot-unsupported-platform"); return 1;
 }
 static inline int rl_snapshot_load(const char *dir, const char *upstream_stage_label, RLLedger *L, int observe, char *err, size_t errn) {
-    (void)dir; (void)upstream_stage_label; (void)L; (void)observe;
+    (void)dir; (void)upstream_stage_label; (void)observe; if (L) memset(L, 0, sizeof *L);
     snprintf(err, errn, "INTERFACE_ERROR resource-snapshot-unsupported-platform"); return 1;
 }
 #else   /* POSIX: mkdir/link no-replace commit with a COMMIT marker written last */
-#include <unistd.h>
 #include <dirent.h>
-#include <errno.h>
 static inline int rl_snap_write_file(const char *path, const unsigned char *d, size_t n) {
     FILE *f = fopen(path, "wb"); size_t w = 0; int ok;
     if (!f) return 0;
@@ -202,7 +288,25 @@ static inline void rl_snap_unlink_all(const char *d, char (*names)[64], int n) {
     char p[4096]; int i;
     for (i = 0; i < n; i++) { snprintf(p, sizeof p, "%s/%s", d, names[i]); unlink(p); }
 }
-#define RL_SNAP_MAX 999   /* blob numbers are resource-NNN.bytes: the writer and the reader share this range */
+/* No-replace hard links for the carried POSIX runtime. This is an OS
+ * mechanism adapter: resource semantics and COMMIT ordering remain above it.
+ * Linux: syscall_64.tbl link=86, asm-generic unistd.h linkat=37.
+ * Darwin: xnu bsd/kern/syscalls.master link=9 (BSD syscall class). */
+static inline int rl_snap_link(const char *from, const char *to) {
+#ifdef __UNISA__
+#ifdef __APPLE__
+    return (int)_unisa_ret(__syscall6(_UNISA_SC(9), (long)from, (long)to, 0, 0, 0));
+#elif defined(__x86_64__)
+    return (int)_unisa_ret(__syscall6(86, (long)from, (long)to, 0, 0, 0));
+#elif defined(__aarch64__)
+    return (int)_unisa_ret(__syscall6(37, -100, (long)from, -100, (long)to, 0));
+#else
+    errno = ENOSYS; return -1;
+#endif
+#else
+    return link(from, to);
+#endif
+}
 /* a listed name the reader accepts: input.bin, resources.tsv, or resource-NNN.bytes (three digits, 000..999) */
 static inline int rl_snap_name_ok(const char *nm) {
     int i;
@@ -237,7 +341,10 @@ static inline int rl_snapshot_write(const char *dir, const char *stage_label, co
         if (b[j].kn == b[k].kn && !memcmp(b[j].key, b[k].key, (size_t)b[k].kn)) {
             if (b[j].len == b[k].len && (b[k].len == 0 || !memcmp(b[j].data, b[k].data, (size_t)b[k].len))) { skip[k] = 1; break; }
             snprintf(err, errn, "INTERFACE_ERROR snapshot-key-conflict"); return 1; }
-    snprintf(tmp, sizeof tmp, "%s.tmp%ld", dir, (long)getpid());
+    { int z = snprintf(tmp, sizeof tmp, "%s.tmp%ld", dir, (long)getpid());
+      size_t leaf = nb ? 18 : 13; /* longest generated child, including metadata */
+      if (z < 0 || (size_t)z > sizeof tmp - leaf - 2) { snprintf(err, errn, "INTERFACE_ERROR snapshot-path-too-long"); return 1; }
+    }
     if (mkdir(tmp, 0700)) { snprintf(err, errn, "INTERFACE_ERROR resource-snapshot-write-failed tmp-create %s", tmp); return 1; }
 #define RL_SNAP_FAIL(msg) do { rl_snap_unlink_all(tmp, names, nf); rmdir(tmp); snprintf(err, errn, "INTERFACE_ERROR %s", msg); return 1; } while (0)
     snprintf(names[nf], sizeof names[0], "input.bin"); snprintf(p, sizeof p, "%s/%s", tmp, names[nf]);
@@ -274,11 +381,11 @@ static inline int rl_snapshot_write(const char *dir, const char *stage_label, co
     snprintf(names[nf], sizeof names[0], "COMMIT"); snprintf(p, sizeof p, "%s/COMMIT", tmp);
     if (!rl_snap_write_file(p, (const unsigned char *)commit, cat)) { nf++; RL_SNAP_FAIL("resource-snapshot-write-failed COMMIT"); }
     nf++;
-    if (mkdir(dir, 0700)) { rl_snap_unlink_all(tmp, names, nf); rmdir(tmp);
-        snprintf(err, errn, errno == EEXIST ? "INTERFACE_ERROR snapshot-target-exists %s" : "INTERFACE_ERROR resource-snapshot-write-failed target %s", dir); return 1; }
+    if (mkdir(dir, 0700)) { int saved = errno; rl_snap_unlink_all(tmp, names, nf); rmdir(tmp);
+        snprintf(err, errn, saved == EEXIST ? "INTERFACE_ERROR snapshot-target-exists %s" : "INTERFACE_ERROR resource-snapshot-write-failed target %s", dir); return 1; }
     for (nfin = 0; nfin < nf && ok; nfin++) {
         char from[4096], to[4096]; snprintf(from, sizeof from, "%s/%s", tmp, names[nfin]); snprintf(to, sizeof to, "%s/%s", dir, names[nfin]);
-        if (link(from, to)) ok = 0;
+        if (rl_snap_link(from, to)) ok = 0;
     }
     if (!ok) {
         rl_snap_unlink_all(dir, names, nfin - 1); rmdir(dir); rl_snap_unlink_all(tmp, names, nf); rmdir(tmp);
@@ -287,81 +394,102 @@ static inline int rl_snapshot_write(const char *dir, const char *stage_label, co
     rl_snap_unlink_all(tmp, names, nf); rmdir(tmp);
     return 0;
 }
-/* loader (standalone only; uses rl_load): COMMIT lists exactly the snapshot's files with their sha256; the ledger's references and
+/* loader (standalone only; parses retained verified views): COMMIT lists exactly the snapshot's files with their sha256; the ledger's references and
    the listed blobs correspond one to one; the header of resources.tsv matches the upstream input.bin (rl_check_identity).
    Callable address keys (the producer's \0library/callablemake and \0library/callablecall, 21 bytes each) are process-local:
    they load only when observe is set (observation or same-ledger replay).  Internal consistency only: no external authentication. */
-static inline int rl_snapshot_load(const char *dir, const char *upstream_stage_label, RLLedger *L, int observe, char *err, size_t errn) {
-    static char listed[RL_SNAP_MAX + 3][64]; static char lhash[RL_SNAP_MAX + 3][65]; static int refs[RL_SNAP_MAX + 3];
-    char path[4096], line[512], *buf = NULL; FILE *f; int nl = 0, i, r, hasin = 0, hastab = 0;
+static inline int rl_snapshot_load_parse(const char *dir, const char *upstream_stage_label,
+                                         RLLedger *L, int observe, char *err, size_t errn) {
+    char listed[RL_SNAP_MAX + 3][64], hashes[RL_SNAP_MAX + 3][65];
+    RLFileView files[RL_SNAP_MAX + 3]; int refs[RL_SNAP_MAX + 3];
+    unsigned char *commit = 0; size_t cn = 0, at = 0; int nl = 0, i, rc = 1, input = -1, table = -1;
     static const char callmake[] = "library/callablemake", callcall[] = "library/callablecall";
+    memset(files, 0, sizeof files); memset(refs, 0, sizeof refs);
     if (!dir || !upstream_stage_label || !L) { snprintf(err, errn, "INTERFACE_ERROR snapshot-bad-arguments"); return 1; }
-    snprintf(path, sizeof path, "%s/COMMIT", dir); f = fopen(path, "rb");
-    if (!f) { snprintf(err, errn, "INTERFACE_ERROR snapshot-incomplete no COMMIT %s", dir); return 1; }
-#define RL_SNAP_LFAIL(msg) do { fclose(f); free(buf); snprintf(err, errn, "INTERFACE_ERROR %s", msg); return 1; } while (0)
-    while (fgets(line, sizeof line, f)) {
-        size_t ln = strlen(line); int hx;
-        if (ln == 0 || line[ln-1] != '\n') RL_SNAP_LFAIL("snapshot-commit-malformed");
-        line[--ln] = 0;
-        if (ln < 67 || line[64] != ' ' || line[65] != ' ') RL_SNAP_LFAIL("snapshot-commit-malformed");
-        for (hx = 0; hx < 64; hx++) if (!((line[hx] >= '0' && line[hx] <= '9') || (line[hx] >= 'a' && line[hx] <= 'f'))) RL_SNAP_LFAIL("snapshot-commit-malformed");
-        if (!rl_snap_name_ok(line + 66)) RL_SNAP_LFAIL("snapshot-commit-name");
-        for (i = 0; i < nl; i++) if (!strcmp(listed[i], line + 66)) RL_SNAP_LFAIL("snapshot-commit-duplicate");
+    if (!rl_stage_label_ok(upstream_stage_label)) { snprintf(err, errn, "INTERFACE_ERROR snapshot-stage-label"); return 1; }
+    commit = rl_file_bytes(dir, "COMMIT", 0, 0, &cn);
+    if (!commit) {
+        snprintf(err, errn, errno == ENOENT ? "INTERFACE_ERROR snapshot-incomplete no COMMIT" :
+                 errno == ENOMEM ? "INTERFACE_ERROR snapshot-out-of-memory COMMIT" :
+                 "INTERFACE_ERROR snapshot-commit-read-failed errno=%d", errno);
+        return 1;
+    }
+#define RL_SNAP_LFAIL(msg) do { snprintf(err, errn, "INTERFACE_ERROR %s", msg); goto done; } while (0)
+    while (at < cn) {
+        size_t end = at, len, k, name_n;
+        while (end < cn && commit[end] != '\n') end++;
+        len = end - at;
+        if (end == cn || len < 67 || len >= 512 || memchr(commit + at, 0, len) || commit[at+64] != ' ' || commit[at+65] != ' ')
+            RL_SNAP_LFAIL("snapshot-commit-malformed");
+        for (k = 0; k < 64; k++) if (!((commit[at+k] >= '0' && commit[at+k] <= '9') || (commit[at+k] >= 'a' && commit[at+k] <= 'f')))
+            RL_SNAP_LFAIL("snapshot-commit-malformed");
         if (nl >= RL_SNAP_MAX + 3) RL_SNAP_LFAIL("snapshot-commit-too-many");
-        memcpy(lhash[nl], line, 64); lhash[nl][64] = 0; snprintf(listed[nl], sizeof listed[0], "%s", line + 66); refs[nl] = 0; nl++;
+        name_n = len - 66;
+        if (name_n >= sizeof listed[0]) RL_SNAP_LFAIL("snapshot-commit-name");
+        memcpy(listed[nl], commit + at + 66, name_n); listed[nl][name_n] = 0;
+        if (!rl_snap_name_ok(listed[nl])) RL_SNAP_LFAIL("snapshot-commit-name");
+        for (i = 0; i < nl; i++) if (!strcmp(listed[i], listed[nl])) RL_SNAP_LFAIL("snapshot-commit-duplicate");
+        memcpy(hashes[nl], commit + at, 64); hashes[nl][64] = 0;
+        files[nl].name = listed[nl];
+        if (!strcmp(listed[nl], "input.bin")) input = nl;
+        if (!strcmp(listed[nl], "resources.tsv")) table = nl;
+        nl++; at = end + 1;
     }
-    fclose(f);
-    for (i = 0; i < nl; i++) { if (!strcmp(listed[i], "input.bin")) hasin = 1; if (!strcmp(listed[i], "resources.tsv")) hastab = 1; }
-    if (!hasin || !hastab) { snprintf(err, errn, "INTERFACE_ERROR snapshot-commit-incomplete"); return 1; }
-    /* every listed file exists and matches its sha256 */
+    if (input < 0 || table < 0) RL_SNAP_LFAIL("snapshot-commit-incomplete");
+    /* Each file is read once, verified against the retained COMMIT, then kept
+     * until parsing finishes. Parsing never reopens a table or resource file. */
     for (i = 0; i < nl; i++) {
-        FILE *g; long cap; size_t n; char got[65];
-        snprintf(path, sizeof path, "%s/%s", dir, listed[i]); g = fopen(path, "rb");
-        if (!g) { snprintf(err, errn, "INTERFACE_ERROR snapshot-listed-file-absent %s", listed[i]); return 1; }
-        if (fseek(g, 0, SEEK_END) || (cap = ftell(g)) < 0 || fseek(g, 0, SEEK_SET)) { fclose(g); snprintf(err, errn, "INTERFACE_ERROR snapshot-listed-file-size %s", listed[i]); return 1; }
-        buf = malloc(cap ? (size_t)cap : 1);
-        if (!buf) { fclose(g); snprintf(err, errn, "INTERFACE_ERROR snapshot-out-of-memory"); return 1; }
-        n = cap ? fread(buf, 1, (size_t)cap, g) : 0; fclose(g);
-        if (n != (size_t)cap) { free(buf); buf = NULL; snprintf(err, errn, "INTERFACE_ERROR snapshot-listed-file-read %s", listed[i]); return 1; }
-        unisa_sha256_hex(buf, n, got); free(buf); buf = NULL;
-        if (strcmp(got, lhash[i])) { snprintf(err, errn, "INTERFACE_ERROR snapshot-file-sha-mismatch %s", listed[i]); return 1; }
+        size_t n = 0; char hash[65];
+        files[i].bytes = rl_file_bytes(dir, listed[i], 0, 0, &n); files[i].n = n;
+        if (!files[i].bytes) {
+            snprintf(err, errn, errno == ENOENT ? "INTERFACE_ERROR snapshot-listed-file-absent %s" :
+                     errno == ENOMEM ? "INTERFACE_ERROR snapshot-out-of-memory %s" :
+                     "INTERFACE_ERROR snapshot-listed-file-read-failed %s", listed[i]);
+            goto done;
+        }
+        unisa_sha256_hex(files[i].bytes, n, hash);
+        if (strcmp(hash, hashes[i])) RL_SNAP_LFAIL("snapshot-file-sha-mismatch");
     }
-    /* no file in the directory is unlisted */
     { DIR *d = opendir(dir); struct dirent *e;
-      if (!d) { snprintf(err, errn, "INTERFACE_ERROR snapshot-dir-open"); return 1; }
-      while ((e = readdir(d))) {
-          int found = 0;
+      if (!d) RL_SNAP_LFAIL("snapshot-dir-open");
+      for (;;) {
+          int found = 0; errno = 0; e = readdir(d);
+          if (!e) { int saved = errno; if (saved) { closedir(d); snprintf(err, errn, "INTERFACE_ERROR snapshot-dir-read errno=%d", saved); goto done; } break; }
           if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..") || !strcmp(e->d_name, "COMMIT")) continue;
-          for (i = 0; i < nl; i++) if (!strcmp(listed[i], e->d_name)) found = 1;
-          if (!found) { snprintf(err, errn, "INTERFACE_ERROR snapshot-extra-file %s", e->d_name); closedir(d); return 1; }
+          for (i = 0; i < nl; i++) if (!strcmp(e->d_name, listed[i])) found = 1;
+          if (!found) { closedir(d); RL_SNAP_LFAIL("snapshot-extra-file"); }
       }
-      closedir(d); }
-    /* the ledger is parsed once (rl_load) and its references are matched to the COMMIT list one by one */
-    snprintf(path, sizeof path, "%s/input.bin", dir); f = fopen(path, "rb");
-    if (!f) { snprintf(err, errn, "INTERFACE_ERROR snapshot-input-absent"); return 1; }
-    if (fseek(f, 0, SEEK_END) || (r = (int)ftell(f)) < 0 || fseek(f, 0, SEEK_SET)) { fclose(f); snprintf(err, errn, "INTERFACE_ERROR snapshot-input-size"); return 1; }
-    { size_t n = (size_t)r; unsigned char *ib = malloc(n ? n : 1); size_t rn;
-      if (!ib) { fclose(f); snprintf(err, errn, "INTERFACE_ERROR snapshot-out-of-memory"); return 1; }
-      rn = n ? fread(ib, 1, n, f) : 0; fclose(f);
-      if (rn != n) { free(ib); snprintf(err, errn, "INTERFACE_ERROR snapshot-input-read"); return 1; }
-      if (rl_load(dir, L, err, errn)) { free(ib); return 1; }
-      if (rl_check_identity(L, upstream_stage_label, ib, (int)n, err, errn)) { free(ib); return 1; }
-      free(ib); }
+      if (closedir(d)) RL_SNAP_LFAIL("snapshot-dir-close");
+    }
+    if (rl_load_views(dir, files, nl, L, err, errn)) goto done;
+    if (rl_check_identity(L, upstream_stage_label, files[input].bytes, (int)files[input].n, err, errn)) goto done;
     for (i = 0; i < L->n; i++) {
         int j, found = -1;
         if (!L->rows[i].present) continue;
-        for (j = 0; j < nl; j++) if (!strcmp(listed[j], L->rows[i].blob)) found = j;
-        if (!rl_snap_blob_name_ok(L->rows[i].blob)) { snprintf(err, errn, "INTERFACE_ERROR snapshot-ledger-bad-blob-name %s", L->rows[i].blob); return 1; }
-        if (found < 0) { snprintf(err, errn, "INTERFACE_ERROR snapshot-ledger-unlisted-blob %s", L->rows[i].blob); return 1; }
-        if (++refs[found] > 1) { snprintf(err, errn, "INTERFACE_ERROR snapshot-ledger-duplicate-reference %s", L->rows[i].blob); return 1; }
-        if (L->rows[i].kn == 21 && L->rows[i].key[0] == 0 && (!memcmp(L->rows[i].key + 1, callmake, 20) || !memcmp(L->rows[i].key + 1, callcall, 20))) {
-            if (!observe) { snprintf(err, errn, "INTERFACE_ERROR snapshot-callable-address-not-portable (needs --observe-callables)"); return 1; }
+        if (!rl_snap_blob_name_ok(L->rows[i].blob)) RL_SNAP_LFAIL("snapshot-ledger-bad-blob-name");
+        for (j = 0; j < nl; j++) if (!strcmp(L->rows[i].blob, listed[j])) found = j;
+        if (found < 0) RL_SNAP_LFAIL("snapshot-ledger-unlisted-blob");
+        if (++refs[found] > 1) RL_SNAP_LFAIL("snapshot-ledger-duplicate-reference");
+        if (L->rows[i].kn == 21 && L->rows[i].key[0] == 0 &&
+            (!memcmp(L->rows[i].key + 1, callmake, 20) || !memcmp(L->rows[i].key + 1, callcall, 20))) {
+            if (!observe) RL_SNAP_LFAIL("snapshot-callable-address-not-portable (needs --observe-callables)");
         }
     }
-    for (i = 0; i < nl; i++)
-        if (!strcmp(listed[i], "input.bin") || !strcmp(listed[i], "resources.tsv")) continue;
-        else if (refs[i] != 1) { snprintf(err, errn, "INTERFACE_ERROR snapshot-commit-unreferenced %s", listed[i]); return 1; }
-    return 0;
+    for (i = 0; i < nl; i++) if (i != input && i != table && refs[i] != 1) RL_SNAP_LFAIL("snapshot-commit-unreferenced");
+    rc = 0;
+done:
+    for (i = 0; i < nl; i++) free((void *)files[i].bytes);
+    free(commit);
+#undef RL_SNAP_LFAIL
+    return rc;
+}
+static inline int rl_snapshot_load(const char *dir, const char *upstream_stage_label,
+                                    RLLedger *L, int observe, char *err, size_t errn) {
+    RLLedger next = {0}; int rc;
+    if (!L) { snprintf(err, errn, "INTERFACE_ERROR snapshot-bad-arguments"); return 1; }
+    rc = rl_snapshot_load_parse(dir, upstream_stage_label, &next, observe, err, errn);
+    if (rc) rl_clear(&next);
+    *L = next; return rc;
 }
 #endif   /* _WIN32 */
 #endif

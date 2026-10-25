@@ -155,7 +155,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 ├─ R1 已有首批：新候选原生产品16断言0；旧Pa7e8的cx/owned模块551断言0及私有状态/函数直接访问拒绝；源码导出同字节；完整覆盖仍NOT_READY
 ├─ R2 旧启动器部分已证：七流原模型/74资源提取不重构；40断言0含constructor真管道/产品镜像同字节/返回7；完整独立合同仍待补
 ├─ R3 旧Pa7e8本机已证：18网8770键/22694真实infer、28868域边界拒绝及恢复、72适配拒绝、三反空跑控制0；非完整产品/跨平台资格
-├─ R4 部分已证：新根产品RI捕获/严格重放/具名拒绝/恢复24断言0；完整snapshot/生命周期/资源预算待补
+├─ R4 部分已证：根RI24；新源Linux驱动RI27、snapshot源适配265/87故障点均0；修复待完整08产品重建，完整RI/Windows/预算仍待补
 ├─ R5 部分已证：当前候选六档原生语义241/直接-run193/Tape16及smoke16断言0；完整优化语料/域/对象/宿主/自举待验，旧55固定点不转授
 ├─ R6 待迁移：库/FFI/回调/布局/生命周期等公共合同，逐项保留覆盖义务
 └─ R7 待完成：新清单全覆盖 → 同候选跨平台CI → 封存与授权发布
@@ -168,6 +168,12 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 **下一动作：** 使用已安装Pb8eae71b/S5ae4d2fc默认-run继续0.0.43；补完整RI/snapshot/生命周期、库/ABI和优化语料/域，并为当前候选取得完整自举及同候选平台证据。07代两架构内核与五驱动均真实构建，1241模型输入双向相等，包SHA未变，未重复构造权重。0.0.44的启动复用提速已登记待实现。
 
 **当前自举事实与下一刀：** 旧Pa7e8/S7601的05代固定点55断言0仅为历史证据；RI与优化入口均已改源，根产品现为Pb8eae71b/S5ae4d2fc，07代已重新构建两架构内核、五驱动和APE。当前候选自身后续重建、完整三阶段链及外宿主仍待验，不借旧固定点。
+
+**Snapshot当前源合同：** tests/snapshots.cx在Pb8启动的shared-C源适配上07代265断言0、87分配故障点，见out/c43-snapshots-07.log；实际验证COMMIT最后/无覆盖、保留已校验字节而不重读、身份/损坏/额外文件/进程本地callable拒绝、FIFO非阻塞/增长/路径/容量边界、链接/读目录/关闭/权限故障及恢复。失败事务输出为空，rl_clear释放行/键/值；故障路径heap/fd/FILE计数归零。新源Linux驱动另27断言0含重复--resource-ledger后项生效及后项拒绝，out/c43-resources-driver-08.log。完整根产品尚未重建，不把源适配或窄驱动绿转授当前根；Windows no-replace/外宿主和完整消费者RI仍NOT_COVERED。
+
+**Snapshot首红与当前刀：** 2026-10-26默认-run最小复现out/c43-snapshot-repro-material-01/snapshot.cx在合法零资源/二进制输入上返回1，具名resource-snapshot-unsupported-platform，见out/c43-snapshot-min-red-01.log。共享resourceledger.h把全部__UNISA__构建列为不支持，因为缺link包装；本版补POSIX原子无覆盖链接机制并恢复同目录身份检查，Windows独立缺口仍保留。tools/ledger-material.cx是有完整source/bootstrap/输入SHA的原C头转接，准备只记PREPARED，不冒充CX重写或功能通过。
+
+**并行旁路已证：** 库/模块ABI新批次在根Pb8eae71b上02代55断言0/not_run0，e5808040bb；只覆盖48库/布局观察、6模块ABI及候选不变，宿主FFI/provider、堆泄漏/UAF和外宿主仍NOT_COVERED。旧HANDOFF/finish-line已由409b91b5e8原文完整归档，旧gate/旧公开授权失效。67f27254b8新增数据驱动批次表/解析入口，结构负控27断言0；只验证元数据，尚未接入tests/run.cx，不算运行或完整资格。
 
 **当前RI刀：** tests/resources.cx以新根产品真实执行默认/捕获/严格重放、跨CWD、身份/重复键/缺失资源/坏行/路径拒绝、空与二进制额外账本项、拒绝后恢复，共24断言0；每个拒绝核rc2、原因及空stdout。额外空/二进制项未被消费者请求，只证账本装载，不扩成完整消费者RI语义。完整snapshot、生命周期、预算和模型坏输入仍待补。
 
@@ -215,7 +221,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 | ujs 子项目 | 独立规格与进度只在 [`ujs/prd.md`](ujs/prd.md)（及 `ujs/ARCHITECTURE.md`）；根宫殿不重述 ujs.com 代际／语料。跨项目只记：底座为 `unisacc.com`+`.cx`，不 tip／Draft 除非另授。 | [`ujs/prd.md`](ujs/prd.md) |
 | 优化合同室 | 六种拼写的原生241/直接-run193及Tape16断言0；手写字节预期、实际Tape改写和非法档拒绝均保留；完整语料/域/外宿主未覆盖。 | tests/optimization.cx及cases/optimization.cx；07代三日志打印同一候选SHA，不借旧PASS。 |
 | 新自举室 | 旧Pa7e8的05代固定点55仅属旧候选；当前Pb8eae71b的07代构建已完成，新固定点/完整三阶段链待验。 | out/c43-native-selfhost-05.log不转授；当前构建见07代日志、tools/product-build.cx。 |
-| 资源与RI室 | 07根产品捕获/严格重放/身份/缺失与坏账本拒绝/恢复24断言0；内嵌NUL原红保持修复。额外空/二进制项只证装载，完整消费者语义、snapshot/生命周期和预算未完成。 | tests/resources.cx、out/c43-resources-installed-07.log及tests/coverage.tsv；原失败/UNKNOWN保留，不改PASS。 |
+| 资源与RI室 | 根07 RI24；新源Linux驱动RI27、snapshot源适配265/87分配故障点均0，事务失败空输出、保留校验字节、堆/fd/FILE释放。完整08产品重建待做；Windows/完整消费者RI/预算仍未覆盖。 | out/c43-snapshots-07.log、out/c43-resources-driver-08.log；首红/UNKNOWN保留。tools/ledger-material.cx只准备原C源，非CX重写或PASS缓存。 |
 | 资格与发布室 | Pb8eae71b只有Linux x86_64具名开发合同；完整清单、自举及外宿主待验，签名/Draft/Latest/公开未授权。 | --all仍3；旧CI不转授。plans/v0.0.44.md的C44-RUN-REUSE-01待实现。 |
 
 旧M7/固定HEAD、旧CI/宿主交接、窗口计数与准备过程已移至[历史记忆快照](archive/prd-c43-pre-native-qualification-20261025.md)。本表只保留当前目标、能力、缺口和入口；原始身份、红/UNKNOWN与回退均未删除。

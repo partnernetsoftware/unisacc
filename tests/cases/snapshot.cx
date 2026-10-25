@@ -1,0 +1,142 @@
+/* Fault-injection fixture for the actual shared C ledger. This prefix wraps
+ * allocation and OS boundaries only; ledger parsing/writing stays verbatim. */
+static long sn_live,sn_allocs,sn_fail_alloc=-1,sn_fds,sn_streams;static int sn_fail_close=-1,sn_fail_fclose=-1,sn_clobber_cleanup;
+static long sn_fail_link=-1,sn_links,sn_commit_at;
+static int sn_fail_dir=-1,sn_table_reads,sn_blob_reads,sn_count_reads,sn_grow_empty,sn_empty_fd=-1;static char sn_empty_path[4096];
+static void *sn_malloc(size_t n){sn_allocs++;if(sn_fail_alloc==0)return 0;if(sn_fail_alloc>0)sn_fail_alloc--;void *p=malloc(n);if(p)sn_live++;return p;}
+static void *sn_realloc(void *p,size_t n){sn_allocs++;if(sn_fail_alloc==0)return 0;if(sn_fail_alloc>0)sn_fail_alloc--;int fresh=(p==0);void *q=realloc(p,n);if(q&&fresh)sn_live++;return q;}
+static void sn_free(void *p){if(p)sn_live--;free(p);}
+static int sn_open(const char *p,int flags){if(sn_count_reads){const char *name=strrchr(p,'/');name=name?name+1:p;if(!strcmp(name,"resources.tsv"))sn_table_reads++;if(!strcmp(name,"resource-002.bytes"))sn_blob_reads++;}int fd=open(p,flags);if(fd>=0)sn_fds++;if(sn_grow_empty){const char *name=strrchr(p,'/');if(name&&!strcmp(name+1,"resource-001.bytes")){sn_empty_fd=fd;if(strlen(p)>=sizeof sn_empty_path)return -1;strcpy(sn_empty_path,p);}}return fd;}
+static int sn_fstat(int fd,struct stat *st){int r=fstat(fd,st);if(!r&&sn_grow_empty&&fd==sn_empty_fd){int out=open(sn_empty_path,O_WRONLY|O_APPEND);if(out<0||write(out,"x",1)!=1||close(out))exit(2);sn_grow_empty=0;}return r;}
+static int sn_close(int fd){int r=close(fd);if(!r)sn_fds--;if(sn_fail_close==0){errno=EIO;return -1;}if(sn_fail_close>0)sn_fail_close--;return r;}
+static FILE *sn_fopen(const char *p,const char *mode){FILE *f=fopen(p,mode);if(f)sn_streams++;return f;}
+static int sn_fclose(FILE *f){int r=fclose(f);sn_streams--;if(sn_fail_fclose==0){errno=EIO;return EOF;}if(sn_fail_fclose>0)sn_fail_fclose--;return r;}
+static int sn_rmdir(const char *p){int r=rmdir(p);if(sn_clobber_cleanup)errno=EIO;return r;}
+static struct dirent *sn_readdir(DIR *d){if(sn_fail_dir==0){errno=EIO;return 0;}if(sn_fail_dir>0)sn_fail_dir--;return readdir(d);}
+static long sn_syscall(long nr,long a,long b,long c,long d,long e){
+ long expected;
+#if defined(__APPLE__)
+ expected=0x2000009L;
+#elif defined(__x86_64__)
+ expected=86;
+#else
+ expected=37;
+#endif
+ if(nr!=expected)return -ENOSYS;
+ const char *to=(const char *)(nr==37?d:b),*name=strrchr(to,'/');name=name?name+1:to;
+ sn_links++;if(!strcmp(name,"COMMIT"))sn_commit_at=sn_links;
+ if(sn_fail_link==0)return -EIO;if(sn_fail_link>0)sn_fail_link--;
+#if defined(__APPLE__)
+ return __syscall6(0x2000009L,a,b,c,d,e);
+#elif defined(__x86_64__)
+ return __syscall6(86,a,b,c,d,e);
+#else
+ return __syscall6(37,a,b,c,d,e);
+#endif
+}
+#define malloc sn_malloc
+#define realloc sn_realloc
+#define free sn_free
+#define open sn_open
+#define fstat sn_fstat
+#define close sn_close
+#define fopen sn_fopen
+#define fclose sn_fclose
+#define rmdir sn_rmdir
+#define readdir sn_readdir
+#define __syscall6 sn_syscall
+/* LEDGER_BODY */
+#undef malloc
+#undef realloc
+#undef free
+#undef open
+#undef fstat
+#undef close
+#undef fopen
+#undef fclose
+#undef rmdir
+#undef readdir
+#undef __syscall6
+
+static int sn_released(void){return !sn_live&&!sn_fds&&!sn_streams;}
+static int assertions,failures;static char base[4096],good[4096];
+static const char *stage="lower:lnx/x86_64/run/O0";
+static const unsigned char input[]="abc",ka[]="alpha",ke[]={0,'e','m','p','t','y'},kb[]={'k',0,'x'},binary[]={0,255,1};
+static RLBlob blobs[3];
+static void die(const char *s){fprintf(stderr,"snapshots: fixture %s errno=%d\n",s,errno);exit(2);}
+static void ck(int ok,const char *name){assertions++;if(!ok)failures++;printf("%s\tsnapshot.%s\n",ok?"PASS":"FAIL",name);}
+static void join(char *p,const char *a,const char *b){int n=snprintf(p,4096,"%s/%s",a,b);if(n<0||n>=4096)die("path");}
+static int absent(const char *p){struct stat st;errno=0;if(!lstat(p,&st))return 0;if(errno!=ENOENT)die("existence check");return 1;}
+static char *load(const char *p,size_t *n){char *b=cx_read(p,n);if(!b)die(p);return b;}
+static void save(const char *p,const void *data,size_t n,int exclusive){int fd=open(p,O_WRONLY|O_CREAT|O_CLOEXEC|(exclusive?O_EXCL:O_TRUNC),0600);if(fd<0)die("fixture output");const char *b=data;while(n){ssize_t z=write(fd,b,n);if(z<0&&errno==EINTR)continue;if(z<=0)die("fixture write");b+=z;n-=(size_t)z;}if(close(fd))die("fixture close");}
+static void copy(const char *name,char *out){join(out,base,name);if(mkdir(out,0700))die("clone directory");DIR *d=opendir(good);if(!d)die("clone input");struct dirent *e;while((e=readdir(d))){if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;char a[4096],b[4096];size_t n;join(a,good,e->d_name);join(b,out,e->d_name);char *s=load(a,&n);save(b,s,n,1);free(s);}if(closedir(d))die("clone close");}
+static void resign(const char *dir,const char *name){char path[4096],hash[65];size_t n,cn;join(path,dir,name);char *s=load(path,&n);cx_sha256_hex(s,n,hash);free(s);join(path,dir,"COMMIT");s=load(path,&cn);size_t at=0;int changed=0;while(at<cn){size_t end=at;while(end<cn&&s[end]!='\n')end++;if(end==cn)die("commit fixture");if(end-at==66+strlen(name)&&!memcmp(s+at+66,name,strlen(name))){memcpy(s+at,hash,64);changed++;}at=end+1;}if(changed!=1)die("resign fixture name");save(path,s,cn,0);free(s);}
+static void reject(const char *dir,const char *label,const char *reason){char err[512]={0},name[140];RLLedger L={0};int r=rl_snapshot_load(dir,label,&L,0,err,sizeof err);snprintf(name,sizeof name,"%s.reason",reason);ck(r==1&&strstr(err,reason),name);snprintf(name,sizeof name,"%s.released",reason);ck(!L.rows&&!L.n&&!L.has_id&&sn_released(),name);if(!(r==1&&strstr(err,reason)))fprintf(stderr,"snapshot actual rc=%d err=%s\n",r,err);rl_clear(&L);}
+static int write_snapshot(const char *name,const RLBlob *b,int count,char *dir,char *err){join(dir,base,name);return rl_snapshot_write(dir,stage,input,3,b,count,err,512);}
+int main(int argc,char **argv){
+ if(argc!=2||argv[1][0]!='/'||strlen(argv[1])>=sizeof base)return 2;strcpy(base,argv[1]);if(mkdir(base,0700))die("new case directory");
+ blobs[0].key=ka;blobs[0].kn=5;blobs[0].data=input;blobs[0].len=3;
+ blobs[1].key=ke;blobs[1].kn=6;blobs[1].data=0;blobs[1].len=0;
+ blobs[2].key=kb;blobs[2].kn=3;blobs[2].data=binary;blobs[2].len=3;
+ char err[512]={0},dir[4096],path[4096],tmp[4096];RLLedger L={0};int r,i;size_t n;
+ r=write_snapshot("good",blobs,3,good,err);ck(r==0,"write.present-empty-binary");if(r){fprintf(stderr,"snapshot %s\n",err);return 1;}
+ ck(sn_links==6&&sn_commit_at==6,"write.COMMIT-is-last-link");
+ snprintf(tmp,sizeof tmp,"%s.tmp%ld",good,(long)getpid());ck(absent(tmp),"write.staging-removed");
+ join(path,good,"input.bin");char *s=load(path,&n);ck(n==3&&!memcmp(s,"abc",3),"input.independent-bytes");free(s);
+ join(path,good,"resources.tsv");s=load(path,&n);const char *prefix="#SC1\tstage=lower:lnx/x86_64/run/O0\tinput_sha256=ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n616c706861\t1\tresource-000.bytes\t3\tba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n00656d707479\t1\tresource-001.bytes\t0\te3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n";
+ ck(n>strlen(prefix)&&!memcmp(s,prefix,strlen(prefix)),"ledger.FIPS-abc-empty-and-key-bytes");free(s);
+ sn_count_reads=1;sn_table_reads=sn_blob_reads=0;r=rl_snapshot_load(good,stage,&L,0,err,sizeof err);sn_count_reads=0;ck(r==0&&L.n==3,"load.three-owned-rows");ck(sn_table_reads==1&&sn_blob_reads==1,"load.verified-files-not-reopened");
+ const RLRow *a=rl_find(&L,ka,5),*empty=rl_find(&L,ke,6),*b=rl_find(&L,kb,3);
+ ck(a&&a->present&&a->vn==3&&!memcmp(a->value,"abc",3),"lookup.independent-abc");ck(empty&&empty->present&&empty->vn==0&&empty->value,"lookup.empty-retains-owned-slot");ck(b&&b->present&&b->vn==3&&!memcmp(b->value,binary,3),"lookup.binary-key-and-value");ck(!rl_find(&L,(const unsigned char *)"missing",7),"lookup.missing-is-distinct");
+ ck(sn_live>0,"ownership.live-before-clear");rl_clear(&L);ck(!L.rows&&!L.n&&!L.has_id&&sn_released(),"ownership.clear-releases-all");rl_clear(&L);ck(sn_released(),"ownership.clear-idempotent");
+ reject(good,"e3:lnx/x86_64/tape/O0","resource-identity-mismatch stage");
+ sn_clobber_cleanup=1;r=rl_snapshot_write(good,stage,input,3,blobs,3,err,sizeof err);sn_clobber_cleanup=0;ck(r==1&&strstr(err,"snapshot-target-exists"),"write.no-replace-existing-target");ck(absent(tmp),"write.no-replace-staging-cleaned");
+ copy("no-commit",dir);join(path,dir,"COMMIT");if(unlink(path))die("remove COMMIT");reject(dir,stage,"snapshot-incomplete no COMMIT");
+ copy("truncated",dir);join(path,dir,"COMMIT");save(path,"00",2,0);reject(dir,stage,"snapshot-commit-malformed");
+ copy("nul-commit",dir);join(path,dir,"COMMIT");s=load(path,&n);s[65]=0;save(path,s,n,0);free(s);reject(dir,stage,"snapshot-commit-malformed");
+ copy("duplicate-commit",dir);join(path,dir,"COMMIT");s=load(path,&n);char *end=memchr(s,'\n',n);if(!end)die("commit line");size_t first=(size_t)(end-s)+1;char *twice=malloc(n+first);if(!twice)die("fixture allocation");memcpy(twice,s,n);memcpy(twice+n,s,first);save(path,twice,n+first,0);free(twice);free(s);reject(dir,stage,"snapshot-commit-duplicate");
+ copy("extra-file",dir);join(path,dir,"unlisted");save(path,"x",1,1);reject(dir,stage,"snapshot-extra-file");
+ copy("missing-blob",dir);join(path,dir,"resource-000.bytes");if(unlink(path))die("remove blob");reject(dir,stage,"snapshot-listed-file-absent");
+ copy("directory-blob",dir);join(path,dir,"resource-000.bytes");if(unlink(path)||mkdir(path,0700))die("directory blob");reject(dir,stage,"snapshot-listed-file-read-failed");
+ copy("changed-blob",dir);join(path,dir,"resource-000.bytes");save(path,"abd",3,0);reject(dir,stage,"snapshot-file-sha-mismatch");
+ copy("changed-input",dir);join(path,dir,"input.bin");save(path,"abd",3,0);resign(dir,"input.bin");reject(dir,stage,"resource-identity-mismatch input");
+ copy("grew-empty",dir);sn_grow_empty=1;sn_empty_fd=-1;reject(dir,stage,"snapshot-listed-file-read-failed");sn_grow_empty=0;
+#if defined(__linux__)
+ copy("fifo-blob",dir);join(path,dir,"resource-000.bytes");if(unlink(path))die("FIFO fixture remove");int pp[2];if(pipe(pp))die("FIFO fixture pipe");char proc[80];snprintf(proc,sizeof proc,"/proc/self/fd/%d",pp[0]);if(symlink(proc,path))die("FIFO fixture link");reject(dir,stage,"snapshot-listed-file-read-failed");if(close(pp[0])||close(pp[1]))die("FIFO fixture close");
+#else
+ puts("NOT_COVERED\tsnapshot.native-FIFO-construction-fixture");
+#endif
+ sn_fail_dir=0;reject(good,stage,"snapshot-dir-read");sn_fail_dir=-1;
+ for(i=0;i<3;i++){char name[40];snprintf(name,sizeof name,"failed-link-%d",i);sn_fail_link=i==2?5:i;sn_links=sn_commit_at=0;r=write_snapshot(name,blobs,3,dir,err);sn_fail_link=-1;ck(r==1&&strstr(err,"resource-snapshot-write-failed link"),"write.injected-link-failure");snprintf(tmp,sizeof tmp,"%s.tmp%ld",dir,(long)getpid());ck(absent(dir)&&absent(tmp),"write.partial-link-cleanup");r=rl_snapshot_write(dir,stage,input,3,blobs,3,err,sizeof err);ck(r==0,"write.recovers-after-link-failure");}
+ RLBlob pair[2]={blobs[0],blobs[0]};r=write_snapshot("duplicate-equal",pair,2,dir,err);ck(r==0,"write.equal-key-deduplicates");r=rl_snapshot_load(dir,stage,&L,0,err,sizeof err);ck(r==0&&L.n==1,"load.equal-key-single-owner");rl_clear(&L);
+ pair[1].data=binary;r=write_snapshot("duplicate-conflict",pair,2,dir,err);ck(r==1&&strstr(err,"snapshot-key-conflict")&&absent(dir),"write.conflicting-key-refused-before-output");
+ RLBlob bad=blobs[0];bad.kn=0;r=write_snapshot("empty-key",&bad,1,dir,err);ck(r==1&&strstr(err,"snapshot-empty-key")&&absent(dir),"write.empty-key-refused");
+ char longpath[4096];memset(longpath,'a',4085);longpath[0]='/';longpath[4085]=0;r=rl_snapshot_write(longpath,stage,input,3,blobs,3,err,sizeof err);ck(r==1&&strstr(err,"snapshot-path-too-long"),"write.long-path-refused-before-truncation");
+ /* Explicit ABSENT rows are distinct from both PRESENT_EMPTY and a missing key. */
+ copy("absent-row",dir);join(path,dir,"resources.tsv");s=load(path,&n);const char *absent_row="ff\t0\t-\t0\t-\n";size_t extra=strlen(absent_row);char *with_absent=malloc(n+extra);if(!with_absent)die("absent fixture");memcpy(with_absent,s,n);memcpy(with_absent+n,absent_row,extra);save(path,with_absent,n+extra,0);free(with_absent);free(s);resign(dir,"resources.tsv");r=rl_snapshot_load(dir,stage,&L,0,err,sizeof err);const unsigned char absent_key[]={255};const RLRow *abs=rl_find(&L,absent_key,1);ck(r==0&&L.n==4&&abs&&!abs->present&&!abs->value&&abs->vn==0,"lookup.explicit-absent-is-retained");rl_clear(&L);ck(sn_released(),"ownership.absent-row-released");
+ /* Process-local callable bytes may be observed, but not silently imported. */
+ unsigned char callable_key[21]={0};memcpy(callable_key+1,"library/callablemake",20);RLBlob callable={callable_key,21,input,3};r=write_snapshot("callable-observation",&callable,1,dir,err);ck(r==0,"write.callable-observation-data");reject(dir,stage,"snapshot-callable-address-not-portable");r=rl_snapshot_load(dir,stage,&L,1,err,sizeof err);ck(r==0&&L.n==1,"load.explicit-observation-only");rl_clear(&L);ck(sn_released(),"ownership.callable-observation-released");
+ /* Empty input and zero resources are real values, not absence or skipped work. */
+ join(dir,base,"empty-snapshot");sn_links=sn_commit_at=0;r=rl_snapshot_write(dir,stage,0,0,0,0,err,sizeof err);ck(r==0&&sn_links==3&&sn_commit_at==3,"write.empty-input-zero-resources");r=rl_snapshot_load(dir,stage,&L,0,err,sizeof err);ck(r==0&&L.has_id&&!L.rows&&!L.n&&!sn_live,"load.empty-input-zero-resources");rl_clear(&L);
+ bad=blobs[0];bad.kn=513;r=write_snapshot("key-too-large",&bad,1,dir,err);ck(r==1&&strstr(err,"snapshot-bad-blob")&&absent(dir),"write.key-byte-boundary");
+ r=write_snapshot("too-many-blobs",blobs,RL_SNAP_MAX+1,dir,err);ck(r==1&&strstr(err,"snapshot-too-many-blobs")&&absent(dir),"write.blob-count-boundary-before-read");
+ join(dir,base,"bad-stage");r=rl_snapshot_write(dir,"lowerx:lnx/x86_64/run/O0",input,3,blobs,3,err,sizeof err);ck(r==1&&strstr(err,"snapshot-stage-label")&&absent(dir),"write.stage-boundary");
+ join(dir,base,"bad-input");r=rl_snapshot_write(dir,stage,0,3,blobs,3,err,sizeof err);ck(r==1&&strstr(err,"snapshot-bad-arguments")&&absent(dir),"write.nonempty-null-input-refused");
+ /* ENOTDIR and EACCES cannot be renamed to an absent ledger. */
+ join(dir,base,"parent-file");save(dir,"x",1,1);r=rl_load(dir,&L,err,sizeof err);ck(r==1&&strstr(err,"resource-ledger-read-failed")&&!strstr(err,"absent"),"load.ENOTDIR-is-not-absence");ck(!L.rows&&!L.n&&sn_released(),"load.ENOTDIR-released");rl_clear(&L);
+ if(geteuid()!=0){copy("denied-commit",dir);join(path,dir,"COMMIT");if(chmod(path,0000))die("permission fixture");reject(dir,stage,"snapshot-commit-read-failed");if(chmod(path,0600))die("permission restore");}else puts("NOT_COVERED\tsnapshot.EACCES-fixture-under-root");
+ /* More than 1KiB per row must fail the existing table budget and remove all
+  * owned staging files, without ever creating a public COMMIT. */
+ static unsigned char wide_keys[300][512];static RLBlob wide[300];for(i=0;i<300;i++){memset(wide_keys[i],'K',512);wide_keys[i][0]=(unsigned char)(i>>8);wide_keys[i][1]=(unsigned char)i;wide[i].key=wide_keys[i];wide[i].kn=512;wide[i].data=0;wide[i].len=0;}r=write_snapshot("table-capacity",wide,300,dir,err);ck(r==1&&strstr(err,"snapshot-capacity-exceeded"),"write.table-budget-refusal");snprintf(tmp,sizeof tmp,"%s.tmp%ld",dir,(long)getpid());ck(absent(dir)&&absent(tmp)&&sn_released(),"write.table-overflow-cleans-staging");
+ /* I/O completion failures are injected after the actual close, so the test
+  * can separately verify named failure, unpublished output, and recovery. */
+ for(i=0;i<3;i++){char label[40];snprintf(label,sizeof label,"failed-fclose-%d",i);sn_fail_fclose=i==2?5:i;sn_links=0;r=write_snapshot(label,blobs,3,dir,err);sn_fail_fclose=-1;ck(r==1&&strstr(err,"resource-snapshot-write-failed")&&sn_links==0,"write.close-failure-no-publication");snprintf(tmp,sizeof tmp,"%s.tmp%ld",dir,(long)getpid());ck(absent(dir)&&absent(tmp)&&sn_released(),"write.close-failure-cleans-all");r=rl_snapshot_write(dir,stage,input,3,blobs,3,err,sizeof err);ck(r==0&&sn_released(),"write.recovers-after-close-failure");}
+ sn_fail_close=0;reject(good,stage,"snapshot-commit-read-failed");sn_fail_close=-1;
+ static unsigned char keys[20][2];static RLBlob many[20];for(i=0;i<20;i++){keys[i][0]=(unsigned char)i;keys[i][1]=42;many[i].key=keys[i];many[i].kn=2;many[i].data=input;many[i].len=3;}r=write_snapshot("allocation-domain",many,20,dir,err);ck(r==0,"allocation.growing-table-fixture");
+ sn_allocs=0;r=rl_snapshot_load(dir,stage,&L,0,err,sizeof err);long allocations=sn_allocs;ck(r==0&&L.n==20&&allocations>20&&allocations<256,"allocation.real-load-points-measured");rl_clear(&L);ck(sn_released(),"allocation.baseline-released");
+ for(long point=0;point<allocations;point++){sn_fail_alloc=point;r=rl_snapshot_load(dir,stage,&L,0,err,sizeof err);sn_fail_alloc=-1;char name[100];snprintf(name,sizeof name,"allocation.failure-%ld.named",point);ck(r==1&&(strstr(err,"memory")||strstr(err,"allocation")),name);snprintf(name,sizeof name,"allocation.failure-%ld.released",point);ck(!L.rows&&!L.n&&!L.has_id&&sn_released(),name);rl_clear(&L);}
+ r=rl_snapshot_load(dir,stage,&L,0,err,sizeof err);ck(r==0&&L.n==20,"allocation.recovery-after-all-faults");rl_clear(&L);ck(sn_released(),"ownership.final-zero");
+ puts("NOT_COVERED\tsnapshot.Windows-no-replace-host-contract-and-cross-host-execution");
+ puts("TIMING\tstartup_construction_loading_inference_output_validation=UNMEASURED\tcold_hot=UNMEASURED");
+ printf("SNAPSHOTS\tassertions=%d\tfailed=%d\tallocation_fault_points=%ld\tscope=shared-C-ledger-native-POSIX-source-transition\n",assertions,failures,allocations);return failures?1:0;
+}
