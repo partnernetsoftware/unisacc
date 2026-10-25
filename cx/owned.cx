@@ -1,0 +1,49 @@
+/* Runtime checked, single-threaded bounded prototype. No raw storage escapes. */
+#pragma unisa module owned
+typedef struct { int status; long long value; } owned_result;
+enum owned_status { OWNED_OK, OWNED_INVALID, OWNED_INDEX, OWNED_SIZE, OWNED_CAPACITY, OWNED_EXHAUSTED };
+enum owned_limits { OWNED_SLOTS=4, OWNED_ELEMENTS=8, OWNED_GENERATIONS=255 };
+static long long data[4][8];
+static int generations[4], lengths[4], live[4];
+static owned_result result(int status,long long value){owned_result r;r.status=status;r.value=value;return r;}
+static int slot(long long h){
+ int s,g;
+ if(h<5||h>1024)return -1;
+ s=(int)((h-1)%4);g=(int)((h-1)/4);
+ if(!live[s]||generations[s]!=g)return -1;
+ return s;
+}
+owned_result owned_new(long long n){
+ int s,i,available=0;
+ if(n<0||n>8)return result(OWNED_SIZE,0);
+ for(s=0;s<4;s++){
+  if(live[s])continue;
+  available=1;
+  if(generations[s]==255)continue;
+  generations[s]++;lengths[s]=(int)n;
+  for(i=0;i<8;i++)data[s][i]=0;
+  live[s]=1;
+  return result(OWNED_OK,generations[s]*4+s+1);
+ }
+ return result(available?OWNED_EXHAUSTED:OWNED_CAPACITY,0);
+}
+owned_result owned_length(long long h){int s=slot(h);if(s<0)return result(OWNED_INVALID,0);return result(OWNED_OK,lengths[s]);}
+owned_result owned_get(long long h,long long index){
+ int s=slot(h);if(s<0)return result(OWNED_INVALID,0);
+ if(index<0||index>=lengths[s])return result(OWNED_INDEX,0);
+ return result(OWNED_OK,data[s][(int)index]);
+}
+owned_result owned_set(long long h,long long index,long long value){
+ int s=slot(h);if(s<0)return result(OWNED_INVALID,0);
+ if(index<0||index>=lengths[s])return result(OWNED_INDEX,0);
+ data[s][(int)index]=value;return result(OWNED_OK,0);
+}
+owned_result owned_move(long long h){
+ int s=slot(h);if(s<0)return result(OWNED_INVALID,0);
+ if(generations[s]==255)return result(OWNED_EXHAUSTED,0);
+ generations[s]++;return result(OWNED_OK,generations[s]*4+s+1);
+}
+owned_result owned_drop(long long h){
+ int s=slot(h);if(s<0)return result(OWNED_INVALID,0);
+ live[s]=0;lengths[s]=0;return result(OWNED_OK,0);
+}

@@ -1,0 +1,47 @@
+#pragma unisa use owned
+static int checks,failures;
+static void ck(int ok,const char *name){checks++;if(!ok){failures++;printf("FAIL\t%s\n",name);}}
+static void status(owned_result r,int expected,const char *name){ck(r.status==expected&&(!r.status||r.value==0),name);}
+static void value(owned_result r,long long expected,const char *name){ck(r.status==OWNED_OK&&r.value==expected,name);}
+int main(void){
+ owned_result r;long long a,b,c,d,old,moved,reused;int i;
+ status(owned_new(-1),OWNED_SIZE,"negative size");
+ status(owned_new(9),OWNED_SIZE,"oversize");
+ status(owned_new(9223372036854775807LL),OWNED_SIZE,"huge size");
+ r=owned_new(8);ck(r.status==OWNED_OK,"create max");a=r.value;
+ r=owned_new(2);ck(r.status==OWNED_OK,"create second");b=r.value;
+ r=owned_new(0);ck(r.status==OWNED_OK,"create empty");c=r.value;
+ r=owned_new(1);ck(r.status==OWNED_OK,"create fourth");d=r.value;
+ value(owned_length(a),8,"length");value(owned_get(a,7),0,"zero initialization");
+ status(owned_set(a,7,-9223372036854775807LL-1),OWNED_OK,"write i64 min");
+ status(owned_set(b,1,9223372036854775807LL),OWNED_OK,"write i64 max");
+ value(owned_get(a,7),-9223372036854775807LL-1,"read i64 min");
+ value(owned_get(b,1),9223372036854775807LL,"objects isolated");
+ status(owned_new(1),OWNED_CAPACITY,"capacity refusal");
+ value(owned_get(a,7),-9223372036854775807LL-1,"capacity preserves contents");
+ status(owned_get(a,-1),OWNED_INDEX,"negative index");status(owned_get(a,8),OWNED_INDEX,"one past");
+ status(owned_set(a,9223372036854775807LL,8),OWNED_INDEX,"huge index");
+ status(owned_get(c,0),OWNED_INDEX,"empty access");
+ value(owned_get(a,7),-9223372036854775807LL-1,"index errors preserve data");
+ status(owned_get(0,0),OWNED_INVALID,"null handle");status(owned_get(-1,0),OWNED_INVALID,"negative handle");
+ status(owned_drop(9223372036854775807LL),OWNED_INVALID,"huge handle");
+ status(owned_get(1,0),OWNED_INVALID,"unissued generation");status(owned_get(a+4,0),OWNED_INVALID,"future generation");
+ old=a;r=owned_move(a);ck(r.status==OWNED_OK&&r.value!=a,"move creates new generation");moved=r.value;
+ status(owned_get(old,7),OWNED_INVALID,"moved read");status(owned_set(old,7,3),OWNED_INVALID,"moved write");
+ status(owned_move(old),OWNED_INVALID,"second move");status(owned_drop(old),OWNED_INVALID,"moved drop");
+ value(owned_get(moved,7),-9223372036854775807LL-1,"move preserves contents");
+ status(owned_drop(moved),OWNED_OK,"drop");status(owned_drop(moved),OWNED_INVALID,"double drop");
+ status(owned_get(moved,0),OWNED_INVALID,"freed read");
+ r=owned_new(8);ck(r.status==OWNED_OK&&r.value!=moved,"reuse different handle");reused=r.value;
+ value(owned_get(reused,7),0,"reuse initializes");status(owned_set(moved,7,42),OWNED_INVALID,"stale write after reuse");
+ value(owned_get(reused,7),0,"stale write preserves reuse");
+ /* Slot 0 is at generation 3; other three slots stay live. */
+ status(owned_set(reused,0,73),OWNED_OK,"exhaustion seed");
+ for(i=3;i<255;i++){r=owned_move(reused);ck(r.status==OWNED_OK,"generation advance");old=reused;reused=r.value;status(owned_get(old,0),OWNED_INVALID,"each moved generation invalid");}
+ status(owned_move(reused),OWNED_EXHAUSTED,"generation exhaustion");value(owned_get(reused,0),73,"exhaustion preserves owner");
+ status(owned_drop(reused),OWNED_OK,"drop final generation");status(owned_new(1),OWNED_EXHAUSTED,"retired slot not recycled");
+ value(owned_get(b,1),9223372036854775807LL,"exhaustion preserves other object");
+ status(owned_drop(b),OWNED_OK,"drop second");status(owned_drop(c),OWNED_OK,"drop empty");status(owned_drop(d),OWNED_OK,"drop fourth");
+ printf("OWNED\tassertions=%d\tfailed=%d\tscope=bounded-runtime-module\n",checks,failures);
+ return failures?1:0;
+}

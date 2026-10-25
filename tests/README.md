@@ -5,9 +5,9 @@ This is a new batch, with no imported PASS records and no legacy runner dependen
 From a checkout with unisacc.com:
 
 ```
-sh ./unisacc.com /tmp/c43-native-suite/tests/run.cx -- --smoke
-sh ./unisacc.com /tmp/c43-native-suite/tests/run.cx -- --list
-sh ./unisacc.com /tmp/c43-native-suite/tests/run.cx -- --all
+sh ./unisacc.com tests/run.cx -- --smoke
+sh ./unisacc.com tests/run.cx -- --list
+sh ./unisacc.com tests/run.cx -- --all
 ```
 
 Neither .cx source uses an explicit #include directive. The runner imports cases.product using the implemented #pragma unisa use/module mechanism and relies on the existing automatic .cx edition prelude for carried library declarations. One compiler invocation builds both source units in memory, and one process computes all sixteen outcomes and compares them with hand-written expected values. It never invokes Python, Clang, shell algorithms, old suites, or child compilers, and writes no executable artifact or result cache. The shell in the command only loads unisacc.com.
@@ -21,6 +21,11 @@ The batch covers basic functions, recursion, struct arrays and pointer mutation,
 Batch execution, validation, compiler startup and internal construction/loading/inference/output are explicitly UNMEASURED. The former sys/time.h dependency is removed; no unverified OS ABI declaration replaces it. A verified module time API and phase probes remain missing. An external wall-clock measurement may report the whole invocation but cannot substitute for missing phase probes.
 
 Pointer mutation, callbacks, overlap operations and malloc/free are tests of the existing unsafe C boundary. The allocation fixture checks its allocation result and frees its buffer, but this is runtime fixture discipline, not a static safety guarantee. Existing module imports provide source organization; this MVP does not implement Rust ownership, borrowing, alias checking or memory safety guarantees.
+
+A separate reusable runtime module lives in cx/owned.cx. Run `make owned` for its
+551-assertion batch; tests/run.cx does not execute this separate batch. It checks
+bounds, stale handles, move/drop, capacity and generation exhaustion. This is
+additional partial library coverage, not a completed library or ownership gate.
 
 No seven-stream, eighteen-net, framing, adjacent-stream oracle, full RI, resource qualification, negative compiler diagnostics, six-target format, actual-host, self-bootstrap, complete library/ABI or candidate CI obligation is claimed complete. All remain visible as NOT_READY under --all. This MVP is not release qualification.
 

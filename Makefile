@@ -11,13 +11,15 @@ COMB_STEP ?=
 COMB ?= 0
 OUT ?= out/unisacc-flat.c
 
-.PHONY: help smoke quick test list export-ref ref com model-com release comboot-seed-step comboot-stage2-step comboot-stage3-step
+.PHONY: owned help smoke quick test list export-ref ref com model-com release comboot-seed-step comboot-stage2-step comboot-stage3-step
 help:
 	@echo 'smoke / quick: native product batch, partial coverage only'
 	@echo 'test: complete contract gate; NOT_READY is a failure'
 	@echo 'list: implemented cases and explicit gaps'
 	@echo 'export-ref OUT=...: native complete source export'
 	@echo 'model-com MODEL_DIR=... MODEL_STEP=...: one bounded construction step'
+owned:
+	@sh "$(UNISACC)" cx/check_owned.cx
 smoke quick:
 	@sh "$(UNISACC)" tests/run.cx -- --smoke
 test:
