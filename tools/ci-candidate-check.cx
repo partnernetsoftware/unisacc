@@ -1,0 +1,55 @@
+/* Read-only candidate admission metadata. This never executes a test batch.
+ * The host adapter first hashes the downloaded bytes independently and executes
+ * the existing seed/ident.c to recompute the source identity. No shell or fork
+ * is used here. rc0 is reserved for --selftest; --check remains NOT_READY/3. */
+#pragma unisa use cxlib.testplan
+static const char *plan_paths[]={"tests/coverage.tsv","tests/batches.tsv","tests/run.cx","tests/plan.cx","tools/cxlib/testplan.cx","tools/ci-candidate-check.cx"};
+static int failures,checks;
+static void check(int ok,const char *name){checks++;if(!ok)failures++;printf("%s\tci-candidate.%s\n",ok?"PASS":"FAIL",name);}
+static int lower_hex(const char *s,size_t n){size_t i;if(!s||strlen(s)!=n)return 0;for(i=0;i<n;i++)if(!((s[i]>='0'&&s[i]<='9')||(s[i]>='a'&&s[i]<='f')))return 0;return 1;}
+static int positive_id(const char *s){size_t i,n;if(!s||(n=strlen(s))==0||n>20||s[0]=='0')return 0;for(i=0;i<n;i++)if(s[i]<'0'||s[i]>'9')return 0;return 1;}
+static int axis(const char *s){return s&&(!strcmp(s,"x86_64")||!strcmp(s,"arm64"));}
+static int host_os(const char *s){return s&&(!strcmp(s,"lnx")||!strcmp(s,"osx")||!strcmp(s,"win"));}
+static int path(char *out,size_t cap,const char *root,const char *rel){int n=snprintf(out,cap,"%s/%s",root,rel);return n>=0&&(size_t)n<cap;}
+static char *load(const char *p,size_t *n){struct stat st;if(lstat(p,&st)||!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>67108864){fprintf(stderr,"candidate-check: regular bounded file required: %s errno=%d\n",p,errno);return 0;}char *s=cx_read(p,n);if(!s||*n!=(size_t)st.st_size){free(s);return 0;}return s;}
+static int digest(const char *root,const char *rel,char h[65]){char p[4400];size_t n;if(!path(p,sizeof p,root,rel))return 0;char *s=load(p,&n);if(!s)return 0;cx_sha256_hex(s,n,h);free(s);return 1;}
+static int nibble(char c){return c<='9'?c-'0':c-'a'+10;}
+/* Canonical plan = SHA256(concat(path UTF8, NUL, raw SHA256(file))) in this
+ * exact six-file order. No newline conversion, file names or cached PASS input. */
+static int plan_digest(const char *root,char h[65]){unsigned char wire[2048];size_t at=0,i,j;for(i=0;i<6;i++){char f[65];size_t z=strlen(plan_paths[i]);if(!digest(root,plan_paths[i],f)||at+z+33>sizeof wire)return 0;memcpy(wire+at,plan_paths[i],z+1);at+=z+1;for(j=0;j<32;j++)wire[at++]=(unsigned char)((nibble(f[2*j])<<4)|nibble(f[2*j+1]));}cx_sha256_hex(wire,at,h);return 1;}
+static const char *process_arch(void){
+#if defined(__aarch64__) || defined(_M_ARM64)
+ return "arm64";
+#elif defined(__x86_64__) || defined(_M_X64)
+ return "x86_64";
+#else
+ return "UNKNOWN";
+#endif
+}
+static const char *process_os(void){
+#if defined(_WIN32)
+ return "win";
+#elif defined(__APPLE__)
+ return "osx";
+#elif defined(__linux__)
+ return "lnx";
+#else
+ return "UNKNOWN";
+#endif
+}
+static int selftest(void){char h[65];cx_sha256_hex("abc",3,h);check(!strcmp(h,"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"),"sha256-standard-abc");check(lower_hex(h,64),"lowercase-hash");check(!lower_hex(h,40),"hash-width-refusal");check(!lower_hex("ABCDEF",6),"uppercase-hash-refusal");check(!lower_hex(0,64),"null-hash-refusal");check(positive_id("123456789"),"decimal-id");check(!positive_id("0")&&!positive_id("01")&&!positive_id("1;bad")&&!positive_id("1\n"),"malformed-id-refusal");check(axis("arm64")&&axis("x86_64")&&!axis("AMD64")&&!axis(0),"explicit-architecture-vocabulary");check(host_os("win")&&host_os("lnx")&&host_os("osx")&&!host_os("Windows"),"explicit-host-vocabulary");cx_sha256_hex("",0,h);check(!strcmp(h,"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),"sha256-standard-empty");check(nibble('0')==0&&nibble('9')==9&&nibble('a')==10&&nibble('f')==15,"raw-digest-nibbles");printf("CI_CANDIDATE_CONTROLS\tassertions=%d\tfailed=%d\texecuted_batches=0\tscope=metadata-only\n",checks,failures);return failures?1:0;}
+int main(int argc,char **argv){if(argc==2&&!strcmp(argv[1],"--selftest"))return selftest();if(argc==3&&!strcmp(argv[1],"--plan-sha")){char h[65];if(!plan_digest(argv[2],h))return 2;puts(h);return 0;}if(argc!=3||strcmp(argv[1],"--check")){fprintf(stderr,"usage: --selftest | --plan-sha ROOT | --check ROOT\n");return 2;}
+ const char *com=getenv("C43_COM_SHA"),*source=getenv("C43_SOURCE_SHA"),*commit=getenv("C43_VERIFY_COMMIT"),*plan=getenv("C43_PLAN_SHA"),*run=getenv("C43_PRODUCER_RUN"),*artifact=getenv("C43_ARTIFACT_ID"),*record=getenv("C43_RECORD_SHA"),*observed=getenv("C43_SOURCE_OBSERVED"),*os=getenv("C43_HOST_OS"),*arch=getenv("C43_HOST_ARCH"),*expected=getenv("C43_EXPECT_PROCESS");
+ if(!lower_hex(com,64)||!lower_hex(source,64)||!lower_hex(commit,40)||!lower_hex(plan,64)||!lower_hex(record,64)||!positive_id(run)||!positive_id(artifact)||!host_os(os)||!axis(arch)||!axis(expected)||!observed||strcmp(source,observed)){fprintf(stderr,"candidate-check: REFUSE explicit identity/host inputs\n");return 2;}
+ char h[65];if(!digest(argv[2],"unisacc.com",h)||strcmp(h,com)||!digest(argv[2],"unisacc.com.build.json",h)||strcmp(h,record)||!plan_digest(argv[2],h)||strcmp(h,plan)){fprintf(stderr,"candidate-check: REFUSE candidate/record/plan digest\n");return 2;}
+ printf("CANDIDATE\tsha256=%s\tsources_sha256=%s\tverification_commit=%s\tplan_sha256=%s\tproducer_run=%s\tartifact_id=%s\n",com,source,commit,plan,run,artifact);
+ printf("CONTEXT\thost_os=%s\thost_arch=%s\tcandidate_compiler_os=%s\tcandidate_compiler_arch=%s\tprocess_observation=compiler-predefines-only\toutput_target=NOT_RUN\n",os,arch,process_os(),process_arch());
+ if(strcmp(os,process_os())||strcmp(expected,process_arch())){fprintf(stderr,"candidate-check: REFUSE unexpected compiler/process axis\n");return 2;}
+ if(!strcmp(os,"win")&&!strcmp(arch,"arm64"))puts("CONTEXT\tWindows-ARM-host\tAPE-PE-x86_64-process\tARM-native-process=NOT_RUN");
+ /* tp_analyze currently owns a POSIX-absolute-root contract. A Windows drive
+  * path is not rewritten to pretend that native path support has been proved. */
+ if(argv[2][0]!='/'){puts("NOT_RUN\tregistry-validation\tcurrent-testplan-requires-POSIX-absolute-root");puts("QUALIFICATION\tNOT_READY\texecuted_batches=0");return 3;}
+ char rp[4400],cp[4400],why[600];size_t rn,cn;if(!path(rp,sizeof rp,argv[2],"tests/batches.tsv")||!path(cp,sizeof cp,argv[2],"tests/coverage.tsv"))return 2;char *r=load(rp,&rn),*c=load(cp,&cn);if(!r||!c){free(r);free(c);return 2;}tp_summary s;int rc=tp_analyze(argv[2],r,rn,c,cn,1,&s,why,sizeof why);free(r);free(c);if(rc){fprintf(stderr,"candidate-check: REFUSE registry: %s\n",why);return 2;}
+ printf("REGISTRY\tmetadata_valid=1\tbatches=%d\tplanned=%d\tunprepared=%d\tunresolved=%d\texecuted_batches=0\n",s.batches,s.planned_batches,s.unprepared_batches,s.unresolved_coverage);
+ puts("NOT_RUN\tfull-registry-execution-and-same-candidate-platform-qualification");puts("QUALIFICATION\tNOT_READY\tmetadata-is-not-functional-PASS");return 3;
+}

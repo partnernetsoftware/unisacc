@@ -1,0 +1,225 @@
+name: candidate-native-admission-draft
+# Local review draft. No push/PR/schedule trigger, upload, release or signing.
+# A manual dispatch is a separate authorized action; this file does not do it.
+on:
+  workflow_dispatch:
+    inputs:
+      producer_run:
+        description: 'Exact completed successful Actions producer run in this repository'
+        type: string
+        required: true
+      artifact_id:
+        description: 'One immutable Actions artifact ID belonging to producer_run'
+        type: string
+        required: true
+      com_sha256:
+        description: 'Expected SHA256 of raw unisacc.com, not the ZIP/artifact digest'
+        type: string
+        required: true
+      source_sha256:
+        description: 'Expected existing seed/ident.c product source-closure SHA256'
+        type: string
+        required: true
+      verification_commit:
+        description: 'Exact 40-character verification commit, never a branch name'
+        type: string
+        required: true
+      plan_sha256:
+        description: 'Canonical six-file plan SHA256 documented in docs/c43-candidate-ci.md'
+        type: string
+        required: true
+      build_record_sha256:
+        description: 'Expected raw unisacc.com.build.json SHA256'
+        type: string
+        required: true
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: candidate-native-admission-draft
+  cancel-in-progress: false
+env:
+  # Preserve source bytes and real symlink identity before checkout. Existing
+  # .gitattributes is also * -text. A failed symlink checkout is a failed input.
+  GIT_CONFIG_COUNT: '2'
+  GIT_CONFIG_KEY_0: core.autocrlf
+  GIT_CONFIG_VALUE_0: 'false'
+  GIT_CONFIG_KEY_1: core.symlinks
+  GIT_CONFIG_VALUE_1: 'true'
+  C43_PRODUCER_RUN: ${{ inputs.producer_run }}
+  C43_ARTIFACT_ID: ${{ inputs.artifact_id }}
+  C43_COM_SHA: ${{ inputs.com_sha256 }}
+  C43_SOURCE_SHA: ${{ inputs.source_sha256 }}
+  C43_VERIFY_COMMIT: ${{ inputs.verification_commit }}
+  C43_PLAN_SHA: ${{ inputs.plan_sha256 }}
+  C43_RECORD_SHA: ${{ inputs.build_record_sha256 }}
+jobs:
+  candidate:
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - {runner: ubuntu-24.04, os: lnx, host: x86_64, process: x86_64}
+          - {runner: ubuntu-24.04-arm, os: lnx, host: arm64, process: arm64}
+          - {runner: macos-15-intel, os: osx, host: x86_64, process: x86_64}
+          - {runner: macos-15, os: osx, host: arm64, process: arm64}
+          - {runner: windows-2025, os: win, host: x86_64, process: x86_64}
+          - {runner: windows-11-arm, os: win, host: arm64, process: x86_64}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 8
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Validate dispatch literals before checkout
+        timeout-minutes: 1
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($name in @('C43_PRODUCER_RUN','C43_ARTIFACT_ID')) {
+            if ([Environment]::GetEnvironmentVariable($name) -cnotmatch '^[1-9][0-9]{0,19}$') { throw "Invalid $name" }
+          }
+          foreach ($name in @('C43_COM_SHA','C43_SOURCE_SHA','C43_PLAN_SHA','C43_RECORD_SHA')) {
+            if ([Environment]::GetEnvironmentVariable($name) -cnotmatch '^[0-9a-f]{64}$') { throw "Invalid $name" }
+          }
+          if ($env:C43_VERIFY_COMMIT -cnotmatch '^[0-9a-f]{40}$') { throw 'Exact verification commit required' }
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6, official tag resolved 2026-10-26
+        timeout-minutes: 1
+        with:
+          ref: ${{ inputs.verification_commit }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Download exact producer artifact through bounded REST requests
+        timeout-minutes: 3
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_API_URL: ${{ github.api_url }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' }
+          $base = "$env:GH_API_URL/repos/$env:GH_REPOSITORY/actions"
+          $run = Invoke-RestMethod -Uri "$base/runs/$env:C43_PRODUCER_RUN" -Headers $headers -TimeoutSec 40 -MaximumRetryCount 0
+          if ($run.status -ne 'completed' -or $run.conclusion -ne 'success') { throw 'Producer run must be completed and successful' }
+          $artifact = Invoke-RestMethod -Uri "$base/artifacts/$env:C43_ARTIFACT_ID" -Headers $headers -TimeoutSec 40 -MaximumRetryCount 0
+          if ($artifact.expired -or "$($artifact.workflow_run.id)" -cne $env:C43_PRODUCER_RUN -or $artifact.size_in_bytes -gt 134217728) { throw 'Artifact run/expiry/size mismatch' }
+          New-Item -ItemType Directory -Force -Path out/ci-candidate | Out-Null
+          Invoke-WebRequest -Uri "$base/artifacts/$env:C43_ARTIFACT_ID/zip" -Headers $headers -OutFile out/candidate.zip -TimeoutSec 45 -MaximumRetryCount 0
+          $zip = [IO.Compression.ZipFile]::OpenRead((Join-Path $PWD 'out/candidate.zip'))
+          try {
+            $names = @($zip.Entries | ForEach-Object { $_.FullName })
+            if ($names.Count -ne 2 -or ((@($names | Sort-Object) -join ',') -cne 'unisacc.com,unisacc.com.build.json')) { throw 'Artifact must contain exactly the two root-level raw files' }
+            foreach ($entry in $zip.Entries) {
+              if ($entry.Length -lt 1 -or $entry.Length -gt 67108864) { throw 'Artifact member size rejected' }
+              [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, (Join-Path $PWD "out/ci-candidate/$($entry.FullName)"), $false)
+            }
+          } finally { $zip.Dispose() }
+          Write-Output "ARTIFACT repository=$env:GH_REPOSITORY run=$env:C43_PRODUCER_RUN artifact=$env:C43_ARTIFACT_ID producer_head=$($run.head_sha) archive_digest=$($artifact.digest)"
+      - name: Verify bytes independently, observe process, retain incomplete qualification
+        timeout-minutes: 5
+        env:
+          C43_HOST_OS: ${{ matrix.os }}
+          C43_MATRIX_HOST: ${{ matrix.host }}
+          C43_EXPECT_PROCESS: ${{ matrix.process }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # This is the host process adapter only; contract parsing is in CX.
+          # ArgumentList performs no shell interpolation. Kill(true) requests
+          # owned-tree cleanup for git. Candidate execution additionally uses the
+          # existing POSIX process-group watchdog at 50s, inside this 53s bound.
+          function Invoke-Bounded([string]$file, [string[]]$arguments, [string]$label) {
+            $info = [Diagnostics.ProcessStartInfo]::new()
+            $info.FileName = $file
+            $info.UseShellExecute = $false
+            $info.RedirectStandardOutput = $true
+            $info.RedirectStandardError = $true
+            foreach ($item in $arguments) { $info.ArgumentList.Add($item) }
+            $process = [Diagnostics.Process]::new()
+            $process.StartInfo = $info
+            try {
+              if (!$process.Start()) { throw "NOT_RUN $label start failed" }
+              $stdout = $process.StandardOutput.ReadToEndAsync()
+              $stderr = $process.StandardError.ReadToEndAsync()
+              if (!$process.WaitForExit(53000)) {
+                $process.Kill($true)
+                if (!$process.WaitForExit(2000)) { throw "NOT_RUN $label process tree cleanup incomplete" }
+                throw "NOT_RUN $label exceeded 53s; owned descendants killed"
+              }
+              if (!$stdout.Wait(500) -or !$stderr.Wait(500)) { $process.Kill($true); throw "NOT_RUN $label inherited stream still open" }
+              $result = @{ Code = $process.ExitCode; Out = $stdout.Result; Err = $stderr.Result }
+              Write-Host "COMMAND $label rc=$($result.Code)"
+              Write-Host $result.Out
+              if ($result.Err) { Write-Host $result.Err }
+              return $result
+            } finally { $process.Dispose() }
+          }
+          function Hash-File([string]$name) { return (Get-FileHash -LiteralPath $name -Algorithm SHA256).Hash.ToLowerInvariant() }
+          $head = Invoke-Bounded 'git' @('rev-parse','HEAD') 'verification-commit'
+          if ($head.Code -ne 0 -or $head.Out.Trim() -cne $env:C43_VERIFY_COMMIT) { throw 'Verification checkout mismatch' }
+          $links = Invoke-Bounded 'git' @('ls-files','--stage','-z') 'symlink-index'
+          if ($links.Code -ne 0) { throw 'Symlink index unavailable' }
+          foreach ($entry in $links.Out.Split([char]0)) {
+            if ($entry.StartsWith('120000 ')) {
+              $name = $entry.Substring($entry.IndexOf("`t") + 1)
+              $item = Get-Item -LiteralPath $name -Force
+              if ($item.LinkType -cne 'SymbolicLink') { throw "NOT_RUN real symlink required: $name" }
+            }
+          }
+          $status = Invoke-Bounded 'git' @('status','--porcelain','--untracked-files=no') 'checkout-bytes'
+          if ($status.Code -ne 0 -or $status.Out) { throw 'Checkout bytes/modes changed' }
+          if ((Hash-File 'out/ci-candidate/unisacc.com') -cne $env:C43_COM_SHA -or (Hash-File 'out/ci-candidate/unisacc.com.build.json') -cne $env:C43_RECORD_SHA) { throw 'Independent host candidate/record hash mismatch' }
+          $record = Get-Content -LiteralPath out/ci-candidate/unisacc.com.build.json -Raw | ConvertFrom-Json -AsHashtable
+          if ($record.schema -ne 1 -or $record.artifact_sha256 -cne $env:C43_COM_SHA -or $record.sources_sha256 -cne $env:C43_SOURCE_SHA -or $record.bytes -ne (Get-Item out/ci-candidate/unisacc.com).Length) { throw 'Build record identities disagree' }
+          $planFiles = @('tests/coverage.tsv','tests/batches.tsv','tests/run.cx','tests/plan.cx','tools/cxlib/testplan.cx','tools/ci-candidate-check.cx')
+          $wire = [IO.MemoryStream]::new()
+          try {
+            foreach ($name in $planFiles) {
+              $bytes = [Text.Encoding]::UTF8.GetBytes($name + [char]0)
+              $wire.Write($bytes)
+              $wire.Write([Convert]::FromHexString((Hash-File $name)))
+            }
+            $actualPlan = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($wire.ToArray())).ToLowerInvariant()
+          } finally { $wire.Dispose() }
+          if ($actualPlan -cne $env:C43_PLAN_SHA) { throw 'Independent host plan digest mismatch' }
+          $hostArch = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+          $actualOS = if ($IsWindows) { 'win' } elseif ($IsMacOS) { 'osx' } elseif ($IsLinux) { 'lnx' } else { 'UNKNOWN' }
+          if ($actualOS -cne $env:C43_HOST_OS) { throw 'Actual host OS differs from matrix' }
+          $env:C43_HOST_ARCH = if ($hostArch -eq 'x64') { 'x86_64' } else { $hostArch }
+          if ($env:C43_HOST_ARCH -cne $env:C43_MATRIX_HOST) { throw 'Actual host architecture differs from matrix' }
+          Write-Output "HOST os=$env:C43_HOST_OS arch=$env:C43_HOST_ARCH launcher_arch=$([Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture) output_targets=NOT_RUN"
+          if ($IsWindows) {
+            $bytes = [IO.File]::ReadAllBytes((Join-Path $PWD 'out/ci-candidate/unisacc.com'))
+            $pe = [BitConverter]::ToUInt32($bytes, 60)
+            if ($pe -gt $bytes.Length - 6 -or [BitConverter]::ToUInt32($bytes, $pe) -ne 0x4550 -or [BitConverter]::ToUInt16($bytes, $pe + 4) -ne 0x8664) { throw 'Expected APE PE x86_64 process image' }
+            Write-Output 'PROCESS image=PE/x86_64; candidate_runtime_process=NOT_RUN; WinARM APE would use x64 emulation; ARM native process NOT_RUN'
+            Write-Output 'NOT_RUN candidate execution/source-closure/registry/--all: Windows JobObject tree watchdog and native path adapter are not implemented'
+            Write-Output 'QUALIFICATION NOT_READY; independent host byte/plan hashes do not prove candidate execution'
+            exit 3
+          }
+          Copy-Item out/ci-candidate/unisacc.com ./unisacc.com
+          Copy-Item out/ci-candidate/unisacc.com.build.json ./unisacc.com.build.json
+          $product = Join-Path $PWD 'unisacc.com'
+          function Invoke-Candidate([string[]]$arguments, [string]$label) {
+            return Invoke-Bounded 'sh' (@('tools/bound','50','sh',$product) + $arguments) $label
+          }
+          # Reuse the existing identity algorithm. Its POSIX/runtime portability
+          # is a real prerequisite; a failure remains NOT_RUN, never bypassed.
+          $source = Invoke-Candidate @('seed/ident.c','--','.') 'source-closure'
+          if ($source.Code -ne 0 -or $source.Out -cnotmatch '^[0-9a-f]{64}\n$' -or $source.Out.Trim() -cne $env:C43_SOURCE_SHA -or $source.Err) { throw 'NOT_RUN source closure did not independently agree with supplied source identity' }
+          $env:C43_SOURCE_OBSERVED = $source.Out.Trim()
+          $metadata = Invoke-Candidate @('tools/ci-candidate-check.cx','--','--check',"$PWD") 'candidate-metadata'
+          if ($metadata.Code -ne 3) { throw 'Candidate metadata must remain explicitly NOT_READY in this draft' }
+          $all = Invoke-Candidate @('tests/run.cx','--','--all') 'all-current-entry'
+          if ($all.Code -ne 0 -and $all.Code -ne 3) { throw 'Current --all failed or could not run' }
+          Write-Output "ALL rc=$($all.Code); complete registry execution and same-candidate qualification remain NOT_READY"
+          if ((Hash-File 'unisacc.com') -cne $env:C43_COM_SHA -or (Hash-File 'unisacc.com.build.json') -cne $env:C43_RECORD_SHA) { throw 'Candidate changed during checks' }
+          Write-Output 'NOT_RUN complete new coverage; every unexecuted batch; foreign output images; strict three-stage chain; publication'
+          Write-Output 'QUALIFICATION NOT_READY; this draft cannot promote smoke/metadata to qualification'
+          exit 3
+      - name: Explicit incomplete evidence receipt
+        if: always()
+        timeout-minutes: 1
+        run: |
+          Write-Output 'NOT_RUN every batch/host/target not actually logged by this attempt'
+          Write-Output 'NOT_RUN full new coverage, strict three-stage selfhost chain, signing, Draft, Latest, public release'
+          Write-Output 'QUALIFICATION NOT_READY; a successful input hash or local smoke is not qualification'
