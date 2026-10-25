@@ -1,13 +1,17 @@
 #pragma unisa use cxlib.kernelcontext
+#pragma unisa use cxlib.corecompat
 /* Refresh a pinned development baseline without reconstructing unchanged models.
- * This is a narrow source-equality migration, not a general model cache.
+ * This is a narrow source-equality migration plus one pinned runtime-only
+ * empty-copy guard (corecompat), not a general model cache. All selected files
+ * remain in model-inputs.tsv with their actual current hash; the exception is
+ * explicit in package.tsv. Constructor/action definitions stay identical.
  * P3 model/directory bytes and non-kernel resources are preserved exactly.
  * Full source identity is recorded separately; this tool grants no test PASS.
  */
 #pragma unisa use cxlib.netpack
 static const char *baseline_sha="7f709378fa84a36edac2fcf1c36a62a13d45c26d34e57f1f7b50af74b2de4d1a";
 static char root[4096],oldroot[4096],work[4096];
-static np_buf closure={0};static int checked;
+static np_buf closure={0};static int checked,core_guarded;static char core_current[65],compat_helper[65];
 static void die(const char *s){fprintf(stderr,"package-refresh: REFUSE %s\n",s);exit(2);}
 static void path(char *p,size_t cap,const char *a,const char *b){int k=snprintf(p,cap,"%s/%s",a,b);if(k<0||(size_t)k>=cap)die("path bound");}
 static char *load(const char *p,size_t *n){struct stat s;size_t z;if(lstat(p,&s)||!S_ISREG(s.st_mode)||s.st_size<0||s.st_size>268435456)die(p);char *b=cx_read(p,&z);if(!b||z!=(size_t)s.st_size)die("read/size changed");*n=z;return b;}
@@ -22,7 +26,7 @@ static int source(const char *p){
  if(!strncmp(p,"seed/",5)){const char *s=p+5;return !strcmp(s,"gen.c")||!strcmp(s,"facts.h")||!strcmp(s,"json.h")||!strcmp(s,"tbl.c")||!strcmp(s,"net.c")||!strcmp(s,"compilerpack.c")||!strcmp(s,"pack.c");}
  return suffix(p,".py")||suffix(p,".c")||suffix(p,".h")||suffix(p,".inc")||suffix(p,".tsv")||suffix(p,".json");
 }
-static void equal_file(const char *relative,int append){char a[4400],b[4400],h[65];size_t an,bn;path(a,sizeof a,root,relative);path(b,sizeof b,oldroot,relative);char *av=load(a,&an),*bv=load(b,&bn);if(an!=bn||memcmp(av,bv,an))die(relative);if(append){cx_sha256_hex(av,an,h);np_puts(&closure,relative);np_puts(&closure,"\t");np_puts(&closure,h);np_puts(&closure,"\n");checked++;}free(av);free(bv);}
+static void equal_file(const char *relative,int append){char a[4400],b[4400],h[65];size_t an,bn;path(a,sizeof a,root,relative);path(b,sizeof b,oldroot,relative);char *av=load(a,&an),*bv=load(b,&bn);if(!strcmp(relative,"exec/c/core.c")){int old=cc_kind(bv,bn),now=cc_kind(av,an);if(old!=0||now<0)die("core-source-compat-unapproved");core_guarded=now;cx_sha256_hex(av,an,core_current);}else if(an!=bn||memcmp(av,bv,an))die(relative);if(append){cx_sha256_hex(av,an,h);np_puts(&closure,relative);np_puts(&closure,"\t");np_puts(&closure,h);np_puts(&closure,"\n");checked++;}free(av);free(bv);}
 /* Compare both directory sets. A new or removed constructor input is refused.
  * Symlinks are excluded only where the selector excludes their suffix, e.g.
  * migrated CX test helpers; selected constructor symlinks are refused by load.
@@ -38,7 +42,7 @@ static void kernel_context(const char *dir){char source_sha[65];kc_check(root,di
 int main(int argc,char **argv){
  if(argc!=5){fputs("usage: ROOT FROZEN_BASELINE_ROOT KERNEL_GENERATION NEW_OUTDIR\n",stderr);return 2;}
  if(!realpath(argv[1],root)||!realpath(argv[2],oldroot)||argv[4][0]!='/'||strlen(argv[4])>=sizeof work)die("root/output");strcpy(work,argv[4]);
- kernel_context(argv[3]);compare_sources();char p[4400],hash[65];size_t bn;path(p,sizeof p,oldroot,"unisacc.com");char *base=load(p,&bn);cx_sha256_hex(base,bn,hash);if(strcmp(hash,baseline_sha))die("baseline product identity");
+ char compat_path[4400];size_t compat_n;path(compat_path,sizeof compat_path,root,"tools/cxlib/corecompat.cx");char *compat_bytes=load(compat_path,&compat_n);cx_sha256_hex(compat_bytes,compat_n,compat_helper);free(compat_bytes);kernel_context(argv[3]);compare_sources();char p[4400],hash[65];size_t bn;path(p,sizeof p,oldroot,"unisacc.com");char *base=load(p,&bn);cx_sha256_hex(base,bn,hash);if(strcmp(hash,baseline_sha))die("baseline product identity");
  if(bn<16||memcmp(base+bn-16,"UNIPKG1\n",8))die("baseline package footer");unsigned long long z=little(base+bn-8);if(!z||z>bn-16)die("baseline package extent");Reader r={base+bn-16-(size_t)z,(size_t)z,0};char w[8][256];int fields=line(&r,w);if(fields!=5||strcmp(w[0],"P")||strcmp(w[1],"3"))die("P3 required");size_t models=number(w[2],65536),stages=number(w[3],65536),resources=number(w[4],65536),i;if(!models||!stages||resources<2)die("counts");
  for(i=0;i<stages;i++){if(line(&r,w)!=6||strcmp(w[0],"D"))die("stage directory");number(w[5],models-1);}
  for(i=0;i<models;i++){if(line(&r,w)!=5||strcmp(w[0],"M")||strcmp(w[3],"1"))die("model record");size_t n=number(w[1],r.n);if(!n||n>r.n-r.at||!number(w[2],2147483647))die("model extent");number(w[4],4294967295ULL);r.at+=n;}
@@ -55,6 +59,7 @@ int main(int argc,char **argv){
   * while these checks bind the exact carried payload bytes. */
  path(p,sizeof p,oldroot,"unisacc.com");size_t again_n;char *again=load(p,&again_n);cx_sha256_hex(again,again_n,hash);free(again);if(strcmp(hash,baseline_sha))die("baseline changed during preparation");
  for(i=0;i<2;i++){char rel[80];snprintf(rel,sizeof rel,"%s.kernel",arch[i]);path(p,sizeof p,argv[3],rel);again=load(p,&again_n);cx_sha256_hex(again,again_n,hash);free(again);if(strcmp(hash,kh[i]))die("kernel changed during preparation");}
- if(mkdir(work,0700))die("new output directory required");saved("compiler.pkg",output.p,output.n);saved("model-inputs.tsv",closure.p,closure.n);cx_sha256_hex(output.p,output.n,hash);char toolhash[65];path(p,sizeof p,root,"tools/package-refresh.cx");again=load(p,&again_n);cx_sha256_hex(again,again_n,toolhash);free(again);char receipt[768];int n=snprintf(receipt,sizeof receipt,"PREPARED\tpackage-refresh\tno-test-result\nbaseline\t%s\npackage\t%s\nmodel-directory-prefix-bytes\t%lu\narm64-kernel\t%s\nx86_64-kernel\t%s\nchecked-source-files\t%d\nrefresh-tool\t%s\n",baseline_sha,hash,(unsigned long)prefix,kh[0],kh[1],checked/2,toolhash);saved("package.tsv",receipt,(size_t)n);fwrite(receipt,1,(size_t)n,stdout);
+ compat_bytes=load(compat_path,&compat_n);cx_sha256_hex(compat_bytes,compat_n,hash);free(compat_bytes);if(strcmp(hash,compat_helper))die("compat helper changed");
+ if(mkdir(work,0700))die("new output directory required");saved("compiler.pkg",output.p,output.n);saved("model-inputs.tsv",closure.p,closure.n);cx_sha256_hex(output.p,output.n,hash);char toolhash[65];path(p,sizeof p,root,"tools/package-refresh.cx");again=load(p,&again_n);cx_sha256_hex(again,again_n,toolhash);free(again);char receipt[768];int n=snprintf(receipt,sizeof receipt,"PREPARED\tpackage-refresh\tno-test-result\nbaseline\t%s\npackage\t%s\nmodel-directory-prefix-bytes\t%lu\narm64-kernel\t%s\nx86_64-kernel\t%s\nchecked-source-files\t%d\nrefresh-tool\t%s\n",baseline_sha,hash,(unsigned long)prefix,kh[0],kh[1],checked/2,toolhash);if(n<0||(size_t)n>=sizeof receipt)die("receipt bound");np_buf final_receipt={0};np_put(&final_receipt,receipt,(size_t)n);if(core_guarded)cc_receipt(&final_receipt,core_current,compat_helper);saved("package.tsv",final_receipt.p,final_receipt.n);fwrite(final_receipt.p,1,final_receipt.n,stdout);free(final_receipt.p);
  free(base);free(kernels[0]);free(kernels[1]);free(keys);free(lengths);free(output.p);free(closure.p);return 0;
 }

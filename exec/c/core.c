@@ -135,7 +135,7 @@ CORE_BYTES_LINKAGE int core_badd(CoreBlobs *t,const unsigned char *b,int n) {
         t->entries=core_alloc(t->entries,sizeof(CoreBlob)*t->cap);
     }
     t->entries[t->n].b=core_alloc(0,(size_t)n+1);
-    memcpy(t->entries[t->n].b,b,n); t->entries[t->n].n=n;
+    if(n)memcpy(t->entries[t->n].b,b,n); t->entries[t->n].n=n;
     return t->n++;
 }
 #endif
