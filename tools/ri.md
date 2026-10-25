@@ -194,11 +194,33 @@ UNMEASURED.
 
 The separate `bootstrap.fixed-p3-driver-lineage` contract is now registered in
 [tests/README.md](../tests/README.md). Its actual HOST-to-stage1-to-stage2-to-stage3
-run completed40 checks with zero failures, and all three full products are P53.
-It binds actual parent receipts and preserves a fixed declared P3 payload; it
-does not reconstruct the NN or packaged ASM kernel sources. Initial source
-measurement remains root-assisted and host-toolchain dependencies are not
-hermetic. This evidence neither replaces RI consumers nor clears broad
+CTX02 run completed41 checks with zero failures in
+`out/c43-hostseed-chain-03.log`, including stage1 versus root complete bytes;
+all three full products are P53. The tool SHA is
+`293e069e71de8bdc8b27a62a70dbb8d452cdd47e9d192334840716f8c7080b1f`;
+its HOST and all18 slice/wrap steps were actually rebuilt under their original55
+limits. Canonical parent admission reconstructs full stage and six artifact
+receipts from HOST, with repeated physical reads before output and after-step
+ancestry verification. Canonical paths, cycle and64-generation depth guards
+are implemented; cycle/depth controls remain untested. The child maxima
+40+6+6+6 total58, exceeding outer55 before overhead: these18 actual successes do
+not guarantee the worst-case permitted ancestry fits55, and the bound remains
+unchanged. The eighth refusal case alters only a private parent wrap receipt's
+builder field and requires named rejection before any new stage output. All
+eight CTX02/current-checker03 controls now independently returned outer rc0:
+71 assertions with zero failures (five8, two10, one11), each using manual `-O2`
+under the unchanged55-second parent, target20 and two-source8 budgets. Their
+actual logs are `out/c43-hostseed-control-*-03.log`; each target required exact
+rc2, empty stdout and its named refusal, preserving the complete original
+manifest and private clones where applicable. The earlier field-only02
+observation11/0 and old CTX01 seven-case60/0 remain historical, separate results;
+neither was transferred to this fresh71/0 qualification.
+
+The fixed declared P3 payload still trusts NN and packaged ASM kernel binaries;
+Python NN/ASM source reconstruction is not replayed. Initial source measurement
+remains root-assisted, host-toolchain dependencies are not hermetic, and unsigned
+receipts are consistency observations rather than historical execution proof.
+This evidence neither replaces RI consumers nor clears broad
 `bootstrap`/complete host-seed/N22 or native foreign-host qualification.
 
 Full RI/model-route coverage, all resource budgets, native foreign hosts and
