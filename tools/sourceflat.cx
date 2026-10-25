@@ -1,0 +1,126 @@
+/* Native complete classic C export. Run from any cwd:
+   sh /repo/unisacc.com /repo/tools/sourceflat.cx -- OUTPUT
+   --verify OUTPUT checks current inputs, flat bytes and the v2 sidecar.
+   Quoted include recognition and first-seen textual path ordering deliberately
+   match the historical export_ref.sh awk contract, including final newlines.
+   This is an assembly export, not a conditional C preprocessor. */
+typedef struct { char *p; size_t n, cap; } Buf;
+typedef struct { char *path; char sha[65]; } Dep;
+static Dep *deps; static int nd, capd;
+static char root[4096], temporary[4096], jt[4096];
+static Buf flat, identity, json;
+static void cleanup(void) {
+    /* Only our exclusive sibling files, never arbitrary caller paths. */
+    if (temporary[0]) { unlink(temporary); temporary[0]=0; }
+    if (jt[0]) { unlink(jt); jt[0]=0; }
+}
+static void die(const char *m, const char *p) {
+    fprintf(stderr,"sourceflat: %s%s%s\n",m,p?": ":"",p?p:"");
+    cleanup(); exit(1);
+}
+static void put(Buf *b,const void *p,size_t n) {
+    char *q; size_t c;
+    if(n > (size_t)-1-b->n-1)die("size overflow",0);
+    if(b->n+n+1>b->cap){c=b->cap?b->cap:4096;while(c<b->n+n+1){if(c>(size_t)-1/2)die("size overflow",0);c*=2;}q=realloc(b->p,c);if(!q)die("allocation failed",0);b->p=q;b->cap=c;}
+    memcpy(b->p+b->n,p,n);b->n+=n;b->p[b->n]=0;
+}
+static void text_(Buf *b,const char *s){put(b,s,strlen(s));}
+static char *read_(const char *p,size_t *n){char *b=cx_read(p,n);if(!b)die("cannot read",p);return b;}
+static void path_(char out[4096],const char *a,const char *b){if(snprintf(out,4096,"%s/%s",a,b)>=4096)die("path too long",b);}
+static int find_(const char *p){int i;for(i=0;i<nd;i++)if(!strcmp(deps[i].path,p))return i;return -1;}
+static void remember(const char *p,const char *bytes,size_t n){
+    char *s; Dep *q;
+    if(find_(p)>=0)return;
+    if(nd==capd){capd=capd?capd*2:128;q=realloc(deps,(size_t)capd*sizeof *deps);if(!q)die("allocation failed",0);deps=q;}
+    s=strdup(p);if(!s)die("allocation failed",0);deps[nd].path=s;
+    cx_sha256_hex(bytes,n,deps[nd].sha);nd++;
+}
+/* Exact ^[ \t]*#include[ \t]+"[^\"]+"[ \t]*$ recognizer. */
+static int quoted(const char *s,size_t n,char child[4096]){
+    size_t i=0,a,k;while(i<n&&(s[i]==' '||s[i]=='\t'))i++;
+    if(n-i<8||memcmp(s+i,"#include",8))return 0;i+=8;
+    if(i==n||(s[i]!=' '&&s[i]!='\t'))return 0;
+    while(i<n&&(s[i]==' '||s[i]=='\t'))i++;
+    if(i==n||s[i]!='"')return 0;a=++i;
+    while(i<n&&s[i]!='"')i++;k=i-a;
+    if(!k||i==n)return 0;i++;
+    while(i<n&&(s[i]==' '||s[i]=='\t'))i++;
+    if(i!=n)return 0;if(k>=4096)die("include path too long",0);
+    memcpy(child,s+a,k);child[k]=0;return 1;
+}
+static void emit(const char *p,int depth){
+    char full[4096],child[4096],next[4096]; char *b,*slash;
+    size_t n,i=0,j,base;
+    if(depth>256)die("include depth exceeds 256",p);
+    if(find_(p)>=0)return;
+    path_(full,root,p);b=read_(full,&n);remember(p,b,n);
+    slash=strrchr(p,'/');base=slash?(size_t)(slash-p+1):0;
+    while(i<n){j=i;while(j<n&&b[j]!='\n')j++;
+        if(quoted(b+i,j-i,child)){
+            if(base+strlen(child)>=sizeof next)die("include path too long",p);
+            memcpy(next,p,base);strcpy(next+base,child);emit(next,depth+1);
+        }else{put(&flat,b+i,j-i);put(&flat,"\n",1);}
+        i=j<n?j+1:j;
+    }
+    free(b);
+}
+static void addfile(const char *relative){char p[4096],*b;size_t n;path_(p,root,relative);b=read_(p,&n);remember(relative,b,n);free(b);}
+/* Bind the implicit CX runtime headers too; cx_walk sorts names before descent. */
+static int cmp_(const void *a,const void *b){return strcmp(*(char *const *)a,*(char *const *)b);}
+static void headers(const char *dir,int depth){
+    DIR *d;struct dirent *e;char **v=0;size_t n=0,cap=0,i;char p[4096];struct stat st;
+    if(depth>64)die("runtime include depth exceeds 64",dir);
+    d=opendir(dir);if(!d)die("cannot open runtime include directory",dir);
+    for(;;){errno=0;e=readdir(d);if(!e){if(errno)die("cannot read runtime include directory",dir);break;}
+        if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;
+        if(n==cap){char **q;cap=cap?cap*2:32;q=realloc(v,cap*sizeof *v);if(!q)die("allocation failed",0);v=q;}
+        path_(p,dir,e->d_name);v[n]=strdup(p);if(!v[n])die("allocation failed",0);n++;
+    }
+    if(closedir(d))die("cannot close runtime include directory",dir);
+    if(n)qsort(v,n,sizeof *v,cmp_);
+    for(i=0;i<n;i++){if(stat(v[i],&st))die("cannot stat runtime input",v[i]);
+        if(S_ISDIR(st.st_mode))headers(v[i],depth+1);
+        else if(S_ISREG(st.st_mode))addfile(v[i]+strlen(root)+1);
+        else die("runtime input is not regular",v[i]);free(v[i]);}
+    free(v);
+}
+static void quote(Buf *b,const char *p){unsigned char c;char u[8];text_(b,"\"");while(*p){c=(unsigned char)*p++;if(c=='"'||c=='\\'){put(b,"\\",1);put(b,&c,1);}else if(c<32){snprintf(u,sizeof u,"\\u%04x",(unsigned)c);text_(b,u);}else put(b,&c,1);}text_(b,"\"");}
+static void receipt(void){
+    int i;char source[65],flatsha[65];
+    text_(&identity,"unisacc-sourceflat-v2\n");
+    for(i=0;i<nd;i++){text_(&identity,deps[i].path);put(&identity,"\0",1);text_(&identity,deps[i].sha);put(&identity,"\n",1);}
+    cx_sha256_hex(identity.p,identity.n,source);cx_sha256_hex(flat.p,flat.n,flatsha);
+    text_(&json,"{\"format\":\"unisacc-sourceflat-v2\",\"source\":\"");text_(&json,source);text_(&json,"\",\"flat\":\"");text_(&json,flatsha);text_(&json,"\",\"inputs\":[");
+    for(i=0;i<nd;i++){if(i)text_(&json,",");text_(&json,"{\"path\":");quote(&json,deps[i].path);text_(&json,",\"sha256\":\"");text_(&json,deps[i].sha);text_(&json,"\"}");}
+    text_(&json,"]}\n");
+}
+static void stable(void){int i;char p[4096],h[65],*b;size_t n;for(i=0;i<nd;i++){path_(p,root,deps[i].path);b=read_(p,&n);cx_sha256_hex(b,n,h);free(b);if(strcmp(h,deps[i].sha))die("input changed during export",p);}}
+/* Resolve the parent even for a new file, and existing symlinks for refusal. */
+static void destination(const char *arg,char out[4096]){
+    char work[4096],parent[4096],resolved[4096],*s;struct stat st;int i;
+    if(strlen(arg)>=sizeof work)die("path too long",arg);strcpy(work,arg);
+    s=strrchr(work,'/');if(s){*s=0;if(!realpath(work[0]?work:"/",parent))die("cannot resolve parent",arg);s++;}else{if(!getcwd(parent,sizeof parent))die("getcwd failed",0);s=work;}
+    if(!*s||!strcmp(s,".")||!strcmp(s,".."))die("invalid output path",arg);
+    path_(out,parent,s);
+    if(stat(out,&st)==0){if(!S_ISREG(st.st_mode))die("output is not regular",out);if(!realpath(out,resolved))die("cannot resolve output",out);}else{if(errno!=ENOENT)die("cannot stat output",out);strcpy(resolved,out);}
+    for(i=0;i<nd;i++){char p[4096],r[4096];path_(p,root,deps[i].path);if(!realpath(p,r))die("cannot resolve input",p);if(!strcmp(r,resolved))die("refusing input overwrite",out);if(stat(out,&st)==0){struct stat in;if(stat(p,&in))die("cannot stat input",p);if(in.st_dev==st.st_dev&&in.st_ino==st.st_ino)die("refusing input hardlink overwrite",out);}else if(errno!=ENOENT)die("cannot stat output",out);}
+}
+static void stage(char tmp[4096],const char *out,const Buf *b){int fd;FILE *f;if(snprintf(tmp,4096,"%s.tmp.XXXXXX",out)>=4096)die("path too long",out);fd=mkstemp(tmp);if(fd<0){tmp[0]=0;die("cannot create sibling temporary",out);}f=fdopen(fd,"wb");if(!f){close(fd);die("fdopen failed",tmp);}if(fwrite(b->p,1,b->n,f)!=b->n){fclose(f);die("write failed",tmp);}if(fflush(f)||fsync(fd)){fclose(f);die("flush failed",tmp);}if(fclose(f))die("close failed",tmp);}
+int main(int argc,char **argv){
+    char self[4096],inc[4096],out[4096],side[4096],sidearg[4096],*s,*b;size_t n;int verify=0;
+    if(argc==3&&!strcmp(argv[1],"--verify")){verify=1;argv++;argc--;}
+    if(argc!=2){fprintf(stderr,"usage: sourceflat.cx [--verify] OUTPUT\n");return 2;}
+    if(!realpath(__FILE__,self))die("cannot resolve tool",__FILE__);
+    s=strrchr(self,'/');if(!s)die("invalid tool path",self);*s=0;s=strrchr(self,'/');if(!s)die("invalid tool root",self);*s=0;strcpy(root,self);
+    /* Mark canonical source before checking output; no file is written yet. */
+    emit("unisacc.c",0);if(!flat.n)die("empty source",0);
+    addfile("tools/sourceflat.cx");path_(inc,root,"include");headers(inc,0);
+    destination(argv[1],out);if(snprintf(sidearg,sizeof sidearg,"%s.source.json",out)>=sizeof sidearg)die("path too long",out);destination(sidearg,side);
+    receipt();stable();
+    if(verify){b=read_(out,&n);if(n!=flat.n||memcmp(b,flat.p,n))die("stale or damaged flat source",out);free(b);b=read_(side,&n);if(n!=json.n||memcmp(b,json.p,n))die("stale or damaged source identity",side);free(b);stable();return 0;}
+    stage(temporary,out,&flat);stage(jt,side,&json);stable();
+    /* Each file is atomic. A crash between renames is rejected by --verify. */
+    if(rename(temporary,out))die("cannot install source",out);temporary[0]=0;
+    if(rename(jt,side))die("cannot install source identity",side);jt[0]=0;
+    return 0;
+}
