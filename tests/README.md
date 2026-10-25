@@ -29,4 +29,9 @@ additional partial library coverage, not a completed library or ownership gate.
 
 No seven-stream, eighteen-net, framing, adjacent-stream oracle, full RI, resource qualification, negative compiler diagnostics, six-target format, actual-host, self-bootstrap, complete library/ABI or candidate CI obligation is claimed complete. All remain visible as NOT_READY under --all. This MVP is not release qualification.
 
+The separate `streams.cx` batch now covers part of the seven-stream and framing
+obligations, with no imported legacy PASS records. Preparation, commands, actual
+coverage and limits are documented in [tools/streams.md](../tools/streams.md).
+Its 40 local assertions do not clear the remaining broad NOT_READY obligations.
+
 The source tree is read-only while running. Apply a caller-owned watchdog of at most 30 seconds for this MVP; the runner performs no child process spawning and has no inner scheduling steps.

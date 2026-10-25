@@ -1,0 +1,85 @@
+/* New, partial stream contracts. Does not load archived results or construct nets.
+ * ROOT STREAM_DIR NEW_OUTDIR; local Linux x86_64 execution only. */
+#pragma unisa use cxlib.netpack
+static char root[4096],streams[4096],work[4096],bound[4200],inc[4200],product[4200];
+static char binaries[7][4200],identities[7][65],product_identity[65];
+static const char *names[]={"e2","e1","e3","e4","prune","lower","elf"};
+static int assertions,failures;
+static void fail(const char *s){fprintf(stderr,"stream contracts: %s\n",s);exit(2);}
+static void check(int ok,const char *s){assertions++;if(!ok)failures++;printf("%s\t%s\n",ok?"PASS":"FAIL",s);}
+static void path(char *out,size_t cap,const char *dir,const char *name){int n=snprintf(out,cap,"%s/%s",dir,name);if(n<0||(size_t)n>=cap)fail("path too long");}
+static void saved(const char *p,const void *s,size_t n){int f=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);size_t at=0;if(f<0)fail("exclusive output create");while(at<n){ssize_t k=write(f,(char *)s+at,n-at);if(k<0&&errno==EINTR)continue;if(k<=0)fail("write");at+=(size_t)k;}if(close(f))fail("close");}
+static char *loaded(const char *p,size_t *n){char *s=cx_read(p,n);if(!s)fail(p);return s;}
+static void digest(const char *p,char *hex){size_t n;char *s=loaded(p,&n);cx_sha256_hex(s,n,hex);free(s);}
+static np_result call(char **v,const char *env){np_result r;char why[1024];const char *add[]={env,"UNISA_MAXSTEPS=200000000",0};if(np_run(v,root,add,15,&r,why,sizeof why))fail(why);return r;}
+static unsigned little(const unsigned char *p){return (unsigned)p[0]|(unsigned)p[1]<<8|(unsigned)p[2]<<16|(unsigned)p[3]<<24;}
+static void case_run(int constructor){
+ char src[4200],input[4200],next[4200],attr[4200],env[4400],label[100],file[80],ref[4200];
+ const char *body=constructor?"int value; __attribute__((constructor)) void init(void){value=7;} int main(void){return value;}\n":"int main(void){return 7;}\n";
+ int c=constructor,i;size_t n;char *bytes;np_result r;
+ snprintf(file,sizeof file,"case%d.c",c);path(src,sizeof src,work,file);saved(src,body,strlen(body));strcpy(input,src);
+ snprintf(file,sizeof file,"case%d.attributes",c);path(attr,sizeof attr,work,file);snprintf(env,sizeof env,"UNISA_ATTRIBUTES=%s",attr);
+ for(i=0;i<7;i++){
+  char *v[]={bound,"10",binaries[i],input,src,inc,0};r=call(v,env);
+  snprintf(file,sizeof file,"case%d-%s.out",c,names[i]);path(next,sizeof next,work,file);saved(next,r.out,r.outn);
+  snprintf(file,sizeof file,"case%d-%s.err",c,names[i]);char err[4200];path(err,sizeof err,work,file);saved(err,r.err,r.errn);
+  snprintf(label,sizeof label,"case%d.%s.accept",c,names[i]);check(r.rc==0&&r.errn==0,label);
+  if(r.rc){np_free(&r);return;}
+  if(i==1){
+   int valid=r.outn>=16&&!memcmp(r.out,"USLATTR1",8);unsigned count=valid?little((unsigned char *)r.out+8):0;
+   snprintf(label,sizeof label,"case%d.e1.attribute-frame",c);check(valid&&count==(unsigned)c&&little((unsigned char *)r.out+12)<=r.outn-16&&r.outn==16+(size_t)count*5+little((unsigned char *)r.out+12),label);
+   bytes=loaded(attr,&n);snprintf(label,sizeof label,"case%d.e1.attribute-sidecar",c);check(n==4+(size_t)c*9&&little((unsigned char *)bytes)==(unsigned)c,label);free(bytes);
+  }
+  np_free(&r);strcpy(input,next);
+ }
+ bytes=loaded(input,&n);snprintf(label,sizeof label,"case%d.elf.header",c);check(n>=64&&!memcmp(bytes,"\177ELF\2\1\1",7)&&(unsigned char)bytes[18]==62&&bytes[19]==0,label);free(bytes);
+ if(chmod(input,0700))fail("chmod image");
+ {char *v[]={bound,"10",input,0};r=call(v,env);snprintf(label,sizeof label,"case%d.execute.handwritten-return7",c);check(r.rc==7&&!r.outn&&!r.errn,label);np_free(&r);}
+ snprintf(file,sizeof file,"case%d-reference.elf",c);path(ref,sizeof ref,work,file);
+ {char *v[]={bound,"15","sh",product,"-O2","-b","lnx/x86_64",src,"-o",ref,0};r=call(v,env);snprintf(label,sizeof label,"case%d.product-route.accept",c);check(r.rc==0&&!r.errn,label);int ok=r.rc==0;np_free(&r);if(!ok)return;}
+ size_t m;char *want=loaded(ref,&m);bytes=loaded(input,&n);snprintf(label,sizeof label,"case%d.product-route.bytes",c);check(n==m&&!memcmp(bytes,want,n),label);free(want);free(bytes);
+}
+static void pipe_contract(void){
+ int links[6][2],input,output,errors,i,j,bad=0,st;pid_t children[7];
+ char src[4200],out[4200],err[4200],expected[4200];
+ path(src,sizeof src,work,"case1.c");path(out,sizeof out,work,"pipe.elf");path(err,sizeof err,work,"pipe.err");path(expected,sizeof expected,work,"case1-elf.out");
+ input=open(src,O_RDONLY|O_CLOEXEC);output=open(out,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);errors=open(err,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);
+ if(input<0||output<0||errors<0)fail("pipeline files");
+ for(i=0;i<6;i++)if(pipe(links[i]))fail("pipeline pipe");
+ for(i=0;i<7;i++){
+  children[i]=fork();if(children[i]<0)fail("pipeline fork");
+  if(!children[i]){
+   if(dup2(i?links[i-1][0]:input,0)<0||dup2(i==6?output:links[i][1],1)<0||dup2(errors,2)<0)_exit(126);
+   for(j=0;j<6;j++){close(links[j][0]);close(links[j][1]);}close(input);close(output);close(errors);
+   if(setenv("UNISA_ATTRIBUTES","",1)||setenv("UNISA_MAXSTEPS","200000000",1))_exit(126);
+   char *v[]={bound,"10",binaries[i],"-",src,inc,0};execv(bound,v);_exit(127);
+  }
+ }
+ for(i=0;i<6;i++){close(links[i][0]);close(links[i][1]);}close(input);close(output);close(errors);
+ for(i=0;i<7;i++){pid_t got;do{got=waitpid(children[i],&st,0);}while(got<0&&errno==EINTR);if(got!=children[i]||!WIFEXITED(st)||WEXITSTATUS(st))bad++;}
+ check(!bad,"stdin-stdout.seven-stream-constructor.accept");
+ size_t n,m;char *a=loaded(out,&n),*b=loaded(expected,&m);check(!bad&&n==m&&!memcmp(a,b,n),"stdin-stdout.constructor-image-bytes");free(a);free(b);
+ a=loaded(err,&n);check(!n,"stdin-stdout.empty-diagnostics");free(a);
+}
+static void refusals(void){
+ const char *raw="@target lnx/x86_64\n@data -\n@data_len 64\n@relocs 57\nret\n";
+ char p[4200];path(p,sizeof p,work,"elf-overrun.tins");saved(p,raw,strlen(raw));
+ char *v[]={bound,"10",binaries[6],p,"overrun.c",inc,0};np_result r=call(v,"UNISA_ATTRIBUTES=");
+ check(r.rc==1&&!r.outn&&strstr(r.err,"ELF input or relocation"),"elf.reject-relocation-overrun");np_free(&r);
+ path(p,sizeof p,work,"e4-empty.tape");saved(p,"",0);char *a[]={bound,"10",binaries[3],p,"empty.c",inc,0};r=call(a,"UNISA_ATTRIBUTES=");check(!r.rc&&!r.outn&&!r.errn,"e4.empty-exact-identity");np_free(&r);
+ path(p,sizeof p,work,"prune-opaque.tape");raw="opaque unsupported instruction\r\n";saved(p,raw,strlen(raw));char *b[]={bound,"10",binaries[4],p,"opaque.c",inc,0};r=call(b,"UNISA_ATTRIBUTES=");check(!r.rc&&!r.errn&&r.outn==strlen(raw)&&!memcmp(r.out,raw,r.outn),"prune.outside-domain-exact-preservation");np_free(&r);
+}
+int main(int argc,char **argv){
+ if(argc!=4){fprintf(stderr,"usage: ROOT STREAM_DIR NEW_OUTDIR\n");return 2;}
+#if !defined(__linux__) || !defined(__x86_64__)
+ fprintf(stderr,"UNVERIFIED: stream execution requires Linux/x86_64\n");return 77;
+#endif
+ if(!realpath(argv[1],root)||!realpath(argv[2],streams))fail("resolve roots");
+ if(argv[3][0]!='/')fail("NEW_OUTDIR must be absolute");if(strlen(argv[3])>=sizeof work)fail("output path too long");strcpy(work,argv[3]);
+ if(mkdir(work,0700))fail("NEW_OUTDIR must not exist");path(bound,sizeof bound,root,"tools/bound");path(inc,sizeof inc,root,"include");path(product,sizeof product,root,"unisacc.com");digest(product,product_identity);
+ int i;for(i=0;i<7;i++){char name[80];snprintf(name,sizeof name,"unisacc-stream%d.com",i+1);path(binaries[i],sizeof binaries[i],streams,name);digest(binaries[i],identities[i]);}
+ case_run(0);case_run(1);pipe_contract();refusals();
+ for(i=0;i<7;i++){char hex[65],name[80];digest(binaries[i],hex);snprintf(name,sizeof name,"identity.%s.unchanged",names[i]);check(!strcmp(hex,identities[i]),name);}char hex[65];digest(product,hex);check(!strcmp(hex,product_identity),"identity.product.unchanged");
+ puts("TIMING\tconstruction_loading_inference_output_validation=UNMEASURED");
+ printf("STREAMS\tassertions=%d\tfailed=%d\tscope=partial-linux-x86_64-O2\n",assertions,failures);return failures?1:0;
+}

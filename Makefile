@@ -10,14 +10,20 @@ COMBSTEP_DIR ?= out/bootstrap/next
 COMB_STEP ?=
 COMB ?= 0
 OUT ?= out/unisacc-flat.c
+STREAM_DIR ?=
+STREAM_OUT ?=
 
-.PHONY: owned help smoke quick test list export-ref ref com model-com release comboot-seed-step comboot-stage2-step comboot-stage3-step
+.PHONY: streams owned help smoke quick test list export-ref ref com model-com release comboot-seed-step comboot-stage2-step comboot-stage3-step
 help:
 	@echo 'smoke / quick: native product batch, partial coverage only'
 	@echo 'test: complete contract gate; NOT_READY is a failure'
 	@echo 'list: implemented cases and explicit gaps'
 	@echo 'export-ref OUT=...: native complete source export'
+	@echo 'streams STREAM_DIR=... STREAM_OUT=...: partial seven-stream contracts, fresh output required'
 	@echo 'model-com MODEL_DIR=... MODEL_STEP=...: one bounded construction step'
+streams:
+	@test -n "$(STREAM_DIR)" -a -n "$(STREAM_OUT)" || { echo 'set STREAM_DIR and a new STREAM_OUT' >&2; exit 2; }
+	@tools/bound 55 sh "$(UNISACC)" tests/streams.cx -- "$(CURDIR)" "$(abspath $(STREAM_DIR))" "$(abspath $(STREAM_OUT))"
 owned:
 	@sh "$(UNISACC)" cx/check_owned.cx
 smoke quick:

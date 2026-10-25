@@ -10,6 +10,10 @@ sh ./unisacc.com tools/sourceflat.cx -- --verify out/unisacc-flat.c
 The export and provenance verification use the product directly. `export_ref.sh`
 is only a compatibility loader for existing construction callers.
 
+`stream-pack.cx` prepares seven isolated stream artifacts from a candidate's
+existing model bytes. Its shared runtime and the new partial contracts are
+documented in [streams.md](streams.md). Preparation never records a test PASS.
+
 The following support was separated from the archived test suite so that
 construction is not broken by its removal: `bound`, `bound.c`, `cxbin`,
 `safedel.cx`, `lib.sh`, `build_ref.sh`, `refshim.h` and `reffoot.h`.
