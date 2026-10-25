@@ -1,0 +1,66 @@
+#!/usr/bin/env -S unisacc.com -run
+/* End-to-end product gate: APE build + corpus contract. Pure .cx.
+   ./unisacc.com -run ujs/product/complete.cx
+*/
+static int enter_root(const char *argv0) {
+    char dir[4096];
+    size_t l;
+    char *sl;
+    if (!argv0 || !argv0[0]) return -1;
+    l = strlen(argv0);
+    if (l >= sizeof dir) return -1;
+    memcpy(dir, argv0, l + 1);
+    sl = strrchr(dir, '/');
+    if (!sl) return -1;
+    *sl = 0;
+    if (chdir(dir) != 0) return -1;
+    return chdir("../..");
+}
+
+int main(int argc, char **argv) {
+    char *av[5];
+    char *out = 0;
+    size_t n = 0;
+    int rc;
+    FILE *f;
+    unsigned char mag[4];
+    (void)argc;
+
+    if (enter_root(argv[0]) != 0) {
+        fprintf(stderr, "complete.cx: chdir failed\n");
+        return 2;
+    }
+
+    av[0] = "sh"; av[1] = "./unisacc.com"; av[2] = "-run"; av[3] = "ujs/product/build-ape.cx"; av[4] = 0;
+    rc = cx_runv_timeout(av, 60, &out, &n);
+    if (out && n) fwrite(out, 1, n, stdout);
+    free(out); out = 0; n = 0;
+    if (rc != 0) {
+        fprintf(stderr, "complete.cx: build-ape failed rc=%d\n", rc);
+        return 1;
+    }
+
+    f = fopen("ujs/ujs.com", "rb");
+    if (!f || fread(mag, 1, 4, f) != 4) {
+        if (f) fclose(f);
+        fprintf(stderr, "complete.cx: cannot read ujs/ujs.com\n");
+        return 1;
+    }
+    fclose(f);
+    if (mag[0] != 'M' || mag[1] != 'Z' || mag[2] != 'q' || mag[3] != 'F') {
+        fprintf(stderr, "complete.cx: ujs/ujs.com is not APE (MZqF…)\n");
+        return 1;
+    }
+
+    av[0] = "sh"; av[1] = "./unisacc.com"; av[2] = "-run"; av[3] = "ujs/product/corpus-host.cx"; av[4] = 0;
+    rc = cx_runv_timeout(av, 60, &out, &n);
+    if (out && n) fwrite(out, 1, n, stdout);
+    free(out);
+    if (rc != 0) {
+        fprintf(stderr, "complete.cx: corpus-host failed rc=%d\n", rc);
+        return 1;
+    }
+
+    printf("complete.cx: ok (APE + corpus 21/7, .cx-only)\n");
+    return 0;
+}

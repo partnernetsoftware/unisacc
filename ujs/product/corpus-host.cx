@@ -1,0 +1,95 @@
+#!/usr/bin/env -S unisacc.com -run
+/* host1 stage0 corpus contract: known accept / known refuse.
+   No #include. Run: ./unisacc.com -run ujs/product/corpus-host.cx
+*/
+static const char *PASS[] = {
+    "arith.ujs", "branch.ujs", "dict.ujs", "dict_key8.ujs", "elseif.ujs",
+    "f64_arith.ujs", "fact.ujs", "globals_fold.ujs", "list.ujs", "list_f64.ujs",
+    "logic.ujs", "setidx.ujs", "setidx_loop.ujs", "str.ujs", "str_cat_long.ujs",
+    "str_empty.ujs", "str_lit7.ujs", "str_lit8.ujs", "str_lit32.ujs",
+    "str_lit255.ujs", "unary_minus.ujs",
+    0
+};
+static const char *REFUSE[] = {
+    "arrow.ujs", "blockarrow.ujs", "forof.ujs", "nullish.ujs",
+    "sum.ujs", "switch.ujs", "ternary.ujs",
+    0
+};
+
+static int exists(const char *p) {
+    FILE *f = fopen(p, "rb");
+    if (!f) return 0;
+    fclose(f);
+    return 1;
+}
+
+static int enter_root(const char *argv0) {
+    char dir[4096];
+    size_t l;
+    char *sl;
+    if (!argv0 || !argv0[0]) return -1;
+    l = strlen(argv0);
+    if (l >= sizeof dir) return -1;
+    memcpy(dir, argv0, l + 1);
+    sl = strrchr(dir, '/');
+    if (!sl) return -1;
+    *sl = 0;
+    if (chdir(dir) != 0) return -1;
+    return chdir("../..");
+}
+
+static int run_one(const char *base, int want_ok) {
+    char src[256], outp[256];
+    char *av[6];
+    char *cap = 0;
+    size_t n = 0;
+    int rc;
+    snprintf(src, sizeof src, "tests/ujs2wasm/corpus/%s", base);
+    snprintf(outp, sizeof outp, "/tmp/ujs-corpus-%s.wasm", base);
+    if (!exists(src)) {
+        fprintf(stderr, "missing %s\n", src);
+        return 1;
+    }
+    /* APE needs sh; native ELF also accepts sh ./ujs/ujs.com */
+    av[0] = "sh";
+    av[1] = "./ujs/ujs.com";
+    av[2] = src;
+    av[3] = "-o";
+    av[4] = outp;
+    av[5] = 0;
+    rc = cx_runv_timeout(av, 30, &cap, &n);
+    free(cap);
+    if (want_ok) {
+        if (rc != 0 || !exists(outp)) {
+            fprintf(stderr, "expected PASS %s rc=%d\n", base, rc);
+            return 1;
+        }
+        return 0;
+    }
+    if (rc == 0 && exists(outp)) {
+        fprintf(stderr, "expected REFUSE %s but wrote wasm\n", base);
+        return 1;
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    int i, bad = 0;
+    (void)argc;
+    if (enter_root(argv[0]) != 0 && !exists("./ujs/ujs.com")) {
+        fprintf(stderr, "corpus-host.cx: need repo root with ujs/ujs.com\n");
+        return 2;
+    }
+    if (!exists("./ujs/ujs.com")) {
+        fprintf(stderr, "corpus-host.cx: build host first (build.cx)\n");
+        return 2;
+    }
+    for (i = 0; PASS[i]; i++) bad += run_one(PASS[i], 1);
+    for (i = 0; REFUSE[i]; i++) bad += run_one(REFUSE[i], 0);
+    if (bad) {
+        fprintf(stderr, "corpus-host.cx: %d mismatches\n", bad);
+        return 1;
+    }
+    printf("corpus-host.cx: ok pass=21 refuse=7 (stage0-host)\n");
+    return 0;
+}

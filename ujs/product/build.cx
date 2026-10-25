@@ -1,0 +1,113 @@
+#!/usr/bin/env -S unisacc.com -run
+/* Build ujs.com host1 with this tree's unisacc.com (no zig / Node / Python).
+   .cx: no #include (cx.h prelude is forced).
+   APE note (host fact, not product contract): interactive `./unisacc.com` works
+   because bash ENOEXEC-falls back into the APE shell polyglot; cx_runv_timeout
+   uses raw execvp, so on Linux without ape binfmt that path gets ENOEXEC/127.
+   Work around with argv ["sh","./unisacc.com",...] until binfmt/assimilate/fix.
+   host1 ujs.com from -o is native ELF: exec directly.
+   Usage (repo root): ./unisacc.com -run ujs/product/build.cx
+*/
+static int exists(const char *p) {
+    FILE *f = fopen(p, "rb");
+    if (!f) return 0;
+    fclose(f);
+    return 1;
+}
+
+static int enter_root(const char *argv0) {
+    char dir[4096];
+    size_t l;
+    char *sl;
+    if (!argv0 || !argv0[0]) return -1;
+    l = strlen(argv0);
+    if (l >= sizeof dir) return -1;
+    memcpy(dir, argv0, l + 1);
+    sl = strrchr(dir, '/');
+    if (!sl) return -1;
+    *sl = 0;
+    if (chdir(dir) != 0) return -1;
+    if (chdir("../..") != 0) return -1;
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    char *out = 0;
+    size_t n = 0;
+    int rc;
+    char *buildv[8];
+    char *ver[3];
+    char *comp[5];
+    (void)argc;
+
+    if (enter_root(argv[0]) != 0) {
+        if (!exists("./unisacc.com")) {
+            fprintf(stderr, "build.cx: need repo root (no ./unisacc.com)\n");
+            return 2;
+        }
+    }
+    if (!exists("./unisacc.com")) {
+        fprintf(stderr, "build.cx: missing ./unisacc.com\n");
+        return 2;
+    }
+
+    buildv[0] = "sh";
+    buildv[1] = "./unisacc.com";
+    buildv[2] = "-DUJS_HOST";
+    buildv[3] = "ujs/product/ujs_main.cx";
+    buildv[4] = "ujs/seed/stage0/compiler_min.cx";
+    buildv[5] = "-o";
+    buildv[6] = "ujs/ujs.com";
+    buildv[7] = 0;
+
+    rc = cx_runv_timeout(buildv, 60, &out, &n);
+    if (rc != 0) {
+        fprintf(stderr, "build.cx: compile failed rc=%d\n", rc);
+        if (out && n) fwrite(out, 1, n, stderr);
+        free(out);
+        return 1;
+    }
+    free(out);
+    out = 0;
+    n = 0;
+    if (!exists("ujs/ujs.com")) {
+        fprintf(stderr, "build.cx: ujs/ujs.com not written\n");
+        return 1;
+    }
+
+    ver[0] = "./ujs/ujs.com";
+    ver[1] = "--version";
+    ver[2] = 0;
+    rc = cx_runv_timeout(ver, 10, &out, &n);
+    if (rc != 0 || !out || n < 8 || strncmp(out, "ujs.com ", 8) != 0) {
+        fprintf(stderr, "build.cx: --version failed rc=%d\n", rc);
+        if (out && n) fwrite(out, 1, n, stderr);
+        free(out);
+        return 1;
+    }
+    fwrite(out, 1, n, stdout);
+    free(out);
+    out = 0;
+    n = 0;
+
+    comp[0] = "./ujs/ujs.com";
+    comp[1] = "tests/ujs2wasm/corpus/arith.ujs";
+    comp[2] = "-o";
+    comp[3] = "/tmp/ujs-com-build-arith.wasm";
+    comp[4] = 0;
+    rc = cx_runv_timeout(comp, 30, &out, &n);
+    if (rc != 0) {
+        fprintf(stderr, "build.cx: arith failed rc=%d\n", rc);
+        if (out && n) fwrite(out, 1, n, stderr);
+        free(out);
+        return 1;
+    }
+    if (out && n) fwrite(out, 1, n, stdout);
+    free(out);
+    if (!exists("/tmp/ujs-com-build-arith.wasm")) {
+        fprintf(stderr, "build.cx: wasm missing\n");
+        return 1;
+    }
+    printf("build.cx: ok\n");
+    return 0;
+}

@@ -9,14 +9,37 @@
 
 ## 0. 一句话
 
-**UJS** = 尽量贴 ES 表面的**闭合**脚本子集 + **构造法确定性推理**（gold → IntNet，不训练填表）+ 产品 API `wasm_run` + **UXE**（Host ABI · 双 wasm · Pages）。  
+**UJS** = 尽量贴 ES 表面的**闭合**脚本子集 + **构造法确定性推理**（gold → IntNet，不训练填表）+ 产品 API／Host。  
 验收：门禁与可机读 snapshot；不以截图猜 UI。
 
-| 层 | 交付 | 不是 |
+### 0.1 出货主产物（主人 2026-10-25）
+
+| | |
+|---|---|
+| **主产物** | **`ujs.com`**——对齐 [`unisacc.com`](../README.md) 的**跨架构单文件可执行**（目标：{Linux, macOS, Windows} × {x86_64, arm64}；APE／自写出／自举合同对齐 Paper A 纪律，细则待钉） |
+| **状态** | **APE `ujs.com` 可构建**（`build-ape.cx`+`ape-pack.cx`，五片；本机 `sh ./ujs/ujs.com` 烟测）。另有 host1 原生／`build-six` 六目标。源仅 `.cx`。覆盖=stage0（语料 21 PASS／7 REFUSE）；core 更全表仍为实践脊待嵌入。未授权 tip／Draft／签／公开 |
+| **不是主产物** | 单独的 `ujs2wasm` CLI、`wat2wasm`、`compile.mjs`、零散 `.wasm` 文件——这些是 **`ujs.com` 的子功能／今日实践脊**，最终应收进或由 `ujs.com` 调度 |
+
+**子功能 ↔ 今日入口（将收敛进 `ujs.com`）**
+
+| 子功能 | 今日怎么用 | 将来在 `ujs.com` 里 |
 |---|---|---|
-| **core** | `bootRuntime` / `wasm_run` / `compile` · path-A `ujs_full` · **出货** `compiler_core` | 页内训练 · 完整 ES · 把 M3 说成 IntNet |
+| 编 `.ujs`→`\0asm` | `python3 -m ujs ujs2wasm` · `node compile.mjs` · `compiler_core` | 子命令／默认驱动（如 `ujs.com FILE.ujs -o out.wasm`） |
+| WAT→二进制 | 外部 **`wat2wasm`** 或常驻 wabt（仓外床实证） | **内部子步骤**，用户不直接当产品；可进程内或自带组装 |
+| 跑／fold／acc | `python3 -m ujs run\|fold\|acc\|…` | 子命令或 `-run` 类动态路径 |
+| path-A 演示核 | `web-build` → `ujs_full.wasm` | 可选子产物，非 ship 必经 |
+| 玩法步进核 | **`sim.wasm`** + Pages Host | 由 `ujs.com` 写出或加载的应用核；Pages 仍可吃 `.wasm` |
+| UXE Host | `engine.js` + `{app}` | 浏览器侧不变；桌面侧由 `ujs.com` 提供工具链 |
+
+**纪律**：对外说「UJS 产品」时，指 **`ujs.com`（待交付）**；说「现在能跑的」时，指下表实践脊。勿把 `wat2wasm`／`ujs2wasm` 说成最终出货物。
+
+### 0.2 今日实践脊（已交付能力，非最终产品形）
+
+| 层 | 今日交付 | 不是 |
+|---|---|---|
+| **core** | `bootRuntime` / `wasm_run` / `compile` · path-A `ujs_full` · **`compiler_core`** | 页内训练 · 完整 ES · 把 M3 说成 IntNet · **冒充已是 ujs.com** |
 | **UXE** | Host + `{app}` · Pages 步进 **`sim.wasm`** · 共享 `engine.js` | Three 移植 · 合包 · ship 必经 `engine.wasm`（P0 已弃） |
-| **构造** | `construct/` gold → 权重；全表 `ujs2wasm`；`web-build` → path-A | 应用运行时依赖 · ship emit |
+| **构造** | `construct/` gold → 权重；全表 `ujs2wasm`；`web-build` → path-A | 应用运行时依赖 · 把 Python CLI 当最终产品 |
 
 **路径 A**（共享 VM · 方法/演示）：`web-build` → `ujs_full.wasm`（曾用名 **`engine.wasm`**；**非** P0 ship 必经；内核仍 C+zig）。  
 **路径 B**（直出 · 出货步进）：`compile.mjs` → **`compiler_core.wasm`** → `sim.wasm`（已交付；玩法核）。  
@@ -24,7 +47,7 @@
 
 **语言（闭合）**：表内全功能，表外永久拒绝。有字面量 / list·dict / let·const / if·while·for·switch / function·箭头 / rest·spread / 算术比较 / 索引成员 / `len`·`keys` / 只读外层闭包。无 `undefined` 双轨、`var`/hoisting、`this`/`class`/prototype、`eval`、async/generator、RegExp 字面量。条款全表见 [`archive/prd-v1.0.md`](archive/prd-v1.0.md)。
 
-**不交付**：完整 ES · Three-in-wasm · 合包 · 用户 LLM key 进核/packet · UJS 直播主线。
+**不交付**：完整 ES · Three-in-wasm · 合包 · 用户 LLM key 进核/packet · UJS 直播主线 · **把外部 `wat2wasm` 当 UJS 品牌出货物**。
 
 ---
 
@@ -32,27 +55,31 @@
 
 别人能按模板交 `{app}`，外网可玩，验收无人。**主线夯 0–4；门禁先于功能。** 不开新门面游戏。
 
-**北极星：UJS 自举** — 最终由 UJS 写的编译器把 UJS→wasm；**逐步脱离 Python**（今仅构造臂可忍）。本应用 **unisacc** 作宿主/工具链底座，但它仍在进化、尚未稳到扛日常开发，故 Python 暂顶；unisacc 稳后优先把 construct 迁回去，再收束到 UJS 自举。Python 最终只留 gold/oracle/acc 对照，非 ship 必经。
+**北极星（两层）**  
+1. **产品形**：交付 **`ujs.com`**（类 `unisacc.com`），子功能含编译／组装／运行／自举，而非「只有 ujs2wasm」。  
+2. **方法形**：UJS 自举——由 UJS 写的编译器把 UJS→wasm；**逐步脱离 Python**（今仅构造臂可忍）。  
 
-**域分工**：unisacc = C 实践 · ujs = JS+wasm 实践 · **同理论**（构造法确定性推理=编译）。
+本应用 **unisacc** 作宿主/工具链底座与 APE 先例。主人 2026-10-25 钉：**ujs 内逐步依赖 `unisacc.com` + `.cx` 自有构型**，日常动态逻辑默认 `unisacc.com FILE.cx -- ARGS`（即 `-run`），**逐步脱离 Python**——与仓库根 AGENTS／零 Python 目标同向；`.cx` 只转调 Python **不算**消除依赖。
+
+**域分工**：unisacc = C 实践 · ujs = JS+wasm 实践 · **同理论**（构造法确定性推理=编译）；**同产品形纪律**（跨架构单文件 `.com`）；**同工具链纪律**（`unisacc.com` + `.cx`，不新堆 Python 算法）。
 
 ### 自举阶梯
 
 1. **今** Python construct 出 A（`engine`）+ B 工具（`ujs2wasm`）；Asteroid + drone Pages 步进默认 B
 2. **#2b / M1 + M1b** 玩法步进直出（B）— **Asteroid ✓ · drone ✓**；build 仍一次 Python emit（M2 去掉）
-3. 更多 construct 面迁入 UJS/wasm（front/emit 可在 wasm host 上用）
-4. **自举** UJS 编译器：UJS→wasm；Python 仍作构造/对照，不挡出货
+3. 更多 construct／测试／胶水迁入 **`unisacc.com` + `.cx`** 与 UJS/wasm（front/emit 可在 wasm host 上用）
+4. **自举** UJS 编译器：UJS→wasm；并交付 **`ujs.com`**；Python 只留构造/对照，不挡出货
 
-**反漂移**：下一步必须把能力推进 JS/wasm（或会打成 wasm 的 UJS 源）；Python construct **只许缩或持平**，禁止新增「仅 Python 才出货」的依赖。
+**反漂移**：下一步必须把能力推进 **`unisacc.com`+`.cx`／JS/wasm／`ujs.com`**；Python construct **只许缩或持平**，禁止新增「仅 Python 才出货或才验收」的依赖；禁止用 `.cx` 外壳转调 Python 冒充迁移完成。
 
 ### 何时可弃 Python（退出条件）
 
-分两层，**先弃出货、后弃构造**。没达到门闩就还不能喊「脱离 Python」。
+分两层，**先弃出货、后弃构造**。没达到门闩就还不能喊「脱离 Python」。底座路径：**`unisacc.com` + `.cx`**（动态 `-run`），不是再发明第三套脚本语言。
 
 | 层 | 弃什么 | 做成什么之后可以弃 | 现在卡在 |
 |---|---|---|---|
-| **P0 弃出货 Python** | `web-build` / `ujs2wasm` CLI / 预编译 embed **不再是 ship 必经** | ① Pages 玩法步进只加载直出 `.wasm`（B），不再 `wasm_run`+bytecode ② 改 `.ujs` 用 **JS/wasm 宿主**重编译，而不是 `python3 -m ujs …` ③ `npm run ship:*` 里无 `python3` | **✓** ship 停拷 `ujs_full`→`engine.wasm`；A 核仅 `FORCE_WEB_BUILD` / `ujs.sh` 重建 |
-| **P1 弃构造 Python** | gold / oracle / acc 也不靠 Python | 构造臂迁到 **unisacc**（或自举后的构造器）；枚举门禁仍在 | unisacc 未稳；刻意后置 |
+| **P0 弃出货 Python** | `web-build` / `ujs2wasm` CLI / 预编译 embed **不再是 ship 必经** | ① Pages 玩法步进只加载直出 `.wasm`（B），不再 `wasm_run`+bytecode ② 改 `.ujs` 用 **JS/wasm 或将来 `ujs.com`** 重编译，而不是 `python3 -m ujs …` ③ `npm run ship:*` 里无 `python3` | **✓** ship 停拷 `ujs_full`→`engine.wasm`；A 核仅 `FORCE_WEB_BUILD` / `ujs.sh` 重建 |
+| **P1 弃构造 Python** | gold / oracle / acc／床上探针也不靠 Python | 构造臂与验收胶水迁到 **`unisacc.com` + `.cx`**（及自举后的 `ujs.com`）；枚举门禁仍在；实际 `-run` 执行、保留拒绝与恢复合同 | unisacc 工具链仍在收口；刻意后置，**不预堆 0.0.44** |
 
 **P0 可检里程碑（每步弃一点）**
 
@@ -62,29 +89,32 @@
 | **M2** | 编译器本身是 wasm，在 Node/浏览器调用 | 输入 `.ujs`→`\0asm`；fold；**ship 脚本无 python3** · `./tests/ujs2wasm_compiler.sh` | 开发/CI 出货对 `python3 -m ujs` 的依赖（生成该编译器 wasm 的一次性 zig/C 尚可忍） — **✓** |
 | **M3** | 编译器用 UJS 写并自举 | stage0→stage1→stage2 **字节一致** | Python 作为编译器实现语言 |
 
-**一句话**：能扔掉出货 Python ≠ emit.py 更全，而是 **M1→M2→M3 门闩全绿**；P1 等 unisacc。
+**一句话**：能扔掉出货 Python ≠ emit.py 更全，而是 **M1→M2→M3 门闩全绿**；P1＝构造／胶水走上 **`unisacc.com`+`.cx`**，再收进 **`ujs.com`**。
 
 ### 产物清单（理论 → 交什么）
 
-同理论在 JS+wasm 域的实践物，**按里程碑交件**；每件都问：最终跑在 JS/wasm 上吗？
+**最终交件**问：是不是 **`ujs.com`**（或由其确定性写出的六目标／应用核）？  
+**里程碑交件**问：是否把能力推进 JS/wasm／自举，并**可被 `ujs.com` 吸收为子功能**？
 
 | 里程碑 | 必须落地的产物 | 不是产物（别做厚） | 状态 |
 |---|---|---|---|
-| **已有脚手架** | path-A `ujs_full`（曾名 engine）· ship-js Host · 全表 `ujs2wasm` **Python CLI** · `ujs2wasm_step` | 再扩 Python 专属出货链 | 脚手架 ✓；非自举；**非** P0 必经 |
-| **M1** | ① **`sim.wasm`**（直出玩法核，含 `host_*`/`run_step`）② Pages/ship **默认**加载它步进 ③ `direct_step.js` 热路径 ④ 合同：`uxe_ship_js` 验 sim.wasm | 只 fold 绿却仍默认 A | **Asteroid ✓ · drone ✓** |
-| **M2** | ① **`compiler.wasm`**：Node/浏览器 `compile(ujs)→wasm` ② **`compile.mjs`** ③ **`ship:*` 无 python3 emit** ④ sim/drone 经 compiler.wasm 出货 | 继续把 emit 只留在 `.py` 当日常编译器 | **✓** `ujs2wasm_compiler.sh`（含 ship emit 无 python3）。一次性构建 compiler.wasm 仍用 zig |
-| **M3** | ① **`compiler.ujs`**（编译器用 UJS 写）② **stage0/1/2**：stage2 字节 ≡ stage1 ③ 自举门禁脚本 | 「差不多能编」无字节一致 | **v16✓** sim+drone body≡ · !/&&/|| · **P0✓** ship 无 A 核 |
-| **P1** | gold/oracle/acc 在 **unisacc**（或自举构造器） | 在 ujs 里把 Python 构造成产品 | 后置 |
+| **已有脚手架** | path-A `ujs_full` · ship-js Host · `ujs2wasm`／`compile.mjs` 等**子功能入口** | 再扩 Python 专属出货链；把 CLI 当最终品牌 | 脚手架 ✓；**≠ ujs.com** |
+| **M1** | ① **`sim.wasm`** ② Pages 默认 B 步进 ③ `direct_step.js` ④ `uxe_ship_js` | 只 fold 绿却仍默认 A | **Asteroid ✓ · drone ✓** |
+| **M2** | ① **`compiler.wasm`／`compiler_core`** ② **`compile.mjs`** ③ ship 无 python3 emit | 继续把 emit 只留在 `.py` 当日常「产品」 | **✓**；仍是子功能脊 |
+| **M3** | ① **`compiler.ujs`** ② stage2≡stage1 ③ 自举门禁 | 「差不多能编」无字节一致 | **v16✓** · **P0✓** |
+| **P1** | gold/oracle/acc／验收胶水在 **`unisacc.com`+`.cx`**（或自举构造器） | 在 ujs 里把 Python 构造成产品；`.cx` 转调 Python 冒充完成 | 后置 |
+| **ujs.com host1** | 本机原生 CLI；`build.cx` | 冒充已覆盖 core | **✓** stage0 |
+| **ujs.com host1-six** | `build-six.cx` 六目标原生 | 冒充 APE 一包 | **✓** |
+| **ujs.com APE** | `build-ape.cx` 五片多形态；对齐 `unisacc.com` 容器形 | 冒充已嵌入 core；依赖用户机 Node／Python | **✓**（本机烟测；跨机切片另证） |
 
-**两条产物线不要混**
+**三条线 → 收束到一个 `.com`**
 
 ```
-用户程序线（玩法）     .ujs  ──M1──►  sim.wasm     ──ship──►  浏览器跑步进
-编译器线（工具）       （今 Python）──M2──►  compiler.wasm ──M3──►  compiler.ujs 自举
-构造线（理论真源）     gold/acc     ──P1──►  unisacc
+用户程序线（玩法）   .ujs ──► sim.wasm ──► Pages          ┐
+编译器线（工具）     compiler_core / compiler.ujs           ├──► 最终由 ujs.com 调度或写出
+构造线（理论）       gold/acc（对照；P1→unisacc）          ┘
+今日工厂             ujs2wasm · wat2wasm · compile.mjs     ──► 子功能，不是主产物名
 ```
-
-今日 `ujs2wasm` 只是 **用户程序线的 Python 工厂**；自举要的是 **编译器线** 上的 wasm/UJS 产物。
 
 **论文 / 对外叙事：两条脊（同纪律，不同产物）**
 
@@ -221,6 +251,32 @@ Python 直出管线（对照 / 全量仍用）：
 ```
 .ujs → front + jtape → emit_wat → wat2wasm → \0asm + meta
 ```
+
+**加速实证（Paper B 床 · 2026-10-25 · 仓外 · 不并表 unisacc 7×18）**
+
+28 语料、NEED5（lex/parse/scope/isel/enc）＋丢 type/shape/ic 死问；字节对拍 b-cli；arith SHA `0b99b103…`。
+
+| 档 | 热语料墙钟 | 做法 |
+|---|---|---|
+| cli `wat2wasm`×文件 | ≈3.2–3.3s | 每文件一进程 |
+| `--jobs=8` 并行 cli | 冷 ≈0.75–0.87s | 只削 spawn 排队 |
+| 常驻 wabt.js（`--asm=wabtjs`） | ≈0.09–0.10s | 进程内组装；批量 IPC 无再降 |
+
+热路径拆相（常驻后，约 0.10s）：
+
+| 段 | 墙钟 | 占热 |
+|---|---|---|
+| front（lex+parse+scope ask＋胶水） | ≈0.02s | ≈20–25% |
+| emit_wat（isel+enc ask＋拼 WAT） | ≈0.013s | ≈13–15% |
+| 组装（wabt：parseWat 为主） | ≈0.04–0.06s | ≈60% |
+
+四流十网：决策网 ask 合计 ≈0.025s（lex/parse/isel/enc）；type/shape/ic=0；irsel/reloc 直出不问。**encode 流的物理写出不在网里。**
+
+CLI `wat2wasm` 内因：×28 时 spawn／加载 ≈1.9–2.1s（约 2/3）；语料工作增量 ≈0.9s。进程内再拆：parseWat ≈57%、validate ≈16%、toBinary ≈11%。
+
+**REJECT**：跨文件 WAT 缓存（28 互异命中 0）；`lower_wasm.encode_wasm`→`UJS1` 非浏览器 `\0asm`；大 JSON 批量 IPC（不降或更慢）；本刀回灌 unisacc（产品直写映像、无 fork 组装）。
+
+**下一刀唯一明显杠杆**：真直出 `\0asm`（不经文本 WAT），且须逐字节同基线。其余为毫秒级。范式：**先按流／相拆墙钟，先打 spawn／IO，再动网。** 证据 `/tmp/ujs-accel-link-20261025/`（C-batch／J-PHASE／ASM-*／O-wabt*）。未 tip、未改出货默认路径。
 
 **`compiler.wasm` ABI**（已钉）：
 
@@ -567,6 +623,10 @@ flowchart TD
 | **UXEP / UXIN** | 一次一包提交 / 输入快照 |
 | **BUILD.json** | 与 Release 对指纹 |
 | **构造不训练** | 出货权重由 gold 代数生成；M3 另用孪生字节门禁 |
+| **ujs.com** | **主产物（愿景）**：类 `unisacc.com` 跨架构单文件；**未实现** |
+| **子功能** | `ujs2wasm`／`wat2wasm`／`compile.mjs`／`sim.wasm`… = 今日脊，将来进 `ujs.com` |
+| **脱 Py** | 新胶水／构造迁 **`unisacc.com` + `.cx`（`-run`）**；只许缩 Python，不许转调冒充 |
+| **直出税** | 热语料大头曾是 `wat2wasm` spawn，非常驻后是 parseWat；网 ask 非主税。见「加速实证」 |
 
 ## 走出宫殿前默念
 
@@ -575,9 +635,10 @@ flowchart LR
     L1["① ship 无 A 核"] --> R1["sim.wasm · 非 engine.wasm"]
     L2["② 核只调 host_*"] --> R2["无 canvas/key"]
     L3["③ 两脊分清"] --> R3["M3 ≠ IntNet"]
+    L4["④ 先拆相再砍网"] --> R4["spawn／IO／parse 税 ≠ IntNet"]
 
     classDef red fill:#7f1d1d,stroke:#f87171,color:#fee2e2
-    class L1,L2,L3 red
+    class L1,L2,L3,L4 red
 ```
 
 ---

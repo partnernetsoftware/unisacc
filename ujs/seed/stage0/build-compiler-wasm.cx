@@ -1,0 +1,50 @@
+#!/usr/bin/env -S unisacc.com -run
+/* Product rule: no .c / zig C seed rebuild.
+   stage0 wasm artifact lives at ujs/iterate/compiler.wasm (committed).
+   Host compiler is compiler_min.cx via product/build.cx.
+   This tool only verifies the artifact is \\0asm.
+*/
+static int enter_stage0(const char *argv0) {
+    char dir[4096];
+    size_t l;
+    char *sl;
+    if (!argv0 || !argv0[0]) return -1;
+    l = strlen(argv0);
+    if (l >= sizeof dir) return -1;
+    memcpy(dir, argv0, l + 1);
+    sl = strrchr(dir, '/');
+    if (!sl) return -1;
+    *sl = 0;
+    return chdir(dir);
+}
+
+int main(int argc, char **argv) {
+    unsigned char mag[4];
+    FILE *f;
+    long sz;
+    (void)argc;
+    if (enter_stage0(argv[0]) != 0) {
+        fprintf(stderr, "build-compiler-wasm.cx: chdir failed\n");
+        return 2;
+    }
+    f = fopen("../../iterate/compiler.wasm", "rb");
+    if (!f) {
+        fprintf(stderr, "build-compiler-wasm.cx: missing iterate/compiler.wasm\n");
+        fprintf(stderr, "  (C/zig rebuild removed; restore artifact or rebuild from .ujs core path)\n");
+        return 1;
+    }
+    if (fread(mag, 1, 4, f) != 4) {
+        fclose(f);
+        fprintf(stderr, "build-compiler-wasm.cx: short read\n");
+        return 1;
+    }
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 1; }
+    sz = ftell(f);
+    fclose(f);
+    if (mag[0] != 0 || mag[1] != 0x61 || mag[2] != 0x73 || mag[3] != 0x6d) {
+        fprintf(stderr, "build-compiler-wasm.cx: not \\0asm\n");
+        return 1;
+    }
+    printf("build-compiler-wasm.cx: ok artifact %ld bytes (no .c rebuild)\n", (long)sz);
+    return 0;
+}

@@ -1,1 +1,0 @@
-../seed/stage0/compiler_min.c

@@ -1,0 +1,134 @@
+#!/usr/bin/env -S unisacc.com -run
+/* Build APE ujs.com: five -b slices + ape-pack.cx. No .c/.py.
+   Usage: ./unisacc.com -run ujs/product/build-ape.cx
+   Writes ujs/ujs.com (APE). Six-target natives remain via build-six.cx.
+*/
+static int exists(const char *p) {
+    FILE *f = fopen(p, "rb");
+    if (!f) return 0;
+    fclose(f);
+    return 1;
+}
+
+static int enter_root(const char *argv0) {
+    char dir[4096];
+    size_t l;
+    char *sl;
+    if (!argv0 || !argv0[0]) return -1;
+    l = strlen(argv0);
+    if (l >= sizeof dir) return -1;
+    memcpy(dir, argv0, l + 1);
+    sl = strrchr(dir, '/');
+    if (!sl) return -1;
+    *sl = 0;
+    if (chdir(dir) != 0) return -1;
+    return chdir("../..");
+}
+
+static int emit_slice(const char *target, const char *outpath) {
+    char *av[12];
+    char *cap = 0;
+    size_t n = 0;
+    int rc;
+    av[0] = "sh";
+    av[1] = "./unisacc.com";
+    av[2] = "-DUJS_HOST";
+    av[3] = "ujs/product/ujs_main.cx";
+    av[4] = "ujs/seed/stage0/compiler_min.cx";
+    av[5] = "-b";
+    av[6] = (char *)target;
+    av[7] = "-o";
+    av[8] = (char *)outpath;
+    av[9] = 0;
+    rc = cx_runv_timeout(av, 60, &cap, &n);
+    if (cap && n && rc != 0) fwrite(cap, 1, n, stderr);
+    free(cap);
+    return (rc == 0 && exists(outpath)) ? 0 : 1;
+}
+
+int main(int argc, char **argv) {
+    char *out = 0;
+    size_t n = 0;
+    int rc;
+    char *av[16];
+    char mk[128];
+    (void)argc;
+
+    if (enter_root(argv[0]) != 0 && !exists("./unisacc.com")) {
+        fprintf(stderr, "build-ape.cx: need repo root\n");
+        return 2;
+    }
+    if (!exists("./unisacc.com") || !exists("ujs/product/ape-pack.cx")) {
+        fprintf(stderr, "build-ape.cx: missing unisacc.com or ape-pack.cx\n");
+        return 2;
+    }
+
+    av[0] = "sh"; av[1] = "-c"; av[2] = "mkdir -p /tmp/ujs-ape-slices"; av[3] = 0;
+    rc = cx_runv_timeout(av, 5, &out, &n);
+    free(out); out = 0; n = 0;
+    if (rc != 0) return 1;
+
+    if (emit_slice("win/x86_64", "/tmp/ujs-ape-slices/win-x86_64") ||
+        emit_slice("lnx/x86_64", "/tmp/ujs-ape-slices/lnx-x86_64") ||
+        emit_slice("lnx/arm64", "/tmp/ujs-ape-slices/lnx-arm64") ||
+        emit_slice("osx/x86_64", "/tmp/ujs-ape-slices/osx-x86_64") ||
+        emit_slice("osx/arm64", "/tmp/ujs-ape-slices/osx-arm64")) {
+        fprintf(stderr, "build-ape.cx: slice emit failed\n");
+        return 1;
+    }
+
+    /* ape-pack via -run (APE itself needs sh to launch later) */
+    av[0] = "sh";
+    av[1] = "./unisacc.com";
+    av[2] = "-run";
+    av[3] = "ujs/product/ape-pack.cx";
+    av[4] = "--";
+    av[5] = "--product";
+    av[6] = "ujs";
+    av[7] = "0.0.1";
+    av[8] = "ujs/ujs.com";
+    av[9] = "/tmp/ujs-ape-slices/win-x86_64";
+    av[10] = "/tmp/ujs-ape-slices/lnx-x86_64";
+    av[11] = "/tmp/ujs-ape-slices/lnx-arm64";
+    av[12] = "/tmp/ujs-ape-slices/osx-x86_64";
+    av[13] = "/tmp/ujs-ape-slices/osx-arm64";
+    av[14] = 0;
+    rc = cx_runv_timeout(av, 60, &out, &n);
+    if (out && n) fwrite(out, 1, n, stdout);
+    free(out); out = 0; n = 0;
+    if (rc != 0 || !exists("ujs/ujs.com")) {
+        fprintf(stderr, "build-ape.cx: pack failed rc=%d\n", rc);
+        return 1;
+    }
+
+    av[0] = "sh";
+    av[1] = "./ujs/ujs.com";
+    av[2] = "--version";
+    av[3] = 0;
+    rc = cx_runv_timeout(av, 30, &out, &n);
+    if (rc != 0 || !out || n < 8 || strncmp(out, "ujs.com ", 8) != 0) {
+        fprintf(stderr, "build-ape.cx: APE --version failed rc=%d\n", rc);
+        if (out && n) fwrite(out, 1, n, stderr);
+        free(out);
+        return 1;
+    }
+    fwrite(out, 1, n, stdout);
+    free(out); out = 0; n = 0;
+
+    av[0] = "sh";
+    av[1] = "./ujs/ujs.com";
+    av[2] = "tests/ujs2wasm/corpus/arith.ujs";
+    av[3] = "-o";
+    av[4] = "/tmp/ujs-ape-arith.wasm";
+    av[5] = 0;
+    rc = cx_runv_timeout(av, 60, &out, &n);
+    if (out && n) fwrite(out, 1, n, stdout);
+    free(out);
+    if (rc != 0 || !exists("/tmp/ujs-ape-arith.wasm")) {
+        fprintf(stderr, "build-ape.cx: APE arith failed rc=%d\n", rc);
+        return 1;
+    }
+    printf("build-ape.cx: ok APE ujs/ujs.com\n");
+    (void)mk;
+    return 0;
+}
