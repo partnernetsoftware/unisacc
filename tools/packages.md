@@ -64,8 +64,19 @@ Its `.native-build.tsv` receipts contain the construction context and artifact
 SHA; wrap rehashes all five slices against their receipts before and after use.
 Existing or partial output is refused. These are PREPARED receipts, not tests.
 
-`tests/selfhost.cx ROOT PRIOR_GENERATION FRESH_GENERATION` compares all 22
-normalized sources, 22 objects, both kernels, five code slices and the full fresh
-product against the installed bootstrap. It checks the installed artifact/source
-record and current kernel context too. A successful two-generation comparison
-does not substitute for the required complete bootstrap chain or foreign hosts.
+`tests/selfhost.cx ROOT PRIOR_GENERATION PRIOR_PACKAGE FRESH_GENERATION FRESH_PACKAGE`
+compares all 22 normalized sources, 22 objects, both kernels, five code slices
+and the full fresh product against the installed bootstrap. The prior builder
+is the saved `PRIOR_GENERATION/bootstrap-before-install.com` and its record; the
+fresh builder is the current root. The checker validates both generations'
+actual kernel/assembler/source/object/package/slice/wrap receipts and complete
+model-input selections before and after comparison. Its bounded invocation-owned
+artifact views are released before the after-check, which physically rereads
+the inputs. No PASS or cross-phase identity cache is used. Run it through
+`tools/bound 30 sh ./unisacc.com tests/selfhost.cx -- ...`.
+
+Generations08/09 of P46cfa11a passed 58 assertions under that original bound;
+see [the test contract and limitations](../tests/README.md). Unsigned receipts
+prove consistency, not historical execution, and the v1 product context does
+not bind the builder. A successful two-generation comparison does not establish
+the host-seed three-stage N22 chain or native foreign-host qualification.

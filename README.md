@@ -69,8 +69,9 @@ Current bounded development steps are documented in [native kernel construction]
 and [package refresh and product construction](tools/packages.md): run
 `tools/kernel-build.cx`, `tools/package-refresh.cx` and `tools/product-build.cx`
 through `sh ./unisacc.com FILE.cx -- ARGS` using their documented material and
-identity checks. `tests/selfhost.cx ROOT PRIOR_GENERATION FRESH_GENERATION`
-compares two native generations, including the complete product; it does not
+identity checks. `tests/selfhost.cx ROOT PRIOR_GENERATION PRIOR_PACKAGE FRESH_GENERATION FRESH_PACKAGE`
+checks both generations' source and material receipts before and after comparing
+the native artifacts, including the complete product; it does not
 establish the host-seed three-stage chain or native foreign-host qualification.
 `unisacc-next.com` is only a build-directory output name.
 
