@@ -150,7 +150,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 ```text
 0.0.43：完成开发、重建自身迭代体系与新验收（发布须另授）
-├─ 当前主刀：P53/S447的真实P3四CASE各12/0，ELF退出0/0/7/7；宿主CC/C HOST首代完整产品与根同字节，后两代在构建。新4批登记待重解析，上次清单98覆盖/59批、19完整缺口，未收口
+├─ 当前主刀：P53/S447的真实P3四CASE各12/0，ELF退出0/0/7/7；宿主CC/C HOST→首代→二代→三代已实际构建，三代完整产品均与根同字节，新链40/0。新4批登记待重解析，上次清单98覆盖/59批、19完整缺口，未收口
 ├─ R0 已归档：2529个旧测试路径原blob/模式完整保留；构造支持移tools，新旧入口分离；原生容器/驱动重建已实跑，构造依赖迁移仍待补
 ├─ R1 已有首批：新根产品smoke16断言0；旧Pa7e8的cx/owned551及私有状态拒绝仅历史证据，完整覆盖仍NOT_READY
 ├─ R2 旧启动器部分已证：七流原模型/74资源提取不重构；40断言0含constructor真管道/产品镜像同字节/返回7；完整独立合同仍待补
@@ -171,9 +171,9 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 **真实P3消费者证据：** 已复用当前P53完整P3包，未重构权重/另写decoder；独立source-only prepare→默认trimming compile（COMPILED pending）→seal（PREPARED）均在原限时内完成。通用fno-trim两次20秒超时及原单步profile55秒超时保留，未放宽；拆步骤并由父直接module verify避免多层默认-run，当前flow-native=dec8638a3d79ae434a4f0f30af83570bd413bf912d96f4a2f80db671962dd990/232165B。独立DATA prepare20秒内0，只记PREPARED；四个实际P3模型CASE各55秒内12父检查/0，out/c43-ri-flow-{e3-empty,e3-absent,e3-missing,e3-to-lower}-01.log，前三fixture各8、lower9。E3实际SC2 fetch区分EMPTY存在len0、ABSENT不存在、MISSING回退到真实13B属性，实际ELF退出0/0/7；保留tapecheck的E3→lower链最终退出7。snapshot input是真E3 tokens，lower capture input是真prune后输入且SHA不同；lower attrs-fetch实际0，不假称lower消费属性。C library-guard source-adapter不是installed CLI集成，也不是完整RI/外宿主资格。新profile/完整DATA目录inventory负控待实跑。
 
-**宿主来源链进展：** 宿主CC已独立编ident与C HOST；初始S测量依赖当前根，后续使用native helper实际测S。HOST产第一代五切片及wrap均成功，out/c43-hostseed-stage1-01/unisacc-seed.com与根完整字节相等P53e2cd1f（cmp0）；首Linux切片也与gen11同34cf321c...。第二/三代正分别由其实际父代构建，每步独立55秒且绑定builder/parent receipt/source/models/payload。NN/P3与ASM kernel仍声明二进制受信输入，未称完整host-seed/N22。CC告警mapping maybe-uninitialized只读控制流未见可达未初始化读；CLI过程资源依赖进程退出回收，不外推可复用library或全生命周期闭合。
+**宿主来源链进展：** 宿主CC已独立编ident与C HOST；初始S测量依赖当前根，后续使用native helper实际测S。HOST产第一代，首代产第二代，第二代产第三代；三代各五切片及wrap均实际成功，out/c43-hostseed-stage{1,2,3}-01/unisacc-seed.com完整SHA均为P53e2cd1f。out/c43-hostseed-chain-01.log在55秒内40/0，前后实际核来源收据、逐字节比二/三代六产物及第三代与当前根，29文件和models/payload未变。每步独立55秒且绑定builder/parent receipt/source/models/payload。NN/P3与ASM kernel仍声明二进制受信输入，未称完整host-seed/N22。CC告警mapping maybe-uninitialized只读控制流未见可达未初始化读；CLI过程资源依赖进程退出回收，不外推可复用library或全生命周期闭合。
 
-**下一动作：** 保持产品源S447冻结，完成HOST后两代及新链验证、真实P3 profile/目录inventory负控，冻结新表后重跑plan/--all并分批提交。再补19完整缺口、真正NN/ASM源重演与同候选六宿主。C44-RUN-REUSE-01仍未实现未测；不签名/Draft/Latest/公开。
+**下一动作：** 保持产品源S447冻结，完成真实P3 profile/目录inventory负控与-run重复启动基线，冻结新表后重跑plan/--all并分批提交。再补19完整缺口、真正NN/ASM源重演与同候选六宿主。C44-RUN-REUSE-01仍未实现未测；不签名/Draft/Latest/公开。
 
 原红、历史候选、试验和阶段记录已原样移至[本拍历史记录](archive/prd-c43-pre-p3-host-lineage-20261026.md)，不继续冒充当前状态。
 
