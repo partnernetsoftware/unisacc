@@ -13,6 +13,28 @@ K=$({ rg --files exec seed unisa include | rg '\.(tsv|py|c|h|sh|inc|json)$' | LC
 D=${TMPDIR:-/tmp}/unisacc-librarytypedreader-$K
 mkdir -p "$D"
 check(){ b sh "$UA" -run tests/librarytypedreadercheck.cx -- "$@"; }
+prepare_typed_c(){
+ (cd "$D" && sha256sum -c --status tools.sha256)
+ b "$D/gen" parse2/librarytyped "$D/typed-c.json" --librarytyped --locations
+ (cd "$D" && sha256sum tools.sha256 typed-c.json >typed-c.sha256)
+}
+prepare_typed_p(){
+ (cd "$D" && sha256sum -c --status tools.sha256 && sha256sum -c --status typed-c.sha256)
+ b python3 exec/build/gen.py parse2/librarytyped "$D/typed.json" --librarytyped --locations
+ check --same "$D/typed-c.json" "$D/typed.json" >"$D/typed-cp.log"
+ (cd "$D" && sha256sum typed-c.sha256 typed-c.json typed.json typed-cp.log >typed-p.sha256)
+}
+prepare_typed_tables(){
+ (cd "$D" && sha256sum -c --status tools.sha256 && sha256sum -c --status typed-c.sha256 && sha256sum -c --status typed-p.sha256)
+ b python3 exec/c/tbl.py "$D/typed.json" "$D/model.tbl"
+ (cd "$D" && sha256sum typed-p.sha256 model.tbl >typed-tables.sha256)
+}
+prepare_typed_net(){
+ (cd "$D" && sha256sum -c --status tools.sha256 && sha256sum -c --status typed-c.sha256 && sha256sum -c --status typed-p.sha256 && sha256sum -c --status typed-tables.sha256)
+ b python3 exec/c/net.py "$D/model.tbl" "$D/model.net"
+ (cd "$D" && sha256sum typed-tables.sha256 model.net >typed-net.sha256)
+ (cd "$D" && sha256sum typed-c.json typed.json model.tbl model.net >typed.sha256)
+}
 case ${1:-check} in
 --cache-dir) printf '%s\n' "$D";;
 --prepare-tools)
@@ -76,14 +98,15 @@ case ${1:-check} in
  b python3 exec/c/net.py "$D/audit.tbl" "$D/audit.net"
  (cd "$D" && sha256sum audit-c.json audit.json audit.tbl audit.net >audit.sha256)
  ;;
+--prepare-typed-c) prepare_typed_c ;;
+--prepare-typed-p) prepare_typed_p ;;
+--prepare-typed-tables) prepare_typed_tables ;;
+--prepare-typed-net) prepare_typed_net ;;
 --prepare-typed)
- (cd "$D" && sha256sum -c --status tools.sha256)
- b "$D/gen" parse2/librarytyped "$D/typed-c.json" --librarytyped --locations
- b python3 exec/build/gen.py parse2/librarytyped "$D/typed.json" --librarytyped --locations
- check --same "$D/typed-c.json" "$D/typed.json" >"$D/typed-cp.log"
- b python3 exec/c/tbl.py "$D/typed.json" "$D/model.tbl"
- b python3 exec/c/net.py "$D/model.tbl" "$D/model.net"
- (cd "$D" && sha256sum typed-c.json typed.json model.tbl model.net >typed.sha256)
+ prepare_typed_c
+ prepare_typed_p
+ prepare_typed_tables
+ prepare_typed_net
  ;;
 check)
  for phase in tools base typed audit;do

@@ -146,7 +146,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 0.0.43 公开发布
 ├─ 已完成：F1产品修复、F2文档／探针；F3历史基线187项=186 PASS＋1宿主未核
 ├─ 已完成：F6三实际编译器SHA相同；三阶段五代码切片实际重编、原50秒界通过
-├─ 当前：固定b09cbbf0b9的1317项正式M7已到166窗；446 PASS／6资源UNKNOWN／5既有基线裁定／1宿主未核／859待办，2600继续
+├─ 当前：固定b09cbbf0b9的1317项原闸在175窗停；543 PASS／6资源UNKNOWN／5既有基线裁定／1宿主未核／1新超时／761待办
 │  ├─ 070窗自然结束、2193已终止；旧冻结的结果仅保留诊断，不计有效正式PASS
 │  ├─ 清单1317项；原seedmemory严格17例=行为16＋真实新鲜度1，后者仍UNKNOWN／OPEN
 │  ├─ 固定env-pin；绑定新HEAD与真实非空Git闭包身份，禁止迁移旧绿或沿用旧闭包hash
@@ -157,7 +157,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 └─ 待完成：Draft资产核对 → Latest／公开 → 下载SHA与运行复核
 ```
 
-**下一动作：2600继续152–210窗，首红即停；原冻结b09源码／环境不变。151三失败已实际定点重排，原state f1e788cc…／新1b03d2b4…及归档保留；只追加arm64-refusals-2与large的fullwindow偏好，不写retried。152／153两refusals及154 large均在原40秒内实际0，Windows lower七消费scope已完成，不以恢复动作补绿。** 147窗三消费者rc75 busy/stale writer lock、两依赖BLOCKED；已定位144尾窗超时遗留空目录锁，当前无活跃队列／消费者。原锁按同inode保留为lock.archived-window144-147；五prepare在原F4／RELEASE_BOUND=1重核原a72c键均rc0且complete seal verified，原证据完整存out/m7-winlower-lock-recovery-147。已实际只重排三75与两BLOCKED，不记PASS；事务原state SHAe6280381…、新d2b0f7e2…，原失败／临时文件与归档均保留。主树以共享／独占flock替代mkdir持锁，默认-run的12项微测及独立exec继承／退出释放检查通过；工具仅桥接flock宿主errno，Mac分支未实跑，正式冻结源保持不变。 131原warnprep-1 solo40.13秒超时及state已完整留档，按当前closure新key以已验证C工具准备两种不同模型，六材料SHA与旧独立参考完全相同；正式M7原warnprep-1／2在132窗各0.552秒rc0，未削断言／加时，也不把CPython冷构造或RSS改判通过。此前124五叶准备竞态原证据保留，主树五条依赖边已修e838a5efab；其余exec-chain分片须继续实际执行，不借首叶通过补绿。Mac两架构构造／默认-run／三处自建xattr及字节回放已全部通过（窄收据见release/evidence/c43-apple-bundle-ci.json）。完整M7／处置、生产准入、正式签名与公开仍未完成。
+**下一动作：原冻结队列已在177窗遇新红停止，当前547 PASS／755 PENDING，另6 RESOURCE_UNKNOWN、5 RULED_BASELINE、1 UNVERIFIED_HOST、1 BLOCKED、2 NEEDS_RULING。** 新红exec-prepare-typedlower-lnx-a原40秒rc142（末行lower states4800），待拆解计时；其冷路径静态包含三份独立参考构造、C构造、六次表／网络构造及完整穷举，不能把聚合超时归因于NN推理。优先完成reader四准备单元的元数据与动态验证，再处理typedlower；保留原H0失败与旧PASS的真实身份，不导入主树改动或迁移未知绿。Mac两架构补充证据已入库；完整覆盖证明、终态具名处置、生产准入、正式签名与公开仍待完成。
 
 <a id="memory-palace"></a>
 ### 记忆宫殿
@@ -185,6 +185,8 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 **提速调度决定**：分别测量准备、编排与真实执行；优先删除重复准备、修复缓存身份和收窄日常回归，保留完整输入校验与最终全覆盖。后台优化不阻塞0.0.43；小探针速度不外推完整E4速度。147窗新增缓存锁阻断，优先解决锁生命周期与读写并发，禁止用增加超时掩盖调度缺陷。
 
 **具名宿主义务**：151窗bound在Linux返回77，Terminal ownership未核，原状态保持UNVERIFIED_HOST。补充CI40141960296/1在17fa1e3cae两Mac架构已实际通过原看门狗与Terminal mock的0／2／142／143、窗口4242断言；原3秒／清理预算均保留。两原ZIP的API digest、bound原log／rc0、六输入SHA、source-head与candidate已逐项核实，收据为release/evidence/c43-bound-darwin-ci.json；它是独立补充证据，不是原Linux PASS或签名资格。先前40141324447诊断上下文缺失与40141567828模拟传输scope误继承均已最小修复、原失败保留。终态须把该具名义务与外部证据联结；旧Apple类策略未自动放宽，完整1317、正式签名／公开仍待办。
+
+**reader准备拆分**：175原聚合在full／solo40秒均142。原b09逐步实测：C构造6.224秒、独立参考31.569秒、原精确比较4.360秒（两JSON各64515633字节且完全相等）、表4.536秒、网络0.413秒，全部各自原40秒内rc0，合计47.102秒；这是准备分组问题，不是NN推理错误。主树按已授权分阶段方向拆四入口，保原命令／断言／错误传播与兼容聚合；H0冻结不导入变更。旧H0 PASS只保留其真实旧身份，旧142不改PASS；H0／新四单元及消费者的具名覆盖补件仍是待验证的结证候选，未经完整验证不据此开放发布。输入身份的真实全局范围不能靠旧注释缩窄，也不为此默许跨闭包迁绿。
 
 **动态维护规则**：进度、身份、阻塞、决定或下一动作变化时，同步原位更新思维树节点及对应房间；只把当前事实留在这里。每次恢复先读两者，派发任务引用当前节点和确切缺口。原始过程与旧失败保留在证据或Git历史中，不冒充当前状态。
 
