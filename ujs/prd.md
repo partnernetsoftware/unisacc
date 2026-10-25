@@ -17,7 +17,7 @@
 | | |
 |---|---|
 | **主产物** | **`ujs.com`**——对齐 [`unisacc.com`](../README.md) 的**跨架构单文件可执行**（目标：{Linux, macOS, Windows} × {x86_64, arm64}；APE／自写出／自举合同对齐 Paper A 纪律，细则待钉） |
-| **状态** | **host1 APE 产品形已交付**（纯 `.cx`：`build-ape.cx`／`complete.cx`；六目标 `build-six.cx`）。语料合同 **28 PASS／0 REFUSE**（含 `?:`／`switch`／`null??`／`for-of`／`+=`／**arrow**／**function+rest**；调用点内联，非嵌 core）。树已产品优先梳理。未授权 tip／Draft／签／公开 |
+| **状态** | **host1 彻底交付（本代）**：`complete.cx` = APE + 语料 **28/0** + 六目标原生；纯 `.cx`。stage0 含 arrow／function+rest（调用点内联）。未嵌 `compiler_core`（可选下一代）。未授权 tip／Draft／签／公开 |
 | **不是主产物** | 单独的 `ujs2wasm` CLI、`wat2wasm`、`compile.mjs`、零散 `.wasm` 文件——这些是 **`ujs.com` 的子功能／今日实践脊**，最终应收进或由 `ujs.com` 调度 |
 
 **子功能 ↔ 今日入口（将收敛进 `ujs.com`）**
@@ -618,7 +618,7 @@ flowchart TD
 | **UXEP / UXIN** | 一次一包提交 / 输入快照 |
 | **BUILD.json** | 与 Release 对指纹 |
 | **构造不训练** | 出货权重由 gold 代数生成；M3 另用孪生字节门禁 |
-| **ujs.com** | **主产物已交付（host1 APE）**：`complete.cx`；stage0 语料 **28/0**；未嵌 core |
+| **ujs.com** | **host1 彻底**：`complete.cx`=APE+28/0+六目标；未嵌 core（可选） |
 | **子功能** | `ujs2wasm`／`wat2wasm`／`compile.mjs`／`sim.wasm`… = 实践脊／全表对照 |
 | **脱 Py** | 新胶水／构造迁 **`unisacc.com` + `.cx`（`-run`）**；只许缩 Python，不许转调冒充 |
 | **直出税** | 热语料大头曾是 `wat2wasm` spawn，非常驻后是 parseWat；网 ask 非主税。见「加速实证」 |

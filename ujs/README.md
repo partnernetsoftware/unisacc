@@ -8,7 +8,7 @@
 
 ```bash
 # 仓库根
-./unisacc.com -run ujs/product/complete.cx   # APE 重建 + 语料闸
+./unisacc.com -run ujs/product/complete.cx   # APE + 语料 28/0 + 六目标
 ./unisacc.com -run ujs/product/build-ape.cx  # 只出 APE
 ./unisacc.com -run ujs/product/build.cx      # 本机原生（快迭代）
 ./unisacc.com -run ujs/product/build-six.cx  # 六目标原生 → /tmp

@@ -20,9 +20,10 @@
 
 ```bash
 # 仓库根
-./unisacc.com -run ujs/product/complete.cx    # APE + corpus-host
+./unisacc.com -run ujs/product/complete.cx    # APE + corpus 28/0 + six
 ./unisacc.com -run ujs/product/build-ape.cx
 ./unisacc.com -run ujs/product/build.cx
+./unisacc.com -run ujs/product/build-six.cx
 ./unisacc.com -run ujs/product/corpus-host.cx # 28 PASS / 0 REFUSE
 ```
 
