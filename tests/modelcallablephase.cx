@@ -1,0 +1,28 @@
+/* Original callable wire oracle commands, fixed partitions; original40 qualification pending.
+ * Each var scope repeats original setup; all three jointly cover its old tail.
+ * Repeated wire regression in the standalone and var suite is intentional. */
+#include <cx.h>
+static int no(const char*s){fprintf(stderr,"modelcallablephase refused: %s\n",s);return 2;}
+static char*rep(char*s,const char*a,const char*b){char*p=strstr(s,a);if(!p||strstr(p+1,a))return 0;size_t k=p-s;char*t=malloc(strlen(s)+strlen(b)-strlen(a)+1);if(!t)return 0;memcpy(t,s,k);strcpy(t+k,b);strcpy(t+k+strlen(b),p+strlen(a));return t;}
+static char*line(char*s,const char*needle){char*p=strstr(s,needle);if(!p||strstr(p+1,needle))return 0;while(p>s&&p[-1]!='\n')p--;return p;}
+int main(int argc,char**argv){
+ if(unsetenv("UNISA_CONTAINER"))return no("restore original parent environment");
+ int inspect=argc==3&&!strcmp(argv[2],"--inspect"),emit=argc==3&&!strcmp(argv[2],"--emit-script");if(argc!=2&&!inspect&&!emit)return no("wire|var-promoted|var-wire|var-native [--inspect]");
+ const char*names[]={"wire","var-promoted","var-wire","var-native"};int part=-1;for(int i=0;i<4;i++)if(!strcmp(argv[1],names[i]))part=i;if(part<0)return no("unknown scope");
+ const char*source=part?"tests/modelcallablevarwirecheck.sh":"tests/modelcallablewirecheck.sh";
+ const char*sha=part?"ca7045635dbbcc241ed3efffa76865b46dffc965eaf00206b15a5fe9a7206652":"ca47bf1fb7db1aebeb15fdfb7e62e75f4eeb528c28853230c9949f891125e4f2";
+ size_t n;char*s=cx_read(source,&n),h[65];if(!s||!n||n>16384||memchr(s,0,n))return no("source read/length/NUL");cx_sha256_hex(s,n,h);if(strcmp(h,sha))return no("original source SHA changed");
+ char*script=s;
+ if(part){const char*needle[]={"\"$R/tests/modelcallablevarwirecheck.py\"","\"$R/tests/modelcallablewirecheck.py\"","\"$R/tests/modelvariadiccallcheck.py\""};char*at[4];for(int i=0;i<3;i++){at[i]=line(s,needle[i]);if(!at[i]||(i&&at[i]<=at[i-1]))return no("original three-checker partition");char*end=strchr(at[i],'\n');if(!end)return no("checker complete line");if(i&&at[i]!=strchr(at[i-1],'\n')+1)return no("unexpected bytes between checker commands");}at[3]=s+n;if(strchr(at[2],'\n')+1!=at[3])return no("unexpected tail");
+  size_t prefix=at[0]-s,tail=at[part]-at[part-1];script=malloc(prefix+tail+1);if(!script)return no("allocation");memcpy(script,s,prefix);memcpy(script+prefix,at[part-1],tail);script[prefix+tail]=0;
+  /* Exact adjacent complete lines: common prefix + all three original tails = source. */
+  size_t sum=prefix;for(int i=0;i<3;i++)sum+=at[i+1]-at[i];if(sum!=n)return no("incomplete reconstruction");
+ }
+ script=rep(script,"bound 55 \"$R/tests/build_ref.sh\" \"$T/ref.c\" \"$T/ref\"\n","bound 55 \"$R/tests/build_ref.sh\" \"$T/ref.c\" \"$T/ref\" --source-only\n");if(!script)return no("reference command");
+ char*start=line(script,"\"$R/exec/build/gen.py\" parse2 \"$T/parse.json\"");if(!start)return no("unique original parse2 command");char*end=strchr(start,'\n');if(!end)return no("complete model command");end++;
+ const char*prepared="mkdir -m 700 \"$T/prepared\"\nbound 20 sh \"$R/tests/cxbin\" \"$R/tests/execchainprepared.cx\" --materialize \"$T/prepared\"\ncp \"$T/prepared/e3.json\" \"$T/parse.json\"\ncmp \"$T/prepared/e3.json\" \"$T/parse.json\"\n";
+ size_t k=start-script,z=strlen(script)-(end-start)+strlen(prepared);char*out=malloc(z+1);if(!out)return no("allocation");memcpy(out,script,k);memcpy(out+k,prepared,strlen(prepared));strcpy(out+k+strlen(prepared),end);cx_sha256_hex(out,z,h);
+ if(inspect){printf("modelcallablephase scope=%s source=%s script_sha256=%s; original checker whole, prepared JSON only; NOT PASS\n",argv[1],sha,h);return 0;}
+ if(emit){if(fwrite(out,1,z,stdout)!=z)return no("script output");return 0;}
+ char*a[]={"sh","-c",out,(char*)source,0};execvp(a[0],a);return no("exec original shell");
+}

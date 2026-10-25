@@ -839,9 +839,11 @@ job lib-union16-direct-5 sh ./unisacc.com -run tests/libraryunion16check.cx -- -
 job lib-union16-callback-5 sh ./unisacc.com -run tests/libraryunion16check.cx -- --package "${MODEL_COM:-./unisacc.com}" --cases fpmix --sanitize --callback
 job lib-callable-variadic-mechanism tests/bound 58 sh ./unisacc.com -run tests/librarycallablevarcheck.cx   # (.cx port, 2026-10-23) concrete variadic callable ABI, normal + ASan/UBSan
 job lib-callable-catalog tests/bound 58 sh ./unisacc.com -run tests/librarycallablecatalogcheck.cx   # (.cx port, 2026-10-23) USLCALL1/2/3 wire + context-owned graph transactions, normal + ASan/UBSan
-job lib-callable-variadic-model ./tests/modelcallablevarwirecheck.sh
+for scope in promoted wire native; do
+job lib-callable-variadic-model-$scope sh ./unisacc.com tests/modelcallablephase.cx -- var-$scope
+done
 job lib-callback-plan sh ./tests/cxbin tests/librarycallbackplancheck.cx   # (.cx port, 2026-10-23) callback declaration/plan probe, normal + ASan/UBSan
-job lib-callable-model ./tests/modelcallablewirecheck.sh
+job lib-callable-model sh ./unisacc.com tests/modelcallablephase.cx -- wire
 job lib-callback-native sh ./unisacc.com -run tests/librarycallbacknativecheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --sanitize   # (.cx port, 2026-10-23)
 job lib-callback-forward sh ./unisacc.com -run tests/librarycallbackforwardcheck.cx -- --package "${MODEL_COM:-./unisacc.com}" --sanitize   # (.cx port, 2026-10-23)
 job lib-callable-variadic-native sh ./tests/cxbin tests/librarycallablevariadicnativecheck.cx --package "${MODEL_COM:-./unisacc.com}" --sanitize   # (.cx port, 2026-10-23)

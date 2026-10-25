@@ -75,3 +75,5 @@ source-to-ELF原第一片`ELF_SHARD=1/3`分为`exec-srcelf-1a`（1/6）与`exec-
 
 `lib-context`经`librarycontextcheck.cx`默认-run门面选择Linux既有LIBRARY_PATH内的常规libffi_pic.a并打印实际SHA；仅ENOENT可略过，其它stat错误或非文件拒绝。无匹配或其它host仍用原-lffi。原Python独立裁判的全部并发、多单元优化、include、错误恢复及参考断言保持，仅链接单参数由门面传入；这未消除该oracle的Python依赖，不改hosttools/env-pin。
 `lib-typed-host`的Linux严格C99探针声明`_GNU_SOURCE`，普通与ASan/UBSan两次构建仍保留原六行为及USBIND3完整断言；两项完整资格待独立H5实跑。
+
+DRAFT callable门面：lib-callable-model仍完整独立执行原wire检查；var聚合三个原checker分别由-promoted、-wire、-native三scope完整执行，重复wire义务不合并。每片恢复parent UNISA_CONTAINER unset，仅source-only免编未用ref，并按既有exec-chain完整身份合同materialize相同parse2 JSON；原runner flags／dump变换／checker／cleanup保留，缺缓存75。原两sh聚合CLI不改；这只是待独立原40实跑的调度候选，不是消除Python依赖或完整通过声明。
