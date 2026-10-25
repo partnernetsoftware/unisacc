@@ -455,7 +455,8 @@ job exec-x86win ./exec/enc/x86wincheck.sh                      # Deferred Window
 job exec-armwin ./exec/enc/armwincheck.sh                      # Windows ARM setup/gates, real text bytes
 job exec-pex86-base env PE_ARCH=x86_64 sh ./unisacc.com tests/pephase.cx -- base
 job exec-pex86-forward env PE_ARCH=x86_64 sh ./unisacc.com tests/pephase.cx -- forward
-job exec-winx86self env SELF_PART=stages TARGET=win/x86_64 ./exec/pipeline/selfcheck.sh
+job exec-winx86self-front env SELF_PART=stages1 TARGET=win/x86_64 ./exec/pipeline/selfcheck.sh # source/model-bound e2..e3 material
+job exec-winx86self env SELF_PART=stages2 TARGET=win/x86_64 ./exec/pipeline/selfcheck.sh # remaining stages plus original complete comparisons
 job exec-winx86self-package env SELF_PART=package TARGET=win/x86_64 ./exec/pipeline/selfcheck.sh
 job exec-pearm-base env PE_ARCH=arm64 sh ./unisacc.com tests/pephase.cx -- base
 job exec-pearm-forward env PE_ARCH=arm64 sh ./unisacc.com tests/pephase.cx -- forward
