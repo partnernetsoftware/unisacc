@@ -1,0 +1,37 @@
+/* Run at most four independent materials=- registry batches in parallel.
+ * ROOT ABS_OUT_PARENT ID [ID ...]. Each child still runs tests/run-batch.cx.
+ * Outer caller must use tools/bound 55; each child has its own bound 50.
+ * This is a development execution wave, never an aggregate qualification. */
+#pragma unisa use cxlib.netpack
+static char root[4096],parent[4096],candidate[4400],runner[4400],bound[4400];
+static char ids[4][128],logs[4][4400],errors[4][4400];
+static pid_t pids[4];static int statuses[4];
+static void die(const char *s){fprintf(stderr,"zero-wave: REFUSE %s errno=%d\n",s,errno);exit(2);}
+static void path(char *out,size_t cap,const char *dir,const char *leaf){int n=snprintf(out,cap,"%s/%s",dir,leaf);if(n<0||(size_t)n>=cap)die("path-bound");}
+static int within(const char *p,const char *base){size_t n=strlen(base);return !strncmp(p,base,n)&&p[n]=='/';}
+static void digest(const char *p,char hex[65]){size_t n;char *s=cx_read(p,&n);if(!s)die("product-read");cx_sha256_hex(s,n,hex);free(s);}
+static int valid_id(const char *s){size_t n=strlen(s);if(!n||n>100)return 0;for(size_t i=0;i<n;i++)if(!((s[i]>='a'&&s[i]<='z')||(s[i]>='0'&&s[i]<='9')||s[i]=='-'))return 0;return 1;}
+static void child(int i){int out=open(logs[i],O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);if(out<0)_exit(126);int err=open(errors[i],O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);if(err<0)_exit(126);
+ if(dup2(out,1)<0||dup2(err,2)<0||close(out)||close(err)||chdir(root))_exit(126);
+ char *v[]={bound,"50","sh",candidate,runner,"--",root,parent,ids[i],0};execv(bound,v);_exit(127);}
+static int marker(const char *s,size_t n,const char *id){char want[220];int z=snprintf(want,sizeof want,"BATCH_RUN\tid=%s\tstatus=PASS\t",id);if(z<0||(size_t)z>=sizeof want)return 0;size_t wn=(size_t)z;int count=0;for(size_t i=0;i+wn<=n;i++)if((i==0||s[i-1]=='\n')&&!memcmp(s+i,want,wn))count++;return count==1;}
+int main(int argc,char **argv){
+#if !defined(__linux__) || !defined(__x86_64__)
+ fputs("zero-wave: requires Linux/x86_64\n",stderr);return 2;
+#endif
+ if(argc<4||argc>7)die("usage ROOT ABS_OUT_PARENT ID [ID ...]; max four");
+ if(argv[1][0]!='/'||argv[2][0]!='/'||!realpath(argv[1],root)||!realpath(argv[2],parent)||strcmp(argv[1],root)||strcmp(argv[2],parent))die("canonical-root-parent");
+ char outroot[4400],canonical[4096];path(outroot,sizeof outroot,root,"out");if(!realpath(outroot,canonical)||!within(parent,canonical))die("parent-must-be-below-out");
+ path(candidate,sizeof candidate,root,"unisacc.com");path(runner,sizeof runner,root,"tests/run-batch.cx");path(bound,sizeof bound,root,"tools/bound");
+ int count=argc-3;for(int i=0;i<count;i++){if(!valid_id(argv[i+3]))die("batch-id-shape");strcpy(ids[i],argv[i+3]);for(int j=0;j<i;j++)if(!strcmp(ids[i],ids[j]))die("duplicate-batch-id");
+  char leaf[150],work[4400];path(work,sizeof work,parent,ids[i]);struct stat st;errno=0;if(!lstat(work,&st)||errno!=ENOENT)die("batch-output-must-be-absent");
+  int z=snprintf(leaf,sizeof leaf,"%s.log",ids[i]);if(z<0||(size_t)z>=sizeof leaf)die("log-leaf");path(logs[i],sizeof logs[i],parent,leaf);
+  z=snprintf(leaf,sizeof leaf,"%s.err",ids[i]);if(z<0||(size_t)z>=sizeof leaf)die("err-leaf");path(errors[i],sizeof errors[i],parent,leaf);
+  errno=0;if(!lstat(logs[i],&st)||errno!=ENOENT)die("log-must-be-absent");errno=0;if(!lstat(errors[i],&st)||errno!=ENOENT)die("err-must-be-absent");}
+ char before[65],after[65];digest(candidate,before);
+ for(int i=0;i<count;i++){pids[i]=fork();if(pids[i]<0){for(int j=0;j<i;j++)kill(pids[j],SIGTERM);for(int j=0;j<i;j++){int st;while(waitpid(pids[j],&st,0)<0&&errno==EINTR){}}die("fork");}if(!pids[i])child(i);}
+ int left=count;while(left){int st;pid_t pid;do{pid=waitpid(-1,&st,0);}while(pid<0&&errno==EINTR);if(pid<0)die("waitpid");int found=-1;for(int i=0;i<count;i++)if(pids[i]==pid){found=i;break;}if(found<0||statuses[found])die("unknown-or-duplicate-child");statuses[found]=WIFEXITED(st)?WEXITSTATUS(st)+1:WIFSIGNALED(st)?128+WTERMSIG(st)+1:257;left--;}
+ digest(candidate,after);int bad=strcmp(before,after)!=0;
+ for(int i=0;i<count;i++){size_t n;char *s=cx_read(logs[i],&n);int ok=s&&statuses[i]==1&&marker(s,n,ids[i])&&!strcmp(before,after);printf("WAVE\tid=%s\tstatus=%s\tchild_rc=%d\tlog=%s\tstderr=%s\tcandidate=%s\n",ids[i],ok?"PASS":"FAIL",statuses[i]?statuses[i]-1:-1,logs[i],errors[i],before);if(!ok)bad=1;free(s);}
+ printf("ZERO_WAVE\tjobs=%d\tfailed=%d\tscope=actual-independent-batches-no-aggregate-qualification\n",count,bad?1:0);return bad?1:0;
+}
