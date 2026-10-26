@@ -81,3 +81,5 @@ POSIX 分支按序尝试来源摘要、CX 元数据和当前 `tests/run.cx --all
 2026-10-27：Windows 分支补入直接启动 PE 的 `--version` 单进程观察，仍明确退出3/NOT_READY，功能、来源闭包和六目标继续 NOT_RUN。当前主树 `out/actionlint` 对修改后工作流返回0；用本地 PowerShell 7.6.8 解析新第三段 run 脚本，ParseFile 错误数0。未在 Windows 运行，此静态证据不授候选进程实跑资格。
 
 同日当前主树的本机输入再核：P75 默认运行 `seed/ident.c` 得完整产品源码闭包 `718017ab98ae13963d0b928496724c0e661990b3972ba452909742ccfa6f6a81`；候选 CX helper 与独立 PowerShell 原始字节算法各自计算六文件计划摘要，均为 `3ca5b2a0d00ffcfca9a0b85a367901594c380eaeb2ab250221a4999a093f249a`。这是本地此时的身份观察；后续清单或工具字节改变须重算，且共享检出尚有其他协作者暂存文件，不能把该摘要当作已固定的验证 commit 或远端 CI 结果。
+
+本地还用产品摘要、活构建记录摘要、现行来源/计划摘要及 Linux x86_64 轴执行 `--check`；为只测元数据路径，producer_run/artifact_id 明示填入**合成的 `1/1`**，绝非真实工件身份。结果 rc3，严格解析 112 批、19 PLANNED、74 UNPREPARED、19 覆盖缺口、执行0，并输出 `QUALIFICATION NOT_READY`；无批次或远端候选运行，不能转用这次合成调用作生产者收据。
