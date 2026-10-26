@@ -96,6 +96,27 @@ static void dependencies_only(SpJob j){if(j.tool>=0)return;char name[160];snprin
 static np_buf dependency_observation(SpJob j){np_buf b={0};np_puts(&b,"source-package-job-dependencies-v1\n");if(j.tool<0){char name[160];snprintf(name,sizeof name,"tool-%s",tools[j.phase]);dependency(&b,name,0);if(j.phase){snprintf(name,sizeof name,"%s-%s",j.phase==1?"gen":"tbl",recipes[j.recipe].id);dependency(&b,name,0);}}return b;}
 static void run_job(const char *id){SpJob j=find_job(id);check_context();char before[65];strcpy(before,context_sha);dependencies_only(j);np_buf dependencies_before=dependency_observation(j);char dir[4400],out[4400],receipt[4400];job_paths(id,j,dir,out,receipt);absent(dir);if(mkdir(dir,0700))die("new-job-directory");char *v[20],exe[4400],src[4400],inc[4400],dep[4400],evidence[4400];job_command(id,j,v,out,exe,src,inc,dep);absent(out);path(evidence,dir,"command");np_result r=command(v,40,evidence);int rc=r.rc;if(r.outn)fwrite(r.out,1,r.outn,stdout);if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);if(rc)die("actual-job-command-failed-partial-retained");check_context();if(strcmp(before,context_sha))die("source-or-context-changed-during-job");dependencies_only(j);np_buf dependencies_after=dependency_observation(j);if(dependencies_before.n!=dependencies_after.n||memcmp(dependencies_before.p,dependencies_after.p,dependencies_before.n))die("transitive-job-inputs-changed");free(dependencies_before.p);free(dependencies_after.p);np_buf b=job_record(id,j,0);write_new(receipt,b.p,b.n);free(b.p);verify_job(id,0);printf("PREPARED\tsource-package-job-v1\t%s\tno-test-result\n",id);}
 static void list_jobs(void){puts("JOB\tSTATE\tDEPENDENCIES\tCHILD_BOUND\tOUTPUT");for(int i=0;i<5;i++)printf("tool-%s\tIMPLEMENTED_DRAFT_NOT_RUN\tcontext+CC+seed/%s.c+transitive-source-SID\t40\tresult.exe\n",tools[i],tools[i]);for(int i=0;i<(int)(sizeof recipes/sizeof *recipes);i++){printf("gen-%s\tIMPLEMENTED_DRAFT_NOT_RUN\ttool-gen+source-SID\t40\tresult.json\n",recipes[i].id);printf("tbl-%s\tIMPLEMENTED_DRAFT_NOT_RUN\ttool-tbl+gen-%s\t40\tresult.tbl\n",recipes[i].id,recipes[i].id);printf("net-%s\tIMPLEMENTED_DRAFT_NOT_RUN\ttool-net+tbl-%s\t40\tresult.net\n",recipes[i].id,recipes[i].id);}const char *targets[]={"lnx-arm64","lnx-x86_64","osx-arm64","osx-x86_64","win-arm64","win-x86_64"};for(int i=0;i<6;i++)printf("route-%s\tPLANNED_NOT_READY\tshared+target-net+image-stages.tsv\tUNMEASURED\troute.tsv\n",targets[i]);puts("declare-package\tPLANNED_NOT_READY\ttool-compilerpack+all-routes+15-extra-nets+declared-kernels\t40\troutes/predefines/audit");puts("pack\tPLANNED_NOT_READY\ttool-pack+declaration+headers+declared-kernels+zlib\t40\tcompiler.pkg");puts("seal\tPLANNED_NOT_READY\tall-job-receipts+kernel-context+fresh-source-endpoints\tUNMEASURED\tpackage.tsv+model-inputs.tsv(source-package-v1)");puts("NOT_CLAIMED\tcomplete-P3-material-functional-PASS-hermetic-hostdeps-zero-Python-chain-or-N22");}
+static void start_job(const char *id){
+ SpJob j=find_job(id);check_context();dependencies_only(j);
+ np_buf before=dependency_observation(j);char dir[4400],out[4400],receipt[4400],evidence[4400];
+ job_paths(id,j,dir,out,receipt);absent(dir);if(mkdir(dir,0700))die("new-job-directory");
+ path(evidence,dir,"dependencies.before.tsv");write_new(evidence,before.p,before.n);free(before.p);
+ char *v[20],exe[4400],src[4400],inc[4400],dep[4400];job_command(id,j,v,out,exe,src,inc,dep);
+ absent(out);path(evidence,dir,"command");np_result r=command(v,40,evidence);
+ int rc=r.rc;if(r.outn)fwrite(r.out,1,r.outn,stdout);if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);
+ if(rc)die("actual-job-command-failed-partial-retained");
+ puts("PREPARED\tsource-package-job-command-v1\tactual-rc0-finish-required\tno-test-result");
+}
+static void finish_job(const char *id){
+ SpJob j=find_job(id);check_context();char before_context[65];strcpy(before_context,context_sha);
+ dependencies_only(j);char dir[4400],out[4400],receipt[4400],p[4400];job_paths(id,j,dir,out,receipt);
+ canonical(dir);absent(receipt);path(p,dir,"dependencies.before.tsv");
+ np_buf before=dependency_observation(j);equal(p,&before);
+ np_buf record=job_record(id,j,0);check_context();if(strcmp(before_context,context_sha))die("source-or-context-changed-during-finish");
+ np_buf after=dependency_observation(j);if(before.n!=after.n||memcmp(before.p,after.p,before.n))die("transitive-job-inputs-changed");
+ free(before.p);free(after.p);write_new(receipt,record.p,record.n);free(record.p);verify_job(id,0);
+ printf("PREPARED\tsource-package-job-v1\t%s\tactual-split-command-and-finish\tno-test-result\n",id);
+}
 int main(int argc,char **argv){
 #if !defined(__linux__) || !defined(__x86_64__)
  fputs("NOT_RUN source-package foundation requires Linux/x86_64\n",stderr);return 3;
@@ -104,6 +125,8 @@ int main(int argc,char **argv){
  if(argc==6&&!strcmp(argv[1],"prepare-context")){setup(argv[2],argv[5]);prepare_context(argv[3],argv[4]);return 0;}
  if(argc==4&&(!strcmp(argv[1],"--list")||!strcmp(argv[1],"--verify-context"))){setup(argv[2],argv[3]);check_context();char before[65];strcpy(before,context_sha);if(!strcmp(argv[1],"--list"))list_jobs();check_context();if(strcmp(before,context_sha))die("context-changed-during-readonly-verification");if(!strcmp(argv[1],"--verify-context"))puts("VERIFIED\tsource-package-context-v1\tcontext-only-no-package-no-test-result");return 0;}
  if(argc==5&&!strcmp(argv[1],"job")){setup(argv[2],argv[3]);run_job(argv[4]);return 0;}
+ if(argc==5&&!strcmp(argv[1],"start-job")){setup(argv[2],argv[3]);start_job(argv[4]);return 0;}
+ if(argc==5&&!strcmp(argv[1],"finish-job")){setup(argv[2],argv[3]);finish_job(argv[4]);return 0;}
  if((argc==5&&!strcmp(argv[1],"pack"))||(argc==4&&!strcmp(argv[1],"--verify"))){fputs("NOT_READY source-package-v1 routes/declaration/pack/seal/full-package-verifier not implemented; no package receipts emitted\n",stderr);return 3;}
  die("usage prepare-context ROOT SAVED_BOOTSTRAP ABS_CC NEW_CTX | --list ROOT CTX | --verify-context ROOT CTX | job ROOT CTX JOB_ID | pack ROOT CTX KERNEL_GENERATION | --verify ROOT CTX");return 2;
 }
