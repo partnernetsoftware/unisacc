@@ -410,7 +410,9 @@ is PREPARED/VERIFIED only, with no functional-test conclusion. The independent
 old-SP full-package observation and current PC04 results are recorded below;
 product-v2/installer qualification, a new candidate and same-candidate
 selfhost/function checks remain pending. Root remains
-P53/S447 bootstrap; no complete Source329 product has been constructed.
+P53/S447 bootstrap. Source329 candidate A was fully constructed under ctx699
+and archived; current candidate B's new-context reconstruction and58/79 gates
+completed, while installation and same-candidate selfhost remain pending.
 
 The compiled `tools/source-job-verify.cx`, using the prior frozen SP module a8aebdd,
 actually verified net-warnparse twice in
@@ -464,10 +466,69 @@ The strict new-pin gate's native02 build completed rc0, then original outer55
 execution recorded67/0 in `out/c43-source-job-snapshot-02.log`, with53 files
 per endpoint at approximately0.55/0.52s. Old PC03 and prior67/0 logs remain
 bound to their original identities. All material is only PREPARED/VERIFIED,
-not functional PASS. Root remains P53/S447 bootstrap; no Source329 candidate
-has been built. The new product-v2 coordinator is in its first compilation;
-candidate construction, installer execution and same-candidate qualification
-remain pending, with all19 broad gaps, classic18 source work and foreign hosts.
+not functional PASS. Root remains P53/S447 bootstrap, while Source329
+candidate A was fully constructed and archived. Current new-context candidate
+B construction and58/79 gates completed; installer and selfhost remain.
+
+Source329 candidate A was fully reconstructed under GEN13 product context
+`699ccb6169f39f77868f0835cd5dd13b9ee1bd7c773fc938cc968cad19a0b00d`:
+all five slices and wrap actually completed rc0. Its4911193B complete artifact
+SHA256 is `53e2cd1f669c92fda2c16dd93a9021cd4db97f05c57ab2d1acf9a835cbac9857`,
+identical to old Root bytes. This is a full source reconstruction observation,
+not a timestamp refresh. Candidate version0.0.43, direct smoke16/0 and
+historical-bootstrap candidate admission58/0 actually completed; see
+`out/c43-source-candidate-13-01.log`. Old rb813/product2872/test0e7 were
+committed as9abe0e86cf. Root remains uninstalled bootstrap with its original
+S447 record, SHA256
+`e0843c0c025f05e728c8584a7fd5db51965345316b65c6316815bd57787dbe45`.
+
+The old installer legacy-header branch checked kernel context/embedded bytes
+without complete P7 admission. New rbce7f/installer e37 drafts use explicit
+schema contracts:mode2 accepts only legacy kind1 and runs full P7 BOM,
+corecompat and v1 verification; mode1 accepts only source kind2; mode0 retains
+its original contract. The relevant source58 and schema/invalid-BOM79 gates
+now passed for candidate B; these are API controls, not positive legacy
+qualification or successful installer execution.
+After checking ctx699 and actual hashes, Root's CX archived12 old product/native
+receipt files in
+`out/c43-native-kernel-13/product-context-699ccb61-before-legacy-admission`
+(`out/c43-product-13-a-archive.log`), preserving the nine ASM phases and NN.
+Current GEN13 candidate B's five slices and wrap each actually completed
+rc0 under original55-second limits, with context
+`14954ce18cff8a1b087c22a60b56546b19a3fb149005240ff8333fb108b98cba`.
+Its complete4911193B artifact retains P53's original raw SHA53e2cd1f...
+Candidate B's version command completed rc0, direct smoke16/0 passed, and new
+rbce7 source-candidate native02/outer55 completed58/0 in
+`out/c43-source-candidate-13b-02.log`; this is independent new-context evidence.
+
+The initial schema gate's72/1 in `out/c43-candidate-schema-13b-01.log` was a
+test expectation error:the old BOM's unisa/ckernel.py row1042 has old SHA
+`db184ffec27565ad0a6d725d49710e7818af7d8e686fb642b67c862b88503aa3`,
+while the current template is
+`d3400bfb0d8dab72c8851eec67fba9c732815cb46ac90d9466791be027e5b9cc`;
+it precedes kernel/unisa_core.c row1115. Production correctly rejected the
+first changed input with exact model-input-digest. The original red log remains.
+The test retains all72 obligations, adding seven independent unique-old-row,
+order, fixed-hash and current-template-stability prerequisites. Native02 and
+original outer55 then actually completed79/0 in
+`out/c43-candidate-schema-13b-02.log`:all three exact schema/BOM refusals,
+A5 output clearing, recovery and unchanged-material checks passed. This is an
+invalid-old-BOM probe, not positive legacy qualification or selfhost.
+
+Root still has its original S447/e084 record and is not installed. Installer
+e37's native coordinator actually built rc0 in
+`out/c43-candidate-install-runner-build-01.log`. A real installer negative
+control on the old known-P7 schema/BOM returned child rc2 with exact
+model-input-digest path=unisa/ckernel.py. Root's own thin CX caller checked
+that refusal and completed outer rc0 in
+`out/c43-installer-reject-probe-run-01.log`. Complete Root/candidate hashes
+were unchanged; all six candidate metadata/backup/staged paths were absent
+with ENOENT specifically. No installation occurred. This is neither positive
+legacy qualification nor successful installation.
+Next:actual complete admission at both installer endpoints, Root329 record,
+fresh gen14/selfhost58 and same-candidate functional/platform checks. Complete
+classic18 source work,19 broad gaps and foreign-host qualification remain open;
+no signing/Draft/Latest/publication or implemented `-run` reuse is claimed.
 
 `cxlib.kernelsha` provides `ks_sha256_hex(input, length, hex65)`:0 succeeds;
 a negative Linux errno reports failure (`-22` invalid arguments, `-95`

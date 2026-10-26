@@ -108,15 +108,20 @@ static int rb_optional_product_metadata(rb_context *c,rb_result *r){char p[4400]
  * builder. current_bootstrap additionally requires its source/artifact to be
  * the verified current root. No candidate installation is required. */
 static int rb_verify_mode(const char *root,const char *generation,const char *packages,const char *bootstrap,int current_bootstrap,int candidate_mode,rb_result *out,char *why,size_t cap){rb_context c;memset(&c,0,sizeof c);if(out)memset(out,0,sizeof *out);if(why&&cap)why[0]=0;if(!root||!generation||!packages||!bootstrap||!out||!why||!cap)return -1;c.root=root;c.gen=generation;c.pkg=packages;c.bootstrap=bootstrap;c.why=why;c.cap=cap;rb_result result;memset(&result,0,sizeof result);int rc=-1;char p[4400],source[65];const char *paths[]={root,generation,packages,bootstrap};int i;for(i=0;i<4;i++)if(paths[i][0]!='/'||strpbrk(paths[i],"\t\r\n")){rb_bad(&c,"absolute-clean-path",paths[i]);goto done;}
- if(candidate_mode){char actual[4400];if(rb_path(&c,p,root,"unisacc.com")||strcmp(p,bootstrap)||!realpath(p,actual)||strcmp(p,actual)){rb_bad(&c,"candidate-builder-must-be-current-root-path",bootstrap);goto done;}if(rb_package_kind(&c)!=2){rb_bad(&c,"candidate-preinstall-requires-source-package-v1",packages);goto done;}}
+ if(candidate_mode){char actual[4400];if(rb_path(&c,p,root,"unisacc.com")||strcmp(p,bootstrap)||!realpath(p,actual)||strcmp(p,actual)){rb_bad(&c,"candidate-builder-must-be-current-root-path",bootstrap);goto done;}int kind=rb_package_kind(&c);if(kind!=(candidate_mode==1?2:1)){rb_bad(&c,candidate_mode==1?"candidate-preinstall-requires-source-package-v1":"legacy-candidate-preinstall-requires-package-refresh",packages);goto done;}}
  if(rb_source(&c,&result)||rb_path(&c,p,root,"unisacc.com")||rb_record(&c,p,candidate_mode?0:result.source,source,result.root_product,result.root_native,&result.root_has_native)||rb_kernel_context(&c,&result))goto done;
- if(candidate_mode){if(strcmp(result.bootstrap,result.root_product)||strcmp(result.bootstrap_record_source,source)){rb_bad(&c,"candidate-builder-root-original-record-mismatch",bootstrap);goto done;}}
+ if(candidate_mode){if(strcmp(result.bootstrap,result.root_product)||strcmp(result.bootstrap_record_source,source)){rb_bad(&c,"candidate-builder-root-original-record-mismatch",bootstrap);goto done;}char record_path[4400];int z=snprintf(record_path,sizeof record_path,"%s.build.json",bootstrap);if(z<0||(size_t)z>=sizeof record_path){rb_bad(&c,"candidate-builder-original-record-path",bootstrap);goto done;}size_t n;char *record=rb_read_hash(&c,record_path,&n,result.builder_record);if(!record)goto done;free(record);}
  else if(current_bootstrap&&(strcmp(result.bootstrap,result.root_product)||strcmp(result.bootstrap_record_source,result.source))){rb_bad(&c,"fresh-bootstrap-is-not-current-root",bootstrap);goto done;}
  if(rb_assembler(&c,&result)||rb_files(&c)||rb_package(&c,&result)||rb_product_context(&c,&result)||rb_optional_product_metadata(&c,&result))goto done;result.files=c.files;result.physical_reads=c.physical_reads;result.retained_hits=c.retained_hits;result.retained_bytes=c.retained_bytes;cx_sha256_hex(c.witness.p,c.witness.n,result.witness);*out=result;rc=0;
  done:for(i=0;i<c.retained_count;i++){free(c.retained[i].path);free(c.retained[i].bytes);}free(c.witness.p);return rc;}
-/* Existing verification semantics are fixed to mode0. Candidate admission is
- * a separate source-package-v1-only mode: the actual current root path MUST
- * be this generation's original builder, including its canonical old record.
+/* Existing verification semantics are fixed to mode0. Explicit source and
+ * legacy candidate modes require their own complete validators and schema.
+ * The actual current root path must be this generation's original builder,
+ * including its canonical old record and artifact bytes.
  * A historical builder source is allowed here, never in rb_verify mode0. */
 int rb_verify(const char *root,const char *generation,const char *packages,const char *bootstrap,int current_bootstrap,rb_result *out,char *why,size_t cap){return rb_verify_mode(root,generation,packages,bootstrap,current_bootstrap,0,out,why,cap);}
 int rb_verify_candidate(const char *root,const char *generation,const char *packages,const char *bootstrap,rb_result *out,char *why,size_t cap){return rb_verify_mode(root,generation,packages,bootstrap,0,1,out,why,cap);}
+/* Legacy mode2 retains the full P7 BOM/corecompat/P3 and v1 sequence. Its
+ * historical builder record is an explicit admission observation, not a v2
+ * rewrite or a fabricated source-package epoch. */
+int rb_verify_legacy_candidate(const char *root,const char *generation,const char *packages,const char *bootstrap,rb_result *out,char *why,size_t cap){return rb_verify_mode(root,generation,packages,bootstrap,0,2,out,why,cap);}
