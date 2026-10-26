@@ -1,0 +1,146 @@
+/* Product image SC2 presence/empty/missing closed loop — not full RI.
+ * Tip row MISSING/ABSENT/EMPTY + front MISSING + PRESENT hash integrity.
+ * Not image-single file-level tip, not resources tape SC1, not ri-flow adapter.
+ * ROOT PRODUCT_COM ABS_OUT. Bound 55. */
+#pragma unisa use cxlib.netpack
+static char root[4096],work[4096],bound[4200],com[4200],src[4400],inc[4400],hdr[4400];
+static char cap[4400],image[4400],ledger[4400],e3id[4400];
+static char capture_sha[65];
+static int assertions,failures;
+static const char *k_tip="0072692f65332d6964656e74697479";
+static const char *k_src="00636c692f736f75726365";
+static const char *msg_e3_absent=
+ "unisacc: INTERFACE_ERROR resource-e3-identity-absent\n";
+static const char *msg_e3_malformed=
+ "unisacc: INTERFACE_ERROR resource-e3-identity-malformed\n";
+static void die(const char *s){fprintf(stderr,"ri-image-pem: REFUSE %s\n",s);exit(2);}
+static void ck(int ok,const char *s){assertions++;if(!ok){failures++;fprintf(stderr,"FAIL\t%s\n",s);}else printf("PASS\t%s\n",s);}
+static void path(char *o,size_t capn,const char *a,const char *b){int n=snprintf(o,capn,"%s/%s",a,b);if(n<0||(size_t)n>=capn)die("path");}
+static void saved(const char *p,const void *s,size_t n){int f=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);size_t at=0;if(f<0)die(p);while(at<n){ssize_t k=write(f,(char *)s+at,n-at);if(k<0&&errno==EINTR)continue;if(k<=0)die("write");at+=(size_t)k;}if(close(f))die("close");}
+static void sha_file(const char *p,char hex[65]){size_t n;char *s=cx_read(p,&n);if(!s)die(p);cx_sha256_hex(s,n,hex);free(s);}
+static np_result runv(char **v,const char *cwd,const char **env,int sec,const char *name){
+ char why[1024],op[4400],ep[4400];np_result r;int z;
+ if(np_run(v,cwd,env,sec,&r,why,sizeof why))die(why);
+ z=snprintf(op,sizeof op,"%s/%s.stdout",work,name);if(z<0||(size_t)z>=sizeof op)die("out");
+ z=snprintf(ep,sizeof ep,"%s/%s.stderr",work,name);if(z<0||(size_t)z>=sizeof ep)die("err");
+ saved(op,r.out,r.outn);saved(ep,r.err,r.errn);return r;}
+static int err_ok(const np_result *r){
+ const char *p;size_t left;if(!r->errn)return 1;p=r->err;left=(size_t)r->errn;
+ while(left){const char *nl=memchr(p,'\n',left);size_t ln=nl?(size_t)(nl-p):left;
+  if(ln<7||memcmp(p,"RR_TIME",7))return 0;if(nl){p=nl+1;left-=ln+1;}else break;}return 1;}
+static int missing(const char *p){struct stat st;errno=0;if(!lstat(p,&st))return 0;if(errno!=ENOENT)die("stat");return 1;}
+static int exact_err(const np_result *r,const char *msg){size_t n=strlen(msg);return r->errn==(int)n&&r->errn>0&&!memcmp(r->err,msg,n);}
+static int err_has(const np_result *r,const char *needle){
+ size_t nn,i;if(!r->errn||!needle||!*needle)return 0;nn=strlen(needle);if((size_t)r->errn<nn)return 0;
+ for(i=0;i<=(size_t)r->errn-nn;i++)if(!memcmp(r->err+i,needle,nn))return 1;return 0;}
+static void cpr(const char *from,const char *to){
+ char *v[]={"/bin/cp","-a",(char *)from,(char *)to,0};np_result r;char why[256];
+ if(np_run(v,0,0,10,&r,why,sizeof why)||r.rc)die(why[0]?why:"cp");np_free(&r);}
+static int pref(char **v,int sec){int n=0;v[n++]=bound;v[n++]=sec<=12?"12":"20";v[n++]="sh";v[n++]=com;return n;}
+/* Rewrite resources.tsv: for matching keyhex apply mode 0=drop 1=absent 2=empty(with blob). */
+static void mutate_row(const char *capdir,const char *keyhex,int mode,const char *empty_blob){
+ char led[4400],tmp[4400],sha[65];size_t n,outn=0,kn;char *s,*ob;int fd,z,hits=0;
+ path(led,sizeof led,capdir,"resources.tsv");s=cx_read(led,&n);if(!s)die("led");
+ kn=strlen(keyhex);ob=malloc(n+128);if(!ob)die("alloc");
+ if(mode==2){path(tmp,sizeof tmp,capdir,empty_blob);saved(tmp,"",0);cx_sha256_hex("",0,sha);}
+ for(size_t i=0;i<n;){size_t e=i;while(e<n&&s[e]!='\n')e++;
+  int hit=e>i&&s[i]!='#'&&e>=i+kn&&!memcmp(s+i,keyhex,kn)&&(e==i+kn||s[i+kn]=='\t');
+  if(hit&&++hits>1)die("duplicate-key-row");
+  if(hit&&mode==0){/* drop */}
+  else if(hit&&mode==1){
+   z=snprintf(ob+outn,n+128-outn,"%s\t0\t-\t0\t-\n",keyhex);if(z<0)die("fmt");outn+=(size_t)z;}
+  else if(hit&&mode==2){
+   z=snprintf(ob+outn,n+128-outn,"%s\t1\t%s\t0\t%s\n",keyhex,empty_blob,sha);if(z<0)die("fmt2");outn+=(size_t)z;}
+  else{memcpy(ob+outn,s+i,e-i+(e<n));outn+=e-i+(e<n);}
+  i=e+(e<n);}
+ if(hits!=1)die("missing-key-row");
+ free(s);fd=open(led,O_WRONLY|O_TRUNC|O_CLOEXEC);if(fd<0)die("led-open");
+ if((size_t)write(fd,ob,outn)!=outn)die("led-w");close(fd);free(ob);}
+static void corrupt_src_blob(const char *capdir){
+ char led[4400],blob[4400];size_t n,i;char *s;int fd;
+ path(led,sizeof led,capdir,"resources.tsv");s=cx_read(led,&n);if(!s)die("led2");
+ for(i=0;i<n;){size_t e=i,a,b,c;while(e<n&&s[e]!='\n')e++;
+  if(e>i&&!memcmp(s+i,k_src,strlen(k_src))&&s[i+strlen(k_src)]=='\t'){
+   a=i;for(c=0;a<e&&c<2;a++)if(s[a]=='\t')c++;if(c!=2||a>=e)die("blob-field");
+   b=a;while(b<e&&s[b]!='\t')b++;if(b>=e||b==a||b-a>=sizeof blob)die("blob-name");
+   memcpy(blob,s+a,b-a);blob[b-a]=0;
+   {char p[4400];size_t bn;char *bb;path(p,sizeof p,capdir,blob);bb=cx_read(p,&bn);if(!bb||bn<1)die("blob-r");
+    bb[0]=(char)(bb[0]^0x5a);fd=open(p,O_WRONLY|O_TRUNC|O_CLOEXEC);if(fd<0)die("blob-o");
+    if((size_t)write(fd,bb,bn)!=bn)die("blob-w");close(fd);free(bb);}
+   free(s);return;}
+  i=e+(e<n);}
+ free(s);die("src-row");}
+static np_result strict_img(const char *leddir,const char *outimg,const char *name){
+ char *v[28];int n=pref(v,20);
+ v[n++]="--strict-resource-flow";v[n++]="--resource-ledger";v[n++]=(char *)leddir;
+ v[n++]="-O0";v[n++]="-b";v[n++]="lnx/x86_64";v[n++]="-I";v[n++]=inc;v[n++]=src;v[n++]="-o";v[n++]=(char *)outimg;v[n]=0;
+ const char *adds[]={"UNISA_JOBS=1",0};return runv(v,root,adds,25,name);}
+int main(int argc,char **argv){
+ char before[65],after[65],envbuf[4600],mut[4400],outp[4400];
+ if(argc!=4||!realpath(argv[1],root)||argv[2][0]!='/'||argv[3][0]!='/'||strstr(argv[3],".."))
+  die("usage ROOT PRODUCT_COM ABS_OUT");
+ if(strlen(argv[2])>=sizeof com||strlen(argv[3])>=sizeof work)die("path-bound");
+ strcpy(com,argv[2]);strcpy(work,argv[3]);
+ if(mkdir(work,0700))die("mkdir");
+ path(bound,sizeof bound,root,"tools/bound");
+ path(inc,sizeof inc,work,"inc");if(mkdir(inc,0700))die("mkdir-inc");
+ path(hdr,sizeof hdr,inc,"helper.h");{const char *h="#define FOO 7 /*a*/\n";saved(hdr,h,strlen(h));}
+ path(src,sizeof src,work,"probe.c");
+ {const char *b="#include \"helper.h\"\nint main(void){return FOO;}\n";saved(src,b,strlen(b));}
+ path(cap,sizeof cap,work,"cap-image");path(image,sizeof image,work,"probe.com");
+ if(mkdir(cap,0700))die("mkdir-cap");
+ sha_file(com,before);
+ /* capture */
+ {snprintf(envbuf,sizeof envbuf,"UNISACC_RF_CAPTURE=%s",cap);
+  const char *adds[]={envbuf,"UNISA_JOBS=1",0};char *v[24];int n=pref(v,20);
+  v[n++]="-O0";v[n++]="-b";v[n++]="lnx/x86_64";v[n++]="-I";v[n++]=inc;v[n++]=src;v[n++]="-o";v[n++]=image;v[n]=0;
+  np_result r=runv(v,root,adds,25,"prod-capture-image");
+  ck(!r.rc&&err_ok(&r),"pem.capture-rc0");np_free(&r);
+  path(ledger,sizeof ledger,cap,"resources.tsv");path(e3id,sizeof e3id,cap,"e3-identity.tsv");
+  {size_t n;char *s=cx_read(ledger,&n);ck(!!s&&n>5&&!memcmp(s,"#SC2\t",5),"pem.capture-SC2");free(s);}
+  ck(!missing(e3id),"pem.capture-e3-file");
+  sha_file(image,capture_sha);}
+ /* P1 strict replay */
+ {unlink(image);np_result r=strict_img(cap,image,"prod-replay");
+  ck(!r.rc&&err_ok(&r),"pem.strict-replay-rc0");np_free(&r);
+  {char hex[65];sha_file(image,hex);ck(!strcmp(hex,capture_sha),"pem.replay-bytes-eq-capture");}
+  {char *rv[6];int n=0;rv[n++]=bound;rv[n++]="5";rv[n++]=image;rv[n]=0;
+   np_result ran=runv(rv,root,0,8,"replay-exec");ck(ran.rc==7&&!ran.outn&&!ran.errn,"pem.replay-return7");np_free(&ran);}}
+ /* T-MISSING */
+ {path(mut,sizeof mut,work,"cap-tip-missing");cpr(cap,mut);mutate_row(mut,k_tip,0,0);
+  path(outp,sizeof outp,work,"out-tip-missing.com");unlink(outp);
+  np_result r=strict_img(mut,outp,"tip-missing");
+  ck(r.rc==2&&!r.outn&&exact_err(&r,msg_e3_absent),"pem.tip-MISSING-exact");
+  ck(missing(outp),"pem.tip-MISSING-no-output");np_free(&r);}
+ /* T-ABSENT */
+ {path(mut,sizeof mut,work,"cap-tip-absent");cpr(cap,mut);mutate_row(mut,k_tip,1,0);
+  path(outp,sizeof outp,work,"out-tip-absent.com");unlink(outp);
+  np_result r=strict_img(mut,outp,"tip-absent");
+  ck(r.rc==2&&!r.outn&&exact_err(&r,msg_e3_absent),"pem.tip-ABSENT-exact");
+  ck(missing(outp),"pem.tip-ABSENT-no-output");np_free(&r);}
+ /* T-EMPTY */
+ {path(mut,sizeof mut,work,"cap-tip-empty");cpr(cap,mut);mutate_row(mut,k_tip,2,"e3-empty.bytes");
+  path(outp,sizeof outp,work,"out-tip-empty.com");unlink(outp);
+  np_result r=strict_img(mut,outp,"tip-empty");
+  ck(r.rc==2&&!r.outn&&exact_err(&r,msg_e3_malformed),"pem.tip-EMPTY-exact");
+  ck(missing(outp),"pem.tip-EMPTY-no-output");np_free(&r);}
+ /* F-MISSING */
+ {path(mut,sizeof mut,work,"cap-src-missing");cpr(cap,mut);mutate_row(mut,k_src,0,0);
+  path(outp,sizeof outp,work,"out-src-missing.com");unlink(outp);
+  np_result r=strict_img(mut,outp,"src-missing");
+  ck(r.rc==2&&!r.outn&&err_has(&r,"resource-trace-key-mismatch")&&err_has(&r,k_src),
+     "pem.front-MISSING-key-mismatch");
+  ck(missing(outp),"pem.front-MISSING-no-output");np_free(&r);}
+ /* F-HASH PRESENT integrity */
+ {path(mut,sizeof mut,work,"cap-src-hash");cpr(cap,mut);corrupt_src_blob(mut);
+  path(outp,sizeof outp,work,"out-src-hash.com");unlink(outp);
+  np_result r=strict_img(mut,outp,"src-hash");
+  ck(r.rc==2&&!r.outn&&err_has(&r,"resource-hash-mismatch")&&err_has(&r,k_src),
+     "pem.front-PRESENT-hash-mismatch");
+  ck(missing(outp),"pem.front-PRESENT-hash-no-output");np_free(&r);}
+ sha_file(com,after);
+ ck(!strcmp(before,after),"candidate-unchanged");
+ puts("NOT_CLAIMED\tfull-RI-tape-SC1-PEM-domain-object-run-routes-foreign-hosts");
+ printf("SUMMARY\tassertions=%d\tfailures=%d\tscope=ri-image-pem-product\tgap=ri\tnot-full-RI\n",assertions,failures);
+ printf("RI_IMAGE_PEM\t%s\ttip-PEM+front-MISSING+hash\n",failures?"FAIL":"OK");
+ return failures?1:0;}
