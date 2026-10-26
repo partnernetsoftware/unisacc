@@ -1,0 +1,54 @@
+/* Independent finite prune stream oracle; Linux x86_64, prepared stream5 material.
+ * ROOT STREAM_DIR NEW_OUTDIR. Full prune domain and foreign hosts remain separate. */
+#pragma unisa use cxlib.netpack
+static char root[4096],streams[4096],work[4096],bound[4200],inc[4200],product[4200],binary[4200];
+static char product_before[65],binary_before[65];
+static const char *binary_pin="3be06b023f5417440b8489b71d566bb883858c2956aea0285fbb6b6e21cfc30c";
+static int assertions,failed;
+static void die(const char *s){fprintf(stderr,"stream-prune: %s\n",s);exit(2);}
+static void check(int ok,const char *s){assertions++;if(!ok)failed++;printf("%s\t%s\n",ok?"PASS":"FAIL",s);}
+static void path(char *out,size_t cap,const char *dir,const char *leaf){int n=snprintf(out,cap,"%s/%s",dir,leaf);if(n<0||(size_t)n>=cap)die("path");}
+static void save(const char *p,const void *s,size_t n){int f=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);size_t at=0;if(f<0)die("exclusive-create");while(at<n){ssize_t k=write(f,(const char *)s+at,n-at);if(k<0&&errno==EINTR)continue;if(k<=0)die("write");at+=(size_t)k;}if(close(f))die("close");}
+static void digest(const char *p,char hex[65]){size_t n;char *s=cx_read(p,&n);if(!s)die(p);cx_sha256_hex(s,n,hex);free(s);}
+static np_result run(const char *leaf){char src[4200],why[1024],out[4300],err[4300];path(src,sizeof src,work,leaf);
+ char *v[]={bound,"12",binary,src,src,inc,0};const char *env[]={"UNISA_ATTRIBUTES=","UNISA_MAXSTEPS=200000000",0};np_result r;
+ if(np_run(v,root,env,14,&r,why,sizeof why))die(why);
+ int n=snprintf(out,sizeof out,"%s/%s.stdout",work,leaf);if(n<0||(size_t)n>=sizeof out)die("out-path");
+ n=snprintf(err,sizeof err,"%s/%s.stderr",work,leaf);if(n<0||(size_t)n>=sizeof err)die("err-path");
+ save(out,r.out,r.outn);save(err,r.err,r.errn);return r;}
+static const char *head="_start:\n  call main\n  ret\nmain:\n  .frame 8\n  store64 [r7+0], r6\n  mov r6, r7\n  .frame 0\n";
+static const char *tail="dead:\n  .frame 8\n  store64 [r7+0], r6\n  mov r6, r7\n  .frame 0\n  imm r0, 99\n  ret\n";
+static void positive(const char *leaf,const char *input,const char *want,const char *label){char p[4200],msg[150];path(p,sizeof p,work,leaf);save(p,input,strlen(input));np_result r=run(leaf);
+ snprintf(msg,sizeof msg,"%s.accept-rc0-empty-stderr",label);check(!r.rc&&!r.errn,msg);
+ snprintf(msg,sizeof msg,"%s.output-exact",label);check(r.outn==strlen(want)&&!memcmp(r.out,want,r.outn),msg);
+ np_free(&r);}
+int main(int argc,char **argv){
+ if(argc!=4){fputs("usage: ROOT STREAM_DIR NEW_OUTDIR\n",stderr);return 2;}
+#if !defined(__linux__) || !defined(__x86_64__)
+ fputs("UNVERIFIED: stream-prune requires Linux/x86_64\n",stderr);return 77;
+#endif
+ if(!realpath(argv[1],root)||!realpath(argv[2],streams))die("resolve");
+ if(argv[3][0]!='/'||strlen(argv[3])>=sizeof work)die("absolute-new-outdir");strcpy(work,argv[3]);
+ if(mkdir(work,0700))die("new-outdir-must-be-absent");
+ path(bound,sizeof bound,root,"tools/bound");path(inc,sizeof inc,root,"include");
+ path(product,sizeof product,root,"unisacc.com");path(binary,sizeof binary,streams,"unisacc-stream5.com");
+ digest(product,product_before);digest(binary,binary_before);
+ if(strcmp(binary_before,binary_pin))die("material.stream5-identity");check(1,"material.stream5-identity");
+ char input[2048],want[2048];int n;
+ n=snprintf(input,sizeof input,"%s  imm r0, 7\n  ret\n%s",head,tail);if(n<0||(size_t)n>=sizeof input)die("dead-fixture");
+ n=snprintf(want,sizeof want,"%s  imm r0, 7\n  ret\n",head);if(n<0||(size_t)n>=sizeof want)die("dead-oracle");
+ positive("dead.tape",input,want,"unreachable-function-pruned");
+ n=snprintf(input,sizeof input,"%s  call dead\n  ret\n%s",head,tail);if(n<0||(size_t)n>=sizeof input)die("call-fixture");
+ positive("called.tape",input,input,"reachable-call-retained");
+ n=snprintf(input,sizeof input,"%s  .lea r1, dead\n  ret\n%s",head,tail);if(n<0||(size_t)n>=sizeof input)die("address-fixture");
+ positive("address.tape",input,input,"address-root-retained");
+ positive("opaque.tape","opaque unsupported instruction\n","opaque unsupported instruction\n","unknown-opcode-preserved");
+ positive("crlf.tape","_start:\r\n  ret\r\n","_start:\r\n  ret\r\n","non-lf-preserved");
+ positive("empty.tape","","","empty-identity");
+ np_result r=run("missing.tape");check(r.rc!=0,"missing-input.reject-nonzero-rc");check(!r.outn,"missing-input.reject-empty-stdout");check(r.errn&&strstr(r.err,"cannot open input"),"missing-input.reject-named");np_free(&r);
+ {char src[4200],why[1024];path(src,sizeof src,work,"dead.tape");char *v[]={bound,"12",binary,src,src,inc,0};const char *env[]={"UNISA_ATTRIBUTES=","UNISA_MAXSTEPS=200000000",0};
+  if(np_run(v,root,env,14,&r,why,sizeof why))die(why);check(r.rc==0&&r.outn==strlen(want)&&!memcmp(r.out,want,r.outn),"replay.dead-output-stable");np_free(&r);}
+ char hex[65];digest(product,hex);check(!strcmp(hex,product_before),"root-product-stable");digest(binary,hex);check(!strcmp(hex,binary_pin),"material.stream5-stable");
+ printf("STREAM_PRUNE\tassertions=%d\tfailed=%d\tscope=independent-finite-prune-io-and-refusal-linux-x86_64\n",assertions,failed);
+ puts("NOT_CLAIMED\tfull-prune-domain-seven-stream-chain-six-host-or-streamseal-shape");return failed?1:0;
+}
