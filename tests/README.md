@@ -764,7 +764,81 @@ These are bootstrap kernel-mechanism observations, not Source329 product/P3-pack
 Source329 kernel gen13's nine phases and old consumer PC01 prepare/34 copies/
 six routes completed at rc0, including warnparse material verification/copy;
 the original producer timeout remains. PC01 declare01 hit outer55 rc142 in
-input verification before native execution or phases/declare output. Provider
-integration has new identities in progress and PC02 has not been created;
-new prepare/copies/routes/declare/pack/seal/verify and product construction
-remain necessary. The19 broad gaps and original time limits remain unchanged.
+input verification before native execution or phases/declare output. Current
+prior consumer56a0be5e was compiled native -O2 and new PC03 prepare/all 34 model
+copies/six routes/declare/pack/seal/--verify each actually completed rc0 under
+the original outer55 limit. Its 1588745B source-package-v1 compiler.pkg SHA is
+`1c6a503090ee8d4189d6326139fa4a18b5db14b9682f1db0949e8ee79519db3e`,
+and model-inputs.tsv SHA is
+`fbabeffcc27d9ca0a677ce793aea7645aa8d30a97893e483755a3aa14c950b8b`.
+This is PREPARED/VERIFIED material, not functional PASS. PC01 declare142,
+PC02 pack142 and the original producer142 are retained; identical package
+bytes in PC02 do not supply a successful outer terminal status.
+
+Prior SPa8aebdd and the actually compiled source-job verifier completed two
+pure-read net-warnparse observations, each 53 files/six ancestor jobs/one model
+and approximately 0.58s, in `out/c43-source-job-verify-warnparse-01.log`.
+No NN was reconstructed. `tests/source-job-snapshot.cx` is the new 67-assertion
+API mechanism gate; native O2 compilation actually completed rc0, followed by
+outer55 rc0 and 67 assertions/0 failures in
+`out/c43-source-job-snapshot-01.log`. Both endpoints actually observed 53 files,
+six ancestor jobs and one model. Wrong valid64 SID and unknown job have exact
+child refusal reasons; argument boundaries return named errors, all supplied
+failed outputs are cleared entirely, and a final fresh observation/snapshot
+recovers the original identities/witness/physical counts. No input is written
+or NN reconstructed. Compiled-controller reuse is code caching, never PASS
+caching; each run must execute every observation and check.
+
+A native controller can be prepared separately with the trusted bootstrap and
+identity-bound compiler flags/source/modules/ELF, then run under the original
+limit (the reported 67/0 used native O2 execution):
+
+```sh
+tools/bound 55 sh ./unisacc.com -O2 -b lnx/x86_64 -o /ABS/NEW_CONTROLLER tests/source-job-snapshot.cx
+tools/bound 55 /ABS/NEW_CONTROLLER ROOT SOURCE_CTX net-warnparse
+```
+
+The test now strictly expects consumerdd6f5e60/sourcepackage407f5ef7, with
+independent material/API contracts. The reported67/0 used prior56a/a8ae;
+the current new pins/64KiB gate independently passed67/0 in native02 build/run
+(`out/c43-source-job-snapshot-02.log`); no prior PASS is inherited. Its maximum child budgets total32 seconds (identity8 twice,
+positive6 twice, two negative children2 each); other argument failures fork
+no child. The outer55 limit remains unchanged. This bootstrap mechanism gate
+is not new-product, NN-function or historical-producer-result qualification.
+The prior a8aebdd SP module's independent full-package double observation
+actually completed rc0 on PC03 in `out/c43-sp-package-probe-run-01.log`:
+1004 physical files,107 jobs/34 models per endpoint,7744849441ns and
+7753816590ns. Four SP endpoints alone take approximately31s, beyond the
+original selfhost30 limit. Before candidate construction, the hybrid threshold
+was therefore changed from1MiB to64KiB/provider-v3. No30/55-second limit,
+physical input read or assertion is removed; no PASS is cached.
+
+New frozen consumer SHA is
+`dd6f5e6068289d04346f202035fb1ae3c84a10e254630c7ba5a650c7a06deb46`,
+and sourcepackage SHA is
+`407f5ef7bd8cf0b65d1086db12b36ab6e19627dc8a0ed5f2e4002df8eae22442`.
+KS8ad, Source329 and foundation9c2 are unchanged. Current PC04 prepare,
+all 34 model copies, six routes, declare, pack, seal and --verify each completed
+actual rc0 under original outer55 limits, reusing verified NN bytes without
+reconstructing weights. compiler.pkg is 1588745B with the same1c6a503... SHA
+as PC03; current model-inputs.tsv SHA256 is
+`b10f49023fbcd78b813ec2adc1df05e42cfa6cd068bf2e383b4a80b38131f822`,
+and package.tsv SHA256 is
+`431639124a24de143a82dbb455fceb3fd8fa815b48085d5199853138952b6e3f`.
+New407/dd6 full-SP probe02 actually completed rc0:1004 physical files,
+107 jobs/34 models per endpoint,5110674321ns and5088791923ns. Every content
+read remains real; these observations do not count as SELFHOST passing.
+The strict new-pin gate's native02 build completed rc0, then original outer55
+execution recorded67/0 in `out/c43-source-job-snapshot-02.log`, with53 files
+per endpoint at approximately0.55/0.52s. Old PC03 and prior67/0 logs remain
+bound to their original identities. All material is only PREPARED/VERIFIED,
+not functional PASS. Root remains P53/S447 bootstrap; no Source329 candidate
+has been built. The new product-v2 coordinator is in its first compilation;
+candidate construction, installer execution and same-candidate qualification
+remain pending, with all19 broad gaps, classic18 source work and foreign hosts.
+New-threshold full-package observations are complete; product-v2 and installer
+compiled qualification, actual candidate construction and same-candidate
+selfhost/function checks remain.
+Root P53/S447 remains bootstrap, no complete Source329 product exists, and
+classic18 source construction, foreign hosts and 19 broad gaps remain open.
+Original time limits are unchanged.

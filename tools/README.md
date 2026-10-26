@@ -397,11 +397,77 @@ including fresh two-endpoint verification and copying of warnparse material.
 The original producer's outer142/no-PREPARED outcome remains unchanged.
 PC01 declare01 instead reached outer55 rc142 during full input verification:
 no phases/declare output was created and the native command was not reached.
-Pack, seal and final verification have not run. Provider integration is changing
-the consumer/sourcepackage identities; PC02 has not been created. Freeze and
-compile those identities before new PC02 prepare/34 copies/six routes and
-actual declare/pack/seal/verify, then build the new v2 product. Existing limits
-remain unchanged; these material observations are not complete-package PASS.
+The prior frozen consumer `56a0be5e2d321456c825d3f8997fcd598303295b62e095af714a2f12dfc12117`
+was actually compiled native with -O2. New PC03 prepare, all 34 copies, six
+routes, declare, pack, seal and --verify each completed rc0 under original
+outer55 limits. The source-package-v1 compiler.pkg is 1588745B, SHA256
+`1c6a503090ee8d4189d6326139fa4a18b5db14b9682f1db0949e8ee79519db3e`;
+model-inputs.tsv SHA256 is
+`fbabeffcc27d9ca0a677ce793aea7645aa8d30a97893e483755a3aa14c950b8b`.
+PC01 declare142 and PC02 pack142 remain retained failures. PC02's same-SHA
+package does not convert its incomplete outer run into success. PC03 material
+is PREPARED/VERIFIED only, with no functional-test conclusion. The independent
+old-SP full-package observation and current PC04 results are recorded below;
+product-v2/installer qualification, a new candidate and same-candidate
+selfhost/function checks remain pending. Root remains
+P53/S447 bootstrap; no complete Source329 product has been constructed.
+
+The compiled `tools/source-job-verify.cx`, using the prior frozen SP module a8aebdd,
+actually verified net-warnparse twice in
+`out/c43-source-job-verify-warnparse-01.log`: each endpoint physically read 53
+files with six ancestry jobs/one model, at approximately 0.58s per snapshot.
+This pure-read material observation reconstructs no NN and does not rewrite
+the original producer's142 outcome. The independent `tests/source-job-snapshot.cx` API gate was actually compiled
+native -O2 and completed outer55 rc0 with 67 assertions/0 failures in
+`out/c43-source-job-snapshot-01.log`. Both endpoints observed 53 files/six jobs/
+one model; exact negative reasons, complete failed-output clearing and recovery
+all passed. A compiled controller caches code only: every invocation still
+physically reads/verifies the applicable inputs, never reuses a PASS. All
+original limits and 19 broad gaps remain.
+
+Current `cxlib.sourcepackage`407f5ef7 retains the same independent pure-read API
+`sp_verify_job_snapshot(ROOT, SOURCE_CTX, JOB_ID, FRESH_SID, SECONDS, &result, why, cap)`.
+FRESH_SID must come from an actual current identity-helper execution, not a saved
+receipt. Success returns0 with sp_result material identities, witness, physical
+read count and measured elapsed_ns; failure returns-1 with a bounded reason,
+clearing every byte of a supplied result. SECONDS must be1..55 and does not add
+time to the caller's outer limit. Each call uses a fresh forked child/view;
+retained per-endpoint bytes do not survive as a future verification result.
+The companion package snapshot API verifies a complete prepared package.
+Both APIs prove unsigned observed consistency, not historical construction,
+atomic filesystem snapshots, NN behavior or new-candidate qualification.
+
+The prior a8aebdd SP module's independent full-package double observation
+actually completed rc0 on PC03 in `out/c43-sp-package-probe-run-01.log`:
+1004 physical files,107 jobs/34 models per endpoint,7744849441ns and
+7753816590ns. Four SP endpoints alone take approximately31s, beyond the
+original selfhost30 limit. Before candidate construction, the hybrid threshold
+was therefore changed from1MiB to64KiB/provider-v3. No30/55-second limit,
+physical input read or assertion is removed; no PASS is cached.
+
+New frozen consumer SHA is
+`dd6f5e6068289d04346f202035fb1ae3c84a10e254630c7ba5a650c7a06deb46`,
+and sourcepackage SHA is
+`407f5ef7bd8cf0b65d1086db12b36ab6e19627dc8a0ed5f2e4002df8eae22442`.
+KS8ad, Source329 and foundation9c2 are unchanged. Current PC04 prepare,
+all 34 model copies, six routes, declare, pack, seal and --verify each completed
+actual rc0 under original outer55 limits, reusing verified NN bytes without
+reconstructing weights. compiler.pkg is 1588745B with the same1c6a503... SHA
+as PC03; current model-inputs.tsv SHA256 is
+`b10f49023fbcd78b813ec2adc1df05e42cfa6cd068bf2e383b4a80b38131f822`,
+and package.tsv SHA256 is
+`431639124a24de143a82dbb455fceb3fd8fa815b48085d5199853138952b6e3f`.
+New407/dd6 full-SP probe02 actually completed rc0:1004 physical files,
+107 jobs/34 models per endpoint,5110674321ns and5088791923ns. Every content
+read remains real; these observations do not count as SELFHOST passing.
+The strict new-pin gate's native02 build completed rc0, then original outer55
+execution recorded67/0 in `out/c43-source-job-snapshot-02.log`, with53 files
+per endpoint at approximately0.55/0.52s. Old PC03 and prior67/0 logs remain
+bound to their original identities. All material is only PREPARED/VERIFIED,
+not functional PASS. Root remains P53/S447 bootstrap; no Source329 candidate
+has been built. The new product-v2 coordinator is in its first compilation;
+candidate construction, installer execution and same-candidate qualification
+remain pending, with all19 broad gaps, classic18 source work and foreign hosts.
 
 `cxlib.kernelsha` provides `ks_sha256_hex(input, length, hex65)`:0 succeeds;
 a negative Linux errno reports failure (`-22` invalid arguments, `-95`
