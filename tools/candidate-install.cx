@@ -22,7 +22,35 @@ static void same_admission(const rb_result *a,const rb_result *b){
   * must match; both endpoints still validate any present metadata completely. */
 }
 static void expected_file_hash(const char *file,const char *expected,const char *reason){size_t n;char actual[65];char *s=load(file,&n);cx_sha256_hex(s,n,actual);free(s);if(strcmp(actual,expected))die(reason);}
+static void prepared_wire(char *wire,size_t cap,const rb_result *r,const char *next_record){
+ int n=snprintf(wire,cap,"candidate-install-prepared-v1\nsource\t%s\nproduct\t%s\npackage\t%s\ncontext\t%s\nkernel\t%s\nbootstrap\t%s\nbuilder-record\t%s\nnext-record\t%s\n",r->source,r->product,r->package,r->product_context,r->kernel_context,r->root_product,r->builder_record,next_record);
+ if(n<0||(size_t)n>=cap)die("prepared receipt bound");
+}
+static int finish_prepared(int argc,char **argv){
+ if(argc!=6){fputs("usage: finish ROOT KERNEL_GENERATION CANDIDATE_COM PREPARED_PACKAGE\n",stderr);return 2;}
+ char root[4096],gen[4096],candidate[4096],package_file[4096],package_dir[4096],p[4400],watch[4400],next[4400],nextrecord[4400],target[4400],targetrecord[4400],sid[65],record_hash[65],wire[1024],why[2048];
+ if(!realpath(argv[2],root)||!realpath(argv[3],gen)||!realpath(argv[4],candidate)||!realpath(argv[5],package_file))die("finish paths");
+ if(package_mode(package_file,package_dir)!=4)die("phased-install-requires-mixed-package");
+ path(p,sizeof p,gen,"unisacc-next.com");if(strcmp(candidate,p))die("finish candidate path");
+ path(next,sizeof next,root,".unisacc-c43-native.next");path(nextrecord,sizeof nextrecord,root,".unisacc-c43-native.next.build.json");
+ size_t n;char *bytes=load(nextrecord,&n);cx_sha256_hex(bytes,n,record_hash);free(bytes);
+ rb_result admitted=admit_candidate(root,gen,package_dir,4);
+ prepared_wire(wire,sizeof wire,&admitted,record_hash);
+ path(p,sizeof p,gen,"candidate-install-prepared.tsv");bytes=load(p,&n);if(n!=strlen(wire)||memcmp(bytes,wire,n))die("prepared admission endpoints changed");free(bytes);
+ expected_file_hash(next,admitted.product,"staged candidate bytes changed");expected_file_hash(candidate,admitted.product,"generation candidate bytes changed");
+ path(p,sizeof p,gen,"bootstrap-before-install.com");expected_file_hash(p,admitted.bootstrap,"saved builder bytes changed");
+ path(p,sizeof p,gen,"bootstrap-before-install.com.build.json");expected_file_hash(p,admitted.builder_record,"saved builder record changed");
+ path(p,sizeof p,root,"unisacc.com");expected_file_hash(p,admitted.root_product,"root builder changed");
+ path(p,sizeof p,gen,"identity-helper");path(watch,sizeof watch,root,"tools/bound");char *v[]={watch,(char *)"15",p,root,0};np_result id={0};
+ if(np_run(v,root,0,20,&id,why,sizeof why)||id.rc||id.errn||id.outn!=65||id.out[64]!='\n')die("fresh source during finish");memcpy(sid,id.out,64);sid[64]=0;np_free(&id);if(strcmp(sid,admitted.source))die("finish source changed");
+ path(target,sizeof target,root,"unisacc.com");path(targetrecord,sizeof targetrecord,root,"unisacc.com.build.json");
+ if(rename(next,target))die("replace product");if(rename(nextrecord,targetrecord))die("product replaced but provenance rename failed; backup retained");
+ int fd=open(root,O_RDONLY|O_DIRECTORY|O_CLOEXEC);if(fd<0||fsync(fd)||close(fd))die("directory fsync");
+ printf("INSTALLED\tdevelopment-only\tno-release-qualification\nartifact\t%s\nsource\t%s\nprevious\t%s\n",admitted.product,admitted.source,admitted.root_product);return 0;
+}
 int main(int argc,char **argv){
+ if(argc==6&&!strcmp(argv[1],"finish"))return finish_prepared(argc,argv);
+ int prepare_only=argc==6&&!strcmp(argv[1],"prepare");if(prepare_only){argc--;argv++;}
  if(argc!=5){fputs("usage: ROOT KERNEL_GENERATION CANDIDATE_COM PREPARED_PACKAGE\n",stderr);return 2;}char root[4096],generation[4096],package_file[4096],package_dir[4096],candidate[4096],sha[65],after[65],hash[65],oldhash[65],p[4400],helper[4400],watch[4400],why[1024];if(!realpath(argv[1],root)||!realpath(argv[2],generation)||!realpath(argv[3],candidate)||!realpath(argv[4],package_file))die("paths");int mode=package_mode(package_file,package_dir);rb_result admitted={0};{char expected[4400];path(expected,sizeof expected,generation,"unisacc-next.com");if(strcmp(candidate,expected))die("candidate-must-be-generation-unisacc-next-com");admitted=admit_candidate(root,generation,package_dir,mode);}kc_check(root,generation,sha);if(strcmp(sha,admitted.source))die("candidate-initial-source-changed");
  size_t cn,pn,on,rn;char *c=load(candidate,&cn),*pkg=load(package_file,&pn);if(cn<16||memcmp(c+cn-16,"UNIPKG1\n",8)||little(c+cn-8)!=pn||pn>cn-16||memcmp(c+cn-16-pn,pkg,pn))die("candidate/prepared package mismatch");char prepared_hash[65];cx_sha256_hex(pkg,pn,prepared_hash);free(pkg);cx_sha256_hex(c,cn,hash);if(strcmp(hash,admitted.product)||strcmp(prepared_hash,admitted.package))die("candidate-loaded-material-differs-from-admission");
  path(helper,sizeof helper,generation,"identity-helper");path(watch,sizeof watch,root,"tools/bound");char *v[]={watch,"15",helper,root,"write",candidate,sha,0};np_result r;if(np_run(v,root,0,20,&r,why,sizeof why))die(why);if(r.rc||r.errn)die("candidate provenance write");np_free(&r);int k=snprintf(p,sizeof p,"%s.build.json",candidate);if(k<0||(size_t)k>=sizeof p)die("record path");char *record=load(p,&rn);
@@ -34,6 +62,7 @@ int main(int argc,char **argv){
  if(rn<3||memcmp(record+rn-3,"\n}\n",3))die("provenance shape");np_buf extended={0};np_put(&extended,record,rn-3);np_puts(&extended,",\n  \"native_construction_sha256\": \"");np_puts(&extended,h);np_puts(&extended,"\"\n}\n");free(record);record=extended.p;rn=extended.n;
  path(p,sizeof p,root,"unisacc.com");char *old=load(p,&on);cx_sha256_hex(old,on,oldhash);path(p,sizeof p,generation,"bootstrap-before-install.com");saved(p,old,on,0700);free(old);path(p,sizeof p,root,"unisacc.com.build.json");old=load(p,&on);path(p,sizeof p,generation,"bootstrap-before-install.com.build.json");saved(p,old,on,0600);free(old);
  char next[4400],nextrecord[4400],target[4400],targetrecord[4400];path(next,sizeof next,root,".unisacc-c43-native.next");path(nextrecord,sizeof nextrecord,root,".unisacc-c43-native.next.build.json");saved(next,c,cn,0700);saved(nextrecord,record,rn,0600);char next_record_hash[65];cx_sha256_hex(record,rn,next_record_hash);free(c);free(record);kc_check(root,generation,after);if(strcmp(sha,after))die("source changed during installation");path(target,sizeof target,root,"unisacc.com");path(targetrecord,sizeof targetrecord,root,"unisacc.com.build.json");
+ if(prepare_only){if(mode!=4)die("phased-install-requires-mixed-package");char wire[1024];prepared_wire(wire,sizeof wire,&admitted,next_record_hash);path(p,sizeof p,generation,"candidate-install-prepared.tsv");saved(p,wire,strlen(wire),0600);printf("PREPARED\tmixed-candidate-install\trequires-finish\tno-release-qualification\n");return 0;}
  {rb_result final=admit_candidate(root,generation,package_dir,mode);same_admission(&admitted,&final);if(strcmp(final.product,hash)||strcmp(final.package,prepared_hash)||strcmp(final.source,sha)||strcmp(final.source,after))die("candidate-final-material-source-changed");char backup[4400];path(backup,sizeof backup,generation,"bootstrap-before-install.com");expected_file_hash(backup,admitted.bootstrap,"saved-builder-bytes-changed");path(backup,sizeof backup,generation,"bootstrap-before-install.com.build.json");expected_file_hash(backup,admitted.builder_record,"saved-builder-original-record-changed");if(strcmp(oldhash,admitted.root_product))die("saved-builder-differs-from-admission");expected_file_hash(next,hash,"staged-candidate-bytes-changed");expected_file_hash(nextrecord,next_record_hash,"staged-candidate-record-changed");}
  /* Atomic replacement of each regular file; exclusive backups are retained.
   * A failure between renames is an installation error, never reported success. */
