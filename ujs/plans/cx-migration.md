@@ -22,7 +22,7 @@
 | W0 | ✓ 0.0.3 | 清空 `ujs/` 内 `.py`／`.c` |
 | W0b | ✓ 0.0.4 | 验面；`ujs/tests/` 自洽 |
 | W0c | ✓ 0.0.5 | host1 **跑面**（非 construct 迁） |
-| W1 | 0.0.6+ | archive 按族真迁 `.cx`；迁完可删对应遗留 |
+| W1 | 0.0.7+ | archive 按族真迁 `.cx`（`method_construct`）。**0.0.6 不做这刀** |
 | W2 | 后置 | path-A VM／IC 表生成器 |
 
 规则：`-run` 真迁；转调 Python 不算完成。
