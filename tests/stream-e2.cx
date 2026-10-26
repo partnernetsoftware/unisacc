@@ -1,0 +1,91 @@
+/* Independent E2 stream oracle (src.c -> UNIPP1/pp). Not the seven-stream chain.
+ * ROOT STREAM_DIR NEW_OUTDIR; Linux/x86_64 only. Uses stream1.com from prepared
+ * seven-stream material; does not construct nets or touch the product route.
+ * This batch checks E2 in isolation; later streams and foreign hosts are separate. */
+#pragma unisa use cxlib.netpack
+static char root[4096],streams[4096],work[4096],bound[4200],inc[4200],product[4200],e2bin[4200];
+static char e2_id[65],product_before[65],product_after[65];
+static const char *e2_pin="d333174e71a2921263449bc318c75000ef55bd27f1c6c1249a7983bdef54cfa6";
+static int assertions,failures;
+static void die(const char *s){fprintf(stderr,"stream-e2: %s\n",s);exit(2);}
+static void check(int ok,const char *s){assertions++;if(!ok)failures++;printf("%s\t%s\n",ok?"PASS":"FAIL",s);}
+static void path(char *out,size_t cap,const char *dir,const char *name){int n=snprintf(out,cap,"%s/%s",dir,name);if(n<0||(size_t)n>=cap)die("path");}
+static void saved(const char *p,const void *s,size_t n){int f=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);size_t at=0;if(f<0)die("exclusive-create");while(at<n){ssize_t k=write(f,(char *)s+at,n-at);if(k<0&&errno==EINTR)continue;if(k<=0)die("write");at+=(size_t)k;}if(close(f))die("close");}
+static char *loaded(const char *p,size_t *n){char *s=cx_read(p,n);if(!s)die(p);return s;}
+static void digest(const char *p,char *hex){size_t n;char *s=loaded(p,&n);cx_sha256_hex(s,n,hex);free(s);}
+static unsigned little(const unsigned char *p){return (unsigned)p[0]|(unsigned)p[1]<<8|(unsigned)p[2]<<16|(unsigned)p[3]<<24;}
+/* Five u32 fields, splice offsets, include records, then exact text bytes. */
+static int unipp1(const unsigned char *b,size_t n,const unsigned char **body,size_t *bn,unsigned *splices,unsigned *includes,const unsigned char **first_include){
+ if(n<27||memcmp(b,"UNIPP1\0",7))return 0;
+ unsigned len=little(b+7),sc=little(b+19),ic=little(b+23);size_t at=27;
+ if(sc>(n-at)/4)return 0;
+ at+=(size_t)sc*4;
+ *first_include=ic?b+at:0;
+ for(unsigned i=0;i<ic;i++){
+  if(n-at<12)return 0;
+  unsigned names=little(b+at+8);at+=12;
+  if(names>62||names>n-at)return 0;
+  at+=names;
+ }
+ if(len!=n-at)return 0;
+ *body=b+at;*bn=len;*splices=sc;*includes=ic;return 1;
+}
+static np_result invoke(const char *input_leaf,const char *evidence_leaf){
+ char src[4200],outp[4400],errp[4400];int z;path(src,sizeof src,work,input_leaf);
+ z=snprintf(outp,sizeof outp,"%s/%s.stdout",work,evidence_leaf);if(z<0||(size_t)z>=sizeof outp)die("stdout-path");
+ z=snprintf(errp,sizeof errp,"%s/%s.stderr",work,evidence_leaf);if(z<0||(size_t)z>=sizeof errp)die("stderr-path");
+ char *v[]={bound,"12",e2bin,src,src,inc,0};np_result r;char why[1024];
+ const char *env[]={"UNISA_ATTRIBUTES=","UNISA_MAXSTEPS=200000000",0};
+ if(np_run(v,root,env,14,&r,why,sizeof why))die(why);
+ saved(outp,r.out,r.outn);saved(errp,r.err,r.errn);return r;}
+static void positive(const char *name,const char *src,const char *want_body,unsigned want_splices,unsigned want_includes){
+ char sp[4200],t[140];path(sp,sizeof sp,work,name);saved(sp,src,strlen(src));
+ np_result r=invoke(name,name);
+ const unsigned char *body,*first=0;size_t bn;unsigned splices=0,includes=0;
+ int frame=unipp1((unsigned char *)r.out,r.outn,&body,&bn,&splices,&includes,&first);
+ snprintf(t,sizeof t,"%s.accept-rc0-empty-stderr",name);check(!r.rc&&!r.errn,t);
+ snprintf(t,sizeof t,"%s.unipp1-frame",name);check(frame,t);
+ snprintf(t,sizeof t,"%s.body-exact",name);check(frame&&bn==strlen(want_body)&&!memcmp(body,want_body,bn),t);
+ snprintf(t,sizeof t,"%s.splice-count",name);check(frame&&splices==want_splices,t);
+ snprintf(t,sizeof t,"%s.include-count",name);check(frame&&includes==want_includes,t);
+ if(want_includes){snprintf(t,sizeof t,"%s.include-record",name);check(frame&&first&&little(first)==1&&little(first+4)==2&&little(first+8)==8&&!memcmp(first+12,"header.h",8),t);}
+ np_free(&r);}
+static void refuse(const char *name,const char *src,const char *needle){
+ char sp[4200],t[140];path(sp,sizeof sp,work,name);saved(sp,src,strlen(src));
+ np_result r=invoke(name,name);
+ snprintf(t,sizeof t,"%s.reject-nonzero-rc",name);check(!!r.rc,t);
+ snprintf(t,sizeof t,"%s.reject-empty-stdout",name);check(!r.outn,t);
+ snprintf(t,sizeof t,"%s.reject-named-oracle",name);check(r.errn&&strstr(r.err,needle),t);
+ np_free(&r);}
+int main(int argc,char **argv){
+ if(argc!=4){fputs("usage: ROOT STREAM_DIR NEW_OUTDIR\n",stderr);return 2;}
+#if !defined(__linux__) || !defined(__x86_64__)
+ fputs("UNVERIFIED: stream-e2 requires Linux/x86_64\n",stderr);return 77;
+#endif
+ if(!realpath(argv[1],root)||!realpath(argv[2],streams))die("resolve");
+ if(argv[3][0]!='/'||strlen(argv[3])>=sizeof work)die("absolute-new-outdir");strcpy(work,argv[3]);
+ if(mkdir(work,0700))die("new-outdir-must-be-absent");
+ path(bound,sizeof bound,root,"tools/bound");path(inc,sizeof inc,root,"include");
+ path(product,sizeof product,root,"unisacc.com");path(e2bin,sizeof e2bin,streams,"unisacc-stream1.com");
+ digest(product,product_before);digest(e2bin,e2_id);
+ if(strcmp(e2_id,e2_pin))die("material.stream1-identity");
+ check(1,"material.stream1-identity");
+ positive("plain.c","int main(void){return 0;}\n","int main(void){return 0;}\n",0,0);
+ positive("comment.c","int /*c*/ z;\n","int   z;\n",0,0);
+ positive("define.c","#define X 7\nint y=X;\n","           \nint y= 7 ;\n",0,0);
+ {char splice[]={'i','n','t',' ','l','o','n','\\','\n','g','_','n','a','m','e',';','\n',0};
+  positive("splice.c",splice,"int long_name;\n",1,0);}
+ {char header[4200];path(header,sizeof header,work,"header.h");saved(header,"int from_h;\n",12);
+  positive("include.c","#include \"header.h\"\nint after;\n","int from_h;\n\n\nint after;\n",0,1);}
+ refuse("unterminated.c","/* bad\n","unterminated comment");
+ refuse("missing-include.c","#include \"no-such-e2-header-xyz.h\"\n","no such file");
+ {char a[4200],why[1024];path(a,sizeof a,work,"plain.c");
+  char *cmd[]={bound,"12",e2bin,a,a,inc,0};const char *env[]={"UNISA_ATTRIBUTES=","UNISA_MAXSTEPS=200000000",0};
+  np_result r1,r2;if(np_run(cmd,root,env,14,&r1,why,sizeof why)||np_run(cmd,root,env,14,&r2,why,sizeof why))die(why);
+  check(r1.outn==r2.outn&&r1.outn&&!memcmp(r1.out,r2.out,r1.outn),"replay.stdout-stable");
+  np_free(&r1);np_free(&r2);}
+ digest(product,product_after);check(!strcmp(product_before,product_after),"root-product-stable");
+ digest(e2bin,e2_id);check(!strcmp(e2_id,e2_pin),"material.stream1-stable");
+ printf("STREAM_E2\tassertions=%d\tfailed=%d\tscope=independent-e2-io-and-named-refusal-linux-x86_64\n",assertions,failures);
+ puts("NOT_CLAIMED\tseven-stream-chain-full-pp-gold-table-six-host-or-streamseal-shape");
+ return failures?1:0;}
