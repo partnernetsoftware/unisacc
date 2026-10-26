@@ -860,7 +860,8 @@ int main(int argc, char **argv) {
         /* Before unit NN, try reuse keyed by raw module sources and CLI inputs.
          * Image (-run/-o): USE34 host ELF. Object/tape (-c/-S): USE33 final artifact. */
         {
-            int rr_can = rr_eligible(nsources, warnings, tape_input, !!deps, fwd_second, target);
+            int rr_can = rr_eligible(nsources, warnings, tape_input, !!deps, fwd_second, target) &&
+                         !(runit && nsources > 1);
 #ifdef __linux__
             if (rr_can && (runit || mode == 0 || mode == 2 || mode == 5)) {
                 int hx;
@@ -997,7 +998,8 @@ rr_after_units:
             {
                 int rr_hit = rr_pre_hit ? 2 : 0;
                 char rr_id[65];
-                int rr_can = rr_eligible(nsources, warnings, tape_input, !!deps, fwd_second, target) || rr_pre_hit;
+                int rr_can = (rr_eligible(nsources, warnings, tape_input, !!deps, fwd_second, target) &&
+                              !(runit && nsources > 1)) || rr_pre_hit;
                 struct timespec rr_t0, rr_t1;
                 int rr_time = !!getenv("UNISACC_RR_TIME");
                 if (rr_pre_hit) memcpy(rr_id, rr_pre_id, 65);
