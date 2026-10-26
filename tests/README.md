@@ -1036,16 +1036,126 @@ At `out/c43-source329-origin-01`, all seven source trees/typekw/ten support
 files and old Root raw/record are actually sealed and checked. The original
 CTX03 helper rescanned capsule/root and returned the complete329 SID, rc0 in
 `out/c43-origin-capsule-snapshot-sid-01.log` and capsule snapshot-sid.stdout.
-Large CTX03/PC04/KGEN/CC materials still require copying; the complete origin
-package is not finished. New product-build/RB drafts explicitly pass
--I ROOT/include for source-package driver/wrapper builds and bind v2 flags
-(legacy argv unchanged); these drafts are not compiled/constructed evidence.
-Next:finish origin-package copying, explicitly qualify NN adoption or construct
-anew, then rebuild using current headers and verify the same candidate. Old329
-receipts must not be relabeled fresh;19 gaps, unimplemented44 startup reuse
-and signing/publication restrictions remain.
+The origin capsule is now complete:706MiB,19 parts plus final verification,
+each under original55 with actual rc0. SEALED SHA is
+`87f7d1fd1469d170556f8a0cc2861d27e14de05f687e97e4805db135268c3273`;
+the original helper twice actually rescanned the full329 SID. See
+`out/c43-origin-capsule-final-verify-01.log`. Old receipts/epoch remain intact.
+Current Source0d GEN15 actually completed all nine phases under original55,
+context `67fb6c9b0dacf0c385bf05e49b49a67493d34bdb489afd5f91589a6d3471cd3f`.
+The two blobs match old4d6e(7096B（含40B头，body7056B）)/32ce(7144B（含40B头，body7104B）); this is PREPARED, not functional
+PASS. Root/record/runner/builder-source after-checks were OK.
 
-Current registry evidence:original20 --list completed rc0 in
+Historical origin SP API98848f9f... and wrapperbf9a331c... were actually compiled native
+with saved CAP/root/unisacc.com plus absolute-I current include/O2. ELF SHA is
+`de8511f0501a1bafb1e2038b3efa89352022d19dccaa0130b0442346f1d8588c`.
+Its independent saved compiler is53/record21704/source329, not live Root raw.
+--write-profile completed0, profile SHA
+`4793f9d98c489b224f020cbc58d0f217c33500cb496147474d4fe73ce8a54bba`.
+The first --snapshot completed original55 rc0 in
+`out/c43-source-origin-snapshot-01.log`:origin329,107 jobs/34 models/1004
+physical reads, execution_reads148 and wrapper6,elapsed6397320828ns. Current
+executing SP988 is separate from origin specification407. This is fresh old
+DAG verification, not current Source0d construction or test PASS. That initial point remains historical; the later indexed37-check gate is recorded below.
+
+Earlier NI module SHA was
+`8becdff327ca5bfed12bbee94367cf59cd3dd91ab68933d0fae66394a4627fac`.
+Its native rebuild completed0; original55
+`out/c43-nninputs-probe-run-02.log` completed6/0,7791 reads=current3888/
+origin3888/support15. This covers all four trees at four endpoints,ten Cdeps,
+directory modes; complete includes and origin DAG have separate domains.
+Two native calls' internal reads remain UNMEASURED. elapsed3627775504ns,
+reader3626988686ns,native_current1503902949ns,native_origin1455617847ns;
+four tree observations each took approximately0.157-0.173s. Old NIcd50's
+3.4738s first observation remains historical. These are not OS-cold/statistical
+acceleration, complete PP equivalence or completed NN adoption.
+
+Current indexed SP a832 uses new verifier ELF02 52fc/profile02 6acb.
+The permanent origin gate completed original55 with37/0; its two positive
+snapshots read107 jobs/34 models/1004 files each in5082765804/5145743979ns.
+The old98837 logs and out/c43-sourcepackage-before-index-988.cx remain
+historical. Current execution code and old origin specification407 are
+separate identities; this verifies Source329 material, not new Source0d
+construction.
+
+tools/libneed-material.cx221119 actually prepared material; derived CX6b48
+and nativeE4 actually built. Both complete include-table controls completed8/0:
+39810B, exact SHA
+aea1293b96da78c6a0cfaf0354e47e840d414de41bdea735bead30d736c8c853.
+Native observations1.452/1.473s versus CX0.161/0.159s are individual timings,
+not OS-cold statistics. fast-attrs01 retained12/0 from old fd7 test logic.
+The later report-label correction to REFERENCE_C_SOURCE avoids claiming a
+host-C compilation history for CX; that labelled version has not yet rerun.
+No seed/header/Source0d/KGEN15 input changed for this optimization.
+
+NI a95 and profile writer954 actually built and created the reader profile.
+E4.cache.tsv (dfab...,3318B) binds compiled headers NI1ed1cb..., original
+material, saved bootstrap, source and module identities. tests/nn-inputs.cx9217
+native02 built and completed original55 with104/0, including two complete
+positive comparisons at approximately1.14s each. The original93/1 log remains:
+Root.com was non-ELF, so its exact expected shape refusal was corrected.
+All93 obligations remain, plus11 shape/private non-executable ELF-clone and
+unknown-artifact refusal premises. The clone is only read, never executed.
+SP/wrapper/origin-test commit02bb4c614d and NI/material/profile/test commit
+789e7d4c6f record these mechanisms.
+
+The new adoption producer a546/native03 9457 actually completed prepare03,
+pack01, seal01 and verify01, each within original55, for
+out/c43-adopted-package-01. P3 is1589556B, SHA
+e486e9523c30c6c4985050f12c5e6a4323f8f6d8d84b9088709083f83b3e52a5;
+manifest20e5ac180c3e88a0fd415ca670a59e666731fa65d044a57948ade77657075a47,
+receipt24ee9ffc4fb6e1b2d757b7f55e8dec03e424cf63804454fb6ff180e229adbbc3,
+context2b1a53bd337b1899a76271139171372b16c71dcd11e913dec8b600c2173f45f4.
+All34 NN and the declaration are explicitly ADOPTED from Source329.
+All107 origin jobs receive fresh full-DAG verification, plus NI and current
+GEN15 kernels; only pack is EXECUTED with current headers. Earlier prepare01/02
+rc2 logs remain: the kernel suffix mapping was corrected from KGEN *.kernel
+to private P3 kernels/arm64 and kernels/x86_64 without removing checks.
+Raw kernels are7096/7144B, including40B headers (bodies7056/7104B).
+
+out/c43-adopted-package-snapshot-01.log completed original55 rc0:
+single-endpoint8.8639s, origin5.1836s, NI1.1473s, body9.0065s.
+These timers have different scopes and must not be added. Four such fresh
+endpoints are projected to exceed original selfhost30; a complete kind3
+selfhost has not run, so this is not a measured selfhost failure. Next:
+measure and reduce helper/controller overhead while retaining30, all four
+full endpoints and all assertions; implement RB kind3/installer integration,
+integrate the adopted-snapshot adapter with RB kind3, then
+construct and qualify a new candidate. Package PREPARED/VERIFIED/snapshot
+results are material evidence, not functional PASS. Installed Root remains
+P53/Source329; current Source0d has no rebuilt candidate. The19 gaps,
+foreign hosts, classic18 source construction and signing/publication
+restrictions remain. The separately authorized csr private C44 v6 report of
+approximately0.07s is not main43 qualification; its size+mtime shortcut is
+not accepted into43, and -run reuse is not implemented in main.
+
+Two separate SOURCE/lnx_x86_64/55 batches are now registered as
+IMPLEMENTED, not PASS. Strict --list actually returned0 in
+out/c43-adoption-testplan-list-01.log: metadata_valid1,98 batches,
+79 implemented/19 planned/63 unprepared,113 coverage,
+94 implemented/19 unresolved,executed0/NOT_EXECUTED. This parses metadata;
+it does not execute batches.
+
+* construction.origin-package: finite37-check origin gate, with materials
+  source-origin, source-origin-verifier, source-origin-profile and
+  logical-source-package. Actual CLI:
+  sh ./unisacc.com tests/origin-package.cx -- ROOT CAPROOT LOGICAL_PC VERIFIER_ELF VERIFIER_PROFILE NEW_WORK
+* construction.nn-input-applicability: finite104-check NI gate, with
+  source-origin and libneed-reader. Actual CLI:
+  sh ./unisacc.com tests/nn-inputs.cx -- ROOT SNAPSHOT_ROOT TRUSTED_READER
+
+A measured native -O2 controller may reuse compiled code; it never caches
+a verdict. These gates do not cover DAG-leaf/status/extra-directory/
+execute-bit/parent-symlink/normal-v1-alias mutations or NI data/Cdep/domain
+mutations, OS-cold behavior, foreign hosts or full PP equivalence.
+
+The adopted-snapshot adapter also completed default-run development testing:
+out/c43-adoptedsnapshot-probe-run-01.log, original55,15/0,
+seven non-mutating negative controls and one full positive endpoint,
+own51 reads/9.355677247s. This is module development verification, not RB3
+integration or candidate qualification.
+
+Historical registry evidence before the two new registrations: original20 --list completed rc0 in
 `out/c43-fclose-testplan-list-01.log`, metadata_valid1,96 batches (77
 implemented,19 planned,61 unprepared),111 coverage (92 implemented,19
 unresolved),executed0/NOT_EXECUTED. Subsequent original20 --all actually
@@ -1053,7 +1163,7 @@ returned3 with empty stderr in `out/c43-fclose-testplan-all-01.log`:
 metadata_valid1/111 coverage/92 implemented/19 gaps; SMOKE16/0 only,
 95 non-smoke batches and76 coverage NOT_RUN,executed_subprocess_batches0.
 Unknown/unrun entries are not PASS. Historical109 coverage/94 batches are not
-the current registry. Implementation metadata does not replace actual tests,
+an updated count after these two registrations. Implementation metadata does not replace actual tests,
 NN adoption or new-candidate qualification. Local installation is not complete qualification.
 The19 gaps, foreign hosts, classic18 weight-source construction and-run44
 remain unfinished; signing/publication restrictions are unchanged. Complete
