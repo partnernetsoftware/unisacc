@@ -1,0 +1,111 @@
+/* Installed-product image RI multi-TU oracle; not full RI.
+ * ROOT PRODUCT_COM NEW_OUTDIR. PRODUCT_COM must be ROOT/unisacc.com.
+ * source:image once; E3 tip; strict hermetic header; refuse TU edit. Bound 55s. */
+#pragma unisa use cxlib.netpack
+static char root[4096],work[4096],bound[4200],com[4200];
+static char a_c[4400],b_c[4400],hdr[4400],inc[4400],cap[4400],image[4400],ledger[4400],e3id[4400];
+static char cap_sha[65],product_before[65];
+static int assertions,failures;
+static void die(const char *s){fprintf(stderr,"ri-image-multi: REFUSE %s\n",s);exit(2);}
+static void check(int ok,const char *s){assertions++;if(!ok){failures++;fprintf(stderr,"FAIL\t%s\n",s);}else printf("PASS\t%s\n",s);}
+static void path(char *o,size_t capn,const char *a,const char *b){int n=snprintf(o,capn,"%s/%s",a,b);if(n<0||(size_t)n>=capn)die("path");}
+static void saved(const char *p,const void *s,size_t n){int f=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);size_t at=0;if(f<0)die(p);while(at<n){ssize_t k=write(f,(char *)s+at,n-at);if(k<0&&errno==EINTR)continue;if(k<=0)die("write");at+=(size_t)k;}if(close(f))die("close");}
+static void sha_file(const char *p,char hex[65]){size_t n;char *s=cx_read(p,&n);if(!s)die(p);cx_sha256_hex(s,n,hex);free(s);}
+static np_result runv(char **v,const char *cwd,const char **env,int sec,const char *name){
+ char why[1024],op[4400],ep[4400];np_result r;int z;
+ if(np_run(v,cwd,env,sec,&r,why,sizeof why))die(why);
+ z=snprintf(op,sizeof op,"%s/%s.stdout",work,name);if(z<0||(size_t)z>=sizeof op)die("out");
+ z=snprintf(ep,sizeof ep,"%s/%s.stderr",work,name);if(z<0||(size_t)z>=sizeof ep)die("err");
+ saved(op,r.out,r.outn);saved(ep,r.err,r.errn);return r;}
+static int err_ok(const np_result *r){return !r->errn;}
+static int file_has(const char *p,const char *needle){size_t n;char *s=cx_read(p,&n);int ok=s&&strstr(s,needle);free(s);return ok;}
+static int hex_key_row(const char *led,const unsigned char *key,size_t kn){
+ size_t i,n,hexn;char hex[1025];char *s;int ok=0;
+ if(!key||!kn||kn>512)return 0;
+ for(i=0;i<kn;i++){hex[2*i]="0123456789abcdef"[key[i]>>4];hex[2*i+1]="0123456789abcdef"[key[i]&15];}
+ hex[2*kn]=0;hexn=2*kn;s=cx_read(led,&n);if(!s)return 0;
+ for(i=0;i<n;){size_t e=i;while(e<n&&s[e]!='\n')e++;
+  if(e>i&&s[i]!='#'&&e>=i+hexn&&!memcmp(s+i,hex,hexn)&&(e==i+hexn||s[i+hexn]=='\t')){ok=1;break;}
+  i=e+(e<n);}free(s);return ok;}
+static int pref(char **v,int sec){
+ int n=0;const char *s=sec<=12?"12":"25";
+ v[n++]=bound;v[n++]=(char *)s;v[n++]="sh";v[n++]=com;return n;}
+int main(int argc,char **argv){
+ static const unsigned char k_e3[]="\0ri/e3-identity";
+ static const unsigned char k_kern[]="\0kernel/x86_64";
+ if(argc!=4||!realpath(argv[1],root)||argv[2][0]!='/'||argv[3][0]!='/'||strlen(argv[3])>=sizeof work||strstr(argv[3],".."))
+  die("usage ROOT PRODUCT_COM ABS_OUT");
+ {char expected[4200];path(expected,sizeof expected,root,"unisacc.com");if(strcmp(argv[2],expected))die("installed-product-required");}
+ strcpy(com,argv[2]);strcpy(work,argv[3]);
+ if(unsetenv("UNISACC_RR_TIME")||unsetenv("UNISACC_RF_CAPTURE")||unsetenv("UNISA_ATTRIBUTES")||setenv("UNISACC_RUN_CACHE","0",1))die("clean-environment");
+ sha_file(com,product_before);
+ if(mkdir(work,0700))die("mkdir");
+ path(bound,sizeof bound,root,"tools/bound");
+ path(inc,sizeof inc,work,"inc");if(mkdir(inc,0700))die("mkdir-inc");
+ path(hdr,sizeof hdr,inc,"mark.h");{const char *h="#define MARK 3 /*a*/\n";saved(hdr,h,strlen(h));}
+ path(a_c,sizeof a_c,work,"a.c");{const char *s="#include \"mark.h\"\nint add1(int x){return x+MARK;}\n";saved(a_c,s,strlen(s));}
+ path(b_c,sizeof b_c,work,"b.c");{const char *s="int add1(int);int main(void){return add1(4);}\n";saved(b_c,s,strlen(s));}
+ path(cap,sizeof cap,work,"cap-multi");path(image,sizeof image,work,"multi.com");
+ if(mkdir(cap,0700))die("mkdir-cap");
+ /* capture multi image */
+ {char env[4600];snprintf(env,sizeof env,"UNISACC_RF_CAPTURE=%s",cap);
+  const char *adds[]={env,"UNISA_JOBS=1",0};char *v[28];int n=pref(v,25);
+  v[n++]="-O0";v[n++]="-b";v[n++]="lnx/x86_64";v[n++]="-I";v[n++]=inc;v[n++]=a_c;v[n++]=b_c;v[n++]="-o";v[n++]=image;v[n]=0;
+  np_result capr=runv(v,root,adds,30,"multi-capture");
+  check(!capr.rc&&err_ok(&capr),"multi.capture-rc0");np_free(&capr);
+  path(ledger,sizeof ledger,cap,"resources.tsv");path(e3id,sizeof e3id,cap,"e3-identity.tsv");
+  check(file_has(ledger,"source:lnx/x86_64/multi/image/O0"),"multi.primary-source-image-once");
+  {size_t n;char *s=cx_read(ledger,&n);check(s&&n>10&&!memcmp(s,"#SC2\tstage=source:",18),"multi.header-is-source-not-e3");free(s);}
+  check(hex_key_row(ledger,k_kern,sizeof k_kern-1),"multi.frontend-kernel-bound");
+  check(hex_key_row(ledger,k_e3,sizeof k_e3-1),"multi.sc2-binds-e3-identity");
+  check(file_has(e3id,"e3:lnx/x86_64/multi/image/O0"),"multi.e3-second-present");
+  sha_file(image,cap_sha);
+  {char *rv[6];int n=0;rv[n++]=bound;rv[n++]="5";rv[n++]=image;rv[n]=0;
+   np_result ran=runv(rv,root,0,8,"multi-capture-exec");check(ran.rc==7&&!ran.outn&&!ran.errn,"multi.capture-exec-return7");np_free(&ran);}}
+ /* strict replay */
+ {unlink(image);char *v[28];int n=pref(v,25);
+  v[n++]="--strict-resource-flow";v[n++]="--resource-ledger";v[n++]=cap;
+  v[n++]="-O0";v[n++]="-b";v[n++]="lnx/x86_64";v[n++]="-I";v[n++]=inc;v[n++]=a_c;v[n++]=b_c;v[n++]="-o";v[n++]=image;v[n]=0;
+  const char *adds[]={"UNISA_JOBS=1",0};np_result rep=runv(v,root,adds,30,"multi-replay");
+  check(!rep.rc&&err_ok(&rep),"multi.strict-replay-rc0");np_free(&rep);
+  {char hex[65];sha_file(image,hex);check(!strcmp(hex,cap_sha),"multi.replay-eq-capture");}
+  {char *rv[6];int n=0;rv[n++]=bound;rv[n++]="5";rv[n++]=image;rv[n]=0;
+   np_result ran=runv(rv,root,0,8,"multi-replay-exec");check(ran.rc==7&&!ran.outn&&!ran.errn,"multi.replay-exec-return7");np_free(&ran);}}
+ /* refuse changed TU source */
+ {const char *s2="#include \"mark.h\"\nint add1(int x){return x+MARK+0;}\n";
+  int f=open(a_c,O_WRONLY|O_TRUNC|O_CLOEXEC);if(f<0)die("a");if((size_t)write(f,s2,strlen(s2))!=strlen(s2))die("aw");close(f);
+  {char *v[28];int n=pref(v,12);
+   v[n++]="--strict-resource-flow";v[n++]="--resource-ledger";v[n++]=cap;
+   v[n++]="-O0";v[n++]="-b";v[n++]="lnx/x86_64";v[n++]="-I";v[n++]=inc;v[n++]=a_c;v[n++]=b_c;v[n++]="-o";v[n++]=image;v[n]=0;
+   const char *adds[]={"UNISA_JOBS=1",0};np_result bad=runv(v,root,adds,14,"multi-refuse-tu-edit");
+   check(bad.rc==2&&bad.errn&&strstr(bad.err,"resource-identity-mismatch"),
+         "multi.refuse-changed-tu-source");np_free(&bad);}
+  {const char *s1="#include \"mark.h\"\nint add1(int x){return x+MARK;}\n";
+   f=open(a_c,O_WRONLY|O_TRUNC|O_CLOEXEC);if(f<0)die("ar");if((size_t)write(f,s1,strlen(s1))!=strlen(s1))die("arw");close(f);}}
+ /* equal-length host header edit — hermetic */
+ {const char *h2="#define MARK 3 /*b*/\n";int f=open(hdr,O_WRONLY|O_TRUNC|O_CLOEXEC);if(f<0)die("h");
+  if((size_t)write(f,h2,strlen(h2))!=strlen(h2))die("hw");close(f);
+  unlink(image);
+  {char *v[28];int n=pref(v,25);
+   v[n++]="--strict-resource-flow";v[n++]="--resource-ledger";v[n++]=cap;
+   v[n++]="-O0";v[n++]="-b";v[n++]="lnx/x86_64";v[n++]="-I";v[n++]=inc;v[n++]=a_c;v[n++]=b_c;v[n++]="-o";v[n++]=image;v[n]=0;
+   const char *adds[]={"UNISA_JOBS=1",0};np_result ok=runv(v,root,adds,30,"multi-replay-hdr-edited");
+   check(!ok.rc&&err_ok(&ok),"multi.header-edit-hermetic-rc0");
+   {char hex[65];sha_file(image,hex);check(!strcmp(hex,cap_sha),"multi.header-edit-same-as-capture");}
+   np_free(&ok);}
+  {const char *h1="#define MARK 3 /*a*/\n";f=open(hdr,O_WRONLY|O_TRUNC|O_CLOEXEC);if(f<0)die("hr");
+   if((size_t)write(f,h1,strlen(h1))!=strlen(h1))die("hrw");close(f);}}
+ /* missing e3 tip */
+ {char broken[4400],gone[4400];path(broken,sizeof broken,work,"cap-multi-no-e3");
+  {char *v[]={"/bin/cp","-a",cap,broken,0};np_result r;char why[256];
+   if(np_run(v,0,0,10,&r,why,sizeof why)||r.rc)die(why[0]?why:"cp");np_free(&r);}
+  path(gone,sizeof gone,broken,"e3-identity.tsv");unlink(gone);
+  {char *v[28];int n=pref(v,12);
+   v[n++]="--strict-resource-flow";v[n++]="--resource-ledger";v[n++]=broken;
+   v[n++]="-O0";v[n++]="-b";v[n++]="lnx/x86_64";v[n++]="-I";v[n++]=inc;v[n++]=a_c;v[n++]=b_c;v[n++]="-o";v[n++]=image;v[n]=0;
+   const char *adds[]={"UNISA_JOBS=1",0};np_result bad=runv(v,root,adds,14,"multi-refuse-missing-e3");
+   check(bad.rc==2&&bad.errn&&(strstr(bad.err,"resource-bytes-absent")||strstr(bad.err,"resource-e3-identity-absent")),
+         "multi.refuse-missing-e3-second-identity");np_free(&bad);}}
+ {char product_after[65];sha_file(com,product_after);check(!strcmp(product_before,product_after),"identity.product-unchanged");}
+ printf("RI_IMAGE_MULTI\tassertions=%d\tfailed=%d\tscope=installed-product-multi-source-and-e3-not-full-RI\n",assertions,failures);
+ return failures?1:0;}
