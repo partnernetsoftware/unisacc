@@ -22,4 +22,5 @@
 | **0.0.4** | [`v0.0.4.md`](v0.0.4.md) | **已交付**（验面 + `ujs/tests/` 自洽） |
 | **0.0.5** | [`v0.0.5.md`](v0.0.5.md) | **已交付**（`--run` + `run-host` 28／28） |
 | **0.0.6** | [`v0.0.6.md`](v0.0.6.md) | **已交付**（`FILE.ujs --run` 一条链） |
-| — | [`cx-migration.md`](cx-migration.md) | 迁移债（construct → 0.0.7+） |
+| **0.0.7** | [`v0.0.7.md`](v0.0.7.md) | **已交付** · lex 扫描器切片（不是 IntNet，不是其余九网） |
+| — | [`cx-migration.md`](cx-migration.md) | 迁移债（0.0.7 只迁 lex；其余后置） |

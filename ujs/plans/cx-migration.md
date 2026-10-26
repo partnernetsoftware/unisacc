@@ -13,7 +13,7 @@
 | `ujs/` 树 `.py`／`.c` | ✓ **0** |
 | 构造臂／旧包入口 | `archive/ujs-legacy-py-c/` |
 | host1 跑面 | ✓ **0.0.5**（产品迷你 VM；≠ archive VM 全迁） |
-| archive 真迁（acc／emit／…） | **后置**（W1；`method_construct`） |
+| archive 真迁 | **0.0.7 已交付 lex 扫描器切片**（不是 IntNet，不是其余九网）。其余后置 |
 
 ## 波次
 
@@ -23,7 +23,7 @@
 | W0b | ✓ 0.0.4 | 验面；`ujs/tests/` 自洽 |
 | W0c | ✓ 0.0.5 | host1 **跑面**（非 construct 迁） |
 | W0d | ✓ 0.0.6 | 日用一条链 `FILE.ujs --run`（仍非 construct 迁） |
-| W1 | 0.0.7+ | archive 按族真迁 `.cx`（`method_construct`）。**0.0.6 不做这刀** |
+| W1 | ✓ 0.0.7 | **只迁 lex 扫描器**（`lex.cx`，`method_construct`）。其余 archive 仍后置 |
 | W2 | 后置 | path-A VM／IC 表生成器 |
 
 规则：`-run` 真迁；转调 Python 不算完成。

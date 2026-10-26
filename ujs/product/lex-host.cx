@@ -1,0 +1,263 @@
+#!/usr/bin/env -S unisacc.com -run
+/* method_construct close gate. Drives the shipped scanner:
+     sh ./unisacc.com -run ujs/seed/construct/lex.cx -- FILE
+   Byte-compares each segment to the frozen fixture. Does not rewrite it.
+   Every refuse name must exist and exit non-zero.
+   ./unisacc.com -run ujs/product/lex-host.cx
+   Prints: lex-host.cx: ok method_construct
+*/
+enum { FIX_MAX = 262144, NAME_MAX = 64, N_MAX = 32, EXPECT_N = 28, OUT_MAX = 262144 };
+
+static int exists(const char *p) {
+    FILE *f = fopen(p, "rb");
+    if (!f) return 0;
+    fclose(f);
+    return 1;
+}
+
+static int enter_root(const char *argv0) {
+    char dir[4096];
+    size_t l;
+    char *sl;
+    if (exists("./ujs/tests/lex-expect.txt") && exists("./unisacc.com")) return 0;
+    if (!argv0 || !argv0[0]) return -1;
+    l = strlen(argv0);
+    if (l >= sizeof dir) return -1;
+    memcpy(dir, argv0, l + 1);
+    sl = strrchr(dir, '/');
+    if (!sl) return -1;
+    *sl = 0;
+    if (chdir(dir) != 0) return -1;
+    return chdir("../..");
+}
+
+static int read_cap(const char *path, char **out, size_t *out_n, size_t cap) {
+    FILE *f;
+    long sz;
+    char *buf;
+    size_t n;
+    f = fopen(path, "rb");
+    if (!f) return 1;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 1; }
+    sz = ftell(f);
+    if (sz < 0 || (size_t)sz > cap) {
+        fprintf(stderr, "lex-host.cx: %s over cap %zu\n", path, cap);
+        fclose(f);
+        return 1;
+    }
+    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return 1; }
+    buf = (char *)malloc((size_t)sz + 1);
+    if (!buf) { fclose(f); return 1; }
+    n = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    if (n != (size_t)sz) { free(buf); return 1; }
+    buf[n] = 0;
+    *out = buf;
+    *out_n = n;
+    return 0;
+}
+
+static int load_names(const char *path, char names[][NAME_MAX], int maxn, int *nout) {
+    FILE *f;
+    char line[128];
+    int n = 0;
+    f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "lex-host.cx: cannot open %s\n", path);
+        return 1;
+    }
+    while (fgets(line, sizeof line, f)) {
+        size_t L = strlen(line);
+        if (L && line[L - 1] != '\n' && !feof(f)) {
+            fprintf(stderr, "lex-host.cx: name line too long in %s\n", path);
+            fclose(f);
+            return 1;
+        }
+        while (L && (line[L - 1] == '\n' || line[L - 1] == '\r')) line[--L] = 0;
+        if (!L || line[0] == '#') continue;
+        if ((int)L >= NAME_MAX || n >= maxn) {
+            fprintf(stderr, "lex-host.cx: too many names in %s\n", path);
+            fclose(f);
+            return 1;
+        }
+        memcpy(names[n], line, L + 1);
+        n++;
+    }
+    fclose(f);
+    *nout = n;
+    return 0;
+}
+
+static int header_at(const char *fix, size_t n, size_t i) {
+    if (i >= n || fix[i] != '#') return 0;
+    if (i + 1 >= n || fix[i + 1] != ' ') return 0;
+    if (i == 0) return 1;
+    return fix[i - 1] == '\n';
+}
+
+static int find_header(const char *fix, size_t n, size_t from, size_t *at) {
+    size_t i;
+    if (from == 0 && header_at(fix, n, 0)) { *at = 0; return 1; }
+    i = from == 0 ? 1 : from;
+    while (i < n) {
+        if (header_at(fix, n, i)) { *at = i; return 1; }
+        i++;
+    }
+    return 0;
+}
+
+static int check_passes(const char *fix, size_t fn, char names[][NAME_MAX], int nnames) {
+    char srcs[EXPECT_N][512];
+    char *av[8 + EXPECT_N];
+    char *got = 0;
+    size_t gn = 0;
+    int k, rc;
+    size_t pos = 0;
+    if (nnames != EXPECT_N) {
+        fprintf(stderr, "lex-host.cx: pass count %d want %d\n", nnames, EXPECT_N);
+        return 1;
+    }
+    av[0] = "sh";
+    av[1] = "./unisacc.com";
+    av[2] = "-run";
+    av[3] = "ujs/seed/construct/lex.cx";
+    av[4] = "--";
+    for (k = 0; k < nnames; k++) {
+        size_t h, name_b, name_e, nlen;
+        if (!find_header(fix, fn, pos, &h) || h != pos) {
+            fprintf(stderr, "lex-host.cx: fixture header missing before %s\n", names[k]);
+            return 1;
+        }
+        name_b = h + 2;
+        name_e = name_b;
+        while (name_e < fn && fix[name_e] != '\n') name_e++;
+        if (name_e >= fn) {
+            fprintf(stderr, "lex-host.cx: fixture header has no newline\n");
+            return 1;
+        }
+        nlen = name_e - name_b;
+        if (nlen != strlen(names[k]) || memcmp(fix + name_b, names[k], nlen) != 0) {
+            fprintf(stderr, "lex-host.cx: fixture name != %s\n", names[k]);
+            return 1;
+        }
+        if (snprintf(srcs[k], sizeof srcs[k], "ujs/tests/corpus/%s", names[k]) >= (int)sizeof srcs[k]) {
+            fprintf(stderr, "lex-host.cx: path overflow %s\n", names[k]);
+            return 1;
+        }
+        if (!exists(srcs[k])) {
+            fprintf(stderr, "lex-host.cx: missing %s\n", srcs[k]);
+            return 1;
+        }
+        av[5 + k] = srcs[k];
+        pos = name_e + 1;
+        if (k + 1 < nnames) {
+            size_t next;
+            if (!find_header(fix, fn, pos, &next)) {
+                fprintf(stderr, "lex-host.cx: fixture ended early at %s\n", names[k]);
+                return 1;
+            }
+            pos = next;
+        }
+    }
+    if (find_header(fix, fn, pos, &pos)) {
+        fprintf(stderr, "lex-host.cx: fixture has an extra header\n");
+        return 1;
+    }
+    av[5 + nnames] = 0;
+    rc = cx_runv_timeout(av, 40, &got, &gn);
+    if (rc != 0) {
+        fprintf(stderr, "lex-host.cx: scan failed rc=%d\n", rc);
+        free(got);
+        return 1;
+    }
+    if (!got) gn = 0;
+    if (gn > OUT_MAX || gn != fn || (gn && memcmp(got, fix, gn) != 0)) {
+        size_t i = 0, m = gn < fn ? gn : fn;
+        while (i < m && got && got[i] == fix[i]) i++;
+        fprintf(stderr, "lex-host.cx: mismatch at %zu got=%zu want=%zu\n", i, gn, fn);
+        free(got);
+        return 1;
+    }
+    free(got);
+    return 0;
+}
+
+static int check_refuses(char names[][NAME_MAX], int nnames) {
+    int k;
+    if (nnames < 1) {
+        fprintf(stderr, "lex-host.cx: refuse list empty\n");
+        return 1;
+    }
+    for (k = 0; k < nnames; k++) {
+        char src[512];
+        char *got = 0;
+        size_t gn = 0;
+        int rc;
+        if (snprintf(src, sizeof src, "ujs/tests/neg/%s", names[k]) >= (int)sizeof src) {
+            fprintf(stderr, "lex-host.cx: refuse path overflow %s\n", names[k]);
+            return 1;
+        }
+        if (!exists(src)) {
+            fprintf(stderr, "lex-host.cx: missing refuse %s\n", src);
+            return 1;
+        }
+        {
+            char cmd[1200];
+            char *qv[4];
+            if (snprintf(cmd, sizeof cmd,
+                    "sh ./unisacc.com -run ujs/seed/construct/lex.cx -- %s >/dev/null 2>/dev/null",
+                    src) >= (int)sizeof cmd) {
+                fprintf(stderr, "lex-host.cx: refuse command overflow %s\n", names[k]);
+                return 1;
+            }
+            qv[0] = "sh";
+            qv[1] = "-c";
+            qv[2] = cmd;
+            qv[3] = 0;
+            rc = cx_runv_timeout(qv, 30, &got, &gn);
+        }
+        free(got);
+        if (rc == 0) {
+            fprintf(stderr, "lex-host.cx: refuse accepted %s\n", names[k]);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    char passes[N_MAX][NAME_MAX];
+    char refuses[N_MAX][NAME_MAX];
+    char *fix = 0;
+    size_t fn = 0;
+    int np = 0, nr = 0;
+    (void)argc;
+    if (enter_root(argv[0]) != 0 || !exists("./unisacc.com")) {
+        fprintf(stderr, "lex-host.cx: need repo root\n");
+        return 2;
+    }
+    if (!exists("ujs/seed/construct/lex.cx")) {
+        fprintf(stderr, "lex-host.cx: missing scanner\n");
+        return 2;
+    }
+    if (read_cap("ujs/tests/lex-expect.txt", &fix, &fn, FIX_MAX) != 0) {
+        fprintf(stderr, "lex-host.cx: cannot read fixture\n");
+        return 2;
+    }
+    if (load_names("ujs/tests/host1-pass.txt", passes, N_MAX, &np) != 0) {
+        free(fix);
+        return 2;
+    }
+    if (load_names("ujs/tests/lex-refuse.txt", refuses, N_MAX, &nr) != 0) {
+        free(fix);
+        return 2;
+    }
+    if (check_passes(fix, fn, passes, np) != 0) {
+        free(fix);
+        return 1;
+    }
+    free(fix);
+    if (check_refuses(refuses, nr) != 0) return 1;
+    puts("lex-host.cx: ok method_construct");
+    return 0;
+}
