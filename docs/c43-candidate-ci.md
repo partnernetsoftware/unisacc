@@ -79,3 +79,5 @@ POSIX 分支按序尝试来源摘要、CX 元数据和当前 `tests/run.cx --all
 2026-10-26：官方 actionlint v1.7.12 校验和匹配，新工作流静态 lint 返回0；官方 PowerShell 7.6.8 Linux x64 发行包 SHA256 与发布页一致，提取的四段 run 脚本全部 ParseFile 语法错误数0，未执行工作流代码。CX helper 默认-run 元数据自测11断言0；缺必要输入返回2。PowerShell 独立计算的六文件计划摘要与 CX 相同；摘要只绑定当时的本地输入，不作为未来候选或 CI 证据。原日志在 `out/c43-candidate-{actionlint-01,pwsh-parse-01,plan-host-01,plan-cx-02}.log`、`out/c43-ci-candidate-{controls-02,absent-input-01}.log`。没有执行任何功能子批次、source identity 重算、产品构造、远端 CI 或上传。
 
 2026-10-27：Windows 分支补入直接启动 PE 的 `--version` 单进程观察，仍明确退出3/NOT_READY，功能、来源闭包和六目标继续 NOT_RUN。当前主树 `out/actionlint` 对修改后工作流返回0；用本地 PowerShell 7.6.8 解析新第三段 run 脚本，ParseFile 错误数0。未在 Windows 运行，此静态证据不授候选进程实跑资格。
+
+同日当前主树的本机输入再核：P75 默认运行 `seed/ident.c` 得完整产品源码闭包 `718017ab98ae13963d0b928496724c0e661990b3972ba452909742ccfa6f6a81`；候选 CX helper 与独立 PowerShell 原始字节算法各自计算六文件计划摘要，均为 `3ca5b2a0d00ffcfca9a0b85a367901594c380eaeb2ab250221a4999a093f249a`。这是本地此时的身份观察；后续清单或工具字节改变须重算，且共享检出尚有其他协作者暂存文件，不能把该摘要当作已固定的验证 commit 或远端 CI 结果。
