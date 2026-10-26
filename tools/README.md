@@ -732,15 +732,42 @@ Raw kernels are7096/7144B, including40B headers (bodies7056/7104B).
 
 out/c43-adopted-package-snapshot-01.log completed original55 rc0:
 single-endpoint8.8639s, origin5.1836s, NI1.1473s, body9.0065s.
-These timers have different scopes and must not be added. Four such fresh
+Current working source is S03a5: the fixed forward-result.tsv is frozen
+as014e1ac4.... The actual G15 identity helper completed bound8 rc0 and measured
+03a5e1b77b24c7fcfe92d289c53d772088bb1b07a94bb3d419a34c75e2bd2334
+in out/c43-forward-decimal-source-identity-01.log; the SID is no longer pending.
+Installed Root remains P53/record21704/Source329. The Source0d adopted package,
+GEN15 and15/37/104 observations are earlier material/mechanism evidence;
+they do not qualify the changed source or a new candidate.
+RB3 source is implemented, but native/default-run compilation through the
+old product remains blocked by its front-end encoding defect; no new slice
+exists. Old forward-result.tsv emitted ccw_i+48 as one byte, turning ordinal10
+(the11th result) into a colon. The badargs default-run returned1 at line400482
+in out/c43-adopted-rb-default-repro-run-01.stderr; original Tape evidence is
+out/c43-driver-tape-debug-01/stage-2243329-000.txt:400482.
+The24576-byte struct-copy probe ran0, so this is not evidence of a large-struct
+failure. source-package-forward-runner01 actually compiled native0 using
+unchanged9c2 tool source. The new partialCTX is not prepared, and shared-e3,
+warnparse and errorparse NN are not reconstructed. The other31 require a new
+mixed-origin schema. Current NI full-equality must refuse this actual change;
+do not exclude the table or reduce coverage. No new candidate exists.
+identity-material a052 actually compiled native02 rc0, but MAT02 prepare,
+verify and derived native compile/run remain NOT_RUN. The old bb7 source,
+MAT01 prepare/verify0 and module-missing derived compile01 rc1 remain;
+no acceleration is claimed. Original30/55, four full fresh endpoints,
+19 gaps and publication restrictions remain.
+
+These earlier timers have different scopes and must not be added. Four such fresh
 endpoints are projected to exceed original selfhost30; a complete kind3
 selfhost has not run, so this is not a measured selfhost failure. Next:
 measure and reduce helper/controller overhead while retaining30, all four
-full endpoints and all assertions; implement RB kind3/installer integration,
-integrate the adopted-snapshot adapter with RB kind3, then
-construct and qualify a new candidate. Package PREPARED/VERIFIED/snapshot
+full endpoints and all assertions. The forward-result source fix and S03a5 measurement are complete; prepare
+the new partialCTX, reconstruct the affected three NN (not yet built),
+and implement mixed-origin adoption for31. Then compile and validate the
+already-written RB3 source, integrate the installer, and construct and qualify
+a new candidate. Earlier adapter evidence remains scoped to Source0d. Package PREPARED/VERIFIED/snapshot
 results are material evidence, not functional PASS. Installed Root remains
-P53/Source329; current Source0d has no rebuilt candidate. The19 gaps,
+P53/Source329; current S03a5 has no rebuilt candidate. Source0d is historical material. The19 gaps,
 foreign hosts, classic18 source construction and signing/publication
 restrictions remain. The separately authorized csr private C44 v6 report of
 approximately0.07s is not main43 qualification; its size+mtime shortcut is
