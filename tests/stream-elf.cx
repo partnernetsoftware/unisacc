@@ -1,0 +1,44 @@
+/* Finite independent ELF stream oracle; hand-built TINS and pinned Linux x86_64 stream. */
+#pragma unisa use cxlib.netpack
+static char root[4096],streams[4096],work[4096],bound[4200],inc[4200],product[4200],binary[4200];
+static char product_before[65],binary_before[65];
+static const char *binary_pin="6e6bbcac0d253e70edb59474caa035168adca3f88f704eb1f68e2c0538af4d31";
+static const char *image_pin="6f42334d0317f835721b7a54770e2c2d34627cfe869c120ac1477d7edd7f4352";
+static int assertions,failed;
+static void die(const char *s){fprintf(stderr,"stream-elf: %s\n",s);exit(2);}
+static void check(int ok,const char *s){assertions++;if(!ok)failed++;printf("%s\t%s\n",ok?"PASS":"FAIL",s);}
+static void path(char *out,size_t cap,const char *dir,const char *leaf){int n=snprintf(out,cap,"%s/%s",dir,leaf);if(n<0||(size_t)n>=cap)die("path");}
+static void save(const char *p,const void *s,size_t n){int f=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);size_t at=0;if(f<0)die("exclusive-create");while(at<n){ssize_t k=write(f,(const char *)s+at,n-at);if(k<0&&errno==EINTR)continue;if(k<=0)die("write");at+=(size_t)k;}if(close(f))die("close");}
+static void digest(const char *p,char hex[65]){size_t n;char *s=cx_read(p,&n);if(!s)die(p);cx_sha256_hex(s,n,hex);free(s);}
+static np_result run(const char *leaf){char src[4200],why[1024],out[4300],err[4300];path(src,sizeof src,work,leaf);
+ char *v[]={bound,"12",binary,src,src,inc,0};const char *env[]={"UNISA_ATTRIBUTES=","UNISA_MAXSTEPS=200000000",0};np_result r;
+ if(np_run(v,root,env,14,&r,why,sizeof why))die(why);
+ int n=snprintf(out,sizeof out,"%s/%s.stdout",work,leaf);if(n<0||(size_t)n>=sizeof out)die("out-path");
+ n=snprintf(err,sizeof err,"%s/%s.stderr",work,leaf);if(n<0||(size_t)n>=sizeof err)die("err-path");
+ save(out,r.out,r.outn);save(err,r.err,r.errn);return r;}
+int main(int argc,char **argv){
+ if(argc!=4){fputs("usage: ROOT STREAM_DIR NEW_OUTDIR\n",stderr);return 2;}
+#if !defined(__linux__) || !defined(__x86_64__)
+ fputs("UNVERIFIED: stream-elf requires Linux/x86_64\n",stderr);return 77;
+#endif
+ if(!realpath(argv[1],root)||!realpath(argv[2],streams))die("resolve");
+ if(argv[3][0]!='/'||strlen(argv[3])>=sizeof work)die("absolute-new-outdir");strcpy(work,argv[3]);
+ if(mkdir(work,0700))die("new-outdir-must-be-absent");
+ path(bound,sizeof bound,root,"tools/bound");path(inc,sizeof inc,root,"include");
+ path(product,sizeof product,root,"unisacc.com");path(binary,sizeof binary,streams,"unisacc-stream7.com");
+ digest(product,product_before);digest(binary,binary_before);
+ if(strcmp(binary_before,binary_pin))die("material.stream7-identity");check(1,"material.stream7-identity");
+ const char *input="@target lnx/x86_64\n@data -\n@src_os lnx\n@data_len 32944\n@bss 0\n@relocs -\n_start:\nspinit rsp\nsetreg rax, imm 60 role=sysno\nsetreg rdi, imm 7 role=arg0\nsetreg rsi, imm 0 role=arg1\nsetreg rdx, imm 0 role=arg2\ngate form=syscall gate=syscall carry=false winapi=ExitProcess catop=exit sysno='60 retconv='none winimp='none ret=rax hstd=33200 written=33224 scr0=33032 scr1=33040\n";
+ char p[4200],image[4200],hex[65],why[1024];path(p,sizeof p,work,"exit7.tins");save(p,input,strlen(input));np_result r=run("exit7.tins");
+ check(!r.rc&&!r.errn,"hand-built-tins.accept-rc0-empty-stderr");
+ cx_sha256_hex(r.out,r.outn,hex);check(r.outn==4096&&!strcmp(hex,image_pin),"hand-built-tins.exact-4096-byte-elf-sha");
+ check(r.outn>=64&&!memcmp(r.out,"\177ELF\2\1\1",7)&&(unsigned char)r.out[18]==62&&r.out[19]==0,"hand-built-tins.elf64-x86_64-header");
+ path(image,sizeof image,work,"image.elf");save(image,r.out,r.outn);np_free(&r);if(chmod(image,0700))die("chmod-image");
+ {char *v[]={bound,"5",image,0};if(np_run(v,root,0,8,&r,why,sizeof why))die(why);check(r.rc==7&&!r.outn&&!r.errn,"hand-built-tins.native-exit7");np_free(&r);}
+ path(p,sizeof p,work,"exit7-replay.tins");save(p,input,strlen(input));r=run("exit7-replay.tins");cx_sha256_hex(r.out,r.outn,hex);check(!r.rc&&!r.errn&&r.outn==4096&&!strcmp(hex,image_pin),"replay.image-stable");np_free(&r);
+ const char *bad="@target lnx/x86_64\n@data -\n@data_len 64\n@relocs 57\nret\n";path(p,sizeof p,work,"bad-reloc.tins");save(p,bad,strlen(bad));r=run("bad-reloc.tins");
+ check(r.rc!=0,"relocation-overrun.reject-nonzero-rc");check(!r.outn,"relocation-overrun.reject-empty-stdout");check(r.errn&&strstr(r.err,"ELF input or relocation"),"relocation-overrun.reject-named");np_free(&r);
+ digest(product,hex);check(!strcmp(hex,product_before),"root-product-stable");digest(binary,hex);check(!strcmp(hex,binary_pin),"material.stream7-stable");
+ printf("STREAM_ELF\tassertions=%d\tfailed=%d\tscope=independent-finite-elf-io-execution-and-refusal-linux-x86_64\n",assertions,failed);
+ puts("NOT_CLAIMED\tfull-elf-domain-seven-stream-chain-six-host-or-streamseal-shape");return failed?1:0;
+}
