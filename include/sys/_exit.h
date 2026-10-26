@@ -44,7 +44,12 @@ static long _u_st_raw(int __u_fd, const char *__u_p, long __u_n) {
     __u_done = 0;
     while (__u_done < __u_n) {
         __u_r = __write(__u_fd, (char *)__u_p + __u_done, __u_n - __u_done);
-        if (__u_r <= 0 || __u_r > __u_n - __u_done) return __u_done;
+        /* POSIX gates return negative errno; a zero/oversized result is
+           an I/O failure (also covers the Windows count-only gate). */
+        if (__u_r <= 0 || __u_r > __u_n - __u_done) {
+            errno = __u_r < 0 ? (int)(0 - __u_r) : EIO;
+            return __u_done;
+        }
         __u_done = __u_done + __u_r;
     }
     return __u_n;

@@ -1,0 +1,44 @@
+/* Single-flat-attribute native scanner/roots contract.
+ * ROOT LIBNEED_NATIVE NEW_WORK; caller bound55.
+ * Exercises the actual native tool. HOSTCC artifact/source bindings do not
+ * prove compiler lineage or hermeticity. No Python/reference invocation.
+ */
+#pragma unisa use cxlib.netpack
+static char root[4096],native[4400],work[4400],bound[4400];
+static int assertions,failed;
+static void die(const char *s){fprintf(stderr,"libneed-attributes: %s\n",s);exit(2);}
+static void ck(int ok,const char *s){assertions++;if(!ok)failed++;printf("%s\t%s\n",ok?"PASS":"FAIL",s);}
+static void path(char p[4400],const char *a,const char *b){int n=snprintf(p,4400,"%s/%s",a,b);if(n<0||n>=4400)die("path-bound");}
+static void digest(const char *p,char h[65]){size_t n;char *s=cx_read(p,&n);if(!s)die("read");cx_sha256_hex(s,n,h);free(s);}
+static void save(const char *p,const char *s){int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(fd<0)die("exclusive-input");size_t n=strlen(s),at=0;while(at<n){ssize_t z=write(fd,s+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0)die("write-input");at+=(size_t)z;}int bad=fsync(fd),closed=close(fd);if(bad||closed)die("input-sync-close");}
+static np_result call(const char *mode,const char *file){np_result r;char why[1200];char *v[]={bound,"8",native,(char *)mode,(char *)file,0};if(np_run(v,root,0,10,&r,why,sizeof why))die(why);return r;}
+static void expect_body(np_buf *b,const char *text,const char *start,const char *end,const char *name){const char *p=strstr(text,start),*q=p?strstr(p,end):0;if(!p||strstr(p+1,start)||!q)die("independent-fixture-markers");char row[300];int n=snprintf(row,sizeof row,"BODY %s %lu %lu\n",name,(unsigned long)(p-text),(unsigned long)(q-text+strlen(end)));if(n<0||n>=sizeof row)die("row-bound");np_put(b,row,(size_t)n);}
+int main(int argc,char **argv){if(argc!=4||!realpath(argv[1],root)||!realpath(argv[2],native)||argv[3][0]!='/'||strlen(argv[3])>=sizeof work)die("usage-ROOT-LIBNEED_NATIVE-NEW_WORK");strcpy(work,argv[3]);if(mkdir(work,0700))die("fresh-work");path(bound,root,"tools/bound");char source[4400],before[65],after[65],tool_before[65],tool_after[65];path(source,root,"seed/unisa_libneed.c");digest(source,before);digest(native,tool_before);ck(!strcmp(before,"5f0469bcb6268bf979d8bb872424ae238c8f991b51543337b6f4b2750b2fdbb1"),"frozen-native-C-source");
+ const char *fixture=
+ "static int plain(void) { return 1; }\n"
+ "__attribute__((constructor)) static void ctor(void) {}\n"
+ "__attribute__(())static int empty_attr(void) { return 2; }\n"
+ "__attribute__((unused,cold)) \t\nstatic int multiline(void) { return 3; }\n"
+ "__attribute__((unused)) static void (*pick(void))(void) { return 0; }\n"
+ "__attribute__((unused)) static int literal(void) { const char *s = \"}\"; /* } */ return 7; }\n"
+ " __attribute__((constructor)) static void indented_attr(void) {}\n"
+ " static void indented_plain(void) {}\n"
+ "__attribute__((unused)) __attribute__((cold)) static void repeated(void) {}\n"
+ "__attribute__((constructor(101))) static void nested_argument(void) {}\n"
+ "__attribute__((constructor) static void malformed(void) {}\n"
+ "__attribute__((unused)) int external(void) {}\n"
+ "__attribute__((unused)) staticish int static_word_boundary(void) {}\n"
+ "__attribute__((constructor)) static void prototype(void);\n";
+ const char *roots="static void helper(void) {}\n__attribute__((constructor)) static void _unisa_environ_init(void) { helper(); }\nstatic void exit(int status) { helper(); }\n";
+ const char *duplicate="__attribute__((unused)) static void twice(void) {}\n__attribute__((cold)) static void twice(void) {}\n";
+ const char *unbalanced="__attribute__((unused)) static int incomplete(void) { return 1;\n";
+ char f[4400],rdir[4400],rfile[4400],ddir[4400],dfile[4400],bad[4400];path(f,work,"bodies.h");path(rdir,work,"roots");path(ddir,work,"duplicate");path(bad,work,"unbalanced.h");if(mkdir(rdir,0700)||mkdir(ddir,0700))die("fixture-dirs");path(rfile,rdir,"fixture.h");path(dfile,ddir,"fixture.h");save(f,fixture);save(rfile,roots);save(dfile,duplicate);save(bad,unbalanced);
+ char fi[65],ri[65],di[65],bi[65],h[65];digest(f,fi);digest(rfile,ri);digest(dfile,di);digest(bad,bi);
+ np_buf expected={0};expect_body(&expected,fixture,"static int plain(","return 1; }","plain");expect_body(&expected,fixture,"__attribute__((constructor)) static void ctor(","{}","ctor");expect_body(&expected,fixture,"__attribute__(())static int empty_attr(","return 2; }","empty_attr");expect_body(&expected,fixture,"__attribute__((unused,cold))", "return 3; }","multiline");expect_body(&expected,fixture,"__attribute__((unused)) static void (*pick(","return 0; }","pick");expect_body(&expected,fixture,"__attribute__((unused)) static int literal(","return 7; }","literal");
+ np_result r=call("bodies",f);ck(!r.rc&&!r.errn,"actual-bodies-native-success");ck(r.outn==expected.n&&!memcmp(r.out,expected.p,expected.n),"six-bodies-exact-names-and-original-prefix-spans-plus-negative-boundaries");np_free(&r);free(expected.p);
+ const char *gold="NAMES _unisa_environ_init exit helper\nKEY _unisa_environ_init _unisa_environ_init helper\nKEY exit exit helper\nKEY helper helper\nROOTS_CLOSURE _unisa_environ_init exit helper\n";
+ r=call("table",rdir);ck(!r.rc&&!r.errn,"actual-table-native-success");ck(r.outn==strlen(gold)&&!memcmp(r.out,gold,r.outn),"constructor-body-and-transitive-root-closure-exact");np_free(&r);
+ r=call("table",ddir);ck(r.rc==1&&!r.outn&&r.errn&&strstr(r.err,"carried body defined twice twice"),"duplicate-attributed-body-refusal-retained");np_free(&r);
+ r=call("bodies",bad);ck(r.rc==1&&!r.outn&&r.errn&&strstr(r.err,"unbalanced body incomplete"),"unbalanced-attributed-body-refusal-retained");np_free(&r);
+ digest(f,h);ck(!strcmp(h,fi),"bodies-fixture-unchanged");digest(rfile,h);ck(!strcmp(h,ri),"roots-fixture-unchanged");digest(dfile,h);ck(!strcmp(h,di),"duplicate-fixture-unchanged");digest(bad,h);ck(!strcmp(h,bi),"unbalanced-fixture-unchanged");digest(source,after);digest(native,tool_after);ck(!strcmp(before,after)&&!strcmp(tool_before,tool_after),"native-and-C-source-stable");printf("NATIVE\t%s\tC_SOURCE\t%s\tHOSTCC-not-hermetic-or-lineage-proof\n",tool_before,before);printf("LIBNEED_ATTRIBUTES\tassertions=%d\tfailed=%d\tscope=single-flat-prefix-actual-native-scanner-and-roots\n",assertions,failed);return failed?1:0;
+}

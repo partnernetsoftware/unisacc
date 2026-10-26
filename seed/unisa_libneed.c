@@ -100,15 +100,38 @@ static char *head_name(const char *h, size_t hn) {
     return NULL;
 }
 
+/* Match HEAD's one optional leading __attribute__(([^)]*)) group, then
+ * whitespace and the original static word boundary. This deliberately does
+ * not extend HEAD to nested attribute arguments or repeated prefixes.
+ * Keep the original offset for Body.a/refs, but start name lookup at static:
+ * attribute identifiers are metadata, not a function declarator. */
+static int body_head(const char *t, size_t n, size_t i, size_t *declarator) {
+    static const char prefix[] = "__attribute__((";
+    size_t p = i, k = sizeof prefix - 1;
+    if (n - p >= k && !memcmp(t + p, prefix, k)) {
+        p += k;
+        while (p < n && t[p] != ')') p++;
+        if (n - p < 2 || t[p] != ')' || t[p + 1] != ')') return 0;
+        p += 2;
+        while (p < n && (t[p] == ' ' || t[p] == '\t' || t[p] == '\n' ||
+                        t[p] == '\r' || t[p] == '\f' || t[p] == '\v')) p++;
+    }
+    if (n - p < 6 || memcmp(t + p, "static", 6) ||
+        (p + 6 < n && ident_char(t[p + 6]))) return 0;
+    *declarator = p;
+    return 1;
+}
+
 static void scan_bodies(const char *t, size_t n, Body **out, size_t *nout, size_t *cap) {
     size_t i = 0;
     while (i < n) {
         int at_line_start = (i == 0 || t[i-1] == '\n');
-        if (at_line_start && !strncmp(t + i, "static", 6) && (i + 6 >= n || !ident_char(t[i+6]))) {
-            size_t j = i, hend;
+        size_t declarator;
+        if (at_line_start && body_head(t, n, i, &declarator)) {
+            size_t j = declarator, hend;
             while (j < n && t[j] != '{' && t[j] != ';') j++;
             if (j < n && t[j] == '{') {
-                char *name = head_name(t + i, j - i);
+                char *name = head_name(t + declarator, j - declarator);
                 if (name) {
                     size_t k = j, depth = 0;
                     for (;;) {

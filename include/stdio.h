@@ -514,13 +514,15 @@ static FILE *freopen(const char *__u_path, const char *__u_mode, FILE *__u_f) {
    the process's input away from every later read. */
 #if !__UNISA_FTRIM_LIBC || __UN_fclose
 static int fclose(FILE *__u_f) {
-    int __u_i;
+    int __u_i; int __u_flush; int __u_errno; long __u_close;
+    __u_flush = 0; __u_errno = 0;
     if ((long)__u_f >= _UNISA_STDIO_BASE) return 0;
     /* free the stream's state slot: a later fopen that gets the same
        descriptor must not inherit this stream's eof/err/pushback */
     __u_i = _u_st_slot(__u_f);
     if (__u_i >= 0) {
-        _u_st_wflush(__u_i);
+        __u_flush = _u_st_wflush(__u_i);
+        if (__u_flush) __u_errno = errno;
         _u_st_n = _u_st_n - 1;
         _u_st_fd[__u_i] = _u_st_fd[_u_st_n]; _u_st_eof[__u_i] = _u_st_eof[_u_st_n];
         _u_st_err[__u_i] = _u_st_err[_u_st_n]; _u_st_ung[__u_i] = _u_st_ung[_u_st_n];
@@ -528,7 +530,17 @@ static int fclose(FILE *__u_f) {
         _u_st_bpos[__u_i] = _u_st_bpos[_u_st_n]; _u_st_blen[__u_i] = _u_st_blen[_u_st_n];
         _u_st_wlen[__u_i] = _u_st_wlen[_u_st_n]; _u_st_ro[__u_i] = _u_st_ro[_u_st_n];
     }
-    return __close(_unisa_fd(__u_f));
+    /* Release the descriptor even when the buffered output failed. Preserve
+       that first failure after the descriptor gate and state-slot cleanup. */
+    __u_close = __close(_unisa_fd(__u_f));
+    if (__u_flush) { errno = __u_errno; return EOF; }
+#ifdef _WIN32
+    /* CloseHandle returns BOOL, not a POSIX result or negative errno. */
+    if (__u_close == 0) { errno = EIO; return EOF; }
+#else
+    if (__u_close < 0) { errno = (int)(0 - __u_close); return EOF; }
+#endif
+    return 0;
 }
 #endif
 #endif
