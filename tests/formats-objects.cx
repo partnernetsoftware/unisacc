@@ -1,0 +1,131 @@
+/* Installed-product object format and link oracle; not full formats coverage.
+ * ROOT PRODUCT_COM NEW_OUTDIR. PRODUCT_COM must be ROOT/unisacc.com.
+ * Contract: Linux -c -funit ET_REL machine/section bounds (x86_64+arm64);
+ * four non-Linux object targets exact named refuse + no output; two-unit
+ * product link -> ELF ET_EXEC + return7; product digest unchanged.
+ * Outer bound 55; each child <=12s. */
+#pragma unisa use cxlib.netpack
+static char root[4096],work[4096],bound[4200],com[4200];
+static char main_c[4400],value_c[4400],main_o[4400],value_o[4400],arm_o[4400],image[4400];
+static int assertions,failures;
+static void die(const char *s){fprintf(stderr,"formats-objects: REFUSE %s\n",s);exit(2);}
+static void ck(int ok,const char *s){assertions++;if(!ok){failures++;fprintf(stderr,"FAIL\t%s\n",s);}else printf("PASS\t%s\n",s);}
+static void path(char *o,size_t cap,const char *a,const char *b){int n=snprintf(o,cap,"%s/%s",a,b);if(n<0||(size_t)n>=cap)die("path");}
+static void saved(const char *p,const void *s,size_t n){int f=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);size_t at=0;if(f<0)die(p);while(at<n){ssize_t k=write(f,(char *)s+at,n-at);if(k<0&&errno==EINTR)continue;if(k<=0)die("write");at+=(size_t)k;}if(close(f))die("close");}
+static void sha_file(const char *p,char hex[65]){size_t n;char *s=cx_read(p,&n);if(!s)die(p);cx_sha256_hex(s,n,hex);free(s);}
+static np_result runv(char **v,const char *cwd,const char **env,int sec,const char *name){
+ char why[1024],op[4400],ep[4400];np_result r;int z;
+ if(np_run(v,cwd,env,sec,&r,why,sizeof why))die(why);
+ z=snprintf(op,sizeof op,"%s/%s.stdout",work,name);if(z<0||(size_t)z>=sizeof op)die("out");
+ z=snprintf(ep,sizeof ep,"%s/%s.stderr",work,name);if(z<0||(size_t)z>=sizeof ep)die("err");
+ saved(op,r.out,r.outn);saved(ep,r.err,r.errn);return r;}
+static int err_ok(const np_result *r){return !r->errn;}
+static int missing(const char *p){struct stat st;errno=0;if(!lstat(p,&st))return 0;if(errno!=ENOENT)die("stat");return 1;}
+static unsigned long long get(const unsigned char *p,int n){unsigned long long v=0;int i;for(i=n-1;i>=0;i--)v=(v<<8)|p[i];return v;}
+static int span(size_t n,unsigned long long at,unsigned long long len){return at<=n&&len<=n-at;}
+/* Same finite ELF64 ET_REL oracle as tests/objects.cx (symbols+RELA required). */
+static int relocatable(const unsigned char *p,size_t n,int arm){
+ if(n<64||memcmp(p,"\177ELF\2\1\1",7)||get(p+16,2)!=1||get(p+18,2)!=(arm?183:62)||get(p+20,4)!=1||get(p+24,8)||get(p+32,8)||get(p+52,2)!=64||get(p+56,2)||get(p+58,2)!=64)return 0;
+ unsigned long long off=get(p+40,8),count=get(p+60,2),strings=get(p+62,2);
+ if(!count||count>256||strings>=count||!span(n,off,count*64))return 0;
+ const unsigned char *names=p+(size_t)off+(size_t)strings*64;
+ unsigned long long no=get(names+24,8),nn=get(names+32,8);
+ if(get(names+4,4)!=3||!nn||!span(n,no,nn))return 0;
+ int symbols=0,relocations=0;size_t i;
+ for(i=0;i<(size_t)count;i++){
+  const unsigned char *q=p+(size_t)off+i*64;
+  unsigned long long type=get(q+4,4),at=get(q+24,8),len=get(q+32,8),align=get(q+48,8),link=get(q+40,4),info=get(q+44,4),entsize=get(q+56,8),name=get(q,4);
+  if(type!=8&&!span(n,at,len))return 0;
+  if(align&&(align&(align-1)))return 0;
+  if(name>=nn||!memchr(p+(size_t)no+(size_t)name,0,(size_t)(nn-name)))return 0;
+  if(type==2){if(entsize!=24||len%24||link>=count||info>len/24||get(p+(size_t)off+(size_t)link*64+4,4)!=3)return 0;symbols++;}
+  if(type==4){if(entsize!=24||len%24||link>=count||info>=count||get(p+(size_t)off+(size_t)link*64+4,4)!=2)return 0;relocations++;}}
+ return symbols>0&&relocations>0;}
+static int executable(const unsigned char *p,size_t n){
+ if(n<64||memcmp(p,"\177ELF\2\1\1",7)||get(p+16,2)!=2||get(p+18,2)!=62||get(p+52,2)!=64||get(p+54,2)!=56)return 0;
+ unsigned long long off=get(p+32,8),count=get(p+56,2),entry=get(p+24,8);
+ if(!count||count>256||!span(n,off,count*56))return 0;
+ int x=0;size_t i;
+ for(i=0;i<(size_t)count;i++){const unsigned char *q=p+(size_t)off+i*56;if(get(q,4)!=1)continue;
+  unsigned long long at=get(q+8,8),va=get(q+16,8),len=get(q+32,8),mem=get(q+40,8);
+  if(!span(n,at,len)||mem<len)return 0;
+  if((get(q+4,4)&1)&&entry>=va&&entry-va<len)x=1;}
+ return x;}
+static int pref(char **v,int sec){int n=0;v[n++]=bound;v[n++]=sec<=8?"8":"12";v[n++]="sh";v[n++]=com;return n;}
+int main(int argc,char **argv){
+ char before[65],after[65];
+ const char *refuse_msg="unisacc: model driver: object output (-c -b) for this target is not on the product route yet (Linux targets are); the reference compiler writes Mach-O and COFF objects\n";
+ const char *bad_tgts[]={"osx/x86_64","osx/arm64","win/x86_64","win/arm64"};
+ int i;
+ if(argc!=4||!realpath(argv[1],root)||argv[2][0]!='/'||argv[3][0]!='/'||strstr(argv[3],".."))
+  die("usage ROOT PRODUCT_COM ABS_OUT");
+ {char expected[4200];path(expected,sizeof expected,root,"unisacc.com");if(strcmp(argv[2],expected))die("installed-product-required");}
+ if(unsetenv("UNISACC_RR_TIME")||unsetenv("UNISACC_RF_CAPTURE")||unsetenv("UNISA_ATTRIBUTES")||setenv("UNISACC_RUN_CACHE","0",1))die("clean-environment");
+ strcpy(com,argv[2]);strcpy(work,argv[3]);
+ if(mkdir(work,0700))die("mkdir");
+ path(bound,sizeof bound,root,"tools/bound");
+ path(main_c,sizeof main_c,work,"main.c");
+ path(value_c,sizeof value_c,work,"value.c");
+ {const char *s="int object_value(void);int main(void){return object_value();}\n";saved(main_c,s,strlen(s));}
+ {const char *s="int object_value(void){return 7;}\n";saved(value_c,s,strlen(s));}
+ path(main_o,sizeof main_o,work,"main-x86_64.o");
+ path(value_o,sizeof value_o,work,"value-x86_64.o");
+ path(arm_o,sizeof arm_o,work,"value-arm64.o");
+ path(image,sizeof image,work,"linked.elf");
+ sha_file(com,before);
+ /* lnx/x86_64 unit objects */
+ {char *v[24];int n=pref(v,12);
+  v[n++]="-O2";v[n++]="-c";v[n++]="-funit";v[n++]="-b";v[n++]="lnx/x86_64";v[n++]=main_c;v[n++]="-o";v[n++]=main_o;v[n]=0;
+  np_result r=runv(v,root,0,14,"compile-main-x86");
+  ck(!r.rc&&err_ok(&r)&&!r.outn,"object.lnx/x86_64.main.compile");np_free(&r);
+  {size_t n2;unsigned char *p=(unsigned char *)cx_read(main_o,&n2);
+   ck(!!p&&relocatable(p,n2,0),"object.lnx/x86_64.main.ET_REL-bounds");free(p);}}
+ {char *v[24];int n=pref(v,12);
+  v[n++]="-O2";v[n++]="-c";v[n++]="-funit";v[n++]="-b";v[n++]="lnx/x86_64";v[n++]=value_c;v[n++]="-o";v[n++]=value_o;v[n]=0;
+  np_result r=runv(v,root,0,14,"compile-value-x86");
+  ck(!r.rc&&err_ok(&r)&&!r.outn,"object.lnx/x86_64.value.compile");np_free(&r);
+  {size_t n2;unsigned char *p=(unsigned char *)cx_read(value_o,&n2);
+   ck(!!p&&relocatable(p,n2,0),"object.lnx/x86_64.value.ET_REL-bounds");free(p);}}
+ /* lnx/arm64 unit object (format only; native NOT_RUN) */
+ {char *v[24];int n=pref(v,12);
+  v[n++]="-O2";v[n++]="-c";v[n++]="-funit";v[n++]="-b";v[n++]="lnx/arm64";v[n++]=value_c;v[n++]="-o";v[n++]=arm_o;v[n]=0;
+  np_result r=runv(v,root,0,14,"compile-value-arm");
+  ck(!r.rc&&err_ok(&r)&&!r.outn,"object.lnx/arm64.value.compile");np_free(&r);
+  {size_t n2;unsigned char *p=(unsigned char *)cx_read(arm_o,&n2);
+   ck(!!p&&relocatable(p,n2,1),"object.lnx/arm64.value.ET_REL-bounds");free(p);}
+  puts("NOT_RUN\tnative-host.lnx/arm64\tobject-format-only");}
+ /* four non-Linux object targets: exact refuse, no output */
+ for(i=0;i<4;i++){
+  char outp[4400],label[80],name[40];snprintf(name,sizeof name,"bad-%d.o",i);path(outp,sizeof outp,work,name);
+  char *v[24];int n=pref(v,8);
+  v[n++]="-O2";v[n++]="-c";v[n++]="-funit";v[n++]="-b";v[n++]=(char *)bad_tgts[i];v[n++]=main_c;v[n++]="-o";v[n++]=outp;v[n]=0;
+  np_result r=runv(v,root,0,10,name);
+  snprintf(label,sizeof label,"object.%s.refuse",bad_tgts[i]);
+  ck(r.rc==1&&!r.outn&&r.errn==(int)strlen(refuse_msg)&&!memcmp(r.err,refuse_msg,r.errn),label);
+  snprintf(label,sizeof label,"object.%s.no-output",bad_tgts[i]);
+  ck(missing(outp),label);np_free(&r);}
+ /* product link two x86_64 units -> ET_EXEC + return7 */
+ {char *v[16];int n=pref(v,8);
+  v[n++]=main_o;v[n++]=value_o;v[n++]="-o";v[n++]=image;v[n]=0;
+  np_result r=runv(v,root,0,10,"link-x86");
+  ck(!r.rc&&err_ok(&r)&&!r.outn,"object.link.lnx/x86_64.accept");np_free(&r);
+  {size_t n2;unsigned char *p=(unsigned char *)cx_read(image,&n2);
+   ck(!!p&&executable(p,n2),"object.link.lnx/x86_64.ET_EXEC-bounds");
+   /* object must not be mistaken for image type */
+   ck(!!p&&get(p+16,2)==2,"object.link.distinguishes-ET_EXEC-from-ET_REL");free(p);}
+  if(chmod(image,0700))die("chmod");
+  {char *rv[6];int n2=0;rv[n2++]=bound;rv[n2++]="5";rv[n2++]=image;rv[n2]=0;
+   np_result ran=runv(rv,root,0,8,"link-exec");
+   ck(ran.rc==7&&!ran.outn&&!ran.errn,"object.link.lnx/x86_64.return7");np_free(&ran);}}
+ /* mixed-target link refuse */
+ {char outp[4400];path(outp,sizeof outp,work,"mixed.elf");
+  char *v[16];int n=pref(v,8);
+  v[n++]=main_o;v[n++]=arm_o;v[n++]="-o";v[n++]=outp;v[n]=0;
+  np_result r=runv(v,root,0,10,"link-mixed");
+  ck(r.rc==1&&!r.outn&&r.errn&&strstr(r.err,"different targets"),"object.link.mixed-target.refuse");
+  ck(missing(outp),"object.link.mixed-target.no-output");np_free(&r);}
+ sha_file(com,after);
+ ck(!strcmp(before,after),"candidate-unchanged");
+ puts("NOT_CLAIMED\tMach-O-COFF-unit-objects-foreign-native-full-formats-close");
+ printf("FORMATS_OBJECTS\tassertions=%d\tfailed=%d\tscope=installed-product-linux-objects-and-boundaries-not-full-formats\n",assertions,failures);
+ return failures?1:0;}
