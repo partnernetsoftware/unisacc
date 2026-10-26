@@ -1,0 +1,104 @@
+/* Finite Linux/x86_64-LP64 AF_ALG mechanism gate; caller bound 55 seconds.
+ * No args, material preparation, host algorithm subprocess or result cache.
+ * Bootstrap execution only: this does not qualify a new product/candidate.
+ * Fixed SHA256 gold: empty, abc and one million 'a'. Million-a/abc checked
+ * against OpenSSL's primary test corpus (RFC6234 section 8.5 and others):
+ * https://github.com/openssl/openssl/blob/master/test/recipes/30-test_evp_data/evpmd_sha.txt
+ * Boundary inputs independently cross-check the existing software cx SHA256.
+ * Errors cross the module ABI as negative Linux errno return values; caller
+ * errno must remain unchanged, including rejected calls (not shared storage).
+ * No timing threshold; startup/construction/load/inference phases UNMEASURED.
+ */
+#pragma unisa use cxlib.kernelsha
+static int kt_assertions,kt_failures;
+static const char *kt_empty="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+static const char *kt_abc="ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+static const char *kt_million="cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0";
+
+static void kt_die(const char *s){fprintf(stderr,"kernelsha: %s errno=%d\n",s,errno);exit(2);}
+static void kt_check(int ok,const char *name){
+    kt_assertions++;
+    if(!ok){kt_failures++;fprintf(stderr,"FAIL %s\n",name);}
+}
+static void kt_named(int ok,const char *label,const char *part){
+    char name[160];int n=snprintf(name,sizeof name,"%s.%s",label,part);
+    if(n<0||(size_t)n>=sizeof name)kt_die("check-name-bound");
+    kt_check(ok,name);
+}
+static void kt_hash(const char *label,const void *bytes,size_t n,const char *gold){
+    char output[65];memset(output,'!',sizeof output);
+    errno=16;int rc=ks_sha256_hex(bytes,n,output);int saved=errno;
+    kt_named(rc==0,label,"actual-api-success");
+    kt_named(rc==0&&!memcmp(output,gold,65),label,"exact-64-lowerhex-and-NUL");
+    kt_named(saved==16,label,"success-preserves-caller-errno");
+}
+static int kt_fd_count(void){
+    /* Each scan includes its own one opendir FD, then closes it before return.
+     * Identical scans therefore compare like-for-like, without a live observer
+     * descriptor surrounding any hash call. readdir/close failures cannot pass. */
+    DIR *directory=opendir("/proc/self/fd");if(!directory)kt_die("proc-fd-open");
+    int count=0;
+    for(;;){
+        errno=0;struct dirent *entry=readdir(directory);
+        if(!entry){int saved=errno;int closed=closedir(directory);if(saved||closed)kt_die("proc-fd-read-or-close");return count;}
+        if(!strcmp(entry->d_name,".")||!strcmp(entry->d_name,".."))continue;
+        for(const char *p=entry->d_name;*p;p++)if(*p<'0'||*p>'9'){closedir(directory);kt_die("proc-fd-nonnumeric-entry");}
+        count++;if(count>4096){closedir(directory);kt_die("proc-fd-bound");}
+    }
+}
+
+int main(int argc,char **argv){
+    (void)argv;
+#if !defined(__linux__) || !defined(__x86_64__)
+    fprintf(stderr,"NOT_RUN kernelsha requires Linux/x86_64-LP64 and kernel AF_ALG hash/sha256\n");return 3;
+#else
+    if(argc!=1||sizeof(long)!=8||sizeof(void *)!=8)kt_die("usage: no args; Linux/x86_64-LP64 required");
+    int fd_initial=kt_fd_count();
+    unsigned char *bytes=malloc(1000000);if(!bytes)kt_die("allocation");
+    memset(bytes,'a',1000000);
+    kt_hash("fixed-empty-NULL-valid",0,0,kt_empty);
+    kt_hash("fixed-abc","abc",3,kt_abc);
+    kt_hash("fixed-million-a-four-send-chunks",bytes,1000000,kt_million);
+
+    /* Explicit unsigned arithmetic; binary payload includes NUL and high bits.
+     * This data recipe is independent of the module and kernel SHA algorithm. */
+    for(size_t i=0;i<262145;i++)bytes[i]=(unsigned char)((i*37U+(i>>8)+11U)&255U);
+    const size_t lengths[]={55,56,63,64,65,262143,262144,262145};
+    char multi_gold[65];
+    for(int i=0;i<8;i++){
+        char gold[65],label[80];cx_sha256_hex(bytes,lengths[i],gold);
+        snprintf(label,sizeof label,"software-crosscheck-length-%lu",(unsigned long)lengths[i]);
+        kt_hash(label,bytes,lengths[i],gold);
+        if(lengths[i]==262145)memcpy(multi_gold,gold,65);
+    }
+    char invalid_output[65];memset(invalid_output,'!',sizeof invalid_output);
+    errno=0;int rc=ks_sha256_hex(0,1,invalid_output);int saved=errno;
+    kt_check(rc<0,"invalid-NULL-input-nonzero-length.named-refusal");
+    kt_check(invalid_output[0]==0,"invalid-NULL-input-nonzero-length.empty-output");
+    kt_check(rc==-22,"invalid-NULL-input-nonzero-length.return-negative-EINVAL");
+    kt_check(saved==0,"invalid-NULL-input-nonzero-length.caller-errno-unchanged");
+    errno=0;rc=ks_sha256_hex("abc",3,0);saved=errno;
+    kt_check(rc<0,"invalid-NULL-output.named-refusal");
+    kt_check(rc==-22,"invalid-NULL-output.return-negative-EINVAL");
+    kt_check(saved==0,"invalid-NULL-output.caller-errno-unchanged");
+    /* A NULL output has no writable destination: no empty-output assertion. */
+    kt_hash("recovery-after-invalid-inputs","abc",3,kt_abc);
+
+    for(int round=0;round<4;round++){
+        for(int i=0;i<8;i++){
+            char label[80];snprintf(label,sizeof label,"repeat-round-%d-call-%d",round,i);
+            if(i%3==0)kt_hash(label,0,0,kt_empty);
+            else if(i%3==1)kt_hash(label,"abc",3,kt_abc);
+            else kt_hash(label,bytes,262145,multi_gold);
+        }
+        char label[80];snprintf(label,sizeof label,"repeat-round-%d.no-fd-leak",round);
+        kt_check(kt_fd_count()==fd_initial,label);
+    }
+    free(bytes);
+    kt_check(kt_fd_count()==fd_initial,"whole-gate.no-fd-leak-including-invalid-and-fixed-calls");
+    puts("SCOPE\tLinux/x86_64-LP64;kernel-AF_ALG-hash-sha256;bootstrap-only;not-new-product-qualification");
+    puts("TIMING\tstartup-construction-load-inference-output-validation-cleanup=UNMEASURED;no-performance-threshold");
+    printf("KERNELSHA\tassertions=%d\tfailed=%d\n",kt_assertions,kt_failures);
+    int failed=kt_failures?1:0;if(fflush(stdout)||ferror(stdout))return 2;return failed;
+#endif
+}

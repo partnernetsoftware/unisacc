@@ -733,3 +733,38 @@ No P3/product/generated-kernel source was changed. Neither byte equality with ol
 weights, all18 NN source reconstruction, foreign-host qualification nor atomic
 snapshot/ABA protection is claimed. The19 broad gaps remain open. Internal
 phase and cold/hot timings remain UNMEASURED.
+
+`tests/kernelsha.cx` is a standalone Linux/x86_64-LP64 AF_ALG mechanism gate,
+with no arguments or prepared weights:
+
+```sh
+tools/bound 55 sh ./unisacc.com tests/kernelsha.cx
+tools/bound 55 sh ./unisacc.com -O2 tests/kernelsha.cx
+```
+
+It checks literal SHA256 for empty/abc/one million `a`, software cross-checks
+at55/56/63/64/65 and262143/262144/262145 bytes, invalid NULL arguments,
+explicit negative-errno returns, unchanged caller errno, recovery and repeated
+calls with `/proc/self/fd` counts before/after. The observer directory FD is
+included identically in each count and closed before hashing. AF_ALG or kernel
+hash/sha256 unavailability fails explicitly; there is no software fallback or
+cached outcome. Actual execution in `out/c43-kernelsha-regression-02.log`
+completed within outer55, rc0,144 assertions/0 failures, using module8ad60.
+The original142/2 failure in `out/c43-kernelsha-regression-01.log` remains:
+module-local errno did not propagate to callers. The new ABI returns negative
+Linux errno directly and preserves caller errno.
+
+The old ce019 formal probe separately measured65MiB load51028690ns and
+hash380484652ns with matching fixed SHA. Current8ad60 also passed its own fresh native three-vector probe in
+`out/c43-kernelsha-module-probe-run-02.log`:load55760174ns and hash386130270ns,
+total441890444ns for the same input. The earlier software4501887772ns is only
+a single-point comparison, with no OS-cold or statistical acceleration claim.
+Fresh source observation remains329 (`out/c43-source-after-afalg-01.sha256`).
+These are bootstrap kernel-mechanism observations, not Source329 product/P3-package or `-run` startup-cache evidence.
+Source329 kernel gen13's nine phases and old consumer PC01 prepare/34 copies/
+six routes completed at rc0, including warnparse material verification/copy;
+the original producer timeout remains. PC01 declare01 hit outer55 rc142 in
+input verification before native execution or phases/declare output. Provider
+integration has new identities in progress and PC02 has not been created;
+new prepare/copies/routes/declare/pack/seal/verify and product construction
+remain necessary. The19 broad gaps and original time limits remain unchanged.

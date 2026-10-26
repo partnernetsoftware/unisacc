@@ -1,0 +1,109 @@
+#pragma unisa module kernelsha
+/* Linux/x86_64-LP64 AF_ALG hash/sha256 dependency, no software fallback.
+ * Header layouts: linux/if_alg.h and include/sys/socket.h Linux LP64 branch.
+ * Each invocation creates and closes its own transform and operation sockets;
+ * no global state, digest cache, input cache or test-result cache.
+ * Caller supplies readable immutable input for the call's full duration.
+ * Success: 0 and 64 lowercase hex bytes plus NUL. Failure: negative Linux
+ * errno (-22 invalid arguments, -95 unsupported layout/platform), hex[0]=0
+ * when non-NULL. First failure survives cleanup. Caller errno is unchanged;
+ * module-local errno is not an error ABI. No partial digest is published.
+ */
+static long ks_raw(int call,long a,long b,long c) {
+    long r;
+    do {
+        switch(call) {
+            case 0:r=__syscall6(0,a,b,c,0,0);break;
+            case 41:r=__syscall6(41,a,b,c,0,0);break;
+            case 43:r=__syscall6(43,a,b,c,0,0);break;
+            case 46:r=__syscall6(46,a,b,c,0,0);break;
+            case 49:r=__syscall6(49,a,b,c,0,0);break;
+            default:return -38;
+        }
+    } while(r==-4);
+    return r;
+}
+
+static int ks_cleanup(int operation,int transform,int saved_error) {
+    /* Linux close releases the fd on EINTR; do not retry a reused number. */
+    if(operation>=0) {
+        long r=__syscall6(3,operation,0,0,0,0);
+        if(r<0&&!saved_error) saved_error=(int)-r;
+    }
+    if(transform>=0) {
+        long r=__syscall6(3,transform,0,0,0,0);
+        if(r<0&&!saved_error) saved_error=(int)-r;
+    }
+    return saved_error;
+}
+
+static int ks_implementation(const void *input,size_t length,char hex[65]) {
+#if defined(__linux__) && defined(__x86_64__)
+    struct KsAddress {
+        unsigned short family;unsigned char type[14];
+        unsigned int feature,mask;unsigned char name[64];
+    } address={0};
+    struct KsIovec { void *base;size_t length; } vector={0};
+    struct KsMessage {
+        void *name;unsigned int name_length;
+        struct KsIovec *iov;size_t iov_length;
+        void *control;size_t control_length;int flags;
+    } message={0};
+    if(!hex||(!input&&length)){if(hex)hex[0]=0;return -22;}
+    if(sizeof(long)!=8||sizeof(void *)!=8||sizeof(size_t)!=8||
+       sizeof address!=88||(char *)&address.feature-(char *)&address!=16||
+       (char *)&address.name-(char *)&address!=24||
+       sizeof vector!=16||(char *)&vector.length-(char *)&vector!=8||
+       sizeof message!=56||(char *)&message.iov-(char *)&message!=16||
+       (char *)&message.iov_length-(char *)&message!=24||
+       (char *)&message.control-(char *)&message!=32||
+       (char *)&message.control_length-(char *)&message!=40||
+       (char *)&message.flags-(char *)&message!=48){hex[0]=0;return -95;}
+    address.family=38;memcpy(address.type,"hash",5);memcpy(address.name,"sha256",7);
+    int transform=-1,operation=-1,error=0;
+    long r=ks_raw(41,38,5,0); /* AF_ALG, SOCK_SEQPACKET */
+    if(r<0){hex[0]=0;return (int)r;}
+    transform=(int)r;
+    r=ks_raw(49,transform,(long)&address,88);
+    if(r<0){error=(int)-r;goto ks_done;}
+    r=ks_raw(43,transform,0,0);
+    if(r<0){error=(int)-r;goto ks_done;}
+    operation=(int)r;
+    message.iov=&vector;message.iov_length=1;
+    const unsigned char *bytes=input;
+    size_t offset=0;
+    while(offset<length) {
+        size_t n=length-offset;if(n>262144)n=262144;
+        vector.base=(void *)(bytes+offset);vector.length=n;
+        /* sendmsg nr46 has only three payload arguments, within the gate ABI. */
+        r=ks_raw(46,operation,(long)&message,0xc000); /* MORE | NOSIGNAL */
+        if(r<0){error=(int)-r;goto ks_done;}
+        if(!r||(unsigned long)r>n){error=5;goto ks_done;}
+        offset+=(size_t)r; /* Continue a short write with MORE still set. */
+    }
+    vector.base=0;vector.length=0;
+    r=ks_raw(46,operation,(long)&message,0x4000); /* zero length, no MORE */
+    if(r<0){error=(int)-r;goto ks_done;}
+    if(r){error=5;goto ks_done;}
+    unsigned char digest[32];
+    r=ks_raw(0,operation,(long)digest,32);
+    if(r<0){error=(int)-r;goto ks_done;}
+    /* One digest is one record; never concatenate a second record on short read. */
+    if(r!=32){error=5;goto ks_done;}
+    error=ks_cleanup(operation,transform,0);operation=-1;transform=-1;
+    if(error){hex[0]=0;return -error;}
+    const char *digits="0123456789abcdef";
+    for(int i=0;i<32;i++){hex[2*i]=digits[digest[i]>>4];hex[2*i+1]=digits[digest[i]&15];}
+    hex[64]=0;return 0;
+ks_done:
+    hex[0]=0;return -ks_cleanup(operation,transform,error);
+#else
+    if(hex)hex[0]=0;
+    return -95;
+#endif
+}
+
+/* The public interface item is unconditional for the current module scanner. */
+int ks_sha256_hex(const void *input,size_t length,char hex[65]) {
+    return ks_implementation(input,length,hex);
+}

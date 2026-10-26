@@ -389,3 +389,40 @@ Trusted initial bootstrap, root-assisted initial measurement, unsigned
 receipts, host dependencies and remaining Python-source/construction debts
 must stay explicit; no complete N22, historical process proof, zero-Python
 chain, foreign-host execution or whole-source atomic snapshot is claimed.
+
+The current Source329 material milestone has gen13's nine kernel phases at
+actual rc0, with a fresh context and both blobs. The old `5c7ad479...` consumer's
+PC01 prepare, all34 model copies and six routes completed at actual rc0,
+including fresh two-endpoint verification and copying of warnparse material.
+The original producer's outer142/no-PREPARED outcome remains unchanged.
+PC01 declare01 instead reached outer55 rc142 during full input verification:
+no phases/declare output was created and the native command was not reached.
+Pack, seal and final verification have not run. Provider integration is changing
+the consumer/sourcepackage identities; PC02 has not been created. Freeze and
+compile those identities before new PC02 prepare/34 copies/six routes and
+actual declare/pack/seal/verify, then build the new v2 product. Existing limits
+remain unchanged; these material observations are not complete-package PASS.
+
+`cxlib.kernelsha` provides `ks_sha256_hex(input, length, hex65)`:0 succeeds;
+a negative Linux errno reports failure (`-22` invalid arguments, `-95`
+unsupported platform/layout). Caller errno is unchanged; module-local errno
+is not a cross-module error ABI. Failure clears the first output byte when the
+output pointer is non-NULL. It requires Linux/x86_64-LP64 AF_ALG hash/sha256,
+creates fresh transform/operation sockets for every call, and has no fallback
+or digest/result cache. Each sendmsg update is at most256KiB; socket and message
+layouts are checked, interrupted/short sends handled, and all owned FDs closed.
+
+The old ce019 module's actual formal probe matched empty/abc/65MiB fixed
+SHA256:load51028690ns and memory-hash380484652ns, measured separately.
+The current8ad60 module corrects the explicit error ABI. Its own fresh native
+probe in `out/c43-kernelsha-module-probe-run-02.log` also matched all three
+vectors:load55760174ns plus hash386130270ns (441890444ns total for this input).
+The earlier software4501887772ns is a single-point comparison, not OS-cold or
+statistical acceleration evidence. Fresh source observation still yields329,
+recorded in `out/c43-source-after-afalg-01.sha256`. Its permanent gate
+recorded144 assertions/0 failures within outer55 in
+`out/c43-kernelsha-regression-02.log`; the original142/2 first-run failure is
+retained in `out/c43-kernelsha-regression-01.log`. This establishes a bootstrap
+kernel-crypto mechanism, not new-product/P3 qualification or a measured
+implementation of `-run` compilation reuse. Producer integration and PC02
+still require their own actual execution; the19 broad gaps remain open.
