@@ -44,6 +44,35 @@ static int _ux_errno(void) {                         /* GetLastError -> errno */
 #if !__UNISA_FTRIM_LIBC || __UN__ux_fail
 static int _ux_fail(void) { errno = _ux_errno(); return -1; }
 #endif
+/* The names above are kept only when a baked library key lists them. A disk
+   body that started calling them later is compiled, and the callee is then
+   missing. These macros expand in the caller and use the host channel
+   directly, same mapping as _ux_sym / _ux_call / _ux_errno. */
+#define _ux_load(dst, name) do { \
+    static long __uxk; long __uxa[10]; int __uxi; \
+    __uxi = 0; while (__uxi < 10) { __uxa[__uxi] = 0; __uxi = __uxi + 1; } \
+    if (!__uxk) { __uxa[0] = (long)"kernel32.dll"; __uxk = __hostcall(__hostaddr0(), __uxa); } \
+    __uxa[0] = __uxk; __uxa[1] = (long)(name); (dst) = __hostcall(__hostaddr1(), __uxa); \
+} while (0)
+#define _ux_go(dst, fn, x0, x1, x2, x3) do { \
+    long __uxa[10]; int __uxi; \
+    __uxi = 0; while (__uxi < 10) { __uxa[__uxi] = 0; __uxi = __uxi + 1; } \
+    __uxa[0] = (long)(x0); __uxa[1] = (long)(x1); __uxa[2] = (long)(x2); __uxa[3] = (long)(x3); \
+    (dst) = __hostcall((fn), __uxa); \
+} while (0)
+#define _ux_err(dst) do { \
+    long __uxa[10]; long __uxe; int __uxi; \
+    __uxi = 0; while (__uxi < 10) { __uxa[__uxi] = 0; __uxi = __uxi + 1; } \
+    __uxe = __hostcall(__hostaddr3(), __uxa) & 0xFFFFFFFFL; \
+    if (__uxe == 2 || __uxe == 3) (dst) = ENOENT; \
+    else if (__uxe == 5) (dst) = EACCES; \
+    else if (__uxe == 6) (dst) = EBADF; \
+    else if (__uxe == 80 || __uxe == 183) (dst) = EEXIST; \
+    else if (__uxe == 145) (dst) = ENOTEMPTY; \
+    else if (__uxe == 32) (dst) = EBUSY; \
+    else if (__uxe == 87) (dst) = EINVAL; \
+    else (dst) = EIO; \
+} while (0)
 #if !__UNISA_FTRIM_LIBC || __UN__ux_ft2unix
 static long _ux_ft2unix(const unsigned int *__u_ft) {   /* FILETIME (100 ns since 1601) -> unix seconds */
     long __u_t; __u_t = ((long)__u_ft[1] << 32) | (long)__u_ft[0];

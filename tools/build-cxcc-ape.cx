@@ -1,0 +1,262 @@
+#!/usr/bin/env -S unisacc.com -run
+/* Build six-target APE gcc_cx.com and clang_cx.com.
+   Usage, from the repo root: ./unisacc.com -run tools/build-cxcc-ape.cx
+   Five slices each. win/arm64 runs the win/x86_64 PE.
+   Writes repo-root gcc_cx.com and clang_cx.com (gitignored).
+   Unix slices call the system compiler with fork and execvp.
+   The Windows slice calls it with posix_spawnp. This host does not run that slice.
+*/
+static int exists(const char *p) {
+    FILE *f = fopen(p, "rb");
+    if (!f) return 0;
+    fclose(f);
+    return 1;
+}
+
+static int enter_root(const char *argv0) {
+    char dir[4096];
+    size_t l;
+    char *sl;
+    if (!argv0 || !argv0[0]) return -1;
+    l = strlen(argv0);
+    if (l >= sizeof dir) return -1;
+    memcpy(dir, argv0, l + 1);
+    sl = strrchr(dir, '/');
+    if (!sl) return -1;
+    *sl = 0;
+    if (chdir(dir) != 0) return -1;
+    if (exists("./unisacc.com")) return 0;
+    return chdir("..");
+}
+
+static int emit_slice(const char *src, const char *target, const char *outpath) {
+    char *av[12];
+    char *cap = 0;
+    size_t n = 0;
+    int rc;
+    av[0] = "sh";
+    av[1] = "./unisacc.com";
+    av[2] = (char *)src;
+    av[3] = "-b";
+    av[4] = (char *)target;
+    av[5] = "-o";
+    av[6] = (char *)outpath;
+    av[7] = 0;
+    rc = cx_runv_timeout(av, 45, &cap, &n);
+    if (cap && n && rc != 0) fwrite(cap, 1, n, stderr);
+    free(cap);
+    if (rc != 0 || !exists(outpath)) {
+        fprintf(stderr, "build-cxcc-ape.cx: slice %s %s failed rc=%d\n", src, target, rc);
+        return 1;
+    }
+    return 0;
+}
+
+static int pack_one(const char *tool, const char *out, const char *dir) {
+    char *av[20];
+    char path[5][160];
+    const char *nm[5];
+    char *cap = 0;
+    size_t n = 0;
+    int i, rc, k;
+    nm[0] = "win-x86_64";
+    nm[1] = "lnx-x86_64";
+    nm[2] = "lnx-arm64";
+    nm[3] = "osx-x86_64";
+    nm[4] = "osx-arm64";
+    for (i = 0; i < 5; i++) {
+        k = snprintf(path[i], sizeof path[i], "%s/%s", dir, nm[i]);
+        if (k < 0 || k >= (int)sizeof path[i]) return 1;
+    }
+    av[0] = "sh";
+    av[1] = "./unisacc.com";
+    av[2] = "-run";
+    av[3] = "ujs/product/ape-pack.cx";
+    av[4] = "--";
+    av[5] = "--tool";
+    av[6] = (char *)tool;
+    av[7] = "--product";
+    av[8] = (char *)tool;
+    av[9] = "0.0.0";
+    av[10] = (char *)out;
+    av[11] = path[0];
+    av[12] = path[1];
+    av[13] = path[2];
+    av[14] = path[3];
+    av[15] = path[4];
+    av[16] = 0;
+    rc = cx_runv_timeout(av, 45, &cap, &n);
+    if (cap && n) fwrite(cap, 1, n, stdout);
+    free(cap);
+    if (rc != 0 || !exists(out)) {
+        fprintf(stderr, "build-cxcc-ape.cx: pack %s failed rc=%d\n", tool, rc);
+        return 1;
+    }
+    return 0;
+}
+
+static int is_mz(const char *p) {
+    FILE *f;
+    unsigned char b[2];
+    f = fopen(p, "rb");
+    if (!f) return 0;
+    if (fread(b, 1, 2, f) != 2) { fclose(f); return 0; }
+    fclose(f);
+    return b[0] == 'M' && b[1] == 'Z';
+}
+
+static int has_text(const char *buf, size_t n, const char *s) {
+    size_t m, i;
+    m = strlen(s);
+    if (m == 0 || n < m) return 0;
+    for (i = 0; i + m <= n; i++) if (memcmp(buf + i, s, m) == 0) return 1;
+    return 0;
+}
+
+static int check_shell(const char *path, const char *tool) {
+    char *buf;
+    size_t n = 0;
+    char mark[64];
+    int k;
+    buf = cx_read(path, &n);
+    if (!buf) return 1;
+    k = snprintf(mark, sizeof mark, "%s.com: no slice", tool);
+    if (k < 0 || !has_text(buf, n, mark) || !has_text(buf, n, "Darwinarm64") ||
+        !has_text(buf, n, "Linuxx86_64") || !has_text(buf, n, "Linuxaarch64")) {
+        fprintf(stderr, "build-cxcc-ape.cx: %s shell text missing\n", path);
+        free(buf);
+        return 1;
+    }
+    free(buf);
+    return 0;
+}
+
+static int run_cap(char **av, int secs, char **out, size_t *n, int *rc) {
+    *out = 0;
+    *n = 0;
+    *rc = cx_runv_timeout(av, secs, out, n);
+    return *rc < 0 ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    char *av[12];
+    char *cap = 0;
+    char *ref = 0;
+    size_t n = 0, nr = 0;
+    int rc, i, t;
+    const char *tool[2];
+    const char *src[2];
+    const char *dir[2];
+    const char *out[2];
+    const char *tgt[5];
+    const char *nm[5];
+    char slice[160];
+    (void)argc;
+
+    tool[0] = "gcc_cx"; tool[1] = "clang_cx";
+    src[0] = "tools/gcc_cx.cx"; src[1] = "tools/clang_cx.cx";
+    dir[0] = "/tmp/cxcc-ape-gcc"; dir[1] = "/tmp/cxcc-ape-clang";
+    out[0] = "gcc_cx.com"; out[1] = "clang_cx.com";
+    tgt[0] = "win/x86_64"; tgt[1] = "lnx/x86_64"; tgt[2] = "lnx/arm64";
+    tgt[3] = "osx/x86_64"; tgt[4] = "osx/arm64";
+    nm[0] = "win-x86_64"; nm[1] = "lnx-x86_64"; nm[2] = "lnx-arm64";
+    nm[3] = "osx-x86_64"; nm[4] = "osx-arm64";
+
+    if (enter_root(argv[0]) != 0 && !exists("./unisacc.com")) {
+        fprintf(stderr, "build-cxcc-ape.cx: need repo root\n");
+        return 2;
+    }
+    if (!exists("./unisacc.com") || !exists("ujs/product/ape-pack.cx") ||
+        !exists("tools/cxcc.cx")) {
+        fprintf(stderr, "build-cxcc-ape.cx: missing unisacc.com, ape-pack.cx or cxcc.cx\n");
+        return 2;
+    }
+
+    av[0] = "sh"; av[1] = "-c";
+    av[2] = "mkdir -p /tmp/cxcc-ape-gcc /tmp/cxcc-ape-clang";
+    av[3] = 0;
+    rc = cx_runv_timeout(av, 5, &cap, &n);
+    free(cap); cap = 0; n = 0;
+    if (rc != 0) return 1;
+
+    for (t = 0; t < 2; t++) {
+        for (i = 0; i < 5; i++) {
+            int k = snprintf(slice, sizeof slice, "%s/%s", dir[t], nm[i]);
+            if (k < 0 || k >= (int)sizeof slice) return 1;
+            if (emit_slice(src[t], tgt[i], slice)) return 1;
+        }
+        if (pack_one(tool[t], out[t], dir[t])) return 1;
+        if (!is_mz(out[t]) || check_shell(out[t], tool[t])) {
+            fprintf(stderr, "build-cxcc-ape.cx: %s is not a named APE\n", out[t]);
+            return 1;
+        }
+    }
+
+    av[0] = "sh"; av[1] = "./gcc_cx.com"; av[2] = 0;
+    if (run_cap(av, 20, &cap, &n, &rc) || rc != 2) {
+        fprintf(stderr, "build-cxcc-ape.cx: gcc_cx usage rc=%d\n", rc);
+        free(cap);
+        return 1;
+    }
+    free(cap); cap = 0;
+
+    av[0] = "sh"; av[1] = "./gcc_cx.com";
+    av[2] = "ujs/seed/construct/lex.cx";
+    av[3] = "-o"; av[4] = "/tmp/cxcc-ape-gcc/lex-bin"; av[5] = 0;
+    if (run_cap(av, 45, &cap, &n, &rc) || rc != 0 || !exists("/tmp/cxcc-ape-gcc/lex-bin")) {
+        fprintf(stderr, "build-cxcc-ape.cx: gcc_cx lex compile rc=%d\n", rc);
+        if (cap && n) fwrite(cap, 1, n, stderr);
+        free(cap);
+        return 1;
+    }
+    free(cap); cap = 0;
+
+    av[0] = "/tmp/cxcc-ape-gcc/lex-bin";
+    av[1] = "ujs/tests/corpus/arith.ujs";
+    av[2] = 0;
+    if (run_cap(av, 20, &cap, &n, &rc) || rc != 0 || !cap) {
+        fprintf(stderr, "build-cxcc-ape.cx: gcc lex run rc=%d\n", rc);
+        free(cap);
+        return 1;
+    }
+    av[0] = "sh"; av[1] = "./unisacc.com"; av[2] = "-run";
+    av[3] = "ujs/seed/construct/lex.cx"; av[4] = "--";
+    av[5] = "ujs/tests/corpus/arith.ujs"; av[6] = 0;
+    if (run_cap(av, 45, &ref, &nr, &rc) || rc != 0 || !ref || n != nr || memcmp(cap, ref, n) != 0) {
+        fprintf(stderr, "build-cxcc-ape.cx: arith mismatch gcc %zu ref %zu rc=%d\n", n, nr, rc);
+        free(cap); free(ref);
+        return 1;
+    }
+    free(cap); free(ref); cap = 0; ref = 0;
+
+    av[0] = "sh"; av[1] = "./gcc_cx.com";
+    av[2] = "tests/streams.cx";
+    av[3] = "-o"; av[4] = "/tmp/cxcc-ape-gcc/streams-bin"; av[5] = 0;
+    if (run_cap(av, 20, &cap, &n, &rc) || rc != 2) {
+        fprintf(stderr, "build-cxcc-ape.cx: streams refuse rc=%d\n", rc);
+        free(cap);
+        return 1;
+    }
+    free(cap); cap = 0;
+
+    av[0] = "sh"; av[1] = "./clang_cx.com";
+    av[2] = "ujs/seed/construct/lex.cx";
+    av[3] = "-o"; av[4] = "/tmp/cxcc-ape-clang/lex-bin"; av[5] = 0;
+    if (run_cap(av, 45, &cap, &n, &rc)) {
+        free(cap);
+        return 1;
+    }
+    if (rc == 127) {
+        printf("build-cxcc-ape.cx: clang not on this host (rc 127); OSX slices emitted, not run\n");
+    } else if (rc != 0 || !exists("/tmp/cxcc-ape-clang/lex-bin")) {
+        fprintf(stderr, "build-cxcc-ape.cx: clang_cx lex compile rc=%d\n", rc);
+        if (cap && n) fwrite(cap, 1, n, stderr);
+        free(cap);
+        return 1;
+    } else {
+        printf("build-cxcc-ape.cx: clang compiled lex on this host\n");
+    }
+    free(cap);
+    printf("build-cxcc-ape.cx: ok APE gcc_cx.com clang_cx.com\n");
+    return 0;
+}

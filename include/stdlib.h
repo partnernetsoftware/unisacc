@@ -259,7 +259,9 @@ static long long atoll(const char *__u_s) { return strtoll(__u_s, 0, 10); }
 /* No <fcntl.h> here: an untrimmed tape (the Python front end, --fold) would carry
    every fcntl.h body, and those name host calls Windows lowering refuses.  The
    exclusive-create flags are spelled out instead (O_RDWR|O_CREAT|O_EXCL per OS). */
-#ifndef _WIN32
+#ifdef _WIN32
+#include <sys/_win.h>
+#endif
 #if !__UNISA_FTRIM_LIBC || __UN_mkstemp
 static int mkstemp(char *__u_t) {
     static unsigned long __u_seq;
@@ -273,6 +275,12 @@ static int mkstemp(char *__u_t) {
         __u_v = ((unsigned long)&__u_try >> 4) * 2654435761u + __u_seq * 40503u;
         __u_j = __u_n - 6;
         while (__u_j < __u_n) { __u_t[__u_j] = (char)(97 + __u_v % 26); __u_v = __u_v / 26 + __u_seq * 7; __u_j = __u_j + 1; }
+#ifdef _WIN32
+        /* GENERIC_READ|GENERIC_WRITE, CREATE_NEW. The gate returns -1; errno comes from GetLastError. */
+        __u_r = __open(__u_t, 0xC0000000L, 1);
+        if (__u_r >= 0) return (int)__u_r;
+        { int __u_e; _ux_err(__u_e); errno = __u_e; }
+#else
 #ifdef __APPLE__
         __u_r = __open(__u_t, 0xA02, 384);
 #else
@@ -280,6 +288,7 @@ static int mkstemp(char *__u_t) {
 #endif
         if (__u_r >= 0) return (int)__u_r;
         errno = (int)(0 - __u_r);
+#endif
         if (errno != EEXIST) return 0 - 1;
         __u_try = __u_try + 1;
     }
@@ -289,11 +298,56 @@ static int mkstemp(char *__u_t) {
 /* realpath (POSIX, 0.0.37 C3): open the path and ask the kernel for the name it resolved
    (Apple F_GETPATH; Linux readlink of /proc/self/fd/N), so symlinks, "." and ".." are the
    kernel's answer, not a lexical guess.  The path must exist, as POSIX requires; a file
-   the caller cannot open fails with the open's errno.  NULL resolved: malloc(PATH_MAX). */
+   the caller cannot open fails with the open's errno.  NULL resolved: malloc(PATH_MAX).
+   Windows (2026-10-26, after Cosmopolitan): open the path and ask GetFinalPathNameByHandleA
+   (VOLUME_NAME_DOS), then drop a leading \\?\ or turn \\?\UNC\ into \\. The __open gate
+   cannot pass FILE_FLAG_BACKUP_SEMANTICS, so a directory does not open; that case, and any
+   final-name failure, falls back to GetFileAttributesA plus GetFullPathNameA. The fallback
+   is absolute and does not resolve a symlink. This slice has not been executed on Windows. */
 #ifndef __UNISA_PYFRONT
 #if !__UNISA_FTRIM_LIBC || __UN_realpath
 static char *realpath(const char *__u_p, char *__u_out) {
     char __u_tmp[PATH_MAX]; long __u_fd; long __u_r; long __u_n; long __u_k; char *__u_d;
+#ifdef _WIN32
+    static long __u_attr, __u_full, __u_fin; long __u_a; long __u_h; long __u_off; int __u_e;
+    if (!__u_attr) {
+        _ux_load(__u_attr, "GetFileAttributesA");
+        _ux_load(__u_full, "GetFullPathNameA");
+        _ux_load(__u_fin, "GetFinalPathNameByHandleA");
+    }
+    __u_n = 0;
+    __u_h = __open((char *)__u_p, 0x80000000L, 3);          /* GENERIC_READ, OPEN_EXISTING */
+    if (__u_h >= 0) {
+        /* Length excludes the NUL. Zero, or a size that does not fit, is not a path. */
+        _ux_go(__u_n, __u_fin, __u_h, (long)__u_tmp, PATH_MAX, 0);
+        __u_n = __u_n & 0xFFFFFFFFL;
+        __close(__u_h);
+        if (__u_n == 0 || __u_n >= PATH_MAX) __u_n = 0;
+    }
+    if (__u_n > 0 && __u_n >= 4 && __u_tmp[0] == 92 && __u_tmp[1] == 92 && __u_tmp[2] == 63 && __u_tmp[3] == 92) {
+        __u_off = 4;
+        if (__u_n >= 8 && (__u_tmp[4] == 85 || __u_tmp[4] == 117) && (__u_tmp[5] == 78 || __u_tmp[5] == 110) &&
+            (__u_tmp[6] == 67 || __u_tmp[6] == 99) && __u_tmp[7] == 92) {
+            __u_tmp[0] = 92; __u_tmp[1] = 92; __u_off = 8; __u_k = 2;
+        } else __u_k = 0;
+        __u_a = __u_off;
+        while (__u_a <= __u_n) { __u_tmp[__u_k] = __u_tmp[__u_a]; __u_k = __u_k + 1; __u_a = __u_a + 1; }
+        __u_n = __u_k - 1;
+    }
+    if (__u_n == 0) {
+        _ux_go(__u_a, __u_attr, (long)__u_p, 0, 0, 0);
+        __u_a = __u_a & 0xFFFFFFFFL;
+        if (__u_a == 0xFFFFFFFFL) { _ux_err(__u_e); errno = __u_e; return 0; }
+        _ux_go(__u_n, __u_full, (long)__u_p, PATH_MAX, (long)__u_tmp, 0);
+        __u_n = __u_n & 0xFFFFFFFFL;
+        if (__u_n == 0) { _ux_err(__u_e); errno = __u_e; return 0; }
+        if (__u_n >= PATH_MAX) { errno = ENAMETOOLONG; return 0; }
+    }
+    __u_d = __u_out;
+    if (!__u_d) { __u_d = (char *)malloc(PATH_MAX); if (!__u_d) { errno = ENOMEM; return 0; } }
+    __u_k = 0; while (__u_k <= __u_n) { __u_d[__u_k] = __u_tmp[__u_k]; __u_k = __u_k + 1; }
+    return __u_d;
+#else
 #ifdef __APPLE__
     __u_fd = __open((char *)__u_p, 0, 0);
     if (__u_fd < 0) { errno = (int)(0 - __u_fd); return 0; }
@@ -324,11 +378,16 @@ static char *realpath(const char *__u_p, char *__u_out) {
     if (!__u_d) { __u_d = (char *)malloc(PATH_MAX); if (!__u_d) { errno = ENOMEM; return 0; } }
     __u_k = 0; while (__u_k <= __u_n) { __u_d[__u_k] = __u_tmp[__u_k]; __u_k = __u_k + 1; }
     return __u_d;
+#endif
 }
 #endif
 #endif
-/* mkdtemp (POSIX, 0.0.35 M1): mkstemp's names, but a directory, mode 0700 */
-#ifndef __UNISA_PYFRONT   /* __mkdir has no Windows import; the Python front end folds one tape across targets */
+/* mkdtemp (POSIX, 0.0.35 M1): mkstemp's names, but a directory, mode 0700.
+   Windows (2026-10-26, after Cosmopolitan): CreateDirectoryA, mode ignored.
+   The template must end in XXXXXX. EEXIST retries. Any other error, and a
+   retry limit, put XXXXXX back and return NULL. __mkdir stays on the Unix
+   branch: it has no Windows import, and the Python front end folds one tape. */
+#ifndef __UNISA_PYFRONT
 #if !__UNISA_FTRIM_LIBC || __UN_mkdtemp
 static char *mkdtemp(char *__u_t) {
     static unsigned long __u_seq;
@@ -342,17 +401,33 @@ static char *mkdtemp(char *__u_t) {
         __u_v = ((unsigned long)&__u_try >> 4) * 2654435761u + __u_seq * 40503u + 17;
         __u_j = __u_n - 6;
         while (__u_j < __u_n) { __u_t[__u_j] = (char)(97 + __u_v % 26); __u_v = __u_v / 26 + __u_seq * 7; __u_j = __u_j + 1; }
+#ifdef _WIN32
+        {   static long __u_cd; long __u_ok; int __u_e;
+            if (!__u_cd) _ux_load(__u_cd, "CreateDirectoryA");
+            _ux_go(__u_ok, __u_cd, (long)__u_t, 0, 0, 0);
+            __u_ok = __u_ok & 0xFFFFFFFFL;
+            if (__u_ok) return __u_t;
+            _ux_err(__u_e); errno = __u_e;
+            if (errno != EEXIST) {
+                __u_j = __u_n - 6; while (__u_j < __u_n) { __u_t[__u_j] = 88; __u_j = __u_j + 1; }
+                return 0;
+            }
+        }
+#else
         __u_r = __mkdir(__u_t, 448, 0);
         if (__u_r >= 0) return __u_t;
         errno = (int)(0 - __u_r);
         if (errno != EEXIST) return 0;
+#endif
         __u_try = __u_try + 1;
     }
+#ifdef _WIN32
+    __u_j = __u_n - 6; while (__u_j < __u_n) { __u_t[__u_j] = 88; __u_j = __u_j + 1; }
+#endif
     return 0;
 }
 #endif
 #endif
-#endif /* !_WIN32 */
 /* strtod's slow path (more than 19 digits, or a power of ten past 22) is a
  * guess a few ulp off; these compare the decimal with the halfway points around
  * it in big integers (base 2^32) and step to the correctly rounded double. */

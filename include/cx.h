@@ -1,7 +1,7 @@
 /* cx.h -- 0.0.34 X1: the small toolkit .cx scripts (#!/usr/bin/env unisacc.com -run) need to replace
  * .sh/.py helpers: run a command and take its output, read/write a whole file, sha256, and a command
- * under a time limit.  Plain C99 over the carried libc; POSIX targets (Windows has no fork; the
- * .cx pilot runs on Linux and macOS; on Windows cx_run/cx_run_timeout return -1).  Every body sits alone in its own guard (tests/libneed.sh). */
+ * under a time limit.  Plain C99 over the carried libc.  Windows has no fork, so
+ * cx_run and cx_runv_timeout still return -1 there.  Every body sits alone in its own guard (tests/libneed.sh). */
 #ifndef _UNISA_CX_H
 #define _UNISA_CX_H
 /* Edition 1 (plans/cx-modules.md CX1; `#pragma unisa cx 1` is implied): edition 0's toolkit and headers, plus the
@@ -22,6 +22,10 @@
 #include <sys/wait.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#else
+#include <unistd.h>
+#include <sys/wait.h>
+#include <spawn.h>
 #endif
 
 static char *cx_read(const char *__u_path, size_t *__u_len);
