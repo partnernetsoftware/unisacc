@@ -600,6 +600,8 @@ UNISA_RUNTIME_STATE const char *INCDIR=0;
    prerequisite; no language decision is made here. */
 UNISA_RUNTIME_STATE int FILE_READ_RECORD=0, FILE_READ_COUNT=0;
 UNISA_RUNTIME_STATE char **FILE_READ_PATHS=0;
+UNISA_RUNTIME_STATE int FILE_ABSENT_COUNT=0;
+UNISA_RUNTIME_STATE char **FILE_ABSENT_PATHS=0;
 static void record_file_read(const char *path) {
     if (!FILE_READ_RECORD) return;
     for (int i=0;i<FILE_READ_COUNT;i++) if (!strcmp(FILE_READ_PATHS[i],path)) return;
@@ -607,6 +609,17 @@ static void record_file_read(const char *path) {
     int n=strlen(path)+1;
     FILE_READ_PATHS[FILE_READ_COUNT]=xrealloc(0,n);
     memcpy(FILE_READ_PATHS[FILE_READ_COUNT++],path,n);
+}
+/* When recording for E3 reuse, remember -I probe paths that were absent so a
+   later-created header at the same path invalidates the cache. */
+static void record_file_absent(const char *path) {
+    if (!FILE_READ_RECORD) return;
+    for (int i=0;i<FILE_ABSENT_COUNT;i++) if (!strcmp(FILE_ABSENT_PATHS[i],path)) return;
+    for (int i=0;i<FILE_READ_COUNT;i++) if (!strcmp(FILE_READ_PATHS[i],path)) return;
+    FILE_ABSENT_PATHS=xrealloc(FILE_ABSENT_PATHS,(FILE_ABSENT_COUNT+1)*sizeof(char *));
+    int n=strlen(path)+1;
+    FILE_ABSENT_PATHS[FILE_ABSENT_COUNT]=xrealloc(0,n);
+    memcpy(FILE_ABSENT_PATHS[FILE_ABSENT_COUNT++],path,n);
 }
 
 /* S step 1 strict resource flow (opt-in: --strict-resource-flow --resource-ledger DIR).  The ledger is the only source;
@@ -836,6 +849,7 @@ static int rf_default_fetch(const unsigned char *p,int n,unsigned char **bytes,i
     if ((int)strlen(path)!=(header ? (int)strlen(INCDIR)+1+n-5 : n)) return 0;
     *bytes=readfile(path,len,1);
     if (*bytes) record_file_read(path);
+    else if (header) record_file_absent(path);
     return *bytes ? 2 : 0;
 }
 #ifdef UNISA_RUNTIME_LIBRARY

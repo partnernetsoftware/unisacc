@@ -231,6 +231,7 @@ static int nucache;
 static int par_get(FILE *f, unsigned *v) { unsigned char q[4]; if (fread(q,1,4,f)!=4) return 0; *v=q[0]|q[1]<<8|q[2]<<16|(unsigned)q[3]<<24; return 1; }
 static void par_put(FILE *f, unsigned v) { unsigned char q[4]={v&255,v>>8&255,v>>16&255,v>>24&255}; fwrite(q,1,4,f); }
 #endif
+#include <time.h>
 static int ucache_find(const char *path) { for (int k=0;k<nucache;k++) if (!strcmp(ucache[k].path,path)) return k; return -1; }
 static void ucache_replay(int k) {                /* append unit k's attribute records under ATTR_UNIT */
     if (!ucache[k].nattr) return;
@@ -245,6 +246,7 @@ static void ucache_replay(int k) {                /* append unit k's attribute r
 }
 static char fwd_path[600];
 #include "fwdpaths.h"
+#include "runreuse.h"
 int cxm_rd(char *path, char *buf, int cap) {
     FILE *f=fopen(path,"rb"); if (!f) return -1;
     size_t n=fread(buf,1,(size_t)cap,f); int bad=ferror(f); fclose(f);
@@ -518,6 +520,8 @@ int main(int argc, char **argv) {
         argc = w; argv[argc] = 0;
         if (RF_STRICT && !RF_LOADED) { fprintf(stderr, "unisacc: --strict-resource-flow needs --resource-ledger DIR\n"); return 2; }
     }
+    rr_cli_argc = argc;
+    rr_cli_argv = argv;
     const char *src = 0, *out = 0, *target = 0, *pkg = 0, *deps = 0;
     int mode = 0, level = 0, explicit_image = 0, runit = 0, argstart = argc, force_origin=0, emitbin=0;
     int deponly=0, depphony=0, ndeptargets=0, sawc=0, funit=0, defrun=0;
@@ -733,6 +737,8 @@ int main(int argc, char **argv) {
         if (n<0 || n>=(int)sizeof route) return clierror("target name too long");
     }
     if (!pkg) pkg = getenv("UNISA_CONTAINER");
+    rr_pkg_path = pkg && strcmp(pkg, argv[0]) ? pkg : 0;
+    rr_special_input = !!(host_symbols_path || host_provider_path || nfwd_libs);
     ResourceInput cli[256]; memset(cli,0,sizeof cli);int nimports=0;
     unsigned char process_argc[8],process_argv[8],memory_text[8],memory_data[8],process_dl[4][8];
     char **runargs=0;
@@ -837,6 +843,8 @@ int main(int argc, char **argv) {
         return clierror("tape domain: required tapecheck model is missing");
     }
     Buf in = {0}; int rc=0;
+    int rr_pre_hit = 0;
+    char rr_pre_id[65];
     if (linking) in=linked;
     else if (nsources==1) {
         in.b = source_read(src,&in.n);
@@ -849,6 +857,42 @@ int main(int argc, char **argv) {
         }
     }
     else {
+        /* Before unit NN, try reuse keyed by raw module sources and CLI inputs.
+         * Image (-run/-o): USE34 host ELF. Object/tape (-c/-S): USE33 final artifact. */
+        {
+            int rr_can = rr_eligible(nsources, warnings, tape_input, !!deps, fwd_second, target);
+#ifdef __linux__
+            if (rr_can && (runit || mode == 0 || mode == 2 || mode == 5)) {
+                int hx;
+                if (runit) {
+                    execrun = 1; runit = 0; mode = 0; if (!deponly) deps = 0;
+                    host_context.native = 0; host_context.mode = 0;
+                    for (int j = 5; j < 13; j++) cli[j].n = 0;
+                }
+                if (mode == 0) {
+                    n = snprintf(route, sizeof route, "%s/%s%simage/O%d", target,
+                                 warnings ? "warn/" : "", nsources > 1 ? "multi/" : "", level);
+                    if (n < 0 || n >= (int)sizeof route) return clierror("target name too long");
+                }
+                hx = rr_sources_hex((char **)sources, nsources, rr_pre_id);
+                if (hx && getenv("UNISACC_RR_DEBUG"))
+                    fprintf(stderr, "unisacc: rr early sources_hex failed nsources=%d\n", nsources);
+                if (!hx) {
+                    Buf cached = {0};
+                    int lk;
+                    if (mode == 0)
+                        lk = rr_lookup_host(argv[0], route, target, level, rr_pre_id, &cached);
+                    else
+                        lk = rr_lookup(argv[0], route, target, level, rr_pre_id, &cached);
+                    if (lk < 0) return clierror("reuse: cache read failed");
+                    if (getenv("UNISACC_RR_DEBUG"))
+                        fprintf(stderr, "unisacc: rr early lookup lk=%d mode=%d route=%s\n", lk, mode, route);
+                    if (lk == 1) { in = cached; rr_pre_hit = 1; }
+                }
+            }
+#endif
+            if (rr_pre_hit) goto rr_after_units;
+        }
         if (RF_STRICT || rf_capture_dir()) {   /* SC1 multi-source identity: before the first unit row is recorded */
             const char *uj0=getenv("UNISA_JOBS"); int rfjobs = uj0 ? atoi(uj0) : 8;   /* the parallel unit path is the default (8) */
             if (rfjobs>1) { fprintf(stderr,"unisacc: INTERFACE_ERROR resource-capture-parallel-unsupported UNISA_JOBS=%d (capture and strict multi-source runs need UNISA_JOBS=1)\n", rfjobs); return 2; }
@@ -941,40 +985,162 @@ int main(int argc, char **argv) {
             free(unit.b);
         }
     }
+rr_after_units:
     free(in.at); in.at=0; /* Framing positions are not input to model inference. */
     if (nsources<=1 && (RF_STRICT || rf_capture_dir())) { int g = rf_identity_gate(in.b,in.n,mode,route,"e3"); if (g) return g; }   /* SC1 identity of a single-source run, before any stage */
     if (!rc && tape_input) rc=tape_domain(route,&in,src); /* decoded Tapebin uses the same model */
     if (!rc && !(tape_input && mode==2)) {
         if (fwdwant) {
-            rc = runroute_range(route,NULL,"e3",&in,src);
-            if (!rc) {
-                Buf tape={0}; int fr=fwd_sidecar(&in,&tape);
-                if (fr<0) rc=1;
-                else if (fr==0) { free(in.b); in=tape; rc=tape_domain(route,&in,src); if (!rc) rc=host_compile(route,level ? "e4" : "prune",&in,src,&host_context); }   /* side-car extraction precedes Tape validation */
-                else {
+            /* E3 + post-host reuse. rr_hit: 1=e3, 2=host.
+             * Eligible -run switches to image+forward_exec so USE34 caches a relocatable ELF and
+             * skips the per-process memory NN (~18ms hot). Multi-TU may already be rr_pre_hit. */
+            {
+                int rr_hit = rr_pre_hit ? 2 : 0;
+                char rr_id[65];
+                int rr_can = rr_eligible(nsources, warnings, tape_input, !!deps, fwd_second, target) || rr_pre_hit;
+                struct timespec rr_t0, rr_t1;
+                int rr_time = !!getenv("UNISACC_RR_TIME");
+                if (rr_pre_hit) memcpy(rr_id, rr_pre_id, 65);
 #ifdef __linux__
-                    if (runit && host_dl_slot(1)==0) {
-                        /* Static compiler image: finish as the image route does and exec the result
-                           (forward_exec).  Stages up to e3 are the same models on both routes; the
-                           run's process and loader resources are withdrawn, as an image has none. */
-                        fwd_exec=1; execrun=1; runit=0; mode=0; if (!deponly) deps=0; host_context.native=0;host_context.mode=0;
-                        for (int j=5;j<13;j++) cli[j].n=0;
-                        n=snprintf(route,sizeof route,"%s/%s%simage/O%d",target,warnings ? "warn/" : "",nsources>1 ? "multi/" : "",level);
-                        if (n<0 || n>=(int)sizeof route) return clierror("target name too long");
-                    }
+                if (!rr_pre_hit && rr_can && runit) {
+                    execrun = 1; runit = 0; mode = 0; if (!deponly) deps = 0;
+                    host_context.native = 0; host_context.mode = 0;
+                    for (int j = 5; j < 13; j++) cli[j].n = 0;
+                    n = snprintf(route, sizeof route, "%s/%s%simage/O%d", target,
+                                 warnings ? "warn/" : "", nsources > 1 ? "multi/" : "", level);
+                    if (n < 0 || n >= (int)sizeof route) return clierror("target name too long");
+                }
 #endif
-                    Buf merged={0};
-                    int fast=fwd_ccw ? 0 : fwd_incremental(target,level,&tape,nsources,&merged);
-                    if (fast>0) {
-                        free(in.b); free(tape.b); in=merged;
-                        rc=tape_domain(route,&in,src);
-                        if (!rc) rc=host_compile(route,level ? "e4" : "prune",&in,src,&host_context);
-                    } else if (fast<0) { free(tape.b); rc=1; }
-                    else { free(tape.b); fwd_restart=1; }
+                if (rr_time) clock_gettime(CLOCK_MONOTONIC, &rr_t0);
+                if (!rr_pre_hit) {
+                    if (rr_sources_hex((char **)sources, nsources, rr_id))
+                        rr_src_hex(in.b, in.n, rr_id);
+                    if (rr_can) {
+                        Buf cached = {0};
+                        int lk = rr_lookup_host(argv[0], route, target, level, rr_id, &cached);
+                        if (lk < 0) rc = clierror("host reuse: cache read failed");
+                        else if (lk == 1) { free(in.b); in = cached; rr_hit = 2; }
+                        else {
+                            lk = rr_lookup(argv[0], route, target, level, rr_id, &cached);
+                            if (lk < 0) rc = clierror("e3 reuse: cache read failed");
+                            else if (lk == 1) { free(in.b); in = cached; rr_hit = 1; }
+                        }
+                    }
+                }
+                if (rr_time) {
+                    clock_gettime(CLOCK_MONOTONIC, &rr_t1);
+                    fprintf(stderr, "RR_TIME\tlookup_hit=%d\tns=%lld\n", rr_hit,
+                            (long long)(rr_t1.tv_sec - rr_t0.tv_sec) * 1000000000LL +
+                            (rr_t1.tv_nsec - rr_t0.tv_nsec));
+                }
+                if (!rc && rr_hit < 2) {
+                    if (!rr_hit) {
+                        int rr_rec = 0, rr_old_rec = FILE_READ_RECORD, rr_old_n = FILE_READ_COUNT, rr_old_ab = FILE_ABSENT_COUNT;
+                        char **rr_old_p = FILE_READ_PATHS, **rr_old_a = FILE_ABSENT_PATHS;
+                        if (rr_can && !deps) {
+                            FILE_READ_RECORD = 1; FILE_READ_COUNT = 0; FILE_READ_PATHS = 0;
+                            FILE_ABSENT_COUNT = 0; FILE_ABSENT_PATHS = 0; rr_rec = 1;
+                        }
+                        rc = runroute_range(route,NULL,"e3",&in,src);
+                        if (!rc && rr_can)
+                            (void)rr_store(argv[0], route, target, level, rr_id, &in, &ATTRS,
+                                           FILE_READ_PATHS, FILE_READ_COUNT,
+                                           FILE_ABSENT_PATHS, FILE_ABSENT_COUNT);
+                        if (rr_rec) {
+                            for (int ri = 0; ri < FILE_READ_COUNT; ri++) free(FILE_READ_PATHS[ri]);
+                            free(FILE_READ_PATHS);
+                            for (int ri = 0; ri < FILE_ABSENT_COUNT; ri++) free(FILE_ABSENT_PATHS[ri]);
+                            free(FILE_ABSENT_PATHS);
+                            FILE_READ_RECORD = rr_old_rec; FILE_READ_COUNT = rr_old_n; FILE_READ_PATHS = rr_old_p;
+                            FILE_ABSENT_COUNT = rr_old_ab; FILE_ABSENT_PATHS = rr_old_a;
+                        }
+                    }
+                    if (!rc) {
+                        Buf tape={0}; int fr=fwd_sidecar(&in,&tape);
+                        if (fr<0) rc=1;
+                        else if (fr==0) { free(in.b); in=tape; rc=tape_domain(route,&in,src); if (!rc) rc=host_compile(route,level ? "e4" : "prune",&in,src,&host_context); }   /* side-car extraction precedes Tape validation */
+                        else {
+#ifdef __linux__
+                            if (runit && host_dl_slot(1)==0) {
+                                /* Static compiler image: finish as the image route does and exec the result
+                                   (forward_exec).  Stages up to e3 are the same models on both routes; the
+                                   run's process and loader resources are withdrawn, as an image has none. */
+                                fwd_exec=1; execrun=1; runit=0; mode=0; if (!deponly) deps=0; host_context.native=0;host_context.mode=0;
+                                for (int j=5;j<13;j++) cli[j].n=0;
+                                n=snprintf(route,sizeof route,"%s/%s%simage/O%d",target,warnings ? "warn/" : "",nsources>1 ? "multi/" : "",level);
+                                if (n<0 || n>=(int)sizeof route) return clierror("target name too long");
+                            }
+#endif
+                            Buf merged={0};
+                            int fast=fwd_ccw ? 0 : fwd_incremental(target,level,&tape,nsources,&merged);
+                            if (fast>0) {
+                                free(in.b); free(tape.b); in=merged;
+                                rc=tape_domain(route,&in,src);
+                                if (!rc) rc=host_compile(route,level ? "e4" : "prune",&in,src,&host_context);
+                            } else if (fast<0) { free(tape.b); rc=1; }
+                            else { free(tape.b); fwd_restart=1; }
+                        }
+                    }
+                    if (!rc && rr_can && !fwd_restart) {
+                        int hs = rr_store_host(argv[0], route, target, level, rr_id, &in, &ATTRS);
+                        if (hs && getenv("UNISACC_RR_DEBUG"))
+                            fprintf(stderr, "unisacc: host reuse store failed rc=%d tape_n=%d attrs_n=%d\n",
+                                    hs, in.n, ATTRS.n);
+                    }
                 }
             }
-        } else
-        rc = host_compile(route,tape_input ? (level ? "e4" : "prune") : 0,&in,src,&host_context);
+        } else {
+            /* -c/-S (object/tape) final-artifact reuse (USE33 under object|tape route). */
+#ifdef __linux__
+            {
+                int rr_hit = rr_pre_hit ? 1 : 0;
+                char rr_id[65];
+                int rr_can = rr_eligible(nsources, warnings, tape_input, !!deps, fwd_second, target) || rr_pre_hit;
+                memset(rr_id, 0, sizeof rr_id);
+                if (rr_pre_hit) memcpy(rr_id, rr_pre_id, 65);
+                if (!rr_pre_hit && rr_can && (mode == 2 || mode == 5)) {
+                    if (rr_sources_hex((char **)sources, nsources, rr_id))
+                        rr_src_hex(in.b, in.n, rr_id);
+                    {
+                        Buf cached = {0};
+                        int lk = rr_lookup(argv[0], route, target, level, rr_id, &cached);
+                        if (lk < 0) rc = clierror("artifact reuse: cache read failed");
+                        else if (lk == 1) { free(in.b); in = cached; rr_hit = 1; }
+                        if (getenv("UNISACC_RR_TIME"))
+                            fprintf(stderr, "RR_TIME\tartifact_hit=%d\tmode=%d\n", rr_hit, mode);
+                    }
+                }
+                if (!rc && !rr_hit) {
+                    int rr_rec = 0, rr_old_rec = FILE_READ_RECORD, rr_old_n = FILE_READ_COUNT, rr_old_ab = FILE_ABSENT_COUNT;
+                    char **rr_old_p = FILE_READ_PATHS, **rr_old_a = FILE_ABSENT_PATHS;
+                    if (rr_can && (mode == 2 || mode == 5) && !deps) {
+                        FILE_READ_RECORD = 1; FILE_READ_COUNT = 0; FILE_READ_PATHS = 0;
+                        FILE_ABSENT_COUNT = 0; FILE_ABSENT_PATHS = 0; rr_rec = 1;
+                        if (!rr_id[0]) {
+                            if (rr_sources_hex((char **)sources, nsources, rr_id))
+                                rr_src_hex(in.b, in.n, rr_id);
+                        }
+                    }
+                    rc = host_compile(route, tape_input ? (level ? "e4" : "prune") : 0, &in, src, &host_context);
+                    if (!rc && rr_can && (mode == 2 || mode == 5) && rr_id[0]) {
+                        (void)rr_store(argv[0], route, target, level, rr_id, &in, &ATTRS,
+                                       FILE_READ_PATHS, FILE_READ_COUNT,
+                                       FILE_ABSENT_PATHS, FILE_ABSENT_COUNT);
+                    }
+                    if (rr_rec) {
+                        for (int ri = 0; ri < FILE_READ_COUNT; ri++) free(FILE_READ_PATHS[ri]);
+                        free(FILE_READ_PATHS);
+                        for (int ri = 0; ri < FILE_ABSENT_COUNT; ri++) free(FILE_ABSENT_PATHS[ri]);
+                        free(FILE_ABSENT_PATHS);
+                        FILE_READ_RECORD = rr_old_rec; FILE_READ_COUNT = rr_old_n; FILE_READ_PATHS = rr_old_p;
+                        FILE_ABSENT_COUNT = rr_old_ab; FILE_ABSENT_PATHS = rr_old_a;
+                    }
+                }
+            }
+#else
+            rc = host_compile(route,tape_input ? (level ? "e4" : "prune") : 0,&in,src,&host_context);
+#endif
+        }
     }
     if (!rc && fwd_restart) {                    /* compile again with the stubs as the last unit */
         unpackage(); RI=0; NRI=0; ATTR_SLOT=-1;
@@ -986,6 +1152,9 @@ int main(int argc, char **argv) {
     if(!rc&&mode==2&&host_symbols_path){Buf symbols={0};HostRequirements requirements;rc=host_symbol_stream(route,&in,src,&host_context,&symbols,&requirements);if(!rc)rc=rf_trace_finish();if(!rc)rc=host_side_write(host_symbols_path,&symbols);free(symbols.b);}
     MemoryImage plan; MemoryMap mapping;
     if (!rc && runit) {
+        struct timespec mem_t0, mem_t1;
+        int mem_time = !!getenv("UNISACC_RR_TIME");
+        if (mem_time) clock_gettime(CLOCK_MONOTONIC, &mem_t0);
         snprintf(route,sizeof route,"%s/memory",target);
         const char *twopass=getenv("UNISA_MEMORY_TWOPASS");
         if (!twopass || strcmp(twopass,"1")) {
@@ -1011,6 +1180,12 @@ int main(int argc, char **argv) {
             cli[8].name=(const unsigned char *)"\0memory/data";cli[8].n=12;cli[8].data=memory_data;cli[8].len=8;
             rc=runroute(route,&in,src);
         }
+        }
+        if (mem_time) {
+            clock_gettime(CLOCK_MONOTONIC, &mem_t1);
+            fprintf(stderr, "RR_TIME\tmemory_bind\trc=%d\tns=%lld\n", rc,
+                    (long long)(mem_t1.tv_sec - mem_t0.tv_sec) * 1000000000LL +
+                    (mem_t1.tv_nsec - mem_t0.tv_nsec));
         }
     }
     unpackage(); RI=0; NRI=0; ATTR_SLOT=-1;
