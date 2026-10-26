@@ -948,6 +948,14 @@ closed FD in `out/c43-fclose-devfull-host-run-02.log`. Host01's implicit-fileno
 warning remains; only clean02 supplies the reference. Root/record/CC/two
 sources/stdio hashes were unchanged. include/stdio.h remains
 `22ede652a598774465af4d8ecf8cd3195b7fe948a1b9492ab717a39cab179b9e`.
+Permanent `tests/stdio-close.cx` (Linux, `ABS_NEW_OUT`) now records the same
+failure across24 distinct stream descriptor numbers. Default-run under the
+original55-second bound actually returned1,338 assertions/48 failures in
+`out/c43-stdio-close-before-01.log`: only EOF and ENOSPC fail in each round.
+The other290 checks passed, including descriptor release, exact binary regular
+file contents, state-slot reuse and final descriptor count. This is an observed
+red regression, not complete library qualification. The test never accesses a
+FILE after close and missing /dev/full is NOT_RUN solely for ENOENT.
 This specific bug is not fixed; no broad library PASS or deferral to44 is
 claimed. Next:save the passing Source329 checkpoint and old-NN origin capsule,
 then fix fclose in this version, revalidate and construct the new source

@@ -1,0 +1,129 @@
+/* ABS_NEW_OUT; Linux close/flush/stream-slot lifecycle, caller bound55.
+ * Actual FILE operations only. No host compiler, constructed weights, cached
+ * results, fflush/fseek assumptions or accesses to a FILE after fclose.
+ * /dev/full missing solely by ENOENT is NOT_RUN rc3, never PASS. Other I/O
+ * precondition errors are rc2. Retained fixtures belong to a new private dir.
+ * 24 successive full/regular pairs use distinct descriptor numbers by keeping
+ * one raw regular-file guard per round; guards consume no stdio state slots.
+ * At most one test-owned FILE is live. This tests slot reuse beyond8 distinct
+ * descriptors, not support for more than8 simultaneous buffered streams.
+ */
+static int stc_assertions,stc_failures;
+static int stc_guards[24],stc_guard_count;
+static const unsigned char stc_gold[]={0x43,0x00,0x4c,0xff,0x53,0x45,0x0a};
+static void stc_die(const char *reason){
+    int saved=errno;
+    for(int i=0;i<stc_guard_count;i++)close(stc_guards[i]);
+    fprintf(stderr,"stdio-close: PRECONDITION %s errno=%d\n",reason,saved);exit(2);
+}
+static void stc_unavailable(void){
+    for(int i=0;i<stc_guard_count;i++)close(stc_guards[i]);
+    fputs("NOT_RUN stdio-close /dev/full absent (ENOENT); contract unverifiable\n",stderr);exit(3);
+}
+static void stc_check(int ok,const char *part,int round){
+    stc_assertions++;if(!ok)stc_failures++;
+    printf("%s\tround=%d\t%s\n",ok?"PASS":"FAIL",round,part);
+}
+static int stc_count_fds(void){
+    /* The observer's own directory fd is included once in each scan, and
+     * closed before returning. No observer fd surrounds a fclose call. */
+    DIR *d=opendir("/proc/self/fd");if(!d)stc_die("proc-fd-open");
+    int n=0;
+    for(;;){errno=0;struct dirent *e=readdir(d);
+        if(!e){int saved=errno;int rc=closedir(d);if(saved||rc)stc_die("proc-fd-read-or-close");return n;}
+        if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;
+        for(const char *p=e->d_name;*p;p++)if(*p<'0'||*p>'9'){closedir(d);stc_die("proc-fd-entry");}
+        if(++n>4096){closedir(d);stc_die("proc-fd-bound");}
+    }
+}
+static int stc_closed(int fd,int *observed_errno){
+    /* Called immediately after fclose, before any operation that could open
+     * a replacement descriptor. The FILE itself is never inspected again. */
+    errno=0;int rc=fcntl(fd,F_GETFD);*observed_errno=errno;
+    int closed=rc==-1&&*observed_errno==EBADF;
+    if(!closed){int saved=errno;close(fd);errno=saved;}
+    return closed;
+}
+static int stc_full(int round){
+    errno=0;FILE *stream=fopen("/dev/full","w");
+    if(!stream){if(errno==ENOENT)stc_unavailable();stc_die("fopen-dev-full");}
+    int fd=fileno(stream);struct stat st;
+    if(fd<3||fstat(fd,&st)||!S_ISCHR(st.st_mode)){fclose(stream);stc_die("private-character-device-descriptor");}
+    char buffer[4096];
+    if(setvbuf(stream,buffer,_IOFBF,sizeof buffer)){fclose(stream);stc_die("full-buffering");}
+    int initial_error=ferror(stream);
+    errno=0;size_t written=fwrite("X",1,1,stream);
+    int write_errno=errno,write_error=ferror(stream);
+    /* Capture the close error before examining the raw fd resets errno. */
+    errno=0;int close_rc=fclose(stream),close_errno=errno;stream=0;
+    int fd_errno;int closed=stc_closed(fd,&fd_errno);
+    stc_check(initial_error==0,"new-devfull-stream-does-not-inherit-error",round);
+    stc_check(written==1&&write_error==0&&write_errno==0,"one-byte-buffered-before-close",round);
+    stc_check(close_rc==EOF,"devfull-close-reports-EOF",round);
+    stc_check(close_errno==ENOSPC,"devfull-close-preserves-flush-ENOSPC",round);
+    stc_check(closed&&fd_errno==EBADF,"devfull-fd-closed-despite-flush-error",round);
+    printf("OBSERVATION\tround=%d\tdevfull_fd=%d\twritten=%lu\twrite_error=%d\twrite_errno=%d\tclose_rc=%d\tclose_errno=%d\tfd_closed=%d\tfd_errno=%d\n",round,fd,(unsigned long)written,write_error,write_errno,close_rc,close_errno,closed,fd_errno);
+    return fd;
+}
+static void stc_regular(const char *path,int round){
+    int reserved=open(path,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);
+    if(reserved<0)stc_die("exclusive-regular-fixture");
+    if(close(reserved))stc_die("reserve-close");
+    FILE *stream=fopen(path,"wb");if(!stream)stc_die("fopen-regular");
+    int fd=fileno(stream);struct stat st;
+    if(fd<3||fstat(fd,&st)||!S_ISREG(st.st_mode)){fclose(stream);stc_die("regular-stream-descriptor");}
+    char buffer[4096];if(setvbuf(stream,buffer,_IOFBF,sizeof buffer)){fclose(stream);stc_die("regular-buffering");}
+    int initial_error=ferror(stream);
+    errno=0;size_t written=fwrite(stc_gold,1,sizeof stc_gold,stream);int write_error=ferror(stream);
+    errno=0;int close_rc=fclose(stream),close_errno=errno;stream=0;
+    int fd_errno;int closed=stc_closed(fd,&fd_errno);
+    stc_check(initial_error==0,"new-regular-stream-does-not-inherit-devfull-error",round);
+    stc_check(written==sizeof stc_gold&&write_error==0,"regular-buffered-binary-write",round);
+    stc_check(close_rc==0,"regular-close-flush-success",round);
+    stc_check(closed&&fd_errno==EBADF,"regular-fd-closed-after-flush",round);
+    /* Independent raw read, not a second FILE and not a recomputed oracle. */
+    int reader=open(path,O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC);if(reader<0)stc_die("raw-content-open");
+    unsigned char actual[sizeof stc_gold];size_t at=0;int read_bad=0;
+    while(at<sizeof actual){ssize_t n=read(reader,actual+at,sizeof actual-at);if(n<0&&errno==EINTR)continue;if(n<=0){read_bad=1;break;}at+=(size_t)n;}
+    unsigned char extra;ssize_t n;do{n=read(reader,&extra,1);}while(n<0&&errno==EINTR);
+    int stat_bad=fstat(reader,&st)||!S_ISREG(st.st_mode)||st.st_size!=(long long)sizeof stc_gold;
+    int close_bad=close(reader);
+    stc_check(!read_bad&&at==sizeof actual&&!memcmp(actual,stc_gold,sizeof actual),"regular-flushed-content-exact-independent-literal",round);
+    stc_check(!stat_bad&&n==0&&!close_bad,"regular-exact-length-EOF-and-reader-closed",round);
+    printf("OBSERVATION\tround=%d\tregular_close_rc=%d\tregular_close_errno=%d\n",round,close_rc,close_errno);
+}
+int main(int argc,char **argv){
+#if !defined(__linux__)
+    fputs("NOT_RUN stdio-close requires Linux /dev/full and /proc/self/fd\n",stderr);return 3;
+#else
+    if(argc!=2||argv[1][0]!='/'||strlen(argv[1])>=4096||strpbrk(argv[1],"\t\r\n"))stc_die("usage ABS_NEW_OUT");
+    struct stat st;errno=0;
+    if(lstat("/dev/full",&st)){if(errno==ENOENT)stc_unavailable();stc_die("dev-full-stat");}
+    if(!S_ISCHR(st.st_mode))stc_die("dev-full-must-be-character-device");
+    int baseline=stc_count_fds();
+    if(mkdir(argv[1],0700))stc_die("exclusive-new-output-directory");
+    char work[4096];if(!realpath(argv[1],work))stc_die("output-realpath");
+    int seen[24];
+    for(int round=0;round<24;round++){
+        int fd=stc_full(round),unique=1;
+        for(int i=0;i<round;i++)if(seen[i]==fd)unique=0;seen[round]=fd;
+        stc_check(unique,"distinct-stream-fd-domain-crosses-eight-state-slots",round);
+        char path[4400];int n=snprintf(path,sizeof path,"%s/round-%02d.bin",work,round);
+        if(n<0||(size_t)n>=sizeof path)stc_die("fixture-path-bound");
+        stc_regular(path,round);
+        stc_check(stc_count_fds()==baseline+stc_guard_count,"no-stream-fd-leak-before-next-guard",round);
+        int guard=open(path,O_RDONLY|O_NOFOLLOW|O_CLOEXEC);if(guard<0)stc_die("raw-descriptor-guard");
+        stc_guards[stc_guard_count++]=guard;
+        stc_check(stc_count_fds()==baseline+stc_guard_count,"only-declared-raw-guards-remain",round);
+    }
+    int cleanup_bad=0;
+    for(int i=0;i<stc_guard_count;i++)if(close(stc_guards[i]))cleanup_bad=1;
+    stc_guard_count=0;
+    stc_check(!cleanup_bad,"all-24-raw-guards-close",24);
+    stc_check(stc_count_fds()==baseline,"whole-gate-no-fd-leak",24);
+    puts("SCOPE\tLinux-fclose-flush-and-descriptor-slot-lifecycle-only;24-distinct-stream-fds;no-post-close-FILE-access;no-fflush-fseek-or-foreign-host-qualification");
+    puts("TIMING\tstartup-loading-output-validation-cold-hot=UNMEASURED;outer55-unchanged");
+    printf("STDIO_CLOSE\tassertions=%d\tfailed=%d\n",stc_assertions,stc_failures);
+    return stc_failures?1:0;
+#endif
+}
