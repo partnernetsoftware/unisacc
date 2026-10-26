@@ -1,0 +1,47 @@
+/* Finite independent E4 input/output oracle on a pinned Linux x86_64 stream. */
+#pragma unisa use cxlib.netpack
+static char root[4096],streams[4096],work[4096],bound[4200],inc[4200],product[4200],binary[4200];
+static char product_before[65],binary_before[65];
+static const char *binary_pin="3afb82eda4a8b2c002e8b45bf34cc50cb66e13e06c9b9767b06a8f14bb2adb4a";
+static int assertions,failed;
+static void die(const char *s){fprintf(stderr,"stream-e4: %s\n",s);exit(2);}
+static void check(int ok,const char *s){assertions++;if(!ok)failed++;printf("%s\t%s\n",ok?"PASS":"FAIL",s);}
+static void path(char *out,size_t cap,const char *dir,const char *leaf){int n=snprintf(out,cap,"%s/%s",dir,leaf);if(n<0||(size_t)n>=cap)die("path");}
+static void save(const char *p,const void *s,size_t n){int f=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);size_t at=0;if(f<0)die("exclusive-create");while(at<n){ssize_t k=write(f,(const char *)s+at,n-at);if(k<0&&errno==EINTR)continue;if(k<=0)die("write");at+=(size_t)k;}if(close(f))die("close");}
+static void digest(const char *p,char hex[65]){size_t n;char *s=cx_read(p,&n);if(!s)die(p);cx_sha256_hex(s,n,hex);free(s);}
+static np_result run(const char *leaf){char src[4200],why[1024],out[4300],err[4300];path(src,sizeof src,work,leaf);
+ char *v[]={bound,"12",binary,src,src,inc,0};const char *env[]={"UNISA_ATTRIBUTES=","UNISA_MAXSTEPS=200000000",0};np_result r;
+ if(np_run(v,root,env,14,&r,why,sizeof why))die(why);
+ int n=snprintf(out,sizeof out,"%s/%s.stdout",work,leaf);if(n<0||(size_t)n>=sizeof out)die("out-path");
+ n=snprintf(err,sizeof err,"%s/%s.stderr",work,leaf);if(n<0||(size_t)n>=sizeof err)die("err-path");
+ save(out,r.out,r.outn);save(err,r.err,r.errn);return r;}
+static void positive(const char *leaf,const char *input,const char *want,const char *label){char p[4200],msg[150];path(p,sizeof p,work,leaf);save(p,input,strlen(input));np_result r=run(leaf);
+ snprintf(msg,sizeof msg,"%s.accept-rc0-empty-stderr",label);check(!r.rc&&!r.errn,msg);
+ snprintf(msg,sizeof msg,"%s.output-exact",label);check(r.outn==strlen(want)&&!memcmp(r.out,want,r.outn),msg);
+ np_free(&r);}
+int main(int argc,char **argv){
+ if(argc!=4){fputs("usage: ROOT STREAM_DIR NEW_OUTDIR\n",stderr);return 2;}
+#if !defined(__linux__) || !defined(__x86_64__)
+ fputs("UNVERIFIED: stream-e4 requires Linux/x86_64\n",stderr);return 77;
+#endif
+ if(!realpath(argv[1],root)||!realpath(argv[2],streams))die("resolve");
+ if(argv[3][0]!='/'||strlen(argv[3])>=sizeof work)die("absolute-new-outdir");strcpy(work,argv[3]);
+ if(mkdir(work,0700))die("new-outdir-must-be-absent");
+ path(bound,sizeof bound,root,"tools/bound");path(inc,sizeof inc,root,"include");
+ path(product,sizeof product,root,"unisacc.com");path(binary,sizeof binary,streams,"unisacc-stream4.com");
+ digest(product,product_before);digest(binary,binary_before);
+ if(strcmp(binary_before,binary_pin))die("material.stream4-identity");check(1,"material.stream4-identity");
+ const char *before="_start:\n  .lea r0, g_value\n  .frame 8\n  store64 [r7+0], r0\n  imm r0, 7\n  load64 r1, [r7+0]\n  .frame -8\n  .st [r1+0], r0, 4\n  ret\n.bss g_value 4\n";
+ const char *after="_start:\n  .lea r1, g_value\n  imm r0, 7\n  .st [r1+0], r0, 4\n  ret\n.bss g_value 4\n";
+ positive("fold.tape",before,after,"stack-address-fold");
+ positive("unrelated.tape","_start:\n  imm r0, 7\n  ret\n","_start:\n  imm r0, 7\n  ret\n","unrelated-identity");
+ positive("opaque.tape","opaque unsupported instruction\n","opaque unsupported instruction\n","unknown-opcode-preserved");
+ positive("crlf.tape","_start:\r\n  ret\r\n","_start:\r\n  ret\r\n","non-lf-preserved");
+ positive("empty.tape","","","empty-identity");
+ np_result r=run("missing.tape");check(r.rc!=0,"missing-input.reject-nonzero-rc");check(!r.outn,"missing-input.reject-empty-stdout");check(r.errn&&strstr(r.err,"cannot open input"),"missing-input.reject-named");np_free(&r);
+ {char src[4200],why[1024];path(src,sizeof src,work,"fold.tape");char *v[]={bound,"12",binary,src,src,inc,0};const char *env[]={"UNISA_ATTRIBUTES=","UNISA_MAXSTEPS=200000000",0};
+  if(np_run(v,root,env,14,&r,why,sizeof why))die(why);check(r.rc==0&&!r.errn&&r.outn==strlen(after)&&!memcmp(r.out,after,r.outn),"replay.fold-output-stable");np_free(&r);}
+ char hex[65];digest(product,hex);check(!strcmp(hex,product_before),"root-product-stable");digest(binary,hex);check(!strcmp(hex,binary_pin),"material.stream4-stable");
+ printf("STREAM_E4\tassertions=%d\tfailed=%d\tscope=independent-finite-e4-io-and-refusal-linux-x86_64\n",assertions,failed);
+ puts("NOT_CLAIMED\tfull-e4-domain-seven-stream-chain-six-host-or-streamseal-shape");return failed?1:0;
+}
