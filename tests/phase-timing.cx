@@ -1,0 +1,199 @@
+/* C43 phase-timing gap (c44 bypass deliverable; mergeable as tests/phase-timing.cx).
+ * ROOT PRODUCT ABS_OUT — PRODUCT is the installed Root APE (e.g. ROOT/unisacc.com).
+ * Linux/x86_64 LP64 only. Outer caller should use tools/bound 55.
+ *
+ * Measures spawn-to-exit wall for one header-free .cx under CACHE=0 (cold) and
+ * with default reuse (hot). Named compiler phases construction/loading/inference
+ * stay UNMEASURED until the product emits phase stamps (no exec/c change here).
+ * "output" is the exact stdout of the user program; its isolated duration is
+ * UNMEASURED (included in e2e). First cold is not an OS-cold claim.
+ */
+#pragma unisa use cxlib.netpack
+static char root[4096], product[4096], work[4096], bound[4400], fixture[4400], selfpath[4096];
+static const char *program = "int main(void){puts(\"PHASE\\tok\");return 0;}\n";
+static const char *want_out = "PHASE\tok\n";
+static int assertions, failures;
+static long long clock_previous;
+static int clock_seen;
+static void die(const char *s) {
+    fprintf(stderr, "phase-timing: REFUSE %s errno=%d\n", s, errno);
+    exit(2);
+}
+static void path(char *p, size_t cap, const char *a, const char *b) {
+    int n = snprintf(p, cap, "%s/%s", a, b);
+    if (n < 0 || (size_t)n >= cap) die("path bound");
+}
+static void ck(int ok, const char *s) {
+    assertions++;
+    if (!ok) failures++;
+    printf("%s\tphase-timing.%s\n", ok ? "PASS" : "FAIL", s);
+}
+static long long now_ns(void) {
+    struct timespec t = {0};
+    long rc = __syscall6(228, 1, (long)&t, 0, 0, 0);
+    if (_unisa_ret(rc) || t.tv_sec < 0 || t.tv_nsec < 0 || t.tv_nsec >= 1000000000L)
+        die("CLOCK_MONOTONIC read or extent");
+    if ((unsigned long long)t.tv_sec > (unsigned long long)(LLONG_MAX - t.tv_nsec) / 1000000000ULL)
+        die("clock integer overflow");
+    long long n = (long long)t.tv_sec * 1000000000LL + t.tv_nsec;
+    if (clock_seen && n < clock_previous) die("CLOCK_MONOTONIC moved backward");
+    clock_seen = 1;
+    clock_previous = n;
+    return n;
+}
+static char *load(const char *p, size_t *n) {
+    struct stat a, b;
+    errno = 0;
+    if (lstat(p, &a)) die("input stat");
+    if (!S_ISREG(a.st_mode) || a.st_size < 0 || a.st_size > 134217728) die("bounded regular input");
+    int fd = open(p, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0 || fstat(fd, &b) || a.st_dev != b.st_dev || a.st_ino != b.st_ino || a.st_size != b.st_size)
+        die("input descriptor");
+    *n = (size_t)a.st_size;
+    char *s = malloc(*n + 1);
+    if (!s) die("allocation");
+    size_t at = 0;
+    while (at < *n) {
+        ssize_t z = read(fd, s + at, *n - at);
+        if (z < 0 && errno == EINTR) continue;
+        if (z <= 0) die("input extent");
+        at += (size_t)z;
+    }
+    char extra;
+    ssize_t z;
+    do {
+        z = read(fd, &extra, 1);
+    } while (z < 0 && errno == EINTR);
+    int bad = fstat(fd, &b) || a.st_dev != b.st_dev || a.st_ino != b.st_ino || a.st_size != b.st_size;
+    int closed = close(fd);
+    if (z || bad || closed) die("input changed");
+    s[*n] = 0;
+    return s;
+}
+static void digest(const char *p, char h[65]) {
+    size_t n;
+    char *s = load(p, &n);
+    cx_sha256_hex(s, n, h);
+    free(s);
+}
+static void save(const char *name, const char *s, size_t n) {
+    char p[4400];
+    path(p, sizeof p, work, name);
+    int fd = open(p, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0) die("exclusive evidence");
+    size_t at = 0;
+    while (at < n) {
+        ssize_t z = write(fd, s + at, n - at);
+        if (z < 0 && errno == EINTR) continue;
+        if (z <= 0) die("evidence write");
+        at += (size_t)z;
+    }
+    if (fsync(fd) || close(fd)) die("evidence close");
+}
+static void transcript(const char *label, const np_result *r, long long duration) {
+    char name[100], status[120];
+    snprintf(name, sizeof name, "%s.stdout", label);
+    save(name, r->out, r->outn);
+    snprintf(name, sizeof name, "%s.stderr", label);
+    save(name, r->err, r->errn);
+    int n = snprintf(status, sizeof status, "rc\t%d\nduration_ns\t%lld\n", r->rc, duration);
+    snprintf(name, sizeof name, "%s.status", label);
+    save(name, status, (size_t)n);
+}
+static void clear_ambient(void) {
+    /* Drop ambient reuse/timing knobs so cold/hot envadd is authoritative.
+     * Missing names are fine (unsetenv returns 0 or ignores). */
+    unsetenv("UNISACC_RF_CAPTURE");
+    unsetenv("UNISA_ATTRIBUTES");
+    unsetenv("UNISACC_RUN_CACHE");
+    unsetenv("UNISACC_E3CACHE");
+    unsetenv("UNISACC_RR_TIME");
+    unsetenv("UNISACC_RR_DEBUG");
+}
+/* One default -run of fixture; env may set UNISACC_RUN_CACHE=0. Child bound 12s. */
+static long long one_run(const char *label, char **env, int expect_reuse_env) {
+    char *v[] = {bound, "12", "sh", product, fixture, "--", 0};
+    char why[1024];
+    np_result r;
+    (void)expect_reuse_env;
+    clear_ambient();
+    long long start = now_ns();
+    int error = np_run(v, root, env, 14, &r, why, sizeof why);
+    long long end = now_ns();
+    if (error) {
+        save("transport.error", why, strlen(why));
+        die(why);
+    }
+    long long dur = end - start;
+    transcript(label, &r, dur);
+    int ok = !r.rc && !r.errn && r.outn == (int)strlen(want_out) && !memcmp(r.out, want_out, r.outn);
+    char name[80];
+    snprintf(name, sizeof name, "%s.exact-output", label);
+    ck(ok, name);
+    if (!ok && r.errn) fwrite(r.err, 1, r.errn, stderr);
+    printf("SAMPLE\t%s\trc=%d\te2e_ns=%lld\toutput=%s\n", label, r.rc, dur, ok ? "MATCH" : "MISMATCH");
+    np_free(&r);
+    return dur;
+}
+int main(int argc, char **argv) {
+#if !defined(__linux__) || !defined(__x86_64__)
+    fputs("NOT_RUN phase-timing requires Linux/x86_64\n", stderr);
+    return 3;
+#endif
+    char parent[4096], base[4096], leaf[4096], prod_hash[65], self_hash[65], after[65];
+    if (argc != 4 || !realpath(argv[1], root) || !realpath(argv[2], product) || argv[3][0] != '/' ||
+        strlen(argv[3]) >= sizeof work || strpbrk(argv[3], "\t\r\n") || !realpath(__FILE__, selfpath))
+        die("usage ROOT PRODUCT ABS_OUT");
+    if (sizeof(long) != 8 || sizeof(void *) != 8 || sizeof(struct timespec) != 16)
+        die("Linux x86_64 LP64 clock layout required");
+    strcpy(parent, argv[3]);
+    char *slash = strrchr(parent, '/');
+    if (!slash || !slash[1] || !strcmp(slash + 1, ".") || !strcmp(slash + 1, "..")) die("new output leaf");
+    strcpy(leaf, slash + 1);
+    if (slash == parent) slash[1] = 0;
+    else *slash = 0;
+    if (!realpath(parent, base)) die("output parent");
+    int z = snprintf(work, sizeof work, "%s%s%s", base, !strcmp(base, "/") ? "" : "/", leaf);
+    if (z < 0 || (size_t)z >= sizeof work || mkdir(work, 0700)) die("new output directory required");
+    path(bound, sizeof bound, root, "tools/bound");
+    path(fixture, sizeof fixture, work, "probe.cx");
+    save("probe.cx", program, strlen(program));
+    digest(product, prod_hash);
+    digest(selfpath, self_hash);
+    printf("IDENTITY\tproduct=%s\tphase_timing_source=%s\n", prod_hash, self_hash);
+    puts("CLOCK\tLinux-clock_gettime-syscall228-CLOCK_MONOTONIC1\tunit=ns\tresolution=UNMEASURED");
+    puts("SCOPE\tspawn-to-exit-e2e-includes-watchdog-compile-bind-run-capture\tnot-OS-cold\tproduct=Root-APE");
+    /* Private e3 cache dir so cold/hot are local to this receipt. */
+    char cache[4400];
+    path(cache, sizeof cache, work, "e3cache");
+    if (mkdir(cache, 0700)) die("e3cache mkdir");
+    char env_cache[4600], env_off[] = "UNISACC_RUN_CACHE=0";
+    if (snprintf(env_cache, sizeof env_cache, "UNISACC_E3CACHE=%s", cache) < 0) die("env");
+    char *env_cold[] = {env_off, env_cache, "UNISACC_TIME_SCALE=1", 0};
+    char *env_hot[] = {env_cache, "UNISACC_TIME_SCALE=1", 0};
+    long long cold_ns = one_run("cold", env_cold, 0);
+    /* Warm reuse then measure hot (second default-cache run). */
+    (void)one_run("warm", env_hot, 1);
+    long long hot_ns = one_run("hot", env_hot, 1);
+    digest(product, after);
+    ck(!strcmp(prod_hash, after), "product-unchanged");
+    digest(selfpath, after);
+    ck(!strcmp(self_hash, after), "phase-timing-source-unchanged");
+    /* Named phase table: only e2e startup wall is measured externally. */
+    printf("PHASE\tstartup\tcold_ns=%lld\thot_ns=%lld\tnote=spawn-to-exit-e2e\n", cold_ns, hot_ns);
+    puts("PHASE\tconstruction\tcold_ns=UNMEASURED\thot_ns=UNMEASURED\tnote=needs-product-phase-stamp");
+    puts("PHASE\tloading\tcold_ns=UNMEASURED\thot_ns=UNMEASURED\tnote=needs-product-phase-stamp");
+    puts("PHASE\tinference\tcold_ns=UNMEASURED\thot_ns=UNMEASURED\tnote=needs-product-phase-stamp");
+    puts("PHASE\toutput\tcold_ns=UNMEASURED\thot_ns=UNMEASURED\tnote=stdout-included-in-startup-e2e");
+    if (!failures && hot_ns > 0 && cold_ns > hot_ns)
+        printf("OBSERVATION\tcold_ns=%lld\thot_ns=%lld\tratio_x100=%lld\tno-speed-threshold\n", cold_ns, hot_ns,
+               (cold_ns * 100) / hot_ns);
+    else if (!failures)
+        printf("OBSERVATION\tcold_ns=%lld\thot_ns=%lld\tratio=UNCOMPARED\tno-speed-threshold\n", cold_ns, hot_ns);
+    else
+        puts("OBSERVATION\tINVALID-functional-or-identity-check-failed");
+    puts("NOT_CLAIMED\tinternal-compiler-phase-attribution-OS-cold-p95-or-multi-TU-run-reuse");
+    printf("PHASE_TIMING\tassertions=%d\tfailed=%d\tscope=external-e2e-startup-cold-hot-five-named-phases\n",
+           assertions, failures);
+    return failures ? 1 : 0;
+}
