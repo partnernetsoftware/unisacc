@@ -1,0 +1,68 @@
+/* Independent finite E3 oracle: hand-built UNITOK1 tokens -> exact tape.
+ * ROOT STREAM_DIR NEW_OUTDIR, Linux/x86_64. No E1 invocation supplies input. */
+#pragma unisa use cxlib.netpack
+static char root[4096],streams[4096],work[4096],bound[4200],product[4200],e3bin[4200];
+static const char *e3_pin="c7dd03ba2ecbc5d6f6325e7c21eab4c05fe62cb3333a77bfaadf6906f19fdec7";
+static const char *tape_pin="4230637b59dc325133adbcc8c0468d5ea401f642952b1719be945680944e6775";
+static char product_before[65],e3_before[65];
+static int assertions,failures;
+static void die(const char *s){fprintf(stderr,"stream-e3: %s errno=%d\n",s,errno);exit(2);}
+static void check(int ok,const char *s){assertions++;if(!ok)failures++;printf("%s\t%s\n",ok?"PASS":"FAIL",s);}
+static void path(char *out,size_t cap,const char *dir,const char *name){int n=snprintf(out,cap,"%s/%s",dir,name);if(n<0||(size_t)n>=cap)die("path-bound");}
+static void save(const char *p,const void *data,size_t n){int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);if(fd<0)die("exclusive-create");size_t at=0;while(at<n){ssize_t z=write(fd,(const char *)data+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0)die("write");at+=(size_t)z;}if(close(fd))die("close");}
+static void digest(const char *p,char h[65]){size_t n;char *s=cx_read(p,&n);if(!s)die("read-identity");cx_sha256_hex(s,n,h);free(s);}
+static void u32(np_buf *b,unsigned x){char v[4];for(int i=0;i<4;i++)v[i]=(char)(x>>(8*i));np_put(b,v,4);}
+static void hand_input(np_buf *b){
+ const char *src="int main(void){return 7;}\n";
+ const char *tok[]={"type=int","id=main","(","type=void",")","{","return","num=7",";","}","eof"};
+ unsigned off[]={0,4,8,9,13,14,15,22,23,24,26};np_buf pp={0};
+ np_put(&pp,"UNIPP1\0",7);u32(&pp,(unsigned)strlen(src));for(int i=0;i<4;i++)u32(&pp,0);np_puts(&pp,src);
+ np_put(b,"UNITOK1\0",8);u32(b,(unsigned)pp.n);np_put(b,pp.p,pp.n);
+ for(int i=0;i<11;i++){np_put(b,"@",1);u32(b,off[i]);np_put(b,"\n",1);np_puts(b,tok[i]);np_put(b,"\n",1);}
+ np_puts(b,"11 tokens\n");free(pp.p);
+}
+static np_result invoke(const char *leaf,const char *input,size_t n){
+ char in[4200],out[4200],err[4200],why[1024];path(in,sizeof in,work,leaf);save(in,input,n);
+ char *v[]={bound,"12",e3bin,in,"hand-token.c","include",0};
+ const char *env[]={"UNISA_ATTRIBUTES=","UNISA_MAXSTEPS=200000000",0};np_result r={0};
+ if(np_run(v,root,env,14,&r,why,sizeof why))die(why);
+ char name[200];snprintf(name,sizeof name,"%s.stdout",leaf);path(out,sizeof out,work,name);save(out,r.out,r.outn);
+ snprintf(name,sizeof name,"%s.stderr",leaf);path(err,sizeof err,work,name);save(err,r.err,r.errn);return r;
+}
+static void reject(const char *name,const char *bytes,size_t n){
+ np_result r=invoke(name,bytes,n);char label[160];
+ snprintf(label,sizeof label,"%s.nonzero-rc",name);check(r.rc!=0,label);
+ snprintf(label,sizeof label,"%s.empty-stdout",name);check(!r.outn,label);
+ snprintf(label,sizeof label,"%s.named-malformed-locations",name);check(r.errn&&strstr(r.err,"malformed token locations"),label);
+ np_free(&r);
+}
+int main(int argc,char **argv){
+ if(argc!=4){fputs("usage: ROOT STREAM_DIR NEW_OUTDIR\n",stderr);return 2;}
+#if !defined(__linux__) || !defined(__x86_64__)
+ fputs("UNVERIFIED: stream-e3 requires Linux/x86_64\n",stderr);return 77;
+#endif
+ if(!realpath(argv[1],root)||!realpath(argv[2],streams))die("resolve");
+ if(argv[3][0]!='/'||strlen(argv[3])>=sizeof work)die("absolute-new-outdir");strcpy(work,argv[3]);
+ if(mkdir(work,0700))die("new-outdir-must-be-absent");
+ path(bound,sizeof bound,root,"tools/bound");path(product,sizeof product,root,"unisacc.com");
+ path(e3bin,sizeof e3bin,streams,"unisacc-stream3.com");
+ digest(product,product_before);digest(e3bin,e3_before);
+ check(!strcmp(e3_before,e3_pin),"material.stream3-identity");if(strcmp(e3_before,e3_pin))die("wrong-material");
+ np_buf b={0};hand_input(&b);check(b.n==195,"hand-frame-length");
+ np_result r=invoke("good.tok",b.p,b.n);char h[65];cx_sha256_hex(r.out,r.outn,h);
+ check(r.rc==0&&!r.errn,"good.accept-empty-stderr");
+ check(r.outn==592&&!strcmp(h,tape_pin),"good.exact-tape-sha256");
+ check(r.outn&&strstr(r.out,"main:\n")&&strstr(r.out,"  imm r0, 7\n")&&strstr(r.out,"__main_ret:\n  .exit r0\n"),"good.tape-control-and-return7");
+ np_result again={0};char in[4200],why[1024];path(in,sizeof in,work,"good.tok");char *v[]={bound,"12",e3bin,in,"hand-token.c","include",0};const char *env[]={"UNISA_ATTRIBUTES=","UNISA_MAXSTEPS=200000000",0};
+ if(np_run(v,root,env,14,&again,why,sizeof why))die(why);
+ check(!again.rc&&!again.errn&&again.outn==r.outn&&!memcmp(again.out,r.out,r.outn),"good.replay-byte-stable");np_free(&again);np_free(&r);
+ reject("empty.tok","",0);
+ char *bad=malloc(b.n);if(!bad)die("allocation");memcpy(bad,b.p,b.n);bad[0]='X';reject("bad-magic.tok",bad,b.n);
+ memcpy(bad,b.p,b.n);bad[8]=54;reject("bad-embedded-length.tok",bad,b.n);
+ free(bad);free(b.p);
+ digest(product,h);check(!strcmp(h,product_before),"root-product-stable");
+ digest(e3bin,h);check(!strcmp(h,e3_pin),"material.stream3-stable");
+ printf("STREAM_E3\tassertions=%d\tfailed=%d\tscope=independent-finite-e3-io-and-malformed-frame-linux-x86_64\n",assertions,failures);
+ puts("NOT_CLAIMED\tfull-e3-gold-table-attributes-resource-input-seven-stream-chain-or-six-host");
+ return failures?1:0;
+}
