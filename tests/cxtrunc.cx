@@ -2,10 +2,11 @@
 /* cxtrunc.cx -- CX4 truncation ratchet of plans/cx-modules.md.
    Counts discarded calls of snprintf, strncpy and memcpy whose length can
    depend on input. Comments and string or character literals do not count.
-   A call is discarded when it is a statement: the previous token is ';',
-   '{', '}', ')', or the keywords else or do. An assignment or a use inside
-   if, while, return or another call is not this class, because the result
-   is kept. snprintf and strncpy count when that bound is sizeof or a
+   A call is discarded when it is a statement. The lookbehind skips
+   whitespace and comments, then accepts ';', '{', '}', ')', a label or
+   case/default colon, or the keywords else or do. An assignment, a ternary
+   colon, or a use inside if, while, return or another call is not this
+   class, because the result is kept. snprintf and strncpy count when that bound is sizeof or a
    decimal literal and, for snprintf, the format can grow with an argument.
    memcpy counts when its length is not that kind of bound. The count only
    goes down. A new .cx with no row is held at 0. This file's own count
@@ -27,6 +28,14 @@ static const char *cxtrunc_note =
     "/* snprintf(buf, sizeof buf, \"%s\", name); strncpy(dst, src, 8); memcpy(dst, src, n); */\n";
 static const char *cxtrunc_lit =
     "const char *s = \"snprintf(buf, sizeof buf, \\\"%s\\\", name);\";\n";
+static const char *cxtrunc_cmt =
+    "void f(void){\n/* note */\nsnprintf(buf, sizeof buf, \"%s\", name);\n}\n";
+static const char *cxtrunc_slash =
+    "void f(void){\n// note\nsnprintf(buf, sizeof buf, \"%s\", name);\n}\n";
+static const char *cxtrunc_label =
+    "void f(void){ lab:\nsnprintf(buf, sizeof buf, \"%s\", name); }\n";
+static const char *cxtrunc_tern =
+    "int g(void){ return cond ? 0 : snprintf(buf, sizeof buf, \"%s\", name); }\n";
 
 typedef struct { char *path; int count; int used; } Row;
 static Row rows[MAXROWS];
@@ -56,16 +65,99 @@ static int word_at(const char *b, size_t n, size_t i, const char *w) {
     return 1;
 }
 
+/* Walk back to the previous token, skipping whitespace and comments.
+   Returns the index just after that token, or 0 when none remains. */
+static size_t skip_back(const char *b, size_t i) {
+    while (i > 0) {
+        while (i > 0 && is_ws((unsigned char)b[i - 1])) i--;
+        if (i >= 2 && b[i - 1] == '/' && b[i - 2] == '*') {
+            size_t k = i - 2;
+            int found = 0;
+            while (k > 0) {
+                if (b[k - 1] == '/' && b[k] == '*') { found = 1; break; }
+                k--;
+            }
+            if (!found) return i;
+            i = k - 1;
+            continue;
+        }
+        if (i > 0) {
+            size_t line = i, p;
+            int mode = 0, has = 0;
+            size_t slash = 0;
+            while (line > 0 && b[line - 1] != '\n') line--;
+            p = line;
+            while (p + 1 < i) {
+                char ch = b[p];
+                if (mode == 3 || mode == 4) {
+                    if (ch == '\\' && p + 1 < i) { p += 2; continue; }
+                    if ((mode == 3 && ch == '"') || (mode == 4 && ch == '\'')) mode = 0;
+                    p++;
+                    continue;
+                }
+                if (ch == '"') { mode = 3; p++; continue; }
+                if (ch == '\'') { mode = 4; p++; continue; }
+                if (ch == '/' && b[p + 1] == '/') { has = 1; slash = p; break; }
+                p++;
+            }
+            if (has) { i = slash; continue; }
+        }
+        return i;
+    }
+    return 0;
+}
+
+/* ':' starts a statement after a label, default, or case. A ternary colon does not. */
+static int colon_is_stmt(const char *b, size_t n, size_t colon) {
+    size_t j, s, k;
+    j = skip_back(b, colon);
+    if (j == 0) return 1;
+    if (b[j - 1] == '\'') {
+        size_t q = j - 1;
+        if (q > 0) q--;
+        while (q > 0 && !(b[q] == '\'' && b[q - 1] != '\\')) q--;
+        j = q;
+    } else if (b[j - 1] >= '0' && b[j - 1] <= '9') {
+        while (j > 0 && ((b[j - 1] >= '0' && b[j - 1] <= '9') || b[j - 1] == 'u' || b[j - 1] == 'U' ||
+                         b[j - 1] == 'l' || b[j - 1] == 'L'))
+            j--;
+        if (j >= 2 && (b[j - 1] == 'x' || b[j - 1] == 'X') && b[j - 2] == '0') j -= 2;
+    }
+    if (j == 0) return 0;
+    if (!is_id((unsigned char)b[j - 1]) && b[j - 1] != '\'') {
+        /* number ended; the keyword before it must be case */
+    }
+    if (is_id((unsigned char)b[j - 1])) {
+        s = j;
+        while (s > 0 && is_id((unsigned char)b[s - 1])) s--;
+        if (word_at(b, n, s, "default")) return 1;
+        k = skip_back(b, s);
+        if (k == 0) return 1;
+        if (b[k - 1] == ';' || b[k - 1] == '{' || b[k - 1] == '}' || b[k - 1] == ':') return 1;
+        if (is_id((unsigned char)b[k - 1])) {
+            size_t t = k;
+            while (t > 0 && is_id((unsigned char)b[t - 1])) t--;
+            if (word_at(b, n, t, "case") || word_at(b, n, t, "else") || word_at(b, n, t, "do")) return 1;
+        }
+        return 0;
+    }
+    k = skip_back(b, j);
+    if (k == 0 || !is_id((unsigned char)b[k - 1])) return 0;
+    s = k;
+    while (s > 0 && is_id((unsigned char)b[s - 1])) s--;
+    return word_at(b, n, s, "case");
+}
+
 /* 1 when the call's value is thrown away. name_at is the first letter. */
-static int discarded(const char *b, size_t name_at) {
-    size_t i = name_at;
-    while (i > 0 && is_ws((unsigned char)b[i - 1])) i--;
+static int discarded(const char *b, size_t n, size_t name_at) {
+    size_t i = skip_back(b, name_at);
     if (i == 0) return 1;
     if (b[i - 1] == ';' || b[i - 1] == '{' || b[i - 1] == '}' || b[i - 1] == ')') return 1;
+    if (b[i - 1] == ':') return colon_is_stmt(b, n, i - 1);
     if (is_id((unsigned char)b[i - 1])) {
         size_t j = i;
         while (j > 0 && is_id((unsigned char)b[j - 1])) j--;
-        if (word_at(b, i, j, "else") || word_at(b, i, j, "do")) return 1;
+        if (word_at(b, n, j, "else") || word_at(b, n, j, "do")) return 1;
     }
     return 0;
 }
@@ -155,7 +247,7 @@ static int call_args(const char *b, size_t n, size_t open, size_t *from, size_t 
 static int truncation_call(const char *b, size_t n, size_t name, size_t name_n, size_t open) {
     size_t from[4], to[4];
     int nargs = 0, kind;
-    if (!discarded(b, name)) return 0;
+    if (!discarded(b, n, name)) return 0;
     if (!call_args(b, n, open, from, to, &nargs)) return 0;
     if (name_is(b + name, name_n, "snprintf")) kind = 1;
     else if (name_is(b + name, name_n, "strncpy")) kind = 2;
@@ -219,7 +311,7 @@ static int count_trunc(const char *b, size_t n) {
 static int self_check(void) {
     size_t n = 0;
     char *self = cx_read("tests/cxtrunc.cx", &n);
-    int bad, kept, note, lit, own;
+    int bad, kept, note, lit, own, cmt, slash, label, tern;
     if (!self) { fprintf(stderr, "cxtrunc: cannot read self\n"); return 0; }
     own = count_trunc(self, n);
     free(self);
@@ -227,9 +319,13 @@ static int self_check(void) {
     kept = count_trunc(cxtrunc_kept, strlen(cxtrunc_kept));
     note = count_trunc(cxtrunc_note, strlen(cxtrunc_note));
     lit = count_trunc(cxtrunc_lit, strlen(cxtrunc_lit));
-    if (own != 0 || bad != 3 || kept != 0 || note != 0 || lit != 0) {
-        fprintf(stderr, "cxtrunc: scanner self-check failed own=%d bad=%d kept=%d note=%d lit=%d\n",
-                own, bad, kept, note, lit);
+    cmt = count_trunc(cxtrunc_cmt, strlen(cxtrunc_cmt));
+    slash = count_trunc(cxtrunc_slash, strlen(cxtrunc_slash));
+    label = count_trunc(cxtrunc_label, strlen(cxtrunc_label));
+    tern = count_trunc(cxtrunc_tern, strlen(cxtrunc_tern));
+    if (own != 0 || bad != 3 || kept != 0 || note != 0 || lit != 0 || cmt != 1 || slash != 1 || label != 1 || tern != 0) {
+        fprintf(stderr, "cxtrunc: scanner self-check failed own=%d bad=%d kept=%d note=%d lit=%d cmt=%d slash=%d label=%d tern=%d\n",
+                own, bad, kept, note, lit, cmt, slash, label, tern);
         return 0;
     }
     return 1;
