@@ -99,11 +99,15 @@ static void die(const char *s){fprintf(stderr,"sourcepackage: REFUSE %s errno=%d
 /* Digest provider is an explicit Linux kernel-crypto dependency. Every actual
  * read buffer is hashed once by the selected algorithm; AF_ALG never supplies
  * a saved file digest or test verdict. Failure has no silent fallback. */
-static const char *digest_provider="sha256-hybrid-v3;bytes>=65536:Linux-AF_ALG/hash/sha256;smaller:cx_sha256_hex;KS-rc0-or-negative-Linux-errno;kernel-crypto-DECLARED";
+/* Material reconstruction preserves the frozen dd6 producer's declaration.
+ * Runtime reports separately name the executing verifier's actual policy;
+ * both providers compute the same SHA256 bytes. No material is rewritten. */
+static const char *material_digest_provider="sha256-hybrid-v3;bytes>=65536:Linux-AF_ALG/hash/sha256;smaller:cx_sha256_hex;KS-rc0-or-negative-Linux-errno;kernel-crypto-DECLARED";
+static const char *digest_provider="sha256-hybrid-v4;bytes>=1024:Linux-AF_ALG/hash/sha256;smaller:cx_sha256_hex;KS-rc0-or-negative-Linux-errno;kernel-crypto-DECLARED";
 static const char *digest_module_pin="8ad60f9004f98b6bd68397668e1c6feabe468bb5be4b5ec9aedc4494aa541e31";
 static void kernel_hash_checked(const void *bytes,size_t n,char h[65],const char *tag){int rc=ks_sha256_hex(bytes,n,h);if(rc){char why[200];snprintf(why,sizeof why,"%s kernelsha-rc=%d",tag,rc);die(why);}}
 static void digest_selfcheck(void){char h[65];kernel_hash_checked("",0,h,"kernel-sha256-empty-selfcheck");if(strcmp(h,"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"))die("kernel-sha256-empty-vector-mismatch");kernel_hash_checked("abc",3,h,"kernel-sha256-abc-selfcheck");if(strcmp(h,"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"))die("kernel-sha256-abc-vector-mismatch");}
-static void hash_bytes(const void *bytes,size_t n,char h[65]){if(n>=65536)kernel_hash_checked(bytes,n,h,"kernel-sha256-buffer-failure");else cx_sha256_hex(bytes,n,h);}
+static void hash_bytes(const void *bytes,size_t n,char h[65]){if(n>=1024)kernel_hash_checked(bytes,n,h,"kernel-sha256-buffer-failure");else cx_sha256_hex(bytes,n,h);}
 static int forbidden_environment(const char *s){const char *keys[]={"SEED_GEN_GENERIC","SEED_GEN_TRACE","UNISACC_SEED_TRACE","UNISACC_RF_CAPTURE","UNISA_ATTRIBUTES"};for(int i=0;i<5;i++){size_t n=strlen(keys[i]);if(!strncmp(s,keys[i],n)&&s[n]=='=')return 1;}return 0;}
 static void clean_environment(void){size_t n=0;for(char **p=environ;*p;p++)n++;if(n>1048576)die("environment-entry-bound");char **next=malloc((n+1)*sizeof *next);if(!next)die("allocation");size_t at=0;for(char **p=environ;*p;p++)if(!forbidden_environment(*p))next[at++]=*p;next[at]=0;char **old=owned_environment;environ=next;owned_environment=next;free(old);for(char **p=environ;*p;p++)if(forbidden_environment(*p))die("environment-policy-not-applied-to-raw-environ");}
 static void path(char *p,const char *a,const char *b){int n=snprintf(p,4400,"%s/%s",a,b);if(n<0||n>=4400)die("path-bound");}
@@ -131,7 +135,7 @@ static SpObservedFile *sp_observe(const char *logical,int want_bytes){const char
 static char *load(const char *p,size_t *n){SpObservedFile *f=sp_observe(p,1);char *copy=malloc(f->n+1);if(!copy)die("allocation");memcpy(copy,f->bytes,f->n+1);*n=f->n;return copy;}
 static void digest(const char *p,char h[65]){SpObservedFile *f=sp_observe(p,0);memcpy(h,f->hash,65);}
 static void row(np_buf *b,const char *k,const char *v){np_puts(b,k);np_puts(b,"\t");np_puts(b,v);np_puts(b,"\n");}
-static void digest_identity(np_buf *b){char p[4400],h[65];path(p,root,"tools/cxlib/kernelsha.cx");digest(p,h);if(strcmp(h,digest_module_pin))die("kernel-sha256-module-identity");row(b,"digest-provider",digest_provider);row(b,"kernelsha-module",h);}
+static void digest_identity(np_buf *b){char p[4400],h[65];path(p,root,"tools/cxlib/kernelsha.cx");digest(p,h);if(strcmp(h,digest_module_pin))die("kernel-sha256-module-identity");row(b,"digest-provider",material_digest_provider);row(b,"kernelsha-module",h);}
 static void equal(const char *p,const np_buf *expected){size_t n;char *s=load(p,&n);int ok=n==expected->n&&!memcmp(s,expected->p,n);free(s);if(!ok)die("receipt-bytes-mismatch");}
 static void optional_digest(const char *artifact,char out[65]){char p[4600];int n=snprintf(p,sizeof p,"%s.build.json",artifact);if(n<0||(size_t)n>=sizeof p)die("metadata-path");struct stat st;errno=0;if(lstat(sp_physical(p),&st)){if(errno!=ENOENT)die("metadata-stat");strcpy(out,"ABSENT");return;}digest(p,out);}
 static void observe_inputs(void){digest(cc,cc_sha);digest(helper,helper_sha);digest(bootstrap,bootstrap_sha);digest(product,product_sha);digest(self,self_sha);digest(netpack,netpack_sha);digest(bound,bound_sha);digest(bound_c,bound_c_sha);digest(ident,ident_sha);char p[4400];path(p,ctx,"cc.version");digest(p,cc_version_sha);}
