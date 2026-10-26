@@ -1,7 +1,8 @@
 # Development and construction support
 
-The working source is Source329; installed P53 was built from S447 and is
-currently a trusted bootstrap, not a newly built Source329 product. Material,
+The working source and installed Root record are now Source329. P53 raw bytes
+were fully reconstructed and locally installed with a new record; the prior
+S447 bootstrap and its original record remain explicitly preserved. Material,
 runtime and product qualifications below retain their named source identities.
 Old PP92/23 and RI/host/source material observations are not transferred merely
 because this checkout now contains the unsigned classic C math repair.
@@ -365,10 +366,12 @@ P7 package-refresh migration and does not invoke archived aggregation gates.
 
 The v1 root build epoch binds ROOT/unisacc.com and the presence/content of its
 .build.json as well as the saved bootstrap. Keep those bytes fixed through
-context, kernel-generation and pack verification. Installing another root
-product or changing its build record invalidates this epoch even when other
-source bytes match; begin new matching material instead of silently relabeling
-old receipts. Saved P53/S447 can bootstrap current Source329 while their
+context, kernel-generation and pack verification. A changed Root/record cannot
+silently satisfy the original epoch, even with equal artifact bytes. Current
+sourcepackage explicitly resolves that original epoch to the saved checkpoint
+only after checking BOTH original raw and record hashes. Installing P53/S329
+does not relabel PkgCTX03's S447/e084 epoch; its original bytes remain available.
+Without that exact provider observation, prepare new matching material. Saved P53/S447 can bootstrap current Source329 while their
 identities remain separate. That use alone does not create a Source329 product.
 
 A precompiled native controller may avoid repeated controller compilation.
@@ -409,10 +412,11 @@ package does not convert its incomplete outer run into success. PC03 material
 is PREPARED/VERIFIED only, with no functional-test conclusion. The independent
 old-SP full-package observation and current PC04 results are recorded below;
 product-v2/installer qualification, a new candidate and same-candidate
-selfhost/function checks remain pending. Root remains
-P53/S447 bootstrap. Source329 candidate A was fully constructed under ctx699
+selfhost03 completed58/0, with further function checks pending. Root is now locally installed P53/S329; the prior S447 bootstrap remains saved. Source329 candidate A was fully constructed under ctx699
 and archived; current candidate B's new-context reconstruction and58/79 gates
-completed, while installation and same-candidate selfhost remain pending.
+completed. Local installation and GEN14 construction are complete; Source329 selfhost
+now completed58/0 in run03 within the unchanged original30-second gate;
+run01 timeout remains historical and the actual fclose bug is NOT_FIXED.
 
 The compiled `tools/source-job-verify.cx`, using the prior frozen SP module a8aebdd,
 actually verified net-warnparse twice in
@@ -466,9 +470,11 @@ The strict new-pin gate's native02 build completed rc0, then original outer55
 execution recorded67/0 in `out/c43-source-job-snapshot-02.log`, with53 files
 per endpoint at approximately0.55/0.52s. Old PC03 and prior67/0 logs remain
 bound to their original identities. All material is only PREPARED/VERIFIED,
-not functional PASS. Root remains P53/S447 bootstrap, while Source329
+not functional PASS. Root is now locally installed P53/S329, while historical Source329
 candidate A was fully constructed and archived. Current new-context candidate
-B construction and58/79 gates completed; installer and selfhost remain.
+B construction and58/79 gates completed, followed by actual local installation;
+current GEN13/14 construction and original30 selfhost03 completed58/0,
+including complete after-validation. The actual fclose bug is NOT_FIXED.
 
 Source329 candidate A was fully reconstructed under GEN13 product context
 `699ccb6169f39f77868f0835cd5dd13b9ee1bd7c773fc938cc968cad19a0b00d`:
@@ -478,8 +484,8 @@ identical to old Root bytes. This is a full source reconstruction observation,
 not a timestamp refresh. Candidate version0.0.43, direct smoke16/0 and
 historical-bootstrap candidate admission58/0 actually completed; see
 `out/c43-source-candidate-13-01.log`. Old rb813/product2872/test0e7 were
-committed as9abe0e86cf. Root remains uninstalled bootstrap with its original
-S447 record, SHA256
+committed as9abe0e86cf. Before B installation, Root retained its original
+S447 bootstrap record, SHA256
 `e0843c0c025f05e728c8584a7fd5db51965345316b65c6316815bd57787dbe45`.
 
 The old installer legacy-header branch checked kernel context/embedded bytes
@@ -515,7 +521,7 @@ original outer55 then actually completed79/0 in
 A5 output clearing, recovery and unchanged-material checks passed. This is an
 invalid-old-BOM probe, not positive legacy qualification or selfhost.
 
-Root still has its original S447/e084 record and is not installed. Installer
+Before positive installation, Root retained its original S447/e084 record. Installer
 e37's native coordinator actually built rc0 in
 `out/c43-candidate-install-runner-build-01.log`. A real installer negative
 control on the old known-P7 schema/BOM returned child rc2 with exact
@@ -523,10 +529,65 @@ model-input-digest path=unisa/ckernel.py. Root's own thin CX caller checked
 that refusal and completed outer rc0 in
 `out/c43-installer-reject-probe-run-01.log`. Complete Root/candidate hashes
 were unchanged; all six candidate metadata/backup/staged paths were absent
-with ENOENT specifically. No installation occurred. This is neither positive
+with ENOENT specifically. No installation occurred in that negative control. This is neither positive
 legacy qualification nor successful installation.
-Next:actual complete admission at both installer endpoints, Root329 record,
-fresh gen14/selfhost58 and same-candidate functional/platform checks. Complete
+Current installation:commit10d2a688a4 contains full-schema rbce7/installer e37/
+schema79 admission. The real installer completed original outer55 rc0 with
+INSTALLED development-only-no-release in
+`out/c43-candidate-13b-install-01.log`. Root is now P53/S329, rather than the
+historical S447 bootstrap-only identity. Its full raw SHA remains
+`53e2cd1f669c92fda2c16dd93a9021cd4db97f05c57ab2d1acf9a835cbac9857`,4911193B:
+identical bytes were actually reconstructed, not timestamp-refreshed.
+Current Root.build.json SHA is
+`21704e50abc28930d9a0792fdb9f895aee49b13cd163dc783451784d3bb73ef5`,
+record.commit is `10d2a688a491d6b4740377cbe46d9eaabec00ce1`, source is329,
+and native SHA is
+`3d75d3557afa43d441a8bdfe6a7cbc992161da90326bfd0d751e9e3d0a115a7b`.
+An independent helper/Root-record check actually completed rc0 in
+`out/c43-installed-329-record-check-01.log`.
+GEN13/bootstrap-before-install.com preserves raw53 and the original e084/S447
+record, identical to the checkpoint originals. PkgCTX03's original Root epoch
+continues through the explicit checkpoint provider's two raw/record hashes;
+its old epoch is not relabeled. Current Source329 fixed-point evidence:RB SHA
+`699b0a2cc5ffb1a791c024aa0b2cb0c21a9e2ffe213e77f69c4535132ceebd92`,
+product coordinator SHA
+`68d55d5548922930d1223445098d7e8418539e6d5d84e1e08ddab85fdbacd15c`.
+GEN13/14 each actually completed five slices/wrap (12 independent original55
+phases), without reconstructing PC04/NN/ASM. Current GEN13 v2 context is
+`1660a13221c0d3034b396af62d4621290ba8bb61deb173128582629595df091d`,
+with saved447/e084 builder. GEN14 context is
+`5cf8787fec970a934c9d50caa2e9ead3116ca19ccdff0d3e9e24d756c080c437`,
+with Root329/21704 builder. Full raw remains P53.
+Actual original30 selfhost completed rc0,58/0 in
+`out/c43-selfhost-source329-03.log`; bash builtin time, including watchdog,
+recorded wall26.414s/user7.701s/sys18.999s. All four SP endpoints physically
+read107 jobs/34 models/1004 files each, with5072600419/5155174425/5069025671/
+5094686385ns elapsed. Eleven after-checks of Root/record/original builders and
+frozen files were OK. Runner source/flags/context profiles are preserved in out/. Assertions, all
+four physical reads, after-validation
+and the original30 bound remain intact; no PASS cache is used.
+Original01 timeout142 (older c275/149 contexts) remains. Run02 only failed to
+find /usr/bin/time (wrapper127), so never started the test; it is neither a
+test failure nor PASS. This is a local native two-generation fixed point, not
+HOST-seed three-stage N22, foreign native qualification or version completion.
+
+Current NOT_FIXED library defect:default-run
+`out/c43-fclose-devfull-probe.cx` actually returned1 in
+`out/c43-fclose-devfull-product-01.log`:buffered fwrite1/ferror0/errno0, then
+incorrect fclose rc0/errno0 despite closed FD (EBADF9). Same-literal host
+system-header reference using /usr/bin/cc (POSIX200809L,O2,implicit-declaration
+errors enabled) built02/ran02 rc0, correctly reporting EOF/-1/ENOSPC28 and
+closed FD in `out/c43-fclose-devfull-host-run-02.log`. Host01's implicit-fileno
+warning remains; only clean02 supplies the reference. Root/record/CC/two
+sources/stdio hashes were unchanged. include/stdio.h remains
+`22ede652a598774465af4d8ecf8cd3195b7fe948a1b9492ab717a39cab179b9e`.
+This specific bug is not fixed; no broad library PASS or deferral to44 is
+claimed. Next:save the passing Source329 checkpoint and old-NN origin capsule,
+then fix fclose in this version, revalidate and construct the new source
+candidate properly. Old329 receipts must not be relabeled fresh. Further
+cache adoption remains design-only;44 startup reuse is unimplemented. Local installation is not complete qualification.
+The19 gaps, foreign hosts, classic18 weight-source construction and-run44
+remain unfinished; signing/publication restrictions are unchanged. Complete
 classic18 source work,19 broad gaps and foreign-host qualification remain open;
 no signing/Draft/Latest/publication or implemented `-run` reuse is claimed.
 
