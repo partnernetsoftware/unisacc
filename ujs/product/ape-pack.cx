@@ -74,6 +74,7 @@ static void sha256hex(const unsigned char *p, long n, char *out16) {
 
 static const char *NAME[4] = {"Linux|x86_64", "Linux|aarch64", "Darwin|x86_64", "Darwin|arm64"};
 static int embedded;   /* --payload: the script exports UNISA_CONTAINER */
+static const char *ape_tool = "ujs"; /* --tool NAME; default keeps the ujs.com shell text */
 static void script(Buf *s, long off[4], long len[4], char key[4][17]) {
     char line[256]; int i;
     s->n = 0;
@@ -86,7 +87,7 @@ static void script(Buf *s, long off[4], long len[4], char key[4][17]) {
         put(s, line, (long)strlen(line));
     }
     {
-        static const char *rest =
+        static const char *rest_ujs =
             "  *) echo \"ujs.com: no slice for $u\" >&2; exit 1;;\n"
             "esac\n"
             "d=\"${XDG_CACHE_HOME:-$HOME/.cache}/ujs\"\n"
@@ -95,7 +96,22 @@ static void script(Buf *s, long off[4], long len[4], char key[4][17]) {
             "if [ ! -x \"$t\" ]; then\n"
             "  tail -c +$o \"$0\" | head -c $n | gzip -dc > \"$t.$$\" && chmod +x \"$t.$$\" && mv -f \"$t.$$\" \"$t\" || { rm -f \"$t.$$\"; exit 1; }\n"
             "fi\n";
-        put(s, rest, (long)strlen(rest));
+        char rest[640];
+        if (!strcmp(ape_tool, "ujs")) put(s, rest_ujs, (long)strlen(rest_ujs));
+        else {
+            int rn = snprintf(rest, sizeof rest,
+                "  *) echo \"%s.com: no slice for $u\" >&2; exit 1;;\n"
+                "esac\n"
+                "d=\"${XDG_CACHE_HOME:-$HOME/.cache}/%s\"\n"
+                "[ -n \"$HOME\" ] && mkdir -p \"$d\" 2>/dev/null || d=\"${TMPDIR:-/tmp}\"\n"
+                "t=\"$d/%s-$k\"\n"
+                "if [ ! -x \"$t\" ]; then\n"
+                "  tail -c +$o \"$0\" | head -c $n | gzip -dc > \"$t.$$\" && chmod +x \"$t.$$\" && mv -f \"$t.$$\" \"$t\" || { rm -f \"$t.$$\"; exit 1; }\n"
+                "fi\n",
+                ape_tool, ape_tool, ape_tool);
+            if (rn < 0 || rn >= (int)sizeof rest) { fprintf(stderr, "ape: tool script too long\n"); exit(1); }
+            put(s, rest, rn);
+        }
         if (embedded) put(s, "UNISA_CONTAINER=\"$0\"; export UNISA_CONTAINER\n", 45);
         put(s, "exec \"$t\" \"$@\"\n", 15);
     }
@@ -233,9 +249,20 @@ int main(int argc, char **argv) {
     while (argc > 1 && argv[1][0] == '-') {
         if (!strcmp(argv[1], "--payload") && argc > 2) { payload = argv[2]; argv += 2; argc -= 2; }
         else if (!strcmp(argv[1], "--product") && argc > 3) { pname = argv[2]; pver = argv[3]; argv += 3; argc -= 3; }
+        else if (!strcmp(argv[1], "--tool") && argc > 2) {
+            const char *t = argv[2]; int k;
+            if (!t[0] || strlen(t) > 16) { fprintf(stderr, "ape: bad --tool\n"); return 2; }
+            for (k = 0; t[k]; k++) {
+                char c = t[k];
+                if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_')) {
+                    fprintf(stderr, "ape: bad --tool\n"); return 2;
+                }
+            }
+            ape_tool = t; argv += 2; argc -= 2;
+        }
         else break;
     }
-    if (argc != 7) { fprintf(stderr, "usage: ape-pack.cx [--payload PKG] [--product NAME VERSION] OUT WIN_X86_64 LNX_X86_64 LNX_ARM64 OSX_X86_64 OSX_ARM64\n"); return 2; }
+    if (argc != 7) { fprintf(stderr, "usage: ape-pack.cx [--payload PKG] [--product NAME VERSION] [--tool NAME] OUT WIN_X86_64 LNX_X86_64 LNX_ARM64 OSX_X86_64 OSX_ARM64\n"); return 2; }
     if (payload) {
         pkg = slurp(payload); embedded = 1;
         if (pkg.n < 4 || (memcmp(pkg.p, "P 1 ", 4) && memcmp(pkg.p, "P 2 ", 4) && memcmp(pkg.p, "P 3 ", 4))) { fprintf(stderr, "ape: embedded payload must be a model package\n"); return 1; }

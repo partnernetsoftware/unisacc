@@ -19,7 +19,7 @@
 ./unisacc.com -run ujs/product/build.cx
 ./unisacc.com -run ujs/product/complete.cx
 
-./ujs/ujs.com --version          # ujs.com 0.0.7（原生）；APE 用 sh ./ujs/ujs.com
+./ujs/ujs.com --version          # ujs.com 0.0.7（六目标 APE；Unix 上 shell 按 uname 选切片）
 ./ujs/ujs.com --help
 ./ujs/ujs.com FILE.ujs           # 默认写出 FILE.wasm
 ./ujs/ujs.com FILE.ujs -o OUT.wasm
