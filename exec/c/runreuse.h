@@ -10,6 +10,9 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
+#if defined(__linux__) && defined(__x86_64__)
+#include <sys/socket.h>
+#endif
 
 enum { RR_VER = 11 }; /* early host for -run/-o; final artifact for -c/-S */
 
@@ -71,6 +74,35 @@ static int rr_dir(char *out, size_t n) {
 #endif
 }
 
+#if defined(__linux__) && defined(__x86_64__)
+static int rr_afalg_hex(const unsigned char *data, size_t n, char hex[65]) {
+    struct { unsigned short family; unsigned char type[14]; unsigned feat, mask; unsigned char name[64]; } addr;
+    int sfd, bfd, i;
+    unsigned char md[32];
+    ssize_t sent, got;
+    memset(&addr, 0, sizeof addr);
+    addr.family = 38; /* Linux AF_ALG */
+    memcpy(addr.type, "hash", 5);
+    memcpy(addr.name, "sha256", 7);
+    sfd = socket(38, 5, 0); /* SOCK_SEQPACKET */
+    if (sfd < 0) return 1;
+    if (bind(sfd, (const struct sockaddr *)&addr, sizeof addr)) { close(sfd); return 1; }
+    bfd = accept(sfd, 0, 0);
+    if (bfd < 0) { close(sfd); return 1; }
+    sent = write(bfd, data, n);
+    if (sent != (ssize_t)n) { close(bfd); close(sfd); return 1; }
+    got = read(bfd, md, 32);
+    close(bfd); close(sfd);
+    if (got != 32) return 1;
+    for (i = 0; i < 32; i++) {
+        hex[2*i] = "0123456789abcdef"[md[i] >> 4];
+        hex[2*i+1] = "0123456789abcdef"[md[i] & 15];
+    }
+    hex[64] = 0;
+    return 0;
+}
+#endif
+
 static int rr_hash_file(const char *path, char hex[65]) {
     FILE *f;
     struct stat st;
@@ -87,7 +119,10 @@ static int rr_hash_file(const char *path, char hex[65]) {
         off += n;
     }
     fclose(f);
-    unisa_sha256_hex(all, off, hex);
+#if defined(__linux__) && defined(__x86_64__)
+    if (off < 65536 || rr_afalg_hex(all, off, hex))
+#endif
+        unisa_sha256_hex(all, off, hex);
     free(all);
     return 0;
 }
