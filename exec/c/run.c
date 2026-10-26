@@ -856,6 +856,9 @@ static int rf_e3_second_identity(const unsigned char *input,int n,int mode,const
     /* Capture: capacity first (same 4096 contract as rf_capture_record), then companion + SC2 row.
      * Refuse before creating e3-identity.tsv so a full pack never leaves a partial companion. */
     if (rf_capture_dir()) {
+#ifdef _WIN32
+        fprintf(stderr,"unisacc: INTERFACE_ERROR capture-unsupported-platform\n"); return 2;
+#else
         char e3path[4096], path[4096], row[1280], hkey[64], sha[65]; int i, rz;
         dir = rf_capture_dir();
         if (rf_cap_full()) {
@@ -882,6 +885,7 @@ static int rf_e3_second_identity(const unsigned char *input,int n,int mode,const
         }
         RF_CAPC++;
         return 0;
+#endif
     }
     if (!RF_STRICT) return 0;
     /* Strict: SC2 next event is e3-identity row; companion file is re-read in full (no fgets). */
