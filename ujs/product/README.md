@@ -1,11 +1,11 @@
 # ujs.com — 产品宿主（host image）
 
-> [`../prd.md`](../prd.md) · [`../plans/v0.0.5.md`](../plans/v0.0.5.md)  
+> [`../prd.md`](../prd.md) · [`../plans/v0.0.6.md`](../plans/v0.0.6.md)  
 > 只用 **`unisacc.com` + `.cx`**。标签 **`host1_package`**。
 
 ## 版本
 
-`ujs.com 0.0.5`（`--version`；APE `--product ujs 0.0.5`）。
+`ujs.com 0.0.6`（`--version`；APE `--product ujs 0.0.6`）。
 
 ## 命令
 
@@ -17,6 +17,7 @@
 ./unisacc.com -run ujs/product/build-six.cx
 ./unisacc.com -run ujs/product/corpus-host.cx
 ./unisacc.com -run ujs/product/run-host.cx
+./unisacc.com -run ujs/product/cli-host.cx
 ./unisacc.com -run ujs/product/verify-host.cx
 ./unisacc.com -run ujs/product/wasm-verify.cx -- FILE.wasm
 ```
@@ -28,7 +29,10 @@
 ./ujs/ujs.com FILE.ujs              # -> FILE.wasm
 ./ujs/ujs.com FILE.ujs -o OUT.wasm
 ./ujs/ujs.com --verify OUT.wasm     # 节／必导出
+./ujs/ujs.com FILE.ujs --run        # 同进程编并跑
+./ujs/ujs.com FILE.ujs -o OUT.wasm --run
 ./ujs/ujs.com --run OUT.wasm        # host1 迷你 VM
+./unisacc.com -run ujs/product/cli-host.cx
 ```
 
 ## 诚实边界

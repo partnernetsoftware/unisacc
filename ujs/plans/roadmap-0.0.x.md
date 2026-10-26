@@ -13,7 +13,7 @@
 | **0.0.3** | ✓ `ujs/` 清空 `.py`／`.c`（迁 archive）；版号 0.0.3；闸绿 | 宣称 construct 已 `.cx` 化；公开 |
 | **0.0.4** | ✓ 验面；套件＋语料在 `ujs/tests/`；版号；闸绿 | 宣称 construct 已迁；训模型；搬回 `.py` |
 | **0.0.5** | ✓ **host1 跑面**（编→验→跑；`--run` + `run-host`） | construct 全迁；Draft；把 C44 `-run` 加速算进 UJS |
-| **0.0.6** | 计划已钉 · 主刀 A 日用一条链（`FILE.ujs --run`）；未实现。见 [`v0.0.6.md`](v0.0.6.md) | construct 真迁；Paper B 改口；公开 |
+| **0.0.6** | ✓ **日用一条链**（`FILE.ujs --run`）。见 [`v0.0.6.md`](v0.0.6.md) | construct 真迁；Paper B 改口；公开 |
 | **0.0.7+** | 另钉 B（`method_construct`）或 C（Paper B §0.1b）；跨机 APE 收据 | 未授权公开 |
 
 ## 退出 0.0.x（暂定）

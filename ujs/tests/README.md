@@ -20,7 +20,7 @@
 | [`host1-refuse.txt`](host1-refuse.txt) | 必须拒绝 → [`neg/`](neg/) |
 | [`host1-run-expect.txt`](host1-run-expect.txt) | 跑面金（28；`tag`＋`value`） |
 
-## 验面（0.0.4）／跑面（0.0.5）
+## 验面（0.0.4）／跑面（0.0.5）／日用一条链（0.0.6）
 
 `ujs.com --verify`／`../product/corpus-host.cx`：对 pass 产物做 `\0asm` 节／必导出检查；冒充实文件必须拒绝。  
 `ujs.com --run`／`../product/run-host.cx`：迷你 VM 执行 `main_export`，对船载跑金。

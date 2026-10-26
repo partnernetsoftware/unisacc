@@ -1,7 +1,7 @@
 # UJS —— 产品规格 v1.3
 
 > **唯一耦合活文档**（规格 · 目标 · 思维树 · 记忆宫殿）。与代码同会话更新。  
-> **版本计划**：[`plans/`](plans/)（`ujs.com` **0.0.5** ✓；[`plans/v0.0.6.md`](plans/v0.0.6.md) 主刀 A 已钉、未实现）  
+> **版本计划**：[`plans/`](plans/)（`ujs.com` **0.0.6** ✓；[`plans/v0.0.6.md`](plans/v0.0.6.md)）  
 > **目录板块**：[`ARCHITECTURE.md`](ARCHITECTURE.md) · 开箱：[`README.md`](README.md) · Host：[`uxe/HOST_ABI.md`](uxe/HOST_ABI.md)  
 > 归档：[`archive/`](archive/)
 
@@ -21,9 +21,9 @@
 | **0.0.3** | ✓ **`ujs/` 无 `.c`／`.py`** | [`plans/v0.0.3.md`](plans/v0.0.3.md) |
 | **0.0.4** | ✓ **host1 wasm 验面** | [`plans/v0.0.4.md`](plans/v0.0.4.md) |
 | **0.0.5** | ✓ **host1 跑面**（`--run`） | [`plans/v0.0.5.md`](plans/v0.0.5.md) |
-| **0.0.6** | 计划已钉 · 主刀 A 日用一条链（未实现） | [`plans/v0.0.6.md`](plans/v0.0.6.md) |
+| **0.0.6** | ✓ **日用一条链**（`FILE.ujs --run`） | [`plans/v0.0.6.md`](plans/v0.0.6.md) |
 
-版号真源：`ujs.com --version`（**`ujs.com 0.0.5`**）。
+版号真源：`ujs.com --version`（**`ujs.com 0.0.6`**）。
 
 **两个名词**：**host image** = APE／六目标／验面／`host1_package`；**method emit** = 表／流→`\0asm`。勿混。
 
@@ -34,7 +34,7 @@
 | | |
 |---|---|
 | **主产物** | **`ujs.com`**——**ujs + wasm 类别的生产力工具**（跨架构单文件 `.com`；编／装／跑／自举收进同一壳） |
-| **状态** | **0.0.5 已交付**（`ujs.com 0.0.5`）：无 `.c`／`.py`；编／验／跑闭环；`ujs/tests/` 自洽。**0.0.6** 主刀 A（`FILE.ujs --run`）已钉、未实现（见 [`plans/v0.0.6.md`](plans/v0.0.6.md)） |
+| **状态** | **0.0.6 已交付**（`ujs.com 0.0.6`）：无 `.c`／`.py`；编／验／跑闭环；`FILE.ujs --run` 同进程一条链。见 [`plans/v0.0.6.md`](plans/v0.0.6.md) |
 | **不是主产物** | 单独的 `ujs2wasm` CLI、`wat2wasm`、`compile.mjs`、零散 `.wasm`——是 **`ujs.com` 的子功能／实践脊**，应收进或由它调度 |
 
 ### 0.1b 产品 · 论文 · unisacc 关系（主人 2026-10-25 定调）

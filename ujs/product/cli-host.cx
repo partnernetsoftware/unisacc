@@ -1,0 +1,207 @@
+#!/usr/bin/env -S unisacc.com -run
+/* 0.0.6 daily chain: FILE.ujs --run, -o, help, four refuses.
+   ./unisacc.com -run ujs/product/cli-host.cx
+   Prints cli-host.cx: ok. No Python / Node.
+*/
+static int exists(const char *p) {
+    FILE *f = fopen(p, "rb");
+    if (!f) return 0;
+    fclose(f);
+    return 1;
+}
+
+static int enter_root(const char *argv0) {
+    char dir[4096];
+    size_t l;
+    char *sl;
+    if (exists("./ujs/tests/corpus/arith.ujs")) return 0;
+    if (!argv0 || !argv0[0]) return -1;
+    l = strlen(argv0);
+    if (l >= sizeof dir) return -1;
+    memcpy(dir, argv0, l + 1);
+    sl = strrchr(dir, '/');
+    if (!sl) return -1;
+    *sl = 0;
+    if (chdir(dir) != 0) return -1;
+    return chdir("../..");
+}
+
+static int run_bin(char **av, int nac, char **outp, size_t *np) {
+    int rc;
+    char *cap = 0;
+    size_t n = 0;
+    rc = cx_runv_timeout(av, 30, &cap, &n);
+    if (rc == 127) {
+        char *shav[8];
+        int i;
+        free(cap); cap = 0; n = 0;
+        shav[0] = "sh";
+        for (i = 0; i < nac && i < 6; i++) shav[i + 1] = av[i];
+        shav[nac + 1] = 0;
+        rc = cx_runv_timeout(shav, 30, &cap, &n);
+    }
+    *outp = cap;
+    *np = n;
+    return rc;
+}
+
+static int capture(char **av, int nac, char *buf, size_t cap, size_t *n_out) {
+    char *out = 0;
+    size_t n = 0;
+    int rc = run_bin(av, nac, &out, &n);
+    if (rc != 0 || !out) {
+        free(out);
+        return -1;
+    }
+    if (n >= cap) n = cap - 1;
+    memcpy(buf, out, n);
+    buf[n] = 0;
+    *n_out = n;
+    free(out);
+    return 0;
+}
+
+static int refuse(const char *cmd, const char *wasm_path) {
+    char shcmd[1200];
+    char *av[4];
+    char *cap = 0;
+    size_t n = 0;
+    int rc;
+    FILE *f;
+    char err[512];
+    size_t got;
+    unlink("/tmp/ujs06-out.txt");
+    unlink("/tmp/ujs06-err.txt");
+    if (wasm_path) unlink(wasm_path);
+    snprintf(shcmd, sizeof shcmd, "%s > /tmp/ujs06-out.txt 2> /tmp/ujs06-err.txt", cmd);
+    av[0] = "sh";
+    av[1] = "-c";
+    av[2] = shcmd;
+    av[3] = 0;
+    rc = cx_runv_timeout(av, 30, &cap, &n);
+    free(cap);
+    if (rc == 0) {
+        fprintf(stderr, "cli-host.cx: expected non-zero: %s\n", cmd);
+        return 1;
+    }
+    f = fopen("/tmp/ujs06-err.txt", "rb");
+    if (!f) {
+        fprintf(stderr, "cli-host.cx: no stderr for %s\n", cmd);
+        return 1;
+    }
+    got = fread(err, 1, sizeof err - 1, f);
+    fclose(f);
+    err[got] = 0;
+    if (got < 8 || memcmp(err, "ujs.com:", 8) != 0) {
+        fprintf(stderr, "cli-host.cx: stderr prefix: [%s]\n", err);
+        return 1;
+    }
+    if (wasm_path && exists(wasm_path)) {
+        fprintf(stderr, "cli-host.cx: wasm left behind %s\n", wasm_path);
+        return 1;
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    char *av[8];
+    char ver[64], help[2048], two[2048], one[2048], both[2048];
+    char *junk = 0;
+    size_t nv = 0, nh = 0, ntwo = 0, none = 0, nboth = 0, jn = 0;
+    FILE *f;
+    int side_before;
+    ver[0] = help[0] = two[0] = one[0] = both[0] = 0;
+    (void)argc;
+
+    if (enter_root(argv[0]) != 0 || !exists("./ujs/ujs.com")) {
+        fprintf(stderr, "cli-host.cx: need repo root and ujs/ujs.com\n");
+        return 2;
+    }
+
+    av[0] = "./ujs/ujs.com";
+    av[1] = "--version";
+    av[2] = 0;
+    if (capture(av, 2, ver, sizeof ver, &nv) != 0 || strcmp(ver, "ujs.com 0.0.6\n") != 0) {
+        fprintf(stderr, "cli-host.cx: version [%s]\n", ver);
+        return 1;
+    }
+
+    av[1] = "--help";
+    if (capture(av, 2, help, sizeof help, &nh) != 0 ||
+        !strstr(help, "ujs.com 0.0.6") || !strstr(help, "FILE.ujs --run")) {
+        fprintf(stderr, "cli-host.cx: help missing chain or version\n");
+        return 1;
+    }
+
+    side_before = exists("ujs/tests/corpus/arith.wasm");
+    av[1] = "ujs/tests/corpus/arith.ujs";
+    av[2] = "-o";
+    av[3] = "/tmp/ujs06-two.wasm";
+    av[4] = 0;
+    if (run_bin(av, 4, &junk, &jn) != 0 || !exists("/tmp/ujs06-two.wasm")) {
+        fprintf(stderr, "cli-host.cx: two-step compile failed\n");
+        free(junk);
+        return 1;
+    }
+    free(junk);
+    av[1] = "--run";
+    av[2] = "/tmp/ujs06-two.wasm";
+    av[3] = 0;
+    if (capture(av, 3, two, sizeof two, &ntwo) != 0 || !strstr(two, "\"tag\":\"i64\"") ||
+        !strstr(two, "\"value\":7")) {
+        fprintf(stderr, "cli-host.cx: two-step run [%s]\n", two);
+        return 1;
+    }
+
+    av[1] = "ujs/tests/corpus/arith.ujs";
+    av[2] = "--run";
+    av[3] = 0;
+    if (capture(av, 3, one, sizeof one, &none) != 0 || ntwo != none ||
+        memcmp(two, one, ntwo) != 0) {
+        fprintf(stderr, "cli-host.cx: one-shot mismatch\n[%s]\n[%s]\n", two, one);
+        return 1;
+    }
+    if (exists("ujs/tests/corpus/arith.wasm") != side_before) {
+        fprintf(stderr, "cli-host.cx: FILE.ujs --run wrote a default wasm\n");
+        return 1;
+    }
+
+    av[1] = "ujs/tests/corpus/arith.ujs";
+    av[2] = "-o";
+    av[3] = "/tmp/ujs06-o.wasm";
+    av[4] = "--run";
+    av[5] = 0;
+    if (capture(av, 5, both, sizeof both, &nboth) != 0 || !exists("/tmp/ujs06-o.wasm") ||
+        nboth != ntwo || memcmp(both, two, ntwo) != 0) {
+        fprintf(stderr, "cli-host.cx: -o --run mismatch [%s]\n", both);
+        return 1;
+    }
+    av[1] = "--run";
+    av[2] = "/tmp/ujs06-o.wasm";
+    av[3] = 0;
+    if (capture(av, 3, one, sizeof one, &none) != 0 || none != nboth ||
+        memcmp(one, both, nboth) != 0) {
+        fprintf(stderr, "cli-host.cx: --run of -o file mismatch\n");
+        return 1;
+    }
+
+    if (refuse("./ujs/ujs.com /tmp/ujs06-missing-no-such.ujs --run -o /tmp/ujs06-miss.wasm",
+               "/tmp/ujs06-miss.wasm"))
+        return 1;
+    f = fopen("/tmp/ujs06-notujs.txt", "wb");
+    if (!f) return 1;
+    fputs("nope\n", f);
+    fclose(f);
+    if (refuse("./ujs/ujs.com /tmp/ujs06-notujs.txt --run -o /tmp/ujs06-badext.wasm",
+               "/tmp/ujs06-badext.wasm"))
+        return 1;
+    if (refuse("./ujs/ujs.com ujs/tests/corpus/arith.ujs --bogus -o /tmp/ujs06-unk.wasm",
+               "/tmp/ujs06-unk.wasm"))
+        return 1;
+    if (refuse("./ujs/ujs.com ujs/tests/neg/bad_lex.ujs --run -o /tmp/ujs06-neg.wasm",
+               "/tmp/ujs06-neg.wasm"))
+        return 1;
+
+    printf("cli-host.cx: ok\n");
+    return 0;
+}
