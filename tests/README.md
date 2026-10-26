@@ -1,16 +1,18 @@
 # Tests
 
-Source identity boundary: the working source is now
-`329cdb7077891074f638634dc7abdcd59ee39c368ad6ba1c2fcf867c3c63de2e`.
+Source identity boundary: final fresh working SID is
+`0d59237f3250b59514a55ff529c77b665033e5feb71061f6fcaded0c7ef925c0`,
+after scanner repair and legitimate carried-header regeneration. Header-only
+cf2270 remains intermediate measured evidence. No new-source product is built.
 Root is now locally installed P53/S329, with a new actual construction/installation
 record and unchanged raw bytes. The original P53/S447 bootstrap remains saved. Source329 candidate A was fully reconstructed
 under ctx699, checked and archived. Current new-context candidate B was fully
 rebuilt and passed direct smoke16/candidate58/schema79, then was actually
 installed development-only. GEN13/14 reconstruction and original30 Source329 selfhost03 completed58/0;
-current fclose library defect is NOT_FIXED; the old
+current fclose is SOURCE_FIXED/PRODUCT_NOT_REBUILT (explicit -I include338/0); the old
 S447 provenance remains historical and is not relabeled.
 P53/S447 results below, including PP92/23, RI and fixed-point observations, are
-not transferred to Source329. The PP low-mask observations remain valid within
+not transferred to changed source; Source32958/0 is also only a retained baseline. The PP low-mask observations remain valid within
 their original scope; they are not relabeled failures.
 
 ## UJS product (`ujs.com`) — **不在本目录**
@@ -841,7 +843,8 @@ not functional PASS. Root is now locally installed P53/S329; historical Source32
 candidate A was constructed, checked under ctx699 and archived. Current
 new-context B construction and58/79 gates completed, then local installation
 actually completed. GEN13/14 reconstruction and current original30 selfhost03 completed58/0;
-the first142 remains historical, and fclose is currently NOT_FIXED.
+the first142 remains historical; fclose is now SOURCE_FIXED with explicit
+working headers, and the new-source product remains NOT_REBUILT.
 
 Source329 candidate A was fully reconstructed under GEN13 product context
 `699ccb6169f39f77868f0835cd5dd13b9ee1bd7c773fc938cc968cad19a0b00d`:
@@ -915,7 +918,7 @@ An independent helper/Root-record check actually completed rc0 in
 GEN13/bootstrap-before-install.com preserves raw53 and the original e084/S447
 record, identical to the checkpoint originals. PkgCTX03's original Root epoch
 continues through the explicit checkpoint provider's two raw/record hashes;
-its old epoch is not relabeled. Current Source329 fixed-point evidence:RB SHA
+its old epoch is not relabeled. Retained Source329 fixed-point baseline (not transferred to changed source):RB SHA
 `699b0a2cc5ffb1a791c024aa0b2cb0c21a9e2ffe213e77f69c4535132ceebd92`,
 product coordinator SHA
 `68d55d5548922930d1223445098d7e8418539e6d5d84e1e08ddab85fdbacd15c`.
@@ -938,7 +941,7 @@ find /usr/bin/time (wrapper127), so never started the test; it is neither a
 test failure nor PASS. This is a local native two-generation fixed point, not
 HOST-seed three-stage N22, foreign native qualification or version completion.
 
-Current NOT_FIXED library defect:default-run
+Historical Source329 library red (current SOURCE_FIXED/PRODUCT_NOT_REBUILT):default-run
 `out/c43-fclose-devfull-probe.cx` actually returned1 in
 `out/c43-fclose-devfull-product-01.log`:buffered fwrite1/ferror0/errno0, then
 incorrect fclose rc0/errno0 despite closed FD (EBADF9). Same-literal host
@@ -946,7 +949,7 @@ system-header reference using /usr/bin/cc (POSIX200809L,O2,implicit-declaration
 errors enabled) built02/ran02 rc0, correctly reporting EOF/-1/ENOSPC28 and
 closed FD in `out/c43-fclose-devfull-host-run-02.log`. Host01's implicit-fileno
 warning remains; only clean02 supplies the reference. Root/record/CC/two
-sources/stdio hashes were unchanged. include/stdio.h remains
+sources/stdio hashes were unchanged at that historical observation. Old stdio SHA was
 `22ede652a598774465af4d8ecf8cd3195b7fe948a1b9492ab717a39cab179b9e`.
 Permanent `tests/stdio-close.cx` (Linux, `ABS_NEW_OUT`) now records the same
 failure across24 distinct stream descriptor numbers. Default-run under the
@@ -956,11 +959,102 @@ The other290 checks passed, including descriptor release, exact binary regular
 file contents, state-slot reuse and final descriptor count. This is an observed
 red regression, not complete library qualification. The test never accesses a
 FILE after close and missing /dev/full is NOT_RUN solely for ENOENT.
-This specific bug is not fixed; no broad library PASS or deferral to44 is
-claimed. Next:save the passing Source329 checkpoint and old-NN origin capsule,
-then fix fclose in this version, revalidate and construct the new source
-candidate properly. Old329 receipts must not be relabeled fresh. Further
-cache adoption remains design-only;44 startup reuse is unimplemented. Local installation is not complete qualification.
+Current state:SOURCE_FIXED / PRODUCT_NOT_REBUILT. Final measured working
+source is `0d59237f3250b59514a55ff529c77b665033e5feb71061f6fcaded0c7ef925c0`
+after precise scanner repair and legitimate carried-header regeneration.
+Header-only cf2270b2e103ead1d13859489a34d6eb9e57a127eb0bef5f347b17822cb6c16e
+remains intermediate source-header evidence (identity01/helper8 rc0). Installed Root
+remains P53/record21704/Source329; no new-source product has been rebuilt or
+installed. Passing Source329 selfhost58 is retained as a baseline/history,
+never transferred to the changed source.
+
+Current stdio source SHA is
+`a6f5cc020e04e547f2668f162f736b5eac423bf1ec1e241406a745d06e2b01e0`;
+include/sys/_exit.h SHA is
+`1b35e59300e2120420d3261c7239159c08332c43d2efb87bde9ad2594ed88701`.
+Permanent tests/stdio-close.cx is unchanged at
+`7106b12654dec939d6657a71b95ad379cb0247c585273d5c119d9f9cf3ecc8b5`.
+Old default-run actually returned1 with338 assertions/48 failures (24 rounds'
+EOF/ENOSPC checks) in `out/c43-stdio-close-before-01.log`. Explicit
+`sh ./unisacc.com -I include tests/stdio-close.cx -- ABS_NEW_OUT` uses the
+working headers:original bound55 actually returned0,338/0, empty stderr in
+`out/c43-stdio-close-source-01.log`. The minimal -I include probe also returned0
+under original bound12 in `out/c43-fclose-devfull-source-01.log`, with EOF/-1,
+ENOSPC28 and closed FD/EBADF9. These are source-header observations, not a new
+candidate or evidence that Root's default embedded library headers changed.
+The old Source329 red and clean host02 reference remain historical evidence.
+
+The scanner is now precisely repaired:seed/unisa_libneed.c SHA
+`5f0469bcb6268bf979d8bb872424ae238c8f991b51543337b6f4b2750b2fdbb1`.
+Host CC compiled it rc0 with POSIX200809/c99/O2/Wall/Wextra and implicit
+declarations treated as errors. out/c43-libneed-attributes-01.elf SHA is
+`5c6a7756fa4de143a3e74ec14f392fc8ee736755ad55043cb976ace0fb2bb011`.
+Actual original55 `out/c43-libneed-attributes-contract-run-01.log` completed
+rc0,12 assertions/0 failures for flat-attribute exact spans/closure/refusal/
+stability. The same implementation is now permanent tests/libneed-attributes.cx,
+SHA `fd7fa200469f1f5aecb3f7567ba0ab7c77759e48d6f417a562295b53988c8679`
+(only comments differ from the original out/ contract). New -I include
+bootstrap default-run actually completed original55 rc0,12/0 in
+`out/c43-libneed-attributes-permanent-run-01.log`:
+
+```sh
+tools/bound 55 sh ./unisacc.com -I include tests/libneed-attributes.cx -- ROOT LIBNEED_NATIVE NEW_WORK
+```
+
+Both construction.libneed-attributes and library.stdio-close are registered
+as independent SOURCE55 batches/coverage. IMPLEMENTED records an implemented
+entry, not execution/PASS; broad library remains NOT_READY.
+
+New tools/carried-header-export.cx SHA is
+`432bf38606d945a1acb8508e04ab784127842593c3ac2a51013019ac1c00acc4`.
+Its -I include/O2 native build actually completed rc0. prepare/--verify/install
+each independently completed rc0 under original55, with empty stderr in
+`out/c43-carried-header-{prepare,verify,install}-01.log`. The complete old
+header names/text/routing/LIBKEY/OFF/DEP/BODY/ROOT canonical oracle actually
+passed. The tool legitimately installed generated kernel/unisa_headers.inc,
+SHA `482d376cc8eb2c5152512a4ead9841f47b32e23b948024a10718eb82b5806d9f`.
+Old e63 generated-header bytes remain in the capsule and new material's
+previous files. Old/new complete libneed tables actually share SHA
+`aea1293b96da78c6a0cfaf0354e47e840d414de41bdea735bead30d736c8c853`;
+autoinc projection probe out/c43-autoinc-projection-probe-01.cx SHA
+`6363a2235de1781dbeb150a34f5694b60cb02814bdb292557a3781054e3cd6a3`
+actually completed -I include default-run original55 rc0,3/0 in
+`out/c43-autoinc-projection-run-01.log`. Actual six-header ordering and Latin1
+line rules produced byte-identical complete canonical projections both
+including printf and excluding printf. Both complete include trees and all
+support inputs were freshly stable at four endpoints. Together with the equal
+complete aea129... libneed table, this is necessary-condition evidence for NN
+adoption. Adoption remains unimplemented; neither complete PP-fact equivalence
+nor completed reuse/new-product construction is claimed.
+
+Final fresh working SID is
+`0d59237f3250b59514a55ff529c77b665033e5feb71061f6fcaded0c7ef925c0`
+(`out/c43-fclose-source-identity-02.log`, original helper bound8 rc0).
+cf2270 remains the header-only intermediate measured identity. Root remains
+P53/record21704/Source329; the new-source product is NOT_REBUILT/not installed.
+At `out/c43-source329-origin-01`, all seven source trees/typekw/ten support
+files and old Root raw/record are actually sealed and checked. The original
+CTX03 helper rescanned capsule/root and returned the complete329 SID, rc0 in
+`out/c43-origin-capsule-snapshot-sid-01.log` and capsule snapshot-sid.stdout.
+Large CTX03/PC04/KGEN/CC materials still require copying; the complete origin
+package is not finished. New product-build/RB drafts explicitly pass
+-I ROOT/include for source-package driver/wrapper builds and bind v2 flags
+(legacy argv unchanged); these drafts are not compiled/constructed evidence.
+Next:finish origin-package copying, explicitly qualify NN adoption or construct
+anew, then rebuild using current headers and verify the same candidate. Old329
+receipts must not be relabeled fresh;19 gaps, unimplemented44 startup reuse
+and signing/publication restrictions remain.
+
+Current registry evidence:original20 --list completed rc0 in
+`out/c43-fclose-testplan-list-01.log`, metadata_valid1,96 batches (77
+implemented,19 planned,61 unprepared),111 coverage (92 implemented,19
+unresolved),executed0/NOT_EXECUTED. Subsequent original20 --all actually
+returned3 with empty stderr in `out/c43-fclose-testplan-all-01.log`:
+metadata_valid1/111 coverage/92 implemented/19 gaps; SMOKE16/0 only,
+95 non-smoke batches and76 coverage NOT_RUN,executed_subprocess_batches0.
+Unknown/unrun entries are not PASS. Historical109 coverage/94 batches are not
+the current registry. Implementation metadata does not replace actual tests,
+NN adoption or new-candidate qualification. Local installation is not complete qualification.
 The19 gaps, foreign hosts, classic18 weight-source construction and-run44
 remain unfinished; signing/publication restrictions are unchanged. Complete
 classic18 source work,19 broad gaps and foreign-host qualification remain open;
@@ -969,12 +1063,14 @@ New-threshold full-package observations and old-ctx candidate A construction
 are complete, as are current B construction/candidate58/schema79 controls.
 Installer and fresh GEN14 construction are complete development-only. Current
 Source329 selfhost03 completed58/0 within unchanged30, including complete
-after-checks. Current fclose is NOT_FIXED; further same-candidate functional
-qualification and new-source validation after repair remain.
+after-checks, retained as Source329 baseline only. Current fclose is
+SOURCE_FIXED/PRODUCT_NOT_REBUILT; explicit-I include338/0 is not default
+embedded-header or new-candidate qualification.
 Root is installed P53/S329; saved P53/S447 remains the explicit historical
 bootstrap. Candidate A is historical, while installed B has smoke16/source58/
 schema79 and actual-install evidence. GEN14 construction passed, but the
 Source329 original30 selfhost03 completed58/0 with complete after-validation;
-original01 timeout remains, and current fclose is NOT_FIXED;
+original01 timeout remains; fclose is now SOURCE_FIXED/PRODUCT_NOT_REBUILT,
+and old Source329 qualification is not transferred to changed source;
 classic18 source construction, foreign hosts and 19 broad gaps remain open.
 Original time limits are unchanged.
