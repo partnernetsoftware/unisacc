@@ -25,7 +25,7 @@
 | 从 tape／tapebin 写目标镜像 | `./unisacc.com INPUT.tape -b OS/ARCH -o OUTPUT` | `.tapebin` 也有现成入口。支持域及具名拒绝仍生效；见 [README](README.md)、[驱动](exec/c/compiler.c)及[当前优化Tape合同](tests/optimization.cx)。 |
 | 写六目标程序 | `./unisacc.com FILE.c -b OS/ARCH -o OUTPUT` | 目标为 `lnx`／`osx`／`win` × `x86_64`／`arm64`；跨目标写出与目标机器原生执行分别记证。 |
 | 查看 `.cx` 模块依赖计划 | `./unisacc.com -cx-plan FILE.cx` | 复用现有模块入口与[当前模块ABI用例](tests/library-abi.cx)，不另造模块扫描器。 |
-| 用系统 GCC／Clang 把无 `use` 的 `.cx` 编成宿主可执行文件 | `./unisacc.com -run tools/gcc_cx.cx -- FILE.cx -o OUT`；Clang 用 `tools/clang_cx.cx` | 抹掉首行 `#!`，再执行 `gcc` 或 `clang -std=c99 -x c -include include/cx.h`。不展开模块，不授予已检查身份。见 §5.3。 |
+| 用系统 GCC／Clang 把 `.cx` 编成普通可执行文件 | `sh ./gcc_cx.com FILE.cx -o OUT`；Clang 用 `sh ./clang_cx.com` | 仓库根六目标 APE，由 `./unisacc.com -run tools/build-cxcc-ape.cx` 写出，不入库。抹掉首行 `#!`。无 `use` 时一次执行系统 `gcc` 或 `clang -std=c99 -x c -include include/cx.h`。有 `#pragma unisa use` 时用本仓库 `unisacc.com -cx-plan` 展开，按每个单元自己的头列表编译再链接。不授予已检查身份。见 §5.3。 |
 
 新动态逻辑优先由 `unisacc.com + .cx` 完成，减少 `.sh`，不新增临时 `.py`。旧脚本尚未迁移的部分如实记为依赖，不把 `.cx` 转调脚本记成迁移完成。经典 C 参考与模型产品是不同实现；对拍前确认实际两端身份，不能笼统判成“对自身验证”。入口已实现不等于任意输入已验证，继续保留原断言、拒绝和预算。
 
@@ -253,6 +253,7 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 | 自举／原生构造室 | 旧P53的11/12固定点58、CTX02链41/拒绝71与旧ASM生成物是历史，不当Source329新来源链。 | 新源码兼容闭包不得靠删1241项或改贴SID绕过；新P3包与产品构建后再实际校验。宿主依赖、未签收据、root辅助来源边界保留。 |
 | 清单与旧套件室 | 当前严格--list实际rc0（adopted-package-testplan-list-01）：99批/80实现/19planned/64unprepared，114coverage/95实现/19缺口，executed0/NOT_EXECUTED。最近实际--all原20 rc3为登记前113coverage/94实现/19缺口，97批/78coverage NOT_RUN、smoke16/0、子批执行0；旧98/113 list、96/111、95批/76coverage NOT_RUN及109/94/旧1333均保留历史。 | out/c43-adopted-package-testplan-list-01.log、out/c43-adoption-testplan-all-01.log；只有P53 smoke16，独立15日志不替代聚合执行；新源码不借旧绿。 |
 | ujs 子项目 | 独立规格与进度只在ujs/prd.md及ujs/ARCHITECTURE.md；根不改写其代际或语料。 | [ujs/prd.md](ujs/prd.md)；底座.bootstrap使用与产品资格分列。 |
+| 宿主 .cx 驱动 | `gcc_cx.com` 617424 字节，`clang_cx.com` 617456 字节，六目标 APE，不入库。模块展开走 `unisacc.com -cx-plan`，不另写解析器。本机 gcc 与 clang 15 对 lex/arith 逐字节相同，对 `tests/cxhost_main.cx` 退出码 42。产物不是已检查的 `.cx`。OSX 切片未实跑。Windows 切片含 `posix_spawnp`，只编译未跑。 | §5.3。`tests/cxinclude.cx`、`tests/cxapis.cx`。 |
 | 资格与发布室 | Source329候选A已归档、B新ctx58/79已实跑，本地安装与GEN13/14构造及原30完整selfhost58实际0；fclose工作header修复已338/0，但新产品未重建，329证据不转授；19缺口、完整NN/ASM源码构造与同候选外宿主未收口。 | 不签名/Draft/Latest/公开；C44启动复用仅csr旁路私有APE原型，尚未回并或获新43资格，旧P53测量不报新提速。 |
 | C44旁路协作室 | 主人特许csr使用`/home/devali/repos/unisacc-c44-opt`、分支`c44/run-reuse`，仅做-run分相/复用原型，基线P53；主检出仍由本线收43。 | csr不改本线include/seed/fclose或候选构造；合并冲突以43最终产品身份为准，旧P53测量须在新43候选重验，不签名不公开。 |
 
@@ -643,7 +644,11 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 
 **规划决定（主人 2026-10-24）**：在 0.1.x 制作共用 `.cx` 前端、构建驱动器及必要的编译器插件/适配，使 Clang、GCC、TinyCC 等工具链支持 `.cx`。具体安全语义以 [`.cx` 草案](docs/cx-spec-draft.md) 后续形成的稳定规范为准。`.cx` 继续采用 C99 语法，通过模块接口、契约和受检查的编译配置表达能力，不增加 Rust 式源码关键字。
 
-**已落地的宿主驱动（2026-10-26）**：`tools/gcc_cx.cx` 与 `tools/clang_cx.cx`（实现在 `tools/cxcc.cx`）。它们把首行 `#!` 涂成空格，再执行系统 `gcc` 或 `clang`，并带上 `-std=c99 -x c -include <仓库>/include/cx.h`。仓库根从驱动所在目录、当前目录向上找，也可用 `CX_ROOT`。源里若有 `#pragma unisa use`，驱动直接拒绝。这一步不展开模块、不插入安全检查、不授予「已通过 `.cx` 检查」的身份。共用前端、CXIF 与编译器插件仍未实现。
+**已落地的宿主驱动（2026-10-26）**：源码是 `tools/gcc_cx.cx` 与 `tools/clang_cx.cx`（实现在 `tools/cxcc.cx`）。六目标 APE 由 `./unisacc.com -run tools/build-cxcc-ape.cx` 写出，放到仓库根的 `gcc_cx.com` 与 `clang_cx.com`，不入库。五个切片是 `win/x86_64`、`lnx/x86_64`、`lnx/arm64`、`osx/x86_64`、`osx/arm64`；`win/arm64` 走同一份 x86_64 PE。Unix 上用 `sh ./gcc_cx.com` 启动，shell 按 `uname` 解出切片，缓存名是 `~/.cache/gcc_cx` 或 `~/.cache/clang_cx`，所以从 argv[0] 找不到仓库时要在仓库根启动，或设置 `CX_ROOT`。驱动把首行 `#!` 涂成空格。没有 `#pragma unisa use` 的单元仍一次交给系统 `gcc` 或 `clang`，参数是 `-std=c99 -x c -include <仓库>/include/cx.h`。有 `use` 时，驱动执行本仓库 `unisacc.com -cx-plan`，按每个单元自己的 include 列表分别编译再链接。解析器只有这一份。产物是普通 C，不授予「已通过 `.cx` 检查」的身份，所有权检查仍未实现。Windows 切片用 `posix_spawnp` 启动系统编译器，也用它抓取 `-cx-plan` 的标准输出；临时文件先看 `TMPDIR`，否则用 `GetTempPathA`。本机没有 Windows，该切片只编译进 APE，没有执行。本机有 `/usr/bin/gcc` 和 Ubuntu clang 15.0.7。OSX 切片只写出、未执行。草案中的版本化 CXIF 对象和编译器插件仍未实现；这一步用的是 unisacc 已有的 CXIF v0 文本头。
+
+**构建收据（2026-10-26，模块展开之后重打）**：`./unisacc.com -run tools/build-cxcc-ape.cx` 实际 rc 0。`gcc_cx.com` 617424 字节，`clang_cx.com` 617456 字节，`file` 均为 PE32+ console x86-64。构建里 gcc 编出的 `ujs/seed/construct/lex.cx` 对 `ujs/tests/corpus/arith.ujs` 与 `./unisacc.com -run` 逐字节相同；`tests/cxhost_main.cx` 展开 `cxhost_mod` 后退出码 42。同一次构建里 Ubuntu clang 15 编过该扫描器，并编过同一夹具、退出码 42。`-run` 另测：用 gcc 编出的 `gcc_cx` 再编 `tests/cxhost_main.cx`，退出码仍是 42；缺模块 `no_such_mod_zz` 由 unisacc 具名拒绝（rc 1），没有交给 gcc。字符串里的 `#pragma unisa use` 不当作导入。`win/x86_64` 的 `tools/gcc_cx.cx` 只编译通过，没有执行。OSX 切片只写出、未执行。活树棘轮 `tests/cxinclude.cx --check` 与 `tests/cxapis.cx --check` 实际 rc 0：436 个 `.cx`，111 行 include，724 处无界调用。
+
+**Windows POSIX／C99（主人 2026-10-26，对照 Cosmopolitan 的目录模板、临时目录和最终路径；未在 Windows 上执行）**：`include/stdlib.h` 的 `mkstemp` 在 Windows 上用 `CreateFileA` 的 `CREATE_NEW`。`realpath` 能打开的路径先问 `GetFinalPathNameByHandleA`（`VOLUME_NAME_DOS`），再去掉 `\\?\`，并把 `\\?\UNC\` 收成 `\\`。目录打不开，因为 `__open` 传不进 `FILE_FLAG_BACKUP_SEMANTICS`；这一路和最终路径失败都退回 `GetFileAttributesA` 加 `GetFullPathNameA`，退回路不解析符号链接。`mkdtemp` 在 Windows 上用 `CreateDirectoryA`，模式忽略；模板必须以 `XXXXXX` 结尾，`EEXIST` 会重试，其它错误和重试耗尽会把 `XXXXXX` 写回去。这些调用展成宿主通道宏，这样当前编译器的库依赖表还没记下新函数时，被调函数也不会被裁掉。本机 Linux 探针实际跑通 `mkstemp`、`mkdtemp` 和 `realpath`；`win/x86_64` 探针只编译通过。`fork`／`execvp` 仍不映射，也不移植 Cosmopolitan 的 Windows `fork`。`cx_run`／`cx_runv_timeout` 在 Windows 上仍返回 -1：不把 `posix_spawnp` 写进 `include/cx.h`。驱动源码在 Windows 上直接调用 `posix_spawnp`；临时目录先看 `TMPDIR`，否则用 `GetTempPathA`。
 
 #### 5.3.1 共用前端与后端分工
 
