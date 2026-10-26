@@ -1,12 +1,15 @@
 #pragma unisa module mixedsnapshot
 #pragma unisa use netpack
 #pragma unisa use kernelsha
-/* Finite read-only PC02 controller adapter. Context SHA pins the reviewed
- * absolute role namespace; source/ELF pins prevent metadata nominating code.
+/* Read-only mixed-package controller adapter. Canonical roles and the actual
+ * context bytes are checked before and after execution; fixed source/ELF pins
+ * prevent package metadata from nominating different executable code.
  * Every invocation executes --snapshot, including full origin107/current49
  * DAGs, and physically observes package/code files on both sides.
  * Caller supplies freshly measured expected source and an outer tree watchdog.
  * Linux x86_64 LP64 only. AF_ALG required for >=64KiB, no fallback/result cache.
+ * The source tree and package require a single writer during this operation:
+ * before/after reads do not prevent same-UID swap-and-restore during exec.
  * Unsigned consistency is not historical compilation or functional PASS.
  * Timing is an observation, never part of stable witness. */
 typedef struct {
@@ -27,7 +30,7 @@ typedef struct {char root[4096],package[4096],out[4400],bound[4400],why[1200],co
 typedef struct {char hash[64][65];np_buf manifest;} MxObserved;
 static const char *mx_controller_source="0ec33d2cfa64c599433ccf9c47f3f15b70298f4a8bbeded3d32751ce2fe54c35";
 static const char *mx_controller_elf="c6aa9980933338dd7544a91b0748696263629fa48738b559b6afc237b7e5256f";
-static const char *mx_context_pin="a08af1d62f8f5b939c5140baf16c573739ee5309b66298bc167cd1bcd91e9d67";
+static const char *mx_origin_elf="8b5fd4cf9fb31e7fa54fafb8172d49e7029a8a72a56e8bdf74b79d5b5199f684";
 static const char *mx_ctx_keys[]={"status","environment-policy","root","snapshot-root","logical-root","logical-package","physical-package","origin-context","source-context","kernel-generation","pack-context","source","origin-source","origin-verifier-ELF-path","origin-profile-path","foundation","origin-consumer","origin-spec","bootstrap","bootstrap-sha","bootstrap-record-sha","controller-source-path","controller-source","controller-ELF-path","controller-ELF","controller-target","controller-model-package","controller-model-package-sha","controller-flags","tools/cxlib/sourcepackage.cx","tools/cxlib/netpack.cx","tools/cxlib/kernelsha.cx","tools/bound","tools/bound.c","seed/ident.c","identity-helper-path","identity-helper-sha","origin.tsv","selection.tsv","current-union.tsv","kernel-state.tsv","headers.tsv","code.tsv","routes/lnx-arm64.tsv","routes/lnx-x86_64.tsv","routes/osx-arm64.tsv","routes/osx-x86_64.tsv","routes/win-arm64.tsv","routes/win-x86_64.tsv","current-net-models","adopted-net-models","current-union-jobs","declaration","scope"};
 static const char *mx_report_keys[]={"status","artifact","manifest","receipt","context","current-source","origin-source","models","kernel-context","origin-spec","origin-verifier","origin-ELF","origin-profile","origin-execution-closure","origin-mapping","union-verifier","union-witness","union-artifact","union-receipt","controller-source","controller-ELF","observation-views","origin-jobs","origin-models","current-union-jobs","current-net-models","adopted-net-models","origin-physical-reads","union-physical-reads","own-physical-reads","endpoint-ns","union-ns","internal-helper-reads","observations-scope","snapshot-body-ns"};
 static int mx_bad(MxContext *c,const char *reason,const char *path){if(!c->failed)snprintf(c->why,sizeof c->why,"%s path=%.700s errno=%d",reason,path?path:"-",errno);c->failed=1;return -1;}
@@ -45,7 +48,9 @@ static long long mx_clock(MxContext *c){long t[2]={0,0};long rc=__syscall6(228,1
 
 static const char *mx_cv(MxContext *c,const char *key){for(int i=0;i<sizeof mx_ctx_keys/sizeof *mx_ctx_keys;i++)if(!strcmp(key,mx_ctx_keys[i]))return c->ctx->v[i];mx_bad(c,"internal-context-key",key);return "";}
 static int mx_context(MxContext *c,const char *fresh){char p[4400];size_t n;if(mx_path(c,p,c->package,"context.tsv"))return -1;char *s=mx_read(c,p,&n,0);if(!s)return -1;int rc=mx_parse(c,s,n,"source-package-mixed-context-v1\n",mx_ctx_keys,sizeof mx_ctx_keys/sizeof *mx_ctx_keys,c->ctx);if(!rc)rc=mx_hash(c,s,n,c->context_sha);free(s);if(rc)return -1;
- if(strcmp(c->context_sha,mx_context_pin)||strcmp(mx_cv(c,"root"),c->root)||strcmp(mx_cv(c,"pack-context"),c->package)||strcmp(mx_cv(c,"source"),fresh)||strcmp(mx_cv(c,"controller-source"),mx_controller_source)||strcmp(mx_cv(c,"controller-ELF"),mx_controller_elf))return mx_bad(c,"finite-PC02-context-or-current-source-mismatch",p);
+ if(strcmp(mx_cv(c,"root"),c->root)||strcmp(mx_cv(c,"logical-root"),c->root)||strcmp(mx_cv(c,"pack-context"),c->package)||strcmp(mx_cv(c,"source"),fresh)||strcmp(mx_cv(c,"controller-source"),mx_controller_source)||strcmp(mx_cv(c,"controller-ELF"),mx_controller_elf))return mx_bad(c,"mixed-context-role-or-controller-mismatch",p);
+ const char *generation=mx_cv(c,"kernel-generation"),*source_context=mx_cv(c,"source-context"),*snapshot=mx_cv(c,"snapshot-root"),*logical_pkg=mx_cv(c,"logical-package"),*physical_pkg=mx_cv(c,"physical-package"),*origin_context=mx_cv(c,"origin-context");
+ if(mx_canonical(c,generation,1)||mx_canonical(c,source_context,1)||mx_canonical(c,snapshot,1)||mx_canonical(c,logical_pkg,1)||mx_canonical(c,physical_pkg,1)||mx_canonical(c,origin_context,1)||!mx_within(generation,c->out)||!mx_within(source_context,c->out)||!mx_within(snapshot,c->out)||!mx_within(logical_pkg,c->out)||!mx_within(physical_pkg,snapshot)||!mx_within(origin_context,snapshot)||!strcmp(generation,source_context)||!strcmp(generation,c->package)||!strcmp(source_context,c->package))return mx_bad(c,"mixed-context-generation-source-or-origin-role",p);
  if(mx_path(c,p,c->root,"tools/source-package-mixed.cx")||strcmp(p,mx_cv(c,"controller-source-path")))return mx_bad(c,"controller-source-path",p);
  return 0;
 }
@@ -53,10 +58,10 @@ static int mx_observe_file(MxContext *c,MxObserved *o,int slot,const char *path,
 
 static int mx_observe(MxContext *c,MxObserved *o,np_buf *origin,np_buf *un,np_buf *pkg){char p[4400];np_puts(&o->manifest,"mixed-snapshot-wrapper-files-v1\n");
  const char *core[]={"compiler.pkg","model-inputs.tsv","package.tsv","context.tsv"};
- for(int i=0;i<4;i++)if(mx_path(c,p,c->package,core[i])||mx_observe_file(c,o,i,p,i==3?mx_context_pin:0,0,0,i==2?pkg:0))return -1;
+ for(int i=0;i<4;i++)if(mx_path(c,p,c->package,core[i])||mx_observe_file(c,o,i,p,i==3?c->context_sha:0,0,0,i==2?pkg:0))return -1;
  const char *paths[]={"controller-ELF-path","controller-source-path","origin-verifier-ELF-path","origin-profile-path","bootstrap","identity-helper-path","controller-model-package"};
- const char *pins[]={mx_controller_elf,mx_controller_source,0,0,mx_cv(c,"bootstrap-sha"),mx_cv(c,"identity-helper-sha"),mx_cv(c,"controller-model-package-sha")};
- for(int i=0;i<7;i++){const char *q=mx_cv(c,paths[i]);if(mx_canonical(c,q,0)||mx_observe_file(c,o,4+i,q,pins[i],i==0||i==2||i==5,i==0||i==2||i==5,0))return -1;}
+ const char *pins[]={mx_controller_elf,mx_controller_source,mx_origin_elf,0,mx_cv(c,"bootstrap-sha"),mx_cv(c,"identity-helper-sha"),mx_cv(c,"controller-model-package-sha")};
+ for(int i=0;i<7;i++){const char *q=mx_cv(c,paths[i]);if(mx_canonical(c,q,0)||(i!=1&&!mx_within(q,c->out))||mx_observe_file(c,o,4+i,q,pins[i],i==0||i==2||i==5,i==0||i==2||i==5,0))return -1;}
  if(snprintf(p,sizeof p,"%s.build.json",mx_cv(c,"bootstrap"))>=sizeof p||mx_canonical(c,p,0)||mx_observe_file(c,o,11,p,mx_cv(c,"bootstrap-record-sha"),0,0,0))return -1;
  const char *code[]={"tools/cxlib/sourcepackage.cx","tools/cxlib/netpack.cx","tools/cxlib/kernelsha.cx","tools/bound","tools/bound.c","seed/ident.c","tools/cxlib/mixedsnapshot.cx"};
  for(int i=0;i<7;i++)if(mx_path(c,p,c->root,code[i])||mx_canonical(c,p,0)||mx_observe_file(c,o,12+i,p,i<6?mx_cv(c,code[i]):0,0,i==3,0))return -1;
