@@ -1166,11 +1166,16 @@ it does not execute batches. The corresponding latest actual original20
 --all returned3 in out/c43-adoption-testplan-all-01.log:
 113 coverage/94 implemented/19 unresolved,97 NOT_RUN batches and78 NOT_RUN
 coverage,SMOKE16/0,executed_subprocess_batches0. Those counts precede the
-new adopted-package registration. Post-edit strict --list now actually
+new adopted-package registration. Before the union registration, strict --list actually
 returned0 in out/c43-adopted-package-testplan-list-01.log: metadata_valid1,
 99 batches/80 implemented/19 planned/64 unprepared,114 coverage/95
-implemented/19 unresolved,executed0/NOT_EXECUTED. These are actual inventory
-counts, not batch execution or qualification. Older111/92 and109/90 evidence
+implemented/19 unresolved,executed0/NOT_EXECUTED. These are historical inventory
+counts before the union registration, not batch execution or qualification.
+The union registration was strictly parsed rc0 in
+out/c43-source-job-union-testplan-list-01.log: metadata_valid1,
+100 batches/81 implemented/19 planned/65 unprepared,115 coverage/
+96 implemented/19 unresolved,executed0/NOT_EXECUTED. Metadata parsing
+does not execute batches or provide an updated --all qualification. Older111/92 and109/90 evidence
 below remains historical.
 
 * construction.origin-package: finite37-check origin gate, with materials
@@ -1209,6 +1214,58 @@ RB kind3 integration, complete candidate qualification or NN functional
 evaluation. Controller bootstrap P53/21704 remains separate from old NN
 production epoch447/e084. Original selfhost30 and all19 broad gaps remain;
 neither log supplies the missing four-endpoint fixed-point result.
+
+The separate `construction.source-job-union` SOURCE/lnx_x86_64/55 batch
+uses `tests/source-job-union.cx`, CLI `ROOT CTX FRESH_SID`; materials are
+`source-job-context` (the prepared current context directory) and
+`current-source-id` (an independently measured fresh64-hex value).
+Expectation: `rc0:SOURCE_JOB_UNION`. Example for the actual current inputs:
+
+```sh
+tools/bound 55 sh ./unisacc.com -I /ABS/ROOT/include tests/source-job-union.cx -- /ABS/ROOT /ABS/ROOT/out/c43-source-package-forward-context-01 03a5e1b77b24c7fcfe92d289c53d772088bb1b07a94bb3d419a34c75e2bd2334
+```
+
+The permanent source retains all36 probe obligations without copylive.
+The permanent path actually completed original55 rc0/36/0 in
+out/c43-source-job-union-permanent-run-02.log using executing SP5cbc;
+only its module pin changed from the probe, with all36 obligations retained.
+Its two fresh net unions each observed12 jobs/3 models/89 reads in
+1.449938355s and1.385322946s; the tool union observed3/0/35 reads in
+0.053068219s. The actual original55 probe
+out/c43-source-job-union-probe-run-01.log completed rc0/36/0 with empty
+stderr: four nonmutating argument controls each check refusal, exact reason
+and whole-result clearing; two fresh reordered three-net unions each verify
+12 jobs/3 models/89 physical reads in1.446987410s and1.462053267s, with the
+same canonical identities and data witness; the independent three-tool
+union verifies3 jobs/0 models/35 reads in0.083057602s; the parent survives.
+Two original net producer outer142 outcomes remain UNKNOWN. Material
+verification does not change those outcomes or claim NN inference,
+a current full107 package, mixed adoption or candidate qualification.
+
+Current S03a5 partial context, three native tools and three affected NN
+materials are prepared. All34 current gen jobs actually completed
+original55 rc0; full JSON byte comparisons against origin found exactly
+shared-e3/warnparse/errorparse different and the other31 identical. All
+three new net native statuses are0; warnparse/errorparse outer142 remain
+UNKNOWN. G16 construction and mixed material assembly are next. No
+Source03a5 candidate has been built. Old Source0d15/37/104 and Root329
+results remain historical. The new origin03 reader/profile was actually
+compiled and its full positive snapshot completed0: ELF
+`dfc1fbd76be4da34a3e9a4cfe7823a94a3498d47918ed7e0013a427fd7d9cac7`,
+profile `aeb85359e6d9ff85a3563ac58aa879e283bee254c4d0906f7e3136833eb7f068`,
+107 jobs/34 models/1004 reads in5.174877257s. Executing SP058a and old
+origin_spec407 are separate roles. New origin04 actual native compilation,
+profile and full-old snapshot each completed original55 rc0: ELF
+`ad550418ff24462c2c2a017790b85e1c4a70f67d9b9f93adbfe75fde614d5a13`,
+profile `24daf95e0f16f404f4ad1737203abb4a923add5e118cbef2d25c0e1506b9de05`,
+executing SP `5cbceaa8a5bd424b5a40005c8b29c7db4f4ea70c982892a3bdeed9416c915aff`,
+with origin_spec407 unchanged,107/34/1004 and4.910414267s.
+Runtime provider-v4 uses1024 bytes, while material provider-v3 retains the
+historical65536-byte declaration; old canonical material is unchanged.
+The origin03/04 times are single observations, not a statistical speedup.
+The original30-second budget, all four fresh endpoints and19 broad gaps
+remain unchanged. The new100-batch/115-coverage inventory above is actual
+strict parsing with executed0, not --all execution or candidate qualification.
 
 Historical registry evidence before the two new registrations: original20 --list completed rc0 in
 `out/c43-fclose-testplan-list-01.log`, metadata_valid1,96 batches (77
