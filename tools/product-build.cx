@@ -2,6 +2,7 @@
  * receipts bind material, never a saved functional PASS. */
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.kernelcontext
+#pragma unisa use cxlib.rebuildcontext
 static char root[4096],generation[4096],packages[4096],product[4400],bound[4400];
 static const char *targets[]={"win/x86_64","lnx/x86_64","lnx/arm64","osx/x86_64","osx/arm64"};
 static const char *files[]={"slice-win-x86_64","slice-lnx-x86_64","slice-lnx-arm64","slice-osx-x86_64","slice-osx-arm64"};
@@ -11,9 +12,18 @@ static char *load(const char *p,size_t *n){struct stat st;if(lstat(p,&st)||!S_IS
 static void digest(const char *p,char *h){size_t n;char *s=load(p,&n);cx_sha256_hex(s,n,h);free(s);}
 static void absent(const char *p){struct stat st;errno=0;if(lstat(p,&st)==0||errno!=ENOENT)die("output must not exist");}
 static void saved(const char *p,const char *s,size_t n){int f=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0600);if(f<0)die("exclusive receipt");while(n){ssize_t k=write(f,s,n);if(k<0&&errno==EINTR)continue;if(k<=0)die("write; partial retained");s+=k;n-=(size_t)k;}if(fsync(f)||close(f))die("fsync/close");}
-static void context(char *h){char sid[65],p[4400],sha[65];kc_check(root,generation,sid);np_buf b={0};np_puts(&b,"native-product-construction-v1\n");np_puts(&b,sid);np_puts(&b,"\n");const char *inputs[]={"tools/product-build.cx","tools/package-refresh.cx","tools/cxlib/kernelcontext.cx","tools/cxlib/netpack.cx","seed/ape.c"};int i;for(i=0;i<5;i++){path(p,sizeof p,root,inputs[i]);digest(p,sha);np_puts(&b,inputs[i]);np_puts(&b,"\t");np_puts(&b,sha);np_puts(&b,"\n");}const char *material[]={"compiler.pkg","package.tsv","model-inputs.tsv"};for(i=0;i<3;i++){path(p,sizeof p,packages,material[i]);digest(p,sha);np_puts(&b,material[i]);np_puts(&b,"\t");np_puts(&b,sha);np_puts(&b,"\n");}cx_sha256_hex(b.p,b.n,h);free(b.p);}
+/* V1 is reproduced by rebuildcontext without changing its bytes. Source-P3
+ * admission is the separate v2 domain, using actual SID from kc_check, a fresh
+ * full material snapshot, original builder record and independent package epoch.
+ * This does not extend the outer55 deadline: whole-DAG cost remains measured
+ * separately; no cached receipt verdict substitutes for either endpoint. */
+static int source_package_mode;
+static char **owned_environment;
+static int forbidden_environment(const char *s){const char *keys[]={"SEED_GEN_GENERIC","SEED_GEN_TRACE","UNISACC_SEED_TRACE","UNISACC_RF_CAPTURE","UNISA_ATTRIBUTES"};for(int i=0;i<5;i++){size_t n=strlen(keys[i]);if(!strncmp(s,keys[i],n)&&s[n]=='=')return 1;}return 0;}
+static void clean_environment(void){size_t n=0;for(char **p=environ;*p;p++)n++;if(n>1048576)die("environment-entry-bound");char **next=malloc((n+1)*sizeof *next);if(!next)die("allocation");size_t at=0;for(char **p=environ;*p;p++)if(!forbidden_environment(*p))next[at++]=*p;next[at]=0;char **old=owned_environment;environ=next;owned_environment=next;free(old);for(char **p=environ;*p;p++)if(forbidden_environment(*p))die("environment-policy-not-applied-to-raw-environ");}
+static void context(char *h){char sid[65],why[2048];kc_check(root,generation,sid);rb_result r;if(rb_build_context(root,generation,packages,product,sid,&r,why,sizeof why))die(why);source_package_mode=r.package_kind==2;strcpy(h,r.product_context);if(source_package_mode)printf("MATERIAL_OBSERVATION\tsource-package-v1\tjobs=%d\tmodels=%d\tphysical-reads=%d\telapsed-ns=%lld\tno-test-result\n",r.source_jobs,r.source_models,r.source_physical_reads,r.source_elapsed_ns);}
 static void receipt(const char *name,const char *input,int verify){char p[4400],rpath[4500],h[65],text[256];path(p,sizeof p,generation,name);digest(p,h);int n=snprintf(text,sizeof text,"PREPARED\tnative-product\tno-test-result\ncontext\t%s\nartifact\t%s\n",input,h);int k=snprintf(rpath,sizeof rpath,"%s.native-build.tsv",p);if(k<0||(size_t)k>=sizeof rpath)die("receipt path");if(verify){size_t rn;char *s=load(rpath,&rn);int ok=rn==(size_t)n&&!memcmp(s,text,rn);free(s);if(!ok)die("missing/stale slice receipt");}else saved(rpath,text,(size_t)n);}
-static void call(char **v){np_result r;char why[1024];if(np_run(v,root,0,45,&r,why,sizeof why))die(why);if(r.outn)fwrite(r.out,1,r.outn,stdout);if(r.errn)fwrite(r.err,1,r.errn,stderr);int rc=r.rc;np_free(&r);if(rc)exit(rc<0?128-rc:rc);}
+static void call(char **v){if(source_package_mode)clean_environment();np_result r;char why[1024];if(np_run(v,root,0,45,&r,why,sizeof why))die(why);if(r.outn)fwrite(r.out,1,r.outn,stdout);if(r.errn)fwrite(r.err,1,r.errn,stderr);int rc=r.rc;np_free(&r);if(rc)exit(rc<0?128-rc:rc);}
 int main(int argc,char **argv){if(argc!=5||!realpath(argv[1],root)||!realpath(argv[2],generation)||!realpath(argv[3],packages)){fputs("usage: ROOT KERNEL_GENERATION PACKAGE_DIR slice-TARGET|wrap\n",stderr);return 2;}path(product,sizeof product,root,"unisacc.com");path(bound,sizeof bound,root,"tools/bound");char before[65],after[65],output[4400],source[4400],pkg[4400],slices[5][4400];context(before);int i,selected=-1;
  for(i=0;i<5;i++){char step[64];snprintf(step,sizeof step,"slice-%s",targets[i]);if(!strcmp(argv[4],step))selected=i;}
  const char *name;if(selected>=0){name=files[selected];path(output,sizeof output,generation,name);absent(output);path(source,sizeof source,root,"exec/c/asmcompiler.c");char *v[]={bound,"40","sh",product,"-O2","-b",(char *)targets[selected],source,"-o",output,0};call(v);
