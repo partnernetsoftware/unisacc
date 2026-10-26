@@ -1014,7 +1014,7 @@ rr_after_units:
                 if (rr_time) clock_gettime(CLOCK_MONOTONIC, &rr_t0);
                 if (!rr_pre_hit) {
                     if (rr_sources_hex((char **)sources, nsources, rr_id))
-                        rr_src_hex(in.b, in.n, rr_id);
+                        rr_can = 0;
                     if (rr_can) {
                         Buf cached = {0};
                         int lk = rr_lookup_host(argv[0], route, target, level, rr_id, &cached);
@@ -1100,8 +1100,8 @@ rr_after_units:
                 if (rr_pre_hit) memcpy(rr_id, rr_pre_id, 65);
                 if (!rr_pre_hit && rr_can && (mode == 2 || mode == 5)) {
                     if (rr_sources_hex((char **)sources, nsources, rr_id))
-                        rr_src_hex(in.b, in.n, rr_id);
-                    {
+                        rr_can = 0;
+                    if (rr_can) {
                         Buf cached = {0};
                         int lk = rr_lookup(argv[0], route, target, level, rr_id, &cached);
                         if (lk < 0) rc = clierror("artifact reuse: cache read failed");
@@ -1118,7 +1118,7 @@ rr_after_units:
                         FILE_ABSENT_COUNT = 0; FILE_ABSENT_PATHS = 0; rr_rec = 1;
                         if (!rr_id[0]) {
                             if (rr_sources_hex((char **)sources, nsources, rr_id))
-                                rr_src_hex(in.b, in.n, rr_id);
+                                rr_can = 0;
                         }
                     }
                     rc = host_compile(route, tape_input ? (level ? "e4" : "prune") : 0, &in, src, &host_context);

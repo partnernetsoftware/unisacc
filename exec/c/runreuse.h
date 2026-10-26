@@ -101,61 +101,14 @@ static const char *rr_product_path(const char *argv0) {
     return argv0;
 }
 
-/* A private sidecar avoids rehashing the APE on every process. Inode, size,
- * nanosecond mtime and ctime bind normal replacement and in-place edits. */
+/* A cache file is not a product identity. Hash the actual APE or ELF bytes on
+ * each process; memoization below only avoids repeated hashes in one process. */
 static int rr_product_hex(const char *product, char hex[65]) {
     const char *path = rr_product_path(product);
     static char held_path[4096], held_hex[65];
     if (!path) return 1;
     if (held_hex[0] && !strcmp(path, held_path)) { memcpy(hex, held_hex, 65); return 0; }
-    if (strlen(path) >= sizeof held_path) return 1;
-#ifdef __linux__
-    {
-        struct stat before, after;
-        char dir[400], ph[65], side[520], line[320], got[65];
-        unsigned long long dev, ino, size;
-        long long mt_s, mt_ns, ct_s, ct_ns;
-        int n;
-        FILE *f;
-        if (lstat(path, &before) || !S_ISREG(before.st_mode) || rr_dir(dir, sizeof dir)) return 1;
-        unisa_sha256_hex(path, strlen(path), ph);
-        n = snprintf(side, sizeof side, "%s/%s.id", dir, ph);
-        if (n < 0 || (size_t)n >= sizeof side) return 1;
-        f = fopen(side, "rb");
-        if (f) {
-            if (fgets(line, sizeof line, f) &&
-                sscanf(line, "%llu %llu %llu %lld %lld %lld %lld %64s",
-                       &dev, &ino, &size, &mt_s, &mt_ns, &ct_s, &ct_ns, got) == 8 &&
-                dev == (unsigned long long)before.st_dev &&
-                ino == (unsigned long long)before.st_ino &&
-                size == (unsigned long long)before.st_size &&
-                mt_s == (long long)before.st_mtime &&
-                mt_ns == (long long)before.st_mtime_nsec &&
-                ct_s == (long long)before.st_ctime &&
-                ct_ns == (long long)before.st_ctime_nsec && strlen(got) == 64) {
-                fclose(f); memcpy(hex, got, 65);
-                strcpy(held_path, path); memcpy(held_hex, hex, 65); return 0;
-            }
-            fclose(f);
-        }
-        if (rr_hash_file(path, hex) || lstat(path, &after) ||
-            before.st_dev != after.st_dev || before.st_ino != after.st_ino ||
-            before.st_size != after.st_size ||
-            before.st_mtime != after.st_mtime ||
-            before.st_mtime_nsec != after.st_mtime_nsec ||
-            before.st_ctime != after.st_ctime ||
-            before.st_ctime_nsec != after.st_ctime_nsec) return 1;
-        n = snprintf(line, sizeof line, "%llu %llu %llu %lld %lld %lld %lld %s\n",
-                     (unsigned long long)before.st_dev, (unsigned long long)before.st_ino,
-                     (unsigned long long)before.st_size, (long long)before.st_mtime,
-                     (long long)before.st_mtime_nsec, (long long)before.st_ctime,
-                     (long long)before.st_ctime_nsec, hex);
-        if (n > 0 && (size_t)n < sizeof line)
-            (void)rr_write_atomic(side, (const unsigned char *)line, (size_t)n);
-    }
-#else
-    if (rr_hash_file(path, hex)) return 1;
-#endif
+    if (strlen(path) >= sizeof held_path || rr_hash_file(path, hex)) return 1;
     strcpy(held_path, path); memcpy(held_hex, hex, 65);
     return 0;
 }
@@ -179,10 +132,6 @@ static int rr_key(char key[65], const char *product, const char *route, const ch
     if (n < 0 || (size_t)n >= sizeof blob) return 1;
     unisa_sha256_hex(blob, (size_t)n, key);
     return 0;
-}
-
-static void rr_src_hex(const unsigned char *srcb, int srcn, char hex[65]) {
-    unisa_sha256_hex(srcb ? srcb : (const unsigned char *)"", srcn > 0 ? (size_t)srcn : 0, hex);
 }
 
 static int rr_cli_argc;
