@@ -51,12 +51,12 @@ tools/bound 20 sh ./unisacc.com tools/ci-candidate-check.cx -- --plan-sha "$PWD"
 | `ubuntu-24.04-arm` | Linux arm64 | arm64 | NOT_RUN |
 | `macos-15-intel` | macOS x86_64 | x86_64 | NOT_RUN |
 | `macos-15` | macOS arm64 | arm64 | NOT_RUN |
-| `windows-2025` | Windows x86_64 | PE x86_64 | NOT_RUN |
-| `windows-11-arm` | Windows arm64 | **PE x86_64，模拟进程** | NOT_RUN；不计 ARM 原生进程 |
+| `windows-2025` | Windows x86_64 | PE x86_64 | 待实际运行；草稿仅安排 `--version` 直接进程观察 |
+| `windows-11-arm` | Windows arm64 | **PE x86_64，模拟进程** | 待实际运行；草稿仅安排 `--version`，不计 ARM 原生进程 |
 
-运行时记录 `.NET OSArchitecture`、实际 PowerShell `ProcessArchitecture`、候选 PE 头与候选 helper 的编译器预定义宏。矩阵只是期待值；helper 宏是候选编译目标观察，不能改名为独立操作系统进程观察。Windows 分支只实际核宿主和 PE 映像头，**不启动候选**；候选运行进程仍为 NOT_RUN。六种输出目标未在本草稿逐一生成或验证，全部独立保留 NOT_RUN，不能把六个 runner 或一个 APE 的切片当作六目标执行通过。
+运行时记录 `.NET OSArchitecture`、实际 PowerShell `ProcessArchitecture`、候选 PE 头与候选 helper 的编译器预定义宏。矩阵只是期待值；helper 宏是候选编译目标观察，不能改名为独立操作系统进程观察。Windows 分支现在编排一次直接 `CreateProcess` 风格的候选 `--version` 观察，并核精确版本输出及运行前后产物摘要；该草稿尚未远端调度，所以实际进程仍为 NOT_RUN。PE 头只能说明映像架构，WinARM 上不能据此声称 ARM 原生进程。六种输出目标未在本草稿逐一生成或验证，全部独立保留 NOT_RUN，不能把六个 runner 或一个 APE 的切片当作六目标执行通过。
 
-Windows 的必要后续工作包括：真正的 JobObject 进程树 watchdog、直接 CreateProcess/ArgumentList APE 启动、原生路径/模块软链、source identity 的目录 API、注册表执行器。现有 `tp_analyze` 要求 POSIX 绝对根，现有 `np_run` 依赖 fork；本草稿不改共享接口、不转用 Git Bash 掩盖差异，也不在 Windows 调用 `np_run`。这些缺口必须先解决，才可加入真实候选执行观察。
+Windows 的必要后续工作包括：真正的 JobObject 进程树 watchdog、原生路径/模块软链、source identity 的目录 API、注册表执行器。草稿已为无子进程的 `--version` 加入直接 `ProcessStartInfo.ArgumentList` 启动；还没有远端实测，也不能将它扩成需要后代清理的功能执行。现有 `tp_analyze` 要求 POSIX 绝对根，现有 `np_run` 依赖 fork；本草稿不改共享接口、不转用 Git Bash 掩盖差异，也不在 Windows 调用 `np_run`。这些缺口必须先解决，才可加入功能候选执行观察。
 
 ## 调度与结果
 
@@ -77,3 +77,5 @@ POSIX 分支按序尝试来源摘要、CX 元数据和当前 `tests/run.cx --all
 ## 本地验证边界
 
 2026-10-26：官方 actionlint v1.7.12 校验和匹配，新工作流静态 lint 返回0；官方 PowerShell 7.6.8 Linux x64 发行包 SHA256 与发布页一致，提取的四段 run 脚本全部 ParseFile 语法错误数0，未执行工作流代码。CX helper 默认-run 元数据自测11断言0；缺必要输入返回2。PowerShell 独立计算的六文件计划摘要与 CX 相同；摘要只绑定当时的本地输入，不作为未来候选或 CI 证据。原日志在 `out/c43-candidate-{actionlint-01,pwsh-parse-01,plan-host-01,plan-cx-02}.log`、`out/c43-ci-candidate-{controls-02,absent-input-01}.log`。没有执行任何功能子批次、source identity 重算、产品构造、远端 CI 或上传。
+
+2026-10-27：Windows 分支补入直接启动 PE 的 `--version` 单进程观察，仍明确退出3/NOT_READY，功能、来源闭包和六目标继续 NOT_RUN。当前主树 `out/actionlint` 对修改后工作流返回0；用本地 PowerShell 7.6.8 解析新第三段 run 脚本，ParseFile 错误数0。未在 Windows 运行，此静态证据不授候选进程实跑资格。
