@@ -1,0 +1,346 @@
+#!/usr/bin/env -S unisacc.com -run
+/* cxtrunc.cx -- CX4 truncation ratchet of plans/cx-modules.md.
+   Counts discarded calls of snprintf, strncpy and memcpy whose length can
+   depend on input. Comments and string or character literals do not count.
+   A call is discarded when it is a statement: the previous token is ';',
+   '{', '}', ')', or the keywords else or do. An assignment or a use inside
+   if, while, return or another call is not this class, because the result
+   is kept. snprintf and strncpy count when that bound is sizeof or a
+   decimal literal and, for snprintf, the format can grow with an argument.
+   memcpy counts when its length is not that kind of bound. The count only
+   goes down. A new .cx with no row is held at 0. This file's own count
+   must stay 0: the samples below sit in a comment and in strings.
+   usage, from the repo root:
+     sh ./unisacc.com -run tests/cxtrunc.cx -- --check
+     sh ./unisacc.com -run tests/cxtrunc.cx -- --write
+*/
+#define BASELINE "tests/cxtrunc.tsv"
+#define MAXROWS 4096
+
+/* strncpy(dst, src, 8); must not count: this line is a comment. */
+
+static const char *cxtrunc_bad =
+    "void f(void){ snprintf(buf, sizeof buf, \"%s\", name); strncpy(dst, src, 8); memcpy(dst, src, n); }";
+static const char *cxtrunc_kept =
+    "void f(void){ if (snprintf(buf, sizeof buf, \"%s\", name) < 0) return 1; int n = snprintf(buf, sizeof buf, \"%s\", name); }";
+static const char *cxtrunc_note =
+    "/* snprintf(buf, sizeof buf, \"%s\", name); strncpy(dst, src, 8); memcpy(dst, src, n); */\n";
+static const char *cxtrunc_lit =
+    "const char *s = \"snprintf(buf, sizeof buf, \\\"%s\\\", name);\";\n";
+
+typedef struct { char *path; int count; int used; } Row;
+static Row rows[MAXROWS];
+static int nrows;
+
+static int is_ws(int c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
+}
+static int is_id(int c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || (c >= '0' && c <= '9');
+}
+static int is_start(int c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+}
+static int name_is(const char *s, size_t n, const char *w) {
+    size_t m = 0;
+    while (w[m]) m++;
+    if (n != m) return 0;
+    return memcmp(s, w, m) == 0;
+}
+static int word_at(const char *b, size_t n, size_t i, const char *w) {
+    size_t m = 0;
+    while (w[m]) m++;
+    if (i + m > n || memcmp(b + i, w, m) != 0) return 0;
+    if (i && is_id((unsigned char)b[i - 1])) return 0;
+    if (i + m < n && is_id((unsigned char)b[i + m])) return 0;
+    return 1;
+}
+
+/* 1 when the call's value is thrown away. name_at is the first letter. */
+static int discarded(const char *b, size_t name_at) {
+    size_t i = name_at;
+    while (i > 0 && is_ws((unsigned char)b[i - 1])) i--;
+    if (i == 0) return 1;
+    if (b[i - 1] == ';' || b[i - 1] == '{' || b[i - 1] == '}' || b[i - 1] == ')') return 1;
+    if (is_id((unsigned char)b[i - 1])) {
+        size_t j = i;
+        while (j > 0 && is_id((unsigned char)b[j - 1])) j--;
+        if (word_at(b, i, j, "else") || word_at(b, i, j, "do")) return 1;
+    }
+    return 0;
+}
+
+/* sizeof or a decimal literal, after spaces. Casts in front still fail closed. */
+static int is_bound(const char *s, size_t n) {
+    size_t i = 0;
+    while (i < n && is_ws((unsigned char)s[i])) i++;
+    if (word_at(s, n, i, "sizeof")) return 1;
+    if (i < n && s[i] >= '0' && s[i] <= '9') return 1;
+    return 0;
+}
+
+/* A string literal whose format has a conversion other than %% can grow. */
+static int format_grows(const char *s, size_t n) {
+    size_t i = 0;
+    while (i < n && is_ws((unsigned char)s[i])) i++;
+    if (i >= n || s[i] != '"') return 1;
+    i++;
+    while (i < n) {
+        if (s[i] == '\\' && i + 1 < n) { i += 2; continue; }
+        if (s[i] == '"') return 0;
+        if (s[i] == '%') {
+            if (i + 1 < n && s[i + 1] == '%') { i += 2; continue; }
+            return 1;
+        }
+        i++;
+    }
+    return 1;
+}
+
+static int starts_string(const char *s, size_t n) {
+    size_t i = 0;
+    while (i < n && is_ws((unsigned char)s[i])) i++;
+    return i < n && s[i] == '"';
+}
+
+/* Fill up to 4 argument spans inside the call that opens at 'open' ('('). */
+static int call_args(const char *b, size_t n, size_t open, size_t *from, size_t *to, int *nargs) {
+    size_t i = open + 1, start = open + 1;
+    int depth = 1, mode = 0, k = 0;
+    *nargs = 0;
+    while (i < n) {
+        char ch = b[i];
+        if (mode == 1) {
+            if (ch == '\n') mode = 0;
+            i++;
+            continue;
+        }
+        if (mode == 2) {
+            if (ch == '*' && i + 1 < n && b[i + 1] == '/') { mode = 0; i += 2; continue; }
+            i++;
+            continue;
+        }
+        if (mode == 3 || mode == 4) {
+            if (ch == '\\' && i + 1 < n) { i += 2; continue; }
+            if ((mode == 3 && ch == '"') || (mode == 4 && ch == '\'')) mode = 0;
+            i++;
+            continue;
+        }
+        if (ch == '/' && i + 1 < n && b[i + 1] == '/') { mode = 1; i += 2; continue; }
+        if (ch == '/' && i + 1 < n && b[i + 1] == '*') { mode = 2; i += 2; continue; }
+        if (ch == '"') { mode = 3; i++; continue; }
+        if (ch == '\'') { mode = 4; i++; continue; }
+        if (ch == '(') { depth++; i++; continue; }
+        if (ch == ')') {
+            depth--;
+            if (depth == 0) {
+                if (k < 4 && i > start) { from[k] = start; to[k] = i; k++; }
+                *nargs = k;
+                return 1;
+            }
+            i++;
+            continue;
+        }
+        if (ch == ',' && depth == 1) {
+            if (k < 4) { from[k] = start; to[k] = i; k++; }
+            start = i + 1;
+            i++;
+            continue;
+        }
+        i++;
+    }
+    return 0;
+}
+
+static int truncation_call(const char *b, size_t n, size_t name, size_t name_n, size_t open) {
+    size_t from[4], to[4];
+    int nargs = 0, kind;
+    if (!discarded(b, name)) return 0;
+    if (!call_args(b, n, open, from, to, &nargs)) return 0;
+    if (name_is(b + name, name_n, "snprintf")) kind = 1;
+    else if (name_is(b + name, name_n, "strncpy")) kind = 2;
+    else if (name_is(b + name, name_n, "memcpy")) kind = 3;
+    else return 0;
+    if (kind == 1) {
+        if (nargs < 3) return 0;
+        if (!is_bound(b + from[1], to[1] - from[1])) return 0;
+        return format_grows(b + from[2], to[2] - from[2]);
+    }
+    if (kind == 2) {
+        if (nargs < 3) return 0;
+        if (!is_bound(b + from[2], to[2] - from[2])) return 0;
+        return !starts_string(b + from[1], to[1] - from[1]);
+    }
+    if (nargs < 3) return 0;
+    return !is_bound(b + from[2], to[2] - from[2]);
+}
+
+static int count_trunc(const char *b, size_t n) {
+    size_t i = 0;
+    int c = 0, mode = 0;
+    while (i < n) {
+        char ch = b[i];
+        if (mode == 1) {
+            if (ch == '\n') mode = 0;
+            i++;
+            continue;
+        }
+        if (mode == 2) {
+            if (ch == '*' && i + 1 < n && b[i + 1] == '/') { mode = 0; i += 2; continue; }
+            i++;
+            continue;
+        }
+        if (mode == 3 || mode == 4) {
+            if (ch == '\\' && i + 1 < n) { i += 2; continue; }
+            if ((mode == 3 && ch == '"') || (mode == 4 && ch == '\'')) mode = 0;
+            i++;
+            continue;
+        }
+        if (ch == '/' && i + 1 < n && b[i + 1] == '/') { mode = 1; i += 2; continue; }
+        if (ch == '/' && i + 1 < n && b[i + 1] == '*') { mode = 2; i += 2; continue; }
+        if (ch == '"') { mode = 3; i++; continue; }
+        if (ch == '\'') { mode = 4; i++; continue; }
+        if (is_start((unsigned char)ch) && (i == 0 || !is_id((unsigned char)b[i - 1]))) {
+            size_t a = i, j;
+            i++;
+            while (i < n && is_id((unsigned char)b[i])) i++;
+            if (name_is(b + a, i - a, "snprintf") || name_is(b + a, i - a, "strncpy") || name_is(b + a, i - a, "memcpy")) {
+                j = i;
+                while (j < n && is_ws((unsigned char)b[j])) j++;
+                if (j < n && b[j] == '(' && truncation_call(b, n, a, i - a, j)) c++;
+            }
+            continue;
+        }
+        i++;
+    }
+    return c;
+}
+
+static int self_check(void) {
+    size_t n = 0;
+    char *self = cx_read("tests/cxtrunc.cx", &n);
+    int bad, kept, note, lit, own;
+    if (!self) { fprintf(stderr, "cxtrunc: cannot read self\n"); return 0; }
+    own = count_trunc(self, n);
+    free(self);
+    bad = count_trunc(cxtrunc_bad, strlen(cxtrunc_bad));
+    kept = count_trunc(cxtrunc_kept, strlen(cxtrunc_kept));
+    note = count_trunc(cxtrunc_note, strlen(cxtrunc_note));
+    lit = count_trunc(cxtrunc_lit, strlen(cxtrunc_lit));
+    if (own != 0 || bad != 3 || kept != 0 || note != 0 || lit != 0) {
+        fprintf(stderr, "cxtrunc: scanner self-check failed own=%d bad=%d kept=%d note=%d lit=%d\n",
+                own, bad, kept, note, lit);
+        return 0;
+    }
+    return 1;
+}
+
+static int load_baseline(void) {
+    size_t n, i = 0, e, t; char *b = cx_read(BASELINE, &n);
+    if (!b) { fprintf(stderr, "cxtrunc: cannot read %s (run --write once)\n", BASELINE); return -1; }
+    while (i < n) {
+        e = i; while (e < n && b[e] != '\n') e++;
+        if (e < n) b[e] = 0;
+        if (e > i && b[e - 1] == '\r') b[e - 1] = 0;
+        if (e > i && b[i] != '#') {
+            char *line = b + i, *tab = strchr(line, '\t'), *end; long v;
+            if (!tab || nrows == MAXROWS) { fprintf(stderr, "cxtrunc: %s: bad row '%s'\n", BASELINE, line); free(b); return -1; }
+            *tab = 0; v = strtol(tab + 1, &end, 10);
+            if (end == tab + 1 || *end || v < 0) { fprintf(stderr, "cxtrunc: %s: bad count for %s\n", BASELINE, line); free(b); return -1; }
+            t = strlen(line) + 1; rows[nrows].path = malloc(t);
+            if (!rows[nrows].path) { free(b); return -1; }
+            { size_t k; for (k = 0; k < t; k++) rows[nrows].path[k] = line[k]; }
+            rows[nrows].count = (int)v; rows[nrows].used = 0; nrows++;
+        }
+        i = e + 1;
+    }
+    free(b); return 0;
+}
+
+static Row *find_row(const char *path) {
+    int k;
+    for (k = 0; k < nrows; k++) if (!strcmp(rows[k].path, path)) return &rows[k];
+    return 0;
+}
+
+static int append(char **buf, size_t *len, size_t *cap, const char *s) {
+    size_t n = strlen(s), k; char *t;
+    if (*len + n + 1 > *cap) {
+        *cap = (*len + n + 1) * 2; t = realloc(*buf, *cap);
+        if (!t) return -1;
+        *buf = t;
+    }
+    for (k = 0; k < n + 1; k++) (*buf)[*len + k] = s[k];
+    *len += n; return 0;
+}
+
+static int append_row(char **buf, size_t *len, size_t *cap, const char *path, int count) {
+    char num[24];
+    int v = count, r = 0, i;
+    char rev[16];
+    if (append(buf, len, cap, path) < 0) return -1;
+    if (append(buf, len, cap, "\t") < 0) return -1;
+    if (v == 0) num[r++] = '0';
+    else {
+        while (v) { rev[i = r++] = (char)('0' + v % 10); v /= 10; (void)i; }
+        for (i = 0; i < r / 2; i++) { char s = rev[i]; rev[i] = rev[r - 1 - i]; rev[r - 1 - i] = s; }
+        for (i = 0; i < r; i++) num[i] = rev[i];
+    }
+    num[r++] = '\n'; num[r] = 0;
+    return append(buf, len, cap, num);
+}
+
+int main(int argc, char **argv) {
+    char *list = 0, *cdup = 0, *p, *end, *out = 0; size_t ln = 0, cl = 0, olen = 0, ocap = 0;
+    int check, files = 0, total = 0, over = 0, under = 0, base_total = 0, k, rc;
+    if (argc != 2 || (strcmp(argv[1], "--check") && strcmp(argv[1], "--write"))) {
+        fprintf(stderr, "usage: cxtrunc.cx --check | --write   (from the repo root)\n"); return 2;
+    }
+    if (!self_check()) return 2;
+    check = !strcmp(argv[1], "--check");
+    rc = cx_run("git rev-parse --show-cdup", &cdup, &cl);
+    if (rc != 0 || !cdup || cl > 1) { fprintf(stderr, "cxtrunc: run from the repo root\n"); return 2; }
+    if (check && load_baseline() < 0) return 2;
+    rc = cx_run("git ls-files -z -- '*.cx'", &list, &ln);
+    if (rc != 0 || !list) { fprintf(stderr, "cxtrunc: git ls-files failed (rc %d)\n", rc); return 2; }
+    if (!check) {
+        append(&out, &olen, &ocap, "# tests/cxtrunc.tsv -- written by tests/cxtrunc.cx --write.\n");
+        append(&out, &olen, &ocap, "# Discarded snprintf/strncpy/memcpy whose length can depend on input.\n");
+        append(&out, &olen, &ocap, "# Comments and literals do not count. Rows only for counts above 0.\n");
+        append(&out, &olen, &ocap, "# Counts only go down (plans/cx-modules.md CX4). A missing row is held at 0.\n");
+        append(&out, &olen, &ocap, "# path\tcalls\n");
+    }
+    for (p = list, end = list + ln; p < end; p += strlen(p) + 1) {
+        size_t n; char *src; int c; Row *r;
+        if (!*p) continue;
+        src = cx_read(p, &n);
+        c = src ? count_trunc(src, n) : 0;
+        free(src);
+        files++; total += c;
+        if (check) {
+            r = find_row(p);
+            if (r) r->used = 1;
+            if (c > (r ? r->count : 0)) {
+                if (r) printf("cxtrunc: %s has %d calls, baseline %d\n", p, c, r->count);
+                else printf("cxtrunc: %s has %d calls and no baseline row (a new .cx must have 0)\n", p, c);
+                over++;
+            } else if (r && c < r->count) under++;
+        } else if (c > 0) {
+            if (append_row(&out, &olen, &ocap, p, c) < 0) { fprintf(stderr, "cxtrunc: out of memory\n"); return 2; }
+        }
+    }
+    free(list); free(cdup);
+    if (!check) {
+        if (cx_write(BASELINE, out, olen) != 0) { fprintf(stderr, "cxtrunc: cannot write %s\n", BASELINE); return 2; }
+        free(out);
+        printf("cxtrunc: wrote %s: %d .cx files, %d calls\n", BASELINE, files, total);
+        return 0;
+    }
+    for (k = 0; k < nrows; k++) {
+        base_total += rows[k].count;
+        if (!rows[k].used) printf("cxtrunc: stale row %s (not a tracked .cx; --write drops it)\n", rows[k].path);
+    }
+    printf("cxtrunc: %s: %d .cx files, %d calls (baseline %d); %d above baseline, %d below (--write ratchets down)\n",
+           over ? "FAIL" : "ok", files, total, base_total, over, under);
+    return over ? 1 : 0;
+}
