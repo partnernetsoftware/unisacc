@@ -1,0 +1,64 @@
+#pragma unisa module cxlab
+/* Lab helpers shared by the cx-lab scripts. TSV loader and command median from
+   the old cxlab.h. No include. cxlab_now stayed behind: it needed sys/time.h,
+   which the prelude does not provide, and no caller used it. */
+enum { CXLAB_MAXCOL = 6, CXLAB_COLW = 32 };
+
+typedef struct { char f[CXLAB_MAXCOL][CXLAB_COLW]; } cxlab_row_t;
+
+/* splits one line on '\t' into row->f[0..ncols-1]; trailing fields are empty */
+static void cxlab_split_tsv(const char *line, cxlab_row_t *row, int ncols) {
+    int col = 0, i; const char *p = line;
+    for (col = 0; col < ncols; col++) row->f[col][0] = 0;
+    col = 0;
+    while (*p && col < ncols) {
+        i = 0;
+        while (*p && *p != '\t' && *p != '\n') { if (i < CXLAB_COLW - 1) row->f[col][i++] = *p; p++; }
+        row->f[col][i] = 0;
+        col++;
+        if (*p == '\t') p++;
+    }
+}
+
+/* data rows only: skip '#' comments and the header line. -1 if path cannot be read. */
+int cxlab_load_tsv(const char *path, cxlab_row_t *rows, int maxrows, int ncols) {
+    size_t len; char *text = cx_read(path, &len), *line, *nl;
+    int n = 0, header_skipped = 0;
+    if (!text) return -1;
+    line = text;
+    while (line && *line && n < maxrows) {
+        nl = strchr(line, '\n');
+        if (nl) *nl = 0;
+        if (line[0] != '#' && line[0] != 0) {
+            if (!header_skipped) header_skipped = 1;
+            else { cxlab_split_tsv(line, &rows[n], ncols); n++; }
+        }
+        line = nl ? nl + 1 : 0;
+    }
+    free(text);
+    return n;
+}
+
+static double cxlab_median(double *xs, int n) {
+    int i, j; double tmp;
+    for (i = 0; i < n - 1; i++)
+        for (j = i + 1; j < n; j++)
+            if (xs[j] < xs[i]) { tmp = xs[i]; xs[i] = xs[j]; xs[j] = tmp; }
+    return xs[n / 2];
+}
+
+/* Median elapsed seconds of `cmd`, measured inside the child by bash time.
+   *rc_out receives the last command status. secs bounds each run. */
+double cxlab_timed_median(const char *cmd, int repeats, int secs, int *rc_out) {
+    double xs[16]; int i, rc = 0; char *out; size_t n; char wrapped[1024];
+    if (repeats > 16) repeats = 16;
+    snprintf(wrapped, sizeof wrapped,
+             "bash -c 'TIMEFORMAT=%%R; { time ( %s >/dev/null 2>/dev/null ) ; } 2>&1'", cmd);
+    for (i = 0; i < repeats; i++) {
+        rc = cx_run_timeout(wrapped, secs, &out, &n);
+        xs[i] = out ? strtod(out, 0) : 0.0;
+        free(out);
+    }
+    if (rc_out) *rc_out = rc;
+    return cxlab_median(xs, repeats);
+}
