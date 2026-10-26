@@ -746,12 +746,22 @@ restrictions remain. The separately authorized csr private C44 v6 report of
 approximately0.07s is not main43 qualification; its size+mtime shortcut is
 not accepted into43, and -run reuse is not implemented in main.
 
-Two separate SOURCE/lnx_x86_64/55 batches are now registered as
-IMPLEMENTED, not PASS. Strict --list actually returned0 in
+Before registration of the adopted-package gate below, the origin and NI
+SOURCE/lnx_x86_64/55 registrations were strictly parsed as IMPLEMENTED,
+not PASS. Strict --list actually returned0 in
 out/c43-adoption-testplan-list-01.log: metadata_valid1,98 batches,
 79 implemented/19 planned/63 unprepared,113 coverage,
 94 implemented/19 unresolved,executed0/NOT_EXECUTED. This parses metadata;
-it does not execute batches.
+it does not execute batches. The corresponding latest actual original20
+--all returned3 in out/c43-adoption-testplan-all-01.log:
+113 coverage/94 implemented/19 unresolved,97 NOT_RUN batches and78 NOT_RUN
+coverage,SMOKE16/0,executed_subprocess_batches0. Those counts precede the
+new adopted-package registration. Post-edit strict --list now actually
+returned0 in out/c43-adopted-package-testplan-list-01.log: metadata_valid1,
+99 batches/80 implemented/19 planned/64 unprepared,114 coverage/95
+implemented/19 unresolved,executed0/NOT_EXECUTED. These are actual inventory
+counts, not batch execution or qualification. Older111/92 and109/90 evidence
+below remains historical.
 
 * construction.origin-package: finite37-check origin gate, with materials
   source-origin, source-origin-verifier, source-origin-profile and
@@ -766,11 +776,31 @@ a verdict. These gates do not cover DAG-leaf/status/extra-directory/
 execute-bit/parent-symlink/normal-v1-alias mutations or NI data/Cdep/domain
 mutations, OS-cold behavior, foreign hosts or full PP equivalence.
 
-The adopted-snapshot adapter also completed default-run development testing:
-out/c43-adoptedsnapshot-probe-run-01.log, original55,15/0,
-seven non-mutating negative controls and one full positive endpoint,
-own51 reads/9.355677247s. This is module development verification, not RB3
-integration or candidate qualification.
+The adopted-snapshot adapter now has a separate permanent gate,
+`construction.adopted-package`, registered SOURCE/lnx_x86_64/55 IMPLEMENTED,
+not broad candidate qualification. `tests/adopted-package.cx` takes exactly
+`ROOT PC FRESH_SID`; registry materials are `adopted-package` (sealed PC)
+and `current-source-id` (the actual independently measured64-hex current SID
+value, not a source record or filename). Expectation: `rc0:ADOPTED_SNAPSHOT`.
+Actual invocation in this checkout:
+
+```sh
+tools/bound 55 sh ./unisacc.com -I /home/devali/repos/unisacc/include tests/adopted-package.cx -- /home/devali/repos/unisacc /home/devali/repos/unisacc/out/c43-adopted-package-01 0d59237f3250b59514a55ff529c77b665033e5feb71061f6fcaded0c7ef925c0
+```
+
+The probe out/c43-adoptedsnapshot-probe-run-01.log and permanent
+out/c43-adopted-package-permanent-run-01.log each actually completed
+original55 rc0/15/0. All15 obligations are retained: seven non-mutating
+argument/SID/canonical-path controls and one actual positive single endpoint,
+with full prefilled-output clearing where present. The probe's own51 reads
+took9.355677247s; the permanent run's own51 took8.958785555s. Both retain the
+actual pinned controller/source and separately named controller-bootstrap
+P53/21704 role, which does not relabel NN epoch447/e084.
+Neither run is RB kind3 integration, source/body mutation coverage, NN
+functional qualification or a four-endpoint fixed point. Original30 and
+the19 broad gaps remain. Root's post-registration strict --list returned0
+with the actual99-batch/114-coverage inventory above; completed batch
+scheduling or qualification is not claimed.
 
 Historical registry evidence before the two new registrations: original20 --list completed rc0 in
 `out/c43-fclose-testplan-list-01.log`, metadata_valid1,96 batches (77
