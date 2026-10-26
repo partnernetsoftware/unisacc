@@ -51,7 +51,8 @@ static unsigned char *rl_readfile(const char *path, size_t *n) {
     unsigned char *b; int saved;
 #ifndef _WIN32
     int fd; struct stat st; size_t size, at = 0;
-    errno = 0; fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    /* Refuse symlink blobs; regular-file and size checks remain. */
+    errno = 0; fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) return 0;
     if (fstat(fd, &st)) { saved = errno ? errno : EIO; close(fd); errno = saved; return 0; }
     if (!S_ISREG(st.st_mode)) { saved = S_ISDIR(st.st_mode) ? EISDIR : EINVAL; close(fd); errno = saved; return 0; }
@@ -242,7 +243,8 @@ typedef struct { const unsigned char *key; int kn; const unsigned char *data; in
    format tape|image|run|object, warn before multi.  A prefix before the target is not a driver shape and is refused. */
 static inline int rl_token_is(const char *p, size_t n, const char *tok) { return strlen(tok) == n && !memcmp(p, tok, n); }
 static inline int rl_stage_label_ok(const char *label) {
-    static const char *stages[] = {"e3", "lower"}, *targets[] = {"lnx", "osx", "win"}, *arches[] = {"x86_64", "arm64"},
+    /* "source" binds image front-end input; e3 binds the token input. */
+    static const char *stages[] = {"e3", "lower", "source"}, *targets[] = {"lnx", "osx", "win"}, *arches[] = {"x86_64", "arm64"},
                        *formats[] = {"tape", "image", "run", "object"};
     const char *colon = label ? strchr(label, ':') : 0, *r, *q; size_t i, n; int ok;
     if (!colon) return 0;

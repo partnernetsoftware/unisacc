@@ -626,6 +626,7 @@ static void record_file_absent(const char *path) {
    RI, package resources and disk are not consulted.  A key the ledger does not list is MISSING: a named interface failure. */
 UNISA_RUNTIME_STATE int RF_STRICT=0, RF_LOADED=0;
 UNISA_RUNTIME_STATE RLLedger RF_LEDGER;
+UNISA_RUNTIME_STATE char RF_LEDGER_DIR[4096];
 static int rf_default_fetch(const unsigned char *p,int n,unsigned char **bytes,int *len);
 UNISA_RUNTIME_STATE int RF_TRACE_STARTED;
 static int rf_trace_finish(void) {
@@ -646,6 +647,11 @@ static const char *rf_capture_dir(void) {
 UNISA_RUNTIME_STATE int RF_CAPC,RF_CAPACTIVE;
 UNISA_RUNTIME_STATE long RF_CAPOWNER;
 UNISA_RUNTIME_STATE char RF_CAPDIR[4096];
+enum { RF_CAP_MAX = 4096 };
+/* Same capacity contract for front-end rows and the e3-identity tip row. */
+static int rf_cap_full(void) {
+    return RF_CAPC >= RF_CAP_MAX;
+}
 static int rf_cap_path(char *p, size_t cap, const char *dir, const char *name, char *err, size_t errn) {
     int z = snprintf(p, cap, "%s/%s", dir, name);
     if (z < 0 || (size_t)z >= cap) { snprintf(err, errn, "INTERFACE_ERROR capture-path-too-long"); return 1; }
@@ -699,7 +705,7 @@ static void rf_capture_record(const unsigned char *p,int n,int owned,unsigned ch
     if (!dir || !RF_CAPACTIVE || strcmp(dir,RF_CAPDIR) || RF_CAPOWNER!=(long)getpid()) die("INTERFACE_ERROR capture-session-not-initialized");
     if (n<=0||n>512||!p) die("INTERFACE_ERROR capture-key-length");
     if (owned<0||owned>2||len<0||(present&&len>0&&!bytes)) die("INTERFACE_ERROR capture-answer-invalid");
-    if (RF_CAPC>=4096) die("INTERFACE_ERROR capture-capacity-exceeded");
+    if (rf_cap_full()) die("INTERFACE_ERROR capture-capacity-exceeded");
     for(int i=0;i<n;i++){hex[2*i]="0123456789abcdef"[p[i]>>4];hex[2*i+1]="0123456789abcdef"[p[i]&15];}hex[2*n]=0;
     if(present){
         unisa_sha256_hex(bytes,(size_t)len,sha);snprintf(name,sizeof name,"resource-%03d.bytes",RF_CAPC);
@@ -749,11 +755,178 @@ static int rf_stage_label(char *dst,size_t cap,const char *stage_name,const char
 }
 static int rf_identity_gate(const unsigned char *input,int n,int mode,const char *route,const char *stage_name) {
     char err[512], stage[160];
-    if (mode != 2 || !route || !strstr(route,"/tape/O")) { fprintf(stderr, "unisacc: INTERFACE_ERROR resource-route-unsupported %s (strict and capture cover the tape route only)\n", route?route:"-"); return 2; }
+    int tape_ok = mode == 2 && route && strstr(route,"/tape/O");
+    /* Image RI: e3 identity may bind …/image/O* when mode is image.
+       Tape keeps its existing mode==2+/tape/O contract. Other routes still refuse. */
+    int image_ok = mode == 0 && route && strstr(route,"/image/O");
+    if (!tape_ok && !image_ok) { fprintf(stderr, "unisacc: INTERFACE_ERROR resource-route-unsupported %s (strict and capture cover tape and image routes only)\n", route?route:"-"); return 2; }
     if (!rf_stage_label(stage,sizeof stage,stage_name,route)) { fprintf(stderr,"unisacc: INTERFACE_ERROR capture-stage-label\n"); return 2; }
     if (RF_STRICT && rl_check_identity(&RF_LEDGER, stage, input, n, err, sizeof err)) { fprintf(stderr, "unisacc: %s\n", err); return 2; }
     if (rf_capture_dir() && rf_identity_write_capture(rf_capture_dir(), stage, input, n, err, sizeof err)) { fprintf(stderr, "unisacc: %s\n", err); return 2; }
     if (RF_STRICT) { RF_LEDGER.cursor = 0; RF_TRACE_STARTED = 1; }
+    return 0;
+}
+/* E3 identity material: E1 token bytes + attribute stream + route is in the stage label. */
+static unsigned char *rf_e3_identity_bytes(const unsigned char *tokens,int tn,const unsigned char *attrs,int an,int *out_n) {
+    size_t total; unsigned char *b; int j;
+    if (tn < 0 || an < 0 || (tn > 0 && !tokens) || (an > 0 && !attrs) || !out_n) return 0;
+    total = 8 + (size_t)tn + (size_t)an;
+    if (total > 0x7fffffff) return 0;
+    b = malloc(total ? total : 1); if (!b) return 0;
+    for (j = 0; j < 4; j++) b[j] = (unsigned char)(((unsigned)tn >> (8 * j)) & 255);
+    if (tn) memcpy(b + 4, tokens, (size_t)tn);
+    for (j = 0; j < 4; j++) b[4 + tn + j] = (unsigned char)(((unsigned)an >> (8 * j)) & 255);
+    if (an) memcpy(b + 8 + tn, attrs, (size_t)an);
+    *out_n = (int)total; return b;
+}
+/* Parse exact single-line e3 companion bytes (must end in '\n', no NULs/extra lines). */
+static int rf_parse_e3_identity_bytes(const unsigned char *b,int n,char *stage,size_t stage_cap,char hex[65]) {
+    const char *s, *t, *v; size_t sn, i;
+    if (n < 20 || !b || b[n - 1] != '\n') return 0;
+    /* Exact single-line receipt: no NULs, no trailing junk after the newline. */
+    for (i = 0; i < (size_t)(n - 1); i++) if (b[i] == 0 || b[i] == '\n') return 0;
+    if (n - 1 >= (int)sizeof(char) * 512) return 0;
+    { char line[512]; if ((size_t)n > sizeof line) return 0; memcpy(line,b,(size_t)n); line[n - 1] = 0;
+      if (strncmp(line,"#SC2\tstage=",11)) return 0;
+      s = line + 11; t = strchr(s,'\t'); if (!t) return 0;
+      sn = (size_t)(t - s); if (sn == 0 || sn >= stage_cap) return 0;
+      memcpy(stage,s,sn); stage[sn] = 0;
+      v = t + 1; if (strncmp(v,"input_sha256=",13) || strlen(v + 13) != 64) return 0;
+      for (i = 0; i < 64; i++) {
+        char c = v[13 + i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
+        hex[i] = c;
+      }
+      hex[64] = 0;
+      if (v[13 + 64] != 0) return 0;
+    }
+    return 1;
+}
+/* Key that binds the e3 companion into the same SC2 ordered pack as front-end events. */
+static const unsigned char RF_E3_ID_KEY[] = {'\0','r','i','/','e','3','-','i','d','e','n','t','i','t','y'};
+enum { RF_E3_ID_KEY_N = 15, RF_E3_ID_MAX = 512 };
+/* Bounded regular full-file read of e3-identity.tsv. Authority is the entire file
+ * (size, unique trailing LF, no NUL/extra lines, 64 lowercase hex) — never fgets. */
+static int rf_e3_read_companion(const char *dir, unsigned char **out, int *out_n, char *err, size_t errn) {
+#ifdef _WIN32
+    (void)dir; (void)out; (void)out_n;
+    snprintf(err, errn, "INTERFACE_ERROR resource-e3-identity-unsupported-platform");
+    return 1;
+#else
+    char path[4096]; unsigned char *b; size_t n = 0; int z;
+    if (!dir || !*dir || !out || !out_n) {
+        snprintf(err, errn, "INTERFACE_ERROR resource-e3-identity-absent"); return 1;
+    }
+    z = snprintf(path, sizeof path, "%s/e3-identity.tsv", dir);
+    if (z < 0 || (size_t)z >= sizeof path) {
+        snprintf(err, errn, "INTERFACE_ERROR resource-e3-identity-path"); return 1;
+    }
+    errno = 0; b = rl_readfile(path, &n);
+    if (!b) {
+        if (errno == ENOENT) snprintf(err, errn, "INTERFACE_ERROR resource-e3-identity-absent");
+        else if (errno == ELOOP) snprintf(err, errn, "INTERFACE_ERROR resource-e3-identity-symlink");
+        else snprintf(err, errn, "INTERFACE_ERROR resource-e3-identity-read-failed errno=%d", errno);
+        return 1;
+    }
+    if (n == 0 || n > (size_t)RF_E3_ID_MAX) {
+        free(b);
+        snprintf(err, errn, n ? "INTERFACE_ERROR resource-e3-identity-too-large" : "INTERFACE_ERROR resource-e3-identity-absent");
+        return 1;
+    }
+    *out = b; *out_n = (int)n; return 0;
+#endif
+}
+/* Second-segment e3 identity: companion e3-identity.tsv is SC2 row \0ri/e3-identity blob.
+ * Strict path re-reads that regular file in full and requires exact bytes == expected line. */
+static int rf_e3_second_identity(const unsigned char *input,int n,int mode,const char *route) {
+    char stage[160], err[512], line[512], hex[65], got_stage[160], got_hex[65];
+    const char *dir; int ln;
+    if (mode != 0 || !route || !strstr(route,"/image/O")) {
+        fprintf(stderr,"unisacc: INTERFACE_ERROR resource-route-unsupported %s (e3 second identity is image-only)\n", route?route:"-");
+        return 2;
+    }
+    if (!rf_stage_label(stage,sizeof stage,"e3",route)) {
+        fprintf(stderr,"unisacc: INTERFACE_ERROR capture-stage-label\n"); return 2;
+    }
+    rl_input_hex(input,n,hex);
+    if (!rl_identity_line(line,sizeof line,stage,hex)) { fprintf(stderr,"unisacc: INTERFACE_ERROR capture-stage-label\n"); return 2; }
+    line[3] = '2';
+    ln = (int)strlen(line);
+    if (ln <= 0 || ln >= (int)sizeof line) { fprintf(stderr,"unisacc: INTERFACE_ERROR capture-stage-label\n"); return 2; }
+    /* Capture: capacity first (same 4096 contract as rf_capture_record), then companion + SC2 row.
+     * Refuse before creating e3-identity.tsv so a full pack never leaves a partial companion. */
+    if (rf_capture_dir()) {
+        char e3path[4096], path[4096], row[1280], hkey[64], sha[65]; int i, rz;
+        dir = rf_capture_dir();
+        if (rf_cap_full()) {
+            fprintf(stderr,"unisacc: INTERFACE_ERROR capture-capacity-exceeded\n"); return 2;
+        }
+        if (rf_cap_new_file(dir,"e3-identity.tsv",(const unsigned char *)line,(size_t)ln,err,sizeof err)) {
+            fprintf(stderr,"unisacc: %s\n", err); return 2;
+        }
+        for (i = 0; i < RF_E3_ID_KEY_N; i++) {
+            hkey[2 * i] = "0123456789abcdef"[RF_E3_ID_KEY[i] >> 4];
+            hkey[2 * i + 1] = "0123456789abcdef"[RF_E3_ID_KEY[i] & 15];
+        }
+        hkey[2 * RF_E3_ID_KEY_N] = 0;
+        unisa_sha256_hex((const unsigned char *)line,(size_t)ln,sha);
+        rz = snprintf(row,sizeof row,"%s\t1\te3-identity.tsv\t%d\t%s\n",hkey,ln,sha);
+        if (rz < 0 || (size_t)rz >= sizeof row) {
+            if (!rf_cap_path(e3path,sizeof e3path,dir,"e3-identity.tsv",err,sizeof err)) unlink(e3path);
+            fprintf(stderr,"unisacc: INTERFACE_ERROR capture-row-too-long\n"); return 2;
+        }
+        if (rf_cap_path(path,sizeof path,dir,"resources.tsv",err,sizeof err) ||
+            rf_cap_append(path,(const unsigned char *)row,(size_t)rz,0,err,sizeof err)) {
+            if (!rf_cap_path(e3path,sizeof e3path,dir,"e3-identity.tsv",err,sizeof err)) unlink(e3path);
+            fprintf(stderr,"unisacc: %s\n", err); return 2;
+        }
+        RF_CAPC++;
+        return 0;
+    }
+    if (!RF_STRICT) return 0;
+    /* Strict: SC2 next event is e3-identity row; companion file is re-read in full (no fgets). */
+    if (!RF_TRACE_STARTED || !RF_LEDGER.trace || !RF_LEDGER_DIR[0]) {
+        fprintf(stderr,"unisacc: INTERFACE_ERROR resource-e3-identity-absent\n"); return 2;
+    }
+    if (RF_LEDGER.cursor >= RF_LEDGER.n) {
+        fprintf(stderr,"unisacc: INTERFACE_ERROR resource-e3-identity-absent\n"); return 2;
+    }
+    {
+        const RLRow *r = &RF_LEDGER.rows[RF_LEDGER.cursor];
+        unsigned char *fileb = 0; int filen = 0;
+        if (r->kn != RF_E3_ID_KEY_N || memcmp(r->key,RF_E3_ID_KEY,RF_E3_ID_KEY_N) || !r->present || !r->value) {
+            fprintf(stderr,"unisacc: INTERFACE_ERROR resource-e3-identity-absent\n"); return 2;
+        }
+        if (strcmp(r->blob,"e3-identity.tsv")) {
+            fprintf(stderr,"unisacc: INTERFACE_ERROR resource-e3-identity-malformed\n"); return 2;
+        }
+        if (rf_e3_read_companion(RF_LEDGER_DIR,&fileb,&filen,err,sizeof err)) {
+            fprintf(stderr,"unisacc: %s\n", err); return 2;
+        }
+        /* Full-file authority: size, unique trailing LF, no NUL/extra lines, 64 lowercase hex. */
+        if (!rf_parse_e3_identity_bytes(fileb,filen,got_stage,sizeof got_stage,got_hex)) {
+            /* Prefix-equal but longer => trailing junk after the identity line. */
+            if (filen > ln && ln > 0 && !memcmp(fileb,line,(size_t)ln))
+                fprintf(stderr,"unisacc: INTERFACE_ERROR resource-e3-identity-trailing\n");
+            else
+                fprintf(stderr,"unisacc: INTERFACE_ERROR resource-e3-identity-malformed\n");
+            free(fileb); return 2;
+        }
+        if (filen != ln || memcmp(fileb,line,(size_t)ln)) {
+            fprintf(stderr,"unisacc: INTERFACE_ERROR resource-identity-mismatch input e3-second\n");
+            free(fileb); return 2;
+        }
+        if (r->vn != filen || memcmp(r->value,fileb,(size_t)filen)) {
+            fprintf(stderr,"unisacc: INTERFACE_ERROR resource-e3-identity-inconsistent\n");
+            free(fileb); return 2;
+        }
+        if (strcmp(got_stage,stage) || strcmp(got_hex,hex)) {
+            fprintf(stderr,"unisacc: INTERFACE_ERROR resource-identity-mismatch stage ledger=%s run=%s\n", got_stage, stage);
+            free(fileb); return 2;
+        }
+        free(fileb);
+        RF_LEDGER.cursor++;
+    }
     return 0;
 }
 /* SC1 multi-source identity input: the source frame, per source in order: u32le name length, name, u32le byte count, bytes.
@@ -810,6 +983,7 @@ int core_host_fetch(const unsigned char *p,int n,unsigned char **bytes,int *len)
             RF_LEDGER.cursor++;
         }else r=rl_find(&RF_LEDGER,p,n);
         if(!r){snprintf(msg,sizeof msg,"MISSING_EXPLICIT_RESOURCE %s",h);die(msg);}
+        /* Strict: ledger answers only. Do not re-read host disk for inc/hdr (offline replay). */
         if(r->present){*bytes=r->value;*len=r->vn;}
         if(rf_capture_dir())rf_capture_record(p,n,r->present,*bytes,*len);
         return r->present?1:0;

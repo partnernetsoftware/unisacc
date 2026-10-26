@@ -511,8 +511,10 @@ int main(int argc, char **argv) {
             if (!strcmp(argv[i],"--resource-ledger")) {
                 char err[512];
                 if (i + 1 >= argc) { fprintf(stderr, "unisacc: --resource-ledger needs DIR\n"); return 2; }
-                rl_clear(&RF_LEDGER); RF_LOADED = 0;
+                rl_clear(&RF_LEDGER); RF_LOADED = 0; RF_LEDGER_DIR[0] = 0;
                 if (rl_load(argv[++i], &RF_LEDGER, err, sizeof err)) { fprintf(stderr, "unisacc: %s\n", err); return 2; }
+                { int zn = snprintf(RF_LEDGER_DIR, sizeof RF_LEDGER_DIR, "%s", argv[i]);
+                  if (zn < 0 || (size_t)zn >= sizeof RF_LEDGER_DIR) { fprintf(stderr, "unisacc: INTERFACE_ERROR resource-ledger-path-too-long\n"); return 2; } }
                 RF_LOADED = 1; continue;
             }
             argv[w++] = argv[i];
@@ -844,6 +846,7 @@ int main(int argc, char **argv) {
     }
     Buf in = {0}; int rc=0;
     int rr_pre_hit = 0;
+    int rf_source_opened = 0; /* image RI: source:image front gate opens at most once */
     char rr_pre_id[65];
     if (linking) in=linked;
     else if (nsources==1) {
@@ -900,7 +903,9 @@ int main(int argc, char **argv) {
             unsigned char **cb=xrealloc(0,nsources*sizeof *cb); int *cl=xrealloc(0,nsources*sizeof *cl);
             for (int j=0;j<nsources;j++) { cl[j]=0; cb[j]=source_read(sources[j],&cl[j]); }
             int fn=0; unsigned char *fb=rf_source_frame(nsources,sources,(const unsigned char **)cb,cl,&fn);
-            int g = fb ? rf_identity_gate(fb,fn,mode,route,"e3") : 2;
+            /* Image RI: open source:image once here (not e3). Tape keeps historical e3 label. */
+            int g = fb ? rf_identity_gate(fb,fn,mode,route, mode==0 ? "source" : "e3") : 2;
+            if (!g && mode==0) rf_source_opened = 1;
             free(fb); for (int j=0;j<nsources;j++) free(cb[j]); free(cb); free(cl);
             if (g) return g;
         }
@@ -988,7 +993,9 @@ int main(int argc, char **argv) {
     }
 rr_after_units:
     free(in.at); in.at=0; /* Framing positions are not input to model inference. */
-    if (nsources<=1 && (RF_STRICT || rf_capture_dir())) { int g = rf_identity_gate(in.b,in.n,mode,route,"e3"); if (g) return g; }   /* SC1 identity of a single-source run, before any stage */
+    /* Tape keeps the historical single-source gate (raw bytes labeled e3:…/tape/O*).
+     * Image RI B does not gate raw C here: e3 identity is applied after e1, before e3. */
+    if (nsources<=1 && mode != 0 && (RF_STRICT || rf_capture_dir())) { int g = rf_identity_gate(in.b,in.n,mode,route,"e3"); if (g) return g; }
     if (!rc && tape_input) rc=tape_domain(route,&in,src); /* decoded Tapebin uses the same model */
     if (!rc && !(tape_input && mode==2)) {
         if (fwdwant) {
@@ -1059,7 +1066,27 @@ rr_after_units:
                             FILE_READ_RECORD = 1; FILE_READ_COUNT = 0; FILE_READ_PATHS = 0;
                             FILE_ABSENT_COUNT = 0; FILE_ABSENT_PATHS = 0; rr_rec = 1;
                         }
-                        rc = runroute_range(route,NULL,"e3",&in,src);
+                        /* Image RI: source:image opens at most once (single-TU here, or multi before units).
+                         * Front-end last stage: single uses e1 (e2+e1); multi/image has units then e3 (no e1).
+                         * E3 second identity seals tokens+ATTRS; then e3 only. */
+                        if (mode == 0 && (RF_STRICT || rf_capture_dir())) {
+                            unsigned char *idb = 0; int idn = 0, g = 0;
+                            const char *front_last = nsources > 1 ? "units" : "e1";
+                            if (!rf_source_opened) {
+                                g = rf_identity_gate(in.b,in.n,mode,route,"source");
+                                if (g) rc = g; else rf_source_opened = 1;
+                            }
+                            if (!rc) rc = runroute_range(route,NULL,front_last,&in,src);
+                            if (!rc) {
+                                idb = rf_e3_identity_bytes(in.b,in.n,ATTRS.b,ATTRS.n,&idn);
+                                g = idb ? rf_e3_second_identity(idb,idn,mode,route) : 2;
+                                free(idb);
+                                if (g) rc = g;
+                            }
+                            if (!rc) rc = runroute_range(route,"e3","e3",&in,src);
+                        } else {
+                            rc = runroute_range(route,NULL,"e3",&in,src);
+                        }
                         if (!rc && rr_can && !rr_run_lookup)
                             (void)rr_store(argv[0], route, target, level, rr_id, &in, &ATTRS,
                                            FILE_READ_PATHS, FILE_READ_COUNT,
