@@ -3,13 +3,15 @@
 The current route contains seven named streams plus a separate tapecheck step.
 These developer artifacts isolate the seven streams; they do not replace the
 complete route, its RI checks, target contracts or publication qualification.
-Only Linux x86_64/O2 is currently selected by the material packer and new tests.
+The material packer selects the image/O2 route for any of the six targets.
+The existing stream tests still cover Linux x86_64/O2 unless a test says otherwise.
 
 Run each command separately from the repository root:
 
 ```sh
 tools/bound 55 sh ./unisacc.com -O2 -fno-trim-libc tools/stream-runtime.c -o out/stream-runtime.com
 tools/bound 30 sh ./unisacc.com tools/stream-pack.cx -- out/stream-runtime.com ./unisacc.com out/streams-new
+tools/bound 30 sh ./unisacc.com tools/stream-pack.cx -- out/stream-runtime.com ./unisacc.com out/streams-arm64-new lnx/arm64
 make streams STREAM_DIR=out/streams-new STREAM_OUT=out/stream-check-new
 ```
 
@@ -21,11 +23,17 @@ manual include directives. No Python or external C compiler is invoked by these
 commands after the existing watchdog is available; the watchdog still has its
 documented host C cold-bootstrap dependency.
 
+The optional last argument is one of `lnx/x86_64`, `lnx/arm64`, `osx/x86_64`,
+`osx/arm64`, `win/x86_64`, or `win/arm64`; the default is `lnx/x86_64`.
+Each route needs its own new output directory. This selects the output target;
+it does not execute on a foreign host.
+
 `stream-pack.cx` imports `cxlib.streampack`. It validates the current P3 directory,
 model and resource extents, preserves original compressed model records and all
 resource records, and appends one package per runtime shell. It does not construct
 weights or inflate networks. `streams.json` records input, runtime, model-record,
-resource-section and artifact hashes. This is PREPARED material, not a PASS.
+resource-section and artifact hashes, along with the selected route. This is
+PREPARED material, not a PASS.
 The extraction implementation was retained from the archived material tool;
 no old test runner, assertions or PASS records are used by the new tests.
 
