@@ -322,11 +322,11 @@ static int product_view(int argc,char **argv) {
     free(b); fwrite(asmbuf.b,1,asmbuf.n,stdout); return 0;
 }
 static int product_as(int argc,char **argv) {
-    const char *in=0,*out="a.out"; int arch=!strcmp(NATIVE_ARCH,"arm64");
+    const char *in=0,*out="a.out"; int arch=!strcmp(NATIVE_ARCH,"arm64"),explicit=0;
     for (int i=2;i<argc;i++) {
         if (!strcmp(argv[i],"-o") && i+1<argc) out=argv[++i];
         else if (!strcmp(argv[i],"-b") && i+1<argc) {
-            const char *t=argv[++i];
+            const char *t=argv[++i];explicit=1;
             if (!strcmp(t,"lnx/x86_64")) arch=0; else if (!strcmp(t,"lnx/arm64")) arch=1;
             else { fputs("as: targets are lnx/x86_64 and lnx/arm64 (Mach-O and COFF text: 0.0.19)\n",stderr); return 2; }
         }
@@ -336,6 +336,8 @@ static int product_as(int argc,char **argv) {
     if (!in) { fputs("usage: unisacc as [-b lnx/x86_64|lnx/arm64] FILE.s [-o FILE.o]\n",stderr); return 2; }
     int len=0; unsigned char *b=source_read(in,&len);
     asmbuf.n=0;
+    /* without -b the -S header names the target; an explicit -b must agree with it */
+    if (explicit && at_header_arch((char *)b,len)>=0 && at_header_arch((char *)b,len)!=arch) { fprintf(stderr,"as: %s: -S header target conflicts with -b\n",in); free(b); return 1; }
     if (at_asm((char *)b,len,arch)) { fprintf(stderr,"as: %s:%d: %s\n",in,at_lineno,at_err ? at_err : "error"); free(b); return 1; }
     free(b);
     FILE *f=fopen(out,"wb"); if (!f) { fprintf(stderr,"as: cannot write %s\n",out); return 1; }

@@ -2159,6 +2159,12 @@ int at_elf(void) {
     at_wn = 0;
     return 0;
 }
+/* the target an -S header names: 0 x86-64, 1 arm64, -1 none */
+int at_header_arch(char *src, us_i64 n) {
+    if (n > 22 && at_is(src, 22, "# unisacc -S lnx/arm64")) return 1;
+    if (n > 23 && at_is(src, 23, "# unisacc -S lnx/x86_64")) return 0;
+    return 0 - 1;
+}
 /* assemble src[0..n) for arch (0 x86-64, 1 arm64); the object goes through at_wr */
 int at_asm(char *src, us_i64 n, int arch) {
     int k;
@@ -2212,9 +2218,10 @@ int at_main(int argc) {
     if (n < 0 || n >= 33554432) { __write(2, "as: input too large\n", 20); return 1; }
     if (arch < 0) {
         arch = HOST_TARGET[4] == 97 ? 1 : 0;   /* this machine's architecture */
-        if (n > 22 && at_is(at_src, 22, "# unisacc -S lnx/arm64")) arch = 1;
-        if (n > 23 && at_is(at_src, 23, "# unisacc -S lnx/x86_64")) arch = 0;
+        if (at_header_arch(at_src, n) >= 0) arch = at_header_arch(at_src, n);
     }
+    else { if (at_header_arch(at_src, n) >= 0 && at_header_arch(at_src, n) != arch) {
+        at_say("as: "); at_say(in); at_say(": -S header target conflicts with -b\n"); return 1; } }
     /* a failed assembly must not leave a file behind: check first, write after */
     at_fd = 0 - 1;
     at_wfail = 1;
