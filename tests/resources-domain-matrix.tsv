@@ -1,0 +1,60 @@
+# Domain matrix for coverage row resources (bounded memory/time/fd/disk/step budgets, recovery and UNKNOWN handling).
+# Parent stays NOT_READY until every required cell is observed on the same candidate on all six native hosts.
+# COVERED_LOCAL = a registered IMPLEMENTED lnx/x86_64 batch asserts exactly this requirement (Root7a/SID4fe; re-run on the next candidate).
+# Unrun, PREPARED, pending and partial assertions are never COVERED.
+# Required outcome vocabulary (prd.md:105-110 invariants 1 and 5; spec.md TP-8):
+#   ACCEPT        rc0 with the exact oracle bytes.
+#   NAMED_REFUSAL declared rc (1 language, 2 interface/runtime, 3 step budget) + exact named stderr + empty stdout + no output file.
+#   PRODUCT_FAIL  signal death, unnamed rc, partial/garbage output, or accept with wrong bytes => FAIL (product defect).
+#   UNKNOWN       harness deadline hit or host-imposed budget killed the process (SIGKILL/SIGXCPU/bound rc142): never PASS,
+#                 never counted as a product refusal, keeps the parent unresolved, all descendants reaped, rerun required.
+#   NOT_RUN       harness could not impose the condition (setrlimit/fork/mkfifo failure, missing /dev/full).
+# Current gap: tests/run-batch.cx:33-36 folds a transport timeout into status=FAIL; tests/cxlib/netpack.cx:803-806 counts only
+#   idle milliseconds and SIGKILLs only the direct child. The runner cells below specify the required UNKNOWN semantics.
+# status: COVERED_LOCAL | MISSING | NEEDS_PRODUCT_CHANGE | NEEDS_FOREIGN_HOST | BLOCKED:<reason>
+# schema: host	cell	required	status	evidence	requirement	citation	oracle
+lnx/x86_64	res.runner.timeout-is-unknown	yes	MISSING	NONE	run-batch child deadline => BATCH_RUN status=UNKNOWN (distinct rc, not 0/1), never FAIL or PASS; --all counts it unresolved	prd.md:106; spec.md TP-8; AGENTS.md:21	fixture child sleeping past budget; literal status line
+lnx/x86_64	res.runner.wall-deadline	yes	MISSING	NONE	deadline is wall-clock (budget + CLEANUP_EPSILON 0.25s), also for a child that writes output continuously	CLAUDE.md 60s rule; tools/bound.c:20-23; tests/cxlib/netpack.cx:803	chatty fixture child; elapsed monotonic time <= budget+0.25s
+lnx/x86_64	res.runner.descendant-cleanup	yes	MISSING	NONE	on deadline every descendant (grandchild sh/product) is killed and reaped; none survives the runner	CLAUDE.md 60s rule (timeout cleans owned descendants)	fixture spawning a grandchild that records its pid; pid absent after runner returns
+lnx/x86_64	res.runner.signal-is-fail	yes	MISSING	NONE	child killed by a signal it raised (SIGSEGV/SIGABRT) => status=FAIL with signal named, not UNKNOWN	prd.md:106	fixture raising SIGSEGV; literal status/signal
+lnx/x86_64	res.runner.bound-rc142	yes	MISSING	NONE	tests wrapping children in tools/bound classify rc142 (interrupted/deadline) as UNKNOWN, not as product rc	tools/bound.c:458-486	fixture via tools/bound 1 sleep; classification line
+lnx/x86_64	res.steps.stream-exhaust	yes	MISSING	NONE	stream container (non-product build) with UNISA_MAXSTEPS=1 exits 3, stderr exactly step budget exhausted (budget 1 steps), stdout empty	exec/c/run.c:14,1046,1054	literal rc3 and message
+lnx/x86_64	res.steps.stream-recovery	yes	MISSING	NONE	same container and input with default budget returns its exact pinned output after the exhaustion case	prd.md:101-111	pinned stream output bytes (streams material)
+lnx/x86_64	res.steps.stream-malformed-budget	yes	MISSING	NONE	UNISA_MAXSTEPS=abc/-1/0 must be a named refusal, not silently coerced (run.c:1046 uses strtol without end check); NEEDS_PRODUCT_CHANGE if observed silent	exec/c/run.c:1046; prd.md:112 (no implicit host input)	literal named reason; rc2
+lnx/x86_64	res.steps.product-env-ignored	yes	MISSING	NONE	installed product with UNISA_MAXSTEPS=1 produces byte-identical tape/image to a run without it (budget is a build constant)	exec/c/asmcompiler.c:4-7; spec.md D-5	byte equality
+lnx/x86_64	res.steps.product-exhaust	yes	BLOCKED:product-budget-4e11-steps-unreachable-within-60s	NONE	product step-budget exhaustion is a named rc3 refusal	exec/c/compiler.c:7-10; exec/c/run.c:1054	needs a bounded reachable test configuration; no host-env override allowed
+lnx/x86_64	res.steps.capture-events	yes	COVERED_LOCAL	ri-capture:ri.capture-quota	4096 capture events accepted, one more refused capture-capacity-exceeded rc2 empty stdout	tools/ri.md:29	literal boundary and reason
+lnx/x86_64	res.steps.snapshot-capacity	yes	COVERED_LOCAL	snapshots:ri.snapshot-commit(capacity refusals)	snapshot blob/table capacity overflow refused by name; output clearable	exec/c/resourceledger.h:237-239,335	literal reasons
+lnx/x86_64	res.steps.pp-header-capacity	yes	COVERED_LOCAL	pp-header-locations:product.pp-header-locations(capacity4096/4097)	pp line-continuation join capacity 4096 accepted, 4097 refused exactly (-E -include header)	tests/pp-header-locations.cx	literal boundary and reason
+lnx/x86_64	res.steps.owned-capacity	yes	COVERED_LOCAL	owned:owned.lifecycle	cx owned handles: capacity exhaustion refused; stale/moved/dropped handles refused	CLAUDE.md module ownership rule	551 literal assertions
+lnx/x86_64	res.mem.compile-as-limit	yes	MISSING	NONE	product compile (-S and -b -o) under RLIMIT_AS at a sufficient and an insufficient level: ACCEPT exact or NAMED_REFUSAL run: out of memory rc2 with no output file; signal death is PRODUCT_FAIL	exec/c/run.c:39-43; prd.md:106	literal reason; output absent; sufficient-level bytes equal unlimited run
+lnx/x86_64	res.mem.run-reserve	yes	MISSING	NONE	-run under RLIMIT_AS below the ~2GB reservation: NAMED_REFUSAL cannot reserve native memory (or out of memory), empty program stdout	prd.md:605; exec/c/memory.c	literal reason; rc2
+lnx/x86_64	res.mem.user-malloc-null	yes	MISSING	NONE	user program under -run and as image observes malloc NULL under limit and exits with its own code; runtime does not crash	C99 7.20.3; product.allocation covers success only	literal program exit code
+lnx/x86_64	res.mem.library-faults	yes	COVERED_LOCAL	snapshots:ri.snapshot-lifecycle;ri-consumers:ri.consumer-empty-copy	87 allocation fault points release heap/fd/FILE and recover; empty-copy NULL0 trap	tools/ri.md:88-95	literal C assertions
+lnx/x86_64	res.mem.recovery	yes	MISSING	NONE	after each memory refusal an unlimited rerun gives the exact baseline bytes	prd.md:101-111	byte equality
+lnx/x86_64	res.fd.compile-nofile-limit	yes	MISSING	NONE	product compile and -run under RLIMIT_NOFILE low: ACCEPT exact or NAMED_REFUSAL (cannot open ...), no crash	exec/c/compiler.c cannot open output; exec/c/run.c cannot open input	literal reason; output absent
+lnx/x86_64	res.fd.no-leak-to-program	yes	MISSING	NONE	program started by -run sees only fds 0,1,2 open	prd.md:601-607 (host binding owns resources)	program lists /proc/self/fd; literal count 3
+lnx/x86_64	res.fd.user-stdio-close	yes	COVERED_LOCAL	stdio-close:library.stdio-close	fclose ENOSPC returns EOF and closes fd; 24 rounds keep slot isolation	C99 7.19.5.1	literal errno and fd state
+lnx/x86_64	res.fd.snapshot-release	yes	COVERED_LOCAL	snapshots:ri.snapshot-lifecycle	snapshot paths release fd/FILE on all failure paths	exec/c/resourceledger.h	literal C assertions
+lnx/x86_64	res.disk.output-full	yes	MISSING	NONE	-o /dev/full: NAMED_REFUSAL cannot write output (rc nonzero), never rc0	exec/c/run.c cannot write output	literal reason; NOT_RUN if /dev/full missing
+lnx/x86_64	res.disk.output-fsize	yes	MISSING	NONE	RLIMIT_FSIZE below image size (SIGXFSZ ignored): NAMED_REFUSAL and no truncated image left claiming success	exec/c/run.c cannot write output	literal reason; output absent or explicitly removed
+lnx/x86_64	res.disk.output-eacces	yes	MISSING	NONE	-o into unwritable dir: NAMED_REFUSAL cannot open output; EACCES not reported as absence	CLAUDE.md file-existence rule	literal reason
+lnx/x86_64	res.time.user-infinite-loop	yes	MISSING	NONE	-run of for(;;); under a 2s bound is classified UNKNOWN (budget exhausted), all descendants reaped, then a clean -run returns 7	prd.md:106; spec.md TP-8	classification line; descendant pid absent; exit 7
+lnx/x86_64	res.time.cpu-limit	yes	MISSING	NONE	RLIMIT_CPU kill (SIGXCPU) of a compile is UNKNOWN, not PRODUCT_FAIL and not PASS	prd.md:106	classification line
+lnx/x86_64	res.time.end-to-end-budget	yes	BLOCKED:no-current-numeric-latency-ruling	phase-timing-external measures but asserts no budget	numeric compile/-run latency budget for the current product	spec.md B-5 (historical Python unisa run); prd.md:687	pending ruling
+lnx/x86_64	res.hostile.truncated-file	yes	MISSING	NONE	truncated source terminates bounded with rc1 named diagnostic, no crash/hang	spec.md A-47	literal diagnostic; rc1; bounded
+lnx/x86_64	res.hostile.unterminated-comment	yes	MISSING	NONE	unterminated comment diagnosed rc1, never silently accepted	spec.md A-47	literal diagnostic
+lnx/x86_64	res.hostile.unterminated-string	yes	MISSING	NONE	unterminated string/char literal diagnosed rc1	spec.md A-47	literal diagnostic
+lnx/x86_64	res.hostile.include-cycle	yes	MISSING	NONE	self-including header terminates with named depth/cycle diagnostic	spec.md A-47; C99 5.2.4.1 (15 nesting levels minimum)	literal diagnostic; bounded
+lnx/x86_64	res.hostile.long-identifier	yes	MISSING	NONE	5000-char identifier compiles exactly or is refused by name	spec.md A-47	exit code or literal diagnostic
+lnx/x86_64	res.hostile.deep-nesting	yes	MISSING	NONE	1000-level parenthesis nesting accepted exactly or refused by name, no stack overflow	spec.md A-47	exit code or literal diagnostic
+lnx/x86_64	res.hostile.binary-garbage	yes	MISSING	NONE	random binary input diagnosed rc1 bounded	spec.md A-47	literal diagnostic prefix; rc1
+lnx/x86_64	res.hostile.embedded-nul	yes	MISSING	NONE	embedded NUL in source diagnosed or handled by declared rule	spec.md A-47	literal diagnostic
+lnx/x86_64	res.hostile.self-expanding-macro	yes	MISSING	NONE	#define a a / mutually recursive macros terminate per C99 6.10.3.4 painting	spec.md A-47; C99 6.10.3.4p2	literal expansion output (-E)
+lnx/x86_64	res.hostile.directory-input	yes	MISSING	NONE	directory as input file refused by name (EISDIR), not read as empty	spec.md A-47; CLAUDE.md file-existence rule	literal reason; rc1/2
+lnx/x86_64	res.recovery.after-budget	yes	MISSING	NONE	after every res.* refusal or UNKNOWN the unconstrained baseline is re-run in the same batch with exact bytes and product SHA unchanged	prd.md:101-111	byte equality; candidate SHA
+lnx/arm64	res.all-local-cells	yes	NEEDS_FOREIGN_HOST	NONE	all lnx/x86_64 cells re-observed natively on same candidate	plans/v0.0.43.md:46	same oracles
+osx/arm64	res.all-local-cells	yes	NEEDS_FOREIGN_HOST	NONE	all cells natively (RLIMIT_AS semantics differ on Darwin; NOT_RUN where unsupported, never PASS)	plans/v0.0.43.md:46	same oracles
+osx/x86_64	res.all-local-cells	yes	NEEDS_FOREIGN_HOST	NONE	all cells natively	plans/v0.0.43.md:46	same oracles
+win/x86_64	res.all-local-cells	yes	NEEDS_FOREIGN_HOST	NONE	equivalent limits via Job Objects; Windows watchdog unfinished	plans/v0.0.43.md:49	same oracles
+win/arm64	res.all-local-cells	yes	NEEDS_FOREIGN_HOST	NONE	as win/x86_64 with native ARM64 PE	plans/v0.0.43.md:47	same oracles
