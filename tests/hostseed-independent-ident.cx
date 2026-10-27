@@ -6,20 +6,21 @@
 static int checks,failed;
 static char root[4096],ctx[4096],work[4096],bound[4400],product[4400],ident[4400],frozen[4400],record[4400],version_file[4400],built[4400];
 static void die(const char *s){fprintf(stderr,"hostseed-independent-ident: REFUSE %s errno=%d\n",s,errno);exit(2);}
+static void copy_fit(char *dst,size_t cap,const char *src){size_t i=0;if(!cap)die("copy-bound");while(src[i]&&i+1<cap){dst[i]=src[i];i++;}if(src[i])die("copy-bound");dst[i]=0;}
 static void ck(int ok,const char *s){checks++;if(!ok)failed++;printf("%s\thostseed-independent-ident.%s\n",ok?"PASS":"FAIL",s);}
 static void path(char *out,size_t cap,const char *a,const char *b){int n=snprintf(out,cap,"%s/%s",a,b);if(n<0||(size_t)n>=cap)die("path-bound");}
 static char *load(const char *p,size_t *n){struct stat st;if(lstat(p,&st)||!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>8388608)die("regular-input");char *s=cx_read(p,n);if(!s||*n!=(size_t)st.st_size)die("input-extent");return s;}
 static void hash(const char *p,char out[65]){size_t n;char *s=load(p,&n);cx_sha256_hex(s,n,out);free(s);}
 static int hex64(const char *s){if(strlen(s)!=64)return 0;for(int i=0;i<64;i++)if(!((s[i]>='0'&&s[i]<='9')||(s[i]>='a'&&s[i]<='f')))return 0;return 1;}
 static int within(const char *p,const char *base){size_t n=strlen(base);return !strncmp(p,base,n)&&(!p[n]||p[n]=='/');}
-static void field(const char *s,const char *key,char *out,size_t cap){size_t k=strlen(key),count=0;const char *p=s;while(*p){const char *e=strchr(p,'\n');if(!e)die("record-line");if((size_t)(e-p)>k+1&&!memcmp(p,key,k)&&p[k]=='\t'){size_t n=(size_t)(e-p-k-1);if(++count!=1||n>=cap)die("record-field");memcpy(out,p+k+1,n);out[n]=0;}p=e+1;}if(count!=1)die("record-field-required");}
+static void field(const char *s,const char *key,char *out,size_t cap){size_t k=strlen(key),count=0;const char *p=s;while(*p){const char *e=strchr(p,'\n');if(!e)die("record-line");if((size_t)(e-p)>k+1&&!memcmp(p,key,k)&&p[k]=='\t'){size_t n=(size_t)(e-p-k-1);if(++count!=1||n>=cap)die("record-field");{size_t i=0;while(i<n){out[i]=p[k+1+i];i++;}}out[n]=0;}p=e+1;}if(count!=1)die("record-field-required");}
 static void measured(char **argv,int seconds,char out[65],const char *label){np_result r={0};char why[1024];int transport=np_run(argv,root,0,seconds,&r,why,sizeof why);int ok=!transport&&!r.rc&&!r.errn&&r.outn==65&&r.out[64]=='\n';if(ok){memcpy(out,r.out,64);out[64]=0;ok=hex64(out);}ck(ok,label);if(!ok){if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);die("measurement");}np_free(&r);}
 int main(int argc,char **argv){
 #if !defined(__linux__) || !defined(__x86_64__)
  fputs("NOT_RUN independent source measurement needs Linux/x86_64\n",stderr);return 3;
 #endif
  if(argc!=4||!realpath(argv[1],root)||!realpath(argv[2],ctx)||argv[3][0]!='/')die("usage ROOT HOST_CTX NEW_ABS_OUT");
- char parent[4096],base[4096];if(strlen(argv[3])>=sizeof parent)die("output-bound");strcpy(parent,argv[3]);char *slash=strrchr(parent,'/');if(!slash||!slash[1])die("output-leaf");if(slash==parent)slash[1]=0;else *slash=0;if(!realpath(parent,base))die("output-parent");path(work,sizeof work,base,strrchr(argv[3],'/')+1);if(strcmp(work,argv[3])||within(work,ctx)||mkdir(work,0700))die("exclusive-output");
+ char parent[4096],base[4096];if(strlen(argv[3])>=sizeof parent)die("output-bound");copy_fit(parent,sizeof parent,argv[3]);char *slash=strrchr(parent,'/');if(!slash||!slash[1])die("output-leaf");if(slash==parent)slash[1]=0;else *slash=0;if(!realpath(parent,base))die("output-parent");path(work,sizeof work,base,strrchr(argv[3],'/')+1);if(strcmp(work,argv[3])||within(work,ctx)||mkdir(work,0700))die("exclusive-output");
  path(bound,sizeof bound,root,"tools/bound");path(product,sizeof product,root,"unisacc.com");path(ident,sizeof ident,root,"seed/ident.c");path(frozen,sizeof frozen,ctx,"identity-helper");path(record,sizeof record,ctx,"context.tsv");path(version_file,sizeof version_file,ctx,"cc.version");path(built,sizeof built,work,"identity-helper");
  if(unsetenv("UNISACC_RF_CAPTURE")||unsetenv("UNISA_ATTRIBUTES"))die("clear-resource-ambient");
  size_t rn;char *wire=load(record,&rn);if(rn<19||memcmp(wire,"hostseed-ident-v1\n",18)||wire[rn-1]!='\n'||memchr(wire,0,rn))die("context-schema");char source[65],cc[4096],cc_sha[65],cc_version_sha[65],helper_sha[65],ident_sha[65],flags[128],bootstrap[65];field(wire,"source",source,sizeof source);field(wire,"cc",cc,sizeof cc);field(wire,"cc-sha",cc_sha,sizeof cc_sha);field(wire,"cc-version-sha",cc_version_sha,sizeof cc_version_sha);field(wire,"helper",helper_sha,sizeof helper_sha);field(wire,"helper-source",ident_sha,sizeof ident_sha);field(wire,"flags",flags,sizeof flags);field(wire,"measurement-bootstrap",bootstrap,sizeof bootstrap);free(wire);
