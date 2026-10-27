@@ -1,9 +1,10 @@
-/* GENERATED -- do not edit. table-kernel-export-v1 math-only.
- * producer tools/table-kernel-export.cx sha256=457e3099f640fd7d43ab74192944a859eb1b7ad7c87440e172e78d70638d2787
- * template unisa/ckernel.py sha256=d3400bfb0d8dab72c8851eec67fba9c732815cb46ac90d9466791be027e5b9cc
- * NN/model/dense/weight/cases/headers retain original bytes and producer provenance.
- * This regenerates C math only, not eighteen NN sources or a product candidate.
- */
+/* GENERATED -- do not edit.  `python3 -m unisa emit-kernel` writes this
+ * file; tests/kernel.sh fails when it differs from a fresh run.
+ * The kernel, self-testing over the FULL gold corpus [P-3]: KERNEL_BODY in
+ * unisa/ckernel.py.  The model and the cases are the files included below.
+ * Inputs (sha256, first 12 hex digits):
+ *   unisa/ckernel.py             d3400bfb0d8d */
+
 #include "unisa_model.inc"
 #include "unisa_cases.inc"
 
@@ -111,3 +112,4 @@ int main(void) {
     printf("%d decisions, %d wrong\n", NCASE, bad);
     return bad != 0;
 }
+

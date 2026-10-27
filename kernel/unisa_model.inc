@@ -9,8 +9,8 @@
  *   unisa/gold.py                25721a152d0d
  *   unisa/catalog.py             b3ff45a5f1fd
  *   unisa/front/lex.py           67f2248c3a8a
- *   weights/built.json           20e0395e9e9a
- *   unisa/ckernel.py             db184ffec275 */
+ *   weights/built.json           9de2f97372ad
+ *   unisa/ckernel.py             d3400bfb0d8d */
 
 #ifndef UNISA_MODEL_INC
 #define UNISA_MODEL_INC
@@ -118,71 +118,71 @@ int model_dims(void) {
   STAGE_NCLS[0] = 4;
   STAGE_VN[0] = 9;
   STAGE_VN[1] = 2;
-  STAGE_M[1] = 2; STAGE_H[1] = 11; STAGE_OFF[1] = 142;  STAGE_MW[1] = 1;
+  STAGE_M[1] = 2; STAGE_H[1] = 13; STAGE_OFF[1] = 142;  STAGE_MW[1] = 1;
   STAGE_NCLS[16] = 10;
   STAGE_VN[4] = 12;
   STAGE_VN[5] = 12;
-  STAGE_M[2] = 2; STAGE_H[2] = 34; STAGE_OFF[2] = 399;  STAGE_MW[2] = 2;
+  STAGE_M[2] = 2; STAGE_H[2] = 35; STAGE_OFF[2] = 445;  STAGE_MW[2] = 2;
   STAGE_NCLS[32] = 36;
   STAGE_VN[8] = 5;
   STAGE_VN[9] = 68;
-  STAGE_M[3] = 3; STAGE_H[3] = 62; STAGE_OFF[3] = 2751;  STAGE_MW[3] = 1;
+  STAGE_M[3] = 3; STAGE_H[3] = 72; STAGE_OFF[3] = 1814;  STAGE_MW[3] = 1;
   STAGE_NCLS[48] = 16;
   STAGE_VN[12] = 15;
   STAGE_VN[13] = 19;
   STAGE_VN[14] = 15;
-  STAGE_M[4] = 2; STAGE_H[4] = 9; STAGE_OFF[4] = 4677;  STAGE_MW[4] = 1;
+  STAGE_M[4] = 2; STAGE_H[4] = 11; STAGE_OFF[4] = 4050;  STAGE_MW[4] = 1;
   STAGE_NCLS[64] = 7;
   STAGE_VN[16] = 6;
   STAGE_VN[17] = 5;
-  STAGE_M[5] = 2; STAGE_H[5] = 75; STAGE_OFF[5] = 4888;  STAGE_MW[5] = 2;
+  STAGE_M[5] = 2; STAGE_H[5] = 75; STAGE_OFF[5] = 4307;  STAGE_MW[5] = 2;
   STAGE_NCLS[80] = 70;
   STAGE_VN[20] = 6;
   STAGE_VN[21] = 70;
-  STAGE_M[6] = 3; STAGE_H[6] = 5; STAGE_OFF[6] = 7817;  STAGE_MW[6] = 2;
+  STAGE_M[6] = 3; STAGE_H[6] = 5; STAGE_OFF[6] = 7236;  STAGE_MW[6] = 2;
   STAGE_NCLS[96] = 5;
   STAGE_VN[24] = 87;
   STAGE_VN[25] = 3;
   STAGE_VN[26] = 2;
-  STAGE_M[7] = 2; STAGE_H[7] = 3; STAGE_OFF[7] = 8096;  STAGE_MW[7] = 1;
+  STAGE_M[7] = 2; STAGE_H[7] = 3; STAGE_OFF[7] = 7515;  STAGE_MW[7] = 1;
   STAGE_NCLS[112] = 3;
   STAGE_VN[28] = 3;
   STAGE_VN[29] = 2;
-  STAGE_M[8] = 2; STAGE_H[8] = 10; STAGE_OFF[8] = 8169;  STAGE_MW[8] = 1;
+  STAGE_M[8] = 2; STAGE_H[8] = 16; STAGE_OFF[8] = 7588;  STAGE_MW[8] = 1;
   STAGE_NCLS[128] = 16;
   STAGE_VN[32] = 8;
   STAGE_VN[33] = 2;
-  STAGE_M[9] = 1; STAGE_H[9] = 6; STAGE_OFF[9] = 8557;  STAGE_MW[9] = 1;
+  STAGE_M[9] = 1; STAGE_H[9] = 10; STAGE_OFF[9] = 7960;  STAGE_MW[9] = 1;
   STAGE_NCLS[144] = 4;
   STAGE_NCLS[145] = 2;
   STAGE_NCLS[146] = 2;
   STAGE_VN[36] = 16;
-  STAGE_M[10] = 1; STAGE_H[10] = 7; STAGE_OFF[10] = 8665;  STAGE_MW[10] = 1;
+  STAGE_M[10] = 1; STAGE_H[10] = 7; STAGE_OFF[10] = 8254;  STAGE_MW[10] = 1;
   STAGE_NCLS[160] = 7;
   STAGE_VN[40] = 9;
-  STAGE_M[11] = 3; STAGE_H[11] = 18; STAGE_OFF[11] = 8774;  STAGE_MW[11] = 1;
+  STAGE_M[11] = 3; STAGE_H[11] = 26; STAGE_OFF[11] = 8363;  STAGE_MW[11] = 1;
   STAGE_NCLS[176] = 10;
   STAGE_VN[44] = 8;
   STAGE_VN[45] = 17;
   STAGE_VN[46] = 12;
-  STAGE_M[12] = 1; STAGE_H[12] = 16; STAGE_OFF[12] = 9336;  STAGE_MW[12] = 2;
+  STAGE_M[12] = 1; STAGE_H[12] = 18; STAGE_OFF[12] = 9173;  STAGE_MW[12] = 2;
   STAGE_NCLS[192] = 2;
   STAGE_NCLS[193] = 8;
   STAGE_NCLS[194] = 16;
   STAGE_VN[48] = 73;
-  STAGE_M[13] = 1; STAGE_H[13] = 11; STAGE_OFF[13] = 9778;  STAGE_MW[13] = 1;
+  STAGE_M[13] = 1; STAGE_H[13] = 11; STAGE_OFF[13] = 9843;  STAGE_MW[13] = 1;
   STAGE_NCLS[208] = 11;
   STAGE_VN[52] = 19;
-  STAGE_M[14] = 2; STAGE_H[14] = 18; STAGE_OFF[14] = 9947;  STAGE_MW[14] = 1;
+  STAGE_M[14] = 2; STAGE_H[14] = 23; STAGE_OFF[14] = 10012;  STAGE_MW[14] = 1;
   STAGE_NCLS[224] = 23;
   STAGE_VN[56] = 16;
   STAGE_VN[57] = 2;
-  STAGE_M[15] = 2; STAGE_H[15] = 88; STAGE_OFF[15] = 10624;  STAGE_MW[15] = 2;
+  STAGE_M[15] = 2; STAGE_H[15] = 148; STAGE_OFF[15] = 10545;  STAGE_MW[15] = 2;
   STAGE_NCLS[240] = 5;
   STAGE_NCLS[241] = 107;
   STAGE_VN[60] = 87;
   STAGE_VN[61] = 2;
-  STAGE_M[16] = 3; STAGE_H[16] = 69; STAGE_OFF[16] = 15383;  STAGE_MW[16] = 2;
+  STAGE_M[16] = 3; STAGE_H[16] = 164; STAGE_OFF[16] = 17357;  STAGE_MW[16] = 2;
   STAGE_NCLS[256] = 96;
   STAGE_NCLS[257] = 19;
   STAGE_NCLS[258] = 19;
@@ -199,7 +199,7 @@ int model_dims(void) {
   STAGE_VN[64] = 87;
   STAGE_VN[65] = 3;
   STAGE_VN[66] = 2;
-  STAGE_M[17] = 3; STAGE_H[17] = 121; STAGE_OFF[17] = 20631;  STAGE_MW[17] = 2;
+  STAGE_M[17] = 3; STAGE_H[17] = 295; STAGE_OFF[17] = 40157;  STAGE_MW[17] = 2;
   STAGE_NCLS[272] = 5;
   STAGE_NCLS[273] = 107;
   STAGE_NCLS[274] = 96;
