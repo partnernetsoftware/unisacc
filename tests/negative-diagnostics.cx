@@ -1,0 +1,133 @@
+/* Installed-product compiler diagnostic corpus with exact file:line:col.
+ * ROOT PRODUCT_COM NEW_ABS_OUT. PRODUCT_COM must be ROOT/unisacc.com.
+ * Ports the 17 archived check/poscase sources of archive/testing-c43-legacy/tests/diag.sh:72-274
+ * (4 check + 13 poscase; diag.knownfail/diag.com.knownfail had 0 live entries) plus the archived
+ * cont/multi/-ferror-limit/reach probes. Each source is written as a literal, then run twice:
+ * the archived command line (-run, or -O2 FILE -run) and an lnx/x86_64 image compile with -o.
+ * Both require rc1, empty stdout, the exact full stderr (position line, user source line, caret,
+ * summary) and no image. A clean ret7 compile then recovers and its image must exit 7.
+ * Spec: spec.md A-40 (file, line, column and source line). Archived expectation was a substring
+ * (file:line:col: error: ... text); this batch is stricter and pins the whole stderr.
+ * KNOWN_GAP lines are A-40 shortfalls the archive accepted; they are reported, never PASS. */
+#pragma unisa use cxlib.netpack
+static char root[4096],work[4096],bound[4200],com[4200];
+static int assertions,failures,gaps;
+static void die(const char *s){fprintf(stderr,"negative-diagnostics: REFUSE %s errno=%d\n",s,errno);exit(2);}
+static void copy_fit(char *dst,size_t cap,const char *src){size_t i=0;if(!cap)die("copy-bound");while(src[i]&&i+1<cap){dst[i]=src[i];i++;}if(src[i])die("copy-bound");dst[i]=0;}
+static void ck(int ok,const char *a,const char *b){assertions++;if(!ok)failures++;printf("%s\tnegative-diagnostics.%s.%s\n",ok?"PASS":"FAIL",a,b);}
+static void gap(const char *a,const char *why){gaps++;printf("KNOWN_GAP\tnegative-diagnostics.%s\t%s\n",a,why);}
+static void path(char *o,size_t cap,const char *a,const char *b){int n=snprintf(o,cap,"%s/%s",a,b);if(n<0||(size_t)n>=cap)die("path");}
+static void saved(const char *name,const void *s,size_t n){char p[4400];path(p,sizeof p,work,name);int f=open(p,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);size_t at=0;if(f<0)die("exclusive-write");while(at<n){ssize_t k=write(f,(const char *)s+at,n-at);if(k<0&&errno==EINTR)continue;if(k<=0)die("write");at+=(size_t)k;}if(fsync(f)||close(f))die("close");}
+static void sha_file(const char *p,char hex[65]){size_t n;char *s=cx_read(p,&n);if(!s)die("read-product");cx_sha256_hex(s,n,hex);free(s);}
+static int missing(const char *name){char p[4400];struct stat st;path(p,sizeof p,work,name);errno=0;if(!lstat(p,&st))return 0;if(errno!=ENOENT)die("stat-not-ENOENT");return 1;}
+static int regular(const char *name){char p[4400];struct stat st;path(p,sizeof p,work,name);return !lstat(p,&st)&&S_ISREG(st.st_mode)&&st.st_size>0;}
+static np_result runv(char **v,const char *label){
+ char why[1024],name[256];np_result r;
+ if(np_run(v,work,0,25,&r,why,sizeof why))die(why);
+ snprintf(name,sizeof name,"%s.stdout",label);saved(name,r.out,r.outn);
+ snprintf(name,sizeof name,"%s.stderr",label);saved(name,r.err,r.errn);return r;}
+static int exact(const np_result *r,const char *want){size_t n=strlen(want);return r->errn==n&&!memcmp(r->err,want,n);}
+
+typedef struct{const char *name;int poscase;const char *src;int line,col;const char *msg;} Case;
+/* The 17 archived cases. line:col and message text are the archive's; the message is the full
+   current wording, whose archived prefix is the case's diag.sh argument. */
+static const Case cases[]={
+ {"ident",0,"#include <stdio.h>\nint main(void) {\n    int x;\n    x = undefined_thing + 1;\n    return x;\n}\n",4,9,"unknown identifier"},
+ {"semi",0,"#include <stdio.h>\nint main(void) {\n    int y = 3\n    return y;\n}\n",4,5,"expected ';'"},
+ {"bare",0,"int main(void) {\n    return nope;\n}\n",2,12,"unknown identifier"},
+ {"deep",0,"#include <stdio.h>\n#include <string.h>\nint helper(int a) { return a + 1; }\nint main(void) {\n    char b[8];\n    strcpy(b, \"hi\");\n    printf(\"%s\\n\", b);\n    return helper(missing);\n}\n",8,19,"unknown identifier"},
+ {"staticafter",1,"extern char **env_zz;\nstatic char *env_zz[] = {\"A=1\", 0};\nint main(void) { return env_zz[1] != 0; }\n",2,14,"static declaration follows a non-static declaration of this name (C99 6.2.2p7)"},
+ {"link_function",1,"int f(void);\nstatic int f(void);\n",2,12,"static declaration follows a non-static declaration of this name (C99 6.2.2p7)"},
+ {"link_comma",1,"extern int y;\nstatic int x, y;\n",2,15,"static declaration follows a non-static declaration of this name (C99 6.2.2p7)"},
+ {"link_fp",1,"extern int (*p)(void);\nstatic int (*p)(void);\n",2,14,"static declaration follows a non-static declaration of this name (C99 6.2.2p7)"},
+ {"link_block",1,"int main(void){extern int f(void);return 0;}\nstatic int f(void){return 1;}\n",2,12,"static declaration follows a non-static declaration of this name (C99 6.2.2p7)"},
+ {"link_plain",1,"static int x;\nint x;\n",2,5,"non-static declaration follows a static declaration of this object (C99 6.2.2p7)"},
+ {"staticinit",1,"int f(int x) { return x + 1; }\nint v = f(1);\nint main(void) { return v != 2; }\n",2,9,"initializer element is not a compile-time constant"},
+ {"init_local",1,"int f(void){return 7;} int g(void){static int x=f();return x;}\nint main(void){return 0;}\n",1,49,"initializer element is not a compile-time constant"},
+ {"init_value",1,"int y; static int x=y;\nint main(void){return 0;}\n",1,21,"initializer element is not a compile-time constant"},
+ {"init_aggregate",1,"int f(void){return 7;} struct S{int x;}; static struct S s={f()};\nint main(void){return 0;}\n",1,61,"initializer element is not a compile-time constant"},
+ {"init_after_sizeof",1,"int f(void){return 7;} static int x=sizeof(f())+f(); int main(void){return 0;}\n",1,49,"initializer element is not a compile-time constant"},
+ {"init_after_dead",1,"int f(void){return 7;} static int x=0?f():3; static int y=f(); int main(void){return 0;}\n",1,59,"initializer element is not a compile-time constant"},
+};
+#define NCASES ((int)(sizeof cases/sizeof cases[0]))
+static const char *nohdr_src="/* a header that no distribution bundles */\n\n\n\n#include <no_such_header_zz.h>\nint main(void) { return 0; }\n";
+static const char *cont_src="#include <stdio.h>\n#define TWO(a, b) \\\n    ((a) + (b))\nint main(void) {\n    return TWO(1, 2) + gone;\n}\n";
+static const char *multi_src="#include <stdio.h>\nint one(int a) {\n    return a + nope1;\n}\nint two(int b) {\n    int c = b\n    return c;\n}\nint three(void) {\n    return nope3;\n}\nint main(void) { return one(1) + two(2) + three(); }\n";
+static const char *reach_src="static int a(void);\nint main(void) { return a(); }\nstatic int a(void) { return nosuch2(); }\n";
+
+/* One located error as A-40 shapes it: position line, two-space-indented user line, caret under col. */
+static void located(np_buf *b,const char *file,const char *src,int line,int col,const char *msg){
+ const char *at=src;for(int l=1;l<line;l++){at=strchr(at,'\n');if(!at)die("case-line");at++;}
+ const char *end=strchr(at,'\n');if(!end)die("case-line-end");
+ np_puts(b,file);np_puts(b,":");np_putll(b,line);np_puts(b,":");np_putll(b,col);np_puts(b,": error: ");np_puts(b,msg);np_puts(b,"\n  ");
+ np_put(b,at,(size_t)(end-at));np_puts(b,"\n");for(int i=0;i<col+1;i++)np_puts(b," ");np_puts(b,"^\n");}
+
+static void recover(const char *label){
+ char bin[256],tag[256];snprintf(bin,sizeof bin,"rec-%s.bin",label);snprintf(tag,sizeof tag,"%s-recovery",label);
+ char *v[]={bound,"20","sh",com,"ok.c","-b","lnx/x86_64","-o",bin,0};
+ np_result r=runv(v,tag);ck(!r.rc&&!r.outn&&!r.errn&&regular(bin),label,"recovery-compile-rc0-image");np_free(&r);
+ char exe[4400];path(exe,sizeof exe,work,bin);char *x[]={bound,"10",exe,0};
+ snprintf(tag,sizeof tag,"%s-recovery-exec",label);r=runv(x,tag);ck(r.rc==7&&!r.outn&&!r.errn,label,"recovery-image-exit7");np_free(&r);}
+
+/* Run the archived command line and the image compile; both must refuse identically. */
+static void refuse(const char *label,const char *file,char **pre,int npre,int poscase,const char *want){
+ char *v[16];int n=0;v[n++]=bound;v[n++]="20";v[n++]="sh";v[n++]=com;for(int i=0;i<npre;i++)v[n++]=pre[i];
+ if(poscase){v[n++]="-O2";v[n++]=(char *)file;v[n++]="-run";}else{v[n++]="-run";v[n++]=(char *)file;}v[n]=0;
+ char tag[256];snprintf(tag,sizeof tag,"%s-run",label);np_result r=runv(v,tag);
+ ck(r.rc==1,label,"run-rc1");ck(!r.outn,label,"run-stdout-empty");ck(exact(&r,want),label,"run-stderr-exact");
+ if(!exact(&r,want)){fprintf(stderr,"negative-diagnostics: %s run stderr:\n",label);fwrite(r.err,1,r.errn,stderr);}np_free(&r);
+ char bin[256];snprintf(bin,sizeof bin,"%s.bin",label);n=4;for(int i=0;i<npre;i++)v[n++]=pre[i];
+ v[n++]=(char *)file;v[n++]="-b";v[n++]="lnx/x86_64";v[n++]="-o";v[n++]=bin;v[n]=0;
+ snprintf(tag,sizeof tag,"%s-compile",label);r=runv(v,tag);
+ ck(r.rc==1,label,"compile-rc1");ck(!r.outn,label,"compile-stdout-empty");ck(exact(&r,want),label,"compile-stderr-exact");ck(missing(bin),label,"compile-no-image");
+ if(!exact(&r,want)){fprintf(stderr,"negative-diagnostics: %s compile stderr:\n",label);fwrite(r.err,1,r.errn,stderr);}np_free(&r);
+ recover(label);}
+
+static int allowed(const char *e){size_t n=strlen(e);
+ if(n>2&&!strcmp(e+n-2,".c"))return 1;if(n>7&&!strcmp(e+n-7,".stdout"))return 1;if(n>7&&!strcmp(e+n-7,".stderr"))return 1;
+ return n>8&&!strncmp(e,"rec-",4)&&!strcmp(e+n-4,".bin");}
+
+int main(int argc,char **argv){
+#if !defined(__linux__) || !defined(__x86_64__)
+ fputs("NOT_RUN negative-diagnostics needs Linux/x86_64\n",stderr);return 3;
+#endif
+ char before[65],after[65];
+ if(argc!=4||!realpath(argv[1],root)||argv[2][0]!='/'||argv[3][0]!='/'||strstr(argv[3],".."))die("usage ROOT PRODUCT_COM ABS_OUT");
+ {char expected[4200];path(expected,sizeof expected,root,"unisacc.com");if(strcmp(argv[2],expected))die("installed-product-required");}
+ if(unsetenv("UNISACC_RR_TIME")||unsetenv("UNISACC_RF_CAPTURE")||unsetenv("UNISA_ATTRIBUTES")||setenv("UNISACC_RUN_CACHE","0",1))die("clean-environment");
+ copy_fit(com,sizeof com,argv[2]);copy_fit(work,sizeof work,argv[3]);if(mkdir(work,0700))die("new-output-required");
+ path(bound,sizeof bound,root,"tools/bound");sha_file(com,before);
+ {const char *s="int main(void){return 7;}\n";saved("ok.c",s,strlen(s));}
+ recover("baseline");
+ for(int i=0;i<NCASES;i++){
+  const Case *c=&cases[i];char file[160];snprintf(file,sizeof file,"%s.c",c->name);saved(file,c->src,strlen(c->src));
+  np_buf want={0};located(&want,file,c->src,c->line,c->col,c->msg);np_puts(&want,"1 error generated.\n");
+  refuse(c->name,file,0,0,c->poscase,want.p);free(want.p);}
+ /* cont: the archive checks the line only, because the column is measured in the macro-expanded
+    line the parser saw and the message prints that expanded line. Pinned exactly; A-40 gap kept. */
+ saved("cont.c",cont_src,strlen(cont_src));
+ refuse("cont","cont.c",0,0,0,"cont.c:5:34: error: unknown identifier\n      return  ( ( 1 ) + ( 2 ) )  + gone;\n                                   ^\n1 error generated.\n");
+ gap("cont.column","column 34 indexes the macro-expanded line, not the user's line 5 (user column 24); archive accepted line-only");
+ /* multi: three functions, three errors at lines 3 7 10, then the summary [S-15 C3]. */
+ saved("multi.c",multi_src,strlen(multi_src));
+ {np_buf w={0};located(&w,"multi.c",multi_src,3,16,"unknown identifier");located(&w,"multi.c",multi_src,7,5,"expected ';'");
+  located(&w,"multi.c",multi_src,10,12,"unknown identifier");np_puts(&w,"3 errors generated.\n");refuse("multi","multi.c",0,0,0,w.p);free(w.p);}
+ /* -ferror-limit=1 stops after the first, as clang does. */
+ {np_buf w={0};char *pre[]={"-ferror-limit=1"};located(&w,"multi.c",multi_src,3,16,"unknown identifier");
+  np_puts(&w,"too many errors emitted, stopping now\n");refuse("limit","multi.c",pre,1,0,w.p);free(w.p);}
+ /* nohdr: E2's DG.inc route names file:line:col and words, but prints no source line, caret or summary. */
+ saved("nohdr.c",nohdr_src,strlen(nohdr_src));
+ refuse("nohdr","nohdr.c",0,0,1,"nohdr.c:5:11: error: no such file for #include\n");
+ gap("nohdr.excerpt","E2 include refusal has file:line:col but no source line/caret/summary (A-40 asks for the source line)");
+ /* reach: archived contract was the text only. The current product still has no position. */
+ saved("reach.c",reach_src,strlen(reach_src));
+ refuse("reach","reach.c",0,0,0,"unisacc: error: undefined function 'nosuch2'\n1 error generated.\n");
+ gap("reach.position","undefined function 'nosuch2' carries no file:line:col (A-40; call site reach.c:3:29); archive checked text only");
+ {DIR *dp=opendir(work);struct dirent *e;int stray=0;if(!dp)die("opendir");
+  while((e=readdir(dp))){if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;if(!allowed(e->d_name)){stray++;fprintf(stderr,"negative-diagnostics: stray %s\n",e->d_name);}}
+  closedir(dp);ck(!stray,"output","no-stray-artifacts");}
+ sha_file(com,after);ck(!strcmp(before,after),"candidate","unchanged");
+ printf("CANDIDATE\tsha256=%s\n",before);
+ puts("NOT_CLAIMED\tpython-front-end-route-damaged-corpus-register-address-cases-foreign-hosts-other-targets");
+ printf("NEGATIVE_DIAGNOSTICS\tassertions=%d\tfailed=%d\tknown_gaps=%d\tarchived_cases=%d\textra=cont,multi,limit,reach\n",assertions,failures,gaps,NCASES+1);
+ return failures?1:0;}
