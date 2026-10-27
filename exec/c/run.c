@@ -153,6 +153,16 @@ static unsigned char *readstream_with(long fd, const char *path, int *len, void 
     *len = n; return b;
 }
 static unsigned char *readstream(long fd, const char *path, int *len) { return readstream_with(fd, path, len, xrealloc, 0); }
+static const char *io_open_reason(long fd) {
+#ifdef _WIN32
+    (void)fd; return 0;
+#else
+    if (fd == -ENOENT) return "ENOENT";
+    if (fd == -ENOTDIR) return "ENOTDIR";
+    if (fd == -EACCES) return "EACCES";
+    return 0;
+#endif
+}
 static unsigned char *readfile(const char *path, int *len, int optional) {
     long fd = io_open(path);
     if (fd < 0) {
@@ -161,7 +171,10 @@ static unsigned char *readfile(const char *path, int *len, int optional) {
 #else
         if (optional && fd == -ENOENT) return 0;
 #endif
-        fprintf(stderr, "run: cannot open %s\n", path); die("cannot open input");
+        const char *reason = io_open_reason(fd);
+        fprintf(stderr, "run: cannot open %s%s%s\n", path,
+                reason ? ": " : "", reason ? reason : "");
+        die("cannot open input");
     }
     unsigned char *b = readstream(fd,path,len);
     if (io_close(fd) < 0) die("close failed");
