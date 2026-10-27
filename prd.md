@@ -153,7 +153,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 **2026-10-27 最新开发候选（cdx）：** 已装SID `ccd29c711123fe97df6fb51656c9804160166ac1007486ed2b1cb4d1bad282e7`、APE `8a8195d5be397a2c2203cdd3e71002f55f464321fd598fd1c5c12ac0b427943b`（2,972,007 B），record `66c6a895…`；context-03正规107作业全部rc0，GEN-ccd29-01双核/五片/真deflate完成；PC02包 `c345ac87…` 独立VERIFIED，kind2准入9/0、开发安装rc0。旧Root1214在GEN备用。安装后smoke16/0；正式CLI宏23/0、目标20/0、include20/0（out/c43-ccd29-cli-wave-01），宏顺序红例闭合。同候选E2重包/正域103/0、拒绝187/0、绑定21/0已完成；完整N22、19宽合同及五外宿主仍开，开发安装不授发布资格。
 
-**2026-10-27 最新源码纪元（cdx）：** `a20f8049fc` 的 -D/-U 顺序与用户目标宏覆盖修复已正规构造并安装到Root8a8195d5，不再只依赖私有驱动。测试按E2→E1→E3→E4→prune→lower→ELF收口，阶段实现状态与矩阵格数分别报告。cc当前研究剩余冷启动ROI，并只读定位kernel-route外来有界改写的三处块后分号语法错误；compact私有差分不进入本安装纪元。
+**2026-10-27 最新源码纪元（cdx）：** E2缺头诊断新增源码行、tab保留的caret和单错误summary；私有三PP模型+新包的诊断套件211/0（含无末尾LF和恢复），E2正103/拒187不退。facts30/0；live SID `a5ec8a435f0456fe9770f639b16523eb1be7fed74979e81f043ede566e98b083`。已装Root8a8195d5仍是SIDccd29，本修尚待正规构造；E2矩阵不因私有验证转绿。
 
 **2026-10-27 cdx 主刀计划（主人本轮改派；重构造仍串行，互不抢文件的轻切片由 cc／Codex 辅助）**
 
@@ -350,11 +350,11 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 <a id="memory-palace"></a>
 ### 记忆宫殿
 
-**现行构造：** live SID `ccd29c71…`；`out/c43-source-ccd29-context-03/` 使用GEN-a825保存的bootstrap，107作业全部外层rc0（四路分波，大项分步，job.*.outer.log）；GEN `out/c43-native-kernel-ccd29-01/` 双核已完成；PC `out/c43-source-ccd29-full-pc-02/` 的34模型/六路线/declare/pack/seal/独立verify均rc0，包SHA `c345ac87a82c3b7b593d48b9a93b6f8160c23b6c23dab467d62800c57ee3548d`。五片/wrap/kind2准入9/0及安装已完成；Root8a8195d5，宏23/0，旧Root1214留备份。
+**已装产品构造：** source SID `ccd29c71…`；`out/c43-source-ccd29-context-03/` 使用GEN-a825保存的bootstrap，107作业全部外层rc0（四路分波，大项分步，job.*.outer.log）；GEN `out/c43-native-kernel-ccd29-01/` 双核已完成；PC `out/c43-source-ccd29-full-pc-02/` 的34模型/六路线/declare/pack/seal/独立verify均rc0，包SHA `c345ac87a82c3b7b593d48b9a93b6f8160c23b6c23dab467d62800c57ee3548d`。五片/wrap/kind2准入9/0及安装已完成；Root8a8195d5，宏23/0，旧Root1214留备份。
 
 **构造失败保留：** context-01缺zlib.h；context-02有超时收据，且bootstrap误指活Root，pack预检拒绝live-root-record-must-use-ephemeral-bind。两上下文均只保留历史、不转授03；PC01预检失败、PC02首次route用斜杠目标名被拒，改正确短横目标名后六路线完成，原日志保留。宿主CC/zlib依赖未清除。
 
-**提速决策：** cc 的 callback-wrapper 二遍增量原型仅单单元映像与基线逐字同，多单元由于第二遍 FFI 裁剪变化出现映像差异；暂不吸入产品。cc 转向 `-o` 测试执行缓存；source-package 控制器已用 `tools/dev-run` 编译并实际完成 gen 作业，缓存仅代码、不缓存收据。
+**提速决策：** 不吸入多单元回调增量（映像不同），不重复封存测试缓存（已有热复用）。cc定位source-package软件SHA瓶颈；控制器≥1024B改用已声明kernelsha，保留所有逐字节观察/依赖检查。foundation13a58d0e、pack1f4b7914、三basis/当前producer已同步；cc私有根六作业结果逐字相同且快测rc0，见out/c43-cc-spdigest-proto-01/wt.log。历史origin/mixed pins不盲改。
 
 **测试加速方向：** 主人同意对不以默认 `-run` 为被测合同的测试先用 `-o` 编出可执行文件并每次实际运行；已有 `tools/dev-run` 是内容寻址的开发代码缓存，不能缓存测试结论或自动代替默认 `-run` 资格。接入前逐批核产品和源闭包身份及输出／退出码等价；`-run` 自身合同仍单独验证。
 
@@ -362,7 +362,7 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 
 **最新开发根：** SID `ccd29c71…`／APE `8a8195d5…`，PC `c345ac87…`，GEN `out/c43-native-kernel-ccd29-01/`，context-03的107作业全部rc0，kind2准入9/0及开发安装通过；smoke16/0，CLI宏23/0、目标/include各20/0。矩阵289 COVERED_LOCAL/364 MISSING/38 NEEDS_PRODUCT_CHANGE；其余历史证据不转授新候选。
 
-**最新源码入口：** live SID与已装候选同为 `ccd29c71…`。同候选E2正103/拒187/绑定21已复跑；下一刀修剩余预处理诊断和计数合同。cc仅在隔离域做提速与语法回归诊断；主树热路径cdx单写。
+**最新源码入口：** E2诊断源码SID `a5ec8a43…`，已装Root8a8195d5仍SIDccd29。私有 `out/c43-e2-excerpt-fix-01/`：诊断211/0、正103/拒187、facts30/0；不能授安装资格。构造控制器hash提速及三basis/当前producer同步已在工作树独立复核，下一源纪元合批构造，避免重复封包。
 
 **历史7bb6入口：** SID `7bb6eb92bd50f964171462945e6a9d0e04982bd6e6a42882abb054aefaa5e2be`；107 作业、PC、五片、APE、kind2 准入均在同源本代完成。开发根已装 `b226463fe13a77070a72fe9947131b797670e0e590fe2c9c4138c94ca9198ba9`，旧 Root7a 留 GEN 备份。smoke16/0、热多模块约0.109秒；本代 stream6 输入拒绝正式29/0，其他四 lower 模式直接51/778/1516/115全绿。默认 ftrim 对新 `cx_*` 两函数仍红；下一刀核 E2 新键采用链。`df8f/831a` 收据只作历史。
 
