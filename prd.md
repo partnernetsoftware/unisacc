@@ -350,7 +350,7 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 <a id="memory-palace"></a>
 ### 记忆宫殿
 
-**新源码构造入口：** `out/c43-source-ccd29-context-01/` 已用当前开发根及 gcc-11 正规 prepare，返回 `PREPARED source-package-context-v2`；只冻结上下文，107 作业、包、候选和准入均尚未完成，不授功能通过。cc 提速原型与构造重活错峰。
+**新源码构造入口：** `out/c43-source-ccd29-context-01/` 已用当前开发根及 gcc-11 正规 prepare，返回 `PREPARED source-package-context-v2`；首个 `tool-gen` 作业已 PREPARED，收据钉 source `ccd29c71…`。其余106作业、包、候选和准入均尚未完成，不授功能通过。cc 提速原型与构造重活错峰。
 
 **当前流入口：** Root `1214e053…`／SID `a8258143…`；活源码 SID `ccd29c71…` 待新候选。E2绑定批13/0，19域矩阵当前286 COVERED_LOCAL、366 MISSING；`--all` rc3、19 unresolved、166批未跑。按阶段收口，不将矩阵覆盖率当实现进度。
 
