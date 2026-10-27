@@ -14,6 +14,7 @@
 #define _DEFAULT_SOURCE 1
 #endif
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #ifndef _WIN32
@@ -244,6 +245,40 @@ static int cx_walk(const char *__u_dir, int (*__u_fn)(const char *__u_path, void
 #include <limits.h>
 #include <errno.h>
 #include <ctype.h>
+/* Return success only when the complete formatted text fits.  A failed
+   format leaves an empty destination whenever it has room for a terminator. */
+#if !__UNISA_FTRIM_LIBC || __UN_cx_fmt
+static int cx_fmt(char *__u_dst, size_t __u_cap, const char *__u_fmt, ...) {
+    va_list __u_ap; int __u_n;
+    if (__u_dst && __u_cap) __u_dst[0] = 0;
+    if (!__u_dst || !__u_fmt || !__u_cap) return -1;
+    va_start(__u_ap, __u_fmt);
+    __u_n = vsnprintf(__u_dst, __u_cap, __u_fmt, __u_ap);
+    va_end(__u_ap);
+    if (__u_n < 0 || (size_t)__u_n >= __u_cap) { __u_dst[0] = 0; return -1; }
+    return 0;
+}
+#endif
+
+/* Join a directory and a relative name without ever writing a partial path. */
+#if !__UNISA_FTRIM_LIBC || __UN_cx_path_join
+static int cx_path_join(char *__u_dst, size_t __u_cap, const char *__u_dir, const char *__u_name) {
+    size_t __u_nd, __u_nn, __u_slash, __u_at = 0;
+    if (!__u_dst || !__u_cap || !__u_dir || !__u_name || !__u_name[0] || __u_name[0] == '/') {
+        if (__u_dst && __u_cap) __u_dst[0] = 0;
+        return -1;
+    }
+    __u_nd = strlen(__u_dir); __u_nn = strlen(__u_name);
+    __u_slash = __u_nd && __u_dir[__u_nd - 1] != '/';
+    if (__u_nd >= __u_cap || __u_slash > __u_cap - __u_nd - 1 ||
+        __u_nn > __u_cap - __u_nd - __u_slash - 1) { __u_dst[0] = 0; return -1; }
+    memmove(__u_dst + __u_at, __u_dir, __u_nd); __u_at += __u_nd;
+    if (__u_slash) __u_dst[__u_at++] = '/';
+    memcpy(__u_dst + __u_at, __u_name, __u_nn); __u_at += __u_nn;
+    __u_dst[__u_at] = 0;
+    return 0;
+}
+#endif
 #ifndef _WIN32
 #include <sys/types.h>
 #include <fcntl.h>
