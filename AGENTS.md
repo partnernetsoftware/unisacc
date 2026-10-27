@@ -30,6 +30,7 @@
 ## 协作、提交和卫生
 
 - 一律main，不用分支或worktree。共享检出只提交自己的路径，别带走其他协作者暂存的文件。
+- 共享 main 上不得用 `git stash`/`pop`、`git clean`、`git reset` 或 `git checkout` 清理、暂移、还原他人路径；需要干净输入时在仓外用 `git archive` 或独立克隆，不改变共享检出。
 - 有合理、可审查进展就分批提交：`git commit -m ... -- 明确路径`；不积压大量改动再作一次大提交。
 - 新动态编辑优先自己的`.com + .cx`，精确匹配并断言；不用临时Python或sed改源码。
 - 文件存在性只把ENOENT当不存在；ENOTDIR/EACCES必须报告。
