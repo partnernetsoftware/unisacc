@@ -247,14 +247,18 @@ int main(int argc, char **argv) {
     at += clen;
   }
 
-  int m_pp = -1, m_lower = -1;
+  int m_pp = -1, m_lower = -1, m_tokenpp = -1, m_tokenlex = -1;
   for (unsigned long i = 0; i < ps; i++) {
     if (!strcmp(stages[i].route, "lnx/x86_64/pp") && !strcmp(stages[i].name, "e2")) m_pp = stages[i].model;
     if (!strcmp(stages[i].route, "lnx/x86_64/image/O0") && !strcmp(stages[i].name, "lower"))
       m_lower = stages[i].model;
+    if (!strcmp(stages[i].route, "tokens") && !strcmp(stages[i].name, "tokenpp")) m_tokenpp = stages[i].model;
+    if (!strcmp(stages[i].route, "tokens") && !strcmp(stages[i].name, "tokenlex")) m_tokenlex = stages[i].model;
   }
   ck(m_pp == 3, "D-shared-pp-e2-M3");
   ck(m_lower == 13, "D-nonshared-image-lower-M13");
+  ck(m_tokenpp == 24, "D-tokens-tokenpp-M24");
+  ck(m_tokenlex == 25, "D-tokens-tokenlex-M25");
 
   /* job text == PC model text (shared + nonshared) */
   static const struct {
@@ -302,15 +306,20 @@ int main(int argc, char **argv) {
   }
 
   /* same-window dynamic: clean / used-M ICM / unused-M OK */
-  char out_e[4400], out_c[4400], bad3[4400], bad13[4400], bad0[4400];
+  char out_e[4400], out_c[4400], out_t[4400], bad3[4400], bad13[4400], bad0[4400], bad24[4400], bad25[4400];
   path(out_e, sizeof out_e, work, "clean.i");
   path(out_c, sizeof out_c, work, "clean.com");
+  path(out_t, sizeof out_t, work, "clean.tokens");
   path(bad3, sizeof bad3, work, "corrupt-m3.com");
   path(bad13, sizeof bad13, work, "corrupt-m13.com");
   path(bad0, sizeof bad0, work, "corrupt-m0.com");
+  path(bad24, sizeof bad24, work, "corrupt-m24.com");
+  path(bad25, sizeof bad25, work, "corrupt-m25.com");
   write_corrupt(ape, ape_n, ft.package_offset, &ms[3], bad3);
   write_corrupt(ape, ape_n, ft.package_offset, &ms[13], bad13);
   write_corrupt(ape, ape_n, ft.package_offset, &ms[0], bad0);
+  write_corrupt(ape, ape_n, ft.package_offset, &ms[24], bad24);
+  write_corrupt(ape, ape_n, ft.package_offset, &ms[25], bad25);
 
   {
     char *tail_e[] = {"-b", "lnx/x86_64", "-E", src, "-o", out_e, 0};
@@ -321,6 +330,11 @@ int main(int argc, char **argv) {
     run_product(product, tail_c, "clean-compile-ok", 0);
     run_product(bad13, tail_c, "corrupt-M13-compile-ICM", 1);
     run_product(bad3, tail_c, "corrupt-M3-compile-still-ok", 0);
+    char *tail_t[] = {"-dump-tokens", src, "-o", out_t, 0};
+    run_product(product, tail_t, "clean-tokens-ok", 0);
+    run_product(bad24, tail_t, "corrupt-M24-tokens-ICM", 1);
+    run_product(bad25, tail_t, "corrupt-M25-tokens-ICM", 1);
+    run_product(bad3, tail_t, "corrupt-M3-tokens-still-ok", 0);
   }
 
   free(stages);
@@ -328,7 +342,7 @@ int main(int argc, char **argv) {
   free(ape);
   puts("NOT_CLAIMED\thostseed-payload-trust-rewrite-complete-N22-all-32-CLI-routes-foreign-hosts");
   printf("P3_MEMBER_CONSUME\tassertions=%d\tfailed=%d\tpm=32\tshared=M3/shared-e2\tnonshared=M13/"
-         "lnx-x86_64-lower\n",
+         "lnx-x86_64-lower\ttokens=M24,M25\n",
          checks, failed);
   return failed ? 1 : 0;
 }
