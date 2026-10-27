@@ -155,7 +155,9 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 **P0 完成边界与待决项：** 外宿主需要同候选真实工件及五宿主原生执行；当前不得 push、上传或派发，授权或真实宿主通道未到前只做本地准备。822 格是当前矩阵账，未经主人裁定不删必选格、不把依赖声明当作 N22 实证。词法三项按 C99 与产品实际输出继续核，具名缺陷不改贴 PASS。
 
-**P1 纪元1候选（cc 独占重构造切片）：** A2 已封源，SID `df8f29fd`。A3 的 107 作业收据已落齐；cc 继续 A4 PC → A5 GEN → A6 kind2 准入加开发安装，每段核同一 SID，原失败/UNKNOWN 不升格（`out/c43-cc-epoch1-build-01.md`）。cdx 不抢该 context／PC／GEN／安装闸。
+**P1 纪元1候选（主人已在 A4 前暂停）：** A2 已封源，SID `df8f29fd`；A3 的 107/107 作业收据和 context 复验完成（`out/c43-cc-epoch1-build-01.md`）。A4 PC、A5 GEN、A6 准入／安装均未开始，不把 PREPARED 升格成候选。先解决 `.cx` 开发反馈墙钟，再决定沿用此 SID 或将已知产品修复合入下一纪元；cdx/cc/grk 均不擅自重开该构造闸。
+
+**P1a `.cx` 提速第一优先（主人新裁定）：** 本机无模块 `.cx` 约0.09s，`use netpack` 约5.4s，`use allsession` 冷/二次约10.4/10.6s；二次模块编译没有复用（`out/c43-cc-speed-probe/`）。cc 独占 `tools/dev-run.cx` 与薄入口，把现有代码缓存原型改为按当前产品／包／源闭包／选项内容寻址；只缓存原生 ELF 代码，每次真执行，不接正式 `run-batch` 直至同产品冷/热、参数变化、污染与失效负控核过。grk 的标准库和模块搜索路径工作先做隔离设计／轻探针，不碰 SID 闭包，避免 A3 身份漂移。cdx 负责审入及后续正式批接线。
 
 **P2 纪元2产品修复（P1 后由 cdx 串行收源、重建）：** 38 个需改产品格，加已知缺陷：E2 五项、E1 errno、`?:` 返回 struct、A-40 三诊断、自引用 struct 措辞、分相计时戳。新红例 `tests/pending/sizeof-global-member.cx`（`68c3adfb72`）：静态结构体数组的 `char op[24]` 得 `sizeof(rows[0].op)=8`，嵌套元素为24、整结构为336、整数组为29232；Root7a 默认 `-run` rc1，产物重建后必须修到四值全对。`lower` 的 ENOTDIR/EACCES 与 ENOENT 诊断未分开，输入域 29 断言中 2 红；修源码后必须重测，不删红项。
 
@@ -332,7 +334,7 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 <a id="memory-palace"></a>
 ### 记忆宫殿
 
-**本轮入图（2026-10-27，cdx 主刀）：** cc 独占候选 A3→A6，A3 的 107 作业收据已落齐；产品仍是旧 Root7a，纪元1 SID `df8f29fd…` 尚未装成新候选。Codex 辅助已交外宿主草稿 producer/artifact head 一致检查（`b40487eadd`，cdx 以 `5b4616387f` 保留较新验证提交）与跨命令 B1b 收据 `dabc5a0efb`，未派发 CI。lower 四个旧 Root7a 正式批 `9a44ce9869` 为 51/0、778/0、1516/0、115/0；ABI 六项 UNVERIFIED、输入 errno 29/2 红。六目标流材料 `61ba5c621c`，五目标有限 oracle `611a8c62d3` 各 17/0，材料显式绑定补丁 `4ef850b1c7` 的 lnx/arm64 正式复跑 17/0；外国目标只在本机验证输出，不授外宿主资格。完整 lower 父行和其余 18 宽行、N22、五外宿主仍开，`--all` rc3。
+**本轮入图（2026-10-27，cdx 主刀）：** cc 的纪元1 A3 已有 107/107 收据、SID `df8f29fd…`，主人在 A4 前暂停，PC/GEN/准入/安装未做；产品仍是旧 Root7a。首要提速缺口是模块 `.cx` 二次运行仍约5–11s、无编译复用；cc 独占当前产品代码缓存原型，grk 的标准库／模块路径工作先隔离，cdx 审入后再接正式批。Codex 辅助已交外宿主草稿 producer/artifact head 一致检查（`b40487eadd`，cdx 以 `5b4616387f` 保留较新验证提交）与跨命令 B1b 收据 `dabc5a0efb`，未派发 CI。lower 四个旧 Root7a 正式批 `9a44ce9869` 为 51/0、778/0、1516/0、115/0；ABI 六项 UNVERIFIED、输入 errno 29/2 红。六目标流材料 `61ba5c621c`，五目标有限 oracle `611a8c62d3` 各 17/0，材料显式绑定补丁 `4ef850b1c7` 的 lnx/arm64 正式复跑 17/0；外国目标只在本机验证输出，不授外宿主资格。完整 lower 父行和其余 18 宽行、N22、五外宿主仍开，`--all` rc3。
 
 **现行入口：** 下一表第一行是当前身份与行动；其余旧行保留来源历史，凡与第一行冲突的“当前”字样均已失效。
 
