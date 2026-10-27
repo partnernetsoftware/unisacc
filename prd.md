@@ -350,6 +350,8 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 <a id="memory-palace"></a>
 ### 记忆宫殿
 
+**提速决策：** cc 的 callback-wrapper 二遍增量原型仅单单元映像与基线逐字同，多单元由于第二遍 FFI 裁剪变化出现映像差异；暂不吸入产品。cc 转向 `-o` 测试执行缓存；source-package 控制器已用 `tools/dev-run` 编译并实际完成 gen 作业，缓存仅代码、不缓存收据。
+
 **测试加速方向：** 主人同意对不以默认 `-run` 为被测合同的测试先用 `-o` 编出可执行文件并每次实际运行；已有 `tools/dev-run` 是内容寻址的开发代码缓存，不能缓存测试结论或自动代替默认 `-run` 资格。接入前逐批核产品和源闭包身份及输出／退出码等价；`-run` 自身合同仍单独验证。
 
 **新构造进展：** `out/c43-source-ccd29-context-01/` 的 tool-pack 缺宿主 zlib.h 而 rc2，失败保留；以 `CPATH=/usr/include/node` 和已有 zlib 库路径新建 `out/c43-source-ccd29-context-02/`，五个基础工具作业均 PREPARED/rc0。剩余102个 gen/tbl/net 作业与候选尚未完成；宿主 zlib 依赖仍明确保留。
