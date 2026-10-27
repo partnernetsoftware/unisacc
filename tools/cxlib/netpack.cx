@@ -20,9 +20,10 @@
                                    env=dict(os.environ, K=V for each "K=V" of ENVADD)): stdin inherited, stdout and
                                    stderr through two pipes read to their ends (as communicate() does), res.rc the
                                    returncode (-N for signal N).  0, or -1 with WHY the exception's line (the exec's or
-                                   the cwd's OSError, or `subprocess.TimeoutExpired: ...`; the child is SIGKILLed).
-                                   SECS counts idle milliseconds polled (<time.h> is not in the prelude), so a child
-                                   that keeps writing is bounded by the caller's tests/bound instead
+                                   the cwd's OSError, or `subprocess.TimeoutExpired: ...`; the child's whole process
+                                   group is SIGKILLed, so grandchildren do not outlive the bound).  SECS counts 1 ms
+                                   ticks, one per loop pass whether or not output arrived (<time.h> is not in the
+                                   prelude), so a child that keeps writing is bounded too; read time is not counted
      np_free(&res)
      np_put / np_puts / np_putll   append bytes / a string / a decimal to an np_buf (grown on the heap; never a
                                    vsnprintf of a string, see the runtime's long-%s bug)
@@ -759,6 +760,7 @@ int np_run(char *const argv[], const char *cwd, char *const envadd[], int secs, 
     pid = fork();
     if (pid < 0) { snprintf(why, wl, "OSError: fork failed"); return -1; }
     if (pid == 0) {
+        setpgid(0, 0);   /* own process group: a timeout kills every descendant */
         close(po[0]); close(pe[0]); close(pf[0]);
         dup2(po[1], 1); dup2(pe[1], 2); close(po[1]); close(pe[1]);
         if (envadd && envadd[0]) {
@@ -785,6 +787,7 @@ int np_run(char *const argv[], const char *cwd, char *const envadd[], int secs, 
         err[0] = 2; err[1] = errno; k = write(pf[1], err, sizeof err); (void)k;
         _exit(255);
     }
+    setpgid(pid, pid);   /* also from the parent, so the group exists before any kill */
     close(po[1]); close(pe[1]); close(pf[1]);
     k = read(pf[0], err, sizeof err);
     close(pf[0]);
@@ -800,10 +803,10 @@ int np_run(char *const argv[], const char *cwd, char *const envadd[], int secs, 
         if (open_o) { k = read(po[0], t, sizeof t); if (k > 0) { np_put(&o, t, (size_t)k); got = 1; } else if (k == 0 || (errno != EAGAIN && errno != EINTR)) { open_o = 0; close(po[0]); } }
         if (open_e) { k = read(pe[0], t, sizeof t); if (k > 0) { np_put(&e, t, (size_t)k); got = 1; } else if (k == 0 || (errno != EAGAIN && errno != EINTR)) { open_e = 0; close(pe[0]); } }
         if (!open_o && !open_e && !reaped) { waitpid(pid, &st, 0); reaped = 1; break; }
-        if (got) continue;
-        if (idle >= (long)secs * 1000) {   /* the bound counts idle milliseconds (<time.h> is not in the prelude) */
+        (void)got;
+        if (idle >= (long)secs * 1000) {   /* 1 ms ticks, counted with or without output */
             size_t i;
-            kill(pid, SIGKILL); waitpid(pid, &st, 0);
+            kill(-pid, SIGKILL); kill(pid, SIGKILL); waitpid(pid, &st, 0);
             if (open_o) close(po[0]);
             if (open_e) close(pe[0]);
             free(o.p); free(e.p);
