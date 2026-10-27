@@ -68,7 +68,8 @@ static unsigned char *source_read(const char *path, int *len) {
     if (!strcmp(path,"-")) return readstream(0,"stdin",len);
     long fd=io_open(path);
     if (fd < 0) {
-        fprintf(stderr,"unisacc: error: cannot open %s\n",path);
+        const char *reason=io_open_reason(fd);
+        fprintf(stderr,"unisacc: error: cannot open %s%s%s\n",path,reason?": ":"",reason?reason:"");
         exit(1);
     }
     unsigned char *bytes=readstream(fd,path,len);

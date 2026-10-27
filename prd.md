@@ -149,17 +149,17 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 <a id="work-tree"></a>
 ### 思维树
 
-**现行流推进（2026-10-28）：** E2本机必选合同62/62已统一到Root41b836d7，十个正式SOURCE批均PASS（out/c43-a5ec-e2-wave-01）：正103/拒187、独立IO36、gold18键21、输入/包含计数21、CLI目标20/include20/宏23、诊断211、header-locations。五外宿主未跑，full-stream-e2仍NOT_READY。下一阶段E1；不得把本机收口写成完整版本或六宿主通过。
+**现行流推进（2026-10-28）：** E2本机必选合同62/62已统一到Root41b836d7，十个正式SOURCE批均PASS（out/c43-a5ec-e2-wave-01）：正103/拒187、独立IO36、gold18键21、输入/包含计数21、CLI目标20/include20/宏23、诊断211、header-locations。E1已用本代stream2重跑旧oracle四批175/501/267/25全部0失败，并独立核包内E1成员绑定24/0；纠正旧oracle对非法数字、空字符与裸换行的接受后，已装模型tokens184/9、refusals526/111，不能沿用旧绿关闭这些合同。私有源码修复模型tokens184/0、bytes501/0、refusals526/0，尚未安装。字符前缀与UCN仍开；先合批修完再重建产品。五外宿主未跑，完整流仍NOT_READY。
 
 **2026-10-28 最新开发候选（cdx）：** 已装SID `a5ec8a435f0456fe9770f639b16523eb1be7fed74979e81f043ede566e98b083`，APE `41b836d7119b96907c3e978f38786d0162adac7ca57104688ee33021bbbdf1b6`（2,972,351 B），record `c7bc3012…`。context-a5ec-01的107作业全部外层rc0，GEN-a5ec-01双核/五片/真deflate完成；PC包 `480f91c8…` 独立VERIFIED，kind2准入9/0、安装rc0，旧Root8a8195d5在GEN备用。安装后smoke16/0、E2十批同候选PASS。--all仍rc3，176 coverage/19 unresolved/166未跑批/子批0；完整N22与外宿主仍开。
 
-**2026-10-28 最新源码纪元（cdx）：** E2缺头诊断源码行、保留tab的caret、summary及EOF无LF已在当前产品正式验证211/0；live SID与已装产品同为a5ec8a43。构造器大文件SHA改用已声明kernelsha，逐字节依赖核验保留；三basis/current producer同步。107项分波累计执行墙钟约6.4min（不含波间排查与其他构造步骤，非同条件A/B）；完整清单补齐了首次列表过滤漏掉的8组x86_64项。现阶段只推进E1实际缺口，不再为已通过E2本机合同重复重建。
+**2026-10-28 最新源码纪元（cdx）：** 已装SID仍a5ec8a43；E1数值整词验证、空字符/换行/未闭合注释及attribute拒绝、驱动source_read errno修复后的live SID为 `4399fcb4161280170c294b6c0795d2d05181a6b4ea649020dbf8b1d1e9031d70`，未构造正式候选。参考数值函数经自身产品执行49/0；私有驱动三种打开失败具名且stdout空，恢复程序return7。现有事实导出器30表check零差（Python债保留）。E2已装诊断211/0和此前107项约6.4min分波执行账保留；不为已通过E2重复重建。下一动作是字符前缀与UCN边界修复后一次封源构造。
 
 **2026-10-27 cdx 主刀计划（主人本轮改派；重构造仍串行，互不抢文件的轻切片由 cc／Codex 辅助）**
 
 完成门（`plans/v0.0.43.md:42`）：19 条 NOT_READY 宽行、完整 N22、五外宿主同候选实证全部闭合后，`--all` 才可 rc0。
 
-**当前矩阵账（2026-10-28，19个域矩阵实算）：** 822必选格：291 COVERED_LOCAL、3 OBSERVED、363 MISSING、37 NEEDS_PRODUCT_CHANGE、79 NEEDS_FOREIGN_HOST、33一般BLOCKED、6具名BLOCKED、10 DECLARED_DEPENDENCY；另9非必选格。E2本机62格已统一Root41b836d7，其他矩阵依各行历史材料，不能直接转授。N22的E7已有产品内汇编合同、E6有成员交叉核对；E2–E5/E9–E11仍是声明的宿主工具依赖，E8保留Python权重发射债，E12外宿主未实跑；声明不当作完整N22通过。
+**当前矩阵账（2026-10-28，19个域矩阵实算）：** 822必选格：315 COVERED_LOCAL、3 OBSERVED、335 MISSING、41 NEEDS_PRODUCT_CHANGE、79 NEEDS_FOREIGN_HOST、33一般BLOCKED、6具名BLOCKED、10 DECLARED_DEPENDENCY；另9非必选格。E2本机62格统一Root41b836d7；E1本机35 COVERED_LOCAL/4 NEEDS_PRODUCT_CHANGE/1 MISSING，其中旧oracle基线与修正后红例分开记录，私有模型不授已装资格。其他矩阵依各行历史材料，不能直接转授。N22的E7已有产品内汇编合同、E6有成员交叉核对；E2–E5/E9–E11仍是声明的宿主工具依赖，E8保留Python权重发射债，E12外宿主未实跑；声明不当作完整N22通过。
 
 **P0 完成边界与待决项：** 外宿主需要同候选真实工件及五宿主原生执行；当前不得 push、上传或派发，授权或真实宿主通道未到前只做本地准备。822 格是当前矩阵账，未经主人裁定不删必选格、不把依赖声明当作 N22 实证。词法三项按 C99 与产品实际输出继续核，具名缺陷不改贴 PASS。
 
@@ -358,11 +358,11 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 
 **测试加速方向：** 主人同意对不以默认 `-run` 为被测合同的测试先用 `-o` 编出可执行文件并每次实际运行；已有 `tools/dev-run` 是内容寻址的开发代码缓存，不能缓存测试结论或自动代替默认 `-run` 资格。接入前逐批核产品和源闭包身份及输出／退出码等价；`-run` 自身合同仍单独验证。
 
-**当前流入口：** E2本机62/62同候选通过，材料 `out/c43-streams-a5ec-01/` 的stream1 `265001c4…` 与当前APE内E2成员逐字绑定；下一刀E1词法。五外宿主与宽父合同保持未完成。
+**当前流入口：** E2本机62/62；本代stream1 `265001c4…`、stream2 `000d67dd…` 均独立与Root41内成员逐字绑定（扩展input-binding24/0）。E1标准修复证据 `out/c43-e1-c99-fix-01/`；私有stream2 `a104ba38…` 的184/501/526全绿不授已装资格。前缀/UCN仍待修，五外宿主与宽父合同未完成。
 
-**最新开发根：** SIDa5ec8a43／APE41b836d7／PC480f91c8，旧Root8a8195d5已备份。全19矩阵291 COVERED_LOCAL/363 MISSING/37 NEEDS_PRODUCT_CHANGE；仅E2本机62格统一当前候选，其余历史证据不直接转授。
+**最新开发根：** SIDa5ec8a43／APE41b836d7／PC480f91c8，旧Root8a8195d5已备份。全19矩阵315 COVERED_LOCAL/335 MISSING/41 NEEDS_PRODUCT_CHANGE；E2本机62格统一当前候选，E1基线与标准纠错后红例分列，其余历史证据不直接转授。
 
-**最新源码入口：** E2源码修复0be0b8332d和构造提速84f1e02b3e已正规构造并安装。E1当前矩阵11/40为旧覆盖账，需按现有批复用后在新候选复核；cc只读盘点，主线保持产品热路径单写。
+**最新源码入口：** E1修复live SID4399fcb4，正式产品仍a5ec8a43。参考数值49/0；私有driver的ENOENT/ENOTDIR/EACCES精确拒绝+return7恢复；私有E1 tokens184/0、bytes501/0、refusals526/0，私有driver+新模型执行smoke16/0（private-smoke.log），均非已装资格。cc接只读边界复核，tests/stream-e1-lex.cx已交cdx单写（四处原暂存byte-loop保留，work路径循环含NUL）。不动其他协作者暂存；前缀/UCN修完再一次封源，不重复构造107。
 
 **历史7bb6入口：** SID `7bb6eb92bd50f964171462945e6a9d0e04982bd6e6a42882abb054aefaa5e2be`；107 作业、PC、五片、APE、kind2 准入均在同源本代完成。开发根已装 `b226463fe13a77070a72fe9947131b797670e0e590fe2c9c4138c94ca9198ba9`，旧 Root7a 留 GEN 备份。smoke16/0、热多模块约0.109秒；本代 stream6 输入拒绝正式29/0，其他四 lower 模式直接51/778/1516/115全绿。默认 ftrim 对新 `cx_*` 两函数仍红；下一刀核 E2 新键采用链。`df8f/831a` 收据只作历史。
 

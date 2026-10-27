@@ -2973,11 +2973,63 @@ int pm_build(void) {
     pm_first[256] = n; pm_built = 1;
     return 0;
 }
+/* C99 6.4.4.1/2: conversion validates the entire preprocessing number.
+   In particular 0xE+1 and 1e are not several valid tokens (6.4.8). */
+int lex_numeric_valid(int begin, int end) {
+    int q; int digits; int isfloat; int hasdot; int octbad; int firstzero; int c; int uns;
+    q = begin; digits = 0; isfloat = 0; hasdot = 0; octbad = 0; firstzero = at(q) == 48;
+    if (firstzero && (at(q + 1) == 120 || at(q + 1) == 88)) {
+        q = q + 2;
+        while (q < end && ishexc(at(q))) { q = q + 1; digits = digits + 1; }
+        if (q < end && at(q) == 46) {
+            hasdot = 1; q = q + 1;
+            while (q < end && ishexc(at(q))) { q = q + 1; digits = digits + 1; }
+        }
+        if (digits == 0) return 0;
+        if (q < end && (at(q) == 112 || at(q) == 80)) {
+            isfloat = 1; q = q + 1;
+            if (q < end && (at(q) == 43 || at(q) == 45)) q = q + 1;
+            digits = 0;
+            while (q < end && isdi(at(q))) { q = q + 1; digits = digits + 1; }
+            if (digits == 0) return 0;
+        } else if (hasdot) return 0;
+    } else {
+        while (q < end && isdi(at(q))) {
+            if (firstzero && at(q) >= 56) octbad = 1;
+            q = q + 1; digits = digits + 1;
+        }
+        if (q < end && at(q) == 46) {
+            isfloat = 1; q = q + 1;
+            while (q < end && isdi(at(q))) { q = q + 1; digits = digits + 1; }
+        }
+        if (digits == 0) return 0;
+        if (q < end && (at(q) == 101 || at(q) == 69)) {
+            isfloat = 1; q = q + 1;
+            if (q < end && (at(q) == 43 || at(q) == 45)) q = q + 1;
+            digits = 0;
+            while (q < end && isdi(at(q))) { q = q + 1; digits = digits + 1; }
+            if (digits == 0) return 0;
+        }
+        if (isfloat == 0 && octbad) return 0;
+    }
+    if (isfloat) {
+        if (q < end && (at(q) == 102 || at(q) == 70 || at(q) == 108 || at(q) == 76)) q = q + 1;
+        return q == end;
+    }
+    uns = 0;
+    if (q < end && (at(q) == 117 || at(q) == 85)) { uns = 1; q = q + 1; }
+    if (q < end && (at(q) == 108 || at(q) == 76)) {
+        c = at(q); q = q + 1;
+        if (q < end && at(q) == c) q = q + 1;
+    }
+    if (uns == 0 && q < end && (at(q) == 117 || at(q) == 85)) q = q + 1;
+    return q == end;
+}
+
 int lex(void) {
     int i; int j; int a; int key[4]; int kind; int st;
     int best; int bl; int k; int p; int L;
     int strpfx;                            /* the `L` of an `L"..."`, or -1 */
-    int isf;
     i = 0;
     ntok = 0; nctorm = 0;
     strpfx = 0 - 1;
@@ -3000,10 +3052,11 @@ int lex(void) {
         else {
         if (a == 7) { while (at(i) >= 0) { if (at(i) == 10) break; i = i + 1; } }
         else {
-        if (a == 6) { i = i + 2;
+        if (a == 6) { int begin; int closed; begin = i; closed = 0; i = i + 2;
             while (at(i) >= 0) {
-                if (at(i) == 42) { if (at(i+1) == 47) { i = i + 2; break; } }
-                i = i + 1; } }
+                if (at(i) == 42) { if (at(i+1) == 47) { i = i + 2; closed = 1; break; } }
+                i = i + 1; }
+            if (closed == 0) { err_at(begin, "unterminated comment"); nerr = nerr + 1; return 0 - 1; } }
         else {
         if (a == 2) {                          /* ident */
             j = i;
@@ -3030,6 +3083,7 @@ int lex(void) {
                             if (st == 0) { k = k + 1; break; } }
                         k = k + 1;
                     }
+                    if (st != 0) { err_at(i, "unterminated attribute or asm"); nerr = nerr + 1; return 0 - 1; }
                     if (srcis(i, j - i, "__attribute__") && nctorm < 256) {
                         int q; q = j;
                         while (q + 11 <= k) {
@@ -3073,52 +3127,11 @@ int lex(void) {
             ntok = ntok + 1;
             i = j;
         } else {
-        if (a == 3) {                          /* num */
-            j = i;
-            if (at(j) == 48) {                 /* 0x... or 0X... */
-                if (at(j+1) == 120 || at(j+1) == 88) { if (at(j+1) != 0 - 1) {
-                    j = j + 2;
-                    while (at(j) >= 0) {
-                        if (isdi(at(j))) { j = j + 1; } else {
-                        if (at(j) >= 97) { if (at(j) <= 102) { j = j + 1; } else break; }
-                        else { if (at(j) >= 65) { if (at(j) <= 70) { j = j + 1; } else break; }
-                               else break; } } }
-                } }
+        if (a == 3) {                          /* num: one whole pp-number */
+            j = xlex(src, i, nsrc);
+            if (j <= i || lex_numeric_valid(i, j) == 0) {
+                err_at(i, "invalid numeric constant"); nerr = nerr + 1; return 0 - 1;
             }
-            while (isdi(at(j))) j = j + 1;
-            /* a floating constant (C99 6.4.4.2): a fraction, an exponent or
-               both, then at most one of f F l L -- the extent the Python
-               lexer takes, so the two token streams stay equal */
-            isf = 0;
-            /* the hex floating form: 0x HEX [. HEX] p [+-] DEC.  The integer
-               scan above stopped at the `.` or the `p`. */
-            if (at(i) == 48 && (at(i + 1) == 120 || at(i + 1) == 88)) {
-                int k3; k3 = j;
-                if (at(k3) == 46) {
-                    k3 = k3 + 1;
-                    while (isdi(at(k3)) || (at(k3) >= 97 && at(k3) <= 102)
-                           || (at(k3) >= 65 && at(k3) <= 70)) k3 = k3 + 1;
-                }
-                if (at(k3) == 112 || at(k3) == 80) {
-                    int k4; k4 = k3 + 1;
-                    if (at(k4) == 43 || at(k4) == 45) k4 = k4 + 1;
-                    if (isdi(at(k4))) {
-                        isf = 1; j = k4; while (isdi(at(j))) j = j + 1;
-                    }
-                }
-            }
-            if (at(i) != 48 || (at(i + 1) != 120 && at(i + 1) != 88)) {
-                if (at(j) == 46) { isf = 1; j = j + 1; while (isdi(at(j))) j = j + 1; }
-                if (at(j) == 101 || at(j) == 69) {
-                    int k2; k2 = j + 1;
-                    if (at(k2) == 43 || at(k2) == 45) k2 = k2 + 1;
-                    if (isdi(at(k2))) { isf = 1; j = k2; while (isdi(at(j))) j = j + 1; }
-                }
-            }
-            if (isf) { if (at(j) == 102 || at(j) == 70 || at(j) == 108 || at(j) == 76) j = j + 1; }
-            /* the suffix letters in any order, as the Python lexer takes
-               them: `1llu` is one token, not `1ll` then an identifier `u` */
-            else { while (at(j) == 117 || at(j) == 85 || at(j) == 108 || at(j) == 76) j = j + 1; }
             tkind[ntok] = 3; tpos[ntok] = i; tlen[ntok] = j - i;
             ntok = ntok + 1;
             i = j;
@@ -3128,6 +3141,8 @@ int lex(void) {
             j = i + 1;
             while (1) {
                 while (at(j) >= 0) {
+                    if (at(j) == 10 || at(j) == 13 || (at(j) == 92 && (at(j + 1) == 10 || at(j + 1) == 13))) {
+                        err_at(i, "missing terminating '\"' character"); nerr = nerr + 1; return 0 - 1; }
                     if (at(j) == 92) { j = j + 2; } else {
                     if (at(j) == 34) break; else j = j + 1; } }
                 /* no closing quote before the end: the token's length used
@@ -3160,7 +3175,10 @@ int lex(void) {
                                                   an escape may be several
                                                   characters long */
             j = i + 1;
+            if (at(j) == 39) { err_at(i, "empty character constant"); nerr = nerr + 1; return 0 - 1; }
             while (at(j) >= 0) {
+                if (at(j) == 10 || at(j) == 13 || (at(j) == 92 && (at(j + 1) == 10 || at(j + 1) == 13))) {
+                    err_at(i, "missing terminating ' character"); nerr = nerr + 1; return 0 - 1; }
                 if (at(j) == 39) break;
                 if (at(j) == 92) j = j + 1;
                 j = j + 1;
