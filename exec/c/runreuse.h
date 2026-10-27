@@ -364,6 +364,7 @@ static int rr_lookup(const char *product, const char *route, const char *target,
     an = (unsigned)fixed[12] | (unsigned)fixed[13] << 8 | (unsigned)fixed[14] << 16 | (unsigned)fixed[15] << 24;
     hn = (unsigned)fixed[16] | (unsigned)fixed[17] << 8 | (unsigned)fixed[18] << 16 | (unsigned)fixed[19] << 24;
     abn = (unsigned)fixed[20] | (unsigned)fixed[21] << 8 | (unsigned)fixed[22] << 16 | (unsigned)fixed[23] << 24;
+    if (tn > (1u << 26) || an > (1u << 26) || hn > 65536 || abn > 65536) { fclose(f); return 0; }
     memcpy(tape_got, fixed + 24, 64); tape_got[64] = 0;
     for (i = 0; i < hn; i++) {
         unsigned char plb[2], meta[16];
@@ -402,6 +403,13 @@ static int rr_lookup(const char *product, const char *route, const char *target,
         free(pp);
     }
     body_need = (size_t)tn + (size_t)an;
+    {
+        long pos = ftell(f);
+        struct stat cst;
+        if (pos < 0 || fstat(fileno(f), &cst) || cst.st_size < (off_t)pos ||
+            cst.st_size - (off_t)pos != (off_t)body_need ||
+            cst.st_size > (off_t)(1 << 26)) { fclose(f); return 0; }
+    }
     body = (unsigned char *)malloc(body_need ? body_need : 1);
     if (!body) { fclose(f); return -1; }
     n = fread(body, 1, body_need, f);
@@ -451,6 +459,7 @@ static int rr_store_host(const char *product, const char *route, const char *tar
     hn = (unsigned)fixed[16] | (unsigned)fixed[17] << 8 | (unsigned)fixed[18] << 16 | (unsigned)fixed[19] << 24;
     abn = (unsigned)fixed[20] | (unsigned)fixed[21] << 8 | (unsigned)fixed[22] << 16 | (unsigned)fixed[23] << 24;
     /* fixed already consumed tape sha; copy receipt records only. */
+    if (e3_tn > (1u << 26) || e3_an > (1u << 26) || hn > 65536 || abn > 65536) { fclose(f); return 1; }
     {
         long start, end, body;
         start = ftell(f);
@@ -470,7 +479,10 @@ static int rr_store_host(const char *product, const char *route, const char *tar
         }
         end = ftell(f);
         body = end - start;
-        if (body < 0 || (size_t)body > (1u << 24)) { fclose(f); return 1; }
+        if (body < 0 || (size_t)body > (1u << 24) ||
+            fstat(fileno(f), &st) || st.st_size < (off_t)end ||
+            st.st_size - (off_t)end != (off_t)((size_t)e3_tn + (size_t)e3_an) ||
+            st.st_size > (off_t)(1 << 26)) { fclose(f); return 1; }
         receipt_n = (size_t)body;
         receipts = (unsigned char *)malloc(receipt_n ? receipt_n : 1);
         if (!receipts) { fclose(f); return 1; }
@@ -529,6 +541,7 @@ static int rr_lookup_host(const char *product, const char *route, const char *ta
     an = (unsigned)fixed[12] | (unsigned)fixed[13] << 8 | (unsigned)fixed[14] << 16 | (unsigned)fixed[15] << 24;
     hn = (unsigned)fixed[16] | (unsigned)fixed[17] << 8 | (unsigned)fixed[18] << 16 | (unsigned)fixed[19] << 24;
     abn = (unsigned)fixed[20] | (unsigned)fixed[21] << 8 | (unsigned)fixed[22] << 16 | (unsigned)fixed[23] << 24;
+    if (tn > (1u << 26) || an > (1u << 26) || hn > 65536 || abn > 65536) { fclose(f); return 0; }
     memcpy(tape_got, fixed + 24, 64); tape_got[64] = 0;
     for (i = 0; i < hn; i++) {
         unsigned char plb[2], meta[16];
@@ -566,6 +579,13 @@ static int rr_lookup_host(const char *product, const char *route, const char *ta
         free(pp);
     }
     body_need = (size_t)tn + (size_t)an;
+    {
+        long pos = ftell(f);
+        struct stat cst;
+        if (pos < 0 || fstat(fileno(f), &cst) || cst.st_size < (off_t)pos ||
+            cst.st_size - (off_t)pos != (off_t)body_need ||
+            cst.st_size > (off_t)(1 << 26)) { fclose(f); return 0; }
+    }
     body = (unsigned char *)malloc(body_need ? body_need : 1);
     if (!body) { fclose(f); return -1; }
     n = fread(body, 1, body_need, f);

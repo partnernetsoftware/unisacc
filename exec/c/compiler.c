@@ -247,6 +247,35 @@ static void ucache_replay(int k) {                /* append unit k's attribute r
 static char fwd_path[600];
 #include "fwdpaths.h"
 #include "runreuse.h"
+/* Multi-TU -run reuse: the unit front ends (E2/E1, where includes are read) run before
+ * rr_after_units, partly in forked workers.  While armed, every unit's read and absent
+ * probe paths are recorded (workers send theirs through the unit file) and become the
+ * first receipts of the later E3 store, so a changed or newly present header misses. */
+static int rr_units_rec, rr_u_n, rr_u_abn;
+static char **rr_u_paths, **rr_u_abs;
+/* Armed by the first pass of a multi-TU -run that restarts with forward stubs and uses no
+ * host slot: its key and complete receipts, stored by the stub pass under multi/fwdexec. */
+static int rr_rs_armed, rr_rs_n, rr_rs_an;
+static char rr_rs_id[65], **rr_rs_p, **rr_rs_a;
+static char **rr_paths_copy(char **v, int n) {
+    char **c = xrealloc(0, (size_t)(n ? n : 1) * sizeof *c);
+    for (int i = 0; i < n; i++) { size_t l = strlen(v[i]) + 1; c[i] = xrealloc(0, l); memcpy(c[i], v[i], l); }
+    return c;
+}
+static void par_paths(FILE *f, char **v, int n) {
+    par_put(f, (unsigned)n);
+    for (int i = 0; i < n; i++) { unsigned l = (unsigned)strlen(v[i]); par_put(f, l); fwrite(v[i], 1, l, f); }
+}
+static int par_take_paths(FILE *f, int absent) {
+    unsigned n = 0, l = 0; char p[4100];
+    if (!par_get(f, &n) || n > 65536) return 0;
+    for (unsigned i = 0; i < n; i++) {
+        if (!par_get(f, &l) || !l || l >= sizeof p || fread(p, 1, l, f) != l) return 0;
+        p[l] = 0;
+        if (absent) record_file_absent(p); else record_file_read(p);
+    }
+    return 1;
+}
 int cxm_rd(char *path, char *buf, int cap) {
     FILE *f=fopen(path,"rb"); if (!f) return -1;
     size_t n=fread(buf,1,(size_t)cap,f); int bad=ferror(f); fclose(f);
@@ -865,10 +894,43 @@ int main(int argc, char **argv) {
         /* Before unit NN, try reuse keyed by raw module sources and CLI inputs.
          * Image (-run/-o): USE34 host ELF. Object/tape (-c/-S): USE33 final artifact. */
         {
-            int rr_can = rr_eligible(nsources, warnings, tape_input, !!deps, fwd_second, target) &&
-                         !(runit && nsources > 1);
+            int rr_can = rr_eligible(nsources, warnings, tape_input, !!deps, fwd_second, target);
 #ifdef __linux__
-            if (rr_can && (runit || mode == 0 || mode == 2 || mode == 5)) {
+            if (rr_can && runit && nsources > 1) {
+                /* Multi-TU -run: a pure probe of the entry the stub pass (fwd_second) stored after
+                 * its host_compile when it ran as forward_exec with no host slot (rr_rs_*). Nothing
+                 * about runit, mode, deps or the process/provider context changes before a hit: a
+                 * miss is the unchanged cold run, a hit replays exactly the stub pass tail. */
+                char probe[96];
+                n = snprintf(probe, sizeof probe, "%s/multi/fwdexec/O%d", target, level);
+                if (n < 0 || n >= (int)sizeof probe) return clierror("target name too long");
+                if (!rr_sources_hex((char **)sources, nsources, rr_pre_id)) {
+                    Buf cached = {0};
+                    int lk = rr_lookup(argv[0], probe, target, level, rr_pre_id, &cached);
+                    if (lk < 0) return clierror("reuse: cache read failed");
+                    if (getenv("UNISACC_RR_DEBUG"))
+                        fprintf(stderr, "unisacc: rr early multi-run probe lk=%d route=%s\n", lk, probe);
+                    if (lk == 1) {   /* replay the stub pass tail: forward_exec of the same image tape */
+                        free(in.b); in = cached; fwd_exec = 1; execrun = 1; runit = 0; mode = 0; if (!deponly) deps = 0;
+                        goto rr_run_replay;
+                    }
+                    /* No stub restart: a cold run without a host slot finished on the image route
+                     * after E3 and stored its USE34 entry there; a hit takes that same switch. */
+                    n = snprintf(probe, sizeof probe, "%s/multi/image/O%d", target, level);
+                    if (n < 0 || n >= (int)sizeof probe) return clierror("target name too long");
+                    lk = rr_lookup_host(argv[0], probe, target, level, rr_pre_id, &cached);
+                    if (lk < 0) return clierror("reuse: cache read failed");
+                    if (getenv("UNISACC_RR_DEBUG"))
+                        fprintf(stderr, "unisacc: rr early multi-image probe lk=%d route=%s\n", lk, probe);
+                    if (lk == 1) {
+                        execrun = 1; runit = 0; mode = 0; if (!deponly) deps = 0;
+                        host_context.native = 0; host_context.mode = 0;
+                        for (int j = 5; j < 13; j++) cli[j].n = 0;
+                        strcpy(route, probe);
+                        in = cached; rr_pre_hit = 1;
+                    }
+                }
+            } else if (rr_can && (runit || mode == 0 || mode == 2 || mode == 5)) {
                 int hx;
                 if (runit) {
                     execrun = 1; runit = 0; mode = 0; if (!deponly) deps = 0;
@@ -899,6 +961,13 @@ int main(int argc, char **argv) {
 #endif
             if (rr_pre_hit) goto rr_after_units;
         }
+#ifdef __linux__
+        if (runit && nsources > 1 && !deps &&
+            rr_eligible(nsources, warnings, tape_input, !!deps, fwd_second, target)) {
+            FILE_READ_RECORD = 1; FILE_READ_COUNT = 0; FILE_READ_PATHS = 0;
+            FILE_ABSENT_COUNT = 0; FILE_ABSENT_PATHS = 0; rr_units_rec = 1;
+        }
+#endif
         if (RF_STRICT || rf_capture_dir()) {   /* SC1 multi-source identity: before the first unit row is recorded */
             const char *uj0=getenv("UNISA_JOBS"); int rfjobs = uj0 ? atoi(uj0) : 8;   /* the parallel unit path is the default (8) */
             if (rfjobs>1) { fprintf(stderr,"unisacc: INTERFACE_ERROR resource-capture-parallel-unsupported UNISA_JOBS=%d (capture and strict multi-source runs need UNISA_JOBS=1)\n", rfjobs); return 2; }
@@ -935,6 +1004,8 @@ int main(int argc, char **argv) {
                         long after = ATTRS.n ? ATTRS.n : 4; unsigned cnt=(unsigned)((after-base)/9);
                         par_put(f,(unsigned)unit.n); fwrite(unit.b,1,unit.n,f); par_put(f,cnt);
                         for (unsigned r2=0;r2<cnt;r2++) fwrite(ATTRS.b+base+9*r2+4,1,5,f);
+                        par_paths(f,FILE_READ_PATHS,rr_units_rec?FILE_READ_COUNT:0);
+                        par_paths(f,FILE_ABSENT_PATHS,rr_units_rec?FILE_ABSENT_COUNT:0);
                         if (fclose(f)) _exit(1);
                         _exit(0);
                     }
@@ -952,6 +1023,7 @@ int main(int argc, char **argv) {
                 unsigned n=0,cnt=0; int ok=par_get(f,&n);
                 unsigned char *b=ok?xrealloc(0,n?n:1):0; if (ok) ok=fread(b,1,n,f)==n && par_get(f,&cnt);
                 unsigned char *at=ok?xrealloc(0,cnt?5*cnt:1):0; if (ok) ok=fread(at,1,5*(size_t)cnt,f)==5*(size_t)cnt;
+                if (ok) ok=par_take_paths(f,0)&&par_take_paths(f,1);   /* unit reads join the parent's receipts */
                 fclose(f); remove(pf);
                 if (!ok || ucache_find(sources[j])>=0) { free(b); free(at); continue; }
                 int k=nucache++; ucache[k].path=sources[j]; ucache[k].n=(int)n; ucache[k].b=b; ucache[k].nattr=cnt; ucache[k].attr=at;
@@ -992,6 +1064,12 @@ int main(int argc, char **argv) {
             for (int k=0;k<unit.n;k++) bput(&in,unit.b[k],0);
             free(unit.b);
         }
+        if (rr_units_rec) {   /* hand the unit receipts to the E3 store; recording off until then */
+            rr_u_paths = FILE_READ_PATHS; rr_u_n = FILE_READ_COUNT;
+            rr_u_abs = FILE_ABSENT_PATHS; rr_u_abn = FILE_ABSENT_COUNT;
+            FILE_READ_RECORD = 0; FILE_READ_COUNT = 0; FILE_READ_PATHS = 0;
+            FILE_ABSENT_COUNT = 0; FILE_ABSENT_PATHS = 0;
+        }
     }
 rr_after_units:
     free(in.at); in.at=0; /* Framing positions are not input to model inference. */
@@ -1007,8 +1085,8 @@ rr_after_units:
             {
                 int rr_hit = rr_pre_hit ? 2 : 0;
                 char rr_id[65];
-                int rr_can = (rr_eligible(nsources, warnings, tape_input, !!deps, fwd_second, target) &&
-                              !(runit && nsources > 1)) || rr_pre_hit;
+                /* Multi-TU -run takes the same pure-probe path as single-TU (rr_run_lookup). */
+                int rr_can = rr_eligible(nsources, warnings, tape_input, !!deps, fwd_second, target) || rr_pre_hit;
 #ifdef __linux__
                 int rr_run_lookup = rr_can && runit;
 #else
@@ -1067,6 +1145,10 @@ rr_after_units:
                         if (rr_can && !deps) {
                             FILE_READ_RECORD = 1; FILE_READ_COUNT = 0; FILE_READ_PATHS = 0;
                             FILE_ABSENT_COUNT = 0; FILE_ABSENT_PATHS = 0; rr_rec = 1;
+                            if (rr_units_rec) {
+                                FILE_READ_PATHS = rr_u_paths; FILE_READ_COUNT = rr_u_n;
+                                FILE_ABSENT_PATHS = rr_u_abs; FILE_ABSENT_COUNT = rr_u_abn;
+                            }
                         }
                         /* Image RI: source:image opens at most once (single-TU here, or multi before units).
                          * Front-end last stage: single uses e1 (e2+e1); multi/image has units then e3 (no e1).
@@ -1119,8 +1201,16 @@ rr_after_units:
                         }   /* side-car extraction precedes Tape validation */
                         else {
                             /* Forwarded symbols can depend on run-only process slots.
-                             * A cold image key must not acquire their E3 receipts. */
-                            if (rr_run_lookup) rr_can=0;
+                             * A cold image key must not acquire their E3 receipts. Without a
+                             * host slot the cold run itself finishes as this image (forward_exec
+                             * below), so the E3 entry is stored exactly as in the fr==0 branch. */
+                            if (rr_run_lookup) {
+                                if (rr_rec && host_dl_slot(1)==0)
+                                    (void)rr_store(argv[0], rr_host_route, target, level, rr_id, &in, &ATTRS,
+                                                   FILE_READ_PATHS, FILE_READ_COUNT,
+                                                   FILE_ABSENT_PATHS, FILE_ABSENT_COUNT);
+                                else rr_can=0;
+                            }
 #ifdef __linux__
                             if (runit && host_dl_slot(1)==0) {
                                 /* Static compiler image: finish as the image route does and exec the result
@@ -1139,7 +1229,14 @@ rr_after_units:
                                 rc=tape_domain(route,&in,src);
                                 if (!rc) rc=host_compile(route,level ? "e4" : "prune",&in,src,&host_context);
                             } else if (fast<0) { free(tape.b); rc=1; }
-                            else { free(tape.b); fwd_restart=1; }
+                            else {
+                                free(tape.b); fwd_restart=1;
+                                if (rr_run_lookup && rr_rec && host_dl_slot(1)==0 && nsources > 1) {
+                                    rr_rs_armed = 1; memcpy(rr_rs_id, rr_id, 65);
+                                    rr_rs_p = rr_paths_copy(FILE_READ_PATHS, FILE_READ_COUNT); rr_rs_n = FILE_READ_COUNT;
+                                    rr_rs_a = rr_paths_copy(FILE_ABSENT_PATHS, FILE_ABSENT_COUNT); rr_rs_an = FILE_ABSENT_COUNT;
+                                }
+                            }
                         }
                     }
                     if (!rc && rr_can && !fwd_restart) {
@@ -1191,6 +1288,14 @@ rr_after_units:
                         }
                     }
                     rc = host_compile(route, tape_input ? (level ? "e4" : "prune") : 0, &in, src, &host_context);
+                    if (!rc && fwd_second && rr_rs_armed && execrun && host_dl_slot(1)==0) {
+                        char rsr[96];
+                        if (snprintf(rsr, sizeof rsr, "%s/multi/fwdexec/O%d", target, level) < (int)sizeof rsr)
+                            { int rs_rc = rr_store(argv[0], rsr, target, level, rr_rs_id, &in, &ATTRS,
+                                           rr_rs_p, rr_rs_n, rr_rs_a, rr_rs_an);
+                              if (getenv("UNISACC_RR_DEBUG")) fprintf(stderr, "unisacc: rr stub store rc=%d receipts=%d absent=%d\n", rs_rc, rr_rs_n, rr_rs_an); }
+                        rr_rs_armed = 0;
+                    }
                     if (!rc && rr_can && (mode == 2 || mode == 5) && rr_id[0]) {
                         (void)rr_store(argv[0], route, target, level, rr_id, &in, &ATTRS,
                                        FILE_READ_PATHS, FILE_READ_COUNT,
@@ -1218,6 +1323,7 @@ rr_after_units:
         av[j]=0; fwd_second=1;
         return main(j,av);
     }
+rr_run_replay:   /* multi-TU hit: the stub pass's post-host_compile tape, then its forward_exec */
     if(!rc&&mode==2&&host_symbols_path){Buf symbols={0};HostRequirements requirements;rc=host_symbol_stream(route,&in,src,&host_context,&symbols,&requirements);if(!rc)rc=rf_trace_finish();if(!rc)rc=host_side_write(host_symbols_path,&symbols);free(symbols.b);}
     MemoryImage plan; MemoryMap mapping;
     if (!rc && runit) {
