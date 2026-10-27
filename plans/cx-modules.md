@@ -21,6 +21,8 @@
 
 2026-10-27 前奏重跑的棘轮：干净树 `48b5be2a4c` 上 include、无界、截断各退出 0，没有文件高于自己的行。481 个 `.cx` 文件，include 108 行（基线 108）；无界活计数 710（基线合计 718）；截断活计数 4138（基线合计 4155）。基线没有改写。旁边文件解析器仍没有 `node_modules`、`package.json` 的 `exports` 和 Bun 安装缓存。gcc 与 clang 的产物仍是普通 C。
 
+2026-10-27 负例两文件：`tests/negative-diagnostics.cx` 与 `tests/negative-model-loader.cx` 在 `ebe891507c` 进入树，截断基线没有它们的行。诊断文件有 9 处被丢弃、格式会增长的 `snprintf`（27、28、66 行两处、70、76、79、81、103）。装载文件有 9 处同样的 `snprintf`（30、31、60、66 行两处、70、73、81、146）和一处变长 `memcpy(b, ape, apen)`。每处 `snprintf` 改为留下返回值，长度不够则 `die`。变长拷贝改为按已检查的 `apen` 逐字节写入，再异或一个字节。`path` 里已经检查过的 `snprintf`，以及装载文件里赋给 `n` 的那次 `snprintf`，没有改。夹具源字符串里的 `#include` 与 `strcpy` 没有改。基线没有改写，也没有为这两个文件加行。干净树在 `7d26c0a9f7` 上、只含这两处改动，include、无界、截断各跑两次，都退出 0，没有文件高于自己的行。483 个 `.cx` 文件，include 108 行（基线 108）；无界活计数 710（基线合计 718）；截断活计数 4138（基线合计 4155）。旁边文件解析器仍没有 `node_modules`、`package.json` 的 `exports` 和 Bun 安装缓存。gcc 与 clang 的产物仍是普通 C。
+
 2026-10-23 实测：
 
 - 已有：`.cx` 单元自动前置 `cx.h`（产品 `exec/c/compiler.c` 与经典参考 `src/front_parse.c` 均已实现；转发单元不带 prelude）。
