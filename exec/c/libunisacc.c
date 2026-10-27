@@ -356,7 +356,7 @@ API const void *us_binding_contract(us_context *c,const char *target,size_t *len
    c->contract_snapshot=malloc((size_t)input.n);if(!c->contract_snapshot)__us_panic("library contract: snapshot allocation failed");
    memcpy(c->contract_snapshot,input.b,(size_t)input.n);c->contract_snapshot_length=(size_t)input.n;
   }
- }
+ }else rc=1; /* a panic after a successful route must not leave rc 0 */
  free(frame);cache_settle();cleanup();active=NULL;RI=NULL;NRI=0;
  if(rc){free(c->contract_snapshot);c->contract_snapshot=NULL;c->contract_snapshot_length=0;return NULL;}
  if(length)*length=c->contract_snapshot_length;return c->contract_snapshot;

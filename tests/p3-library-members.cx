@@ -1,0 +1,100 @@
+/* Formal batch: the three P3 members that only the library product consumes.
+ * ROOT PACK_CTX NEW_ABS_OUT
+ * The installed APE has no route to <target>/nativeabi, library-contract or
+ * library-selection; exec/c/libunisacc.c is their only consumer. This batch builds
+ * tests/cases/p3_library_members.c (a private runtime copy, public API only) with
+ * the pinned host GCC11 and system libffi, then runs three phases against the PC
+ * package and one-byte flips of M28/M30/M31 and of one member that no lnx/x86_64
+ * or library route references. Every observed line must equal the expected matrix. */
+#pragma unisa use cxlib.netpack
+static char root[4096],pc[4096],work[4096];
+static char bound[4400],fixture[4400],pkgpath[4400];
+static int checks,failed;
+static void die(const char *s){fprintf(stderr,"p3-library-members: REFUSE %s errno=%d\n",s,errno);exit(2);}
+static void ck(int ok,const char *s){checks++;if(!ok)failed++;printf("%s\tp3-library-members.%s\n",ok?"PASS":"FAIL",s);}
+static void path(char *out,size_t cap,const char *a,const char *b){int n=snprintf(out,cap,"%s/%s",a,b);if(n<0||(size_t)n>=cap)die("path-bound");}
+static void copy_fit(char *dst,size_t cap,const char *src){size_t i=0;if(!cap)die("copy-bound");while(src[i]&&i+1<cap){dst[i]=src[i];i++;}if(src[i])die("copy-bound");dst[i]=0;}
+static int within(const char *p,const char *base){size_t n=strlen(base);return !strncmp(p,base,n)&&(!p[n]||p[n]=='/');}
+static char *load(const char *p,size_t *n){struct stat st;if(lstat(p,&st)||!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>8388608)die("regular-input");char *s=cx_read(p,n);if(!s||*n!=(size_t)st.st_size)die("input-extent");return s;}
+static void hash(const char *p,char out[65]){size_t n;char *s=load(p,&n);cx_sha256_hex(s,n,out);free(s);}
+static void save(const char *name,const char *s,size_t n){char p[4400];path(p,sizeof p,work,name);int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(fd<0)die("exclusive-evidence");size_t at=0;while(at<n){ssize_t z=write(fd,s+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0)die("evidence-write");at+=(size_t)z;}if(fsync(fd)||close(fd))die("evidence-close");}
+
+/* P3 text header: "P 3 PM PS NR", PS "D route stage in out M" rows, then PM
+   "M CLEN RAW CODEC CRC" rows each followed by CLEN compressed bytes. */
+enum{PM=32,PS=1479};
+static size_t body[PM],clen[PM];static int used[PM];
+static size_t line_end(const char *s,size_t n,size_t at){const char *e=memchr(s+at,'\n',n-at);if(!e)die("package-line");return (size_t)(e-s)+1;}
+static int route_member(const char *s,size_t n,size_t at,size_t end,const char *route){
+ size_t rn=strlen(route);if(end-at<2+rn+1||memcmp(s+at,"D ",2)||memcmp(s+at+2,route,rn)||s[at+2+rn]!=' ')return -1;
+ size_t k=end-1;while(k>at&&s[k-1]>='0'&&s[k-1]<='9')k--;if(k==end-1||s[k-1]!=' ')die("package-D-member");
+ int m=0;for(size_t i=k;i<end-1;i++)m=m*10+(s[i]-'0');if(m<0||m>=PM)die("package-D-range");return m;
+}
+static void parse(const char *s,size_t n,int *m28,int *m30,int *m31){
+ unsigned pm=0,ps=0,nr=0;if(n<16||sscanf(s,"P 3 %u %u %u",&pm,&ps,&nr)!=3||pm!=PM||ps!=PS)die("package-header");
+ size_t at=line_end(s,n,0);*m28=*m30=*m31=-1;
+ for(int i=0;i<PS;i++){
+  size_t end=line_end(s,n,at);if(memcmp(s+at,"D ",2))die("package-D");
+  int m;
+  if((m=route_member(s,n,at,end,"lnx/x86_64/nativeabi"))>=0)*m28=m;
+  if((m=route_member(s,n,at,end,"library-contract"))>=0)*m30=m;
+  if((m=route_member(s,n,at,end,"library-selection"))>=0)*m31=m;
+  if(!memcmp(s+at+2,"lnx/x86_64/",11)||!memcmp(s+at+2,"library-",8)){size_t k=end-1;while(s[k-1]!=' ')k--;used[atoi(s+k)]=1;}
+  at=end;
+ }
+ for(int i=0;i<PM;i++){
+  size_t end=line_end(s,n,at);unsigned c=0,r=0,codec=0,crc=0;
+  if(memcmp(s+at,"M ",2)||sscanf(s+at,"M %u %u %u %u",&c,&r,&codec,&crc)!=4||codec!=1||c<32||n-end<c)die("package-M");
+  body[i]=end;clen[i]=c;at=end+c;
+ }
+}
+static void flipped(const char *s,size_t n,int m,const char *name,char *out,size_t cap){
+ char *b=malloc(n);if(!b)die("flip-allocation");memcpy(b,s,n);b[body[m]+16]^=1;
+ path(out,cap,work,name);save(name,b,n);free(b);
+}
+static const char *phases[3]={"contract","compile","carrier"};
+static void run_phase(const char *pkg,const char *label,int phase,const char *expect){
+ char why[1024],name[96];np_result r;
+ char *cmd[]={bound,"20",fixture,(char *)pkg,"lnx/x86_64",(char *)phases[phase],0};
+ if(np_run(cmd,root,0,25,&r,why,sizeof why))die(why);
+ snprintf(name,sizeof name,"%s-%s.stdout",label,phases[phase]);save(name,r.out,r.outn);
+ snprintf(name,sizeof name,"%s-%s.stderr",label,phases[phase]);save(name,r.err,r.errn);
+ int want_ok=!strncmp(expect,"OK ",3);
+ int ok=r.rc==(want_ok?0:1)&&!r.errn&&r.outn==strlen(expect)+1&&!memcmp(r.out,expect,strlen(expect))&&r.out[r.outn-1]=='\n';
+ if(!ok){fprintf(stderr,"p3-library-members: %s/%s rc=%d out=",label,phases[phase],r.rc);fwrite(r.out,1,r.outn,stderr);fwrite(r.err,1,r.errn,stderr);}
+ snprintf(name,sizeof name,"%s-%s",label,phases[phase]);ck(ok,name);np_free(&r);
+}
+int main(int argc,char **argv){
+#if !defined(__linux__) || !defined(__x86_64__)
+ fputs("NOT_RUN p3-library-members needs Linux/x86_64\n",stderr);return 3;
+#endif
+ if(argc!=4||!realpath(argv[1],root)||!realpath(argv[2],pc)||argv[3][0]!='/')die("usage ROOT PACK_CTX NEW_ABS_OUT");
+ char parent[4096],base[4096],leaf[4096];copy_fit(parent,sizeof parent,argv[3]);char *slash=strrchr(parent,'/');if(!slash||!slash[1]||!strcmp(slash+1,".")||!strcmp(slash+1,".."))die("output-leaf");copy_fit(leaf,sizeof leaf,slash+1);if(slash==parent)slash[1]=0;else *slash=0;if(!realpath(parent,base))die("output-parent");int z=snprintf(work,sizeof work,"%s%s%s",base,!strcmp(base,"/")?"":"/",leaf);if(z<0||(size_t)z>=sizeof work||within(work,pc))die("output-aliases-input");if(mkdir(work,0700))die("new-output-required");
+ path(bound,sizeof bound,root,"tools/bound");path(pkgpath,sizeof pkgpath,pc,"compiler.pkg");path(fixture,sizeof fixture,work,"fixture.elf");
+ static const char *dep_names[]={"unisacc.com","tests/cases/p3_library_members.c","exec/c/libunisacc.c","exec/c/librarylatebind.h","exec/c/librarycall_x86_64.S","exec/c/run.c"};
+ enum{ND=6};char dep_paths[ND][4400],dep_before[ND][65],pkg_before[65];
+ for(int i=0;i<ND;i++){path(dep_paths[i],sizeof dep_paths[i],root,dep_names[i]);hash(dep_paths[i],dep_before[i]);}
+ hash(pkgpath,pkg_before);
+ char src[4400],asmsrc[4400];path(src,sizeof src,root,"tests/cases/p3_library_members.c");path(asmsrc,sizeof asmsrc,root,"exec/c/librarycall_x86_64.S");
+ char *build[]={bound,"30","/usr/bin/x86_64-linux-gnu-gcc-11","-std=c11","-O2","-w","-I",root,src,asmsrc,"-lffi","-ldl","-o",fixture,0};
+ np_result compiled;char why[1024];if(np_run(build,root,0,35,&compiled,why,sizeof why))die(why);
+ save("build.stderr",compiled.err,compiled.errn);
+ int built=!compiled.rc&&!compiled.errn&&!compiled.outn;np_free(&compiled);ck(built,"fixture-build");if(!built)die("fixture-build");
+ size_t n;char *pkg=load(pkgpath,&n);int m28,m30,m31;parse(pkg,n,&m28,&m30,&m31);
+ ck(m28==28,"D-lnx-x86_64-nativeabi-M28");ck(m30==30,"D-library-contract-M30");ck(m31==31,"D-library-selection-M31");
+ int control=-1;for(int i=0;i<PM;i++)if(!used[i]){control=i;break;}
+ ck(control>=0&&control!=28&&control!=30&&control!=31,"control-member-unreferenced");if(failed)die("package-routing");
+ char p28[4400],p30[4400],p31[4400],pctl[4400];
+ flipped(pkg,n,28,"m28.pkg",p28,sizeof p28);flipped(pkg,n,30,"m30.pkg",p30,sizeof p30);flipped(pkg,n,31,"m31.pkg",p31,sizeof p31);flipped(pkg,n,control,"control.pkg",pctl,sizeof pctl);free(pkg);
+ static const char *clean_out[3]={"OK contract USLCON1 bytes=344","OK compile answers=1027,2037","OK carrier export=present"};
+ static const char *icm[3]={"ERR contract invalid compressed model","ERR compile invalid compressed model","ERR carrier invalid compressed model"};
+ for(int p=0;p<3;p++)run_phase(pkgpath,"clean",p,clean_out[p]);
+ for(int p=0;p<3;p++)run_phase(pctl,"control",p,clean_out[p]);
+ run_phase(p28,"m28",0,clean_out[0]);run_phase(p28,"m28",1,clean_out[1]);run_phase(p28,"m28",2,icm[2]);
+ for(int p=0;p<3;p++)run_phase(p30,"m30",p,icm[p]);
+ run_phase(p31,"m31",0,clean_out[0]);run_phase(p31,"m31",1,icm[1]);run_phase(p31,"m31",2,icm[2]);
+ char after[65];hash(pkgpath,after);ck(!strcmp(after,pkg_before),"package-unchanged");
+ for(int i=0;i<ND;i++){char label[80];snprintf(label,sizeof label,"unchanged-%s",dep_names[i]);for(char *q=label;*q;q++)if(*q=='/')*q='-';hash(dep_paths[i],after);ck(!strcmp(after,dep_before[i]),label);}
+ printf("CONTROL\tmember=%d\n",control);
+ puts("NOT_CLAIMED\tinstalled-APE-consumption-other-targets-library-product-qualification-hostseed-payload-trust-N22-foreign-hosts");
+ printf("P3_LIBRARY_MEMBERS_BATCH\tassertions=%d\tfailed=%d\tM28=carrier\tM30=contract\tM31=selection\n",checks,failed);return failed?1:0;
+}

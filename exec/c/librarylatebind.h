@@ -88,7 +88,7 @@ static int us_late_prepare(us_context *c,const char *target){
    rc=runroute("library-selection",&input,"binding-ownership");
    if(!rc)us_late_snapshot(&c->late_selection,&c->late_selection_n,input.b,(size_t)input.n);
   }
- }
+ }else rc=1; /* contract success already set rc 0; a selection panic must still fail */
  free(frame);cache_settle();cleanup();active=NULL;RI=NULL;NRI=0;
  us_late_clear_all(c);
  if(rc){free(c->late_contract);c->late_contract=NULL;c->late_contract_n=0;free(c->late_selection);c->late_selection=NULL;c->late_selection_n=0;}
