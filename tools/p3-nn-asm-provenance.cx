@@ -1,0 +1,48 @@
+/* Bind current P3 NN models and dual-ISA ASM kernels to source-construction
+ * receipts. Does not rewrite hostseed payload-trust, rebuild packages, or
+ * claim complete N22 / foreign hosts / classic18 MODEL-in-P3. */
+#pragma unisa use cxlib.netpack
+static char root[4096],ctx[4096],pc[4096],genc[4096],genb[4096];
+static int checks,failed;
+static void die(const char *s){fprintf(stderr,"p3-nn-asm-provenance: REFUSE %s errno=%d\n",s,errno);exit(2);}
+static void ck(int ok,const char *s){checks++;if(!ok)failed++;printf("%s\tp3-nn-asm-provenance.%s\n",ok?"PASS":"FAIL",s);}
+static void path(char *out,size_t cap,const char *a,const char *b){int n=snprintf(out,cap,"%s/%s",a,b);if(n<0||(size_t)n>=cap)die("path-bound");}
+static int hex64(const char *s){for(int i=0;i<64;i++)if(!((s[i]>='0'&&s[i]<='9')||(s[i]>='a'&&s[i]<='f')))return 0;return 1;}
+static char *load(const char *p,size_t *n){struct stat a,b;errno=0;if(lstat(p,&a))die(errno==ENOENT?"input-absent":"input-stat");if(!S_ISREG(a.st_mode)||a.st_size<0||a.st_size>134217728)die("bounded-regular-input");int fd=open(p,O_RDONLY|O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK);if(fd<0||fstat(fd,&b)||a.st_dev!=b.st_dev||a.st_ino!=b.st_ino||a.st_size!=b.st_size)die("input-descriptor");*n=(size_t)a.st_size;char *s=malloc(*n+1);if(!s)die("allocation");size_t at=0;while(at<*n){ssize_t z=read(fd,s+at,*n-at);if(z<0&&errno==EINTR)continue;if(z<=0)die("read-extent");at+=(size_t)z;}char extra;ssize_t z;do{z=read(fd,&extra,1);}while(z<0&&errno==EINTR);int bad=fstat(fd,&b)||a.st_dev!=b.st_dev||a.st_ino!=b.st_ino||a.st_size!=b.st_size;int closed=close(fd);if(z||bad||closed)die("input-changed");s[*n]=0;return s;}
+static void hash(const char *p,char out[65]){size_t n;char *s=load(p,&n);cx_sha256_hex(s,n,out);free(s);}
+static int within_rel(const char *rel){if(!rel||!*rel||rel[0]=='/'||strstr(rel,".."))return 0;for(const char *p=rel;*p;p++)if(!(*p=='/'||*p=='.'||*p=='_'||(*p>='a'&&*p<='z')||(*p>='A'&&*p<='Z')||(*p>='0'&&*p<='9')||*p=='-'))return 0;return 1;}
+static void require_sha_file(const char *dir,const char *rel,const char *want,const char *label){char p[4400],got[65];if(!within_rel(rel)||!hex64(want)){ck(0,label);die(label);}path(p,sizeof p,dir,rel);hash(p,got);int ok=!strcmp(got,want);ck(ok,label);if(!ok)die(label);}
+static void check_kernel_manifest(const char *gen,const char *name,int expect_rows){char p[4400];path(p,sizeof p,gen,name);size_t n;char *s=load(p,&n);if(n<31||memcmp(s,"unisacc-native-kernel-files-v1\n",31)||memchr(s,0,n)||memchr(s,'\r',n)){free(s);die("kernel-manifest-wire");}int rows=0;const char *line=s+31;while(*line){const char *nl=strchr(line,'\n');if(!nl){free(s);die("kernel-manifest-line");}const char *tab=memchr(line,'\t',(size_t)(nl-line));if(!tab||tab==line||(size_t)(nl-(tab+1))!=64||!hex64(tab+1)){free(s);die("kernel-manifest-row");}char rel[4400],want[65];size_t rn=(size_t)(tab-line);if(rn>=sizeof rel){free(s);die("kernel-manifest-rel");}memcpy(rel,line,rn);rel[rn]=0;memcpy(want,tab+1,64);want[64]=0;require_sha_file(gen,rel,want,"asm-manifest-member");rows++;line=nl+1;}free(s);{int ok=rows==expect_rows;ck(ok,"asm-manifest-row-count");if(!ok)die("asm-manifest-row-count");}}
+static void bind_phase(const char *inputs,const char *phase,const char *suffix,int *count){size_t plen=strlen(phase);const char *line=inputs;while(*line){const char *nl=strchr(line,'\n');if(!nl)die("inputs-line");const char *tab=memchr(line,'\t',(size_t)(nl-line));if(tab&&tab>line){size_t jn=(size_t)(tab-line);int is_job=jn<160&&jn>plen+1&&!memcmp(line,phase,plen)&&line[plen]=='-';for(size_t i=0;is_job&&i<jn;i++)if(line[i]=='/')is_job=0;if(is_job){char job[160];memcpy(job,line,jn);job[jn]=0;if((size_t)(nl-(tab+1))!=64||!hex64(tab+1))die("job-receipt-shape");char receipt[65],opath[4400],osha[65],got[65],model[4400],msh[65];memcpy(receipt,tab+1,64);receipt[64]=0;const char *out_line=nl+1;const char *out_nl=strchr(out_line,'\n');if(!out_nl)die("job-output-line");const char *out_tab=memchr(out_line,'\t',(size_t)(out_nl-out_line));if(!out_tab||out_tab==out_line||(size_t)(out_nl-(out_tab+1))!=64||!hex64(out_tab+1))die("job-output-shape");size_t pn=(size_t)(out_tab-out_line);if(pn>=sizeof opath)die("job-output-path");memcpy(opath,out_line,pn);opath[pn]=0;memcpy(osha,out_tab+1,64);osha[64]=0;char recf[4400];int zn=snprintf(recf,sizeof recf,"%s/jobs/%s/record.tsv",ctx,job);if(zn<0||(size_t)zn>=sizeof recf)die("record-path");hash(recf,got);{int ok=!strcmp(got,receipt);ck(ok,"job-record");if(!ok)die("job-record");}hash(opath,got);{int ok=!strcmp(got,osha);ck(ok,"job-output");if(!ok)die("job-output");}if(!strcmp(suffix,".net")||!strcmp(suffix,".tbl")){const char *id=job+plen+1;zn=snprintf(model,sizeof model,"%s/models/%s%s",pc,id,suffix);if(zn<0||(size_t)zn>=sizeof model)die("model-path");hash(model,msh);{int ok=!strcmp(msh,osha);ck(ok,"pc-model-equals-job-output");if(!ok)die("pc-model-mismatch");}}(*count)++;line=out_nl+1;continue;}}line=nl+1;} }
+int main(int argc,char **argv){
+#if !defined(__linux__) || !defined(__x86_64__)
+ fputs("NOT_RUN p3-nn-asm-provenance needs Linux/x86_64\n",stderr);return 3;
+#endif
+ if(argc!=6||!realpath(argv[1],root)||!realpath(argv[2],ctx)||!realpath(argv[3],pc)||!realpath(argv[4],genc)||!realpath(argv[5],genb))die("usage ROOT SOURCE_CTX PACK_CTX GEN_C GEN_B");
+ char inputs_path[4400],pkg[4400],ka[4400],kx[4400],ba[4400],bx[4400],product[4400];
+ path(inputs_path,sizeof inputs_path,pc,"model-inputs.tsv");path(pkg,sizeof pkg,pc,"compiler.pkg");
+ path(ka,sizeof ka,pc,"kernels/arm64");path(kx,sizeof kx,pc,"kernels/x86_64");
+ path(ba,sizeof ba,genc,"arm64.kernel");path(bx,sizeof bx,genc,"x86_64.kernel");
+ path(product,sizeof product,root,"unisacc.com");
+ char pkg_sha[65],want_pkg[]="4d9b8a3a526f340709316f7fb67189603bbd15bcd38dbab5b7997617c505a83e";
+ char prod_sha[65],want_prod[]="7a0cf28bba67f2394abaf783b886baeafe0687f4590c392dbd8611212a0f5f77";
+ hash(pkg,pkg_sha);ck(!strcmp(pkg_sha,want_pkg),"pc04-compiler-pkg");
+ hash(product,prod_sha);ck(!strcmp(prod_sha,want_prod),"installed-root7a");
+ size_t in_n;char *inputs=load(inputs_path,&in_n);
+ if(in_n<32||memcmp(inputs,"source-package-inputs-v1\n",25)||memchr(inputs,0,in_n)||memchr(inputs,'\r',in_n)){free(inputs);die("model-inputs-wire");}
+ int nets=0;
+ bind_phase(inputs,"net",".net",&nets);
+ ck(nets==34,"net-models-34");
+ free(inputs);
+ char ha[65],hx[65],ga[65],gx[65],gba[65],gbx[65];
+ hash(ka,ha);hash(kx,hx);hash(ba,ga);hash(bx,gx);
+ path(ba,sizeof ba,genb,"arm64.kernel");path(bx,sizeof bx,genb,"x86_64.kernel");hash(ba,gba);hash(bx,gbx);
+ ck(!strcmp(ha,ga)&&!strcmp(ha,gba),"arm64-kernel-pc-genc-genb");
+ ck(!strcmp(hx,gx)&&!strcmp(hx,gbx),"x86_64-kernel-pc-genc-genb");
+ check_kernel_manifest(genc,"arm64-sources.tsv",11);check_kernel_manifest(genc,"x86_64-sources.tsv",11);
+ check_kernel_manifest(genc,"arm64-objects.tsv",11);check_kernel_manifest(genc,"x86_64-objects.tsv",11);
+ puts("BOUNDARY\tp3-nn-asm-provenance-binds-PC04-models-and-GEN-ASM-to-ctx04-jobs;does-not-rewrite-hostseed-payload-trust");
+ puts("NOT_CLAIMED\thostseed-payload-trust-rewrite-hermetic-host-CC-libz-classic18-MODEL-in-P3-complete-N22-foreign-hosts");
+ printf("P3_NN_ASM_PROVENANCE\tassertions=%d\tfailed=%d\tscope=current-SID4fe-PC04-GENC-source-bound-inputs\n",checks,failed);
+ return failed?1:0;
+}
