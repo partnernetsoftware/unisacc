@@ -25,6 +25,14 @@ static int rr_stat_reg(const char *path, struct stat *st) {
     return 0;
 }
 
+/* A cached failed -I probe is still absent only for ENOENT.  ENOTDIR and
+ * EACCES make a fresh compile fail instead of continuing to the next path. */
+static int rr_still_absent(const char *path) {
+    struct stat st;
+    if (stat(path, &st) == 0) return 0;
+    return errno == ENOENT;
+}
+
 static int rr_off(void) {
     const char *e = getenv("UNISACC_RUN_CACHE");
     return e && !strcmp(e, "0");
@@ -382,7 +390,6 @@ static int rr_lookup(const char *product, const char *route, const char *target,
         unsigned char plb[2];
         unsigned pl;
         char *pp;
-        struct stat ast;
         if (fread(plb, 1, 2, f) != 2) { fclose(f); return 0; }
         pl = (unsigned)plb[0] | (unsigned)plb[1] << 8;
         if (!pl || pl > 4096) { fclose(f); return 0; }
@@ -391,7 +398,7 @@ static int rr_lookup(const char *product, const char *route, const char *target,
         if (fread(pp, 1, pl, f) != pl) { free(pp); fclose(f); return 0; }
         pp[pl] = 0;
         /* Still absent? If the file now exists (follow links), invalidate. */
-        if (!rr_stat_reg(pp, &ast)) { free(pp); fclose(f); return 0; }
+        if (!rr_still_absent(pp)) { free(pp); fclose(f); return 0; }
         free(pp);
     }
     body_need = (size_t)tn + (size_t)an;
@@ -548,7 +555,6 @@ static int rr_lookup_host(const char *product, const char *route, const char *ta
         unsigned char plb[2];
         unsigned pl;
         char *pp;
-        struct stat ast;
         if (fread(plb, 1, 2, f) != 2) { fclose(f); return 0; }
         pl = (unsigned)plb[0] | (unsigned)plb[1] << 8;
         if (!pl || pl > 4096) { fclose(f); return 0; }
@@ -556,7 +562,7 @@ static int rr_lookup_host(const char *product, const char *route, const char *ta
         if (!pp) { fclose(f); return -1; }
         if (fread(pp, 1, pl, f) != pl) { free(pp); fclose(f); return 0; }
         pp[pl] = 0;
-        if (!rr_stat_reg(pp, &ast)) { free(pp); fclose(f); return 0; }
+        if (!rr_still_absent(pp)) { free(pp); fclose(f); return 0; }
         free(pp);
     }
     body_need = (size_t)tn + (size_t)an;

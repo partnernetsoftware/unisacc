@@ -610,8 +610,9 @@ static void record_file_read(const char *path) {
     FILE_READ_PATHS[FILE_READ_COUNT]=xrealloc(0,n);
     memcpy(FILE_READ_PATHS[FILE_READ_COUNT++],path,n);
 }
-/* When recording for E3 reuse, remember -I probe paths that were absent so a
-   later-created header at the same path invalidates the cache. */
+/* When recording for E3 reuse, remember optional disk probes that were absent
+   so a later-created path invalidates the cache.  readfile(optional) returns
+   NULL only for ENOENT on reuse-enabled Linux. */
 static void record_file_absent(const char *path) {
     if (!FILE_READ_RECORD) return;
     for (int i=0;i<FILE_ABSENT_COUNT;i++) if (!strcmp(FILE_ABSENT_PATHS[i],path)) return;
@@ -1027,7 +1028,7 @@ static int rf_default_fetch(const unsigned char *p,int n,unsigned char **bytes,i
     if ((int)strlen(path)!=(header ? (int)strlen(INCDIR)+1+n-5 : n)) return 0;
     *bytes=readfile(path,len,1);
     if (*bytes) record_file_read(path);
-    else if (header) record_file_absent(path);
+    else record_file_absent(path);
     return *bytes ? 2 : 0;
 }
 #ifdef UNISA_RUNTIME_LIBRARY

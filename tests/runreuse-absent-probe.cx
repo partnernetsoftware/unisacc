@@ -1,0 +1,58 @@
+/* Regression for a cached absent -I probe changing to ENOTDIR or PRESENT.
+ * ROOT PRODUCT PKG|- NEW_ABS_OUT.  PRODUCT is an APE when PKG is '-', or a
+ * native driver slice when PKG names its compiler.pkg.  Pending until the
+ * installed product includes the receipt fix; no release qualification. */
+#pragma unisa use cxlib.netpack
+static char root[4096],product[4096],pkg[4096],work[4096];
+static char src[4400],good[4400],blocked[4400],blocked_run[4400],header[4400],image[4400],cache[4400],cache_run[4400];
+static char cache_env[4600],cache_run_env[4600];
+static int checks,failures,ape;
+static void die(const char *s){fprintf(stderr,"runreuse-absent-probe: REFUSE %s errno=%d\n",s,errno);exit(2);}
+static void ck(int ok,const char *s){checks++;printf("%s\t%s\n",ok?"PASS":"FAIL",s);if(!ok)failures++;}
+static void copy(char *dst,size_t cap,const char *s){size_t n=strlen(s);if(n>=cap)die("copy-bound");memcpy(dst,s,n+1);}
+static void path(char *dst,size_t cap,const char *a,const char *b){int n=snprintf(dst,cap,"%s/%s",a,b);if(n<0||(size_t)n>=cap)die("path-bound");}
+static void save(const char *p,const char *s){int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);size_t n=strlen(s),at=0;if(fd<0)die("create");while(at<n){ssize_t k=write(fd,s+at,n-at);if(k<0&&errno==EINTR)continue;if(k<=0)die("write");at+=(size_t)k;}if(close(fd))die("close");}
+static int contains(const char *s,size_t n,const char *part){size_t m=strlen(part);if(m>n)return 0;for(size_t i=0;i+m<=n;i++)if(!memcmp(s+i,part,m))return 1;return 0;}
+static int missing(const char *p){struct stat st;errno=0;if(!lstat(p,&st))return 0;if(errno!=ENOENT)die("stat");return 1;}
+static void digest(const char *p,char h[65]){size_t n;char *s=cx_read(p,&n);if(!s)die("digest-read");cx_sha256_hex(s,n,h);free(s);}
+static np_result compile(const char *tag){char *v[20];int n=0;np_result r;char why[1200];char *env[]={cache_env,"UNISACC_RR_TIME=1","UNISACC_RUN_CACHE=1",0};
+ if(ape)v[n++]="sh";v[n++]=product;if(!ape){v[n++]="--models";v[n++]=pkg;}
+ v[n++]="-I";v[n++]=blocked;v[n++]="-I";v[n++]=good;v[n++]=src;v[n++]="-o";v[n++]=image;v[n]=0;
+ if(np_run(v,root,env,15,&r,why,sizeof why))die(why);
+ printf("OBS\t%s\trc=%d\tstderr=%.*s\n",tag,r.rc,(int)r.errn,r.err?r.err:"");return r;}
+static np_result run_source(const char *tag){char *v[20];int n=0;np_result r;char why[1200];char *env[]={cache_run_env,"UNISACC_RR_TIME=1","UNISACC_RUN_CACHE=1",0};
+ if(ape)v[n++]="sh";v[n++]=product;if(!ape){v[n++]="--models";v[n++]=pkg;}
+ v[n++]="-run";v[n++]="-I";v[n++]=blocked_run;v[n++]="-I";v[n++]=good;v[n++]=src;v[n++]="--";v[n]=0;
+ if(np_run(v,root,env,15,&r,why,sizeof why))die(why);
+ printf("OBS\t%s\trc=%d\tstderr=%.*s\n",tag,r.rc,(int)r.errn,r.err?r.err:"");return r;}
+static int run_image(void){char *v[]={image,0};np_result r;char why[1200];int rc;if(np_run(v,root,0,5,&r,why,sizeof why))die(why);rc=r.rc;ck(!r.outn&&!r.errn,"image.no-output-or-error");np_free(&r);return rc;}
+int main(int argc,char **argv){char before[65],after[65];np_result r;
+ if(argc!=5||argv[1][0]!='/'||argv[2][0]!='/'||argv[4][0]!='/')die("usage ROOT PRODUCT PKG|- NEW_ABS_OUT");
+ if(!realpath(argv[1],root)||!realpath(argv[2],product))die("canonical-input");
+ ape=!strcmp(argv[3],"-");if(!ape){if(argv[3][0]!='/'||!realpath(argv[3],pkg))die("canonical-package");}
+ copy(work,sizeof work,argv[4]);if(mkdir(work,0700))die("fresh-out-required");
+ path(src,sizeof src,work,"main.c");path(good,sizeof good,work,"good");path(blocked,sizeof blocked,work,"blocked");
+ path(image,sizeof image,work,"program.elf");path(cache,sizeof cache,work,"cache");path(cache_run,sizeof cache_run,work,"cache-run");path(blocked_run,sizeof blocked_run,work,"blocked-run");
+ if(mkdir(good,0700)||mkdir(cache,0700)||mkdir(cache_run,0700))die("mkdir");
+ path(header,sizeof header,good,"rr_probe_header.h");save(header,"#define RR_PROBE_VALUE 7\n");
+ save(src,"#include <rr_probe_header.h>\nint main(void){return RR_PROBE_VALUE;}\n");
+ {int z=snprintf(cache_env,sizeof cache_env,"UNISACC_E3CACHE=%s",cache);if(z<0||(size_t)z>=sizeof cache_env)die("cache-env-bound");}
+ {int z=snprintf(cache_run_env,sizeof cache_run_env,"UNISACC_E3CACHE=%s",cache_run);if(z<0||(size_t)z>=sizeof cache_run_env)die("cache-run-env-bound");}
+ digest(product,before);
+ r=compile("cold-absent");ck(!r.rc&&!r.outn&&contains(r.err,r.errn,"lookup_hit=0"),"cold-absent-compiles");np_free(&r);
+ ck(run_image()==7,"cold-image-return7");
+ r=compile("hot-absent");ck(!r.rc&&!r.outn&&contains(r.err,r.errn,"lookup_hit=2"),"hot-absent-hit");np_free(&r);
+ if(unlink(image))die("unlink-before-enotdir");save(blocked,"not a directory\n");
+ r=compile("enotdir");ck(r.rc==2&&!r.outn&&contains(r.err,r.errn,"lookup_hit=0")&&contains(r.err,r.errn,"cannot open input"),"enotdir-miss-and-refuse");np_free(&r);
+ ck(missing(image),"enotdir-no-output");
+ if(unlink(blocked)||mkdir(blocked,0700))die("make-present-dir");path(header,sizeof header,blocked,"rr_probe_header.h");save(header,"#define RR_PROBE_VALUE 9\n");
+ r=compile("appeared");ck(!r.rc&&!r.outn&&contains(r.err,r.errn,"lookup_hit=0"),"appeared-header-miss");np_free(&r);
+ ck(run_image()==9,"appeared-image-return9");
+ r=run_source("run-cold-absent");ck(r.rc==7&&!r.outn&&contains(r.err,r.errn,"lookup_hit=0"),"run-cold-return7");np_free(&r);
+ r=run_source("run-hot-absent");ck(r.rc==7&&!r.outn&&contains(r.err,r.errn,"lookup_hit=2"),"run-hot-return7");np_free(&r);
+ save(blocked_run,"not a directory\n");
+ r=run_source("run-enotdir");ck(r.rc==2&&!r.outn&&contains(r.err,r.errn,"lookup_hit=0")&&contains(r.err,r.errn,"cannot open input"),"run-enotdir-miss-and-refuse");np_free(&r);
+ digest(product,after);ck(!strcmp(before,after),"product-unchanged");
+ printf("RUNREUSE_ABSENT_PROBE\tassertions=%d\tfailed=%d\tscope=local-cache-receipt-regression\n",checks,failures);
+ puts("NOT_CLAIMED\tall-routes-all-hosts-release-qualification");return failures?1:0;
+}
