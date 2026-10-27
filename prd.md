@@ -157,7 +157,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 **P1 纪元1候选（主人已在 A4 前暂停）：** A2 已封源，SID `df8f29fd`；A3 的 107/107 作业收据和 context 复验完成（`out/c43-cc-epoch1-build-01.md`）。A4 PC、A5 GEN、A6 准入／安装均未开始，不把 PREPARED 升格成候选。先解决 `.cx` 开发反馈墙钟，再决定沿用此 SID 或将已知产品修复合入下一纪元；cdx/cc/grk 均不擅自重开该构造闸。
 
-**P1a `.cx` 提速第一优先（主人新裁定）：** 本机无模块 `.cx` 约0.09s，`use netpack` 约5.4s，`use allsession` 冷/二次约10.4/10.6s；二次模块编译没有复用（`out/c43-cc-speed-probe/`）。cc 独占 `tools/dev-run.cx` 与薄入口，把现有代码缓存原型改为按当前产品／包／源闭包／选项内容寻址；只缓存原生 ELF 代码，每次真执行，不接正式 `run-batch` 直至同产品冷/热、参数变化、污染与失效负控核过。grk 的标准库和模块搜索路径工作先做隔离设计／轻探针，不碰 SID 闭包，避免 A3 身份漂移。cdx 负责审入及后续正式批接线。
+**P1a `.cx` 提速第一优先（已交开发代码缓存）：** 本机无模块 `.cx` 默认约0.09s，`use netpack` 默认约5.45s、`use allsession` 默认约10.37s 且二次约10.55s；产品默认 `-run` 重复模块编译未复用。`5a0dd533f4` 将 `tools/dev-run` 改为按已装产品/包/源与模块闭包/选项/环境内容寻址的原生 ELF 代码缓存，`7e37405e21` 只排除12个精确会话变量，冷/热分别为 netpack 8.86/0.099s、allsession 17.05/0.133s；坏 ELF、产品/模块/源/选项/包变更均 miss。cdx 独立用它缓存 `tests/run-batch.cx` 控制器跑 `core-compat`：当前版冷19.77s、热7.72s，默认控制器15.57s；三次子批均真实执行16/0。仅 DEV_ONLY，不缓存测试结果，不把正式 SOURCE 批的受测默认 `-run` 改成 ELF。grk 的 std/模块路径工作仍限隔离原型；A3 身份不漂移。
 
 **P2 下一产品源码纪元（cdx 串行收源、重建）：** 38 个需改产品格，加已知缺陷：E2 五项、E1 errno、`?:` 返回 struct、A-40 三诊断、自引用 struct 措辞、分相计时戳。新红例 `tests/pending/sizeof-global-member.cx`（`68c3adfb72`）：静态结构体数组的 `char op[24]` 得 `sizeof(rows[0].op)=8`，嵌套元素为24、整结构为336、整数组为29232；Root7a 默认 `-run` rc1。只读定位：参考 `src/front_parse.c` 的成员尺寸路径正确，产品走 `exec/parse2/control-result.tsv` 的 `SZ.expr` 通用分支，末端成员数组衰变后 `ELSZ` 给出指针宽 8；`((Row*)0)->op` 也红。修复须保留 `sizeof` 操作数最终成员的数组类型及维度、普通指针仍为8，并测静态／自动对象、数组索引、箭头、指针成员与嵌套成员。改 `exec/` 表会换 SID，纳入下一纪元一起重建。`lower` 的 ENOTDIR/EACCES 与 ENOENT 诊断未分开，输入域 29 断言中 2 红；修源码后必须重测，不删红项。
 
@@ -334,7 +334,7 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 <a id="memory-palace"></a>
 ### 记忆宫殿
 
-**本轮入图（2026-10-27，cdx 主刀）：** cc 的纪元1 A3 已有 107/107 收据、SID `df8f29fd…`，主人在 A4 前暂停，PC/GEN/准入/安装未做；产品仍是旧 Root7a。首要提速缺口是模块 `.cx` 二次运行仍约5–11s、无编译复用；cc 独占当前产品代码缓存原型，grk 的标准库／模块路径工作先隔离，cdx 审入后再接正式批。Codex 辅助已交外宿主草稿 producer/artifact head 一致检查（`b40487eadd`，cdx 以 `5b4616387f` 保留较新验证提交）与跨命令 B1b 收据 `dabc5a0efb`，未派发 CI。lower 四个旧 Root7a 正式批 `9a44ce9869` 为 51/0、778/0、1516/0、115/0；ABI 六项 UNVERIFIED、输入 errno 29/2 红。六目标流材料 `61ba5c621c`，五目标有限 oracle `611a8c62d3` 各 17/0，材料显式绑定补丁 `4ef850b1c7` 的 lnx/arm64 正式复跑 17/0；外国目标只在本机验证输出，不授外宿主资格。`sizeof` 红例定位在产品 `exec/parse2` 末端成员数组衰变路径，须下一 SID 修。当前矩阵为 822 必选／245 本机覆盖／3 观察／408 缺测，旧 257/421 摘要作废；完整 lower 父行和其余 18 宽行、N22、五外宿主仍开，`--all` rc3。
+**本轮入图（2026-10-27，cdx 主刀）：** cc 的纪元1 A3 已有 107/107 收据、SID `df8f29fd…`，主人在 A4 前暂停，PC/GEN/准入/安装未做；产品仍是旧 Root7a。产品默认 `-run` 的模块 `.cx` 二次运行仍约5–11s，独立开发代码缓存已先收反馈墙钟；cc 已按当前产品交 `dev-run` 内容寻址代码缓存，模块热约0.10–0.13s；cdx 独立核 `run-batch` 控制器热7.72s/16/0，默认15.57s/16/0。缓存仅 DEV_ONLY，不替代 SOURCE 默认 `-run`；grk 的标准库／模块路径工作仍隔离，A3 不重开。Codex 辅助已交外宿主草稿 producer/artifact head 一致检查（`b40487eadd`，cdx 以 `5b4616387f` 保留较新验证提交）与跨命令 B1b 收据 `dabc5a0efb`，未派发 CI。lower 四个旧 Root7a 正式批 `9a44ce9869` 为 51/0、778/0、1516/0、115/0；ABI 六项 UNVERIFIED、输入 errno 29/2 红。六目标流材料 `61ba5c621c`，五目标有限 oracle `611a8c62d3` 各 17/0，材料显式绑定补丁 `4ef850b1c7` 的 lnx/arm64 正式复跑 17/0；外国目标只在本机验证输出，不授外宿主资格。`sizeof` 红例定位在产品 `exec/parse2` 末端成员数组衰变路径，须下一 SID 修。当前矩阵为 822 必选／245 本机覆盖／3 观察／408 缺测，旧 257/421 摘要作废；完整 lower 父行和其余 18 宽行、N22、五外宿主仍开，`--all` rc3。
 
 **现行入口：** 下一表第一行是当前身份与行动；其余旧行保留来源历史，凡与第一行冲突的“当前”字样均已失效。
 
