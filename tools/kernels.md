@@ -5,9 +5,28 @@ C assembler through its CX adapter, and the CX ELF linker. No Clang, LLVM linker
 or Python is used by these steps. Both architectures' eleven units completed
 construction and linking in generation `out/c43-native-kernel-03`: x86_64 produced
 a 7144-byte UNIKERN1 blob and ARM64 a 7096-byte blob. This establishes construction,
-not runtime correctness. The path is being qualified independently before
-wiring it into the original shared-model builder, which still has its old
-external assembly dependency. A development product using these fresh kernels
+not runtime correctness.
+
+Correction (2026-10-27, E7): the earlier sentence here said the native path was
+"being qualified before wiring it into the original shared-model builder, which
+still has its old external assembly dependency". Against the current actual path
+that is stale. The kernels of the current source package (PC04,
+`out/c43-source-classic18-full-pc-04/kernels/*`) and the installed root product
+come from the native generation (`out/c43-native-kernel-classic18-01`, bound by
+`tools/source-package-pack.cx`); no external assembler produced them. The two
+SHA-256 values are recorded as regression pins in `tests/asm-golden/kernels.tsv`.
+The legacy builder (`exec/c/buildcompiler.sh shared` → `seed/blob.c` or
+`exec/c/asm/blob.py` → `exec/c/asm/machocc.sh` → host `cc`/`clang` and linker)
+still exists. It still has that external dependency, but it is no longer the
+kernel route and nothing in the current candidate depends on its output. The
+product also now ships its own assembler, `unisacc as -b lnx/ISA`. The route
+`tools/kernel-route.cx` builds both kernels with only the candidate
+(`-E` + `tools/asm-source.cx` → `unisacc.com as` → `tools/kernel-link.cx`) and
+reproduces both pinned SHAs locally. That makes the `prepare-assembler`/`assemble`
+cache steps below redundant for new generations. The contract is
+spec §4.8 [AS-1..AS-11], checked by `tests/kernel-route.cx`.
+
+A development product using these fresh kernels
 and five rebuilt C driver slices was installed at the repository root on
 2026-10-25 23:06. It is not a fully qualified release.
 

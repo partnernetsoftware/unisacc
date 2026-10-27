@@ -1,0 +1,81 @@
+/* Kernel construction route, spec §4.8 [AS-1][AS-8][AS-9]. The candidate product alone turns
+ * the canonical kernel assembly into UNIKERN1 on any host that can run unisacc.com:
+ *   ROOT/exec/c/asm/<unit>_<ISA>.S --product -E + tools/asm-source.cx--> <unit>.s
+ *   <unit>.s --`unisacc.com as -b lnx/<ISA>`--> <unit>.o --tools/kernel-link.cx--> <ISA>.kernel
+ * No host assembler, linker, C compiler or Python is invoked by this route itself. tools/bound,
+ * the per-child watchdog, is a POSIX sh script that builds tools/bound.c with the host cc once
+ * (declared in AS-11); it bounds children and is not part of the produced bytes.
+ *
+ * Usage: ROOT NEW_ABS_OUT [--isa x86_64|arm64]... [--units u1,...,u11] [--asm-dir DIR]
+ *   --units  must equal the AS-1 canonical order exactly; any other order or set is refused
+ *            by name before anything is created (the linker itself would accept it).
+ *   --asm-dir reads <unit>_<ISA>.S, layout.h, actions.h and DIR/../core.h from DIR instead of
+ *            ROOT/exec/c/asm; the receipt then says canonical=NO (negative tests only).
+ * Output: OUT/<ISA>/<unit>.s, OUT/<ISA>/<unit>.o, OUT/<ISA>.kernel, OUT/route.tsv.
+ * This is construction (PREPARED), never a test verdict; tests/kernel-route.cx judges it.
+ * Phase times are UNMEASURED here: the prelude has no portable clock. */
+#pragma unisa use cxlib.netpack
+static const char *canonical_units[11]={"transition","arith","buffer","memory","intern","bytes","format","stack","action","run","bridge"};
+static char root[4096],out[4096],asmdir[4096],product[4400],bound[4400];
+static void die(const char *s){fprintf(stderr,"kernel-route: REFUSE %s\n",s);exit(2);}
+static void die2(const char *s,const char *t){fprintf(stderr,"kernel-route: REFUSE %s %s\n",s,t);exit(2);}
+static void path(char *p,size_t cap,const char *a,const char *b){int n=snprintf(p,cap,"%s/%s",a,b);if(n<0||(size_t)n>=cap)die("path length");}
+static char *load(const char *p,size_t *n){struct stat st;errno=0;if(lstat(p,&st)){fprintf(stderr,"kernel-route: input %s errno=%d\n",p,errno);die("input lstat (only ENOENT means absent; every errno is refused here)");}if(!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>67108864)die2("bounded regular input required:",p);char *s=cx_read(p,n);if(!s||*n!=(size_t)st.st_size)die2("input read:",p);return s;}
+static void digest(const char *p,char h[65]){size_t n;char *s=load(p,&n);cx_sha256_hex(s,n,h);free(s);}
+static void save(const char *p,const char *s,size_t n){int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);size_t at=0;if(fd<0)die2("exclusive output create:",p);while(at<n){ssize_t k=write(fd,s+at,n-at);if(k<0&&errno==EINTR)continue;if(k<=0)die("output write; partial retained");at+=(size_t)k;}if(fsync(fd)||close(fd))die("output close");}
+static void child(char **v,const char *what){np_result r;char why[1024];if(np_run(v,root,0,50,&r,why,sizeof why))die2(what,why);if(r.outn)fwrite(r.out,1,r.outn,stderr);if(r.errn)fwrite(r.err,1,r.errn,stderr);int rc=r.rc;np_free(&r);if(rc){fprintf(stderr,"kernel-route: %s rc=%d\n",what,rc);die2("child refused:",what);}}
+typedef struct {char rel[256];char abs[4400];char sha[65];} input_id;
+static input_id inputs[64];static int ninputs;
+static void add_input(const char *label,const char *abs){if(ninputs==64)die("input capacity");input_id *d=&inputs[ninputs];snprintf(d->rel,sizeof(d->rel),"%s",label);snprintf(d->abs,sizeof(d->abs),"%s",abs);digest(abs,d->sha);ninputs++;}
+static void recheck_inputs(void){int i;char h[65];for(i=0;i<ninputs;i++){digest(inputs[i].abs,h);if(strcmp(h,inputs[i].sha))die2("input changed during the route:",inputs[i].rel);}}
+int main(int argc,char **argv){
+ const char *isas[2];int nisa=0,i,a,custom_dir=0;char units_arg[512]="";
+ if(argc<3)die("usage ROOT NEW_ABS_OUT [--isa x86_64|arm64]... [--units u1,...,u11] [--asm-dir DIR]");
+ if(!realpath(argv[1],root))die("root resolution");if(argv[2][0]!='/'||strlen(argv[2])>=sizeof out)die("NEW_ABS_OUT must be absolute");snprintf(out,sizeof out,"%s",argv[2]);
+ path(asmdir,sizeof asmdir,root,"exec/c/asm");
+ for(i=3;i<argc;i++){
+  if(!strcmp(argv[i],"--isa")&&i+1<argc){const char *t=argv[++i];if(strcmp(t,"x86_64")&&strcmp(t,"arm64"))die("ISA is x86_64 or arm64");if(nisa==2||(nisa&&!strcmp(isas[0],t)))die("each ISA at most once");isas[nisa++]=t;}
+  else if(!strcmp(argv[i],"--units")&&i+1<argc){snprintf(units_arg,sizeof units_arg,"%s",argv[++i]);}
+  else if(!strcmp(argv[i],"--asm-dir")&&i+1<argc){if(!realpath(argv[++i],asmdir))die("--asm-dir resolution");custom_dir=1;}
+  else die2("unknown argument",argv[i]);
+ }
+ if(!nisa){isas[0]="x86_64";isas[1]="arm64";nisa=2;}
+ if(units_arg[0]){
+  /* AS-1: the link order is part of the kernel's identity; refuse before any output exists. */
+  char expect[512]="";for(i=0;i<11;i++){if(i)strcat(expect,",");strcat(expect,canonical_units[i]);}
+  if(strcmp(units_arg,expect)){fprintf(stderr,"kernel-route: expected=%s\nkernel-route: given=%s\n",expect,units_arg);die("unit order differs from AS-1 canonical order");}
+ }
+ path(product,sizeof product,root,"unisacc.com");path(bound,sizeof bound,root,"tools/bound");
+ {struct stat st;errno=0;if(!lstat(out,&st))die("NEW_ABS_OUT must not exist");if(errno!=ENOENT){fprintf(stderr,"kernel-route: output errno=%d\n",errno);die("NEW_ABS_OUT lstat failed with an errno other than ENOENT");}}
+ {char p[4400];
+  add_input("unisacc.com",product);
+  const char *tools[]={"tools/kernel-route.cx","tools/asm-source.cx","tools/kernel-link.cx","tools/cxlib/elfkernel.cx","tools/cxlib/netpack.cx","tools/bound","tools/bound.c"};
+  for(i=0;i<7;i++){path(p,sizeof p,root,tools[i]);add_input(tools[i],p);}
+  path(p,sizeof p,asmdir,"layout.h");add_input("asm/layout.h",p);path(p,sizeof p,asmdir,"actions.h");add_input("asm/actions.h",p);path(p,sizeof p,asmdir,"../core.h");add_input("asm/../core.h",p);
+  for(a=0;a<nisa;a++)for(i=0;i<11;i++){char rel[200],name[200];snprintf(name,sizeof name,"%s_%s.S",canonical_units[i],isas[a]);snprintf(rel,sizeof rel,"asm/%s",name);path(p,sizeof p,asmdir,name);add_input(rel,p);}
+ }
+ if(mkdir(out,0700))die("NEW_ABS_OUT create");
+ np_buf receipt={0};np_puts(&receipt,"unisacc-kernel-route-v1\nstatus\tPREPARED\nspec\tAS-1,AS-8,AS-9\ncanonical\t");np_puts(&receipt,custom_dir?"NO":"YES");np_puts(&receipt,"\nunits\t");for(i=0;i<11;i++){if(i)np_puts(&receipt,",");np_puts(&receipt,canonical_units[i]);}np_puts(&receipt,"\n");
+ for(i=0;i<ninputs;i++){np_puts(&receipt,"input\t");np_puts(&receipt,inputs[i].rel);np_puts(&receipt,"\t");np_puts(&receipt,inputs[i].sha);np_puts(&receipt,"\n");}
+ for(a=0;a<nisa;a++){
+  const char *isa=isas[a];char dir[4400],src[11][4400],dst[11][4400],obj[11][4400],kernel[4400],target[32],tool[4400],h[65];char *v[64];int n=0;
+  path(dir,sizeof dir,out,isa);if(mkdir(dir,0700))die("ISA output directory");
+  path(tool,sizeof tool,root,"tools/asm-source.cx");v[n++]=bound;v[n++]="45";v[n++]="sh";v[n++]=product;v[n++]=tool;v[n++]="--";v[n++]=root;v[n++]=(char *)isa;
+  for(i=0;i<11;i++){char name[200];snprintf(name,sizeof name,"%s_%s.S",canonical_units[i],isa);path(src[i],sizeof src[i],asmdir,name);snprintf(name,sizeof name,"%s.s",canonical_units[i]);path(dst[i],sizeof dst[i],dir,name);v[n++]=src[i];v[n++]=dst[i];}
+  v[n]=0;child(v,"asm-source (product -E and AS-2 macro subset)");
+  snprintf(target,sizeof target,"lnx/%s",isa);
+  for(i=0;i<11;i++){char name[200];snprintf(name,sizeof name,"%s.o",canonical_units[i]);path(obj[i],sizeof obj[i],dir,name);
+   char *w[]={bound,"20","sh",product,"as","-b",target,dst[i],"-o",obj[i],0};char what[300];snprintf(what,sizeof what,"product as %s %s",isa,canonical_units[i]);child(w,what);
+   struct stat st;if(lstat(obj[i],&st)||!S_ISREG(st.st_mode))die2("product as wrote no object:",canonical_units[i]);}
+  {char name[64];snprintf(name,sizeof name,"%s.kernel",isa);path(kernel,sizeof kernel,out,name);}
+  path(tool,sizeof tool,root,"tools/kernel-link.cx");n=0;v[n++]=bound;v[n++]="45";v[n++]="sh";v[n++]=product;v[n++]=tool;v[n++]="--";v[n++]=(char *)isa;v[n++]=kernel;for(i=0;i<11;i++)v[n++]=obj[i];v[n]=0;child(v,"kernel-link (AS-8)");
+  for(i=0;i<11;i++){char rel[200];digest(dst[i],h);snprintf(rel,sizeof rel,"%s/%s.s",isa,canonical_units[i]);np_puts(&receipt,"source\t");np_puts(&receipt,rel);np_puts(&receipt,"\t");np_puts(&receipt,h);np_puts(&receipt,"\n");
+   digest(obj[i],h);snprintf(rel,sizeof rel,"%s/%s.o",isa,canonical_units[i]);np_puts(&receipt,"object\t");np_puts(&receipt,rel);np_puts(&receipt,"\t");np_puts(&receipt,h);np_puts(&receipt,"\n");}
+  digest(kernel,h);np_puts(&receipt,"kernel\t");np_puts(&receipt,isa);np_puts(&receipt,".kernel\t");np_puts(&receipt,h);np_puts(&receipt,"\n");
+  printf("PREPARED\tkernel-route\t%s\tkernel_sha256=%s\tcanonical=%s\n",isa,h,custom_dir?"NO":"YES");
+ }
+ recheck_inputs();
+ np_puts(&receipt,"timing\tpreprocess,assemble,link=UNMEASURED(no portable clock in the prelude)\n");
+ {char p[4400];path(p,sizeof p,out,"route.tsv");save(p,receipt.p,receipt.n);}free(receipt.p);
+ puts("PREPARED\tkernel-route\treceipt=route.tsv\tno-test-result");return 0;
+}

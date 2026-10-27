@@ -1,0 +1,299 @@
+/* Encoding-form classifier for the spec §4.8 kernel assembly contract (AS-3..AS-5).
+ * A shape key names the mnemonic and only the operand classes that select a
+ * different encoding rule: register width and REX/extension bit, immediate
+ * range class, ModRM/SIB displacement and base class, symbol section, A64
+ * register kind, immediate path and addressing mode. Register numbers inside
+ * one class only fill fields, so one hand-derived row per key covers them.
+ * This module classifies text; it never assembles and never consults the
+ * product assembler. Every call owns its buffers; nothing escapes but the set. */
+#pragma unisa module kernel_route_shape
+
+typedef struct krs_shapes { char **key; char **example; int *count; int n, cap; } krs_shapes;
+typedef struct krs_label { char *name; int sect; } krs_label;
+typedef struct krs_ctx { krs_label *v; int n, cap; int arm; } krs_ctx;
+
+void krs_free(krs_shapes *s) {
+    int i; for (i = 0; i < s->n; i++) { free(s->key[i]); free(s->example[i]); }
+    free(s->key); free(s->example); free(s->count); memset(s, 0, sizeof *s);
+}
+int krs_find(const krs_shapes *s, const char *key) { int i; for (i = 0; i < s->n; i++) if (!strcmp(s->key[i], key)) return i; return -1; }
+int krs_add(krs_shapes *s, const char *key, const char *example) {
+    int i = krs_find(s, key); char *k, *e;
+    if (i >= 0) { s->count[i]++; return 0; }
+    if (s->n == s->cap) {
+        int cap = s->cap ? s->cap * 2 : 64; char **nk = realloc(s->key, (size_t)cap * sizeof *nk), **ne;
+        if (!nk) return -1; s->key = nk;
+        ne = realloc(s->example, (size_t)cap * sizeof *ne); if (!ne) return -1; s->example = ne;
+        { int *nc = realloc(s->count, (size_t)cap * sizeof *nc); if (!nc) return -1; s->count = nc; }
+        s->cap = cap;
+    }
+    k = strdup(key); e = strdup(example); if (!k || !e) { free(k); free(e); return -1; }
+    s->key[s->n] = k; s->example[s->n] = e; s->count[s->n] = 1; s->n++; return 0;
+}
+static int krs_sp(int c) { return c == ' ' || c == '\t' || c == '\r'; }
+static int krs_idc(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '$'; }
+static int krs_is(const char *s, size_t n, const char *w) { size_t k = strlen(w); return n == k && !memcmp(s, w, k); }
+static void krs_trim(const char **s, size_t *n) { while (*n && krs_sp(**s)) { (*s)++; (*n)--; } while (*n && krs_sp((*s)[*n - 1])) (*n)--; }
+/* Decimal or 0x literal with +/- terms; 0 when not a pure number (AS-3 expression subset). */
+static int krs_num(const char *s, size_t n, long long *out) {
+    long long v = 0; size_t i = 0; int sign = 1, any = 0;
+    krs_trim(&s, &n); if (!n) return 0;
+    while (i < n) {
+        long long t = 0; int base = 10, digits = 0;
+        while (i < n && krs_sp(s[i])) i++;
+        if (i < n && (s[i] == '+' || s[i] == '-')) { sign = s[i] == '-' ? -sign : sign; i++; while (i < n && krs_sp(s[i])) i++; if (i < n && (s[i] == '+' || s[i] == '-')) { sign = s[i] == '-' ? -sign : sign; i++; } }
+        if (i + 1 < n && s[i] == '0' && (s[i + 1] == 'x' || s[i + 1] == 'X')) { base = 16; i += 2; }
+        while (i < n) {
+            int c = s[i], d;
+            if (c >= '0' && c <= '9') d = c - '0'; else if (base == 16 && c >= 'a' && c <= 'f') d = c - 'a' + 10; else if (base == 16 && c >= 'A' && c <= 'F') d = c - 'A' + 10; else break;
+            t = t * base + d; digits++; i++;
+        }
+        if (!digits) return 0;
+        v += sign * t; sign = 1; any = 1;
+        while (i < n && krs_sp(s[i])) i++;
+        if (i < n && s[i] != '+' && s[i] != '-') return 0;
+    }
+    *out = v; return any;
+}
+static int krs_label_add(krs_ctx *c, const char *s, size_t n, int sect) {
+    int i; for (i = 0; i < c->n; i++) if (strlen(c->v[i].name) == n && !memcmp(c->v[i].name, s, n)) return 0;
+    if (c->n == c->cap) { int cap = c->cap ? c->cap * 2 : 128; krs_label *v = realloc(c->v, (size_t)cap * sizeof *v); if (!v) return -1; c->v = v; c->cap = cap; }
+    c->v[c->n].name = malloc(n + 1); if (!c->v[c->n].name) return -1;
+    memcpy(c->v[c->n].name, s, n); c->v[c->n].name[n] = 0; c->v[c->n].sect = sect; c->n++; return 0;
+}
+/* t = defined in .text of this unit, d = defined in .data/.bss, e = undefined (external). */
+static char krs_symclass(const krs_ctx *c, const char *s, size_t n) {
+    int i; krs_trim(&s, &n);
+    if (n > 4 && !memcmp(s + n - 4, "@PLT", 4)) n -= 4;
+    { size_t k = 0; while (k < n && krs_idc(s[k])) k++; n = k; }
+    for (i = 0; i < c->n; i++) if (strlen(c->v[i].name) == n && !memcmp(c->v[i].name, s, n)) return c->v[i].sect == 1 ? 't' : 'd';
+    return 'e';
+}
+/* Strip comments as AS-3 defines them, then leading/trailing blanks. */
+static void krs_clean(int arm, const char **s, size_t *n) {
+    size_t q = 0; int inq = 0, lead = 1;
+    while (q < *n) {
+        char c = (*s)[q];
+        if (c == '"') inq = !inq;
+        if (!inq) { if (c == '/' && q + 1 < *n && (*s)[q + 1] == '/') break; if (c == '#' && (!arm || lead)) break; }
+        if (!krs_sp(c)) lead = 0; q++;
+    }
+    *n = q; krs_trim(s, n);
+}
+/* Consume leading "name:" labels; returns the number consumed. */
+static int krs_labels(const char **s, size_t *n, krs_ctx *c, int sect, int record) {
+    int count = 0;
+    for (;;) {
+        size_t k = 0; while (k < *n && krs_idc((*s)[k])) k++;
+        if (!k || k >= *n || (*s)[k] != ':' || ((*s)[0] >= '0' && (*s)[0] <= '9')) return count;
+        if (record && krs_label_add(c, *s, k, sect)) return -1;
+        *s += k + 1; *n -= k + 1; krs_trim(s, n); count++;
+    }
+}
+static int krs_section(const char *s, size_t n, int *sect) {
+    size_t k = 0; while (k < n && !krs_sp(s[k])) k++;
+    if (krs_is(s, k, ".text")) { *sect = 1; return 1; }
+    if (krs_is(s, k, ".data")) { *sect = 2; return 1; }
+    if (krs_is(s, k, ".bss")) { *sect = 3; return 1; }
+    if (krs_is(s, k, ".section")) {
+        const char *r = s + k; size_t rn = n - k, y = 0; krs_trim(&r, &rn); while (y < rn && r[y] != ',' && !krs_sp(r[y])) y++;
+        *sect = krs_is(r, y, ".text") ? 1 : krs_is(r, y, ".data") ? 2 : krs_is(r, y, ".bss") ? 3 : 9; return 1;
+    }
+    return 0;
+}
+/* Split operands at depth-0 commas (AS-3). */
+static int krs_split(const char *s, size_t n, const char **op, size_t *opl, int max) {
+    int count = 0, depth = 0; size_t st = 0, k;
+    for (k = 0; k <= n; k++) {
+        if (k == n || (s[k] == ',' && !depth)) {
+            const char *a = s + st; size_t l = k - st; krs_trim(&a, &l);
+            if (count == max) return -1;
+            op[count] = a; opl[count] = l; count++; st = k + 1;
+        } else if (s[k] == '(' || s[k] == '[') depth++; else if (s[k] == ')' || s[k] == ']') depth--;
+    }
+    if (count == 1 && !opl[0]) return 0;
+    return count;
+}
+static const char *krs_x64[16] = { "rax","rcx","rdx","rbx","rsp","rbp","rsi","rdi","r8","r9","r10","r11","r12","r13","r14","r15" };
+static const char *krs_x32[16] = { "eax","ecx","edx","ebx","esp","ebp","esi","edi","r8d","r9d","r10d","r11d","r12d","r13d","r14d","r15d" };
+static const char *krs_x16[16] = { "ax","cx","dx","bx","sp","bp","si","di","r8w","r9w","r10w","r11w","r12w","r13w","r14w","r15w" };
+static const char *krs_x8[16] = { "al","cl","dl","bl","spl","bpl","sil","dil","r8b","r9b","r10b","r11b","r12b","r13b","r14b","r15b" };
+static int krs_xreg(const char *s, size_t n, int *cls, int *hi) {
+    int k; *hi = 0;
+    for (k = 0; k < 16; k++) {
+        if (krs_is(s, n, krs_x64[k])) { *cls = 64; return k; }
+        if (krs_is(s, n, krs_x32[k])) { *cls = 32; return k; }
+        if (krs_is(s, n, krs_x16[k])) { *cls = 16; return k; }
+        if (krs_is(s, n, krs_x8[k])) { *cls = 8; return k; }
+    }
+    if (krs_is(s, n, "ah")) { *cls = 8; *hi = 1; return 4; }
+    if (krs_is(s, n, "ch")) { *cls = 8; *hi = 1; return 5; }
+    if (krs_is(s, n, "dh")) { *cls = 8; *hi = 1; return 6; }
+    if (krs_is(s, n, "bh")) { *cls = 8; *hi = 1; return 7; }
+    return -1;
+}
+static void krs_cat(char *out, size_t cap, const char *s) { size_t n = strlen(out); if (n + 1 < cap) snprintf(out + n, cap - n, "%s", s); }
+static void krs_xregclass(char *out, size_t cap, int r, int cls, int hi) {
+    char b[16];
+    if (cls == 8) snprintf(b, sizeof b, "%s", hi ? "r8h" : r >= 8 ? "r8x" : r >= 4 ? "r8l" : "r8");
+    else snprintf(b, sizeof b, "r%d%s", cls, r >= 8 ? "x" : "");
+    krs_cat(out, cap, b);
+}
+static const char *krs_immclass(long long v) {
+    if (v >= -128 && v <= 127) return "i8";
+    if (v >= 128 && v <= 255) return "u8";
+    if (v >= -2147483647LL - 1 && v <= 2147483647LL) return "i32";
+    if (v >= 0 && v <= 4294967295LL) return "u32";
+    return "i64";
+}
+/* x86 operand class (AS-4). */
+static int krs_xop(const krs_ctx *c, const char *s, size_t n, int shift_first, char *out, size_t cap) {
+    int cls, hi, r; long long v;
+    if (n >= 2 && s[0] == '%') {
+        r = krs_xreg(s + 1, n - 1, &cls, &hi); if (r < 0) { krs_cat(out, cap, "?reg"); return 0; }
+        if (shift_first && cls == 8 && r == 1 && !hi) { krs_cat(out, cap, "cl"); return 0; }
+        krs_xregclass(out, cap, r, cls, hi); return 0;
+    }
+    if (n >= 1 && s[0] == '*') { krs_cat(out, cap, "*"); s++; n--; krs_trim(&s, &n); if (n >= 2 && s[0] == '%') { r = krs_xreg(s + 1, n - 1, &cls, &hi); if (r < 0) { krs_cat(out, cap, "?reg"); return 0; } krs_xregclass(out, cap, r, cls, hi); return 0; } }
+    if (n >= 1 && s[0] == '$') {
+        if (krs_num(s + 1, n - 1, &v)) krs_cat(out, cap, krs_immclass(v)); else krs_cat(out, cap, "isym");
+        return 0;
+    }
+    {
+        size_t k = 0; while (k < n && s[k] != '(') k++;
+        if (k == n) { char b[8]; snprintf(b, sizeof b, "L%c", krs_num(s, n, &v) ? 'n' : krs_symclass(c, s, n)); krs_cat(out, cap, b); return 0; }
+        {
+            const char *d = s; size_t dn = k, a, part = 0; char disp[8], base[8] = "-", index[8] = "-", buf[48];
+            const char *in = s + k + 1; size_t inn = n - k - 1; int rip = 0;
+            krs_trim(&d, &dn);
+            if (!inn || in[inn - 1] != ')') { krs_cat(out, cap, "?mem"); return 0; }
+            inn--;
+            a = 0;
+            while (a <= inn) {
+                size_t j = a; const char *p; size_t pl; while (j < inn && in[j] != ',') j++;
+                p = in + a; pl = j - a; krs_trim(&p, &pl);
+                if (pl && p[0] == '%') {
+                    if (part == 0 && krs_is(p + 1, pl - 1, "rip")) { rip = 1; snprintf(base, sizeof base, "rip"); }
+                    else {
+                        r = krs_xreg(p + 1, pl - 1, &cls, &hi);
+                        if (r < 0 || cls != 64) { krs_cat(out, cap, "?mem"); return 0; }
+                        if (part == 0) snprintf(base, sizeof base, "%s", (r & 7) == 4 ? (r >= 8 ? "spx" : "sp") : (r & 7) == 5 ? (r >= 8 ? "bpx" : "bp") : (r >= 8 ? "bx" : "b"));
+                        else snprintf(index, sizeof index, "%s", r >= 8 ? "ix" : "i");
+                    }
+                }
+                part++; a = j + 1;
+            }
+            if (!dn) snprintf(disp, sizeof disp, "0");
+            else if (krs_num(d, dn, &v)) snprintf(disp, sizeof disp, "%s", !v ? "0" : (v >= -128 && v <= 127) ? "d8" : "d32");
+            else snprintf(disp, sizeof disp, "s%c", krs_symclass(c, d, dn));
+            (void)rip;
+            snprintf(buf, sizeof buf, "m(%s,%s,%s)", disp, base, index); krs_cat(out, cap, buf); return 0;
+        }
+    }
+}
+static int krs_aregk(const char *s, size_t n, char *out, size_t cap) {
+    long long v;
+    if (krs_is(s, n, "sp")) { krs_cat(out, cap, "SP"); return 1; }
+    if (krs_is(s, n, "xzr")) { krs_cat(out, cap, "XZR"); return 1; }
+    if (krs_is(s, n, "wzr")) { krs_cat(out, cap, "WZR"); return 1; }
+    if (n >= 2 && (s[0] == 'x' || s[0] == 'w') && krs_num(s + 1, n - 1, &v) && v >= 0 && v <= 30 && s[1] >= '0' && s[1] <= '9') { krs_cat(out, cap, s[0] == 'x' ? "X" : "W"); return 1; }
+    return 0;
+}
+/* A64 wide-immediate path, as AS-5 orders it: per halfword MOVZ then MOVN, then ORR bitmask. */
+static void krs_amov(long long v, int sf, char *out, size_t cap) {
+    unsigned long long u = (unsigned long long)v, mask = sf ? ~0ULL : 0xffffffffULL; int i; char b[16];
+    u &= mask;
+    for (i = 0; i < (sf ? 4 : 2); i++) {
+        if (!(u & ~(0xffffULL << (i * 16)))) { snprintf(b, sizeof b, "#movz%d", i); krs_cat(out, cap, b); return; }
+        if (!((~u & mask) & ~(0xffffULL << (i * 16)))) { snprintf(b, sizeof b, "#movn%d", i); krs_cat(out, cap, b); return; }
+    }
+    krs_cat(out, cap, "#bitmask");
+}
+static void krs_aop(const krs_ctx *c, const char *mn, size_t mnl, int index, const char *s, size_t n, int sf, char *out, size_t cap) {
+    long long v;
+    if (krs_aregk(s, n, out, cap)) return;
+    if (n && s[0] == '#') {
+        if (!krs_num(s + 1, n - 1, &v)) { krs_cat(out, cap, "#?"); return; }
+        if (krs_is(mn, mnl, "mov") && index == 1) { krs_amov(v, sf, out, cap); return; }
+        krs_cat(out, cap, v < 0 ? "#neg" : v <= 4095 ? "#u12" : v <= 65535 ? "#u16" : "#big"); return;
+    }
+    if (n > 4 && !memcmp(s, "lsl ", 4)) { krs_cat(out, cap, "lsl#"); return; }
+    if (n > 6 && !memcmp(s, ":lo12:", 6)) { char b[8]; snprintf(b, sizeof b, "lo12%c", krs_symclass(c, s + 6, n - 6)); krs_cat(out, cap, b); return; }
+    if (n && s[0] == '[') {
+        const char *q = s + 1; size_t qn = n - 1, k = 0; int pre = 0; char b[48] = "[";
+        if (qn && q[qn - 1] == '!') { pre = 1; qn--; }
+        if (!qn || q[qn - 1] != ']') { krs_cat(out, cap, "[?]"); return; }
+        qn--;
+        while (k < qn && q[k] != ',') k++;
+        { const char *base = q; size_t bn = k; krs_trim(&base, &bn); if (!krs_aregk(base, bn, b, sizeof b)) krs_cat(b, sizeof b, "?"); }
+        if (k < qn) {
+            const char *r = q + k + 1; size_t rn = qn - k - 1, j = 0; krs_trim(&r, &rn);
+            if (rn && r[0] == '#') { krs_cat(b, sizeof b, krs_num(r + 1, rn - 1, &v) ? (v < 0 ? ",#neg" : ",#pos") : ",#?"); }
+            else if (rn > 6 && !memcmp(r, ":lo12:", 6)) { char t[10]; snprintf(t, sizeof t, ",lo12%c", krs_symclass(c, r + 6, rn - 6)); krs_cat(b, sizeof b, t); }
+            else {
+                while (j < rn && r[j] != ',') j++;
+                { const char *ix = r; size_t xn = j; krs_trim(&ix, &xn); krs_cat(b, sizeof b, ","); if (!krs_aregk(ix, xn, b, sizeof b)) krs_cat(b, sizeof b, "?"); }
+                if (j < rn) { const char *e = r + j + 1; size_t en = rn - j - 1; krs_trim(&e, &en); krs_cat(b, sizeof b, en >= 4 && !memcmp(e, "uxtw", 4) ? ",uxtw" : en >= 3 && !memcmp(e, "lsl", 3) ? ",lsl" : ",?"); }
+            }
+        }
+        krs_cat(b, sizeof b, pre ? "]!" : "]"); krs_cat(out, cap, b); return;
+    }
+    {
+        static const char *conds[] = { "eq","ne","hs","lo","mi","pl","vs","vc","hi","ls","ge","lt","gt","le",0 }; int i;
+        for (i = 0; conds[i]; i++) if (krs_is(s, n, conds[i])) { krs_cat(out, cap, "cond"); return; }
+    }
+    { char b[8]; snprintf(b, sizeof b, "L%c", krs_num(s, n, &v) ? 'n' : krs_symclass(c, s, n)); krs_cat(out, cap, b); }
+}
+/* Directive class (AS-3): name@section plus operand kind. */
+static void krs_directive(const char *s, size_t n, int sect, char *out, size_t cap) {
+    size_t k = 0; const char *r; size_t rn; long long v; char b[64];
+    while (k < n && !krs_sp(s[k])) k++;
+    r = s + k; rn = n - k; krs_trim(&r, &rn);
+    snprintf(b, sizeof b, "%.*s@%s", (int)(k < 20 ? k : 20), s, sect == 1 ? "text" : sect == 2 ? "data" : sect == 3 ? "bss" : "other");
+    krs_cat(out, cap, b);
+    if (krs_is(s, k, ".long") || krs_is(s, k, ".word") || krs_is(s, k, ".quad") || krs_is(s, k, ".byte")) {
+        int num = 0, diff = 0; size_t a = 0;
+        while (a < rn) { size_t e = a; while (e < rn && r[e] != ',') e++; if (krs_num(r + a, e - a, &v)) num = 1; else diff = 1; a = e + 1; }
+        krs_cat(out, cap, num && diff ? ":num+diff" : diff ? ":diff" : ":num");
+    }
+}
+/* Classify text[0..n). only_line < 0: every instruction/directive line; else that 1-based line only.
+ * Returns 0, or -1 with why. Section/label pre-pass gives symbol classes. */
+int krs_classify(int arm, const char *text, size_t n, int only_line, krs_shapes *out, char *why, size_t wl) {
+    krs_ctx c; size_t p = 0; int pass, rc = 0;
+    memset(&c, 0, sizeof c); c.arm = arm;
+    for (pass = 0; pass < 2 && !rc; pass++) {
+        int sect = 1, line = 0; p = 0;
+        while (p < n) {
+            size_t e = p, ln; const char *s; char key[256]; char ex[256];
+            while (e < n && text[e] != '\n') e++;
+            s = text + p; ln = e - p; p = e + 1; line++;
+            krs_clean(arm, &s, &ln);
+            if (krs_labels(&s, &ln, &c, sect, pass == 0) < 0) { snprintf(why, wl, "label allocation"); rc = -1; break; }
+            if (!ln) continue;
+            if (krs_section(s, ln, &sect)) { if (pass == 1 && (only_line < 0 || only_line == line)) { char b[16]; size_t k = 0; while (k < ln && !krs_sp(s[k])) k++; snprintf(b, sizeof b, "%.*s", (int)(k < 15 ? k : 15), s); if (krs_add(out, b, b)) { rc = -1; break; } } continue; }
+            if (pass == 0 || (only_line >= 0 && only_line != line)) continue;
+            key[0] = 0; snprintf(ex, sizeof ex, "%.*s", (int)(ln < 255 ? ln : 255), s);
+            if (s[0] == '.') {
+                size_t k = 0; while (k < ln && !krs_sp(s[k])) k++;
+                if (krs_is(s, k, ".globl") || krs_is(s, k, ".global")) snprintf(key, sizeof key, ".globl");
+                else krs_directive(s, ln, sect, key, sizeof key);
+            } else {
+                const char *op[6]; size_t opl[6]; size_t k = 0; int nop, i, sf = 0;
+                while (k < ln && !krs_sp(s[k])) k++;
+                snprintf(key, sizeof key, "%.*s", (int)(k < 40 ? k : 40), s);
+                nop = krs_split(s + k, ln - k, op, opl, 6);
+                if (nop < 0) { snprintf(why, wl, "operand count at line %d", line); rc = -1; break; }
+                if (arm && nop) sf = opl[0] && op[0][0] == 'x';
+                for (i = 0; i < nop; i++) {
+                    krs_cat(key, sizeof key, i ? "," : " ");
+                    if (arm) krs_aop(&c, s, k, i, op[i], opl[i], sf, key, sizeof key);
+                    else krs_xop(&c, op[i], opl[i], i == 0 && nop == 2 && (s[0] == 's') && (s[1] == 'h' || s[1] == 'a'), key, sizeof key);
+                }
+            }
+            if (krs_add(out, key, ex)) { snprintf(why, wl, "shape allocation"); rc = -1; break; }
+        }
+    }
+    { int i; for (i = 0; i < c.n; i++) free(c.v[i].name); free(c.v); }
+    return rc;
+}
