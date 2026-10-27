@@ -1,0 +1,52 @@
+/* Drives tools/gcc_cx.cx and tools/clang_cx.cx. No second resolver. */
+static int fails;
+
+static void note(int ok, const char *name) {
+    if (ok) printf("PASS %s\n", name);
+    else { printf("FAIL %s\n", name); fails = fails + 1; }
+}
+
+static int drive(const char *which, const char *src, const char *out, int want) {
+    char cmd[1100];
+    char *buf = 0;
+    size_t n = 0;
+    int k, rc, ran;
+    unlink(out);
+    k = snprintf(cmd, sizeof cmd, "sh ./unisacc.com -run tools/%s_cx.cx -- %s -o %s", which, src, out);
+    if (k < 0 || k >= (int)sizeof cmd) return 0;
+    rc = cx_run_timeout(cmd, 40, &buf, &n);
+    free(buf);
+    buf = 0;
+    if (want < 0) return rc != 0 && rc != 124 && access(out, F_OK) != 0;
+    if (rc != 0) return 0;
+    k = snprintf(cmd, sizeof cmd, "./%s", out);
+    if (k < 0 || k >= (int)sizeof cmd) return 0;
+    ran = cx_run_timeout(cmd, 10, &buf, &n);
+    free(buf);
+    return ran == want;
+}
+
+int main(void) {
+    if (cx_run("mkdir -p out/cxcc-drive", 0, 0) != 0) {
+        printf("FAIL mkdir\n");
+        return 1;
+    }
+    note(drive("gcc", "tests/cxhost_main.cx", "out/cxcc-drive/gcc-host", 42), "gcc cxhost 42");
+    note(drive("clang", "tests/cxhost_main.cx", "out/cxcc-drive/clang-host", 42), "clang cxhost 42");
+    note(drive("gcc", "tests/cxcc_missing.cx", "out/cxcc-drive/gcc-miss", -1), "gcc missing");
+    note(drive("clang", "tests/cxcc_missing.cx", "out/cxcc-drive/clang-miss", -1), "clang missing");
+    note(drive("gcc", "tests/cxcycle/ping.cx", "out/cxcc-drive/gcc-cycle", -1), "gcc cycle");
+    note(drive("clang", "tests/cxcycle/ping.cx", "out/cxcc-drive/clang-cycle", -1), "clang cycle");
+    note(drive("gcc", "tests/cxstd_unknown.cx", "out/cxcc-drive/gcc-std", -1), "gcc std.absent");
+    note(drive("clang", "tests/cxstd_unknown.cx", "out/cxcc-drive/clang-std", -1), "clang std.absent");
+    note(drive("gcc", "tests/cxpriv_bad.cx", "out/cxcc-drive/gcc-bad", -1), "gcc file-local");
+    note(drive("clang", "tests/cxpriv_bad.cx", "out/cxcc-drive/clang-bad", -1), "clang file-local");
+    note(drive("gcc", "tests/cxpriv_ok.cx", "out/cxcc-drive/gcc-ok", 42), "gcc export");
+    note(drive("clang", "tests/cxpriv_ok.cx", "out/cxcc-drive/clang-ok", 42), "clang export");
+    note(drive("gcc", "tests/cxcc_one.cx", "out/cxcc-drive/gcc-one", 5), "gcc one-unit");
+    note(drive("clang", "tests/cxcc_one.cx", "out/cxcc-drive/clang-one", 5), "clang one-unit");
+    note(drive("gcc", "tests/cxcc_shebang.cx", "out/cxcc-drive/gcc-bang", 3), "gcc shebang");
+    note(drive("clang", "tests/cxcc_shebang.cx", "out/cxcc-drive/clang-bang", 3), "clang shebang");
+    printf("CXCC fails=%d\n", fails);
+    return fails ? 1 : 0;
+}

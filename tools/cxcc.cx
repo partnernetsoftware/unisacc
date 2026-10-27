@@ -2,8 +2,11 @@
 /* Host driver behind gcc_cx and clang_cx.
    Blanks a leading #! line, then runs the system compiler with
    -std=c99 -x c -include <repo>/include/cx.h.
-   A unit that contains `#pragma unisa use` is expanded by this repository's
-   unisacc.com -cx-plan. Each unit is compiled with that plan's own includes.
+   Stock gcc and clang ignore `#pragma unisa`. A unit that contains
+   `#pragma unisa use` is expanded by this repository's unisacc.com -cx-plan.
+   Each unit is compiled with that plan's own includes.
+   An undeclared call is an error. Compiled units are reused from
+   out/cxcc-cache when the prelude bytes and the unit bytes match.
    This is ordinary C. It does not grant a checked .cx identity.
    Unix uses fork and execvp. Windows uses posix_spawnp.
    Set CX_ROOT when the repository is not found from the driver path or the
@@ -368,6 +371,148 @@ static int cxcc_linkish(const char *a, int *need) {
     return 0;
 }
 
+static int cxcc_ensure_dir(const char *path) {
+    struct stat st;
+    if (mkdir(path, 0755) == 0) return 0;
+    if (errno == EEXIST && stat(path, &st) == 0 && S_ISDIR(st.st_mode)) return 0;
+    return -1;
+}
+
+static void cxcc_fold(unsigned char acc[32], const void *p, size_t n) {
+    unsigned char one[32], cat[64];
+    cx_sha256(p, n, one);
+    memcpy(cat, acc, 32);
+    memcpy(cat + 32, one, 32);
+    cx_sha256(cat, 64, acc);
+}
+
+static void cxcc_fold_str(unsigned char acc[32], const char *s) {
+    cxcc_fold(acc, s, strlen(s));
+}
+
+static int cxcc_fold_file(unsigned char acc[32], const char *path) {
+    unsigned char *buf = 0;
+    size_t n = 0;
+    int rr = read_cap(path, &buf, &n);
+    if (rr != 0) return -1;
+    cxcc_fold(acc, buf, n);
+    free(buf);
+    return 0;
+}
+
+static void cxcc_hex32(const unsigned char md[32], char out[65]) {
+    static const char *hexd = "0123456789abcdef";
+    int i;
+    for (i = 0; i < 32; i++) {
+        out[i * 2] = hexd[md[i] >> 4];
+        out[i * 2 + 1] = hexd[md[i] & 15];
+    }
+    out[64] = 0;
+}
+
+static char cxcc_cid[160];
+static int cxcc_cid_set;
+
+static int cxcc_compiler_tag(const char *compiler) {
+    const char *env, *p, *q;
+    char tryb[CXCC_PATH];
+    struct stat st;
+    int n, k, clen;
+    clen = (int)strlen(compiler);
+    if (cxcc_cid_set && strncmp(cxcc_cid, compiler, (size_t)clen) == 0 && cxcc_cid[clen] == '\n') return 0;
+    env = getenv("PATH");
+    if (!env) return -1;
+    p = env;
+    while (*p) {
+        q = p;
+        while (*q && *q != ':') q++;
+        n = (int)(q - p);
+        if (n <= 0) k = snprintf(tryb, sizeof tryb, "./%s", compiler);
+        else if (n < (int)sizeof tryb - 80) {
+            memcpy(tryb, p, (size_t)n);
+            tryb[n] = 0;
+            k = snprintf(tryb + n, sizeof tryb - (size_t)n, "/%s", compiler);
+            if (k >= 0) k = n + k;
+        } else k = -1;
+        if (k > 0 && k < (int)sizeof tryb && access(tryb, X_OK) == 0 &&
+            stat(tryb, &st) == 0 && S_ISREG(st.st_mode)) {
+            k = snprintf(cxcc_cid, sizeof cxcc_cid, "%s\n%s\n%ld\n%ld",
+                         compiler, tryb, (long)st.st_mtime, (long)st.st_size);
+            if (k < 0 || k >= (int)sizeof cxcc_cid) { cxcc_cid_set = 0; return -1; }
+            cxcc_cid_set = 1;
+            return 0;
+        }
+        if (*q == 0) break;
+        p = q + 1;
+    }
+    return -1;
+}
+
+static int cxcc_copy_file(const char *from, const char *to) {
+    FILE *in, *out;
+    char buf[8192];
+    char tmp[CXCC_PATH];
+    size_t n;
+    int k;
+    k = snprintf(tmp, sizeof tmp, "%s.tmp", to);
+    if (k < 0 || k >= (int)sizeof tmp) return -1;
+    in = fopen(from, "rb");
+    if (!in) return -1;
+    out = fopen(tmp, "wb");
+    if (!out) { fclose(in); return -1; }
+    while ((n = fread(buf, 1, sizeof buf, in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) {
+            fclose(in); fclose(out); unlink(tmp); return -1;
+        }
+    }
+    if (ferror(in)) { fclose(in); fclose(out); unlink(tmp); return -1; }
+    fclose(in);
+    if (fclose(out) != 0) { unlink(tmp); return -1; }
+    if (rename(tmp, to) != 0) { unlink(tmp); return -1; }
+    return 0;
+}
+
+/* 1: cached object exists. 0: caller compiles, then may store `cached`.
+   -1: cache unavailable. fields[0] is the plan index, fields[1] the source. */
+static int cxcc_cache_open(const char *root, const char *compiler, const char *cxh,
+                           char **cflags, int nc, char **fields, int nf,
+                           const unsigned char *src, size_t sn,
+                           char *cached, size_t cap) {
+    unsigned char acc[32];
+    char hex[65];
+    char dir[CXCC_PATH];
+    struct stat st;
+    int i, k;
+    cached[0] = 0;
+    if (cxcc_compiler_tag(compiler) != 0) return -1;
+    memset(acc, 0, sizeof acc);
+    cxcc_fold_str(acc, cxcc_cid);
+    cxcc_fold_str(acc, "-std=c99");
+    cxcc_fold_str(acc, "-Werror=implicit-function-declaration");
+    for (i = 0; i < nc; i++) cxcc_fold_str(acc, cflags[i]);
+    if (cxcc_fold_file(acc, cxh)) return -1;
+    k = snprintf(dir, sizeof dir, "%s/include/unisa_sha256.h", root);
+    if (k < 0 || k >= (int)sizeof dir || cxcc_fold_file(acc, dir)) return -1;
+    k = snprintf(dir, sizeof dir, "%s/include/unisa_safedel.h", root);
+    if (k < 0 || k >= (int)sizeof dir || cxcc_fold_file(acc, dir)) return -1;
+    cxcc_fold(acc, src, sn);
+    for (i = 2; i < nf; i++) {
+        if (!fields[i][0] || !strcmp(fields[i], "cx.h")) continue;
+        if (cxcc_fold_file(acc, fields[i])) return -1;
+    }
+    cxcc_hex32(acc, hex);
+    k = snprintf(dir, sizeof dir, "%s/out", root);
+    if (k < 0 || k >= (int)sizeof dir || cxcc_ensure_dir(dir)) return -1;
+    k = snprintf(dir, sizeof dir, "%s/out/cxcc-cache", root);
+    if (k < 0 || k >= (int)sizeof dir || cxcc_ensure_dir(dir)) return -1;
+    k = snprintf(dir, sizeof dir, "%s/out/cxcc-cache/%s", root, compiler);
+    if (k < 0 || k >= (int)sizeof dir || cxcc_ensure_dir(dir)) return -1;
+    k = snprintf(cached, cap, "%s/%s.o", dir, hex);
+    if (k < 0 || k >= (int)cap) { cached[0] = 0; return -1; }
+    if (stat(cached, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0) return 1;
+    return 0;
+}
+
 static int cxcc_expand(int argc, char **argv, const char *compiler, const char *cmd,
                        const char *root, const char *cxh, int *src_at, int nsrc) {
     char uni[CXCC_PATH];
@@ -490,71 +635,82 @@ static int cxcc_expand(int argc, char **argv, const char *compiler, const char *
                 return 2;
             }
             blank_shebang(buf, bn);
-            if (write_temp(buf, bn, srcs[nunit], CXCC_TMP)) {
-                fprintf(stderr, "%s: cannot write a temporary copy of %s\n", cmd, fields[1]);
+            {
+                char cached[CXCC_PATH];
+                int cache = cxcc_cache_open(root, compiler, cxh, cflags, nc, fields, nf,
+                                            buf, bn, cached, sizeof cached);
+                int reuse = 0;
+                if (write_temp(buf, bn, srcs[nunit], CXCC_TMP)) {
+                    fprintf(stderr, "%s: cannot write a temporary copy of %s\n", cmd, fields[1]);
+                    free(buf);
+                    cxcc_unlink_paths(srcs, nunit);
+                    cxcc_unlink_paths(objs, nunit);
+                    free(plan);
+                    return 2;
+                }
                 free(buf);
-                cxcc_unlink_paths(srcs, nunit);
-                cxcc_unlink_paths(objs, nunit);
-                free(plan);
-                return 2;
-            }
-            free(buf);
-            kn = snprintf(objs[nunit], CXCC_TMP, "%s.o", srcs[nunit]);
-            if (kn < 0 || kn >= CXCC_TMP) {
-                fprintf(stderr, "%s: temporary path too long\n", cmd);
-                cxcc_unlink_paths(srcs, nunit + 1);
-                cxcc_unlink_paths(objs, nunit);
-                free(plan);
-                return 2;
-            }
-            n = 0;
-            av[n++] = (char *)compiler;
-            av[n++] = "-std=c99";
-            av[n++] = "-include";
-            av[n++] = (char *)cxh;
-            for (k = 0; k < nc; k++) {
-                if (n + 8 >= CXCC_PLANARGS) {
-                    fprintf(stderr, "%s: too many arguments\n", cmd);
+                kn = snprintf(objs[nunit], CXCC_TMP, "%s.o", srcs[nunit]);
+                if (kn < 0 || kn >= CXCC_TMP) {
+                    fprintf(stderr, "%s: temporary path too long\n", cmd);
                     cxcc_unlink_paths(srcs, nunit + 1);
-                    cxcc_unlink_paths(objs, nunit + 1);
+                    cxcc_unlink_paths(objs, nunit);
                     free(plan);
                     return 2;
                 }
-                av[n++] = cflags[k];
-            }
-            for (k = 2; k < nf; k++) {
-                if (!fields[k][0] || !strcmp(fields[k], "cx.h")) continue;
-                if (n + 8 >= CXCC_PLANARGS) {
-                    fprintf(stderr, "%s: too many arguments\n", cmd);
-                    cxcc_unlink_paths(srcs, nunit + 1);
-                    cxcc_unlink_paths(objs, nunit + 1);
-                    free(plan);
-                    return 2;
+                if (cache == 1 && cxcc_copy_file(cached, objs[nunit]) == 0) reuse = 1;
+                if (!reuse) {
+                    n = 0;
+                    av[n++] = (char *)compiler;
+                    av[n++] = "-std=c99";
+                    av[n++] = "-Werror=implicit-function-declaration";
+                    av[n++] = "-include";
+                    av[n++] = (char *)cxh;
+                    for (k = 0; k < nc; k++) {
+                        if (n + 8 >= CXCC_PLANARGS) {
+                            fprintf(stderr, "%s: too many arguments\n", cmd);
+                            cxcc_unlink_paths(srcs, nunit + 1);
+                            cxcc_unlink_paths(objs, nunit + 1);
+                            free(plan);
+                            return 2;
+                        }
+                        av[n++] = cflags[k];
+                    }
+                    for (k = 2; k < nf; k++) {
+                        if (!fields[k][0] || !strcmp(fields[k], "cx.h")) continue;
+                        if (n + 8 >= CXCC_PLANARGS) {
+                            fprintf(stderr, "%s: too many arguments\n", cmd);
+                            cxcc_unlink_paths(srcs, nunit + 1);
+                            cxcc_unlink_paths(objs, nunit + 1);
+                            free(plan);
+                            return 2;
+                        }
+                        av[n++] = "-include";
+                        av[n++] = fields[k];
+                    }
+                    if (n + 8 >= CXCC_PLANARGS) {
+                        fprintf(stderr, "%s: too many arguments\n", cmd);
+                        cxcc_unlink_paths(srcs, nunit + 1);
+                        cxcc_unlink_paths(objs, nunit + 1);
+                        free(plan);
+                        return 2;
+                    }
+                    av[n++] = "-c";
+                    av[n++] = "-x";
+                    av[n++] = "c";
+                    av[n++] = srcs[nunit];
+                    av[n++] = "-o";
+                    av[n++] = objs[nunit];
+                    av[n] = 0;
+                    rc = cxcc_exec(cmd, compiler, av);
+                    if (rc != 0) {
+                        fprintf(stderr, "%s: compile failed: %s\n", cmd, fields[1]);
+                        cxcc_unlink_paths(srcs, nunit + 1);
+                        cxcc_unlink_paths(objs, nunit + 1);
+                        free(plan);
+                        return rc;
+                    }
+                    if (cache == 0 && cached[0]) cxcc_copy_file(objs[nunit], cached);
                 }
-                av[n++] = "-include";
-                av[n++] = fields[k];
-            }
-            if (n + 8 >= CXCC_PLANARGS) {
-                fprintf(stderr, "%s: too many arguments\n", cmd);
-                cxcc_unlink_paths(srcs, nunit + 1);
-                cxcc_unlink_paths(objs, nunit + 1);
-                free(plan);
-                return 2;
-            }
-            av[n++] = "-c";
-            av[n++] = "-x";
-            av[n++] = "c";
-            av[n++] = srcs[nunit];
-            av[n++] = "-o";
-            av[n++] = objs[nunit];
-            av[n] = 0;
-            rc = cxcc_exec(cmd, compiler, av);
-            if (rc != 0) {
-                fprintf(stderr, "%s: compile failed: %s\n", cmd, fields[1]);
-                cxcc_unlink_paths(srcs, nunit + 1);
-                cxcc_unlink_paths(objs, nunit + 1);
-                free(plan);
-                return rc;
             }
             nunit++;
         }
@@ -716,6 +872,7 @@ static int cxcc_drive_os(int argc, char **argv, const char *compiler, const char
     n = 0;
     av[n++] = (char *)compiler;
     av[n++] = "-std=c99";
+    av[n++] = "-Werror=implicit-function-declaration";
     av[n++] = "-include";
     av[n++] = cxh;
     skip = 0;
