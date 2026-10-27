@@ -3030,9 +3030,11 @@ int lex(void) {
     int i; int j; int a; int key[4]; int kind; int st;
     int best; int bl; int k; int p; int L;
     int strpfx;                            /* the `L` of an `L"..."`, or -1 */
+    int charpfx;
     i = 0;
     ntok = 0; nctorm = 0;
     strpfx = 0 - 1;
+    charpfx = 0 - 1;
     while (1) {
         /* every branch below appends at most one token; none checked */
         if (ntok >= maxtok - 2) { printf("too many tokens\n"); return 0 - 1; }
@@ -3101,15 +3103,13 @@ int lex(void) {
                 | srcis(i, j - i, "__restrict__") | srcis(i, j - i, "__const")
                 | srcis(i, j - i, "__volatile__")
                 | srcis(i, j - i, "__signed__")) { i = j; continue; }
-            /* a wide CHARACTER constant is an int, so drop the prefix.  A
-               wide STRING keeps it -- the token is still a string, and its
-               TEXT is the whole `L"..."`, which is what the Python lexer
-               emits and what lexdiff compares. */
+            /* Preserve the prefix in both literal spellings and source offsets.
+               Type/value conversion belongs to the consumer, not this lexer. */
             if (at(j) == 39) {
                 if (j - i == 1) { if (at(i) == 76 | at(i) == 117 | at(i) == 85) {
-                    i = j; continue; } }
+                    charpfx = i; i = j; continue; } }
                 if (j - i == 2) { if (at(i) == 117) { if (at(i+1) == 56) {
-                    i = j; continue; } } }
+                    charpfx = i; i = j; continue; } } }
             }
             if (at(j) == 34) {
                 int wide;
@@ -3185,7 +3185,10 @@ int lex(void) {
             }
             if (at(j) < 0) { err_at(i, "missing terminating ' character");
                 nerr = nerr + 1; return 0 - 1; }
-            tkind[ntok] = 3; tpos[ntok] = i; tlen[ntok] = j + 1 - i;
+            tkind[ntok] = 3;
+            if (charpfx >= 0) tpos[ntok] = charpfx;
+            else tpos[ntok] = i;
+            tlen[ntok] = j + 1 - tpos[ntok]; charpfx = 0 - 1;
             ntok = ntok + 1;
             i = j + 1;
         } else {

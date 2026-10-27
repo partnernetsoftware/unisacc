@@ -556,6 +556,14 @@ int eframe(int d, int t, us_i64 off) {
    may carry a u/U/l/L suffix.  Four copies of `v = v * 10 + (c - 48)` got all
    three wrong -- `0xff` came out 7794, `010` came out 10, and `5L` came out
    78, because 'L' - '0' is 28. */
+int char_quote_offset(int t) {
+    int p; int n; int c;
+    p = tpos[t]; n = tlen[t]; c = src[p] & 255;
+    if (n > 1 && c == 39) return 0;
+    if (n > 2 && (c == 76 || c == 117 || c == 85) && (src[p + 1] & 255) == 39) return 1;
+    if (n > 3 && c == 117 && (src[p + 1] & 255) == 56 && (src[p + 2] & 255) == 39) return 2;
+    return 0 - 1;
+}
 us_i64 numval(int t) {
     int k; int n; us_i64 v; int c; int base; int d;
     k = 0; n = tlen[t]; v = 0; base = 10;
@@ -563,10 +571,13 @@ us_i64 numval(int t) {
        evaluated: the decimal loop read `'b'` as quote-minus-'0' and so on,
        and nothing noticed until <stdio.h> was compiled here and every
        `putchar('c')` wrote a NUL. */
-    if ((src[tpos[t]] & 255) == 39) {
-        c = src[tpos[t] + 1] & 255;
+    d = char_quote_offset(t);
+    if (d >= 0) {
+        /* Skip a spelling prefix without mutating token storage. */
+        int start; start = tpos[t] + d;
+        c = src[start + 1] & 255;
         if (c != 92) return c;
-        c = src[tpos[t] + 2] & 255;
+        c = src[start + 2] & 255;
         if (c == 110) return 10;                  /* \n */
         if (c == 116) return 9;                   /* \t */
         if (c == 114) return 13;                  /* \r */
@@ -575,7 +586,7 @@ us_i64 numval(int t) {
         if (c == 98) return 8;                    /* \b */
         if (c == 97) return 7;                    /* \a */
         if (c == 120) {                           /* \xHH */
-            k = 3; v = 0;
+            k = d + 3; v = 0;
             while (k < n - 1) {
                 c = src[tpos[t] + k] & 255; d = 0 - 1;
                 if (isdi(c)) d = c - 48;
@@ -587,7 +598,7 @@ us_i64 numval(int t) {
             return v;
         }
         if (isdi(c)) {                            /* \ooo */
-            k = 2; v = 0;
+            k = d + 2; v = 0;
             while (k < n - 1) {
                 c = src[tpos[t] + k] & 255;
                 if (c < 48) break;
@@ -1807,7 +1818,7 @@ int primary(void) {
             if ((src[tpos[tp] + k] & 255) == 76) cursize = 8;
             k = k + 1;
         }
-        if ((src[tpos[tp]] & 255) == 39) cursize = 4;      /* 'x' is an int */
+        if (char_quote_offset(tp) >= 0) cursize = 4;      /* character constants, including L'x' */
         /* C99 6.4.4.1: a HEX or OCTAL constant takes the first of int,
            unsigned int, long, unsigned long that holds it -- so 0xffffffff
            is an unsigned int, and `s == 0xffffffff` compares in 32 bits. */
@@ -1823,7 +1834,7 @@ int primary(void) {
             if (v < 0) { cursize = 8; curuns = 1; }
         } }
         /* Character contents are not integer suffixes: 'U' is an int. */
-        if ((src[tpos[tp]] & 255) != 39) {
+        if (char_quote_offset(tp) < 0) {
             k = 0;
             while (k < tlen[tp]) {
                 if ((src[tpos[tp] + k] & 255) == 117) curuns = 1;   /* u */
@@ -3059,7 +3070,7 @@ int fltlit(int t) {
         }
         return 0;
     }
-    if ((src[tpos[t]] & 255) == 39) return 0;          /* a character constant */
+    if (char_quote_offset(t) >= 0) return 0;          /* a character constant */
     while (k < tlen[t]) {
         c = src[tpos[t] + k] & 255;
         if (c == 46 || c == 101 || c == 69) {
