@@ -147,25 +147,21 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 <a id="work-tree"></a>
 ### 思维树
 
-**2026-10-27 cc 收口计划（唯一现行调度；主人令停 fan-out：串行推进，cc 亲自执行，同一时刻至多一个代理且只做重构造）**
+**2026-10-27 cdx 主刀计划（主人本轮改派；重构造仍串行，互不抢文件的轻切片由 cc／Codex 辅助）**
 
 完成门（`plans/v0.0.43.md:42`）：19 条 NOT_READY 宽行、完整 N22、五外宿主同候选实证全部闭合后，`--all` 才可 rc0。
 
 **实测账（`out/c43-cc-plan-matrix-counts.txt`）：** 19 行矩阵共 822 个必选格。Root7a 上已覆盖约 257 个；另有约 55 个已登记、待矩阵回填。本机仍缺 421 个，需改产品 38 个，需外宿主约 98 个（含 hosts 行 15 个），阻塞 19 个，声明依赖 10 个。N22 现状：E7 已由产品内汇编合同闭合（`0764fa8861`）；E6 已有成员交叉核对；E2–E5、E9–E11 属可声明的宿主/工具依赖；E8 的权重仍由 Python 发射器生成；E12 即外宿主。
 
-**P0 主人裁定（阻塞收口，先定）：**
-- **D1 外宿主路线**：(a) 授权 push 并派发 CI 产出同候选 producer 产物，在五宿主实跑；或 (b) 提供真实宿主/SSH。未定则 0.0.43 不可完成。
-- **D2 格数门槛**：822 格由 cc 本周写定，未经主人确认。建议一次审定，只保留声明合同与 C99 强制项为 0.0.43 必选，其余标 `required=no` 移入 0.0.44。
-- **D3 N22 口径**：建议 E2–E5、E9–E11 在 0.0.43 记 DECLARED_DEPENDENCY，消除留给 0.1.x 退出条件（§5.0）；E6/E8 须以源构造证据闭合。
-- **D4 词法裁定**：空字符常量 `''`、字符常量出为 num、`1e` 拆分，三者是否属缺陷。
+**P0 完成边界与待决项：** 外宿主需要同候选真实工件及五宿主原生执行；当前不得 push、上传或派发，授权或真实宿主通道未到前只做本地准备。822 格是当前矩阵账，未经主人裁定不删必选格、不把依赖声明当作 N22 实证。词法三项按 C99 与产品实际输出继续核，具名缺陷不改贴 PASS。
 
-**P1 纪元1候选（进行中，唯一后台代理）：** A2 已封源，SID `df8f29fd`。A3 107 作业 → A4 PC → A5 GEN → A6 kind2 准入加开发安装（`out/c43-cc-epoch1-build-01.md`）。
+**P1 纪元1候选（cc 独占重构造切片）：** A2 已封源，SID `df8f29fd`。A3 的 107 作业收据已落齐；cc 继续 A4 PC → A5 GEN → A6 kind2 准入加开发安装，每段核同一 SID，原失败/UNKNOWN 不升格（`out/c43-cc-epoch1-build-01.md`）。cdx 不抢该 context／PC／GEN／安装闸。
 
-**P2 纪元2产品修复（P1 后，cc 亲自做，一次重建）：** 38 个需改产品格，加已知缺陷：E2 五项、E1 errno、`?:` 返回 struct、A-40 三诊断、自引用 struct 措辞、分相计时戳。修完重建一次候选。
+**P2 纪元2产品修复（P1 后由 cdx 串行收源、重建）：** 38 个需改产品格，加已知缺陷：E2 五项、E1 errno、`?:` 返回 struct、A-40 三诊断、自引用 struct 措辞、分相计时戳。`lower` 草稿中的 `sizeof abi[nabi].f[i]` 得到 8 而声明元素为 24；单层 `sizeof` 得 24，嵌套动态索引的独立写法被解析器拒，需先缩成有效最小复现再定源码修法。`lower` 的 ENOTDIR/EACCES 与 ENOENT 诊断未分开，输入域 29 断言中 2 红；修源码后必须重测，不删红项。
 
-**P3 本机格逐行闭合（串行，一次一行）：** 按“距闭合最近”排序：candidate 6、bootstrap 10、optimization 14、formats 16、phase-timing 11、e4 17、prune 19、properties 21、negative 22、ri 26、lower 28、elf 28、interfaces 28、e1 29、resources 31、library 34、e3 36、e2 45。每行做到本机格全覆盖并回填矩阵后再开下一行。所有测试只走 .cx 与产品。
+**P3 本机格逐行闭合（独立轻切片可并行，父行仍按完整域判）：** `9a44ce9869` 为 lower 登记四个 SOURCE 批，Root7a 的正式 run-batch 分别 51/0、778/0、1516/0、115/0，A-41 的 762 个本机布局输入已穷举；ABI 可观察格 144/0 但六项无 tape 拼写记 UNVERIFIED，输入拒绝 29/2 保持红，六目标／五外宿主／完整 lower 父行仍开。新候选必须重跑；其余宽行按矩阵逐格收据推进，不以局部绿替代完整域。
 
-**P4 `--all` 跨命令收据（B1b）：** start → run → finish，run 相由执行器自身 waitpid 并封存 bound rc；外层 `bound 58` 即硬限 60 秒。代理已停，WIP 保存在 `out/c43-cc-all-waves-02/`，P3 期间由 cc 完成。
+**P4 `--all` 跨命令收据（B1b）：** `dabc5a0efb` 已提交 start → run → finish；run 相由执行器自身 waitpid 封存 bound rc，另钉末尾 RUN SHA。外层 `bound 58` 即硬限 60 秒；隔离根 12/12 控制、smoke PASS，聚合仍 rc3（132 批未跑、19 宽行未解）。尚须在最终同候选上执行完整分波，不能缓存 PASS。
 
 **P5 本机全量：** 在最终候选上分波跑完全部批次，矩阵中本机格全部 COVERED_LOCAL。
 
@@ -173,7 +169,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 **P7 发布：** 签名、Draft、Latest、公开另需授权，未授权不动。
 
-**已提交的 B/C 成果：** B1 `796120b74d`、`3cf3da0708`；B2/E7 `0764fa8861`；B3 `a13eddbc40`；S3 `757d3b59cd`；S5 `cdd9c99a1e`；门修 `60da553502`。待办债：L1/S7 草稿（未提交，未验证），p3-library-members 去 GCC（B4）。
+**已提交的本轮辅助成果：** 外宿主 CI 草稿把 producer run／artifact 的 head SHA 绑到验证提交（`b40487eadd`，静态核，未派发）；B1b `dabc5a0efb`；lower 四批 `9a44ce9869`。先前 B1/E7/C1/S3/S5 收据保留。待办债：L1 草稿使用宿主 GCC，需改产品自身 `.cx`；lower 的 ABI 六项、输入 errno 与五目标路线仍未关。
 
 **2026-10-27 cc 节点·宽合同已全量规格化：** 19 条 NOT_READY 宽行此前只有一行 oracle 文本、无法诚实关闭；现每行有 `tests/<row>-domain-matrix.tsv` 逐格规格（统一列 `host cell required status evidence requirement citation oracle note`；COVERED_LOCAL 仅限 Root7a 上实际 run-batch PASS 且恰断言该组，新候选须全部重跑）。提交 `e4d7a95bb8`（negative/optimization/formats/phase-timing/bootstrap/candidate 231 格）、`175a9642ff`（ri/resources/library/properties 212 格）、`97a3f4472a`（七流＋interfaces 365 格）；报告 `out/c43-cc-domain-specs-{contract,runtime,streams}-01.md` 给出约 70 个批量级切片。同提交修共享运行器：`np_run` 子进程自成进程组、超时杀整组、有无输出均计 1ms 拍；`run-batch` 自身超时记 `status=UNKNOWN` 退 3（非 PASS、需重跑），smoke/qprefix 复跑 PASS。纪元裁定：本纪元封源点＝流控制表 F1/F3 修复落地；A-40 三诊断缺口（触及 `exec/parse2`/`exec/pp` 位置传递）与产品内分相计时戳排入下一纪元，不挡 SID 重建。`@relocs` 槽值按参考 `relocate` 维持不设值域（C 允许 one-past-end），F3 只拒缺头/空码/静态 `@sym` 与指令数据引用越界。外宿主（push/派发/产物暴露）待主人授权。
 
@@ -334,7 +330,7 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 <a id="memory-palace"></a>
 ### 记忆宫殿
 
-**本轮入图（2026-10-27，cc 主刀）：** HEAD 源码 SID 已因库修复 `5fd85c0130` 变为 `9147bd13…`，Root7a 未重建；SID4fe 收据为上一基线。M28/M30/M31 只由 `libunisacc` 消费，正式批 `p3-library-members` 27/0 并有修复前负控；APE 无此三路由。19 宽行、完整 N22、五外宿主仍开，`--all` rc3。
+**本轮入图（2026-10-27，cdx 主刀）：** cc 独占候选 A3→A6，A3 的 107 作业收据已落齐；产品仍是旧 Root7a，纪元1 SID `df8f29fd…` 尚未装成新候选。Codex 辅助已交外宿主草稿 head-SHA 绑定 `b40487eadd` 与跨命令 B1b 收据 `dabc5a0efb`，未派发 CI。cdx 提交 lower 四个 Root7a 正式批 `9a44ce9869`：51/0、778/0、1516/0、115/0；ABI 六项 UNVERIFIED、输入 errno 29/2 红，完整 lower 父行和其余 18 宽行均未关。完整 N22、五外宿主仍开，`--all` rc3。
 
 **现行入口：** 下一表第一行是当前身份与行动；其余旧行保留来源历史，凡与第一行冲突的“当前”字样均已失效。
 
