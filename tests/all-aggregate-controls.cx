@@ -1,0 +1,71 @@
+/* Negative controls for tests/all-aggregate.cx (cxlib.allsession).
+ *   tools/bound 55 sh ./unisacc.com tests/all-aggregate-controls.cx -- ROOT SESSION NEW_OUT PASS_ID MISSING_ID TIMEOUT_ID
+ * SESSION is an actual tools/all-waves.cx session in which PASS_ID has a PASS receipt, TIMEOUT_ID has
+ * only a watchdog-deadline UNKNOWN receipt and MISSING_ID was never run.  Every control works on its
+ * own copy below NEW_OUT (a new directory below ROOT/out); the source session is only read.  Each copy
+ * is aggregated in-process and must be refused or downgraded by name:
+ *   baseline            unmodified copy: PASS_ID PASS, no REFUSE/RECEIPT_REFUSE, rc1 (not every batch ran)
+ *   missing-batch       MISSING_ID reported MISSING by name, rc1
+ *   timeout-receipt     TIMEOUT_ID reported UNKNOWN reason=watchdog-deadline (never PASS), rc1
+ *   tampered-stdout     one byte of PASS_ID's saved stdout flipped -> RECEIPT_REFUSE receipt-stdout-sha-mismatch
+ *   foreign-candidate   PASS_ID's receipt rewritten to another candidate SHA, manifest re-hashed and
+ *                       re-chained consistently -> RECEIPT_REFUSE receipt-candidate-mismatch
+ *   receipt-removed     PASS_ID's RECEIPT line deleted and re-chained -> REFUSE session-manifest (finish receipts)
+ *   changed-registry    session registry SHA rewritten and re-chained -> REFUSE session-registry-mismatch
+ *   changed-candidate   session candidate SHA rewritten and re-chained -> REFUSE session-candidate-mismatch
+ * PASS of this tool means the aggregator refused every forgery; it is never a batch or release PASS. */
+#pragma unisa use cxlib.allsession
+#pragma unisa use cxlib.netpack
+static char root[4096],source[4096],out[4096],why[1700];
+static const char *pass_id,*missing_id,*timeout_id;
+static int assertions,failed;
+static void die(const char *s,const char *d){fprintf(stderr,"all-aggregate-controls: REFUSE %s %s\n",s,d?d:"-");exit(2);}
+static void join(char *o,size_t cap,const char *a,const char *b){int n=snprintf(o,cap,"%s/%s",a,b);if(n<0||(size_t)n>=cap)die("path-bound",b);}
+static void put(const char *p,const char *s,size_t n,int fresh){int fd=open(p,O_WRONLY|O_CREAT|O_CLOEXEC|O_NOFOLLOW|(fresh?O_EXCL:O_TRUNC),0600);if(fd<0)die("write-open",p);size_t at=0;while(at<n){ssize_t z=write(fd,s+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0)die("write",p);at+=(size_t)z;}if(close(fd))die("close",p);}
+static void copy_tree(const char *src,const char *dst){struct stat st;if(lstat(src,&st))die("copy-stat",src);
+ if(S_ISLNK(st.st_mode)){char t[4096];long k=readlink(src,t,sizeof t-1);if(k<0)die("readlink",src);t[k]=0;if(symlink(t,dst))die("symlink",dst);return;}
+ if(S_ISREG(st.st_mode)){size_t n;char *s=as_read(src,0,&n,why,sizeof why);if(!s)die("copy-read",why);put(dst,s,n,1);free(s);return;}
+ if(!S_ISDIR(st.st_mode))die("copy-special",src);if(mkdir(dst,0700))die("copy-mkdir",dst);DIR *d=opendir(src);if(!d)die("opendir",src);struct dirent *e;
+ while((e=readdir(d))){if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;char a[4400],b[4400];join(a,sizeof a,src,e->d_name);join(b,sizeof b,dst,e->d_name);copy_tree(a,b);}closedir(d);}
+static char *slurp(const char *p,size_t *n){char *s=as_read(p,0,n,why,sizeof why);if(!s)die("read",why);return s;}
+/* replace the one occurrence of OLD in file P by NEW */
+static void replace_once(const char *p,const char *old,const char *nw){size_t n;char *s=slurp(p,&n);if(np_count(s,n,old,strlen(old))!=1)die("replace-not-unique",old);np_buf b={0,0,0};np_replace(s,n,old,strlen(old),nw,strlen(nw),1,&b);put(p,b.p,b.n,0);free(s);free(b.p);}
+/* drop the line that starts with PREFIX (exactly one) */
+static void drop_line(const char *p,const char *prefix){size_t n,at=0;char *s=slurp(p,&n);np_buf b={0,0,0};int hit=0;while(at<n){size_t end=at;while(end<n&&s[end]!='\n')end++;if(end-at>=strlen(prefix)&&!memcmp(s+at,prefix,strlen(prefix)))hit++;else np_put(&b,s+at,end-at+1);at=end+1;}if(hit!=1)die("drop-line",prefix);put(p,b.p,b.n,0);free(s);free(b.p);}
+/* recompute every BLOCK prev= so a forgery is internally consistent and only the targeted check can see it */
+static void rechain(const char *session){char p[4400];join(p,sizeof p,session,"session.tsv");size_t n,at=0;char *s=slurp(p,&n);np_buf b={0,0,0};
+ while(at<n){size_t end=at;while(end<n&&s[end]!='\n')end++;if(end-at>6&&!memcmp(s+at,"BLOCK\t",6)){const char *pv=0;for(size_t i=at;i+6<=end;i++)if(!memcmp(s+i,"\tprev=",6))pv=s+i;if(!pv)die("rechain",0);char h[65];cx_sha256_hex(b.p?b.p:"",b.n,h);np_put(&b,s+at,(size_t)(pv-(s+at)));np_puts(&b,"\tprev=");np_puts(&b,h);np_puts(&b,"\n");}else np_put(&b,s+at,end-at+1);at=end+1;}
+ put(p,b.p,b.n,0);free(s);free(b.p);}
+static void receipt_paths(const char *session,const char *id,char rel[600],char sha[65]){char p[4400];join(p,sizeof p,session,"session.tsv");size_t n;char *s=slurp(p,&n);char pre[200];snprintf(pre,sizeof pre,"RECEIPT\t%s\t",id);char *line=0;size_t at=0;int c=0;
+ while(at<n){size_t end=at;while(end<n&&s[end]!='\n')end++;if(end-at>strlen(pre)&&!memcmp(s+at,pre,strlen(pre))){c++;line=s+at;s[end]=0;}at=end+1;}
+ if(c!=1)die("receipt-line-count",id);char *f=line+strlen(pre),*t=strchr(f,'\t');if(!t||(size_t)(t-f)>=600)die("receipt-line",id);memcpy(rel,f,(size_t)(t-f));rel[t-f]=0;char *sh=strstr(t,"\tsha=");if(!sh)die("receipt-sha",id);memcpy(sha,sh+5,64);sha[64]=0;free(s);}
+static int aggregate(const char *session,const char *name,char **text,size_t *tn){char log[4400],leaf[200];snprintf(leaf,sizeof leaf,"%s.aggregate.log",name);join(log,sizeof log,out,leaf);fflush(stdout);int saved=dup(1),fd=open(log,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);if(saved<0||fd<0||dup2(fd,1)<0)die("redirect",log);close(fd);
+ int rc=as_aggregate(root,session);fflush(stdout);if(dup2(saved,1)<0)die("restore-stdout",0);close(saved);*text=slurp(log,tn);return rc;}
+static int has_line(const char *s,size_t n,const char *prefix){size_t at=0,pn=strlen(prefix);while(at<n){size_t end=at;while(end<n&&s[end]!='\n')end++;if(end-at>=pn&&!memcmp(s+at,prefix,pn))return 1;at=end+1;}return 0;}
+static void expect(const char *name,int ok,const char *what,int rc){assertions++;if(!ok)failed++;printf("CONTROL\t%s\t%s\texpected=%s\taggregate_rc=%d\n",ok?"PASS":"FAIL",name,what,rc);}
+static void fresh_copy(const char *name,char dst[4400]){join(dst,4400,out,name);copy_tree(source,dst);}
+int main(int argc,char **argv){
+ if(argc!=7)die("usage","ROOT SESSION NEW_OUT PASS_ID MISSING_ID TIMEOUT_ID");
+ if(argv[1][0]!='/'||!realpath(argv[1],root)||strcmp(root,argv[1])||argv[2][0]!='/'||!realpath(argv[2],source)||strcmp(source,argv[2]))die("canonical-root-session",0);
+ if(argv[3][0]!='/'||strlen(argv[3])>=sizeof out)die("out-absolute",argv[3]);strcpy(out,argv[3]);if(mkdir(out,0700))die("new-out-required",out);char co[4096],ob[4400],oc[4096];join(ob,sizeof ob,root,"out");if(!realpath(out,co)||strcmp(co,out)||!realpath(ob,oc)||strncmp(out,oc,strlen(oc))||out[strlen(oc)]!='/')die("out-below-ROOT/out",out);
+ pass_id=argv[4];missing_id=argv[5];timeout_id=argv[6];char d[4400],line[400],*t;size_t tn;int rc;
+ fresh_copy("baseline",d);rc=aggregate(d,"baseline",&t,&tn);snprintf(line,sizeof line,"BATCH\t%s\tPASS\t",pass_id);
+ expect("baseline",rc==1&&has_line(t,tn,line)&&!has_line(t,tn,"REFUSE\t")&&!has_line(t,tn,"RECEIPT_REFUSE\t")&&has_line(t,tn,"AGGREGATE\tNOT_QUALIFIED\t"),line,rc);
+ snprintf(line,sizeof line,"BATCH\t%s\tMISSING\t",missing_id);expect("missing-batch",rc==1&&has_line(t,tn,line),line,rc);
+ snprintf(line,sizeof line,"BATCH\t%s\tUNKNOWN\t",timeout_id);char why_line[400];snprintf(why_line,sizeof why_line,"RECEIPT\t%s\tUNKNOWN\t",timeout_id);
+ expect("timeout-receipt",rc==1&&has_line(t,tn,line)&&has_line(t,tn,why_line)&&strstr(t,"reason=watchdog-deadline")!=0,line,rc);free(t);
+ {char rel[600],sha[65],p[4400],leafp[700];fresh_copy("tampered-stdout",d);receipt_paths(d,pass_id,rel,sha);strcpy(leafp,rel);char *slash=strrchr(leafp,'/');snprintf(slash+1,sizeof leafp-(size_t)(slash+1-leafp),"%s.stdout",pass_id);join(p,sizeof p,d,leafp);size_t n;char *s=slurp(p,&n);if(!n)die("empty-stdout",p);s[0]^=1;put(p,s,n,0);free(s);
+  rc=aggregate(d,"tampered-stdout",&t,&tn);snprintf(line,sizeof line,"RECEIPT_REFUSE\t%s\treceipt-stdout-sha-mismatch\t",pass_id);expect("tampered-stdout",rc==1&&has_line(t,tn,line),line,rc);free(t);}
+ {char rel[600],sha[65],p[4400],m[4400],h[65],cand[65],foreign[65];fresh_copy("foreign-candidate",d);receipt_paths(d,pass_id,rel,sha);join(p,sizeof p,d,rel);join(m,sizeof m,d,"session.tsv");
+  as_manifest man;if(as_load(d,&man,why,sizeof why))die("manifest",why);strcpy(cand,man.ident.candidate);as_free(&man);cx_sha256_hex("foreign-candidate",17,foreign);
+  char ob1[100],nb1[100];snprintf(ob1,sizeof ob1,"candidate_before\t%s\n",cand);snprintf(nb1,sizeof nb1,"candidate_before\t%s\n",foreign);replace_once(p,ob1,nb1);snprintf(ob1,sizeof ob1,"candidate_after\t%s\n",cand);snprintf(nb1,sizeof nb1,"candidate_after\t%s\n",foreign);replace_once(p,ob1,nb1);
+  if(as_sha_file(p,0,h,0,why,sizeof why))die("receipt-hash",why);char os[80],ns[80];snprintf(os,sizeof os,"sha=%s",sha);snprintf(ns,sizeof ns,"sha=%s",h);replace_once(m,os,ns);rechain(d);
+  rc=aggregate(d,"foreign-candidate",&t,&tn);snprintf(line,sizeof line,"RECEIPT_REFUSE\t%s\treceipt-candidate-mismatch\t",pass_id);expect("foreign-candidate",rc==1&&has_line(t,tn,line)&&!strstr(t,"receipt-sha-mismatch"),line,rc);free(t);}
+ {char m[4400],pre[200];fresh_copy("receipt-removed",d);join(m,sizeof m,d,"session.tsv");snprintf(pre,sizeof pre,"RECEIPT\t%s\t",pass_id);drop_line(m,pre);rechain(d);
+  rc=aggregate(d,"receipt-removed",&t,&tn);expect("receipt-removed",rc==2&&has_line(t,tn,"REFUSE\tsession-manifest\tmanifest-finish-receipts\t"),"REFUSE\tsession-manifest\tmanifest-finish-receipts",rc);free(t);}
+ {char m[4400];fresh_copy("changed-registry",d);join(m,sizeof m,d,"session.tsv");as_manifest man;if(as_load(d,&man,why,sizeof why))die("manifest",why);char o[100],n2[100],f[65];cx_sha256_hex("changed-registry",16,f);snprintf(o,sizeof o,"registry_sha\t%s\n",man.ident.registry);snprintf(n2,sizeof n2,"registry_sha\t%s\n",f);as_free(&man);replace_once(m,o,n2);rechain(d);
+  rc=aggregate(d,"changed-registry",&t,&tn);expect("changed-registry",rc==2&&has_line(t,tn,"REFUSE\tsession-registry-mismatch\t"),"REFUSE\tsession-registry-mismatch",rc);free(t);}
+ {char m[4400];fresh_copy("changed-candidate",d);join(m,sizeof m,d,"session.tsv");as_manifest man;if(as_load(d,&man,why,sizeof why))die("manifest",why);char o[100],n2[100],f[65];cx_sha256_hex("changed-candidate",17,f);snprintf(o,sizeof o,"candidate_sha\t%s\n",man.ident.candidate);snprintf(n2,sizeof n2,"candidate_sha\t%s\n",f);as_free(&man);replace_once(m,o,n2);rechain(d);
+  rc=aggregate(d,"changed-candidate",&t,&tn);expect("changed-candidate",rc==2&&has_line(t,tn,"REFUSE\tsession-candidate-mismatch\t"),"REFUSE\tsession-candidate-mismatch",rc);free(t);}
+ printf("CONTROLS\tassertions=%d\tfailed=%d\tscope=aggregator-refusals-only-not-a-batch-or-release-pass\n",assertions,failed);return failed?1:0;
+}
