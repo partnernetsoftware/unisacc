@@ -52,8 +52,12 @@ to their own frame refusal):
   `reject: not covered: truncated token dump`.
 
 The USLATTR1 frame's own length fields are validated by the C adapter that
-removes the frame, not by E3 (that adapter does not yet compare the payload
-length field).
+removes the frame, not by E3. After the 16-byte header it requires exactly
+`count * 5` record bytes plus the declared payload byte length; an inconsistent
+count/extent or payload length is refused as `run: malformed USLATTR1 side-car`
+with status 2 and no output. The single-stream adapter separately refuses a
+truncated header (recognized magic but fewer than 16 bytes) as
+`run: invalid attribute frame`, also with status 2 and no output.
 
 ## target.text (lower -> elf input)
 

@@ -151,6 +151,8 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 **当前分工与下一动作：** cdx保持产品源码冻结，cc独占fresh out/c43-da4e-fixedpoint-*内的新根context/107/PC/两GEN/kind2/selfhost构造，不安装或写共享源。Codex辅助只读审剩余域并在out整理既有interfaces草稿。cdx已修kernel-route三处分号/else解析回归，三路径继承的有界改写与修复差分分别保存在out/c43-da4e-kernel-route-repair-01/；尚未实跑/提交，不授PASS，待重活位空出验证。剩余36个需产品格中15个已有源修复，先验证E3/ELF边界，避免为旧材料重复改源/重建。
 
+**边界测试待验（2026-10-28）：** 已审入既有interfaces草稿修订：七流当前pin、由独立参考规则手推的592B Tape字面oracle，以及四个E3 trailer负例的外框长度修复，确保测到目标层。修正attr长度拒绝名与ELF截断位置，保留原271项并新增12项；当前仍NOT_RUN。原e2-input-binding扩展为七流成员与候选逐字核对，含各新增模型一字节差异负控及前后稳定性，仍待实跑；不另造重复批。草稿out/c43-da4e-interfaces-review-01/，严格清单169批/178覆盖/19缺口，仅元数据通过、执行0。formats.md仅据现有attr_strip代码纠正旧描述；冻结helper实测SID仍16219141、产品仍da4e7ef1，不影响cc构造。
+
 **现行流推进（2026-10-28）：** 已装Rootda4e/SID1621完成同候选七流材料刷新：out/c43-streams-da4e-01/来自实际安装体内嵌包50cc5a96；stream1=4f3c87fd、stream2=68f08deb，独立成员/输入绑定24/0。14个正式SOURCE批全部PASS（out/c43-da4e-stream-validation-01/）：E1 tokens188/0、bytes501/0、refusals624/0、independent25/0；E2 positive103/0、refusal187/0、independent36/0、pp-gold21/0、CLI targets20/0/includes20/0/macros23/0、header-locations11/0、negative-diagnostics211/0（known_gaps=2），另含绑定批。E2既定本机62格现均有本代证据；E1必选本机40格中38格有证，余lex-144流内逐键oracle及其host聚合。UCN产品整链正式13/0，旧Root41同批13/12保留。完整C99、19宽行、N22与五外宿主仍未关闭。
 
 **2026-10-28 最新开发候选（cdx）：** 已装SID `162191414d86d92afda572ff92f61c1afb0b2302d563abd4c52446115ef1b7d9`，APE `da4e7ef144186ccf578d282381ac671885094c6dfe30053727ac3f3c4a3e5592`（3,001,553 B），record `ab5f17c8…`。本源107作业全0、22对象/双核/五片/真deflate完成，PC包50cc5a96独立VERIFIED，kind2准入后安装rc0。旧Root41与record c7bc在GEN1621-01/bootstrap-before-install.*应急备用。安装体正式SOURCE smoke16/0、UCN13/0、RI单源29/0和多源15/0均PASS；cc独立33个-E探针全过。本代流材料及14个E1/E2正式SOURCE批已刷新并全PASS。证据out/c43-1621-installed-wave-{01,02}/与out/c43-da4e-stream-validation-01/。UCN首次登记因空格标记FAIL、修正TAB后新叶PASS，原FAIL保留。--all仍rc3，177覆盖/19缺口；完整N22、宽行和五外宿主未关，其他批旧证据不转授。
@@ -369,6 +371,8 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 **最新开发根：** SID16219141／APEda4e7ef1／PC50cc5a96，旧Root41b836d7及record c7bc在GEN1621-01应急备份。19矩阵实算319 COVERED_LOCAL/336 MISSING/36 NEEDS_PRODUCT_CHANGE（822必选），E1/E2已按14个本代正式批更新；其他域不转授旧根资格。下一动作：新根绑定的同源固定点与剩余域缺口，不再重复本轮14批。
 
 **待收口工作域：** cc只写out/c43-da4e-fixedpoint-*的新构造材料；kernel-route三个共享路径现由cdx接管，源码修复未验证。其他协作者暂存原样保留；不把未提交/未实跑草稿当资格。
+
+**边界草稿入口：** interfaces既有源和登记行已准备，七流成员绑定扩展也已编辑；283项是拟执行计数，不是PASS。重活窗口归cc，GEN-A准入交接后由cdx先验候选与同字节安装，再执行这些本代边界批和kernel-route修复验证。exec/pipeline/formats.md是SID排除的说明文件，正文长度校验描述已据实际C适配器更正；产品源未变。
 
 **最新源码入口：** live SID16219141，正式产品同源16219141/Rootda4e。E1/E2/E3及独立参考的UCN身份修复已合入，通用数字约束与AnnexD标识符约束分域；公共拼写/原始诊断/RI身份保留。三个生成器--check及30事实表零差通过；证据out/c43-ucn-identities-test-01与out/c43-ucn-integrated-models-01。本源107/PC/双核/五片/APE/kind2准入/开发安装闭合，四个产品SOURCE批及14个本代流SOURCE批通过。下一刀同源新根固定点，不转授旧source context或旧功能结果；原红保留。
 
