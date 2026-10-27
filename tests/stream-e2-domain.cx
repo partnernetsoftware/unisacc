@@ -1,0 +1,298 @@
+/* E2 stream domain cells (src.c -> UNIPP1 pp.locations) on Linux/x86_64.
+ * MODE ROOT STREAM_DIR NEW_OUTDIR, MODE = positive | refusal. Uses the pinned
+ * stream1.com from prepared seven-stream material; constructs nothing and does
+ * not touch the product route. Matrix: tests/stream-e2-domain-matrix.tsv.
+ * Oracles are hand-derived, never taken from earlier product output:
+ *  - text/splice/comment/shebang bytes: C99 5.1.1.2 phases 2-3 and the
+ *    exec/pp/text-*.tsv declarations (one space per comment; shebang bytes
+ *    become spaces up to LF);
+ *  - splice records: file line of each joined backslash (src/front_pp.c spl_at;
+ *    the location net LN.s2 compares them with line numbers);
+ *  - include records: the classic reference algorithm (src/front_pp.c include
+ *    splice: header text + one newline replaces the directive text, the record
+ *    is the buffer line where it starts and 1 + its LF count, insertion order);
+ *  - macro expansion: C99 6.10.3 results compared as token text (canon below);
+ *  - refusal names: exec/pp REJECT declarations and the DIAG/ELSE/ENDIF/ERR
+ *    text rows, printed by exec/c/run.c as "reject: NAME"; input errors from
+ *    exec/c/run.c readfile/readstream.
+ * Every refusal is followed by a clean input whose bytes are checked exactly. */
+#pragma unisa use cxlib.netpack
+static char root[4096],streams[4096],work[4096],bound[4200],inc[4200],product[4200],e2bin[4200],empty_inc[4200];
+static char e2_id[65],product_before[65],product_after[65];
+static const char *e2_pin="078bccb6dad868b470bb6287ba6fdd9c415e3eaa5d25280c883ce4ea2710fdc9";
+static int assertions,failures,runs;
+static void die(const char *s){fprintf(stderr,"stream-e2-domain: REFUSE %s errno=%d\n",s,errno);exit(2);}
+static void copy_fit(char *dst,size_t cap,const char *src){size_t i=0;if(!cap)die("copy-bound");while(src[i]&&i+1<cap){dst[i]=src[i];i++;}if(src[i])die("copy-bound");dst[i]=0;}
+static void check(int ok,const char *case_name,const char *what){assertions++;if(!ok)failures++;printf("%s\tstream-e2-domain.%s.%s\n",ok?"PASS":"FAIL",case_name,what);}
+static void path(char *out,size_t cap,const char *dir,const char *name){int n=snprintf(out,cap,"%s/%s",dir,name);if(n<0||(size_t)n>=cap)die("path");}
+static void saved(const char *p,const void *s,size_t n){int f=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);size_t at=0;if(f<0)die("exclusive-create");while(at<n){ssize_t k=write(f,(const char *)s+at,n-at);if(k<0&&errno==EINTR)continue;if(k<=0)die("write");at+=(size_t)k;}if(close(f))die("close");}
+static void savedz(const char *dir,const char *leaf,const char *s){char p[4400];path(p,sizeof p,dir,leaf);saved(p,s,strlen(s));}
+static char *loaded(const char *p,size_t *n){char *s=cx_read(p,n);if(!s)die(p);return s;}
+static void digest(const char *p,char *hex){size_t n;char *s=loaded(p,&n);cx_sha256_hex(s,n,hex);free(s);}
+static unsigned little(const unsigned char *p){return (unsigned)p[0]|(unsigned)p[1]<<8|(unsigned)p[2]<<16|(unsigned)p[3]<<24;}
+
+/* ---- UNIPP1 decoder (exec/pipeline/formats.md "Preprocessor diagnostic envelope") ---- */
+#define MAXREC 16
+typedef struct {int ok;unsigned len,forced,autoinc,nspl,ninc;unsigned spl[MAXREC];unsigned inc_line[MAXREC],inc_lines[MAXREC],inc_namelen[MAXREC];const unsigned char *inc_name[MAXREC];const unsigned char *body;size_t bn;} frame;
+static frame unipp1(const unsigned char *b,size_t n){
+ frame f;memset(&f,0,sizeof f);
+ if(n<27||memcmp(b,"UNIPP1\0",7))return f;
+ f.len=little(b+7);f.forced=little(b+11);f.autoinc=little(b+15);f.nspl=little(b+19);f.ninc=little(b+23);size_t at=27;
+ if(f.nspl>(n-at)/4)return f;
+ for(unsigned i=0;i<f.nspl;i++){if(i<MAXREC)f.spl[i]=little(b+at);at+=4;}
+ for(unsigned i=0;i<f.ninc;i++){
+  if(n-at<12)return f;
+  unsigned names=little(b+at+8);
+  if(i<MAXREC){f.inc_line[i]=little(b+at);f.inc_lines[i]=little(b+at+4);f.inc_namelen[i]=names;}
+  at+=12;if(names>62||names>n-at)return f;
+  if(i<MAXREC)f.inc_name[i]=b+at;at+=names;
+ }
+ if(f.len!=n-at)return f;
+ f.body=b+at;f.bn=f.len;f.ok=1;return f;}
+
+/* ---- token-text canon: C99 6.10.3 fixes token sequences, not the spaces an
+ * expansion writes between tokens. Per line: drop leading/trailing blanks, drop
+ * blank runs except one space between two identifier/number characters; string
+ * and character literals are copied byte for byte. LF structure is kept. ---- */
+static int wordc(int c){return (c>='0'&&c<='9')||(c>='a'&&c<='z')||(c>='A'&&c<='Z')||c=='_';}
+static int blankc(int c){return c==' '||c=='\t'||c=='\r'||c=='\f'||c=='\v';}
+static char *canon(const unsigned char *s,size_t n,size_t *outn){
+ char *o=malloc(n+1);size_t k=0;int prev=-1,pend=0;if(!o)die("oom");
+ for(size_t i=0;i<n;i++){int c=s[i];
+  if(c=='\n'){o[k++]='\n';prev=-1;pend=0;continue;}
+  if(blankc(c)){pend=1;continue;}
+  if(pend&&prev>=0&&wordc(prev)&&wordc(c))o[k++]=' ';
+  pend=0;o[k++]=(char)c;prev=c;
+  if(c=='"'||c=='\''){int q=c;while(i+1<n&&s[i+1]!='\n'){i++;o[k++]=(char)s[i];if(s[i]=='\\'&&i+1<n&&s[i+1]!='\n'){i++;o[k++]=(char)s[i];continue;}if(s[i]==q)break;}prev=q;}
+ }
+ o[k]=0;*outn=k;return o;}
+static int canon_equal(const unsigned char *body,size_t bn,const char *want){
+ size_t an,bn2;char *a=canon(body,bn,&an),*b=canon((const unsigned char *)want,strlen(want),&bn2);
+ int ok=an==bn2&&!memcmp(a,b,an);free(a);free(b);return ok;}
+/* Non-empty canonical lines joined by LF; for pragma cells where blank-line
+ * placement is not the property under test. */
+static int canon_lines_equal(const unsigned char *body,size_t bn,const char *want){
+ size_t an;char *a=canon(body,bn,&an);char *c=malloc(an+2);size_t k=0,i=0;if(!c)die("oom");
+ while(i<an){size_t e=i;while(e<an&&a[e]!='\n')e++;if(e>i){memcpy(c+k,a+i,e-i);k+=e-i;c[k++]='\n';}i=e+1;}
+ int ok=k==strlen(want)&&!memcmp(c,want,k);free(a);free(c);return ok;}
+static int has(const unsigned char *b,size_t n,const char *needle){size_t m=strlen(needle);if(m>n)return 0;for(size_t i=0;i+m<=n;i++)if(!memcmp(b+i,needle,m))return 1;return 0;}
+static int count_of(const unsigned char *b,size_t n,const char *needle){size_t m=strlen(needle);int c=0;if(!m||m>n)return 0;for(size_t i=0;i+m<=n;i++)if(!memcmp(b+i,needle,m))c++;return c;}
+static int has_line(const char *s,size_t n,const char *line){size_t m=strlen(line),at=0;while(at<n){size_t e=at;while(e<n&&s[e]!='\n')e++;if(e-at==m&&!memcmp(s+at,line,m))return 1;at=e+1;}return 0;}
+
+/* ---- invocation: stream1 INPUT SOURCE_LABEL INCLUDE_DIR, own watchdog ---- */
+static np_result run_at(const char *input,const char *incdir,const char *cwd){
+ char outp[4400],errp[4400],why[1024];int z;runs++;
+ z=snprintf(outp,sizeof outp,"%s/run%03d.stdout",work,runs);if(z<0||(size_t)z>=sizeof outp)die("stdout-path");
+ z=snprintf(errp,sizeof errp,"%s/run%03d.stderr",work,runs);if(z<0||(size_t)z>=sizeof errp)die("stderr-path");
+ char *v[]={bound,"12",e2bin,(char *)input,(char *)input,(char *)incdir,0};np_result r;
+ const char *env[]={"UNISA_ATTRIBUTES=","UNISA_MAXSTEPS=200000000",0};
+ if(np_run(v,cwd,(char *const *)env,14,&r,why,sizeof why))die(why);
+ saved(outp,r.out,r.outn);saved(errp,r.err,r.errn);return r;}
+static np_result run_src(const char *leaf,const char *src,size_t n,const char *incdir){
+ char p[4400];path(p,sizeof p,work,leaf);saved(p,src,n);return run_at(p,incdir,root);}
+static frame accepted(const char *name,np_result *r){
+ frame f=unipp1((const unsigned char *)r->out,r->outn);
+ check(!r->rc&&!r->errn,name,"accept-rc0-empty-stderr");check(f.ok,name,"unipp1-frame");
+ return f;}
+
+/* ---- positive cells ---- */
+static void pos_exact(const char *name,const char *src,const char *want,unsigned nspl,const unsigned *spl){
+ np_result r=run_src(name,src,strlen(src),empty_inc);frame f=accepted(name,&r);
+ check(f.ok&&f.bn==strlen(want)&&!memcmp(f.body,want,f.bn),name,"body-exact");
+ check(f.ok&&f.forced==0&&f.autoinc==0&&f.ninc==0,name,"no-include-fields");
+ int sp=f.ok&&f.nspl==nspl;for(unsigned i=0;sp&&i<nspl;i++)sp=f.spl[i]==spl[i];
+ check(sp,name,"splice-records-exact");np_free(&r);}
+static void pos_canon(const char *name,const char *src,const char *want){
+ np_result r=run_src(name,src,strlen(src),empty_inc);frame f=accepted(name,&r);
+ check(f.ok&&canon_equal(f.body,f.bn,want),name,"tokens-exact");
+ check(f.ok&&f.nspl==0&&f.ninc==0,name,"no-records");np_free(&r);}
+static void pos_lines(const char *name,const char *src,const char *want){
+ np_result r=run_src(name,src,strlen(src),empty_inc);frame f=accepted(name,&r);
+ check(f.ok&&canon_lines_equal(f.body,f.bn,want),name,"nonblank-tokens-exact");
+ check(f.ok&&!has(f.body,f.bn,"#pragma")&&!has(f.body,f.bn,"_Pragma"),name,"pragma-consumed");np_free(&r);}
+static void pos_markers(const char *name,const char *src,const char *const *good,int ngood){
+ np_result r=run_src(name,src,strlen(src),empty_inc);frame f=accepted(name,&r);
+ for(int i=0;i<ngood;i++){char t[96];int z=snprintf(t,sizeof t,"%s-present",good[i]);if(z<0||(size_t)z>=sizeof t)die("label");check(f.ok&&count_of(f.body,f.bn,good[i])==1,name,t);}
+ check(f.ok&&!has(f.body,f.bn,"BAD"),name,"no-BAD-branch");np_free(&r);}
+typedef struct {unsigned line,lines;const char *name;} increc;
+static void check_records(const char *name,const frame *f,const increc *want,unsigned n){
+ int ok=f->ok&&f->ninc==n;
+ for(unsigned i=0;ok&&i<n;i++){size_t m=strlen(want[i].name);if(m>62)m=62;ok=f->inc_line[i]==want[i].line&&f->inc_lines[i]==want[i].lines&&f->inc_namelen[i]==m&&!memcmp(f->inc_name[i],want[i].name,m);}
+ check(ok,name,"include-records-exact");}
+static void pos_include(const char *name,const char *src,const char *incdir,const char *want,const increc *rec,unsigned nrec){
+ np_result r=run_src(name,src,strlen(src),incdir);frame f=accepted(name,&r);
+ check(f.ok&&f.bn==strlen(want)&&!memcmp(f.body,want,f.bn),name,"body-exact");
+ check_records(name,&f,rec,nrec);check(f.ok&&f.nspl==0&&f.forced==0&&f.autoinc==0,name,"other-fields-zero");np_free(&r);}
+
+static void positive(void){
+ {static const unsigned none[1]={0};
+  pos_exact("line-comment.c","int a; // note\nint b;\n","int a;  \nint b;\n",0,none);
+  pos_exact("shebang.c","#!/x/y\nint a;\n","      \nint a;\n",0,none);}
+ {static const unsigned one[1]={1};char s[]={'i','n','t',' ','l','o','n','\\','\r','\n','g','_','n','a','m','e',';','\n',0};
+  pos_exact("splice-crlf.c",s,"int long_name;\n",1,one);}
+ {static const unsigned three[3]={1,3,4};
+  pos_exact("splice-offsets.c","int a\\\n=1;\nint b=\\\n2\\\n;\n","int a=1;\nint b=2;\n",3,three);}
+ pos_canon("function-macro.c",
+  "#define ADD(x,y) ((x)+(y))\n#define TWICE(x) DBL(x)\n#define DBL(x) ((x)*2)\nint v=ADD(1,2);\nint r=TWICE(ADD(3,4));\n",
+  "\n\n\nint v=((1)+(2));\nint r=((((3)+(4)))*2);\n");
+ pos_canon("variadic-macro.c",
+  "#define CALL(f,...) f(__VA_ARGS__)\n#define LOG(fmt,...) out(fmt,##__VA_ARGS__)\nint r=CALL(g,1,2);\nLOG(1);\nLOG(1,2);\n",
+  "\n\nint r=g(1,2);\nout(1);\nout(1,2);\n");
+ pos_canon("stringize.c",
+  "#define S(x) #x\nchar *s=S(a  +  b);\nchar *t=S(\"q\\n\");\n",
+  "\nchar *s=\"a + b\";\nchar *t=\"\\\"q\\\\n\\\"\";\n");
+ pos_canon("paste.c","#define CAT(a,b) a##b\nint CAT(foo,bar)=CAT(1,2);\n","\nint foobar=12;\n");
+ pos_canon("macro-params-8.c",
+  "#define P8(a,b,c,d,e,f,g,h) a+b+c+d+e+f+g+h\nint s=P8(1,2,3,4,5,6,7,8);\n","\nint s=1+2+3+4+5+6+7+8;\n");
+ /* Declared layout bound: exec/facts/pp-layout.tsv MAXP=12 (cc ruling 2026-10-27; 13 is refused below). */
+ pos_canon("macro-params-12.c",
+  "#define P12(a,b,c,d,e,f,g,h,i,j,k,l) l+k+j+i+h+g+f+e+d+c+b+a\nint s=P12(1,2,3,4,5,6,7,8,9,10,11,12);\n","\nint s=12+11+10+9+8+7+6+5+4+3+2+1;\n");
+ pos_canon("self-reference.c",
+  "#define foo foo+1\n#define A B\n#define B A\nint x=foo;\nint y=A;\n","\n\n\nint x=foo+1;\nint y=A;\n");
+ {static const char *const g[]={"GOOD1","GOOD2","GOOD3","GOOD4","GOOD5","GOOD6","GOOD7"};
+  pos_markers("if-expression.c",
+   "#if (2+3)*4==20 && !0 || 0\nint GOOD1;\n#else\nint BAD1;\n#endif\n"
+   "#if (1?0:1)==0 && (0?0:7)==7\nint GOOD2;\n#else\nint BAD2;\n#endif\n"
+   "#if 'A'==65 && '\\n'==10\nint GOOD3;\n#else\nint BAD3;\n#endif\n"
+   "#if 0x10==16 && 010==8 && 10u==10 && 10L==10\nint GOOD4;\n#else\nint BAD4;\n#endif\n"
+   "#if -1<0 && (7%3)==1 && (1<<4)==16 && (~0&0xF)==15 && (5>>1)==2\nint GOOD5;\n#else\nint BAD5;\n#endif\n"
+   "#if -1>0u\nint GOOD6;\n#else\nint BAD6;\n#endif\n"
+   "#if (3^5)==6 && (3|4)==7 && 1!=2 && 2>=2 && 1<=1\nint GOOD7;\n#else\nint BAD7;\n#endif\n",g,7);}
+ {static const char *const g[]={"GOOD1","GOOD2","GOOD3"};
+  pos_markers("defined-operator.c",
+   "#define D 1\n#if defined D && defined(D) && !defined NOPE\nint GOOD1;\n#endif\n"
+   "#if 0\nint BAD1;\n#elif defined(D)\nint GOOD2;\n#endif\n"
+   "#if defined(NOPE)\nint BAD2;\n#elif !defined D\nint BAD3;\n#else\nint GOOD3;\n#endif\n",g,3);}
+ pos_lines("pragma-macro-stack.c",
+  "#define M 1\n#pragma push_macro(\"M\")\n#undef M\n#define M 2\nint a=M;\n#pragma pop_macro(\"M\")\nint b=M;\n","int a=2;\nint b=1;\n");
+ pos_lines("pragma-operator.c","_Pragma(\"e2 probe\") int p;\nint q;\n","int p;\nint q;\n");
+ /* Includes. Headers live beside the sources (quoted) or in a private INCLUDE_DIR. */
+ char sysinc[4400];path(sysinc,sizeof sysinc,work,"sysinc");if(mkdir(sysinc,0700))die("sysinc");
+ savedz(sysinc,"sys_e2.h","int from_sys;\n");
+ {increc r[1]={{1,2,"sys_e2.h"}};pos_include("system-include.c","#include <sys_e2.h>\nint after;\n",sysinc,"int from_sys;\n\n\nint after;\n",r,1);}
+ savedz(work,"guard.h","#ifndef GUARD_E2\n#define GUARD_E2\nint g;\n#endif\n");
+ {np_result r=run_src("include-guard.c","#include \"guard.h\"\n#include \"guard.h\"\nint m;\n",strlen("#include \"guard.h\"\n#include \"guard.h\"\nint m;\n"),empty_inc);
+  frame f=accepted("include-guard.c",&r);increc w[2]={{1,5,"guard.h"},{7,5,"guard.h"}};
+  check(f.ok&&count_of(f.body,f.bn,"int g;")==1,"include-guard.c","one-copy");
+  check(f.ok&&canon_equal(f.body,f.bn,"\n\nint g;\n\n\n\n\n\n\n\n\n\nint m;\n"),"include-guard.c","tokens-exact");
+  check_records("include-guard.c",&f,w,2);np_free(&r);}
+ savedz(work,"nest_a.h","int a1;\n#include \"nest_b.h\"\nint a2;\n");savedz(work,"nest_b.h","int b1;\n");
+ {increc w[3]={{1,4,"nest_a.h"},{2,2,"nest_b.h"},{8,2,"nest_b.h"}};
+  pos_include("nested-include.c","#include \"nest_a.h\"\n#include \"nest_b.h\"\nint m;\n",empty_inc,
+   "int a1;\nint b1;\n\n\nint a2;\n\n\nint b1;\n\n\nint m;\n",w,3);}
+ {char longname[80];memset(longname,'n',68);memcpy(longname+68,".h",3);savedz(work,longname,"int long_h;\n");
+  char src[160];int z=snprintf(src,sizeof src,"#include \"%s\"\nint m;\n",longname);if(z<0||(size_t)z>=sizeof src)die("long-src");
+  increc w[1]={{1,2,longname}};pos_include("include-name-62.c",src,empty_inc,"int long_h;\n\n\nint m;\n",w,1);}
+ /* cwd independence: same absolute input from two working directories. */
+ savedz(work,"cwd_h.h","int from_h;\n");
+ {const char *src="#include \"cwd_h.h\"\nint after;\n";char p[4400];path(p,sizeof p,work,"cwd-label.c");saved(p,src,strlen(src));
+  np_result a=run_at(p,empty_inc,root),b=run_at(p,empty_inc,work);
+  frame fa=accepted("cwd-label.c@root",&a),fb=accepted("cwd-label.c@work",&b);
+  check(a.outn==b.outn&&a.outn&&!memcmp(a.out,b.out,a.outn),"cwd-label.c","stdout-identical-across-cwd");
+  increc w[1]={{1,2,"cwd_h.h"}};check_records("cwd-label.c@root",&fa,w,1);check_records("cwd-label.c@work",&fb,w,1);
+  check(fa.ok&&fa.ninc==1&&!memchr(fa.inc_name[0],'/',fa.inc_namelen[0]),"cwd-label.c","record-name-has-no-path");
+  np_free(&a);np_free(&b);}
+}
+
+/* ---- refusal cells, each followed by recovery ---- */
+static const char *recovery_src="int ok_after;\n";
+static void recovery(const char *after){
+ char name[160];int z=snprintf(name,sizeof name,"recovery-after-%s",after);if(z<0||(size_t)z>=sizeof name)die("label");
+ char leaf[200];z=snprintf(leaf,sizeof leaf,"%s.c",name);if(z<0||(size_t)z>=sizeof leaf)die("label");
+ np_result r=run_src(leaf,recovery_src,strlen(recovery_src),empty_inc);frame f=accepted(name,&r);
+ check(f.ok&&f.bn==strlen(recovery_src)&&!memcmp(f.body,recovery_src,f.bn)&&!f.nspl&&!f.ninc&&!f.forced&&!f.autoinc,name,"oracle-bytes");np_free(&r);}
+static void refused_common(const char *name,np_result *r){
+ check(r->rc!=0,name,"reject-nonzero-rc");check(r->outn==0,name,"reject-empty-stdout");}
+/* Declared REJECT name: run.c prints exactly "reject: NAME" on its own line. */
+static void ref_named(const char *name,const char *src,size_t n,const char *declared){
+ np_result r=run_src(name,src,n,empty_inc);refused_common(name,&r);
+ char line[400];int z=snprintf(line,sizeof line,"reject: %s",declared);if(z<0||(size_t)z>=sizeof line)die("label");
+ check(r.errn&&has_line(r.err,r.errn,line),name,"reject-declared-name");np_free(&r);recovery(name);}
+/* Positioned DIAG rows: "LABEL:LINE:COL: error: TEXT\n" (directive-scan-result DIAG.*). */
+static void ref_diag(const char *name,const char *src,unsigned line,const char *text){
+ char p[4400];path(p,sizeof p,work,name);saved(p,src,strlen(src));np_result r=run_at(p,empty_inc,root);refused_common(name,&r);
+ char pre[4600],tail[600];int z=snprintf(pre,sizeof pre,"%s:%u:",p,line);if(z<0||(size_t)z>=sizeof pre)die("label");
+ z=snprintf(tail,sizeof tail,": error: %s\n",text);if(z<0||(size_t)z>=sizeof tail)die("label");
+ check(r.errn>=strlen(pre)&&!memcmp(r.err,pre,strlen(pre)),name,"diag-label-line");
+ check(r.errn&&has((const unsigned char *)r.err,r.errn,tail),name,"diag-declared-text");np_free(&r);recovery(name);}
+/* No declared diagnostic exists; C99 requires one. The refusal must still name
+ * something other than an internal unreachable state. */
+static void ref_required(const char *name,const char *src,size_t n){
+ np_result r=run_src(name,src,n,empty_inc);refused_common(name,&r);
+ check(r.errn&&!(r.errn==strlen("reject: unreachable\n")&&!memcmp(r.err,"reject: unreachable\n",r.errn)),name,"reject-named-not-unreachable");np_free(&r);recovery(name);}
+static char *strip_path(const char *s,size_t n,const char *p){
+ np_buf b={0};np_replace(s,n,p,strlen(p),"PATH",4,-1,&b);np_put(&b,"",1);return b.p;}
+
+static void refusal(void){
+ ref_diag("error-directive.c","int x;\n#error hello world\nint y;\n",2,"#error hello world");
+ {char src[400],text[300];memset(text,'x',283);text[283]=0;int z=snprintf(src,sizeof src,"#error %s\n",text);if(z<0||(size_t)z>=sizeof src)die("err283");
+  char want[300];z=snprintf(want,sizeof want,"#error %s",text);if(z<0||(size_t)z>=sizeof want)die("err283");
+  ref_diag("error-text-283.c",src,1,want);
+  memset(text,'x',284);text[284]=0;z=snprintf(src,sizeof src,"#error %s\n",text);if(z<0||(size_t)z>=sizeof src)die("err284");
+  ref_named("error-text-284.c",src,strlen(src),"not covered: #error text longer than 283 bytes");}
+ ref_required("unterminated-if.c","#if 1\nint x;\n",strlen("#if 1\nint x;\n"));
+ ref_diag("stray-endif.c","int x;\n#endif\n",2,"#endif without #if");
+ ref_diag("stray-else.c","#else\nint x;\n",1,"#else without #if");
+ ref_required("stray-elif.c","#elif 1\nint x;\n",strlen("#elif 1\nint x;\n"));
+ ref_named("if-malformed.c","#if 1 +\n#endif\n",strlen("#if 1 +\n#endif\n"),"not covered: #if expression");
+ ref_named("if-division-zero.c","#if 1/0\n#endif\n",strlen("#if 1/0\n#endif\n"),"not covered: #if division by zero");
+ ref_named("if-integer-literal.c","#if 1.5\n#endif\n",strlen("#if 1.5\n#endif\n"),"not covered: #if integer literal");
+ ref_named("if-char-literal.c","#if 'ab'\n#endif\n",strlen("#if 'ab'\n#endif\n"),"not covered: #if literal");
+ ref_named("if-defined-operand.c","#if defined 1\n#endif\n",strlen("#if defined 1\n#endif\n"),"not covered: #if defined operand");
+ ref_named("macro-too-few-args.c","#define F(a,b) a\nint x=F(1);\n",strlen("#define F(a,b) a\nint x=F(1);\n"),"not covered: argument count");
+ ref_named("macro-too-many-args.c","#define F(a,b) a\nint x=F(1,2,3);\n",strlen("#define F(a,b) a\nint x=F(1,2,3);\n"),"not covered: argument count");
+ ref_named("macro-unterminated-call.c","#define G(a) a\nint y=G(1\n",strlen("#define G(a) a\nint y=G(1\n"),"not covered: unterminated macro call");
+ {const char *s13="#define P13(a,b,c,d,e,f,g,h,i,j,k,l,m) a\nint z=P13(1,2,3,4,5,6,7,8,9,10,11,12,13);\n";
+  ref_named("macro-params-13.c",s13,strlen(s13),"not covered: function-like macro invocation");}
+ ref_named("paste-at-end.c","#define E(a) a##\nint e=E(1);\n",strlen("#define E(a) a##\nint e=E(1);\n"),"not covered: ## at the end of a body");
+ ref_named("hash-not-parameter.c","#define H(a) #b\nchar *h=H(1);\n",strlen("#define H(a) #b\nchar *h=H(1);\n"),"not covered: # not followed by a parameter");
+ ref_named("paste-operand.c","#define Q(a) a ## +\nint q=Q(x);\n",strlen("#define Q(a) a ## +\nint q=Q(x);\n"),"not covered: ## operand");
+ ref_required("include-operand.c","#include bogus_operand\nint x;\n",strlen("#include bogus_operand\nint x;\n"));
+ savedz(work,"self_e2.h","#include \"self_e2.h\"\n");
+ ref_named("include-self-cycle.c","#include \"self_e2.h\"\n",strlen("#include \"self_e2.h\"\n"),"not covered: more than 4000 #include splices (a header that includes itself?)");
+ savedz(work,"ping_e2.h","#include \"pong_e2.h\"\n");savedz(work,"pong_e2.h","#include \"ping_e2.h\"\n");
+ ref_named("include-mutual-cycle.c","#include \"ping_e2.h\"\n",strlen("#include \"ping_e2.h\"\n"),"not covered: more than 4000 #include splices (a header that includes itself?)");
+ {const char nul[]={'i','n','t',' ','a',';',0,'i','n','t',' ','b',';','\n'};ref_required("nul-byte.c",nul,sizeof nul);}
+ ref_named("unterminated-literal-body.c","#define J(a) a##b \"q\nint j=J(1);\n",strlen("#define J(a) a##b \"q\nint j=J(1);\n"),"not covered: unterminated literal in a body");
+ ref_named("unterminated-literal-call.c","#define K(a) a\nint k=K('x);\n",strlen("#define K(a) a\nint k=K('x);\n"),"not covered: unterminated literal in a call");
+ /* Missing and non-regular INPUT (exec/c/run.c readfile/readstream). */
+ {char missing[4400],notdir[4400],noperm[4400],dir[4400];
+  path(missing,sizeof missing,work,"absent-e2-input.c");
+  savedz(work,"regular.c","int r;\n");path(notdir,sizeof notdir,work,"regular.c/x.c");
+  savedz(work,"noperm.c","int n;\n");path(noperm,sizeof noperm,work,"noperm.c");if(chmod(noperm,0))die("chmod");
+  path(dir,sizeof dir,work,"dir-input.c");if(mkdir(dir,0700))die("dir-input");
+  np_result a=run_at(missing,empty_inc,root);refused_common("missing-input-enoent",&a);
+  check(a.errn&&has((const unsigned char *)a.err,a.errn,"cannot open"),"missing-input-enoent","named-cannot-open");recovery("missing-input-enoent");
+  np_result b=run_at(notdir,empty_inc,root);refused_common("missing-input-enotdir",&b);
+  char *sa=strip_path(a.err,a.errn,missing),*sb=strip_path(b.err,b.errn,notdir);
+  check(b.errn&&strcmp(sa,sb),"missing-input-enotdir","reported-distinct-from-enoent");recovery("missing-input-enotdir");
+  np_result c=run_at(noperm,empty_inc,root);refused_common("missing-input-eacces",&c);
+  char *sc=strip_path(c.err,c.errn,noperm);
+  check(c.errn&&strcmp(sa,sc)&&strcmp(sb,sc),"missing-input-eacces","reported-distinct-from-enoent-enotdir");recovery("missing-input-eacces");
+  np_result d=run_at(dir,empty_inc,root);refused_common("directory-input",&d);check(d.errn>0,"directory-input","diagnostic-present");recovery("directory-input");
+  if(chmod(noperm,0600))die("chmod-restore");
+  free(sa);free(sb);free(sc);np_free(&a);np_free(&b);np_free(&c);np_free(&d);}
+}
+
+int main(int argc,char **argv){
+ if(argc!=5||(strcmp(argv[1],"positive")&&strcmp(argv[1],"refusal"))){fputs("usage: positive|refusal ROOT STREAM_DIR NEW_ABS_OUTDIR\n",stderr);return 2;}
+#if !defined(__linux__) || !defined(__x86_64__)
+ fputs("NOT_RUN stream-e2-domain needs Linux/x86_64\n",stderr);return 3;
+#endif
+ int pos=!strcmp(argv[1],"positive");
+ if(!realpath(argv[2],root)||!realpath(argv[3],streams))die("resolve");
+ if(argv[4][0]!='/')die("absolute-new-outdir");copy_fit(work,sizeof work,argv[4]);
+ if(mkdir(work,0700))die("new-outdir-must-be-absent");
+ {char real[4096];if(!realpath(work,real))die("outdir-resolve");copy_fit(work,sizeof work,real);}
+ path(empty_inc,sizeof empty_inc,work,"empty-include");if(mkdir(empty_inc,0700))die("empty-include");
+ path(bound,sizeof bound,root,"tools/bound");path(inc,sizeof inc,root,"include");
+ path(product,sizeof product,root,"unisacc.com");path(e2bin,sizeof e2bin,streams,"unisacc-stream1.com");
+ digest(product,product_before);digest(e2bin,e2_id);
+ if(strcmp(e2_id,e2_pin))die("material.stream1-identity");
+ check(1,"material","stream1-identity");
+ if(pos)positive();else refusal();
+ digest(product,product_after);check(!strcmp(product_before,product_after),"identity","root-product-stable");
+ digest(e2bin,e2_id);check(!strcmp(e2_id,e2_pin),"identity","stream1-stable");
+ printf("%s\tassertions=%d\tfailed=%d\truns=%d\tscope=e2-domain-%s-linux-x86_64\n",pos?"STREAM_E2_DOMAIN_POSITIVE":"STREAM_E2_DOMAIN_REFUSAL",assertions,failures,runs,argv[1]);
+ puts("NOT_CLAIMED\tsix-target-predefines-cli-forced-auto-include-file-vs-stdin-foreign-hosts-same-candidate-model");
+ return failures?1:0;}
