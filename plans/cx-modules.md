@@ -23,6 +23,8 @@
 
 2026-10-27 负例两文件：`tests/negative-diagnostics.cx` 与 `tests/negative-model-loader.cx` 在 `ebe891507c` 进入树，截断基线没有它们的行。诊断文件有 9 处被丢弃、格式会增长的 `snprintf`（27、28、66 行两处、70、76、79、81、103）。装载文件有 9 处同样的 `snprintf`（30、31、60、66 行两处、70、73、81、146）和一处变长 `memcpy(b, ape, apen)`。每处 `snprintf` 改为留下返回值，长度不够则 `die`。变长拷贝改为按已检查的 `apen` 逐字节写入，再异或一个字节。`path` 里已经检查过的 `snprintf`，以及装载文件里赋给 `n` 的那次 `snprintf`，没有改。夹具源字符串里的 `#include` 与 `strcpy` 没有改。基线没有改写，也没有为这两个文件加行。干净树在 `7d26c0a9f7` 上、只含这两处改动，include、无界、截断各跑两次，都退出 0，没有文件高于自己的行。483 个 `.cx` 文件，include 108 行（基线 108）；无界活计数 710（基线合计 718）；截断活计数 4138（基线合计 4155）。旁边文件解析器仍没有 `node_modules`、`package.json` 的 `exports` 和 Bun 安装缓存。gcc 与 clang 的产物仍是普通 C。
 
+2026-10-27 负例回跑：`28a2912821` 之后，`tests/cxstd/mark.cx` 的 `-cx-interface` 仍只写出 `int cxstd_mark(int n);`，文件内助手 `cxstd_pack` 不在接口里。`tests/cxstd_main.cx` 的 `-cx-plan` 列出 `tests/cxstd_main.cx` 与 `tests/cxstd/mark.cx`，不为前奏 `std` 列出文件。两次 `unisacc.com -run` 与两次 `gcc_cx` 都退出 11，两次 gcc 编译退出 0。`tests/cxstd_unknown.cx` 的 `std.absent` 在宿主编译之前被拒绝，stderr 含 `unknown std module`，没有写出二进制。同一候选 `7a0cf28bba67f2394abaf783b886baeafe0687f4590c392dbd8611212a0f5f77` 上，`negative-diagnostics` 打印 `assertions=193 failed=0 known_gaps=3 archived_cases=17`，`negative-model-loader` 的 core 打印 `assertions=99 failed=0`。两批 `BATCH_RUN` 都是 PASS，rc 0，stderr 为空。基线没有改写。旁边文件解析器仍没有 `node_modules`、`package.json` 的 `exports` 和 Bun 安装缓存。gcc 与 clang 的产物仍是普通 C。
+
 2026-10-23 实测：
 
 - 已有：`.cx` 单元自动前置 `cx.h`（产品 `exec/c/compiler.c` 与经典参考 `src/front_parse.c` 均已实现；转发单元不带 prelude）。
