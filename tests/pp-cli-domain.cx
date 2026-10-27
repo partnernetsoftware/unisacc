@@ -1,0 +1,45 @@
+/* Product preprocessing CLI cells, native Linux x86_64 observer.
+ * Target macros come from exec/pp/predefines.tsv, not the host compiler.
+ * Literal integer token oracles cover -D/-U and include search order.
+ * This does not execute foreign targets or qualify the full E2 domain. */
+#pragma unisa use cxlib.netpack
+static char root[4096],product[4096],work[4096],bound[4400];
+static int checks,failed;
+static void die(const char *s){fprintf(stderr,"pp-cli-domain: %s errno=%d\n",s,errno);exit(2);}
+static void ck(int ok,const char *name,const char *part){checks++;if(!ok)failed++;printf("%s\tpp-cli.%s.%s\n",ok?"PASS":"FAIL",name,part);}
+static void path(char *p,size_t n,const char *a,const char *b){if(cx_path_join(p,n,a,b))die("path-bound");}
+static void save(const char *p,const char *s,size_t n){int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(fd<0)die("exclusive-fixture");size_t at=0;while(at<n){ssize_t z=write(fd,s+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0)die("fixture-write");at+=(size_t)z;}if(close(fd))die("fixture-close");}
+static void digest(char h[65]){struct stat st;if(lstat(product,&st)||!S_ISREG(st.st_mode)||st.st_size<0)die("candidate-stat");size_t n;char *s=cx_read(product,&n);if(!s||n!=(size_t)st.st_size)die("candidate-read");cx_sha256_hex(s,n,h);free(s);}
+static int tokens(const char *s,size_t n,const char *want){size_t j=0;for(size_t i=0;i<n;i++){unsigned char c=(unsigned char)s[i];if(c==' '||c=='\t'||c=='\r'||c=='\n'||c=='\v'||c=='\f')continue;if(!want[j]||want[j++]!=(char)c)return 0;}return !want[j];}
+static void run(const char *name,const char *src,const char *target,char **options,const char *want,int refusal){
+ char source[4400],leaf[160],log[4400];if(cx_fmt(leaf,sizeof leaf,"%s.c",name))die("fixture-name");path(source,sizeof source,work,leaf);save(source,src,strlen(src));
+ char *v[40];int k=0;v[k++]=bound;v[k++]="10";v[k++]="sh";v[k++]=product;v[k++]="-b";v[k++]=(char *)target;v[k++]="-E";if(options)for(int i=0;options[i];i++){if(k>=37)die("argv-bound");v[k++]=options[i];}v[k++]=source;v[k]=0;
+ np_result r={0};char why[1024];int transport=np_run(v,root,0,12,&r,why,sizeof why);
+ if(cx_fmt(leaf,sizeof leaf,"%s.stdout",name))die("log-name");path(log,sizeof log,work,leaf);save(log,r.out,r.outn);
+ if(cx_fmt(leaf,sizeof leaf,"%s.stderr",name))die("log-name");path(log,sizeof log,work,leaf);save(log,r.err,r.errn);
+ ck(!transport,name,"transport");ck(r.rc==(refusal?1:0),name,"exit-class");ck(refusal?(!r.outn&&r.errn&&strstr(r.err,want)!=0):(r.outn&&!r.errn&&tokens(r.out,r.outn,want)),name,refusal?"named-refusal-empty-output":"exact-integer-tokens");if(transport)fprintf(stderr,"%s\n",why);np_free(&r);
+}
+int main(int argc,char **argv){
+ if((argc!=4&&argc!=5)||!realpath(argv[1],root)||!realpath(argv[2],product)||argv[3][0]!='/'||strlen(argv[3])>=sizeof work)die("usage ROOT PRODUCT NEW_ABS_OUT [all|targets|macros|includes]");
+ const char *mode=argc==5?argv[4]:"all";int all=!strcmp(mode,"all"),targets_on=all||!strcmp(mode,"targets"),macros_on=all||!strcmp(mode,"macros"),includes_on=all||!strcmp(mode,"includes");if(!targets_on&&!macros_on&&!includes_on)die("unknown-mode");
+#if !defined(__linux__) || !defined(__x86_64__)
+ puts("NOT_RUN pp-cli-domain requires native Linux/x86_64 observer");return 3;
+#endif
+ memcpy(work,argv[3],strlen(argv[3])+1);if(mkdir(work,0700))die("fresh-output-required");path(bound,sizeof bound,root,"tools/bound");unsetenv("UNISACC_RF_CAPTURE");unsetenv("UNISA_ATTRIBUTES");unsetenv("UNISACC_RR_TIME");unsetenv("UNISACC_RR_DEBUG");char before[65],after[65];digest(before);ck(strlen(before)==64,"candidate","initial-digest");printf("CANDIDATE\tsha256=%s\n",before);
+ const char *macros[]={"__linux__","__unix__","__ELF__","__APPLE__","__MACH__","_WIN32","_WIN64","__x86_64__","__aarch64__","__LP64__","__UNISA__"};
+ const char *targets[]={"lnx/x86_64","lnx/arm64","osx/x86_64","osx/arm64","win/x86_64","win/arm64"};
+ const char *gold[]={"intobserved[]={1,1,1,0,0,0,0,1,0,1,1};","intobserved[]={1,1,1,0,0,0,0,0,1,1,1};","intobserved[]={0,1,0,1,1,0,0,1,0,1,1};","intobserved[]={0,1,0,1,1,0,0,0,1,1,1};","intobserved[]={0,0,0,0,0,1,1,1,0,1,1};","intobserved[]={0,0,0,0,0,1,1,0,1,1,1};"};
+ np_buf src={0};for(int i=0;i<11;i++){np_puts(&src,"#ifndef ");np_puts(&src,macros[i]);np_puts(&src,"\n#define ");np_puts(&src,macros[i]);np_puts(&src," 0\n#endif\n");}np_puts(&src,"int observed[]={");for(int i=0;i<11;i++){if(i)np_puts(&src,",");np_puts(&src,macros[i]);}np_puts(&src,"};\n");np_put(&src,"",1);
+ if(targets_on)for(int i=0;i<6;i++){char name[64];if(cx_fmt(name,sizeof name,"target-%d",i))die("target-name");run(name,src.p,targets[i],0,gold[i],0);}free(src.p);
+ if(macros_on){
+ const char *defs="#ifndef CLI_DROP\n#define CLI_DROP 0\n#endif\nint values[]={CLI_KEEP,CLI_DROP};\n";char *du[]={"-DCLI_KEEP=37","-DCLI_DROP=1","-UCLI_DROP",0},*ud[]={"-DCLI_KEEP=37","-UCLI_DROP","-DCLI_DROP=9",0};run("define-then-undef",defs,targets[0],du,"intvalues[]={37,0};",0);run("undef-then-define",defs,targets[0],ud,"intvalues[]={37,9};",0);
+ char *cycle[]={"-DCLI_KEEP=37","-DCLI_DROP=1","-UCLI_DROP","-DCLI_DROP=9","-UCLI_DROP",0},*builtin[]={"-U__linux__",0},*invalid[]={"-DCLI_KEEP=37","-UCLI_DROP=bad","-DCLI_DROP=9",0};run("alternating-last-undef",defs,targets[0],cycle,"intvalues[]={37,0};",0);run("undef-target-predefined","#ifdef __linux__\nint live=1;\n#else\nint live=0;\n#endif\n",targets[0],builtin,"intlive=0;",0);run("invalid-undef-not-hidden",defs,targets[0],invalid,"invalid CLI undefine",1);
+ char *target_def[]={"-D__linux__=9",0},*target_ud[]={"-U__linux__","-D__linux__=7",0};run("override-target-predefined","int linux_value=__linux__;\n",targets[0],target_def,"intlinux_value=9;",0);run("undef-then-define-target","int linux_value=__linux__;\n",targets[0],target_ud,"intlinux_value=7;",0);
+ }
+ if(includes_on){
+ char one[4400],two[4400],p[4400];path(one,sizeof one,work,"one");path(two,sizeof two,work,"two");if(mkdir(one,0700)||mkdir(two,0700))die("include-directories");path(p,sizeof p,work,"choice.h");save(p,"#define CHOICE 7\n",17);path(p,sizeof p,one,"choice.h");save(p,"#define CHOICE 11\n",18);path(p,sizeof p,two,"choice.h");save(p,"#define CHOICE 22\n",18);
+ char *ab[]={"-I",one,"-I",two,0},*ba[]={"-I",two,"-I",one,0},*no[]={"-nostdinc","-I",one,0},*onlyno[]={"-nostdinc",0};const char *angle="#include <choice.h>\nint choice=CHOICE;\n";
+ run("include-order-ab",angle,targets[0],ab,"intchoice=11;",0);run("include-order-ba",angle,targets[0],ba,"intchoice=22;",0);run("quoted-local-first","#include \"choice.h\"\nint choice=CHOICE;\n",targets[0],ab,"intchoice=7;",0);run("nostdinc-private",angle,targets[0],no,"intchoice=11;",0);run("nostdinc-carried-refused","#include <stddef.h>\nint n;\n",targets[0],onlyno,"no such file for #include",1);run("include-recovery",angle,targets[0],ab,"intchoice=11;",0);
+ }
+ digest(after);ck(!strcmp(before,after),"candidate","unchanged");puts("NOT_CLAIMED\tforeign-native-execution-full-E2-forced-auto-include-counts");printf("PP_CLI_DOMAIN\tassertions=%d\tfailed=%d\tmode=%s\tscope=product-preprocessing-cli-native-observer\n",checks,failed,mode);return failed?1:0;
+}
