@@ -157,7 +157,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 **P1 纪元1候选（cc 独占重构造切片）：** A2 已封源，SID `df8f29fd`。A3 的 107 作业收据已落齐；cc 继续 A4 PC → A5 GEN → A6 kind2 准入加开发安装，每段核同一 SID，原失败/UNKNOWN 不升格（`out/c43-cc-epoch1-build-01.md`）。cdx 不抢该 context／PC／GEN／安装闸。
 
-**P2 纪元2产品修复（P1 后由 cdx 串行收源、重建）：** 38 个需改产品格，加已知缺陷：E2 五项、E1 errno、`?:` 返回 struct、A-40 三诊断、自引用 struct 措辞、分相计时戳。`lower` 草稿中的 `sizeof abi[nabi].f[i]` 得到 8 而声明元素为 24；单层 `sizeof` 得 24，嵌套动态索引的独立写法被解析器拒，需先缩成有效最小复现再定源码修法。`lower` 的 ENOTDIR/EACCES 与 ENOENT 诊断未分开，输入域 29 断言中 2 红；修源码后必须重测，不删红项。
+**P2 纪元2产品修复（P1 后由 cdx 串行收源、重建）：** 38 个需改产品格，加已知缺陷：E2 五项、E1 errno、`?:` 返回 struct、A-40 三诊断、自引用 struct 措辞、分相计时戳。新红例 `tests/pending/sizeof-global-member.cx`（`68c3adfb72`）：静态结构体数组的 `char op[24]` 得 `sizeof(rows[0].op)=8`，嵌套元素为24、整结构为336、整数组为29232；Root7a 默认 `-run` rc1，产物重建后必须修到四值全对。`lower` 的 ENOTDIR/EACCES 与 ENOENT 诊断未分开，输入域 29 断言中 2 红；修源码后必须重测，不删红项。
 
 **P3 本机格逐行闭合（独立轻切片可并行，父行仍按完整域判）：** `9a44ce9869` 为 lower 登记四个 SOURCE 批，Root7a 的正式 run-batch 分别 51/0、778/0、1516/0、115/0，A-41 的 762 个本机布局输入已穷举；ABI 可观察格 144/0 但六项无 tape 拼写记 UNVERIFIED，输入拒绝 29/2 保持红，六目标／五外宿主／完整 lower 父行仍开。新候选必须重跑；其余宽行按矩阵逐格收据推进，不以局部绿替代完整域。
 
