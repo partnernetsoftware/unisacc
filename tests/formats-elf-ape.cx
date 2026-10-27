@@ -1,0 +1,283 @@
+/* Formats slice F1 (tests/formats-domain-matrix.tsv): elf.x86_64.segments,
+ * elf.arm64.segments, image.six-target-repeat-bytes, ape.container-structure,
+ * object.lnx-arm64.unit-link.  Usage: ROOT PRODUCT_COM NEW_ABS_OUT, with
+ * PRODUCT_COM == ROOT/unisacc.com (the installed product).
+ *
+ * Oracles are written here from published layouts, never from product output:
+ *  - ELF64 gABI: ET_EXEC, PT_LOAD=1, PF_X=1 PF_W=2 PF_R=4, phdr 56 bytes,
+ *    PT_NOTE=4, SHT_NOTE=7; spec.md I-1 (text vaddr 0x400000), I-12 (separate
+ *    R|X text and R|W data PT_LOAD, p_offset == p_vaddr mod 0x1000), prd.md
+ *    3.10 (two PT_LOAD, p_filesz/p_memsz distinguished, zero tail in memory).
+ *  - D-5/A-10/I-4: same source twice per target -> identical bytes across a
+ *    different source path, output name, cwd and wall-clock second; no path
+ *    strings, no ELF note (build-id carrier), no Mach-O LC_UUID (0x1b), PE COFF
+ *    TimeDateStamp 0 and no debug directory.
+ *  - APE (spec.md A-38, exec/c/PACKAGE.md "Embedded development container" and
+ *    P3, seed/ape.c layout): "MZqFpD='" shell-acceptable first line, PE32+ at
+ *    0 with 8-aligned e_lfanew, launcher case lines (1-based tail offsets, no
+ *    leading zero), four 16-aligned contiguous gzip slices (RFC 1952, MTIME 0,
+ *    no FLG names) inflated by the RFC 1951 decoder below with independent
+ *    CRC-32/ISIZE, cache key = first 16 hex of SHA-256(member), slices are
+ *    ELF x86_64, ELF aarch64, Mach-O x86_64, Mach-O arm64, then the P3 package
+ *    and the 16-byte UNIPKG1 footer ending exactly at EOF.
+ * Controls mutate private in-memory copies and require each oracle's exact
+ * named refusal, so a vacuous oracle cannot pass.  Only the lnx/x86_64 image
+ * executes; lnx/arm64 execution is the foreign native cell (NOT_RUN).
+ * Outer bound 55 s; each child <= 12 s. */
+#pragma unisa use cxlib.netpack
+static char root[4096],work[4096],com[4200],bound[4200];
+static int assertions,failures;
+static void die(const char *s){fprintf(stderr,"formats-elf-ape: REFUSE %s errno=%d\n",s,errno);exit(2);}
+static void ck(int ok,const char *a,const char *b){char l[256];int z=snprintf(l,sizeof l,"%s%s%s",a,b?".":"",b?b:"");if(z<0||(size_t)z>=sizeof l)die("label");assertions++;if(!ok)failures++;printf("%s\t%s\n",ok?"PASS":"FAIL",l);}
+static void path(char *o,size_t cap,const char *a,const char *b){int n=snprintf(o,cap,"%s/%s",a,b);if(n<0||(size_t)n>=cap)die("path");}
+static void copy_fit(char *d,size_t cap,const char *s){size_t n=strlen(s);if(n+1>cap)die("copy-bound");memcpy(d,s,n+1);}
+static void saved(const char *p,const void *s,size_t n){int f=open(p,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);size_t at=0;if(f<0)die(p);while(at<n){ssize_t k=write(f,(const char *)s+at,n-at);if(k<0&&errno==EINTR)continue;if(k<=0)die("write");at+=(size_t)k;}if(close(f))die("close");}
+static unsigned char *load(const char *p,size_t *n){char *s=cx_read(p,n);if(!s)die(p);return (unsigned char *)s;}
+static void sha_file(const char *p,char h[65]){size_t n;unsigned char *s=load(p,&n);cx_sha256_hex((char *)s,n,h);free(s);}
+static long long mtime_of(const char *p){struct stat st;errno=0;if(lstat(p,&st))die(errno==ENOENT?"mtime: absent":"mtime: stat");return (long long)st.st_mtime;}
+static unsigned long long get(const unsigned char *p,int n){unsigned long long v=0;int i;for(i=n-1;i>=0;i--)v=(v<<8)|p[i];return v;}
+static void put_le(unsigned char *p,int n,unsigned long long v){int i;for(i=0;i<n;i++)p[i]=(unsigned char)(v>>(8*i));}
+static int span(size_t n,unsigned long long at,unsigned long long len){return at<=n&&len<=n-at;}
+static unsigned long long up16(unsigned long long v){return (v+15)/16*16;}
+static int has(const unsigned char *p,size_t n,const char *needle){size_t k=strlen(needle),i;if(!k||k>n)return 0;for(i=0;i+k<=n;i++)if(p[i]==(unsigned char)needle[0]&&!memcmp(p+i,needle,k))return 1;return 0;}
+
+/* Product children: bound 12, empty-environment-drift guard as in formats-objects. */
+static np_result product(const char *cwd,const char *const *args,const char *name){
+ char *v[24],why[1024],op[4400];int n=0,i;np_result r;
+ v[n++]=bound;v[n++]="12";v[n++]="sh";v[n++]=com;for(i=0;args[i];i++){if(n>=23)die("argv");v[n++]=(char *)args[i];}v[n]=0;
+ if(np_run(v,cwd,0,15,&r,why,sizeof why))die(why);
+ {int z=snprintf(op,sizeof op,"%s/%s.stdout",work,name);if(z<0||(size_t)z>=sizeof op)die("evidence");saved(op,r.out,r.outn);}
+ {int z=snprintf(op,sizeof op,"%s/%s.stderr",work,name);if(z<0||(size_t)z>=sizeof op)die("evidence");saved(op,r.err,r.errn);}
+ return r;}
+static int quiet_ok(np_result *r){int ok=!r->rc&&!r->outn&&!r->errn;if(!ok&&r->errn)fwrite(r->err,1,r->errn,stderr);np_free(r);return ok;}
+
+/* ELF64 ET_EXEC segment oracle (I-1, I-12, prd 3.10).  0 = accept, else the
+ * named refusal.  min_zero: bytes the R|W PT_LOAD must hold in memory only. */
+static const char *elf_exec(const unsigned char *p,size_t n,int arm,unsigned long long min_zero){
+ if(n<64||memcmp(p,"\177ELF\2\1\1",7)||get(p+16,2)!=2||get(p+18,2)!=(arm?183ULL:62ULL)||get(p+20,4)!=1||get(p+52,2)!=64||get(p+54,2)!=56)return "elf-header";
+ unsigned long long ph=get(p+32,8),count=get(p+56,2),entry=get(p+24,8);
+ if(!count||count>64||!span(n,ph,count*56))return "phdr-bounds";
+ int loads=0;long ti=-1,di=-1;size_t i;
+ for(i=0;i<(size_t)count;i++){const unsigned char *q=p+(size_t)ph+i*56;
+  unsigned long long type=get(q,4),flags=get(q+4,4),off=get(q+8,8),va=get(q+16,8),fs=get(q+32,8),ms=get(q+40,8),al=get(q+48,8);
+  if(type!=1)continue;loads++;
+  if((flags&2)&&(flags&1))return "wx-segment";
+  if(!span(n,off,fs))return "file-extent";
+  if(al<0x1000||(al&(al-1))||off%al!=va%al||off%0x1000!=va%0x1000)return "page-congruence";
+  if(ms<fs)return "filesz-memsz";
+  if(flags==5){if(ti>=0)return "text-flags";ti=(long)i;}else if(flags==6){if(di>=0)return "data-flags";di=(long)i;}}
+ if(loads!=2)return "load-count";
+ if(ti<0)return "text-flags";
+ if(di<0)return "data-flags";
+ const unsigned char *t=p+(size_t)ph+(size_t)ti*56,*d=p+(size_t)ph+(size_t)di*56;
+ unsigned long long tva=get(t+16,8),tfs=get(t+32,8),tms=get(t+40,8),dva=get(d+16,8),dfs=get(d+32,8),dms=get(d+40,8);
+ if(tms!=tfs||dms<=dfs)return "filesz-memsz";
+ if(dms-dfs<min_zero)return "zero-tail";
+ if(tva!=0x400000)return "text-vaddr";
+ {unsigned long long t0=tva&~0xfffULL,t1=(tva+tms+0xfff)&~0xfffULL,d0=dva&~0xfffULL,d1=(dva+dms+0xfff)&~0xfffULL;if(d0<t1&&t0<d1)return "overlap";}
+ if(entry<tva||entry-tva>=tfs)return "entry";
+ return 0;}
+/* No build-id carrier: no PT_NOTE and, when present, no SHT_NOTE section. */
+static const char *elf_ids(const unsigned char *p,size_t n){
+ unsigned long long ph=get(p+32,8),count=get(p+56,2),sh=get(p+40,8),sn=get(p+60,2);size_t i;
+ if(!span(n,ph,count*56))return "phdr-bounds";
+ for(i=0;i<(size_t)count;i++)if(get(p+(size_t)ph+i*56,4)==4)return "elf-note";
+ if(sn){if(get(p+58,2)!=64||!span(n,sh,sn*64))return "shdr-bounds";for(i=0;i<(size_t)sn;i++)if(get(p+(size_t)sh+i*64+4,4)==7)return "elf-note";}
+ return 0;}
+/* Mach-O 64 MH_EXECUTE, bounded load commands, no LC_UUID. */
+static const char *macho_ids(const unsigned char *p,size_t n,int arm){
+ if(n<32||get(p,4)!=0xfeedfacfULL||get(p+4,4)!=(arm?0x100000cULL:0x1000007ULL)||get(p+12,4)!=2)return "macho-header";
+ unsigned long long count=get(p+16,4),size=get(p+20,4),at=32;size_t i;
+ if(!count||!span(n,32,size))return "macho-bounds";
+ for(i=0;i<(size_t)count;i++){if(at+8>32+size)return "macho-bounds";unsigned long long cmd=get(p+at,4),len=get(p+at+4,4);if(len<8||len>32+size-at)return "macho-bounds";if(cmd==0x1b)return "lc-uuid";at+=len;}
+ return 0;}
+/* PE32+: COFF TimeDateStamp 0 and empty debug directory (index 6). */
+static const char *pe_ids(const unsigned char *p,size_t n,int arm){
+ if(n<64||memcmp(p,"MZ",2))return "pe-header";
+ unsigned long long pe=get(p+60,4);
+ if(!span(n,pe,24)||memcmp(p+pe,"PE\0\0",4)||get(p+pe+4,2)!=(arm?0xaa64ULL:0x8664ULL))return "pe-header";
+ unsigned long long opt=pe+24,optn=get(p+pe+20,2);
+ if(optn<112||!span(n,opt,optn)||get(p+opt,2)!=0x20b)return "pe-header";
+ if(get(p+pe+8,4))return "coff-timestamp";
+ unsigned long long dirs=get(p+opt+108,4);
+ if(dirs>6){if(optn<112+56)return "pe-header";if(get(p+opt+112+48,4)||get(p+opt+112+52,4))return "debug-directory";}
+ return 0;}
+
+/* RFC 1951 inflate (canonical-Huffman decoder after the published puff
+ * algorithm, written independently here), RFC 1952 member, CRC-32. */
+typedef struct{const unsigned char *in;size_t inlen,incnt;unsigned long long bitbuf;int bitcnt;unsigned char *out;size_t outlen,outcnt;int err;}zst;
+typedef struct{short count[16];short symbol[320];}huff;
+static int zbits(zst *s,int need){unsigned long long v=s->bitbuf;while(s->bitcnt<need){if(s->incnt==s->inlen){s->err=1;return 0;}v|=(unsigned long long)s->in[s->incnt++]<<s->bitcnt;s->bitcnt+=8;}s->bitbuf=v>>need;s->bitcnt-=need;return (int)(v&((1ULL<<need)-1));}
+static int zdecode(zst *s,const huff *h){int code=0,first=0,index=0,len;for(len=1;len<16;len++){code|=zbits(s,1);if(s->err)return -1;int c=h->count[len];if(code-c<first)return h->symbol[index+(code-first)];index+=c;first+=c;first<<=1;code<<=1;}return -1;}
+static int zbuild(huff *h,const short *length,int n){short offs[16];int len,sym,left=1;for(len=0;len<16;len++)h->count[len]=0;for(sym=0;sym<n;sym++)h->count[length[sym]]++;if(h->count[0]==n)return 0;for(len=1;len<16;len++){left<<=1;left-=h->count[len];if(left<0)return left;}offs[1]=0;for(len=1;len<15;len++)offs[len+1]=(short)(offs[len]+h->count[len]);for(sym=0;sym<n;sym++)if(length[sym])h->symbol[offs[length[sym]]++]=(short)sym;return left;}
+static const short zlbase[29]={3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258};
+static const short zlext[29]={0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0};
+static const short zdbase[30]={1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577};
+static const short zdext[30]={0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13};
+static int zcodes(zst *s,const huff *lc,const huff *dc){int sym;do{sym=zdecode(s,lc);if(sym<0)return -10;if(sym<256){if(s->outcnt>=s->outlen)return -100;s->out[s->outcnt++]=(unsigned char)sym;}else if(sym>256){sym-=257;if(sym>=29)return -11;int len=zlbase[sym]+zbits(s,zlext[sym]);int ds=zdecode(s,dc);if(ds<0||ds>=30)return -12;size_t dist=(size_t)(zdbase[ds]+zbits(s,zdext[ds]));if(s->err)return -1;if(dist>s->outcnt)return -13;if((size_t)len>s->outlen-s->outcnt)return -100;while(len--){s->out[s->outcnt]=s->out[s->outcnt-dist];s->outcnt++;}}}while(sym!=256);return 0;}
+static int zstored(zst *s){s->bitbuf=0;s->bitcnt=0;if(s->incnt+4>s->inlen)return 2;size_t len=s->in[s->incnt]|(size_t)s->in[s->incnt+1]<<8;if(s->in[s->incnt+2]!=(unsigned char)(~len&0xff)||s->in[s->incnt+3]!=(unsigned char)((~len>>8)&0xff))return -2;s->incnt+=4;if(len>s->inlen-s->incnt)return 2;if(len>s->outlen-s->outcnt)return -100;memcpy(s->out+s->outcnt,s->in+s->incnt,len);s->outcnt+=len;s->incnt+=len;return 0;}
+static int zfixed(zst *s){static huff lc,dc;static int ready;if(!ready){short l[320];int i;for(i=0;i<144;i++)l[i]=8;for(;i<256;i++)l[i]=9;for(;i<280;i++)l[i]=7;for(;i<288;i++)l[i]=8;zbuild(&lc,l,288);for(i=0;i<30;i++)l[i]=5;zbuild(&dc,l,30);ready=1;}return zcodes(s,&lc,&dc);}
+static const short zorder[19]={16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15};
+static int zdynamic(zst *s){short lengths[320];huff lc,dc;int nlen=zbits(s,5)+257,ndist=zbits(s,5)+1,ncode=zbits(s,4)+4,index,err;if(s->err)return -1;if(nlen>286||ndist>30)return -3;for(index=0;index<ncode;index++)lengths[zorder[index]]=(short)zbits(s,3);for(;index<19;index++)lengths[zorder[index]]=0;if(s->err)return -1;if(zbuild(&lc,lengths,19))return -4;index=0;while(index<nlen+ndist){int sym=zdecode(s,&lc);if(sym<0)return -5;if(sym<16)lengths[index++]=(short)sym;else{int len=0;if(sym==16){if(!index)return -5;len=lengths[index-1];sym=3+zbits(s,2);}else if(sym==17)sym=3+zbits(s,3);else sym=11+zbits(s,7);if(s->err)return -1;if(index+sym>nlen+ndist)return -6;while(sym--)lengths[index++]=(short)len;}}if(!lengths[256])return -9;err=zbuild(&lc,lengths,nlen);if(err&&(err<0||nlen!=lc.count[0]+lc.count[1]))return -7;err=zbuild(&dc,lengths+nlen,ndist);if(err&&(err<0||ndist!=dc.count[0]+dc.count[1]))return -8;return zcodes(s,&lc,&dc);}
+static unsigned long crc32_of(const unsigned char *p,size_t n){static unsigned long t[256];static int ready;size_t i;if(!ready){unsigned long c;int k;for(i=0;i<256;i++){c=(unsigned long)i;for(k=0;k<8;k++)c=(c&1)?0xEDB88320UL^(c>>1):c>>1;t[i]=c;}ready=1;}unsigned long c=0xFFFFFFFFUL;for(i=0;i<n;i++)c=t[(c^p[i])&0xff]^(c>>8);return (c^0xFFFFFFFFUL)&0xFFFFFFFFUL;}
+/* One gzip member occupying exactly [p, p+n).  0 or a named refusal. */
+static const char *gunzip(const unsigned char *p,size_t n,unsigned char **out,size_t *outn){
+ *out=0;*outn=0;
+ if(n<18||p[0]!=0x1f||p[1]!=0x8b||p[2]!=8)return "gzip-header";
+ if(p[3])return "gzip-flags";
+ if(get(p+4,4))return "gzip-mtime";
+ unsigned long long isize=get(p+n-4,4);
+ if(isize>(64ULL<<20))return "gzip-isize";
+ zst s;memset(&s,0,sizeof s);s.in=p+10;s.inlen=n-18;s.outlen=(size_t)isize;s.out=malloc(s.outlen+1);if(!s.out)die("allocation");
+ int last,rc=0;
+ do{last=zbits(&s,1);int type=zbits(&s,2);if(s.err){rc=-1;break;}if(type==0)rc=zstored(&s);else if(type==1)rc=zfixed(&s);else if(type==2)rc=zdynamic(&s);else rc=-1;if(s.err&&!rc)rc=-1;}while(!last&&!rc);
+ if(rc){free(s.out);return rc==-100?"gzip-isize":"inflate";}
+ if(s.incnt!=s.inlen){free(s.out);return "gzip-length";}
+ if(s.outcnt!=s.outlen){free(s.out);return "gzip-isize";}
+ if(crc32_of(s.out,s.outcnt)!=get(p+n-8,4)){free(s.out);return "gzip-crc32";}
+ *out=s.out;*outn=s.outcnt;return 0;}
+
+/* APE container oracle. */
+typedef struct{unsigned long long off[4],len[4],pe_end,pkg_at,pkg_len,lfanew;unsigned char *raw[4];size_t rawn[4];} ape_t;
+static const char *ape_case[4]={"  Linuxx86_64) o=","  Linuxaarch64|Linuxarm64) o=","  Darwinx86_64) o=","  Darwinarm64) o="};
+static void ape_free(ape_t *a){int i;for(i=0;i<4;i++){free(a->raw[i]);a->raw[i]=0;}}
+static int ape_dec(const unsigned char **c,const unsigned char *e,unsigned long long *v){const unsigned char *q=*c;unsigned long long x=0;int d=0;if(q<e&&*q=='0')return 0;while(q<e&&*q>='0'&&*q<='9'&&d<16){x=x*10+(unsigned long long)(*q-'0');q++;d++;}if(!d)return 0;*v=x;*c=q;return 1;}
+static int ape_line(const unsigned char *s,size_t n,const char *lit){return has(s,n,lit);}
+static const char *ape_parse(const unsigned char *p,size_t n,ape_t *a){
+ int i;memset(a,0,sizeof *a);
+ if(n<1024+16||memcmp(p+n-16,"UNIPKG1\n",8))return "footer-magic";
+ a->pkg_len=get(p+n-8,8);
+ if(a->pkg_len<8||a->pkg_len>n-16)return "footer-length";
+ a->pkg_at=n-16-a->pkg_len;
+ {const unsigned char *q=p+a->pkg_at,*e=q+(a->pkg_len<64?a->pkg_len:64);unsigned long long v;if(memcmp(q,"P 3 ",4))return "p3-header";q+=4;for(i=0;i<3;i++){if(q<e&&*q=='0'&&q+1<e&&(q[1]==' '||q[1]=='\n')){q++;}else if(!ape_dec(&q,e,&v))return "p3-header";if(q>=e||*q!=(i<2?' ':'\n'))return "p3-header";q++;}}
+ if(memcmp(p,"MZqFpD='\n",9))return "shell-first-line";
+ a->lfanew=get(p+0x3c,4);
+ {size_t qend=9;while(qend<n&&qend<4096&&p[qend]!='\'')qend++;if(qend>=n||qend>=4096||qend+1>=n||p[qend+1]!='\n')return "shell-quote";
+  size_t sb=qend+2;if(a->lfanew%8||a->lfanew<=sb||!span(n,a->lfanew,24)||memcmp(p+a->lfanew,"PE\0\0",4))return "pe-header";
+  const unsigned char *sc=p+sb;size_t sn=(size_t)a->lfanew-sb,k;
+  for(k=0;k<sn;k++)if(!(sc[k]=='\n'||(sc[k]>=32&&sc[k]<127)))return "script-bytes";
+  for(i=0;i<4;i++){size_t l=strlen(ape_case[i]),at;int found=0;for(at=0;at+l<=sn;at++)if(!memcmp(sc+at,ape_case[i],l)&&(at==0||sc[at-1]=='\n')){if(found)return "script-offsets";found=1;
+     const unsigned char *c=sc+at+l,*e=sc+sn;unsigned long long o,m;if(!ape_dec(&c,e,&o)||o<1)return "script-offsets";if(e-c<3||memcmp(c," n=",3))return "script-offsets";c+=3;if(!ape_dec(&c,e,&m)||!m)return "script-offsets";if(e-c<3+16+3||memcmp(c," k=",3))return "script-offsets";c+=3;int h;for(h=0;h<16;h++)if(!((c[h]>='0'&&c[h]<='9')||(c[h]>='a'&&c[h]<='f')))return "script-offsets";if(memcmp(c+16,";;\n",3))return "script-offsets";a->off[i]=o-1;a->len[i]=m;}
+   if(!found)return "script-offsets";}
+  if(!ape_line(sc,sn,"\n  tail -c +$o \"$0\" | head -c $n | gzip -dc > \"$t.$$\"")||!ape_line(sc,sn,"\nUNISA_CONTAINER=\"$0\"; export UNISA_CONTAINER\n")||!ape_line(sc,sn,"\nexec \"$t\" \"$@\"\n"))return "script-launcher";}
+ {unsigned long long pe=a->lfanew,opt=pe+24,optn,ns,sec,end;size_t k;
+  if(get(p+pe+4,2)!=0x8664)return "pe-header";optn=get(p+pe+20,2);ns=get(p+pe+6,2);
+  if(optn<112||!span(n,opt,optn)||get(p+opt,2)!=0x20b||!ns||ns>96)return "pe-header";
+  sec=opt+optn;if(!span(n,sec,ns*40))return "pe-sections";
+  end=get(p+opt+60,4);if(end<sec+ns*40)return "pe-sections";
+  for(k=0;k<(size_t)ns;k++){const unsigned char *q=p+sec+k*40;unsigned long long rs=get(q+16,4),ro=get(q+20,4);if(rs){if(!span(n,ro,rs))return "pe-sections";if(ro+rs>end)end=ro+rs;}}
+  a->pe_end=end;}
+ {unsigned long long at=up16(a->pe_end),prev=a->pe_end,z;
+  for(i=0;i<4;i++){if(a->off[i]!=at)return "slice-offset";if(!span(n,a->off[i],a->len[i]))return "slice-bounds";for(z=prev;z<a->off[i];z++)if(p[z])return "slice-padding";prev=a->off[i]+a->len[i];at=up16(prev);}
+  if(a->pkg_at!=at)return "package-offset";for(z=prev;z<at;z++)if(p[z])return "slice-padding";}
+ for(i=0;i<4;i++){char hex[65];const unsigned char *m=p+a->off[i];
+  const char *why=gunzip(m,(size_t)a->len[i],&a->raw[i],&a->rawn[i]);if(why)return why;
+  const unsigned char *r=a->raw[i];size_t rn=a->rawn[i];
+  if(i<2){if(rn<64||memcmp(r,"\177ELF\2\1\1",7)||get(r+16,2)!=2||get(r+18,2)!=(i?183ULL:62ULL))return "slice-content";}
+  else if(macho_ids(r,rn,i==3)&&strcmp(macho_ids(r,rn,i==3),"lc-uuid"))return "slice-content";
+  cx_sha256_hex((char *)m,(size_t)a->len[i],hex);
+  {const unsigned char *sc=p+9;size_t l=strlen(ape_case[i]),at,sn=(size_t)a->lfanew-9;for(at=0;at+l<=sn;at++)if(!memcmp(sc+at,ape_case[i],l))break;if(at+l>sn)return "cache-key";const unsigned char *k=(const unsigned char *)memchr(sc+at+l,'k',sn-at-l);if(!k||(size_t)(sc+sn-k)<18||k[1]!='='||memcmp(k+2,hex,16))return "cache-key";}}
+ return 0;}
+
+static const char *data_src="static char msg[] = \"unisacc-data\";\nstatic long counter = 40;\nstatic int table[4096];\nint main(void){table[4095]=2;counter+=table[4095];return (int)counter+(msg[8]=='d'?0:100)-35;}\n";
+static const char *targets[6]={"lnx/x86_64","lnx/arm64","osx/x86_64","osx/arm64","win/x86_64","win/arm64"};
+static const char *tnames[6]={"lnx-x86_64","lnx-arm64","osx-x86_64","osx-arm64","win-x86_64","win-arm64"};
+
+static void elf_controls(const unsigned char *p,size_t n){
+ /* Mutations of the accepted lnx/x86_64 image; each must hit its named refusal. */
+ static const char *want[8]={"elf-header","wx-segment","page-congruence","filesz-memsz","text-flags","load-count","entry","file-extent"};
+ static const char *name[8]={"machine-swapped","data-rwx","data-vaddr-plus16","data-memsz-eq-filesz","text-read-only","phnum-1","entry-in-data","text-filesz-past-eof"};
+ unsigned long long ph=get(p+32,8),count=get(p+56,2);long ti=-1,di=-1;size_t i;int c;
+ for(i=0;i<(size_t)count;i++){const unsigned char *q=p+ph+i*56;if(get(q,4)==1&&get(q+4,4)==5)ti=(long)i;if(get(q,4)==1&&get(q+4,4)==6)di=(long)i;}
+ if(ti<0||di<0){puts("NOT_RUN\tcontrol.elf\tbase-image-not-accepted");return;}
+ for(c=0;c<8;c++){unsigned char *m=malloc(n);if(!m)die("allocation");memcpy(m,p,n);unsigned char *t=m+ph+(size_t)ti*56,*d=m+ph+(size_t)di*56;
+  if(c==0)put_le(m+18,2,183);else if(c==1)put_le(d+4,4,7);else if(c==2)put_le(d+16,8,get(d+16,8)+16);else if(c==3)put_le(d+40,8,get(d+32,8));else if(c==4)put_le(t+4,4,4);else if(c==5)put_le(m+56,2,1);else if(c==6)put_le(m+24,8,get(d+16,8));else{put_le(t+32,8,n+1);put_le(t+40,8,n+1);}
+  const char *got=elf_exec(m,n,0,16384);char l[96];snprintf(l,sizeof l,"%s.refuses-%s",name[c],want[c]);ck(got&&!strcmp(got,want[c]),"control.elf",l);if(!got||strcmp(got,want[c]))fprintf(stderr,"control %s got %s\n",name[c],got?got:"accept");free(m);}}
+
+static void ape_controls(const unsigned char *p,size_t n,const ape_t *base){
+ static const char *want[7]={"footer-magic","footer-length","p3-header","shell-first-line","slice-offset","gzip-crc32","slice-padding"};
+ static const char *name[7]={"footer-magic-byte","footer-length-eq-size","p3-version-9","first-line-double-quote","linux-x86_64-offset-digit","slice0-crc-byte","slice0-padding-byte"};
+ int c;
+ for(c=0;c<7;c++){unsigned char *m=malloc(n);if(!m)die("allocation");memcpy(m,p,n);int applied=1;
+  if(c==0)m[n-16]='X';else if(c==1)put_le(m+n-8,8,n);else if(c==2)m[base->pkg_at+2]='9';else if(c==3)m[7]='"';
+  else if(c==4){size_t l=strlen(ape_case[0]),at;applied=0;for(at=9;at+l<(size_t)base->lfanew;at++)if(!memcmp(m+at,ape_case[0],l)){size_t e=at+l;while(m[e]>='0'&&m[e]<='9')e++;m[e-1]=(unsigned char)(m[e-1]=='9'?'8':m[e-1]+1);applied=1;break;}}
+  else if(c==5)m[base->off[0]+base->len[0]-8]^=0x01;
+  else{unsigned long long z=base->off[0]+base->len[0];if(z<base->off[1])m[z]=1;else applied=0;}
+  if(!applied){printf("NOT_RUN\tcontrol.ape.%s\tno-site-in-this-container\n",name[c]);free(m);continue;}
+  ape_t a;const char *got=ape_parse(m,n,&a);ape_free(&a);char l[96];snprintf(l,sizeof l,"%s.refuses-%s",name[c],want[c]);ck(got&&!strcmp(got,want[c]),"control.ape",l);if(!got||strcmp(got,want[c]))fprintf(stderr,"control %s got %s\n",name[c],got?got:"accept");free(m);}}
+
+int main(int argc,char **argv){
+ char before[65],after[65],da[4400],db[4400],sa[4400],stamp[4400],img_a[6][4400],img_b[6][4400];
+ int i,ok_a[6],ok_b[6];
+ if(argc!=4||!realpath(argv[1],root)||argv[2][0]!='/'||argv[3][0]!='/'||strstr(argv[3],".."))die("usage ROOT PRODUCT_COM NEW_ABS_OUT");
+ {char expected[4200];path(expected,sizeof expected,root,"unisacc.com");if(strcmp(argv[2],expected))die("installed-product-required");}
+ if(unsetenv("UNISACC_RR_TIME")||unsetenv("UNISACC_RF_CAPTURE")||unsetenv("UNISA_ATTRIBUTES")||setenv("UNISACC_RUN_CACHE","0",1))die("clean-environment");
+ copy_fit(com,sizeof com,argv[2]);copy_fit(work,sizeof work,argv[3]);
+ if(mkdir(work,0700))die("new private output required");
+ path(bound,sizeof bound,root,"tools/bound");
+ sha_file(com,before);printf("INPUT\tproduct\t%s\tsha256=%s\n",com,before);
+ path(da,sizeof da,work,"alpha_dir_7Q");path(db,sizeof db,work,"bravo_longer_dir_9Z");if(mkdir(da,0700)||mkdir(db,0700))die("round dirs");
+ path(sa,sizeof sa,da,"alpha_source_7Q.c");saved(sa,data_src,strlen(data_src));
+ {char sb[4400];path(sb,sizeof sb,db,"bravo_source_9Z.c");saved(sb,data_src,strlen(data_src));}
+
+ /* Round A: absolute paths, cwd ROOT. */
+ for(i=0;i<6;i++){char f[64],nm[32];snprintf(f,sizeof f,"alpha_image_7Q.%s",tnames[i]);path(img_a[i],sizeof img_a[i],da,f);snprintf(nm,sizeof nm,"compile-a-%d",i);
+  const char *v[]={"-O2","-b",targets[i],sa,"-o",img_a[i],0};np_result r=product(root,v,nm);ok_a[i]=quiet_ok(&r);char l[64];snprintf(l,sizeof l,"%s.compile-a",targets[i]);ck(ok_a[i],"image.six-target-repeat-bytes",l);}
+ /* Wall-clock separation: spin on a private stamp until its mtime passes every round-A image. */
+ {long long last=0;for(i=0;i<6;i++)if(ok_a[i]&&mtime_of(img_a[i])>last)last=mtime_of(img_a[i]);path(stamp,sizeof stamp,work,"wallclock.stamp");long spins=0;
+  for(;;){int f=open(stamp,O_WRONLY|O_CREAT|O_TRUNC|O_NOFOLLOW|O_CLOEXEC,0600);if(f<0||write(f,"x",1)!=1||close(f))die("stamp");if(mtime_of(stamp)>last)break;if(++spins>8000000)die("wallclock-stall");}
+  printf("WALLCLOCK\tround-a-max-mtime=%lld\tstamp-mtime=%lld\tspins=%ld\n",last,mtime_of(stamp),spins);}
+ /* Round B: relative paths, different names, cwd = round-B dir. */
+ for(i=0;i<6;i++){char f[64],nm[32];snprintf(f,sizeof f,"bravo_image_9Z.%s.out",tnames[i]);path(img_b[i],sizeof img_b[i],db,f);snprintf(nm,sizeof nm,"compile-b-%d",i);
+  const char *v[]={"-O2","-b",targets[i],"bravo_source_9Z.c","-o",f,0};np_result r=product(db,v,nm);ok_b[i]=quiet_ok(&r);char l[64];snprintf(l,sizeof l,"%s.compile-b",targets[i]);ck(ok_b[i],"image.six-target-repeat-bytes",l);}
+ for(i=0;i<6;i++){char l[96];if(!ok_a[i]||!ok_b[i]){printf("NOT_RUN\timage.six-target-repeat-bytes.%s\tcompile-failed\n",targets[i]);continue;}
+  size_t na,nb;unsigned char *a=load(img_a[i],&na),*b=load(img_b[i],&nb);char ha[65];cx_sha256_hex((char *)a,na,ha);printf("EVIDENCE\timage.%s\tbytes=%lu\tsha256=%s\n",targets[i],(unsigned long)na,ha);
+  snprintf(l,sizeof l,"%s.wallclock-separated",targets[i]);ck(mtime_of(img_b[i])>mtime_of(img_a[i]),"image.six-target-repeat-bytes",l);
+  snprintf(l,sizeof l,"%s.identical-bytes",targets[i]);ck(na==nb&&!memcmp(a,b,na),"image.six-target-repeat-bytes",l);
+  {const char *needle[7]={"alpha_","bravo_","_7Q","_9Z","source_",root,work};int clean=1,k;for(k=0;k<7;k++)if(has(a,na,needle[k])||has(b,nb,needle[k])){clean=0;fprintf(stderr,"path string %s in %s\n",needle[k],targets[i]);}
+   snprintf(l,sizeof l,"%s.no-path-strings",targets[i]);ck(clean,"image.six-target-repeat-bytes",l);}
+  {const char *why=i<2?elf_ids(a,na):i<4?macho_ids(a,na,i%2):pe_ids(a,na,i%2);snprintf(l,sizeof l,"%s.%s",targets[i],i<2?"no-elf-note-build-id":i<4?"no-lc-uuid":"coff-timestamp-zero-no-debug-dir");ck(!why,"image.six-target-repeat-bytes",l);if(why)fprintf(stderr,"%s: %s\n",targets[i],why);}
+  free(a);free(b);}
+ {unsigned char x[4]={1,2,3,4},y[4]={1,2,3,5};ck(memcmp(x,y,4)!=0,"control.repeat","one-byte-difference-detected");}
+
+ /* ELF I-12 on the round-A Linux images (data source with bss table[4096]). */
+ for(i=0;i<2;i++){const char *cell=i?"elf.arm64.segments":"elf.x86_64.segments";if(!ok_a[i]){printf("NOT_RUN\t%s\tcompile-failed\n",cell);continue;}
+  size_t n;unsigned char *p=load(img_a[i],&n);const char *why=elf_exec(p,n,i,16384);ck(!why,cell,"rx-text-rw-data-congruent-zero-tail-entry");if(why)fprintf(stderr,"%s: %s\n",cell,why);
+  if(!i&&!why){elf_controls(p,n);char h0[65],h1[65];sha_file(img_a[0],h0);if(chmod(img_a[0],0700))die("chmod");
+   char *run[]={bound,"5",img_a[0],0};np_result r;char e[1024];if(np_run(run,root,0,8,&r,e,sizeof e))die(e);ck(r.rc==7&&!r.outn&&!r.errn,cell,"lnx-x86_64-data-and-bss-writes-exit7");np_free(&r);sha_file(img_a[0],h1);ck(!strcmp(h0,h1),cell,"image-unchanged-by-execution");}
+  if(i)puts("NOT_RUN\tnative-host.lnx/arm64\telf.arm64.segments-format-only");free(p);}
+
+ /* lnx/arm64 two-unit product link. */
+ {char mc[4400],vc[4400],mo[4400],vo[4400],l1[4400],l2[4400],hm[65],hv[65],hm2[65],hv2[65];const char *cell="object.lnx-arm64.unit-link";
+  path(mc,sizeof mc,work,"unit_main.c");path(vc,sizeof vc,work,"unit_value.c");path(mo,sizeof mo,work,"unit_main-arm64.o");path(vo,sizeof vo,work,"unit_value-arm64.o");path(l1,sizeof l1,work,"linked-arm64.elf");path(l2,sizeof l2,db,"relinked-arm64.out");
+  {const char *s="int object_value(void);int main(void){return object_value();}\n";saved(mc,s,strlen(s));}
+  {const char *s="int object_value(void){return 7;}\n";saved(vc,s,strlen(s));}
+  int ok=1;
+  {const char *v[]={"-O2","-c","-funit","-b","lnx/arm64",mc,"-o",mo,0};np_result r=product(root,v,"unit-main-arm64");int c=quiet_ok(&r);ck(c,cell,"compile-main");ok&=c;}
+  {const char *v[]={"-O2","-c","-funit","-b","lnx/arm64",vc,"-o",vo,0};np_result r=product(root,v,"unit-value-arm64");int c=quiet_ok(&r);ck(c,cell,"compile-value");ok&=c;}
+  if(ok){size_t n;unsigned char *p=load(mo,&n);int c=n>=64&&!memcmp(p,"\177ELF\2\1\1",7)&&get(p+16,2)==1&&get(p+18,2)==183;free(p);p=load(vo,&n);c=c&&n>=64&&!memcmp(p,"\177ELF\2\1\1",7)&&get(p+16,2)==1&&get(p+18,2)==183;free(p);ck(c,cell,"inputs-ET_REL-EM_AARCH64");ok&=c;}
+  if(ok){sha_file(mo,hm);sha_file(vo,hv);
+   {const char *v[]={mo,vo,"-o",l1,0};np_result r=product(root,v,"link-arm64");int c=quiet_ok(&r);ck(c,cell,"product-link-accept");ok&=c;}
+   if(ok){size_t n;unsigned char *p=load(l1,&n);const char *why=elf_exec(p,n,1,1);ck(!why,cell,"ET_EXEC-EM_AARCH64-I12-segments-entry");if(why)fprintf(stderr,"%s: %s\n",cell,why);
+    {const char *v[]={"../unit_main-arm64.o","../unit_value-arm64.o","-o","relinked-arm64.out",0};np_result r=product(db,v,"relink-arm64");int c=quiet_ok(&r);ck(c,cell,"relink-accept");
+     if(c){size_t n2;unsigned char *q=load(l2,&n2);ck(n2==n&&!memcmp(p,q,n),cell,"relink-identical-bytes");free(q);}}
+    free(p);}
+   sha_file(mo,hm2);sha_file(vo,hv2);ck(!strcmp(hm,hm2)&&!strcmp(hv,hv2),cell,"input-objects-unchanged");}
+  puts("NOT_RUN\tnative-host.lnx/arm64\tobject.lnx-arm64.unit-link-execution");}
+
+ /* APE container structure of the installed product. */
+ {size_t n;unsigned char *p=load(com,&n);ape_t a;const char *why=ape_parse(p,n,&a);const char *cell="ape.container-structure";
+  ck(!why,cell,"footer-p3-firstline-pe-script-slices-gzip-crc-key-content");if(why)fprintf(stderr,"%s: %s\n",cell,why);
+  if(!why){static const char *sn[4]={"lnx/x86_64","lnx/arm64","osx/x86_64","osx/arm64"};
+   printf("EVIDENCE\tape\tbytes=%lu\tpe_end=%llu\tpackage_at=%llu\tpackage_len=%llu\n",(unsigned long)n,a.pe_end,a.pkg_at,a.pkg_len);
+   for(i=0;i<4;i++){char h[65];cx_sha256_hex((char *)a.raw[i],a.rawn[i],h);printf("EVIDENCE\tape.slice.%s\toffset=%llu\tgzip=%llu\tinflated=%lu\tsha256=%s\n",sn[i],a.off[i],a.len[i],(unsigned long)a.rawn[i],h);}
+   {const char *w=elf_exec(a.raw[0],a.rawn[0],0,1);ck(!w,cell,"slice.lnx-x86_64.I12-segments");if(w)fprintf(stderr,"slice0: %s\n",w);}
+   {const char *w=elf_exec(a.raw[1],a.rawn[1],1,1);ck(!w,cell,"slice.lnx-arm64.I12-segments");if(w)fprintf(stderr,"slice1: %s\n",w);}
+   ape_controls(p,n,&a);}
+  ape_free(&a);free(p);}
+
+ sha_file(com,after);ck(!strcmp(before,after),"candidate-unchanged",0);
+ puts("NOT_CLAIMED\tforeign-native-execution-macho-pe-deep-structure-codesign-fat-system-linker");
+ puts("TIMING\tstartup_construction_loading_inference_output_validation_cold_hot=UNMEASURED");
+ printf("FORMATS_ELF_APE\tassertions=%d\tfailed=%d\tscope=elf-i12-x2-six-target-repeat-bytes-ape-structure-arm64-unit-link\n",assertions,failures);
+ return failures?1:0;}

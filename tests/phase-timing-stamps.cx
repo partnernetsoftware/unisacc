@@ -1,0 +1,582 @@
+/* C43 slice P1: phase-timing stamps (tests/phase-timing-stamps.cx).
+ * ROOT PRODUCT ABS_OUT -- PRODUCT is the installed Root APE (ROOT/unisacc.com); ABS_OUT a new directory.
+ * Linux/x86_64 LP64 only.  Outer caller uses tools/bound 55; every child runs under tools/bound 12.
+ *
+ * Cells of tests/phase-timing-domain-matrix.tsv closed or explained here:
+ *   startup.isolated.{cold,hot}        external proxy: `sh PRODUCT --version` spawn-to-exit, no compile
+ *   loading.run-reuse-lookup.{miss,hit} exec/c/compiler.c:1057-1061 stamp `RR_TIME\tlookup_hit=H\tns=N`
+ *                                       (-run on lnx/x86_64 probes only the host route: hit is 2, never 1),
+ *                                       plus the -c stamp compiler.c:1178-1179 `RR_TIME\tartifact_hit=H\tmode=M`
+ *   loading.memory-bind.{cold,hot}     compiler.c:1253-1257 `RR_TIME\tmemory_bind\trc=R\tns=N`, printed only on
+ *                                       the in-memory route; reported as measured when present, else UNMEASURED
+ *                                       with the route reason (never estimated, never zero)
+ *   validation.{cold,hot}              this harness's own verify time (exact compare, stamp parse, cache scan,
+ *                                       product re-digest) per sample
+ *   report.unmeasured-schema           every phase x {cold,hot} exactly once as a positive ns or the literal
+ *                                       UNMEASURED with a reason; the checker refuses eleven malformed reports
+ * Phases the product does not stamp (construction, forward-exec loading, member inflate, in-product inference,
+ * output duration) are printed UNMEASURED.  No speed threshold: concurrent load only adds noise, so the checks are
+ * schema, ordering inside one process and consistency (stamp <= its own e2e wall), not absolute times.
+ * Cold = UNISACC_RUN_CACHE=0 process (or the first run on an empty private cache for the lookup miss); not OS-cold.
+ */
+#pragma unisa use cxlib.netpack
+static char root[4096], product[4096], work[4096], bound[4400], fixture[4400], selfpath[4096];
+static char cache[4400], object[4400], env_cache[4600];
+static char prod_hash[65], self_hash[65], fixture_hash[65];
+/* The probe is written into ABS_OUT (exclusive create) so the batch depends on no other checkout file. */
+static const char *program = "int main(void){puts(\"PHASE\\tok\");return 0;}\n";
+static const char *want_run = "PHASE\tok\n";
+static const char *want_version = "unisacc 0.0.43\n";
+static int assertions, failures, report_failures;
+static long long clock_previous;
+static int clock_seen;
+static long long validation_start;
+
+static void die(const char *s) {
+    fprintf(stderr, "phase-timing-stamps: REFUSE %s errno=%d\n", s, errno);
+    exit(2);
+}
+static void copy_fit(char *dst, size_t cap, const char *src) {
+    size_t i = 0;
+    if (!cap) die("copy bound");
+    while (src[i]) {
+        if (i + 1 >= cap) die("copy bound");
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = 0;
+}
+static void path(char *p, size_t cap, const char *a, const char *b) {
+    int n = snprintf(p, cap, "%s/%s", a, b);
+    if (n < 0 || (size_t)n >= cap) die("path bound");
+}
+static void label2(char *dst, size_t cap, const char *a, const char *b) {
+    int n = snprintf(dst, cap, "%s.%s", a, b);
+    if (n < 0 || (size_t)n >= cap) die("label bound");
+}
+static void ck(int ok, const char *s) {
+    assertions++;
+    if (!ok) failures++;
+    printf("%s\tphase-timing-stamps.%s\n", ok ? "PASS" : "FAIL", s);
+}
+/* A matrix cell is MEASURED only with a positive value from a run whose every check passed. */
+static void cell_line(const char *name, long long v) {
+    if (v > 0 && !failures) printf("CELL\t%s\tMEASURED\t%lld\n", name, v);
+    else printf("CELL\t%s\tINVALID\tvalue=%lld\tfailed=%d\n", name, v, failures);
+}
+static void ck2(int ok, const char *a, const char *b) {
+    char name[160];
+    label2(name, sizeof name, a, b);
+    ck(ok, name);
+}
+static long long now_ns(void) {
+    struct timespec t = {0};
+    long rc = __syscall6(228, 1, (long)&t, 0, 0, 0);
+    if (_unisa_ret(rc) || t.tv_sec < 0 || t.tv_nsec < 0 || t.tv_nsec >= 1000000000L)
+        die("CLOCK_MONOTONIC read or extent");
+    if ((unsigned long long)t.tv_sec > (unsigned long long)(LLONG_MAX - t.tv_nsec) / 1000000000ULL)
+        die("clock integer overflow");
+    long long n = (long long)t.tv_sec * 1000000000LL + t.tv_nsec;
+    if (clock_seen && n < clock_previous) die("CLOCK_MONOTONIC moved backward");
+    clock_seen = 1;
+    clock_previous = n;
+    return n;
+}
+static long long clock_resolution_ns(void) {
+    struct timespec t = {0};
+    long rc = __syscall6(229, 1, (long)&t, 0, 0, 0);   /* clock_getres(CLOCK_MONOTONIC) */
+    if (_unisa_ret(rc) || t.tv_sec != 0 || t.tv_nsec <= 0 || t.tv_nsec >= 1000000000L)
+        die("CLOCK_MONOTONIC resolution");
+    return t.tv_nsec;
+}
+static char *load(const char *p, size_t *n) {
+    struct stat a, b;
+    errno = 0;
+    if (lstat(p, &a)) {
+        fprintf(stderr, "phase-timing-stamps: input %s\n", p);
+        die("input stat");
+    }
+    if (!S_ISREG(a.st_mode) || a.st_size < 0 || a.st_size > 134217728) die("bounded regular input");
+    int fd = open(p, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0 || fstat(fd, &b) || a.st_dev != b.st_dev || a.st_ino != b.st_ino || a.st_size != b.st_size)
+        die("input descriptor");
+    *n = (size_t)a.st_size;
+    char *s = malloc(*n + 1);
+    if (!s) die("allocation");
+    size_t at = 0;
+    while (at < *n) {
+        ssize_t z = read(fd, s + at, *n - at);
+        if (z < 0 && errno == EINTR) continue;
+        if (z <= 0) die("input extent");
+        at += (size_t)z;
+    }
+    char extra;
+    ssize_t z;
+    do {
+        z = read(fd, &extra, 1);
+    } while (z < 0 && errno == EINTR);
+    int bad = fstat(fd, &b) || a.st_dev != b.st_dev || a.st_ino != b.st_ino || a.st_size != b.st_size;
+    int closed = close(fd);
+    if (z || bad || closed) die("input changed");
+    s[*n] = 0;
+    return s;
+}
+static void digest(const char *p, char h[65]) {
+    size_t n;
+    char *s = load(p, &n);
+    cx_sha256_hex(s, n, h);
+    free(s);
+}
+static void save(const char *name, const char *s, size_t n) {
+    char p[4400];
+    path(p, sizeof p, work, name);
+    int fd = open(p, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0) die("exclusive evidence");
+    size_t at = 0;
+    while (at < n) {
+        ssize_t z = write(fd, s + at, n - at);
+        if (z < 0 && errno == EINTR) continue;
+        if (z <= 0) die("evidence write");
+        at += (size_t)z;
+    }
+    if (fsync(fd) || close(fd)) die("evidence close");
+}
+
+/* ---- stamp grammar (exec/c/compiler.c RR_TIME lines, stderr) ---- */
+/* Exact decimal: no sign, no leading zero, at most 18 digits; POSITIVE also refuses 0. */
+static int digits(const char *s, size_t n, long long *v, int positive) {
+    long long acc = 0;
+    if (!n || n > 18 || (s[0] == '0' && n > 1)) return 0;
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] < '0' || s[i] > '9') return 0;
+        acc = acc * 10 + (s[i] - '0');
+    }
+    if (positive && acc <= 0) return 0;
+    *v = acc;
+    return 1;
+}
+/* "A\tKEY B" with A a decimal and B a decimal (positive when BPOS). */
+static int pair(const char *s, size_t n, const char *key, long long *a, long long *b, int bpos) {
+    size_t an = 0, kn = strlen(key);
+    while (an < n && s[an] != '\t') an++;
+    if (an == n || !digits(s, an, a, 0)) return 0;
+    const char *r = s + an + 1;
+    size_t rn = n - an - 1;
+    if (rn < kn || memcmp(r, key, kn)) return 0;
+    return digits(r + kn, rn - kn, b, bpos);
+}
+typedef struct stamps {
+    int lines, bad, lookup_n, art_n, mem_n;
+    long long lookup_hit, lookup_ns, art_hit, art_mode, mem_rc, mem_ns;
+} stamps;
+static int prefixed(const char *l, size_t n, const char *p, size_t *k) {
+    *k = strlen(p);
+    return n >= *k && !memcmp(l, p, *k);
+}
+static void parse_stamps(const char *e, size_t n, stamps *st) {
+    size_t at = 0, k;
+    memset(st, 0, sizeof *st);
+    if (n && e[n - 1] != '\n') st->bad++;   /* unterminated last line */
+    while (at < n) {
+        size_t end = at;
+        while (end < n && e[end] != '\n') end++;
+        const char *l = e + at;
+        size_t ln = end - at;
+        long long a, b;
+        st->lines++;
+        if (prefixed(l, ln, "RR_TIME\tlookup_hit=", &k) && pair(l + k, ln - k, "ns=", &a, &b, 1) && a <= 2) {
+            st->lookup_n++; st->lookup_hit = a; st->lookup_ns = b;
+        } else if (prefixed(l, ln, "RR_TIME\tartifact_hit=", &k) && pair(l + k, ln - k, "mode=", &a, &b, 0) && a <= 1) {
+            st->art_n++; st->art_hit = a; st->art_mode = b;
+        } else if (prefixed(l, ln, "RR_TIME\tmemory_bind\trc=", &k) && pair(l + k, ln - k, "ns=", &a, &b, 1)) {
+            st->mem_n++; st->mem_rc = a; st->mem_ns = b;
+        } else st->bad++;
+        at = end + 1;
+    }
+}
+
+/* ---- samples ---- */
+typedef struct sample {
+    const char *label;
+    np_result r;
+    long long e2e_ns, validation_ns;
+    stamps st;
+} sample;
+static void transcript(const sample *s) {
+    char name[120], status[200];
+    label2(name, sizeof name, s->label, "stdout");
+    save(name, s->r.out, s->r.outn);
+    label2(name, sizeof name, s->label, "stderr");
+    save(name, s->r.err, s->r.errn);
+    int n = snprintf(status, sizeof status, "rc\t%d\ne2e_ns\t%lld\nvalidation_ns\t%lld\n", s->r.rc, s->e2e_ns,
+                     s->validation_ns);
+    if (n < 0 || (size_t)n >= sizeof status) die("status bound");
+    label2(name, sizeof name, s->label, "status");
+    save(name, status, (size_t)n);
+}
+static void spawn(sample *s, const char *label, char **argv, char **env) {
+    char why[1024];
+    s->label = label;
+    long long start = now_ns();
+    int error = np_run(argv, root, env, 14, &s->r, why, sizeof why);
+    long long end = now_ns();
+    if (error) {
+        save("transport.error", why, strlen(why));
+        die(why);
+    }
+    s->e2e_ns = end - start;
+    validation_start = now_ns();   /* validation phase of this sample starts here */
+    parse_stamps(s->r.err, s->r.errn, &s->st);
+}
+static int exact(const np_result *r, const char *want) {
+    return r->outn == strlen(want) && !memcmp(r->out, want, r->outn);
+}
+static void identity_after(const sample *s) {
+    char h[65];
+    digest(product, h);
+    ck2(!strcmp(h, prod_hash), s->label, "product-unchanged");
+}
+static void finish(sample *s) {
+    s->validation_ns = now_ns() - validation_start;
+    ck2(s->e2e_ns > 0 && s->validation_ns > 0, s->label, "e2e-and-validation-positive");
+    transcript(s);
+    printf("SAMPLE\t%s\trc=%d\te2e_ns=%lld\tvalidation_ns=%lld\tstamp_lines=%d\n", s->label, s->r.rc, s->e2e_ns,
+           s->validation_ns, s->st.lines);
+}
+static void cache_scan(int *all, int *host) {
+    DIR *d = opendir(cache);
+    struct dirent *e;
+    size_t n;
+    if (!d) die("cache scan");
+    *all = *host = 0;
+    while ((e = readdir(d))) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        (*all)++;
+        n = strlen(e->d_name);
+        if (n > 5 && !strcmp(e->d_name + n - 5, ".host")) (*host)++;
+    }
+    if (closedir(d)) die("cache scan close");
+}
+
+/* ---- phase report and its schema ---- */
+enum { NPHASE = 11, NCELL = 22 };
+static const char *phases[NPHASE] = {
+    "startup.isolated", "run.e2e", "construction", "loading.reuse-lookup", "loading.artifact-reuse",
+    "loading.memory-bind", "loading.forward-exec", "loading.model-inflate", "inference.in-product",
+    "output.duration", "validation"};
+typedef struct cell { const char *phase, *temp, *basis; long long ns; } cell; /* ns<0: UNMEASURED */
+static cell cells[NCELL];
+static int ncells;
+static void put_cell(const char *phase, const char *temp, long long ns, const char *basis) {
+    if (ncells >= NCELL) die("cell bound");
+    cells[ncells].phase = phase; cells[ncells].temp = temp; cells[ncells].ns = ns; cells[ncells].basis = basis;
+    ncells++;
+}
+enum { M_NONE, M_ZERO, M_OMIT, M_DUP, M_LEADING_ZERO, M_ESTIMATE, M_NEGATIVE, M_UNKNOWN_PHASE, M_BAD_TEMP,
+       M_EMPTY_BASIS, M_EXTRA_FIELD, M_WORD_VALUE, M_COUNT };
+static const char *mutation_name[M_COUNT] = {"none", "zero-value", "omitted-cell", "duplicate-cell", "leading-zero",
+    "estimate-tilde", "negative", "unknown-phase", "bad-temperature", "unmeasured-without-reason", "extra-field",
+    "word-value"};
+static const char *mutation_reason[M_COUNT] = {0, "bad-value", "missing", "duplicate", "bad-value", "bad-value",
+    "bad-value", "unknown-phase", "bad-temp", "empty-basis", "field-count", "bad-value"};
+static int first_measured(void) {
+    for (int i = 0; i < ncells; i++) if (cells[i].ns > 0) return i;
+    die("no measured cell");
+    return -1;
+}
+static int first_unmeasured(void) {
+    for (int i = 0; i < ncells; i++) if (cells[i].ns < 0) return i;
+    die("no unmeasured cell");
+    return -1;
+}
+static void emit_report(np_buf *b, int m) {
+    int fm = first_measured(), fu = first_unmeasured();
+    b->n = 0;
+    np_put(b, "", 0);
+    for (int i = 0; i < ncells; i++) {
+        const cell *c = &cells[i];
+        if (m == M_OMIT && i == fm) continue;
+        for (int rep = 0; rep < (m == M_DUP && i == fm ? 2 : 1); rep++) {
+            np_puts(b, "PHASE\t");
+            np_puts(b, m == M_UNKNOWN_PHASE && i == fm ? "loading.guess" : c->phase);
+            np_puts(b, "\t");
+            np_puts(b, m == M_BAD_TEMP && i == fm ? "warm" : c->temp);
+            np_puts(b, "\t");
+            if (i == fm && m == M_ZERO) np_puts(b, "0");
+            else if (i == fm && m == M_WORD_VALUE) np_puts(b, "estimated");
+            else if (c->ns < 0) np_puts(b, "UNMEASURED");
+            else {
+                if (i == fm && m == M_LEADING_ZERO) np_puts(b, "0");
+                if (i == fm && m == M_ESTIMATE) np_puts(b, "~");
+                if (i == fm && m == M_NEGATIVE) np_puts(b, "-");
+                np_putll(b, c->ns);
+            }
+            np_puts(b, "\t");
+            if (!(m == M_EMPTY_BASIS && i == fu)) np_puts(b, c->basis);
+            if (m == M_EXTRA_FIELD && i == fm) np_puts(b, "\textra");
+            np_puts(b, "\n");
+        }
+    }
+}
+/* Returns 0 for a valid report, else the refusal reason. */
+static const char *check_report(const char *s, size_t n) {
+    int seen[NPHASE][2];
+    size_t at = 0;
+    memset(seen, 0, sizeof seen);
+    if (!n || s[n - 1] != '\n') return "unterminated";
+    while (at < n) {
+        size_t end = at, f[8], fl[8];
+        int nf = 0;
+        while (end < n && s[end] != '\n') end++;
+        f[0] = at;
+        for (size_t i = at; i <= end; i++) {
+            if (i == end || s[i] == '\t') {
+                if (nf >= 7) return "field-count";
+                fl[nf] = i - f[nf];
+                nf++;
+                f[nf] = i + 1;
+            }
+        }
+        if (nf != 5) return "field-count";
+        if (fl[0] != 5 || memcmp(s + f[0], "PHASE", 5)) return "foreign-line";
+        int p = -1, t = -1;
+        for (int i = 0; i < NPHASE; i++)
+            if (strlen(phases[i]) == fl[1] && !memcmp(s + f[1], phases[i], fl[1])) p = i;
+        if (p < 0) return "unknown-phase";
+        if (fl[2] == 4 && !memcmp(s + f[2], "cold", 4)) t = 0;
+        else if (fl[2] == 3 && !memcmp(s + f[2], "hot", 3)) t = 1;
+        else return "bad-temp";
+        long long v;
+        int unmeasured = fl[3] == 10 && !memcmp(s + f[3], "UNMEASURED", 10);
+        if (!unmeasured && !digits(s + f[3], fl[3], &v, 1)) return "bad-value";
+        if (!fl[4]) return "empty-basis";
+        if (seen[p][t]++) return "duplicate";
+        at = end + 1;
+    }
+    for (int i = 0; i < NPHASE; i++)
+        if (seen[i][0] != 1 || seen[i][1] != 1) return "missing";
+    return 0;
+}
+
+static void clean_environment(void) {
+    static const char *knobs[] = {"UNISACC_RR_TIME", "UNISACC_RR_DEBUG", "UNISACC_RF_CAPTURE", "UNISACC_RUN_CACHE",
+        "UNISACC_E3CACHE", "UNISA_ATTRIBUTES", "UNISA_MEMORY_TWOPASS", "UNISA_CONTAINER", "UNISA_FWD_UNITCACHE",
+        "UNISA_JOBS", 0};
+    for (int i = 0; knobs[i]; i++)
+        if (unsetenv(knobs[i])) die("clean-environment");
+    for (char **v = environ; *v; v++)   /* the children inherit environ itself: verify it, not just getenv */
+        for (int i = 0; knobs[i]; i++) {
+            size_t l = strlen(knobs[i]);
+            if (!strncmp(*v, knobs[i], l) && (*v)[l] == '=') die("ambient product knob survived unsetenv");
+        }
+}
+
+int main(int argc, char **argv) {
+#if !defined(__linux__) || !defined(__x86_64__)
+    fputs("NOT_RUN phase-timing-stamps requires Linux/x86_64\n", stderr);
+    return 3;
+#endif
+    char parent[4096], base[4096], leaf[4096], after[65];
+    if (argc != 4 || !realpath(argv[1], root) || !realpath(argv[2], product) || argv[3][0] != '/' ||
+        strlen(argv[3]) >= sizeof work || strpbrk(argv[3], "\t\r\n") || !realpath(__FILE__, selfpath))
+        die("usage ROOT PRODUCT ABS_OUT");
+    if (sizeof(long) != 8 || sizeof(void *) != 8 || sizeof(struct timespec) != 16)
+        die("Linux x86_64 LP64 clock layout required");
+    copy_fit(parent, sizeof parent, argv[3]);
+    char *slash = strrchr(parent, '/');
+    if (!slash || !slash[1] || !strcmp(slash + 1, ".") || !strcmp(slash + 1, "..")) die("new output leaf");
+    copy_fit(leaf, sizeof leaf, slash + 1);
+    if (slash == parent) slash[1] = 0;
+    else *slash = 0;
+    if (!realpath(parent, base)) die("output parent");
+    int z = snprintf(work, sizeof work, "%s%s%s", base, !strcmp(base, "/") ? "" : "/", leaf);
+    if (z < 0 || (size_t)z >= sizeof work || mkdir(work, 0700)) die("new output directory required");
+    clean_environment();
+    path(bound, sizeof bound, root, "tools/bound");
+    path(fixture, sizeof fixture, work, "probe.cx");
+    save("probe.cx", program, strlen(program));
+    path(cache, sizeof cache, work, "e3cache");
+    path(object, sizeof object, work, "probe.o");
+    if (mkdir(cache, 0700)) die("e3cache mkdir");   /* runreuse.h rr_mkdir requires an exact 0700 directory */
+    z = snprintf(env_cache, sizeof env_cache, "UNISACC_E3CACHE=%s", cache);
+    if (z < 0 || (size_t)z >= sizeof env_cache) die("env bound");
+    digest(product, prod_hash);
+    digest(selfpath, self_hash);
+    digest(fixture, fixture_hash);
+    printf("IDENTITY\tproduct=%s\tphase_timing_stamps_source=%s\tprobe=%s\n", prod_hash, self_hash, fixture_hash);
+    printf("CLOCK\tLinux-clock_gettime-syscall228-CLOCK_MONOTONIC1\tunit=ns\tresolution_ns=%lld\n",
+           clock_resolution_ns());
+    puts("SCOPE\te2e=np_run-spawn-to-exit-incl-tools/bound+sh+APE+1ms-poll\tstamps=product-stderr-UNISACC_RR_TIME=1"
+         "\tvalidation=harness-verify-per-sample\tnot-OS-cold\tno-speed-threshold");
+
+    char env_time[] = "UNISACC_RR_TIME=1", env_off[] = "UNISACC_RUN_CACHE=0", env_on[] = "UNISACC_RUN_CACHE=1";
+    char *env_cold[] = {env_time, env_off, env_cache, 0};
+    char *env_hot[] = {env_time, env_on, env_cache, 0};
+    char *v_version[] = {bound, "12", "sh", product, "--version", 0};
+    char *v_run[] = {bound, "12", "sh", product, fixture, "--", 0};
+    char *v_obj[] = {bound, "12", "sh", product, "-c", fixture, "-o", object, 0};
+    sample ver_cold, ver_hot, run_cold, run_miss, run_hit, obj_miss, obj_hit;
+    int all = 0, host = 0, all_after_miss = 0;
+
+    /* startup.isolated: --version with the timing knob on; any compile route would stamp stderr. */
+    spawn(&ver_cold, "ver.cold", v_version, env_cold);
+    ck2(!ver_cold.r.rc && exact(&ver_cold.r, want_version), "ver.cold", "rc0-exact-version-stdout");
+    ck2(!ver_cold.r.errn, "ver.cold", "empty-stderr-no-compile-stamp");
+    identity_after(&ver_cold);
+    finish(&ver_cold);
+    spawn(&ver_hot, "ver.hot", v_version, env_hot);
+    ck2(!ver_hot.r.rc && exact(&ver_hot.r, want_version), "ver.hot", "rc0-exact-version-stdout");
+    ck2(!ver_hot.r.errn, "ver.hot", "empty-stderr-no-compile-stamp");
+    identity_after(&ver_hot);
+    finish(&ver_hot);
+
+    /* Cache off: the lookup stamp still prints (hash only, rr_can=0) and nothing is stored. */
+    spawn(&run_cold, "run.cold", v_run, env_cold);
+    ck2(!run_cold.r.rc && exact(&run_cold.r, want_run), "run.cold", "rc0-exact-stdout");
+    ck2(!run_cold.st.bad && run_cold.st.lookup_n == 1 && run_cold.st.lookup_hit == 0 && !run_cold.st.art_n,
+        "run.cold", "stamp-grammar-one-lookup_hit=0-positive-ns");
+    ck2(run_cold.st.lookup_ns < run_cold.e2e_ns, "run.cold", "lookup-stamp-within-own-e2e");
+    ck2(run_cold.st.mem_n <= 1 && (!run_cold.st.mem_n || (!run_cold.st.mem_rc &&
+        run_cold.st.mem_ns < run_cold.e2e_ns)), "run.cold", "memory_bind-at-most-once-rc0-within-e2e");
+    cache_scan(&all, &host);
+    ck2(all == 0, "run.cold", "cache-off-stored-nothing");
+    identity_after(&run_cold);
+    finish(&run_cold);
+
+    /* First cached run on the empty private cache: a real miss that stores one host entry. */
+    spawn(&run_miss, "run.miss", v_run, env_hot);
+    ck2(!run_miss.r.rc && exact(&run_miss.r, want_run), "run.miss", "rc0-exact-stdout");
+    ck2(!run_miss.st.bad && run_miss.st.lookup_n == 1 && run_miss.st.lookup_hit == 0 && !run_miss.st.art_n,
+        "run.miss", "stamp-grammar-one-lookup_hit=0-positive-ns");
+    ck2(run_miss.st.lookup_ns < run_miss.e2e_ns, "run.miss", "lookup-stamp-within-own-e2e");
+    ck2(run_miss.st.mem_n <= 1 && (!run_miss.st.mem_n || !run_miss.st.mem_rc), "run.miss",
+        "memory_bind-at-most-once-rc0");
+    cache_scan(&all, &host);
+    all_after_miss = all;
+    ck2(host == 1 && all >= 2, "run.miss", "stored-one-host-entry-and-e3-receipt");
+    identity_after(&run_miss);
+    finish(&run_miss);
+
+    /* Hot: host-route reuse hit (lookup_hit=2); the in-memory route is never taken on a hit. */
+    spawn(&run_hit, "run.hit", v_run, env_hot);
+    ck2(!run_hit.r.rc && exact(&run_hit.r, want_run), "run.hit", "rc0-exact-stdout");
+    ck2(!run_hit.st.bad && run_hit.st.lookup_n == 1 && run_hit.st.lookup_hit == 2 && !run_hit.st.art_n,
+        "run.hit", "stamp-grammar-one-lookup_hit=2-positive-ns");
+    ck2(run_hit.st.lookup_ns < run_hit.e2e_ns, "run.hit", "lookup-stamp-within-own-e2e");
+    ck2(!run_hit.st.mem_n, "run.hit", "no-memory_bind-on-reuse-hit");
+    cache_scan(&all, &host);
+    ck2(all == all_after_miss && host == 1, "run.hit", "hit-added-no-cache-entry");
+    identity_after(&run_hit);
+    finish(&run_hit);
+
+    /* -c final-artifact reuse: artifact_hit 0 then 1 (mode 2), byte-identical objects. Key binds the -o path. */
+    char obj1[65], obj2[65];
+    spawn(&obj_miss, "obj.miss", v_obj, env_hot);
+    ck2(!obj_miss.r.rc && !obj_miss.r.outn, "obj.miss", "rc0-empty-stdout");
+    ck2(!obj_miss.st.bad && obj_miss.st.art_n == 1 && obj_miss.st.art_hit == 0 && obj_miss.st.art_mode == 2 &&
+        !obj_miss.st.lookup_n && !obj_miss.st.mem_n, "obj.miss", "stamp-grammar-one-artifact_hit=0-mode=2");
+    digest(object, obj1);
+    identity_after(&obj_miss);
+    finish(&obj_miss);
+    spawn(&obj_hit, "obj.hit", v_obj, env_hot);
+    ck2(!obj_hit.r.rc && !obj_hit.r.outn, "obj.hit", "rc0-empty-stdout");
+    ck2(!obj_hit.st.bad && obj_hit.st.art_n == 1 && obj_hit.st.art_hit == 1 && obj_hit.st.art_mode == 2 &&
+        !obj_hit.st.lookup_n && !obj_hit.st.mem_n, "obj.hit", "stamp-grammar-one-artifact_hit=1-mode=2");
+    digest(object, obj2);
+    ck2(!strcmp(obj1, obj2), "obj.hit", "object-bytes-equal-to-miss");
+    identity_after(&obj_hit);
+    finish(&obj_hit);
+    printf("STAMP\tlookup\tcache-off\thit=%lld\tns=%lld\n", run_cold.st.lookup_hit, run_cold.st.lookup_ns);
+    printf("STAMP\tlookup\tmiss\thit=%lld\tns=%lld\n", run_miss.st.lookup_hit, run_miss.st.lookup_ns);
+    printf("STAMP\tlookup\thit\thit=%lld\tns=%lld\n", run_hit.st.lookup_hit, run_hit.st.lookup_ns);
+    printf("STAMP\tartifact\tmiss\thit=%lld\tmode=%lld\tns=UNMEASURED\n", obj_miss.st.art_hit, obj_miss.st.art_mode);
+    printf("STAMP\tartifact\thit\thit=%lld\tmode=%lld\tns=UNMEASURED\n", obj_hit.st.art_hit, obj_hit.st.art_mode);
+    printf("STAMP\tmemory_bind\tcount_cold=%d\tcount_miss=%d\tcount_hit=%d\n", run_cold.st.mem_n, run_miss.st.mem_n,
+           run_hit.st.mem_n);
+
+    /* Report cells: positive ns only from a real measurement or a real product stamp; else UNMEASURED + reason. */
+    const char *mem_absent = "route-not-taken:static-Linux-product-has-no-dlsym(src/host_dl.h:17)-so--run-goes-image+"
+                             "forward_exec(exec/c/compiler.c:1108-1129,1287);stamp-only-on-memory-route(1223-1257)";
+    put_cell("startup.isolated", "cold", ver_cold.e2e_ns, "external-proxy:sh-PRODUCT---version-spawn-to-exit,cache-off");
+    put_cell("startup.isolated", "hot", ver_hot.e2e_ns, "external-proxy:sh-PRODUCT---version-second-process");
+    put_cell("run.e2e", "cold", run_cold.e2e_ns, "spawn-to-exit-default-run,UNISACC_RUN_CACHE=0");
+    put_cell("run.e2e", "hot", run_hit.e2e_ns, "spawn-to-exit-default-run,reuse-hit");
+    put_cell("construction", "cold", -1, "needs-product-stamp:package-parse/route-select/model-decode");
+    put_cell("construction", "hot", -1, "needs-product-stamp:package-parse/route-select/model-decode");
+    put_cell("loading.reuse-lookup", "cold", run_miss.st.lookup_ns,
+             "product-stamp:RR_TIME-lookup_hit=0(compiler.c:1059),first-run-empty-private-cache");
+    put_cell("loading.reuse-lookup", "hot", run_hit.st.lookup_ns,
+             "product-stamp:RR_TIME-lookup_hit=2(compiler.c:1059),host-route-hit");
+    put_cell("loading.artifact-reuse", "cold", -1, "stamp-has-no-duration:RR_TIME-artifact_hit(compiler.c:1179)");
+    put_cell("loading.artifact-reuse", "hot", -1, "stamp-has-no-duration:RR_TIME-artifact_hit(compiler.c:1179)");
+    if (run_cold.st.mem_n == 1 && !run_cold.st.mem_rc)
+        put_cell("loading.memory-bind", "cold", run_cold.st.mem_ns, "product-stamp:RR_TIME-memory_bind(compiler.c:1255)");
+    else put_cell("loading.memory-bind", "cold", -1, mem_absent);
+    put_cell("loading.memory-bind", "hot", -1, "skipped-by-reuse:hit-sets-execrun(compiler.c:1044);also-cold-reason");
+    put_cell("loading.forward-exec", "cold", -1, "needs-product-stamp:forward_exec-memfd-write+execveat");
+    put_cell("loading.forward-exec", "hot", -1, "needs-product-stamp:forward_exec-memfd-write+execveat");
+    put_cell("loading.model-inflate", "cold", -1, "needs-product-stamp:per-member-inflate/CRC/parse");
+    put_cell("loading.model-inflate", "hot", -1, "needs-product-stamp:per-member-inflate/CRC/parse");
+    put_cell("inference.in-product", "cold", -1, "needs-product-stamp:per-stream-e2/e1/e3/e4/prune/lower/elf");
+    put_cell("inference.in-product", "hot", -1, "needs-product-stamp:per-stream-or-skipped-by-reuse");
+    put_cell("output.duration", "cold", -1, "needs-product-stamp:image-write/stdout-flush;included-in-run.e2e");
+    put_cell("output.duration", "hot", -1, "needs-product-stamp:image-write/stdout-flush;included-in-run.e2e");
+    put_cell("validation", "cold", run_cold.validation_ns, "harness:exact-compare+stamp-parse+cache-scan+product-sha256");
+    put_cell("validation", "hot", run_hit.validation_ns, "harness:exact-compare+stamp-parse+cache-scan+product-sha256");
+    int failures_before_report = failures;
+    ck(ncells == NCELL, "report.cell-count-phases-x-cold-hot");
+    for (int i = 0; i < ncells; i++)
+        if (cells[i].ns == 0) die("zero duration reached the report"); /* A-45: zero is not-run */
+
+    np_buf rep = {0, 0, 0}, bad = {0, 0, 0};
+    emit_report(&rep, M_NONE);
+    const char *why = check_report(rep.p, rep.n);
+    ck(!why, "report.schema-accepts-real-report");
+    if (why) printf("REPORT_REFUSED\t%s\n", why);
+    for (int m = M_ZERO; m < M_COUNT; m++) {
+        char name[120];
+        emit_report(&bad, m);
+        const char *got = check_report(bad.p, bad.n);
+        int n = snprintf(name, sizeof name, "report.refuses-%s-as-%s", mutation_name[m], mutation_reason[m]);
+        if (n < 0 || (size_t)n >= sizeof name) die("label bound");
+        ck(got && !strcmp(got, mutation_reason[m]), name);
+        if (!got || strcmp(got, mutation_reason[m])) printf("REPORT_MUTATION\t%s\tgot=%s\n", mutation_name[m],
+                                                              got ? got : "ACCEPTED");
+    }
+    report_failures = failures - failures_before_report;
+    save("report.tsv", rep.p, rep.n);
+    fwrite(rep.p, 1, rep.n, stdout);
+
+    /* Matrix cell outcome lines for the registrar (a cell is MEASURED only with a real positive value here). */
+    cell_line("startup.isolated.cold", ver_cold.e2e_ns);
+    cell_line("startup.isolated.hot", ver_hot.e2e_ns);
+    cell_line("loading.run-reuse-lookup.miss", run_miss.st.lookup_ns);
+    cell_line("loading.run-reuse-lookup.hit", run_hit.st.lookup_ns);
+    if (run_cold.st.mem_n == 1 && !run_cold.st.mem_rc) cell_line("loading.memory-bind.cold", run_cold.st.mem_ns);
+    else puts("CELL\tloading.memory-bind.cold\tUNMEASURED\troute-not-taken-on-static-Linux-product");
+    puts("CELL\tloading.memory-bind.hot\tUNMEASURED\tskipped-by-reuse-and-route-not-taken");
+    cell_line("validation.cold", run_cold.validation_ns);
+    cell_line("validation.hot", run_hit.validation_ns);
+    printf("CELL\treport.unmeasured-schema\t%s\tmutations=%d\n", report_failures ? "FAILED" : "CHECKED",
+           M_COUNT - 1);
+
+    digest(product, after);
+    ck(!strcmp(prod_hash, after), "product-unchanged-at-end");
+    digest(selfpath, after);
+    ck(!strcmp(self_hash, after), "source-unchanged");
+    digest(fixture, after);
+    ck(!strcmp(fixture_hash, after), "probe-unchanged");
+    if (!failures)
+        printf("OBSERVATION\tstartup_isolated_cold_ns=%lld\trun_e2e_cold_ns=%lld\trun_e2e_hot_ns=%lld\t"
+               "lookup_miss_ns=%lld\tlookup_hit_ns=%lld\tno-speed-threshold\n",
+               ver_cold.e2e_ns, run_cold.e2e_ns, run_hit.e2e_ns, run_miss.st.lookup_ns, run_hit.st.lookup_ns);
+    else puts("OBSERVATION\tINVALID-functional-schema-or-identity-check-failed");
+    puts("NOT_CLAIMED\tconstruction/forward-exec/model-inflate/inference/output-durations;memory-bind-on-this-product;"
+         "OS-cold;p95;foreign-hosts");
+    np_free(&ver_cold.r); np_free(&ver_hot.r); np_free(&run_cold.r); np_free(&run_miss.r); np_free(&run_hit.r);
+    np_free(&obj_miss.r); np_free(&obj_hit.r);
+    free(rep.p); free(bad.p);
+    printf("PHASE_TIMING_STAMPS\tassertions=%d\tfailed=%d\tscope=isolated-startup,reuse-lookup,memory-bind,"
+           "validation,report-schema\n", assertions, failures);
+    return failures ? 1 : 0;
+}

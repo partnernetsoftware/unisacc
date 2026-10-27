@@ -1,0 +1,193 @@
+/* Installed-product hostile-input oracle: the twelve hostile.* cells of tests/negative-domain-matrix.tsv.
+ * ROOT PRODUCT_COM NEW_ABS_OUT. PRODUCT_COM must be ROOT/unisacc.com.
+ * Spec: spec.md A-47 (unexpected input must EXIT; what C calls invalid must be diagnosed) and A-39
+ * (nonexistent input diagnosed). Ports archive/testing-c43-legacy/tests/hostile.sh, whose bar was
+ * "no signal, no hang" plus "rejected with a message"; this batch is stricter: every fixture is a
+ * literal (or a fixed byte rule) written here, run through both the -run route and an lnx/x86_64
+ * image compile with -o, and each refusal must have the exact rc, empty stdout, the exact named
+ * stderr, no image, a measured wall time under the 20 s watchdog, then a pristine ret7 compile
+ * whose image exits 7 (recovery). Accepted hostile inputs must produce the literal expected value.
+ * Pinned refusal wording is the product's observed wording; the cell requirement is the floor.
+ * self-containing-struct requires the refusal to name the incomplete type (C99 6.7.2.1p2); the
+ * product's "not covered" wording is a feature-gap claim, so that assertion is a product finding. */
+#pragma unisa use cxlib.netpack
+static char root[4096],work[4096],bound[4200],com[4200];
+static int assertions,failures;
+static void die(const char *s){fprintf(stderr,"negative-hostile: REFUSE %s errno=%d\n",s,errno);exit(2);}
+static void copy_fit(char *dst,size_t cap,const char *src){size_t i=0;if(!cap)die("copy-bound");while(src[i]&&i+1<cap){dst[i]=src[i];i++;}if(src[i])die("copy-bound");dst[i]=0;}
+static void ck(int ok,const char *a,const char *b){assertions++;if(!ok)failures++;printf("%s\tnegative-hostile.%s.%s\n",ok?"PASS":"FAIL",a,b);}
+static void path(char *o,size_t cap,const char *a,const char *b){int n=snprintf(o,cap,"%s/%s",a,b);if(n<0||(size_t)n>=cap)die("path");}
+static void name2(char *o,size_t cap,const char *a,const char *b){int n=snprintf(o,cap,"%s%s",a,b);if(n<0||(size_t)n>=cap)die("name");}
+static void saved(const char *name,const void *s,size_t n){char p[4400];path(p,sizeof p,work,name);int f=open(p,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);size_t at=0;if(f<0)die("exclusive-write");while(at<n){ssize_t k=write(f,(const char *)s+at,n-at);if(k<0&&errno==EINTR)continue;if(k<=0)die("write");at+=(size_t)k;}if(fsync(f)||close(f))die("close");}
+static void sha_file(const char *p,char hex[65]){size_t n;char *s=cx_read(p,&n);if(!s)die("read");cx_sha256_hex(s,n,hex);free(s);}
+/* Existence: only ENOENT means absent; any other lstat failure refuses the batch. */
+static int missing(const char *name){char p[4400];struct stat st;path(p,sizeof p,work,name);errno=0;if(!lstat(p,&st))return 0;if(errno!=ENOENT)die("stat-not-ENOENT");return 1;}
+static int regular(const char *name){char p[4400];struct stat st;path(p,sizeof p,work,name);return !lstat(p,&st)&&S_ISREG(st.st_mode)&&st.st_size>0;}
+static long long now_ns(void){struct timespec t={0};long rc=__syscall6(228,1,(long)&t,0,0,0);if(rc||t.tv_sec<0||t.tv_nsec<0||t.tv_nsec>=1000000000L)die("monotonic-clock");return (long long)t.tv_sec*1000000000LL+t.tv_nsec;}
+static long long last_ms;
+static np_result runv(char **v,const char *label){
+ char why[1024],name[256];np_result r;long long t0=now_ns();
+ if(np_run(v,work,0,25,&r,why,sizeof why))die(why);
+ last_ms=(now_ns()-t0)/1000000;printf("TIME\t%s\twall_ms=%lld\n",label,last_ms);
+ name2(name,sizeof name,label,".stdout");saved(name,r.out,r.outn);
+ name2(name,sizeof name,label,".stderr");saved(name,r.err,r.errn);return r;}
+static int exact(const np_result *r,const char *want){size_t n=strlen(want);return r->errn==n&&!memcmp(r->err,want,n);}
+static int has(const np_result *r,const char *lit){size_t l=strlen(lit);if(l>r->errn)return 0;for(size_t i=0;i+l<=r->errn;i++)if(!memcmp(r->err+i,lit,l))return 1;return 0;}
+static void show(const char *label,const np_result *r){fprintf(stderr,"negative-hostile: %s rc=%d stderr:\n",label,r->rc);fwrite(r->err,1,r->errn,stderr);}
+
+/* Expected images: accepted cases and recoveries. Anything else in the output tree is stray. */
+static char images[64][128];static int nimages;
+static void expect_image(const char *bin){if(nimages==64)die("image-table");copy_fit(images[nimages++],128,bin);}
+
+static void recover(const char *label){
+ char bin[256],tag[256];name2(bin,sizeof bin,"rec-",label);name2(bin,sizeof bin,bin,".bin");name2(tag,sizeof tag,label,"-recovery");expect_image(bin);
+ char *v[]={bound,"20","sh",com,"ok.c","-b","lnx/x86_64","-o",bin,0};
+ np_result r=runv(v,tag);ck(!r.rc&&!r.outn&&!r.errn&&regular(bin),label,"recovery-compile-rc0-image");np_free(&r);
+ char exe[4400];path(exe,sizeof exe,work,bin);char *x[]={bound,"10",exe,0};
+ name2(tag,sizeof tag,label,"-recovery-exec");r=runv(x,tag);ck(r.rc==7&&!r.outn&&!r.errn,label,"recovery-image-exit7");np_free(&r);}
+
+/* A refusal through both routes: exact rc, empty stdout, exact stderr, no image, bounded. */
+static void refuse(const char *label,const char *file,int rc,const char *want){
+ char tag[256],bin[256];name2(tag,sizeof tag,label,"-run");
+ char *v[]={bound,"20","sh",com,"-run",(char *)file,0};np_result r=runv(v,tag);
+ ck(r.rc==rc,label,rc==1?"run-rc1":"run-rc2");ck(!r.outn,label,"run-stdout-empty");ck(exact(&r,want),label,"run-stderr-named-exact");ck(last_ms<20000,label,"run-bounded-under-20s");
+ if(!exact(&r,want)||r.rc!=rc)show(tag,&r);np_free(&r);
+ name2(tag,sizeof tag,label,"-compile");name2(bin,sizeof bin,label,".bin");
+ char *w[]={bound,"20","sh",com,(char *)file,"-b","lnx/x86_64","-o",bin,0};r=runv(w,tag);
+ ck(r.rc==rc,label,rc==1?"compile-rc1":"compile-rc2");ck(!r.outn,label,"compile-stdout-empty");ck(exact(&r,want),label,"compile-stderr-named-exact");ck(missing(bin),label,"compile-no-image");ck(last_ms<20000,label,"compile-bounded-under-20s");
+ if(!exact(&r,want)||r.rc!=rc)show(tag,&r);np_free(&r);
+ recover(label);}
+
+/* An input that must compile to the literal value 7 through both routes.
+   refusable: the cell also admits a named limit refusal (rc1, one "error"/"reject:" message, no image). */
+static void accept7(const char *label,const char *file,int refusable){
+ char tag[256],bin[256];name2(tag,sizeof tag,label,"-run");
+ char *v[]={bound,"20","sh",com,"-run",(char *)file,0};np_result r=runv(v,tag);
+ int named=refusable&&r.rc==1&&!r.outn&&r.errn>1&&r.err[r.errn-1]=='\n'&&(has(&r,": error: ")||has(&r,"reject: "));
+ if(named)printf("OUTCOME\t%s\tnamed-limit-refusal\n",tag);
+ ck(named||(r.rc==7&&!r.outn&&!r.errn),label,refusable?"run-exit7-or-named-refusal":"run-exit7");ck(last_ms<20000,label,"run-bounded-under-20s");
+ if(!named&&r.rc!=7)show(tag,&r);np_free(&r);
+ name2(tag,sizeof tag,label,"-compile");name2(bin,sizeof bin,label,".bin");
+ char *w[]={bound,"20","sh",com,(char *)file,"-b","lnx/x86_64","-o",bin,0};r=runv(w,tag);
+ named=refusable&&r.rc==1&&!r.outn&&r.errn>1&&r.err[r.errn-1]=='\n'&&(has(&r,": error: ")||has(&r,"reject: "))&&missing(bin);
+ if(named){printf("OUTCOME\t%s\tnamed-limit-refusal\n",tag);ck(1,label,"compile-named-refusal-no-image");np_free(&r);recover(label);return;}
+ ck(!r.rc&&!r.outn&&!r.errn&&regular(bin),label,refusable?"compile-rc0-image-or-named-refusal":"compile-rc0-image");ck(last_ms<20000,label,"compile-bounded-under-20s");
+ if(r.rc)show(tag,&r);np_free(&r);
+ if(regular(bin)){expect_image(bin);char exe[4400];path(exe,sizeof exe,work,bin);char *x[]={bound,"10",exe,0};name2(tag,sizeof tag,label,"-exec");
+  r=runv(x,tag);ck(r.rc==7&&!r.outn&&!r.errn,label,"image-exit7");np_free(&r);}
+ else ck(0,label,"image-exit7");}
+
+static char *repeat(char c,size_t n){char *s=malloc(n+1);if(!s)die("allocation");for(size_t i=0;i<n;i++)s[i]=c;s[n]=0;return s;}
+
+/* Fixture table for the input-unchanged check. */
+static const char *fixtures[]={"ok.c","truncated.c","truncated_mid.c","ucomment.c","ustring.c","uchar.c","selfcyc.c","self.h","mutcyc.c","a.h","b.h",
+ "guarded.c","ga.h","gb.h","ident5000.c","paren1000.c","binary.c","nul.c","nul_control.c","selfmac.c","selfstruct.c","selfstruct_member.c","nested_control.c",0};
+static char fixture_sha[32][65];
+
+static int allowed(const char *e){size_t n=strlen(e);
+ for(int i=0;fixtures[i];i++)if(!strcmp(e,fixtures[i]))return 1;
+ if(!strcmp(e,"adir.c"))return 1;
+ if(n>7&&(!strcmp(e+n-7,".stdout")||!strcmp(e+n-7,".stderr")))return 1;
+ for(int i=0;i<nimages;i++)if(!strcmp(e,images[i]))return 1;return 0;}
+
+int main(int argc,char **argv){
+#if !defined(__linux__) || !defined(__x86_64__)
+ fputs("NOT_RUN negative-hostile needs Linux/x86_64\n",stderr);return 3;
+#endif
+ char before[65],after[65];long long t_all=now_ns();
+ if(argc!=4||!realpath(argv[1],root)||argv[2][0]!='/'||argv[3][0]!='/'||strstr(argv[3],".."))die("usage ROOT PRODUCT_COM ABS_OUT");
+ {char expected[4200];path(expected,sizeof expected,root,"unisacc.com");if(strcmp(argv[2],expected))die("installed-product-required");}
+ if(unsetenv("UNISACC_RR_TIME")||unsetenv("UNISACC_RF_CAPTURE")||unsetenv("UNISA_ATTRIBUTES")||setenv("UNISACC_RUN_CACHE","0",1))die("clean-environment");
+ copy_fit(com,sizeof com,argv[2]);copy_fit(work,sizeof work,argv[3]);if(mkdir(work,0700))die("new-output-required");
+ path(bound,sizeof bound,root,"tools/bound");sha_file(com,before);
+
+ /* ---- fixtures: literals, or fixed byte rules (archived hostile.sh where it had one) ---- */
+ {const char *s="int main(void){return 7;}\n";saved("ok.c",s,strlen(s));}
+ {const char *s="int main(void) { return 0;\n";saved("truncated.c",s,strlen(s));}               /* archived: no closing brace */
+ {const char *s="int main(void) { ret";saved("truncated_mid.c",s,strlen(s));}                   /* cut inside a token, no newline */
+ {const char *s="int main(void){return 7;}\n/* a comment that never ends\n";saved("ucomment.c",s,strlen(s));}
+ {const char *s="int main(void) { char *s = \"no end;\n  return 0; }\n";saved("ustring.c",s,strlen(s));}
+ {const char *s="int main(void) { char c = 'x;\n  return 0; }\n";saved("uchar.c",s,strlen(s));}
+ {const char *s="#include \"self.h\"\nint main(void){return 7;}\n";saved("selfcyc.c",s,strlen(s));s="#include \"self.h\"\n";saved("self.h",s,strlen(s));}
+ {const char *s="#include \"a.h\"\nint main(void){return 7;}\n";saved("mutcyc.c",s,strlen(s));
+  s="#include \"b.h\"\n";saved("a.h",s,strlen(s));s="#include \"a.h\"\n";saved("b.h",s,strlen(s));}
+ /* control: a guarded mutual include is valid C and must not trip the cycle bound */
+ {const char *s="#include \"ga.h\"\nint main(void){return seven();}\n";saved("guarded.c",s,strlen(s));
+  s="#ifndef GA_H\n#define GA_H\n#include \"gb.h\"\n#endif\n";saved("ga.h",s,strlen(s));
+  s="#ifndef GB_H\n#define GB_H\n#include \"ga.h\"\nint seven(void){return 7;}\n#endif\n";saved("gb.h",s,strlen(s));}
+ /* two 5000-character identifiers that differ only in the last character: truncation would collide */
+ {char *x=repeat('x',4999);np_buf b={0};np_puts(&b,"int ");np_puts(&b,x);np_puts(&b,"a = 3;\nint ");np_puts(&b,x);np_puts(&b,"b = 4;\nint main(void) { return ");
+  np_puts(&b,x);np_puts(&b,"a + ");np_puts(&b,x);np_puts(&b,"b; }\n");saved("ident5000.c",b.p,b.n);free(b.p);free(x);}
+ /* 1000-deep parentheses around 10-3: literal expected value 7 */
+ {char *l=repeat('(',1000),*r=repeat(')',1000);np_buf b={0};np_puts(&b,"int main(void) { return ");np_puts(&b,l);np_puts(&b,"10-3");np_puts(&b,r);np_puts(&b,"; }\n");
+  saved("paren1000.c",b.p,b.n);free(b.p);free(l);free(r);}
+ /* archived binary rule: 4096 bytes (i*37+11)&0xFF */
+ {char *g=malloc(4096);if(!g)die("allocation");for(int i=0;i<4096;i++)g[i]=(char)((i*37+11)&0xFF);saved("binary.c",g,4096);free(g);}
+ /* archived NUL: a valid unit, then NUL, then more text; the control replaces the NUL with a space */
+ {const char s[]="int main(void) { return 7; }\n\0int trailing;\n";saved("nul.c",s,sizeof s-1);
+  const char c[]="int main(void) { return 7; }\n int trailing;\n";saved("nul_control.c",c,sizeof c-1);}
+ /* C99 6.10.3.4p2: no re-expansion of a macro inside its own replacement, direct, mutual and function-like */
+ {const char *s="int f(int a){return a;}\n#define X X\n#define B C\n#define C B\n#define f(a) f((a)+1)\nint X = 2; int B = 1;\nint main(void){ return X + B + f(3); }\n";saved("selfmac.c",s,strlen(s));}
+ {const char *s="struct S { struct S inner; };\nint main(void){ return 0; }\n";saved("selfstruct.c",s,strlen(s));}
+ {const char *s="struct S { int y; struct S inner; };\nint main(void){ return 0; }\n";saved("selfstruct_member.c",s,strlen(s));}
+ {const char *s="struct A { int x; };\nstruct B { struct A a; };\nint main(void){ struct B b; b.a.x = 7; return b.a.x; }\n";saved("nested_control.c",s,strlen(s));}
+ {char d[4400];path(d,sizeof d,work,"adir.c");if(mkdir(d,0700))die("directory-fixture");}
+ ck(missing("nothere.c"),"missing-input-file","fixture-ENOENT");
+ for(int i=0;fixtures[i];i++){char p[4400];path(p,sizeof p,work,fixtures[i]);sha_file(p,fixture_sha[i]);}
+
+ recover("baseline");
+ /* 1 truncated-file */
+ refuse("truncated-file","truncated.c",1,"truncated.c:2:1: error: this is not the start of an expression\n  \n  ^\n1 error generated.\n");
+ refuse("truncated-file-mid-token","truncated_mid.c",1,"truncated_mid.c:1:18: error: unknown identifier\n  int main(void) { ret\n                   ^\n1 error generated.\n");
+ /* 2 unterminated-comment */
+ refuse("unterminated-comment","ucomment.c",1,"reject: unterminated comment\n");
+ /* 3 unterminated-string-char */
+ refuse("unterminated-string","ustring.c",1,"reject: missing terminating '\"' character\n");
+ refuse("unterminated-char","uchar.c",1,"reject: missing terminating ' character\n");
+ /* 4 include-cycle */
+ refuse("include-cycle-self","selfcyc.c",1,"reject: not covered: more than 4000 #include splices (a header that includes itself?)\n");
+ refuse("include-cycle-mutual","mutcyc.c",1,"reject: not covered: more than 4000 #include splices (a header that includes itself?)\n");
+ accept7("include-cycle-guarded-control","guarded.c",0);
+ /* 5 identifier-5000 / 6 paren-depth-1000 */
+ accept7("identifier-5000","ident5000.c",1);
+ accept7("paren-depth-1000","paren1000.c",1);
+ /* 7 binary-garbage / 8 embedded-nul */
+ refuse("binary-garbage","binary.c",1,"reject: unexpected character\n");
+ refuse("embedded-nul","nul.c",1,"reject: unexpected character\n");
+ accept7("embedded-nul-control","nul_control.c",0);
+ /* 9 self-expanding-macro */
+ accept7("self-expanding-macro","selfmac.c",0);
+ /* 10 directory-input */
+ refuse("directory-input","adir.c",2,"run: cannot read adir.c\nrun: cannot read input\n");
+ {char d[4400];path(d,sizeof d,work,"adir.c");DIR *dp=opendir(d);struct dirent *e;int n=0;if(!dp)die("opendir-adir");while((e=readdir(dp)))if(strcmp(e->d_name,".")&&strcmp(e->d_name,".."))n++;closedir(dp);
+  ck(!n,"directory-input","directory-untouched-empty");}
+ /* 11 missing-input-file */
+ refuse("missing-input-file","nothere.c",1,"unisacc: error: cannot open nothere.c\n");
+ ck(missing("nothere.c"),"missing-input-file","input-still-ENOENT");
+ /* 12 self-containing-struct: C99 6.7.2.1p2 constraint (member of incomplete type). Diagnosed at
+    the member, rc1, no image through both routes; the message must name the incomplete type. */
+ static const char *ss[2][2]={{"self-containing-struct","selfstruct.c"},{"self-containing-struct-member","selfstruct_member.c"}};
+ for(int k=0;k<2;k++){
+  const char *label=ss[k][0],*file=ss[k][1];char tag[256],bin[256],pos[256];name2(pos,sizeof pos,file,":1:");
+  name2(tag,sizeof tag,label,"-run");char *v[]={bound,"20","sh",com,"-run",(char *)file,0};np_result r=runv(v,tag);
+  int located=r.errn>strlen(pos)&&!memcmp(r.err,pos,strlen(pos))&&has(&r,": error: ")&&has(&r,"1 error generated.\n");
+  ck(r.rc==1&&!r.outn,label,"run-rc1-stdout-empty");ck(located,label,"run-diagnosed-at-line1");ck(has(&r,"incomplete"),label,"run-names-incomplete-type");ck(last_ms<20000,label,"run-bounded-under-20s");
+  if(!has(&r,"incomplete"))show(tag,&r);np_free(&r);
+  name2(tag,sizeof tag,label,"-compile");name2(bin,sizeof bin,label,".bin");char *w[]={bound,"20","sh",com,(char *)file,"-b","lnx/x86_64","-o",bin,0};r=runv(w,tag);
+  located=r.errn>strlen(pos)&&!memcmp(r.err,pos,strlen(pos))&&has(&r,": error: ")&&has(&r,"1 error generated.\n");
+  ck(r.rc==1&&!r.outn,label,"compile-rc1-stdout-empty");ck(located,label,"compile-diagnosed-at-line1");ck(has(&r,"incomplete"),label,"compile-names-incomplete-type");ck(missing(bin),label,"compile-no-image");ck(last_ms<20000,label,"compile-bounded-under-20s");
+  np_free(&r);recover(label);}
+ accept7("self-containing-struct-complete-member-control","nested_control.c",0);
+
+ /* ---- hygiene: inputs unchanged, no stray outputs, product unchanged ---- */
+ {int changed=0;for(int i=0;fixtures[i];i++){char p[4400],h[65];path(p,sizeof p,work,fixtures[i]);sha_file(p,h);if(strcmp(h,fixture_sha[i])){changed++;fprintf(stderr,"negative-hostile: input changed %s\n",fixtures[i]);}}
+  ck(!changed,"output","inputs-unchanged");}
+ {DIR *dp=opendir(work);struct dirent *e;int stray=0;if(!dp)die("opendir");
+  while((e=readdir(dp))){if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;if(!allowed(e->d_name)){stray++;fprintf(stderr,"negative-hostile: stray %s\n",e->d_name);}}
+  closedir(dp);ck(!stray,"output","no-refused-image-or-stray");}
+ sha_file(com,after);ck(!strcmp(before,after),"candidate","unchanged");
+ printf("CANDIDATE\tsha256=%s\n",before);
+ printf("TIME\tbatch\twall_ms=%lld\n",(now_ns()-t_all)/1000000);
+ puts("NOT_CLAIMED\tother-targets-foreign-hosts-cc-differential-deeper-than-1000-nesting-longer-than-5000-identifiers-random-fuzz-EACCES-ENOTDIR-inputs");
+ printf("NEGATIVE_HOSTILE\tassertions=%d\tfailed=%d\tcells=12\n",assertions,failures);
+ return failures?1:0;}
