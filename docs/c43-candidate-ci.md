@@ -12,13 +12,13 @@
 | `artifact_id` | 该运行内一个仍有效的不可变 Actions artifact ID |
 | `com_sha256` | 原始 `unisacc.com` 字节 SHA256，不是 ZIP / Actions artifact digest |
 | `source_sha256` | 现有 `seed/ident.c` 定义的完整产品输入闭包摘要 |
-| `verification_commit` | 精确的40位小写 Git commit；固定测试、计划和辅助代码 |
+| `verification_commit` | 精确的40位小写 Git commit；固定测试、计划和辅助代码，且必须等于生产运行的 `head_sha` |
 | `plan_sha256` | 下述六文件规范摘要 |
 | `build_record_sha256` | 原始 `unisacc.com.build.json` 字节摘要 |
 
-工件 ZIP 必须正好包含两个顶层普通文件：`unisacc.com` 和 `unisacc.com.build.json`，不得附带测试源码或嵌套目录。单个文件限制64 MiB，归档元数据限制128 MiB。先通过 REST 核工件归属运行、有效期和生产运行成功状态，再下载。下载身份、生产运行 head 和归档摘要会记录；归档摘要不能代替外部提供的 raw com 摘要。
+工件 ZIP 必须正好包含两个顶层普通文件：`unisacc.com` 和 `unisacc.com.build.json`，不得附带测试源码或嵌套目录。单个文件限制64 MiB，归档元数据限制128 MiB。先通过 REST 核工件归属运行、有效期、生产运行及工件元数据的 `head_sha == verification_commit`，再下载。下载身份、生产运行 head 和归档摘要会记录；归档摘要不能代替外部提供的 raw com 摘要。成功运行与提交一致仅绑定输入身份，不证明该运行如何构造工件。
 
-`verification_commit` 可以比产品构建记录的 `commit` 更新，例如只新增测试；其产品闭包必须仍与 `source_sha256` 一致。构建记录的 source/raw-com/bytes 必须匹配；POSIX 分支再默认-run **现成** `seed/ident.c` 重算当前 checkout 的产品闭包，不能只信构建记录自述。这个重算由已独立核哈希的候选执行，不是独立宿主编译器验证，也不证明构建或三阶段链正确。
+`verification_commit` 可以比产品构建记录的 `commit` 更新，例如只新增测试；生产运行须在该验证提交上，上传同字节候选。其产品闭包必须仍与 `source_sha256` 一致。构建记录的 source/raw-com/bytes 必须匹配；POSIX 分支再默认-run **现成** `seed/ident.c` 重算当前 checkout 的产品闭包，不能只信构建记录自述。这个重算由已独立核哈希的候选执行，不是独立宿主编译器验证，也不证明构建或三阶段链正确。
 
 输入从结构化 Actions `env/with` 传递；严格校验数字 ID 与小写定长摘要。候选命令使用 `.NET ProcessStartInfo.ArgumentList`，不把输入展开成 shell 命令文本。下载 token 仅存在下载步骤，候选执行步骤不接收它。
 
@@ -85,3 +85,5 @@ POSIX 分支按序尝试来源摘要、CX 元数据和当前 `tests/run.cx --all
 本地还用产品摘要、活构建记录摘要、现行来源/计划摘要及 Linux x86_64 轴执行 `--check`；为只测元数据路径，producer_run/artifact_id 明示填入**合成的 `1/1`**，绝非真实工件身份。结果 rc3，严格解析 112 批、19 PLANNED、74 UNPREPARED、19 覆盖缺口、执行0，并输出 `QUALIFICATION NOT_READY`；无批次或远端候选运行，不能转用这次合成调用作生产者收据。
 
 同日登记独立 E3 有限批后，六文件计划摘要由 CX helper 和独立 PowerShell 再次算得同一 `dcbb123d703a5211fd41563c1d0f7e7b73eab9c7b6c7ea77cb13445752bbc320`；`--list` 为 113 批、124 覆盖、19 缺口，`--all` 仍 rc3、子批执行0。上述合成 `--check` 是登记前的旧输入检查，未把其 112 批结果改贴为新计划结果。
+
+2026-10-27：生产运行 `head_sha` 与工件 `workflow_run.head_sha` 均加入精确验证提交检查，任一不符即在下载前失败。本地 `out/actionlint` 返回0；PowerShell 7.6.8 对四段 `run` 脚本解析为0错误，并对生产运行 head 的同值接受／异值拒绝作隔离检查。只验证静态逻辑；仍无生产运行、工件下载或外宿主实跑。

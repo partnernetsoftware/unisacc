@@ -101,8 +101,11 @@ jobs:
           $base = "$env:GH_API_URL/repos/$env:GH_REPOSITORY/actions"
           $run = Invoke-RestMethod -Uri "$base/runs/$env:C43_PRODUCER_RUN" -Headers $headers -TimeoutSec 40 -MaximumRetryCount 0
           if ($run.status -ne 'completed' -or $run.conclusion -ne 'success') { throw 'Producer run must be completed and successful' }
+          # The successful run must belong to the exact checkout whose plan and
+          # source are checked below; a run from another ref is not its producer.
+          if ($run.head_sha -cne $env:C43_VERIFY_COMMIT) { throw 'Producer run head differs from verification commit' }
           $artifact = Invoke-RestMethod -Uri "$base/artifacts/$env:C43_ARTIFACT_ID" -Headers $headers -TimeoutSec 40 -MaximumRetryCount 0
-          if ($artifact.expired -or "$($artifact.workflow_run.id)" -cne $env:C43_PRODUCER_RUN -or $artifact.size_in_bytes -gt 134217728) { throw 'Artifact run/expiry/size mismatch' }
+          if ($artifact.expired -or "$($artifact.workflow_run.id)" -cne $env:C43_PRODUCER_RUN -or $artifact.workflow_run.head_sha -cne $env:C43_VERIFY_COMMIT -or $artifact.size_in_bytes -gt 134217728) { throw 'Artifact run/head/expiry/size mismatch' }
           New-Item -ItemType Directory -Force -Path out/ci-candidate | Out-Null
           Invoke-WebRequest -Uri "$base/artifacts/$env:C43_ARTIFACT_ID/zip" -Headers $headers -OutFile out/candidate.zip -TimeoutSec 45 -MaximumRetryCount 0
           $zip = [IO.Compression.ZipFile]::OpenRead((Join-Path $PWD 'out/candidate.zip'))
