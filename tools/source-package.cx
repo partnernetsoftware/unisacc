@@ -14,6 +14,7 @@
  * before any source-package-v1 package.tsv/model-inputs.tsv may be emitted.
  */
 #pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.kernelsha
 typedef struct {const char *id,*stage,*flags[4];} SpModel;
 static const SpModel recipes[]={
  {"shared-e2","pp",{"--shared-predefines",0}},
@@ -62,7 +63,9 @@ static void path(char *p,const char *a,const char *b){int n=snprintf(p,4400,"%s/
 static void clean(const char *p){if(!p[0]||strpbrk(p,"\r\n\t"))die("unclean-path");}
 static void canonical(const char *p){char actual[4400];clean(p);if(p[0]!='/'||!realpath(p,actual)||strcmp(p,actual))die("canonical-input-path-required");}
 static char *load(const char *p,size_t *n){struct stat a,b;errno=0;if(lstat(p,&a))die(errno==ENOENT?"input-absent":"input-stat");if(!S_ISREG(a.st_mode)||a.st_size<0||a.st_size>134217728)die("bounded-regular-input");int fd=open(p,O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC);if(fd<0||fstat(fd,&b)||a.st_dev!=b.st_dev||a.st_ino!=b.st_ino||a.st_size!=b.st_size)die("input-descriptor");*n=(size_t)a.st_size;char *s=malloc(*n+1);if(!s)die("allocation");size_t at=0;while(at<*n){ssize_t z=read(fd,s+at,*n-at);if(z<0&&errno==EINTR)continue;if(z<=0)die("input-extent");at+=(size_t)z;}char extra;ssize_t z;do{z=read(fd,&extra,1);}while(z<0&&errno==EINTR);int bad=fstat(fd,&b)||a.st_dev!=b.st_dev||a.st_ino!=b.st_ino||a.st_size!=b.st_size;int closed=close(fd);if(z||bad||closed)die("input-changed-or-close");s[*n]=0;return s;}
-static void digest(const char *p,char h[65]){size_t n;char *s=load(p,&n);cx_sha256_hex(s,n,h);free(s);}
+/* The consumer already declares this hybrid provider. Keep every observation
+ * and byte comparison; only the implementation of SHA-256 changes. */
+static void digest(const char *p,char h[65]){size_t n;char *s=load(p,&n);if(n>=1024){int rc=ks_sha256_hex(s,n,h);if(rc){fprintf(stderr,"source-package: kernel-sha256 rc=%d on %s\n",rc,p);die("digest-provider-failure");}}else cx_sha256_hex(s,n,h);free(s);}
 static void absent(const char *p){struct stat st;errno=0;if(!lstat(p,&st)||errno!=ENOENT)die("exclusive-output-required");}
 static void write_new(const char *p,const char *s,size_t n){int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(fd<0)die("exclusive-record");size_t at=0;while(at<n){ssize_t z=write(fd,s+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0)die("record-write");at+=(size_t)z;}int synced=fsync(fd),closed=close(fd);if(synced||closed)die("record-close");}
 static void row(np_buf *b,const char *k,const char *v){np_puts(b,k);np_puts(b,"\t");np_puts(b,v);np_puts(b,"\n");}
