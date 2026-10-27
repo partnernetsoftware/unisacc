@@ -1,8 +1,10 @@
 /* DEV_ONLY unsigned code cache, never a test-result or product qualification.
  * Build with -DDEV_RUN_SOURCE_SHA='"actual tools/dev-run.cx SHA256"'.
  * CLI ROOT [--opt=0|--opt=2] SOURCE.cx [-- PROGRAM_ARGS...]. Linux/x86_64.
- * The pinned CSR compiler writes a standard native ELF on a cache miss.
- * A complete external byte namespace covers all compile inputs. Unsealed attempts
+ * On a cache miss the installed product (/bin/sh ROOT/unisacc.com, its embedded package
+ * unless UNISACC_DEV_MODELS names one) writes a standard native ELF; the product bytes,
+ * shell, package, options, environment, -cx-plan module closure and include tree all
+ * enter the key, so any change is a miss. A complete external byte namespace covers all compile inputs. Unsealed attempts
  * are never reused. Inputs must be quiescent: before/after checks are not an
  * atomic snapshot or protection against a malicious same-user ABA mutation.
  */
@@ -11,8 +13,7 @@
 #ifndef DEV_RUN_SOURCE_SHA
 #define DEV_RUN_SOURCE_SHA "NOT_COMPILED_WITH_SOURCE_IDENTITY"
 #endif
-static const char *compiler_pin="82f89d58ba2ed4a4ac40b28fefc8fca0a2162faa7b5fb6fe72c92e875a1f7ce6";
-static const char *np_pin="ba52e2f2f81d5c45482f995cc3d62f1e8ac9155cd01cbb2ce42ef0d8df232b77";
+static const char *np_pin="fa5ec4702ac0ee4216edc8085f5d3e4b4ae53aed05ac2a4a308f64c0d2e51660";
 static const char *ks_pin="8ad60f9004f98b6bd68397668e1c6feabe468bb5be4b5ec9aedc4494aa541e31";
 static unsigned long long physical_reads;
 static int uncached,tree_entries;
@@ -30,7 +31,7 @@ static char **children(const char *p,int *count){DIR *d=opendir(p);if(!d)bad("di
 static void tree(np_buf *b,const char *p,int depth){if(depth>32||++tree_entries>8192)bad("tree-bound");struct stat a,c;if(lstat(p,&a))bad("tree-stat");if(!S_ISDIR(a.st_mode)){file(b,p,0);return;}field(b,p);field(b,"directory");num(b,(long long)(a.st_mode&07777));int n;char **v=children(p,&n);num(b,n);for(int i=0;i<n;i++){char q[4400];path(q,p,v[i]);tree(b,q,depth+1);free(v[i]);}free(v);if(lstat(p,&c)||!same(&a,&c))bad("directory-changed");}
 static void pinned(np_buf *b,const char *p,const char *expected){size_t n;char *s=read_actual(p,&n,0);char h[65];hash(s,n,h);free(s);if(strcmp(h,expected))bad("compiled-source-or-native-pin");field(b,p);field(b,h);}
 static void canonical(const char *p,char out[4400]){if(!realpath(p,out))bad("canonical-path");}
-static void plan(np_buf *b,const char *native,const char *pkg,const char *inc,const char *src,const char *cwd,const char *bound){char *v[]={(char *)bound,"8",(char *)native,"--models",(char *)pkg,"-I",(char *)inc,"-cx-plan",(char *)src,0};np_result r={0};char why[1200];if(np_run(v,cwd,0,10,&r,why,sizeof why)||r.rc||r.errn||!r.outn||r.outn>1048576||memchr(r.out,0,r.outn)||memchr(r.out,'\r',r.outn)||r.out[r.outn-1]!='\n')bad("incomplete-cx-plan");field(b,r.out);char *at=r.out;int units=0;while(*at){char *end=strchr(at,'\n');*end=0;char *tab=strchr(at,'\t');if(!tab)bad("plan-row");*tab=0;char index[20];snprintf(index,sizeof index,"%d",units);if(strcmp(at,index)||++units>256)bad("plan-index-or-unit-bound");if(units>16)uncached=1;at=tab+1;int col=0;for(;;){tab=strchr(at,'\t');if(tab)*tab=0;if(!*at||strlen(at)>=4400)bad("plan-empty-or-long-field");char p[4400];if(!strcmp(at,"cx.h"))path(p,inc,"cx.h");else if(at[0]=='/')snprintf(p,sizeof p,"%s",at);else path(p,cwd,at);file(b,p,col==0);col++;if(!tab)break;at=tab+1;}if(col<2)bad("plan-cx-prelude-missing");at=end+1;}if(!units)bad("empty-plan");np_free(&r);}
+static void plan(np_buf *b,char **v,const char *inc,const char *cwd){np_result r={0};char why[1200];if(np_run(v,cwd,0,10,&r,why,sizeof why)||r.rc||r.errn||!r.outn||r.outn>1048576||memchr(r.out,0,r.outn)||memchr(r.out,'\r',r.outn)||r.out[r.outn-1]!='\n')bad("incomplete-cx-plan");field(b,r.out);char *at=r.out;int units=0;while(*at){char *end=strchr(at,'\n');*end=0;char *tab=strchr(at,'\t');if(!tab)bad("plan-row");*tab=0;char index[20];snprintf(index,sizeof index,"%d",units);if(strcmp(at,index)||++units>256)bad("plan-index-or-unit-bound");if(units>16)uncached=1;at=tab+1;int col=0;for(;;){tab=strchr(at,'\t');if(tab)*tab=0;if(!*at||strlen(at)>=4400)bad("plan-empty-or-long-field");char p[4400];if(!strcmp(at,"cx.h"))path(p,inc,"cx.h");else if(at[0]=='/')snprintf(p,sizeof p,"%s",at);else path(p,cwd,at);file(b,p,col==0);col++;if(!tab)break;at=tab+1;}if(col<2)bad("plan-cx-prelude-missing");at=end+1;}if(!units)bad("empty-plan");np_free(&r);}
 static char **compiler_environment(char **caller){size_t n=0;for(char **p=caller;*p;p++)if(++n>65536)bad("environment-count");char **v=calloc(n+2,sizeof *v);if(!v)bad("allocation");size_t k=0;for(char **p=caller;*p;p++)if(strncmp(*p,"UNISACC_E3CACHE=",16)&&strncmp(*p,"UNISACC_RUN_CACHE=",18))v[k++]=*p;v[k++]="UNISACC_RUN_CACHE=0";return v;}
 static void environment(np_buf *b){np_buf e={0};for(char **p=environ;*p;p++){
  /* The outer bound sets a fresh absolute deadline for every invocation.
@@ -41,7 +42,7 @@ static void environment(np_buf *b){np_buf e={0};for(char **p=environ;*p;p++){
     !strncmp(*p,"_=",2))continue;
  field(&e,*p);
  }char h[65];hash(e.p,e.n,h);field(b,"compiler-output-environ-sha256");field(b,h);free(e.p);}
-static void manifest(char h[65],const char *root,const char *native,const char *pkg,const char *inc,const char *src,const char *bound,const char *cwd,char **command){np_buf b={0};uncached=0;tree_entries=0;field(&b,"dev-run-native-elf-namespace-v2;DEV_ONLY;byte-hybrid1024;no-verdict-cache");field(&b,root);field(&b,cwd);char p[4400];path(p,root,"tools/dev-run.cx");pinned(&b,p,DEV_RUN_SOURCE_SHA);path(p,root,"tools/cxlib/netpack.cx");pinned(&b,p,np_pin);path(p,root,"tools/cxlib/kernelsha.cx");pinned(&b,p,ks_pin);pinned(&b,native,compiler_pin);file(&b,pkg,0);file(&b,bound,0);for(int i=0;command[i];i++)field(&b,command[i]);environment(&b);plan(&b,native,pkg,inc,src,cwd,bound);tree(&b,inc,0);hash(b.p,b.n,h);free(b.p);}
+static void manifest(char h[65],const char *root,const char *product,const char *shell,const char *pkg,const char *inc,const char *bound,const char *cwd,char **command,char **planv){np_buf b={0};uncached=0;tree_entries=0;field(&b,"dev-run-product-elf-namespace-v3;DEV_ONLY;byte-hybrid1024;no-verdict-cache");field(&b,root);field(&b,cwd);char p[4400];path(p,root,"tools/dev-run.cx");pinned(&b,p,DEV_RUN_SOURCE_SHA);path(p,root,"tools/cxlib/netpack.cx");pinned(&b,p,np_pin);path(p,root,"tools/cxlib/kernelsha.cx");pinned(&b,p,ks_pin);file(&b,product,0);file(&b,shell,0);if(*pkg)file(&b,pkg,0);else field(&b,"embedded-package");file(&b,bound,0);for(int i=0;command[i];i++)field(&b,command[i]);environment(&b);plan(&b,planv,inc,cwd);tree(&b,inc,0);hash(b.p,b.n,h);free(b.p);}
 static void private_dir(const char *p,int create){struct stat st;errno=0;if(lstat(p,&st)){if(errno!=ENOENT||!create||mkdir(p,0700)||lstat(p,&st))bad("private-directory-create");}if(!S_ISDIR(st.st_mode)||st.st_uid!=getuid()||(st.st_mode&07777)!=0700)bad("private-directory-owner-mode");}
 /* A seal covers every blob byte, name, mode and size; no program rc/output.
  * Only this leaf inventory is admitted. Symlinks/directories never enter it. */
@@ -61,26 +62,32 @@ int main(int argc,char **argv){
  if(sn<3||strcmp(source+sn-3,".cx")||source[0]=='-')bad("only-cx-source");
  if(sn>=sizeof src)bad("source-path-bound");memcpy(src,source,sn+1);
  if(at<argc&&strcmp(argv[at++],"--"))bad("program-arguments-require-separator");
- path(native,root,"out/c43-csr-native-01.elf");
- const char *e=getenv("UNISACC_DEV_MODELS");if(e&&*e)canonical(e,pkg);else path(pkg,root,"out/c43-source-package-material-04/compiler.pkg");
+ path(native,root,"unisacc.com");char *shell="/bin/sh";pkg[0]=0;
+ const char *e=getenv("UNISACC_DEV_MODELS");if(e&&*e)canonical(e,pkg);
  e=getenv("UNISACC_DEV_INCLUDE");if(e&&*e)canonical(e,inc);else path(inc,root,"include");path(bound,root,"tools/bound");
  char k[65];if(ks_sha256_hex("",0,k)||strcmp(k,"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")||ks_sha256_hex("abc",3,k)||strcmp(k,"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"))bad("kernel-sha-selfcheck");
  char **caller_environ=environ;environ=compiler_environment(caller_environ);
  /* Only compiler options enter the key. The output role is stable; the actual
   * fresh attempt path and all runtime program arguments never enter it. */
  char *role="fresh-output-role/program.elf";
- char *command[]={bound,"40",native,"--models",pkg,"-I",inc,opt,"-b","lnx/x86_64",src,"-o",role,0};
- char before[65],after[65];manifest(before,root,native,pkg,inc,src,bound,cwd,command);int no_cache=uncached;
+ char *command[16],*planv[12];int c=0,p=0;
+ command[c++]=bound;command[c++]="40";command[c++]=shell;command[c++]=native;
+ planv[p++]=bound;planv[p++]="8";planv[p++]=shell;planv[p++]=native;
+ if(*pkg){command[c++]="--models";command[c++]=pkg;planv[p++]="--models";planv[p++]=pkg;}
+ command[c++]="-I";command[c++]=inc;command[c++]=opt;command[c++]="-b";command[c++]="lnx/x86_64";command[c++]=src;command[c++]="-o";
+ int out_at=c;command[c++]=role;command[c]=0;
+ planv[p++]="-I";planv[p++]=inc;planv[p++]="-cx-plan";planv[p++]=src;planv[p]=0;
+ char before[65],after[65];manifest(before,root,native,shell,pkg,inc,bound,cwd,command,planv);int no_cache=uncached;
  char cache[4400],ns[4400],attempt[4400],sealed[65],program[4400];
- path(cache,root,"out/c43-dev-run-cache");private_dir(cache,1);path(ns,cache,before);private_dir(ns,1);
+ path(cache,root,"out/c43-cxcache-product-cache");private_dir(cache,1);path(ns,cache,before);private_dir(ns,1);
  int hit=!no_cache&&warm(ns,attempt,sealed);
  if(!hit){path(attempt,ns,"attempt-XXXXXX");if(!mkdtemp(attempt))bad("fresh-attempt");private_dir(attempt,0);}
  path(program,attempt,"program.elf");
  fprintf(stderr,"DEV_RUN\tDEV_ONLY\tcache=%s\tnamespace=%s\n",no_cache?"BYPASS-input-scope":hit?"SEALED":"COLD",before);
  if(!hit){
-  command[12]=program;int rc=execute(command,cwd);command[12]=role;
+  command[out_at]=program;int rc=execute(command,cwd);command[out_at]=role;
   if(rc)return rc;
-  manifest(after,root,native,pkg,inc,src,bound,cwd,command);
+  manifest(after,root,native,shell,pkg,inc,bound,cwd,command,planv);
   if(strcmp(before,after)||uncached!=no_cache)bad("inputs-changed-during-compilation");
   struct stat st;if(lstat(program,&st)||!S_ISREG(st.st_mode)||st.st_uid!=getuid())bad("compiler-output-not-regular-owned");
   if(chmod(program,0700))bad("compiler-output-mode");
