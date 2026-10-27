@@ -1074,7 +1074,7 @@ static int attr_strip(Buf *out) {
     if (out->n < 16 || memcmp(out->b, "USLATTR1", 8)) return 0;
     unsigned count = attr_u32(out->b + 8);
     long head = 16 + 5L * count;
-    if (count > 1000000u || head > out->n) die("malformed USLATTR1 side-car");
+    if (count > 1000000u || head > out->n || attr_u32(out->b + 12) != (unsigned long)(out->n - head)) die("malformed USLATTR1 side-car");
     if (ATTRS.n == 0) { for (int k = 0; k < 4; k++) attr_put(0); }
     unsigned total = attr_u32(ATTRS.b) + count;
     for (unsigned r = 0; r < count; r++) {

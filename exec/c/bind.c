@@ -62,6 +62,9 @@ static int host_compile(const char*route,const char*first,Buf*in,const char*src,
  else provider.available=15; /* existing target-loader import provider, not host addresses */
  HostBindPlan plan;char error[160];if(host_bind(&requirements,&provider,c->filter,&plan,error,sizeof error)){fprintf(stderr,"%s\n",error);return 1;}
  if(c->native){for(int j=0;j<4;j++){resource_u64(c->dl+8*j,plan.address[j]);c->cli[9+j].n=13;}}
- return host_stage_present(route,"elf")?runroute_from(route,"elf",in,src):0;
+ /* run routes end at lower (memory writes the image); an image route without its elf
+    stage is a package boundary error, never lower text written as the image */
+ if(c->mode==3&&!host_stage_present(route,"elf"))return 0;
+ return runroute_from(route,"elf",in,src);
 }
 
