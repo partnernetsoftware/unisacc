@@ -150,7 +150,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 **2026-10-27 cc 计划树（唯一现行调度；cc 亲自管理子代理，不用 Workflow；并发上限＝重活1＋轻活3；交付经核验即按路径提交，不在共享检出囤积在制）：**
 - **A 新候选纪元1（关键路径，串行，独占重活位）**：A1 流控制表 F1/F3 修复〔代理进行中〕→ A2 封源、独立 helper 测 SID → A3 新 source context 107 作业（声明 `CPATH=/usr/include/node`、`LIBRARY_PATH=out/c43-source-riroot-local-zlib`）→ A4 PC 全包 → A5 GEN 双核/五切片/wrap → A6 kind2 准入＋开发安装 → A7 新候选上分波重跑全部 IMPLEMENTED 批（经 B1）。
 - **B 测试基础设施（轻，并行）**：B1 `--all` 分波实跑＋同候选收据聚合〔进行中〕；B2 E7 产品内两 ISA 汇编合同（spec AS 条款、手册引用 golden、kernel-route）〔进行中〕；B3 C1 候选身份批〔进行中〕。到达即核验、登记、提交。
-- **C 宽行本机格（轻，A6 之后，每次≤2 路）**：按 `out/c43-cc-domain-specs-{contract,runtime,streams}-01.md` 切片顺序取用，在新候选上实跑后才计覆盖。
+- **C 宽行本机格（轻，与 A 并行；每个独立分支一个子代理，文件域互斥）**：按 `out/c43-cc-domain-specs-{contract,runtime,streams}-01.md` 切片取用；现在即对 Root7a 写成并实跑，新候选 A6 后重跑才计覆盖。进行中：S5 `stream-e1-lex`、S3 `stream-e2-domain`。
 - **D 纪元2 产品修复（A6 之后）**：A-40 三诊断缺口、自引用 struct 诊断措辞、产品内分相计时戳及 C 切片新发现。
 - **E 外宿主**：push/派发/产物暴露待主人授权，未授权前不动。
 
