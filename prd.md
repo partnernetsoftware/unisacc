@@ -147,12 +147,33 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 <a id="work-tree"></a>
 ### 思维树
 
-**2026-10-27 cc 计划树（唯一现行调度；cc 亲自管理子代理，不用 Workflow；并发上限＝重活1＋轻活3；交付经核验即按路径提交，不在共享检出囤积在制）：**
-- **A 新候选纪元1（关键路径，串行，独占重活位）**：A1 流控制表 F1/F3 修复〔已提交 b75177e48d；F2 已于 48b5be2a4c 在源码修，纪元1源码封口〕→ A2–A6〔重活代理进行中，证据 out/c43-cc-epoch1-build-01.md〕A2 封源、独立 helper 测 SID → A3 新 source context 107 作业（声明 `CPATH=/usr/include/node`、`LIBRARY_PATH=out/c43-source-riroot-local-zlib`）→ A4 PC 全包 → A5 GEN 双核/五切片/wrap → A6 kind2 准入＋开发安装 → A7 新候选上分波重跑全部 IMPLEMENTED 批（经 B1）。
-- **B 测试基础设施（轻，并行）**：B4〔待轻位，主人裁定 2026-10-27：测试只走 .cx 与产品，不新建 .c/.py 夹具，宿主 GCC 不作测试前置〕把 `tests/p3-library-members.cx`＋`tests/cases/p3_library_members.c`（宿主 GCC11 构建）改为产品自身路径，做不到的格标 NEEDS_PRODUCT_CHANGE 并留 .cx 复现，L1 已同令改；B1 `--all` 分波实跑＋同候选收据聚合〔已提交 796120b74d：`tools/all-waves.cx` init/material/wave，`tests/all-aggregate.cx` 重测身份与收据，`run.cx --all SESSION` 仅 QUALIFIED 才 rc0；真实会话须冻结 tests/tools/cx 与源码；子批在 55 秒窗内约余 20–30 秒，满额批会回 UNKNOWN〕；B2 E7 产品内两 ISA 汇编合同〔已提交 0764fa8861：spec AS-1..11、`tests/asm-golden` 五表（arm64 155/155、x86_64 307/307 所有者在 stash 事件后逐行重核）、`tools/kernel-route.cx` 只用候选、九批登记；encoding/coverage run-batch PASS；-b/头冲突拒绝待新候选才绿；route-refusal 54/55 秒贴线〕；B1 判定修补 3cf3da0708：bound_rc≠子退出码一律 UNKNOWN（cdx 发现 143+子0 误 PASS），控制 9/0；B1b〔待轻位〕：单窗 wave 给子批仅约 20–30 秒，kernel-route-route-refusal 等满额批必 UNKNOWN，改为跨命令 start→独立 bound55 run-batch→finish 同会话收据，不改 UNKNOWN、不抬 60 秒门；B3 C1 候选身份批〔已提交 a13eddbc40：identity run-batch PASS 24/0；kind2 admission 在活 SID≠候选 SID 时具名拒绝、positive NOT_RUN rc3；补 `tests/cxlib/mixedsnapshot.cx` 链接，此前 tests/ 下 rebuildcontext 用户均编不过〕。到达即核验、登记、提交。
-- **C 宽行本机格（轻，与 A 并行；每个独立分支一个子代理，文件域互斥）**：按 `out/c43-cc-domain-specs-{contract,runtime,streams}-01.md` 切片取用；现在即对 Root7a 写成并实跑，新候选 A6 后重跑才计覆盖。进行中：S5 `stream-e1-lex`、S3 `stream-e2-domain`。
-- **D 纪元2 产品修复（A6 之后）**：语言缺陷 L-S5-1 经 `?:` 返回 struct 被拒 not covered: struct return（复现 out/c43-cc-branch-s5-01/repro-struct-ternary.cx）；E1 词法待主人复核：空字符常量 `''` 被接受（C99 6.4.4.4 要求非空，属语法违例须诊断）、字符常量出为 num、`1e` 拆为 num+id（C99 pp-number 应为单个 pp-number 并在 E3 拒绝）；E2 五缺陷（S3 实证，复现 out/c43-cc-branch-s3-01/ref-2/：F-S3-1 `#if` 无 `#endif` 被接受；F-S3-2 孤立 `#elif` 被接受；F-S3-3 `#include bogus` 静默清空；F-S3-4 源中 NUL 被接受并抄入输出；F-S3-5 ENOENT/ENOTDIR/EACCES 同报 cannot open，E1 同因 exec/c/run.c:164 readfile 同报 cannot open input（S5 P1））、A-40 三诊断缺口、自引用 struct 诊断措辞、产品内分相计时戳及 C 切片新发现。
-- **E 外宿主**：push/派发/产物暴露待主人授权，未授权前不动。
+**2026-10-27 cc 收口计划（唯一现行调度；主人令停 fan-out：串行推进，cc 亲自执行，同一时刻至多一个代理且只做重构造）**
+
+完成门（`plans/v0.0.43.md:42`）：19 条 NOT_READY 宽行、完整 N22、五外宿主同候选实证全部闭合后，`--all` 才可 rc0。
+
+**实测账（`out/c43-cc-plan-matrix-counts.txt`）：** 19 行矩阵共 822 个必选格。Root7a 上已覆盖约 257 个；另有约 55 个已登记、待矩阵回填。本机仍缺 421 个，需改产品 38 个，需外宿主约 98 个（含 hosts 行 15 个），阻塞 19 个，声明依赖 10 个。N22 现状：E7 已由产品内汇编合同闭合（`0764fa8861`）；E6 已有成员交叉核对；E2–E5、E9–E11 属可声明的宿主/工具依赖；E8 的权重仍由 Python 发射器生成；E12 即外宿主。
+
+**P0 主人裁定（阻塞收口，先定）：**
+- **D1 外宿主路线**：(a) 授权 push 并派发 CI 产出同候选 producer 产物，在五宿主实跑；或 (b) 提供真实宿主/SSH。未定则 0.0.43 不可完成。
+- **D2 格数门槛**：822 格由 cc 本周写定，未经主人确认。建议一次审定，只保留声明合同与 C99 强制项为 0.0.43 必选，其余标 `required=no` 移入 0.0.44。
+- **D3 N22 口径**：建议 E2–E5、E9–E11 在 0.0.43 记 DECLARED_DEPENDENCY，消除留给 0.1.x 退出条件（§5.0）；E6/E8 须以源构造证据闭合。
+- **D4 词法裁定**：空字符常量 `''`、字符常量出为 num、`1e` 拆分，三者是否属缺陷。
+
+**P1 纪元1候选（进行中，唯一后台代理）：** A2 已封源，SID `df8f29fd`。A3 107 作业 → A4 PC → A5 GEN → A6 kind2 准入加开发安装（`out/c43-cc-epoch1-build-01.md`）。
+
+**P2 纪元2产品修复（P1 后，cc 亲自做，一次重建）：** 38 个需改产品格，加已知缺陷：E2 五项、E1 errno、`?:` 返回 struct、A-40 三诊断、自引用 struct 措辞、分相计时戳。修完重建一次候选。
+
+**P3 本机格逐行闭合（串行，一次一行）：** 按“距闭合最近”排序：candidate 6、bootstrap 10、optimization 14、formats 16、phase-timing 11、e4 17、prune 19、properties 21、negative 22、ri 26、lower 28、elf 28、interfaces 28、e1 29、resources 31、library 34、e3 36、e2 45。每行做到本机格全覆盖并回填矩阵后再开下一行。所有测试只走 .cx 与产品。
+
+**P4 `--all` 跨命令收据（B1b）：** start → run → finish，run 相由执行器自身 waitpid 并封存 bound rc；外层 `bound 58` 即硬限 60 秒。代理已停，WIP 保存在 `out/c43-cc-all-waves-02/`，P3 期间由 cc 完成。
+
+**P5 本机全量：** 在最终候选上分波跑完全部批次，矩阵中本机格全部 COVERED_LOCAL。
+
+**P6 外宿主（依 D1）：** 同一产物、同一身份在五宿主实跑，然后 `--all` 聚合。
+
+**P7 发布：** 签名、Draft、Latest、公开另需授权，未授权不动。
+
+**已提交的 B/C 成果：** B1 `796120b74d`、`3cf3da0708`；B2/E7 `0764fa8861`；B3 `a13eddbc40`；S3 `757d3b59cd`；S5 `cdd9c99a1e`；门修 `60da553502`。待办债：L1/S7 草稿（未提交，未验证），p3-library-members 去 GCC（B4）。
 
 **2026-10-27 cc 节点·宽合同已全量规格化：** 19 条 NOT_READY 宽行此前只有一行 oracle 文本、无法诚实关闭；现每行有 `tests/<row>-domain-matrix.tsv` 逐格规格（统一列 `host cell required status evidence requirement citation oracle note`；COVERED_LOCAL 仅限 Root7a 上实际 run-batch PASS 且恰断言该组，新候选须全部重跑）。提交 `e4d7a95bb8`（negative/optimization/formats/phase-timing/bootstrap/candidate 231 格）、`175a9642ff`（ri/resources/library/properties 212 格）、`97a3f4472a`（七流＋interfaces 365 格）；报告 `out/c43-cc-domain-specs-{contract,runtime,streams}-01.md` 给出约 70 个批量级切片。同提交修共享运行器：`np_run` 子进程自成进程组、超时杀整组、有无输出均计 1ms 拍；`run-batch` 自身超时记 `status=UNKNOWN` 退 3（非 PASS、需重跑），smoke/qprefix 复跑 PASS。纪元裁定：本纪元封源点＝流控制表 F1/F3 修复落地；A-40 三诊断缺口（触及 `exec/parse2`/`exec/pp` 位置传递）与产品内分相计时戳排入下一纪元，不挡 SID 重建。`@relocs` 槽值按参考 `relocate` 维持不设值域（C 允许 one-past-end），F3 只拒缺头/空码/静态 `@sym` 与指令数据引用越界。外宿主（push/派发/产物暴露）待主人授权。
 
