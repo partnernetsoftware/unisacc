@@ -350,7 +350,9 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 <a id="memory-palace"></a>
 ### 记忆宫殿
 
-**E2候选表批：** ccd29 context-02 的34个 tbl 收据已存在；并发大表 finish 三次 rc142 保留，errorparse/warnparse 用优化控制器单独 finish rc0，shared-e3 的超时后收据经 source-job-verify 双端只读 VERIFIED，原 rc142 不改写。net 正按四路分波构造，shared-e3 大项单列；尚无新包或候选。
+**现行构造纠正：** context-02 的 bootstrap 指向活 Root，pack 预检拒绝 `live-root-record-must-use-ephemeral-bind`；其107条收据只保留历史，不转授。新建 `out/c43-source-ccd29-context-03/` 使用 GEN-a825 保存的 bootstrap-before-install.com，prepare 与 pack consumer `--verify-source-context` 均rc0。须在03按依赖重新实跑107；双核 GEN-ccd29-01 已完成，后续复核适用身份。
+
+**E2候选表批：** ccd29 context-02 的107个作业收据已齐（5工具+34 gen+34 tbl+34 net）；并发大表 finish 三次 rc142 保留，errorparse/warnparse 表用优化控制器单独 finish rc0，shared-e3 表的超时后收据经 source-job-verify 双端只读 VERIFIED。net-errorparse/net-warnparse 外层142但已有输出/收据，两项独立双端复验均 VERIFIED；原超时不改写。net-shared-e3 单独 start/finish 均rc0。下一步双核、PC、五片与准入，尚无新包或候选。
 
 **构造调度纠正：** 34 个 tbl 作业在 gen 完成后按独立 job 目录限并发四路执行；每命令独立限时和封收据，不同一作业重复写。随后 net 按已完成 tbl 分波执行，不再逐项串行等待。
 
