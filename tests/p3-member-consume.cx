@@ -1,0 +1,62 @@
+/* Formal batch wrapper: rebuild the host-gcc O2 ELF from current source.
+ * ROOT SOURCE_CTX PACK_CTX TOOL_ELF NEW_ABS_OUT
+ * The supplied ELF is material only; its bytes must match this fresh build. */
+#pragma unisa use cxlib.netpack
+static char root[4096],ctx[4096],pc[4096],elf[4096],work[4096];
+static char bound[4400],product[4400],tool[4400];
+static int checks,failed;
+static void die(const char *s){fprintf(stderr,"p3-member-consume-test: REFUSE %s errno=%d\n",s,errno);exit(2);}
+static void ck(int ok,const char *s){checks++;if(!ok)failed++;printf("%s\tp3-member-consume-test.%s\n",ok?"PASS":"FAIL",s);}
+static void path(char *out,size_t cap,const char *a,const char *b){int n=snprintf(out,cap,"%s/%s",a,b);if(n<0||(size_t)n>=cap)die("path-bound");}
+static void copy_fit(char *dst,size_t cap,const char *src){size_t i=0;if(!cap)die("copy-bound");while(src[i]&&i+1<cap){dst[i]=src[i];i++;}if(src[i])die("copy-bound");dst[i]=0;}
+static int within(const char *p,const char *base){size_t n=strlen(base);return !strncmp(p,base,n)&&(!p[n]||p[n]=='/');}
+static char *load(const char *p,size_t *n){struct stat st;if(lstat(p,&st)||!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>8388608)die("regular-input");char *s=cx_read(p,n);if(!s||*n!=(size_t)st.st_size)die("input-extent");return s;}
+static void hash(const char *p,char out[65]){size_t n;char *s=load(p,&n);cx_sha256_hex(s,n,out);free(s);}
+static void save(const char *name,const char *s,size_t n){char p[4400];path(p,sizeof p,work,name);int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(fd<0)die("exclusive-evidence");size_t at=0;while(at<n){ssize_t z=write(fd,s+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0)die("evidence-write");at+=(size_t)z;}if(fsync(fd)||close(fd))die("evidence-close");}
+static int line_eq(const char *p,size_t n,const char *s){size_t z=strlen(s);return n==z&&!memcmp(p,s,z);}
+static int exact_tool_output(const char *p,size_t n){
+ static const char *names[]={
+  "emb-pkg-eq-pc04","pm32-ps1479","D-shared-pp-e2-M3","D-nonshared-image-lower-M13",
+  "shared-job-eq-pc-text","shared-text-sha-pin","shared-raw-magic","shared-raw-eq-encode-compact_q-pin",
+  "nonshared-job-eq-pc-text","nonshared-text-sha-pin","nonshared-raw-magic","nonshared-raw-eq-encode-compact_q-pin",
+  "clean-E-ok","corrupt-M3-E-ICM","corrupt-M0-E-still-ok",
+  "clean-compile-ok","corrupt-M13-compile-ICM","corrupt-M3-compile-still-ok"};
+ size_t at=0,passes=0;int algorithm=0,boundary=0,summary=0;
+ if(!n||memchr(p,0,n))return 0;
+ while(at<n){const char *end=memchr(p+at,'\n',n-at);if(!end)return 0;size_t len=(size_t)(end-(p+at));const char *line=p+at;
+  if(len>=5&&!memcmp(line,"PASS\t",5)){
+   char expected[128];if(passes>=sizeof names/sizeof names[0])return 0;
+   int z=snprintf(expected,sizeof expected,"PASS\tp3-member-consume.%s",names[passes]);
+   if(z<0||(size_t)z>=sizeof expected||!line_eq(line,len,expected))return 0;passes++;
+  }else if(len>=10&&!memcmp(line,"ALGORITHM\t",10)){if(algorithm++||passes!=4)return 0;
+  }else if(line_eq(line,len,"NOT_CLAIMED\thostseed-payload-trust-rewrite-complete-N22-all-32-CLI-routes-foreign-hosts")){if(boundary++||passes!=18)return 0;
+  }else if(line_eq(line,len,"P3_MEMBER_CONSUME\tassertions=18\tfailed=0\tpm=32\tshared=M3/shared-e2\tnonshared=M13/lnx-x86_64-lower")){if(summary++||passes!=18||!boundary)return 0;
+  }else return 0;
+  at=(size_t)(end-p)+1;
+ }
+ return passes==18&&algorithm==1&&boundary==1&&summary==1;
+}
+int main(int argc,char **argv){
+#if !defined(__linux__) || !defined(__x86_64__)
+ fputs("NOT_RUN p3-member-consume-test needs Linux/x86_64\n",stderr);return 3;
+#endif
+ if(argc!=6||!realpath(argv[1],root)||!realpath(argv[2],ctx)||!realpath(argv[3],pc)||!realpath(argv[4],elf)||argv[5][0]!='/')die("usage ROOT SOURCE_CTX PACK_CTX TOOL_ELF NEW_ABS_OUT");
+ char parent[4096],base[4096],leaf[4096];copy_fit(parent,sizeof parent,argv[5]);char *slash=strrchr(parent,'/');if(!slash||!slash[1]||!strcmp(slash+1,".")||!strcmp(slash+1,".."))die("output-leaf");copy_fit(leaf,sizeof leaf,slash+1);if(slash==parent)slash[1]=0;else *slash=0;if(!realpath(parent,base))die("output-parent");int z=snprintf(work,sizeof work,"%s%s%s",base,!strcmp(base,"/")?"":"/",leaf);if(z<0||(size_t)z>=sizeof work||within(work,ctx)||within(work,pc)||within(work,elf))die("output-aliases-input");if(mkdir(work,0700))die("new-output-required");
+ path(bound,sizeof bound,root,"tools/bound");path(product,sizeof product,root,"unisacc.com");path(tool,sizeof tool,root,"tools/p3-member-consume.c");
+ char before[3][65];hash(product,before[0]);hash(tool,before[1]);hash(elf,before[2]);
+ if(access(elf,X_OK))die("tool-elf-executable");
+ char fresh[4400],inc[4400],nested[4400];path(fresh,sizeof fresh,work,"fresh-tool.elf");path(inc,sizeof inc,root,"exec/c");path(nested,sizeof nested,work,"tool-run");
+ char *build[]={bound,"20","/usr/bin/x86_64-linux-gnu-gcc-11","-std=c99","-O2","-w","-I",inc,tool,"-o",fresh,0};
+ np_result compiled;char why[1024];if(np_run(build,root,0,20,&compiled,why,sizeof why))die(why);
+ int built_ok=!compiled.rc&&!compiled.errn&&!compiled.outn;np_free(&compiled);if(!built_ok)die("fresh-tool-build");
+ char fresh_sha[65];hash(fresh,fresh_sha);ck(!strcmp(fresh_sha,before[2]),"fresh-tool-equals-material");if(failed)die("tool-elf-source-mismatch");
+ char *cmd2[]={bound,"35",fresh,root,ctx,pc,nested,0};
+ np_result r;if(np_run(cmd2,root,0,35,&r,why,sizeof why))die(why);
+ save("tool.stdout",r.out,r.outn);save("tool.stderr",r.err,r.errn);
+ {char status[40];int sn=snprintf(status,sizeof status,"rc\t%d\n",r.rc);save("tool.status",status,(size_t)sn);}
+ int ok=!r.rc&&!r.errn&&exact_tool_output(r.out,r.outn);
+ ck(ok,"tool-verified");if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);if(!ok)die("member-consume-required");
+ char after[65];hash(product,after);ck(!strcmp(after,before[0]),"product-unchanged");hash(tool,after);ck(!strcmp(after,before[1]),"tool-source-unchanged");hash(elf,after);ck(!strcmp(after,before[2]),"tool-elf-unchanged");hash(fresh,after);ck(!strcmp(after,fresh_sha),"fresh-tool-unchanged");
+ puts("NOT_CLAIMED\thostseed-payload-trust-rewrite-complete-N22-foreign-hosts");
+ printf("P3_MEMBER_CONSUME_BATCH\tassertions=%d\tfailed=%d\n",checks,failed);return failed?1:0;
+}
