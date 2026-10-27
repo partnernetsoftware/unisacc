@@ -1,0 +1,472 @@
+/* Lower stream domain cells (tape.text -> target.text) on the registered streams material:
+ * Linux/x86_64 unisacc-stream6.com pin c89eabb6 (route lnx/x86_64/image/O2). Matrix:
+ * tests/stream-lower-domain-matrix.tsv. Usage: MODE ROOT STREAM_DIR NEW_ABS_OUTDIR, MODE one of
+ *   format        data header (@data/@sym/@data_len/@relocs/@threads, duplicate, alias, sparse BSS),
+ *                 the formats.md target.text grammar, replay and file-vs-stdin determinism, POSIX
+ *                 .write/.exit/.print; supporting x86_64 halves of regmap (8 tregs) and reloc (3 kinds)
+ *   abi           every lnx/x86_64 abi.tsv row reachable from tape.text: 35 system-call ops through .sys
+ *                 and .sys6, getdirentries64 (sysno none) refusal, 45 tape machine ops; the 6 catalog ops
+ *                 with no tape spelling are UNVERIFIED (rc3)
+ *   layout-plain  A-41 enumeration: 258 tapes of 1..3 definitions over {bss 1, bss 8, str 1, str 7, str 8,
+ *                 str of 8 NULs}
+ *   layout-redef  A-41 enumeration: the 504 tapes where the first or the last symbol is defined twice
+ *   refusals      malformed data directives, the 2^31-1 extent boundary, argument shapes, library ops outside
+ *                 library mode; every refusal is followed by an exact clean recovery
+ *   input         missing/non-regular INPUT (ENOENT, ENOTDIR, EACCES, directory), each + recovery
+ * Oracles are independent of the product and never taken from its output:
+ *   - header keys, value grammar, Linux @bss 0: exec/pipeline/formats.md "target.text";
+ *   - zero-last data layout: unisa/tape.py parse/string (.str unaligned, .bss 8-aligned, a repeated name
+ *     adds nothing) and unisa/lower.py zero_last, hand-ported below; literals from exec/lower/check.py;
+ *   - scratch cells after the data: unisa/lower.py SCRATCH=144 SYSA=80 PRINTMAX=24, WIN_HSTD=168,
+ *     WIN_WRITTEN=192; DATA_BASE=256 (formats.md @sym, unisa/tape.py);
+ *   - instruction text: archive/docs/exec/e5-tins-interface.md and archive tests/enc/tins.py dump (args
+ *     joined by ", ", meta " key=value", bools true/false, None as none, a string that would read back as
+ *     int/bool/none prefixed with ');
+ *   - per-op sequences: unisa/lower.py lower()/syscall_seq with facts read at run time from
+ *     weights/gold/{regmap,reloc,abi,enc}.tsv; winapi names transcribed from unisa/catalog.py SYSCALLS;
+ *   - refusal names: exec/lower data-manifest 'tape data directive', codeend-manifest '{target} lowering',
+ *     libraryfn-result 'libraryfn requires library mode', exec/modelbindings-result 'library import binding
+ *     or signature'; exit classes from exec/c/run.c (1 model reject "reject: NAME", 2 runtime "run: ...").
+ * Timing phases are UNMEASURED. */
+#pragma unisa use cxlib.netpack
+static char root[4096],streams[4096],work[4096],bound[4200],inc[4200],product[4200],s6bin[4200];
+static char product_before[65];
+static const char *s6_pin="c89eabb6dabc3e48fe96665da6db5776740b5bcbf1976117c3be23568a96a6c9";
+static int assertions,failures,unverified,runs,seq;
+static void die(const char *s){fprintf(stderr,"stream-lower-domain: REFUSE %s errno=%d\n",s,errno);exit(2);}
+static void copy_fit(char *dst,size_t cap,const char *src){size_t i=0;if(!cap)die("copy-bound");while(src[i]&&i+1<cap){dst[i]=src[i];i++;}if(src[i])die("copy-bound");dst[i]=0;}
+static void check(int ok,const char *c,const char *w){assertions++;if(!ok)failures++;printf("%s\tstream-lower-domain.%s.%s\n",ok?"PASS":"FAIL",c,w);}
+static void path(char *out,size_t cap,const char *dir,const char *name){int n=snprintf(out,cap,"%s/%s",dir,name);if(n<0||(size_t)n>=cap)die("path");}
+static void saved(const char *p,const void *s,size_t n){int f=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);size_t at=0;if(f<0)die("exclusive-create");while(at<n){ssize_t k=write(f,(const char *)s+at,n-at);if(k<0&&errno==EINTR)continue;if(k<=0)die("write");at+=(size_t)k;}if(close(f))die("close");}
+static char *loaded(const char *p,size_t *n){char *s=cx_read(p,n);if(!s)die(p);return s;}
+static void digest(const char *p,char *hex){size_t n;char *s=loaded(p,&n);cx_sha256_hex(s,n,hex);free(s);}
+static int has(const char *h,size_t hn,const char *needle){size_t k=strlen(needle),i;if(!k)return 1;if(hn<k)return 0;for(i=0;i+k<=hn;i++)if(!memcmp(h+i,needle,k))return 1;return 0;}
+static int has_line(const char *s,size_t n,const char *line){size_t m=strlen(line),at=0;while(at<n){size_t e=at;while(e<n&&s[e]!='\n')e++;if(e-at==m&&!memcmp(s+at,line,m))return 1;at=e+1;}return 0;}
+static void lf(np_buf *b,const char *s){np_puts(b,s);np_put(b,"\n",1);}
+#define FMT(buf,...) do{int z_=snprintf(buf,sizeof buf,__VA_ARGS__);if(z_<0||(size_t)z_>=sizeof buf)die("format-bound");}while(0)
+
+/* ---- gold facts (oracle source, read-only) ---- */
+enum{SYSNO,ARG0,ARG1,ARG2,ARG3,ARG4,ARG5,RET,GATE,NRREG,SHAPE,RETCONV,WINIMP,NF};
+#define ABI_OP_CAP 24
+#define ABI_FIELD_CAP 24
+#define ABI_FORM_CAP 12
+#define REG_CAP 8
+#define RELOC_CAP 8
+typedef struct {char op[ABI_OP_CAP];char f[NF][ABI_FIELD_CAP];char form[ABI_FORM_CAP];} abirow;
+static abirow abi[87];static int nabi;
+static char rmap[8][REG_CAP],relk[3][RELOC_CAP];
+static int split(const char *s,size_t n,const char **f,size_t *fl,int max){int k=0;size_t at=0;while(k<max){size_t e=at;while(e<n&&s[e]!='\t')e++;f[k]=s+at;fl[k]=e-at;k++;if(e>=n)break;at=e+1;}return k;}
+static int fis(const char *f,size_t fl,const char *w){return strlen(w)==fl&&!memcmp(f,w,fl);}
+static void fcopy(char *d,size_t cap,const char *s,size_t n){if(n+1>cap)die("gold-field");memcpy(d,s,n);d[n]=0;}
+typedef void (*rowfn)(const char **f,size_t *fl,int k);
+static int each_row(const char *leaf,rowfn fn){char p[4200];size_t n,at=0,e;char *s;const char *f[24];size_t fl[24];int rows=0;
+ path(p,sizeof p,root,leaf);s=loaded(p,&n);
+ while(at<n){e=at;while(e<n&&s[e]!='\n')e++;
+  if(e>at&&s[at]!='#'){int k=split(s+at,e-at,f,fl,24);if(!fis(f[0],fl[0],"op")&&!fis(f[0],fl[0],"treg")&&!fis(f[0],fl[0],"kind")){fn(f,fl,k);rows++;}}
+  at=e+1;}
+ free(s);return rows;}
+static void regmap_row(const char **f,size_t *fl,int k){if(k!=3)die("regmap shape");if(!fis(f[1],fl[1],"x86_64"))return;
+ if(fl[0]!=2||f[0][0]!='r'||f[0][1]<'0'||f[0][1]>'7')die("regmap treg");{int r=f[0][1]-'0';if(rmap[r][0])die("regmap duplicate");fcopy(rmap[r],REG_CAP,f[2],fl[2]);}}
+static void reloc_row(const char **f,size_t *fl,int k){int i=-1;if(k!=3)die("reloc shape");if(!fis(f[1],fl[1],"x86_64"))return;
+ if(fis(f[0],fl[0],"jmp"))i=0;else if(fis(f[0],fl[0],"jz"))i=1;else if(fis(f[0],fl[0],"call"))i=2;else die("reloc kind");
+ if(relk[i][0])die("reloc duplicate");fcopy(relk[i],RELOC_CAP,f[2],fl[2]);}
+static void abi_row(const char **f,size_t *fl,int k){int i;if(k!=3+NF)die("abi shape");if(!fis(f[1],fl[1],"lnx")||!fis(f[2],fl[2],"x86_64"))return;
+ if(nabi>=87)die("abi rows");fcopy(abi[nabi].op,ABI_OP_CAP,f[0],fl[0]);for(i=0;i<NF;i++)fcopy(abi[nabi].f[i],ABI_FIELD_CAP,f[3+i],fl[3+i]);nabi++;}
+static void enc_row(const char **f,size_t *fl,int k){int i;if(k!=4)die("enc shape");if(!fis(f[1],fl[1],"lnx")||!fis(f[2],fl[2],"x86_64"))return;
+ for(i=0;i<nabi;i++)if(fis(f[0],fl[0],abi[i].op)){if(abi[i].form[0])die("enc duplicate");fcopy(abi[i].form,ABI_FORM_CAP,f[3],fl[3]);return;}
+ die("enc op not in abi");}
+static void load_gold(void){int i;
+ if(each_row("weights/gold/regmap.tsv",regmap_row)!=16)die("regmap rows");for(i=0;i<8;i++)if(!rmap[i][0])die("regmap missing");
+ if(each_row("weights/gold/reloc.tsv",reloc_row)!=6)die("reloc rows");for(i=0;i<3;i++)if(!relk[i][0])die("reloc missing");
+ if(each_row("weights/gold/abi.tsv",abi_row)!=522||nabi!=87)die("abi rows");
+ if(each_row("weights/gold/enc.tsv",enc_row)!=522)die("enc rows");for(i=0;i<nabi;i++)if(!abi[i].form[0])die("enc missing");}
+static const abirow *A(const char *op){int i;for(i=0;i<nabi;i++)if(!strcmp(abi[i].op,op))return &abi[i];die("abi op");return 0;}
+static const char *R(const char *t){if(t[0]=='r'&&t[1]>='0'&&t[1]<='7'&&!t[2])return rmap[t[1]-'0'];die("treg");return 0;}
+/* unisa/catalog.py SYSCALLS 4th column (C.WINAPI); absent = None */
+static const char *winapi_of(const char *op){
+ static const char *t[][2]={{"exit","ExitProcess"},{"read","ReadFile"},{"write","WriteFile"},{"open","CreateFileW"},{"close","CloseHandle"},
+  {"mmap","VirtualAlloc"},{"munmap","VirtualFree"},{"mprotect","VirtualProtect"},{"getpid","GetCurrentProcessId"},{"clock_gettime","QueryPerformanceCounter"},
+  {"nanosleep","Sleep"},{"futex","WaitOnAddress"},{"socket","WSASocketW"},{"connect","connect"},{"bind","bind"},{"listen","listen"},{"accept","accept"},
+  {"clone","CreateThread"},{"execve","CreateProcessW"},{"lseek","SetFilePointer"},{"unlink","DeleteFileA"},{"rename","MoveFileExA"}};
+ size_t i;for(i=0;i<sizeof t/sizeof t[0];i++)if(!strcmp(t[i][0],op))return t[i][1];return 0;}
+/* tins.py _arg: a string that int(s,0) / true / false / none would read back as something else is 'quoted */
+static int intlike(const char *s){const char *p=s;if(*p=='+'||*p=='-')p++;
+ if(p[0]=='0'&&p[1]&&strchr("xXoObB",p[1])){int base=(p[1]|32)=='x'?16:(p[1]|32)=='o'?8:2;p+=2;if(!*p)return 0;for(;*p;p++){int c=*p|32,d=c>='0'&&c<='9'?c-'0':c>='a'&&c<='f'?c-'a'+10:99;if(d>=base)return 0;}return 1;}
+ if(!*p)return 0;{const char *q;int nz=0;for(q=p;*q;q++){if(*q<'0'||*q>'9')return 0;if(*q!='0')nz=1;}if(p[0]=='0'&&p[1]&&nz)return 0;}return 1;}
+static const char *Q(char *buf,size_t cap,const char *v){int z=snprintf(buf,cap,"%s%s",(intlike(v)||!strcmp(v,"true")||!strcmp(v,"false")||!strcmp(v,"none"))?"'":"",v);if(z<0||(size_t)z>=cap)die("meta");return buf;}
+
+/* ---- data layout oracle ---- */
+#define DATA_BASE 256ULL
+#define TAIL 168ULL           /* SCRATCH 144 + PRINTMAX 24 (POSIX) */
+#define MAXD 16
+typedef struct {const char *name;int bss;unsigned long long len;const char *raw;const char *spell;} ddef;
+static unsigned long long G_base;   /* DATA_BASE + used: SCR0; the scratch cells follow */
+static void layout(const ddef *d,int n,np_buf *head){
+ int uq[MAXD],nu=0,i,j,threads=0,ns=0,b;unsigned long long off[MAXD],dn=0,st[MAXD+1],en[MAXD+1],k,used;int nz[MAXD+1];long long newp[MAXD+1],at=0;
+ unsigned char img[1024];size_t stored=0;char l[600];
+ if(n>MAXD)die("defs");
+ for(i=0;i<n;i++){int dup=0;if(!strcmp(d[i].name,"g___unisa_threads"))threads=1;for(j=0;j<nu;j++)if(!strcmp(d[uq[j]].name,d[i].name))dup=1;if(dup)continue;
+  if(d[i].bss)dn=(dn+7)&~7ULL;off[nu]=dn;uq[nu++]=i;dn+=d[i].len;}
+ for(j=0;j<nu;j++){int seen=0;for(i=0;i<ns;i++)if(st[i]==off[j])seen=1;if(!seen)st[ns++]=off[j];}
+ for(i=1;i<ns;i++){unsigned long long v=st[i];j=i-1;while(j>=0&&st[j]>v){st[j+1]=st[j];j--;}st[j+1]=v;}
+ if(!ns||st[0]!=0){for(i=ns;i>0;i--)st[i]=st[i-1];st[0]=0;ns++;}
+ for(i=0;i<ns;i++){en[i]=i+1<ns?st[i+1]:dn;nz[i]=0;
+  for(j=0;j<nu;j++){const ddef *x=&d[uq[j]];if(x->bss)continue;for(k=0;k<x->len;k++){unsigned long long p=off[j]+k;if(p>=st[i]&&p<en[i]&&(unsigned char)x->raw[k])nz[i]=1;}}}
+ for(b=0;b<2;b++)for(i=0;i<ns;i++)if(nz[i]==!b){long long s=(long long)st[i];at+=((s-at)%8+8)%8;newp[i]=at;at+=(long long)(en[i]-st[i]);}
+ used=((unsigned long long)at+7)&~7ULL;memset(img,0,sizeof img);
+ for(j=0;j<nu;j++){const ddef *x=&d[uq[j]];if(x->bss)continue;
+  for(k=0;k<x->len;k++){unsigned long long p=off[j]+k,q;for(b=0;b<ns;b++)if(p>=st[b]&&p<en[b])break;if(b==ns)die("layout-blob");if(!nz[b])continue;
+   q=(unsigned long long)newp[b]+(p-st[b]);if(q>=sizeof img)die("layout-image");img[q]=(unsigned char)x->raw[k];if(img[q]&&q+1>stored)stored=(size_t)q+1;}}
+ lf(head,"@target lnx/x86_64");
+ if(!stored)lf(head,"@data -");else{size_t q;np_puts(head,"@data ");for(q=0;q<stored;q++){char h[3];FMT(h,"%02x",img[q]);np_puts(head,h);}np_put(head,"\n",1);}
+ for(j=0;j<nu;j++){for(b=0;b<ns;b++)if(st[b]==off[j])break;if(b==ns)die("layout-sym");FMT(l,"@sym %s %llu",d[uq[j]].name,DATA_BASE+(unsigned long long)newp[b]);lf(head,l);}
+ lf(head,"@src_os lnx");FMT(l,"@data_len %llu",used+TAIL);lf(head,l);lf(head,"@bss 0");lf(head,"@relocs -");if(threads)lf(head,"@threads 1");
+ G_base=DATA_BASE+used;}
+#define SCR0 (G_base)
+#define SCR1 (G_base+8)
+#define PLEN (G_base+16)
+#define PBUF (G_base+24)
+#define ARGC (G_base+48)
+#define ARGV (G_base+56)
+#define SYS0 (G_base+80)
+#define HSTD (G_base+168)
+#define WRITTEN (G_base+192)
+
+/* ---- program builder: tape text and the expected target.text side by side ---- */
+typedef struct {np_buf tape,code,head;const ddef *d;int nd;int data_first;} prog;
+#define MAXB 160
+static const char *bname[MAXB];static size_t bfrom[MAXB],bto[MAXB];static int nb;
+static void T(prog *p,const char *s){lf(&p->tape,s);}
+static void W(prog *p,const char *s){lf(&p->code,s);}
+static void begin(prog *p,const ddef *d,int nd,int data_first){memset(p,0,sizeof *p);p->d=d;p->nd=nd;p->data_first=data_first;layout(d,nd,&p->head);nb=0;
+ if(data_first){int i;char l[400];for(i=0;i<nd;i++){if(d[i].bss)FMT(l,".bss %s %llu",d[i].name,d[i].len);else FMT(l,".str %s %s",d[i].name,d[i].spell);T(p,l);}}}
+static void finish(prog *p,np_buf *tape,np_buf *want){int i;char l[400];
+ *tape=p->tape;if(!p->data_first)for(i=0;i<p->nd;i++){if(p->d[i].bss)FMT(l,".bss %s %llu",p->d[i].name,p->d[i].len);else FMT(l,".str %s %s",p->d[i].name,p->d[i].spell);lf(tape,l);}
+ np_put(&p->head,p->code.p?p->code.p:"",p->code.n);*want=p->head;free(p->code.p);}
+static void mark(const char *name,size_t from,prog *p){if(nb>=MAXB)die("blocks");bname[nb]=name;bfrom[nb]=from;bto[nb]=p->code.n;nb++;}
+static void entry(prog *p){char l[200];T(p,"_start:");W(p,"_start:");FMT(l,"spinit %s",R("r7"));W(p,l);FMT(l,"argsave %llu, %llu, true",ARGC,ARGV);W(p,l);}
+static void ins_ret(prog *p){char l[100];T(p,"  ret");FMT(l,"ret form=%s",A("ret")->form);W(p,l);}
+static void ins_imm(prog *p,const char *r,long long v){char l[100];FMT(l,"  imm %s, %lld",r,v);T(p,l);FMT(l,"imm %s, %lld",R(r),v);W(p,l);}
+static long long sysno_value(const char *s){char *e;long long v;errno=0;v=strtoll(s,&e,0);if(errno||!*s||*e)die("sysno");return v;}
+/* unisa/lower.py syscall_seq for a non-Windows target */
+static void sysseq(prog *p,const char *op,int nsrc,const char *const *src,int priv){
+ const abirow *a=A(op);const char *lform=A("load64")->form,*w=winapi_of(op);char l[700],q[8][40];int i;
+ if(!strcmp(op,"syscall")){if(priv)FMT(l,"load64 %s, %s, 0 form=%s",a->f[NRREG],R("r7"),lform);else FMT(l,"setreg %s, mem %llu role=sysno",a->f[NRREG],SYS0);W(p,l);}
+ else if(strcmp(a->f[SYSNO],"none")){FMT(l,"setreg %s, imm %lld role=sysno",a->f[NRREG],sysno_value(a->f[SYSNO]));W(p,l);}
+ else die("oracle: no system call for this op on lnx (a refusal case)");
+ for(i=0;i<nsrc;i++){const char *arg=a->f[ARG0+i];if(i>=6||!strcmp(arg,"none"))die("oracle: stack argument (a refusal case)");
+  if(priv)FMT(l,"load64 %s, %s, %s form=%s",arg,R("r7"),src[i],lform);else FMT(l,"setreg %s, %s role=arg%d",arg,src[i],i);W(p,l);}
+ FMT(l,"gate form=%s gate=%s carry=false winapi=%s catop=%s sysno=%s retconv=%s winimp=%s ret=%s hstd=%llu written=%llu scr0=%llu scr1=%llu",
+  Q(q[0],40,a->form),Q(q[1],40,a->f[GATE]),w?Q(q[2],40,w):"none",Q(q[3],40,op),Q(q[4],40,a->f[SYSNO]),Q(q[5],40,a->f[RETCONV]),Q(q[6],40,a->f[WINIMP]),Q(q[7],40,a->f[RET]),HSTD,WRITTEN,SCR0,SCR1);
+ W(p,l);}
+static void x_exit(prog *p,const char *r){char l[200],m[3][40];const char *s[3]={m[0],m[1],m[2]};
+ FMT(l,"  .exit %s",r);T(p,l);FMT(l,"setmem %llu, %s",SCR0,R(r));W(p,l);
+ FMT(m[0],"mem %llu",SCR0);FMT(m[1],"imm 0");FMT(m[2],"imm 0");sysseq(p,"exit",3,s,0);}
+static void x_write(prog *p,const char *ra,const char *rb){char l[200],m[3][40];const char *s[3]={m[0],m[1],m[2]};
+ FMT(l,"  .write %s, %s",ra,rb);T(p,l);FMT(l,"setmem %llu, %s",SCR0,R(ra));W(p,l);FMT(l,"setmem %llu, %s",SCR1,R(rb));W(p,l);
+ FMT(m[0],"imm 1");FMT(m[1],"mem %llu",SCR0);FMT(m[2],"mem %llu",SCR1);sysseq(p,"write",3,s,0);}
+static void x_print(prog *p,const char *r){char l[200],m[3][40];const char *s[3]={m[0],m[1],m[2]};
+ FMT(l,"  .print %s",r);T(p,l);FMT(l,"setmem %llu, %s",SCR0,R(r));W(p,l);FMT(l,"itoa %llu, %llu, %llu",SCR0,PBUF,PLEN);W(p,l);
+ FMT(m[0],"imm 1");FMT(m[1],"addr %llu",PBUF);FMT(m[2],"mem %llu",PLEN);sysseq(p,"write",3,s,0);}
+static void x_sys(prog *p,const char *op,const char *ra,const char *rb,const char *rc){
+ char l[200],m0[40],m1[40],m2[40];const char *sh=A(op)->f[SHAPE];const char *s[5];int n;
+ FMT(l,"  .sys %s, %s, %s, %s",op,ra,rb,rc);T(p,l);
+ FMT(l,"setmem %llu, %s",SCR0,R(ra));W(p,l);FMT(l,"setmem %llu, %s",SCR1,R(rb));W(p,l);FMT(l,"setmem %llu, %s",PLEN,R(rc));W(p,l);
+ FMT(m0,"mem %llu",SCR0);FMT(m1,"mem %llu",SCR1);FMT(m2,"mem %llu",PLEN);
+ if(!strcmp(sh,"plain")){s[0]=m0;s[1]=m1;s[2]=m2;n=3;}
+ else if(!strcmp(sh,"zero4")){s[0]=m0;s[1]=m1;s[2]=m2;s[3]="imm 0";n=4;}
+ else if(!strcmp(sh,"atfd_1")){s[0]="imm -100";s[1]=m0;s[2]=m1;s[3]=m2;n=4;}
+ else if(!strcmp(sh,"atfd_1_zero")){s[0]="imm -100";s[1]=m0;s[2]="imm 0";n=3;}
+ else if(!strcmp(sh,"atfd_2_zero5")){s[0]="imm -100";s[1]=m0;s[2]="imm -100";s[3]=m1;s[4]="imm 0";n=5;}
+ else die("argshape");
+ sysseq(p,op,n,s,0);FMT(l,"mov %s, %s",R("r0"),A(op)->f[RET]);W(p,l);}
+static void x_sys6(prog *p,const char *op){
+ static const char *tr[6]={"r0","r1","r2","r3","r4","r5"};const char *sp=R("r7"),*lform=A("load64")->form,*scratch="r11";
+ char l[300],o[6][8];const char *s[6];int i,n=0;
+ for(i=0;i<8;i++)if(!strcmp(rmap[i],scratch))die("oracle: sys6 scratch aliases a tape register");
+ FMT(l,"  .sys6 %s, r0, r1, r2, r3, r4, r5",op);T(p,l);
+ FMT(l,"mov %s, %s form=%s",scratch,sp,lform);W(p,l);FMT(l,".frame 80 form=%s",lform);W(p,l);
+ for(i=0;i<6;i++){const char *src=R(tr[i]);if(!strcmp(src,sp))src=scratch;FMT(l,"store64 %s, %d, %s form=%s",sp,8*i,src,lform);W(p,l);}
+ FMT(l,"store64 %s, 48, %s form=%s",sp,R("r6"),lform);W(p,l);FMT(l,"store64 %s, 56, %s form=%s",sp,scratch,lform);W(p,l);
+ for(i=strcmp(op,"syscall")?0:1;i<6;i++){FMT(o[n],"%d",8*i);s[n]=o[n];n++;}
+ sysseq(p,op,n,s,1);
+ FMT(l,"mov %s, %s form=%s",R("r0"),A(op)->f[RET],lform);W(p,l);FMT(l,"load64 %s, %s, 48 form=%s",R("r6"),sp,lform);W(p,l);FMT(l,".frame -80 form=%s",lform);W(p,l);}
+
+/* ---- comparison: @sym lines are a set (formats.md fixes no order); every other byte in order ---- */
+typedef struct {const char *p;size_t n;} span;
+static int spancmp(const void *x,const void *y){const span *a=x,*b=y;size_t m=a->n<b->n?a->n:b->n;int c=memcmp(a->p,b->p,m);return c?c:(a->n<b->n?-1:a->n>b->n?1:0);}
+static void parts(const char *s,size_t n,np_buf *rest,span **sy,size_t *ns){size_t at=0,cap=0;*sy=0;*ns=0;
+ while(at<n){size_t e=at;while(e<n&&s[e]!='\n')e++;size_t ln=e<n?e+1-at:e-at;
+  if(e-at>5&&!memcmp(s+at,"@sym ",5)){if(*ns==cap){cap=cap?cap*2:16;*sy=realloc(*sy,cap*sizeof **sy);if(!*sy)die("oom");}(*sy)[*ns].p=s+at;(*sy)[(*ns)++].n=ln;}
+  else np_put(rest,s+at,ln);at=e+1;}
+ if(*ns)qsort(*sy,*ns,sizeof **sy,spancmp);}
+static int target_equal(const char *got,size_t gn,const char *want,size_t wn,const char *name){
+ np_buf a={0},b={0};span *sa,*sb;size_t na,nbs,i;int ok;np_put(&a,"",0);np_put(&b,"",0);
+ parts(got,gn,&a,&sa,&na);parts(want,wn,&b,&sb,&nbs);
+ ok=a.n==b.n&&!memcmp(a.p,b.p,a.n)&&na==nbs;for(i=0;ok&&i<na;i++)ok=!spancmp(&sa[i],&sb[i]);
+ if(!ok){size_t k=0,ls=0;while(k<a.n&&k<b.n&&a.p[k]==b.p[k]){if(a.p[k]=='\n')ls=k+1;k++;}
+  size_t ge=ls,we=ls;while(ge<a.n&&a.p[ge]!='\n')ge++;while(we<b.n&&b.p[we]!='\n')we++;
+  printf("DIFF\t%s\tsyms got=%lu want=%lu\tgot_line=%.*s\twant_line=%.*s\n",name,(unsigned long)na,(unsigned long)nbs,(int)(ge-ls),a.p+ls,(int)(we-ls),b.p+ls);}
+ free(a.p);free(b.p);free(sa);free(sb);return ok;}
+/* exec/pipeline/formats.md target.text: header keys, value grammar, lower's six always-emitted keys, Linux @bss 0 */
+static int digits(const char *s,size_t n){size_t i;if(!n)return 0;for(i=0;i<n;i++)if(s[i]<'0'||s[i]>'9')return 0;return 1;}
+static unsigned long long dec(const char *s,size_t n){unsigned long long v=0;size_t i;for(i=0;i<n&&i<20;i++)v=v*10+(unsigned long long)(s[i]-'0');return n>19?~0ULL:v;}
+static int conform(const char *s,size_t n){
+ static const char *keys[]={"target","data","sym","src_os","data_len","bss","relocs","threads","argc","argv"};
+ int cnt[10]={0},ok=1,head=1,i;size_t at=0,stored=0;unsigned long long dl=0;span names[64];int nn=0;
+ while(at<n){size_t e=at;while(e<n&&s[e]!='\n')e++;
+  if(e==n){ok=0;break;}                 /* every line ends with LF */
+  if(s[at]=='@'){size_t k=at+1,v;int key=-1;if(!head)ok=0;while(k<e&&s[k]!=' ')k++;v=k;while(v<e&&s[v]==' ')v++;if(v==k||v==e)ok=0;
+   for(i=0;i<10;i++)if(fis(s+at+1,k-at-1,keys[i]))key=i;if(key<0){ok=0;at=e+1;continue;}cnt[key]++;
+   const char *x=s+v;size_t xn=e-v;
+   if(key==0){static const char *t[]={"lnx/x86_64","lnx/arm64","osx/x86_64","osx/arm64","win/x86_64","win/arm64"};int hit=0;for(i=0;i<6;i++)if(fis(x,xn,t[i]))hit=1;if(!hit)ok=0;}
+   else if(key==1){if(!fis(x,xn,"-")){size_t q;if(xn%2)ok=0;for(q=0;q<xn;q++)if(!((x[q]>='0'&&x[q]<='9')||(x[q]>='a'&&x[q]<='f')))ok=0;stored=xn/2;}}
+   else if(key==2){size_t q=0;while(q<xn&&x[q]!=' ')q++;if(!q||q+1>=xn||!digits(x+q+1,xn-q-1))ok=0;else{int d2;for(d2=0;d2<nn;d2++)if(names[d2].n==q&&!memcmp(names[d2].p,x,q))ok=0;if(nn<64){names[nn].p=x;names[nn++].n=q;}}}
+   else if(key==4){if(!digits(x,xn))ok=0;else{dl=dec(x,xn);if(dl>2147483647ULL)ok=0;}}
+   else if(key==5){if(!fis(x,xn,"0"))ok=0;}                 /* Linux images require @bss 0 */
+   else if(key==6){if(!fis(x,xn,"-")){size_t q=0,st=0;for(q=0;q<=xn;q++)if(q==xn||x[q]==','){if(!digits(x+st,q-st))ok=0;st=q+1;}}}
+   else if(key==7){if(!fis(x,xn,"1"))ok=0;}
+   else if(key==8||key==9){if(!digits(x,xn))ok=0;}
+  }else head=0;
+  at=e+1;}
+ for(i=0;i<10;i++)if(i!=2&&cnt[i]>1)ok=0;
+ if(!cnt[0]||!cnt[1]||!cnt[3]||!cnt[4]||!cnt[5]||!cnt[6])ok=0;   /* lower always emits these six */
+ if(dl<stored)ok=0;
+ return ok;}
+
+/* ---- running stream6: INPUT SOURCE_LABEL INCLUDE_DIR under its own watchdog ---- */
+static np_result run_in(const char *tag,const char *input,const char *label,const char *stdin_file){
+ char leaf[300],outp[4400],errp[4400],why[1024];np_result r;int z,save=-1;runs++;
+ char *v[]={bound,"12",s6bin,(char *)input,(char *)label,inc,0};const char *env[]={"UNISA_ATTRIBUTES=","UNISA_MAXSTEPS=200000000",0};
+ if(stdin_file){int fd=open(stdin_file,O_RDONLY|O_CLOEXEC);save=dup(0);if(fd<0||save<0||dup2(fd,0)<0)die("stdin redirect");close(fd);}
+ z=np_run(v,root,(char *const *)env,14,&r,why,sizeof why);
+ if(stdin_file){if(dup2(save,0)<0)die("stdin restore");close(save);}
+ if(z)die(why);
+ FMT(leaf,"%04d-%s.stdout",seq,tag);path(outp,sizeof outp,work,leaf);FMT(leaf,"%04d-%s.stderr",seq,tag);path(errp,sizeof errp,work,leaf);
+ saved(outp,r.out,r.outn);saved(errp,r.err,r.errn);return r;}
+static void tape_path(char *out,size_t cap,const char *tag){char leaf[300];FMT(leaf,"%04d-%s.tape",seq,tag);path(out,cap,work,leaf);}
+static np_result run_text(const char *tag,const char *text,size_t n,char *keep,size_t kcap){char p[4400];seq++;tape_path(p,sizeof p,tag);saved(p,text,n);if(keep)copy_fit(keep,kcap,p);return run_in(tag,p,p,0);}
+static void accepted(const char *name,np_result *r,const np_buf *want){
+ check(r->rc==0&&r->errn==0,name,"accept-rc0-empty-stderr");
+ if(r->errn)printf("STDERR\t%s\trc=%d\t%.*s\n",name,r->rc,(int)(r->errn>200?200:r->errn),r->err);
+ check(target_equal(r->out,r->outn,want->p,want->n,name),name,"target-text-exact");
+ check(conform(r->out,r->outn),name,"formats-md-header-grammar");}
+static void accept_prog(const char *name,prog *p,np_result *keep_out,char *keep_path,size_t kcap){np_buf tape,want;np_result r;int i;
+ finish(p,&tape,&want);r=run_text(name,tape.p,tape.n,keep_path,kcap);accepted(name,&r,&want);
+ for(i=0;i<nb;i++){np_buf b={0};char t[300];np_put(&b,"\n",1);np_put(&b,want.p+(want.n-p->code.n)+bfrom[i],bto[i]-bfrom[i]);np_put(&b,"",0);
+  FMT(t,"%s-sequence-exact",bname[i]);check(r.outn&&has(r.out,r.outn,b.p),name,t);free(b.p);}
+ if(keep_out)*keep_out=r;else np_free(&r);free(tape.p);free(want.p);}
+
+static const ddef NODATA[1]={{"",0,0,"",""}};
+static void literal_prog(prog *p){begin(p,NODATA,0,0);entry(p);ins_imm(p,"r0",7);ins_ret(p);}
+static void recovery(const char *after){char name[200];prog p;FMT(name,"recovery-after-%s",after);literal_prog(&p);accept_prog(name,&p,0,0,0);}
+static void refused_model(const char *name,np_result *r,const char *declared){char want[400];
+ check(r->rc==1,name,"reject-rc1-model-refusal");check(r->outn==0,name,"reject-empty-stdout");
+ FMT(want,"reject: %s\n",declared);check(r->errn==strlen(want)&&!memcmp(r->err,want,r->errn),name,"reject-stderr-exactly-declared-name");
+ if(r->errn!=strlen(want)||memcmp(r->err,want,r->errn))printf("STDERR\t%s\trc=%d\t%.*s\n",name,r->rc,(int)(r->errn>200?200:r->errn),r->err?r->err:"");}
+static void refuse_text(const char *name,const char *text,const char *declared){np_result r=run_text(name,text,strlen(text),0,0);refused_model(name,&r,declared);np_free(&r);recovery(name);}
+
+/* ---- format ---- */
+static void mode_format(void){
+ prog p;np_result a,b,c;char fpath[4400],l[300];size_t dn;char *doc;
+ /* exec/pipeline/formats.md carries the target.text grammar the checks below apply */
+ path(fpath,sizeof fpath,root,"exec/pipeline/formats.md");doc=loaded(fpath,&dn);
+ check(has_line(doc,dn,"## target.text (lower -> elf input)"),"spec-text","formats-md-section-present");
+ {static const char *rows[]={"| `@target` |","| `@data` |","| `@sym` |","| `@src_os` |","| `@data_len` |","| `@bss` |","| `@relocs` |","| `@threads` |"};int i,ok=1;for(i=0;i<8;i++)if(!has(doc,dn,rows[i]))ok=0;check(ok,"spec-text","formats-md-header-key-table");}
+ check(has(doc,dn,"Lower always emits `@target`, `@data`, `@src_os`, `@data_len`, `@bss`, and\n`@relocs`."),"spec-text","formats-md-lower-always-emits-six-keys");free(doc);
+ /* header with data: escapes, ';' inside a literal, a NUL-only literal, mod-8 placement of a blob at offset 31 */
+ {static const ddef d[]={{"msg",0,3,"hi\n","\"hi\\n\""},{"buf",1,20,0,0},{"z",0,3,"\0\0\0","\"\\0\\0\\0\""},{"semi",0,3,"\xff;q","\"\\xff;q\""}};
+  begin(&p,d,4,1);entry(&p);
+  {const char *rr[4]={"r0","r1","r2","r3"};const char *nm[4]={"msg","buf","z","semi"};int i;for(i=0;i<4;i++){FMT(l,"  .lea %s, %s",rr[i],nm[i]);T(&p,l);FMT(l,".lea %s, %s",R(rr[i]),nm[i]);W(&p,l);}}
+  x_exit(&p,"r0");
+  {np_buf tape,want;char kp[4400];finish(&p,&tape,&want);
+   a=run_text("header-data",tape.p,tape.n,kp,sizeof kp);accepted("header-data",&a,&want);
+   /* hand literals of this layout: msg 0..3, semi 31..34 -> 15 (31 mod 8 = 7), buf 8 -> 24, z 28 -> 44, used 48 */
+   check(has_line(a.out,a.outn,"@data 68690a000000000000000000000000ff3b71")&&has_line(a.out,a.outn,"@sym msg 256")&&has_line(a.out,a.outn,"@sym semi 271")
+    &&has_line(a.out,a.outn,"@sym buf 280")&&has_line(a.out,a.outn,"@sym z 300")&&has_line(a.out,a.outn,"@data_len 216")&&has_line(a.out,a.outn,"@relocs -"),"header-data","hand-literal-layout");
+   /* determinism: the same file again, and the same bytes on stdin ('-') */
+   b=run_in("header-data-replay",kp,kp,0);
+   check(!a.rc&&!b.rc&&a.outn&&a.outn==b.outn&&!memcmp(a.out,b.out,a.outn)&&a.errn==b.errn,"det.replay","header-data-stdout-identical");
+   seq++;c=run_in("header-data-stdin","-",kp,kp);accepted("det.file-vs-stdin",&c,&want);
+   check(!a.rc&&!c.rc&&a.outn&&a.outn==c.outn&&!memcmp(a.out,c.out,a.outn),"det.file-vs-stdin","stdout-identical");
+   np_free(&a);np_free(&b);np_free(&c);free(tape.p);free(want.p);}}
+ /* exec/lower/check.py 'duplicate': a repeated name adds nothing; data "ab", first 256, other 257 */
+ {static const ddef d[]={{"first",0,1,"a","\"a\""},{"first",0,5,"WRONG","\"WRONG\""},{"first",1,100,0,0},{"other",0,1,"b","\"b\""}};
+  begin(&p,d,4,1);entry(&p);T(&p,"  .lea r0, first");FMT(l,".lea %s, first",R("r0"));W(&p,l);T(&p,"  .lea r1, other");FMT(l,".lea %s, other",R("r1"));W(&p,l);ins_ret(&p);
+  accept_prog("header-duplicate",&p,&a,0,0);
+  check(has_line(a.out,a.outn,"@data 6162")&&has_line(a.out,a.outn,"@sym first 256")&&has_line(a.out,a.outn,"@sym other 257")&&!has(a.out,a.outn,"WRONG"),"header-duplicate","check-py-literal");np_free(&a);}
+ /* exec/lower/check.py 'alias-nonzero': first 256, z 272, empty 264, next 264 */
+ {static const ddef d[]={{"first",0,3,"abc","\"abc\""},{"z",1,16,0,0},{"empty",0,0,"","\"\""},{"next",0,1,"q","\"q\""}};
+  begin(&p,d,4,1);entry(&p);ins_ret(&p);accept_prog("header-alias",&p,&a,0,0);
+  check(has_line(a.out,a.outn,"@sym first 256")&&has_line(a.out,a.outn,"@sym z 272")&&has_line(a.out,a.outn,"@sym empty 264")&&has_line(a.out,a.outn,"@sym next 264"),"header-alias","check-py-literal");np_free(&a);}
+ /* @threads 1 for g___unisa_threads; not for a near-miss name */
+ {static const ddef d[]={{"g___unisa_threads",1,4,0,0}};begin(&p,d,1,1);entry(&p);ins_ret(&p);accept_prog("header-threads",&p,&a,0,0);
+  check(has_line(a.out,a.outn,"@threads 1"),"header-threads","threads-line");np_free(&a);}
+ {static const ddef d[]={{"g___unisa_thread",1,4,0,0}};begin(&p,d,1,1);entry(&p);ins_ret(&p);accept_prog("header-thread-near-miss",&p,&a,0,0);
+  check(!has(a.out,a.outn,"@threads"),"header-thread-near-miss","no-threads-line");np_free(&a);}
+ /* sparse BSS: 610,000,000 zero bytes advance @data_len only; the stored prefix is the one nonzero byte */
+ {static const ddef d[]={{"big",1,610000000ULL,0,0},{"s",0,1,"x","\"x\""}};begin(&p,d,2,0);entry(&p);T(&p,"  .lea r0, big");FMT(l,".lea %s, big",R("r0"));W(&p,l);ins_ret(&p);
+  accept_prog("header-sparse-bss",&p,&a,0,0);
+  check(has_line(a.out,a.outn,"@data 78")&&has_line(a.out,a.outn,"@data_len 610000176")&&has_line(a.out,a.outn,"@sym s 256")&&has_line(a.out,a.outn,"@sym big 264")&&a.outn<1024,"header-sparse-bss","zeros-not-stored");np_free(&a);}
+ /* POSIX side effects: .print, .write and .exit lower to real write/exit system calls (abi.tsv rows) */
+ begin(&p,NODATA,0,0);entry(&p);ins_imm(&p,"r0",5);
+ {size_t f=p.code.n;x_print(&p,"r0");mark("print",f,&p);f=p.code.n;x_write(&p,"r1","r2");mark("write",f,&p);f=p.code.n;x_exit(&p,"r0");mark("exit",f,&p);}
+ {char kp[4400];np_buf tape,want;finish(&p,&tape,&want);a=run_text("posix-syscall",tape.p,tape.n,kp,sizeof kp);accepted("posix-syscall",&a,&want);
+  {int i;for(i=0;i<nb;i++){np_buf bb={0};char t[200];np_put(&bb,"\n",1);np_put(&bb,want.p+(want.n-(size_t)(p.code.n))+bfrom[i],bto[i]-bfrom[i]);np_put(&bb,"",0);FMT(t,"%s-sequence-exact",bname[i]);check(a.outn&&has(a.out,a.outn,bb.p),"posix-syscall",t);free(bb.p);}}
+  check(has(a.out,a.outn,"setreg rax, imm 1 role=sysno")&&has(a.out,a.outn,"setreg rax, imm 60 role=sysno"),"posix-syscall","linux-write1-exit60-literal");
+  b=run_in("posix-syscall-replay",kp,kp,0);check(!a.rc&&!b.rc&&a.outn&&a.outn==b.outn&&!memcmp(a.out,b.out,a.outn),"det.replay","posix-syscall-stdout-identical");
+  np_free(&a);np_free(&b);free(tape.p);free(want.p);}
+ /* supporting: regmap r0..r7 and reloc jmp/jz/call, x86_64 halves (arm64 needs foreign-route material) */
+ begin(&p,NODATA,0,0);entry(&p);
+ {static const char *pr[4][2]={{"r0","r1"},{"r2","r3"},{"r4","r5"},{"r6","r7"}};int i;for(i=0;i<4;i++){FMT(l,"  mov %s, %s",pr[i][0],pr[i][1]);T(&p,l);FMT(l,"mov %s, %s",R(pr[i][0]),R(pr[i][1]));W(&p,l);}}
+ ins_ret(&p);accept_prog("regmap-x86_64",&p,&a,0,0);
+ check(has_line(a.out,a.outn,"mov rax, rdi")&&has_line(a.out,a.outn,"mov rsi, rdx")&&has_line(a.out,a.outn,"mov rcx, r8")&&has_line(a.out,a.outn,"mov r9, rsp"),"regmap-x86_64","eight-tregs-literal");np_free(&a);
+ begin(&p,NODATA,0,0);entry(&p);
+ T(&p,"  jump L1");FMT(l,"jump L1 form=%s reloc=%s",A("jump")->form,relk[0]);W(&p,l);T(&p,"L1:");W(&p,"L1:");
+ T(&p,"  jumpz r0, L2");FMT(l,"jumpz %s, L2 form=%s reloc=%s",R("r0"),A("jumpz")->form,relk[1]);W(&p,l);T(&p,"L2:");W(&p,"L2:");
+ T(&p,"  call L3");FMT(l,"call L3 form=%s reloc=%s",A("call")->form,relk[2]);W(&p,l);T(&p,"L3:");W(&p,"L3:");ins_ret(&p);
+ accept_prog("reloc-x86_64",&p,&a,0,0);check(has_line(a.out,a.outn,"jump L1 form=x86 reloc=rel32")&&has_line(a.out,a.outn,"call L3 form=x86 reloc=rel32"),"reloc-x86_64","rel32-literal");np_free(&a);
+ puts("CLAIMS\tlower.fmt.header-data,lower.fmt.spec-text,lower.det.replay,lower.det.file-vs-stdin,lower.pos.posix-syscall");
+ puts("NOT_CLAIMED\tlower.gold.regmap-16 and lower.gold.reloc-6 (x86_64 halves asserted here; arm64 halves need arm64 route material)");}
+
+/* ---- abi ---- */
+static int is_sysop(const char *op){return !strcmp(A(op)->form,"syscall");}
+static void mode_abi(void){
+ prog p;np_result a;char l[300];int i,nsys=0;
+ static const char *notape[]={"cas64","fence","syscall_gate","tls_base","cycle_counter","stack_enter"};
+ /* 35 system-call ops through .sys (three tape arguments, argshape) */
+ begin(&p,NODATA,0,0);entry(&p);
+ for(i=0;i<nabi;i++)if(is_sysop(abi[i].op)&&strcmp(abi[i].f[SYSNO],"none")){size_t f=p.code.n;x_sys(&p,abi[i].op,"r1","r2","r3");mark(abi[i].op,f,&p);nsys++;}
+ x_exit(&p,"r0");
+ check(nsys==35,"abi","thirty-five-lnx-x86_64-system-call-rows-with-a-number");
+ accept_prog("sys3",&p,0,0,0);
+ /* the same 35 through .sys6 (six arguments: arg0..arg5, the generic syscall shifted by one) */
+ begin(&p,NODATA,0,0);entry(&p);
+ for(i=0;i<nabi;i++)if(is_sysop(abi[i].op)&&strcmp(abi[i].f[SYSNO],"none")){size_t f=p.code.n;x_sys6(&p,abi[i].op);mark(abi[i].op,f,&p);}
+ x_exit(&p,"r0");accept_prog("sys6",&p,0,0,0);
+ /* getdirentries64: abi sysno none on lnx -> no system call for this on lnx (unisa/lower.py), declared {target} lowering */
+ {int nnone=0;for(i=0;i<nabi;i++)if(is_sysop(abi[i].op)&&!strcmp(abi[i].f[SYSNO],"none"))nnone++;check(nnone==1&&!strcmp(A("getdirentries64")->f[SYSNO],"none"),"abi","getdirentries64-only-row-without-number");}
+ refuse_text("getdirentries64-sys3","_start:\n  .sys getdirentries64, r0, r1, r2\n  ret\n","not covered: lnx/x86_64 lowering");
+ refuse_text("getdirentries64-sys6","_start:\n  .sys6 getdirentries64, r0, r1, r2, r3, r4, r5\n  ret\n","not covered: lnx/x86_64 lowering");
+ /* 45 tape machine ops: no system-call sequence; enc form; regmap operands; reloc on branches */
+ begin(&p,NODATA,0,0);entry(&p);
+ {static const char *op3[]={"add64","sub64","xor64","mul64","slt64","sle64","and64","or64","shl64","shr64","ult64","ule64","lshr64",
+   "fadd64","fsub64","fmul64","fdiv64","flt64","fle64","feq64","fadd32","fsub32","fmul32","fdiv32","flt32","fle32","feq32"};
+  static const char *op2[]={"cvtid","cvtud","cvtis","cvtus","cvtdi","cvtdu","cvtsd","cvtds","fsqrt64","fsqrt32"};int nm=0;size_t f;
+  for(i=0;i<27;i++){f=p.code.n;FMT(l,"  %s r0, r1, r2",op3[i]);T(&p,l);FMT(l,"%s %s, %s, %s form=%s",op3[i],R("r0"),R("r1"),R("r2"),A(op3[i])->form);W(&p,l);mark(op3[i],f,&p);nm++;}
+  for(i=0;i<10;i++){f=p.code.n;FMT(l,"  %s r3, r4",op2[i]);T(&p,l);FMT(l,"%s %s, %s form=%s",op2[i],R("r3"),R("r4"),A(op2[i])->form);W(&p,l);mark(op2[i],f,&p);nm++;}
+  f=p.code.n;T(&p,"  load64 r5, [r6+16]");FMT(l,"load64 %s, %s, 16 form=%s",R("r5"),R("r6"),A("load64")->form);W(&p,l);mark("load64",f,&p);nm++;
+  f=p.code.n;T(&p,"  store64 [r6+24], r5");FMT(l,"store64 %s, 24, %s form=%s",R("r6"),R("r5"),A("store64")->form);W(&p,l);mark("store64",f,&p);nm++;
+  f=p.code.n;T(&p,"  callr r1");FMT(l,"callr %s form=%s",R("r1"),A("callr")->form);W(&p,l);mark("callr",f,&p);nm++;
+  f=p.code.n;T(&p,"  nop");FMT(l,"nop form=%s",A("nop")->form);W(&p,l);mark("nop",f,&p);nm++;
+  f=p.code.n;T(&p,"  jump M1");FMT(l,"jump M1 form=%s reloc=%s",A("jump")->form,relk[0]);W(&p,l);mark("jump",f,&p);nm++;T(&p,"M1:");W(&p,"M1:");
+  f=p.code.n;T(&p,"  jumpz r2, M2");FMT(l,"jumpz %s, M2 form=%s reloc=%s",R("r2"),A("jumpz")->form,relk[1]);W(&p,l);mark("jumpz",f,&p);nm++;T(&p,"M2:");W(&p,"M2:");
+  f=p.code.n;T(&p,"  call M3");FMT(l,"call M3 form=%s reloc=%s",A("call")->form,relk[2]);W(&p,l);mark("call",f,&p);nm++;T(&p,"M3:");W(&p,"M3:");
+  f=p.code.n;ins_ret(&p);mark("ret",f,&p);nm++;
+  check(nm==45,"abi","forty-five-tape-machine-ops");
+  /* every one of them has an all-none abi row except form: nothing to gate */
+  {int ok=1,j;for(i=0;i<nabi;i++)if(!is_sysop(abi[i].op))for(j=0;j<NF;j++){const char *v=abi[i].f[j];
+    if(j==SHAPE?strcmp(v,"plain"):(j==GATE&&!strcmp(abi[i].op,"syscall_gate"))?strcmp(v,"syscall"):strcmp(v,"none"))ok=0;}
+   check(ok,"abi","machine-op-rows-carry-no-system-call-facts");}}
+ accept_prog("machine-ops",&p,&a,0,0);
+ check(!has(a.out,a.outn,"\ngate ")&&!has(a.out,a.outn,"role=sysno"),"machine-ops","no-gate-sequence");np_free(&a);
+ for(i=0;i<6;i++){printf("UNVERIFIED\tlower.gold.abi-lnx-x86_64.%s\treason=catalog op has no tape.text spelling (unisa/tape.py SHAPE); lower never asks its abi row from a tape\n",notape[i]);unverified++;}
+ puts("CLAIMS\tlower.gold.abi-lnx-x86_64 (81 of 87 rows observable; 6 UNVERIFIED -> rc3)");
+ puts("NOT_CLAIMED\tlower.gold.enc-form (lnx/x86_64 forms asserted on every emitted op; arm forms need arm64 material)");}
+
+/* ---- A-41 layout enumeration ---- */
+static const struct {const char *suf;int bss;unsigned len;const char *raw;const char *spell;} SPECS[6]={
+ {"b1",1,1,0,0},{"b8",1,8,0,0},{"s1",0,1,"a","\"a\""},{"s7",0,7,"abcdefg","\"abcdefg\""},{"s8",0,8,"abcdefgh","\"abcdefgh\""},
+ {"z8",0,8,"\0\0\0\0\0\0\0\0","\"\\0\\0\\0\\0\\0\\0\\0\\0\""}};
+static const char *DN[3]={"d0","d1","d2"};
+static int layout_one(const int *c,int k,int redef){ddef d[4];prog p;char name[64],l[100];int i,n=0;
+ name[0]=0;for(i=0;i<k;i++){if(i)strcat(name,"_");strcat(name,SPECS[c[i]].suf);}
+ if(redef>=0){FMT(l,".r%d",redef);strcat(name,l);}
+ for(i=0;i<k;i++){d[n].name=DN[i];d[n].bss=SPECS[c[i]].bss;d[n].len=SPECS[c[i]].len;d[n].raw=SPECS[c[i]].raw;d[n].spell=SPECS[c[i]].spell;n++;}
+ if(redef>=0){d[n]=d[redef];n++;}
+ begin(&p,d,n,0);entry(&p);
+ for(i=0;i<k;i++){FMT(l,"  .lea r0, %s",DN[i]);T(&p,l);FMT(l,".lea %s, %s",R("r0"),DN[i]);W(&p,l);}
+ ins_imm(&p,"r0",0);x_exit(&p,"r0");
+ {char tag[80];FMT(tag,"layout-%s",name);accept_prog(tag,&p,0,0,0);}
+ return 1;}
+static void mode_layout(int redef){int k,c[3],total=0;
+ for(k=1;k<=3;k++){int m=1,i,x;for(i=0;i<k;i++)m*=6;
+  for(x=0;x<m;x++){int v=x;for(i=k-1;i>=0;i--){c[i]=v%6;v/=6;}
+   if(!redef)total+=layout_one(c,k,-1);else if(k>1){total+=layout_one(c,k,0);total+=layout_one(c,k,k-1);}}}
+ check(total==(redef?504:258),"layout",redef?"enumerated-504-redefinition-tapes":"enumerated-258-plain-tapes");
+ printf("CLAIMS\tlower.pos.data-layout (%s half of the 762-tape A-41 domain, lnx/x86_64)\n",redef?"redefinition":"plain");}
+
+/* ---- refusals ---- */
+static void mode_refusals(void){
+ static const char *dd[][2]={{"str-no-literal",".str s"},{"bss-no-size",".bss s"},{"bss-negative",".bss s -1"},{"bss-not-decimal",".bss s x"},
+  {"str-unquoted",".str s abc"},{"str-unterminated",".str s \"abc"},{"str-bad-hex",".str s \"\\xZZ\""},{"str-short-hex",".str s \"\\x4\""},{"str-escape-at-eol",".str s \"a\\"}};
+ char t[400],name[100];size_t i;prog p;np_result a;
+ /* data directives the reference reader refuses (unisa/tape.py parse/_unescape) -> exec/lower 'tape data directive' */
+ for(i=0;i<sizeof dd/sizeof dd[0];i++){FMT(t,"_start:\n  ret\n%s\n",dd[i][1]);FMT(name,"data-directive.%s",dd[i][0]);refuse_text(name,t,"not covered: tape data directive");}
+ /* extent: @data_len = align8(extent) + 168 must stay <= 2^31-1 (formats.md; README 'rejects an extent which cannot
+  * also accommodate alignment and scratch storage') -> the largest extent is 2147483472 */
+ {static const ddef d[]={{"big",1,2147483472ULL,0,0}};begin(&p,d,1,0);entry(&p);ins_ret(&p);accept_prog("extent.largest-accepted",&p,&a,0,0);
+  check(has_line(a.out,a.outn,"@data_len 2147483640")&&has_line(a.out,a.outn,"@data -"),"extent.largest-accepted","data-len-literal");np_free(&a);}
+ refuse_text("extent.bss-one-past","_start:\n  ret\n.bss big 2147483473\n","not covered: tape data directive");
+ refuse_text("extent.str-crosses","_start:\n  ret\n.bss big 2147483472\n.str s \"a\"\n","not covered: tape data directive");
+ refuse_text("extent.two-gib-halves","_start:\n  ret\n.bss a 1073741824\n.bss b 1073741824\n","not covered: tape data directive");
+ refuse_text("extent.beyond-u64","_start:\n  ret\n.bss big 18446744073709551616\n","not covered: tape data directive");
+ /* argument shapes the lowering cannot pass (unisa/lower.py: stack argument; hostaddr index 0..3; unknown catalog op) */
+ refuse_text("shape.sys-machine-op","_start:\n  .sys add64, r0, r1, r2\n  ret\n","not covered: lnx/x86_64 lowering");
+ refuse_text("shape.hostaddr-index-4","_start:\n  .hostaddr r0, 4\n  ret\n","not covered: lnx/x86_64 lowering");
+ refuse_text("shape.sys-unknown-op","_start:\n  .sys nosuch, r0, r1, r2\n  ret\n","not covered: lnx/x86_64 lowering");
+ /* library ops outside library mode */
+ refuse_text("library.libraryfn-outside-mode","_start:\n  .libraryfn r0, 1\n  ret\n","not covered: libraryfn requires library mode");
+ refuse_text("library.librarycall-without-bindings","_start:\n  .librarycall r0, r1\n  ret\n","not covered: library import binding or signature");
+ puts("CLAIMS\tlower.ref.extent-2gb (data extent),lower.rec.after-refusal");
+ puts("NOT_CLAIMED\tlower.ref.unsupported-shape object-metadata part (stream6 is the image route; .global/.unit are object-route metadata)");
+ puts("NOT_CLAIMED\tlower.ref.library-mode malformed callsite/callback contracts (need library-mode material)");
+ puts("NOT_CLAIMED\tlower.ref.extent-2gb relative-addressing part (code beyond 2 GiB not constructible within the 60 s bound)");}
+
+/* ---- input ---- */
+static char *strip_path(const char *s,size_t n,const char *p){np_buf b={0};np_replace(s,n,p,strlen(p),"PATH",4,-1,&b);np_put(&b,"",1);return b.p;}
+static void refused_input(const char *name,np_result *r,const char *line){
+ check(r->rc==2,name,"reject-rc2-runtime-refusal");check(r->outn==0,name,"reject-empty-stdout");check(r->errn&&has_line(r->err,r->errn,line),name,"reject-named");}
+static void mode_input(void){
+ char missing[4400],notdir[4400],noperm[4400],dir[4400],reg[4400];int probe,eacces_real;np_result a,b,c,d;char *sa,*sb,*sc;
+ path(missing,sizeof missing,work,"absent.tape");path(reg,sizeof reg,work,"regular.tape");saved(reg,"_start:\n  ret\n",14);path(notdir,sizeof notdir,work,"regular.tape/x.tape");
+ path(noperm,sizeof noperm,work,"noperm.tape");saved(noperm,"_start:\n  ret\n",14);if(chmod(noperm,0))die("chmod");
+ path(dir,sizeof dir,work,"dir.tape");if(mkdir(dir,0700))die("dir-input");
+ probe=open(noperm,O_RDONLY|O_CLOEXEC);eacces_real=probe<0&&errno==EACCES;if(probe>=0)close(probe);
+ seq++;a=run_in("input-enoent",missing,missing,0);refused_input("input-enoent",&a,"run: cannot open input");recovery("input-enoent");
+ seq++;b=run_in("input-enotdir",notdir,notdir,0);refused_input("input-enotdir",&b,"run: cannot open input");
+ sa=strip_path(a.err,a.errn,missing);sb=strip_path(b.err,b.errn,notdir);
+ check(b.errn&&strcmp(sa,sb),"input-enotdir","reported-distinct-from-enoent");recovery("input-enotdir");
+ seq++;c=run_in("input-eacces",noperm,noperm,0);sc=strip_path(c.err,c.errn,noperm);
+ if(eacces_real){refused_input("input-eacces",&c,"run: cannot open input");check(c.errn&&strcmp(sa,sc)&&strcmp(sb,sc),"input-eacces","reported-distinct-from-enoent-enotdir");}
+ else{unverified++;puts("UNVERIFIED\tinput-eacces\treason=mode-000-file-readable-by-this-user");}
+ recovery("input-eacces");
+ seq++;d=run_in("input-directory",dir,dir,0);refused_input("input-directory",&d,"run: cannot read input");recovery("input-directory");
+ if(chmod(noperm,0600))die("chmod-restore");
+ free(sa);free(sb);free(sc);np_free(&a);np_free(&b);np_free(&c);np_free(&d);
+ puts("CLAIMS\tlower.ref.non-regular-input");}
+
+int main(int argc,char **argv){
+ static const char *modes[]={"format","abi","layout-plain","layout-redef","refusals","input"};int m=-1,i;char hex[65];
+ for(i=0;argc==5&&i<6;i++)if(!strcmp(argv[1],modes[i]))m=i;
+ if(m<0){fputs("usage: format|abi|layout-plain|layout-redef|refusals|input ROOT STREAM_DIR NEW_ABS_OUTDIR\n",stderr);return 2;}
+#if !defined(__linux__) || !defined(__x86_64__)
+ fputs("NOT_RUN stream-lower-domain needs Linux/x86_64\n",stderr);return 3;
+#endif
+ if(!realpath(argv[2],root)||!realpath(argv[3],streams))die("resolve");
+ if(argv[4][0]!='/')die("absolute-new-outdir");copy_fit(work,sizeof work,argv[4]);
+ if(mkdir(work,0700))die("new-outdir-must-be-absent");
+ {char real[4096];if(!realpath(work,real))die("outdir-resolve");copy_fit(work,sizeof work,real);}
+ path(bound,sizeof bound,root,"tools/bound");path(inc,sizeof inc,root,"include");
+ path(product,sizeof product,root,"unisacc.com");path(s6bin,sizeof s6bin,streams,"unisacc-stream6.com");
+ digest(product,product_before);digest(s6bin,hex);
+ if(strcmp(hex,s6_pin))die("material.stream6-identity");
+ check(1,"material","stream6-identity");
+ load_gold();
+ if(m==0)mode_format();else if(m==1)mode_abi();else if(m==2)mode_layout(0);else if(m==3)mode_layout(1);else if(m==4)mode_refusals();else mode_input();
+ digest(product,hex);check(!strcmp(hex,product_before),"identity","root-product-stable");
+ digest(s6bin,hex);check(!strcmp(hex,s6_pin),"identity","stream6-stable");
+ puts("TIMING\tstartup_load_inference_output_validation=UNMEASURED");
+ printf("STREAM_LOWER_DOMAIN\tmode=%s\tassertions=%d\tfailed=%d\tunverified=%d\truns=%d\tscope=lower-domain-linux-x86_64-stream6\n",modes[m],assertions,failures,unverified,runs);
+ puts("NOT_CLAIMED\tforeign-targets-foreign-hosts-same-candidate-model-unisym1-validation-credential");
+ return failures?1:unverified?3:0;}
