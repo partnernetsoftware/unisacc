@@ -28,6 +28,77 @@ reference front end retains these marks outside its token stream. Dropping
 the resource can make E3 accept a source while omitting a constructor call
 from the tape, as `probes/f1_header_ctor.c` demonstrates.
 
+## E3 token trailer (enforced by every E3 model)
+
+E3 checks the end of its token input after the startup scan reaches the
+final `eof` token (statics `TT.*` rows; the located readers route a failure
+to their own frame refusal):
+
+- **tokens.plain / tokens.typed and UNITOK1 (single unit):** right after the
+  `eof` record comes exactly one count line, `N tokens` LF, and then the end
+  of the input. N is canonical decimal (no sign, no leading zero, at least
+  1) and must equal the number of token records from the start of the token
+  stream through `eof`. Records are counted structurally, not through the
+  parser: a UNITOK1 record is `@`, four offset bytes, LF and its token text;
+  a tokens.typed record is one line. A line that does not start a record
+  (a blank, white-space- or quote-led line in tokens.typed; any line not led
+  by `@` in UNITOK1) continues a multi-line string token. Folding by the
+  parser (parenfold) and look-ahead do not change N.
+- **UNITOK2:** there is no count line; the input must end right after the
+  final prefixed `eof` record.
+- A missing, wrong, padded or repeated count line, or any byte after it, is
+  refused: located E3 (UNITOK1/UNITOK2, all CLI routes) with
+  `reject: not covered: malformed token locations`; the plain E3 with
+  `reject: not covered: truncated token dump`.
+
+The USLATTR1 frame's own length fields are validated by the C adapter that
+removes the frame, not by E3 (that adapter does not yet compare the payload
+length field).
+
+## target.text (lower -> elf input)
+
+`target.text` is the lowering stage's output and the image stage's input:
+header lines, then target instruction lines (labels, `.dir` and instruction
+forms of the selected ISA). Header lines start with `@`; a key is followed by
+one or more spaces and its value up to LF. The ELF/Mach-O/PE/object and memory
+image routes of all six targets accept these header keys (x86_64 in
+`exec/enc/address-*`, arm64 in `exec/enc/armlayout-*`, shared image input in
+`exec/enc/elfimage-*`):
+
+| key | value | required | contract |
+|---|---|---|---|
+| `@target` | `lnx/x86_64` ... `win/arm64` | yes | selects the address layout; must match the image format |
+| `@data` | lowercase hex byte pairs, or `-` | no (absent = empty) | stored initial data prefix, through its last nonzero byte |
+| `@sym` | `NAME DECIMAL` | no, repeatable, unique | named data offset (DATA_BASE 256 = first data byte) |
+| `@src_os` | os name | no | carried |
+| `@data_len` | decimal digits only, at most 2^31-1, not below the stored `@data` length | yes | full logical data extent including the implicit zero tail |
+| `@bss` | decimal | no | Linux/macOS images require 0; Windows: extra reserved extent |
+| `@relocs` | `-` or comma-separated decimal slot offsets | no | each slot `offset + 8` must lie inside the extent |
+| `@threads` | `1` | no | thread-cell layout |
+| `@argc` / `@argv` | decimal | memory route (required there; ignored by file images) | argument cells inside the extent |
+
+Lower always emits `@target`, `@data`, `@src_os`, `@data_len`, `@bss`, and
+`@relocs`. The image stage refuses, with no output:
+
+- a missing `@target` or `@data_len`, an empty input, or a header-only input,
+  and (file images, not objects or the memory route) no `_start` label or a
+  `_start` that is not inside the code: `reject: not covered: address or
+  target declaration` on x86_64; the ARM64 encoder reports these through its
+  existing header failure (`arm64: ...` then `reject: not covered: ARM64
+  operand or instruction`);
+- an `@sym` value or an instruction data reference (named or numeric address,
+  `argsave`/`argvget`, itoa tables, Windows gate cells, ARM `AD.data`) whose
+  offset lies past the end of the extent, DATA_BASE + `@data_len` (+ Windows
+  `@bss`): `reject: not covered: ELF input or relocation` (`PE`/`Mach-O` in
+  that name for those formats). One past the end is allowed (the ARM stack top
+  and C one-past-end pointers use it); the width of the access at the last
+  bytes is not checked.
+
+`@relocs` slot values are not range-checked; only slot positions are. The
+image stage adds the data base to each slot's 64-bit value as the reference
+`unisa/image` relocate does, so a pointer one past an object (or any other
+value) is carried unchanged in meaning.
+
 ## Preprocessor diagnostic envelope (development)
 
 `exec/build/gen.py pp --locations` emits **pp.locations**, while its default remains

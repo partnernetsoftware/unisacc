@@ -1,0 +1,261 @@
+/* Interfaces, Linux x86_64 column: adjacent-edge byte oracle and per-consumer framing refusals
+ * over the seven single-stream containers (E2 -> E1 -> E3 -> E4 -> prune -> lower -> elf).
+ * ROOT STREAM_DIR NEW_ABS_OUTDIR; material is the prepared `streams` set, each container SHA pinned.
+ *
+ * Edges: two literal fixtures run stage by stage through files and, independently, through stdin
+ * ("-"); every edge must be byte-equal across the two transports, satisfy the consumer's frame
+ * (UNIPP1, USLATTR1+UNITOK1, tape.text, target.text, ELF64), and the fixture-0 edges must equal the
+ * hand-built independent oracles of tests/stream-e1.cx / stream-e3.cx. The last edge must equal the
+ * full product's -O2 image and execute to 7.
+ *
+ * Refusals: each corrupt input names an exact rc and the complete stderr, empty stdout and no
+ * attribute side-car; a clean recovery run on the same stage then reproduces the clean edge bytes.
+ * Formats that carry no magic or length field (E2 source text, tape.text) print NOT_APPLICABLE
+ * cells that are not counted. Accepted corrupt input is a FAIL and prints a FINDING line. E3 trailer and
+ * elf target.text cells expect the product's named refusals (exec/pipeline/formats.md target.text and
+ * UNITOK1 trailer); the USLATTR1 length cells remain this batch's provisional C-adapter contract. */
+#pragma unisa use cxlib.netpack
+static char root[4096],streams[4096],work[4096],bound[4200],inc[4200],product[4200],source[2][4200];
+static char bins[7][4200],product_before[65];
+static const char *names[]={"e2","e1","e3","e4","prune","lower","elf"};
+static const char *pins[]={
+ "078bccb6dad868b470bb6287ba6fdd9c415e3eaa5d25280c883ce4ea2710fdc9","0ae80726541fc4181d57de9aad1a960a7adf698c38dda8097f9edd2b9ae75fbb",
+ "8605c8f3c9764f977f362449d9e7311622f61e8d5ee0d20cddc21d554e430bf5","9d3119df5d07c76f34042a33923a57cfdf7af95ee8100ca0d39fb1911fbc54aa",
+ "1306de94c4c6fb8052f7bb936af3a34f6b67d80b08df092bacbf807499176cfd","c89eabb6dabc3e48fe96665da6db5776740b5bcbf1976117c3be23568a96a6c9",
+ "2f063f38f951b40fb128ef6af85c8a03fe54698fef669e78f7555afecf5dc57e"};
+static const char *tape_oracle="4230637b59dc325133adbcc8c0468d5ea401f642952b1719be945680944e6775"; /* tests/stream-e3.cx tape_pin */
+static const char *bodies[]={"int main(void){return 7;}\n","int value; __attribute__((constructor)) void init(void){value=7;} int main(void){return value;}\n"};
+static np_buf edge[2][8];          /* edge[f][0] source, edge[f][k+1] file-route stdout of stage k */
+static char edge_path[2][8][4200];
+static char edge_sha[2][8][65];
+static int assertions,failures,not_applicable,findings,seq;
+static void die(const char *s){fprintf(stderr,"interfaces: REFUSE %s errno=%d\n",s,errno);exit(2);}
+static void copy_fit(char *dst,size_t cap,const char *src){size_t i=0;if(!cap)die("copy-bound");while(src[i]&&i+1<cap){dst[i]=src[i];i++;}if(src[i])die("copy-bound");dst[i]=0;}
+static void path(char *out,size_t cap,const char *dir,const char *leaf){int n=snprintf(out,cap,"%s/%s",dir,leaf);if(n<0||(size_t)n>=cap)die("path-bound");}
+static void label3(char *out,size_t cap,const char *a,const char *b,const char *c){int n=snprintf(out,cap,"%s.%s.%s",a,b,c);if(n<0||(size_t)n>=cap)die("label-bound");}
+static void check(int ok,const char *s){assertions++;if(!ok)failures++;printf("%s\tinterfaces.%s\n",ok?"PASS":"FAIL",s);}
+static void na(const char *stage,const char *cell,const char *why){not_applicable++;printf("NOT_APPLICABLE\tinterfaces.%s.%s\t%s\n",stage,cell,why);}
+static void save(const char *p,const void *s,size_t n){int f=open(p,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);size_t at=0;if(f<0)die("exclusive-create");while(at<n){ssize_t k=write(f,(const char *)s+at,n-at);if(k<0&&errno==EINTR)continue;if(k<=0)die("write");at+=(size_t)k;}if(close(f))die("close");}
+static void digest(const char *p,char hex[65]){size_t n;char *s=cx_read(p,&n);if(!s)die(p);cx_sha256_hex(s,n,hex);free(s);}
+static int absent(const char *p){struct stat st;if(!lstat(p,&st))return 0;if(errno!=ENOENT)die("side-car-stat-not-enoent");return 1;}
+static unsigned le32(const char *p){const unsigned char *u=(const unsigned char *)p;return (unsigned)u[0]|(unsigned)u[1]<<8|(unsigned)u[2]<<16|(unsigned)u[3]<<24;}
+static void put32(np_buf *b,unsigned x){char v[4];int i;for(i=0;i<4;i++)v[i]=(char)(x>>(8*i));np_put(b,v,4);}
+static int same(const char *a,size_t an,const char *b,size_t bn){return an==bn&&(!an||!memcmp(a,b,an));}
+static int exact_err(np_result *r,const char *want){return same(r->err,r->errn,want,strlen(want));}
+static size_t find(const char *h,size_t hn,const char *s){size_t sn=strlen(s),i;for(i=0;i+sn<=hn;i++)if(!memcmp(h+i,s,sn))return i;die("fixture-anchor-missing");return 0;}
+
+/* One stage run. Input bytes go to a fresh exclusive file; via_stdin feeds that file on fd 0 and
+ * passes "-". The side-car path is fresh and absent; evidence lands beside it. */
+static np_result stage(int k,int fixture,const char *bytes,size_t n,const char *tag,int via_stdin,char *side,size_t sidecap){
+ char leaf[200],in[4200],env[4400],ev[4200],why[1024];np_result r;int z;
+ seq++;z=snprintf(leaf,sizeof leaf,"%03d-%s-%s.in",seq,names[k],tag);if(z<0||(size_t)z>=sizeof leaf)die("leaf-bound");path(in,sizeof in,work,leaf);save(in,bytes,n);
+ z=snprintf(leaf,sizeof leaf,"%03d-%s-%s.attributes",seq,names[k],tag);if(z<0||(size_t)z>=sizeof leaf)die("leaf-bound");path(side,sidecap,work,leaf);
+ if(!absent(side))die("side-car-preexists");
+ z=snprintf(env,sizeof env,"UNISA_ATTRIBUTES=%s",side);if(z<0||(size_t)z>=sizeof env)die("env-bound");
+ char *v[]={bound,"10",bins[k],via_stdin?"-":in,source[fixture],inc,0};const char *add[]={env,"UNISA_MAXSTEPS=200000000",0};
+ int saved=-1,f;
+ if(via_stdin){saved=dup(0);f=open(in,O_RDONLY|O_CLOEXEC);if(saved<0||f<0||dup2(f,0)<0)die("stdin-route");close(f);}
+ z=np_run(v,root,(char *const *)add,14,&r,why,sizeof why);
+ if(via_stdin){if(dup2(saved,0)<0)die("stdin-restore");close(saved);}
+ if(z)die(why);
+ z=snprintf(leaf,sizeof leaf,"%03d-%s-%s.stdout",seq,names[k],tag);if(z<0||(size_t)z>=sizeof leaf)die("leaf-bound");path(ev,sizeof ev,work,leaf);save(ev,r.out,r.outn);
+ z=snprintf(leaf,sizeof leaf,"%03d-%s-%s.stderr",seq,names[k],tag);if(z<0||(size_t)z>=sizeof leaf)die("leaf-bound");path(ev,sizeof ev,work,leaf);save(ev,r.err,r.errn);
+ return r;
+}
+
+/* Independent consumer-side frame parsers. */
+static int unipp1_frame(const char *b,size_t n,const char *body){
+ size_t i,bn=strlen(body);if(n!=27+bn||memcmp(b,"UNIPP1\0",7)||le32(b+7)!=bn)return 0;
+ for(i=11;i<27;i++)if(b[i])return 0;return !memcmp(b+27,body,bn);}
+static int uslattr1_frame(const char *b,size_t n,unsigned want_count,const char **pay,size_t *pn){
+ if(n<16||memcmp(b,"USLATTR1",8)||le32(b+8)!=want_count)return 0;
+ if(16+(size_t)want_count*5+(size_t)le32(b+12)!=n)return 0;*pay=b+16+(size_t)want_count*5;*pn=le32(b+12);return 1;}
+static int unitok1_echo(const char *pay,size_t pn,const char *pp,size_t ppn){
+ return pn>=12+ppn&&!memcmp(pay,"UNITOK1\0",8)&&le32(pay+8)==ppn&&!memcmp(pay+12,pp,ppn)&&pn>=4&&!memcmp(pay+pn-1,"\n",1);}
+static int tape_text(const char *b,size_t n){size_t i;if(n<8||memcmp(b,"_start:\n",8)||b[n-1]!='\n')return 0;for(i=0;i<n;i++)if(!b[i])return 0;return 1;}
+static int target_text(const char *b,size_t n){
+ size_t i,at,len;const char *hdr="@target lnx/x86_64\n@data ";if(n<strlen(hdr)||memcmp(b,hdr,strlen(hdr))||b[n-1]!='\n')return 0;
+ for(i=0;i<n;i++)if(!b[i])return 0;
+ at=find(b,n,"\n@data_len ")+11;len=0;while(at+len<n&&b[at+len]>='0'&&b[at+len]<='9')len++;if(!len||b[at+len]!='\n')return 0;
+ return find(b,n,"\n@relocs ")<find(b,n,"\n_start:\n");}
+static int elf_image(const char *b,size_t n){return n>=64&&!memcmp(b,"\177ELF\2\1\1",7)&&(unsigned char)b[16]==2&&(unsigned char)b[18]==62&&!b[19];}
+/* tests/stream-e3.cx hand_input: the UNITOK1 frame for bodies[0], built without E1. */
+static void hand_unitok1(np_buf *b){
+ const char *src=bodies[0];const char *tok[]={"type=int","id=main","(","type=void",")","{","return","num=7",";","}","eof"};
+ unsigned off[]={0,4,8,9,13,14,15,22,23,24,26};np_buf pp={0};int i;
+ np_put(&pp,"UNIPP1\0",7);put32(&pp,(unsigned)strlen(src));for(i=0;i<4;i++)put32(&pp,0);np_puts(&pp,src);
+ np_put(b,"UNITOK1\0",8);put32(b,(unsigned)pp.n);np_put(b,pp.p,pp.n);
+ for(i=0;i<11;i++){np_put(b,"@",1);put32(b,off[i]);np_put(b,"\n",1);np_puts(b,tok[i]);np_put(b,"\n",1);}
+ np_puts(b,"11 tokens\n");free(pp.p);}
+
+static void chain(int f){
+ char lab[160],side[4200],leaf[80],tag[40];int k;np_result r;
+ edge[f][0].n=0;np_puts(&edge[f][0],bodies[f]);
+ for(k=0;k<7;k++){
+  snprintf(tag,sizeof tag,"case%d-file",f);
+  r=stage(k,f,edge[f][k].p,edge[f][k].n,tag,0,side,sizeof side);
+  snprintf(tag,sizeof tag,"case%d",f);label3(lab,sizeof lab,tag,names[k],"file-route.accept-rc0-empty-stderr");check(r.rc==0&&!r.errn,lab);
+  if(k==1||k==2){unsigned c=(unsigned)f;size_t n=0;char *s=absent(side)?0:cx_read(side,&n);
+   label3(lab,sizeof lab,tag,names[k],"attribute-side-car-count");check(s&&n==4+9*(size_t)c&&le32(s)==c,lab);free(s);}
+  else{label3(lab,sizeof lab,tag,names[k],"no-attribute-side-car");check(absent(side),lab);}
+  edge[f][k+1].n=0;np_put(&edge[f][k+1],r.out,r.outn);np_free(&r);
+  snprintf(leaf,sizeof leaf,"edge-case%d-%d-%s.bytes",f,k+1,names[k]);path(edge_path[f][k+1],sizeof edge_path[f][k+1],work,leaf);
+  save(edge_path[f][k+1],edge[f][k+1].p,edge[f][k+1].n);cx_sha256_hex(edge[f][k+1].p,edge[f][k+1].n,edge_sha[f][k+1]);
+  printf("EDGE\tcase%d\t%s->%s\tbytes=%zu\tsha256=%s\n",f,names[k],k<6?names[k+1]:"image",edge[f][k+1].n,edge_sha[f][k+1]);
+ }
+ /* stdin route: an independent chain, each stage reading the previous stdin-route stdout on fd 0. */
+ {np_buf prev={0};np_put(&prev,bodies[f],strlen(bodies[f]));
+  for(k=0;k<7;k++){
+   snprintf(tag,sizeof tag,"case%d-stdin",f);r=stage(k,f,prev.p,prev.n,tag,1,side,sizeof side);
+   snprintf(tag,sizeof tag,"case%d",f);label3(lab,sizeof lab,tag,names[k],"stdin-route.edge-bytes-equal-file-route");
+   check(r.rc==0&&!r.errn&&same(r.out,r.outn,edge[f][k+1].p,edge[f][k+1].n),lab);
+   prev.n=0;np_put(&prev,r.out,r.outn);np_free(&r);}
+  free(prev.p);}
+ /* consumer frame of every edge */
+ {const char *pay=0;size_t pn=0;snprintf(tag,sizeof tag,"case%d",f);
+  label3(lab,sizeof lab,tag,"e2-e1","unipp1-frame-carries-source");check(unipp1_frame(edge[f][1].p,edge[f][1].n,bodies[f]),lab);
+  label3(lab,sizeof lab,tag,"e1-e3","uslattr1-frame-extent");check(uslattr1_frame(edge[f][2].p,edge[f][2].n,(unsigned)f,&pay,&pn),lab);
+  label3(lab,sizeof lab,tag,"e1-e3","unitok1-echo-equals-e2-e1-edge");check(pay&&unitok1_echo(pay,pn,edge[f][1].p,edge[f][1].n),lab);
+  label3(lab,sizeof lab,tag,"e3-e4","tape-text");check(tape_text(edge[f][3].p,edge[f][3].n),lab);
+  label3(lab,sizeof lab,tag,"e4-prune","tape-text");check(tape_text(edge[f][4].p,edge[f][4].n),lab);
+  label3(lab,sizeof lab,tag,"prune-lower","tape-text");check(tape_text(edge[f][5].p,edge[f][5].n),lab);
+  label3(lab,sizeof lab,tag,"lower-elf","target-text-header");check(target_text(edge[f][6].p,edge[f][6].n),lab);
+  label3(lab,sizeof lab,tag,"elf-image","elf64-x86_64-header");check(elf_image(edge[f][7].p,edge[f][7].n),lab);}
+ /* the last edge executes and equals the full product's image */
+ {char img[4200],ref[4200],why[1024];snprintf(leaf,sizeof leaf,"case%d-chain.elf",f);path(img,sizeof img,work,leaf);save(img,edge[f][7].p,edge[f][7].n);if(chmod(img,0700))die("chmod-image");
+  char *v[]={bound,"5",img,0};if(np_run(v,root,0,8,&r,why,sizeof why))die(why);
+  snprintf(tag,sizeof tag,"case%d",f);label3(lab,sizeof lab,tag,"elf-image","executes-return7");check(r.rc==7&&!r.outn&&!r.errn,lab);np_free(&r);
+  snprintf(leaf,sizeof leaf,"case%d-product.elf",f);path(ref,sizeof ref,work,leaf);
+  char *p[]={bound,"15","sh",product,"-O2","-b","lnx/x86_64",source[f],"-o",ref,0};const char *add[]={"UNISA_ATTRIBUTES=",0};
+  if(np_run(p,root,(char *const *)add,17,&r,why,sizeof why))die(why);int ok=r.rc==0&&!r.errn;np_free(&r);
+  size_t n=0;char *want=ok?cx_read(ref,&n):0;label3(lab,sizeof lab,tag,"elf-image","equals-full-product-O2-image");check(want&&same(want,n,edge[f][7].p,edge[f][7].n),lab);free(want);}
+}
+
+static void oracle_case0(void){
+ np_buf pp={0},tok={0},fr={0};int i;char h[65];
+ np_put(&pp,"UNIPP1\0",7);put32(&pp,(unsigned)strlen(bodies[0]));for(i=0;i<4;i++)put32(&pp,0);np_puts(&pp,bodies[0]);
+ check(same(edge[0][1].p,edge[0][1].n,pp.p,pp.n),"case0.e2-e1.equals-hand-unipp1-oracle");
+ hand_unitok1(&tok);np_put(&fr,"USLATTR1",8);put32(&fr,0);put32(&fr,(unsigned)tok.n);np_put(&fr,tok.p,tok.n);
+ check(tok.n==195&&same(edge[0][2].p,edge[0][2].n,fr.p,fr.n),"case0.e1-e3.equals-hand-uslattr1-unitok1-oracle");
+ cx_sha256_hex(edge[0][3].p,edge[0][3].n,h);check(edge[0][3].n==592&&!strcmp(h,tape_oracle),"case0.e3-e4.equals-stream-e3-hand-oracle-tape");
+ {char side[4200];np_result r=stage(2,0,tok.p,tok.n,"case0-bare-unitok1",0,side,sizeof side);
+  check(r.rc==0&&!r.errn&&same(r.out,r.outn,edge[0][3].p,edge[0][3].n),"case0.e3.framed-and-bare-unitok1-same-tape");np_free(&r);}
+ free(pp.p);free(tok.p);free(fr.p);}
+
+/* A corrupt input on stage k (clean input/output = fixture-0 edges k, k+1), then recovery. */
+static void refuse(int k,const char *tag,const char *bytes,size_t n,int want_rc,const char *want_err){
+ char side[4200],lab[160];np_result r=stage(k,0,bytes,n,tag,0,side,sizeof side);
+ int named=r.rc==want_rc&&exact_err(&r,want_err),quiet=!r.outn,clean=absent(side);
+ label3(lab,sizeof lab,names[k],tag,"refuse-exact-rc-and-diagnostic");check(named,lab);
+ label3(lab,sizeof lab,names[k],tag,"refuse-empty-stdout");check(quiet,lab);
+ label3(lab,sizeof lab,names[k],tag,"refuse-no-side-car");check(clean,lab);
+ if(!named||!quiet){findings++;printf("FINDING\tinterfaces.%s.%s\twant rc=%d stderr=%.*s\tgot rc=%d stdout=%zu stderr=%.*s\n",names[k],tag,want_rc,(int)(strlen(want_err)?strlen(want_err)-1:0),want_err,r.rc,r.outn,(int)(r.errn&&r.err[r.errn-1]=='\n'?r.errn-1:r.errn),r.err);}
+ np_free(&r);
+ char rt[80];snprintf(rt,sizeof rt,"%s-recovery",tag);r=stage(k,0,edge[0][k].p,edge[0][k].n,rt,0,side,sizeof side);
+ label3(lab,sizeof lab,names[k],tag,"recovery-clean-edge-bytes");check(r.rc==0&&!r.errn&&same(r.out,r.outn,edge[0][k+1].p,edge[0][k+1].n),lab);np_free(&r);
+}
+static void flip(np_buf *o,int k,size_t at,int delta){o->n=0;np_put(o,edge[0][k].p,edge[0][k].n);if(at>=o->n)die("flip-range");o->p[at]=(char)((unsigned char)o->p[at]+delta);}
+static void prefix(np_buf *o,int k,size_t n){o->n=0;if(n>edge[0][k].n)die("prefix-range");np_put(o,edge[0][k].p,n);}
+static void append(np_buf *o,int k,const char *s,size_t n){o->n=0;np_put(o,edge[0][k].p,edge[0][k].n);np_put(o,s,n);}
+static void rewrite(np_buf *o,int k,const char *old,const char *nw){
+ if(np_count(edge[0][k].p,edge[0][k].n,old,strlen(old))!=1)die("rewrite-anchor-not-unique");
+ np_replace(edge[0][k].p,edge[0][k].n,old,strlen(old),nw,strlen(nw),1,o);}
+static void line_of(char *out,size_t cap,int k,const char *key){size_t at=find(edge[0][k].p,edge[0][k].n,key)+1,e=at;while(e<edge[0][k].n&&edge[0][k].p[e]!='\n')e++;if(e>=edge[0][k].n||e-at+2>cap)die("line-bound");memcpy(out,edge[0][k].p+at,e-at+1);out[e-at+1]=0;}
+
+static const char *PP_REJ="reject: not covered: malformed preprocessing locations\n";
+static const char *TOK_REJ="reject: not covered: malformed token locations\n";
+static const char *ATTR_REJ="run: invalid attribute frame\n";
+static const char *CTOR_REJ="reject: not covered: malformed constructor attributes\n";
+static const char *FOREIGN_REJ="run: attribute frame requires e3 input\n";
+static const char *TGT_REJ="reject: not covered: address or target declaration\n";
+static const char *EXT_REJ="reject: not covered: ELF input or relocation\n";
+static const char *OP_REJ="reject: not covered: an op outside the first encoder slice\n";
+static const char *OPERAND_REJ="reject: not covered: an operand that is not a register or an integer\n";
+static const char *LABEL_REJ="reject: not covered: a branch to an undefined label\n";
+
+static void refusals(void){
+ np_buf b={0};int k;char line[256],nw[256];
+ /* E2: source text, no frame */
+ na("e2","bad-magic","src.c carries no magic");na("e2","length-field","src.c carries no length field");
+ na("e2","truncation","src.c truncation is a different program (stream.e2 refusal slice)");na("e2","trailing-bytes","src.c has no frame end");
+ /* E1: UNIPP1 = magic7, u32 text length, 4 x u32 counts, text */
+ flip(&b,1,0,1);refuse(1,"bad-magic",b.p,b.n,1,PP_REJ);
+ prefix(&b,1,20);refuse(1,"truncated-header",b.p,b.n,1,PP_REJ);
+ prefix(&b,1,edge[0][1].n-1);refuse(1,"truncated-text",b.p,b.n,1,PP_REJ);
+ flip(&b,1,7,-1);refuse(1,"length-understated",b.p,b.n,1,PP_REJ);
+ flip(&b,1,7,1);refuse(1,"length-overstated",b.p,b.n,1,PP_REJ);
+ append(&b,1,"X",1);refuse(1,"trailing-byte",b.p,b.n,1,PP_REJ);
+ refuse(1,"empty","",0,1,PP_REJ);
+ /* E3: USLATTR1 (magic8, u32 count, u32 payload length, records) + UNITOK1 (magic8, u32 echo length, echo, tokens, "N tokens") */
+ flip(&b,2,0,1);refuse(2,"attribute-bad-magic",b.p,b.n,1,TOK_REJ);
+ flip(&b,2,16,1);refuse(2,"token-bad-magic",b.p,b.n,1,TOK_REJ);
+ prefix(&b,2,12);refuse(2,"truncated-attribute-header",b.p,b.n,2,ATTR_REJ);
+ prefix(&b,2,100);refuse(2,"truncated-echo",b.p,b.n,1,TOK_REJ);
+ prefix(&b,2,edge[0][2].n-strlen("11 tokens\n"));refuse(2,"truncated-token-count-line",b.p,b.n,1,TOK_REJ);
+ prefix(&b,2,edge[0][2].n-1);refuse(2,"truncated-final-byte",b.p,b.n,1,TOK_REJ);
+ flip(&b,2,12,-1);refuse(2,"attribute-length-understated",b.p,b.n,2,ATTR_REJ);
+ flip(&b,2,12,1);refuse(2,"attribute-length-overstated",b.p,b.n,2,ATTR_REJ);
+ flip(&b,2,8,1);refuse(2,"attribute-count-overstated",b.p,b.n,1,CTOR_REJ);
+ flip(&b,2,24,-1);refuse(2,"echo-length-understated",b.p,b.n,1,TOK_REJ);
+ flip(&b,2,24,1);refuse(2,"echo-length-overstated",b.p,b.n,1,TOK_REJ);
+ append(&b,2,"X",1);refuse(2,"trailing-byte",b.p,b.n,1,TOK_REJ);
+ refuse(2,"empty","",0,1,TOK_REJ);
+ /* A USLATTR1 frame is the only magic a non-E3 stage can be handed: every other stage names it. */
+ for(k=0;k<7;k++)if(k!=2){char side[4200],lab[160];np_result r=stage(k,0,edge[0][2].p,edge[0][2].n,"foreign-attribute-frame",0,side,sizeof side);
+  label3(lab,sizeof lab,names[k],"foreign-attribute-frame","refuse-exact-rc-and-diagnostic");check(r.rc==2&&exact_err(&r,FOREIGN_REJ)&&!r.outn&&absent(side),lab);np_free(&r);
+  r=stage(k,0,edge[0][k].p,edge[0][k].n,"foreign-attribute-frame-recovery",0,side,sizeof side);
+  label3(lab,sizeof lab,names[k],"foreign-attribute-frame","recovery-clean-edge-bytes");check(r.rc==0&&!r.errn&&same(r.out,r.outn,edge[0][k+1].p,edge[0][k+1].n),lab);np_free(&r);}
+ /* tape.text: no magic, no length; truncation/trailing are preserved by design (prd 3.7/3.7a) and must be refused at elf. */
+ for(k=3;k<6;k++){na(names[k],"bad-magic","tape.text carries no magic");na(names[k],"length-field","tape.text carries no length field");}
+ {const char *cut="  imm r0, 7\n";size_t at=find(edge[0][3].p,edge[0][3].n,cut)+6;
+  struct{const char *tag;size_t keep;const char *tail;size_t tn;const char *want;}tc[]={
+   {"tape-trailing-garbage",edge[0][3].n,"zz",2,OP_REJ},{"tape-trailing-nul",edge[0][3].n,"\0\1\2",3,OP_REJ},
+   {"tape-truncated-mid-instruction",at,"",0,LABEL_REJ},{"tape-empty",0,"",0,TGT_REJ}}; /* lower of an empty tape has no code or _start */
+  int c;for(c=0;c<4;c++){np_buf t={0};char side[4200],lab[160];np_result r;int s,ok=1;np_put(&t,edge[0][3].p,tc[c].keep);np_put(&t,tc[c].tail,tc[c].tn);
+   for(s=3;s<6&&ok;s++){r=stage(s,0,t.p,t.n,tc[c].tag,0,side,sizeof side);ok=r.rc==0&&!r.errn;
+    label3(lab,sizeof lab,names[s],tc[c].tag,s<5?"preserved-exact":"lowered-rc0");check(ok&&(s==5||same(r.out,r.outn,t.p,t.n)),lab);t.n=0;np_put(&t,r.out,r.outn);np_free(&r);}
+   if(ok)refuse(6,tc[c].tag,t.p,t.n,1,tc[c].want);free(t.p);}}
+ /* elf: target.text header (@target, @data, @sym, @src_os, @data_len, @bss, @relocs) then target ops */
+ rewrite(&b,6,"@target lnx/x86_64\n","@targex lnx/x86_64\n");refuse(6,"bad-magic",b.p,b.n,1,TGT_REJ);
+ rewrite(&b,6,"@target lnx/x86_64\n","@target zzz/q\n");refuse(6,"unknown-target",b.p,b.n,1,TGT_REJ);
+ prefix(&b,6,find(edge[0][6].p,edge[0][6].n,"\n@data_len ")+5);refuse(6,"truncated-header-mid-line",b.p,b.n,1,TGT_REJ);
+ prefix(&b,6,strlen("@target lnx/x86_64\n"));refuse(6,"truncated-header-target-line-only",b.p,b.n,1,TGT_REJ);
+ refuse(6,"empty","",0,1,TGT_REJ);
+ line_of(line,sizeof line,6,"\n@data_len ");rewrite(&b,6,line,"");refuse(6,"length-missing",b.p,b.n,1,TGT_REJ);
+ rewrite(&b,6,line,"@data_len 8\n");refuse(6,"length-understated",b.p,b.n,1,EXT_REJ);
+ rewrite(&b,6,line,"@data_len 99999999999999999999\n");refuse(6,"length-overflow",b.p,b.n,1,EXT_REJ);
+ snprintf(nw,sizeof nw,"@data_len x%s",line+strlen("@data_len "));rewrite(&b,6,line,nw);refuse(6,"length-non-decimal",b.p,b.n,1,EXT_REJ);
+ line_of(line,sizeof line,6,"\n@sym __argvv ");rewrite(&b,6,line,"@sym __argvv 99999\n");refuse(6,"symbol-length-overstated",b.p,b.n,1,EXT_REJ);
+ prefix(&b,6,edge[0][6].n-20);refuse(6,"truncated-final-op",b.p,b.n,1,OPERAND_REJ);
+ prefix(&b,6,find(edge[0][6].p,edge[0][6].n,"\n__main_ret:\n")+1);refuse(6,"truncated-before-branch-target",b.p,b.n,1,LABEL_REJ);
+ append(&b,6,"zz\n",3);refuse(6,"trailing-garbage-line",b.p,b.n,1,OP_REJ);
+ append(&b,6,"\0",1);refuse(6,"trailing-nul",b.p,b.n,1,OP_REJ);
+ free(b.p);
+}
+
+int main(int argc,char **argv){
+ if(argc!=4){fputs("usage: ROOT STREAM_DIR NEW_ABS_OUTDIR\n",stderr);return 2;}
+#if !defined(__linux__) || !defined(__x86_64__)
+ fputs("UNVERIFIED: interfaces-lnx-x86_64 requires Linux/x86_64\n",stderr);return 77;
+#endif
+ int i,f,k;char hex[65],lab[160];
+ if(!realpath(argv[1],root)||!realpath(argv[2],streams))die("resolve");
+ if(argv[3][0]!='/'||strlen(argv[3])>=sizeof work)die("absolute-new-outdir");copy_fit(work,sizeof work,argv[3]);
+ if(mkdir(work,0700))die("new-outdir-must-be-absent");
+ path(bound,sizeof bound,root,"tools/bound");path(inc,sizeof inc,root,"include");path(product,sizeof product,root,"unisacc.com");
+ digest(product,product_before);printf("CANDIDATE\t%s\tsha256=%s\n",product,product_before);
+ for(i=0;i<7;i++){char leaf[80];snprintf(leaf,sizeof leaf,"unisacc-stream%d.com",i+1);path(bins[i],sizeof bins[i],streams,leaf);digest(bins[i],hex);
+  if(strcmp(hex,pins[i])){fprintf(stderr,"interfaces: material %s sha256=%s want %s\n",leaf,hex,pins[i]);die("material-identity");}
+  label3(lab,sizeof lab,"material",names[i],"identity");check(1,lab);}
+ for(f=0;f<2;f++){char leaf[40];snprintf(leaf,sizeof leaf,"case%d.c",f);path(source[f],sizeof source[f],work,leaf);save(source[f],bodies[f],strlen(bodies[f]));}
+ chain(0);chain(1);oracle_case0();refusals();
+ for(f=0;f<2;f++)for(k=1;k<8;k++){int z;digest(edge_path[f][k],hex);z=snprintf(lab,sizeof lab,"edge-file.case%d.%s.unchanged",f,names[k-1]);if(z<0||(size_t)z>=sizeof lab)die("label-bound");
+  check(!strcmp(hex,edge_sha[f][k]),lab);}
+ for(i=0;i<7;i++){digest(bins[i],hex);label3(lab,sizeof lab,"material",names[i],"unchanged");check(!strcmp(hex,pins[i]),lab);}
+ digest(product,hex);check(!strcmp(hex,product_before),"product.unchanged");
+ puts("TIMING\tstartup_construction_loading_inference_output_validation=UNMEASURED");
+ puts("DOMAIN\tlnx/x86_64=OBSERVED\tlnx/arm64=BLOCKED\tmac/x86_64=BLOCKED\tmac/arm64=BLOCKED\twin/x86_64=BLOCKED\twin/arm64=BLOCKED");
+ printf("INTERFACES_LNX_X86_64\tassertions=%d\tfailed=%d\tfindings=%d\tnot_applicable=%d\tscope=two-fixture-adjacent-edge-and-framing-linux-x86_64\n",assertions,failures,findings,not_applicable);
+ puts("NOT_CLAIMED\tfive-foreign-hosts-full-language-edges-multi-unit-UNITOK2-or-current-SID-material");
+ return failures?1:0;
+}
