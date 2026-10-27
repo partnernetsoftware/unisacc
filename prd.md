@@ -157,7 +157,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 **P0 完成边界与待决项：** 外宿主需要同候选真实工件及五宿主原生执行；当前不得 push、上传或派发，授权或真实宿主通道未到前只做本地准备。822 格是当前矩阵账，未经主人裁定不删必选格、不把依赖声明当作 N22 实证。词法三项按 C99 与产品实际输出继续核，具名缺陷不改贴 PASS。
 
-**P1 现行开发根与重构造：** 活 SID `7bb6eb92bd50f964171462945e6a9d0e04982bd6e6a42882abb054aefaa5e2be` 已独立重做 context 的 107 作业、34 模型／六路线 PC、双 ISA 核、五片及真 deflate APE。PC 包 SHA `4cb6784e…`，本机 kind2 准入 9/0；新开发根 `unisacc.com` 为 2,970,097 B、SHA `b226463fe13a77070a72fe9947131b797670e0e590fe2c9c4138c94ca9198ba9`，build record SHA `44dcb47d…`。旧 `7a0cf28b…` 在 GEN `bootstrap-before-install.com` 备用。新根 smoke16/0、热多模块 `-run` 约0.109秒、缺席收据13/0、两个 `sizeof` 红例绿；`cx_fmt`／`cx_path_join` 默认修剪仍报未定义，`-fno-trim-libc` 可运行，须修 ftrim 选择链后再建下一代。`831a` 及更早纪元仅历史，不能转授；19 宽行、完整 N22 与五外宿主仍开，开发安装非发布资格。
+**P1 现行开发根与重构造：** 活 SID `7bb6eb92bd50f964171462945e6a9d0e04982bd6e6a42882abb054aefaa5e2be` 已独立重做 context 的 107 作业、34 模型／六路线 PC、双 ISA 核、五片及真 deflate APE。PC 包 SHA `4cb6784e…`，本机 kind2 准入 9/0；新开发根 `unisacc.com` 为 2,970,097 B、SHA `b226463fe13a77070a72fe9947131b797670e0e590fe2c9c4138c94ca9198ba9`，build record SHA `44dcb47d…`。旧 `7a0cf28b…` 在 GEN `bootstrap-before-install.com` 备用。新根 smoke16/0、热多模块 `-run` 约0.109秒、缺席收据13/0、两个 `sizeof` 红例绿；`cx_fmt`／`cx_path_join` 默认修剪仍报未定义，`-fno-trim-libc` 可运行，须核部署 E2 的新 libneed 键采用链。`--all` 实测 rc3：170 coverage／151 implemented／19 unresolved／160 NOT_RUN batches，子批0，符合不假绿合同。`831a` 及更早纪元仅历史，不能转授；完整 N22 与五外宿主仍开，开发安装非发布资格。
 
 **P1 上一源码纪元材料（已转历史，A4 仍暂停）：** A2 曾封 SID `df8f29fd`，A3 的 107/107 作业收据与 context 复验保存在 `out/c43-cc-epoch1-context-01/`；PC、GEN、准入与安装均未做。`e27c4a544e` 修复复用缓存的缺席头收据；`a1c9c793ea` 增加 cx.h 两项有界 API 并正规再生 header 表；`12ebcc23e1` 修复 `sizeof` 末端成员数组形状；`1682e10d8f` 区分运行时输入 open 的 ENOENT/ENOTDIR/EACCES；`e38b24a668` 为多 TU 默认 `-run` 加纯探测、单元读收据和双遍转发复用，并拒绝畸形缓存长度。冻存 identity-helper 对当时活树实测 SID `831a44c31d5760dce4b82b5ea9eed186e208f8b10881942dcf1a27c6150e4bb7`。旧 A3 不能接现源码的 A4，须新 context 和 107 作业；当前仅有私有驱动／参考编译器验证，不把 PREPARED 升格候选。
 
@@ -354,7 +354,7 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 
 | 房间 | 当前事实／决定 | 证据与行动入口 |
 |---|---|---|
-| 0.0.43 现行 SID（2026-10-27） | `7bb6eb92…`／开发根 `b226463f…`；本代 107 作业、PC 34/6、双核、五片、真 deflate wrap、kind2 准入 9/0、安装、smoke16/0。默认多模块热 `-run` 约0.109秒；`cx_fmt`／`cx_path_join` 默认 ftrim 红，显式不修剪绿。19 宽行、N22、五外宿主仍开。 | `out/c43-source-7bb6-context-01/`、`out/c43-source-7bb6-full-pc-01/`、`out/c43-native-kernel-7bb6-01/`、`out/c43-7bb6-admit-01/`；下一步修 ftrim 默认选体，旧 Root7a 备份在 GEN。 |
+| 0.0.43 现行 SID（2026-10-27） | `7bb6eb92…`／开发根 `b226463f…`；本代 107 作业、PC 34/6、双核、五片、真 deflate wrap、kind2 准入 9/0、安装、smoke16/0。默认多模块热 `-run` 约0.109秒；`cx_fmt`／`cx_path_join` 默认 ftrim 红，显式不修剪绿。`--all` rc3／19 unresolved／子批0；N22、五外宿主仍开。 | `out/c43-source-7bb6-context-01/`、`out/c43-source-7bb6-full-pc-01/`、`out/c43-native-kernel-7bb6-01/`、`out/c43-7bb6-admit-01/`、`out/c43-7bb6-all-after-install.log`；下一步核部署 E2 新键采用，旧 Root7a 备份在 GEN。 |
 | 0.0.43 前一源与下一步（2026-10-27） | HEAD `e38b24a668`，SID `831a44c3…`；Root7a 未重建。多 TU 默认 `-run` 的私有新源驱动已见双遍 fwdexec 热命中、活参数、头收据失效和畸形缓存失效；smoke16/0、缺席回归13/0。旧 A3 107 收据不适用。19 宽行、N22、五外宿主仍开。 | `out/c43-multitu-absorb-01/`；下一步冻结本源码，起新 source context 的107作业、PC、GEN、准入，装同候选后重跑红例与默认 `-run` 正式批。 |
 | 0.0.43 properties 有限域（2026-10-27） | 独立新测叶 41/0、7.59 秒，本机循环边界／变形／拒绝／恢复绿；完整性质域及五外宿主未测，不改宽父行。 | `tests/pending/properties.cx`、`out/c43-full-properties-local-04.log`；下一步先补完整域矩阵与同候选外宿主。 |
 | 0.0.43 P3 独立前缀读取器（2026-10-27） | 对现装 APE 内 32 个模型用既有 CX oracle 实跑 rc0，Q 语义与运行结果相同、八拒绝；只授包内压紧格式/运行对照，不授每模型 ctx04 job、N22 或外宿主。 | `out/c43-root7a-qprefix-artifact-01.log`；下一步接 CSR 独立成员↔job 正式批。 |
