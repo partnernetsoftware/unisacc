@@ -23,7 +23,24 @@ static int model(const unsigned char *file,size_t n,const char *route,const char
 static int eq(const void *a,size_t an,const void *b,size_t bn){return an==bn&&(!an||!memcmp(a,b,an));}
 static unsigned le32(const unsigned char *p){return (unsigned)p[0]|(unsigned)p[1]<<8|(unsigned)p[2]<<16|(unsigned)p[3]<<24;}
 static int frame(const char *s,size_t n,const char *body){const unsigned char *p=(const unsigned char *)s;size_t z=strlen(body);return n==27+z&&!memcmp(p,"UNIPP1\0",7)&&le32(p+7)==z&&!le32(p+11)&&!le32(p+15)&&!le32(p+19)&&!le32(p+23)&&!memcmp(p+27,body,z);}
-static void save(const char *p,const char *s){int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(fd<0)die("fixture-create");size_t n=strlen(s),at=0;while(at<n){ssize_t z=write(fd,s+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0)die("fixture-write");at+=(size_t)z;}if(close(fd))die("fixture-close");}
+static void save_n(const char *p,const char *s,size_t n,int mode){int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,mode);if(fd<0)die("fixture-create");size_t at=0;while(at<n){ssize_t z=write(fd,s+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0)die("fixture-write");at+=(size_t)z;}if(close(fd))die("fixture-close");}
+static void save(const char *p,const char *s){save_n(p,s,strlen(s),0600);}
+/* Preserve the actual stream model/resources; append only a forced-include
+ * CLI resource. The count oracle is one synthetic include line per argument
+ * (front_parse.c prelines), independently of the header's physical length. */
+static void forced_image(const char *image,size_t n,const char *header,const char *out){
+ if(n<16||memcmp(image+n-16,"UNIPKG1\n",8))die("fixture-footer");
+ unsigned long long extent=0;for(int i=7;i>=0;i--)extent=(extent<<8)|(unsigned char)image[n-8+(size_t)i];if(extent>n-16)die("fixture-footer");size_t base=n-16-(size_t)extent;
+ Reader r={(const unsigned char *)image+base,(size_t)extent,0,{{0}},0};unsigned long long pm,ps,nr,len,keylen;if(!line(&r)||r.nf!=5||!number(r.f[2],65536,&pm)||!number(r.f[3],65536,&ps)||!number(r.f[4],65536,&nr))die("fixture-header");size_t rest=r.pos;
+ for(unsigned long long i=0;i<ps;i++)if(!line(&r)||r.nf!=6||strcmp(r.f[0],"D"))die("fixture-directory");
+ for(unsigned long long i=0;i<pm;i++){if(!line(&r)||r.nf!=5||strcmp(r.f[0],"M")||!number(r.f[1],r.n,&len)||len>r.n-r.pos)die("fixture-model");r.pos+=(size_t)len;}
+ const char *key="\0cli/includes";size_t kn=sizeof("\0cli/includes")-1;
+ for(unsigned long long i=0;i<nr;i++){if(!line(&r)||r.nf!=3||strcmp(r.f[0],"F")||!number(r.f[1],r.n,&keylen)||!number(r.f[2],r.n,&len)||keylen>r.n-r.pos||len>r.n-r.pos-(size_t)keylen)die("fixture-resource");if(keylen==kn&&!memcmp(r.p+r.pos,key,kn))die("fixture-resource-already-present");r.pos+=(size_t)keylen+(size_t)len;}
+ if(r.pos!=r.n)die("fixture-trailing");np_buf b={0};np_puts(&b,"P 3 ");np_putll(&b,(long long)pm);np_puts(&b," ");np_putll(&b,(long long)ps);np_puts(&b," ");np_putll(&b,(long long)nr+1);np_puts(&b,"\n");np_put(&b,r.p+rest,r.n-rest);
+ np_puts(&b,"F ");np_putll(&b,(long long)kn);np_puts(&b," ");np_putll(&b,(long long)strlen(header)+1);np_puts(&b,"\n");np_put(&b,key,kn);np_put(&b,header,strlen(header)+1);
+ np_buf full={0};np_put(&full,image,base);np_put(&full,b.p,b.n);char footer[16];memcpy(footer,"UNIPKG1\n",8);unsigned long long z=b.n;for(int i=0;i<8;i++){footer[8+i]=(char)(z&255);z>>=8;}np_put(&full,footer,16);save_n(out,full.p,full.n,0700);free(full.p);free(b.p);
+}
+static int counts(const np_result *r,unsigned forced,unsigned automatic){if(r->rc||r->errn||r->outn<27||memcmp(r->out,"UNIPP1\0",7))return 0;const unsigned char *p=(const unsigned char *)r->out;unsigned text=le32(p+7);return text<=r->outn-27&&le32(p+11)==forced&&le32(p+15)==automatic;}
 int main(int argc,char **argv){
  if(argc!=5||argv[4][0]!='/')die("usage ROOT PRODUCT STREAM_DIR NEW_ABS_OUT");
 #if !defined(__linux__) || !defined(__x86_64__)
@@ -36,6 +53,11 @@ int main(int argc,char **argv){
  char *copy=malloc(sn);if(!copy)die("allocation");memcpy(copy,s,sn);if(sa&&sm.n){size_t off=(size_t)((const char *)sm.p-s);copy[off+sm.n-1]^=1;int ok=model((unsigned char *)copy,sn,"stream","e2",&bad);ck(ok&&ca&&!eq(cm.p,cm.n,bad.p,bad.n),"changed-model-byte-refused");}else ck(0,"changed-model-byte-refused");free(copy);ck(!model((unsigned char *)p,pn-1,"lnx/x86_64/image/O2","e2",&bad),"truncated-footer-refused");
  const char *fixture="int main(void){return 7;}\n";save(input,fixture);char *vf[]={bound,"10",stream,input,input,include,0},*vi[]={bound,"10",stream,"-",input,include,0};const char *env[]={"UNISA_ATTRIBUTES=","UNISACC_RF_CAPTURE=","UNISA_MAXSTEPS=200000000",0};np_result a={0},b={0};char why[1024];int ar=np_run(vf,root,(char *const *)env,12,&a,why,sizeof why);ck(!ar&&!a.rc&&!a.errn,"file-transport-rc0");ck(!ar&&frame(a.out,a.outn,fixture),"file-unipp1-exact");
  int saved=dup(0),fd=open(input,O_RDONLY|O_NOFOLLOW|O_CLOEXEC);if(saved<0||fd<0||dup2(fd,0)<0)die("stdin-redirect");close(fd);int br=np_run(vi,root,(char *const *)env,12,&b,why,sizeof why);if(dup2(saved,0)<0||close(saved))die("stdin-restore");ck(!br&&!b.rc&&!b.errn,"stdin-transport-rc0");ck(!br&&frame(b.out,b.outn,fixture),"stdin-unipp1-exact");ck(!ar&&!br&&eq(a.out,a.outn,b.out,b.outn),"stdin-equals-file-byte-for-byte");np_free(&a);np_free(&b);
+ char header[4400],forced[4400],forced_src[4400],auto_src[4400];join(header,sizeof header,argv[4],"forced.h");join(forced,sizeof forced,argv[4],"forced-stream.com");join(forced_src,sizeof forced_src,argv[4],"forced.c");join(auto_src,sizeof auto_src,argv[4],"automatic.c");save(header,"int forced_a;\nint forced_b;\n");save(forced_src,"int ordinary;\n");save(auto_src,"int main(void){printf(\"ok\\n\");return 0;}\n");forced_image(s,sn,header,forced);
+ size_t fn;char *fb=load(forced,&fn);Model fm={0};int fok=model((unsigned char *)fb,fn,"stream","e2",&fm);ck(fok&&eq(fm.p,fm.n,sm.p,sm.n),"forced-fixture-preserves-model");free(fb);
+ char *fv[]={bound,"10",forced,forced_src,forced_src,include,0},*av[]={bound,"10",stream,auto_src,auto_src,include,0};np_result f={0},a2={0};int fr=np_run(fv,root,(char *const *)env,12,&f,why,sizeof why);ck(!fr&&!f.rc&&!f.errn,"forced-transport-rc0");ck(!fr&&counts(&f,1,0),"forced-one-prefix-line-not-header-lines");
+ if(!fr&&counts(&f,1,0)){unsigned text=le32((unsigned char *)f.out+7);const char *body=f.out+f.outn-text;ck(strstr(body,"int forced_a;")&&strstr(body,"int forced_b;")&&strstr(body,"int ordinary;"),"forced-header-and-source-body");}else ck(0,"forced-header-and-source-body");
+ int ar2=np_run(av,root,(char *const *)env,12,&a2,why,sizeof why);ck(!ar2&&!a2.rc&&!a2.errn,"automatic-transport-rc0");ck(!ar2&&counts(&a2,0,1),"automatic-one-inserted-header-line");ck(!ar2&&counts(&a2,0,1)&&le32((unsigned char *)a2.out+23)>0,"automatic-header-region-present");ck(!fr&&!ar2&&!counts(&f,2,0)&&!counts(&a2,1,0),"metadata-counters-not-interchangeable");np_free(&f);np_free(&a2);
  size_t z;char *v=load(product,&z);cx_sha256_hex(v,z,after);ck(!strcmp(pb,after),"candidate-unchanged");free(v);v=load(stream,&z);cx_sha256_hex(v,z,after);ck(!strcmp(sb,after),"stream-unchanged");free(v);free(p);free(s);
  puts("NOT_CLAIMED\tfull-package-integrity-foreign-hosts-complete-E2-or-N22");printf("E2_INPUT_BINDING\tassertions=%d\tfailed=%d\tscope=current-product-and-single-stream-Linux-x86_64\n",checks,failed);return failed?1:0;
 }

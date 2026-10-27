@@ -149,9 +149,9 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 <a id="work-tree"></a>
 ### 思维树
 
-**现行流推进（2026-10-27）：** 按E2→E1→E3→E4→prune→lower→ELF分层收口；实现能力、同候选验证、矩阵覆盖分别报告。Root8a8195d5已正规构造并安装宏顺序修复；同候选E2流材料 `out/c43-streams-ccd29-01/`（stream1 `840b7ab8…`）绑定13/0、正域103/0、拒绝187/0，CLI宏23/0、目标/include各20/0。本机E2矩阵58/62；剩余forced/auto include计数、缺头诊断excerpt和本机全格闭合。五外宿主仍未验证。
+**现行流推进（2026-10-27）：** 按E2→E1→E3→E4→prune→lower→ELF分层收口；实现能力、同候选验证、矩阵覆盖分别报告。Root8a8195d5已正规构造并安装宏顺序修复；同候选E2流材料 `out/c43-streams-ccd29-01/`（stream1 `840b7ab8…`）绑定21/0、正域103/0、拒绝187/0，CLI宏23/0、目标/include各20/0。本机E2矩阵60/62；forced/auto include计数已由21/0正式批补齐（wave-03）；剩余缺头诊断excerpt和本机全格闭合。五外宿主仍未验证。
 
-**2026-10-27 最新开发候选（cdx）：** 已装SID `ccd29c711123fe97df6fb51656c9804160166ac1007486ed2b1cb4d1bad282e7`、APE `8a8195d5be397a2c2203cdd3e71002f55f464321fd598fd1c5c12ac0b427943b`（2,972,007 B），record `66c6a895…`；context-03正规107作业全部rc0，GEN-ccd29-01双核/五片/真deflate完成；PC02包 `c345ac87…` 独立VERIFIED，kind2准入9/0、开发安装rc0。旧Root1214在GEN备用。安装后smoke16/0；正式CLI宏23/0、目标20/0、include20/0（out/c43-ccd29-cli-wave-01），宏顺序红例闭合。同候选E2重包/正域103/0、拒绝187/0、绑定13/0已完成；完整N22、19宽合同及五外宿主仍开，开发安装不授发布资格。
+**2026-10-27 最新开发候选（cdx）：** 已装SID `ccd29c711123fe97df6fb51656c9804160166ac1007486ed2b1cb4d1bad282e7`、APE `8a8195d5be397a2c2203cdd3e71002f55f464321fd598fd1c5c12ac0b427943b`（2,972,007 B），record `66c6a895…`；context-03正规107作业全部rc0，GEN-ccd29-01双核/五片/真deflate完成；PC02包 `c345ac87…` 独立VERIFIED，kind2准入9/0、开发安装rc0。旧Root1214在GEN备用。安装后smoke16/0；正式CLI宏23/0、目标20/0、include20/0（out/c43-ccd29-cli-wave-01），宏顺序红例闭合。同候选E2重包/正域103/0、拒绝187/0、绑定21/0已完成；完整N22、19宽合同及五外宿主仍开，开发安装不授发布资格。
 
 **2026-10-27 最新源码纪元（cdx）：** `a20f8049fc` 的 -D/-U 顺序与用户目标宏覆盖修复已正规构造并安装到Root8a8195d5，不再只依赖私有驱动。测试按E2→E1→E3→E4→prune→lower→ELF收口，阶段实现状态与矩阵格数分别报告。cc当前研究剩余冷启动ROI，并只读定位kernel-route外来有界改写的三处块后分号语法错误；compact私有差分不进入本安装纪元。
 
@@ -159,7 +159,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 完成门（`plans/v0.0.43.md:42`）：19 条 NOT_READY 宽行、完整 N22、五外宿主同候选实证全部闭合后，`--all` 才可 rc0。
 
-**当前矩阵账（2026-10-27 对 19 个 `tests/*-domain-matrix.tsv` 数据行实算；旧 `out/c43-cc-plan-matrix-counts.txt` 已过期）：** 822 个必选格中，287 个标 `COVERED_LOCAL`、3 个 `OBSERVED`、366 个 `MISSING`、38 个 `NEEDS_PRODUCT_CHANGE`、79 个 `NEEDS_FOREIGN_HOST`、33 个一般 `BLOCKED`、6 个具名 `BLOCKED:*`、10 个 `DECLARED_DEPENDENCY`；另有 9 个非必选格。本轮宏顺序格已在Root8a8195d5转为COVERED_LOCAL；此前新增7个CLI目标/头搜索格；此前13个拒绝格和19个正域格也有Root1214e053正式证据；其余旧覆盖仍依各行历史材料，不能直接转授新候选。N22 现状：E7 已由产品内汇编合同闭合（`0764fa8861`）；E6 已有成员交叉核对；E2–E5、E9–E11 属声明的宿主/工具依赖；E8 的权重仍由 Python 发射器生成；E12 即外宿主。声明项并未被当作完整 N22 PASS。
+**当前矩阵账（2026-10-27 对 19 个 `tests/*-domain-matrix.tsv` 数据行实算；旧 `out/c43-cc-plan-matrix-counts.txt` 已过期）：** 822 个必选格中，289 个标 `COVERED_LOCAL`、3 个 `OBSERVED`、364 个 `MISSING`、38 个 `NEEDS_PRODUCT_CHANGE`、79 个 `NEEDS_FOREIGN_HOST`、33 个一般 `BLOCKED`、6 个具名 `BLOCKED:*`、10 个 `DECLARED_DEPENDENCY`；另有 9 个非必选格。本轮宏顺序格已在Root8a8195d5转为COVERED_LOCAL；此前新增7个CLI目标/头搜索格；此前13个拒绝格和19个正域格也有Root1214e053正式证据；其余旧覆盖仍依各行历史材料，不能直接转授新候选。N22 现状：E7 已由产品内汇编合同闭合（`0764fa8861`）；E6 已有成员交叉核对；E2–E5、E9–E11 属声明的宿主/工具依赖；E8 的权重仍由 Python 发射器生成；E12 即外宿主。声明项并未被当作完整 N22 PASS。
 
 **P0 完成边界与待决项：** 外宿主需要同候选真实工件及五宿主原生执行；当前不得 push、上传或派发，授权或真实宿主通道未到前只做本地准备。822 格是当前矩阵账，未经主人裁定不删必选格、不把依赖声明当作 N22 实证。词法三项按 C99 与产品实际输出继续核，具名缺陷不改贴 PASS。
 
@@ -358,11 +358,11 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 
 **测试加速方向：** 主人同意对不以默认 `-run` 为被测合同的测试先用 `-o` 编出可执行文件并每次实际运行；已有 `tools/dev-run` 是内容寻址的开发代码缓存，不能缓存测试结论或自动代替默认 `-run` 资格。接入前逐批核产品和源闭包身份及输出／退出码等价；`-run` 自身合同仍单独验证。
 
-**当前流入口：** Root `8a8195d5…`／SID `ccd29c71…`；E2本机矩阵58/62，含旧候选证据，不能冒充同候选完整资格。19宽合同仍未关闭。
+**当前流入口：** Root `8a8195d5…`／SID `ccd29c71…`；E2本机矩阵60/62，含旧候选证据，不能冒充同候选完整资格。19宽合同仍未关闭。
 
-**最新开发根：** SID `ccd29c71…`／APE `8a8195d5…`，PC `c345ac87…`，GEN `out/c43-native-kernel-ccd29-01/`，context-03的107作业全部rc0，kind2准入9/0及开发安装通过；smoke16/0，CLI宏23/0、目标/include各20/0。矩阵287 COVERED_LOCAL/366 MISSING/38 NEEDS_PRODUCT_CHANGE；其余历史证据不转授新候选。
+**最新开发根：** SID `ccd29c71…`／APE `8a8195d5…`，PC `c345ac87…`，GEN `out/c43-native-kernel-ccd29-01/`，context-03的107作业全部rc0，kind2准入9/0及开发安装通过；smoke16/0，CLI宏23/0、目标/include各20/0。矩阵289 COVERED_LOCAL/364 MISSING/38 NEEDS_PRODUCT_CHANGE；其余历史证据不转授新候选。
 
-**最新源码入口：** live SID与已装候选同为 `ccd29c71…`。同候选E2正103/拒187/绑定13已复跑；下一刀修剩余预处理诊断和计数合同。cc仅在隔离域做提速与语法回归诊断；主树热路径cdx单写。
+**最新源码入口：** live SID与已装候选同为 `ccd29c71…`。同候选E2正103/拒187/绑定21已复跑；下一刀修剩余预处理诊断和计数合同。cc仅在隔离域做提速与语法回归诊断；主树热路径cdx单写。
 
 **历史7bb6入口：** SID `7bb6eb92bd50f964171462945e6a9d0e04982bd6e6a42882abb054aefaa5e2be`；107 作业、PC、五片、APE、kind2 准入均在同源本代完成。开发根已装 `b226463fe13a77070a72fe9947131b797670e0e590fe2c9c4138c94ca9198ba9`，旧 Root7a 留 GEN 备份。smoke16/0、热多模块约0.109秒；本代 stream6 输入拒绝正式29/0，其他四 lower 模式直接51/778/1516/115全绿。默认 ftrim 对新 `cx_*` 两函数仍红；下一刀核 E2 新键采用链。`df8f/831a` 收据只作历史。
 
