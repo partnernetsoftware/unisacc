@@ -1,0 +1,79 @@
+/* Broader local property contract, pending registry promotion.
+ * ROOT ABS_NEW_OUT. Each child has its own bound; caller must impose outer55.
+ * Generated C is a test input, never a cached result or product source. */
+/* This pending path cannot import tests/cxlib.netpack: module resolution is
+ * relative to the caller. The small process adapter below stays local. */
+typedef struct {int rc;char *out;size_t outn;char *err;size_t errn;} Result;
+static char root[4096],work[4096],com[4400],bound[4400];
+static char source[2][4400],bad[4400],image[4][4400],bad_image[4400];
+static int assertions,failures;
+static char observed[4][4][40];static size_t observed_n[4][4];static int observed_ok[4][4];
+static const char *inputs[]={"0","1","255","256"};
+static const char *gold[]={"0\t0\t0\n","1\t0\t0\n","255\t32385\t255\n","256\t32640\t0\n"};
+static void die(const char *s){fprintf(stderr,"full-properties: REFUSE %s errno=%d\n",s,errno);exit(2);}
+static void path(char *p,size_t cap,const char *a,const char *b){int n=snprintf(p,cap,"%s/%s",a,b);if(n<0||(size_t)n>=cap)die("path bound");}
+static void ck(int ok,const char *label){assertions++;if(!ok)failures++;printf("%s\tfull-properties.%s\n",ok?"PASS":"FAIL",label);}
+static void save(const char *p,const void *bytes,size_t n){int f=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);size_t at=0;if(f<0)die("exclusive evidence");while(at<n){ssize_t z=write(f,(const char *)bytes+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0)die("evidence write");at+=(size_t)z;}if(close(f))die("evidence close");}
+static void sha_file(const char *p,char h[65]){size_t n;char *s=cx_read(p,&n);if(!s)die("digest input");cx_sha256_hex(s,n,h);free(s);}
+static int missing(const char *p){struct stat st;errno=0;if(!lstat(p,&st))return 0;if(errno!=ENOENT)die("output stat");return 1;}
+static Result call(char **v,const char *label,int seconds){Result r={0};char op[4400],ep[4400],leaf[160];int z=snprintf(leaf,sizeof leaf,"%s.stdout",label);if(z<0||(size_t)z>=sizeof leaf)die("label");path(op,sizeof op,work,leaf);z=snprintf(leaf,sizeof leaf,"%s.stderr",label);if(z<0||(size_t)z>=sizeof leaf)die("label");path(ep,sizeof ep,work,leaf);
+ int of=open(op,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600),ef=open(ep,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);if(of<0||ef<0)die("exclusive child evidence");
+ pid_t pid=fork();if(pid<0)die("fork");if(pid==0){if(chdir(root)||dup2(of,1)<0||dup2(ef,2)<0)_exit(126);close(of);close(ef);execvp(v[0],v);_exit(127);}
+ close(of);close(ef);int status=0;if(waitpid(pid,&status,0)!=pid)die("waitpid");r.rc=WIFEXITED(status)?WEXITSTATUS(status):128+WTERMSIG(status);r.out=cx_read(op,&r.outn);r.err=cx_read(ep,&r.errn);if(!r.out||!r.err)die("child evidence read");(void)seconds;return r;}
+static void release(Result *r){free(r->out);free(r->err);}
+static const char *head=
+ "#include <stdio.h>\n#include <string.h>\n"
+ "int main(int argc,char **argv){\n"
+ " unsigned n=0,sum=0,x=0;\n"
+ " if(argc!=2)return 2;\n"
+ " if(!strcmp(argv[1],\"0\"))n=0;\n"
+ " else if(!strcmp(argv[1],\"1\"))n=1;\n"
+ " else if(!strcmp(argv[1],\"255\"))n=255;\n"
+ " else if(!strcmp(argv[1],\"256\"))n=256;\n"
+ " else return 2;\n";
+static const char *body[]={
+ " for(unsigned i=0;i<n;i++){sum+=i;x^=i;}\n",
+ " for(unsigned i=n;i>0;){--i;sum+=i;x^=i;}\n"
+};
+static const char *tail=" printf(\"%u\\t%u\\t%u\\n\",n,sum,x);return 0;}\n";
+static void write_source(int which){save(source[which],head,strlen(head));/* append only to our new fixture */
+ int f=open(source[which],O_WRONLY|O_APPEND|O_CLOEXEC);if(f<0)die("append fixture");const char *parts[]={body[which],tail};for(int i=0;i<2;i++){size_t n=strlen(parts[i]),at=0;while(at<n){ssize_t z=write(f,parts[i]+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0)die("fixture write");at+=(size_t)z;}}if(close(f))die("fixture close");}
+static int exact(const Result *r,const char *s){size_t n=strlen(s);return r->rc==0&&!r->errn&&r->outn==n&&!memcmp(r->out,s,n);}
+static int compile(int which,int opt,int slot,const char *label){char *v[]={bound,"8","sh",com,opt?"-O2":"-O0","-b","lnx/x86_64",source[which],"-o",image[slot],0};Result r=call(v,label,10);int ok=!r.rc&&!r.outn&&!r.errn&&!missing(image[slot]);ck(ok,label);if(!ok&&r.errn)fwrite(r.err,1,r.errn,stderr);release(&r);return ok;}
+static void run_domain(int slot,const char *label){char leaf[160];for(int i=0;i<4;i++){char *v[]={bound,"2",image[slot],(char *)inputs[i],0};snprintf(leaf,sizeof leaf,"%s.input%s",label,inputs[i]);Result r=call(v,leaf,3);observed_ok[slot][i]=r.rc==0&&!r.errn&&r.outn<sizeof observed[0][0];if(observed_ok[slot][i]){observed_n[slot][i]=r.outn;memcpy(observed[slot][i],r.out,r.outn);}ck(exact(&r,gold[i]),leaf);release(&r);}}
+static void refuse(int slot,const char *label,const char *arg){char leaf[160];snprintf(leaf,sizeof leaf,"%s.refuse-%s",label,arg?arg:"argc");char *v[]={bound,"2",image[slot],(char *)arg,0};if(!arg)v[3]=0;Result r=call(v,leaf,3);ck(r.rc==2&&!r.outn&&!r.errn,leaf);release(&r);}
+int main(int argc,char **argv){
+#if !defined(__linux__) || !defined(__x86_64__)
+ fputs("full-properties: Linux x86_64 native host required\n",stderr);return 2;
+#endif
+ if(argc!=3||argv[1][0]!='/'||argv[2][0]!='/'||!realpath(argv[1],root)||strcmp(root,argv[1]))die("usage ROOT ABS_NEW_OUT");
+ if(strlen(argv[2])>=sizeof work)die("output path bound");strcpy(work,argv[2]);if(mkdir(work,0700))die("exclusive output directory");
+ path(com,sizeof com,root,"unisacc.com");path(bound,sizeof bound,root,"tools/bound");
+ path(source[0],sizeof source[0],work,"forward.c");path(source[1],sizeof source[1],work,"reverse.c");path(bad,sizeof bad,work,"invalid.c");path(bad_image,sizeof bad_image,work,"invalid-image");
+ const char *names[]={"forward-O0","forward-O2","reverse-O0","forward-O0-repeat"};for(int i=0;i<4;i++)path(image[i],sizeof image[i],work,names[i]);
+ char com_before[65],com_after[65],src_before[2][65],src_after[65],im_before[65],im_after[65];sha_file(com,com_before);
+ write_source(0);write_source(1);for(int i=0;i<2;i++)sha_file(source[i],src_before[i]);
+ printf("CANDIDATE\tsha256=%s\n",com_before);printf("SCOPE\tfinite-loop-sum-xor-boundaries-0-1-255-256; forward-reverse; O0-O2; exact-native-output; refusal-and-recovery\n");
+ int good[4]={0};good[0]=compile(0,0,0,names[0]);if(good[0]){run_domain(0,names[0]);sha_file(image[0],im_before);}
+ /* A malformed source must refuse before any image, then the identical valid
+  * source must compile and run again in this same parent invocation. */
+ {/* Compiler language diagnostics use rc1; see exec/c/COMPILERCHECK.md.
+     The phrase and suffix below were observed in the first raw run. */
+  const char *s="int main(void){return ( ;}\n",*end="1 error generated.\n";save(bad,s,strlen(s));char *v[]={bound,"8","sh",com,"-O0","-b","lnx/x86_64",bad,"-o",bad_image,0};Result r=call(v,"invalid-source",10);
+  ck(r.rc==1&&!r.outn&&r.errn>=strlen(end)&&strstr(r.err,"error: this is not the start of an expression")&&!memcmp(r.err+r.errn-strlen(end),end,strlen(end))&&missing(bad_image),"invalid-source.rc1-named-refusal-no-image");release(&r);}
+ good[3]=compile(0,0,3,names[3]);if(good[3])run_domain(3,names[3]);
+ if(good[0]&&good[3]){sha_file(image[3],im_after);ck(!strcmp(im_before,im_after),"repeat-compile.same-image-sha256");}
+ good[1]=compile(0,1,1,names[1]);if(good[1])run_domain(1,names[1]);
+ good[2]=compile(1,0,2,names[2]);if(good[2])run_domain(2,names[2]);
+ if(good[0]){refuse(0,"forward-O0",0);refuse(0,"forward-O0","257");refuse(0,"forward-O0","0255");refuse(0,"forward-O0","-1");}
+ if(good[0]&&good[1]&&good[2]&&good[3])for(int i=0;i<4;i++)for(int j=1;j<4;j++){
+  char label[160];snprintf(label,sizeof label,"metamorphic.input%s.base-vs-%s",inputs[i],names[j]);
+  ck(observed_ok[0][i]&&observed_ok[j][i]&&observed_n[0][i]==observed_n[j][i]&&!memcmp(observed[0][i],observed[j][i],observed_n[0][i]),label);
+ }
+ sha_file(com,com_after);ck(!strcmp(com_before,com_after),"candidate-unchanged");for(int i=0;i<2;i++){sha_file(source[i],src_after);ck(!strcmp(src_before[i],src_after),i?"reverse-source-unchanged":"forward-source-unchanged");}
+ puts("HOST\tlnx/x86_64\tLOCAL_ONLY");
+ puts("HOST\tlnx/arm64\tNOT_RUN\nHOST\tosx/x86_64\tNOT_RUN\nHOST\tosx/arm64\tNOT_RUN\nHOST\twin/x86_64\tNOT_RUN\nHOST\twin/arm64\tNOT_RUN");
+ puts("REMAINING\tfull-language-property-domain; stream-net-RI-properties; ABI-and-memory-lifetime-properties; same-candidate-five-foreign-hosts; cross-platform-native-execution");
+ puts("TIMING\tstartup=UNMEASURED\tconstruction=UNMEASURED\tloading=UNMEASURED\tinference=UNMEASURED\toutput=UNMEASURED\tvalidation=UNMEASURED\tcold_hot=UNMEASURED");
+ printf("FULL_PROPERTIES\tassertions=%d\tfailed=%d\tscope=local-finite-metamorphic-boundary-contract\n",assertions,failures);return failures?1:0;
+}
