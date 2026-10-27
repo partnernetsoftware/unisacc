@@ -155,6 +155,8 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 **2026-10-28 最新源码纪元（cdx）：** 已装SID仍a5ec8a43；live SID `162191414d86d92afda572ff92f61c1afb0b2302d563abd4c52446115ef1b7d9`，待一次正式封源构造。E2采用共享AnnexD事实的有限机校验，内部键规范化而-E/字符串化原样；数字域只校验通用UCN约束，不误套标识符AnnexD规则。E3在模型内部规范化标识符载荷并修units三处身份键，原始源/位置/RI输入身份保留；参考独立修复宏键与语义名字/诊断映射，50/0（旧参考50/14），不借产品实现替代参考。tools/ucn-pp-gen.cx与tools/ucn-identity-tables.cx分别可重现E2六表/E3三表，E1生成器786432图检查仍通过。六条实际路由gen/tbl/net共18相rc0，复用未改E1模型，私有包50cc5a96/APE dab8f54e（3,001,345 B）在out/c43-ucn-integrated-models-01；out/c43-ucn-identities-test-01保存整链13/0、旧根13/12、E2 103/187全0和首次诊断渲染空格oracle误差。小ASCII E3三组对照tape/stderr/rc全等，墙钟中位16.55→16.72ms，区间重叠，非总体性能界。主树cdx单写；30事实表check零差，旧Python导出债保留。下一动作提交本刀、固定源后正规context/107/PC/GEN/准入，不转授私有资格。
 
+**本源正式构造（a0b150aa86）：** 新context `out/c43-source-1621-context-01/`已PREPARED，全文SHA d78d5f6a…；bootstrap与原生helper均测得SID16219141，冻结Root41/record c7bc3012。未改控制器的O2 ELF 67eb70d0…已编成（206,585 B），独立--verify-context与--list均rc0；后续107作业由单一构造工人按依赖波并行，全部收据未齐前不授P3。当前清单168批/177覆盖/19缺口；实际--all仍rc3、167未跑批、子批0。根产品未换，不改源/pin，不把私有13/0转授正式候选。
+
 **2026-10-27 cdx 主刀计划（主人本轮改派；重构造仍串行，互不抢文件的轻切片由 cc／Codex 辅助）**
 
 完成门（`plans/v0.0.43.md:42`）：19 条 NOT_READY 宽行、完整 N22、五外宿主同候选实证全部闭合后，`--all` 才可 rc0。
@@ -351,6 +353,8 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 ### 记忆宫殿
 
 **已装产品构造：** context `out/c43-source-a5ec-context-01/`（foundation13a58d0e/producer1f4b7914）107条收据与107个outer.rc均为0；GEN `out/c43-native-kernel-a5ec-01/`；PC `out/c43-source-a5ec-full-pc-01/` 包 `480f91c805dd228410857b6daf992e40ca013a8e33a43afe7a17fcd24ed6f10e`；APE41b836d7、kind2 9/0、smoke16/0、正式E2十批通过。历史ccd29材料不转授。
+
+**本源构造入口：** a0b150aa86/SID16219141；context1621-01已PREPARED且独立复核，SHA d78d5f6a…，新鲜107收据尚未齐。控制器O2 ELF67eb70d0来自未改的13a58d0e源；自身体系编译，外部GCC仅为已声明source-P3种子构造依赖。单工人占out/c43-source-1621-build-01/context-01；主线不改其输出或产品源。注意本机无/usr/include/zlib.h与链接名libz.so，tool-pack需已知/usr/include/node和受控私有链接；不把声明宿主依赖说成hermetic。--all当前177覆盖/19未解/子批0。
 
 **构造失败保留：** context-01缺zlib.h；context-02有超时收据，且bootstrap误指活Root，pack预检拒绝live-root-record-must-use-ephemeral-bind。两上下文均只保留历史、不转授03；PC01预检失败、PC02首次route用斜杠目标名被拒，改正确短横目标名后六路线完成，原日志保留。宿主CC/zlib依赖未清除。
 
