@@ -149,6 +149,8 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 <a id="work-tree"></a>
 ### 思维树
 
+**现行流推进（2026-10-27）：** 按 E2→E1→E3→E4→prune→lower→ELF 分层收口；分别记录产品功能、同候选验证和未完成合同，矩阵格数不是实现百分比。E2 当前产品正域103/0、拒绝域187/0；`37a80dd995` 新增同候选内嵌模型绑定与文件/stdin等价正式13/0（`out/c43-a825-e2-binding-wave-01/`），E2本机矩阵57/62，其中旧材料不能转授。宏顺序源码修复仍待构造。cc 在隔离目录集中研究高ROI提速，主线独占产品热文件和构造。
+
 **2026-10-27 最新开发候选（cdx）：** SID `a8258143d5ad53fad2234988bb298b6b30f8c8d72ba60326b464fe19fd867e7c` 的107作业全部外层rc0，本代双核、PC34模型/六路线/封包、五片与真deflate APE已完成。开发根 SHA `1214e053466dea1c29bb76b33a45bc2a64d0f28dc1a3aef5f3829a2047143a5e`，2,970,646 B；PC `b98c540e…`，kind2准入9/0，旧根 `0ce6f231…` 留GEN备份。正式 E2 正域103/0、拒绝域187/0（60次流执行）、smoke16/0及cx-bounded通过；候选默认 `-E/-S` 拒绝恢复20/0。第一片初次外层142未留产物，热控制器重试rc0，原日志保留。`--all`仍rc3：175 coverage、19 unresolved、165未跑批、子批0；完整N22与五外宿主仍开。当前产品CLI目标宏20/0、include20/0；宏选项23/3红。新源码修复待下纪元构造，同源第二代仍待。
 
 **2026-10-27 最新源码纪元（cdx）：** `a20f8049fc` 修复 -D/-U 分组导致顺序丢失，以及目标预定义覆盖用户-D；驱动、经典C参考和E2三变体对齐，保留对象专用保护宏。活 SID `ccd29c711123fe97df6fb51656c9804160166ac1007486ed2b1cb4d1bad282e7`，已装产品仍SIDa825/Root1214。facts30/0；禁缓存私有驱动+新包CLI59/0、E2正103/拒187不退，ET_REL保护宏控制有效；宿主CC构造的经典参考给出三条正确宏结果。自身编译完整3.1MB参考的outer55超时142、无产物，保留UNKNOWN，不宣称清除宿主CC依赖。`5f26779c2b`登记三CLI批：当前产品targets20/0、includes20/0，macros23/3 FAIL保留；7格补证、宏格改NEEDS_PRODUCT_CHANGE。下一步合并可审的CC私有FWD增量成果后批量封驱动纪元，其他本机缺口继续推进。
@@ -347,6 +349,8 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 
 <a id="memory-palace"></a>
 ### 记忆宫殿
+
+**当前流入口：** Root `1214e053…`／SID `a8258143…`；活源码 SID `ccd29c71…` 待新候选。E2绑定批13/0，19域矩阵当前286 COVERED_LOCAL、366 MISSING；`--all` rc3、19 unresolved、166批未跑。按阶段收口，不将矩阵覆盖率当实现进度。
 
 **最新开发根：** SID `a8258143…`／APE `1214e053…`，PC `b98c540e…`，GEN `out/c43-native-kernel-a825-01/`，kind2 9/0。正式E2正103/0、拒187/0、smoke16/0、有界API通过；旧根在GEN备份。矩阵284 COVERED_LOCAL/368 MISSING/39 NEEDS_PRODUCT_CHANGE，`--all` rc3/19 unresolved；当前CLI targets/includes各20/0，宏23/3红；下一步新源码驱动纪元及诊断域，开发安装不授发布资格。
 
