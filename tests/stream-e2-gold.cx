@@ -1,0 +1,71 @@
+/* Linux/x86_64 PP gold-domain oracle for stream.e2 (18 keys from weights/gold/pp.tsv).
+ * ROOT STREAMS NEW_OUT. Uses pinned stream1.com; does not close all-six parent. */
+#pragma unisa use cxlib.netpack
+static char root[4096],streams[4096],work[4096],bound[4200],inc[4200],product[4200],e2bin[4200];
+static char e2_id[65],product_before[65],product_after[65];
+static const char *e2_pin="078bccb6dad868b470bb6287ba6fdd9c415e3eaa5d25280c883ce4ea2710fdc9";
+static int assertions,failures;
+static void die(const char *s){fprintf(stderr,"stream-e2-gold: REFUSE %s errno=%d\n",s,errno);exit(2);}
+static void copy_fit(char *dst,size_t cap,const char *src){size_t i=0;if(!cap)die("copy-bound");while(src[i]&&i+1<cap){dst[i]=src[i];i++;}if(src[i])die("copy-bound");dst[i]=0;}
+static void ck(int ok,const char *s){assertions++;if(!ok)failures++;printf("%s\tstream-e2-gold.%s\n",ok?"PASS":"FAIL",s);}
+static void path(char *out,size_t cap,const char *a,const char *b){int n=snprintf(out,cap,"%s/%s",a,b);if(n<0||(size_t)n>=cap)die("path");}
+static void saved(const char *p,const void *s,size_t n){int f=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);size_t at=0;if(f<0)die("exclusive-create");while(at<n){ssize_t k=write(f,(char*)s+at,n-at);if(k<0&&errno==EINTR)continue;if(k<=0)die("write");at+=(size_t)k;}if(close(f))die("close");}
+static char *loaded(const char *p,size_t *n){char *s=cx_read(p,n);if(!s)die(p);return s;}
+static void digest(const char *p,char *hex){size_t n;char *s=loaded(p,&n);cx_sha256_hex(s,n,hex);free(s);}
+static unsigned little(const unsigned char *p){return (unsigned)p[0]|(unsigned)p[1]<<8|(unsigned)p[2]<<16|(unsigned)p[3]<<24;}
+static int unipp1_body(const unsigned char *b,size_t n,const unsigned char **body,size_t *bn){
+ if(n<27||memcmp(b,"UNIPP1\0",7))return 0;unsigned len=little(b+7),sc=little(b+19),ic=little(b+23);size_t at=27;
+ if(sc>(n-at)/4)return 0;at+=(size_t)sc*4;
+ for(unsigned i=0;i<ic;i++){if(n-at<12)return 0;unsigned names=little(b+at+8);at+=12;if(names>62||names>n-at)return 0;at+=names;}
+ if(len!=n-at)return 0;*body=b+at;*bn=len;return 1;}
+static np_result invoke(const char *leaf){
+ char src[4200],outp[4400],errp[4400];path(src,sizeof src,work,leaf);
+ int z=snprintf(outp,sizeof outp,"%s/%s.stdout",work,leaf);if(z<0||(size_t)z>=sizeof outp)die("stdout-path");
+ z=snprintf(errp,sizeof errp,"%s/%s.stderr",work,leaf);if(z<0||(size_t)z>=sizeof errp)die("stderr-path");
+ char *v[]={bound,"12",e2bin,src,src,inc,0};np_result r;char why[1024];
+ const char *env[]={"UNISA_ATTRIBUTES=","UNISA_MAXSTEPS=200000000",0};
+ if(np_run(v,root,env,14,&r,why,sizeof why))die(why);
+ saved(outp,r.out,r.outn);saved(errp,r.err,r.errn);return r;}
+static int find(const unsigned char *b,size_t n,const char *needle){size_t m=strlen(needle);if(m>n)return 0;for(size_t i=0;i+m<=n;i++){size_t j=0;while(j<m&&b[i+j]==(unsigned char)needle[j])j++;if(j==m)return 1;}return 0;}
+static void case_body(const char *name,const char *src,int want_good,int want_bad){
+ char sp[4200];path(sp,sizeof sp,work,name);saved(sp,src,strlen(src));
+ np_result r=invoke(name);const unsigned char *body;size_t bn;
+ int ok=!r.rc&&!r.errn&&unipp1_body((const unsigned char*)r.out,r.outn,&body,&bn);
+ if(ok){int has_good=find(body,bn,"GOOD");int has_bad=find(body,bn,"BAD");
+  ok=(want_good?has_good:!has_good)&&(want_bad?has_bad:!has_bad);}
+ ck(ok,name);np_free(&r);if(failures)die(name);}
+int main(int argc,char **argv){
+#if !defined(__linux__) || !defined(__x86_64__)
+ fputs("NOT_RUN stream-e2-gold needs Linux/x86_64\n",stderr);return 3;
+#endif
+ if(argc!=4||!realpath(argv[1],root)||!realpath(argv[2],streams)||argv[3][0]!='/')die("usage ROOT STREAMS NEW_ABS_OUT");
+ char parent[4096],base[4096],leaf[4096];copy_fit(parent,sizeof parent,argv[3]);char *slash=strrchr(parent,'/');if(!slash||!slash[1])die("output-leaf");copy_fit(leaf,sizeof leaf,slash+1);if(slash==parent)slash[1]=0;else *slash=0;if(!realpath(parent,base))die("output-parent");
+ {int z=snprintf(work,sizeof work,"%s/%s",base,leaf);if(z<0||(size_t)z>=sizeof work)die("work");}
+ if(mkdir(work,0700))die("exclusive-out");path(inc,sizeof inc,work,"inc");if(mkdir(inc,0700))die("inc");
+ path(bound,sizeof bound,root,"tools/bound");path(product,sizeof product,root,"unisacc.com");path(e2bin,sizeof e2bin,streams,"unisacc-stream1.com");
+ digest(product,product_before);digest(e2bin,e2_id);ck(!strcmp(e2_id,e2_pin),"stream1-pin");if(failures)die("pin");
+ /* 18 pp gold keys: dir×defined -> y in {take,skip,pop,macro}. */
+ case_body("ifdef-0.c","#ifdef NOPE\nint BAD;\n#endif\nint GOOD;\n",1,0);
+ case_body("ifdef-1.c","#define F 1\n#ifdef F\nint GOOD;\n#endif\n",1,0);
+ case_body("ifndef-0.c","#ifndef NOPE\nint GOOD;\n#endif\n",1,0);
+ case_body("ifndef-1.c","#define F 1\n#ifndef F\nint BAD;\n#endif\nint GOOD;\n",1,0);
+ case_body("if-0.c","#if 0\nint BAD;\n#endif\nint GOOD;\n",1,0);
+ case_body("if-1.c","#if 1\nint GOOD;\n#endif\n",1,0);
+ case_body("elif-0.c","#if 0\nint BAD;\n#elif 0\nint BAD;\n#endif\nint GOOD;\n",1,0);
+ case_body("elif-1.c","#if 0\nint BAD;\n#elif 1\nint GOOD;\n#endif\n",1,0);
+ case_body("else-0.c","#if 1\nint GOOD;\n#else\nint BAD;\n#endif\n",1,0);
+ case_body("else-1.c","#if 0\nint BAD;\n#else\nint GOOD;\n#endif\n",1,0);
+ case_body("endif-0.c","#if 0\nint BAD;\n#endif\nint GOOD;\n",1,0);
+ case_body("endif-1.c","#if 1\nint GOOD;\n#endif\n",1,0);
+ case_body("define-0.c","#define X 7\nint GOOD=X;\n",1,0);
+ case_body("define-1.c","#define X 1\n#if X\nint GOOD;\n#endif\n",1,0);
+ {char h[4200];path(h,sizeof h,inc,"g.h");saved(h,"int GOOD;\n",10);
+  case_body("include-0.c","#include \"g.h\"\n",1,0);
+  case_body("include-1.c","#define USE 1\n#if USE\n#include \"g.h\"\n#endif\n",1,0);}
+ case_body("undef-0.c","#define F 1\n#undef F\n#ifndef F\nint GOOD;\n#endif\n",1,0);
+ case_body("undef-1.c","#define F 1\n#undef F\n#ifdef F\nint BAD;\n#endif\nint GOOD;\n",1,0);
+ digest(product,product_after);ck(!strcmp(product_before,product_after),"product-stable");
+ digest(e2bin,e2_id);ck(!strcmp(e2_id,e2_pin),"stream1-stable");
+ puts("NOT_CLAIMED\tstream-e2-parent-all-six-hosts-seven-stream-chain-or-complete-N22");
+ printf("STREAM_E2_GOLD\tassertions=%d\tfailed=%d\tscope=pp-gold-18-keys-linux-x86_64-only\n",assertions,failures);
+ return failures?1:0;}
