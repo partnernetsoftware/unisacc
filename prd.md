@@ -350,6 +350,10 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 <a id="memory-palace"></a>
 ### 记忆宫殿
 
+**E2候选表批：** ccd29 context-02 的34个 tbl 收据已存在；并发大表 finish 三次 rc142 保留，errorparse/warnparse 用优化控制器单独 finish rc0，shared-e3 的超时后收据经 source-job-verify 双端只读 VERIFIED，原 rc142 不改写。net 正按四路分波构造，shared-e3 大项单列；尚无新包或候选。
+
+**构造调度纠正：** 34 个 tbl 作业在 gen 完成后按独立 job 目录限并发四路执行；每命令独立限时和封收据，不同一作业重复写。随后 net 按已完成 tbl 分波执行，不再逐项串行等待。
+
 **E2候选构造：** `out/c43-source-ccd29-context-02/` 五个工具与34个 gen 作业均已 PREPARED（39条记录）；接下来34个 tbl 和34个 net、包、候选及准入均未完成。控制器通过 dev-run 缓存代码，仍逐作业执行与封收据。
 
 **提速决策：** cc 的 callback-wrapper 二遍增量原型仅单单元映像与基线逐字同，多单元由于第二遍 FFI 裁剪变化出现映像差异；暂不吸入产品。cc 转向 `-o` 测试执行缓存；source-package 控制器已用 `tools/dev-run` 编译并实际完成 gen 作业，缓存仅代码、不缓存收据。
