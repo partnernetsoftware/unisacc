@@ -157,7 +157,7 @@ unisacc [flags] FILE.c [FILE.c ...] [-- args...]
   -E              只预处理，输出文本
   -o FILE         输出位置；`-o -` 为 stdout
   -               作为输入文件名时表示 stdin
-  -I DIR  -D N[=v]  -U N     与 cc 同义；-U 在全部预定义之后生效，能撤销 __linux__ 之类
+  -I DIR  -D N[=v]  -U N     与 cc 同义；目标/标准预定义先建立，-D/-U 按出现顺序处理，-U 能撤销 __linux__ 之类
   -include FILE   如同源文件第一行是 #include "FILE"；报错行号仍是用户文件的
   -nostdinc       不查内建的头文件副本（只查源文件目录与 -I）
   -l* -L* -x c    接受并忽略：库在头文件里，没有链接器，只有一种语言

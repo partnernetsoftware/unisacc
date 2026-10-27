@@ -1394,11 +1394,18 @@ int mdef1(char *s) { return mdefb(s, blen(s), "1", 1, 1, 0); }
 int blen(char *s) { int n; n = 0; while (s[n]) n = n + 1; return n; }
 int predef(void) {
     char *t; int i;
-    /* C99 6.10.8: a conforming hosted C99 implementation; installed before
-       -D/-U so either can replace or remove one (unisa/front/pp.py: same) */
+    /* C99 6.10.8 and target macros precede command-line definitions.
+       main.c preserves the effective -D/-U order within the two option lists. */
     mdef1("__STDC__");
     mdefb("__STDC_VERSION__", 16, "199901L", 7, 199901, 0);
     mdef1("__STDC_HOSTED__");
+    t = tgt;
+    if (t[0] == 108) { mdef1("__linux__"); mdef1("__unix__"); mdef1("__ELF__"); }
+    if (t[0] == 111) { mdef1("__APPLE__"); mdef1("__MACH__"); mdef1("__unix__"); }
+    if (t[0] == 119) { mdef1("_WIN32"); mdef1("_WIN64"); }
+    if (t[4] == 120) mdef1("__x86_64__"); else mdef1("__aarch64__");
+    mdef1("__LP64__");
+    mdef1("__UNISA__");
     /* -D NAME or -D NAME=<integer> */
     i = 0;
     while (i < noptd) {
@@ -1415,16 +1422,9 @@ int predef(void) {
         } else mdefb(a, n, "1", 1, 1, 0);
         i = i + 1;
     }
-    t = tgt;
-    if (t[0] == 108) { mdef1("__linux__"); mdef1("__unix__"); mdef1("__ELF__"); }
-    if (t[0] == 111) { mdef1("__APPLE__"); mdef1("__MACH__"); mdef1("__unix__"); }
-    if (t[0] == 119) { mdef1("_WIN32"); mdef1("_WIN64"); }
     /* R21-4a': an object (-c -b / -funit) has no host loader slots, so the
        carried bodies that forward to the system library are left out there */
     if (unitmode || objextern) mdef1("__UNISA_OBJECT");
-    if (t[4] == 120) mdef1("__x86_64__"); else mdef1("__aarch64__");
-    mdef1("__LP64__");
-    mdef1("__UNISA__");
     ftrim_libc_define();
     /* -U NAME: applied after every predefinition, so it can remove one */
     i = 0;

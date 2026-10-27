@@ -159,6 +159,20 @@ int main(void) {
             } else { if (a[1] == 68) {                     /* -D */
                 if (noptd < 16) {
                     if (a[2]) optd[noptd] = a + 2; else { i = i + 1; optd[noptd] = __argv(i); }
+                    /* Preserve argv order despite the preprocessor's separate
+                       option lists: a later definition cancels an earlier -U. */
+                    { int dn; int uj; int uk; int uq; char *d;
+                      d = optd[noptd]; dn = 0;
+                      while (d[dn] && d[dn] != 61) dn = dn + 1;
+                      uj = 0;
+                      while (uj < noptu) {
+                          uk = 0; while (optu[uj][uk] && uk < dn && optu[uj][uk] == d[uk]) uk = uk + 1;
+                          if (uk == dn && !optu[uj][uk]) {
+                              uq = uj; while (uq + 1 < noptu) { optu[uq] = optu[uq + 1]; uq = uq + 1; }
+                              noptu = noptu - 1;
+                          } else uj = uj + 1;
+                      }
+                    }
                     noptd = noptd + 1;
                 }
             } else { if (a[1] == 114) { runit = 1;         /* -run */

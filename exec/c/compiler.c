@@ -448,6 +448,24 @@ static void argbytes(Buf *b, const char *s) {
     while (*s) { bput(b,(unsigned char)*s,0); s++; }
     bput(b,0,0);
 }
+/* The model receives separate defines/undefines resources. A later -D must
+ * cancel earlier -U of the same exact name before those resources are grouped.
+ * Keep malformed undef arguments intact so their existing model refusal runs. */
+static void cli_redefine(Buf *undefs, const char *definition) {
+    const char *equal = strchr(definition, '=');
+    size_t name_n = equal ? (size_t)(equal-definition) : strlen(definition);
+    long at=0, used=0;
+    while (at<undefs->n) {
+        long end=at; while (end<undefs->n && undefs->b[end]) end++;
+        if (end==undefs->n) die("malformed CLI undefine list");
+        size_t n=(size_t)(end-at);
+        if (n!=name_n || memcmp(undefs->b+at,definition,n)) {
+            memmove(undefs->b+used,undefs->b+at,n+1); used+=(long)n+1;
+        }
+        at=end+1;
+    }
+    undefs->n=used;
+}
 /* the forced-include list one unit is compiled with: a .cx unit's starts with its built-in prelude cx.h, and one
    that uses modules ends with their interfaces (cxm_lists, CX2a) */
 static Buf *cxm_lists;
@@ -625,6 +643,7 @@ int main(int argc, char **argv) {
         else if (a[0]=='-' && (a[1]=='D' || a[1]=='U')) {
             const char *value=a+2;
             if (!*value) { if (++i >= argc) return clierror("missing macro argument"); value=argv[i]; }
+            if (a[1]=='D') cli_redefine(&undefs,value);
             argbytes(a[1]=='D' ? &defs : &undefs,value);
         } else if (!strcmp(a,"-include")) {
             if (++i >= argc) return clierror("missing forced include"); argbytes(&forced,argv[i]);

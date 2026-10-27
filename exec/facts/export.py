@@ -900,7 +900,7 @@ def ppgen():
         o, a = t.split("/")
         names = E.PREDEF["os", o] + E.PREDEF["arch", a] + E.PREDEF["common", "*"]
         assert len(set(names)) == len(names), "overlapping target predefinitions: " + t
-        predef[t] = [dict(entry="P3PD%d" % k, resume="P3PDR%d" % k, next="P3PD%d" % (k + 1) if k + 1 < len(names) else "OOBJ.start",
+        predef[t] = [dict(entry="P3PD%d" % k, resume="P3PDR%d" % k, next="P3PD%d" % (k + 1) if k + 1 < len(names) else "CLI.D",
                           name=nm) for k, nm in enumerate(names)]
     # The first four switch rows are fixed in dsw-template.tsv.  Only the
     # directive spelling/ordinal/target are facts.
