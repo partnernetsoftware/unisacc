@@ -31,6 +31,8 @@
 
 2026-10-27 格式批收回：已提交树 `de91e4c6af` 在仓外克隆上量过，没有在共享检出上 stash、pop、clean、reset 或 checkout 他人路径。486 个 `.cx` 文件。include 108，退出 0。无界活计数 708（基线合计 718），退出 0，没有文件高于自己的行。截断活计数 4154（基线合计 4155），退出 1：`tests/formats-elf-ape.cx` 有 16 处被丢弃的调用，且没有基线行。其中 4 处是已检查长度的变长 `memcpy`，12 处是格式会增长且被丢弃的 `snprintf`。`memcpy` 改为按该长度逐字节写入。`snprintf` 留下返回值，放不下则 `die`。源文件没有 `#include`。同一产品上，改前克隆与改后的 `unisacc.com -run`、以及 `gcc_cx` 编出的二进制，都打印 `FORMATS_ELF_APE assertions=68 failed=0`，退出 0。两次复测：include 108，无界 708，截断 4138，都退出 0，没有文件高于自己的行。基线没有改写。`tests/cxtrunc.cx` 没有改。四条 hostseed 路径没有改。旁边文件解析器仍没有 `node_modules` 爬升、`package.json` 的 `exports` / `main` / `imports`、`bun` 条件和 Bun 安装缓存。gcc 与 clang 的产物仍是普通 C。
 
+2026-10-27 前奏与裸名重跑：`tests/cxstd_main.cx` 写 `#pragma unisa use std` 和 `#pragma unisa use cxstd.mark`。`-cx-interface` 只写出 `int cxstd_mark(int n);`，助手 `cxstd_pack` 不在接口里。`-cx-plan` 列出 `tests/cxstd/mark.cx`，不为前奏 `std` 列出文件。两次 `unisacc.com -run` 与两次 `gcc_cx` 都退出 11，两次 gcc 编译退出 0。`std.absent` 在宿主编译之前被拒绝，stderr 含 `unknown std module`，没有写出二进制。`archive/testing-c43-legacy/tests/cx/n1.cx` 写 `#pragma unisa use nosuch`。unisacc 与 `gcc_cx` 都在宿主编译之前拒绝，stderr 含 `nosuch` 和 `no file`，没有写出二进制，旁边也没有 `node_modules`。同一已提交树上 include 108、无界 708、截断 4138。基线没有改写。旁边文件解析器仍没有 `node_modules` 爬升、`package.json` 的 `exports` / `main` / `imports`、`bun` 条件和 Bun 安装缓存。gcc 与 clang 的产物仍是普通 C。
+
 2026-10-23 实测：
 
 - 已有：`.cx` 单元自动前置 `cx.h`（产品 `exec/c/compiler.c` 与经典参考 `src/front_parse.c` 均已实现；转发单元不带 prelude）。
