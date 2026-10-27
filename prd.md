@@ -147,6 +147,52 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 <a id="work-tree"></a>
 ### 思维树
 
+**2026-10-27 本代独立身份算法对照：** SID4fe／Root7a 的 ctx04 `source-job-union` 经正式单批重验 37/0。新 `hostseed-independent-ident` 独立批用 hostseed 冻结的 GCC11 从 `seed/ident.c` 另编 helper，helper 字节与冻结件相同，GCC 版本字节亦同冻结收据；批内先用原生 helper 测来源，再调用产品身份路径，两者及 ctx 来源均为 SID4fe。正式批 14/0、stderr 空（`out/c43-classic18-source-union-batch-01/`、`out/c43-hostseed-independent-ident-batch-05/`）。严格清单 123 批／134 覆盖／19 宽缺口。**批本身由已装产品启动**，因此只证明批内首次身份计算由独立 helper 完成；历史 hostseed 初测顺序、宿主编译器／系统库来源、P3 NN/ASM 输入、完整 N22、外宿主仍开。下一步优先同候选外国原生观察和 P3 输入溯源；禁签/Draft/Latest/公开。
+
+**2026-10-27 本代七流复验：** SID4fe／Root7a 以当前 PC04 同字节 P3 包，复用上期 e252 制备且七容器摘要未变的流材料，在八个独立 outer55 正式批重跑：整链 40/0；E2/E1/E3/E4/prune/lower/ELF 分别 36/25/17/17/19/12/11，八份子 stderr 空（`out/c43-classic18-stream-batches-01/`）。这是当前产品对有限流合同的实际消费，不是本代重新构造流材料；七条完整金表域、RI、六宿主仍开。下一刀仍是完整 N22 的 NN/ASM 来源与同候选外宿主；禁签/Draft/Latest/公开。
+
+**2026-10-27 P3→hostseed 当前端点绑定：** 当前 SID4fe/Root7a 下，PC04 钉住的 native tool-pack 从原输入在新目录重封 1,595,409 B 包，逐字节等于 PC04；活 ctx04/PC04 `--verify` 和三代 hostseed `--verify-chain` 均 rc0、stderr 空（`out/c43-classic18-p3-pack-replay-01/`）。csr 的私有一字节负例证明单独 hostseed 链不看活 net job／PC 模型。新独立正式批 `hostseed-source-bind` 要求 payload 路径为活 PC04 包，在同一 outer55 内先验三代链、再全验活 ctx04/PC04 的 107 作业／34 模型，14/0、stderr 空；错包路径 rc2 且 stdout 空（`out/c43-hostseed-source-bound-formal-01/`）。原 41 断言批保留；严格清单现 122 批／133 覆盖，19 个宽合同仍未关闭。此为单写者前提下的**当前端点**绑定，不追证历史源码执行；经典18 MODEL 尚未进 P3、完整 N22／外国宿主仍开。禁签/Draft/Latest/公开。
+
+**2026-10-27 最新行动（覆盖下方旧下一刀）：** SID4fe5a4f1/Root7a/e2ab9233 的本机同源两代 P3 固定点已核；当前已装产品实际运行全部 24 条零材料 IMPLEMENTED 批，24 个独立 `BATCH_RUN PASS`、子 stderr 空。`out/c43-hostseed-classic18-context-01/` 测得 SID4fe，GCC11 构造 HOST，HOST→三代各自五片加真 deflate wrap 的 18 个命令均在 outer55 内完成；三代 APE 与 Root7a 逐字节相同。`--verify-chain` 通过，正式 `hostseed-fixed-p3` 41/0，八个具名拒绝控制批各自 PASS。本轮又从已选经典十八网的活 `kernel/` 生成并复验材料；正式 `nets` 在当前 Root 上通过全18域、8770键、22694决策、28868字段拒绝及恢复、72适配拒绝，`net-controls` 3/0，日志在 `out/c43-classic18-net-batches-02/`，stderr 空。此为**当前 SID 的本机固定 P3 宿主种子链与 deploy-kernel 行为**；经典十八网 MODEL 尚未进入 P3 产品包，链仍信任 P3 NN/ASM 二进制输入与 Root 辅助初测，宿主 CC/libz 非 hermetic、外国原生宿主未跑；完整 N22、RI/流域等 19 宽合同仍开，`--all` 仍应 rc3。下一步直攻 P3 输入溯源、完整合同和同候选外宿主；禁签/Draft/Latest/公开。
+
+**2026-10-27 同源 ASM/身份补证：** GEN-C 的本代材料又经正式 `run-batch` 分三窗实跑：`assembler` 189/0、`assembler-cache` 篡改拒绝 2/0、`identity` 15/0，日志与空 stderr 均在 `out/c43-classic18-asm-batches-01/`。此前 e252/GEN29 的同类结果不再充当前 SID。现有 `source-package-pack` seal 已验 107 job、34 组模型副本，kind2 准入已核 ASM 源/对象收据；新只读门应针对真正缺的包内 M 正文与来源绑定，不重复旧收据。完整 N22/外宿主仍开。
+
+**2026-10-27 本轮最新补记（覆盖下方两段的下一动作）：** 已装开发根仍为 SID `4fe5a4f1…`、产品 `7a0cf28b…`、record `e2ab9233…`。换源后新建 `out/c43-source-classic18-context-04/`，冻结当前 root record 并完成全部 107 个正式作业；PC02/03/04 各自 34 模型、六路、declare、pack、seal、verify 均完成且包逐字节同。GEN-B/PC03 与 GEN-C/PC04 各自完成双 ISA 核、五切片、真 deflate APE，核／切片／整包逐字相同且同已装根；两端分别通过 kind2 准入（107/34）、smoke 16/0。旧 context03/PC01 在新 live record 下拒绝，旧 GEN-A 收据与新 PC02 配对也拒绝，均保留为预期负例。这只关闭本机同源 P3 两代固定点；经典18 deploy MODEL 未进入 P3，完整 N22、NN/ASM 二进制输入、宿主 CC/libz、RI/流域及五外宿主仍开放。下一刀对准完整合同与同候选外宿主，不签名、不 Draft/Latest/公开。
+
+**2026-10-27 最新节点（覆盖下方 e252 开头的旧节点）：** 当前工作 SID `4fe5a4f101a4960adf8d160937c413a05c60e05951921b288b877f6cbf2ca541`；已装开发产品仍为 `7a0cf28bba67f2394abaf783b886baeafe0687f4590c392dbd8611212a0f5f77`、2,954,593 B，build record 已更新为新 SID（SHA `e2ab9233…`）。经典十八网的私有构造材料经 18 次 verify、22,694/0 自测及 evidence replay 后写入 `weights/built.json` 并由 legacy emitter 再生 `kernel/`；这套 deploy MODEL 尚未进入产品 P3 包，不能把产品固定点当作新网产品功能 PASS。新 SID 的双 ISA 核、source context03 的 107 作业、full PC01 的 34 模型／六路／封包／seal 均已实跑核验；同源 `-O2` ELF 使 `tbl-shared-e3 finish-job` 在 55 秒内完成，不吸 memo。GEN `out/c43-native-kernel-classic18-01/` 的五切片和真 deflate APE 已完成 kind2 独立准入（107/34），整包逐字节等于旧 Root7a；开发安装成功，安装后 smoke 16/0。旧 context03 冻结的是安装前 e252 root record，不能跨新 SID 转授；下一代须新建 source context。完整 RI、流域、N22、同候选五外宿主仍开放，`--all` 不能记 PASS；不签名、不 Draft/Latest/公开。
+
+**2026-10-27 现行节点：** 工作 SID `e252e3fe9970e396649f554d1caa625246fea0edd3beec51ab746f3e12f6f0eb`，已装开发 Root `7a0cf28bba67f2394abaf783b886baeafe0687f4590c392dbd8611212a0f5f77`（2,954,593 B）。新 Root 的 ctx01 已冻结当前 epoch，49/49 作业有收据；GEN28/PC01 与 GEN29/PC02 分别完成双 kernel、五切片及真 deflate APE，包和产品逐字节相同。GEN28 两段式开发安装后，ctx01/PC01 复验仍绿；mixed 五个正式批已 PASS（比较64/0）。当前 smoke16/0、formats14/0、formats-objects21/0、对象材料九批198/0、identity15/0、GEN29 assembler189/0、image RI 单TU29/0、多TU15/0、错路由10/0、SC2 image PEM17/0；严格清单121批/132覆盖/19缺口；固定P3宿主种子链41/0、八拒绝批71/0，`--all`仍 rc3、子批0。开发专用 `tools/dev-run` 已有独立命令热缓存实测，代码缓存不授产品资格。下一刀是完整 RI/流域、N22 和同候选外国宿主，旧 P75 结果不转授；不签/Draft/Latest/公开。以下 P75 段为上期状态，以本段和记忆宫殿首行为准。
+
+**当前 Root 七流实跑补证：** 用 Root7a 重建流运行体并从当前包打出 `out/c43-streams-riroot-01/`；七流链40/0，独立 E2/E1/E3/E4/prune/lower/ELF 分别36/25/17/17/19/12/11断言、均0失败。七个测试材料钉已换为本代容器实际 SHA，旧 E2 钉的首轮拒绝留作代际证据。收据在 `out/c43-riroot-stream-batches-{01,02}/`；SID 复核仍 e252。只授本机有限流用例，不关闭七个完整流或六宿主 interfaces 合同。
+
+**当前 Root 零材料批：** 清单中19个 IMPLEMENTED、`materials=-` 批已各自实际执行并在 `out/c43-riroot-zero-batches-01/` 留 `BATCH_RUN PASS`，收据均钉 Root7a。同期 `out/c43-riroot-all-afterstream-01.log` 的 `--all` 实际 rc3，115批与92个已实现覆盖行 NOT_RUN、子进程批0、19完整缺口仍在；单批收据不回填聚合。
+
+**当前 Root 既有材料实跑：** `out/c43-riroot-material-02/` 下 `nets` 全18域 8770键/22694判定、28868字段拒绝与恢复、72适配拒绝实跑 PASS；`libneed-attributes` 12/0。旧网络与扫描器材料只经本候选实际消费，不称 SID e252 新构造。
+
+**当前 Root source-job union：** 注册批已修正材料 SID 文件入口和执行模块源身份核验，在 ctx01 实跑37/0（`out/c43-riroot-source-job-batch-01/`）；旧硬钉直接调用的三项失败原样保留。该有限材料并集不是完整包、NN 推理或候选资格。新清单 `--list` 仍有效，产品 SID 不变。
+
+**当前 Root RI image：** CSR 单／多 TU 私有探针已改接已装产品并由主树收为两条 SOURCE 批；`out/c43-riroot-ri-image-batches-01/` 分别29/0、15/0，含 source:image 前闸、E3 实际 tokens/ATTRS 副身份、严格封存回放、改/删活头仍同镜像、改源／篡改／缺副收据拒绝。清单118批/129覆盖/19缺口；`out/c43-riroot-all-riimage-01.log` 实际 rc3，117批与94个已实现覆盖行 NOT_RUN、子批0。仍不授完整 RI、外国宿主或发布资格。
+
+**当前 Root mixed 固定点正式批：** GEN28/PC01、GEN29/PC02 的四个独立 `selfhost-mixed-*` 端点在 `out/c43-riroot-selfhost-registry-01/` 均实际 `BATCH_RUN PASS`；比较批以这四份同 run-id 日志在 `out/c43-riroot-selfhost-registry-02/compare.log` 实际64/0。首轮错传旧 run-id 日志的比较4项失败保留在 `...registry-01/compare.log`，不改写为绿。此为同候选本机 mixed 两代固定点，非宿主种子 N22／外国宿主资格。
+
+**当前 Root 对象格式有限批：** `formats-objects` 直接经已装 Root7a 编 Linux x86_64/arm64 ET_REL，核 section/symbol/RELA 有限界，链接 x86_64 ET_EXEC 并原生返回7；四个未支持目标与混目标链接均具名拒绝且无输出。`out/c43-riroot-formats-objects-batch-01/` 实际21/0；`--list` 119批/130覆盖/19完整缺口。arm64 原生、Mach-O/COFF 单元对象与完整 formats 仍未授资格。
+
+**当前 Root 九条对象材料批：** 上期 MAT02 在 Root7a 下具名拒绝；新 `out/c43-riroot-object-material-01/` 由已装产品准备并验证。`out/c43-riroot-objects-batches-01/` 九条 `objects-*` 正式批各自复核材料并全部 PASS，合计198/0（链接返回7、混目标／定义／版本和四未支持目标拒绝）。材料准备不替代功能执行；外国宿主与完整 formats 仍开放。
+
+**当前 Root RI 错路由拒绝：** `ri-route-refuse` 正式批在 `out/c43-riroot-ri-route-refuse-batch-01/` 实际10/0：tape 捕获正端；object/run 捕获在账本／输出前精确拒绝；有效 tape 账本也不能授权 object 严格回放。清单120批/131覆盖/19完整缺口；`out/c43-riroot-all-riroute-01.log` 实际 rc3、119批与96个实现覆盖行 NOT_RUN、子批0。仍不授完整 RI。
+
+**当前 Root 构造支持正式批：** GEN29 材料经 `out/c43-riroot-identity-assembler-batches-01/` 的 `run-batch` 实际消费：identity15/0、assembler189/0、assembler-cache 私有单字节篡改拒绝2/0（生成任何对象前拒绝）。三条均钉已装 Root7a，不把有限构造／ISA 合同升格为完整 N22 或外国宿主。
+
+**当前 Root 宿主种子三代：** 新 `out/c43-hostseed-riroot-zlib-context-01/` 用本代 SID e252 和已装 Root7a 测源并由 GCC11 构造 HOST；HOST→第一代→第二代→第三代各自实际跑五片与自运行 zlib 封装，18 个步骤均独立 outer55 返回0。三代整包都是 2,954,593 B、SHA `7a0cf28b…`，五切片与 GEN29 同字节；正式 `hostseed-fixed-p3` 41/0、八项拒绝批合计71/0（`out/c43-hostseed-riroot-zlib-{registry,control}-01*`）。旧 stored 封装 5,316,769 B 与根不等，保留作差异证据。此链仍信任既有 NN/ASM 二进制输入，宿主 GCC/libz 非 hermetic，初始测源借已装 Root，六宿主未齐，故仅授本机固定 P3 三代字节固定点，不关闭完整 N22。
+
+**2026-10-27 当前树（覆盖本节下方 Source03a5 历史快照）：** 工作源码 SID `718017ab98ae13963d0b928496724c0e661990b3972ba452909742ccfa6f6a81`；开发 Root `75a52ae7f898a6db7ea32b810f250deb9ffda9a2fad2b1d8a6ec81efba4f8972`、2,934,337 B、版本0.0.43，真 deflate APE。ctx03 冻结 root-epoch 记录、49/49 作业正式收据；PC04/PC05 与 GEN26/GEN27 已各自构造和验证，两代 44 个 ASM/对象、双 kernel、五片及整包逐字节相同。双阶段开发安装 rc0，安装换活记录后 ctx03/PC04 复验 rc0。四个 mixed-candidate 端点及比较现已登记为五个独立批次，并在 `out/c43-selfhost-mixed-registry-01/` 实跑五个 PASS、比较 64/0；源码驱动协调器最初两次外层超时仍记 UNKNOWN，实际 PASS 使用测得热点的私有 native 代码缓存，未放宽单命令 55 秒。P75 上独立 E2/E1/E3/prune 有限 oracle 在新清单分别实跑 36/0、25/0、17/0、19/0；四个完整流合同仍 NOT_READY。Root smoke16/0、18零材料批、相位外墙钟5/0及部分有材料批另有收据；严格清单现 113 批、124 覆盖、19 缺口，`--all` 仍 rc3/子批执行0。这是本机混合包两代固定点，不是完整 N22 或外国宿主资格。下一刀：补19完整合同与同候选外国宿主证据；不签名、不 Draft/Latest/公开。以下以 Source03a5、P53 为“当前”的旧树及长叙事是未整理的历史，不得作为现行身份或资格；以本段和本轮原始收据为准。
+
+**开发反馈波次：** `tools/zero-wave.cx` 在 P75 下以一条 outer55 命令并行执行四个独立零材料批次，smoke/core-compat/library-abi/owned 各自经原 `run-batch.cx` 实际 PASS、独占日志和输出叶，产品摘要前后不变；重复 ID 在派生前拒绝，缺材料不能被合计成 PASS。它只缩短合格开发批的反馈，不改变 `--all` 的 rc3、19 个完整缺口或发布资格。
+
+**RI 产品路由缺口：** P75 安装产品对有效 tape SC2 走严格 image/O0 仍 rc2 `resource-route-unsupported`。C44 私有 B 原型的 `RF_CAPTURE_HOLD` 曾让 e2/e1 资源读取不入捕获；`out/c43-ri-b-front-01/` 实际收据没有 include 头行。CSR 私有 B2 已改成 source:image 前闸、e2/e1 资源事件及 E3 tokens+attrs 第二身份；副身份作为有序 SC2 行封存，NUL key 探针改为显式长度，单 TU 27/0（`unisacc-c44-opt/out/c44-ri-image-B2-02.log`）。主树 `exec/c` 未吸纳。多 TU 首次补闸后在 `out/c43-ri-b3-multitu-01/` 实跑 rc1 `tape domain: unknown opcode`；包声明表明须先过 `units` 再核 E3 实际输入。B2/B3 私有稿还有严格回放读取活宿主头的错误接线，须撤。严格 SC2 回放应只用收据封存的头字节，活头改动后同输出属于正确行为，篡改收据或 E3 身份才应拒绝；不得以私有有限绿宣称完整 RI。
+
+**外国宿主候选准备：** 本地 CI 草稿的 Windows 分支现编排直接启动原始 PE 的 `--version` 单进程观察，并在前后核产品摘要；`actionlint` 与本地 PowerShell 解析绿。没有 Windows runner 实跑，功能批、来源闭包、JobObject 后代清理与原生路径适配仍 NOT_RUN，不算六宿主资格。
+
 **目标：开发unisacc.com 0.0.43直到完成。** 日常直接用unisacc.com＋.cx迭代；源码身份、bootstrap身份和同候选资格分别记账。新候选未构建前，不把旧产品局部结果转授给新源码。发布仍须明确授权。
 
 ```text
@@ -162,7 +208,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 ├─ R5 待新来源链：旧11/12固定点58、CTX02固定P3链41/拒绝71均属Source447；Source329候选A/包及当前B已构造，新ctx58/79已实跑，本机原30两代selfhost03已58/0；完整N22和外宿主仍待
 ├─ R6 pp局部来源：Source447低mask域构造92/配方拒绝23有效但历史；不计Source329重验或全18参数源码重建
 ├─ R7 19完整缺口、完整NN/ASM源码构造及同候选跨平台资格仍未收口；签名/Draft/Latest/公开仍禁
-└─ C44旁路：主人特许csr在unisacc-c44-opt/c44/run-reuse做-run分相/复用原型，钉旧P53；主检出继续43，回并以43最终产品身份为准
+└─ C44旁路：已审修 live record 入 witness 洞——sp_load_ephemeral 严读活记录不入 sp_files；witness 仅冻副本全文SHA+artifact/source投影。补丁 C44 out/.../fix-live-ephemeral-vs-main.diff（lib->6d0a4296…）；origin 107仍绿。
 ```
 
 **当前源码与已安装Root分离：** 当前最终工作SID为0d59237f3250b59514a55ff529c77b665033e5feb71061f6fcaded0c7ef925c0，已含scanner精确修复及工具正规头再生并fresh helper核0；cf2270b2e103ead1d13859489a34d6eb9e57a127eb0bef5f347b17822cb6c16e仅保留header-only中间实测身份；当前无新源码候选，以下Source329构造/安装/58证据保留为基线，不转授工作源。旧Source329cdb7077891074f638634dc7abdcd59ee39c368ad6ba1c2fcf867c3c63de2e下，完整候选A已由该源码实际构造并归档，当前新tool context候选B已完整重建并获smoke16/candidate58/schema79实证，B已实际本地安装、本机原30两代selfhost03已58/0；完整N22和外宿主仍待。根unisacc.com现是P53e2cd1f669c92fda2c16dd93a9021cd4db97f05c57ab2d1acf9a835cbac9857（4911193B）/Source329，当前record21704e...由真实安装生成；旧S447/source记录完整保留在GEN13/bootstrap-before-install.com及out/c43-u64-checkpoint-01/bootstrap.com。完整重构与实际安装均有证据，旧epoch与旧资格不改贴为Source329。
@@ -240,8 +286,19 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 <a id="memory-palace"></a>
 ### 记忆宫殿
 
+**现行入口：** 下一表第一行是当前身份与行动；其余旧行保留来源历史，凡与第一行冲突的“当前”字样均已失效。
+
 | 房间 | 当前事实／决定 | 证据与行动入口 |
 |---|---|---|
+| 0.0.43 本代独立身份算法对照（2026-10-27） | 当前 ctx04 `source-job-union` 正式 37/0；新 `hostseed-independent-ident` 用冻结 GCC11 自 `seed/ident.c` 编出与冻结 helper 同字节的新 helper，GCC 版本收据匹配；批内先测 SID4fe 后测 Root7a，两者与 ctx 来源一致；正式批 14/0、stderr 空。清单 123 批／134 覆盖／19 宽缺口。批本身由产品启动；只证明批内首次身份计算独立，历史 hostseed 顺序、宿主 CC/库、P3 NN/ASM、完整 N22 和外国宿主仍开。 | `out/c43-classic18-source-union-batch-01/`、`out/c43-hostseed-independent-ident-batch-05/`；下一步同候选外国原生观察／P3 输入来源。禁签/Draft/Latest/公开。 |
+| 0.0.43 本代七流复验（2026-10-27） | SID4fe／Root7a、当前 PC04 同字节包；上期 e252 构造的七流容器摘要仍钉住，八个正式 outer55 批当前实跑 PASS：整链40/0、独立 E2/E1/E3/E4/prune/lower/ELF 为36/25/17/17/19/12/11，stderr 全空。只授本机有限流实际消费，不称本代重新构造材料或七条完整流、RI、外宿主。 | `out/c43-classic18-stream-batches-01/`；下一步完整 NN/ASM 来源和同候选外宿主，禁签/Draft/Latest/公开。 |
+| 0.0.43 P3→宿主链当前端点（2026-10-27） | SID4fe/Root7a/e2ab；原输入重包与 PC04 同字。私有一字节负例说明单独 hostseed 不核活 job/model。独立正式 `hostseed-source-bind` 同一 outer55 内验三代链及活 ctx04/PC04 107 作业／34 模型，14/0、stderr 空；错 payload 路径 rc2。原 41 断言批不变；清单 122 批／133 覆盖／19 宽缺口。仅单写者前提下当前端点绑定，历史源码执行、完整 N22、经典18→P3、外宿主仍开。 | `out/c43-classic18-p3-pack-replay-01/`、`out/c43-hostseed-source-bound-formal-01/`；下一步实际历史构造来源／P3 NN-ASM 输入闭包及外宿主，禁签/Draft/Latest/公开。 |
+| 0.0.43 本代 ASM/身份补证（2026-10-27） | 当前 SID4fe5a4f1、产品 Root7a0cf28b、record e2ab9233；GEN-C 材料正式实跑 assembler189/0、assembler-cache2/0、identity15/0，每批 outer55、同候选、stderr 空。现有 seal/kind2 已核作业与 ASM 收据，尚须核包内模型正文消费及完整 N22；经典18 MODEL 未进 P3。 | `out/c43-classic18-asm-batches-01/`；继续 P3 真缺边，不重复已核收据。其余当前功能与宿主链见下一行；禁签/Draft/Latest/公开。 |
+| 0.0.43 当前 SID 功能与宿主链（2026-10-27） | SID4fe5a4f1/Root7a/e2ab9233；24 条零材料正式批各自 PASS。HOST→三代的 18 个切片/wrap 阶段已执行，三代真 deflate APE=Root7a；链级 verify、正式批41/0、八拒绝批各自 PASS。活经典18 deploy-kernel 新材料在当前 Root 全域实跑：8770键／22694决策，拒绝及恢复28868、适配拒绝72，负控3/0。只授本机固定 P3 链和新权重 deploy-kernel 行为；经典18 MODEL 未进 P3，P3 NN/ASM 二进制输入、CC/libz、外国宿主、完整 N22/RI/流域仍开。 | `out/c43-classic18-zero-batches-01/`、`out/c43-hostseed-classic18-{context,stage1,stage2,stage3}-01/`、`out/c43-hostseed-classic18-registry-01/`、`out/c43-classic18-net-material-01/`、`out/c43-classic18-net-batches-02/`；下一步 P3 输入溯源、完整合同与同候选外宿主。禁签/Draft/Latest/公开。 |
+| 0.0.43 当前同源两代（2026-10-27） | SID4fe5a4f1/Root7a/e2ab9233；context04 新 epoch 107/107。PC02/03/04 各自 seal/verify，GEN-B/PC03 与 GEN-C/PC04 的两核、五片、完整 APE 逐字相同，各自 kind2 准入 107/34、smoke16/0。旧 ctx03/PC01 和跨 epoch 配对具名拒绝。本机 P3 两代固定点成立；经典18 MODEL 未进包，完整 N22/RI/流域/五外宿主仍开。 | `out/c43-source-classic18-context-04/`、`out/c43-source-classic18-full-pc-{02,03,04}/`、`out/c43-native-kernel-classic18-{02,03}/`；下一步完整合同与同候选外宿主。禁签/Draft/Latest/公开。 |
+| 0.0.43 最新开发根（2026-10-27） | SID4fe5a4f1 已开发安装，产品仍 Root7a0cf28b/2,954,593 B，build record SHA e2ab9233；同源优化 ELF 化解 `tbl-shared-e3 finish-job` 超时，未改验证合同。新 context03 107/107、full PC01 34 模型与六路/封包/复验、GEN 五片与真 deflate 包、kind2 候选准入均完成；安装后 smoke16/0。经典18 deploy MODEL 未进 P3 包，旧 e252 功能收据不转授新 SID；完整 RI/流域/N22/五外宿主未完。 | `out/c43-source-classic18-context-03/`、`out/c43-source-classic18-full-pc-01/`、`out/c43-native-kernel-classic18-01/`；下一步新 root epoch 的 source context、同候选功能批与域缺口。禁签/Draft/Latest/公开。 |
+| 0.0.43 现行根与下一刀（2026-10-27） | SID e252e3fe、Root7a0cf28b/2,954,593 B 已本机开发安装。ctx01 的49作业、GEN28/PC01 与 GEN29/PC02 各自完成并验证；GEN28安装后 ctx01/PC01 复验仍绿；mixed 四端点及比较正式批全 PASS、比较64/0。新 Root smoke16/0、formats14/0、formats-objects21/0、对象九批198/0、identity15/0；image RI 单TU29/0、多TU15/0、错路由10/0、SC2 image PEM17/0。严格清单121批/132覆盖/19缺口；固定P3宿主种子链41/0、八拒绝批71/0；`--all` rc3、子批0。完整 RI/N22/流域及外国宿主资格未完成。开发专用 `tools/dev-run` 跨独立命令热缓存已验。 | 新根 `out/c43-native-kernel-riimage-winfix-27/`；两代 `out/c43-native-kernel-riroot-{28,29}/`、`out/c43-source-riroot-mixed-pc-{01,02}/`；正式五批 `out/c43-riroot-selfhost-registry-{01,02}/`、对象九批 `out/c43-riroot-objects-batches-01/`、RI 错路由 `out/c43-riroot-ri-route-refuse-batch-01/`、PEM `out/c43-riroot-ri-image-pem-batch-02/`。下一步补完整合同和同候选外国宿主；不签名、不 Draft/Latest/公开。 |
+| 上期开发根快照 | SID718017ab、Root75a52ae7/2,934,337 B；kernel23、49作业、PC02、GEN25/PC03及双构建者安装记录保留为上期证据。smoke16/0、callback冷热23/0、18零材料批PASS；相位外墙钟5/0，identity15/0、assembler189/0、nets十八网全域、libneed-attributes12/0 分别PASS，P75 七流材料 streams40/0。其时清单104批/119覆盖/19缺口，`--all` rc3/子批0；现行状态以上一行及思维树首段为准。 | `out/c43-native-kernel-runreuse-23/`、`out/c43-native-kernel-runreuse-25/`、`out/c43-source-7180-mixed-pc-03/`、`out/c43-root-7180-validation-01/`、`out/c43-phase-timing-75a5-01/`、`out/c43-material-batches-75a5-01/`、`out/c43-streams-75a5-01/`。 |
 | 源码／产品身份室 | 当前工作SID03a5e1b7...fresh核0（forward-result表修复014e1ac4...）；旧SID0d5923...是先前材料身份，cf2270仅header-only中间实测；scanner12/正规头再生实际0，PRODUCT_NOT_REBUILT。根仍已安装P53/S329，当前record21704e/native3d75；旧S447/e084保存在GEN13及checkpoint，原pkg epoch继续双hash核。B149构造/58/79实际0，当前GEN13 ctx1660/GEN14 ctx5cf8重wrap全0，原30 selfhost03实际58/0；旧01超时保留。 | 保存P53在out/c43-u64-checkpoint-01；不改贴旧root build record，不转授旧绿。 |
 | 数学核修复室 | mask64返回/v/lit三处unsigned；独立CX exporter再生两C，39 NN输入及旧provenance不变，非NN参数重构。 | out/c43-table-kernel-math-01/installed.tsv记录实际Source329与两artifact SHA；单文件原子rename，非整对事务。 |
 | 十八网机制室 | 新数学核由保存P53实际执行8770键/22694判定、28868字段拒绝及恢复、72适配拒绝全0；宿主shiftSan22694/0。 | out/c43-nets-u64-bootstrap-all-01.log、out/c43-table-kernel-u64-host-run-01.stdout；旧NN参数复用，不称新产品或全18源码重建。 |
@@ -255,7 +312,7 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 | ujs 子项目 | 独立规格与进度只在ujs/prd.md及ujs/ARCHITECTURE.md；根不改写其代际或语料。 | [ujs/prd.md](ujs/prd.md)；底座.bootstrap使用与产品资格分列。 |
 | 宿主 .cx 驱动 | `gcc_cx.com` 617424 字节，`clang_cx.com` 617456 字节，六目标 APE，不入库。模块展开走 `unisacc.com -cx-plan`，不另写解析器。本机 gcc 与 clang 15 对 lex/arith 逐字节相同，对 `tests/cxhost_main.cx` 退出码 42。产物不是已检查的 `.cx`。OSX 切片未实跑。Windows 切片含 `posix_spawnp`，只编译未跑。 | §5.3。`tests/cxinclude.cx`、`tests/cxapis.cx`。 |
 | 资格与发布室 | Source329候选A已归档、B新ctx58/79已实跑，本地安装与GEN13/14构造及原30完整selfhost58实际0；fclose工作header修复已338/0，但新产品未重建，329证据不转授；19缺口、完整NN/ASM源码构造与同候选外宿主未收口。 | 不签名/Draft/Latest/公开；C44启动复用仅csr旁路私有APE原型，尚未回并或获新43资格，旧P53测量不报新提速。 |
-| C44旁路协作室 | 主人特许csr使用`/home/devali/repos/unisacc-c44-opt`、分支`c44/run-reuse`，仅做-run分相/复用原型，基线P53；主检出仍由本线收43。 | csr不改本线include/seed/fclose或候选构造；合并冲突以43最终产品身份为准，旧P53测量须在新43候选重验，不签名不公开。 |
+| C44旁路协作室 | Root-epoch C44原型：非origin=v2+冻副本+sp_execution_record；origin=v1兼容；PC03 origin正端107绿；pin链清单已交cdx。 | C44 `out/c44-root-epoch-proto-01/`（含PIN-CHECKLIST与diff-vs-HEAD）；不改主热路径吸纳前；不签不公开。 |
 
 Source447的原思维树、当前证据段与记忆表已原样存入[历史快照](archive/prd-c43-source447-before-unsigned-math-20261026.md)。此处仅维护当前源码、待办和证据入口。
 
@@ -557,47 +614,27 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 <a id="model-function-bytes"></a>
 ### 3.14 当前模型功能与物理字节账
 
-下面从 `research/model-bytes.json` 生成，按实际封存 `.com` 计。只对阶段/模式作可证的功能归属，不把跨阶段动作任意分摊成“指针占多少字节”。
+下账对应 0.0.43 本机开发候选 `75a52ae7f898a6db7ea32b810f250deb9ffda9a2fad2b1d8a6ec81efba4f8972`，不是发布字节。`research/model-bytes.json` 中 SHA `518601e5…` 属 0.0.24 历史候选，不作当前账。只按实际封装内容记物理字节；同一网络被多条阶段行引用时不重复相加。
 
 <!-- model-bytes:begin -->
-快照 SHA-256：`518601e5ff6e844cc7faf4c45b91bcf379cbe5f0d77017452ff6020bfc120de7`；总计 **2,019,976 B**。
+快照 SHA-256：`75a52ae7f898a6db7ea32b810f250deb9ffda9a2fad2b1d8a6ec81efba4f8972`；总计 **2,934,337 B**。源码 SID `718017ab98ae13963d0b928496724c0e661990b3972ba452909742ccfa6f6a81`；包 SHA `4d9b8a3a526f340709316f7fb67189603bbd15bcd38dbab5b7997617c505a83e`。
 
-| 物理内容 | 字节 | 占整个 .com |
-|---|---:|---:|
-| 28 个共享网络体 | 880,454 | 43.59% |
-| 平台驱动、APE 启动/加载与对齐（混合账） | 796,560 | 39.43% |
-| 43 份 C 头文件/库实现源码 | 255,303 | 12.64% |
-| 两 ISA 通用推理执行核资源 | 15,520 | 0.77% |
-| 目标预定义宏声明资源 | 321 | 0.02% |
-| 目录、记录头与资源键 | 71,802 | 3.55% |
-| 尾部 | 16 | 0.00% |
+| 物理内容 | 文件内字节 |
+|---|---:|
+| Windows x86_64 PE，含脚本/版本资源；Windows ARM 入口共用 | 687,616 |
+| Linux x86_64 gzip（展开 724,187 B） | 166,772 |
+| Linux arm64 gzip（展开 752,796 B） | 153,761 |
+| macOS x86_64 gzip（展开 726,754 B） | 171,586 |
+| macOS arm64 gzip（展开 759,778 B） | 159,121 |
+| 五片间及尾部对齐 | 56 |
+| P3 `compiler.pkg` | 1,595,409 |
+| `UNIPKG1` 尾 | 16 |
+| **总计** | **2,934,337** |
 
-| 模型阶段 / 具体功能 | 物理模型数 | 模型体 B | 占 .com | 阶段行引用数 |
-|---|---:|---:|---:|---:|
-| `e2`：预处理、目标预定义宏与位置模式 | 2 | 72,684 | 3.60% | 138 |
-| `e1`：词法与 token/位置输出 | 1 | 27,764 | 1.37% | 132 |
-| `e3`：解析、类型/作用域、tape、错误与警告 | 2 | 303,469 | 15.02% | 240 |
-| `e4`：O1/O2 优化 | 2 | 14,409 | 0.71% | 160 |
-| `nativeabi`：宿主ABI carrier认证（原始类型图→目标载体证书） | 1 | 15,976 | 0.79% | 6 |
-| `prune`：函数可达闭包与保守原文剪枝（数据/地址根保留） | 1 | 9,110 | 0.45% | 168 |
-| `lower`：ABI、调用、目标指令 lowering 与数据布局 | 8 | 205,584 | 10.18% | 168 |
-| `elf`：目标指令编码及 ELF/Mach-O/PE 镜像写出 | 8 | 178,690 | 8.85% | 102 |
-| `tokenpp`：公开 token 路线的预处理 | 1 | 13,880 | 0.69% | 1 |
-| `tokenlex`：公开 token 路线的词法输出 | 1 | 4,477 | 0.22% | 1 |
-| `units`：多文件分帧与文件级 static 隔离 | 1 | 34,411 | 1.70% | 120 |
-
-下表是二进制网络的压缩前拆分；与物理压缩体不可相加，百分比为相对整包大小而非物理占比：
-
-| 网络记录 / 含义 | 字节 | 占整个 .com |
-|---|---:|---:|
-| `H`：阈值/选择网络参数记录 | 1,221,473 | 60.47% |
-| `Q`：动作序列声明（包含编译模板动作） | 1,115,159 | 55.21% |
-| `S`：字节字符串声明 | 22,764 | 1.13% |
-| `N`：网络头记录 | 565 | 0.03% |
-| `C`：动作序列共享前缀声明 | 636,894 | 31.53% |
+包内 32 个网络压缩体共 1,088,123 B，74 个资源内容共 420,643 B；其余目录、记录头与键共 86,643 B。七流压缩体共 996,753 B：e3 342,284、lower 320,870、elf 185,908、e2 94,739、e1 28,340、e4 15,481、prune 9,131。阶段行引用网络内容，不另占一份网络体。四个 gzip 成员实际解压 SHA 与本轮四个 ELF/Mach-O 切片逐一相同；当前打包由宿主 GCC + zlib 完成，编译器本身未链接 zlib。五目标写出和本机 smoke 已验，外国宿主原生运行仍待。
 <!-- model-bytes:end -->
 
-两个 e3 是错误与错误+告警变体。共享物理模型数、阶段行数和物理字节以本节的生成账本为准；压缩前 Q/C/H 不能与压缩体相加。旧快照、纠错和计数来源见 [结构测量史](archive/prd-release-and-development-history-20261001.md#结构测量与纠错)。
+旧快照、纠错和计数来源见 [结构测量史](archive/prd-release-and-development-history-20261001.md#结构测量与纠错)。
 
 ### 3.15 目标文件、分开编译与链接（0.0.17）
 

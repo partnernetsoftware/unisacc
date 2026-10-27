@@ -1,4 +1,4 @@
 int main(void) {
-    printf("hello from C99\n");
+    printf("from hello.c\n");
     return 0;
 }
