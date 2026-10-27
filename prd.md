@@ -151,15 +151,15 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 **现行流推进（2026-10-27）：** 按 E2→E1→E3→E4→prune→lower→ELF 分层收口；分别记录产品功能、同候选验证和未完成合同，矩阵格数不是实现百分比。E2 当前产品正域103/0、拒绝域187/0；`37a80dd995` 新增同候选内嵌模型绑定与文件/stdin等价正式13/0（`out/c43-a825-e2-binding-wave-01/`），E2本机矩阵57/62，其中旧材料不能转授。宏顺序源码修复仍待构造。cc 在隔离目录集中研究高ROI提速，主线独占产品热文件和构造。
 
-**2026-10-27 最新开发候选（cdx）：** SID `a8258143d5ad53fad2234988bb298b6b30f8c8d72ba60326b464fe19fd867e7c` 的107作业全部外层rc0，本代双核、PC34模型/六路线/封包、五片与真deflate APE已完成。开发根 SHA `1214e053466dea1c29bb76b33a45bc2a64d0f28dc1a3aef5f3829a2047143a5e`，2,970,646 B；PC `b98c540e…`，kind2准入9/0，旧根 `0ce6f231…` 留GEN备份。正式 E2 正域103/0、拒绝域187/0（60次流执行）、smoke16/0及cx-bounded通过；候选默认 `-E/-S` 拒绝恢复20/0。第一片初次外层142未留产物，热控制器重试rc0，原日志保留。`--all`仍rc3：175 coverage、19 unresolved、165未跑批、子批0；完整N22与五外宿主仍开。当前产品CLI目标宏20/0、include20/0；宏选项23/3红。新源码修复待下纪元构造，同源第二代仍待。
+**2026-10-27 最新开发候选（cdx）：** 已装SID `ccd29c711123fe97df6fb51656c9804160166ac1007486ed2b1cb4d1bad282e7`、APE `8a8195d5be397a2c2203cdd3e71002f55f464321fd598fd1c5c12ac0b427943b`（2,972,007 B），record `66c6a895…`；context-03正规107作业全部rc0，GEN-ccd29-01双核/五片/真deflate完成；PC02包 `c345ac87…` 独立VERIFIED，kind2准入9/0、开发安装rc0。旧Root1214在GEN备用。安装后smoke16/0；正式CLI宏23/0、目标20/0、include20/0（out/c43-ccd29-cli-wave-01），宏顺序红例闭合。E2其他功能材料待同候选重包复跑；完整N22、19宽合同及五外宿主仍开，开发安装不授发布资格。
 
-**2026-10-27 最新源码纪元（cdx）：** `a20f8049fc` 修复 -D/-U 分组导致顺序丢失，以及目标预定义覆盖用户-D；驱动、经典C参考和E2三变体对齐，保留对象专用保护宏。活 SID `ccd29c711123fe97df6fb51656c9804160166ac1007486ed2b1cb4d1bad282e7`，已装产品仍SIDa825/Root1214。facts30/0；禁缓存私有驱动+新包CLI59/0、E2正103/拒187不退，ET_REL保护宏控制有效；宿主CC构造的经典参考给出三条正确宏结果。自身编译完整3.1MB参考的outer55超时142、无产物，保留UNKNOWN，不宣称清除宿主CC依赖。`5f26779c2b`登记三CLI批：当前产品targets20/0、includes20/0，macros23/3 FAIL保留；7格补证、宏格改NEEDS_PRODUCT_CHANGE。下一步合并可审的CC私有FWD增量成果后批量封驱动纪元，其他本机缺口继续推进。
+**2026-10-27 最新源码纪元（cdx）：** `a20f8049fc` 的 -D/-U 顺序与用户目标宏覆盖修复已正规构造并安装到Root8a8195d5，不再只依赖私有驱动。测试按E2→E1→E3→E4→prune→lower→ELF收口，阶段实现状态与矩阵格数分别报告。cc当前研究剩余冷启动ROI，并只读定位kernel-route外来有界改写的三处块后分号语法错误；compact私有差分不进入本安装纪元。
 
 **2026-10-27 cdx 主刀计划（主人本轮改派；重构造仍串行，互不抢文件的轻切片由 cc／Codex 辅助）**
 
 完成门（`plans/v0.0.43.md:42`）：19 条 NOT_READY 宽行、完整 N22、五外宿主同候选实证全部闭合后，`--all` 才可 rc0。
 
-**当前矩阵账（2026-10-27 对 19 个 `tests/*-domain-matrix.tsv` 数据行实算；旧 `out/c43-cc-plan-matrix-counts.txt` 已过期）：** 822 个必选格中，284 个标 `COVERED_LOCAL`、3 个 `OBSERVED`、368 个 `MISSING`、39 个 `NEEDS_PRODUCT_CHANGE`、79 个 `NEEDS_FOREIGN_HOST`、33 个一般 `BLOCKED`、6 个具名 `BLOCKED:*`、10 个 `DECLARED_DEPENDENCY`；另有 9 个非必选格。本轮新增7个CLI目标/头搜索格；此前13个拒绝格和19个正域格也有Root1214e053正式证据；其余旧覆盖仍依各行历史材料，不能直接转授新候选。N22 现状：E7 已由产品内汇编合同闭合（`0764fa8861`）；E6 已有成员交叉核对；E2–E5、E9–E11 属声明的宿主/工具依赖；E8 的权重仍由 Python 发射器生成；E12 即外宿主。声明项并未被当作完整 N22 PASS。
+**当前矩阵账（2026-10-27 对 19 个 `tests/*-domain-matrix.tsv` 数据行实算；旧 `out/c43-cc-plan-matrix-counts.txt` 已过期）：** 822 个必选格中，287 个标 `COVERED_LOCAL`、3 个 `OBSERVED`、366 个 `MISSING`、38 个 `NEEDS_PRODUCT_CHANGE`、79 个 `NEEDS_FOREIGN_HOST`、33 个一般 `BLOCKED`、6 个具名 `BLOCKED:*`、10 个 `DECLARED_DEPENDENCY`；另有 9 个非必选格。本轮宏顺序格已在Root8a8195d5转为COVERED_LOCAL；此前新增7个CLI目标/头搜索格；此前13个拒绝格和19个正域格也有Root1214e053正式证据；其余旧覆盖仍依各行历史材料，不能直接转授新候选。N22 现状：E7 已由产品内汇编合同闭合（`0764fa8861`）；E6 已有成员交叉核对；E2–E5、E9–E11 属声明的宿主/工具依赖；E8 的权重仍由 Python 发射器生成；E12 即外宿主。声明项并未被当作完整 N22 PASS。
 
 **P0 完成边界与待决项：** 外宿主需要同候选真实工件及五宿主原生执行；当前不得 push、上传或派发，授权或真实宿主通道未到前只做本地准备。822 格是当前矩阵账，未经主人裁定不删必选格、不把依赖声明当作 N22 实证。词法三项按 C99 与产品实际输出继续核，具名缺陷不改贴 PASS。
 
@@ -350,27 +350,19 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 <a id="memory-palace"></a>
 ### 记忆宫殿
 
-**现行构造纠正：** context-02 的 bootstrap 指向活 Root，pack 预检拒绝 `live-root-record-must-use-ephemeral-bind`；其107条收据只保留历史，不转授。新建 `out/c43-source-ccd29-context-03/` 使用 GEN-a825 保存的 bootstrap-before-install.com，prepare 与 pack consumer `--verify-source-context` 均rc0。须在03按依赖重新实跑107；双核 GEN-ccd29-01 已完成，后续复核适用身份。
+**现行构造：** live SID `ccd29c71…`；`out/c43-source-ccd29-context-03/` 使用GEN-a825保存的bootstrap，107作业全部外层rc0（四路分波，大项分步，job.*.outer.log）；GEN `out/c43-native-kernel-ccd29-01/` 双核已完成；PC `out/c43-source-ccd29-full-pc-02/` 的34模型/六路线/declare/pack/seal/独立verify均rc0，包SHA `c345ac87a82c3b7b593d48b9a93b6f8160c23b6c23dab467d62800c57ee3548d`。五片/wrap/kind2准入9/0及安装已完成；Root8a8195d5，宏23/0，旧Root1214留备份。
 
-**E2候选表批：** ccd29 context-02 的107个作业收据已齐（5工具+34 gen+34 tbl+34 net）；并发大表 finish 三次 rc142 保留，errorparse/warnparse 表用优化控制器单独 finish rc0，shared-e3 表的超时后收据经 source-job-verify 双端只读 VERIFIED。net-errorparse/net-warnparse 外层142但已有输出/收据，两项独立双端复验均 VERIFIED；原超时不改写。net-shared-e3 单独 start/finish 均rc0。下一步双核、PC、五片与准入，尚无新包或候选。
-
-**构造调度纠正：** 34 个 tbl 作业在 gen 完成后按独立 job 目录限并发四路执行；每命令独立限时和封收据，不同一作业重复写。随后 net 按已完成 tbl 分波执行，不再逐项串行等待。
-
-**E2候选构造：** `out/c43-source-ccd29-context-02/` 五个工具与34个 gen 作业均已 PREPARED（39条记录）；接下来34个 tbl 和34个 net、包、候选及准入均未完成。控制器通过 dev-run 缓存代码，仍逐作业执行与封收据。
+**构造失败保留：** context-01缺zlib.h；context-02有超时收据，且bootstrap误指活Root，pack预检拒绝live-root-record-must-use-ephemeral-bind。两上下文均只保留历史、不转授03；PC01预检失败、PC02首次route用斜杠目标名被拒，改正确短横目标名后六路线完成，原日志保留。宿主CC/zlib依赖未清除。
 
 **提速决策：** cc 的 callback-wrapper 二遍增量原型仅单单元映像与基线逐字同，多单元由于第二遍 FFI 裁剪变化出现映像差异；暂不吸入产品。cc 转向 `-o` 测试执行缓存；source-package 控制器已用 `tools/dev-run` 编译并实际完成 gen 作业，缓存仅代码、不缓存收据。
 
 **测试加速方向：** 主人同意对不以默认 `-run` 为被测合同的测试先用 `-o` 编出可执行文件并每次实际运行；已有 `tools/dev-run` 是内容寻址的开发代码缓存，不能缓存测试结论或自动代替默认 `-run` 资格。接入前逐批核产品和源闭包身份及输出／退出码等价；`-run` 自身合同仍单独验证。
 
-**新构造进展：** `out/c43-source-ccd29-context-01/` 的 tool-pack 缺宿主 zlib.h 而 rc2，失败保留；以 `CPATH=/usr/include/node` 和已有 zlib 库路径新建 `out/c43-source-ccd29-context-02/`，五个基础工具作业均 PREPARED/rc0。剩余102个 gen/tbl/net 作业与候选尚未完成；宿主 zlib 依赖仍明确保留。
+**当前流入口：** Root `8a8195d5…`／SID `ccd29c71…`；E2本机矩阵58/62，含旧候选证据，不能冒充同候选完整资格。19宽合同仍未关闭。
 
-**新源码构造入口：** `out/c43-source-ccd29-context-01/` 已用当前开发根及 gcc-11 正规 prepare，返回 `PREPARED source-package-context-v2`；首个 `tool-gen` 作业已 PREPARED，收据钉 source `ccd29c71…`。其余106作业、包、候选和准入均尚未完成，不授功能通过。cc 提速原型与构造重活错峰。
+**最新开发根：** SID `ccd29c71…`／APE `8a8195d5…`，PC `c345ac87…`，GEN `out/c43-native-kernel-ccd29-01/`，context-03的107作业全部rc0，kind2准入9/0及开发安装通过；smoke16/0，CLI宏23/0、目标/include各20/0。矩阵287 COVERED_LOCAL/366 MISSING/38 NEEDS_PRODUCT_CHANGE；其余历史证据不转授新候选。
 
-**当前流入口：** Root `1214e053…`／SID `a8258143…`；活源码 SID `ccd29c71…` 待新候选。E2绑定批13/0，19域矩阵当前286 COVERED_LOCAL、366 MISSING；`--all` rc3、19 unresolved、166批未跑。按阶段收口，不将矩阵覆盖率当实现进度。
-
-**最新开发根：** SID `a8258143…`／APE `1214e053…`，PC `b98c540e…`，GEN `out/c43-native-kernel-a825-01/`，kind2 9/0。正式E2正103/0、拒187/0、smoke16/0、有界API通过；旧根在GEN备份。矩阵284 COVERED_LOCAL/368 MISSING/39 NEEDS_PRODUCT_CHANGE，`--all` rc3/19 unresolved；当前CLI targets/includes各20/0，宏23/3红；下一步新源码驱动纪元及诊断域，开发安装不授发布资格。
-
-**最新源码入口：** live SID `ccd29c71…`／`a20f8049fc`，Root仍 `1214e053…`、SIDa825。私有CLI修复59/0（产品与包哈希见 `out/c43-pp-cli-order-fix-01/private-final-inputs.sha256`），E2正103/拒187，经典参考宏序和目标覆盖输出正确；尚未正规重构造/准入。正式 `out/c43-a825-pp-cli-wave-02/`：targets20/0、includes20/0、macros23/3红。CC改做隔离callback-wrapper增量二遍原型；主树热路径cdx单写，下一纪元按净差分合批。
+**最新源码入口：** live SID与已装候选同为 `ccd29c71…`。下一刀同候选重包E2流材料并复跑正域/拒绝域/身份输入绑定，然后修剩余预处理诊断和计数合同。cc仅在隔离域做提速与语法回归诊断；主树热路径cdx单写。
 
 **历史7bb6入口：** SID `7bb6eb92bd50f964171462945e6a9d0e04982bd6e6a42882abb054aefaa5e2be`；107 作业、PC、五片、APE、kind2 准入均在同源本代完成。开发根已装 `b226463fe13a77070a72fe9947131b797670e0e590fe2c9c4138c94ca9198ba9`，旧 Root7a 留 GEN 备份。smoke16/0、热多模块约0.109秒；本代 stream6 输入拒绝正式29/0，其他四 lower 模式直接51/778/1516/115全绿。默认 ftrim 对新 `cx_*` 两函数仍红；下一刀核 E2 新键采用链。`df8f/831a` 收据只作历史。
 
