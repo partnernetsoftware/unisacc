@@ -149,13 +149,13 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 <a id="work-tree"></a>
 ### 思维树
 
-**现行流推进（2026-10-28）：** E2既定本机62/62仍是Root41旧范围，不覆盖完整C99。E1数值/字面量/前缀/UCN值域私验188/501/624全0；在此基础上，E2宏身份与E3同字符异拼写已合入源码并串成私有产品dab8f54e。新ucn-identities批由该私有产品自身编译并实际运行，13/0：宏/参数/字符串化/pp-number、擦除非法UCN、跨单元静态隔离、63字符和原诊断位置；旧Root41同批13/12，原红保留。新E2流既有正例103/0、拒绝187/0。均未安装或正式准入，不升级19宽合同、完整N22或五外宿主。
+**现行流推进（2026-10-28）：** E2既定本机62/62仍是Root41旧范围，不覆盖完整C99。E1数值/字面量/前缀/UCN值域私验188/501/624全0；在此基础上，E2宏身份与E3同字符异拼写已合入源码并串成私有产品dab8f54e。新ucn-identities批已由正式安装体Rootda4e自身编译并实际运行，13/0：宏/参数/字符串化/pp-number、擦除非法UCN、跨单元静态隔离、63字符和原诊断位置；旧Root41同批13/12，原红保留。新E2流既有正例103/0、拒绝187/0。正式同源构造、kind2准入和开发安装已完成，但不升级19宽合同、完整N22或五外宿主。
 
-**2026-10-28 最新开发候选（cdx）：** 已装SID `a5ec8a435f0456fe9770f639b16523eb1be7fed74979e81f043ede566e98b083`，APE `41b836d7119b96907c3e978f38786d0162adac7ca57104688ee33021bbbdf1b6`（2,972,351 B），record `c7bc3012…`。context-a5ec-01的107作业全部外层rc0，GEN-a5ec-01双核/五片/真deflate完成；PC包 `480f91c8…` 独立VERIFIED，kind2准入9/0、安装rc0，旧Root8a8195d5在GEN备用。安装后smoke16/0、E2十批同候选PASS。--all仍rc3，177 coverage/19 unresolved/167未跑批/子批0；完整N22与外宿主仍开。
+**2026-10-28 最新开发候选（cdx）：** 已装SID `162191414d86d92afda572ff92f61c1afb0b2302d563abd4c52446115ef1b7d9`，APE `da4e7ef144186ccf578d282381ac671885094c6dfe30053727ac3f3c4a3e5592`（3,001,553 B），record `ab5f17c8…`。本源107作业全0、22对象/双核/五片/真deflate完成，PC包50cc5a96独立VERIFIED，kind2准入后安装rc0。旧Root41与record c7bc在GEN1621-01/bootstrap-before-install.*应急备用。实际安装体正式SOURCE smoke16/0、UCN13/0、RI单源29/0和多源15/0均PASS；cc独立33个-E探针全过。UCN首个登记批虽然断言13/0，因结果标记用了空格而被批运行器FAIL；改为协议要求的TAB后新叶PASS，原FAIL保留。证据out/c43-1621-installed-wave-{01,02}/。--all仍rc3，177覆盖/19缺口；完整N22、宽行和五外宿主未关；本代流材料及其他功能批尚待刷新，旧Root41的E2十批不转授。
 
-**2026-10-28 最新源码纪元（cdx）：** 已装SID仍a5ec8a43；live SID `162191414d86d92afda572ff92f61c1afb0b2302d563abd4c52446115ef1b7d9`，待一次正式封源构造。E2采用共享AnnexD事实的有限机校验，内部键规范化而-E/字符串化原样；数字域只校验通用UCN约束，不误套标识符AnnexD规则。E3在模型内部规范化标识符载荷并修units三处身份键，原始源/位置/RI输入身份保留；参考独立修复宏键与语义名字/诊断映射，50/0（旧参考50/14），不借产品实现替代参考。tools/ucn-pp-gen.cx与tools/ucn-identity-tables.cx分别可重现E2六表/E3三表，E1生成器786432图检查仍通过。六条实际路由gen/tbl/net共18相rc0，复用未改E1模型，私有包50cc5a96/APE dab8f54e（3,001,345 B）在out/c43-ucn-integrated-models-01；out/c43-ucn-identities-test-01保存整链13/0、旧根13/12、E2 103/187全0和首次诊断渲染空格oracle误差。小ASCII E3三组对照tape/stderr/rc全等，墙钟中位16.55→16.72ms，区间重叠，非总体性能界。主树cdx单写；30事实表check零差，旧Python导出债保留。已提交a0b150aa86；正式107和PC封条/独立复验完成，双核有新收据；下一步五片/APE/准入与安装，不转授私有测试资格。
+**2026-10-28 最新源码纪元（cdx）：** 已装SID同16219141；live SID `162191414d86d92afda572ff92f61c1afb0b2302d563abd4c52446115ef1b7d9`，正式同源构造/准入/开发安装已完成。E2采用共享AnnexD事实的有限机校验，内部键规范化而-E/字符串化原样；数字域只校验通用UCN约束，不误套标识符AnnexD规则。E3在模型内部规范化标识符载荷并修units三处身份键，原始源/位置/RI输入身份保留；参考独立修复宏键与语义名字/诊断映射，50/0（旧参考50/14），不借产品实现替代参考。tools/ucn-pp-gen.cx与tools/ucn-identity-tables.cx分别可重现E2六表/E3三表，E1生成器786432图检查仍通过。六条实际路由gen/tbl/net共18相rc0，复用未改E1模型，私有包50cc5a96/APE dab8f54e（3,001,345 B）在out/c43-ucn-integrated-models-01；out/c43-ucn-identities-test-01保存整链13/0、旧根13/12、E2 103/187全0和首次诊断渲染空格oracle误差。小ASCII E3三组对照tape/stderr/rc全等，墙钟中位16.55→16.72ms，区间重叠，非总体性能界。主树cdx单写；30事实表check零差，旧Python导出债保留。已提交a0b150aa86；正式107和PC封条/独立复验完成，双核有新收据；已装Rootda4e，正式SOURCE smoke16/0、UCN13/0、RI单源29/0和多源15/0均PASS；下一步刷新同候选流材料/功能批及两代固定点，不转授旧根结果。
 
-**本源正式构造（a0b150aa86）：** 新context `out/c43-source-1621-context-01/`已PREPARED，全文SHA d78d5f6a…；bootstrap与原生helper均测得SID16219141，冻结Root41/record c7bc3012。未改控制器的O2 ELF 67eb70d0…已编成（206,585 B），独立--verify-context与--list均rc0；107/107作业的start/finish/command退出码全部0，最终context复验通过。GEN1621双核/22对象已重建；PC1621-01完成34模型/六路线/declare/pack/seal/独立verify，包50cc5a96（1,630,081 B）与私验包逐字相同。仅授P3材料PREPARED/VERIFIED，非功能PASS；五片/APE/准入未完。当前清单168批/177覆盖/19缺口；实际--all仍rc3、167未跑批、子批0。根产品未换，不改源/pin，不把私有13/0转授正式候选。
+**本源正式构造（a0b150aa86）：** 新context `out/c43-source-1621-context-01/`已PREPARED，全文SHA d78d5f6a…；bootstrap与原生helper均测得SID16219141，冻结Root41/record c7bc3012。未改控制器的O2 ELF 67eb70d0…已编成（206,585 B），独立--verify-context与--list均rc0；107/107作业的start/finish/command退出码全部0，最终context复验通过。GEN1621双核/22对象已重建；PC1621-01完成34模型/六路线/declare/pack/seal/独立verify，包50cc5a96（1,630,081 B）与私验包逐字相同。P3材料PREPARED/VERIFIED、五片/APE/kind2准入与开发安装完成；功能资格仍逐批取得，不授N22/all-six。当前清单168批/177覆盖/19缺口；实际--all仍rc3、167未跑批、子批0。根产品已按kind2准入开发安装；只计新Root实际运行的正式SOURCE证据，不转授私有13/0。
 
 **2026-10-27 cdx 主刀计划（主人本轮改派；重构造仍串行，互不抢文件的轻切片由 cc／Codex 辅助）**
 
@@ -352,9 +352,9 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 <a id="memory-palace"></a>
 ### 记忆宫殿
 
-**已装产品构造：** context `out/c43-source-a5ec-context-01/`（foundation13a58d0e/producer1f4b7914）107条收据与107个outer.rc均为0；GEN `out/c43-native-kernel-a5ec-01/`；PC `out/c43-source-a5ec-full-pc-01/` 包 `480f91c805dd228410857b6daf992e40ca013a8e33a43afe7a17fcd24ed6f10e`；APE41b836d7、kind2 9/0、smoke16/0、正式E2十批通过。历史ccd29材料不转授。
+**已装产品构造：** source context `out/c43-source-1621-context-01/`已在旧Root41下完成107/107实际作业；GEN `out/c43-native-kernel-1621-01/`新建22对象、双核、五片与真deflate APE；PC `out/c43-source-1621-full-pc-01/`包50cc5a96独立VERIFIED。新Rootda4e/SID1621/record ab5f安装rc0，旧Root41及record在GEN的bootstrap-before-install.*。四个正式SOURCE批16/13/29/15均0失败，cc新Root独立-E探针33/33。换产品字节后旧source-context复验按预期rc2 receipt-bytes-mismatch；不手改旧上下文，下次固定点需新Root绑定的fresh context。历史a5ec/ccd29材料不转授。
 
-**本源构造入口：** a0b150aa86/SID16219141；context1621-01已PREPARED且独立复核，SHA d78d5f6a…，本源107/107收据齐，PC1621-01已封条并独立VERIFIED，包50cc5a96；GEN1621-01双核与上一代逐字相同，五片/APE/准入尚未完成。控制器O2 ELF67eb70d0来自未改的13a58d0e源；自身体系编译，外部GCC仅为已声明source-P3种子构造依赖。单工人占out/c43-source-1621-build-01/context-01；主线不改其输出或产品源。注意本机无/usr/include/zlib.h与链接名libz.so，tool-pack需已知/usr/include/node和受控私有链接；不把声明宿主依赖说成hermetic。--all当前177覆盖/19未解/子批0。
+**本源构造入口：** a0b150aa86/SID16219141；context1621-01已PREPARED且独立复核，SHA d78d5f6a…，本源107/107收据齐，PC1621-01已封条并独立VERIFIED，包50cc5a96；GEN1621-01双核与上一代同字节，五片/APE/kind2准入/开发安装完成。控制器O2 ELF67eb70d0来自未改的13a58d0e源；自身体系编译，外部GCC仅为已声明source-P3种子构造依赖。单工人占out/c43-source-1621-build-01/context-01；主线不改其输出或产品源。注意本机无/usr/include/zlib.h与链接名libz.so，tool-pack需已知/usr/include/node和受控私有链接；不把声明宿主依赖说成hermetic。--all当前177覆盖/19未解/子批0。
 
 **构造失败保留：** context-01缺zlib.h；context-02有超时收据，且bootstrap误指活Root，pack预检拒绝live-root-record-must-use-ephemeral-bind。两上下文均只保留历史、不转授03；PC01预检失败、PC02首次route用斜杠目标名被拒，改正确短横目标名后六路线完成，原日志保留。宿主CC/zlib依赖未清除。
 
@@ -364,9 +364,9 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 
 **当前流入口：** 已装Root41的E2既定62/62与stream1 265001c4/stream2 000d67dd身份仍保留。新私有E2 stream1 4f3c87fd正例103/0、拒绝187/0，E1 stream2仍68f08deb（188/501/624全0的同字节模型）。私有整链UCN回归13/0，旧Root41为13/12；新增批不自动关闭宽行或授已装资格。
 
-**最新开发根：** SIDa5ec8a43／APE41b836d7／PC480f91c8，旧Root8a8195d5已备份。全19矩阵315 COVERED_LOCAL/335 MISSING/41 NEEDS_PRODUCT_CHANGE；E2本机62格统一当前候选，E1基线与标准纠错后红例分列，其余历史证据不直接转授。
+**最新开发根：** SID16219141／APEda4e7ef1／PC50cc5a96，旧Root41b836d7及record c7bc在GEN1621-01应急备份。全19矩阵315 COVERED_LOCAL/335 MISSING/41 NEEDS_PRODUCT_CHANGE；62格是Root41历史本机台账；本代流材料批重验前不转授，已装新Root的四个正式SOURCE批已PASS。
 
-**最新源码入口：** live SID16219141，正式产品仍a5ec8a43。E1/E2/E3及独立参考的UCN身份修复已合入，通用数字约束与AnnexD标识符约束分域；公共拼写/原始诊断/RI身份保留。cc只交隔离E2差分，Codex辅助只在out构造模型和参考，主树cdx串行审入。三个生成器--check及30事实表零差通过；证据out/c43-ucn-identities-test-01与out/c43-ucn-integrated-models-01。原红、首次诊断缩进oracle错误和旧材料保留。本源107/PC/双核已闭合；下一刀五片/APE/准入/安装和同候选验证，不借私有结果。
+**最新源码入口：** live SID16219141，正式产品已同源16219141/Rootda4e。E1/E2/E3及独立参考的UCN身份修复已合入，通用数字约束与AnnexD标识符约束分域；公共拼写/原始诊断/RI身份保留。cc只交隔离E2差分，Codex辅助只在out构造模型和参考，主树cdx串行审入。三个生成器--check及30事实表零差通过；证据out/c43-ucn-identities-test-01与out/c43-ucn-integrated-models-01。原红、首次诊断缩进oracle错误和旧材料保留。本源107/PC/双核/五片/APE/kind2准入/开发安装已闭合；四个正式SOURCE批通过。下一刀本代流材料/功能批与同源两代固定点，不借旧结果。
 
 **历史7bb6入口：** SID `7bb6eb92bd50f964171462945e6a9d0e04982bd6e6a42882abb054aefaa5e2be`；107 作业、PC、五片、APE、kind2 准入均在同源本代完成。开发根已装 `b226463fe13a77070a72fe9947131b797670e0e590fe2c9c4138c94ca9198ba9`，旧 Root7a 留 GEN 备份。smoke16/0、热多模块约0.109秒；本代 stream6 输入拒绝正式29/0，其他四 lower 模式直接51/778/1516/115全绿。默认 ftrim 对新 `cx_*` 两函数仍红；下一刀核 E2 新键采用链。`df8f/831a` 收据只作历史。
 
@@ -380,7 +380,7 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 
 | 房间 | 当前事实／决定 | 证据与行动入口 |
 |---|---|---|
-| 0.0.43 现行源码与私验（2026-10-28） | live SID16219141；已装SIDa5ec/Root41。E2/E3 UCN身份修复已合入；私有包50cc5a96/APE dab8f54e自编控制器整链13/0，旧Root同批13/12；既有E2 103/187全0，私有smoke16/0。正式107/107与PC已完成，GEN双核已完成，五片/APE/准入未完；下列旧房间不再表示现行。 | out/c43-ucn-identities-test-01/、out/c43-ucn-integrated-models-01/；下一步完成五片/APE并准入安装，再做同候选功能批。RI image安装体批按installed-product-required拒绝私有路径，保留拒绝日志，未授正式RI资格。 |
+| 0.0.43 现行源码与私验（2026-10-28） | live SID16219141；已装SID1621/Rootda4e。E2/E3 UCN身份修复已合入；私有包50cc5a96/APE dab8f54e自编控制器整链13/0，旧Root同批13/12；既有E2 103/187全0，私有smoke16/0。正式107/PC/GEN/kind2准入及开发安装均完成，四SOURCE批PASS；下列旧房间不再表示现行。 | out/c43-ucn-identities-test-01/、out/c43-ucn-integrated-models-01/；下一步刷新本代流材料/功能批与同源两代固定点。旧私有路径拒绝日志保留；当前安装体RI image单源29/0、多源15/0正式PASS，仅授有限RI image合同。 |
 | 0.0.43 CLI源码纪元（2026-10-27） | live SID `ccd29c71…`／`a20f8049fc`，已装根仍SIDa825/Root1214。私有驱动+三PP变体59/0，E2正103/拒187、对象保护宏控制有效；目标宏与头搜索正式各20/0，宏批23/3红待构造。 | `out/c43-pp-cli-order-fix-01/`、`out/c43-a825-pp-cli-wave-02/`；合并可审FWD改进后建新context/PC/GEN并准入；不借a825收据。 |
 | 0.0.43 最新开发根（2026-10-27） | SID `a8258143…`，APE `1214e053…`/2,970,646 B，PC `b98c540e…`，107job全rc0，本代双核五片，kind2 9/0并开发安装。E2正103/0、拒187/0、smoke16/0、cx-bounded通过；`--all` rc3/19 unresolved。 | `out/c43-source-a825-context-01/`、`out/c43-source-a825-full-pc-01/`、`out/c43-native-kernel-a825-01/`、`out/c43-a825-admit-01/`、`out/c43-a825-local-wave-{01,02}/`；下一步CLI/诊断域、同源第二代。 |
 | 0.0.43 历史20a8构造前快照（2026-10-27） | SID `20a8d5a5…`；开发根仍旧 `b226463f…`。E2 两网私有替换已使默认 `cx-bounded.cx` 的 `-E/-run/-o` 通过；新 context 有 107 份 record，两个外层 rc142 保留 UNKNOWN 且只读双端 VERIFIED。PC/GEN/准入/安装待做。 | `out/c43-e2-adopt-02/`、`out/c43-source-20a8-context-{01,02}/`；下一步本代双核、PC、GEN、kind2、默认回归。 |
