@@ -1,0 +1,483 @@
+/* ucn-pp-gen.cx -- E2 universal character names: generate the UCN rows of the pp tables.
+ * Production generator; its pristine input is the six tables at 9b0b08bf68.
+ *
+ *   sh ./unisacc.com tools/ucn-pp-gen.cx -- gen     PRISTINE_ROOT OUT_ROOT
+ *   sh ./unisacc.com tools/ucn-pp-gen.cx -- --check PRISTINE_ROOT TARGET_ROOT
+ *
+ * Input fact: PRISTINE_ROOT/exec/facts/ucn-annexd.tsv (C99 Annex D ranges; every row is checked:
+ * 4-hex lo <= hi within 00A0..FFFF, kind letter|digit, per-kind sorted by lo, no same-kind overlap).
+ * Input tables: the six PRISTINE_ROOT/exec/pp tables as they were before this generator
+ * (every patched line must occur exactly once as a whole line; otherwise rc 3).
+ * gen writes the six patched tables under OUT_ROOT/exec/pp (OUT_ROOT may equal PRISTINE_ROOT).
+ * --check regenerates in memory and compares with TARGET_ROOT's six tables: comment lines
+ * (leading '#') and blank lines are ignored, every other line must match byte for byte; rc 0 when
+ * identical, rc 1 with the first differing line otherwise, so the committed tables are reproducible.
+ *
+ * Contract (0.0.43 E2, cdx ruling): spelling is never rewritten. A host state sends byte 92 to
+ * UCN.in (identifier domain: 6.4.3 value rules + Annex D membership + 6.4.2.1 initial digit) or
+ * UCNN.in (pp-number domain, 6.4.8: 6.4.3 value rules only) with [MARK U, LDI UCNK k,
+ * LDI UCNINIT 1|0, ADV]; the UCN is consumed with ADV only and validated by state (hex-digit
+ * prefix tries built from the fact); UCN.L0/UCN.no (result side) return by k to the host's
+ * continue state, or rewind to U and run the host's old end row when "\" is not u/U, so
+ * UCN-free input is unchanged. Key hosts intern the name: when UCNSEEN, CANON re-scans it and
+ * builds the identity key in the string buffer (ASCII runs via SBSPAN, each UCN as \U + 8
+ * lowercase hex via SBOUT), then SBINTERN; SB is saved/restored around CANON. The define-time
+ * body scan (HS0) validates UCNs in stored bodies even when the macro is never used. */
+
+enum { LET = 1, DIG = 2, INV = 3, NOP = 4 };
+enum { MAXR = 400, LINE = 8192, NTABLE = 6 };
+
+static void die(const char *what, const char *detail) {
+    fprintf(stderr, "ucn-pp-gen: %s%s%s\n", what, detail ? ": " : "", detail ? detail : "");
+    exit(3);
+}
+/* bounded formatting: every snprintf result is checked against its buffer */
+static void fmt_check(int n, size_t cap) { if (n < 0 || (size_t)n >= cap) die("formatted text exceeds its buffer", 0); }
+#define F(buf, ...) fmt_check(snprintf(buf, sizeof buf, __VA_ARGS__), sizeof buf)
+
+/* growable text buffer, bounded at 64 MiB */
+typedef struct { char *s; size_t n, cap; } Buf;
+static void bput(Buf *b, const char *s, size_t n) {
+    const size_t limit = (size_t)64 << 20;
+    if (b->n >= limit || n > limit - b->n - 1) die("table text exceeds the generator bound", 0);
+    if (b->n + n + 1 > b->cap) {
+        size_t cap = b->cap ? b->cap : 65536;
+        while (b->n + n + 1 > cap) cap *= 2;
+        if (cap > (size_t)64 << 20) die("table text exceeds the generator bound", 0);
+        b->s = realloc(b->s, cap); if (!b->s) die("out of memory", 0); b->cap = cap;
+    }
+    memcpy(b->s + b->n, s, n); b->n += n; b->s[b->n] = 0;
+}
+static void bputs(Buf *b, const char *s) { bput(b, s, strlen(s)); }
+
+static int lo_[MAXR], hi_[MAXR], kind_[MAXR], nr;
+static Buf B, R;            /* rows appended to rescan-byte.tsv / rescan-result.tsv */
+static int brows, rrows, nodes;
+static const char *HEX = "48-57,65-70,97-102";
+static const char *REJ_INV = "[[\"JUMP\",\"U\"],[\"REJECT\",\"invalid universal character name\"]]";
+static const char *REJ_NOP = "[[\"JUMP\",\"U\"],[\"REJECT\",\"universal character name not permitted in identifier\"]]";
+static const char *REJ_DIG = "[[\"JUMP\",\"U\"],[\"REJECT\",\"universal character name digit cannot start identifier\"]]";
+static const char *UNREACH = "[[\"REJECT\",\"unreachable\"]]";
+static const char *ADV = "[[\"ADV\"]]";
+
+static void row(Buf *b, const char *st, const char *obs, const char *next, const char *acts) {
+    char l[LINE]; F(l, "%s\t%s\t%s\t%s\n", st, obs, next, acts); bputs(b, l);
+}
+static void brow(const char *st, const char *obs, const char *next, const char *acts) { row(&B, st, obs, next, acts); brows++; }
+static void rrow(const char *st, const char *obs, const char *next, const char *acts) { row(&R, st, obs, next, acts); rrows++; }
+
+/* ---- value classification ---- */
+static int numeric;         /* 1 while generating the pp-number domain: 6.4.3 only, no Annex D */
+static int cls(int cp) {
+    int i;
+    if (numeric) return (cp >= 0xD800 && cp <= 0xDFFF) || (cp < 0xA0 && cp != 0x24 && cp != 0x40 && cp != 0x60) ? INV : LET;
+    if (cp < 0xA0) return (cp == 0x24 || cp == 0x40 || cp == 0x60) ? NOP : INV;
+    if (cp >= 0xD800 && cp <= 0xDFFF) return INV;
+    for (i = 0; i < nr; i++) if (kind_[i] == DIG && cp >= lo_[i] && cp <= hi_[i]) return DIG;
+    for (i = 0; i < nr; i++) if (kind_[i] == LET && cp >= lo_[i] && cp <= hi_[i]) return LET;
+    return NOP;
+}
+static int uniform(int from, int n) { int c = cls(from), i; for (i = 1; i < n; i++) if (cls(from + i) != c) return 0; return c; }
+static void obs(int d, char *out, size_t cap) {
+    int n = d < 10 ? snprintf(out, cap, "%d", 48 + d) : snprintf(out, cap, "%d,%d", 97 + d - 10, 65 + d - 10);
+    fmt_check(n, cap);
+}
+static const char *outcome_next(int c, int rem, char *buf, size_t cap) {
+    if (c == INV || c == NOP) return "DEAD";
+    fmt_check(snprintf(buf, cap, "UCN.%c%d", c == LET ? 'L' : 'D', rem), cap);
+    return buf;
+}
+static const char *outcome_acts(int c, int rem) {
+    if (c == INV) return REJ_INV;
+    if (c == NOP) return REJ_NOP;
+    if (rem) return ADV;
+    return c == LET ? "[[\"ADV\"],[\"RLD\",\"UCNK\"]]" : "[[\"ADV\"],[\"RLD\",\"UCNINIT\"]]";
+}
+/* trie node for the hex prefix v (depth digits consumed); the subtree covers 16^(4-depth) code points */
+static void trie(int v, int depth, const char *name) {
+    int d, span = 1 << (4 * (3 - depth)), c;
+    char bucket[5][200], o[16], child[64], nx[16];
+    for (c = 0; c < 5; c++) bucket[c][0] = 0;
+    nodes++;
+    for (d = 0; d < 16; d++) {
+        int from = (v * 16 + d) * span;
+        obs(d, o, sizeof o);
+        c = uniform(from, span);
+        if (c) {
+            size_t used = strlen(bucket[c]), add = strlen(o), comma = used ? 1 : 0;
+            if (add + comma >= sizeof bucket[c] - used) die("observation list exceeds its buffer", name);
+            if (comma) bucket[c][used++] = ',';
+            memcpy(bucket[c] + used, o, add + 1);
+        } else { F(child, "%s%X", name, d); brow(name, o, child, ADV); }
+    }
+    for (c = 1; c <= 4; c++) if (bucket[c][0]) brow(name, bucket[c], outcome_next(c, 3 - depth, nx, sizeof nx), outcome_acts(c, 3 - depth));
+    brow(name, "*", "DEAD", REJ_INV);
+    for (d = 0; d < 16; d++) {
+        int from = (v * 16 + d) * span;
+        if (!uniform(from, span)) { F(child, "%s%X", name, d); trie(v * 16 + d, depth + 1, child); }
+    }
+}
+/* entry prefix states of a domain: \u -> V (4-digit trie), \U0000 -> V, \U0001..\U0010 -> PLANES (4 more hex digits) */
+static void prefix(const char *dom, const char *planes) {
+    char in[16], u0[16], u1[16], u2[16], u3a[16], u3b[16], v[16];
+    F(in, "%s.in", dom); F(u0, "%s.U0", dom); F(u1, "%s.U1", dom); F(u2, "%s.U2", dom); F(u3a, "%s.U3a", dom); F(u3b, "%s.U3b", dom); F(v, "%s.V", dom);
+    brow(in, "117", v, ADV);
+    brow(in, "85", u0, ADV);
+    brow(in, "*", "UCN.no", "[[\"JUMP\",\"U\"],[\"RLD\",\"UCNK\"]]");
+    brow(u0, "48", u1, ADV); brow(u0, "*", "DEAD", REJ_INV);
+    brow(u1, "48", u2, ADV); brow(u1, "*", "DEAD", REJ_INV);
+    brow(u2, "48", u3a, ADV); brow(u2, "49", u3b, ADV); brow(u2, "*", "DEAD", REJ_INV);
+    brow(u3a, "48", v, ADV); brow(u3a, "49-57,65-70,97-102", planes, ADV); brow(u3a, "*", "DEAD", REJ_INV);
+    brow(u3b, "48", planes, ADV); brow(u3b, "*", "DEAD", REJ_INV);
+}
+
+/* ---- hosts: k, state receiving the 92 row, domain (0 identifier start, 1 identifier continue, 2 pp-number),
+   state/actions after a valid UCN, state/actions when "\" is not a UCN (the host's old row), key host flag ---- */
+typedef struct { int k; const char *st; int dom; const char *oknext, *okacts, *nonext, *noacts; int key; } Host;
+/* key hosts: the end row "ST * -> NEXT [MARK E, INTERN reg S E, rest]" becomes a UCNSEEN dispatch */
+typedef struct { const char *st, *next, *reg, *S, *E, *rest; } KeyHost;
+static const Host H[] = {
+ { 1, "DN0",         0, "DN",       "",                                                                            "DN.ue",   "[[\"MARK\",\"NE\"],[\"RLD\",\"UCNSEEN\"]]", 1 },
+ { 2, "DN",          1, "DN",       "",                                                                            "DN.ue",   "[[\"MARK\",\"NE\"],[\"RLD\",\"UCNSEEN\"]]", 1 },
+ { 3, "DP0",         0, "DPID",     "[\"COPYW\",\"PS_\",\"U\"]",                                                   "P3BLANK", "[[\"LDI\",\"t\",2],[\"STX\",\"EA\",[\"constant\",\"F_FN\"],\"t\"],[\"JUMP\",\"LS\"]]", 1 },
+ { 4, "DPID",        1, "DPID",     "",                                                                            "DPID.ue", "[[\"MARK\",\"PE_\"],[\"RLD\",\"UCNSEEN\"]]", 1 },
+ { 5, "XO",          0, "XID",      "[\"COPYW\",\"XS\",\"U\"]",                                                    "DEAD",    "[[\"REJECT\",\"not covered: #if expression\"]]", 1 },
+ { 6, "XID",         1, "XID",      "",                                                                            "XID.ue",  "[[\"MARK\",\"XE_\"],[\"RLD\",\"UCNSEEN\"]]", 1 },
+ { 7, "XD",          0, "XDI",      "[\"COPYW\",\"XS\",\"U\"]",                                                    "DEAD",    "[[\"REJECT\",\"not covered: #if expression\"]]", 1 },
+ { 8, "XDP",         0, "XDI",      "[\"COPYW\",\"XS\",\"U\"]",                                                    "DEAD",    "[[\"REJECT\",\"not covered: #if expression\"]]", 1 },
+ { 9, "XDI",         1, "XDI",      "",                                                                            "XDI.ue",  "[[\"MARK\",\"XE_\"],[\"RLD\",\"UCNSEEN\"]]", 1 },
+ {10, "XE.defword",  0, "XE.defid", "[\"COPYW\",\"xdf\",\"U\"]",                                                   "DEAD",    "[[\"REJECT\",\"not covered: #if defined operand\"]]", 0 },
+ {11, "XE.defparen", 0, "XE.defid", "[\"COPYW\",\"xdf\",\"U\"]",                                                   "DEAD",    "[[\"REJECT\",\"not covered: #if defined operand\"]]", 0 },
+ {12, "XE.defid",    1, "XE.defid", "",                                                                            "EB",      "[[\"SPANT\",\"xdf\"]]", 0 },
+ {13, "ERL",         0, "ERID",     "[\"COPYW\",\"IS\",\"U\"],[\"XATTR\",\"ESEG\"],[\"SETOT\",\"ESEG\"],[\"COPYW\",\"IDLN\",\"P4LN\"]", "ERL", "[[\"COPYT\"],[\"ADV\"]]", 1 },
+ {14, "ERID",        1, "ERID",     "",                                                                            "ERID.ue", "[[\"MARK\",\"IE\"],[\"RLD\",\"UCNSEEN\"]]", 1 },
+ {15, "EB",          0, "EBSP",     "[\"COPYW\",\"BIS\",\"U\"],[\"LDI\",\"PNT\",0],[\"RLD\",\"SEP\"]",             "EBP0",    "[[\"RLD\",\"SEP\"]]", 1 },
+ {16, "EBPT",        0, "EBSP",     "[\"COPYW\",\"BIS\",\"U\"],[\"RLD\",\"SEP\"]",                                 "DEAD",    "[[\"REJECT\",\"not covered: byte 1 in a body\"]]", 1 },
+ {17, "EBID",        1, "EBID",     "",                                                                            "EBID.ue", "[[\"MARK\",\"BIE\"],[\"RLD\",\"UCNSEEN\"]]", 1 },
+ {18, "HW",          0, "HID",      "[\"COPYW\",\"hs\",\"U\"]",                                                    "HPGW",    "[[\"RLD\",\"GLUE\"]]", 1 },
+ {19, "HID",         1, "HID",      "",                                                                            "HID.ue",  "[[\"MARK\",\"he\"],[\"RLD\",\"UCNSEEN\"]]", 1 },
+ {20, "HH3",         0, "HHI",      "[\"COPYW\",\"hs\",\"U\"]",                                                    "DEAD",    "[[\"REJECT\",\"not covered: # not followed by a parameter\"]]", 1 },
+ {21, "HHI",         1, "HHI",      "",                                                                            "HHI.ue",  "[[\"MARK\",\"he\"],[\"RLD\",\"UCNSEEN\"]]", 1 },
+ {22, "HPG1W",       1, "HW",       "[\"LDI\",\"GLUE\",0],[\"LDI\",\"PSP\",0],[\"MARK\",\"hc1\"],[\"SBSPAN\",\"U\",\"hc1\"],[\"LDI\",\"LASTK\",1]", "DEAD", "[[\"REJECT\",\"not covered: ## operand\"]]", 0 },
+ {23, "HPG1A",       1, "HA1",      "[\"LDI\",\"GLUE\",0],[\"LDI\",\"PSP\",0],[\"MARK\",\"hc1\"],[\"SBSPAN\",\"U\",\"hc1\"],[\"LDI\",\"LASTK\",1]", "DEAD", "[[\"REJECT\",\"not covered: ## operand\"]]", 0 },
+ {24, "HCPW",        1, "HW",       "[\"MARK\",\"hc1\"],[\"SBSPAN\",\"U\",\"hc1\"],[\"LDI\",\"LASTK\",1]",         "HW",      "[[\"MARK\",\"hc0\"],[\"ADV\"],[\"MARK\",\"hc1\"],[\"SBSPAN\",\"hc0\",\"hc1\"],[\"LDI\",\"LASTK\",0]]", 0 },
+ {25, "HCPA",        1, "HA1",      "[\"MARK\",\"hc1\"],[\"SBSPAN\",\"U\",\"hc1\"],[\"LDI\",\"LASTK\",1]",         "HA1",     "[[\"MARK\",\"hc0\"],[\"ADV\"],[\"MARK\",\"hc1\"],[\"SBSPAN\",\"hc0\",\"hc1\"],[\"LDI\",\"LASTK\",0]]", 0 },
+ {26, "EBN",         2, "EBN",      "[\"SPANT\",\"U\"]",                                                           "EB",      "[]", 0 },
+ {27, "ERN",         2, "ERN",      "[\"SPANT\",\"U\"]",                                                           "ERL",     "[]", 0 },
+ {28, "HS0",         0, "HS0I",     "",                                                                            "HS0",     "[[\"ADV\"]]", 0 },
+ {29, "HS0I",        1, "HS0I",     "",                                                                            "HS0",     "[[\"ADV\"]]", 0 },
+ {30, "HS0N",        2, "HS0N",     "",                                                                            "HS0",     "[[\"ADV\"]]", 0 },
+};
+static const KeyHost K[] = {
+ { "DN",   "DEOL",    "NID", "NS",  "NE",  "" },
+ { "DPID", "DPIDS",   "pid", "PS_", "PE_", ",[\"CMPI\",\"NP\",[\"constant\",\"MAXP\"]]" },
+ { "XID",  "XID1",    "t",   "XS",  "XE_", ",[\"CMP\",\"t\",\"ID_DEFD\"]" },
+ { "XDI",  "XDW",     "NID", "XS",  "XE_", ",[\"CMPI\",\"xpar\",1]" },
+ { "ERID", "ERPR",    "NID", "IS",  "IE",  ",[\"CMP\",\"NID\",\"ID_PRAGMAOP\"]" },
+ { "EBID", "XE.mode", "NID", "BIS", "BIE", ",[\"RLD\",\"XEMODE\"]" },
+ { "HID",  "HPL0I",   "hid", "hs",  "he",  ",[\"RLD\",\"hfn\"]" },
+ { "HHI",  "HPL0S",   "hid", "hs",  "he",  ",[\"LDI\",\"one\",1],[\"RLD\",\"one\"]" },
+};
+/* the 92 row's actions for host k; four rotating buffers so several entries may appear in one format call */
+static char eb[4][128]; static int ebi;
+static const char *entry(int k) {
+    char *e = eb[ebi = (ebi + 1) & 3]; int dom = -1, i;
+    for (i = 0; i < (int)(sizeof H / sizeof H[0]); i++) if (H[i].k == k) dom = H[i].dom;
+    if (dom < 0) die("unknown host", 0);
+    fmt_check(snprintf(e, sizeof eb[0], "[[\"MARK\",\"U\"],[\"LDI\",\"UCNK\",%d],[\"LDI\",\"UCNINIT\",%d],[\"ADV\"]]", k, dom == 0), sizeof eb[0]);
+    return e;
+}
+
+/* ---- the fact ---- */
+static void load_fact(const char *root) {
+    char path[4096], l[LINE]; FILE *f; int i, j;
+    F(path, "%s/exec/facts/ucn-annexd.tsv", root);
+    f = fopen(path, "rb"); if (!f) die("cannot open fact", path);
+    while (fgets(l, sizeof l, f)) {
+        char lo[16], hi[16], block[64], kind[16], *e1, *e2; int k, p;
+        if (l[0] == '#' || l[0] == '\n' || !strncmp(l, "lo\t", 3)) continue;
+        if (!strchr(l, '\n')) die("fact line too long", l);
+        if (sscanf(l, "%15s %15s %63s %15s", lo, hi, block, kind) != 4) die("fact row needs lo hi block kind", l);
+        if (nr >= MAXR) die("too many fact rows", 0);
+        lo_[nr] = (int)strtol(lo, &e1, 16); hi_[nr] = (int)strtol(hi, &e2, 16);
+        if (strlen(lo) != 4 || strlen(hi) != 4 || *e1 || *e2) die("fact row: lo/hi must be 4 hex digits", l);
+        if (lo_[nr] > hi_[nr] || lo_[nr] < 0xA0 || hi_[nr] > 0xFFFF) die("fact row: range must satisfy 00A0 <= lo <= hi <= FFFF", l);
+        if (!strcmp(kind, "letter")) k = LET; else if (!strcmp(kind, "digit")) k = DIG; else die("fact row: kind must be letter or digit", l);
+        for (p = nr - 1; p >= 0 && kind_[p] != k; p--) ;
+        if (p >= 0 && lo_[nr] <= hi_[p]) die("fact row: not sorted by lo within its kind", l);
+        kind_[nr] = k; nr++;
+    }
+    if (ferror(f)) die("fact read failed", path);
+    fclose(f);
+    for (i = 0; i < nr; i++) for (j = 0; j < i; j++)
+        if (kind_[i] == kind_[j] && lo_[i] <= hi_[j] && lo_[j] <= hi_[i]) die("fact: same-kind ranges overlap", 0);
+    if (!nr) die("fact has no rows", path);
+}
+
+/* ---- the generated rows ---- */
+static void generate(void) {
+    int i;
+    char hdr[LINE];
+    F(hdr, "\n# ---- Universal character names in E2 identifiers and pp-numbers (C99 6.4.3, 6.4.2.1p3, 6.4.8, Annex D).\n"
+           "# Generated by tools/ucn-pp-gen.cx from exec/facts/ucn-annexd.tsv (%d ranges); do not edit by hand.\n"
+           "# UCN.in: identifier domain (value rules, Annex D, initial digit); UCNN.in: pp-number domain (value rules only).\n"
+           "# Entered from a host state at byte 92 with [MARK U, LDI UCNK k, LDI UCNINIT 1|0, ADV]; consumes with ADV only\n"
+           "# (spelling is never rewritten); UCN.L0/UCN.no (rescan-result.tsv) return to the host by k. CANON re-scans an\n"
+           "# interned name that contained a UCN and builds its identity key (\\U + 8 lowercase hex per UCN) in the string buffer.\n", nr);
+    bputs(&B, hdr);
+    bputs(&R, "\n# ---- UCN result states, generated by tools/ucn-pp-gen.cx with the UCN section of rescan-byte.tsv.\n");
+    /* identifier domain: planes 1..16 are well-formed but outside Annex D */
+    prefix("UCN", "UCN.H0");
+    brow("UCN.H0", HEX, "UCN.H1", ADV); brow("UCN.H0", "*", "DEAD", REJ_INV);
+    brow("UCN.H1", HEX, "UCN.H2", ADV); brow("UCN.H1", "*", "DEAD", REJ_INV);
+    brow("UCN.H2", HEX, "UCN.H3", ADV); brow("UCN.H2", "*", "DEAD", REJ_INV);
+    brow("UCN.H3", HEX, "DEAD", REJ_NOP);  brow("UCN.H3", "*", "DEAD", REJ_INV);
+    /* remaining-digit consumers after an early uniform decision */
+    for (i = 3; i >= 1; i--) {
+        char st[16], nx[16];
+        F(st, "UCN.L%d", i); F(nx, "UCN.L%d", i - 1); brow(st, HEX, nx, i > 1 ? ADV : "[[\"ADV\"],[\"RLD\",\"UCNK\"]]"); brow(st, "*", "DEAD", REJ_INV);
+        F(st, "UCN.D%d", i); F(nx, "UCN.D%d", i - 1); brow(st, HEX, nx, i > 1 ? ADV : "[[\"ADV\"],[\"RLD\",\"UCNINIT\"]]"); brow(st, "*", "DEAD", REJ_INV);
+    }
+    trie(0, 0, "UCN.V");
+    /* pp-number domain (6.4.8 identifier-nondigit includes any UCN; Annex D is an identifier constraint only);
+       planes 1..16 are accepted through the shared UCN.L3 chain */
+    numeric = 1;
+    prefix("UCNN", "UCN.L3");
+    trie(0, 0, "UCNN.V");
+    numeric = 0;
+    /* result side: outcomes and host returns (UCN.L0 = valid, UCN.D0 = Annex D digit) */
+    rrow("UCN.D0", "1", "DEAD", REJ_DIG);
+    rrow("UCN.D0", "0", "UCN.L0", "[[\"RLD\",\"UCNK\"]]");
+    rrow("UCN.D0", "*", "DEAD", UNREACH);
+    for (i = 0; i < (int)(sizeof H / sizeof H[0]); i++) {
+        char k[8], acts[1024];
+        F(k, "%d", H[i].k);
+        F(acts, "[%s%s[\"LDI\",\"UCNSEEN\",%d]]", H[i].okacts, H[i].okacts[0] ? "," : "", H[i].key);
+        rrow("UCN.L0", k, H[i].oknext, acts);
+        rrow("UCN.no", k, H[i].nonext, H[i].noacts);
+    }
+    rrow("UCN.L0", "*", "DEAD", UNREACH);
+    rrow("UCN.no", "*", "DEAD", UNREACH);
+    /* key hosts: UCNSEEN dispatch and CANON return */
+    for (i = 0; i < (int)(sizeof K / sizeof K[0]); i++) {
+        char st[32], k[8], acts[1024];
+        F(st, "%s.ue", K[i].st); F(k, "%d", i + 1);
+        F(acts, "[[\"INTERN\",\"%s\",\"%s\",\"%s\"]%s]", K[i].reg, K[i].S, K[i].E, K[i].rest);
+        rrow(st, "0", K[i].next, acts);
+        F(acts, "[[\"SBSAVE\",\"UCNSB\"],[\"SBCLR\"],[\"JUMP\",\"%s\"],[\"MARK\",\"CA\"],[\"LDI\",\"CANRET\",%d]]", K[i].S, i + 1);
+        rrow(st, "1", "CANON.in", acts);
+        rrow(st, "*", "DEAD", UNREACH);
+        F(acts, "[[\"SBINTERN\",\"%s\"],[\"SBCLR\"],[\"SBBLOB\",\"UCNSB\"],[\"LDI\",\"UCNSEEN\",0]%s]", K[i].reg, K[i].rest);
+        rrow("CANON.ok", k, K[i].next, acts);
+    }
+    rrow("CANON.ok", "*", "DEAD", UNREACH);
+    /* ## operand copy: the domain follows the kind of the token being built (LASTK 2 = pp-number) */
+    rrow("HCPW.uk", "2", "UCNN.in", entry(24)); rrow("HCPW.uk", "*", "UCN.in", entry(24));
+    rrow("HCPA.uk", "2", "UCNN.in", entry(25)); rrow("HCPA.uk", "*", "UCN.in", entry(25));
+    /* CANON: re-scan of a validated name from CA; stops where the host's scan stopped */
+    brow("CANON.in", "48-57,65-90,95,97-122", "CANON.in", ADV);
+    brow("CANON.in", "92", "CANON.bs", "[[\"MARK\",\"CB\"],[\"ADV\"]]");
+    brow("CANON.in", "*", "CANON.ok", "[[\"MARK\",\"CB\"],[\"SBSPAN\",\"CA\",\"CB\"],[\"RLD\",\"CANRET\"]]");
+    brow("CANON.bs", "117", "CANON.u0", "[[\"SBSPAN\",\"CA\",\"CB\"],[\"SBOUT\",92],[\"SBOUT\",85],[\"SBOUT\",48],[\"SBOUT\",48],[\"SBOUT\",48],[\"SBOUT\",48],[\"ADV\"]]");
+    brow("CANON.bs", "85", "CANON.U0", "[[\"SBSPAN\",\"CA\",\"CB\"],[\"SBOUT\",92],[\"SBOUT\",85],[\"ADV\"]]");
+    brow("CANON.bs", "*", "CANON.ok", "[[\"JUMP\",\"CB\"],[\"SBSPAN\",\"CA\",\"CB\"],[\"RLD\",\"CANRET\"]]");
+    for (i = 0; i < 12; i++) {
+        char st[16], nx[16], o[16], acts[128]; int d, last = (i == 3 || i == 11);
+        if (i < 4) { F(st, "CANON.u%d", i); F(nx, "CANON.u%d", i + 1); }
+        else { F(st, "CANON.U%d", i - 4); F(nx, "CANON.U%d", i - 3); }
+        if (last) F(nx, "CANON.in");
+        for (d = 0; d < 16; d++) {
+            int lo = d < 10 ? 48 + d : 97 + d - 10;
+            obs(d, o, sizeof o);
+            if (last) F(acts, "[[\"SBOUT\",%d],[\"ADV\"],[\"MARK\",\"CA\"]]", lo); else F(acts, "[[\"SBOUT\",%d],[\"ADV\"]]", lo);
+            brow(st, o, nx, acts);
+        }
+        brow(st, "*", "DEAD", UNREACH);
+    }
+    /* text-level pp-number (6.4.8) in the rescan: digits, ".digit", then [0-9A-Za-z_.] with e/E/p/P[+-] and UCNs, copied byte
+       for byte; a macro name glued to a number (1e, 0xE+e) is part of the pp-number and must not expand. Mirrors EBN. */
+    brow("ERDOT", "48-57", "ERN", "[[\"COPYT\"],[\"ADV\"]]");
+    brow("ERDOT", "*", "ERL", "[]");
+    brow("ERN", "69,80,101,112", "ERNE", "[[\"COPYT\"],[\"ADV\"]]");
+    brow("ERN", "46,48-57,65-68,70-79,81-90,95,97-100,102-111,113-122", "ERN", "[[\"COPYT\"],[\"ADV\"]]");
+    brow("ERN", "92", "UCNN.in", entry(27));
+    brow("ERN", "*", "ERL", "[]");
+    brow("ERNE", "43,45", "ERN", "[[\"COPYT\"],[\"ADV\"]]");
+    brow("ERNE", "*", "ERN", "[]");
+}
+
+/* ---- exact-line patching of the host tables (in memory) ---- */
+static const char *TABLES[NTABLE] = { "directive-scan-byte.tsv", "directive-body-byte.tsv", "expression-byte.tsv",
+                                      "rescan-byte.tsv", "rescan-result.tsv", "hash-byte.tsv" };
+static Buf T[NTABLE];
+static Buf *cur; static const char *curname;
+static void slurp(Buf *b, const char *path) {
+    FILE *f = fopen(path, "rb"); char chunk[65536]; size_t n;
+    if (!f) die("cannot open table", path);
+    b->n = 0;
+    while ((n = fread(chunk, 1, sizeof chunk, f)) > 0) bput(b, chunk, n);
+    if (ferror(f)) die("table read failed", path);
+    fclose(f);
+    if (!b->s) bput(b, "", 0);
+}
+static void topen(int i) { cur = &T[i]; curname = TABLES[i]; }
+/* replace the whole line OLD (without newline) by NEW (empty, one or several lines); OLD must occur exactly once as a full line */
+static void tline(const char *old, const char *new_) {
+    char *p = cur->s, *hit = 0; size_t ol = strlen(old), nl = strlen(new_); int count = 0;
+    if (!ol) die("empty patch line", curname);
+    while ((p = strstr(p, old))) {
+        if ((p == cur->s || p[-1] == '\n') && p[ol] == '\n') { count++; hit = p; }
+        p += ol;
+    }
+    if (count != 1) { char m[LINE]; F(m, "%s: a patched line must occur exactly once, found %d: %s", curname, count, old); die("table does not match the pristine input", m); }
+    {
+        size_t off = (size_t)(hit - cur->s), tail = cur->n - off - ol;
+        Buf out = {0};
+        bput(&out, cur->s, off); bput(&out, new_, nl); bput(&out, cur->s + off + ol, tail);
+        if (!nl && out.s[off] == '\n' && off && out.s[off - 1] == '\n') { memmove(out.s + off, out.s + off + 1, out.n - off); out.n--; }   /* a deleted line leaves no blank line */
+        free(cur->s); *cur = out;
+    }
+}
+static void patch_tables(void) {
+    char nb[LINE], l[64]; int i;
+    topen(0);   /* directive-scan-byte.tsv */
+    tline("DWS\t*\tDN\t[[\"MARK\",\"NS\"]]", "DWS\t*\tDN0\t[[\"MARK\",\"NS\"]]");
+    F(nb, "DN0\t48-57,65-90,95,97-122\tDN\t[[\"ADV\"]]\nDN0\t92\tUCN.in\t%s\nDN0\t*\tDN.ue\t[[\"MARK\",\"NE\"],[\"RLD\",\"UCNSEEN\"]]\nDN\t48-57,65-90,95,97-122\tDN\t[[\"ADV\"]]", entry(1));
+    tline("DN\t48-57,65-90,95,97-122\tDN\t[[\"ADV\"]]", nb);
+    F(nb, "DN\t92\tUCN.in\t%s\nDN\t*\tDN.ue\t[[\"MARK\",\"NE\"],[\"RLD\",\"UCNSEEN\"]]", entry(2));
+    tline("DN\t*\tDEOL\t[[\"MARK\",\"NE\"],[\"INTERN\",\"NID\",\"NS\",\"NE\"]]", nb);
+
+    topen(1);   /* directive-body-byte.tsv */
+    F(nb, "DP0\t65-90,95,97-122\tDPID\t[[\"MARK\",\"PS_\"]]\nDP0\t92\tUCN.in\t%s", entry(3));
+    tline("DP0\t65-90,95,97-122\tDPID\t[[\"MARK\",\"PS_\"]]", nb);
+    F(nb, "DPID\t92\tUCN.in\t%s\nDPID\t*\tDPID.ue\t[[\"MARK\",\"PE_\"],[\"RLD\",\"UCNSEEN\"]]", entry(4));
+    tline("DPID\t*\tDPIDS\t[[\"MARK\",\"PE_\"],[\"INTERN\",\"pid\",\"PS_\",\"PE_\"],[\"CMPI\",\"NP\",[\"constant\",\"MAXP\"]]]", nb);
+
+    topen(2);   /* expression-byte.tsv */
+    F(nb, "XO\t65-90,95,97-122\tXID\t[[\"MARK\",\"XS\"]]\nXO\t92\tUCN.in\t%s", entry(5));
+    tline("XO\t65-90,95,97-122\tXID\t[[\"MARK\",\"XS\"]]", nb);
+    F(nb, "XID\t92\tUCN.in\t%s\nXID\t*\tXID.ue\t[[\"MARK\",\"XE_\"],[\"RLD\",\"UCNSEEN\"]]", entry(6));
+    tline("XID\t*\tXID1\t[[\"MARK\",\"XE_\"],[\"INTERN\",\"t\",\"XS\",\"XE_\"],[\"CMP\",\"t\",\"ID_DEFD\"]]", nb);
+    F(nb, "XD\t65-90,95,97-122\tXDI\t[[\"MARK\",\"XS\"]]\nXD\t92\tUCN.in\t%s", entry(7));
+    tline("XD\t65-90,95,97-122\tXDI\t[[\"MARK\",\"XS\"]]", nb);
+    F(nb, "XDP\t65-90,95,97-122\tXDI\t[[\"MARK\",\"XS\"]]\nXDP\t92\tUCN.in\t%s", entry(8));
+    tline("XDP\t65-90,95,97-122\tXDI\t[[\"MARK\",\"XS\"]]", nb);
+    F(nb, "XDI\t92\tUCN.in\t%s\nXDI\t*\tXDI.ue\t[[\"MARK\",\"XE_\"],[\"RLD\",\"UCNSEEN\"]]", entry(9));
+    tline("XDI\t*\tXDW\t[[\"MARK\",\"XE_\"],[\"INTERN\",\"NID\",\"XS\",\"XE_\"],[\"CMPI\",\"xpar\",1]]", nb);
+    F(nb, "XE.defword\t65-90,95,97-122\tXE.defid\t[[\"MARK\",\"xdf\"]]\nXE.defword\t92\tUCN.in\t%s", entry(10));
+    tline("XE.defword\t65-90,95,97-122\tXE.defid\t[[\"MARK\",\"xdf\"]]", nb);
+    F(nb, "XE.defparen\t65-90,95,97-122\tXE.defid\t[[\"MARK\",\"xdf\"]]\nXE.defparen\t92\tUCN.in\t%s", entry(11));
+    tline("XE.defparen\t65-90,95,97-122\tXE.defid\t[[\"MARK\",\"xdf\"]]", nb);
+    F(nb, "XE.defid\t48-57,65-90,95,97-122\tXE.defid\t[[\"ADV\"]]\nXE.defid\t92\tUCN.in\t%s", entry(12));
+    tline("XE.defid\t48-57,65-90,95,97-122\tXE.defid\t[[\"ADV\"]]", nb);
+
+    topen(3);   /* rescan-byte.tsv: hosts, text pp-number entry, removal of the old shape-only UCN rows, then the generated section */
+    F(nb, "ERL\t65-90,95,97-122\tERID\t[[\"MARK\",\"IS\"],[\"XATTR\",\"ESEG\"],[\"SETOT\",\"ESEG\"],[\"COPYW\",\"IDLN\",\"P4LN\"]]\nERL\t92\tUCN.in\t%s", entry(13));
+    tline("ERL\t65-90,95,97-122\tERID\t[[\"MARK\",\"IS\"],[\"XATTR\",\"ESEG\"],[\"SETOT\",\"ESEG\"],[\"COPYW\",\"IDLN\",\"P4LN\"]]", nb);
+    tline("ERID\t92\tUCN\t[[\"MARK\",\"U\"],[\"ADV\"]]", "");
+    tline("ERL\t39\tERS39\t[[\"COPYT\"],[\"ADV\"]]", "ERL\t39\tERS39\t[[\"COPYT\"],[\"ADV\"]]\nERL\t46\tERDOT\t[[\"COPYT\"],[\"ADV\"]]\nERL\t48-57\tERN\t[[\"COPYT\"],[\"ADV\"]]");
+    F(nb, "ERID\t92\tUCN.in\t%s\nERID\t*\tERID.ue\t[[\"MARK\",\"IE\"],[\"RLD\",\"UCNSEEN\"]]", entry(14));
+    tline("ERID\t*\tERPR\t[[\"MARK\",\"IE\"],[\"INTERN\",\"NID\",\"IS\",\"IE\"],[\"CMP\",\"NID\",\"ID_PRAGMAOP\"]]", nb);
+    tline("UCN\t117\tUCN4_0\t[[\"ADV\"]]", ""); tline("UCN\t85\tUCN8_0\t[[\"ADV\"]]", ""); tline("UCN\t*\tERIDX\t[[\"JUMP\",\"U\"]]", "");
+    for (i = 0; i < 4; i++) {
+        if (i == 3) F(l, "ERID"); else F(l, "UCN4_%d", i + 1);
+        F(nb, "UCN4_%d\t48-57,65-70,97-102\t%s\t[[\"ADV\"]]", i, l); tline(nb, "");
+        F(nb, "UCN4_%d\t*\tERIDX\t[[\"JUMP\",\"U\"]]", i); tline(nb, "");
+    }
+    for (i = 0; i < 8; i++) {
+        if (i == 7) F(l, "ERID"); else F(l, "UCN8_%d", i + 1);
+        F(nb, "UCN8_%d\t48-57,65-70,97-102\t%s\t[[\"ADV\"]]", i, l); tline(nb, "");
+        F(nb, "UCN8_%d\t*\tERIDX\t[[\"JUMP\",\"U\"]]", i); tline(nb, "");
+    }
+    tline("ERIDX\t*\tERPR\t[[\"MARK\",\"IE\"],[\"INTERN\",\"NID\",\"IS\",\"IE\"],[\"CMP\",\"NID\",\"ID_PRAGMAOP\"]]", "");
+    F(nb, "EB\t65-90,95,97-122\tEBSP\t[[\"MARK\",\"BIS\"],[\"LDI\",\"PNT\",0],[\"RLD\",\"SEP\"]]\nEB\t92\tUCN.in\t%s", entry(15));
+    tline("EB\t65-90,95,97-122\tEBSP\t[[\"MARK\",\"BIS\"],[\"LDI\",\"PNT\",0],[\"RLD\",\"SEP\"]]", nb);
+    F(nb, "EBPT\t65-90,95,97-122\tEBSP\t[[\"MARK\",\"BIS\"],[\"RLD\",\"SEP\"]]\nEBPT\t92\tUCN.in\t%s", entry(16));
+    tline("EBPT\t65-90,95,97-122\tEBSP\t[[\"MARK\",\"BIS\"],[\"RLD\",\"SEP\"]]", nb);
+    F(nb, "EBID\t92\tUCN.in\t%s", entry(17));
+    tline("EBID\t92\tDEAD\t[[\"REJECT\",\"not covered: UCN in a body\"]]", nb);
+    F(nb, "EBN\t92\tUCNN.in\t%s\nEBN\t*\tEB\t[]", entry(26));
+    tline("EBN\t*\tEB\t[]", nb);
+    tline("EBID\t*\tXE.mode\t[[\"MARK\",\"BIE\"],[\"INTERN\",\"NID\",\"BIS\",\"BIE\"],[\"RLD\",\"XEMODE\"]]", "EBID\t*\tEBID.ue\t[[\"MARK\",\"BIE\"],[\"RLD\",\"UCNSEEN\"]]");
+    bput(cur, B.s, B.n);
+
+    topen(4);   /* rescan-result.tsv: the generated result section */
+    bput(cur, R.s, R.n);
+
+    topen(5);   /* hash-byte.tsv */
+    F(nb, "HW\t65-90,95,97-122\tHID\t[[\"MARK\",\"hs\"]]\nHW\t92\tUCN.in\t%s", entry(18));
+    tline("HW\t65-90,95,97-122\tHID\t[[\"MARK\",\"hs\"]]", nb);
+    F(nb, "HID\t92\tUCN.in\t%s", entry(19));
+    tline("HID\t92\tDEAD\t[[\"REJECT\",\"not covered: UCN in a body\"]]", nb);
+    tline("HID\t*\tHPL0I\t[[\"MARK\",\"he\"],[\"INTERN\",\"hid\",\"hs\",\"he\"],[\"RLD\",\"hfn\"]]", "HID\t*\tHID.ue\t[[\"MARK\",\"he\"],[\"RLD\",\"UCNSEEN\"]]");
+    F(nb, "HH3\t65-90,95,97-122\tHHI\t[[\"MARK\",\"hs\"]]\nHH3\t92\tUCN.in\t%s", entry(20));
+    tline("HH3\t65-90,95,97-122\tHHI\t[[\"MARK\",\"hs\"]]", nb);
+    F(nb, "HHI\t48-57,65-90,95,97-122\tHHI\t[[\"ADV\"]]\nHHI\t92\tUCN.in\t%s\nHHI\t*\tHHI.ue\t[[\"MARK\",\"he\"],[\"RLD\",\"UCNSEEN\"]]", entry(21));
+    tline("HHI\t48-57,65-90,95,97-122\tHHI\t[[\"ADV\"]]", nb);
+    tline("HHI\t*\tHPL0S\t[[\"MARK\",\"he\"],[\"INTERN\",\"hid\",\"hs\",\"he\"],[\"LDI\",\"one\",1],[\"RLD\",\"one\"]]", "");
+    /* define-time body scan: identifier (HS0I) and pp-number (HS0N) sub-states so stored bodies are validated even when unused */
+    F(nb, "HS0\t65-90,95,97-122\tHS0I\t[[\"ADV\"]]\nHS0\t48-57\tHS0N\t[[\"ADV\"]]\nHS0\t92\tUCN.in\t%s\nHS0\t*\tHS0\t[[\"ADV\"]]\n"
+          "HS0\t46\tHS0DOT\t[[\"ADV\"]]\nHS0DOT\t48-57\tHS0N\t[[\"ADV\"]]\nHS0DOT\t*\tHS0\t[]\n"
+          "HS0N\t69,80,101,112\tHS0NE\t[[\"ADV\"]]\nHS0N\t46,48-57,65-68,70-79,81-90,95,97-100,102-111,113-122\tHS0N\t[[\"ADV\"]]\nHS0NE\t43,45\tHS0N\t[[\"ADV\"]]\nHS0NE\t*\tHS0N\t[]\n"
+          "HS0N\t92\tUCNN.in\t%s\nHS0N\t35\tHS0\t[[\"ADV\"],[\"LDI\",\"hz\",1],[\"STX\",\"EA\",[\"constant\",\"F_HASH\"],\"hz\"]]\nHS0N\t34\tHSQ34\t[[\"ADV\"]]\nHS0N\t39\tHSQ39\t[[\"ADV\"]]\nHS0N\t256\tRET\t[[\"INPOP\"]]\nHS0N\t*\tHS0\t[[\"ADV\"]]\n"
+          "HS0I\t48-57,65-90,95,97-122\tHS0I\t[[\"ADV\"]]\nHS0I\t92\tUCN.in\t%s\nHS0I\t35\tHS0\t[[\"ADV\"],[\"LDI\",\"hz\",1],[\"STX\",\"EA\",[\"constant\",\"F_HASH\"],\"hz\"]]\nHS0I\t34\tHSQ34\t[[\"ADV\"]]\nHS0I\t39\tHSQ39\t[[\"ADV\"]]\nHS0I\t256\tRET\t[[\"INPOP\"]]\nHS0I\t*\tHS0\t[[\"ADV\"]]",
+          entry(28), entry(30), entry(29));
+    tline("HS0\t*\tHS0\t[[\"ADV\"]]", nb);
+    F(nb, "HPG1W\t48-57,65-90,95,97-122\tHCPW\t[[\"LDI\",\"GLUE\",0],[\"LDI\",\"PSP\",0]]\nHPG1W\t92\tUCN.in\t%s", entry(22));
+    tline("HPG1W\t48-57,65-90,95,97-122\tHCPW\t[[\"LDI\",\"GLUE\",0],[\"LDI\",\"PSP\",0]]", nb);
+    F(nb, "HPG1A\t48-57,65-90,95,97-122\tHCPA\t[[\"LDI\",\"GLUE\",0],[\"LDI\",\"PSP\",0]]\nHPG1A\t92\tUCN.in\t%s", entry(23));
+    tline("HPG1A\t48-57,65-90,95,97-122\tHCPA\t[[\"LDI\",\"GLUE\",0],[\"LDI\",\"PSP\",0]]", nb);
+    tline("HCPW\t0-8,11-31,33,36-38,40-43,45-47,58-64,91-94,96,123-255\tHW\t[[\"MARK\",\"hc0\"],[\"ADV\"],[\"MARK\",\"hc1\"],[\"SBSPAN\",\"hc0\",\"hc1\"],[\"LDI\",\"LASTK\",0]]",
+          "HCPW\t0-8,11-31,33,36-38,40-43,45-47,58-64,91,93-94,96,123-255\tHW\t[[\"MARK\",\"hc0\"],[\"ADV\"],[\"MARK\",\"hc1\"],[\"SBSPAN\",\"hc0\",\"hc1\"],[\"LDI\",\"LASTK\",0]]\nHCPW\t92\tHCPW.uk\t[[\"RLD\",\"LASTK\"]]");
+    tline("HCPA\t0-8,11-31,33,36-38,40-43,45-47,58-64,91-94,96,123-255\tHA1\t[[\"MARK\",\"hc0\"],[\"ADV\"],[\"MARK\",\"hc1\"],[\"SBSPAN\",\"hc0\",\"hc1\"],[\"LDI\",\"LASTK\",0]]",
+          "HCPA\t0-8,11-31,33,36-38,40-43,45-47,58-64,91,93-94,96,123-255\tHA1\t[[\"MARK\",\"hc0\"],[\"ADV\"],[\"MARK\",\"hc1\"],[\"SBSPAN\",\"hc0\",\"hc1\"],[\"LDI\",\"LASTK\",0]]\nHCPA\t92\tHCPA.uk\t[[\"RLD\",\"LASTK\"]]");
+}
+
+/* ---- comparison ignoring comment and blank lines ---- */
+static const char *next_code_line(const char *p, const char *end, size_t *len) {
+    while (p < end) {
+        const char *nl = memchr(p, '\n', (size_t)(end - p)); size_t n = nl ? (size_t)(nl - p) : (size_t)(end - p);
+        if (n && p[0] != '#') { *len = n; return p; }
+        p += n;
+        if (p < end) p++;
+    }
+    return 0;
+}
+static int same_code(const Buf *a, const Buf *b, const char *name) {
+    const char *pa = a->s, *pb = b->s, *ea = a->s + a->n, *eb_ = b->s + b->n; size_t la, lb; int line = 0;
+    for (;;) {
+        pa = next_code_line(pa, ea, &la); pb = next_code_line(pb, eb_, &lb); line++;
+        if (!pa && !pb) return 1;
+        if (!pa || !pb || la != lb || memcmp(pa, pb, la)) {
+            fprintf(stderr, "ucn-pp-gen: %s: code line %d differs\n  generated: %.*s\n  target:    %.*s\n", name, line,
+                    pa ? (int)la : 6, pa ? pa : "<none>", pb ? (int)lb : 6, pb ? pb : "<none>");
+            return 0;
+        }
+        pa += la; pb += lb;
+    }
+}
+
+int main(int argc, char **argv) {
+    char path[4096]; int i, check;
+    if (argc != 4 || (strcmp(argv[1], "gen") && strcmp(argv[1], "--check"))) {
+        fputs("usage: ucn-pp-gen gen PRISTINE_ROOT OUT_ROOT | --check PRISTINE_ROOT TARGET_ROOT\n", stderr); return 2;
+    }
+    check = !strcmp(argv[1], "--check");
+    load_fact(argv[2]);
+    for (i = 0; i < NTABLE; i++) { F(path, "%s/exec/pp/%s", argv[2], TABLES[i]); slurp(&T[i], path); }
+    generate();
+    patch_tables();
+    if (check) {
+        int ok = 1;
+        for (i = 0; i < NTABLE; i++) { Buf t = {0}; F(path, "%s/exec/pp/%s", argv[3], TABLES[i]); slurp(&t, path); if (!same_code(&T[i], &t, TABLES[i])) ok = 0; free(t.s); }
+        fprintf(stderr, "ucn-pp-gen: --check %s (%d fact ranges, %d trie nodes, %d+%d generated rows)\n", ok ? "identical" : "DIFFERS", nr, nodes, brows, rrows);
+        return ok ? 0 : 1;
+    }
+    for (i = 0; i < NTABLE; i++) {
+        FILE *f; F(path, "%s/exec/pp/%s", argv[3], TABLES[i]);
+        f = fopen(path, "wb"); if (!f) die("cannot write table", path);
+        if (fwrite(T[i].s, 1, T[i].n, f) != T[i].n || fclose(f)) die("table write failed", path);
+    }
+    fprintf(stderr, "ucn-pp-gen: wrote %d tables (%d fact ranges, %d trie nodes, %d+%d generated rows)\n", NTABLE, nr, nodes, brows, rrows);
+    return 0;
+}

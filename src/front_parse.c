@@ -6461,6 +6461,75 @@ int istapebin(char *p) {
         && p[n - 2] == 105 && p[n - 1] == 110;
 }
 
+/* Keep every parser name consumer on one canonical semantic spelling while
+   the original source, -E and lexer instrument remain byte-for-byte intact.
+   Storing the private view after nsrc also keeps literal positions unchanged. */
+int canonical_identifiers(void) {
+    int i; int k; int j; int u; int has; int aliases; int at; int begin; int original;
+    int width; int digit; int shift; us_i64 need; us_i64 value; char *grown; int *map;
+    aliases = 0; need = (us_i64)nsrc + 1;
+    i = 0;
+    while (i < ntok) {
+        if (tkind[i] == T_ID) {
+            has = 0; k = 0;
+            while (k < tlen[i]) { if (src[tpos[i] + k] == 92) has = 1; k = k + 1; }
+            if (has) {
+                name_toolong(i); aliases = aliases + 1; k = 0;
+                while (k < tlen[i]) {
+                    if (src[tpos[i] + k] == 92) {
+                        u = ucnlen(tpos[i] + k);
+                        if (u == 0 || k + u > tlen[i]) return emsg("unisacc: invalid semantic identifier", 0);
+                        need = need + 10; k = k + u;
+                    } else { need = need + 1; k = k + 1; }
+                }
+                need = need + 1;
+                if (need > 2147483646) return emsg("unisacc: semantic identifier storage too large", 0);
+            }
+        }
+        i = i + 1;
+    }
+    if (aliases == 0) return 0;
+    /* Grow before writing, and do not raise MAXSRC: the sibling preprocessing
+       buffers still have that original capacity. */
+    grown = realloc(src, (size_t)(need > maxsrc ? need : maxsrc));
+    if (grown == 0) return emsg("unisacc: out of memory for semantic identifiers", 0);
+    src = grown;
+    map = realloc(semantic_origins, (size_t)(need - nsrc - 1) * sizeof(int));
+    if (map == 0) return emsg("unisacc: out of memory for semantic source map", 0);
+    semantic_origins = map; src[nsrc] = 0; begin = nsrc + 1; at = begin;
+    i = 0;
+    while (i < ntok) {
+        if (tkind[i] == T_ID) {
+            has = 0; k = 0;
+            while (k < tlen[i]) { if (src[tpos[i] + k] == 92) has = 1; k = k + 1; }
+            if (has) {
+                original = tpos[i]; j = at; k = 0;
+                while (k < tlen[i]) {
+                    if (src[original + k] == 92) {
+                        u = ucnlen(original + k); value = 0; width = u - 2; digit = 0;
+                        while (digit < width) { value = value * 16 + pphexv(src[original + k + 2 + digit] & 255); digit = digit + 1; }
+                        src[at] = 92; map[at - begin] = original + k; at = at + 1;
+                        src[at] = 85; map[at - begin] = original + k + 1; at = at + 1;
+                        digit = 0;
+                        while (digit < 8) {
+                            shift = (7 - digit) * 4; has = (int)((value >> shift) & 15);
+                            src[at] = has < 10 ? 48 + has : 87 + has;
+                            map[at - begin] = digit < 8 - width ? original + k : original + k + 2 + digit - (8 - width);
+                            at = at + 1; digit = digit + 1;
+                        }
+                        k = k + u;
+                    } else { src[at] = src[original + k]; map[at - begin] = original + k; at = at + 1; k = k + 1; }
+                }
+                src[at] = 0; map[at - begin] = original + tlen[i];
+                tpos[i] = j; tlen[i] = at - j; at = at + 1;
+            }
+        }
+        i = i + 1;
+    }
+    semantic_begin = begin; semantic_count = at - begin;
+    return 0;
+}
+
 /* Read, preprocess and lex ONE file.  Split out of fe_tape so that several
    files can be walked into one tape: preprocessing is per file (include
    guards, `#define` state, `__FILE__`), only the walk is shared -- the same
@@ -6551,6 +6620,7 @@ char *fe_forced(char *path, int ni, int cxu) {
 }
 int fe_load(char *path, char *t) {
     int fd; int k;
+    semantic_begin = 0; semantic_count = 0;
     srcpath = path;
     /* Source maps belong to this unit; warning counts belong to the program. */
     nspl = 0; nireg = 0; nisp = 0; nfnpool = 0; nautoinc = 0; nld = 0;
@@ -6646,6 +6716,7 @@ int fe_load(char *path, char *t) {
     }
     if (lex() < 0) return 1;
     parenfold();
+    if (canonical_identifiers()) return 1;
     tp = 0;
     return 0;
 }

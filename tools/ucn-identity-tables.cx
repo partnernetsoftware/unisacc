@@ -1,0 +1,81 @@
+/* Generate/check the private E3 UCN identity procedures and token copier.
+   Identifier membership is validated by E1; these tables normalize UCN
+   spelling, bound every access, and preserve opaque source/location bytes.
+   No model construction, integration edits or source snapshot operations. */
+#pragma unisa use cxlib.netpack
+static char output[4400];
+static int check_mode;
+static np_buf byte_rows={0},result_rows={0};
+static void die(const char *s){fprintf(stderr,"ucn-identity-tables: %s errno=%d\n",s,errno);exit(2);}
+static void checked(int n){if(n<0)die("format buffer overflow");}
+static void save(const char *rel,const char *s,size_t n){
+ char p[4400];if(cx_path_join(p,sizeof p,output,rel))die("path");
+ if(check_mode){size_t old_n;char *old=cx_read(p,&old_n);if(!old)die(p);int same=old_n==n&&!memcmp(old,s,n);free(old);if(!same)die(p);}
+ else if(cx_write(p,s,n))die(p);
+}
+static void row(int r,const char *s,const char *key,const char *next,const char *acts){np_buf *b=r?&result_rows:&byte_rows;np_puts(b,s);np_puts(b,"\t");np_puts(b,key);np_puts(b,"\t");np_puts(b,next);np_puts(b,"\t");np_puts(b,acts);np_puts(b,"\n");}
+static void fmtrow(int r,const char *s,const char *key,const char *next,const char *fmt,const char *p){char a[1600];checked(cx_fmt(a,sizeof a,fmt,p,p,p,p,p,p,p,p,p,p,p,p,p,p,p,p));row(r,s,key,next,a);}
+/* UCK uses scratch and returns an intern key. UCO writes to normal output.
+   Both receive ux_s/ux_e and preserve cursor, all other parser registers,
+   and original spans. Position checks precede every byte read. */
+static void canonicalizer(const char *p,int scratch){
+ char s[100],t[100],a[1600],start[100];checked(cx_fmt(start,sizeof start,"%s.begin",p));
+ checked(cx_fmt(a,sizeof a,"[[\"MARK\",\"%s_resume\"],[\"JUMP\",\"ux_s\"]%s]",p,scratch?",[\"SBCLR\"]":""));checked(cx_fmt(t,sizeof t,"%s.check",p));row(1,start,"*",t,a);
+ checked(cx_fmt(s,sizeof s,"%s.check",p));checked(cx_fmt(t,sizeof t,"%s.checked",p));fmtrow(1,s,"*",t,"[[\"MARK\",\"%s_at\"],[\"CMP\",\"%s_at\",\"ux_e\"]]",p);
+ checked(cx_fmt(s,sizeof s,"%s.checked",p));checked(cx_fmt(t,sizeof t,"%s.char",p));row(1,s,"0",t,"[]");checked(cx_fmt(t,sizeof t,"%s.done",p));row(1,s,"1",t,"[]");row(1,s,"*","UC.bad","[]");
+ checked(cx_fmt(s,sizeof s,"%s.char",p));checked(cx_fmt(t,sizeof t,"%s.slashcheck",p));row(0,s,"92",t,"[[\"ADV\"]]");row(0,s,"256","UC.bad","[]");
+ checked(cx_fmt(t,sizeof t,"%s.check",p));checked(cx_fmt(a,sizeof a,"[[\"ADV\"],[\"MARK\",\"%s_end\"],[\"%s\",\"%s_at\",\"%s_end\"]]",p,scratch?"SBSPAN":"SPAN2",p,p));row(0,s,"*",t,a);
+ checked(cx_fmt(s,sizeof s,"%s.slashcheck",p));checked(cx_fmt(t,sizeof t,"%s.slashchecked",p));fmtrow(1,s,"*",t,"[[\"MARK\",\"%s_at\"],[\"CMP\",\"%s_at\",\"ux_e\"]]",p);
+ checked(cx_fmt(s,sizeof s,"%s.slashchecked",p));checked(cx_fmt(t,sizeof t,"%s.slash",p));row(1,s,"0",t,"[]");row(1,s,"*","UC.bad","[]");
+ checked(cx_fmt(s,sizeof s,"%s.slash",p));checked(cx_fmt(t,sizeof t,"%s.h4check",p));checked(cx_fmt(a,sizeof a,"[[\"ADV\"],[\"%s\",92],[\"%s\",85],[\"%s\",48],[\"%s\",48],[\"%s\",48],[\"%s\",48]]",scratch?"SBOUT":"OUT",scratch?"SBOUT":"OUT",scratch?"SBOUT":"OUT",scratch?"SBOUT":"OUT",scratch?"SBOUT":"OUT",scratch?"SBOUT":"OUT"));row(0,s,"117",t,a);
+ checked(cx_fmt(t,sizeof t,"%s.h0check",p));checked(cx_fmt(a,sizeof a,"[[\"ADV\"],[\"%s\",92],[\"%s\",85]]",scratch?"SBOUT":"OUT",scratch?"SBOUT":"OUT"));row(0,s,"85",t,a);row(0,s,"*","UC.bad","[]");
+ for(int i=0;i<8;i++){
+  checked(cx_fmt(s,sizeof s,"%s.h%dcheck",p,i));checked(cx_fmt(t,sizeof t,"%s.h%dchecked",p,i));fmtrow(1,s,"*",t,"[[\"MARK\",\"%s_at\"],[\"CMP\",\"%s_at\",\"ux_e\"]]",p);
+  checked(cx_fmt(s,sizeof s,"%s.h%dchecked",p,i));checked(cx_fmt(t,sizeof t,"%s.h%d",p,i));row(1,s,"0",t,"[]");row(1,s,"*","UC.bad","[]");
+  checked(cx_fmt(s,sizeof s,"%s.h%d",p,i));if(i==7)checked(cx_fmt(t,sizeof t,"%s.check",p));else checked(cx_fmt(t,sizeof t,"%s.h%dcheck",p,i+1));
+  for(int j=0;j<16;j++){char k[40];int c=j<10?48+j:97+j-10;if(j<10)checked(cx_fmt(k,sizeof k,"%d",c));else checked(cx_fmt(k,sizeof k,"%d,%d",c,c-32));checked(cx_fmt(a,sizeof a,"[[\"ADV\"],[\"%s\",%d]]",scratch?"SBOUT":"OUT",c));row(0,s,k,t,a);}row(0,s,"*","UC.bad","[]");
+ }
+ checked(cx_fmt(s,sizeof s,"%s.done",p));checked(cx_fmt(a,sizeof a,"[%s[\"JUMP\",\"%s_resume\"]]",scratch?"[\"SBINTERN\",\"ux_id\"],":"",p));row(1,s,"*","RET",a);
+}
+static void words(const char *s,const char *next){
+ char st[100],to[100],a[800];checked(cx_fmt(st,sizeof st,"%s",s));checked(cx_fmt(to,sizeof to,"%s.0",s));row(1,st,"*",to,"[[\"LDI\",\"ucn_word\",0]]");
+ for(int i=0;i<4;i++){checked(cx_fmt(st,sizeof st,"%s.%d",s,i));if(i==3)checked(cx_fmt(to,sizeof to,"%s",next));else checked(cx_fmt(to,sizeof to,"%s.%d",s,i+1));checked(cx_fmt(a,sizeof a,"[[\"ALUI\",\"add\",\"ucn_word\",\"ucn_word\",[\"observation\",%d]],[\"ADV\"]]",i*8));row(0,st,i==3?"0-127":"0-255",to,a);row(0,st,"*","UC.bad", "[]");}
+}
+static void skip(const char *s,const char *next){
+ char to[100];checked(cx_fmt(to,sizeof to,"%s.r",s));row(1,s,"*",to,"[[\"MARK\",\"ucn_at\"],[\"XLEN\",\"ucn_total\"],[\"A64\",\"add\",\"ucn_end\",\"ucn_at\",\"ucn_word\"],[\"C64\",\"ucn_end\",\"ucn_total\"]]");row(1,to,"0,1",next,"[[\"JUMP\",\"ucn_end\"]]");row(1,to,"*","UC.bad","[]");
+}
+static void copier(void){
+ row(1,"UC.start","*","$initial","[[\"LDI\",\"ucn_copy\",0],[\"LDI\",\"ucn_zero\",0],[\"LDI\",\"ucn_multi\",0]]");
+ const char *magic="UNITOK";for(int i=0;i<6;i++){char s[50],to[50],k[15];checked(cx_fmt(s,sizeof s,"UC.magic%d",i));checked(cx_fmt(to,sizeof to,"UC.magic%d",i+1));checked(cx_fmt(k,sizeof k,"%d",magic[i]));row(0,s,k,to,"[[\"ADV\"]]");row(0,s,"*","UC.bad","[]");}
+ row(0,"UC.magic6","49","UC.singlezero","[[\"ADV\"]]");row(0,"UC.magic6","50","UC.multizero","[[\"ADV\"]]");row(0,"UC.magic6","*","UC.bad","[]");
+ row(0,"UC.singlezero","0","UC.pplen","[[\"ADV\"],[\"LDI\",\"ucn_left\",1]]");row(0,"UC.singlezero","*","UC.bad","[]");
+ row(0,"UC.multizero","0","UC.count","[[\"ADV\"],[\"LDI\",\"ucn_multi\",1]]");row(0,"UC.multizero","*","UC.bad","[]");
+ words("UC.count","UC.countcheck");row(1,"UC.countcheck","*","UC.countmax","[[\"COPYW\",\"ucn_left\",\"ucn_word\"],[\"CMPI\",\"ucn_word\",0]]");row(1,"UC.countmax","1","UC.bad","[]");row(1,"UC.countmax","*","UC.countlimit","[[\"CMPI\",\"ucn_word\",64]]");row(1,"UC.countlimit","2","UC.bad","[]");row(1,"UC.countlimit","*","UC.namelen","[]");
+ words("UC.namelen","UC.nameskip");skip("UC.nameskip","UC.pplen");words("UC.pplen","UC.ppskip");skip("UC.ppskip","UC.ppnext");
+ row(1,"UC.ppnext","*","UC.ppnext.r","[[\"ALUI\",\"sub\",\"ucn_left\",\"ucn_left\",1],[\"CMPI\",\"ucn_left\",0]]");row(1,"UC.ppnext.r","1","UC.record","[]");row(1,"UC.ppnext.r","*","UC.namelen","[]");
+ row(0,"UC.record","64","UC.prefix.which","[[\"ADV\"],[\"LDI\",\"ucn_prefix\",4],[\"CMPI\",\"ucn_multi\",0]]");row(0,"UC.record","256","UC.finish","[]");row(0,"UC.record","*","UC.rest","[]");
+ row(1,"UC.prefix.which","1","UC.prefix","[]");row(1,"UC.prefix.which","*","UC.prefix","[[\"LDI\",\"ucn_prefix\",8]]");
+ row(0,"UC.prefix","0-255","UC.prefix.next","[[\"ADV\"],[\"ALUI\",\"sub\",\"ucn_prefix\",\"ucn_prefix\",1],[\"CMPI\",\"ucn_prefix\",0]]");row(0,"UC.prefix","*","UC.bad","[]");row(1,"UC.prefix.next","1","UC.prefix.nl","[]");row(1,"UC.prefix.next","*","UC.prefix","[]");row(0,"UC.prefix.nl","10","UC.token","[[\"ADV\"]]");row(0,"UC.prefix.nl","*","UC.bad","[]");
+ row(0,"UC.token","105","UC.i","[[\"ADV\"]]");row(0,"UC.token","115","UC.s","[[\"ADV\"]]");row(0,"UC.token","10","$record","[[\"ADV\"]]");row(0,"UC.token","256","UC.finish","[]");row(0,"UC.token","*","UC.tail","[[\"ADV\"]]");
+ row(0,"UC.i","100","UC.id","[[\"ADV\"]]");row(0,"UC.i","*","UC.tail","[]");row(0,"UC.id","61","UC.idscan","[[\"ADV\"],[\"MARK\",\"ux_s\"]]");row(0,"UC.id","*","UC.tail","[]");
+ row(0,"UC.idscan","10","UCO.begin","[[\"MARK\",\"ux_e\"],[\"SPAN2\",\"ucn_copy\",\"ux_s\"],[\"PUSH\",\"UC.iddone\"]]");row(0,"UC.idscan","256","UC.bad","[]");row(0,"UC.idscan","*","UC.idscan","[[\"ADV\"]]");row(1,"UC.iddone","*","UC.tail","[[\"MARK\",\"ucn_copy\"]]");
+ row(0,"UC.s","116","UC.st","[[\"ADV\"]]");row(0,"UC.s","*","UC.tail","[]");row(0,"UC.st","114","UC.str","[[\"ADV\"]]");row(0,"UC.st","*","UC.tail","[]");row(0,"UC.str","61","UC.qstart","[[\"ADV\"]]");row(0,"UC.str","*","UC.tail","[]");
+ /* Mirrors strings token_span QS.body/QS.escape/QS.gap, including L fragments.
+    Extra u/U/u8 prefix recognition only protects opaque rejected literals. */
+ row(0,"UC.qstart","34","UC.qbody","[[\"ADV\"]]");row(0,"UC.qstart","76,85","UC.qquote","[[\"ADV\"]]");row(0,"UC.qstart","117","UC.qu","[[\"ADV\"]]");row(0,"UC.qstart","*","UC.bad","[]");row(0,"UC.qu","56","UC.qquote","[[\"ADV\"]]");row(0,"UC.qu","34","UC.qbody","[[\"ADV\"]]");row(0,"UC.qu","*","UC.bad","[]");row(0,"UC.qquote","34","UC.qbody","[[\"ADV\"]]");row(0,"UC.qquote","*","UC.bad","[]");
+ row(0,"UC.qbody","92","UC.qescape","[[\"ADV\"]]");row(0,"UC.qbody","34","UC.qgap","[[\"ADV\"],[\"MARK\",\"ucn_quoteend\"]]");row(0,"UC.qbody","256","UC.bad","[]");row(0,"UC.qbody","*","UC.qbody","[[\"ADV\"]]");row(0,"UC.qescape","256","UC.bad","[]");row(0,"UC.qescape","*","UC.qbody","[[\"ADV\"]]");
+ row(0,"UC.qgap","9-13,32","UC.qgap","[[\"ADV\"]]");row(0,"UC.qgap","34","UC.qbody","[[\"ADV\"]]");row(0,"UC.qgap","76,85","UC.qquote","[[\"ADV\"]]");row(0,"UC.qgap","117","UC.qu","[[\"ADV\"]]");row(0,"UC.qgap","*","UC.tail","[[\"JUMP\",\"ucn_quoteend\"]]");
+ row(0,"UC.tail","10","$record","[[\"ADV\"]]");row(0,"UC.tail","256","UC.finish","[]");row(0,"UC.tail","*","UC.tail","[[\"ADV\"]]");row(0,"UC.rest","256","UC.finish","[]");row(0,"UC.rest","*","UC.rest","[[\"ADV\"]]");
+ row(1,"UC.finish","*","$tail","[[\"MARK\",\"ucn_end\"],[\"SPAN2\",\"ucn_copy\",\"ucn_end\"],[\"SWAP\"]]");
+}
+static void tables(void){
+ np_puts(&byte_rows,"# Generated by tools/ucn-identity-tables.cx; do not edit.\n# state\tbyte\tnext\tactions\n");np_puts(&result_rows,"# Generated by tools/ucn-identity-tables.cx; do not edit.\n# state\tresult\tnext\tactions\n");canonicalizer("UCK",1);canonicalizer("UCO",0);copier();
+ row(1,"UC.bad","*","DEAD","[[\"REJECT\",[\"constant\",\"bad\"]]]");save("parse2/ucnidentity-byte.tsv",byte_rows.p,byte_rows.n);save("parse2/ucnidentity-result.tsv",result_rows.p,result_rows.n);
+ const char *m="# Generated by tools/ucn-identity-tables.cx; do not edit.\n# op\tstem\tsection\twhen\tfacts\tfresh\tseq\tbind\topts\nlet\t-\t-\tlocations\t-\t-\t-\tinitial=@str:UC.magic0,record=@str:UC.record,bad=@str:not covered: malformed token locations\t-\nlet\t-\t-\t!locations\t-\t-\t-\tinitial=@str:UC.token,record=@str:UC.token,bad=@str:not covered: truncated token dump\t-\nrows\tucnidentity\t-\t-\t-\t-\t-\tinitial=$initial,record=$record,tail=$tail,bad=$bad\t-\n";save("parse2/ucnidentity-manifest.tsv",m,strlen(m));
+}
+int main(int argc,char **argv){
+ if(argc!=3||(strcmp(argv[2],"--write")&&strcmp(argv[2],"--check")))die("ROOT --write|--check");
+ char root[4096];if(!realpath(argv[1],root)||cx_path_join(output,sizeof output,root,"exec"))die("root path");
+ check_mode=!strcmp(argv[2],"--check");tables();free(byte_rows.p);free(result_rows.p);
+ printf("UCN_IDENTITY_TABLES mode=%s files=3 no-model-construction no-test-result\n",argv[2]);return 0;
+}

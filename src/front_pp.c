@@ -25,6 +25,14 @@ int *tkind;             /* index into TOKV */
 int *tpos;              /* offset of the token text in src */
 int *tlen;
 int ntok;
+/* A private semantic identifier view is appended after the original source.
+   Diagnostics map it back; -E and the lexical token instrument never use it. */
+int semantic_begin; int semantic_count; int *semantic_origins;
+long source_original(long p) {
+    if (semantic_count > 0 && p >= semantic_begin && p - semantic_begin < semantic_count)
+        return semantic_origins[p - semantic_begin];
+    return p;
+}
 /* 0.0.28 F1: the lexer drops __attribute__((...)) (the Python lexer does too, and selfhost
    compares token streams), so constructor/destructor survive only as marks: the index of the
    next token and the kind (1 constructor, 2 destructor), read by the parser's function(). */
@@ -183,6 +191,118 @@ int isal(int c) {
 }
 int isdi(int c) { if (c >= 48) { if (c <= 57) return 1; } return 0; }
 
+/* E2 scans spelling, independently of the E1 identifier constraint check.
+   Keep a complete UCN in its preprocessing token, even when E1 must later
+   reject its value. Never rewrite bytes used by -E or stringization. */
+int pp_ucn_span(char *b, int i, int e) {
+    int n; int k; int c;
+    if (i + 1 >= e || (b[i] & 255) != 92) return 0;
+    n = 0;
+    if (b[i + 1] == 117) n = 6;
+    if (b[i + 1] == 85) n = 10;
+    if (n == 0 || n > e - i) return 0;
+    k = 2;
+    while (k < n) {
+        c = b[i + k] & 255;
+        if (!((c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102))) return 0;
+        k = k + 1;
+    }
+    return n;
+}
+us_i64 pp_ucn_value(char *b, int i, int n) {
+    int k; int c; int d; us_i64 value;
+    value = 0; k = 2;
+    while (k < n) {
+        c = b[i + k] & 255; d = c - 48;
+        if (c >= 65 && c <= 70) d = c - 55;
+        if (c >= 97 && c <= 102) d = c - 87;
+        value = value * 16 + d; k = k + 1;
+    }
+    return value;
+}
+int pp_idend(char *b, int i, int e) {
+    int j; int n; int c;
+    j = i;
+    while (j < e) {
+        c = b[j] & 255;
+        if (isal(c) || (j > i && isdi(c))) { j = j + 1; continue; }
+        n = pp_ucn_span(b, j, e);
+        if (n == 0) break;
+        j = j + n;
+    }
+    return j;
+}
+/* Compare scalar identities without allocating canonical text or changing
+   either token. The raw lengths can differ for equivalent UCN spellings. */
+int pp_id_same(char *a, int an, char *b, int bn) {
+    int i; int j; int n; int m; us_i64 av; us_i64 bv;
+    i = 0; j = 0;
+    while (i < an && j < bn) {
+        n = pp_ucn_span(a, i, an); m = pp_ucn_span(b, j, bn);
+        av = n ? pp_ucn_value(a, i, n) : (a[i] & 255);
+        bv = m ? pp_ucn_value(b, j, m) : (b[j] & 255);
+        if (av != bv) return 0;
+        i = i + (n ? n : 1); j = j + (m ? m : 1);
+    }
+    return i == an && j == bn;
+}
+int xlex(char *b, int i, int e);
+int err_at(long p, char *msg);
+int lex_ucnlen(int j, int initial);
+char *lex_ucn_reason(int code);
+/* Directives disappear before E1's ordinary token pass. Reuse its exact
+   constraint check for active names and replacement-list identifiers. */
+int pp_checkid(int from, int to) {
+    int j; int n; int c;
+    j = from;
+    while (j < to) {
+        c = src[j] & 255;
+        /* A bare backslash or \\x is a pp-other token, not a malformed
+           UCN. Stringization may consume it before E1 conversion. */
+        if (c == 92 && j + 1 < to && (src[j + 1] == 117 || src[j + 1] == 85)) {
+            n = lex_ucnlen(j, j == from);
+            if (n < 0) { err_at(j, lex_ucn_reason(n)); __exit(1); return 0 - 1; }
+            j = j + n; continue;
+        }
+        if (isal(c) || (j > from && isdi(c))) { j = j + 1; continue; }
+        break;
+    }
+    return 0;
+}
+/* A pp-number admits UCNs outside Annex D, including non-BMP scalars.
+   Only the generic 6.4.3 form/value constraints apply. Check a malformed
+   trailing UCN prefix too: xlex stops before its backslash. */
+int pp_checknumber(int from, int end, int limit) {
+    int j; int n; int code;
+    j = from;
+    while (j < end || (j == end && j + 1 < limit && src[j] == 92
+        && (src[j + 1] == 117 || src[j + 1] == 85))) {
+        if (src[j] == 92 && j + 1 < limit && (src[j + 1] == 117 || src[j + 1] == 85)) {
+            n = pp_ucn_span(src, j, limit);
+            code = n ? lex_ucnlen(j, 0) : 0 - 1;
+            if (code == 0 - 1) { err_at(j, lex_ucn_reason(code)); __exit(1); return 0 - 1; }
+            j = j + n;
+        } else j = j + 1;
+    }
+    return 0;
+}
+int pp_checkbody(int from, int to) {
+    int j; int e; int c;
+    j = from;
+    while (j < to) {
+        c = src[j] & 255;
+        if (c == 32 || c == 9 || c == 13) { j = j + 1; continue; }
+        e = xlex(src, j, to);
+        if (isdi(c) || (c == 46 && j + 1 < to && isdi(src[j + 1] & 255))) pp_checknumber(j, e, to);
+        if ((c == 92 && j + 1 < to && (src[j + 1] == 117 || src[j + 1] == 85))
+            || (isal(c) && src[e - 1] != 34 && src[e - 1] != 39)) {
+            if (pp_checkid(j, to) < 0) return 0 - 1;
+        }
+        j = e;
+    }
+    return 0;
+}
+
 /* ---- the preprocessor: the pp table decides every directive [W-1] ----- */
 #define MAXMAC 16384     /* 0.0.28 H1': 2048 stopped the SQLite amalgamation ("too many macro definitions") */
 /* A macro lives from its #define to its #undef, and a redefinition replaces
@@ -198,25 +318,48 @@ int isdi(int c) { if (c >= 48) { if (c <= 57) return 1; } return 0; }
 #define MAXSEG 65536
 #define MACPOOL 131072
 #define MAXMPARAM 12
-/* Identifier storage width.  C99 6.4.2.1 requires 63 significant
-   characters, so 64 bytes fits a 63-character name plus its NUL.  It was
+/* Identifier storage width. C99 5.2.4.1 counts a UCN as one of the 63
+   internal/macro-name characters. Its canonical spelling needs ten bytes;
+   reserve 630 plus the NUL instead of mistaking encoded bytes for characters.
+   The old ASCII-only width was 64. Before that it was
    32, which silently merged any two names sharing their first 32
    characters and made every name of 32+ characters unfindable (the
    symptom depended on the use: "a constant is required here" for an array
    bound, "expected ')'" for a type name, "unknown identifier" for a
    variable).  A longer name is refused by name_toolong() rather than
    truncated.  [R13-0c #32] */
-#define NAMEW 64
+#define NAMEW 640
 int err_at(long p, char *msg);
 int err_tok(int t, char *msg);
+int identifier_chars(char *s, int n) {
+    int at; int count; int k; int width; int c; int hex;
+    at = 0; count = 0;
+    while (at < n) {
+        width = 0;
+        if ((s[at] & 255) == 92 && at + 1 < n) {
+            if (s[at + 1] == 117) width = 6;
+            if (s[at + 1] == 85) width = 10;
+            if (width && at + width <= n) {
+                k = 2;
+                while (k < width) { c = s[at + k] & 255;
+                    hex = (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102);
+                    if (hex == 0) break; k = k + 1;
+                }
+                if (k != width) width = 0;
+            } else width = 0;
+        }
+        at = at + (width ? width : 1); count = count + 1;
+    }
+    return count;
+}
 int name_toolong(int t) {
-    if (tlen[t] < NAMEW) return 0;
+    if (tlen[t] < NAMEW && identifier_chars(src + tpos[t], tlen[t]) <= 63) return 0;
     err_tok(t, "identifier too long (max 63 characters)");
     __exit(1);
     return 0;
 }
 int name_long(char *s, int n, long pos) {   /* the same rule, for a raw name */
-    if (n < NAMEW) return 0;
+    if (n < NAMEW && identifier_chars(s, n) <= 63) return 0;
     err_at(pos, "identifier too long (max 63 characters)");
     __exit(1);
     return 0;
@@ -260,10 +403,15 @@ int mfindt(int t);
 int mac_h[MACH]; int mh_n = 0 - 1;
 
 int mac_hash(char *s, int n) {
-    int i; int h;
-    h = n * 131;
+    int i; int h; int u; us_i64 value;
+    h = 131;
     i = 0;
-    while (i < n) { h = h * 31 + (s[i] & 255); i = i + 1; }
+    while (i < n) {
+        u = pp_ucn_span(s, i, n);
+        value = u ? pp_ucn_value(s, i, u) : (s[i] & 255);
+        h = (h * 31 + (int)(value & 16777215)) & 16777215;
+        i = i + (u ? u : 1);
+    }
     h = h & (MACH - 1);
     if (h < 0) h = 0 - h;
     return h;
@@ -272,12 +420,8 @@ int mac_hash(char *s, int n) {
 int mac_is(int i, char *s, int n) {     /* is entry i the name s[0..n)? */
     int k;
     k = 0;
-    while (macname[i * NAMEW + k]) {
-        if (k >= n) return 0;
-        if (macname[i * NAMEW + k] != s[k]) return 0;
-        k = k + 1;
-    }
-    return k == n;
+    while (macname[i * NAMEW + k]) k = k + 1;
+    return pp_id_same(macname + i * NAMEW, k, s, n);
 }
 
 int mac_reindex(void) {
@@ -386,6 +530,7 @@ int ppu;             /* the value just computed is unsigned (uintmax_t) */
 int ppskip;          /* > 0: inside an operand that is not evaluated */
 int ppdiv0;          /* a division by zero was evaluated */
 int ppnow;           /* expanding an #if line: resolve names in the table as it stands */
+int pp_skip_ucn_check; /* preserve the pre-existing skipped-condition behavior */
 
 long ppcond(void);
 int srcis(int p, int L, char *nm);
@@ -494,21 +639,17 @@ long ppprim(void) {
     if (c == 39) return ppchar();
     if (c == 76 && ppp + 1 < ppe) { if ((ppb[ppp + 1] & 255) == 39) {
         ppp = ppp + 1; return ppchar(); } }
-    if (isal(c)) {
+    if (isal(c) || pp_ucn_span(ppb, ppp, ppe)) {
         /* what is left of an identifier after expansion is 0, C99 6.10.1p4 --
            except `defined`, which a macro body may have produced */
         int ns; ns = ppp;
-        while (ppp < ppe) { if (isal(ppb[ppp] & 255) == 0) {
-                                if (isdi(ppb[ppp] & 255) == 0) break; }
-                            ppp = ppp + 1; }
+        ppp = pp_idend(ppb, ppp, ppe);
         if (ppp - ns == 7) { if (vsame("defined", 0, ppb + ns, 7)) {
             int s2;
             paren = 0;
             if (ppop("(", 1)) paren = 1;
             ppws(); s2 = ppp;
-            while (ppp < ppe) { if (isal(ppb[ppp] & 255) == 0) {
-                                    if (isdi(ppb[ppp] & 255) == 0) break; }
-                                ppp = ppp + 1; }
+            ppp = pp_idend(ppb, ppp, ppe);
             v = 0;
             if (mfind(ppb + s2, ppp - s2) >= 0) v = 1;
             if (paren) ppop(")", 1);
@@ -681,17 +822,15 @@ int ppdefined(int from, int to) {
     int j; int k; int ns; int ne; int paren; int v;
     j = from;
     while (j < to) {
-        if (isal(src[j] & 255) == 0) { j = j + 1; continue; }
-        if (j > from) { if (isdi(src[j - 1] & 255)) { j = j + 1; continue; } }
-        k = j;
-        while (k < to) { if (isal(src[k] & 255) == 0) { if (isdi(src[k] & 255) == 0) break; } k = k + 1; }
+        if (wsat(j)) { j = j + 1; continue; }
+        k = xlex(src, j, to);
         if (k - j != 7 || srcis(j, 7, "defined") == 0) { j = k; continue; }
         while (k < to && wsat(k)) k = k + 1;
         paren = 0;
         if (k < to) { if ((src[k] & 255) == 40) { paren = 1; k = k + 1; } }
         while (k < to && wsat(k)) k = k + 1;
         ns = k;
-        while (k < to) { if (isal(src[k] & 255) == 0) { if (isdi(src[k] & 255) == 0) break; } k = k + 1; }
+        k = pp_idend(src, k, to);
         ne = k;
         if (paren) { while (k < to && wsat(k)) k = k + 1;
                      if (k < to) { if ((src[k] & 255) == 41) k = k + 1; } }
@@ -705,8 +844,11 @@ int ppdefined(int from, int to) {
 
 int ppeval(int from, int to, int live) {
     long v;
+    if (live) pp_checkbody(from, to);
     ppdefined(from, to);
+    pp_skip_ucn_check = live == 0;
     ppexpandline(from, to);
+    pp_skip_ucn_check = 0;
     ppp = 0; ppskip = 0; ppdiv0 = 0;
     if (live == 0) ppskip = 1;          /* a skipped group's #elif is not diagnosed */
     v = ppcond();
@@ -1227,6 +1369,7 @@ int uncov_put(char *s) {
 }
 int diag_at(long p, char *msg, char *kind) {
     long q; long line; long col; int i; int inside; char *fname;
+    p = source_original(p);
     if (p < 0) p = 0;
     if (p > nsrc) p = nsrc;
     /* the line and column IN THE BUFFER -- macro expansion rewrites a line
@@ -1284,6 +1427,7 @@ int diag_at(long p, char *msg, char *kind) {
 int line_at_inside;         /* set by line_at: the include region p is in, or -1 (for __FILE__) */
 long line_at(long p) {
     long q; long line; int i; int inside;
+    p = source_original(p);
     if (p < 0) p = 0;
     if (p > nsrc) p = nsrc;
     line = 1; q = 0;
@@ -1535,8 +1679,9 @@ int preprocess(void) {
             d = vfind(DIRV, NDIRV, src + ws, we - ws);
             while (j < i) { if (wsat(j) == 0) break; j = j + 1; }
             ns = j;
-            while (j < i) { if (isal(src[j] & 255) == 0) { if (isdi(src[j] & 255) == 0) break; } j = j + 1; }
+            j = pp_idend(src, j, i);
             ne = j;
+            if (live && (d == 0 || d == 1 || d == 6 || d == 8)) pp_checkid(ns, i);
             flag = 0;
             if (d < 0) { if (live) { if (we - ws == 6) { if (srcis(ws, 6, "pragma")) {
                 pushpop(ls, we, i);
@@ -1636,11 +1781,8 @@ int preprocess(void) {
                                     while (vs < i) { if (wsat(vs) == 0) break; vs = vs + 1; }
                                     break;
                                 }
-                                while (vs < i) {
-                                    if (isal(src[vs] & 255)) { vs = vs + 1; continue; }
-                                    if (isdi(src[vs] & 255)) { vs = vs + 1; continue; }
-                                    break;
-                                }
+                                pp_checkid(vs, i);
+                                vs = pp_idend(src, vs, i);
                                 pe = vs;
                                 if (np < MAXMPARAM) {
                                     po[np] = macstash(ps, pe); pl[np] = pe - ps;
@@ -1653,6 +1795,7 @@ int preprocess(void) {
                             if (vs < i) { if ((src[vs] & 255) == 41) vs = vs + 1; }
                         } }
                         while (vs < i) { if (wsat(vs) == 0) break; vs = vs + 1; }
+                        pp_checkbody(vs, i);
                         /* The numeric probe needs its OWN cursor: `vs` is
                            where the replacement list starts, and scanning the
                            digits with it left `#define N 5` with an empty
@@ -2180,6 +2323,7 @@ int *ebseg;              /* the segment each byte of ebuf came from */
 /* srcroom(N): buffers for a unit of N bytes.  Called before the unit is read, when no pointer
    into the old buffers is held; a larger unit gets new buffers (the old ones are let go). */
 int srcroom(long need) {
+    semantic_begin = 0; semantic_count = 0;
     long want; want = need * 2 + 1048576;
     if (src != 0 && want <= maxsrc) return 0;
     if (want > maxsrc) { maxsrc = (int)want; maxtok = maxsrc / 4; }
@@ -2354,23 +2498,15 @@ int xisws(int c) {
 
 /* b[i] starts a token (not whitespace); where does it end? */
 int xlex(char *b, int i, int e) {
-    int c; int d; int q; int j;
+    int c; int d; int q; int j; int u;
     c = b[i] & 255;
     j = i;
-    if (isal(c)) {
+    if (isal(c) || pp_ucn_span(b, i, e)) {
         while (j < e) {
             d = b[j] & 255;
             if (isal(d) || isdi(d)) { j = j + 1; continue; }
-            if (d == 92 && j + 1 < e) {                      /* a UCN */
-                int n; int k2; n = 0;
-                if ((b[j + 1] & 255) == 117) n = 4;
-                if ((b[j + 1] & 255) == 85) n = 8;
-                if (n == 0 || j + 2 + n > e) break;
-                k2 = 0;
-                while (k2 < n) { if (ishexc(b[j + 2 + k2] & 255) == 0) break; k2 = k2 + 1; }
-                if (k2 < n) break;
-                j = j + 2 + n; continue;
-            }
+            u = pp_ucn_span(b, j, e);
+            if (u) { j = j + u; continue; }
             break;
         }
         /* L"x", u'x', u8"x": a prefix, not a name */
@@ -2401,6 +2537,8 @@ int xlex(char *b, int i, int e) {
             if ((d == 101 || d == 69 || d == 112 || d == 80) && j + 1 < e &&
                 ((b[j + 1] & 255) == 43 || (b[j + 1] & 255) == 45)) { j = j + 2; continue; }
             if (isal(d) || isdi(d) || d == 46) { j = j + 1; continue; }
+            u = pp_ucn_span(b, j, e);
+            if (u) { j = j + u; continue; }
             break;
         }
         return j;
@@ -2431,12 +2569,9 @@ int xis2(int t, int c) {                      /* the two-character c c */
     return (xp(t)[0] & 255) == c && (xp(t)[1] & 255) == c;
 }
 int xisid(int t) {
-    char *p; int c;
+    char *p;
     p = xp(t);
-    if (isal(p[0] & 255) == 0) return 0;
-    c = p[xl[t] - 1] & 255;
-    if (c == 34 || c == 39) return 0;
-    return 1;
+    return xl[t] > 0 && pp_idend(p, 0, xl[t]) == xl[t];
 }
 int xsame(int a, int b) {
     int k; char *p; char *q;
@@ -2459,6 +2594,9 @@ int xnext(void) {
     }
     if (xsp >= xend) return 0 - 1;
     e = xlex(src, xsp, xend);
+    if (pp_skip_ucn_check == 0 && (isdi(c) || (c == 46 && xsp + 1 < xend && isdi(src[xsp + 1] & 255)))) pp_checknumber(xsp, e, xend);
+    if (pp_skip_ucn_check == 0 && ((c == 92 && xsp + 1 < xend && (src[xsp + 1] == 117 || src[xsp + 1] == 85))
+        || (isal(c) && src[e - 1] != 34 && src[e - 1] != 39))) pp_checkid(xsp, xend);
     t = xnew(0, xsp, e - xsp, 0, ws, 0);
     if (ppnow == 0) xs[t] = srcseg[xsp];
     xsp = e;
@@ -2531,17 +2669,13 @@ int xstringize(int ao, int al, int w, int seg) {
 
 /* the parameter index of body token t of macro m, or -1 */
 int xparam(int m, int t) {
-    int p; int L; int j; int ok; char *q;
+    int p; int L; char *q;
     if (xisid(t) == 0) return 0 - 1;
     q = xp(t);
     p = 0;
     while (p < macnp[m] && p < MAXMPARAM) {
         L = macplen[m * MAXMPARAM + p];
-        if (L == xl[t]) {
-            ok = 1; j = 0;
-            while (j < L) { if (macpool[macpoff[m * MAXMPARAM + p] + j] != q[j]) { ok = 0; break; } j = j + 1; }
-            if (ok) return p;
-        }
+        if (pp_id_same(macpool + macpoff[m * MAXMPARAM + p], L, q, xl[t])) return p;
         p = p + 1;
     }
     return 0 - 1;
@@ -2809,11 +2943,12 @@ int xrange(int from, int to) {
         }
         if (isdi(c) || (c == 46 && i + 1 < to && isdi(src[i + 1] & 255))) {
             j = xlex(src, i, to);                    /* a pp-number: 0x1f, 1e10 */
+            if (pp_skip_ucn_check == 0) pp_checknumber(i, j, to);
             eputsrc(i, j); i = j; continue;
         }
-        if (isal(c) == 0) { eput(c); i = i + 1; continue; }
-        j = identend(i);
-        if (j > to) j = to;
+        if (isal(c) == 0 && pp_ucn_span(src, i, to) == 0) { eput(c); i = i + 1; continue; }
+        if (pp_skip_ucn_check == 0) pp_checkid(i, to);
+        j = pp_idend(src, i, to);
         if (j < to) { q = src[j] & 255;
             /* only L u U u8 prefix a literal: `LUA_POF"%s"` is a macro
                followed by a string (lua loadlib.c) */
