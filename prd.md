@@ -169,7 +169,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 **P7 发布：** 签名、Draft、Latest、公开另需授权，未授权不动。
 
-**已提交的本轮辅助成果：** 外宿主 CI 草稿把 producer run／artifact 的 head SHA 绑到验证提交（`b40487eadd`，静态核，未派发）；B1b `dabc5a0efb`；lower 四批 `9a44ce9869`。先前 B1/E7/C1/S3/S5 收据保留。待办债：L1 草稿使用宿主 GCC，需改产品自身 `.cx`；lower 的 ABI 六项、输入 errno 与五目标路线仍未关。
+**已提交的本轮辅助成果：** 外宿主 CI 草稿核 producer run／artifact 的 head SHA 互相一致（`b40487eadd` 后经 `5b4616387f` 修正，允许较新的验证提交；静态核，未派发）；B1b `dabc5a0efb`；lower 四批 `9a44ce9869`。先前 B1/E7/C1/S3/S5 收据保留。待办债：L1 草稿使用宿主 GCC，需改产品自身 `.cx`；lower 的 ABI 六项、输入 errno 与五目标路线仍未关。
 
 **2026-10-27 cc 节点·宽合同已全量规格化：** 19 条 NOT_READY 宽行此前只有一行 oracle 文本、无法诚实关闭；现每行有 `tests/<row>-domain-matrix.tsv` 逐格规格（统一列 `host cell required status evidence requirement citation oracle note`；COVERED_LOCAL 仅限 Root7a 上实际 run-batch PASS 且恰断言该组，新候选须全部重跑）。提交 `e4d7a95bb8`（negative/optimization/formats/phase-timing/bootstrap/candidate 231 格）、`175a9642ff`（ri/resources/library/properties 212 格）、`97a3f4472a`（七流＋interfaces 365 格）；报告 `out/c43-cc-domain-specs-{contract,runtime,streams}-01.md` 给出约 70 个批量级切片。同提交修共享运行器：`np_run` 子进程自成进程组、超时杀整组、有无输出均计 1ms 拍；`run-batch` 自身超时记 `status=UNKNOWN` 退 3（非 PASS、需重跑），smoke/qprefix 复跑 PASS。纪元裁定：本纪元封源点＝流控制表 F1/F3 修复落地；A-40 三诊断缺口（触及 `exec/parse2`/`exec/pp` 位置传递）与产品内分相计时戳排入下一纪元，不挡 SID 重建。`@relocs` 槽值按参考 `relocate` 维持不设值域（C 允许 one-past-end），F3 只拒缺头/空码/静态 `@sym` 与指令数据引用越界。外宿主（push/派发/产物暴露）待主人授权。
 
@@ -330,7 +330,7 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 <a id="memory-palace"></a>
 ### 记忆宫殿
 
-**本轮入图（2026-10-27，cdx 主刀）：** cc 独占候选 A3→A6，A3 的 107 作业收据已落齐；产品仍是旧 Root7a，纪元1 SID `df8f29fd…` 尚未装成新候选。Codex 辅助已交外宿主草稿 head-SHA 绑定 `b40487eadd` 与跨命令 B1b 收据 `dabc5a0efb`，未派发 CI。cdx 提交 lower 四个 Root7a 正式批 `9a44ce9869`：51/0、778/0、1516/0、115/0；ABI 六项 UNVERIFIED、输入 errno 29/2 红，完整 lower 父行和其余 18 宽行均未关。完整 N22、五外宿主仍开，`--all` rc3。
+**本轮入图（2026-10-27，cdx 主刀）：** cc 独占候选 A3→A6，A3 的 107 作业收据已落齐；产品仍是旧 Root7a，纪元1 SID `df8f29fd…` 尚未装成新候选。Codex 辅助已交外宿主草稿 producer/artifact head 一致检查（`b40487eadd`，cdx 以 `5b4616387f` 保留较新验证提交）与跨命令 B1b 收据 `dabc5a0efb`，未派发 CI。cdx 提交 lower 四个 Root7a 正式批 `9a44ce9869`：51/0、778/0、1516/0、115/0；ABI 六项 UNVERIFIED、输入 errno 29/2 红，完整 lower 父行和其余 18 宽行均未关。完整 N22、五外宿主仍开，`--all` rc3。
 
 **现行入口：** 下一表第一行是当前身份与行动；其余旧行保留来源历史，凡与第一行冲突的“当前”字样均已失效。
 
