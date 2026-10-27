@@ -1,6 +1,63 @@
 /* Drives tools/gcc_cx.cx and tools/clang_cx.cx. No second resolver. */
 static int fails;
 
+static int write_text(const char *path, const char *text) {
+    FILE *f;
+    size_t want, n;
+    f = fopen(path, "wb");
+    if (!f) return -1;
+    want = strlen(text);
+    n = fwrite(text, 1, want, f);
+    if (fclose(f) != 0) return -1;
+    return n == want ? 0 : -1;
+}
+
+/* A warm -include must see a changed header. The value is the sum of the
+   macro and the module anchor, so an old object would keep the old sum. */
+static int include_fresh(const char *which) {
+    char cmd[1400];
+    char *buf = 0;
+    size_t n = 0;
+    int k, rc, ran;
+    const char *modp = "out/cxcc-drive/incmod.cx";
+    const char *mainp = "out/cxcc-drive/incmain.cx";
+    const char *hdr = "out/cxcc-drive/extra.h";
+    const char *out = "out/cxcc-drive/incbin";
+    if (write_text(modp, "#pragma unisa module incmod\nint cxcc_inc_anchor(void) { return 1; }\n")) return 0;
+    if (write_text(mainp, "#pragma unisa use incmod\nint main(void) { return EXTRA_VALUE + cxcc_inc_anchor(); }\n")) return 0;
+    if (write_text(hdr, "#define EXTRA_VALUE 7\n")) return 0;
+    unlink(out);
+    k = snprintf(cmd, sizeof cmd,
+                 "sh ./unisacc.com -run tools/%s_cx.cx -- %s -include %s -o %s",
+                 which, mainp, hdr, out);
+    if (k < 0 || k >= (int)sizeof cmd) return 0;
+    rc = cx_run_timeout(cmd, 40, &buf, &n);
+    free(buf);
+    buf = 0;
+    if (rc != 0) return 0;
+    k = snprintf(cmd, sizeof cmd, "./%s", out);
+    if (k < 0 || k >= (int)sizeof cmd) return 0;
+    ran = cx_run_timeout(cmd, 10, &buf, &n);
+    free(buf);
+    buf = 0;
+    if (ran != 8) return 0;
+    if (write_text(hdr, "#define EXTRA_VALUE 11\n")) return 0;
+    unlink(out);
+    k = snprintf(cmd, sizeof cmd,
+                 "sh ./unisacc.com -run tools/%s_cx.cx -- %s -include %s -o %s",
+                 which, mainp, hdr, out);
+    if (k < 0 || k >= (int)sizeof cmd) return 0;
+    rc = cx_run_timeout(cmd, 40, &buf, &n);
+    free(buf);
+    buf = 0;
+    if (rc != 0) return 0;
+    k = snprintf(cmd, sizeof cmd, "./%s", out);
+    if (k < 0 || k >= (int)sizeof cmd) return 0;
+    ran = cx_run_timeout(cmd, 10, &buf, &n);
+    free(buf);
+    return ran == 12;
+}
+
 static void note(int ok, const char *name) {
     if (ok) printf("PASS %s\n", name);
     else { printf("FAIL %s\n", name); fails = fails + 1; }
@@ -47,6 +104,8 @@ int main(void) {
     note(drive("clang", "tests/cxcc_one.cx", "out/cxcc-drive/clang-one", 5), "clang one-unit");
     note(drive("gcc", "tests/cxcc_shebang.cx", "out/cxcc-drive/gcc-bang", 3), "gcc shebang");
     note(drive("clang", "tests/cxcc_shebang.cx", "out/cxcc-drive/clang-bang", 3), "clang shebang");
+    note(include_fresh("gcc"), "gcc include-bytes");
+    note(include_fresh("clang"), "clang include-bytes");
     printf("CXCC fails=%d\n", fails);
     return fails ? 1 : 0;
 }
