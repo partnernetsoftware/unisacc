@@ -14,6 +14,8 @@
 #include <unistd.h>
 #include "packagefooter.h"
 #include "../include/unisa_sha256.h"
+#include "../include/cx.h"
+#include "cxlib/netpack.cx"
 /* Exact product codec (puff + slice CRC); same refuse path as run.c inflate. */
 #define UNISA_RUNTIME_STATE static
 #include "codec.h"
@@ -47,6 +49,59 @@ static unsigned char *slurp(const char *p, size_t *n) {
 }
 static void hex(const unsigned char *b, size_t n, char out[65]) {
   unisa_sha256_hex(b, n, out);
+}
+static void binary_int(np_buf *out, long long value) {
+  uint64_t u = value < 0 ? ~((uint64_t)value << 1) : ((uint64_t)value << 1);
+  do {
+    unsigned char c = (unsigned char)(u & 127);
+    u >>= 7;
+    if (u) c |= 128;
+    np_put(out, (const char *)&c, 1);
+  } while (u);
+}
+/* exec/c/networkformat.py encode: compacted Net text -> UNINETB1 records. */
+static void binary_encode(const char *text, size_t n, np_buf *out) {
+  np_puts(out, "UNINETB1");
+  size_t at = 0;
+  while (at < n) {
+    const char *end = memchr(text + at, '\n', n - at);
+    if (!end || at + 1 >= n || text[at + 1] != ' ') die("binary-record-line");
+    char tag = text[at];
+    if (tag != 'N' && tag != 'S' && tag != 'Q' && tag != 'C' && tag != 'H') die("binary-record-tag");
+    np_put(out, &tag, 1);
+    const char *p = text + at + 2;
+    if (tag == 'S') {
+      while (p < end && *p == ' ') p++;
+      if (p >= end) die("binary-string-field");
+      const char *stop = end;
+      while (stop > p && stop[-1] == ' ') stop--;
+      if (stop == p + 1 && *p == '-') binary_int(out, 0);
+      else {
+        size_t count = (size_t)(stop - p);
+        if (!count || count % 2) die("binary-string-hex");
+        binary_int(out, (long long)(count / 2));
+        for (size_t i = 0; i < count; i += 2) {
+          int a = p[i] >= '0' && p[i] <= '9' ? p[i] - '0' : p[i] >= 'a' && p[i] <= 'f' ? p[i] - 'a' + 10 : -1;
+          int b = p[i + 1] >= '0' && p[i + 1] <= '9' ? p[i + 1] - '0' : p[i + 1] >= 'a' && p[i + 1] <= 'f' ? p[i + 1] - 'a' + 10 : -1;
+          if (a < 0 || b < 0) die("binary-string-hex");
+          unsigned char c = (unsigned char)(a * 16 + b);
+          np_put(out, (const char *)&c, 1);
+        }
+      }
+    } else {
+      while (p < end) {
+        while (p < end && *p == ' ') p++;
+        if (p == end) break;
+        errno = 0;
+        char *next;
+        long long value = strtoll(p, &next, 10);
+        if (errno || next == p || next > end || (next < end && *next != ' ')) die("binary-integer");
+        binary_int(out, value);
+        p = next;
+      }
+    }
+    at = (size_t)(end - text) + 1;
+  }
 }
 static int parse_u(const unsigned char *s, size_t n, size_t *at, unsigned long *out) {
   unsigned long v = 0;
@@ -275,8 +330,8 @@ int main(int argc, char **argv) {
        "16d99cdb459f52dcacea4544b57551cfa285443480b594147bbb7d7d3c81feb5",
        "3f4c80e2500315ddf9db4086e7bd7bffab0ac6c5944186a1e391581d71ea3ad5"},
   };
-  puts("ALGORITHM\tcomparable-id=SHA256(inflate(M.body));equals=SHA256(networkformat.encode(pack.compact_q(job.result.net)));"
-       "construction=exec/c/pack.py:build compact_q then compressed_model;raw-.net-text-not-byte-equal");
+  puts("ALGORITHM\tall-32-live-byte-equality=inflate(M.body)==networkformat.encode(netpack.compact_q(job.result.net));"
+       "each-job-text==PC-model-text;raw-.net-text-not-byte-equal");
   for (int c = 0; c < 2; c++) {
     char jp[4400], mp[4400], jh[65], mh[65], rh[65];
     path(jp, sizeof jp, ctx, cases[c].job);
@@ -303,6 +358,35 @@ int main(int argc, char **argv) {
     ck(!strcmp(rh, cases[c].raw_sha), c == 0 ? "shared-raw-eq-encode-compact_q-pin" : "nonshared-raw-eq-encode-compact_q-pin");
     /* pin documents offline equality to encode(compact_q(job)); construction proof pack.py */
     free(raw);
+  }
+
+  /* Recompute every carried member from the live source-job Net text.  These
+     names are the fixed PC04 recipe order, not a private report at runtime. */
+  static const char *members[32] = {
+      "warnpp-shared", "warnlex", "lnx-arm64-elf", "shared-e2", "errorparse", "tapecheck",
+      "shared-o1", "shared-e4", "shared-prune", "lnx-arm64-lower", "object-lower-arm64",
+      "object-enc-arm64", "lnx-x86_64-elf", "lnx-x86_64-lower", "object-lower-x86_64",
+      "object-enc-x86_64", "osx-arm64-elf", "osx-arm64-lower", "osx-x86_64-elf",
+      "osx-x86_64-lower", "win-arm64-elf", "win-arm64-lower", "win-x86_64-elf",
+      "win-x86_64-lower", "tokenpp", "tokenlex", "warnparse", "warnunits", "shared-nativeabi",
+      "hostsymbols", "librarycontract", "librarypartition"};
+  for (int mi = 0; mi < 32; mi++) {
+    char jp[4400], mp[4400], label[64], why[256];
+    int z = snprintf(jp, sizeof jp, "%s/jobs/net-%s/result.net", ctx, members[mi]);
+    if (z < 0 || (size_t)z >= sizeof jp) die("member-job-path");
+    z = snprintf(mp, sizeof mp, "%s/models/%s.net", pc, members[mi]);
+    if (z < 0 || (size_t)z >= sizeof mp) die("member-model-path");
+    size_t jn, mn;
+    unsigned char *job = slurp(jp, &jn), *model = slurp(mp, &mn);
+    snprintf(label, sizeof label, "member-text-%02d", mi);
+    ck(jn == mn && !memcmp(job, model, jn), label);
+    np_buf compact = {0}, encoded = {0};
+    if (np_compact_q((const char *)job, jn, &compact, why, sizeof why)) die("member-compact-q");
+    binary_encode(compact.p, compact.n, &encoded);
+    unsigned char *raw = inflate_raw(b + ms[mi].off, (size_t)ms[mi].clen, (size_t)ms[mi].rlen, ms[mi].crc);
+    snprintf(label, sizeof label, "member-binary-%02d", mi);
+    ck((size_t)ms[mi].rlen == encoded.n && !memcmp(raw, encoded.p, encoded.n), label);
+    free(job); free(model); free(raw); free(compact.p); free(encoded.p);
   }
 
   /* same-window dynamic: clean / used-M ICM / unused-M OK */
