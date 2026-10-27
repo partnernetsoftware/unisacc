@@ -8,6 +8,7 @@ static char cap_img[4400],cap_tape[4400],image[4400],ledger[4400],e3id[4400];
 static char capture_img_sha[65],product_before[65];
 static int assertions,failures;
 static void die(const char *s){fprintf(stderr,"ri-image-single: REFUSE %s\n",s);exit(2);}
+static void copy_fit(char *dst, size_t cap, const char *src){size_t i=0;if(cap==0)die("copy-bound");while(src[i]&&i+1<cap){dst[i]=src[i];i++;}if(src[i])die("copy-bound");dst[i]=0;}
 static void check(int ok,const char *s){assertions++;if(!ok){failures++;fprintf(stderr,"FAIL\t%s\n",s);}else printf("PASS\t%s\n",s);}
 static void path(char *o,size_t cap,const char *a,const char *b){int n=snprintf(o,cap,"%s/%s",a,b);if(n<0||(size_t)n>=cap)die("path");}
 static void saved(const char *p,const void *s,size_t n){int f=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);size_t at=0;if(f<0)die(p);while(at<n){ssize_t k=write(f,(char *)s+at,n-at);if(k<0&&errno==EINTR)continue;if(k<=0)die("write");at+=(size_t)k;}if(close(f))die("close");}
@@ -46,10 +47,10 @@ static void patch_e3_row_len_sha(const char *cap){
   if(hit){
    a=i;for(c=0;a<e&&c<3;a++)if(tb[a]=='\t')c++;if(c!=3||a>=e)die("e3-row");
    b=a;while(b<e&&tb[b]!='\t')b++;if(b>=e)die("e3-row2");
-   memcpy(ob+outn,tb+i,a-i);outn+=a-i;
-   memcpy(ob+outn,lenbuf,(size_t)z);outn+=(size_t)z;ob[outn++]='\t';
+   {size_t ncopy=a-i;size_t ci=0;while(ci<ncopy){ob[outn+ci]=tb[i+ci];ci++;}outn+=ncopy;}
+   {size_t ncopy=(size_t)z;size_t ci=0;while(ci<ncopy){ob[outn+ci]=lenbuf[ci];ci++;}outn+=ncopy;}ob[outn++]='\t';
    memcpy(ob+outn,sha,64);outn+=64;ob[outn++]='\n';
-  }else{memcpy(ob+outn,tb+i,e-i+(e<tn));outn+=e-i+(e<tn);}
+  }else{{size_t ncopy=e-i+(e<tn);size_t ci=0;while(ci<ncopy){ob[outn+ci]=tb[i+ci];ci++;}outn+=ncopy;}}
   i=e+(e<tn);}
  free(tb);fd=open(led,O_WRONLY|O_TRUNC|O_CLOEXEC);if(fd<0)die("led-open");
  if((size_t)write(fd,ob,outn)!=outn)die("led-write");close(fd);free(ob);}
@@ -66,7 +67,7 @@ int main(int argc,char **argv){
  if(argc!=4||!realpath(argv[1],root)||argv[2][0]!='/'||argv[3][0]!='/'||strlen(argv[3])>=sizeof work||strstr(argv[3],".."))
   die("usage ROOT PRODUCT_COM ABS_OUT");
  {char expected[4200];path(expected,sizeof expected,root,"unisacc.com");if(strcmp(argv[2],expected))die("installed-product-required");}
- strcpy(com,argv[2]);strcpy(work,argv[3]);
+ copy_fit(com,sizeof com,argv[2]);copy_fit(work,sizeof work,argv[3]);
  if(unsetenv("UNISACC_RR_TIME")||unsetenv("UNISACC_RF_CAPTURE")||unsetenv("UNISA_ATTRIBUTES")||setenv("UNISACC_RUN_CACHE","0",1))die("clean-environment");
  sha_file(com,product_before);
  if(mkdir(work,0700))die("mkdir");
@@ -80,7 +81,7 @@ int main(int argc,char **argv){
  path(image,sizeof image,work,"probe.com");
  if(mkdir(cap_img,0700)||mkdir(cap_tape,0700))die("mkdir-cap");
  /* tape contract on product */
- {char env[4600];snprintf(env,sizeof env,"UNISACC_RF_CAPTURE=%s",cap_tape);
+ {char env[4600];{int zn=snprintf(env,sizeof env,"UNISACC_RF_CAPTURE=%s",cap_tape);if(zn<0||(size_t)zn>=sizeof env)die("capture-env");}
   const char *adds[]={env,"UNISA_JOBS=1",0};char *v[24];int n=pref(v,15);
   v[n++]="-O0";v[n++]="-b";v[n++]="lnx/x86_64";v[n++]="-S";v[n++]=src;v[n++]="-I";v[n++]=inc;v[n++]="-o";v[n++]="-";v[n]=0;
   np_result cap=runv(v,root,adds,18,"prod-capture-tape");
@@ -94,7 +95,7 @@ int main(int argc,char **argv){
   const char *adds[]={"UNISA_JOBS=1",0};np_result rep=runv(v,root,adds,18,"prod-replay-tape");
   check(!rep.rc&&err_ok(&rep)&&rep.outn>0,"tape.product-strict-replay-rc0");np_free(&rep);}
  /* image capture */
- {char env[4600];snprintf(env,sizeof env,"UNISACC_RF_CAPTURE=%s",cap_img);
+ {char env[4600];{int zn=snprintf(env,sizeof env,"UNISACC_RF_CAPTURE=%s",cap_img);if(zn<0||(size_t)zn>=sizeof env)die("capture-env");}
   const char *adds[]={env,"UNISA_JOBS=1",0};char *v[24];int n=pref(v,20);
   v[n++]="-O0";v[n++]="-b";v[n++]="lnx/x86_64";v[n++]="-I";v[n++]=inc;v[n++]=src;v[n++]="-o";v[n++]=image;v[n]=0;
   np_result cap=runv(v,root,adds,25,"prod-capture-image");

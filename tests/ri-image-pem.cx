@@ -14,6 +14,7 @@ static const char *msg_e3_absent=
 static const char *msg_e3_malformed=
  "unisacc: INTERFACE_ERROR resource-e3-identity-malformed\n";
 static void die(const char *s){fprintf(stderr,"ri-image-pem: REFUSE %s\n",s);exit(2);}
+static void copy_fit(char *dst, size_t cap, const char *src){size_t i=0;if(cap==0)die("copy-bound");while(src[i]&&i+1<cap){dst[i]=src[i];i++;}if(src[i])die("copy-bound");dst[i]=0;}
 static void ck(int ok,const char *s){assertions++;if(!ok){failures++;fprintf(stderr,"FAIL\t%s\n",s);}else printf("PASS\t%s\n",s);}
 static void path(char *o,size_t capn,const char *a,const char *b){int n=snprintf(o,capn,"%s/%s",a,b);if(n<0||(size_t)n>=capn)die("path");}
 static void saved(const char *p,const void *s,size_t n){int f=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);size_t at=0;if(f<0)die(p);while(at<n){ssize_t k=write(f,(char *)s+at,n-at);if(k<0&&errno==EINTR)continue;if(k<=0)die("write");at+=(size_t)k;}if(close(f))die("close");}
@@ -51,7 +52,7 @@ static void mutate_row(const char *capdir,const char *keyhex,int mode,const char
    z=snprintf(ob+outn,n+128-outn,"%s\t0\t-\t0\t-\n",keyhex);if(z<0)die("fmt");outn+=(size_t)z;}
   else if(hit&&mode==2){
    z=snprintf(ob+outn,n+128-outn,"%s\t1\t%s\t0\t%s\n",keyhex,empty_blob,sha);if(z<0)die("fmt2");outn+=(size_t)z;}
-  else{memcpy(ob+outn,s+i,e-i+(e<n));outn+=e-i+(e<n);}
+  else{{size_t ncopy=e-i+(e<n);size_t ci=0;while(ci<ncopy){ob[outn+ci]=s[i+ci];ci++;}outn+=ncopy;}}
   i=e+(e<n);}
  if(hits!=1)die("missing-key-row");
  free(s);fd=open(led,O_WRONLY|O_TRUNC|O_CLOEXEC);if(fd<0)die("led-open");
@@ -63,7 +64,7 @@ static void corrupt_src_blob(const char *capdir){
   if(e>i&&!memcmp(s+i,k_src,strlen(k_src))&&s[i+strlen(k_src)]=='\t'){
    a=i;for(c=0;a<e&&c<2;a++)if(s[a]=='\t')c++;if(c!=2||a>=e)die("blob-field");
    b=a;while(b<e&&s[b]!='\t')b++;if(b>=e||b==a||b-a>=sizeof blob)die("blob-name");
-   memcpy(blob,s+a,b-a);blob[b-a]=0;
+   {size_t ncopy=b-a;size_t ci=0;while(ci<ncopy){blob[ci]=s[a+ci];ci++;}blob[ncopy]=0;}
    {char p[4400];size_t bn;char *bb;path(p,sizeof p,capdir,blob);bb=cx_read(p,&bn);if(!bb||bn<1)die("blob-r");
     bb[0]=(char)(bb[0]^0x5a);fd=open(p,O_WRONLY|O_TRUNC|O_CLOEXEC);if(fd<0)die("blob-o");
     if((size_t)write(fd,bb,bn)!=bn)die("blob-w");close(fd);free(bb);}
@@ -80,7 +81,7 @@ int main(int argc,char **argv){
  if(argc!=4||!realpath(argv[1],root)||argv[2][0]!='/'||argv[3][0]!='/'||strstr(argv[3],".."))
   die("usage ROOT PRODUCT_COM ABS_OUT");
  if(strlen(argv[2])>=sizeof com||strlen(argv[3])>=sizeof work)die("path-bound");
- strcpy(com,argv[2]);strcpy(work,argv[3]);
+ copy_fit(com,sizeof com,argv[2]);copy_fit(work,sizeof work,argv[3]);
  if(mkdir(work,0700))die("mkdir");
  path(bound,sizeof bound,root,"tools/bound");
  path(inc,sizeof inc,work,"inc");if(mkdir(inc,0700))die("mkdir-inc");
@@ -91,7 +92,7 @@ int main(int argc,char **argv){
  if(mkdir(cap,0700))die("mkdir-cap");
  sha_file(com,before);
  /* capture */
- {snprintf(envbuf,sizeof envbuf,"UNISACC_RF_CAPTURE=%s",cap);
+ {{int zn=snprintf(envbuf,sizeof envbuf,"UNISACC_RF_CAPTURE=%s",cap);if(zn<0||(size_t)zn>=sizeof envbuf)die("capture-env");}
   const char *adds[]={envbuf,"UNISA_JOBS=1",0};char *v[24];int n=pref(v,20);
   v[n++]="-O0";v[n++]="-b";v[n++]="lnx/x86_64";v[n++]="-I";v[n++]=inc;v[n++]=src;v[n++]="-o";v[n++]=image;v[n]=0;
   np_result r=runv(v,root,adds,25,"prod-capture-image");

@@ -8,6 +8,7 @@ static char e1_id[65],product_before[65],product_after[65];
 static const char *e1_pin="0ae80726541fc4181d57de9aad1a960a7adf698c38dda8097f9edd2b9ae75fbb";
 static int assertions,failures;
 static void die(const char *s){fprintf(stderr,"stream-e1: %s\n",s);exit(2);}
+static void copy_fit(char *dst, size_t cap, const char *src){size_t i=0;if(cap==0)die("copy-bound");while(src[i]&&i+1<cap){dst[i]=src[i];i++;}if(src[i])die("copy-bound");dst[i]=0;}
 static void check(int ok,const char *s){assertions++;if(!ok)failures++;printf("%s\t%s\n",ok?"PASS":"FAIL",s);}
 static void path(char *out,size_t cap,const char *dir,const char *name){int n=snprintf(out,cap,"%s/%s",dir,name);if(n<0||(size_t)n>=cap)die("path");}
 static void saved(const char *p,const void *s,size_t n){int f=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);size_t at=0;if(f<0)die("exclusive-create");while(at<n){ssize_t k=write(f,(char *)s+at,n-at);if(k<0&&errno==EINTR)continue;if(k<=0)die("write");at+=(size_t)k;}if(close(f))die("close");}
@@ -19,7 +20,7 @@ static void write_unipp1(const char *leaf,const char *body){
  if(bn>65535)die("pp-body-bound");memcpy(hdr,"UNIPP1",6);hdr[6]=0;
  hdr[7]=(unsigned char)(len);hdr[8]=(unsigned char)(len>>8);hdr[9]=(unsigned char)(len>>16);hdr[10]=(unsigned char)(len>>24);
  for(i=11;i<27;i++)hdr[i]=0;
- char p[4200];path(p,sizeof p,work,leaf);{unsigned char *all=malloc(27+bn);if(!all)die("alloc");memcpy(all,hdr,27);memcpy(all+27,body,bn);saved(p,all,27+bn);free(all);}}
+ char p[4200];path(p,sizeof p,work,leaf);{unsigned char *all=malloc(27+bn);if(!all)die("alloc");memcpy(all,hdr,27);{size_t ci=0;while(ci<bn){all[27+ci]=body[ci];ci++;}}saved(p,all,27+bn);free(all);}}
 static int uslattr1(const unsigned char *b,size_t n,unsigned *count,const unsigned char **pay,size_t *pn){
  unsigned plen;if(n<16||memcmp(b,"USLATTR1",8))return 0;*count=little(b+8);plen=little(b+12);
  if(16+(size_t)(*count)*5+(size_t)plen!=n)return 0;*pay=b+16+(size_t)(*count)*5;*pn=plen;return 1;}
@@ -44,16 +45,16 @@ static np_result invoke(const char *input_leaf,const char *evidence_leaf){
 static void positive(const char *name,const char *body){
  char t[160];unsigned count=0;const unsigned char *pay=0;size_t pn=0;
  write_unipp1(name,body);np_result r=invoke(name,name);
- snprintf(t,sizeof t,"%s.accept-rc0-empty-stderr",name);check(!r.rc&&!r.errn,t);
- snprintf(t,sizeof t,"%s.uslattr1-frame",name);check(uslattr1((unsigned char *)r.out,r.outn,&count,&pay,&pn)&&count==0,t);
- snprintf(t,sizeof t,"%s.unitok1-embeds-source",name);check(pay&&unitok1(pay,pn,body),t);
+ {int zn=snprintf(t,sizeof t,"%s.accept-rc0-empty-stderr",name);if(zn<0||(size_t)zn>=sizeof t)die("label");}check(!r.rc&&!r.errn,t);
+ {int zn=snprintf(t,sizeof t,"%s.uslattr1-frame",name);if(zn<0||(size_t)zn>=sizeof t)die("label");}check(uslattr1((unsigned char *)r.out,r.outn,&count,&pay,&pn)&&count==0,t);
+ {int zn=snprintf(t,sizeof t,"%s.unitok1-embeds-source",name);if(zn<0||(size_t)zn>=sizeof t)die("label");}check(pay&&unitok1(pay,pn,body),t);
  np_free(&r);}
 static void refuse(const char *name,const void *bytes,size_t n,const char *needle){
  char sp[4200],t[160];path(sp,sizeof sp,work,name);saved(sp,bytes,n);
  np_result r=invoke(name,name);
- snprintf(t,sizeof t,"%s.reject-nonzero-rc",name);check(!!r.rc,t);
- snprintf(t,sizeof t,"%s.reject-empty-stdout",name);check(!r.outn,t);
- snprintf(t,sizeof t,"%s.reject-named-oracle",name);check(r.errn&&strstr(r.err,needle),t);
+ {int zn=snprintf(t,sizeof t,"%s.reject-nonzero-rc",name);if(zn<0||(size_t)zn>=sizeof t)die("label");}check(!!r.rc,t);
+ {int zn=snprintf(t,sizeof t,"%s.reject-empty-stdout",name);if(zn<0||(size_t)zn>=sizeof t)die("label");}check(!r.outn,t);
+ {int zn=snprintf(t,sizeof t,"%s.reject-named-oracle",name);if(zn<0||(size_t)zn>=sizeof t)die("label");}check(r.errn&&strstr(r.err,needle),t);
  np_free(&r);}
 int main(int argc,char **argv){
  if(argc!=4){fputs("usage: ROOT STREAM_DIR NEW_OUTDIR\n",stderr);return 2;}
@@ -61,7 +62,7 @@ int main(int argc,char **argv){
  fputs("UNVERIFIED: stream-e1 requires Linux/x86_64\n",stderr);return 77;
 #endif
  if(!realpath(argv[1],root)||!realpath(argv[2],streams))die("resolve");
- if(argv[3][0]!='/'||strlen(argv[3])>=sizeof work)die("absolute-new-outdir");strcpy(work,argv[3]);
+ if(argv[3][0]!='/'||strlen(argv[3])>=sizeof work)die("absolute-new-outdir");copy_fit(work,sizeof work,argv[3]);
  if(mkdir(work,0700))die("new-outdir-must-be-absent");
  path(bound,sizeof bound,root,"tools/bound");path(inc,sizeof inc,root,"include");
  path(product,sizeof product,root,"unisacc.com");path(e1bin,sizeof e1bin,streams,"unisacc-stream2.com");
@@ -76,7 +77,7 @@ int main(int argc,char **argv){
   {unsigned char trunc[10];memcpy(trunc,"UNIPP1",6);trunc[6]=0;trunc[7]=1;trunc[8]=0;trunc[9]=0;refuse("trunc.pp",trunc,10,needle);}
   {const char *body="int x;\n";unsigned char bad[40];unsigned lie=(unsigned)strlen(body)+5;int i;
    memcpy(bad,"UNIPP1",6);bad[6]=0;bad[7]=(unsigned char)lie;bad[8]=bad[9]=bad[10]=0;for(i=11;i<27;i++)bad[i]=0;
-   memcpy(bad+27,body,strlen(body));refuse("bad-len.pp",bad,27+strlen(body),needle);}}
+   {size_t ncopy=strlen(body),ci=0;while(ci<ncopy){bad[27+ci]=body[ci];ci++;}}refuse("bad-len.pp",bad,27+strlen(body),needle);}}
  {char a[4200],why[1024];path(a,sizeof a,work,"plain.pp");char lab[4200];path(lab,sizeof lab,work,"label.c");
   char *cmd[]={bound,"12",e1bin,a,lab,inc,0};const char *env[]={"UNISA_ATTRIBUTES=","UNISA_MAXSTEPS=200000000",0};
   np_result r1,r2;if(np_run(cmd,root,env,14,&r1,why,sizeof why)||np_run(cmd,root,env,14,&r2,why,sizeof why))die(why);
