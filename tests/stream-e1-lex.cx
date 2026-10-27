@@ -189,7 +189,8 @@ static const krow K[]={
  {"dot","star","op",".*x","0:." E "1:*" E "2:id=x"},{"dot","punct","op",".+x","0:." E "1:+" E "2:id=x"},{"dot","eof","op",".","0:."},
  {"dot","other","op",".@","!unexpected character"},{"dot","dot","op","..x","0:." E "1:." E "2:id=x"},
  {"other","ws","bad","@ x","!unexpected character"},{"other","nl","bad","$\nx","!unexpected character"},{"other","A","bad","#a","!unexpected character"},
- {"other","d","bad","`1","!unexpected character"},{"other","q","bad","\\\"s\"","!unexpected character"},{"other","sq","bad","\x7f's'","!unexpected character"},
+ /* Backslash has its own UCN scanner; use an ordinary bad byte for this gold class. */
+ {"other","d","bad","`1","!unexpected character"},{"other","q","bad","@\"s\"","!unexpected character"},{"other","sq","bad","\x7f's'","!unexpected character"},
  {"other","slash","bad","\x80/x","!unexpected character"},{"other","star","bad","\xff*x","!unexpected character"},{"other","punct","bad","\x1b+x","!unexpected character"},
  {"other","eof","bad","\x0b","!unexpected character"},{"other","other","bad","\x0c@","!unexpected character"},{"other","dot","bad","\x01.x","!unexpected character"}};
 static int is_punct_tok(const char *s,size_t n){int i;for(i=5;i<ntokdom;i++){const char *t=tokdom[i];if(strlen(t)==n&&!memcmp(t,s,n)&&!((t[0]>='a'&&t[0]<='z')||t[0]=='_'))return 1;}return 0;}
@@ -253,8 +254,10 @@ static const frag PUNCT_MUNCH[]={
  {"a>>>=b","0:id=a" E "1:>>" E "3:>=" E "5:id=b"},{"a!==b","0:id=a" E "1:!=" E "3:=" E "4:id=b"},{"a-->b","0:id=a" E "1:--" E "3:>" E "4:id=b"},
  {"a/**/b","0:id=a" E "5:id=b"},{"a//*c\nb","0:id=a" E "6:id=b"},{"a/ /b","0:id=a" E "1:/" E "3:/" E "4:id=b"}};
 static const frag UCNS[]={
- {"a\\u00e9;","0:id=a\\u00e9" E "7:;"},{"b\\U0001F600c;","0:id=b\\U0001F600c" E "12:;"},{"x\\u00E9\\u00e8 y","0:id=x\\u00E9\\u00e8" E "14:id=y"},
- {"L\\u00e9","0:id=L\\u00e9"},{"_\\u0041","0:id=_\\u0041"}};
+ {"a\\u00e9;","0:id=a\\u00e9" E "7:;"},{"b\\U000003B1c;","0:id=b\\U000003B1c" E "12:;"},{"x\\u00E9\\u00e8 y","0:id=x\\u00E9\\u00e8" E "14:id=y"},
+ {"L\\u00e9","0:id=L\\u00e9"},{"_\\u00C0","0:id=_\\u00C0"},
+ {"\\u00e9x;","0:id=\\u00e9x" E "7:;"},{"\\U000000E9;","0:id=\\U000000E9" E "10:;"},
+ {"\\u0901;","0:id=\\u0901" E "6:;"},{"a\\u0660;","0:id=a\\u0660" E "7:;"},{"a\\u0E50;","0:id=a\\u0E50" E "7:;"}};
 static const frag LEXWORD[]={
  {"__attribute__((unused)) int a;","24:type=int" E "28:id=a" E "29:;"},{"__attribute__ ((x)) b;","20:id=b" E "21:;"},
  {"__attribute__((a(b,(c)))) z;","26:id=z" E "27:;"},{"__attribute__ x;","0:id=__attribute__" E "14:id=x" E "15:;"},
@@ -291,6 +294,28 @@ static void marks_case(void){
  ab=cx_read(attr,&an);
  {static const unsigned char want[]={2,0,0,0, 0,0,0,0,3,0,0,0,1, 0,0,0,0,10,0,0,0,2};check(ab&&an==sizeof want&&!memcmp(ab,want,an),"positive.constructor-destructor-marks.sidecar-unit0-records-exact");}
  free(ab);free(pp.p);free(txt.p);tfree(&w);}
+static int ucn_hex4(const char *s,size_t n){int v=0;if(n!=4)die("Annex D hex width");for(size_t i=0;i<n;i++){int c=(unsigned char)s[i],d=c>='0'&&c<='9'?c-'0':c>='A'&&c<='F'?c-'A'+10:-1;if(d<0)die("Annex D hex");v=v*16+d;}return v;}
+static void ucn_range_case(void){
+ char p[4400];path(p,sizeof p,root,"exec/facts/ucn-annexd.tsv");size_t n;char *s=loaded(p,&n);unsigned char *kind=calloc(65536,1);if(!kind)die("Annex D allocation");
+ int ranges[249][2],rows=0,letters=0,digits=0;size_t at=0;
+ while(at<n){size_t e=at;while(e<n&&s[e]!='\n')e++;if(e>at&&s[at]!='#'){
+  const char *f[4];size_t fl[4];int count=split(s+at,e-at,f,fl,4);if(count!=4)die("Annex D row");
+  if(!fis(f[0],fl[0],"lo")){int lo=ucn_hex4(f[0],fl[0]),hi=ucn_hex4(f[1],fl[1]),k=fis(f[3],fl[3],"letter")?1:fis(f[3],fl[3],"digit")?2:0;if(!k||lo>hi||rows==249)die("Annex D range");
+   ranges[rows][0]=lo;ranges[rows++][1]=hi;if(k==1)letters++;else digits++;for(int v=lo;v<=hi;v++)kind[v]|=(unsigned char)k;
+  }}at=e+1;
+ }
+ free(s);if(rows!=249||letters!=235||digits!=14)die("Annex D inventory");
+ np_buf text={0};toks wanted={{0},0};int words=0;
+ for(int r=0;r<rows;r++){int values[3]={ranges[r][0],(ranges[r][0]+ranges[r][1])/2,ranges[r][1]};
+  for(int k=0;k<3;k++){int v=values[k];if(k&&v==values[k-1])continue;for(int wide=0;wide<2;wide++){
+   char name[24],spec[32];const char *prefix=(kind[v]&2)?"a":"";
+   if(cx_fmt(name,sizeof name,wide?"%s\\U%08X":"%s\\u%04x",prefix,(unsigned)v)<0||cx_fmt(spec,sizeof spec,"id=%s",name)<0)die("Annex D format");
+   tk(&wanted,(unsigned)text.n,spec,strlen(spec));np_puts(&text,name);np_puts(&text," ");words++;
+  }}
+ }
+ np_puts(&text,"\n");tk_end(&wanted,(unsigned)text.n);accept_text("positive.ucn-annexd-range-boundaries-both-forms",text.p,text.n,0,&wanted);
+ printf("INFO\tucn-annexd\tranges=%d\tboundary_forms=%d\n",rows,words);free(text.p);free(kind);tfree(&wanted);
+}
 static void mode_tokens(void){
  toks w={{0},0};int i;
  /* format: exact token lines after the echo, typed spelling, text-relative offsets, eof at text length */
@@ -317,6 +342,7 @@ static void mode_tokens(void){
  frag_case("positive.numbers",NUMBERS,(int)(sizeof NUMBERS/sizeof NUMBERS[0]),0);
  frag_case("positive.literals",LITERALS,(int)(sizeof LITERALS/sizeof LITERALS[0]),0);
  frag_case("positive.ucn",UCNS,(int)(sizeof UCNS/sizeof UCNS[0]),0);
+ ucn_range_case();
  lexword_table_check();frag_case("gold.lexword",LEXWORD,(int)(sizeof LEXWORD/sizeof LEXWORD[0]),0);
  marks_case();
  /* A-47: 5000-byte identifier is one token or a named refusal; never a crash or hang */
@@ -335,7 +361,7 @@ static void mode_bytes(void){
    char name[100];np_buf t={0};np_puts(&t,"__attribute__");np_put(&t,&ch,1);np_puts(&t,"((x))");
    z=snprintf(name,sizeof name,"lexcls.b%03d.other-attws-%s",b,battws[b]?"yes":"no");if(z<0||(size_t)z>=sizeof name)die("label");
    if(battws[b])die("gold other byte with attws=yes is not modelled");
-   refuse_text(name,t.p,t.n,BADCH);free(t.p);refusals++;covered++;continue;}
+   refuse_text(name,t.p,t.n,b==92?"invalid universal character name":BADCH);free(t.p);refusals++;covered++;continue;}
   /* class fragment */
   switch(c){
    case 2:src[0]=ch;sl=1;z=snprintf(spec,sizeof spec,"0:id=%c",ch);break;
@@ -395,8 +421,11 @@ static void mode_refusals(void){
  /* lexer: stray bytes, UCN, unterminated literals, binary garbage, embedded NUL */
  text_refusal("ref.stray.at-sign","int x @;\n",9,BADCH);text_refusal("ref.stray.hash","#define X 1\n",12,BADCH);
  text_refusal("ref.stray.backquote","a = b ` c;\n",11,BADCH);text_refusal("ref.stray.embedded-nul","int\0x;\n",7,BADCH);
- text_refusal("ref.ucn.at-identifier-start","\\u00e9x;\n",9,BADCH);text_refusal("ref.ucn.short-u","a\\u12;\n",7,BADCH);
- text_refusal("ref.ucn.short-U","a\\U0001F60;\n",12,BADCH);text_refusal("ref.ucn.not-u","a\\x41;\n",7,BADCH);
+ text_refusal("ref.ucn.short-u","a\\u12;\n",7,"invalid universal character name");
+ text_refusal("ref.ucn.short-U","a\\U0001F60;\n",12,"invalid universal character name");text_refusal("ref.ucn.not-u","a\\x41;\n",7,"invalid universal character name");
+ {const char *bad[]={"\\u0041","a\\u0000","a\\uD800","\\uDFFF","a\\U00110000","a\\UFFFFFFFF"};for(int k=0;k<6;k++){char name[100];if(cx_fmt(name,sizeof name,"ref.ucn.invalid-value-%d",k)<0)die("label");text_refusal(name,bad[k],strlen(bad[k]),"invalid universal character name");}}
+ {const char *bad[]={"\\u0024","a\\u0040","\\u0060","a\\U0001F600","\\u00A0","a\\uFFFF"};for(int k=0;k<6;k++){char name[100];if(cx_fmt(name,sizeof name,"ref.ucn.not-identifier-%d",k)<0)die("label");text_refusal(name,bad[k],strlen(bad[k]),"universal character name not permitted in identifier");}}
+ {const char *bad[]={"\\u0660","\\u0E50","\\U00000F20"};for(int k=0;k<3;k++){char name[100];if(cx_fmt(name,sizeof name,"ref.ucn.initial-digit-%d",k)<0)die("label");text_refusal(name,bad[k],strlen(bad[k]),"universal character name digit cannot start identifier");}}
  text_refusal("ref.unterminated.string","s = \"abc\n",9,NOQ);text_refusal("ref.unterminated.char","c = 'a\n",7,NOSQ);
  text_refusal("ref.unterminated.string-escape-at-end","\"a\\",3,NOQ);text_refusal("ref.unterminated.char-escape-at-end","'\\",2,NOSQ);
  /* C99 6.4.4/6.4.8: these whole preprocessing numbers cannot be

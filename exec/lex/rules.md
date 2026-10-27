@@ -15,7 +15,9 @@ deleted on 2026-10-23 (it built on the archived seed's construction).
 | `weights/gold/parse.tsv` token field | token names and numeric order |
 | `iterate/kernel/typekw.tsv` | type keyword values |
 | `number.tsv`, `literal.tsv` | numeric and literal/comment transitions |
-| `ident-byte.tsv`, `ident-stack.tsv` | UCN and balanced-skip transitions |
+| `ident-byte.tsv`, `ident-stack.tsv` | balanced-skip transitions |
+| `ucn-byte.tsv` | generated UCN shape, scalar-value, Annex D membership and initial-digit decisions |
+| `../facts/ucn-annexd.tsv` | C99 Annex D identifier ranges; digit membership takes precedence for initial characters |
 | `gen-template.tsv` | dispatch/peek/handler rows, identifier-prefix trie, punctuator munch trie (overlay template over facts) |
 | `entry.tsv` | dispatch action to entry/linked machine |
 | `output.tsv`, `spelling.tsv` | output sequences and spelling modes |
@@ -45,6 +47,17 @@ links between declared machines. Token IDs 0..4 (eof/type/id/num/str), the
 class names and named registers are interface contracts in the adapter.
 Changing the protocol or those contracts can require adapter changes;
 this is not a claim that arbitrary lexer designs need no construction code.
+
+UCNs preserve their original token spelling and source offset. The generated
+hex-digit classifier accepts both four- and eight-digit forms, rejects invalid
+values and characters outside Annex D, and rejects Annex D digits in the initial
+position. Regenerate its ordinary finite rules and the reference range view with
+`sh ./unisacc.com tools/ucn-table.cx -- ROOT --write`; use `--check` before source
+construction. The generator verifies its compact graph against the range facts
+over the BMP and high-word classes. This structural check is separate from actual
+network execution. The stream test exercises both spellings at range boundaries.
+Identity equivalence between different spellings belongs to macro/symbol lookup;
+accepting a UCN in E1 does not establish that downstream identity behavior.
 
 Default generation reads no old kernel or reference compiler. The explicit
 `--check-declarations` test mode checks the old Python/C declarations; it is

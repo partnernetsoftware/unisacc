@@ -1,0 +1,90 @@
+/* Construct the E1 hex-digit DFA and the reference range view from one C99
+   Annex D fact table. No weights or test results are cached. */
+#pragma unisa use cxlib.netpack
+#define UCG_MAX_NODES 8192
+#define UCG_HASH_SIZE 32768
+static unsigned char ucg_kind[65536];
+static int ucg_nodes[UCG_MAX_NODES][16],ucg_hash[UCG_HASH_SIZE],ucg_count;
+static const char *ucg_errors[]={"invalid universal character name","universal character name not permitted in identifier","universal character name digit cannot start identifier"};
+static void ucg_die(const char *s){fprintf(stderr,"ucn-table: %s errno=%d\n",s,errno);exit(2);}
+static int ucg_hex(const char *s){
+ int v=0;if(strlen(s)!=4)ucg_die("four hexadecimal digits required");
+ for(int i=0;i<4;i++){int c=(unsigned char)s[i],d=c>='0'&&c<='9'?c-'0':c>='A'&&c<='F'?c-'A'+10:-1;if(d<0)ucg_die("uppercase hexadecimal fact");v=v*16+d;}return v;
+}
+static void ucg_load(char *text){
+ int rows=0,letters=0,digits=0,points[2]={0,0};
+ for(char *line=text;*line;){char *end=strchr(line,'\n');if(!end)ucg_die("fact final LF");*end=0;
+  if(*line&&*line!='#'&&strncmp(line,"lo\t",3)){
+   char *a=strchr(line,'\t'),*b=a?strchr(a+1,'\t'):0,*c=b?strchr(b+1,'\t'):0;if(!a||!b||!c||strchr(c+1,'\t'))ucg_die("fact columns");*a=0;*b=0;*c=0;
+   int lo=ucg_hex(line),hi=ucg_hex(a+1),kind=!strcmp(c+1,"letter")?1:!strcmp(c+1,"digit")?2:0;if(!kind||lo>hi||!* (b+1))ucg_die("fact range/kind");
+   for(int v=lo;v<=hi;v++){if(ucg_kind[v]&kind)ucg_die("overlapping same-kind ranges");ucg_kind[v]|=kind;}
+   rows++;if(kind==1)letters++;else digits++;points[kind-1]+=hi-lo+1;
+  }line=end+1;
+ }
+ if(rows!=249||letters!=235||digits!=14||points[0]!=34819||points[1]!=149)ucg_die("Annex D inventory");
+}
+/* Equal suffix classifiers share nodes; no language decision is made by a
+   runtime callback. Every emitted edge is an ordinary E1 finite rule. */
+static int ucg_intern(const int child[16]){
+ unsigned h=2166136261u;for(int k=0;k<16;k++){h^=(unsigned)child[k];h*=16777619u;}h&=UCG_HASH_SIZE-1;
+ while(ucg_hash[h]){int id=ucg_hash[h]-1;if(!memcmp(ucg_nodes[id],child,16*sizeof(int)))return id+1;h=(h+1)&(UCG_HASH_SIZE-1);}
+ if(ucg_count>=UCG_MAX_NODES)ucg_die("DFA capacity");int id=ucg_count++;for(int k=0;k<16;k++)ucg_nodes[id][k]=child[k];ucg_hash[h]=id+1;return id+1;
+}
+static int ucg_compress(int values[65536]){
+ int count=65536;while(count>1){int next=count/16;for(int i=0;i<next;i++)values[i]=ucg_intern(values+i*16);count=next;}return values[0];
+}
+static int ucg_leaf(unsigned v,int initial){
+ if(v>0x10ffffu||(v>=0xd800u&&v<=0xdfffu)||(v<0xa0u&&v!=0x24u&&v!=0x40u&&v!=0x60u))return -2;
+ if(v>=65536u||!ucg_kind[v])return -3;
+ if(initial&&(ucg_kind[v]&2))return -4;
+ return -1;
+}
+static int ucg_constant(int leaf){int row[16];for(int depth=0;depth<4;depth++){for(int k=0;k<16;k++)row[k]=leaf;leaf=ucg_intern(row);}return leaf;}
+static int ucg_trace(int root,unsigned value,int width){
+ int id=root;for(int shift=(width-1)*4;shift>=0;shift-=4){if(id<=0||id>ucg_count)ucg_die("early DFA terminal");id=ucg_nodes[id-1][(value>>shift)&15u];}return id;
+}
+static void ucg_putnum(np_buf *b,int n){np_putll(b,n);}
+static void ucg_target(np_buf *b,int target){if(target==-1)np_puts(b,"ID*");else if(target<0)np_puts(b,"HALT");else{np_puts(b,"UCN.n");ucg_putnum(b,target);}}
+static void ucg_actions(np_buf *b,int target){
+ np_puts(b,"[[\"ADV\"]");if(target< -1){np_puts(b,",[\"JUMP\",\"B\"],[\"REJECT\",\"");np_puts(b,ucg_errors[-target-2]);np_puts(b,"\"]");}np_puts(b,"]\n");
+}
+static void ucg_entry(np_buf *b,const char *name,int small,int large){
+ np_puts(b,name);np_puts(b,"\t117\t");ucg_target(b,small);np_puts(b,"\t");ucg_actions(b,small);
+ np_puts(b,name);np_puts(b,"\t85\t");ucg_target(b,large);np_puts(b,"\t");ucg_actions(b,large);
+ np_puts(b,name);np_puts(b,"\t*\tHALT\t[[\"JUMP\",\"B\"],[\"REJECT\",\"invalid universal character name\"]]\n");
+}
+static void ucg_emit(const char *path,np_buf *b,int check){
+ if(check){size_t n;char *s=cx_read(path,&n);if(!s||n!=b->n||memcmp(s,b->p,n))ucg_die(path);free(s);}
+ else if(cx_write(path,b->p,b->n))ucg_die(path);
+}
+int main(int argc,char **argv){
+ if(argc!=3||(strcmp(argv[2],"--write")&&strcmp(argv[2],"--check")))ucg_die("ROOT --write|--check");
+ char input[4400],output[4400],header[4400],root[4096];if(!realpath(argv[1],root)||cx_path_join(input,sizeof input,root,"exec/facts/ucn-annexd.tsv")||cx_path_join(output,sizeof output,root,"exec/lex/ucn-byte.tsv")||cx_path_join(header,sizeof header,root,"src/ucn_ranges.inc"))ucg_die("path");
+ size_t n;char *facts=cx_read(input,&n);if(!facts)ucg_die("read facts");char hash[65];cx_sha256_hex(facts,n,hash);ucg_load(facts);free(facts);
+ int *values=malloc(65536*sizeof(int));if(!values)ucg_die("allocation");int roots[2][2];
+ int invalid=ucg_constant(-2),notid=ucg_constant(-3);
+ for(int initial=0;initial<2;initial++){
+  for(unsigned v=0;v<65536u;v++)values[v]=ucg_leaf(v,initial);roots[initial][0]=ucg_compress(values);
+  for(int v=0;v<65536;v++)values[v]=v==0?roots[initial][0]:v<=16?notid:invalid;roots[initial][1]=ucg_compress(values);
+ }
+ /* Exhaustive BMP and all high-word classes independently check the compact
+    graph against range membership, including the overlapping Thai digits. */
+ long long checks=0;
+ for(int initial=0;initial<2;initial++)for(unsigned v=0;v<65536u;v++){
+  int want=ucg_leaf(v,initial);if(ucg_trace(roots[initial][0],v,4)!=want||ucg_trace(roots[initial][1],v,8)!=want)ucg_die("BMP DFA mismatch");checks+=2;
+  unsigned tails[4]={0,0xd800u,0xffffu,0x00e9u};for(int k=0;k<4;k++){unsigned value=(v<<16)|tails[k];if(ucg_trace(roots[initial][1],value,8)!=ucg_leaf(value,initial))ucg_die("high-word DFA mismatch");checks++;}
+ }
+ free(values);np_buf b={0},h={0};np_puts(&b,"# Generated by tools/ucn-table.cx from exec/facts/ucn-annexd.tsv; do not edit.\n# facts-sha256 ");np_puts(&b,hash);np_puts(&b,"\n# state\tbyte\tnext\tactions\n");
+ ucg_entry(&b,"UCN",roots[0][0],roots[0][1]);ucg_entry(&b,"UCNI",roots[1][0],roots[1][1]);
+ for(int i=0;i<ucg_count;i++){
+  for(int k=0;k<16;k++){np_puts(&b,"UCN.n");ucg_putnum(&b,i+1);np_puts(&b,"\t");if(k<10)ucg_putnum(&b,48+k);else{ucg_putnum(&b,65+k-10);np_puts(&b,",");ucg_putnum(&b,97+k-10);}np_puts(&b,"\t");ucg_target(&b,ucg_nodes[i][k]);np_puts(&b,"\t");ucg_actions(&b,ucg_nodes[i][k]);}
+  np_puts(&b,"UCN.n");ucg_putnum(&b,i+1);np_puts(&b,"\t*\tHALT\t[[\"JUMP\",\"B\"],[\"REJECT\",\"invalid universal character name\"]]\n");
+ }
+ np_puts(&h,"/* Generated by tools/ucn-table.cx; facts SHA256 ");np_puts(&h,hash);np_puts(&h,". */\n#ifndef UNISA_UCN_RANGES_INC\n#define UNISA_UCN_RANGES_INC\nstatic const unsigned short unisa_ucn_ranges[][3] = {\n");
+ int spans=0;for(int v=0;v<65536;){int kind=(ucg_kind[v]&2)?2:ucg_kind[v]?1:0;if(!kind){v++;continue;}int lo=v++;while(v<65536&&((ucg_kind[v]&2)?2:ucg_kind[v]?1:0)==kind)v++;
+  char line[100];if(cx_fmt(line,sizeof line,"    {%d, %d, %d},\n",lo,v-1,kind)<0)ucg_die("format");np_puts(&h,line);spans++;
+ }
+ np_puts(&h,"};\nstatic int unisa_ucn_kind(int c) {\n    int i;\n    for (i = 0; i < ");ucg_putnum(&h,spans);np_puts(&h,"; i = i + 1) {\n        if (c >= unisa_ucn_ranges[i][0] && c <= unisa_ucn_ranges[i][1]) return unisa_ucn_ranges[i][2];\n    }\n    return 0;\n}\n#endif\n");
+ ucg_emit(output,&b,!strcmp(argv[2],"--check"));ucg_emit(header,&h,!strcmp(argv[2],"--check"));free(b.p);free(h.p);
+ printf("UCN_TABLE nodes=%d ranges=%d checks=%lld mode=%s\n",ucg_count,spans,checks,argv[2]);return 0;
+}

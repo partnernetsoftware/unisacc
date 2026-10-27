@@ -6,6 +6,7 @@
  *
  * Stage 1: the lexer.  `unisacc -tokens f.c` prints the token stream.
  */
+#include "ucn_ranges.inc"
 
 /* 0.0.28 H1': the source buffers are sized at run time.  They start at 8 MB (0.0.21: the
    flattened self-source passed half of 4 MB) and srcroom() widens them, before a unit is read,
@@ -2228,6 +2229,31 @@ int ucnlen(int j) {
     return 2 + n;
 }
 
+/* Identifier conversion is an E1 constraint. E2's spelling scanner is
+   separate; both public streams retain their original identifier bytes. */
+int lex_ucnlen(int j, int initial) {
+    int n; int k; int c; int d; int kind; us_i64 v;
+    n = ucnlen(j); if (n == 0) return 0 - 1;
+    v = 0; k = 2;
+    while (k < n) {
+        c = src[j + k] & 255; d = c - 48;
+        if (c >= 65 && c <= 70) d = c - 55;
+        if (c >= 97 && c <= 102) d = c - 87;
+        v = v * 16 + d; k = k + 1;
+    }
+    if (v > 1114111 || (v >= 55296 && v <= 57343)
+        || (v < 160 && v != 36 && v != 64 && v != 96)) return 0 - 1;
+    kind = unisa_ucn_kind((int)v);
+    if (kind == 0) return 0 - 2;
+    if (initial && kind == 2) return 0 - 3;
+    return n;
+}
+char *lex_ucn_reason(int code) {
+    if (code == 0 - 2) return "universal character name not permitted in identifier";
+    if (code == 0 - 3) return "universal character name digit cannot start identifier";
+    return "invalid universal character name";
+}
+
 int identend(int i) {
     int j; int u; j = i;
     while (j < nsrc) {
@@ -3042,6 +3068,7 @@ int lex(void) {
         key[1] = charclass(at(i + 1));
         key[2] = 0; key[3] = 0;
         a = inf(S_LEX, key, 0);                /* the table decides [W-2] */
+        if (at(i) == 92) a = 2;                 /* validated UCN identifier start */
         if (a == 0) {                          /* skip */
             if (at(i) < 0) {
                 tkind[ntok] = 0; tpos[ntok] = i; tlen[ntok] = 0;
@@ -3063,10 +3090,13 @@ int lex(void) {
         if (a == 2) {                          /* ident */
             j = i;
             while (at(j) >= 0) {
-                if (isal(at(j)) == 0) { if (isdi(at(j)) == 0) {
-                    int u; u = ucnlen(j);      /* `caf\u00e9` is one name */
-                    if (u == 0) break;
+                if (at(j) == 92) {
+                    int u; u = lex_ucnlen(j, j == i);
+                    if (u < 0) { err_at(j, lex_ucn_reason(u)); nerr = nerr + 1; return 0 - 1; }
                     j = j + u; continue;
+                }
+                if (isal(at(j)) == 0) { if (isdi(at(j)) == 0) {
+                    break;
                 } }
                 j = j + 1;
             }

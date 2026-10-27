@@ -149,11 +149,11 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 <a id="work-tree"></a>
 ### 思维树
 
-**现行流推进（2026-10-28）：** E2本机必选合同62/62已统一到Root41b836d7，十个正式SOURCE批均PASS（out/c43-a5ec-e2-wave-01）：正103/拒187、独立IO36、gold18键21、输入/包含计数21、CLI目标20/include20/宏23、诊断211、header-locations。E1已用本代stream2重跑旧oracle四批175/501/267/25全部0失败，并独立核包内E1成员绑定24/0；纠正旧oracle对非法数字、空字符与裸换行的接受后，已装模型tokens184/9、refusals526/111，不能沿用旧绿关闭这些合同。私有源码修复模型tokens184/0、bytes501/0、refusals526/0，尚未安装。字符前缀与UCN仍开；先合批修完再重建产品。五外宿主未跑，完整流仍NOT_READY。
+**现行流推进（2026-10-28）：** E2既定本机必选合同62/62统一Root41b836d7，十个正式SOURCE批均PASS；该清单不覆盖新发现的UCN宏缺陷，不能称完整C99预处理完成。E1已用本代stream2重跑旧oracle四批175/501/267/25全部0失败，并独立核包内E1成员绑定24/0；旧oracle对非法数字、空字符与裸换行的接受已纠正。数值/字面量/前缀/UCN值域源码修复后的私有网络tokens188/0、bytes501/0、refusals624/0，AnnexD249段的1228边界拼写逐字与偏移正确，未安装。E2宏身份与E3同字符不同UCN拼写身份仍在并行修复，不能把私有E1绿算成整链绿。五外宿主与宽合同未完成。
 
 **2026-10-28 最新开发候选（cdx）：** 已装SID `a5ec8a435f0456fe9770f639b16523eb1be7fed74979e81f043ede566e98b083`，APE `41b836d7119b96907c3e978f38786d0162adac7ca57104688ee33021bbbdf1b6`（2,972,351 B），record `c7bc3012…`。context-a5ec-01的107作业全部外层rc0，GEN-a5ec-01双核/五片/真deflate完成；PC包 `480f91c8…` 独立VERIFIED，kind2准入9/0、安装rc0，旧Root8a8195d5在GEN备用。安装后smoke16/0、E2十批同候选PASS。--all仍rc3，176 coverage/19 unresolved/166未跑批/子批0；完整N22与外宿主仍开。
 
-**2026-10-28 最新源码纪元（cdx）：** 已装SID仍a5ec8a43；live SID `1af74794ca96232e4638e70dc76f06b06a3ade5f62249a628896f4dcc2654cf7`，未构造正式候选。c96909e11f的数值/坏字面量/driver errno修复经cc独立89例net==参考、无合法形式误拒；现又同步E1保留字符L/u/U/u8前缀及初始偏移、E3读入与参考求值。私有E1三模式184/501/526全0、参考字符12/0、私有默认O0编译字符fixture return7、smoke16/0（out/c43-e1-prefix-fix-01/）；首次漏换默认errorparse的红保留，补换后通过。事实30表check零差，Python债保留。下一动作是UCN：E1值域/起始由cdx写，E2宏名/正文/实参由cc隔离原型；保留原始拼写，规范化只用于身份键。E2现有62格证据不覆盖新发现的UCN宏展开缺陷，不能据此宣称全部C99预处理完成；不重复构造107。
+**2026-10-28 最新源码纪元（cdx）：** 已装SID仍a5ec8a43；live SID `eb1b84f28d8facfe5ca92dd848c770c9bf95572cab579bd0a39cffd52108b15c`，未构造正式候选。c969数值/坏字面量修复经cc独立89例一致，691f546d73前缀修复已私验。E1 UCN从同一AnnexD事实生成174节点及参考range视图；独立核原标准补了初稿遗漏0901–0903，249段（235 letter/14 digit）。生成器786432次图检查与--check通过，实际私有E1188/501/624全0，参考函数26/0（out/c43-e1-ucn-fix-01/）；第一次tokens188/1是gold的普通bad字节探针仍选了现有专用UCN入口反斜杠，改用同类@后188/0，原红保留。UCN同拼写程序return7，等价u/U拼写仍unknown identifier：E3缺陷已具体现证。cc在隔离域修E2，Codex辅助在out写E3内部规范化预遍历+units三处键；主树仍cdx单写、重活位串行。原始token/-E拼写和位置不改，不重复构造107；30事实表check零差，旧Python导出债保留。
 
 **2026-10-27 cdx 主刀计划（主人本轮改派；重构造仍串行，互不抢文件的轻切片由 cc／Codex 辅助）**
 
@@ -358,11 +358,11 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 
 **测试加速方向：** 主人同意对不以默认 `-run` 为被测合同的测试先用 `-o` 编出可执行文件并每次实际运行；已有 `tools/dev-run` 是内容寻址的开发代码缓存，不能缓存测试结论或自动代替默认 `-run` 资格。接入前逐批核产品和源闭包身份及输出／退出码等价；`-run` 自身合同仍单独验证。
 
-**当前流入口：** E2本机62/62；本代stream1 `265001c4…`、stream2 `000d67dd…` 均独立与Root41内成员逐字绑定（扩展input-binding24/0）。E1标准修复证据 `out/c43-e1-c99-fix-01/`；私有stream2 `a104ba38…` 的184/501/526全绿不授已装资格。前缀/UCN仍待修，五外宿主与宽父合同未完成。
+**当前流入口：** E2既定本机62/62；本代stream1 `265001c4…`、stream2 `000d67dd…` 均独立与Root41内成员绑定（input-binding24/0）。E1最新私有stream2 `68f08deb…`，证据out/c43-e1-ucn-fix-01：188/501/624全0、AnnexD1228边界形式；旧模型同修正oracle188/18、624/143。只授私有模型，尚不授已装资格。E2/E3的UCN身份消费仍开。
 
 **最新开发根：** SIDa5ec8a43／APE41b836d7／PC480f91c8，旧Root8a8195d5已备份。全19矩阵315 COVERED_LOCAL/335 MISSING/41 NEEDS_PRODUCT_CHANGE；E2本机62格统一当前候选，E1基线与标准纠错后红例分列，其余历史证据不直接转授。
 
-**最新源码入口：** 前缀修复live SID1af74794，正式产品仍a5ec8a43。c969数值修复cc独立89例一致；前缀E1/E3同步的私有证据在out/c43-e1-prefix-fix-01（184/501/526全0、reference12/0、character_prefix.cx return7、smoke16/0），均非已装资格。E1 UCN由cdx，E2 UCN由cc在out隔离，重活窗口已让cc；共享主树单写，原始-E/token拼写与位置合同不变。AnnexD数据复用out/c43-cc-e2-ucn-proto-01/annexd.tsv，UCN同字符身份规范化不得靠改E1公开拼写实现。
+**最新源码入口：** E1 UCN修复live SIDeb1b84f2；正式产品仍a5ec8a43。事实exec/facts/ucn-annexd.tsv（a0b92ff9…）经独立标准核补漏，从tools/ucn-table.cx派生exec/lex/ucn-byte.tsv与src/ucn_ranges.inc；--write/--check可复现。参考UCN26/0、实际私有188/501/624全0；源闭包sourceflat成功。E3别名红例equivalent-spelling.log保留；Codex辅助只写out/c43-e3-ucn-identity-proto-cdx，cc只写E2隔离域。构网窗口已从E1转交E3；cc补1##UCN残差需后续接窗。主树热文件单写，不改他人暂存，不借旧107资格。
 
 **历史7bb6入口：** SID `7bb6eb92bd50f964171462945e6a9d0e04982bd6e6a42882abb054aefaa5e2be`；107 作业、PC、五片、APE、kind2 准入均在同源本代完成。开发根已装 `b226463fe13a77070a72fe9947131b797670e0e590fe2c9c4138c94ca9198ba9`，旧 Root7a 留 GEN 备份。smoke16/0、热多模块约0.109秒；本代 stream6 输入拒绝正式29/0，其他四 lower 模式直接51/778/1516/115全绿。默认 ftrim 对新 `cx_*` 两函数仍红；下一刀核 E2 新键采用链。`df8f/831a` 收据只作历史。
 
