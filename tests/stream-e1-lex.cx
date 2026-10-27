@@ -1,0 +1,452 @@
+/* E1 lexing domain on the registered streams material (lnx/x86_64, unisacc-stream2.com pin 0ae80726).
+ * ROOT STREAM_DIR NEW_OUTDIR MODE, MODE one of:
+ *   --tokens    token-line format, typed spelling, offsets, non-zero UNIPP1 maps, marks, positive lexing,
+ *               lex.tsv 144 keys, lexword 15 words, parse.tsv tok domain + typekw, label/transport determinism
+ *   --bytes     lexcls.tsv 257 rows: byte class and __attribute__ look-ahead (attws) per byte, eof
+ *   --refusals  E1 envelope/lexer/capacity/input refusals by declared name, each followed by exact recovery
+ * Inputs are hand-built UNIPP1.  Expected bytes are hand oracles from exec/lex control tables
+ * (entry/number/literal/ident/location/f1 tables) and weights/gold lex, lexcls, lexword, parse tok and
+ * iterate/kernel/typekw.tsv, which are read at run time to bind each fragment to its gold key.  Product
+ * output is never an oracle.  Timing phases are UNMEASURED. */
+#pragma unisa use cxlib.netpack
+#define E "\001"
+static char root[4096],streams[4096],work[4096],bound[4200],inc[4200],product[4200],e1bin[4200];
+static char label_a[4200],label_b[4200];
+static const char *e1_pin="0ae80726541fc4181d57de9aad1a960a7adf698c38dda8097f9edd2b9ae75fbb";
+static int assertions,failures,unverified,seq;
+static const char *cname[12]={"ws","nl","A","d","q","sq","slash","star","punct","eof","other","dot"};
+static int bcls[257],battws[257];
+static char ytab[12][12][12];
+static char *tokdom[128];static int ntokdom;
+static char *typekw[64];static int ntypekw;
+static const char *MALF="not covered: malformed preprocessing locations";
+static const char *BADCH="unexpected character";
+static const char *NOQ="missing terminating '\"' character";
+static const char *NOSQ="missing terminating ' character";
+
+static void die(const char *s){fprintf(stderr,"stream-e1-lex: %s\n",s);exit(2);}
+static void check(int ok,const char *s){assertions++;if(!ok)failures++;printf("%s\t%s\n",ok?"PASS":"FAIL",s);}
+static void checkf(int ok,const char *a,const char *b){char t[400];int z=snprintf(t,sizeof t,"%s.%s",a,b);if(z<0||(size_t)z>=sizeof t)die("label");check(ok,t);}
+static void path(char *out,size_t cap,const char *dir,const char *name){int n=snprintf(out,cap,"%s/%s",dir,name);if(n<0||(size_t)n>=cap)die("path");}
+static void saved(const char *p,const void *s,size_t n){int f=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);size_t at=0;if(f<0)die("exclusive-create");while(at<n){ssize_t k=write(f,(const char *)s+at,n-at);if(k<0&&errno==EINTR)continue;if(k<=0)die("write");at+=(size_t)k;}if(close(f))die("close");}
+static char *loaded(const char *p,size_t *n){char *s=cx_read(p,n);if(!s)die(p);return s;}
+static void digest(const char *p,char *hex){size_t n;char *s=loaded(p,&n);cx_sha256_hex(s,n,hex);free(s);}
+static unsigned le(const unsigned char *p){return (unsigned)p[0]|(unsigned)p[1]<<8|(unsigned)p[2]<<16|(unsigned)p[3]<<24;}
+static void put32(np_buf *b,unsigned v){char c[4];c[0]=(char)(v&255u);c[1]=(char)((v>>8)&255u);c[2]=(char)((v>>16)&255u);c[3]=(char)((v>>24)&255u);np_put(b,c,4);}
+static int has(const char *h,size_t hn,const char *needle){size_t k=strlen(needle),i;if(!k)return 1;if(hn<k)return 0;for(i=0;i+k<=hn;i++)if(!memcmp(h+i,needle,k))return 1;return 0;}
+
+/* ---- gold tables (oracle source, read-only) ---- */
+static int cidx(const char *s,size_t n){int i;for(i=0;i<12;i++)if(strlen(cname[i])==n&&!memcmp(cname[i],s,n))return i;return -1;}
+static int split(const char *s,size_t n,const char **f,size_t *fl,int max){int k=0;size_t at=0;while(k<max){size_t e=at;while(e<n&&s[e]!='\t')e++;f[k]=s+at;fl[k]=e-at;k++;if(e>=n)break;at=e+1;}return k;}
+static int fis(const char *f,size_t fl,const char *w){return strlen(w)==fl&&!memcmp(f,w,fl);}
+static void load_gold(void){
+ char p[4200];size_t n,at,e;char *s;int i,j,rows=0;const char *f[260];size_t fl[260];
+ for(i=0;i<257;i++){bcls[i]=-1;battws[i]=-1;}
+ path(p,sizeof p,root,"weights/gold/lexcls.tsv");s=loaded(p,&n);at=0;
+ while(at<n){e=at;while(e<n&&s[e]!='\n')e++;
+  if(e>at&&s[at]!='#'){int k=split(s+at,e-at,f,fl,8);
+   if(k!=3)die("lexcls row shape");
+   if(!fis(f[0],fl[0],"b")){int b=0;size_t q;
+    if(fis(f[0],fl[0],"eof"))b=256;else{if(!fl[0]||fl[0]>3)die("lexcls byte");for(q=0;q<fl[0];q++){if(f[0][q]<'0'||f[0][q]>'9')die("lexcls byte digit");b=b*10+(f[0][q]-'0');}if(b>255)die("lexcls byte range");}
+    if(bcls[b]>=0)die("lexcls duplicate");bcls[b]=cidx(f[1],fl[1]);if(bcls[b]<0)die("lexcls class");
+    battws[b]=fis(f[2],fl[2],"yes")?1:fis(f[2],fl[2],"no")?0:-1;if(battws[b]<0)die("lexcls attws");rows++;}}
+  at=e+1;}
+ free(s);if(rows!=257)die("lexcls row count");
+ path(p,sizeof p,root,"weights/gold/lex.tsv");s=loaded(p,&n);at=0;rows=0;
+ for(i=0;i<12;i++)for(j=0;j<12;j++)ytab[i][j][0]=0;
+ while(at<n){e=at;while(e<n&&s[e]!='\n')e++;
+  if(e>at&&s[at]!='#'){int k=split(s+at,e-at,f,fl,8);
+   if(k!=3)die("lex row shape");
+   if(!fis(f[0],fl[0],"c")){int c=cidx(f[0],fl[0]),pk=cidx(f[1],fl[1]);if(c<0||pk<0||fl[2]==0||fl[2]>=12||ytab[c][pk][0])die("lex row key");memcpy(ytab[c][pk],f[2],fl[2]);ytab[c][pk][fl[2]]=0;rows++;}}
+  at=e+1;}
+ free(s);if(rows!=144)die("lex row count");
+ path(p,sizeof p,root,"weights/gold/parse.tsv");s=loaded(p,&n);at=0;
+ while(at<n){e=at;while(e<n&&s[e]!='\n')e++;
+  if(e-at>11&&!memcmp(s+at,"#field\ttok\t",11)){int k=split(s+at,e-at,f,fl,200);if(k<7||k-2>128)die("parse tok shape");
+   for(i=2;i<k;i++){tokdom[ntokdom]=malloc(fl[i]+1);if(!tokdom[ntokdom])die("alloc");memcpy(tokdom[ntokdom],f[i],fl[i]);tokdom[ntokdom][fl[i]]=0;ntokdom++;}}
+  at=e+1;}
+ free(s);if(ntokdom!=68)die("parse tok domain size");
+ if(strcmp(tokdom[0],"eof")||strcmp(tokdom[1],"type")||strcmp(tokdom[2],"id")||strcmp(tokdom[3],"num")||strcmp(tokdom[4],"str"))die("parse tok prefix");
+ path(p,sizeof p,root,"iterate/kernel/typekw.tsv");s=loaded(p,&n);at=0;
+ while(at<n){e=at;while(e<n&&s[e]!='\n')e++;
+  if(e-at>3&&!memcmp(s+at,"kw\t",3)){size_t l=e-at-3;if(ntypekw>=64)die("typekw size");typekw[ntypekw]=malloc(l+1);if(!typekw[ntypekw])die("alloc");memcpy(typekw[ntypekw],s+at+3,l);typekw[ntypekw][l]=0;ntypekw++;}
+  at=e+1;}
+ free(s);if(ntypekw<1)die("typekw empty");}
+
+/* ---- UNIPP1 input and expected token lines ---- */
+typedef struct {unsigned forced,autoc;int ns;unsigned spl[4];int ni;unsigned iline[2],ilines[2];const char *iname[2];} ppmap;
+static void pp_build(np_buf *b,const char *text,size_t tn,const ppmap *m){int i;
+ np_put(b,"UNIPP1\0",7);put32(b,(unsigned)tn);put32(b,m?m->forced:0);put32(b,m?m->autoc:0);put32(b,m?(unsigned)m->ns:0);put32(b,m?(unsigned)m->ni:0);
+ if(m){for(i=0;i<m->ns;i++)put32(b,m->spl[i]);for(i=0;i<m->ni;i++){put32(b,m->iline[i]);put32(b,m->ilines[i]);put32(b,(unsigned)strlen(m->iname[i]));np_puts(b,m->iname[i]);}}
+ np_put(b,text,tn);}
+typedef struct {np_buf b;int n;} toks;
+static void tk(toks *t,unsigned off,const char *s,size_t sn){np_put(&t->b,"@",1);put32(&t->b,off);np_put(&t->b,"\n",1);np_put(&t->b,s,sn);np_put(&t->b,"\n",1);t->n++;}
+static void tks(toks *t,unsigned off,const char *s){tk(t,off,s,strlen(s));}
+static void tk_end(toks *t,unsigned off){tk(t,off,"eof",3);np_putll(&t->b,t->n);np_puts(&t->b," tokens\n");}
+/* spec: "OFF:TOKEN" entries separated by \001; OFF is relative to BASE */
+static void want_spec(toks *t,unsigned base,const char *spec){const char *s=spec;
+ while(*s){unsigned off=0;const char *q;if(*s<'0'||*s>'9')die("spec offset");while(*s>='0'&&*s<='9'){off=off*10+(unsigned)(*s-'0');s++;}if(*s!=':')die("spec colon");s++;q=s;while(*s&&*s!='\001')s++;tk(t,base+off,q,(size_t)(s-q));if(*s)s++;}}
+/* join fragments with one LF */
+static void jf(np_buf *txt,toks *w,const char *src,size_t sn,const char *spec){if(txt->n)np_put(txt,"\n",1);{unsigned base=(unsigned)txt->n;np_put(txt,src,sn);want_spec(w,base,spec);}}
+static void tfree(toks *t){free(t->b.p);t->b.p=0;t->b.n=t->b.cap=0;t->n=0;}
+
+/* ---- running stream2 ---- */
+static np_result run_argv(const char *tag,const char *input,const char *label,const char *attr,const char *stdin_file){
+ char leaf[300],outp[4400],errp[4400],envattr[4500],why[1024];np_result r;int z,save=-1;
+ z=snprintf(envattr,sizeof envattr,"UNISA_ATTRIBUTES=%s",attr?attr:"");if(z<0||(size_t)z>=sizeof envattr)die("env");
+ {char *v[]={bound,"12",e1bin,(char *)input,(char *)label,inc,0};const char *env[]={envattr,"UNISA_MAXSTEPS=200000000",0};
+  if(stdin_file){int fd=open(stdin_file,O_RDONLY|O_CLOEXEC);save=dup(0);if(fd<0||save<0||dup2(fd,0)<0)die("stdin redirect");close(fd);}
+  z=np_run(v,root,(char *const *)env,14,&r,why,sizeof why);
+  if(stdin_file){if(dup2(save,0)<0)die("stdin restore");close(save);}
+  if(z)die(why);}
+ z=snprintf(leaf,sizeof leaf,"%03d-%s.stdout",seq,tag);if(z<0||(size_t)z>=sizeof leaf)die("leaf");path(outp,sizeof outp,work,leaf);
+ z=snprintf(leaf,sizeof leaf,"%03d-%s.stderr",seq,tag);if(z<0||(size_t)z>=sizeof leaf)die("leaf");path(errp,sizeof errp,work,leaf);
+ saved(outp,r.out,r.outn);saved(errp,r.err,r.errn);return r;}
+static void input_path(char *out,size_t cap,const char *tag){char leaf[300];int z=snprintf(leaf,sizeof leaf,"%03d-%s.pp",seq,tag);if(z<0||(size_t)z>=sizeof leaf)die("leaf");path(out,cap,work,leaf);}
+static np_result run_pp(const char *tag,const char *pp,size_t n,const char *attr,const char *label,int via_stdin){
+ char in[4400];seq++;input_path(in,sizeof in,tag);saved(in,pp,n);
+ if(via_stdin)return run_argv(tag,"-",label,attr,in);
+ return run_argv(tag,in,label,attr,0);}
+
+static void show_diff(const char *name,const unsigned char *got,size_t gn,const unsigned char *want,size_t wn){
+ size_t i=0,a,k;while(i<gn&&i<wn&&got[i]==want[i])i++;a=i>24?i-24:0;
+ printf("DIFF\t%s\tat=%lu\tgot_len=%lu\twant_len=%lu\tgot=",name,(unsigned long)i,(unsigned long)gn,(unsigned long)wn);
+ for(k=a;k<gn&&k<i+40;k++){unsigned c=got[k];if(c>=32&&c<127&&c!='\\')putchar((int)c);else printf("\\x%02x",c);}
+ printf("\twant=");for(k=a;k<wn&&k<i+40;k++){unsigned c=want[k];if(c>=32&&c<127&&c!='\\')putchar((int)c);else printf("\\x%02x",c);}putchar('\n');}
+/* exact accept: rc0, empty stderr, USLATTR1 with exactly the hand marks, UNITOK1 exact echo, exact token lines */
+static void accept_check(const char *name,np_result *r,const char *pp,size_t ppn,toks *want,const unsigned *marks,int nm){
+ const unsigned char *o=(const unsigned char *)r->out,*pay=0,*tl=0;size_t on=r->outn,tln=0;unsigned cnt=0,pl=0;int frame,recs,echo,ok,i;
+ checkf(r->rc==0&&r->errn==0,name,"accept-rc0-empty-stderr");
+ if(r->errn)printf("STDERR\t%s\t%.*s\n",name,(int)(r->errn>200?200:r->errn),r->err);
+ frame=on>=16&&!memcmp(o,"USLATTR1",8);if(frame){cnt=le(o+8);pl=le(o+12);frame=cnt<=1000000u&&16+(size_t)cnt*5+(size_t)pl==on;}
+ recs=frame&&cnt==(unsigned)nm;for(i=0;recs&&i<nm;i++)recs=le(o+16+5*(size_t)i)==marks[2*i]&&o[16+5*(size_t)i+4]==marks[2*i+1];
+ checkf(frame&&recs,name,"uslattr1-marks-exact");
+ if(frame)pay=o+16+(size_t)cnt*5;
+ echo=frame&&pl>=12&&!memcmp(pay,"UNITOK1\0",8)&&le(pay+8)==(unsigned)ppn&&12+ppn<=(size_t)pl&&!memcmp(pay+12,pp,ppn);
+ checkf(echo,name,"unitok1-echo-exact");
+ if(echo){tl=pay+12+ppn;tln=(size_t)pl-12-ppn;}
+ ok=echo&&tln==want->b.n&&!memcmp(tl,want->b.p,tln);
+ checkf(ok,name,"token-lines-exact");
+ if(!ok&&echo)show_diff(name,tl,tln,(const unsigned char *)want->b.p,want->b.n);}
+static void refuse_check(const char *name,np_result *r,const char *needle){
+ checkf(r->rc>0&&r->rc<124,name,"refuse-rc-nonzero-not-signal-or-timeout");
+ checkf(r->outn==0,name,"refuse-empty-stdout");
+ checkf(r->errn&&has(r->err,r->errn,needle),name,"refuse-declared-name");
+ if(!(r->errn&&has(r->err,r->errn,needle)))printf("STDERR\t%s\trc=%d\t%.*s\n",name,r->rc,(int)(r->errn>200?200:r->errn),r->err?r->err:"");}
+static void accept_text(const char *name,const char *text,size_t tn,const ppmap *m,toks *want){
+ np_buf pp={0};np_result r;pp_build(&pp,text,tn,m);r=run_pp(name,pp.p,pp.n,0,label_a,0);accept_check(name,&r,pp.p,pp.n,want,0,0);np_free(&r);free(pp.p);}
+static void refuse_text(const char *name,const char *text,size_t tn,const char *needle){
+ np_buf pp={0};np_result r;pp_build(&pp,text,tn,0);r=run_pp(name,pp.p,pp.n,0,label_a,0);refuse_check(name,&r,needle);np_free(&r);free(pp.p);}
+
+/* ---- plain hand oracle ---- */
+static const char *PLAIN="int main(void){return 7;}\n";
+static void plain_want(toks *w){tks(w,0,"type=int");tks(w,4,"id=main");tks(w,8,"(");tks(w,9,"type=void");tks(w,13,")");tks(w,14,"{");tks(w,15,"return");tks(w,22,"num=7");tks(w,23,";");tks(w,24,"}");tk_end(w,26);}
+static void recover(const char *after){char name[300];toks w={{0},0};int z=snprintf(name,sizeof name,"%s.recovery",after);if(z<0||(size_t)z>=sizeof name)die("label");plain_want(&w);accept_text(name,PLAIN,strlen(PLAIN),0,&w);tfree(&w);}
+
+/* ---- lex.tsv 144 keys: hand fragments; byte0 has class c, byte1 class peek (or end of text for eof) ---- */
+typedef struct {const char *c,*peek,*y,*src,*want;} krow;
+static const krow K[]={
+ {"ws","ws","skip","  x","2:id=x"},{"ws","nl","skip"," \nx","2:id=x"},{"ws","A","skip"," a","1:id=a"},{"ws","d","skip"," 1","1:num=1"},
+ {"ws","q","skip"," \"s\";","1:str=\"s\"" E "4:;"},{"ws","sq","skip"," 's'","1:num='s'"},{"ws","slash","skip"," /x","1:/" E "2:id=x"},
+ {"ws","star","skip"," *x","1:*" E "2:id=x"},{"ws","punct","skip"," +x","1:+" E "2:id=x"},{"ws","eof","skip"," ",""},
+ {"ws","other","skip"," @","!unexpected character"},{"ws","dot","skip"," .x","1:." E "2:id=x"},
+ {"nl","ws","nl","\n x","2:id=x"},{"nl","nl","nl","\n\nx","2:id=x"},{"nl","A","nl","\na","1:id=a"},{"nl","d","nl","\n1","1:num=1"},
+ {"nl","q","nl","\n\"s\";","1:str=\"s\"" E "4:;"},{"nl","sq","nl","\n's'","1:num='s'"},{"nl","slash","nl","\n/x","1:/" E "2:id=x"},
+ {"nl","star","nl","\n*x","1:*" E "2:id=x"},{"nl","punct","nl","\n+x","1:+" E "2:id=x"},{"nl","eof","nl","\n",""},
+ {"nl","other","nl","\n@","!unexpected character"},{"nl","dot","nl","\n.x","1:." E "2:id=x"},
+ {"A","ws","ident","a x","0:id=a" E "2:id=x"},{"A","nl","ident","a\nx","0:id=a" E "2:id=x"},{"A","A","ident","ab","0:id=ab"},{"A","d","ident","a1","0:id=a1"},
+ {"A","q","ident","a\"s\";","0:id=a" E "1:str=\"s\"" E "4:;"},{"A","sq","ident","a's'","0:id=a" E "1:num='s'"},
+ {"A","slash","ident","a/x","0:id=a" E "1:/" E "2:id=x"},{"A","star","ident","a*x","0:id=a" E "1:*" E "2:id=x"},
+ {"A","punct","ident","a+x","0:id=a" E "1:+" E "2:id=x"},{"A","eof","ident","a","0:id=a"},{"A","other","ident","a@","!unexpected character"},
+ {"A","dot","ident","a.x","0:id=a" E "1:." E "2:id=x"},
+ {"d","ws","num","1 x","0:num=1" E "2:id=x"},{"d","nl","num","1\nx","0:num=1" E "2:id=x"},{"d","A","num","1u","0:num=1u"},{"d","d","num","12","0:num=12"},
+ {"d","q","num","1\"s\";","0:num=1" E "1:str=\"s\"" E "4:;"},{"d","sq","num","1's'","0:num=1" E "1:num='s'"},
+ {"d","slash","num","1/x","0:num=1" E "1:/" E "2:id=x"},{"d","star","num","1*x","0:num=1" E "1:*" E "2:id=x"},
+ {"d","punct","num","1+x","0:num=1" E "1:+" E "2:id=x"},{"d","eof","num","1","0:num=1"},{"d","other","num","1@","!unexpected character"},
+ {"d","dot","num","1.x","0:num=1." E "2:id=x"},
+ {"q","ws","str","\" \";","0:str=\" \"" E "3:;"},{"q","nl","str","\"\n\";","0:str=\"\n\"" E "3:;"},{"q","A","str","\"a\";","0:str=\"a\"" E "3:;"},
+ {"q","d","str","\"1\";","0:str=\"1\"" E "3:;"},{"q","q","str","\"\";","0:str=\"\"" E "2:;"},{"q","sq","str","\"'\";","0:str=\"'\"" E "3:;"},
+ {"q","slash","str","\"/\";","0:str=\"/\"" E "3:;"},{"q","star","str","\"*\";","0:str=\"*\"" E "3:;"},{"q","punct","str","\"+\";","0:str=\"+\"" E "3:;"},
+ {"q","eof","str","\"","!missing terminating '\"' character"},{"q","other","str","\"@\";","0:str=\"@\"" E "3:;"},{"q","dot","str","\".\";","0:str=\".\"" E "3:;"},
+ {"sq","ws","charlit","' '","0:num=' '"},{"sq","nl","charlit","'\n'","0:num='\n'"},{"sq","A","charlit","'a'","0:num='a'"},{"sq","d","charlit","'1'","0:num='1'"},
+ {"sq","q","charlit","'\"'","0:num='\"'"},{"sq","sq","charlit","''","0:num=''"},{"sq","slash","charlit","'/'","0:num='/'"},{"sq","star","charlit","'*'","0:num='*'"},
+ {"sq","punct","charlit","'+'","0:num='+'"},{"sq","eof","charlit","'","!missing terminating ' character"},{"sq","other","charlit","'@'","0:num='@'"},
+ {"sq","dot","charlit","'.'","0:num='.'"},
+ {"slash","ws","op","/ x","0:/" E "2:id=x"},{"slash","nl","op","/\nx","0:/" E "2:id=x"},{"slash","A","op","/x","0:/" E "1:id=x"},{"slash","d","op","/1","0:/" E "1:num=1"},
+ {"slash","q","op","/\"s\";","0:/" E "1:str=\"s\"" E "4:;"},{"slash","sq","op","/'s'","0:/" E "1:num='s'"},{"slash","slash","linecmt","//x",""},
+ {"slash","star","cmt","/*x*/",""},{"slash","punct","op","/=x","0:/=" E "2:id=x"},{"slash","eof","op","/","0:/"},{"slash","other","op","/@","!unexpected character"},
+ {"slash","dot","op","/.x","0:/" E "1:." E "2:id=x"},
+ {"star","ws","op","* x","0:*" E "2:id=x"},{"star","nl","op","*\nx","0:*" E "2:id=x"},{"star","A","op","*x","0:*" E "1:id=x"},{"star","d","op","*1","0:*" E "1:num=1"},
+ {"star","q","op","*\"s\";","0:*" E "1:str=\"s\"" E "4:;"},{"star","sq","op","*'s'","0:*" E "1:num='s'"},{"star","slash","op","*/x","0:*" E "1:/" E "2:id=x"},
+ {"star","star","op","**x","0:*" E "1:*" E "2:id=x"},{"star","punct","op","*=x","0:*=" E "2:id=x"},{"star","eof","op","*","0:*"},
+ {"star","other","op","*@","!unexpected character"},{"star","dot","op","*.x","0:*" E "1:." E "2:id=x"},
+ {"punct","ws","op","; x","0:;" E "2:id=x"},{"punct","nl","op","{\nx","0:{" E "2:id=x"},{"punct","A","op","-x","0:-" E "1:id=x"},{"punct","d","op","(1","0:(" E "1:num=1"},
+ {"punct","q","op",",\"s\";","0:," E "1:str=\"s\"" E "4:;"},{"punct","sq","op","='s'","0:=" E "1:num='s'"},{"punct","slash","op","!/x","0:!" E "1:/" E "2:id=x"},
+ {"punct","star","op","&*x","0:&" E "1:*" E "2:id=x"},{"punct","punct","op","++x","0:++" E "2:id=x"},{"punct","eof","op","}","0:}"},
+ {"punct","other","op","~@","!unexpected character"},{"punct","dot","op","[.x","0:[" E "1:." E "2:id=x"},
+ {"dot","ws","op",". x","0:." E "2:id=x"},{"dot","nl","op",".\nx","0:." E "2:id=x"},{"dot","A","op",".x","0:." E "1:id=x"},{"dot","d","num",".5","0:num=.5"},
+ {"dot","q","op",".\"s\";","0:." E "1:str=\"s\"" E "4:;"},{"dot","sq","op",".'s'","0:." E "1:num='s'"},{"dot","slash","op","./x","0:." E "1:/" E "2:id=x"},
+ {"dot","star","op",".*x","0:." E "1:*" E "2:id=x"},{"dot","punct","op",".+x","0:." E "1:+" E "2:id=x"},{"dot","eof","op",".","0:."},
+ {"dot","other","op",".@","!unexpected character"},{"dot","dot","op","..x","0:." E "1:." E "2:id=x"},
+ {"other","ws","bad","@ x","!unexpected character"},{"other","nl","bad","$\nx","!unexpected character"},{"other","A","bad","#a","!unexpected character"},
+ {"other","d","bad","`1","!unexpected character"},{"other","q","bad","\\\"s\"","!unexpected character"},{"other","sq","bad","\x7f's'","!unexpected character"},
+ {"other","slash","bad","\x80/x","!unexpected character"},{"other","star","bad","\xff*x","!unexpected character"},{"other","punct","bad","\x1b+x","!unexpected character"},
+ {"other","eof","bad","\x0b","!unexpected character"},{"other","other","bad","\x0c@","!unexpected character"},{"other","dot","bad","\x01.x","!unexpected character"}};
+static int is_punct_tok(const char *s,size_t n){int i;for(i=5;i<ntokdom;i++){const char *t=tokdom[i];if(strlen(t)==n&&!memcmp(t,s,n)&&!((t[0]>='a'&&t[0]<='z')||t[0]=='_'))return 1;}return 0;}
+/* first expected token must agree with the gold y of the key */
+static int y_consistent(const krow *k){const char *w=k->want,*y=k->y;size_t tl;const char *t,*e;
+ if(w[0]=='!'){if(!strcmp(y,"bad"))return !strcmp(w+1,BADCH);if(!strcmp(y,"str"))return !strcmp(w+1,NOQ);if(!strcmp(y,"charlit"))return !strcmp(w+1,NOSQ);return !strcmp(k->peek,"other")&&!strcmp(w+1,BADCH);}
+ if(!strcmp(y,"cmt")||!strcmp(y,"linecmt"))return w[0]==0;
+ if(!strcmp(y,"skip")||!strcmp(y,"nl"))return !(w[0]=='0'&&w[1]==':');
+ if(!(w[0]=='0'&&w[1]==':'))return 0;t=w+2;e=t;while(*e&&*e!='\001')e++;tl=(size_t)(e-t);
+ if(!strcmp(y,"ident"))return tl>3&&!memcmp(t,"id=",3);
+ if(!strcmp(y,"num"))return tl>4&&!memcmp(t,"num=",4)&&t[4]!='\'';
+ if(!strcmp(y,"str"))return tl>4&&!memcmp(t,"str=\"",5);
+ if(!strcmp(y,"charlit"))return tl>4&&!memcmp(t,"num='",5);
+ if(!strcmp(y,"op"))return is_punct_tok(t,tl);
+ return 0;}
+static void mode_lex144(void){
+ int seen[12][12],i,j,nk=(int)(sizeof K/sizeof K[0]),table_ok=1,ycons=1;np_buf txt={0};toks w={{0},0};char name[200];
+ for(i=0;i<12;i++)for(j=0;j<12;j++)seen[i][j]=0;
+ for(i=0;i<nk;i++){int c=cidx(K[i].c,strlen(K[i].c)),p=cidx(K[i].peek,strlen(K[i].peek));size_t sl=strlen(K[i].src);
+  int ok=c>=0&&p>=0&&c!=9&&!strcmp(ytab[c][p],K[i].y)&&sl>=1&&bcls[(unsigned char)K[i].src[0]]==c&&(p==9?sl==1:(sl>=2&&bcls[(unsigned char)K[i].src[1]]==p));
+  if(ok)seen[c][p]++;else{table_ok=0;printf("TABLE\tlex144\t%s.%s\tgold_y=%s\trow_y=%s\n",K[i].c,K[i].peek,(c>=0&&p>=0)?ytab[c][p]:"?",K[i].y);}
+  if(!y_consistent(&K[i])){ycons=0;printf("YCONS\tlex144\t%s.%s\n",K[i].c,K[i].peek);}}
+ for(j=0;j<12;j++)seen[9][j]++;/* c=eof row: one observable, the empty-text run below */
+ for(i=0;i<12;i++)for(j=0;j<12;j++)if(seen[i][j]!=1){table_ok=0;printf("TABLE\tlex144\tkey %s.%s seen=%d\n",cname[i],cname[j],seen[i][j]);}
+ check(table_ok,"lex144.table-binds-all-144-gold-keys-and-lexcls-classes");
+ check(ycons,"lex144.expected-first-token-agrees-with-gold-y");
+ /* one joined run for every key whose peek byte stays in-stream and whose text is accepted */
+ for(i=0;i<nk;i++)if(strcmp(K[i].peek,"eof")&&K[i].want[0]!='!')jf(&txt,&w,K[i].src,strlen(K[i].src),K[i].want);
+ np_put(&txt,"\n",1);tk_end(&w,(unsigned)txt.n);accept_text("lex144.joined-in-stream-keys",txt.p,txt.n,0,&w);free(txt.p);tfree(&w);
+ /* separate runs: end-of-text peek and refusals */
+ for(i=0;i<nk;i++){if(!strcmp(K[i].peek,"eof")||K[i].want[0]=='!'){int z=snprintf(name,sizeof name,"lex144.%s.%s",K[i].c,K[i].peek);if(z<0||(size_t)z>=sizeof name)die("label");
+  if(K[i].want[0]=='!')refuse_text(name,K[i].src,strlen(K[i].src),K[i].want+1);
+  else{toks x={{0},0};want_spec(&x,0,K[i].want);tk_end(&x,(unsigned)strlen(K[i].src));accept_text(name,K[i].src,strlen(K[i].src),0,&x);tfree(&x);}}}
+ {toks x={{0},0};tk_end(&x,0);accept_text("lex144.eof.all-peek-empty-text",0,0,0,&x);tfree(&x);}}
+
+/* ---- --tokens mode ---- */
+typedef struct {const char *src,*want;} frag;
+static void frag_case(const char *name,const frag *fs,int n,const ppmap *m){np_buf txt={0};toks w={{0},0};int i;
+ for(i=0;i<n;i++)jf(&txt,&w,fs[i].src,strlen(fs[i].src),fs[i].want);np_put(&txt,"\n",1);tk_end(&w,(unsigned)txt.n);
+ accept_text(name,txt.p,txt.n,m,&w);free(txt.p);tfree(&w);}
+static const frag LITERALS[]={
+ {"\"a\\\"b\";","0:str=\"a\\\"b\"" E "6:;"},{"\"\\\\\";","0:str=\"\\\\\"" E "4:;"},{"\"\\x41\\n\";","0:str=\"\\x41\\n\"" E "8:;"},
+ {"'\\''","0:num='\\''"},{"'\\n'","0:num='\\n'"},{"'\\\\'","0:num='\\\\'"},
+ {"L'x'","1:num='x'"},{"u'x'","1:num='x'"},{"U'x'","1:num='x'"},{"u8'x'","2:num='x'"},
+ {"L\"w\";","0:str=L\"w\"" E "4:;"},{"u\"w\";","0:str=u\"w\"" E "4:;"},{"U\"w\";","0:str=U\"w\"" E "4:;"},{"u8\"w\";","0:str=u8\"w\"" E "5:;"},
+ {"\"a\" \"b\";","0:str=\"a\" \"b\"" E "7:;"},{"\"a\"\n\t\"b\";","0:str=\"a\"\n\t\"b\"" E "8:;"},
+ {"\"a\" L\"b\" u8\"c\";","0:str=\"a\" L\"b\" u8\"c\"" E "14:;"},{"\"a\"u\"b\";","0:str=\"a\"u\"b\"" E "7:;"},
+ {"\"a\" Lx;","0:str=\"a\"" E "4:id=Lx" E "6:;"},{"\"a\" u8x;","0:str=\"a\"" E "4:id=u8x" E "7:;"},{"\"a\" U'c';","0:str=\"a\"" E "5:num='c'" E "8:;"}};
+static const frag NUMBERS[]={
+ {"0 7 42 0x1F 0XaBc 0xffu 017 08","0:num=0" E "2:num=7" E "4:num=42" E "7:num=0x1F" E "12:num=0XaBc" E "18:num=0xffu" E "24:num=017" E "28:num=08"},
+ {"1.5 1. .5 1e10 1E+5 1e-5 1.e5","0:num=1.5" E "4:num=1." E "7:num=.5" E "10:num=1e10" E "15:num=1E+5" E "20:num=1e-5" E "25:num=1.e5"},
+ {"1.5f 1.5F 1.5L 2.l 1.5e3f .5e1L","0:num=1.5f" E "5:num=1.5F" E "10:num=1.5L" E "15:num=2.l" E "19:num=1.5e3f" E "26:num=.5e1L"},
+ {"10u 10U 10l 10L 10ul 10ULL 10llu","0:num=10u" E "4:num=10U" E "8:num=10l" E "12:num=10L" E "16:num=10ul" E "21:num=10ULL" E "27:num=10llu"},
+ {"0x1p3 0x1.8p-2 0x.8p1 0X1P+4","0:num=0x1p3" E "6:num=0x1.8p-2" E "15:num=0x.8p1" E "22:num=0X1P+4"},
+ {"1e x","0:num=1" E "1:id=e" E "3:id=x"},{"1e+","0:num=1" E "1:id=e" E "2:+"},{"0x;","0:num=0x" E "2:;"}};
+static const frag PUNCT_MUNCH[]={
+ {"a+++b","0:id=a" E "1:++" E "3:+" E "4:id=b"},{"a---b","0:id=a" E "1:--" E "3:-" E "4:id=b"},{"x>>=y","0:id=x" E "1:>>=" E "4:id=y"},
+ {"x<<=y","0:id=x" E "1:<<=" E "4:id=y"},{"p->q","0:id=p" E "1:->" E "3:id=q"},{"f(...)","0:id=f" E "1:(" E "2:..." E "5:)"},
+ {"a&&=b","0:id=a" E "1:&&" E "3:=" E "4:id=b"},{"a|||b","0:id=a" E "1:||" E "3:|" E "4:id=b"},{"a<<<b","0:id=a" E "1:<<" E "3:<" E "4:id=b"},
+ {"a->>b","0:id=a" E "1:->" E "3:>" E "4:id=b"},{"a+==b","0:id=a" E "1:+=" E "3:=" E "4:id=b"},{"a....b","0:id=a" E "1:..." E "4:." E "5:id=b"},
+ {"a>>>=b","0:id=a" E "1:>>" E "3:>=" E "5:id=b"},{"a!==b","0:id=a" E "1:!=" E "3:=" E "4:id=b"},{"a-->b","0:id=a" E "1:--" E "3:>" E "4:id=b"},
+ {"a/**/b","0:id=a" E "5:id=b"},{"a//*c\nb","0:id=a" E "6:id=b"},{"a/ /b","0:id=a" E "1:/" E "3:/" E "4:id=b"}};
+static const frag UCNS[]={
+ {"a\\u00e9;","0:id=a\\u00e9" E "7:;"},{"b\\U0001F600c;","0:id=b\\U0001F600c" E "12:;"},{"x\\u00E9\\u00e8 y","0:id=x\\u00E9\\u00e8" E "14:id=y"},
+ {"L\\u00e9","0:id=L\\u00e9"},{"_\\u0041","0:id=_\\u0041"}};
+static const frag LEXWORD[]={
+ {"__attribute__((unused)) int a;","24:type=int" E "28:id=a" E "29:;"},{"__attribute__ ((x)) b;","20:id=b" E "21:;"},
+ {"__attribute__((a(b,(c)))) z;","26:id=z" E "27:;"},{"__attribute__ x;","0:id=__attribute__" E "14:id=x" E "15:;"},
+ {"__asm__(\"nop\") int c;","15:type=int" E "19:id=c" E "20:;"},{"asm (\"x\");","9:;"},{"__asm__ y;","0:id=__asm__" E "8:id=y" E "9:;"},
+ {"asm\n(1) w;","8:id=w" E "9:;"},
+ {"__extension__ int d;","14:type=int" E "18:id=d" E "19:;"},{"__inline int e;","9:type=int" E "13:id=e" E "14:;"},{"__inline__ f;","11:id=f" E "12:;"},
+ {"__restrict g;","11:id=g" E "12:;"},{"__restrict__ h;","13:id=h" E "14:;"},{"__const i;","8:id=i" E "9:;"},{"__volatile__ j;","13:id=j" E "14:;"},
+ {"__signed__ int k;","11:type=int" E "15:id=k" E "16:;"},
+ {"L u U u8;","0:id=L" E "2:id=u" E "4:id=U" E "6:id=u8" E "8:;"},
+ {"__attribute __attributes __inlin __asm asmx u8x Lx;","0:id=__attribute" E "12:id=__attributes" E "25:id=__inlin" E "33:id=__asm" E "39:id=asmx" E "44:id=u8x" E "48:id=Lx" E "50:;"}};
+static void lexword_table_check(void){
+ /* every lexword.tsv word is exercised by LEXWORD/LITERALS with the gcc/pfxch/pfxstr behaviour the table declares */
+ char p[4200];size_t n,at=0,e;char *s;int rows=0,ok=1;const char *f[8];size_t fl[8];
+ const char *expect[][4]={{"__attribute__","skipparen","no","no"},{"__asm__","skipparen","no","no"},{"asm","skipparen","no","no"},{"__extension__","drop","no","no"},
+  {"__inline","drop","no","no"},{"__inline__","drop","no","no"},{"__restrict","drop","no","no"},{"__restrict__","drop","no","no"},{"__const","drop","no","no"},
+  {"__volatile__","drop","no","no"},{"__signed__","drop","no","no"},{"L","none","yes","yes"},{"u","none","yes","yes"},{"U","none","yes","yes"},{"u8","none","yes","yes"}};
+ path(p,sizeof p,root,"weights/gold/lexword.tsv");s=loaded(p,&n);
+ while(at<n){e=at;while(e<n&&s[e]!='\n')e++;
+  if(e>at&&s[at]!='#'){int k=split(s+at,e-at,f,fl,8);if(k==4&&!fis(f[0],fl[0],"w")){int i,hit=0;for(i=0;i<15;i++)if(fis(f[0],fl[0],expect[i][0])){hit=1;if(!fis(f[1],fl[1],expect[i][1])||!fis(f[2],fl[2],expect[i][2])||!fis(f[3],fl[3],expect[i][3]))ok=0;}if(!hit)ok=0;rows++;}}
+  at=e+1;}
+ free(s);check(ok&&rows==15,"lexword.fragments-bound-to-all-15-gold-words");}
+static void seq_case(const char *name,char **words,int nw,int typed){np_buf txt={0};toks w={{0},0};int i;
+ for(i=0;i<nw;i++){unsigned base;if(i)np_put(&txt," ",1);base=(unsigned)txt.n;np_puts(&txt,words[i]);
+  if(typed){np_buf t={0};np_puts(&t,typed==2?"id=":"type=");np_puts(&t,words[i]);tk(&w,base,t.p,t.n);free(t.p);}else tks(&w,base,words[i]);}
+ np_put(&txt,"\n",1);tk_end(&w,(unsigned)txt.n);accept_text(name,txt.p,txt.n,0,&w);free(txt.p);tfree(&w);}
+static void marks_case(void){
+ static const frag F[]={{"int v; __attribute__((constructor)) void g(void){}","0:type=int" E "4:id=v" E "5:;" E "36:type=void" E "41:id=g" E "42:(" E "43:type=void" E "47:)" E "48:{" E "49:}"},
+  {"__attribute__((destructor)) void h(void){}","28:type=void" E "33:id=h" E "34:(" E "35:type=void" E "39:)" E "40:{" E "41:}"}};
+ np_buf txt={0},pp={0};toks w={{0},0};int i;unsigned marks[4]={3,1,10,2};char attr[4400];np_result r;size_t an;char *ab;
+ for(i=0;i<2;i++)jf(&txt,&w,F[i].src,strlen(F[i].src),F[i].want);np_put(&txt,"\n",1);tk_end(&w,(unsigned)txt.n);
+ pp_build(&pp,txt.p,txt.n,0);path(attr,sizeof attr,work,"marks.attributes");
+ r=run_pp("positive.constructor-destructor-marks",pp.p,pp.n,attr,label_a,0);
+ accept_check("positive.constructor-destructor-marks",&r,pp.p,pp.n,&w,marks,2);np_free(&r);
+ ab=cx_read(attr,&an);
+ {static const unsigned char want[]={2,0,0,0, 0,0,0,0,3,0,0,0,1, 0,0,0,0,10,0,0,0,2};check(ab&&an==sizeof want&&!memcmp(ab,want,an),"positive.constructor-destructor-marks.sidecar-unit0-records-exact");}
+ free(ab);free(pp.p);free(txt.p);tfree(&w);}
+static void mode_tokens(void){
+ toks w={{0},0};int i;
+ /* format: exact token lines after the echo, typed spelling, text-relative offsets, eof at text length */
+ plain_want(&w);accept_text("format.plain-token-lines",PLAIN,strlen(PLAIN),0,&w);
+ /* non-zero maps: echo is the whole envelope, offsets stay text-relative; splice at text end and 62-byte name accepted */
+ {ppmap m;memset(&m,0,sizeof m);m.forced=1;m.autoc=2;m.ns=2;m.spl[0]=3;m.spl[1]=(unsigned)strlen(PLAIN);m.ni=2;m.iline[0]=1;m.ilines[0]=2;m.iname[0]="inc/a.h";
+  m.iline[1]=2;m.ilines[1]=1;m.iname[1]="n12345678901234567890123456789012345678901234567890123456789.h";
+  if(strlen(m.iname[1])!=62)die("62-byte include name");accept_text("input.nonzero-maps-text-relative",PLAIN,strlen(PLAIN),&m,&w);}
+ /* determinism: stdin transport and a different SOURCE_LABEL give the same bytes */
+ {np_buf pp={0};np_result a,b,c;pp_build(&pp,PLAIN,strlen(PLAIN),0);
+  a=run_pp("det.file-label-a",pp.p,pp.n,0,label_a,0);b=run_pp("det.stdin-label-a",pp.p,pp.n,0,label_a,1);c=run_pp("det.file-label-b",pp.p,pp.n,0,label_b,0);
+  accept_check("det.stdin-transport",&b,pp.p,pp.n,&w,0,0);
+  check(!a.rc&&!b.rc&&a.outn&&a.outn==b.outn&&!memcmp(a.out,b.out,a.outn)&&a.errn==b.errn,"det.file-vs-stdin-identical");
+  accept_check("det.label-b",&c,pp.p,pp.n,&w,0,0);
+  check(!a.rc&&!c.rc&&a.outn&&a.outn==c.outn&&!memcmp(a.out,c.out,a.outn),"det.label-independent-stdout");
+  np_free(&a);np_free(&b);np_free(&c);free(pp.p);}
+ tfree(&w);
+ /* gold token domain: every parse.tsv tok keyword/punctuator, every typekw word */
+ {char *kw[128],*pu[128];int nkw=0,npu=0;for(i=5;i<ntokdom;i++){char c=tokdom[i][0];if((c>='a'&&c<='z')||c=='_')kw[nkw++]=tokdom[i];else pu[npu++]=tokdom[i];}
+  printf("INFO\tparse-tok\tkeywords=%d\tpunctuators=%d\ttypekw=%d\n",nkw,npu,ntypekw);
+  seq_case("gold.keywords-parse-tok",kw,nkw,0);seq_case("gold.punctuators-parse-tok",pu,npu,0);seq_case("gold.typekw-type-spelling",typekw,ntypekw,1);}
+ {static char *notkw[]={"i","in","ifx","int_","Int","returns","_Boolx","structs"};seq_case("gold.keyword-prefixes-are-identifiers",notkw,8,2);}
+ frag_case("positive.longest-match-punct",PUNCT_MUNCH,(int)(sizeof PUNCT_MUNCH/sizeof PUNCT_MUNCH[0]),0);
+ frag_case("positive.numbers",NUMBERS,(int)(sizeof NUMBERS/sizeof NUMBERS[0]),0);
+ frag_case("positive.literals",LITERALS,(int)(sizeof LITERALS/sizeof LITERALS[0]),0);
+ frag_case("positive.ucn",UCNS,(int)(sizeof UCNS/sizeof UCNS[0]),0);
+ lexword_table_check();frag_case("gold.lexword",LEXWORD,(int)(sizeof LEXWORD/sizeof LEXWORD[0]),0);
+ marks_case();
+ /* A-47: 5000-byte identifier is one token or a named refusal; never a crash or hang */
+ {char *id=malloc(5001);np_buf pp={0},t={0};np_result r;toks x={{0},0};if(!id)die("alloc");memset(id,'a',5000);id[5000]=0;
+  np_puts(&t,"id=");np_puts(&t,id);tk(&x,0,t.p,t.n);tk_end(&x,5000);pp_build(&pp,id,5000,0);r=run_pp("positive.long-identifier",pp.p,pp.n,0,label_a,0);
+  if(r.rc==0)accept_check("positive.long-identifier-5000",&r,pp.p,pp.n,&x,0,0);
+  else{printf("INFO\tpositive.long-identifier\trefused rc=%d\n",r.rc);check(r.rc>0&&r.rc<124&&!r.outn&&r.errn&&has(r.err,r.errn,"reject:"),"positive.long-identifier-5000.named-refusal");}
+  np_free(&r);free(pp.p);free(t.p);tfree(&x);free(id);}
+ mode_lex144();}
+
+/* ---- --bytes mode: lexcls.tsv 257 rows ---- */
+static void mode_bytes(void){
+ np_buf txt={0};toks w={{0},0};int b,covered=0,refusals=0;char spec[200],src[64];int z;
+ for(b=0;b<256;b++){int c=bcls[b];char ch=(char)b;size_t sl;
+  if(c==10){/* other: refused outside literals; attws=no keeps the attribute look-ahead from skipping it */
+   char name[100];np_buf t={0};np_puts(&t,"__attribute__");np_put(&t,&ch,1);np_puts(&t,"((x))");
+   z=snprintf(name,sizeof name,"lexcls.b%03d.other-attws-%s",b,battws[b]?"yes":"no");if(z<0||(size_t)z>=sizeof name)die("label");
+   if(battws[b])die("gold other byte with attws=yes is not modelled");
+   refuse_text(name,t.p,t.n,BADCH);free(t.p);refusals++;covered++;continue;}
+  /* class fragment */
+  switch(c){
+   case 2:src[0]=ch;sl=1;z=snprintf(spec,sizeof spec,"0:id=%c",ch);break;
+   case 3:src[0]=ch;sl=1;z=snprintf(spec,sizeof spec,"0:num=%c",ch);break;
+   case 0:case 1:src[0]='x';src[1]=ch;src[2]='y';sl=3;z=snprintf(spec,sizeof spec,"0:id=x" E "2:id=y");break;
+   case 4:memcpy(src,"\"s\";",4);sl=4;z=snprintf(spec,sizeof spec,"0:str=\"s\"" E "3:;");if(b!=34)die("q byte");break;
+   case 5:memcpy(src,"'s'",3);sl=3;z=snprintf(spec,sizeof spec,"0:num='s'");if(b!=39)die("sq byte");break;
+   case 6:case 7:case 8:case 11:src[0]=ch;src[1]='x';sl=2;z=snprintf(spec,sizeof spec,"0:%c" E "1:id=x",ch);break;
+   default:die("unmodelled class");}
+  if(z<0||(size_t)z>=sizeof spec)die("spec");jf(&txt,&w,src,sl,spec);
+  /* attws fragment */
+  memcpy(src,"__attribute__",13);
+  if(battws[b]){src[13]=ch;memcpy(src+14,"((x))",5);jf(&txt,&w,src,19,"");src[13]=ch;src[14]='y';jf(&txt,&w,src,15,"0:id=__attribute__" E "14:id=y");}
+  else switch(c){
+   case 2:case 3:src[13]=ch;z=snprintf(spec,sizeof spec,"0:id=__attribute__%c",ch);jf(&txt,&w,src,14,spec);break;
+   case 0:case 1:src[13]=ch;memcpy(src+14,"((x))",5);jf(&txt,&w,src,19,"0:id=__attribute__" E "14:(" E "15:(" E "16:id=x" E "17:)" E "18:)");break;
+   case 4:memcpy(src+13,"\"s\";",4);jf(&txt,&w,src,17,"0:id=__attribute__" E "13:str=\"s\"" E "16:;");break;
+   case 5:memcpy(src+13,"'s'",3);jf(&txt,&w,src,16,"0:id=__attribute__" E "13:num='s'");break;
+   default:if(b=='(')break;/* '(' is the skipparen opener itself (gold.lexword) */
+    src[13]=ch;src[14]='x';z=snprintf(spec,sizeof spec,"0:id=__attribute__" E "13:%c" E "14:id=x",ch);if(z<0||(size_t)z>=sizeof spec)die("spec");jf(&txt,&w,src,15,spec);}
+  covered++;}
+ np_put(&txt,"\n",1);tk_end(&w,(unsigned)txt.n);
+ if(bcls[256]!=9||battws[256]!=0)die("gold eof row");covered++;/* eof: the joined run ends with eof at the text length */
+ accept_text("lexcls.joined-non-other-bytes-and-attws-eof",txt.p,txt.n,0,&w);free(txt.p);tfree(&w);
+ check(covered==257,"lexcls.all-257-rows-exercised");printf("INFO\tlexcls\trefusal_runs=%d\n",refusals);
+ /* other bytes are accepted inside a string literal and a block comment */
+ {np_buf t={0},s={0};toks x={{0},0};unsigned semi;np_put(&t,"\"",1);for(b=0;b<256;b++)if(bcls[b]==10&&b!=92){char ch=(char)b;np_put(&t,&ch,1);}
+  np_put(&t,"\"",1);semi=(unsigned)t.n;np_put(&t,";\n/*",4);for(b=0;b<256;b++)if(bcls[b]==10){char ch=(char)b;np_put(&t,&ch,1);}np_put(&t,"*/\n",3);
+  np_puts(&s,"str=");np_put(&s,t.p,semi);tk(&x,0,s.p,s.n);tks(&x,semi,";");tk_end(&x,(unsigned)t.n);
+  accept_text("lexcls.other-bytes-inside-string-and-comment",t.p,t.n,0,&x);free(t.p);free(s.p);tfree(&x);}}
+
+/* ---- --refusals mode ---- */
+static void env_case(const char *name,np_buf *pp,const char *needle){np_result r=run_pp(name,pp->p,pp->n,0,label_a,0);refuse_check(name,&r,needle);np_free(&r);free(pp->p);pp->p=0;pp->n=pp->cap=0;recover(name);}
+static void hdr(np_buf *b,unsigned tl,unsigned fo,unsigned au,unsigned ns,unsigned ni){np_put(b,"UNIPP1\0",7);put32(b,tl);put32(b,fo);put32(b,au);put32(b,ns);put32(b,ni);}
+static void text_refusal(const char *name,const char *text,size_t tn,const char *needle){refuse_text(name,text,tn,needle);recover(name);}
+static void mode_refusals(void){
+ const char *T="int x;\n";unsigned tl=7;np_buf b={0};int i;
+ /* envelope */
+ hdr(&b,tl-3,0,0,0,0);np_puts(&b,T);env_case("ref.length-understated",&b,MALF);
+ hdr(&b,tl,0,0,0,0);np_puts(&b,T);np_put(&b,"Z",1);env_case("ref.trailing-byte",&b,MALF);
+ hdr(&b,tl,0,0,1,0);put32(&b,tl+1);np_puts(&b,T);env_case("ref.splice-offset-past-text",&b,MALF);
+ hdr(&b,tl,0,0,1,0);put32(&b,0xffffu);np_puts(&b,T);env_case("ref.splice-offset-far-past-text",&b,MALF);
+ hdr(&b,tl,0,0,0,1);put32(&b,1);put32(&b,1);put32(&b,40);np_puts(&b,"a.h");np_puts(&b,T);env_case("ref.include-name-past-input",&b,MALF);
+ hdr(&b,tl,0,0,0,1);put32(&b,1);env_case("ref.include-record-truncated",&b,MALF);
+ hdr(&b,tl,0,0,0,1);put32(&b,1);put32(&b,1);put32(&b,63);for(i=0;i<63;i++)np_put(&b,"n",1);np_puts(&b,T);env_case("ref.include-name-63-over-bound",&b,MALF);
+ hdr(&b,tl,0,0,0,2);put32(&b,1);put32(&b,1);put32(&b,3);np_puts(&b,"a.h");np_puts(&b,T);env_case("ref.include-count-overstated",&b,MALF);
+ /* nonnegative signed 32-bit extents */
+ hdr(&b,0x80000000u|tl,0,0,0,0);np_puts(&b,T);env_case("ref.int32.text-length",&b,MALF);
+ hdr(&b,tl,0x80000000u,0,0,0);np_puts(&b,T);env_case("ref.int32.forced-count",&b,MALF);
+ hdr(&b,tl,0,0x80000000u,0,0);np_puts(&b,T);env_case("ref.int32.auto-count",&b,MALF);
+ hdr(&b,tl,0,0,0x80000000u,0);np_puts(&b,T);env_case("ref.int32.splice-count",&b,MALF);
+ hdr(&b,tl,0,0,0,0x80000000u);np_puts(&b,T);env_case("ref.int32.include-count",&b,MALF);
+ hdr(&b,tl,0,0,1,0);put32(&b,0x80000000u);np_puts(&b,T);env_case("ref.int32.splice-offset",&b,MALF);
+ hdr(&b,tl,0,0,0,1);put32(&b,0x80000000u);put32(&b,1);put32(&b,3);np_puts(&b,"a.h");np_puts(&b,T);env_case("ref.int32.include-line",&b,MALF);
+ hdr(&b,tl,0,0,0,1);put32(&b,1);put32(&b,0x80000000u);put32(&b,3);np_puts(&b,"a.h");np_puts(&b,T);env_case("ref.int32.include-lines",&b,MALF);
+ hdr(&b,tl,0,0,0,1);put32(&b,1);put32(&b,1);put32(&b,0x80000000u);np_puts(&b,"a.h");np_puts(&b,T);env_case("ref.int32.include-name-length",&b,MALF);
+ /* lexer: stray bytes, UCN, unterminated literals, binary garbage, embedded NUL */
+ text_refusal("ref.stray.at-sign","int x @;\n",9,BADCH);text_refusal("ref.stray.hash","#define X 1\n",12,BADCH);
+ text_refusal("ref.stray.backquote","a = b ` c;\n",11,BADCH);text_refusal("ref.stray.embedded-nul","int\0x;\n",7,BADCH);
+ text_refusal("ref.ucn.at-identifier-start","\\u00e9x;\n",9,BADCH);text_refusal("ref.ucn.short-u","a\\u12;\n",7,BADCH);
+ text_refusal("ref.ucn.short-U","a\\U0001F60;\n",12,BADCH);text_refusal("ref.ucn.not-u","a\\x41;\n",7,BADCH);
+ text_refusal("ref.unterminated.string","s = \"abc\n",9,NOQ);text_refusal("ref.unterminated.char","c = 'a\n",7,NOSQ);
+ text_refusal("ref.unterminated.string-escape-at-end","\"a\\",3,NOQ);text_refusal("ref.unterminated.char-escape-at-end","'\\",2,NOSQ);
+ {char g[4096];unsigned x=12345u;int k=0;static const unsigned char elf[16]={0x7f,'E','L','F',2,1,1,0,0,0,0,0,0,0,0,0};
+  for(i=0;i<4096;i++){x=x*1103515245u+12345u;g[i]=(char)(x>>16);}g[0]=0x7f;text_refusal("ref.binary-garbage-4096",g,4096,BADCH);
+  memset(g,0,4096);memcpy(g,elf,16);text_refusal("ref.binary-elf-header-like",g,4096,BADCH);
+  for(i=0;i<4096;i++){x=x*1103515245u+12345u;do{x=x*1103515245u+12345u;k=(int)((x>>16)&255u);}while(bcls[k]!=10);g[i]=(char)k;}text_refusal("ref.binary-all-other-class",g,4096,BADCH);}
+ /* capacity: 256 constructor marks accepted exactly, 257 refused by name */
+ {const char *rep="__attribute__((constructor))x;\n";size_t rl=strlen(rep);np_buf t={0},pp={0};toks w={{0},0};unsigned *marks=malloc(sizeof(unsigned)*512);np_result r;
+  if(!marks)die("alloc");if(rl!=31)die("rep length");
+  for(i=0;i<256;i++){unsigned base=(unsigned)t.n;np_puts(&t,rep);tks(&w,base+28,"id=x");tks(&w,base+29,";");marks[2*i]=(unsigned)(2*i);marks[2*i+1]=1;}
+  tk_end(&w,(unsigned)t.n);pp_build(&pp,t.p,t.n,0);r=run_pp("ref.constructor-capacity-256",pp.p,pp.n,0,label_a,0);
+  accept_check("ref.constructor-capacity-256-accepted",&r,pp.p,pp.n,&w,marks,256);np_free(&r);free(pp.p);pp.p=0;pp.n=pp.cap=0;
+  np_puts(&t,rep);text_refusal("ref.constructor-capacity-257",t.p,t.n,"too many constructor attributes");free(t.p);tfree(&w);free(marks);}
+ /* missing / non-regular INPUT (ENOENT only is absence; ENOTDIR and EACCES must be reported distinctly) */
+ {char absent[4400],notdir[4400],noperm[4400],regular[4400];np_result r0,r1,r2,r3;int probe,eacces_real;
+  path(absent,sizeof absent,work,"absent.pp");path(regular,sizeof regular,work,"regular.pp");{np_buf pp={0};pp_build(&pp,PLAIN,strlen(PLAIN),0);saved(regular,pp.p,pp.n);free(pp.p);}
+  path(notdir,sizeof notdir,regular,"x.pp");path(noperm,sizeof noperm,work,"noperm.pp");saved(noperm,"x",1);if(chmod(noperm,0))die("chmod");
+  probe=open(noperm,O_RDONLY|O_CLOEXEC);eacces_real=probe<0&&errno==EACCES;if(probe>=0)close(probe);
+  seq++;r0=run_argv("ref.input-enoent",absent,label_a,0,0);refuse_check("ref.input-enoent",&r0,"cannot open input");recover("ref.input-enoent");
+  seq++;r1=run_argv("ref.input-enotdir",notdir,label_a,0,0);refuse_check("ref.input-enotdir",&r1,"cannot open input");recover("ref.input-enotdir");
+  check(r1.errn&&(has(r1.err,r1.errn,"ENOTDIR")||has(r1.err,r1.errn,"Not a directory")),"ref.input-enotdir.errno-reported-distinctly");
+  seq++;r2=run_argv("ref.input-eacces",noperm,label_a,0,0);
+  if(eacces_real){refuse_check("ref.input-eacces",&r2,"cannot open input");check(r2.errn&&(has(r2.err,r2.errn,"EACCES")||has(r2.err,r2.errn,"Permission denied")),"ref.input-eacces.errno-reported-distinctly");}
+  else{unverified++;puts("UNVERIFIED\tref.input-eacces\treason=mode-000-file-readable-by-this-user");}
+  recover("ref.input-eacces");
+  check(r0.errn&&!has(r0.err,r0.errn,"Not a directory")&&!has(r0.err,r0.errn,"Permission denied"),"ref.input-enoent.not-misreported");
+  seq++;r3=run_argv("ref.input-directory",work,label_a,0,0);
+  check(r3.rc>0&&r3.rc<124&&!r3.outn&&r3.errn&&has(r3.err,r3.errn,"cannot read input"),"ref.input-directory.named-refusal");
+  if(r3.errn)printf("INFO\tref.input-directory\trc=%d\t%.*s\n",r3.rc,(int)(r3.errn>160?160:r3.errn),r3.err);
+  recover("ref.input-directory");
+  np_free(&r0);np_free(&r1);np_free(&r2);np_free(&r3);if(chmod(noperm,0600))die("chmod restore");}}
+
+int main(int argc,char **argv){
+ char before[65],after[65],sid[65];const char *mode;
+ if(argc!=5){fputs("usage: ROOT STREAM_DIR NEW_OUTDIR --tokens|--bytes|--refusals\n",stderr);return 2;}
+#if !defined(__linux__) || !defined(__x86_64__)
+ fputs("UNVERIFIED: stream-e1-lex requires Linux/x86_64\n",stderr);return 77;
+#endif
+ mode=argv[4];if(strcmp(mode,"--tokens")&&strcmp(mode,"--bytes")&&strcmp(mode,"--refusals")){fputs("unknown mode\n",stderr);return 2;}
+ if(!realpath(argv[1],root)||!realpath(argv[2],streams))die("resolve");
+ if(argv[3][0]!='/'||strlen(argv[3])>=sizeof work)die("absolute-new-outdir");memcpy(work,argv[3],strlen(argv[3])+1);
+ if(mkdir(work,0700))die("new-outdir-must-be-absent");
+ path(bound,sizeof bound,root,"tools/bound");path(inc,sizeof inc,root,"include");
+ path(product,sizeof product,root,"unisacc.com");path(e1bin,sizeof e1bin,streams,"unisacc-stream2.com");
+ path(label_a,sizeof label_a,work,"label.c");path(label_b,sizeof label_b,work,"other/relabelled-source.c");
+ digest(product,before);digest(e1bin,sid);if(strcmp(sid,e1_pin))die("material.stream2-identity");check(1,"material.stream2-identity");
+ load_gold();
+ if(!strcmp(mode,"--tokens"))mode_tokens();else if(!strcmp(mode,"--bytes"))mode_bytes();else mode_refusals();
+ digest(product,after);check(!strcmp(before,after),"root-product-stable");
+ digest(e1bin,sid);check(!strcmp(sid,e1_pin),"material.stream2-stable");
+ puts("TIMING\tstartup_load_inference_output_validation=UNMEASURED");
+ printf("STREAM_E1_LEX\tmode=%s\tassertions=%d\tfailed=%d\tunverified=%d\truns=%d\tscope=e1-lex-domain-linux-x86_64-stream2\n",mode+2,assertions,failures,unverified,seq);
+ return failures?1:0;}
