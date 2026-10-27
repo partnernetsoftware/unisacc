@@ -149,6 +149,8 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 <a id="work-tree"></a>
 ### 思维树
 
+**2026-10-27 最新开发候选（cdx）：** SID `20a8d5a5…` 的 107 作业收据、本代双核、PC 34 模型／六路线／封包、五切片与真 deflate APE 已完成；PC SHA `890b8aee…`，kind2 独立准入 9/0。开发安装后 `unisacc.com` SHA `0ce6f23198ae9cdc4f0dcefd399d3914300a6ef6b0b655ea629b53eaf593f829`，2,970,344 B；上一根 `b226463f…` 留在 GEN 备份。安装前后 smoke16/0，默认修剪 `cx-bounded.cx` 为 `CX_BOUNDED_PASS`，多 TU `tests/run.cx` 热启动实测 `multi/fwdexec` 命中且 smoke16/0。`--all` 仍 rc3：171 coverage、19 unresolved、161 未跑批、子批0。两条 net 外层 rc142 原状态保留，其材料经当前源码只读双端分别 VERIFIED。此为本机开发候选，19 宽行、完整 N22、五外宿主仍未关闭；下一步按受影响合同做正式子批并建立下一代固定点。
+
 **2026-10-27 最新源码纪元（cdx）：** `d397fe7dc3` 把 `include/**/*.h` 纳入 E2 `pp-autoinc-gen` 事实表的生成输入，并重生 30 张规范事实表；`--check` 为 30/0。活源码 SID `20a8d5a5a4949e184df7db0a9141a25514fc0a65232d3f7d934a0fbe70912f70`。私有包同时换入 `shared-e2` 与 `warnpp-shared` 后，已装开发驱动在默认修剪、禁缓存条件下 `cx-bounded.cx` 的 `-E`、`-run`、`-o` 均通过，smoke16/0；该包只是开发验证。新 `out/c43-source-20a8-context-02/` 冻结已装根，107 个 job record 齐；`net-warnparse`／`net-errorparse` 外层曾 rc142，原状态保留，当前源码重编的只读双端校验分别 VERIFIED。`context-01` 的宿主 `zlib.h` 缺失拒绝仍留存。下一刀：以本代双核建 full PC、五片、真 deflate APE，准入和开发安装后重跑默认 `.cx` 与多 TU 复用；旧 7bb6 PC/GEN 不转授。本机之外五宿主、19 宽行、完整 N22 仍开。
 
 **2026-10-27 cdx 主刀计划（主人本轮改派；重构造仍串行，互不抢文件的轻切片由 cc／Codex 辅助）**
@@ -346,6 +348,8 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 <a id="memory-palace"></a>
 ### 记忆宫殿
 
+**最新开发根：** `unisacc.com` 已安装 SID `20a8d5a5…`／APE `0ce6f231…`；PC `890b8aee…`，GEN `out/c43-native-kernel-20a8-01/`，kind2 9/0。smoke16/0、默认有界 API `CX_BOUNDED_PASS`、多 TU 热 `fwdexec lk=1`；`--all` rc3／19 unresolved。旧根在本代 GEN `bootstrap-before-install.com`。下一步正式受影响批与第二代同源构造；不把开发安装写成发布资格。
+
 **最新入口：** 活 SID `20a8d5a5…`，已装开发根仍 `b226463f…`、属于上一源码纪元。`exec/facts` 在 `d397fe7dc3` 重生并经 30/0 检查；私有 `out/c43-e2-adopt-02/compiler.pkg` 证明默认 `cx_fmt`／`cx_path_join` 修剪路线可用，但非正式 PC。`out/c43-source-20a8-context-02/` 有 107 份 record；两个外层 rc142 job 另经现行只读双端验证，不抹原 UNKNOWN。下一步本代 kernel→PC→GEN→kind2→开发安装；禁止借 7bb6 收据冒充当前候选。
 
 **现行入口：** SID `7bb6eb92bd50f964171462945e6a9d0e04982bd6e6a42882abb054aefaa5e2be`；107 作业、PC、五片、APE、kind2 准入均在同源本代完成。开发根已装 `b226463fe13a77070a72fe9947131b797670e0e590fe2c9c4138c94ca9198ba9`，旧 Root7a 留 GEN 备份。smoke16/0、热多模块约0.109秒；本代 stream6 输入拒绝正式29/0，其他四 lower 模式直接51/778/1516/115全绿。默认 ftrim 对新 `cx_*` 两函数仍红；下一刀核 E2 新键采用链。`df8f/831a` 收据只作历史。
@@ -360,6 +364,7 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 
 | 房间 | 当前事实／决定 | 证据与行动入口 |
 |---|---|---|
+| 0.0.43 最新开发根（2026-10-27） | SID `20a8d5a5…`，APE `0ce6f231…`／2,970,344 B，PC `890b8aee…`，107 job、本代双核五片、kind2 9/0、安装后 smoke16/0；默认 `cx-bounded` 通过且多 TU 热 `fwdexec lk=1`。`--all` rc3／19 unresolved；N22 与五外宿主仍开。 | `out/c43-source-20a8-context-02/`、`out/c43-source-20a8-full-pc-01/`、`out/c43-native-kernel-20a8-01/`、`out/c43-20a8-admit-01/`；下一步受影响正式批和同源第二代。 |
 | 0.0.43 最新源码纪元（2026-10-27） | SID `20a8d5a5…`；开发根仍旧 `b226463f…`。E2 两网私有替换已使默认 `cx-bounded.cx` 的 `-E/-run/-o` 通过；新 context 有 107 份 record，两个外层 rc142 保留 UNKNOWN 且只读双端 VERIFIED。PC/GEN/准入/安装待做。 | `out/c43-e2-adopt-02/`、`out/c43-source-20a8-context-{01,02}/`；下一步本代双核、PC、GEN、kind2、默认回归。 |
 | 0.0.43 现行 SID（2026-10-27） | `7bb6eb92…`／开发根 `b226463f…`；本代 107 作业、PC 34/6、双核、五片、真 deflate wrap、kind2 准入 9/0、安装、smoke16/0。默认多模块热 `-run` 约0.109秒；本代 stream6 输入拒绝正式29/0，四同源模式直接绿。`cx_fmt`／`cx_path_join` 默认 ftrim 红。`--all` rc3／19 unresolved／子批0；N22、五外宿主仍开。 | `out/c43-source-7bb6-context-01/`、`out/c43-source-7bb6-full-pc-01/`、`out/c43-native-kernel-7bb6-01/`、`out/c43-7bb6-admit-01/`、`out/c43-streams-7bb6-02/`、`out/c43-7bb6-lower-input-registry-01/`；下一步核部署 E2 新键采用，旧 Root7a 备份在 GEN。 |
 | 0.0.43 前一源与下一步（2026-10-27） | HEAD `e38b24a668`，SID `831a44c3…`；Root7a 未重建。多 TU 默认 `-run` 的私有新源驱动已见双遍 fwdexec 热命中、活参数、头收据失效和畸形缓存失效；smoke16/0、缺席回归13/0。旧 A3 107 收据不适用。19 宽行、N22、五外宿主仍开。 | `out/c43-multitu-absorb-01/`；下一步冻结本源码，起新 source context 的107作业、PC、GEN、准入，装同候选后重跑红例与默认 `-run` 正式批。 |
