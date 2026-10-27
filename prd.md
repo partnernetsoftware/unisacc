@@ -161,7 +161,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 **P3 本机格逐行闭合（独立轻切片可并行，父行仍按完整域判）：** `9a44ce9869` 为 lower 登记四个 SOURCE 批，Root7a 的正式 run-batch 分别 51/0、778/0、1516/0、115/0，A-41 的 762 个本机布局输入已穷举；ABI 可观察格 144/0 但六项无 tape 拼写记 UNVERIFIED，输入拒绝 29/2 保持红，六目标／五外宿主／完整 lower 父行仍开。新候选必须重跑；其余宽行按矩阵逐格收据推进，不以局部绿替代完整域。
 
-**P3a 六目标流材料（cdx 独立轻切片）：** `61ba5c621c` 给 `stream-pack.cx` 增加六个 `image/O2` 目标的显式选择；默认 `lnx/x86_64` 七件与原材料逐字相同。PC04 包六路各生成七件，五个其他目标的 stream6 在本机对 `_start: ret` 输出相应 `@target`，非法目标在建目录前 rc2。每路 `streams.json` 记录所选路由；目前仅 PREPARED 材料与单输入烟测，不记外宿主原生执行或宽父行 PASS。下一步用独立目标 oracle 验六路流域，并在 cc 新候选落地后重绑材料身份。
+**P3a 六目标流材料及有限 oracle：** `61ba5c621c` 给 `stream-pack.cx` 增加六个 `image/O2` 目标的显式选择；默认 `lnx/x86_64` 七件与原材料逐字相同。PC04 包六路各生成七件，非法目标在建目录前 rc2。`611a8c62d3` 登记五个外国输出目标的本机 `stream6` 四夹具（ret、八寄存器、三重定位、稀疏数据），五批各 17/0、20 次流执行；`4ef850b1c7` 把材料目录改为 `run-batch` 显式输入，复跑 lnx/arm64 17/0。只授 Root7a 本机有限输出目标行为；新候选须重包、重钉、重跑，五外宿主原生与宽父行仍开。
 
 **P4 `--all` 跨命令收据（B1b）：** `dabc5a0efb` 已提交 start → run → finish；run 相由执行器自身 waitpid 封存 bound rc，另钉末尾 RUN SHA。外层 `bound 58` 即硬限 60 秒；隔离根 12/12 控制、smoke PASS，聚合仍 rc3（132 批未跑、19 宽行未解）。尚须在最终同候选上执行完整分波，不能缓存 PASS。
 
@@ -332,7 +332,7 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 <a id="memory-palace"></a>
 ### 记忆宫殿
 
-**本轮入图（2026-10-27，cdx 主刀）：** cc 独占候选 A3→A6，A3 的 107 作业收据已落齐；产品仍是旧 Root7a，纪元1 SID `df8f29fd…` 尚未装成新候选。Codex 辅助已交外宿主草稿 producer/artifact head 一致检查（`b40487eadd`，cdx 以 `5b4616387f` 保留较新验证提交）与跨命令 B1b 收据 `dabc5a0efb`，未派发 CI。cdx 提交 lower 四个 Root7a 正式批 `9a44ce9869`：51/0、778/0、1516/0、115/0；ABI 六项 UNVERIFIED、输入 errno 29/2 红。`61ba5c621c` 已生成六目标七流材料，默认七件与旧材料逐字相同，外国目标仅在本机验证 stream6 简单输入，未授外宿主资格。完整 lower 父行和其余 18 宽行、N22、五外宿主仍开，`--all` rc3。
+**本轮入图（2026-10-27，cdx 主刀）：** cc 独占候选 A3→A6，A3 的 107 作业收据已落齐；产品仍是旧 Root7a，纪元1 SID `df8f29fd…` 尚未装成新候选。Codex 辅助已交外宿主草稿 producer/artifact head 一致检查（`b40487eadd`，cdx 以 `5b4616387f` 保留较新验证提交）与跨命令 B1b 收据 `dabc5a0efb`，未派发 CI。lower 四个旧 Root7a 正式批 `9a44ce9869` 为 51/0、778/0、1516/0、115/0；ABI 六项 UNVERIFIED、输入 errno 29/2 红。六目标流材料 `61ba5c621c`，五目标有限 oracle `611a8c62d3` 各 17/0，材料显式绑定补丁 `4ef850b1c7` 的 lnx/arm64 正式复跑 17/0；外国目标只在本机验证输出，不授外宿主资格。完整 lower 父行和其余 18 宽行、N22、五外宿主仍开，`--all` rc3。
 
 **现行入口：** 下一表第一行是当前身份与行动；其余旧行保留来源历史，凡与第一行冲突的“当前”字样均已失效。
 
