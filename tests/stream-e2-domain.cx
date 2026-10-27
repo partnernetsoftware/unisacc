@@ -20,7 +20,7 @@
 static char root[4096],streams[4096],work[4096],bound[4200],inc[4200],product[4200],e2bin[4200],empty_inc[4200];
 static char e2_id[65],product_before[65],product_after[65];
 static const char *e2_pin="078bccb6dad868b470bb6287ba6fdd9c415e3eaa5d25280c883ce4ea2710fdc9";
-static int assertions,failures,runs;
+static int assertions,failures,runs,unverified;
 static void die(const char *s){fprintf(stderr,"stream-e2-domain: REFUSE %s errno=%d\n",s,errno);exit(2);}
 static void copy_fit(char *dst,size_t cap,const char *src){size_t i=0;if(!cap)die("copy-bound");while(src[i]&&i+1<cap){dst[i]=src[i];i++;}if(src[i])die("copy-bound");dst[i]=0;}
 static void check(int ok,const char *case_name,const char *what){assertions++;if(!ok)failures++;printf("%s\tstream-e2-domain.%s.%s\n",ok?"PASS":"FAIL",case_name,what);}
@@ -78,6 +78,7 @@ static int canon_lines_equal(const unsigned char *body,size_t bn,const char *wan
 static int has(const unsigned char *b,size_t n,const char *needle){size_t m=strlen(needle);if(m>n)return 0;for(size_t i=0;i+m<=n;i++)if(!memcmp(b+i,needle,m))return 1;return 0;}
 static int count_of(const unsigned char *b,size_t n,const char *needle){size_t m=strlen(needle);int c=0;if(!m||m>n)return 0;for(size_t i=0;i+m<=n;i++)if(!memcmp(b+i,needle,m))c++;return c;}
 static int has_line(const char *s,size_t n,const char *line){size_t m=strlen(line),at=0;while(at<n){size_t e=at;while(e<n&&s[e]!='\n')e++;if(e-at==m&&!memcmp(s+at,line,m))return 1;at=e+1;}return 0;}
+static int has_line_prefix(const char *s,size_t n,const char *pre){size_t m=strlen(pre),at=0;while(at<n){size_t e=at;while(e<n&&s[e]!='\n')e++;if(e-at>m&&!memcmp(s+at,pre,m))return 1;at=e+1;}return 0;}
 
 /* ---- invocation: stream1 INPUT SOURCE_LABEL INCLUDE_DIR, own watchdog ---- */
 static np_result run_at(const char *input,const char *incdir,const char *cwd){
@@ -201,16 +202,18 @@ static void recovery(const char *after){
  char leaf[200];z=snprintf(leaf,sizeof leaf,"%s.c",name);if(z<0||(size_t)z>=sizeof leaf)die("label");
  np_result r=run_src(leaf,recovery_src,strlen(recovery_src),empty_inc);frame f=accepted(name,&r);
  check(f.ok&&f.bn==strlen(recovery_src)&&!memcmp(f.body,recovery_src,f.bn)&&!f.nspl&&!f.ninc&&!f.forced&&!f.autoinc,name,"oracle-bytes");np_free(&r);}
-static void refused_common(const char *name,np_result *r){
- check(r->rc!=0,name,"reject-nonzero-rc");check(r->outn==0,name,"reject-empty-stdout");}
+/* run.c: status 1 is a model reject ("reject: NAME" or a positioned DIAG), status 2 a named runtime
+ * refusal ("run: ..."); a watchdog 142, signal or transport error is never a refusal. */
+static void refused_common(const char *name,np_result *r,int want){
+ check(r->rc==want,name,want==1?"reject-rc1-model-refusal":"reject-rc2-runtime-refusal");check(r->outn==0,name,"reject-empty-stdout");}
 /* Declared REJECT name: run.c prints exactly "reject: NAME" on its own line. */
 static void ref_named(const char *name,const char *src,size_t n,const char *declared){
- np_result r=run_src(name,src,n,empty_inc);refused_common(name,&r);
+ np_result r=run_src(name,src,n,empty_inc);refused_common(name,&r,1);
  char line[400];int z=snprintf(line,sizeof line,"reject: %s",declared);if(z<0||(size_t)z>=sizeof line)die("label");
  check(r.errn&&has_line(r.err,r.errn,line),name,"reject-declared-name");np_free(&r);recovery(name);}
 /* Positioned DIAG rows: "LABEL:LINE:COL: error: TEXT\n" (directive-scan-result DIAG.*). */
 static void ref_diag(const char *name,const char *src,unsigned line,const char *text){
- char p[4400];path(p,sizeof p,work,name);saved(p,src,strlen(src));np_result r=run_at(p,empty_inc,root);refused_common(name,&r);
+ char p[4400];path(p,sizeof p,work,name);saved(p,src,strlen(src));np_result r=run_at(p,empty_inc,root);refused_common(name,&r,1);
  char pre[4600],tail[600];int z=snprintf(pre,sizeof pre,"%s:%u:",p,line);if(z<0||(size_t)z>=sizeof pre)die("label");
  z=snprintf(tail,sizeof tail,": error: %s\n",text);if(z<0||(size_t)z>=sizeof tail)die("label");
  check(r.errn>=strlen(pre)&&!memcmp(r.err,pre,strlen(pre)),name,"diag-label-line");
@@ -218,8 +221,8 @@ static void ref_diag(const char *name,const char *src,unsigned line,const char *
 /* No declared diagnostic exists; C99 requires one. The refusal must still name
  * something other than an internal unreachable state. */
 static void ref_required(const char *name,const char *src,size_t n){
- np_result r=run_src(name,src,n,empty_inc);refused_common(name,&r);
- check(r.errn&&!(r.errn==strlen("reject: unreachable\n")&&!memcmp(r.err,"reject: unreachable\n",r.errn)),name,"reject-named-not-unreachable");np_free(&r);recovery(name);}
+ np_result r=run_src(name,src,n,empty_inc);refused_common(name,&r,1);
+ check(r.errn&&(has_line_prefix(r.err,r.errn,"reject: ")||has((const unsigned char *)r.err,r.errn,": error: "))&&!has_line(r.err,r.errn,"reject: unreachable"),name,"reject-named-not-unreachable");np_free(&r);recovery(name);}
 static char *strip_path(const char *s,size_t n,const char *p){
  np_buf b={0};np_replace(s,n,p,strlen(p),"PATH",4,-1,&b);np_put(&b,"",1);return b.p;}
 
@@ -261,15 +264,16 @@ static void refusal(void){
   savedz(work,"regular.c","int r;\n");path(notdir,sizeof notdir,work,"regular.c/x.c");
   savedz(work,"noperm.c","int n;\n");path(noperm,sizeof noperm,work,"noperm.c");if(chmod(noperm,0))die("chmod");
   path(dir,sizeof dir,work,"dir-input.c");if(mkdir(dir,0700))die("dir-input");
-  np_result a=run_at(missing,empty_inc,root);refused_common("missing-input-enoent",&a);
+  np_result a=run_at(missing,empty_inc,root);refused_common("missing-input-enoent",&a,2);
   check(a.errn&&has((const unsigned char *)a.err,a.errn,"cannot open"),"missing-input-enoent","named-cannot-open");recovery("missing-input-enoent");
-  np_result b=run_at(notdir,empty_inc,root);refused_common("missing-input-enotdir",&b);
+  np_result b=run_at(notdir,empty_inc,root);refused_common("missing-input-enotdir",&b,2);
   char *sa=strip_path(a.err,a.errn,missing),*sb=strip_path(b.err,b.errn,notdir);
   check(b.errn&&strcmp(sa,sb),"missing-input-enotdir","reported-distinct-from-enoent");recovery("missing-input-enotdir");
-  np_result c=run_at(noperm,empty_inc,root);refused_common("missing-input-eacces",&c);
+  {int probe=open(noperm,O_RDONLY|O_CLOEXEC);if(probe>=0){close(probe);unverified++;puts("UNVERIFIED\tmissing-input-eacces\treason=mode-000-file-readable-by-this-user");}}
+  np_result c=run_at(noperm,empty_inc,root);refused_common("missing-input-eacces",&c,2);
   char *sc=strip_path(c.err,c.errn,noperm);
   check(c.errn&&strcmp(sa,sc)&&strcmp(sb,sc),"missing-input-eacces","reported-distinct-from-enoent-enotdir");recovery("missing-input-eacces");
-  np_result d=run_at(dir,empty_inc,root);refused_common("directory-input",&d);check(d.errn>0,"directory-input","diagnostic-present");recovery("directory-input");
+  np_result d=run_at(dir,empty_inc,root);refused_common("directory-input",&d,2);check(d.errn>0,"directory-input","diagnostic-present");recovery("directory-input");
   if(chmod(noperm,0600))die("chmod-restore");
   free(sa);free(sb);free(sc);np_free(&a);np_free(&b);np_free(&c);np_free(&d);}
 }
@@ -293,6 +297,6 @@ int main(int argc,char **argv){
  if(pos)positive();else refusal();
  digest(product,product_after);check(!strcmp(product_before,product_after),"identity","root-product-stable");
  digest(e2bin,e2_id);check(!strcmp(e2_id,e2_pin),"identity","stream1-stable");
- printf("%s\tassertions=%d\tfailed=%d\truns=%d\tscope=e2-domain-%s-linux-x86_64\n",pos?"STREAM_E2_DOMAIN_POSITIVE":"STREAM_E2_DOMAIN_REFUSAL",assertions,failures,runs,argv[1]);
+ printf("%s\tassertions=%d\tfailed=%d\tunverified=%d\truns=%d\tscope=e2-domain-%s-linux-x86_64\n",pos?"STREAM_E2_DOMAIN_POSITIVE":"STREAM_E2_DOMAIN_REFUSAL",assertions,failures,unverified,runs,argv[1]);
  puts("NOT_CLAIMED\tsix-target-predefines-cli-forced-auto-include-file-vs-stdin-foreign-hosts-same-candidate-model");
- return failures?1:0;}
+ return failures?1:unverified?3:0;}
