@@ -149,9 +149,9 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 <a id="work-tree"></a>
 ### 思维树
 
-**现行流推进（2026-10-27）：** 按 E2→E1→E3→E4→prune→lower→ELF 分层收口；分别记录产品功能、同候选验证和未完成合同，矩阵格数不是实现百分比。E2 当前产品正域103/0、拒绝域187/0；`37a80dd995` 新增同候选内嵌模型绑定与文件/stdin等价正式13/0（`out/c43-a825-e2-binding-wave-01/`），E2本机矩阵57/62，其中旧材料不能转授。宏顺序源码修复仍待构造。cc 在隔离目录集中研究高ROI提速，主线独占产品热文件和构造。
+**现行流推进（2026-10-27）：** 按E2→E1→E3→E4→prune→lower→ELF分层收口；实现能力、同候选验证、矩阵覆盖分别报告。Root8a8195d5已正规构造并安装宏顺序修复；同候选E2流材料 `out/c43-streams-ccd29-01/`（stream1 `840b7ab8…`）绑定13/0、正域103/0、拒绝187/0，CLI宏23/0、目标/include各20/0。本机E2矩阵58/62；剩余forced/auto include计数、缺头诊断excerpt和本机全格闭合。五外宿主仍未验证。
 
-**2026-10-27 最新开发候选（cdx）：** 已装SID `ccd29c711123fe97df6fb51656c9804160166ac1007486ed2b1cb4d1bad282e7`、APE `8a8195d5be397a2c2203cdd3e71002f55f464321fd598fd1c5c12ac0b427943b`（2,972,007 B），record `66c6a895…`；context-03正规107作业全部rc0，GEN-ccd29-01双核/五片/真deflate完成；PC02包 `c345ac87…` 独立VERIFIED，kind2准入9/0、开发安装rc0。旧Root1214在GEN备用。安装后smoke16/0；正式CLI宏23/0、目标20/0、include20/0（out/c43-ccd29-cli-wave-01），宏顺序红例闭合。E2其他功能材料待同候选重包复跑；完整N22、19宽合同及五外宿主仍开，开发安装不授发布资格。
+**2026-10-27 最新开发候选（cdx）：** 已装SID `ccd29c711123fe97df6fb51656c9804160166ac1007486ed2b1cb4d1bad282e7`、APE `8a8195d5be397a2c2203cdd3e71002f55f464321fd598fd1c5c12ac0b427943b`（2,972,007 B），record `66c6a895…`；context-03正规107作业全部rc0，GEN-ccd29-01双核/五片/真deflate完成；PC02包 `c345ac87…` 独立VERIFIED，kind2准入9/0、开发安装rc0。旧Root1214在GEN备用。安装后smoke16/0；正式CLI宏23/0、目标20/0、include20/0（out/c43-ccd29-cli-wave-01），宏顺序红例闭合。同候选E2重包/正域103/0、拒绝187/0、绑定13/0已完成；完整N22、19宽合同及五外宿主仍开，开发安装不授发布资格。
 
 **2026-10-27 最新源码纪元（cdx）：** `a20f8049fc` 的 -D/-U 顺序与用户目标宏覆盖修复已正规构造并安装到Root8a8195d5，不再只依赖私有驱动。测试按E2→E1→E3→E4→prune→lower→ELF收口，阶段实现状态与矩阵格数分别报告。cc当前研究剩余冷启动ROI，并只读定位kernel-route外来有界改写的三处块后分号语法错误；compact私有差分不进入本安装纪元。
 
@@ -362,7 +362,7 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 
 **最新开发根：** SID `ccd29c71…`／APE `8a8195d5…`，PC `c345ac87…`，GEN `out/c43-native-kernel-ccd29-01/`，context-03的107作业全部rc0，kind2准入9/0及开发安装通过；smoke16/0，CLI宏23/0、目标/include各20/0。矩阵287 COVERED_LOCAL/366 MISSING/38 NEEDS_PRODUCT_CHANGE；其余历史证据不转授新候选。
 
-**最新源码入口：** live SID与已装候选同为 `ccd29c71…`。下一刀同候选重包E2流材料并复跑正域/拒绝域/身份输入绑定，然后修剩余预处理诊断和计数合同。cc仅在隔离域做提速与语法回归诊断；主树热路径cdx单写。
+**最新源码入口：** live SID与已装候选同为 `ccd29c71…`。同候选E2正103/拒187/绑定13已复跑；下一刀修剩余预处理诊断和计数合同。cc仅在隔离域做提速与语法回归诊断；主树热路径cdx单写。
 
 **历史7bb6入口：** SID `7bb6eb92bd50f964171462945e6a9d0e04982bd6e6a42882abb054aefaa5e2be`；107 作业、PC、五片、APE、kind2 准入均在同源本代完成。开发根已装 `b226463fe13a77070a72fe9947131b797670e0e590fe2c9c4138c94ca9198ba9`，旧 Root7a 留 GEN 备份。smoke16/0、热多模块约0.109秒；本代 stream6 输入拒绝正式29/0，其他四 lower 模式直接51/778/1516/115全绿。默认 ftrim 对新 `cx_*` 两函数仍红；下一刀核 E2 新键采用链。`df8f/831a` 收据只作历史。
 
