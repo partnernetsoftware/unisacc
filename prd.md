@@ -151,13 +151,13 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 **2026-10-27 最新开发候选（cdx）：** SID `20a8d5a5…` 的 107 作业收据、本代双核、PC 34 模型／六路线／封包、五切片与真 deflate APE 已完成；PC SHA `890b8aee…`，kind2 独立准入 9/0。开发安装后 `unisacc.com` SHA `0ce6f23198ae9cdc4f0dcefd399d3914300a6ef6b0b655ea629b53eaf593f829`，2,970,344 B；上一根 `b226463f…` 留在 GEN 备份。安装前后 smoke16/0，默认修剪 `cx-bounded.cx` 为 `CX_BOUNDED_PASS`，多 TU `tests/run.cx` 热启动实测 `multi/fwdexec` 命中且 smoke16/0。`--all` 仍 rc3：171 coverage、19 unresolved、161 未跑批、子批0。两条 net 外层 rc142 原状态保留，其材料经当前源码只读双端分别 VERIFIED。此为本机开发候选，19 宽行、完整 N22、五外宿主仍未关闭；下一步按受影响合同做正式子批并建立下一代固定点。
 
-**2026-10-27 最新源码纪元（cdx）：** `d397fe7dc3` 把 `include/**/*.h` 纳入 E2 `pp-autoinc-gen` 事实表的生成输入，并重生 30 张规范事实表；`--check` 为 30/0。活源码 SID `20a8d5a5a4949e184df7db0a9141a25514fc0a65232d3f7d934a0fbe70912f70`。私有包同时换入 `shared-e2` 与 `warnpp-shared` 后，已装开发驱动在默认修剪、禁缓存条件下 `cx-bounded.cx` 的 `-E`、`-run`、`-o` 均通过，smoke16/0；该包只是开发验证。新 `out/c43-source-20a8-context-02/` 冻结已装根，107 个 job record 齐；`net-warnparse`／`net-errorparse` 外层曾 rc142，原状态保留，当前源码重编的只读双端校验分别 VERIFIED。`context-01` 的宿主 `zlib.h` 缺失拒绝仍留存。下一刀：以本代双核建 full PC、五片、真 deflate APE，准入和开发安装后重跑默认 `.cx` 与多 TU 复用；旧 7bb6 PC/GEN 不转授。本机之外五宿主、19 宽行、完整 N22 仍开。
+**2026-10-27 最新源码纪元（cdx）：** `1b521a4b5e` 修复 E2 未闭合条件、孤立 `#elif`、非法 include 操作数静默接受及源 NUL；活 SID `a8258143d5ad53fad2234988bb298b6b30f8c8d72ba60326b464fe19fd867e7c`，已装根仍为上一源码的 `0ce6f231…`。私有 locations 模型正域103/0、拒绝域181/0；plain 与 locations 两网合包的产品 `-E/-S` 拒绝与恢复20/0。旧产品拒绝181/12保留，修复须新 context/107/PC/GEN/准入后才能转授。当前产品正式 cx-bounded、core-compat16/0、library-abi55/0、callback23/0及 E2 正域103/0均PASS；后者已补19个原 MISSING 格。下一步批量构造此修复纪元；五外宿主、19宽行、完整N22仍开。
 
 **2026-10-27 cdx 主刀计划（主人本轮改派；重构造仍串行，互不抢文件的轻切片由 cc／Codex 辅助）**
 
 完成门（`plans/v0.0.43.md:42`）：19 条 NOT_READY 宽行、完整 N22、五外宿主同候选实证全部闭合后，`--all` 才可 rc0。
 
-**当前矩阵账（2026-10-27 对 19 个 `tests/*-domain-matrix.tsv` 数据行实算；旧 `out/c43-cc-plan-matrix-counts.txt` 已过期）：** 822 个必选格中，245 个标 `COVERED_LOCAL`、3 个 `OBSERVED`、408 个 `MISSING`、38 个 `NEEDS_PRODUCT_CHANGE`、79 个 `NEEDS_FOREIGN_HOST`、33 个一般 `BLOCKED`、6 个具名 `BLOCKED:*`、10 个 `DECLARED_DEPENDENCY`；另有 9 个非必选格。这些覆盖值仍是 Root7a 账，新候选须重跑，不能直接转授。N22 现状：E7 已由产品内汇编合同闭合（`0764fa8861`）；E6 已有成员交叉核对；E2–E5、E9–E11 属声明的宿主/工具依赖；E8 的权重仍由 Python 发射器生成；E12 即外宿主。声明项并未被当作完整 N22 PASS。
+**当前矩阵账（2026-10-27 对 19 个 `tests/*-domain-matrix.tsv` 数据行实算；旧 `out/c43-cc-plan-matrix-counts.txt` 已过期）：** 822 个必选格中，264 个标 `COVERED_LOCAL`、3 个 `OBSERVED`、389 个 `MISSING`、38 个 `NEEDS_PRODUCT_CHANGE`、79 个 `NEEDS_FOREIGN_HOST`、33 个一般 `BLOCKED`、6 个具名 `BLOCKED:*`、10 个 `DECLARED_DEPENDENCY`；另有 9 个非必选格。新增19个本机格有当前 Root0ce6f231 的正式正域证据；其余旧覆盖仍依各行历史材料，不能直接转授新候选。N22 现状：E7 已由产品内汇编合同闭合（`0764fa8861`）；E6 已有成员交叉核对；E2–E5、E9–E11 属声明的宿主/工具依赖；E8 的权重仍由 Python 发射器生成；E12 即外宿主。声明项并未被当作完整 N22 PASS。
 
 **P0 完成边界与待决项：** 外宿主需要同候选真实工件及五宿主原生执行；当前不得 push、上传或派发，授权或真实宿主通道未到前只做本地准备。822 格是当前矩阵账，未经主人裁定不删必选格、不把依赖声明当作 N22 实证。词法三项按 C99 与产品实际输出继续核，具名缺陷不改贴 PASS。
 
@@ -350,7 +350,7 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 
 **最新开发根：** `unisacc.com` 已安装 SID `20a8d5a5…`／APE `0ce6f231…`；PC `890b8aee…`，GEN `out/c43-native-kernel-20a8-01/`，kind2 9/0。smoke16/0、默认有界 API `CX_BOUNDED_PASS`、多 TU 热 `fwdexec lk=1`；`--all` rc3／19 unresolved。旧根在本代 GEN `bootstrap-before-install.com`。下一步正式受影响批与第二代同源构造；不把开发安装写成发布资格。
 
-**最新入口：** 活 SID `20a8d5a5…`，已装开发根仍 `b226463f…`、属于上一源码纪元。`exec/facts` 在 `d397fe7dc3` 重生并经 30/0 检查；私有 `out/c43-e2-adopt-02/compiler.pkg` 证明默认 `cx_fmt`／`cx_path_join` 修剪路线可用，但非正式 PC。`out/c43-source-20a8-context-02/` 有 107 份 record；两个外层 rc142 job 另经现行只读双端验证，不抹原 UNKNOWN。下一步本代 kernel→PC→GEN→kind2→开发安装；禁止借 7bb6 收据冒充当前候选。
+**最新源码入口：** SID `a8258143…`／源码修复 `1b521a4b5e`，开发产品仍为 SID20a8 的 `0ce6f231…`。E2 四类拒绝修复仅私有模型验证：103/0正域、181/0拒绝、产品两路线恢复20/0。正式当前产品波次 `out/c43-20a8-local-wave-01/` 有 cx-bounded、core-compat、library-abi、callback 和 E2 正域 PASS，19本机矩阵格已补证。下一步新source context→107→PC→GEN→准入；旧产品红例保持。
 
 **现行入口：** SID `7bb6eb92bd50f964171462945e6a9d0e04982bd6e6a42882abb054aefaa5e2be`；107 作业、PC、五片、APE、kind2 准入均在同源本代完成。开发根已装 `b226463fe13a77070a72fe9947131b797670e0e590fe2c9c4138c94ca9198ba9`，旧 Root7a 留 GEN 备份。smoke16/0、热多模块约0.109秒；本代 stream6 输入拒绝正式29/0，其他四 lower 模式直接51/778/1516/115全绿。默认 ftrim 对新 `cx_*` 两函数仍红；下一刀核 E2 新键采用链。`df8f/831a` 收据只作历史。
 
