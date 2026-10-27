@@ -384,6 +384,15 @@ under a relaxed timeout. Ident compilation has a15-second child bound, native
 C HOST compilation35 seconds, each slice or wrap40 seconds; parent commands
 retain55 seconds. The checker uses bounded read-only verification, not builds.
 
+`hostseed-source-bind` is a separate 55-second batch for the current Linux
+x86_64 candidate. It requires the hostseed payload to be the exact
+`source-pack-context/compiler.pkg`, checks the three-generation chain once,
+then runs the full live source-package `--verify` against `source-job-context`
+and `source-pack-context`. Its output is `HOSTSEED_SOURCE_BIND`; the original
+41-assertion hostseed batch remains required. This binds the current endpoint
+under a single-writer premise. It does not prove historical source execution,
+classic18 MODEL consumption by P3, complete N22, or foreign native execution.
+
 The native HOST is compiled by the explicitly resolved host CC from current
 `exec/c/compiler.c`, using the C core with no ASM defines. Each five-target
 driver is built from `exec/c/asmcompiler.c` at `-O2`; wrap executes `seed/ape.c`
