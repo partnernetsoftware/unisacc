@@ -157,11 +157,11 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 **P0 完成边界与待决项：** 外宿主需要同候选真实工件及五宿主原生执行；当前不得 push、上传或派发，授权或真实宿主通道未到前只做本地准备。822 格是当前矩阵账，未经主人裁定不删必选格、不把依赖声明当作 N22 实证。词法三项按 C99 与产品实际输出继续核，具名缺陷不改贴 PASS。
 
-**P1 纪元1材料（已转历史，A4 仍暂停）：** A2 曾封 SID `df8f29fd`，A3 的 107/107 作业收据与 context 复验保存在 `out/c43-cc-epoch1-context-01/`；PC、GEN、准入与安装均未做。`e27c4a544e` 修复复用缓存的缺席头收据；`a1c9c793ea` 增加 cx.h 两项有界 API 并正规再生 header 表；`12ebcc23e1` 修复 `sizeof` 末端成员数组形状；`1682e10d8f` 区分运行时输入 open 的 ENOENT/ENOTDIR/EACCES。冻存 identity-helper 对活树实测 SID `defcd2bef5bf8cfeb9b718438a2d9c07ea07ef0be08777e78702fa1542b41aa6`。旧 A3 不能接现源码的 A4，须新 context 和 107 作业；当前仅有私有驱动／参考编译器验证，不把 PREPARED 升格候选。
+**P1 纪元1材料（已转历史，A4 仍暂停）：** A2 曾封 SID `df8f29fd`，A3 的 107/107 作业收据与 context 复验保存在 `out/c43-cc-epoch1-context-01/`；PC、GEN、准入与安装均未做。`e27c4a544e` 修复复用缓存的缺席头收据；`a1c9c793ea` 增加 cx.h 两项有界 API 并正规再生 header 表；`12ebcc23e1` 修复 `sizeof` 末端成员数组形状；`1682e10d8f` 区分运行时输入 open 的 ENOENT/ENOTDIR/EACCES；`e38b24a668` 为多 TU 默认 `-run` 加纯探测、单元读收据和双遍转发复用，并拒绝畸形缓存长度。冻存 identity-helper 对活树实测 SID `831a44c31d5760dce4b82b5ea9eed186e208f8b10881942dcf1a27c6150e4bb7`。旧 A3 不能接现源码的 A4，须新 context 和 107 作业；当前仅有私有驱动／参考编译器验证，不把 PREPARED 升格候选。
 
 **P1a `.cx` 提速第一优先（已交开发代码缓存）：** 本机无模块 `.cx` 默认约0.09s，`use netpack` 默认约5.45s、`use allsession` 默认约10.37s 且二次约10.55s；产品默认 `-run` 重复模块编译未复用。`5a0dd533f4` 将 `tools/dev-run` 改为按已装产品/包/源与模块闭包/选项/环境内容寻址的原生 ELF 代码缓存，`7e37405e21` 只排除12个精确会话变量，冷/热分别为 netpack 8.86/0.099s、allsession 17.05/0.133s；坏 ELF、产品/模块/源/选项/包变更均 miss。cdx 独立用它缓存 `tests/run-batch.cx` 控制器跑 `core-compat`：当前版冷19.77s、热7.72s，默认控制器15.57s；三次子批均真实执行16/0。仅 DEV_ONLY，不缓存测试结果，不把正式 SOURCE 批的受测默认 `-run` 改成 ELF。grk 的 std/模块路径工作仍限隔离原型；代码缓存自身未换 SID，随后 `e27c4a544e` 的产品收据修复已换 SID。
 
-**产品默认模块热路仍待下一源码纪元：** `compiler.c` 在多 TU `-run` 的早、晚复用处均显式禁用；直接删守卫会在冷 miss 前切到 image 路由，撤掉 run 的 process/provider 槽。安全方案须在 units 前以完整源、CXIF／每单元 include 资源及文件存在性收据探测，只有命中才转 image；冷路径仍走 run，且在首单元前开启读取收据，先用串行 units 避免子进程丢收据，仅无 sidecar／无 provider 时存同键 USE33＋USE34。缺席路径复验必须只把 ENOENT 当缺席，EACCES／ENOTDIR 不可命中。此刀会改变 `exec/` 的 SID，A3 不直接继承。
+**产品默认模块热路已落源码、待新候选：** `e38b24a668` 在多 TU units 前只查 USE33 双遍转发与 USE34 image，miss 不改 run 的 process/provider 路线；父进程合并 fork worker 的实际读和缺席路径，再随 E3/宿主产物存收据，热查逐路径复验。私有当前源码驱动（`out/c43-multitu-absorb-01/driver2.lnx`，旧 PC04 包）跑 `netpack` 双遍转发冷约5.9s、热约0.1s且 `fwdexec lk=1`；改运行参数仍取活值。多 TU 缺席头出现时 image 热命中变 miss，输出从5变9；缓存头的4GiB伪长度变 miss 后冷编执行；smoke16/0、单 TU 缺席探针13/0。新源码 SID 已变，Root7a 尚未含此刀；默认 `-run` 的正式产品等价和六宿主仍待重建后验证。
 
 **std／模块路径事实边界：** `a1c9c793ea` 已将 `cx_fmt` 与 `cx_path_join` 写入 `include/cx.h` 并由 carried-header-export prepare／verify／install 正规再生 `kernel/unisa_headers.inc`。私有探针在参考编译器默认裁剪及系统 `gcc_cx.com` 各自运行 `CX_API_PASS`；未使用新 API 的普通 C 对象在旧／新 header 下逐字相同。已装 Root7a 的旧 P3 E2 模型仍报这两个函数未定义，新包／新产品尚未构造，所以不记已装产品 PASS。grk 的 `cx_read_all` 严读与显式模块根仍只在 `out/c43-cxstd-proto-grk/` 原型，未进入主源码；默认模块解析仍仅邻位，不爬父目录、`node_modules` 或 `package.json`。
 
@@ -340,16 +340,17 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 <a id="memory-palace"></a>
 ### 记忆宫殿
 
-**本轮补证：** `1682e10d8f` 的私有 standalone runner 沿原 stream6 包走 `--bundle`，同一输入子域八次运行、29/0（`out/c43-cxstd-absorb-cdx-01/lower-input-private-02/`）；旧 stream6 正式材料仍 29/2，须新候选重包后重跑，不转授私有绿。
+**本轮补证：** `e38b24a668` 后 SID `831a44c31d5760dce4b82b5ea9eed186e208f8b10881942dcf1a27c6150e4bb7`；私有当前源驱动冷/热双遍 `fwdexec` 为 `lk=0/1`，活 argv 不缓存；多 TU image 头缺席→在场 miss，4GiB 畸形缓存头 miss，smoke16/0 与旧缺席探针13/0。下一动作：冻结此源码、正规建新 context→107 作业→PC→GEN→准入，再在同候选跑默认 `-run` 与旧红例，不借旧 A3。`1682e10d8f` 的私有 standalone runner 沿原 stream6 包走 `--bundle`，同一输入子域八次运行、29/0（`out/c43-cxstd-absorb-cdx-01/lower-input-private-02/`）；旧 stream6 正式材料仍 29/2，须新候选重包后重跑，不转授私有绿。
 
-**2026-10-27 cdx 当前源身份（下段为旧快照）：** `1682e10d8f` 后活树 SID 为 `defcd2bef5bf8cfeb9b718438a2d9c07ea07ef0be08777e78702fa1542b41aa6`；`cx_fmt`／`cx_path_join` 已在源码及生成 header 表，参考编译器默认裁剪与 `gcc_cx.com` 探针通过，但 Root7a 的旧 P3 E2 仍不认识函数，新 context／包／候选没有重建。`sizeof` 成员数组表在私有重建 parse 模型下原红例与 12 对照 PASS，Root7a 对照首项仍红；私有 runtime 输入 ENOENT／ENOTDIR／EACCES 具名拒绝＋恢复通过，旧 stream6 的 29/2 留待新材料。`cx_read_all` 与显式模块搜索仍为 grk 隔离探针。cc 在隔离目录研究多 TU 默认 `-run` 安全复用；不可在冷 miss 前切 image，也不可把旧 A3 收据转授新 SID。
+**2026-10-27 cdx 当前源身份（下段为旧快照）：** `e38b24a668` 后活树 SID 为 `831a44c31d5760dce4b82b5ea9eed186e208f8b10881942dcf1a27c6150e4bb7`；`cx_fmt`／`cx_path_join` 已在源码及生成 header 表，参考编译器默认裁剪与 `gcc_cx.com` 探针通过，但 Root7a 的旧 P3 E2 仍不认识函数，新 context／包／候选没有重建。`sizeof` 成员数组表在私有重建 parse 模型下原红例与 12 对照 PASS，Root7a 对照首项仍红；私有 runtime 输入 ENOENT／ENOTDIR／EACCES 具名拒绝＋恢复通过，旧 stream6 的 29/2 留待新材料。多 TU `-run` 复用已落源码并经私有驱动的双遍热命中、头失效、畸形缓存与 smoke 验证；Root7a 未含此刀。`cx_read_all` 与显式模块搜索仍为 grk 隔离探针。旧 A3 收据不可转授新 SID。
 
-**本轮入图（2026-10-27，cdx 主刀）：** cc 的旧纪元 A3 有 107/107 收据、SID `df8f29fd…`，但 `e27c4a544e` 后活源 SID 已是 `8cd09d26…`；A4 仍暂停，新 context/PC/GEN/准入/安装均未做，根产品仍旧 Root7a。产品默认 `-run` 的模块 `.cx` 二次运行仍约5–11s，独立开发代码缓存已先收反馈墙钟；cc 已按当前产品交 `dev-run` 内容寻址代码缓存，模块热约0.10–0.13s；cdx 独立核 `run-batch` 控制器热7.72s/16/0，默认15.57s/16/0。缓存仅 DEV_ONLY，不替代 SOURCE 默认 `-run`；grk 的 std／模块路径隔离探针 `PROTO fails=0`，尚未入 `cx.h`；产品多 TU 热路还需后续源码刀记录单元头收据；单 TU 缺席 -I 收据已修，私有驱动13/0、Root7a 13/5 红。Codex 辅助已交外宿主草稿 producer/artifact head 一致检查（`b40487eadd`，cdx 以 `5b4616387f` 保留较新验证提交）与跨命令 B1b 收据 `dabc5a0efb`，未派发 CI。lower 四个旧 Root7a 正式批 `9a44ce9869` 为 51/0、778/0、1516/0、115/0；ABI 六项 UNVERIFIED、输入 errno 29/2 红。六目标流材料 `61ba5c621c`，五目标有限 oracle `611a8c62d3` 各 17/0，材料显式绑定补丁 `4ef850b1c7` 的 lnx/arm64 正式复跑 17/0；外国目标只在本机验证输出，不授外宿主资格。`sizeof` 红例定位在产品 `exec/parse2` 末端成员数组衰变路径，须下一 SID 修。当前矩阵为 822 必选／245 本机覆盖／3 观察／408 缺测，旧 257/421 摘要作废；完整 lower 父行和其余 18 宽行、N22、五外宿主仍开，`--all` rc3。
+**历史入图（2026-10-27，已由上方当前身份取代）：** cc 的旧纪元 A3 有 107/107 收据、SID `df8f29fd…`，但 `e27c4a544e` 后活源 SID 曾是 `8cd09d26…`；A4 当时暂停，新 context/PC/GEN/准入/安装均未做，根产品仍旧 Root7a。cc 交 `dev-run` 内容寻址代码缓存，模块热约0.10–0.13s；cdx 独立核 `run-batch` 控制器热7.72s/16/0，默认15.57s/16/0。此为 DEV_ONLY，不替代 SOURCE 默认 `-run`。其余当时观察见 Git 历史；现行进度及下一动作以上方两段和下表首行为准。
 
 **现行入口：** 下一表第一行是当前身份与行动；其余旧行保留来源历史，凡与第一行冲突的“当前”字样均已失效。
 
 | 房间 | 当前事实／决定 | 证据与行动入口 |
 |---|---|---|
+| 0.0.43 当前源与下一步（2026-10-27） | HEAD `e38b24a668`，SID `831a44c3…`；Root7a 未重建。多 TU 默认 `-run` 的私有新源驱动已见双遍 fwdexec 热命中、活参数、头收据失效和畸形缓存失效；smoke16/0、缺席回归13/0。旧 A3 107 收据不适用。19 宽行、N22、五外宿主仍开。 | `out/c43-multitu-absorb-01/`；下一步冻结本源码，起新 source context 的107作业、PC、GEN、准入，装同候选后重跑红例与默认 `-run` 正式批。 |
 | 0.0.43 properties 有限域（2026-10-27） | 独立新测叶 41/0、7.59 秒，本机循环边界／变形／拒绝／恢复绿；完整性质域及五外宿主未测，不改宽父行。 | `tests/pending/properties.cx`、`out/c43-full-properties-local-04.log`；下一步先补完整域矩阵与同候选外宿主。 |
 | 0.0.43 P3 独立前缀读取器（2026-10-27） | 对现装 APE 内 32 个模型用既有 CX oracle 实跑 rc0，Q 语义与运行结果相同、八拒绝；只授包内压紧格式/运行对照，不授每模型 ctx04 job、N22 或外宿主。 | `out/c43-root7a-qprefix-artifact-01.log`；下一步接 CSR 独立成员↔job 正式批。 |
 | 0.0.43 P3 包成员正式交叉（2026-10-27） | `8d5e023d04`：32/32 M 解压正文与现行 ctx04 job 经 compact_q＋二进制编码逐字相等，job 文本又等于 PC 模型；私有 M28 双文本同改负控仅二进制门失败。正式批11/0、内部88/0，M3/M13/M24/M25 四路动态差分；34 阶段引用及27早期探索分账，三入口 NOT_RUN。完整 N22 未关。 | `out/c43-p3-member-all-registry-02.log`、`out/c43-p3-member-all-negative-01/run.log`；下一步审库三成员真实入口与 hostseed 历史消费边，不把静态交叉冒充全 32 运行。 |
