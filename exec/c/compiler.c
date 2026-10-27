@@ -262,6 +262,7 @@ static char **rr_paths_copy(char **v, int n) {
     for (int i = 0; i < n; i++) { size_t l = strlen(v[i]) + 1; c[i] = xrealloc(0, l); memcpy(c[i], v[i], l); }
     return c;
 }
+#ifndef _WIN32
 static void par_paths(FILE *f, char **v, int n) {
     par_put(f, (unsigned)n);
     for (int i = 0; i < n; i++) { unsigned l = (unsigned)strlen(v[i]); par_put(f, l); fwrite(v[i], 1, l, f); }
@@ -276,6 +277,7 @@ static int par_take_paths(FILE *f, int absent) {
     }
     return 1;
 }
+#endif
 int cxm_rd(char *path, char *buf, int cap) {
     FILE *f=fopen(path,"rb"); if (!f) return -1;
     size_t n=fread(buf,1,(size_t)cap,f); int bad=ferror(f); fclose(f);
