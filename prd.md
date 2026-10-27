@@ -149,15 +149,15 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 <a id="work-tree"></a>
 ### 思维树
 
-**2026-10-27 最新开发候选（cdx）：** SID `a8258143d5ad53fad2234988bb298b6b30f8c8d72ba60326b464fe19fd867e7c` 的107作业全部外层rc0，本代双核、PC34模型/六路线/封包、五片与真deflate APE已完成。开发根 SHA `1214e053466dea1c29bb76b33a45bc2a64d0f28dc1a3aef5f3829a2047143a5e`，2,970,646 B；PC `b98c540e…`，kind2准入9/0，旧根 `0ce6f231…` 留GEN备份。正式 E2 正域103/0、拒绝域187/0（60次流执行）、smoke16/0及cx-bounded通过；候选默认 `-E/-S` 拒绝恢复20/0。第一片初次外层142未留产物，热控制器重试rc0，原日志保留。`--all`仍rc3：172 coverage、19 unresolved、162未跑批、子批0；完整N22与五外宿主仍开。下一步E2 CLI/目标宏及剩余诊断域；同源第二代仍待。
+**2026-10-27 最新开发候选（cdx）：** SID `a8258143d5ad53fad2234988bb298b6b30f8c8d72ba60326b464fe19fd867e7c` 的107作业全部外层rc0，本代双核、PC34模型/六路线/封包、五片与真deflate APE已完成。开发根 SHA `1214e053466dea1c29bb76b33a45bc2a64d0f28dc1a3aef5f3829a2047143a5e`，2,970,646 B；PC `b98c540e…`，kind2准入9/0，旧根 `0ce6f231…` 留GEN备份。正式 E2 正域103/0、拒绝域187/0（60次流执行）、smoke16/0及cx-bounded通过；候选默认 `-E/-S` 拒绝恢复20/0。第一片初次外层142未留产物，热控制器重试rc0，原日志保留。`--all`仍rc3：175 coverage、19 unresolved、165未跑批、子批0；完整N22与五外宿主仍开。当前产品CLI目标宏20/0、include20/0；宏选项23/3红。新源码修复待下纪元构造，同源第二代仍待。
 
-**2026-10-27 最新源码纪元（cdx）：** `1b521a4b5e` 的四类 E2 拒绝修复已通过本代正式构造、准入及产品批；不再仅是私有模型绿。三个PP变体及其tbl变化，其余模型与前代逐字相同。`ca20f86592` 更新候选流身份、补stringize参数拒绝并将13个MISSING格落到当前产品187/0证据；前轮19个正域格也已刷新。旧产品181/12及失败/UNKNOWN材料仍保留。
+**2026-10-27 最新源码纪元（cdx）：** `a20f8049fc` 修复 -D/-U 分组导致顺序丢失，以及目标预定义覆盖用户-D；驱动、经典C参考和E2三变体对齐，保留对象专用保护宏。活 SID `ccd29c711123fe97df6fb51656c9804160166ac1007486ed2b1cb4d1bad282e7`，已装产品仍SIDa825/Root1214。facts30/0；禁缓存私有驱动+新包CLI59/0、E2正103/拒187不退，ET_REL保护宏控制有效；宿主CC构造的经典参考给出三条正确宏结果。自身编译完整3.1MB参考的outer55超时142、无产物，保留UNKNOWN，不宣称清除宿主CC依赖。`5f26779c2b`登记三CLI批：当前产品targets20/0、includes20/0，macros23/3 FAIL保留；7格补证、宏格改NEEDS_PRODUCT_CHANGE。下一步合并可审的CC私有FWD增量成果后批量封驱动纪元，其他本机缺口继续推进。
 
 **2026-10-27 cdx 主刀计划（主人本轮改派；重构造仍串行，互不抢文件的轻切片由 cc／Codex 辅助）**
 
 完成门（`plans/v0.0.43.md:42`）：19 条 NOT_READY 宽行、完整 N22、五外宿主同候选实证全部闭合后，`--all` 才可 rc0。
 
-**当前矩阵账（2026-10-27 对 19 个 `tests/*-domain-matrix.tsv` 数据行实算；旧 `out/c43-cc-plan-matrix-counts.txt` 已过期）：** 822 个必选格中，277 个标 `COVERED_LOCAL`、3 个 `OBSERVED`、376 个 `MISSING`、38 个 `NEEDS_PRODUCT_CHANGE`、79 个 `NEEDS_FOREIGN_HOST`、33 个一般 `BLOCKED`、6 个具名 `BLOCKED:*`、10 个 `DECLARED_DEPENDENCY`；另有 9 个非必选格。13个新增拒绝格及此前19个正域格有当前 Root1214e053 的正式证据；其余旧覆盖仍依各行历史材料，不能直接转授新候选。N22 现状：E7 已由产品内汇编合同闭合（`0764fa8861`）；E6 已有成员交叉核对；E2–E5、E9–E11 属声明的宿主/工具依赖；E8 的权重仍由 Python 发射器生成；E12 即外宿主。声明项并未被当作完整 N22 PASS。
+**当前矩阵账（2026-10-27 对 19 个 `tests/*-domain-matrix.tsv` 数据行实算；旧 `out/c43-cc-plan-matrix-counts.txt` 已过期）：** 822 个必选格中，284 个标 `COVERED_LOCAL`、3 个 `OBSERVED`、368 个 `MISSING`、39 个 `NEEDS_PRODUCT_CHANGE`、79 个 `NEEDS_FOREIGN_HOST`、33 个一般 `BLOCKED`、6 个具名 `BLOCKED:*`、10 个 `DECLARED_DEPENDENCY`；另有 9 个非必选格。本轮新增7个CLI目标/头搜索格；此前13个拒绝格和19个正域格也有Root1214e053正式证据；其余旧覆盖仍依各行历史材料，不能直接转授新候选。N22 现状：E7 已由产品内汇编合同闭合（`0764fa8861`）；E6 已有成员交叉核对；E2–E5、E9–E11 属声明的宿主/工具依赖；E8 的权重仍由 Python 发射器生成；E12 即外宿主。声明项并未被当作完整 N22 PASS。
 
 **P0 完成边界与待决项：** 外宿主需要同候选真实工件及五宿主原生执行；当前不得 push、上传或派发，授权或真实宿主通道未到前只做本地准备。822 格是当前矩阵账，未经主人裁定不删必选格、不把依赖声明当作 N22 实证。词法三项按 C99 与产品实际输出继续核，具名缺陷不改贴 PASS。
 
@@ -348,9 +348,9 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 <a id="memory-palace"></a>
 ### 记忆宫殿
 
-**最新开发根：** SID `a8258143…`／APE `1214e053…`，PC `b98c540e…`，GEN `out/c43-native-kernel-a825-01/`，kind2 9/0。正式E2正103/0、拒187/0、smoke16/0、有界API通过；旧根在GEN备份。矩阵277 COVERED_LOCAL/376 MISSING，`--all` rc3/19 unresolved；下一步本机CLI/诊断域及同源第二代，开发安装不授发布资格。
+**最新开发根：** SID `a8258143…`／APE `1214e053…`，PC `b98c540e…`，GEN `out/c43-native-kernel-a825-01/`，kind2 9/0。正式E2正103/0、拒187/0、smoke16/0、有界API通过；旧根在GEN备份。矩阵284 COVERED_LOCAL/368 MISSING/39 NEEDS_PRODUCT_CHANGE，`--all` rc3/19 unresolved；当前CLI targets/includes各20/0，宏23/3红；下一步新源码驱动纪元及诊断域，开发安装不授发布资格。
 
-**最新源码入口：** `1b521a4b5e` 已被活根 `1214e053…` 消费；source context `out/c43-source-a825-context-01/` 有107份全rc0收据，PC独立VERIFIED。正式波次 `out/c43-a825-local-wave-{01,02}/`，187/0含stringize参数在argument扫描阶段的具名拒绝，不宣称触达HSL内部路径。CC正做隔离E2跳过/空白提速原型，主树热路径由cdx单写。
+**最新源码入口：** live SID `ccd29c71…`／`a20f8049fc`，Root仍 `1214e053…`、SIDa825。私有CLI修复59/0（产品与包哈希见 `out/c43-pp-cli-order-fix-01/private-final-inputs.sha256`），E2正103/拒187，经典参考宏序和目标覆盖输出正确；尚未正规重构造/准入。正式 `out/c43-a825-pp-cli-wave-02/`：targets20/0、includes20/0、macros23/3红。CC改做隔离callback-wrapper增量二遍原型；主树热路径cdx单写，下一纪元按净差分合批。
 
 **历史7bb6入口：** SID `7bb6eb92bd50f964171462945e6a9d0e04982bd6e6a42882abb054aefaa5e2be`；107 作业、PC、五片、APE、kind2 准入均在同源本代完成。开发根已装 `b226463fe13a77070a72fe9947131b797670e0e590fe2c9c4138c94ca9198ba9`，旧 Root7a 留 GEN 备份。smoke16/0、热多模块约0.109秒；本代 stream6 输入拒绝正式29/0，其他四 lower 模式直接51/778/1516/115全绿。默认 ftrim 对新 `cx_*` 两函数仍红；下一刀核 E2 新键采用链。`df8f/831a` 收据只作历史。
 
@@ -364,6 +364,7 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 
 | 房间 | 当前事实／决定 | 证据与行动入口 |
 |---|---|---|
+| 0.0.43 CLI源码纪元（2026-10-27） | live SID `ccd29c71…`／`a20f8049fc`，已装根仍SIDa825/Root1214。私有驱动+三PP变体59/0，E2正103/拒187、对象保护宏控制有效；目标宏与头搜索正式各20/0，宏批23/3红待构造。 | `out/c43-pp-cli-order-fix-01/`、`out/c43-a825-pp-cli-wave-02/`；合并可审FWD改进后建新context/PC/GEN并准入；不借a825收据。 |
 | 0.0.43 最新开发根（2026-10-27） | SID `a8258143…`，APE `1214e053…`/2,970,646 B，PC `b98c540e…`，107job全rc0，本代双核五片，kind2 9/0并开发安装。E2正103/0、拒187/0、smoke16/0、cx-bounded通过；`--all` rc3/19 unresolved。 | `out/c43-source-a825-context-01/`、`out/c43-source-a825-full-pc-01/`、`out/c43-native-kernel-a825-01/`、`out/c43-a825-admit-01/`、`out/c43-a825-local-wave-{01,02}/`；下一步CLI/诊断域、同源第二代。 |
 | 0.0.43 历史20a8构造前快照（2026-10-27） | SID `20a8d5a5…`；开发根仍旧 `b226463f…`。E2 两网私有替换已使默认 `cx-bounded.cx` 的 `-E/-run/-o` 通过；新 context 有 107 份 record，两个外层 rc142 保留 UNKNOWN 且只读双端 VERIFIED。PC/GEN/准入/安装待做。 | `out/c43-e2-adopt-02/`、`out/c43-source-20a8-context-{01,02}/`；下一步本代双核、PC、GEN、kind2、默认回归。 |
 | 0.0.43 现行 SID（2026-10-27） | `7bb6eb92…`／开发根 `b226463f…`；本代 107 作业、PC 34/6、双核、五片、真 deflate wrap、kind2 准入 9/0、安装、smoke16/0。默认多模块热 `-run` 约0.109秒；本代 stream6 输入拒绝正式29/0，四同源模式直接绿。`cx_fmt`／`cx_path_join` 默认 ftrim 红。`--all` rc3／19 unresolved／子批0；N22、五外宿主仍开。 | `out/c43-source-7bb6-context-01/`、`out/c43-source-7bb6-full-pc-01/`、`out/c43-native-kernel-7bb6-01/`、`out/c43-7bb6-admit-01/`、`out/c43-streams-7bb6-02/`、`out/c43-7bb6-lower-input-registry-01/`；下一步核部署 E2 新键采用，旧 Root7a 备份在 GEN。 |
