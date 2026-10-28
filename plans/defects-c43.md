@@ -110,6 +110,10 @@ prepare9653/finish78640均rc0，错误候选finish拒绝时共享仍3a5b，暂�
 smoke16/0。源码身份指冻结8390；共享源码另有cxmod与stream-runtime后续改动为e4bf22ba，未混称包含。
 此新有限路径不是kind4原构造流程；没有补造历史107作业，没有签名或发布资格。
 
+4c28已安装后追加回归：library-abi实际55/0、negative-diagnostics211/0（known_gaps1、archived17保留）。
+日志out/c43-4c28-abi-02及out/c43-4c28-negative-01；ABI第一次误用三参数入口rc2，修正为其ROOT单参数后通过，原失败保留。
+coverage中旧1/4缺陷描述改为本候选实际4/1及明确合同冲突，没有移除原direct-C断言。
+
 - 现象：`int used(void); int main(void){return used()+2;}` 经 `-c -b lnx/x86_64 -funit` 得 main.o 后，`unisacc -o img main.o`（或加只定义 `unused` 的归档、或直接 `-o img main.c`）rc 0 并写出镜像；运行 SIGSEGV（rc 139）。预期：`link: undefined reference to used`，rc≠0，无镜像。
 - 定位：src/tapelink.c:351 `tl_check_undef`（R20-3）只检查名字以 `g_` 开头的未定义外部（全局数据对象），函数外部不检查。
 - 同现：经典参考 REF 0ed46192 行为相同（共享缺陷，非回归）；产品==REF 字节差分仍有效，不阻塞候选 f3705dfa。
