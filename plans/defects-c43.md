@@ -49,6 +49,13 @@ sizeof纪元固定identity-helper实读新源SID为
 在nninputs的ni_deps/ni_quotes中列举，不含tapelink；这只是编译依赖边界，
 还不能替代运行时数据输入闭包证明，故未据此放宽复用准入。
 
+运行时读入口审查进展：seed/tbl.c仅以argv[1]读JSON，seed/net.c仅以argv[1]读表；
+seed/pack.c读显式manifest、manifest指定模型和mount文件。source-package-pack.cx的正式pack命令
+仅mount include、kernels、declaration/predefines，未mount src。gen.c的事实加载器固定前缀
+exec/facts，通用stage清单固定exec前缀，但模板路径来自清单展开，不能只凭fopen文字搜索宣称闭包已证。
+读入口列表保存在`out/c43-link-undef-fix-01/constructor-read-sites.txt`；正式gen命令与展开路径
+仍需逐项绑定，下一步重点是这部分，不重复审已确认的tbl/net单输入路径。
+
 - 现象：`int used(void); int main(void){return used()+2;}` 经 `-c -b lnx/x86_64 -funit` 得 main.o 后，`unisacc -o img main.o`（或加只定义 `unused` 的归档、或直接 `-o img main.c`）rc 0 并写出镜像；运行 SIGSEGV（rc 139）。预期：`link: undefined reference to used`，rc≠0，无镜像。
 - 定位：src/tapelink.c:351 `tl_check_undef`（R20-3）只检查名字以 `g_` 开头的未定义外部（全局数据对象），函数外部不检查。
 - 同现：经典参考 REF 0ed46192 行为相同（共享缺陷，非回归）；产品==REF 字节差分仍有效，不阻塞候选 f3705dfa。
