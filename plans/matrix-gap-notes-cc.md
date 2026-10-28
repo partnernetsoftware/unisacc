@@ -47,3 +47,8 @@
 ## 估算
 
 第一个 10 分钟窗口（只扩现有工具）：§2 的 9 格；再四个小生成器：§3 中无材料阻塞的 5 格；其余 12 格需材料、裁定或产品改动，在 d65 上保持开放是诚实状态。
+
+## 附：stream-semantics 工具的接口事实（只读，2026-10-28）
+
+- stream6（lower）输入 tape.text，输出 target.text（`@target/@data/@sym/@src_os/@data_len/@bss/@relocs` 头 + 目标指令行，见 §14 lower 组）；stream7（elf）输入 target.text，输出 image.bytes，pin 2f063f38（tests/stream-elf.cx:6），调用形同 stream4/5：`tools/bound 12 unisacc-stream7.com INPUT INPUT INC`，env `UNISA_ATTRIBUTES=`、`UNISA_MAXSTEPS=200000000`。
+- 因此 e4.sem.stream-boundary / prune.sem.execution-preserved 的链：tape → stream4|5 → stream6 → stream7 → 镜像 → `tools/bound 5 镜像` 执行；对照链：原 tape → stream6 → stream7 → 执行。断言：两镜像的 stdout/退出码相等，且与手推字面相等（非空洞）；镜像字节可不同（E4/prune 改写了指令）。夹具可复用 properties 的循环程序 tape（经产品 `-S` 得 E3 tape）与 prune 的 dead 夹具。
