@@ -330,8 +330,8 @@ int main(int argc, char **argv) {
         stage_manifest(argv[3], t, argv[5]);
         return 0;
     }
-    if (argc == 3 && (!strcmp(argv[2], "list-current") || !strcmp(argv[2], "list-legacy"))) { legacy_projection = !strcmp(argv[2], "list-legacy"); list_paths = 1; identity(hex); return 0; }
-    if (argc == 3 && !strcmp(argv[2], "legacy-projection")) { legacy_projection = 1; identity(hex); puts(hex); return 0; }
+    if (argc == 3 && (!strcmp(argv[2], "list-current") || !strcmp(argv[2], "list-legacy"))) { if (chdir(root)) die("cannot enter", root); legacy_projection = !strcmp(argv[2], "list-legacy"); list_paths = 1; identity(hex); return 0; }
+    if (argc == 3 && !strcmp(argv[2], "legacy-projection")) { if (chdir(root)) die("cannot enter", root); legacy_projection = 1; identity(hex); puts(hex); return 0; }
     if (!(argc == 1 || argc == 2 || (argc == 5 && !strcmp(argv[2], "write")) || (argc == 4 && !strcmp(argv[2], "check"))))
         die("usage", "ident [ROOT] | ident ROOT write ARTIFACT START | ident ROOT check ARTIFACT");
     /* the artifact path is taken relative to the caller's directory, before entering ROOT */

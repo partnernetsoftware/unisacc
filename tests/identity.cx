@@ -10,12 +10,14 @@ static void put(const char *relative,const char *bytes){char p[4400];full(p,size
 static void entry(char *bytes,size_t *n,const char *relative){char p[4400];size_t z;unsigned char sha[32];full(p,sizeof p,relative);char *s=cx_read(p,&z);if(!s)fatal(p);cx_sha256(s,z,sha);free(s);size_t k=strlen(relative)+1;if(*n+k+32>4096)fatal("hash payload overflow");memcpy(bytes+*n,relative,k);*n+=k;memcpy(bytes+*n,sha,32);*n+=32;}
 static void expected(char *hex){char bytes[4096],name[200];size_t n=0;entry(bytes,&n,"iterate/kernel/typekw.tsv");int i;for(i=0;i<10;i++){snprintf(name,sizeof name,"tools/%s",support[i]);entry(bytes,&n,name);}cx_sha256_hex(bytes,n,hex);}
 static np_result actual(void){np_result r;char why[1024];char *v[]={watchdog,"5",ident,fixture,0};if(np_run(v,root,0,7,&r,why,sizeof why))fatal(why);return r;}
+static np_result projection(void){np_result r;char why[1024];char *v[]={watchdog,"5",ident,fixture,"legacy-projection",0};if(np_run(v,root,0,7,&r,why,sizeof why))fatal(why);return r;}
+static np_result listing(const char *mode){np_result r;char why[1024];char *v[]={watchdog,"5",ident,fixture,(char *)mode,0};if(np_run(v,root,0,7,&r,why,sizeof why))fatal(why);return r;}
 static int matches(np_result *r,const char *sha){return !r->rc&&!r->errn&&r->outn==65&&!memcmp(r->out,sha,64)&&r->out[64]=='\n';}
 int main(int argc,char **argv){
  if(argc!=4){fprintf(stderr,"usage: ROOT IDENT_BINARY NEW_ABSOLUTE_FIXTURE\n");return 2;}
  if(!realpath(argv[1],root)||!realpath(argv[2],ident))fatal("resolve inputs");
  if(argv[3][0]!='/'||strlen(argv[3])>=sizeof fixture)fatal("absolute fixture path required");strcpy(fixture,argv[3]);if(mkdir(fixture,0700))fatal("fixture must not exist");
- const char *dirs[]={"exec","exec/c","exec/c/asm","unisa","src","kernel","include","weights","seed","iterate","iterate/kernel","tools"};int i;char p[4400];for(i=0;i<12;i++){full(p,sizeof p,dirs[i]);if(mkdir(p,0700))fatal(p);}
+ const char *dirs[]={"exec","exec/c","exec/c/asm","unisa","src","kernel","include","weights","seed","iterate","iterate/kernel","tools","cx"};int i;char p[4400];for(i=0;i<13;i++){full(p,sizeof p,dirs[i]);if(mkdir(p,0700))fatal(p);}
  put("iterate/kernel/typekw.tsv","x");char name[200],baseline[65],sha[65];for(i=0;i<10;i++){snprintf(name,sizeof name,"tools/%s",support[i]);put(name,"x");}
  int z=snprintf(watchdog,sizeof watchdog,"%s/tools/bound",root);if(z<0||(size_t)z>=sizeof watchdog)fatal("watchdog path");
  expected(baseline);np_result r=actual();check(matches(&r,baseline),"identity.independent-ordered-payload");np_free(&r);
@@ -26,5 +28,11 @@ int main(int argc,char **argv){
  full(p,sizeof p,"tools/sourceflat.cx");if(unlink(p))fatal("remove fixture");r=actual();check(r.rc==1&&!r.outn&&strstr(r.err,"cannot open"),"identity.missing-exporter-refused");np_free(&r);
  if(mkdir(p,0700))fatal("directory fixture");r=actual();check(r.rc==1&&!r.outn&&strstr(r.err,"read failed"),"identity.directory-exporter-refused");np_free(&r);
  if(rmdir(p))fatal("remove fixture directory");put("tools/sourceflat.cx","x");r=actual();check(matches(&r,baseline),"identity.error-recovery-exact");np_free(&r);
+ put("cx/module.cx","module-v1");r=actual();check(!r.rc&&!r.errn&&r.outn==65&&memcmp(r.out,baseline,64),"identity.cx-module-included");char cx_baseline[65];if(r.rc||r.errn||r.outn!=65)fatal("CX identity");memcpy(cx_baseline,r.out,64);cx_baseline[64]=0;np_free(&r);
+ r=projection();check(matches(&r,baseline),"identity.legacy-excludes-cx-module");np_free(&r);
+ r=listing("list-current");check(!r.rc&&!r.errn&&strstr(r.out,"cx/module.cx\t")&&!strstr(r.out,"seed/ident.c\t"),"identity.current-list-uses-requested-root");np_free(&r);
+ r=listing("list-legacy");check(!r.rc&&!r.errn&&!strstr(r.out,"cx/module.cx\t")&&strstr(r.out,"tools/bound\t"),"identity.legacy-list-uses-requested-root");np_free(&r);
+ put("cx/check_memory.cx","test-v1");put("cx/check_owned.cx","test-v1");put("exec/c/examplecheck.cx","test-v1");r=actual();check(matches(&r,cx_baseline),"identity.cx-validation-excluded");np_free(&r);
+ put("cx/module.cx","module-v2");r=actual();check(!r.rc&&!r.errn&&r.outn==65&&memcmp(r.out,cx_baseline,64),"identity.cx-module-change-observed");np_free(&r);
  printf("IDENTITY\tchecks=%d\tfailed=%d\tscope=construction-support-closure\n",checks,bad);return bad?1:0;
 }
