@@ -19,7 +19,7 @@ def closure(h):
     """Conservative dependency closure: includes imported Python, embedded C
     templates, gold tables, carried headers and the inference verifier."""
     # seed/: the C99 constructor tools that build tables and networks by default since 0.0.26 B3'
-    for directory in ('exec', 'unisa', 'src', 'kernel', 'include', 'weights', 'seed'):
+    for directory in ('exec', 'unisa', 'src', 'kernel', 'include', 'weights', 'seed', 'cx'):
         # Byte-identical on every host: POSIX path spelling and case-sensitive part order
         # (Windows would spell backslashes and sort case-insensitively).
         for path in sorted((ROOT / directory).rglob('*'), key=lambda q: q.relative_to(ROOT).parts):
@@ -35,7 +35,7 @@ def closure(h):
                 continue   # 0.0.35 P8: probe sources are test inputs; no generator reads them (a probe edit kept invalidating every model)
             if rel[:2] == ('exec', 'build') and (len(rel) > 3 or path.suffix != '.py'):
                 continue   # only the tracked drivers exec/build/*.py are inputs; anything else there is generated
-            if path.is_file() and path.suffix in ('.py', '.c', '.h', '.inc', '.tsv', '.json', '.sh'):
+            if path.is_file() and path.suffix in ('.py', '.c', '.cx', '.h', '.inc', '.tsv', '.json', '.sh'):
                 h.update(path.relative_to(ROOT).as_posix().encode() + b'\0')
                 h.update(bytes.fromhex(digest(path)))
     path = ROOT / 'iterate/kernel/typekw.tsv'

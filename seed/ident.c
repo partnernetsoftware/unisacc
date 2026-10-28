@@ -44,7 +44,7 @@ static const char *suffix(const char *p) {
     dot = strrchr(base, '.'); return dot && dot != base ? dot : "";
 }
 static int keep(const char *rel) {
-    static const char *const exts[] = {".py", ".c", ".h", ".inc", ".tsv", ".json", ".sh"};
+    static const char *const exts[] = {".py", ".c", ".cx", ".h", ".inc", ".tsv", ".json", ".sh"};
     const char *sfx = suffix(rel); size_t i; int ok = 0;
     for (i = 0; i < sizeof exts / sizeof *exts; i++) if (!strcmp(sfx, exts[i])) ok = 1;
     if (!ok) return 0;
@@ -95,11 +95,11 @@ static void file_entry(Sha *h, const char *rel) {
     sha_put(h, dg, 32);
 }
 static void identity(char hex[65]) {
-    static const char *const dirs[] = {"exec", "unisa", "src", "kernel", "include", "weights", "seed"};
+    static const char *const dirs[] = {"exec", "unisa", "src", "kernel", "include", "weights", "seed", "cx"};
     Sha h; unsigned char out[32]; size_t i, first; int j;
     npaths = 0;
     sha_init(&h);
-    for (j = 0; j < 7; j++) {
+    for (j = 0; j < (int)(sizeof dirs / sizeof *dirs); j++) {
         first = npaths; walk(dirs[j]);
         qsort(paths + first, npaths - first, sizeof *paths, part_cmp);
     }
