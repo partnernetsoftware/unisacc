@@ -106,4 +106,5 @@
 - 三方 oracle：(1) 经典 `src/tapeprune.c`+`src/tapescan.h` 原文（去 `#include`）+ 12 行 main，由产品自身编译运行（`sh unisacc.com ABS_OUT/tp-ref.c -- INPUT`），不用宿主 C 编译器、不改经典源；两源 sha256 写入 results.tsv 作 oracle 身份。(2) 生成器按每例声明的单元/边/取址名自行算根闭包（根 `_start/main/__init/__main_ret` 与 `.lea` 目标；无 `_start` 时首代码单元为根），存活单元 + 全部数据语句即期望；`whole` 类（callr/callm、.hostcall/.hostaddr/.librarycall、`.global`/缺标签/重复标签）期望等于输入。(3) stream5 容器（pin 1306de94…，`out/c43-streams-riroot-01`）。PASS 要求三者字节相等；经典≠声明记 ORACLE_SPLIT，闭包例输出==输入记 VACUOUS。
 - `oracle-only` 模式先用 tests/stream-prune.cx 的 dead 夹具核经典驱动（期望为该夹具手推字节）。
 - 2026-10-28 实跑（`sh ./unisacc.com tools/prune-cases-gen.cx -- . STREAM5 ABS_OUT [oracle-only]`，两次各 <60 s；日志 out/c43-cc-prune-01）：oracle-only PASS；24 例 = PASS 24 / FAIL 0 / ORACLE_SPLIT 0 / VACUOUS 0 / NOT_RUN 0（闭包例 15 个均实际删除 68–208 B，whole 例 9 个输入输出同长）。
-- 未做：prune.pos.capacity-preserved（2 MiB 边界经产品编译的经典驱动有 60 s 风险，另开片）、prune.pos.library-exports（库路线不在材料内）。待办：登记批 `stream-prune-cases` 后九格 MISSING→PASS（该矩阵文件未被 cdx 暂存，批行一出即可换标）。
+- 追加 prune.pos.capacity-preserved（同日实测：60 s 风险不成立，stream5 处理 2.1 MiB 127 ms、经典驱动 0.9 s）：三例合成输入——超 2 MiB（2139627 B）整体保留、超 tp_ROWMAX 行（32775 行）整体保留、刚好低于两者（2070612 B）仍剪除死函数；经典驱动缓冲放大到 4 MiB 以便超限输入被完整读入后按合同原样返回。全部 27 例 PASS，整次 4 s。
+- 未做：prune.pos.library-exports（库路线不在材料内）。待办：登记批 `stream-prune-cases` 后十格 MISSING→PASS（该矩阵文件未被 cdx 暂存，批行一出即可换标）。
