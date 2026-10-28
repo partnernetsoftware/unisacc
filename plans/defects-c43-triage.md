@@ -18,7 +18,7 @@
 | S1 | 11 | `int t[0];` / `void f(void x)` / `static extern int u;` | 6.7.5.2p1 / 6.7.5.3p10 / 6.7.1p2 | E3 | c-negative.zero-array-size / void-parameter-named / multiple-storage-classes | rc0 → 拒绝 |
 | S1 | 12 | `#include <stdio.h`（未闭合，静默包含 stdio.h） | 6.4.7 / 6.10.2 | E2 | pp-negative.header-name-unclosed | rc0 → 拒绝 |
 | S1 | 13 | `#define 3x 1` | 6.10.3 | E2 | pp-negative.macro-name-not-identifier | rc0 → 拒绝 |
-| S2 | 14a | 未定义外部函数：`-o img main.o`、仅定义 unused 的归档、直接 .c、跨归档逆序 `m2.o B.a A.a` | prd.md:771 R20-3 | src/tapelink.c:351 | link-undefined-function.*（1/4） | rc0+SIGSEGV 镜像 → `link: undefined reference to NAME` rc≠0 无镜像；补丁已拟（defects-c43.md） |
+| S2 | 14a | 未定义外部函数：直接 C 路线 `-o img main.c`（对象/归档/跨归档三例已在 Root 3a5b76ab 修复，896888f424） | prd.md:771 R20-3 | exec/c 直接 C 路线（不经 tapelink 检查） | link-undefined-function.direct-c-route（3a5b76ab 上 4/1） | rc0+SIGSEGV 镜像 → 具名拒绝 |
 | S2 | 14b | `-run noret.tape`（_start 无 ret 落出末尾）产品进程 SIGSEGV | 有界终止合同 | 运行器 | link-malformed-input.run.tape-falls-off-end | rc -11 无 stderr → 具名拒绝/有界终止 |
 | S1 | 14c | ELF 魔数覆盖 / 截断到 2000 字节的单元对象被链接成镜像 | prd.md:771 | compiler.c tl_tape 定位 | link-malformed-input.object.bad-elf-magic / truncated-2000 | rc0+镜像 → 具名拒绝 |
 | S3 | 15 | `-run u.o`（单元对象） | CLAUDE.md 具名拒绝 | exec/c/compiler.c 驱动 | driver-diagnostics.run.unit-object.named | rc1 **stderr 空** → 具名 |
