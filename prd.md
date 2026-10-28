@@ -154,6 +154,8 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 <a id="work-tree"></a>
 ### 思维树
 
+**落尾实测节点：** 已装b6f15七例原始基线4通过/3失败，三种落尾均SIGSEGV(-11)，合法跳转、ret后不可达尾、有限回边、函数调用返回均安静exit7；证据out/c43-fallthrough-baseline-01。下一刀lower具名运行时guard设计与模型实现，需同时覆盖宿主回调与独立镜像；未修复，不以trap或末opcode判断替代合同。
+
 **当前已装产品（链接容器）：** b6f15e82/record db7af545，冻结ecb5fbe322/SID003166c6，五切片与APE实构、固定单文件差异和内嵌PCff696核验、prepare/finish两阶段安装完成，收据544011da；旧8147备份out/c43-tapelink-install-01。候选格式68/0、容器边界11/0、原畸形批10/1（唯一余红tape落尾SIGSEGV）；安装后smoke16/0、已装入口边界11/0。原8147的8/3及旧证据保留，矩阵不自动迁标。下一步补新身份受影响资格与独立落尾模型合同；完整发布覆盖及外国宿主资格仍未完成。以下FIFO/CX当前措辞均为历史节点。
 
 **当前已装产品（FIFO，2026-10-28）：** 8147f2e7/record c493b971，源b2007a76/冻结ab7fbdc810，prepare/finish两阶段安装完成，旧e955备份out/c43-fifo-install-01/。候选格式68/0、直接内嵌模型五项通过；安装后smoke16/0，FIFO已装入口rc1具名拒绝且空stdout。安装收据d9326852。以下e955及“未安装”段是过程历史。下一步新产品受影响模块/ABI/诊断与完整发布覆盖；开发安装不授完整或外国宿主资格。
@@ -379,6 +381,8 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 
 <a id="memory-palace"></a>
 ### 记忆宫殿
+
+**落尾基线：** out/c43-fallthrough-baseline-01.stdout及逐例stdout/stderr，工具rc1，7断言/3失败，产品b6f15e82；三负例rc=-11/transport=0，四正例rc7且无输出。源码tools/tape-fallthrough-cases.cx；尚未构造修复模型。
 
 **当前链接容器身份：** product b6f15e823db12f42461371e2193c30f8b9b34961367caf2905c497765d147b0d，record db7af545234484fb12efb873d77758401e81596f071a0c715f6f5129ceb1ad90，安装收据544011da86bb1511272bb76dac519e66d6f1e9ee3022561ec50dc3729811d92c。冻结根unisacc-epoch-tapelink-ecb5fbe322，context6a7ceb4b；安装备份out/c43-tapelink-install-01，已装smoke16/0和边界11/0为out/c43-tapelink-installed-*。候选原畸形批10/1，落尾仍红。旧私有ec17e24f+ff696的六目标对象证据仍在out/c43-tapelink-private-01，四外国对象经典参考生成，未外国执行；不扩授以下历史资格。
 
