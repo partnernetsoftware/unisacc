@@ -91,3 +91,11 @@
 - B 测（acls=alu 的三操作数 op）：`imm r2, 0` + `OP r0, r1, r2` + `ret`；期望 = peep(imm, bcls, const0)（to_mov → `mov r0, r1`；keep → 原样）。其余 op 的 bcls 与 acls 同词，记 SAME_AS_A。
 - 2026-10-28 实跑（`sh ./unisacc.com tools/opinfo-cases-gen.cx -- . STREAM4 ABS_OUT FIRST COUNT`，两片 <60 s；日志 out/c43-cc-opinfo-01）：87 用例 = PASS 87（其中 drop_a 方向 17、to_mov 方向 7、keep 方向 63）+ FAIL 0 + ORACLE_MISSING 0 + NOT_RUN 0；SAME_AS_A 59。`.ld/.st/.lea`（simple=1 但 acls=other）按金表保持不删，`slt64/sle64/ult64/eq/ne`（acls=alu、bcls=other）A 删 B 保持，`ule64`（simple=0）保持——三头都有区分性观测。
 - 待办：登记批 `stream-e4-opinfo`（与 `stream-e4-peep` 同，待 cdx 提交 tests/batches.tsv）。
+
+## 12. 事实生成用例三：`e4.pos.o2-*` 四格（已实现：tools/o2-cases-gen.cx）
+
+- 机械 oracle（2026-10-28 实测）：经典参考 `REF -O0 -S S.c` 给未优化 tape，`REF -O2 -S S.c` 给参考 O2 tape；E4 O2 流容器跑 O0 tape 必须与参考 O2 tape 字节相等。此前"参考不接受 tape 输入"的障碍绕开：输入走 C 源，tape 由参考自己产出。
+- 用例：12 个内联 C 程序，四格各 3（basic-blocks：if/else 汇合、循环携带、store 后标签；liveness：死临时量、值携带、未用即覆盖；read-fusion：局部 int/char/两局部读；copy-retarget：复制后用、结果复制、复制链）。每例要求 O0≠O2 且参考 O2 含该格的见证子串（`jumpz`/`jump`/`[r6-`/…），否则记 VACUOUS 不算 PASS。
+- 实跑（`sh ./unisacc.com tools/o2-cases-gen.cx -- . REF STREAM4 ABS_OUT`，单次 <60 s；日志 out/c43-cc-o2-01）：12 PASS / 0 FAIL / 0 VACUOUS / 0 NOT_RUN，O2 与 E4 输出逐例同字节（907–1220 B）。
+- 限制：本次 REF 用的是 /tmp/ua_ref（2026-10-24 宿主构建，源身份未绑定）；正式换标时 REF 必须由冻结导出的 `make ref` 重建并记录源 SID。liveness/copy-retarget 的见证子串目前仅 `ret`/`add64`（弱），区分性主要靠 O0≠O2 与字节相等；可再细化。
+- 待办：登记批 `stream-e4-o2`，四格 MISSING→PASS（同样待 cdx 提交 tests/batches.tsv 与 stream-e4 矩阵）。

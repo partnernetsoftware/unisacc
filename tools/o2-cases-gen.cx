@@ -1,0 +1,84 @@
+/* tools/o2-cases-gen.cx -- E4 O2 positive cells (e4.pos.o2-basic-blocks / -liveness / -read-fusion / -copy-retarget)
+ * against the classic reference's own O2 tapes.
+ *   sh ./unisacc.com tools/o2-cases-gen.cx -- ROOT REF STREAM4_COM ABS_OUT
+ * Oracle (mechanical, measured 2026-10-28): for a C source S, `REF -O0 -S S` is the unoptimised tape and
+ * `REF -O2 -S S` the reference O2 tape; the E4 O2 stream container run on the O0 tape must be byte-identical to
+ * the reference O2 tape. A case is only meaningful when O0 != O2 (something was rewritten) and when the O2 tape
+ * shows the rewrite the cell is about (its witness substring); otherwise it is VACUOUS, counted and never PASS.
+ * REF is the host-built classic reference (`make ref`, prd/matrix: "reference O2 tape"); the C inputs are inline.
+ * Each reference run is bounded 20 s, each container run 12 s; the whole tool stays under the 60 s rule. */
+#pragma unisa use cxlib.netpack
+
+static char root[4096], ref[4096], stream4[4096], outdir[4096], inc[4400], bound[4400];
+static void die(const char *s) { fprintf(stderr, "o2-cases: REFUSE %s errno=%d\n", s, errno); exit(2); }
+static void path(char *p, size_t cap, const char *a, const char *b) { int n = snprintf(p, cap, "%s/%s", a, b); if (n < 0 || (size_t)n >= cap) die("path"); }
+static void saved(const char *p, const char *s, size_t n) { int f = open(p, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600); if (f < 0) die("exclusive create"); while (n) { ssize_t k = write(f, s, n); if (k <= 0) die("write"); s += k; n -= (size_t)k; } if (close(f)) die("close"); }
+
+typedef struct { const char *cell, *name, *witness, *src; } Case;
+static const Case cases[] = {
+    /* basic blocks: rewrites must stop at labels; a value stored before a branch and read after it in another block */
+    { "basic-blocks", "if-else-join", "jumpz",
+      "int f(int a){int r=0; if(a>3){r=a+1;} else {r=a-1;} return r*2;}\nint main(){return f(5);}\n" },
+    { "basic-blocks", "loop-carried", "jump",
+      "int f(int n){int s=0; int i=0; while(i<n){s=s+i; i=i+1;} return s;}\nint main(){return f(4);}\n" },
+    { "basic-blocks", "label-after-store", "jumpz",
+      "int g(int x){int t=x*3; if(t>10){return t;} t=t+1; return t;}\nint main(){return g(2);}\n" },
+    /* liveness: dead temporaries disappear, values carried in registers across the rescan */
+    { "liveness", "dead-temp", "ret",
+      "int f(int a){int unused=a*7; int b=a+2; return b;}\nint main(){return f(1);}\n" },
+    { "liveness", "value-carry", "add64",
+      "int f(int a,int b){int c=a+b; int d=c+1; int e=d+1; return e;}\nint main(){return f(1,2);}\n" },
+    { "liveness", "overwritten-before-use", "ret",
+      "int f(int a){int x=a+1; x=a+2; return x;}\nint main(){return f(1);}\n" },
+    /* read fusion: `imm r2,N / sub64 rD,r6,r2 / .ld rD,[rD+0],W` becomes one frame-relative load */
+    { "read-fusion", "local-int-reads", "[r6-",
+      "int f(int a){int x=a; int y=x+x; return y+x;}\nint main(){return f(3);}\n" },
+    { "read-fusion", "local-char-read", "[r6-",
+      "int f(int a){char c=(char)a; return c+1;}\nint main(){return f(65);}\n" },
+    { "read-fusion", "two-locals", "[r6-",
+      "int f(int a,int b){int x=a; int y=b; return x*y;}\nint main(){return f(2,3);}\n" },
+    /* copy / destination retarget: `OP rD / mov rY, rD` becomes `OP rY`; `mov rY, rX / OP rY` reads rX */
+    { "copy-retarget", "copy-then-use", "ret",
+      "int f(int a){int b=a; return b+1;}\nint main(){return f(1);}\n" },
+    { "copy-retarget", "result-copy", "ret",
+      "int f(int a,int b){int c; c=a*b; return c;}\nint main(){return f(2,3);}\n" },
+    { "copy-retarget", "chain-of-copies", "ret",
+      "int f(int a){int b=a; int c=b; int d=c; return d;}\nint main(){return f(9);}\n" },
+};
+
+static int has(const char *h, size_t hn, const char *n) { size_t nn = strlen(n); if (nn > hn) return 0; for (size_t i = 0; i + nn <= hn; i++) if (!memcmp(h + i, n, nn)) return 1; return 0; }
+static int run_to(char *const argv[], int secs, np_result *r, char *why, size_t wl) { char *env[] = { "UNISA_ATTRIBUTES=", 0 }; return np_run(argv, root, env, secs, r, why, wl); }
+
+int main(int argc, char **argv) {
+    if (argc != 5 || !realpath(argv[1], root) || !realpath(argv[2], ref) || !realpath(argv[3], stream4) || argv[4][0] != '/') { fputs("usage: ROOT REF STREAM4_COM ABS_OUT\n", stderr); return 2; }
+    snprintf(outdir, sizeof outdir, "%s", argv[4]);
+    path(inc, sizeof inc, root, "include"); path(bound, sizeof bound, root, "tools/bound");
+    if (mkdir(outdir, 0700) && errno != EEXIST) die("out dir");
+    char respath[4400]; path(respath, sizeof respath, outdir, "results.tsv"); FILE *res = fopen(respath, "wbx"); if (!res) die("results exclusive");
+    int npass = 0, nfail = 0, nvac = 0, nnotrun = 0;
+    for (size_t i = 0; i < sizeof cases / sizeof *cases; i++) {
+        const Case *c = &cases[i]; char key[128]; snprintf(key, sizeof key, "%02zu.%s.%s", i, c->cell, c->name);
+        char cp[4600], o0[4600], o2[4600], e4[4600];
+        snprintf(cp, sizeof cp, "%s/%s.c", outdir, key); saved(cp, c->src, strlen(c->src));
+        snprintf(o0, sizeof o0, "%s/%s.O0.tape", outdir, key); snprintf(o2, sizeof o2, "%s/%s.O2.tape", outdir, key); snprintf(e4, sizeof e4, "%s/%s.E4.tape", outdir, key);
+        np_result r0, r2, re; char why[1024];
+        char *v0[] = { bound, "20", ref, "-O0", "-S", cp, 0 }, *v2[] = { bound, "20", ref, "-O2", "-S", cp, 0 };
+        if (run_to(v0, 22, &r0, why, sizeof why) || r0.rc || !r0.outn) { nnotrun++; fprintf(res, "NOT_RUN\t%s\tref -O0 rc=%d %s\n", key, r0.rc, why); np_free(&r0); continue; }
+        if (run_to(v2, 22, &r2, why, sizeof why) || r2.rc || !r2.outn) { nnotrun++; fprintf(res, "NOT_RUN\t%s\tref -O2 rc=%d %s\n", key, r2.rc, why); np_free(&r0); np_free(&r2); continue; }
+        saved(o0, r0.out, r0.outn); saved(o2, r2.out, r2.outn);
+        int same = r0.outn == r2.outn && !memcmp(r0.out, r2.out, r0.outn);
+        int witness = has(r2.out, r2.outn, c->witness);
+        if (same || !witness) { nvac++; fprintf(res, "VACUOUS\t%s\t%s\n", key, same ? "O0==O2: nothing rewritten" : "witness absent from O2 tape"); np_free(&r0); np_free(&r2); continue; }
+        char *ve[] = { bound, "12", stream4, o0, o0, inc, 0 };
+        if (run_to(ve, 14, &re, why, sizeof why)) { nnotrun++; fprintf(res, "NOT_RUN\t%s\tE4 %s\n", key, why); np_free(&r0); np_free(&r2); continue; }
+        saved(e4, re.out, re.outn);
+        int ok = !re.rc && re.outn == r2.outn && !memcmp(re.out, r2.out, re.outn);
+        if (ok) npass++; else nfail++;
+        fprintf(res, "%s\t%s\tO0=%zu O2=%zu E4=%zu bytes rc=%d\n", ok ? "PASS" : "FAIL", key, r0.outn, r2.outn, re.outn, re.rc);
+        np_free(&r0); np_free(&r2); np_free(&re);
+    }
+    fprintf(res, "SUMMARY\tcases=%zu\tpass=%d\tfail=%d\tvacuous=%d\tnot_run=%d\n", sizeof cases / sizeof *cases, npass, nfail, nvac, nnotrun);
+    fclose(res);
+    printf("O2_CASES\tcases=%zu\tpass=%d\tfail=%d\tvacuous=%d\tnot_run=%d\n", sizeof cases / sizeof *cases, npass, nfail, nvac, nnotrun);
+    return nfail || nnotrun || nvac ? 1 : 0;
+}
