@@ -25,6 +25,9 @@ GCC与Clang各四项-o实跑：正常/缺席编译rc0且执行rc7，超限/目�
 独立宿主驱动为`out/c43-cxpack-review-01/{gcc,clang}-fixed-02.elf`，未覆盖根目录宿主产品。
 本次仅Linux/x86_64；共享4c28未安装此修复，完整缺陷仍开放。
 
+回归断言进一步收紧为拒绝码必须1，超限必须报告`cxpack.tsv too large`、目录必须报告
+`cannot read cxpack.tsv`，且stdout为空。此断言修订尚待重新执行，不继承旧4/0为新测试结果。
+
 构造接续：af8429d0cf已git archive到仓外`/home/devali/repos/unisacc-epoch-cxpack-af8429d0cf`，
 启动产品逐字核为4c2831c3，来源记录一并保存。prepare-context默认-run实返0，
 初始产品观察与新宿主identity-helper观察均为SID
