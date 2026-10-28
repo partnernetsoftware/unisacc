@@ -36,6 +36,13 @@ sizeof纪元固定identity-helper实读新源SID为
 私有模型驱动对象格式批`out/c43-link-driver-formats-01.stdout`21/0；其中打印的installed-product字样是工具固有标签，
 本次实际对象始终是显式私有wrapper+e229驱动+ff696包，不是共享安装，也不是跨平台运行资格。
 
+正规复用前置实测：新增薄入口`tools/nn-inputs-compare.cx`直接调用既有ni_compare，
+对8390与353c冻结根、固定原生reader5c6a7756实际返回rc2
+`necessary-data-tree-mismatch`，证据`out/c43-link-undef-fix-01/nn-inputs.stderr`。
+同根负控亦rc2。原因明确：现有nninputs整树读取exec/unisa/src/weights，src/tapelink变化必然拒绝。
+这只证明现有保守复用合同不适用，不证明模型需要重造；下一步核实构造器实际输入闭包，
+在保留独立原包验证与新源身份的前提下建立适用证明。未删现有校验、未改旧包收据、未授准入。
+
 - 现象：`int used(void); int main(void){return used()+2;}` 经 `-c -b lnx/x86_64 -funit` 得 main.o 后，`unisacc -o img main.o`（或加只定义 `unused` 的归档、或直接 `-o img main.c`）rc 0 并写出镜像；运行 SIGSEGV（rc 139）。预期：`link: undefined reference to used`，rc≠0，无镜像。
 - 定位：src/tapelink.c:351 `tl_check_undef`（R20-3）只检查名字以 `g_` 开头的未定义外部（全局数据对象），函数外部不检查。
 - 同现：经典参考 REF 0ed46192 行为相同（共享缺陷，非回归）；产品==REF 字节差分仍有效，不阻塞候选 f3705dfa。
