@@ -90,3 +90,4 @@
 - 17:5x 链接路线边界猎取（缺陷曾出于此）：8 项合同成立（私有同名不冲突、跨单元 extern 数据、重复 main/对象两次/未定义数据具名拒绝、归档重复成员容忍、空归档、无 main 拒绝），批 `link-edge-cases` 8/0，冻结导出 unisacc-cc-f3705-c328960a2f 上 run-batch PASS @f3705dfa；发现一条诊断质量观察（无 main 的拒绝文本不具名）记入 plans/defects-c43.md。
 - 17:5x 同根第二现象：跨归档逆序（`m2.o B.a A.a`）静默链接成崩溃镜像；已加入批 `link-undefined-function`（现 1/4 红），defects 记录；补丁合入后应与 ld 一致转具名拒绝。
 - 17:5x 驱动/ar 具名拒绝猎取：批 `driver-diagnostics` 7/11（红为设计）：4 处诊断缺陷（-run 单元对象静默、-run/-o 仅归档错因文本、ar 空归档非法操作静默 rc 0）记入 plans/defects-c43.md，7 项具名拒绝合同成立。冻结导出 unisacc-cc-f3705-51549fb2cd。
+- 17:5x 预处理器差分（宿主 gcc -E -P 为 oracle，去空白等价 + 手写字面）：8 夹具 24/0，无分歧；批 `pp-differential`，冻结导出 unisacc-cc-f3705-a1f5b388dc 上 run-batch PASS @f3705dfa。
