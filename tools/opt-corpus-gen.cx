@@ -134,31 +134,47 @@ static void group_cli(void) {
    batch may call a host tool the matrix row declares as its oracle; identity recorded). For every corpus program the host
    cc image (-O0 and -O2, -std=c99 -w) and the product lnx/x86_64 image (-O0 and -O2) must execute to the hand literal,
    hence to each other; stderr must be empty on both sides. The 4th argument is HOST_CC (in `ref`). */
-static void group_ccdiff(void) {
+/* ccdiff-2 (2026-10-28, fable: differential defect hunt on a second corpus; the same three-way oracle): bit-fields,
+   union aliasing, VLA, string functions, snprintf truncation, unsigned wrap and signed division, pointer difference with
+   goto and nested switch, a function-pointer table, long long arithmetic, char signedness (x86-64 SysV: signed) */
+static const Prog progs2[] = {
+    { "corpus.cc-differential-2", "bitfields", "#include <stdio.h>\nstruct B{unsigned a:3;unsigned b:5;int c:4;};\nint main(void){struct B x;x.a=7;x.b=31;x.c=-3;printf(\"%u %u %d %u\\n\",x.a,x.b,x.c,(unsigned)sizeof x);return (int)(x.a+x.b);}\n", 0, "7 31 -3 4\n", 38 },
+    { "corpus.cc-differential-2", "union-alias", "#include <stdio.h>\nunion U{unsigned int u;unsigned char b[4];float f;};\nint main(void){union U v;v.u=0x01020304u;printf(\"%u %u\\n\",v.b[0],v.b[3]);v.f=1.0f;printf(\"%x %u %u\\n\",v.u,v.b[2],v.b[3]);return v.b[2]+v.b[3];}\n", 0, "4 1\n3f800000 128 63\n", 191 },
+    { "corpus.cc-differential-2", "vla", "#include <stdio.h>\nstatic int sum(int n,int *a){int i,s=0;for(i=0;i<n;i++)s+=a[i];return s;}\nint main(void){int n=5;int a[n];int i;for(i=0;i<n;i++)a[i]=i*i;printf(\"%d %u\\n\",sum(n,a),(unsigned)sizeof a);return sum(n,a);}\n", 0, "30 20\n", 30 },
+    { "corpus.cc-differential-2", "string-funcs", "#include <stdio.h>\n#include <string.h>\nint main(void){char buf[32];strcpy(buf,\"hello\");strcat(buf,\" world\");int l=(int)strlen(buf);int c=strcmp(\"abc\",\"abd\");char m[4];memset(m,'z',3);m[3]=0;char d[8];memcpy(d,\"abcdef\",7);printf(\"%d %d %d %s %s %s\\n\",l,c<0,memcmp(\"ab\",\"ac\",2)<0,buf,m,d);return l;}\n", 0, "11 1 1 hello world zzz abcdef\n", 11 },
+    { "corpus.cc-differential-2", "snprintf-trunc", "#include <stdio.h>\nint main(void){char b[16];int n=snprintf(b,sizeof b,\"%d-%s-%05d\",42,\"x\",7);printf(\"%s %d\\n\",b,n);int n2=snprintf(b,4,\"%d\",123456);printf(\"%s %d\\n\",b,n2);return n+n2;}\n", 0, "42-x-00007 10\n123 6\n", 16 },
+    { "corpus.cc-differential-2", "wrap-div", "#include <stdio.h>\nint main(void){unsigned a=0xFFFFFFFFu;a+=2;unsigned long long m=1ULL<<40;int q=-17/4,r=-17%4;unsigned char c=250;c+=10;printf(\"%u %llu %d %d %u\\n\",a,m,q,r,c);return (int)a+(-q)+(-r)+c;}\n", 0, "1 1099511627776 -4 -1 4\n", 10 },
+    { "corpus.cc-differential-2", "ptrdiff-goto-switch", "#include <stdio.h>\nstatic int nested(int x,int y){int r;switch(x){case 2:switch(y){case 1:r=21;break;default:r=20;}break;case 3:r=30;break;default:r=0;}return r;}\nint main(void){int arr[10];int *p=arr+7,*q=arr+2;int cnt=0;again:cnt++;if(cnt<3)goto again;printf(\"%d %d %d %d\\n\",(int)(p-q),cnt,nested(2,1),nested(3,9)+nested(2,5));return (int)(p-q)+cnt+nested(2,1);}\n", 0, "5 3 21 50\n", 29 },
+    { "corpus.cc-differential-2", "fnptr-table", "#include <stdio.h>\nstatic int inc(int v){return v+1;}static int dbl(int v){return v*2;}static int sq(int v){return v*v;}\nint main(void){int (*t[3])(int)={inc,dbl,sq};int i,s=0;for(i=0;i<3;i++){int r=t[i](3);s+=r;printf(\"%d%c\",r,i==2?'\\n':' ');}return s;}\n", 0, "4 6 9\n", 19 },
+    { "corpus.cc-differential-2", "longlong-arith", "#include <stdio.h>\nint main(void){long long a=123456789012LL;unsigned long long u=~0ULL/3;long long neg=-a;printf(\"%lld %lld %llu %lld\\n\",a/1000,a%1000,u,neg/7);return (int)(a%1000);}\n", 0, "123456789 12 6148914691236517205 -17636684144\n", 12 },
+    { "corpus.cc-differential-2", "char-sign", "#include <stdio.h>\nint main(void){char c=(char)200;unsigned char u=(unsigned char)c;signed char s=-1;int w=(int)c+(int)u;printf(\"%d %d %d %d\\n\",c,u,s,w);return u;}\n", 0, "-56 200 -1 144\n", 200 },
+};
+#define NPROG2 ((int)(sizeof progs2 / sizeof *progs2))
+static void group_ccdiff(const Prog *tbl, int count) {
     if (!ref[0]) die("ccdiff needs HOST_CC");
     { np_result r; char *vv[] = { ref, "--version", 0 }; char ver[200] = "-"; if (!run(vv, 5, &r)) { size_t k = 0; while (k < r.outn && r.out[k] != '\n' && k < 199) { ver[k] = r.out[k]; k++; } ver[k] = 0; np_free(&r); } fprintf(res, "ORACLE\thost_cc=%s\toracle_id=%s\n", ref, ver); }
-    for (int i = 0; i < NPROG; i++) { const Prog *p = &progs[i]; char a[4400], b[4400]; sources(p, a, sizeof a, b, sizeof b); const char *lv[2] = { "-O0", "-O2" };
+    for (int i = 0; i < count; i++) { const Prog *p = &tbl[i]; char a[4400], b[4400]; sources(p, a, sizeof a, b, sizeof b); const char *lv[2] = { "-O0", "-O2" };
         for (int f = 0; f < 2; f++) { char hi[4400], pi[4400], lab[200], d[300]; snprintf(hi, sizeof hi, "%s/%s.%s.cc", work, p->name, lv[f] + 1); snprintf(pi, sizeof pi, "%s/%s.%s.product", work, p->name, lv[f] + 1); np_result r;
             char *hv[] = { ref, "-std=c99", "-w", (char *)lv[f], (char *)a, b[0] ? (char *)b : "-o", b[0] ? "-o" : hi, b[0] ? hi : 0, 0 }; snprintf(lab, sizeof lab, "%s.%s.host-cc", p->name, lv[f] + 1);
-            if (run(hv, 20, &r) || r.rc) { snprintf(d, sizeof d, "host cc rc=%d", r.rc); check(0, "corpus.cc-differential", lab, d); np_free(&r); continue; } np_free(&r);
-            if (compile_with("product", a, b, lv[f], targets[0], pi, &r) || r.rc) { snprintf(lab, sizeof lab, "%s.%s.product", p->name, lv[f] + 1); check(0, "corpus.cc-differential", lab, "product compile failed"); np_free(&r); continue; } np_free(&r);
-            np_result h, q; char *x[] = { hi, 0 }, *y[] = { pi, 0 }; if (run(x, 3, &h)) { check(0, "corpus.cc-differential", lab, "host image did not run"); continue; } if (run(y, 3, &q)) { check(0, "corpus.cc-differential", lab, "product image did not run"); np_free(&h); continue; }
+            if (run(hv, 20, &r) || r.rc) { snprintf(d, sizeof d, "host cc rc=%d", r.rc); check(0, p->cell, lab, d); np_free(&r); continue; } np_free(&r);
+            if (compile_with("product", a, b, lv[f], targets[0], pi, &r) || r.rc) { snprintf(lab, sizeof lab, "%s.%s.product", p->name, lv[f] + 1); check(0, p->cell, lab, "product compile failed"); np_free(&r); continue; } np_free(&r);
+            np_result h, q; char *x[] = { hi, 0 }, *y[] = { pi, 0 }; if (run(x, 3, &h)) { check(0, p->cell, lab, "host image did not run"); continue; } if (run(y, 3, &q)) { check(0, p->cell, lab, "product image did not run"); np_free(&h); continue; }
             int hl = exact(&h, p->stdout_want, p->exit_want), pl = exact(&q, p->stdout_want, p->exit_want), eq = h.rc == q.rc && h.outn == q.outn && !memcmp(h.out, q.out, h.outn);
             snprintf(d, sizeof d, "host rc=%d product rc=%d want=%d; host literal=%d product literal=%d equal=%d", h.rc, q.rc, p->exit_want, hl, pl, eq); snprintf(lab, sizeof lab, "%s.%s.host-equals-product-equals-literal", p->name, lv[f] + 1);
-            check(hl && pl && eq, "corpus.cc-differential", lab, d); np_free(&h); np_free(&q); } }
+            check(hl && pl && eq, p->cell, lab, d); np_free(&h); np_free(&q); } }
 }
 
 int main(int argc, char **argv) {
-    if ((argc != 4 && argc != 5) || !realpath(argv[1], root) || argv[2][0] != '/' || (argc == 5 && !realpath(argv[4], ref))) { fputs("usage: ROOT ABS_OUT corpus-0..corpus-9|closure|cli [REF] | ccdiff HOST_CC\n", stderr); return 2; }
-    const char *group = argv[3]; int gp = -1, gl = !strcmp(group, "closure"), gi = !strcmp(group, "cli"), gc = !strcmp(group, "ccdiff");
+    if ((argc != 4 && argc != 5) || !realpath(argv[1], root) || argv[2][0] != '/' || (argc == 5 && !realpath(argv[4], ref))) { fputs("usage: ROOT ABS_OUT corpus-0..corpus-9|closure|cli [REF] | ccdiff|ccdiff-2 HOST_CC\n", stderr); return 2; }
+    const char *group = argv[3]; int gp = -1, gl = !strcmp(group, "closure"), gi = !strcmp(group, "cli"), gc = !strcmp(group, "ccdiff"), gc2 = !strcmp(group, "ccdiff-2");
     if (!strncmp(group, "corpus-", 7) && group[7] >= '0' && group[7] < '0' + NPROG && !group[8]) gp = group[7] - '0';
-    if (gp < 0 && !gl && !gi && !gc) die("group");
+    if (gp < 0 && !gl && !gi && !gc && !gc2) die("group");
     snprintf(outdir, sizeof outdir, "%s", argv[2]); if (mkdir(outdir, 0700) && errno != EEXIST) die("out dir"); path(work, sizeof work, outdir, group); if (mkdir(work, 0700)) die("group dir must be absent");
     path(bound, sizeof bound, root, "tools/bound"); path(product, sizeof product, root, "unisacc.com");
     char rp[4400]; snprintf(rp, sizeof rp, "%s/results-%s.tsv", outdir, group); res = fopen(rp, "wbx"); if (!res) die("results exclusive");
     { char hp[65], hr[65]; if (!shafile(product, hp)) die("product"); fprintf(res, "IDENTITY\tproduct=%s\n", hp); if (ref[0]) { if (!shafile(ref, hr)) die("ref"); fprintf(res, "IDENTITY\tref=%s\n", hr); } }
     if (gp >= 0) corpus_program(&progs[gp]);
-    else if (gl) group_closure(); else if (gc) group_ccdiff(); else group_cli();
+    else if (gl) group_closure(); else if (gc) group_ccdiff(progs, NPROG); else if (gc2) group_ccdiff(progs2, NPROG2); else group_cli();
     fprintf(res, "SUMMARY\tgroup=%s\tpass=%d\tfail=%d\tvacuous=%d\tnot_run=%d\n", group, npass, nfail, nvac, nnotrun); fclose(res);
     printf("OPT_CORPUS\tgroup=%s\tpass=%d\tfail=%d\tvacuous=%d\tnot_run=%d\n", group, npass, nfail, nvac, nnotrun);
     return nfail || nvac || nnotrun ? 1 : 0;
