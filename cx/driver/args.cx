@@ -1,0 +1,264 @@
+/* module args. Five public operations:
+     cxa_record, cxa_line, cxa_raw, cxa_cancel, cxa_includes.
+   No module state. One block is caller-owned storage:
+   *block, *length, *cap. Start from a null block and two zeros.
+   The caller frees *block with free. There is no parallel position
+   array. The caller serializes use of one block.
+   text, bytes, path, plain, withcx, and unit are borrowed and are
+   not written. cxa_includes publishes a borrowed view; it does not
+   copy. These functions do not call die, exit, clierror, or fprintf.
+
+   A record block and a line block are different buffers.
+   cxa_record appends the text and one trailing 0. An empty text
+   appends only that 0. The length includes the 0. -D, -U, -include,
+   -ferror-limit, the source path, and the leading cx.h are records.
+   Resetting *length to 0 and calling again replaces a resource
+   without freeing *cap.
+   cxa_line appends a newline first when *length is already non-zero,
+   then the text, and no trailing 0. A first empty text leaves the
+   length at 0. Newlines inside the text are kept.
+   cxa_raw appends exactly n bytes and no trailing 0. The cx.h record
+   is followed by one raw copy of the forced-include block.
+
+   A block is not a Buf. Buf carries a parallel at array that bput
+   updates and this module never allocates. The bytes and the length
+   are the whole object. forced_cx is cxa_record("cx.h") then one
+   cxa_raw of the forced block. Each per-unit list is cxa_raw of that
+   cx.h block, then cxa_record for every interface path. Those
+   lifetimes stay inside the module: a later bput would write at[]
+   out of step with the bytes. No at bridge is provided. Readers that
+   only use the bytes and the length can borrow the block. Free the
+   block alone.
+
+   cxa_cancel deletes NUL-terminated records whose bytes equal the
+   name in definition. The name is the bytes before the first '=',
+   or the whole definition when there is no '='. Other records stay,
+   in order. A repeated name is not folded. *cap and the pointer stay.
+   A record that reaches *length without a 0 is refused and the block
+   is not modified.
+
+   cxa_includes borrows withcx when the path ends in .cx, otherwise
+   plain. unit_n < 0 means there is no per-unit override. A unit_n
+   of 0 or more borrows unit instead, for every suffix.
+   The compare is case-sensitive. A chosen length above 2147483647
+   is refused because the resource length is an int.
+
+   A borrowed input must not overlap the block it writes.
+   cxa_record, cxa_line, and cxa_raw compare the input with the live
+   allocation [*block, *block + *cap). cxa_cancel compares definition
+   with the occupied prefix [*block, *block + *length), because it
+   does not reallocate. Overlap is refused before any byte changes
+   and before any reallocation, so the call cannot observe a dangling
+   pointer. Copying from a different block is allowed: the cx.h block
+   borrows the forced block that way. cxa_includes does not allocate.
+   Its result may be one of the pointers it borrowed.
+   An empty input has no bytes and is not overlap.
+
+   Return 0, or a named failure in why (empty on success):
+     2 malformed CLI undefine list
+     4 resource too large
+     5 bad argument
+       aliased argument    the borrowed input overlaps the block
+     6 out of memory
+   On failure the bytes already inside *length stay, and *length is
+   unchanged. why is untouched when it is null or whycap <= 0.
+   Growth starts at 256 and doubles. A doubled capacity that would
+   not fit a signed 32-bit length becomes the exact needed size, or
+   code 4 when that size is still above 2147483647. A failed
+   allocation leaves the previous block in place. */
+#pragma unisa module args
+
+static void cxa_setwhy(char *why, long cap, const char *msg) {
+    long i;
+    if (!why || cap <= 0) return;
+    i = 0;
+    if (msg) while (msg[i] && i + 1 < cap) { why[i] = msg[i]; i = i + 1; }
+    why[i] = 0;
+}
+
+static int cxa_fail(int rc, const char *msg, char *why, long whycap) {
+    cxa_setwhy(why, whycap, msg);
+    return rc;
+}
+
+static int cxa_span(const char *s, long *n, char *why, long whycap) {
+    long i;
+    i = 0;
+    while (s[i]) {
+        if (i == 2147483647L) return cxa_fail(4, "resource too large", why, whycap);
+        i = i + 1;
+    }
+    *n = i;
+    return 0;
+}
+
+static int cxa_alias(const unsigned char *block, long cap, const unsigned char *p, long n) {
+    unsigned long long b0;
+    unsigned long long b1;
+    unsigned long long p0;
+    unsigned long long p1;
+    if (!block || !p || cap <= 0 || n <= 0) return 0;
+    b0 = (unsigned long long)block;
+    p0 = (unsigned long long)p;
+    if (b0 + (unsigned long long)cap < b0) return 1;
+    if (p0 + (unsigned long long)n < p0) return 1;
+    b1 = b0 + (unsigned long long)cap;
+    p1 = p0 + (unsigned long long)n;
+    return p0 < b1 && p1 > b0;
+}
+
+static int cxa_room(unsigned char **block, long *length, long *cap, long need, char *why, long whycap) {
+    long want;
+    long ncap;
+    unsigned char *grown;
+    if (!block || !length || !cap) return cxa_fail(5, "bad argument", why, whycap);
+    if (need < 0 || *length < 0 || *cap < 0 || *length > *cap) return cxa_fail(5, "bad argument", why, whycap);
+    if ((*length > 0 || *cap > 0) && !*block) return cxa_fail(5, "bad argument", why, whycap);
+    if (need == 0) return 0;
+    if (*length > 2147483647L - need) return cxa_fail(4, "resource too large", why, whycap);
+    want = *length + need;
+    if (want <= *cap) return 0;
+    ncap = *cap > 0 ? *cap : 256;
+    while (ncap < want) {
+        if (ncap > 1073741823L) { ncap = want; break; }
+        ncap = ncap * 2;
+    }
+    if (ncap < want) return cxa_fail(4, "resource too large", why, whycap);
+    grown = (unsigned char *)realloc(*block, ncap);
+    if (!grown) return cxa_fail(6, "out of memory", why, whycap);
+    *block = grown;
+    *cap = ncap;
+    return 0;
+}
+
+static int cxa_write(unsigned char **block, long *length, long *cap, int lead,
+                     const unsigned char *bytes, long n, int term, char *why, long whycap) {
+    long extra;
+    long need;
+    long at;
+    long k;
+    int rc;
+    extra = lead ? 1 : 0;
+    if (term) {
+        if (extra >= 2147483647L) return cxa_fail(4, "resource too large", why, whycap);
+        extra = extra + 1;
+    }
+    if (n > 2147483647L - extra) return cxa_fail(4, "resource too large", why, whycap);
+    need = n + extra;
+    if (n > 0 && bytes && block && *block) {
+        long span;
+        span = cap && *cap > 0 ? *cap : 0;
+        if ((span > 0 && cxa_alias(*block, span, bytes, n)) || (!span && bytes == *block))
+            return cxa_fail(5, "aliased argument", why, whycap);
+    }
+    rc = cxa_room(block, length, cap, need, why, whycap);
+    if (rc) return rc;
+    if (need == 0) {
+        cxa_setwhy(why, whycap, 0);
+        return 0;
+    }
+    at = *length;
+    if (lead) { (*block)[at] = '\n'; at = at + 1; }
+    k = 0;
+    while (k < n) { (*block)[at] = bytes[k]; at = at + 1; k = k + 1; }
+    if (term) { (*block)[at] = 0; at = at + 1; }
+    *length = at;
+    cxa_setwhy(why, whycap, 0);
+    return 0;
+}
+
+int cxa_record(unsigned char **block, long *length, long *cap, const char *text, char *why, long whycap) {
+    long n;
+    int rc;
+    if (!text) return cxa_fail(5, "bad argument", why, whycap);
+    rc = cxa_span(text, &n, why, whycap);
+    if (rc) return rc;
+    return cxa_write(block, length, cap, 0, (const unsigned char *)text, n, 1, why, whycap);
+}
+
+int cxa_line(unsigned char **block, long *length, long *cap, const char *text, char *why, long whycap) {
+    long n;
+    int rc;
+    if (!text) return cxa_fail(5, "bad argument", why, whycap);
+    rc = cxa_span(text, &n, why, whycap);
+    if (rc) return rc;
+    if (!length) return cxa_fail(5, "bad argument", why, whycap);
+    return cxa_write(block, length, cap, *length > 0, (const unsigned char *)text, n, 0, why, whycap);
+}
+
+int cxa_raw(unsigned char **block, long *length, long *cap, const unsigned char *bytes, long n, char *why, long whycap) {
+    if (n < 0 || (n > 0 && !bytes)) return cxa_fail(5, "bad argument", why, whycap);
+    return cxa_write(block, length, cap, 0, bytes, n, 0, why, whycap);
+}
+
+int cxa_cancel(unsigned char **block, long *length, const char *definition, char *why, long whycap) {
+    long name_n;
+    long at;
+    long end;
+    long used;
+    long n;
+    if (!block || !length || !definition) return cxa_fail(5, "bad argument", why, whycap);
+    if (*length < 0) return cxa_fail(5, "bad argument", why, whycap);
+    if (*length > 0 && !*block) return cxa_fail(5, "bad argument", why, whycap);
+    name_n = 0;
+    while (definition[name_n] && definition[name_n] != '=') {
+        if (name_n == 2147483647L) return cxa_fail(4, "resource too large", why, whycap);
+        name_n = name_n + 1;
+    }
+    if (name_n > 0 && *block && cxa_alias(*block, *length, (const unsigned char *)definition, name_n))
+        return cxa_fail(5, "aliased argument", why, whycap);
+    at = 0;
+    while (at < *length) {
+        end = at;
+        while (end < *length && (*block)[end]) end = end + 1;
+        if (end == *length) return cxa_fail(2, "malformed CLI undefine list", why, whycap);
+        at = end + 1;
+    }
+    at = 0;
+    used = 0;
+    while (at < *length) {
+        end = at;
+        while ((*block)[end]) end = end + 1;
+        n = end - at;
+        if (n != name_n || memcmp(*block + at, definition, (size_t)n)) {
+            if (used != at) memmove(*block + used, *block + at, (size_t)(n + 1));
+            used = used + n + 1;
+        }
+        at = end + 1;
+    }
+    *length = used;
+    cxa_setwhy(why, whycap, 0);
+    return 0;
+}
+
+int cxa_includes(const char *path, const unsigned char *plain, long plain_n,
+                 const unsigned char *withcx, long withcx_n, const unsigned char *unit, long unit_n,
+                 const unsigned char **out, long *out_n, char *why, long whycap) {
+    const unsigned char *pick;
+    long n;
+    long i;
+    int cx;
+    if (!path || !out || !out_n) return cxa_fail(5, "bad argument", why, whycap);
+    if (plain_n < 0 || withcx_n < 0) return cxa_fail(5, "bad argument", why, whycap);
+    if ((plain_n > 0 && !plain) || (withcx_n > 0 && !withcx)) return cxa_fail(5, "bad argument", why, whycap);
+    if (unit_n >= 0) {
+        if (unit_n > 2147483647L) return cxa_fail(4, "resource too large", why, whycap);
+        if (unit_n > 0 && !unit) return cxa_fail(5, "bad argument", why, whycap);
+        pick = unit;
+        n = unit_n;
+    } else {
+        i = 0;
+        while (path[i]) {
+            if (i == 2147483647L) return cxa_fail(4, "resource too large", why, whycap);
+            i = i + 1;
+        }
+        cx = i >= 3 && path[i - 3] == '.' && path[i - 2] == 'c' && path[i - 1] == 'x';
+        if (cx) { pick = withcx; n = withcx_n; }
+        else { pick = plain; n = plain_n; }
+        if (n > 2147483647L) return cxa_fail(4, "resource too large", why, whycap);
+    }
+    *out = pick;
+    *out_n = n;
+    cxa_setwhy(why, whycap, 0);
+    return 0;
+}

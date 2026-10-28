@@ -1,0 +1,274 @@
+/* Independent check for module args. Not a product driver.
+   tools/driver -> ../cx/driver. This unit consumes that module.
+   Run one source: sh ./unisacc.com tools/check-driver-args.cx
+   Not run in the turn that added it.
+   chain-no-bput builds the forced, cx.h, and per-unit blocks with
+   only cxa_record and cxa_raw. That is the whole lifetime. */
+#pragma unisa use driver.args
+
+static int g_fail;
+
+static void note(int ok, const char *name) {
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", name);
+    if (!ok) g_fail = g_fail + 1;
+}
+
+static int eq(const unsigned char *b, long n, const unsigned char *s, long sn) {
+    long i;
+    if (n != sn) return 0;
+    if (!n) return 1;
+    if (!b) return 0;
+    i = 0;
+    while (i < n) {
+        if (b[i] != s[i]) return 0;
+        i = i + 1;
+    }
+    return 1;
+}
+
+static void wipe(unsigned char **b, long *n, long *c) {
+    free(*b);
+    *b = 0;
+    *n = 0;
+    *c = 0;
+}
+
+int main(void) {
+    unsigned char *b;
+    unsigned char *cxb;
+    unsigned char *list;
+    unsigned char *kept;
+    unsigned char raw[8];
+    unsigned char one;
+    const unsigned char *view;
+    const unsigned char *plain;
+    const unsigned char *withcx;
+    const unsigned char *unit;
+    long n;
+    long c;
+    long cn;
+    long cc;
+    long ln;
+    long lc;
+    long vn;
+    long before;
+    char why[64];
+    char dirty[8];
+    int rc;
+    g_fail = 0;
+    b = 0;
+    n = 0;
+    c = 0;
+    why[0] = 'x';
+    rc = cxa_record(&b, &n, &c, "", why, (long)sizeof why);
+    note(rc == 0 && n == 1 && b && b[0] == 0 && why[0] == 0, "record-empty");
+    wipe(&b, &n, &c);
+
+    why[0] = 'x';
+    rc = cxa_record(&b, &n, &c, "FOO", why, (long)sizeof why);
+    raw[0] = 'F'; raw[1] = 'O'; raw[2] = 'O'; raw[3] = 0;
+    note(rc == 0 && why[0] == 0 && eq(b, n, raw, 4), "record-foo");
+    rc = cxa_record(&b, &n, &c, "BAR=1", why, (long)sizeof why);
+    raw[4] = 'B'; raw[5] = 'A'; raw[6] = 'R'; raw[7] = '=';
+    note(rc == 0 && n == 10 && b[4] == 'B' && b[8] == '1' && b[9] == 0, "record-two");
+    wipe(&b, &n, &c);
+
+    cxa_record(&b, &n, &c, "FOO", why, (long)sizeof why);
+    cxa_record(&b, &n, &c, "BAR", why, (long)sizeof why);
+    cxa_record(&b, &n, &c, "BAZ", why, (long)sizeof why);
+    kept = b;
+    before = c;
+    rc = cxa_cancel(&b, &n, "BAR=1", why, (long)sizeof why);
+    raw[0] = 'F'; raw[1] = 'O'; raw[2] = 'O'; raw[3] = 0;
+    raw[4] = 'B'; raw[5] = 'A'; raw[6] = 'Z'; raw[7] = 0;
+    note(rc == 0 && b == kept && c == before && eq(b, n, raw, 8), "cancel-eq");
+    wipe(&b, &n, &c);
+
+    cxa_record(&b, &n, &c, "BAR2", why, (long)sizeof why);
+    cxa_record(&b, &n, &c, "BAR", why, (long)sizeof why);
+    rc = cxa_cancel(&b, &n, "BAR", why, (long)sizeof why);
+    raw[0] = 'B'; raw[1] = 'A'; raw[2] = 'R'; raw[3] = '2'; raw[4] = 0;
+    note(rc == 0 && eq(b, n, raw, 5), "cancel-longer");
+    wipe(&b, &n, &c);
+
+    cxa_record(&b, &n, &c, "NAME", why, (long)sizeof why);
+    cxa_record(&b, &n, &c, "NAME=1", why, (long)sizeof why);
+    rc = cxa_cancel(&b, &n, "NAME=1", why, (long)sizeof why);
+    raw[0] = 'N'; raw[1] = 'A'; raw[2] = 'M'; raw[3] = 'E'; raw[4] = '='; raw[5] = '1'; raw[6] = 0;
+    note(rc == 0 && eq(b, n, raw, 7), "cancel-keep-value");
+    wipe(&b, &n, &c);
+
+    cxa_record(&b, &n, &c, "FOO", why, (long)sizeof why);
+    cxa_record(&b, &n, &c, "FOO", why, (long)sizeof why);
+    rc = cxa_cancel(&b, &n, "BAR", why, (long)sizeof why);
+    note(rc == 0 && n == 8 && b[0] == 'F' && b[3] == 0 && b[4] == 'F' && b[7] == 0, "cancel-dup");
+    wipe(&b, &n, &c);
+
+    raw[0] = 'F'; raw[1] = 'O'; raw[2] = 'O'; raw[3] = 0; raw[4] = 'B'; raw[5] = 'A'; raw[6] = 'R';
+    rc = cxa_raw(&b, &n, &c, raw, 7, why, (long)sizeof why);
+    kept = b;
+    before = n;
+    why[0] = 'x';
+    rc = cxa_cancel(&b, &n, "FOO", why, (long)sizeof why);
+    note(rc == 2 && b == kept && n == before && !strcmp(why, "malformed CLI undefine list") && eq(b, n, raw, 7), "cancel-malformed");
+    wipe(&b, &n, &c);
+
+    cxa_raw(&b, &n, &c, (const unsigned char *)"\0\0", 2, why, (long)sizeof why);
+    cxa_record(&b, &n, &c, "FOO", why, (long)sizeof why);
+    rc = cxa_cancel(&b, &n, "", why, (long)sizeof why);
+    raw[0] = 'F'; raw[1] = 'O'; raw[2] = 'O'; raw[3] = 0;
+    note(rc == 0 && eq(b, n, raw, 4), "cancel-empty-name");
+    wipe(&b, &n, &c);
+
+    why[0] = 'x';
+    rc = cxa_line(&b, &n, &c, "inc", why, (long)sizeof why);
+    raw[0] = 'i'; raw[1] = 'n'; raw[2] = 'c';
+    note(rc == 0 && why[0] == 0 && eq(b, n, raw, 3), "line-first");
+    rc = cxa_line(&b, &n, &c, "sys", why, (long)sizeof why);
+    raw[3] = '\n'; raw[4] = 's'; raw[5] = 'y'; raw[6] = 's';
+    note(rc == 0 && eq(b, n, raw, 7), "line-second");
+    wipe(&b, &n, &c);
+
+    rc = cxa_line(&b, &n, &c, "", why, (long)sizeof why);
+    note(rc == 0 && b == 0 && n == 0 && c == 0, "line-empty-first");
+    cxa_line(&b, &n, &c, "inc", why, (long)sizeof why);
+    rc = cxa_line(&b, &n, &c, "", why, (long)sizeof why);
+    raw[0] = 'i'; raw[1] = 'n'; raw[2] = 'c'; raw[3] = '\n';
+    note(rc == 0 && eq(b, n, raw, 4), "line-empty-next");
+    wipe(&b, &n, &c);
+
+    cxa_record(&b, &n, &c, "100", why, (long)sizeof why);
+    kept = b;
+    before = c;
+    n = 0;
+    rc = cxa_record(&b, &n, &c, "9", why, (long)sizeof why);
+    note(rc == 0 && b == kept && c == before && n == 2 && b[0] == '9' && b[1] == 0, "limit-reset");
+    wipe(&b, &n, &c);
+
+    cxa_record(&b, &n, &c, "cx.h", why, (long)sizeof why);
+    raw[0] = 'a'; raw[1] = '.'; raw[2] = 'h'; raw[3] = 0;
+    rc = cxa_raw(&b, &n, &c, raw, 4, why, (long)sizeof why);
+    note(rc == 0 && n == 9 && b[0] == 'c' && b[4] == 0 && b[5] == 'a' && b[8] == 0, "raw-after-cxh");
+    rc = cxa_raw(&b, &n, &c, 0, 0, why, (long)sizeof why);
+    note(rc == 0 && n == 9, "raw-zero");
+    kept = b;
+    before = n;
+    rc = cxa_raw(&b, &n, &c, 0, -1, why, (long)sizeof why);
+    note(rc == 5 && b == kept && n == before && !strcmp(why, "bad argument"), "raw-negative");
+    rc = cxa_raw(&b, &n, &c, 0, 2, why, (long)sizeof why);
+    note(rc == 5 && n == before && b[0] == 'c', "raw-null-bytes");
+    wipe(&b, &n, &c);
+
+    cxb = 0;
+    list = 0;
+    cn = 0;
+    cc = 0;
+    ln = 0;
+    lc = 0;
+    cxa_record(&b, &n, &c, "a.h", why, (long)sizeof why);
+    cxa_record(&b, &n, &c, "b.h", why, (long)sizeof why);
+    rc = cxa_record(&cxb, &cn, &cc, "cx.h", why, (long)sizeof why);
+    if (!rc) rc = cxa_raw(&cxb, &cn, &cc, b, n, why, (long)sizeof why);
+    if (!rc) rc = cxa_raw(&list, &ln, &lc, cxb, cn, why, (long)sizeof why);
+    if (!rc) rc = cxa_record(&list, &ln, &lc, "iface.h", why, (long)sizeof why);
+    note(rc == 0 && b != cxb && cxb != list && n == 8 && cn == 13 && ln == 21
+        && cxb[0] == 'c' && cxb[4] == 0 && cxb[5] == 'a' && cxb[12] == 0
+        && list[0] == 'c' && list[4] == 0 && list[5] == 'a' && list[8] == 0
+        && list[9] == 'b' && list[12] == 0 && list[13] == 'i' && list[20] == 0, "chain-no-bput");
+    free(cxb);
+    free(list);
+    wipe(&b, &n, &c);
+
+    cxa_record(&b, &n, &c, "AB", why, (long)sizeof why);
+    kept = b;
+    before = n;
+    rc = cxa_record(&b, &n, &c, (const char *)b, why, (long)sizeof why);
+    note(rc == 5 && b == kept && n == before && c > n && b[0] == 'A' && b[2] == 0
+        && !strcmp(why, "aliased argument"), "alias-record");
+    c = n;
+    rc = cxa_raw(&b, &n, &c, b, 2, why, (long)sizeof why);
+    note(rc == 5 && b == kept && n == before && c == before && b[0] == 'A' && b[1] == 'B'
+        && !strcmp(why, "aliased argument"), "alias-raw");
+    rc = cxa_line(&b, &n, &c, (const char *)b, why, (long)sizeof why);
+    note(rc == 5 && b == kept && n == before && b[0] == 'A' && !strcmp(why, "aliased argument"), "alias-line");
+    rc = cxa_record(&b, &n, &c, (const char *)(b + 2), why, (long)sizeof why);
+    note(rc == 0 && n == before + 1 && b[before] == 0, "alias-empty");
+    wipe(&b, &n, &c);
+
+    cxa_record(&b, &n, &c, "FOO", why, (long)sizeof why);
+    cxa_record(&b, &n, &c, "BAR", why, (long)sizeof why);
+    kept = b;
+    before = n;
+    rc = cxa_cancel(&b, &n, (const char *)(b + 4), why, (long)sizeof why);
+    note(rc == 5 && b == kept && n == before && b[0] == 'F' && b[4] == 'B' && b[7] == 0
+        && !strcmp(why, "aliased argument"), "alias-cancel");
+    wipe(&b, &n, &c);
+
+    cxa_record(&b, &n, &c, "AB", why, (long)sizeof why);
+    kept = b;
+    before = n;
+    rc = cxa_record(&b, &n, &c, 0, why, (long)sizeof why);
+    note(rc == 5 && b == kept && n == before && b[0] == 'A' && !strcmp(why, "bad argument"), "null-text");
+    memcpy(dirty, "DIRTY", 6);
+    rc = cxa_record(&b, &n, &c, 0, dirty, 0);
+    note(rc == 5 && n == before && !strcmp(dirty, "DIRTY"), "why-untouched");
+    rc = cxa_record(&b, &n, &c, "Z", 0, 8);
+    note(rc == 0 && n == before + 2 && b[before] == 'Z', "null-why");
+    wipe(&b, &n, &c);
+
+    rc = cxa_record(0, &n, &c, "A", why, (long)sizeof why);
+    note(rc == 5 && !strcmp(why, "bad argument"), "null-block");
+    n = -1;
+    rc = cxa_line(&b, &n, &c, "A", why, (long)sizeof why);
+    note(rc == 5 && n == -1 && b == 0, "negative-length");
+    n = 0;
+
+    one = 'Z';
+    b = &one;
+    n = 2147483647L;
+    c = 2147483647L;
+    rc = cxa_record(&b, &n, &c, "a", why, (long)sizeof why);
+    note(rc == 4 && b == &one && one == 'Z' && n == 2147483647L && c == 2147483647L
+        && !strcmp(why, "resource too large"), "too-large");
+    b = 0;
+    n = 0;
+    c = 0;
+
+    plain = (const unsigned char *)"plain";
+    withcx = (const unsigned char *)"with";
+    unit = (const unsigned char *)"unit";
+    view = (const unsigned char *)1;
+    vn = 9;
+    why[0] = 'x';
+    rc = cxa_includes("a.cx", plain, 5, withcx, 4, 0, -1, &view, &vn, why, (long)sizeof why);
+    note(rc == 0 && view == withcx && vn == 4 && why[0] == 0, "inc-cx");
+    rc = cxa_includes("a.c", plain, 5, withcx, 4, 0, -1, &view, &vn, why, (long)sizeof why);
+    note(rc == 0 && view == plain && vn == 5, "inc-c");
+    rc = cxa_includes("a.CX", plain, 5, withcx, 4, 0, -1, &view, &vn, why, (long)sizeof why);
+    note(rc == 0 && view == plain && vn == 5, "inc-CX");
+    rc = cxa_includes("a.cxx", plain, 5, withcx, 4, 0, -1, &view, &vn, why, (long)sizeof why);
+    note(rc == 0 && view == plain, "inc-cxx");
+    rc = cxa_includes(".cx", plain, 5, withcx, 4, 0, -1, &view, &vn, why, (long)sizeof why);
+    note(rc == 0 && view == withcx, "inc-dotcx");
+    rc = cxa_includes("", plain, 5, withcx, 4, 0, -1, &view, &vn, why, (long)sizeof why);
+    note(rc == 0 && view == plain, "inc-empty-path");
+    rc = cxa_includes("a.c", plain, 5, withcx, 4, unit, 4, &view, &vn, why, (long)sizeof why);
+    note(rc == 0 && view == unit && vn == 4, "inc-override-c");
+    rc = cxa_includes("a.cx", plain, 5, withcx, 4, unit, -1, &view, &vn, why, (long)sizeof why);
+    note(rc == 0 && view == withcx, "inc-no-override");
+    rc = cxa_includes("a.cx", plain, 5, withcx, 4, 0, 0, &view, &vn, why, (long)sizeof why);
+    note(rc == 0 && view == 0 && vn == 0, "inc-unit-empty");
+    view = (const unsigned char *)1;
+    vn = 9;
+    rc = cxa_includes(0, plain, 5, withcx, 4, 0, -1, &view, &vn, why, (long)sizeof why);
+    note(rc == 5 && view == (const unsigned char *)1 && vn == 9 && !strcmp(why, "bad argument"), "inc-null-path");
+    rc = cxa_includes("a.c", plain, -1, withcx, 4, 0, -1, &view, &vn, why, (long)sizeof why);
+    note(rc == 5 && view == (const unsigned char *)1, "inc-negative-plain");
+    rc = cxa_includes("a.c", plain, 5, withcx, 4, 0, 3, &view, &vn, why, (long)sizeof why);
+    note(rc == 5 && view == (const unsigned char *)1, "inc-unit-null");
+    rc = cxa_includes("a.c", plain, 5, withcx, 4, 0, -1, 0, &vn, why, (long)sizeof why);
+    note(rc == 5, "inc-out-null");
+
+    printf("CXA\tfailed=%d\n", g_fail);
+    return g_fail ? 1 : 0;
+}
