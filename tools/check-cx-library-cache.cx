@@ -1,0 +1,22 @@
+/* Build a private library and exercise failure/retry/cleanup under host ASan. */
+#pragma unisa use runtime.process
+static void die(const char *s){fprintf(stderr,"cx-library-cache: %s\n",s);exit(2);}
+static void hash(const char *path,char h[65]){size_t n;char *p=cx_read(path,&n);if(!p)die("read-input");cx_sha256_hex(p,n,h);free(p);}
+static np_result run(char **v,char **env,const char *root){np_result r={0};char why[1024];if(np_run(v,root,env,53,&r,why,sizeof why))die(why);return r;}
+int main(int argc,char **argv){
+ char root[4096],pc[4096],pkg[4400],bound[4400],product[4400],builder[4400],src[4400],libdir[4400],lib[4400],exe[4400],p0[65],p1[65],s0[65],s1[65];
+ if(argc!=4||!realpath(argv[1],root)||!realpath(argv[2],pc)||argv[3][0]!='/')die("usage ROOT PACK_CTX NEW_OUT");
+ if(mkdir(argv[3],0700))die("new-output-required");
+ if(cx_fmt(pkg,sizeof pkg,"%s/compiler.pkg",pc)||cx_fmt(bound,sizeof bound,"%s/tools/bound",root)||cx_fmt(product,sizeof product,"%s/unisacc.com",root)||cx_fmt(builder,sizeof builder,"%s/tools/cx-library-build.cx",root)||cx_fmt(src,sizeof src,"%s/tests/cases/model_cache_recovery.c",root)||cx_fmt(libdir,sizeof libdir,"%s/lib",argv[3])||cx_fmt(lib,sizeof lib,"%s/libunisacc.a",libdir)||cx_fmt(exe,sizeof exe,"%s/cache-asan",argv[3]))die("path-bound");
+ hash(pkg,p0);hash(src,s0);
+ char *build[]={bound,"45","sh",product,builder,"--",pkg,libdir,"/usr/bin/x86_64-linux-gnu-gcc-11","/usr/bin/x86_64-linux-gnu-ar",0};
+ np_result r=run(build,0,root);if(r.rc||r.errn){if(r.errn)fwrite(r.err,1,r.errn,stderr);die("library-build");}np_free(&r);
+ char *compile[]={bound,"20","/usr/bin/x86_64-linux-gnu-gcc-11","-O1","-g","-fsanitize=address",src,lib,"-lffi","-ldl","-o",exe,0};
+ r=run(compile,0,root);if(r.rc||r.errn){if(r.errn)fwrite(r.err,1,r.errn,stderr);die("probe-build");}np_free(&r);
+ char *v[]={bound,"20",exe,pkg,0};char *env[]={"ASAN_OPTIONS=detect_leaks=1",0};r=run(v,env,root);
+ const char *out="CACHE_RECOVERY cycles=3\n";
+ const char *err="run: UNISA_MAXSTEPS must be a positive decimal integer <= 9223372036854775807\nrun: UNISA_MAXSTEPS must be a positive decimal integer <= 9223372036854775807\nrun: UNISA_MAXSTEPS must be a positive decimal integer <= 9223372036854775807\n";
+ int ok=!r.rc&&r.outn==strlen(out)&&r.errn==strlen(err)&&!memcmp(r.out,out,r.outn)&&!memcmp(r.err,err,r.errn);
+ if(!ok&&r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);hash(pkg,p1);hash(src,s1);if(strcmp(p0,p1)||strcmp(s0,s1))die("input-changed");
+ printf("%s\tcache-failure-retry-and-free\nCXLIBRARY_CACHE\tfailed=%d\n",ok?"PASS":"FAIL",!ok);return ok?0:1;
+}
