@@ -362,7 +362,7 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 <a id="memory-palace"></a>
 ### 记忆宫殿
 
-**构造接续检查点（2026-10-28）：** ace3冻结根`unisacc-epoch-aggregate-13d8cfe478`已有73项带收据作业（tool5/gen34/tbl34），34项net尚未启动；这只是材料进度，不是候选资格。原始检查点`out/epoch-build-01/checkpoint-tbl34-final-01.tsv`明确大产物未在该次审计重哈希。31个配方相同、3个不同的复用正在接入显式mixed-v2身份合同；SourceRoot保留冻结输入，ToolRoot独立绑定新执行工具。新验证器/执行profile/控制器原生摘要与实际读取计数尚待构造，不能先授复用资格。cc的661c×35差分在独立导出运行；直接调用旧riroot流材料的结果须单列，不能充作新E3行为覆盖。
+**构造接续检查点（2026-10-28）：** ace3冻结根`unisacc-epoch-aggregate-13d8cfe478`已有73项带收据作业（tool5/gen34/tbl34），34项net尚未启动；这只是材料进度，不是候选资格。原始检查点`out/epoch-build-01/checkpoint-tbl34-final-01.tsv`明确大产物未在该次审计重哈希。31个配方相同、3个不同的复用正在接入显式mixed-v2身份合同；SourceRoot保留冻结输入，ToolRoot独立绑定新执行工具。材料角色合同实跑7/0；原生验证器02构造rc0、SHA72e1d772，执行profile01已生成，真实snapshot首测rc2拒绝origin-path-outside-logical-root（历史外部CC键），原红证据保留在out/c43-f9-origin-exec-01/。固定CC捕获映射待修复及再验；控制器原生摘要/读取计数未齐，尚无复用资格。cc的661c×35差分已结束，报告35/35、0 DIFF；16批含实际C编译，19批仅控制器兼容/旧流材料，不能充作新E3完整覆盖。
 
 **现行产品（2026-10-28）：** Rootd65c1474/record49465750，完整源SIDf9fff160、冻结778fc68ebc；107/107、PC e154c747、双内核/五切片/APE、kind2准入/正规安装和共享精确迁入完成。10个E2相关批加smoke共11批全PASS，header11/0长名修复已实际装入，negative211/0/known_gaps1；证据out/c43-fullname-validation-01/与out/c43-fullname-promote-01/。此前Root94私包绿/未安装的表述已成为历史。E3成员聚合值返回/最终类型核验已由private661c2b02实跑43/0及raw流17/0，内存138/0/库ABI55/0；尚未装入Rootd65。下一刀正规接入该E3改动；结构化CX接口记录与编译期所有权仍未完成。
 
