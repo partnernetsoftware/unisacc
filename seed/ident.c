@@ -43,7 +43,7 @@ static const char *suffix(const char *p) {
     const char *base = strrchr(p, '/'), *dot; base = base ? base + 1 : p;
     dot = strrchr(base, '.'); return dot && dot != base ? dot : "";
 }
-static int legacy_projection;
+static int legacy_projection, list_paths;
 static int keep(const char *rel) {
     static const char *const exts[] = {".py", ".c", ".cx", ".h", ".inc", ".tsv", ".json", ".sh"};
     const char *sfx = suffix(rel); size_t i; int ok = 0;
@@ -93,6 +93,7 @@ static void file_entry(Sha *h, const char *rel) {
     if (n < 0) die("read failed", rel);
     close(fd);
     sha_end(&f, dg);
+    if (list_paths) { printf("%s\t", rel); for (int i=0;i<32;i++) printf("%02x", dg[i]); putchar('\n'); }
     sha_put(h, rel, strlen(rel) + 1);
     sha_put(h, dg, 32);
 }
@@ -328,6 +329,7 @@ int main(int argc, char **argv) {
         stage_manifest(argv[3], t, argv[5]);
         return 0;
     }
+    if (argc == 3 && (!strcmp(argv[2], "list-current") || !strcmp(argv[2], "list-legacy"))) { legacy_projection = !strcmp(argv[2], "list-legacy"); list_paths = 1; identity(hex); return 0; }
     if (argc == 3 && !strcmp(argv[2], "legacy-projection")) { legacy_projection = 1; identity(hex); puts(hex); return 0; }
     if (!(argc == 1 || argc == 2 || (argc == 5 && !strcmp(argv[2], "write")) || (argc == 4 && !strcmp(argv[2], "check"))))
         die("usage", "ident [ROOT] | ident ROOT write ARTIFACT START | ident ROOT check ARTIFACT");
