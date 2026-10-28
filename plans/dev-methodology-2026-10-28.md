@@ -82,3 +82,12 @@
   - retarget（to_jump）：E4 在重定向后同时删除已不可达的落点 `jump`（死码，非窥孔关系）；oracle 期望删除后的形态。
   - TABLE_SUSPECT 16（金表给出非 keep 的 y，但参考分类器对该类对永不产生该关系）：a_dead×{other,none}（load64/imm/mov/alu，8 键：`ol_scan` 把 tape 末尾与 OK_OTHER 行视为读全部寄存器）、copy_into×{load64,imm,jump,jumpz,other}（5 键：b 不读 rY 或非 simple）、to_next×none（2 键）、other.mov.dest_to_mov（1 键）。不可达，无行为影响；金表若按参考收紧应改这 16 行为 keep（经生成器路线）。
   - 待办：登记批 `stream-e4-peep`（tests/batches.tsv 当前由 cdx 暂存，待其提交后再加）。
+  - TABLE_SUSPECT 16 行的归属路线（fable 子代理裁定 2026-10-28，仅记录为线索、本窗不改）：`weights/gold/peep.tsv` 由 `unisa/gold.py:peep_label` 经 `gold-export` 生成，并经 `build-weights --from-tsv --check` → `emit-kernel` 进入 kernel/ 与 SID；改 16 个 y 等于改权重字节与内核，需慢车道纪元与表主人（主人/cdx）决定。建议：把 `peep_label` 收紧到参考分类器可达集合。
+
+## 11. 事实生成用例二：`e4.gold.opinfo-73`（已实现：tools/opinfo-cases-gen.cx）
+
+- 事实：`weights/gold/opinfo.tsv` 73 个 op × 三头（simple/acls/bcls）。三头都通过 `weights/gold/peep.tsv` 可观测，因此 oracle 全部是查表，不含手写期望。
+- A 测（每 op）：op 写 r2（若写寄存器）+ `add64 r0, r1, r3` + `ret`；期望 = peep(acls, add64, a_dead)（simple 且写寄存器时）或 peep(acls, add64, none)。drop_a → op 行被删；keep → 原样。jump/jumpz/call 用远标签避免 to_next/to_jump；`ret` 作为 op 时仅自身。
+- B 测（acls=alu 的三操作数 op）：`imm r2, 0` + `OP r0, r1, r2` + `ret`；期望 = peep(imm, bcls, const0)（to_mov → `mov r0, r1`；keep → 原样）。其余 op 的 bcls 与 acls 同词，记 SAME_AS_A。
+- 2026-10-28 实跑（`sh ./unisacc.com tools/opinfo-cases-gen.cx -- . STREAM4 ABS_OUT FIRST COUNT`，两片 <60 s；日志 out/c43-cc-opinfo-01）：87 用例 = PASS 87（其中 drop_a 方向 17、to_mov 方向 7、keep 方向 63）+ FAIL 0 + ORACLE_MISSING 0 + NOT_RUN 0；SAME_AS_A 59。`.ld/.st/.lea`（simple=1 但 acls=other）按金表保持不删，`slt64/sle64/ult64/eq/ne`（acls=alu、bcls=other）A 删 B 保持，`ule64`（simple=0）保持——三头都有区分性观测。
+- 待办：登记批 `stream-e4-opinfo`（与 `stream-e4-peep` 同，待 cdx 提交 tests/batches.tsv）。

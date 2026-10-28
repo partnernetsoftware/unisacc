@@ -1,0 +1,131 @@
+/* tools/opinfo-cases-gen.cx -- E4 op-class gold table (weights/gold/opinfo.tsv, 73 ops) as executable cases.
+ *   sh ./unisacc.com tools/opinfo-cases-gen.cx -- ROOT STREAM4_COM ABS_OUT FIRST COUNT
+ * opinfo gives each op three heads: simple (0/1: straight-line explicit-operand op the reference liveness pass may
+ * rewrite), acls (its class when it is the first of a peephole pair) and bcls (its class as the second). All three
+ * are observable through weights/gold/peep.tsv, so every expectation here is a table lookup, never a hand value:
+ *   A test (every op): the op writes r2 (when it writes a register) and is followed by `add64 r0, r1, r3` + `ret`.
+ *     Expected output = peep(acls, add64, a_dead) when the op is simple and writes a register (drop_a -> the op
+ *     line is removed; keep -> unchanged), peep(acls, add64, none) otherwise (keep). Jumps/calls get a far label
+ *     so no to_next/to_jump relation holds; `ret` as the op is the whole body.
+ *   B test (three-operand acls=alu ops only): `imm r2, 0` + `OP r0, r1, r2` + `ret`; expected = peep(imm, bcls,
+ *     const0): to_mov -> `mov r0, r1` replaces both lines; keep -> unchanged. For every other op bcls is the same
+ *     word as acls and the A test already carries it (state SAME_AS_A).
+ * Each tape runs on the E4 O2 stream container (STREAM4_COM INPUT INPUT ROOT/include, UNISA_ATTRIBUTES unset),
+ * bounded 12 s; the caller's slice is bounded by the 60 s rule. An expected action the oracle cannot realise
+ * mechanically is ORACLE_MISSING, counted and never PASS. Output: ABS_OUT/cases/OP.{a,b}.tape|.out|.want,
+ * ABS_OUT/results-FIRST-COUNT.tsv and a SUMMARY line. */
+#pragma unisa use cxlib.netpack
+
+static char root[4096], stream4[4096], outdir[4096], inc[4400], bound[4400], cases[4400];
+static void die(const char *s) { fprintf(stderr, "opinfo-cases: REFUSE %s errno=%d\n", s, errno); exit(2); }
+static void path(char *p, size_t cap, const char *a, const char *b) { int n = snprintf(p, cap, "%s/%s", a, b); if (n < 0 || (size_t)n >= cap) die("path"); }
+static void saved(const char *p, const char *s, size_t n) { int f = open(p, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600); if (f < 0) die("exclusive create"); while (n) { ssize_t k = write(f, s, n); if (k <= 0) die("write"); s += k; n -= (size_t)k; } if (close(f)) die("close"); }
+
+/* peep gold rows: key "a\tb\trel" -> y */
+enum { PEEP_MAX = 2048 };
+static char peep_k[PEEP_MAX][96], peep_y[PEEP_MAX][24]; static int npeep;
+static const char *peep(const char *a, const char *b, const char *rel) {
+    char k[96]; snprintf(k, sizeof k, "%s\t%s\t%s", a, b, rel);
+    for (int i = 0; i < npeep; i++) if (!strcmp(peep_k[i], k)) return peep_y[i];
+    die("peep key missing"); return 0;
+}
+static void load_peep(void) {
+    char p[4400]; path(p, sizeof p, root, "weights/gold/peep.tsv"); FILE *f = fopen(p, "rb"); if (!f) die("peep gold");
+    char line[512];
+    while (fgets(line, sizeof line, f)) {
+        if (line[0] == '#' || !strncmp(line, "a\t", 2)) continue;
+        char a[32], b[32], r[40], y[24]; if (sscanf(line, "%31s %31s %39s %23s", a, b, r, y) != 4) die("peep row");
+        if (npeep >= PEEP_MAX) die("peep size"); snprintf(peep_k[npeep], 96, "%s\t%s\t%s", a, b, r); snprintf(peep_y[npeep], 24, "%s", y); npeep++;
+    }
+    fclose(f);
+}
+
+/* the minimal well-formed instance of each op, writing r2 where the op writes a register (measured forms from the
+ * current E4/lower tapes; .arg/.libraryaddr/callm forms from src/back_lower.c). A form with "%s" takes the op word. */
+typedef struct { const char *op, *line; int writes; } Form;
+static const Form forms[] = {
+    { "imm", "  imm r2, 5\n", 1 }, { "mov", "  mov r2, r1\n", 1 },
+    { "add64", "  add64 r2, r1, r3\n", 1 }, { "sub64", "  sub64 r2, r1, r3\n", 1 }, { "mul64", "  mul64 r2, r1, r3\n", 1 },
+    { "xor64", "  xor64 r2, r1, r3\n", 1 }, { "and64", "  and64 r2, r1, r3\n", 1 }, { "or64", "  or64 r2, r1, r3\n", 1 },
+    { "shl64", "  shl64 r2, r1, r3\n", 1 }, { "shr64", "  shr64 r2, r1, r3\n", 1 }, { "lshr64", "  lshr64 r2, r1, r3\n", 1 },
+    { ".div", "  .div r2, r1, r3\n", 1 }, { ".mod", "  .mod r2, r1, r3\n", 1 }, { ".udiv", "  .udiv r2, r1, r3\n", 1 }, { ".umod", "  .umod r2, r1, r3\n", 1 },
+    { "slt64", "  slt64 r2, r1, r3\n", 1 }, { "sle64", "  sle64 r2, r1, r3\n", 1 }, { "ult64", "  ult64 r2, r1, r3\n", 1 }, { "ule64", "  ule64 r2, r1, r3\n", 1 },
+    { "eq", "  eq r2, r1, r3\n", 1 }, { "ne", "  ne r2, r1, r3\n", 1 },
+    { "load64", "  load64 r2, [r6+16]\n", 1 }, { "store64", "  store64 [r6+16], r1\n", 0 },
+    { ".ld", "  .ld r2, [r6+16], 4\n", 1 }, { ".st", "  .st [r6+16], r1, 4\n", 0 }, { ".lea", "  .lea r2, g\n", 1 }, { ".zero", "  .zero r1, 0, 8\n", 0 },
+    { "jump", "  jump L1\n", 0 }, { "jumpz", "  jumpz r1, L1\n", 0 }, { "call", "  call L1\n", 0 }, { "callr", "  callr r5\n", 0 }, { "callm", "  callm [r5+8]\n", 0 },
+    { ".hostcall", "  .hostcall r2, r1\n", 1 }, { ".librarycall", "  .librarycall r2, r1\n", 1 }, { ".libraryaddr", "  .libraryaddr r2, 0\n", 1 },
+    { ".libraryfn", "  .libraryfn r2, 256\n", 1 }, { ".hostaddr", "  .hostaddr r2, 0\n", 1 }, { "ret", "  ret\n", 0 },
+    { ".frame", "  .frame 8\n", 0 }, { ".arg", "  .arg r2, r1\n", 1 }, { ".print", "  .print r1\n", 0 }, { ".write", "  .write r1, r3\n", 0 }, { ".exit", "  .exit r1\n", 0 },
+    { ".sys", "  .sys write, r1, r3, r4\n", 0 }, { ".sys6", "  .sys6 syscall, r1, r3, r4, r5, r2, r0\n", 0 }, { ".argc", "  .argc r2\n", 1 }, { ".argv", "  .argv r2, r1\n", 1 }, { "nop", "  nop\n", 0 },
+    { "fadd64", "  fadd64 r2, r1, r3\n", 1 }, { "fsub64", "  fsub64 r2, r1, r3\n", 1 }, { "fmul64", "  fmul64 r2, r1, r3\n", 1 }, { "fdiv64", "  fdiv64 r2, r1, r3\n", 1 },
+    { "flt64", "  flt64 r2, r1, r3\n", 1 }, { "fle64", "  fle64 r2, r1, r3\n", 1 }, { "feq64", "  feq64 r2, r1, r3\n", 1 },
+    { "fadd32", "  fadd32 r2, r1, r3\n", 1 }, { "fsub32", "  fsub32 r2, r1, r3\n", 1 }, { "fmul32", "  fmul32 r2, r1, r3\n", 1 }, { "fdiv32", "  fdiv32 r2, r1, r3\n", 1 },
+    { "flt32", "  flt32 r2, r1, r3\n", 1 }, { "fle32", "  fle32 r2, r1, r3\n", 1 }, { "feq32", "  feq32 r2, r1, r3\n", 1 },
+    { "cvtid", "  cvtid r2, r1\n", 1 }, { "cvtud", "  cvtud r2, r1\n", 1 }, { "cvtis", "  cvtis r2, r1\n", 1 }, { "cvtus", "  cvtus r2, r1\n", 1 },
+    { "cvtdi", "  cvtdi r2, r1\n", 1 }, { "cvtdu", "  cvtdu r2, r1\n", 1 }, { "cvtsd", "  cvtsd r2, r1\n", 1 }, { "cvtds", "  cvtds r2, r1\n", 1 },
+    { "fsqrt64", "  fsqrt64 r2, r1\n", 1 }, { "fsqrt32", "  fsqrt32 r2, r1\n", 1 },
+    { "other", "  .unknownop r2, r1\n", 1 },
+};
+static const Form *form(const char *op) { for (size_t i = 0; i < sizeof forms / sizeof *forms; i++) if (!strcmp(forms[i].op, op)) return &forms[i]; die("op without a form"); return 0; }
+
+#define APP(dst, ...) do { size_t _l = strlen(dst); int _n = snprintf(dst + _l, sizeof dst - _l, __VA_ARGS__); if (_n < 0 || (size_t)_n >= sizeof dst - _l) die("case text bound"); } while (0)
+
+static int run_case(const char *key, const char *in, const char *want, FILE *res, const char *note) {
+    char tp[4600]; snprintf(tp, sizeof tp, "%s/%s.tape", cases, key); saved(tp, in, strlen(in));
+    char *v[] = { bound, "12", stream4, tp, tp, inc, 0 }; char *env[] = { "UNISA_ATTRIBUTES=", 0 };
+    np_result rr; char why[1024];
+    if (np_run(v, root, env, 14, &rr, why, sizeof why)) { fprintf(res, "NOT_RUN\t%s\t%s\t%s\n", key, note, why); return 2; }
+    char op[4600]; snprintf(op, sizeof op, "%s/%s.out", cases, key); saved(op, rr.out, rr.outn);
+    int ok = !rr.rc && rr.outn == strlen(want) && !memcmp(rr.out, want, rr.outn);
+    fprintf(res, "%s\t%s\t%s\trc=%d\n", ok ? "PASS" : "FAIL", key, note, rr.rc);
+    if (!ok) { char wp[4600]; snprintf(wp, sizeof wp, "%s/%s.want", cases, key); saved(wp, want, strlen(want)); }
+    np_free(&rr); return ok ? 0 : 1;
+}
+
+int main(int argc, char **argv) {
+    if (argc != 6 || !realpath(argv[1], root) || !realpath(argv[2], stream4) || argv[3][0] != '/') { fputs("usage: ROOT STREAM4_COM ABS_OUT FIRST COUNT\n", stderr); return 2; }
+    snprintf(outdir, sizeof outdir, "%s", argv[3]); int first = atoi(argv[4]), count = atoi(argv[5]);
+    if (first < 0 || count < 1 || count > 100) die("range");
+    path(inc, sizeof inc, root, "include"); path(bound, sizeof bound, root, "tools/bound"); path(cases, sizeof cases, outdir, "cases");
+    mkdir(outdir, 0700); if (mkdir(cases, 0700) && errno != EEXIST) die("cases dir");
+    load_peep();
+    char gold[4400]; path(gold, sizeof gold, root, "weights/gold/opinfo.tsv"); FILE *g = fopen(gold, "rb"); if (!g) die("opinfo gold");
+    char respath[4400]; snprintf(respath, sizeof respath, "%s/results-%d-%d.tsv", outdir, first, count); FILE *res = fopen(respath, "wbx"); if (!res) die("results exclusive");
+    char line[512]; int row = 0, seen = 0, npass = 0, nfail = 0, nnotrun = 0, nmiss = 0, nsame = 0;
+    while (fgets(line, sizeof line, g)) {
+        if (line[0] == '#' || !strncmp(line, "op\t", 3)) continue;
+        char op[32], ss[8], acls[32], bcls[32]; if (sscanf(line, "%31s %7s %31s %31s", op, ss, acls, bcls) != 4) die("opinfo row");
+        int k = row++; if (k < first || k >= first + count) continue;
+        seen++; int simple = atoi(ss); const Form *f = form(op);
+        /* A test */
+        char in[1024] = "", want[1024] = "", key[96]; snprintf(key, sizeof key, "%02d.%s.a", k, op);
+        const char *rel = (simple && f->writes) ? "a_dead" : "none"; const char *y = peep(acls, "add64", rel);
+        int far = !strcmp(op, "jump") || !strcmp(op, "jumpz") || !strcmp(op, "call");
+        int is_ret = !strcmp(op, "ret");
+        APP(in, "_start:\n%s", f->line);
+        if (!is_ret) APP(in, "  add64 r0, r1, r3\n  ret\n");
+        if (far) APP(in, "L1:\n  imm r0, 3\n  ret\n");
+        if (!strcmp(op, ".lea")) APP(in, "  .bss g 8\n");
+        char note[64]; snprintf(note, sizeof note, "simple=%d acls=%s rel=%s y=%s", simple, acls, rel, y);
+        if (!strcmp(y, "keep")) { snprintf(want, sizeof want, "%s", in); }
+        else if (!strcmp(y, "drop_a")) { APP(want, "_start:\n  add64 r0, r1, r3\n  ret\n"); if (far) APP(want, "L1:\n  imm r0, 3\n  ret\n"); }
+        else { nmiss++; fprintf(res, "ORACLE_MISSING\t%s\t%s\n", key, note); goto btest; }
+        { int r = run_case(key, in, want, res, note); if (r == 0) npass++; else if (r == 1) nfail++; else nnotrun++; }
+    btest:
+        snprintf(key, sizeof key, "%02d.%s.b", k, op);
+        if (strcmp(acls, "alu")) { nsame++; fprintf(res, "SAME_AS_A\t%s\tbcls=%s equals acls word\n", key, bcls); continue; }
+        in[0] = want[0] = 0; y = peep("imm", bcls, "const0");
+        APP(in, "_start:\n  imm r2, 0\n  %s r0, r1, r2\n  ret\n", op);
+        snprintf(note, sizeof note, "bcls=%s rel=const0 y=%s", bcls, y);
+        if (!strcmp(y, "keep")) snprintf(want, sizeof want, "%s", in);
+        else if (!strcmp(y, "to_mov")) APP(want, "_start:\n  mov r0, r1\n  ret\n");
+        else { nmiss++; fprintf(res, "ORACLE_MISSING\t%s\t%s\n", key, note); continue; }
+        { int r = run_case(key, in, want, res, note); if (r == 0) npass++; else if (r == 1) nfail++; else nnotrun++; }
+    }
+    fclose(g);
+    fprintf(res, "SUMMARY\tops=%d\tpass=%d\tfail=%d\tsame_as_a=%d\toracle_missing=%d\tnot_run=%d\n", seen, npass, nfail, nsame, nmiss, nnotrun);
+    fclose(res);
+    printf("OPINFO_CASES\tfirst=%d\tcount=%d\tops=%d\tpass=%d\tfail=%d\tsame_as_a=%d\toracle_missing=%d\tnot_run=%d\n", first, count, seen, npass, nfail, nsame, nmiss, nnotrun);
+    return nfail || nnotrun ? 1 : 0;
+}
