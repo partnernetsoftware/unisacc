@@ -370,7 +370,11 @@ coverage中旧1/4缺陷描述改为本候选实际4/1及明确合同冲突，没
 
 ### 容器修复开发安装（冻结ecb5fbe322）
 
-冻结95b23dc9接续：11个DIFF模型（shared-e3、warnparse、errorparse、六程序lower、两object-lower）tbl/net共22项通过source-package job真实执行并落PREPARED收据，全部命令rc0；外层每项bound55、内层构造40，未放宽时限。连同34 gen及tool-gen/tbl/net，共59项当前材料收据位于冻结根out/epoch-context-01/jobs；外层输出out/c43-fallguard-{tbl,net}-*-01.*。这只完成变化材料构造，不代表23项来源复用准入、内核/PC/候选安装或发布资格；已装产品仍b6f15。下一动作核验复用来源并建立本次明确角色，不能把旧sizeof profile换pins后冒充同一资格。
+正式落尾包接续：新增独立f9-fallguard-v1角色，保留历史角色及其工具身份；角色测试28/0。原生origin-verifier c674ecba对完整f9来源107作业/34模型核验，实际1005读取；当前59项DAG独立核验373读取。双架构内核由冻结源实际构造。out/c43-fallguard-mixed-pc-01完成prepare、declare/finish、pack/finish、seal及独立--verify；正式包SHA7b806ec2502694a0a0af3ffdc348106a7c6e8dc76f737fdd3f36fffd39194194，11当前模型/23来源模型。控制器源码beb85da9、ELFad59e570，独立读取器固定绑定此身份，未覆盖旧pins。证据out/c43-fallguard-mixed-*-01.*及origin-snapshot-01.*。这是控制器独立材料视图VERIFIED，不是消费者准入、产品测试或安装；已装仍b6f15。
+
+消费者接续：product-build的-O2自编译bound55退出142；宿主GCC CX尝试先暴露缺失的直接mixedprofiles导入（已补），随后因sourcepackage依赖__syscall6/_unisa_ret拒绝，未改被固定的模块去适配宿主。-O0产品自编译成功，但observe及独立-O2 mixed-reader都立即拒绝。reader-02补现场信息后确认reads=9、explicit=1、failed=0：旧读取器未经具名诊断就拒绝out外的bootstrap，而本次角色明确登记冻结根unisacc.com。已改为显式角色的bootstrap必须精确匹配root/controller_bootstrap_relative，实际artifact/record SHA仍核验；其他执行路径违规具名拒绝。reader-03重新构造并实际调用完整snapshot，rc0、full-origin107-current59-11new23adopted PASS（out/c43-fallguard-reader-03.*）。原始拒绝保留；下一步重构产品协调工具以包含此修正，再observe及生成切片，尚未安装。
+
+冻结95b23dc9接续：11个DIFF模型（shared-e3、warnparse、errorparse、六程序lower、两object-lower）tbl/net共22项通过source-package job真实执行并落PREPARED收据，全部命令rc0；外层每项bound55、内层构造40，未放宽时限。连同34 gen及tool-gen/tbl/net，共59项当前材料收据位于冻结根out/epoch-context-01/jobs；外层输出out/c43-fallguard-{tbl,net}-*-01.*。此段为材料构造阶段记录，后续包核验见上段，不授候选安装或发布资格。
 
 冻结95b23dc9的34个gen作业已全部逐项PREPARED，tool-gen/tbl/net均实构（共37项材料收据）。tools/source-model-compare.cx对sizeof来源逐字节比较为26 SAME/8 DIFF，差异精确为六程序lower+两object-lower（out/c43-fallguard-vs-sizeof-01.tsv）；对完整f9捕获域为23 SAME/11 DIFF，另含shared-e3/warnparse/errorparse三项既有解析修复（out/c43-fallguard-vs-f9-01.tsv）。比较核过双方context/job record/实际rc0/output SHA，不代替完整来源DAG核验或复用准入。下一步11项changed的tbl/net真实构造、23项来源域核验、内核/PC与候选；不把26/34或37收据当产品完成率。
 
