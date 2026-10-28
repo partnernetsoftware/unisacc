@@ -28,6 +28,7 @@
 | 用系统 GCC／Clang 把 `.cx` 编成普通可执行文件 | `sh ./gcc_cx.com FILE.cx -o OUT`；Clang 用 `sh ./clang_cx.com`。Windows 上是 `gcc_cx.com FILE.cx -o OUT` | PATH 上的 gcc 或 clang 由 `tools/build-cxcc-host.cx` 在该机链出驱动，不入库。Linux 与 OSX 用 `sh ./gcc_cx.com`；Windows 的 `gcc_cx.com` 是本机程序。本机只跑过 Linux。不调用 `unisacc.com`。抹掉首行 `#!`。无 `use` 时一次执行系统 `gcc` 或 `clang -std=c99 -x c -include include/cx.h`；没有后续非选项输入时不追加 `-x none`。有 `#pragma unisa use` 时在驱动进程里按 `src/cxmod.c` 展开，再按每个单元编译链接。`-run` 尚未做。六目标 APE 这次没有重打。不授予已检查身份。见 §5.3。 |
 | 拒新的模块 `#include` | `sh ./unisacc.com -run tests/cxinclude.cx -- --check` | 模块 `.cx` 新文件必须为 0；`tests/cxinclude.tsv` 旧债只降不升。`--write` 遇到新行或更高计数就拒绝落盘。`include/` 与 `tools/cxcc-hostinc/` 仍可用 `#include`。见 [plans/cx-include-lint.md](plans/cx-include-lint.md)。 |
 | 包清单与导入身份 | `sh ./unisacc.com -run tests/cxpack.cx -- --fixtures` | 目录里的 `cxpack.tsv` 把模块名钉到路径。公开名字只能是该文件的非 static 定义。未知 `use`、跨模块调用未公开的名字、static 列入公开集、名字与路径不一致，都退出 1。正例 `tests/cxpack/ok/main.cx` 的 `-run` 退出 5。这不是编译期所有权：CXIF v0 仍导出全部非 static 定义。见 [plans/cx-pack.md](plans/cx-pack.md)。 |
+| 核对 CXIF v0 文本 | `sh ./unisacc.com -run tests/cxif.cx -- --fixtures` | 现场 `-cx-interface` 必须是 banner、守卫、类型、原型和 `#endif`。函数体、`static`、缺 `#endif`、版本不是 v0 都退出 1。效果、布局和所有权字段不在 v0 里。见 [plans/cxif-v0.md](plans/cxif-v0.md)。 |
 
 新动态逻辑优先由 `unisacc.com + .cx` 完成，减少 `.sh`，不新增临时 `.py`。旧脚本尚未迁移的部分如实记为依赖，不把 `.cx` 转调脚本记成迁移完成。经典 C 参考与模型产品是不同实现；对拍前确认实际两端身份，不能笼统判成“对自身验证”。入口已实现不等于任意输入已验证，继续保留原断言、拒绝和预算。
 
