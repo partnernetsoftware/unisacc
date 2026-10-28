@@ -51,17 +51,13 @@ static int tape_domain(const char *route, Buf *in, const char *src) {
 }
 #include "bind.c"
 
-static int tapebin_path(const char *path) {
-    size_t n=strlen(path);return n>=8&&!strcmp(path+n-8,".tapebin");
-}
-static int tape_path(const char *path) {
-    size_t n=strlen(path);return n>=5&&!strcmp(path+n-5,".tape");
-}
-static int tapebin_target(const char *target) {
-    static const char *names[]={"lnx/x86_64","lnx/arm64","osx/x86_64","osx/arm64","win/x86_64","win/arm64"};
-    for(int i=0;i<6;i++)if(!strcmp(target,names[i]))return i+1;
-    return 0;
-}
+int cxp_tapebin_path(const char *),cxp_tape_path(const char *),cxp_tapebin_target(const char *);
+int cxp_object_path(const char *),cxp_archive_path(const char *);
+#define tapebin_path cxp_tapebin_path
+#define tape_path cxp_tape_path
+#define tapebin_target cxp_tapebin_target
+#define object_path cxp_object_path
+#define archive_path cxp_archive_path
 int cxi_read(const char *,unsigned char **,long *,char *,long);
 /* Source IO has the public compiler diagnostic; package/resource IO keeps
    the runtime diagnostic. No source interpretation happens in this helper. */
@@ -330,11 +326,6 @@ static int product_as(int argc,char **argv) {
     int bad=fwrite(asmbuf.b,1,asmbuf.n,f)!=(size_t)asmbuf.n; bad|=fclose(f)!=0;
     return bad;
 }
-static int object_path(const char *p) {
-    size_t n=strlen(p);
-    return (n>=2 && (!strcmp(p+n-2,".o") || !strcmp(p+n-2,".a"))) || (n>=4 && !strcmp(p+n-4,".obj"));
-}
-static int archive_path(const char *p) { size_t n=strlen(p); return n>=2 && !strcmp(p+n-2,".a"); }
 static int take_unit(char *t,long tl,int u) {
     if (u==0) { strncpy(tl_first,tl_target,31); tl_first[31]=0; }
     else if (strcmp(tl_first,tl_target)) { fprintf(stderr,"unisacc: error: the objects were compiled for different targets (%s, %s)\n",tl_first,tl_target); return 1; }
