@@ -1,15 +1,50 @@
-/* module cli. First slice of command-line parsing.
-   The caller owns one CxcState. These functions borrow argv and do not
-   write its slots or the bytes of any argument. They do not allocate,
-   and they have no mutable module state. They do not call die, exit,
-   clierror, or fprintf.
+/* module cli. Command-line parsing, including the resource options.
+   The caller owns one CxcState, one CxcResources through res, and one
+   CxcOps through ops. These functions borrow argv and do not write its
+   slots or the bytes of any argument. They do not allocate for
+   themselves. The caller's record and line may grow the caller's
+   blocks. There is no mutable module state. They do not call die,
+   exit, clierror, or fprintf, and they do not assign INCDIR or
+   fwd_libs. This module does not use the args module. The caller
+   fills record, line, and cancel. A consumer that uses args injects
+   cxa_record, cxa_line, and cxa_cancel.
 
-   Transitional C callers paste this typedef and these prototypes.
-   The layout below is the ABI: eight pointers, then eighteen ints,
-   natural alignment, no pack attribute. On LP64 and LLP64 that is
-   8-byte pointers and 4-byte ints, sizeof 136, with no interior
-   padding. tools/check-driver-cli.cx locks every offset.
+   Transitional C callers paste these typedefs and these prototypes.
+   CxcState is eight pointers, then eighteen ints, then res, then ops.
+   Natural alignment, no pack attribute. On LP64 and LLP64 that is
+   8-byte pointers and 4-byte ints. The original fields stay at their
+   old offsets, sizeof was 136, res is the pointer at offset 136, and
+   ops is the pointer at offset 144. sizeof CxcState is 152.
+   CxcResources is nineteen pointers, sizeof 152, with no interior
+   padding. CxcOps is three function pointers, sizeof 24.
+   tools/check-driver-cli.cx locks every offset.
 
+     typedef struct {
+         unsigned char **defs;
+         unsigned char **undefs;
+         unsigned char **forced;
+         unsigned char **incdir;
+         unsigned char **quotedir;
+         unsigned char **errorlimit;
+         long *defs_n;
+         long *undefs_n;
+         long *forced_n;
+         long *incdir_n;
+         long *quotedir_n;
+         long *error_n;
+         long *defs_cap;
+         long *undefs_cap;
+         long *forced_cap;
+         long *incdir_cap;
+         long *quotedir_cap;
+         long *error_cap;
+         const char *last_include;
+     } CxcResources;
+     typedef struct {
+         int (*record)(unsigned char **, long *, long *, const char *, char *, long);
+         int (*line)(unsigned char **, long *, long *, const char *, char *, long);
+         int (*cancel)(unsigned char **, long *, const char *, char *, long);
+     } CxcOps;
      typedef struct {
          const char *out;
          const char *target;
@@ -37,6 +72,8 @@
          int werror;
          int nostd;
          int notrim;
+         CxcResources *res;
+         CxcOps *ops;
      } CxcState;
      int cxc_default_run(CxcState *st, char **argv, int argc,
                          char *why, long whycap);
@@ -62,13 +99,32 @@
      0  this slice consumed the option. *index is the next slot.
         The caller must not also increment.
      1  not this slice. *index and every state field stay unchanged.
-        The caller handles -D/-U/-I/-include/-iquote/-ferror-limit,
-        -l/-L/-x, --help/--version, positionals, "--", ledger words,
-        and unknown words.
+        The caller handles -l/-L/-x, --help/--version, positionals,
+        "--", ledger words, and unknown words. -ferror-limit without
+        '=' is one of those unknown words, as is -includefoo.
      5  missing or refused argument. *index and every state field stay
         unchanged. why receives the phrase the driver passes to
         clierror. This 5 is not an args-module failure and must not
-        be turned into die.
+        be turned into die. A null res, a null ops, a null function
+        this option needs, or a null pointer inside the view this
+        option needs, is also 5 "bad argument", and only after a
+        present argument has been resolved. A missing argument is
+        reported first and does not read res or ops. -D requires both
+        cancel and record before cancel runs. -ferror-limit= requires
+        record before it sets the error-limit length to 0.
+     7  a call through record, line, or cancel failed. *index and
+        every CxcState field stay unchanged. why is that call's phrase.
+        The caller must die(why), not clierror. Two failures are
+        already committed and are not rolled back: -ferror-limit=
+        sets the error-limit length to 0 before record, and -D
+        finishes cancel before record. A cancel failure does
+        not record. When the caller injects cxa_cancel, that entry
+        removes undef records whose whole bytes equal the name of the
+        -D text, and that name stops before '='. A stored FOO=1 record
+        therefore stays when the later definition is FOO. -I publishes
+        last_include only after line returns 0. The caller assigns
+        INCDIR from last_include after
+        the walk. -l/-L/-x stay at return 1.
    A missing -b or -t therefore does not update mode. The in-driver
    loop used to assign mode and then return; that write died with the
    stack frame. Here the state is the caller's object, so the write
@@ -86,6 +142,34 @@
    positive cap receives a truncated phrase and a terminating NUL.
    Success clears why when the buffer is usable. Return 1 does not. */
 #pragma unisa module cli
+
+typedef struct {
+    unsigned char **defs;
+    unsigned char **undefs;
+    unsigned char **forced;
+    unsigned char **incdir;
+    unsigned char **quotedir;
+    unsigned char **errorlimit;
+    long *defs_n;
+    long *undefs_n;
+    long *forced_n;
+    long *incdir_n;
+    long *quotedir_n;
+    long *error_n;
+    long *defs_cap;
+    long *undefs_cap;
+    long *forced_cap;
+    long *incdir_cap;
+    long *quotedir_cap;
+    long *error_cap;
+    const char *last_include;
+} CxcResources;
+
+typedef struct {
+    int (*record)(unsigned char **, long *, long *, const char *, char *, long);
+    int (*line)(unsigned char **, long *, long *, const char *, char *, long);
+    int (*cancel)(unsigned char **, long *, const char *, char *, long);
+} CxcOps;
 
 typedef struct {
     const char *out;
@@ -114,6 +198,8 @@ typedef struct {
     int werror;
     int nostd;
     int notrim;
+    CxcResources *res;
+    CxcOps *ops;
 } CxcState;
 
 static void cxc_setwhy(char *why, long cap, const char *msg) {
@@ -151,6 +237,107 @@ static int cxc_need(char **argv, int argc, int index, char **out) {
     if (!argv[index + 1]) return -1;
     *out = argv[index + 1];
     return 1;
+}
+
+static int cxc_arg(char **argv, int argc, int index, const char *a, int at, char **out,
+                   const char *missing, char *why, long whycap) {
+    int got;
+    if (a[at]) { *out = (char *)(a + at); return 0; }
+    got = cxc_need(argv, argc, index, out);
+    if (got == 0) return cxc_fail(5, missing, why, whycap);
+    if (got < 0) return cxc_fail(5, "bad argument", why, whycap);
+    return 0;
+}
+
+static int cxc_advance(int *index, const char *a, int at, char *why, long whycap) {
+    *index = *index + (a[at] ? 1 : 2);
+    return cxc_ok(why, whycap);
+}
+
+static int cxc_macro(CxcState *st, char **argv, int argc, int *index, const char *a,
+                     char *why, long whycap) {
+    CxcResources *r;
+    char *arg;
+    int rc;
+    rc = cxc_arg(argv, argc, *index, a, 2, &arg, "missing macro argument", why, whycap);
+    if (rc) return rc;
+    r = st->res;
+    if (a[1] == 'D') {
+        if (!r || !st->ops || !st->ops->cancel || !st->ops->record
+            || !r->undefs || !r->undefs_n || !r->defs || !r->defs_n || !r->defs_cap)
+            return cxc_fail(5, "bad argument", why, whycap);
+        rc = st->ops->cancel(r->undefs, r->undefs_n, arg, why, whycap);
+        if (rc) return 7;
+        rc = st->ops->record(r->defs, r->defs_n, r->defs_cap, arg, why, whycap);
+        if (rc) return 7;
+    } else {
+        if (!r || !st->ops || !st->ops->record || !r->undefs || !r->undefs_n || !r->undefs_cap)
+            return cxc_fail(5, "bad argument", why, whycap);
+        rc = st->ops->record(r->undefs, r->undefs_n, r->undefs_cap, arg, why, whycap);
+        if (rc) return 7;
+    }
+    return cxc_advance(index, a, 2, why, whycap);
+}
+
+static int cxc_include(CxcState *st, char **argv, int argc, int *index, char *why, long whycap) {
+    CxcResources *r;
+    char *arg;
+    int got;
+    int rc;
+    got = cxc_need(argv, argc, *index, &arg);
+    if (got == 0) return cxc_fail(5, "missing forced include", why, whycap);
+    if (got < 0) return cxc_fail(5, "bad argument", why, whycap);
+    r = st->res;
+    if (!r || !st->ops || !st->ops->record || !r->forced || !r->forced_n || !r->forced_cap)
+        return cxc_fail(5, "bad argument", why, whycap);
+    rc = st->ops->record(r->forced, r->forced_n, r->forced_cap, arg, why, whycap);
+    if (rc) return 7;
+    *index = *index + 2;
+    return cxc_ok(why, whycap);
+}
+
+static int cxc_quote(CxcState *st, char **argv, int argc, int *index, const char *a,
+                     char *why, long whycap) {
+    CxcResources *r;
+    char *arg;
+    int rc;
+    rc = cxc_arg(argv, argc, *index, a, 7, &arg, "missing quote include path", why, whycap);
+    if (rc) return rc;
+    r = st->res;
+    if (!r || !st->ops || !st->ops->line || !r->quotedir || !r->quotedir_n || !r->quotedir_cap)
+        return cxc_fail(5, "bad argument", why, whycap);
+    rc = st->ops->line(r->quotedir, r->quotedir_n, r->quotedir_cap, arg, why, whycap);
+    if (rc) return 7;
+    return cxc_advance(index, a, 7, why, whycap);
+}
+
+static int cxc_incdir(CxcState *st, char **argv, int argc, int *index, const char *a,
+                      char *why, long whycap) {
+    CxcResources *r;
+    char *arg;
+    int rc;
+    rc = cxc_arg(argv, argc, *index, a, 2, &arg, "missing include path", why, whycap);
+    if (rc) return rc;
+    r = st->res;
+    if (!r || !st->ops || !st->ops->line || !r->incdir || !r->incdir_n || !r->incdir_cap)
+        return cxc_fail(5, "bad argument", why, whycap);
+    rc = st->ops->line(r->incdir, r->incdir_n, r->incdir_cap, arg, why, whycap);
+    if (rc) return 7;
+    r->last_include = arg;
+    return cxc_advance(index, a, 2, why, whycap);
+}
+
+static int cxc_limit(CxcState *st, int *index, const char *a, char *why, long whycap) {
+    CxcResources *r;
+    int rc;
+    r = st->res;
+    if (!r || !st->ops || !st->ops->record || !r->errorlimit || !r->error_n || !r->error_cap)
+        return cxc_fail(5, "bad argument", why, whycap);
+    *r->error_n = 0;
+    rc = st->ops->record(r->errorlimit, r->error_n, r->error_cap, a + 14, why, whycap);
+    if (rc) return 7;
+    *index = *index + 1;
+    return cxc_ok(why, whycap);
 }
 
 int cxc_default_run(CxcState *st, char **argv, int argc, char *why, long whycap) {
@@ -311,5 +498,12 @@ int cxc_step(CxcState *st, char **argv, int argc, int *index, char *why, long wh
     if (!strcmp(a, "-O1")) { st->level = 1; *index = *index + 1; return cxc_ok(why, whycap); }
     if (!strcmp(a, "-O2") || !strcmp(a, "-O3")) { st->level = 2; *index = *index + 1; return cxc_ok(why, whycap); }
     if (!strcmp(a, "-Os")) { st->level = 1; *index = *index + 1; return cxc_ok(why, whycap); }
+    if (!strncmp(a, "-ferror-limit=", 14)) return cxc_limit(st, index, a, why, whycap);
+    if (!strcmp(a, "-include")) return cxc_include(st, argv, argc, index, why, whycap);
+    if (!strncmp(a, "-iquote", 7)) return cxc_quote(st, argv, argc, index, a, why, whycap);
+    if (!strcmp(a, "-I") || (a[0] == '-' && a[1] == 'I' && a[2]))
+        return cxc_incdir(st, argv, argc, index, a, why, whycap);
+    if (a[0] == '-' && (a[1] == 'D' || a[1] == 'U'))
+        return cxc_macro(st, argv, argc, index, a, why, whycap);
     return 1;
 }

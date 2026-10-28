@@ -1,10 +1,18 @@
 /* Independent check for module cli. Not a product driver.
-   tools/driver -> ../cx/driver. This unit consumes that module.
+   tools/driver -> ../cx/driver. This unit uses driver.cli and
+   driver.args separately and injects cxa_record, cxa_line, and
+   cxa_cancel. cli does not use args.
    Run one source: sh ./unisacc.com tools/check-driver-cli.cx
-   The adding turn ran that command once: exit 0, CXC failed=0.
-   The ABI notes lock the transitional C struct: eight pointers then
-   eighteen ints, sizeof 136, natural alignment. */
+   The ABI notes lock CxcState at sizeof 152, res at offset 136,
+   ops at offset 144, CxcResources at sizeof 152, and CxcOps at
+   sizeof 24. The original CxcState offsets through notrim stay.
+   ops-null-D, ops-hole-record, and ops-hole-limit lock a missing
+   entry: no call, and the error length is not zeroed.
+   fail-ferror-zeroed and fail-cancel-keeps lock the two committed
+   failures. fail-cancel-norecord locks that a cancel failure does
+   not record. -l/-L/-x stay outside this slice. */
 #pragma unisa use driver.cli
+#pragma unisa use driver.args
 
 static int g_fail;
 
@@ -18,7 +26,7 @@ static unsigned long long at(const void *p) { return (unsigned long long)p; }
 static void abi(void) {
     CxcState s;
     unsigned long long b = at(&s);
-    note(sizeof(CxcState) == 136, "abi-size");
+    note(sizeof(CxcState) == 152, "abi-size");
     note(at(&s.out) - b == 0, "abi-out");
     note(at(&s.target) - b == 8, "abi-target");
     note(at(&s.pkg) - b == 16, "abi-pkg");
@@ -45,6 +53,301 @@ static void abi(void) {
     note(at(&s.werror) - b == 124, "abi-werror");
     note(at(&s.nostd) - b == 128, "abi-nostd");
     note(at(&s.notrim) - b == 132, "abi-notrim");
+    note(at(&s.res) - b == 136, "abi-res");
+    note(at(&s.ops) - b == 144, "abi-ops");
+}
+
+static void abi_ops(void) {
+    CxcOps o;
+    unsigned long long b = at(&o);
+    note(sizeof(CxcOps) == 24, "abi-ops-size");
+    note(at(&o.record) - b == 0, "abi-ops-record");
+    note(at(&o.line) - b == 8, "abi-ops-line");
+    note(at(&o.cancel) - b == 16, "abi-ops-cancel");
+}
+
+static void abi_res(void) {
+    CxcResources r;
+    unsigned long long b = at(&r);
+    note(sizeof(CxcResources) == 152, "abi-res-size");
+    note(at(&r.defs) - b == 0, "abi-res-defs");
+    note(at(&r.undefs) - b == 8, "abi-res-undefs");
+    note(at(&r.forced) - b == 16, "abi-res-forced");
+    note(at(&r.incdir) - b == 24, "abi-res-incdir");
+    note(at(&r.quotedir) - b == 32, "abi-res-quotedir");
+    note(at(&r.errorlimit) - b == 40, "abi-res-error");
+    note(at(&r.defs_n) - b == 48, "abi-res-defs-n");
+    note(at(&r.undefs_n) - b == 56, "abi-res-undefs-n");
+    note(at(&r.forced_n) - b == 64, "abi-res-forced-n");
+    note(at(&r.incdir_n) - b == 72, "abi-res-incdir-n");
+    note(at(&r.quotedir_n) - b == 80, "abi-res-quotedir-n");
+    note(at(&r.error_n) - b == 88, "abi-res-error-n");
+    note(at(&r.defs_cap) - b == 96, "abi-res-defs-cap");
+    note(at(&r.undefs_cap) - b == 104, "abi-res-undefs-cap");
+    note(at(&r.forced_cap) - b == 112, "abi-res-forced-cap");
+    note(at(&r.incdir_cap) - b == 120, "abi-res-incdir-cap");
+    note(at(&r.quotedir_cap) - b == 128, "abi-res-quotedir-cap");
+    note(at(&r.error_cap) - b == 136, "abi-res-error-cap");
+    note(at(&r.last_include) - b == 144, "abi-res-last");
+}
+
+typedef struct { unsigned char *b; long n, cap; } RSlot;
+
+static CxcOps g_ops;
+
+static void rclear(RSlot *s) { s->b = 0; s->n = 0; s->cap = 0; }
+
+static void rarm(CxcState *st, CxcResources *r, RSlot *d, RSlot *u, RSlot *f, RSlot *i, RSlot *q, RSlot *e) {
+    memset(r, 0, sizeof *r);
+    r->defs = &d->b; r->defs_n = &d->n; r->defs_cap = &d->cap;
+    r->undefs = &u->b; r->undefs_n = &u->n; r->undefs_cap = &u->cap;
+    r->forced = &f->b; r->forced_n = &f->n; r->forced_cap = &f->cap;
+    r->incdir = &i->b; r->incdir_n = &i->n; r->incdir_cap = &i->cap;
+    r->quotedir = &q->b; r->quotedir_n = &q->n; r->quotedir_cap = &q->cap;
+    r->errorlimit = &e->b; r->error_n = &e->n; r->error_cap = &e->cap;
+    g_ops.record = cxa_record;
+    g_ops.line = cxa_line;
+    g_ops.cancel = cxa_cancel;
+    st->res = r;
+    st->ops = &g_ops;
+}
+
+static void resources(void) {
+    CxcState st, before;
+    CxcResources r;
+    RSlot d, u, f, inc, q, e;
+    char why[96];
+    unsigned char dmem[32], umem[16], imem[16], emem[32];
+    int i, rc;
+    char *seq[] = {"prog", "-UFOO", "-DFOO=1", "-include", "a.h", "-iquote", "Q", "-I", "inc", "-Iinc2", "-ferror-limit=4", "-ferror-limit="};
+    char *du[] = {"prog", "-DFOO", "-UFOO"};
+    char *ud[] = {"prog", "-UFOO=1", "-DFOO"};
+    const char *oldp = "old";
+    const char *keepp = "keep";
+    char *dd[] = {"prog", "-DFOO", "-DFOO=2"};
+    char *sp[] = {"prog", "-D", "A", "-U", "B", "-include", "p.h", "-iquote", "dir", "-I", "one"};
+    char *join[] = {"prog", "-DFOO", "-Ifoo", "-iquotedir"};
+    char *dfoo[] = {"prog", "-DFOO"};
+    char *bare[] = {"prog", "-ferror-limit"};
+    char *incfoo[] = {"prog", "-includefoo"};
+    char *dump[] = {"prog", "-dump-tokens"};
+    char *oneU[] = {"prog", "-U"};
+    char *lim[] = {"prog", "-ferror-limit=3"};
+    char *empty[] = {"prog", "-ferror-limit="};
+    char *dnull[3];
+    char *inull[3];
+
+    rclear(&d); rclear(&u); rclear(&f); rclear(&inc); rclear(&q); rclear(&e);
+    memset(&st, 0, sizeof st);
+    st.mode = 6;
+    rarm(&st, &r, &d, &u, &f, &inc, &q, &e);
+    i = 1;
+    rc = 0;
+    while (i < 12 && !rc) rc = cxc_step(&st, seq, 12, &i, why, (long)sizeof why);
+    note(rc == 0 && i == 12 && why[0] == 0 && st.mode == 6 && u.n == 0
+        && d.n == 6 && d.b && !memcmp(d.b, "FOO=1", 6)
+        && f.n == 4 && !memcmp(f.b, "a.h", 4)
+        && q.n == 1 && q.b[0] == 'Q'
+        && inc.n == 8 && !memcmp(inc.b, "inc\ninc2", 8)
+        && r.last_include == seq[9] + 2
+        && e.n == 1 && e.b && e.b[0] == 0
+        && !strcmp(seq[1], "-UFOO") && !strcmp(seq[11], "-ferror-limit="), "step-resource-order");
+
+    rclear(&d); rclear(&u); rclear(&f); rclear(&inc); rclear(&q); rclear(&e);
+    memset(&st, 0, sizeof st);
+    rarm(&st, &r, &d, &u, &f, &inc, &q, &e);
+    i = 1;
+    rc = cxc_step(&st, du, 3, &i, why, (long)sizeof why);
+    rc = rc || cxc_step(&st, du, 3, &i, why, (long)sizeof why);
+    note(rc == 0 && i == 3 && d.n == 4 && d.b && !memcmp(d.b, "FOO", 4) && u.n == 4 && u.b && !memcmp(u.b, "FOO", 4), "step-D-then-U");
+
+    rclear(&d); rclear(&u); rclear(&f); rclear(&inc); rclear(&q); rclear(&e);
+    memset(&st, 0, sizeof st);
+    rarm(&st, &r, &d, &u, &f, &inc, &q, &e);
+    i = 1;
+    rc = 0;
+    while (i < 3 && !rc) rc = cxc_step(&st, ud, 3, &i, why, (long)sizeof why);
+    note(rc == 0 && i == 3 && u.n == 6 && u.b && !memcmp(u.b, "FOO=1", 6) && d.n == 4 && d.b && !memcmp(d.b, "FOO", 4), "step-U-equals-kept");
+
+    rclear(&d); rclear(&u); rclear(&f); rclear(&inc); rclear(&q); rclear(&e);
+    memset(&st, 0, sizeof st);
+    rarm(&st, &r, &d, &u, &f, &inc, &q, &e);
+    i = 1;
+    rc = 0;
+    while (i < 3 && !rc) rc = cxc_step(&st, dd, 3, &i, why, (long)sizeof why);
+    note(rc == 0 && d.n == 10 && d.b && !memcmp(d.b, "FOO\0FOO=2", 10), "step-D-twice");
+
+    rclear(&d); rclear(&u); rclear(&f); rclear(&inc); rclear(&q); rclear(&e);
+    memset(&st, 0, sizeof st);
+    rarm(&st, &r, &d, &u, &f, &inc, &q, &e);
+    r.last_include = "old";
+    i = 1;
+    rc = 0;
+    while (i < 11 && !rc) rc = cxc_step(&st, sp, 11, &i, why, (long)sizeof why);
+    note(rc == 0 && i == 11 && d.n == 2 && d.b[0] == 'A' && u.n == 2 && u.b[0] == 'B'
+        && f.n == 4 && !memcmp(f.b, "p.h", 4) && q.n == 3 && !memcmp(q.b, "dir", 3)
+        && inc.n == 3 && !memcmp(inc.b, "one", 3) && r.last_include == sp[10], "step-split-forms");
+
+    rclear(&d); rclear(&u); rclear(&f); rclear(&inc); rclear(&q); rclear(&e);
+    memset(&st, 0, sizeof st);
+    rarm(&st, &r, &d, &u, &f, &inc, &q, &e);
+    i = 1;
+    rc = cxc_step(&st, join, 4, &i, why, (long)sizeof why);
+    note(rc == 0 && i == 2 && d.n == 4, "step-D-join-index");
+    rc = cxc_step(&st, join, 4, &i, why, (long)sizeof why);
+    note(rc == 0 && i == 3 && r.last_include == join[2] + 2 && inc.n == 3, "step-I-join");
+    before = st;
+    rc = cxc_step(&st, join, 4, &i, why, (long)sizeof why);
+    note(rc == 0 && i == 4 && q.n == 3 && !memcmp(q.b, "dir", 3) && r.last_include == join[2] + 2
+        && memcmp(&st, &before, sizeof st) == 0, "step-iquote-join");
+
+    memset(emem, 'Q', sizeof emem);
+    e.b = emem; e.n = 4; e.cap = 32;
+    i = 1;
+    rc = cxc_step(&st, lim, 2, &i, why, (long)sizeof why);
+    note(rc == 0 && i == 2 && e.n == 2 && e.b == emem && e.cap == 32 && emem[0] == '3' && emem[1] == 0, "step-limit-replace");
+    i = 1;
+    rc = cxc_step(&st, empty, 2, &i, why, (long)sizeof why);
+    note(rc == 0 && e.n == 1 && e.b == emem && e.cap == 32 && emem[0] == 0, "step-limit-empty");
+
+    rclear(&d); rclear(&u); rclear(&f); rclear(&inc); rclear(&q); rclear(&e);
+    memset(&st, 0, sizeof st);
+    rarm(&st, &r, &d, &u, &f, &inc, &q, &e);
+    d.n = 9; u.n = 9; f.n = 9; inc.n = 9; q.n = 9; e.n = 9;
+    r.last_include = oldp;
+    before = st;
+    i = 1;
+    memcpy(why, "keep", 5);
+    rc = cxc_step(&st, oneU, 2, &i, why, (long)sizeof why);
+    note(rc == 5 && i == 1 && !strcmp(why, "missing macro argument") && d.n == 9 && u.n == 9
+        && r.last_include == oldp && memcmp(&st, &before, sizeof st) == 0, "step-U-miss");
+    dnull[0] = "prog"; dnull[1] = "-D"; dnull[2] = 0;
+    i = 1;
+    memcpy(why, "keep", 5);
+    before = st;
+    rc = cxc_step(&st, dnull, 3, &i, why, (long)sizeof why);
+    note(rc == 5 && i == 1 && !strcmp(why, "bad argument") && u.n == 9 && d.n == 9
+        && memcmp(&st, &before, sizeof st) == 0, "step-D-null");
+    inull[0] = "prog"; inull[1] = "-include"; inull[2] = 0;
+    i = 1;
+    before = st;
+    rc = cxc_step(&st, inull, 3, &i, why, (long)sizeof why);
+    note(rc == 5 && i == 1 && !strcmp(why, "bad argument") && f.n == 9
+        && memcmp(&st, &before, sizeof st) == 0, "step-include-null");
+
+    memset(&st, 0, sizeof st);
+    st.mode = 3;
+    i = 1;
+    before = st;
+    rc = cxc_step(&st, dfoo, 2, &i, why, (long)sizeof why);
+    note(rc == 5 && i == 1 && !strcmp(why, "bad argument") && memcmp(&st, &before, sizeof st) == 0, "res-null-D");
+
+    memset(&st, 0, sizeof st);
+    rarm(&st, &r, &d, &u, &f, &inc, &q, &e);
+    r.defs = 0;
+    u.b = umem; memcpy(umem, "FOO", 4); u.n = 4; u.cap = 16;
+    d.n = 0;
+    i = 1;
+    rc = cxc_step(&st, dfoo, 2, &i, why, (long)sizeof why);
+    note(rc == 5 && i == 1 && !strcmp(why, "bad argument") && u.n == 4 && d.n == 0, "res-hole-D");
+
+    memset(&st, 0, sizeof st);
+    rarm(&st, &r, &d, &u, &f, &inc, &q, &e);
+    st.ops = 0;
+    d.n = 11; u.n = 11;
+    i = 1;
+    memcpy(why, "keep", 5);
+    before = st;
+    rc = cxc_step(&st, dfoo, 2, &i, why, (long)sizeof why);
+    note(rc == 5 && i == 1 && !strcmp(why, "bad argument") && d.n == 11 && u.n == 11
+        && st.ops == 0 && memcmp(&st, &before, sizeof st) == 0, "ops-null-D");
+
+    memset(&st, 0, sizeof st);
+    rarm(&st, &r, &d, &u, &f, &inc, &q, &e);
+    st.ops->record = 0;
+    memcpy(umem, "FOO", 4);
+    u.b = umem; u.n = 4; u.cap = 16;
+    d.b = 0; d.n = 0;
+    i = 1;
+    rc = cxc_step(&st, dfoo, 2, &i, why, (long)sizeof why);
+    note(rc == 5 && i == 1 && !strcmp(why, "bad argument") && u.n == 4 && !memcmp(umem, "FOO", 4)
+        && d.n == 0 && d.b == 0, "ops-hole-record");
+
+    memset(&st, 0, sizeof st);
+    rarm(&st, &r, &d, &u, &f, &inc, &q, &e);
+    st.ops->record = 0;
+    e.b = emem; e.n = 4; e.cap = 32;
+    i = 1;
+    rc = cxc_step(&st, lim, 2, &i, why, (long)sizeof why);
+    note(rc == 5 && i == 1 && !strcmp(why, "bad argument") && e.n == 4 && e.b == emem && e.cap == 32,
+        "ops-hole-limit");
+
+    memset(emem, 'Q', sizeof emem);
+    memcpy(emem, "-ferror-limit=ZZ", 17);
+    rclear(&d); rclear(&u); rclear(&f); rclear(&inc); rclear(&q); rclear(&e);
+    memset(&st, 0, sizeof st);
+    rarm(&st, &r, &d, &u, &f, &inc, &q, &e);
+    e.b = emem; e.n = 4; e.cap = 32;
+    r.last_include = keepp;
+    st.mode = 4;
+    dnull[0] = "prog"; dnull[1] = (char *)emem;
+    i = 1;
+    rc = cxc_step(&st, dnull, 2, &i, why, (long)sizeof why);
+    note(rc == 7 && i == 1 && !strcmp(why, "aliased argument") && e.n == 0 && e.cap == 32 && e.b == emem
+        && r.last_include == keepp && st.mode == 4, "fail-ferror-zeroed");
+
+    memset(dmem, 0, sizeof dmem);
+    memcpy(dmem, "-DFOO", 6);
+    memcpy(umem, "FOO\0BAR", 7);
+    umem[7] = 0;
+    rclear(&d); rclear(&u); rclear(&f); rclear(&inc); rclear(&q); rclear(&e);
+    memset(&st, 0, sizeof st);
+    rarm(&st, &r, &d, &u, &f, &inc, &q, &e);
+    d.b = dmem; d.n = 0; d.cap = 32;
+    u.b = umem; u.n = 8; u.cap = 16;
+    dnull[0] = "prog"; dnull[1] = (char *)dmem;
+    i = 1;
+    rc = cxc_step(&st, dnull, 2, &i, why, (long)sizeof why);
+    note(rc == 7 && i == 1 && !strcmp(why, "aliased argument") && d.n == 0 && d.b == dmem && d.cap == 32
+        && u.n == 4 && !memcmp(umem, "BAR", 4), "fail-cancel-keeps");
+
+    memcpy(umem, "ABC", 3);
+    rclear(&d); rclear(&u); rclear(&f); rclear(&inc); rclear(&q); rclear(&e);
+    memset(&st, 0, sizeof st);
+    rarm(&st, &r, &d, &u, &f, &inc, &q, &e);
+    u.b = umem; u.n = 3; u.cap = 8;
+    dnull[0] = "prog"; dnull[1] = "-DNAME";
+    i = 1;
+    rc = cxc_step(&st, dnull, 2, &i, why, (long)sizeof why);
+    note(rc == 7 && i == 1 && !strcmp(why, "malformed CLI undefine list") && u.n == 3 && !memcmp(umem, "ABC", 3)
+        && d.n == 0 && d.b == 0, "fail-cancel-norecord");
+
+    memset(imem, 0, sizeof imem);
+    memcpy(imem, "-Ifoo", 6);
+    rclear(&d); rclear(&u); rclear(&f); rclear(&inc); rclear(&q); rclear(&e);
+    memset(&st, 0, sizeof st);
+    rarm(&st, &r, &d, &u, &f, &inc, &q, &e);
+    inc.b = imem; inc.n = 3; inc.cap = 16;
+    r.last_include = oldp;
+    dnull[0] = "prog"; dnull[1] = (char *)imem;
+    i = 1;
+    rc = cxc_step(&st, dnull, 2, &i, why, (long)sizeof why);
+    note(rc == 7 && i == 1 && !strcmp(why, "aliased argument") && inc.n == 3 && inc.b == imem
+        && r.last_include == oldp, "fail-I-clean");
+
+    rclear(&d); rclear(&u); rclear(&f); rclear(&inc); rclear(&q); rclear(&e);
+    memset(&st, 0, sizeof st);
+    rarm(&st, &r, &d, &u, &f, &inc, &q, &e);
+    d.n = 5; u.n = 5; f.n = 5; inc.n = 5; q.n = 5; e.n = 5;
+    i = 1;
+    memcpy(why, "keep", 5);
+    rc = cxc_step(&st, bare, 2, &i, why, (long)sizeof why);
+    note(rc == 1 && i == 1 && !strcmp(why, "keep") && e.n == 5 && d.n == 5, "leave-ferror-word");
+    rc = cxc_step(&st, incfoo, 2, &i, why, (long)sizeof why);
+    note(rc == 1 && i == 1 && f.n == 5 && !strcmp(why, "keep"), "leave-includefoo");
+    i = 1;
+    rc = cxc_step(&st, dump, 2, &i, why, (long)sizeof why);
+    note(rc == 0 && i == 2 && st.mode == 4 && d.n == 5, "step-dump-not-define");
 }
 
 static void defcase(char **v, int n, int run, const char *name) {
@@ -188,10 +491,8 @@ int main(void) {
     char *nost[] = {"prog", "-nostdinc"};
     char *oneD[] = {"prog", "-D"};
     char *oneI[] = {"prog", "-I"};
-    char *oneIf[] = {"prog", "-Ifoo"};
     char *oneInc[] = {"prog", "-include"};
     char *oneQ[] = {"prog", "-iquote"};
-    char *oneF[] = {"prog", "-ferror-limit=3"};
     char *oneL[] = {"prog", "-l"};
     char *oneLL[] = {"prog", "-Ldir"};
     char *oneX[] = {"prog", "-x", "c"};
@@ -211,6 +512,9 @@ int main(void) {
 
     g_fail = 0;
     abi();
+    abi_res();
+    abi_ops();
+    resources();
     defcase(only, 1, 1, "def-only-prog");
     defcase(opt, 4, 1, "def-file-opt");
     defcase(c, 3, 0, "def-c");
@@ -401,12 +705,10 @@ int main(void) {
     before = st;
     rc = cxc_step(&st, gstd, 4, &i, why, (long)sizeof why);
     note(rc == 0 && i == 4 && memcmp(&st, &before, sizeof st) == 0 && st.mode == 2, "step-std");
-    leave(oneD, 2, 1, "leave-D");
-    leave(oneI, 2, 1, "leave-I");
-    leave(oneIf, 2, 1, "leave-Ifoo");
-    leave(oneInc, 2, 1, "leave-include");
-    leave(oneQ, 2, 1, "leave-iquote");
-    leave(oneF, 2, 1, "leave-ferror");
+    miss(oneD, 2, 1, "missing macro argument", "step-D-miss");
+    miss(oneI, 2, 1, "missing include path", "step-I-miss");
+    miss(oneInc, 2, 1, "missing forced include", "step-include-miss");
+    miss(oneQ, 2, 1, "missing quote include path", "step-iquote-miss");
     leave(oneL, 2, 1, "leave-l");
     leave(oneLL, 2, 1, "leave-L");
     leave(oneX, 3, 1, "leave-x");

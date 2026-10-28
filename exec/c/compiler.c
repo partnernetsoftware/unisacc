@@ -396,10 +396,23 @@ static int product_ar(int argc,char **argv) {
 typedef struct { unsigned char *b; long n,cap; } CliBlock;
 /* Transitional ABI shared with cx/driver/cli.cx; fields borrow argv. */
 typedef struct {
+    unsigned char **defs,**undefs,**forced,**incdir,**quotedir,**errorlimit;
+    long *defs_n,*undefs_n,*forced_n,*incdir_n,*quotedir_n,*error_n;
+    long *defs_cap,*undefs_cap,*forced_cap,*incdir_cap,*quotedir_cap,*error_cap;
+    const char *last_include;
+} CxcResources;
+typedef struct {
+    int (*record)(unsigned char **,long *,long *,const char *,char *,long);
+    int (*line)(unsigned char **,long *,long *,const char *,char *,long);
+    int (*cancel)(unsigned char **,long *,const char *,char *,long);
+} CxcOps;
+typedef struct {
     const char *out,*target,*pkg,*deps,*host_symbols_path,*host_provider_path;
     const char **deptargets; int *depquoted;
     int deptarget_cap,ndeptargets,mode,level,explicit_image,runit,force_origin,emitbin;
     int deponly,depphony,sawc,sawS,funit,warnings,defrun,werror,nostd,notrim;
+    CxcResources *res;
+    CxcOps *ops;
 } CxcState;
 int cxc_default_run(CxcState *,char **,int,char *,long);
 int cxc_step(CxcState *,char **,int,int *,char *,long);
@@ -410,9 +423,7 @@ int cxa_cancel(unsigned char **,long *,const char *,char *,long);
 int cxa_includes(const char *,const unsigned char *,long,const unsigned char *,long,const unsigned char *,long,const unsigned char **,long *,char *,long);
 static void args_check(int rc,const char *why) { if (rc) die(why); }
 static void argbytes(CliBlock *b,const char *s) { char why[96]; int rc=cxa_record(&b->b,&b->n,&b->cap,s,why,sizeof why); args_check(rc,why); }
-static void argline(CliBlock *b,const char *s) { char why[96]; int rc=cxa_line(&b->b,&b->n,&b->cap,s,why,sizeof why); args_check(rc,why); }
 static void argraw(CliBlock *b,const unsigned char *p,long n) { char why[96]; int rc=cxa_raw(&b->b,&b->n,&b->cap,p,n,why,sizeof why); args_check(rc,why); }
-static void cli_redefine(CliBlock *b,const char *s) { char why[96]; int rc=cxa_cancel(&b->b,&b->n,s,why,sizeof why); args_check(rc,why); }
 /* the forced-include list one unit is compiled with: a .cx unit's starts with its built-in prelude cx.h, and one
    that uses modules ends with their interfaces (cxm_lists, CX2a) */
 static CliBlock *cxm_lists;
@@ -546,39 +557,30 @@ int main(int argc, char **argv) {
     int sawS=0;
     CliBlock srcres={0};                   /* \0cli/source: the main source path */
     CxcState opts={0}; char cli_reason[128];
+    CxcResources resources={&defs.b,&undefs.b,&forced.b,&incdir.b,&quotedir.b,&errorlimit.b,
+        &defs.n,&undefs.n,&forced.n,&incdir.n,&quotedir.n,&errorlimit.n,
+        &defs.cap,&undefs.cap,&forced.cap,&incdir.cap,&quotedir.cap,&errorlimit.cap,0};
+    opts.res=&resources;
+    CxcOps cliops={cxa_record,cxa_line,cxa_cancel}; opts.ops=&cliops;
     opts.deptargets=deptargets; opts.depquoted=depquoted; opts.deptarget_cap=argc;
     if (cxc_default_run(&opts,argv,argc,cli_reason,sizeof cli_reason)) return clierror(cli_reason);
     for (int i=1;i<argc;) {
         const char *a=argv[i]; int next=i;
         int parsed=cxc_step(&opts,argv,argc,&next,cli_reason,sizeof cli_reason);
         if (!parsed) { i=next; continue; }
+        if (parsed==7) die(cli_reason);
         if (parsed!=1) return clierror(cli_reason);
         if (!strcmp(a,"--version") || !strcmp(a,"-version")) {
             if(rf_trace_finish())return 2;printf("unisacc %s\n",UNISACC_VERSION);return 0;
         } else if (!strcmp(a,"--help")) {
             if(rf_trace_finish())return 2;puts("unisacc FILE [-S|-c|-o FILE|-run]\nDiagnostic, non-stable: --emit-host-symbols FILE (-S/-c/-o, not -run)\nDiagnostic, non-stable: --host-provider FILE (12-byte capability filter; no addresses)");return 0;
-        } else if (!strncmp(a,"-ferror-limit=",14)) { errorlimit.n=0;argbytes(&errorlimit,a+14); }
-        else if (opts.runit && !strcmp(a,"--")) { argstart=i+1;break; }
+        } else if (opts.runit && !strcmp(a,"--")) { argstart=i+1;break; }
         else if (opts.runit && src && a[0]!='-') {
             if(tapebin_path(src)||tape_path(src)){argstart=i;break;}
             size_t len=strlen(a);
             if ((len>=2&&!strcmp(a+len-2,".c")) || (len>=3&&!strcmp(a+len-3,".cx")) || object_path(a)) sources[nsources++]=a;
             else {argstart=i;break;}
-        } else if (a[0]=='-' && (a[1]=='D' || a[1]=='U')) {
-            const char *value=a+2;
-            if (!*value) { if (++i>=argc) return clierror("missing macro argument");value=argv[i]; }
-            if (a[1]=='D') cli_redefine(&undefs,value);
-            argbytes(a[1]=='D'?&defs:&undefs,value);
-        } else if (!strcmp(a,"-include")) {
-            if (++i>=argc) return clierror("missing forced include");argbytes(&forced,argv[i]);
-        } else if (!strncmp(a,"-iquote",7)) {
-            const char *value=a+7;
-            if (!*value) { if (++i>=argc) return clierror("missing quote include path");value=argv[i]; }
-            argline(&quotedir,value);
-        } else if (!strcmp(a,"-I")) {
-            if (++i>=argc) return clierror("missing include path");INCDIR=argv[i];argline(&incdir,INCDIR);
-        } else if (a[0]=='-' && a[1]=='I' && a[2]) { INCDIR=a+2;argline(&incdir,INCDIR); }
-        else if (a[0]=='-' && (a[1]=='l' || a[1]=='L' || a[1]=='x')) {
+        } else if (a[0]=='-' && (a[1]=='l' || a[1]=='L' || a[1]=='x')) {
             const char *value=a+2;
             if (!*value) {
                 if (++i>=argc) return clierror(opts.defrun && src ? "missing compatibility argument (arguments for the program go after --: unisacc prog.c -- -x)" : "missing compatibility argument");
@@ -590,6 +592,7 @@ int main(int argc, char **argv) {
         else { sources[nsources++]=a;if(!src)src=a; }
         i++;
     }
+    if(resources.last_include) INCDIR=resources.last_include;
     out=opts.out;target=opts.target;pkg=opts.pkg;deps=opts.deps;
     host_symbols_path=opts.host_symbols_path;host_provider_path=opts.host_provider_path;
     ndeptargets=opts.ndeptargets;mode=opts.mode;level=opts.level;explicit_image=opts.explicit_image;
