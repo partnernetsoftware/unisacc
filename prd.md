@@ -154,6 +154,8 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 <a id="work-tree"></a>
 ### 思维树
 
+**当前已装产品（FIFO，2026-10-28）：** 8147f2e7/record c493b971，源b2007a76/冻结ab7fbdc810，prepare/finish两阶段安装完成，旧e955备份out/c43-fifo-install-01/。候选格式68/0、直接内嵌模型五项通过；安装后smoke16/0，FIFO已装入口rc1具名拒绝且空stdout。安装收据d9326852。以下e955及“未安装”段是过程历史。下一步新产品受影响模块/ABI/诊断与完整发布覆盖；开发安装不授完整或外国宿主资格。
+
 **FIFO 构造当前节点：** 冻结ab7fbdc810于仓外unisacc-epoch-fifo-ab7fbdc810，SID b2007a76；context61d040c6及tool-gen已完成。固定两处源码差异核验通过，五切片与APE8147f2e7已实际构造，复用PCff696；native identity-helper已写候选来源记录。启动/已装仍e955；下一步候选格式/行为/材料复核和安装，不将构造记为产品通过。
 
 **FIFO 修复接续：** POSIX模型私有驱动五项5/0（7a90b9e2b3），经典参考驱动同五项0/1/1/0/1，FIFO具名拒绝且空stdout。宿主cxcc由grk跟进；Windows和已装e955不记已修。下一动作补宿主/平台验证及新产品构造安装。
@@ -375,6 +377,8 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 
 <a id="memory-palace"></a>
 ### 记忆宫殿
+
+**当前FIFO安装身份：** product8147f2e72dafeb6a0c367398a3eafff2c1b8c5c555e00eee9018cabf86abd63e，record c493b97153c6a3f363bc5df2c0bb36e6c85a8f7a5364b259665fd8ed648d1be9，installed.tsv d932685226e4e4475a7da1ca2c682ee5e33ecb0c443ce3fabeeca243294a1df4。out/c43-fifo-install-01保留e955备份；smoke16/0与已装FIFO拒绝日志out/c43-fifo-installed-*。下述e955身份与未安装语句仅为历史。
 
 **FIFO 冻结检查点：** source b2007a76e3fcb9b852dae5d8e28a058af5081ec6638a269373e01cb5fbfeaf7b；context61d040c692914254eb00d930bb83007bc51d5ced8e4cd1ad1a53cbb585b9ab20，路径unisacc-epoch-fifo-ab7fbdc810/out/epoch-context-01。tool-gen已完成；首次context因缺out父目录拒绝，out/c43-fifo-context-01.stderr保留，补目录后context-02成功。尚无FIFO新候选安装。
 
