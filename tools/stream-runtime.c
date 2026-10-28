@@ -8,6 +8,7 @@
 #include <fcntl.h>
 int cxs_write(int,const void *,long);
 int cxs_attributes(const char *,const void *,long);
+int cxsr_parse(const char *,unsigned char *,long,const char **,int *);
 int main(int argc,char **argv){
  const char *input=argc>1?argv[1]:"-",*source=argc>2?argv[2]:"stdin.c",*ap;unsigned char *bytes,*owned=0;int n,rc,framed;Buf in={0},out={0};static unsigned char one=1;static ResourceInput ri[5];static unsigned char rname[256];
  if(argc>4){fprintf(stderr,"usage: stream.com [INPUT|-] [SOURCE_LABEL] [INCLUDE_DIR]\n");return 2;}
@@ -18,7 +19,7 @@ int main(int argc,char **argv){
  ri[2].name=(unsigned char*)"\0cli/source";ri[2].n=11;ri[2].data=(unsigned char*)source;ri[2].len=strlen(source);ri[3].name=(unsigned char*)"\0cli/target";ri[3].n=11;ri[3].data=(unsigned char*)"lnx/x86_64";ri[3].len=10;RI=ri;NRI=4;ATTR_SLOT=1;
  /* cc 2026-10-28: optional UNISA_STREAM_RESOURCE=NAME=PATH adds one resource "\0NAME" with PATH's bytes (library/symbols,
     library/signatures); absent or empty, behaviour and bytes are unchanged */
- ap=getenv("UNISA_STREAM_RESOURCE");if(ap&&*ap){const char *eq=strchr(ap,'=');size_t nl=eq?(size_t)(eq-ap):0;int rl=0;if(!eq||!nl||nl>254||!eq[1])die("UNISA_STREAM_RESOURCE must be NAME=PATH");rname[0]=0;memcpy(rname+1,ap,nl);ri[4].name=rname;ri[4].n=(int)nl+1;ri[4].data=readfile(eq+1,&rl,0);if(!ri[4].data)die("cannot read UNISA_STREAM_RESOURCE file");ri[4].len=rl;NRI=5;}
+ {const char *resource_path=0;int name_len=0;int parsed=cxsr_parse(getenv("UNISA_STREAM_RESOURCE"),rname,sizeof rname,&resource_path,&name_len);if(parsed==2)die("UNISA_STREAM_RESOURCE must be NAME=PATH");if(parsed==1){int rl=0;ri[4].name=rname;ri[4].n=name_len;ri[4].data=readfile(resource_path,&rl,0);if(!ri[4].data)die("cannot read UNISA_STREAM_RESOURCE file");ri[4].len=rl;NRI=5;}}
  in.b=!strcmp(input,"-")?readstream(0,"stdin",&in.n):readfile(input,&in.n,0);
  framed=in.n>=8&&!memcmp(in.b,"USLATTR1",8);
  if(framed){if(strcmp(STAGES[0].name,"e3"))die("attribute frame requires e3 input");if(!attr_strip(&in))die("invalid attribute frame");}

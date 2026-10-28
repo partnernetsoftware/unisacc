@@ -13,7 +13,8 @@ tools/bound 55 sh ./unisacc.com -O0 -DUNISA_CX_CODEC -I include -iquote exec/c -
 tools/bound 55 sh ./unisacc.com -O2 -I include -iquote exec/c -b lnx/x86_64 -c -funit cx/runtime/codec.cx -o out/stream-codec-unit.o
 tools/bound 55 sh ./unisacc.com -O2 -I include -iquote exec/c -b lnx/x86_64 -c -funit cx/runtime/process_group.cx -o out/stream-process-unit.o
 tools/bound 55 sh ./unisacc.com -O2 -I include -iquote exec/c -b lnx/x86_64 -c -funit cx/runtime/stream_output.cx -o out/stream-output-unit.o
-tools/bound 55 sh ./unisacc.com -fno-trim-libc -o out/stream-runtime.com out/stream-runtime-unit.o out/stream-codec-unit.o out/stream-process-unit.o out/stream-output-unit.o
+tools/bound 55 sh ./unisacc.com -O2 -I include -iquote exec/c -b lnx/x86_64 -c -funit cx/runtime/stream_resource.cx -o out/stream-resource-unit.o
+tools/bound 55 sh ./unisacc.com -fno-trim-libc -o out/stream-runtime.com out/stream-runtime-unit.o out/stream-codec-unit.o out/stream-process-unit.o out/stream-output-unit.o out/stream-resource-unit.o
 tools/bound 30 sh ./unisacc.com tools/stream-pack.cx -- out/stream-runtime.com ./unisacc.com out/streams-new
 tools/bound 30 sh ./unisacc.com tools/stream-pack.cx -- out/stream-runtime.com ./unisacc.com out/streams-arm64-new lnx/arm64
 make streams STREAM_DIR=out/streams-new STREAM_OUT=out/stream-check-new
@@ -21,7 +22,7 @@ make streams STREAM_DIR=out/streams-new STREAM_OUT=out/stream-check-new
 
 Both output directories must be new. Material preparation refuses overwrites and
 retains partial output on failure for inspection. The runtime binary is a shared
-C substrate linked with separate CX codec, stream output and Linux x86-64 process provider
+C substrate linked with separate CX codec, stream output, resource parser and Linux x86-64 process provider
 units. The large runtime unit uses O0 to fit the command bound; this development
 construction is not a performance claim. The product builds these units because
 executable-format and pipeline behavior are under test. All new CX source uses
