@@ -69,6 +69,11 @@
 - A2 宏摘要 + 预展开前缀：E2 结束态转储活宏为 `#define` 文本（需在宏表新增名/参数文本 blob 字段，F_NAMEBLOB/F_PBLOB，FSZ 23→24+），驱动缓存（前奏 E2 输出文本, 摘要）；命中时 E2 以 `\0cli/preexpanded` 资源整段 SPAN 复制前缀、只处理摘要+用户源。改 E2 表 + facts + 驱动；locations 变体需同时缓存位置记录。
 碰撞提示：cdx 的 cx0 工作正在改 E2 对不可变资源的消费（6b0ffc7901），A2 与其同区；A1 在 run.c。先与 cdx 对齐再开工；期间按既定顺序做 MISSING 格的事实生成用例。
 
+- 2026-10-28 追加（fable 子代理裁定：A1 暂不启动，先去风险）：产品的 E2 运行核不是 exec/c/core.c——`exec/c/run.c:28-33` 在 UNISA_CORE_BLOB 下排除 core.c，`core_run` 来自 exec/c/asm/run_x86_64.S / run_arm64.S（布局 exec/c/asm/layout.h）；C 版 core_run 仅在由 compiler.c 构建的开发驱动里运行。因此 A1 的检查点要在两套 ISA 的汇编核里加钩子与恢复，属慢车道纪元项，不是"最小改动"。与 cdx 的碰撞风险低：cdx 当前工作集是 exec/parse2 三表、tests/*、tools/ 若干 .cx；6b0ffc7901 只改 cx0 自身对 `\0cli/includes` 的应答，不改 run.c 与 E2 表；A1 文件集（exec/c/run.c、core.c、runreuse.h、asm/run_*.S、layout.h）与之不相交，A2 则会碰 exec/pp 表。
+  - 实测（out/c43-cc-probe-a1-01，产品 d65c1474）：`int main(void){return 3;}` 作 .cx：E2 推理 1.44–1.55 s，E1 37 ms，E3 45 ms，`-E` 输出 481,573 B；两份不同名/不同目录/不同内容的文件 `-E` 输出到第 481,545 字节前逐字节相同——前奏展开不依赖源名与内容，前奏边界检查点原则上存在。
+  - A1 设计（待汇编核移植时执行，按构造字节等价）：触发于 core_run 循环顶首次窥视用户字节（顶帧 b==s.x 且 mode[q]==0），守卫 F->i==0、主输入未执行动作、xattr 全零、`\0cli/source` 未取用且无其它 blob/intern 等于 src；序列化 q/steps/regs/r/ot/osel/out/err/scratch/stack/memory/blobs/strings/resources 与宿主取用收据（命中时重放以保持 E3 runreuse 收据一致）；键 = 检查点版本 + 包身份（runreuse 已绑）+ PCRC[m] + 阶段/路线 + 除 `\0cli/source` 外全部 `\0cli/*` 资源（defines/undefines/includes/include-dir/nostdinc/quote-dir/fno-trim-libc/werror/object/funit/error-limit），命中时重发触发前每次 core_host_fetch 并逐字节核对；资格同 rr_eligible 去 nsources（RF_STRICT、capture、UNISACC_RUN_CACHE=0 下关闭）；位置 rr_dir()（$UNISACC_E3CACHE 或 $TMPDIR/unisacc-e3cache-UID）文件 pre-<hex>.ckpt。证明：`-E` 冷（UNISACC_RUN_CACHE=0）对命中在 tools/*.cx(75)+tests/preprocess/*.cx(20)+sim 探针上 stdout/stderr/rc 逐字节相等；-D 变更、头字节翻转、包更换必须未命中；tests/phase-timing-stamps.cx RR_TIME 前后。
+  - 下一步：仓外导出里做 C 核可行性探测（开发驱动 + 外部包复现产品 -E 字节；触发守卫是否成立、检查点大小、命中路径 E2 时间），结论回写本节为"A1 确认、汇编移植已定范围"或"A1 源绑定无效、转 A2"。
+  - 附：045306290b 的 RR_TIME 戳已在 d65c1474 里（tests/phase-timing-stamps.cx 在已装产品上 57/0，含测量分支；out/c43-cc-phase-02），HANDOFF 的"待下一纪元装入"已过时。
 ## 10. 下一事实生成用例：`e4.gold.peep-1632`（已实现：tools/peep-cases-gen.cx）
 
 - 事实：`weights/gold/peep.tsv` 1632 键 (a,b,rel)→y；y 分布 keep 1494、drop_a 104、fold_copy 16、to_mov 8、retarget_dest 5、retarget 2、load_to_mov/drop_b/fold_imm 各 1。
