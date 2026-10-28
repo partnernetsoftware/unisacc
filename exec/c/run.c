@@ -39,7 +39,20 @@
 #define UNISA_RUNTIME_PANIC(m) do { fprintf(stderr,"run: %s\n",m); exit(2); } while (0)
 #endif
 static void die(const char *m) { UNISA_RUNTIME_PANIC(m); }
+#ifdef UNISA_CX_CODEC
+/* Transitional ABI: the context is owned by this runtime instance; library
+ * builds may make UNISA_RUNTIME_STATE thread-local. */
+typedef struct { uint32_t table[4][256]; } CxCodecCrc;
+int cxcodec_crc_init(CxCodecCrc *);
+int cxcodec_crc(CxCodecCrc *,const char *,int,uint32_t *);
+int cxcodec_inflate(unsigned char *,unsigned long,const unsigned char *,unsigned long);
+UNISA_RUNTIME_STATE CxCodecCrc cx_runtime_crc;
+static int crc_init(void) { return cxcodec_crc_init(&cx_runtime_crc); }
+static uint32_t crc(char *p,int n) { uint32_t out; if(cxcodec_crc(&cx_runtime_crc,p,n,&out))die("invalid CRC input"); return out; }
+static int unisa_inflate(unsigned char *out,unsigned long outlen,const unsigned char *in,unsigned long inlen) { return cxcodec_inflate(out,outlen,in,inlen); }
+#else
 #include "codec.h"
+#endif
 #include "packagefooter.h"
 static void *xrealloc(void *p, size_t n) { p = realloc(p, n ? n : 1); if (!p) die("out of memory"); return p; }
 /* Package bytes and decoded model tables are owned by their cache (one per

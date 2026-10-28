@@ -10,7 +10,9 @@
 #define UNISA_DEFAULT_MAXSTEPS 400000000000LL
 #endif
 #define UNISA_RUNTIME_LIBRARY
+#define UNISA_CX_CODEC
 #include "run.c"
+#undef UNISA_CX_CODEC
 #undef UNISA_RUNTIME_LIBRARY
 #include "tapebin.h"
 #include "tapebin_emit.h"
