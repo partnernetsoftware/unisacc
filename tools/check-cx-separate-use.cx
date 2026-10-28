@@ -1,0 +1,26 @@
+/* A use consumer and its module must remain separately linkable.
+ * DRIVER MODELS NEW_OUTDIR; outputs and diagnostics stay in that directory. */
+#pragma unisa use cxlib.netpack
+static int invoke(char **v,const char *label){
+    np_result r={0};char why[512];int err=np_run(v,0,0,50,&r,why,sizeof why);
+    int ok=!err&&!r.rc&&!r.errn;
+    printf("%s\t%s\n",ok?"PASS":"FAIL",label);
+    if(!ok){if(err)fprintf(stderr,"%s: %s\n",label,why);else if(r.errn)fwrite(r.err,1,r.errn,stderr);}
+    np_free(&r);return ok;
+}
+int main(int argc,char **argv){
+    if(argc!=4){fputs("usage: DRIVER MODELS NEW_OUTDIR\n",stderr);return 2;}
+    if(mkdir(argv[3],0700)){perror("output directory");return 2;}
+    char consumer[4096],module[4096],image[4096];
+    if(snprintf(consumer,sizeof consumer,"%s/consumer.o",argv[3])>=(int)sizeof consumer||
+       snprintf(module,sizeof module,"%s/module.o",argv[3])>=(int)sizeof module||
+       snprintf(image,sizeof image,"%s/linked.elf",argv[3])>=(int)sizeof image)return 2;
+    char *a[]={"tools/bound","45",argv[1],"--models",argv[2],"-c","-funit","-b","lnx/x86_64","tools/check-driver-compat.cx","-o",consumer,0};
+    char *b[]={"tools/bound","45",argv[1],"--models",argv[2],"-c","-funit","-b","lnx/x86_64","cx/driver/compat.cx","-o",module,0};
+    char *c[]={"tools/bound","45",argv[1],"--models",argv[2],consumer,module,"-o",image,0};
+    int n=0;if(!invoke(a,"consumer-unit"))n++;if(!invoke(b,"module-unit"))n++;
+    if(n){puts("CX_SEPARATE_USE\tNOT_RUN link: prerequisite failed");return 1;}
+    if(!invoke(c,"separate-link")){puts("CX_SEPARATE_USE\tchecks=3\tfailed=1\tlinked-consumer=NOT_RUN");return 1;}
+    char *d[]={"tools/bound","15",image,0};if(!invoke(d,"linked-consumer")){puts("CX_SEPARATE_USE\tchecks=4\tfailed=1");return 1;}
+    puts("CX_SEPARATE_USE\tchecks=4\tfailed=0\tscope=Linux-x86_64");return 0;
+}
