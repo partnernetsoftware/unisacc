@@ -332,6 +332,7 @@ static int take_unit(char *t,long tl,int u) {
     tl_unitver(t,(int)tl); tl_unit(t,(int)tl,u); tl_note_links(t,tl);
     return 0;
 }
+int cxr_member(char *,long,int,char *,long,char **,long *,char *,long);
 static int link_objects(const char **paths,int n,Buf *out) {
     int u=0;
     linkbuf.n=0; tl_ng=0; tl_gend=0; tl_nend=0; tl_ndef=0; tl_next=0; tl_ngdef=0; tl_has_entry=0;
@@ -346,12 +347,14 @@ static int link_objects(const char **paths,int n,Buf *out) {
     for (int p=0;p<n;p++) {                      /* archives, in order: members that define a wanted name */
         if (!archive_path(paths[p])) continue;
         int len=0; unsigned char *b=source_read(paths[p],&len);
-        char *used=calloc(65536,1); int changed=1; char nm[256];
+        char *used=calloc(65536,1); int changed=1; char nm[256],why[128];
+        if (!used) { free(b); die("out of memory"); }
         while (changed) {
             changed=0;
             for (int i=0;i<65536;i++) {
-                long ml=0; char *m=tl_ar_member((char *)b,len,i,nm,&ml);
-                if (!m) break;
+                long ml=0; char *m=0; int rc=cxr_member((char *)b,len,i,nm,sizeof nm,&m,&ml,why,sizeof why);
+                if (rc==1) break;
+                if (rc) { fputs(why,stderr); free(b); free(used); return 1; }
                 if (used[i]) continue;
                 long tl=0; char *t=tl_tape(m,ml,&tl);
                 if (t && tl_needs(t,tl)) { if (take_unit(t,tl,u)) { free(b); free(used); return 1; } u++; used[i]=1; changed=1; }
@@ -372,7 +375,6 @@ static int link_objects(const char **paths,int n,Buf *out) {
    code, with stdio for the files */
 int cxr_operation(const char *,char *,long);
 int cxr_append(char *,long,long,const char *,const char *,long,long *,char *,long);
-int cxr_member(char *,long,int,char *,long,char **,long *,char *,long);
 static int product_ar(int argc,char **argv) {
     if (argc<4) { fputs("usage: unisacc ar rcs|t|x LIB.a [MEMBER...]\n",stderr); return 2; }
     const char *op=argv[2],*lib=argv[3];
