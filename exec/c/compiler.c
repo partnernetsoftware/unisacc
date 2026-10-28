@@ -4,6 +4,7 @@
    is performed by the package's networks. Unsupported CLI remains an explicit
    error until migrated; no call to a reference compiler. Not the default yet. */
 #include "../../src/version.h"
+#include <limits.h>
 /* Match the existing selfcheck fuel budget; explicit environment wins. */
 #ifndef UNISA_DEFAULT_MAXSTEPS
 #define UNISA_DEFAULT_MAXSTEPS 400000000000LL
@@ -381,10 +382,12 @@ static int product_ar(int argc,char **argv) {
     char why[128];
     if (cxr_operation(op,why,sizeof why)) { fputs(why,stderr); return 2; }
     if (op[0]=='r' || op[0]=='q') {
-        long cap=8; for (int i=4;i<argc;i++) { int len=0; unsigned char *b=source_read(argv[i],&len); free(b); cap+=len+400+strlen(argv[i]); }
-        char *ab=malloc(cap); memcpy(ab,"!<arch>\n",8); long at=8;
+        long cap=8; for (int i=4;i<argc;i++) { int len=0; unsigned char *b=source_read(argv[i],&len); size_t namesz=strlen(argv[i]); free(b);
+            if (namesz>(size_t)(LONG_MAX-400-len) || cap>LONG_MAX-400-len-(long)namesz) { fputs("ar: archive too large\n",stderr); return 1; }
+            cap+=len+400+(long)namesz; }
+        char *ab=malloc((size_t)cap); if (!ab) die("out of memory"); memcpy(ab,"!<arch>\n",8); long at=8;
         for (int i=4;i<argc;i++) { int len=0; unsigned char *b=source_read(argv[i],&len); long next=0; int rc=cxr_append(ab,cap,at,argv[i],(char *)b,len,&next,why,sizeof why); free(b); if(rc){ fputs(why,stderr); free(ab); return 1; } at=next; }
-        FILE *f=fopen(lib,"wb"); if (!f) { fprintf(stderr,"ar: cannot write %s\n",lib); return 1; }
+        FILE *f=fopen(lib,"wb"); if (!f) { fprintf(stderr,"ar: cannot write %s\n",lib); free(ab); return 1; }
         int bad=fwrite(ab,1,at,f)!=(size_t)at; bad|=fclose(f)!=0; free(ab);
         return bad;
     }
