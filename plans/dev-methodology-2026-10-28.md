@@ -121,3 +121,4 @@
 
 - §10–§12 的 E4 实跑原用 out/c43-streams-da4e-01 容器（df480481…，非矩阵 pin）；已在 pin 容器 9d3119df（out/c43-streams-riroot-01）复跑：peep 277 PASS / 0 FAIL / 1339 UNREALIZABLE / 16 TABLE_SUSPECT（out/c43-cc-peep-02），opinfo 87 PASS（out/c43-cc-opinfo-02），o2 12 PASS（out/c43-cc-o2-02）——与 da4e 结果逐项相同。
 - `tests/batches.tsv` 本窗由 cdx 暂存，五组共 15 行批登记写在 `plans/batches-cc-proposal.tsv`（peep 8 片、opinfo 2 片、o2 1、prune 1、properties 3 组），cdx 提交后原样并入即可；o2 行需要 run.cx 提供 `{ref}`（冻结导出 `make ref` 产物）占位，目前没有。
+- §14 追加组 `tu`（2026-10-28 探后落地）：两 TU（各自 `static int hidden` 7/100）与单 TU 同程序输出同为 507，静态名隔离成立；`UNISA_JOBS=1` 对 `=4` 与默认的 tape/镜像字节相等。关闭 prop.meta.single-vs-multi-tu、prop.det.jobs-invariance；5 PASS / 0 FAIL；批提案增 `properties-cases-tu` 行。properties 合计 65 PASS，十五格。

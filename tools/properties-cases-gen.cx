@@ -6,6 +6,7 @@
  *   meta  : prop.meta.tape-roundtrip, prop.meta.O2-fixpoint, prop.meta.e4-idempotent, prop.meta.prune-idempotent,
  *           prop.meta.forward-reverse, prop.meta.comment-whitespace, prop.meta.identifier-rename
  *   bound : prop.bound.loop-0-1-255-256, prop.bound.int64-arith, prop.bound.div-zero, prop.bound.tape-integer-range
+ *   tu    : prop.meta.single-vs-multi-tu (two TUs, static name isolation), prop.det.jobs-invariance (UNISA_JOBS 1 vs 4)
  * Subject: the installed product ROOT/unisacc.com (images via `-b TARGET -o`, tapes via `-S`), the E4 and prune
  * stream containers. Inputs are inline (the loop program of tests/pending/properties.cx and its variants, tapes).
  * Non-vacuity guards: determinism rows compile in separate processes and, for no-path-or-time, a different
@@ -140,6 +141,31 @@ static void group_meta(void) {
       if (have[0] && have[1]) check(!strcmp(cat[0], cat[1]), "prop.meta.forward-reverse", "forward-vs-reverse.outputs", "identical outputs on 0/1/255/256"); }
 }
 
+/* two translation units: the same program split in two, each TU with its own `static int hidden` (7 and 100) */
+static const char *tu_a = "#include <stdio.h>\nint helper(int);\nstatic int hidden(void){return 7;}\nint main(void){printf(\"%d\\n\",helper(5)+hidden());return 0;}\n";
+static const char *tu_b = "static int hidden(void){return 100;}\nint helper(int x){return x*hidden();}\n";
+static const char *tu_single = "#include <stdio.h>\nstatic int hidden_a(void){return 7;}\nstatic int hidden_b(void){return 100;}\nint helper(int x){return x*hidden_b();}\nint main(void){printf(\"%d\\n\",helper(5)+hidden_a());return 0;}\n";
+static void group_tu(void) {
+    char a[4400], b[4400], s[4400]; path(a, sizeof a, work, "a.c"); path(b, sizeof b, work, "b.c"); path(s, sizeof s, work, "single.c");
+    saved(a, tu_a, strlen(tu_a)); saved(b, tu_b, strlen(tu_b)); saved(s, tu_single, strlen(tu_single));
+    char mi[4400], si[4400]; path(mi, sizeof mi, work, "multi.img"); path(si, sizeof si, work, "single.img"); np_result r;
+    { char *v[] = { "sh", product, a, b, "-O2", "-b", "lnx/x86_64", "-o", mi, 0 }; if (run(v, noenv, 20, &r) || r.rc) { row("NOT_RUN", "prop.meta.single-vs-multi-tu", "multi.compile", "two-TU compile failed"); np_free(&r); return; } np_free(&r); }
+    if (compile(s, "-O2", targets[0], si, noenv, &r) || r.rc) { row("NOT_RUN", "prop.meta.single-vs-multi-tu", "single.compile", "compile failed"); np_free(&r); return; } np_free(&r);
+    { np_result m, o; char *vm[] = { mi, 0 }, *vs[] = { si, 0 };
+      if (run(vm, noenv, 3, &m) || run(vs, noenv, 3, &o)) row("NOT_RUN", "prop.meta.single-vs-multi-tu", "run", "image did not run");
+      else { check(exact(&m, "507\n"), "prop.meta.single-vs-multi-tu", "multi.output-507", "static hidden() of each TU isolated: 5*100+7");
+             check(exact(&o, "507\n") && m.outn == o.outn && !memcmp(m.out, o.out, m.outn), "prop.meta.single-vs-multi-tu", "single-equals-multi", "identical output"); np_free(&m); np_free(&o); } }
+    /* UNISA_JOBS=1 versus 4 on the two-TU input: tape and image byte-equal */
+    { char t1[4400], t4[4400], i1[4400], i4[4400]; path(t1, sizeof t1, work, "jobs1.tape"); path(t4, sizeof t4, work, "jobs4.tape"); path(i1, sizeof i1, work, "jobs1.img"); path(i4, sizeof i4, work, "jobs4.img");
+      char *e1[] = { "UNISA_JOBS=1", 0 }, *e4[] = { "UNISA_JOBS=4", 0 }; int bad = 0;
+      { char *v[] = { "sh", product, a, b, "-O2", "-S", "-o", t1, 0 }; if (run(v, e1, 20, &r) || r.rc) bad = 1; np_free(&r); }
+      { char *v[] = { "sh", product, a, b, "-O2", "-S", "-o", t4, 0 }; if (run(v, e4, 20, &r) || r.rc) bad = 1; np_free(&r); }
+      { char *v[] = { "sh", product, a, b, "-O2", "-b", "lnx/x86_64", "-o", i1, 0 }; if (run(v, e1, 20, &r) || r.rc) bad = 1; np_free(&r); }
+      { char *v[] = { "sh", product, a, b, "-O2", "-b", "lnx/x86_64", "-o", i4, 0 }; if (run(v, e4, 20, &r) || r.rc) bad = 1; np_free(&r); }
+      if (bad) row("NOT_RUN", "prop.det.jobs-invariance", "jobs", "a compile failed");
+      else { check(same_file(t1, t4), "prop.det.jobs-invariance", "two-TU.tape-jobs1-vs-jobs4", "byte equality"); check(same_file(i1, i4), "prop.det.jobs-invariance", "two-TU.image-jobs1-vs-jobs4", "byte equality"); check(same_file(i1, mi), "prop.det.jobs-invariance", "two-TU.image-jobs1-vs-default", "byte equality with the default job count"); } }
+}
+
 static void group_bound(void) {
     np_result r; char src[4400], img[4400]; path(src, sizeof src, work, "forward.c"); write_program(src, fwd); path(img, sizeof img, work, "forward.img");
     if (compile(src, "-O0", targets[0], img, noenv, &r) || r.rc) die("forward compile"); np_free(&r);
@@ -183,14 +209,14 @@ static void group_bound(void) {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 6 || !realpath(argv[1], root) || !realpath(argv[2], stream4) || !realpath(argv[3], stream5) || argv[4][0] != '/') { fputs("usage: ROOT STREAM4_COM STREAM5_COM ABS_OUT det|meta|bound\n", stderr); return 2; }
-    const char *group = argv[5]; if (strcmp(group, "det") && strcmp(group, "meta") && strcmp(group, "bound")) die("group");
+    if (argc != 6 || !realpath(argv[1], root) || !realpath(argv[2], stream4) || !realpath(argv[3], stream5) || argv[4][0] != '/') { fputs("usage: ROOT STREAM4_COM STREAM5_COM ABS_OUT det|meta|bound|tu\n", stderr); return 2; }
+    const char *group = argv[5]; if (strcmp(group, "det") && strcmp(group, "meta") && strcmp(group, "bound") && strcmp(group, "tu")) die("group");
     snprintf(outdir, sizeof outdir, "%s", argv[4]); if (mkdir(outdir, 0700) && errno != EEXIST) die("out dir");
     path(work, sizeof work, outdir, group); if (mkdir(work, 0700)) die("group dir must be absent");
     path(inc, sizeof inc, root, "include"); path(bound, sizeof bound, root, "tools/bound"); path(product, sizeof product, root, "unisacc.com");
     char rp[4400]; snprintf(rp, sizeof rp, "%s/results-%s.tsv", outdir, group); res = fopen(rp, "wbx"); if (!res) die("results exclusive");
     { char hp[65], h4[65], h5[65]; if (!shafile(product, hp) || !shafile(stream4, h4) || !shafile(stream5, h5)) die("identity"); fprintf(res, "IDENTITY\tproduct=%s\tstream4=%s\tstream5=%s\n", hp, h4, h5); }
-    if (!strcmp(group, "det")) group_det(); else if (!strcmp(group, "meta")) group_meta(); else group_bound();
+    if (!strcmp(group, "det")) group_det(); else if (!strcmp(group, "meta")) group_meta(); else if (!strcmp(group, "tu")) group_tu(); else group_bound();
     fprintf(res, "SUMMARY\tgroup=%s\tpass=%d\tfail=%d\tvacuous=%d\tnot_run=%d\n", group, npass, nfail, nvac, nnotrun); fclose(res);
     printf("PROPERTY_CASES\tgroup=%s\tpass=%d\tfail=%d\tvacuous=%d\tnot_run=%d\n", group, npass, nfail, nvac, nnotrun);
     return nfail || nvac || nnotrun ? 1 : 0;
