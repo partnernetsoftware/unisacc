@@ -31,3 +31,7 @@
 ## 观察（非缺陷）：相同字符串字面量的指针相等性（2026-10-28 ccdiff-4 探针）
 
 - `const char *s1="dup",*s2="dup"; s1==s2`：宿主 gcc 11 输出 1（字面量合并），产品 f3705dfa 输出 0（不合并）。C99 6.4.5p6 明示"相同内容的字面量是否为同一对象未指定"，两者都合规；不入差分语料，不改产品。
+
+## 观察（诊断质量，低）：无 main 的链接拒绝文本不具名（2026-10-28 link-edge-cases）
+
+- `unisacc -o p a.o`（a.o 无 main）：rc 1、无镜像（合同满足），但 stderr 为 `reject: not covered: address or target declaration`，未说明"undefined reference to main"。建议 src 域所有者在 tl_check_undef 补丁同批加 `_start`/`main` 缺失的具名诊断。批 `link-edge-cases` 以 INFO 行记录现文本，不断言。

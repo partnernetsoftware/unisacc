@@ -1,0 +1,49 @@
+/* tools/link-edge-cases.cx -- unit-link edge contracts (prd.md:771 §3.15; src/tapelink.c R19-8 / R20-3), probed on
+ * f3705dfa 2026-10-28 after the undefined-function defect; these are the behaviours that DO hold and must keep holding.
+ *   sh ./unisacc.com tools/link-edge-cases.cx -- ROOT ABS_OUT
+ * Units (`-c -b lnx/x86_64 -funit`): a.c/b.c each define a private `static int h()` with different bodies plus a()/b();
+ * m.c uses a(), b(), `extern int gv` (defined in g.c) and its own gv2; m2.c is a second main; md.c references an
+ * undefined data object. Rows:
+ *   private-names-do-not-collide: m+a+b+g links and exits 138 (= 11+22+100+5: each unit's own h);
+ *   extern-data-resolved: the same program (gv from g.o);
+ *   duplicate-main.refused / object-twice.refused: `link: multiple definitions of main|a`, rc != 0, no image;
+ *   undefined-data.refused: `link: undefined reference to missing_data`, rc != 0, no image (R20-3 g_ check);
+ *   duplicate-archive-member.tolerated: an archive holding a.o twice links once and exits 138;
+ *   empty-archive.created: `ar rcs e.a` with no members writes the 8-byte magic only;
+ *   no-main: linking a.o alone is refused with rc != 0 and no image; the diagnostic text is recorded as INFO (observed
+ *     `reject: not covered: address or target declaration`, which does not name the missing main -- a diagnostic
+ *     quality note, see plans/defects-c43.md). */
+#pragma unisa use cxlib.netpack
+
+static char root[4096], outdir[4096], product[4400], bound[4400]; static int npass, nfail; static FILE *res;
+static void die(const char *s) { fprintf(stderr, "link-edge-cases: REFUSE %s errno=%d\n", s, errno); exit(2); }
+static void path(char *p, size_t cap, const char *a, const char *b) { int n = snprintf(p, cap, "%s/%s", a, b); if (n < 0 || (size_t)n >= cap) die("path"); }
+static void saved(const char *p, const char *s, size_t n) { int f = open(p, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600); if (f < 0) die("exclusive create"); while (n) { ssize_t k = write(f, s, n); if (k <= 0) die("write"); s += k; n -= (size_t)k; } if (close(f)) die("close"); }
+static void check(int ok, const char *label, const char *detail) { fprintf(res, "%s\tlink.edge.%s\t%s\n", ok ? "PASS" : "FAIL", label, detail); printf("%s\t%s\n", ok ? "PASS" : "FAIL", label); if (ok) npass++; else nfail++; }
+static int prod(char *const extra[], np_result *r) { char *v[20]; int n = 0; v[n++] = "sh"; v[n++] = product; for (int i = 0; extra[i]; i++) { if (n >= 19) die("argv"); v[n++] = extra[i]; } v[n] = 0; char why[1024]; return np_run(v, outdir, 0, 20, r, why, sizeof why); }
+static int absent(const char *leaf) { char p[4400]; path(p, sizeof p, outdir, leaf); struct stat st; errno = 0; if (!lstat(p, &st)) return 0; if (errno != ENOENT) die("lstat"); return 1; }
+static int exec_rc(const char *leaf, size_t *outn) { char p[4400]; path(p, sizeof p, outdir, leaf); if (chmod(p, 0700)) die("chmod"); char *v[] = { bound, "5", p, 0 }; np_result r; char why[1024]; if (np_run(v, outdir, 0, 7, &r, why, sizeof why)) return -1; int rc = r.rc; *outn = r.outn; np_free(&r); return rc; }
+static void refused(const char *label, char *const argv[], const char *img, const char *text) { np_result r; if (prod(argv, &r)) { check(0, label, "transport"); return; }
+    int named = r.errn && strstr(r.err, text) != 0; char d[320]; snprintf(d, sizeof d, "rc=%d image-absent=%d named=%d stderr=%.*s", r.rc, absent(img), named, (int)(r.errn > 120 ? 120 : r.errn), r.err); for (char *q = d; *q; q++) if (*q == '\n') *q = ' ';
+    check(r.rc && absent(img) && named, label, d); np_free(&r); }
+
+int main(int argc, char **argv) {
+    if (argc != 3 || !realpath(argv[1], root) || argv[2][0] != '/') { fputs("usage: ROOT ABS_OUT\n", stderr); return 2; }
+    snprintf(outdir, sizeof outdir, "%s", argv[2]); if (mkdir(outdir, 0700)) die("new out dir must be absent"); path(product, sizeof product, root, "unisacc.com"); path(bound, sizeof bound, root, "tools/bound");
+    char rp[4400]; path(rp, sizeof rp, outdir, "results.tsv"); res = fopen(rp, "wbx"); if (!res) die("results");
+    { size_t n; char *b = cx_read(product, &n); if (!b) die("product"); char h[65]; cx_sha256_hex(b, n, h); free(b); fprintf(res, "IDENTITY\tcandidate=%s\n", h); }
+    struct { const char *leaf, *src; } u[6] = {
+        { "a", "static int h(void){return 1;}int a(void){return h()+10;}\n" }, { "b", "static int h(void){return 2;}int b(void){return h()+20;}\n" },
+        { "m", "int a(void);int b(void);extern int gv;int gv2=5;int main(void){return a()+b()+gv+gv2;}\n" }, { "g", "int gv=100;\n" },
+        { "m2", "int main(void){return 1;}\n" }, { "md", "extern int missing_data;int main(void){return missing_data;}\n" } };
+    for (int i = 0; i < 6; i++) { char c[64], o[64], p[4400]; snprintf(c, sizeof c, "%s.c", u[i].leaf); snprintf(o, sizeof o, "%s.o", u[i].leaf); path(p, sizeof p, outdir, c); saved(p, u[i].src, strlen(u[i].src)); char *v[] = { "-c", "-b", "lnx/x86_64", "-funit", "-o", o, c, 0 }; np_result r; if (prod(v, &r) || r.rc) die("unit compile"); np_free(&r); }
+    { char *v[] = { "-o", "p1", "m.o", "a.o", "b.o", "g.o", 0 }; np_result r; if (prod(v, &r)) die("p1"); int rc = r.rc; np_free(&r); size_t on = 1; int x = rc ? -1 : exec_rc("p1", &on); char d[120]; snprintf(d, sizeof d, "link rc=%d run rc=%d want 138 stdout=%zu", rc, x, on);
+      check(!rc && x == 138 && !on, "private-names-do-not-collide", d); check(!rc && x == 138, "extern-data-resolved", d); }
+    { char *v[] = { "-o", "p2", "m.o", "m2.o", "a.o", "b.o", "g.o", 0 }; refused("duplicate-main.refused", v, "p2", "link: multiple definitions of main"); }
+    { char *v[] = { "-o", "p6", "m.o", "a.o", "a.o", "b.o", "g.o", 0 }; refused("object-twice.refused", v, "p6", "link: multiple definitions of a"); }
+    { char *v[] = { "-o", "p3", "md.o", 0 }; refused("undefined-data.refused", v, "p3", "link: undefined reference to missing_data"); }
+    { char *a[] = { "ar", "rcs", "d.a", "a.o", "a.o", 0 }; np_result r; if (prod(a, &r) || r.rc) die("d.a"); np_free(&r); char *v[] = { "-o", "p5", "m.o", "d.a", "b.o", "g.o", 0 }; if (prod(v, &r)) die("p5"); int rc = r.rc; np_free(&r); size_t on = 1; int x = rc ? -1 : exec_rc("p5", &on); char d[120]; snprintf(d, sizeof d, "link rc=%d run rc=%d want 138", rc, x); check(!rc && x == 138 && !on, "duplicate-archive-member.tolerated", d); }
+    { char *a[] = { "ar", "rcs", "e.a", 0 }; np_result r; if (prod(a, &r)) die("e.a"); int rc = r.rc; np_free(&r); char p[4400]; path(p, sizeof p, outdir, "e.a"); size_t n = 0; char *b = rc ? 0 : cx_read(p, &n); char d[100]; snprintf(d, sizeof d, "rc=%d bytes=%zu", rc, n); check(!rc && b && n == 8 && !memcmp(b, "!<arch>\n", 8), "empty-archive.created", d); free(b); }
+    { char *v[] = { "-o", "p4", "a.o", 0 }; np_result r; if (prod(v, &r)) die("p4"); char d[300]; snprintf(d, sizeof d, "rc=%d image-absent=%d stderr=%.*s", r.rc, absent("p4"), (int)(r.errn > 150 ? 150 : r.errn), r.err); for (char *q = d; *q; q++) if (*q == '\n') *q = ' '; check(r.rc && absent("p4"), "no-main.refused", d); fprintf(res, "INFO\tlink.edge.no-main.diagnostic\t%s\n", d); np_free(&r); }
+    fprintf(res, "SUMMARY\tpass=%d\tfail=%d\n", npass, nfail); fclose(res); printf("LINK_EDGE_CASES\tpass=%d\tfail=%d\n", npass, nfail); return nfail ? 1 : 0;
+}
