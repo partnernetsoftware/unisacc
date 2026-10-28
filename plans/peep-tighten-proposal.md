@@ -44,4 +44,4 @@
          return "fold_copy"
 ```
 
-依据：src/opt.c `ol_scan`（tape 末尾与 OK_OTHER 行视为读全部寄存器，故 b=none/other 时 rD 永不死）与 copy_into 的 `ol_k[i+1]==OK_SIMPLE && (ol_rm[i+1] & (1<<ya))`（imm 不读寄存器；jump/jumpz/other 非 SIMPLE；load64 读基址寄存器故保留）。预期效果：`gold-export` 后 peep.tsv 恰有 12 行 y 由 drop_a/fold_copy 变 keep；tools/peep-cases-gen.cx 全片重跑应为 277 PASS / 0 FAIL / 1355 UNREALIZABLE / 0 TABLE_SUSPECT（16→12→0，其中 4 键已由生成器补实现）。
+依据：src/opt.c `ol_scan`（tape 末尾与 OK_OTHER 行视为读全部寄存器，故 b=none/other 时 rD 永不死）与 copy_into 的 `ol_k[i+1]==OK_SIMPLE && (ol_rm[i+1] & (1<<ya))`（imm 不读寄存器；jump/jumpz/other 非 SIMPLE；load64 读基址寄存器故保留）。预期效果：`gold-export` 后 peep.tsv 恰有 12 行 y 由 drop_a/fold_copy 变 keep；tools/peep-cases-gen.cx 全片重跑应为 281 PASS / 0 FAIL / 1351 UNREALIZABLE / 0 TABLE_SUSPECT（PASS 277+4：4 键已由生成器补实现；UNREALIZABLE 1339+12：12 键改 keep 后按定义计入；TABLE_SUSPECT 16→12→0）。
