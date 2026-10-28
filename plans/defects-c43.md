@@ -27,3 +27,7 @@
 ```
 
 验收：批 `link-undefined-function` 三行转绿（`link: undefined reference to used`，rc≠0，无镜像）；`objects-link`、`formats-objects`、`formats-archive-ar`（17）、`formats-elf-ape`（68）不变；REF 需同步同一补丁后 `optimization-corpus-*` 六目标字节差分保持 0 DIFF。风险：若某单元对 `_start` 或 `__init_u` 发 `.extern`（本次夹具未见），需把它们加入白名单。
+
+## 观察（非缺陷）：相同字符串字面量的指针相等性（2026-10-28 ccdiff-4 探针）
+
+- `const char *s1="dup",*s2="dup"; s1==s2`：宿主 gcc 11 输出 1（字面量合并），产品 f3705dfa 输出 0（不合并）。C99 6.4.5p6 明示"相同内容的字面量是否为同一对象未指定"，两者都合规；不入差分语料，不改产品。

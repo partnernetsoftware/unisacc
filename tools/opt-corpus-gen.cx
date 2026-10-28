@@ -166,6 +166,19 @@ static const Prog progs3[] = {
     { "corpus.cc-differential-3", "promotion-shifts", "#include <stdio.h>\nint main(void){unsigned short us=0xFFFF;int w=us+1;unsigned char uc=0x80;int sh=uc<<1;long long big=(long long)1<<33;printf(\"%d %d %lld %d\\n\",w,sh,big,(int)(big>>30));return (int)(big>>30);}\n", 0, "65536 256 8589934592 8\n", 8 },
 };
 #define NPROG3 ((int)(sizeof progs3 / sizeof *progs3))
+/* ccdiff-4: inf/nan and printf conversions, string/stdlib functions (strchr, strrchr, strstr, memmove, qsort, bsearch,
+   abs, labs, div), struct arrays by value with unions and a long long switch, large double->u64 and float rounding,
+   mixed int/double varargs, u64 division, negative indexing, struct copy via memcpy and arithmetic right shift
+   (x86-64: arithmetic). Excluded on purpose: identical string literals' pointer equality (unspecified, C99 6.4.5p6;
+   host folds, product does not -- recorded in plans/defects-c43.md as a non-defect divergence). */
+static const Prog progs4[] = {
+    { "corpus.cc-differential-4", "printf-conv", "#include <stdio.h>\nint main(void){volatile double z=0.0;double inf=1.0/z;double n=z/z;printf(\"%f %f %d %d %.3e %g\\n\",inf,-inf,inf>1e308,n!=n,123456789.0,0.0001);printf(\"%5s|%-5s|%.2s|%c|%o|%X|%%|%ld|%08.3f\\n\",\"ab\",\"cd\",\"efgh\",'Q',64,255,-5L,3.14159);return 9;}\n", 0, "inf -inf 1 1 1.235e+08 0.0001\n   ab|cd   |ef|Q|100|FF|%|-5|0003.142\n", 9 },
+    { "corpus.cc-differential-4", "string-stdlib", "#include <stdio.h>\n#include <string.h>\n#include <stdlib.h>\nstatic int cmp(const void*a,const void*b){return *(const int*)a-*(const int*)b;}\nint main(void){char b[32]=\"abcabc\";printf(\"%s %s %d\\n\",strchr(b,'c'),strrchr(b,'a'),(int)(strstr(b,\"ca\")-b));char m[16]=\"0123456789\";memmove(m+2,m,5);printf(\"%s\\n\",m);int v[6]={5,3,9,1,7,2};qsort(v,6,sizeof v[0],cmp);int k=1,*f=bsearch(&k,v,6,sizeof v[0],cmp);printf(\"%d%d%d%d%d%d %d %d %ld\\n\",v[0],v[1],v[2],v[3],v[4],v[5],(int)(f-v),abs(-9),labs(-10L));div_t d=div(17,5);printf(\"%d %d\\n\",d.quot,d.rem);return d.quot+d.rem;}\n", 0, "cabc abc 2\n0101234789\n123579 0 9 10\n3 2\n", 5 },
+    { "corpus.cc-differential-4", "struct-union-switch-ll", "#include <stdio.h>\nstruct A{int v[3];};struct W{struct A a;union{int i;char c[4];}u;};\nstatic struct A twice(struct A a){int i;for(i=0;i<3;i++)a.v[i]*=2;return a;}\nstatic int (*pick(int k))(int){return k?0:0;}\nstatic const char greet[]=\"hey\";static int tbl[4]={1,2};\nint main(void){struct W w;w.a.v[0]=1;w.a.v[1]=2;w.a.v[2]=3;w.u.i=0x41424344;struct A b=twice(w.a);struct A c=b;c.v[0]=99;long long big=5000000000LL;int r;switch(big){case 5000000000LL:r=1;break;default:r=0;}printf(\"%d %d %d %c %u %d %d %d %u %d\\n\",b.v[0],b.v[2],c.v[0],w.u.c[0],(unsigned)sizeof greet,tbl[2],tbl[3],r,(unsigned)sizeof tbl,pick(1)==0);double dd=4294967296.0;unsigned long long ul=(unsigned long long)dd;float ff=16777217;printf(\"%llu %.0f %d\\n\",ul,ff,(int)(float)16777217);return b.v[2]+r;}\n", 0, "2 6 99 D 4 0 0 1 16 1\n4294967296 16777216 16777216\n", 7 },
+    { "corpus.cc-differential-4", "varargs-u64-negidx", "#include <stdio.h>\n#include <stdarg.h>\nstatic double mix(int n,...){va_list ap;double s=0;int i;va_start(ap,n);for(i=0;i<n;i++){if(i%2)s+=va_arg(ap,double);else s+=va_arg(ap,int);}va_end(ap);return s;}\nint main(void){printf(\"%.1f\\n\",mix(4,1,2.5,3,4.5));unsigned long long u=18446744073709551615ULL;printf(\"%llu %llu\\n\",u/7,u%7);int a[5]={1,2,3,4,5};int *p=a+4;printf(\"%d %d\\n\",p[-2],*(p-4));return p[-2]+*(p-4);}\n", 0, "11.0\n2635249153387078802 1\n3 1\n", 4 },
+    { "corpus.cc-differential-4", "memcpy-struct-shift", "#include <stdio.h>\n#include <string.h>\nstruct T{char c;double d;short s;};\nint main(void){struct T a={'x',2.5,7},b;memcpy(&b,&a,sizeof a);printf(\"%c %.1f %d %u\\n\",b.c,b.d,b.s,(unsigned)sizeof a);int sh=-16>>2;printf(\"%d %d\\n\",sh,-1>>31);return b.s+(-sh);}\n", 0, "x 2.5 7 24\n-4 -1\n", 11 },
+};
+#define NPROG4 ((int)(sizeof progs4 / sizeof *progs4))
 static void group_ccdiff(const Prog *tbl, int count) {
     if (!ref[0]) die("ccdiff needs HOST_CC");
     { np_result r; char *vv[] = { ref, "--version", 0 }; char ver[200] = "-"; if (!run(vv, 5, &r)) { size_t k = 0; while (k < r.outn && r.out[k] != '\n' && k < 199) { ver[k] = r.out[k]; k++; } ver[k] = 0; np_free(&r); } fprintf(res, "ORACLE\thost_cc=%s\toracle_id=%s\n", ref, ver); }
@@ -181,16 +194,16 @@ static void group_ccdiff(const Prog *tbl, int count) {
 }
 
 int main(int argc, char **argv) {
-    if ((argc != 4 && argc != 5) || !realpath(argv[1], root) || argv[2][0] != '/' || (argc == 5 && !realpath(argv[4], ref))) { fputs("usage: ROOT ABS_OUT corpus-0..corpus-9|closure|cli [REF] | ccdiff|ccdiff-2|ccdiff-3 HOST_CC\n", stderr); return 2; }
-    const char *group = argv[3]; int gp = -1, gl = !strcmp(group, "closure"), gi = !strcmp(group, "cli"), gc = !strcmp(group, "ccdiff"), gc2 = !strcmp(group, "ccdiff-2"), gc3 = !strcmp(group, "ccdiff-3");
+    if ((argc != 4 && argc != 5) || !realpath(argv[1], root) || argv[2][0] != '/' || (argc == 5 && !realpath(argv[4], ref))) { fputs("usage: ROOT ABS_OUT corpus-0..corpus-9|closure|cli [REF] | ccdiff|ccdiff-2|ccdiff-3|ccdiff-4 HOST_CC\n", stderr); return 2; }
+    const char *group = argv[3]; int gp = -1, gl = !strcmp(group, "closure"), gi = !strcmp(group, "cli"), gc = !strcmp(group, "ccdiff"), gc2 = !strcmp(group, "ccdiff-2"), gc3 = !strcmp(group, "ccdiff-3"), gc4 = !strcmp(group, "ccdiff-4");
     if (!strncmp(group, "corpus-", 7) && group[7] >= '0' && group[7] < '0' + NPROG && !group[8]) gp = group[7] - '0';
-    if (gp < 0 && !gl && !gi && !gc && !gc2 && !gc3) die("group");
+    if (gp < 0 && !gl && !gi && !gc && !gc2 && !gc3 && !gc4) die("group");
     snprintf(outdir, sizeof outdir, "%s", argv[2]); if (mkdir(outdir, 0700) && errno != EEXIST) die("out dir"); path(work, sizeof work, outdir, group); if (mkdir(work, 0700)) die("group dir must be absent");
     path(bound, sizeof bound, root, "tools/bound"); path(product, sizeof product, root, "unisacc.com");
     char rp[4400]; snprintf(rp, sizeof rp, "%s/results-%s.tsv", outdir, group); res = fopen(rp, "wbx"); if (!res) die("results exclusive");
     { char hp[65], hr[65]; if (!shafile(product, hp)) die("product"); fprintf(res, "IDENTITY\tproduct=%s\n", hp); if (ref[0]) { if (!shafile(ref, hr)) die("ref"); fprintf(res, "IDENTITY\tref=%s\n", hr); } }
     if (gp >= 0) corpus_program(&progs[gp]);
-    else if (gl) group_closure(); else if (gc) group_ccdiff(progs, NPROG); else if (gc2) group_ccdiff(progs2, NPROG2); else if (gc3) group_ccdiff(progs3, NPROG3); else group_cli();
+    else if (gl) group_closure(); else if (gc) group_ccdiff(progs, NPROG); else if (gc2) group_ccdiff(progs2, NPROG2); else if (gc3) group_ccdiff(progs3, NPROG3); else if (gc4) group_ccdiff(progs4, NPROG4); else group_cli();
     fprintf(res, "SUMMARY\tgroup=%s\tpass=%d\tfail=%d\tvacuous=%d\tnot_run=%d\n", group, npass, nfail, nvac, nnotrun); fclose(res);
     printf("OPT_CORPUS\tgroup=%s\tpass=%d\tfail=%d\tvacuous=%d\tnot_run=%d\n", group, npass, nfail, nvac, nnotrun);
     return nfail || nvac || nnotrun ? 1 : 0;
