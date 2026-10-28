@@ -10,6 +10,11 @@ static int digit(int c) {
 int main(int argc, char **argv) {
     unsigned char data[256]; int n = 0;
     if (argc != 3) return 2;
+    if (!strcmp(argv[1], "hex")) { printf("%d\n",hexv((unsigned char)argv[2][0])); return 0; }
+    if (!strcmp(argv[1], "tag") || !strcmp(argv[1], "btag")) {
+        LBIN=argv[1][0]=='b'; LB=(unsigned char *)argv[2]; LN=(int)strlen(argv[2]); LP=0;
+        int c=lchar(); printf("%d %d\n",c,LP); return 0;
+    }
     if (!strcmp(argv[1], "budget")) {
         I value=42; int ok=runtime_step_budget(argv[2],&value);
         printf("%d %lld\n",ok,(long long)value); return 0;

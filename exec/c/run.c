@@ -208,11 +208,24 @@ static unsigned char *readfile(const char *path, int *len, int optional) {
    checked before multiply/add (including the INT64_MIN magnitude). */
 UNISA_RUNTIME_STATE unsigned char *LB; UNISA_RUNTIME_STATE int LP, LN, LBIN;
 static void lskip(void) { if(!LBIN)while (LP < LN && LB[LP] <= 32) LP++; }
+#ifdef UNISA_CX_MODEL_NUMBER
+int cxmn_tag(const unsigned char *,long,long *,int,int *);
+int cxmn_hex(int);
+static int lchar(void) {
+    long pos=LP; int value=0, rc=cxmn_tag(LB,LN,&pos,LBIN,&value); LP=(int)pos;
+    if(rc==1)die("truncated binary model tag");
+    if(rc==2)die("truncated model");
+    if(rc==3)die("bad model tag");
+    if(rc)die("invalid model tag input");
+    return value;
+}
+#else
 static int lchar(void) {
     if(LBIN){if(LP==LN)die("truncated binary model tag");return LB[LP++];}
     lskip(); if (LP == LN) die("truncated model");
     int c = LB[LP++]; if (LP < LN && LB[LP] > 32) die("bad model tag"); return c;
 }
+#endif
 static void ltag(int c) { if (lchar() != c) die("bad model tag"); }
 #ifdef UNISA_CX_MODEL_NUMBER
 int cxmn_number(const unsigned char *,long,long *,int,long long *);
@@ -263,7 +276,14 @@ UNISA_RUNTIME_STATE int ISNET, TOPMAX;
 UNISA_RUNTIME_STATE int *NLO, *NHI, *BN, *BQ, *RETS; UNISA_RUNTIME_STATE unsigned char **RETOK;
 UNISA_RUNTIME_STATE int *SMODE; UNISA_RUNTIME_STATE int **ROWK, **ROWN, **ROWQ; UNISA_RUNTIME_STATE int *ROWC;
 
-static int hexv(int c) { if (c >= '0' && c <= '9') return c-'0'; if (c >= 'a' && c <= 'f') return c-'a'+10; die("bad hex string"); return 0; }
+static int hexv(int c) {
+#ifdef UNISA_CX_MODEL_NUMBER
+    int value=cxmn_hex(c); if(value>=0)return value;
+#else
+    if (c >= '0' && c <= '9') return c-'0'; if (c >= 'a' && c <= 'f') return c-'a'+10;
+#endif
+    die("bad hex string"); return 0;
+}
 
 static void loadbytes(unsigned char *data, int len) {
     LB = data; LN = len; LBIN=len>=8 && !memcmp(data,"UNINETB1",8); LP=LBIN?8:0;
