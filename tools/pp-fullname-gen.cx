@@ -1,0 +1,22 @@
+/* Facts -> E2 semantic-name tables. No change to the locations wire format.
+ * snapshot ROOT NEW_PRISTINE
+ * gen|--check FACT_ROOT PRISTINE TARGET
+ * Every fact matches exactly one row and one fragment; check is byte-exact. */
+typedef struct {char *p;size_t n,cap;} Text;
+typedef struct {char *file,*key,*old,*replacement;int used;} Rule;
+static const char *files[]={"exec/pp/include-location-byte.tsv","exec/pp/rescan-result.tsv","exec/pp/linedir-result.tsv","exec/pp/body-manifest.tsv"};
+static Rule rules[16];static int nr;
+static const char *active_file="-",*active_key="-";
+static void die(const char *s){fprintf(stderr,"pp-fullname-gen: %s file=%s row=%s errno=%d\n",s,active_file,active_key,errno);exit(2);}
+static void add(Text *b,const char *s,size_t n){if(n>16777216-b->n)die("text-bound");if(b->n+n+1>b->cap){b->cap=(b->n+n+1)*2;b->p=realloc(b->p,b->cap);if(!b->p)die("allocation");}memcpy(b->p+b->n,s,n);b->n+=n;b->p[b->n]=0;}
+static void join(char p[4400],const char *a,const char *b){if(cx_path_join(p,4400,a,b))die("path-bound");}
+static char *load(const char *p,size_t *n){char *s=cx_read(p,n);if(!s)die(p);if(memchr(s,0,*n)||! *n||s[*n-1]!='\n')die("text-input");return s;}
+static void parents(char *path){for(char *p=path+1;*p;p++)if(*p=='/'){*p=0;if(mkdir(path,0700)&&errno!=EEXIST)die("mkdir");*p='/';}}
+static void save(const char *root,const char *leaf,const char *s,size_t n){char p[4400];join(p,root,leaf);parents(p);if(cx_write(p,s,n))die("write");}
+static char *facts(const char *root){char p[4400];join(p,root,"exec/facts/pp-layout.tsv");size_t n;char *s=load(p,&n);if(!strstr(s,"\nIRFULLNAME\t4398046511104\n"))die("IRFULLNAME-region-fact");free(s);join(p,root,"exec/facts/pp-fullname.tsv");s=load(p,&n);char *line=s;while(*line){char *end=strchr(line,'\n');*end=0;if(*line&&*line!='#'){if(nr==16)die("rule-count");char **field[]={&rules[nr].file,&rules[nr].key,&rules[nr].old,&rules[nr].replacement};char *at=line;for(int i=0;i<4;i++){*field[i]=at;char *tab=strchr(at,'\t');if(i<3){if(!tab)die("rule-fields");*tab=0;at=tab+1;}else if(tab)die("rule-fields");if(!**field[i])die("empty-rule");}int known=0;for(int i=0;i<4;i++)if(!strcmp(rules[nr].file,files[i]))known=1;if(!known)die("unknown-rule-file");nr++;}line=end+1;}if(nr!=7)die("expected-seven-rules");return s;}
+static int row(const char *s,size_t n,const char *key){const char *colon=strchr(key,':');if(!colon){size_t k=strlen(key);return n>=k&&!memcmp(s,key,k)&&(key[0]=='#'||s[k]=='\t');}size_t first=(size_t)(colon-key),last=strlen(colon+1);return n>first+last+1&&!memcmp(s,key,first)&&s[first]=='\t'&&!memcmp(s+first+1,colon+1,last)&&s[first+last+1]=='\t';}
+static Text generate(const char *file,const char *s,size_t n){Text out={0};size_t at=0;while(at<n){size_t end=at;while(end<n&&s[end]!='\n')end++;Text line={0};add(&line,s+at,end-at);for(int k=0;k<nr;k++){Rule *r=rules+k;if(strcmp(file,r->file)||!row(line.p,line.n,r->key))continue;active_file=file;active_key=r->key;char *p=strstr(line.p,r->old);if(!p)continue;if(r->used++)die("duplicate-rule-row");if(strstr(p+strlen(r->old),r->old))die("fragment-not-unique");Text changed={0};add(&changed,line.p,(size_t)(p-line.p));add(&changed,r->replacement,strlen(r->replacement));add(&changed,p+strlen(r->old),line.n-(size_t)(p-line.p)-strlen(r->old));free(line.p);line=changed;}add(&out,line.p,line.n);add(&out,"\n",1);free(line.p);at=end+1;}return out;}
+int main(int argc,char **argv){
+ if(argc==4&&!strcmp(argv[1],"snapshot")){if(mkdir(argv[3],0700))die("new-pristine-required");for(int i=0;i<4;i++){char p[4400];join(p,argv[2],files[i]);size_t n;char *s=load(p,&n);save(argv[3],files[i],s,n);free(s);}puts("PP_FULLNAME_PRISTINE\tPREPARED\tfiles=4");return 0;}
+ if(argc!=5||(strcmp(argv[1],"gen")&&strcmp(argv[1],"--check")))die("usage snapshot ROOT NEW_PRISTINE | gen|--check FACT_ROOT PRISTINE TARGET");int check=!strcmp(argv[1],"--check");char *rulebytes=facts(argv[2]);Text output[4]={0};for(int i=0;i<4;i++){char p[4400];join(p,argv[3],files[i]);size_t n;char *s=load(p,&n);output[i]=generate(files[i],s,n);free(s);}for(int k=0;k<nr;k++)if(rules[k].used!=1)die("unmatched-rule");for(int i=0;i<4;i++){if(check){char p[4400];join(p,argv[4],files[i]);size_t n;char *s=load(p,&n);if(n!=output[i].n||memcmp(s,output[i].p,n))die("check-difference");free(s);}else save(argv[4],files[i],output[i].p,output[i].n);free(output[i].p);}free(rulebytes);printf("PP_FULLNAME_%s\tfiles=4\trules=%d\n",check?"CHECK":"GENERATED",nr);return 0;
+}

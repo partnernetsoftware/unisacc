@@ -43,6 +43,15 @@ as an undefined host-forwarded declaration. It uses the same negative-syscall
 return/errno convention as the carried runtime. Other platforms and general
 host-library replacement remain unimplemented.
 
+`RuntimeProvider` currently selects a provider during assembly through C symbol
+names and generated declarations. This is the first slice of late binding. The
+next interface must let CX0 declare stable import IDs, type/ABI contracts and
+ownership effects, then let workspace validate target/version-compatible
+providers before wiring the graph. Each provider must uniquely own private
+state and initialization. Structured import validation and protected privacy
+are still missing from the present C symbol bridge; unchecked name lookup does
+not supply those guarantees.
+
 Independent projection gold is 14/0 in
 `out/c43-cx-runtime-projection-gold-04.stdout`, including initialized multiple
 declarators, wide literals, conditional function bodies and macro-selected
