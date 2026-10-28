@@ -11,16 +11,22 @@ static int invoke(char **v,const char *label){
 int main(int argc,char **argv){
     if(argc!=4){fputs("usage: DRIVER MODELS NEW_OUTDIR\n",stderr);return 2;}
     if(mkdir(argv[3],0700)){perror("output directory");return 2;}
-    char consumer[4096],module[4096],image[4096];
+    char consumer[4096],module[4096],image[4096],missing[4096];
     if(snprintf(consumer,sizeof consumer,"%s/consumer.o",argv[3])>=(int)sizeof consumer||
        snprintf(module,sizeof module,"%s/module.o",argv[3])>=(int)sizeof module||
-       snprintf(image,sizeof image,"%s/linked.elf",argv[3])>=(int)sizeof image)return 2;
+       snprintf(image,sizeof image,"%s/linked.elf",argv[3])>=(int)sizeof image||
+       snprintf(missing,sizeof missing,"%s/missing.elf",argv[3])>=(int)sizeof missing)return 2;
     char *a[]={"tools/bound","45",argv[1],"--models",argv[2],"-c","-funit","-b","lnx/x86_64","tools/check-driver-compat.cx","-o",consumer,0};
     char *b[]={"tools/bound","45",argv[1],"--models",argv[2],"-c","-funit","-b","lnx/x86_64","cx/driver/compat.cx","-o",module,0};
     char *c[]={"tools/bound","45",argv[1],"--models",argv[2],consumer,module,"-o",image,0};
     int n=0;if(!invoke(a,"consumer-unit"))n++;if(!invoke(b,"module-unit"))n++;
     if(n){puts("CX_SEPARATE_USE\tNOT_RUN link: prerequisite failed");return 1;}
-    if(!invoke(c,"separate-link")){puts("CX_SEPARATE_USE\tchecks=3\tfailed=1\tlinked-consumer=NOT_RUN");return 1;}
-    char *d[]={"tools/bound","15",image,0};if(!invoke(d,"linked-consumer")){puts("CX_SEPARATE_USE\tchecks=4\tfailed=1");return 1;}
-    puts("CX_SEPARATE_USE\tchecks=4\tfailed=0\tscope=Linux-x86_64");return 0;
+    char *neg[]={"tools/bound","45",argv[1],"--models",argv[2],consumer,"-o",missing,0};
+    np_result r={0};char why[512];int err=np_run(neg,0,0,50,&r,why,sizeof why);struct stat st;
+    errno=0;int absent=lstat(missing,&st)!=0&&errno==ENOENT;
+    int ok=!err&&r.rc==1&&r.err&&strstr(r.err,"undefined reference to cxp_step")&&absent;
+    printf("%s\tmissing-module-refused\n",ok?"PASS":"FAIL");np_free(&r);if(!ok)return 1;
+    if(!invoke(c,"separate-link")){puts("CX_SEPARATE_USE\tchecks=4\tfailed=1\tlinked-consumer=NOT_RUN");return 1;}
+    char *d[]={"tools/bound","15",image,0};if(!invoke(d,"linked-consumer")){puts("CX_SEPARATE_USE\tchecks=5\tfailed=1");return 1;}
+    puts("CX_SEPARATE_USE\tchecks=5\tfailed=0\tscope=Linux-x86_64");return 0;
 }

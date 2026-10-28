@@ -600,8 +600,9 @@ int main(int argc, char **argv) {
     deponly=opts.deponly;depphony=opts.depphony;sawc=opts.sawc;sawS=opts.sawS;funit=opts.funit;warnings=opts.warnings;
     if(opts.werror)bput(&werror,1,0);if(opts.nostd)bput(&nostd,1,0);if(opts.notrim)bput(&notrim,1,0);
     if (!src) return clierror("expected a C source file");
-    /* CX2a: a .cx unit's `#pragma unisa use` adds the module's unit after the command-line sources (src/cxmod.c);
-       .c units are never scanned.  -cx-interface prints one module's interface, -cx-plan the units and their lists. */
+    /* Resolve the whole graph for interfaces; only explicit sources belong to
+       a separate -funit object. Other routes still compile dependencies. */
+    int explicit_sources=nsources;
     if (cxm_wantif) { if(rf_trace_finish())return 2;return cxm_interface((char *)src); }
     cxm_on=0;
     if (!object_path(src) && !tapebin_path(src) && !tape_path(src)) {
@@ -620,6 +621,7 @@ int main(int argc, char **argv) {
         for (int k=0;k<forced.n;k++) if (!k || !forced.b[k-1]) opt[nopt++]=(const char *)forced.b+k;
         cxm_planprint((char **)opt,nopt); free(opt); return 0;
     }
+    if (funit && sawc && target && cxm_on) nsources=explicit_sources;
     /* -c with -b: an object (R17-1).  The product writes objects through its
        own route (\0cli/object, \0cli/funit; exec/enc, in progress) -- until
        that route exists the driver says so instead of writing a tape. */
