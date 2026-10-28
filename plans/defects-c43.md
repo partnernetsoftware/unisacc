@@ -357,6 +357,8 @@ coverage中旧1/4缺陷描述改为本候选实际4/1及明确合同冲突，没
 
 诊断合同接续：100字节截断现在要求精确原因malformed unit object container；不再把有ELF头但节表缺失的对象归为无载荷。拒绝谓词收紧为rc>0且<128，负信号退出不能被当作拒绝。保留全部11项并在同私有驱动复跑out/c43-tapelink-malformed-02为10/1，唯一余红仍是tape落尾SIGSEGV。未改旧01或已装8147证据；此批仍返回1，不掩盖崩溃。
 
+补现有formats-objects私有包装器回归21/0，日志out/c43-tapelink-objects-01.*，仅显式ec17e24f+ff696，不把工具输出里的installed-product措辞转授共享8147。容器刀冻结ecb5fbe322于仓外unisacc-epoch-tapelink-ecb5fbe322，SID003166c6945165d0b9ec568dbdb0ae8b817f4e497551a2365f7017eb7c0e10c9，context已PREPARED；相对FIFO来源的模型/产品树仅src/tapelink.c变化。尚未新候选安装，落尾模型方案并行只读审查。
+
 原批out/c43-tapelink-malformed-01仍9/2：坏魔数及2000字节截断已拒；100字节截断改报malformed unit object container而旧断言要求carries no unit tape，保留该诊断合同差异；tape落尾仍SIGSEGV，未声称关闭。已装8147原批8/3不覆盖。
 
 批 `link-malformed-input`（tools/link-malformed-input.cx，8/11，红行即复现）：
