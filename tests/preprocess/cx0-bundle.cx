@@ -1,0 +1,66 @@
+/* Independent packet gold and hostile-reader inputs, plus real planner seals.
+ * ROOT NEW_ABS_OUT E2_MODEL_CONTAINER. All input mutation is between calls. */
+#pragma unisa use bundle
+static int checks,failed;static char work[4096];
+static void die(const char *s){fprintf(stderr,"cx0-bundle-test: %s errno=%d\n",s,errno);exit(2);}
+static void ck(int ok,const char *s){checks++;if(!ok)failed++;printf("%s\tcx0-bundle.%s\n",ok?"PASS":"FAIL",s);}
+static void put(unsigned char *p,unsigned v){for(int i=0;i<4;i++)p[i]=(unsigned char)(v>>(8*i));}
+static void digest(unsigned char *p,size_t n){char h[65];put(p+8,(unsigned)n);cx_sha256_hex(p,n-64,h);memcpy(p+n-64,h,64);}
+static void save(const char *name,const void *p,size_t n){char path[4400];if(cx_path_join(path,sizeof path,work,name)||cx_write(path,p,n))die("save");}
+static void reject(unsigned char *p,size_t n,const char *want,const char *label){cxb_bundle b={0};char why[256];int rc=cxb_read(p,n,&b,why,sizeof why);ck(rc&&strstr(why,want)&&!b.storage&&!b.units&&!b.resources&&!b.bytes,label);if(!rc||!strstr(why,want))fprintf(stderr,"%s actual=%s\n",label,why);cxb_clear(&b);}
+static size_t gold(unsigned char p[512],int refs){
+ memset(p,0,512);memcpy(p,"CX0BND1\n",8);put(p+12,1);put(p+16,(unsigned)refs);put(p+20,10);put(p+24,12);memset(p+32,'1',64);memcpy(p+96,"lnx/x86_64unisa-c99-v1",22);
+ put(p+118+8,6);put(p+118+12,7);put(p+118+16,(unsigned)refs);memcpy(p+142,"gold.cint n;\n",13);size_t end=155;
+ if(refs){put(p+end,0);end+=4;put(p+end,0);put(p+end+4,1);put(p+end+8,4);put(p+end+12,0);put(p+end+16,0);memcpy(p+end+20,"cx.h",4);end+=24;}
+ digest(p,end+64);return end+64;
+}
+int main(int argc,char **argv){
+ char root[4096];if(argc!=4||!realpath(argv[1],root)||argv[2][0]!='/'||strlen(argv[2])>=sizeof work)die("usage ROOT NEW_ABS_OUT E2_MODEL_CONTAINER");memcpy(work,argv[2],strlen(argv[2])+1);if(mkdir(work,0700))die("exclusive output");
+ unsigned char p[512],bad[512];size_t n=gold(p,0);cxb_bundle b={0};char why[256];int rc=cxb_read(p,n,&b,why,sizeof why);
+ ck(!rc&&b.unit_count==1&&!b.resource_count&&b.units[0].source_bytes==7&&!memcmp(b.units[0].source,"int n;\n",7)&&!strcmp(b.target,"lnx/x86_64"),"literal-gold-packet");
+ p[148]='X';ck(!rc&&b.units[0].source[0]=='i',"reader-owns-immutable-copy");cxb_clear(&b);ck(!b.storage&&!b.units&&!b.resources&&!b.bytes,"clear-zeroes-view");n=gold(p,0);
+ memcpy(bad,p,n);bad[0]='X';reject(bad,n,"version","version-refused");reject(p,n-1,"header","truncated-packet-refused");
+ memcpy(bad,p,n);bad[n]=0;reject(bad,n+1,"header","trailing-packet-refused");
+ memcpy(bad,p,n);put(bad+28,1);reject(bad,n,"header","reserved-header-refused");
+ memcpy(bad,p,n);put(bad+12,65);reject(bad,n,"metadata","unit-count-bound");
+ memcpy(bad,p,n);put(bad+16,4097);reject(bad,n,"metadata","resource-count-bound");
+ memcpy(bad,p,n);bad[32]='z';reject(bad,n,"metadata","model-hash-shape");
+ memcpy(bad,p,n);bad[148]^=1;reject(bad,n,"digest","payload-corruption-refused");
+ memcpy(bad,p,n);bad[96]='q';digest(bad,n);reject(bad,n,"target-or-abi","unknown-target-refused");
+ memcpy(bad,p,n);bad[106]='q';digest(bad,n);reject(bad,n,"target-or-abi","unknown-abi-refused");
+ memcpy(bad,p,n);put(bad+118,1);digest(bad,n);reject(bad,n,"unit-shape","unit-index-refused");
+ memcpy(bad,p,n);put(bad+122,2);digest(bad,n);reject(bad,n,"unit-shape","language-kind-refused");
+ memcpy(bad,p,n);put(bad+130,0xffffffffU);digest(bad,n);reject(bad,n,"unit-shape","unit-length-overflow-refused");
+ memcpy(bad,p,n);put(bad+138,1);digest(bad,n);reject(bad,n,"unit-shape","reserved-unit-refused");
+ memcpy(bad,p,155);bad[155]=0;digest(bad,n+1);reject(bad,n+1,"trailing","body-trailer-refused-after-rehash");
+ memcpy(bad,p,155);memcpy(bad+155,p+118,37);put(bad+155,1);put(bad+12,2);digest(bad,256);reject(bad,256,"unit-duplicate","duplicate-unit-refused");
+ n=gold(p,1);rc=cxb_read(p,n,&b,why,sizeof why);ck(!rc&&b.resource_count==1&&b.resources[0].bytes==0,"empty-present-header-preserved");cxb_clear(&b);
+ memcpy(bad,p,n);put(bad+155,1);digest(bad,n);reject(bad,n,"resource-reference","invalid-resource-reference");
+ memcpy(bad,p,n);put(bad+159+4,9);digest(bad,n);reject(bad,n,"resource-shape","resource-kind-refused");
+ memcpy(bad,p,n);put(bad+159+12,0xffffffffU);digest(bad,n);reject(bad,n,"resource-shape","resource-length-overflow-refused");
+ memcpy(bad,p,n);put(bad+159+16,1);digest(bad,n);reject(bad,n,"resource-shape","reserved-resource-refused");
+ memcpy(bad,p,183);memcpy(bad+183,p+159,24);put(bad+183,1);put(bad+16,2);digest(bad,271);reject(bad,271,"resource-duplicate","duplicate-resource-refused");
+ memcpy(bad,p,183);memcpy(bad+183,p+159,24);put(bad+183,1);put(bad+187,2);put(bad+16,2);digest(bad,271);reject(bad,271,"resource-duplicate","cross-kind-resource-name-refused");
+ memcpy(bad,p,159);put(bad+159,0);memcpy(bad+163,p+159,24);put(bad+134,2);digest(bad,251);reject(bad,251,"include-duplicate","duplicate-unit-include-refused");
+ n=gold(p,0);rc=cxb_read(p,n,&b,why,sizeof why);ck(!rc,"reader-recovers-after-refusals");cxb_clear(&b);
+ char entry[4400],mod[4400],interfaces[4400],model[65];if(cx_path_join(entry,sizeof entry,work,"entry.cx")||cx_path_join(mod,sizeof mod,work,"dep.cx")||cx_path_join(interfaces,sizeof interfaces,work,"interfaces"))die("paths");if(mkdir(interfaces,0700))die("interfaces");
+ const char *source="#pragma unisa use dep\nint frozen_result=FROZEN_VALUE;\n";const char *module="#pragma unisa module dep\nstatic int hidden(void){return 7;}\nint shown(void){return hidden();}\n";
+ if(cx_write(entry,source,strlen(source))||cx_write(mod,module,strlen(module)))die("sources");size_t mn;char *mb=cx_read(argv[3],&mn);if(!mb)die("model");cx_sha256_hex(mb,mn,model);free(mb);
+ char prelude[]="#define FROZEN_VALUE 7\n";cxb_input extra={1,"cx.h",prelude,strlen(prelude)};cxb_options options={"lnx/x86_64","unisa-c99-v1",model};char *sources[]={entry};
+ cxb_result sealed=cxb_seal(sources,1,interfaces,&options,&extra,1);ck(!sealed.status&&sealed.bytes>0,"seal-real-planned-module");if(sealed.status){fprintf(stderr,"seal: %s\n",sealed.why);return 1;}
+ rc=cxb_read(sealed.data,sealed.bytes,&b,why,sizeof why);ck(!rc&&b.unit_count==2&&b.resource_count>=2,"sealed-reader-two-units");
+ ck(!rc&&b.units[0].source_bytes==strlen(source)&&!memcmp(b.units[0].source,source,strlen(source)),"sealed-source-exact");
+ cxb_result repeat=cxb_seal(sources,1,interfaces,&options,&extra,1);ck(!repeat.status&&repeat.bytes==sealed.bytes&&!memcmp(repeat.data,sealed.data,sealed.bytes),"repeat-seal-byte-determinism");cxb_release(&repeat);
+ char interface_name[4096];int got_interface=0;for(int i=0;i<b.resource_count;i++)if(b.resources[i].kind==2){memcpy(interface_name,b.resources[i].name,b.resources[i].name_bytes);interface_name[b.resources[i].name_bytes]=0;got_interface=1;break;}
+ if(!got_interface)die("expected interface");cxb_input conflict[2];conflict[0]=extra;conflict[1].kind=2;conflict[1].name=interface_name;conflict[1].data="bad";conflict[1].bytes=3;
+ repeat=cxb_seal(sources,1,interfaces,&options,conflict,2);ck(repeat.status==2&&!repeat.data&&!repeat.bytes&&strstr(repeat.why,"interface-resource-conflict"),"explicit-resource-cannot-replace-planned-interface");cxb_release(&repeat);
+ repeat=cxb_seal(sources,1,interfaces,&options,0,0);ck(repeat.status==2&&!repeat.data&&!repeat.bytes&&strstr(repeat.why,"resource-absent"),"missing-prelude-no-success-bundle");cxb_release(&repeat);
+ char plain[4400];if(cx_path_join(plain,sizeof plain,work,"ordinary.c"))die("plain path");if(cx_write(plain,"int ordinary;\n",14))die("plain source");char *mixed[]={entry,plain};repeat=cxb_seal(mixed,2,interfaces,&options,&extra,1);cxb_bundle mbundle={0};
+ int mixed_rc=repeat.status?1:cxb_read(repeat.data,repeat.bytes,&mbundle,why,sizeof why);ck(!mixed_rc&&mbundle.unit_count==3&&!mbundle.units[1].language&&!mbundle.units[1].include_count&&mbundle.units[0].language,"mixed-c-cx-preserves-unit-preludes");cxb_clear(&mbundle);cxb_release(&repeat);
+ save("sealed.cxb",sealed.data,sealed.bytes);if(cx_write(entry,"#error LIVE_SOURCE_CHANGED\n",27)||cx_write(mod,"#error LIVE_MODULE_CHANGED\n",27))die("mutate live sources");prelude[21]='9';
+ for(int i=0;i<b.resource_count;i++)if(b.resources[i].kind==2){char name[4400];if(b.resources[i].name_bytes>=sizeof name)die("resource-name");memcpy(name,b.resources[i].name,b.resources[i].name_bytes);name[b.resources[i].name_bytes]=0;if(cx_write(name,"#error LIVE_INTERFACE_CHANGED\n",30))die("mutate live interface");}
+ ck(b.units[0].source_bytes==strlen(source)&&!memcmp(b.units[0].source,source,strlen(source)),"live-source-mutation-cannot-change-view");
+ ck(b.resources[0].bytes==strlen("#define FROZEN_VALUE 7\n")&&!memcmp(b.resources[0].data,"#define FROZEN_VALUE 7\n",b.resources[0].bytes),"borrowed-extra-copied-into-bundle");
+ cxb_clear(&b);cxb_release(&sealed);ck(!sealed.data&&!sealed.bytes,"release-zeroes-sealed-result");
+ printf("CX0_BUNDLE\tassertions=%d\tfailed=%d\toutput=%s/sealed.cxb\n",checks,failed,work);return failed?1:0;
+}

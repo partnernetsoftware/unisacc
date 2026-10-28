@@ -2,7 +2,7 @@
 
 `plan.cx` 已由现行 `src/cxmod.c` 提取为 CX 模块。原 C 解析语义暂作迁移基线；所有解析函数与状态在模块内私有，只公开 `cx0_result`、`cx0_plan` 和 `cx0_release`。调用方通过 `#pragma unisa use` 使用，不 include 实现，不访问 `cxm_*` 全局变量。
 
-这是一份**已运行的提取实现**，但 U1/U2 尚未完成：产品驱动仍调用原 C 规划器，E2 尚未消费新的计划格式；不可变源码束、目标/ABI 字段、完整 CX0/E2 合同和模型化部署仍待实现。当前生产产品仍为七个模型流。
+这是一份**已运行的提取实现**。新 `bundle.cx` 已将规划时观察到的源码/接口及显式资源封存为不可变 `CX0BND1`，独立 E2 适配器已实际消费并产生 UNIPP1；[字节协议、API 与限制](BUNDLE.md) 给出独立复现方法。U1/U2 尚未完成：已安装产品驱动仍调用原 C 规划器，完整配置/依赖映射、规范逻辑 ID、完整 CX0/E2 合同和 CX0 模型化部署仍待实现。当前生产产品仍为七个模型流。
 
 ## 接口及所有权
 
@@ -10,6 +10,7 @@
 cx0_result cx0_plan(int interface_only, char **sources, int count,
                    char **forced, int nforced, const char *directory);
 void cx0_release(cx0_result *result);
+cx0_result cx0_capture_plan(char **sources, int count, const char *directory);
 ```
 
 源数组、强制头数组和字符串只在本次同步调用期间借用。结果的 `text` 和 `diagnostic` 为调用者拥有的分配；使用完必须 `cx0_release`，释放后字段清零。结果可跨另一次调用保留。`directory` 必须是调用者明确提供的现存目录，不读取 TMPDIR 隐式选择接口位置。
@@ -19,7 +20,7 @@ void cx0_release(cx0_result *result);
 - `status=2`：无效 API 输入、文件/权限/接口发布故障或工作进程协议故障。只有 ENOENT 归缺失；ENOTDIR、EACCES 和目录输入单列 IO 错误。
 - 任何失败均不返回成功计划字节。已生成的正确接口缓存文件可保留，不把缓存的存在记作规划通过。
 
-首版使用 POSIX 工作进程隔离解析状态，父进程不执行旧解析器，不保留其可写全局；结果通过有长度上限的内部管道返回。它只面向单线程 POSIX 调用者。Windows、任意线程并发、Rust 编译期所有权和任意 C99 安全性均未获资格。内部分进程传输不等于已固定的跨平台编译单元束协议。
+首版使用 POSIX 工作进程隔离解析状态，父进程不执行旧解析器，不保留其可写全局；结果通过有长度上限的内部管道返回。它只面向单线程 POSIX 调用者。Windows、任意线程并发、Rust 编译期所有权和任意 C99 安全性均未获资格。`cx0_capture_plan` 是束生产者使用的二进制读取观察入口，内部管道不作为公开束协议；公开束格式独立固定在 `CX0BND1`。
 
 接口通过同目录临时文件和无覆盖 link 发布，正文不匹配的现存文件拒绝。当前随带 unistd 没有公开 link 包装，CX 适配器复用 `resourceledger.h` 已有的 syscall 绑定方式，宿主 GCC/Clang 使用系统 link。这不是新依赖清零证据。
 

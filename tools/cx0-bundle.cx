@@ -1,0 +1,41 @@
+/* Explicit resource manifest: H<TAB>header-name<TAB>physical-file or
+ * F<TAB>logical-path<TAB>physical-file. There is no ambient include search.
+ * seal TARGET MODEL IF_DIR MANIFEST NEW_BUNDLE SOURCE...
+ * inspect BUNDLE. ABI is fixed at unisa-c99-v1; no hidden compiler flags. */
+#pragma unisa use cx0.bundle
+static void fail(const char *s){fprintf(stderr,"cx0-bundle: %s errno=%d\n",s,errno);exit(2);}
+static char *read_regular(const char *path,size_t *n){
+ int fd=open(path,O_RDONLY|O_NONBLOCK);if(fd<0)fail(path);struct stat st;
+ if(fstat(fd,&st)||!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>67108864){close(fd);fail("regular-input-size");}
+ *n=(size_t)st.st_size;char *p=malloc(*n+1);if(!p){close(fd);fail("allocation");}size_t at=0;
+ while(at<*n){ssize_t z=read(fd,p+at,*n-at);if(z<0&&errno==EINTR)continue;if(z<=0){close(fd);free(p);fail("input-read");}at+=(size_t)z;}
+ char tail;ssize_t z;do{z=read(fd,&tail,1);}while(z<0&&errno==EINTR);struct stat after;int bad=z||fstat(fd,&after)||st.st_size!=after.st_size;if(close(fd))bad=1;if(bad){free(p);fail("input-changed-or-close");}p[*n]=0;return p;
+}
+static void publish(const char *path,const void *p,size_t n){
+ int fd=open(path,O_WRONLY|O_CREAT|O_EXCL,0600);if(fd<0)fail("exclusive-output");size_t at=0;int bad=0;
+ while(at<n){ssize_t z=write(fd,(const char *)p+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0){bad=1;break;}at+=(size_t)z;}
+ if(fsync(fd))bad=1;if(close(fd))bad=1;if(bad){if(unlink(path))fail("failed-output-unlink");fail("output-write-or-close");}
+}
+int main(int argc,char **argv){
+ if(argc==3&&!strcmp(argv[1],"inspect")){
+  size_t n;char *p=read_regular(argv[2],&n),why[256];cxb_bundle b={0};if(cxb_read(p,n,&b,why,sizeof why))fail(why);free(p);
+  printf("CX0BND1\ttarget=%s\tabi=%s\tmodel=%s\tunits=%d\tresources=%d\tbytes=%zu\n",b.target,b.abi,b.model,b.unit_count,b.resource_count,b.bytes);
+  for(int i=0;i<b.unit_count;i++){cxb_unit *u=b.units+i;printf("U\t%d\t%s\t%.*s\t%zu\t%d\n",i,u->language?"CX":"C",(int)u->name_bytes,u->name,u->source_bytes,u->include_count);}
+  for(int i=0;i<b.resource_count;i++){cxb_resource *r=b.resources+i;char h[65];cx_sha256_hex(r->data,r->bytes,h);printf("R\t%d\t%s\t%.*s\t%zu\t%s\n",i,r->kind==1?"H":"F",(int)r->name_bytes,r->name,r->bytes,h);}
+  cxb_clear(&b);return 0;
+ }
+ if(argc<8||strcmp(argv[1],"seal"))fail("usage seal TARGET MODEL IF_DIR MANIFEST NEW_BUNDLE SOURCE... | inspect BUNDLE");
+ size_t mn;char *mb=read_regular(argv[3],&mn),model[65];cx_sha256_hex(mb,mn,model);free(mb);
+ size_t n;char *manifest=read_regular(argv[5],&n);if(n>1048576||memchr(manifest,0,n))fail("manifest-shape");
+ cxb_input *extra=calloc(4096,sizeof *extra);if(!extra)fail("allocation");int count=0;size_t total=0;
+ char *line=manifest;
+ while(*line){char *end=strchr(line,'\n');if(end)*end=0;if(!*line||*line=='#'){if(!end)break;line=end+1;continue;}
+  char *name=strchr(line,'\t');if(!name||name-line!=1||(line[0]!='H'&&line[0]!='F'))fail("manifest-kind");*name++=0;char *path=strchr(name,'\t');if(!path)fail("manifest-fields");*path++=0;if(!*name||!*path||strchr(path,'\t')||strchr(path,'\r')||count==4096)fail("manifest-fields");
+  char *p=read_regular(path,&n);if(n>67108864-total)fail("resource-total-bound");total+=n;extra[count].kind=line[0]=='H'?1:2;extra[count].name=name;extra[count].data=p;extra[count].bytes=n;count++;
+  if(!end)break;line=end+1;
+ }
+ cxb_options options={argv[2],"unisa-c99-v1",model};cxb_result r=cxb_seal(argv+7,argc-7,argv[4],&options,extra,count);
+ if(r.status){fprintf(stderr,"cx0-bundle: %s\n",r.why);return r.status;}
+ publish(argv[6],r.data,r.bytes);printf("CX0_BUNDLE\tSEALED\tbytes=%zu\tmodel=%s\n",r.bytes,model);cxb_release(&r);
+ for(int i=0;i<count;i++)free((void *)extra[i].data);free(extra);free(manifest);return 0;
+}

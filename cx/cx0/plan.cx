@@ -11,6 +11,9 @@ static char *cx0_directory;
 static char *cx0_text,*cx0_diagnostic;
 static size_t cx0_textn,cx0_diagnosticn;
 static int cx0_io_failed;
+static int cx0_observing,cx0_observed_count;
+static unsigned char *cx0_observed;
+static size_t cx0_observedn;
 static int cx0_append(char **p,size_t *n,const char *s,size_t len){
  if(len>4194304||*n>4194304-len){cx0_io_failed=1;return 1;}
  char *q=realloc(*p,*n+len+1);if(!q){cx0_io_failed=1;return 1;}
@@ -20,6 +23,17 @@ static void cx0_error(const char *kind,const char *path){
  char b[900];int e=errno;int n=snprintf(b,sizeof b,"cx0: %s path=%s errno=%d\n",kind,path?path:"-",e);
  if(n>0&&(size_t)n<sizeof b)cx0_append(&cx0_diagnostic,&cx0_diagnosticn,b,(size_t)n);cx0_io_failed=1;
 }
+static unsigned cx0_u32(const unsigned char *p){return (unsigned)p[0]|(unsigned)p[1]<<8|(unsigned)p[2]<<16|(unsigned)p[3]<<24;}
+static void cx0_put32(unsigned char *p,size_t n){for(int i=0;i<4;i++)p[i]=(unsigned char)(n>>(8*i));}
+static int cx0_observe(const char *name,const char *data,size_t n){
+ if(!cx0_observing)return 0;size_t nn=strlen(name),at=0;
+ while(at<cx0_observedn){unsigned a=cx0_u32(cx0_observed+at),b=cx0_u32(cx0_observed+at+4);at+=8;
+  if(a==nn&&!memcmp(cx0_observed+at,name,nn)){if(b!=n||(n&&memcmp(cx0_observed+at+a,data,n))){errno=0;cx0_error("input-changed-during-plan",name);return 1;}return 0;}at+=(size_t)a+b;}
+ if(nn>4095||n>67108864-8-nn||cx0_observedn>67108864-8-nn-n){errno=EFBIG;cx0_error("snapshot-bound",name);return 1;}
+ unsigned char *p=realloc(cx0_observed,cx0_observedn+8+nn+n);if(!p){cx0_error("snapshot-allocation",name);return 1;}cx0_observed=p;
+ cx0_put32(p+cx0_observedn,nn);cx0_put32(p+cx0_observedn+4,n);memcpy(p+cx0_observedn+8,name,nn);if(n)memcpy(p+cx0_observedn+8+nn,data,n);
+ cx0_observedn+=8+nn+n;cx0_observed_count++;return 0;
+}
 static int cxm_rd(char *path,char *buf,int cap){
  int fd=open(path,O_RDONLY|O_NONBLOCK);if(fd<0){if(errno==ENOENT)return -1;cx0_error("source-io",path);return -3;}
  struct stat st;if(fstat(fd,&st)||!S_ISREG(st.st_mode)||st.st_size<0){close(fd);errno=EISDIR;cx0_error("regular-source-required",path);return -3;}
@@ -27,7 +41,8 @@ static int cxm_rd(char *path,char *buf,int cap){
  size_t want=(size_t)st.st_size,at=0;while(at<want){ssize_t n=read(fd,buf+at,want-at);if(n<0&&errno==EINTR)continue;if(n<=0){close(fd);cx0_error("source-read",path);return -3;}at+=(size_t)n;}
  char extra;ssize_t tail;do{tail=read(fd,&extra,1);}while(tail<0&&errno==EINTR);
  struct stat after;int changed=fstat(fd,&after)||st.st_size!=after.st_size;int closed=close(fd);
- if(tail||changed||closed){cx0_error("source-changed-or-close",path);return -3;}return (int)at;
+ if(tail||changed||closed){cx0_error("source-changed-or-close",path);return -3;}
+ if(cap>1&&cx0_observe(path,buf,at))return -3;return (int)at;
 }
 static int cx0_write_all(int fd,const void *p,size_t n){
  const char *s=p;size_t at=0;while(at<n){ssize_t w=write(fd,s+at,n-at);if(w<0&&errno==EINTR)continue;if(w<=0)return 1;at+=(size_t)w;}return 0;
@@ -53,7 +68,7 @@ static int cxm_wr(char *path,char *buf,int n){
   int e=errno;char *old=malloc((size_t)n+1);int got=old?cxm_rd(path,old,n+1):-3;
   bad=e!=EEXIST||got!=n||(n&&memcmp(old,buf,(size_t)n));free(old);
  }
- if(unlink(tmp))bad=1;if(bad)cx0_error("interface-publish",path);return bad;
+ if(unlink(tmp))bad=1;if(bad)cx0_error("interface-publish",path);else bad=cx0_observe(path,buf,(size_t)n);return bad;
 }
 static int cxm_say(int fd,char *s,int n){if(n<0)return 1;return fd==2?cx0_append(&cx0_diagnostic,&cx0_diagnosticn,s,(size_t)n):cx0_append(&cx0_text,&cx0_textn,s,(size_t)n);}
 
@@ -860,7 +875,7 @@ static cx0_result cx0_execute(int interface_only,char **sources,int count,char *
 #if !defined(__unix__) && !defined(__APPLE__)
  return cx0_invalid("cx0: NOT_IMPLEMENTED requires POSIX process isolation\n");
 #else
- if(!sources||count<1||count>64||nforced<0||nforced>64||(nforced&&!forced)||!directory||!directory[0]||strlen(directory)>440||(interface_only&&count!=1))return cx0_invalid("cx0: invalid-input\n");
+ if(!sources||count<1||count>64||nforced<0||nforced>64||(nforced&&!forced)||!directory||!directory[0]||strlen(directory)>440||(interface_only==1&&count!=1))return cx0_invalid("cx0: invalid-input\n");
  for(int i=0;i<count;i++)if(!sources[i]||!sources[i][0]||strpbrk(sources[i],"\t\r\n"))return cx0_invalid("cx0: invalid-source-name\n");
  for(int i=0;i<nforced;i++)if(!forced[i]||!forced[i][0]||strpbrk(forced[i],"\t\r\n"))return cx0_invalid("cx0: invalid-forced-name\n");
  if(strpbrk(directory,"\t\r\n"))return cx0_invalid("cx0: invalid-interface-directory\n");
@@ -868,15 +883,21 @@ static cx0_result cx0_execute(int interface_only,char **sources,int count,char *
  int channel[2];if(pipe(channel))return cx0_invalid("cx0: pipe-failed\n");
  pid_t child=fork();if(child<0){close(channel[0]);close(channel[1]);return cx0_invalid("cx0: fork-failed\n");}
  if(!child){
-  close(channel[0]);cx0_directory=(char *)directory;int rc=0;
+  close(channel[0]);cx0_directory=(char *)directory;cx0_observing=interface_only==2;int rc=0;
   for(int i=0;i<count&&!rc;i++){
    char byte;int probe=cxm_rd(sources[i],&byte,1);
    if(probe==-1){char b[700];int z=snprintf(b,sizeof b,"cx0: source-absent path=%s\n",sources[i]);if(z>0&&(size_t)z<sizeof b)cxm_say(2,b,z);rc=1;}
    else if(probe==-3)rc=2;
   }
-  if(!rc){if(interface_only)rc=cxm_interface(sources[0]);else{rc=cxm_plan(sources,count);if(!rc)rc=cxm_planprint(forced,nforced);}}
+  if(!rc&&cx0_observing)for(int i=0;i<count&&!rc;i++){int n=cxm_rd(sources[i],cxm_src,CXM_SRCMAX);if(n==-2){errno=EFBIG;cx0_error("snapshot-source-bound",sources[i]);rc=2;}else if(n<0)rc=2;}
+  if(!rc){if(interface_only==1)rc=cxm_interface(sources[0]);else{rc=cxm_plan(sources,count);if(!rc)rc=cxm_planprint(forced,nforced);}}
+  if(!rc&&cx0_observing){
+   size_t pn=9+cx0_textn,total=16+pn+cx0_observedn;unsigned char *p=malloc(total);
+   if(!p){cx0_error("snapshot-allocation",0);rc=2;}
+   else{memcpy(p,"CX0CAP1\n",8);cx0_put32(p+8,pn);cx0_put32(p+12,(size_t)cx0_observed_count);memcpy(p+16,"CX0PLAN1\n",9);memcpy(p+25,cx0_text,cx0_textn);if(cx0_observedn)memcpy(p+16+pn,cx0_observed,cx0_observedn);free(cx0_text);cx0_text=(char *)p;cx0_textn=total;}
+  }
   if(cx0_io_failed)rc=2;
-  const char *schema=interface_only?"CX0IF0\n":"CX0PLAN1\n";
+  const char *schema=interface_only==2?"":interface_only==1?"CX0IF0\n":"CX0PLAN1\n";
   long long header[3]={rc,rc?0:(long long)(strlen(schema)+cx0_textn),(long long)cx0_diagnosticn};
   int bad=cx0_write_all(channel[1],header,sizeof header);
   if(!rc){if(cx0_write_all(channel[1],schema,strlen(schema))||cx0_write_all(channel[1],cx0_text,cx0_textn))bad=1;}
@@ -885,7 +906,7 @@ static cx0_result cx0_execute(int interface_only,char **sources,int count,char *
  }
  close(channel[1]);long long header[3]={0};cx0_result r={2,0,0,0,0};
  int bad=cx0_read_all(channel[0],header,sizeof header);
- if(!bad&&(header[0]<0||header[0]>2||header[1]<0||header[1]>4194400||header[2]<0||header[2]>4194304))bad=1;
+ if(!bad&&(header[0]<0||header[0]>2||header[1]<0||header[1]>71303200||header[2]<0||header[2]>4194304))bad=1;
  if(!bad){r.text=malloc((size_t)header[1]+1);r.diagnostic=malloc((size_t)header[2]+1);if(!r.text||!r.diagnostic)bad=1;}
  if(!bad){r.bytes=(size_t)header[1];r.diagnostic_bytes=(size_t)header[2];bad=cx0_read_all(channel[0],r.text,r.bytes)||cx0_read_all(channel[0],r.diagnostic,r.diagnostic_bytes);r.text[r.bytes]=0;r.diagnostic[r.diagnostic_bytes]=0;r.status=(int)header[0];}
  close(channel[0]);if(bad)kill(child,SIGKILL);int status=0;pid_t waited;do{waited=waitpid(child,&status,0);}while(waited<0&&errno==EINTR);
@@ -894,5 +915,6 @@ static cx0_result cx0_execute(int interface_only,char **sources,int count,char *
 #endif
 }
 cx0_result cx0_plan(int interface_only,char **sources,int count,char **forced,int nforced,const char *directory){
- return cx0_execute(interface_only,sources,count,forced,nforced,directory);
+ return cx0_execute(interface_only?1:0,sources,count,forced,nforced,directory);
 }
+cx0_result cx0_capture_plan(char **sources,int count,const char *directory){return cx0_execute(2,sources,count,0,0,directory);}

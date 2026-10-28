@@ -1,0 +1,48 @@
+/* ROOT E2_READER MODEL NEW_ABS_OUT. Independent UNIPP1 decoder and semantic
+ * gold; runs the real model against sealed bytes before/after live mutation. */
+#pragma unisa use bundle
+#pragma unisa use cxlib.netpack
+static int checks,failed,runid;static char root[4096],work[4096],reader[4096],modelpath[4096];
+static void die(const char *s){fprintf(stderr,"cx0-e2-test: %s errno=%d\n",s,errno);exit(2);}
+static void ck(int ok,const char *s){checks++;if(!ok)failed++;printf("%s\tcx0-e2.%s\n",ok?"PASS":"FAIL",s);}
+static void path(char *out,size_t cap,const char *name){if(cx_path_join(out,cap,work,name))die("path");}
+static void save(const char *name,const void *p,size_t n){char file[4400];path(file,sizeof file,name);if(cx_write(file,p,n))die("save");}
+static unsigned le(const unsigned char *p){return (unsigned)p[0]|(unsigned)p[1]<<8|(unsigned)p[2]<<16|(unsigned)p[3]<<24;}
+static int body(const np_result *r,const unsigned char **p,size_t *n){
+ const unsigned char *b=(const unsigned char *)r->out;size_t at=27;if(r->rc||r->errn||r->outn<27||memcmp(b,"UNIPP1\0",7))return 0;
+ unsigned sp=le(b+19),inc=le(b+23);if(sp>(r->outn-at)/4)return 0;at+=4*(size_t)sp;
+ for(unsigned i=0;i<inc;i++){if(r->outn-at<12)return 0;unsigned nn=le(b+at+8);at+=12;if(nn>r->outn-at)return 0;at+=nn;}
+ if(le(b+7)!=r->outn-at)return 0;*p=b+at;*n=r->outn-at;return 1;
+}
+static int has(const unsigned char *p,size_t n,const char *text){size_t m=strlen(text);for(size_t i=0;m<=n&&i<=n-m;i++)if(!memcmp(p+i,text,m))return 1;return 0;}
+static int compact_has(const unsigned char *p,size_t n,const char *text){char *s=malloc(n+1);if(!s)die("allocation");size_t at=0;for(size_t i=0;i<n;i++)if(p[i]>32)s[at++]=(char)p[i];s[at]=0;int ok=strstr(s,text)!=0;free(s);return ok;}
+static np_result run(const char *packet,const char *index,const char *mp,const char *label){
+ char full[4400];path(full,sizeof full,packet);char *v[]={reader,(char *)mp,full,(char *)index,0};char *env[]={"UNISA_ATTRIBUTES=","UNISA_MAXSTEPS=200000000",0};np_result r={0};char why[1024];
+ if(np_run(v,root,env,12,&r,why,sizeof why))die(why);char name[200];int z=snprintf(name,sizeof name,"%02d-%s.stdout",++runid,label);if(z<0||(size_t)z>=sizeof name)die("log");save(name,r.out,r.outn);
+ z=snprintf(name,sizeof name,"%02d-%s.stderr",runid,label);if(z<0||(size_t)z>=sizeof name)die("log");save(name,r.err,r.errn);return r;
+}
+int main(int argc,char **argv){
+ if(argc!=5||!realpath(argv[1],root)||!realpath(argv[2],reader)||!realpath(argv[3],modelpath)||argv[4][0]!='/'||strlen(argv[4])>=sizeof work)die("usage ROOT READER MODEL NEW_ABS_OUT");memcpy(work,argv[4],strlen(argv[4])+1);if(mkdir(work,0700))die("exclusive-output");
+ size_t mn;char *mb=cx_read(modelpath,&mn),model[65];if(!mb)die("model");cx_sha256_hex(mb,mn,model);
+ char entry[4400],dep[4400],interfaces[4400];path(entry,sizeof entry,"entry.cx");path(dep,sizeof dep,"dep.cx");path(interfaces,sizeof interfaces,"interfaces");if(mkdir(interfaces,0700))die("interfaces");
+ const char *src="#pragma unisa use dep\n#define FROM_ROOT 1\nint frozen_result=FROZEN_VALUE;\n";
+ const char *mod="#pragma unisa module dep\n#ifdef FROM_ROOT\n#error MACRO_LEAK\n#endif\nstatic int hidden(void){return 7;}\nint shown(void){return hidden();}\n";
+ save("entry.cx",src,strlen(src));save("dep.cx",mod,strlen(mod));char prelude[]="#define FROZEN_VALUE 7\n";cxb_input extra={1,"cx.h",prelude,strlen(prelude)};cxb_options options={"lnx/x86_64","unisa-c99-v1",model};char *sources[]={entry};
+ cxb_result sealed=cxb_seal(sources,1,interfaces,&options,&extra,1);ck(!sealed.status,"real-cx0-seal");if(sealed.status){fprintf(stderr,"%s\n",sealed.why);return 1;}save("sealed.cxb",sealed.data,sealed.bytes);
+ const unsigned char *p=0;size_t n=0;np_result first=run("sealed.cxb","0",modelpath,"root-before");int ok=body(&first,&p,&n);ck(ok,"root-model-accepts-unipp1");ck(ok&&compact_has(p,n,"intfrozen_result=7;")&&compact_has(p,n,"intshown(void);")&&!has(p,n,"hidden("),"public-interface-and-frozen-macro-gold");
+ save("entry.cx","#error LIVE_SOURCE\n",strlen("#error LIVE_SOURCE\n"));save("dep.cx","#error LIVE_MODULE\n",strlen("#error LIVE_MODULE\n"));prelude[21]='9';
+ cxb_bundle b={0};char why[256];if(cxb_read(sealed.data,sealed.bytes,&b,why,sizeof why))die(why);
+ for(int i=0;i<b.resource_count;i++)if(b.resources[i].kind==2){char file[4096];memcpy(file,b.resources[i].name,b.resources[i].name_bytes);file[b.resources[i].name_bytes]=0;if(unlink(file))die("unlink-owned-interface");}cxb_clear(&b);if(unlink(entry)||unlink(dep))die("unlink-owned-source");
+ np_result after=run("sealed.cxb","0",modelpath,"root-after-delete");ck(!after.rc&&!after.errn&&after.outn==first.outn&&!memcmp(after.out,first.out,first.outn),"byte-identical-after-live-source-interface-deletion");np_free(&after);
+ np_result module=run("sealed.cxb","1",modelpath,"module");ok=body(&module,&p,&n);ck(ok&&compact_has(p,n,"staticinthidden(void){return7;}")&&!has(p,n,"frozen_result")&&!has(p,n,"MACRO_LEAK"),"fresh-e2-state-per-unit");np_free(&module);
+ sealed.data[sealed.bytes-1]^=1;save("corrupt.cxb",sealed.data,sealed.bytes);sealed.data[sealed.bytes-1]^=1;np_result r=run("corrupt.cxb","0",modelpath,"corrupt");ck(r.rc==2&&!r.outn&&strstr(r.err,"bundle-digest"),"bad-bundle-no-success-output");np_free(&r);
+ r=run("sealed.cxb","2",modelpath,"bad-unit");ck(r.rc==2&&!r.outn&&strstr(r.err,"target-or-unit"),"unit-bound-refused");np_free(&r);
+ r=run(".","0",modelpath,"directory-input");ck(r.rc==2&&!r.outn&&strstr(r.err,"regular-input-size"),"directory-refused-before-read");np_free(&r);
+ mb[mn-1]^=1;save("other-model.com",mb,mn);free(mb);char other[4400];path(other,sizeof other,"other-model.com");r=run("sealed.cxb","0",other,"wrong-model");ck(r.rc==2&&!r.outn&&strstr(r.err,"model-identity-mismatch"),"different-model-refused-before-execution");np_free(&r);
+ /* An undeclared header exists on disk, but is absent from the sealed RI. */
+ char plain[4400],live[4400];path(plain,sizeof plain,"ordinary.c");path(live,sizeof live,"live.h");save("live.h","int AMBIENT_HEADER;\n",strlen("int AMBIENT_HEADER;\n"));char text[4800];int z=snprintf(text,sizeof text,"#include \"%s\"\nint value;\n",live);if(z<0||(size_t)z>=sizeof text)die("source");save("ordinary.c",text,(size_t)z);sources[0]=plain;
+ cxb_result absent=cxb_seal(sources,1,interfaces,&options,0,0);ck(!absent.status,"ordinary-c-seal");if(absent.status)die(absent.why);save("absent.cxb",absent.data,absent.bytes);cxb_release(&absent);
+ r=run("absent.cxb","0",modelpath,"absent-header");ck(r.rc==1&&!r.outn&&strstr(r.err,"no such file"),"undeclared-live-header-cannot-fall-back-to-disk");np_free(&r);
+ r=run("sealed.cxb","0",modelpath,"recovery");ck(!r.rc&&!r.errn&&r.outn==first.outn&&!memcmp(r.out,first.out,first.outn),"exact-recovery-after-refusals");np_free(&r);np_free(&first);cxb_release(&sealed);
+ printf("CX0_E2\tassertions=%d\tfailed=%d\tmodel=%s\n",checks,failed,model);return failed?1:0;
+}
