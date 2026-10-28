@@ -43,6 +43,12 @@ sizeof纪元固定identity-helper实读新源SID为
 这只证明现有保守复用合同不适用，不证明模型需要重造；下一步核实构造器实际输入闭包，
 在保留独立原包验证与新源身份的前提下建立适用证明。未删现有校验、未改旧包收据、未授准入。
 
+复用拒绝现已具名定位：nninputs的等值检查新增首个不同规范树行的路径诊断，
+不改变任何相等/拒绝条件。新实跑仍rc2，明确`path=src/tapelink.c`，见
+`out/c43-link-undef-fix-01/nn-inputs-located.stderr`。五个宿主构造器的既有引用闭包
+在nninputs的ni_deps/ni_quotes中列举，不含tapelink；这只是编译依赖边界，
+还不能替代运行时数据输入闭包证明，故未据此放宽复用准入。
+
 - 现象：`int used(void); int main(void){return used()+2;}` 经 `-c -b lnx/x86_64 -funit` 得 main.o 后，`unisacc -o img main.o`（或加只定义 `unused` 的归档、或直接 `-o img main.c`）rc 0 并写出镜像；运行 SIGSEGV（rc 139）。预期：`link: undefined reference to used`，rc≠0，无镜像。
 - 定位：src/tapelink.c:351 `tl_check_undef`（R20-3）只检查名字以 `g_` 开头的未定义外部（全局数据对象），函数外部不检查。
 - 同现：经典参考 REF 0ed46192 行为相同（共享缺陷，非回归）；产品==REF 字节差分仍有效，不阻塞候选 f3705dfa。
