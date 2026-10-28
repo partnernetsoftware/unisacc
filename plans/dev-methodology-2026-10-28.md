@@ -76,3 +76,4 @@
 - 生成：每键一份两指令 tape（`_start:` + 片段 + `ret`），能按上述规格实现的键给精确输入；a/b 类与 rel 不相容的键（如 a=jump 且 rel=same_slot）按"不可实现，y=keep 为定义值"显式计数并单独列出，不冒充观测（同 lex-144 折叠的处理）。
 - oracle：keep → 输出 == 输入；drop_a/drop_b → 去掉 a/b；load_to_mov → `load64 rY,[M]`→`mov rY, rX`；其余 34 键（fold_copy/to_mov/retarget*/fold_imm）用矩阵已允许的经典参考（`make ref`，`src/opt.c` O2）产出期望 tape，并在同一批内核对 E4 流输出字节相等。
 - 入口：E4 流容器 `streams/unisacc-stream4.com INPUT INPUT INC`（见 tests/stream-e4.cx），材料 pin 走现行七流；新批登记为 `stream-e4-peep`，不改既有批。
+- 2026-10-28 peep 规格实测（out/c43-cc-peep-01，stream4 容器直跑）：结果寄存器必须在 `ret` 前仍活（用 r0），否则 O2 的死码消除先于窥孔把整对删掉；按规格实现的键与金表一致：load_to_mov（`mov r0, r1`）、const0/const1→to_mov、copy_dead→fold_imm、pow2→keep、同槽 store/store→drop_a、同槽同寄存器 store/load→drop_b。一个待裁定差异：`mov r1, r2 / add64 r0, r1, r3`（金表 copy_into→fold_copy）E4 保持不变。经典参考 `/tmp/ua_ref -S` 不接受 tape 输入（原样回显），34 个非机械类键的 oracle 需手推或经 C 源路线。
