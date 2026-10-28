@@ -96,3 +96,4 @@
 - 18:0x c-negative 第二轮：再添 8 处静默接受（int→指针、原型实参过多、函数类型冲突、枚举常量重声明、零长数组、void 值、const 指针写入、int+=字符串），批现 19/34；defects 累计 15 项 C 约束漏检。
 - 18:0x c-negative 第三轮：再添 6 处（不兼容指针比较、块内重定义、重复 case、浮点下标、void 调用作值、丢弃 const），批现 20/41，漏检累计 21。
 - 18:0x c-negative 第四轮（声明层）：仅再添 2 处（具名 void 形参、多存储类），18 项声明约束已正确拒绝——漏检集中在表达式/类型兼容性与作用域层；另记一处有效程序被拒（强制转换 ICE 数组大小）。批现 20/43。
+- 18:1x fable 裁定 B 限量（链接器畸形输入）：批 `link-malformed-input` 8/11——**产品自身崩溃**（tape _start 落出末尾时 -run SIGSEGV）、ELF 魔数覆盖/截断对象仍被链接；triage 增 14b/14c。D 分诊表 plans/defects-c43-triage.md、C 补丁 plans/patches/driver-diagnostics.diff 已交；tapelink 补丁由 src 所有者 896888f424 合入，待新产品验收。
