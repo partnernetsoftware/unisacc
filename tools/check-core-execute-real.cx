@@ -1,0 +1,18 @@
+#pragma unisa use runtime.process
+/* Every model is rehashed and executed afresh; no prior result is reused. */
+int main(int argc,char **argv){
+ if(argc!=4)return 2;char root[4096],models[4096],exe[4096],manifest[4400],bound[4400],path[4400];
+ if(!realpath(argv[1],root)||!realpath(argv[2],models)||!realpath(argv[3],exe))return 2;
+ if(cx_fmt(manifest,sizeof manifest,"%s/manifest.tsv",models)||cx_fmt(bound,sizeof bound,"%s/tools/bound",root))return 2;
+ FILE *f=fopen(manifest,"rb");if(!f)return 2;char line[9000],expected[32][65];int count=0;
+ while(fgets(line,sizeof line,f))if(!strncmp(line,"model\t",6)){int id;long len;if(count>=32||sscanf(line+6,"%d %ld %64s",&id,&len,expected[count])!=3||id!=count||len<=0)return 2;count++;}
+ if(ferror(f)||fclose(f)||count!=32)return 2;
+ int failed=0;for(int i=0;i<count;i++){
+  if(cx_fmt(path,sizeof path,"%s/model-%03d.bin",models,i))return 2;size_t n;char *bytes=cx_read(path,&n),hash[65];if(!bytes)return 2;cx_sha256_hex(bytes,n,hash);free(bytes);if(strcmp(hash,expected[i]))return 2;
+  char *v[]={bound,"15",exe,path,0};np_result r={0};char why[512];if(np_run(v,root,0,17,&r,why,sizeof why))return 2;
+  int cases=0,bad=0;int ok=!r.rc&&!r.errn&&r.out&&sscanf(r.out,"CORE_EXECUTE_COMPARE cases=%d failed=%d",&cases,&bad)==2&&cases==3&&bad==0;
+  if(!ok){fprintf(stderr,"FAIL model-%03d rc=%d stderr=%.*s\n",i,r.rc,(int)r.errn,r.err);failed++;}else printf("PASS model-%03d cases=%d\n",i,cases);np_free(&r);
+  bytes=cx_read(path,&n);if(!bytes)return 2;cx_sha256_hex(bytes,n,hash);free(bytes);if(strcmp(hash,expected[i]))return 2;
+ }
+ printf("CORE_EXECUTE_REAL models=%d cases=%d failed=%d\n",count,count*3,failed);return failed?1:0;
+}
