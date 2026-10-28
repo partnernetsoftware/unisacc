@@ -5,7 +5,7 @@
  * Checks (the ones that this week's E2 UCN work found by probing after construction):
  *   total       a b/r state missing an edge for some key 0..256 (the executor dies at run time there)
  *   reach       states unreachable from the start state (dead rows are debt, not coverage)
- *   stale-r     a result-mode state entered by an edge whose actions do not set r
+ *   stale-r     (WARN: path-insensitive) a result-mode state entered without r set since the last dispatch
  *               (CMP/CMPI/C64/C64U/RLD/A64/A64I/DIVMOD10/OLAST), so it dispatches on a stale result
  *   t-keys      a label PUSHed somewhere without a row in a t-mode state, or a t-row key never pushed
  *   unwritten   a register read somewhere but written nowhere (reads 0 forever)
@@ -83,13 +83,13 @@ int main(int argc, char **argv) {
     /* stale-r: r must have been set since the last result-mode dispatch (fresh=1); dataflow over the graph */
     { unsigned char *fresh = calloc((size_t)D.ns, 1), *has = calloc((size_t)D.ns, 1); if (!fresh || !has) return 2; has[D.start] = 1; fresh[D.start] = 0; int changed = 1, rounds = 0;
       while (changed && rounds < 1000) { changed = 0; rounds++;
-        for (int i = 0; i < NE; i++) { int f = E[i].from, t = E[i].next; if (!has[f]) continue; int c = D.s[f].mode == 'r' ? 0 : fresh[f]; if (sets_r(E[i].seq)) c = 1;
+        for (int i = 0; i < NE; i++) { int f = E[i].from, t = E[i].next; if (!has[f]) continue; int c = D.s[f].mode == 'r' ? (E[i].keys == 1 ? 1 : E[i].keys == 257 ? fresh[f] : 0) : fresh[f]; if (sets_r(E[i].seq)) c = 1;   /* a single-key edge out of a result state knows r exactly */
           if (!has[t]) { has[t] = 1; fresh[t] = (unsigned char)c; changed = 1; } else if (fresh[t] && !c) { fresh[t] = 0; changed = 1; } } }
-      for (int i = 0; i < NE; i++) { int f = E[i].from, t = E[i].next; if (!has[f] || D.s[t].mode != 'r') continue; int c = D.s[f].mode == 'r' ? 0 : fresh[f]; if (sets_r(E[i].seq)) c = 1;
+      for (int i = 0; i < NE; i++) { int f = E[i].from, t = E[i].next; if (!has[f] || D.s[t].mode != 'r') continue; int c = D.s[f].mode == 'r' ? (E[i].keys == 1 ? 1 : E[i].keys == 257 ? fresh[f] : 0) : fresh[f]; if (sets_r(E[i].seq)) c = 1;
         if (!c && D.s[f].mode == 'r' && E[i].keys == 1) continue;   /* a single-key edge out of a result state knows r exactly: re-dispatch is deliberate */
         if (!c) { int uniform = 1; for (int k = 1; k < 257; k++) if (D.s[t].byte[k].next != D.s[t].byte[0].next || D.s[t].byte[k].seq != D.s[t].byte[0].seq) { uniform = 0; break; }
           if (uniform) continue;   /* a result state whose row is one `*` edge does not dispatch on r */
-          snprintf(detail, sizeof detail, "entered from %s on key %s (%d keys) without r set since the last result dispatch", D.s[f].name, keyname(&D.s[f], E[i].key, kb, sizeof kb), E[i].keys); finding("ERROR", "stale-r", D.s[t].name, detail); } }
+          snprintf(detail, sizeof detail, "entered from %s on key %s (%d keys) without r set since the last result dispatch", D.s[f].name, keyname(&D.s[f], E[i].key, kb, sizeof kb), E[i].keys); finding("WARN", "stale-r", D.s[t].name, detail); } }
     }
     /* t-keys */
     for (int i = 0; i < NE; i++) for (int j = 0; j < E[i].seq->n; j++) if (E[i].seq->a[j].op == DL_PUSH) {
