@@ -156,7 +156,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 **2026-10-28 单元化重构决定：** 主人要求参考Rust模块化与内存安全设计，去除include引入的隐式耦合；不是换后缀。CX权威源码、公开接口、私有实例、显式资源/构建图、所有权/借用合同共同构成目标。目标CX0 → E2 → E1 → E3 → E4 → prune → lower → elf；现有独立CX0/束/适配已落地，安装产品仍七流。CX0语义控制最终也须网络化，十八张ask事实网不按阶段数机械加一。详见[单元化计划](plans/v0.0.43-units.md)及[cx入口](cx/README.md)。
 
-**当前分工与下一动作：** E3成员聚合值返回及最终名义类型核验已正规装入共享产品Rootf3705dfa/源ace3，原pending默认-run实返7；错误类型是带位置的普通类型错误，-Wall不再误报UNCOVERED。正式mixed-v2构造复用31张相同net、实构3张差异net，经完整来源核验、五切片/APE、两相准入安装及精确迁入；不能将历史107和当前43材料并称150项新作业。新产品内嵌模型聚合43/0、内存138/0、ABI55/0、诊断211/0、smoke16/0；私包时期独立E3流17/0仍保留原对象，不移贴新流资格。下一刀sizeof索引后缀私包（仅两实际路由模型），同时继续结构化CX类型/ABI与所有权原生化。详见[E3切片](plans/c43-aggregate-return-2026-10-28.md)及[正规构造安装收据](plans/mixed-f9-ace3-origin-2026-10-28.md)。完整测试清单最近实测仍204批/193覆盖/19未解、--all rc3，未将登记或局部通过当完整发布资格。
+**当前分工与下一动作：** sizeof索引后缀修复已正规构造、两阶段准入安装并迁入共享产品Root3a5b76ab/record0523b6c7/源353cb118（冻结e5bade1851）；共享默认-run原始用例实返7。新产品自身内嵌模型sizeof正例9/0、拒绝恢复9/0、成员聚合正例15/0、smoke16/0。新源实构43项材料，原f9历史107项独立验证；正规PCff696、双内核、五切片/APE及finish均完成。此前f3705上的43/0聚合、138/0内存、55/0 ABI、211/0诊断仍保留原产品身份，不整体转授新Root。下一刀补新Root受影响诊断/ABI与完整清单、流网/RI、N22和同候选平台证据；CX结构化类型/ABI与所有权原生化继续并行。详见`plans/c43-sizeof-postfix-2026-10-28.md`；开发安装不等于发布资格。
 
 **双线推进（2026-10-28）：** 0.0.43现行Rootf3705dfa/SIDace3继续补完整流/网/RI、N22与同候选平台证据，不等待整个CX重构完工；CX产物独立核身份逐单元接入，不能把完整Rust式编译期所有权自动扩为发布前置条件。现行版本明确的产品与验收合同仍须完成。历史E1 located warnlex已核654状态/168896观测决定及展开动作与当时正式模型全等，手写规则144类对/24 peek边界293/0；EOF后的12类peek逐项UNOBSERVABLE，不折叠作144源流PASS，也不转授新流资格。新已装产品core.memory138/0只证明管理API运行期约束；成员struct直接return的原始最小例已在共享默认-run真实rc7，sizeof索引后缀原红正在单独修复。
 
@@ -362,11 +362,11 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 <a id="memory-palace"></a>
 ### 记忆宫殿
 
-**sizeof 正规接续（2026-10-28）：** 冻结源`unisacc-epoch-sizeof-e5bade1851`/SID353cb118完成43项材料作业（tool3/gen34/tbl3/net3），34份JSON对原f9实测31同/3异。新origin ELF bdf812/profile1286独立核原107/34；双内核KGEN7be6完成。正规mixed包ff696已实际declare/pack/finish/seal，context7d69、manifestcc6c、receipt4c74；独立读取器默认-run通过原107/当前43，误用旧profile与错误源身份均具名拒绝。新产品context93219已核，五切片/APE、准入安装仍待完成；共享产品仍f3705。详情与日志见`plans/c43-sizeof-postfix-2026-10-28.md`及`out/c43-sizeof-origin-exec-01/`。这些是材料构造/核验，不转授私包20项或跨平台功能资格。
+**sizeof 正规接续（2026-10-28）：** 冻结源`unisacc-epoch-sizeof-e5bade1851`/SID353cb118完成43项材料作业，34份JSON对原f9实测31同/3异；新origin独立核原107/34。正规mixed包ff696、双内核KGEN7be6、产品context93219、五切片/APE完成。候选3a5b76ab/record0523经prepare99188、finish57768装入冻结根，再经迁入65655进入共享根；迁入收据`out/c43-3a5b-promote-01/receipt.tsv` SHA a580e700。初次prepare13012因archive缺Git元数据在来源记录步骤拒绝；补原e5b提交元数据后源context复验不变，原失败保留。新产品sizeof18/0、聚合正例15/0、smoke16/0，共享原始例rc7；完整及跨平台资格未授。
 
 **构造接续检查点（2026-10-28）：** ace3冻结根`unisacc-epoch-aggregate-13d8cfe478`完成76项带收据作业（tool5/gen34/tbl34/net3），31张相同net按显式mixed-v2合同复用；历史107与当前union43分别核验，不冒称当前150项新构造。正规PC661c2b02、context8cb8e390、receipt3fb50654已封存并独立读取通过。新KGEN58adde、五切片、APE及逐项finish均完成；产品context fe3650a0。新产品f3705dfa（3,007,351B）已两相准入、冻结根安装及共享迁入，record63e7d703、源ace3，development-only。内嵌模型聚合四组43/0保留独立d65原红对照；内存138/0、ABI55/0、诊断211/0、smoke16/0均在新产品实跑。证据out/c43-f9-origin-exec-01/及out/c43-f3705-promote-01/；迁入前后witness4f7a21c6一致。下一重活窗交sizeof，两路由模型私包基底使用正规661c，不借旧d65证据。安装已改变冻结根产品，不把安装前材料观察冒充安装后未变；跨平台运行与完整发布资格仍开。
 
-**现行产品（2026-10-28）：** Rootf3705dfa/record63e7d703，完整源SIDace3b447、冻结13d8cfe478；mixed-v2 PC661c2b02、双内核/五切片/APE、kind4两相准入安装及共享精确迁入完成。新产品自身启动、内嵌模型实跑聚合43/0、内存138/0、库ABI55/0、negative211/0（known_gaps1）、smoke16/0；共享默认-run原始成员聚合返回用例真实rc7/stderr空。证据out/c43-f9-origin-exec-01/、迁入收据out/c43-f3705-promote-01/receipt.tsv（SHA0dce6df7）；原d65/record4946备份保留。迁入工具经修前2项、helper绑定修后4项具名拒绝及正例验证，提交6f63648600；这些本机合同不授同候选跨平台或完整发布资格。下一刀sizeof索引后缀私包验证；结构化CX接口类型记录与编译期所有权仍未完成。
+**现行产品（2026-10-28）：** Root3a5b76ab（3,007,394B）/record0523b6c7，源SID353cb118/冻结e5bade1851，内嵌正规PCff696。kind4两阶段准入、冻结根安装与共享精确迁入已完成，development-only。新产品自身启动并实跑sizeof正例9/0、拒绝恢复9/0、成员聚合正例15/0、smoke16/0；共享默认-run原始sizeof用例rc7/stderr空。两项错误profile迁入负控具名rc2；原f3705/record63e7备份在`out/c43-3a5b-promote-01/`。完整执行收据见`out/c43-sizeof-origin-exec-01/progress-root-01.tsv`，不移贴旧Root的流网/功能/平台资格。
 
 **现行重构入口（2026-10-28）：** tools/cx-runtime.cx从显式原头生成声明树/无include provider，记录原头、bootstrap、生成器、消费者、ABI与产物哈希；tools/cx-driver.cx的RuntimeProvider只加入一次，tools/runtime/process模块只带进程执行接口。新增可选RuntimeProviderSHA/RuntimeDeclarationsSHA成对绑定，直接核封存束内provider/声明清单/逐头身份，11项正拒绝恢复实跑0失败（out/c43-runtime-binding-03.stdout）；旧profile仍明确无绑定。此前新链driver自编译在原预算内成功，所得静态ELF实跑原生共享malloc/free/errno/stdio/setpgid5/0和driver14/0。consumer接口剥constructor/destructor注册效应，provider独有初始化。CIF文本投影/forced includes仍是兼容桥，原生类型/符号/所有权直入E3及编译期保证未完成；unsafe兼容ABI仍暴露内部声明，不能宣称私有安全完成。
 
@@ -768,7 +768,7 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 ### 3.15 目标文件、分开编译与链接（0.0.17）
 
 - **对象**：`-c -b os/arch` 写可重定位对象，格式随目标（ELF/Mach-O/COFF）。参考侧三格式都有；产品的 Linux ELF 由模型路由写出（对象专用 lower + ELF 写出 δ，与参考逐字节同），Mach-O/COFF 产品路由在 0.0.18（驱动按名拒绝）。整程序对象可被系统链接器单独链接，并可读 cc 定义的数据符号；与 cc 的函数互调需要调用约定适配（0.0.18）。设计与事实表见 [docs/toolchain.md](docs/toolchain.md)。
-- **单元与链接**：`-funit` 写单元对象（tape 带 `.global/.extern` 链接属性；对象里另有不装载的节存单元 tape）。`unisacc a.o b.o lib.a [-o prog]` 在 tape 级合并（src/tapelink.c：私有名改 `__u<k>_`、全局按名相会、同名全局对象按 C 公共定义合一、各单元 `__init_u` 串成 `__init`），再走普通后端，六目标都可出；`unisacc ar rcs|t|x` 读写系统 `ar` 也认的归档。产品驱动复用同一合并核心，编译决策仍全在模型路由。
+- **单元与链接**：`-funit` 写单元对象（tape 带 `.global/.extern` 链接属性；对象里另有不装载的节存单元 tape）。`unisacc a.o b.o lib.a [-o prog]` 在 tape 级合并（src/tapelink.c：私有名改 `__u<k>_`、全局按名相会、同名全局对象按 C 公共定义合一、各单元 `__init_u` 串成 `__init`），再走普通后端，六目标都可出；`unisacc ar rcs|t|x` 读写系统 `ar` 也认的归档（2026-10-28 cc：archive.product-ar 以宿主 ar 为 oracle 实跑 17/0 @f3705dfa；未定义外部函数的链接拒绝另立格 link.undef-function-refusal，当前为已知缺陷，见 plans/defects-c43.md）。产品驱动复用同一合并核心，编译决策仍全在模型路由。
 - **驱动默认模式**：见 §3.11（裸 `unisacc FILE.c` 即运行）。
 
 ## 4. 质量体系

@@ -268,3 +268,37 @@ hyphens. Initial hyphen-spelled commands were refused before construction or
 finish; their logs are retained, not counted as successful steps.
 The correctly named win/x86_64 slice (3220) and independent finish (43379)
 both exited 0; four other slices, wrap, admission and installation remain.
+
+All remaining slices and their independent finish steps subsequently completed,
+then wrap/finish-wrap produced the 3,007,394-byte candidate
+`3a5b76ab91ba2dc84085015e5b498cea701c5fe4f2e65c69c087d8e64447e34a`.
+The candidate's embedded default-run original sizeof case returned 7 with
+empty stderr. Exact terminal statuses are retained in
+`out/c43-sizeof-origin-exec-01/progress-root-01.tsv`.
+
+Installation's first prepare (13012) refused while writing provenance: the
+archive export had no Git metadata, which seed/ident.c requires for the commit
+field. No live product or staged install pair was replaced. The frozen root
+was given local Git metadata for the exact original commit
+`e5bade1851e8695c65935550a609a8704ff1a5f1`, without checking out or changing
+source files. Its tracked tree was clean and source context reverified rc0.
+The original failure remains in `install-prepare-01.*`; prepare02 (99188) and
+finish01 (57768) then completed rc0, installing only the frozen root.
+New record SHA is `0523b6c7f7c166cd5a9ba67da422737e8b7601eafda44278cd1c72529656ea30`,
+native receipt `b5c7cf61698123eae70f18a0073d200c7adf7f9b3c62bb5e2842704bc6f88f47`,
+prepared receipt `9619e29b1f7dd01c217e70cea7d55f22e746ec6dc18e208ad833b475160fdd1e`.
+
+The installed product itself compiled and ran sizeof positive9/0 and
+refusal/recovery9/0 with `MODELS=-`, aggregate positive15/0 with a separate
+retained D65 baseline, and smoke16/0. These are actual embedded-candidate
+results, not transferred private-package conclusions.
+
+The promoter now accepts an explicit registered v2 material profile while
+retaining the old default CLI. Source/profile mismatch and unknown-profile
+negative calls both returned their expected named rc2 without changing the
+shared product. Actual migration (65655) returned 0, preserving f3705/63e7
+backups in `out/c43-3a5b-promote-01/`; receipt SHA is
+`a580e7000546745cb51c63fd50dca8976f399d44530c3859971fd80e5c7afe9d`.
+Shared product/record now exactly match 3a5b/0523. The shared default-run
+original sizeof case returned 7, stderr empty. Foreign host execution and
+complete release qualification remain unverified; this is development install.
