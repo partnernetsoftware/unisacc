@@ -56,6 +56,16 @@ exec/facts，通用stage清单固定exec前缀，但模板路径来自清单展�
 读入口列表保存在`out/c43-link-undef-fix-01/constructor-read-sites.txt`；正式gen命令与展开路径
 仍需逐项绑定，下一步重点是这部分，不重复审已确认的tbl/net单输入路径。
 
+生成器实际依赖观察已完成：从sizeof纪元34份gen command.argv.tsv取stage/flags，
+保留原工具与40秒预算，仅把工作目录切到8390冻结根、输出写入新out目录；
+外层strace -f trace=%file记录每次实际文件访问，34命令全rc0。
+执行工具SHA5145075e08da56a5e4e25cf90d4eecf0366b322b49938b1cfd8889f04496818b。
+34份JSON与353c原result.json逐份SHA相等，34 SAME/0 DIFF，未运行tbl/net重造权重。
+`out/c43-link-gen-trace-01/COMPARE.tsv` SHA90953f766402415c697e8387c04dd01f396b6c1c57eb82e0839337f0572dd80e；
+同目录保存每命令trace/stdout/stderr/JSON。trace未出现tapelink或直接src路径；
+默认strace字符串截断使它不是完整规范路径清单，34输出逐字身份比较另有独立证据，不能混称通用依赖证明。
+下一步将这份实际34同结果与原包来源链接入显式复用合同；当前ni_compare默认拒绝仍保留。
+
 - 现象：`int used(void); int main(void){return used()+2;}` 经 `-c -b lnx/x86_64 -funit` 得 main.o 后，`unisacc -o img main.o`（或加只定义 `unused` 的归档、或直接 `-o img main.c`）rc 0 并写出镜像；运行 SIGSEGV（rc 139）。预期：`link: undefined reference to used`，rc≠0，无镜像。
 - 定位：src/tapelink.c:351 `tl_check_undef`（R20-3）只检查名字以 `g_` 开头的未定义外部（全局数据对象），函数外部不检查。
 - 同现：经典参考 REF 0ed46192 行为相同（共享缺陷，非回归）；产品==REF 字节差分仍有效，不阻塞候选 f3705dfa。
