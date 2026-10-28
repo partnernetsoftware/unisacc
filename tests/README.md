@@ -37,6 +37,8 @@ sh ./gcc_cx.com tests/cxcc/suite.cx -o out/cxcc-suite/suite
 ./out/cxcc-suite/suite --list
 ```
 
+Linux and OSX start the entries with `sh`. `tools/build-cxcc-host.cx` builds each one with the matching compiler from `PATH` (`gcc` for `gcc_cx`, `clang` for `clang_cx`, including Apple clang). On Windows that builder writes `gcc_cx.com` and `clang_cx.com` as the native programs, and the command is `gcc_cx.com FILE.cx -o OUT` when `gcc` is on `PATH`. The driver calls `posix_spawnp`, `waitpid`, and `mkstemp`. On Windows those bodies are `tools/cxcc-hostinc/spawn.h` (`CreateProcessA` and `open`), and the compile line adds `-idirafter tools/cxcc-hostinc` because MinGW has no `spawn.h`. The suite above was run on Linux. Windows and OSX were not executed in this tree.
+
 ## Native test entry and explicit gaps (unisacc CX)
 
 This is a separate batch, with no imported PASS records and no legacy runner dependencies. It does **not** gate `ujs.com`.

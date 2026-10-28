@@ -11,9 +11,12 @@
    recorded header closure still match. A header included by an -include
    file is part of that closure. __FILE__ stays the original .cx path.
    This is ordinary C. It does not grant a checked .cx identity.
-   Unix uses fork and execvp. Windows uses posix_spawnp.
-   Set CX_ROOT when the repository is not found from the driver path or the
-   working directory. */
+   The driver calls POSIX posix_spawnp, waitpid, and mkstemp. gcc and clang
+   are names on PATH. On Linux and OSX those calls are the system libc.
+   On Windows, tools/cxcc-hostinc/spawn.h supplies the same calls with
+   CreateProcessA and open, because MinGW has no spawn.h. The compile line
+   adds -idirafter tools/cxcc-hostinc there. Set CX_ROOT when the repository
+   is not found from the driver path or the working directory. */
 enum { CXCC_ARGS = 96, CXCC_SRCS = 32, CXCC_PATH = 4096, CXCC_BYTES = 4194304 };
 
 static int ends_with(const char *s, const char *suf) {
@@ -161,29 +164,7 @@ static int write_temp(const unsigned char *s, size_t n, char *path, size_t path_
     int fd;
     FILE *f;
 #ifdef _WIN32
-    /* Cosmopolitan tmpdir order: $TMPDIR, then GetTempPathA. Both end with a slash. */
-    static long gt;
-    const char *td;
-    int nlen, j;
-    const char *suf = "cxccXXXXXX";
-    td = getenv("TMPDIR");
-    nlen = 0;
-    if (td && td[0]) {
-        while (td[nlen] && nlen < CXCC_PATH - 16) { tmpl[nlen] = td[nlen]; nlen = nlen + 1; }
-        if (td[nlen]) return -1;
-        if (tmpl[nlen - 1] != '/' && tmpl[nlen - 1] != '\\') {
-            if (nlen + 1 >= CXCC_PATH - 16) return -1;
-            tmpl[nlen] = '\\';
-            nlen = nlen + 1;
-        }
-    } else {
-        if (!gt) gt = _ux_sym("GetTempPathA");
-        nlen = (int)(_ux_call(gt, (long)(CXCC_PATH - 16), (long)tmpl, 0, 0) & 0xFFFFFFFFL);
-        if (nlen <= 0 || nlen >= CXCC_PATH - 16) return -1;
-    }
-    j = 0;
-    while (suf[j]) { tmpl[nlen] = suf[j]; nlen = nlen + 1; j = j + 1; }
-    tmpl[nlen] = 0;
+    if (cxcc_temp_template(tmpl, sizeof tmpl)) return -1;
 #else
     if (copy_str(tmpl, sizeof tmpl, "/tmp/cxccXXXXXX")) return -1;
 #endif
@@ -211,157 +192,31 @@ static int cxcc_status(int st) {
     return 2;
 }
 
-static int cxcc_exec(const char *cmd, const char *what, char **av) {
-#ifdef _WIN32
-    pid_t pid = 0;
-    int st = 0;
-    int spr = posix_spawnp(&pid, av[0], 0, 0, av, 0);
-    if (spr != 0) {
-        fprintf(stderr, "%s: cannot run %s\n", cmd, what);
-        return 127;
-    }
-    if (waitpid(pid, &st, 0) < 0) {
-        fprintf(stderr, "%s: lost %s\n", cmd, what);
-        return 2;
-    }
-    return cxcc_status(st);
-#else
-    pid_t pid;
-    int st;
-    pid = fork();
-    if (pid < 0) {
-        fprintf(stderr, "%s: cannot start %s\n", cmd, what);
-        return 2;
-    }
-    if (pid == 0) {
-        execvp(av[0], av);
-        fprintf(stderr, "%s: cannot run %s\n", cmd, what);
-        _exit(127);
-    }
-    if (waitpid(pid, &st, 0) < 0) {
-        fprintf(stderr, "%s: lost %s\n", cmd, what);
-        return 2;
-    }
-    return cxcc_status(st);
+#ifndef _WIN32
+int posix_spawnp(pid_t *pid, const char *file, const void *fa, const void *at,
+                 char *const argv[], char *const envp[]);
 #endif
-}
 
-static int cxcc_plan_capture(const char *cmd, char **av, char *buf, size_t cap, size_t *out_n) {
-#ifdef _WIN32
-    char path[CXCC_PATH];
-    posix_spawn_file_actions_t fa;
+static int cxcc_exec(const char *cmd, const char *what, char **av) {
     pid_t pid = 0;
-    int st = 0, spr;
-    FILE *f;
-    size_t n = 0, k;
-    if (cap < 2) return 2;
-    if (write_temp((const unsigned char *)"", 0, path, sizeof path)) {
-        fprintf(stderr, "%s: cannot store the module plan\n", cmd);
-        return 2;
-    }
-    if (strlen(path) >= 255) {
-        fprintf(stderr, "%s: plan path is too long\n", cmd);
-        unlink(path);
-        return 2;
-    }
-    posix_spawn_file_actions_init(&fa);
-    /* O_WRONLY|O_CREAT|O_TRUNC on the Windows open gate. */
-    spr = posix_spawn_file_actions_addopen(&fa, 1, path, 0x301, 384);
+    int st = 0;
+    /* posix_spawnp takes the new environment. NULL is not "inherit":
+       an empty environment makes gcc fail to execute cc1. Windows
+       CreateProcessA treats a null environment as inherit, so pass NULL there. */
+#ifdef _WIN32
+    int spr = posix_spawnp(&pid, av[0], 0, 0, av, 0);
+#else
+    int spr = posix_spawnp(&pid, av[0], 0, 0, av, environ);
+#endif
     if (spr != 0) {
-        posix_spawn_file_actions_destroy(&fa);
-        unlink(path);
-        fprintf(stderr, "%s: cannot capture the module plan\n", cmd);
-        return 2;
-    }
-    spr = posix_spawnp(&pid, av[0], &fa, 0, av, 0);
-    posix_spawn_file_actions_destroy(&fa);
-    if (spr != 0) {
-        fprintf(stderr, "%s: cannot run %s\n", cmd, av[0]);
-        unlink(path);
+        fprintf(stderr, "%s: cannot run %s\n", cmd, what);
         return 127;
     }
     if (waitpid(pid, &st, 0) < 0) {
-        fprintf(stderr, "%s: lost %s\n", cmd, av[0]);
-        unlink(path);
+        fprintf(stderr, "%s: lost %s\n", cmd, what);
         return 2;
     }
-    f = fopen(path, "rb");
-    if (!f) {
-        unlink(path);
-        fprintf(stderr, "%s: cannot read the module plan\n", cmd);
-        return 2;
-    }
-    while (n + 1 < cap) {
-        k = fread(buf + n, 1, cap - 1 - n, f);
-        if (k == 0) break;
-        n += k;
-    }
-    if (n + 1 >= cap && fgetc(f) != EOF) {
-        fclose(f);
-        unlink(path);
-        fprintf(stderr, "%s: module plan is too long\n", cmd);
-        return 2;
-    }
-    fclose(f);
-    unlink(path);
-    buf[n] = 0;
-    *out_n = n;
     return cxcc_status(st);
-#else
-    int sp[2];
-    pid_t pid;
-    int st = 0;
-    size_t n = 0;
-    if (cap < 2) return 2;
-    if (pipe(sp) != 0) {
-        fprintf(stderr, "%s: cannot capture the module plan\n", cmd);
-        return 2;
-    }
-    pid = fork();
-    if (pid < 0) {
-        close(sp[0]);
-        close(sp[1]);
-        fprintf(stderr, "%s: cannot start the module plan\n", cmd);
-        return 2;
-    }
-    if (pid == 0) {
-        if (dup2(sp[1], 1) < 0) _exit(127);
-        close(sp[0]);
-        close(sp[1]);
-        execvp(av[0], av);
-        fprintf(stderr, "%s: cannot run %s\n", cmd, av[0]);
-        _exit(127);
-    }
-    close(sp[1]);
-    for (;;) {
-        ssize_t k;
-        if (n + 1 >= cap) {
-            kill(pid, SIGKILL);
-            close(sp[0]);
-            waitpid(pid, &st, 0);
-            fprintf(stderr, "%s: module plan is too long\n", cmd);
-            return 2;
-        }
-        k = read(sp[0], buf + n, cap - 1 - n);
-        if (k < 0) {
-            if (errno == EINTR) continue;
-            close(sp[0]);
-            waitpid(pid, &st, 0);
-            fprintf(stderr, "%s: cannot read the module plan\n", cmd);
-            return 2;
-        }
-        if (k == 0) break;
-        n += (size_t)k;
-    }
-    close(sp[0]);
-    if (waitpid(pid, &st, 0) < 0) {
-        fprintf(stderr, "%s: lost %s\n", cmd, av[0]);
-        return 2;
-    }
-    buf[n] = 0;
-    *out_n = n;
-    return cxcc_status(st);
-#endif
 }
 
 static void cxcc_blank_paths(char paths[][CXCC_TMP], int n) {
@@ -468,31 +323,51 @@ static int cxcc_cid_set;
 static int cxcc_compiler_tag(const char *compiler) {
     const char *env, *p, *q;
     char tryb[CXCC_PATH];
+    char name[2][80];
     struct stat st;
-    int n, k, clen;
+    int n, k, clen, pass, npass;
+    char sep;
     clen = (int)strlen(compiler);
+    if (clen <= 0 || clen >= 60) return -1;
     if (cxcc_cid_set && strncmp(cxcc_cid, compiler, (size_t)clen) == 0 && cxcc_cid[clen] == '\n') return 0;
+    memcpy(name[0], compiler, (size_t)clen + 1);
+    npass = 1;
+#ifdef _WIN32
+    sep = ';';
+    if (!ends_with(compiler, ".exe") && !ends_with(compiler, ".EXE")) {
+        k = snprintf(name[1], sizeof name[1], "%s.exe", compiler);
+        if (k > 0 && k < (int)sizeof name[1]) npass = 2;
+    }
+#else
+    sep = ':';
+#endif
     env = getenv("PATH");
     if (!env) return -1;
     p = env;
     while (*p) {
         q = p;
-        while (*q && *q != ':') q++;
+        while (*q && *q != sep) q++;
         n = (int)(q - p);
-        if (n <= 0) k = snprintf(tryb, sizeof tryb, "./%s", compiler);
-        else if (n < (int)sizeof tryb - 80) {
-            memcpy(tryb, p, (size_t)n);
-            tryb[n] = 0;
-            k = snprintf(tryb + n, sizeof tryb - (size_t)n, "/%s", compiler);
-            if (k >= 0) k = n + k;
-        } else k = -1;
-        if (k > 0 && k < (int)sizeof tryb && access(tryb, X_OK) == 0 &&
-            stat(tryb, &st) == 0 && S_ISREG(st.st_mode)) {
-            k = snprintf(cxcc_cid, sizeof cxcc_cid, "%s\n%s\n%ld\n%ld",
-                         compiler, tryb, (long)st.st_mtime, (long)st.st_size);
-            if (k < 0 || k >= (int)sizeof cxcc_cid) { cxcc_cid_set = 0; return -1; }
-            cxcc_cid_set = 1;
-            return 0;
+        for (pass = 0; pass < npass; pass++) {
+            if (n <= 0) k = snprintf(tryb, sizeof tryb, "./%s", name[pass]);
+            else if (n < (int)sizeof tryb - 80) {
+                memcpy(tryb, p, (size_t)n);
+                tryb[n] = 0;
+                k = snprintf(tryb + n, sizeof tryb - (size_t)n, "/%s", name[pass]);
+                if (k >= 0) k = n + k;
+            } else k = -1;
+#ifdef _WIN32
+            if (k > 0 && k < (int)sizeof tryb && access(tryb, 0) == 0 &&
+#else
+            if (k > 0 && k < (int)sizeof tryb && access(tryb, X_OK) == 0 &&
+#endif
+                stat(tryb, &st) == 0 && S_ISREG(st.st_mode)) {
+                k = snprintf(cxcc_cid, sizeof cxcc_cid, "%s\n%s\n%ld\n%ld",
+                             compiler, tryb, (long)st.st_mtime, (long)st.st_size);
+                if (k < 0 || k >= (int)sizeof cxcc_cid) { cxcc_cid_set = 0; return -1; }
+                cxcc_cid_set = 1;
+                return 0;
+            }
         }
         if (*q == 0) break;
         p = q + 1;
@@ -713,6 +588,10 @@ static int cxcc_cache_open(const char *root, const char *compiler, const char *c
     if (k < 0 || k >= (int)sizeof dir || cxcc_fold_file(acc, dir)) return -1;
     k = snprintf(dir, sizeof dir, "%s/include/unisa_safedel.h", root);
     if (k < 0 || k >= (int)sizeof dir || cxcc_fold_file(acc, dir)) return -1;
+#ifdef _WIN32
+    k = snprintf(dir, sizeof dir, "%s/tools/cxcc-hostinc/spawn.h", root);
+    if (k < 0 || k >= (int)sizeof dir || cxcc_fold_file(acc, dir)) return -1;
+#endif
     cxcc_fold(acc, src, sn);
     for (i = 2; i < nf; i++) {
         if (!fields[i][0] || !strcmp(fields[i], "cx.h")) continue;
@@ -786,6 +665,28 @@ int cxm_say(int fd, char *s, int n) {
 int cxm_plan(char **paths, int n);
 int cxm_planprint(char **opt, int nopt);
 
+/* Windows adds -idirafter <repo>/tools/cxcc-hostinc before -include cx.h.
+   hostinc must stay alive until the compiler process returns. */
+static int cxcc_push_prelude(char **av, int n, int cap, char *hostinc, size_t hostcap,
+                             const char *root, const char *cxh) {
+#ifdef _WIN32
+    int k;
+    if (n + 4 >= cap) return -1;
+    k = snprintf(hostinc, hostcap, "%s/tools/cxcc-hostinc", root);
+    if (k < 0 || k >= (int)hostcap) return -1;
+    av[n++] = "-idirafter";
+    av[n++] = hostinc;
+#else
+    (void)hostinc;
+    (void)hostcap;
+    (void)root;
+    if (n + 2 >= cap) return -1;
+#endif
+    av[n++] = "-include";
+    av[n++] = (char *)cxh;
+    return n;
+}
+
 static int cxcc_expand(int argc, char **argv, const char *compiler, const char *cmd,
                        const char *root, const char *cxh, int *src_at, int nsrc) {
     char *paths[CXCC_SRCS];
@@ -793,6 +694,7 @@ static int cxcc_expand(int argc, char **argv, const char *compiler, const char *
     char *lflags[CXCC_PLANARGS];
     char srcs[CXCC_UNITS][CXCC_TMP];
     char objs[CXCC_UNITS][CXCC_TMP];
+    char hostinc[CXCC_PATH];
     char *plan = 0;
     char *out_path = 0;
     size_t plan_n = 0;
@@ -952,8 +854,14 @@ static int cxcc_expand(int argc, char **argv, const char *compiler, const char *
                     av[n++] = (char *)compiler;
                     av[n++] = "-std=c99";
                     av[n++] = "-Werror=implicit-function-declaration";
-                    av[n++] = "-include";
-                    av[n++] = (char *)cxh;
+                    n = cxcc_push_prelude(av, n, CXCC_PLANARGS, hostinc, sizeof hostinc, root, cxh);
+                    if (n < 0) {
+                        fprintf(stderr, "%s: prelude path too long\n", cmd);
+                        cxcc_unlink_paths(srcs, nunit + 1);
+                        cxcc_unlink_paths(objs, nunit + 1);
+                        free(plan);
+                        return 2;
+                    }
                     for (k = 0; k < nc; k++) {
                         if (n + 8 >= CXCC_PLANARGS) {
                             fprintf(stderr, "%s: too many arguments\n", cmd);
@@ -1076,41 +984,15 @@ static int cxcc_later_input(int argc, char **argv, int from) {
     return 0;
 }
 
-#ifdef _WIN32
-static int cxcc_spawn(const char *cmd, const char *compiler, char **av, char temps[][260], int nsrc) {
-    pid_t pid = 0;
-    int st = 0;
-    int spr = posix_spawnp(&pid, compiler, 0, 0, av, 0);
-    int i;
-    if (spr != 0) {
-        fprintf(stderr, "%s: cannot run %s\n", cmd, compiler);
-        for (i = 0; i < nsrc; i++) unlink(temps[i]);
-        return 127;
-    }
-    if (waitpid(pid, &st, 0) < 0) {
-        fprintf(stderr, "%s: lost %s\n", cmd, compiler);
-        for (i = 0; i < nsrc; i++) unlink(temps[i]);
-        return 2;
-    }
-    for (i = 0; i < nsrc; i++) unlink(temps[i]);
-    if (WIFEXITED(st)) return WEXITSTATUS(st);
-    if (WIFSIGNALED(st)) return 128 + WTERMSIG(st);
-    return 2;
-}
-#endif
-
 static int cxcc_drive_os(int argc, char **argv, const char *compiler, const char *cmd) {
     char root[CXCC_PATH];
     char cxh[CXCC_PATH];
+    char hostinc[CXCC_PATH];
     char temps[CXCC_SRCS][260];
     char *av[CXCC_ARGS];
     int src_at[CXCC_SRCS];
     int nsrc = 0;
     int i, n, rc, skip, repo;
-#ifndef _WIN32
-    int st;
-    pid_t pid;
-#endif
     repo = find_repo(argc > 0 ? argv[0] : 0, root, sizeof root);
     if (repo == -2) {
         fprintf(stderr, "%s: CX_ROOT has no include/cx.h\n", cmd);
@@ -1201,8 +1083,12 @@ static int cxcc_drive_os(int argc, char **argv, const char *compiler, const char
     av[n++] = (char *)compiler;
     av[n++] = "-std=c99";
     av[n++] = "-Werror=implicit-function-declaration";
-    av[n++] = "-include";
-    av[n++] = cxh;
+    n = cxcc_push_prelude(av, n, CXCC_ARGS, hostinc, sizeof hostinc, root, cxh);
+    if (n < 0) {
+        fprintf(stderr, "%s: prelude path too long\n", cmd);
+        for (i = 0; i < nsrc; i++) unlink(temps[i]);
+        return 2;
+    }
     skip = 0;
     for (i = 1; i < argc; i++) {
         int si;
@@ -1237,30 +1123,9 @@ static int cxcc_drive_os(int argc, char **argv, const char *compiler, const char
         }
     }
     av[n] = 0;
-#ifdef _WIN32
-    return cxcc_spawn(cmd, compiler, av, temps, nsrc);
-#else
-    pid = fork();
-    if (pid < 0) {
-        fprintf(stderr, "%s: cannot start %s\n", cmd, compiler);
-        for (i = 0; i < nsrc; i++) unlink(temps[i]);
-        return 2;
-    }
-    if (pid == 0) {
-        execvp(compiler, av);
-        fprintf(stderr, "%s: cannot run %s\n", cmd, compiler);
-        _exit(127);
-    }
-    if (waitpid(pid, &st, 0) < 0) {
-        fprintf(stderr, "%s: lost %s\n", cmd, compiler);
-        for (i = 0; i < nsrc; i++) unlink(temps[i]);
-        return 2;
-    }
+    rc = cxcc_exec(cmd, compiler, av);
     for (i = 0; i < nsrc; i++) unlink(temps[i]);
-    if (WIFEXITED(st)) return WEXITSTATUS(st);
-    if (WIFSIGNALED(st)) return 128 + WTERMSIG(st);
-    return 2;
-#endif
+    return rc;
 }
 
 int cxcc_drive(int argc, char **argv, const char *compiler, const char *cmd) {

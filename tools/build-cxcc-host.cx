@@ -1,8 +1,26 @@
-/* Linux -o drivers for .cx. System gcc links src/cxmod.c into the driver.
-   The resulting gcc_cx.com and clang_cx.com do not call unisacc.com.
-   From the repo root:
+/* Build gcc_cx and clang_cx on the machine that will run them.
+   Each driver is compiled by the same compiler name it will call.
+   gcc and clang are taken from PATH. A missing name is skipped.
+   The drivers link src/cxmod.c and do not call unisacc.com. -o only.
+
+   Linux, and OSX when the name gcc is on PATH:
    gcc -std=c99 -Werror=implicit-function-declaration -include include/cx.h -x c tools/build-cxcc-host.cx -o out/cxcc-host/build
    ./out/cxcc-host/build
+   OSX when the host compiler is clang (Apple clang is enough to build this file):
+   clang -std=c99 -Werror=implicit-function-declaration -include include/cx.h -x c tools/build-cxcc-host.cx -o out/cxcc-host/build
+   ./out/cxcc-host/build
+   Then: sh ./gcc_cx.com FILE.cx -o OUT
+         sh ./clang_cx.com FILE.cx -o OUT
+
+   Windows, from the repository root, MinGW gcc or MinGW clang on PATH.
+   The .com file is that native program, not a shell script:
+   gcc -std=c99 -Werror=implicit-function-declaration -idirafter tools/cxcc-hostinc -include include/cx.h -include tools/cxcc-hostinc/win.h -x c tools/build-cxcc-host.cx -o out/cxcc-host/build.exe
+   out\cxcc-host\build.exe
+   Then: gcc_cx.com FILE.cx -o OUT
+         clang_cx.com FILE.cx -o OUT
+   On Windows this builder calls posix_spawnp and waitpid. The bodies are
+   tools/cxcc-hostinc/spawn.h (CreateProcessA and open). Linux and OSX use
+   the system libc through cx_run_timeout.
 */
 static int write_text(const char *path, const char *text) {
     FILE *f;
@@ -15,6 +33,15 @@ static int write_text(const char *path, const char *text) {
     return n == want ? 0 : -1;
 }
 
+static int ensure_dir(const char *path) {
+    struct stat st;
+    if (mkdir(path, 0755) == 0) return 0;
+    if (errno == EEXIST && stat(path, &st) == 0 && S_ISDIR(st.st_mode)) return 0;
+    fprintf(stderr, "build-cxcc-host: cannot create %s\n", path);
+    return -1;
+}
+
+#ifndef _WIN32
 static int run(const char *cmd) {
     char *buf = 0;
     size_t n = 0;
@@ -29,25 +56,205 @@ static int run(const char *cmd) {
     return rc;
 }
 
+static int on_path(const char *cc) {
+    char line[96];
+    char *buf = 0;
+    size_t n = 0;
+    int rc, k;
+    k = snprintf(line, sizeof line, "command -v %s >/dev/null 2>&1", cc);
+    if (k < 0 || k >= (int)sizeof line) return 0;
+    rc = cx_run_timeout(line, 10, &buf, &n);
+    free(buf);
+    return rc == 0;
+}
+
+static int write_launcher(const char *cmdname) {
+    char path[64];
+    char text[512];
+    int k;
+    k = snprintf(path, sizeof path, "%s.com", cmdname);
+    if (k < 0 || k >= (int)sizeof path) return -1;
+    k = snprintf(text, sizeof text,
+                 "#!/bin/sh\n"
+                 "here=$(CDPATH= cd -- \"$(dirname \"$0\")\" && pwd) || exit 2\n"
+                 "exec \"$here/out/cxcc-host/%s\" \"$@\"\n",
+                 cmdname);
+    if (k < 0 || k >= (int)sizeof text) return -1;
+    if (write_text(path, text)) return -1;
+    if (chmod(path, 0755) != 0) return -1;
+    return 0;
+}
+
+static int build_one(const char *cc, const char *cmdname) {
+    char line[1024];
+    int k;
+    k = snprintf(line, sizeof line,
+                 "%s -std=c99 -Werror=implicit-function-declaration -include stdlib.h -c src/cxmod.c -o out/cxcc-host/%s-cxmod.o",
+                 cc, cc);
+    if (k < 0 || k >= (int)sizeof line || run(line)) return 1;
+    k = snprintf(line, sizeof line,
+                 "%s -std=c99 -Werror=implicit-function-declaration -include include/cx.h -x c -c tools/cxcc.cx -o out/cxcc-host/%s-cxcc.o",
+                 cc, cc);
+    if (k < 0 || k >= (int)sizeof line || run(line)) return 1;
+    k = snprintf(line, sizeof line,
+                 "%s -std=c99 -Werror=implicit-function-declaration -include include/cx.h -x c -c tools/%s.cx -o out/cxcc-host/%s-main.o",
+                 cc, cmdname, cc);
+    if (k < 0 || k >= (int)sizeof line || run(line)) return 1;
+    k = snprintf(line, sizeof line,
+                 "%s -std=c99 -o out/cxcc-host/%s out/cxcc-host/%s-cxcc.o out/cxcc-host/%s-cxmod.o out/cxcc-host/%s-main.o",
+                 cc, cmdname, cc, cc, cc);
+    if (k < 0 || k >= (int)sizeof line || run(line)) return 1;
+    if (write_launcher(cmdname)) return 1;
+    return 0;
+}
+#else
+static int copy_file(const char *from, const char *to) {
+    FILE *in, *out;
+    char buf[8192];
+    size_t n;
+    in = fopen(from, "rb");
+    if (!in) return -1;
+    out = fopen(to, "wb");
+    if (!out) { fclose(in); return -1; }
+    while ((n = fread(buf, 1, sizeof buf, in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) { fclose(in); fclose(out); return -1; }
+    }
+    if (ferror(in)) { fclose(in); fclose(out); return -1; }
+    if (fclose(in) != 0) { fclose(out); return -1; }
+    if (fclose(out) != 0) return -1;
+    return 0;
+}
+
+static int on_path(const char *cc) {
+    const char *env, *p, *q;
+    char tryb[4096];
+    char name[2][80];
+    int npass, pass, n, k;
+    env = getenv("PATH");
+    if (!env || strlen(cc) >= 60) return 0;
+    if (snprintf(name[0], sizeof name[0], "%s", cc) < 0) return 0;
+    npass = 1;
+    if (!strstr(cc, ".exe") && !strstr(cc, ".EXE")) {
+        if (snprintf(name[1], sizeof name[1], "%s.exe", cc) > 0) npass = 2;
+    }
+    p = env;
+    while (*p) {
+        q = p;
+        while (*q && *q != ';') q++;
+        n = (int)(q - p);
+        for (pass = 0; pass < npass; pass++) {
+            if (n <= 0) k = snprintf(tryb, sizeof tryb, "%s", name[pass]);
+            else k = snprintf(tryb, sizeof tryb, "%.*s/%s", n, p, name[pass]);
+            if (k > 0 && k < (int)sizeof tryb && access(tryb, 0) == 0) return 1;
+        }
+        if (*q == 0) break;
+        p = q + 1;
+    }
+    return 0;
+}
+
+static int wrun(char **av) {
+    pid_t pid = 0;
+    int st = 0, spr, rc, i;
+    spr = posix_spawnp(&pid, av[0], 0, 0, av, 0);
+    if (spr != 0) {
+        fprintf(stderr, "build-cxcc-host: cannot run");
+        for (i = 0; av[i]; i++) fprintf(stderr, " %s", av[i]);
+        fputc('\n', stderr);
+        return 1;
+    }
+    if (waitpid(pid, &st, 0) < 0) {
+        fprintf(stderr, "build-cxcc-host: lost child\n");
+        return 1;
+    }
+    if (WIFEXITED(st)) rc = WEXITSTATUS(st);
+    else if (WIFSIGNALED(st)) rc = 128 + WTERMSIG(st);
+    else rc = 2;
+    if (rc == 0) return 0;
+    fprintf(stderr, "build-cxcc-host: rc=%d", rc);
+    for (i = 0; av[i]; i++) fprintf(stderr, " %s", av[i]);
+    fputc('\n', stderr);
+    return 1;
+}
+
+static int build_one(const char *cc, const char *cmdname) {
+    char omod[160], occ[160], omain[160], obin[160], srcpath[80], com[80];
+    char *av[20];
+    int k;
+    k = snprintf(omod, sizeof omod, "out/cxcc-host/%s-cxmod.o", cc);
+    if (k < 0 || k >= (int)sizeof omod) return 1;
+    k = snprintf(occ, sizeof occ, "out/cxcc-host/%s-cxcc.o", cc);
+    if (k < 0 || k >= (int)sizeof occ) return 1;
+    k = snprintf(omain, sizeof omain, "out/cxcc-host/%s-main.o", cc);
+    if (k < 0 || k >= (int)sizeof omain) return 1;
+    k = snprintf(obin, sizeof obin, "out/cxcc-host/%s.exe", cmdname);
+    if (k < 0 || k >= (int)sizeof obin) return 1;
+    k = snprintf(srcpath, sizeof srcpath, "tools/%s.cx", cmdname);
+    if (k < 0 || k >= (int)sizeof srcpath) return 1;
+    k = snprintf(com, sizeof com, "%s.com", cmdname);
+    if (k < 0 || k >= (int)sizeof com) return 1;
+    av[0] = (char *)cc;
+    av[1] = "-std=c99";
+    av[2] = "-Werror=implicit-function-declaration";
+    av[3] = "-include";
+    av[4] = "stdlib.h";
+    av[5] = "-c";
+    av[6] = "src/cxmod.c";
+    av[7] = "-o";
+    av[8] = omod;
+    av[9] = 0;
+    if (wrun(av)) return 1;
+    av[3] = "-idirafter";
+    av[4] = "tools/cxcc-hostinc";
+    av[5] = "-include";
+    av[6] = "include/cx.h";
+    av[7] = "-include";
+    av[8] = "tools/cxcc-hostinc/win.h";
+    av[9] = "-x";
+    av[10] = "c";
+    av[11] = "-c";
+    av[12] = "tools/cxcc.cx";
+    av[13] = "-o";
+    av[14] = occ;
+    av[15] = 0;
+    if (wrun(av)) return 1;
+    /* The entry file needs cx.h, not win.h. Drop the second -include. */
+    av[7] = "-x";
+    av[8] = "c";
+    av[9] = "-c";
+    av[10] = srcpath;
+    av[11] = "-o";
+    av[12] = omain;
+    av[13] = 0;
+    if (wrun(av)) return 1;
+    av[1] = "-std=c99";
+    av[2] = "-o";
+    av[3] = obin;
+    av[4] = occ;
+    av[5] = omod;
+    av[6] = omain;
+    av[7] = 0;
+    if (wrun(av)) return 1;
+    if (copy_file(obin, com)) return 1;
+    return 0;
+}
+#endif
+
 int main(void) {
-    const char *gcc_sh =
-        "#!/bin/sh\n"
-        "here=$(CDPATH= cd -- \"$(dirname \"$0\")\" && pwd) || exit 2\n"
-        "exec \"$here/out/cxcc-host/gcc_cx\" \"$@\"\n";
-    const char *clang_sh =
-        "#!/bin/sh\n"
-        "here=$(CDPATH= cd -- \"$(dirname \"$0\")\" && pwd) || exit 2\n"
-        "exec \"$here/out/cxcc-host/clang_cx\" \"$@\"\n";
-    if (run("mkdir -p out/cxcc-host") != 0) return 1;
-    if (run("gcc -std=c99 -Werror=implicit-function-declaration -include stdlib.h -c src/cxmod.c -o out/cxcc-host/cxmod.o") != 0) return 1;
-    if (run("gcc -std=c99 -Werror=implicit-function-declaration -include include/cx.h -x c -c tools/cxcc.cx -o out/cxcc-host/cxcc.o") != 0) return 1;
-    if (run("gcc -std=c99 -Werror=implicit-function-declaration -include include/cx.h -x c -c tools/gcc_cx.cx -o out/cxcc-host/gcc_cx.o") != 0) return 1;
-    if (run("gcc -std=c99 -Werror=implicit-function-declaration -include include/cx.h -x c -c tools/clang_cx.cx -o out/cxcc-host/clang_cx.o") != 0) return 1;
-    if (run("gcc -std=c99 -o out/cxcc-host/gcc_cx out/cxcc-host/cxcc.o out/cxcc-host/cxmod.o out/cxcc-host/gcc_cx.o") != 0) return 1;
-    if (run("gcc -std=c99 -o out/cxcc-host/clang_cx out/cxcc-host/cxcc.o out/cxcc-host/cxmod.o out/cxcc-host/clang_cx.o") != 0) return 1;
-    if (write_text("gcc_cx.com", gcc_sh) != 0) return 1;
-    if (write_text("clang_cx.com", clang_sh) != 0) return 1;
-    if (run("chmod 755 gcc_cx.com clang_cx.com") != 0) return 1;
+    int built = 0;
+    if (ensure_dir("out") || ensure_dir("out/cxcc-host")) return 1;
+    if (on_path("gcc")) {
+        if (build_one("gcc", "gcc_cx")) return 1;
+        built = 1;
+    } else fprintf(stderr, "build-cxcc-host: skip gcc_cx (gcc is not on PATH)\n");
+    if (on_path("clang")) {
+        if (build_one("clang", "clang_cx")) return 1;
+        built = 1;
+    } else fprintf(stderr, "build-cxcc-host: skip clang_cx (clang is not on PATH)\n");
+    if (!built) {
+        fprintf(stderr, "build-cxcc-host: no compiler on PATH\n");
+        return 1;
+    }
     printf("build-cxcc-host: ok\n");
     return 0;
 }
