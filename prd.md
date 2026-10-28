@@ -151,9 +151,9 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 **2026-10-28 单元化重构决定：** 主人要求参考Rust模块化与内存安全设计，去除include引入的隐式耦合；不是换后缀。CX权威源码、公开接口、私有实例、显式资源/构建图、所有权/借用合同共同构成目标。目标CX0 → E2 → E1 → E3 → E4 → prune → lower → elf；现有独立CX0/束/适配已落地，安装产品仍七流。CX0语义控制最终也须网络化，十八张ask事实网不按阶段数机械加一。详见[单元化计划](plans/v0.0.43-units.md)及[cx入口](cx/README.md)。
 
-**当前分工与下一动作：** 已交付束38/0（unisacc/GCC/Clang）、E2边界12/0、CX整链11/0、源码优先driver14/0、CX权威倒转18/0+24/0、工作区目录闭包19/0。plan.cx是权威，src/cxmod.c兼容投影42902字节/452fcb3全文不变，旧模板已归档。六包清单可调度；加入G/root新键后正重建当前产物，旧收据不移贴。当前并发：版本线补实际E1 NN词法边界完整oracle；CX线推进memory实例/所有权/借用单元和全六包当前身份构建。grk维护GCC/Clang兼容，cc维护lint；不改他人暂存。主人已撤销旧签名/Draft/Latest/公开禁令。
+**当前分工与下一动作：** 已交付束38/0（unisacc/GCC/Clang）、E2边界12/0、CX整链11/0、源码优先driver14/0、权威反投影18/0+24/0、目录闭包19/0、core.memory138/0。六工具当前G/root键全部构建且复核；新CX阶段链实际编译tools/cx0.cx后再跑规划/接口gold2/0，编译memory套件后实跑138/0。driver自身四单元编译在E2耗尽原45秒总预算，无最终镜像/成功收据，不记通过；约0.6MB/单元的前奏展开是下一运行库模块化热点。plan.cx为权威，C兼容投影42902字节/452fcb3全文不变。版本线实际E1 NN边界293/0，原矩阵义务保留。下一步拆运行库及原生接口、真实消费者接owner/borrow API，并修0.0.43产品缺口。
 
-**双线推进（2026-10-28）：** 0.0.43现行Rootda4e/SID1621继续补完整流/网/RI、N22与平台缺口，不等待CX重构完工；CX演进独立验证并逐单元接入。E1物理源流不能制造EOF后的12种peek，不再用EOF折叠记144键PASS；正在用同候选实际NN的core_transition边界求值建立独立规则oracle。完整矩阵在合同真正满足前保留MISSING。
+**双线推进（2026-10-28）：** 0.0.43现行Rootda4e/SID1621继续补完整流/网/RI、N22与平台，不等待CX重构完工；CX产物独立核身份逐单元接入。E1实际located warnlex已核654状态/168896观测决定及展开动作与正式模型全等，手写规则144类对/24 peek边界293/0；EOF后的12类peek逐项UNOBSERVABLE，不折叠作144源流PASS，矩阵仍MISSING。core.memory有138项正/拒绝/恢复实跑，仅管理API运行期约束；成员struct直接return的正向最小例在tests/pending/struct-return-member.cx当前rc1而期望rc7，保持NEEDS_PRODUCT_CHANGE。
 
 **边界测试待验（2026-10-28）：** 已审入既有interfaces草稿修订：七流当前pin、由独立参考规则手推的592B Tape字面oracle，以及四个E3 trailer负例的外框长度修复，确保测到目标层。修正attr长度拒绝名与ELF截断位置，保留原271项并新增12项；当前仍NOT_RUN。原e2-input-binding扩展为七流成员与候选逐字核对，含各新增模型一字节差异负控及前后稳定性，仍待实跑；不另造重复批。草稿out/c43-da4e-interfaces-review-01/，严格清单169批/178覆盖/19缺口，仅元数据通过、执行0。formats.md仅据现有attr_strip代码纠正旧描述；冻结helper实测SID仍16219141、产品仍da4e7ef1，不影响cc构造。
 
@@ -357,7 +357,7 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 <a id="memory-palace"></a>
 ### 记忆宫殿
 
-**现行重构入口（2026-10-28）：** tools/cx-driver.cx是源码优先默认运行入口，显式profile供给资源根/模型/适配器，经CX0封存后走实际模型链，14/0及实际include根默认运行已证。工作区G目录快照把66头的名字/长度/内容入键，增删改和私有闭包实际19/0。CX权威反投影已交f2a280553f，C全文不变；旧.c仍活依赖不能归档。新memory单元在实现实例/owner/lease运行期约束，尚不授编译期借用安全。CXIF文本投影/forced includes仍是兼容桥；下一原生接口须把类型/符号/ABI/所有权记录交E3。安装产品未切入口，完整U1/U2、CX0网络化和外国宿主仍开。
+**现行重构入口（2026-10-28）：** tools/cx-driver.cx为源码优先默认运行入口，显式profile供给资源/模型/适配器，经CX0束走实际模型链；14/0及实际include根default-run已证。工作区目录快照绑定66头的名字/长度/内容，私有闭包/头增删改实际19/0；当前六包全部PREPARED并REVERIFIED。core.memory安全API无内部pointer输出，move/drop/共享及独占借用/跨实例/配额实跑138/0，新阶段链编译后也138/0；只保证受管理API的单线程运行期合同。CIF文本投影/forced includes仍是兼容桥，结构化类型/符号/ABI/所有权直入E3和编译期保证未完成。安装体未切入口，完整U1/U2、CX0网络化及外国宿主仍开。
 
 **本轮基线复核：** APE da4e7ef144186ccf578d282381ac671885094c6dfe30053727ac3f3c4a3e5592；build record dd2385cf4952f95cd7cdb6d4d25b2cf774841becdcbd8506138260a92743abc0（替代下方首次安装 ab5f）。同源固定点 GEN-A / GEN-B02 的原58断言已通过；本轮预编译 O2 验证亦在原30秒内58/0、stderr空，直接 O2 默认-run 原30秒rc142，不冒称登记批通过。下方 cc 独占构造/等待新固定点的语句是交接前状态，不再作为待执行工作。
 
