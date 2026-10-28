@@ -1,0 +1,90 @@
+/* Actual E1 NN classification boundary, not 144 reachable source strings.
+ * ROOT STREAM_DIR CORE_ADAPTER FORMAL_E1_JSON FORMAL_E1_NET NEW_ABS_OUT
+ * C99 6.4, 6.4.2.1, 6.4.4, 6.4.5, 6.4.6 and 6.4.9 motivate the hand rules:
+ * whitespace/newline, identifiers, numbers/literals, comments and punctuators.
+ * eof->skip and other->bad are this finite dispatch contract. Gold is checked
+ * against those rules, never used to manufacture expected model answers.
+ * core_transition evaluates the actual stream2 NN at injected state/byte
+ * boundaries. The companion formal network is exhaustively compared with
+ * that NN, including expanded actions, before any injected answers are read.
+ * c=eof x peek has no source representation: all 12 remain UNOBSERVABLE as
+ * source cases even when the actual EOF edge/action is proven at the boundary. */
+#pragma unisa use cxlib.netpack
+static const char *classes[]={"ws","nl","A","d","q","sq","slash","star","punct","eof","other","dot"};
+static const char *actions[]={"skip","nl","ident","num","str","charlit","cmt","linecmt","op","bad"};
+static const int representative[]={32,10,120,49,34,39,47,42,43,256,64,46};
+static const char *first_target[]={"DISPATCH","DISPATCH","ID*","DEC","STR","CH0","PEEK:slash","OP:*|37","OP:+|35","CNT0","HALT","PEEK:dot"};
+static const int arity[]={0,1,1,2,2,4,4,2,2,1,3,3,1,1,0,0,1,1,2,0,0,1,2,2,3,0,1,1,1,1,0,3,3,1,1,2,0,0,1,2,1,1,1,1,2,1,1,1,0,0,1,4,4,2,2,1};
+static char root[4096],work[4096],stream[4400],helper[4096],formal_json[4096],formal_net[4096],product[4400];
+static char *state_names[1024];static int states,checks,failures,source_unobservable;
+static np_buf identities={0};
+static const char *code_inputs[]={"tests/stream-e1-lex144-core.c","exec/c/run.c","exec/c/core.c","exec/c/core.h","exec/c/codec.h","exec/c/packagefooter.h","exec/c/resourceledger.h","exec/c/asm/binding.c"};
+typedef struct {int seen,q,key,next,na,words;long long data[512];} Answer;
+static Answer answer[1200];
+static void die(const char *s){fprintf(stderr,"e1-lex144: %s errno=%d\n",s,errno);exit(2);}
+static void ck(int ok,const char *name){checks++;if(!ok)failures++;printf("%s\t%s\n",ok?"PASS":"FAIL",name);}
+static void path(char *p,const char *base,const char *name){if(cx_path_join(p,4400,base,name))die("path");}
+static char *load(const char *p,size_t *n){struct stat st;if(lstat(p,&st)||!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>8388608)die("bounded-regular-input");char *s=cx_read(p,n);if(!s||*n!=(size_t)st.st_size)die("input-read");return s;}
+static void save(const char *name,const void *p,size_t n){char file[4400];path(file,work,name);int fd=open(file,O_WRONLY|O_CREAT|O_EXCL,0600);if(fd<0)die("exclusive-output");size_t at=0;while(at<n){ssize_t z=write(fd,(const char *)p+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0)die("write");at+=(size_t)z;}if(close(fd))die("close");}
+static void digest(const char *p,char hash[65]){size_t n;char *s=load(p,&n);cx_sha256_hex(s,n,hash);free(s);}
+static void bind(const char *name,const char *p,const char *want){char h[65];digest(p,h);if(want&&strcmp(h,want))die(name);np_puts(&identities,name);np_puts(&identities,"\t");np_puts(&identities,h);np_puts(&identities,"\n");}
+static void code_identity(void){for(int i=0;i<(int)(sizeof code_inputs/sizeof code_inputs[0]);i++){char p[4400];path(p,root,code_inputs[i]);bind(code_inputs[i],p,0);}}
+static int expected(int c,int p){
+ /* Independently hand specified action rule; no generated/table lookup. */
+ if(c==6){if(p==6)return 7;if(p==7)return 6;return 8;}
+ if(c==11)return p==3?3:8;
+ const int base[]={0,1,2,3,4,5,-1,8,8,0,9,-1};return base[c];
+}
+static int index(const char *name){for(int i=0;i<states;i++)if(!strcmp(state_names[i],name))return i;die("required-formal-state-name");return -1;}
+/* Structural extraction of formal state insertion order. The formal JSON is
+ * SHA-pinned; braces/arrays and quoted escapes are walked, not regex matched.
+ * tbl's documented missing-target rule appends HALT (the sole absent target).
+ * The NN adapter proves the resulting complete numeric network is identical. */
+static void state_map(const char *json){
+ const char *p=strstr(json,"\"states\":{");if(!p||strstr(p+1,"\"states\":{"))die("formal-states-object");p+=10;
+ while(*p&&*p!='}'){
+  if(*p++!='\"')die("formal-state-key");const char *begin=p;while(*p&&*p!='\"'){if(*p=='\\')die("escaped-formal-state-name");p++;}if(!*p||p-begin>200||states==1023)die("formal-state-key-bound");char *name=malloc((size_t)(p-begin)+1);if(!name)die("allocation");memcpy(name,begin,(size_t)(p-begin));name[p-begin]=0;state_names[states++]=name;
+  p++;if(*p++!=':'||*p!='[')die("formal-state-value");int depth=0,quoted=0;
+  do{char c=*p++;if(!c)die("formal-state-truncated");if(quoted){if(c=='\\'){if(!*p)die("formal-escape");p++;}else if(c=='\"')quoted=0;}else if(c=='\"')quoted=1;else if(c=='['||c=='{')depth++;else if(c==']'||c=='}')depth--;}while(depth);
+  if(*p==',')p++;else if(*p!='}')die("formal-state-separator");
+ }
+ for(int i=0;i<states;i++)if(!strcmp(state_names[i],"HALT"))die("formal-HALT-presence-changed");state_names[states++]="HALT";
+}
+static void gold(const char *file){size_t n;char *s=load(file,&n),*line=s;int seen[144]={0},count=0;
+ while(*line){char *end=strchr(line,'\n');if(!end)die("gold-final-newline");*end=0;if(*line&&*line!='#'&&strncmp(line,"c\tpeek\t",7)){
+  char *p=strchr(line,'\t');if(!p)die("gold-columns");*p++=0;char *y=strchr(p,'\t');if(!y)die("gold-columns");*y++=0;if(strchr(y,'\t'))die("gold-columns");int c=-1,k=-1;for(int i=0;i<12;i++){if(!strcmp(line,classes[i]))c=i;if(!strcmp(p,classes[i]))k=i;}if(c<0||k<0||seen[c*12+k]++)die("gold-key");char label[150];snprintf(label,sizeof label,"hand-oracle.%s.%s",classes[c],classes[k]);ck(!strcmp(y,actions[expected(c,k)]),label);count++;
+ }line=end+1;}
+ ck(count==144,"hand-oracle.all-144-distinct-gold-keys");free(s);
+}
+static np_result run(const char *net,const char *queries,const char *label){char q[4400],why[1200],name[120];path(q,work,queries);char *v[]={helper,stream,(char *)net,q,0};char *env[]={"UNISA_ATTRIBUTES=",0};np_result r={0};if(np_run(v,root,env,12,&r,why,sizeof why))die(why);snprintf(name,sizeof name,"%s.stdout",label);save(name,r.out,r.outn);snprintf(name,sizeof name,"%s.stderr",label);save(name,r.err,r.errn);return r;}
+static void parse(np_result *r){if(r->rc||r->errn){if(r->errn)fwrite(r->err,1,r->errn,stderr);die("actual-NN-adapter-failed");}char *line=r->out;int bound=0,rows=0;
+ while(*line){char *end=strchr(line,'\n');if(!end)die("adapter-final-newline");*end=0;if(!strncmp(line,"BIND\t",5)){int ns=0;long transitions=0;if(sscanf(line,"BIND\tstates=%d\ttransitions=%ld",&ns,&transitions)!=2||bound++||ns!=states||transitions<states*257L)die("actual-formal-NN-binding");}
+  else {if(strncmp(line,"Q\t",2))die("adapter-output-record");char *p=line+2,*tail;long id=strtol(p,&tail,10);if(tail==p||*tail!='\t'||id<0||id>=1200||answer[id].seen++)die("adapter-query-id");Answer *a=answer+id;p=tail+1;long values[4];for(int i=0;i<4;i++){values[i]=strtol(p,&tail,10);if(tail==p||(i<3&&*tail!='\t')||(i==3&&*tail&&*tail!='\t'))die("adapter-query-header");p=*tail?tail+1:tail;}a->q=(int)values[0];a->key=(int)values[1];a->next=(int)values[2];a->na=(int)values[3];while(*p){if(a->words==512)die("adapter-action-bound");a->data[a->words++]=strtoll(p,&tail,10);if(tail==p||(*tail&&*tail!='\t'))die("adapter-action-word");p=*tail?tail+1:tail;}rows++;}
+  line=end+1;
+ }ck(bound==1&&rows==168,"actual-NN.exact-168-boundary-queries");
+}
+static int action_has(const Answer *a,int wanted){int at=0,found=0;for(int i=0;i<a->na;i++){if(at>=a->words)return -1;int op=(int)a->data[at];if(op<0||op>=(int)(sizeof arity/sizeof arity[0])||at+1+arity[op]>a->words)return -1;if(op==wanted)found=1;at+=1+arity[op];}return at==a->words?found:-1;}
+int main(int argc,char **argv){
+ if(argc!=7||!realpath(argv[1],root)||!realpath(argv[3],helper)||!realpath(argv[4],formal_json)||!realpath(argv[5],formal_net)||argv[6][0]!='/'||strlen(argv[6])>=sizeof work)die("usage ROOT STREAM_DIR CORE_ADAPTER FORMAL_E1_JSON FORMAL_E1_NET NEW_ABS_OUT");strcpy(work,argv[6]);if(mkdir(work,0700))die("exclusive-output");path(stream,argv[2],"unisacc-stream2.com");path(product,root,"unisacc.com");
+ bind("product",product,"da4e7ef144186ccf578d282381ac671885094c6dfe30053727ac3f3c4a3e5592");bind("stream2",stream,"68f08debe54118109ddaaadf5c1e0345ad785788e372a50022e1e0c4f41b4b24");bind("formal-json",formal_json,"a9b31d5d09aa9ac5b34ae291ec2b5a5f718b73a212a9de1a8bdb77d40f6a59fd");bind("formal-net",formal_net,"a7fe31e54c740859e113692a347722f0cc676e63e7e6452db80a373dad1f671c");bind("adapter",helper,0);
+ char file[4400];path(file,root,"weights/gold/lex.tsv");bind("gold",file,"2896d54faa99bbcad02b126b120150426a6281040c38a508405619d74e7a141b");gold(file);path(file,root,"exec/lex/gen-template.tsv");bind("dispatch-template",file,"1bcde69fd1a134135bb3e46799e3f0eaea62b8a186d8e7ee33b0a48b06d49bdf");code_identity();
+ size_t n;char *json=load(formal_json,&n);state_map(json);free(json);np_buf queries={0};int dispatch=index("DISPATCH");
+ for(int c=0;c<12;c++)for(int p=0;p<12;p++){char row[100];int id=c*12+p;snprintf(row,sizeof row,"%d %d %d\n",id,dispatch,representative[c]);np_puts(&queries,row);if(c==6||c==11){snprintf(row,sizeof row,"%d %d %d\n",1000+id,index(first_target[c]),representative[p]);np_puts(&queries,row);}}
+ save("queries.tsv",queries.p,queries.n);free(queries.p);np_result r=run(formal_net,"queries.tsv","boundary");parse(&r);np_free(&r);
+ for(int c=0;c<12;c++)for(int p=0;p<12;p++){
+  int id=c*12+p;Answer *a=answer+id;int good=a->seen==1&&a->q==dispatch&&a->key==representative[c]&&a->next==index(first_target[c]);int actual=expected(c,p);
+  if(c==6||c==11){Answer *b=answer+1000+id;const char *target=c==11?(p==3?"H:num":"H:op"):(p==6?"H:linecmt":p==7?"H:cmt":"H:op");good=good&&b->seen==1&&b->q==a->next&&b->key==representative[p]&&b->next==index(target)&&b->na==1&&b->words==2&&b->data[0]==2;}
+  if(c==0||c==1)good=good&&a->na==1&&a->words==1&&a->data[0]==0;
+  else if(c==10)good=good&&a->na==1&&a->words==2&&a->data[0]==50;
+  else if(c==9)good=good&&action_has(a,0)==0&&action_has(a,45)==0; /* no ADV or BYTE before CNT0 */
+  else good=good&&action_has(a,1)==1&&action_has(a,0)==1;
+  char label[180];snprintf(label,sizeof label,"NN-boundary.%s.%s.action-%s",classes[c],classes[p],actions[actual]);ck(good,label);
+  if(c==9){source_unobservable++;printf("UNOBSERVABLE\tsource.%s.%s\treason=current-EOF-has-no-next-byte\tproof=actual-NN-edge-to-CNT0-without-ADV-or-BYTE\n",classes[c],classes[p]);}
+ }
+ ck(source_unobservable==12,"source.EOF-twelve-keys-not-folded-into-PASS");
+ /* A valid same-shape changed diagnostic action must fail the full model
+  * binding even though it does not change the positive classifier cases. */
+ char *net=load(formal_net,&n);char *change=strstr(net,"\nQ 1 50 0\n");if(!change)die("negative-action-anchor");change[8]='1';save("changed.net",net,n);free(net);char changed[4400];path(changed,work,"changed.net");r=run(changed,"queries.tsv","changed-action");ck(r.rc==2&&!r.outn&&r.errn&&strstr(r.err,"source-model-transition-or-action"),"binding.changed-action-negative-control");np_free(&r);
+ np_buf before={0};np_put(&before,identities.p,identities.n);free(identities.p);memset(&identities,0,sizeof identities);bind("product",product,0);bind("stream2",stream,0);bind("formal-json",formal_json,0);bind("formal-net",formal_net,0);bind("adapter",helper,0);path(file,root,"weights/gold/lex.tsv");bind("gold",file,0);path(file,root,"exec/lex/gen-template.tsv");bind("dispatch-template",file,0);code_identity();ck(before.n==identities.n&&!memcmp(before.p,identities.p,before.n),"identities.stable-before-after");save("identities.tsv",identities.p,identities.n);free(before.p);free(identities.p);
+ printf("E1_LEX144\tboundary_keys=144\tpeek_edges=24\tsource_unobservable=%d\tassertions=%d\tfailed=%d\n",source_unobservable,checks,failures);puts("SCOPE\tactual-seven-stream-E1-NN-boundary-injection\tNOT_144_REACHABLE_SOURCE_CASES\tMATRIX_UNCHANGED");puts("TIMING\tstartup/construction/loading/inference/output/validation=UNMEASURED");return failures?1:0;
+}
