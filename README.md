@@ -125,7 +125,12 @@ machine). The C headers it needs travel inside it.
   macOS, the explicit dl/libffi bridge can call system APIs. Since 0.0.19, `-run` on
   macOS also forwards an external function that has a prototype, no definition and
   no bundled body to the host libc (dlsym + libffi); variadic and struct-by-value
-  calls are refused by name, and writing a file or cross-compiling never forwards. System FILE/va_list and allocator families must
+  calls are refused by name. Direct C `-run` and `-o` routes can emit host-forwarding
+  stubs for Linux, macOS and Windows targets; symbols are resolved on the system
+  executing the program, not on the build host. Object/archive linking and `-S`/`-c`
+  do not use this route. A missing forwarded function is diagnosed at runtime
+  with exit status 127. See [host interop](docs/host-interop.md) for calling limits.
+  System FILE/va_list and allocator families must
   not be mixed with the bundled implementations.
 - **Several files, one program:** `unisacc a.c b.c ...` compiles all the units
   of a program in one invocation. Each unit is preprocessed on its own, and a

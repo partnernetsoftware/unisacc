@@ -2,7 +2,7 @@
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.kernelsha
 static char oldroot[4096],newroot[4096];static int files,dirs,links,delta;static np_buf record;
-static int fifo_profile,tapelink_profile;
+static int fifo_profile,tapelink_profile,driverdiag_profile;
 static void die(const char *s,const char *p){fprintf(stderr,"cxpack-source-delta: REFUSE %s path=%s errno=%d\n",s,p,errno);exit(2);}
 static void path(char *p,const char *a,const char *b){int n=snprintf(p,4400,"%s/%s",a,b);if(n<0||n>=4400)die("path-bound",b);}
 static void hash(const void *p,size_t n,char h[65]){if(ks_sha256_hex(p,n,h))die("sha256","-");}
@@ -21,7 +21,12 @@ static void walk(const char *rel,int depth){
  }
  if(S_ISLNK(sa.st_mode)){char x[4400],y[4400];ssize_t nx=readlink(a,x,sizeof x),ny=readlink(b,y,sizeof y);if(nx<0||ny<0||nx>=sizeof x||ny>=sizeof y||nx!=ny||memcmp(x,y,(size_t)nx))die("literal-symlink-mismatch",rel);hash(x,(size_t)nx,ha);strcpy(hb,ha);links++;}
  else if(S_ISREG(sa.st_mode)){size_t an,bn;char *x=readfile(a,&an),*y=readfile(b,&bn);hash(x,an,ha);hash(y,bn,hb);
-  if(tapelink_profile){
+  if(driverdiag_profile){
+   if(!strcmp(rel,"exec/c/compiler.c")){if(strcmp(ha,"cd0680d13b3251c62215f94db3aa757974379bd80a6f601ea3e9ce43989b2d04")||strcmp(hb,"5abb0daa38f80ef81f13f1e934ebcb5eeed1aae7d25ae661fe032fe3ab220c19"))die("unapproved-driverdiag-source-pair",rel);delta++;}
+   else if(!strcmp(rel,"src/tapelink.c")){if(strcmp(ha,"abca60c309919cdebaaac13a2c11f2193729d5e2b99a18118592398fa89967db")||strcmp(hb,"4eb4b8bdb875c03503dca1289343194410fa6e6d1531a64faa951b0099c1d531"))die("unapproved-driverdiag-source-pair",rel);delta++;}
+   else if(an!=bn||memcmp(x,y,an))die("unexpected-content-delta",rel);
+  }
+  else if(tapelink_profile){
    if(!strcmp(rel,"src/tapelink.c")){if(strcmp(ha,"16925f6467ed351302a1854023d670f75412b72d90f09a19c3ca5c46d2b13ea4")||strcmp(hb,"abca60c309919cdebaaac13a2c11f2193729d5e2b99a18118592398fa89967db"))die("unapproved-tapelink-source-pair",rel);delta++;}
    else if(an!=bn||memcmp(x,y,an))die("unexpected-content-delta",rel);
   }
@@ -37,9 +42,9 @@ static void walk(const char *rel,int depth){
  }else die("special-file",rel);
  np_puts(&record,"\t");np_puts(&record,ha);np_puts(&record,"\t");np_puts(&record,hb);np_puts(&record,"\n");
 }
-int main(int argc,char **argv){if((argc!=3&&argc!=4)||(argc==4&&strcmp(argv[3],"fifo-v1")&&strcmp(argv[3],"tapelink-v1"))||!realpath(argv[1],oldroot)||!realpath(argv[2],newroot)||!strcmp(oldroot,newroot))die("usage DISTINCT_ORIGIN_ROOT CURRENT_ROOT [fifo-v1|tapelink-v1]","-");fifo_profile=argc==4&&!strcmp(argv[3],"fifo-v1");tapelink_profile=argc==4&&!strcmp(argv[3],"tapelink-v1");
+int main(int argc,char **argv){if((argc!=3&&argc!=4)||(argc==4&&strcmp(argv[3],"fifo-v1")&&strcmp(argv[3],"tapelink-v1")&&strcmp(argv[3],"driverdiag-v1"))||!realpath(argv[1],oldroot)||!realpath(argv[2],newroot)||!strcmp(oldroot,newroot))die("usage DISTINCT_ORIGIN_ROOT CURRENT_ROOT [fifo-v1|tapelink-v1|driverdiag-v1]","-");fifo_profile=argc==4&&!strcmp(argv[3],"fifo-v1");tapelink_profile=argc==4&&!strcmp(argv[3],"tapelink-v1");driverdiag_profile=argc==4&&!strcmp(argv[3],"driverdiag-v1");
  const char *trees[]={"src","exec","unisa","include","weights","kernel","seed","iterate/kernel"};
- np_puts(&record,tapelink_profile?"tapelink-source-delta-v1\n":fifo_profile?"cxpack-fifo-source-delta-v1\n":"cxpack-source-delta-v1\n");for(int i=0;i<8;i++)walk(trees[i],0);if(delta!=(tapelink_profile?1:fifo_profile?2:3))die("exact-pinned-delta-count-required","CX pack");char h[65];hash(record.p,record.n,h);free(record.p);
+ np_puts(&record,driverdiag_profile?"driver-diagnostics-source-delta-v1\n":tapelink_profile?"tapelink-source-delta-v1\n":fifo_profile?"cxpack-fifo-source-delta-v1\n":"cxpack-source-delta-v1\n");for(int i=0;i<8;i++)walk(trees[i],0);if(delta!=(driverdiag_profile?2:tapelink_profile?1:fifo_profile?2:3))die("exact-pinned-delta-count-required","CX pack");char h[65];hash(record.p,record.n,h);free(record.p);
  printf("CXPACK_SOURCE_DELTA\tfiles=%d\tdirectories=%d\tliteral-symlinks=%d\tapproved-deltas=%d\twitness=%s\n",files,dirs,links,delta,h);
  puts("NOT_CLAIMED\tatomic-snapshot;complete-repository-identity;constructor-execution;package-provenance;admission;functional-PASS");return 0;
 }

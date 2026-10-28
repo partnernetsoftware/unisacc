@@ -1,5 +1,13 @@
 # c43 已知缺陷登记（cc，2026-10-28 起）
 
+## 2026-10-28 驱动诊断安装与归档入口复核
+
+已装79fb84e65a10b55ce40be5f68746748acbd38f441944046c0a5dfa5718bc0c32，record4608b9ac，冻结207195a597/SID5675f557；沿用未变PC7b806ec2。driverdiag-v1实核八树1935文件仅compiler.c/tapelink.c两个固定差异，反向根与错误候选拒绝。五切片实构、两阶段有限开发安装收据out/c43-driverdiag-install-01/installed.tsv SHA1b180548；旧cb743c27保留previous.com。候选诊断11/0、archive-ar17/0、格式68/0；已装诊断11/0、smoke16/0。不授外国执行或完整发布资格，不迁旧矩阵。
+
+cc静态指出归档main可能误拒，已用tools/archive-entry-probe.cx在旧cb743c27及新79fb84e6实际对比（out/c43-archive-entry-compare-03.stdout，逐命令输出在同前缀-01目录）。两者archive-only及helper-archive都rc1：旧分别为缺tapecheck模型和address/target未覆盖，新分别具名no input unit selected、missing _start；显式main对象加helper归档均实际rc7；仅main原型单元均rc1。这是现存归档入口支持缺口，没有观察到本刀回归。探针只记录观察，不授PASS或归档入口完整合同。
+
+迟绑定静态复核：compiler.c的fwdwant接受lnx/osx/win目标的直接C-run/-o，不要求目标等于构建宿主；-S/-c和对象/归档链接不走该路由。README旧“写镜像或跨编译从不转发”已纠正。原direct-c-route链接期拒绝断言仍红；不删除、不改期望、不以文档纠正记通过。后续显式禁转发选项与默认迟绑定运行期具名拒绝应分别验证。修复先私有验证攒批，避免逐刀构造安装和全矩阵迁标。
+
 ## cxpack.fifo-open — 非普通清单阻塞（Linux 候选切片已复现，待修）
 
 已装Linux修复：fifo-candidate-install的prepare/finish各重新核材料，备份旧e955产品/记录并暂存候选，finish校验后替换及fsync。共享已装8147f2e7/record c493b971，收据out/c43-fifo-install-01/installed.tsv SHA d932685226e4e4475a7da1ca2c682ee5e33ecb0c443ce3fabeeca243294a1df4。安装后smoke16/0，直接已装FIFO清单rc1、cannot read cxpack.tsv且stdout为空。Windows仍未改；外国宿主未运行；以下未安装描述为此前阶段历史。
