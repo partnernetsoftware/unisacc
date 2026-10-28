@@ -2,6 +2,11 @@
    Each driver is compiled by the same compiler name it will call.
    gcc and clang are taken from PATH. A missing name is skipped.
    The drivers link src/cxmod.c and do not call unisacc.com. -o only.
+   Product file: <cmd>_<lnx|osx|win><64|32>-<x86|arm>.bin
+   Windows uses .exe. This Linux x86-64 host writes
+   out/cxcc-host/gcc_cx_lnx64-x86.bin and clang_cx_lnx64-x86.bin.
+   Until the six-cell APE is rebuilt, the repo-root .com is a shell
+   that execs that file. 32-bit and win64-arm are names, not slices.
 
    Linux, and OSX when the name gcc is on PATH:
    gcc -std=c99 -Werror=implicit-function-declaration -include include/cx.h -x c tools/build-cxcc-host.cx -o out/cxcc-host/build
@@ -68,7 +73,33 @@ static int on_path(const char *cc) {
     return rc == 0;
 }
 
-static int write_launcher(const char *cmdname) {
+/* Product file: <cmd>_<os><64|32>-<x86|arm>.bin  (Windows uses .exe). */
+static int host_bin_name(const char *cmd, char *out, size_t cap) {
+    char *osb = 0, *mb = 0;
+    size_t on = 0, mn = 0;
+    const char *os, *bits, *arch;
+    int rc, k;
+    rc = cx_run_timeout("uname -s", 5, &osb, &on);
+    if (rc != 0 || !osb) { free(osb); return -1; }
+    rc = cx_run_timeout("uname -m", 5, &mb, &mn);
+    if (rc != 0 || !mb) { free(osb); free(mb); return -1; }
+    while (on && (osb[on - 1] == '\n' || osb[on - 1] == '\r')) osb[--on] = 0;
+    while (mn && (mb[mn - 1] == '\n' || mb[mn - 1] == '\r')) mb[--mn] = 0;
+    if (!strcmp(osb, "Linux")) os = "lnx";
+    else if (!strcmp(osb, "Darwin")) os = "osx";
+    else { free(osb); free(mb); return -1; }
+    if (!strcmp(mb, "x86_64")) { bits = "64"; arch = "x86"; }
+    else if (!strcmp(mb, "aarch64") || !strcmp(mb, "arm64")) { bits = "64"; arch = "arm"; }
+    else if (!strcmp(mb, "i386") || !strcmp(mb, "i686")) { bits = "32"; arch = "x86"; }
+    else if (!strncmp(mb, "arm", 3)) { bits = "32"; arch = "arm"; }
+    else { free(osb); free(mb); return -1; }
+    k = snprintf(out, cap, "%s_%s%s-%s.bin", cmd, os, bits, arch);
+    free(osb);
+    free(mb);
+    return (k < 0 || (size_t)k >= cap) ? -1 : 0;
+}
+
+static int write_launcher(const char *cmdname, const char *bin) {
     char path[64];
     char text[512];
     int k;
@@ -78,7 +109,7 @@ static int write_launcher(const char *cmdname) {
                  "#!/bin/sh\n"
                  "here=$(CDPATH= cd -- \"$(dirname \"$0\")\" && pwd) || exit 2\n"
                  "exec \"$here/out/cxcc-host/%s\" \"$@\"\n",
-                 cmdname);
+                 bin);
     if (k < 0 || k >= (int)sizeof text) return -1;
     if (write_text(path, text)) return -1;
     if (chmod(path, 0755) != 0) return -1;
@@ -87,7 +118,9 @@ static int write_launcher(const char *cmdname) {
 
 static int build_one(const char *cc, const char *cmdname) {
     char line[1024];
+    char bin[80];
     int k;
+    if (host_bin_name(cmdname, bin, sizeof bin)) return 1;
     k = snprintf(line, sizeof line,
                  "%s -std=c99 -Werror=implicit-function-declaration -include stdlib.h -c src/cxmod.c -o out/cxcc-host/%s-cxmod.o",
                  cc, cc);
@@ -102,9 +135,10 @@ static int build_one(const char *cc, const char *cmdname) {
     if (k < 0 || k >= (int)sizeof line || run(line)) return 1;
     k = snprintf(line, sizeof line,
                  "%s -std=c99 -o out/cxcc-host/%s out/cxcc-host/%s-cxcc.o out/cxcc-host/%s-cxmod.o out/cxcc-host/%s-main.o",
-                 cc, cmdname, cc, cc, cc);
+                 cc, bin, cc, cc, cc);
     if (k < 0 || k >= (int)sizeof line || run(line)) return 1;
-    if (write_launcher(cmdname)) return 1;
+    if (write_launcher(cmdname, bin)) return 1;
+    printf("build-cxcc-host: %s\n", bin);
     return 0;
 }
 #else
@@ -177,8 +211,25 @@ static int wrun(char **av) {
     return 1;
 }
 
+static int host_bin_name(const char *cmd, char *out, size_t cap) {
+    const char *tag;
+#if defined(_WIN64) && (defined(__aarch64__) || defined(_M_ARM64))
+    tag = "win64-arm";
+#elif defined(_WIN64)
+    tag = "win64-x86";
+#elif defined(__aarch64__) || defined(_M_ARM64) || defined(__arm__) || defined(_M_ARM)
+    tag = "win32-arm";
+#else
+    tag = "win32-x86";
+#endif
+    {
+        int k = snprintf(out, cap, "%s_%s.exe", cmd, tag);
+        return (k < 0 || (size_t)k >= cap) ? -1 : 0;
+    }
+}
+
 static int build_one(const char *cc, const char *cmdname) {
-    char omod[160], occ[160], omain[160], obin[160], srcpath[80], com[80];
+    char omod[160], occ[160], omain[160], obin[160], srcpath[80], com[80], bin[80];
     char *av[20];
     int k;
     k = snprintf(omod, sizeof omod, "out/cxcc-host/%s-cxmod.o", cc);
@@ -187,7 +238,8 @@ static int build_one(const char *cc, const char *cmdname) {
     if (k < 0 || k >= (int)sizeof occ) return 1;
     k = snprintf(omain, sizeof omain, "out/cxcc-host/%s-main.o", cc);
     if (k < 0 || k >= (int)sizeof omain) return 1;
-    k = snprintf(obin, sizeof obin, "out/cxcc-host/%s.exe", cmdname);
+    if (host_bin_name(cmdname, bin, sizeof bin)) return 1;
+    k = snprintf(obin, sizeof obin, "out/cxcc-host/%s", bin);
     if (k < 0 || k >= (int)sizeof obin) return 1;
     k = snprintf(srcpath, sizeof srcpath, "tools/%s.cx", cmdname);
     if (k < 0 || k >= (int)sizeof srcpath) return 1;
