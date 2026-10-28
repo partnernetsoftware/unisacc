@@ -34,7 +34,7 @@
 ## 5. 完成门拆分（需主人确认后改 prd/plans）
 
 - 本机门：19 域的本机必选格 + N22 本机可证部分；`--all` 的本机子集 rc0 作为日常完成信号。
-- 外宿主门：79 个 NEEDS_FOREIGN_HOST + hosts 域，单列，待真实宿主通道；不计入本机进度。
+- 外宿主门：79 个 NEEDS_FOREIGN_HOST + hosts 域（2026-10-28 19:0x 机械复核：lnx/arm64 19、osx/x86_64 18、osx/arm64 18、win/x86_64 18、win/arm64 6；计划见 plans/foreign-host-runbook-cc.md），单列，待真实宿主通道；不计入本机进度。
 - 6 个具名 BLOCKED：两周内裁定（删格或定合同）。
 - 36 个 NEEDS_PRODUCT_CHANGE（15 个已有源修复）：下一个慢车道纪元集中清理，这是唯一真正的产品工作。
 
