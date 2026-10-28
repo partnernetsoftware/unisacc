@@ -47,3 +47,18 @@ explicit package 7b806ec2. Wrapper `out/c43-output-private.com` only dispatches
 that ELF with the package. Result `out/c43-output-private-01.stdout`: **9/0**,
 with raw child output in the same-named directory. No installation or foreign
 platform qualification; the matrix retains an open product-adoption cell.
+
+Boundary follow-up: appending the staging suffix to a 240-byte destination
+basename exceeded the filesystem component limit. The first private driver
+therefore failed the expanded suite 1/12 (`out/c43-output-boundary-before-01`).
+Staging now uses a short `.unisacc-PID-attempt.tmp` basename in the same directory,
+independent of the destination basename. The expanded suite also checks an
+unwritable parent with a writable old target (refusal and old bytes preserved)
+and a read-only old file in a writable parent (replacement remains executable).
+Permission checks refuse to run as root; the suite is Linux x86_64 only.
+
+Self-built private driver
+`dcc86125d2e309034ac28d6b4c2c0d2a12c9a9e1930f30bc30146b72fd059c79`
+with PC7b806ec2 passes **12/0**, `out/c43-output-boundary-after-01.stdout`.
+No new installation or matrix promotion. Collision retries remain bounded and
+exclusive; forced collision exhaustion has not yet been exercised.

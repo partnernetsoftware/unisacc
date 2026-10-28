@@ -110,8 +110,10 @@ static long output_begin(const char *path,char **temporary) {
     if (!ordinary) return output_open(path);
     size_t cap=strlen(path)+80;
     char *tmp=xrealloc(0,cap);
+    const char *slash=strrchr(path,'/');
+    int directory=slash ? (int)(slash-path+1) : 0;
     for (int attempt=0;attempt<100;attempt++) {
-        snprintf(tmp,cap,"%s.unisacc-%ld-%d.tmp",path,(long)getpid(),attempt);
+        snprintf(tmp,cap,"%.*s.unisacc-%ld-%d.tmp",directory,path,(long)getpid(),attempt);
         int fd=open(tmp,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0755);
         if (fd>=0) { *temporary=tmp;return fd; }
         if (errno!=EEXIST) break;
