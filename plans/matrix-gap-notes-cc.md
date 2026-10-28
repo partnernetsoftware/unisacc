@@ -92,3 +92,4 @@
 - 17:5x 驱动/ar 具名拒绝猎取：批 `driver-diagnostics` 7/11（红为设计）：4 处诊断缺陷（-run 单元对象静默、-run/-o 仅归档错因文本、ar 空归档非法操作静默 rc 0）记入 plans/defects-c43.md，7 项具名拒绝合同成立。冻结导出 unisacc-cc-f3705-51549fb2cd。
 - 17:5x 预处理器差分（宿主 gcc -E -P 为 oracle，去空白等价 + 手写字面）：8 夹具 24/0，无分歧；批 `pp-differential`，冻结导出 unisacc-cc-f3705-a1f5b388dc 上 run-batch PASS @f3705dfa。
 - 17:5x 预处理负向猎取：批 `pp-negative` 8/10（红为设计）——两处真缺陷：`#define 3x 1` 与 `#include <stdio.h`（未闭合却静默包含 stdio.h）均 rc 0 无诊断；四类拒绝文本缺 file:line（INFO）。plans/defects-c43.md。冻结导出 unisacc-cc-f3705-20f6f4361d。
+- 18:0x C 约束负向猎取：批 `c-negative` 10/17（红为设计）——七处约束违反被静默接受并产出对象（赋值给 const、switch 外 case、struct 重定义、指针当 int 返回、不兼容指针初始化、typedef 冲突、重复形参），plans/defects-c43.md c.negative。冻结导出 unisacc-cc-f3705-55b664f4cd。
