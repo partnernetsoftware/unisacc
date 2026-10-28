@@ -3,7 +3,9 @@
  * Build with the product; package material is supplied separately. */
 #define main stream_executor_main
 #define UNISA_CX_PACKAGEFOOTER
+#define UNISA_CX_ATTRIBUTE_FRAME
 #include "../exec/c/run.c"
+#undef UNISA_CX_ATTRIBUTE_FRAME
 #undef main
 #undef UNISA_CX_PACKAGEFOOTER
 #include <unistd.h>

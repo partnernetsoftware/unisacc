@@ -1,0 +1,161 @@
+#pragma unisa module attribute_frame
+/* Caller-owned attribute table. *block, *length and *cap start null
+ * and zero; the caller frees *block. Nothing is retained. These
+ * functions do not call die, exit, or fprintf, and they do not publish
+ * an RI slot. The unit is an argument, not process state.
+ *
+ * A table is a little-endian count and then that many nine-byte
+ * records: unit, ordinal, kind. cxaf_strip reads one USLATTR1 frame
+ * and appends its five-byte records under unit, then moves the payload
+ * to the front of input. A count of zero still commits a four-byte
+ * header when the table was empty. cxaf_merge appends raw five-byte
+ * records, the compiler-cache shape; a count of zero changes nothing
+ * and does not inspect the block.
+ *
+ * Return 0 when strip does not see a frame, or when merge has nothing
+ * to add. Return 1 after a committed update. Return 2 for a malformed
+ * frame, before any write. Return 4 when the count would wrap the
+ * header or the table would pass 2147483647. Return 5 for a bad
+ * argument or for input that overlaps the live allocation
+ * [*block, *block + *cap). Return 6 when allocation fails. Failure
+ * leaves *block, *length, *cap and the input unchanged. Overlap is
+ * refused before a write and before reallocation. Growth starts at
+ * 256 and doubles. An occupied table shorter than four bytes is a bad
+ * argument; a longer table is extended at *length and only its count
+ * word is rewritten. */
+static int cxaf_alias(const unsigned char *block, long cap, const unsigned char *p, long n) {
+    unsigned long long b0, b1, p0, p1;
+    if (!block || !p || cap <= 0 || n <= 0) return 0;
+    b0 = (unsigned long long)block;
+    p0 = (unsigned long long)p;
+    if (b0 + (unsigned long long)cap < b0) return 1;
+    if (p0 + (unsigned long long)n < p0) return 1;
+    b1 = b0 + (unsigned long long)cap;
+    p1 = p0 + (unsigned long long)n;
+    return p0 < b1 && p1 > b0;
+}
+
+static int cxaf_room(unsigned char **block, long *length, long *cap, long need) {
+    long want, ncap;
+    unsigned char *grown;
+    if (need == 0) return 0;
+    if (*length > 2147483647L - need) return 4;
+    want = *length + need;
+    if (want <= *cap) return 0;
+    ncap = *cap > 0 ? *cap : 256;
+    while (ncap < want) {
+        if (ncap > 1073741823L) { ncap = want; break; }
+        ncap = ncap * 2;
+    }
+    if (ncap < want || ncap > 2147483647L) return 4;
+    grown = (unsigned char *)realloc(*block, (size_t)ncap);
+    if (!grown) return 6;
+    *block = grown;
+    *cap = ncap;
+    return 0;
+}
+
+static unsigned cxaf_u32(const unsigned char *p) {
+    return (unsigned)p[0] | ((unsigned)p[1] << 8) | ((unsigned)p[2] << 16) | ((unsigned)p[3] << 24);
+}
+
+static void cxaf_store4(unsigned char *p, unsigned long v) {
+    p[0] = (unsigned char)v;
+    p[1] = (unsigned char)(v >> 8);
+    p[2] = (unsigned char)(v >> 16);
+    p[3] = (unsigned char)(v >> 24);
+}
+
+static int cxaf_block(unsigned char **block, long *length, long *cap) {
+    if (!block || !length || !cap) return 5;
+    if (*length < 0 || *cap < 0 || *length > *cap) return 5;
+    if ((*length > 0 || *cap > 0) && !*block) return 5;
+    if (*length > 0 && *length < 4) return 5;
+    return 0;
+}
+
+static int cxaf_fit(long length, long count) {
+    long need;
+    if (count < 0 || count > 1000000L) return 4;
+    need = length == 0 ? 4 + 9 * count : 9 * count;
+    if (length > 2147483647L - need) return 4;
+    return 0;
+}
+
+static int cxaf_append(unsigned char **block, long *length, long *cap,
+                       const unsigned char *recs, long count, unsigned unit) {
+    long need, base, at, i;
+    unsigned old;
+    unsigned long long total;
+    int rc;
+    rc = cxaf_fit(*length, count);
+    if (rc) return rc;
+    need = *length == 0 ? 4 + 9 * count : 9 * count;
+    if (*length > 0) {
+        old = cxaf_u32(*block);
+        if ((unsigned long long)old + (unsigned long long)count > 4294967295ULL) return 4;
+        total = (unsigned long long)old + (unsigned long long)count;
+    } else {
+        total = (unsigned long)count;
+    }
+    rc = cxaf_room(block, length, cap, need);
+    if (rc) return rc;
+    base = *length;
+    if (base == 0) {
+        cxaf_store4(*block, 0);
+        base = 4;
+    }
+    i = 0;
+    while (i < count) {
+        at = base + 9 * i;
+        cxaf_store4(*block + at, unit);
+        memcpy(*block + at + 4, recs + 5 * i, 5);
+        i = i + 1;
+    }
+    *length = base + 9 * count;
+    cxaf_store4(*block, total);
+    return 1;
+}
+
+int cxaf_strip(unsigned char **block, long *length, long *cap,
+               unsigned char *input, long *input_n, unsigned unit) {
+    unsigned count;
+    unsigned long token_len, payload;
+    long head;
+    int rc;
+    if (!input_n) return 5;
+    if (*input_n < 16) return 0;
+    if (!input) return 5;
+    if (memcmp(input, "USLATTR1", 8)) return 0;
+    count = cxaf_u32(input + 8);
+    if (count > 1000000u) return 2;
+    head = 16 + 5L * (long)count;
+    if (head > *input_n) return 2;
+    payload = (unsigned long)(*input_n - head);
+    token_len = cxaf_u32(input + 12);
+    if (token_len != payload) return 2;
+    rc = cxaf_block(block, length, cap);
+    if (rc) return rc;
+    if (cxaf_fit(*length, (long)count)) return 4;
+    if (cxaf_alias(*block, *cap, input, *input_n)) return 5;
+    rc = cxaf_append(block, length, cap, input + 16, (long)count, unit);
+    if (rc != 1) return rc;
+    if (payload) memmove(input, input + head, (size_t)payload);
+    *input_n = (long)payload;
+    return 1;
+}
+
+int cxaf_merge(unsigned char **block, long *length, long *cap,
+               const unsigned char *recs, long count, unsigned unit) {
+    int rc;
+    if (count == 0) return 0;
+    if (count < 0) return 5;
+    if (count > 1000000L) return 4;
+    if (!recs) return 5;
+    rc = cxaf_block(block, length, cap);
+    if (rc) return rc;
+    if (cxaf_fit(*length, count)) return 4;
+    if (*length > 0 && (unsigned long long)cxaf_u32(*block) + (unsigned long long)count > 4294967295ULL) return 4;
+    if (block && *block && cxaf_alias(*block, *cap, recs, count * 5)) return 5;
+    return cxaf_append(block, length, cap, recs, count, unit);
+}

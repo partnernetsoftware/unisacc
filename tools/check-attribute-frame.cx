@@ -1,0 +1,116 @@
+#pragma unisa use runtime.attribute_frame
+static int failed;
+static void check(int ok, const char *name) {
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", name);
+    if (!ok) failed++;
+}
+static void put4(unsigned char *p, unsigned long v) {
+    p[0] = (unsigned char)v; p[1] = (unsigned char)(v >> 8);
+    p[2] = (unsigned char)(v >> 16); p[3] = (unsigned char)(v >> 24);
+}
+static unsigned u32(const unsigned char *p) {
+    return (unsigned)p[0] | ((unsigned)p[1] << 8) | ((unsigned)p[2] << 16) | ((unsigned)p[3] << 24);
+}
+static void frame(unsigned char *p, unsigned count, unsigned token_len, unsigned ordinal, unsigned kind) {
+    memcpy(p, "USLATTR1", 8);
+    put4(p + 8, count);
+    put4(p + 12, token_len);
+    if (count) { put4(p + 16, ordinal); p[20] = (unsigned char)kind; }
+}
+int main(void) {
+    unsigned char *block = 0, input[64], saved[64], rec[5];
+    long length = 0, cap = 0, n, n2;
+    unsigned char scratch[32];
+    memset(input, 0xa5, sizeof input);
+    memcpy(saved, input, sizeof input);
+    n = 15;
+    check(cxaf_strip(&block, &length, &cap, input, &n, 0) == 0 && n == 15 && !block && !length && !cap
+          && !memcmp(input, saved, sizeof input), "short-header-untouched");
+    n = -1;
+    check(cxaf_strip(&block, &length, &cap, 0, &n, 0) == 0 && n == -1, "negative-length-not-frame");
+    n = 16; memcpy(input, "NOTAFRAME", 9);
+    check(cxaf_strip(&block, &length, &cap, input, &n, 0) == 0 && n == 16 && !block, "wrong-magic");
+    check(cxaf_strip(0, &length, &cap, input, 0, 0) == 5, "null-input-length");
+    frame(input, 1, 4, 0x11223344u, 7);
+    memcpy(input + 21, "PAY!", 4);
+    n = 25;
+    check(cxaf_strip(&block, &length, &cap, input, &n, 0x01020304u) == 1 && n == 4 && !memcmp(input, "PAY!", 4)
+          && length == 13 && cap == 256 && block && u32(block) == 1
+          && u32(block + 4) == 0x01020304u && u32(block + 8) == 0x11223344u && block[12] == 7, "strip-one-grow-256");
+    frame(input, 1, 1, 9, 3);
+    input[21] = 'Z';
+    n = 22;
+    check(cxaf_strip(&block, &length, &cap, input, &n, 2) == 1 && n == 1 && input[0] == 'Z'
+          && length == 22 && cap == 256 && u32(block) == 2
+          && u32(block + 4) == 0x01020304u && u32(block + 13) == 2 && block[21] == 3, "strip-appends");
+    memcpy(rec, block + 17, 5);
+    {
+        unsigned char *other = 0; long on = 0, oc = 0;
+        check(cxaf_merge(&other, &on, &oc, rec, 1, 9) == 1 && on == 13 && oc == 256
+              && u32(other) == 1 && u32(other + 4) == 9 && !memcmp(other + 8, rec, 5), "merge-retags-unit");
+        free(other);
+    }
+    frame(input, 0, 3, 0, 0);
+    memcpy(input + 16, "abc", 3);
+    n = 19;
+    {
+        unsigned char *empty = 0; long en = 0, ec = 0;
+        check(cxaf_strip(&empty, &en, &ec, input, &n, 5) == 1 && n == 3 && !memcmp(input, "abc", 3)
+              && en == 4 && ec == 256 && u32(empty) == 0, "empty-frame-commits-header");
+        n = 3; memcpy(input, "abc", 3); memcpy(input + 3, "USLATTR1", 8);
+        frame(input, 0, 0, 0, 0); n = 16;
+        check(cxaf_strip(&empty, &en, &ec, input, &n, 5) == 1 && n == 0 && en == 4 && ec == 256
+              && u32(empty) == 0, "second-empty-frame-keeps-header");
+        free(empty);
+    }
+    frame(input, 1, 0, 1, 1); input[21] = 0x6e; n = 22;
+    check(cxaf_strip(&block, &length, &cap, input, &n, 0) == 2 && n == 22 && length == 22 && cap == 256
+          && input[0] == 'U' && input[21] == 0x6e, "token-len-mismatch");
+    frame(input, 0, 0, 0, 0); put4(input + 8, 1000001u); n = 16;
+    check(cxaf_strip(&block, &length, &cap, input, &n, 0) == 2 && n == 16 && length == 22, "count-limit");
+    frame(input, 1, 0, 1, 1); n = 20; input[0] = 'U';
+    {
+        unsigned char *wide = malloc(64); long wn = 4, wc = 64;
+        memset(wide, 0x5a, 64); put4(wide, 0);
+        frame(wide + 16, 1, 0, 1, 1);
+        n = 21;
+        check(cxaf_strip(&wide, &wn, &wc, wide + 16, &n, 0) == 5 && n == 21 && wn == 4 && wc == 64 && wide[0] == 0
+              && wide[16] == 'U', "overlap-refused");
+        free(wide);
+    }
+    {
+        unsigned char *small = malloc(16); long sn = 4, sc = 16; unsigned char recs[10];
+        memset(small, 0, 16); memset(recs, 0x11, sizeof recs);
+        check(cxaf_merge(&small, &sn, &sc, recs, 2, 4) == 1 && sn == 22 && sc == 32
+              && u32(small) == 2 && u32(small + 4) == 4 && small[12] == 0x11 && small[21] == 0x11, "merge-doubles-cap");
+        check(cxaf_merge(&small, &sn, &sc, small + 4, 1, 1) == 5 && sn == 22 && sc == 32, "merge-overlap");
+        check(cxaf_merge(&small, &sn, &sc, 0, 0, 1) == 0 && sn == 22, "merge-zero-is-noop");
+        free(small);
+    }
+    {
+        unsigned char tiny = 0x3c, *tp = &tiny; long tn = 2147483640L, tc = 2147483640L;
+        check(cxaf_merge(&tp, &tn, &tc, rec, 1, 1) == 4 && tn == 2147483640L && tc == 2147483640L && tiny == 0x3c, "length-limit");
+    }
+    {
+        unsigned char full[4], *fp = full; long fn = 4, fc = 4;
+        memset(full, 0xff, 4);
+        check(cxaf_merge(&fp, &fn, &fc, rec, 1, 1) == 4 && fn == 4 && full[0] == 0xff, "count-wrap");
+    }
+    {
+        unsigned char shortb[4], *sp = shortb; long sn = 1, sc = 4;
+        shortb[0] = 0x3c;
+        check(cxaf_merge(&sp, &sn, &sc, rec, 1, 1) == 5 && sn == 1 && shortb[0] == 0x3c, "short-table");
+    }
+    check(cxaf_merge(0, 0, 0, 0, 0, 1) == 0, "merge-absent");
+    check(cxaf_merge(&block, &length, &cap, 0, -1, 1) == 5 && length == 22, "merge-negative");
+    frame(input, 0, 16, 0, 0); frame(input + 16, 0, 0, 0, 0); n = 32;
+    {
+        unsigned char *keep = 0; long kn = 0, kc = 0;
+        check(cxaf_strip(&keep, &kn, &kc, input, &n, 0) == 1 && n == 16 && !memcmp(input, "USLATTR1", 8)
+              && kn == 4 && u32(keep) == 0, "payload-not-restripped");
+        free(keep);
+    }
+    printf("CXATTR_FRAME\tfailed=%d\n", failed);
+    free(block);
+    return failed ? 1 : 0;
+}

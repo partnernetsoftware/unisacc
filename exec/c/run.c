@@ -1124,6 +1124,27 @@ static int execute(unsigned char *input,int inputn,const char *src,Buf *result) 
    \0cli/attributes resource E3 reads: u32 count, then count x (u32 unit, u32 ordinal, u8 kind).
    No decision is made here: the records are passed through as E1 wrote them. */
 UNISA_RUNTIME_STATE Buf ATTRS; UNISA_RUNTIME_STATE int ATTR_UNIT; UNISA_RUNTIME_STATE int ATTR_SLOT = -1;
+#ifdef UNISA_CX_ATTRIBUTE_FRAME
+int cxaf_strip(unsigned char **,long *,long *,unsigned char *,long *,unsigned);
+int cxaf_merge(unsigned char **,long *,long *,const unsigned char *,long,unsigned);
+static void attr_publish(void) {
+    if (ATTR_SLOT >= 0) { RI[ATTR_SLOT].data = ATTRS.b; RI[ATTR_SLOT].len = ATTRS.n; }
+}
+static void attr_error(int rc) {
+    if (rc == 2) die("malformed USLATTR1 side-car");
+    if (rc == 4) die("attribute table too large");
+    if (rc == 6) die("out of memory");
+    die("invalid attribute table");
+}
+static int attr_strip(Buf *out) {
+    long n = ATTRS.n, cap = ATTRS.cap, in = out->n;
+    int rc = cxaf_strip(&ATTRS.b, &n, &cap, out->b, &in, (unsigned)ATTR_UNIT);
+    if (rc != 0 && rc != 1) attr_error(rc);
+    ATTRS.n = (int)n; ATTRS.cap = (int)cap; out->n = (int)in;
+    if (rc == 1) attr_publish();
+    return rc;
+}
+#else
 static void attr_put(int c) {      /* bput is only in the runtime-library build */
     if (ATTRS.n >= ATTRS.cap) { ATTRS.cap = ATTRS.cap ? ATTRS.cap * 2 : 256; ATTRS.b = xrealloc(ATTRS.b, ATTRS.cap); }
     ATTRS.b[ATTRS.n++] = (unsigned char)c;
@@ -1146,6 +1167,7 @@ static int attr_strip(Buf *out) {
     if (ATTR_SLOT >= 0) { RI[ATTR_SLOT].data = ATTRS.b; RI[ATTR_SLOT].len = ATTRS.n; }
     return 1;
 }
+#endif
 static int runroute_range(const char *route, const char *first_stage, const char *last_stage, Buf *in, const char *src) {
     int count = 0, ready = first_stage == 0, ended = last_stage == 0;
     for (int i = 0; i < PS; i++) {

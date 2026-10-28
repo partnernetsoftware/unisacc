@@ -12,7 +12,9 @@
 #define UNISA_RUNTIME_LIBRARY
 #define UNISA_CX_CODEC
 #define UNISA_CX_PACKAGEFOOTER
+#define UNISA_CX_ATTRIBUTE_FRAME
 #include "run.c"
+#undef UNISA_CX_ATTRIBUTE_FRAME
 #undef UNISA_CX_PACKAGEFOOTER
 #undef UNISA_CX_CODEC
 #undef UNISA_RUNTIME_LIBRARY
@@ -175,15 +177,11 @@ static void par_put(FILE *f, unsigned v) { unsigned char q[4]={v&255,v>>8&255,v>
 #include <time.h>
 static int ucache_find(const char *path) { for (int k=0;k<nucache;k++) if (!strcmp(ucache[k].path,path)) return k; return -1; }
 static void ucache_replay(int k) {                /* append unit k's attribute records under ATTR_UNIT */
-    if (!ucache[k].nattr) return;
-    if (ATTRS.n == 0) { for (int q=0;q<4;q++) attr_put(0); }
-    unsigned total = attr_u32(ATTRS.b) + ucache[k].nattr;
-    for (unsigned r=0;r<ucache[k].nattr;r++) {
-        for (int q=0;q<4;q++) attr_put((ATTR_UNIT >> (8*q)) & 255);
-        for (int q=0;q<5;q++) attr_put(ucache[k].attr[5*r+q]);
-    }
-    for (int q=0;q<4;q++) ATTRS.b[q] = (total >> (8*q)) & 255;
-    if (ATTR_SLOT >= 0) { RI[ATTR_SLOT].data = ATTRS.b; RI[ATTR_SLOT].len = ATTRS.n; }
+    long n=ATTRS.n, cap=ATTRS.cap;
+    int rc=cxaf_merge(&ATTRS.b,&n,&cap,ucache[k].attr,ucache[k].nattr,(unsigned)ATTR_UNIT);
+    if (rc != 0 && rc != 1) attr_error(rc);
+    ATTRS.n=(int)n; ATTRS.cap=(int)cap;
+    if (rc == 1) attr_publish();
 }
 static char fwd_path[600];
 #include "fwdpaths.h"
