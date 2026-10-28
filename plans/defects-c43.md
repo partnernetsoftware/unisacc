@@ -1,5 +1,15 @@
 # c43 已知缺陷登记（cc，2026-10-28 起）
 
+## cxpack.manifest-read-fail-open — 清单读取失败扩大公开接口（开放，未安装源码）
+
+2c949ba577的cxm_listed把所有cxm_rd负值当成无清单，返回2并导出全部非static函数。
+当前源码私有模型驱动e2292a76、PCff696上实际验证：正常清单只导出pack_mark；
+65536字节以上清单、cxpack.tsv为目录两者均rc0且额外导出pack_extra。
+原生回归tools/cxpack-read-failures.cx为3项/2失败，out/c43-cxpack-read-regression-01.stdout。
+夹具与原始输出在out/c43-cxpack-review-01/；共享4c28尚未包含该公开过滤改动，不能移贴私有结果。
+修复需区分ENOENT与读失败/超限，失败具名拒绝、无接口输出；保留无清单兼容行为。
+cxm_rd存在模型驱动、经典参考和cxcc三个实现，需保持返回合同一致，不能仅改一端。
+
 ## link.undef-function-refusal — 未定义外部函数链接成崩溃镜像（开放）
 
 2026-10-28 cdx 实测更新：共享3a5b完整原批为1 PASS/4 FAIL，收据

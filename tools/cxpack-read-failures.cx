@@ -1,0 +1,17 @@
+/* Explicit private-driver regression; no installed-product qualification. */
+#pragma unisa use cxlib.netpack
+static void die(const char *s){fprintf(stderr,"cxpack-read-failures: REFUSE %s errno=%d\n",s,errno);exit(2);}
+static void path(char *p,const char *a,const char *b){int n=snprintf(p,4400,"%s/%s",a,b);if(n<0||n>=4400)die("path");}
+static void save(const char *p,const char *s,size_t n){int f=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);if(f<0)die("create");while(n){ssize_t z=write(f,s,n);if(z<0&&errno==EINTR)continue;if(z<=0)die("write");s+=z;n-=(size_t)z;}if(close(f))die("close");}
+int main(int argc,char **argv){
+ if(argc!=4||argv[1][0]!='/'||argv[2][0]!='/'||argv[3][0]!='/')die("usage ABS_DRIVER ABS_PACKAGE NEW_OUT");if(mkdir(argv[3],0700))die("new-out");
+ const char *names[]={"valid","oversize","directory"};int failed=0;
+ for(int i=0;i<3;i++){char dir[4400],source[4400],manifest[4400];path(dir,argv[3],names[i]);if(mkdir(dir,0700))die("mkdir");path(source,dir,"mark.cx");path(manifest,dir,"cxpack.tsv");
+  const char *body="#pragma unisa module mark\nint pack_extra(void){return 9;}\nint pack_mark(void){return 7;}\n";save(source,body,strlen(body));
+  if(i==2){if(mkdir(manifest,0700))die("manifest-directory");}else{np_buf b={0};np_puts(&b,"mark\tmark.cx\tpack_mark\n");if(i==1){np_puts(&b,"#");for(int j=0;j<65536;j++)np_puts(&b,"x");np_puts(&b,"\n");}save(manifest,b.p,b.n);free(b.p);}
+  char *v[]={argv[1],"--models",argv[2],"-cx-interface",source,0};np_result r;char why[1024];if(np_run(v,dir,0,10,&r,why,sizeof why))die(why);
+  int ok=i==0?!r.rc&&!r.errn&&strstr(r.out,"pack_mark")&&!strstr(r.out,"pack_extra"):r.rc!=0&&r.errn>0&&r.outn==0;
+  printf("%s\t%s\trc=%d\texported-unlisted=%d\n",ok?"PASS":"FAIL",names[i],r.rc,strstr(r.out,"pack_extra")!=0);failed+=!ok;np_free(&r);
+ }
+ printf("CXPACK_READ_FAILURES\tassertions=3\tfailed=%d\tscope=explicit-private-driver\n",failed);return failed?1:0;
+}
