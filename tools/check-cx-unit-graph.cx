@@ -1,0 +1,33 @@
+/* Direct and transitive uses, separately and explicitly compiled together.
+ * DRIVER MODELS NEW_OUTDIR. This exercises Linux x86-64 only. */
+#pragma unisa use cxlib.netpack
+static int run(char **v,int expected,const char *label,const char *errtext){
+    np_result r={0};char why[512];int tr=np_run(v,0,0,50,&r,why,sizeof why);
+    int ok=!tr&&r.rc==expected&&(errtext?(r.err&&strstr(r.err,errtext)):!r.errn);
+    printf("%s\t%s\n",ok?"PASS":"FAIL",label);
+    if(!ok){if(tr)fprintf(stderr,"%s: %s\n",label,why);else if(r.errn)fwrite(r.err,1,r.errn,stderr);}
+    np_free(&r);return ok;
+}
+int main(int argc,char **argv){
+    if(argc!=4){fputs("usage: DRIVER MODELS NEW_OUTDIR\n",stderr);return 2;}
+    if(mkdir(argv[3],0700)){perror("output directory");return 2;}
+    const char *names[]={"top","mid","leaf"};char obj[3][4096],image[4096],multi[4096],mi[4096],missing[4096];
+    for(int i=0;i<3;i++)if(snprintf(obj[i],sizeof obj[i],"%s/%s.o",argv[3],names[i])>=(int)sizeof obj[i])return 2;
+    if(snprintf(image,sizeof image,"%s/linked.elf",argv[3])>=(int)sizeof image||snprintf(multi,sizeof multi,"%s/multi.o",argv[3])>=(int)sizeof multi||snprintf(mi,sizeof mi,"%s/multi.elf",argv[3])>=(int)sizeof mi||snprintf(missing,sizeof missing,"%s/missing.elf",argv[3])>=(int)sizeof missing)return 2;
+    const char *top="tests/cases/cx-unit-graph/top.cx",*mid="tests/cases/cx-unit-graph/mid.cx",*leaf="tests/cases/cx-unit-graph/leaf.cx";
+    char *def[]={"tools/bound","45",argv[1],"--models",argv[2],(char *)top,0};int failed=!run(def,8,"default-run",0);
+    const char *src[]={top,mid,leaf};
+    for(int i=0;i<3;i++){char *v[]={"tools/bound","45",argv[1],"--models",argv[2],"-c","-funit","-b","lnx/x86_64",(char *)src[i],"-o",obj[i],0};if(!run(v,0,names[i],0))failed++;}
+    if(failed){printf("CX_UNIT_GRAPH\tprerequisite-failed=%d\n",failed);return 1;}
+    char *neg[]={"tools/bound","45",argv[1],"--models",argv[2],obj[0],obj[1],"-o",missing,0};
+    if(!run(neg,1,"missing-leaf","undefined reference to leaf_value"))failed++;
+    struct stat st;errno=0;if(!lstat(missing,&st)||errno!=ENOENT){puts("FAIL\tmissing-output");failed++;}else puts("PASS\tmissing-output");
+    char *link[]={"tools/bound","45",argv[1],"--models",argv[2],obj[0],obj[1],obj[2],"-o",image,0};
+    if(!run(link,0,"separate-link",0))failed++;else{char *v[]={"tools/bound","15",image,0};if(!run(v,8,"separate-run",0))failed++;}
+    char *compile[]={"tools/bound","45",argv[1],"--models",argv[2],"-c","-funit","-b","lnx/x86_64",(char *)top,(char *)mid,"-o",multi,0};
+    if(!run(compile,0,"explicit-multi-unit",0))failed++;else{
+        char *link2[]={"tools/bound","45",argv[1],"--models",argv[2],multi,obj[2],"-o",mi,0};
+        if(!run(link2,0,"multi-link",0))failed++;else{char *v[]={"tools/bound","15",mi,0};if(!run(v,8,"multi-run",0))failed++;}
+    }
+    printf("CX_UNIT_GRAPH\tfailed=%d\tscope=Linux-x86_64\n",failed);return failed?1:0;
+}
