@@ -370,6 +370,8 @@ coverage中旧1/4缺陷描述改为本候选实际4/1及明确合同冲突，没
 
 ### 容器修复开发安装（冻结ecb5fbe322）
 
+默认-run私包进展：out/c43-fallguard-private-01仅替换lnx/x86_64 lower.net，其余模型/内核取自PCff696材料，原生compilerpack生成路由、pack装包；私包SHA6fcff655c0758866f615bad10955aa78115acf7c7beb7c885702bdd8473b0d93，包装器SHA654bcf4094a5577ccfa550f2980cd9f403cc7afbbbff716bc0c4084b0907c0e7，实际驱动b6f15e82且显式--models。out/c43-fallguard-seven-02为7/0：三落尾rc127且具名诊断，四合法控制rc7且无输出，均transport0。未安装、未授库容器或外国目标资格。第一次seven-01因尚未完成pack、缺compiler.pkg全部拒绝，保留不计产品失败；当前宿主重编seed/pack.c缺zlib.h，改用既有out/c43-source-package-context-03/jobs/tool-pack/result.exe，宿主工具依赖未清零，私包非正规准入。
+
 落尾模型实现首轮：exec/lower/fallguard-{manifest,result,byte}.tsv经codeend接入C.done。只对非库、非空full输出追加运行时诊断；使用已有SCR0/SCR1/PRINTLEN和24字节PRINTBUF，分24+12输出36字节诊断；第二次write重置fd/ptr；先走library_exit路由，若回调返回再走SYSCALL.base原生exit127。cc静态审查指出libraryfn会重命名C.done并在包后进入旧后继，故FG入口按lfn_enabled跳过，避免在UNILOWP1后追加文本；该库字节合同仍待实测。空nc跳过。CFG、函数间落穿及准确函数名归因尚未实现。
 
 实测仅私有Linux/x86_64独立镜像：native seed-gen生成out/c43-fallguard-lnx-x86_64-04.json，seed-tbl转表，旧通用run执行lower及PCff696的elf模型。三种原始落尾straight/conditional/returned-call镜像均rc127，stderr精确control falls off the end of _start换行，stdout为空，证据out/c43-fallguard-*-native-04.*。模型生成01缺byte文件、02空plain规则、直接JSON交run的bad model tag均保留；改sectioned规则并转tbl后成功。不称默认-run已修、四合法控制通过或六目标通过；尚未私包/安装，已装仍b6f15。
