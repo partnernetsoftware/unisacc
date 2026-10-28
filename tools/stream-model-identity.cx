@@ -1,0 +1,75 @@
+/* tools/stream-model-identity.cx -- cells e4.id.same-candidate-model / prune.id.same-candidate-model (and the other
+ * five stream units): pure hash comparison, no inference, no container run.
+ *   sh ./unisacc.com tools/stream-model-identity.cx -- STREAMS_DIR CANDIDATE_PKG_OR_PRODUCT UNITS [check]
+ * CANDIDATE is a canonical P3 package or a product with the terminal UNIPKG1 footer (the P3 is the footer extent).
+ * UNITS is `all` or a ':'-or-','-separated list of stream units (e4:prune; ':' because registry args cannot carry ','): only those entries count toward the exit status; the
+ * whole-package row and the other units are still printed, as INFO, so a partial match is never mistaken for a full one.
+ * For every entry of STREAMS_DIR/streams.json: SHA-256 of the P3 model block `original_model_index` (compressed payload
+ * and whole M record, the same bytes tools/cxlib/streampack.cx hashed) must equal compressed_model_sha256 /
+ * original_M_record_sha256, the container file must equal com_sha256, and the P3 bytes must equal source_package_sha256.
+ * Rows: SAME / DIFFERENT (a true finding about the material, not a tool failure) / NOT_RUN / INFO. Exit 0 only when
+ * every counted row is SAME. `check`: self-test on the same inputs (hash twice equal; a one-byte in-memory tamper of
+ * each compared model must be detected); it never writes. Positional flags because run-batch args cannot carry `--`. */
+#pragma unisa use cxlib.netpack
+
+static void die(const char *s) { fprintf(stderr, "stream-model-identity: REFUSE %s errno=%d\n", s, errno); exit(2); }
+static const char *mfind(const char *h, size_t hn, const char *nd, size_t nn) { if (!nn || hn < nn) return 0; for (size_t i = 0; i + nn <= hn; i++) if (h[i] == nd[0] && !memcmp(h + i, nd, nn)) return h + i; return 0; }
+static char *PK; static size_t PN, POS;
+static int nsame, ndiff, nnotrun;
+static const char *units; static int ninfo;
+static int counted(const char *unit) { if (!strcmp(units, "all")) return 1; size_t n = strlen(unit); const char *p = units; while ((p = strstr(p, unit))) { if ((p == units || p[-1] == ',' || p[-1] == ':') && (!p[n] || p[n] == ',' || p[n] == ':')) return 1; p += n; } return 0; }
+static void row(const char *st, const char *unit, const char *what, const char *detail) { if (!counted(unit) && strcmp(st, "NOT_RUN")) st = "INFO"; printf("%s\t%s.id.same-candidate-model\t%s\t%s\n", st, unit, what, detail); if (!strcmp(st, "SAME")) nsame++; else if (!strcmp(st, "DIFFERENT")) ndiff++; else if (!strcmp(st, "INFO")) ninfo++; else nnotrun++; }
+/* one ASCII header line split on single spaces; returns field count */
+static int line(char *v[8], char buf[2048]) { size_t s = POS, k; int n = 0; if (POS >= PN) die("truncated header");
+    while (POS < PN && PK[POS] != '\n') { if (PK[POS] < 32 || PK[POS] > 126) die("non-ASCII header"); POS++; }
+    if (POS >= PN || POS - s >= 2048) die("truncated/large header"); k = POS - s; memcpy(buf, PK + s, k); buf[k] = 0; POS++;
+    v[n++] = buf; for (s = 0; s < k; s++) if (buf[s] == ' ') { buf[s] = 0; if (n >= 8) die("header fields"); v[n++] = buf + s + 1; } return n; }
+static unsigned long long num(const char *s, unsigned long long lim) { unsigned long long x = 0; if (!*s) die("empty integer"); for (; *s; s++) { int d = *s - '0'; if (d < 0 || d > 9 || x > (lim - (unsigned)d) / 10) die("integer range"); x = x * 10 + (unsigned)d; } return x; }
+/* JSON string field VALUE after KEY inside [from, to) -- the receipt is flat ASCII written by streampack */
+static int field(const char *from, const char *to, const char *key, char *out, size_t cap) { char k[80]; snprintf(k, sizeof k, "\"%s\":", key); const char *p = from; size_t kl = strlen(k);
+    while ((p = mfind(p, (size_t)(to - p), k, kl))) { p += kl; while (p < to && *p == ' ') p++; if (p >= to) return 0;
+        if (*p == '"') { const char *e = memchr(p + 1, '"', (size_t)(to - p - 1)); if (!e || (size_t)(e - p - 1) >= cap) return 0; memcpy(out, p + 1, (size_t)(e - p - 1)); out[e - p - 1] = 0; return 1; }
+        { size_t i = 0; while (p < to && *p >= '0' && *p <= '9' && i + 1 < cap) out[i++] = *p++; out[i] = 0; return i > 0; } } return 0; }
+
+int main(int argc, char **argv) {
+    int check = argc == 5 && !strcmp(argv[4], "check"); if (argc != 4 && !check) { fputs("usage: STREAMS_DIR CANDIDATE_PKG_OR_PRODUCT UNITS(all|e4:prune) [check]\n", stderr); return 2; }
+    units = argv[3]; if (!*units || strchr(units, ' ')) die("UNITS");
+    char streams[4096], jp[4400]; if (!realpath(argv[1], streams)) die("STREAMS_DIR"); snprintf(jp, sizeof jp, "%s/streams.json", streams);
+    size_t jn; char *js = cx_read(jp, &jn); if (!js) die("streams.json"); char jh[65]; cx_sha256_hex(js, jn, jh);
+    size_t cn; char *cand = cx_read(argv[2], &cn); if (!cand) die("candidate"); char ch[65]; cx_sha256_hex(cand, cn, ch);
+    PK = cand; PN = cn;
+    if (PN < 2 || PK[0] != 'P' || PK[1] != ' ') { unsigned long long ext = 0; if (PN < 16 || memcmp(PK + PN - 16, "UNIPKG1\n", 8)) die("candidate is neither P3 nor UNIPKG1-footer product");
+        for (int z = 7; z >= 0; z--) ext = (ext << 8) | (unsigned char)PK[PN - 8 + z]; if (!ext || ext > PN - 16) die("footer extent"); PK = cand + (PN - 16 - ext); PN = (size_t)ext; }
+    char ph[65]; cx_sha256_hex(PK, PN, ph);
+    printf("IDENTITY\tstreams.json=%s\tcandidate_file=%s\tp3=%s\tmode=%s\n", jh, ch, ph, check ? "check" : "compare");
+    /* P3 directory: P 3 pm ps nr; ps D lines; pm M lines + compressed bytes */
+    char *v[8], buf[2048]; POS = 0; int n = line(v, buf); if (n != 5 || strcmp(v[0], "P") || strcmp(v[1], "3")) die("not canonical P3");
+    int pm = (int)num(v[2], 65536), ps = (int)num(v[3], 65536); if (pm < 1) die("no models");
+    for (int i = 0; i < ps; i++) { n = line(v, buf); if (n != 6 || strcmp(v[0], "D")) die("stream directory line"); }
+    size_t *mat = calloc((size_t)pm, sizeof *mat), *mdata = calloc((size_t)pm, sizeof *mdata), *mcomp = calloc((size_t)pm, sizeof *mcomp), *mbytes = calloc((size_t)pm, sizeof *mbytes); if (!mat || !mdata || !mcomp || !mbytes) die("alloc");
+    for (int i = 0; i < pm; i++) { mat[i] = POS; n = line(v, buf); if (n != 5 || strcmp(v[0], "M")) die("model header"); unsigned long long len = num(v[1], PN); if (!len || len > PN - POS) die("model truncated"); mdata[i] = POS; mcomp[i] = (size_t)len; POS += (size_t)len; mbytes[i] = POS - mat[i]; }
+    /* receipt header */
+    char src[80]; if (!field(js, js + jn, "source_package_sha256", src, sizeof src)) die("receipt source_package_sha256");
+    row(!strcmp(src, ph) ? "SAME" : "DIFFERENT", "all", "source-package", src);
+    /* entries */
+    const char *p = mfind(js, jn, "\"streams\":", 10); if (!p) die("receipt streams"); const char *end = js + jn; int entries = 0;
+    while ((p = mfind(p, (size_t)(end - p), "{\"stream_unit\":", 15))) { const char *e = memchr(p, '}', (size_t)(end - p)); if (!e) die("receipt entry"); entries++;
+        char unit[32], file[64], idxs[16], msha[80], bsha[80], csha[80], detail[300];
+        if (!field(p, e, "stream_unit", unit, sizeof unit) || !field(p, e, "file", file, sizeof file) || !field(p, e, "original_model_index", idxs, sizeof idxs) || !field(p, e, "compressed_model_sha256", msha, sizeof msha) || !field(p, e, "original_M_record_sha256", bsha, sizeof bsha) || !field(p, e, "com_sha256", csha, sizeof csha)) die("receipt entry fields");
+        int idx = (int)num(idxs, 65535); if (idx >= pm) { snprintf(detail, sizeof detail, "index %d >= %d models in candidate", idx, pm); row("DIFFERENT", unit, "model-index", detail); p = e; continue; }
+        char mh[65], bh[65]; cx_sha256_hex(PK + mdata[idx], mcomp[idx], mh); cx_sha256_hex(PK + mat[idx], mbytes[idx], bh);
+        snprintf(detail, sizeof detail, "model %d candidate=%.16s receipt=%.16s", idx, mh, msha); row(!strcmp(mh, msha) ? "SAME" : "DIFFERENT", unit, "compressed-model", detail);
+        snprintf(detail, sizeof detail, "model %d candidate=%.16s receipt=%.16s", idx, bh, bsha); row(!strcmp(bh, bsha) ? "SAME" : "DIFFERENT", unit, "m-record", detail);
+        char cp[4500]; snprintf(cp, sizeof cp, "%s/%s", streams, file); size_t fn; char *fb = cx_read(cp, &fn);
+        if (!fb) { snprintf(detail, sizeof detail, "%s errno=%d", file, errno); if (errno != ENOENT) die(detail); row("NOT_RUN", unit, "container-file", detail); }
+        else { char fh[65]; cx_sha256_hex(fb, fn, fh); free(fb); snprintf(detail, sizeof detail, "%s file=%.16s receipt=%.16s", file, fh, csha); row(!strcmp(fh, csha) ? "SAME" : "DIFFERENT", unit, "container-file", detail); }
+        if (check) { /* self-test: stable rehash and one-byte tamper detection on this model's payload */
+            char again[65]; cx_sha256_hex(PK + mdata[idx], mcomp[idx], again); if (strcmp(again, mh)) die("self-check: rehash differs");
+            char *t = malloc(mcomp[idx]); if (!t) die("alloc"); memcpy(t, PK + mdata[idx], mcomp[idx]); t[mcomp[idx] / 2] ^= 0x5a; cx_sha256_hex(t, mcomp[idx], again); free(t);
+            if (!strcmp(again, mh)) die("self-check: tamper not detected"); row("SAME", unit, "self-check", "rehash stable, one-byte tamper detected"); }
+        p = e; }
+    if (entries != 7) { char d[64]; snprintf(d, sizeof d, "%d entries, expected 7", entries); row("DIFFERENT", "all", "entry-count", d); }
+    if (strcmp(units, "all")) printf("INFO\tscope\tunits=%s only; whole-package identity is the all.* rows above\n", units);
+    printf("STREAM_MODEL_IDENTITY\tunits=%s\tsame=%d\tdifferent=%d\tinfo=%d\tnot_run=%d\n", units, nsame, ndiff, ninfo, nnotrun);
+    free(js); free(cand); return ndiff || nnotrun ? 1 : 0;
+}

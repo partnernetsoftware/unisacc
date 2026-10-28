@@ -67,3 +67,10 @@
 3. B2 等价核 ≈3 min。
 4. 迁移准备：待共享树产品换到 ace3 根后，在冻结导出重跑 35 批到 out/c43-cc-reg-02，`tools/matrix-flip-gen.cx … --migrate d65c1474 <ace3 候选短 SHA> out/c43-cc-reg-02` 生成并 `--check`，再覆盖五张矩阵（≈12 min，可另开窗）。
 不授跨平台、不换标到未装候选。
+
+## 附：2026-10-28 17:0x 无窗期进展（fable 裁定：拒绝自行开跑 stream-semantics；做桌面核对 + 纯哈希工具）
+
+- 新工具 `tools/stream-model-identity.cx`（已登记批 `stream-model-identity`，coverage `stream.model-identity`，args `{streams};{candidate};e4:prune;check`）：纯 SHA-256 比对，无推理、无容器运行、不写文件；~8 s。按 streams.json 每条目核 P3 模型块（压缩负载 + 整 M 记录，与 streampack 同字节）、容器文件、源包三重身份；自检为重哈希稳定 + 单字节篡改必被发现。
+- 实跑（out/c43-cc-reg-02/stream-model-identity.log，run-batch PASS，candidate f3705dfa）：e4/prune 计入 8/0；INFO 21。事实：riroot-01 的 e4(model 7)/prune(model 8)/lower(model 13) 模型字节与已装产品内嵌 P3（SHA 661c2b02）成员完全相同；源包整体不同（4d9b8a3a vs 661c2b02），e2/e1/e3/elf 四个模型不同。即 stream4/5 容器确是当前候选的 E4/prune 模型，但 pinned 流集合并非由当前候选打包。`all` 模式 rc 1（9 DIFFERENT）如实保留，不换标其它流格。
+- 两格换标：e4.id.same-candidate-model、prune.id.same-candidate-model → COVERED_LOCAL@f3705dfa；队列同步。
+- stream-semantics 桌面核对（对照 tests/stream-elf.cx）：`.exit` 是合法 tape 操作（src/tapeprune.c:21，back_lower.c:1084 降为 exit 门）✓；`saved()` 以 0700 创建，镜像可执行，与 stream-elf 的 chmod 0700 等效 ✓；execute() 传空 env（stream-elf 传 NULL 继承），静态镜像无差 ✓；每级 bound 12 s，最坏链 5×12+2×5=70 s 超出 55 s 外层上限——首跑用外层 `timeout 55`，实际 riroot 容器单级约 1–3 s，超时即 NOT_RUN 不记 PASS；E4 是否在 `imm r1,42` 前缀下仍折叠由 VACUOUS 行把关。未改代码。
