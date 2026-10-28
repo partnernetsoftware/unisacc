@@ -116,3 +116,8 @@
 - 2026-10-28 实跑（产品 94b549d1，stream4 9d3119df，stream5 1306de94；日志 out/c43-cc-props-01）：PASS 60（det 14 / meta 28 / bound 18）/ FAIL 0 / VACUOUS 0 / NOT_RUN 0。六目标两次编译 SHA 相同；异目录异 TZ/LANG 相同；O2 tape 回灌 `-O2 -S` 字节不变（解决矩阵"tape 输入 -O 接受未验证"注）；E4(O0)==E4(E4(O0))==产品 `-O2 -S`；注释/空行/冗余括号变体的 lnx/x86_64 镜像字节与基准相同（无位置数据）；`.div/.mod` 除零 rc 136；TP-9 边界 ±2^63/2^64−1 接受、越界与下划线拼写 rc1 且 stderr 含 integer 与行号。
 - 发现（记录，不改产品）：(1) `.print` 在 lnx/x86_64 不保留 r1/r2（产品与经典参考 /tmp/ua_ref 一致：`.print r5` 后 `.exit r1` 得 1、`.exit r2` 得 24），spec.md:570 对寄存器保留沉默——int64 用例改为每个 op 前重载操作数；建议 spec 明示 `.print/.write` 的寄存器破坏集。(2) `INT64_MIN .div/.mod −1` 在 lnx/x86_64 镜像 rc 136（x86 idiv 溢出陷阱）；C99 6.5.5 未定义、TP-2（模 2^64）会期望回绕，本用例不断言该格，待 spec 裁定。(3) 十六进制拼写 `0x…` 产品 tape 验域记"not covered"显式拒绝；TP-9 只说"支持的各进制拼写"，用例记 INFO 不计 PASS/FAIL。
 - 未做（子代理裁定延后）：prop.det.jobs-invariance 与 prop.meta.single-vs-multi-tu（多 TU 入口待探）、prop.det.stream-replay.lower、prop.bound.frame-256 / data-layout-mod8、prop.meta.random-programs。待办：登记批 `properties-cases` 后换标（同样等 cdx 的 tests/batches.tsv）。
+
+## 15. 批登记提案与 pin 复核（2026-10-28）
+
+- §10–§12 的 E4 实跑原用 out/c43-streams-da4e-01 容器（df480481…，非矩阵 pin）；已在 pin 容器 9d3119df（out/c43-streams-riroot-01）复跑：peep 277 PASS / 0 FAIL / 1339 UNREALIZABLE / 16 TABLE_SUSPECT（out/c43-cc-peep-02），opinfo 87 PASS（out/c43-cc-opinfo-02），o2 12 PASS（out/c43-cc-o2-02）——与 da4e 结果逐项相同。
+- `tests/batches.tsv` 本窗由 cdx 暂存，五组共 15 行批登记写在 `plans/batches-cc-proposal.tsv`（peep 8 片、opinfo 2 片、o2 1、prune 1、properties 3 组），cdx 提交后原样并入即可；o2 行需要 run.cx 提供 `{ref}`（冻结导出 `make ref` 产物）占位，目前没有。
