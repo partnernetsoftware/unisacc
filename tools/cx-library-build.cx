@@ -1,0 +1,256 @@
+/* Linux x86_64 host library builder. First version only.
+ * PACKAGE OUTPUT CC AR [LDFLAG...]
+ * PACKAGE, OUTPUT, CC and AR are absolute paths. OUTPUT must not exist
+ * and must lie under /tmp, $TMPDIR or <repo>/out so failure can delete
+ * that new tree. Default link flags are -lffi -ldl. No FFI probe.
+ * The receipt is manifest.txt. A failed build removes OUTPUT.
+ * The library TU does not define UNISA_CX_MODEL_NUMBER.
+ */
+#pragma unisa use runtime.process
+#define NFILE 256
+static char root[4096], outdir[4096], boundp[4400], ccpath[4096], arpath[4096];
+static char relv[NFILE][240];
+static char shav[NFILE][65];
+static int nrel, created;
+static FILE *man;
+static void fail(const char *s) {
+    if (created && cx_rmtree(outdir)) fprintf(stderr, "cx-library-build: cleanup-failed\n");
+    fprintf(stderr, "cx-library-build: %s\n", s);
+    exit(2);
+}
+static int bad_token(const char *s) {
+    if (!s || !s[0]) return 1;
+    for (const char *p = s; *p; p++) if (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') return 1;
+    return 0;
+}
+static void hash_file(const char *p, char h[65]) {
+    size_t n; char *s = cx_read(p, &n);
+    if (!s) fail("read-input");
+    cx_sha256_hex(s, n, h);
+    free(s);
+}
+static int below(const char *path, const char *base) {
+    size_t n;
+    if (!base || !base[0]) return 0;
+    n = strlen(base);
+    return strlen(path) > n && !strncmp(path, base, n) && path[n] == '/';
+}
+static int normalize(const char *in, char *out, size_t cap) {
+    const char *comp[64], *p = in; size_t len[64], n = 0; int k = 0;
+    while (*p) {
+        while (*p == '/') p++;
+        if (!*p) break;
+        const char *q = p; while (*q && *q != '/') q++;
+        size_t L = (size_t)(q - p);
+        if (L == 1 && p[0] == '.') { p = q; continue; }
+        if (L == 2 && p[0] == '.' && p[1] == '.') { if (!k) return 1; k--; p = q; continue; }
+        if (k == 64) return 1;
+        comp[k] = p; len[k] = L; k++; p = q;
+    }
+    if (!k) return 1;
+    for (int i = 0; i < k; i++) {
+        if (n && n + 1 >= cap) return 1;
+        if (n) out[n++] = '/';
+        if (n + len[i] >= cap) return 1;
+        memcpy(out + n, comp[i], len[i]); n += len[i];
+    }
+    out[n] = 0;
+    return 0;
+}
+static void mkdir_parent(const char *file) {
+    char buf[4400]; int n = snprintf(buf, sizeof buf, "%s", file);
+    if (n < 0 || (size_t)n >= sizeof buf) fail("path-bound");
+    for (char *p = buf + 1; *p; p++) if (*p == '/') {
+        *p = 0; if (mkdir(buf, 0700) && errno != EEXIST) fail("mkdir-snapshot"); *p = '/';
+    }
+}
+static int known(const char *r) {
+    for (int i = 0; i < nrel; i++) if (!strcmp(relv[i], r)) return 1;
+    return 0;
+}
+static void add_rel(const char *r);
+static void scan_includes(const char *s, size_t n, const char *filerel) {
+    size_t i = 0;
+    while (i < n) {
+        size_t a = i; while (i < n && s[i] != '\n') i++;
+        const char *p = s + a, *e = s + i; const char *name; char inc[240], joined[512], norm[240], dir[240];
+        while (p < e && (*p == ' ' || *p == '\t')) p++;
+        if (p < e && *p == '#') {
+            p++; while (p < e && (*p == ' ' || *p == '\t')) p++;
+            if ((size_t)(e - p) >= 7 && !memcmp(p, "include", 7)) {
+                p += 7; while (p < e && (*p == ' ' || *p == '\t')) p++;
+                if (p < e && *p == '"') {
+                    p++; name = p; while (p < e && *p != '"') p++;
+                    if (p < e && (size_t)(p - name) < sizeof inc) {
+                        memcpy(inc, name, (size_t)(p - name)); inc[p - name] = 0;
+                        dir[0] = 0; { const char *sl = strrchr(filerel, '/'); if (sl) { size_t d = (size_t)(sl - filerel); if (d >= sizeof dir) fail("path-bound"); memcpy(dir, filerel, d); dir[d] = 0; } }
+                        if (dir[0]) { int z = snprintf(joined, sizeof joined, "%s/%s", dir, inc); if (z < 0 || (size_t)z >= sizeof joined) fail("path-bound"); }
+                        else { int z = snprintf(joined, sizeof joined, "%s", inc); if (z < 0 || (size_t)z >= sizeof joined) fail("path-bound"); }
+                        if (normalize(joined, norm, sizeof norm)) fail("include-escapes");
+                        add_rel(norm);
+                    } else fail("include-path");
+                }
+            }
+        }
+        if (i < n) i++;
+    }
+}
+static void add_rel(const char *r) {
+    char full[4400], dest[4400]; struct stat st; size_t n; char *s; int z, id;
+    if (known(r)) return;
+    if (nrel >= NFILE || strlen(r) >= 240) fail("snapshot-too-large");
+    z = snprintf(full, sizeof full, "%s/%s", root, r);
+    if (z < 0 || (size_t)z >= sizeof full) fail("path-bound");
+    if (lstat(full, &st) || !S_ISREG(st.st_mode)) fail("include-missing");
+    id = nrel; strcpy(relv[id], r); nrel++;
+    s = cx_read(full, &n); if (!s) fail("read-source");
+    cx_sha256_hex(s, n, shav[id]);
+    z = snprintf(dest, sizeof dest, "%s/work/src/%s", outdir, r);
+    if (z < 0 || (size_t)z >= sizeof dest) fail("path-bound");
+    mkdir_parent(dest);
+    { FILE *f = fopen(dest, "wx"); if (!f || fwrite(s, 1, n, f) != n || fclose(f)) fail("snapshot-write"); }
+    if (fprintf(man, "source\t%s\t%s\n", r, shav[id]) < 0) fail("manifest-write");
+    scan_includes(s, n, r);
+    free(s);
+}
+static long mono_ms(void) {
+#if defined(__UNISA__) && defined(__linux__) && defined(__x86_64__)
+    long stamp[2] = { 0, 0 };
+    long rc = __syscall6(228, 1, (long)stamp, 0, 0, 0);
+    if (rc || stamp[0] < 0 || stamp[1] < 0 || stamp[1] >= 1000000000L) fail("clock");
+    return stamp[0] * 1000L + stamp[1] / 1000000L;
+#else
+    fail("clock");
+    return 0;
+#endif
+}
+static void run_step(char **av, char **env, const char *label) {
+    np_result r = { 0 }; char why[1024]; long a, b, ms;
+    a = mono_ms();
+    if (np_run(av, root, env, 55, &r, why, sizeof why)) fail(why);
+    b = mono_ms();
+    ms = b - a; if (ms < 0) ms = 0;
+    if (r.rc) { if (r.errn) fwrite(r.err, 1, r.errn, stderr); np_free(&r); fail(label); }
+    np_free(&r);
+    if (fprintf(man, "command\t%ld", ms) < 0) fail("manifest-write");
+    for (int i = 0; av[i]; i++) if (fprintf(man, "\t%s", av[i]) < 0) fail("manifest-write");
+    if (fprintf(man, "\trc=0\n") < 0) fail("manifest-write");
+}
+static void rehash(const char *pkg, const char *pkgsha, const char *ccsha, const char *arsha, const char *selfsha) {
+    char h[65];
+    hash_file(pkg, h); if (strcmp(h, pkgsha)) fail("package-changed");
+    hash_file(ccpath, h); if (strcmp(h, ccsha)) fail("cc-changed");
+    hash_file(arpath, h); if (strcmp(h, arsha)) fail("ar-changed");
+    hash_file(__FILE__, h); if (strcmp(h, selfsha)) fail("builder-changed");
+    for (int i = 0; i < nrel; i++) {
+        char full[4400]; int z = snprintf(full, sizeof full, "%s/%s", root, relv[i]);
+        if (z < 0 || (size_t)z >= sizeof full) fail("path-bound");
+        hash_file(full, h); if (strcmp(h, shav[i])) fail("source-changed");
+    }
+}
+static void artifact(const char *name, const char *path) {
+    struct stat st; char h[65];
+    if (lstat(path, &st) || !S_ISREG(st.st_mode)) fail("artifact-missing");
+    hash_file(path, h);
+    if (fprintf(man, "artifact\t%s\t%ld\t%s\n", name, (long)st.st_size, h) < 0) fail("manifest-write");
+}
+static int allowed(const char *full) {
+    char tmp[4096], repoout[4400], envroot[4096]; const char *t = getenv("TMPDIR");
+    if (!realpath("/tmp", tmp)) fail("temp-root");
+    if (below(full, tmp)) return 1;
+    if (t && t[0] == '/' && realpath(t, envroot) && below(full, envroot)) return 1;
+    { int z = snprintf(repoout, sizeof repoout, "%s/out", root); if (z < 0 || (size_t)z >= sizeof repoout) fail("path-bound"); }
+    if (realpath(repoout, envroot) && below(full, envroot)) return 1;
+    return 0;
+}
+int main(int argc, char **argv) {
+#if !defined(__linux__) || !defined(__x86_64__)
+    fprintf(stderr, "cx-library-build: host-not-lnx-x86_64\n");
+    return 2;
+#else
+    char parent[4096], leaf[240], pkg_real[4096], parent_real[4096], selfsha[65], pkgsha[65], ccsha[65], arsha[65];
+    char src_library[4400], src_bridge[4400], src_codec[4400], src_footer[4400], src_attr[4400], inc[4400];
+    char obj_library[4400], obj_bridge[4400], obj_codec[4400], obj_footer[4400], obj_attr[4400], lib_a[4400], lib_so[4400];
+    char header_src[4400], header_dst[4400], pkg_dst[4400], man_src[4400], man_dst[4400], work[4400];
+    char *ld[16]; int nld, z; struct stat st; const char *ffi = "-lffi", *dl = "-ldl";
+    if (argc < 5 || argc > 21) fail("usage PACKAGE OUTPUT CC AR [LDFLAG...]");
+    for (int i = 1; i <= 4; i++) if (argv[i][0] != '/' || bad_token(argv[i])) fail("absolute-path");
+    nld = argc == 5 ? 2 : argc - 5;
+    if (argc == 5) { ld[0] = (char *)ffi; ld[1] = (char *)dl; }
+    else for (int i = 0; i < nld; i++) { if (argv[5 + i][0] != '-' || bad_token(argv[5 + i])) fail("bad-ldflag"); ld[i] = argv[5 + i]; }
+    if (!strcmp(argv[1], argv[2]) || (!strncmp(argv[1], argv[2], strlen(argv[2])) && argv[1][strlen(argv[2])] == '/')) fail("output-aliases-package");
+    if (!realpath(__FILE__, parent)) fail("self-path");
+    { char *s = strrchr(parent, '/'); if (!s) fail("self-path"); *s = 0; s = strrchr(parent, '/'); if (!s || s == parent) fail("self-path"); *s = 0; }
+    z = snprintf(root, sizeof root, "%s", parent); if (z < 0 || (size_t)z >= sizeof root) fail("path-bound");
+    z = snprintf(boundp, sizeof boundp, "%s/tools/bound", root); if (z < 0 || (size_t)z >= sizeof boundp) fail("path-bound");
+    if (lstat(boundp, &st) || !S_ISREG(st.st_mode)) fail("bound-missing");
+    if (lstat(argv[1], &st) || !S_ISREG(st.st_mode) || !realpath(argv[1], pkg_real)) fail("package-missing");
+    errno = 0;
+    if (!lstat(argv[2], &st)) fail("output-must-not-exist");
+    if (errno != ENOENT) fail("output-stat");
+    z = snprintf(parent, sizeof parent, "%s", argv[2]); if (z < 0 || (size_t)z >= sizeof parent) fail("path-bound");
+    { char *s = strrchr(parent, '/'); if (!s || s == parent || !s[1]) fail("output-path-shape"); *s = 0; z = snprintf(leaf, sizeof leaf, "%s", s + 1); if (z < 0 || (size_t)z >= sizeof leaf) fail("path-bound"); }
+    if (!strcmp(leaf, ".") || !strcmp(leaf, "..")) fail("output-path-shape");
+    if (lstat(parent, &st) || !S_ISDIR(st.st_mode) || !realpath(parent, parent_real)) fail("output-parent");
+    z = snprintf(outdir, sizeof outdir, "%s/%s", parent_real, leaf); if (z < 0 || (size_t)z >= sizeof outdir) fail("path-bound");
+    if (!strcmp(outdir, pkg_real) || below(pkg_real, outdir)) fail("output-aliases-package");
+    if (!allowed(outdir)) fail("output-not-in-temp-or-out");
+    if (lstat(argv[3], &st)) fail("cc-missing");
+    if (!realpath(argv[3], ccpath) || stat(ccpath, &st) || !S_ISREG(st.st_mode) || !(st.st_mode & 0111)) fail("cc-missing");
+    if (lstat(argv[4], &st)) fail("ar-missing");
+    if (!realpath(argv[4], arpath) || stat(arpath, &st) || !S_ISREG(st.st_mode) || !(st.st_mode & 0111)) fail("ar-missing");
+    hash_file(pkg_real, pkgsha); hash_file(ccpath, ccsha); hash_file(arpath, arsha); hash_file(__FILE__, selfsha);
+    if (mkdir(outdir, 0700)) fail("mkdir-output");
+    created = 1;
+    z = snprintf(work, sizeof work, "%s/work", outdir); if (z < 0 || (size_t)z >= sizeof work) fail("path-bound");
+    if (mkdir(work, 0700)) fail("mkdir-work");
+    z = snprintf(man_src, sizeof man_src, "%s/manifest.txt", work); if (z < 0 || (size_t)z >= sizeof man_src) fail("path-bound");
+    man = fopen(man_src, "wx"); if (!man) fail("manifest-write");
+    if (fprintf(man, "CXLIBRARY1\ntarget\tlnx/x86_64\nscope\thost-cc static and dynamic library; ffi probe not run; UNISA_CX_MODEL_NUMBER not set\npackage\t%s\t%s\ncc\t%s\t%s\nar\t%s\t%s\nbuilder\t%s\n", pkgsha, pkg_real, ccpath, ccsha, arpath, arsha, selfsha) < 0) fail("manifest-write");
+    if (fprintf(man, "define\tUNISA_CX_CODEC\ndefine\tUNISA_CX_PACKAGEFOOTER\ndefine\tUNISA_CX_ATTRIBUTE_FRAME\nlink\tlibunisacc.a\tlibrary.o bridge.o codec.o footer.o attribute_frame.o\nlink\tlibunisacc.so\tlibrary.o bridge.o codec.o footer.o attribute_frame.o\n") < 0) fail("manifest-write");
+    for (int i = 0; i < nld; i++) if (fprintf(man, "ldflag\t%s\n", ld[i]) < 0) fail("manifest-write");
+    add_rel("exec/c/libunisacc.c"); add_rel("exec/c/libunisacc.h"); add_rel("exec/c/librarycall_x86_64.S");
+    add_rel("cx/runtime/codec.cx"); add_rel("cx/runtime/packagefooter.cx"); add_rel("cx/runtime/attribute_frame.cx"); add_rel("include/cx.h");
+    if (cx_fmt(src_library, sizeof src_library, "%s/work/src/exec/c/libunisacc.c", outdir)) fail("path-bound");
+    if (cx_fmt(src_bridge, sizeof src_bridge, "%s/work/src/exec/c/librarycall_x86_64.S", outdir)) fail("path-bound");
+    if (cx_fmt(src_codec, sizeof src_codec, "%s/work/src/cx/runtime/codec.cx", outdir)) fail("path-bound");
+    if (cx_fmt(src_footer, sizeof src_footer, "%s/work/src/cx/runtime/packagefooter.cx", outdir)) fail("path-bound");
+    if (cx_fmt(src_attr, sizeof src_attr, "%s/work/src/cx/runtime/attribute_frame.cx", outdir)) fail("path-bound");
+    if (cx_fmt(inc, sizeof inc, "%s/work/src/include/cx.h", outdir)) fail("path-bound");
+    if (cx_fmt(obj_library, sizeof obj_library, "%s/work/library.o", outdir)) fail("path-bound");
+    if (cx_fmt(obj_bridge, sizeof obj_bridge, "%s/work/bridge.o", outdir)) fail("path-bound");
+    if (cx_fmt(obj_codec, sizeof obj_codec, "%s/work/codec.o", outdir)) fail("path-bound");
+    if (cx_fmt(obj_footer, sizeof obj_footer, "%s/work/footer.o", outdir)) fail("path-bound");
+    if (cx_fmt(obj_attr, sizeof obj_attr, "%s/work/attribute_frame.o", outdir)) fail("path-bound");
+    if (cx_fmt(lib_a, sizeof lib_a, "%s/work/libunisacc.a", outdir)) fail("path-bound");
+    if (cx_fmt(lib_so, sizeof lib_so, "%s/work/libunisacc.so", outdir)) fail("path-bound");
+    { char *av[] = { boundp, "50", ccpath, "-std=c11", "-O2", "-fPIC", "-fvisibility=hidden", "-x", "c", "-include", inc, "-c", src_codec, "-o", obj_codec, 0 }; run_step(av, 0, "codec-compile"); }
+    { char *av[] = { boundp, "50", ccpath, "-std=c11", "-O2", "-fPIC", "-fvisibility=hidden", "-x", "c", "-include", inc, "-c", src_footer, "-o", obj_footer, 0 }; run_step(av, 0, "footer-compile"); }
+    { char *av[] = { boundp, "50", ccpath, "-std=c11", "-O2", "-fPIC", "-fvisibility=hidden", "-x", "c", "-include", inc, "-c", src_attr, "-o", obj_attr, 0 }; run_step(av, 0, "attribute-compile"); }
+    { char *av[] = { boundp, "50", ccpath, "-std=c11", "-O2", "-fPIC", "-fvisibility=hidden", "-DUNISA_CX_CODEC", "-DUNISA_CX_PACKAGEFOOTER", "-DUNISA_CX_ATTRIBUTE_FRAME", "-c", src_library, "-o", obj_library, 0 }; run_step(av, 0, "library-compile"); }
+    { char *av[] = { boundp, "50", ccpath, "-fPIC", "-c", src_bridge, "-o", obj_bridge, 0 }; run_step(av, 0, "bridge-compile"); }
+    { char *env[] = { "ZERO_AR_DATE=1", 0 }; char *av[] = { boundp, "50", arpath, "rcs", lib_a, obj_library, obj_bridge, obj_codec, obj_footer, obj_attr, 0 }; run_step(av, env, "static-link"); }
+    { char *av[40]; int n = 0; av[n++] = boundp; av[n++] = "50"; av[n++] = ccpath; av[n++] = "-shared"; av[n++] = "-Wl,-soname,libunisacc.so"; av[n++] = obj_library; av[n++] = obj_bridge; av[n++] = obj_codec; av[n++] = obj_footer; av[n++] = obj_attr; for (int i = 0; i < nld; i++) av[n++] = ld[i]; av[n++] = "-o"; av[n++] = lib_so; av[n] = 0; run_step(av, 0, "dynamic-link"); }
+    rehash(pkg_real, pkgsha, ccsha, arsha, selfsha);
+    if (cx_fmt(header_src, sizeof header_src, "%s/work/src/exec/c/libunisacc.h", outdir)) fail("path-bound");
+    if (cx_fmt(header_dst, sizeof header_dst, "%s/libunisacc.h", outdir)) fail("path-bound");
+    if (cx_fmt(pkg_dst, sizeof pkg_dst, "%s/compiler.pkg", outdir)) fail("path-bound");
+    if (cx_fmt(lib_a, sizeof lib_a, "%s/libunisacc.a", outdir)) fail("path-bound");
+    if (cx_fmt(lib_so, sizeof lib_so, "%s/libunisacc.so", outdir)) fail("path-bound");
+    { size_t n; char *s; FILE *f; char h[65];
+      s = cx_read(header_src, &n); if (!s) fail("read-header"); f = fopen(header_dst, "wx"); if (!f || fwrite(s, 1, n, f) != n || fclose(f)) fail("header-write"); free(s);
+      s = cx_read(pkg_real, &n); if (!s) fail("read-package"); cx_sha256_hex(s, n, h); if (strcmp(h, pkgsha)) { free(s); fail("package-changed"); }
+      f = fopen(pkg_dst, "wx"); if (!f || fwrite(s, 1, n, f) != n || fclose(f)) fail("package-write"); free(s); }
+    { char from_a[4400], from_so[4400]; size_t n; char *s; FILE *f;
+      if (cx_fmt(from_a, sizeof from_a, "%s/work/libunisacc.a", outdir) || cx_fmt(from_so, sizeof from_so, "%s/work/libunisacc.so", outdir)) fail("path-bound");
+      s = cx_read(from_a, &n); if (!s) fail("read-static"); f = fopen(lib_a, "wx"); if (!f || fwrite(s, 1, n, f) != n || fclose(f)) fail("static-write"); free(s);
+      s = cx_read(from_so, &n); if (!s) fail("read-dynamic"); f = fopen(lib_so, "wx"); if (!f || fwrite(s, 1, n, f) != n || fclose(f)) fail("dynamic-write"); free(s); }
+    artifact("libunisacc.a", lib_a); artifact("libunisacc.so", lib_so); artifact("libunisacc.h", header_dst); artifact("compiler.pkg", pkg_dst);
+    if (fclose(man)) fail("manifest-write"); man = 0;
+    z = snprintf(man_dst, sizeof man_dst, "%s/manifest.txt", outdir); if (z < 0 || (size_t)z >= sizeof man_dst) fail("path-bound");
+    { size_t n; char *s = cx_read(man_src, &n); FILE *f; if (!s) fail("read-manifest"); f = fopen(man_dst, "wx"); if (!f || fwrite(s, 1, n, f) != n || fclose(f)) fail("manifest-publish"); free(s); }
+    if (cx_rmtree(work)) fail("work-cleanup");
+    printf("CXLIBRARY1\ttarget=lnx/x86_64\tpackage=%s\tartifacts=4\n", pkgsha);
+    return 0;
+#endif
+}

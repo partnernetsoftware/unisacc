@@ -1,0 +1,86 @@
+/* Refusal probe for the Linux x86_64 library builder.
+ * No library compile, no link, and no FFI probe.
+ */
+#pragma unisa use runtime.process
+static char root[4096], base[512], boundp[4400], product[4400], tool[4400];
+static int failed;
+static void die(const char *s) {
+    fprintf(stderr, "check-cx-library-build: %s\n", s);
+    if (base[0]) cx_rmtree(base);
+    exit(2);
+}
+static void pass(int ok, const char *name, const np_result *r) {
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", name);
+    if (!ok && r && r->errn) fwrite(r->err, 1, r->errn, stderr);
+    if (!ok) failed++;
+}
+static int absent(const char *p) {
+    struct stat st; errno = 0;
+    return lstat(p, &st) != 0 && errno == ENOENT;
+}
+static void putfile(const char *p, const char *s) {
+    FILE *f = fopen(p, "wx"); size_t n = strlen(s);
+    if (!f || fwrite(s, 1, n, f) != n || fclose(f)) die("setup-write");
+}
+static int phrase(const np_result *r, const char *s) {
+    return r->rc == 2 && !r->outn && r->err && strstr(r->err, s) != 0;
+}
+static void call(char **av, np_result *r) {
+    char why[1024];
+    memset(r, 0, sizeof *r);
+    if (np_run(av, root, 0, 12, r, why, sizeof why)) {
+        fprintf(stderr, "%s\n", why);
+        r->rc = -1;
+    }
+}
+static void join(char *dst, size_t cap, const char *name) {
+    if (cx_fmt(dst, cap, "%s/%s", base, name)) die("path-bound");
+}
+int main(void) {
+    char self[4096], pkg[4400], out[4400], sent[4400], relp[4400], relo[4400];
+    char cc[] = "/no/such/cxlib-cc", ar[] = "/no/such/cxlib-ar";
+    np_result r; int n;
+    if (!realpath(__FILE__, self)) die("self-path");
+    { char *s = strrchr(self, '/'); if (!s) die("self-path"); *s = 0;
+      s = strrchr(self, '/'); if (!s || s == self) die("self-path"); *s = 0; }
+    if (cx_fmt(root, sizeof root, "%s", self)) die("path-bound");
+    if (cx_fmt(boundp, sizeof boundp, "%s/tools/bound", root)) die("path-bound");
+    if (cx_fmt(product, sizeof product, "%s/unisacc.com", root)) die("path-bound");
+    if (cx_fmt(tool, sizeof tool, "%s/tools/cx-library-build.cx", root)) die("path-bound");
+    n = snprintf(base, sizeof base, "/tmp/cxlib-build-check-%ld", (long)getpid());
+    if (n < 0 || (size_t)n >= sizeof base) die("path-bound");
+    if (mkdir(base, 0700)) die("mkdir-base");
+    if (cx_fmt(relp, sizeof relp, "%s/cxlib-rel-pkg", root)) die("path-bound");
+    if (cx_fmt(relo, sizeof relo, "%s/cxlib-rel-out", root)) die("path-bound");
+    { char *av[] = { boundp, "8", "sh", product, tool, 0 };
+      call(av, &r); pass(phrase(&r, "cx-library-build: usage PACKAGE OUTPUT CC AR [LDFLAG...]"), "usage", &r); np_free(&r); }
+    join(out, sizeof out, "abs-out");
+    { char *av[] = { boundp, "8", "sh", product, tool, "--", "cxlib-rel-pkg", out, cc, ar, 0 };
+      call(av, &r); pass(phrase(&r, "cx-library-build: absolute-path") && absent(out) && absent(relp), "absolute-package", &r); np_free(&r); }
+    { char *av[] = { boundp, "8", "sh", product, tool, "--", out, "cxlib-rel-out", cc, ar, 0 };
+      call(av, &r); pass(phrase(&r, "cx-library-build: absolute-path") && absent(out) && absent(relo), "absolute-output", &r); np_free(&r); }
+    join(out, sizeof out, "alias-out"); join(pkg, sizeof pkg, "alias-out/compiler.pkg");
+    { char *av[] = { boundp, "8", "sh", product, tool, "--", pkg, out, cc, ar, 0 };
+      call(av, &r); pass(phrase(&r, "cx-library-build: output-aliases-package") && absent(out), "output-aliases-package", &r); np_free(&r); }
+    join(out, sizeof out, "exists"); join(sent, sizeof sent, "exists/sentinel"); join(pkg, sizeof pkg, "pkg-real");
+    if (mkdir(out, 0700)) die("mkdir-exists");
+    putfile(sent, "keep"); putfile(pkg, "pkg");
+    { char *av[] = { boundp, "8", "sh", product, tool, "--", pkg, out, cc, ar, 0 }; size_t kn; char *keep;
+      call(av, &r); keep = cx_read(sent, &kn);
+      pass(phrase(&r, "cx-library-build: output-must-not-exist") && keep && kn == 4 && !memcmp(keep, "keep", 4), "output-must-not-exist", &r);
+      free(keep); np_free(&r); }
+    join(pkg, sizeof pkg, "missing-pkg"); join(out, sizeof out, "missing-out");
+    { char *av[] = { boundp, "8", "sh", product, tool, "--", pkg, out, cc, ar, 0 };
+      call(av, &r); pass(phrase(&r, "cx-library-build: package-missing") && absent(out), "package-missing", &r); np_free(&r); }
+    join(pkg, sizeof pkg, "pkg-real"); join(out, sizeof out, "cc-out");
+    { char *av[] = { boundp, "8", "sh", product, tool, "--", pkg, out, cc, ar, 0 };
+      call(av, &r); pass(phrase(&r, "cx-library-build: cc-missing") && absent(out), "cc-missing", &r); np_free(&r); }
+    join(pkg, sizeof pkg, "ld-pkg"); join(out, sizeof out, "ld-out");
+    { char *av[] = { boundp, "8", "sh", product, tool, "--", pkg, out, cc, ar, "nope", 0 };
+      call(av, &r); pass(phrase(&r, "cx-library-build: bad-ldflag") && absent(out) && absent(pkg), "bad-ldflag", &r); np_free(&r); }
+    if (cx_rmtree(base)) die("cleanup");
+    base[0] = 0;
+    printf("NOT_RUN\tlibrary-compile-link-ffi-probe-foreign-host\n");
+    printf("CXLIBRARY_BUILD_CHECK\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
