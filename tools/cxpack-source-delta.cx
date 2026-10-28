@@ -2,6 +2,7 @@
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.kernelsha
 static char oldroot[4096],newroot[4096];static int files,dirs,links,delta;static np_buf record;
+static int fifo_profile;
 static void die(const char *s,const char *p){fprintf(stderr,"cxpack-source-delta: REFUSE %s path=%s errno=%d\n",s,p,errno);exit(2);}
 static void path(char *p,const char *a,const char *b){int n=snprintf(p,4400,"%s/%s",a,b);if(n<0||n>=4400)die("path-bound",b);}
 static void hash(const void *p,size_t n,char h[65]){if(ks_sha256_hex(p,n,h))die("sha256","-");}
@@ -20,16 +21,21 @@ static void walk(const char *rel,int depth){
  }
  if(S_ISLNK(sa.st_mode)){char x[4400],y[4400];ssize_t nx=readlink(a,x,sizeof x),ny=readlink(b,y,sizeof y);if(nx<0||ny<0||nx>=sizeof x||ny>=sizeof y||nx!=ny||memcmp(x,y,(size_t)nx))die("literal-symlink-mismatch",rel);hash(x,(size_t)nx,ha);strcpy(hb,ha);links++;}
  else if(S_ISREG(sa.st_mode)){size_t an,bn;char *x=readfile(a,&an),*y=readfile(b,&bn);hash(x,an,ha);hash(y,bn,hb);
-  if(!strcmp(rel,"src/cxmod.c")){if(strcmp(ha,"452fcb3bc03a9071099307205b4eda0e6e2d09922de49637d982080976f9a2cc")||strcmp(hb,"c0a385b6ff5f1aa3e9067142b91b033747134718afa7af62bd9236a6a49c7ce6"))die("unapproved-cxpack-source-pair",rel);delta++;}
+  if(fifo_profile){
+   if(!strcmp(rel,"src/main.c")){if(strcmp(ha,"c2a1f76fd222016eab3ff1f588104a464b2259e88e7c3e677f1b6384c0f50ec3")||strcmp(hb,"29d6f3fa6a453c7d899759691958fb1eaa1af72b62c2221d3a75bc0b3f05b008"))die("unapproved-fifo-source-pair",rel);delta++;}
+   else if(!strcmp(rel,"exec/c/compiler.c")){if(strcmp(ha,"e29a12864bf37445c269561c1c2a36f59c909b17cefa6f181621ed96e0b72d32")||strcmp(hb,"cd0680d13b3251c62215f94db3aa757974379bd80a6f601ea3e9ce43989b2d04"))die("unapproved-fifo-source-pair",rel);delta++;}
+   else if(an!=bn||memcmp(x,y,an))die("unexpected-content-delta",rel);
+  }
+  else if(!strcmp(rel,"src/cxmod.c")){if(strcmp(ha,"452fcb3bc03a9071099307205b4eda0e6e2d09922de49637d982080976f9a2cc")||strcmp(hb,"c0a385b6ff5f1aa3e9067142b91b033747134718afa7af62bd9236a6a49c7ce6"))die("unapproved-cxpack-source-pair",rel);delta++;}
   else if(!strcmp(rel,"src/main.c")){if(strcmp(ha,"53a44b1aa097f2e20f1ffd64491ef27417377bb236f11848c84cde1a52f1ea04")||strcmp(hb,"c2a1f76fd222016eab3ff1f588104a464b2259e88e7c3e677f1b6384c0f50ec3"))die("unapproved-cxpack-source-pair",rel);delta++;}
   else if(!strcmp(rel,"exec/c/compiler.c")){if(strcmp(ha,"4d7d44f21e85fafa8463d007da5b329b1cfb34f64238adb1afb3b1699cffd17c")||strcmp(hb,"e29a12864bf37445c269561c1c2a36f59c909b17cefa6f181621ed96e0b72d32"))die("unapproved-cxpack-source-pair",rel);delta++;}
   else if(an!=bn||memcmp(x,y,an))die("unexpected-content-delta",rel);free(x);free(y);files++;
  }else die("special-file",rel);
  np_puts(&record,"\t");np_puts(&record,ha);np_puts(&record,"\t");np_puts(&record,hb);np_puts(&record,"\n");
 }
-int main(int argc,char **argv){if(argc!=3||!realpath(argv[1],oldroot)||!realpath(argv[2],newroot)||!strcmp(oldroot,newroot))die("usage DISTINCT_ORIGIN_ROOT CURRENT_ROOT","-");
+int main(int argc,char **argv){if((argc!=3&&argc!=4)||(argc==4&&strcmp(argv[3],"fifo-v1"))||!realpath(argv[1],oldroot)||!realpath(argv[2],newroot)||!strcmp(oldroot,newroot))die("usage DISTINCT_ORIGIN_ROOT CURRENT_ROOT [fifo-v1]","-");fifo_profile=argc==4;
  const char *trees[]={"src","exec","unisa","include","weights","kernel","seed","iterate/kernel"};
- np_puts(&record,"cxpack-source-delta-v1\n");for(int i=0;i<8;i++)walk(trees[i],0);if(delta!=3)die("exactly-three-pinned-deltas-required","CX pack");char h[65];hash(record.p,record.n,h);free(record.p);
+ np_puts(&record,fifo_profile?"cxpack-fifo-source-delta-v1\n":"cxpack-source-delta-v1\n");for(int i=0;i<8;i++)walk(trees[i],0);if(delta!=(fifo_profile?2:3))die("exact-pinned-delta-count-required","CX pack");char h[65];hash(record.p,record.n,h);free(record.p);
  printf("CXPACK_SOURCE_DELTA\tfiles=%d\tdirectories=%d\tliteral-symlinks=%d\tapproved-deltas=%d\twitness=%s\n",files,dirs,links,delta,h);
  puts("NOT_CLAIMED\tatomic-snapshot;complete-repository-identity;constructor-execution;package-provenance;admission;functional-PASS");return 0;
 }

@@ -2,6 +2,8 @@
 
 ## cxpack.fifo-open — 非普通清单阻塞（Linux 候选切片已复现，待修）
 
+FIFO冻结ab7fbdc810/SIDb2007a76的复用适用性：现有cxpack-source-delta新增显式fifo-v1配置，不改变默认旧配置的三个固定文件对。实核相对af8429d0cf共1932文件/49目录/8符号链接，仅src/main.c和exec/c/compiler.c两个固定哈希对变化，witness1f0a90a7ef74c19edfd26b452885844df3eb403f0508ef4e67c1d17914e063c5。反向根rc2具名拒绝；旧默认配置复跑witness仍ab107f14。证据out/c43-fifo-source-delta-01.*、reverse-01.*及out/c43-fifo-delta-legacy-01.*。模型/构造树字节未变，不重复生成权重；后续包绑定、切片及产品准入仍须实际核验。
+
 宿主接续21ba1f4b52：按现有build-cxcc-host配方私有重链GCC/Clang至out/c43-fifo-{gcc,clang}-host.elf，两端五项-o均实返0/1/1/0/1；valid/absent生成程序均rc7，FIFO具名cannot read cxpack.tsv。证据out/c43-fifo-{gcc,clang}-{case}.{stdout,stderr}，根gcc_cx.com/clang_cx.com未替换。模型驱动osx/arm64切片out/c43-fifo-osx-arm64-01构造rc0，未执行外国平台，不授运行资格。已装e955仍未包含此修复。
 
 经典参考接续：src/main.c 同样采用 POSIX 非阻塞打开及同fd普通文件检查。现有 tools/build_ref.sh（宿主C依赖）构造 out/c43-fifo-ref-01.elf，五项实返0/1/1/0/1，公开函数过滤/缺席兼容保持；超限、目录、FIFO均具名拒绝且stdout为0字节。日志out/c43-fifo-ref-{valid,oversize,directory,absent,fifo}-01.*。未验证Windows或经典自举。
