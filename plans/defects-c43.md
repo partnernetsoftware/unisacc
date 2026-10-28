@@ -73,6 +73,13 @@ out/c43-cxpack-model-compare-01.tsv SHA5e0a71b2a2cb897d7d8b116038dda15d4656be994
 cxpack-source-delta正向rc0，核1932文件/49目录/8符号链接/三处固定差异，
 witness ab107f143caae14f4c336e6a2a73378f3cc31dad26db8cb7e8cfc9d7788ff6af；反向rc2具名拒绝src/cxmod.c。
 证据out/c43-cxpack-source-delta-{01,reverse-01}.*。这些证明内容与差异范围，不是候选准入或功能PASS。
+
+冻结根out/candidate-01已实际构造lnx/x86_64和win/x86_64两个切片，均bound55内rc0。
+命令为冻结根`sh ./unisacc.com -O2 -I <冻结根>/include -I <冻结根>/exec/c -b TARGET exec/c/asmcompiler.c -o out/candidate-01/slice-TARGET`；
+构造者4c2831c3，显式两项-I为本次实用flags（不是旧product-build的-iquote命令）。
+lnx切片751192B，SHA435c75687470c0e65254c2f425646ce695ad776813dd0ef4c9c9c57aad95bd25。
+两次构造后identity-helper均复测SID6e7375f9不变，stdout/stderr保留在同目录。
+其余三片、APE封装、候选记录和准入尚未完成，未替换已装产品。
 证据沿用冻结根out/cxpack-gen-*-01.*与epoch-context-01/jobs；当前无所属在跑作业。
 
 ## link.undef-function-refusal — 未定义外部函数链接成崩溃镜像（开放）
