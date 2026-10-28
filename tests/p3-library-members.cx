@@ -5,10 +5,18 @@
  * tests/cases/p3_library_members.c (a private runtime copy, public API only) with
  * the pinned host GCC11 and system libffi, then runs three phases against the PC
  * package and one-byte flips of M28/M30/M31 and of one member that no lnx/x86_64
- * or library route references. Every observed line must equal the expected matrix. */
+ * or library route references. Every observed line must equal the expected matrix.
+ * ROOT PACK_CTX NEW_ABS_OUT api  -- separate batch p3-library-api (the default run above is unchanged).
+ * Library-domain cells (tests/library-domain-matrix.tsv): one "api" fixture run on the clean
+ * package only prints one observation line per cell; each must equal a literal below taken
+ * from the documented API contract and exec/c/libunisacc.c refusal strings, glibc dlerror text
+ * and hand arithmetic (adler32("a")=0x00620062=6422626). us_define and us_include_path are also
+ * compared with the installed product's -D/-I default-run exit status. Not claimed here:
+ * concurrency, leak cycles, borrowed snapshots, injected imports/data, language-error text,
+ * execution-during-compilation reentry, owned-library search order and handle release. */
 #pragma unisa use cxlib.netpack
 static char root[4096],pc[4096],work[4096];
-static char bound[4400],fixture[4400],pkgpath[4400];
+static char bound[4400],fixture[4400],pkgpath[4400],product[4400],incdir[4400];
 static int checks,failed;
 static void die(const char *s){fprintf(stderr,"p3-library-members: REFUSE %s errno=%d\n",s,errno);exit(2);}
 static void ck(int ok,const char *s){checks++;if(!ok)failed++;printf("%s\tp3-library-members.%s\n",ok?"PASS":"FAIL",s);}
@@ -63,13 +71,63 @@ static void run_phase(const char *pkg,const char *label,int phase,const char *ex
  if(!ok){fprintf(stderr,"p3-library-members: %s/%s rc=%d out=",label,phases[phase],r.rc);fwrite(r.out,1,r.outn,stderr);fwrite(r.err,1,r.errn,stderr);}
  {int zn=snprintf(name,sizeof name,"%s-%s",label,phases[phase]);if(zn<0||(size_t)zn>=sizeof name)die("phase-name");}ck(ok,name);np_free(&r);
 }
+/* Expected api observations, in fixture order. Refusal = "<rc>:<us_error>", success = "0" or "0:<value>". */
+static const char *api_expect[]={
+ "lib.in.us_add_source|null-ctx=1:null context|null-name=1:missing source|null-source=1:missing source|valid=0:7",
+ "lib.in.us_define|null=1:invalid definition|newline=1:invalid definition|value=0:42",
+ "lib.in.us_include_path|null=1:invalid include path|value=0:9",
+ "lib.in.us_set_signature_version|built=0|v4=1:invalid signature version configuration|v1=1:invalid signature version configuration|v2-same=0|v2-image=kept|v3=0|v3-image=null:library is not relocated|v3-rebuilt=0:7",
+ "lib.compile.us_relocate.order|compile-empty=1:no input|added=0|relocate-first=1:no compiled tape|compiled=0|sym-before-relocate=null:library is not relocated",
+ "lib.compile.cross-target|compile=0|tape=nonempty|contract=USLCON1|relocate=1:library execution target differs from host",
+ "lib.run.us_run_main|built=0|argc-negative=1:invalid main arguments|argv-null=1:invalid main arguments|status-null=1:invalid main arguments|valid=0:23",
+ "lib.run.us_call_status|built=0|ok=5:0:0|exit=0:1:9",
+ "lib.ctx.us_free|null=noop|fds=equal|maps=equal",
+ "lib.ctx.reentry|declared=0|compile=1:recursive compilation not yet supported|run-main=1:recursive script execution not yet supported|contract=null:library contract: recursive query|relocate=1:recursive compilation not yet supported|outer=42",
+ "lib.cb.host-to-script-api|sorted=0,1,2,3,4|status=0",
+ "lib.bind.us_declare_import|process=0:5|injection-first=0:99|bad=1:invalid import parameters|after-bad=0:5",
+ "lib.bind.us_load_library|empty=1:invalid library path|missing=1:/nonexistent/unisacc-p3-missing.so: cannot open shared object file: No such file or directory|libz=0|duplicate=1:duplicate library path|adler32=0:6422626",
+ "lib.bind.us_add_symbol.invalid-and-data|null-signature=1:invalid symbol registration|too-many=1:invalid symbol parameters|data-with-args=1:invalid data symbol declaration|data=0:32|registered=0|after-registration=null:library is not relocated",
+ "API_DONE"};
+enum{NAPI=15}; /* product E3 refuses sizeof in an enum constant (C99 6.6p6 allows it); count fixed by hand */
+static void run_api(const char *pkg){
+ char why[1024];np_result r;
+ char *cmd[]={bound,"25",fixture,(char *)pkg,"lnx/x86_64","api",incdir,0};
+ if(np_run(cmd,root,0,30,&r,why,sizeof why))die(why);
+ save("api.stdout",r.out,r.outn);save("api.stderr",r.err,r.errn);
+ ck(r.rc==0&&!r.errn,"api-exit-0-empty-stderr");
+ size_t lines=0;for(size_t i=0;i<r.outn;i++)if(r.out[i]=='\n')lines++;
+ ck(lines==NAPI&&r.outn&&r.out[r.outn-1]=='\n',"api-line-count");
+ for(int k=0;k<NAPI;k++){
+  const char *want=api_expect[k];size_t wn=strlen(want),at=0;int found=0;
+  while(at<r.outn){size_t e=at;while(e<r.outn&&r.out[e]!='\n')e++;if(e-at==wn&&!memcmp(r.out+at,want,wn))found=1;at=e+1;}
+  char label[96];size_t cn=strcspn(want,"|");if(cn>80)die("api-label");
+  {int zn=snprintf(label,sizeof label,"api.%.*s",(int)cn,want);if(zn<0||(size_t)zn>=sizeof label)die("api-label");}
+  if(!found)fprintf(stderr,"p3-library-members: %s expected %s\n",label,want);
+  ck(found,label);
+ }
+ if(r.errn)fwrite(r.err,1,r.errn,stderr);
+ np_free(&r);
+}
+/* The same -D / -I effect through the installed product's default -run: exit status is the value. */
+static void run_cli(const char *label,const char *a1,const char *a2,const char *src,int want){
+ char why[1024],name[96];np_result r;
+ char *cmd[]={bound,"20","sh",product,(char *)a1,(char *)a2,(char *)src,0};
+ if(!a2){cmd[5]=(char *)src;cmd[6]=0;}
+ if(np_run(cmd,work,0,25,&r,why,sizeof why))die(why);
+ {int zn=snprintf(name,sizeof name,"%s.stdout",label);if(zn<0||(size_t)zn>=sizeof name)die("cli-name");}save(name,r.out,r.outn);
+ {int zn=snprintf(name,sizeof name,"%s.stderr",label);if(zn<0||(size_t)zn>=sizeof name)die("cli-name");}save(name,r.err,r.errn);
+ int ok=r.rc==want&&!r.outn&&!r.errn;
+ if(!ok){fprintf(stderr,"p3-library-members: %s rc=%d want=%d\n",label,r.rc,want);fwrite(r.err,1,r.errn,stderr);}
+ ck(ok,label);np_free(&r);
+}
 int main(int argc,char **argv){
 #if !defined(__linux__) || !defined(__x86_64__)
  fputs("NOT_RUN p3-library-members needs Linux/x86_64\n",stderr);return 3;
 #endif
- if(argc!=4||!realpath(argv[1],root)||!realpath(argv[2],pc)||argv[3][0]!='/')die("usage ROOT PACK_CTX NEW_ABS_OUT");
+ int api=argc==5&&!strcmp(argv[4],"api");
+ if((argc!=4&&!api)||!realpath(argv[1],root)||!realpath(argv[2],pc)||argv[3][0]!='/')die("usage ROOT PACK_CTX NEW_ABS_OUT");
  char parent[4096],base[4096],leaf[4096];copy_fit(parent,sizeof parent,argv[3]);char *slash=strrchr(parent,'/');if(!slash||!slash[1]||!strcmp(slash+1,".")||!strcmp(slash+1,".."))die("output-leaf");copy_fit(leaf,sizeof leaf,slash+1);if(slash==parent)slash[1]=0;else *slash=0;if(!realpath(parent,base))die("output-parent");int z=snprintf(work,sizeof work,"%s%s%s",base,!strcmp(base,"/")?"":"/",leaf);if(z<0||(size_t)z>=sizeof work||within(work,pc))die("output-aliases-input");if(mkdir(work,0700))die("new-output-required");
- path(bound,sizeof bound,root,"tools/bound");path(pkgpath,sizeof pkgpath,pc,"compiler.pkg");path(fixture,sizeof fixture,work,"fixture.elf");
+ path(bound,sizeof bound,root,"tools/bound");path(pkgpath,sizeof pkgpath,pc,"compiler.pkg");path(fixture,sizeof fixture,work,"fixture.elf");path(product,sizeof product,root,"unisacc.com");path(incdir,sizeof incdir,work,"inc");
  static const char *dep_names[]={"unisacc.com","tests/cases/p3_library_members.c","exec/c/libunisacc.c","exec/c/librarylatebind.h","exec/c/librarycall_x86_64.S","exec/c/run.c"};
  enum{ND=6};char dep_paths[ND][4400],dep_before[ND][65],pkg_before[65];
  for(int i=0;i<ND;i++){path(dep_paths[i],sizeof dep_paths[i],root,dep_names[i]);hash(dep_paths[i],dep_before[i]);}
@@ -79,6 +137,20 @@ int main(int argc,char **argv){
  np_result compiled;char why[1024];if(np_run(build,root,0,35,&compiled,why,sizeof why))die(why);
  save("build.stderr",compiled.err,compiled.errn);
  int built=!compiled.rc&&!compiled.errn&&!compiled.outn;np_free(&compiled);ck(built,"fixture-build");if(!built)die("fixture-build");
+ if(api){   /* separate batch p3-library-api: library-domain API cells on the clean package only */
+  static const char HV[]="#define HV 9\n",DEF[]="int main(void) { return N + M; }\n",INC[]="#include <hv.h>\nint main(void) { return HV; }\n";
+  char defc[4400],incc[4400],after[65];
+  if(mkdir(incdir,0700))die("include-dir");save("inc/hv.h",HV,sizeof HV-1);save("def.c",DEF,sizeof DEF-1);save("inc.c",INC,sizeof INC-1);
+  path(defc,sizeof defc,work,"def.c");path(incc,sizeof incc,work,"inc.c");
+  run_api(pkgpath);
+  run_cli("cli-define-42","-DN=41","-DM",defc,42);
+  run_cli("cli-include-9","-I",incdir,incc,9);
+  hash(pkgpath,after);ck(!strcmp(after,pkg_before),"package-unchanged");
+  for(int i=0;i<ND;i++){char label[80];{int zn=snprintf(label,sizeof label,"unchanged-%s",dep_names[i]);if(zn<0||(size_t)zn>=sizeof label)die("label");}for(char *q=label;*q;q++)if(*q=='/')*q='-';hash(dep_paths[i],after);ck(!strcmp(after,dep_before[i]),label);}
+  printf("SOURCE\tprivate-host-libunisacc.c+%s\tpackage=%s\n",dep_before[2],pkg_before);
+  puts("NOT_CLAIMED\tinstalled-APE-library-API-qualification-concurrency-leak-cycles-borrowed-snapshots-injected-import-data-language-error-compile-time-reentry-owned-library-order-foreign-hosts");
+  printf("P3_LIBRARY_API_BATCH\tassertions=%d\tfailed=%d\n",checks,failed);return failed?1:0;
+ }
  size_t n;char *pkg=load(pkgpath,&n);int m28,m30,m31;parse(pkg,n,&m28,&m30,&m31);
  ck(m28==28,"D-lnx-x86_64-nativeabi-M28");ck(m30==30,"D-library-contract-M30");ck(m31==31,"D-library-selection-M31");
  int control=-1;for(int i=0;i<PM;i++)if(!used[i]){control=i;break;}
