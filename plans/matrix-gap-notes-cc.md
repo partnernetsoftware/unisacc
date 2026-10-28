@@ -8,7 +8,7 @@
 
 | cell | 覆盖批 | 说明 |
 |---|---|---|
-| elf.x86_64.segments, elf.arm64.segments, ape.container-structure, object.lnx-arm64.unit-link | formats-elf-ape（IMPLEMENTED，tests/formats-elf-ape.cx 283 行） | 该批已登记但这四格仍 MISSING；按 §7 格式贴 `formats-elf-ape@<候选>:N/0;日志` 即可，须先在当前候选实跑一次取 N。 |
+| elf.x86_64.segments, elf.arm64.segments, ape.container-structure, object.lnx-arm64.unit-link | formats-elf-ape（IMPLEMENTED，tests/formats-elf-ape.cx 283 行） | 2026-10-28 17:2x 已由 cc 实跑（fable 裁定：换标合同是实跑证据而非批作者权；只读运行不改输入）：run-batch PASS @f3705dfa，68/0，四格标签逐项 PASS（3/1/3/8 行），日志 out/c43-cc-reg-02/formats-elf-ape.log，测试 blob 20dca21533c6；四格已换 COVERED_LOCAL。 |
 
 ## 2. 只扩现有生成器、一个窗口槽（每格 ≤40 s）
 
