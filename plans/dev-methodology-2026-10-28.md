@@ -140,3 +140,11 @@
 - §12/§14/§16 的 REF 告诫已闭合：在仓外冻结导出 `/home/devali/repos/unisacc-ref-500d6cf3d8`（`git archive` HEAD 500d6cf3d8 + 拷入当前产品供 export_ref 使用）里跑 `tools/build_ref.sh out/ua_ref.c out/ua_ref`（23 s），得 REF `0ed46192…`，source-flat 身份 `b95cec77…`（out/ua_ref.c.flat.*.source.json）。build_ref 的 safedel 清理在仓外路径被白名单拒绝，仅影响临时文件，不影响产物。
 - 产品在本日 13:09 被 cdx 的 fullname 纪元（`unisacc-epoch-fullname-778fc68ebc`，artifact d65c1474…）替换：§10–§16 的早期证据产品为 94b549d1，之后的复跑产品为 d65c1474。
 - 用新 REF + 新产品复跑全部参考依赖组：o2 12 PASS（out/c43-cc-o2-03）、properties lower 13 PASS、random 43 PASS（out/c43-cc-props-02）、optimization 9 组 328 PASS（out/c43-cc-opt-02）；全部 0 FAIL，与旧 REF/旧产品结果逐项相同。换标时引用这些目录（REF 与产品身份均在各 results.tsv 的 IDENTITY 行）。
+
+## 18. 事实生成用例七、八：data-layout-mod8 全枚举与 Mach-O/PE 结构（2026-10-28，fable 裁定）
+
+- prop.bound.data-layout-mod8（tools/layout-cases-gen.cx）：fable 裁定全枚举而非抽样——tape 编译仅 ~0.04 s。六类 {b1,b8,s1,s7,s8,z8} 长度 1..3 共 258 序列，按 len12 与 len3-0..5 七片（每片 <40 s）。布局规则移植自 tests/stream-lower-domain.cx layout()（= src/back_lower.c bk_repack，目标无关）：声明序分配（.bss 8 对齐、.str 不对齐）→ 以排序唯一起点切 blob → 非零 blob 先、零 blob 后各按起点序保持 mod 8 余数重排 → `@sym = 256 + 新起点`。三方 oracle：stream6 头部文本等于表、lnx 镜像执行写出 addr(dk)−addr(d0) 字节等于表、六目标产品镜像等于冻结 REF 镜像；表写入 layout-table-SLICE.tsv。实跑（out/c43-cc-layout-01，产品 d65c1474、REF 0ed46192）：258 序列 2064 PASS / 0 FAIL / 0 VACUOUS。
+  - 移植教训：末尾 `.bss o 8` 暂存格必须作为真实定义参与 blob 切分（前一 blob 的区间延伸到它的 8 对齐起点），否则 s1.z8.s8 等 3 例的零串位置差 8；第一版漏掉导致 6 行 FAIL，修正后全绿——stream6 与镜像行为与参考规则一致。
+- formats Mach-O/PE 八格（tools/formats-macho-pe.cx）：osx/win × x86_64/arm64 × 两夹具 = 8 镜像；oracle 全部按公开布局（loader.h/codesign.h、PE/COFF）手写：四段与权限/区间、载入命令集合（DYLINKER/DYLIB/MAIN/PIE、零符号表 8-NUL strtab、零 dysymtab、仅 bind 的 dyld info、无 UUID）、ad-hoc CodeDirectory（0x20400、SHA-256、4096 页、codeLimit=签名偏移）且每页哈希以 cx_sha256 重算相等；PE32+ 四节对齐/区间/标志、入口在 .text、KERNEL32 导入 INT==IAT（22 项）、IAT 目录、320 字节 load config 与 .data 内 cookie、单条 DIR64 重定位恰指向 cookie 字段；每格带变异控制（翻转页字节、RVA +16）必须被拒。实跑 out/c43-cc-fmt-01：96 PASS / 0 FAIL，12 s。
+  - 发现：矩阵行 macho.*.load-commands 写"header slack ≥256"，实测（且 src/back_image.c 显式 `wz(156)`）为 156 字节；工具只断言命令区结束于 __text 之前并记录实测值，矩阵注应改为 156 或说明来源。
+- 批提案增 `properties-cases-layout-len12`、`-len3-0..5`（材料 streams;ref）与 `formats-macho-pe`；提案共 39 行。
