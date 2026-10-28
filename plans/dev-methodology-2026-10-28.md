@@ -148,3 +148,9 @@
 - formats Mach-O/PE 八格（tools/formats-macho-pe.cx）：osx/win × x86_64/arm64 × 两夹具 = 8 镜像；oracle 全部按公开布局（loader.h/codesign.h、PE/COFF）手写：四段与权限/区间、载入命令集合（DYLINKER/DYLIB/MAIN/PIE、零符号表 8-NUL strtab、零 dysymtab、仅 bind 的 dyld info、无 UUID）、ad-hoc CodeDirectory（0x20400、SHA-256、4096 页、codeLimit=签名偏移）且每页哈希以 cx_sha256 重算相等；PE32+ 四节对齐/区间/标志、入口在 .text、KERNEL32 导入 INT==IAT（22 项）、IAT 目录、320 字节 load config 与 .data 内 cookie、单条 DIR64 重定位恰指向 cookie 字段；每格带变异控制（翻转页字节、RVA +16）必须被拒。实跑 out/c43-cc-fmt-01：96 PASS / 0 FAIL，12 s。
   - 发现：矩阵行 macho.*.load-commands 写"header slack ≥256"，实测（且 src/back_image.c 显式 `wz(156)`）为 156 字节；工具只断言命令区结束于 __text 之前并记录实测值，矩阵注应改为 156 或说明来源。
 - 批提案增 `properties-cases-layout-len12`、`-len3-0..5`（材料 streams;ref）与 `formats-macho-pe`；提案共 39 行。
+
+## 19. 批登记提案的真实运行器验证（2026-10-28）
+
+- 在仓外冻结导出 `/home/devali/repos/unisacc-cc-batches-cba0b16589`（git archive HEAD + 当前产品）里把 `plans/batches-cc-proposal.tsv` 与 `plans/coverage-cc-proposal.tsv` 追加到其 tests/batches.tsv / coverage.tsv，用真实 `tests/run-batch.cx`（占位符展开、材料绑定、55 s 预算、候选 SHA 前后一致、expect 标记行）逐行执行全部 39 行：39/39 `status=PASS`（候选 d65c1474；材料 streams=out/c43-streams-riroot-01、ref=冻结 REF 0ed46192）。日志在该导出的 out/rb/ 下。共享检出未改动。
+- 运行器暴露并已修正的登记错误：materials 分隔符须为逗号（原 `streams;ref`）；layer 只接受 contract/product/library/interfaces/negative/properties/platform（formats 行改 platform）；`properties-cases-lower` 的 args 用了 `{ref}` 但 materials 漏列（coverage id 必须存在于 coverage.tsv，故配套 15 行 coverage 提案）；`tools/peep-cases-gen.cx` 原把 16 个 TABLE_SUSPECT 当非零退出，批会 FAIL——现仅 FAIL/NOT_RUN 非零，TABLE_SUSPECT 仍在输出与 results.tsv 中计数（它是金表线索，不是运行失败）。
+- 结论：cdx 提交 tests/batches.tsv 后，两份提案可原样并入；run.cx 还需提供 `{ref}` 材料绑定（run-batch 已支持任意 `name=ABS_PATH` 材料，批行 materials 列 `ref` 即可）。
