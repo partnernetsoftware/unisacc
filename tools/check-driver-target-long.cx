@@ -1,0 +1,28 @@
+/* Check target long width in generated tape without executing foreign code.
+ * DRIVER MODELS OUTDIR: fresh output paths are retained for inspection. */
+#pragma unisa use cxlib.netpack
+int main(int argc,char **argv) {
+    if(argc!=4){fputs("usage: DRIVER MODELS OUTDIR\n",stderr);return 2;}
+    const char *targets[]={"lnx/x86_64","osx/x86_64","win/x86_64","win/arm64"};
+    const char *names[]={"lnx-x86_64","osx-x86_64","win-x86_64","win-arm64"};
+    const char *expected[]={"  imm r0, 8\n","  imm r0, 8\n","  imm r0, 4\n","  imm r0, 4\n"};
+    if(mkdir(argv[3],0700)){perror("output directory");return 2;}
+    char source[4096];int z=snprintf(source,sizeof source,"%s/sizeof-long.c",argv[3]);
+    if(z<0||(size_t)z>=sizeof source)return 2;
+    const char *body="int main(void){return sizeof(long);}\n";
+    if(cx_write(source,body,strlen(body)))return 2;
+    int failed=0;
+    for(int i=0;i<4;i++){
+        char tape[4096],why[512];z=snprintf(tape,sizeof tape,"%s/%s.tape",argv[3],names[i]);
+        if(z<0||(size_t)z>=sizeof tape)return 2;
+        char *v[]={"tools/bound","15",argv[1],"--models",argv[2],"-S","-t",(char *)targets[i],source,"-o",tape,0};
+        np_result r={0};int transport=np_run(v,0,0,17,&r,why,sizeof why);
+        size_t n=0;char *s=transport?0:cx_read(tape,&n);char *mainpos=s?strstr(s,"main:\n"):0;
+        char *end=mainpos?strstr(mainpos,"__unisacc_R"):0;char *imm=mainpos?strstr(mainpos,expected[i]):0;
+        int ok=!transport&&!r.rc&&!r.errn&&mainpos&&end&&imm&&imm<end;
+        printf("%s\t%s\tlong=%d\n",ok?"PASS":"FAIL",targets[i],i<2?8:4);
+        if(!ok){failed++;if(transport)fprintf(stderr,"%s: %s\n",targets[i],why);else if(r.errn)fwrite(r.err,1,r.errn,stderr);}
+        free(s);np_free(&r);
+    }
+    printf("TARGET_LONG\tchecks=4\tfailed=%d\n",failed);return failed?1:0;
+}
