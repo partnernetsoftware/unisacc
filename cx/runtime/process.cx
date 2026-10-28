@@ -1,0 +1,117 @@
+/* Native process capture module. Extracted from netpack's existing process
+ * contract: only np_run/np_free are public operations. Buffers and error
+ * rendering remain module-private; returned output belongs to the caller. */
+#pragma unisa module process
+typedef struct np_buf { char *p; size_t n, cap; } np_buf;
+typedef struct np_result { int rc; char *out; size_t outn; char *err; size_t errn; } np_result;
+
+
+static void np_put(np_buf *b, const char *s, size_t n) {
+    if (b->n + n + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 256; char *g;
+        while (c < b->n + n + 1) c *= 2;
+        g = realloc(b->p, c);
+        if (!g) { fputs("MemoryError\n", stderr); exit(1); }
+        b->p = g; b->cap = c;
+    }
+    if (n) memcpy(b->p + b->n, s, n);
+    b->n += n; b->p[b->n] = 0;
+}
+
+static void np_puts(np_buf *b, const char *s) { np_put(b, s, strlen(s)); }
+
+static void np_oserror(int e, const char *name, char *why, size_t wl) {
+    const char *cls = "OSError"; const char *msg = strerror(e);
+    if (e == ENOENT) cls = "FileNotFoundError";
+    else if (e == EACCES || e == EPERM) cls = "PermissionError";
+    else if (e == ENOTDIR) cls = "NotADirectoryError";
+    else if (e == EISDIR) cls = "IsADirectoryError";
+    else if (e == EEXIST) cls = "FileExistsError";
+    /* the C library text Python shows (the carried runtime lacks some of it) */
+    if (e == ENOENT) msg = "No such file or directory";
+    else if (e == EACCES) msg = "Permission denied";
+    else if (e == EPERM) msg = "Operation not permitted";
+    else if (e == ENOTDIR) msg = "Not a directory";
+    else if (e == EISDIR) msg = "Is a directory";
+    else if (e == EEXIST) msg = "File exists";
+    if (name) snprintf(why, wl, "%s: [Errno %d] %s: '%s'", cls, e, msg, name);
+    else snprintf(why, wl, "%s: [Errno %d] %s", cls, e, msg);
+}
+
+
+void np_free(np_result *r) { free(r->out); free(r->err); r->out = r->err = 0; r->outn = r->errn = 0; }
+int np_run(char *const argv[], const char *cwd, char *const envadd[], int secs, np_result *res, char *why, size_t wl) {
+    int po[2], pe[2], pf[2], err[2] = { 0, 0 }, st = 0, open_o = 1, open_e = 1, reaped = 0;
+    pid_t pid; ssize_t k; long idle = 0; np_buf o = { 0, 0, 0 }, e = { 0, 0, 0 }; char t[65536];
+    res->rc = 0; res->out = res->err = 0; res->outn = res->errn = 0;
+    if (pipe(po) || pipe(pe) || pipe(pf)) { snprintf(why, wl, "OSError: cannot create pipes"); return -1; }
+    fcntl(pf[1], F_SETFD, FD_CLOEXEC);
+    pid = fork();
+    if (pid < 0) { snprintf(why, wl, "OSError: fork failed"); return -1; }
+    if (pid == 0) {
+        setpgid(0, 0);   /* own process group: a timeout kills every descendant */
+        close(po[0]); close(pe[0]); close(pf[0]);
+        dup2(po[1], 1); dup2(pe[1], 2); close(po[1]); close(pe[1]);
+        if (envadd && envadd[0]) {
+            /* dict(os.environ, K=V): rebuilt in environ itself (the runtime's setenv() does not reach execvp) */
+            size_t n = 0, a = 0, x, y; char **ne, **v;
+            for (v = environ; *v; v++) n++;
+            while (envadd[a]) a++;
+            ne = malloc((n + a + 1) * sizeof *ne);
+            if (!ne) _exit(255);
+            for (x = 0, v = environ; *v; v++) {
+                int keep = 1;
+                for (y = 0; y < a; y++) {
+                    size_t l = strcspn(envadd[y], "=");
+                    if (!strncmp(*v, envadd[y], l) && (*v)[l] == '=') keep = 0;
+                }
+                if (keep) ne[x++] = *v;
+            }
+            for (y = 0; y < a; y++) ne[x++] = envadd[y];
+            ne[x] = 0;
+            environ = ne;
+        }
+        if (cwd && chdir(cwd) != 0) { err[0] = 1; err[1] = errno; k = write(pf[1], err, sizeof err); _exit(255); }
+        execvp(argv[0], argv);
+        err[0] = 2; err[1] = errno; k = write(pf[1], err, sizeof err); (void)k;
+        _exit(255);
+    }
+    setpgid(pid, pid);   /* also from the parent, so the group exists before any kill */
+    close(po[1]); close(pe[1]); close(pf[1]);
+    k = read(pf[0], err, sizeof err);
+    close(pf[0]);
+    if (k == (ssize_t)sizeof err) {
+        waitpid(pid, &st, 0); close(po[0]); close(pe[0]);
+        np_oserror(err[1], err[0] == 1 ? cwd : argv[0], why, wl);
+        return -1;
+    }
+    fcntl(po[0], F_SETFL, O_NONBLOCK); fcntl(pe[0], F_SETFL, O_NONBLOCK);
+    np_put(&o, "", 0); np_put(&e, "", 0);
+    while (open_o || open_e || !reaped) {
+        int got = 0;
+        if (open_o) { k = read(po[0], t, sizeof t); if (k > 0) { np_put(&o, t, (size_t)k); got = 1; } else if (k == 0 || (errno != EAGAIN && errno != EINTR)) { open_o = 0; close(po[0]); } }
+        if (open_e) { k = read(pe[0], t, sizeof t); if (k > 0) { np_put(&e, t, (size_t)k); got = 1; } else if (k == 0 || (errno != EAGAIN && errno != EINTR)) { open_e = 0; close(pe[0]); } }
+        if (!open_o && !open_e && !reaped) { waitpid(pid, &st, 0); reaped = 1; break; }
+        (void)got;
+        if (idle >= (long)secs * 1000) {   /* 1 ms ticks, counted with or without output */
+            size_t i;
+            kill(-pid, SIGKILL); kill(pid, SIGKILL); waitpid(pid, &st, 0);
+            if (open_o) close(po[0]);
+            if (open_e) close(pe[0]);
+            free(o.p); free(e.p);
+            {   np_buf l = { 0, 0, 0 };
+                np_puts(&l, "subprocess.TimeoutExpired: Command '[");
+                for (i = 0; argv[i]; i++) { if (i) np_puts(&l, ", "); np_puts(&l, "'"); np_puts(&l, argv[i]); np_puts(&l, "'"); }
+                np_puts(&l, "]' timed out after ");
+                snprintf(t, sizeof t, "%d seconds", secs); np_puts(&l, t);
+                snprintf(why, wl, "%s", l.p); free(l.p);
+            }
+            return -1;
+        }
+        usleep(1000); idle++;
+    }
+    res->rc = WIFSIGNALED(st) ? -WTERMSIG(st) : WEXITSTATUS(st);
+    res->out = o.p; res->outn = o.n; res->err = e.p; res->errn = e.n;
+    return 0;
+}
+

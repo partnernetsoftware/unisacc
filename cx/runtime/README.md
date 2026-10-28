@@ -10,7 +10,7 @@ No undefined function is silently forwarded to host libc.
 From the repository root, with a fresh absolute output directory:
 
 ```
-tools/bound 55 sh ./unisacc.com tools/cx-runtime.cx -- "$PWD/include" "$PWD/out/runtime-new" "$PWD/unisacc.com" --abi cx/runtime/lnx-x86_64.c tools/cx-driver.cx cx/cx0/bundle.cx cx/cx0/plan.cx tools/cxlib/netpack.cx
+tools/bound 55 sh ./unisacc.com tools/cx-runtime.cx -- "$PWD/include" "$PWD/out/runtime-new" "$PWD/unisacc.com" --abi cx/runtime/lnx-x86_64.c tools/cx-driver.cx cx/cx0/bundle.cx cx/cx0/plan.cx cx/runtime/process.cx tests/preprocess/runtime-native.cx tests/preprocess/runtime_native_state.cx
 ```
 
 The explicitly named bootstrap product only preprocesses an identifier-demand
@@ -20,9 +20,11 @@ provider is self contained preprocessed C; final consumer/provider compilation
 uses the actual CX model chain. Preparation is reported as `PREPARED` and does
 not certify a consumer run. All consumer modules must be named as demand inputs.
 
-`source-identity.tsv` records original header hashes, bootstrap identity and
-flags, optional ABI source and implementation hash. Headers and bootstrap are
-rechecked after preprocessing; `declaration-identity.tsv` records generated
+`source-identity.tsv` records original header hashes, complete consumer source
+hashes, generator source hash, bootstrap identity and flags, optional ABI source
+and implementation hash. Headers, consumers, generator source and bootstrap are
+rechecked after preprocessing; `G` identifies source bytes, not the executing
+generator ELF. `declaration-identity.tsv` records generated
 header hashes. The final driver's immutable bundle binds actual consumed bytes.
 This is a before/after identity check, not an atomic snapshot against hostile
 concurrent writers.
@@ -53,3 +55,20 @@ Its private buffer/error helpers and public `np_run`/`np_free` retain the old
 netpack process contract, including environment replacement, independent output
 channels and bounded descendant termination. Construction/packing algorithms
 remain in the old netpack module and are no longer source-driver dependencies.
+
+The final local five-unit source-driver compilation completed the real model
+chain under its unchanged 45-second total and 12-second stage limits:
+`out/c43-cx-runtime-self-driver-05/`. The generated 217,031-byte statically
+linked ELF has SHA256
+`771741a7d1ed15c3b559ca5341398924716f096662af5fa4315cf10206b99d75`.
+Its preparation receipt remains `PREPARED-no-test-result`. That actual ELF then
+compiled and ran `tests/preprocess/runtime-native.cx` through the new chain,
+passing all five allocation/errno/stdio/process-group gold assertions in
+`out/c43-cx-runtime-native-gold-05.stdout`.
+The same self-compiled ELF also passes the original 14 driver contract
+assertions in `out/c43-cx-runtime-driver-contract-05.stdout`.
+
+Earlier failures remain separate: the original E2 budget exhaustion, missing
+native `setpgid` at E3, and the larger netpack consumer's E4 12-second timeout
+were not relabelled as passes. This local result does not replace complete
+suite or same-candidate cross-platform qualification.
