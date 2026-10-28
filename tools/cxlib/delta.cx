@@ -1,0 +1,187 @@
+/* cxlib.delta -- loader for a seed-gen delta (the pre-network JSON with state names), shared by
+ * tools/sim.cx (execution with coverage) and tools/table-lint.cx (static checks).
+ *   dl_load(PATH, &d)   parse PATH into d (dies with a message on any shape error)
+ *   dl_opname(op) / dl_aluname(op)   names for diagnostics
+ *   dl_regname(&d, id)  the register name behind an id (1..d.nreg; 0 = none)
+ *   dl_state(&d, NAME)  state index or -1
+ * Delta shape (exec/pp/sim.py load()): {"start": NAME, "states": {NAME: [MODE, {KEY: [NEXT, SEQ]}]},
+ * "seqs": [[[OP, args...]...]]}; MODE b/r rows are keyed "0".."256", MODE t rows by label or "BOT".
+ * Action arguments are strings (registers or labels) or integers; a CMP whose second operand is an
+ * integer reads that numeric W address (Python W.get(int)), kept as dl_act.addr2.
+ * No exported objects (CXIF v0): everything lives in the dl_delta the caller owns. */
+#pragma unisa module delta
+
+enum { DL_EOF = 256 };
+enum { DL_ADV, DL_MARK, DL_JUMP, DL_COPYT, DL_COPY, DL_OUT, DL_LDI, DL_COPYW, DL_ALU, DL_ALUI, DL_CMP, DL_CMPI, DL_A64, DL_A64I, DL_C64, DL_C64U, DL_RLD, DL_LDX, DL_STX, DL_OUTW,
+       DL_SPAN, DL_SPANT, DL_SPAN2, DL_OLAST, DL_ODROP, DL_OLEN, DL_OCUT, DL_ORES, DL_OFILL, DL_OCLR, DL_OSEL, DL_SETOT, DL_XATTR, DL_PUSH, DL_POP, DL_INTERN, DL_SBINTERN,
+       DL_BLOBSAVE, DL_SBSAVE, DL_INPUSH, DL_INPUSHX, DL_INPUSHXE, DL_INPOP, DL_SBCLR, DL_SBOUT, DL_SBSPAN, DL_SBBLOB, DL_SBFIND, DL_BYTE, DL_XLEN, DL_BLEN, DL_DIVMOD10, DL_SWAP, DL_ACCEPT, DL_REJECT, DL_OP_N };
+enum { DL_add, DL_sub, DL_mul, DL_div, DL_rem, DL_and, DL_or, DL_xor, DL_shl, DL_sar, DL_sdiv, DL_srem, DL_udiv, DL_urem, DL_not, DL_shr, DL_ALU_N };
+typedef struct dl_act { int op; int alu; const char *s1, *s2, *s3; long long v; int addr2; int r1, r2, r3; } dl_act;
+typedef struct dl_seq { dl_act *a; int n; } dl_seq;
+typedef struct dl_edge { int next; dl_seq *seq; } dl_edge;   /* next < 0: no edge for this key */
+typedef struct dl_state { const char *name; int mode; dl_edge *byte; char **tkeys; dl_edge *tedges; int tn; } dl_state;
+typedef struct dl_delta { dl_state *s; int ns; dl_seq *seqs; int nseq; int start; int nreg; char **regnames; void *index; void *regs; } dl_delta;   /* index: state name map; regs: register name map */
+
+static const char *dl_opnames[DL_OP_N] = { "ADV", "MARK", "JUMP", "COPYT", "COPY", "OUT", "LDI", "COPYW", "ALU", "ALUI", "CMP", "CMPI", "A64", "A64I", "C64", "C64U", "RLD", "LDX", "STX", "OUTW",
+       "SPAN", "SPANT", "SPAN2", "OLAST", "ODROP", "OLEN", "OCUT", "ORES", "OFILL", "OCLR", "OSEL", "SETOT", "XATTR", "PUSH", "POP", "INTERN", "SBINTERN",
+       "BLOBSAVE", "SBSAVE", "INPUSH", "INPUSHX", "INPUSHXE", "INPOP", "SBCLR", "SBOUT", "SBSPAN", "SBBLOB", "SBFIND", "BYTE", "XLEN", "BLEN", "DIVMOD10", "SWAP", "ACCEPT", "REJECT" };
+static const char *dl_alunames[DL_ALU_N] = { "add", "sub", "mul", "div", "rem", "and", "or", "xor", "shl", "sar", "sdiv", "srem", "udiv", "urem", "not", "shr" };
+const char *dl_opname(int op) { return op >= 0 && op < DL_OP_N ? dl_opnames[op] : "?"; }
+const char *dl_aluname(int op) { return op >= 0 && op < DL_ALU_N ? dl_alunames[op] : "?"; }
+
+static void dl_die(const char *s) { fprintf(stderr, "delta: %s\n", s); exit(2); }
+static void *dl_alloc(size_t n) { void *p = malloc(n ? n : 1); if (!p) dl_die("out of memory"); return p; }
+static void *dl_grow(void *p, size_t n) { p = realloc(p, n ? n : 1); if (!p) dl_die("out of memory"); return p; }
+
+/* ---- string -> int map (open addressing; keys owned) ---- */
+typedef struct dl_map { char **keys; long long *vals; long n, cap; } dl_map;
+static unsigned long dl_hash(const char *s, long n) { unsigned long h = 1469598103934665603UL; for (long i = 0; i < n; i++) { h ^= (unsigned char)s[i]; h *= 1099511628211UL; } return h; }
+static long dl_find(dl_map *m, const char *k, long n, int insert) {
+    if (!m->cap || (insert && m->n * 2 >= m->cap)) {
+        long oc = m->cap, nc = oc ? oc * 2 : 1024; char **ok = m->keys; long long *ov = m->vals;
+        m->keys = dl_alloc((size_t)nc * sizeof(char *)); m->vals = dl_alloc((size_t)nc * sizeof(long long)); memset(m->keys, 0, (size_t)nc * sizeof(char *)); m->cap = nc; m->n = 0;
+        for (long i = 0; i < oc; i++) if (ok[i]) { long j = dl_find(m, ok[i], (long)strlen(ok[i]), 1); m->keys[j] = ok[i]; m->vals[j] = ov[i]; m->n++; }
+        free(ok); free(ov);
+    }
+    long i = (long)(dl_hash(k, n) & (unsigned long)(m->cap - 1));
+    for (;;) {
+        if (!m->keys[i]) return insert ? i : -1;
+        if ((long)strlen(m->keys[i]) == n && !memcmp(m->keys[i], k, (size_t)n)) return i;
+        i = (i + 1) & (m->cap - 1);
+    }
+}
+static long long dl_mapget(dl_map *m, const char *k, long long absent) { long i = m->cap ? dl_find(m, k, (long)strlen(k), 0) : -1; return i < 0 ? absent : m->vals[i]; }
+static void dl_mapset(dl_map *m, const char *k, long long v) {
+    long n = (long)strlen(k), i = dl_find(m, k, n, 1);
+    if (!m->keys[i]) { char *c = dl_alloc((size_t)n + 1); memcpy(c, k, (size_t)n + 1); m->keys[i] = c; m->n++; }
+    m->vals[i] = v;
+}
+
+/* ---- minimal JSON ---- */
+enum { DLJ_NULL, DLJ_BOOL, DLJ_NUM, DLJ_STR, DLJ_ARR, DLJ_OBJ };
+typedef struct dl_jv { int kind; long long num; char *str; struct dl_jv **items; char **keys; int n; } dl_jv;
+static const char *dl_jp; static long dl_jline;
+static void dl_jskip(void) { while (*dl_jp == ' ' || *dl_jp == '\t' || *dl_jp == '\n' || *dl_jp == '\r') { if (*dl_jp == '\n') dl_jline++; dl_jp++; } }
+static void dl_jfail(const char *w) { fprintf(stderr, "delta: JSON: %s near line %ld\n", w, dl_jline); exit(2); }
+static dl_jv *dl_jnew(int k) { dl_jv *v = dl_alloc(sizeof *v); memset(v, 0, sizeof *v); v->kind = k; return v; }
+static char *dl_jstring(void) {
+    char *b = 0; long n = 0, cap = 0;
+    if (*dl_jp != '"') dl_jfail("string expected"); dl_jp++;
+    for (;;) {
+        unsigned char c = (unsigned char)*dl_jp; unsigned v; int out[3], on = 0;
+        if (!c) dl_jfail("unterminated string");
+        if (c == '"') { dl_jp++; break; }
+        if (c == '\\') {
+            dl_jp++; c = (unsigned char)*dl_jp;
+            if (c == 'n') out[on++] = '\n'; else if (c == 't') out[on++] = '\t'; else if (c == 'r') out[on++] = '\r'; else if (c == 'b') out[on++] = '\b'; else if (c == 'f') out[on++] = '\f';
+            else if (c == '/' || c == '\\' || c == '"') out[on++] = c;
+            else if (c == 'u') {
+                v = 0;
+                for (int i = 1; i <= 4; i++) { int d = dl_jp[i]; int h = d >= '0' && d <= '9' ? d - '0' : d >= 'a' && d <= 'f' ? d - 'a' + 10 : d >= 'A' && d <= 'F' ? d - 'A' + 10 : -1; if (h < 0) dl_jfail("bad \\u escape"); v = v * 16 + (unsigned)h; }
+                dl_jp += 4;
+                if (v < 0x80) out[on++] = (int)v; else if (v < 0x800) { out[on++] = 0xC0 | (int)(v >> 6); out[on++] = 0x80 | (int)(v & 63); } else { out[on++] = 0xE0 | (int)(v >> 12); out[on++] = 0x80 | (int)((v >> 6) & 63); out[on++] = 0x80 | (int)(v & 63); }
+            } else dl_jfail("bad escape");
+            dl_jp++;
+        } else { out[on++] = c; dl_jp++; }
+        if (n + on + 1 > cap) { cap = cap ? cap * 2 : 32; b = dl_grow(b, (size_t)cap); }
+        for (int i = 0; i < on; i++) b[n++] = (char)out[i];
+    }
+    if (n + 1 > cap) b = dl_grow(b, (size_t)n + 1);
+    b[n] = 0; return b;
+}
+static dl_jv *dl_jparse(void) {
+    dl_jskip(); dl_jv *v;
+    if (*dl_jp == '{') {
+        v = dl_jnew(DLJ_OBJ); dl_jp++; dl_jskip(); int cap = 0; if (*dl_jp == '}') { dl_jp++; return v; }
+        for (;;) {
+            dl_jskip(); char *k = dl_jstring(); dl_jskip(); if (*dl_jp != ':') dl_jfail("colon expected"); dl_jp++; dl_jv *x = dl_jparse();
+            if (v->n == cap) { cap = cap ? cap * 2 : 8; v->items = dl_grow(v->items, (size_t)cap * sizeof(dl_jv *)); v->keys = dl_grow(v->keys, (size_t)cap * sizeof(char *)); }
+            v->keys[v->n] = k; v->items[v->n++] = x; dl_jskip();
+            if (*dl_jp == ',') { dl_jp++; continue; } if (*dl_jp == '}') { dl_jp++; return v; } dl_jfail("object syntax");
+        }
+    }
+    if (*dl_jp == '[') {
+        v = dl_jnew(DLJ_ARR); dl_jp++; dl_jskip(); int cap = 0; if (*dl_jp == ']') { dl_jp++; return v; }
+        for (;;) {
+            dl_jv *x = dl_jparse(); if (v->n == cap) { cap = cap ? cap * 2 : 8; v->items = dl_grow(v->items, (size_t)cap * sizeof(dl_jv *)); } v->items[v->n++] = x; dl_jskip();
+            if (*dl_jp == ',') { dl_jp++; continue; } if (*dl_jp == ']') { dl_jp++; return v; } dl_jfail("array syntax");
+        }
+    }
+    if (*dl_jp == '"') { v = dl_jnew(DLJ_STR); v->str = dl_jstring(); return v; }
+    if (*dl_jp == '-' || (*dl_jp >= '0' && *dl_jp <= '9')) { v = dl_jnew(DLJ_NUM); int neg = *dl_jp == '-'; if (neg) dl_jp++; long long n = 0; while (*dl_jp >= '0' && *dl_jp <= '9') { n = n * 10 + (*dl_jp - '0'); dl_jp++; } if (*dl_jp == '.' || *dl_jp == 'e' || *dl_jp == 'E') dl_jfail("non-integer number"); v->num = neg ? -n : n; return v; }
+    if (!strncmp(dl_jp, "true", 4)) { dl_jp += 4; v = dl_jnew(DLJ_BOOL); v->num = 1; return v; }
+    if (!strncmp(dl_jp, "false", 5)) { dl_jp += 5; return dl_jnew(DLJ_BOOL); }
+    if (!strncmp(dl_jp, "null", 4)) { dl_jp += 4; return dl_jnew(DLJ_NULL); }
+    dl_jfail("value expected"); return 0;
+}
+static dl_jv *dl_jget(dl_jv *o, const char *k) { if (o->kind != DLJ_OBJ) return 0; for (int i = 0; i < o->n; i++) if (!strcmp(o->keys[i], k)) return o->items[i]; return 0; }
+
+/* ---- actions ---- */
+static int dl_opcode(const char *s) { for (int i = 0; i < DL_OP_N; i++) if (!strcmp(dl_opnames[i], s)) return i; fprintf(stderr, "delta: unknown action %s\n", s); exit(2); }
+static int dl_alucode(const char *s) { for (int i = 0; i < DL_ALU_N; i++) if (!strcmp(dl_alunames[i], s)) return i; fprintf(stderr, "delta: unknown ALU op %s\n", s); exit(2); }
+static const char *dl_jstr(dl_jv *a, int i) { if (i >= a->n || a->items[i]->kind != DLJ_STR) dl_die("action argument: string expected"); return a->items[i]->str; }
+static long long dl_jnum(dl_jv *a, int i) { if (i >= a->n || a->items[i]->kind != DLJ_NUM) dl_die("action argument: number expected"); return a->items[i]->num; }
+static int dl_regid(dl_delta *d, const char *s) {
+    dl_map *m = d->regs; if (!s) return 0;
+    long long id = dl_mapget(m, s, -1); if (id >= 0) return (int)id;
+    if ((d->nreg & (d->nreg + 1)) == 0) d->regnames = dl_grow(d->regnames, (size_t)(2 * d->nreg + 2) * sizeof(char *));
+    d->nreg++; d->regnames[d->nreg] = (char *)s; dl_mapset(m, s, d->nreg); return d->nreg;
+}
+static void dl_load_seq(dl_delta *d, dl_seq *q, dl_jv *arr) {
+    q->n = arr->n; q->a = dl_alloc((size_t)(arr->n ? arr->n : 1) * sizeof(dl_act));
+    for (int i = 0; i < arr->n; i++) {
+        dl_jv *a = arr->items[i]; dl_act *t = &q->a[i]; memset(t, 0, sizeof *t);
+        if (a->kind != DLJ_ARR || a->n < 1) dl_die("action shape"); t->op = dl_opcode(dl_jstr(a, 0));
+        switch (t->op) {
+        case DL_MARK: case DL_JUMP: case DL_RLD: case DL_OLEN: case DL_SETOT: case DL_XATTR: case DL_PUSH: case DL_INPUSH: case DL_INPUSHX: case DL_SBBLOB: case DL_SBFIND: case DL_BYTE: case DL_XLEN: case DL_DIVMOD10: case DL_SBINTERN: case DL_SBSAVE: case DL_REJECT: case DL_OUTW: case DL_SPAN: case DL_SPANT:
+            t->s1 = dl_jstr(a, 1); break;
+        case DL_OSEL: case DL_OUT: case DL_SBOUT: t->v = dl_jnum(a, 1); break;
+        case DL_LDI: case DL_ORES: t->s1 = dl_jstr(a, 1); t->v = dl_jnum(a, 2); break;
+        case DL_CMP: t->s1 = dl_jstr(a, 1); if (a->n > 2 && a->items[2]->kind == DLJ_NUM) { t->addr2 = 1; t->v = a->items[2]->num; } else t->s2 = dl_jstr(a, 2); break;
+        case DL_CMPI: t->s1 = dl_jstr(a, 1); t->v = dl_jnum(a, 2); break;
+        case DL_COPYW: case DL_C64: case DL_C64U: case DL_SPAN2: case DL_INPUSHXE: case DL_SBSPAN: case DL_BLEN: case DL_OCUT: t->s1 = dl_jstr(a, 1); t->s2 = dl_jstr(a, 2); break;
+        case DL_OFILL: t->s1 = dl_jstr(a, 1); t->s2 = dl_jstr(a, 2); t->v = dl_jnum(a, 3); break;
+        case DL_ALU: case DL_A64: t->alu = dl_alucode(dl_jstr(a, 1)); t->s1 = dl_jstr(a, 2); t->s2 = dl_jstr(a, 3); t->s3 = dl_jstr(a, 4); break;
+        case DL_ALUI: case DL_A64I: t->alu = dl_alucode(dl_jstr(a, 1)); t->s1 = dl_jstr(a, 2); t->s2 = dl_jstr(a, 3); t->v = dl_jnum(a, 4); break;
+        case DL_LDX: t->s1 = dl_jstr(a, 1); t->s2 = dl_jstr(a, 2); t->v = dl_jnum(a, 3); break;
+        case DL_STX: t->s1 = dl_jstr(a, 1); t->v = dl_jnum(a, 2); t->s2 = dl_jstr(a, 3); break;
+        case DL_INTERN: case DL_BLOBSAVE: t->s1 = dl_jstr(a, 1); t->s2 = dl_jstr(a, 2); t->s3 = dl_jstr(a, 3); break;
+        default: break;   /* ADV COPYT COPY OLAST ODROP OCLR POP INPOP SBCLR SWAP ACCEPT */
+        }
+        if (t->op != DL_PUSH && t->op != DL_REJECT) { t->r1 = dl_regid(d, t->s1); t->r2 = dl_regid(d, t->s2); t->r3 = dl_regid(d, t->s3); }
+    }
+}
+int dl_state(dl_delta *d, const char *name) { dl_map *m = d->index; return (int)dl_mapget(m, name, -1); }
+const char *dl_regname(dl_delta *d, int id) { return id > 0 && id <= d->nreg ? d->regnames[id] : ""; }
+void dl_load(const char *path, dl_delta *d) {
+    FILE *f = fopen(path, "rb"); if (!f) { fprintf(stderr, "delta: cannot open %s\n", path); exit(2); }
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    char *text = dl_alloc((size_t)n + 1); if (fread(text, 1, (size_t)n, f) != (size_t)n) dl_die("read"); text[n] = 0; fclose(f);
+    memset(d, 0, sizeof *d);
+    dl_map *states_ix = dl_alloc(sizeof *states_ix); memset(states_ix, 0, sizeof *states_ix);
+    dl_map *reg_ix = dl_alloc(sizeof *reg_ix); memset(reg_ix, 0, sizeof *reg_ix); d->regs = reg_ix; d->index = states_ix;
+    dl_jp = text; dl_jline = 1; dl_jv *root = dl_jparse();
+    dl_jv *start = dl_jget(root, "start"), *states = dl_jget(root, "states"), *seqs = dl_jget(root, "seqs");
+    if (!start || !states || !seqs || start->kind != DLJ_STR || states->kind != DLJ_OBJ || seqs->kind != DLJ_ARR) dl_die("delta shape: start/states/seqs");
+    d->nseq = seqs->n; d->seqs = dl_alloc((size_t)(d->nseq ? d->nseq : 1) * sizeof(dl_seq));
+    for (int i = 0; i < d->nseq; i++) dl_load_seq(d, &d->seqs[i], seqs->items[i]);
+    d->ns = states->n; d->s = dl_alloc((size_t)(d->ns ? d->ns : 1) * sizeof(dl_state)); memset(d->s, 0, (size_t)(d->ns ? d->ns : 1) * sizeof(dl_state));
+    for (int i = 0; i < d->ns; i++) { d->s[i].name = states->keys[i]; dl_mapset(states_ix, d->s[i].name, i); }
+    for (int i = 0; i < d->ns; i++) {
+        dl_jv *st = states->items[i]; if (st->kind != DLJ_ARR || st->n != 2 || st->items[0]->kind != DLJ_STR || st->items[1]->kind != DLJ_OBJ) dl_die("state shape");
+        const char *m = st->items[0]->str; dl_jv *row = st->items[1]; d->s[i].mode = m[0];
+        if (m[0] != 'b' && m[0] != 'r' && m[0] != 't') dl_die("state mode");
+        if (m[0] == 't') { d->s[i].tn = row->n; d->s[i].tkeys = row->keys; d->s[i].tedges = dl_alloc((size_t)(row->n ? row->n : 1) * sizeof(dl_edge)); }
+        else { d->s[i].byte = dl_alloc(257 * sizeof(dl_edge)); for (int k = 0; k < 257; k++) { d->s[i].byte[k].next = -1; d->s[i].byte[k].seq = 0; } }
+        for (int k = 0; k < row->n; k++) {
+            dl_jv *e = row->items[k]; if (e->kind != DLJ_ARR || e->n != 2 || e->items[0]->kind != DLJ_STR || e->items[1]->kind != DLJ_NUM) dl_die("edge shape");
+            long long ni = dl_mapget(states_ix, e->items[0]->str, -1); if (ni < 0) { fprintf(stderr, "delta: edge from %s to unknown state %s\n", d->s[i].name, e->items[0]->str); exit(2); }
+            long long si = e->items[1]->num; if (si < 0 || si >= d->nseq) dl_die("sequence index");
+            dl_edge ed; ed.next = (int)ni; ed.seq = &d->seqs[si];
+            if (m[0] == 't') d->s[i].tedges[k] = ed;
+            else { char *end; long key = strtol(row->keys[k], &end, 10); if (*end || key < 0 || key > 256) dl_die("byte/result key"); d->s[i].byte[key] = ed; }
+        }
+    }
+    long long si = dl_mapget(states_ix, start->str, -1); if (si < 0) dl_die("start state"); d->start = (int)si;
+    free(text);
+}
