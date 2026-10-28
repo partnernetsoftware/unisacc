@@ -1,0 +1,420 @@
+/* module route. Route selection only.
+   No compiler global and no module state. Borrowed strings are not
+   written. Caller-owned outputs are written only on success. These
+   functions do not allocate, do not call exit, and do not print.
+   There is no use pragma. Link selection, tapelink tables,
+   cxd_default_target, clierror, and bind checks stay in the driver.
+
+   Call order that keeps the driver's first error:
+     cxt_object, then the driver's link, then cxt_decide, then the
+     driver's bind checks, then cxt_text.
+   cxt_decide does not build route text and does not return
+   "target name too long". Only cxt_text does. A long target and an
+   illegal bind therefore still report the bind error first.
+
+   Transitional C callers paste these types and prototypes. Lengths
+   are long. Pointers are 8 bytes on LP64 and LLP64. Ints are 4.
+   CxtIn is twelve ints then four pointers: mode at 0, exec_restart
+   at 44, target at 48, native at 56, linked_target at 64, only_target
+   at 72. sizeof CxtIn is 80. CxtOut is four pointers: target at 0,
+   mode at 8, runit at 16, clear_deps at 24. sizeof CxtOut is 32.
+   There is no target buffer and no target_cap. The route buffer is
+   not in CxtOut. cxt_text borrows it.
+
+     int cxt_object(int mode, int sawc, int sawS, int funit,
+                    const char *target, const char *out, int src_object,
+                    int *mode_out, int *need_default_name,
+                    int *obj_out, int *asm_out,
+                    char *why, long whycap);
+     int cxt_decide(const CxtIn *in, CxtOut *out, char *why, long whycap);
+     int cxt_text(const char *target, int mode, int nsources, int warnings,
+                  int level, char *route, long routecap,
+                  char *why, long whycap);
+
+   A flag is true when it is not zero. A null target or out means the
+   option is absent. An empty string is present. src_object,
+   src_tape, and src_tapebin are the caller's existing path classes.
+
+   cxt_object runs before link_objects. It does not invent a file name.
+     0  *mode_out is 5 when an object is requested, otherwise the
+        incoming mode. *need_default_name is 1 only when an object is
+        requested and out is null. why is cleared when usable.
+     1  why is a clierror phrase with no prefix and no newline:
+        "object output (-c -b) for this target is not on the product route yet (Linux targets are); the reference compiler writes Mach-O and COFF objects"
+        "-funit needs -c -b os/arch (a unit object)"
+     4  why is this whole line, including the newline. The substituted
+        text is the borrowed target:
+        "unisacc: error: assembly text (-S -b ... -o FILE.s) is written for Linux targets in this version (Mach-O and COFF text: 0.0.19); the target was %s\n"
+     5  mode_out, need_default_name, obj_out, or asm_out is null.
+        why receives "bad argument". This is tested before any phrase,
+        so a null output wins over the assembly line.
+   On success, *obj_out and *asm_out are exactly 0 or 1, not the
+   incoming sawc or sawS value. *obj_out is 1 when an object is
+   requested. *asm_out is 1 when assembly text is requested. The
+   driver uses obj_out later for the object resource and the package
+   route, and asm_out later for the bind diagnostic and assembly
+   text. It must not recompute those flags or infer them from mode.
+   The object request is sawc with a target and a source that is not
+   an object, or an assembly output. Assembly output is sawS, a
+   target, a source that is not an object, and an out longer than 2
+   whose last two bytes are ".s". ".s" and ".S" are not assembly
+   output. Checks keep the driver order: the assembly line, then the
+   non-Linux object phrase unless funit is set, then the funit phrase.
+   A non-Linux target may still request an object when funit is set.
+   "lnx/" is the Linux prefix. On code 1, 4, or 5, *mode_out,
+   *need_default_name, *obj_out, and *asm_out stay unchanged.
+
+   cxt_decide runs after the driver has linked, if it linked, and
+   has set nsources to 1. The mix-of-sources phrase stays in the
+   driver. It chooses the target and the final mode. It does not
+   write a route and it has no route buffer.
+     0  *target receives a borrowed pointer, not a copy. *mode,
+        *runit, and *clear_deps receive the values below. why is
+        cleared when usable. The pointer is one of target,
+        linked_target, only_target, native, or the static literal
+        "lnx/x86_64". The caller keeps those four inputs alive and
+        unchanged until cxt_text returns, and does not write through
+        the returned pointer. A snapshot of a moving link global
+        stays in the driver; this module does not copy it.
+     1  why is a clierror phrase with no prefix and no newline:
+        "tape needs one source and a tape/image/run output"
+        "--tapebin needs -S or -c"
+        "multiple preprocessing outputs not migrated"
+        "target is outside this single-target compiler"
+     4  why is one whole line, including the newline. Both substituted
+        texts are linked_target, not native:
+        "unisacc: error: these objects were compiled for another target; running needs this machine's: %s\n"
+        "unisacc: error: -b differs from the target these objects were compiled for: %s\n"
+     5  a null in or out; a null target, mode, runit, or
+        clear_deps; a null native; a negative nsources; linking
+        without linked_target; or single without only_target.
+        why receives "bad argument". Length is not a decide error.
+   On code 1, 4, or 5, *target, *mode, *runit, and *clear_deps
+   stay unchanged. in is not written. A long target still returns 0
+   from decide and the same pointer. Only cxt_text can reject it.
+   Order, using the incoming mode and runit until the later steps:
+   the two link lines; if linking and there is no target and runit is
+   false, the target becomes linked_target; a tape, tapebin, or link
+   input refuses nsources other than 1 and modes 1 and 4; emitbin
+   refuses a mode other than 2 or any true runit; nsources above 1
+   refuses modes 1 and 4. Then single replaces the default: an
+   existing target that differs from only_target is refused, otherwise
+   the target is only_target, and a true runit sets mode to 3. Without
+   single, a null target becomes "lnx/x86_64" when mode is not 0 and
+   native when mode is 0; a true runit then sets the target to native
+   and mode to 3. exec_restart with a true incoming runit then sets
+   runit to 0 and mode to 0, and sets *clear_deps to 1 unless deponly
+   is true. Otherwise *clear_deps is 0 and *runit keeps the incoming
+   value. Mode 4 does not replace an explicit target. A null target
+   with mode 4 still uses the nonzero-mode default "lnx/x86_64".
+   The driver passes that chosen target to cli/target. It must not
+   force lnx/x86_64 only because the mode is 4.
+
+   cxt_text runs after the driver's bind checks. Pass it the target
+   and mode that cxt_decide wrote, and the same nsources, warnings,
+   and level the driver passed to cxt_decide.
+     0  route receives the text and a NUL. why is cleared when usable.
+     1  why is "target name too long" when the text and its NUL do
+        not fit routecap. route stays unchanged.
+     5  target or route is null, routecap <= 0, or nsources < 0.
+        why receives "bad argument". route stays unchanged.
+   Mode 4 is "tokens". Mode 1 is target + "/pp". Any other mode is
+   target + "/" + optional "warn/" + optional "multi/" + kind + "/O"
+   + the decimal level. warn/ is present when warnings is true and
+   the mode passed in is not 1 or 4. multi/ is present when
+   nsources > 1. kind is "object" for 5, "run" for 3, "tape" for 2,
+   and "image" otherwise. level is printed in full, including a
+   minus sign. It is not clamped. A short positive whycap truncates
+   and still writes a NUL. A null why or a whycap <= 0 is not written.
+*/
+#pragma unisa module route
+
+typedef struct {
+    int mode;
+    int level;
+    int warnings;
+    int nsources;
+    int runit;
+    int emitbin;
+    int deponly;
+    int src_tape;
+    int src_tapebin;
+    int linking;
+    int single;
+    int exec_restart;
+    const char *target;
+    const char *native;
+    const char *linked_target;
+    const char *only_target;
+} CxtIn;
+
+typedef struct {
+    const char **target;
+    int *mode;
+    int *runit;
+    int *clear_deps;
+} CxtOut;
+
+static void cxt_setwhy(char *why, long cap, const char *msg) {
+    long i;
+    if (!why || cap <= 0) return;
+    i = 0;
+    if (msg) while (msg[i] && i + 1 < cap) { why[i] = msg[i]; i = i + 1; }
+    why[i] = 0;
+}
+
+static int cxt_fail(int rc, const char *msg, char *why, long whycap) {
+    cxt_setwhy(why, whycap, msg);
+    return rc;
+}
+
+static int cxt_ok(char *why, long whycap) {
+    cxt_setwhy(why, whycap, 0);
+    return 0;
+}
+
+static int cxt_line(const char *pre, const char *mid, const char *suf, char *why, long cap) {
+    const char *p[3];
+    int s;
+    long at;
+    long i;
+    if (!why || cap <= 0) return 4;
+    p[0] = pre;
+    p[1] = mid;
+    p[2] = suf;
+    at = 0;
+    s = 0;
+    while (s < 3) {
+        i = 0;
+        while (p[s][i]) {
+            if (at + 1 < cap) why[at] = p[s][i];
+            at = at + 1;
+            i = i + 1;
+        }
+        s = s + 1;
+    }
+    if (at < cap) why[at] = 0;
+    else why[cap - 1] = 0;
+    return 4;
+}
+
+static long cxt_len(const char *s) {
+    long n;
+    n = 0;
+    while (s[n]) n = n + 1;
+    return n;
+}
+
+static int cxt_eq(const char *a, const char *b) {
+    long i;
+    i = 0;
+    while (a[i] && a[i] == b[i]) i = i + 1;
+    return a[i] == b[i];
+}
+
+static int cxt_linux(const char *s) {
+    if (!s || !s[0] || !s[1] || !s[2] || !s[3]) return 0;
+    return s[0] == 'l' && s[1] == 'n' && s[2] == 'x' && s[3] == '/';
+}
+
+static int cxt_asmout(const char *s) {
+    long n;
+    if (!s) return 0;
+    n = cxt_len(s);
+    if (n <= 2) return 0;
+    return s[n - 2] == '.' && s[n - 1] == 's';
+}
+
+static int cxt_on(int v) { return v != 0; }
+
+static int cxt_sum(long a, long b, long *out) {
+    unsigned long long s;
+    unsigned long long lim;
+    if (a < 0 || b < 0) return 0;
+    lim = 1;
+    lim = lim << (sizeof(long) * 8 - 1);
+    s = (unsigned long long)a + (unsigned long long)b;
+    if (s >= lim) return 0;
+    *out = (long)s;
+    return 1;
+}
+
+static long cxt_ilen(int v) {
+    unsigned int u;
+    long n;
+    n = 1;
+    if (v < 0) u = (unsigned int)(-(v + 1)) + 1u;
+    else u = (unsigned int)v;
+    while (u > 9u) {
+        u = u / 10u;
+        n = n + 1;
+    }
+    if (v < 0) n = n + 1;
+    return n;
+}
+
+static void cxt_app(char *dst, long *at, const char *s) {
+    long i;
+    i = 0;
+    while (s[i]) { dst[*at] = s[i]; *at = *at + 1; i = i + 1; }
+}
+
+static void cxt_app_i(char *dst, long *at, int v) {
+    char dig[16];
+    unsigned int u;
+    int n;
+    n = 0;
+    if (v < 0) {
+        u = (unsigned int)(-(v + 1)) + 1u;
+    } else {
+        u = (unsigned int)v;
+    }
+    do {
+        dig[n] = (char)(48 + (int)(u % 10u));
+        n = n + 1;
+        u = u / 10u;
+    } while (u);
+    if (v < 0) { dst[*at] = '-'; *at = *at + 1; }
+    while (n > 0) { n = n - 1; dst[*at] = dig[n]; *at = *at + 1; }
+}
+
+static const char *cxt_kind(int mode) {
+    if (mode == 5) return "object";
+    if (mode == 3) return "run";
+    if (mode == 2) return "tape";
+    return "image";
+}
+
+static int cxt_route_len(const char *tgt, int mode, int nsources, int warn, int level, long *out) {
+    long n;
+    long d;
+    if (mode == 4) { *out = 6; return 1; }
+    n = cxt_len(tgt);
+    if (mode == 1) return cxt_sum(n, 3, out);
+    if (!cxt_sum(n, 1, &n)) return 0;
+    if (warn && !cxt_sum(n, 5, &n)) return 0;
+    if (nsources > 1 && !cxt_sum(n, 6, &n)) return 0;
+    d = cxt_len(cxt_kind(mode));
+    if (!cxt_sum(n, d, &n)) return 0;
+    if (!cxt_sum(n, 2, &n)) return 0;
+    d = cxt_ilen(level);
+    return cxt_sum(n, d, out);
+}
+
+static void cxt_route_write(char *dst, const char *tgt, int mode, int nsources, int warn, int level) {
+    long at;
+    at = 0;
+    if (mode == 4) { cxt_app(dst, &at, "tokens"); dst[at] = 0; return; }
+    cxt_app(dst, &at, tgt);
+    if (mode == 1) { cxt_app(dst, &at, "/pp"); dst[at] = 0; return; }
+    cxt_app(dst, &at, "/");
+    if (warn) cxt_app(dst, &at, "warn/");
+    if (nsources > 1) cxt_app(dst, &at, "multi/");
+    cxt_app(dst, &at, cxt_kind(mode));
+    cxt_app(dst, &at, "/O");
+    cxt_app_i(dst, &at, level);
+    dst[at] = 0;
+}
+
+int cxt_object(int mode, int sawc, int sawS, int funit,
+               const char *target, const char *out, int src_object,
+               int *mode_out, int *need_default_name,
+               int *obj_out, int *asm_out,
+               char *why, long whycap) {
+    int asmf;
+    int obj;
+    if (!mode_out || !need_default_name || !obj_out || !asm_out) {
+        return cxt_fail(5, "bad argument", why, whycap);
+    }
+    asmf = cxt_on(sawS) && target && !cxt_on(src_object) && cxt_asmout(out);
+    if (asmf && !cxt_linux(target)) {
+        return cxt_line("unisacc: error: assembly text (-S -b ... -o FILE.s) is written for Linux targets in this version (Mach-O and COFF text: 0.0.19); the target was ",
+                        target, "\n", why, whycap);
+    }
+    obj = (cxt_on(sawc) && target && !cxt_on(src_object)) || asmf;
+    if (obj && !cxt_linux(target) && !cxt_on(funit)) {
+        return cxt_fail(1, "object output (-c -b) for this target is not on the product route yet (Linux targets are); the reference compiler writes Mach-O and COFF objects", why, whycap);
+    }
+    if (cxt_on(funit) && !obj) return cxt_fail(1, "-funit needs -c -b os/arch (a unit object)", why, whycap);
+    if (obj) *mode_out = 5;
+    else *mode_out = mode;
+    *need_default_name = obj && !out;
+    *obj_out = obj ? 1 : 0;
+    *asm_out = asmf ? 1 : 0;
+    return cxt_ok(why, whycap);
+}
+
+int cxt_decide(const CxtIn *in, CxtOut *out, char *why, long whycap) {
+    const char *tgt;
+    int mode2;
+    int runit2;
+    int clear2;
+    if (!in || !out || !out->target || !out->mode || !out->runit || !out->clear_deps) {
+        return cxt_fail(5, "bad argument", why, whycap);
+    }
+    if (!in->native || in->nsources < 0) {
+        return cxt_fail(5, "bad argument", why, whycap);
+    }
+    if (cxt_on(in->linking) && !in->linked_target) return cxt_fail(5, "bad argument", why, whycap);
+    if (cxt_on(in->single) && !in->only_target) return cxt_fail(5, "bad argument", why, whycap);
+    tgt = in->target;
+    if (cxt_on(in->linking)) {
+        if (cxt_on(in->runit) && !cxt_eq(in->linked_target, in->native)) {
+            return cxt_line("unisacc: error: these objects were compiled for another target; running needs this machine's: ",
+                            in->linked_target, "\n", why, whycap);
+        }
+        if (in->target && !cxt_eq(in->target, in->linked_target)) {
+            return cxt_line("unisacc: error: -b differs from the target these objects were compiled for: ",
+                            in->linked_target, "\n", why, whycap);
+        }
+        if (!in->target && !cxt_on(in->runit)) tgt = in->linked_target;
+    }
+    if ((cxt_on(in->src_tape) || cxt_on(in->src_tapebin) || cxt_on(in->linking)) &&
+        (in->nsources != 1 || in->mode == 1 || in->mode == 4)) {
+        return cxt_fail(1, "tape needs one source and a tape/image/run output", why, whycap);
+    }
+    if (cxt_on(in->emitbin) && (in->mode != 2 || cxt_on(in->runit))) {
+        return cxt_fail(1, "--tapebin needs -S or -c", why, whycap);
+    }
+    if (in->nsources > 1 && (in->mode == 1 || in->mode == 4)) {
+        return cxt_fail(1, "multiple preprocessing outputs not migrated", why, whycap);
+    }
+    mode2 = in->mode;
+    runit2 = in->runit;
+    if (cxt_on(in->single)) {
+        if (tgt && !cxt_eq(tgt, in->only_target)) {
+            return cxt_fail(1, "target is outside this single-target compiler", why, whycap);
+        }
+        tgt = in->only_target;
+        if (cxt_on(runit2)) mode2 = 3;
+    } else {
+        if (!tgt) tgt = mode2 ? "lnx/x86_64" : in->native;
+        if (cxt_on(runit2)) { tgt = in->native; mode2 = 3; }
+    }
+    clear2 = 0;
+    if (cxt_on(in->exec_restart) && cxt_on(runit2)) {
+        runit2 = 0;
+        mode2 = 0;
+        if (!cxt_on(in->deponly)) clear2 = 1;
+    }
+    *out->target = tgt;
+    *out->mode = mode2;
+    *out->runit = runit2;
+    *out->clear_deps = clear2;
+    return cxt_ok(why, whycap);
+}
+
+int cxt_text(const char *target, int mode, int nsources, int warnings, int level,
+             char *route, long routecap, char *why, long whycap) {
+    int warn;
+    long rlen;
+    if (!target || !route || routecap <= 0 || nsources < 0) {
+        return cxt_fail(5, "bad argument", why, whycap);
+    }
+    warn = cxt_on(warnings) && mode != 1 && mode != 4;
+    if (!cxt_route_len(target, mode, nsources, warn, level, &rlen) || rlen >= routecap) {
+        return cxt_fail(1, "target name too long", why, whycap);
+    }
+    cxt_route_write(route, target, mode, nsources, warn, level);
+    return cxt_ok(why, whycap);
+}

@@ -327,6 +327,15 @@ static int product_as(int argc,char **argv) {
     int bad=fwrite(asmbuf.b,1,asmbuf.n,f)!=(size_t)asmbuf.n; bad|=fclose(f)!=0;
     return bad;
 }
+typedef struct {
+    int mode,level,warnings,nsources,runit,emitbin,deponly,src_tape,src_tapebin,linking,single,exec_restart;
+    const char *target,*native,*linked_target,*only_target;
+} CxtIn;
+typedef struct { const char **target; int *mode,*runit,*clear_deps; } CxtOut;
+int cxt_object(int,int,int,int,const char *,const char *,int,int *,int *,int *,int *,char *,long);
+int cxt_decide(const CxtIn *,CxtOut *,char *,long);
+int cxt_text(const char *,int,int,int,int,char *,long,char *,long);
+static int cxt_error(int rc,const char *why) { if(rc==4){fputs(why,stderr);return 1;} return clierror(why); }
 static int take_unit(char *t,long tl,int u) {
     if (u==0) { strncpy(tl_first,tl_target,31); tl_first[31]=0; }
     else if (strcmp(tl_first,tl_target)) { fprintf(stderr,"unisacc: error: the objects were compiled for different targets (%s, %s)\n",tl_first,tl_target); return 1; }
@@ -630,18 +639,14 @@ int main(int argc, char **argv) {
     /* -c with -b: object routes carry \0cli/object and \0cli/funit.
        Non-Linux objects are unit containers; the selected package must
        supply the requested route before the driver accepts them. */
-    int objwant = sawc && target && !object_path(src);
-    /* -S -b lnx/ARCH: the object -c -b writes, as GNU assembly; bare -S stays the tape */
-    /* ...and only when -o names a .s file; `-S -b T` alone stays the target's tape */
-    int asmwant = sawS && target && !object_path(src) && out && strlen(out)>2 && !strcmp(out+strlen(out)-2,".s");
-    if (asmwant) {
-        if (strncmp(target,"lnx/",4)) { fprintf(stderr,"unisacc: error: assembly text (-S -b ... -o FILE.s) is written for Linux targets in this version (Mach-O and COFF text: 0.0.19); the target was %s\n",target); return 1; }
-        objwant=1;
-    }
-    if (objwant && strncmp(target,"lnx/",4) && !funit) return clierror("object output (-c -b) for this target is not on the product route yet (Linux targets are); the reference compiler writes Mach-O and COFF objects");
-    if (funit && !objwant) return clierror("-funit needs -c -b os/arch (a unit object)");
+    int objwant=0,asmwant=0,need_object_name=0; char route_reason[8192];
+    char *object_reason=route_reason; size_t object_reason_cap=sizeof route_reason;
+    if(target && strlen(target)>sizeof route_reason-512) { object_reason_cap=strlen(target)+512; object_reason=xrealloc(0,object_reason_cap); }
+    int route_rc=cxt_object(mode,sawc,sawS,funit,target,out,object_path(src),&mode,&need_object_name,&objwant,&asmwant,object_reason,(long)object_reason_cap);
+    if(route_rc) { int ret=cxt_error(route_rc,object_reason); if(object_reason!=route_reason)free(object_reason); return ret; }
+    if(object_reason!=route_reason)free(object_reason);
     char default_object_target[520], deps_reason[128];
-    if (objwant) { mode = 5; if (!out) {
+    if (objwant) { if (need_object_name) {
         if (cxd_default_target(src,default_object_target,sizeof default_object_target,deps_reason,sizeof deps_reason)) return clierror(deps_reason);
         out = default_object_target;
     } }
@@ -651,29 +656,23 @@ int main(int argc, char **argv) {
     if (linking) {
         for (int j=0;j<nsources;j++) if (!object_path(sources[j])) return clierror("mix of objects and sources: compile each source with -c -b os/arch -funit first");
         if (link_objects(sources,nsources,&linked)) return 1;
-        if (runit && strcmp(tl_first,NATIVE_OS "/" NATIVE_ARCH)) { fprintf(stderr,"unisacc: error: these objects were compiled for another target; running needs this machine's: %s\n",tl_first); return 1; }
-        if (target && strcmp(target,tl_first)) { fprintf(stderr,"unisacc: error: -b differs from the target these objects were compiled for: %s\n",tl_first); return 1; }
-        if (!target && !runit) { static char tbuf[32]; strcpy(tbuf,tl_first); target=tbuf; }
         nsources=1;
     }
     int isbin=tapebin_path(src), istape=tape_path(src)||linking, tape_input=isbin||istape;
-    if(tape_input&&(nsources!=1||mode==1||mode==4))return clierror("tape needs one source and a tape/image/run output");
-    if(emitbin&&(mode!=2||runit))return clierror("--tapebin needs -S or -c");
-    if (nsources>1 && (mode==1 || mode==4)) return clierror("multiple preprocessing outputs not migrated");
+    int clear_deps=0, single=0, restart=0; const char *only_target=0;
 #ifdef UNISA_SINGLE_TARGET
-    if (target && strcmp(target,UNISA_SINGLE_TARGET))
-        return clierror("target is outside this single-target compiler");
-    target = UNISA_SINGLE_TARGET;
-    if (runit) mode=3;
-#else
-    if (!target) target = mode ? "lnx/x86_64" : NATIVE_OS "/" NATIVE_ARCH;
-    if (runit) { target=NATIVE_OS "/" NATIVE_ARCH; mode=3; }
+    single=1; only_target=UNISA_SINGLE_TARGET;
 #endif
 #ifdef __linux__
     /* forward_exec, on the stub restart: the same program as an image; no file is written, as in a run */
     int execrun=fwd_exec && runit;
-    if (execrun) { runit=0; mode=0; if (!deponly) deps=0; }
+    restart=fwd_exec;
 #endif
+    CxtIn route_in={mode,level,warnings,nsources,runit,emitbin,deponly,istape,isbin,linking,single,restart,target,NATIVE_OS "/" NATIVE_ARCH,linking?tl_first:0,only_target};
+    CxtOut route_out={&target,&mode,&runit,&clear_deps};
+    route_rc=cxt_decide(&route_in,&route_out,route_reason,sizeof route_reason);
+    if(route_rc)return cxt_error(route_rc,route_reason);
+    if(clear_deps)deps=0;
     unsigned host_target=host_target_id(target),host_filter=15;
     if((host_symbols_path||host_provider_path)&&(!host_target||mode==1||mode==4||mode==5||emitbin||asmwant))return clierror("bind: diagnostic option mode/target not supported");
     if(host_symbols_path&&(runit||!strcmp(host_symbols_path,"-")))return clierror("bind: --emit-host-symbols cannot be used with -run or stdout");
@@ -696,15 +695,9 @@ int main(int argc, char **argv) {
         }
     }
     if(host_provider_path&&host_filter_file(host_provider_path,host_target,&host_filter))return 1;
-    char route[96];
-    int n = mode == 4 ? snprintf(route,sizeof route,"tokens") :
-        mode == 1 ? snprintf(route,sizeof route,"%s/pp",target) :
-        snprintf(route,sizeof route,"%s/%s%s/O%d",target,nsources>1 ? "multi/" : "",mode==5 ? "object" : mode==3 ? "run" : mode==2 ? "tape" : "image",level);
-    if (n < 0 || n >= (int)sizeof route) return clierror("target name too long");
-    if (warnings && mode!=1 && mode!=4) {
-        n=snprintf(route,sizeof route,"%s/warn/%s%s/O%d",target,nsources>1 ? "multi/" : "",mode==5 ? "object" : mode==3 ? "run" : mode==2 ? "tape" : "image",level);
-        if (n<0 || n>=(int)sizeof route) return clierror("target name too long");
-    }
+    char route[96]; int n;
+    route_rc=cxt_text(target,mode,nsources,warnings,level,route,sizeof route,route_reason,sizeof route_reason);
+    if(route_rc)return cxt_error(route_rc,route_reason);
     if (!pkg) pkg = getenv("UNISA_CONTAINER");
     rr_pkg_path = pkg && strcmp(pkg, argv[0]) ? pkg : 0;
     rr_special_input = !!(host_symbols_path || host_provider_path || nfwd_libs);

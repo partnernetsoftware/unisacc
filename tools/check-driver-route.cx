@@ -1,0 +1,540 @@
+/* Independent check for module route. Not a product driver.
+   tools/driver -> ../cx/driver. This unit consumes that module.
+   Run one source: sh ./unisacc.com tools/check-driver-route.cx
+   Locks CxtIn at 80 bytes and CxtOut at 32. The chosen target is
+   a borrowed pointer. cxt_object returns obj and asm as 0 or 1.
+   cxt_decide does not build route text.
+   cxt_text is the only "target name too long" entry. Failure leaves
+   every output unchanged. Does not run a product or a host bootstrap. */
+#pragma unisa use driver.route
+
+static int g_fail;
+static CxtIn g_in;
+
+static void note(int ok, const char *name) {
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", name);
+    if (!ok) g_fail = g_fail + 1;
+}
+
+static unsigned long long at(const void *p) { return (unsigned long long)p; }
+
+static void abi(void) {
+    CxtIn in;
+    CxtOut out;
+    unsigned long long b;
+    b = at(&in);
+    note(sizeof(CxtIn) == 80, "abi-in-size");
+    note(at(&in.mode) - b == 0, "abi-in-mode");
+    note(at(&in.exec_restart) - b == 44, "abi-in-exec");
+    note(at(&in.target) - b == 48, "abi-in-target");
+    note(at(&in.native) - b == 56, "abi-in-native");
+    note(at(&in.linked_target) - b == 64, "abi-in-linked");
+    note(at(&in.only_target) - b == 72, "abi-in-only");
+    b = at(&out);
+    note(sizeof(CxtOut) == 32, "abi-out-size");
+    note(at(&out.target) - b == 0, "abi-out-target");
+    note(at(&out.mode) - b == 8, "abi-out-mode");
+    note(at(&out.runit) - b == 16, "abi-out-runit");
+    note(at(&out.clear_deps) - b == 24, "abi-out-clear");
+}
+
+static void obj_ok(int mode, int sawc, int sawS, int funit, const char *target, const char *out, int src_object, int want_mode, int want_need, int want_obj, int want_asm, const char *name) {
+    int mode_out;
+    int need;
+    int objf;
+    int asmf;
+    int rc;
+    char why[8];
+    memcpy(why, "OLD", 4);
+    mode_out = -1;
+    need = -1;
+    objf = -1;
+    asmf = -1;
+    rc = cxt_object(mode, sawc, sawS, funit, target, out, src_object, &mode_out, &need, &objf, &asmf, why, (long)sizeof why);
+    note(rc == 0 && mode_out == want_mode && need == want_need && objf == want_obj && asmf == want_asm && why[0] == 0, name);
+}
+
+static void obj_keep(int mode, int sawc, int sawS, int funit, const char *target, const char *out, int src_object, int want, const char *phrase, const char *name) {
+    int mode_out;
+    int need;
+    int objf;
+    int asmf;
+    int rc;
+    char why[320];
+    mode_out = 12345;
+    need = 6789;
+    objf = 2468;
+    asmf = 1357;
+    memcpy(why, "KEEP", 5);
+    rc = cxt_object(mode, sawc, sawS, funit, target, out, src_object, &mode_out, &need, &objf, &asmf, why, (long)sizeof why);
+    note(rc == want && mode_out == 12345 && need == 6789 && objf == 2468 && asmf == 1357 && !strcmp(why, phrase), name);
+}
+
+static void base(void) {
+    memset(&g_in, 0, sizeof g_in);
+    g_in.nsources = 1;
+    g_in.native = "lnx/x86_64";
+}
+
+static int decide(const char **tout, int *mode, int *runit, int *clear, char *why, long wcap) {
+    CxtOut o;
+    o.target = tout;
+    o.mode = mode;
+    o.runit = runit;
+    o.clear_deps = clear;
+    return cxt_decide(&g_in, &o, why, wcap);
+}
+
+static void fin_ok(const char *route, const char *target, const char *same, int mode, int runit, int clear, const char *name) {
+    char r[160];
+    char why[8];
+    const char *tp;
+    int mo;
+    int ru;
+    int cl;
+    int rc;
+    int tr;
+    CxtIn saved;
+    memset(r, 0xA5, sizeof r);
+    memcpy(why, "OLD", 4);
+    tp = "UNSET";
+    mo = -7;
+    ru = -7;
+    cl = -7;
+    saved = g_in;
+    rc = decide(&tp, &mo, &ru, &cl, why, (long)sizeof why);
+    tr = 1;
+    if (rc == 0) tr = cxt_text(tp, mo, g_in.nsources, g_in.warnings, g_in.level, r, 160, why, (long)sizeof why);
+    note(rc == 0 && tr == 0 && tp && !strcmp(tp, target) && (!same || tp == same) && !strcmp(r, route) && mo == mode && ru == runit && cl == clear && why[0] == 0 && !memcmp(&g_in, &saved, sizeof g_in), name);
+}
+
+static void fin_keep(int want, const char *phrase, const char *name) {
+    char why[320];
+    const char *tp;
+    const char *held;
+    int mo;
+    int ru;
+    int cl;
+    int rc;
+    held = "HELD";
+    tp = held;
+    memcpy(why, "KEEP", 5);
+    mo = 12345;
+    ru = 6789;
+    cl = 1357;
+    rc = decide(&tp, &mo, &ru, &cl, why, (long)sizeof why);
+    note(rc == want && tp == held && mo == 12345 && ru == 6789 && cl == 1357 && !strcmp(why, phrase), name);
+}
+
+static void objects(void) {
+    char buf[8];
+    char why[64];
+    int mode_out;
+    int need;
+    int objf;
+    int asmf;
+    int rc;
+    mode_out = 12345;
+    need = 6789;
+    objf = 2468;
+    asmf = 1357;
+    memcpy(why, "KEEP", 5);
+    rc = cxt_object(0, 0, 0, 0, 0, 0, 0, 0, &need, &objf, &asmf, why, 64);
+    note(rc == 5 && need == 6789 && objf == 2468 && asmf == 1357 && !strcmp(why, "bad argument"), "obj-null-mode");
+    mode_out = 12345;
+    memcpy(why, "KEEP", 5);
+    rc = cxt_object(2, 1, 0, 0, "lnx/x86_64", 0, 0, &mode_out, 0, &objf, &asmf, why, 64);
+    note(rc == 5 && mode_out == 12345 && objf == 2468 && asmf == 1357 && !strcmp(why, "bad argument"), "obj-null-need");
+    memcpy(why, "KEEP", 5);
+    rc = cxt_object(2, 0, 0, 0, 0, 0, 0, &mode_out, &need, 0, &asmf, why, 64);
+    note(rc == 5 && mode_out == 12345 && need == 6789 && asmf == 1357 && !strcmp(why, "bad argument"), "obj-null-obj");
+    memcpy(why, "KEEP", 5);
+    rc = cxt_object(2, 0, 1, 0, "osx/arm64", "a.s", 0, &mode_out, &need, &objf, 0, why, 64);
+    note(rc == 5 && mode_out == 12345 && objf == 2468 && !strcmp(why, "bad argument"), "obj-null-asm");
+    memcpy(why, "KEEP", 5);
+    rc = cxt_object(2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, why, 64);
+    note(rc == 5 && !strcmp(why, "bad argument"), "obj-null-outs");
+    why[0] = 'Z';
+    rc = cxt_object(2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, why, 0);
+    note(rc == 5 && why[0] == 'Z', "obj-why-cap0");
+    rc = cxt_object(2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8);
+    note(rc == 5, "obj-null-why");
+    memcpy(why, "KEEP", 5);
+    mode_out = 1;
+    need = 1;
+    objf = 1;
+    asmf = 1;
+    rc = cxt_object(2, 0, 0, 0, 0, 0, 0, 0, &need, &objf, &asmf, why, 4);
+    note(rc == 5 && why[0] == 'b' && why[1] == 'a' && why[2] == 'd' && why[3] == 0 && need == 1 && objf == 1 && asmf == 1, "obj-short-why");
+    obj_ok(2, 1, 0, 0, "lnx/x86_64", 0, 0, 5, 1, 1, 0, "obj-need-name");
+    obj_ok(2, 1, 0, 0, "lnx/x86_64", "", 0, 5, 0, 1, 0, "obj-empty-out");
+    obj_ok(2, 1, 0, 0, "lnx/x86_64", "a.o", 0, 5, 0, 1, 0, "obj-have-out");
+    obj_ok(2, 2, 0, 0, "lnx/arm64", "a.o", 0, 5, 0, 1, 0, "obj-flag-two");
+    obj_ok(2, 1, 0, 0, "lnx/", "a.o", 0, 5, 0, 1, 0, "obj-lnx-slash");
+    obj_keep(2, 1, 0, 0, "win/x86_64", "a.o", 0, 1, "object output (-c -b) for this target is not on the product route yet (Linux targets are); the reference compiler writes Mach-O and COFF objects", "obj-nonlinux");
+    obj_keep(2, 1, 0, 0, "", "a.o", 0, 1, "object output (-c -b) for this target is not on the product route yet (Linux targets are); the reference compiler writes Mach-O and COFF objects", "obj-empty-target");
+    obj_keep(2, 1, 0, 0, "lnx", "a.o", 0, 1, "object output (-c -b) for this target is not on the product route yet (Linux targets are); the reference compiler writes Mach-O and COFF objects", "obj-lnx-short");
+    obj_ok(2, 1, 0, 1, "win/x86_64", "a.o", 0, 5, 0, 1, 0, "obj-funit-nonlinux");
+    obj_keep(2, 0, 0, 1, 0, 0, 0, 1, "-funit needs -c -b os/arch (a unit object)", "obj-funit-bare");
+    obj_keep(2, 1, 0, 1, 0, "a.o", 0, 1, "-funit needs -c -b os/arch (a unit object)", "obj-funit-no-target");
+    obj_ok(2, 0, 1, 0, "lnx/x86_64", "a.s", 0, 5, 0, 1, 1, "asm-short-name");
+    obj_ok(2, 0, 2, 0, "lnx/x86_64", "a.s", 0, 5, 0, 1, 1, "asm-flag-two");
+    obj_ok(2, 0, 1, 0, "lnx/arm64", "dir/file.s", 0, 5, 0, 1, 1, "asm-nested");
+    obj_ok(2, 0, 1, 0, "lnx/x86_64", "ab.s", 0, 5, 0, 1, 1, "asm-three");
+    obj_ok(4, 0, 1, 0, "lnx/x86_64", ".s", 0, 4, 0, 0, 0, "asm-dot-s");
+    obj_ok(4, 0, 1, 0, "lnx/x86_64", "a.S", 0, 4, 0, 0, 0, "asm-capital");
+    obj_ok(4, 0, 1, 0, "lnx/x86_64", "as", 0, 4, 0, 0, 0, "asm-len-2");
+    obj_keep(2, 0, 1, 0, "osx/arm64", "a.s", 0, 4, "unisacc: error: assembly text (-S -b ... -o FILE.s) is written for Linux targets in this version (Mach-O and COFF text: 0.0.19); the target was osx/arm64\n", "asm-nonlinux");
+    obj_keep(2, 1, 1, 1, "osx/arm64", "a.s", 0, 4, "unisacc: error: assembly text (-S -b ... -o FILE.s) is written for Linux targets in this version (Mach-O and COFF text: 0.0.19); the target was osx/arm64\n", "asm-before-object");
+    obj_ok(2, 1, 1, 0, "lnx/x86_64", "a.s", 0, 5, 0, 1, 1, "asm-and-c");
+    obj_ok(7, 1, 0, 0, "lnx/x86_64", "a.s", 1, 7, 0, 0, 0, "obj-already-object");
+    obj_keep(2, 1, 0, 1, "lnx/x86_64", "a.o", 1, 1, "-funit needs -c -b os/arch (a unit object)", "obj-funit-on-object");
+    obj_ok(2, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, "obj-plain");
+    memcpy(buf, "a.s", 4);
+    obj_ok(2, 0, 1, 0, "lnx/x86_64", buf, 0, 5, 0, 1, 1, "obj-borrow-out");
+    note(buf[0] == 'a' && buf[1] == '.' && buf[2] == 's' && buf[3] == 0, "obj-borrow-unchanged");
+    memcpy(why, "OLD", 4);
+    mode_out = 1;
+    need = 1;
+    objf = 1;
+    asmf = 1;
+    rc = cxt_object(2, 0, 1, 0, "osx/arm64", "a.s", 0, &mode_out, &need, &objf, &asmf, why, 12);
+    note(rc == 4 && mode_out == 1 && need == 1 && objf == 1 && asmf == 1 && why[11] == 0 && why[0] == 'u', "asm-short-why");
+    memcpy(why, "Z", 2);
+    rc = cxt_object(2, 0, 1, 0, "osx/arm64", "a.s", 0, &mode_out, &need, &objf, &asmf, why, -1);
+    note(rc == 4 && mode_out == 1 && objf == 1 && asmf == 1 && why[0] == 'Z', "asm-why-neg");
+}
+
+static void bad_finish(void) {
+    char r[8];
+    char why[16];
+    const char *tp;
+    const char *held;
+    int mo;
+    int ru;
+    int cl;
+    int rc;
+    CxtOut o;
+    base();
+    memset(r, 0xA5, sizeof r);
+    held = "HELD";
+    tp = held;
+    mo = 3;
+    ru = 4;
+    cl = 5;
+    memcpy(why, "KEEP", 5);
+    rc = cxt_decide(0, &o, why, 16);
+    note(rc == 5 && tp == held && !strcmp(why, "bad argument"), "fin-null-in");
+    o.target = &tp;
+    o.mode = &mo;
+    o.runit = &ru;
+    o.clear_deps = &cl;
+    memcpy(why, "KEEP", 5);
+    rc = cxt_decide(&g_in, 0, why, 16);
+    note(rc == 5 && mo == 3 && tp == held && !strcmp(why, "bad argument"), "fin-null-out");
+    memcpy(why, "KEEP", 5);
+    rc = cxt_text("ab", 0, 1, 0, 0, 0, 8, why, 16);
+    note(rc == 5 && r[0] == (char)0xA5 && !strcmp(why, "bad argument"), "fin-null-route");
+    rc = cxt_text("ab", 0, 1, 0, 0, r, 0, why, 16);
+    note(rc == 5 && r[0] == (char)0xA5, "fin-routecap0");
+    rc = cxt_text("ab", 0, 1, 0, 0, r, -1, why, 16);
+    note(rc == 5 && r[0] == (char)0xA5, "fin-routecap-neg");
+    rc = cxt_text(0, 0, 1, 0, 0, r, 8, why, 16);
+    note(rc == 5 && r[0] == (char)0xA5, "fin-null-text-target");
+    rc = decide(0, &mo, &ru, &cl, why, 16);
+    note(rc == 5 && tp == held && mo == 3, "fin-null-target-out");
+    rc = decide(&tp, 0, &ru, &cl, why, 16);
+    note(rc == 5 && tp == held, "fin-null-mode-out");
+    rc = decide(&tp, &mo, 0, &cl, why, 16);
+    note(rc == 5 && mo == 3 && tp == held, "fin-null-runit-out");
+    rc = decide(&tp, &mo, &ru, 0, why, 16);
+    note(rc == 5 && cl == 5 && tp == held, "fin-null-clear");
+    g_in.native = 0;
+    rc = decide(&tp, &mo, &ru, &cl, why, 16);
+    note(rc == 5 && tp == held, "fin-null-native");
+    g_in.native = "lnx/x86_64";
+    g_in.nsources = -1;
+    rc = decide(&tp, &mo, &ru, &cl, why, 16);
+    note(rc == 5 && tp == held, "fin-neg-sources");
+    g_in.nsources = 1;
+    g_in.linking = 1;
+    rc = decide(&tp, &mo, &ru, &cl, why, 16);
+    note(rc == 5 && tp == held, "fin-link-null");
+    g_in.linking = 0;
+    g_in.single = 1;
+    rc = decide(&tp, &mo, &ru, &cl, why, 16);
+    note(rc == 5 && tp == held, "fin-single-null");
+    g_in.single = 0;
+    g_in.target = "ab";
+    why[0] = 'Q';
+    rc = decide(&tp, &mo, &ru, &cl, why, -3);
+    note(rc == 0 && why[0] == 'Q' && tp == g_in.target && !strcmp(tp, "ab"), "fin-why-neg-still-ok");
+    g_in.native = 0;
+    rc = cxt_decide(&g_in, &o, 0, 16);
+    note(rc == 5 && tp == g_in.target && tp[0] == 'a', "fin-null-why");
+    memcpy(why, "KEEP", 5);
+    rc = decide(&tp, &mo, &ru, &cl, why, 4);
+    note(rc == 5 && why[3] == 0 && why[0] == 'b' && tp == g_in.target && tp[0] == 'a', "fin-short-why");
+}
+
+static void routes(void) {
+    char borrowed[16];
+    char longt[96];
+    int i;
+    base();
+    g_in.linking = 1;
+    g_in.runit = 1;
+    g_in.linked_target = "osx/arm64";
+    fin_keep(4, "unisacc: error: these objects were compiled for another target; running needs this machine's: osx/arm64\n", "link-other-machine");
+    g_in.exec_restart = 1;
+    fin_keep(4, "unisacc: error: these objects were compiled for another target; running needs this machine's: osx/arm64\n", "link-before-exec");
+    g_in.exec_restart = 0;
+    g_in.runit = 0;
+    g_in.target = "win/x86_64";
+    g_in.linked_target = "lnx/arm64";
+    fin_keep(4, "unisacc: error: -b differs from the target these objects were compiled for: lnx/arm64\n", "link-b-differs");
+    g_in.nsources = 2;
+    g_in.mode = 1;
+    fin_keep(4, "unisacc: error: -b differs from the target these objects were compiled for: lnx/arm64\n", "link-before-tape");
+    base();
+    g_in.src_tape = 1;
+    g_in.nsources = 2;
+    fin_keep(1, "tape needs one source and a tape/image/run output", "tape-many");
+    base();
+    g_in.src_tapebin = 1;
+    g_in.mode = 1;
+    fin_keep(1, "tape needs one source and a tape/image/run output", "tapebin-pp");
+    base();
+    g_in.src_tape = 1;
+    g_in.mode = 4;
+    fin_keep(1, "tape needs one source and a tape/image/run output", "tape-tokens");
+    base();
+    g_in.src_tape = 1;
+    g_in.nsources = 0;
+    fin_keep(1, "tape needs one source and a tape/image/run output", "tape-zero");
+    base();
+    g_in.linking = 1;
+    g_in.linked_target = "lnx/x86_64";
+    g_in.mode = 1;
+    fin_keep(1, "tape needs one source and a tape/image/run output", "link-is-tape");
+    base();
+    g_in.src_tape = 1;
+    g_in.src_tapebin = 1;
+    g_in.mode = 2;
+    fin_ok("lnx/x86_64/tape/O0", "lnx/x86_64", 0, 2, 0, 0, "tape-one-ok");
+    base();
+    g_in.emitbin = 1;
+    g_in.mode = 2;
+    fin_ok("lnx/x86_64/tape/O0", "lnx/x86_64", 0, 2, 0, 0, "emit-s");
+    g_in.runit = 1;
+    fin_keep(1, "--tapebin needs -S or -c", "emit-run");
+    g_in.runit = 0;
+    g_in.mode = 5;
+    fin_keep(1, "--tapebin needs -S or -c", "emit-object");
+    g_in.mode = 0;
+    fin_keep(1, "--tapebin needs -S or -c", "emit-image");
+    g_in.mode = 1;
+    g_in.nsources = 3;
+    fin_keep(1, "--tapebin needs -S or -c", "emit-before-multi");
+    base();
+    g_in.mode = 1;
+    g_in.nsources = 2;
+    g_in.target = "osx/arm64";
+    fin_keep(1, "multiple preprocessing outputs not migrated", "multi-pp");
+    g_in.mode = 4;
+    fin_keep(1, "multiple preprocessing outputs not migrated", "multi-tokens");
+    base();
+    g_in.native = "lnx/arm64";
+    fin_ok("lnx/arm64/image/O0", "lnx/arm64", g_in.native, 0, 0, 0, "default-native");
+    g_in.mode = 2;
+    fin_ok("lnx/x86_64/tape/O0", "lnx/x86_64", 0, 2, 0, 0, "default-linux");
+    g_in.mode = 5;
+    g_in.level = 2;
+    fin_ok("lnx/x86_64/object/O2", "lnx/x86_64", 0, 5, 0, 0, "default-object");
+    base();
+    g_in.target = "osx/arm64";
+    fin_ok("osx/arm64/image/O0", "osx/arm64", g_in.target, 0, 0, 0, "keep-target");
+    g_in.target = "";
+    fin_ok("/image/O0", "", g_in.target, 0, 0, 0, "empty-target");
+    base();
+    g_in.runit = 1;
+    g_in.target = "osx/arm64";
+    g_in.native = "lnx/x86_64";
+    fin_ok("lnx/x86_64/run/O0", "lnx/x86_64", g_in.native, 3, 1, 0, "runit-native");
+    g_in.runit = 7;
+    g_in.target = 0;
+    g_in.mode = 0;
+    fin_ok("lnx/x86_64/run/O0", "lnx/x86_64", g_in.native, 3, 7, 0, "runit-kept");
+    base();
+    g_in.single = 1;
+    g_in.only_target = "win/arm64";
+    fin_ok("win/arm64/image/O0", "win/arm64", g_in.only_target, 0, 0, 0, "single-default");
+    g_in.target = "win/arm64";
+    fin_ok("win/arm64/image/O0", "win/arm64", g_in.only_target, 0, 0, 0, "single-same");
+    g_in.target = "osx/arm64";
+    fin_keep(1, "target is outside this single-target compiler", "single-differs");
+    g_in.target = "";
+    fin_keep(1, "target is outside this single-target compiler", "single-empty");
+    g_in.target = 0;
+    g_in.runit = 1;
+    fin_ok("win/arm64/run/O0", "win/arm64", g_in.only_target, 3, 1, 0, "single-run");
+    g_in.mode = 4;
+    g_in.runit = 0;
+    fin_ok("tokens", "win/arm64", g_in.only_target, 4, 0, 0, "single-tokens");
+    base();
+    g_in.mode = 4;
+    g_in.warnings = 1;
+    g_in.level = 9;
+    fin_ok("tokens", "lnx/x86_64", 0, 4, 0, 0, "tokens-ignore-warn");
+    g_in.target = "osx/arm64";
+    fin_ok("tokens", "osx/arm64", g_in.target, 4, 0, 0, "tokens-keep-osx");
+    g_in.target = "win/x86_64";
+    fin_ok("tokens", "win/x86_64", g_in.target, 4, 0, 0, "tokens-keep-win");
+    g_in.mode = 1;
+    g_in.target = "osx/arm64";
+    fin_ok("osx/arm64/pp", "osx/arm64", g_in.target, 1, 0, 0, "pp-ignore-warn");
+    base();
+    g_in.mode = 3;
+    g_in.target = "lnx/x86_64";
+    fin_ok("lnx/x86_64/run/O0", "lnx/x86_64", g_in.target, 3, 0, 0, "kind-run");
+    g_in.mode = 7;
+    fin_ok("lnx/x86_64/image/O0", "lnx/x86_64", g_in.target, 7, 0, 0, "kind-other");
+    g_in.mode = 0;
+    g_in.nsources = 2;
+    fin_ok("lnx/x86_64/multi/image/O0", "lnx/x86_64", g_in.target, 0, 0, 0, "multi-image");
+    g_in.warnings = 1;
+    g_in.level = 1;
+    fin_ok("lnx/x86_64/warn/multi/image/O1", "lnx/x86_64", g_in.target, 0, 0, 0, "warn-multi");
+    g_in.nsources = 1;
+    g_in.mode = 5;
+    g_in.level = 2;
+    fin_ok("lnx/x86_64/warn/object/O2", "lnx/x86_64", g_in.target, 5, 0, 0, "warn-object");
+    g_in.warnings = 0;
+    g_in.mode = 0;
+    g_in.level = 10;
+    fin_ok("lnx/x86_64/image/O10", "lnx/x86_64", g_in.target, 0, 0, 0, "level-10");
+    g_in.level = -1;
+    fin_ok("lnx/x86_64/image/O-1", "lnx/x86_64", g_in.target, 0, 0, 0, "level-neg");
+    g_in.level = -2147483647 - 1;
+    fin_ok("lnx/x86_64/image/O-2147483648", "lnx/x86_64", g_in.target, 0, 0, 0, "level-min");
+    base();
+    g_in.exec_restart = 1;
+    g_in.runit = 1;
+    g_in.target = "osx/arm64";
+    fin_ok("lnx/x86_64/image/O0", "lnx/x86_64", g_in.native, 0, 0, 1, "exec-clears");
+    g_in.deponly = 1;
+    fin_ok("lnx/x86_64/image/O0", "lnx/x86_64", g_in.native, 0, 0, 0, "exec-deponly");
+    g_in.deponly = 4;
+    fin_ok("lnx/x86_64/image/O0", "lnx/x86_64", g_in.native, 0, 0, 0, "exec-deponly-two");
+    g_in.deponly = 0;
+    g_in.runit = 0;
+    g_in.mode = 2;
+    g_in.target = "lnx/x86_64";
+    fin_ok("lnx/x86_64/tape/O0", "lnx/x86_64", g_in.target, 2, 0, 0, "exec-without-run");
+    g_in.single = 1;
+    g_in.only_target = "win/arm64";
+    g_in.runit = 1;
+    g_in.target = 0;
+    g_in.mode = 0;
+    fin_ok("win/arm64/image/O0", "win/arm64", g_in.only_target, 0, 0, 1, "exec-single");
+    base();
+    g_in.linking = 1;
+    g_in.runit = 1;
+    g_in.linked_target = "lnx/x86_64";
+    fin_ok("lnx/x86_64/run/O0", "lnx/x86_64", g_in.native, 3, 1, 0, "link-run-match");
+    g_in.runit = 0;
+    g_in.target = 0;
+    g_in.linked_target = "lnx/arm64";
+    g_in.mode = 0;
+    fin_ok("lnx/arm64/image/O0", "lnx/arm64", g_in.linked_target, 0, 0, 0, "link-adopt");
+    g_in.target = "lnx/arm64";
+    fin_ok("lnx/arm64/image/O0", "lnx/arm64", g_in.target, 0, 0, 0, "link-same");
+    memcpy(borrowed, "osx/arm64", 10);
+    g_in.target = borrowed;
+    g_in.linking = 0;
+    fin_ok("osx/arm64/image/O0", "osx/arm64", g_in.target, 0, 0, 0, "borrow-target");
+    note(!strcmp(borrowed, "osx/arm64"), "borrow-unchanged");
+    base();
+    g_in.target = "ab";
+    fin_ok("ab/image/O0", "ab", g_in.target, 0, 0, 0, "exact-room");
+    {
+        char r[12];
+        char why[64];
+        const char *tp;
+        int mo;
+        int ru;
+        int cl;
+        int rc;
+        memset(r, 0xA5, 12);
+        memcpy(why, "KEEP", 5);
+        tp = "UNSET";
+        mo = 1;
+        ru = 1;
+        cl = 1;
+        rc = decide(&tp, &mo, &ru, &cl, why, 64);
+        note(rc == 0 && mo == 0 && tp == g_in.target && !strcmp(tp, "ab") && r[0] == (char)0xA5, "decide-before-text");
+        rc = cxt_text(tp, mo, g_in.nsources, g_in.warnings, g_in.level, r, 11, why, 64);
+        note(rc == 1 && mo == 0 && r[0] == (char)0xA5 && tp == g_in.target && !strcmp(why, "target name too long"), "route-one-short");
+        rc = cxt_text(tp, mo, g_in.nsources, g_in.warnings, g_in.level, r, 12, why, 64);
+        note(rc == 0 && !strcmp(r, "ab/image/O0") && tp == g_in.target, "route-exact");
+    }
+    base();
+    g_in.target = "lnx/x86_64";
+    {
+        char r[8];
+        char why[32];
+        const char *tp;
+        int mo;
+        int ru;
+        int cl;
+        int rc;
+        memset(r, 0xA5, 8);
+        tp = "HELD";
+        mo = 9;
+        ru = 9;
+        cl = 9;
+        rc = decide(&tp, &mo, &ru, &cl, why, 32);
+        note(rc == 0 && mo == 0 && ru == 0 && cl == 0 && tp == g_in.target, "decide-no-cap");
+        memset(r, 0xA5, 8);
+        rc = cxt_text(tp, mo, g_in.nsources, g_in.warnings, g_in.level, r, 1, why, 32);
+        note(rc == 1 && r[0] == (char)0xA5 && tp == g_in.target && !strcmp(why, "target name too long"), "target-fits-route-not");
+    }
+    i = 0;
+    while (i < 90) { longt[i] = 'a'; i = i + 1; }
+    longt[90] = 0;
+    base();
+    g_in.target = longt;
+    {
+        char r[96];
+        char why[64];
+        const char *tp;
+        int mo;
+        int ru;
+        int cl;
+        int rc;
+        memset(r, 0xA5, 96);
+        tp = "HELD";
+        mo = 3;
+        ru = 3;
+        cl = 3;
+        rc = decide(&tp, &mo, &ru, &cl, why, 64);
+        note(rc == 0 && mo == 0 && tp == longt && tp == g_in.target && r[0] == (char)0xA5, "decide-long-target");
+        rc = cxt_text(tp, mo, g_in.nsources, g_in.warnings, g_in.level, r, 96, why, 64);
+        note(rc == 1 && r[0] == (char)0xA5 && mo == 0 && tp == longt && !strcmp(why, "target name too long"), "route-96");
+    }
+    base();
+    g_in.linking = 1;
+    g_in.nsources = -1;
+    g_in.linked_target = "osx/arm64";
+    g_in.runit = 1;
+    fin_keep(5, "bad argument", "neg-before-link-phrase");
+}
+
+int main(void) {
+    abi();
+    objects();
+    bad_finish();
+    routes();
+    printf("CXT\tfailed=%d\n", g_fail);
+    return g_fail ? 1 : 0;
+}
