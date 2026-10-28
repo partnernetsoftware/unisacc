@@ -11,6 +11,14 @@ main.o、main.o none.a均rc1并具名used；m2.o B.a A.a具名inner且rc1；三�
 直接C路径仍生成动态ELF并rc0，说明仅修tapelink尚未闭合整个合同；继续查动态外部符号解析边界。
 当前仅源码及参考验证，未重建/安装产品，登记批仍红，不授修复完成。
 
+后续复核纠正直接C归因：`src/main.c` R21-4a'明确让写出的镜像也转发宿主函数；
+`exec/c/compiler.c`的fwdwant明确覆盖mode0但排除linking；`src/fwdstub.c`生成的缺符号分支具名exit127。
+新参考实际执行direct.elf为rc127、stderr=`unisacc: no host function used`；合法abs(-7)的直接C镜像仍rc7。
+因此direct-C不是同一静态链接缺陷；现登记批要求编译期拒绝与既有迟绑定合同冲突。
+保留该断言及原红，未通过删断言或限制所有未知宿主名来造绿；需将两个合同明确区分后再登记验收。
+长名探针250字符在前端按63字符上限拒绝，未到链接器，不能算长名链接负控通过。
+相关文件在`out/c43-link-undef-fix-01/`；这不扩授产品或跨平台资格。
+
 - 现象：`int used(void); int main(void){return used()+2;}` 经 `-c -b lnx/x86_64 -funit` 得 main.o 后，`unisacc -o img main.o`（或加只定义 `unused` 的归档、或直接 `-o img main.c`）rc 0 并写出镜像；运行 SIGSEGV（rc 139）。预期：`link: undefined reference to used`，rc≠0，无镜像。
 - 定位：src/tapelink.c:351 `tl_check_undef`（R20-3）只检查名字以 `g_` 开头的未定义外部（全局数据对象），函数外部不检查。
 - 同现：经典参考 REF 0ed46192 行为相同（共享缺陷，非回归）；产品==REF 字节差分仍有效，不阻塞候选 f3705dfa。
