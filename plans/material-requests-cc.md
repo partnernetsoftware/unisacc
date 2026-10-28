@@ -14,3 +14,9 @@
 - 阻塞：流容器 CLI（tools/stream-runtime.c）只接 INPUT/INC，无注入资源的入口；产品侧库模式入口拼写未在 cc 侧核实。
 - 请求（所有者：stream-runtime / 产品 CLI 主人）：(a) 容器增加 `UNISA_RESOURCE_FILE=<path>` 或第 4 参，把文件字节作为 `\0library/signatures` 资源供给；或 (b) 给出产品的库模式拼写（`-flib`? `-shared`?）与一份最小 USLSIG1 夹具（含 1 个公共标签、1 个类型化签名、1 个畸形头）。
 - 验收：三条夹具经 stream5 输出分别为"导出根保留（dead 不剪）"、"typed library signature 拒绝"、"malformed… 拒绝"，rc≠0 且 stdout 空；预期文本以上述两行为准。cc 收到材料后在 tools/prune-cases-gen.cx 加 `library` 组，一个窗口槽 ≤40 s。
+
+### 2. 库路线 — 18:3x 事实补充（只读核对，未实跑）
+
+- 产品 CLI 不暴露库模式（exec/c/compiler.c 无 `library/symbols`/`library/signatures`/USLTAPE1 字样）；run.c 的 env 钩子只有 UNISA_ATTRIBUTES / UNISA_MAXSTEPS / UNISA_CONTAINER / UNISACC_RF_CAPTURE / UNISACC_RR_TIME，无通用资源注入。
+- 链路（exec/parse2/libraryexports.md、exec/c/librarysignature-v2.md）：E3 在资源 `\0library/symbols`=LE64 1 时输出 `USLTAPE1`（tape + 模型生成的 USLSIG2）；prune 在资源 `\0library/signatures` 下保留公共定义为根。故库材料 = stream3 带 symbols 资源 → 拆 USLTAPE1 → stream5 带 signatures 资源。
+- 所需改动（超出 cc 轻活槽，列为请求）：tools/stream-runtime.c 加 `UNISA_STREAM_RESOURCE_<NAME>=<path>`（或两个专用 env）填 ri[4..5]；一个 USLTAPE1 拆分小工具（.cx，按 v2 文档 LE64 框架）；畸形签名夹具按 libraryroots.md 规则构造（截断、defined≠1、重名）。cc 可在所有者准予后一次窗口槽完成（基座重编 7 s + 重打包 + ≤40 s 用例）。
