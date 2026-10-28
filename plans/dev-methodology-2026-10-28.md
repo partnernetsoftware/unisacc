@@ -162,3 +162,9 @@
 - 在仓外冻结导出 `/home/devali/repos/unisacc-cc-batches-cba0b16589`（git archive HEAD + 当前产品）里把 `plans/batches-cc-proposal.tsv` 与 `plans/coverage-cc-proposal.tsv` 追加到其 tests/batches.tsv / coverage.tsv，用真实 `tests/run-batch.cx`（占位符展开、材料绑定、55 s 预算、候选 SHA 前后一致、expect 标记行）逐行执行全部 39 行：39/39 `status=PASS`（候选 d65c1474；材料 streams=out/c43-streams-riroot-01、ref=冻结 REF 0ed46192）。日志在该导出的 out/rb/ 下。共享检出未改动。
 - 运行器暴露并已修正的登记错误：materials 分隔符须为逗号（原 `streams;ref`）；layer 只接受 contract/product/library/interfaces/negative/properties/platform（formats 行改 platform）；`properties-cases-lower` 的 args 用了 `{ref}` 但 materials 漏列（coverage id 必须存在于 coverage.tsv，故配套 15 行 coverage 提案）；`tools/peep-cases-gen.cx` 原把 16 个 TABLE_SUSPECT 当非零退出，批会 FAIL——现仅 FAIL/NOT_RUN 非零，TABLE_SUSPECT 仍在输出与 results.tsv 中计数（它是金表线索，不是运行失败）。
 - 结论：cdx 提交 tests/batches.tsv 后，两份提案可原样并入；run.cx 还需提供 `{ref}` 材料绑定（run-batch 已支持任意 `name=ABS_PATH` 材料，批行 materials 列 `ref` 即可）。
+
+## 20. 登记落地与共享检出全批实跑（2026-10-28）
+
+- cdx 已把 `plans/batches-cc-proposal.tsv` 与 `plans/coverage-cc-proposal.tsv` 原样并入正式两表（723f6f5a46，35 批记录 + 15 coverage 记录）；`--list` 元数据有效（204 批 / 193 覆盖 / 19 未解）。
+- 在共享检出（非冻结导出）上用真实 `tests/run-batch.cx` 逐行执行全部 35 行（材料 streams=out/c43-streams-riroot-01、ref=冻结 REF 0ed46192；候选 d65c1474 每行前后 SHA 一致；每行 `timeout 60`，整轮约 12 min，无残留进程）：35/35 `status=PASS`，TABLE_SUSPECT 仍在 peep 输出中计数。证据 out/c43-cc-reg-01/BATCH_RUNS.tsv 与各行目录。
+- 下一步（正规车道）：`tools/all-waves.cx` 支持材料映射（NAME\tPATH，`material` 子命令逐项指纹），可在一个 `--all` 会话里把这 35 行按 start/run/finish 拆分尝试跑出收据供 tests/all-aggregate.cx 聚合；矩阵格 MISSING→PASS 换标按规则留给下一次慢车道纪元，引用本目录。
