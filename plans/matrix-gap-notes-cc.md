@@ -52,3 +52,10 @@
 
 - stream6（lower）输入 tape.text，输出 target.text（`@target/@data/@sym/@src_os/@data_len/@bss/@relocs` 头 + 目标指令行，见 §14 lower 组）；stream7（elf）输入 target.text，输出 image.bytes，pin 2f063f38（tests/stream-elf.cx:6），调用形同 stream4/5：`tools/bound 12 unisacc-stream7.com INPUT INPUT INC`，env `UNISA_ATTRIBUTES=`、`UNISA_MAXSTEPS=200000000`。
 - 因此 e4.sem.stream-boundary / prune.sem.execution-preserved 的链：tape → stream4|5 → stream6 → stream7 → 镜像 → `tools/bound 5 镜像` 执行；对照链：原 tape → stream6 → stream7 → 执行。断言：两镜像的 stdout/退出码相等，且与手推字面相等（非空洞）；镜像字节可不同（E4/prune 改写了指令）。夹具可复用 properties 的循环程序 tape（经产品 `-S` 得 E3 tape）与 prune 的 dead 夹具。
+
+## 附：两份草稿的接口桌面核对（只读，2026-10-28；fable 裁定：等窗期不再写新草稿）
+
+- 容器 CLI：`tools/bound 12 unisacc-streamN.com INPUT INPUT INC`，INPUT 为 `-` 时读 stdin（tools/stream-runtime.c:12-19）✓。
+- 拒绝文本：stream-runtime.c:5 `#include "../exec/c/run.c"`，故 `readfile()` 的 `run: cannot open PATH: ENOENT|ENOTDIR|EACCES` + `cannot open input` 同产品（run.c:155-178）✓；目录作为 INPUT 可能 open 成功而在 read 失败，草稿按 INFO 记录 ✓。
+- 步数预算：容器是非产品构建，`UNISA_MAXSTEPS` 经 strtol 生效，status 3 打印 `step budget exhausted (budget N steps)`（run.c:1061-1069），execute() 返回 status 即进程 rc ✓；草稿已改为不传重复变量（91f6e33791）。
+- stream6/7 链：输入输出格式与 pin 见上节 ✓。未核：`UNISA_MAXSTEPS=abc` 被 strtol 变 0（已知产品外分支缺陷，queue 中 res.steps 行），草稿不触碰。
