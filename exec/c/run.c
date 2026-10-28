@@ -285,6 +285,9 @@ static int hexv(int c) {
     die("bad hex string"); return 0;
 }
 
+#ifdef UNISA_CX_MODEL_DECODE
+static void loadbytes(unsigned char *data, int len);
+#else
 static void loadbytes(unsigned char *data, int len) {
     LB = data; LN = len; LBIN=len>=8 && !memcmp(data,"UNINETB1",8); LP=LBIN?8:0;
     int kind = lchar(); NS=lint(); NQ=lint(); NRG=lint(); NSTR=lint(); START=lint();
@@ -397,6 +400,7 @@ static void loadbytes(unsigned char *data, int len) {
             if (QA[i] == PUSH && QA[i+1] > TOPMAX) TOPMAX = (int)QA[i+1];
     }
 }
+#endif
 
 #ifndef UNISA_RUNTIME_LIBRARY
 static void load(const char *path) {
@@ -555,6 +559,21 @@ static void model_bind(const Model *m) {
     SMODE = m->smode; ROWC = m->rowc; ROWK = m->rowk; ROWN = m->rown; ROWQ = m->rowq;
     NLO = m->nlo; NHI = m->nhi; BN = m->bn; BQ = m->bq; RETS = m->rets; RETOK = m->retok;
 }
+#ifdef UNISA_CX_MODEL_DECODE
+/* The CX decoder owns partial results locally and releases them before an
+ * error reaches the runtime's longjmp/exit boundary. A successful model is
+ * moved into the existing runtime view for the current stage. */
+typedef struct CxDecode { Model model; void *(*allocate)(void *,size_t); void (*release)(void *); const char *why; } CxDecode;
+int cxmd_decode(CxDecode *,const unsigned char *,long);
+void cxmd_take(CxDecode *,Model *);
+static void *model_decode_alloc(void *p,size_t n) { return UNISA_PACKAGE_REALLOC(p,n); }
+static void loadbytes(unsigned char *data, int len) {
+    CxDecode d={0}; Model model={0};
+    d.allocate=model_decode_alloc; d.release=mfree;
+    if(cxmd_decode(&d,data,len)) die(d.why ? d.why : "invalid model input");
+    cxmd_take(&d,&model); model_bind(&model);
+}
+#endif
 /* Safe on a partially decoded model (see loadbytes: arrays of pointers are zeroed when allocated). */
 #ifdef UNISA_CX_MODEL_LIFETIME
 void cxml_release(Model *, void (*)(void *));
