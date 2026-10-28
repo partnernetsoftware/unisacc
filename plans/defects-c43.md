@@ -28,6 +28,14 @@ SHA `e2292a760d559dd9c733aca6a39f8bac896fdb04a5c448382f0f67218514ed9a`，
 测试夹具首次包装把--models放在ar前，造成运输失败；修复后第二次遗漏watchdog的bound.c，
 导致执行控制失败；两轮原收据均保留。补全watchdog源码后才产生上述最终实跑结果，不把夹具失败误归产品。
 
+接续正规构造：896888f424已git archive到仓外`/home/devali/repos/unisacc-epoch-link-896888f424`；
+tar SHA af06942e0334e96e81757c5ad04a1fb4569fa1d7daf9a0ce78123b2b9574fe70。
+sizeof纪元固定identity-helper实读新源SID为
+`8390b60b0b8f40138c1da649a4cd55afa97edefc7a6eb0e8e88cb369d60f6549`（rc0）。
+相对e5bade1851，src/exec/include/kernel/seed内仅src/tapelink.c变化；旧mixed包收据仍绑定353c，不能直接改标成8390。
+私有模型驱动对象格式批`out/c43-link-driver-formats-01.stdout`21/0；其中打印的installed-product字样是工具固有标签，
+本次实际对象始终是显式私有wrapper+e229驱动+ff696包，不是共享安装，也不是跨平台运行资格。
+
 - 现象：`int used(void); int main(void){return used()+2;}` 经 `-c -b lnx/x86_64 -funit` 得 main.o 后，`unisacc -o img main.o`（或加只定义 `unused` 的归档、或直接 `-o img main.c`）rc 0 并写出镜像；运行 SIGSEGV（rc 139）。预期：`link: undefined reference to used`，rc≠0，无镜像。
 - 定位：src/tapelink.c:351 `tl_check_undef`（R20-3）只检查名字以 `g_` 开头的未定义外部（全局数据对象），函数外部不检查。
 - 同现：经典参考 REF 0ed46192 行为相同（共享缺陷，非回归）；产品==REF 字节差分仍有效，不阻塞候选 f3705dfa。
