@@ -1,0 +1,29 @@
+/* Differential check of the actual C and CX-backed runtime adapters. */
+#pragma unisa use runtime.process
+static int failed;
+static void die(const char *s){fprintf(stderr,"model-number-runtime: %s\n",s);exit(2);}
+static void ck(int ok,const char *name){printf("%s\t%s\n",ok?"PASS":"FAIL",name);if(!ok)failed++;}
+static np_result call(char **v,const char *root){np_result r;char why[512];if(np_run(v,root,0,35,&r,why,sizeof why))die(why);return r;}
+int main(void){
+ char root[4096],bound[4400],src[4400],mod[4400],inc[4400],old[512],newer[512],obj[512];
+ char tmp[]="/tmp/cx-model-number-XXXXXX";if(!realpath(".",root)||!mkdtemp(tmp))die("setup");
+ if(cx_fmt(bound,sizeof bound,"%s/tools/bound",root)||cx_fmt(src,sizeof src,"%s/tests/cases/model_number_runtime.c",root)||cx_fmt(mod,sizeof mod,"%s/cx/runtime/model_number.cx",root)||cx_fmt(inc,sizeof inc,"%s/include/cx.h",root)||cx_fmt(old,sizeof old,"%s/old",tmp)||cx_fmt(newer,sizeof newer,"%s/new",tmp)||cx_fmt(obj,sizeof obj,"%s/model.o",tmp))die("path");
+ char *cc="/usr/bin/x86_64-linux-gnu-gcc-11";
+ char *a[]={bound,"30",cc,"-O2","-x","c","-include",inc,"-c",mod,"-o",obj,0};np_result r=call(a,root);if(r.rc||r.errn)die("module-build");np_free(&r);
+ char *b[]={bound,"30",cc,"-O2","-w","-ffunction-sections","-fdata-sections","-Wl,--gc-sections",src,"-o",old,0};r=call(b,root);if(r.rc||r.errn)die("old-build");np_free(&r);
+ char *c[]={bound,"30",cc,"-O2","-w","-ffunction-sections","-fdata-sections","-Wl,--gc-sections","-DUNISA_CX_MODEL_NUMBER",src,obj,"-o",newer,0};r=call(c,root);if(r.rc||r.errn)die("new-build");np_free(&r);
+ struct Row {const char *name,*binary,*input,*output,*error;int rc;} rows[]={
+  {"text-min","0","-9223372036854775808","-9223372036854775808 20\n","",0},
+  {"text-max","0","9223372036854775807","9223372036854775807 19\n","",0},
+  {"text-overflow","0","9223372036854775808","","run: model number overflow\n",2},
+  {"text-bad","0","3x","","run: bad model number\n",2},
+  {"text-missing","0","- ","","run: missing model number\n",2},
+  {"binary-min","1","ffffffffffffffffff01","-9223372036854775808 10\n","",0},
+  {"binary-max","1","feffffffffffffffff01","9223372036854775807 10\n","",0},
+  {"binary-noncanonical","1","8000","","run: noncanonical binary model number\n",2},
+  {"binary-overflow","1","ffffffffffffffffff02","","run: binary model number overflow\n",2},
+  {"binary-truncated","1","80","","run: truncated binary model number\n",2}
+ };
+ for(int i=0;i<10;i++){char *x[]={bound,"10",old,(char *)rows[i].binary,(char *)rows[i].input,0};char *y[]={bound,"10",newer,(char *)rows[i].binary,(char *)rows[i].input,0};np_result p=call(x,root),q=call(y,root);size_t on=strlen(rows[i].output),en=strlen(rows[i].error);int ok=p.rc==rows[i].rc&&q.rc==rows[i].rc&&p.outn==on&&q.outn==on&&p.errn==en&&q.errn==en&&!memcmp(p.out,rows[i].output,on)&&!memcmp(q.out,rows[i].output,on)&&!memcmp(p.err,rows[i].error,en)&&!memcmp(q.err,rows[i].error,en);ck(ok,rows[i].name);np_free(&p);np_free(&q);}
+ if(cx_rmtree(tmp))die("cleanup");printf("CXMODEL_RUNTIME\tfailed=%d\n",failed);return failed?1:0;
+}
