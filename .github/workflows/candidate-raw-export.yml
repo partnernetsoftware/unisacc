@@ -1,0 +1,220 @@
+# Exact existing release assets -> the two-file candidate-native input artifact.
+# Transport only: does not build or execute a candidate, create/update a release,
+# select Latest, sign, or confer qualification. The evidence capsule is separate.
+name: Export exact raw candidate pair
+on:
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: 'Exact existing release ID in this repository; Draft visibility remains NOT_RUN'
+        type: string
+        required: true
+      com_asset_id:
+        description: 'Exact existing unisacc.com asset ID in that release'
+        type: string
+        required: true
+      record_asset_id:
+        description: 'Exact existing unisacc.com.build.json asset ID in that release'
+        type: string
+        required: true
+      com_sha256:
+        description: 'Independently fixed raw unisacc.com SHA256'
+        type: string
+        required: true
+      record_sha256:
+        description: 'Independently fixed raw build record SHA256'
+        type: string
+        required: true
+      source_sha256:
+        description: 'Independently fixed product source-closure SHA256 in the record'
+        type: string
+        required: true
+      record_commit:
+        description: 'Exact 40-character build record commit, distinct from this transport head'
+        type: string
+        required: true
+permissions:
+  # GET release/asset endpoints document Contents read. Draft visibility is
+  # unverified here; denial fails without permission escalation or a fallback.
+  # https://docs.github.com/en/rest/releases/releases#get-a-release
+  contents: read
+concurrency:
+  group: candidate-raw-export
+  cancel-in-progress: false
+env:
+  C43_RELEASE_ID: ${{ inputs.release_id }}
+  C43_COM_ASSET_ID: ${{ inputs.com_asset_id }}
+  C43_RECORD_ASSET_ID: ${{ inputs.record_asset_id }}
+  C43_COM_SHA: ${{ inputs.com_sha256 }}
+  C43_RECORD_SHA: ${{ inputs.record_sha256 }}
+  C43_SOURCE_SHA: ${{ inputs.source_sha256 }}
+  C43_RECORD_COMMIT: ${{ inputs.record_commit }}
+jobs:
+  export:
+    if: github.repository == 'partnernetsoftware/unisacc' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Validate explicit identity literals
+        timeout-minutes: 1
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($name in @('C43_RELEASE_ID','C43_COM_ASSET_ID','C43_RECORD_ASSET_ID')) {
+            if ([Environment]::GetEnvironmentVariable($name) -cnotmatch '\A[1-9][0-9]{0,19}\z') { throw "Invalid $name" }
+          }
+          if ($env:C43_COM_ASSET_ID -ceq $env:C43_RECORD_ASSET_ID) { throw 'Two distinct exact asset IDs required' }
+          foreach ($name in @('C43_COM_SHA','C43_RECORD_SHA','C43_SOURCE_SHA')) {
+            if ([Environment]::GetEnvironmentVariable($name) -cnotmatch '\A[0-9a-f]{64}\z') { throw "Invalid $name" }
+          }
+          if ($env:C43_RECORD_COMMIT -cnotmatch '\A[0-9a-f]{40}\z') { throw 'Exact record commit required' }
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        timeout-minutes: 1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Bind exact producer head and existing release assets
+        timeout-minutes: 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_API_URL: ${{ github.api_url }}
+          PRODUCER_HEAD: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $info = [Diagnostics.ProcessStartInfo]::new()
+          $info.FileName = 'git'; $info.UseShellExecute = $false
+          $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true
+          $info.ArgumentList.Add('rev-parse'); $info.ArgumentList.Add('HEAD')
+          $process = [Diagnostics.Process]::new(); $process.StartInfo = $info
+          try {
+            if (!$process.Start()) { throw 'Producer checkout observation could not start' }
+            $stdout = $process.StandardOutput.ReadToEndAsync(); $stderr = $process.StandardError.ReadToEndAsync()
+            if (!$process.WaitForExit(15000)) {
+              $process.Kill($true)
+              if (!$process.WaitForExit(2000)) { throw 'Producer checkout observation cleanup incomplete' }
+              throw 'Producer checkout observation timed out'
+            }
+            if (!$stdout.Wait(500) -or !$stderr.Wait(500) -or $process.ExitCode -ne 0 -or $stderr.Result -or $stdout.Result.Trim() -cne $env:PRODUCER_HEAD) { throw 'Producer checkout differs from workflow head' }
+          } finally { $process.Dispose() }
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' }
+          $releaseUrl = "$env:GH_API_URL/repos/$env:GH_REPOSITORY/releases/$env:C43_RELEASE_ID"
+          $release = Invoke-RestMethod -Uri $releaseUrl -Headers $headers -TimeoutSec 30 -MaximumRetryCount 0
+          if ("$($release.id)" -cne $env:C43_RELEASE_ID -or $release.url -cne $releaseUrl -or @($release.assets).Count -gt 1000) { throw 'Exact existing repository release required' }
+          $com = @($release.assets | Where-Object { $_.name -ieq 'unisacc.com' })
+          $record = @($release.assets | Where-Object { $_.name -ieq 'unisacc.com.build.json' })
+          if ($com.Count -ne 1 -or $record.Count -ne 1) { throw 'Exactly one asset for each raw filename required' }
+          $expected = @(
+            @{ Asset = $com[0]; Name = 'unisacc.com'; Id = $env:C43_COM_ASSET_ID; Sha = $env:C43_COM_SHA; Max = 67108864 },
+            @{ Asset = $record[0]; Name = 'unisacc.com.build.json'; Id = $env:C43_RECORD_ASSET_ID; Sha = $env:C43_RECORD_SHA; Max = 65536 }
+          )
+          $bound = @()
+          foreach ($item in $expected) {
+            $asset = $item.Asset
+            $url = "$env:GH_API_URL/repos/$env:GH_REPOSITORY/releases/assets/$($item.Id)"
+            if ("$($asset.id)" -cne $item.Id -or $asset.name -cne $item.Name -or $asset.url -cne $url -or $asset.state -cne 'uploaded' -or $asset.size -lt 1 -or $asset.size -gt $item.Max) { throw 'Exact raw asset identity/name/state/size mismatch' }
+            if ($asset.digest -and $asset.digest -cne "sha256:$($item.Sha)") { throw 'Asset API digest disagrees with independent expected SHA' }
+            $bound += [ordered]@{ id = "$($asset.id)"; name = $asset.name; url = $asset.url; state = $asset.state; size = $asset.size; digest = $asset.digest; updated_at = $asset.updated_at }
+          }
+          $output = Join-Path $env:RUNNER_TEMP 'unisacc-candidate-raw-output'
+          $binding = Join-Path $env:RUNNER_TEMP 'unisacc-candidate-raw-binding.json'
+          if ((Test-Path -LiteralPath $output) -or (Test-Path -LiteralPath $binding)) { throw 'Fresh private transport paths required' }
+          New-Item -ItemType Directory -Path $output | Out-Null
+          $bound | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $binding -Encoding utf8NoBOM -NoNewline
+          Write-Output "PRODUCER head=$env:PRODUCER_HEAD record_commit=$env:C43_RECORD_COMMIT release=$env:C43_RELEASE_ID"
+          # This head identifies transport code and the resulting Actions run.
+          # record_commit identifies existing product provenance, not this checkout.
+          # candidate-native checks artifact.workflow_run.head_sha == producer_run.head_sha;
+          # its separately pinned verification checkout/SID/plan remain independent.
+      - name: Download and hash exact raw product
+        timeout-minutes: 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bound = @(Get-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'unisacc-candidate-raw-binding.json') -Raw | ConvertFrom-Json)
+          $asset = $bound[0]
+          $file = Join-Path $env:RUNNER_TEMP 'unisacc-candidate-raw-output/unisacc.com'
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/octet-stream'; 'X-GitHub-Api-Version' = '2022-11-28' }
+          Invoke-WebRequest -Uri $asset.url -Headers $headers -OutFile $file -TimeoutSec 45 -MaximumRetryCount 0
+          if ((Get-Item -LiteralPath $file).Length -ne $asset.size -or (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:C43_COM_SHA) { throw 'Raw candidate size/SHA mismatch' }
+      - name: Download and hash exact raw build record
+        timeout-minutes: 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bound = @(Get-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'unisacc-candidate-raw-binding.json') -Raw | ConvertFrom-Json)
+          $asset = $bound[1]
+          $file = Join-Path $env:RUNNER_TEMP 'unisacc-candidate-raw-output/unisacc.com.build.json'
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/octet-stream'; 'X-GitHub-Api-Version' = '2022-11-28' }
+          Invoke-WebRequest -Uri $asset.url -Headers $headers -OutFile $file -TimeoutSec 45 -MaximumRetryCount 0
+          if ((Get-Item -LiteralPath $file).Length -ne $asset.size -or (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:C43_RECORD_SHA) { throw 'Raw record size/SHA mismatch' }
+      - name: Validate pair binding and unchanged exact source assets
+        timeout-minutes: 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_API_URL: ${{ github.api_url }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $output = Join-Path $env:RUNNER_TEMP 'unisacc-candidate-raw-output'
+          $files = @(Get-ChildItem -LiteralPath $output -Force)
+          if ($files.Count -ne 2 -or ((@($files.Name | Sort-Object) -join ',') -cne 'unisacc.com,unisacc.com.build.json')) { throw 'Exactly two raw top-level files required' }
+          foreach ($file in $files) {
+            if ($file.PSIsContainer -or ($file.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Raw regular files required' }
+          }
+          $com = Join-Path $output 'unisacc.com'; $record = Join-Path $output 'unisacc.com.build.json'
+          if ((Get-FileHash -LiteralPath $com -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:C43_COM_SHA -or (Get-FileHash -LiteralPath $record -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:C43_RECORD_SHA) { throw 'Candidate pair changed after download' }
+          $doc = [Text.Json.JsonDocument]::Parse([IO.File]::ReadAllText($record, [Text.Encoding]::UTF8))
+          try {
+            $root = $doc.RootElement
+            if ($root.ValueKind -ne [Text.Json.JsonValueKind]::Object) { throw 'Build record object required' }
+            $keys = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+            foreach ($property in $root.EnumerateObject()) {
+              if (!$keys.Add($property.Name) -or $property.Name -cnotin @('schema','artifact_sha256','sources_sha256','bytes','commit','settings','native_construction_sha256')) { throw 'Duplicate or unknown build record field' }
+            }
+            if ($keys.Count -ne 6 -and $keys.Count -ne 7) { throw 'Complete schema-1 record required' }
+            if ($root.GetProperty('schema').GetInt32() -ne 1 -or $root.GetProperty('artifact_sha256').GetString() -cne $env:C43_COM_SHA -or $root.GetProperty('sources_sha256').GetString() -cne $env:C43_SOURCE_SHA -or $root.GetProperty('commit').GetString() -cne $env:C43_RECORD_COMMIT -or $root.GetProperty('bytes').GetInt64() -ne (Get-Item -LiteralPath $com).Length) { throw 'Independent product/record/source/commit/extent binding mismatch' }
+            $settings = $root.GetProperty('settings')
+            if ($settings.ValueKind -ne [Text.Json.JsonValueKind]::Object -or @($settings.EnumerateObject()).Count -ne 0) { throw 'Canonical empty build settings required' }
+            if ($keys.Contains('native_construction_sha256') -and $root.GetProperty('native_construction_sha256').GetString() -cnotmatch '\A[0-9a-f]{64}\z') { throw 'Invalid native construction identity' }
+          } finally { $doc.Dispose() }
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' }
+          $releaseUrl = "$env:GH_API_URL/repos/$env:GH_REPOSITORY/releases/$env:C43_RELEASE_ID"
+          $release = Invoke-RestMethod -Uri $releaseUrl -Headers $headers -TimeoutSec 30 -MaximumRetryCount 0
+          if ("$($release.id)" -cne $env:C43_RELEASE_ID -or $release.url -cne $releaseUrl -or @($release.assets).Count -gt 1000) { throw 'Source release binding changed' }
+          $after = @()
+          foreach ($name in @('unisacc.com','unisacc.com.build.json')) {
+            $matches = @($release.assets | Where-Object { $_.name -ieq $name })
+            if ($matches.Count -ne 1) { throw 'Source raw filename is no longer unique' }
+            $asset = $matches[0]
+            $after += [ordered]@{ id = "$($asset.id)"; name = $asset.name; url = $asset.url; state = $asset.state; size = $asset.size; digest = $asset.digest; updated_at = $asset.updated_at }
+          }
+          $before = Get-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'unisacc-candidate-raw-binding.json') -Raw
+          if (($after | ConvertTo-Json -Depth 5) -cne $before) { throw 'Exact source asset metadata changed during download' }
+          Write-Output "RAW_PAIR_BOUND com=$env:C43_COM_SHA record=$env:C43_RECORD_SHA source=$env:C43_SOURCE_SHA record_commit=$env:C43_RECORD_COMMIT qualification=NOT_ATTESTED"
+      - name: Upload only the verified raw candidate pair
+        id: raw
+        timeout-minutes: 1
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: unisacc-candidate-raw-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/unisacc-candidate-raw-output/unisacc.com
+            ${{ runner.temp }}/unisacc-candidate-raw-output/unisacc.com.build.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Report transport identity without qualification
+        timeout-minutes: 1
+        env:
+          RAW_ARTIFACT_ID: ${{ steps.raw.outputs.artifact-id }}
+          RAW_ARTIFACT_DIGEST: ${{ steps.raw.outputs.artifact-digest }}
+        run: |
+          Write-Output "CANDIDATE_RAW_TRANSPORT producer_run=${{ github.run_id }} artifact=$env:RAW_ARTIFACT_ID archive_digest=$env:RAW_ARTIFACT_DIGEST"
+          Write-Output 'Use this exact successful run and artifact ID with candidate-native; archive_digest is not the raw product SHA.'
+          Write-Output 'NOT_ATTESTED construction/history/source-recomputation/native-hosts/qualification; existing platform NOT_RUN remains unchanged.'
