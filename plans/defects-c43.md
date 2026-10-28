@@ -80,6 +80,15 @@ witness ab107f143caae14f4c336e6a2a73378f3cc31dad26db8cb7e8cfc9d7788ff6af；反�
 lnx切片751192B，SHA435c75687470c0e65254c2f425646ce695ad776813dd0ef4c9c9c57aad95bd25。
 两次构造后identity-helper均复测SID6e7375f9不变，stdout/stderr保留在同目录。
 其余三片、APE封装、候选记录和准入尚未完成，未替换已装产品。
+
+后续三片lnx/arm64、osx/x86_64、osx/arm64均在原bound55内rc0，五片已齐。
+使用sizeof正规纪元ape-wrap-host.elf、来源相同seed/ape.c（SHAad3c21cf）、PCff696封装rc0。
+冻结根out/candidate-01/unisacc.com为3014754B，
+SHA e955714e766f89e324c76812b02624bf0a6960270507c2feba802a977eacfd0f；构造后SID仍6e7375f9。
+直接`sh CANDIDATE -cx-interface SOURCE`未挂外部模型包，正常/超限/目录/缺席四项rc为0/1/1/0；
+正常只导出pack_mark，缺席同时导出pack_extra，两拒绝具名且stdout为空。
+证据out/c43-cxpack-read-regression-02/{valid,oversize,directory,absent}/candidate.*。
+新APE仍未准入/安装，外国宿主未运行；候选记录与更完整产品验证继续。
 证据沿用冻结根out/cxpack-gen-*-01.*与epoch-context-01/jobs；当前无所属在跑作业。
 
 ## link.undef-function-refusal — 未定义外部函数链接成崩溃镜像（开放）
