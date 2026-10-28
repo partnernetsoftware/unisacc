@@ -11,7 +11,7 @@ static int number(const unsigned char *p, size_t n, size_t *at, unsigned long *o
 static int delimiter(const unsigned char *p,size_t n,size_t *at,int ch) { if(*at>=n||p[*at]!=ch)return 0; (*at)++; return 1; }
 static int real_member(CxCodecCrc *crc) {
     size_t n=0, at; unsigned char *file=(unsigned char *)cx_read("unisacc.com",&n), *raw=0; PackageFooter f;
-    unsigned long models, stages, resources, packed, unpacked, format, expected; int ok=0;
+    unsigned long models, stages, resources, packed, unpacked, format, expected; uint32_t actual; int ok=0;
     if(!file||n>2147483647||!packagefooter_locate_bytes(file,(long)n,&f))goto done;
     const unsigned char *p=file+f.package_offset; n=(size_t)f.package_length; at=4;
     if(n<4||memcmp(p,"P 3 ",4)||!number(p,n,&at,&models)||!delimiter(p,n,&at,' ')||
@@ -22,7 +22,7 @@ static int real_member(CxCodecCrc *crc) {
            !number(p,n,&at,&unpacked)||!delimiter(p,n,&at,' ')||!number(p,n,&at,&format)||!delimiter(p,n,&at,' ')||
            !number(p,n,&at,&expected)||!delimiter(p,n,&at,'\n')||format!=1||packed>n-at||unpacked>2147483647UL)goto done;
         raw=malloc(unpacked?unpacked:1); if(!raw)goto done;
-        if(cxcodec_inflate(raw,unpacked,p+at,packed) || cxcodec_crc(crc,(char *)raw,(int)unpacked)!=expected || unpacked<9 || memcmp(raw,"UNINETB1N",9))goto done;
+        if(cxcodec_inflate(raw,unpacked,p+at,packed) || cxcodec_crc(crc,(char *)raw,(int)unpacked,&actual) || actual!=expected || unpacked<9 || memcmp(raw,"UNINETB1N",9))goto done;
         free(raw); raw=0; at+=packed;
     }
     ok=1;
@@ -33,7 +33,11 @@ int main(void) {
     const unsigned char compressed[] = {0xcb,0x48,0xcd,0xc9,0xc9,0x07,0x00};
     const unsigned char extended[] = {0xcb,0x48,0xcd,0xc9,0xc9,0x07,0x00,0x00};
     check(!cxcodec_crc_init(&a) && !cxcodec_crc_init(&b), "independent-tables");
-    check(cxcodec_crc(&a, "123456789", 9) == 0xcbf43926U && cxcodec_crc(&b, "", 0) == 0, "crc32-vectors");
+    uint32_t result=0, empty=1;
+    check(!cxcodec_crc(&a, "123456789", 9, &result) && result==0xcbf43926U && !cxcodec_crc(&b, 0, 0, &empty) && empty==0, "crc32-vectors");
+    result=42;
+    check(cxcodec_crc(&a, 0, 1, &result)==1 && result==42 && cxcodec_crc(&a, "x", -1, &result)==1 && result==42 &&
+          cxcodec_crc(0, "x", 1, &result)==1 && result==42 && cxcodec_crc(&a, "x", 1, 0)==1, "crc-invalid-preserves-result");
     check(!cxcodec_inflate(out, 5, compressed, sizeof compressed) && !memcmp(out, "hello", 5), "inflate-known");
     check(cxcodec_inflate(out, 5, compressed, sizeof compressed - 1) != 0, "truncated-rejected");
     check(cxcodec_inflate(out, 5, extended, sizeof extended) != 0, "trailing-rejected");
