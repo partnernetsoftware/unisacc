@@ -451,6 +451,10 @@ static char *pword_owned(void) {
 }
 /* Safe on a partially parsed package: every table is null until allocated,
    and stage names are zeroed before they are filled. */
+#ifdef UNISA_CX_PACKAGE_LIFETIME
+void cxpl_release(Package *, void (*)(void *));
+static void package_release(Package *p) { cxpl_release(p,mfree); }
+#else
 static void package_release(Package *p) {
     if (p->stages) for (int i = 0; i < p->s; i++) {
         mfree(p->stages[i].route); mfree(p->stages[i].name); mfree(p->stages[i].in); mfree(p->stages[i].out);
@@ -458,6 +462,7 @@ static void package_release(Package *p) {
     mfree(p->stages); mfree(p->off); mfree(p->len); mfree(p->raw); mfree(p->crc); mfree(p->res); mfree(p->file); mfree(p->path);
     memset(p, 0, sizeof *p);
 }
+#endif
 static void package_bind(const Package *p) {
     PFILE = p->file; PB = p->b; PN = p->n; PM = p->m; PS = p->s; PVER = p->ver;
     POFF = p->off; PLEN = p->len; PRAW = p->raw; PCRC = p->crc; STAGES = p->stages; RES = p->res; NR = p->nr;
