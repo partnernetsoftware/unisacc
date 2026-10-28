@@ -16,7 +16,7 @@
    name a module exports, one type name from two modules a unit can see) are refused before compilation.
    Each CXIF is written once, content-addressed, to $TMPDIR/ua-cxif-<sha16>.h; its bytes depend on the module
    bytes, this generator, and a matching cxpack.tsv row when one exists.  .c units are never scanned and their include list is exactly the -include list.
-   The driver supplies cxm_rd (read a file: length, -1 missing, -2 too large), cxm_wr (write a file) and cxm_say
+   The driver supplies cxm_rd (length, -1 ENOENT only, -2 too large, -3 other read/open/close error), cxm_wr (write a file) and cxm_say
    (bytes to fd 1 or 2).  Inspection: -cx-interface M.cx prints the CXIF, -cx-plan prints the units as TSV:
    index, compile path, forced includes. */
 #include "../include/unisa_sha256.h"
@@ -515,11 +515,12 @@ int cxm_listed(int u, char *nm, int nl) {
     char *s;
     dl = cxm_len(cxm_path[u]);
     while (dl > 0 && cxm_path[u][dl - 1] != '/') dl = dl - 1;
-    if (dl + 12 >= CXM_PATHW) return 2;
+    if (dl + 12 >= CXM_PATHW) { cxm_start(u, 1); cxm_m("cxpack.tsv path too long"); cxm_fail(); return -1; }
     k = 0; while (k < dl) { man[k] = cxm_path[u][k]; k = k + 1; }
     if (cxm_cpy(man + dl, "cxpack.tsv", CXM_PATHW - dl) < 10) return 2;
     n = cxm_rd(man, pack, 65535);
-    if (n < 0) return 2;
+    if (n == -1) return 2;
+    if (n < 0) { cxm_start(u, 1); cxm_m(n == -2 ? "cxpack.tsv too large" : "cannot read cxpack.tsv"); cxm_fail(); return -1; }
     pack[n] = 0;
     k = 0;
     while (dl + k < cxm_len(cxm_path[u]) && k < CXM_PATHW - 1) { rel[k] = cxm_path[u][dl + k]; k = k + 1; }
@@ -645,6 +646,7 @@ int cxm_project(int u, int lib) {
             int pub;
             cxm_dname(s, cxm_ib[k], cxm_ibody[k], &nb, &nl, &isfn);
             pub = cxm_listed(u, s + nb, nl);
+            if (pub < 0) return 1;
             if (pub == 0) { k = k + 1; continue; }
             if (cxm_addsym(s + nb, nl, u, cxm_iline[k], 0, 0, 0)) return 1;
             if (cxm_emit(cxm_ib[k], cxm_ibody[k]) || cxm_nift >= CXM_IFMAX - 2) { cxm_start(u, cxm_iline[k]); cxm_m("interface too large"); return cxm_fail(); }

@@ -280,9 +280,9 @@ static int par_take_paths(FILE *f, int absent) {
 }
 #endif
 int cxm_rd(char *path, char *buf, int cap) {
-    FILE *f=fopen(path,"rb"); if (!f) return -1;
-    size_t n=fread(buf,1,(size_t)cap,f); int bad=ferror(f); fclose(f);
-    return bad ? -1 : n>=(size_t)cap ? -2 : (int)n;
+    FILE *f=fopen(path,"rb"); if (!f) return errno==ENOENT ? -1 : -3;
+    size_t n=fread(buf,1,(size_t)cap,f); int bad=ferror(f); if(fclose(f))bad=1;
+    return bad ? -3 : n>=(size_t)cap ? -2 : (int)n;
 }
 int cxm_wr(char *path, char *buf, int n) {       /* beside it, then renamed: a reader never sees half a file */
 #ifdef _WIN32

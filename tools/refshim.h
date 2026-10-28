@@ -1,6 +1,7 @@
 /* Only for building unisacc.c with a reference compiler: our intrinsics become
  * POSIX calls, and argc/argv come from a real main().  unisa itself lowers
  * these through the `.sys` gate and the loader's argv. */
+#include <errno.h> /* cxm_rd distinguishes absence from other host I/O failures. */
 #ifdef _WIN32
 #include <stdio.h>
 #include <stdlib.h>

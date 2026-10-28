@@ -74,13 +74,14 @@ int askedline(void) {
 }
 /* src/cxmod.c's file access, for this driver */
 int cxm_rd(char *path, char *buf, int cap) {
-    int fd; int n;
-    fd = ropen(path);
-    if (fd < 0) return 0 - 1;
-    n = __read(fd, buf, cap); __close(fd);
-    if (n < 0) return 0 - 1;
-    if (n >= cap) return 0 - 2;
-    return n;
+    FILE *f; size_t n; int bad;
+    f = fopen(path, "rb");
+    if (!f) return errno == ENOENT ? -1 : -3;
+    n = fread(buf, 1, (size_t)cap, f); bad = ferror(f);
+    if (fclose(f)) bad = 1;
+    if (bad) return -3;
+    if (n >= (size_t)cap) return -2;
+    return (int)n;
 }
 int cxm_wr(char *path, char *buf, int n) {
     int fd; int w;

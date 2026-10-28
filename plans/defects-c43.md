@@ -10,6 +10,16 @@
 修复需区分ENOENT与读失败/超限，失败具名拒绝、无接口输出；保留无清单兼容行为。
 cxm_rd存在模型驱动、经典参考和cxcc三个实现，需保持返回合同一致，不能仅改一端。
 
+修复源码已统一三端返回合同：仅ENOENT返回-1，超限返回-2，其他打开/读取/关闭失败返回-3。
+公开接口生成遇后两者具名拒绝，不再退回全部公开；缺少清单仍保留兼容行为。
+私有模型驱动driver-fixed.elf配正规PCff696实跑4/0，输出在
+`out/c43-cxpack-read-regression-02.stdout`，包含正常、超限、目录及无清单四项。
+经典参考reference-fixed-02.elf同四项实际结果为0/1/1/0；两拒绝stdout为空，
+stderr分别为cxpack.tsv too large和cannot read cxpack.tsv，见
+`out/c43-cxpack-review-01/ref-{valid,oversize,directory,absent}.*`。
+第一次参考构造因errno声明缺失失败，原日志保留；refshim补显式errno头后构造成功。
+cxcc宿主改动尚未重建验证；共享4c28未安装此修复，完整缺陷仍开放。
+
 ## link.undef-function-refusal — 未定义外部函数链接成崩溃镜像（开放）
 
 2026-10-28 cdx 实测更新：共享3a5b完整原批为1 PASS/4 FAIL，收据
