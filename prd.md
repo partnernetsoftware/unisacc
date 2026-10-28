@@ -368,6 +368,8 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 <a id="memory-palace"></a>
 ### 记忆宫殿
 
+**CX新源构造准备（2026-10-28）：** af8429d0cf仓外冻结根unisacc-epoch-cxpack-af8429d0cf，初始与宿主独立identity-helper均测SID6e7375f9；context cce326a8已PREPARED，启动产品仍4c2831c3。材料作业、包、候选与安装尚未开始；下一步在重活窗释放后核context并执行受影响构造。收据见plans/defects-c43.md。
+
 **现行开发安装（2026-10-28）：** 4c2831c3/820b9ae4，冻结源8390b60b；link-candidate-check与link-candidate-install的prepare/finish均实跑，finish重新核材料、暂存产品/记录及旧备份后替换并fsync。installed.tsv SHA13a9f8102b7c018cffbce91a592fcd248fca0f392ca39306017a872ae57a67d2；原3a5b保留。安装后16/0 smoke，静态链接拒绝修复有效；完整发布资格未授。以下sizeof/aggregate记录为来源历史，不再代表现行产品。
 
 **sizeof 正规接续（2026-10-28）：** 冻结源`unisacc-epoch-sizeof-e5bade1851`/SID353cb118完成43项材料作业，34份JSON对原f9实测31同/3异；新origin独立核原107/34。正规mixed包ff696、双内核KGEN7be6、产品context93219、五切片/APE完成。候选3a5b76ab/record0523经prepare99188、finish57768装入冻结根，再经迁入65655进入共享根；迁入收据`out/c43-3a5b-promote-01/receipt.tsv` SHA a580e700。初次prepare13012因archive缺Git元数据在来源记录步骤拒绝；补原e5b提交元数据后源context复验不变，原失败保留。新产品sizeof18/0、聚合正例15/0、smoke16/0，共享原始例rc7；完整及跨平台资格未授。

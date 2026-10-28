@@ -25,6 +25,14 @@ GCC与Clang各四项-o实跑：正常/缺席编译rc0且执行rc7，超限/目�
 独立宿主驱动为`out/c43-cxpack-review-01/{gcc,clang}-fixed-02.elf`，未覆盖根目录宿主产品。
 本次仅Linux/x86_64；共享4c28未安装此修复，完整缺陷仍开放。
 
+构造接续：af8429d0cf已git archive到仓外`/home/devali/repos/unisacc-epoch-cxpack-af8429d0cf`，
+启动产品逐字核为4c2831c3，来源记录一并保存。prepare-context默认-run实返0，
+初始产品观察与新宿主identity-helper观察均为SID
+`6e7375f9aba84aba36c5ccbc5d705a911a1134e4660776ad22345c75b3602250`；
+context.tsv SHA `cce326a849ec5d73f3e2e5700bfa6f4c232abb011b0f63b0dec55150f4190623`。
+证据在冻结根out/epoch-context-01与out/cxpack-context-01.*。
+仅PREPARED，材料作业未开；与cc流批出现重叠后停止续派，不能把该准备记作候选或资格。
+
 ## link.undef-function-refusal — 未定义外部函数链接成崩溃镜像（开放）
 
 2026-10-28 cdx 实测更新：共享3a5b完整原批为1 PASS/4 FAIL，收据
