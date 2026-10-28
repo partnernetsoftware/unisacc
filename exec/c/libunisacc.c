@@ -156,6 +156,13 @@ static void tracked_free(void *p) {
     if (node->next) node->next->prev=node->prev;
     free(p); free(node);
 }
+#ifdef UNISA_CX_CORE_EXECUTE
+/* The separately compiled CX execution unit uses this call's tracked domain.
+ * These are link-time adapters, with state still held in the existing TLS. */
+void *__us_core_realloc(void *p,size_t n) { return tracked_realloc(p,n); }
+void *__us_core_calloc(size_t n,size_t size) { return tracked_calloc(n,size); }
+void __us_core_free(void *p) { tracked_free(p); }
+#endif
 static void cleanup(void) {
     while (open_files) {UsOpenFile *node=open_files;open_files=node->next;close(node->fd);free(node);}
     while (allocations) { Allocation *a=allocations; allocations=a->next; free(a->p); free(a); }
