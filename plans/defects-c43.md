@@ -1,6 +1,12 @@
 # c43 已知缺陷登记（cc，2026-10-28 起）
 
-## cxpack.fifo-open — 非普通清单可能阻塞（代码审查发现，待复现）
+## cxpack.fifo-open — 非普通清单阻塞（Linux 候选切片已复现，待修）
+
+2026-10-28：`out/c43-e955-cxpack-fifo-01/` 实跑候选 slice-lnx-x86_64（冻结 af8429d0cf）及显式 PCff696，前四项通过；第五项真实无写端 FIFO 超过 10 秒，transport-error 为 TimeoutExpired，控制器 rc2。不是具名拒绝通过，不授其他驱动/平台结论。stdout/stderr/status.tsv 和超时原因均保留。下段为复现前分析。
+
+### e955 CX0 正式批验收
+
+`out/c43-e955-cx0-batches-01/`：cx0-unit 28/0、cx0-bundle 38/0、cx0-e2 17/0，三个 BATCH_RUN 均 PASS 且 candidate=e955714e。E2 reader 由 fresh workspace `out/c43-e955-cx-workspace-01/` 构造，SHA558ce95c；模型来自新提取 `out/c43-streams-e955-01/`，独立 e2-input-binding 正式44/0。日志 `out/c43-e955-{cx0-unit,cx0-bundle,cx0-e2,input-binding}-01.stdout`。严格清单 metadata_valid=1，234批/214覆盖/19 unresolved；清单校验不记执行资格。首次误用不存在的 tools/bound55 导致 rc127，保留 list-01；改用现有 tools/bound 55 后 list-02 rc0。有限模块合同不关闭完整发布或外国宿主资格。
 
 模型/经典/cxcc三端cxm_rd使用阻塞fopen；无写端FIFO可能在进入fread前阻塞，
 与CX0模块的O_NONBLOCK+普通文件检查不一致。尚未实跑，不能记已确认失败。

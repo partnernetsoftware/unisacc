@@ -154,6 +154,8 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 <a id="work-tree"></a>
 ### 思维树
 
+**CX0 当前验证（2026-10-28）：** e955 上正式 cx0-unit28/0、cx0-bundle38/0、cx0-e2 17/0；新提取七流与候选绑定44/0。fresh workspace读取器已构造。FIFO探针确认候选Linux切片读取无写端清单超过10秒；下一刀修cxm_rd非普通文件边界，原始证据out/c43-e955-cxpack-fifo-01/。严格清单仍19项未解决，不记完整发布通过。
+
 **当前产品（2026-10-28）：** CX候选e955714e/记录0fe8abb8已通过有限材料复核及prepare/finish两阶段安装，来源冻结af8429d0cf/SID6e7375f9，内嵌PCff696未变。安装后smoke16/0；候选APE格式68/0，CX0权威源投影EXACT及28/0。旧4c28备份在out/c43-cxpack-install-01，installed.tsv f1a20e2e。下一步补新产品模块/ABI/诊断与完整发布清单、流网/RI、N22及同候选平台证据；不把开发安装当发布完成。下列4c28段为上一开发产品来源历史。
 
 **CX清单读取修复（2026-10-28）：** 三个cxm_rd实现统一区分ENOENT、超限与其他I/O失败，CXIF生成只在清单确实缺席时保留全部非static公开。私有模型驱动四项4/0，经典参考同四项正常/超限/目录/缺席实返0/1/1/0。宿主首轮暴露目录零长度漏读，改有界读取后GCC/Clang各四项-o通过，正例执行rc7；全部原失败保留。本次仅Linux/x86_64，现行4c2831c3不含此改动。下一动作按源码身份构造与验收；证据见plans/defects-c43.md。
@@ -369,6 +371,8 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 
 <a id="memory-palace"></a>
 ### 记忆宫殿
+
+**CX0 接窗结果：** 正式三批及输入绑定分别28/0、38/0、17/0、44/0，控制器e955，证据out/c43-e955-cx0-batches-01/及对应stdout。FIFO清单超时已复现，待修；前四项通过不掩盖第五项失败。cc矩阵迁标由cc单独维护。
 
 **当前安装身份（2026-10-28）：** unisacc.com=e955714e766f89e324c76812b02624bf0a6960270507c2feba802a977eacfd0f，记录0fe8abb8b337825fc1b9f927adf668622528cbb10f94bd40f7ae14c11ecb8541。CX两阶段安装实际完成，收据f1a20e2e330cb663a7086c5474c65924729a8d557477c6c9944eada07ac30ad5。smoke16/0，原4c28及记录保留；以下构造/安装段是过程历史，不再代表当前安装身份。
 
