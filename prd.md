@@ -362,7 +362,7 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 <a id="memory-palace"></a>
 ### 记忆宫殿
 
-**构造接续检查点（2026-10-28）：** ace3冻结根`unisacc-epoch-aggregate-13d8cfe478`完成76项带收据作业（tool5/gen34/tbl34/net3）；三张差异net与此前private03逐字一致，源码SID与context b09d未变。检查点`out/epoch-build-01/checkpoint-net3-only-01.tsv`；31张相同net未重构造，仍须mixed验证后复用。origin层已提交34ccb522db：角色合同9/0，原生验证器03/执行profile02核身份，真实历史107/34通过；错摘要、符号链接逃逸、未知外部键、执行权限负例及恢复通过。早期失败保留于out/c43-f9-origin-exec-01/。当前接新KGEN与修正ToolRoot后的controller02，尚无新PC、准入或安装资格。cc的661c×35差分报告35/35、0 DIFF；16批含实际C编译，19批仅控制器兼容/旧流材料，不作新E3完整覆盖。
+**构造接续检查点（2026-10-28）：** ace3冻结根`unisacc-epoch-aggregate-13d8cfe478`完成76项带收据作业（tool5/gen34/tbl34/net3）；三张差异net与此前private03逐字一致，源码SID与context b09d未变。检查点`out/epoch-build-01/checkpoint-net3-only-01.tsv`；31张相同net按显式mixed-v2合同复用。origin层已提交34ccb522db：角色合同9/0，原生验证器03/执行profile02核身份，真实历史107/34通过；错摘要、符号链接逃逸、未知外部键、执行权限负例及恢复通过。新KGEN context58adde、controller02已完成prepare/declare/finish/pack/finish/seal，正规实构PC为661c2b02（与私包同字节），context8cb8e390、receipt3fb50654，证据out/c43-f9-ace3-mixed-pc-01/及out/c43-f9-origin-exec-01/。独立读取探针已输出full-origin107/current43/3new/31adopted通过；产品构造、准入和安装尚未完成，不迁移私包测试资格。cc的661c×35差分报告35/35、0 DIFF；16批含实际C编译，19批仅控制器兼容/旧流材料，不作新E3完整覆盖。
 
 **现行产品（2026-10-28）：** Rootd65c1474/record49465750，完整源SIDf9fff160、冻结778fc68ebc；107/107、PC e154c747、双内核/五切片/APE、kind2准入/正规安装和共享精确迁入完成。10个E2相关批加smoke共11批全PASS，header11/0长名修复已实际装入，negative211/0/known_gaps1；证据out/c43-fullname-validation-01/与out/c43-fullname-promote-01/。此前Root94私包绿/未安装的表述已成为历史。E3成员聚合值返回/最终类型核验已由private661c2b02实跑43/0及raw流17/0，内存138/0/库ABI55/0；尚未装入Rootd65。下一刀正规接入该E3改动；结构化CX接口记录与编译期所有权仍未完成。
 
