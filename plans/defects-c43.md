@@ -98,3 +98,12 @@ main.o、main.o none.a均rc1并具名used；m2.o B.a A.a具名inner且rc1；三�
 14. `const char *c="x"; c[0]='y';` — 6.5.16p2 经 const 指针写入。
 15. `int i; i += "str";` — 6.5.16.2p1。
 诊断质量：`int s2[-1]` 被拒但文本为 `reject: not covered: tape data directive`（错因，INFO）。
+
+### c.negative 第三轮（2026-10-28 18:0x）：再添六处（批现 20/41，漏检累计 21）
+
+16. `char *p; int *q; p == q` — 6.5.9p2 不兼容指针比较。
+17. `int x = 1; int x = 2;`（同一块作用域）— 6.7p3。
+18. `case 1: case 1:` — 6.8.4.2p3 重复 case。
+19. `a[1.5]` — 6.5.2.1p1 下标须为整型。
+20. `int a19(void){ return a18(); }`（a18 返回 void）— 6.8.6.4p1。
+21. `const int c; int *p = &c;` — 6.7.8p11 丢弃限定符。
