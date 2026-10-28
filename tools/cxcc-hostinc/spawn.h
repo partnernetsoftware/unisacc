@@ -24,6 +24,7 @@
 #endif
 #include <errno.h>
 #include <fcntl.h>
+#include <io.h>
 #include <limits.h>
 #include <stdint.h>
 #include <sys/stat.h>
@@ -38,11 +39,64 @@
 
 #define waitpid cxcc_waitpid
 #define mkstemp cxcc_mkstemp
+#ifndef SIGKILL
+#define SIGKILL 9
+#endif
+#ifndef O_BINARY
+#define O_BINARY 0
+#endif
 
-struct cxcc_spawn_fa { int n; };
+enum { CXCC_FA_MAX = 16 };
+struct cxcc_fa_act { int op; int fd; int nfd; int oflag; int mode; char path[260]; };
+struct cxcc_spawn_fa { int n; struct cxcc_fa_act a[CXCC_FA_MAX]; };
 struct cxcc_spawn_at { int flags; };
 typedef struct cxcc_spawn_fa posix_spawn_file_actions_t;
 typedef struct cxcc_spawn_at posix_spawnattr_t;
+
+static int posix_spawn_file_actions_init(posix_spawn_file_actions_t *fa) {
+    if (!fa) return EINVAL;
+    fa->n = 0;
+    return 0;
+}
+static int posix_spawn_file_actions_destroy(posix_spawn_file_actions_t *fa) {
+    if (!fa) return EINVAL;
+    fa->n = 0;
+    return 0;
+}
+static int posix_spawn_file_actions_adddup2(posix_spawn_file_actions_t *fa, int fd, int nfd) {
+    if (!fa || fd < 0 || nfd < 0) return EBADF;
+    if (fa->n >= CXCC_FA_MAX) return ENOMEM;
+    fa->a[fa->n].op = 1;
+    fa->a[fa->n].fd = fd;
+    fa->a[fa->n].nfd = nfd;
+    fa->n++;
+    return 0;
+}
+static int posix_spawn_file_actions_addclose(posix_spawn_file_actions_t *fa, int fd) {
+    if (!fa || fd < 0) return EBADF;
+    if (fa->n >= CXCC_FA_MAX) return ENOMEM;
+    fa->a[fa->n].op = 2;
+    fa->a[fa->n].fd = fd;
+    fa->n++;
+    return 0;
+}
+static int posix_spawn_file_actions_addopen(posix_spawn_file_actions_t *fa, int fd,
+                                            const char *path, int oflag, int mode) {
+    int i;
+    if (!fa || fd < 0 || !path) return EBADF;
+    if (fa->n >= CXCC_FA_MAX) return ENOMEM;
+    for (i = 0; path[i]; i++) {
+        if (i >= 259) return ENAMETOOLONG;
+        fa->a[fa->n].path[i] = path[i];
+    }
+    fa->a[fa->n].path[i] = 0;
+    fa->a[fa->n].op = 3;
+    fa->a[fa->n].fd = fd;
+    fa->a[fa->n].oflag = oflag;
+    fa->a[fa->n].mode = mode;
+    fa->n++;
+    return 0;
+}
 
 enum { CXCC_HMAX = 64, CXCC_CMDLINE = 32768 };
 static void *cxcc_hnd[CXCC_HMAX];
@@ -95,34 +149,86 @@ static int posix_spawnp(pid_t *pid, const char *file, const posix_spawn_file_act
     static char env[CXCC_CMDLINE];
     STARTUPINFOA si;
     PROCESS_INFORMATION pi;
-    int i, k, j;
+    HANDLE stdh[3];
+    int opened[CXCC_FA_MAX];
+    int i, k, j, nopen, tgt;
+    intptr_t osf;
     (void)file;
     (void)at;
-    if (fa && fa->n) return ENOSYS;
     if (!argv || !argv[0]) return EINVAL;
     memset(&si, 0, sizeof si);
     si.cb = sizeof si;
     memset(&pi, 0, sizeof pi);
+    stdh[0] = GetStdHandle((unsigned long)-10);
+    stdh[1] = GetStdHandle((unsigned long)-11);
+    stdh[2] = GetStdHandle((unsigned long)-12);
+    nopen = 0;
+    if (fa) for (i = 0; i < fa->n; i++) {
+        if (fa->a[i].op == 2) continue;
+        tgt = fa->a[i].op == 1 ? fa->a[i].nfd : fa->a[i].fd;
+        if (tgt < 0 || tgt > 2) {
+            while (nopen) close(opened[--nopen]);
+            return ENOSYS;
+        }
+        if (fa->a[i].op == 1) {
+            if (fa->a[i].fd <= 2) stdh[tgt] = stdh[fa->a[i].fd];
+            else {
+                osf = _get_osfhandle(fa->a[i].fd);
+                if (osf == (intptr_t)-1) {
+                    while (nopen) close(opened[--nopen]);
+                    return EBADF;
+                }
+                stdh[tgt] = (HANDLE)osf;
+            }
+        } else {
+            k = open(fa->a[i].path, fa->a[i].oflag | O_BINARY, fa->a[i].mode);
+            if (k < 0) {
+                while (nopen) close(opened[--nopen]);
+                return errno ? errno : EIO;
+            }
+            opened[nopen++] = k;
+            osf = _get_osfhandle(k);
+            if (osf == (intptr_t)-1) {
+                while (nopen) close(opened[--nopen]);
+                return EBADF;
+            }
+            SetHandleInformation((HANDLE)osf, 1, 1);
+            stdh[tgt] = (HANDLE)osf;
+        }
+    }
+    if (fa && fa->n) {
+        si.dwFlags = 0x100;
+        si.hStdInput = stdh[0];
+        si.hStdOutput = stdh[1];
+        si.hStdError = stdh[2];
+    }
     k = 0;
     for (i = 0; argv[i]; i++) {
-        if (i) { if (k >= CXCC_CMDLINE - 2) return E2BIG; cmd[k++] = ' '; }
+        if (i) {
+            if (k >= CXCC_CMDLINE - 2) { while (nopen) close(opened[--nopen]); return E2BIG; }
+            cmd[k++] = ' ';
+        }
         k = cxcc_cmdarg(cmd, k, CXCC_CMDLINE - 2, argv[i]);
-        if (k < 0) return E2BIG;
+        if (k < 0) { while (nopen) close(opened[--nopen]); return E2BIG; }
     }
     cmd[k] = 0;
     if (envp) {
         k = 0;
         for (i = 0; envp[i]; i++) {
             for (j = 0; envp[i][j]; j++) {
-                if (k >= CXCC_CMDLINE - 3) return E2BIG;
+                if (k >= CXCC_CMDLINE - 3) { while (nopen) close(opened[--nopen]); return E2BIG; }
                 env[k++] = envp[i][j];
             }
             env[k++] = 0;
         }
         env[k++] = 0;
     }
-    if (!CreateProcessA(0, cmd, 0, 0, 1, 0, envp ? env : 0, 0, &si, &pi))
-        return cxcc_win_errno(GetLastError());
+    if (!CreateProcessA(0, cmd, 0, 0, 1, 0, envp ? env : 0, 0, &si, &pi)) {
+        k = cxcc_win_errno(GetLastError());
+        while (nopen) close(opened[--nopen]);
+        return k;
+    }
+    while (nopen) close(opened[--nopen]);
     CloseHandle(pi.hThread);
     return cxcc_hput(pi.hProcess, pid);
 }
@@ -156,7 +262,7 @@ static int cxcc_mkstemp(char *t) {
         seq++;
         v = (unsigned long)((uintptr_t)&tries >> 4) * 2654435761UL + seq * 40503UL;
         for (j = n - 6; j < n; j++) { t[j] = (char)('a' + (int)(v % 26)); v = v / 26 + seq * 7; }
-        fd = open(t, O_RDWR | O_CREAT | O_EXCL, 0600);
+        fd = open(t, O_RDWR | O_CREAT | O_EXCL | O_BINARY, 0600);
         if (fd >= 0) return fd;
         if (errno != EEXIST) return -1;
     }
@@ -240,7 +346,25 @@ static char *cxcc_realpath(const char *p, char *out) {
     return out;
 }
 
+static int cxcc_kill(pid_t pid, int sig) {
+    if (pid <= 0 || pid >= CXCC_HMAX || sig < 0) { errno = EINVAL; return -1; }
+    if (!cxcc_hnd[pid]) { errno = ESRCH; return -1; }
+    if (sig == 0) return 0;
+    if (!TerminateProcess(cxcc_hnd[pid], (unsigned)(128 + (sig & 0x7f)))) {
+        errno = EPERM;
+        return -1;
+    }
+    return 0;
+}
+
+static int cxcc_usleep(unsigned us) {
+    Sleep(us / 1000u + (us % 1000u ? 1u : 0u));
+    return 0;
+}
+
 #define mkdir(p, m) cxcc_mkdir((p), (m))
 #define realpath(p, o) cxcc_realpath((p), (o))
+#define kill(p, s) cxcc_kill((p), (s))
+#define usleep(u) cxcc_usleep((unsigned)(u))
 #endif
 #endif

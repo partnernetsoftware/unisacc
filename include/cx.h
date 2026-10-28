@@ -1,7 +1,7 @@
 /* cx.h -- 0.0.34 X1: the small toolkit .cx scripts (#!/usr/bin/env unisacc.com -run) need to replace
  * .sh/.py helpers: run a command and take its output, read/write a whole file, sha256, and a command
- * under a time limit.  Plain C99 over the carried libc.  Windows has no fork, so
- * cx_run and cx_runv_timeout still return -1 there.  Every body sits alone in its own guard (tests/libneed.sh). */
+ * under a time limit.  Plain C99 over the carried libc.  Windows has no fork: cx_run and
+ * cx_runv_timeout call posix_spawnp, and cx_walk calls opendir.  Every body sits alone in its own guard (tests/libneed.sh). */
 #ifndef _UNISA_CX_H
 #define _UNISA_CX_H
 /* Edition 1 (plans/cx-modules.md CX1; `#pragma unisa cx 1` is implied): edition 0's toolkit and headers, plus the
@@ -25,6 +25,9 @@
 #include <sys/stat.h>
 #else
 #include <unistd.h>
+#include <signal.h>
+#include <sys/stat.h>
+#include <dirent.h>
 #include <sys/wait.h>
 #include <spawn.h>
 #endif
@@ -59,7 +62,8 @@ static char *_cx_slurp(FILE *__u_f, size_t *__u_len) {
 
 /* the whole file, as _cx_slurp; NULL when it cannot be opened or a read fails -- a directory
    included (fopen "rb" opens one on POSIX and the first read fails with EISDIR; it was an empty
-   buffer until 0.0.43, where Python's open() raises) */
+   buffer until 0.0.43, where Python's open() raises). Windows fopen does not fail that way, so
+   a directory is rejected with stat. */
 #if !__UNISA_FTRIM_LIBC || __UN_cx_read
 static char *cx_read(const char *__u_path, size_t *__u_len) {
     FILE *__u_f = fopen(__u_path, "rb"); char *__u_b;
@@ -83,6 +87,13 @@ static char *cx_read(const char *__u_path, size_t *__u_len) {
         if (__u_len) *__u_len = __u_n;
     }
 #else
+    {   struct stat __u_st;
+        if (stat(__u_path, &__u_st) == 0 && S_ISDIR(__u_st.st_mode)) {
+            fclose(__u_f);
+            if (__u_len) *__u_len = 0;
+            return 0;
+        }
+    }
     __u_b = _cx_slurp(__u_f, __u_len);
     if (__u_b && ferror(__u_f)) { free(__u_b); __u_b = 0; if (__u_len) *__u_len = 0; }
 #endif
@@ -106,7 +117,9 @@ static int cx_write(const char *__u_path, const void *__u_buf, size_t __u_len) {
 #if !__UNISA_FTRIM_LIBC || __UN_cx_run
 static int cx_run(const char *__u_cmd, char **__u_out, size_t *__u_len) {
 #ifdef _WIN32
-    (void)__u_cmd; if (__u_out) *__u_out = 0; if (__u_len) *__u_len = 0; return -1;   /* no popen yet */
+    char *__u_argv[4];
+    __u_argv[0] = "sh"; __u_argv[1] = "-c"; __u_argv[2] = (char *)__u_cmd; __u_argv[3] = 0;
+    return cx_runv_timeout(__u_argv, 0, __u_out, __u_len);
 #else
     FILE *__u_f = popen(__u_cmd, "r"); char *__u_b; int __u_st;
     if (!__u_f) return -1;
@@ -125,7 +138,9 @@ static int cx_run(const char *__u_cmd, char **__u_out, size_t *__u_len) {
 #if !__UNISA_FTRIM_LIBC || __UN_cx_run_timeout
 static int cx_run_timeout(const char *__u_cmd, int __u_secs, char **__u_out, size_t *__u_len) {
 #ifdef _WIN32
-    (void)__u_secs; return cx_run(__u_cmd, __u_out, __u_len);
+    char *__u_argv[4];
+    __u_argv[0] = "sh"; __u_argv[1] = "-c"; __u_argv[2] = (char *)__u_cmd; __u_argv[3] = 0;
+    return cx_runv_timeout(__u_argv, __u_secs, __u_out, __u_len);
 #else
     char __u_tmp[] = "/tmp/cxrunXXXXXX"; int __u_fd = mkstemp(__u_tmp), __u_st = 0, __u_rc;
     long __u_ticks = (long)__u_secs * 100; pid_t __u_pid, __u_w; FILE *__u_f;
@@ -170,7 +185,41 @@ static void cx_sha256_hex(const void *__u_buf, size_t __u_len, char __u_hex[65])
 #if !__UNISA_FTRIM_LIBC || __UN_cx_runv_timeout
 static int cx_runv_timeout(char *const __u_argv[], int __u_secs, char **__u_out, size_t *__u_len) {
 #ifdef _WIN32
-    (void)__u_argv; (void)__u_secs; if (__u_out) *__u_out = 0; if (__u_len) *__u_len = 0; return -1;
+    char __u_tmp[512], *__u_b; const char *__u_td; posix_spawn_file_actions_t __u_fa;
+    pid_t __u_pid = 0, __u_w; int __u_fd, __u_st = 0, __u_rc, __u_spr, __u_k; long __u_ticks; FILE *__u_f;
+    if (!__u_argv || !__u_argv[0]) return -1;
+    __u_td = getenv("TMPDIR");
+    if (!__u_td || !__u_td[0]) __u_td = getenv("TEMP");
+    if (!__u_td || !__u_td[0]) __u_td = ".";
+    __u_k = snprintf(__u_tmp, sizeof __u_tmp, "%s/cxrunXXXXXX", __u_td);
+    if (__u_k < 0 || __u_k >= (int)sizeof __u_tmp) return -1;
+    __u_fd = mkstemp(__u_tmp);
+    if (__u_fd < 0) return -1;
+    if (close(__u_fd) != 0) { unlink(__u_tmp); return -1; }
+    if (posix_spawn_file_actions_init(&__u_fa) != 0) { unlink(__u_tmp); return -1; }
+    if (posix_spawn_file_actions_addopen(&__u_fa, 1, __u_tmp, O_WRONLY | O_CREAT | O_TRUNC, 0600) != 0) {
+        posix_spawn_file_actions_destroy(&__u_fa); unlink(__u_tmp); return -1;
+    }
+    __u_spr = posix_spawnp(&__u_pid, __u_argv[0], &__u_fa, 0, __u_argv, 0);
+    posix_spawn_file_actions_destroy(&__u_fa);
+    if (__u_spr != 0) { unlink(__u_tmp); return __u_spr == ENOENT ? 127 : -1; }
+    __u_ticks = (long)__u_secs * 100; __u_rc = -1;
+    for (;;) {
+        __u_w = waitpid(__u_pid, &__u_st, WNOHANG);
+        if (__u_w == __u_pid) { __u_rc = (__u_st & 0x7f) ? 128 + (__u_st & 0x7f) : (__u_st >> 8) & 0xff; break; }
+        if (__u_w < 0) { __u_rc = -1; break; }
+        if (__u_secs > 0 && __u_ticks-- <= 0) {
+            kill(-__u_pid, SIGKILL); kill(__u_pid, SIGKILL); waitpid(__u_pid, &__u_st, 0); __u_rc = 124; break;
+        }
+        usleep(10000);
+    }
+    __u_f = fopen(__u_tmp, "rb");
+    if (__u_f) {
+        __u_b = _cx_slurp(__u_f, __u_len); fclose(__u_f);
+        if (__u_out) *__u_out = __u_b; else free(__u_b);
+    } else if (__u_out) *__u_out = 0;
+    unlink(__u_tmp);
+    return __u_rc;
 #else
     char __u_tmp[] = "/tmp/cxrunXXXXXX"; int __u_fd = mkstemp(__u_tmp), __u_st = 0, __u_rc;
     long __u_ticks = (long)__u_secs * 100; pid_t __u_pid, __u_w; FILE *__u_f;
@@ -207,9 +256,6 @@ static int _cx_cmp(const void *__u_a, const void *__u_b) { return strcmp(*(char 
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_cx_walk
 static int cx_walk(const char *__u_dir, int (*__u_fn)(const char *__u_path, void *__u_ctx), void *__u_ctx) {
-#ifdef _WIN32
-    (void)__u_dir; (void)__u_fn; (void)__u_ctx; return -1;
-#else
     DIR *__u_d = opendir(__u_dir); struct dirent *__u_e; char **__u_v = 0; size_t __u_n = 0, __u_cap = 0, __u_i; int __u_rc = 0;
     if (!__u_d) return -1;
     while ((__u_e = readdir(__u_d))) {
@@ -232,7 +278,6 @@ static int cx_walk(const char *__u_dir, int (*__u_fn)(const char *__u_path, void
     }
     free(__u_v);
     return __u_rc;
-#endif
 }
 #endif
 
