@@ -1,0 +1,90 @@
+#pragma unisa module package_decode
+#pragma unisa use package_lifetime
+#pragma unisa use model_number
+/* Decode directory tables from one borrowed package span.  On success the
+ * caller owns the returned allocations; file and path remain unowned. */
+typedef struct {
+    const unsigned char *bytes; long length, at;
+    void *(*allocate)(void *, size_t); void (*release)(void *);
+    CxPackage package; const char *why;
+} CxPackageDecode;
+static int bad(CxPackageDecode *d,const char *why) { if (!d->why) d->why=why; return 1; }
+static void *getmem(CxPackageDecode *d,size_t n) {
+    void *p=d->allocate(0,n?n:1); if(!p)bad(d,"out of memory"); return p;
+}
+static int tag(CxPackageDecode *d,int want) {
+    int value=0,rc=cxmn_tag(d->bytes,d->length,&d->at,0,&value);
+    if(rc==2)return bad(d,"truncated model");
+    if(rc==3)return bad(d,"bad model tag");
+    if(rc)return bad(d,"invalid model tag input");
+    return value==want?0:bad(d,"bad model tag");
+}
+static int number(CxPackageDecode *d,long long *v) {
+    int rc=cxmn_number(d->bytes,d->length,&d->at,0,v);
+    if(rc==5)return bad(d,"bad model number");
+    if(rc==6)return bad(d,"model number overflow");
+    if(rc==7)return bad(d,"missing model number");
+    return rc?bad(d,"invalid model number input"):0;
+}
+static int integer(CxPackageDecode *d,int *v) {
+    long long n;if(number(d,&n))return 1;
+    if(n < (-2147483647LL-1) || n > 2147483647LL)return bad(d,"model index overflow");
+    *v=(int)n;return 0;
+}
+static char *word(CxPackageDecode *d) {
+    while(d->at<d->length && d->bytes[d->at]<=32)d->at++;
+    long start=d->at;
+    while(d->at<d->length && d->bytes[d->at]>32) {
+        int c=d->bytes[d->at++];
+        if(!((c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_'||c=='-'||c=='.'||c=='/')){bad(d,"bad package name");return 0;}
+    }
+    long n=d->at-start;if(!n){bad(d,"missing package name");return 0;}
+    char *v=getmem(d,(size_t)n+1);if(v){memcpy(v,d->bytes+start,(size_t)n);v[n]=0;}return v;
+}
+static int decode(CxPackageDecode *d) {
+    CxPackage *p=&d->package;int ver,pm,ps,nr=0;
+    p->b=(unsigned char *)d->bytes;p->n=(int)d->length;
+    if(tag(d,'P')||integer(d,&ver))return 1;
+    if(ver<1||ver>3)return bad(d,"unknown package version");p->ver=ver;
+    if(integer(d,&pm)||integer(d,&ps)||(ver>=2&&integer(d,&nr)))return 1;
+    if(nr<0||nr>p->n/5)return bad(d,"bad resource count");
+    p->res=getmem(d,sizeof(CxPackageResource)*(size_t)nr);if(!p->res)return 1;p->nr=nr;
+    if(pm<=0||ps<=0||pm>p->n/8||ps>p->n/10)return bad(d,"bad package count");
+    p->off=getmem(d,sizeof(int)*(size_t)pm);if(!p->off)return 1;
+    p->len=getmem(d,sizeof(int)*(size_t)pm);if(!p->len)return 1;
+    p->raw=getmem(d,sizeof(int)*(size_t)pm);if(!p->raw)return 1;
+    p->crc=getmem(d,sizeof(uint32_t)*(size_t)pm);if(!p->crc)return 1;p->m=pm;
+    p->stages=getmem(d,sizeof(CxPackageStage)*(size_t)ps);if(!p->stages)return 1;
+    memset(p->stages,0,sizeof(CxPackageStage)*(size_t)ps);p->s=ps;
+    for(int i=0;i<ps;i++){
+        if(tag(d,'D'))return 1;CxPackageStage *s=&p->stages[i];
+        s->route=word(d);if(!s->route)return 1;s->name=word(d);if(!s->name)return 1;
+        s->in=word(d);if(!s->in)return 1;s->out=word(d);if(!s->out)return 1;
+        if(integer(d,&s->model))return 1;if(s->model<0||s->model>=pm)return bad(d,"bad package model index");
+        int previous=-1;for(int j=0;j<i;j++)if(!strcmp(s->route,p->stages[j].route)){
+            if(!strcmp(s->name,p->stages[j].name))return bad(d,"duplicate package stage");previous=j;
+        }
+        if(previous>=0&&strcmp(p->stages[previous].out,s->in))return bad(d,"package format mismatch");
+    }
+    for(int i=0;i<pm;i++){
+        int n;if(tag(d,'M')||integer(d,&n))return 1;p->raw[i]=n;p->crc[i]=0;
+        if(ver==3){int codec;long long sum;if(integer(d,&p->raw[i])||integer(d,&codec)||number(d,&sum))return 1;
+            if(p->raw[i]<=0||codec!=1||sum<0||sum>4294967295LL)return bad(d,"bad compressed model header");p->crc[i]=(uint32_t)sum;}
+        if(d->at>=d->length||d->bytes[d->at++]!=10||n<=0||n>d->length-d->at)return bad(d,"bad package model extent");
+        if(ver<3&&d->bytes[d->at]!='N')return bad(d,"package requires networks");
+        p->off[i]=(int)d->at;p->len[i]=n;d->at+=n;
+    }
+    for(int i=0;i<nr;i++){
+        int n,len;if(tag(d,'F')||integer(d,&n)||integer(d,&len))return 1;
+        if(d->at>=d->length||d->bytes[d->at++]!=10||n<=0||len<0||n>d->length-d->at||len>d->length-d->at-n)return bad(d,"bad resource extent");
+        p->res[i].name=(int)d->at;p->res[i].n=n;p->res[i].data=(int)d->at+n;p->res[i].len=len;
+        for(int j=0;j<i;j++)if(p->res[j].n==n&&!memcmp(d->bytes+p->res[j].name,d->bytes+d->at,(size_t)n))return bad(d,"duplicate resource name");
+        d->at+=n+len;
+    }
+    if(d->at!=d->length)return bad(d,"trailing package data");p->complete=1;return 0;
+}
+int cxpk_decode(CxPackageDecode *d,const unsigned char *bytes,long n) {
+    if(!d||!d->allocate||!d->release||n<0||n>2147483647L||(!bytes&&n))return 1;
+    cxpl_release(&d->package,d->release);d->bytes=bytes;d->length=n;d->at=0;d->why=0;
+    if(decode(d)){cxpl_release(&d->package,d->release);return 1;}return 0;
+}
