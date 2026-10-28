@@ -53,7 +53,16 @@ static int unisa_inflate(unsigned char *out,unsigned long outlen,const unsigned 
 #else
 #include "codec.h"
 #endif
+#ifdef UNISA_CX_PACKAGEFOOTER
+typedef struct {
+    long file_size, footer_offset, package_offset, package_length;
+    long certificate_offset, certificate_length;
+    int padding;
+} PackageFooter;
+int packagefooter_locate_bytes(const unsigned char *, long, PackageFooter *);
+#else
 #include "packagefooter.h"
+#endif
 static void *xrealloc(void *p, size_t n) { p = realloc(p, n ? n : 1); if (!p) die("out of memory"); return p; }
 /* Package bytes and decoded model tables are owned by their cache (one per
    library context; one static slot for the command line), not by the

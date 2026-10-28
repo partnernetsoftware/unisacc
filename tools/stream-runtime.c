@@ -2,8 +2,10 @@
  * Default step budget stays 2e8, identical to exec/c/run.c.
  * Build with the product; package material is supplied separately. */
 #define main stream_executor_main
+#define UNISA_CX_PACKAGEFOOTER
 #include "../exec/c/run.c"
 #undef main
+#undef UNISA_CX_PACKAGEFOOTER
 #include <unistd.h>
 #include <fcntl.h>
 int cxs_write(int,const void *,long);
