@@ -1,0 +1,51 @@
+/* tools/link-malformed-input.cx -- malformed object / tapebin / tape inputs to the linker, decoder and runner must be
+ * refused by name (rc != 0, non-empty stderr, no output file), never accepted or crash the product. Found 2026-10-28 on
+ * f3705dfa (fable: limited sweep B, same root as the link defects): an object whose ELF magic is overwritten and an
+ * object truncated to its first 2000 bytes are LINKED (rc 0, image written: the unit tape is located without validating
+ * the container); a tape whose _start falls off the end (`imm r0, 7` with no ret) makes `-run` SIGSEGV (rc 139).
+ *   sh ./unisacc.com tools/link-malformed-input.cx -- ROOT ABS_OUT
+ * Green today: truncated-to-100-bytes object (`carries no unit tape`), tapebin with a flipped byte / truncated header /
+ * corrupted minor (`invalid tapebin or origin target mismatch`), tape with an unknown opcode, binary garbage as tape. */
+#pragma unisa use cxlib.netpack
+
+static char root[4096], outdir[4096], product[4400]; static int npass, nfail; static FILE *res;
+static void die(const char *s) { fprintf(stderr, "link-malformed-input: REFUSE %s errno=%d\n", s, errno); exit(2); }
+static void path(char *p, size_t cap, const char *a, const char *b) { int n = snprintf(p, cap, "%s/%s", a, b); if (n < 0 || (size_t)n >= cap) die("path"); }
+static void saved(const char *p, const char *s, size_t n) { int f = open(p, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600); if (f < 0) die("exclusive create"); while (n) { ssize_t k = write(f, s, n); if (k <= 0) die("write"); s += k; n -= (size_t)k; } if (close(f)) die("close"); }
+static void check(int ok, const char *label, const char *detail) { fprintf(res, "%s\tlink.malformed.%s\t%s\n", ok ? "PASS" : "FAIL", label, detail); printf("%s\t%s\n", ok ? "PASS" : "FAIL", label); if (ok) npass++; else nfail++; }
+static int prod(char *const extra[], np_result *r) { char *v[20]; int n = 0; v[n++] = "sh"; v[n++] = product; for (int i = 0; extra[i]; i++) { if (n >= 19) die("argv"); v[n++] = extra[i]; } v[n] = 0; char why[1024]; return np_run(v, outdir, 0, 20, r, why, sizeof why); }
+static int absent(const char *leaf) { if (!leaf) return 1; char p[4400]; path(p, sizeof p, outdir, leaf); struct stat st; errno = 0; if (!lstat(p, &st)) return 0; if (errno != ENOENT) die("lstat"); return 1; }
+static char *load(const char *leaf, size_t *n) { char p[4400]; path(p, sizeof p, outdir, leaf); char *b = cx_read(p, n); if (!b) die(leaf); return b; }
+static void derive(const char *from, const char *to, size_t cut, long at, unsigned char byte) { size_t n; char *b = load(from, &n); if (cut && cut < n) n = cut; if (at >= 0 && (size_t)at < n) b[at] = (char)byte; char p[4400]; path(p, sizeof p, outdir, to); saved(p, b, n); free(b); }
+/* named refusal: rc != 0 and < 128 (no signal), stderr non-empty containing TEXT, OUT absent */
+static void refused(const char *label, char *const argv[], const char *out, const char *text) { np_result r; if (prod(argv, &r)) { check(0, label, "transport"); return; }
+    int ok = r.rc && r.rc < 128 && absent(out) && r.errn && (!text || strstr(r.err, text)); char d[320]; snprintf(d, sizeof d, "rc=%d out-absent=%d stderr(%zu)=%.*s", r.rc, absent(out), r.errn, (int)(r.errn > 110 ? 110 : r.errn), r.err); for (char *q = d; *q; q++) if (*q == '\n') *q = ' ';
+    check(ok, label, d); np_free(&r); }
+
+int main(int argc, char **argv) {
+    if (argc != 3 || !realpath(argv[1], root) || argv[2][0] != '/') { fputs("usage: ROOT ABS_OUT\n", stderr); return 2; }
+    snprintf(outdir, sizeof outdir, "%s", argv[2]); if (mkdir(outdir, 0700)) die("new out dir must be absent"); path(product, sizeof product, root, "unisacc.com");
+    char rp[4400]; path(rp, sizeof rp, outdir, "results.tsv"); res = fopen(rp, "wbx"); if (!res) die("results");
+    { size_t n; char *b = cx_read(product, &n); if (!b) die("product"); char h[65]; cx_sha256_hex(b, n, h); free(b); fprintf(res, "IDENTITY\tcandidate=%s\n", h); }
+    char p[4400]; const char *M = "int main(void){return 7;}\n"; path(p, sizeof p, outdir, "m.c"); saved(p, M, strlen(M));
+    { char *v[] = { "-c", "-b", "lnx/x86_64", "-funit", "-o", "u.o", "m.c", 0 }; np_result r; if (prod(v, &r) || r.rc) die("u.o"); np_free(&r); char *w[] = { "-S", "--tapebin", "-o", "t.tapebin", "m.c", 0 }; if (prod(w, &r) || r.rc) die("t.tapebin"); np_free(&r); }
+    derive("u.o", "trunc.o", 100, -1, 0); derive("u.o", "badmagic.o", 0, 0, 'X'); derive("u.o", "half.o", 2000, -1, 0);
+    derive("t.tapebin", "tb-flip.tapebin", 0, 100, 0xff); derive("t.tapebin", "tb-trunc.tapebin", 64, -1, 0); derive("t.tapebin", "tb-minor.tapebin", 0, 10, 7);
+    const char *bad = "_start:\n  bogus r9, r0\n  ret\n", *noret = "_start:\n  imm r0, 7\n", *bin = "\0\1\2garbage\n";
+    path(p, sizeof p, outdir, "bad.tape"); saved(p, bad, strlen(bad)); path(p, sizeof p, outdir, "noret.tape"); saved(p, noret, strlen(noret)); path(p, sizeof p, outdir, "bin.tape"); saved(p, bin, 11);
+    /* green today */
+    { char *v[] = { "-o", "p1", "trunc.o", 0 }; refused("object.truncated-100.named", v, "p1", "carries no unit tape"); }
+    { char *v[] = { "-S", "-o", "o1.tape", "tb-flip.tapebin", 0 }; refused("tapebin.flipped-byte.named", v, "o1.tape", "invalid tapebin"); }
+    { char *v[] = { "-S", "-o", "o2.tape", "tb-trunc.tapebin", 0 }; refused("tapebin.truncated-header.named", v, "o2.tape", "invalid tapebin"); }
+    { char *v[] = { "-S", "-o", "o3.tape", "tb-minor.tapebin", 0 }; refused("tapebin.bad-minor.named", v, "o3.tape", "invalid tapebin"); }
+    { char *v[] = { "-run", "tb-flip.tapebin", 0 }; refused("run.tapebin-flipped.named", v, 0, "invalid tapebin"); }
+    { char *v[] = { "-run", "bad.tape", 0 }; refused("run.tape-unknown-opcode.named", v, 0, "unknown opcode"); }
+    { char *v[] = { "-run", "bin.tape", 0 }; refused("run.tape-binary-garbage.named", v, 0, 0); }
+    { char *v[] = { "-o", "p4", "bad.tape", 0 }; refused("image.tape-unknown-opcode.named", v, "p4", "unknown opcode"); }
+    /* red today */
+    { char *v[] = { "-o", "p2", "badmagic.o", 0 }; refused("object.bad-elf-magic.named", v, "p2", 0); }
+    { char *v[] = { "-o", "p3", "half.o", 0 }; refused("object.truncated-2000.named", v, "p3", 0); }
+    { char *v[] = { "-run", "noret.tape", 0 }; refused("run.tape-falls-off-end.named-no-crash", v, 0, 0); }
+    { char *v[] = { "-o", "p5", "noret.tape", 0 }; np_result r; if (prod(v, &r)) die("p5"); char d[200]; snprintf(d, sizeof d, "rc=%d out-absent=%d stderr=%.*s", r.rc, absent("p5"), (int)(r.errn > 100 ? 100 : r.errn), r.err); for (char *q = d; *q; q++) if (*q == '\n') *q = ' '; fprintf(res, "INFO\tlink.malformed.image.tape-falls-off-end\t%s\n", d); np_free(&r); }
+    fprintf(res, "SUMMARY\tpass=%d\tfail=%d\n", npass, nfail); fclose(res); printf("LINK_MALFORMED_INPUT\tpass=%d\tfail=%d\n", npass, nfail); return nfail ? 1 : 0;
+}

@@ -141,3 +141,10 @@ sizeof纪元固定identity-helper实读新源SID为
 ## 观察（有效程序被拒，低）：`int vla_fs[(int)1.0 + 0];`
 
 - 文件作用域数组大小为整型常量表达式（C99 6.6p6 允许把浮点常量强制转换为整型），gcc 接受；产品拒绝（`-c -b`，rc 1）。属 E3 常量折叠对强制转换的覆盖缺口；非安全问题。
+
+## link.malformed-input — 畸形输入：两处容器不校验、一处产品自身崩溃（开放；exec/c/compiler.c tl_tape 定位 / 运行器）
+
+批 `link-malformed-input`（tools/link-malformed-input.cx，8/11，红行即复现）：
+1. **S2 产品崩溃**：`_start:\n  imm r0, 7\n`（无 ret，落出末尾）`-run noret.tape` → 产品进程 SIGSEGV（rc -11，无 stderr）。预期具名拒绝（"control falls off the end of _start"）或运行期有界终止。`-o` 镜像路线 rc 0 并写出镜像（INFO）。
+2. S1 容器不校验：ELF 魔数被覆盖为 `XXXX` 的单元对象仍被链接成镜像（rc 0）；截断到前 2000 字节（无节头表）的对象同样被链接。tl_tape 直接搜索单元 tape 负载而不校验 ELF 头/节表。预期：`not an ELF unit object` / `truncated object` 具名拒绝。
+绿：截到 100 字节对象、tapebin 翻字节/截断/坏 minor、未知操作码 tape、二进制垃圾 tape 均具名拒绝。
