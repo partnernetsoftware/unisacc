@@ -370,6 +370,8 @@ coverage中旧1/4缺陷描述改为本候选实际4/1及明确合同冲突，没
 
 ### 容器修复开发安装（冻结ecb5fbe322）
 
+落尾正规来源构造起点：git archive 648fe13db9到仓外unisacc-epoch-fallguard-648fe13db9，保存b6f15启动产品及db7af545记录，不采入共享prd未提交编辑。新SID95b23dc90b25b8b30eddbf4aed2215f48ba293d11d0fc433ff483fb7da2bbd81；context70dbb7095c5a1c9bfa107b8042a71f9218fabd003a66b234b782b08cee4606e4。prepare-context、tool-gen及八个gen lower（六程序目标+两object目标）已逐作业PREPARED并保存原生命令/输出/身份收据；冻结lnx/x86_64生成JSON与私有04逐字节相同。object-lower相对sizeof来源也有差异，不能遗漏；其余材料生成/差异分组、tbl/net、kernel/PC、候选与安装尚待完成。PREPARED不授测试或发布资格，已装仍b6f15。
+
 落尾跨目标构造及库回归接续：原生seed-gen分别--full加--arm64/--osx/--win生成其余五目标lower，seed-tbl及通用run均rc0；同straight-falloff输入经过新lower与PCff696各目标elf模型，五个镜像均成功，file识别为对应ELF ARM64/Mach-O x86_64+arm64/PE x86_64+arm64。日志out/c43-fallguard-{lnx-arm64,osx-x86_64,osx-arm64,win-x86_64,win-arm64}-*；加此前Linux x86_64共六目标构造，不授外国执行。私包6fcff655在现有tests/p3-library-members.cx实跑27/0（out/c43-fallguard-library-01）：本机宿主fixture实构，clean库合同、编译调用答案1027/2037、carrier导出及成员损坏拒绝全过。证明该私包本机库调用未被包后追加guard破坏；未做新旧UNILOWP1全字节比较，不声称六目标库/完整库资格或零宿主依赖。
 
 默认-run私包进展：out/c43-fallguard-private-01仅替换lnx/x86_64 lower.net，其余模型/内核取自PCff696材料，原生compilerpack生成路由、pack装包；私包SHA6fcff655c0758866f615bad10955aa78115acf7c7beb7c885702bdd8473b0d93，包装器SHA654bcf4094a5577ccfa550f2980cd9f403cc7afbbbff716bc0c4084b0907c0e7，实际驱动b6f15e82且显式--models。out/c43-fallguard-seven-02为7/0：三落尾rc127且具名诊断，四合法控制rc7且无输出，均transport0。未安装、未授库容器或外国目标资格。第一次seven-01因尚未完成pack、缺compiler.pkg全部拒绝，保留不计产品失败；当前宿主重编seed/pack.c缺zlib.h，改用既有out/c43-source-package-context-03/jobs/tool-pack/result.exe，宿主工具依赖未清零，私包非正规准入。
