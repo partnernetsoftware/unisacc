@@ -293,6 +293,10 @@ coverage中旧1/4缺陷描述改为本候选实际4/1及明确合同冲突，没
 
 ## driver.diagnostics — 驱动与 ar 的四处不具名/错因拒绝（开放，诊断类；exec/c/compiler.c，所有者 cdx/grk）
 
+cb743c27接续：已装原断言复跑out/c43-driver-cb74-01为7/4。修复源码仅exec/c/compiler.c与src/tapelink.c：ar操作在遍历成员前校验（共享tl_ar_operation）；链接未选择任何单元时具名拒绝输入；tl_note_links记录真正的_start标签，两条链接入口各次重置并在输出前拒绝缺入口。无入口单元原先并非编译拒绝，而是回退执行普通函数并返回1，因此撤掉了仅在rc失败后追加上下文的中间尝试。私有Linux驱动9e9d4768cce9fe2000b9f418c78742b95baa98b843ba436b6f645cc2d1503999配正式PC7b806ec2，包装SHAfaf48763；out/c43-driver-diag-check-05为11/0、driver-diag-ar-01为17/0（含实际GNU ar互操作和正常链接exit7）。共享已装仍cb743c27；参考源码已同步，参考二进制及外国平台未重构实跑。第一轮helper误落TL_PRODUCT条件外导致未定义、私有包装把--models放在ar前导致ok.a失败、第二轮10/1全部保留，不记PASS。
+
+直接C未定义函数另案：cb743c27与私有04均4/1（out/c43-undefined-cb74-01、driver-diag-undef-01）；对象及归档拒绝正确，直接-o生成迟绑定桩。相同源-S在1:38具名undefined function并rc1；生成镜像实际rc127、stderr为unisacc: no host function used（undefined-direct-image-01），不是此轮SIGSEGV。docs/host-interop.md明确-o也转发，与README“写文件不转发”冲突；保留原红断言与开放合同，不关闭宿主转发或把静态链接合同偷偷改为PASS。
+
 批 `driver-diagnostics`（tools/driver-diagnostics.cx，7/11，红行即复现）：
 1. `unisacc -run u.o`（单元对象）：rc 1，**stderr 为空**。预期具名拒绝（如 `cannot run a unit object; link it first`）。
 2. `unisacc -run ok.a`（仅归档）：文本 `these objects were compiled for another target; running needs this machine's: `（目标名为空，且原因错误：问题是没有可运行的单元/main）。

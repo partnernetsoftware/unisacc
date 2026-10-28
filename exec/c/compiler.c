@@ -404,7 +404,7 @@ static int take_unit(char *t,long tl,int u) {
 }
 static int link_objects(const char **paths,int n,Buf *out) {
     int u=0;
-    linkbuf.n=0; tl_ng=0; tl_gend=0; tl_nend=0; tl_ndef=0; tl_next=0; tl_ngdef=0;
+    linkbuf.n=0; tl_ng=0; tl_gend=0; tl_nend=0; tl_ndef=0; tl_next=0; tl_ngdef=0; tl_has_entry=0;
     for (int p=0;p<n;p++) {                      /* every object is taken */
         if (archive_path(paths[p])) continue;
         int len=0; unsigned char *b=source_read(paths[p],&len); long tl=0;
@@ -429,7 +429,9 @@ static int link_objects(const char **paths,int n,Buf *out) {
         }
         free(used); free(b);
     }
+    if (!u) { fprintf(stderr,"link: no input unit selected from %s\n",paths[0]); return 1; }
     if (tl_check_undef()) return 1;              /* R20-3: shared with the reference linker */
+    if (!tl_has_entry) { fprintf(stderr,"link: missing _start entry in %s\n",paths[0]); return 1; }
     tl_os("__init:\n",8);
     for (int k=0;k<u;k++) { tl_os("  call __init_u",15); tl_num(k); tl_o(10); }
     tl_os("  ret\n",6);
@@ -441,6 +443,7 @@ static int link_objects(const char **paths,int n,Buf *out) {
 static int product_ar(int argc,char **argv) {
     if (argc<4) { fputs("usage: unisacc ar rcs|t|x LIB.a [MEMBER...]\n",stderr); return 2; }
     const char *op=argv[2],*lib=argv[3];
+    if (!tl_ar_operation(op)) { fputs("ar: operation must be r, q, t or x\n",stderr); return 2; }
     if (op[0]=='r' || op[0]=='q') {
         long cap=8; for (int i=4;i<argc;i++) { int len=0; unsigned char *b=source_read(argv[i],&len); free(b); cap+=len+400+strlen(argv[i]); }
         char *ab=malloc(cap); memcpy(ab,"!<arch>\n",8); long at=8;

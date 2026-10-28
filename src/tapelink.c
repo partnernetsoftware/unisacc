@@ -309,6 +309,7 @@ char *tl_ar_member(char *ab, long n, int i, char *nm, long *len) {
 char tl_npool[2097152]; int tl_nend;
 int tl_def_at[65536]; int tl_def_len[65536]; int tl_ndef;
 int tl_ext_at[65536]; int tl_ext_len[65536]; int tl_next;
+int tl_has_entry;
 int tl_inset(int *at, int *ln, int cnt, char *s, int n) {
     int i; i = 0; while (i < cnt) { if (tl_same(tl_npool + at[i], ln[i], s, n)) return 1; i = i + 1; } return 0;
 }
@@ -329,6 +330,7 @@ int tl_note_links(char *t, long n) {
         e = i; while (e < n && t[e] != 10) e = e + 1;
         if (tl_islink(t, i, e, ".global ")) tl_addname(tl_def_at, tl_def_len, &tl_ndef, t + i + 8, (int)(e - i - 8));
         if (tl_islink(t, i, e, ".extern ")) tl_addname(tl_ext_at, tl_ext_len, &tl_next, t + i + 8, (int)(e - i - 8));
+        if (tl_is(t + i, (int)(e - i), "_start:")) tl_has_entry = 1;
         i = e + 1;
     }
     return 0;
@@ -469,6 +471,10 @@ char *tl_tape(char *b, long n, long *len) {
 malformed:
     tl_fail("link: malformed unit tape payload\n"); return 0;
 }
+/* Validate the operation independently of whether the archive has members. */
+int tl_ar_operation(const char *op) {
+    return op[0] == 114 || op[0] == 113 || op[0] == 116 || op[0] == 120;
+}
 #ifndef TL_PRODUCT
 int isobject(char *p) {
     int n; n = 0; while (p[n]) n = n + 1;
@@ -499,7 +505,7 @@ char tl_used[65536];
 int fe_link(char **paths, int npath) {
     int u; int p; long n; long len; char *t; int k; int i; int changed; char nm[256];
     model_dims(); setup();
-    nout = 0; tl_ng = 0; tl_gend = 0; tl_nend = 0; tl_ndef = 0; tl_next = 0; tl_ngdef = 0;
+    nout = 0; tl_ng = 0; tl_gend = 0; tl_nend = 0; tl_ndef = 0; tl_next = 0; tl_ngdef = 0; tl_has_entry = 0;
     u = 0; p = 0;
     while (p < npath) {                       /* every object is taken */
         if (isarchive(paths[p]) == 0) {
@@ -536,7 +542,9 @@ int fe_link(char **paths, int npath) {
         }
         p = p + 1;
     }
+    if (!u) { __write(2, "link: no input unit selected from ", blen("link: no input unit selected from ")); __write(2, paths[0], blen(paths[0])); __write(2, "\n", 1); return 1; }
     if (tl_check_undef()) return 1;
+    if (!tl_has_entry) { __write(2, "link: missing _start entry in ", blen("link: missing _start entry in ")); __write(2, paths[0], blen(paths[0])); __write(2, "\n", 1); return 1; }
     tl_os("__init:\n", 8);
     k = 0; while (k < u) { tl_os("  call __init_u", 15); tl_num(k); tl_o(10); k = k + 1; }
     tl_os("  ret\n", 6);
@@ -548,6 +556,7 @@ int tl_ar(int argc) {
     char *op; char *lib; long at; int i; int fd; long n; char nm[256]; char *m; long len; int k;
     if (argc < 4) { __write(2, "usage: unisacc ar rcs|t|x LIB.a [MEMBER...]\n", 44); return 2; }
     op = __argv(2); lib = __argv(3);
+    if (!tl_ar_operation(op)) { __write(2, "ar: operation must be r, q, t or x\n", 35); return 2; }
     if (op[0] == 114 || op[0] == 113) {       /* r, q (c and s accepted: no index is needed by our linker) */
         tl_arbuf[0] = 33; tl_arbuf[1] = 60; tl_arbuf[2] = 97; tl_arbuf[3] = 114; tl_arbuf[4] = 99; tl_arbuf[5] = 104; tl_arbuf[6] = 62; tl_arbuf[7] = 10;
         at = 8; i = 4;
