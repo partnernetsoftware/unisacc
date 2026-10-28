@@ -1,0 +1,27 @@
+/* Exercise extraction as fresh, identified material, not as a test cache. */
+#pragma unisa use runtime.process
+static void die(const char *s){fprintf(stderr,"p3-extract-check: %s\n",s);exit(2);}
+static np_result call(char **v,const char *root){np_result r={0};char why[512];if(np_run(v,root,0,52,&r,why,sizeof why))die(why);return r;}
+static void digest(const char *p,char h[65]){size_t n;char *b=cx_read(p,&n);if(!b)die("read-input");cx_sha256_hex(b,n,h);free(b);}
+int main(int argc,char **argv){
+ char root[4096],pc[4096],pkg[4400],tool[4400],prod[4400],bound[4400],good[4400],bad[4400],badpkg[4400],manifest[4400],p[4400],before[65],after[65],h[65],declared[65];
+ if(argc!=4||!realpath(argv[1],root)||!realpath(argv[2],pc)||argv[3][0]!='/')die("usage ROOT PACK_CTX NEW_OUT");
+ if(mkdir(argv[3],0700))die("new-output-required");
+ if(cx_fmt(pkg,sizeof pkg,"%s/compiler.pkg",pc)||cx_fmt(tool,sizeof tool,"%s/tools/extract-p3-models.cx",root)||cx_fmt(prod,sizeof prod,"%s/unisacc.com",root)||cx_fmt(bound,sizeof bound,"%s/tools/bound",root)||cx_fmt(good,sizeof good,"%s/good",argv[3])||cx_fmt(bad,sizeof bad,"%s/bad",argv[3])||cx_fmt(badpkg,sizeof badpkg,"%s/bad.pkg",argv[3])||cx_fmt(manifest,sizeof manifest,"%s/manifest.tsv",good))die("path");
+ size_t pn;char *bytes=cx_read(pkg,&pn);int expected=0;if(!bytes||sscanf(bytes,"P 3 %d",&expected)!=1||expected<=0)die("p3-header");cx_sha256_hex(bytes,pn,before);free(bytes);
+ char *v[]={bound,"45","sh",prod,tool,"--",root,pkg,good,0};np_result r=call(v,root);int ok=!r.rc&&!r.errn&&r.out&&strstr(r.out,"PREPARED\tP3MODEL_EXTRACT1\t")!=0;np_free(&r);
+ FILE *f=fopen(manifest,"rb");if(!f)die("manifest");char line[9000];int models=0,sources=0,package=0;long length;
+ while(fgets(line,sizeof line,f)) {
+    if(!strncmp(line,"package\t",8)){if(sscanf(line+8,"%64s",declared)!=1||strcmp(declared,before))ok=0;package++;}
+    else if(!strncmp(line,"source\t",7)){char name[512];if(sscanf(line+7,"%511s %64s",name,declared)!=2||strstr(name,"..")||cx_fmt(p,sizeof p,"%s/%s",root,name))die("source-row");digest(p,h);if(strcmp(h,declared))ok=0;sources++;}
+    else if(!strncmp(line,"model\t",6)){int index;size_t z;char *data;if(sscanf(line+6,"%d %ld %64s",&index,&length,declared)!=3||index!=models||cx_fmt(p,sizeof p,"%s/model-%03d.bin",good,index))die("model-row");data=cx_read(p,&z);if(!data)die("model-read");cx_sha256_hex(data,z,h);free(data);if((long)z!=length||strcmp(h,declared))ok=0;models++;}
+ }
+ if(ferror(f)||fclose(f))die("manifest-read");
+ ok=ok&&package==1&&sources==6&&models==expected;digest(pkg,after);if(strcmp(before,after))ok=0;
+ printf("%s\tmaterial-identity-and-members\n",ok?"PASS":"FAIL");int failed=!ok;
+ char first[65],first_after[65];if(cx_fmt(p,sizeof p,"%s/model-000.bin",good))die("path");digest(p,first);digest(manifest,h);
+ r=call(v,root);ok=r.rc==2;np_free(&r);digest(manifest,after);digest(p,first_after);ok=ok&&!strcmp(h,after)&&!strcmp(first,first_after);printf("%s\texisting-output-preserved\n",ok?"PASS":"FAIL");failed+=!ok;
+ {const unsigned char b[]={1,9,0,246,255,'U','N','I','N','E','T','B','1','N'};f=fopen(badpkg,"wx");if(!f||fputs("P 3 1 1 0\nD route stage in out 0\nM 14 9 1 0\n",f)<0||fwrite(b,1,sizeof b,f)!=sizeof b||fclose(f))die("bad-fixture");}
+ char *w[]={bound,"45","sh",prod,tool,"--",root,badpkg,bad,0};r=call(w,root);struct stat st;errno=0;ok=r.rc==2&&r.err&&strstr(r.err,"extract-p3: payload-or-input-changed")&&lstat(bad,&st)!=0&&errno==ENOENT;np_free(&r);printf("%s\tbad-crc-no-output\n",ok?"PASS":"FAIL");failed+=!ok;
+ printf("CXP3_EXTRACT\tfailed=%d\n",failed);return failed?1:0;
+}
