@@ -369,21 +369,105 @@ int isarchive(char *p) { int n; n = 0; while (p[n]) n = n + 1; return n >= 2 && 
 
 /* the tape a unit object carries, or 0; its target goes to tl_target */
 char tl_target[32]; char tl_first[32];
+/* Decode a bounded little-endian field without overflowing host long. */
+long tl_objnum(char *p, int w, long max) {
+    long v; int d; v = 0;
+    while (w > 0) { w = w - 1; d = p[w] & 255;
+        if (d > max || v > (max - d) / 256) return -1;
+        v = v * 256 + d;
+    }
+    return v;
+}
+int tl_objspan(long off, long size, long n) { return off >= 0 && size >= 0 && off <= n && size <= n - off; }
+int tl_objname(char *p, long n, char *s) {
+    long i; i = 0; while (s[i]) { if (i >= n || p[i] != s[i]) return 0; i = i + 1; }
+    return i < n && p[i] == 0;
+}
+char *tl_container_target;
+long tl_objsection(char *b, long n, long *size) {
+    long table; long count; long i; long h; long off; long z; long found; long names; long namesz; long ni; long end; long cmd; long width; long machine;
+    found = -1; *size = 0; tl_container_target = 0;
+    if (n < 64) return -1;
+    if (b[0] == 127 && b[1] == 69 && b[2] == 76 && b[3] == 70) {
+        if (b[4] != 2 || b[5] != 1 || b[6] != 1 || tl_objnum(b + 16, 2, 65535) != 1 || tl_objnum(b + 58, 2, 65535) != 64) goto bad;
+        machine = tl_objnum(b + 18, 2, 65535);
+        if (machine == 62) tl_container_target = "lnx/x86_64"; else if (machine == 183) tl_container_target = "lnx/arm64"; else goto bad;
+        table = tl_objnum(b + 40, 8, n); count = tl_objnum(b + 60, 2, 65535); ni = tl_objnum(b + 62, 2, 65535);
+        if (table < 64 || count <= 0 || ni <= 0 || ni >= count || count > (n - table) / 64) goto bad;
+        h = table + ni * 64; names = tl_objnum(b + h + 24, 8, n); namesz = tl_objnum(b + h + 32, 8, n);
+        if (!tl_objspan(names, namesz, n) || tl_objnum(b + h + 4, 4, 65535) != 3) goto bad;
+        i = 0; while (i < count) {
+            h = table + i * 64; off = tl_objnum(b + h + 24, 8, n); z = tl_objnum(b + h + 32, 8, 2147483647);
+            if (tl_objnum(b + h + 4, 4, 65535) != 8 && !tl_objspan(off, z, n)) goto bad;
+            ni = tl_objnum(b + h, 4, namesz); if (ni < 0 || ni >= namesz) goto bad;
+            if (tl_objname(b + names + ni, namesz - ni, ".unisa.tape")) {
+                if (found >= 0 || tl_objnum(b + h + 4, 4, 65535) != 1 || !tl_objspan(off, z, n)) goto bad;
+                found = off; *size = z;
+            }
+            i = i + 1;
+        }
+    } else if ((b[0] & 255) == 207 && (b[1] & 255) == 250 && (b[2] & 255) == 237 && (b[3] & 255) == 254) {
+        machine = tl_objnum(b + 4, 4, 2147483647);
+        if (machine == 16777223) tl_container_target = "osx/x86_64"; else if (machine == 16777228) tl_container_target = "osx/arm64"; else goto bad;
+        if (tl_objnum(b + 12, 4, 65535) != 1) goto bad;
+        count = tl_objnum(b + 16, 4, n); z = tl_objnum(b + 20, 4, n); if (!tl_objspan(32, z, n) || count < 0 || count > z / 8) goto bad;
+        end = 32 + z; table = 32; i = 0;
+        while (i < count) {
+            if (!tl_objspan(table, 8, end)) goto bad;
+            cmd = tl_objnum(b + table, 4, 2147483647); width = tl_objnum(b + table + 4, 4, n);
+            if (width < 8 || !tl_objspan(table, width, end)) goto bad;
+            if (cmd == 25) {
+                long sections; long j;
+                if (width < 72) goto bad; sections = tl_objnum(b + table + 64, 4, n);
+                if (sections < 0 || sections > (width - 72) / 80 || 72 + sections * 80 != width) goto bad;
+                j = 0; while (j < sections) {
+                    h = table + 72 + j * 80; off = tl_objnum(b + h + 48, 4, n); z = tl_objnum(b + h + 40, 8, 2147483647);
+                    if ((b[h + 64] & 255) != 1 && !tl_objspan(off, z, n)) goto bad;
+                    if (tl_objname(b + h, 16, "__unisa_tape") && tl_objname(b + h + 16, 16, "__UNISA")) {
+                        if (found >= 0 || !tl_objspan(off, z, n)) goto bad; found = off; *size = z;
+                    }
+                    j = j + 1;
+                }
+            }
+            table = table + width; i = i + 1;
+        }
+        if (table != end) goto bad;
+    } else {
+        machine = tl_objnum(b, 2, 65535);
+        if (machine == 34404) tl_container_target = "win/x86_64"; else if (machine == 43620) tl_container_target = "win/arm64"; else goto bad;
+        count = tl_objnum(b + 2, 2, 65535); if (tl_objnum(b + 16, 2, 65535) != 0 || count <= 0 || count > (n - 20) / 40) goto bad;
+        table = tl_objnum(b + 8, 4, n); z = tl_objnum(b + 12, 4, n); if (table < 0 || z < 0 || z > (n - table) / 18) goto bad;
+        i = 0; while (i < count) {
+            h = 20 + i * 40; off = tl_objnum(b + h + 20, 4, n); z = tl_objnum(b + h + 16, 4, 2147483647);
+            if (!(b[h + 36] & 128) && !tl_objspan(off, z, n)) goto bad;
+            if (tl_is(b + h, 8, ".unisatp")) { if (found >= 0 || !tl_objspan(off, z, n)) goto bad; found = off; *size = z; }
+            i = i + 1;
+        }
+    }
+    return found;
+bad:
+    tl_fail("link: malformed unit object container\n"); return -1;
+}
 char *tl_tape(char *b, long n, long *len) {
-    long i; long k; long v; int q;
-    i = 0;
-    while (i + 11 < n) {
+    long i; long k; long v; long size; long digits; int q;
+    i = tl_objsection(b, n, &size); if (i < 0) return 0;
+    n = i + size;
+    if (size > 11) {
         if (b[i] == 85 && b[i + 1] == 78 && b[i + 2] == 73 && b[i + 3] == 83 && b[i + 4] == 65 && b[i + 5] == 84
             && b[i + 6] == 65 && b[i + 7] == 80 && b[i + 8] == 69 && b[i + 9] == 49 && b[i + 10] == 32) {
             k = i + 11; q = 0;
             while (k < n && b[k] != 32 && q < 31) { tl_target[q] = b[k]; q = q + 1; k = k + 1; }
-            tl_target[q] = 0; k = k + 1; v = 0;
-            while (k < n && b[k] >= 48 && b[k] <= 57) { v = v * 10 + (b[k] - 48); k = k + 1; }
-            if (k < n && b[k] == 10 && k + 1 + v <= n) { *len = v; return b + k + 1; }
+            if (!q || k >= n || b[k] != 32) goto malformed;
+            tl_target[q] = 0; if (!tl_objname(tl_target, 32, tl_container_target)) goto malformed;
+            k = k + 1; digits = k;
+            while (k < n && b[k] >= 48 && b[k] <= 57) k = k + 1;
+            if (k >= n || b[k] != 10 || k - digits > 20) goto malformed;
+            v = tl_ar_dec(b + digits, (int)(k - digits), n - k - 1);
+            if (v >= 0 && v == n - k - 1) { *len = v; return b + k + 1; }
         }
-        i = i + 1;
     }
-    return 0;
+malformed:
+    tl_fail("link: malformed unit tape payload\n"); return 0;
 }
 #ifndef TL_PRODUCT
 int isobject(char *p) {

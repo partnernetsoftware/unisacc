@@ -1,0 +1,38 @@
+/* ROOT PRIVATE_DRIVER_ROOT FIXTURES NEW_OUT. Explicit private-driver evidence;
+ * fixtures are real six-target unit objects, not cached test conclusions. */
+#pragma unisa use cxlib.netpack
+static char root[4096],driver[4400],fixtures[4096],work[4096];
+static int checks,failed;
+static void die(const char *s){fprintf(stderr,"link-container-cases: %s errno=%d\n",s,errno);exit(2);}
+static void path(char *p,const char *a,const char *b){if(snprintf(p,4400,"%s/%s",a,b)>=4400)die("path");}
+static void save(const char *name,const char *p,size_t n){char f[4400];path(f,work,name);if(cx_write(f,p,n))die("write");}
+static void put(char *p,size_t at,int n,unsigned long long v){for(int i=0;i<n;i++){p[at+i]=(char)v;v>>=8;}}
+static size_t marker(const char *p,size_t n){for(size_t i=0;i+11<n;i++)if(!memcmp(p+i,"UNISATAPE1 ",11))return i;die("fixture-tape-marker");return 0;}
+static void refusal(const char *file,const char *label,const char *reason){
+ char output[4400];path(output,work,"must-not-exist");char *v[]={"sh",driver,"-o",output,(char *)file,0};np_result r={0};char why[1024];
+ int transport=np_run(v,work,0,8,&r,why,sizeof why);char log[200];snprintf(log,sizeof log,"%s.stdout",label);save(log,r.out,r.outn);snprintf(log,sizeof log,"%s.stderr",label);save(log,r.err,r.errn);
+ struct stat st;errno=0;int absent=lstat(output,&st)<0&&errno==ENOENT;
+ int ok=!transport&&r.rc>0&&r.rc<128&&!r.outn&&r.errn&&strstr(r.err,reason)&&absent;
+ checks++;failed+=!ok;printf("%s\t%s\trc=%d\ttransport=%d\n",ok?"PASS":"FAIL",label,r.rc,transport);
+ if(!absent)die("unexpected-output-retained");np_free(&r);
+}
+int main(int argc,char **argv){
+ if(argc!=5||!realpath(argv[1],root)||!realpath(argv[3],fixtures)||argv[4][0]!='/'||strlen(argv[4])>=sizeof work)die("usage ROOT DRIVER_ROOT FIXTURES NEW_OUT");
+ path(driver,argv[2],"unisacc.com");strcpy(work,argv[4]);if(mkdir(work,0700))die("exclusive-output");
+ const char *files[]={"lnx-x86_64.o","ref-osx-x86_64.o","ref-win-x86_64.o"};
+ const char *labels[]={"elf-section-table","elf-section-width","macho-command-size","macho-section-count","coff-section-count","coff-symbol-offset","payload-target","payload-decimal-overflow","payload-negative-length","payload-empty-length"};
+ for(int c=0;c<10;c++){
+  int f=c<2?0:c<4?1:c<6?2:0;char src[4400];path(src,fixtures,files[f]);size_t n;char *p=cx_read(src,&n);if(!p||n<512)die("fixture");
+  if(c==0)put(p,40,8,~0ULL);if(c==1)put(p,58,2,1);
+  if(c==2)put(p,36,4,0);if(c==3)put(p,96,4,0xffffffff);
+  if(c==4)put(p,2,2,65535);if(c==5)put(p,8,4,0xffffffff);
+  if(c>=6){size_t at=marker(p,n)+11;if(c==6)p[at]='q';else{while(at<n&&p[at]!=' ')at++;at++;if(at+32>=n)die("fixture-length-room");if(c==7){memset(p+at,'9',30);p[at+30]='\n';}if(c==8)p[at]='-';if(c==9)p[at]='\n';}}
+  char name[200];snprintf(name,sizeof name,"%s.o",labels[c]);save(name,p,n);free(p);refusal(name,labels[c],c<6?"malformed unit object container":"malformed unit tape payload");
+ }
+ /* A malformed member must not disappear during archive selection. */
+ char member[4400];path(member,work,"elf-section-table.o");size_t mn;char *mb=cx_read(member,&mn);if(!mb||mn>999999999)die("archive-member");
+ char header[61];int hn=snprintf(header,sizeof header,"%-16s%-12d%-6d%-6d%-8s%-10zu`\n","bad.o/",0,0,0,"100644",mn);if(hn!=60)die("archive-header");
+ char *archive=malloc(68+mn+1);if(!archive)die("archive-allocation");memcpy(archive,"!<arch>\n",8);memcpy(archive+8,header,60);memcpy(archive+68,mb,mn);archive[68+mn]='\n';save("bad.a",archive,68+mn+(mn&1));free(archive);free(mb);
+ refusal("bad.a","archive-malformed-member","malformed unit object container");
+ printf("LINK_CONTAINER_CASES\tassertions=%d\tfailed=%d\tscope=explicit-private-driver\n",checks,failed);return failed?1:0;
+}

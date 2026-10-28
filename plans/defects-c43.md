@@ -353,6 +353,10 @@ coverage中旧1/4缺陷描述改为本候选实际4/1及明确合同冲突，没
 
 ## link.malformed-input — 畸形输入：两处容器不校验、一处产品自身崩溃（开放；exec/c/compiler.c tl_tape 定位 / 运行器）
 
+容器修复私有验证（未安装）：src/tapelink.c按ELF/Mach-O/COFF专用节定位载荷，检查字段/区间/目标及有界十进制长度，拒绝畸形归档成员。私有driver ec17e24f+显式ff696、包装身份7f9f52ec；六目标正常对象链接成功（Linux对象由产品生成，另外四目标产品入口具名未实现，改由经典参考生成后交私有驱动链接），本机镜像rc7。out/c43-tapelink-private-01/保留全部材料。新增tools/link-container-cases.cx边界11/0，out/c43-tapelink-boundaries-02.*；首轮归档夹具误用包装器ar入口，10项过后rc2，原01保留。
+
+原批out/c43-tapelink-malformed-01仍9/2：坏魔数及2000字节截断已拒；100字节截断改报malformed unit object container而旧断言要求carries no unit tape，保留该诊断合同差异；tape落尾仍SIGSEGV，未声称关闭。已装8147原批8/3不覆盖。
+
 批 `link-malformed-input`（tools/link-malformed-input.cx，8/11，红行即复现）：
 1. **S2 产品崩溃**：`_start:\n  imm r0, 7\n`（无 ret，落出末尾）`-run noret.tape` → 产品进程 SIGSEGV（rc -11，无 stderr）。预期具名拒绝（"control falls off the end of _start"）或运行期有界终止。`-o` 镜像路线 rc 0 并写出镜像（INFO）。
 2. S1 容器不校验：ELF 魔数被覆盖为 `XXXX` 的单元对象仍被链接成镜像（rc 0）；截断到前 2000 字节（无节头表）的对象同样被链接。tl_tape 直接搜索单元 tape 负载而不校验 ELF 头/节表。预期：`not an ELF unit object` / `truncated object` 具名拒绝。
