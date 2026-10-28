@@ -151,7 +151,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 **2026-10-28 单元化重构决定：** 主人要求参考Rust模块化与内存安全设计，去除include引入的隐式耦合；不是换后缀。CX权威源码、公开接口、私有实例、显式资源/构建图、所有权/借用合同共同构成目标。目标CX0 → E2 → E1 → E3 → E4 → prune → lower → elf；现有独立CX0/束/适配已落地，安装产品仍七流。CX0语义控制最终也须网络化，十八张ask事实网不按阶段数机械加一。详见[单元化计划](plans/v0.0.43-units.md)及[cx入口](cx/README.md)。
 
-**当前分工与下一动作：** 已交付束38/0（unisacc/GCC/Clang）、E2边界12/0、CX整链11/0、源码优先driver14/0、权威反投影18/0+24/0、目录闭包19/0、core.memory138/0。六工具当前G/root键全部构建且复核；新CX阶段链实际编译tools/cx0.cx后再跑规划/接口gold2/0，编译memory套件后实跑138/0。driver自身四单元编译在E2耗尽原45秒总预算，无最终镜像/成功收据，不记通过；约0.6MB/单元的前奏展开是下一运行库模块化热点。plan.cx为权威，C兼容投影42902字节/452fcb3全文不变。版本线实际E1 NN边界293/0，原矩阵义务保留。下一步拆运行库及原生接口、真实消费者接owner/borrow API，并修0.0.43产品缺口。
+**当前分工与下一动作：** 运行库已拆消费者声明与唯一原生provider，driver改用5,825B process模块替代整netpack；原45秒/阶段12秒内自编译成功，217031B ELF/771741a7，生成程序再实跑native ABI5/0及原driver14/0；投影14/0、生成接口constructor单注册3/0、sealed-source RI17/0。保留旧E2超时及中间E3 setpgid缺口/E4超时原红，不放宽预算。原生setpgid绑定同provider，私有导出仍unsafe兼容ABI，不授静态所有权。cc冻结c590纪元候选已正规安装后转到共享Root94；negative211/0、reach定位闭、known_gaps1。正在冻结测试源刷新14个E1/E2批；只迁移同候选实跑证据。
 
 **双线推进（2026-10-28）：** 0.0.43现行Rootda4e/SID1621继续补完整流/网/RI、N22与平台，不等待CX重构完工；CX产物独立核身份逐单元接入。E1实际located warnlex已核654状态/168896观测决定及展开动作与正式模型全等，手写规则144类对/24 peek边界293/0；EOF后的12类peek逐项UNOBSERVABLE，不折叠作144源流PASS，矩阵仍MISSING。core.memory有138项正/拒绝/恢复实跑，仅管理API运行期约束；成员struct直接return的正向最小例在tests/pending/struct-return-member.cx当前rc1而期望rc7，保持NEEDS_PRODUCT_CHANGE。
 
@@ -159,7 +159,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 **现行流推进（2026-10-28）：** 已装Rootda4e/SID1621完成同候选七流材料刷新：out/c43-streams-da4e-01/来自实际安装体内嵌包50cc5a96；stream1=4f3c87fd、stream2=68f08deb，独立成员/输入绑定24/0。14个正式SOURCE批全部PASS（out/c43-da4e-stream-validation-01/）：E1 tokens188/0、bytes501/0、refusals624/0、independent25/0；E2 positive103/0、refusal187/0、independent36/0、pp-gold21/0、CLI targets20/0/includes20/0/macros23/0、header-locations11/0、negative-diagnostics211/0（known_gaps=2），另含绑定批。E2既定本机62格现均有本代证据；E1必选本机40格中38格有证，余lex-144流内逐键oracle及其host聚合。UCN产品整链正式13/0，旧Root41同批13/12保留。完整C99、19宽行、N22与五外宿主仍未关闭。
 
-**2026-10-28 最新开发候选（cdx）：** 已装SID `162191414d86d92afda572ff92f61c1afb0b2302d563abd4c52446115ef1b7d9`，APE `da4e7ef144186ccf578d282381ac671885094c6dfe30053727ac3f3c4a3e5592`（3,001,553 B），record `ab5f17c8…`。本源107作业全0、22对象/双核/五片/真deflate完成，PC包50cc5a96独立VERIFIED，kind2准入后安装rc0。旧Root41与record c7bc在GEN1621-01/bootstrap-before-install.*应急备用。安装体正式SOURCE smoke16/0、UCN13/0、RI单源29/0和多源15/0均PASS；cc独立33个-E探针全过。本代流材料及14个E1/E2正式SOURCE批已刷新并全PASS。证据out/c43-1621-installed-wave-{01,02}/与out/c43-da4e-stream-validation-01/。UCN首次登记因空格标记FAIL、修正TAB后新叶PASS，原FAIL保留。--all仍rc3，177覆盖/19缺口；完整N22、宽行和五外宿主未关，其他批旧证据不转授。
+**2026-10-28 最新开发候选（cdx）：** 已装APE94b549d1fbbbb29f9068492c17866aa8ea072f950fe4c7519d86cd989d0bb7f1（3001840B），record fe5d0aec94bdf46fd3816806a0afc412105494684415816af30f7b810fa52f75。来自仓外冻结c590410c68/source d4ada505a117028b5e35685d7407077278b28c29a410bf8a47d709021a674f73，107/107、PC66c797a0、kind2准入及正规冻结Root安装后精确转移；目标liveSID88fe6313不同，不冒充live同源或重验准入。旧da4e/dd2385备份在out/c43-e3diag-promote-01。共享新安装体negative-diagnostics211/0/known_gaps1；reach.c:3:29九项精确断言通过，两矩阵仅此产品route换标。完整N22、其他域和外国宿主未授新资格；新候选14个E1/E2批刷新中。
 
 **2026-10-28 最新源码纪元（cdx）：** 已装SID同16219141；live SID `162191414d86d92afda572ff92f61c1afb0b2302d563abd4c52446115ef1b7d9`，正式同源构造/准入/开发安装已完成。E2采用共享AnnexD事实的有限机校验，内部键规范化而-E/字符串化原样；数字域只校验通用UCN约束，不误套标识符AnnexD规则。E3在模型内部规范化标识符载荷并修units三处身份键，原始源/位置/RI输入身份保留；参考独立修复宏键与语义名字/诊断映射，50/0（旧参考50/14），不借产品实现替代参考。tools/ucn-pp-gen.cx与tools/ucn-identity-tables.cx分别可重现E2六表/E3三表，E1生成器786432图检查仍通过。六条实际路由gen/tbl/net共18相rc0，复用未改E1模型，私有包50cc5a96/APE dab8f54e（3,001,345 B）在out/c43-ucn-integrated-models-01；out/c43-ucn-identities-test-01保存整链13/0、旧根13/12、E2 103/187全0和首次诊断渲染空格oracle误差。小ASCII E3三组对照tape/stderr/rc全等，墙钟中位16.55→16.72ms，区间重叠，非总体性能界。主树cdx单写；30事实表check零差，旧Python导出债保留。已提交a0b150aa86；正式107和PC封条/独立复验完成，双核有新收据；已装Rootda4e，正式SOURCE smoke16/0、UCN13/0、RI单源29/0和多源15/0均PASS；本代流材料及14个E1/E2正式SOURCE批已刷新并全PASS；下一步新根绑定的同源固定点与剩余域，不转授旧根结果。
 
@@ -357,7 +357,7 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 <a id="memory-palace"></a>
 ### 记忆宫殿
 
-**现行重构入口（2026-10-28）：** tools/cx-driver.cx为源码优先默认运行入口，显式profile供给资源/模型/适配器，经CX0束走实际模型链；14/0及实际include根default-run已证。工作区目录快照绑定66头的名字/长度/内容，私有闭包/头增删改实际19/0；当前六包全部PREPARED并REVERIFIED。core.memory安全API无内部pointer输出，move/drop/共享及独占借用/跨实例/配额实跑138/0，新阶段链编译后也138/0；只保证受管理API的单线程运行期合同。CIF文本投影/forced includes仍是兼容桥，结构化类型/符号/ABI/所有权直入E3和编译期保证未完成。安装体未切入口，完整U1/U2、CX0网络化及外国宿主仍开。
+**现行重构入口（2026-10-28）：** tools/cx-runtime.cx从显式原头生成声明树/无include provider，记录原头、bootstrap、生成器、消费者、ABI与产物哈希；tools/cx-driver.cx的RuntimeProvider只加入一次，tools/runtime/process模块只带进程执行接口。新链driver自编译在原预算内成功，所得静态ELF实跑原生共享malloc/free/errno/stdio/setpgid5/0和driver14/0。consumer接口剥constructor/destructor注册效应，provider独有初始化。CIF文本投影/forced includes仍是兼容桥，原生类型/符号/所有权直入E3及编译期保证未完成；unsafe兼容ABI仍暴露内部声明，不能宣称私有安全完成。
 
 **本轮基线复核：** APE da4e7ef144186ccf578d282381ac671885094c6dfe30053727ac3f3c4a3e5592；build record dd2385cf4952f95cd7cdb6d4d25b2cf774841becdcbd8506138260a92743abc0（替代下方首次安装 ab5f）。同源固定点 GEN-A / GEN-B02 的原58断言已通过；本轮预编译 O2 验证亦在原30秒内58/0、stderr空，直接 O2 默认-run 原30秒rc142，不冒称登记批通过。下方 cc 独占构造/等待新固定点的语句是交接前状态，不再作为待执行工作。
 
@@ -373,7 +373,7 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 
 **当前流入口：** 实际安装体Rootda4e的七流材料out/c43-streams-da4e-01/已重封；stream1=4f3c87fd、stream2=68f08deb。14个正式SOURCE批全PASS：E1 188/501/624/25，E2 103/187/36/21，成员输入绑定24，CLI20/20/23、头位置11、诊断211（known_gaps=2）。逐批日志out/c43-da4e-stream-validation-01/。E2既定62个本机格已重立；E1剩lex-144 oracle及host聚合，不以EOF折叠冒充144键。旧Root41红例和私网日志保留，不代替本代证据；宽行/all-six仍开。
 
-**最新开发根：** SID16219141／APEda4e7ef1／PC50cc5a96／record dd2385cf。本机同源 GEN-A/GEN-B02 固定点58/0；完整N22/十九宽合同/五外宿主仍开放。原矩阵319/336/36是旧域账，不作为重构完成率。下一动作按单元化计划先交 CX0 与 E2 独立测试边界，不再重复十四批或重构造已完成的固定点。
+**最新开发根：** 已装Root94b549d1/PC66c797a0/recordfe5d0aec/source冻结d4ada505，commit c590410c68；live源码88fe6313不授同源。冻结Root正规安装及共享字节转移收据见out/c43-e3diag-promote-01，旧pair完整备份；新Root负诊断211/0，reach位置已闭。旧Rootda4e的GEN固定点58/0等保留历史，不直接授Root94完整N22。其余十九宽合同、外国宿主及新14批刷新按实际候选分别列账。
 
 **待收口工作域：** cc只写out/c43-da4e-fixedpoint-*的新构造材料；kernel-route三个共享路径现由cdx接管，源码修复未验证。其他协作者暂存原样保留；不把未提交/未实跑草稿当资格。
 
