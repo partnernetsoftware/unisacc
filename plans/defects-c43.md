@@ -370,6 +370,8 @@ coverage中旧1/4缺陷描述改为本候选实际4/1及明确合同冲突，没
 
 ### 容器修复开发安装（冻结ecb5fbe322）
 
+冻结95b23dc9的34个gen作业已全部逐项PREPARED，tool-gen/tbl/net均实构（共37项材料收据）。tools/source-model-compare.cx对sizeof来源逐字节比较为26 SAME/8 DIFF，差异精确为六程序lower+两object-lower（out/c43-fallguard-vs-sizeof-01.tsv）；对完整f9捕获域为23 SAME/11 DIFF，另含shared-e3/warnparse/errorparse三项既有解析修复（out/c43-fallguard-vs-f9-01.tsv）。比较核过双方context/job record/实际rc0/output SHA，不代替完整来源DAG核验或复用准入。下一步11项changed的tbl/net真实构造、23项来源域核验、内核/PC与候选；不把26/34或37收据当产品完成率。
+
 落尾正规来源构造起点：git archive 648fe13db9到仓外unisacc-epoch-fallguard-648fe13db9，保存b6f15启动产品及db7af545记录，不采入共享prd未提交编辑。新SID95b23dc90b25b8b30eddbf4aed2215f48ba293d11d0fc433ff483fb7da2bbd81；context70dbb7095c5a1c9bfa107b8042a71f9218fabd003a66b234b782b08cee4606e4。prepare-context、tool-gen及八个gen lower（六程序目标+两object目标）已逐作业PREPARED并保存原生命令/输出/身份收据；冻结lnx/x86_64生成JSON与私有04逐字节相同。object-lower相对sizeof来源也有差异，不能遗漏；其余材料生成/差异分组、tbl/net、kernel/PC、候选与安装尚待完成。PREPARED不授测试或发布资格，已装仍b6f15。
 
 落尾跨目标构造及库回归接续：原生seed-gen分别--full加--arm64/--osx/--win生成其余五目标lower，seed-tbl及通用run均rc0；同straight-falloff输入经过新lower与PCff696各目标elf模型，五个镜像均成功，file识别为对应ELF ARM64/Mach-O x86_64+arm64/PE x86_64+arm64。日志out/c43-fallguard-{lnx-arm64,osx-x86_64,osx-arm64,win-x86_64,win-arm64}-*；加此前Linux x86_64共六目标构造，不授外国执行。私包6fcff655在现有tests/p3-library-members.cx实跑27/0（out/c43-fallguard-library-01）：本机宿主fixture实构，clean库合同、编译调用答案1027/2037、carrier导出及成员损坏拒绝全过。证明该私包本机库调用未被包后追加guard破坏；未做新旧UNILOWP1全字节比较，不声称六目标库/完整库资格或零宿主依赖。
