@@ -4,7 +4,7 @@
 
 - 事实：riroot 源包 `out/c43-source-riroot-full-pc-03/compiler.pkg`（4d9b8a3a）已含 `lnx/x86_64/image/O1` 路线，e4 流单元模型索引 6（O2 路线为 7），其余单元与 O2 同索引。即 O1 模型已在包内，只缺打包路线。
 - 阻塞：`tools/cxlib/streampack.cx` 第 27 行硬编码 `route = "%s/image/O2"`，只打 O2。
-- 请求（所有者：材料打包器主人 / cdx）：给 `stream_pack` 加可选第 5 参 LEVEL（`O0|O1|O2`，默认 O2，拼入 route），`NAMES` 不变；O1 路线无 `tapecheck` 要求差异（包内 O1 同样含 tapecheck，可照旧跳过）。输出到新目录 `out/c43-streams-riroot-o1-01/`，receipt `selected_route` 为 `lnx/x86_64/image/O1`。
+- 2026-10-28 18:2x 更新：fable 裁定 streampack 不在 cx 结构化预留内且请求单超时，cc 已自行实施（可选第 5 参 LEVEL，默认 O2 字节等价：七容器 sha 回归一致；O1 容器已打成 out/c43-streams-cc-o1-01，e4 模型索引 6），待 cdx 复核。原请求：给 `stream_pack` 加可选第 5 参 LEVEL（`O0|O1|O2`，默认 O2，拼入 route），`NAMES` 不变；O1 路线无 `tapecheck` 要求差异（包内 O1 同样含 tapecheck，可照旧跳过）。输出到新目录 `out/c43-streams-riroot-o1-01/`，receipt `selected_route` 为 `lnx/x86_64/image/O1`。
 - 输入身份：BASE_COM = 与 riroot-01 相同的 stream-runtime 基座（receipt base_sha256 03d00cfc…），CANDIDATE_PKG = 4d9b8a3a（或当前准入候选内嵌 P3，若换则两份身份都记）。
 - 验收：`tools/stream-model-identity.cx <新目录> <包> all` 全 SAME；stream4(O1) 对 `imm r2, 0 / add64 r0, r1, r2` 不折叠（O1 不含 O2 折叠）而对软件栈 save/restore 折叠为 mov；oracle = REF `-O1 -S` tape（tools/o2-cases-gen.cx 可扩一组 `o1`）。deadline：下一慢车道纪元前；每条命令 ≤55 s。
 
