@@ -1,0 +1,41 @@
+#pragma unisa module model_number
+/* Decode one model integer from a borrowed byte span. The caller owns the
+ * cursor and result. Failure publishes the consumed cursor but not a value.
+ * Codes match the distinct loader diagnostics; no state or allocations. */
+int cxmn_number(const unsigned char *data, long size, long *cursor,
+                int binary, long long *value) {
+    if (!cursor || !value || size < 0 || *cursor < 0 || *cursor > size || (!data && size)) return 8;
+    long p = *cursor;
+    unsigned long long v = 0;
+    if (binary) {
+        int shift = 0;
+        for (int k = 0; k < 10; k++) {
+            if (p == size) { *cursor = p; return 1; }
+            int c = data[p++];
+            if (k == 9 && c > 1) { *cursor = p; return 2; }
+            v |= (unsigned long long)(c & 127) << shift;
+            if (c < 128) {
+                *cursor = p;
+                if (k && !c) return 3;
+                *value = (long long)((v >> 1) ^ (0ULL - (v & 1)));
+                return 0;
+            }
+            shift += 7;
+        }
+        *cursor = p; return 4;
+    }
+    while (p < size && data[p] <= 32) p++;
+    int neg = 0, count = 0;
+    if (p < size && data[p] == '-') { neg = 1; p++; }
+    unsigned long long limit = neg ? 9223372036854775808ULL : 9223372036854775807ULL;
+    while (p < size && data[p] > 32) {
+        int d = data[p++] - '0';
+        if (d < 0 || d > 9) { *cursor = p; return 5; }
+        if (v > (limit - (unsigned)d) / 10) { *cursor = p; return 6; }
+        v = v * 10 + (unsigned)d; count++;
+    }
+    *cursor = p;
+    if (!count) return 7;
+    *value = neg ? (long long)(0ULL - v) : (long long)v;
+    return 0;
+}

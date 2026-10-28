@@ -214,6 +214,22 @@ static int lchar(void) {
     int c = LB[LP++]; if (LP < LN && LB[LP] > 32) die("bad model tag"); return c;
 }
 static void ltag(int c) { if (lchar() != c) die("bad model tag"); }
+#ifdef UNISA_CX_MODEL_NUMBER
+int cxmn_number(const unsigned char *,long,long *,int,long long *);
+static I lnum(void) {
+    long pos=LP; long long value=0;
+    int rc=cxmn_number(LB,LN,&pos,LBIN,&value); LP=(int)pos;
+    if(rc==1)die("truncated binary model number");
+    if(rc==2)die("binary model number overflow");
+    if(rc==3)die("noncanonical binary model number");
+    if(rc==4)die("long binary model number");
+    if(rc==5)die("bad model number");
+    if(rc==6)die("model number overflow");
+    if(rc==7)die("missing model number");
+    if(rc)die("invalid model number input");
+    return (I)value;
+}
+#else
 static I lnum(void) {
     if(LBIN){uint64_t v=0;int shift=0;
         for(int k=0;k<10;k++){
@@ -235,6 +251,7 @@ static I lnum(void) {
     if (!count) die("missing model number");
     return neg ? (I)(0-v) : (I)v;
 }
+#endif
 static int lint(void) { I n = lnum(); if (n < INT32_MIN || n > INT32_MAX) die("model index overflow"); return (int)n; }
 
 /* ---- the table ---- */

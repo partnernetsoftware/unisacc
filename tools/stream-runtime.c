@@ -4,7 +4,9 @@
 #define main stream_executor_main
 #define UNISA_CX_PACKAGEFOOTER
 #define UNISA_CX_ATTRIBUTE_FRAME
+#define UNISA_CX_MODEL_NUMBER
 #include "../exec/c/run.c"
+#undef UNISA_CX_MODEL_NUMBER
 #undef UNISA_CX_ATTRIBUTE_FRAME
 #undef main
 #undef UNISA_CX_PACKAGEFOOTER
