@@ -1,0 +1,197 @@
+/* tools/properties-cases-gen.cx -- product property cells (tests/properties-domain-matrix.tsv prop.*) as executable
+ * cases with mechanical oracles (byte/SHA equality or literal outputs).
+ *   sh ./unisacc.com tools/properties-cases-gen.cx -- ROOT STREAM4_COM STREAM5_COM ABS_OUT GROUP
+ * GROUP selects one slice so that every invocation stays under the 60 s rule (each compile costs about 1 s):
+ *   det   : prop.det.image-repeat-six-targets, prop.det.no-path-or-time, prop.det.host-env-ignored, prop.det.run-repeat
+ *   meta  : prop.meta.tape-roundtrip, prop.meta.O2-fixpoint, prop.meta.e4-idempotent, prop.meta.prune-idempotent,
+ *           prop.meta.forward-reverse, prop.meta.comment-whitespace, prop.meta.identifier-rename
+ *   bound : prop.bound.loop-0-1-255-256, prop.bound.int64-arith, prop.bound.div-zero, prop.bound.tape-integer-range
+ * Subject: the installed product ROOT/unisacc.com (images via `-b TARGET -o`, tapes via `-S`), the E4 and prune
+ * stream containers. Inputs are inline (the loop program of tests/pending/properties.cx and its variants, tapes).
+ * Non-vacuity guards: determinism rows compile in separate processes and, for no-path-or-time, a different
+ * directory with different TZ/LANG; O2-fixpoint/e4 rows require O0 != O2; prune-idempotent requires prune(t) != t;
+ * variant rows require the variant source bytes to differ from the base. A guard failure is VACUOUS, never PASS.
+ * Measured 2026-10-28 and relied on: `.print` does not preserve r1/r2 on lnx/x86_64 (product and classic reference
+ * agree; spec.md:570 is silent), so arithmetic tapes reload operands before every op.
+ * Output: ABS_OUT/GROUP/... evidence files, ABS_OUT/results-GROUP.tsv, SUMMARY line; exit 1 on any non-PASS. */
+#pragma unisa use cxlib.netpack
+
+static char root[4096], stream4[4096], stream5[4096], outdir[4096], work[4200], inc[4400], bound[4400], product[4400];
+static FILE *res; static int npass, nfail, nvac, nnotrun;
+static void die(const char *s) { fprintf(stderr, "properties-cases: REFUSE %s errno=%d\n", s, errno); exit(2); }
+static void path(char *p, size_t cap, const char *a, const char *b) { int n = snprintf(p, cap, "%s/%s", a, b); if (n < 0 || (size_t)n >= cap) die("path"); }
+static void saved(const char *p, const char *s, size_t n) { int f = open(p, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600); if (f < 0) die("exclusive create"); while (n) { ssize_t k = write(f, s, n); if (k <= 0) die("write"); s += k; n -= (size_t)k; } if (close(f)) die("close"); }
+static int shafile(const char *p, char h[65]) { size_t n; char *s = cx_read(p, &n); if (!s) { if (errno != ENOENT) die("read for digest"); return 0; } cx_sha256_hex(s, n, h); free(s); return 1; }
+static void row(const char *state, const char *cell, const char *label, const char *detail) { fprintf(res, "%s\t%s\t%s\t%s\n", state, cell, label, detail); if (!strcmp(state, "PASS")) npass++; else if (!strcmp(state, "FAIL")) nfail++; else if (!strcmp(state, "VACUOUS")) nvac++; else nnotrun++; }
+static void check(int ok, const char *cell, const char *label, const char *detail) { row(ok ? "PASS" : "FAIL", cell, label, detail); }
+
+/* run argv under tools/bound with extra env; returns 0 when the child ran (its rc is in r->rc) */
+static int run(char *const argv[], char *const env[], int secs, np_result *r) { char why[1024]; char *v[64]; int n = 0; v[n++] = bound; char s[16]; snprintf(s, sizeof s, "%d", secs); v[n++] = s; for (int i = 0; argv[i]; i++) { if (n >= 62) die("argv bound"); v[n++] = argv[i]; } v[n] = 0; return np_run(v, root, env, secs + 2, r, why, sizeof why); }
+static char *noenv[] = { 0 };
+/* compile SRC to OUT: opt is "-O0"/"-O2", target is "-b T" or 0 for a tape (-S) */
+static int compile(const char *src, const char *opt, const char *target, const char *out, char *const env[], np_result *r) {
+    char *v[] = { "sh", product, (char *)src, (char *)opt, target ? "-b" : "-S", target ? (char *)target : "-o", target ? "-o" : (char *)out, target ? (char *)out : 0, 0 };
+    return run(v, env, 20, r);
+}
+static const char *targets[6] = { "lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64" };
+static const char *tslug(int t) { return t == 0 ? "lnx-x86_64" : t == 1 ? "lnx-arm64" : t == 2 ? "osx-x86_64" : t == 3 ? "osx-arm64" : t == 4 ? "win-x86_64" : "win-arm64"; }
+
+/* the loop program (tests/pending/properties.cx) and its variants */
+static const char *head =
+    "#include <stdio.h>\n#include <string.h>\n"
+    "int main(int argc,char **argv){\n unsigned n=0,sum=0,x=0;\n if(argc!=2)return 2;\n"
+    " if(!strcmp(argv[1],\"0\"))n=0;\n else if(!strcmp(argv[1],\"1\"))n=1;\n else if(!strcmp(argv[1],\"255\"))n=255;\n else if(!strcmp(argv[1],\"256\"))n=256;\n else return 2;\n";
+static const char *fwd = " for(unsigned i=0;i<n;i++){sum+=i;x^=i;}\n", *rev = " for(unsigned i=n;i>0;){--i;sum+=i;x^=i;}\n";
+static const char *tail = " printf(\"%u\\t%u\\t%u\\n\",n,sum,x);return 0;}\n";
+static const char *commented =
+    "#include <stdio.h>\n/* comment before */\n#include <string.h>\n\n\nint main(int argc,char **argv){ /* trailing */\n unsigned n=0,sum=0,x=0;\n\n if((argc)!=(2))return 2;\n"
+    " if(!strcmp(argv[1],\"0\"))n=0;\n else if(!strcmp(argv[1],\"1\"))n=1;\n else if(!strcmp(argv[1],\"255\"))n=(255);\n else if(!strcmp(argv[1],\"256\"))n=256;\n else return 2;\n"
+    " for(unsigned i=0;(i)<(n);i++){ /* body */ (sum)+=(i);x^=(i);}\n\n printf(\"%u\\t%u\\t%u\\n\",n,sum,x);return 0;}\n";
+static const char *renamed =
+    "#include <stdio.h>\n#include <string.h>\n"
+    "int main(int count_args,char **args){\n unsigned count=0,total=0,acc=0;\n if(count_args!=2)return 2;\n"
+    " if(!strcmp(args[1],\"0\"))count=0;\n else if(!strcmp(args[1],\"1\"))count=1;\n else if(!strcmp(args[1],\"255\"))count=255;\n else if(!strcmp(args[1],\"256\"))count=256;\n else return 2;\n"
+    " for(unsigned k=0;k<count;k++){total+=k;acc^=k;}\n printf(\"%u\\t%u\\t%u\\n\",count,total,acc);return 0;}\n";
+static const char *inputs[4] = { "0", "1", "255", "256" };
+static const char *gold[4] = { "0\t0\t0\n", "1\t0\t0\n", "255\t32385\t255\n", "256\t32640\t0\n" };
+
+static void write_program(const char *p, const char *body) { char buf[4096]; snprintf(buf, sizeof buf, "%s%s%s", head, body, tail); saved(p, buf, strlen(buf)); }
+static int same_file(const char *a, const char *b) { size_t na, nb; char *x = cx_read(a, &na), *y = cx_read(b, &nb); int ok = x && y && na == nb && !memcmp(x, y, na); free(x); free(y); return ok; }
+static int exact(const np_result *r, const char *s) { size_t n = strlen(s); return r->rc == 0 && !r->errn && r->outn == n && !memcmp(r->out, s, n); }
+/* run an image over the four inputs; returns how many matched gold; stores the outputs' concatenation in cat */
+static int run_domain(const char *img, const char *cell, const char *label, char *cat, size_t catcap) {
+    int ok = 0; cat[0] = 0;
+    for (int i = 0; i < 4; i++) { np_result r; char *v[] = { (char *)img, (char *)inputs[i], 0 }; char lab[160]; snprintf(lab, sizeof lab, "%s.input-%s", label, inputs[i]);
+        if (run(v, noenv, 3, &r)) { row("NOT_RUN", cell, lab, "image did not run"); continue; }
+        int hit = exact(&r, gold[i]); ok += hit; check(hit, cell, lab, hit ? "literal gold" : "output differs from gold");
+        { size_t l = strlen(cat); if (l + r.outn + 1 < catcap) { memcpy(cat + l, r.out, r.outn); cat[l + r.outn] = 0; } }
+        np_free(&r); }
+    return ok;
+}
+
+static void group_det(void) {
+    char base[4400], alt[4400], altsrc[4400]; path(base, sizeof base, work, "base.c"); write_program(base, fwd);
+    snprintf(alt, sizeof alt, "%s/alt/deep/dir", work); { char a1[4400], a2[4400]; snprintf(a1, sizeof a1, "%s/alt", work); snprintf(a2, sizeof a2, "%s/alt/deep", work); if (mkdir(a1, 0700) || mkdir(a2, 0700) || mkdir(alt, 0700)) die("alt dirs"); }
+    path(altsrc, sizeof altsrc, alt, "q.c"); write_program(altsrc, fwd);
+    char *altenv[] = { "TZ=Asia/Tokyo", "LANG=C.UTF-8", "LC_ALL=C.UTF-8", 0 };
+    for (int t = 0; t < 6; t++) {
+        char i1[4400], i2[4400], i3[4400], h1[65], h2[65], h3[65], lab[160], det[200]; np_result r;
+        snprintf(i1, sizeof i1, "%s/img-%s-1", work, tslug(t)); snprintf(i2, sizeof i2, "%s/img-%s-2", work, tslug(t)); snprintf(i3, sizeof i3, "%s/img-%s-alt", alt, tslug(t));
+        if (compile(base, "-O2", targets[t], i1, noenv, &r) || r.rc || !shafile(i1, h1)) { snprintf(lab, sizeof lab, "%s.compile-1", tslug(t)); row("NOT_RUN", "prop.det.image-repeat-six-targets", lab, "first compile failed"); np_free(&r); continue; } np_free(&r);
+        if (compile(base, "-O2", targets[t], i2, noenv, &r) || r.rc || !shafile(i2, h2)) { snprintf(lab, sizeof lab, "%s.compile-2", tslug(t)); row("NOT_RUN", "prop.det.image-repeat-six-targets", lab, "second compile failed"); np_free(&r); continue; } np_free(&r);
+        snprintf(lab, sizeof lab, "%s.repeat", tslug(t)); snprintf(det, sizeof det, "sha256=%s", h1); check(!strcmp(h1, h2), "prop.det.image-repeat-six-targets", lab, det);
+        if (compile(altsrc, "-O2", targets[t], i3, altenv, &r) || r.rc || !shafile(i3, h3)) { snprintf(lab, sizeof lab, "%s.compile-alt", tslug(t)); row("NOT_RUN", "prop.det.no-path-or-time", lab, "alt compile failed"); np_free(&r); continue; } np_free(&r);
+        snprintf(lab, sizeof lab, "%s.alt-dir-tz-lang", tslug(t)); check(!strcmp(h1, h3), "prop.det.no-path-or-time", lab, det);
+    }
+    { char ie[4400], h1[65], he[65]; np_result r; char *env[] = { "UNISA_MAXSTEPS=5000000", "FOO=bar", "UNISA_UNRELATED=1", 0 };
+      snprintf(ie, sizeof ie, "%s/img-lnx-x86_64-env", work); char i1[4400]; snprintf(i1, sizeof i1, "%s/img-lnx-x86_64-1", work);
+      if (compile(base, "-O2", targets[0], ie, env, &r) || r.rc || !shafile(ie, he) || !shafile(i1, h1)) row("NOT_RUN", "prop.det.host-env-ignored", "lnx-x86_64.env", "compile failed"); else check(!strcmp(h1, he), "prop.det.host-env-ignored", "lnx-x86_64.UNISA_MAXSTEPS-and-unrelated-env", "sha256 equal to plain compile"); np_free(&r); }
+    { char i1[4400]; snprintf(i1, sizeof i1, "%s/img-lnx-x86_64-1", work); np_result a, b; char *v[] = { i1, "255", 0 };
+      if (run(v, noenv, 3, &a) || run(v, noenv, 3, &b)) row("NOT_RUN", "prop.det.run-repeat", "lnx-x86_64.run-255", "image did not run");
+      else { int ok = a.rc == b.rc && a.outn == b.outn && !memcmp(a.out, b.out, a.outn) && exact(&a, gold[2]); check(ok, "prop.det.run-repeat", "lnx-x86_64.run-255-twice", "identical stdout and rc, equal to gold"); np_free(&a); np_free(&b); } }
+}
+
+static void group_meta(void) {
+    char base[4400], o0[4400], o2[4400], fix[4400], e4a[4400], e4b[4400]; np_result r;
+    path(base, sizeof base, work, "base.c"); write_program(base, fwd);
+    path(o0, sizeof o0, work, "base.O0.tape"); path(o2, sizeof o2, work, "base.O2.tape"); path(fix, sizeof fix, work, "base.O2.again.tape");
+    if (compile(base, "-O0", 0, o0, noenv, &r) || r.rc) die("O0 tape"); np_free(&r);
+    if (compile(base, "-O2", 0, o2, noenv, &r) || r.rc) die("O2 tape"); np_free(&r);
+    int differ = !same_file(o0, o2);
+    /* O2 fixpoint: the O2 tape fed back through -O2 -S */
+    if (!differ) row("VACUOUS", "prop.meta.O2-fixpoint", "base", "O0 == O2, nothing to fix");
+    else if (compile(o2, "-O2", 0, fix, noenv, &r) || r.rc) { row("NOT_RUN", "prop.meta.O2-fixpoint", "base", "tape input -O2 -S not accepted"); np_free(&r); }
+    else { np_free(&r); check(same_file(o2, fix), "prop.meta.O2-fixpoint", "base.O2-tape-through-O2", "byte equality; O0 != O2 held"); }
+    /* E4 idempotent and E4 == product -O2 */
+    { char *v1[] = { stream4, o0, o0, inc, 0 }; char *env[] = { "UNISA_ATTRIBUTES=", 0 }; np_result a, b;
+      if (run(v1, env, 12, &a) || a.rc) row("NOT_RUN", "prop.meta.e4-idempotent", "base", "stream4 on O0 tape failed");
+      else { path(e4a, sizeof e4a, work, "base.E4.tape"); saved(e4a, a.out, a.outn); char *v2[] = { stream4, e4a, e4a, inc, 0 };
+        if (!differ) row("VACUOUS", "prop.meta.e4-idempotent", "base", "O0 == O2");
+        else if (run(v2, env, 12, &b) || b.rc) row("NOT_RUN", "prop.meta.e4-idempotent", "base", "stream4 on E4 tape failed");
+        else { path(e4b, sizeof e4b, work, "base.E4E4.tape"); saved(e4b, b.out, b.outn);
+          check(a.outn == b.outn && !memcmp(a.out, b.out, a.outn), "prop.meta.e4-idempotent", "base.E4-of-E4", "byte equality");
+          check(same_file(e4a, o2), "prop.meta.e4-idempotent", "base.E4-equals-product-O2", "byte equality with -O2 -S"); np_free(&b); }
+        np_free(&a); } }
+    /* prune idempotent on a tape with a dead function */
+    { char pt[4400], p1[4400]; path(pt, sizeof pt, work, "dead.tape"); path(p1, sizeof p1, work, "dead.pruned.tape");
+      const char *t = "_start:\n  call main\n  ret\nmain:\n  .frame 8\n  store64 [r7+0], r6\n  mov r6, r7\n  .frame 0\n  imm r0, 7\n  ret\ndead:\n  .frame 8\n  store64 [r7+0], r6\n  mov r6, r7\n  .frame 0\n  imm r0, 99\n  ret\n";
+      saved(pt, t, strlen(t)); char *env[] = { "UNISA_ATTRIBUTES=", "UNISA_MAXSTEPS=200000000", 0 }; char *v1[] = { stream5, pt, pt, inc, 0 }; np_result a, b;
+      if (run(v1, env, 12, &a) || a.rc) row("NOT_RUN", "prop.meta.prune-idempotent", "dead", "stream5 failed");
+      else if (a.outn == strlen(t) && !memcmp(a.out, t, a.outn)) { row("VACUOUS", "prop.meta.prune-idempotent", "dead", "prune(t) == t"); np_free(&a); }
+      else { saved(p1, a.out, a.outn); char *v2[] = { stream5, p1, p1, inc, 0 };
+        if (run(v2, env, 12, &b) || b.rc) row("NOT_RUN", "prop.meta.prune-idempotent", "dead", "second stream5 failed");
+        else { check(a.outn == b.outn && !memcmp(a.out, b.out, a.outn), "prop.meta.prune-idempotent", "dead.prune-of-prune", "byte equality; prune(t) != t held"); np_free(&b); }
+        np_free(&a); } }
+    /* tape roundtrip: O2 tape -> image equals C -> image, six targets */
+    for (int t = 0; t < 6; t++) { char ic[4400], it[4400], hc[65], ht[65], lab[160];
+        snprintf(ic, sizeof ic, "%s/rt-%s-c", work, tslug(t)); snprintf(it, sizeof it, "%s/rt-%s-tape", work, tslug(t)); snprintf(lab, sizeof lab, "%s.tape-to-image", tslug(t));
+        if (compile(base, "-O2", targets[t], ic, noenv, &r) || r.rc || !shafile(ic, hc)) { row("NOT_RUN", "prop.meta.tape-roundtrip", lab, "C compile failed"); np_free(&r); continue; } np_free(&r);
+        if (compile(o2, "-O2", targets[t], it, noenv, &r) || r.rc || !shafile(it, ht)) { row("NOT_RUN", "prop.meta.tape-roundtrip", lab, "tape compile failed"); np_free(&r); continue; } np_free(&r);
+        char det[200]; snprintf(det, sizeof det, "sha256=%s", hc); check(!strcmp(hc, ht), "prop.meta.tape-roundtrip", lab, det); }
+    /* forward / reverse / comment / rename variants: literal gold on four inputs */
+    { const char *names[4] = { "forward", "reverse", "commented", "renamed" }; const char *cells[4] = { "prop.meta.forward-reverse", "prop.meta.forward-reverse", "prop.meta.comment-whitespace", "prop.meta.identifier-rename" };
+      char cat[4][256]; char hb[65], hv[65]; int have[4] = { 0 };
+      for (int k = 0; k < 4; k++) { char src[4400], img[4400]; snprintf(src, sizeof src, "%s/%s.c", work, names[k]); snprintf(img, sizeof img, "%s/%s.img", work, names[k]);
+        if (k == 0) write_program(src, fwd); else if (k == 1) write_program(src, rev); else saved(src, k == 2 ? commented : renamed, strlen(k == 2 ? commented : renamed));
+        if (k && same_file(base, src)) { row("VACUOUS", cells[k], names[k], "variant source equals base"); continue; }
+        if (compile(src, "-O0", targets[0], img, noenv, &r) || r.rc) { row("NOT_RUN", cells[k], names[k], "compile failed"); np_free(&r); continue; } np_free(&r);
+        have[k] = run_domain(img, cells[k], names[k], cat[k], sizeof cat[k]) == 4;
+        if (k == 2) { char ib[4400]; snprintf(ib, sizeof ib, "%s/forward.img", work); if (shafile(ib, hb) && shafile(img, hv)) row(!strcmp(hb, hv) ? "PASS" : "INFO", cells[k], "commented.image-bytes", !strcmp(hb, hv) ? "image sha256 equal to forward" : "image sha256 differs from forward (position data present)"); } }
+      if (have[0] && have[1]) check(!strcmp(cat[0], cat[1]), "prop.meta.forward-reverse", "forward-vs-reverse.outputs", "identical outputs on 0/1/255/256"); }
+}
+
+static void group_bound(void) {
+    np_result r; char src[4400], img[4400]; path(src, sizeof src, work, "forward.c"); write_program(src, fwd); path(img, sizeof img, work, "forward.img");
+    if (compile(src, "-O0", targets[0], img, noenv, &r) || r.rc) die("forward compile"); np_free(&r);
+    char cat[256]; run_domain(img, "prop.bound.loop-0-1-255-256", "forward-O0", cat, sizeof cat);
+    { const char *bad[4] = { "257", "0255", "-1", 0 }; for (int i = 0; i < 4; i++) { char *v[] = { img, (char *)bad[i], 0 }; char lab[160]; snprintf(lab, sizeof lab, "forward-O0.refuse-%s", bad[i] ? bad[i] : "argc");
+        if (run(v, noenv, 3, &r)) { row("NOT_RUN", "prop.bound.loop-0-1-255-256", lab, "image did not run"); continue; } check(r.rc == 2 && !r.outn && !r.errn, "prop.bound.loop-0-1-255-256", lab, "rc 2, empty stdout/stderr"); np_free(&r); } }
+    /* int64 arithmetic per TP-2 (mod 2^64, two's complement); operands reloaded before every op (.print clobbers r1/r2) */
+    { struct { const char *op, *a, *b, *want; } ops[] = {
+        { ".div", "-9223372036854775808", "7", "-1317624576693539401" }, { ".mod", "-9223372036854775808", "7", "-1" },
+        { "shl64", "1", "63", "-9223372036854775808" }, { "shl64", "-9223372036854775808", "0", "-9223372036854775808" },
+        { "shr64", "-9223372036854775808", "63", "-1" }, { "lshr64", "-9223372036854775808", "63", "1" }, { "shr64", "-9223372036854775808", "0", "-9223372036854775808" },
+        { "add64", "18446744073709551615", "1", "0" }, { "mul64", "4294967296", "4294967296", "0" }, { "sub64", "0", "1", "-1" }, { ".mod", "1", "-1", "0" }, { ".udiv", "18446744073709551615", "2", "9223372036854775807" } };
+      char tape[4096] = "_start:\n", want[512] = ""; int n = (int)(sizeof ops / sizeof *ops);
+      for (int i = 0; i < n; i++) { size_t l = strlen(tape); snprintf(tape + l, sizeof tape - l, "  imm r1, %s\n  imm r2, %s\n  %s r0, r1, r2\n  .print r0\n", ops[i].a, ops[i].b, ops[i].op); size_t w = strlen(want); snprintf(want + w, sizeof want - w, "%s\n", ops[i].want); }
+      strcat(tape, "  imm r0, 0\n  .exit r0\n");
+      char tp[4400], ti[4400]; path(tp, sizeof tp, work, "arith.tape"); path(ti, sizeof ti, work, "arith.img"); saved(tp, tape, strlen(tape));
+      if (compile(tp, "-O0", targets[0], ti, noenv, &r) || r.rc) { row("NOT_RUN", "prop.bound.int64-arith", "arith", "tape compile failed"); np_free(&r); }
+      else { np_free(&r); char *v[] = { ti, 0 }; if (run(v, noenv, 3, &r)) row("NOT_RUN", "prop.bound.int64-arith", "arith", "image did not run");
+        else { /* .write r3, r3 is not a newline writer; compare on the concatenated decimal stream instead */
+          char flat[512] = ""; for (int i = 0; i < n; i++) strcat(flat, ops[i].want);
+          int ok = r.rc == 0 && r.outn >= strlen(flat); char got[1024] = ""; size_t g = 0; for (size_t i = 0; i < r.outn && g + 1 < sizeof got; i++) if (r.out[i] == '-' || (r.out[i] >= '0' && r.out[i] <= '9')) got[g++] = r.out[i]; got[g] = 0;
+          ok = ok && !strcmp(got, flat); check(ok, "prop.bound.int64-arith", "twelve-ops.decimal-stream", ok ? "TP-2 literals" : got); np_free(&r); } } }
+    /* .div by zero exits 136 on the lnx/x86_64 image */
+    { const char *t = "_start:\n  imm r1, 0\n  imm r0, 5\n  .div r0, r0, r1\n  .exit r0\n"; char tp[4400], ti[4400]; path(tp, sizeof tp, work, "divzero.tape"); path(ti, sizeof ti, work, "divzero.img"); saved(tp, t, strlen(t));
+      if (compile(tp, "-O0", targets[0], ti, noenv, &r) || r.rc) { row("NOT_RUN", "prop.bound.div-zero", "div", "tape compile failed"); np_free(&r); }
+      else { np_free(&r); char *v[] = { ti, 0 }; if (run(v, noenv, 3, &r)) row("NOT_RUN", "prop.bound.div-zero", "div", "image did not run"); else { char d[64]; snprintf(d, sizeof d, "rc=%d", r.rc); check(r.rc == 136, "prop.bound.div-zero", "div-by-zero.exit-136", d); np_free(&r); } }
+      const char *m = "_start:\n  imm r1, 0\n  imm r0, 5\n  .mod r0, r0, r1\n  .exit r0\n"; path(tp, sizeof tp, work, "modzero.tape"); path(ti, sizeof ti, work, "modzero.img"); saved(tp, m, strlen(m));
+      if (compile(tp, "-O0", targets[0], ti, noenv, &r) || r.rc) { row("NOT_RUN", "prop.bound.div-zero", "mod", "tape compile failed"); np_free(&r); }
+      else { np_free(&r); char *v[] = { ti, 0 }; if (run(v, noenv, 3, &r)) row("NOT_RUN", "prop.bound.div-zero", "mod", "image did not run"); else { char d[64]; snprintf(d, sizeof d, "rc=%d", r.rc); check(r.rc == 136, "prop.bound.div-zero", "mod-by-zero.exit-136", d); np_free(&r); } } }
+    /* tape integer range per TP-9 */
+    /* accept=2: a hex spelling; the product's tape domain refuses it as "not covered" (measured 2026-10-28), which is an
+     * explicit refusal, not a wrong accept -- recorded as INFO, neither PASS nor FAIL, until the spelling set is ruled */
+    { struct { const char *lit; int accept; } lits[] = { { "-9223372036854775808", 1 }, { "18446744073709551615", 1 }, { "0xffffffffffffffff", 2 }, { "-9223372036854775809", 0 }, { "18446744073709551616", 0 }, { "1_000", 0 }, { "0x_1f", 0 }, { "0_0", 0 } };
+      for (size_t i = 0; i < sizeof lits / sizeof *lits; i++) { char t[256], tp[4400], ti[4400], lab[160]; snprintf(t, sizeof t, "_start:\n  imm r0, %s\n  .exit r0\n", lits[i].lit); snprintf(tp, sizeof tp, "%s/lit-%zu.tape", work, i); snprintf(ti, sizeof ti, "%s/lit-%zu.img", work, i); saved(tp, t, strlen(t));
+        snprintf(lab, sizeof lab, "%s.%s", lits[i].lit, lits[i].accept == 1 ? "accept" : lits[i].accept == 2 ? "hex-spelling" : "refuse");
+        if (compile(tp, "-O0", targets[0], ti, noenv, &r)) { row("NOT_RUN", "prop.bound.tape-integer-range", lab, "product did not run"); continue; }
+        if (lits[i].accept == 2) { char d[200]; snprintf(d, sizeof d, "rc=%d stderr=%.*s", r.rc, (int)(r.errn > 120 ? 120 : r.errn), r.err); for (char *p = d; *p; p++) if (*p == '\n' || *p == '\t') *p = ' '; fprintf(res, "INFO\t%s\t%s\t%s\n", "prop.bound.tape-integer-range", lab, d); }
+        else if (lits[i].accept) check(r.rc == 0 && !r.errn && !r.outn, "prop.bound.tape-integer-range", lab, "rc 0, image written");
+        else { int ok = r.rc == 1 && !r.outn && r.errn && strstr(r.err, "integer") && strstr(r.err, "line 2"); check(ok, "prop.bound.tape-integer-range", lab, ok ? "rc 1, stderr names integer and line 2, empty stdout" : "refusal shape differs"); }
+        np_free(&r); } }
+}
+
+int main(int argc, char **argv) {
+    if (argc != 6 || !realpath(argv[1], root) || !realpath(argv[2], stream4) || !realpath(argv[3], stream5) || argv[4][0] != '/') { fputs("usage: ROOT STREAM4_COM STREAM5_COM ABS_OUT det|meta|bound\n", stderr); return 2; }
+    const char *group = argv[5]; if (strcmp(group, "det") && strcmp(group, "meta") && strcmp(group, "bound")) die("group");
+    snprintf(outdir, sizeof outdir, "%s", argv[4]); if (mkdir(outdir, 0700) && errno != EEXIST) die("out dir");
+    path(work, sizeof work, outdir, group); if (mkdir(work, 0700)) die("group dir must be absent");
+    path(inc, sizeof inc, root, "include"); path(bound, sizeof bound, root, "tools/bound"); path(product, sizeof product, root, "unisacc.com");
+    char rp[4400]; snprintf(rp, sizeof rp, "%s/results-%s.tsv", outdir, group); res = fopen(rp, "wbx"); if (!res) die("results exclusive");
+    { char hp[65], h4[65], h5[65]; if (!shafile(product, hp) || !shafile(stream4, h4) || !shafile(stream5, h5)) die("identity"); fprintf(res, "IDENTITY\tproduct=%s\tstream4=%s\tstream5=%s\n", hp, h4, h5); }
+    if (!strcmp(group, "det")) group_det(); else if (!strcmp(group, "meta")) group_meta(); else group_bound();
+    fprintf(res, "SUMMARY\tgroup=%s\tpass=%d\tfail=%d\tvacuous=%d\tnot_run=%d\n", group, npass, nfail, nvac, nnotrun); fclose(res);
+    printf("PROPERTY_CASES\tgroup=%s\tpass=%d\tfail=%d\tvacuous=%d\tnot_run=%d\n", group, npass, nfail, nvac, nnotrun);
+    return nfail || nvac || nnotrun ? 1 : 0;
+}
