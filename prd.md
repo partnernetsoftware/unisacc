@@ -149,9 +149,9 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 <a id="work-tree"></a>
 ### 思维树
 
-**2026-10-28 单元化重构决定：** 主人要求 crate/Cargo 式结构单元化，并要求为 `.cx` 的 `#pragma unisa` 处理增加独立阶段。目标为 CX0 → E2 → E1 → E3 → E4 → prune → lower → elf；当前产品仍七流，CX0 尚未实现或接入。执行按 [单元化计划](plans/v0.0.43-units.md)，第一闭环是 CX0/E2 两包与 [独立测试件合同](tests/preprocess/CONTRACT.md)。先验证依赖隔离、独立产物和受影响重建范围；不以新增有限 PASS 批数量计收口，不增加 Rust 所有权实现这一隐含前置。
+**2026-10-28 单元化重构决定：** 主人要求 crate/Cargo 式结构单元化，并要求为 `.cx` 的 `#pragma unisa` 处理增加独立阶段。目标为 CX0 → E2 → E1 → E3 → E4 → prune → lower → elf；当前产品仍七流；CX0 独立 CX 模块/CLI 已实现并三路径实跑24/0，尚未接入产品 E2。执行按 [单元化计划](plans/v0.0.43-units.md)，第一闭环是 CX0/E2 两包与 [独立测试件合同](tests/preprocess/CONTRACT.md)。先验证依赖隔离、独立产物和受影响重建范围；不以新增有限 PASS 批数量计收口，不增加 Rust 所有权实现这一隐含前置。
 
-**当前分工与下一动作：** 主线先固定 CX0 输入/单元束输出及完整测试合同，再提取 src/cxmod.c；E2 按单元消费计划，语言宏与普通 pragma 仍归 E2。旧 cc 固定点构造已完成，GEN-A 安装仅改 record 为 dd2385cf、APE 仍 da4e；GEN-B02 与 A/当前根逐字相同，直接 selfhost58/0。登记批原30秒默认-run仍超时；本轮同源码 O2 ELF 在30秒内58/0（out/c43-resume-selfhost-o2-01.run.stdout），只证编译与验证需分相，不回填登记 PASS。其他协作者暂存不动；本轮只提交重构文档。
+**当前分工与下一动作：** 首个 CX0 提取已落在 cx/cx0/plan.cx（生成器可重现，不手改生成物），调用者只导入公开结果/规划/释放 API；POSIX 子进程隔离旧解析状态。tools/cx0.cx 实际输出 CX0PLAN1，独立测试在 unisacc 默认运行、GCC/Clang 仅-o后运行均24/0，stderr空。下一刀完成不可变单元束/读取器再接 E2，不把带路径的迁移计划当完整资源束。grk负责两宿主入口，主人明确无需-run。其他协作者暂存不动；产品源码SID仍16219141、Rootda4e/recorddd2385cf未变。
 
 **边界测试待验（2026-10-28）：** 已审入既有interfaces草稿修订：七流当前pin、由独立参考规则手推的592B Tape字面oracle，以及四个E3 trailer负例的外框长度修复，确保测到目标层。修正attr长度拒绝名与ELF截断位置，保留原271项并新增12项；当前仍NOT_RUN。原e2-input-binding扩展为七流成员与候选逐字核对，含各新增模型一字节差异负控及前后稳定性，仍待实跑；不另造重复批。草稿out/c43-da4e-interfaces-review-01/，严格清单169批/178覆盖/19缺口，仅元数据通过、执行0。formats.md仅据现有attr_strip代码纠正旧描述；冻结helper实测SID仍16219141、产品仍da4e7ef1，不影响cc构造。
 
@@ -269,13 +269,13 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 ```text
 0.0.43：按 crate/Cargo 式单元化重构收口（发布须另授）
-├─ 当前主刀 U1：提取独立 CX0（CX pragma / 模块 / 编译单元计划），以 src/cxmod.c 为唯一迁移源
+├─ 当前主刀 U1：独立 CX0 模块/CLI 已落地、三路径24/0；补不可变编译单元束与读取器后接 E2，U1/U2尚未完成
 ├─ U2：E2 独立包消费 CX0 单元束；先收 CX0、E2、边界三组完整合同，再接产品
 ├─ U3：沿公开依赖图迁移其余六流、执行核、模型格式、host 与构造器；分别核构建/接口/装配/测试键
 ├─ U4：接回完整十九合同、N22 与同候选宿主验收；不删断言、不放宽预算、不缓存 PASS
 ├─ 现行基线：SID16219141 / Rootda4e7ef1 / record dd2385cf；本机两代固定点58/0，非完整N22
 ├─ 已有能力：module/use、CXIF v0 文本投影和 cx-plan；尚无 crate 式独立包产物或编译期所有权保证
-└─ 当前交付：plans/v0.0.43-units.md 与 tests/preprocess/CONTRACT.md 为设计；CX0 尚未实现/接入，产品仍七流
+└─ 当前交付：cx/cx0/plan.cx、tools/cx0.cx、tests/preprocess/cx0.cx 实际代码；产品仍七流，完整CX0/E2合同仍开
 ```
 
 旧思维树原文见 [裁定前历史树](archive/plans/c43-pre-unit-work-tree-20261028.md)。以下 Source329/0d5923/03a5 的构造与缺陷段为历史纪元；其中“当前/下一步”不再调度。现行身份与动作以上树及记忆宫殿首段为准。
@@ -355,7 +355,7 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 <a id="memory-palace"></a>
 ### 记忆宫殿
 
-**现行重构入口（2026-10-28）：** 主人决定采用 crate/Cargo 式独立单元，并将 CX pragma/模块规划提为 E2 前的独立 CX0。完整目标、U0–U4 与八项失效传播实验在 [单元化计划](plans/v0.0.43-units.md)；CX0/E2/边界三组测试义务在 [测试件合同](tests/preprocess/CONTRACT.md)。当前只完成规划，CX0 未接入，产品仍七流；module/use、文本 CXIF v0 不等于独立包或 Rust 编译期所有权。下一动作提取 CX0，暂不扩张无关有限批。
+**现行重构入口（2026-10-28）：** CX0首个独立CX单元已实现：原C解析器可重现提取为私有模块，公开cx0_result/cx0_plan/cx0_release；显式接口目录、CX0PLAN1/CX0IF0、失败无成功输出、POSIX调用隔离。三路径当前源码24/0及使用方法见 cx/cx0/README.md；产品CLI仍走原C规划器，不授第八模型流/不可变单元束/完整U1。下一刀完成资源束读取与E2消费，目标与全合同仍在单元化计划及测试件合同。GCC/Clang仅-o，不要求-run；静态所有权未实现。
 
 **本轮基线复核：** APE da4e7ef144186ccf578d282381ac671885094c6dfe30053727ac3f3c4a3e5592；build record dd2385cf4952f95cd7cdb6d4d25b2cf774841becdcbd8506138260a92743abc0（替代下方首次安装 ab5f）。同源固定点 GEN-A / GEN-B02 的原58断言已通过；本轮预编译 O2 验证亦在原30秒内58/0、stderr空，直接 O2 默认-run 原30秒rc142，不冒称登记批通过。下方 cc 独占构造/等待新固定点的语句是交接前状态，不再作为待执行工作。
 

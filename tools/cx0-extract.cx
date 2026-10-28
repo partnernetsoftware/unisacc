@@ -1,0 +1,47 @@
+/* Reproducible first CX0 extraction. The C resolver remains the migration
+ * oracle; this emits one private CX module, not a second hand-maintained parser.
+ * sh ./unisacc.com tools/cx0-extract.cx -- [--check] */
+static void bad(const char *why){fprintf(stderr,"cx0-extract: %s\n",why);exit(2);}
+static char *replace_one(char *s,const char *old,const char *fresh){
+ char *p=strstr(s,old);if(!p||strstr(p+1,old))bad("expected unique source anchor");
+ size_t n=strlen(s),a=(size_t)(p-s),o=strlen(old),f=strlen(fresh);
+ char *r=malloc(n-o+f+1);if(!r)bad("allocation");
+ memcpy(r,s,a);memcpy(r+a,fresh,f);memcpy(r+a+f,p+o,n-a-o+1);free(s);return r;
+}
+int main(int argc,char **argv){
+ int check=argc==2&&!strcmp(argv[1],"--check");if(argc!=1&&!check)bad("usage [--check]");
+ size_t sn,tn;char *src=cx_read("src/cxmod.c",&sn),*tpl=cx_read("cx/cx0/plan.cx.in",&tn);
+ if(!src||!tpl||memchr(src,0,sn)||memchr(tpl,0,tn))bad("read source/template");
+ char *start=strstr(src,"#define CXM_MAXU 64\n");if(!start)bad("resolver start");
+ char *body=malloc(strlen(start)*2+1024);if(!body)bad("allocation");size_t at=0;
+ /* Every resolver symbol is private, including a second declaration on the
+  * same file-scope line. Function-local declarations are left unchanged. */
+ const char *p=start;int depth=0,comment=0,quote=0,escape=0;
+ while(*p){
+  if(!depth&&!comment&&!quote&&(!strncmp(p,"int cxm_",8)||!strncmp(p,"char cxm_",9)||!strncmp(p,"char *cxm_",10))){memcpy(body+at,"static ",7);at+=7;}
+  char c=*p;body[at++]=c;
+  if(comment){if(c=='*'&&p[1]=='/'){body[at++]=*++p;comment=0;}}
+  else if(quote){if(escape)escape=0;else if(c=='\\')escape=1;else if(c==quote)quote=0;}
+  else if(c=='/'&&p[1]=='*'){body[at++]=*++p;comment=1;}
+  else if(c=='/'&&p[1]=='/'){while(p[1]&&p[1]!='\n')body[at++]=*++p;}
+  else if(c=='"'||c=='\'')quote=c;
+  else if(c=='{')depth++;else if(c=='}')depth--;
+  p++;
+ }
+ body[at]=0;if(depth||comment||quote)bad("unbalanced resolver");
+ body=replace_one(body,"unisa_sha256_hex(cxm_out, (size_t)cxm_nout, hex);","cx_sha256_hex(cxm_out, (size_t)cxm_nout, hex);");
+ body=replace_one(body,"unisa_sha256_hex(cxm_src, (size_t)cxm_nsrc, hex);","cx_sha256_hex(cxm_src, (size_t)cxm_nsrc, hex);");
+ body=replace_one(body,
+ "td = getenv(\"TMPDIR\"); if (td == 0 || td[0] == 0) td = getenv(\"TEMP\");   /* TEMP: Windows, as the forwarding unit */\n    if (td == 0 || td[0] == 0) td = \"/tmp\";",
+ "td = cx0_directory; /* explicit per-invocation interface resource */");
+ body=replace_one(body,"    if (n < 0) return 0 - 1;\n    cxm_nsrc = n;", "    if (n == -3) return 1;\n    if (n < 0) return 0 - 1;\n    cxm_nsrc = n;");
+ body=replace_one(body,"        if (cxm_rd(norm, cxm_cmp, 1) == 0 - 1) {", "        int probe = cxm_rd(norm, cxm_cmp, 1);\n        if (probe == -3) return 1;\n        if (probe == 0 - 1) {");
+ char source_sha[65];cx_sha256_hex(src,sn,source_sha);free(src);
+ tpl=replace_one(tpl,"@RESOLVER_SHA256@",source_sha);
+ tpl=replace_one(tpl,"/* CX0_LEGACY_BODY */",body);free(body);
+ size_t n=strlen(tpl);int rc=0;
+ if(check){size_t oldn;char *old=cx_read("cx/cx0/plan.cx",&oldn);rc=!old||oldn!=n||memcmp(old,tpl,n);free(old);}
+ else rc=cx_write("cx/cx0/plan.cx",tpl,n);
+ free(tpl);if(rc)bad(check?"generated module differs":"write module");
+ puts(check?"CX0_EXTRACT\tEXACT":"CX0_EXTRACT\tPREPARED");return 0;
+}

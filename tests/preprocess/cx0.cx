@@ -1,0 +1,76 @@
+/* Independent CX0 tests: semantic gold, failures and invocation isolation.
+ * ROOT NEW_ABS_OUT. GCC/Clang adapters are used only with -o, then binaries
+ * are executed separately. This does not close the full CX0/E2 contract. */
+#pragma unisa use plan
+static int checks,failed;
+static char work[4096],interfaces[4400];
+static void die(const char *why){fprintf(stderr,"cx0-unit: %s errno=%d\n",why,errno);exit(2);}
+static void check(int ok,const char *name){checks++;if(!ok)failed++;printf("%s\tcx0.%s\n",ok?"PASS":"FAIL",name);}
+static void path(char *out,size_t cap,const char *a,const char *b){int n=snprintf(out,cap,"%s/%s",a,b);if(n<0||(size_t)n>=cap)die("path-bound");}
+static void fixture(const char *name,const char *text,char out[4400]){
+ path(out,4400,work,name);int fd=open(out,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,0600);if(fd<0)die("exclusive-fixture");
+ size_t n=strlen(text),at=0;while(at<n){ssize_t w=write(fd,text+at,n-at);if(w<0&&errno==EINTR)continue;if(w<=0)die("write-fixture");at+=(size_t)w;}if(close(fd))die("close-fixture");
+}
+static int occurrences(const char *s,const char *word){int n=0;size_t len=strlen(word);while((s=strstr(s,word))){n++;s+=len;}return n;}
+static int refused(const cx0_result *r,int status,const char *reason){return r->status==status&&!r->bytes&&r->diagnostic&&strstr(r->diagnostic,reason);}
+static char *root_interface(const char *plan){
+ const char *end=strchr(plan,'\n');if(!end)return 0;const char *line=end+1;end=strchr(line,'\n');if(!end)return 0;
+ const char *p=strstr(line,interfaces);if(!p||p>=end)return 0;const char *e=p;while(e<end&&*e!='\t')e++;
+ char file[4400];size_t n=(size_t)(e-p);if(n>=sizeof file)return 0;memcpy(file,p,n);file[n]=0;size_t bytes;return cx_read(file,&bytes);
+}
+int main(int argc,char **argv){
+ char root[4096];if(argc!=3||!realpath(argv[1],root)||argv[2][0]!='/'||strlen(argv[2])>=sizeof work)die("usage ROOT NEW_ABS_OUT");
+ memcpy(work,argv[2],strlen(argv[2])+1);if(mkdir(work,0700))die("new-output-required");path(interfaces,sizeof interfaces,work,"interfaces");if(mkdir(interfaces,0700))die("interfaces-directory");
+ char plain[4400],one[4400],entry[4400],mod[4400],leaf[4400],gate[4400],nested[4400],missing[4400],a[4400],b[4400],cycle[4400],fake[4400],conditional[4400],other[4400],collision[4400],mainmod[4400],mainentry[4400],exported[4400],unreadable[4400];
+ fixture("plain.c","int main(void){return 7;}\n",plain);
+ fixture("one.cx","int main(void){return 7;}\n",one);
+ fixture("module.cx","#pragma unisa module module\nstatic int hidden(int n){return n+1;}\nint shown(int n){return hidden(n);}\n",mod);
+ fixture("entry.cx","#pragma unisa use module\nint main(void){return shown(6);}\n",entry);
+ fixture("leaf.cx","#pragma unisa module leaf\ntypedef struct { int value; } leaf_value;\nint leaf_add(int n){return n+1;}\n",leaf);
+ fixture("gate.cx","#pragma unisa module gate\n#pragma unisa use leaf\nint gate_add(int n){return leaf_add(n);}\n",gate);
+ fixture("nested.cx","#pragma unisa use gate\nint main(void){return gate_add(6);}\n",nested);
+ fixture("missing.cx","#pragma unisa use not_here\nint main(void){return 7;}\n",missing);
+ fixture("ping.cx","#pragma unisa module ping\n#pragma unisa use pong\nint ping_run(int n){return n;}\n",a);
+ fixture("pong.cx","#pragma unisa module pong\n#pragma unisa use ping\nint pong_run(int n){return n;}\n",b);
+ fixture("cycle.cx","#pragma unisa use ping\nint main(void){return 7;}\n",cycle);
+ fixture("fake.cx","/* #pragma unisa use not_here */\nstatic const char *s=\"#pragma unisa use not_here\";\nint main(void){return 7;}\n",fake);
+ fixture("conditional.cx","#if 0\n#pragma unisa use module\n#endif\nint main(void){return 7;}\n",conditional);
+ fixture("other.cx","#pragma unisa module other\nint shown(int n){return n;}\n",other);
+ fixture("collision.cx","#pragma unisa use module\n#pragma unisa use other\nint main(void){return shown(6);}\n",collision);
+ fixture("mainmod.cx","#pragma unisa module mainmod\nint main(void){return 7;}\n",mainmod);
+ fixture("mainentry.cx","#pragma unisa use mainmod\nint root(void){return 7;}\n",mainentry);
+ fixture("exported.cx","#pragma unisa module exported\nint outside;\n",exported);
+ fixture("unreadable.cx","int main(void){return 7;}\n",unreadable);
+ char *sources[]={plain};cx0_result r=cx0_plan(0,sources,1,0,0,interfaces);
+ char expected[5000];int z=snprintf(expected,sizeof expected,"CX0PLAN1\n0\t%s\n",plain);if(z<0||(size_t)z>=sizeof expected)die("expected-bound");
+ check(!r.status&&!r.diagnostic_bytes&&!strcmp(r.text,expected),"plain-c-exact-plan");cx0_release(&r);
+ sources[0]=one;r=cx0_plan(0,sources,1,0,0,interfaces);z=snprintf(expected,sizeof expected,"CX0PLAN1\n0\t%s\tcx.h\n",one);if(z<0||(size_t)z>=sizeof expected)die("expected-bound");
+ check(!r.status&&!r.diagnostic_bytes&&!strcmp(r.text,expected),"cx-exact-prelude-plan");cx0_release(&r);
+ sources[0]=entry;r=cx0_plan(0,sources,1,0,0,interfaces);
+ check(!r.status&&r.bytes&&!r.diagnostic_bytes&&strstr(r.text,mod)&&occurrences(r.text,"\n")==3,"module-plan-two-units");
+ char *header=r.status?0:root_interface(r.text);check(header&&strstr(header,"int shown(int n);")&&!strstr(header,"hidden"),"only-public-interface-visible");free(header);
+ char *saved=malloc(r.bytes+1);if(!saved)die("retain-plan");memcpy(saved,r.text,r.bytes+1);cx0_result kept=r;
+ sources[0]=missing;r=cx0_plan(0,sources,1,0,0,interfaces);check(refused(&r,1,"no file"),"missing-module-rejected");cx0_release(&r);
+ check(kept.text&&!strcmp(kept.text,saved),"retained-result-survives-other-call");
+ sources[0]=entry;r=cx0_plan(0,sources,1,0,0,interfaces);check(!r.status&&!strcmp(r.text,saved),"rejection-recovery-exact");cx0_release(&r);free(saved);cx0_release(&kept);
+ sources[0]=nested;r=cx0_plan(0,sources,1,0,0,interfaces);check(!r.status&&occurrences(r.text,"\n")==4&&strstr(r.text,leaf)&&strstr(r.text,gate),"nested-dependency-plan");
+ header=r.status?0:root_interface(r.text);check(header&&strstr(header,"leaf_value")&&!strstr(header,"leaf_add"),"transitive-interface-is-types-only");free(header);cx0_release(&r);
+ sources[0]=cycle;r=cx0_plan(0,sources,1,0,0,interfaces);check(refused(&r,1,"cycle"),"cycle-rejected");cx0_release(&r);
+ sources[0]=fake;r=cx0_plan(0,sources,1,0,0,interfaces);check(!r.status&&occurrences(r.text,"\n")==2,"fake-pragma-does-not-add-dependency");cx0_release(&r);
+ sources[0]=conditional;r=cx0_plan(0,sources,1,0,0,interfaces);check(refused(&r,1,"conditional"),"conditional-dependency-rejected");if(r.status!=1)fprintf(stderr,"conditional actual: %s\n",r.diagnostic);cx0_release(&r);
+ sources[0]=collision;r=cx0_plan(0,sources,1,0,0,interfaces);check(refused(&r,1,"shown"),"duplicate-public-name-rejected");cx0_release(&r);
+ sources[0]=mainentry;r=cx0_plan(0,sources,1,0,0,interfaces);check(refused(&r,1,"main"),"module-main-rejected");cx0_release(&r);
+ sources[0]=exported;r=cx0_plan(1,sources,1,0,0,interfaces);check(refused(&r,1,"object"),"public-object-rejected");cx0_release(&r);
+ sources[0]=mod;r=cx0_plan(1,sources,1,0,0,interfaces);check(!r.status&&!strncmp(r.text,"CX0IF0\n",7)&&strstr(r.text,"int shown(int n);")&&!strstr(r.text,"hidden"),"interface-mode-public-gold");cx0_release(&r);
+ char missingroot[4400],badparent[4500];path(missingroot,sizeof missingroot,work,"absent.cx");sources[0]=missingroot;r=cx0_plan(0,sources,1,0,0,interfaces);check(refused(&r,1,"source-absent"),"missing-root-is-refusal");cx0_release(&r);
+ path(badparent,sizeof badparent,one,"child.cx");sources[0]=badparent;r=cx0_plan(0,sources,1,0,0,interfaces);check(refused(&r,2,"source-io")&&!strstr(r.diagnostic,"source-absent"),"enotdir-is-io-not-absent");cx0_release(&r);
+ sources[0]=work;r=cx0_plan(0,sources,1,0,0,interfaces);check(refused(&r,2,"regular-source-required"),"directory-is-io-not-absent");cx0_release(&r);
+ if(geteuid()!=0){if(chmod(unreadable,0000))die("deny-source");sources[0]=unreadable;r=cx0_plan(0,sources,1,0,0,interfaces);check(refused(&r,2,"source-io")&&!strstr(r.diagnostic,"source-absent"),"eacces-is-io-not-absent");cx0_release(&r);if(chmod(unreadable,0600))die("restore-source");}
+ else puts("NOT_RUN\tcx0.eacces-is-io-not-absent\troot-bypasses-file-permissions");
+ sources[0]=one;r=cx0_plan(0,sources,1,0,0,one);check(refused(&r,2,"interface-directory-required"),"interface-directory-required");cx0_release(&r);
+ r=cx0_plan(0,sources,65,0,0,interfaces);check(refused(&r,2,"invalid-input"),"root-count-bound-before-array-read");cx0_release(&r);
+ char *forced[]={"first.h","second.h"};r=cx0_plan(0,sources,1,forced,2,interfaces);check(!r.status&&strstr(r.text,"\tcx.h\tfirst.h\tsecond.h\n"),"forced-interface-order");cx0_release(&r);
+ check(!r.text&&!r.diagnostic&&!r.bytes&&!r.diagnostic_bytes,"release-clears-owned-result");
+ puts("NOT_CLAIMED\tfull-CX0-E2-unit-bundle-product-integration-foreign-hosts-static-ownership");
+ printf("CX0_UNIT\tassertions=%d\tfailed=%d\tscope=independent-plan-interface-io-recovery\n",checks,failed);return failed?1:0;
+}
