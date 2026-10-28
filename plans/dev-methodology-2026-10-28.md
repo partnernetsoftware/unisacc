@@ -172,3 +172,22 @@
 - 正规会话在冻结导出里完成（2026-10-28 14:27–14:38，`/home/devali/repos/unisacc-cc-session-2e6adb9ce0/out/allsession-01`，ROOT=导出、候选=导出内产品 d65c1474、材料 streams 42137e48… / ref 9a926c43…）：35 行拆分尝试 start/run/finish 全部 FINISH PASS、identity STABLE；`tests/all-aggregate.cx` 纯读重导：pass=35 fail=0 unknown=0，cc 的 15 个 coverage 行全部 SATISFIED；会话整体 NOT_QUALIFIED 仅因其余 150 个已实现批未在此会话执行（missing=150），属预期。11 min，无残留进程。换标依据：本会话收据 + out/c43-cc-reg-01。
 - 换标提案（2026-10-28）：`tools/matrix-flip-gen.cx` 按 `plans/matrix-flip-cc-map.tsv`（60 格 → 登记批 + 证据标签）从现行五张矩阵生成 `plans/matrix-flip-cc-proposal/*.tsv`（只改 state=COVERED_LOCAL 与 evidence 列，其余字节不动），`--check` 校验每格现为 MISSING、每批 IMPLEMENTED、输出未过期。效果：properties 21→0 MISSING、optimization 15→2、formats 16→7、stream-e4 17→10、stream-prune 19→9。按规则由下一慢车道纪元原样覆盖 tests/*-domain-matrix.tsv（证据：冻结导出会话 35 收据 + out/c43-cc-reg-01）。
 - 换标已落地（fable 裁定 2026-10-28：矩阵证据绑"最近一次慢车道纪元的候选"，即当日 cdx fullname 纪元的 d65c1474，cc 的 35 批收据正是该候选，属同候选新证据而非迁移；快车道禁令是不触 SID/PC/GEN，TSV 换标不触）：证据列改为 §7 格式 `batch@d65c1474:N/0;out/c43-cc-reg-01/<batch>;cells`，生成器在每张矩阵头注里加一行说明 d65 行的来源且 Root7a 旧行不动；五张矩阵（不在任何 owner 路径窗内、工作树干净）由 proposal 覆盖：properties MISSING 21→0、optimization 15→2、formats 16→7、stream-e4 17→10、stream-prune 19→9；`--list` 元数据仍有效。commit 路径只含五张矩阵、map、proposal、生成器与 HANDOFF，不含 tests/batches.tsv。
+
+## 21. 前奏拆分实测（2026-10-28，给 cx 结构化轨道的量化依据）
+
+- 方法：把 include/ 复制为私有树 out/c43-cc-prelude-01/inc，用 `-I inc`（不改 include/）逐个清空头文件后 `-E` 同一 .cx（`int main(void){return 3;}`），冷跑（UNISACC_RUN_CACHE=0）读 RR_TIME E2 推理；负载 0.5–1.2，16 核。注意 `-I inc` 的展开（517,803 B）与默认路径（481,573 B）从第 6057 字节起有空白行差异（头文件查找路径不同），故对比只在 `-I inc` 口径内做。
+- 独占贡献（清空单个头，其余不变）：
+
+  | 清空 | -E 字节 | E2 推理 | 节省 |
+  |---|---|---|---|
+  | （全量） | 517,803 | 1.60–1.71 s | — |
+  | unistd.h | 377,615 | 0.99 s | −140 KB，−0.65 s |
+  | unisa_safedel.h | 360,710 | 1.28–1.33 s | −157 KB，−0.33 s |
+  | dirent.h | 459,984 | 1.39 s | −58 KB，−0.25 s |
+  | sys/wait.h | 492,263 | 1.48 s | −26 KB，−0.15 s |
+  | signal.h | 504,890 | 1.48 s | −13 KB，−0.15 s |
+  | unisa_sha256.h | 513,494 | 1.57 s | −4 KB，−0.05 s |
+  | unistd.h + unisa_safedel.h | 239,237 | 0.72 s | −279 KB，−0.93 s |
+
+- 结论：按时间看最大的杠杆是 unistd.h（21 KB 源展开到 ~140 KB，经 stdlib/sys/_win/sys/_ret/_timespec），其次 unisa_safedel.h（§9 的 57% 是含传递依赖的独立展开，独占只有 157 KB/0.33 s）。两者按需化后每次 .cx 编译 E2 从 ~1.65 s 降到 ~0.72 s（−56%）；all-waves 每批三次启动则省 ~2.8 s/批。使用面：safedel 仅 10/229 个 .cx 使用；unistd 的 spawn/run 由 148 个使用（主要经 cxlib.netpack），需要的是"进程相关 API 作为模块按需引入"而非整头删除。按需模块与 cx.h 属 cdx/grk 的 cx 结构化域；cc 只交数字，不改 include/。
+- 未做：unistd.h 内部再归因（哪一段展开最大）、10 个 safedel 使用者的显式 include 等价验证（待结构化方案定型后做，口径要与真实模块机制一致）。
