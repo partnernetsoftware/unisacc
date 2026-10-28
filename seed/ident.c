@@ -50,6 +50,7 @@ static int keep(const char *rel) {
     if (legacy_projection && !strcmp(sfx, ".cx")) return 0;
     for (i = 0; i < sizeof exts / sizeof *exts; i++) if (!strcmp(sfx, exts[i])) ok = 1;
     if (!ok) return 0;
+    if (!strcmp(rel, "cx/check_memory.cx") || !strcmp(rel, "cx/check_owned.cx")) return 0;
     if (!strncmp(rel, "seed/", 5)) {
         const char *base = strrchr(rel, '/') + 1;
         return !strcmp(base, "tbl.c") || !strcmp(base, "net.c") || !strcmp(base, "json.h")

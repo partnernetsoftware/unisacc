@@ -27,6 +27,8 @@ def closure(h):
             # construction input; exec/build/*.py (gen.py, graph.py, procs.py, parsebase.py,
             # parse2base.py) are.  exec/.gitignore keeps only these (0.0.24 T3).
             rel = path.relative_to(ROOT).parts
+            if rel in (('cx', 'check_memory.cx'), ('cx', 'check_owned.cx')):
+                continue   # standalone validation programs, not product inputs
             if rel[0] == 'seed' and rel[-1] not in ('tbl.c', 'net.c', 'json.h', 'gen.c', 'facts.h', 'ident.c', 'blob.c', 'sha256.h', 'pack.c', 'compilerpack.c', 'ape.c'):
                 continue   # only the tools the build runs (0.0.32 B5: seed/gen.c builds the shared deltas)
             if rel[0] == 'exec' and path.suffix in ('.sh', '.py', '.cx') and path.stem.endswith('check'):
