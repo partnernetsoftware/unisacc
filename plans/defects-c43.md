@@ -265,7 +265,7 @@ coverage中旧1/4缺陷描述改为本候选实际4/1及明确合同冲突，没
 2. S1 容器不校验：ELF 魔数被覆盖为 `XXXX` 的单元对象仍被链接成镜像（rc 0）；截断到前 2000 字节（无节头表）的对象同样被链接。tl_tape 直接搜索单元 tape 负载而不校验 ELF 头/节表。预期：`not an ELF unit object` / `truncated object` 具名拒绝。
 绿：截到 100 字节对象、tapebin 翻字节/截断/坏 minor、未知操作码 tape、二进制垃圾 tape 均具名拒绝。
 
-### 验收（2026-10-28 18:5x，已装 Root 3a5b76ab 含 896888f424 修复）
+### 验收（2026-10-28 18:5x，已装 Root 4c2831c3 —— prd.md:159 链接修复产品，含 896888f424；红批复跑时共享产品已由 3a5b76ab 换为 4c2831c3，日志 IDENTITY 为准）
 
-- 批 `link-undefined-function` 在 3a5b76ab 上 4/1：object-only、archive-without-definition、cross-archive-order（逆序拒绝 + 工作顺序 106）均转绿——`link: undefined reference to NAME` 已具名；**仅余 direct-c-route**（`-o img main.c`，直接 C 路线不经 tapelink 的未定义检查，cdx 提交注记 "retain direct-C gap"），仍 rc 0 + 崩溃镜像。triage #14 由 S2 降为"direct-C 路线一例开放"。
-- 其余红批在 3a5b76ab 上计数与 f3705dfa 相同：driver-diagnostics 7/11、link-malformed-input 8/11、pp-negative 8/10、c-negative 20/43（日志 out/c43-cc-reg-3a5b-01/）。
+- 批 `link-undefined-function` 在 4c2831c3 上 4/1：object-only、archive-without-definition、cross-archive-order（逆序拒绝 + 工作顺序 106）均转绿——`link: undefined reference to NAME` 已具名；**仅余 direct-c-route**（`-o img main.c`，直接 C 路线不经 tapelink 的未定义检查，cdx 提交注记 "retain direct-C gap"），仍 rc 0 + 崩溃镜像。triage #14 由 S2 降为"direct-C 路线一例开放"。
+- 其余红批在 4c2831c3 上计数与 f3705dfa 相同：driver-diagnostics 7/11、link-malformed-input 8/11、pp-negative 8/10、c-negative 20/43（日志 out/c43-cc-reg-3a5b-01/）。
