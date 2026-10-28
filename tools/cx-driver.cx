@@ -5,7 +5,7 @@
  * No ambient header roots, manual resource manifest or old compiler fallback. */
 #pragma unisa use cx0.bundle
 #pragma unisa use runtime.process
-typedef struct {char *target,*headers,*streams,*e2,*stage,*product,*pipeline,*runtime,*roots[16];int nr;} Profile;
+typedef struct {char *target,*headers,*streams,*e2,*stage,*product,*pipeline,*runtime,*runtime_sha,*interface_sha,*roots[16];int nr;} Profile;
 static long long deadline;
 static size_t resource_bytes;
 static int resource_count,resource_entries;
@@ -33,12 +33,14 @@ static char *regular(const char *path,size_t limit,size_t *n){
 static void save(const char *path,const void *p,size_t n){remaining();int fd=open(path,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,0600);if(fd<0)die("exclusive-output",path);size_t at=0;int bad=0;while(at<n){ssize_t z=write(fd,(const char *)p+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0){bad=1;break;}at+=(size_t)z;}if(fsync(fd))bad=1;if(close(fd))bad=1;if(bad){unlink(path);die("output-write-or-close",path);}}
 static char *resolve(const char *path,int directory){char p[4096];struct stat st;if(!path||path[0]!='/'||strpbrk(path,"\t\r\n")||!realpath(path,p))die("absolute-existing-path-required",path);if(lstat(p,&st)||(directory?!S_ISDIR(st.st_mode):!S_ISREG(st.st_mode)))die("profile-path-kind",path);return copy(p);}
 static void singleton(char **field,char *value){if(*field)die("duplicate-profile-field",value);*field=value;}
+static int hash_shape(const char *p){if(!p||strlen(p)!=64)return 0;for(int i=0;i<64;i++)if(!((p[i]>='0'&&p[i]<='9')||(p[i]>='a'&&p[i]<='f')))return 0;return 1;}
 static Profile profile(char *text,size_t n){
  Profile p={0};if(n>65536||memchr(text,0,n)||n<10||memcmp(text,"CXDRIVER1\n",10))die("profile-version-or-size",0);char *line=text+10;
  while(*line){char *end=strchr(line,'\n');if(!end)die("profile-final-newline",0);*end=0;if(*line&&*line!='#'){char *value=strchr(line,'\t');if(!value)die("profile-fields",line);*value++=0;if(!*value||strpbrk(value,"\r\t"))die("profile-fields",line);
-  if(!strcmp(line,"Target"))singleton(&p.target,value);else if(!strcmp(line,"HeaderRoot"))singleton(&p.headers,value);else if(!strcmp(line,"Streams"))singleton(&p.streams,value);else if(!strcmp(line,"E2Adapter"))singleton(&p.e2,value);else if(!strcmp(line,"StageAdapter"))singleton(&p.stage,value);else if(!strcmp(line,"Product"))singleton(&p.product,value);else if(!strcmp(line,"Pipeline"))singleton(&p.pipeline,value);else if(!strcmp(line,"RuntimeProvider"))singleton(&p.runtime,value);else if(!strcmp(line,"ResourceRoot")){if(p.nr==16)die("resource-root-count",0);p.roots[p.nr++]=value;}else die("unknown-profile-field",line);
+  if(!strcmp(line,"Target"))singleton(&p.target,value);else if(!strcmp(line,"HeaderRoot"))singleton(&p.headers,value);else if(!strcmp(line,"Streams"))singleton(&p.streams,value);else if(!strcmp(line,"E2Adapter"))singleton(&p.e2,value);else if(!strcmp(line,"StageAdapter"))singleton(&p.stage,value);else if(!strcmp(line,"Product"))singleton(&p.product,value);else if(!strcmp(line,"Pipeline"))singleton(&p.pipeline,value);else if(!strcmp(line,"RuntimeProvider"))singleton(&p.runtime,value);else if(!strcmp(line,"RuntimeProviderSHA"))singleton(&p.runtime_sha,value);else if(!strcmp(line,"RuntimeDeclarationsSHA"))singleton(&p.interface_sha,value);else if(!strcmp(line,"ResourceRoot")){if(p.nr==16)die("resource-root-count",0);p.roots[p.nr++]=value;}else die("unknown-profile-field",line);
  }line=end+1;}
  if(!p.target||!p.headers||!p.streams||!p.e2||!p.stage||!p.product||!p.pipeline)die("missing-profile-field",0);
+ if((p.runtime_sha||p.interface_sha)&&(!p.runtime||!hash_shape(p.runtime_sha)||!hash_shape(p.interface_sha)))die("runtime-binding-requires-provider-and-two-sha256",0);
  if(strcmp(p.target,"lnx/x86_64"))die("unsupported-target",p.target);
  p.headers=resolve(p.headers,1);p.streams=resolve(p.streams,1);p.e2=resolve(p.e2,0);p.stage=resolve(p.stage,0);p.product=resolve(p.product,0);p.pipeline=resolve(p.pipeline,0);
  if(p.runtime){p.runtime=resolve(p.runtime,0);size_t len=strlen(p.runtime);if(len<2||strcmp(p.runtime+len-2,".c"))die("runtime-provider-requires-c-boundary",p.runtime);}
@@ -67,6 +69,24 @@ static int seal_bounded(char **sources,int count,const char *interfaces,const cx
  setpgid(pid,pid);int status=0;for(;;){pid_t got=waitpid(pid,&status,WNOHANG);if(got==pid)break;if(got<0&&errno!=EINTR){kill(-pid,SIGKILL);kill(pid,SIGKILL);die("seal-wait",0);}if(now()>=deadline){kill(-pid,SIGKILL);kill(pid,SIGKILL);while(waitpid(pid,&status,0)<0&&errno==EINTR){}die("seal-total-budget-exhausted",0);}usleep(1000);}
  if(!WIFEXITED(status))die("seal-signal",0);return WEXITSTATUS(status);
 }
+/* Verify the actual sealed bytes, never a second read of live headers/provider.
+ * This binds C ABI material; it is not structural type or ownership checking. */
+static void runtime_binding(Profile *p,const char *packet){
+ if(!p->runtime_sha)return;size_t n;char *data=regular(packet,67108864,&n),why[256],hash[65];cxb_bundle b={0};
+ if(cxb_read(data,n,&b,why,sizeof why))die("runtime-binding-bundle",why);free(data);int provider=0,manifest=-1;int seen[4096]={0};
+ for(int i=0;i<b.unit_count;i++){cxb_unit *u=b.units+i;if(u->name_bytes==strlen(p->runtime)&&!memcmp(u->name,p->runtime,u->name_bytes)){cx_sha256_hex(u->source,u->source_bytes,hash);if(strcmp(hash,p->runtime_sha))die("runtime-provider-sha-mismatch",p->runtime);provider++;}}
+ if(provider!=1)die("runtime-provider-binding-count",0);
+ for(int i=0;i<b.resource_count;i++){cxb_resource *r=b.resources+i;if(r->kind==1&&r->name_bytes==24&&!memcmp(r->name,"declaration-identity.tsv",24))manifest=i;}
+ if(manifest<0)die("runtime-declarations-missing",0);cxb_resource *m=b.resources+manifest;cx_sha256_hex(m->data,m->bytes,hash);if(strcmp(hash,p->interface_sha))die("runtime-declarations-sha-mismatch",0);
+ if(!m->bytes||m->bytes>1048576||memchr(m->data,0,m->bytes)||m->data[m->bytes-1]!='\n')die("runtime-declarations-format",0);
+ size_t at=0;int entries=0;while(at<m->bytes){size_t end=at;while(end<m->bytes&&m->data[end]!='\n')end++;if(end-at<68||memcmp(m->data+at,"I\t",2))die("runtime-declarations-format",0);size_t tab=at+2;while(tab<end&&m->data[tab]!='\t')tab++;size_t nn=tab-at-2;if(!nn||nn>4095||end-tab!=65)die("runtime-declarations-format",0);char want[65];memcpy(want,m->data+tab+1,64);want[64]=0;if(!hash_shape(want))die("runtime-declarations-format",0);int found=-1;
+  for(int i=0;i<b.resource_count;i++){cxb_resource *r=b.resources+i;if(r->kind==1&&r->name_bytes==nn&&!memcmp(r->name,m->data+at+2,nn))found=i;}
+  if(found<0)die("runtime-declaration-header-missing",0);if(seen[found]++)die("runtime-declaration-duplicate",0);cxb_resource *r=b.resources+found;cx_sha256_hex(r->data,r->bytes,hash);if(strcmp(hash,want))die("runtime-declaration-header-sha-mismatch",0);entries++;at=end+1;
+ }
+ if(!entries)die("runtime-declarations-empty",0);
+ for(int i=0;i<b.resource_count;i++){cxb_resource *r=b.resources+i;if(r->kind!=1)continue;if(r->name_bytes==9&&!memcmp(r->name,"runtime.c",9)){cx_sha256_hex(r->data,r->bytes,hash);if(strcmp(hash,p->runtime_sha))die("runtime-provider-resource-sha-mismatch",0);}if(seen[i])continue;const char *allowed[]={"declaration-identity.tsv","source-identity.tsv","runtime-probe.c","runtime.c"};int ok=0;for(int j=0;j<4;j++)if(r->name_bytes==strlen(allowed[j])&&!memcmp(r->name,allowed[j],r->name_bytes))ok=1;if(!ok)die("runtime-declaration-unlisted-header",0);}
+ cxb_clear(&b);
+}
 int main(int argc,char **argv){
  deadline=now()+45000000000LL;char *profile_path=0,*output=0,*sources[64];int ns=0,emit=0,argstart=argc;
  for(int i=1;i<argc;i++){
@@ -86,7 +106,7 @@ int main(int argc,char **argv){
  join(interfaces,out,"interfaces");if(mkdir(interfaces,0700))die("interface-directory",interfaces);
  walk(p.headers,"",1,0);for(int i=0;i<p.nr;i++)walk(p.roots[i],"",2,0);
  join(file,p.streams,"unisacc-stream1.com");size_t n;char *modelbytes=regular(file,67108864,&n),model[65];cx_sha256_hex(modelbytes,n,model);free(modelbytes);
- cxb_options options={p.target,"unisa-c99-v1",model};join(packet,out,"bundle.cxb");int sealrc=seal_bounded(sources,ns,interfaces,&options,packet);if(sealrc)return sealrc;remaining();
+ cxb_options options={p.target,"unisa-c99-v1",model};join(packet,out,"bundle.cxb");int sealrc=seal_bounded(sources,ns,interfaces,&options,packet);if(sealrc)return sealrc;remaining();runtime_binding(&p,packet);
  char *binary=regular(p.pipeline,67108864,&n);join(pipeline,out,"pipeline-executor");save(pipeline,binary,n);free(binary);if(chmod(pipeline,0700))die("pipeline-executable",pipeline);join(runout,out,"pipeline");
  char **v=calloc((size_t)(argc-argstart)+12,sizeof *v);if(!v)die("allocation",0);int k=0;v[k++]=pipeline;if(emit)v[k++]="--emit";v[k++]=packet;v[k++]=p.streams;v[k++]=p.e2;v[k++]=p.stage;v[k++]=p.product;v[k++]=runout;if(argstart<argc){v[k++]="--";for(int i=argstart;i<argc;i++)v[k++]=argv[i];}
  np_result result={0};char why[1200];char *env[]={"UNISA_ATTRIBUTES=","UNISACC_RF_CAPTURE=",0};if(np_run(v,0,env,remaining(),&result,why,sizeof why))die("pipeline-process",why);

@@ -151,7 +151,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 **2026-10-28 单元化重构决定：** 主人要求参考Rust模块化与内存安全设计，去除include引入的隐式耦合；不是换后缀。CX权威源码、公开接口、私有实例、显式资源/构建图、所有权/借用合同共同构成目标。目标CX0 → E2 → E1 → E3 → E4 → prune → lower → elf；现有独立CX0/束/适配已落地，安装产品仍七流。CX0语义控制最终也须网络化，十八张ask事实网不按阶段数机械加一。详见[单元化计划](plans/v0.0.43-units.md)及[cx入口](cx/README.md)。
 
-**当前分工与下一动作：** 运行库声明/provider与最小process分离后，原45秒/阶段12秒内driver自编译217031B成功，其产物native5/0、driver14/0；投影14/0、生成接口constructor唯一注册3/0、sealed source RI17/0。已装冻结Root94新negative211/0/known_gaps1；冻结源14批13PASS1FAIL、无UNKNOWN，E1 38/E2 58格新证，长名失败不掩盖。新IRFULLNAME源码事实修复与3PP私包已通过原11头位置+新14探针，29其它模型/全资源逐字不变、lint0ERROR/既有141WARN、辅助sim覆盖修改分支；私包NON_ADMITTED不授安装体，header矩阵仍NEEDS_PRODUCT_CHANGE。下一刀结合cc前奏缓存A正规冻结构造/准入新候选，再换该长名格；结构化迟绑定/类型与所有权合同仍继续，不将C ABI桥当静态安全完成。
+**当前分工与下一动作：** 运行库声明/provider与最小process分离后，原45秒/阶段12秒内driver自编译217031B成功，其产物native5/0、driver14/0；投影14/0、生成接口constructor唯一注册3/0、sealed source RI17/0。新增原生ABI材料绑定门：profile成对固定provider与声明清单SHA，在封存束实际字节上核provider/逐头身份，错配在进入模型流水线前拒绝；Root94启动编译的新driver实跑11/0（out/c43-runtime-binding-03.stdout），不授类型/所有权证明。已装冻结Root94新negative211/0/known_gaps1；冻结源14批13PASS1FAIL、无UNKNOWN，E1 38/E2 58格新证，长名失败不掩盖。新IRFULLNAME源码事实修复与3PP私包已通过原11头位置+新14探针，29其它模型/全资源逐字不变、lint0ERROR/既有141WARN、辅助sim覆盖修改分支；私包NON_ADMITTED不授安装体，header矩阵仍NEEDS_PRODUCT_CHANGE。下一刀结合cc前奏缓存A正规冻结构造/准入新候选，再换该长名格；结构化迟绑定/类型与所有权合同仍继续，不将C ABI桥当静态安全完成。
 
 **双线推进（2026-10-28）：** 0.0.43现行Rootda4e/SID1621继续补完整流/网/RI、N22与平台，不等待CX重构完工；CX产物独立核身份逐单元接入。E1实际located warnlex已核654状态/168896观测决定及展开动作与正式模型全等，手写规则144类对/24 peek边界293/0；EOF后的12类peek逐项UNOBSERVABLE，不折叠作144源流PASS，矩阵仍MISSING。core.memory有138项正/拒绝/恢复实跑，仅管理API运行期约束；成员struct直接return的正向最小例在tests/pending/struct-return-member.cx当前rc1而期望rc7，保持NEEDS_PRODUCT_CHANGE。
 
@@ -357,7 +357,7 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 <a id="memory-palace"></a>
 ### 记忆宫殿
 
-**现行重构入口（2026-10-28）：** tools/cx-runtime.cx从显式原头生成声明树/无include provider，记录原头、bootstrap、生成器、消费者、ABI与产物哈希；tools/cx-driver.cx的RuntimeProvider只加入一次，tools/runtime/process模块只带进程执行接口。新链driver自编译在原预算内成功，所得静态ELF实跑原生共享malloc/free/errno/stdio/setpgid5/0和driver14/0。consumer接口剥constructor/destructor注册效应，provider独有初始化。CIF文本投影/forced includes仍是兼容桥，原生类型/符号/所有权直入E3及编译期保证未完成；unsafe兼容ABI仍暴露内部声明，不能宣称私有安全完成。
+**现行重构入口（2026-10-28）：** tools/cx-runtime.cx从显式原头生成声明树/无include provider，记录原头、bootstrap、生成器、消费者、ABI与产物哈希；tools/cx-driver.cx的RuntimeProvider只加入一次，tools/runtime/process模块只带进程执行接口。新增可选RuntimeProviderSHA/RuntimeDeclarationsSHA成对绑定，直接核封存束内provider/声明清单/逐头身份，11项正拒绝恢复实跑0失败（out/c43-runtime-binding-03.stdout）；旧profile仍明确无绑定。此前新链driver自编译在原预算内成功，所得静态ELF实跑原生共享malloc/free/errno/stdio/setpgid5/0和driver14/0。consumer接口剥constructor/destructor注册效应，provider独有初始化。CIF文本投影/forced includes仍是兼容桥，原生类型/符号/所有权直入E3及编译期保证未完成；unsafe兼容ABI仍暴露内部声明，不能宣称私有安全完成。
 
 **本轮基线复核：** APE da4e7ef144186ccf578d282381ac671885094c6dfe30053727ac3f3c4a3e5592；build record dd2385cf4952f95cd7cdb6d4d25b2cf774841becdcbd8506138260a92743abc0（替代下方首次安装 ab5f）。同源固定点 GEN-A / GEN-B02 的原58断言已通过；本轮预编译 O2 验证亦在原30秒内58/0、stderr空，直接 O2 默认-run 原30秒rc142，不冒称登记批通过。下方 cc 独占构造/等待新固定点的语句是交接前状态，不再作为待执行工作。
 

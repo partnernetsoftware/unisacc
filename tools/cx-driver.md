@@ -20,6 +20,17 @@ declared HeaderRoot interface, while the provider owns implementation state.
 This is an explicit native C ABI boundary, not host forwarding or a claim of
 compiled ownership checks. The provider and interfaces must be generated and
 validated from matching inputs; merely adding external declarations is insufficient.
+To enforce the material pairing, supply both `RuntimeProviderSHA` and
+`RuntimeDeclarationsSHA` as lowercase 64-digit SHA-256 values together with
+`RuntimeProvider`. The latter digest pins HeaderRoot's
+`declaration-identity.tsv`, whose rows are `I<TAB>relative-name<TAB>sha256<LF>`.
+The driver checks the sealed provider unit, manifest and every listed H resource
+before starting the model pipeline. Missing, duplicate, changed or unlisted
+headers are refused. The generated metadata files `source-identity.tsv` and
+`runtime-probe.c` are exempt from the declaration list; `runtime.c`, if present
+as an H resource, must match the provider digest. This checks supplied material
+identity, not ABI type compatibility, authenticity or ownership. Profiles
+without the two digest fields retain the existing unbound C ABI path.
 The following illustrates the fields; substitute actual paths and artifacts:
 
 ```text
@@ -75,3 +86,17 @@ The standalone executable in the batch verifies the actual output format and
 allows repeated fresh executions after one compilation. Test results are never
 cached. Detailed startup/construction/loading/inference/output/validation times
 remain UNMEASURED.
+
+`tests/preprocess/runtime-binding.cx` accepts the same eight batch arguments and
+checks bound execution, provider/header/manifest mismatches, duplicate and
+unlisted headers, a mismatched provider resource (including a listed one),
+missing manifest, a one-character header name and recovery. Negative cases
+require refusal before a pipeline output directory exists.
+
+Local validation on 2026-10-28: installed Root `94b549d1` bootstrapped driver
+SHA-256 `91833c8e1f2a5fb1230a3051b466ad2bbfb9fa5a3def10c0e95ad282e0dfed40`.
+Using that Root's frozen `c43-94-streams-01` materials, binding checks passed
+11/11 (`out/c43-runtime-binding-03.stdout`) and the original driver batch passed
+14/14 (`out/c43-runtime-binding-legacy-01.stdout`), both with empty stderr.
+This qualifies the local tool behavior; it does not install the pending E2
+long-filename package or qualify another platform.
