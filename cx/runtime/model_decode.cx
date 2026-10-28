@@ -1,0 +1,374 @@
+#pragma unisa module model_decode
+#pragma unisa use model_number
+#pragma unisa use model_lifetime
+/* Borrowed model span in, caller-owned CxModel out. Allocation uses the
+ * injected pair and turns a zero byte count into one byte. Failure releases
+ * the local model before returning; loadbytes globals are not touched. */
+static const unsigned char ARITY[56] = {
+    0,1,1,2,2,4,4,2,2,1,3,3,1,1,0,0,1,1,2,0,0,1,2,2,3,0,1,1,1,1,0,3,3,1,1,2,
+    0,0,1,2,1,1,1,1,2,1,1,1,0,0,1,4,4,2,2,1
+};
+typedef struct CxDecode {
+    CxModel model;
+    void *(*realloc)(void *, size_t);
+    void (*release)(void *);
+    const char *why;
+} CxDecode;
+typedef struct In {
+    CxDecode *d;
+    const unsigned char *data;
+    long length, at;
+    int binary, err;
+} In;
+static int seterr(In *in, int code, const char *why) {
+    if (in->err) return in->err;
+    in->err = code;
+    in->d->why = why;
+    cxml_release(&in->d->model, in->d->release);
+    return code;
+}
+static void *raw_alloc(In *in, size_t n, int zero) {
+    size_t want;
+    void *p;
+    if (in->err) return 0;
+    want = n ? n : 1;
+    p = in->d->realloc(0, want);
+    if (!p) { seterr(in, 8, "out of memory"); return 0; }
+    if (zero) memset(p, 0, want);
+    return p;
+}
+static int grow_qa(In *in, int cap) {
+    size_t bytes;
+    void *p;
+    if (in->err) return in->err;
+    bytes = sizeof(int64_t) * (size_t)cap;
+    if (!bytes) bytes = 1;
+    p = in->d->realloc(in->d->model.qa, bytes);
+    if (!p) return seterr(in, 8, "out of memory");
+    in->d->model.qa = p;
+    return 0;
+}
+static int num(In *in, long long *o) {
+    int rc;
+    const char *why;
+    if (in->err) return in->err;
+    rc = cxmn_number(in->data, in->length, &in->at, in->binary, o);
+    if (!rc) return 0;
+    why = "invalid model number input";
+    if (rc == 1) why = "truncated binary model number";
+    else if (rc == 2) why = "binary model number overflow";
+    else if (rc == 3) why = "noncanonical binary model number";
+    else if (rc == 4) why = "long binary model number";
+    else if (rc == 5) why = "bad model number";
+    else if (rc == 6) why = "model number overflow";
+    else if (rc == 7) why = "missing model number";
+    return seterr(in, 3, why);
+}
+static int lint(In *in, int *o) {
+    long long v;
+    if (num(in, &v)) return in->err;
+    if (v < -2147483647LL - 1 || v > 2147483647LL) return seterr(in, 3, "model index overflow");
+    *o = (int)v;
+    return 0;
+}
+static void skip(In *in) {
+    if (in->binary || in->err) return;
+    while (in->at < in->length && in->data[in->at] <= 32) in->at++;
+}
+static int lchar(In *in, int *c) {
+    if (in->err) return in->err;
+    if (in->binary) {
+        if (in->at == in->length) return seterr(in, 2, "truncated binary model tag");
+        *c = in->data[in->at++];
+        return 0;
+    }
+    skip(in);
+    if (in->at == in->length) return seterr(in, 2, "truncated model");
+    *c = in->data[in->at++];
+    if (in->at < in->length && in->data[in->at] > 32) return seterr(in, 2, "bad model tag");
+    return 0;
+}
+static int ltag(In *in, int expect) {
+    int c = 0;
+    if (lchar(in, &c)) return in->err;
+    if (c != expect) return seterr(in, 2, "bad model tag");
+    return 0;
+}
+static int hexv(In *in, int c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    seterr(in, 4, "bad hex string");
+    return 0;
+}
+static int strings(In *in) {
+    CxModel *m = &in->d->model;
+    int k, nstr = m->nstr;
+    void *p = raw_alloc(in, (size_t)(nstr + 1) * sizeof(char *), 1);
+    if (in->err) return in->err;
+    m->str = p;
+    p = raw_alloc(in, (size_t)(nstr + 1) * sizeof(int), 1);
+    if (in->err) return in->err;
+    m->strl = p;
+    for (k = 0; k < nstr; k++) {
+        int n = 0;
+        char *s;
+        if (ltag(in, 'S')) return in->err;
+        if (in->binary) {
+            if (lint(in, &n)) return in->err;
+            if (n < 0 || (long)n > in->length - in->at || n == 2147483647)
+                return seterr(in, 4, "bad binary model string");
+            p = raw_alloc(in, (size_t)n + 1, 0);
+            if (in->err) return in->err;
+            m->str[k] = p;
+            m->strl[k] = n;
+            memcpy(m->str[k], in->data + in->at, (size_t)n);
+            m->str[k][n] = 0;
+            in->at += n;
+            continue;
+        }
+        skip(in);
+        {
+            long begin = in->at;
+            int size, j;
+            while (in->at < in->length && in->data[in->at] > 32) in->at++;
+            size = (int)(in->at - begin);
+            if (size == 0 || ((size & 1) && !(size == 1 && in->data[begin] == '-')))
+                return seterr(in, 4, "bad string");
+            n = size == 1 && in->data[begin] == '-' ? 0 : size / 2;
+            p = raw_alloc(in, (size_t)n + 1, 0);
+            if (in->err) return in->err;
+            m->str[k] = p;
+            m->strl[k] = n;
+            s = m->str[k];
+            for (j = 0; j < n; j++) {
+                int hi = hexv(in, in->data[begin + 2 * j]);
+                int lo = hexv(in, in->data[begin + 2 * j + 1]);
+                if (in->err) return in->err;
+                s[j] = (char)(hi * 16 + lo);
+            }
+            s[n] = 0;
+        }
+    }
+    return 0;
+}
+static int sequences(In *in) {
+    CxModel *m = &in->d->model;
+    int cap = 1 << 16, nqa = 0, k, nq = m->nq;
+    void *p = raw_alloc(in, (size_t)nq * sizeof(int), 0);
+    if (in->err) return in->err;
+    m->qoff = p;
+    p = raw_alloc(in, (size_t)nq * sizeof(int), 0);
+    if (in->err) return in->err;
+    m->qlen = p;
+    p = raw_alloc(in, sizeof(int64_t) * (size_t)cap, 0);
+    if (in->err) return in->err;
+    m->qa = p;
+    for (k = 0; k < nq; k++) {
+        int tag = 0, prefix = 0, copied = 0, from = 0, n = 0, a;
+        int64_t *qa;
+        if (lchar(in, &tag)) return in->err;
+        if (tag == 'C') {
+            int ref = 0;
+            long long end;
+            if (lint(in, &ref) || lint(in, &prefix) || lint(in, &n)) return in->err;
+            if (ref < 0 || ref >= k || prefix <= 0 || prefix > m->qlen[ref] ||
+                n < 0 || n > 2147483647 - prefix)
+                return seterr(in, 5, "bad sequence prefix");
+            from = m->qoff[ref];
+            end = from;
+            for (a = 0; a < prefix; a++) end += 1 + ARITY[(int)m->qa[end]];
+            copied = (int)(end - from);
+        } else {
+            if (tag != 'Q') return seterr(in, 5, "bad sequence tag");
+            if (lint(in, &n)) return in->err;
+            if (n < 0) return seterr(in, 5, "bad sequence");
+        }
+        m->qoff[k] = nqa;
+        m->qlen[k] = prefix + n;
+        if (nqa > 2147483647 - copied) return seterr(in, 5, "sequence extent overflow");
+        while (nqa + copied > cap) {
+            if (cap > 2147483647 / 2) return seterr(in, 5, "sequence capacity exceeded");
+            cap *= 2;
+            if (grow_qa(in, cap)) return in->err;
+        }
+        qa = m->qa;
+        for (a = 0; a < copied; a++) qa[nqa++] = qa[from + a];
+        for (a = 0; a < n; a++) {
+            int op = 0, j;
+            if (lint(in, &op)) return in->err;
+            if (op < 0 || op >= 56) return seterr(in, 5, "bad opcode");
+            if (nqa > 2147483647 - 6) return seterr(in, 5, "sequence extent overflow");
+            if (nqa + 6 > cap) {
+                if (cap > 2147483647 / 2) return seterr(in, 5, "sequence capacity exceeded");
+                cap *= 2;
+                if (grow_qa(in, cap)) return in->err;
+                qa = m->qa;
+            }
+            qa[nqa++] = op;
+            for (j = 0; j < ARITY[op]; j++) {
+                long long operand;
+                if (num(in, &operand)) return in->err;
+                qa[nqa++] = operand;
+            }
+        }
+    }
+    m->nqa = nqa;
+    return 0;
+}
+static int states(In *in) {
+    CxModel *m = &in->d->model;
+    int ns = m->ns, s;
+    void *p;
+    p = raw_alloc(in, (size_t)ns * sizeof(int), 1); if (in->err) return in->err; m->smode = p;
+    p = raw_alloc(in, (size_t)ns * sizeof(int), 1); if (in->err) return in->err; m->rowc = p;
+    p = raw_alloc(in, (size_t)ns * sizeof(int *), 1); if (in->err) return in->err; m->rowk = p;
+    p = raw_alloc(in, (size_t)ns * sizeof(int *), 1); if (in->err) return in->err; m->rown = p;
+    p = raw_alloc(in, (size_t)ns * sizeof(int *), 1); if (in->err) return in->err; m->rowq = p;
+    p = raw_alloc(in, (size_t)ns * sizeof(int), 1); if (in->err) return in->err; m->nlo = p;
+    p = raw_alloc(in, (size_t)ns * sizeof(int), 1); if (in->err) return in->err; m->nhi = p;
+    p = raw_alloc(in, (size_t)ns * sizeof(int), 1); if (in->err) return in->err; m->bn = p;
+    p = raw_alloc(in, (size_t)ns * sizeof(int), 1); if (in->err) return in->err; m->bq = p;
+    p = raw_alloc(in, (size_t)ns * sizeof(int), 1); if (in->err) return in->err; m->rets = p;
+    p = raw_alloc(in, (size_t)ns * sizeof(unsigned char *), 1); if (in->err) return in->err; m->retok = p;
+    for (s = 0; s < ns; s++) m->rets[s] = -1;
+    for (s = 0; s < ns; s++) {
+        if (m->isnet) {
+            int mode = 0, lo = 0, hi = 0, n = 0, bn = 0, bq = 0, j;
+            if (ltag(in, 'H')) return in->err;
+            if (lint(in, &mode) || lint(in, &lo) || lint(in, &hi) || lint(in, &n) ||
+                lint(in, &bn) || lint(in, &bq)) return in->err;
+            if (mode == 3) {
+                int rs = 0, rn = 0, prev = -1;
+                if (lint(in, &rs) || lint(in, &rn)) return in->err;
+                if (rs < 0 || rs >= m->nq || rn < 1 || rn > ns)
+                    return seterr(in, 6, "bad return declaration");
+                m->rets[s] = rs;
+                p = raw_alloc(in, (size_t)ns, 1);
+                if (in->err) return in->err;
+                m->retok[s] = p;
+                for (j = 0; j < rn; j++) {
+                    int key = 0;
+                    if (lint(in, &key)) return in->err;
+                    if (key <= prev || key >= ns) return seterr(in, 6, "bad return declaration");
+                    m->retok[s][key] = 1;
+                    prev = key;
+                }
+                mode = 1;
+            }
+            if (mode < 0 || mode > 2 || lo != (mode == 1 ? -1 : 0) ||
+                hi != (mode == 1 ? m->topmax : 256) || n < 0 ||
+                (long long)n > (long long)hi - lo)
+                return seterr(in, 6, "bad network bank");
+            m->smode[s] = mode;
+            m->nlo[s] = lo;
+            m->nhi[s] = hi;
+            m->rowc[s] = n;
+            m->bn[s] = bn;
+            m->bq[s] = bq;
+            p = raw_alloc(in, sizeof(int) * (size_t)n, 0); if (in->err) return in->err; m->rowk[s] = p;
+            p = raw_alloc(in, sizeof(int) * (size_t)n, 0); if (in->err) return in->err; m->rown[s] = p;
+            p = raw_alloc(in, sizeof(int) * (size_t)n, 0); if (in->err) return in->err; m->rowq[s] = p;
+            {
+                int prev = lo;
+                for (j = 0; j < n; j++) {
+                    if (lint(in, &m->rowk[s][j]) || lint(in, &m->rown[s][j]) || lint(in, &m->rowq[s][j]))
+                        return in->err;
+                    if (m->rowk[s][j] <= prev || m->rowk[s][j] > hi)
+                        return seterr(in, 6, "bad network unit");
+                    prev = m->rowk[s][j];
+                }
+            }
+            continue;
+        }
+        {
+            int mode = 0, n = 0, dn = 0, dq = 0, j;
+            if (ltag(in, 'R')) return in->err;
+            if (lint(in, &mode) || lint(in, &n) || lint(in, &dn) || lint(in, &dq)) return in->err;
+            if (mode < 0 || mode > 2 || n < 0) return seterr(in, 6, "bad state");
+            m->smode[s] = mode;
+            m->rowc[s] = n;
+            if (mode == 1) {
+                p = raw_alloc(in, sizeof(int) * (size_t)n, 0); if (in->err) return in->err; m->rowk[s] = p;
+                p = raw_alloc(in, sizeof(int) * (size_t)n, 0); if (in->err) return in->err; m->rown[s] = p;
+                p = raw_alloc(in, sizeof(int) * (size_t)n, 0); if (in->err) return in->err; m->rowq[s] = p;
+                for (j = 0; j < n; j++)
+                    if (lint(in, &m->rowk[s][j]) || lint(in, &m->rown[s][j]) || lint(in, &m->rowq[s][j]))
+                        return in->err;
+            } else {
+                p = raw_alloc(in, sizeof(int) * 257, 0); if (in->err) return in->err; m->rown[s] = p;
+                p = raw_alloc(in, sizeof(int) * 257, 0); if (in->err) return in->err; m->rowq[s] = p;
+                m->rowk[s] = 0;
+                for (j = 0; j < 257; j++) { m->rown[s][j] = dn; m->rowq[s][j] = dq; }
+                for (j = 0; j < n; j++) {
+                    int key = 0, nx = 0, seq = 0;
+                    if (lint(in, &key) || lint(in, &nx) || lint(in, &seq)) return in->err;
+                    if (key < 0 || key > 256 || nx < -1 || nx >= ns) return seterr(in, 6, "bad row");
+                    m->rown[s][key] = nx;
+                    m->rowq[s][key] = seq;
+                }
+            }
+        }
+    }
+    return 0;
+}
+static void raise_top(CxModel *m) {
+    int s, i;
+    for (s = 0; s < m->ns; s++) if (m->smode[s] == 1)
+        for (i = 0; i < m->rowc[s]; i++)
+            if (m->rowk[s][i] > m->topmax) m->topmax = m->rowk[s][i];
+    for (i = 0; i < m->nqa; ) {
+        int op = (int)m->qa[i];
+        if (op == 29 && m->qa[i + 1] > m->topmax) m->topmax = (int)m->qa[i + 1];
+        i += 1 + ARITY[op];
+    }
+}
+int cxmd_decode(CxDecode *d, const unsigned char *data, long length) {
+    In in;
+    CxModel *m;
+    int kind = 0, ns = 0, nq = 0, nrg = 0, nstr = 0, start = 0, top = 0;
+    if (!d || !d->realloc || !d->release || length < 0 || length > 2147483647L || (length > 0 && !data)) {
+        if (d && d->release) cxml_release(&d->model, d->release);
+        if (d) d->why = "invalid model input";
+        return 1;
+    }
+    cxml_release(&d->model, d->release);
+    d->why = 0;
+    in.d = d;
+    in.data = data;
+    in.length = length;
+    in.at = 0;
+    in.binary = length >= 8 && !memcmp(data, "UNINETB1", 8);
+    in.err = 0;
+    if (in.binary) in.at = 8;
+    m = &d->model;
+    if (lchar(&in, &kind) || lint(&in, &ns) || lint(&in, &nq) || lint(&in, &nrg) ||
+        lint(&in, &nstr) || lint(&in, &start)) return in.err;
+    if ((kind != 'T' && kind != 'N') || ns <= 0 || nq <= 0 || nrg < 0 || nstr < 0 ||
+        start < 0 || start >= ns)
+        return seterr(&in, 2, "bad header");
+    if ((long)ns > length || (long)nq > length || (long)nstr > length || nstr == 2147483647)
+        return seterr(&in, 2, "bad model count extent");
+    m->ns = ns;
+    m->nq = nq;
+    m->nrg = nrg;
+    m->nstr = nstr;
+    m->start = start;
+    m->isnet = kind == 'N';
+    m->topmax = ns - 1;
+    if (m->isnet) {
+        if (lint(&in, &top)) return in.err;
+        if (top < ns - 1 || top == 2147483647) return seterr(&in, 2, "bad network domain");
+        m->topmax = top;
+    }
+    if (strings(&in) || sequences(&in) || states(&in)) return in.err;
+    skip(&in);
+    if (in.at != in.length) return seterr(&in, 7, "trailing model data");
+    if (!m->isnet) raise_top(m);
+    m->loaded = 1;
+    return 0;
+}
+void cxmd_take(CxDecode *d, CxModel *out) {
+    if (!d || !out) return;
+    *out = d->model;
+    memset(&d->model, 0, sizeof d->model);
+}

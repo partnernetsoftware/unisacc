@@ -1,0 +1,387 @@
+/* No-global decoder: text/binary pairs, 257-cell tables, allocation failure. */
+#pragma unisa use runtime.model_decode
+static int failed, calls, fail_at, invalid, nowned, zero_requests;
+static int growth_attempted, growth_failed, harness_leak;
+static void *owned[4096];
+static void ck(int ok, const char *name) {
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", name);
+    if (!ok) failed++;
+    fflush(stdout);
+}
+static void *injected_realloc(void *p, size_t n) {
+    int i;
+    calls++;
+    if (p) growth_attempted++;
+    if (!n) { zero_requests++; return 0; }
+    if (calls == fail_at) { if (p) growth_failed++; return 0; }
+    if (p) {
+        for (i = 0; i < nowned; i++) if (owned[i] == p) {
+            void *q = realloc(p, n);
+            if (q) owned[i] = q;
+            return q;
+        }
+        invalid++;
+        return 0;
+    }
+    if (nowned >= 4096) { invalid++; return 0; }
+    {
+        void *q = malloc(n);
+        if (!q) return 0;
+        memset(q, 0xa5, n);
+        owned[nowned++] = q;
+        return q;
+    }
+}
+static void injected_free(void *p) {
+    int i;
+    if (!p) return;
+    for (i = 0; i < nowned; i++) if (owned[i] == p) { owned[i] = 0; free(p); return; }
+    invalid++;
+}
+static void reset_heap(void) {
+    int i;
+    for (i = 0; i < nowned; i++) if (owned[i]) { free(owned[i]); owned[i] = 0; harness_leak++; }
+    nowned = calls = invalid = growth_attempted = growth_failed = zero_requests = 0;
+}
+static int zero_model(const CxDecode *d) {
+    CxModel z;
+    memset(&z, 0, sizeof z);
+    return d && !memcmp(&d->model, &z, sizeof z);
+}
+static void setup(CxDecode *d) {
+    memset(d, 0, sizeof *d);
+    d->realloc = injected_realloc;
+    d->release = injected_free;
+}
+static int leftovers(void) {
+    int i, n = 0;
+    for (i = 0; i < nowned; i++) if (owned[i]) { free(owned[i]); owned[i] = 0; n++; }
+    return n || invalid || zero_requests;
+}
+static int release_clean(CxDecode *d) {
+    cxml_release(&d->model, d->release);
+    return leftovers() || !zero_model(d);
+}
+static int addf(char *out, int cap, int n, const char *fmt, int a, int b, int c, int e) {
+    int k;
+    if (n < 0 || n >= cap) return -1;
+    k = sprintf(out + n, fmt, a, b, c, e);
+    if (k < 0 || n > cap - k - 1) return -1;
+    return n + k;
+}
+static int adds(char *out, int cap, int n, const char *fmt, int a, int b) {
+    int k;
+    if (n < 0 || n >= cap) return -1;
+    k = sprintf(out + n, fmt, a, b);
+    if (k < 0 || n > cap - k - 1) return -1;
+    return n + k;
+}
+static int addq(char *out, int cap, int n, long long v) {
+    int k;
+    if (n < 0 || n >= cap) return -1;
+    k = sprintf(out + n, " %lld", v);
+    if (k < 0 || n > cap - k - 1) return -1;
+    return n + k;
+}
+static int render(const CxModel *m, char *out, int cap) {
+    int n = 0, i, j, k;
+    if (!m || cap < 64) return -1;
+    n = sprintf(out, "model ns=%d nq=%d nrg=%d nstr=%d start=%d net=%d top=%d nqa=%d\n",
+                m->ns, m->nq, m->nrg, m->nstr, m->start, m->isnet, m->topmax, m->nqa);
+    if (n < 0 || n >= cap) return -1;
+    if (m->nstr && (!m->str || !m->strl)) return -1;
+    for (i = 0; i < m->nstr; i++) {
+        n = adds(out, cap, n, "str %d %d", i, m->strl[i]);
+        if (n < 0) return -1;
+        if (m->strl[i] && !m->str[i]) return -1;
+        for (j = 0; j < m->strl[i]; j++) {
+            k = sprintf(out + n, " %02x", (unsigned char)m->str[i][j]);
+            if (k < 0 || n > cap - k - 1) return -1;
+            n += k;
+        }
+        if (n >= cap - 1) return -1;
+        out[n++] = '\n';
+        out[n] = 0;
+    }
+    if (m->nq && (!m->qoff || !m->qlen)) return -1;
+    for (i = 0; i < m->nq; i++) {
+        n = addf(out, cap, n, "q %d %d %d\n", i, m->qoff[i], m->qlen[i], 0);
+        if (n < 0) return -1;
+    }
+    if (n >= cap - 3) return -1;
+    out[n++] = 'q'; out[n++] = 'a'; out[n] = 0;
+    if (m->nqa && !m->qa) return -1;
+    for (i = 0; i < m->nqa; i++) {
+        n = addq(out, cap, n, (long long)m->qa[i]);
+        if (n < 0) return -1;
+    }
+    if (n >= cap - 1) return -1;
+    out[n++] = '\n'; out[n] = 0;
+    if (m->ns && (!m->smode || !m->rowc || !m->rets)) return -1;
+    if (m->isnet && m->ns && (!m->nlo || !m->nhi || !m->bn || !m->bq)) return -1;
+    for (i = 0; i < m->ns; i++) {
+        n = addf(out, cap, n, "state %d mode=%d count=%d", i, m->smode[i], m->rowc[i], 0);
+        if (n < 0) return -1;
+        if (m->isnet) {
+            n = addf(out, cap, n, " lo=%d hi=%d bn=%d bq=%d", m->nlo[i], m->nhi[i], m->bn[i], m->bq[i]);
+            if (n < 0) return -1;
+        }
+        n = adds(out, cap, n, " ret=%d\n", m->rets[i], 0);
+        if (n < 0) return -1;
+        if (m->retok && m->retok[i]) {
+            n = adds(out, cap, n, "returns %d", i, 0);
+            if (n < 0) return -1;
+            for (j = 0; j < m->ns; j++) if (m->retok[i][j]) {
+                n = adds(out, cap, n, " %d", j, 0);
+                if (n < 0) return -1;
+            }
+            if (n >= cap - 1) return -1;
+            out[n++] = '\n'; out[n] = 0;
+        }
+        if (m->isnet || m->smode[i] == 1) {
+            if (m->rowc[i] && (!m->rowk || !m->rowk[i] || !m->rown || !m->rown[i] || !m->rowq || !m->rowq[i])) return -1;
+            for (j = 0; j < m->rowc[i]; j++) {
+                n = addf(out, cap, n, "row %d %d %d %d\n", i, m->rowk[i][j], m->rown[i][j], m->rowq[i][j]);
+                if (n < 0) return -1;
+            }
+        } else {
+            int dn, dq;
+            if (!m->rown || !m->rown[i] || !m->rowq || !m->rowq[i]) return -1;
+            dn = m->rown[i][0]; dq = m->rowq[i][0];
+            n = addf(out, cap, n, "direct %d %d %d\n", i, dn, dq, 0);
+            if (n < 0) return -1;
+            for (j = 1; j < 257; j++) if (m->rown[i][j] != dn || m->rowq[i][j] != dq) {
+                n = addf(out, cap, n, "direct-entry %d %d %d %d\n", i, j, m->rown[i][j], m->rowq[i][j]);
+                if (n < 0) return -1;
+            }
+        }
+    }
+    return n;
+}
+static void showdiff(const char *name, const char *got, int gn, const char *want, int wn) {
+    int i = 0, n = gn < wn ? gn : wn, a, b;
+    if (!got) got = "";
+    if (gn < 0) gn = 0;
+    while (i < n && got[i] == want[i]) i++;
+    fprintf(stderr, "%s at %d got %d want %d\n", name, i, gn, wn);
+    a = i > 40 ? i - 40 : 0;
+    b = i + 40; if (b > gn) b = gn;
+    if (b > a) fwrite(got + a, 1, (size_t)(b - a), stderr);
+    fputc('\n', stderr);
+}
+static int decode_clean(const unsigned char *p, int n, CxDecode *d) {
+    reset_heap();
+    fail_at = 0;
+    setup(d);
+    return cxmd_decode(d, p, (long)n);
+}
+static int extra(const CxModel *m, int kind) {
+    int j;
+    if (kind == 1) {
+        if (!m->str || !m->str[0] || m->strl[0] != 0 || m->str[0][0] || m->nqa != 4) return 0;
+        if (m->qa[0] != 1 || m->qa[1] != 7 || m->qa[2] != 1 || m->qa[3] != 7) return 0;
+        if (m->qoff[0] != 0 || m->qoff[1] != 2 || m->qlen[0] != 1 || m->qlen[1] != 1) return 0;
+        return m->rowk && m->rowk[0] && m->rown && m->rown[0] && m->rowq && m->rowq[0];
+    }
+    if (kind == 2) {
+        if (!m->rown || !m->rown[0] || !m->rowq || !m->rowq[0] || !m->rowk || m->rowk[0]) return 0;
+        if (m->topmax != 5 || m->nqa != 2 || m->qa[0] != 29 || m->qa[1] != 5 || m->rowc[0] != 1) return 0;
+        for (j = 0; j < 257; j++) {
+            int nx = j == 7 ? 0 : -1, sq = 0;
+            if (m->rown[0][j] != nx || m->rowq[0][j] != sq) return 0;
+        }
+        return 1;
+    }
+    if (kind == 3)
+        return m->topmax == 5 && m->nqa == 0 && m->smode[0] == 1 && m->rowc[0] == 1 &&
+               m->rowk && m->rowk[0] && m->rowk[0][0] == 5 && m->rown[0][0] == 0 && m->rowq[0][0] == 0;
+    if (!m->retok || !m->retok[0] || !m->retok[0][0] || m->rets[0] != 0 || m->rowc[0] != 0) return 0;
+    if (m->smode[0] != 1 || m->nlo[0] != -1 || m->nhi[0] != 0 || m->topmax != 0 || m->nqa != 0) return 0;
+    return m->rowk && m->rowk[0] && m->rown && m->rown[0] && m->rowq && m->rowq[0];
+}
+static void pair(const char *text, const unsigned char *bin, int bn, const char *want, const char *name, int kind) {
+    char buf[4096];
+    CxDecode d;
+    int wn = (int)strlen(want), side, ok = 1;
+    const unsigned char *ps[2];
+    int ns[2];
+    ps[0] = (const unsigned char *)text; ns[0] = (int)strlen(text);
+    ps[1] = bin; ns[1] = bn;
+    for (side = 0; side < 2; side++) {
+        int rc = decode_clean(ps[side], ns[side], &d);
+        int gn = rc == 0 ? render(&d.model, buf, (int)sizeof buf) : -1;
+        int good = rc == 0 && !d.why && d.model.loaded == 1 && gn == wn && !memcmp(buf, want, (size_t)wn);
+        if (good) good = extra(&d.model, kind);
+        if (!good) showdiff(name, gn >= 0 ? buf : 0, gn, want, wn);
+        if (release_clean(&d) || zero_requests) good = 0;
+        ok = ok && good;
+    }
+    ck(ok, name);
+}
+static void expect_fail(const char *text, int code, const char *why, const char *name) {
+    CxDecode d;
+    int rc = decode_clean((const unsigned char *)text, (int)strlen(text), &d);
+    int good = rc == code && d.why && !strcmp(d.why, why) && zero_model(&d);
+    if (!good) fprintf(stderr, "%s rc=%d why=%s\n", name, rc, d.why ? d.why : "");
+    if (release_clean(&d)) good = 0;
+    ck(good, name);
+}
+static int sweep_bad;
+static const char *sweep_why;
+static int tested[3], saw_growth_failure, saw_growth_success, sweep_complete;
+static void note(int bad, const char *why) { if (bad && !sweep_bad) { sweep_bad = 1; sweep_why = why; } }
+static void sweep(const unsigned char *data, int n, int fixture) {
+    int step, success = 0;
+    for (step = 1; step <= 40 && !success; step++) {
+        CxDecode d;
+        int rc, leaks;
+        reset_heap();
+        fail_at = step;
+        setup(&d);
+        rc = cxmd_decode(&d, data, (long)n);
+        if (fixture == 1 && growth_failed) saw_growth_failure++;
+        if (rc == 0) {
+            success = 1;
+            if (d.why || !d.model.loaded) note(1, "success-status");
+            if (fixture == 1 && growth_attempted) saw_growth_success++;
+            if (fixture == 0)
+                note(!(d.model.rowk && d.model.rowk[0] && d.model.rown[0] && d.model.rowq[0] &&
+                       d.model.str && d.model.str[0] && d.model.strl[0] == 0 && d.model.nqa == 0), "binary-shape");
+            if (fixture == 1)
+                note(!(d.model.nqa == 65538 && d.model.qlen && d.model.qlen[0] == 32769 &&
+                       d.model.qa && d.model.qa[65536] == 1 && d.model.qa[65537] == 7 &&
+                       d.model.rowk && !d.model.rowk[0] && d.model.rown && d.model.rown[0] &&
+                       d.model.rowq && d.model.rowq[0] && d.model.rown[0][0] == -1 &&
+                       d.model.rowq[0][0] == 0 && d.model.rown[0][256] == -1 && d.model.topmax == 0), "growth-shape");
+            if (fixture == 2)
+                note(!(d.model.retok && d.model.retok[0] && d.model.retok[0][0] && d.model.rets[0] == 0 &&
+                       d.model.rowc && d.model.rowc[0] == 1 && d.model.rowk && d.model.rowk[0] &&
+                       d.model.rowk[0][0] == 0 && d.model.strl && d.model.strl[0] == 1 &&
+                       d.model.str && d.model.str[0] && d.model.str[0][0] == 'A'), "return-shape");
+        } else {
+            tested[fixture]++;
+            note(!(rc == 8 && d.why && !strcmp(d.why, "out of memory") && zero_model(&d)), "oom-cleanup");
+        }
+        cxml_release(&d.model, d.release);
+        leaks = leftovers();
+        note(leaks || !zero_model(&d) || zero_requests, "leak");
+    }
+    sweep_complete += success;
+}
+static unsigned char *slurp(const char *path, int *n) {
+    FILE *f = fopen(path, "rb");
+    long z;
+    unsigned char *b;
+    if (!f) return 0;
+    if (fseek(f, 0, 2)) { fclose(f); return 0; }
+    z = ftell(f);
+    if (z < 0 || z > 2000000) { fclose(f); return 0; }
+    if (fseek(f, 0, 0)) { fclose(f); return 0; }
+    b = malloc((size_t)z + 1);
+    if (!b || (z && fread(b, 1, (size_t)z, f) != (size_t)z)) { free(b); fclose(f); return 0; }
+    fclose(f);
+    b[z] = 0;
+    *n = (int)z;
+    return b;
+}
+static void p3_one(const char *bin, const char *dump, const char *name) {
+    int nb = 0, nd = 0, rc, gn, good;
+    unsigned char *b = slurp(bin, &nb), *t = slurp(dump, &nd);
+    char *buf;
+    CxDecode d;
+    if (!b || !t) { printf("NOT_RUN\t%s\n", name); free(b); free(t); fflush(stdout); return; }
+    buf = malloc(1 << 20);
+    rc = decode_clean(b, nb, &d);
+    gn = rc == 0 && buf ? render(&d.model, buf, 1 << 20) : -1;
+    good = rc == 0 && !d.why && gn == nd && buf && !memcmp(buf, t, (size_t)gn);
+    if (!good) {
+        fprintf(stderr, "%s rc=%d why=%s gn=%d\n", name, rc, d.why ? d.why : "", gn);
+        showdiff(name, buf, gn, (const char *)t, nd);
+    }
+    if (release_clean(&d)) good = 0;
+    ck(good, name);
+    free(buf); free(b); free(t);
+}
+int main(void) {
+    const char *prefix = "N 1 2 0 1 0 0\nS -\nQ 1 1 7\nC 0 1 0\nH 0 0 256 0 0 0\n";
+    const unsigned char pbin[] = {'U','N','I','N','E','T','B','1','N',2,4,0,2,0,0,'S',0,'Q',2,2,14,'C',0,2,0,'H',0,0,128,4,0,0,0};
+    const char *pw = "model ns=1 nq=2 nrg=0 nstr=1 start=0 net=1 top=0 nqa=4\nstr 0 0\nq 0 0 1\nq 1 2 1\nqa 1 7 1 7\nstate 0 mode=0 count=0 lo=0 hi=256 bn=0 bq=0 ret=-1\n";
+    const char *table = "T 1 1 0 0 0\nQ 1 29 5\nR 0 1 -1 0 7 0 0\n";
+    const unsigned char tbin[] = {'U','N','I','N','E','T','B','1','T',2,2,0,0,0,'Q',2,58,10,'R',0,2,1,0,14,0,0};
+    const char *tw = "model ns=1 nq=1 nrg=0 nstr=0 start=0 net=0 top=5 nqa=2\nq 0 0 1\nqa 29 5\nstate 0 mode=0 count=1 ret=-1\ndirect 0 -1 0\ndirect-entry 0 7 0 0\n";
+    const char *keyed = "T 1 1 0 0 0\nQ 0\nR 1 1 -1 0 5 0 0\n";
+    const unsigned char kbin[] = {'U','N','I','N','E','T','B','1','T',2,2,0,0,0,'Q',0,'R',2,2,1,0,10,0,0};
+    const char *kw = "model ns=1 nq=1 nrg=0 nstr=0 start=0 net=0 top=5 nqa=0\nq 0 0 0\nqa\nstate 0 mode=1 count=1 ret=-1\nrow 0 5 0 0\n";
+    const char *ret = "N 1 1 0 0 0 0\nQ 0\nH 3 -1 0 0 0 0 0 1 0\n";
+    const unsigned char rbin[] = {'U','N','I','N','E','T','B','1','N',2,2,0,0,0,0,'Q',0,'H',6,1,0,0,0,0,0,2,0};
+    const char *rw = "model ns=1 nq=1 nrg=0 nstr=0 start=0 net=1 top=0 nqa=0\nq 0 0 0\nqa\nstate 0 mode=1 count=0 lo=-1 hi=0 bn=0 bq=0 ret=0\nreturns 0 0\n";
+    const unsigned char minimal[] = {'U','N','I','N','E','T','B','1','N',2,2,0,2,0,0,'S',0,'Q',0,'H',0,0,128,4,0,0,0};
+    const char *returns = "N 1 1 0 1 0 0\nS 41\nQ 1 1 7\nH 3 -1 0 1 0 0 0 1 0 0 0 0\n";
+    const unsigned char mag[] = {'U','N','I','N','E','T','B','1'};
+    char *large;
+    int used, i;
+    CxDecode d;
+    pair(prefix, pbin, (int)sizeof pbin, pw, "text-binary-prefix-copy", 1);
+    pair(table, tbin, (int)sizeof tbin, tw, "text-binary-table-push", 2);
+    pair(keyed, kbin, (int)sizeof kbin, kw, "text-binary-table-keyed", 3);
+    pair(ret, rbin, (int)sizeof rbin, rw, "text-binary-return-set", 4);
+    expect_fail("N 1 1 0 1 0 0\nS 4A\nQ 0\nH 0 0 256 0 0 0\n", 4, "bad hex string", "uppercase-hex");
+    expect_fail("N 1 1 0 0 0 0\nC 0 1 0\n", 5, "bad sequence prefix", "forward-prefix");
+    expect_fail("N 1 1 0 0 0 0\nQ 1 1\n", 3, "missing model number", "missing-operand");
+    expect_fail("N 1 1 0 0 0 0\nQ 0\nH 0 0 256 0 0 0\nX", 7, "trailing model data", "trailing");
+    {
+        int rc = decode_clean((const unsigned char *)"", 0, &d);
+        int good = rc == 2 && d.why && !strcmp(d.why, "truncated model") && zero_model(&d);
+        if (release_clean(&d)) good = 0;
+        ck(good, "empty-input");
+        rc = decode_clean(mag, 8, &d);
+        good = rc == 2 && d.why && !strcmp(d.why, "truncated binary model tag") && zero_model(&d);
+        if (release_clean(&d)) good = 0;
+        ck(good, "magic-only");
+        rc = decode_clean(0, 4, &d);
+        good = rc == 1 && d.why && !strcmp(d.why, "invalid model input");
+        if (release_clean(&d)) good = 0;
+        ck(good, "invalid-argument");
+    }
+    {
+        int rc = decode_clean((const unsigned char *)prefix, (int)strlen(prefix), &d);
+        CxModel out;
+        memset(&out, 0, sizeof out);
+        if (rc == 0) cxmd_take(&d, &out);
+        ck(rc == 0 && zero_model(&d) && out.nqa == 4 && out.loaded == 1, "take-moves");
+        cxml_release(&out, injected_free);
+        ck(!leftovers() && zero_model(&d), "take-release");
+        reset_heap();
+        fail_at = 0;
+        setup(&d);
+        rc = cxmd_decode(&d, (const unsigned char *)prefix, (long)strlen(prefix));
+        if (rc == 0) rc = cxmd_decode(&d, (const unsigned char *)prefix, (long)strlen(prefix));
+        ck(rc == 0 && d.model.nqa == 4 && !release_clean(&d), "repeat-decode");
+    }
+    sweep(minimal, (int)sizeof minimal, 0);
+    sweep((const unsigned char *)returns, (int)strlen(returns), 2);
+    large = malloc(140000);
+    if (!large) ck(0, "alloc-growth-19");
+    else {
+        used = sprintf(large, "T 1 1 0 0 0\nQ 32769\n");
+        for (i = 0; i < 32769; i++) { memcpy(large + used, "1 7 ", 4); used += 4; }
+        memcpy(large + used, "\nR 0 0 -1 0\n", 12);
+        used += 12;
+        sweep((const unsigned char *)large, used, 1);
+        free(large);
+    }
+    if (sweep_bad) fprintf(stderr, "alloc %s tested=%d,%d,%d growth=%d,%d\n", sweep_why, tested[0], tested[1], tested[2], saw_growth_failure, saw_growth_success);
+    ck(!sweep_bad && tested[0] == 20, "alloc-binary-20");
+    ck(!sweep_bad && tested[2] == 21, "alloc-return-21");
+    ck(!sweep_bad && tested[1] == 19 && saw_growth_failure == 1 && saw_growth_success == 1, "alloc-growth-19");
+    ck(!sweep_bad && sweep_complete == 3, "alloc-complete");
+    p3_one("out/cx-p3-model-material-01/models/model-029.bin", "out/cx-p3-model-material-01/reference-dumps/model-029.txt", "p3-029");
+    p3_one("out/cx-p3-model-material-01/models/model-030.bin", "out/cx-p3-model-material-01/reference-dumps/model-030.txt", "p3-030");
+    p3_one("out/cx-p3-model-material-01/models/model-031.bin", "out/cx-p3-model-material-01/reference-dumps/model-031.txt", "p3-031");
+    p3_one("out/cx-p3-model-material-01/models-02/model-029.bin", "out/cx-p3-model-material-01/reference-dumps/model-029.txt", "p3-029-second");
+    p3_one("out/cx-p3-model-material-01/models-02/model-030.bin", "out/cx-p3-model-material-01/reference-dumps/model-030.txt", "p3-030-second");
+    p3_one("out/cx-p3-model-material-01/models-02/model-031.bin", "out/cx-p3-model-material-01/reference-dumps/model-031.txt", "p3-031-second");
+    printf("NOT_RUN\tinflate\nNOT_RUN\tcrc\nNOT_RUN\tpackage-framing\nNOT_RUN\texecution\nNOT_RUN\trun-c-wiring\nNOT_RUN\tforeign-hosts\nNOT_RUN\tproduct-qualification\nNOT_RUN\tp3-other-29\nNOT_RUN\tp3-model-000-growth\n");
+    printf("CXMODEL_DECODE\tfailed=%d\n", failed);
+    return failed || harness_leak ? 1 : 0;
+}
