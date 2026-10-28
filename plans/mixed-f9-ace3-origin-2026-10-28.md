@@ -20,6 +20,27 @@
 
 默认角色回归入口：`sh ./unisacc.com tests/source-package-mixed-profiles.cx`。该测试另有逐次真实origin正例/显式未知profile/legacy-v3/错误来源/根别名拒绝入口；见源码用法，每次各有独立输出目录。准备的入口不能冒充已执行；本检查点实际父子正例由上列native snapshot证明。
 
-sourcepackage的公共签名除新增显式origin API外不变。共用parser原布尔origin参数改成显式角色指针；普通/recorded调用仍传null，legacy origin明确取旧角色。共用context/producer/basis/映射分支均只在origin模式选择角色；本次尚未新实跑legacy完整正例和非origin union，必须在后续mixed资格中继续验证。
+sourcepackage的公共签名除新增显式origin API外不变。共用parser原布尔origin参数改成显式角色指针；普通/recorded调用仍传null，legacy origin明确取旧角色。共用context/producer/basis/映射分支均只在origin模式选择角色；origin层首次提交未新实跑legacy完整正例和非origin union，后续实际43项current union已通过。legacy完整正例仍未新实跑。
 
-下一步：独立mixed controller/readers固定上述实际执行身份，构造仅3个JSON已变网，再验证旧107+当前43、全部源依赖和四端fresh；31个相同JSON的网不重造，不给当前context伪造kind2收据。当前材料仍73项，尚无新kind4包或NN功能PASS。
+## 同日后续材料构造
+
+仅三个JSON已变网完成正规start/finish：shared-e3 `fbae160942499fafa47cbcc2607e75053190a38572603f29de147e484c279611`，warnparse `b29966210ad0beb9b6b7d83a8cd5f575090555aaf780440079c312d4ab45c139`，errorparse `1aa3c025ecee9f043869d3f463c983dac50889bae71c9547a0b33f869590c7dd`。三份与private03材料逐字相同，当前context仍b09d、实测SID仍ace3。原73项不重跑，当前仅76项材料，31个相同JSON的网不重造，不给当前context伪造kind2收据。
+
+冻结SourceRoot原kernel-build/default-run D65完成九相正规KGEN：`out/epoch-kernel-01`，context `58adde8fed71ae734e4e21056ec77b463eb7dbed16d40ac2fecb98898ec5e0eb`，新product-built helper实际0b8f5d与既定pin匹配；双kernel与44份s/o收据齐全。未复制GCC helper。该根 `out/epoch-build-01/checkpoint-net3-only-01.tsv`、`checkpoint-kernel-complete-01.tsv`记录全部真实session和终态。
+
+mixed controller01静审发现origin executing-module仍取SourceRoot，修复为显式profile取ToolRoot后只重编controller02。实际源 `c2257bf86a0af86aa738c21daaef2769eb02724fc5a642ce85b44eca5211886f`，ELF `4343993ccaa402003f4b2e08ec1f249ca54048b11a5642a541fdeba7ac44f912`，无verifier自哈希循环。
+
+新PC为ToolRoot下 `out/c43-f9-ace3-mixed-pc-01`。prepare、declare、declare-finish、pack、pack-finish、seal均真实终态rc0/stderr空，遵守原55秒外层和原40秒native预算。独立静审selection34条精确31equal/3diff，current-union43/models3；origin107/34与四端fresh保留。实际新包：
+
+- compiler.pkg：1,632,679字节，`661c2b02bb9fce9f6d6939a3ee7b97242462daf5ce70b7604cea832d5fe53d6f`
+- model-inputs.tsv：`d1fd67a404c8b7cbb6cb13fec4911ab5457cc73ff8ce54201e7e76a2eb27f768`
+- package.tsv：`3fb50654c099bb1ad55e4daeafc69a3288f7104d8d30e054b9430798c801b324`
+- context.tsv：`8cb8e390d4085b5da57afb3d3dd2959359455518ce1d5391fda8e15f88c09ee2`
+
+这些是kind4材料构造收据，不能迁移旧B1的NN功能PASS。日志为 `out/c43-f9-origin-exec-01/mixed-{prepare,declare,declare-finish,pack,pack-finish,seal}-01.{stdout,stderr}`。
+
+独立mx reader默认-run探针 `out/c43-mixed-reader-01.cx`：session7212真实终态rc0/stderr空，`mixed-reader-01.stdout`一条综合断言通过，检查profile/SourceRoot/ToolRoot、完整origin107/34、当前43/3/31及origin读取1005。该入口实际重新执行controller snapshot并独立观察代码/包前后身份，没有沿用seal结果。reader模块SHA `f36ae9573135b6f511a8a1fcd7a250843a8bc09ed584b08a44c2b327287c434f`。这证明本对显式profile的真实材料正例；不代表所有负控或产品准入已通过。产品构造/准入继续单独执行。
+
+产品消费者接续：default-run observe（session4727）和保存工具的-O2编译（session15288）均真实终态142，原55秒预算不变，空stdout/stderr保留，未生成产品context。分离构造工具采用-O0，产品切片仍要求-O2；工具产物 `product-build-O0-02.elf` 为2,099,776字节，SHA `f9afd1066da04d2bf6c4f4e58b27ecdd36b7bbe41f401b2891e28fc796fef764`。执行代理容量错误后由root接管，原编译退出码暂未取回，明确UNOBSERVED；不因ELF存在记录编译PASS。root在确认原所属进程消失、context不存在后，以该ELF启动独立observe，日志 `product-observe-native-02.*`，原55秒预算，无重复编译或缓存核验结论。
+
+独立native observe（session71096）真实终态0/stderr空；1348次物理读取，材料核验30.929054702秒，产品context `fe3650a0cf346835c8152fdf689fee023ded6bf606bf682fc25e3684e52ec4ec`。报告jobs150是历史107与当前union43之和，不能改称当前150个新构造作业。该正例通过后接五切片构造与独立finish，仍不授功能或平台运行资格。
