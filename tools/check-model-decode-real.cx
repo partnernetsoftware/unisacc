@@ -1,0 +1,54 @@
+/* Compare fresh CX decodes to freshly executed C runtime decodes, not cached
+ * conclusions. ROOT must be a frozen source snapshot containing both. */
+#pragma unisa use runtime.process
+#pragma unisa use runtime.model_decode
+static void die(const char *s){fprintf(stderr,"model-decode-real: %s\n",s);exit(2);}
+static void *heap(void *p,size_t n){return realloc(p,n);}
+static void release(void *p){free(p);}
+static void hash(const char *p,char h[65]){size_t n;char *b=cx_read(p,&n);if(!b)die("read-input");cx_sha256_hex(b,n,h);free(b);}
+static np_result call(char **v,const char *root,int sec){np_result r={0};char why[512];if(np_run(v,root,0,sec,&r,why,sizeof why))die(why);return r;}
+typedef struct {char *p;size_t n,cap;} Output;
+static void put(Output *b,const char *s,size_t n){if(n>(size_t)-1-b->n)die("output-overflow");size_t want=b->n+n;if(want>b->cap){size_t cap=b->cap?b->cap:256;while(cap<want){if(cap>(size_t)-1/2)die("output-overflow");cap*=2;}char *p=realloc(b->p,cap);if(!p)die("output-memory");b->p=p;b->cap=cap;}if(n)memcpy(b->p+b->n,s,n);b->n=want;}
+static void puts_out(Output *b,const char *s){put(b,s,strlen(s));}
+static void f4(Output *b,const char *fmt,int a,int c,int d,int e){char t[256];int n=snprintf(t,sizeof t,fmt,a,c,d,e);if(n<0||n>=(int)sizeof t)die("format");put(b,t,(size_t)n);}
+static void f64(Output *b,long long x){char t[64];int n=snprintf(t,sizeof t," %lld",x);if(n<0||n>=(int)sizeof t)die("format");put(b,t,(size_t)n);}
+static void render(const CxModel *m,Output *b){
+ f4(b,"model ns=%d nq=%d nrg=%d nstr=%d",m->ns,m->nq,m->nrg,m->nstr);
+ f4(b," start=%d net=%d top=%d nqa=%d\n",m->start,m->isnet,m->topmax,m->nqa);
+ const char *hex="0123456789abcdef";
+ for(int i=0;i<m->nstr;i++){f4(b,"str %d %d",i,m->strl[i],0,0);for(int j=0;j<m->strl[i];j++){unsigned c=(unsigned char)m->str[i][j];char v[3]={' ',hex[c>>4],hex[c&15]};put(b,v,3);}puts_out(b,"\n");}
+ for(int i=0;i<m->nq;i++)f4(b,"q %d %d %d\n",i,m->qoff[i],m->qlen[i],0);
+ puts_out(b,"qa");for(int i=0;i<m->nqa;i++)f64(b,(long long)m->qa[i]);puts_out(b,"\n");
+ for(int i=0;i<m->ns;i++){
+  f4(b,"state %d mode=%d count=%d",i,m->smode[i],m->rowc[i],0);
+  if(m->isnet)f4(b," lo=%d hi=%d bn=%d bq=%d",m->nlo[i],m->nhi[i],m->bn[i],m->bq[i]);
+  f4(b," ret=%d\n",m->rets[i],0,0,0);
+  if(m->retok[i]){f4(b,"returns %d",i,0,0,0);for(int j=0;j<m->ns;j++)if(m->retok[i][j])f4(b," %d",j,0,0,0);puts_out(b,"\n");}
+  if(m->isnet||m->smode[i]==1)for(int j=0;j<m->rowc[i];j++)f4(b,"row %d %d %d %d\n",i,m->rowk[i][j],m->rown[i][j],m->rowq[i][j]);
+  else {int dn=m->rown[i][0],dq=m->rowq[i][0];f4(b,"direct %d %d %d\n",i,dn,dq,0);for(int j=1;j<257;j++)if(m->rown[i][j]!=dn||m->rowq[i][j]!=dq)f4(b,"direct-entry %d %d %d %d\n",i,j,m->rown[i][j],m->rowq[i][j]);}
+ }
+}
+int main(int argc,char **argv){
+ char root[4096],models[4096],manifest[4400],source[4400],ref[4400],bound[4400],path[4400],h[65],after[65],manifestsha[65],expected[32][65];
+ if(argc!=4||!realpath(argv[1],root)||!realpath(argv[2],models)||argv[3][0]!='/')die("usage ROOT MODEL_DIR NEW_OUT");
+ if(mkdir(argv[3],0700))die("new-output-required");
+ if(cx_fmt(manifest,sizeof manifest,"%s/manifest.tsv",models)||cx_fmt(source,sizeof source,"%s/tests/cases/model_decode_reference.c",root)||cx_fmt(bound,sizeof bound,"%s/tools/bound",root)||cx_fmt(ref,sizeof ref,"%s/reference",argv[3]))die("path");
+ hash(manifest,manifestsha);FILE *f=fopen(manifest,"rb");if(!f)die("manifest");char line[9000];int count=0;
+ while(fgets(line,sizeof line,f))if(!strncmp(line,"model\t",6)){int id;long len;if(count>=32||sscanf(line+6,"%d %ld %64s",&id,&len,expected[count])!=3||id!=count||len<=0)die("model-row");count++;}
+ if(ferror(f)||fclose(f)||count!=32)die("manifest-count");
+ const char *deps[]={"tests/cases/model_decode_reference.c","exec/c/run.c","exec/c/core.h","exec/c/core.c","cx/runtime/model_decode.cx","cx/runtime/model_number.cx","cx/runtime/model_lifetime.cx","tools/check-model-decode-real.cx"};
+ char dep[8][4400],dep_hash[8][65];for(int i=0;i<8;i++){if(cx_fmt(dep[i],sizeof dep[i],"%s/%s",root,deps[i]))die("path");hash(dep[i],dep_hash[i]);}
+ char *build[]={bound,"30","/usr/bin/x86_64-linux-gnu-gcc-11","-O2","-w","-ffunction-sections","-fdata-sections","-Wl,--gc-sections",source,"-o",ref,0};np_result r=call(build,root,35);if(r.rc||r.errn)die("reference-build");np_free(&r);
+ int failed=0;
+ for(int i=0;i<32;i++){
+  if(cx_fmt(path,sizeof path,"%s/model-%03d.bin",models,i))die("path");size_t n;char *data=cx_read(path,&n);if(!data||n>2147483647UL)die("model-read");cx_sha256_hex(data,n,h);if(strcmp(h,expected[i]))die("model-identity");
+  CxDecode d={0};d.realloc=heap;d.release=release;int rc=cxmd_decode(&d,(const unsigned char *)data,(long)n);free(data);
+  char *v[]={bound,"10",ref,path,0};r=call(v,root,12);Output b={0};if(!rc)render(&d.model,&b);
+  int ok=!rc&&!r.rc&&!r.errn&&b.n==r.outn&&(!b.n||!memcmp(b.p,r.out,b.n));
+  if(!ok){fprintf(stderr,"model-decode-real: member=%d cx=%d why=%s ref=%d bytes=%ld/%ld\n",i,rc,d.why?d.why:"",r.rc,(long)b.n,(long)r.outn);failed++;}
+  cxml_release(&d.model,release);free(b.p);np_free(&r);hash(path,after);if(strcmp(h,after))die("model-changed");
+  printf("%s\tmodel-%03d\n",ok?"PASS":"FAIL",i);fflush(stdout);
+ }
+ hash(manifest,after);if(strcmp(manifestsha,after))die("manifest-changed");for(int i=0;i<8;i++){hash(dep[i],after);if(strcmp(dep_hash[i],after))die("source-changed");}
+ printf("CXMODEL_DECODE_REAL\tmodels=%d\tfailed=%d\tmanifest=%s\n",count,failed,manifestsha);return failed?1:0;
+}
