@@ -27,6 +27,8 @@ GCC与Clang各四项-o实跑：正常/缺席编译rc0且执行rc7，超限/目�
 
 回归断言进一步收紧为拒绝码必须1，超限必须报告`cxpack.tsv too large`、目录必须报告
 `cannot read cxpack.tsv`，且stdout为空。此断言修订尚待重新执行，不继承旧4/0为新测试结果。
+工具现逐例独占保存stdout、stderr、status.tsv；传输失败额外保存transport-error，保留现场后拒绝。
+此证据留存改动也尚待实跑，不补造旧回归中未保存的逐例输出。
 
 构造接续：af8429d0cf已git archive到仓外`/home/devali/repos/unisacc-epoch-cxpack-af8429d0cf`，
 启动产品逐字核为4c2831c3，来源记录一并保存。prepare-context默认-run实返0，
