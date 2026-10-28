@@ -19,6 +19,15 @@ main.o、main.o none.a均rc1并具名used；m2.o B.a A.a具名inner且rc1；三�
 长名探针250字符在前端按63字符上限拒绝，未到链接器，不能算长名链接负控通过。
 相关文件在`out/c43-link-undef-fix-01/`；这不扩授产品或跨平台资格。
 
+模型驱动验证：共享3a5b以-O2编译当前`exec/c/asmcompiler.c`成功，私有ELF
+SHA `e2292a760d559dd9c733aca6a39f8bac896fdb04a5c448382f0f67218514ed9a`，
+显式挂载原正规包ff696（未重造模型），未安装。薄包装在`out/c43-link-driver-subject-01/`，
+不作为已装产品身份。原缺陷批`out/c43-link-driver-test-03/`实为4 PASS/1 FAIL：
+对象、缺定义归档、逆序归档三拒绝均正确，正序实际rc106；唯一保留红为直接C合同冲突。
+`out/c43-link-driver-archive-02.stdout`原归档互操作批17/0（独立/usr/bin/ar）。
+测试夹具首次包装把--models放在ar前，造成运输失败；修复后第二次遗漏watchdog的bound.c，
+导致执行控制失败；两轮原收据均保留。补全watchdog源码后才产生上述最终实跑结果，不把夹具失败误归产品。
+
 - 现象：`int used(void); int main(void){return used()+2;}` 经 `-c -b lnx/x86_64 -funit` 得 main.o 后，`unisacc -o img main.o`（或加只定义 `unused` 的归档、或直接 `-o img main.c`）rc 0 并写出镜像；运行 SIGSEGV（rc 139）。预期：`link: undefined reference to used`，rc≠0，无镜像。
 - 定位：src/tapelink.c:351 `tl_check_undef`（R20-3）只检查名字以 `g_` 开头的未定义外部（全局数据对象），函数外部不检查。
 - 同现：经典参考 REF 0ed46192 行为相同（共享缺陷，非回归）；产品==REF 字节差分仍有效，不阻塞候选 f3705dfa。
