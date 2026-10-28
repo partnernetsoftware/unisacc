@@ -346,17 +346,18 @@ int tl_needs(char *t, long n) {                              /* defines somethin
     }
     return 0;
 }
-/* R20-3: an object some unit declares `extern` and no unit defines (the
-   link used to emit a reference to nothing and crash at run time) */
+/* Reject unresolved data and function externs before emitting an image.
+   __init alone is synthesized below after this check. */
 int tl_check_undef(void) {
     int i; int k; char msg[320]; char *pre;
     i = 0;
     while (i < tl_next) {
         char *s; int n; s = tl_npool + tl_ext_at[i]; n = tl_ext_len[i];
-        if (n > 2 && n < 250 && s[0] == 103 && s[1] == 95 && !tl_inset(tl_def_at, tl_def_len, tl_ndef, s, n)) {
+        if (n > 0 && !tl_is(s, n, "__init") && !tl_inset(tl_def_at, tl_def_len, tl_ndef, s, n)) {
             pre = "link: undefined reference to "; k = 0;
             while (pre[k]) { msg[k] = pre[k]; k = k + 1; }
-            n = n - 2; s = s + 2; while (n > 0) { msg[k] = *s; k = k + 1; s = s + 1; n = n - 1; }
+            if (n > 2 && s[0] == 103 && s[1] == 95) { n = n - 2; s = s + 2; }
+            while (n > 0 && k < 318) { msg[k] = *s; k = k + 1; s = s + 1; n = n - 1; }
             msg[k] = 10; msg[k + 1] = 0;
             tl_fail(msg); return 1;
         }

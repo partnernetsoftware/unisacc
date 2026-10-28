@@ -2,6 +2,15 @@
 
 ## link.undef-function-refusal — 未定义外部函数链接成崩溃镜像（开放）
 
+2026-10-28 cdx 实测更新：共享3a5b完整原批为1 PASS/4 FAIL，收据
+`out/c43-3a5b-link-undef-01/results.tsv`；object/archive/reversed三个错误镜像rc139，direct-C为rc127，不能统称SIGSEGV。
+本刀`tl_check_undef`检查所有未解析extern，仅豁免随后生成的`__init`；诊断有界截断，不再跳过长名。
+修改源码经现有build_ref构造的独立参考`out/c43-link-undef-fix-01/reference.elf`已实测：
+main.o、main.o none.a均rc1并具名used；m2.o B.a A.a具名inner且rc1；三者未产生镜像。
+正序m2.o A.a B.a仍成功且运行rc106。首次归档试命令误写lib.a，得到cannot open，不计通过；随后正确none.a实测如上。
+直接C路径仍生成动态ELF并rc0，说明仅修tapelink尚未闭合整个合同；继续查动态外部符号解析边界。
+当前仅源码及参考验证，未重建/安装产品，登记批仍红，不授修复完成。
+
 - 现象：`int used(void); int main(void){return used()+2;}` 经 `-c -b lnx/x86_64 -funit` 得 main.o 后，`unisacc -o img main.o`（或加只定义 `unused` 的归档、或直接 `-o img main.c`）rc 0 并写出镜像；运行 SIGSEGV（rc 139）。预期：`link: undefined reference to used`，rc≠0，无镜像。
 - 定位：src/tapelink.c:351 `tl_check_undef`（R20-3）只检查名字以 `g_` 开头的未定义外部（全局数据对象），函数外部不检查。
 - 同现：经典参考 REF 0ed46192 行为相同（共享缺陷，非回归）；产品==REF 字节差分仍有效，不阻塞候选 f3705dfa。
