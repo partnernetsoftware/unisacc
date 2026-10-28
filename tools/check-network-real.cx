@@ -1,0 +1,22 @@
+/* Observe binary network framing of every P3 member; no model execution. */
+#pragma unisa use runtime.packagestruct
+#pragma unisa use runtime.network_structure
+#pragma unisa use runtime.codec
+typedef struct { int seen; int code; } Seen;
+static int visit(void *arg,const unsigned char *p,long n,long rawlen,unsigned long sum) {
+    Seen *s=(Seen *)arg; unsigned char *raw=malloc((size_t)rawlen); CxCodecCrc crc; uint32_t got;
+    if(!raw){s->code=-1;return 2;}
+    if(cxcodec_inflate(raw,(unsigned long)rawlen,p,(unsigned long)n))s->code=-2;
+    else if(cxcodec_crc_init(&crc)||cxcodec_crc(&crc,(const char *)raw,(int)rawlen,&got)||got!=(uint32_t)sum)s->code=-3;
+    else s->code=cxns_audit(raw,rawlen);
+    free(raw);if(s->code)return 2;s->seen++;return 0;
+}
+int main(int argc,char **argv) {
+    size_t n;char *data;char sha[65];int ver=0;Seen s={0};
+    if(argc!=2){fputs("network-real: usage P3\n",stderr);return 2;}
+    data=cx_read(argv[1],&n);if(!data||n>2147483647UL){free(data);return 2;}
+    cx_sha256_hex(data,n,sha);
+    int rc=cxps_models((const unsigned char *)data,(long)n,&ver,visit,&s);free(data);
+    if(rc||ver!=3){fprintf(stderr,"network-real: member=%d code=%d structure=%d\n",s.seen,s.code,rc);return 1;}
+    printf("NETWORK_REAL\tmembers=%d\tP3\tsha256=%s\n",s.seen,sha);return 0;
+}
