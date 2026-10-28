@@ -24,13 +24,13 @@
 
 模块 `#include` 是 lint。不在对接前缀里的 `.cx` 新文件必须为 0；`tests/cxinclude.tsv` 旧债只降不升。`include/` 与 `tools/cxcc-hostinc/` 是 libc／POSIX 对接单元，可以用 `#include`。短记 [plans/cx-include-lint.md](../../plans/cx-include-lint.md)。检查是 `sh ./unisacc.com -run tests/cxinclude.cx -- --check`。树上若有别人暂存的新 `#include`，该检查退出 1，这不表示棘轮被抬高。
 
-包清单把导入身份钉到路径。一个目录一份 `cxpack.tsv`：模块名对应旁边的文件，公开列是该文件非 static 定义的有序子集。短记 [plans/cx-pack.md](../../plans/cx-pack.md)。检查是 `sh ./unisacc.com -run tests/cxpack.cx -- --fixtures`。
+包清单把导入身份钉到路径。一个目录一份 `cxpack.tsv`：模块名对应旁边的文件，公开列是该文件非 static 定义的有序子集。短记 [plans/cx-pack.md](../../plans/cx-pack.md)。检查是 `sh ./unisacc.com -run tests/cxpack.cx -- --fixtures`。`src/cxmod.c` 在模块文件同目录有这份清单、且某一行的路径对上该文件时，CXIF 只写出公开列里的函数；没有对上的行仍导出全部非 static。本机用一份 Linux x86-64 探针编过这个源码：公开调用退出 5，调用未公开的 `pack_extra` 被 gcc 拒绝，没有清单的模块夹具退出 42。仓库根的 `.com` 和已安装的 `unisacc.com` 仍是上一份，这次没有重打，所以它们还导出全部非 static。
 
 CXIF v0 文本是 banner、守卫、类型、原型和 `#endif`。短记 [plans/cxif-v0.md](../../plans/cxif-v0.md)。检查是 `sh ./unisacc.com -run tests/cxif.cx -- --fixtures`。
 
 ## 还没做
 
-编译器仍导出每一个非 static 函数。包清单里的公开集不会裁剪 CXIF。
+已安装的 `unisacc.com` 与仓库根 `.com` 仍导出每一个非 static 函数。源码里的裁剪要等这两份重新构造才进入它们。
 
 `#include` 不是编译器拒绝。`src/cxmod.c` 仍编译带 `#include` 的模块。
 
@@ -42,7 +42,7 @@ spec §5 的所有权没有实现。
 
 ## 下一动作
 
-六格 APE 已按带 `cxproc` 的驱动重打。下一步仍是公开集裁剪：未列入 `cxpack.tsv` 的非 static 函数还在 CXIF 里。那是编译器的事，本篇不改 `src/cxmod.c`。
+公开集裁剪已经写进 `src/cxmod.c`，并用一份 Linux 探针跑过。仓库根的六格 APE 这次没有重打。下一步是让已安装的 `unisacc.com` 带上这份源码；所有权仍未实现。
 
 ## 索引
 

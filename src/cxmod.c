@@ -7,12 +7,15 @@
    dependency order -- the whole CXIF of a direct use, only the type part of a transitive one.
    CXIF v0 is text: one pass over the module source (splices joined, comments removed, strings respected) that splits
    file-scope items at a depth-0 ';' or at the '}' closing a function body, and exports the prototype of each
-   non-static function definition and every typedef / struct-union-enum definition, whitespace collapsed.  An exported
+   non-static function definition and every typedef / struct-union-enum definition, whitespace collapsed.  When
+   cxpack.tsv sits in the module file's directory and a row's path matches that file, only the comma-separated
+   public names on that row are exported; a module with no such row still exports every non-static function.
+   An exported
    object, a prototype the module does not define, a module macro inside an exported item, an export under #if and a
    reserved name prefix are refused by name.  Collisions (one function exported by two modules, a unit defining a
    name a module exports, one type name from two modules a unit can see) are refused before compilation.
-   Each CXIF is written once, content-addressed, to $TMPDIR/ua-cxif-<sha16>.h; its bytes depend only on the module
-   bytes and this generator.  .c units are never scanned and their include list is exactly the -include list.
+   Each CXIF is written once, content-addressed, to $TMPDIR/ua-cxif-<sha16>.h; its bytes depend on the module
+   bytes, this generator, and a matching cxpack.tsv row when one exists.  .c units are never scanned and their include list is exactly the -include list.
    The driver supplies cxm_rd (read a file: length, -1 missing, -2 too large), cxm_wr (write a file) and cxm_say
    (bytes to fd 1 or 2).  Inspection: -cx-interface M.cx prints the CXIF, -cx-plan prints the units as TSV:
    index, compile path, forced includes. */
@@ -503,6 +506,60 @@ int cxm_typenames(int u, int k, int b, int e, int istypedef, int tb, int te) {
     }
     return 0;
 }
+/* 1 if nm is on the public list of the cxpack.tsv row for this file.  0 if that row exists and omits nm.
+   2 if there is no manifest, or no row whose path is this file. */
+int cxm_listed(int u, char *nm, int nl) {
+    char man[CXM_PATHW]; char rel[CXM_PATHW];
+    static char pack[65536];
+    int dl; int k; int n; int i; int hit;
+    char *s;
+    dl = cxm_len(cxm_path[u]);
+    while (dl > 0 && cxm_path[u][dl - 1] != '/') dl = dl - 1;
+    if (dl + 12 >= CXM_PATHW) return 2;
+    k = 0; while (k < dl) { man[k] = cxm_path[u][k]; k = k + 1; }
+    if (cxm_cpy(man + dl, "cxpack.tsv", CXM_PATHW - dl) < 10) return 2;
+    n = cxm_rd(man, pack, 65535);
+    if (n < 0) return 2;
+    pack[n] = 0;
+    k = 0;
+    while (dl + k < cxm_len(cxm_path[u]) && k < CXM_PATHW - 1) { rel[k] = cxm_path[u][dl + k]; k = k + 1; }
+    rel[k] = 0;
+    s = pack; i = 0; hit = 0;
+    while (i < n) {
+        int line; int t1; int t2; int rl;
+        line = i;
+        while (i < n && s[i] != '\n') i = i + 1;
+        if (line < i && s[line] != '#') {
+            t1 = line; while (t1 < i && s[t1] != '\t') t1 = t1 + 1;
+            t2 = t1 + 1; while (t2 < i && s[t2] != '\t') t2 = t2 + 1;
+            rl = cxm_len(rel);
+            if (t1 < i && t2 < i && t2 - (t1 + 1) == rl) {
+                int q; q = 0;
+                while (q < rl && s[t1 + 1 + q] == rel[q]) q = q + 1;
+                if (q == rl) {
+                    int p; int end;
+                    hit = 1; p = t2 + 1; end = i;
+                    if (end > p && s[end - 1] == '\r') end = end - 1;
+                    while (p < end) {
+                        int b; int e;
+                        b = p; while (p < end && s[p] != ',') p = p + 1; e = p;
+                        while (b < e && s[b] == ' ') b = b + 1;
+                        while (e > b && (s[e - 1] == ' ' || s[e - 1] == '\r')) e = e - 1;
+                        if (e - b == nl) {
+                            int q2; q2 = 0;
+                            while (q2 < nl && s[b + q2] == nm[q2]) q2 = q2 + 1;
+                            if (q2 == nl) return 1;
+                        }
+                        if (p < end && s[p] == ',') p = p + 1;
+                    }
+                }
+            }
+        }
+        if (i < n && s[i] == '\n') i = i + 1;
+    }
+    if (hit) return 0;
+    return 2;
+}
 /* project the loaded unit u.  lib: a used module -- classify every item, refuse by name, and write its interface
    text into cxm_ift; otherwise only record its non-static function definitions (collision check) */
 int cxm_project(int u, int lib) {
@@ -585,7 +642,10 @@ int cxm_project(int u, int lib) {
     k = 0;
     while (k < cxm_nitem) {
         if (cxm_ikind[k] == 2) {
+            int pub;
             cxm_dname(s, cxm_ib[k], cxm_ibody[k], &nb, &nl, &isfn);
+            pub = cxm_listed(u, s + nb, nl);
+            if (pub == 0) { k = k + 1; continue; }
             if (cxm_addsym(s + nb, nl, u, cxm_iline[k], 0, 0, 0)) return 1;
             if (cxm_emit(cxm_ib[k], cxm_ibody[k]) || cxm_nift >= CXM_IFMAX - 2) { cxm_start(u, cxm_iline[k]); cxm_m("interface too large"); return cxm_fail(); }
             cxm_ift[cxm_nift] = ';'; cxm_ift[cxm_nift + 1] = '\n'; cxm_nift = cxm_nift + 2;

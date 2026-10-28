@@ -9,4 +9,4 @@
 
 `sh ./unisacc.com -run tests/cxpack.cx -- --fixtures` 跑正例和四个反例，并在 /tmp 拒绝一份带 include 的模块。正例 `tests/cxpack/ok/main.cx` 的 `-run` 退出 5。
 
-这不是 spec §5 的编译期所有权。CXIF v0 仍导出全部非 static 定义。`tests/cxpack/ok/mark.cx` 的 `-cx-interface` 写出 `pack_extra` 与 `pack_mark`，没有 `pack_hide`。清单只公开 `pack_mark`。`tests/cxpack/bad-call/main.cx` 调用 `pack_extra`，lint 退出 1，同一文件 `-run` 仍退出 2。密封与晋升不读这张表。
+这不是 spec §5 的编译期所有权。`src/cxmod.c` 在同目录 `cxpack.tsv` 的路径对上该文件时，只把公开列写进 CXIF。没有对上的行仍导出全部非 static。已安装的 `unisacc.com -cx-interface` 还是旧生成器：`tests/cxpack/ok/mark.cx` 仍写出 `pack_extra` 与 `pack_mark`，没有 `pack_hide`。清单只公开 `pack_mark`。`tests/cxpack/bad-call/main.cx` 的 lint 退出 1，同一文件的 `unisacc.com -run` 仍退出 2。用这份源码编出的 Linux 驱动会拒绝那个调用。密封与晋升不读这张表。仓库根的 `.com` 这次没有重打。
