@@ -6,6 +6,10 @@
 
 ## 接口及所有权
 
+当前模块与已装 e955 产品都支持 `cxpack.tsv` 的函数公开列表：文件目录中有匹配行时，仅导出该行列出的非 static 函数；无清单或无匹配行保持旧兼容行为。超限或读取失败必须拒绝，不能退回全部公开。类型声明仍沿用 CXIF v0 文本接口，这不是编译期所有权检查。
+
+本次权威模块投影为 45,858 字节，与 `src/cxmod.c` 逐字一致；独立模块测试 28/0，包含清单过滤、目录/超限拒绝与缺席恢复。统一清单已登记 `cx0-unit`，登记后的正式批次尚待执行，不能以先前直接运行记录代替。
+
 ```c
 cx0_result cx0_plan(int interface_only, char **sources, int count,
                    char **forced, int nforced, const char *directory);
