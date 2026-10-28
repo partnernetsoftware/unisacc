@@ -156,7 +156,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 **2026-10-28 单元化重构决定：** 主人要求参考Rust模块化与内存安全设计，去除include引入的隐式耦合；不是换后缀。CX权威源码、公开接口、私有实例、显式资源/构建图、所有权/借用合同共同构成目标。目标CX0 → E2 → E1 → E3 → E4 → prune → lower → elf；现有独立CX0/束/适配已落地，安装产品仍七流。CX0语义控制最终也须网络化，十八张ask事实网不按阶段数机械加一。详见[单元化计划](plans/v0.0.43-units.md)及[cx入口](cx/README.md)。
 
-**当前分工与下一动作：** E3聚合值返回已落入实际NN：局部成员表达式先完整解析，再核最终零间接/名义聚合类型并拷贝整值；错误类型为带位置的普通类型错误，-Wall不再误报UNCOVERED。新源码SIDace3b447、三配方原生重建；private661c2b02只替换2个实际路由E3模型，30其它模型及全资源逐字不变。正/拒绝/告警拒绝恢复/模块四组43/0，独立E3流17/0，原内存138/0和库ABI55/0；两个路由模型lint0ERROR、WARN与基线相同，未路由共享图的旧lint拒绝仍保留。已装Rootd65/源f9仍拒原pending正例，未授新候选或矩阵资格。下一刀正规构造/准入/接入E3，再推进结构化CX接口类型记录；编译期所有权仍开。详见[E3切片收据](plans/c43-aggregate-return-2026-10-28.md)。 本轮正规构造已从主人提交13d8cfe478建立仓外冻结，context已PREPARED（source仍ace3b447），73项带收据作业已完成（tool5/gen34/tbl34），34项net未起；显式mixed-v2复用合同正在接线与独立审查，尚未准入；35个实批/15覆盖提案已原样接入正式两表，--list204/193/19未解，--all实测rc3，未将登记当PASS。
+**当前分工与下一动作：** E3聚合值返回已落入实际NN：局部成员表达式先完整解析，再核最终零间接/名义聚合类型并拷贝整值；错误类型为带位置的普通类型错误，-Wall不再误报UNCOVERED。新源码SIDace3b447、三配方原生重建；private661c2b02只替换2个实际路由E3模型，30其它模型及全资源逐字不变。正/拒绝/告警拒绝恢复/模块四组43/0，独立E3流17/0，原内存138/0和库ABI55/0；两个路由模型lint0ERROR、WARN与基线相同，未路由共享图的旧lint拒绝仍保留。已装Rootd65/源f9仍拒原pending正例，未授新候选或矩阵资格。下一刀正规构造/准入/接入E3，再推进结构化CX接口类型记录；编译期所有权仍开。详见[E3切片收据](plans/c43-aggregate-return-2026-10-28.md)。 本轮正规构造已从主人提交13d8cfe478建立仓外冻结，context已PREPARED（source仍ace3b447），76项带收据作业已完成（tool5/gen34/tbl34/net3），31项相同net未重构造、待正式复用；显式mixed-v2复用合同正在接线与独立审查，尚未准入；35个实批/15覆盖提案已原样接入正式两表，--list204/193/19未解，--all实测rc3，未将登记当PASS。
 
 **双线推进（2026-10-28）：** 0.0.43现行Rootda4e/SID1621继续补完整流/网/RI、N22与平台，不等待CX重构完工；CX产物独立核身份逐单元接入。E1实际located warnlex已核654状态/168896观测决定及展开动作与正式模型全等，手写规则144类对/24 peek边界293/0；EOF后的12类peek逐项UNOBSERVABLE，不折叠作144源流PASS，矩阵仍MISSING。core.memory有138项正/拒绝/恢复实跑，仅管理API运行期约束；成员struct直接return的正向最小例在tests/pending/struct-return-member.cx当前rc1而期望rc7，保持NEEDS_PRODUCT_CHANGE。
 
@@ -362,7 +362,7 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 <a id="memory-palace"></a>
 ### 记忆宫殿
 
-**构造接续检查点（2026-10-28）：** ace3冻结根`unisacc-epoch-aggregate-13d8cfe478`已有73项带收据作业（tool5/gen34/tbl34），34项net尚未启动；这只是材料进度，不是候选资格。原始检查点`out/epoch-build-01/checkpoint-tbl34-final-01.tsv`明确大产物未在该次审计重哈希。31个配方相同、3个不同的复用正在接入显式mixed-v2身份合同；SourceRoot保留冻结输入，ToolRoot独立绑定新执行工具。材料角色合同实跑7/0；原生验证器02构造rc0、SHA72e1d772，执行profile01已生成，真实snapshot首测rc2拒绝origin-path-outside-logical-root（历史外部CC键），原红证据保留在out/c43-f9-origin-exec-01/。固定CC捕获映射待修复及再验；控制器原生摘要/读取计数未齐，尚无复用资格。cc的661c×35差分已结束，报告35/35、0 DIFF；16批含实际C编译，19批仅控制器兼容/旧流材料，不能充作新E3完整覆盖。
+**构造接续检查点（2026-10-28）：** ace3冻结根`unisacc-epoch-aggregate-13d8cfe478`完成76项带收据作业（tool5/gen34/tbl34/net3）；三张差异net与此前private03逐字一致，源码SID与context b09d未变。检查点`out/epoch-build-01/checkpoint-net3-only-01.tsv`；31张相同net未重构造，仍须mixed验证后复用。origin层已提交34ccb522db：角色合同9/0，原生验证器03/执行profile02核身份，真实历史107/34通过；错摘要、符号链接逃逸、未知外部键、执行权限负例及恢复通过。早期失败保留于out/c43-f9-origin-exec-01/。当前接新KGEN与修正ToolRoot后的controller02，尚无新PC、准入或安装资格。cc的661c×35差分报告35/35、0 DIFF；16批含实际C编译，19批仅控制器兼容/旧流材料，不作新E3完整覆盖。
 
 **现行产品（2026-10-28）：** Rootd65c1474/record49465750，完整源SIDf9fff160、冻结778fc68ebc；107/107、PC e154c747、双内核/五切片/APE、kind2准入/正规安装和共享精确迁入完成。10个E2相关批加smoke共11批全PASS，header11/0长名修复已实际装入，negative211/0/known_gaps1；证据out/c43-fullname-validation-01/与out/c43-fullname-promote-01/。此前Root94私包绿/未安装的表述已成为历史。E3成员聚合值返回/最终类型核验已由private661c2b02实跑43/0及raw流17/0，内存138/0/库ABI55/0；尚未装入Rootd65。下一刀正规接入该E3改动；结构化CX接口记录与编译期所有权仍未完成。
 
