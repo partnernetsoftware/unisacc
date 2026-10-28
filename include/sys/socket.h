@@ -54,7 +54,7 @@ struct sockaddr_storage { sa_family_t ss_family; char __ss_pad[126]; };
 #ifdef _WIN32
 /* Winsock exports use a pointer-width SOCKET, not a POSIX int fd.  These are
  * declarations: the whole-program forwarder resolves them from ws2_32.dll. */
-typedef unsigned long SOCKET;
+typedef unsigned long long SOCKET;   /* UINT_PTR: 8 bytes on Win64 (long is 4 there) */
 #define INVALID_SOCKET ((SOCKET)-1)
 #define SOCKET_ERROR (-1)
 SOCKET socket(int __u_af, int __u_type, int __u_protocol);

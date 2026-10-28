@@ -6,9 +6,10 @@
 #define _UNISA_DIRENT_H
 #include <stdlib.h>
 #include <errno.h>
+#include <sys/_word.h>
 #include <sys/_win.h>
 struct dirent {
-    unsigned long d_ino;
+    __u_uword d_ino;
     unsigned char d_type;
     char d_name[256];
 };
@@ -20,7 +21,7 @@ struct dirent {
 #endif
 typedef struct {
     int fd, pos, len, failed;
-    long basep;                                  /* macOS getdirentries64 position */
+    __u_word basep;                                  /* macOS getdirentries64 position */
     long index;                                  /* entries returned so far (telldir) */
     struct dirent ent;
     unsigned char buf[_UNISA_DIRBUF];
@@ -30,9 +31,9 @@ typedef struct {
    buf[512..] = the "path\\*" pattern kept for rewinddir. */
 #if !__UNISA_FTRIM_LIBC || __UN_opendir
 static DIR *opendir(const char *__u_path) {
-    DIR *__u_d; long __u_fd;
+    DIR *__u_d; __u_word __u_fd;
 #ifdef _WIN32
-    static long __u_ff; static long __u_fc; long __u_h; int __u_n;
+    static __u_word __u_ff; static __u_word __u_fc; __u_word __u_h; int __u_n;
     if (!__u_ff) { __u_ff = _ux_sym("FindFirstFileA"); __u_fc = _ux_sym("FindClose"); }
     for (__u_n = 0; __u_path[__u_n]; __u_n++) ;
     if (__u_n == 0) { errno = ENOENT; return 0; }
@@ -42,7 +43,7 @@ static DIR *opendir(const char *__u_path) {
     for (__u_fd = 0; __u_fd < __u_n; __u_fd++) __u_d->buf[512 + __u_fd] = (unsigned char)__u_path[__u_fd];
     if (__u_path[__u_n - 1] != '\\' && __u_path[__u_n - 1] != '/') __u_d->buf[512 + __u_n++] = '\\';
     __u_d->buf[512 + __u_n] = '*'; __u_d->buf[513 + __u_n] = 0;
-    __u_h = _ux_call(__u_ff, (long)(__u_d->buf + 512), (long)__u_d->buf, 0, 0);
+    __u_h = _ux_call(__u_ff, (__u_word)(__u_d->buf + 512), (__u_word)__u_d->buf, 0, 0);
     if (__u_h == -1 || __u_h == 0) { __u_fd = _ux_errno(); free(__u_d); errno = (int)__u_fd; return 0; }
     if (!(__u_d->buf[0] & 0x10)) { _ux_call(__u_fc, __u_h, 0, 0, 0); free(__u_d); errno = ENOTDIR; return 0; }  /* "x\\*" of a file */
     __u_d->fd = -1; __u_d->pos = 1; __u_d->len = 0; __u_d->failed = 0; __u_d->basep = __u_h; __u_d->index = 0;
@@ -85,19 +86,19 @@ static int dirfd(DIR *__u_d) { if (!__u_d || __u_d->fd < 0) { errno = EINVAL; re
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_readdir
 static struct dirent *readdir(DIR *__u_d) {
-    unsigned char *__u_r; int __u_rl, __u_i, __u_left; long __u_n;
+    unsigned char *__u_r; int __u_rl, __u_i, __u_left; __u_word __u_n;
     errno = 0;
     if (__u_d == 0) { errno = EBADF; return 0; }
     if (__u_d->failed) { errno = __u_d->failed; return 0; }
 #ifdef _WIN32
-    {   static long __u_fn; static long __u_ff; long __u_e;
+    {   static __u_word __u_fn; static __u_word __u_ff; __u_word __u_e;
         if (!__u_fn) { __u_fn = _ux_sym("FindNextFileA"); __u_ff = _ux_sym("FindFirstFileA"); }
         if (__u_d->basep == -1) return 0;
         if (__u_d->basep == 0) {                     /* after rewinddir */
-            __u_d->basep = _ux_call(__u_ff, (long)(__u_d->buf + 512), (long)__u_d->buf, 0, 0);
+            __u_d->basep = _ux_call(__u_ff, (__u_word)(__u_d->buf + 512), (__u_word)__u_d->buf, 0, 0);
             if (__u_d->basep == -1 || __u_d->basep == 0) { __u_d->basep = -1; return 0; }
         } else if (!__u_d->pos) {
-            if (!(_ux_call(__u_fn, __u_d->basep, (long)__u_d->buf, 0, 0) & 0xFFFFFFFFL)) {
+            if (!(_ux_call(__u_fn, __u_d->basep, (__u_word)__u_d->buf, 0, 0) & 0xFFFFFFFFL)) {
                 __u_e = _ux_errno(); errno = 0;
                 if (__u_e != EIO) { __u_d->failed = (int)__u_e; errno = (int)__u_e; }   /* ERROR_NO_MORE_FILES maps to EIO: the end */
                 return 0;
@@ -152,7 +153,7 @@ static struct dirent *readdir(DIR *__u_d) {
 static void rewinddir(DIR *__u_d) {
     if (__u_d == 0) return;
 #ifdef _WIN32
-    {   static long __u_fc;
+    {   static __u_word __u_fc;
         if (!__u_fc) __u_fc = _ux_sym("FindClose");
         if (__u_d->basep != -1 && __u_d->basep != 0) _ux_call(__u_fc, __u_d->basep, 0, 0, 0);
         __u_d->basep = 0; __u_d->pos = 1; __u_d->failed = 0; __u_d->index = 0;
@@ -176,10 +177,10 @@ static void seekdir(DIR *__u_d, long __u_loc) {
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_closedir
 static int closedir(DIR *__u_d) {
-    long __u_r;
+    __u_word __u_r;
     if (__u_d == 0) { errno = EBADF; return -1; }
 #ifdef _WIN32
-    {   static long __u_fc;
+    {   static __u_word __u_fc;
         if (!__u_fc) __u_fc = _ux_sym("FindClose");
         __u_r = 0;
         if (__u_d->basep != -1 && __u_d->basep != 0) __u_r = _ux_call(__u_fc, __u_d->basep, 0, 0, 0) & 0xFFFFFFFFL;

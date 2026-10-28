@@ -13,6 +13,7 @@
  */
 #ifndef _UNISA_MATH_H
 #define _UNISA_MATH_H
+#include <sys/_word.h>   /* LLP64: |x| < 2^52 integer parts need the 8-byte __u_word, not a 4-byte long */
 
 #define HUGE_VAL (1.0 / 0.0)
 #define INFINITY (1.0f / 0.0f)
@@ -123,7 +124,7 @@ static double trunc(double __u_x) {
     double __u_a;
     __u_a = fabs(__u_x);
     if (__u_a >= 4503599627370496.0 || __u_x != __u_x) return __u_x;
-    return copysign((double)(long)__u_x, __u_x);
+    return copysign((double)(__u_word)__u_x, __u_x);
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_floor
@@ -161,7 +162,7 @@ static double rint(double __u_x) {                   /* halfway to even (default
     double __u_t; double __u_d;
     __u_t = trunc(__u_x);                            /* x itself for nan, inf, |x| >= 2^52 */
     __u_d = fabs(__u_x - __u_t);                     /* exact: |x| < 2^52 */
-    if (__u_d > 0.5 || (__u_d == 0.5 && ((long)__u_t & 1) != 0)) __u_t = __u_t + copysign(1.0, __u_x);
+    if (__u_d > 0.5 || (__u_d == 0.5 && ((__u_word)__u_t & 1) != 0)) __u_t = __u_t + copysign(1.0, __u_x);
     return __u_t;
 }
 #endif

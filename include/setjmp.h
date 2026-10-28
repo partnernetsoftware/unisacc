@@ -11,7 +11,8 @@
  * than C99 7.13.2.1 promises without `volatile`. */
 #ifndef _UNISA_SETJMP_H
 #define _UNISA_SETJMP_H
-typedef long jmp_buf[8];
+#include <sys/_word.h>   /* LLP64: the saved frame/stack/label slots are 8 bytes */
+typedef __u_word jmp_buf[8];
 int setjmp(jmp_buf env);
 void longjmp(jmp_buf env, int val);
 int _setjmp(jmp_buf env);

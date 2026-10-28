@@ -7,6 +7,7 @@
  */
 #ifndef _UNISACC_FFI_H
 #define _UNISACC_FFI_H
+#include <sys/_word.h>   /* LLP64: __hostcall argument slots are the 8-byte __u_word */
 #if !defined(__APPLE__) && !defined(__linux__) && !defined(_WIN32)
 #error unisacc_ffi requires macOS, Linux or Windows
 #endif
@@ -72,8 +73,8 @@ static int __uffi_ready;
    name that resolved before still resolves the same way. */
 #if !__UNISA_FTRIM_LIBC || __UN_uffi_dlopen
 static void *uffi_dlopen(const char *__u_path, int __u_mode) {
-    long __u_args[10] = {0};
-    __u_args[0] = (long)__u_path; __u_args[1] = __u_mode;
+    __u_word __u_args[10] = {0};
+    __u_args[0] = (__u_word)__u_path; __u_args[1] = __u_mode;
 #ifdef _WIN32
     __u_args[1] = 0;
 #endif
@@ -83,23 +84,23 @@ static void *uffi_dlopen(const char *__u_path, int __u_mode) {
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_uffi_dlsym
 static void *uffi_dlsym(void *__u_handle, const char *__u_name) {
-    long __u_args[10] = {0};
+    __u_word __u_args[10] = {0};
 #ifdef _WIN32
     void *__u_r; int __u_i; char *__u_dll[9];
     __u_dll[0] = "ucrtbase.dll"; __u_dll[1] = "kernel32.dll"; __u_dll[2] = "ws2_32.dll"; __u_dll[3] = "msvcrt.dll";
     __u_dll[4] = "user32.dll"; __u_dll[5] = "gdi32.dll"; __u_dll[6] = "shell32.dll"; __u_dll[7] = "advapi32.dll"; __u_dll[8] = "dxgi.dll";
     __u_args[2] = 0; __u_args[3] = 0; __u_args[4] = 0; __u_args[5] = 0;
-    if (__u_handle) { __u_args[0] = (long)__u_handle; __u_args[1] = (long)__u_name; return (void *)__hostcall(__hostaddr1(), __u_args); }
+    if (__u_handle) { __u_args[0] = (__u_word)__u_handle; __u_args[1] = (__u_word)__u_name; return (void *)__hostcall(__hostaddr1(), __u_args); }
     __u_i = 0;
     while (__u_i < 9) {
-        __u_args[0] = (long)__u_dll[__u_i]; __u_args[1] = 0;
+        __u_args[0] = (__u_word)__u_dll[__u_i]; __u_args[1] = 0;
         __u_args[0] = __hostcall(__hostaddr0(), __u_args);
-        if (__u_args[0]) { __u_args[1] = (long)__u_name; __u_r = (void *)__hostcall(__hostaddr1(), __u_args); if (__u_r) return __u_r; }
+        if (__u_args[0]) { __u_args[1] = (__u_word)__u_name; __u_r = (void *)__hostcall(__hostaddr1(), __u_args); if (__u_r) return __u_r; }
         __u_i = __u_i + 1;
     }
     return 0;
 #else
-    __u_args[0] = (long)__u_handle; __u_args[1] = (long)__u_name;
+    __u_args[0] = (__u_word)__u_handle; __u_args[1] = (__u_word)__u_name;
     __u_args[2] = 0; __u_args[3] = 0; __u_args[4] = 0; __u_args[5] = 0;
     return (void *)__hostcall(__hostaddr1(), __u_args);
 #endif
@@ -107,8 +108,8 @@ static void *uffi_dlsym(void *__u_handle, const char *__u_name) {
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_uffi_dlclose
 static int uffi_dlclose(void *__u_handle) {
-    long __u_args[10] = {0};
-    __u_args[0] = (long)__u_handle; __u_args[1] = 0;
+    __u_word __u_args[10] = {0};
+    __u_args[0] = (__u_word)__u_handle; __u_args[1] = 0;
     __u_args[2] = 0; __u_args[3] = 0; __u_args[4] = 0; __u_args[5] = 0;
 #ifdef _WIN32
     return __hostcall(__hostaddr2(), __u_args) ? 0 : -1;
@@ -122,7 +123,7 @@ static char *uffi_dlerror(void) {
 #ifdef _WIN32
     return "Windows loader error";
 #else
-    long __u_args[10] = {0};
+    __u_word __u_args[10] = {0};
     __u_args[0] = 0; __u_args[1] = 0; __u_args[2] = 0;
     __u_args[3] = 0; __u_args[4] = 0; __u_args[5] = 0;
     return (char *)__hostcall(__hostaddr3(), __u_args);
@@ -138,7 +139,7 @@ static char *uffi_dlerror(void) {
 static int uffi_init(void) {
     int __u_i;
     if (__uffi_ready) return 0;
-    if (sizeof(long) != 8 || sizeof(void *) != 8 ||
+    if (sizeof(__u_word) != 8 || sizeof(void *) != 8 ||
         sizeof(struct uffi_cif) != UFFI_CIF_SIZE) return 0 - 1;
 #ifdef __APPLE__
     if (__uffi_handle == 0) __uffi_handle = uffi_dlopen("/usr/lib/libffi.dylib", 2);
@@ -194,7 +195,7 @@ static int uffi_call_types(void *__u_fn, void *__u_rtype, void **__u_types,
                            void **__u_values, int __u_n, int __u_fixed,
                            void *__u_result) {
     struct uffi_cif __u_cif;
-    long __u_args[10] = {0};
+    __u_word __u_args[10] = {0};
     int __u_i; int __u_status;
     __u_status = uffi_init();
     if (__u_status != 0) return __u_status;
@@ -214,19 +215,19 @@ static int uffi_call_types(void *__u_fn, void *__u_rtype, void **__u_types,
              __u_types[__u_i] == __uffi_types[UFFI_UINT16])) return 0 - 3;
         __u_i = __u_i + 1;
     }
-    __u_args[0] = (long)&__u_cif; __u_args[1] = UFFI_ABI;
+    __u_args[0] = (__u_word)&__u_cif; __u_args[1] = UFFI_ABI;
     if (__u_fixed < 0) {
-        __u_args[2] = __u_n; __u_args[3] = (long)__u_rtype;
-        __u_args[4] = (long)__u_types; __u_args[5] = 0;
+        __u_args[2] = __u_n; __u_args[3] = (__u_word)__u_rtype;
+        __u_args[4] = (__u_word)__u_types; __u_args[5] = 0;
         __u_status = (int)__hostcall(__uffi_prep, __u_args);
     } else {
         __u_args[2] = __u_fixed; __u_args[3] = __u_n;
-        __u_args[4] = (long)__u_rtype; __u_args[5] = (long)__u_types;
+        __u_args[4] = (__u_word)__u_rtype; __u_args[5] = (__u_word)__u_types;
         __u_status = (int)__hostcall(__uffi_prep_var, __u_args);
     }
     if (__u_status != 0) return __u_status;
-    __u_args[0] = (long)&__u_cif; __u_args[1] = (long)__u_fn;
-    __u_args[2] = (long)__u_result; __u_args[3] = (long)__u_values;
+    __u_args[0] = (__u_word)&__u_cif; __u_args[1] = (__u_word)__u_fn;
+    __u_args[2] = (__u_word)__u_result; __u_args[3] = (__u_word)__u_values;
     __u_args[4] = 0; __u_args[5] = 0;
     __hostcall(__uffi_call, __u_args);
     return 0;

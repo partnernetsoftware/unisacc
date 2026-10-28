@@ -4,11 +4,20 @@
 /* A shared guard: <sys/types.h> declares the same shorthand types, and two
  * identical typedefs are legal in C11 but were only tolerated in C99 -- so
  * whichever header comes first defines them and the other defers. */
+#if defined(_WIN64)
+/* LLP64 Windows: long is 4 bytes, so the pointer-sized types are long long. */
+#ifndef _UNISA_SIZE_T
+#define _UNISA_SIZE_T
+typedef unsigned long long size_t;
+#endif
+typedef long long ptrdiff_t;
+#else
 #ifndef _UNISA_SIZE_T
 #define _UNISA_SIZE_T
 typedef unsigned long size_t;
 #endif
 typedef long ptrdiff_t;
+#endif
 typedef int wchar_t;
 /* offsetof is a compiler intrinsic (__builtin_offsetof reads the struct
  * table), not pointer arithmetic on a null pointer.  It accepts a type name

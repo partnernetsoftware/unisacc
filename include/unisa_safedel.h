@@ -42,6 +42,15 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #endif
+#ifdef __UNISA__
+#include <sys/_word.h>
+#elif !defined(__u_word) && defined(_WIN64)   /* a host compiler over its own libc (seed/compilerpack.c): no carried sys/_word.h */
+#define __u_word long long
+#define __u_uword unsigned long long
+#elif !defined(__u_word)
+#define __u_word long
+#define __u_uword unsigned long
+#endif
 
 #define SAFEDEL_TRASH 0u
 #define SAFEDEL_PURGE 1u
@@ -56,8 +65,8 @@
 
 struct unisa_safedel_env { char home[SAFEDEL_PATHLEN], cwd[SAFEDEL_PATHLEN], cwdrepo[SAFEDEL_PATHLEN], tmp[2][SAFEDEL_PATHLEN]; const char *tmpwhy[2]; };
 
-static int unisa_safedel(const char *path, unsigned flags, long max_files, char *why, int whylen);
-static int unisa_safedel_purge_trash(const char *home, long hours, long max_files, unsigned flags, char *why, int whylen);
+static int unisa_safedel(const char *path, unsigned flags, __u_word max_files, char *why, int whylen);
+static int unisa_safedel_purge_trash(const char *home, __u_word hours, __u_word max_files, unsigned flags, char *why, int whylen);
 
 /* RC, with "PATH: A B" in WHY */
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_sd_say
@@ -126,7 +135,7 @@ static int _unisa_sd_ingit(const char *p) {
 #endif
 /* a fresh number per call in this process (the trash and clock directory names) */
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_sd_seq
-static unsigned long _unisa_sd_seq(void) { static unsigned long n; return n++; }
+static __u_uword _unisa_sd_seq(void) { static __u_uword n; return n++; }
 #endif
 /* $HOME, the cwd, the cwd's repository and the temp root, resolved */
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_sd_env
@@ -255,7 +264,7 @@ static int _unisa_sd_list(const char *p, const struct stat *st, char ***out, siz
 /* check 3: count P (described by ST) and what lies below it into *CNT, stopping once it passes CAP; refuse a .git
    entry, another device than ROOT's, a depth past SAFEDEL_DEPTH */
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_sd_walk
-static int _unisa_sd_walk(const char *p, const struct stat *st, const struct stat *root, int depth, long *cnt, long cap, char *why, int whylen) {
+static int _unisa_sd_walk(const char *p, const struct stat *st, const struct stat *root, int depth, __u_word *cnt, __u_word cap, char *why, int whylen) {
 #ifdef _WIN32
     (void)p; (void)st; (void)root; (void)depth; (void)cnt; (void)cap;
     return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, "", "Windows", "");
@@ -306,7 +315,7 @@ static int _unisa_sd_purge(const char *p, const struct stat *root, int depth, ch
 #endif
 /* the file system's clock: the mtime of a directory made (and removed) in DIR; -1 on error */
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_sd_now
-static long _unisa_sd_now(const char *dir) {
+static __u_word _unisa_sd_now(const char *dir) {
 #ifdef _WIN32
     (void)dir; return -1;
 #else
@@ -321,20 +330,24 @@ static long _unisa_sd_now(const char *dir) {
 #endif
 /* T (seconds since 1970, UTC) as YYYYMMDDTHHMMSSZ */
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_sd_stamp
-static void _unisa_sd_stamp(long t, char out[20]) {
-    long z = t / 86400, s = t % 86400, era, doe, yoe, y, doy, mp, d, m;
+static void _unisa_sd_stamp(__u_word t, char out[20]) {
+    __u_word z = t / 86400, s = t % 86400, era, doe, yoe, y, doy, mp, d, m;
     if (s < 0) { s += 86400; z -= 1; }
     z += 719468; era = (z >= 0 ? z : z - 146096) / 146097; doe = z - era * 146097;
     yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; y = yoe + era * 400;
     doy = doe - (365 * yoe + yoe / 4 - yoe / 100); mp = (5 * doy + 2) / 153;
     d = doy - (153 * mp + 2) / 5 + 1; m = mp < 10 ? mp + 3 : mp - 9; if (m <= 2) y += 1;
+#if defined(_WIN64)
+    snprintf(out, 20, "%04lld%02lld%02lldT%02lld%02lld%02lldZ", y, m, d, s / 3600, s / 60 % 60, s % 60);
+#else
     snprintf(out, 20, "%04ld%02ld%02ldT%02ld%02ld%02ldZ", y, m, d, s / 3600, s / 60 % 60, s % 60);
+#endif
 }
 #endif
 /* the time a trash entry name starts with (YYYYMMDDTHHMMSSZ), or -1 */
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_sd_unstamp
-static long _unisa_sd_unstamp(const char *nm) {
-    long v[6], y, m, era, yoe, doy, doe; int i, j, k = 0, w;
+static __u_word _unisa_sd_unstamp(const char *nm) {
+    __u_word v[6], y, m, era, yoe, doy, doe; int i, j, k = 0, w;
     for (i = 0; i < 6; i++) {
         if (i == 3 && nm[k++] != 'T') return -1;
         w = i == 0 ? 4 : 2; v[i] = 0;
@@ -366,7 +379,7 @@ static int _unisa_sd_trashdir(const char *home, char *tr, int make, char *why, i
 #endif
 /* unisa_safedel, with the counted entries in *COUNT */
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_sd_run
-static int _unisa_sd_run(const char *path, unsigned flags, long max_files, long *count, char *why, int whylen) {
+static int _unisa_sd_run(const char *path, unsigned flags, __u_word max_files, __u_word *count, char *why, int whylen) {
 #ifdef _WIN32
     (void)flags; (void)max_files; *count = 0;
     return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "deletion is not supported on Windows", "");
@@ -430,12 +443,12 @@ static int _unisa_sd_run(const char *path, unsigned flags, long max_files, long 
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_unisa_safedel
-static int unisa_safedel(const char *path, unsigned flags, long max_files, char *why, int whylen) {
-    long n; return _unisa_sd_run(path, flags, max_files, &n, why, whylen);
+static int unisa_safedel(const char *path, unsigned flags, __u_word max_files, char *why, int whylen) {
+    __u_word n; return _unisa_sd_run(path, flags, max_files, &n, why, whylen);
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_unisa_safedel_purge_trash
-static int unisa_safedel_purge_trash(const char *home, long hours, long max_files, unsigned flags, char *why, int whylen) {
+static int unisa_safedel_purge_trash(const char *home, __u_word hours, __u_word max_files, unsigned flags, char *why, int whylen) {
 #ifdef _WIN32
     (void)hours; (void)max_files; (void)flags;
     return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, home, "deletion is not supported on Windows", "");

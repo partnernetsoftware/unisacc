@@ -4,6 +4,7 @@
  * constructor and every other name). */
 #ifndef _UNISA_SYS_EXIT_H
 #define _UNISA_SYS_EXIT_H
+#include <sys/_word.h>
 static void exit();   /* 0.0.35 H1: static like its definition below (C99 6.2.2p7); before the definition, as <stdlib.h> always had it (0.0.33 D3': after it, the redeclaration typed exit int and E3 refused assert's (printf(...), exit(1))) */
 static void (*_unisa_atexit[32])(void);
 static int _unisa_natexit = 0;
@@ -22,8 +23,8 @@ static char _u_st_buf[_U_NST * _U_BUFSZ];
 static int _u_st_bpos[_U_NST];
 static int _u_st_blen[_U_NST];
 #if !__UNISA_FTRIM_LIBC || __UN__u_st_copy
-static void _u_st_copy(char *__u_d, const char *__u_s, long __u_n) {
-    long __u_j; __u_j = 0;
+static void _u_st_copy(char *__u_d, const char *__u_s, __u_word __u_n) {
+    __u_word __u_j; __u_j = 0;
     while (__u_j < __u_n) { __u_d[__u_j] = __u_s[__u_j]; __u_j = __u_j + 1; }
 }
 #endif
@@ -39,8 +40,8 @@ static int _u_st_n;
    __write gate calls an error: negative on POSIX and the VM, 0 on Windows
    (WriteFile's count); an answer larger than asked is not trusted. */
 #if !__UNISA_FTRIM_LIBC || __UN__u_st_raw
-static long _u_st_raw(int __u_fd, const char *__u_p, long __u_n) {
-    long __u_done; long __u_r;
+static __u_word _u_st_raw(int __u_fd, const char *__u_p, __u_word __u_n) {
+    __u_word __u_done; __u_word __u_r;
     __u_done = 0;
     while (__u_done < __u_n) {
         __u_r = __write(__u_fd, (char *)__u_p + __u_done, __u_n - __u_done);
@@ -57,7 +58,7 @@ static long _u_st_raw(int __u_fd, const char *__u_p, long __u_n) {
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN__u_st_wflush
 static int _u_st_wflush(int __u_i) {
-    long __u_k;
+    __u_word __u_k;
     if (__u_i < 0 || _u_st_wlen[__u_i] == 0) return 0;
     __u_k = _u_st_wlen[__u_i]; _u_st_wlen[__u_i] = 0;
     if (_u_st_raw(_u_st_fd[__u_i], _u_st_buf + __u_i * _U_BUFSZ, __u_k) != __u_k) { _u_st_err[__u_i] = 1; return 0 - 1; }

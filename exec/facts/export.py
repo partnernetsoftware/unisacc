@@ -352,8 +352,10 @@ def _ppsrc():
                 any(not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", n) for n in names)):
             raise ValueError("%s:%d: invalid or duplicate predefinition row" % (path, line))
         pre[key] = names
-    if set(pre) != {("os", x) for x in ("lnx", "osx", "win")} | {("arch", x) for x in ("x86_64", "arm64")} | {("common", "*")}:
-        raise ValueError("%s: expected OS, architecture and common declarations" % path)
+    # optional per-OS data-model rows (e.g. __LP64__ on lnx/osx, none on LLP64 win), placed after the architecture
+    required = {("os", x) for x in ("lnx", "osx", "win")} | {("arch", x) for x in ("x86_64", "arm64")} | {("common", "*")}
+    if not required <= set(pre) or not set(pre) - required <= {("model", x) for x in ("lnx", "osx", "win")}:
+        raise ValueError("%s: expected OS, architecture, optional data-model and common declarations" % path)
     E.PREDEF = pre
     E.XOPS = {}
     for line in (ROOT / "exec/pp/operators.tsv").read_text().splitlines():
@@ -898,7 +900,7 @@ def ppgen():
     predef = {}
     for t in E.TARGETS:
         o, a = t.split("/")
-        names = E.PREDEF["os", o] + E.PREDEF["arch", a] + E.PREDEF["common", "*"]
+        names = E.PREDEF["os", o] + E.PREDEF["arch", a] + E.PREDEF.get(("model", o), []) + E.PREDEF["common", "*"]
         assert len(set(names)) == len(names), "overlapping target predefinitions: " + t
         predef[t] = [dict(entry="P3PD%d" % k, resume="P3PDR%d" % k, next="P3PD%d" % (k + 1) if k + 1 < len(names) else "CLI.D",
                           name=nm) for k, nm in enumerate(names)]
@@ -915,7 +917,7 @@ def ppgen():
             "=cases\tjson\t" + json.dumps(cases), "=dswkeys\tjson\t" + json.dumps(sorted([0, 100, 101, 102] + [c["key"] for c in cases])), "=dactions\tjson\t" + json.dumps(acts),
             "=esc\tjson\t" + json.dumps(esc), "=esckeys\tjson\t" + json.dumps([e["code"] for e in esc]),
             "=xelayout\tjson\t" + json.dumps(prec),
-            "=predefres\tjson\t" + json.dumps({t: "".join(n + "\0" for n in E.PREDEF["os", t.split("/")[0]] + E.PREDEF["arch", t.split("/")[1]] + E.PREDEF["common", "*"])
+            "=predefres\tjson\t" + json.dumps({t: "".join(n + "\0" for n in E.PREDEF["os", t.split("/")[0]] + E.PREDEF["arch", t.split("/")[1]] + E.PREDEF.get(("model", t.split("/")[0]), []) + E.PREDEF["common", "*"])
                                                  for t in sorted(E.TARGETS)})]
 
 

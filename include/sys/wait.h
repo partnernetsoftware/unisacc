@@ -2,6 +2,7 @@
  * status macros (the same encoding on Linux and macOS).  Windows: waitpid on a posix_spawn HANDLE. */
 #ifndef _UNISA_SYS_WAIT_H
 #define _UNISA_SYS_WAIT_H
+#include <sys/_word.h>
 #include <sys/types.h>
 #include <unistd.h>
 #include <errno.h>
@@ -19,17 +20,17 @@ static pid_t waitpid(pid_t __u_pid, int *__u_st, int __u_opt) {
 #ifdef _WIN32
     /* Windows (0.0.22): a pid is the process HANDLE from posix_spawn; the exit code is
        encoded as an exited status.  pid -1 has no meaning here and answers ECHILD. */
-    static long __u_w, __u_x, __u_c; unsigned int __u_code;
+    static __u_word __u_w, __u_x, __u_c; unsigned int __u_code;
     if (__u_pid <= 0) { errno = ECHILD; return -1; }
     if (!__u_w) { __u_w = _ux_sym("WaitForSingleObject"); __u_x = _ux_sym("GetExitCodeProcess"); __u_c = _ux_sym("CloseHandle"); }
-    if ((_ux_call(__u_w, (long)__u_pid, (__u_opt & WNOHANG) ? 0 : 0xFFFFFFFFL, 0, 0) & 0xFFFFFFFFL) == 0x102) return 0;
+    if ((_ux_call(__u_w, (__u_word)__u_pid, (__u_opt & WNOHANG) ? 0 : 0xFFFFFFFFL, 0, 0) & 0xFFFFFFFFL) == 0x102) return 0;
     __u_code = 0;
-    if (!(_ux_call(__u_x, (long)__u_pid, (long)&__u_code, 0, 0) & 0xFFFFFFFFL)) return _ux_fail();
-    _ux_call(__u_c, (long)__u_pid, 0, 0, 0);
+    if (!(_ux_call(__u_x, (__u_word)__u_pid, (__u_word)&__u_code, 0, 0) & 0xFFFFFFFFL)) return _ux_fail();
+    _ux_call(__u_c, (__u_word)__u_pid, 0, 0, 0);
     if (__u_st) *__u_st = (int)((__u_code & 0xff) << 8);
     return __u_pid;
 #else
-    return (pid_t)_unisa_ret(__syscall6(_UNISA_SC(_UNISA_NR_wait4), (long)__u_pid, (long)__u_st, (long)__u_opt, 0, 0));
+    return (pid_t)_unisa_ret(__syscall6(_UNISA_SC(_UNISA_NR_wait4), (__u_word)__u_pid, (__u_word)__u_st, (__u_word)__u_opt, 0, 0));
 #endif
 }
 #endif

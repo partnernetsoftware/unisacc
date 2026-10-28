@@ -2,35 +2,38 @@
  * let <unistd.h>, <fcntl.h>, <sys/stat.h> and <time.h> wrap POSIX names thinly
  * over kernel32 (no home-grown libc).  The host channel is the program's IAT:
  * __hostaddr0..3 = LoadLibraryA GetProcAddress FreeLibrary GetLastError, and
- * __hostcall(fn, long[10]) makes the Win64/AAPCS64 call.  kernel32's handle is
+ * __hostcall(fn, __u_word[10]) makes the Win64/AAPCS64 call.  kernel32's handle is
  * looked up once; each caller caches its own procedure in a static.
- * On Windows an fd IS the HANDLE value (as the bundled stdio already has it). */
+ * On Windows an fd IS the HANDLE value (as the bundled stdio already has it).
+ * Windows is LLP64 (long is 4 bytes): handles, procedures, pointers and the host
+ * channel's 8-byte slots are __u_word (<sys/_word.h>), never long. */
 #ifndef _UNISA_SYS_WIN_H
 #define _UNISA_SYS_WIN_H
 #if defined(_WIN32) && !defined(_UNISA_NO_HOSTCALL)   /* the compiler builds itself without the host channel until the product lowers it on Windows (0.0.22) */
 #include <errno.h>
+#include <sys/_word.h>
 #if !__UNISA_FTRIM_LIBC || __UN__ux_sym
-static long _ux_sym(const char *__u_name) {          /* GetProcAddress(kernel32, name) */
-    static long __u_k32;
-    long __u_a[10] = {0};
+static __u_word _ux_sym(const char *__u_name) {          /* GetProcAddress(kernel32, name) */
+    static __u_word __u_k32;
+    __u_word __u_a[10] = {0};
     __u_a[1] = 0; __u_a[2] = 0; __u_a[3] = 0; __u_a[4] = 0; __u_a[5] = 0;
-    if (!__u_k32) { __u_a[0] = (long)"kernel32.dll"; __u_k32 = __hostcall(__hostaddr0(), __u_a); }
-    __u_a[0] = __u_k32; __u_a[1] = (long)__u_name;
+    if (!__u_k32) { __u_a[0] = (__u_word)"kernel32.dll"; __u_k32 = __hostcall(__hostaddr0(), __u_a); }
+    __u_a[0] = __u_k32; __u_a[1] = (__u_word)__u_name;
     return __hostcall(__hostaddr1(), __u_a);
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN__ux_call
-static long _ux_call(long __u_fn, long __u_x0, long __u_x1, long __u_x2, long __u_x3) {
-    long __u_a[10] = {0};
+static __u_word _ux_call(__u_word __u_fn, __u_word __u_x0, __u_word __u_x1, __u_word __u_x2, __u_word __u_x3) {
+    __u_word __u_a[10] = {0};
     __u_a[0] = __u_x0; __u_a[1] = __u_x1; __u_a[2] = __u_x2; __u_a[3] = __u_x3; __u_a[4] = 0; __u_a[5] = 0;
     return __hostcall(__u_fn, __u_a);
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN__ux_errno
 static int _ux_errno(void) {                         /* GetLastError -> errno */
-    long __u_a[10] = {0}; long __u_e;
+    __u_word __u_a[10] = {0}; __u_word __u_e;
     __u_a[0] = 0; __u_a[1] = 0; __u_a[2] = 0; __u_a[3] = 0; __u_a[4] = 0; __u_a[5] = 0;
-    __u_e = __hostcall(__hostaddr3(), __u_a) & 0xFFFFFFFFL;
+    __u_e = __hostcall(__hostaddr3(), __u_a) & 0xFFFFFFFFLL;
     if (__u_e == 2 || __u_e == 3) return ENOENT;
     if (__u_e == 5) return EACCES;
     if (__u_e == 6) return EBADF;
@@ -49,21 +52,21 @@ static int _ux_fail(void) { errno = _ux_errno(); return -1; }
    missing. These macros expand in the caller and use the host channel
    directly, same mapping as _ux_sym / _ux_call / _ux_errno. */
 #define _ux_load(dst, name) do { \
-    static long __uxk; long __uxa[10]; int __uxi; \
+    static __u_word __uxk; __u_word __uxa[10]; int __uxi; \
     __uxi = 0; while (__uxi < 10) { __uxa[__uxi] = 0; __uxi = __uxi + 1; } \
-    if (!__uxk) { __uxa[0] = (long)"kernel32.dll"; __uxk = __hostcall(__hostaddr0(), __uxa); } \
-    __uxa[0] = __uxk; __uxa[1] = (long)(name); (dst) = __hostcall(__hostaddr1(), __uxa); \
+    if (!__uxk) { __uxa[0] = (__u_word)"kernel32.dll"; __uxk = __hostcall(__hostaddr0(), __uxa); } \
+    __uxa[0] = __uxk; __uxa[1] = (__u_word)(name); (dst) = __hostcall(__hostaddr1(), __uxa); \
 } while (0)
 #define _ux_go(dst, fn, x0, x1, x2, x3) do { \
-    long __uxa[10]; int __uxi; \
+    __u_word __uxa[10]; int __uxi; \
     __uxi = 0; while (__uxi < 10) { __uxa[__uxi] = 0; __uxi = __uxi + 1; } \
-    __uxa[0] = (long)(x0); __uxa[1] = (long)(x1); __uxa[2] = (long)(x2); __uxa[3] = (long)(x3); \
+    __uxa[0] = (__u_word)(x0); __uxa[1] = (__u_word)(x1); __uxa[2] = (__u_word)(x2); __uxa[3] = (__u_word)(x3); \
     (dst) = __hostcall((fn), __uxa); \
 } while (0)
 #define _ux_err(dst) do { \
-    long __uxa[10]; long __uxe; int __uxi; \
+    __u_word __uxa[10]; __u_word __uxe; int __uxi; \
     __uxi = 0; while (__uxi < 10) { __uxa[__uxi] = 0; __uxi = __uxi + 1; } \
-    __uxe = __hostcall(__hostaddr3(), __uxa) & 0xFFFFFFFFL; \
+    __uxe = __hostcall(__hostaddr3(), __uxa) & 0xFFFFFFFFLL; \
     if (__uxe == 2 || __uxe == 3) (dst) = ENOENT; \
     else if (__uxe == 5) (dst) = EACCES; \
     else if (__uxe == 6) (dst) = EBADF; \
@@ -74,9 +77,9 @@ static int _ux_fail(void) { errno = _ux_errno(); return -1; }
     else (dst) = EIO; \
 } while (0)
 #if !__UNISA_FTRIM_LIBC || __UN__ux_ft2unix
-static long _ux_ft2unix(const unsigned int *__u_ft) {   /* FILETIME (100 ns since 1601) -> unix seconds */
-    long __u_t; __u_t = ((long)__u_ft[1] << 32) | (long)__u_ft[0];
-    return (__u_t - 116444736000000000L) / 10000000L;
+static __u_word _ux_ft2unix(const unsigned int *__u_ft) {   /* FILETIME (100 ns since 1601) -> unix seconds */
+    __u_word __u_t; __u_t = ((__u_word)__u_ft[1] << 32) | (__u_word)__u_ft[0];
+    return (__u_t - 116444736000000000LL) / 10000000LL;
 }
 #endif
 #endif

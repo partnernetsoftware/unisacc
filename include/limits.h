@@ -35,6 +35,16 @@
    was 4294967296 where gcc wraps to 0 (fb12-08b). */
 #define UINT_MAX    4294967295U
 
+#if defined(_WIN64)
+/* LLP64 Windows: long is 4 bytes, long long is the 8-byte type. */
+#define LONG_MIN    (-2147483647L - 1)
+#define LONG_MAX    2147483647L
+#define ULONG_MAX   4294967295UL
+
+#define LLONG_MIN   (-9223372036854775807LL - 1)
+#define LLONG_MAX   9223372036854775807LL
+#define ULLONG_MAX  18446744073709551615ULL
+#else
 #define LONG_MIN    (-9223372036854775807 - 1)
 #define LONG_MAX    9223372036854775807
 /* The UL suffix matters: without it this literal does not fit any signed
@@ -46,5 +56,6 @@
 #define LLONG_MIN   LONG_MIN
 #define LLONG_MAX   LONG_MAX
 #define ULLONG_MAX  ULONG_MAX
+#endif
 
 #endif

@@ -58,7 +58,7 @@ int WSAStartup(unsigned short __u_version, void *__u_data);
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_wsa_init
 static int _unisa_wsa_init(void) {
     static int __u_done;
-    static long __u_wsadata[64];             /* WSADATA is 408 bytes on Win64 */
+    static long long __u_wsadata[64];        /* WSADATA is 408 bytes on Win64; 64 8-byte slots (long is 4 bytes there) */
     if (!__u_done) { __u_done = 1; WSAStartup(0x0202, __u_wsadata); }
     return 0;
 }

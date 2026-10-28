@@ -6,11 +6,19 @@
 #include <poll.h>
 #include <string.h>
 #define FD_SETSIZE 1024
-typedef struct { unsigned long fds_bits[FD_SETSIZE / 64]; } fd_set;
+#include <sys/_word.h>
+typedef struct { __u_uword fds_bits[FD_SETSIZE / 64]; } fd_set;
 #define FD_ZERO(s) do { int __u_z; for (__u_z = 0; __u_z < FD_SETSIZE / 64; __u_z++) (s)->fds_bits[__u_z] = 0; } while (0)   /* no memset: a macro must not hide a library call (the on-demand library cannot see it) */
+#if defined(_WIN64)
+/* LLP64: 1UL is 32 bits, so the 64-bit word's bit is built from 1ULL */
+#define FD_SET(d, s) ((s)->fds_bits[(d) / 64] |= (1ULL << ((d) % 64)))
+#define FD_CLR(d, s) ((s)->fds_bits[(d) / 64] &= ~(1ULL << ((d) % 64)))
+#define FD_ISSET(d, s) (((s)->fds_bits[(d) / 64] >> ((d) % 64)) & 1ULL)
+#else
 #define FD_SET(d, s) ((s)->fds_bits[(d) / 64] |= (1UL << ((d) % 64)))
 #define FD_CLR(d, s) ((s)->fds_bits[(d) / 64] &= ~(1UL << ((d) % 64)))
 #define FD_ISSET(d, s) (((s)->fds_bits[(d) / 64] >> ((d) % 64)) & 1UL)
+#endif
 #ifndef _WIN32   /* Windows has no poll here (poll.h) */
 #if !__UNISA_FTRIM_LIBC || __UN_select
 static int select(int __u_n, fd_set *__u_r, fd_set *__u_w, fd_set *__u_e, struct timeval *__u_t) {

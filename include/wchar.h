@@ -9,6 +9,7 @@
 #define _UNISA_WCHAR_H
 #include <stdlib.h>   /* errno, ERANGE, LONG_MIN/LONG_MAX and _unisa_strdigit for wcstol/wcstoul */
 #include <time.h>     /* struct tm and strftime for wcsftime */
+#include <sys/_word.h>
 
 #ifndef _UNISA_WCHAR_T
 #define _UNISA_WCHAR_T
@@ -27,8 +28,8 @@ typedef struct { int __u_count; unsigned int __u_wch; } mbstate_t;
 #define WEOF (0-1)
 
 #if !__UNISA_FTRIM_LIBC || __UN_wcslen
-static long wcslen(const wchar_t *__u_s) {
-    long __u_n;
+static __u_word wcslen(const wchar_t *__u_s) {
+    __u_word __u_n;
     __u_n = 0;
     while (__u_s[__u_n]) __u_n = __u_n + 1;
     return __u_n;
@@ -40,16 +41,16 @@ static long wcslen(const wchar_t *__u_s) {
  * comparisons compare elements as wchar_t (int, as the host's glibc does)
  * and return -1, 0 or 1, the sign the host returns. */
 #if !__UNISA_FTRIM_LIBC || __UN_wmemcpy
-static wchar_t *wmemcpy(wchar_t *__u_d, const wchar_t *__u_s, long __u_n) {
-    long __u_i;
+static wchar_t *wmemcpy(wchar_t *__u_d, const wchar_t *__u_s, __u_word __u_n) {
+    __u_word __u_i;
     __u_i = 0;
     while (__u_i < __u_n) { __u_d[__u_i] = __u_s[__u_i]; __u_i = __u_i + 1; }
     return __u_d;
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_wmemmove
-static wchar_t *wmemmove(wchar_t *__u_d, const wchar_t *__u_s, long __u_n) {
-    long __u_i;
+static wchar_t *wmemmove(wchar_t *__u_d, const wchar_t *__u_s, __u_word __u_n) {
+    __u_word __u_i;
     if (__u_d < __u_s) {
         __u_i = 0;
         while (__u_i < __u_n) { __u_d[__u_i] = __u_s[__u_i]; __u_i = __u_i + 1; }
@@ -61,8 +62,8 @@ static wchar_t *wmemmove(wchar_t *__u_d, const wchar_t *__u_s, long __u_n) {
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_wmemcmp
-static int wmemcmp(const wchar_t *__u_a, const wchar_t *__u_b, long __u_n) {
-    long __u_i;
+static int wmemcmp(const wchar_t *__u_a, const wchar_t *__u_b, __u_word __u_n) {
+    __u_word __u_i;
     __u_i = 0;
     while (__u_i < __u_n) {
         if (__u_a[__u_i] < __u_b[__u_i]) return -1;
@@ -73,8 +74,8 @@ static int wmemcmp(const wchar_t *__u_a, const wchar_t *__u_b, long __u_n) {
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_wmemchr
-static wchar_t *wmemchr(const wchar_t *__u_s, wchar_t __u_c, long __u_n) {
-    long __u_i;
+static wchar_t *wmemchr(const wchar_t *__u_s, wchar_t __u_c, __u_word __u_n) {
+    __u_word __u_i;
     __u_i = 0;
     while (__u_i < __u_n) {
         if (__u_s[__u_i] == __u_c) return (wchar_t *)(__u_s + __u_i);
@@ -84,8 +85,8 @@ static wchar_t *wmemchr(const wchar_t *__u_s, wchar_t __u_c, long __u_n) {
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_wmemset
-static wchar_t *wmemset(wchar_t *__u_s, wchar_t __u_c, long __u_n) {
-    long __u_i;
+static wchar_t *wmemset(wchar_t *__u_s, wchar_t __u_c, __u_word __u_n) {
+    __u_word __u_i;
     __u_i = 0;
     while (__u_i < __u_n) { __u_s[__u_i] = __u_c; __u_i = __u_i + 1; }
     return __u_s;
@@ -93,7 +94,7 @@ static wchar_t *wmemset(wchar_t *__u_s, wchar_t __u_c, long __u_n) {
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_wcscpy
 static wchar_t *wcscpy(wchar_t *__u_d, const wchar_t *__u_s) {
-    long __u_i;
+    __u_word __u_i;
     __u_i = 0;
     while (__u_s[__u_i]) { __u_d[__u_i] = __u_s[__u_i]; __u_i = __u_i + 1; }
     __u_d[__u_i] = 0;
@@ -101,8 +102,8 @@ static wchar_t *wcscpy(wchar_t *__u_d, const wchar_t *__u_s) {
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_wcsncpy
-static wchar_t *wcsncpy(wchar_t *__u_d, const wchar_t *__u_s, long __u_n) {
-    long __u_i;
+static wchar_t *wcsncpy(wchar_t *__u_d, const wchar_t *__u_s, __u_word __u_n) {
+    __u_word __u_i;
     __u_i = 0;
     while (__u_i < __u_n && __u_s[__u_i]) { __u_d[__u_i] = __u_s[__u_i]; __u_i = __u_i + 1; }
     while (__u_i < __u_n) { __u_d[__u_i] = 0; __u_i = __u_i + 1; }
@@ -111,7 +112,7 @@ static wchar_t *wcsncpy(wchar_t *__u_d, const wchar_t *__u_s, long __u_n) {
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_wcscat
 static wchar_t *wcscat(wchar_t *__u_d, const wchar_t *__u_s) {
-    long __u_i; long __u_j;
+    __u_word __u_i; __u_word __u_j;
     __u_i = 0; while (__u_d[__u_i]) __u_i = __u_i + 1;
     __u_j = 0;
     while (__u_s[__u_j]) { __u_d[__u_i + __u_j] = __u_s[__u_j]; __u_j = __u_j + 1; }
@@ -120,8 +121,8 @@ static wchar_t *wcscat(wchar_t *__u_d, const wchar_t *__u_s) {
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_wcsncat
-static wchar_t *wcsncat(wchar_t *__u_d, const wchar_t *__u_s, long __u_n) {
-    long __u_i; long __u_j;
+static wchar_t *wcsncat(wchar_t *__u_d, const wchar_t *__u_s, __u_word __u_n) {
+    __u_word __u_i; __u_word __u_j;
     __u_i = 0; while (__u_d[__u_i]) __u_i = __u_i + 1;
     __u_j = 0;
     while (__u_j < __u_n) { if (__u_s[__u_j] == 0) break; __u_d[__u_i + __u_j] = __u_s[__u_j]; __u_j = __u_j + 1; }
@@ -131,7 +132,7 @@ static wchar_t *wcsncat(wchar_t *__u_d, const wchar_t *__u_s, long __u_n) {
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_wcscmp
 static int wcscmp(const wchar_t *__u_a, const wchar_t *__u_b) {
-    long __u_i;
+    __u_word __u_i;
     __u_i = 0;
     while (__u_a[__u_i] == __u_b[__u_i]) {
         if (__u_a[__u_i] == 0) return 0;
@@ -142,8 +143,8 @@ static int wcscmp(const wchar_t *__u_a, const wchar_t *__u_b) {
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_wcsncmp
-static int wcsncmp(const wchar_t *__u_a, const wchar_t *__u_b, long __u_n) {
-    long __u_i;
+static int wcsncmp(const wchar_t *__u_a, const wchar_t *__u_b, __u_word __u_n) {
+    __u_word __u_i;
     __u_i = 0;
     while (__u_i < __u_n) {
         if (__u_a[__u_i] != __u_b[__u_i]) {
@@ -158,7 +159,7 @@ static int wcsncmp(const wchar_t *__u_a, const wchar_t *__u_b, long __u_n) {
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_wcschr
 static wchar_t *wcschr(const wchar_t *__u_s, wchar_t __u_c) {
-    long __u_i;
+    __u_word __u_i;
     __u_i = 0;
     while (__u_s[__u_i] != __u_c) {
         if (__u_s[__u_i] == 0) return NULL;
@@ -169,7 +170,7 @@ static wchar_t *wcschr(const wchar_t *__u_s, wchar_t __u_c) {
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_wcsrchr
 static wchar_t *wcsrchr(const wchar_t *__u_s, wchar_t __u_c) {
-    long __u_i; long __u_last;
+    __u_word __u_i; __u_word __u_last;
     __u_i = 0; __u_last = -1;
     while (1) {
         if (__u_s[__u_i] == __u_c) __u_last = __u_i;
@@ -182,7 +183,7 @@ static wchar_t *wcsrchr(const wchar_t *__u_s, wchar_t __u_c) {
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_wcsstr
 static wchar_t *wcsstr(const wchar_t *__u_h, const wchar_t *__u_n) {
-    long __u_i; long __u_j;
+    __u_word __u_i; __u_word __u_j;
     __u_i = 0;
     while (1) {
         __u_j = 0;
@@ -194,8 +195,8 @@ static wchar_t *wcsstr(const wchar_t *__u_h, const wchar_t *__u_n) {
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_wcsspn
-static long wcsspn(const wchar_t *__u_s, const wchar_t *__u_accept) {
-    long __u_i; long __u_j;
+static __u_word wcsspn(const wchar_t *__u_s, const wchar_t *__u_accept) {
+    __u_word __u_i; __u_word __u_j;
     __u_i = 0;
     while (__u_s[__u_i]) {
         __u_j = 0;
@@ -207,8 +208,8 @@ static long wcsspn(const wchar_t *__u_s, const wchar_t *__u_accept) {
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_wcscspn
-static long wcscspn(const wchar_t *__u_s, const wchar_t *__u_reject) {
-    long __u_i; long __u_j;
+static __u_word wcscspn(const wchar_t *__u_s, const wchar_t *__u_reject) {
+    __u_word __u_i; __u_word __u_j;
     __u_i = 0;
     while (__u_s[__u_i]) {
         __u_j = 0;
@@ -223,7 +224,7 @@ static long wcscspn(const wchar_t *__u_s, const wchar_t *__u_reject) {
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_wcspbrk
 static wchar_t *wcspbrk(const wchar_t *__u_s, const wchar_t *__u_accept) {
-    long __u_i; long __u_j;
+    __u_word __u_i; __u_word __u_j;
     __u_i = 0;
     while (__u_s[__u_i]) {
         __u_j = 0;
@@ -245,7 +246,7 @@ static wchar_t *wcspbrk(const wchar_t *__u_s, const wchar_t *__u_accept) {
  * and glibc's wcstok do) so the next call returns NULL. */
 #if !__UNISA_FTRIM_LIBC || __UN_wcstok
 static wchar_t *wcstok(wchar_t *__u_s, const wchar_t *__u_delim, wchar_t **__u_ptr) {
-    wchar_t *__u_start; long __u_k; int __u_isd;
+    wchar_t *__u_start; __u_word __u_k; int __u_isd;
     if (__u_s == 0) __u_s = *__u_ptr;
     if (__u_s == 0) return NULL;
     /* skip leading delimiters */
@@ -277,8 +278,8 @@ static wchar_t *wcstok(wchar_t *__u_s, const wchar_t *__u_delim, wchar_t **__u_p
  * still consumes every valid digit.  No digits: *end = nptr and 0. */
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_wcsmag
 static int _unisa_wcsmag(const wchar_t *__u_s, wchar_t **__u_end, int __u_base,
-                         long *__u_hi, long *__u_lo, int *__u_neg) {
-    long __u_i; long __u_start; long __u_l; long __u_h; int __u_d; int __u_over; int __u_auto;
+                         __u_word *__u_hi, __u_word *__u_lo, int *__u_neg) {
+    __u_word __u_i; __u_word __u_start; __u_word __u_l; __u_word __u_h; int __u_d; int __u_over; int __u_auto;
     __u_auto = __u_base == 0; __u_i = 0; *__u_hi = 0; *__u_lo = 0; *__u_neg = 0; __u_over = 0;
     if (__u_end) *__u_end = (wchar_t *)__u_s;
     if (__u_base != 0 && (__u_base < 2 || __u_base > 36)) return 0;
@@ -316,8 +317,21 @@ static int _unisa_wcsmag(const wchar_t *__u_s, wchar_t **__u_end, int __u_base,
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_wcstol
 static long wcstol(const wchar_t *__u_s, wchar_t **__u_end, int __u_base) {
-    long __u_hi; long __u_lo; long __u_v; int __u_neg; int __u_over;
+    __u_word __u_hi; __u_word __u_lo; __u_word __u_v; int __u_neg; int __u_over;
     __u_over = _unisa_wcsmag(__u_s, __u_end, __u_base, &__u_hi, &__u_lo, &__u_neg);
+#if defined(_WIN64)
+    /* LLP64: long is 32 bits, so the magnitude limit is 2^31 (negative) or 2^31-1. */
+    if (__u_over || __u_hi != 0 || __u_lo > 2147483648 ||
+        (__u_lo == 2147483648 && !__u_neg)) {
+        errno = ERANGE;
+        if (__u_neg) return LONG_MIN;
+        return LONG_MAX;
+    }
+    if (__u_lo == 2147483648) return LONG_MIN;
+    __u_v = __u_lo;
+    if (__u_neg) return (long)(0 - __u_v);
+    return (long)__u_v;
+#else
     if (__u_over || __u_hi > 2147483648 ||
         (__u_hi == 2147483648 && (__u_lo != 0 || !__u_neg))) {
         errno = ERANGE;
@@ -328,16 +342,25 @@ static long wcstol(const wchar_t *__u_s, wchar_t **__u_end, int __u_base) {
     __u_v = __u_hi * 4294967296 + __u_lo;
     if (__u_neg) return 0 - __u_v;
     return __u_v;
+#endif
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_wcstoul
 static unsigned long wcstoul(const wchar_t *__u_s, wchar_t **__u_end, int __u_base) {
-    long __u_hi; long __u_lo; unsigned long __u_v; int __u_neg; int __u_over;
+    __u_word __u_hi; __u_word __u_lo; __u_uword __u_v; int __u_neg; int __u_over;
     __u_over = _unisa_wcsmag(__u_s, __u_end, __u_base, &__u_hi, &__u_lo, &__u_neg);
+#if defined(_WIN64)
+    /* LLP64: unsigned long is 32 bits, so any magnitude above 2^32-1 is ERANGE. */
+    if (__u_over || __u_hi != 0) { errno = ERANGE; return (unsigned long)0 - 1; }
+    __u_v = (unsigned long)__u_lo;
+    if (__u_neg) return (unsigned long)0 - (unsigned long)__u_v;
+    return (unsigned long)__u_v;
+#else
     if (__u_over) { errno = ERANGE; return (unsigned long)0 - 1; }
     __u_v = ((unsigned long)__u_hi << 32) | (unsigned long)__u_lo;
     if (__u_neg) return (unsigned long)0 - __u_v;
     return __u_v;
+#endif
 }
 #endif
 
@@ -355,7 +378,7 @@ static size_t wcsftime(wchar_t *__u_s, size_t __u_max, const wchar_t *__u_f, con
     char *__u_nf; char *__u_b; size_t __u_n; size_t __u_k;
     __u_n = 0;
     while (__u_f[__u_n]) { if (__u_f[__u_n] < 0 || __u_f[__u_n] > 127) return 0; __u_n = __u_n + 1; }
-    __u_nf = (char *)malloc((long)__u_n + 1);
+    __u_nf = (char *)malloc((__u_word)__u_n + 1);
     if (__u_nf == 0) return 0;
     __u_k = 0;
     while (__u_k <= __u_n) { __u_nf[__u_k] = (char)__u_f[__u_k]; __u_k = __u_k + 1; }

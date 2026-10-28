@@ -18,6 +18,31 @@
 #ifndef _UNISA_SYS_TYPES_H
 #define _UNISA_SYS_TYPES_H
 
+/* LLP64 Windows (_WIN64) spells the 8-byte types `long long`: every type
+ * here keeps the same 8-byte width and layout on all targets. */
+#if defined(_WIN64)
+#ifndef _UNISA_SIZE_T
+#define _UNISA_SIZE_T
+typedef unsigned long long size_t;
+#endif
+typedef long long          ssize_t;
+typedef long long          off_t;
+typedef int                pid_t;
+typedef unsigned int       uid_t;
+typedef unsigned int       gid_t;
+typedef unsigned int       mode_t;
+typedef unsigned long long dev_t;
+typedef unsigned long long ino_t;
+typedef unsigned long long nlink_t;
+typedef long long          blksize_t;
+typedef long long          blkcnt_t;
+#ifndef _UNISA_TIME_T
+#define _UNISA_TIME_T
+typedef long long          time_t;
+#endif
+typedef long long          suseconds_t;
+typedef unsigned long long useconds_t;
+#else
 #ifndef _UNISA_SIZE_T
 #define _UNISA_SIZE_T
 typedef unsigned long size_t;
@@ -39,5 +64,6 @@ typedef long          time_t;
 #endif
 typedef long          suseconds_t;
 typedef unsigned long useconds_t;
+#endif
 
 #endif

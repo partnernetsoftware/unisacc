@@ -3,6 +3,7 @@
  * the mingw O_* values and open() over CreateFileA; the fd is the HANDLE. */
 #ifndef _UNISA_FCNTL_H
 #define _UNISA_FCNTL_H
+#include <sys/_word.h>
 #include <sys/types.h>
 #include <errno.h>
 #include <sys/_win.h>
@@ -54,9 +55,9 @@
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_open
 static int open(const char *__u_p, int __u_flags, int __u_mode) {
-    long __u_r;
+    __u_word __u_r;
 #ifdef _WIN32
-    long __u_acc; long __u_disp;              /* the __open gate is CreateFileA(path, access, disposition) */
+    __u_word __u_acc; __u_word __u_disp;              /* the __open gate is CreateFileA(path, access, disposition) */
     __u_acc = 0x80000000L;                                        /* GENERIC_READ */
     if ((__u_flags & O_ACCMODE) == O_WRONLY) __u_acc = 0x40000000L;
     if ((__u_flags & O_ACCMODE) == O_RDWR) __u_acc = 0xC0000000L;
@@ -98,8 +99,8 @@ struct flock { short l_type; short l_whence; off_t l_start; off_t l_len; pid_t l
 #endif
 #ifndef _WIN32
 #if !__UNISA_FTRIM_LIBC || __UN_fcntl
-static int fcntl(int __u_fd, int __u_cmd, long __u_arg) {
-    long __u_r; __u_r = __fcntl(__u_fd, __u_cmd, __u_arg);
+static int fcntl(int __u_fd, int __u_cmd, __u_word __u_arg) {
+    __u_word __u_r; __u_r = __fcntl(__u_fd, __u_cmd, __u_arg);
     if (__u_r < 0) { errno = (int)(0 - __u_r); return -1; } return (int)__u_r;
 }
 #endif

@@ -9,6 +9,7 @@
  * unless named); any other target answers ENOSYS. */
 #ifndef _UNISA_SPAWN_H
 #define _UNISA_SPAWN_H
+#include <sys/_word.h>   /* LLP64: STARTUPINFO/PROCESS_INFORMATION slots and host-call args are 8-byte __u_word */
 #include <sys/types.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -90,11 +91,11 @@ static int _unisa_spawn(pid_t *__u_pid, const char *__u_path, const posix_spawn_
 #endif
 #elif !defined(_UNISA_NO_HOSTCALL)
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_inherit
-static long _unisa_inherit(long __u_h) {            /* an inheritable duplicate, or 0 */
-    static long __u_dh, __u_gp; long __u_a[10] = {0}; long __u_n, __u_self;
+static __u_word _unisa_inherit(__u_word __u_h) {            /* an inheritable duplicate, or 0 */
+    static __u_word __u_dh, __u_gp; __u_word __u_a[10] = {0}; __u_word __u_n, __u_self;
     if (!__u_dh) { __u_dh = _ux_sym("DuplicateHandle"); __u_gp = _ux_sym("GetCurrentProcess"); }
     __u_self = _ux_call(__u_gp, 0, 0, 0, 0); __u_n = 0;
-    __u_a[0] = __u_self; __u_a[1] = __u_h; __u_a[2] = __u_self; __u_a[3] = (long)&__u_n; __u_a[4] = 0; __u_a[5] = 1; __u_a[6] = 2;
+    __u_a[0] = __u_self; __u_a[1] = __u_h; __u_a[2] = __u_self; __u_a[3] = (__u_word)&__u_n; __u_a[4] = 0; __u_a[5] = 1; __u_a[6] = 2;
     if (!(__hostcall(__u_dh, __u_a) & 0xFFFFFFFFL)) return 0;
     return __u_n;
 }
@@ -119,8 +120,8 @@ static int _unisa_cmdarg(char *__u_d, int __u_k, int __u_max, const char *__u_s)
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_wspawn
 static int _unisa_wspawn(pid_t *__u_pid, const char *__u_path, const posix_spawn_file_actions_t *__u_fa,
                         char *const __u_argv[], char *const __u_envp[], int __u_usepath) {
-    static long __u_cp, __u_gs, __u_ch; static char __u_cmd[8192]; static char __u_env[16384];
-    long __u_si[13], __u_pi[3], __u_std[3], __u_a[10] = {0}; char *__u_sb; int __u_i, __u_k, __u_r, __u_n, __u_j;
+    static __u_word __u_cp, __u_gs, __u_ch; static char __u_cmd[8192]; static char __u_env[16384];
+    __u_word __u_si[13], __u_pi[3], __u_std[3], __u_a[10] = {0}; char *__u_sb; int __u_i, __u_k, __u_r, __u_n, __u_j;
     const struct _unisa_spawn_act *__u_x;
     if (!__u_cp) { __u_cp = _ux_sym("CreateProcessA"); __u_gs = _ux_sym("GetStdHandle"); __u_ch = _ux_sym("CloseHandle"); }
     for (__u_i = 0; __u_i < 3; __u_i = __u_i + 1) __u_std[__u_i] = _ux_call(__u_gs, -10 - __u_i, 0, 0, 0);
@@ -129,8 +130,8 @@ static int _unisa_wspawn(pid_t *__u_pid, const char *__u_path, const posix_spawn
         if (__u_x->__u_op == 2) continue;
         __u_n = __u_x->__u_op == 1 ? __u_x->__u_nfd : __u_x->__u_fd;
         if (__u_n < 0 || __u_n > 2) return ENOSYS;
-        if (__u_x->__u_op == 1) __u_std[__u_n] = __u_x->__u_fd <= 2 ? __u_std[__u_x->__u_fd] : (long)__u_x->__u_fd;
-        else { __u_r = open(__u_x->__u_path, __u_x->__u_oflag, __u_x->__u_mode); if (__u_r < 0) return errno; __u_std[__u_n] = (long)__u_r; }
+        if (__u_x->__u_op == 1) __u_std[__u_n] = __u_x->__u_fd <= 2 ? __u_std[__u_x->__u_fd] : (__u_word)__u_x->__u_fd;
+        else { __u_r = open(__u_x->__u_path, __u_x->__u_oflag, __u_x->__u_mode); if (__u_r < 0) return errno; __u_std[__u_n] = (__u_word)__u_r; }
     }
     for (__u_i = 0; __u_i < 13; __u_i = __u_i + 1) __u_si[__u_i] = 0;
     __u_sb = (char *)__u_si; *(int *)__u_sb = 104; *(int *)(__u_sb + 60) = 0x100;   /* cb, STARTF_USESTDHANDLES */
@@ -150,8 +151,8 @@ static int _unisa_wspawn(pid_t *__u_pid, const char *__u_path, const posix_spawn
         __u_env[__u_k] = 0; __u_env[__u_k + 1] = 0;
     }
     __u_pi[0] = 0; __u_pi[1] = 0; __u_pi[2] = 0;
-    __u_a[0] = __u_usepath ? 0 : (long)__u_path; __u_a[1] = (long)__u_cmd; __u_a[2] = 0; __u_a[3] = 0; __u_a[4] = 1;
-    __u_a[5] = 0; __u_a[6] = __u_envp != 0 ? (long)__u_env : 0; __u_a[7] = 0; __u_a[8] = (long)__u_si; __u_a[9] = (long)__u_pi;
+    __u_a[0] = __u_usepath ? 0 : (__u_word)__u_path; __u_a[1] = (__u_word)__u_cmd; __u_a[2] = 0; __u_a[3] = 0; __u_a[4] = 1;
+    __u_a[5] = 0; __u_a[6] = __u_envp != 0 ? (__u_word)__u_env : 0; __u_a[7] = 0; __u_a[8] = (__u_word)__u_si; __u_a[9] = (__u_word)__u_pi;
     __u_r = (int)(__hostcall(__u_cp, __u_a) & 0xFFFFFFFFL);
     __u_n = __u_r ? 0 : _ux_errno();
     for (__u_i = 0; __u_i < 3; __u_i = __u_i + 1) if (__u_si[10 + __u_i]) _ux_call(__u_ch, __u_si[10 + __u_i], 0, 0, 0);

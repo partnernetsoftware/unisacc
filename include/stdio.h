@@ -8,6 +8,7 @@
 #include <stddef.h>
 #include <stdarg.h>
 #include <errno.h>
+#include <sys/_word.h>
 #define NULL 0
 #define EOF (0-1)
 #define SEEK_SET 0
@@ -23,7 +24,7 @@
 typedef struct _UNISA_FILE FILE;
 /* C99 7.19.1p2: an object type recording every position in a file.  The host's
    (glibc _G_fpos_t) is an off_t and an mbstate_t: sixteen bytes. */
-typedef struct { long __u_pos; int __u_count; unsigned int __u_wch; } fpos_t;
+typedef struct { __u_word __u_pos; int __u_count; unsigned int __u_wch; } fpos_t;
 /* A FILE* IS the descriptor cast to a pointer (fopen returns `(FILE *)(long)fd`),
    so the three standard streams used to be ((FILE *)0/1/2) -- which made
    `stdin == NULL` TRUE.  Programs test the result of fopen for NULL and then
@@ -39,16 +40,16 @@ static int printf();   /* 0.0.35 H1: static like its definition (C99 6.2.2p7) */
 
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_fd
 static int _unisa_fd(FILE *__u_f) {
-    long __u_v;
-    __u_v = (long)__u_f;
+    __u_word __u_v;
+    __u_v = (__u_word)__u_f;
     if (__u_v >= _UNISA_STDIO_BASE) return (int)(__u_v - _UNISA_STDIO_BASE);
     return (int)__u_v;
 }
 #endif
 
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_len
-static long _unisa_len(const char *__u_s) {
-    long __u_n;
+static __u_word _unisa_len(const char *__u_s) {
+    __u_word __u_n;
     __u_n = 0;
     while (__u_s[__u_n]) __u_n = __u_n + 1;
     return __u_n;
@@ -87,11 +88,11 @@ static int _u_st_slot(FILE *__u_f) {
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN__u_st_wput
-static long _u_st_wput(FILE *__u_f, const char *__u_p, long __u_n) {
+static __u_word _u_st_wput(FILE *__u_f, const char *__u_p, __u_word __u_n) {
     int __u_fd; int __u_i;
     __u_fd = _unisa_fd(__u_f);
     if (__u_n <= 0) return 0;
-    if ((long)__u_f >= _UNISA_STDIO_BASE || __u_fd <= 2) return _u_st_raw(__u_fd, __u_p, __u_n);
+    if ((__u_word)__u_f >= _UNISA_STDIO_BASE || __u_fd <= 2) return _u_st_raw(__u_fd, __u_p, __u_n);
     __u_i = _u_st_slot(__u_f);
     if (__u_i < 0) return _u_st_raw(__u_fd, __u_p, __u_n);
     if (_u_st_ro[__u_i]) { _u_st_err[__u_i] = 1; errno = 9; return 0; }   /* EBADF, as glibc and BSD answer at once */
@@ -161,7 +162,7 @@ static int puts(const char *__u_s) {
  * trusted, so `done` cannot overflow either.
  * The return is complete elements: done / sz, rounded down. */
 #if !__UNISA_FTRIM_LIBC || __UN_fwrite
-static long fwrite(const void *__u_p, long __u_sz, long __u_n, FILE *__u_f) {
+static __u_word fwrite(const void *__u_p, __u_word __u_sz, __u_word __u_n, FILE *__u_f) {
     if (__u_sz <= 0 || __u_n <= 0) return 0;
     if (__u_n > 0x7fffffffffffffff / __u_sz) return 0;
     return _u_st_wput(__u_f, (const char *)__u_p, __u_sz * __u_n) / __u_sz;
@@ -213,7 +214,7 @@ static int ungetc(int __u_c, FILE *__u_f) {
    which C99 7.19.7.4 permits: the call may be made at any time, and only
    _IOFBF/_IOLBF/_IONBF are defined.  Returning non-zero would mean failure. */
 #if !__UNISA_FTRIM_LIBC || __UN_setvbuf
-static int setvbuf(FILE *__u_f, char *__u_buf, int __u_mode, long __u_size) {
+static int setvbuf(FILE *__u_f, char *__u_buf, int __u_mode, __u_word __u_size) {
     if (__u_f == NULL) return 0 - 1;
     return 0;
 }
@@ -221,8 +222,8 @@ static int setvbuf(FILE *__u_f, char *__u_buf, int __u_mode, long __u_size) {
 #endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_fread
-static long fread(void *__u_p, long __u_sz, long __u_n, FILE *__u_f) {
-    long __u_got; long __u_want; long __u_pre; int __u_i;
+static __u_word fread(void *__u_p, __u_word __u_sz, __u_word __u_n, FILE *__u_f) {
+    __u_word __u_got; __u_word __u_want; __u_word __u_pre; int __u_i;
     __u_want = __u_sz * __u_n;
     if (__u_want <= 0) return 0;
     /* a byte pushed back by ungetc comes out first [C99 7.19.7.11]; a short
@@ -237,7 +238,7 @@ static long fread(void *__u_p, long __u_sz, long __u_n, FILE *__u_f) {
     /* buffered bytes next, then at most one descriptor read: straight into
        the caller for a request of a buffer or more, else a buffer refill */
     if (__u_i >= 0 && __u_want > __u_pre && _u_st_bpos[__u_i] < _u_st_blen[__u_i]) {
-        long __u_k; __u_k = _u_st_blen[__u_i] - _u_st_bpos[__u_i];
+        __u_word __u_k; __u_k = _u_st_blen[__u_i] - _u_st_bpos[__u_i];
         if (__u_k > __u_want - __u_pre) __u_k = __u_want - __u_pre;
         _u_st_copy((char *)__u_p + __u_pre, _u_st_buf + __u_i * _U_BUFSZ + _u_st_bpos[__u_i], __u_k);
         _u_st_bpos[__u_i] = _u_st_bpos[__u_i] + (int)__u_k; __u_pre = __u_pre + __u_k;
@@ -284,13 +285,13 @@ static FILE *fopen(const char *__u_path, const char *__u_mode) {
     /* Windows has no POSIX file-opening call, and CreateFileA wants its own shapes.  They
        are built HERE and not in the encoder, because this is the only place
        that knows whether the program is being compiled for Windows. */
-    long __u_access;
-    long __u_disp;
+    __u_word __u_access;
+    __u_word __u_disp;
     __u_access = 0x80000000;                  /* GENERIC_READ  */
     __u_disp = 3;                             /* OPEN_EXISTING */
     if (__u_mode[0] == 119) { __u_access = 0x40000000; __u_disp = 2; }   /* 'w' CREATE_ALWAYS */
     if (__u_mode[0] == 97)  { __u_access = 0x40000000; __u_disp = 4; }   /* 'a' OPEN_ALWAYS   */
-    __u_fd = __open((char *)__u_path, __u_access, __u_disp);
+    __u_fd = (int)__open((char *)__u_path, __u_access, __u_disp);   /* a HANDLE: 32 significant bits, sign-extended back by (FILE *)(__u_word) */
 #else
     int __u_flags;
     int __u_plus;
@@ -330,8 +331,8 @@ static FILE *fopen(const char *__u_path, const char *__u_mode) {
     }
     {   int __u_s2; int __u_j2; int __u_ro; __u_ro = __u_mode[0] == 114; __u_j2 = 0;
         while (__u_mode[__u_j2]) { if (__u_mode[__u_j2] == 43) __u_ro = 0; __u_j2 = __u_j2 + 1; }
-        __u_s2 = _u_st_slot((FILE *)(long)__u_fd); if (__u_s2 >= 0) _u_st_ro[__u_s2] = __u_ro; }
-    return (FILE *)(long)__u_fd;
+        __u_s2 = _u_st_slot((FILE *)(__u_word)__u_fd); if (__u_s2 >= 0) _u_st_ro[__u_s2] = __u_ro; }
+    return (FILE *)(__u_word)__u_fd;
 }
 #endif
 
@@ -420,9 +421,9 @@ static FILE *tmpfile(void) {
         /* _u_digits fills a buffer of 24 from the END and returns where the
            digits start, so the decimal text lands in __u_d[__u_s..23] */
         {   char __u_d[24];
-            long __u_s;
-            long __u_j;
-            __u_s = _u_digits(__u_d, (unsigned long)__u_v & 2147483647, 10, 0);
+            __u_word __u_s;
+            __u_word __u_j;
+            __u_s = _u_digits(__u_d, (__u_uword)__u_v & 2147483647, 10, 0);
             __u_j = __u_s;
             __u_i = 7;
             while (__u_j < 24) { __u_p[__u_i] = __u_d[__u_j]; __u_i = __u_i + 1; __u_j = __u_j + 1; }
@@ -463,7 +464,7 @@ static char *fgets(char *__u_s, int __u_n, FILE *__u_f) {
 #ifndef __UNISA_PYFRONT   /* the Python control-group front end folds one tape across targets */
 #if !__UNISA_FTRIM_LIBC || __UN_freopen
 static FILE *freopen(const char *__u_path, const char *__u_mode, FILE *__u_f) {
-    FILE *__u_n; long __u_r;
+    FILE *__u_n; __u_word __u_r;
     if (__u_path == 0) { errno = EINVAL; return NULL; }
     _u_st_wflush(_u_st_slot(__u_f));
     __u_n = fopen(__u_path, __u_mode);
@@ -514,9 +515,9 @@ static FILE *freopen(const char *__u_path, const char *__u_mode, FILE *__u_f) {
    the process's input away from every later read. */
 #if !__UNISA_FTRIM_LIBC || __UN_fclose
 static int fclose(FILE *__u_f) {
-    int __u_i; int __u_flush; int __u_errno; long __u_close;
+    int __u_i; int __u_flush; int __u_errno; __u_word __u_close;
     __u_flush = 0; __u_errno = 0;
-    if ((long)__u_f >= _UNISA_STDIO_BASE) return 0;
+    if ((__u_word)__u_f >= _UNISA_STDIO_BASE) return 0;
     /* free the stream's state slot: a later fopen that gets the same
        descriptor must not inherit this stream's eof/err/pushback */
     __u_i = _u_st_slot(__u_f);
@@ -560,30 +561,53 @@ static int fseek(FILE *__u_f, long __u_off, int __u_whence) {
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_ftell
 static long ftell(FILE *__u_f) {
-    long __u_r; int __u_i;
+    __u_word __u_r; int __u_i;
     __u_i = _u_st_slot(__u_f);
     if (__u_i >= 0) _u_st_wflush(__u_i);
     __u_r = __lseek(_unisa_fd(__u_f), 0, SEEK_CUR);
     if (__u_r >= 0 && __u_i >= 0) __u_r = __u_r - (_u_st_blen[__u_i] - _u_st_bpos[__u_i]) - (_u_st_ung[__u_i] >= 0);
+#if defined(_WIN64)
+    /* the API answers a 32-bit long here; a position it cannot hold is a failure (-1), as the
+       old 32-bit __u_r took SetFilePointer's 0xFFFFFFFF failure and offsets >= 2^31 */
+    if (__u_r != (long)__u_r) return -1;
+    return (long)__u_r;
+#else
     return __u_r;
+#endif
 }
 #endif
 /* POSIX spellings lua's LUA_USE_POSIX build asks for (0.0.34 L1b): off_t is
    long here, so fseeko/ftello are fseek/ftell; there is one thread, so the
    stream locks have nothing to do and getc_unlocked is getc. */
 #if !__UNISA_FTRIM_LIBC || __UN_fseeko
-static int fseeko(FILE *__u_f, long __u_off, int __u_whence) { return fseek(__u_f, __u_off, __u_whence); }
+static int fseeko(FILE *__u_f, __u_word __u_off, int __u_whence) {
+#if defined(_WIN64)
+    /* off_t is 8 bytes, fseek's long 4: an offset long cannot hold is refused, not wrapped */
+    if (__u_off != (long)__u_off) return -1;
+    return fseek(__u_f, (long)__u_off, __u_whence);
+#else
+    return fseek(__u_f, __u_off, __u_whence);
+#endif
+}
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_ftello
-static long ftello(FILE *__u_f) { return ftell(__u_f); }
+static __u_word ftello(FILE *__u_f) { return ftell(__u_f); }
 #endif
 /* fgetpos/fsetpos (C99 7.19.9.1, 7.19.9.3) over ftell/fseek: the fpos_t holds
    the byte offset in its first field; nonzero on failure. */
 #if !__UNISA_FTRIM_LIBC || __UN_fgetpos
-static int fgetpos(FILE *__u_f, fpos_t *__u_p) { long __u_r; __u_r = ftell(__u_f); if (__u_r < 0) return -1; __u_p->__u_pos = __u_r; __u_p->__u_count = 0; __u_p->__u_wch = 0; return 0; }
+static int fgetpos(FILE *__u_f, fpos_t *__u_p) { __u_word __u_r; __u_r = ftell(__u_f); if (__u_r < 0) return -1; __u_p->__u_pos = __u_r; __u_p->__u_count = 0; __u_p->__u_wch = 0; return 0; }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_fsetpos
-static int fsetpos(FILE *__u_f, const fpos_t *__u_p) { return fseek(__u_f, __u_p->__u_pos, SEEK_SET); }
+static int fsetpos(FILE *__u_f, const fpos_t *__u_p) {
+#if defined(_WIN64)
+    /* __u_pos is 8 bytes, the seek offset long is 4: a stored position came from the 32-bit tell */
+    if (__u_p->__u_pos != (long)__u_p->__u_pos) return -1;
+    return fseek(__u_f, (long)__u_p->__u_pos, SEEK_SET);
+#else
+    return fseek(__u_f, __u_p->__u_pos, SEEK_SET);
+#endif
+}
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_flockfile
 static void flockfile(FILE *__u_f) { (void)__u_f; }
@@ -608,7 +632,7 @@ static int rename(const char *__u_from, const char *__u_to) {
 #if !__UNISA_FTRIM_LIBC || __UN_fflush
 static int fflush(FILE *__u_f) {
     if (__u_f == NULL) { _u_st_flushall(); return 0; }
-    if ((long)__u_f >= _UNISA_STDIO_BASE || _unisa_fd(__u_f) <= 2) return 0;
+    if ((__u_word)__u_f >= _UNISA_STDIO_BASE || _unisa_fd(__u_f) <= 2) return 0;
     return _u_st_wflush(_u_st_slot(__u_f));
 }
 #endif
@@ -619,7 +643,7 @@ static int fflush(FILE *__u_f) {
  * takes a format at RUN time is written here, in the subset itself. */
 
 #if !__UNISA_FTRIM_LIBC || __UN__u_put
-static void _u_put(char *__u_out, long __u_cap, long *__u_n, FILE *__u_f, int __u_c) {
+static void _u_put(char *__u_out, __u_word __u_cap, __u_word *__u_n, FILE *__u_f, int __u_c) {
     char __u_ch;
     if (__u_out != NULL) {
         if (__u_cap < 0 | *__u_n < __u_cap - 1) __u_out[*__u_n] = __u_c;
@@ -632,8 +656,8 @@ static void _u_put(char *__u_out, long __u_cap, long *__u_n, FILE *__u_f, int __
 #endif
 
 #if !__UNISA_FTRIM_LIBC || __UN__u_digits
-static long _u_digits(char *__u_buf, unsigned long __u_v, int __u_base, int __u_upper) {
-    long __u_i;
+static __u_word _u_digits(char *__u_buf, __u_uword __u_v, int __u_base, int __u_upper) {
+    __u_word __u_i;
     int __u_d;
     __u_i = 24;
     if (__u_v == 0) { __u_i = __u_i - 1; __u_buf[__u_i] = 48; return __u_i; }
@@ -661,12 +685,12 @@ static long _u_digits(char *__u_buf, unsigned long __u_v, int __u_base, int __u_
 /* digits of v, most significant first; returns their count, and *x is how
    many of them are before the decimal point (<= 0 for |v| < 1) */
 #if !__UNISA_FTRIM_LIBC || __UN__u_dexp
-static int _u_dexp(unsigned long __u_bits, char *__u_dig, int *__u_x) {
-    unsigned long __u_lim[_U_NL];
-    unsigned long __u_m;
-    unsigned long __u_t;
-    unsigned long __u_carry;
-    unsigned long __u_mul;
+static int _u_dexp(__u_uword __u_bits, char *__u_dig, int *__u_x) {
+    __u_uword __u_lim[_U_NL];
+    __u_uword __u_m;
+    __u_uword __u_t;
+    __u_uword __u_carry;
+    __u_uword __u_mul;
     int __u_n;
     int __u_e;
     int __u_k;
@@ -756,7 +780,7 @@ static int _u_dat(char *__u_dig, int __u_nd, int __u_x, int __u_p) {
 /* %f %e %g (and upper case) of `bits` into out[]; returns the length.
    Sign, width and padding are the caller's. */
 #if !__UNISA_FTRIM_LIBC || __UN__u_ffmt
-static int _u_ffmt(char *__u_out, unsigned long __u_bits, int __u_c, int __u_prec, int __u_alt) {
+static int _u_ffmt(char *__u_out, __u_uword __u_bits, int __u_c, int __u_prec, int __u_alt) {
     char __u_dig[_U_ND];
     int __u_nd;
     int __u_x;
@@ -777,7 +801,7 @@ static int _u_ffmt(char *__u_out, unsigned long __u_bits, int __u_c, int __u_pre
         return 3;
     }
     if ((__u_c | 32) == 97) {                     /* %a %A: C99 7.19.6.1p8 */
-        unsigned long __u_m; int __u_lead; int __u_hd; int __u_d;
+        __u_uword __u_m; int __u_lead; int __u_hd; int __u_d;
         __u_m = __u_bits & 4503599627370495; __u_e = (int)((__u_bits >> 52) & 2047);
         if (__u_e == 0) {                         /* subnormal: normalised, as BSD libc prints it */
             __u_lead = 0; __u_e = 0;
@@ -786,12 +810,12 @@ static int _u_ffmt(char *__u_out, unsigned long __u_bits, int __u_c, int __u_pre
         else { __u_lead = 1; __u_e = __u_e - 1023; }
         __u_nd = 13;
         if (__u_prec >= 0 && __u_prec < 13) {
-            unsigned long __u_rem; unsigned long __u_half; int __u_sh;
+            __u_uword __u_rem; __u_uword __u_half; int __u_sh;
             __u_sh = (13 - __u_prec) * 4;
-            __u_rem = __u_m & (((unsigned long)1 << __u_sh) - 1); __u_half = (unsigned long)1 << (__u_sh - 1);
+            __u_rem = __u_m & (((__u_uword)1 << __u_sh) - 1); __u_half = (__u_uword)1 << (__u_sh - 1);
             __u_m = __u_m >> __u_sh;
             if (__u_rem > __u_half || (__u_rem == __u_half && (__u_m & 1))) __u_m = __u_m + 1;
-            if (__u_m >> (__u_prec * 4)) { __u_m = __u_m & (((unsigned long)1 << (__u_prec * 4)) - 1); __u_lead = __u_lead + 1; }
+            if (__u_m >> (__u_prec * 4)) { __u_m = __u_m & (((__u_uword)1 << (__u_prec * 4)) - 1); __u_lead = __u_lead + 1; }
             __u_nd = __u_prec; __u_hd = __u_prec;
         } else {
             if (__u_prec < 0) { while (__u_nd > 0 && (__u_m & 15) == 0) { __u_m = __u_m >> 4; __u_nd = __u_nd - 1; } __u_hd = __u_nd; }
@@ -878,12 +902,12 @@ static int _u_ffmt(char *__u_out, unsigned long __u_bits, int __u_c, int __u_pre
    sent its bytes to FILE * 0, which is descriptor 0 (stdin): a blocked write when nobody reads it, the hang the
    .cx ports met, and a lost vprintf line.  The measuring callers pass a one-byte buffer of capacity 0 instead. */
 #if !__UNISA_FTRIM_LIBC || __UN__u_vfmt
-static int _u_vfmt(char *__u_out, long __u_cap, FILE *__u_f, const char *__u_fmt, va_list __u_ap) {
-    long __u_n;
-    long __u_i;
-    long __u_k;
-    long __u_len;
-    long __u_start;
+static int _u_vfmt(char *__u_out, __u_word __u_cap, FILE *__u_f, const char *__u_fmt, va_list __u_ap) {
+    __u_word __u_n;
+    __u_word __u_i;
+    __u_word __u_k;
+    __u_word __u_len;
+    __u_word __u_start;
     int __u_c;
     int __u_left;
     int __u_zero;
@@ -898,9 +922,9 @@ static int _u_vfmt(char *__u_out, long __u_cap, FILE *__u_f, const char *__u_fmt
     int __u_alt;
     int __u_hh;
     int __u_neg;
-    long __u_j;
-    long __u_sv;
-    unsigned long __u_uv;
+    __u_word __u_j;
+    __u_word __u_sv;
+    __u_uword __u_uv;
     char *__u_sp;
     char __u_buf[24];
     char __u_fbuf[1300];
@@ -934,10 +958,20 @@ static int _u_vfmt(char *__u_out, long __u_cap, FILE *__u_f, const char *__u_fmt
         __u_lng = 0; __u_hh = 0;
         while (__u_fmt[__u_i] == 104 | __u_fmt[__u_i] == 108 | __u_fmt[__u_i] == 122 | __u_fmt[__u_i] == 106
                | __u_fmt[__u_i] == 116 | __u_fmt[__u_i] == 76) {
+#if defined(_WIN64)
+            /* LLP64: a lone l is the 4-byte long and narrows like no modifier; ll, z, j, t, L
+               are 64-bit.  __u_lng counts here and is folded to 0/1 after the loop. */
+            if (__u_fmt[__u_i] == 104) __u_hh = __u_hh + 1;
+            else { if (__u_fmt[__u_i] == 108) __u_lng = __u_lng + 1; else __u_lng = 2; }
+#else
             if (__u_fmt[__u_i] == 104) __u_hh = __u_hh + 1;   /* h, hh: narrow */
             else __u_lng = 1;                                /* l, z, j, t, L are 64-bit */
+#endif
             __u_i = __u_i + 1;
         }
+#if defined(_WIN64)
+        __u_lng = __u_lng >= 2;
+#endif
         __u_c = __u_fmt[__u_i];
         __u_i = __u_i + 1;
         if (__u_c == 37) { _u_put(__u_out, __u_cap, &__u_n, __u_f, 37); continue; }
@@ -945,9 +979,9 @@ static int _u_vfmt(char *__u_out, long __u_cap, FILE *__u_f, const char *__u_fmt
         if (__u_c == 102 | __u_c == 70 | __u_c == 101 | __u_c == 69 | __u_c == 103 | __u_c == 71 | __u_c == 97 | __u_c == 65) {
             /* %f %e %g: a double -- a float argument was promoted to one */
             double __u_dv;
-            unsigned long __u_bits;
+            __u_uword __u_bits;
             __u_dv = va_arg(__u_ap, double);
-            __u_bits = *(unsigned long *)&__u_dv;
+            __u_bits = *(__u_uword *)&__u_dv;
             __u_neg = (__u_bits >> 63) & 1;
             __u_len = _u_ffmt(__u_fbuf + 1, __u_bits, __u_c, __u_prec, __u_alt);
             __u_start = 1; __u_sp = __u_fbuf;
@@ -966,7 +1000,7 @@ static int _u_vfmt(char *__u_out, long __u_cap, FILE *__u_f, const char *__u_fmt
                 __u_start = 23; __u_len = 1; __u_sp = __u_buf;
             } else {
                 if (__u_c == 100 | __u_c == 105) {
-                    __u_sv = va_arg(__u_ap, long);
+                    __u_sv = va_arg(__u_ap, __u_word);
                     /* C99 7.19.6.1p7: hh converts to signed/unsigned char and h
                        to short, BEFORE the value is printed -- `%hhd` of 300 is
                        44, and going through a char keeps the sign (`%hhd` of 200
@@ -982,7 +1016,7 @@ static int _u_vfmt(char *__u_out, long __u_cap, FILE *__u_f, const char *__u_fmt
                     if (__u_c == 88) { __u_base = 16; __u_upper = 1; }
                     if (__u_c == 111) { __u_base = 8; }
                     if (__u_c == 112) { __u_base = 16; }
-                    __u_uv = va_arg(__u_ap, unsigned long);
+                    __u_uv = va_arg(__u_ap, __u_uword);
                     if (__u_hh == 2) __u_uv = __u_uv & 255;       /* %hhu, %hhx */
                     else { if (__u_hh == 1) __u_uv = __u_uv & 65535;   /* %hu, %hx */
                            else { if (__u_lng == 0) {
@@ -1060,7 +1094,7 @@ static int vsprintf(char *__u_b, const char *__u_fmt, va_list __u_ap) {
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_vsnprintf
-static int vsnprintf(char *__u_b, long __u_cap, const char *__u_fmt, va_list __u_ap) {
+static int vsnprintf(char *__u_b, __u_word __u_cap, const char *__u_fmt, va_list __u_ap) {
     char __u_z;
     if (__u_b == NULL) { __u_b = &__u_z; __u_cap = 0; }   /* measure only (C99 7.19.6.12p2) */
     return _u_vfmt(__u_b, __u_cap, NULL, __u_fmt, __u_ap);
@@ -1081,7 +1115,7 @@ static int sprintf(char *__u_b, const char *__u_fmt, ...) {
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_snprintf
-static int snprintf(char *__u_b, long __u_cap, const char *__u_fmt, ...) {
+static int snprintf(char *__u_b, __u_word __u_cap, const char *__u_fmt, ...) {
     va_list __u_ap; int __u_r; char __u_z;
     if (__u_b == NULL) { __u_b = &__u_z; __u_cap = 0; }   /* measure only (C99 7.19.6.5p2) */
     va_start(__u_ap, __u_fmt);
@@ -1133,9 +1167,9 @@ static int _u_digit(int __u_c, int __u_base) {
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_vsscanf
 static int vsscanf(const char *__u_in, const char *__u_fmt, va_list __u_ap) {
-    long __u_i; long __u_j; int __u_stored; int __u_c; int __u_width; int __u_skip; int __u_lng; int __u_base;
-    int __u_neg; int __u_any; long __u_v; unsigned long __u_uv; double __u_d; double __u_scale; int exp; int __u_eneg;
-    char *__u_sp; int *__u_ip; long *__u_lp; short *__u_hp; double *__u_dp; float *__u_fp; long __u_n;
+    __u_word __u_i; __u_word __u_j; int __u_stored; int __u_c; int __u_width; int __u_skip; int __u_lng; int __u_base;
+    int __u_neg; int __u_any; long __u_v; __u_uword __u_uv; double __u_d; double __u_scale; int exp; int __u_eneg;
+    char *__u_sp; int *__u_ip; long *__u_lp; short *__u_hp; double *__u_dp; float *__u_fp; __u_word __u_n;
     __u_i = 0; __u_j = 0; __u_stored = 0;
     while (__u_fmt[__u_j]) {
         __u_c = __u_fmt[__u_j];
@@ -1147,9 +1181,16 @@ static int vsscanf(const char *__u_in, const char *__u_fmt, va_list __u_ap) {
         if (__u_fmt[__u_j] == 42) { __u_skip = 1; __u_j = __u_j + 1; }
         while (__u_fmt[__u_j] >= 48 && __u_fmt[__u_j] <= 57) { __u_width = __u_width * 10 + (__u_fmt[__u_j] - 48); __u_j = __u_j + 1; }
         if (__u_fmt[__u_j] == 104) { __u_lng = 0 - 1; __u_j = __u_j + 1; if (__u_fmt[__u_j] == 104) { __u_lng = 0 - 2; __u_j = __u_j + 1; } }
+#if defined(_WIN64)
+        /* LLP64: l stores the 4-byte long (__u_lng 1); ll, z, j, t, L store 8 bytes (__u_lng 2) */
+        if (__u_fmt[__u_j] == 108) { __u_lng = 1; __u_j = __u_j + 1; if (__u_fmt[__u_j] == 108) { __u_lng = 2; __u_j = __u_j + 1; } }
+        if (__u_fmt[__u_j] == 122 || __u_fmt[__u_j] == 106 || __u_fmt[__u_j] == 116) { __u_lng = 2; __u_j = __u_j + 1; }
+        if (__u_fmt[__u_j] == 76) { __u_lng = 2; __u_j = __u_j + 1; }
+#else
         if (__u_fmt[__u_j] == 108) { __u_lng = 1; __u_j = __u_j + 1; if (__u_fmt[__u_j] == 108) __u_j = __u_j + 1; }
         if (__u_fmt[__u_j] == 122 || __u_fmt[__u_j] == 106 || __u_fmt[__u_j] == 116) { __u_lng = 1; __u_j = __u_j + 1; }
         if (__u_fmt[__u_j] == 76) { __u_lng = 1; __u_j = __u_j + 1; }
+#endif
         __u_c = __u_fmt[__u_j]; __u_j = __u_j + 1;
         if (__u_width == 0) __u_width = 1000000000;
         if (__u_c == 99) {                                   /* %c: no space skip */
@@ -1188,6 +1229,10 @@ static int vsscanf(const char *__u_in, const char *__u_fmt, va_list __u_ap) {
             if (__u_any == 0) break;
             if (__u_neg) __u_uv = 0 - __u_uv;
             if (__u_skip == 0) {
+#if defined(_WIN64)
+                if (__u_lng == 2) { __u_word *__u_qp; __u_qp = va_arg(__u_ap, __u_word *); *__u_qp = (__u_word)__u_uv; }
+                else
+#endif
                 if (__u_lng == 1) { __u_lp = va_arg(__u_ap, long *); *__u_lp = (long)__u_uv; }
                 else { if (__u_lng == 0 - 1) { __u_hp = va_arg(__u_ap, short *); *__u_hp = (short)__u_uv; }
                        else { if (__u_lng == 0 - 2) { __u_sp = va_arg(__u_ap, char *); *__u_sp = (char)__u_uv; }
@@ -1217,7 +1262,11 @@ static int vsscanf(const char *__u_in, const char *__u_fmt, va_list __u_ap) {
             } }
             if (__u_neg) __u_d = 0.0 - __u_d;
             if (__u_skip == 0) {
+#if defined(_WIN64)
+                if (__u_lng >= 1) { __u_dp = va_arg(__u_ap, double *); *__u_dp = __u_d; }   /* l and L (ll) are double */
+#else
                 if (__u_lng == 1) { __u_dp = va_arg(__u_ap, double *); *__u_dp = __u_d; }
+#endif
                 else { __u_fp = va_arg(__u_ap, float *); *__u_fp = (float)__u_d; }
                 __u_stored = __u_stored + 1;
             }
@@ -1275,7 +1324,7 @@ static void perror(const char *__u_s) {
 #if !__UNISA_FTRIM_LIBC || __UN_getline
 #include <stdlib.h>
 #if !__UNISA_FTRIM_LIBC || __UN_getline
-static long getline(char **__u_line, size_t *__u_cap, FILE *__u_f) {
+static __u_word getline(char **__u_line, size_t *__u_cap, FILE *__u_f) {
     size_t __u_n; int __u_c; char *__u_p;
     if (__u_line == NULL || __u_cap == NULL) { errno = EINVAL; return -1; }
     if (*__u_line == NULL || *__u_cap == 0) {
@@ -1295,7 +1344,7 @@ static long getline(char **__u_line, size_t *__u_cap, FILE *__u_f) {
     }
     if (__u_n == 0) return -1;
     (*__u_line)[__u_n] = 0;
-    return (long)__u_n;
+    return (__u_word)__u_n;
 }
 #endif
 #endif
@@ -1306,7 +1355,7 @@ static long getline(char **__u_line, size_t *__u_cap, FILE *__u_f) {
 static FILE *fdopen(int __u_fd, const char *__u_mode) {
     if (__u_fd < 0) { errno = 9; return NULL; }   /* EBADF */
     if (__u_fd < 3) return (FILE *)(_UNISA_STDIO_BASE + __u_fd);
-    return (FILE *)(long)__u_fd;
+    return (FILE *)(__u_word)__u_fd;
 }
 #endif
 /* fileno (POSIX), 0.0.43: fdopen's inverse -- the descriptor the FILE * stands for, 0..2 for

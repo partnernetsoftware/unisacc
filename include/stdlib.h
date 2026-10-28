@@ -6,6 +6,7 @@
 #include <stddef.h>
 #include <errno.h>
 #include <limits.h>
+#include <sys/_word.h>
 #define NULL 0
 #define EXIT_SUCCESS 0
 #define EXIT_FAILURE 1
@@ -33,28 +34,28 @@
 #define _UNISA_CHUNK 1048576
 static char *_unisa_freel[12];
 static char *_unisa_cur = 0;
-static long _unisa_left = 0;
+static __u_word _unisa_left = 0;
 
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_map
-static char *_unisa_map(long __u_n) {
-    long __u_r;
-    __u_r = (long)_UNISA_MAP(__u_n);
+static char *_unisa_map(__u_word __u_n) {
+    __u_word __u_r;
+    __u_r = (__u_word)_UNISA_MAP(__u_n);
     if (__u_r == 0 - 1 || __u_r == 0) return NULL;
     return (char *)__u_r;
 }
 #endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_malloc
-static void *malloc(long __u_n) {
-    long __u_sz; int __u_k; char *__u_p;
+static void *malloc(__u_word __u_n) {
+    __u_word __u_sz; int __u_k; char *__u_p;
     if (__u_n < 0 || __u_n > 0x100000000000) return NULL;
     __u_sz = __u_n + 16;
     if (__u_sz > 65536) {
         __u_sz = (__u_sz + 65535) & ~65535;
         __u_p = _unisa_map(__u_sz);
         if (__u_p == NULL) return NULL;
-        *(long *)__u_p = __u_sz;
-        *(long *)(__u_p + 8) = 0 - 1;
+        *(__u_word *)__u_p = __u_sz;
+        *(__u_word *)(__u_p + 8) = 0 - 1;
         return __u_p + 16;
     }
     __u_k = 0;
@@ -74,19 +75,19 @@ static void *malloc(long __u_n) {
     __u_p = _unisa_cur;
     _unisa_cur = _unisa_cur + __u_sz;
     _unisa_left = _unisa_left - __u_sz;
-    *(long *)__u_p = __u_sz;
-    *(long *)(__u_p + 8) = __u_k;
+    *(__u_word *)__u_p = __u_sz;
+    *(__u_word *)(__u_p + 8) = __u_k;
     return __u_p + 16;
 }
 #endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_free
 static void free(void *__u_q) {
-    char *__u_p; long __u_k;
+    char *__u_p; __u_word __u_k;
     if (__u_q == NULL) return;
     __u_p = (char *)__u_q - 16;
-    __u_k = *(long *)(__u_p + 8);
-    if (__u_k < 0) { __munmap(__u_p, *(long *)__u_p); return; }
+    __u_k = *(__u_word *)(__u_p + 8);
+    if (__u_k < 0) { __munmap(__u_p, *(__u_word *)__u_p); return; }
     *(char **)(__u_p + 16) = _unisa_freel[__u_k];
     _unisa_freel[__u_k] = __u_p;
 }
@@ -102,12 +103,12 @@ static void abort(void) { __exit(134); }
 #endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_calloc
-static void *calloc(long __u_n, long __u_sz) {
-    long *__u_p; long __u_total; long __u_i;
+static void *calloc(__u_word __u_n, __u_word __u_sz) {
+    __u_word *__u_p; __u_word __u_total; __u_word __u_i;
     if (__u_n < 0 || __u_sz < 0) return NULL;
     if (__u_sz != 0 && __u_n > 0x100000000000 / __u_sz) return NULL;
     __u_total = __u_n * __u_sz;
-    __u_p = (long *)malloc(__u_total);
+    __u_p = (__u_word *)malloc(__u_total);
     if (__u_p == NULL) return NULL;
     /* a payload is a multiple of 16 bytes, so whole longs stay inside it */
     __u_total = (__u_total + 7) / 8;
@@ -118,17 +119,17 @@ static void *calloc(long __u_n, long __u_sz) {
 #endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_realloc
-static void *realloc(void *__u_old, long __u_n) {
-    long *__u_p; long *__u_o; long __u_i; long __u_cap;
+static void *realloc(void *__u_old, __u_word __u_n) {
+    __u_word *__u_p; __u_word *__u_o; __u_word __u_i; __u_word __u_cap;
     if (__u_old == NULL) return malloc(__u_n);
     if (__u_n < 0) return NULL;
-    __u_cap = *(long *)((char *)__u_old - 16) - 16;
+    __u_cap = *(__u_word *)((char *)__u_old - 16) - 16;
     if (__u_n <= __u_cap && (__u_cap <= 65536 || __u_n > __u_cap / 2)) return __u_old;
-    __u_p = (long *)malloc(__u_n);
+    __u_p = (__u_word *)malloc(__u_n);
     if (__u_p == NULL) return NULL;
     if (__u_n < __u_cap) __u_cap = __u_n;
     __u_cap = (__u_cap + 7) / 8;
-    __u_o = (long *)__u_old;
+    __u_o = (__u_word *)__u_old;
     __u_i = 0;
     while (__u_i < __u_cap) { __u_p[__u_i] = __u_o[__u_i]; __u_i = __u_i + 1; }
     free(__u_old);
@@ -142,7 +143,7 @@ static int abs(int __u_v) { if (__u_v < 0) return 0 - __u_v; return __u_v; }
 
 #if !__UNISA_FTRIM_LIBC || __UN_atoi
 static int atoi(const char *__u_s) {
-    int __u_v; int __u_sign; long __u_i;
+    int __u_v; int __u_sign; __u_word __u_i;
     __u_v = 0; __u_sign = 1; __u_i = 0;
     while (__u_s[__u_i] == 32) __u_i = __u_i + 1;
     if (__u_s[__u_i] == 45) { __u_sign = 0 - 1; __u_i = __u_i + 1; }
@@ -168,8 +169,8 @@ static int _unisa_strdigit(int __u_c) {
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_strmag
 static int _unisa_strmag(const char *__u_s, char **__u_end, int __u_base,
-                       long *__u_hi, long *__u_lo, int *__u_neg) {
-    long __u_i; long __u_start; long __u_l; long __u_h; int __u_d; int __u_over; int __u_auto;
+                       __u_word *__u_hi, __u_word *__u_lo, int *__u_neg) {
+    __u_word __u_i; __u_word __u_start; __u_word __u_l; __u_word __u_h; int __u_d; int __u_over; int __u_auto;
     __u_auto = __u_base == 0; __u_i = 0; *__u_hi = 0; *__u_lo = 0; *__u_neg = 0; __u_over = 0;
     if (__u_end) *__u_end = (char *)__u_s;
     if (__u_base != 0 && (__u_base < 2 || __u_base > 36)) return 0;
@@ -207,6 +208,20 @@ static int _unisa_strmag(const char *__u_s, char **__u_end, int __u_base,
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_strtol
 static long strtol(const char *__u_s, char **__u_end, int __u_base) {
+#if defined(_WIN64)
+    /* LLP64: long is 32 bits, so the range is [LONG_MIN, LONG_MAX], not the 64-bit one */
+    __u_word __u_hi; __u_word __u_lo; __u_uword __u_m; int __u_neg; int __u_over;
+    __u_over = _unisa_strmag(__u_s, __u_end, __u_base, &__u_hi, &__u_lo, &__u_neg);
+    __u_m = ((__u_uword)__u_hi << 32) | (__u_uword)__u_lo;
+    if (__u_over || (!__u_neg && __u_m > (__u_uword)LONG_MAX) ||
+        (__u_neg && __u_m > (__u_uword)LONG_MAX + 1)) {
+        errno = ERANGE;
+        if (__u_neg) return LONG_MIN;
+        return LONG_MAX;
+    }
+    if (__u_neg) return (long)(0 - (__u_word)__u_m);
+    return (long)__u_m;
+#else
     long __u_hi; long __u_lo; long __u_v; int __u_neg; int __u_over;
     __u_over = _unisa_strmag(__u_s, __u_end, __u_base, &__u_hi, &__u_lo, &__u_neg);
     if (__u_over || __u_hi > 2147483648 ||
@@ -219,16 +234,27 @@ static long strtol(const char *__u_s, char **__u_end, int __u_base) {
     __u_v = __u_hi * 4294967296 + __u_lo;
     if (__u_neg) return 0 - __u_v;
     return __u_v;
+#endif
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_strtoul
 static unsigned long strtoul(const char *__u_s, char **__u_end, int __u_base) {
+#if defined(_WIN64)
+    /* LLP64: unsigned long is 32 bits; a magnitude past ULONG_MAX is ERANGE, then '-' negates */
+    __u_word __u_hi; __u_word __u_lo; unsigned long __u_v; int __u_neg; int __u_over;
+    __u_over = _unisa_strmag(__u_s, __u_end, __u_base, &__u_hi, &__u_lo, &__u_neg);
+    if (__u_over || __u_hi != 0) { errno = ERANGE; return (unsigned long)0 - 1; }
+    __u_v = (unsigned long)__u_lo;
+    if (__u_neg) return (unsigned long)0 - __u_v;
+    return __u_v;
+#else
     long __u_hi; long __u_lo; unsigned long __u_v; int __u_neg; int __u_over;
     __u_over = _unisa_strmag(__u_s, __u_end, __u_base, &__u_hi, &__u_lo, &__u_neg);
     if (__u_over) { errno = ERANGE; return (unsigned long)0 - 1; }
     __u_v = ((unsigned long)__u_hi << 32) | (unsigned long)__u_lo;
     if (__u_neg) return (unsigned long)0 - __u_v;
     return __u_v;
+#endif
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_atol
@@ -239,12 +265,38 @@ static long atol(const char *__u_s) { return strtol(__u_s, 0, 10); }
  * conversion, overflow clamp, ERANGE and end-pointer rules in one routine. */
 #if !__UNISA_FTRIM_LIBC || __UN_strtoll
 static long long strtoll(const char *__u_s, char **__u_end, int __u_base) {
+#if defined(_WIN64)
+    /* LLP64: strtol is 32-bit here, so the 64-bit range is converted and clamped directly */
+    __u_word __u_hi; __u_word __u_lo; __u_word __u_v; int __u_neg; int __u_over;
+    __u_over = _unisa_strmag(__u_s, __u_end, __u_base, &__u_hi, &__u_lo, &__u_neg);
+    if (__u_over || __u_hi > 2147483648 ||
+        (__u_hi == 2147483648 && (__u_lo != 0 || !__u_neg))) {
+        errno = ERANGE;
+        if (__u_neg) return LLONG_MIN;
+        return LLONG_MAX;
+    }
+    if (__u_hi == 2147483648) return LLONG_MIN;
+    __u_v = __u_hi * 4294967296 + __u_lo;
+    if (__u_neg) return 0 - __u_v;
+    return __u_v;
+#else
     return strtol(__u_s, __u_end, __u_base);
+#endif
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_strtoull
 static unsigned long long strtoull(const char *__u_s, char **__u_end, int __u_base) {
+#if defined(_WIN64)
+    /* LLP64: strtoul is 32-bit here, so the 64-bit value is assembled directly */
+    __u_word __u_hi; __u_word __u_lo; __u_uword __u_v; int __u_neg; int __u_over;
+    __u_over = _unisa_strmag(__u_s, __u_end, __u_base, &__u_hi, &__u_lo, &__u_neg);
+    if (__u_over) { errno = ERANGE; return (__u_uword)0 - 1; }
+    __u_v = ((__u_uword)__u_hi << 32) | (__u_uword)__u_lo;
+    if (__u_neg) return (__u_uword)0 - __u_v;
+    return __u_v;
+#else
     return strtoul(__u_s, __u_end, __u_base);
+#endif
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_atoll
@@ -264,15 +316,15 @@ static long long atoll(const char *__u_s) { return strtoll(__u_s, 0, 10); }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_mkstemp
 static int mkstemp(char *__u_t) {
-    static unsigned long __u_seq;
-    long __u_n; long __u_j; int __u_try; long __u_r; unsigned long __u_v;
+    static __u_uword __u_seq;
+    __u_word __u_n; __u_word __u_j; int __u_try; __u_word __u_r; __u_uword __u_v;
     __u_n = 0; while (__u_t[__u_n]) __u_n = __u_n + 1;
     if (__u_n < 6) { errno = EINVAL; return 0 - 1; }
     __u_j = __u_n - 6; while (__u_j < __u_n) { if (__u_t[__u_j] != 88) { errno = EINVAL; return 0 - 1; } __u_j = __u_j + 1; }
     __u_try = 0;
     while (__u_try < 100) {
         __u_seq = __u_seq + 1;
-        __u_v = ((unsigned long)&__u_try >> 4) * 2654435761u + __u_seq * 40503u;
+        __u_v = ((__u_uword)&__u_try >> 4) * 2654435761u + __u_seq * 40503u;
         __u_j = __u_n - 6;
         while (__u_j < __u_n) { __u_t[__u_j] = (char)(97 + __u_v % 26); __u_v = __u_v / 26 + __u_seq * 7; __u_j = __u_j + 1; }
 #ifdef _WIN32
@@ -307,9 +359,9 @@ static int mkstemp(char *__u_t) {
 #ifndef __UNISA_PYFRONT
 #if !__UNISA_FTRIM_LIBC || __UN_realpath
 static char *realpath(const char *__u_p, char *__u_out) {
-    char __u_tmp[PATH_MAX]; long __u_fd; long __u_r; long __u_n; long __u_k; char *__u_d;
+    char __u_tmp[PATH_MAX]; __u_word __u_fd; __u_word __u_r; __u_word __u_n; __u_word __u_k; char *__u_d;
 #ifdef _WIN32
-    static long __u_attr, __u_full, __u_fin; long __u_a; long __u_h; long __u_off; int __u_e;
+    static __u_word __u_attr, __u_full, __u_fin; __u_word __u_a; __u_word __u_h; __u_word __u_off; int __u_e;
     if (!__u_attr) {
         _ux_load(__u_attr, "GetFileAttributesA");
         _ux_load(__u_full, "GetFullPathNameA");
@@ -319,7 +371,7 @@ static char *realpath(const char *__u_p, char *__u_out) {
     __u_h = __open((char *)__u_p, 0x80000000L, 3);          /* GENERIC_READ, OPEN_EXISTING */
     if (__u_h >= 0) {
         /* Length excludes the NUL. Zero, or a size that does not fit, is not a path. */
-        _ux_go(__u_n, __u_fin, __u_h, (long)__u_tmp, PATH_MAX, 0);
+        _ux_go(__u_n, __u_fin, __u_h, (__u_word)__u_tmp, PATH_MAX, 0);
         __u_n = __u_n & 0xFFFFFFFFL;
         __close(__u_h);
         if (__u_n == 0 || __u_n >= PATH_MAX) __u_n = 0;
@@ -335,10 +387,10 @@ static char *realpath(const char *__u_p, char *__u_out) {
         __u_n = __u_k - 1;
     }
     if (__u_n == 0) {
-        _ux_go(__u_a, __u_attr, (long)__u_p, 0, 0, 0);
+        _ux_go(__u_a, __u_attr, (__u_word)__u_p, 0, 0, 0);
         __u_a = __u_a & 0xFFFFFFFFL;
         if (__u_a == 0xFFFFFFFFL) { _ux_err(__u_e); errno = __u_e; return 0; }
-        _ux_go(__u_n, __u_full, (long)__u_p, PATH_MAX, (long)__u_tmp, 0);
+        _ux_go(__u_n, __u_full, (__u_word)__u_p, PATH_MAX, (__u_word)__u_tmp, 0);
         __u_n = __u_n & 0xFFFFFFFFL;
         if (__u_n == 0) { _ux_err(__u_e); errno = __u_e; return 0; }
         if (__u_n >= PATH_MAX) { errno = ENAMETOOLONG; return 0; }
@@ -390,21 +442,21 @@ static char *realpath(const char *__u_p, char *__u_out) {
 #ifndef __UNISA_PYFRONT
 #if !__UNISA_FTRIM_LIBC || __UN_mkdtemp
 static char *mkdtemp(char *__u_t) {
-    static unsigned long __u_seq;
-    long __u_n; long __u_j; int __u_try; long __u_r; unsigned long __u_v;
+    static __u_uword __u_seq;
+    __u_word __u_n; __u_word __u_j; int __u_try; __u_word __u_r; __u_uword __u_v;
     __u_n = 0; while (__u_t[__u_n]) __u_n = __u_n + 1;
     if (__u_n < 6) { errno = EINVAL; return 0; }
     __u_j = __u_n - 6; while (__u_j < __u_n) { if (__u_t[__u_j] != 88) { errno = EINVAL; return 0; } __u_j = __u_j + 1; }
     __u_try = 0;
     while (__u_try < 100) {
         __u_seq = __u_seq + 1;
-        __u_v = ((unsigned long)&__u_try >> 4) * 2654435761u + __u_seq * 40503u + 17;
+        __u_v = ((__u_uword)&__u_try >> 4) * 2654435761u + __u_seq * 40503u + 17;
         __u_j = __u_n - 6;
         while (__u_j < __u_n) { __u_t[__u_j] = (char)(97 + __u_v % 26); __u_v = __u_v / 26 + __u_seq * 7; __u_j = __u_j + 1; }
 #ifdef _WIN32
-        {   static long __u_cd; long __u_ok; int __u_e;
+        {   static __u_word __u_cd; __u_word __u_ok; int __u_e;
             if (!__u_cd) _ux_load(__u_cd, "CreateDirectoryA");
-            _ux_go(__u_ok, __u_cd, (long)__u_t, 0, 0, 0);
+            _ux_go(__u_ok, __u_cd, (__u_word)__u_t, 0, 0, 0);
             __u_ok = __u_ok & 0xFFFFFFFFL;
             if (__u_ok) return __u_t;
             _ux_err(__u_e); errno = __u_e;
@@ -434,13 +486,13 @@ static char *mkdtemp(char *__u_t) {
 #define _U_BL 200
 #if !__UNISA_FTRIM_LIBC || __UN__u_bn_muls
 static void _u_bn_muls(unsigned int *__u_a, int *__u_n, unsigned int __u_k) {
-    unsigned long __u_c; int __u_i; __u_c = 0;
-    for (__u_i = 0; __u_i < *__u_n; __u_i++) { __u_c = __u_c + (unsigned long)__u_a[__u_i] * __u_k; __u_a[__u_i] = (unsigned int)__u_c; __u_c = __u_c >> 32; }
+    __u_uword __u_c; int __u_i; __u_c = 0;
+    for (__u_i = 0; __u_i < *__u_n; __u_i++) { __u_c = __u_c + (__u_uword)__u_a[__u_i] * __u_k; __u_a[__u_i] = (unsigned int)__u_c; __u_c = __u_c >> 32; }
     if (__u_c && *__u_n < _U_BL) { __u_a[*__u_n] = (unsigned int)__u_c; *__u_n = *__u_n + 1; }
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN__u_bn_shl
-static void _u_bn_shl(unsigned int *__u_a, int *__u_n, long __u_b) {
+static void _u_bn_shl(unsigned int *__u_a, int *__u_n, __u_word __u_b) {
     int __u_w; int __u_s; int __u_i;
     __u_w = (int)(__u_b >> 5); __u_s = (int)(__u_b & 31);
     if (*__u_n == 0) return;
@@ -454,7 +506,7 @@ static void _u_bn_shl(unsigned int *__u_a, int *__u_n, long __u_b) {
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN__u_bn_pow10
-static void _u_bn_pow10(unsigned int *__u_a, int *__u_n, long __u_x) {
+static void _u_bn_pow10(unsigned int *__u_a, int *__u_n, __u_word __u_x) {
     while (__u_x >= 9) { _u_bn_muls(__u_a, __u_n, 1000000000u); __u_x = __u_x - 9; }
     while (__u_x > 0) { _u_bn_muls(__u_a, __u_n, 10u); __u_x = __u_x - 1; }
 }
@@ -472,27 +524,27 @@ static int _u_bn_cmp(unsigned int *__u_a, int __u_na, unsigned int *__u_b, int _
 /* sign of D*10^x10 - (2m+1)*2^(e-1), the halfway point above v; D = the digits
    s[0..len) skipping '.', at most 780 significant (the rest only make it bigger) */
 #if !__UNISA_FTRIM_LIBC || __UN__u_sd_cmp
-static int _u_sd_cmp(const char *__u_s, long __u_len, long __u_x10, double __u_v) {
+static int _u_sd_cmp(const char *__u_s, __u_word __u_len, __u_word __u_x10, double __u_v) {
     static unsigned int __u_d[_U_BL]; static unsigned int __u_h[_U_BL];
-    int __u_nd; int __u_nh; int __u_sticky; int __u_c; long __u_i; long __u_cnt; long __u_xx;
-    unsigned long __u_bits; unsigned long __u_m; long __u_e;
+    int __u_nd; int __u_nh; int __u_sticky; int __u_c; __u_word __u_i; __u_word __u_cnt; __u_word __u_xx;
+    __u_uword __u_bits; __u_uword __u_m; __u_word __u_e;
     __u_nd = 0; __u_sticky = 0; __u_cnt = 0; __u_xx = __u_x10;
     for (__u_i = 0; __u_i < __u_len; __u_i++) {
-        int __u_ch; unsigned long __u_c2; int __u_j;
+        int __u_ch; __u_uword __u_c2; int __u_j;
         __u_ch = __u_s[__u_i];
         if (__u_ch == 46) continue;
         if (__u_cnt >= 780) { if (__u_ch != 48) __u_sticky = 1; __u_xx = __u_xx + 1; continue; }
         if (__u_nd == 0 && __u_ch == 48) continue;
         if (__u_nd == 0) { __u_d[0] = 0; __u_nd = 1; }
         _u_bn_muls(__u_d, &__u_nd, 10u);
-        __u_c2 = (unsigned long)(__u_ch - 48);
+        __u_c2 = (__u_uword)(__u_ch - 48);
         for (__u_j = 0; __u_c2 && __u_j < __u_nd; __u_j++) { __u_c2 = __u_c2 + __u_d[__u_j]; __u_d[__u_j] = (unsigned int)__u_c2; __u_c2 = __u_c2 >> 32; }
         if (__u_c2 && __u_nd < _U_BL) { __u_d[__u_nd] = (unsigned int)__u_c2; __u_nd = __u_nd + 1; }
         __u_cnt = __u_cnt + 1;
     }
     if (__u_nd == 0) return 0 - 1;
-    __u_bits = *(unsigned long *)&__u_v;
-    __u_e = (long)((__u_bits >> 52) & 2047); __u_m = __u_bits & 4503599627370495;
+    __u_bits = *(__u_uword *)&__u_v;
+    __u_e = (__u_word)((__u_bits >> 52) & 2047); __u_m = __u_bits & 4503599627370495;
     if (__u_e == 0) __u_e = 1; else __u_m = __u_m | 4503599627370496;
     __u_e = __u_e - 1075;
     __u_m = 2 * __u_m + 1;
@@ -506,10 +558,10 @@ static int _u_sd_cmp(const char *__u_s, long __u_len, long __u_x10, double __u_v
 #endif
 /* walk the guess (finite, >= 0, a few ulp off) to the correctly rounded double */
 #if !__UNISA_FTRIM_LIBC || __UN__u_sd_fix
-static double _u_sd_fix(const char *__u_s, long __u_len, long __u_x10, double __u_v) {
-    unsigned long __u_b; unsigned long __u_lb; int __u_c; int __u_k;
+static double _u_sd_fix(const char *__u_s, __u_word __u_len, __u_word __u_x10, double __u_v) {
+    __u_uword __u_b; __u_uword __u_lb; int __u_c; int __u_k;
     for (__u_k = 0; __u_k < 64; __u_k++) {
-        __u_b = *(unsigned long *)&__u_v;
+        __u_b = *(__u_uword *)&__u_v;
         if (__u_b >= 9218868437227405312) return __u_v;              /* inf or nan */
         __u_c = _u_sd_cmp(__u_s, __u_len, __u_x10, __u_v);
         if (__u_c > 0 || (__u_c == 0 && (__u_b & 1))) { __u_b = __u_b + 1; __u_v = *(double *)&__u_b; continue; }
@@ -524,15 +576,15 @@ static double _u_sd_fix(const char *__u_s, long __u_len, long __u_x10, double __
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_strtod
 static double strtod(const char *__u_s, char **__u_end) {
-    double __u_v; int __u_sign; long __u_i; int __u_any;
-    long __u_e; int __u_esign;
+    double __u_v; int __u_sign; __u_word __u_i; int __u_any;
+    __u_word __u_e; int __u_esign;
     __u_v = 0.0; __u_sign = 1; __u_i = 0; __u_any = 0;
     while (__u_s[__u_i] == 32 || (__u_s[__u_i] >= 9 && __u_s[__u_i] <= 13)) __u_i = __u_i + 1;
     if (__u_s[__u_i] == 45) { __u_sign = 0 - 1; __u_i = __u_i + 1; }
     else { if (__u_s[__u_i] == 43) __u_i = __u_i + 1; }
     /* C99 hexadecimal form: 0x hex-digits [. hex-digits] [p [+-] decimal] */
     if (__u_s[__u_i] == 48 && (__u_s[__u_i + 1] | 32) == 120) {
-        long __u_k; int __u_d; long __u_be; int __u_hany;
+        __u_word __u_k; int __u_d; __u_word __u_be; int __u_hany;
         __u_k = __u_i + 2; __u_hany = 0; __u_be = 0;
         while (1) {
             __u_d = __u_s[__u_k];
@@ -553,7 +605,7 @@ static double strtod(const char *__u_s, char **__u_end) {
         }
         if (__u_hany == 0) { if (__u_end) *__u_end = (char *)(__u_s + __u_i + 1); return 0.0 * (double)__u_sign; }
         if ((__u_s[__u_k] | 32) == 112) {
-            long __u_j; __u_j = __u_k + 1; __u_esign = 1;
+            __u_word __u_j; __u_j = __u_k + 1; __u_esign = 1;
             if (__u_s[__u_j] == 45) { __u_esign = 0 - 1; __u_j = __u_j + 1; }
             else { if (__u_s[__u_j] == 43) __u_j = __u_j + 1; }
             if (__u_s[__u_j] >= 48 && __u_s[__u_j] <= 57) {
@@ -572,23 +624,23 @@ static double strtod(const char *__u_s, char **__u_end) {
     /* Up to 19 significant digits are kept exactly in an integer and scaled
      * once by a power of ten; with at most 2^53 and |power| <= 22 that is a
      * single rounding (Clinger's fast path), so 2^63 and 10^i come out exact. */
-    {   unsigned long __u_m; long __u_x10; double __u_p; long __u_q;
-        long __u_ds; long __u_de; long __u_fd; long __u_ex; int __u_drop;
+    {   __u_uword __u_m; __u_word __u_x10; double __u_p; __u_word __u_q;
+        __u_word __u_ds; __u_word __u_de; __u_word __u_fd; __u_word __u_ex; int __u_drop;
         __u_m = 0; __u_x10 = 0; __u_ds = __u_i; __u_fd = 0; __u_ex = 0; __u_drop = 0;
         while (__u_s[__u_i] >= 48 && __u_s[__u_i] <= 57) {
-            if (__u_m < 1844674407370955161) __u_m = __u_m * 10 + (unsigned long)(__u_s[__u_i] - 48); else { __u_x10 = __u_x10 + 1; __u_drop = 1; }
+            if (__u_m < 1844674407370955161) __u_m = __u_m * 10 + (__u_uword)(__u_s[__u_i] - 48); else { __u_x10 = __u_x10 + 1; __u_drop = 1; }
             __u_i = __u_i + 1; __u_any = 1;
         }
         if (__u_s[__u_i] == 46) {
             __u_i = __u_i + 1;
             while (__u_s[__u_i] >= 48 && __u_s[__u_i] <= 57) {
-                if (__u_m < 1844674407370955161) { __u_m = __u_m * 10 + (unsigned long)(__u_s[__u_i] - 48); __u_x10 = __u_x10 - 1; } else __u_drop = 1;
+                if (__u_m < 1844674407370955161) { __u_m = __u_m * 10 + (__u_uword)(__u_s[__u_i] - 48); __u_x10 = __u_x10 - 1; } else __u_drop = 1;
                 __u_i = __u_i + 1; __u_any = 1; __u_fd = __u_fd + 1;
             }
         }
         __u_de = __u_i;
         if (__u_any) { if (__u_s[__u_i] == 101 || __u_s[__u_i] == 69) {
-            long __u_j; __u_j = __u_i + 1; __u_esign = 1;
+            __u_word __u_j; __u_j = __u_i + 1; __u_esign = 1;
             if (__u_s[__u_j] == 45) { __u_esign = 0 - 1; __u_j = __u_j + 1; }
             else { if (__u_s[__u_j] == 43) __u_j = __u_j + 1; }
             if (__u_s[__u_j] >= 48 && __u_s[__u_j] <= 57) {
@@ -599,12 +651,12 @@ static double strtod(const char *__u_s, char **__u_end) {
         } }
         while (__u_m != 0 && __u_x10 < 0 && __u_m % 10 == 0) { __u_m = __u_m / 10; __u_x10 = __u_x10 + 1; }
         __u_drop = __u_drop || __u_m > 9007199254740992 || __u_x10 > 22 || __u_x10 < 0 - 22;
-        if (__u_m >> 63) __u_v = (double)(long)(__u_m >> 1) * 2.0 + (double)(long)(__u_m & 1); else __u_v = (double)(long)__u_m;
+        if (__u_m >> 63) __u_v = (double)(__u_word)(__u_m >> 1) * 2.0 + (double)(__u_word)(__u_m & 1); else __u_v = (double)(__u_word)__u_m;
         /* decimal magnitude of the leading digit: past 10^309 the value overflows, below 10^-325
            it underflows to zero -- decided here, because the big-integer walk below only moves a
            few ulp and its integers do not reach such exponents */
         if (__u_m != 0) {
-            unsigned long __u_t; long __u_mag; __u_t = __u_m; __u_mag = __u_x10 - 1;
+            __u_uword __u_t; __u_word __u_mag; __u_t = __u_m; __u_mag = __u_x10 - 1;
             while (__u_t) { __u_t = __u_t / 10; __u_mag = __u_mag + 1; }
             if (__u_mag > 309) { __u_m = 0; __u_v = 1.0e300 * 1.0e300; __u_drop = 0; }
             else { if (__u_mag < 0 - 325) { __u_m = 0; __u_v = 0.0; __u_drop = 0; errno = ERANGE; } }
@@ -638,7 +690,7 @@ static double strtold(const char *__u_s, char **__u_end) { return strtod(__u_s, 
 static double atof(const char *__u_s) { return strtod(__u_s, 0); }
 #endif
 
-static long _unisa_seed = 1;
+static __u_word _unisa_seed = 1;
 #if !__UNISA_FTRIM_LIBC || __UN_rand
 static int rand(void) {
     _unisa_seed = _unisa_seed * 1103515245 + 12345;
@@ -672,8 +724,8 @@ static lldiv_t lldiv(long long __u_a, long long __u_b) { lldiv_t __u_r; __u_r.qu
 #endif
 
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_swap
-static void _unisa_swap(char *__u_a, char *__u_b, long __u_n) {
-    long __u_i; char __u_t;
+static void _unisa_swap(char *__u_a, char *__u_b, __u_word __u_n) {
+    __u_word __u_i; char __u_t;
     __u_i = 0;
     while (__u_i < __u_n) { __u_t = __u_a[__u_i]; __u_a[__u_i] = __u_b[__u_i]; __u_b[__u_i] = __u_t; __u_i = __u_i + 1; }
 }
@@ -681,8 +733,8 @@ static void _unisa_swap(char *__u_a, char *__u_b, long __u_n) {
 
 /* Sift element `i` of a heap of `n` elements down to its place. */
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_sift
-static void _unisa_sift(char *__u_base, long __u_n, long __u_sz, long __u_i, int (*__u_cmp)(const void *, const void *)) {
-    long __u_c;
+static void _unisa_sift(char *__u_base, __u_word __u_n, __u_word __u_sz, __u_word __u_i, int (*__u_cmp)(const void *, const void *)) {
+    __u_word __u_c;
     while (1) {
         __u_c = 2 * __u_i + 1;
         if (__u_c >= __u_n) return;
@@ -695,8 +747,8 @@ static void _unisa_sift(char *__u_base, long __u_n, long __u_sz, long __u_i, int
 #endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_qsort
-static void qsort(void *__u_v, long __u_n, long __u_sz, int (*__u_cmp)(const void *, const void *)) {
-    char *__u_base; long __u_i;
+static void qsort(void *__u_v, __u_word __u_n, __u_word __u_sz, int (*__u_cmp)(const void *, const void *)) {
+    char *__u_base; __u_word __u_i;
     __u_base = (char *)__u_v;
     if (__u_n < 2) return;
     __u_i = __u_n / 2;
@@ -711,8 +763,8 @@ static void qsort(void *__u_v, long __u_n, long __u_sz, int (*__u_cmp)(const voi
 #endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_bsearch
-static void *bsearch(const void *__u_key, const void *__u_v, long __u_n, long __u_sz, int (*__u_cmp)(const void *, const void *)) {
-    char *__u_base; long __u_lo; long __u_hi; long __u_mid; int __u_c;
+static void *bsearch(const void *__u_key, const void *__u_v, __u_word __u_n, __u_word __u_sz, int (*__u_cmp)(const void *, const void *)) {
+    char *__u_base; __u_word __u_lo; __u_word __u_hi; __u_word __u_mid; int __u_c;
     __u_base = (char *)__u_v; __u_lo = 0; __u_hi = __u_n;
     while (__u_lo < __u_hi) {
         __u_mid = __u_lo + (__u_hi - __u_lo) / 2;
@@ -769,8 +821,8 @@ __attribute__((constructor)) static void _unisa_environ_init(void) {
    when the product lowers it (the compiler itself must not need it yet). */
 /* the index in environ of the entry "NAME=...", or -1 (NAME holds no '=') */
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_envfind
-static long _unisa_envfind(const char *__u_name) {
-    long __u_k; int __u_i; char *__u_e;
+static __u_word _unisa_envfind(const char *__u_name) {
+    __u_word __u_k; int __u_i; char *__u_e;
     if (!_unisa_env) _unisa_environ_init();   /* called from a constructor that ran first */
     for (__u_k = 0; (__u_e = _unisa_env[__u_k]) != 0; __u_k++) {
         __u_i = 0;
@@ -782,7 +834,7 @@ static long _unisa_envfind(const char *__u_name) {
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_getenv
 static char *getenv(const char *__u_name) {
-    long __u_k; int __u_i;
+    __u_word __u_k; int __u_i;
     __u_k = _unisa_envfind(__u_name);
     if (__u_k < 0) return 0;
     __u_i = 0; while (_unisa_env[__u_k][__u_i] != 61) __u_i = __u_i + 1;
@@ -794,11 +846,11 @@ static char *getenv(const char *__u_name) {
    valid, as glibc and the BSDs keep them.  Appending past the kernel's copy (or past an
    array the program assigned to environ) moves environ to a malloc'd array twice as big. */
 #if !__UNISA_FTRIM_LIBC || __UN_setenv
-static char **_unisa_envheap; static long _unisa_envcap;
+static char **_unisa_envheap; static __u_word _unisa_envcap;
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_setenv
 static int setenv(const char *__u_name, const char *__u_val, int __u_over) {
-    long __u_k; long __u_n; long __u_i; long __u_j; char *__u_s; char **__u_a;
+    __u_word __u_k; __u_word __u_n; __u_word __u_i; __u_word __u_j; char *__u_s; char **__u_a;
     if (!__u_name || !__u_name[0]) { errno = EINVAL; return -1; }
     for (__u_i = 0; __u_name[__u_i]; __u_i++) if (__u_name[__u_i] == 61) { errno = EINVAL; return -1; }
     __u_k = _unisa_envfind(__u_name);
@@ -826,7 +878,7 @@ static int setenv(const char *__u_name, const char *__u_val, int __u_over) {
 /* unsetenv: every "NAME=..." entry leaves environ, the rest keep their order */
 #if !__UNISA_FTRIM_LIBC || __UN_unsetenv
 static int unsetenv(const char *__u_name) {
-    long __u_k; long __u_m; int __u_i;
+    __u_word __u_k; __u_word __u_m; int __u_i;
     if (!__u_name || !__u_name[0]) { errno = EINVAL; return -1; }
     for (__u_i = 0; __u_name[__u_i]; __u_i++) if (__u_name[__u_i] == 61) { errno = EINVAL; return -1; }
     while ((__u_k = _unisa_envfind(__u_name)) >= 0) {

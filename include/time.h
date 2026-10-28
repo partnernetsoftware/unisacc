@@ -7,13 +7,14 @@
 #ifndef _UNISA_TIME_H
 #define _UNISA_TIME_H
 #include <stddef.h>
+#include <sys/_word.h>   /* LLP64: times, offsets and host slots are the 8-byte __u_word */
 #define NULL 0
 #define CLOCKS_PER_SEC 1000000
 #ifndef _UNISA_TIME_T
 #define _UNISA_TIME_T
-typedef long time_t;
+typedef __u_word time_t;
 #endif
-typedef long clock_t;
+typedef __u_word clock_t;
 #include <sys/_timespec.h>
 #include <sys/_ret.h>
 /* clock_gettime / nanosleep (0.0.20 R20-6, dsh).  Linux: the system calls.
@@ -28,25 +29,25 @@ typedef int clockid_t;
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_clock_gettime
 static int clock_gettime(clockid_t __u_c, struct timespec *__u_ts) {
-    long __u_r;
+    __u_word __u_r;
 #ifdef _WIN32
-    static long __u_ft; static long __u_qc; static long __u_qf; static long __u_freq;
-    unsigned int __u_t[2]; long __u_v;
+    static __u_word __u_ft; static __u_word __u_qc; static __u_word __u_qf; static __u_word __u_freq;
+    unsigned int __u_t[2]; __u_word __u_v;
     if (__u_c == CLOCK_REALTIME) {            /* GetSystemTimePreciseAsFileTime */
         if (!__u_ft) __u_ft = _ux_sym("GetSystemTimePreciseAsFileTime");
-        __u_t[0] = 0; __u_t[1] = 0; _ux_call(__u_ft, (long)__u_t, 0, 0, 0);
-        __u_v = (((long)__u_t[1] << 32) | (long)__u_t[0]) - 116444736000000000L;
-        __u_ts->tv_sec = __u_v / 10000000L; __u_ts->tv_nsec = (__u_v % 10000000L) * 100;
+        __u_t[0] = 0; __u_t[1] = 0; _ux_call(__u_ft, (__u_word)__u_t, 0, 0, 0);
+        __u_v = (((__u_word)__u_t[1] << 32) | (__u_word)__u_t[0]) - 116444736000000000L;
+        __u_ts->tv_sec = __u_v / 10000000L; __u_ts->tv_nsec = (long)((__u_v % 10000000L) * 100);
         return 0;
     }
     if (__u_c != CLOCK_MONOTONIC) return (int)_unisa_ret(0 - 22);
     if (!__u_qc) { __u_qc = _ux_sym("QueryPerformanceCounter"); __u_qf = _ux_sym("QueryPerformanceFrequency"); }
-    if (!__u_freq) { _ux_call(__u_qf, (long)&__u_freq, 0, 0, 0); if (__u_freq <= 0) __u_freq = 1; }
-    __u_r = 0; _ux_call(__u_qc, (long)&__u_r, 0, 0, 0);
-    __u_ts->tv_sec = __u_r / __u_freq; __u_ts->tv_nsec = (__u_r % __u_freq) * 1000000000L / __u_freq;
+    if (!__u_freq) { _ux_call(__u_qf, (__u_word)&__u_freq, 0, 0, 0); if (__u_freq <= 0) __u_freq = 1; }
+    __u_r = 0; _ux_call(__u_qc, (__u_word)&__u_r, 0, 0, 0);
+    __u_ts->tv_sec = __u_r / __u_freq; __u_ts->tv_nsec = (long)((__u_r % __u_freq) * 1000000000L / __u_freq);
     return 0;
 #elif defined(__APPLE__)
-    long __u_tv[2];
+    __u_word __u_tv[2];
     if (__u_c != CLOCK_REALTIME && __u_c != CLOCK_MONOTONIC) return (int)_unisa_ret(0 - 22);
     __u_tv[0] = 0; __u_tv[1] = 0;
     __u_r = __gettimeofday((char *)__u_tv, 0, 0);
@@ -54,10 +55,10 @@ static int clock_gettime(clockid_t __u_c, struct timespec *__u_ts) {
     __u_ts->tv_sec = __u_tv[0]; __u_ts->tv_nsec = __u_tv[1] * 1000;
     return 0;
 #elif defined(__x86_64__)
-    __u_r = __syscall6(228, __u_c, (long)__u_ts, 0, 0, 0);
+    __u_r = __syscall6(228, __u_c, (__u_word)__u_ts, 0, 0, 0);
     return (int)_unisa_ret(__u_r);
 #else
-    __u_r = __syscall6(113, __u_c, (long)__u_ts, 0, 0, 0);
+    __u_r = __syscall6(113, __u_c, (__u_word)__u_ts, 0, 0, 0);
     return (int)_unisa_ret(__u_r);
 #endif
 }
@@ -81,14 +82,14 @@ struct tm {
 #if !__UNISA_FTRIM_LIBC || __UN_time
 static time_t time(time_t *__u_t) {
 #ifdef _WIN32
-    static long __u_f; unsigned int __u_ft[2]; long __u_s;   /* GetSystemTimeAsFileTime */
+    static __u_word __u_f; unsigned int __u_ft[2]; __u_word __u_s;   /* GetSystemTimeAsFileTime */
     if (!__u_f) __u_f = _ux_sym("GetSystemTimeAsFileTime");
-    __u_ft[0] = 0; __u_ft[1] = 0; _ux_call(__u_f, (long)__u_ft, 0, 0, 0);
+    __u_ft[0] = 0; __u_ft[1] = 0; _ux_call(__u_f, (__u_word)__u_ft, 0, 0, 0);
     __u_s = _ux_ft2unix(__u_ft);
     if (__u_t) *__u_t = __u_s;
     return __u_s;
 #else
-    long __u_tv[2]; long __u_r;
+    __u_word __u_tv[2]; __u_word __u_r;
     __u_tv[0] = 0; __u_tv[1] = 0;
     __u_r = __gettimeofday((char *)__u_tv, 0, 0);
     if (__u_r < 0) return (time_t)(0 - 1);
@@ -112,8 +113,8 @@ static time_t time(time_t *__u_t) {
    read.  struct tm has no tm_gmtoff/tm_zone there: %Z prints "UTC" for a
    zero offset and "" otherwise, %z the current bias. */
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_days_from_civil
-static long _unisa_days_from_civil(long y, int m, int d) {
-    long era; long yoe; long doy; long doe;
+static __u_word _unisa_days_from_civil(__u_word y, int m, int d) {
+    __u_word era; __u_word yoe; __u_word doy; __u_word doe;
     y = y - (m <= 2); era = (y >= 0 ? y : y - 399) / 400;
     yoe = y - era * 400; doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
     doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
@@ -121,8 +122,8 @@ static long _unisa_days_from_civil(long y, int m, int d) {
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_civil
-static void _unisa_civil(long z, long *py, int *pm, int *pd) {
-    long era; long doe; long yoe; long doy; long mp; long y; int m;
+static void _unisa_civil(__u_word z, __u_word *py, int *pm, int *pd) {
+    __u_word era; __u_word doe; __u_word yoe; __u_word doy; __u_word mp; __u_word y; int m;
     z = z + 719468; era = (z >= 0 ? z : z - 146096) / 146097;
     doe = z - era * 146097; yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
     y = yoe + era * 400; doy = doe - (365 * yoe + yoe / 4 - yoe / 100); mp = (5 * doy + 2) / 153;
@@ -131,11 +132,11 @@ static void _unisa_civil(long z, long *py, int *pm, int *pd) {
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_leap
-static int _unisa_leap(long y) { return (y % 4 == 0 && y % 100 != 0) || y % 400 == 0; }
+static int _unisa_leap(__u_word y) { return (y % 4 == 0 && y % 100 != 0) || y % 400 == 0; }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_fill
-static struct tm *_unisa_fill(long t, long off, int dst, const char *zone, struct tm *r) {
-    long days; long sec; long y; int m; int d; static int cum[12] = { 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 };
+static struct tm *_unisa_fill(__u_word t, __u_word off, int dst, const char *zone, struct tm *r) {
+    __u_word days; __u_word sec; __u_word y; int m; int d; static int cum[12] = { 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 };
     t = t + off; days = t / 86400; sec = t % 86400; if (sec < 0) { sec = sec + 86400; days = days - 1; }
     _unisa_civil(days, &y, &m, &d);
     r->tm_sec = (int)(sec % 60); r->tm_min = (int)(sec / 60 % 60); r->tm_hour = (int)(sec / 3600);
@@ -150,16 +151,16 @@ static struct tm *_unisa_fill(long t, long off, int dst, const char *zone, struc
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_gmtime_r
-static struct tm *gmtime_r(const time_t *__u_t, struct tm *__u_r) { return _unisa_fill((long)*__u_t, 0, 0, "UTC", __u_r); }
+static struct tm *gmtime_r(const time_t *__u_t, struct tm *__u_r) { return _unisa_fill((__u_word)*__u_t, 0, 0, "UTC", __u_r); }
 #endif
 static struct tm _unisa_tmbuf;
 #if !__UNISA_FTRIM_LIBC || __UN_gmtime
 static struct tm *gmtime(const time_t *__u_t) { return gmtime_r(__u_t, &_unisa_tmbuf); }
 #endif
 /* the zone, loaded once */
-static unsigned char _unisa_tz[65536]; static long _unisa_tzn; static int _unisa_tzstate;   /* 0 not loaded, 1 TZif, 2 UTC */
+static unsigned char _unisa_tz[65536]; static __u_word _unisa_tzn; static int _unisa_tzstate;   /* 0 not loaded, 1 TZif, 2 UTC */
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_be
-static long _unisa_be(const unsigned char *p, int n) { long v; int k; v = 0; k = 0; while (k < n) { v = (v << 8) | p[k]; k = k + 1; } if (n == 4 && (v & 0x80000000L)) v = v - 4294967296L; return v; }
+static __u_word _unisa_be(const unsigned char *p, int n) { __u_word v; int k; v = 0; k = 0; while (k < n) { v = (v << 8) | p[k]; k = k + 1; } if (n == 4 && (v & 0x80000000L)) v = v - 4294967296L; return v; }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_envget
 static char *_unisa_envget(const char *nm) {
@@ -170,7 +171,7 @@ static char *_unisa_envget(const char *nm) {
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_tzload
 static void _unisa_tzload(void) {
-    char path[512]; char *tz; long fd; int q; char *pre;
+    char path[512]; char *tz; __u_word fd; int q; char *pre;
     if (_unisa_tzstate) return;
 #ifdef _WIN32
     _unisa_tzstate = 2; (void)path; (void)tz; (void)fd; (void)q; (void)pre;
@@ -193,13 +194,13 @@ static void _unisa_tzload(void) {
 #endif
 /* offset, dst and abbreviation in effect at UTC time t */
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_tzat
-static long _unisa_tzat(long t, int *dst, const char **zone) {
-    unsigned char *h; long isut; long isstd; long leap; long tc; long ty; long ch; int tsz; long p; long i; long idx; unsigned char *tt;
+static __u_word _unisa_tzat(__u_word t, int *dst, const char **zone) {
+    unsigned char *h; __u_word isut; __u_word isstd; __u_word leap; __u_word tc; __u_word ty; __u_word ch; int tsz; __u_word p; __u_word i; __u_word idx; unsigned char *tt;
 #ifdef _WIN32
-    static long __u_gz; int __u_ti[43]; long __u_k; long __u_b;   /* TIME_ZONE_INFORMATION, 172 bytes */
+    static __u_word __u_gz; int __u_ti[43]; __u_word __u_k; __u_word __u_b;   /* TIME_ZONE_INFORMATION, 172 bytes */
     if (!__u_gz) __u_gz = _ux_sym("GetTimeZoneInformation");
     __u_ti[0] = 0; __u_ti[21] = 0; __u_ti[42] = 0;
-    __u_k = _ux_call(__u_gz, (long)__u_ti, 0, 0, 0) & 0xFFFFFFFFL;
+    __u_k = _ux_call(__u_gz, (__u_word)__u_ti, 0, 0, 0) & 0xFFFFFFFFL;
     __u_b = __u_ti[0] + (__u_k == 2 ? __u_ti[42] : (__u_k == 1 ? __u_ti[21] : 0));   /* Bias + DaylightBias / StandardBias, minutes */
     *dst = __u_k == 2; *zone = __u_b == 0 ? "UTC" : "";
     (void)t; (void)h; (void)isut; (void)isstd; (void)leap; (void)tc; (void)ty; (void)ch; (void)tsz; (void)p; (void)i; (void)idx; (void)tt;
@@ -228,9 +229,9 @@ static long _unisa_tzat(long t, int *dst, const char **zone) {
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_localtime_r
 static struct tm *localtime_r(const time_t *__u_t, struct tm *__u_r) {
-    int dst; const char *zone; long off;
-    off = _unisa_tzat((long)*__u_t, &dst, &zone);
-    return _unisa_fill((long)*__u_t, off, dst, zone, __u_r);
+    int dst; const char *zone; __u_word off;
+    off = _unisa_tzat((__u_word)*__u_t, &dst, &zone);
+    return _unisa_fill((__u_word)*__u_t, off, dst, zone, __u_r);
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_localtime
@@ -238,7 +239,7 @@ static struct tm *localtime(const time_t *__u_t) { return localtime_r(__u_t, &_u
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_mktime
 static time_t mktime(struct tm *__u_tm) {
-    long y; long m; long days; long t; long off; int dst; const char *zone;
+    __u_word y; __u_word m; __u_word days; __u_word t; __u_word off; int dst; const char *zone;
     m = __u_tm->tm_mon; y = __u_tm->tm_year + 1900L + m / 12; m = m % 12; if (m < 0) { m = m + 12; y = y - 1; }
     days = _unisa_days_from_civil(y, (int)m + 1, 1) + __u_tm->tm_mday - 1;
     t = days * 86400 + __u_tm->tm_hour * 3600L + __u_tm->tm_min * 60L + __u_tm->tm_sec;
@@ -254,7 +255,7 @@ static const char *_unisa_mon[12] = { "January", "February", "March", "April", "
 static size_t _unisa_put(char *s, size_t max, size_t n, const char *t, int k) { int i; i = 0; while (i < k && t[i]) { if (n + 1 < max) s[n] = t[i]; n = n + 1; i = i + 1; } return n; }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_num
-static size_t _unisa_num(char *s, size_t max, size_t n, long v, int w, int pad) {
+static size_t _unisa_num(char *s, size_t max, size_t n, __u_word v, int w, int pad) {
     char d[24]; int k; int neg; neg = v < 0; if (neg) v = 0 - v; k = 0;
     do { d[k] = (char)(48 + v % 10); v = v / 10; k = k + 1; } while (v > 0);
     while (k < w) { d[k] = (char)pad; k = k + 1; }
@@ -265,7 +266,7 @@ static size_t _unisa_num(char *s, size_t max, size_t n, long v, int w, int pad) 
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_strftime
 static size_t strftime(char *__u_s, size_t __u_max, const char *__u_f, const struct tm *__u_tm) {
-    size_t n; int c; long y;
+    size_t n; int c; __u_word y;
     n = 0; y = __u_tm->tm_year + 1900L;
     while (*__u_f) {
         if (*__u_f != 37) { if (n + 1 < __u_max) __u_s[n] = *__u_f; n = n + 1; __u_f = __u_f + 1; continue; }
@@ -293,14 +294,14 @@ static size_t strftime(char *__u_s, size_t __u_max, const char *__u_f, const str
         else if (c == 116) n = _unisa_put(__u_s, __u_max, n, "\t", 1);
         else if (c == 37) n = _unisa_put(__u_s, __u_max, n, "%", 1);
 #ifdef _WIN32
-        else if (c == 90 || c == 122) { int __u_dz; const char *__u_z; long o; o = _unisa_tzat(0, &__u_dz, &__u_z);
+        else if (c == 90 || c == 122) { int __u_dz; const char *__u_z; __u_word o; o = _unisa_tzat(0, &__u_dz, &__u_z);
             if (c == 90) n = _unisa_put(__u_s, __u_max, n, __u_z, 99);
             else { n = _unisa_put(__u_s, __u_max, n, o < 0 ? "-" : "+", 1); if (o < 0) o = 0 - o; n = _unisa_num(__u_s, __u_max, n, o / 3600 * 100 + o / 60 % 60, 4, 48); } }
 #else
         else if (c == 90) n = _unisa_put(__u_s, __u_max, n, __u_tm->tm_zone ? __u_tm->tm_zone : "", 99);
-        else if (c == 122) { long o; o = __u_tm->tm_gmtoff; n = _unisa_put(__u_s, __u_max, n, o < 0 ? "-" : "+", 1); if (o < 0) o = 0 - o; n = _unisa_num(__u_s, __u_max, n, o / 3600 * 100 + o / 60 % 60, 4, 48); }
+        else if (c == 122) { __u_word o; o = __u_tm->tm_gmtoff; n = _unisa_put(__u_s, __u_max, n, o < 0 ? "-" : "+", 1); if (o < 0) o = 0 - o; n = _unisa_num(__u_s, __u_max, n, o / 3600 * 100 + o / 60 % 60, 4, 48); }
 #endif
-        else if (c == 115) { struct tm __u_c; __u_c = *__u_tm; n = _unisa_num(__u_s, __u_max, n, (long)mktime(&__u_c), 1, 48); }
+        else if (c == 115) { struct tm __u_c; __u_c = *__u_tm; n = _unisa_num(__u_s, __u_max, n, (__u_word)mktime(&__u_c), 1, 48); }
         else if (c == 68) n = n + strftime(__u_s + (n < __u_max ? n : __u_max), n < __u_max ? __u_max - n : 0, "%m/%d/%y", __u_tm);
         else if (c == 70) n = n + strftime(__u_s + (n < __u_max ? n : __u_max), n < __u_max ? __u_max - n : 0, "%Y-%m-%d", __u_tm);
         else if (c == 84 || c == 88) n = n + strftime(__u_s + (n < __u_max ? n : __u_max), n < __u_max ? __u_max - n : 0, "%H:%M:%S", __u_tm);
@@ -330,15 +331,15 @@ static double difftime(time_t __u_a, time_t __u_b) { return (double)(__u_a - __u
 #if !defined(_WIN32) && !defined(__UNISA_PYFRONT)
 #if !__UNISA_FTRIM_LIBC || __UN_clock
 static clock_t clock(void) {
-    long __u_ru[18]; long __u_r;
+    __u_word __u_ru[18]; __u_word __u_r;
 #if defined(__APPLE__) && defined(__x86_64__)
-    __u_r = __syscall6(0x2000000L + 117, 0, (long)__u_ru, 0, 0, 0);
+    __u_r = __syscall6(0x2000000L + 117, 0, (__u_word)__u_ru, 0, 0, 0);
 #elif defined(__APPLE__)
-    __u_r = __syscall6(117, 0, (long)__u_ru, 0, 0, 0);
+    __u_r = __syscall6(117, 0, (__u_word)__u_ru, 0, 0, 0);
 #elif defined(__x86_64__)
-    __u_r = __syscall6(98, 0, (long)__u_ru, 0, 0, 0);
+    __u_r = __syscall6(98, 0, (__u_word)__u_ru, 0, 0, 0);
 #else
-    __u_r = __syscall6(165, 0, (long)__u_ru, 0, 0, 0);
+    __u_r = __syscall6(165, 0, (__u_word)__u_ru, 0, 0, 0);
 #endif
     if (__u_r < 0) return (clock_t)(0 - 1);
     return (clock_t)((__u_ru[0] + __u_ru[2]) * 1000000 + (__u_ru[1] & 0xFFFFFFFFL) + (__u_ru[3] & 0xFFFFFFFFL));

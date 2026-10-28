@@ -8,6 +8,7 @@
  * SIGINT is never called by Ctrl-C.  That is stated rather than faked. */
 #ifndef _UNISA_SIGNAL_H
 #define _UNISA_SIGNAL_H
+#include <sys/_word.h>
 typedef int sig_atomic_t;
 #define SIG_DFL ((void (*)(int))0)
 #define SIG_IGN ((void (*)(int))1)
@@ -56,7 +57,7 @@ static int raise(int __u_sig) {
  * flags are kept for the caller to read back and otherwise have no effect;
  * sigprocmask answers the empty set. */
 #include <errno.h>
-typedef unsigned long sigset_t;
+typedef __u_uword sigset_t;
 struct sigaction {
     void (*sa_handler)(int);
     sigset_t sa_mask;
@@ -129,22 +130,22 @@ static int sigprocmask(int __u_how, const sigset_t *__u_set, sigset_t *__u_old) 
 #if !__UNISA_FTRIM_LIBC || __UN_kill
 static int kill(pid_t __u_pid, int __u_sig) {
 #ifdef _WIN32
-    static long __u_t;
+    static __u_word __u_t;
     if (__u_pid <= 0 || __u_sig < 0 || __u_sig >= _UNISA_NSIG) { errno = EINVAL; return -1; }
     if (__u_sig == 0) return 0;
     if (!__u_t) __u_t = _ux_sym("TerminateProcess");
-    if (!(_ux_call(__u_t, (long)__u_pid, 128 + __u_sig, 0, 0) & 0xFFFFFFFFL)) return (int)_ux_fail();
+    if (!(_ux_call(__u_t, (__u_word)__u_pid, 128 + __u_sig, 0, 0) & 0xFFFFFFFFL)) return (int)_ux_fail();
     return 0;
 #elif defined(__APPLE__)
 #if defined(__x86_64__)
-    return (int)_unisa_ret(__syscall6(0x2000000L + 37, (long)__u_pid, (long)__u_sig, 1, 0, 0));
+    return (int)_unisa_ret(__syscall6(0x2000000L + 37, (__u_word)__u_pid, (__u_word)__u_sig, 1, 0, 0));
 #else
-    return (int)_unisa_ret(__syscall6(37, (long)__u_pid, (long)__u_sig, 1, 0, 0));
+    return (int)_unisa_ret(__syscall6(37, (__u_word)__u_pid, (__u_word)__u_sig, 1, 0, 0));
 #endif
 #elif defined(__x86_64__)
-    return (int)_unisa_ret(__syscall6(62, (long)__u_pid, (long)__u_sig, 0, 0, 0));
+    return (int)_unisa_ret(__syscall6(62, (__u_word)__u_pid, (__u_word)__u_sig, 0, 0, 0));
 #else
-    return (int)_unisa_ret(__syscall6(129, (long)__u_pid, (long)__u_sig, 0, 0, 0));
+    return (int)_unisa_ret(__syscall6(129, (__u_word)__u_pid, (__u_word)__u_sig, 0, 0, 0));
 #endif
 }
 #endif
