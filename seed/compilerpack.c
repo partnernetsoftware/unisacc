@@ -140,8 +140,10 @@ int main(int argc, char **argv) {
         for (int j = 0; j < 7; j++) if (strcmp(T->stage[j][1], order[j])) die("unexpected image stages", T->name);
         for (int j = 0; j < 7; j++) T->stage[j][4] = resolved(base, T->stage[j][4]);
         T->nspec = nspecs; memcpy(T->spec, specs, sizeof *specs * nspecs);
-        int lnx = !strcmp(T->name, "lnx/x86_64") || !strcmp(T->name, "lnx/arm64");
-        if (lnx) { T->spec[T->nspec++] = (Spec){"object/O0", "elf", "none"}; T->spec[T->nspec++] = (Spec){"object/O1", "elf", "O1"}; T->spec[T->nspec++] = (Spec){"object/O2", "elf", "O2"}; }
+        int object_target = !strcmp(T->name, "lnx/x86_64") || !strcmp(T->name, "lnx/arm64") ||
+            !strcmp(T->name, "osx/x86_64") || !strcmp(T->name, "osx/arm64") ||
+            !strcmp(T->name, "win/x86_64") || !strcmp(T->name, "win/arm64");
+        if (object_target) { T->spec[T->nspec++] = (Spec){"object/O0", "elf", "none"}; T->spec[T->nspec++] = (Spec){"object/O1", "elf", "O1"}; T->spec[T->nspec++] = (Spec){"object/O2", "elf", "O2"}; }
         char *unit = cat(T->name, "/unit"), *mem = cat(T->name, "/memory");
         for (int j = 0; j < 2; j++) add(&rows, unit, T->stage[j][1], T->stage[j][2], T->stage[j][3], T->stage[j][4]);
         add(&rows, mem, T->stage[6][1], T->stage[6][2], "memory-v1", T->stage[6][4]);
@@ -159,11 +161,16 @@ int main(int argc, char **argv) {
         nt++;
     }
     qsort(tg, nt, sizeof *tg, tcmp);
-    /* Linux object routes take the object lower/enc models */
+    /* Unit object routes take target-specific lower/enc models. */
     for (int t = 0; t < nt; t++) {
-        const char *arch = !strcmp(tg[t].name, "lnx/x86_64") ? "x86_64" : !strcmp(tg[t].name, "lnx/arm64") ? "arm64" : 0;
-        if (!arch) continue;
-        char *pre = cat(tg[t].name, "/object/"), *lw = cat("object-lower-", arch), *en = cat("object-enc-", arch);
+        const char *model_target = !strcmp(tg[t].name, "lnx/x86_64") ? "x86_64" :
+            !strcmp(tg[t].name, "lnx/arm64") ? "arm64" :
+            !strcmp(tg[t].name, "osx/x86_64") ? "osx-x86_64" :
+            !strcmp(tg[t].name, "osx/arm64") ? "osx-arm64" :
+            !strcmp(tg[t].name, "win/x86_64") ? "win-x86_64" :
+            !strcmp(tg[t].name, "win/arm64") ? "win-arm64" : 0;
+        if (!model_target) continue;
+        char *pre = cat(tg[t].name, "/object/"), *lw = cat("object-lower-", model_target), *en = cat("object-enc-", model_target);
         char *lm = model(mdir, lw), *em = model(mdir, en);
         for (int i = 0; i < rows.n; i++) if (!strncmp(rows.r[i].c[0], pre, strlen(pre))) {
             if (!strcmp(rows.r[i].c[1], "lower")) set(&rows.r[i].c[4], lm);
