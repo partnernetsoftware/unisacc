@@ -134,3 +134,9 @@
 - 发现（记录）：经典参考对 -Og/-Ofast/-O-1/-O4/-O5/-O1x 静默接受并产出镜像（rc0、stderr 空），产品具名拒绝；矩阵行要求"具名拒绝或文档化别名"，产品满足，参考宽松——若参考被当 CLI oracle 须先裁定。
 - 延后：corpus.cc-differential（行声明宿主 cc 为 oracle，cx-only 下不可做，需改行为"经典参考"）、closure.o1-round-bound（内部不可观测）。批提案增 9 行（optimization-corpus-0..6、-closure、-cli，材料 `ref`）。
 - §14 追加组 `random`（2026-10-28，fable 裁定可按行口径做）：种子 LCG 生成 16 个仅含已定义行为的 unsigned 64 位直线程序（回绕、<64 位移、非零常数除模、计数器只读循环、一个辅助调用），生成器自行模拟得到"预录参考输出"；lnx/x86_64 镜像 stdout 与退出码等于模拟值，lnx 镜像等于参考镜像，每第 8 个程序六目标镜像等于参考。守卫：16 个输出互异（最初 24 程序含 `v-v`/`v&v` 退化两例全零，改为操作数不同）。43 PASS / 0 FAIL，35 s。关闭 prop.meta.random-programs；properties 合计 120 PASS、十七格（仅 data-layout-mod8 延后）；批提案增 `properties-cases-random`（材料 `ref`）。
+
+## 17. 参考身份绑定与产品更换复核（2026-10-28）
+
+- §12/§14/§16 的 REF 告诫已闭合：在仓外冻结导出 `/home/devali/repos/unisacc-ref-500d6cf3d8`（`git archive` HEAD 500d6cf3d8 + 拷入当前产品供 export_ref 使用）里跑 `tools/build_ref.sh out/ua_ref.c out/ua_ref`（23 s），得 REF `0ed46192…`，source-flat 身份 `b95cec77…`（out/ua_ref.c.flat.*.source.json）。build_ref 的 safedel 清理在仓外路径被白名单拒绝，仅影响临时文件，不影响产物。
+- 产品在本日 13:09 被 cdx 的 fullname 纪元（`unisacc-epoch-fullname-778fc68ebc`，artifact d65c1474…）替换：§10–§16 的早期证据产品为 94b549d1，之后的复跑产品为 d65c1474。
+- 用新 REF + 新产品复跑全部参考依赖组：o2 12 PASS（out/c43-cc-o2-03）、properties lower 13 PASS、random 43 PASS（out/c43-cc-props-02）、optimization 9 组 328 PASS（out/c43-cc-opt-02）；全部 0 FAIL，与旧 REF/旧产品结果逐项相同。换标时引用这些目录（REF 与产品身份均在各 results.tsv 的 IDENTITY 行）。
