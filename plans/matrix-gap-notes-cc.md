@@ -81,3 +81,4 @@
 - 同时发现产品缺陷：未定义外部函数链接成崩溃镜像（REF 同现）。按裁定另立批 `link-undefined-function`（红 0/3，预期不放宽）与 `plans/defects-c43.md`；修复提案归 src 域所有者。formats 本机 MISSING 2→1（仅余 object.system-linker，裁定允许 .cx 调用宿主 ld 关格，待做）。
 - 纪元提示：若 3a5b76ab 准入并装为正式候选，cc 全部 @f3705dfa 证据需按 §7 在窗口内重跑迁移（35+9 批，约 15 min），`tools/matrix-flip-gen.cx --migrate f3705dfa <新候选> <日志目录>`。
 - 17:4x object.system-linker 闭合：新工具 `tools/object-ld-cases.cx`、批 `formats-object-ld`（宿主 ld 为 oracle，身份 ld.bfd 2.38 + sha 58937fc2；三夹具 24/0，含 -static 与产品镜像路线字面一致），冻结导出 unisacc-cc-f3705-a6a93efcc3 上 run-batch PASS @f3705dfa。formats 本机 MISSING 1→0（余 NEEDS_PRODUCT_CHANGE 2、外宿主 5）。
+- 17:4x corpus.cc-differential 闭合：opt-corpus-gen 新增 ccdiff 组（宿主 gcc 11.4.0 为 oracle，身份记录；十程序 -O0/-O2 宿主==产品==字面，20/0，约 25 s），批 `optimization-ccdiff`，冻结导出 unisacc-cc-f3705-36db85590a 上 run-batch PASS @f3705dfa。optimization 本机 MISSING 2→1（余 closure.o1-round-bound，非必需，需产品侧计数器）。
