@@ -357,6 +357,8 @@ coverage中旧1/4缺陷描述改为本候选实际4/1及明确合同冲突，没
 
 诊断合同接续：100字节截断现在要求精确原因malformed unit object container；不再把有ELF头但节表缺失的对象归为无载荷。拒绝谓词收紧为rc>0且<128，负信号退出不能被当作拒绝。保留全部11项并在同私有驱动复跑out/c43-tapelink-malformed-02为10/1，唯一余红仍是tape落尾SIGSEGV。未改旧01或已装8147证据；此批仍返回1，不掩盖崩溃。
 
+容器源适用性：tools/cxpack-source-delta.cx新增显式tapelink-v1固定单文件旧/新SHA对；FIFO冻结到ecb5冻结八树1932文件/49目录/8字面软链核对通过，唯一变化src/tapelink.c，witness69b112f37c6baa792ac12e8038313249594863a293c86deb4d87e895f8dbff3c（out/c43-tapelink-source-delta-01）。反向输入rc2拒绝unapproved-tapelink-source-pair；fifo-v1兼容复核保持原witness1f0a90a7。新context SHA6a7ceb4b9eff45c23fe144125dacc5d6ac32cabc41666b141b0f975c691abf87。此为有限材料适用性，不授准入/测试PASS。落尾只读审查确认tapecheck无CFG、lower C.done直接ACCEPT；不能靠最后opcode判据，也不能混入未经六目标合同验证的exit/trap。
+
 补现有formats-objects私有包装器回归21/0，日志out/c43-tapelink-objects-01.*，仅显式ec17e24f+ff696，不把工具输出里的installed-product措辞转授共享8147。容器刀冻结ecb5fbe322于仓外unisacc-epoch-tapelink-ecb5fbe322，SID003166c6945165d0b9ec568dbdb0ae8b817f4e497551a2365f7017eb7c0e10c9，context已PREPARED；相对FIFO来源的模型/产品树仅src/tapelink.c变化。尚未新候选安装，落尾模型方案并行只读审查。
 
 原批out/c43-tapelink-malformed-01仍9/2：坏魔数及2000字节截断已拒；100字节截断改报malformed unit object container而旧断言要求carries no unit tape，保留该诊断合同差异；tape落尾仍SIGSEGV，未声称关闭。已装8147原批8/3不覆盖。
