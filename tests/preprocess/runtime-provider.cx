@@ -1,0 +1,18 @@
+/* Explicit provider ABI and single state instance; no host forwarding. */
+#pragma unisa use cxlib.netpack
+static char work[4096];static int checks,failed;
+static void die(const char *s){fprintf(stderr,"runtime-provider-test: %s errno=%d\n",s,errno);exit(2);}
+static void path(char *p,const char *s){if(cx_path_join(p,4400,work,s))die("path");}
+static void save(const char *s,const char *text){char p[4400];path(p,s);if(cx_write(p,text,strlen(text)))die("write");}
+static void ck(int ok,const char *s){checks++;if(!ok)failed++;printf("%s\truntime-provider.%s\n",ok?"PASS":"FAIL",s);}
+int main(int argc,char **argv){
+ if(argc!=9||argv[8][0]!='/'||strlen(argv[8])>=sizeof work)die("ROOT DRIVER STREAMS E2 STAGE PIPELINE PRODUCT NEW_ABS_OUT");strcpy(work,argv[8]);if(mkdir(work,0700))die("exclusive-out");
+ char headers[4400],provider[4400],entry[4400],profile[4400],output[4400];path(headers,"headers");if(mkdir(headers,0700))die("headers");
+ save("headers/cx.h","int runtime_next(void);\n");save("runtime.c","static int count;\nint runtime_next(void){count++;return count;}\n");
+ save("entry.cx","#pragma unisa use dep\nint main(void){int a=runtime_next();int b=module_next();return a*10+b;}\n");save("dep.cx","#pragma unisa module dep\nint module_next(void){return runtime_next();}\n");path(provider,"runtime.c");path(entry,"entry.cx");path(profile,"profile.tsv");path(output,"run");
+ char text[28000];int n=snprintf(text,sizeof text,"CXDRIVER1\nTarget\tlnx/x86_64\nHeaderRoot\t%s\nStreams\t%s\nE2Adapter\t%s\nStageAdapter\t%s\nPipeline\t%s\nProduct\t%s\nRuntimeProvider\t%s\n",headers,argv[3],argv[4],argv[5],argv[6],argv[7],provider);if(n<0||(size_t)n>=sizeof text)die("profile");save("profile.tsv",text);
+ char *v[]={argv[2],"--profile",profile,"--out",output,entry,0};np_result r={0};char why[1024];if(np_run(v,argv[1],0,20,&r,why,sizeof why))die(why);char log[4400];path(log,"run.stdout");if(cx_write(log,r.out,r.outn))die("stdout");path(log,"run.stderr");if(cx_write(log,r.err,r.errn))die("stderr");ck(r.rc==12&&!r.outn&&!r.errn,"two-consumers-share-one-provider-state");np_free(&r);
+ /* Explicitly listing the same source must not instantiate it twice. */
+ path(output,"duplicate");char *dup[]={argv[2],"--profile",profile,"--out",output,entry,provider,0};if(np_run(dup,argv[1],0,10,&r,why,sizeof why))die(why);ck(r.rc==2&&!r.outn&&strstr(r.err,"duplicate-runtime-provider"),"duplicate-provider-refused");np_free(&r);
+ printf("RUNTIME_PROVIDER\tassertions=%d\tfailed=%d\n",checks,failed);return failed?1:0;
+}

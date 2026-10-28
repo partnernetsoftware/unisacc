@@ -5,7 +5,7 @@
  * No ambient header roots, manual resource manifest or old compiler fallback. */
 #pragma unisa use cx0.bundle
 #pragma unisa use cxlib.netpack
-typedef struct {char *target,*headers,*streams,*e2,*stage,*product,*pipeline,*roots[16];int nr;} Profile;
+typedef struct {char *target,*headers,*streams,*e2,*stage,*product,*pipeline,*runtime,*roots[16];int nr;} Profile;
 static long long deadline;
 static size_t resource_bytes;
 static int resource_count,resource_entries;
@@ -36,11 +36,12 @@ static void singleton(char **field,char *value){if(*field)die("duplicate-profile
 static Profile profile(char *text,size_t n){
  Profile p={0};if(n>65536||memchr(text,0,n)||n<10||memcmp(text,"CXDRIVER1\n",10))die("profile-version-or-size",0);char *line=text+10;
  while(*line){char *end=strchr(line,'\n');if(!end)die("profile-final-newline",0);*end=0;if(*line&&*line!='#'){char *value=strchr(line,'\t');if(!value)die("profile-fields",line);*value++=0;if(!*value||strpbrk(value,"\r\t"))die("profile-fields",line);
-  if(!strcmp(line,"Target"))singleton(&p.target,value);else if(!strcmp(line,"HeaderRoot"))singleton(&p.headers,value);else if(!strcmp(line,"Streams"))singleton(&p.streams,value);else if(!strcmp(line,"E2Adapter"))singleton(&p.e2,value);else if(!strcmp(line,"StageAdapter"))singleton(&p.stage,value);else if(!strcmp(line,"Product"))singleton(&p.product,value);else if(!strcmp(line,"Pipeline"))singleton(&p.pipeline,value);else if(!strcmp(line,"ResourceRoot")){if(p.nr==16)die("resource-root-count",0);p.roots[p.nr++]=value;}else die("unknown-profile-field",line);
+  if(!strcmp(line,"Target"))singleton(&p.target,value);else if(!strcmp(line,"HeaderRoot"))singleton(&p.headers,value);else if(!strcmp(line,"Streams"))singleton(&p.streams,value);else if(!strcmp(line,"E2Adapter"))singleton(&p.e2,value);else if(!strcmp(line,"StageAdapter"))singleton(&p.stage,value);else if(!strcmp(line,"Product"))singleton(&p.product,value);else if(!strcmp(line,"Pipeline"))singleton(&p.pipeline,value);else if(!strcmp(line,"RuntimeProvider"))singleton(&p.runtime,value);else if(!strcmp(line,"ResourceRoot")){if(p.nr==16)die("resource-root-count",0);p.roots[p.nr++]=value;}else die("unknown-profile-field",line);
  }line=end+1;}
  if(!p.target||!p.headers||!p.streams||!p.e2||!p.stage||!p.product||!p.pipeline)die("missing-profile-field",0);
  if(strcmp(p.target,"lnx/x86_64"))die("unsupported-target",p.target);
  p.headers=resolve(p.headers,1);p.streams=resolve(p.streams,1);p.e2=resolve(p.e2,0);p.stage=resolve(p.stage,0);p.product=resolve(p.product,0);p.pipeline=resolve(p.pipeline,0);
+ if(p.runtime){p.runtime=resolve(p.runtime,0);size_t len=strlen(p.runtime);if(len<2||strcmp(p.runtime+len-2,".c"))die("runtime-provider-requires-c-boundary",p.runtime);}
  for(int i=0;i<p.nr;i++){p.roots[i]=resolve(p.roots[i],1);for(int j=0;j<i;j++)if(under(p.roots[i],p.roots[j])||under(p.roots[j],p.roots[i]))die("overlapping-resource-roots",p.roots[i]);}
  return p;
 }
@@ -80,6 +81,7 @@ int main(int argc,char **argv){
  size_t pn;char *raw=regular(profile_path,65536,&pn),*parsed=malloc(pn+1);if(!parsed)die("allocation",0);memcpy(parsed,raw,pn+1);Profile p=profile(parsed,pn);
  if(under(out,p.headers))die("output-inside-input-root",p.headers);for(int i=0;i<p.nr;i++)if(under(out,p.roots[i]))die("output-inside-input-root",p.roots[i]);
  size_t total=0;for(int i=0;i<ns;i++){sources[i]=resolve(sources[i],0);size_t n;char *s=regular(sources[i],4194304,&n);free(s);if(n>16777216-total)die("source-total-bytes",sources[i]);total+=n;}
+ if(p.runtime){if(ns==64)die("runtime-provider-unit-limit",0);for(int i=0;i<ns;i++)if(!strcmp(sources[i],p.runtime))die("duplicate-runtime-provider",p.runtime);size_t rn;char *rb=regular(p.runtime,4194304,&rn);free(rb);if(rn>16777216-total)die("source-total-bytes",p.runtime);sources[ns++]=copy(p.runtime);}
  if(mkdir(out,0700))die("exclusive-output-directory",out);char file[4400],interfaces[4400],packet[4400],pipeline[4400],runout[4400];join(file,out,"profile.tsv");save(file,raw,pn);free(raw);
  join(interfaces,out,"interfaces");if(mkdir(interfaces,0700))die("interface-directory",interfaces);
  walk(p.headers,"",1,0);for(int i=0;i<p.nr;i++)walk(p.roots[i],"",2,0);

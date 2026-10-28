@@ -13,6 +13,13 @@ tools/bound 55 sh ./unisacc.com tools/cx-driver.cx -- --profile /absolute/local.
 The profile is `CXDRIVER1`, followed by tab-separated key/value lines, with a
 final newline. All paths name existing absolute paths. Required fields occur
 once; `ResourceRoot` may occur up to sixteen times. Comments start with `#`.
+Optional `RuntimeProvider` names an absolute ordinary `.c` implementation unit.
+The driver appends it once after the explicit sources; a duplicate source,
+non-C provider or exhausted 64-unit limit is refused. Consumers receive the
+declared HeaderRoot interface, while the provider owns implementation state.
+This is an explicit native C ABI boundary, not host forwarding or a claim of
+compiled ownership checks. The provider and interfaces must be generated and
+validated from matching inputs; merely adding external declarations is insufficient.
 The following illustrates the fields; substitute actual paths and artifacts:
 
 ```text
