@@ -1,0 +1,33 @@
+/* Two-phase installation of the finite checked CX candidate. Development only.
+ * The build record describes SOURCE_ROOT, not the possibly newer shared tree. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.kernelsha
+static void die(const char *s){fprintf(stderr,"tapelink-candidate-install: REFUSE %s errno=%d\n",s,errno);exit(2);}
+static void path(char *p,const char *a,const char *b){int n=snprintf(p,4400,"%s/%s",a,b);if(n<0||n>=4400)die("path-bound");}
+static char *load(const char *p,size_t *n){struct stat st;if(lstat(p,&st)||!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>268435456)die(p);char *s=cx_read(p,n);if(!s||*n!=(size_t)st.st_size)die("read-size");return s;}
+static void hash(const void *s,size_t n,char h[65]){if(ks_sha256_hex(s,n,h))die("sha256");}
+static void pin(const char *p,const char *want){size_t n;char *s=load(p,&n),h[65];hash(s,n,h);free(s);if(strcmp(h,want))die(p);}
+static void saved(const char *p,const void *s,size_t n,int mode){int f=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,mode);if(f<0)die("exclusive-create");const char *b=s;while(n){ssize_t z=write(f,b,n);if(z<0&&errno==EINTR)continue;if(z<=0)die("write");b+=z;n-=(size_t)z;}if(fsync(f)||close(f))die("sync-close");}
+static void copy(const char *a,const char *b,int mode){size_t n;char *s=load(a,&n);saved(b,s,n,mode);free(s);}
+static void pair(np_buf *b,const char *key,const char *value){np_puts(b,key);np_puts(b,"\t");np_puts(b,value);np_puts(b,"\n");}
+int main(int argc,char **argv){
+ if(argc!=9||(strcmp(argv[1],"prepare")&&strcmp(argv[1],"finish")))die("usage prepare|finish TOOL_ROOT ORIGIN_ROOT SOURCE_ROOT CANDIDATE CURRENT_CONTEXT ORIGIN_CONTEXT NEW_WORK");
+ char root[4096],origin[4096],source[4096],candidate[4096],json[4096],oldctx[4096],work[4096];
+ if(!realpath(argv[2],root)||!realpath(argv[3],origin)||!realpath(argv[4],source)||!realpath(argv[5],candidate)||!realpath(argv[6],json)||!realpath(argv[7],oldctx)||argv[8][0]!='/'||strstr(argv[8],"..")||strlen(argv[8])>=sizeof work)die("paths");strcpy(work,argv[8]);
+ char allowed[4400];path(allowed,root,"out/");if(strncmp(work,allowed,strlen(allowed)))die("work-must-be-root-out");
+ int prepare=!strcmp(argv[1],"prepare");if(!prepare){char actual[4096];if(!realpath(work,actual)||strcmp(actual,work))die("canonical-existing-work");}
+ char product[4400],record[4400],next[4400],nextrecord[4400],old[4400],oldrecord[4400],proof[4400],checker[4400],self[4400],crecord[4400],receipt[4400];
+ path(product,root,"unisacc.com");path(record,root,"unisacc.com.build.json");path(next,root,".unisacc-tapelink.next");path(nextrecord,root,".unisacc-tapelink.next.build.json");path(old,work,"previous.com");path(oldrecord,work,"previous.com.build.json");path(proof,work,"material-check.stdout");path(receipt,work,"prepared.tsv");path(checker,root,"tools/tapelink-candidate-check.cx");path(self,root,"tools/tapelink-candidate-install.cx");
+ if(snprintf(crecord,sizeof crecord,"%s.build.json",candidate)>=(int)sizeof crecord)die("record-path");
+ const char *before="8147f2e72dafeb6a0c367398a3eafff2c1b8c5c555e00eee9018cabf86abd63e",*br="c493b97153c6a3f363bc5df2c0bb36e6c85a8f7a5364b259665fd8ed648d1be9",*after="b6f15e823db12f42461371e2193c30f8b9b34961367caf2905c497765d147b0d",*ar="db7af545234484fb12efb873d77758401e81596f071a0c715f6f5129ceb1ad90";
+ pin(product,before);pin(record,br);pin(candidate,after);pin(crecord,ar);
+ np_buf wire={0};np_puts(&wire,"tapelink-candidate-install-prepared-v1\n");pair(&wire,"root",root);pair(&wire,"origin",origin);pair(&wire,"source-root",source);pair(&wire,"candidate",candidate);pair(&wire,"json",json);pair(&wire,"origin-context",oldctx);pair(&wire,"candidate-sha",after);pair(&wire,"record-sha",ar);
+ char sh[65],ch[65];size_t sn,cn;char *ss=load(self,&sn),*cs=load(checker,&cn);hash(ss,sn,sh);hash(cs,cn,ch);free(ss);free(cs);pair(&wire,"installer",sh);pair(&wire,"checker",ch);
+ char *v[]={"sh",product,checker,"--",root,origin,source,candidate,json,oldctx,0};np_result r;char why[1400];if(np_run(v,root,0,48,&r,why,sizeof why))die(why);if(r.rc||r.errn||!strstr(r.out,"CHECKED\tfinite-material-applicability\tNOT_INSTALLED_NOT_RELEASE_QUALIFIED\n"))die("fresh-candidate-check");char h[65];hash(r.out,r.outn,h);pair(&wire,"observation",h);
+ pin(self,sh);pin(checker,ch);pin(product,before);pin(record,br);pin(candidate,after);pin(crecord,ar);
+ if(prepare){if(mkdir(work,0700))die("new-work-required");copy(product,old,0700);copy(record,oldrecord,0600);copy(candidate,next,0700);copy(crecord,nextrecord,0600);saved(proof,r.out,r.outn,0600);saved(receipt,wire.p,wire.n,0600);puts("PREPARED\ttapelink-candidate\tfinish-required\tdevelopment-only");}
+ else{size_t n;char *s=load(receipt,&n);if(n!=wire.n||memcmp(s,wire.p,n))die("prepared-context-changed");free(s);pin(proof,h);pin(old,before);pin(oldrecord,br);pin(next,after);pin(nextrecord,ar);
+  if(rename(next,product))die("replace-product");if(rename(nextrecord,record))die("product-replaced-record-failed-backup-retained");int fd=open(root,O_RDONLY|O_DIRECTORY|O_CLOEXEC);if(fd<0||fsync(fd)||close(fd))die("root-sync");pin(product,after);pin(record,ar);char installed[4400];path(installed,work,"installed.tsv");saved(installed,wire.p,wire.n,0600);puts("INSTALLED\ttapelink-candidate\tdevelopment-only\tno-release-qualification");
+ }
+ np_free(&r);free(wire.p);return 0;
+}

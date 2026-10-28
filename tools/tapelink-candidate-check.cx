@@ -1,0 +1,38 @@
+/* Finite b200 -> 0031 container candidate material check. No installation or release. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.kernelsha
+static char root[4096],origin[4096],source[4096],candidate[4096],generated[4096],oldctx[4096],product[4400];
+static np_buf evidence;
+static void die(const char *s){fprintf(stderr,"tapelink-candidate-check: REFUSE %s\n",s);exit(2);}
+static void path(char *p,const char *a,const char *b){int n=snprintf(p,4400,"%s/%s",a,b);if(n<0||n>=4400)die("path-bound");}
+static char *readfile(const char *p,size_t *n){struct stat st;if(lstat(p,&st)||!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>268435456)die(p);char *s=cx_read(p,n);if(!s||*n!=(size_t)st.st_size)die("read-size");return s;}
+static void digest(const char *p,char h[65]){size_t n;char *s=readfile(p,&n);if(ks_sha256_hex(s,n,h))die("sha256");free(s);}
+static void row(const char *key,const char *value){np_puts(&evidence,key);np_puts(&evidence,"\t");np_puts(&evidence,value);np_puts(&evidence,"\n");}
+static void pin(const char *p,const char *expected,const char *label){char h[65];digest(p,h);if(strcmp(h,expected))die(label);row(label,h);}
+static void execute(char **v,const char *needle,int budget,const char *label){np_result r;char why[1400];if(np_run(v,root,0,budget,&r,why,sizeof why))die(why);if(r.rc||r.errn||!strstr(r.out,needle)){fprintf(stderr,"child %s rc=%d stderr=%.*s\n",label,r.rc,(int)r.errn,r.err);np_free(&r);die(label);}char h[65];if(ks_sha256_hex(r.out,r.outn,h))die("child-sha");row(label,h);np_free(&r);}
+static void embedded(const char *p,const char **body,size_t *bytes,char **owned){size_t n;char *s=readfile(p,&n);if(n<16||memcmp(s+n-16,"UNIPKG1\n",8))die("package-footer");unsigned long long z=0;for(int i=7;i>=0;i--)z=(z<<8)|(unsigned char)s[n-8+i];if(!z||z>n-16)die("package-extent");*body=s+n-16-(size_t)z;*bytes=(size_t)z;*owned=s;}
+int main(int argc,char **argv){
+ if(argc!=7||!realpath(argv[1],root)||!realpath(argv[2],origin)||!realpath(argv[3],source)||!realpath(argv[4],candidate)||!realpath(argv[5],generated)||!realpath(argv[6],oldctx)||!strcmp(origin,source))die("usage TOOL_ROOT ORIGIN_ROOT SOURCE_ROOT CANDIDATE CURRENT_CONTEXT ORIGIN_CONTEXT");
+ np_puts(&evidence,"tapelink-candidate-material-check-v1\n");path(product,root,"unisacc.com");
+ pin(product,"8147f2e72dafeb6a0c367398a3eafff2c1b8c5c555e00eee9018cabf86abd63e","executing-bootstrap");
+ char baseline[4400],record[4400],helper[4400],delta[4400],compare[4400],jobs[4400];path(baseline,root,"unisacc.com");path(record,root,"unisacc.com.build.json");
+ pin(baseline,"8147f2e72dafeb6a0c367398a3eafff2c1b8c5c555e00eee9018cabf86abd63e","origin-product");
+ pin(record,"c493b97153c6a3f363bc5df2c0bb36e6c85a8f7a5364b259665fd8ed648d1be9","origin-record");
+ pin(candidate,"b6f15e823db12f42461371e2193c30f8b9b34961367caf2905c497765d147b0d","candidate");
+ char candidate_record[4400];if(snprintf(candidate_record,sizeof candidate_record,"%s.build.json",candidate)>=(int)sizeof candidate_record)die("candidate-record-path");pin(candidate_record,"db7af545234484fb12efb873d77758401e81596f071a0c715f6f5129ceb1ad90","candidate-record");
+ const char *a,*b;size_t an,bn;char *aa,*bb;embedded(baseline,&a,&an,&aa);embedded(candidate,&b,&bn,&bb);if(an!=bn||memcmp(a,b,an))die("embedded-package-changed");char ph[65];if(ks_sha256_hex(b,bn,ph)||strcmp(ph,"ff696253808d017b4ac81e353729c918eb5c96a7a78bf375f564baa2e40ef955"))die("package-pin");row("preserved-package",ph);free(aa);free(bb);
+ path(helper,source,"out/epoch-context-01/identity-helper");pin(helper,"72c2ddb9a4c7ebee1caa057224f63830b489abf5f99d4d6841d07a14fc820918","identity-helper");
+ char *oi[]={helper,origin,0},*si[]={helper,source,0};execute(oi,"b2007a76e3fcb9b852dae5d8e28a058af5081ec6638a269373e01cb5fbfeaf7b\n",10,"origin-source");execute(si,"003166c6945165d0b9ec568dbdb0ae8b817f4e497551a2365f7017eb7c0e10c9\n",10,"candidate-source");
+ path(delta,root,"tools/cxpack-source-delta.cx");path(compare,root,"tools/source-model-compare.cx");path(jobs,generated,"context.tsv");pin(jobs,"6a7ceb4b9eff45c23fe144125dacc5d6ac32cabc41666b141b0f975c691abf87","current-context");path(jobs,oldctx,"context.tsv");pin(jobs,"61d040c692914254eb00d930bb83007bc51d5ced8e4cd1ad1a53cbb585b9ab20","origin-context");char dh[65],ch[65],after[65];digest(delta,dh);digest(compare,ch);row("delta-tool",dh);row("json-tool",ch);
+ char *dv[]={"sh",product,delta,"--",origin,source,"tapelink-v1",0};execute(dv,"witness=69b112f37c6baa792ac12e8038313249594863a293c86deb4d87e895f8dbff3c\n",20,"source-delta-observation");
+ char *cv[]={helper,source,"check",candidate,0};execute(cv,"product freshness: verified b6f15e823db12f42461371e2193c30f8b9b34961367caf2905c497765d147b0d\n",10,"candidate-record-verification");
+ /* Source profile verifies all eight model/construction trees byte-for-byte;
+  * no generator rerun is claimed for this driver-only change. */
+ row("model-reuse-basis","fixed-one-container-delta-all-model-trees-identical");
+ digest(delta,after);if(strcmp(dh,after))die("delta-tool-changed");digest(compare,after);if(strcmp(ch,after))die("json-tool-changed");
+ execute(oi,"b2007a76e3fcb9b852dae5d8e28a058af5081ec6638a269373e01cb5fbfeaf7b\n",10,"origin-source-after");execute(si,"003166c6945165d0b9ec568dbdb0ae8b817f4e497551a2365f7017eb7c0e10c9\n",10,"candidate-source-after");
+ pin(product,"8147f2e72dafeb6a0c367398a3eafff2c1b8c5c555e00eee9018cabf86abd63e","executing-bootstrap-after");pin(record,"c493b97153c6a3f363bc5df2c0bb36e6c85a8f7a5364b259665fd8ed648d1be9","origin-record-after");
+ pin(candidate,"b6f15e823db12f42461371e2193c30f8b9b34961367caf2905c497765d147b0d","candidate-after");
+ pin(candidate_record,"db7af545234484fb12efb873d77758401e81596f071a0c715f6f5129ceb1ad90","candidate-record-after");
+ if(fwrite(evidence.p,1,evidence.n,stdout)!=evidence.n)die("stdout");free(evidence.p);puts("CHECKED\tfinite-material-applicability\tNOT_INSTALLED_NOT_RELEASE_QUALIFIED");return 0;
+}

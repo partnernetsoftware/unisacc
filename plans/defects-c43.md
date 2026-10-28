@@ -368,6 +368,12 @@ coverage中旧1/4缺陷描述改为本候选实际4/1及明确合同冲突，没
 2. S1 容器不校验：ELF 魔数被覆盖为 `XXXX` 的单元对象仍被链接成镜像（rc 0）；截断到前 2000 字节（无节头表）的对象同样被链接。tl_tape 直接搜索单元 tape 负载而不校验 ELF 头/节表。预期：`not an ELF unit object` / `truncated object` 具名拒绝。
 绿：截到 100 字节对象、tapebin 翻字节/截断/坏 minor、未知操作码 tape、二进制垃圾 tape 均具名拒绝。
 
+### 容器修复开发安装（冻结ecb5fbe322）
+
+五切片由冻结源和8147启动产品顺序构造，每步bound55；Linux x86_64切片与已测私有ec17e24f同字节。复用源码未变的seed/ape.c宿主包装器与PCff696，APE b6f15e823db12f42461371e2193c30f8b9b34961367caf2905c497765d147b0d（3029010B），来源记录db7af545234484fb12efb873d77758401e81596f071a0c715f6f5129ceb1ad90。固定tapelink-v1差异核验及native identity-helper记录核验通过；旧产品误作候选rc2拒绝。独立工具tools/tapelink-candidate-check.cx和install.cx保留固定来源/候选/记录/context/模型包身份，prepare/finish每次新核验，不改旧FIFO工具的历史pins。json-tool仅作为继承工具字节记录，不声称运行生成器。
+
+候选本体：out/c43-tapelink-ape-formats-01为68/0，ape-boundaries-01为11/0，ape-malformed-01为10/1且rc1，唯一红项仍落尾SIGSEGV。没有外国宿主执行。两阶段安装收据out/c43-tapelink-install-01/installed.tsv SHA544011da86bb1511272bb76dac519e66d6f1e9ee3022561ec50dc3729811d92c，旧8147及记录保存同目录previous.com。安装后out/c43-tapelink-installed-smoke-01为16/0；installed-boundaries-01实际参数指向共享已装产品，11/0（工具固定scope文字仍explicit-private-driver，以实参和产品hash为准）。有限开发安装，不称完整kind4或发布资格；旧矩阵/跨平台证据不迁标。
+
 ### 验收（2026-10-28 18:5x，已装 Root 4c2831c3 —— prd.md:159 链接修复产品，含 896888f424；红批复跑时共享产品已由 3a5b76ab 换为 4c2831c3，日志 IDENTITY 为准）
 
 - 批 `link-undefined-function` 在 4c2831c3 上 4/1：object-only、archive-without-definition、cross-archive-order（逆序拒绝 + 工作顺序 106）均转绿——`link: undefined reference to NAME` 已具名；**仅余 direct-c-route**（`-o img main.c`，直接 C 路线不经 tapelink 的未定义检查，cdx 提交注记 "retain direct-C gap"），仍 rc 0 + 崩溃镜像。triage #14 由 S2 降为"direct-C 路线一例开放"。
