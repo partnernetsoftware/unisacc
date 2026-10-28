@@ -178,7 +178,7 @@ static void par_put(FILE *f, unsigned v) { unsigned char q[4]={v&255,v>>8&255,v>
 static int ucache_find(const char *path) { for (int k=0;k<nucache;k++) if (!strcmp(ucache[k].path,path)) return k; return -1; }
 static void ucache_replay(int k) {                /* append unit k's attribute records under ATTR_UNIT */
     long n=ATTRS.n, cap=ATTRS.cap;
-    int rc=cxaf_merge(&ATTRS.b,&n,&cap,ucache[k].attr,ucache[k].nattr,(unsigned)ATTR_UNIT);
+    int rc=cxaf_merge(&ATTRS.b,&n,&cap,ucache[k].attr,ucache[k].nattr,(unsigned)ATTR_UNIT,realloc);
     if (rc != 0 && rc != 1) attr_error(rc);
     ATTRS.n=(int)n; ATTRS.cap=(int)cap;
     if (rc == 1) attr_publish();

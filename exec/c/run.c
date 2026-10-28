@@ -1125,8 +1125,8 @@ static int execute(unsigned char *input,int inputn,const char *src,Buf *result) 
    No decision is made here: the records are passed through as E1 wrote them. */
 UNISA_RUNTIME_STATE Buf ATTRS; UNISA_RUNTIME_STATE int ATTR_UNIT; UNISA_RUNTIME_STATE int ATTR_SLOT = -1;
 #ifdef UNISA_CX_ATTRIBUTE_FRAME
-int cxaf_strip(unsigned char **,long *,long *,unsigned char *,long *,unsigned);
-int cxaf_merge(unsigned char **,long *,long *,const unsigned char *,long,unsigned);
+int cxaf_strip(unsigned char **,long *,long *,unsigned char *,long *,unsigned,void *(*)(void *,size_t));
+int cxaf_merge(unsigned char **,long *,long *,const unsigned char *,long,unsigned,void *(*)(void *,size_t));
 static void attr_publish(void) {
     if (ATTR_SLOT >= 0) { RI[ATTR_SLOT].data = ATTRS.b; RI[ATTR_SLOT].len = ATTRS.n; }
 }
@@ -1138,7 +1138,7 @@ static void attr_error(int rc) {
 }
 static int attr_strip(Buf *out) {
     long n = ATTRS.n, cap = ATTRS.cap, in = out->n;
-    int rc = cxaf_strip(&ATTRS.b, &n, &cap, out->b, &in, (unsigned)ATTR_UNIT);
+    int rc = cxaf_strip(&ATTRS.b, &n, &cap, out->b, &in, (unsigned)ATTR_UNIT, realloc);
     if (rc != 0 && rc != 1) attr_error(rc);
     ATTRS.n = (int)n; ATTRS.cap = (int)cap; out->n = (int)in;
     if (rc == 1) attr_publish();

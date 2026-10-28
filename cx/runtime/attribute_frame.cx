@@ -22,7 +22,15 @@
  * refused before a write and before reallocation. Growth starts at
  * 256 and doubles. An occupied table shorter than four bytes is a bad
  * argument; a longer table is extended at *length and only its count
- * word is rewritten. */
+ * word is rewritten.
+ *
+ * The last argument is the growth allocator, with realloc's signature
+ * void *(*alloc)(void *, size_t). It is called only when *cap cannot
+ * hold the new bytes. The library passes tracked_realloc. The driver
+ * passes realloc. A null allocator on that path returns 5 and does
+ * not write. A null return from the allocator is 6; the old pointer
+ * is kept, so the allocator must leave the old block valid. A request
+ * that would pass 2147483647 returns 4 and does not call it. */
 static int cxaf_alias(const unsigned char *block, long cap, const unsigned char *p, long n) {
     unsigned long long b0, b1, p0, p1;
     if (!block || !p || cap <= 0 || n <= 0) return 0;
@@ -35,7 +43,8 @@ static int cxaf_alias(const unsigned char *block, long cap, const unsigned char 
     return p0 < b1 && p1 > b0;
 }
 
-static int cxaf_room(unsigned char **block, long *length, long *cap, long need) {
+static int cxaf_room(unsigned char **block, long *length, long *cap, long need,
+                     void *(*alloc)(void *, size_t)) {
     long want, ncap;
     unsigned char *grown;
     if (need == 0) return 0;
@@ -48,7 +57,8 @@ static int cxaf_room(unsigned char **block, long *length, long *cap, long need) 
         ncap = ncap * 2;
     }
     if (ncap < want || ncap > 2147483647L) return 4;
-    grown = (unsigned char *)realloc(*block, (size_t)ncap);
+    if (!alloc) return 5;
+    grown = (unsigned char *)alloc(*block, (size_t)ncap);
     if (!grown) return 6;
     *block = grown;
     *cap = ncap;
@@ -83,7 +93,8 @@ static int cxaf_fit(long length, long count) {
 }
 
 static int cxaf_append(unsigned char **block, long *length, long *cap,
-                       const unsigned char *recs, long count, unsigned unit) {
+                       const unsigned char *recs, long count, unsigned unit,
+                       void *(*alloc)(void *, size_t)) {
     long need, base, at, i;
     unsigned old;
     unsigned long long total;
@@ -98,7 +109,7 @@ static int cxaf_append(unsigned char **block, long *length, long *cap,
     } else {
         total = (unsigned long)count;
     }
-    rc = cxaf_room(block, length, cap, need);
+    rc = cxaf_room(block, length, cap, need, alloc);
     if (rc) return rc;
     base = *length;
     if (base == 0) {
@@ -118,7 +129,8 @@ static int cxaf_append(unsigned char **block, long *length, long *cap,
 }
 
 int cxaf_strip(unsigned char **block, long *length, long *cap,
-               unsigned char *input, long *input_n, unsigned unit) {
+               unsigned char *input, long *input_n, unsigned unit,
+               void *(*alloc)(void *, size_t)) {
     unsigned count;
     unsigned long token_len, payload;
     long head;
@@ -138,7 +150,7 @@ int cxaf_strip(unsigned char **block, long *length, long *cap,
     if (rc) return rc;
     if (cxaf_fit(*length, (long)count)) return 4;
     if (cxaf_alias(*block, *cap, input, *input_n)) return 5;
-    rc = cxaf_append(block, length, cap, input + 16, (long)count, unit);
+    rc = cxaf_append(block, length, cap, input + 16, (long)count, unit, alloc);
     if (rc != 1) return rc;
     if (payload) memmove(input, input + head, (size_t)payload);
     *input_n = (long)payload;
@@ -146,7 +158,8 @@ int cxaf_strip(unsigned char **block, long *length, long *cap,
 }
 
 int cxaf_merge(unsigned char **block, long *length, long *cap,
-               const unsigned char *recs, long count, unsigned unit) {
+               const unsigned char *recs, long count, unsigned unit,
+               void *(*alloc)(void *, size_t)) {
     int rc;
     if (count == 0) return 0;
     if (count < 0) return 5;
@@ -157,5 +170,5 @@ int cxaf_merge(unsigned char **block, long *length, long *cap,
     if (cxaf_fit(*length, count)) return 4;
     if (*length > 0 && (unsigned long long)cxaf_u32(*block) + (unsigned long long)count > 4294967295ULL) return 4;
     if (block && *block && cxaf_alias(*block, *cap, recs, count * 5)) return 5;
-    return cxaf_append(block, length, cap, recs, count, unit);
+    return cxaf_append(block, length, cap, recs, count, unit, alloc);
 }
