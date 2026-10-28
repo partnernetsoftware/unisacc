@@ -687,6 +687,13 @@ static void library_side_unwrap(Buf *input,const char *magic,const char *side_ma
 }
 API int us_compile(us_context *c,const char *target,int level) {
     if (!c || !target || level<0 || level>2) return error(c,"invalid compilation options");
+    /* Validate the public target spelling before touching the current image,
+       late bindings or tape. The binding-contract target set is narrower
+       (POSIX host imports) and must not exclude Windows compilation here. */
+    if (strcmp(target,"lnx/x86_64") && strcmp(target,"lnx/arm64") &&
+        strcmp(target,"osx/x86_64") && strcmp(target,"osx/arm64") &&
+        strcmp(target,"win/x86_64") && strcmp(target,"win/arm64"))
+        return error(c,"invalid compilation options");
     if (!c->sources && !c->input_is_tape) return error(c,"no input");
     if (active) return error(c,"recursive compilation not yet supported");
     c->error[0]=0;

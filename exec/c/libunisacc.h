@@ -86,6 +86,8 @@ US_API int us_add_symbol_typed(us_context *ctx, const char *name, void *address,
 US_API int us_declare_import_typed(us_context *ctx, const char *name,
                                   const void *signature, size_t length);
 US_API int us_load_library(us_context *ctx, const char *path);
+/* target is lnx/osx/win paired with x86_64/arm64; optimisation is 0..2.
+   Invalid options return an error before invalidating the prior generation. */
 US_API int us_compile(us_context *ctx, const char *target, int optimisation);
 US_API int us_relocate(us_context *ctx);
 US_API int us_run_main(us_context *ctx, int argc, const char *const *argv, int *status);
