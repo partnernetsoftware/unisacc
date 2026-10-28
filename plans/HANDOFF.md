@@ -7,3 +7,10 @@
 2026-10-25 主人已裁定本版重建测试与自身迭代体系。旧 1333 项队列、旧 gate、旧 scratch/提交规则和旧终点线不再作为当前调度入口；旧记录与未通过项仍保留，不能借旧 PASS 结证新候选。日常直接使用 `unisacc.com + .cx`，按现行 AGENTS.md 开发、验证及只提交自身路径。
 
 当前不得自行签名、Draft、Latest 或公开。先完成可审查技术交付，发布另需明确授权；历史文档中的旧授权措辞不构成当前授权。
+
+## 2026-10-28 cc 的所有权与状态（会话中断时他人可接）
+
+- 已入库（cc 路径）：`plans/dev-methodology-2026-10-28.md`（两车道方法与决策记录）、`tools/ucn-pp-gen.cx`、`tools/cxlib/delta.cx`、`tools/sim.cx`、`tools/table-lint.cx`；产品修复 `5192aa98f4`（E3 undefined-function 定位，已由 cdx 装为 Root 94b549d1）、`045306290b`（`UNISACC_RR_TIME` 分相戳，待下一纪元装入；`tests/phase-timing-stamps.cx` 已能读戳，已装产品上 54/0，shim 上 57/0）。
+- 正在做/下一步：(1) 前奏 E2 缓存（方法学 §9，A1/A2 二选一，需先与 cdx 对齐 E2 资源消费改动）；(2) MISSING 格的事实生成用例（候选 `e4.gold.peep-1632`/`opinfo-73`，需先定两指令 tape 的实现规格与 E4 改写 oracle）。
+- 不属 cc：cx/、cx0、include/cx.h、tools/cxcc*（cdx/grk）；cdx 工作树里未提交的 tests/工具文件未动。
+- 证据目录：`out/c43-cc-e3diag-01`（E3 修复快车道）、`out/c43-e3diag-epoch-01` + 仓外 `/home/devali/repos/unisacc-epoch-c590410c68`（纪元）、`out/c43-cc-phase-01`（分相戳）、`out/c43-cc-da4e-matrix-review-01`（矩阵迁移）。
