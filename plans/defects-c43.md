@@ -18,7 +18,12 @@ cxm_rd存在模型驱动、经典参考和cxcc三个实现，需保持返回合�
 stderr分别为cxpack.tsv too large和cannot read cxpack.tsv，见
 `out/c43-cxpack-review-01/ref-{valid,oversize,directory,absent}.*`。
 第一次参考构造因errno声明缺失失败，原日志保留；refshim补显式errno头后构造成功。
-cxcc宿主改动尚未重建验证；共享4c28未安装此修复，完整缺陷仍开放。
+cxcc宿主首次重建发现目录仍被当空清单：fseek/ftell得到零长度，零字节fread跳过实际读取。
+保留两宿主首轮directory/*-build.*及错误产物；改为有界fread并检查ferror/fclose后，
+GCC与Clang各四项-o实跑：正常/缺席编译rc0且执行rc7，超限/目录编译rc1并具名拒绝。
+二轮证据在`out/c43-cxpack-read-regression-02/{valid,oversize,directory,absent}/*-build-02.*`；
+独立宿主驱动为`out/c43-cxpack-review-01/{gcc,clang}-fixed-02.elf`，未覆盖根目录宿主产品。
+本次仅Linux/x86_64；共享4c28未安装此修复，完整缺陷仍开放。
 
 ## link.undef-function-refusal — 未定义外部函数链接成崩溃镜像（开放）
 
