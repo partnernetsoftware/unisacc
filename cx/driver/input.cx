@@ -1,0 +1,152 @@
+/* module input. One public operation: cxi_read.
+   Owns no compiler global and keeps no fd or buffer after return.
+   path is borrowed for this call and is not written.
+   On success, *out is a malloc block owned by the caller (free) and
+   *length is the byte count. An empty file still returns a non-null
+   *out and *length 0. why is cleared on success.
+   On failure the partial block is freed, *out is set null when out is
+   non-null, *length is set 0 when length is non-null, and no fd opened
+   by this call stays open.
+   why is untouched when it is null or whycap <= 0. The path is not
+   copied into why. This file does not record FILE_READ and does not
+   call die, exit, clierror, or fprintf.
+   Not thread-safe for "-": that path reads fd 0 and never closes it.
+   The caller serializes stdin. Any other path is opened and closed here.
+
+   Return 0, or a named failure in why:
+     1 open failed. why is exactly "", "ENOENT", "ENOTDIR", or "EACCES".
+       Windows always uses the empty string, even when errno is set.
+     2 cannot read input
+     3 cannot close input
+     4 input too large
+     5 bad input argument      null path, null out, or null length
+     6 out of memory
+   A null out is code 5 and does not store through out. When out itself
+   is non-null, *out is cleared even if path or length is null.
+   An empty path is not stdin and is not code 5. It is opened, and the
+   open failure is code 1 (ENOENT on this host).
+   "-" performs no open and no close. The display name "stdin" belongs
+   to the driver.
+
+   A regular file whose size is in 0..1073741823 is sized as size+1 so
+   the trailing empty read fits. Every other fd, including a failed
+   fstat, starts at 4096 and doubles. When the buffer is full and the
+   cap is already above 1073741823, or the doubled cap would wrap, the
+   result is code 4 and the block is freed. Each read asks for at most
+   1048576 bytes. EINTR is not retried: one read of -1 is code 2.
+   After a successful open, a later malloc or realloc failure closes
+   the owned fd; if that close fails the result is 3, not 6. A close
+   failure after a full read frees the block, leaves *out null, and
+   returns 3. The caller does not receive that data.
+   A directory may open and then fail its read (code 2). A fifo or a
+   terminal can block, as the product open does. */
+#pragma unisa module input
+
+static void cxi_setwhy(char *why, long cap, const char *msg) {
+    long i;
+    if (!why || cap <= 0) return;
+    i = 0;
+    if (msg) while (msg[i] && i + 1 < cap) { why[i] = msg[i]; i = i + 1; }
+    why[i] = 0;
+}
+
+static int cxi_drop(int owned, int fd, unsigned char *buf, unsigned char **out, long *length,
+                    int rc, const char *msg, char *why, long whycap) {
+    if (buf) free(buf);
+    if (out) *out = 0;
+    if (length) *length = 0;
+    if (owned && close(fd) < 0) {
+        cxi_setwhy(why, whycap, "cannot close input");
+        return 3;
+    }
+    cxi_setwhy(why, whycap, msg);
+    return rc;
+}
+
+#ifdef _WIN32
+static void cxi_openwhy(int err, char *why, long cap) {
+    (void)err;
+    cxi_setwhy(why, cap, "");
+}
+#else
+static void cxi_openwhy(int err, char *why, long cap) {
+    const char *msg;
+    msg = "";
+    if (err == ENOENT) msg = "ENOENT";
+    else if (err == ENOTDIR) msg = "ENOTDIR";
+    else if (err == EACCES) msg = "EACCES";
+    cxi_setwhy(why, cap, msg);
+}
+#endif
+
+int cxi_read(const char *path, unsigned char **out, long *length, char *why, long whycap) {
+    int fd;
+    int owned;
+    long cap;
+    long n;
+    long room;
+    long want;
+    long got;
+    long ncap;
+    unsigned char *buf;
+    unsigned char *grown;
+    struct stat st;
+
+    if (out) *out = 0;
+    if (length) *length = 0;
+    if (!path || !out || !length) {
+        cxi_setwhy(why, whycap, "bad input argument");
+        return 5;
+    }
+    if (path[0] == '-' && path[1] == 0) {
+        fd = 0;
+        owned = 0;
+    } else {
+        fd = open(path, O_RDONLY, 0);
+        if (fd < 0) {
+            cxi_openwhy(errno, why, whycap);
+            return 1;
+        }
+        owned = 1;
+    }
+    cap = 4096;
+    if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode)
+        && st.st_size >= 0 && st.st_size <= 1073741823L)
+        cap = st.st_size + 1;
+    buf = (unsigned char *)malloc(cap);
+    if (!buf) return cxi_drop(owned, fd, 0, out, length, 6, "out of memory", why, whycap);
+    n = 0;
+    for (;;) {
+        if (n == cap) {
+            if (cap > 1073741823L)
+                return cxi_drop(owned, fd, buf, out, length, 4, "input too large", why, whycap);
+            ncap = cap * 2;
+            if (ncap < cap)
+                return cxi_drop(owned, fd, buf, out, length, 4, "input too large", why, whycap);
+            grown = (unsigned char *)realloc(buf, ncap);
+            if (!grown)
+                return cxi_drop(owned, fd, buf, out, length, 6, "out of memory", why, whycap);
+            buf = grown;
+            cap = ncap;
+        }
+        room = cap - n;
+        want = room;
+        if (want > 1048576L) want = 1048576L;
+        got = (long)read(fd, buf + n, (size_t)want);
+        if (got < 0 || got > want)
+            return cxi_drop(owned, fd, buf, out, length, 2, "cannot read input", why, whycap);
+        if (got == 0) break;
+        n = n + got;
+    }
+    if (owned && close(fd) < 0) {
+        free(buf);
+        *out = 0;
+        *length = 0;
+        cxi_setwhy(why, whycap, "cannot close input");
+        return 3;
+    }
+    *out = buf;
+    *length = n;
+    cxi_setwhy(why, whycap, 0);
+    return 0;
+}

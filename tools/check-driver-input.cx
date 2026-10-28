@@ -1,0 +1,192 @@
+/* Independent check for module input. Not a product driver.
+   tools/driver -> ../cx/driver. This unit consumes that module.
+   Run one source: sh ./unisacc.com tools/check-driver-input.cx
+   Not run in the turn that added it.
+   The directory case expects a POSIX open of a directory followed by a
+   failed read. The descriptor count reads /proc/self/fd. dup2 is the
+   same POSIX surface the deps check already uses. EACCES is skipped
+   when the effective uid is 0, and the mode is put back to 0600.
+   The temporary directory is left under /tmp. */
+#pragma unisa use driver.input
+
+static int g_fail;
+
+static void note(int ok, const char *name) {
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", name);
+    if (!ok) g_fail = g_fail + 1;
+}
+
+static int putfile(const char *path, const char *text, long n) {
+    int fd;
+    long off;
+    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) return 0;
+    off = 0;
+    while (off < n) {
+        long wrote;
+        wrote = (long)write(fd, text + off, (size_t)(n - off));
+        if (wrote < 0 && errno == EINTR) continue;
+        if (wrote <= 0) { close(fd); return 0; }
+        off = off + wrote;
+    }
+    if (close(fd) < 0) return 0;
+    return 1;
+}
+
+static int fdcount(void) {
+    DIR *d;
+    int n;
+    d = opendir("/proc/self/fd");
+    if (!d) return -1;
+    n = 0;
+    while (readdir(d)) n = n + 1;
+    if (closedir(d) < 0) return -1;
+    return n;
+}
+
+static int stdin_match(const char *path) {
+    int saved;
+    int fd;
+    int rc;
+    int ok;
+    unsigned char *out;
+    long n;
+    long got;
+    char why[32];
+    char scratch;
+    saved = dup(0);
+    fd = open(path, O_RDONLY, 0);
+    out = 0;
+    ok = 0;
+    if (saved >= 0 && fd >= 0 && dup2(fd, 0) >= 0) {
+        close(fd);
+        fd = -1;
+        why[0] = 'x';
+        n = -1;
+        rc = cxi_read("-", &out, &n, why, (long)sizeof why);
+        scratch = 7;
+        got = (long)read(0, &scratch, 1);
+        if (rc == 0 && got == 0 && n == 3 && out && !memcmp(out, "abc", 3) && why[0] == 0)
+            ok = 1;
+    }
+    if (fd >= 0) close(fd);
+    if (saved >= 0) {
+        dup2(saved, 0);
+        close(saved);
+    }
+    free(out);
+    return ok;
+}
+
+static void one_read(const char *path, int want, const char *wwhy, const char *name) {
+    unsigned char *out;
+    long n;
+    char why[64];
+    int rc;
+    out = (unsigned char *)1;
+    n = 9;
+    why[0] = 'D';
+    why[1] = 0;
+    rc = cxi_read(path, &out, &n, why, (long)sizeof why);
+    note(rc == want && out == 0 && n == 0 && !strcmp(why, wwhy), name);
+}
+
+int main(void) {
+    char dir[64];
+    char path[160];
+    char why[64];
+    char dirty[8];
+    unsigned char *out;
+    long n;
+    int rc;
+    int before;
+    int after;
+    g_fail = 0;
+    if (snprintf(dir, sizeof dir, "/tmp/cxiXXXXXX") < 0 || !mkdtemp(dir)) return 2;
+
+    snprintf(path, sizeof path, "%s/empty", dir);
+    note(putfile(path, "", 0), "empty-create");
+    out = 0;
+    n = -1;
+    why[0] = 'x';
+    rc = cxi_read(path, &out, &n, why, (long)sizeof why);
+    note(rc == 0 && out != 0 && n == 0 && why[0] == 0, "empty");
+    free(out);
+
+    snprintf(path, sizeof path, "%s/abc", dir);
+    note(putfile(path, "abc", 3), "bytes-create");
+    out = 0;
+    n = -1;
+    why[0] = 'x';
+    rc = cxi_read(path, &out, &n, why, (long)sizeof why);
+    note(rc == 0 && out != 0 && n == 3 && !memcmp(out, "abc", 3) && why[0] == 0, "bytes");
+    free(out);
+
+    note(stdin_match(path), "stdin");
+
+    snprintf(path, sizeof path, "%s/missing", dir);
+    one_read(path, 1, "ENOENT", "missing");
+
+    snprintf(path, sizeof path, "%s/reg", dir);
+    note(putfile(path, "z", 1), "notdir-create");
+    snprintf(path, sizeof path, "%s/reg/nope", dir);
+    one_read(path, 1, "ENOTDIR", "notdir");
+
+    if (geteuid() == 0) {
+        printf("SKIP\teacces\n");
+    } else {
+        snprintf(path, sizeof path, "%s/noperm", dir);
+        note(putfile(path, "z", 1), "eacces-create");
+        if (chmod(path, 0) < 0) note(0, "eacces");
+        else {
+            one_read(path, 1, "EACCES", "eacces");
+            note(chmod(path, 0600) == 0, "eacces-restore");
+        }
+    }
+
+    one_read(dir, 2, "cannot read input", "directory");
+
+    out = (unsigned char *)1;
+    n = 4;
+    rc = cxi_read(0, &out, &n, why, (long)sizeof why);
+    note(rc == 5 && out == 0 && n == 0 && !strcmp(why, "bad input argument"), "null-path");
+    n = 4;
+    rc = cxi_read("x", 0, &n, why, (long)sizeof why);
+    note(rc == 5 && n == 0 && !strcmp(why, "bad input argument"), "null-out");
+    out = (unsigned char *)1;
+    rc = cxi_read("x", &out, 0, why, (long)sizeof why);
+    note(rc == 5 && out == 0 && !strcmp(why, "bad input argument"), "null-length");
+    memcpy(dirty, "DIRTY", 6);
+    out = (unsigned char *)1;
+    n = 4;
+    rc = cxi_read(0, &out, &n, dirty, 0);
+    note(rc == 5 && out == 0 && n == 0 && !strcmp(dirty, "DIRTY"), "why-cap0");
+    rc = cxi_read(0, &out, &n, dirty, -1);
+    note(rc == 5 && !strcmp(dirty, "DIRTY"), "why-negative");
+    out = (unsigned char *)1;
+    rc = cxi_read(0, &out, &n, 0, (long)sizeof why);
+    note(rc == 5 && out == 0, "null-why");
+    one_read("", 1, "ENOENT", "empty-path");
+
+    snprintf(path, sizeof path, "%s/abc", dir);
+    before = fdcount();
+    out = 0;
+    rc = cxi_read(path, &out, &n, why, (long)sizeof why);
+    free(out);
+    after = fdcount();
+    note(rc == 0 && before >= 0 && before == after, "fds-ok");
+
+    snprintf(path, sizeof path, "%s/missing", dir);
+    before = fdcount();
+    one_read(path, 1, "ENOENT", "fds-missing-read");
+    after = fdcount();
+    note(before >= 0 && before == after, "fds-missing");
+
+    before = fdcount();
+    one_read(dir, 2, "cannot read input", "fds-dir-read");
+    after = fdcount();
+    note(before >= 0 && before == after, "fds-dir");
+
+    printf("CXI\tfailed=%d\n", g_fail);
+    return g_fail ? 1 : 0;
+}
