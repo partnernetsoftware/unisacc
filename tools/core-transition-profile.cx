@@ -1,0 +1,15 @@
+/* Build an instrumented source copy only. The caller must separately compile,
+ * link and execute it; counters are diagnostic and change execution cost. */
+int main(int argc,char **argv){
+ if(argc!=3){fprintf(stderr,"usage SOURCE NEW_OUTPUT\n");return 2;}
+ size_t n;char *s=cx_read(argv[1],&n);if(!s)return 2;
+ const char *anchor="const char *core_transition(const CxTransitionModel *m,int q,int key,int *nx,int *sq) {";
+ char *p=strstr(s,anchor);if(!p||strstr(p+1,anchor)){free(s);return 2;}
+ char sha[65];cx_sha256_hex(s,n,sha);FILE *f=fopen(argv[2],"wx");if(!f){free(s);return 2;}
+ int bad=0;if(fwrite(s,1,p-s,f)!=(size_t)(p-s))bad=1;
+ if(fputs("static long long pcalls, pzero, pone, psmall, plarge, ptable;\n",f)<0)bad=1;
+ if(fwrite(anchor,1,strlen(anchor),f)!=strlen(anchor))bad=1;
+ if(fputs("\n    pcalls++;if(m->isnet){int c=m->count[q];if(c==0)pzero++;else if(c==1)pone++;else if(c<=3)psmall++;else plarge++;}else ptable++;if(pcalls%100000==0)fprintf(stderr,\"PROFILE %lld %lld %lld %lld %lld %lld\\n\",pcalls,pzero,pone,psmall,plarge,ptable);\n",f)<0)bad=1;
+ p+=strlen(anchor);if(fwrite(p,1,n-(p-s),f)!=n-(size_t)(p-s))bad=1;free(s);if(fclose(f))bad=1;
+ if(bad){unlink(argv[2]);return 2;}printf("CORE_TRANSITION_PROFILE source=%s scope=instrumented-source-only\n",sha);return 0;
+}
