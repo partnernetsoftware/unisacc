@@ -204,3 +204,10 @@
 2. stream-e4-peep-0..7 重跑（out/c43-cc-peep-04）：1632 键 = 281 PASS / 0 FAIL / 1339 UNREALIZABLE / 12 TABLE_SUSPECT，与 plans/peep-tighten-proposal.md 的预测完全一致；12 个剩余键即提案 A 组。
 3. B2 等价基线（out/c43-cc-b2-01）：`-S`/`-E` 都是单单元路线，6 个 safedel 使用者里 4 个用 `#pragma unisa use` 模块的文件被产品拒绝 "multiple preprocessing outputs not migrated"（cxcc、cxlib/nninputs、source-package-mixed、candidate-identity）；只给 2 个单单元文件（tools/safedel.cx 632,938 B sha 7175007f…、tools/cxlib/pytempfile.cx 580,699 B sha b746b195…）留下 -E 基线。结论：前奏拆分后的等价核对，模块使用者只能走执行行为（其登记批/smoke），单单元者可字节比对；这是结构化轨道要知道的接口事实。
 4. 未做（时间已到，归还窗口）：f3705dfa 上 35 批重跑与 `--migrate`（≈12 min，另申窗）；stream-semantics 草稿首跑。
+
+## 23. 12 分钟重活窗：f3705dfa 重跑与换标迁移（2026-10-28 16:22–16:35，csr 交窗）
+
+- 对象实记：控制器与 C/E3 编译均为共享产品 f3705dfa（record 63e7d703）；被测旧流仍是 riroot-01 pin（stream4 9d3119df、stream5 1306de94、stream6）；REF 仍冻结导出 0ed46192。按 §21 B1 的分类：16 批真正经 f3705 的 E3 编译 C 源（prune 经典驱动、properties det/meta/bound/tu/lower/random、optimization×9、formats），19 批只证明控制器在 f3705 下兼容（peep×8、opinfo×2、o2、layout×7 喂 tape）。旧流/REF 证据不改成新 E3/新七流资格；UNVERIFIED/TABLE_SUSPECT 不授资格。
+- 实跑（冻结导出 unisacc-cc-reg02-1d72030b04，out/c43-cc-reg-02 为仓内副本；每批 run-batch 55 s 预算、nice、顺序；父循环绑定 16:34 总 deadline 的守护：到时仅 SIGTERM 父循环不杀在飞批）：35/35 `status=PASS`，16:32:37 完成于 deadline 内，守护未触发；逐批 PASS 计数与 d65 相同，仅 peep-3/5/6/7 各 +1（生成器新实现的 4 键，281 对 277），TABLE_SUSPECT 12。
+- 迁标：map 的 peep 证据改为 281/0 与 12 TABLE_SUSPECT；`tools/matrix-flip-gen.cx … --migrate d65c1474 f3705dfa out/c43-cc-reg-02` 生成 + `--check` 通过，覆盖五张矩阵（60 格证据 @f3705dfa，迁移注一行，Root7a 旧行不动）；`--list` 元数据有效（204/193/19）。
+- 未跑（时间到，归还窗口）：stream-semantics 草稿首跑（≈1 min）——列入下次窗。
