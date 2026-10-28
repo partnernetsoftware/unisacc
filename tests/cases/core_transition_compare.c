@@ -1,9 +1,10 @@
 /* Compare the production C transition against the separately linked CX unit. */
+#define CORE_TRANSITION_NAME core_transition_c
 #include "../../exec/c/core.c"
 #include <stdio.h>
 const char *cxtn_transition(const CoreModel *,int,int,int *,int *);
 static int same(CoreModel *m,int key){
- int a=77,b=77,c=88,d=88;const char *x=core_transition(m,0,key,&a,&b),*y=cxtn_transition(m,0,key,&c,&d);
+ int a=77,b=77,c=88,d=88;const char *x=core_transition_c(m,0,key,&a,&b),*y=core_transition(m,0,key,&c,&d);
  return a==c&&b==d&&((!x&&!y)||(x&&y&&!strcmp(x,y)));
 }
 int main(void){

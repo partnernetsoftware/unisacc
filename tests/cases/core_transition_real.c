@@ -1,10 +1,11 @@
 /* Exhaust the ordinary observation alphabet and each threshold boundary. */
 #define UNISA_RUNTIME_LIBRARY
+#define CORE_TRANSITION_NAME core_transition_c
 #include "../../exec/c/run.c"
 const char *cxtn_transition(const CoreModel *,int,int,int *,int *);
 static long long checked,failed;
 static void compare(const CoreModel *m,int q,int key){
- int a=77,b=77,c=88,d=88;const char *x=core_transition(m,q,key,&a,&b),*y=cxtn_transition(m,q,key,&c,&d);checked++;
+ int a=77,b=77,c=88,d=88;const char *x=core_transition_c(m,q,key,&a,&b),*y=core_transition(m,q,key,&c,&d);checked++;
  if(a!=c||b!=d||!((!x&&!y)||(x&&y&&!strcmp(x,y)))){if(failed++<10)fprintf(stderr,"mismatch q=%d key=%d\n",q,key);}
 }
 int main(int argc,char **argv){
