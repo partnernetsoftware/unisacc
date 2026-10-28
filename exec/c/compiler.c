@@ -98,6 +98,27 @@ static long output_write(long fd, const void *p, long n) {
     return write((int)fd, p, (size_t)n);
 #endif
 }
+#ifndef _WIN32
+/* Ordinary named outputs are committed only after a complete write and close.
+ * Preserve direct IO for devices/FIFOs/symlinks; never unlink the destination.
+ * New inodes use 0755 subject to umask, including replacement of a hardlink.
+ * An unwritable parent is a refusal, not a fallback to destructive truncation. */
+static long output_begin(const char *path,char **temporary) {
+    struct stat st;int ordinary;
+    if (lstat(path,&st)==0) ordinary=S_ISREG(st.st_mode);
+    else { if (errno!=ENOENT) return -1; ordinary=1; }
+    if (!ordinary) return output_open(path);
+    size_t cap=strlen(path)+80;
+    char *tmp=xrealloc(0,cap);
+    for (int attempt=0;attempt<100;attempt++) {
+        snprintf(tmp,cap,"%s.unisacc-%ld-%d.tmp",path,(long)getpid(),attempt);
+        int fd=open(tmp,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0755);
+        if (fd>=0) { *temporary=tmp;return fd; }
+        if (errno!=EEXIST) break;
+    }
+    free(tmp);return -1;
+}
+#endif
 /* Dependency formatting is a driver/file contract, byte for byte gcc -MM's
    (mkdeps.cc): one space between names, " \\\n " once a line would pass
    column 72, make's special characters escaped (space, #, $) in
@@ -1465,18 +1486,42 @@ rr_run_replay:   /* multi-TU hit: the stub pass's post-host_compile tape, then i
     /* No destination is opened before successful compilation. */
     struct timespec ow_t0, ow_t1; int ow_time = !!getenv("UNISACC_RR_TIME");
     if (ow_time) clock_gettime(CLOCK_MONOTONIC, &ow_t0);
-    long fd = out && strcmp(out,"-") ? output_open(out) : 1;
+    char *output_tmp=0;
+    long fd=1;
+    if (out && strcmp(out,"-")) {
+#ifdef _WIN32
+        fd=output_open(out);
+#else
+        fd=output_begin(out,&output_tmp);
+#endif
+    }
     if (fd < 0) { free(in.b); return clierror("cannot open output"); }
     int done = 0;
     while (done < in.n) {
         long wrote = output_write(fd,in.b+done,in.n-done);
+#ifdef __UNISA__
+        if (wrote==-4) continue; /* POSIX EINTR from the raw gate */
+#else
+        if (wrote<0 && errno==EINTR) continue;
+#endif
         if (wrote <= 0 || wrote > in.n-done) {
-            if (fd != 1) io_close(fd); free(in.b); return clierror("short output write");
+            if (fd != 1) io_close(fd);
+            if (output_tmp) { unlink(output_tmp);free(output_tmp); }
+            free(in.b); return clierror("short output write");
         }
         done += (int)wrote;
     }
     free(in.b);
-    if (fd != 1 && io_close(fd) < 0) return clierror("cannot close output");
+    if (fd != 1 && io_close(fd) < 0) {
+        if (output_tmp) { unlink(output_tmp);free(output_tmp); }
+        return clierror("cannot close output");
+    }
+    if (output_tmp) {
+        if (rename(output_tmp,out)) {
+            unlink(output_tmp);free(output_tmp);return clierror("cannot commit output");
+        }
+        free(output_tmp);
+    }
     if (ow_time) {   /* UNISACC_RR_TIME output stamp: open + write + close of the image/tape */
         clock_gettime(CLOCK_MONOTONIC, &ow_t1);
         fprintf(stderr, "RR_TIME\toutput\tkind=image\tbytes=%d\tns=%lld\n", done,
