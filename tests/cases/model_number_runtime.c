@@ -10,6 +10,10 @@ static int digit(int c) {
 int main(int argc, char **argv) {
     unsigned char data[256]; int n = 0;
     if (argc != 3) return 2;
+    if (!strcmp(argv[1], "budget")) {
+        I value=42; int ok=runtime_step_budget(argv[2],&value);
+        printf("%d %lld\n",ok,(long long)value); return 0;
+    }
     LBIN = argv[1][0] == '1';
     if (LBIN) {
         const char *s = argv[2];

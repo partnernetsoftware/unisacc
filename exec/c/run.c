@@ -216,6 +216,7 @@ static int lchar(void) {
 static void ltag(int c) { if (lchar() != c) die("bad model tag"); }
 #ifdef UNISA_CX_MODEL_NUMBER
 int cxmn_number(const unsigned char *,long,long *,int,long long *);
+int cxmn_budget(const char *,long long *);
 static I lnum(void) {
     long pos=LP; long long value=0;
     int rc=cxmn_number(LB,LN,&pos,LBIN,&value); LP=(int)pos;
@@ -1096,6 +1097,12 @@ static void bput(Buf *o,int c,I at) {
 /* The standalone executor accepts a positive decimal budget, never strtol's
  * partial prefix, sign/whitespace coercion or saturated overflow result. */
 static int runtime_step_budget(const char *s,I *value) {
+#ifdef UNISA_CX_MODEL_NUMBER
+    long long parsed;
+    if (!cxmn_budget(s,&parsed)) return 0;
+    *value=(I)parsed;
+    return 1;
+#else
     I v=0,limit=9223372036854775807LL;
     if (!s || !*s) return 0;
     for (;*s;s++) {
@@ -1106,6 +1113,7 @@ static int runtime_step_budget(const char *s,I *value) {
     }
     if (!v) return 0;
     *value=v;return 1;
+#endif
 }
 #endif
 static int execute(unsigned char *input,int inputn,const char *src,Buf *result) {
