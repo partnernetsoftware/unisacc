@@ -1,5 +1,5 @@
 /* Independent compilation units, then link. No saved test results.
- * ROOT BUILDER IDENTITY_HELPER NEW_OR_EXISTING_OUT driver|output|native|deps|input|path|args|cli|compat|link [ABS_MODELS [EXPECTED_SHA256]]
+ * ROOT BUILDER IDENTITY_HELPER NEW_OR_EXISTING_OUT driver|output|native|deps|input|path|args|cli|compat|environment|link [ABS_MODELS [EXPECTED_SHA256]]
  * First native provider is Linux/x86_64; other targets remain explicit work. */
 #pragma unisa use cxlib.netpack
 static void fail(const char *s){fprintf(stderr,"cx-driver-build: %s errno=%d\n",s,errno);exit(2);}
@@ -14,7 +14,8 @@ static void sid(const char *root,const char *helper,char h[65]){
  memcpy(h,r.out,64);h[64]=0;np_free(&r);
 }
 static void receipt(char *s,size_t cap,const char *source,const char *builder,const char *identity,const char *tool,const char *netpack,const char *models,const char *step,const char *artifact){
- int n=snprintf(s,cap,"CXDRIVERUNIT3\nsource\t%s\nbuilder\t%s\nidentity\t%s\ntool\t%s\nnetpack\t%s\nmodels\t%s\ntarget\tlnx/x86_64\nstep\t%s\nartifact\t%s\n",source,builder,identity,tool,netpack,models,step,artifact);if(n<0||(size_t)n>=cap)fail("receipt-bound");
+ const char *flags=!strcmp(step,"driver")?"-O0 -c -funit":!strcmp(step,"link")?"default-link":"-O2 -c -funit";
+ int n=snprintf(s,cap,"CXDRIVERUNIT4\nsource\t%s\nbuilder\t%s\nidentity\t%s\ntool\t%s\nnetpack\t%s\nmodels\t%s\ntarget\tlnx/x86_64\nstep\t%s\nflags\t%s\nartifact\t%s\n",source,builder,identity,tool,netpack,models,step,flags,artifact);if(n<0||(size_t)n>=cap)fail("receipt-bound");
 }
 int main(int argc,char **argv){
  if(argc<6||argc>8)fail("usage ROOT BUILDER IDENTITY_HELPER OUT STEP [ABS_MODELS [EXPECTED_SHA256]]");
@@ -28,28 +29,28 @@ int main(int argc,char **argv){
  if(lstat(argv[4],&st)||!S_ISDIR(st.st_mode)||!realpath(argv[4],out))fail("output-directory");
  char modelpath[4096],modelhash[65];int external=argc>=7;
  if(external){if(argv[6][0]!='/'||lstat(argv[6],&st)||!S_ISREG(st.st_mode)||!realpath(argv[6],modelpath))fail("model-path");hash(modelpath,modelhash);if(argc==8&&strcmp(modelhash,argv[7]))fail("model-identity-mismatch");}else strcpy(modelhash,"embedded");
- const char *names[]={"driver","output","native","deps","input","path","args","cli","compat","link"};int step=-1;for(int i=0;i<10;i++)if(!strcmp(argv[5],names[i]))step=i;if(step<0)fail("unknown-step");
+ const char *names[]={"driver","output","native","deps","input","path","args","cli","compat","environment","link"};int step=-1;for(int i=0;i<11;i++)if(!strcmp(argv[5],names[i]))step=i;if(step<0)fail("unknown-step");
  char source[65],bh[65],ih[65],th[65],nh[65],after[65],artifact[65],record[1024],netpack[4400];join(netpack,root,"tools/cxlib/netpack.cx");sid(root,ident,source);hash(builder,bh);hash(ident,ih);hash(self,th);hash(netpack,nh);
- const char *files[]={"driver.o","output.o","native.o","deps.o","input.o","path.o","args.o","cli.o","compat.o","driver.elf"};char objs[9][4400],output[4400],rp[4400],leaf[100];
- for(int i=0;i<9;i++)join(objs[i],out,files[i]);join(output,out,files[step]);absent(output);
+ const char *files[]={"driver.o","output.o","native.o","deps.o","input.o","path.o","args.o","cli.o","compat.o","environment.o","driver.elf"};char objs[10][4400],output[4400],rp[4400],leaf[100];
+ for(int i=0;i<10;i++)join(objs[i],out,files[i]);join(output,out,files[step]);absent(output);
  snprintf(leaf,sizeof leaf,"%s.receipt",names[step]);join(rp,out,leaf);absent(rp);
- if(step==9)for(int i=0;i<9;i++){
+ if(step==10)for(int i=0;i<10;i++){
   hash(objs[i],artifact);receipt(record,sizeof record,source,bh,ih,th,nh,modelhash,names[i],artifact);
   char p[4400];snprintf(leaf,sizeof leaf,"%s.receipt",names[i]);join(p,out,leaf);size_t n;char *s=cx_read(p,&n);
   if(!s||n!=strlen(record)||memcmp(s,record,n))fail("unit-receipt-or-source-mismatch");free(s);
  }
  char bound[4400],headers[4400],quotes[4400],src[4400];join(bound,root,"tools/bound");join(headers,root,"include");join(quotes,root,"exec/c");
- const char *sources[]={"exec/c/asmcompiler.c","cx/driver/output.cx","cx/runtime/process_group.cx","cx/driver/deps.cx","cx/driver/input.cx","cx/driver/path.cx","cx/driver/args.cx","cx/driver/cli.cx","cx/driver/compat.cx"};if(step<9)join(src,root,sources[step]);
- /* The current monolithic driver has measured 48s on this host; retain an
-    explicit budget below the 55s outer watchdog until further unit splits. */
- char *compile[]={bound,"50","sh",builder,"--models",modelpath,"-O2","-I",headers,"-iquote",quotes,"-b","lnx/x86_64","-c","-funit",src,"-o",output,0};
- char *linkv[]={bound,"50","sh",builder,"--models",modelpath,"-b","lnx/x86_64",objs[0],objs[1],objs[2],objs[3],objs[4],objs[5],objs[6],objs[7],objs[8],"-o",output,0};
+ const char *sources[]={"exec/c/asmcompiler.c","cx/driver/output.cx","cx/runtime/process_group.cx","cx/driver/deps.cx","cx/driver/input.cx","cx/driver/path.cx","cx/driver/args.cx","cx/driver/cli.cx","cx/driver/compat.cx","cx/driver/environment.cx"};if(step<10)join(src,root,sources[step]);
+ /* The large transitional driver is compiled at O0 to stay within the
+    watchdog; smaller independent modules remain O2. The flags are receipted. */
+ char *compile[]={bound,"50","sh",builder,"--models",modelpath,step==0?"-O0":"-O2","-I",headers,"-iquote",quotes,"-b","lnx/x86_64","-c","-funit",src,"-o",output,0};
+ char *linkv[]={bound,"50","sh",builder,"--models",modelpath,"-b","lnx/x86_64",objs[0],objs[1],objs[2],objs[3],objs[4],objs[5],objs[6],objs[7],objs[8],objs[9],"-o",output,0};
  if(!external){for(int i=4;;i++){compile[i]=compile[i+2];if(!compile[i])break;}for(int i=4;;i++){linkv[i]=linkv[i+2];if(!linkv[i])break;}}
- np_result r={0};char why[1024];if(np_run(step==9?linkv:compile,root,0,52,&r,why,sizeof why))fail(why);
+ np_result r={0};char why[1024];if(np_run(step==10?linkv:compile,root,0,52,&r,why,sizeof why))fail(why);
  if(r.outn)fwrite(r.out,1,r.outn,stdout);if(r.errn)fwrite(r.err,1,r.errn,stderr);
  if(r.rc){fprintf(stderr,"cx-driver-build: step=%s child_rc=%d stdout_bytes=%ld stderr_bytes=%ld\n",names[step],r.rc,(long)r.outn,(long)r.errn);np_free(&r);fail("unit-command-failed");}np_free(&r);
  sid(root,ident,after);if(strcmp(source,after))fail("source-changed");hash(builder,after);if(strcmp(bh,after))fail("builder-changed");hash(ident,after);if(strcmp(ih,after))fail("identity-helper-changed");hash(self,after);if(strcmp(th,after))fail("tool-changed");hash(netpack,after);if(strcmp(nh,after))fail("netpack-changed");
- if(step==9)for(int i=0;i<9;i++){
+ if(step==10)for(int i=0;i<10;i++){
   hash(objs[i],artifact);receipt(record,sizeof record,source,bh,ih,th,nh,modelhash,names[i],artifact);
   char p[4400];snprintf(leaf,sizeof leaf,"%s.receipt",names[i]);join(p,out,leaf);size_t n;char *s=cx_read(p,&n);
   if(!s||n!=strlen(record)||memcmp(s,record,n))fail("unit-changed-during-link");free(s);

@@ -436,15 +436,7 @@ static void unit_includes(ResourceInput *r, const char *path, const CliBlock *pl
     int rc=cxa_includes(path,plain->b,plain->n,withcx->b,withcx->n,unit?unit->b:0,unit?unit->n:-1,&out,&n,why,sizeof why);
     args_check(rc,why); r->data=out; r->len=(int)n;
 }
-static char *process_environment(int argc,char **argv,int i) {
-#ifdef __UNISA__
-    /* main's argv is a compiler-created copy; the intrinsic names the
-       process vector, which also contains envp after its terminating NULL. */
-    return __argv(__argc()+1+i);
-#else
-    return argv[argc+1+i];
-#endif
-}
+char *cxe_environment(int,char **,int);
 #define ARGRESOURCE(i,k,v) cli[i].name=(const unsigned char *)k; cli[i].n=sizeof(k)-1; cli[i].data=v.b; cli[i].len=v.n
 /* A static compiler image (Linux, built by unisacc) has no host loader in its process, so a run
    whose program forwards to the host libc cannot be bound in memory.  main finishes it as the
@@ -715,12 +707,12 @@ int main(int argc, char **argv) {
 #endif
         ) {
         int count=1+argc-argstart;
-        int envn=0; while (process_environment(argc,argv,envn)) envn++;
+        int envn=0; while (cxe_environment(argc,argv,envn)) envn++;
         runargs=xrealloc(0,(count+envn+2)*sizeof(char *));
         runargs[0]=(char *)src;
         for (int j=argstart;j<argc;j++) runargs[j-argstart+1]=argv[j];
         runargs[count]=0;
-        for (int j=0;j<=envn;j++) runargs[count+1+j]=process_environment(argc,argv,j);
+        for (int j=0;j<=envn;j++) runargs[count+1+j]=cxe_environment(argc,argv,j);
         resource_u64(process_argc,count); resource_u64(process_argv,(uintptr_t)runargs);
     }
     ARGRESOURCE(0,"\0cli/defines",defs);
