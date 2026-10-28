@@ -154,7 +154,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 <a id="work-tree"></a>
 ### 思维树
 
-**落尾实测节点：** 已装b6f15七例原始基线4通过/3失败，三种落尾均SIGSEGV(-11)，合法跳转、ret后不可达尾、有限回边、函数调用返回均安静exit7；证据out/c43-fallthrough-baseline-01。下一刀lower具名运行时guard设计与模型实现，需同时覆盖宿主回调与独立镜像；未修复，不以trap或末opcode判断替代合同。
+**当前已装产品（落尾修复）：** cb743c27/record9783c93d，冻结648fe13db9/SID95b23dc9，内嵌正式包7b806ec2。完整来源107项与当前59项独立核验、双内核、五切片及APE均完成；暂存候选prepare+verify-prepared后以staged-v2迁入共享根，冻结启动产品b6f15保留，安装收据5266380d，备份out/c43-fallguard-install-01。候选七例7/0、原畸形批11/0（原10/1转绿）、格式68/0、库成员27/0；已装smoke16/0、落尾7/0。这只修物理代码末尾的具名运行时保护；CFG、函数间落穿、准确函数名归因、完整发布覆盖与外国宿主资格仍未闭合。下一步已装受影响资格和剩余诊断/类型ABI/所有权主线；以下b6f15等为历史身份。
 
 **当前已装产品（链接容器）：** b6f15e82/record db7af545，冻结ecb5fbe322/SID003166c6，五切片与APE实构、固定单文件差异和内嵌PCff696核验、prepare/finish两阶段安装完成，收据544011da；旧8147备份out/c43-tapelink-install-01。候选格式68/0、容器边界11/0、原畸形批10/1（唯一余红tape落尾SIGSEGV）；安装后smoke16/0、已装入口边界11/0。原8147的8/3及旧证据保留，矩阵不自动迁标。下一步补新身份受影响资格与独立落尾模型合同；完整发布覆盖及外国宿主资格仍未完成。以下FIFO/CX当前措辞均为历史节点。
 
@@ -382,7 +382,9 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 <a id="memory-palace"></a>
 ### 记忆宫殿
 
-**落尾基线：** out/c43-fallthrough-baseline-01.stdout及逐例stdout/stderr，工具rc1，7断言/3失败，产品b6f15e82；三负例rc=-11/transport=0，四正例rc7且无输出。源码tools/tape-fallthrough-cases.cx；尚未构造修复模型。
+**落尾当前身份与收据：** 共享cb743c27b736119a3c88b1146187c35a8dec955149590eb38b860520a62c1e55，记录9783c93d2bdc5a4cfdfe6f564871dbce168dea75cd94c178906f56ba700c2798；迁入收据out/c43-fallguard-install-01/receipt.tsv SHA5266380d11788f59e974b78c861d28155f5065b94ee2441aba895cc08c957d8a。候选证据out/c43-fallguard-candidate-{seven,malformed,formats,library,smoke}-01，已装smoke/seven为16/0与7/0。source-root冻结648fe13db9的unisacc.com仍b6f15，包7b806ec2和工具身份未替换；旧协议与仅PREPARED收据拒绝，独立目标迁入试验通过。不迁旧矩阵或外国平台资格。
+
+**落尾历史基线：** out/c43-fallthrough-baseline-01为b6f15的4/3；私包seven-02为7/0、library-01为27/0。reader-01/02路径拒绝、早期构造失败和原SIGSEGV证据全部保留；正式候选与已装结果见上段。
 
 **当前链接容器身份：** product b6f15e823db12f42461371e2193c30f8b9b34961367caf2905c497765d147b0d，record db7af545234484fb12efb873d77758401e81596f071a0c715f6f5129ceb1ad90，安装收据544011da86bb1511272bb76dac519e66d6f1e9ee3022561ec50dc3729811d92c。冻结根unisacc-epoch-tapelink-ecb5fbe322，context6a7ceb4b；安装备份out/c43-tapelink-install-01，已装smoke16/0和边界11/0为out/c43-tapelink-installed-*。候选原畸形批10/1，落尾仍红。旧私有ec17e24f+ff696的六目标对象证据仍在out/c43-tapelink-private-01，四外国对象经典参考生成，未外国执行；不扩授以下历史资格。
 
