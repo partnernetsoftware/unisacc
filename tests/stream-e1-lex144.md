@@ -6,7 +6,8 @@ one EOF execution as twelve successful source cases. It evaluates the actual
 deployed E1 network at the classification boundary instead.
 
 `stream-e1-lex144-core.c` uses the existing loader and `core_transition` from
-`exec/c/run.c` and `exec/c/core.c`. It loads the real `unisacc-stream2.com` and
+`exec/c/run.c` and the C generic evaluator in `exec/c/core.c`; this is not live
+state injection into the installed product's ASM kernel. It loads the real `unisacc-stream2.com` and
 the formally constructed, same-generation **located `warnlex`** network. The
 image/O2 route selects this model in `seed/compilerpack.c`; the unlocated
 `shared-e1` network is a different artifact and is refused by the test pins.
@@ -41,8 +42,8 @@ tools/bound 55 sh ./unisacc.com tests/stream-e1-lex144.cx -- "$PWD" "$PWD/out/c4
 ```
 
 The 2026-10-28 local run used `out/c43-e1-lex144-core-02.elf` and
-`out/c43-e1-lex144-boundary-02/`: 293 assertions, zero failures, empty batch
-stderr. Its outer logs are `out/c43-e1-lex144-boundary-02.stdout` and `.stderr`.
+`out/c43-e1-lex144-boundary-03/`: 293 assertions, zero failures, empty batch
+stderr. Its outer logs are `out/c43-e1-lex144-boundary-03.stdout` and `.stderr`.
 The output directory retains the 168-query plan, actual NN answers, mutation
 refusal and before/after identities of the candidate, stream, formal artifacts,
 adapter, generic C sources and gold input. Root is `da4e7ef1…`, stream2 is
