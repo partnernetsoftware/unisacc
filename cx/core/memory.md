@@ -75,3 +75,11 @@ case remains `NEEDS_PRODUCT_CHANGE` in
 `tests/pending/struct-return-member.cx`; that tracked case also ran with rc1
 and the named refusal in `out/c43-struct-return-member-pending-01.stderr`.
 Its original minimal red remains in `out/c43-core-memory-struct-return-01.stderr`.
+
+The E3 source fix now parses the complete returned expression and checks its
+final aggregate type before copying the value. A private, non-admitted model
+package passes the direct member-return, value independence and module tests
+(43 assertions), plus this unchanged managed-memory batch (138/0). Evidence and
+scope are in [the E3 cut](../../plans/c43-aggregate-return-2026-10-28.md).
+The installed Rootd65 still rejects the pending positive; the local-copy helpers
+remain until formal product integration. Compile-time ownership remains open.

@@ -1,0 +1,52 @@
+/* MODE ROOT PRODUCT PACKAGE NEW_ABS_OUT; MODE positive|refusal|refusal-warnings|module.
+ * Actual NN compilation/default execution. PACKAGE is private, never admitted
+ * by this test. The installed product's original member-return red is retained.
+ * Value copies are not a claim of compile-time ownership or Rust borrowing. */
+#pragma unisa use cxlib.netpack
+static char root[4096],product[4096],package[4096],work[4096],bound[4400];
+static int checks,failed,warnings;
+static void die(const char *s){fprintf(stderr,"aggregate-return: %s errno=%d\n",s,errno);exit(2);}
+static void path(char p[4400],const char *leaf){if(cx_path_join(p,4400,work,leaf))die("path");}
+static void put(const char *leaf,const char *s){char p[4400];path(p,leaf);if(cx_write(p,s,strlen(s)))die("write");}
+static void hash(const char *p,char h[65]){size_t n;char *s=cx_read(p,&n);if(!s)die("read");cx_sha256_hex(s,n,h);free(s);}
+static void ck(int ok,const char *name){checks++;failed+=!ok;printf("%s\taggregate-return.%s\n",ok?"PASS":"FAIL",name);}
+static void run(const char *leaf,const char *text,int want,const char *reason,int patched){
+ char source[4400],log[4400],label[200],why[1200];path(source,leaf);if(text)put(leaf,text);char *v[12];int n=0;v[n++]=bound;v[n++]="5";v[n++]="sh";v[n++]=product;if(patched){v[n++]="--models";v[n++]=package;}if(warnings)v[n++]="-Wall";v[n++]=source;v[n]=0;
+ np_buf argv={0};for(int i=0;v[i];i++){np_putll(&argv,i);np_puts(&argv,"\t");np_puts(&argv,v[i]);np_puts(&argv,"\n");}snprintf(label,sizeof label,"%s.argv.tsv",leaf);path(log,label);if(cx_write(log,argv.p,argv.n))die("argv");free(argv.p);
+ np_result r={0};int transport=np_run(v,work,0,6,&r,why,sizeof why);snprintf(label,sizeof label,"%s.stdout",leaf);path(log,label);if(cx_write(log,r.out,r.outn))die("stdout");snprintf(label,sizeof label,"%s.stderr",leaf);path(log,label);if(cx_write(log,r.err,r.errn))die("stderr");if(transport)die(why);
+ int ok=r.rc==want&&!r.outn&&(reason?strstr(r.err,reason)!=0&&strstr(r.err,source)!=0&&(!patched||!strstr(r.err,"UNCOVERED\t")):!r.errn);ck(ok,leaf);if(!ok)fprintf(stderr,"%s rc=%d stderr=%s\n",leaf,r.rc,r.err);np_free(&r);
+}
+static const char *member="typedef struct {int value;} child;typedef struct {child item;} parent;static child project(parent p){return p.item;}int main(void){parent p;p.item.value=7;child c=project(p);return c.value;}\n";
+static void positive(void){
+ run("retained-installed-red.c",member,1,"not covered: struct return",0);
+ run("member.c",member,7,0,1);
+ run("local.c","typedef struct{int v;} C;static C f(void){C c;c.v=7;return c;}int main(void){C c=f();return c.v;}\n",7,0,1);
+ run("nested.c","typedef struct{int v;} C;typedef struct{C c;} B;typedef struct{B b;} A;static C f(A a){return a.b.c;}int main(void){A a;a.b.c.v=9;C c=f(a);return c.v;}\n",9,0,1);
+ run("pointer-member.c","typedef struct{int v;} C;typedef struct{C c;} P;static C f(P *p){return p->c;}int main(void){P p;p.c.v=7;C c=f(&p);return c.v;}\n",7,0,1);
+ run("array-member.c","typedef struct{int v;} C;typedef struct{C c[2];} P;static C f(P p){return p.c[1];}int main(void){P p;p.c[0].v=3;p.c[1].v=11;C c=f(p);return c.v;}\n",11,0,1);
+ run("parenthesized.c","typedef struct{int v;} C;typedef struct{C c;} P;static C f(P p){return (p.c);}int main(void){P p;p.c.v=7;C c=f(p);return c.v;}\n",7,0,1);
+ run("alias.c","typedef struct{int v;} C;typedef C Alias;typedef struct{C c;} P;static Alias f(P p){return p.c;}int main(void){P p;p.c.v=7;Alias c=f(p);return c.v;}\n",7,0,1);
+ run("value-independent.c","typedef struct{int v;} C;typedef struct{C c;} P;static C f(P *p){return p->c;}int main(void){P p;p.c.v=7;C a=f(&p);p.c.v=9;C b=f(&p);return a.v==7&&b.v==9?7:1;}\n",7,0,1);
+ run("single-evaluation.c","typedef struct{int v;} C;typedef struct{C c[2];} P;static int calls;static int next(void){calls++;return 1;}static C f(P *p){return p->c[next()];}int main(void){P p;p.c[0].v=3;p.c[1].v=7;C c=f(&p);return c.v==7&&calls==1?7:1;}\n",7,0,1);
+ run("whole-value-copy.c","typedef struct{long a,b,c;} C;typedef struct{long tag;C c;long tail;} P;static C f(P *p){return p->c;}int main(void){P p;p.tag=99;p.c.a=7;p.c.b=43;p.c.c=-4294967294LL;p.tail=101;C c=f(&p);p.c.c=0;return c.a==7&&c.b==43&&c.c==-4294967294LL?7:1;}\n",7,0,1);
+ run("global-member.c","typedef struct{int v;} C;typedef struct{C c;} P;static P p;static C f(void){return p.c;}int main(void){p.c.v=7;C c=f();return c.v;}\n",7,0,1);
+ run("chained-call.c","typedef struct{int v;} C;typedef struct{C c;} P;static C inner(P p){return p.c;}static C outer(P p){return inner(p);}int main(void){P p;p.c.v=7;C c=outer(p);return c.v;}\n",7,0,1);
+}
+static void refusal(void){const char *bad[]={
+ "typedef struct{int v;} A;typedef struct{int v;} B;static A f(B b){return b;}int main(void){return 31;}\n",
+ "typedef struct{int v;} C;typedef struct{C c;} P;static C f(P *p){return &p->c;}int main(void){return 31;}\n",
+ "typedef struct{int v;} C;typedef struct{C c;} P;static C f(P p){return p.c.v;}int main(void){return 31;}\n",
+ "typedef struct{int v;} C;typedef struct{C c[2];} P;static C f(P p){return p.c;}int main(void){return 31;}\n",
+ "typedef struct{int v;} A;typedef struct{int v;} B;typedef struct{B b;} P;static A f(P p){return p.b;}int main(void){return 31;}\n"};
+ for(int i=0;i<5;i++){char leaf[100];snprintf(leaf,sizeof leaf,"mismatch-%d.c",i);run(leaf,bad[i],1,"incompatible aggregate return type",1);snprintf(leaf,sizeof leaf,"recovery-%d.c",i);run(leaf,member,7,0,1);}
+}
+static void module(void){
+ put("aggregate_api.cx","#pragma unisa module aggregate_api\ntypedef struct {int value;} Child;typedef struct {Child item;} Parent;Child project(Parent p){return p.item;}\n");
+ run("module-main.cx","#pragma unisa use aggregate_api\nint main(void){Parent p;p.item.value=7;Child c=project(p);return c.value;}\n",7,0,1);
+ put("aggregate_state.cx","#pragma unisa module aggregate_state\ntypedef struct {int value;} Value;typedef struct {Value item;} Owner;static Owner state;void set_value(int v){state.item.value=v;}Value get_value(void){Owner copy=state;return copy.item;}\n");
+ run("module-copy.cx","#pragma unisa use aggregate_state\nint main(void){set_value(7);Value a=get_value();set_value(9);Value b=get_value();return a.value==7&&b.value==9?7:1;}\n",7,0,1);
+}
+int main(int argc,char **argv){
+ if(argc!=6||(!strcmp(argv[1],"positive")+!strcmp(argv[1],"refusal")+!strcmp(argv[1],"refusal-warnings")+!strcmp(argv[1],"module"))!=1||!realpath(argv[2],root)||!realpath(argv[3],product)||!realpath(argv[4],package)||argv[5][0]!='/'||strlen(argv[5])>=sizeof work)die("MODE ROOT PRODUCT PACKAGE NEW_ABS_OUT");warnings=!strcmp(argv[1],"refusal-warnings");strcpy(work,argv[5]);if(mkdir(work,0700))die("exclusive-output");if(cx_path_join(bound,sizeof bound,root,"tools/bound"))die("bound");char ph[65],mh[65],after[65];hash(product,ph);hash(package,mh);
+ if(!strcmp(argv[1],"positive"))positive();else if(!strcmp(argv[1],"refusal")||warnings)refusal();else module();hash(product,after);ck(!strcmp(ph,after),"product-unchanged");hash(package,after);ck(!strcmp(mh,after),"package-unchanged");printf("AGGREGATE_RETURN\tmode=%s\tassertions=%d\tfailed=%d\tscope=private-NN-value-return-not-static-ownership\n",argv[1],checks,failed);return failed?1:0;
+}
