@@ -1,0 +1,19 @@
+/* Graph contract only. Root cwd; NEW_OUT must not exist. */
+#pragma unisa use workspace.driver
+static int checks,failed;static char work[4096];
+static void die(const char *s){fprintf(stderr,"workspace-test: %s errno=%d\n",s,errno);exit(2);}
+static void ck(int yes,const char *name){checks++;if(!yes)failed++;printf("%s\tworkspace.%s\n",yes?"PASS":"FAIL",name);fflush(stdout);}
+static int run(const char *manifest,const char *label,char **output){char p[4400],log[4400];snprintf(p,sizeof p,"%s/%s.tsv",work,label);snprintf(log,sizeof log,"%s/%s.log",work,label);if(cx_write(p,manifest,strlen(manifest)))die("manifest-write");pid_t pid=fork();if(pid<0)die("fork");if(!pid){int fd=open(log,O_CREAT|O_EXCL|O_WRONLY,0600);if(fd<0)_exit(99);dup2(fd,1);dup2(fd,2);close(fd);char *v[]={"cx-workspace","plan",p,"out/unused","lnx/x86_64",0};int rc=cxw_main(5,v);fflush(stdout);_exit(rc);}int status;if(waitpid(pid,&status,0)!=pid)die("wait");size_t n;*output=cx_read(log,&n);if(!*output)die("read-log");return WIFEXITED(status)?WEXITSTATUS(status):99;}
+int main(int argc,char **argv){if(argc!=2||strlen(argv[1])>=sizeof work)die("usage NEW_OUT");strcpy(work,argv[1]);if(mkdir(work,0700))die("exclusive-output");char *out=0;int rc;
+const char *valid="CXWORK1\nP\ta\ttools/cx0.cx\ta\tunisacc\t1\nP\tb\ttools/cx0-bundle.cx\tb\tunisacc\t1\nI\ta\timplementation\tentry\ttools/cx0.cx\nI\tb\timplementation\tentry\ttools/cx0-bundle.cx\nD\tb\tnormal\ta\n";
+rc=run(valid,"valid",&out);ck(!rc&&strstr(out,"PLAN\ta\t")&&strstr(out,"PLAN\tb\t")&&strstr(out,"PLAN\ta\t")<strstr(out,"PLAN\tb\t"),"dependency-before-consumer");char *first=out;
+char text[4000];snprintf(text,sizeof text,"%sD\ta\tbuild\tb\n",valid);rc=run(text,"cycle",&out);ck(rc==2&&strstr(out,"dependency-cycle"),"normal-build-cycle-refused");free(out);
+snprintf(text,sizeof text,"%sD\ta\tnormal\tabsent\n",valid);rc=run(text,"missing",&out);ck(rc==2&&strstr(out,"missing-package"),"missing-package-refused");free(out);
+snprintf(text,sizeof text,"%sD\tb\tbuild\ta\n",valid);rc=run(text,"duplicate-edge",&out);ck(rc==2&&strstr(out,"duplicate-edge"),"duplicate-edge-refused");free(out);
+rc=run("CXWORK1\nP\ta\ttools/cx0.cx\ta\tunisacc\t1\nP\tb\ttools/cx0.cx\tb\tunisacc\t1\n","ownership",&out);ck(rc==2&&strstr(out,"duplicate-package-source"),"duplicate-source-ownership-refused");free(out);
+rc=run("CXWORK1\nP\ta\ttools/cx0.cx\ta\tunisacc\t1\n","undeclared",&out);ck(rc==2&&strstr(out,"undeclared-package-source"),"undeclared-source-refused");free(out);
+rc=run("CXWORK1\nP\ta\ttools/cx0.cx\ta\tunisacc\t56\n","timeout",&out);ck(rc==2&&strstr(out,"seconds-1-to-55"),"unbounded-child-refused");free(out);
+snprintf(text,sizeof text,"%sI\ta\ttest\ttest-source\ttests/workspace.cx\n",valid);rc=run(text,"test-only",&out);ck(!rc&&!strcmp(first,out),"test-only-input-does-not-change-build-plan");free(first);free(out);
+snprintf(text,sizeof text,"%sI\ta\timplementation\tmissing\tout/cx-workspace-no-such-file\n",valid);rc=run(text,"missing-file",&out);ck(rc==2&&strstr(out,"missing-input"),"missing-input-refused");free(out);
+snprintf(text,sizeof text,"%sI\ta\timplementation\tbad-parent\ttools/cx0.cx/child\n",valid);rc=run(text,"not-directory",&out);ck(rc==2&&strstr(out,"input-stat")&&!strstr(out,"missing-input"),"enotdir-is-io-failure");free(out);
+printf("WORKSPACE\tassertions=%d\tfailed=%d\n",checks,failed);return failed?1:0;}
