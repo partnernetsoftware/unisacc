@@ -10,13 +10,13 @@
 | **Paper A** | neural-network-based compiler；当前方法：给定表到网络的精确构造 | 网络承载编译阶段；表构造方法、工程实例与保证层次（§2.3） | [`unisacc-paper.md`](unisacc-paper.md) | 修订中 | cdx-unisacc 编辑，cc-unisacc 提供实现证据 |
 | **Paper B** | UJS：封闭 JavaScript 子集的构造式表网络 | 同一方法在第二门语言上是否成立 | [`ujs-paper.md`](ujs-paper.md) | 草稿 | csr |
 | **Paper C** | 把“确定性模型推理替代编译”推广为管道方法 | 为什么能推广、需要什么条件、能否机械化 | [`paper-c-intent.md`](paper-c-intent.md) | 意向书 | 待定 |
-| **Paper D** | 流水线上的可选内存安全节点：模型推断标注、确定性检查器验证、分级编译 | 不改一行 C99 能否拿到接近 Rust 的保证；保证从哪来、如何量化 | [`paper-d-intent.md`](paper-d-intent.md) | 意向书 | 待定 |
+| **Paper D** | `.cx` 架构：模块化 + 内存安全；流水线上可选安全节点（推断／确定性验证／分级） | 如何在 C99 语法面上做可核验模块边界与渐进安全合同；保证从哪来、如何量化 | [`paper-d-intent.md`](paper-d-intent.md) | 意向书 | 待定 |
 | **Paper E** | 编译器有限控制表的系统构造方法 | 如何从文法、属性规则与状态不变量获得可靠的控制表 | [`paper-e-intent.md`](paper-e-intent.md) | 研究候选 | 待定 |
 
 A 与 B 分别提供 C99 子集与 UJS 的实现及验证证据；C 不重复这些工作，只把 A、B 当作证据引用。
 B 的方法命题一律引用 A；不编造延迟或准确率数字；不把 M3 写成 IntNet。
 
-A 研究给定有限控制表到网络的精确构造，不证明控制表自动覆盖完整 C99；E 研究可靠控制表的系统构造方法。A 仍须交代表的来源、可信基、覆盖边界和已知缺陷。C 研究阶段组合条件，D 研究安全节点，均不把网络等于表当作语言或安全语义正确性的证明。
+A 研究给定有限控制表到网络的精确构造，不证明控制表自动覆盖完整 C99；E 研究可靠控制表的系统构造方法。A 仍须交代表的来源、可信基、覆盖边界和已知缺陷。C 研究阶段组合条件。**D 以 `.cx` 为模块化与内存安全的主载体**（经典 C99「不改一行」可选节点为对照面）；均不把网络等于表当作语言或安全语义正确性的证明。CX 细则不进 A／E 正文。
 
 ## 每条主线的文件
 
@@ -54,7 +54,8 @@ A 研究给定有限控制表到网络的精确构造，不证明控制表自动
 
 | 文件 | 角色 |
 |---|---|
-| [`paper-d-intent.md`](paper-d-intent.md) | 意向书（分工、三步、需要的理论、实验、风险）；工程条目在 archive/plans/v0.1.x.md v0.1.3 |
+| [`paper-d-intent.md`](paper-d-intent.md) | 意向书（`.cx` 模块化＋内存安全为主；可选安全节点为对照；理论／实验／风险） |
+| [`../cx/README.md`](../cx/README.md) · [`../docs/cx/prd.md`](../docs/cx/prd.md) · [`../plans/cx-modules.md`](../plans/cx-modules.md) | 工程载体与棘轮；不冒称论文已完成 |
 
 **Paper E**
 

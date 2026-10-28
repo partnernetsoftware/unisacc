@@ -1,5 +1,7 @@
 # 需求（强制）：`.cx` 逐步改造为无 `#include` 的模块 —— API 由 unisacc 提供，模块结构与内存安全参照 Rust
 
+论文叙事归 **Paper D**（[research/paper-d-intent.md](../research/paper-d-intent.md)），不进 Paper A。
+
 > 提出：2026-10-23（主人重申，强制要求，逐步实现）· 执行：cc · 依据：`docs/cx-spec-draft.md` v0.3、9df1417c（`.cx` 内置 prelude 已落地）
 
 ## 0. 一句话
