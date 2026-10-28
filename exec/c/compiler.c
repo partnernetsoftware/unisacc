@@ -623,10 +623,9 @@ int main(int argc, char **argv) {
     /* -c with -b: an object (R17-1).  The product writes objects through its
        own route (\0cli/object, \0cli/funit; exec/enc, in progress) -- until
        that route exists the driver says so instead of writing a tape. */
-    /* -c with -b: an object (R17-1).  The Linux targets have the product's
-       object route (cdx 7f72206: <os>/<arch>[/warn][/multi]/object/O<n>,
-       resources \0cli/object and \0cli/funit); Mach-O and COFF objects are
-       still the reference compiler's, and the driver says so by name. */
+    /* -c with -b: object routes carry \0cli/object and \0cli/funit.
+       Non-Linux objects are unit containers; the selected package must
+       supply the requested route before the driver accepts them. */
     int objwant = sawc && target && !object_path(src);
     /* -S -b lnx/ARCH: the object -c -b writes, as GNU assembly; bare -S stays the tape */
     /* ...and only when -o names a .s file; `-S -b T` alone stays the target's tape */
