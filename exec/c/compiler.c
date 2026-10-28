@@ -394,6 +394,8 @@ static int product_ar(int argc,char **argv) {
     free(b); return 0;
 }
 typedef struct { unsigned char *b; long n,cap; } CliBlock;
+typedef struct { char **libs; int *n; int cap; } CxpState;
+int cxp_step(CxpState *,char **,int,int *,char *,long);
 /* Transitional ABI shared with cx/driver/cli.cx; fields borrow argv. */
 typedef struct {
     unsigned char **defs,**undefs,**forced,**incdir,**quotedir,**errorlimit;
@@ -556,7 +558,7 @@ int main(int argc, char **argv) {
     if (argc>=2 && (!strcmp(argv[1],"nm") || !strcmp(argv[1],"objdump"))) { if(rf_trace_finish())return 2;return product_view(argc,argv); }   /* R18-4 */
     int sawS=0;
     CliBlock srcres={0};                   /* \0cli/source: the main source path */
-    CxcState opts={0}; char cli_reason[128];
+    CxcState opts={0}; char cli_reason[128]; CxpState compat={fwd_libs,&nfwd_libs,16};
     CxcResources resources={&defs.b,&undefs.b,&forced.b,&incdir.b,&quotedir.b,&errorlimit.b,
         &defs.n,&undefs.n,&forced.n,&incdir.n,&quotedir.n,&errorlimit.n,
         &defs.cap,&undefs.cap,&forced.cap,&incdir.cap,&quotedir.cap,&errorlimit.cap,0};
@@ -581,12 +583,10 @@ int main(int argc, char **argv) {
             if ((len>=2&&!strcmp(a+len-2,".c")) || (len>=3&&!strcmp(a+len-3,".cx")) || object_path(a)) sources[nsources++]=a;
             else {argstart=i;break;}
         } else if (a[0]=='-' && (a[1]=='l' || a[1]=='L' || a[1]=='x')) {
-            const char *value=a+2;
-            if (!*value) {
-                if (++i>=argc) return clierror(opts.defrun && src ? "missing compatibility argument (arguments for the program go after --: unisacc prog.c -- -x)" : "missing compatibility argument");
-                value=argv[i];
-            }
-            if (a[1]=='l' && *value && nfwd_libs<16 && strcmp(value,"m") && strcmp(value,"c") && strcmp(value,"dl") && strcmp(value,"pthread") && strcmp(value,"rt")) fwd_libs[nfwd_libs++]=(char *)value;
+            int compat_next=i;int rc=cxp_step(&compat,argv,argc,&compat_next,cli_reason,sizeof cli_reason);
+            if(rc==9) return clierror(opts.defrun && src ? "missing compatibility argument (arguments for the program go after --: unisacc prog.c -- -x)" : "missing compatibility argument");
+            if(rc) return clierror(cli_reason);
+            i=compat_next;continue;
         } else if (cxm_flag((char *)a)) { }
         else if (a[0]=='-' && a[1]) return clierror(opts.defrun && src ? "option not migrated (arguments for the program go after --: unisacc prog.c -- --flag)" : "option not migrated");
         else { sources[nsources++]=a;if(!src)src=a; }
