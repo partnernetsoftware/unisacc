@@ -635,7 +635,7 @@ int main(int argc, char **argv) {
         if (strncmp(target,"lnx/",4)) { fprintf(stderr,"unisacc: error: assembly text (-S -b ... -o FILE.s) is written for Linux targets in this version (Mach-O and COFF text: 0.0.19); the target was %s\n",target); return 1; }
         objwant=1;
     }
-    if (objwant && strncmp(target,"lnx/",4)) return clierror("object output (-c -b) for this target is not on the product route yet (Linux targets are); the reference compiler writes Mach-O and COFF objects");
+    if (objwant && strncmp(target,"lnx/",4) && !funit) return clierror("object output (-c -b) for this target is not on the product route yet (Linux targets are); the reference compiler writes Mach-O and COFF objects");
     if (funit && !objwant) return clierror("-funit needs -c -b os/arch (a unit object)");
     char default_object_target[520], deps_reason[128];
     if (objwant) { mode = 5; if (!out) {
@@ -809,6 +809,14 @@ int main(int argc, char **argv) {
             fprintf(stderr, "RR_TIME\tconstruction\tns=%lld\n",
                     (long long)(pk_t1.tv_sec - pk_t0.tv_sec) * 1000000000LL + (pk_t1.tv_nsec - pk_t0.tv_nsec));
         }
+    }
+    if (objwant && strncmp(target,"lnx/",4)) {
+        int lower=0,encoder=0;
+        for (int i=0;i<PS;i++) if (!strcmp(STAGES[i].route,route)) {
+            if (!strcmp(STAGES[i].name,"lower")) lower=1;
+            if (!strcmp(STAGES[i].name,"elf") && !strcmp(STAGES[i].out,"object-v1")) encoder=1;
+        }
+        if (!lower || !encoder) { unpackage();return clierror("object unit route is absent from the selected package"); }
     }
     HostCompileContext host_context={host_target,host_filter,mode,runit,host_symbols_path,cli,process_dl[0]};
     if(host_target&&(mode==0||mode==3||host_symbols_path)&&!host_stage_present("host-symbols","symbols")){unpackage();return clierror("bind: required host-symbols model is missing");}
