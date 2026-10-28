@@ -60,3 +60,11 @@
 - 设计记录（未做）：`diag.gap-cont-user-column`/`e3.ref.diag-expanded-column`。E3 的 `diag_source` 是展开后文本，`dp_col` 在展开行上计数；要给用户列号与用户行摘录，需要 (a) E2 在 UNIPP1 locations 变体里多一段"展开映射"（展开偏移→源偏移，每个宏调用边界一对），(b) tokenlocations 读入并在 DP 里把列映射回源，(c) DP 从原始源（`\0inc/q/`+`\0cli/source` 路径经文件字典）读摘录行；头文件内错误需按 include 记录解析路径。公开 locations 格式变更 + 三组表 + oracle，约一天；不在本次快车道内。
 - 2026-10-28 快车道第二例：产品内分相时间戳（`UNISACC_RR_TIME`：construction / 每流 model inflate|cache / 每流 inference / output），`tests/phase-timing-stamps.cx` 读入八个剩余格（无戳产品报 UNMEASURED+原因，批仍绿；hit 必须零流）。快车道验证用"驱动切片 + 外部包"的 shim 产品（`driver.elf --models PKG`），57/0；已装产品 54/0（UNMEASURED 分支）。待下一慢车道纪元后八格翻绿。
 - 实测发现：header-free `.cx` 探针冷编译的产品内推理合计 **1.94 s**（同样的 `.c` 约 0.1 s）——内置 cx 前奏（`include/cx.h`）在 E2/E1/E3 的代价；这是 cx 进化最大的单项性能靶（分相数据见 out/c43-cc-phase-01/stamps-shim/run.cold.stderr）。
+
+## 9. 决策记录：.cx 前奏 E2 代价（2026-10-28，fable 子代理裁定）
+
+数据：header-free `.cx` 冷编译 E2 1.78 s / 总 1.94 s；`include/cx.h` 折入 23 个系统头，E2 吞吐约 0.75 MB/s（线性）。裁定：(A) cc 做前奏级 E2 结果缓存（内容寻址，键 = 预定义宏集 + cx.h + 传递头字节；命中仍核内容；smoke 里保留冷/缓存字节等价探针）；(B) 前奏精简归 grk/cdx，只送测量；(C) 执行器提速不做；通知 grk 而非等待。
+实现路线（待选，均为 SID 变更需慢车道纪元）：
+- A1 执行器检查点：E2 处理完 `\0cli/includes` 后把机器状态（W 稀疏表、数值内存、blobs、intern、SB、输出及属性）序列化进 runreuse；命中时恢复并从用户源继续。不碰 E2 表；需 run.c 新增状态序列化与"检查点状态"约定，正确性风险在遗漏状态。
+- A2 宏摘要 + 预展开前缀：E2 结束态转储活宏为 `#define` 文本（需在宏表新增名/参数文本 blob 字段，F_NAMEBLOB/F_PBLOB，FSZ 23→24+），驱动缓存（前奏 E2 输出文本, 摘要）；命中时 E2 以 `\0cli/preexpanded` 资源整段 SPAN 复制前缀、只处理摘要+用户源。改 E2 表 + facts + 驱动；locations 变体需同时缓存位置记录。
+碰撞提示：cdx 的 cx0 工作正在改 E2 对不可变资源的消费（6b0ffc7901），A2 与其同区；A1 在 run.c。先与 cdx 对齐再开工；期间按既定顺序做 MISSING 格的事实生成用例。
