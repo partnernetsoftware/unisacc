@@ -72,6 +72,14 @@ exec/facts，通用stage清单固定exec前缀，但模板路径来自清单展�
 证据native-compare-02.stdout；首次纯CX SHA超55秒rc142保留，改用既有kernelsha后在原预算内完成。
 独立JSON内容差异夹具rc1（out/c43-json-compare-negative-01），未放宽相等条件。
 
+私有完整产品进展：冻结8390源用共享3a5b、显式冻结include/exec-c路径、-O2，
+依次构造win/x86_64、lnx/arm64、osx/x86_64、osx/arm64、lnx/x86_64五切片，各40秒内rc0。
+既有sizeof纪元host APE wrapper（seed/ape.c源同SHA ad3c21cf）挂载未变ff696包，封装rc0。
+`out/c43-link-ape-01/unisacc.com` SHA4c2831c3fa1c871f5abf9549bcfd1f98f46f61554639706f698ed3ebd680e5b0。
+真正APE上的原formats-elf-ape批68/0，out/c43-link-ape-formats-01；先前薄包装59/1保留，不冒充APE。
+完整APE上的原链接缺陷批仍4/1，唯一失败direct-C迟绑定合同冲突，其余静态拒绝与正序rc106均通过。
+这是未准入私有候选，不替换共享3a5b，不授外国宿主运行或完整发布资格。
+
 - 现象：`int used(void); int main(void){return used()+2;}` 经 `-c -b lnx/x86_64 -funit` 得 main.o 后，`unisacc -o img main.o`（或加只定义 `unused` 的归档、或直接 `-o img main.c`）rc 0 并写出镜像；运行 SIGSEGV（rc 139）。预期：`link: undefined reference to used`，rc≠0，无镜像。
 - 定位：src/tapelink.c:351 `tl_check_undef`（R20-3）只检查名字以 `g_` 开头的未定义外部（全局数据对象），函数外部不检查。
 - 同现：经典参考 REF 0ed46192 行为相同（共享缺陷，非回归）；产品==REF 字节差分仍有效，不阻塞候选 f3705dfa。
