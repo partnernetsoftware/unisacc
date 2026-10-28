@@ -1,5 +1,13 @@
 # c43 已知缺陷登记（cc，2026-10-28 起）
 
+## cxpack.fifo-open — 非普通清单可能阻塞（代码审查发现，待复现）
+
+模型/经典/cxcc三端cxm_rd使用阻塞fopen；无写端FIFO可能在进入fread前阻塞，
+与CX0模块的O_NONBLOCK+普通文件检查不一致。尚未实跑，不能记已确认失败。
+tools/cxpack-read-failures.cx新增可选--fifo，Linux/x86_64创建并核实实际FIFO；
+保留原四项，加第五项必须rc1具名拒绝且无接口输出。子进程仍限10秒，超时不能判PASS。
+待cc归还窗口后实跑；本次未修改产品输入或重建产品。
+
 ## cxpack.manifest-read-fail-open — 清单读取失败扩大公开接口（开放，未安装源码）
 
 2c949ba577的cxm_listed把所有cxm_rd负值当成无清单，返回2并导出全部非static函数。
