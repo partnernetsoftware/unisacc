@@ -5,6 +5,11 @@
    ./out/cxcc-suite/suite --list
    Units are tests/cxcc/units.tsv. Both drivers run every row.
    refuse: the driver exits non-zero and leaves no binary.
+   compile-speed: warm -o of tests/cxhost_main.cx, median of 3.
+   Ceilings are 30% under the old medians: gcc <= 268ms, clang <= 227ms.
+   nest-header: a header included by -include changes the object.
+   wide-pragma: '#pragma  unisa use' with two spaces still expands.
+   file-place: __FILE__ and the error line name the .cx path.
 */
 enum { CXSU_N = 24, CXSU_NAME = 32, CXSU_PATH = 160 };
 
@@ -165,6 +170,138 @@ static int include_fresh(const char *which) {
     return ran == 12;
 }
 
+static int compile_bin(const char *which, const char *src, const char *extra, const char *out) {
+    char cmd[1600];
+    int k, rc;
+    unlink(out);
+    k = snprintf(cmd, sizeof cmd, "sh ./%s_cx.com %s %s -o %s", which, src, extra, out);
+    if (k < 0 || k >= (int)sizeof cmd) return -1;
+    rc = cx_run_timeout(cmd, 40, 0, 0);
+    return rc;
+}
+
+static int run_bin(const char *out) {
+    char cmd[240];
+    int k;
+    k = snprintf(cmd, sizeof cmd, "./%s", out);
+    if (k < 0 || k >= (int)sizeof cmd) return -1;
+    return cx_run_timeout(cmd, 10, 0, 0);
+}
+
+static int nest_header(const char *which) {
+    const char *dep = "out/cxcc-suite/nestdep.cx";
+    const char *mainp = "out/cxcc-suite/nestmain.cx";
+    const char *top = "out/cxcc-suite/top.h";
+    const char *nested = "out/cxcc-suite/nested.h";
+    const char *out = "out/cxcc-suite/nestbin";
+    char extra[240];
+    int k, rc;
+    if (write_text(dep, "#pragma unisa module nestdep\nint nestdep_n(void) { return 1; }\n")) return 0;
+    if (write_text(mainp, "#pragma unisa use nestdep\nint main(void) { return REVIEW_VALUE + nestdep_n(); }\n")) return 0;
+    if (write_text(top, "#include \"nested.h\"\n")) return 0;
+    if (write_text(nested, "#define REVIEW_VALUE 7\n")) return 0;
+    k = snprintf(extra, sizeof extra, "-include %s", top);
+    if (k < 0 || k >= (int)sizeof extra) return 0;
+    rc = compile_bin(which, mainp, extra, out);
+    if (rc != 0 || run_bin(out) != 8) return 0;
+    if (write_text(nested, "#define REVIEW_VALUE 11\n")) return 0;
+    rc = compile_bin(which, mainp, extra, out);
+    if (rc != 0) return 0;
+    return run_bin(out) == 12;
+}
+
+static int wide_pragma(const char *which) {
+    const char *dep = "out/cxcc-suite/wsdep.cx";
+    const char *mainp = "out/cxcc-suite/wsmain.cx";
+    const char *out = "out/cxcc-suite/wsbin";
+    int rc;
+    if (write_text(dep, "#pragma unisa module wsdep\nint wsdep_n(void) { return 7; }\n")) return 0;
+    if (write_text(mainp, "#pragma  unisa use wsdep\nint main(void) { return wsdep_n(); }\n")) return 0;
+    rc = compile_bin(which, mainp, "", out);
+    if (rc != 0) return 0;
+    return run_bin(out) == 7;
+}
+
+static int file_place(const char *which) {
+    const char *dep = "out/cxcc-suite/iddep.cx";
+    const char *src = "out/cxcc-suite/fileid.cx";
+    const char *bad = "out/cxcc-suite/filebad.cx";
+    const char *out = "out/cxcc-suite/fileidbin";
+    const char *errp = "out/cxcc-suite/filebad.err";
+    const char *cap = "out/cxcc-suite/fileid.out";
+    char cmd[1600];
+    char *text = 0;
+    size_t n = 0;
+    int k, rc;
+    if (write_text(dep, "#pragma unisa module iddep\nint iddep_n(void) { return 1; }\n")) return 0;
+    if (write_text(src, "#pragma unisa use iddep\nint main(void) { fputs(__FILE__, stdout); return iddep_n() == 1 ? 0 : 2; }\n")) return 0;
+    rc = compile_bin(which, src, "", out);
+    if (rc != 0) return 0;
+    k = snprintf(cmd, sizeof cmd, "./%s >%s", out, cap);
+    if (k < 0 || k >= (int)sizeof cmd) return 0;
+    if (cx_run_timeout(cmd, 10, 0, 0) != 0) return 0;
+    text = cx_read(cap, &n);
+    if (!text) return 0;
+    rc = n == strlen(src) && memcmp(text, src, n) == 0;
+    free(text);
+    if (!rc) return 0;
+    if (write_text(bad, "#pragma unisa use iddep\nint main(void) { return not_declared_zz(1); }\n")) return 0;
+    k = snprintf(cmd, sizeof cmd, "sh ./%s_cx.com %s -o %s >%s 2>&1", which, bad, out, errp);
+    if (k < 0 || k >= (int)sizeof cmd) return 0;
+    if (cx_run_timeout(cmd, 40, 0, 0) == 0) return 0;
+    text = cx_read(errp, &n);
+    if (!text) return 0;
+    rc = strstr(text, bad) != 0 && strstr(text, ":2:") != 0;
+    free(text);
+    return rc;
+}
+
+static long long median3(long long a, long long b, long long c) {
+    long long t;
+    if (a > b) { t = a; a = b; b = t; }
+    if (b > c) { t = b; b = c; c = t; }
+    if (a > b) { t = a; a = b; b = t; }
+    return b;
+}
+
+static int compile_speed(const char *which, int limit_ms) {
+    char cmd[1600];
+    char out[80];
+    long long sample[3];
+    long long med, limit;
+    char *buf;
+    char *end;
+    size_t n;
+    int k, t, rc, compile_rc;
+    k = snprintf(out, sizeof out, "out/cxcc-suite/perf-%s", which);
+    if (k < 0 || k >= (int)sizeof out) return 0;
+    k = snprintf(cmd, sizeof cmd, "sh ./%s_cx.com tests/cxhost_main.cx -o %s >/dev/null 2>&1",
+                 which, out);
+    if (k < 0 || k >= (int)sizeof cmd) return 0;
+    if (cx_run_timeout(cmd, 20, 0, 0) != 0) return 0;
+    for (t = 0; t < 3; t++) {
+        buf = 0;
+        n = 0;
+        k = snprintf(cmd, sizeof cmd,
+            "s=$(date +%%s%%N); sh ./%s_cx.com tests/cxhost_main.cx -o %s >/dev/null 2>&1; "
+            "rc=$?; e=$(date +%%s%%N); printf '%%s %%s\\n' \"$rc\" \"$((e-s))\"",
+            which, out);
+        if (k < 0 || k >= (int)sizeof cmd) return 0;
+        rc = cx_run_timeout(cmd, 20, &buf, &n);
+        if (rc != 0 || !buf) { free(buf); return 0; }
+        compile_rc = (int)strtol(buf, &end, 10);
+        if (end == buf || *end != ' ') { free(buf); return 0; }
+        sample[t] = strtoll(end + 1, &end, 10);
+        free(buf);
+        if (compile_rc != 0 || sample[t] < 0) return 0;
+    }
+    med = median3(sample[0], sample[1], sample[2]);
+    limit = (long long)limit_ms * 1000000LL;
+    printf("TIME %s compile-speed median=%lldms limit=%dms\n",
+           which, med / 1000000LL, limit_ms);
+    return med <= limit;
+}
+
 int main(int argc, char **argv) {
     int i;
     if (load_units("tests/cxcc/units.tsv") != 0) return 2;
@@ -174,6 +311,10 @@ int main(int argc, char **argv) {
             else printf("%s\t%s\t%d\n", units[i].name, units[i].path, units[i].code);
         }
         printf("include-bytes\tout/cxcc-suite/extra.h\t8-then-12\n");
+        printf("nest-header\tout/cxcc-suite/nested.h\t8-then-12\n");
+        printf("wide-pragma\tout/cxcc-suite/wsmain.cx\t7\n");
+        printf("file-place\tout/cxcc-suite/fileid.cx\tpath-and-line-2\n");
+        printf("compile-speed\ttests/cxhost_main.cx\tgcc<=268ms clang<=227ms\n");
         return 0;
     }
     if (argc > 1) {
@@ -194,6 +335,14 @@ int main(int argc, char **argv) {
     }
     note(include_fresh("gcc"), "gcc include-bytes");
     note(include_fresh("clang"), "clang include-bytes");
+    note(nest_header("gcc"), "gcc nest-header");
+    note(nest_header("clang"), "clang nest-header");
+    note(wide_pragma("gcc"), "gcc wide-pragma");
+    note(wide_pragma("clang"), "clang wide-pragma");
+    note(file_place("gcc"), "gcc file-place");
+    note(file_place("clang"), "clang file-place");
+    note(compile_speed("gcc", 268), "gcc compile-speed");
+    note(compile_speed("clang", 227), "clang compile-speed");
     printf("CXCC units=%d drivers=2 fails=%d\n", nunits, fails);
     return fails ? 1 : 0;
 }

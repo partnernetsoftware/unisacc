@@ -29,7 +29,7 @@ host1 语料在 [`../ujs/tests/corpus|neg`](../ujs/tests/)。本树 [`ujs2wasm/`
 
 ## gcc_cx / clang_cx cx suite
 
-`tests/cxcc/units.tsv` lists the cx units. Both drivers run every row. `refuse` means a non-zero compile and no output binary. The suite does not call `unisacc.com`. From the repo root:
+`tests/cxcc/units.tsv` lists the cx units. Both drivers run every row. `refuse` means a non-zero compile and no output binary. The suite also checks a nested `-include` header, a `#pragma unisa use` with extra spaces, `__FILE__` and diagnostic paths, and a warm `-o` of `tests/cxhost_main.cx` (median of three at most 268 ms for gcc and 227 ms for clang). The suite does not call `unisacc.com`. From the repo root:
 
 ```
 sh ./gcc_cx.com tests/cxcc/suite.cx -o out/cxcc-suite/suite
