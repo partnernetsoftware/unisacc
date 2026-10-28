@@ -43,6 +43,20 @@ int main(int argc,char **argv){
  char plain[4400],live[4400];path(plain,sizeof plain,"ordinary.c");path(live,sizeof live,"live.h");save("live.h","int AMBIENT_HEADER;\n",strlen("int AMBIENT_HEADER;\n"));char text[4800];int z=snprintf(text,sizeof text,"#include \"%s\"\nint value;\n",live);if(z<0||(size_t)z>=sizeof text)die("source");save("ordinary.c",text,(size_t)z);sources[0]=plain;
  cxb_result absent=cxb_seal(sources,1,interfaces,&options,0,0);ck(!absent.status,"ordinary-c-seal");if(absent.status)die(absent.why);save("absent.cxb",absent.data,absent.bytes);cxb_release(&absent);
  r=run("absent.cxb","0",modelpath,"absent-header");ck(r.rc==1&&!r.outn&&strstr(r.err,"no such file"),"undeclared-live-header-cannot-fall-back-to-disk");np_free(&r);
+ /* The quoted-header dependency scan asks for the unit's source as a file
+  * resource. It must receive the sealed unit, independently of the live path.
+  * This checks the public trimming macro and a handwritten expansion gold,
+  * rather than asserting an implementation's resource lookup sequence. */
+ char scan[4400],leaf[4400];path(scan,sizeof scan,"scan.c");path(leaf,sizeof leaf,"scan-leaf.h");
+ const char *scantext="#include \"scan-leaf.h\"\n#if !__UNISA_FTRIM_LIBC\n#error SOURCE_RI_SCAN_REQUIRED\n#endif\nint sealed_scan_value=SCAN_VALUE;\n";
+ const char *leaftext="#define SCAN_VALUE 29\n";save("scan.c",scantext,strlen(scantext));save("scan-leaf.h",leaftext,strlen(leaftext));sources[0]=scan;
+ cxb_input scanres[2]={{2,leaf,leaftext,strlen(leaftext)},{2,scan,"#error WRONG_SOURCE_RI\n",strlen("#error WRONG_SOURCE_RI\n")}};
+ cxb_result scanned=cxb_seal(sources,1,interfaces,&options,scanres,1);ck(!scanned.status,"source-scan-seal-without-duplicate-source-resource");if(scanned.status)die(scanned.why);save("scan.cxb",scanned.data,scanned.bytes);cxb_release(&scanned);
+ cxb_result conflict=cxb_seal(sources,1,interfaces,&options,scanres,2);ck(!conflict.status,"conflicting-source-resource-bundle-is-well-formed");if(conflict.status)die(conflict.why);save("source-conflict.cxb",conflict.data,conflict.bytes);cxb_release(&conflict);
+ if(unlink(scan)||unlink(leaf))die("unlink-owned-scan-input");
+ r=run("scan.cxb","0",modelpath,"source-scan-after-delete");ok=body(&r,&p,&n);ck(ok&&compact_has(p,n,"intsealed_scan_value=29;"),"source-ri-scan-keeps-trimming-with-deleted-live-inputs");np_free(&r);
+ r=run("source-conflict.cxb","0",modelpath,"source-conflict");ck(r.rc==2&&!r.outn&&strstr(r.err,"conflicting-source-resource"),"conflicting-file-resource-cannot-shadow-unit-source");np_free(&r);
+ r=run("scan.cxb","0",modelpath,"source-scan-recovery");ok=body(&r,&p,&n);ck(ok&&compact_has(p,n,"intsealed_scan_value=29;"),"source-ri-scan-recovers-after-conflict");np_free(&r);
  r=run("sealed.cxb","0",modelpath,"recovery");ck(!r.rc&&!r.errn&&r.outn==first.outn&&!memcmp(r.out,first.out,first.outn),"exact-recovery-after-refusals");np_free(&r);np_free(&first);cxb_release(&sealed);
  printf("CX0_E2\tassertions=%d\tfailed=%d\tmodel=%s\n",checks,failed,model);return failed?1:0;
 }
