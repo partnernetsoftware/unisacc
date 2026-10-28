@@ -1,14 +1,20 @@
 /* Windows body for the POSIX calls the host cx driver uses.
    include/cx.h includes <spawn.h> on Windows. MinGW does not ship one, so the
-   driver adds -idirafter tools/cxcc-hostinc and this file is found.
-   The shape follows include/spawn.h and the mkstemp in include/stdlib.h:
+   driver adds -I tools/cxcc-hostinc and this file is found.
+   The shape follows include/spawn.h, include/sys/stat.h mkdir, and the
+   mkstemp and realpath in include/stdlib.h:
    posix_spawnp quotes a command line and calls CreateProcessA (NULL
    application name, so PATH is searched and .exe is appended);
    waitpid waits on that process and stores (exit & 0xff) << 8;
-   mkstemp replaces trailing XXXXXX and creates the file with open(O_EXCL).
+   mkstemp replaces trailing XXXXXX and creates the file with open(O_EXCL);
+   mkdir is CreateDirectoryA (the mode is not mapped);
+   realpath opens the path, asks GetFinalPathNameByHandleA, and falls back
+   to GetFullPathNameA. A null environment inherits.
    pid_t on this C library is narrower than a HANDLE, so the HANDLE lives in
    a small table and the pid is the slot. These are direct calls, not _ux_sym.
-   Linux and OSX do not include this file. It has not been executed on Windows. */
+   The host compile uses -I tools/cxcc-hostinc so this file, not the product
+   include/spawn.h, satisfies <spawn.h>. Linux and OSX do not include it.
+   It has not been executed on Windows. */
 #ifndef CXCC_HOST_SPAWN_H
 #define CXCC_HOST_SPAWN_H
 #ifdef _WIN32
@@ -18,8 +24,17 @@
 #endif
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <stdint.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <windows.h>
+#ifndef PATH_MAX
+#define PATH_MAX 260
+#endif
+#ifndef ENAMETOOLONG
+#define ENAMETOOLONG 36
+#endif
 
 #define waitpid cxcc_waitpid
 #define mkstemp cxcc_mkstemp
@@ -139,7 +154,7 @@ static int cxcc_mkstemp(char *t) {
     for (j = n - 6; j < n; j++) if (t[j] != 'X') { errno = EINVAL; return -1; }
     for (tries = 0; tries < 100; tries++) {
         seq++;
-        v = ((unsigned long)&tries >> 4) * 2654435761UL + seq * 40503UL;
+        v = (unsigned long)((uintptr_t)&tries >> 4) * 2654435761UL + seq * 40503UL;
         for (j = n - 6; j < n; j++) { t[j] = (char)('a' + (int)(v % 26)); v = v / 26 + seq * 7; }
         fd = open(t, O_RDWR | O_CREAT | O_EXCL, 0600);
         if (fd >= 0) return fd;
@@ -172,5 +187,60 @@ static int cxcc_temp_template(char *dst, size_t cap) {
     memcpy(dst + i, suf, 11);
     return 0;
 }
+
+/* POSIX mkdir. MinGW's own mkdir takes one argument. The mode is ignored,
+   matching include/sys/stat.h on Windows. */
+static int cxcc_mkdir(const char *p, int mode) {
+    (void)mode;
+    if (!p) { errno = EINVAL; return -1; }
+    if (CreateDirectoryA(p, 0)) return 0;
+    if (GetLastError() == ERROR_ALREADY_EXISTS) errno = EEXIST;
+    else errno = EACCES;
+    return -1;
+}
+
+/* POSIX realpath. The buffer is PATH_MAX bytes when the caller passes one.
+   Directories open because FILE_FLAG_BACKUP_SEMANTICS is set. */
+static char *cxcc_realpath(const char *p, char *out) {
+    char tmp[PATH_MAX];
+    unsigned long n, a, off, k;
+    HANDLE h;
+    if (!p) { errno = EINVAL; return 0; }
+    n = 0;
+    h = CreateFileA(p, 0x80000000u, 7, 0, 3, 0x02000000u, 0);
+    if (h != INVALID_HANDLE_VALUE) {
+        n = GetFinalPathNameByHandleA(h, tmp, PATH_MAX, 0);
+        CloseHandle(h);
+        if (n == 0 || n >= PATH_MAX) n = 0;
+    }
+    if (n >= 4 && tmp[0] == '\\' && tmp[1] == '\\' && tmp[2] == '?' && tmp[3] == '\\') {
+        off = 4;
+        k = 0;
+        if (n >= 8 && (tmp[4] == 'U' || tmp[4] == 'u') && (tmp[5] == 'N' || tmp[5] == 'n') &&
+            (tmp[6] == 'C' || tmp[6] == 'c') && tmp[7] == '\\') {
+            tmp[0] = '\\';
+            tmp[1] = '\\';
+            off = 8;
+            k = 2;
+        }
+        a = off;
+        while (a <= n) { tmp[k++] = tmp[a++]; }
+        n = k - 1;
+    }
+    if (n == 0) {
+        if (GetFileAttributesA(p) == 0xFFFFFFFFu) { errno = ENOENT; return 0; }
+        n = GetFullPathNameA(p, PATH_MAX, tmp, 0);
+        if (n == 0 || n >= PATH_MAX) { errno = ENAMETOOLONG; return 0; }
+    }
+    if (!out) {
+        out = (char *)malloc((size_t)n + 1);
+        if (!out) { errno = ENOMEM; return 0; }
+    }
+    memcpy(out, tmp, (size_t)n + 1);
+    return out;
+}
+
+#define mkdir(p, m) cxcc_mkdir((p), (m))
+#define realpath(p, o) cxcc_realpath((p), (o))
 #endif
 #endif
