@@ -8,13 +8,17 @@
  * "seqs": [[[OP, args...]...]]}; MODE b/r rows are keyed "0".."256", MODE t rows by label or "BOT".
  * Action arguments are strings (registers or labels) or integers; a CMP whose second operand is an
  * integer reads that numeric W address (Python W.get(int)), kept as dl_act.addr2.
+ * An immediate may also arrive as a JSON string (lower binds constants with @str, e.g.
+ * ["LDI","lfn_ctarget","1"]); seed/tbl.c:170 turns such a string into its atol value. This loader
+ * follows the construction chain, not exec/pp/sim.py (which would store the string), but only for a
+ * canonical decimal integer: anything atol would silently map ("abc", "01", "+1", " 1", "") is refused.
  * No exported objects (CXIF v0): everything lives in the dl_delta the caller owns. */
 #pragma unisa module delta
 
 enum { DL_EOF = 256 };
 enum { DL_ADV, DL_MARK, DL_JUMP, DL_COPYT, DL_COPY, DL_OUT, DL_LDI, DL_COPYW, DL_ALU, DL_ALUI, DL_CMP, DL_CMPI, DL_A64, DL_A64I, DL_C64, DL_C64U, DL_RLD, DL_LDX, DL_STX, DL_OUTW,
        DL_SPAN, DL_SPANT, DL_SPAN2, DL_OLAST, DL_ODROP, DL_OLEN, DL_OCUT, DL_ORES, DL_OFILL, DL_OCLR, DL_OSEL, DL_SETOT, DL_XATTR, DL_PUSH, DL_POP, DL_INTERN, DL_SBINTERN,
-       DL_BLOBSAVE, DL_SBSAVE, DL_INPUSH, DL_INPUSHX, DL_INPUSHXE, DL_INPOP, DL_SBCLR, DL_SBOUT, DL_SBSPAN, DL_SBBLOB, DL_SBFIND, DL_BYTE, DL_XLEN, DL_BLEN, DL_DIVMOD10, DL_SWAP, DL_ACCEPT, DL_REJECT, DL_OP_N };
+       DL_BLOBSAVE, DL_SBSAVE, DL_INPUSH, DL_INPUSHX, DL_INPUSHXE, DL_INPOP, DL_SBCLR, DL_SBOUT, DL_SBSPAN, DL_SBBLOB, DL_SBFIND, DL_BYTE, DL_XLEN, DL_BLEN, DL_DIVMOD10, DL_SWAP, DL_ACCEPT, DL_REJECT, DL_INC, DL_OP_N };   /* INC: seed/tbl.c OPK "r", exec/c/core.c:300 */
 enum { DL_add, DL_sub, DL_mul, DL_div, DL_rem, DL_and, DL_or, DL_xor, DL_shl, DL_sar, DL_sdiv, DL_srem, DL_udiv, DL_urem, DL_not, DL_shr, DL_ALU_N };
 typedef struct dl_act { int op; int alu; const char *s1, *s2, *s3; long long v; int addr2; int r1, r2, r3; } dl_act;
 typedef struct dl_seq { dl_act *a; int n; } dl_seq;
@@ -24,7 +28,7 @@ typedef struct dl_delta { dl_state *s; int ns; dl_seq *seqs; int nseq; int start
 
 static const char *dl_opnames[DL_OP_N] = { "ADV", "MARK", "JUMP", "COPYT", "COPY", "OUT", "LDI", "COPYW", "ALU", "ALUI", "CMP", "CMPI", "A64", "A64I", "C64", "C64U", "RLD", "LDX", "STX", "OUTW",
        "SPAN", "SPANT", "SPAN2", "OLAST", "ODROP", "OLEN", "OCUT", "ORES", "OFILL", "OCLR", "OSEL", "SETOT", "XATTR", "PUSH", "POP", "INTERN", "SBINTERN",
-       "BLOBSAVE", "SBSAVE", "INPUSH", "INPUSHX", "INPUSHXE", "INPOP", "SBCLR", "SBOUT", "SBSPAN", "SBBLOB", "SBFIND", "BYTE", "XLEN", "BLEN", "DIVMOD10", "SWAP", "ACCEPT", "REJECT" };
+       "BLOBSAVE", "SBSAVE", "INPUSH", "INPUSHX", "INPUSHXE", "INPOP", "SBCLR", "SBOUT", "SBSPAN", "SBBLOB", "SBFIND", "BYTE", "XLEN", "BLEN", "DIVMOD10", "SWAP", "ACCEPT", "REJECT", "INC" };
 static const char *dl_alunames[DL_ALU_N] = { "add", "sub", "mul", "div", "rem", "and", "or", "xor", "shl", "sar", "sdiv", "srem", "udiv", "urem", "not", "shr" };
 const char *dl_opname(int op) { return op >= 0 && op < DL_OP_N ? dl_opnames[op] : "?"; }
 const char *dl_aluname(int op) { return op >= 0 && op < DL_ALU_N ? dl_alunames[op] : "?"; }
@@ -119,8 +123,26 @@ static dl_jv *dl_jget(dl_jv *o, const char *k) { if (o->kind != DLJ_OBJ) return 
 /* ---- actions ---- */
 static int dl_opcode(const char *s) { for (int i = 0; i < DL_OP_N; i++) if (!strcmp(dl_opnames[i], s)) return i; fprintf(stderr, "delta: unknown action %s\n", s); exit(2); }
 static int dl_alucode(const char *s) { for (int i = 0; i < DL_ALU_N; i++) if (!strcmp(dl_alunames[i], s)) return i; fprintf(stderr, "delta: unknown ALU op %s\n", s); exit(2); }
-static const char *dl_jstr(dl_jv *a, int i) { if (i >= a->n || a->items[i]->kind != DLJ_STR) dl_die("action argument: string expected"); return a->items[i]->str; }
-static long long dl_jnum(dl_jv *a, int i) { if (i >= a->n || a->items[i]->kind != DLJ_NUM) dl_die("action argument: number expected"); return a->items[i]->num; }
+static const char *dl_cur_op = "?";   /* the action being decoded, for argument diagnostics */
+static void dl_argdie(int i, const char *want, const char *got) {
+    fprintf(stderr, "delta: action %s argument %d: %s expected%s%s%s\n", dl_cur_op, i, want, got ? ", got \"" : "", got ? got : "", got ? "\"" : ""); exit(2);
+}
+static const char *dl_jstr(dl_jv *a, int i) { if (i >= a->n || a->items[i]->kind != DLJ_STR) dl_argdie(i, "string", 0); return a->items[i]->str; }
+/* A canonical decimal integer: optional '-', then "0" or a nonzero digit followed by digits, in range. */
+static int dl_canonint(const char *s, long long *out) {
+    const char *p = s; int neg = 0; unsigned long long v = 0, lim;
+    if (*p == '-') { neg = 1; p++; }
+    if (!*p || (*p == '0' && p[1]) || (neg && *p == '0')) return 0;
+    lim = neg ? 9223372036854775808ULL : 9223372036854775807ULL;
+    for (; *p; p++) { if (*p < '0' || *p > '9') return 0; unsigned d = (unsigned)(*p - '0'); if (v > (lim - d) / 10) return 0; v = v * 10 + d; }
+    *out = neg ? (long long)(0 - v) : (long long)v; return 1;
+}
+static long long dl_jnum(dl_jv *a, int i) {
+    if (i >= a->n) dl_argdie(i, "number", 0);
+    if (a->items[i]->kind == DLJ_NUM) return a->items[i]->num;
+    if (a->items[i]->kind == DLJ_STR) { long long v; if (dl_canonint(a->items[i]->str, &v)) return v; dl_argdie(i, "number or canonical decimal string", a->items[i]->str); }
+    dl_argdie(i, "number", 0); return 0;
+}
 static int dl_regid(dl_delta *d, const char *s) {
     dl_map *m = d->regs; if (!s) return 0;
     long long id = dl_mapget(m, s, -1); if (id >= 0) return (int)id;
@@ -131,9 +153,9 @@ static void dl_load_seq(dl_delta *d, dl_seq *q, dl_jv *arr) {
     q->n = arr->n; q->a = dl_alloc((size_t)(arr->n ? arr->n : 1) * sizeof(dl_act));
     for (int i = 0; i < arr->n; i++) {
         dl_jv *a = arr->items[i]; dl_act *t = &q->a[i]; memset(t, 0, sizeof *t);
-        if (a->kind != DLJ_ARR || a->n < 1) dl_die("action shape"); t->op = dl_opcode(dl_jstr(a, 0));
+        if (a->kind != DLJ_ARR || a->n < 1) dl_die("action shape"); dl_cur_op = "?"; t->op = dl_opcode(dl_jstr(a, 0)); dl_cur_op = dl_opnames[t->op];
         switch (t->op) {
-        case DL_MARK: case DL_JUMP: case DL_RLD: case DL_OLEN: case DL_SETOT: case DL_XATTR: case DL_PUSH: case DL_INPUSH: case DL_INPUSHX: case DL_SBBLOB: case DL_SBFIND: case DL_BYTE: case DL_XLEN: case DL_DIVMOD10: case DL_SBINTERN: case DL_SBSAVE: case DL_REJECT: case DL_OUTW: case DL_SPAN: case DL_SPANT:
+        case DL_MARK: case DL_JUMP: case DL_RLD: case DL_OLEN: case DL_SETOT: case DL_XATTR: case DL_PUSH: case DL_INPUSH: case DL_INPUSHX: case DL_SBBLOB: case DL_SBFIND: case DL_BYTE: case DL_XLEN: case DL_DIVMOD10: case DL_SBINTERN: case DL_SBSAVE: case DL_REJECT: case DL_OUTW: case DL_SPAN: case DL_SPANT: case DL_INC:
             t->s1 = dl_jstr(a, 1); break;
         case DL_OSEL: case DL_OUT: case DL_SBOUT: t->v = dl_jnum(a, 1); break;
         case DL_LDI: case DL_ORES: t->s1 = dl_jstr(a, 1); t->v = dl_jnum(a, 2); break;

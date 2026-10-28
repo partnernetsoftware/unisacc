@@ -1,0 +1,96 @@
+/* tests/delta-loader.cx -- tools/cxlib/delta.cx argument decoding, through its two consumers.
+ *   sh ./unisacc.com tests/delta-loader.cx -- ROOT NEW_ABS_OUT
+ * Minimal hand-written deltas, independent of any generated table. Oracles:
+ *  - a string immediate means what seed/tbl.c:170 makes of it (atol of a canonical decimal);
+ *    the loader refuses every string atol would silently remap ("abc", "01", "+1", " 1", "", overflow);
+ *  - INC is seed/tbl.c OPK "r" and exec/c/core.c:300: R = (R + 1) & 0xFFFFFFFF;
+ *  - ["LDI","lfn_ctarget","1"] is the exact action the lower generator emits from
+ *    exec/lower/librarydataspan-manifest.tsv expected_target=@str:1 (the 2026-10-28 V2/V4 failure,
+ *    out/c43-xtarget-lower-v1-01/lint-*.stderr: "delta: action argument: number expected").
+ * Each accepted delta must print exactly "Y" through tools/sim.cx and pass tools/table-lint.cx with
+ * rc0; each refused one must exit 2 with the exact named stderr line and no stdout. */
+#pragma unisa use cxlib.netpack
+static char root[4096], work[4096], bound[4400], sim[4400], lint[4400];
+static int checks, failed;
+static void die(const char *s) { fprintf(stderr, "delta-loader: REFUSE %s errno=%d\n", s, errno); exit(2); }
+static void ck(int ok, const char *label, const char *detail) { checks++; if (!ok) failed++; printf("%s\tdelta-loader.%s\t%s\n", ok ? "PASS" : "FAIL", label, detail); }
+static void path(char *o, size_t cap, const char *a, const char *b) { int n = snprintf(o, cap, "%s/%s", a, b); if (n < 0 || (size_t)n >= cap) die("path"); }
+static void save(const char *name, const char *s) {
+    char p[4400]; path(p, sizeof p, work, name); size_t n = strlen(s), at = 0;
+    int f = open(p, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600); if (f < 0) die(p);
+    while (at < n) { ssize_t k = write(f, s + at, n - at); if (k < 0 && errno == EINTR) continue; if (k <= 0) die("write"); at += (size_t)k; }
+    if (close(f)) die("close");
+}
+static void build(const char *src, const char *out) {
+    char s[4400], why[1024]; np_result r; path(s, sizeof s, root, src);
+    char *v[] = { bound, "50", "sh", "./unisacc.com", "-o", (char *)out, s, 0 };
+    if (np_run(v, root, 0, 55, &r, why, sizeof why)) die(why);
+    int ok = !r.rc && !r.errn; char d[64]; snprintf(d, sizeof d, "rc=%d", r.rc); ck(ok, src, d); np_free(&r); if (!ok) die("build");
+}
+/* Total two-state delta: S (byte-keyed, all 257 keys) runs SEQ0 and moves to T; T (result-keyed,
+   all 257 keys) prints 'Y' when r==1 and 'N' otherwise, then accepts; its edges return to S so the
+   graph is total and every T entry follows SEQ0's result dispatch. On the empty input only key 256 runs. */
+static void delta(char *out, size_t cap, const char *seq0) {
+    size_t at = 0; int n;
+#define DPUT(...) do { n = snprintf(out + at, cap - at, __VA_ARGS__); if (n < 0 || (size_t)n >= cap - at) die("delta-bound"); at += (size_t)n; } while (0)
+    DPUT("{\"start\":\"S\",\"states\":{\"S\":[\"b\",{");
+    for (int k = 0; k <= 256; k++) DPUT("%s\"%d\":[\"T\",0]", k ? "," : "", k);
+    DPUT("}],\"T\":[\"r\",{");
+    for (int k = 0; k <= 256; k++) DPUT("%s\"%d\":[\"S\",%d]", k ? "," : "", k, k == 1 ? 1 : 2);
+    DPUT("}]},\"seqs\":[[%s],[[\"OUT\",89],[\"ACCEPT\"]],[[\"OUT\",78],[\"ACCEPT\"]]]}\n", seq0);
+#undef DPUT
+}
+static void run(const char *exe, const char *json, np_result *r) {
+    char p[4400], empty[4400], why[1024]; path(p, sizeof p, work, json); path(empty, sizeof empty, work, "empty.input");
+    char *v[] = { bound, "20", (char *)exe, p, empty, 0 };
+    if (exe == lint) v[4] = 0;
+    if (np_run(v, work, 0, 25, r, why, sizeof why)) die(why);
+}
+static void accepted(const char *label, const char *seq0) {
+    static char j[16384]; char name[128], d[256]; np_result r;
+    delta(j, sizeof j, seq0); snprintf(name, sizeof name, "%s.json", label); save(name, j);
+    run(sim, name, &r);
+    snprintf(d, sizeof d, "sim rc=%d out=%.*s err=%.*s", r.rc, (int)(r.outn > 8 ? 8 : r.outn), r.out, (int)(r.errn > 120 ? 120 : r.errn), r.err);
+    for (char *q = d; *q; q++) if (*q == '\n') *q = ' ';
+    char l1[160]; snprintf(l1, sizeof l1, "%s.sim-Y", label); ck(r.rc == 0 && r.outn == 1 && r.out[0] == 'Y' && !r.errn, l1, d); np_free(&r);
+    run(lint, name, &r);
+    snprintf(d, sizeof d, "lint rc=%d err=%.*s", r.rc, (int)(r.errn > 120 ? 120 : r.errn), r.err);
+    for (char *q = d; *q; q++) if (*q == '\n') *q = ' ';
+    snprintf(l1, sizeof l1, "%s.lint-rc0", label); ck(r.rc == 0 && !r.errn && !strstr(r.out, "ERROR\t"), l1, d); np_free(&r);
+}
+static void refused(const char *label, const char *seq0, const char *want) {
+    static char j[16384]; char name[128], d[320]; np_result r;
+    delta(j, sizeof j, seq0); snprintf(name, sizeof name, "%s.json", label); save(name, j);
+    for (int k = 0; k < 2; k++) {
+        run(k ? lint : sim, name, &r);
+        int ok = r.rc == 2 && !r.outn && r.errn == strlen(want) && !memcmp(r.err, want, r.errn);
+        snprintf(d, sizeof d, "rc=%d stderr=%.*s", r.rc, (int)(r.errn > 200 ? 200 : r.errn), r.err);
+        for (char *q = d; *q; q++) if (*q == '\n') *q = ' ';
+        char l1[160]; snprintf(l1, sizeof l1, "%s.%s-refused", label, k ? "lint" : "sim"); ck(ok, l1, d); np_free(&r);
+    }
+}
+int main(int argc, char **argv) {
+    if (argc != 3 || !realpath(argv[1], root) || argv[2][0] != '/') die("usage ROOT NEW_ABS_OUT");
+    snprintf(work, sizeof work, "%s", argv[2]); if (mkdir(work, 0700)) die("new-output");
+    path(bound, sizeof bound, root, "tools/bound"); path(sim, sizeof sim, work, "sim.elf"); path(lint, sizeof lint, work, "table-lint.elf");
+    save("empty.input", "");
+    build("tools/sim.cx", sim); build("tools/table-lint.cx", lint);
+    accepted("string-immediate-5-inc-6", "[\"LDI\",\"x\",\"5\"],[\"INC\",\"x\"],[\"CMPI\",\"x\",6]");
+    accepted("inc-wraps-32-bit", "[\"LDI\",\"x\",4294967295],[\"INC\",\"x\"],[\"CMPI\",\"x\",0]");
+    accepted("lower-lfn-ctarget-shape", "[\"LDI\",\"lfn_ctarget\",\"1\"],[\"CMPI\",\"lfn_ctarget\",1]");
+    accepted("negative-string-immediate", "[\"LDI\",\"x\",\"-3\"],[\"CMPI\",\"x\",-3]");
+    accepted("numeric-immediate-unchanged", "[\"LDI\",\"x\",7],[\"CMPI\",\"x\",7]");
+    refused("string-abc", "[\"LDI\",\"x\",\"abc\"]", "delta: action LDI argument 2: number or canonical decimal string expected, got \"abc\"\n");
+    refused("string-leading-zero", "[\"LDI\",\"x\",\"01\"]", "delta: action LDI argument 2: number or canonical decimal string expected, got \"01\"\n");
+    refused("string-plus", "[\"LDI\",\"x\",\"+1\"]", "delta: action LDI argument 2: number or canonical decimal string expected, got \"+1\"\n");
+    refused("string-space", "[\"LDI\",\"x\",\" 1\"]", "delta: action LDI argument 2: number or canonical decimal string expected, got \" 1\"\n");
+    refused("string-empty", "[\"LDI\",\"x\",\"\"]", "delta: action LDI argument 2: number or canonical decimal string expected, got \"\"\n");
+    refused("string-minus-zero", "[\"LDI\",\"x\",\"-0\"]", "delta: action LDI argument 2: number or canonical decimal string expected, got \"-0\"\n");
+    refused("string-overflow", "[\"LDI\",\"x\",\"9223372036854775808\"]", "delta: action LDI argument 2: number or canonical decimal string expected, got \"9223372036854775808\"\n");
+    refused("array-immediate", "[\"LDI\",\"x\",[]]", "delta: action LDI argument 2: number expected\n");
+    refused("missing-immediate", "[\"LDI\",\"x\"]", "delta: action LDI argument 2: number expected\n");
+    refused("inc-number-register", "[\"INC\",5]", "delta: action INC argument 1: string expected\n");
+    refused("unknown-action", "[\"INCX\",\"x\"]", "delta: unknown action INCX\n");
+    puts("NOT_CLAIMED\tgenerated-table-semantics-network-equivalence-other-consumers");
+    printf("DELTA_LOADER\tassertions=%d\tfailed=%d\n", checks, failed); return failed ? 1 : 0;
+}
