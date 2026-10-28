@@ -2,6 +2,8 @@
 
 ## cxpack.fifo-open — 非普通清单阻塞（Linux 候选切片已复现，待修）
 
+FIFO新APE候选8147f2e72dafeb6a0c367398a3eafff2c1b8c5c555e00eee9018cabf86abd63e，record c493b97153c6a3f363bc5df2c0bb36e6c85a8f7a5364b259665fd8ed648d1be9，identity-helper check通过。候选格式out/c43-fifo-ape-formats-02.stdout为68/0；首轮ROOT错误触发installed-product-required，原list不覆盖，改以候选所在目录为ROOT并提供现有watchdog后实跑通过。直接sh候选、不传外部模型，清单五项实返0/1/1/0/1，过滤与缺席导出符合预期，超限/目录/FIFO具名拒绝且stdout为零；日志out/c43-fifo-candidate-{case}-01.*。仍未安装，不转授外国宿主执行资格。
+
 FIFO冻结ab7fbdc810/SIDb2007a76的复用适用性：现有cxpack-source-delta新增显式fifo-v1配置，不改变默认旧配置的三个固定文件对。实核相对af8429d0cf共1932文件/49目录/8符号链接，仅src/main.c和exec/c/compiler.c两个固定哈希对变化，witness1f0a90a7ef74c19edfd26b452885844df3eb403f0508ef4e67c1d17914e063c5。反向根rc2具名拒绝；旧默认配置复跑witness仍ab107f14。证据out/c43-fifo-source-delta-01.*、reverse-01.*及out/c43-fifo-delta-legacy-01.*。模型/构造树字节未变，不重复生成权重；后续包绑定、切片及产品准入仍须实际核验。
 
 宿主接续21ba1f4b52：按现有build-cxcc-host配方私有重链GCC/Clang至out/c43-fifo-{gcc,clang}-host.elf，两端五项-o均实返0/1/1/0/1；valid/absent生成程序均rc7，FIFO具名cannot read cxpack.tsv。证据out/c43-fifo-{gcc,clang}-{case}.{stdout,stderr}，根gcc_cx.com/clang_cx.com未替换。模型驱动osx/arm64切片out/c43-fifo-osx-arm64-01构造rc0，未执行外国平台，不授运行资格。已装e955仍未包含此修复。
