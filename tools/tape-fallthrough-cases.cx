@@ -1,0 +1,35 @@
+/* Default-run control-flow contract. Keep signals and transport failures red.
+ * Usage: ROOT NEW_ABS_OUT. This development suite is not release coverage. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.kernelsha
+static void die(const char *s){fprintf(stderr,"tape-fallthrough-cases: %s errno=%d\n",s,errno);exit(2);}
+static void path(char *p,const char *a,const char *b){int z=snprintf(p,4400,"%s/%s",a,b);if(z<0||z>=4400)die("path");}
+static void digest(const char *p,char h[65]){size_t n;char *s=cx_read(p,&n);if(!s||ks_sha256_hex(s,n,h))die("product-digest");free(s);}
+static void save(const char *p,const char *s,size_t n){int f=open(p,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(f<0)die("exclusive-create");while(n){ssize_t z=write(f,s,n);if(z<0&&errno==EINTR)continue;if(z<=0)die("write");s+=z;n-=(size_t)z;}if(close(f))die("close");}
+int main(int argc,char **argv){
+ char root[4096],product[4400],before[65],after[65];
+ if(argc!=3||!realpath(argv[1],root)||argv[2][0]!='/'||strstr(argv[2],".."))die("usage ROOT NEW_ABS_OUT");
+ if(mkdir(argv[2],0700))die("new-output");path(product,root,"unisacc.com");digest(product,before);
+ printf("INPUT\tproduct=%s\tsha256=%s\n",product,before);
+ const char *names[]={"straight-falloff","conditional-falloff","returned-call-falloff","jump-over-tail","return-unreachable-tail","finite-backward-jump","called-function-return"};
+ const char *code[]={
+ "_start:\n  imm r0, 7\n",
+ "_start:\n  imm r0, 0\n  jumpz r0, tail\n  ret\ntail:\n  imm r0, 7\n",
+ "helper:\n  imm r0, 7\n  ret\n_start:\n  call helper\n",
+ "_start:\n  jump answer\nunused:\n  imm r0, 19\nanswer:\n  imm r0, 7\n  ret\n",
+ "_start:\n  imm r0, 7\n  ret\nunused:\n  imm r0, 19\n",
+ "_start:\n  imm r0, 2\n  imm r1, 1\nagain:\n  sub64 r0, r0, r1\n  jumpz r0, done\n  jump again\ndone:\n  imm r0, 7\n  ret\n",
+ "_start:\n  call helper\n  ret\nhelper:\n  imm r0, 7\n  ret\n"};
+ int failed=0;
+ for(int i=0;i<7;i++){
+  char leaf[128],input[4400],log[4400];snprintf(leaf,sizeof leaf,"%s.tape",names[i]);path(input,argv[2],leaf);save(input,code[i],strlen(code[i]));
+  char *v[]={"sh",product,input,0};np_result r={0};char why[1024]={0};int transport=np_run(v,root,0,5,&r,why,sizeof why);
+  snprintf(leaf,sizeof leaf,"%s.stdout",names[i]);path(log,argv[2],leaf);save(log,r.out,r.outn);
+  snprintf(leaf,sizeof leaf,"%s.stderr",names[i]);path(log,argv[2],leaf);save(log,r.err,r.errn);
+  int ok=!transport&&!r.outn&&(i<3?(r.rc>0&&r.rc<128&&r.errn&&strstr(r.err,"control falls off the end")):(r.rc==7&&!r.errn));
+  failed+=!ok;printf("%s\t%s\trc=%d\ttransport=%d\texpect=%s\n",ok?"PASS":"FAIL",names[i],r.rc,transport,i<3?"named-refusal-no-signal":"exit7-quiet");
+  if(transport)fprintf(stderr,"transport %s: %s\n",names[i],why);np_free(&r);
+ }
+ digest(product,after);if(strcmp(before,after))die("product-changed");
+ printf("TAPE_FALLTHROUGH\tassertions=7\tfailed=%d\tscope=local-default-run-not-full-cfg\n",failed);return failed?1:0;
+}

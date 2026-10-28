@@ -370,6 +370,8 @@ coverage中旧1/4缺陷描述改为本候选实际4/1及明确合同冲突，没
 
 ### 容器修复开发安装（冻结ecb5fbe322）
 
+落尾下一刀新增tools/tape-fallthrough-cases.cx开发合同，尚未编译或运行、未登记资格：三项具名拒绝（直线、条件分支、调用返回后落尾），四项正常exit7控制（跳转越过代码、ret后不可达尾、有限回边、被调用函数返回）。每项默认-run，子调用5s，信号/超时/运输失败均红，前后记录产品SHA，保留stdout/stderr；不以“最后opcode不是ret”判定。当前模型定位：tapecheck只做词法，lower/code-scan-result的C.parsed已缓冲指令，code-shell-result的C.done直接ACCEPT。单纯trap仍违反原named-no-crash；若采用运行时guard须具名并受控终止，且覆盖宿主library_exit绑定及六目标非宿主模式。尚未修改模型或宣称落尾修复。
+
 五切片由冻结源和8147启动产品顺序构造，每步bound55；Linux x86_64切片与已测私有ec17e24f同字节。复用源码未变的seed/ape.c宿主包装器与PCff696，APE b6f15e823db12f42461371e2193c30f8b9b34961367caf2905c497765d147b0d（3029010B），来源记录db7af545234484fb12efb873d77758401e81596f071a0c715f6f5129ceb1ad90。固定tapelink-v1差异核验及native identity-helper记录核验通过；旧产品误作候选rc2拒绝。独立工具tools/tapelink-candidate-check.cx和install.cx保留固定来源/候选/记录/context/模型包身份，prepare/finish每次新核验，不改旧FIFO工具的历史pins。json-tool仅作为继承工具字节记录，不声称运行生成器。
 
 候选本体：out/c43-tapelink-ape-formats-01为68/0，ape-boundaries-01为11/0，ape-malformed-01为10/1且rc1，唯一红项仍落尾SIGSEGV。没有外国宿主执行。两阶段安装收据out/c43-tapelink-install-01/installed.tsv SHA544011da86bb1511272bb76dac519e66d6f1e9ee3022561ec50dc3729811d92c，旧8147及记录保存同目录previous.com。安装后out/c43-tapelink-installed-smoke-01为16/0；installed-boundaries-01实际参数指向共享已装产品，11/0（工具固定scope文字仍explicit-private-driver，以实参和产品hash为准）。有限开发安装，不称完整kind4或发布资格；旧矩阵/跨平台证据不迁标。
