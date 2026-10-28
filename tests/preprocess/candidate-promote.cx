@@ -1,0 +1,23 @@
+/* ROOT TOOL FROZEN_ROOT GEN PACKAGE_DIR PRODUCT_SHA SOURCE_SID RECORD_SHA
+ * NATIVE_RECEIPT_SHA PACKAGE_SHA INSTALL_STDOUT INSTALL_STDOUT_SHA NEW_ABS_OUT.
+ * Uses a real installed frozen endpoint;
+ * only the disposable target is promoted. No source receipts are fabricated. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.kernelsha
+static char root[4096],work[4096],toy[4400];static int checks,failed;
+static void die(const char *s){fprintf(stderr,"candidate-promote-test: %s errno=%d\n",s,errno);exit(2);}
+static void ck(int ok,const char *s){checks++;if(!ok)failed++;printf("%s\tcandidate-promote.%s\n",ok?"PASS":"FAIL",s);}
+static void path(char *p,const char *a,const char *b){if(cx_path_join(p,4400,a,b))die("path");}
+static int same(const char *a,const char *b){size_t an,bn;char *ap=cx_read(a,&an),*bp=cx_read(b,&bn);int ok=ap&&bp&&an==bn&&!memcmp(ap,bp,an);free(ap);free(bp);return ok;}
+static int hashis(const char *p,const char *expected){size_t n;char *s=cx_read(p,&n),h[65];if(!s)return 0;if(n>=65536){if(ks_sha256_hex(s,n,h))die("kernel-hash");}else cx_sha256_hex(s,n,h);free(s);return !strcmp(h,expected);}
+static np_result call(char **v,const char *label){np_result r={0};char why[1200],p[4400],leaf[120];if(np_run(v,root,0,45,&r,why,sizeof why))die(why);int z=snprintf(leaf,sizeof leaf,"%s.stdout",label);if(z<0||(size_t)z>=sizeof leaf)die("label");path(p,work,leaf);if(cx_write(p,r.out,r.outn))die("stdout");z=snprintf(leaf,sizeof leaf,"%s.stderr",label);if(z<0||(size_t)z>=sizeof leaf)die("label");path(p,work,leaf);if(cx_write(p,r.err,r.errn))die("stderr");return r;}
+int main(int argc,char **argv){
+ if(argc!=14||!realpath(argv[1],root)||argv[13][0]!='/'||strlen(argv[13])>=sizeof work)die("usage ROOT TOOL FROZEN_ROOT GEN PACKAGE_DIR PRODUCT_SHA SOURCE_SID RECORD_SHA NATIVE_RECEIPT_SHA PACKAGE_SHA INSTALL_STDOUT INSTALL_STDOUT_SHA NEW_ABS_OUT");strcpy(work,argv[13]);if(mkdir(work,0700))die("exclusive-output");path(toy,work,"target");if(mkdir(toy,0700))die("toy-target");
+ char oh[65],rh[65],out[4400],before[4400],record[4400],p[4400],q[4400];path(before,toy,"unisacc.com");path(record,toy,"unisacc.com.build.json");path(p,argv[4],"bootstrap-before-install.com");size_t oldn;char *old=cx_read(p,&oldn);if(!old||ks_sha256_hex(old,oldn,oh)||cx_write(before,old,oldn))die("old-product-fixture");free(old);path(p,argv[4],"bootstrap-before-install.com.build.json");old=cx_read(p,&oldn);if(!old)die("old-record-fixture");cx_sha256_hex(old,oldn,rh);if(cx_write(record,old,oldn))die("old-record-fixture-write");free(old);path(out,work,"bad-old");
+ char wrong[65];memset(wrong,'0',64);wrong[64]=0;char *v[]={argv[2],argv[3],argv[4],argv[5],toy,out,wrong,rh,argv[6],argv[7],argv[8],argv[9],argv[10],argv[11],argv[12],0};np_result r=call(v,"bad-old");ck(r.rc==2&&!r.outn&&strstr(r.err,"endpoint-digest-mismatch"),"wrong-previous-product-refused");np_free(&r);ck(hashis(before,oh)&&hashis(record,rh),"refusal-preserves-old-pair");struct stat st;errno=0;ck(lstat(out,&st)&&errno==ENOENT,"refusal-does-not-create-success-evidence");
+ v[6]=oh;v[10]=wrong;path(out,work,"bad-new-record");r=call(v,"bad-new-record");ck(r.rc==2&&!r.outn&&strstr(r.err,"endpoint-digest-mismatch"),"wrong-origin-record-refused");np_free(&r);ck(hashis(before,oh)&&hashis(record,rh),"origin-record-refusal-preserves-old-pair");
+ v[10]=argv[8];path(out,work,"accepted");r=call(v,"accepted");int promoted=!r.rc&&!r.errn&&strstr(r.out,"PROMOTED");ck(promoted,"real-installed-frozen-endpoint-promotes-disposable-target");np_free(&r);
+ path(p,argv[3],"unisacc.com");path(q,argv[3],"unisacc.com.build.json");ck(same(before,p)&&same(record,q),"installed-product-and-original-record-byte-identical");path(p,out,"previous.com");path(q,out,"previous.com.build.json");ck(hashis(p,oh)&&hashis(q,rh),"old-pair-backed-up-exactly");path(p,out,"promoted.com.native.tsv");ck(hashis(p,argv[9]),"native-receipt-backed-up-exactly");path(p,out,"receipt.tsv");size_t n;char *receipt=cx_read(p,&n);ck(receipt&&strstr(receipt,"status\tPROMOTED-development-only-no-test-result\n")&&strstr(receipt,"target-live-source-not-qualified"),"receipt-keeps-frozen-and-live-source-scopes-distinct");free(receipt);
+ path(p,toy,".unisacc-candidate-promote.next");errno=0;int no_product=lstat(p,&st)&&errno==ENOENT;path(p,toy,".unisacc-candidate-promote.next.build.json");errno=0;ck(promoted&&no_product&&lstat(p,&st)&&errno==ENOENT,"staged-pair-consumed-by-renames");
+ printf("CANDIDATE_PROMOTE\tassertions=%d\tfailed=%d\n",checks,failed);return failed?1:0;
+}
