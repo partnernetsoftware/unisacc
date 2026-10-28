@@ -68,3 +68,11 @@
 - A1 执行器检查点：E2 处理完 `\0cli/includes` 后把机器状态（W 稀疏表、数值内存、blobs、intern、SB、输出及属性）序列化进 runreuse；命中时恢复并从用户源继续。不碰 E2 表；需 run.c 新增状态序列化与"检查点状态"约定，正确性风险在遗漏状态。
 - A2 宏摘要 + 预展开前缀：E2 结束态转储活宏为 `#define` 文本（需在宏表新增名/参数文本 blob 字段，F_NAMEBLOB/F_PBLOB，FSZ 23→24+），驱动缓存（前奏 E2 输出文本, 摘要）；命中时 E2 以 `\0cli/preexpanded` 资源整段 SPAN 复制前缀、只处理摘要+用户源。改 E2 表 + facts + 驱动；locations 变体需同时缓存位置记录。
 碰撞提示：cdx 的 cx0 工作正在改 E2 对不可变资源的消费（6b0ffc7901），A2 与其同区；A1 在 run.c。先与 cdx 对齐再开工；期间按既定顺序做 MISSING 格的事实生成用例。
+
+## 10. 下一事实生成用例：`e4.gold.peep-1632`（设计，待实现为 tools/peep-cases-gen.cx）
+
+- 事实：`weights/gold/peep.tsv` 1632 键 (a,b,rel)→y；y 分布 keep 1494、drop_a 104、fold_copy 16、to_mov 8、retarget_dest 5、retarget 2、load_to_mov/drop_b/fold_imm 各 1。
+- 关系的实现规格（`src/opt.c:770-845`，`pk_*`）：`store64 [M], rX`+`load64 rY, [M]`/`store64 [M], rY` 同槽（M 非 `[r7+…]`）→ same_slot / same_slot_same_reg(x==y)；`imm rK, N`(K≤5) + 三操作数 `OP rD, rS, rK`（rS≠rK，rK 其后死）→ const0/const1/pow2；`imm rK` + `mov rY, rK`（Y≠K，rK 死）→ copy_dead；`mov rY, rX`(Y≤5,Y≠X) + 读 rY 不写 rY 的 simple 指令，rY 其后死 → copy_into；simple 非 store 指令 + `mov`（dest_to_mov）；写 rD(≤5) 且其后死 → a_dead；`jump/jumpz L` + 紧随标签 L → to_next；跳到另一 `jump` → to_jump；其余 none。寄存器"死"= 对后续块粒度活性（ol_dead），两指令片段后接 `ret` 即死。
+- 生成：每键一份两指令 tape（`_start:` + 片段 + `ret`），能按上述规格实现的键给精确输入；a/b 类与 rel 不相容的键（如 a=jump 且 rel=same_slot）按"不可实现，y=keep 为定义值"显式计数并单独列出，不冒充观测（同 lex-144 折叠的处理）。
+- oracle：keep → 输出 == 输入；drop_a/drop_b → 去掉 a/b；load_to_mov → `load64 rY,[M]`→`mov rY, rX`；其余 34 键（fold_copy/to_mov/retarget*/fold_imm）用矩阵已允许的经典参考（`make ref`，`src/opt.c` O2）产出期望 tape，并在同一批内核对 E4 流输出字节相等。
+- 入口：E4 流容器 `streams/unisacc-stream4.com INPUT INPUT INC`（见 tests/stream-e4.cx），材料 pin 走现行七流；新批登记为 `stream-e4-peep`，不改既有批。
