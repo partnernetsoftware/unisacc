@@ -370,14 +370,18 @@ static int link_objects(const char **paths,int n,Buf *out) {
 }
 /* `unisacc ar rcs|t|x LIB.a [MEMBER...]` (R17-3): the reference's archive
    code, with stdio for the files */
+int cxr_operation(const char *,char *,long);
+int cxr_append(char *,long,long,const char *,const char *,long,long *,char *,long);
+int cxr_member(char *,long,int,char *,long,char **,long *,char *,long);
 static int product_ar(int argc,char **argv) {
     if (argc<4) { fputs("usage: unisacc ar rcs|t|x LIB.a [MEMBER...]\n",stderr); return 2; }
     const char *op=argv[2],*lib=argv[3];
-    if (!tl_ar_operation(op)) { fputs("ar: operation must be r, q, t or x\n",stderr); return 2; }
+    char why[128];
+    if (cxr_operation(op,why,sizeof why)) { fputs(why,stderr); return 2; }
     if (op[0]=='r' || op[0]=='q') {
         long cap=8; for (int i=4;i<argc;i++) { int len=0; unsigned char *b=source_read(argv[i],&len); free(b); cap+=len+400+strlen(argv[i]); }
         char *ab=malloc(cap); memcpy(ab,"!<arch>\n",8); long at=8;
-        for (int i=4;i<argc;i++) { int len=0; unsigned char *b=source_read(argv[i],&len); at=tl_ar_add(ab,at,argv[i],(char *)b,len); free(b); }
+        for (int i=4;i<argc;i++) { int len=0; unsigned char *b=source_read(argv[i],&len); long next=0; int rc=cxr_append(ab,cap,at,argv[i],(char *)b,len,&next,why,sizeof why); free(b); if(rc){ fputs(why,stderr); free(ab); return 1; } at=next; }
         FILE *f=fopen(lib,"wb"); if (!f) { fprintf(stderr,"ar: cannot write %s\n",lib); return 1; }
         int bad=fwrite(ab,1,at,f)!=(size_t)at; bad|=fclose(f)!=0; free(ab);
         return bad;
@@ -385,8 +389,9 @@ static int product_ar(int argc,char **argv) {
     int len=0; unsigned char *b=source_read(lib,&len); char nm[256]; int i=0;
     if (len<8 || memcmp(b,"!<arch>\n",8)) { fputs("ar: not an archive\n",stderr); return 1; }
     for (;;i++) {
-        long ml=0; char *m=tl_ar_member((char *)b,len,i,nm,&ml);
-        if (!m) break;
+        long ml=0; char *m=0; int rc=cxr_member((char *)b,len,i,nm,sizeof nm,&m,&ml,why,sizeof why);
+        if (rc==1) break;
+        if (rc) { fputs(why,stderr); free(b); return 1; }
         if (op[0]=='t') puts(nm);
         else if (op[0]=='x') { FILE *f=fopen(nm,"wb"); if (!f || fwrite(m,1,ml,f)!=(size_t)ml || fclose(f)) { fprintf(stderr,"ar: cannot write %s\n",nm); return 1; } }
         else { fputs("ar: operation must be r, q, t or x\n",stderr); return 2; }

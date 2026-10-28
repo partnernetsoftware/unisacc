@@ -1,0 +1,473 @@
+/* Independent check for module archive. Not a product driver.
+   tools/driver -> ../cx/driver. This unit consumes that module.
+   Run one source: sh ./unisacc.com tools/check-driver-archive.cx
+   Locks two small headers, member order, basename, BSD #1/, the odd
+   0x0A pad, skipped symbol tables, the five format lines, a short
+   buffer canary, null as 5, operation letters including rcs, and the
+   borrow of payload bytes versus the copied name. Does not run
+   tools/archive-ar-cases.cx or tools/driver-diagnostics.cx. */
+#pragma unisa use driver.archive
+
+static int g_fail;
+
+static void note(int ok, const char *name) {
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", name);
+    if (!ok) g_fail = g_fail + 1;
+}
+
+static void magic(char *d) {
+    d[0] = 33; d[1] = 60; d[2] = 97; d[3] = 114;
+    d[4] = 99; d[5] = 104; d[6] = 62; d[7] = 10;
+}
+
+static void fill(char *d, long n, int v) {
+    long i;
+    i = 0;
+    while (i < n) { d[i] = (char)v; i = i + 1; }
+}
+
+static int untouched(const char *d, long n, int v) {
+    long i;
+    i = 0;
+    while (i < n) {
+        if (d[i] != (char)v) return 0;
+        i = i + 1;
+    }
+    return 1;
+}
+
+static void op_code(const char *op, int want, const char *phrase, const char *name) {
+    char why[64];
+    int rc;
+    memcpy(why, "keep", 5);
+    rc = cxr_operation(op, why, (long)sizeof why);
+    if (want == 0) note(rc == 0 && why[0] == 0, name);
+    else note(rc == want && !strcmp(why, phrase), name);
+}
+
+static void put_hdr(char *d, const char *nm, const char *sz, int bad) {
+    int i;
+    i = 0;
+    while (i < 60) { d[i] = 32; i = i + 1; }
+    i = 0;
+    while (nm[i] && i < 16) { d[i] = nm[i]; i = i + 1; }
+    d[16] = 48;
+    d[28] = 48;
+    d[34] = 48;
+    d[40] = 49; d[41] = 48; d[42] = 48; d[43] = 54; d[44] = 52; d[45] = 52;
+    i = 0;
+    while (sz[i] && i < 10) { d[48 + i] = sz[i]; i = i + 1; }
+    if (bad) { d[58] = 88; d[59] = 88; }
+    else { d[58] = 96; d[59] = 10; }
+}
+
+static void expect_short(char *b, long off, const char *nm, long pn, const char *tag) {
+    char expect[60];
+    int i;
+    int nl;
+    int k;
+    char dig[16];
+    long v;
+    nl = 0;
+    while (nm[nl]) nl = nl + 1;
+    i = 0;
+    while (i < 60) { expect[i] = 32; i = i + 1; }
+    i = 0;
+    while (i < nl && i < 16) { expect[i] = nm[i]; i = i + 1; }
+    expect[16] = 48;
+    expect[28] = 48;
+    expect[34] = 48;
+    expect[40] = 49; expect[41] = 48; expect[42] = 48; expect[43] = 54; expect[44] = 52; expect[45] = 52;
+    k = 0;
+    v = pn;
+    if (v == 0) { dig[k] = 48; k = k + 1; }
+    while (v > 0) { dig[k] = (char)(48 + (v % 10)); v = v / 10; k = k + 1; }
+    i = 0;
+    while (k > 0) { k = k - 1; expect[48 + i] = dig[k]; i = i + 1; }
+    expect[58] = 96;
+    expect[59] = 10;
+    note(memcmp(b + off, expect, 60) == 0, tag);
+}
+
+int main(void) {
+    struct { char b[512]; char tomb; } box;
+    struct { char b[512]; char tomb; } other;
+    char why[64];
+    char tiny[8];
+    char nm[256];
+    char hold[256];
+    char big[258];
+    char sym[256];
+    char *data;
+    char *d1;
+    char *d2;
+    const char *longn;
+    const char *name15;
+    long at;
+    long at2;
+    long ml;
+    long ml1;
+    long nlen;
+    long saved;
+    int rc;
+    int i;
+    g_fail = 0;
+    longn = "0123456789abcdef";
+    name15 = "0123456789abcde";
+
+    op_code("r", 0, 0, "op-r");
+    op_code("q", 0, 0, "op-q");
+    op_code("t", 0, 0, "op-t");
+    op_code("x", 0, 0, "op-x");
+    op_code("rcs", 0, 0, "op-rcs");
+    op_code("qfoo", 0, 0, "op-qrest");
+    op_code("", 2, "ar: operation must be r, q, t or x\n", "op-empty");
+    op_code("zz", 2, "ar: operation must be r, q, t or x\n", "op-zz");
+    op_code("c", 2, "ar: operation must be r, q, t or x\n", "op-c");
+    op_code("s", 2, "ar: operation must be r, q, t or x\n", "op-s");
+    op_code("R", 2, "ar: operation must be r, q, t or x\n", "op-R");
+    memcpy(why, "keep", 5);
+    rc = cxr_operation(0, why, (long)sizeof why);
+    note(rc == 5 && !strcmp(why, "bad argument"), "op-null");
+    memcpy(tiny, "ZZZZZZZZ", 8);
+    rc = cxr_operation("", tiny, 4);
+    note(rc == 2 && tiny[0] == 'a' && tiny[1] == 'r' && tiny[2] == ':' && tiny[3] == 0 && tiny[4] == 'Z', "op-short-why");
+    tiny[0] = 'Z';
+    rc = cxr_operation("r", tiny, 0);
+    note(rc == 0 && tiny[0] == 'Z', "op-cap0");
+    rc = cxr_operation(0, 0, 32);
+    note(rc == 5, "op-null-why");
+
+    fill(box.b, 512, 0xA5);
+    box.tomb = 'T';
+    magic(box.b);
+    at = 8;
+    memcpy(why, "keep", 5);
+    rc = cxr_append(box.b, 512, at, "dir/sub/a.o", "HI", 2, &at, why, (long)sizeof why);
+    note(rc == 0 && at == 70 && why[0] == 0, "add-base-rc");
+    note(box.b[0] == 33 && box.b[7] == 10, "add-magic-kept");
+    note(box.b[8] == 'a' && box.b[9] == '.' && box.b[10] == 'o' && box.b[11] == ' ', "add-ao-name");
+    note(box.b[8 + 16] == '0' && box.b[8 + 17] == ' ', "add-ao-mtime");
+    note(box.b[8 + 40] == '1' && box.b[8 + 45] == '4' && box.b[8 + 46] == ' ', "add-ao-mode");
+    note(box.b[8 + 48] == '2' && box.b[8 + 49] == ' ', "add-ao-size");
+    note(box.b[8 + 58] == '`' && box.b[8 + 59] == '\n', "add-ao-fmag");
+    note(box.b[68] == 'H' && box.b[69] == 'I', "add-ao-bytes");
+    expect_short(box.b, 8, "a.o", 2, "add-ao-hdr");
+    note(untouched(box.b + at, 512 - at, 0xA5) && box.tomb == 'T', "add-ao-canary");
+
+    fill(other.b, 512, 0xA5);
+    other.tomb = 'T';
+    magic(other.b);
+    at2 = 8;
+    rc = cxr_append(other.b, 512, at2, longn, "Z", 1, &at2, why, (long)sizeof why);
+    note(rc == 0 && at2 == 86 && other.tomb == 'T', "add-long-rc");
+    note(other.b[8] == '#' && other.b[9] == '1' && other.b[10] == '/' && other.b[11] == '1' &&
+        other.b[12] == '6' && other.b[13] == ' ', "add-long-mark");
+    note(other.b[8 + 48] == '1' && other.b[8 + 49] == '7' && other.b[8 + 50] == ' ', "add-long-size");
+    note(memcmp(other.b + 68, longn, 16) == 0 && other.b[84] == 'Z' && other.b[85] == 10, "add-long-body");
+    note(memcmp(box.b + 8, other.b + 8, 60) != 0, "add-two-headers");
+    note(box.b[8] == 'a' && box.b[68] == 'H' && box.tomb == 'T', "add-first-stable");
+
+    fill(box.b, 512, 0xA5);
+    magic(box.b);
+    at = 8;
+    rc = cxr_append(box.b, 512, at, name15, "OK", 2, &at, why, (long)sizeof why);
+    note(rc == 0 && box.b[8 + 14] == 'e' && box.b[8 + 15] == ' ' && box.b[8] != '#', "add-15");
+    expect_short(box.b, 8, name15, 2, "add-15-hdr");
+    note(box.b[68] == 'O' && box.b[69] == 'K' && at == 70, "add-15-bytes");
+
+    fill(box.b, 512, 0xA5);
+    magic(box.b);
+    at = 8;
+    rc = cxr_append(box.b, 512, at, "a.o", "X", 1, &at, why, (long)sizeof why);
+    note(rc == 0 && at == 70 && box.b[69] == 10 && box.b[68] == 'X', "add-odd-pad");
+    saved = at;
+    box.b[at] = 0x5A;
+    rc = cxr_member(box.b, at - 1, 0, nm, 256, &data, &ml, why, (long)sizeof why);
+    note(rc == 0 && ml == 1 && data[0] == 'X', "mem-odd-inside");
+    memcpy(nm, "SENT", 5);
+    data = (char *)1;
+    ml = 77;
+    memcpy(why, "keep", 5);
+    rc = cxr_member(box.b, at - 1, 1, nm, 256, &data, &ml, why, (long)sizeof why);
+    note(rc == 4 && !strcmp(why, "ar: truncated member header\n") && data == (char *)1 && ml == 77 && !strcmp(nm, "SENT") && box.b[saved] == 0x5A, "mem-trunc-odd");
+    memcpy(why, "keep", 5);
+    memcpy(nm, "SENT", 5);
+    data = (char *)1;
+    ml = 77;
+    rc = cxr_member(box.b, at, 0, nm, 256, &data, &ml, why, (long)sizeof why);
+    note(rc == 0 && ml == 1 && data == box.b + 68 && data[0] == 'X' && !strcmp(nm, "a.o") && why[0] == 0, "mem-odd-ok");
+    box.b[68] = 'Q';
+    note(data[0] == 'Q', "borrow-sees-src");
+    box.b[8] = 'Z';
+    note(nm[0] == 'a' && nm[1] == '.', "name-copied");
+    box.b[8] = 'a';
+    box.b[68] = 'X';
+
+    fill(other.b, 512, 0xA5);
+    magic(other.b);
+    at2 = 8;
+    rc = cxr_append(other.b, 512, at2, "b.o", "Y", 1, &at2, why, (long)sizeof why);
+    memcpy(why, "keep", 5);
+    rc = cxr_member(box.b, 70, 0, nm, 256, &d1, &ml1, why, (long)sizeof why);
+    rc = cxr_member(other.b, at2, 0, hold, 256, &d2, &ml, why, (long)sizeof why);
+    note(d1 == box.b + 68 && d2 == other.b + 68 && d1[0] == 'X' && d2[0] == 'Y', "life-two");
+    note(!strcmp(nm, "a.o") && !strcmp(hold, "b.o"), "life-names");
+
+    fill(box.b, 512, 0xA5);
+    box.tomb = 'T';
+    magic(box.b);
+    at = 8;
+    rc = cxr_append(box.b, 512, at, "a.o", "HI", 2, &at, why, (long)sizeof why);
+    rc = cxr_append(box.b, 512, at, "__.SYMDEF", "SYM", 3, &at, why, (long)sizeof why);
+    note(box.b[at - 1] == 10, "pad-sym");
+    rc = cxr_append(box.b, 512, at, "dir/", "E", 1, &at, why, (long)sizeof why);
+    rc = cxr_append(box.b, 512, at, "a.o/", "E", 1, &at, why, (long)sizeof why);
+    rc = cxr_append(box.b, 512, at, "__.X", "Q", 1, &at, why, (long)sizeof why);
+    rc = cxr_append(box.b, 512, at, "b.o", "X", 1, &at, why, (long)sizeof why);
+    rc = cxr_append(box.b, 512, at, longn, "Z", 1, &at, why, (long)sizeof why);
+    note(rc == 0 && box.tomb == 'T' && untouched(box.b + at, 512 - at, 0xA5), "add-order-canary");
+    memcpy(why, "keep", 5);
+    rc = cxr_member(box.b, at, 0, nm, 256, &data, &ml, why, (long)sizeof why);
+    note(rc == 0 && !strcmp(nm, "a.o") && ml == 2 && data[0] == 'H' && data[1] == 'I', "mem-0");
+    rc = cxr_member(box.b, at, 1, nm, 256, &data, &ml, why, (long)sizeof why);
+    note(rc == 0 && !strcmp(nm, "__.X") && ml == 1 && data[0] == 'Q', "mem-1-not-sym");
+    rc = cxr_member(box.b, at, 2, nm, 256, &data, &ml, why, (long)sizeof why);
+    note(rc == 0 && !strcmp(nm, "b.o") && ml == 1 && data[0] == 'X', "mem-2");
+    rc = cxr_member(box.b, at, 3, nm, 256, &data, &ml, why, (long)sizeof why);
+    note(rc == 0 && !strcmp(nm, longn) && ml == 1 && data[0] == 'Z', "mem-3-long");
+    memcpy(nm, "SENT", 5);
+    data = (char *)1;
+    ml = 77;
+    memcpy(why, "keep", 5);
+    rc = cxr_member(box.b, at, 4, nm, 256, &data, &ml, why, (long)sizeof why);
+    note(rc == 1 && data == 0 && ml == 77 && !strcmp(nm, "SENT") && !strcmp(why, "keep"), "mem-end");
+
+    fill(box.b, 128, 0xA5);
+    magic(box.b);
+    at = 8;
+    rc = cxr_append(box.b, 128, at, "dir/", "E", 1, &at, why, (long)sizeof why);
+    note(rc == 0 && box.b[8] == ' ', "add-empty-base");
+    memcpy(why, "keep", 5);
+    data = (char *)1;
+    rc = cxr_member(box.b, at, 0, nm, 256, &data, &ml, why, (long)sizeof why);
+    note(rc == 1 && data == 0 && !strcmp(why, "keep"), "mem-skip-empty");
+
+    fill(box.b, 128, 0xA5);
+    magic(box.b);
+    at = 8;
+    rc = cxr_append(box.b, 128, at, "__.SYMDEF", "SYM", 3, &at, why, (long)sizeof why);
+    data = (char *)1;
+    memcpy(why, "keep", 5);
+    rc = cxr_member(box.b, at, 0, nm, 256, &data, &ml, why, (long)sizeof why);
+    note(rc == 1 && data == 0 && !strcmp(why, "keep"), "mem-skip-symdef");
+
+    fill(box.b, 256, 0xA5);
+    magic(box.b);
+    at = 8;
+    rc = cxr_append(box.b, 256, at, "a.o", "AA", 2, &at, why, (long)sizeof why);
+    rc = cxr_append(box.b, 256, at, "a.o", "BB", 2, &at, why, (long)sizeof why);
+    rc = cxr_member(box.b, at, 0, nm, 256, &data, &ml, why, (long)sizeof why);
+    note(rc == 0 && data[0] == 'A' && data[1] == 'A', "mem-dup-0");
+    rc = cxr_member(box.b, at, 1, nm, 256, &data, &ml, why, (long)sizeof why);
+    note(rc == 0 && data[0] == 'B' && data[1] == 'B', "mem-dup-1");
+
+    i = 0;
+    while (i < 255) { big[i] = 'b'; i = i + 1; }
+    big[255] = 0;
+    fill(box.b, 512, 0xA5);
+    magic(box.b);
+    at = 8;
+    rc = cxr_append(box.b, 512, at, big, "Q", 1, &at, why, (long)sizeof why);
+    note(rc == 0 && at == 324, "add-255-rc");
+    note(box.b[8] == '#' && box.b[9] == '1' && box.b[10] == '/' && box.b[11] == '2' &&
+        box.b[12] == '5' && box.b[13] == '5' && box.b[14] == ' ', "add-255-mark");
+    note(box.b[8 + 48] == '2' && box.b[8 + 49] == '5' && box.b[8 + 50] == '6' && box.b[8 + 51] == ' ', "add-255-size");
+    note(box.b[68] == 'b' && box.b[322] == 'b' && box.b[323] == 'Q', "add-255-body");
+    rc = cxr_member(box.b, at, 0, nm, 256, &data, &ml, why, (long)sizeof why);
+    nlen = 0;
+    while (nm[nlen]) nlen = nlen + 1;
+    note(rc == 0 && nlen == 255 && nm[0] == 'b' && nm[254] == 'b' && ml == 1 && data[0] == 'Q', "mem-255");
+    fill(hold, 256, 'Z');
+    data = (char *)1;
+    ml = 77;
+    memcpy(why, "keep", 5);
+    rc = cxr_member(box.b, at, 0, hold, 255, &data, &ml, why, (long)sizeof why);
+    note(rc == 5 && !strcmp(why, "bad argument") && data == (char *)1 && ml == 77 && hold[0] == 'Z' && hold[254] == 'Z', "mem-namecap-255");
+
+    i = 0;
+    while (i < 256) { big[i] = 'c'; i = i + 1; }
+    big[256] = 0;
+    fill(box.b, 64, 0xA5);
+    box.tomb = 'T';
+    at = 8;
+    memcpy(why, "keep", 5);
+    saved = 44;
+    rc = cxr_append(box.b, 64, at, big, "Q", 1, &saved, why, (long)sizeof why);
+    note(rc == 8 && !strcmp(why, "ar: archive too large\n") && saved == 44 && untouched(box.b, 64, 0xA5) && box.tomb == 'T', "add-name-256");
+
+    fill(box.b, 64, 0xA5);
+    at = 0;
+    saved = 9;
+    memcpy(why, "keep", 5);
+    rc = cxr_append(box.b, 64, at, "a.o", "HI", 10000000000L, &saved, why, (long)sizeof why);
+    note(rc == 8 && !strcmp(why, "ar: archive too large\n") && saved == 9 && untouched(box.b, 64, 0xA5), "add-wide");
+
+    fill(box.b, 64, 0xA5);
+    magic(box.b);
+    saved = 3;
+    memcpy(why, "keep", 5);
+    rc = cxr_append(box.b, 20, 8, "a.o", "HI", 2, &saved, why, (long)sizeof why);
+    note(rc == 8 && saved == 3 && box.b[8] == (char)0xA5 && box.b[0] == 33, "add-short-cap");
+    saved = 3;
+    rc = cxr_append(box.b, 50, 100, "a.o", "HI", 2, &saved, why, (long)sizeof why);
+    note(rc == 8 && saved == 3 && untouched(box.b + 8, 56, 0xA5), "add-at-past");
+
+    saved = 3;
+    memcpy(why, "keep", 5);
+    rc = cxr_append(0, 64, 0, big, "Q", 1, &saved, why, (long)sizeof why);
+    note(rc == 5 && !strcmp(why, "bad argument") && saved == 3, "add-null-before-size");
+    rc = cxr_append(0, 64, 0, "a.o", "HI", 2, &saved, why, (long)sizeof why);
+    note(rc == 5 && saved == 3, "add-null-dst");
+    fill(box.b, 32, 0xA5);
+    rc = cxr_append(box.b, 32, 0, 0, "HI", 2, &saved, why, (long)sizeof why);
+    note(rc == 5 && saved == 3 && untouched(box.b, 32, 0xA5), "add-null-name");
+    rc = cxr_append(box.b, 32, 0, "a.o", 0, 2, &saved, why, (long)sizeof why);
+    note(rc == 5 && untouched(box.b, 32, 0xA5), "add-null-bytes");
+    rc = cxr_append(box.b, 32, 0, "a.o", "HI", 2, 0, why, (long)sizeof why);
+    note(rc == 5 && untouched(box.b, 32, 0xA5), "add-null-out");
+    rc = cxr_append(box.b, 32, 0, "a.o", "HI", -1, &saved, why, (long)sizeof why);
+    note(rc == 5 && saved == 3 && untouched(box.b, 32, 0xA5), "add-neg-n");
+    rc = cxr_append(box.b, 32, -1, "a.o", "HI", 2, &saved, why, (long)sizeof why);
+    note(rc == 5 && saved == 3, "add-neg-at");
+    rc = cxr_append(box.b, -1, 0, "a.o", "HI", 2, &saved, why, (long)sizeof why);
+    note(rc == 5 && saved == 3, "add-neg-cap");
+    at = 0;
+    rc = cxr_append(box.b, 64, 0, "z.o", 0, 0, &at, why, (long)sizeof why);
+    note(rc == 0 && at == 60 && box.b[48] == '0' && box.b[49] == ' ', "add-zero-bytes");
+    memcpy(tiny, "ZZZZZZZZ", 8);
+    rc = cxr_append(0, 8, 0, "a.o", "HI", 2, &saved, tiny, 4);
+    note(rc == 5 && tiny[0] == 'b' && tiny[1] == 'a' && tiny[2] == 'd' && tiny[3] == 0 && tiny[4] == 'Z', "add-short-why");
+
+    magic(sym);
+    put_hdr(sym + 8, "/", "0", 0);
+    put_hdr(sym + 68, "//", "0", 0);
+    put_hdr(sym + 128, "real.o", "2", 0);
+    sym[188] = 'O';
+    sym[189] = 'K';
+    put_hdr(sym + 190, "foo/", "2", 0);
+    sym[250] = 'Z';
+    sym[251] = 'Z';
+    rc = cxr_member(sym, 252, 0, nm, 256, &data, &ml, why, (long)sizeof why);
+    note(rc == 0 && !strcmp(nm, "real.o") && ml == 2 && data[0] == 'O' && data[1] == 'K', "mem-skip-slash");
+    rc = cxr_member(sym, 252, 1, nm, 256, &data, &ml, why, (long)sizeof why);
+    note(rc == 0 && !strcmp(nm, "foo") && ml == 2 && data[0] == 'Z', "mem-strip-slash");
+    data = (char *)1;
+    memcpy(why, "keep", 5);
+    rc = cxr_member(sym, 252, 2, nm, 256, &data, &ml, why, (long)sizeof why);
+    note(rc == 1 && data == 0 && !strcmp(why, "keep"), "mem-skip-end");
+
+    memcpy(why, "keep", 5);
+    memcpy(nm, "SENT", 5);
+    data = (char *)1;
+    ml = 77;
+    rc = cxr_member("01234567", 8, 0, nm, 256, &data, &ml, why, (long)sizeof why);
+    note(rc == 4 && !strcmp(why, "ar: not an archive\n") && data == (char *)1 && ml == 77 && !strcmp(nm, "SENT"), "mem-not-arch");
+    rc = cxr_member("abcd", 4, 0, nm, 256, &data, &ml, why, (long)sizeof why);
+    note(rc == 4 && !strcmp(why, "ar: not an archive\n") && !strcmp(nm, "SENT"), "mem-short-arch");
+    magic(sym);
+    rc = cxr_member(sym, 8, 0, nm, 256, &data, &ml, why, (long)sizeof why);
+    note(rc == 1 && data == 0, "mem-empty-arch");
+
+    magic(sym);
+    put_hdr(sym + 8, "a.o", "0", 1);
+    memcpy(nm, "SENT", 5);
+    data = (char *)1;
+    ml = 77;
+    memcpy(why, "keep", 5);
+    rc = cxr_member(sym, 68, 0, nm, 256, &data, &ml, why, (long)sizeof why);
+    note(rc == 4 && !strcmp(why, "ar: malformed member header\n") && data == (char *)1 && ml == 77 && !strcmp(nm, "SENT"), "mem-bad-fmag");
+
+    magic(sym);
+    put_hdr(sym + 8, "a.o", "100", 0);
+    data = (char *)1;
+    ml = 77;
+    memcpy(nm, "SENT", 5);
+    rc = cxr_member(sym, 68, 0, nm, 256, &data, &ml, why, (long)sizeof why);
+    note(rc == 4 && !strcmp(why, "ar: member exceeds archive\n") && data == (char *)1 && !strcmp(nm, "SENT"), "mem-exceeds");
+    put_hdr(sym + 8, "a.o", "2X", 0);
+    rc = cxr_member(sym, 68, 0, nm, 256, &data, &ml, why, (long)sizeof why);
+    note(rc == 4 && !strcmp(why, "ar: member exceeds archive\n"), "mem-exceeds-junk");
+    put_hdr(sym + 8, "a.o", "", 0);
+    rc = cxr_member(sym, 68, 0, nm, 256, &data, &ml, why, (long)sizeof why);
+    note(rc == 4 && !strcmp(why, "ar: member exceeds archive\n"), "mem-exceeds-blank");
+
+    fill(box.b, 512, 0);
+    magic(box.b);
+    put_hdr(box.b + 8, "#1/256", "256", 0);
+    i = 0;
+    while (i < 256) { box.b[68 + i] = 'n'; i = i + 1; }
+    data = (char *)1;
+    ml = 77;
+    memcpy(nm, "SENT", 5);
+    rc = cxr_member(box.b, 324, 0, nm, 256, &data, &ml, why, (long)sizeof why);
+    note(rc == 4 && !strcmp(why, "ar: invalid member name length\n") && data == (char *)1 && ml == 77 && !strcmp(nm, "SENT"), "mem-bad-namelen");
+
+    magic(sym);
+    sym[8] = 'x'; sym[9] = 'x'; sym[10] = 'x'; sym[11] = 'x';
+    data = (char *)1;
+    memcpy(nm, "SENT", 5);
+    rc = cxr_member(sym, 12, 0, nm, 256, &data, &ml, why, (long)sizeof why);
+    note(rc == 4 && !strcmp(why, "ar: truncated member header\n") && data == (char *)1 && !strcmp(nm, "SENT"), "mem-trunc");
+
+    fill(box.b, 128, 0xA5);
+    magic(box.b);
+    at = 8;
+    rc = cxr_append(box.b, 128, at, "a.o", "HI", 2, &at, why, (long)sizeof why);
+    rc = cxr_member(box.b, at, 0, nm, 256, &data, &ml, why, (long)sizeof why);
+    note(rc == 0 && !strcmp(nm, "a.o"), "mem-early-ok");
+    data = (char *)1;
+    memcpy(nm, "SENT", 5);
+    memcpy(why, "keep", 5);
+    rc = cxr_member(box.b, at + 3, 1, nm, 256, &data, &ml, why, (long)sizeof why);
+    note(rc == 4 && !strcmp(why, "ar: truncated member header\n") && data == (char *)1 && !strcmp(nm, "SENT") && !strcmp(why, "ar: truncated member header\n"), "mem-tail-trunc");
+
+    fill(hold, 4, 'W');
+    data = (char *)1;
+    ml = 77;
+    memcpy(why, "keep", 5);
+    rc = cxr_member(box.b, at, 0, hold, 3, &data, &ml, why, (long)sizeof why);
+    note(rc == 5 && !strcmp(why, "bad argument") && hold[0] == 'W' && hold[1] == 'W' && hold[2] == 'W' && data == (char *)1 && ml == 77, "mem-namecap-short");
+    rc = cxr_member(box.b, at, 0, nm, 4, &data, &ml, why, (long)sizeof why);
+    note(rc == 0 && !strcmp(nm, "a.o") && ml == 2, "mem-namecap-fit");
+
+    memcpy(nm, "SENT", 5);
+    data = (char *)1;
+    ml = 77;
+    memcpy(why, "keep", 5);
+    rc = cxr_member(0, 8, 0, nm, 256, &data, &ml, why, (long)sizeof why);
+    note(rc == 5 && !strcmp(why, "bad argument") && data == (char *)1 && !strcmp(nm, "SENT"), "mem-null-src");
+    rc = cxr_member(box.b, at, 0, 0, 256, &data, &ml, why, (long)sizeof why);
+    note(rc == 5 && data == (char *)1, "mem-null-name");
+    rc = cxr_member(box.b, at, 0, nm, 256, 0, &ml, why, (long)sizeof why);
+    note(rc == 5 && !strcmp(nm, "SENT"), "mem-null-data");
+    rc = cxr_member(box.b, at, 0, nm, 256, &data, 0, why, (long)sizeof why);
+    note(rc == 5 && data == (char *)1, "mem-null-len");
+    rc = cxr_member(box.b, -1, 0, nm, 256, &data, &ml, why, (long)sizeof why);
+    note(rc == 5 && data == (char *)1 && !strcmp(nm, "SENT"), "mem-neg-n");
+    rc = cxr_member(box.b, at, -1, nm, 256, &data, &ml, why, (long)sizeof why);
+    note(rc == 5 && !strcmp(nm, "SENT"), "mem-neg-index");
+    rc = cxr_member(box.b, at, 0, nm, 0, &data, &ml, why, (long)sizeof why);
+    note(rc == 5 && !strcmp(nm, "SENT") && data == (char *)1, "mem-namecap0");
+    memcpy(tiny, "ZZZZZZZZ", 8);
+    rc = cxr_member("01234567", 8, 0, nm, 256, &data, &ml, tiny, 8);
+    note(rc == 4 && tiny[0] == 'a' && tiny[1] == 'r' && tiny[2] == ':' && tiny[3] == ' ' && tiny[7] == 0, "mem-short-why");
+    tiny[0] = 'Z';
+    rc = cxr_member(0, 1, 0, nm, 256, &data, &ml, tiny, 0);
+    note(rc == 5 && tiny[0] == 'Z', "mem-why-cap0");
+    rc = cxr_member(0, 1, 0, nm, 256, &data, &ml, 0, 16);
+    note(rc == 5, "mem-null-why");
+
+    printf("CXR\tfailed=%d\n", g_fail);
+    return g_fail ? 1 : 0;
+}

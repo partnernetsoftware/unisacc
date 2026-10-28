@@ -1,0 +1,310 @@
+/* module archive. In-memory GNU/BSD ar member bytes.
+   No compiler global and no module state. The caller owns dst and the
+   name buffer. name and bytes are borrowed for the call and copied.
+   src is borrowed: *data points into src and is valid only while src
+   is. These functions do not allocate, do not call exit, and do not
+   touch tl_in, tl_arbuf, or any linker table.
+
+   Transitional C callers paste these prototypes. Lengths are long.
+   Pointers are 8 bytes on LP64 and LLP64. There is no state struct.
+
+     int cxr_operation(const char *op, char *why, long whycap);
+     int cxr_append(char *dst, long dstcap, long at, const char *name,
+                    const char *bytes, long n, long *out_at,
+                    char *why, long whycap);
+     int cxr_member(char *src, long n, int index, char *name, long namecap,
+                    char **data, long *len, char *why, long whycap);
+
+   cxr_operation looks at op[0] only.
+     0  op[0] is r, q, t, or x. "rcs" is r. why is cleared when usable.
+     2  op is present and op[0] is anything else, including an empty
+        string. why receives
+        "ar: operation must be r, q, t or x\n"
+     5  op is null. op[0] is not read. why receives "bad argument".
+   The usage line stays in the driver. This module does not print.
+
+   cxr_append copies one member into dst at offset at.
+     0  the member was written at [at, *out_at). why is cleared.
+     5  a null dst, name, or out_at; a negative at, n, or dstcap; or
+        n > 0 with a null bytes. n == 0 may pass a null bytes. dst and
+        *out_at stay unchanged.
+     8  the basename is longer than 255, the decimal size does not fit
+        in 10 digits, the size arithmetic does not fit in long, or
+        dstcap cannot hold the member. why receives
+        "ar: archive too large\n"
+        dst and *out_at stay unchanged. No byte of that member is written.
+   The basename is the text after the last '/'. "dir/" has an empty
+   basename and is not a refusal. A basename of 15 bytes or fewer is
+   space-padded in the 16-byte name. A longer basename uses BSD
+   "#1/<len>" and is stored ahead of the payload. mtime, uid, and gid
+   are numeric 0. mode is 100644. An odd body length appends one 0x0A
+   so the next member starts at an even offset. Payload bytes are not
+   truncated. The 8-byte magic is the caller's; this function does not
+   write it.
+
+   cxr_member walks src and returns the index-th real member. Symbol
+   tables are not counted: a name that is empty, starts with '/', or
+   starts with "__.S" (the __.SYMDEF prefix).
+     0  one member. name receives a copy and a terminating NUL. *data
+        borrows the payload inside src. *len is the payload length.
+        why is cleared.
+     1  clean end. *data is set to null. name, *len, and why stay as
+        the caller left them.
+     4  the bytes are not a well-formed archive through this index.
+        name, *data, and *len stay unchanged. why receives exactly one
+        of these lines, including the newline:
+        "ar: not an archive\n"
+        "ar: malformed member header\n"
+        "ar: member exceeds archive\n"
+        "ar: invalid member name length\n"
+        "ar: truncated member header\n"
+     5  a null src, name, data, or len; n < 0; index < 0; namecap <= 0;
+        or the member name plus a NUL does not fit in namecap. Nothing
+        is truncated and name, *data, and *len stay unchanged. why
+        receives "bad argument".
+   A short positive whycap receives a truncated phrase and a NUL. A
+   null why or a whycap <= 0 is not written. Codes 1 does not write why.
+   File I/O, the usage line, and "ar: cannot write" stay in the driver.
+*/
+#pragma unisa module archive
+
+static void cxr_setwhy(char *why, long cap, const char *msg) {
+    long i;
+    if (!why || cap <= 0) return;
+    i = 0;
+    if (msg) while (msg[i] && i + 1 < cap) { why[i] = msg[i]; i = i + 1; }
+    why[i] = 0;
+}
+
+static int cxr_fail(int rc, const char *msg, char *why, long whycap) {
+    cxr_setwhy(why, whycap, msg);
+    return rc;
+}
+
+static int cxr_ok(char *why, long whycap) {
+    cxr_setwhy(why, whycap, 0);
+    return 0;
+}
+
+static int cxr_sum(long a, long b, long *out) {
+    unsigned long long s;
+    unsigned long long lim;
+    if (a < 0 || b < 0) return 0;
+    lim = 1;
+    lim = lim << (sizeof(long) * 8 - 1);
+    s = (unsigned long long)a + (unsigned long long)b;
+    if (s >= lim) return 0;
+    *out = (long)s;
+    return 1;
+}
+
+static int cxr_wide(long v) {
+    int d;
+    if (v < 0) return 1;
+    d = 1;
+    while (v > 9) {
+        v = v / 10;
+        d = d + 1;
+        if (d > 10) return 1;
+    }
+    return 0;
+}
+
+static void cxr_field(char *dst, int w, long v, const char *s) {
+    char dig[24];
+    int n;
+    int k;
+    k = 0;
+    if (s) {
+        while (s[k] && k < w) { dst[k] = s[k]; k = k + 1; }
+    } else {
+        n = 0;
+        if (v == 0) { dig[n] = 48; n = n + 1; }
+        while (v > 0) {
+            dig[n] = (char)(48 + (v % 10));
+            v = v / 10;
+            n = n + 1;
+        }
+        while (n > 0 && k < w) { n = n - 1; dst[k] = dig[n]; k = k + 1; }
+    }
+    while (k < w) { dst[k] = 32; k = k + 1; }
+}
+
+static long cxr_dec(const char *b, int w, long max) {
+    long v;
+    int k;
+    int digit;
+    int d;
+    v = 0;
+    k = 0;
+    digit = 0;
+    while (k < w && b[k] >= 48 && b[k] <= 57) {
+        d = b[k] - 48;
+        if (d > max || v > (max - d) / 10) return -1;
+        v = v * 10 + d;
+        digit = 1;
+        k = k + 1;
+    }
+    if (!digit) return -1;
+    while (k < w) {
+        if (b[k] != 32) return -1;
+        k = k + 1;
+    }
+    return v;
+}
+
+static void cxr_base(const char *name, const char **base, long *bl) {
+    long n;
+    long k;
+    n = 0;
+    while (name[n]) n = n + 1;
+    k = n;
+    while (k > 0 && name[k - 1] != 47) k = k - 1;
+    *base = name + k;
+    *bl = n - k;
+}
+
+int cxr_operation(const char *op, char *why, long whycap) {
+    char c;
+    if (!op) return cxr_fail(5, "bad argument", why, whycap);
+    c = op[0];
+    if (c == 114 || c == 113 || c == 116 || c == 120) return cxr_ok(why, whycap);
+    return cxr_fail(2, "ar: operation must be r, q, t or x\n", why, whycap);
+}
+
+int cxr_append(char *dst, long dstcap, long at, const char *name,
+               const char *bytes, long n, long *out_at,
+               char *why, long whycap) {
+    const char *base;
+    char hdr[60];
+    char lf[16];
+    long bl;
+    long body;
+    long need;
+    long pos;
+    long i;
+    int k;
+    if (!dst || !name || !out_at || at < 0 || n < 0 || dstcap < 0) return cxr_fail(5, "bad argument", why, whycap);
+    if (n > 0 && !bytes) return cxr_fail(5, "bad argument", why, whycap);
+    cxr_base(name, &base, &bl);
+    if (bl > 255) return cxr_fail(8, "ar: archive too large\n", why, whycap);
+    if (bl > 15) {
+        if (!cxr_sum(n, bl, &body)) return cxr_fail(8, "ar: archive too large\n", why, whycap);
+    } else {
+        body = n;
+    }
+    if (cxr_wide(body)) return cxr_fail(8, "ar: archive too large\n", why, whycap);
+    need = 60;
+    if (bl > 15 && !cxr_sum(need, bl, &need)) return cxr_fail(8, "ar: archive too large\n", why, whycap);
+    if (!cxr_sum(need, n, &need)) return cxr_fail(8, "ar: archive too large\n", why, whycap);
+    if ((body % 2) && !cxr_sum(need, 1, &need)) return cxr_fail(8, "ar: archive too large\n", why, whycap);
+    if (at > dstcap || need > dstcap - at) return cxr_fail(8, "ar: archive too large\n", why, whycap);
+    if (bl > 15) {
+        lf[0] = 35;
+        lf[1] = 49;
+        lf[2] = 47;
+        cxr_field(lf + 3, 13, bl, 0);
+        k = 0;
+        while (k < 16) { hdr[k] = lf[k]; k = k + 1; }
+    } else {
+        cxr_field(hdr, 16, 0, base);
+        if (bl < 16) hdr[bl] = 32;
+    }
+    cxr_field(hdr + 16, 12, 0, 0);
+    cxr_field(hdr + 28, 6, 0, 0);
+    cxr_field(hdr + 34, 6, 0, 0);
+    cxr_field(hdr + 40, 8, 0, "100644");
+    cxr_field(hdr + 48, 10, body, 0);
+    hdr[58] = 96;
+    hdr[59] = 10;
+    i = 0;
+    while (i < 60) { dst[at + i] = hdr[i]; i = i + 1; }
+    pos = at + 60;
+    if (bl > 15) {
+        i = 0;
+        while (i < bl) { dst[pos + i] = base[i]; i = i + 1; }
+        pos = pos + bl;
+    }
+    i = 0;
+    while (i < n) { dst[pos + i] = bytes[i]; i = i + 1; }
+    pos = pos + n;
+    if (body % 2) { dst[pos] = 10; pos = pos + 1; }
+    *out_at = pos;
+    return cxr_ok(why, whycap);
+}
+
+int cxr_member(char *src, long n, int index, char *name, long namecap,
+               char **data, long *len, char *why, long whycap) {
+    char nm[256];
+    long at;
+    long sz;
+    long name_len;
+    long dl;
+    long nlen;
+    long i;
+    int k;
+    int nl;
+    int idx;
+    char *d;
+    if (!src || !name || !data || !len || n < 0 || index < 0 || namecap <= 0) {
+        return cxr_fail(5, "bad argument", why, whycap);
+    }
+    if (n < 8 || src[0] != 33 || src[1] != 60 || src[2] != 97 || src[3] != 114 ||
+        src[4] != 99 || src[5] != 104 || src[6] != 62 || src[7] != 10) {
+        return cxr_fail(4, "ar: not an archive\n", why, whycap);
+    }
+    at = 8;
+    idx = 0;
+    while (at <= n - 60) {
+        if (src[at + 58] != 96 || src[at + 59] != 10) {
+            return cxr_fail(4, "ar: malformed member header\n", why, whycap);
+        }
+        sz = cxr_dec(src + at + 48, 10, n - at - 60);
+        if (sz < 0) return cxr_fail(4, "ar: member exceeds archive\n", why, whycap);
+        nl = 0;
+        if (src[at] == 35 && src[at + 1] == 49 && src[at + 2] == 47) {
+            name_len = cxr_dec(src + at + 3, 13, sz);
+            if (name_len < 0 || name_len > 255) {
+                return cxr_fail(4, "ar: invalid member name length\n", why, whycap);
+            }
+            nl = (int)name_len;
+        }
+        if (nl > 0) {
+            k = 0;
+            while (k < nl && k < 255 && src[at + 60 + k]) {
+                nm[k] = src[at + 60 + k];
+                k = k + 1;
+            }
+            nm[k] = 0;
+            d = src + at + 60 + nl;
+            dl = sz - nl;
+        } else {
+            k = 0;
+            while (k < 16 && src[at + k] != 32) { nm[k] = src[at + k]; k = k + 1; }
+            if (k > 1 && nm[k - 1] == 47) k = k - 1;
+            nm[k] = 0;
+            d = src + at + 60;
+            dl = sz;
+        }
+        if (!(nm[0] == 47 || nm[0] == 0 ||
+              (nm[0] == 95 && nm[1] == 95 && nm[2] == 46 && nm[3] == 83))) {
+            if (idx == index) {
+                nlen = 0;
+                while (nm[nlen]) nlen = nlen + 1;
+                if (namecap <= nlen) return cxr_fail(5, "bad argument", why, whycap);
+                i = 0;
+                while (i < nlen) { name[i] = nm[i]; i = i + 1; }
+                name[nlen] = 0;
+                *data = d;
+                *len = dl;
+                return cxr_ok(why, whycap);
+            }
+            idx = idx + 1;
+        }
+        at = at + 60 + sz;
+        if (at % 2) at = at + 1;
+    }
+    if (at != n) return cxr_fail(4, "ar: truncated member header\n", why, whycap);
+    *data = 0;
+    return 1;
+}
