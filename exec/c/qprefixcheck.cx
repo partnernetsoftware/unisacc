@@ -21,11 +21,9 @@
    -h/--help prints the help, rc 0); long options may be abbreviated and take `--opt=value`.
    ROOT is Path(__file__).resolve().parents[2].  The opcode table (name, operand kinds) is exec/c/tbl.py OPS, as
    tests/statecheck.cx carries it.
-   Prelude gaps: exec/c/codec.h (the production puff inflate and CRC32, as tests/modelstreamextract.cx uses it) and
-   tests/cxlib/pytempfile.cx (mkdtemp + the guarded rmtree; deletions must go through that helper).  codec.h is
-   included as text; pytempfile is used through the exec/c/cxlib/ symlink (`#pragma unisa use` resolves beside the
-   using file only). */
-#include "codec.h"
+   Codec and temporary-directory helpers are independent CX modules; the
+   CRC context belongs to main and is borrowed during package parsing. */
+#pragma unisa use cxlib.codec
 #pragma unisa use cxlib.pytempfile
 
 #define PATHN 4096
@@ -408,7 +406,7 @@ static long long pnum(const char *w, size_t l) {
     long long v; if (!pyint(w, l, &v)) die("ValueError", "invalid literal for int() with base 10"); return v;
 }
 static int weq(const char *a, size_t al, const char *b, size_t bl) { return al == bl && !memcmp(a, b, al); }
-static void read_package(const unsigned char *data, size_t n, Models *ms) {
+static void read_package(const unsigned char *data, size_t n, Models *ms, CxCodecCrc *crc_context) {
     const char *w[8]; size_t wl[8]; int k, version; long long nm, nd, nr, i, j;
     const char **rt; size_t *rl;   /* per stream-stage row: route, stream-stage, in, out */
     PD = data; PN = n; PAT = 0;
@@ -452,7 +450,7 @@ static void read_package(const unsigned char *data, size_t n, Models *ms) {
             if (rawlen <= 0 || rawlen >= 2147483648LL || codec != 1 || !(0 <= sum && sum < 4294967296LL)) die("ValueError", "model metadata");
             raw = malloc((size_t)rawlen);
             if (!raw) die("MemoryError", 0);
-            if (unisa_inflate(raw, (unsigned long)rawlen, wire, (unsigned long)len) || crc((char *)raw, (int)rawlen) != (uint32_t)sum)
+            if (cxcodec_inflate(raw, (unsigned long)rawlen, wire, (unsigned long)len) || cxcodec_crc(crc_context, (char *)raw, (int)rawlen) != (uint32_t)sum)
                 die("ValueError", "invalid compressed model extent/CRC");
             if (rawlen < 9 || memcmp(raw, "UNINETB1N", 9)) die("ValueError", "binary network required");
             bdecode(raw, (size_t)rawlen, t); free(raw);
@@ -552,7 +550,7 @@ int main(int argc, char **argv) {
     if (!realpath(__FILE__, self)) die("FileNotFoundError", __FILE__);
     for (k = 0; k < 3; k++) { char *s = strrchr(self, '/'); if (s && s != self) *s = 0; else { strcpy(self, "/"); break; } }
     snprintf(ROOT, sizeof ROOT, "%s", self);
-    crc_init();
+    CxCodecCrc crc_context; cxcodec_crc_init(&crc_context);
     if (ptf_mkdtemp(0, "unisacc-qprefix-", TD, sizeof TD)) { TD[0] = 0; die("FileNotFoundError", "No usable temporary directory found"); }
     /* Compare flat-Q and prefix-C inputs through the production decoder.  This also runs from exported source trees
        without a git repository. */
@@ -645,7 +643,7 @@ int main(int argc, char **argv) {
             e = n - 16; s = len > (unsigned long long)e ? 0 : e - (size_t)len;
             body = pkg + s; n = e - s;
         }
-        read_package(body, n, &ms);
+        read_package(body, n, &ms, &crc_context);
         for (i = 0; i < ms.n; i++) {
             Buf *model = &ms.m[i];
             compact_q(model->p, model->n, &comp);
