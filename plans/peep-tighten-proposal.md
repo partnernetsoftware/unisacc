@@ -30,3 +30,18 @@
 ## 后果与路线
 
 改 A 的 12 个 y 会改变 weights 字节、kernel/ 与 SID，须走慢车道纪元（gold-export → build-weights --check → emit-kernel → 构造 → 准入）；不在快车道做。建议与下一次需要重建权重的纪元合并，而不是单独为此开纪元。
+
+## 建议的 `unisa/gold.py:peep_label` 改法（供表主人审阅，cc 不提交 Python）
+
+```
+-    if rel == "a_dead" and a in ("imm", "mov", "alu", "load64"):
++    if rel == "a_dead" and a in ("imm", "mov", "alu", "load64") and b not in ("none", "other"):
+         return "drop_a"
+...
+-    if rel == "copy_into" and a == "mov" and b != "none":
++    if rel == "copy_into" and a == "mov" and b in ("store64", "load64", "mov", "add64", "sub64", "mul64",
++                                                   "shl64", "shr64", "lshr64", "or64", "xor64", "and64"):
+         return "fold_copy"
+```
+
+依据：src/opt.c `ol_scan`（tape 末尾与 OK_OTHER 行视为读全部寄存器，故 b=none/other 时 rD 永不死）与 copy_into 的 `ol_k[i+1]==OK_SIMPLE && (ol_rm[i+1] & (1<<ya))`（imm 不读寄存器；jump/jumpz/other 非 SIMPLE；load64 读基址寄存器故保留）。预期效果：`gold-export` 后 peep.tsv 恰有 12 行 y 由 drop_a/fold_copy 变 keep；tools/peep-cases-gen.cx 全片重跑应为 277 PASS / 0 FAIL / 1355 UNREALIZABLE / 0 TABLE_SUSPECT（16→12→0，其中 4 键已由生成器补实现）。
