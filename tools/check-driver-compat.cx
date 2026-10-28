@@ -1,0 +1,274 @@
+/* Independent check for module compat. Not a product driver.
+   tools/driver -> ../cx/driver. This unit consumes that module.
+   Run one source: sh ./unisacc.com tools/check-driver-compat.cx
+   The ABI notes lock CxpState at sizeof 24, libs at 0, n at 8, and
+   cap at 16. step-order locks the filter and the borrows. miss-l,
+   miss-L, and miss-x lock code 9 with why untouched. null-l, null-L,
+   and null-x lock a null next slot as 5. leave-c, leave-D,
+   leave-dashdash, and leave-positional stay at return 1. This module
+   does not scan for default -run. */
+#pragma unisa use driver.compat
+
+static int g_fail;
+
+static void note(int ok, const char *name) {
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", name);
+    if (!ok) g_fail = g_fail + 1;
+}
+
+static unsigned long long at(const void *p) { return (unsigned long long)p; }
+
+static void abi(void) {
+    CxpState s;
+    unsigned long long b = at(&s);
+    note(sizeof(CxpState) == 24, "abi-size");
+    note(at(&s.libs) - b == 0, "abi-libs");
+    note(at(&s.n) - b == 8, "abi-n");
+    note(at(&s.cap) - b == 16, "abi-cap");
+}
+
+static void arm(CxpState *st, char **libs, int *n, int cap) {
+    st->libs = libs;
+    st->n = n;
+    st->cap = cap;
+}
+
+static void leave(char **v, int n, const char *name) {
+    CxpState st, before;
+    char why[32];
+    int i, rc;
+    memset(&st, 0x11, sizeof st);
+    before = st;
+    memcpy(why, "keep", 5);
+    i = 1;
+    rc = cxp_step(&st, v, n, &i, why, (long)sizeof why);
+    note(rc == 1 && i == 1 && !strcmp(why, "keep") && memcmp(&st, &before, sizeof st) == 0, name);
+}
+
+static void miss(char **v, const char *name) {
+    CxpState st, before;
+    char why[32];
+    int i, rc;
+    memset(&st, 0x11, sizeof st);
+    before = st;
+    memcpy(why, "keep", 5);
+    i = 1;
+    rc = cxp_step(&st, v, 2, &i, why, (long)sizeof why);
+    note(rc == 9 && i == 1 && !strcmp(why, "keep") && memcmp(&st, &before, sizeof st) == 0, name);
+}
+
+static void nullslot(char *flag, const char *name) {
+    CxpState st, before;
+    char *v[3];
+    char why[32];
+    int i, rc;
+    v[0] = "prog";
+    v[1] = flag;
+    v[2] = 0;
+    memset(&st, 0x11, sizeof st);
+    before = st;
+    memcpy(why, "keep", 5);
+    i = 1;
+    rc = cxp_step(&st, v, 3, &i, why, (long)sizeof why);
+    note(rc == 5 && i == 1 && !strcmp(why, "bad argument") && memcmp(&st, &before, sizeof st) == 0, name);
+}
+
+static void eaten(char **v, int n, int next, const char *name) {
+    char why[32];
+    int i, rc;
+    memcpy(why, "keep", 5);
+    i = 1;
+    rc = cxp_step(0, v, n, &i, why, (long)sizeof why);
+    note(rc == 0 && i == next && why[0] == 0, name);
+}
+
+int main(void) {
+    CxpState st, before;
+    char *libs[8];
+    char *seq[] = {"prog", "-lfoo", "-lm", "-l", "bar", "-Ldir", "-xc", "-lpthread", "-lrt"};
+    char *ll[] = {"prog", "-ll"};
+    char *two[] = {"prog", "-lfoo", "-lbar"};
+    char *full[] = {"prog", "-lfoo"};
+    char *empty[] = {"prog", "-l", ""};
+    char *dup[] = {"prog", "-lfoo", "-lfoo"};
+    char *split[] = {"prog", "-l", "foo"};
+    char *join[] = {"prog", "-lfoo"};
+    char *take[] = {"prog", "-l", "-c"};
+    char *filt[] = {"prog", "-lc", "-ldl", "-lC", "-lpthread2"};
+    char *longn[] = {"prog", "-long"};
+    char *oneLflag[] = {"prog", "-l"};
+    char *oneL[] = {"prog", "-L"};
+    char *oneX[] = {"prog", "-x"};
+    char *oneC[] = {"prog", "-c"};
+    char *oneD[] = {"prog", "-D"};
+    char *dash[] = {"prog", "--"};
+    char *pos[] = {"prog", "file.c"};
+    char *lone[] = {"prog", "-"};
+    char *lm[] = {"prog", "-lm"};
+    char *ldir[] = {"prog", "-Ldir"};
+    char *xc[] = {"prog", "-xc"};
+    char *lnext[] = {"prog", "-L", "dir"};
+    char *sentinel = "sentinel";
+    char why[32];
+    char tiny[4];
+    char tomb;
+    int n, i, rc;
+    g_fail = 0;
+    abi();
+
+    memset(libs, 0, sizeof libs);
+    n = 0;
+    arm(&st, libs, &n, 16);
+    memcpy(why, "keep", 5);
+    i = 1;
+    rc = 0;
+    while (i < 9 && !rc) rc = cxp_step(&st, seq, 9, &i, why, (long)sizeof why);
+    note(rc == 0 && i == 9 && n == 2 && libs[0] == seq[1] + 2 && libs[1] == seq[4]
+        && !strcmp(libs[0], "foo") && !strcmp(libs[1], "bar") && why[0] == 0
+        && !strcmp(seq[1], "-lfoo") && !strcmp(seq[2], "-lm") && !strcmp(seq[3], "-l")
+        && !strcmp(seq[4], "bar") && !strcmp(seq[5], "-Ldir") && !strcmp(seq[6], "-xc")
+        && !strcmp(seq[7], "-lpthread") && !strcmp(seq[8], "-lrt"), "step-order");
+
+    n = 0;
+    libs[0] = 0;
+    arm(&st, libs, &n, 16);
+    i = 1;
+    rc = cxp_step(&st, ll, 2, &i, why, (long)sizeof why);
+    note(rc == 0 && i == 2 && n == 1 && libs[0] == ll[1] + 2 && !strcmp(libs[0], "l")
+        && !strcmp(ll[1], "-ll"), "step-ll");
+
+    n = 0;
+    libs[1] = sentinel;
+    arm(&st, libs, &n, 1);
+    i = 1;
+    rc = cxp_step(&st, two, 3, &i, why, (long)sizeof why);
+    rc = rc || cxp_step(&st, two, 3, &i, why, (long)sizeof why);
+    note(rc == 0 && i == 3 && n == 1 && libs[0] == two[1] + 2 && libs[1] == sentinel, "step-cap-drop");
+
+    n = 2;
+    libs[2] = sentinel;
+    arm(&st, libs, &n, 2);
+    i = 1;
+    rc = cxp_step(&st, full, 2, &i, why, (long)sizeof why);
+    note(rc == 0 && i == 2 && n == 2 && libs[2] == sentinel, "step-already-full");
+
+    n = -1;
+    libs[0] = sentinel;
+    arm(&st, libs, &n, 16);
+    i = 1;
+    rc = cxp_step(&st, full, 2, &i, why, (long)sizeof why);
+    note(rc == 0 && i == 2 && n == -1 && libs[0] == sentinel, "step-negative-n");
+
+    n = 0;
+    libs[0] = sentinel;
+    arm(&st, libs, &n, 16);
+    i = 1;
+    rc = cxp_step(&st, empty, 3, &i, why, (long)sizeof why);
+    note(rc == 0 && i == 3 && n == 0 && libs[0] == sentinel && !strcmp(empty[2], ""), "step-empty");
+
+    n = 0;
+    arm(&st, libs, &n, 16);
+    i = 1;
+    rc = cxp_step(&st, dup, 3, &i, why, (long)sizeof why);
+    rc = rc || cxp_step(&st, dup, 3, &i, why, (long)sizeof why);
+    note(rc == 0 && i == 3 && n == 2 && libs[0] == dup[1] + 2 && libs[1] == dup[2] + 2
+        && libs[0] != libs[1] && !strcmp(libs[0], "foo") && !strcmp(libs[1], "foo"), "step-dup");
+
+    n = 0;
+    arm(&st, libs, &n, 16);
+    i = 1;
+    memcpy(why, "keep", 5);
+    rc = cxp_step(&st, split, 3, &i, why, (long)sizeof why);
+    note(rc == 0 && i == 3 && n == 1 && libs[0] == split[2] && why[0] == 0, "step-l-split");
+    n = 0;
+    i = 1;
+    rc = cxp_step(&st, join, 2, &i, why, (long)sizeof why);
+    note(rc == 0 && i == 2 && n == 1 && libs[0] == join[1] + 2, "step-l-join");
+
+    n = 0;
+    libs[0] = sentinel;
+    arm(&st, libs, &n, 16);
+    i = 1;
+    rc = cxp_step(&st, take, 3, &i, why, (long)sizeof why);
+    note(rc == 0 && i == 3 && n == 1 && libs[0] == take[2] && !strcmp(take[2], "-c"), "step-l-takes-c");
+
+    n = 0;
+    arm(&st, libs, &n, 16);
+    i = 1;
+    rc = 0;
+    while (i < 5 && !rc) rc = cxp_step(&st, filt, 5, &i, why, (long)sizeof why);
+    note(rc == 0 && i == 5 && n == 2 && libs[0] == filt[3] + 2 && libs[1] == filt[4] + 2
+        && !strcmp(libs[0], "C") && !strcmp(libs[1], "pthread2"), "step-filter");
+
+    n = 0;
+    arm(&st, libs, &n, 16);
+    i = 1;
+    rc = cxp_step(&st, longn, 2, &i, why, (long)sizeof why);
+    note(rc == 0 && i == 2 && n == 1 && libs[0] == longn[1] + 2 && !strcmp(libs[0], "ong"), "step-long");
+
+    miss(oneLflag, "miss-l");
+    miss(oneL, "miss-L");
+    miss(oneX, "miss-x");
+    nullslot("-l", "null-l");
+    nullslot("-L", "null-L");
+    nullslot("-x", "null-x");
+    leave(oneC, 2, "leave-c");
+    leave(oneD, 2, "leave-D");
+    leave(dash, 2, "leave-dashdash");
+    leave(pos, 2, "leave-positional");
+    leave(lone, 2, "leave-lone-dash");
+    eaten(lm, 2, 2, "drop-lm-null-st");
+    eaten(ldir, 2, 2, "drop-L-null-st");
+    eaten(xc, 2, 2, "drop-x-null-st");
+    eaten(lnext, 3, 3, "drop-L-next-null-st");
+
+    n = 7;
+    arm(&st, 0, &n, 16);
+    before = st;
+    i = 1;
+    memcpy(why, "keep", 5);
+    rc = cxp_step(&st, full, 2, &i, why, (long)sizeof why);
+    note(rc == 5 && i == 1 && n == 7 && !strcmp(why, "bad argument")
+        && memcmp(&st, &before, sizeof st) == 0, "hole-libs");
+    arm(&st, libs, 0, 16);
+    before = st;
+    i = 1;
+    rc = cxp_step(&st, full, 2, &i, why, (long)sizeof why);
+    note(rc == 5 && i == 1 && !strcmp(why, "bad argument")
+        && memcmp(&st, &before, sizeof st) == 0, "hole-n");
+    i = 1;
+    rc = cxp_step(0, full, 2, &i, why, (long)sizeof why);
+    note(rc == 5 && i == 1 && !strcmp(why, "bad argument"), "hole-st");
+
+    memcpy(tiny, "ZZZZ", 4);
+    i = 1;
+    rc = cxp_step(0, full, 2, &i, tiny, 4);
+    note(rc == 5 && i == 1 && tiny[0] == 'b' && tiny[1] == 'a' && tiny[2] == 'd' && tiny[3] == 0,
+        "step-short-why");
+    tomb = 'Z';
+    n = 0;
+    arm(&st, libs, &n, 16);
+    i = 1;
+    rc = cxp_step(&st, full, 2, &i, &tomb, 0);
+    note(rc == 0 && i == 2 && n == 1 && tomb == 'Z', "step-why-cap0");
+    i = 1;
+    rc = cxp_step(0, full, 2, &i, 0, 96);
+    note(rc == 5 && i == 1, "step-null-why");
+    n = 0;
+    arm(&st, libs, &n, 16);
+    i = -1;
+    before = st;
+    rc = cxp_step(&st, full, 2, &i, why, (long)sizeof why);
+    note(rc == 5 && i == -1 && n == 0 && memcmp(&st, &before, sizeof st) == 0, "step-bad-index");
+    i = 2;
+    rc = cxp_step(&st, full, 2, &i, why, (long)sizeof why);
+    note(rc == 5 && i == 2 && n == 0, "step-index-argc");
+    i = 1;
+    rc = cxp_step(&st, 0, 2, &i, why, (long)sizeof why);
+    note(rc == 5 && i == 1, "step-null-argv");
+    rc = cxp_step(&st, full, 2, 0, why, (long)sizeof why);
+    note(rc == 5 && n == 0, "step-null-index");
+
+    printf("CXC\tfailed=%d\n", g_fail);
+    return g_fail ? 1 : 0;
+}

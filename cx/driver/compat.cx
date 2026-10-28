@@ -1,0 +1,113 @@
+/* module compat. -l, -L, and -x only.
+   The caller owns one CxpState. libs borrows argv bytes and is not
+   allocated here. These functions do not write argv slots or the bytes
+   of any argument. There is no mutable module state. They do not call
+   die, exit, clierror, or fprintf, and they do not assign INCDIR.
+   This module does not use cli or args. It has no function pointers.
+   The default-run prescan stays in cli. Do not add -l, -L, or -x to
+   that prescan's skip list: unisacc -l -c file.c must still see -c.
+
+   Transitional C callers paste this typedef and this prototype.
+   CxpState is two pointers then one int. Natural alignment, no pack
+   attribute. On LP64 and LLP64 the pointers are 8 bytes and the int
+   is 4. libs is at 0, n is at 8, and cap is at 16. sizeof CxpState
+   is 24. tools/check-driver-compat.cx locks every offset.
+
+     typedef struct {
+         char **libs;
+         int *n;
+         int cap;
+     } CxpState;
+     int cxp_step(CxpState *st, char **argv, int argc, int *index,
+                  char *why, long whycap);
+
+   char ** matches main. The stored pointers are borrows of argv.
+
+   cxp_step reads argv[*index] only.
+     0  this slice consumed the option. *index is the next slot.
+        The caller must not also increment. A joined value advances
+        by 1. A separate value advances by 2.
+     1  not this slice. *index and every state field stay unchanged.
+        why is left untouched.
+     5  refused argument. *index and every state field stay unchanged.
+        why receives "bad argument". The driver passes that phrase to
+        clierror. A null argv, a null index, an index outside
+        [0, argc), or a null current slot is 5. A present -l/-L/-x
+        whose next slot is null is 5. A -l that would store into a
+        null state, a null libs, or a null n is 5. A missing next
+        slot is not 5.
+     9  the option is -l, -L, or -x, the value is not joined, and
+        there is no next slot. *index and every state field stay
+        unchanged. why is left untouched. The driver chooses the
+        phrase from defrun and whether a source is already present.
+        This module does not contain those phrases. An explicit -run
+        does not set defrun; that scan is not here.
+   -l stores the borrowed value when it is non-empty and not exactly
+   m, c, dl, pthread, or rt. An empty value and those five names are
+   consumed and not stored. -L and -x consume any value and store
+   nothing. Neither filtered -l nor -L nor -x reads the state, so a
+   null state still returns 0. Duplicate names are kept. A full array
+   (*n < 0 or *n >= cap) is consumed and not stored, and libs[*n] is
+   not written. -ll stores l. -l -c stores the borrowed "-c"; the
+   prescan is what still sees -c as a mode word.
+   Success clears why when the buffer is usable. Return 1 and return
+   9 do not. A short positive cap on code 5 receives a truncated
+   phrase and a terminating NUL. A null why or a cap <= 0 is not
+   written. */
+#pragma unisa module compat
+
+typedef struct {
+    char **libs;
+    int *n;
+    int cap;
+} CxpState;
+
+static void cxp_setwhy(char *why, long cap, const char *msg) {
+    long i;
+    if (!why || cap <= 0) return;
+    i = 0;
+    if (msg) while (msg[i] && i + 1 < cap) { why[i] = msg[i]; i = i + 1; }
+    why[i] = 0;
+}
+
+static int cxp_fail(int rc, const char *msg, char *why, long whycap) {
+    cxp_setwhy(why, whycap, msg);
+    return rc;
+}
+
+static int cxp_ok(char *why, long whycap) {
+    cxp_setwhy(why, whycap, 0);
+    return 0;
+}
+
+static int cxp_drop(const char *value) {
+    return !value[0] || !strcmp(value, "m") || !strcmp(value, "c")
+        || !strcmp(value, "dl") || !strcmp(value, "pthread") || !strcmp(value, "rt");
+}
+
+int cxp_step(CxpState *st, char **argv, int argc, int *index, char *why, long whycap) {
+    char *a;
+    char *value;
+    int joined;
+    if (!argv || !index || argc < 1 || *index < 0 || *index >= argc)
+        return cxp_fail(5, "bad argument", why, whycap);
+    a = argv[*index];
+    if (!a) return cxp_fail(5, "bad argument", why, whycap);
+    if (a[0] != '-' || (a[1] != 'l' && a[1] != 'L' && a[1] != 'x')) return 1;
+    joined = a[2] != 0;
+    if (joined) value = a + 2;
+    else {
+        if (*index + 1 >= argc) return 9;
+        value = argv[*index + 1];
+        if (!value) return cxp_fail(5, "bad argument", why, whycap);
+    }
+    if (a[1] == 'l' && !cxp_drop(value)) {
+        if (!st || !st->libs || !st->n) return cxp_fail(5, "bad argument", why, whycap);
+        if (*st->n >= 0 && *st->n < st->cap) {
+            st->libs[*st->n] = value;
+            *st->n = *st->n + 1;
+        }
+    }
+    *index = *index + (joined ? 1 : 2);
+    return cxp_ok(why, whycap);
+}
