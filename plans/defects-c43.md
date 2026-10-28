@@ -78,3 +78,15 @@ main.o、main.o none.a均rc1并具名used；m2.o B.a A.a具名inner且rc1；三�
 6. `typedef int T; typedef char T;` — 6.7p3（C99 禁止 typedef 重定义）。
 7. `void vv(int a, int a){}` — 6.9.1p9/6.7p3 重复形参。
 前四项影响语义（接受错误程序），后三项为类型系统漏检。十项已正确拒绝的里有 5 项诊断带 file:line（INFO）。
+
+### c.negative 第二轮（2026-10-28 18:0x）：再添八处静默接受（批现 19/34）
+
+8. `int *p = 5;` — 6.7.8p11 int→指针初始化。
+9. `int k2(int); k2(1,2)` — 6.5.2.2p2 原型存在时实参过多。
+10. `int n2(int); char n2(int);` — 6.7p4 函数类型冲突。
+11. `enum E2{A2,B2}; enum F2{A2};` — 6.7p3 枚举常量重声明。
+12. `int t2[0];` — 6.7.5.2p1 数组大小须大于零（gcc 扩展接受，`-pedantic-errors` 拒绝）。
+13. `x = (void)0;` — 6.5.16.1p1 void 值被使用。
+14. `const char *c="x"; c[0]='y';` — 6.5.16p2 经 const 指针写入。
+15. `int i; i += "str";` — 6.5.16.2p1。
+诊断质量：`int s2[-1]` 被拒但文本为 `reject: not covered: tape data directive`（错因，INFO）。
