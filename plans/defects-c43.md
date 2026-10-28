@@ -370,6 +370,8 @@ coverage中旧1/4缺陷描述改为本候选实际4/1及明确合同冲突，没
 
 ### 容器修复开发安装（冻结ecb5fbe322）
 
+冻结95b23dc9接续：11个DIFF模型（shared-e3、warnparse、errorparse、六程序lower、两object-lower）tbl/net共22项通过source-package job真实执行并落PREPARED收据，全部命令rc0；外层每项bound55、内层构造40，未放宽时限。连同34 gen及tool-gen/tbl/net，共59项当前材料收据位于冻结根out/epoch-context-01/jobs；外层输出out/c43-fallguard-{tbl,net}-*-01.*。这只完成变化材料构造，不代表23项来源复用准入、内核/PC/候选安装或发布资格；已装产品仍b6f15。下一动作核验复用来源并建立本次明确角色，不能把旧sizeof profile换pins后冒充同一资格。
+
 冻结95b23dc9的34个gen作业已全部逐项PREPARED，tool-gen/tbl/net均实构（共37项材料收据）。tools/source-model-compare.cx对sizeof来源逐字节比较为26 SAME/8 DIFF，差异精确为六程序lower+两object-lower（out/c43-fallguard-vs-sizeof-01.tsv）；对完整f9捕获域为23 SAME/11 DIFF，另含shared-e3/warnparse/errorparse三项既有解析修复（out/c43-fallguard-vs-f9-01.tsv）。比较核过双方context/job record/实际rc0/output SHA，不代替完整来源DAG核验或复用准入。下一步11项changed的tbl/net真实构造、23项来源域核验、内核/PC与候选；不把26/34或37收据当产品完成率。
 
 落尾正规来源构造起点：git archive 648fe13db9到仓外unisacc-epoch-fallguard-648fe13db9，保存b6f15启动产品及db7af545记录，不采入共享prd未提交编辑。新SID95b23dc90b25b8b30eddbf4aed2215f48ba293d11d0fc433ff483fb7da2bbd81；context70dbb7095c5a1c9bfa107b8042a71f9218fabd003a66b234b782b08cee4606e4。prepare-context、tool-gen及八个gen lower（六程序目标+两object目标）已逐作业PREPARED并保存原生命令/输出/身份收据；冻结lnx/x86_64生成JSON与私有04逐字节相同。object-lower相对sizeof来源也有差异，不能遗漏；其余材料生成/差异分组、tbl/net、kernel/PC、候选与安装尚待完成。PREPARED不授测试或发布资格，已装仍b6f15。
