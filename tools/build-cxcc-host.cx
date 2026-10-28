@@ -1,0 +1,53 @@
+/* Linux -o drivers for .cx. System gcc links src/cxmod.c into the driver.
+   The resulting gcc_cx.com and clang_cx.com do not call unisacc.com.
+   From the repo root:
+   gcc -std=c99 -Werror=implicit-function-declaration -include include/cx.h -x c tools/build-cxcc-host.cx -o out/cxcc-host/build
+   ./out/cxcc-host/build
+*/
+static int write_text(const char *path, const char *text) {
+    FILE *f;
+    size_t want, n;
+    f = fopen(path, "wb");
+    if (!f) return -1;
+    want = strlen(text);
+    n = fwrite(text, 1, want, f);
+    if (fclose(f) != 0) return -1;
+    return n == want ? 0 : -1;
+}
+
+static int run(const char *cmd) {
+    char *buf = 0;
+    size_t n = 0;
+    int rc;
+    rc = cx_run_timeout(cmd, 50, &buf, &n);
+    if (buf && n && fwrite(buf, 1, n, stderr) != n) {
+        free(buf);
+        return 1;
+    }
+    free(buf);
+    if (rc != 0) fprintf(stderr, "build-cxcc-host: rc=%d %s\n", rc, cmd);
+    return rc;
+}
+
+int main(void) {
+    const char *gcc_sh =
+        "#!/bin/sh\n"
+        "here=$(CDPATH= cd -- \"$(dirname \"$0\")\" && pwd) || exit 2\n"
+        "exec \"$here/out/cxcc-host/gcc_cx\" \"$@\"\n";
+    const char *clang_sh =
+        "#!/bin/sh\n"
+        "here=$(CDPATH= cd -- \"$(dirname \"$0\")\" && pwd) || exit 2\n"
+        "exec \"$here/out/cxcc-host/clang_cx\" \"$@\"\n";
+    if (run("mkdir -p out/cxcc-host") != 0) return 1;
+    if (run("gcc -std=c99 -Werror=implicit-function-declaration -include stdlib.h -c src/cxmod.c -o out/cxcc-host/cxmod.o") != 0) return 1;
+    if (run("gcc -std=c99 -Werror=implicit-function-declaration -include include/cx.h -x c -c tools/cxcc.cx -o out/cxcc-host/cxcc.o") != 0) return 1;
+    if (run("gcc -std=c99 -Werror=implicit-function-declaration -include include/cx.h -x c -c tools/gcc_cx.cx -o out/cxcc-host/gcc_cx.o") != 0) return 1;
+    if (run("gcc -std=c99 -Werror=implicit-function-declaration -include include/cx.h -x c -c tools/clang_cx.cx -o out/cxcc-host/clang_cx.o") != 0) return 1;
+    if (run("gcc -std=c99 -o out/cxcc-host/gcc_cx out/cxcc-host/cxcc.o out/cxcc-host/cxmod.o out/cxcc-host/gcc_cx.o") != 0) return 1;
+    if (run("gcc -std=c99 -o out/cxcc-host/clang_cx out/cxcc-host/cxcc.o out/cxcc-host/cxmod.o out/cxcc-host/clang_cx.o") != 0) return 1;
+    if (write_text("gcc_cx.com", gcc_sh) != 0) return 1;
+    if (write_text("clang_cx.com", clang_sh) != 0) return 1;
+    if (run("chmod 755 gcc_cx.com clang_cx.com") != 0) return 1;
+    printf("build-cxcc-host: ok\n");
+    return 0;
+}
