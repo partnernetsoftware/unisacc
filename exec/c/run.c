@@ -1053,12 +1053,34 @@ static void bput(Buf *o,int c,I at) {
     o->b[o->n]=(unsigned char)c; o->at[o->n]=at; o->n++;
 }
 #endif
+#ifndef UNISA_PRODUCT_BUILD
+/* The standalone executor accepts a positive decimal budget, never strtol's
+ * partial prefix, sign/whitespace coercion or saturated overflow result. */
+static int runtime_step_budget(const char *s,I *value) {
+    I v=0,limit=9223372036854775807LL;
+    if (!s || !*s) return 0;
+    for (;*s;s++) {
+        if (*s<'0' || *s>'9') return 0;
+        int digit=*s-'0';
+        if (v>(limit-digit)/10) return 0;
+        v=v*10+digit;
+    }
+    if (!v) return 0;
+    *value=v;return 1;
+}
+#endif
 static int execute(unsigned char *input,int inputn,const char *src,Buf *result) {
     CoreModel m; core_model(&m);
 #ifdef UNISA_PRODUCT_BUILD
     I maxsteps=UNISA_DEFAULT_MAXSTEPS;   /* shipped: a build constant, the host environment has no say */
 #else
-    I maxsteps=getenv("UNISA_MAXSTEPS") ? strtol(getenv("UNISA_MAXSTEPS"),0,10) : UNISA_DEFAULT_MAXSTEPS;
+    I maxsteps=UNISA_DEFAULT_MAXSTEPS;
+    const char *budget=getenv("UNISA_MAXSTEPS");
+    if (budget && !runtime_step_budget(budget,&maxsteps)) {
+        fprintf(stderr,"run: UNISA_MAXSTEPS must be a positive decimal integer <= 9223372036854775807\n");
+        memset(result,0,sizeof *result);
+        return 2;
+    }
 #endif
     CoreResult r; int status=core_run(&m,input,inputn,src,maxsteps,&r);
 #ifdef UNISA_RUNTIME_DIAGNOSTIC

@@ -1,0 +1,43 @@
+/* Generic executor resource contract. ROOT RUNNER MODEL NEW_ABS_OUT.
+ * Explicit model input; no stream-container or installed-product qualification. */
+#pragma unisa use cxlib.netpack
+static void save(const char *p,const void *s,size_t n){FILE *f=fopen(p,"wx");if(!f||fwrite(s,1,n,f)!=n||fclose(f))exit(2);}
+int main(int argc,char **argv){
+ if(argc!=5||argv[4][0]!='/'||mkdir(argv[4],0700))return 2;
+ char input[4400],log[4400],bound[4400],env[256],why[1024];
+ snprintf(input,sizeof input,"%s/input.tape",argv[4]);snprintf(bound,sizeof bound,"%s/tools/bound",argv[1]);
+ const char *tape="_start:\n  imm r0, 7\n  ret\n";save(input,tape,strlen(tape));
+ const char *values[]={0,"9223372036854775807","1","abc","-1","0","","+1"," 1","1x","9223372036854775808","99999999999999999999999999999999"};
+ int fails=0;char *reference=0;size_t refn=0;
+ unsetenv("UNISA_MAXSTEPS");
+ for(int i=0;i<12;i++){
+  char *av[]={bound,"5",argv[2],argv[3],input,0};char *ev[]={env,0};np_result r={0};
+  if(i)snprintf(env,sizeof env,"UNISA_MAXSTEPS=%s",values[i]);
+  int transport=np_run(av,argv[1],i?ev:0,7,&r,why,sizeof why);
+  snprintf(log,sizeof log,"%s/%02d.stdout",argv[4],i);save(log,r.out,r.outn);
+  snprintf(log,sizeof log,"%s/%02d.stderr",argv[4],i);save(log,r.err,r.errn);
+  int ok=0;
+  if(i==0){ok=!transport&&!r.rc&&!r.errn&&r.outn>0;reference=malloc(r.outn+1);if(!reference)return 2;memcpy(reference,r.out,r.outn);refn=r.outn;}
+  else if(i==1)ok=!transport&&!r.rc&&!r.errn&&r.outn==refn&&!memcmp(r.out,reference,refn);
+  else {const char *want=i==2?"step budget exhausted (budget 1 steps)\n":"run: UNISA_MAXSTEPS must be a positive decimal integer <= 9223372036854775807\n";
+   ok=!transport&&r.rc==(i==2?3:2)&&!r.outn&&r.errn==strlen(want)&&!memcmp(r.err,want,r.errn);}
+  printf("%s\tbudget.%02d\trc=%d\ttransport=%d\n",ok?"PASS":"FAIL",i,r.rc,transport);if(!ok)fails++;np_free(&r);
+ }
+ free(reference);reference=0;refn=0;
+ /* Shipped compiler deliberately ignores the developer-only environment knob. */
+ char product[4400],source[4400],output[4400];
+ snprintf(product,sizeof product,"%s/unisacc.com",argv[1]);snprintf(source,sizeof source,"%s/probe.cx",argv[4]);
+ const char *code="int main(void){return 7;}\n";save(source,code,strlen(code));
+ for(int i=0;i<3;i++){
+  snprintf(output,sizeof output,"%s/product-%d.tape",argv[4],i);
+  char *av[]={bound,"5","sh",product,"-S",source,"-o",output,0};
+  char *ev[]={"UNISACC_RUN_CACHE=0",i==1?"UNISA_MAXSTEPS=1":"UNISA_MAXSTEPS=abc",0};
+  if(!i)ev[1]=0;np_result r={0};int transport=np_run(av,argv[1],ev,7,&r,why,sizeof why);
+  snprintf(log,sizeof log,"%s/product-%d.stdout",argv[4],i);save(log,r.out,r.outn);
+  snprintf(log,sizeof log,"%s/product-%d.stderr",argv[4],i);save(log,r.err,r.errn);
+  size_t n=0;char *bytes=cx_read(output,&n);int ok=!transport&&!r.rc&&!r.outn&&!r.errn&&bytes&&n>0;
+  if(!i){reference=bytes;refn=n;}else{ok=ok&&n==refn&&!memcmp(bytes,reference,n);free(bytes);}
+  printf("%s\tproduct-env.%d\trc=%d\ttransport=%d\n",ok?"PASS":"FAIL",i,r.rc,transport);if(!ok)fails++;np_free(&r);
+ }
+ free(reference);printf("RUNTIME_BUDGET\tassertions=15\tfailed=%d\n",fails);return fails?1:0;
+}
