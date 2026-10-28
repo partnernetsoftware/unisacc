@@ -11,6 +11,7 @@
 - [当前版本与有效计划](#current-plans) · [当前架构](#pipeline-design)
 - [路线](#5-路线) · [未解决问题](#6-未解决问题) · [归档索引](#7-归档索引)
 - [0.1.x：其他 C 编译器接入 `.cx`](#53-01x其他-c-编译器接入-cx)
+- **[cx 模式](docs/cx/prd.md)**：现行宿主 `-o`、模块 lint、包清单与 CXIF v0。cx 的当前阅读从这里进入。
 
 <a id="implemented-usage"></a>
 
