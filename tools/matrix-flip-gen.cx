@@ -1,0 +1,49 @@
+/* tools/matrix-flip-gen.cx -- generate domain-matrix rows flipped MISSING -> COVERED_LOCAL from a mapping, with --check.
+ *   sh ./unisacc.com tools/matrix-flip-gen.cx -- ROOT MAP.tsv OUT_DIR            write OUT_DIR/<matrix>-domain-matrix.tsv
+ *   sh ./unisacc.com tools/matrix-flip-gen.cx -- ROOT MAP.tsv --check [OUT_DIR]  verify only (and, with OUT_DIR, that
+ *                                                                               its files equal a fresh generation)
+ * MAP rows: matrix<TAB>cell<TAB>batches(comma list)<TAB>evidence. For every row: tests/<matrix>-domain-matrix.tsv
+ * must hold exactly one row for the cell (column 2) whose state (column 4) is MISSING, and every batch id must be an
+ * IMPLEMENTED row of tests/batches.tsv. The flipped row keeps every other column and sets state COVERED_LOCAL and
+ * evidence (column 5) to the mapping's text. Rows that are not mapped are copied byte for byte. This prepares the
+ * relabel the slow lane applies; it never writes into tests/. */
+#pragma unisa use cxlib.netpack
+
+static char root[4096];
+static void die(const char *s) { fprintf(stderr, "matrix-flip: REFUSE %s errno=%d\n", s, errno); exit(2); }
+static void path(char *p, size_t cap, const char *a, const char *b) { int n = snprintf(p, cap, "%s/%s", a, b); if (n < 0 || (size_t)n >= cap) die("path"); }
+typedef struct { char matrix[64], cell[128], batches[1024], evidence[2048]; int used; } Map;
+static Map maps[128]; static int nmap;
+static int field(const char *line, int idx, char *out, size_t cap) { const char *p = line; for (int i = 0; i < idx; i++) { p = strchr(p, '\t'); if (!p) return 0; p++; } const char *e = strchr(p, '\t'); size_t n = e ? (size_t)(e - p) : strlen(p); if (n && p[n - 1] == '\n') n--; if (n >= cap) return 0; memcpy(out, p, n); out[n] = 0; return 1; }
+static int batch_implemented(const char *reg, size_t rn, const char *id) { const char *at = reg; size_t idn = strlen(id); while (at < reg + rn) { const char *e = memchr(at, '\n', (size_t)(reg + rn - at)); if (!e) e = reg + rn; if ((size_t)(e - at) > idn + 1 && !memcmp(at, id, idn) && at[idn] == '\t') { char impl[64]; char line[8192]; size_t ln = (size_t)(e - at); if (ln >= sizeof line) ln = sizeof line - 1; memcpy(line, at, ln); line[ln] = 0; return field(line, 1, impl, sizeof impl) && !strcmp(impl, "IMPLEMENTED"); } at = e + 1; } return 0; }
+
+int main(int argc, char **argv) {
+    if ((argc != 4 && argc != 5) || !realpath(argv[1], root)) { fputs("usage: ROOT MAP.tsv OUT_DIR | ROOT MAP.tsv --check [OUT_DIR]\n", stderr); return 2; }
+    int check = !strcmp(argv[3], "--check"); const char *outdir = check ? (argc == 5 ? argv[4] : 0) : argv[3];
+    size_t mn; char *m = cx_read(argv[2], &mn); if (!m) die("map");
+    for (char *at = m; at < m + mn;) { char *e = memchr(at, '\n', (size_t)(m + mn - at)); if (!e) e = m + mn; *e = 0; if (at[0] != '#' && strncmp(at, "matrix\t", 7) && *at) { if (nmap >= 128) die("map size"); Map *x = &maps[nmap]; if (!field(at, 0, x->matrix, sizeof x->matrix) || !field(at, 1, x->cell, sizeof x->cell) || !field(at, 2, x->batches, sizeof x->batches) || !field(at, 3, x->evidence, sizeof x->evidence)) die("map row shape"); nmap++; } at = e + 1; }
+    char rp[4400]; path(rp, sizeof rp, root, "tests/batches.tsv"); size_t rn; char *reg = cx_read(rp, &rn); if (!reg) die("batches.tsv");
+    for (int i = 0; i < nmap; i++) { char b[1024]; snprintf(b, sizeof b, "%s", maps[i].batches); for (char *t = strtok(b, ","); t; t = strtok(0, ",")) if (!batch_implemented(reg, rn, t)) { fprintf(stderr, "matrix-flip: REFUSE batch-not-implemented %s (cell %s)\n", t, maps[i].cell); return 2; } }
+    const char *names[] = { "stream-e4", "stream-prune", "properties", "optimization", "formats" }; int flipped = 0;
+    if (outdir && !check && mkdir(outdir, 0700) && errno != EEXIST) die("out dir");
+    for (size_t k = 0; k < sizeof names / sizeof *names; k++) {
+        char in[4400], leaf[160]; snprintf(leaf, sizeof leaf, "tests/%s-domain-matrix.tsv", names[k]); path(in, sizeof in, root, leaf);
+        size_t n; char *s = cx_read(in, &n); if (!s) die("matrix read");
+        char *out = malloc(n + 65536); if (!out) die("alloc"); size_t on = 0;
+        for (char *at = s; at < s + n;) { char *e = memchr(at, '\n', (size_t)(s + n - at)); size_t ln = e ? (size_t)(e - at) : (size_t)(s + n - at); char line[8192]; if (ln >= sizeof line) die("line bound"); memcpy(line, at, ln); line[ln] = 0;
+            char cell[128], state[64]; int hit = -1;
+            if (line[0] != '#' && field(line, 1, cell, sizeof cell) && field(line, 3, state, sizeof state)) for (int i = 0; i < nmap; i++) if (!strcmp(maps[i].matrix, names[k]) && !strcmp(maps[i].cell, cell)) { if (strcmp(state, "MISSING")) { fprintf(stderr, "matrix-flip: REFUSE cell-not-missing %s/%s state=%s\n", names[k], cell, state); return 2; } if (maps[i].used) { fprintf(stderr, "matrix-flip: REFUSE duplicate-cell %s/%s\n", names[k], cell); return 2; } maps[i].used = 1; hit = i; }
+            if (hit < 0) { memcpy(out + on, at, ln); on += ln; }
+            else { /* rebuild: columns 0-2 as is, 3 = COVERED_LOCAL, 4 = evidence, 5.. as is */
+                char *cols[16]; int nc = 0; char copy[8192]; memcpy(copy, line, ln + 1); for (char *p = copy; nc < 16; ) { cols[nc++] = p; char *t = strchr(p, '\t'); if (!t) break; *t = 0; p = t + 1; }
+                if (nc < 6) die("matrix row columns"); char nl[8192]; int w = snprintf(nl, sizeof nl, "%s\t%s\t%s\tCOVERED_LOCAL\t%s", cols[0], cols[1], cols[2], maps[hit].evidence); for (int c = 5; c < nc; c++) { int z = snprintf(nl + w, sizeof nl - (size_t)w, "\t%s", cols[c]); if (z < 0 || (size_t)z >= sizeof nl - (size_t)w) die("row bound"); w += z; }
+                memcpy(out + on, nl, (size_t)w); on += (size_t)w; flipped++; }
+            if (e) out[on++] = '\n'; at = e ? e + 1 : s + n; }
+        if (outdir) { char op[4400]; snprintf(op, sizeof op, "%s/%s-domain-matrix.tsv", outdir, names[k]);
+            if (check) { size_t gn; char *g = cx_read(op, &gn); if (!g || gn != on || memcmp(g, out, on)) { fprintf(stderr, "matrix-flip: REFUSE stale-output %s\n", op); return 2; } free(g); }
+            else { unlink(op); int f = open(op, O_WRONLY | O_CREAT | O_EXCL, 0600); if (f < 0) die("open out"); if (write(f, out, on) != (ssize_t)on) die("write out"); close(f); } }
+        free(out); free(s);
+    }
+    for (int i = 0; i < nmap; i++) if (!maps[i].used) { fprintf(stderr, "matrix-flip: REFUSE cell-not-found %s/%s\n", maps[i].matrix, maps[i].cell); return 2; }
+    printf("MATRIX_FLIP\tmode=%s\tmapped=%d\tflipped=%d\n", check ? "check" : "gen", nmap, flipped); return 0;
+}
