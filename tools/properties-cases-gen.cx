@@ -10,6 +10,7 @@
  *   bound : prop.bound.loop-0-1-255-256, prop.bound.int64-arith, prop.bound.div-zero, prop.bound.tape-integer-range
  *   tu    : prop.meta.single-vs-multi-tu (two TUs, static name isolation), prop.det.jobs-invariance (UNISA_JOBS 1 vs 4)
  *   lower : prop.det.stream-replay.lower (stream6 beside STREAM5_COM), prop.bound.frame-256 (lnx/x86_64 executed; arm64 bytes UNVERIFIED)
+ *   random: prop.meta.random-programs (24 seeded UB-free programs simulated by the generator; REF differential)
  * Subject: the installed product ROOT/unisacc.com (images via `-b TARGET -o`, tapes via `-S`), the E4 and prune
  * stream containers. Inputs are inline (the loop program of tests/pending/properties.cx and its variants, tapes).
  * Non-vacuity guards: determinism rows compile in separate processes and, for no-path-or-time, a different
@@ -21,6 +22,8 @@
 #pragma unisa use cxlib.netpack
 
 static char root[4096], stream4[4096], stream5[4096], outdir[4096], work[4200], inc[4400], bound[4400], product[4400], ref[4096];
+#define APP(dst, ...) do { size_t _l = strlen(dst); int _n = snprintf(dst + _l, sizeof dst - _l, __VA_ARGS__); if (_n < 0 || (size_t)_n >= sizeof dst - _l) die("text bound"); } while (0)
+#define APPN(dst, cap, ...) do { size_t _l = strlen(dst); int _n = snprintf(dst + _l, (cap) - _l, __VA_ARGS__); if (_n < 0 || (size_t)_n >= (cap) - _l) die("text bound"); } while (0)
 static FILE *res; static int npass, nfail, nvac, nnotrun;
 static void die(const char *s) { fprintf(stderr, "properties-cases: REFUSE %s errno=%d\n", s, errno); exit(2); }
 static void path(char *p, size_t cap, const char *a, const char *b) { int n = snprintf(p, cap, "%s/%s", a, b); if (n < 0 || (size_t)n >= cap) die("path"); }
@@ -200,6 +203,53 @@ static void group_lower(void) {
       else { char h[65]; shafile(ref, h); fprintf(res, "IDENTITY\tref=%s\n", h); } }
 }
 
+/* prop.meta.random-programs: a seeded LCG emits straight-line unsigned-64 programs (defined behaviour only: unsigned
+ * wraparound, shifts < 64, division by non-zero constants, loops whose counter is read-only in the body, one helper
+ * call) and simulates each one to obtain its "pre-recorded reference output". The lnx/x86_64 image must print the
+ * simulated values; with REF the lnx image must also equal the reference image, and every fourth program is
+ * compared on all six targets. */
+static unsigned long long rng_state;
+static unsigned rng(void) { rng_state = rng_state * 6364136223846793005ULL + 1442695040888963407ULL; return (unsigned)(rng_state >> 33); }
+static void random_program(unsigned seed, char *src, size_t cap, char *want, size_t wcap) {
+    unsigned long long v[4]; rng_state = seed; src[0] = want[0] = 0;
+    APPN(src, cap, "#include <stdio.h>\nstatic unsigned long long f(unsigned long long x){return x*3ULL+1ULL;}\nint main(void){\n unsigned long long v0,v1,v2,v3;unsigned i;\n");
+    for (int k = 0; k < 4; k++) { v[k] = rng() % 1000; APPN(src, cap, " v%d=%lluULL;\n", k, v[k]); }
+    int nstmt = 8 + rng() % 8;
+    for (int s = 0; s < nstmt; s++) { int x = rng() % 4, y = rng() % 4, z = (y + 1 + rng() % 3) % 4, op = rng() % 11;   /* y != z: no x-x or x&x collapse */ unsigned long long K = 1 + rng() % 9, kk = rng() % 64, n = rng() % 40;
+        switch (op) {
+        case 0: APPN(src, cap, " v%d=v%d+v%d;\n", x, y, z); v[x] = v[y] + v[z]; break;
+        case 1: APPN(src, cap, " v%d=v%d-v%d;\n", x, y, z); v[x] = v[y] - v[z]; break;
+        case 2: APPN(src, cap, " v%d=v%d*%lluULL;\n", x, y, K); v[x] = v[y] * K; break;
+        case 3: APPN(src, cap, " v%d=v%d&v%d;\n", x, y, z); v[x] = v[y] & v[z]; break;
+        case 4: APPN(src, cap, " v%d=v%d|v%d;\n", x, y, z); v[x] = v[y] | v[z]; break;
+        case 5: APPN(src, cap, " v%d=v%d^v%d;\n", x, y, z); v[x] = v[y] ^ v[z]; break;
+        case 6: APPN(src, cap, " v%d=v%d>>%llu;\n", x, y, kk); v[x] = v[y] >> kk; break;
+        case 7: APPN(src, cap, " v%d=v%d<<%llu;\n", x, y, kk); v[x] = v[y] << kk; break;
+        case 8: APPN(src, cap, " v%d=v%d/%lluULL+v%d%%%lluULL;\n", x, y, K, z, K); v[x] = v[y] / K + v[z] % K; break;
+        case 9: APPN(src, cap, " for(i=0;i<%llu;i++){v%d+=i*%lluULL;}\n", n, x, K); for (unsigned long long i = 0; i < n; i++) v[x] += i * K; break;
+        default: APPN(src, cap, " if(v%d>v%d){v%d=f(v%d);}else{v%d=v%d-v%d;}\n", y, z, x, y, x, z, y); if (v[y] > v[z]) v[x] = v[y] * 3ULL + 1ULL; else v[x] = v[z] - v[y]; break;
+        } }
+    APPN(src, cap, " printf(\"%%llu %%llu %%llu %%llu\\n\",v0,v1,v2,v3);\n return (int)(v0%%7ULL);\n}\n");
+    snprintf(want, wcap, "%llu %llu %llu %llu\n", v[0], v[1], v[2], v[3]);
+}
+static void group_random(void) {
+    enum { NP = 16 }; char cat[8192] = ""; int distinct = 1;
+    for (int p = 0; p < NP; p++) { static char src[8192], want[256]; unsigned seed = 20261028u + 7919u * (unsigned)p; random_program(seed, src, sizeof src, want, sizeof want);
+        char cp[4400], img[4400], lab[160]; snprintf(cp, sizeof cp, "%s/r%02d.c", work, p); snprintf(img, sizeof img, "%s/r%02d.img", work, p); saved(cp, src, strlen(src));
+        { char line[300]; snprintf(line, sizeof line, "|%s", want); if (strstr(cat, line)) distinct = 0; strcat(cat, "|"); } if (strlen(cat) + strlen(want) + 1 < sizeof cat) strcat(cat, want);
+        np_result r; snprintf(lab, sizeof lab, "seed-%u.executes", seed);
+        if (compile(cp, "-O2", targets[0], img, noenv, &r) || r.rc) { row("NOT_RUN", "prop.meta.random-programs", lab, "compile failed"); np_free(&r); continue; } np_free(&r);
+        char *v[] = { img, 0 }; if (run(v, noenv, 3, &r)) { row("NOT_RUN", "prop.meta.random-programs", lab, "image did not run"); continue; }
+        { unsigned long long v0 = strtoull(want, 0, 10); int rc_want = (int)(v0 % 7ULL); int ok = r.rc == rc_want && !r.errn && r.outn == strlen(want) && !memcmp(r.out, want, r.outn);
+          char d[300]; snprintf(d, sizeof d, "simulated %s exit %d", want, rc_want); for (char *q = d; *q; q++) if (*q == '\n') *q = ' '; check(ok, "prop.meta.random-programs", lab, ok ? d : "output differs from simulation"); np_free(&r); }
+        if (ref[0]) { int nt = (p % 8 == 0) ? 6 : 1; for (int t = 0; t < nt; t++) { char pi[4400], ri[4400]; snprintf(pi, sizeof pi, "%s/r%02d.%s", work, p, tslug(t)); snprintf(ri, sizeof ri, "%s/r%02d.%s.ref", work, p, tslug(t)); snprintf(lab, sizeof lab, "seed-%u.%s.image-equals-reference", seed, tslug(t));
+            if (t == 0) snprintf(pi, sizeof pi, "%s", img); else if (compile(cp, "-O2", targets[t], pi, noenv, &r) || r.rc) { row("NOT_RUN", "prop.meta.random-programs", lab, "product compile failed"); np_free(&r); continue; } np_free(&r);
+            char *rv[] = { ref, cp, "-O2", "-b", (char *)targets[t], "-o", ri, 0 }; if (run(rv, noenv, 20, &r) || r.rc) { row("NOT_RUN", "prop.meta.random-programs", lab, "reference compile failed"); np_free(&r); continue; } np_free(&r);
+            check(same_file(pi, ri), "prop.meta.random-programs", lab, "byte equality"); } } }
+    row(distinct ? "PASS" : "VACUOUS", "prop.meta.random-programs", "corpus.outputs-distinct", distinct ? "16 seeded programs, 16 distinct simulated outputs" : "two programs share an output");
+    if (!ref[0]) fprintf(res, "UNVERIFIED\tprop.meta.random-programs\tsix-targets\tno REF given\n");
+}
+
 static void group_bound(void) {
     np_result r; char src[4400], img[4400]; path(src, sizeof src, work, "forward.c"); write_program(src, fwd); path(img, sizeof img, work, "forward.img");
     if (compile(src, "-O0", targets[0], img, noenv, &r) || r.rc) die("forward compile"); np_free(&r);
@@ -243,14 +293,14 @@ static void group_bound(void) {
 }
 
 int main(int argc, char **argv) {
-    if ((argc != 6 && argc != 7) || !realpath(argv[1], root) || !realpath(argv[2], stream4) || !realpath(argv[3], stream5) || argv[4][0] != '/' || (argc == 7 && !realpath(argv[6], ref))) { fputs("usage: ROOT STREAM4_COM STREAM5_COM ABS_OUT det|meta|bound|tu|lower [REF]\n", stderr); return 2; }
-    const char *group = argv[5]; if (strcmp(group, "det") && strcmp(group, "meta") && strcmp(group, "bound") && strcmp(group, "tu") && strcmp(group, "lower")) die("group");
+    if ((argc != 6 && argc != 7) || !realpath(argv[1], root) || !realpath(argv[2], stream4) || !realpath(argv[3], stream5) || argv[4][0] != '/' || (argc == 7 && !realpath(argv[6], ref))) { fputs("usage: ROOT STREAM4_COM STREAM5_COM ABS_OUT det|meta|bound|tu|lower|random [REF]\n", stderr); return 2; }
+    const char *group = argv[5]; if (strcmp(group, "det") && strcmp(group, "meta") && strcmp(group, "bound") && strcmp(group, "tu") && strcmp(group, "lower") && strcmp(group, "random")) die("group");
     snprintf(outdir, sizeof outdir, "%s", argv[4]); if (mkdir(outdir, 0700) && errno != EEXIST) die("out dir");
     path(work, sizeof work, outdir, group); if (mkdir(work, 0700)) die("group dir must be absent");
     path(inc, sizeof inc, root, "include"); path(bound, sizeof bound, root, "tools/bound"); path(product, sizeof product, root, "unisacc.com");
     char rp[4400]; snprintf(rp, sizeof rp, "%s/results-%s.tsv", outdir, group); res = fopen(rp, "wbx"); if (!res) die("results exclusive");
     { char hp[65], h4[65], h5[65]; if (!shafile(product, hp) || !shafile(stream4, h4) || !shafile(stream5, h5)) die("identity"); fprintf(res, "IDENTITY\tproduct=%s\tstream4=%s\tstream5=%s\n", hp, h4, h5); }
-    if (!strcmp(group, "det")) group_det(); else if (!strcmp(group, "meta")) group_meta(); else if (!strcmp(group, "tu")) group_tu(); else if (!strcmp(group, "lower")) group_lower(); else group_bound();
+    if (!strcmp(group, "det")) group_det(); else if (!strcmp(group, "meta")) group_meta(); else if (!strcmp(group, "tu")) group_tu(); else if (!strcmp(group, "lower")) group_lower(); else if (!strcmp(group, "random")) group_random(); else group_bound();
     fprintf(res, "SUMMARY\tgroup=%s\tpass=%d\tfail=%d\tvacuous=%d\tnot_run=%d\n", group, npass, nfail, nvac, nnotrun); fclose(res);
     printf("PROPERTY_CASES\tgroup=%s\tpass=%d\tfail=%d\tvacuous=%d\tnot_run=%d\n", group, npass, nfail, nvac, nnotrun);
     return nfail || nvac || nnotrun ? 1 : 0;

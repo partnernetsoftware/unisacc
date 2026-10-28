@@ -133,3 +133,4 @@
 - 2026-10-28 实跑（产品 94b549d1，REF /tmp/ua_ref；日志 out/c43-cc-opt-01；`corpus-N` 每程序一组 ≈28 s，两程序一组会到 56–60 s 故按程序切片）：9 组 = PASS 328（corpus 7×42、closure 28、cli 6）/ FAIL 0 / VACUOUS 0 / NOT_RUN 0。
 - 发现（记录）：经典参考对 -Og/-Ofast/-O-1/-O4/-O5/-O1x 静默接受并产出镜像（rc0、stderr 空），产品具名拒绝；矩阵行要求"具名拒绝或文档化别名"，产品满足，参考宽松——若参考被当 CLI oracle 须先裁定。
 - 延后：corpus.cc-differential（行声明宿主 cc 为 oracle，cx-only 下不可做，需改行为"经典参考"）、closure.o1-round-bound（内部不可观测）。批提案增 9 行（optimization-corpus-0..6、-closure、-cli，材料 `ref`）。
+- §14 追加组 `random`（2026-10-28，fable 裁定可按行口径做）：种子 LCG 生成 16 个仅含已定义行为的 unsigned 64 位直线程序（回绕、<64 位移、非零常数除模、计数器只读循环、一个辅助调用），生成器自行模拟得到"预录参考输出"；lnx/x86_64 镜像 stdout 与退出码等于模拟值，lnx 镜像等于参考镜像，每第 8 个程序六目标镜像等于参考。守卫：16 个输出互异（最初 24 程序含 `v-v`/`v&v` 退化两例全零，改为操作数不同）。43 PASS / 0 FAIL，35 s。关闭 prop.meta.random-programs；properties 合计 120 PASS、十七格（仅 data-layout-mod8 延后）；批提案增 `properties-cases-random`（材料 `ref`）。
