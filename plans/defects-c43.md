@@ -40,3 +40,12 @@
 
 - `m2.o A.a B.a`（A 含 outer，B 含 inner，outer 调 inner）rc 0 且退出 106；`m2.o B.a A.a` 也 rc 0，镜像运行 SIGSEGV。原因：exec/c/compiler.c:401 / src/tapelink.c:446 归档按给定顺序各自扫到不动点，不回扫前面的归档（与 GNU ld 单遍语义相同——ld 在此情形报 `undefined reference to inner`），而未定义函数又不被 tl_check_undef 拦截，于是静默链接。上述补丁合入后此例转为具名拒绝（与 ld 一致）；是否改为跨归档回扫属产品合同选择，未要求。
 - 复现入口：批 `link-undefined-function` 行 `cross-archive-order.reversed-refused`（工作顺序行 `working-order` 断言 106，保证非空洞）。
+
+## driver.diagnostics — 驱动与 ar 的四处不具名/错因拒绝（开放，诊断类；exec/c/compiler.c，所有者 cdx/grk）
+
+批 `driver-diagnostics`（tools/driver-diagnostics.cx，7/11，红行即复现）：
+1. `unisacc -run u.o`（单元对象）：rc 1，**stderr 为空**。预期具名拒绝（如 `cannot run a unit object; link it first`）。
+2. `unisacc -run ok.a`（仅归档）：文本 `these objects were compiled for another target; running needs this machine's: `（目标名为空，且原因错误：问题是没有可运行的单元/main）。
+3. `unisacc -o p ok.a`（仅归档链接）：文本 `model driver: tape domain: required tapecheck model is missing`（错因）。预期与无 main 一致的具名拒绝。
+4. `unisacc ar zz empty.a`（空归档上的非法操作）：rc 0 无输出；product_ar 只在遍历成员时校验 op（compiler.c:445），空归档不触发。预期 `ar: operation must be r, q, t or x` rc 2（非空归档已如此）。
+附：`ar q2`/`rcsX` 等后缀不校验（op[0] 判定），低优先。

@@ -1,0 +1,49 @@
+/* tools/driver-diagnostics.cx -- named-refusal contract of the driver and `ar` on wrong inputs (CLAUDE.md: refusals
+ * must be named; prd.md:771 unit-link route; exec/c/compiler.c product_ar). Found 2026-10-28 on f3705dfa.
+ *   sh ./unisacc.com tools/driver-diagnostics.cx -- ROOT ABS_OUT
+ * Every row: rc != 0, no output file, stderr non-empty AND names the offending input path (or the operation). Rows that
+ * hold today (green): link of a whole-program object (`carries no unit tape`), unit + whole-program mixed, `ar t` on a
+ * non-archive, `ar rcs` with a missing member (`cannot open ... ENOENT`), `ar rcs` to an unwritable path, `ar x` into an
+ * unwritable directory, `ar zz` on a non-empty archive. Rows that are red today (known diagnostic defects, see
+ * plans/defects-c43.md driver.diagnostics): `-run` on a unit object (rc 1, EMPTY stderr); `-run` on an archive alone
+ * (text claims "compiled for another target" with an empty target name); `-o` from an archive alone (text blames a
+ * missing tapecheck model); `ar zz` on an EMPTY archive (rc 0, silent: the operation is only validated per member). */
+#pragma unisa use cxlib.netpack
+
+static char root[4096], outdir[4096], product[4400]; static int npass, nfail; static FILE *res;
+static void die(const char *s) { fprintf(stderr, "driver-diagnostics: REFUSE %s errno=%d\n", s, errno); exit(2); }
+static void path(char *p, size_t cap, const char *a, const char *b) { int n = snprintf(p, cap, "%s/%s", a, b); if (n < 0 || (size_t)n >= cap) die("path"); }
+static void saved(const char *p, const char *s, size_t n) { int f = open(p, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600); if (f < 0) die("exclusive create"); while (n) { ssize_t k = write(f, s, n); if (k <= 0) die("write"); s += k; n -= (size_t)k; } if (close(f)) die("close"); }
+static void check(int ok, const char *label, const char *detail) { fprintf(res, "%s\tdriver.diagnostics.%s\t%s\n", ok ? "PASS" : "FAIL", label, detail); printf("%s\t%s\n", ok ? "PASS" : "FAIL", label); if (ok) npass++; else nfail++; }
+static int prod_in(const char *dir, char *const extra[], np_result *r) { char *v[20]; int n = 0; v[n++] = "sh"; v[n++] = product; for (int i = 0; extra[i]; i++) { if (n >= 19) die("argv"); v[n++] = extra[i]; } v[n] = 0; char why[1024]; return np_run(v, dir, 0, 20, r, why, sizeof why); }
+static int prod(char *const extra[], np_result *r) { return prod_in(outdir, extra, r); }
+static int absent(const char *dir, const char *leaf) { if (!leaf) return 1; char p[4400]; path(p, sizeof p, dir, leaf); struct stat st; errno = 0; if (!lstat(p, &st)) return 0; if (errno != ENOENT) die("lstat"); return 1; }
+/* named refusal: rc != 0, no OUT, stderr non-empty and containing NAME (an input path or the operation) */
+static void named(const char *dir, const char *label, char *const argv[], const char *out, const char *name, int want_rc) {
+    np_result r; if (prod_in(dir, argv, &r)) { check(0, label, "transport"); return; }
+    int ok = r.rc && (want_rc < 0 || r.rc == want_rc) && absent(dir, out) && r.errn && strstr(r.err, name); char d[320]; snprintf(d, sizeof d, "rc=%d out-absent=%d stderr(%zu)=%.*s", r.rc, absent(dir, out), r.errn, (int)(r.errn > 140 ? 140 : r.errn), r.err); for (char *q = d; *q; q++) if (*q == '\n') *q = ' ';
+    check(ok, label, d); np_free(&r); }
+
+int main(int argc, char **argv) {
+    if (argc != 3 || !realpath(argv[1], root) || argv[2][0] != '/') { fputs("usage: ROOT ABS_OUT\n", stderr); return 2; }
+    snprintf(outdir, sizeof outdir, "%s", argv[2]); if (mkdir(outdir, 0700)) die("new out dir must be absent"); path(product, sizeof product, root, "unisacc.com");
+    char rp[4400]; path(rp, sizeof rp, outdir, "results.tsv"); res = fopen(rp, "wbx"); if (!res) die("results");
+    { size_t n; char *b = cx_read(product, &n); if (!b) die("product"); char h[65]; cx_sha256_hex(b, n, h); free(b); fprintf(res, "IDENTITY\tcandidate=%s\n", h); }
+    char p[4400]; const char *A = "int f(void){return 1;}\n", *M = "int f(void);int main(void){return f();}\n";
+    path(p, sizeof p, outdir, "a.c"); saved(p, A, strlen(A)); path(p, sizeof p, outdir, "m.c"); saved(p, M, strlen(M));
+    { char *v[] = { "-c", "-b", "lnx/x86_64", "-funit", "-o", "u.o", "a.c", 0 }; np_result r; if (prod(v, &r) || r.rc) die("u.o"); np_free(&r); char *w[] = { "-c", "-b", "lnx/x86_64", "-o", "m.o", "m.c", 0 }; if (prod(w, &r) || r.rc) die("m.o"); np_free(&r); char *a[] = { "ar", "rcs", "ok.a", "u.o", 0 }; if (prod(a, &r) || r.rc) die("ok.a"); np_free(&r); char *e[] = { "ar", "rcs", "empty.a", 0 }; if (prod(e, &r) || r.rc) die("empty.a"); np_free(&r); }
+    /* green today */
+    { char *v[] = { "-o", "p1", "m.o", "u.o", 0 }; named(outdir, "link.whole-program-object.named", v, "p1", "m.o", -1); }
+    { char *v[] = { "-o", "p2", "u.o", "m.o", 0 }; named(outdir, "link.unit-plus-whole.named", v, "p2", "m.o", -1); }
+    { char *v[] = { "ar", "t", "a.c", 0 }; named(outdir, "ar.t-non-archive.named", v, 0, "not an archive", -1); }
+    { char *v[] = { "ar", "rcs", "miss.a", "u.o", "nope.o", 0 }; named(outdir, "ar.rcs-missing-member.named-enoent", v, "miss.a", "nope.o", -1); }
+    { char *v[] = { "ar", "rcs", "/proc/nope.a", "u.o", 0 }; named(outdir, "ar.rcs-unwritable.named", v, 0, "/proc/nope.a", -1); }
+    { char ro[4400]; path(ro, sizeof ro, outdir, "ro"); if (mkdir(ro, 0500)) die("ro"); char *v[] = { "ar", "x", "../ok.a", 0 }; named(ro, "ar.x-unwritable-dir.named", v, "u.o", "u.o", -1); chmod(ro, 0700); }
+    { char *v[] = { "ar", "zz", "ok.a", 0 }; named(outdir, "ar.bad-op-nonempty.named", v, 0, "operation must be", 2); }
+    /* red today: diagnostic defects */
+    { char *v[] = { "-run", "u.o", 0 }; named(outdir, "run.unit-object.named", v, 0, "u.o", -1); }
+    { char *v[] = { "-run", "ok.a", 0 }; named(outdir, "run.archive-alone.named", v, 0, "ok.a", -1); }
+    { char *v[] = { "-o", "p3", "ok.a", 0 }; named(outdir, "link.archive-alone.named", v, "p3", "ok.a", -1); }
+    { char *v[] = { "ar", "zz", "empty.a", 0 }; named(outdir, "ar.bad-op-empty.named", v, 0, "operation must be", 2); }
+    fprintf(res, "SUMMARY\tpass=%d\tfail=%d\n", npass, nfail); fclose(res); printf("DRIVER_DIAGNOSTICS\tpass=%d\tfail=%d\n", npass, nfail); return nfail ? 1 : 0;
+}
