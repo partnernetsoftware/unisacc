@@ -25,6 +25,49 @@ static void hand_input(np_buf *b){
  for(int i=0;i<11;i++){np_put(b,"@",1);u32(b,off[i]);np_put(b,"\n",1);np_puts(b,tok[i]);np_put(b,"\n",1);}
  np_puts(b,"11 tokens\n");free(pp.p);
 }
+/* Independent C99 6.5.3.4 oracle: Row has two char members, hence size 8,
+ * name has size 7, and name[0] has size 1. No VLA is involved. The index
+ * calls a declared-only function: sizeof must emit no reference to next.
+ * Literal tokens/byte offsets below are hand-written, never supplied by E1. */
+static void sizeof_input(np_buf *b,int element){
+ const char *src=element?
+  "struct Row{char name[7];char tail;};struct Row rows[1];int next(void);int main(void){return sizeof rows[next()].name[0];}\n":
+  "struct Row{char name[7];char tail;};struct Row rows[1];int next(void);int main(void){return sizeof rows[next()].name;}\n";
+ const char *tok[]={"struct","id=Row","{","type=char","id=name","[","num=7","]",";","type=char","id=tail",";","}",";","struct","id=Row","id=rows","[","num=1","]",";","type=int","id=next","(","type=void",")",";","type=int","id=main","(","type=void",")","{","return","sizeof","id=rows","[","id=next","(",")","]",".","id=name",";","}","eof"};
+ unsigned off[]={0,7,10,11,16,20,21,22,23,24,29,33,34,35,36,43,47,51,52,53,54,55,59,63,64,68,69,70,74,78,79,83,84,85,92,99,103,104,108,109,110,111,112,116,117,119};
+ np_buf pp={0};np_put(&pp,"UNIPP1\0",7);u32(&pp,(unsigned)strlen(src));for(int i=0;i<4;i++)u32(&pp,0);np_puts(&pp,src);
+ np_put(b,"UNITOK1\0",8);u32(b,(unsigned)pp.n);np_put(b,pp.p,pp.n);
+ for(int i=0;i<46;i++){
+  if(element&&i==43){const char *extra[]={"[","num=0","]"};for(int j=0;j<3;j++){np_put(b,"@",1);u32(b,116+(unsigned)j);np_put(b,"\n",1);np_puts(b,extra[j]);np_put(b,"\n",1);}}
+  np_put(b,"@",1);u32(b,off[i]+(element&&i>=43?3:0));np_put(b,"\n",1);np_puts(b,tok[i]);np_put(b,"\n",1);
+ }
+ np_puts(b,element?"49 tokens\n":"46 tokens\n");free(pp.p);
+}
+/* Hand-derived Tape, not captured E3 output. Classic reference sources:
+ * src/front_parse.c emit_start (7109-7116); global array storage (6311-6319);
+ * prototype rollback (6048-6053); P_SIZEOF (1420-1439) discards operand code;
+ * function/return (5997-6000,6078-6093,5842-5871); fe_units (6758-6776).
+ * Relative to the independent return-7 oracle in interfaces-lnx-x86_64.cx,
+ * only the eight-byte g_rows allocation and the selected constant differ.
+ * No constructor, local, index call, runtime address calculation or load
+ * belongs to this Tape. The ABI save/return spill remains required. */
+static void sizeof_tape(np_buf *b,int element){
+ np_puts(b,
+  "_start:\n  call __init\n"
+  "  .argc r0\n  .lea r1, __argvv\n  imm r2, 0\n__argv_top:\n"
+  "  slt64 r3, r2, r0\n  jumpz r3, __argv_done\n  .argv r4, r2\n"
+  "  imm r5, 8\n  mul64 r5, r2, r5\n  add64 r5, r1, r5\n"
+  "  store64 [r5+0], r4\n  imm r5, 1\n  add64 r2, r2, r5\n"
+  "  jump __argv_top\n__argv_done:\n  call main\n  jump __main_ret\n.bss __argvv 32768\n"
+  ".bss g_rows 8\n"
+  "main:\n  .frame 8\n  store64 [r7+0], r6\n  mov r6, r7\n  .frame      0\n");
+ np_puts(b,element?"  imm r0, 1\n":"  imm r0, 7\n");
+ np_puts(b,
+  "  .frame 8\n  .st [r7+0], r0, 4\n  .ld r0, [r7+0], 4\n  .frame -8\n"
+  "  jump __unisacc_R1\n  imm r0, 0\n__unisacc_R1:\n"
+  "  mov r7, r6\n  load64 r6, [r7+0]\n  .frame -8\n  ret\n"
+  "__init:\n  ret\n__main_ret:\n  .exit r0\n");
+}
 static np_result invoke(const char *leaf,const char *input,size_t n){
  char in[4200],out[4200],err[4200],why[1024];path(in,sizeof in,work,leaf);save(in,input,n);
  char *v[]={bound,"12",e3bin,in,"hand-token.c","include",0};
@@ -39,6 +82,16 @@ static void reject(const char *name,const char *bytes,size_t n){
  {int zn=snprintf(label,sizeof label,"%s.empty-stdout",name);if(zn<0||(size_t)zn>=sizeof label)die("label");}check(!r.outn,label);
  {int zn=snprintf(label,sizeof label,"%s.named-malformed-locations",name);if(zn<0||(size_t)zn>=sizeof label)die("label");}check(r.errn&&strstr(r.err,"malformed token locations"),label);
  np_free(&r);
+}
+static void sizeof_case(int element){
+ np_buf b={0},want={0};char label[160];const char *name=element?"sizeof-indexed-member-element":"sizeof-indexed-member-array";
+ sizeof_input(&b,element);sizeof_tape(&want,element);
+ {int z=snprintf(label,sizeof label,"%s.hand-frame-length",name);if(z<0||(size_t)z>=sizeof label)die("label");}check(b.n==(element?701:670),label);
+ np_result r=invoke(element?"sizeof-element.tok":"sizeof-member.tok",b.p,b.n);
+ {int z=snprintf(label,sizeof label,"%s.accept-empty-stderr",name);if(z<0||(size_t)z>=sizeof label)die("label");}check(!r.rc&&!r.errn,label);
+ {int z=snprintf(label,sizeof label,"%s.exact-hand-tape-and-member-width",name);if(z<0||(size_t)z>=sizeof label)die("label");}check(want.n==606&&r.outn==want.n&&!memcmp(r.out,want.p,want.n),label);
+ {int z=snprintf(label,sizeof label,"%s.unevaluated-next-no-runtime-reference",name);if(z<0||(size_t)z>=sizeof label)die("label");}check(r.outn&&!strstr(r.out,"next"),label);
+ np_free(&r);free(b.p);free(want.p);
 }
 int main(int argc,char **argv){
  if(argc!=4&&argc!=5){fputs("usage: ROOT STREAM_DIR NEW_OUTDIR [EXPECTED_STREAM3_SHA]\n",stderr);return 2;}
@@ -65,9 +118,10 @@ int main(int argc,char **argv){
  char *bad=malloc(b.n);if(!bad)die("allocation");{size_t ci=0;while(ci<b.n){bad[ci]=b.p[ci];ci++;}}bad[0]='X';reject("bad-magic.tok",bad,b.n);
  {size_t ci=0;while(ci<b.n){bad[ci]=b.p[ci];ci++;}}bad[8]=54;reject("bad-embedded-length.tok",bad,b.n);
  free(bad);free(b.p);
+ sizeof_case(0);sizeof_case(1);
  digest(product,h);check(!strcmp(h,product_before),"root-product-stable");
  digest(e3bin,h);check(!strcmp(h,e3_pin),"material.stream3-stable");
- printf("STREAM_E3\tassertions=%d\tfailed=%d\tscope=independent-finite-e3-io-and-malformed-frame-linux-x86_64\n",assertions,failures);
+ printf("STREAM_E3\tassertions=%d\tfailed=%d\tscope=independent-finite-e3-io-sizeof-indexed-member-and-malformed-frame-linux-x86_64\n",assertions,failures);
  puts("NOT_CLAIMED\tfull-e3-gold-table-attributes-resource-input-seven-stream-chain-or-six-host");
  return failures?1:0;
 }

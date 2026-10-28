@@ -302,3 +302,37 @@ backups in `out/c43-3a5b-promote-01/`; receipt SHA is
 Shared product/record now exactly match 3a5b/0523. The shared default-run
 original sizeof case returned 7, stderr empty. Foreign host execution and
 complete release qualification remain unverified; this is development install.
+
+Post-install validation on shared3a5b: negative diagnostics211/0
+(known_gaps1 retained) and library ABI55/0, each actual rc0. Fresh stream
+runtime built from the frozen source is `abe915c3…`; extracting the installed
+ff696 package produced `out/c43-3a5b-streams-01/` (manifest `e7c1519c…`).
+Seven-model/product binding passed44/0. No weights were reconstructed.
+
+The independent E3 batch now retains its original17 checks and adds8 checks
+for two hand-written UNITOK1 frames. `Row` occupies8 bytes, `name`7 and
+`name[0]`1. A declared-only `next()` in the index must remain unevaluated.
+The expected606-byte Tape is hand-derived from the classic reference source,
+not copied from E3 output; no live E1 supplies tokens. New stream3
+`58421d09…` passes25/0. The same new test against f3705's preserved package,
+extracted onto the identical runtime (`d388ba64…` stream3), retains six actual
+failures: both member suffixes are refused at column112 with expected ';'.
+The original17 checks and both hand-frame lengths still pass in that control.
+Raw positive evidence: `out/c43-3a5b-independent-e3-sizeof-01.*`;
+retained red: `out/c43-f370-sizeof-baseline-e3-01.*`.
+
+All seven independent finite stream batches passed on new materials:
+E2=36, E1=25, E3=25, E4=17, prune=19, lower=12, elf=11 (145/0 total).
+These are finite Linux/x86_64 contracts, not broad stream completion.
+New classic reference C/ELF were actually exported and host-compiled from
+the frozen source: C `e8f4765b…`, ELF `dbf8328c…`, retained in
+`SourceRoot/out/ref-3a5b-01/`. The O2 differential batch with this REF and
+new stream4 passed12/0, vacuous0/not_run0. Host gcc11 and the existing thin
+export/build wrappers remain declared dependencies; this is not N22.
+
+Current inventory validation reports218 batches,199 implemented,19 planned;
+200 coverage rows,181 implemented,19 unresolved. Metadata validation executes
+no batches. Standalone BATCH_RUN logs are development observations, not
+ALLRECEIPT/all-session qualification: the latter binds harness and source
+closures, rejects earlier sessions after test-source changes, and still needs
+a fresh complete session and the unresolved broad contracts.
