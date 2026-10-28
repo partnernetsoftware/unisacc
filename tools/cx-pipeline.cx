@@ -1,0 +1,87 @@
+/* A CX-owned stage pipeline over immutable CX0BND1 units and actual networks.
+ * Default: compile and run. --emit: compile only. Linux x86_64, O2.
+ * [--emit] BUNDLE STREAM_DIR E2_ADAPTER STAGE_ADAPTER PRODUCT NEW_OUT [-- ARGS...]
+ * The old compiler is only the bootstrap compiler for this tool. It is never
+ * invoked here: units/tapecheck use a one-stage generic executor adapter. */
+#pragma unisa use cx0.bundle
+#pragma unisa use cxlib.netpack
+static char work[4096],stagefiles[7][4400],e2reader[4400],stage_reader[4400],product[4400],packet[4400],attrsfile[4400];
+static const char *stagenames[]={"e2","e1","e3","e4","prune","lower","elf"};
+static np_buf receipt={0};
+static char pending_image[4400];
+static long long deadline;
+static void die(const char *s){int e=errno;if(pending_image[0]){if(unlink(pending_image)&&errno!=ENOENT)fprintf(stderr,"cx-pipeline: failed-image-cleanup errno=%d\n",errno);}fprintf(stderr,"cx-pipeline: %s errno=%d\n",s,e);exit(2);}
+static long long now(void){
+ struct timespec t={0};
+#if defined(__UNISA__) && defined(__linux__) && defined(__x86_64__)
+ long rc=__syscall6(228,1,(long)&t,0,0,0);if(_unisa_ret(rc))die("monotonic-clock");
+#else
+ extern int clock_gettime(int,struct timespec *);if(clock_gettime(1,&t))die("monotonic-clock");
+#endif
+ if(t.tv_sec<0||t.tv_nsec<0||t.tv_nsec>=1000000000L)die("monotonic-clock-range");return (long long)t.tv_sec*1000000000LL+t.tv_nsec;
+}
+static int budget(void){long long left=deadline-now();if(left<1000000000LL)die("total-budget-exhausted");int seconds=(int)(left/1000000000LL);return seconds<12?seconds:12;}
+static void path(char *p,const char *name){int z=snprintf(p,4400,"%s/%s",work,name);if(z<0||z>=4400)die("path-bound");}
+static unsigned little(const unsigned char *p){return (unsigned)p[0]|(unsigned)p[1]<<8|(unsigned)p[2]<<16|(unsigned)p[3]<<24;}
+static void number(np_buf *b,unsigned n){char p[4];for(int i=0;i<4;i++)p[i]=(char)(n>>(8*i));np_put(b,p,4);}
+static char *readregular(const char *p,size_t *n){
+ int fd=open(p,O_RDONLY|O_NONBLOCK);if(fd<0)die(p);struct stat s,t;
+ if(fstat(fd,&s)||!S_ISREG(s.st_mode)||s.st_size<0||s.st_size>67108864){close(fd);die("bounded-regular-input");}
+ *n=(size_t)s.st_size;char *b=malloc(*n+1);if(!b){close(fd);die("allocation");}size_t at=0;
+ while(at<*n){ssize_t z=read(fd,b+at,*n-at);if(z<0&&errno==EINTR)continue;if(z<=0)die("input-read");at+=(size_t)z;}
+ char c;ssize_t z;do{z=read(fd,&c,1);}while(z<0&&errno==EINTR);int bad=z||fstat(fd,&t)||s.st_size!=t.st_size;if(close(fd))bad=1;if(bad)die("input-changed-or-close");b[*n]=0;return b;
+}
+static void save(const char *name,const void *p,size_t n){char file[4400];path(file,name);int fd=open(file,O_CREAT|O_EXCL|O_WRONLY,0600);if(fd<0)die("exclusive-output");size_t at=0;int bad=0;while(at<n){ssize_t z=write(fd,(char *)p+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0){bad=1;break;}at+=(size_t)z;}if(fsync(fd))bad=1;if(close(fd))bad=1;if(bad){unlink(file);die("output-write-or-close");}}
+static void record(const char *kind,const char *name,const void *p,size_t n){char hash[65];cx_sha256_hex(p,n,hash);np_puts(&receipt,kind);np_puts(&receipt,"\t");np_puts(&receipt,name);np_puts(&receipt,"\t");np_puts(&receipt,hash);np_puts(&receipt,"\n");}
+static void snapshot(const char *from,const char *name,char *dest,int executable){size_t n;char *p=readregular(from,&n);save(name,p,n);record("INPUT",name,p,n);free(p);path(dest,name);if(executable&&chmod(dest,0700))die("snapshot-chmod");}
+static np_result call(char **v,const char *label,const char *env){
+ np_result r={0};char why[1200],name[160];char *add[]={"UNISA_MAXSTEPS=200000000","UNISACC_RF_CAPTURE=",(char *)env,0};
+ if(np_run(v,0,add,budget(),&r,why,sizeof why))die(why);
+ int z=snprintf(name,sizeof name,"%s.stderr",label);if(z<0||(size_t)z>=sizeof name)die("stage-label");save(name,r.err,r.errn);
+ if(r.errn)fwrite(r.err,1,r.errn,stderr);
+ if(r.rc){fprintf(stderr,"cx-pipeline: stage=%s rc=%d\n",label,r.rc);int rc=r.rc;np_free(&r);exit(rc>0&&rc<126?rc:2);}
+ z=snprintf(name,sizeof name,"%s.out",label);if(z<0||(size_t)z>=sizeof name)die("stage-label");save(name,r.out,r.outn);record("STAGE",label,r.out,r.outn);return r;
+}
+int main(int argc,char **argv){
+ deadline=now()+45000000000LL;
+ int k=1,emit=0;if(k<argc&&!strcmp(argv[k],"--emit")){emit=1;k++;}
+ if(argc-k<6)die("usage [--emit] BUNDLE STREAM_DIR E2_ADAPTER STAGE_ADAPTER PRODUCT NEW_OUT [-- ARGS...]");
+ int argstart=k+6;if(argstart<argc&&strcmp(argv[argstart],"--"))die("program-arguments-need-separator");if(argstart<argc)argstart++;
+ if(argv[k+5][0]=='/'){if(strlen(argv[k+5])>=sizeof work)die("output-path-bound");strcpy(work,argv[k+5]);}
+ else {char cwd[4096];if(!getcwd(cwd,sizeof cwd))die("cwd");int z=snprintf(work,sizeof work,"%s/%s",cwd,argv[k+5]);if(z<0||(size_t)z>=sizeof work)die("output-path-bound");}
+ size_t n;char *p=readregular(argv[k],&n),why[256];cxb_bundle b={0};if(cxb_read(p,n,&b,why,sizeof why))die(why);free(p);
+ if(strcmp(b.target,"lnx/x86_64")||strcmp(b.abi,"unisa-c99-v1"))die("unsupported-target-or-abi");
+ if(mkdir(work,0700))die("exclusive-work-directory");np_puts(&receipt,"CXPIPE1\ntarget\tlnx/x86_64\noptimization\tO2\ncompiler-driver-fallback\tdisabled\n");
+ save("bundle.cxb",b.storage,b.bytes);path(packet,"bundle.cxb");record("INPUT","bundle.cxb",b.storage,b.bytes);
+ snapshot(argv[k+2],"e2-reader",e2reader,1);snapshot(argv[k+3],"stage-reader",stage_reader,1);snapshot(argv[k+4],"product-model-container",product,0);
+ for(int i=0;i<7;i++){char from[4400],name[80];int z=snprintf(from,sizeof from,"%s/unisacc-stream%d.com",argv[k+1],i+1);if(z<0||(size_t)z>=sizeof from)die("stream-path-bound");snprintf(name,sizeof name,"stream%d",i+1);snapshot(from,name,stagefiles[i],1);}
+ /* Identity is checked against the exact same bytes E2 will load. */
+ p=readregular(stagefiles[0],&n);char digest[65];cx_sha256_hex(p,n,digest);free(p);if(strcmp(digest,b.model))die("e2-model-identity-mismatch");
+ {char *v[]={stage_reader,"--verify",product,work,0};np_result r=call(v,"material-verify","UNISA_ATTRIBUTES=");np_free(&r);}
+ np_buf frames={0},attributes={0};number(&attributes,0);unsigned marks=0;
+ for(int i=0;i<b.unit_count;i++){
+  char index[20],label[80],source[4096],ppfile[4400];snprintf(index,sizeof index,"%d",i);memcpy(source,b.units[i].name,b.units[i].name_bytes);source[b.units[i].name_bytes]=0;
+  snprintf(label,sizeof label,"unit%02d-e2",i);char *v[]={e2reader,stagefiles[0],packet,index,0};np_result pp=call(v,label,"UNISA_ATTRIBUTES=");if(pp.outn<7||memcmp(pp.out,"UNIPP1\0",7))die("e2-missing-unipp1");np_free(&pp);
+  char file[100];snprintf(file,sizeof file,"%s.out",label);path(ppfile,file);snprintf(label,sizeof label,"unit%02d-e1",i);char *lex[]={stagefiles[1],ppfile,source,0};np_result tokens=call(lex,label,"UNISA_ATTRIBUTES=");
+  if(tokens.outn<16||memcmp(tokens.out,"USLATTR1",8))die("e1-missing-attribute-frame");unsigned count=little((unsigned char *)tokens.out+8),tn=little((unsigned char *)tokens.out+12);
+  if(count>1000000||16+5*(size_t)count+tn!=tokens.outn||marks>1000000-count)die("e1-attribute-frame-extent");
+  for(unsigned j=0;j<count;j++){number(&attributes,(unsigned)i);np_put(&attributes,tokens.out+16+5*j,5);}marks+=count;
+  size_t head=16+5*(size_t)count;if(tn<8||memcmp(tokens.out+head,"UNITOK1",7))die("e1-missing-unitok1");
+  if(b.unit_count==1)np_put(&frames,tokens.out+head,tn);
+  else {size_t size=4+b.units[i].name_bytes+tn;if(size>2147483647)die("unit-frame-size");number(&frames,(unsigned)size);number(&frames,(unsigned)b.units[i].name_bytes);np_put(&frames,(char *)b.units[i].name,b.units[i].name_bytes);np_put(&frames,tokens.out+head,tn);}
+  np_free(&tokens);
+ }
+ for(int i=0;i<4;i++)attributes.p[i]=(char)(marks>>(8*i));save("attributes.bin",attributes.p,attributes.n);path(attrsfile,"attributes.bin");record("ASSEMBLY","attributes.bin",attributes.p,attributes.n);free(attributes.p);
+ save("units.bin",frames.p,frames.n);record("ASSEMBLY","units.bin",frames.p,frames.n);free(frames.p);char input[4400];path(input,"units.bin");
+ char source[4096];memcpy(source,b.units[0].name,b.units[0].name_bytes);source[b.units[0].name_bytes]=0;
+ if(b.unit_count>1){char *v[]={stage_reader,product,"lnx/x86_64/multi/image/O2","units",input,source,attrsfile,0};np_result r=call(v,"units","UNISA_ATTRIBUTES=");if(r.outn<8||memcmp(r.out,"UNITOK2",7))die("units-missing-unitok2");np_free(&r);path(input,"units.out");}
+ char env[4600];int z=snprintf(env,sizeof env,"UNISA_ATTRIBUTES=%s",attrsfile);if(z<0||(size_t)z>=sizeof env)die("attribute-path-bound");
+ for(int i=2;i<7;i++){
+  char *v[]={stagefiles[i],input,source,0};np_result r=call(v,stagenames[i],env);np_free(&r);char name[80];snprintf(name,sizeof name,"%s.out",stagenames[i]);path(input,name);
+  if(i==2){char *check[]={stage_reader,product,"lnx/x86_64/image/O2","tapecheck",input,source,attrsfile,0};r=call(check,"tapecheck",env);np_free(&r);path(input,"tapecheck.out");}
+ }
+ budget();p=readregular(input,&n);if(n<64||memcmp(p,"\177ELF\2\1\1",7)||(unsigned char)p[18]!=62||p[19])die("expected-linux-x86-64-elf");budget();save("program.elf",p,n);char image[4400];path(image,"program.elf");strcpy(pending_image,image);record("OUTPUT","program.elf",p,n);free(p);if(chmod(image,0700))die("image-chmod");
+ np_puts(&receipt,"status\tPREPARED-no-test-result\nphases\tstartup/construction/loading/inference/output/validation=UNMEASURED\n");save("receipt.tsv",receipt.p,receipt.n);pending_image[0]=0;free(receipt.p);cxb_clear(&b);
+ if(emit){printf("CXPIPE1\tPREPARED\t%s\n",image);return 0;}
+ char **run=calloc((size_t)(argc-argstart)+2,sizeof *run);if(!run)die("allocation");run[0]=image;for(int i=argstart;i<argc;i++)run[i-argstart+1]=argv[i];np_result result={0};char err[1200];char *add[]={"UNISA_ATTRIBUTES=",0};if(np_run(run,0,add,budget(),&result,err,sizeof err))die(err);if(result.outn)fwrite(result.out,1,result.outn,stdout);if(result.errn)fwrite(result.err,1,result.errn,stderr);int rc=result.rc;np_free(&result);free(run);return rc>=0&&rc<256?rc:2;
+}
