@@ -1,0 +1,29 @@
+/* Fresh content comparison, not a reconstruction of historical exit status. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.kernelsha
+static void die(const char *s){fprintf(stderr,"generator-json-compare: REFUSE %s errno=%d\n",s,errno);exit(2);}
+static void path(char *out,const char *base,const char *leaf){int n=snprintf(out,4400,"%s/%s",base,leaf);if(n<0||n>=4400)die("path-bound");}
+static char *read_regular(const char *p,size_t *n){struct stat a,b;if(lstat(p,&a)||!S_ISREG(a.st_mode)||a.st_size<0||a.st_size>268435456)die(p);char *s=cx_read(p,n);if(!s||*n!=(size_t)a.st_size||lstat(p,&b)||a.st_dev!=b.st_dev||a.st_ino!=b.st_ino||a.st_size!=b.st_size||a.st_mtime!=b.st_mtime)die("read-changed");return s;}
+static int order(const void *a,const void *b){return strcmp(*(char *const *)a,*(char *const *)b);}
+int main(int argc,char **argv){
+ char origin[4096],current[4096];if(argc!=3||!realpath(argv[1],origin)||!realpath(argv[2],current))die("usage ORIGIN_JOBS NEW_JSON_DIRECTORY");
+ DIR *d=opendir(origin);if(!d)die("origin-directory");char *names[256];int count=0;
+ for(;;){errno=0;struct dirent *e=readdir(d);if(!e){if(errno)die("directory-read");break;}if(strncmp(e->d_name,"gen-",4))continue;
+  for(const char *p=e->d_name;*p;p++)if(!((*p>='a'&&*p<='z')||(*p>='0'&&*p<='9')||*p=='-'||*p=='_'))die("job-name");
+  if(count==256)die("job-limit");names[count]=strdup(e->d_name);if(!names[count++])die("allocation");
+ }if(closedir(d)||!count)die("empty-or-unreadable-jobs");qsort(names,(size_t)count,sizeof *names,order);
+ int different=0;np_buf witness={0};np_puts(&witness,"generator-json-content-v1\n");
+ for(int i=0;i<count;i++){
+  char job[4400],oldfile[4400],newfile[4400],leaf[512],command[4400],oldsha[65],newsha[65],cmdsha[65];
+  path(job,origin,names[i]);struct stat st;if(lstat(job,&st)||!S_ISDIR(st.st_mode))die("normal-job-directory");path(oldfile,job,"result.json");path(command,job,"command.argv.tsv");
+  int z=snprintf(leaf,sizeof leaf,"%s.json",names[i]);if(z<0||(size_t)z>=sizeof leaf)die("leaf-bound");path(newfile,current,leaf);
+  size_t an,bn,cn;char *a=read_regular(oldfile,&an),*b=read_regular(newfile,&bn),*c=read_regular(command,&cn);
+  if(ks_sha256_hex(a,an,oldsha)||ks_sha256_hex(b,bn,newsha)||ks_sha256_hex(c,cn,cmdsha))die("kernel-sha256");
+  int same=an==bn&&!memcmp(a,b,an);different+=!same;
+  np_puts(&witness,names[i]);np_puts(&witness,"\t");np_puts(&witness,oldsha);np_puts(&witness,"\t");np_puts(&witness,newsha);np_puts(&witness,"\t");np_puts(&witness,cmdsha);np_puts(&witness,"\n");
+  printf("JSON\t%s\t%s\t%s\t%s\t%s\n",names[i],same?"SAME":"DIFF",oldsha,newsha,cmdsha);free(a);free(b);free(c);free(names[i]);
+ }
+ char hash[65];if(ks_sha256_hex(witness.p,witness.n,hash))die("witness-sha256");free(witness.p);
+ printf("GENERATOR_JSON\tcount=%d\tdifferent=%d\twitness=%s\n",count,different,hash);
+ puts("NOT_CLAIMED\texecution-status;source-identity;complete-job-inventory;package-provenance;admission;functional-PASS");return different?1:0;
+}

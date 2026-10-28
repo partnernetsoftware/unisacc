@@ -66,6 +66,12 @@ exec/facts，通用stage清单固定exec前缀，但模板路径来自清单展�
 默认strace字符串截断使它不是完整规范路径清单，34输出逐字身份比较另有独立证据，不能混称通用依赖证明。
 下一步将这份实际34同结果与原包来源链接入显式复用合同；当前ni_compare默认拒绝仍保留。
 
+原生独立内容复验入口`tools/generator-json-compare.cx`已落地：枚举原gen目录、逐字比较新旧JSON、
+绑定原命令文件SHA，输出规范witness；不从文件存在推断历史退出码或完整作业资格。
+默认-run实读34份为different=0、rc0，witness9f1d7ec3076f65d812af21da912a192c5834caf46614070e06dc5386b1f118f4。
+证据native-compare-02.stdout；首次纯CX SHA超55秒rc142保留，改用既有kernelsha后在原预算内完成。
+独立JSON内容差异夹具rc1（out/c43-json-compare-negative-01），未放宽相等条件。
+
 - 现象：`int used(void); int main(void){return used()+2;}` 经 `-c -b lnx/x86_64 -funit` 得 main.o 后，`unisacc -o img main.o`（或加只定义 `unused` 的归档、或直接 `-o img main.c`）rc 0 并写出镜像；运行 SIGSEGV（rc 139）。预期：`link: undefined reference to used`，rc≠0，无镜像。
 - 定位：src/tapelink.c:351 `tl_check_undef`（R20-3）只检查名字以 `g_` 开头的未定义外部（全局数据对象），函数外部不检查。
 - 同现：经典参考 REF 0ed46192 行为相同（共享缺陷，非回归）；产品==REF 字节差分仍有效，不阻塞候选 f3705dfa。
