@@ -1,0 +1,52 @@
+/* Structural refusals and accepts for P1, P2, and P3 package spans.
+ * P1 and P2 extents must start with N. No inflation, checksum execution,
+ * network text, library link, or builder run.
+ */
+#pragma unisa use runtime.packagestruct
+static int failed;
+static void ck(int ok, const char *name) {
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", name);
+    if (!ok) failed++;
+}
+static void audit(const char *s, int want, int ver, const char *name) {
+    int v = 9, rc = cxps_audit((const unsigned char *)s, (long)strlen(s), &v);
+    ck(rc == want && (rc ? v == 9 : v == ver), name);
+}
+int main(void) {
+    int v = 9;
+    audit("P 1 1 1\nD route stage in out 0\nM 4\nNxxx", 0, 1, "p1-leading-n");
+    audit("P 1 1 2\nD route a in mid 0\nD route b mid out 0\nM 1\nN", 0, 1, "p1-stage-chain");
+    audit("P 2 1 1 1\nD route stage in out 0\nM 4\nNxxxF 1 1\nkv", 0, 2, "p2-resource");
+    audit("P 3 1 1 0\nD route stage in out 0\nM 4 8 1 0\nxxxx", 0, 3, "p3-opaque-extent");
+    audit("P 1 01 1\nD route stage in out 0\nM 1\nN", 0, 1, "p1-leading-zero-count");
+    audit("P 4 1 1\nD route stage in out 0\nM 1\nZ", 2, 0, "version-rejected");
+    audit("P 1 1 1 0\nD route stage in out 0\nM 1\nZ", 2, 0, "p1-extra-header");
+    audit("P 1 0 1\nD route stage in out 0\nM 1\nZ", 3, 0, "zero-model-count");
+    audit("P 1 1 2\nD route a in mid 0\nD route a mid out 0\nM 1\nZ", 4, 0, "duplicate-stage");
+    audit("P 1 1 2\nD route a in mid 0\nD route b other out 0\nM 1\nZ", 4, 0, "stage-chain");
+    audit("P 1 1 1\nD route stage in out 1\nM 1\nZ", 4, 0, "stage-index");
+    audit("P 1 10 1\nD route stage in out 9\nM 1\nN", 5, 0, "model-count-short");
+    audit("P 1 10 1\nD route stage in out 9\nM 1\nNM 1\nNM 1\nNM 1\nNM 1\nNM 1\nNM 1\nNM 1\nNM 1\nNM 1\nN", 0, 1, "stage-index-at-limit");
+    audit("P 1 1 1\nD os/x86_64 name in.out step-1 0\nM 1\nN", 0, 1, "stage-word");
+    audit("P 1 1 1\nD good_name stage in out 0\nM 2\nN ", 0, 1, "stage-name-legal");
+    audit("P 1 1 1\nD bad@name stage in out 0\nM 2\nN ", 4, 0, "stage-route-at");
+    audit("P 1 1 1\nD route bad@name in out 0\nM 2\nN ", 4, 0, "stage-name-at");
+    audit("P 1 1 1\nD route stage bad@name out 0\nM 2\nN ", 4, 0, "stage-in-at");
+    audit("P 1 1 1\nD route stage in bad@name 0\nM 2\nN ", 4, 0, "stage-out-at");
+    audit("P 1 1 1\nD route stage in out 0\nM 4\nxy", 5, 0, "model-short");
+    audit("P 3 1 1 0\nD route stage in out 0\nM 1 1 2 0\nZ", 5, 0, "codec-range");
+    audit("P 3 1 1 0\nD route stage in out 0\nM 1\nZ", 5, 0, "p3-short-model-record");
+    audit("P 2 1 1 0\nD route stage in out 0\nM 1 1 1 0\nZ", 5, 0, "p2-long-model-record");
+    audit("P 1 1 1\nD route stage in out 0\nM 1\nZ", 5, 0, "p1-sentinel");
+    audit("P 2 1 1 0\nD route stage in out 0\nM 1\nZ", 5, 0, "p2-sentinel");
+    audit("P 2 1 1 2\nD route stage in out 0\nM 1\nNF 1 1\nkVF 1 1\nkW", 6, 0, "duplicate-resource");
+    audit("P 2 1 1 1\nD route stage in out 0\nM 1\nNF 0 1\nV", 6, 0, "empty-resource-key");
+    audit("P 1 1 1\nD route stage in out 0\nM 1\nN!", 7, 0, "trailing");
+    audit("P 1 1 1\nD route stage in out 0\nM 1\nNF 1 1\nkV", 7, 0, "p1-no-resource-section");
+    ck(cxps_audit(0, 1, &v) == 1 && v == 9, "null-data");
+    ck(cxps_audit((const unsigned char *)"P", 1, 0) == 1, "null-version");
+    printf("NOT_RUN\tp3-inflate-crc-uninet-full-network-text\n");
+    printf("NOT_RUN\tfooter-slice-full-file-identity-library-link-builder\n");
+    printf("CXPACKAGE_STRUCT\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

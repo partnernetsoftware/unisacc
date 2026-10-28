@@ -7,6 +7,8 @@
  * The library TU links the CX model number reader as a separate unit.
  */
 #pragma unisa use runtime.process
+#pragma unisa use runtime.packagestruct
+#pragma unisa use runtime.packagefooter
 #define NFILE 256
 static char root[4096], outdir[4096], boundp[4400], ccpath[4096], arpath[4096];
 static char relv[NFILE][240];
@@ -28,6 +30,21 @@ static void hash_file(const char *p, char h[65]) {
     if (!s) fail("read-input");
     cx_sha256_hex(s, n, h);
     free(s);
+}
+/* Audit package framing, not compressed model contents or authentication. */
+static int package_structure(const char *path) {
+    size_t n; char *bytes=cx_read(path,&n); int version=0, rc;
+    if (!bytes) fail("read-package");
+    if (n > 2147483647UL) { free(bytes); fail("package-too-large"); }
+    const unsigned char *data=(const unsigned char *)bytes; long length=(long)n;
+    if (n < 2 || bytes[0] != 'P' || bytes[1] != ' ') {
+        PackageFooter footer;
+        if (!packagefooter_locate_bytes(data,length,&footer)) { free(bytes); fail("package-footer"); }
+        data+=(long)footer.package_offset; length=(long)footer.package_length;
+    }
+    rc=cxps_audit(data,length,&version); free(bytes);
+    if(rc) fail("package-structure");
+    return version;
 }
 static int below(const char *path, const char *base) {
     size_t n;
@@ -168,11 +185,11 @@ int main(int argc, char **argv) {
     fprintf(stderr, "cx-library-build: host-not-lnx-x86_64\n");
     return 2;
 #else
-    char parent[4096], leaf[240], pkg_real[4096], parent_real[4096], selfsha[65], pkgsha[65], ccsha[65], arsha[65];
+    char parent[4096], leaf[240], pkg_real[4096], parent_real[4096], selfsha[65], pkgsha[65], ccsha[65], arsha[65], auditsha[65], footsha[65], verifysha[65], auditpath[4400], footpath[4400];
     char src_library[4400], src_bridge[4400], src_codec[4400], src_footer[4400], src_attr[4400], src_num[4400], inc[4400];
     char obj_library[4400], obj_bridge[4400], obj_codec[4400], obj_footer[4400], obj_attr[4400], obj_num[4400], lib_a[4400], lib_so[4400];
     char header_src[4400], header_dst[4400], pkg_dst[4400], man_src[4400], man_dst[4400], work[4400];
-    char *ld[16]; int nld, z; struct stat st; const char *ffi = "-lffi", *dl = "-ldl";
+    char *ld[16]; int nld, z, pkgversion; struct stat st; const char *ffi = "-lffi", *dl = "-ldl";
     if (argc < 5 || argc > 21) fail("usage PACKAGE OUTPUT CC AR [LDFLAG...]");
     for (int i = 1; i <= 4; i++) if (argv[i][0] != '/' || bad_token(argv[i])) fail("absolute-path");
     nld = argc == 5 ? 2 : argc - 5;
@@ -199,7 +216,9 @@ int main(int argc, char **argv) {
     if (!realpath(argv[3], ccpath) || stat(ccpath, &st) || !S_ISREG(st.st_mode) || !(st.st_mode & 0111)) fail("cc-missing");
     if (lstat(argv[4], &st)) fail("ar-missing");
     if (!realpath(argv[4], arpath) || stat(arpath, &st) || !S_ISREG(st.st_mode) || !(st.st_mode & 0111)) fail("ar-missing");
-    hash_file(pkg_real, pkgsha); hash_file(ccpath, ccsha); hash_file(arpath, arsha); hash_file(__FILE__, selfsha);
+    if (cx_fmt(auditpath,sizeof auditpath,"%s/cx/runtime/packagestruct.cx",root) || cx_fmt(footpath,sizeof footpath,"%s/cx/runtime/packagefooter.cx",root)) fail("path-bound");
+    hash_file(auditpath,auditsha); hash_file(footpath,footsha);
+    hash_file(pkg_real, pkgsha); pkgversion=package_structure(pkg_real); hash_file(ccpath, ccsha); hash_file(arpath, arsha); hash_file(__FILE__, selfsha);
     if (mkdir(outdir, 0700)) fail("mkdir-output");
     created = 1;
     z = snprintf(work, sizeof work, "%s/work", outdir); if (z < 0 || (size_t)z >= sizeof work) fail("path-bound");
@@ -207,6 +226,8 @@ int main(int argc, char **argv) {
     z = snprintf(man_src, sizeof man_src, "%s/manifest.txt", work); if (z < 0 || (size_t)z >= sizeof man_src) fail("path-bound");
     man = fopen(man_src, "wx"); if (!man) fail("manifest-write");
     if (fprintf(man, "CXLIBRARY1\ntarget\tlnx/x86_64\nscope\thost-cc static and dynamic library; ffi probe not run\npackage\t%s\t%s\ncc\t%s\t%s\nar\t%s\t%s\nbuilder\t%s\n", pkgsha, pkg_real, ccpath, ccsha, arpath, arsha, selfsha) < 0) fail("manifest-write");
+    if (fprintf(man, "package-structure\tP%d\topaque-models-no-crc-or-inflate\n",pkgversion) < 0) fail("manifest-write");
+    if (fprintf(man, "audit-source\tpackagestruct\t%s\naudit-source\tpackagefooter\t%s\n",auditsha,footsha) < 0) fail("manifest-write");
     if (fprintf(man, "define\tUNISA_CX_CODEC\ndefine\tUNISA_CX_PACKAGEFOOTER\ndefine\tUNISA_CX_ATTRIBUTE_FRAME\ndefine\tUNISA_CX_MODEL_NUMBER\nlink\tlibunisacc.a\tlibrary.o bridge.o codec.o footer.o attribute_frame.o model_number.o\nlink\tlibunisacc.so\tlibrary.o bridge.o codec.o footer.o attribute_frame.o model_number.o\n") < 0) fail("manifest-write");
     for (int i = 0; i < nld; i++) if (fprintf(man, "ldflag\t%s\n", ld[i]) < 0) fail("manifest-write");
     add_rel("exec/c/libunisacc.c"); add_rel("exec/c/libunisacc.h"); add_rel("exec/c/librarycall_x86_64.S");
@@ -235,6 +256,8 @@ int main(int argc, char **argv) {
     { char *env[] = { "ZERO_AR_DATE=1", 0 }; char *av[] = { boundp, "50", arpath, "rcs", lib_a, obj_library, obj_bridge, obj_codec, obj_footer, obj_attr, obj_num, 0 }; run_step(av, env, "static-link"); }
     { char *av[40]; int n = 0; av[n++] = boundp; av[n++] = "50"; av[n++] = ccpath; av[n++] = "-shared"; av[n++] = "-Wl,-soname,libunisacc.so"; av[n++] = obj_library; av[n++] = obj_bridge; av[n++] = obj_codec; av[n++] = obj_footer; av[n++] = obj_attr; av[n++] = obj_num; for (int i = 0; i < nld; i++) av[n++] = ld[i]; av[n++] = "-o"; av[n++] = lib_so; av[n] = 0; run_step(av, 0, "dynamic-link"); }
     rehash(pkg_real, pkgsha, ccsha, arsha, selfsha);
+    hash_file(auditpath,verifysha); if(strcmp(verifysha,auditsha)) fail("audit-source-changed");
+    hash_file(footpath,verifysha); if(strcmp(verifysha,footsha)) fail("audit-source-changed");
     if (cx_fmt(header_src, sizeof header_src, "%s/work/src/exec/c/libunisacc.h", outdir)) fail("path-bound");
     if (cx_fmt(header_dst, sizeof header_dst, "%s/libunisacc.h", outdir)) fail("path-bound");
     if (cx_fmt(pkg_dst, sizeof pkg_dst, "%s/compiler.pkg", outdir)) fail("path-bound");
