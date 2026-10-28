@@ -6,7 +6,10 @@
  * must hold exactly one row for the cell (column 2) whose state (column 4) is MISSING, and every batch id must be an
  * IMPLEMENTED row of tests/batches.tsv. The flipped row keeps every other column and sets state COVERED_LOCAL and
  * evidence (column 5) to the mapping's text. Rows that are not mapped are copied byte for byte. This prepares the
- * relabel the slow lane applies; it never writes into tests/. */
+ * relabel the slow lane applies; it never writes into tests/.
+ * Migration (next epoch): after re-running the 35 batches on the new candidate into LOGDIR, append `--migrate OLDHEX
+ * NEWHEX LOGDIR`: mapped cells must then be COVERED_LOCAL with @OLDHEX evidence; their evidence is re-tagged to @NEWHEX
+ * and LOGDIR, a migration note is added, and --check works the same way. */
 #pragma unisa use cxlib.netpack
 
 static char root[4096];
@@ -18,8 +21,12 @@ static int field(const char *line, int idx, char *out, size_t cap) { const char 
 static int batch_implemented(const char *reg, size_t rn, const char *id) { const char *at = reg; size_t idn = strlen(id); while (at < reg + rn) { const char *e = memchr(at, '\n', (size_t)(reg + rn - at)); if (!e) e = reg + rn; if ((size_t)(e - at) > idn + 1 && !memcmp(at, id, idn) && at[idn] == '\t') { char impl[64]; char line[8192]; size_t ln = (size_t)(e - at); if (ln >= sizeof line) ln = sizeof line - 1; memcpy(line, at, ln); line[ln] = 0; return field(line, 1, impl, sizeof impl) && !strcmp(impl, "IMPLEMENTED"); } at = e + 1; } return 0; }
 
 int main(int argc, char **argv) {
-    if ((argc != 4 && argc != 5) || !realpath(argv[1], root)) { fputs("usage: ROOT MAP.tsv OUT_DIR | ROOT MAP.tsv --check [OUT_DIR]\n", stderr); return 2; }
-    int check = !strcmp(argv[3], "--check"); const char *outdir = check ? (argc == 5 ? argv[4] : 0) : argv[3];
+    /* optional trailing `--migrate OLDHEX NEWHEX LOGDIR`: re-tag cells that are already COVERED_LOCAL with @OLDHEX evidence
+     * to @NEWHEX and LOGDIR (the next epoch's rerun), instead of flipping MISSING cells */
+    const char *mig_old = 0, *mig_new = 0, *mig_log = 0; int ac = argc;
+    if (argc >= 7 && !strcmp(argv[argc - 4], "--migrate")) { mig_old = argv[argc - 3]; mig_new = argv[argc - 2]; mig_log = argv[argc - 1]; ac = argc - 4; }
+    if ((ac != 4 && ac != 5) || !realpath(argv[1], root)) { fputs("usage: ROOT MAP.tsv OUT_DIR | ROOT MAP.tsv --check [OUT_DIR]  [--migrate OLDHEX NEWHEX LOGDIR]\n", stderr); return 2; }
+    int check = !strcmp(argv[3], "--check"); const char *outdir = check ? (ac == 5 ? argv[4] : 0) : argv[3];
     size_t mn; char *m = cx_read(argv[2], &mn); if (!m) die("map");
     for (char *at = m; at < m + mn;) { char *e = memchr(at, '\n', (size_t)(m + mn - at)); if (!e) e = m + mn; *e = 0; if (at[0] != '#' && strncmp(at, "matrix\t", 7) && *at) { if (nmap >= 128) die("map size"); Map *x = &maps[nmap]; if (!field(at, 0, x->matrix, sizeof x->matrix) || !field(at, 1, x->cell, sizeof x->cell) || !field(at, 2, x->batches, sizeof x->batches) || !field(at, 3, x->evidence, sizeof x->evidence)) die("map row shape"); nmap++; } at = e + 1; }
     char rp[4400]; path(rp, sizeof rp, root, "tests/batches.tsv"); size_t rn; char *reg = cx_read(rp, &rn); if (!reg) die("batches.tsv");
@@ -30,16 +37,23 @@ int main(int argc, char **argv) {
         char in[4400], leaf[160]; snprintf(leaf, sizeof leaf, "tests/%s-domain-matrix.tsv", names[k]); path(in, sizeof in, root, leaf);
         size_t n; char *s = cx_read(in, &n); if (!s) die("matrix read");
         char *out = malloc(n + 65536); if (!out) die("alloc"); size_t on = 0; int header_done = 0;
-        static const char *note = "# 2026-10-28: rows with @d65c1474 evidence ran on the admitted fullname-epoch candidate d65c1474 (out/c43-cc-reg-01; all-waves session unisacc-cc-session-2e6adb9ce0, 35 receipts PASS); older Root7a rows are untouched.\n";
+        static char note[1024]; if (mig_new) snprintf(note, sizeof note, "# migrated: rows with @%s evidence were re-run on the admitted candidate %s (%s); earlier rows are untouched.\n", mig_new, mig_new, mig_log);
+        else snprintf(note, sizeof note, "# 2026-10-28: rows with @d65c1474 evidence ran on the admitted fullname-epoch candidate d65c1474 (out/c43-cc-reg-01; all-waves session unisacc-cc-session-2e6adb9ce0, 35 receipts PASS); older Root7a rows are untouched.\n");
         for (char *at = s; at < s + n;) {
             if (!header_done && at > s && at[0] != '#' && memcmp(at, note, strlen(note))) { int any = 0; for (int i = 0; i < nmap; i++) if (!strcmp(maps[i].matrix, names[k])) any = 1; if (any) { memcpy(out + on, note, strlen(note)); on += strlen(note); } header_done = 1; }
             if (!header_done && !memcmp(at, note, strlen(note))) header_done = 1; char *e = memchr(at, '\n', (size_t)(s + n - at)); size_t ln = e ? (size_t)(e - at) : (size_t)(s + n - at); char line[8192]; if (ln >= sizeof line) die("line bound"); memcpy(line, at, ln); line[ln] = 0;
             char cell[128], state[64]; int hit = -1;
-            if (line[0] != '#' && field(line, 1, cell, sizeof cell) && field(line, 3, state, sizeof state)) for (int i = 0; i < nmap; i++) if (!strcmp(maps[i].matrix, names[k]) && !strcmp(maps[i].cell, cell)) { if (strcmp(state, "MISSING")) { fprintf(stderr, "matrix-flip: REFUSE cell-not-missing %s/%s state=%s\n", names[k], cell, state); return 2; } if (maps[i].used) { fprintf(stderr, "matrix-flip: REFUSE duplicate-cell %s/%s\n", names[k], cell); return 2; } maps[i].used = 1; hit = i; }
+            if (line[0] != '#' && field(line, 1, cell, sizeof cell) && field(line, 3, state, sizeof state)) for (int i = 0; i < nmap; i++) if (!strcmp(maps[i].matrix, names[k]) && !strcmp(maps[i].cell, cell)) { char ev[4096]; if (!field(line, 4, ev, sizeof ev)) die("evidence column"); char oldtag[80]; snprintf(oldtag, sizeof oldtag, "@%s", mig_old ? mig_old : "");
+                if (mig_old ? (strcmp(state, "COVERED_LOCAL") || !strstr(ev, oldtag)) : strcmp(state, "MISSING")) { fprintf(stderr, "matrix-flip: REFUSE %s %s/%s state=%s\n", mig_old ? "cell-not-covered-by-old-candidate" : "cell-not-missing", names[k], cell, state); return 2; } if (maps[i].used) { fprintf(stderr, "matrix-flip: REFUSE duplicate-cell %s/%s\n", names[k], cell); return 2; } maps[i].used = 1; hit = i; }
             if (hit < 0) { memcpy(out + on, at, ln); on += ln; }
             else { /* rebuild: columns 0-2 as is, 3 = COVERED_LOCAL, 4 = evidence, 5.. as is */
                 char *cols[16]; int nc = 0; char copy[8192]; memcpy(copy, line, ln + 1); for (char *p = copy; nc < 16; ) { cols[nc++] = p; char *t = strchr(p, '\t'); if (!t) break; *t = 0; p = t + 1; }
-                if (nc < 6) die("matrix row columns"); char nl[8192]; int w = snprintf(nl, sizeof nl, "%s\t%s\t%s\tCOVERED_LOCAL\t%s", cols[0], cols[1], cols[2], maps[hit].evidence); for (int c = 5; c < nc; c++) { int z = snprintf(nl + w, sizeof nl - (size_t)w, "\t%s", cols[c]); if (z < 0 || (size_t)z >= sizeof nl - (size_t)w) die("row bound"); w += z; }
+                if (nc < 6) die("matrix row columns"); char evd[2048]; snprintf(evd, sizeof evd, "%s", maps[hit].evidence);
+                if (mig_old) { /* @OLD -> @NEW and out/c43-cc-reg-01 -> LOGDIR inside the evidence text */
+                    char tmp[2048], o1[80], n1[80]; snprintf(o1, sizeof o1, "@%s", mig_old); snprintf(n1, sizeof n1, "@%s", mig_new);
+                    const char *pairs[2][2] = { { o1, n1 }, { "out/c43-cc-reg-01", mig_log } };
+                    for (int q = 0; q < 2; q++) { tmp[0] = 0; const char *src = evd; size_t ol = strlen(pairs[q][0]); for (const char *f; (f = strstr(src, pairs[q][0])); src = f + ol) { size_t l = strlen(tmp); if (l + (size_t)(f - src) + strlen(pairs[q][1]) + 1 >= sizeof tmp) die("evidence bound"); memcpy(tmp + l, src, (size_t)(f - src)); tmp[l + (size_t)(f - src)] = 0; strcat(tmp, pairs[q][1]); } strcat(tmp, src); snprintf(evd, sizeof evd, "%s", tmp); } }
+                char nl[8192]; int w = snprintf(nl, sizeof nl, "%s\t%s\t%s\tCOVERED_LOCAL\t%s", cols[0], cols[1], cols[2], evd); for (int c = 5; c < nc; c++) { int z = snprintf(nl + w, sizeof nl - (size_t)w, "\t%s", cols[c]); if (z < 0 || (size_t)z >= sizeof nl - (size_t)w) die("row bound"); w += z; }
                 memcpy(out + on, nl, (size_t)w); on += (size_t)w; flipped++; }
             if (e) out[on++] = '\n'; at = e ? e + 1 : s + n; }
         if (outdir) { char op[4400]; snprintf(op, sizeof op, "%s/%s-domain-matrix.tsv", outdir, names[k]);
