@@ -1,0 +1,315 @@
+/* module cli. First slice of command-line parsing.
+   The caller owns one CxcState. These functions borrow argv and do not
+   write its slots or the bytes of any argument. They do not allocate,
+   and they have no mutable module state. They do not call die, exit,
+   clierror, or fprintf.
+
+   Transitional C callers paste this typedef and these prototypes.
+   The layout below is the ABI: eight pointers, then eighteen ints,
+   natural alignment, no pack attribute. On LP64 and LLP64 that is
+   8-byte pointers and 4-byte ints, sizeof 136, with no interior
+   padding. tools/check-driver-cli.cx locks every offset.
+
+     typedef struct {
+         const char *out;
+         const char *target;
+         const char *pkg;
+         const char *deps;
+         const char *host_symbols_path;
+         const char *host_provider_path;
+         const char **deptargets;
+         int *depquoted;
+         int deptarget_cap;
+         int ndeptargets;
+         int mode;
+         int level;
+         int explicit_image;
+         int runit;
+         int force_origin;
+         int emitbin;
+         int deponly;
+         int depphony;
+         int sawc;
+         int sawS;
+         int funit;
+         int warnings;
+         int defrun;
+         int werror;
+         int nostd;
+         int notrim;
+     } CxcState;
+     int cxc_default_run(CxcState *st, char **argv, int argc,
+                         char *why, long whycap);
+     int cxc_step(CxcState *st, char **argv, int argc, int *index,
+                  char *why, long whycap);
+
+   char ** matches main. A const char ** parameter would not accept
+   main's argv under the host warning set. Borrowing is the contract,
+   not a const qualifier.
+
+   cxc_default_run scans argv[1..argc). A "--" ends the scan. A single
+   letter o, b, t, S, c, E, or M is a mode flag, as are the exact words
+   -run, -dump-tokens, --tapebin, --version, and -version. The exact
+   words --models, -I, -iquote, -D, -U, -include, -MF, -MT, -MQ,
+   --emit-host-symbols, and --host-provider skip the following slot
+   without reading it, so that slot cannot itself count as a mode flag.
+   -DFOO, -Ifoo, and -iquotepath do not skip. With no mode flag, runit
+   and defrun become 1. A mode flag leaves every field unchanged, so an
+   explicit -run does not set defrun. --force-origin, -funit, --help,
+   and -Werror are not mode flags.
+
+   cxc_step reads argv[*index] only.
+     0  this slice consumed the option. *index is the next slot.
+        The caller must not also increment.
+     1  not this slice. *index and every state field stay unchanged.
+        The caller handles -D/-U/-I/-include/-iquote/-ferror-limit,
+        -l/-L/-x, --help/--version, positionals, "--", ledger words,
+        and unknown words.
+     5  missing or refused argument. *index and every state field stay
+        unchanged. why receives the phrase the driver passes to
+        clierror. This 5 is not an args-module failure and must not
+        be turned into die.
+   A missing -b or -t therefore does not update mode. The in-driver
+   loop used to assign mode and then return; that write died with the
+   stack frame. Here the state is the caller's object, so the write
+   waits until the argument is present.
+   -MD and -MMD store a read-only empty string only when deps is null.
+   -M and -MM also set deponly and mode 1. -MF after either keeps the
+   path that -MF stored. werror, nostd, and notrim are sticky ints.
+   The caller emits any one-byte resource after the walk. -S and -c
+   both set mode 2 and do not clear each other's saw bit. -b sets
+   mode 0 and explicit_image 1. -t sets mode 2 and explicit_image 0.
+   A later mode flag does not clear sawc or sawS. -O and -Os store
+   level 1, -O2 and -O3 store 2, and -O0 stores 0; the last one wins.
+   -g and -std= are accepted and change no field.
+   why is left untouched when it is null or whycap <= 0. A short
+   positive cap receives a truncated phrase and a terminating NUL.
+   Success clears why when the buffer is usable. Return 1 does not. */
+#pragma unisa module cli
+
+typedef struct {
+    const char *out;
+    const char *target;
+    const char *pkg;
+    const char *deps;
+    const char *host_symbols_path;
+    const char *host_provider_path;
+    const char **deptargets;
+    int *depquoted;
+    int deptarget_cap;
+    int ndeptargets;
+    int mode;
+    int level;
+    int explicit_image;
+    int runit;
+    int force_origin;
+    int emitbin;
+    int deponly;
+    int depphony;
+    int sawc;
+    int sawS;
+    int funit;
+    int warnings;
+    int defrun;
+    int werror;
+    int nostd;
+    int notrim;
+} CxcState;
+
+static void cxc_setwhy(char *why, long cap, const char *msg) {
+    long i;
+    if (!why || cap <= 0) return;
+    i = 0;
+    if (msg) while (msg[i] && i + 1 < cap) { why[i] = msg[i]; i = i + 1; }
+    why[i] = 0;
+}
+
+static int cxc_fail(int rc, const char *msg, char *why, long whycap) {
+    cxc_setwhy(why, whycap, msg);
+    return rc;
+}
+
+static int cxc_ok(char *why, long whycap) {
+    cxc_setwhy(why, whycap, 0);
+    return 0;
+}
+
+static int cxc_skips(const char *a) {
+    return !strcmp(a, "--models") || !strcmp(a, "-I") || !strcmp(a, "-iquote")
+        || !strcmp(a, "-D") || !strcmp(a, "-U") || !strcmp(a, "-include")
+        || !strcmp(a, "-MF") || !strcmp(a, "-MT") || !strcmp(a, "-MQ")
+        || !strcmp(a, "--emit-host-symbols") || !strcmp(a, "--host-provider");
+}
+
+static int cxc_mode_word(const char *a) {
+    return !strcmp(a, "-run") || !strcmp(a, "-dump-tokens") || !strcmp(a, "--tapebin")
+        || !strcmp(a, "--version") || !strcmp(a, "-version");
+}
+
+static int cxc_need(char **argv, int argc, int index, char **out) {
+    if (index + 1 >= argc) return 0;
+    if (!argv[index + 1]) return -1;
+    *out = argv[index + 1];
+    return 1;
+}
+
+int cxc_default_run(CxcState *st, char **argv, int argc, char *why, long whycap) {
+    int i, modeflag;
+    if (!st || !argv || argc < 1) return cxc_fail(5, "bad argument", why, whycap);
+    modeflag = 0;
+    for (i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if (!a) return cxc_fail(5, "bad argument", why, whycap);
+        if (!strcmp(a, "--")) break;
+        if (a[0] != '-') continue;
+        if (a[1] == 'o' || a[1] == 'b' || a[1] == 't' || a[1] == 'S' || a[1] == 'c'
+            || a[1] == 'E' || a[1] == 'M') modeflag = 1;
+        if (cxc_mode_word(a)) modeflag = 1;
+        if (cxc_skips(a)) i++;
+    }
+    if (!modeflag) {
+        st->runit = 1;
+        st->defrun = 1;
+    }
+    return cxc_ok(why, whycap);
+}
+
+int cxc_step(CxcState *st, char **argv, int argc, int *index, char *why, long whycap) {
+    const char *a;
+    char *arg;
+    int got;
+    if (!st || !argv || !index || argc < 1 || *index < 0 || *index >= argc)
+        return cxc_fail(5, "bad argument", why, whycap);
+    a = argv[*index];
+    if (!a) return cxc_fail(5, "bad argument", why, whycap);
+    if (!strcmp(a, "-Wall") || !strcmp(a, "-Wextra")) {
+        st->warnings = 1;
+        *index = *index + 1;
+        return cxc_ok(why, whycap);
+    }
+    if (!strcmp(a, "-Werror")) {
+        st->warnings = 1;
+        st->werror = 1;
+        *index = *index + 1;
+        return cxc_ok(why, whycap);
+    }
+    if (!strcmp(a, "-nostdinc")) {
+        st->nostd = 1;
+        *index = *index + 1;
+        return cxc_ok(why, whycap);
+    }
+    if (!strcmp(a, "-ftrim-libc") || !strcmp(a, "-libneed")) {
+        st->notrim = 0;
+        *index = *index + 1;
+        return cxc_ok(why, whycap);
+    }
+    if (!strcmp(a, "-fno-trim-libc")) {
+        st->notrim = 1;
+        *index = *index + 1;
+        return cxc_ok(why, whycap);
+    }
+    if (!strcmp(a, "-run")) { st->runit = 1; *index = *index + 1; return cxc_ok(why, whycap); }
+    if (!strcmp(a, "--force-origin")) { st->force_origin = 1; *index = *index + 1; return cxc_ok(why, whycap); }
+    if (!strcmp(a, "--tapebin")) { st->emitbin = 1; *index = *index + 1; return cxc_ok(why, whycap); }
+    if (!strcmp(a, "-funit")) { st->funit = 1; *index = *index + 1; return cxc_ok(why, whycap); }
+    if (!strcmp(a, "-dump-tokens")) { st->mode = 4; *index = *index + 1; return cxc_ok(why, whycap); }
+    if (!strcmp(a, "-E")) { st->mode = 1; *index = *index + 1; return cxc_ok(why, whycap); }
+    if (!strcmp(a, "-S") || !strcmp(a, "-c")) {
+        st->mode = 2;
+        if (a[1] == 'c') st->sawc = 1;
+        else st->sawS = 1;
+        *index = *index + 1;
+        return cxc_ok(why, whycap);
+    }
+    if (!strcmp(a, "-MP")) { st->depphony = 1; *index = *index + 1; return cxc_ok(why, whycap); }
+    if (!strcmp(a, "-MD") || !strcmp(a, "-MMD")) {
+        if (!st->deps) st->deps = "";
+        *index = *index + 1;
+        return cxc_ok(why, whycap);
+    }
+    if (!strcmp(a, "-M") || !strcmp(a, "-MM")) {
+        st->deponly = 1;
+        st->mode = 1;
+        if (!st->deps) st->deps = "";
+        *index = *index + 1;
+        return cxc_ok(why, whycap);
+    }
+    if (!strcmp(a, "-MT") || !strcmp(a, "-MQ")) {
+        got = cxc_need(argv, argc, *index, &arg);
+        if (got == 0) return cxc_fail(5, "missing dependency target", why, whycap);
+        if (got < 0) return cxc_fail(5, "bad argument", why, whycap);
+        if (st->ndeptargets < 0 || st->deptarget_cap < 0 || st->ndeptargets >= st->deptarget_cap
+            || !st->deptargets || !st->depquoted)
+            return cxc_fail(5, "dependency target capacity", why, whycap);
+        st->deptargets[st->ndeptargets] = arg;
+        st->depquoted[st->ndeptargets] = a[2] == 'Q';
+        st->ndeptargets = st->ndeptargets + 1;
+        *index = *index + 2;
+        return cxc_ok(why, whycap);
+    }
+    if (!strcmp(a, "--emit-host-symbols") || !strcmp(a, "--host-provider")) {
+        const char *phrase = a[2] == 'e' ? "invalid --emit-host-symbols argument"
+                                         : "invalid --host-provider argument";
+        if ((a[2] == 'e' && st->host_symbols_path) || (a[2] != 'e' && st->host_provider_path))
+            return cxc_fail(5, phrase, why, whycap);
+        got = cxc_need(argv, argc, *index, &arg);
+        if (got == 0) return cxc_fail(5, phrase, why, whycap);
+        if (got < 0) return cxc_fail(5, "bad argument", why, whycap);
+        if (a[2] == 'e') st->host_symbols_path = arg;
+        else st->host_provider_path = arg;
+        *index = *index + 2;
+        return cxc_ok(why, whycap);
+    }
+    if (!strcmp(a, "-MF")) {
+        got = cxc_need(argv, argc, *index, &arg);
+        if (got == 0) return cxc_fail(5, "missing dependency output", why, whycap);
+        if (got < 0) return cxc_fail(5, "bad argument", why, whycap);
+        st->deps = arg;
+        *index = *index + 2;
+        return cxc_ok(why, whycap);
+    }
+    if (!strcmp(a, "--models")) {
+        got = cxc_need(argv, argc, *index, &arg);
+        if (got == 0) return cxc_fail(5, "missing package", why, whycap);
+        if (got < 0) return cxc_fail(5, "bad argument", why, whycap);
+        st->pkg = arg;
+        *index = *index + 2;
+        return cxc_ok(why, whycap);
+    }
+    if (!strcmp(a, "-b") || !strcmp(a, "-t")) {
+        int mode, image;
+        got = cxc_need(argv, argc, *index, &arg);
+        if (got == 0) return cxc_fail(5, "missing target", why, whycap);
+        if (got < 0) return cxc_fail(5, "bad argument", why, whycap);
+        mode = a[1] == 'b' ? 0 : 2;
+        image = mode == 0;
+        st->mode = mode;
+        st->explicit_image = image;
+        st->target = arg;
+        *index = *index + 2;
+        return cxc_ok(why, whycap);
+    }
+    if (!strcmp(a, "-o")) {
+        got = cxc_need(argv, argc, *index, &arg);
+        if (got == 0) return cxc_fail(5, "missing output path", why, whycap);
+        if (got < 0) return cxc_fail(5, "bad argument", why, whycap);
+        st->out = arg;
+        *index = *index + 2;
+        return cxc_ok(why, whycap);
+    }
+    if (a[0] == '-' && a[1] == 'o' && a[2]) {
+        st->out = a + 2;
+        *index = *index + 1;
+        return cxc_ok(why, whycap);
+    }
+    if (!strcmp(a, "-g") || !strncmp(a, "-std=", 5)) {
+        *index = *index + 1;
+        return cxc_ok(why, whycap);
+    }
+    if (!strcmp(a, "-O")) { st->level = 1; *index = *index + 1; return cxc_ok(why, whycap); }
+    if (!strcmp(a, "-O0")) { st->level = 0; *index = *index + 1; return cxc_ok(why, whycap); }
+    if (!strcmp(a, "-O1")) { st->level = 1; *index = *index + 1; return cxc_ok(why, whycap); }
+    if (!strcmp(a, "-O2") || !strcmp(a, "-O3")) { st->level = 2; *index = *index + 1; return cxc_ok(why, whycap); }
+    if (!strcmp(a, "-Os")) { st->level = 1; *index = *index + 1; return cxc_ok(why, whycap); }
+    return 1;
+}

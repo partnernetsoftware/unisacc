@@ -1,0 +1,493 @@
+/* Independent check for module cli. Not a product driver.
+   tools/driver -> ../cx/driver. This unit consumes that module.
+   Run one source: sh ./unisacc.com tools/check-driver-cli.cx
+   The adding turn ran that command once: exit 0, CXC failed=0.
+   The ABI notes lock the transitional C struct: eight pointers then
+   eighteen ints, sizeof 136, natural alignment. */
+#pragma unisa use driver.cli
+
+static int g_fail;
+
+static void note(int ok, const char *name) {
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", name);
+    if (!ok) g_fail = g_fail + 1;
+}
+
+static unsigned long long at(const void *p) { return (unsigned long long)p; }
+
+static void abi(void) {
+    CxcState s;
+    unsigned long long b = at(&s);
+    note(sizeof(CxcState) == 136, "abi-size");
+    note(at(&s.out) - b == 0, "abi-out");
+    note(at(&s.target) - b == 8, "abi-target");
+    note(at(&s.pkg) - b == 16, "abi-pkg");
+    note(at(&s.deps) - b == 24, "abi-deps");
+    note(at(&s.host_symbols_path) - b == 32, "abi-symbols");
+    note(at(&s.host_provider_path) - b == 40, "abi-provider");
+    note(at(&s.deptargets) - b == 48, "abi-deptargets");
+    note(at(&s.depquoted) - b == 56, "abi-depquoted");
+    note(at(&s.deptarget_cap) - b == 64, "abi-cap");
+    note(at(&s.ndeptargets) - b == 68, "abi-count");
+    note(at(&s.mode) - b == 72, "abi-mode");
+    note(at(&s.level) - b == 76, "abi-level");
+    note(at(&s.explicit_image) - b == 80, "abi-explicit");
+    note(at(&s.runit) - b == 84, "abi-runit");
+    note(at(&s.force_origin) - b == 88, "abi-origin");
+    note(at(&s.emitbin) - b == 92, "abi-emit");
+    note(at(&s.deponly) - b == 96, "abi-deponly");
+    note(at(&s.depphony) - b == 100, "abi-depphony");
+    note(at(&s.sawc) - b == 104, "abi-sawc");
+    note(at(&s.sawS) - b == 108, "abi-sawS");
+    note(at(&s.funit) - b == 112, "abi-funit");
+    note(at(&s.warnings) - b == 116, "abi-warnings");
+    note(at(&s.defrun) - b == 120, "abi-defrun");
+    note(at(&s.werror) - b == 124, "abi-werror");
+    note(at(&s.nostd) - b == 128, "abi-nostd");
+    note(at(&s.notrim) - b == 132, "abi-notrim");
+}
+
+static void defcase(char **v, int n, int run, const char *name) {
+    CxcState st, before;
+    char why[96];
+    int rc, ok;
+    memset(&st, 0x5a, sizeof st);
+    before = st;
+    why[0] = 'Q';
+    rc = cxc_default_run(&st, v, n, why, (long)sizeof why);
+    ok = rc == 0 && why[0] == 0;
+    if (run) {
+        ok = ok && st.runit == 1 && st.defrun == 1;
+        st.runit = before.runit;
+        st.defrun = before.defrun;
+    }
+    note(ok && memcmp(&st, &before, sizeof st) == 0, name);
+}
+
+static void deffail(char **v, int n, const char *name) {
+    CxcState st, before;
+    char why[96];
+    int rc;
+    memset(&st, 0x5a, sizeof st);
+    before = st;
+    rc = cxc_default_run(&st, v, n, why, (long)sizeof why);
+    note(rc == 5 && !strcmp(why, "bad argument") && memcmp(&st, &before, sizeof st) == 0, name);
+}
+
+static void leave(char **v, int n, int at, const char *name) {
+    CxcState st, before;
+    char why[96];
+    int i, rc;
+    memset(&st, 0x11, sizeof st);
+    before = st;
+    memcpy(why, "keep", 5);
+    i = at;
+    rc = cxc_step(&st, v, n, &i, why, (long)sizeof why);
+    note(rc == 1 && i == at && !strcmp(why, "keep") && memcmp(&st, &before, sizeof st) == 0, name);
+}
+
+static void miss(char **v, int n, int at, const char *phrase, const char *name) {
+    CxcState st, before;
+    char why[96];
+    int i, rc;
+    memset(&st, 0, sizeof st);
+    if (at > 1) {
+        int j = 1;
+        while (j < at) {
+            rc = cxc_step(&st, v, n, &j, why, (long)sizeof why);
+            if (rc != 0) { note(0, name); return; }
+        }
+        if (j != at) { note(0, name); return; }
+    }
+    before = st;
+    why[0] = 'Q';
+    i = at;
+    rc = cxc_step(&st, v, n, &i, why, (long)sizeof why);
+    note(rc == 5 && i == at && !strcmp(why, phrase) && memcmp(&st, &before, sizeof st) == 0, name);
+}
+
+int main(void) {
+    CxcState st, before;
+    char why[96];
+    char tomb;
+    char raw[] = {'-', 'c', 0};
+    char *bytes[2];
+    const char *slots[4];
+    int quoted[4];
+    int i, rc;
+    char *only[] = {"prog"};
+    char *opt[] = {"prog", "file.c", "-O2", "-Wall"};
+    char *c[] = {"prog", "file.c", "-c"};
+    char *S[] = {"prog", "-S"};
+    char *E[] = {"prog", "-E"};
+    char *M[] = {"prog", "-M"};
+    char *MM[] = {"prog", "-MM"};
+    char *MD[] = {"prog", "-MD"};
+    char *MMD[] = {"prog", "-MMD"};
+    char *MP[] = {"prog", "-MP"};
+    char *MF[] = {"prog", "-MF", "deps.d", "file.c"};
+    char *o[] = {"prog", "-o", "out"};
+    char *ojoin[] = {"prog", "-oOUT"};
+    char *b[] = {"prog", "-b", "lnx/x86_64"};
+    char *t[] = {"prog", "-t", "lnx/arm64"};
+    char *run[] = {"prog", "-run"};
+    char *dump[] = {"prog", "-dump-tokens"};
+    char *tape[] = {"prog", "--tapebin"};
+    char *ver[] = {"prog", "--version"};
+    char *ver2[] = {"prog", "-version"};
+    char *skipd[] = {"prog", "-D", "-c", "file.c"};
+    char *skipi[] = {"prog", "-I", "-c", "file.c"};
+    char *skipu[] = {"prog", "-U", "-S", "file.c"};
+    char *skipinc[] = {"prog", "-include", "-c", "file.c"};
+    char *skipq[] = {"prog", "-iquote", "-c", "file.c"};
+    char *skipm[] = {"prog", "--models", "-c", "file.c"};
+    char *skipe[] = {"prog", "--emit-host-symbols", "-c", "file.c"};
+    char *skipp[] = {"prog", "--host-provider", "-S", "file.c"};
+    char *noskipd[] = {"prog", "-DFOO", "-c"};
+    char *noskipi[] = {"prog", "-Ifoo", "-c"};
+    char *noskipq[] = {"prog", "-iquotepath", "-c"};
+    char *stopped[] = {"prog", "file.c", "--", "-c"};
+    char *origin[] = {"prog", "--force-origin", "file.c"};
+    char *funit[] = {"prog", "-funit", "file.c"};
+    char *help[] = {"prog", "--help"};
+    char *werr[] = {"prog", "-Werror"};
+    char *lone[] = {"prog", "-", "-c"};
+    char *dend[] = {"prog", "-D"};
+    char *mtnull[3];
+    char *dnull[3];
+    char *seen[2];
+    char *cb[] = {"prog", "-c", "-b", "T"};
+    char *bc[] = {"prog", "-b", "T", "-c"};
+    char *tb[] = {"prog", "-t", "T", "-b", "U"};
+    char *ec[] = {"prog", "-E", "-c"};
+    char *sc[] = {"prog", "-S", "-c"};
+    char *cs[] = {"prog", "-c", "-S"};
+    char *cdump[] = {"prog", "-c", "-dump-tokens"};
+    char *olevel[] = {"prog", "-O3", "-O0", "-Os", "-O", "-O2", "-O1"};
+    char *oj[] = {"prog", "-oOUT", "next"};
+    char *osplit[] = {"prog", "-o", "OUT", "next"};
+    char *omiss[] = {"prog", "-c", "-o"};
+    char *bmiss[] = {"prog", "-c", "-b"};
+    char *tmiss[] = {"prog", "-t"};
+    char *pmiss[] = {"prog", "--models"};
+    char *mfmiss[] = {"prog", "-c", "-MF"};
+    char *mfmd[] = {"prog", "-MF", "a.d", "-MD"};
+    char *mdmf[] = {"prog", "-MD", "-MF", "a.d"};
+    char *mfm[] = {"prog", "-MF", "a.d", "-M"};
+    char *mmf[] = {"prog", "-M", "-MF", "b.d"};
+    char *mtq[] = {"prog", "-MT", "foo", "-MQ", "bar"};
+    char *mtmiss[] = {"prog", "-MT"};
+    char *emit[] = {"prog", "--emit-host-symbols", "sym.out"};
+    char *emit0[] = {"prog", "--emit-host-symbols", ""};
+    char *prov[] = {"prog", "--host-provider", "prov"};
+    char *gstd[] = {"prog", "-c", "-g", "-std=c99"};
+    char *flags[] = {"prog", "--force-origin", "--tapebin", "-funit", "-MP", "-run"};
+    char *trim1[] = {"prog", "-fno-trim-libc", "-ftrim-libc"};
+    char *trim2[] = {"prog", "-libneed", "-fno-trim-libc"};
+    char *warns[] = {"prog", "-Wall", "-Wextra", "-Werror"};
+    char *nost[] = {"prog", "-nostdinc"};
+    char *oneD[] = {"prog", "-D"};
+    char *oneI[] = {"prog", "-I"};
+    char *oneIf[] = {"prog", "-Ifoo"};
+    char *oneInc[] = {"prog", "-include"};
+    char *oneQ[] = {"prog", "-iquote"};
+    char *oneF[] = {"prog", "-ferror-limit=3"};
+    char *oneL[] = {"prog", "-l"};
+    char *oneLL[] = {"prog", "-Ldir"};
+    char *oneX[] = {"prog", "-x", "c"};
+    char *oneHelp[] = {"prog", "--help"};
+    char *oneVer[] = {"prog", "--version"};
+    char *oneDash[] = {"prog", "--"};
+    char *onePos[] = {"prog", "file.c"};
+    char *oneLed[] = {"prog", "--strict-resource-flow"};
+    char *oneDir[] = {"prog", "--resource-ledger"};
+    char *oneBad[] = {"prog", "--weird"};
+    char *oneLone[] = {"prog", "-"};
+    char *oneStd[] = {"prog", "-std"};
+    char *oneG[] = {"prog", "-gfoo"};
+    char *oneO[] = {"prog", "-O2x"};
+    char *oneB[] = {"prog", "-bfoo"};
+    char *mto[] = {"prog", "-MT", "foo", "-o"};
+
+    g_fail = 0;
+    abi();
+    defcase(only, 1, 1, "def-only-prog");
+    defcase(opt, 4, 1, "def-file-opt");
+    defcase(c, 3, 0, "def-c");
+    defcase(S, 2, 0, "def-S");
+    defcase(E, 2, 0, "def-E");
+    defcase(M, 2, 0, "def-M");
+    defcase(MM, 2, 0, "def-MM");
+    defcase(MD, 2, 0, "def-MD");
+    defcase(MMD, 2, 0, "def-MMD");
+    defcase(MP, 2, 0, "def-MP");
+    defcase(MF, 4, 0, "def-MF");
+    defcase(o, 3, 0, "def-o");
+    defcase(ojoin, 2, 0, "def-ojoin");
+    defcase(b, 3, 0, "def-b");
+    defcase(t, 3, 0, "def-t");
+    defcase(run, 2, 0, "def-run");
+    defcase(dump, 2, 0, "def-dump");
+    defcase(tape, 2, 0, "def-tapebin");
+    defcase(ver, 2, 0, "def-version-long");
+    defcase(ver2, 2, 0, "def-version-short");
+    defcase(skipd, 4, 1, "def-skip-D-c");
+    defcase(skipi, 4, 1, "def-skip-I-c");
+    defcase(skipu, 4, 1, "def-skip-U-S");
+    defcase(skipinc, 4, 1, "def-skip-include");
+    defcase(skipq, 4, 1, "def-skip-iquote");
+    defcase(skipm, 4, 1, "def-skip-models");
+    defcase(skipe, 4, 1, "def-skip-emit");
+    defcase(skipp, 4, 1, "def-skip-provider");
+    defcase(noskipd, 3, 0, "def-noskip-DFOO");
+    defcase(noskipi, 3, 0, "def-noskip-Ifoo");
+    defcase(noskipq, 3, 0, "def-noskip-iquote");
+    defcase(stopped, 4, 1, "def-dash-stop");
+    defcase(origin, 3, 1, "def-force-origin");
+    defcase(funit, 3, 1, "def-funit");
+    defcase(help, 2, 1, "def-help");
+    defcase(werr, 2, 1, "def-Werror");
+    defcase(lone, 3, 0, "def-lone-dash-c");
+    defcase(dend, 2, 1, "def-D-at-end");
+    mtnull[0] = "prog"; mtnull[1] = "-MT"; mtnull[2] = 0;
+    defcase(mtnull, 3, 0, "def-MT-null-skipped");
+    dnull[0] = "prog"; dnull[1] = "-D"; dnull[2] = 0;
+    defcase(dnull, 3, 1, "def-D-null-skipped");
+    seen[0] = "prog"; seen[1] = 0;
+    deffail(seen, 2, "def-null-seen");
+    deffail(0, 1, "def-null-argv");
+    memset(&st, 0x5a, sizeof st);
+    before = st;
+    rc = cxc_default_run(&st, only, 0, why, (long)sizeof why);
+    note(rc == 5 && !strcmp(why, "bad argument") && memcmp(&st, &before, sizeof st) == 0, "def-argc0");
+    rc = cxc_default_run(0, only, 1, why, (long)sizeof why);
+    note(rc == 5 && !strcmp(why, "bad argument"), "def-null-st");
+    tomb = 'Z';
+    memset(&st, 0, sizeof st);
+    rc = cxc_default_run(&st, only, 1, &tomb, 0);
+    note(rc == 0 && st.runit == 1 && st.defrun == 1 && tomb == 'Z', "def-why-cap0");
+
+    memset(&st, 0, sizeof st);
+    i = 1;
+    rc = cxc_step(&st, cb, 4, &i, why, (long)sizeof why);
+    note(rc == 0 && i == 2 && st.mode == 2 && st.sawc == 1 && st.sawS == 0, "step-c");
+    rc = cxc_step(&st, cb, 4, &i, why, (long)sizeof why);
+    note(rc == 0 && i == 4 && st.mode == 0 && st.explicit_image == 1 && st.sawc == 1
+        && st.target == cb[3], "step-c-b");
+    memset(&st, 0, sizeof st);
+    i = 1;
+    rc = cxc_step(&st, bc, 4, &i, why, (long)sizeof why);
+    rc = rc || cxc_step(&st, bc, 4, &i, why, (long)sizeof why);
+    note(rc == 0 && st.mode == 2 && st.explicit_image == 1 && st.sawc == 1 && st.target == bc[2], "step-b-c");
+    memset(&st, 0, sizeof st);
+    i = 1;
+    rc = 0;
+    while (i < 5 && !rc) rc = cxc_step(&st, tb, 5, &i, why, (long)sizeof why);
+    note(rc == 0 && i == 5 && st.mode == 0 && st.explicit_image == 1 && st.target == tb[4], "step-t-b");
+    memset(&st, 0, sizeof st);
+    i = 1;
+    rc = cxc_step(&st, ec, 3, &i, why, (long)sizeof why);
+    rc = rc || cxc_step(&st, ec, 3, &i, why, (long)sizeof why);
+    note(rc == 0 && st.mode == 2 && st.sawc == 1 && st.sawS == 0, "step-E-c");
+    memset(&st, 0, sizeof st);
+    i = 1;
+    rc = cxc_step(&st, sc, 3, &i, why, (long)sizeof why);
+    rc = rc || cxc_step(&st, sc, 3, &i, why, (long)sizeof why);
+    note(rc == 0 && st.mode == 2 && st.sawS == 1 && st.sawc == 1, "step-S-c");
+    memset(&st, 0, sizeof st);
+    i = 1;
+    rc = cxc_step(&st, cs, 3, &i, why, (long)sizeof why);
+    rc = rc || cxc_step(&st, cs, 3, &i, why, (long)sizeof why);
+    note(rc == 0 && st.sawc == 1 && st.sawS == 1 && st.mode == 2, "step-c-S");
+    memset(&st, 0, sizeof st);
+    i = 1;
+    rc = cxc_step(&st, cdump, 3, &i, why, (long)sizeof why);
+    rc = rc || cxc_step(&st, cdump, 3, &i, why, (long)sizeof why);
+    note(rc == 0 && st.mode == 4 && st.sawc == 1, "step-c-dump");
+    memset(&st, 0, sizeof st);
+    i = 1;
+    rc = 0;
+    while (i < 7 && !rc) rc = cxc_step(&st, olevel, 7, &i, why, (long)sizeof why);
+    note(rc == 0 && i == 7 && st.level == 1, "step-O-last");
+    memset(&st, 0, sizeof st);
+    i = 1;
+    rc = cxc_step(&st, oj, 3, &i, why, (long)sizeof why);
+    note(rc == 0 && i == 2 && st.out == oj[1] + 2 && oj[2][0] == 'n', "step-o-join");
+    memset(&st, 0, sizeof st);
+    i = 1;
+    rc = cxc_step(&st, osplit, 4, &i, why, (long)sizeof why);
+    note(rc == 0 && i == 3 && st.out == osplit[2], "step-o-split");
+    miss(omiss, 3, 2, "missing output path", "step-o-miss");
+    miss(bmiss, 3, 2, "missing target", "step-b-miss");
+    miss(tmiss, 2, 1, "missing target", "step-t-miss");
+    miss(pmiss, 2, 1, "missing package", "step-models-miss");
+    miss(mfmiss, 3, 2, "missing dependency output", "step-MF-miss");
+    memset(&st, 0, sizeof st);
+    i = 1;
+    rc = cxc_step(&st, mfmd, 4, &i, why, (long)sizeof why);
+    rc = rc || cxc_step(&st, mfmd, 4, &i, why, (long)sizeof why);
+    note(rc == 0 && st.deps == mfmd[2] && st.deps[0] == 'a', "step-MF-MD");
+    memset(&st, 0, sizeof st);
+    i = 1;
+    rc = cxc_step(&st, mdmf, 4, &i, why, (long)sizeof why);
+    note(rc == 0 && st.deps && st.deps[0] == 0, "step-MD-empty");
+    rc = cxc_step(&st, mdmf, 4, &i, why, (long)sizeof why);
+    note(rc == 0 && st.deps == mdmf[3], "step-MD-MF");
+    memset(&st, 0, sizeof st);
+    i = 1;
+    rc = cxc_step(&st, mfm, 4, &i, why, (long)sizeof why);
+    rc = rc || cxc_step(&st, mfm, 4, &i, why, (long)sizeof why);
+    note(rc == 0 && st.deps == mfm[2] && st.deponly == 1 && st.mode == 1, "step-MF-M");
+    memset(&st, 0, sizeof st);
+    i = 1;
+    rc = cxc_step(&st, mmf, 4, &i, why, (long)sizeof why);
+    note(rc == 0 && st.deps && st.deps[0] == 0 && st.deponly == 1 && st.mode == 1, "step-M-empty");
+    rc = cxc_step(&st, mmf, 4, &i, why, (long)sizeof why);
+    note(rc == 0 && st.deps == mmf[3] && st.deponly == 1, "step-M-MF");
+    memset(&st, 0, sizeof st);
+    st.deptargets = slots;
+    st.depquoted = quoted;
+    st.deptarget_cap = 4;
+    i = 1;
+    rc = cxc_step(&st, mtq, 5, &i, why, (long)sizeof why);
+    rc = rc || cxc_step(&st, mtq, 5, &i, why, (long)sizeof why);
+    note(rc == 0 && st.ndeptargets == 2 && slots[0] == mtq[2] && quoted[0] == 0
+        && slots[1] == mtq[4] && quoted[1] == 1, "step-MT-MQ");
+    miss(mtmiss, 2, 1, "missing dependency target", "step-MT-miss");
+    memset(&st, 0, sizeof st);
+    st.deptargets = slots;
+    st.depquoted = quoted;
+    before = st;
+    i = 1;
+    memcpy(why, "keep", 5);
+    rc = cxc_step(&st, mtq, 5, &i, why, (long)sizeof why);
+    note(rc == 5 && i == 1 && !strcmp(why, "dependency target capacity")
+        && memcmp(&st, &before, sizeof st) == 0, "step-cap0");
+    memset(&st, 0, sizeof st);
+    st.deptarget_cap = 2;
+    before = st;
+    i = 1;
+    rc = cxc_step(&st, mtq, 5, &i, why, (long)sizeof why);
+    note(rc == 5 && i == 1 && memcmp(&st, &before, sizeof st) == 0, "step-null-arrays");
+    memset(&st, 0, sizeof st);
+    i = 1;
+    rc = cxc_step(&st, emit, 3, &i, why, (long)sizeof why);
+    note(rc == 0 && i == 3 && st.host_symbols_path == emit[2], "step-emit");
+    before = st;
+    i = 1;
+    rc = cxc_step(&st, emit, 3, &i, why, (long)sizeof why);
+    note(rc == 5 && i == 1 && !strcmp(why, "invalid --emit-host-symbols argument")
+        && memcmp(&st, &before, sizeof st) == 0, "step-emit-dup");
+    miss(emit, 2, 1, "invalid --emit-host-symbols argument", "step-emit-miss");
+    memset(&st, 0, sizeof st);
+    i = 1;
+    rc = cxc_step(&st, emit0, 3, &i, why, (long)sizeof why);
+    note(rc == 0 && st.host_symbols_path && st.host_symbols_path[0] == 0, "step-emit-empty");
+    memset(&st, 0, sizeof st);
+    i = 1;
+    rc = cxc_step(&st, prov, 3, &i, why, (long)sizeof why);
+    before = st;
+    i = 1;
+    rc = cxc_step(&st, prov, 3, &i, why, (long)sizeof why);
+    note(rc == 5 && i == 1 && !strcmp(why, "invalid --host-provider argument")
+        && st.host_provider_path == prov[2], "step-provider-dup");
+    miss(prov, 2, 1, "invalid --host-provider argument", "step-provider-miss");
+    memset(&st, 0, sizeof st);
+    i = 1;
+    rc = cxc_step(&st, gstd, 4, &i, why, (long)sizeof why);
+    before = st;
+    rc = cxc_step(&st, gstd, 4, &i, why, (long)sizeof why);
+    note(rc == 0 && i == 3 && memcmp(&st, &before, sizeof st) == 0, "step-g");
+    before = st;
+    rc = cxc_step(&st, gstd, 4, &i, why, (long)sizeof why);
+    note(rc == 0 && i == 4 && memcmp(&st, &before, sizeof st) == 0 && st.mode == 2, "step-std");
+    leave(oneD, 2, 1, "leave-D");
+    leave(oneI, 2, 1, "leave-I");
+    leave(oneIf, 2, 1, "leave-Ifoo");
+    leave(oneInc, 2, 1, "leave-include");
+    leave(oneQ, 2, 1, "leave-iquote");
+    leave(oneF, 2, 1, "leave-ferror");
+    leave(oneL, 2, 1, "leave-l");
+    leave(oneLL, 2, 1, "leave-L");
+    leave(oneX, 3, 1, "leave-x");
+    leave(oneHelp, 2, 1, "leave-help");
+    leave(oneVer, 2, 1, "leave-version");
+    leave(oneDash, 2, 1, "leave-dashdash");
+    leave(onePos, 2, 1, "leave-positional");
+    leave(oneLed, 2, 1, "leave-strict");
+    leave(oneDir, 2, 1, "leave-ledger");
+    leave(oneBad, 2, 1, "leave-unknown");
+    leave(oneLone, 2, 1, "leave-lone-dash");
+    leave(oneStd, 2, 1, "leave-std");
+    leave(oneG, 2, 1, "leave-gfoo");
+    leave(oneO, 2, 1, "leave-O2x");
+    leave(oneB, 2, 1, "leave-bfoo");
+    bytes[0] = "prog";
+    bytes[1] = raw;
+    memset(&st, 0, sizeof st);
+    i = 1;
+    rc = cxc_step(&st, bytes, 2, &i, why, (long)sizeof why);
+    note(rc == 0 && i == 2 && st.mode == 2 && st.sawc == 1 && raw[0] == '-' && raw[1] == 'c' && raw[2] == 0, "step-bytes");
+    memset(&st, 0, sizeof st);
+    i = 1;
+    rc = 0;
+    while (i < 6 && !rc) rc = cxc_step(&st, flags, 6, &i, why, (long)sizeof why);
+    note(rc == 0 && st.force_origin == 1 && st.emitbin == 1 && st.funit == 1 && st.depphony == 1
+        && st.runit == 1 && st.mode == 0, "step-flags");
+    memset(&st, 0, sizeof st);
+    i = 1;
+    rc = cxc_step(&st, trim1, 3, &i, why, (long)sizeof why);
+    rc = rc || cxc_step(&st, trim1, 3, &i, why, (long)sizeof why);
+    note(rc == 0 && st.notrim == 0, "step-trim-clear");
+    memset(&st, 0, sizeof st);
+    i = 1;
+    rc = cxc_step(&st, trim2, 3, &i, why, (long)sizeof why);
+    rc = rc || cxc_step(&st, trim2, 3, &i, why, (long)sizeof why);
+    note(rc == 0 && st.notrim == 1, "step-trim-set");
+    memset(&st, 0, sizeof st);
+    i = 1;
+    rc = 0;
+    while (i < 4 && !rc) rc = cxc_step(&st, warns, 4, &i, why, (long)sizeof why);
+    note(rc == 0 && st.warnings == 1 && st.werror == 1, "step-warn");
+    memset(&st, 0, sizeof st);
+    i = 1;
+    rc = cxc_step(&st, nost, 2, &i, why, (long)sizeof why);
+    note(rc == 0 && st.nostd == 1 && st.warnings == 0, "step-nostd");
+    memset(&st, 0, sizeof st);
+    st.deptargets = slots;
+    st.depquoted = quoted;
+    st.deptarget_cap = 4;
+    i = 1;
+    rc = cxc_step(&st, mto, 4, &i, why, (long)sizeof why);
+    note(rc == 0 && i == 3 && st.ndeptargets == 1 && slots[0] == mto[2], "step-MT-kept");
+    before = st;
+    rc = cxc_step(&st, mto, 4, &i, why, (long)sizeof why);
+    note(rc == 5 && i == 3 && !strcmp(why, "missing output path") && st.ndeptargets == 1
+        && slots[0] == mto[2] && memcmp(&st, &before, sizeof st) == 0, "step-MT-o-miss");
+    memset(&st, 0, sizeof st);
+    st.mode = 7;
+    i = 1;
+    rc = cxc_step(&st, run, 2, &i, why, (long)sizeof why);
+    note(rc == 0 && st.runit == 1 && st.mode == 7 && st.defrun == 0, "step-run-keeps-mode");
+    tomb = 'Z';
+    memset(&st, 0, sizeof st);
+    i = 1;
+    rc = cxc_step(&st, omiss, 3, &i, &tomb, 0);
+    note(rc == 0 && i == 2 && tomb == 'Z', "step-why-cap0");
+    i = 2;
+    rc = cxc_step(&st, omiss, 3, &i, 0, 96);
+    note(rc == 5 && i == 2 && st.mode == 2 && st.out == 0, "step-null-why");
+    rc = cxc_step(0, only, 1, &i, why, (long)sizeof why);
+    note(rc == 5 && !strcmp(why, "bad argument"), "step-null-st");
+    memset(&st, 0, sizeof st);
+    i = -1;
+    before = st;
+    rc = cxc_step(&st, only, 1, &i, why, (long)sizeof why);
+    note(rc == 5 && i == -1 && memcmp(&st, &before, sizeof st) == 0, "step-bad-index");
+    i = 1;
+    rc = cxc_step(&st, only, 1, &i, why, (long)sizeof why);
+    note(rc == 5 && i == 1, "step-index-argc");
+
+    printf("CXC\tfailed=%d\n", g_fail);
+    return g_fail ? 1 : 0;
+}
