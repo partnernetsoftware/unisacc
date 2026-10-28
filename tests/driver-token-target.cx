@@ -1,0 +1,28 @@
+#pragma unisa use cxlib.netpack
+
+static int failed;
+static void check(int ok,const char *name){printf("%s\t%s\n",ok?"PASS":"FAIL",name);if(!ok)failed++;}
+static void run(const char *root,const char *product,const char *source,const char *target,const char *mode,const char *want,const char *name){
+    char *v[9]; int n=0; v[n++]="sh";v[n++]=(char *)product;
+    if(target){v[n++]="-b";v[n++]=(char *)target;}v[n++]=(char *)mode;v[n++]=(char *)source;v[n]=0;
+    np_result r={0};char why[512];int tr=np_run(v,root,0,10,&r,why,sizeof why);
+    int ok=!tr&&!r.rc&&r.out&&strstr(r.out,want)!=0&&strstr(r.out,"wrong_marker")==0;
+    check(ok,name);np_free(&r);
+}
+int main(int argc,char **argv){
+    if(argc!=3||argv[1][0]!='/'||argv[2][0]!='/')return 2;
+    char product[4400],source[4400];
+    if(snprintf(product,sizeof product,"%s/unisacc.com",argv[1])>=(int)sizeof product||
+       snprintf(source,sizeof source,"%s/source.c",argv[2])>=(int)sizeof source)return 2;
+    if(mkdir(argv[2],0700))return 2;
+    FILE *f=fopen(source,"wx");if(!f)return 2;
+    const char *body="#if defined(_WIN32)\nint win_marker;\n#elif defined(__APPLE__)\nint mac_marker;\n#elif defined(__linux__)\nint linux_marker;\n#else\nint wrong_marker;\n#endif\n";
+    if(fwrite(body,1,strlen(body),f)!=strlen(body)||fclose(f))return 2;
+    run(argv[1],product,source,"win/x86_64","-dump-tokens","id=win_marker","tokens-win");
+    run(argv[1],product,source,"osx/arm64","-dump-tokens","id=mac_marker","tokens-osx");
+    run(argv[1],product,source,"lnx/x86_64","-dump-tokens","id=linux_marker","tokens-linux");
+    run(argv[1],product,source,0,"-dump-tokens","id=linux_marker","tokens-default");
+    run(argv[1],product,source,"win/x86_64","-E","win_marker","preprocess-win");
+    run(argv[1],product,source,"osx/arm64","-E","mac_marker","preprocess-osx");
+    printf("DRIVER_TOKEN_TARGET\tfailed=%d\n",failed);return failed?1:0;
+}

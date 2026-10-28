@@ -797,7 +797,7 @@ int main(int argc, char **argv) {
     free(ATTRS.b); ATTRS.b=0; ATTRS.n=0; ATTRS.cap=0; ATTR_UNIT=0;
     ATTR_SLOT=NRI; cli[NRI].name=(const unsigned char *)"\0cli/attributes"; cli[NRI].n=15; cli[NRI].data=0; cli[NRI].len=0; NRI++;
     /* Target selection is input data; the E2 model chooses its declaration. */
-    const char *predefine_target=mode==4 ? "lnx/x86_64" : target;
+    const char *predefine_target=target;
     cli[NRI].name=(const unsigned char *)"\0cli/target"; cli[NRI].n=11;
     cli[NRI].data=(const unsigned char *)predefine_target;
     cli[NRI].len=(int)strlen(predefine_target); NRI++;
