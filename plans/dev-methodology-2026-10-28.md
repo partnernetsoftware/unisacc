@@ -69,7 +69,7 @@
 - A2 宏摘要 + 预展开前缀：E2 结束态转储活宏为 `#define` 文本（需在宏表新增名/参数文本 blob 字段，F_NAMEBLOB/F_PBLOB，FSZ 23→24+），驱动缓存（前奏 E2 输出文本, 摘要）；命中时 E2 以 `\0cli/preexpanded` 资源整段 SPAN 复制前缀、只处理摘要+用户源。改 E2 表 + facts + 驱动；locations 变体需同时缓存位置记录。
 碰撞提示：cdx 的 cx0 工作正在改 E2 对不可变资源的消费（6b0ffc7901），A2 与其同区；A1 在 run.c。先与 cdx 对齐再开工；期间按既定顺序做 MISSING 格的事实生成用例。
 
-## 10. 下一事实生成用例：`e4.gold.peep-1632`（设计，待实现为 tools/peep-cases-gen.cx）
+## 10. 下一事实生成用例：`e4.gold.peep-1632`（已实现：tools/peep-cases-gen.cx）
 
 - 事实：`weights/gold/peep.tsv` 1632 键 (a,b,rel)→y；y 分布 keep 1494、drop_a 104、fold_copy 16、to_mov 8、retarget_dest 5、retarget 2、load_to_mov/drop_b/fold_imm 各 1。
 - 关系的实现规格（`src/opt.c:770-845`，`pk_*`）：`store64 [M], rX`+`load64 rY, [M]`/`store64 [M], rY` 同槽（M 非 `[r7+…]`）→ same_slot / same_slot_same_reg(x==y)；`imm rK, N`(K≤5) + 三操作数 `OP rD, rS, rK`（rS≠rK，rK 其后死）→ const0/const1/pow2；`imm rK` + `mov rY, rK`（Y≠K，rK 死）→ copy_dead；`mov rY, rX`(Y≤5,Y≠X) + 读 rY 不写 rY 的 simple 指令，rY 其后死 → copy_into；simple 非 store 指令 + `mov`（dest_to_mov）；写 rD(≤5) 且其后死 → a_dead；`jump/jumpz L` + 紧随标签 L → to_next；跳到另一 `jump` → to_jump；其余 none。寄存器"死"= 对后续块粒度活性（ol_dead），两指令片段后接 `ret` 即死。
@@ -77,3 +77,8 @@
 - oracle：keep → 输出 == 输入；drop_a/drop_b → 去掉 a/b；load_to_mov → `load64 rY,[M]`→`mov rY, rX`；其余 34 键（fold_copy/to_mov/retarget*/fold_imm）用矩阵已允许的经典参考（`make ref`，`src/opt.c` O2）产出期望 tape，并在同一批内核对 E4 流输出字节相等。
 - 入口：E4 流容器 `streams/unisacc-stream4.com INPUT INPUT INC`（见 tests/stream-e4.cx），材料 pin 走现行七流；新批登记为 `stream-e4-peep`，不改既有批。
 - 2026-10-28 peep 规格实测（out/c43-cc-peep-01，stream4 容器直跑）：结果寄存器必须在 `ret` 前仍活（用 r0），否则 O2 的死码消除先于窥孔把整对删掉；按规格实现的键与金表一致：load_to_mov（`mov r0, r1`）、const0/const1→to_mov、copy_dead→fold_imm、pow2→keep、同槽 store/store→drop_a、同槽同寄存器 store/load→drop_b。一个待裁定差异：`mov r1, r2 / add64 r0, r1, r3`（金表 copy_into→fold_copy）E4 保持不变。经典参考 `/tmp/ua_ref -S` 不接受 tape 输入（原样回显），34 个非机械类键的 oracle 需手推或经 C 源路线。
+- 2026-10-28 全表实跑（`sh ./unisacc.com tools/peep-cases-gen.cx -- . STREAM4 ABS_OUT FIRST COUNT`，8 片各 ≤200 键、每片 <60 s；日志 out/c43-cc-peep-01/gen）：1632 键 = PASS 277 + FAIL 0 + UNREALIZABLE 1339（y=keep 为定义值）+ TABLE_SUSPECT 16 + NOT_RUN 0。所有 y 都是机械 oracle（含 fold_copy/to_mov/retarget*/fold_imm），不再需要经典参考产出期望。
+  - 上条"待裁定差异"撤回：`mov r1, r2 / …` 不折叠是因为参考 `ol_scan` 在 `ret` 处视 r0/r1 为活（结果寄存器），r1 永不死；复制目标改用 r3 后 11 个 copy_into 键全部 fold_copy 一致。E4 与参考在此无分歧。
+  - retarget（to_jump）：E4 在重定向后同时删除已不可达的落点 `jump`（死码，非窥孔关系）；oracle 期望删除后的形态。
+  - TABLE_SUSPECT 16（金表给出非 keep 的 y，但参考分类器对该类对永不产生该关系）：a_dead×{other,none}（load64/imm/mov/alu，8 键：`ol_scan` 把 tape 末尾与 OK_OTHER 行视为读全部寄存器）、copy_into×{load64,imm,jump,jumpz,other}（5 键：b 不读 rY 或非 simple）、to_next×none（2 键）、other.mov.dest_to_mov（1 键）。不可达，无行为影响；金表若按参考收紧应改这 16 行为 keep（经生成器路线）。
+  - 待办：登记批 `stream-e4-peep`（tests/batches.tsv 当前由 cdx 暂存，待其提交后再加）。

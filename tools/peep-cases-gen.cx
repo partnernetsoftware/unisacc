@@ -1,0 +1,196 @@
+/* tools/peep-cases-gen.cx -- E4 peephole gold table (weights/gold/peep.tsv, 1632 keys) as executable cases.
+ *   sh ./unisacc.com tools/peep-cases-gen.cx -- ROOT STREAM4_COM ABS_OUT FIRST COUNT
+ * For every gold key (a, b, rel) -> y in rows FIRST..FIRST+COUNT-1 the tool writes one two-instruction tape that
+ * realises the relation exactly as the reference classifies it (src/opt.c pk_* : same_slot, const0/1/pow2,
+ * copy_dead, copy_into, dest_to_mov, a_dead, to_next, to_jump, none), runs the E4 O2 stream container on it
+ * (STREAM4_COM INPUT INPUT ROOT/include, UNISA_ATTRIBUTES unset) and compares the output with the rewrite the gold
+ * action prescribes (keep / drop_a / drop_b / load_to_mov / to_mov / fold_imm / fold_copy / retarget /
+ * retarget_dest), derived mechanically from the input. The result register is r0 so that liveness does not erase
+ * the pair before the peephole sees it (measured: a dead result is dropped first).
+ * A key whose a/b classes cannot carry its relation (e.g. a=jump with same_slot) is UNREALIZABLE: no tape is run,
+ * and the gold row must say keep (its only consistent value); it is counted, never reported as PASS.
+ * Output: ABS_OUT/cases/KEY.tape, KEY.out, ABS_OUT/results.tsv (PASS|FAIL|UNREALIZABLE|NOT_RUN per key) and a
+ * SUMMARY line. Caller bound 55; each container run is bounded 12. */
+#pragma unisa use cxlib.netpack
+
+static char root[4096], stream4[4096], outdir[4096], inc[4400], bound[4400];
+static void die(const char *s) { fprintf(stderr, "peep-cases: REFUSE %s errno=%d\n", s, errno); exit(2); }
+static void path(char *p, size_t cap, const char *a, const char *b) { int n = snprintf(p, cap, "%s/%s", a, b); if (n < 0 || (size_t)n >= cap) die("path"); }
+static void saved(const char *p, const char *s, size_t n) { int f = open(p, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600); if (f < 0) die("exclusive create"); while (n) { ssize_t k = write(f, s, n); if (k <= 0) die("write"); s += k; n -= (size_t)k; } if (close(f)) die("close"); }
+
+enum { NA = 8, NB = 17, NR = 13, NY = 11 };
+static const char *A[NA] = { "store64", "load64", "imm", "mov", "jump", "jumpz", "alu", "other" };
+static const char *B[NB] = { "store64", "load64", "imm", "mov", "jump", "jumpz", "add64", "sub64", "mul64", "shl64", "shr64", "lshr64", "or64", "xor64", "and64", "other", "none" };
+static const char *R[NR] = { "none", "same_slot", "same_slot_same_reg", "const0", "const1", "pow2", "copy_dead", "to_next", "to_jump", "a_dead", "dest_to_mov", "copy_into" };
+static const char *Y[NY] = { "keep", "load_to_mov", "drop_b", "drop_a", "retarget", "to_mov", "to_shl", "fold_imm", "retarget_dest", "fold_copy", "-" };
+static int idx(const char **t, int n, const char *s) { for (int i = 0; i < n; i++) if (!strcmp(t[i], s)) return i; return -1; }
+static int is_alu_b(int b) { return b >= 6 && b <= 14; }
+static int simple_a(int a) { return a == 0 || a == 1 || a == 2 || a == 3 || a == 6; }   /* opinfo simple=1 classes */
+static int simple_b(int b) { return b == 0 || b == 1 || b == 2 || b == 3 || is_alu_b(b); }
+
+/* A realisation: the input tape and the expected output tape (both complete, LF-terminated). */
+typedef struct { char in[1024], want[1024]; int realizable; } Case;
+#define APP(dst, ...) do { size_t _l = strlen(dst); int _n = snprintf(dst + _l, sizeof dst - _l, __VA_ARGS__); if (_n < 0 || (size_t)_n >= sizeof dst - _l) die("case text bound"); } while (0)
+
+/* Build the case for (a, b, rel) with gold action y; returns 0 when the relation cannot be carried by (a, b). */
+static int realise(int a, int b, int r, int y, Case *c) {
+    const char *aline = 0, *bline = 0, *abop = B[b];
+    char ab[128], bb[128], want_a[128], want_b[128];
+    c->realizable = 0; c->in[0] = c->want[0] = 0; ab[0] = bb[0] = want_a[0] = want_b[0] = 0;
+    int tail_ret = 1, layout = 0;   /* layout 1: to_next (label right after the jump); 2: to_jump (target is a jump) */
+    switch (r) {
+    case 0: /* none: every written register is consumed before ret; no relation holds */
+        switch (a) {
+        case 0: aline = "  store64 [r6+16], r1\n"; break;
+        case 1: aline = "  load64 r0, [r6+16]\n"; break;
+        case 2: aline = "  imm r0, 5\n"; break;
+        case 3: aline = "  mov r0, r1\n"; break;
+        case 4: aline = "  jump L1\n"; break;
+        case 5: aline = "  jumpz r1, L1\n"; break;
+        case 6: aline = "  add64 r0, r1, r3\n"; break;
+        default: aline = "  nop\n"; break;
+        }
+        if (b == 16) { bline = 0; tail_ret = 0; }
+        else if (b == 0) bline = "  store64 [r6+24], r0\n";
+        else if (b == 1) bline = "  load64 r1, [r6+24]\n";   /* never overwrite a's r0: that would make a dead */
+        else if (b == 2) bline = "  imm r1, 7\n";
+        else if (b == 3) bline = "  mov r1, r0\n";
+        else if (b == 4) bline = "  jump L1\n";
+        else if (b == 5) bline = "  jumpz r0, L1\n";
+        else if (is_alu_b(b)) { snprintf(bb, sizeof bb, "  %s r0, r0, r3\n", abop); bline = bb; }
+        else bline = "  nop\n";
+        if (a == 4 || a == 5) layout = 3;              /* jump to a far label that is not itself a jump */
+        break;
+    case 1: case 2: /* same_slot[_same_reg]: store64 then load64/store64 of the same non-r7 slot */
+        if (a != 0 || (b != 0 && b != 1)) return 0;
+        aline = "  store64 [r6+16], r1\n";
+        if (b == 1) bline = r == 2 ? "  load64 r1, [r6+16]\n" : "  load64 r0, [r6+16]\n";
+        else bline = r == 2 ? "  store64 [r6+16], r1\n" : "  store64 [r6+16], r3\n";
+        if (b == 1 && r == 2) { aline = "  store64 [r6+16], r0\n"; bline = "  load64 r0, [r6+16]\n"; }
+        break;
+    case 3: case 4: case 5: /* const0/const1/pow2: imm rK then a three-operand op with rK as the third operand */
+        if (a != 2 || !is_alu_b(b)) return 0;
+        snprintf(ab, sizeof ab, "  imm r2, %d\n", r == 3 ? 0 : r == 4 ? 1 : 8); aline = ab;
+        snprintf(bb, sizeof bb, "  %s r0, r1, r2\n", abop); bline = bb;
+        break;
+    case 6: /* copy_dead: imm rK then mov rY, rK with rK dead */
+        if (a != 2 || b != 3) return 0;
+        aline = "  imm r2, 5\n"; bline = "  mov r0, r2\n"; break;
+    case 7: case 8: /* to_next / to_jump: a is a jump; b is the instruction it lands on */
+        if (a != 4 && a != 5) return 0;
+        if (b == 16) return 0;
+        aline = a == 4 ? "  jump L1\n" : "  jumpz r1, L1\n";
+        if (b == 0) bline = "  store64 [r6+16], r1\n";
+        else if (b == 1) bline = "  load64 r0, [r6+16]\n";
+        else if (b == 2) bline = "  imm r0, 3\n";
+        else if (b == 3) bline = "  mov r0, r1\n";
+        else if (b == 4) bline = "  jump L2\n";
+        else if (b == 5) bline = "  jumpz r1, L2\n";
+        else if (is_alu_b(b)) { snprintf(bb, sizeof bb, "  %s r0, r1, r3\n", abop); bline = bb; }
+        else bline = "  nop\n";
+        layout = r == 7 ? 1 : 2;
+        if (r == 8 && b != 4) return 0;             /* to_jump: the landing instruction is a jump by definition */
+        break;
+    case 9: /* a_dead: a simple op writing rD (<=5) that nothing reads; the reference (src/opt.c ol_scan) treats the
+             * tape end and any OK_OTHER line as reading every register, so b=none / b=other cannot carry it */
+        if (!simple_a(a) || a == 0 || b == 15 || b == 16) return 0;      /* a store writes no register */
+        if (a == 1) aline = "  load64 r2, [r6+16]\n"; else if (a == 2) aline = "  imm r2, 5\n"; else if (a == 3) aline = "  mov r2, r1\n"; else aline = "  add64 r2, r1, r3\n";
+        if (b == 16) { bline = 0; tail_ret = 0; }
+        else if (b == 0) bline = "  store64 [r6+24], r1\n";
+        else if (b == 1) bline = "  load64 r0, [r6+24]\n";
+        else if (b == 2) bline = "  imm r0, 7\n";
+        else if (b == 3) bline = "  mov r0, r1\n";
+        else if (b == 4) bline = "  jump L1\n";
+        else if (b == 5) bline = "  jumpz r1, L1\n";
+        else if (is_alu_b(b)) { snprintf(bb, sizeof bb, "  %s r0, r1, r3\n", abop); bline = bb; }
+        else bline = "  nop\n";
+        if (b == 4 || b == 5) layout = 3;
+        break;
+    case 10: /* dest_to_mov: a simple op writing db, then mov yb, db with db dead */
+        if (!simple_a(a) || a == 0 || b != 3) return 0;
+        if (a == 1) aline = "  load64 r2, [r6+16]\n"; else if (a == 2) aline = "  imm r2, 5\n"; else if (a == 3) aline = "  mov r2, r1\n"; else aline = "  add64 r2, r1, r3\n";
+        bline = "  mov r0, r2\n"; break;
+    case 11: /* copy_into: mov rY, rX then a simple op reading rY (not writing it), rY dead after */
+        if (a != 3 || !simple_b(b) || b == 2 || b == 1) return 0;     /* imm and load64 read no register */
+        /* the copy target must be r2..r5: the reference keeps r0/r1 live at `ret` (ol_scan), so r1 is never dead */
+        aline = "  mov r3, r2\n";
+        if (b == 0) bline = "  store64 [r6+16], r3\n"; else if (b == 3) bline = "  mov r0, r3\n";
+        else { snprintf(bb, sizeof bb, "  %s r0, r3, r1\n", abop); bline = bb; }
+        break;
+    default: return 0;
+    }
+    /* the input tape */
+    APP(c->in, "_start:\n");
+    if (layout == 3) { APP(c->in, "%s", aline); if (bline) APP(c->in, "%s", bline); APP(c->in, "  ret\nL1:\n  imm r0, 3\n  ret\n"); }
+    else if (layout == 1) { APP(c->in, "%sL1:\n%s", aline, bline); if (b == 4 || b == 5) APP(c->in, "  ret\nL2:\n  imm r0, 3\n  ret\n"); else APP(c->in, "  ret\n"); }
+    else if (layout == 2) { APP(c->in, "%s  imm r0, 9\n  ret\nL1:\n%sL2:\n  imm r0, 3\n  ret\n", aline, bline); }
+    else { APP(c->in, "%s", aline); if (bline) APP(c->in, "%s", bline); if (tail_ret) APP(c->in, "  ret\n"); }
+    /* the expected output under the gold action (mechanical) */
+    const char *wa = aline, *wb = bline; char fa[128], fb[128]; fa[0] = fb[0] = 0;
+    switch (y) {
+    case 0: break;                                                     /* keep */
+    case 3: wa = 0; break;                                              /* drop_a */
+    case 2: wb = 0; break;                                              /* drop_b */
+    case 1: wb = "  mov r0, r1\n"; break;                               /* load_to_mov: load rY,[M] after store [M], rX */
+    case 5: wb = "  mov r0, r1\n"; wa = 0; break;                       /* to_mov: OP rD, rS, rK(0|1) -> mov rD, rS; imm dropped */
+    case 7: wa = 0; wb = "  imm r0, 5\n"; break;                        /* fold_imm: imm rK, N / mov rY, rK -> imm rY, N */
+    case 4: wa = a == 4 ? "  jump L2\n" : "  jumpz r1, L2\n"; break;    /* retarget: jump to a jump -> jump to its target */
+    case 8: { snprintf(fa, sizeof fa, "%s", aline); char *p = strstr(fa, "r2"); if (p) p[1] = '0'; wa = fa; wb = 0; break; }   /* retarget_dest */
+    case 9: { snprintf(fb, sizeof fb, "%s", bline); for (char *p = fb; (p = strstr(p, "r3")); p++) p[1] = '2'; wa = 0; wb = fb; break; }   /* fold_copy: rY -> rX */
+    default: return 0;                                                  /* to_shl is not produced for any key */
+    }
+    APP(c->want, "_start:\n");
+    if (layout == 3) { if (wa) APP(c->want, "%s", wa); if (wb) APP(c->want, "%s", wb); APP(c->want, "  ret\nL1:\n  imm r0, 3\n  ret\n"); }
+    else if (layout == 1) { if (wa) APP(c->want, "%s", wa); APP(c->want, "L1:\n"); if (wb) APP(c->want, "%s", wb); if (b == 4 || b == 5) APP(c->want, "  ret\nL2:\n  imm r0, 3\n  ret\n"); else APP(c->want, "  ret\n"); }
+    else if (layout == 2) { if (wa) APP(c->want, "%s", wa); APP(c->want, "  imm r0, 9\n  ret\nL1:\n");
+        /* after the retarget the landing jump is unreachable; the container's dead-code pass removes it (measured),
+         * which is outside the peep relation: the oracle expects the removed form. */
+        if (wb && y != 4) APP(c->want, "%s", wb); APP(c->want, "L2:\n  imm r0, 3\n  ret\n"); }
+    else { if (wa) APP(c->want, "%s", wa); if (wb) APP(c->want, "%s", wb); if (tail_ret) APP(c->want, "  ret\n"); }
+    c->realizable = 1;
+    return 1;
+}
+
+int main(int argc, char **argv) {
+    if (argc != 6 || !realpath(argv[1], root) || !realpath(argv[2], stream4) || argv[3][0] != '/') { fputs("usage: ROOT STREAM4_COM ABS_OUT FIRST COUNT\n", stderr); return 2; }
+    snprintf(outdir, sizeof outdir, "%s", argv[3]); int first = atoi(argv[4]), count = atoi(argv[5]);
+    if (first < 0 || count < 1 || count > 1700) die("range");
+    path(inc, sizeof inc, root, "include"); path(bound, sizeof bound, root, "tools/bound");
+    char gold[4400]; path(gold, sizeof gold, root, "weights/gold/peep.tsv");
+    FILE *g = fopen(gold, "rb"); if (!g) die("gold");
+    char cases[4400]; path(cases, sizeof cases, outdir, "cases"); mkdir(outdir, 0700); if (mkdir(cases, 0700) && errno != EEXIST) die("cases dir");
+    char respath[4400]; snprintf(respath, sizeof respath, "%s/results-%d-%d.tsv", outdir, first, count);
+    FILE *res = fopen(respath, "wbx"); if (!res) die("results exclusive");
+    char line[512]; int row = 0, npass = 0, nfail = 0, nunr = 0, nsusp = 0, nnotrun = 0, seen = 0;
+    while (fgets(line, sizeof line, g)) {
+        if (line[0] == '#' || !strncmp(line, "a\t", 2)) continue;
+        char sa[32], sb[32], sr[40], sy[32];
+        if (sscanf(line, "%31s %31s %39s %31s", sa, sb, sr, sy) != 4) die("gold row");
+        int k = row++; if (k < first || k >= first + count) continue;
+        seen++;
+        int a = idx(A, NA, sa), b = idx(B, NB, sb), r = idx(R, NR, sr), y = idx(Y, NY, sy);
+        if (a < 0 || b < 0 || r < 0 || y < 0) die("gold vocabulary");
+        char key[160]; snprintf(key, sizeof key, "%04d.%s.%s.%s", k, sa, sb, sr);
+        Case c;
+        if (!realise(a, b, r, y, &c)) {
+            if (y == 0) { nunr++; fprintf(res, "UNREALIZABLE\t%s\t%s\tkeep-by-definition\n", key, sy); }
+            else { nsusp++; fprintf(res, "TABLE_SUSPECT\t%s\t%s\trelation-not-carried-by-classes-but-y-is-not-keep\n", key, sy); }
+            continue;
+        }
+        char tp[4600]; snprintf(tp, sizeof tp, "%s/%s.tape", cases, key); saved(tp, c.in, strlen(c.in));
+        char *v[] = { bound, "12", stream4, tp, tp, inc, 0 }; char *env[] = { "UNISA_ATTRIBUTES=", 0 };
+        np_result rr; char why[1024];
+        if (np_run(v, root, env, 14, &rr, why, sizeof why)) { nnotrun++; fprintf(res, "NOT_RUN\t%s\t%s\t%s\n", key, sy, why); continue; }
+        char op[4600]; snprintf(op, sizeof op, "%s/%s.out", cases, key); saved(op, rr.out, rr.outn);
+        int ok = !rr.rc && rr.outn == strlen(c.want) && !memcmp(rr.out, c.want, rr.outn);
+        if (ok) npass++; else nfail++;
+        fprintf(res, "%s\t%s\t%s\trc=%d\n", ok ? "PASS" : "FAIL", key, sy, rr.rc);
+        if (!ok) { char wp[4600]; snprintf(wp, sizeof wp, "%s/%s.want", cases, key); saved(wp, c.want, strlen(c.want)); }
+        np_free(&rr);
+    }
+    fclose(g);
+    fprintf(res, "SUMMARY\tkeys=%d\tpass=%d\tfail=%d\tunrealizable=%d\ttable_suspect=%d\tnot_run=%d\n", seen, npass, nfail, nunr, nsusp, nnotrun);
+    fclose(res);
+    printf("PEEP_CASES\tfirst=%d\tcount=%d\tkeys=%d\tpass=%d\tfail=%d\tunrealizable=%d\ttable_suspect=%d\tnot_run=%d\n", first, count, seen, npass, nfail, nunr, nsusp, nnotrun);
+    return nfail || nsusp || nnotrun ? 1 : 0;
+}
