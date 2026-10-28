@@ -1,4 +1,4 @@
-/* tools/stream-semantics.cx -- DRAFT (written 2026-10-28 without a run window; NOT executed, NOT registered).
+/* tools/stream-semantics.cx -- first run 2026-10-28 18:1x (fable: light work, machine idle).
  * Cells: e4.sem.stream-boundary (isolated E4 output, lowered and encoded by the pinned lower/elf streams, executes like
  * the E4 input) and prune.sem.execution-preserved (pruned and unpruned tapes execute identically).
  *   sh ./unisacc.com tools/stream-semantics.cx -- ROOT STREAMS_DIR ABS_OUT e4|prune
@@ -6,7 +6,9 @@
  * Chain B (control): tape -> stream6 -> stream7 -> image -> execute.
  * Oracle: both images' stdout and exit code are equal and equal to the hand-derived literal (non-vacuous: the subject
  * stream must have changed the tape, else VACUOUS). Image bytes may differ (the subject stream rewrote instructions).
- * Fixtures: e4 -- a tape whose O2 rewrite is known (`imm r2, 0 / add64 r0, r1, r2` -> `mov r0, r1`, with r1 set so the
+ * Fixtures (product `-S -O0` E3 tapes of small C programs; hand-written tapes proved invalid for lower/elf on the first
+ * run): e4 -- `int a=42,b=0; return a+b;` (O2 must rewrite it; exit 42); prune -- a dead static function (exit 7).
+ * Old note: e4 -- a tape whose O2 rewrite is known (`imm r2, 0 / add64 r0, r1, r2` -> `mov r0, r1`, with r1 set so the
  * exit code is observable); prune -- the dead-function fixture (exit 7, `dead` removed). Containers from STREAMS_DIR
  * (riroot-01 pins), each run bounded 12 s, images executed under tools/bound 5. */
 #pragma unisa use cxlib.netpack
@@ -30,11 +32,12 @@ int main(int argc, char **argv) {
     path(inc, sizeof inc, root, "include"); path(bound, sizeof bound, root, "tools/bound");
     char rp[4400]; path(rp, sizeof rp, outdir, "results.tsv"); res = fopen(rp, "wbx"); if (!res) die("results");
     int subject = !strcmp(pfx, "e4") ? 4 : 5; const char *cell = subject == 4 ? "e4.sem.stream-boundary" : "prune.sem.execution-preserved";
-    /* fixture: exit code carries the result; r1 is set explicitly so the O2 rewrite `mov r0, r1` is observable */
-    const char *fix = subject == 4 ? "_start:\n  imm r1, 42\n  imm r2, 0\n  add64 r0, r1, r2\n  .exit r0\n"
-        : "_start:\n  call main\n  .exit r0\nmain:\n  .frame 8\n  store64 [r7+0], r6\n  mov r6, r7\n  .frame 0\n  imm r0, 7\n  ret\ndead:\n  .frame 8\n  store64 [r7+0], r6\n  mov r6, r7\n  .frame 0\n  imm r0, 99\n  ret\n";
+    /* fixture: the product's own -O0 E3 tape of a small C program (first run 2026-10-28 showed hand-written tapes are not
+       a valid lower/elf input: both images crashed, and E4 left the hand tape unchanged); exit code carries the result */
+    const char *csrc = subject == 4 ? "int main(void){int a=42,b=0;return a+b;}\n" : "static int dead(int x){return x*99;}\nint main(void){return 7;}\n";
     int want_rc = subject == 4 ? 42 : 7;
-    char t0[4400], ta[4400], la[4400], ia[4400], lb[4400], ib[4400]; path(t0, sizeof t0, outdir, "in.tape"); saved(t0, fix, strlen(fix));
+    char t0[4400], ta[4400], la[4400], ia[4400], lb[4400], ib[4400], cp[4400]; path(cp, sizeof cp, outdir, "in.c"); saved(cp, csrc, strlen(csrc)); path(t0, sizeof t0, outdir, "in.tape");
+    { char prod[4400]; path(prod, sizeof prod, root, "unisacc.com"); char *v[] = { bound, "20", "sh", prod, "-S", "-O0", "-o", t0, cp, 0 }; char *env[] = { 0 }; np_result r; char why[1024]; if (np_run(v, root, env, 22, &r, why, sizeof why) || r.rc) { row("NOT_RUN", cell, "product -S -O0 of the fixture failed"); goto done; } np_free(&r); }
     path(ta, sizeof ta, outdir, "subject.tape"); path(la, sizeof la, outdir, "subject.target"); path(ia, sizeof ia, outdir, "subject.img");
     path(lb, sizeof lb, outdir, "control.target"); path(ib, sizeof ib, outdir, "control.img");
     if (stage(subject, t0, ta)) { row("NOT_RUN", cell, "subject stream failed"); goto done; }
