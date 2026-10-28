@@ -66,6 +66,13 @@ lnx-arm64与lnx-x86_64各lower/elf、osx-arm64的lower/elf共十项生成全部r
 cxpack-af8429d0cf；只允许src/cxmod.c、src/main.c、exec/c/compiler.c三对固定哈希，
 其余八棵产品输入树核目录、类型/模式、字节与符号链接字面值。正向及反向拒绝测试尚未跑，
 不能据代码存在授予复用；生成JSON完整比较与候选身份检查仍独立必需。
+
+后续已完成全部34项生成（加tool-gen共35项实构），每项独立bound55、rc0并有job收据。
+source-model-compare对sizeof冻结纪元完整实测34 SAME/0 DIFF；报告
+out/c43-cxpack-model-compare-01.tsv SHA5e0a71b2a2cb897d7d8b116038dda15d4656be994259455331e5ba0738b0177d。
+cxpack-source-delta正向rc0，核1932文件/49目录/8符号链接/三处固定差异，
+witness ab107f143caae14f4c336e6a2a73378f3cc31dad26db8cb7e8cfc9d7788ff6af；反向rc2具名拒绝src/cxmod.c。
+证据out/c43-cxpack-source-delta-{01,reverse-01}.*。这些证明内容与差异范围，不是候选准入或功能PASS。
 证据沿用冻结根out/cxpack-gen-*-01.*与epoch-context-01/jobs；当前无所属在跑作业。
 
 ## link.undef-function-refusal — 未定义外部函数链接成崩溃镜像（开放）
