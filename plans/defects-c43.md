@@ -57,3 +57,15 @@
 2. `#include <stdio.h`（缺 `>`）：产品 rc 0 且**静默包含了 stdio.h**（stdout 56860 字节），无 stderr。C99 6.4.7 header-name 必须闭合；须拒绝。
 诊断质量（INFO，不断言）：`unterminated conditional directive`、`argument count`、`#if expression`、`unterminated macro call` 四类拒绝文本无 `file:line`，而 `#error`、`#else without #if`、`no such file for #include` 有。
 非缺陷：`#foo bar` 为 6.10 非指令（产品接受合规，gcc 选择报错）；`#define __STDC__ 2` 产品与 gcc 都接受（gcc 仅警告）。
+
+## c.negative — 七处 C99 约束违反被静默接受并产出对象（开放；E3/parse2 模型域，所有者 cdx/grk）
+
+批 `c-negative`（tools/c-negative.cx，10/17，红行即复现；宿主 gcc 11 `-std=c99 -pedantic-errors` 对七者均 rc 1；产品 rc 0、无 stderr、写出 .o）：
+1. `const int k=1; void f(void){ k=2; }` — 6.5.16p2 可修改左值。
+2. `int j(void){ case 1: return 0; }` — 6.8.1p2 case 须在 switch 内。
+3. `struct S{int a;}; struct S{int b;};` — 6.7.2.3p1 同作用域重定义。
+4. `int v(void){ int a[3]; return a; }` — 6.8.6.4p3/6.5.16.1p1 指针→int。
+5. `int *p=0; char *c=p;` — 6.7.8p11/6.5.16.1p1 不兼容指针初始化。
+6. `typedef int T; typedef char T;` — 6.7p3（C99 禁止 typedef 重定义）。
+7. `void vv(int a, int a){}` — 6.9.1p9/6.7p3 重复形参。
+前四项影响语义（接受错误程序），后三项为类型系统漏检。十项已正确拒绝的里有 5 项诊断带 file:line（INFO）。

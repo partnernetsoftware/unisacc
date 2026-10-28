@@ -1,0 +1,53 @@
+/* tools/c-negative.cx -- C99 constraint violations the product must diagnose at compile time (`-c -b lnx/x86_64`:
+ * rc != 0, non-empty stderr, no object). The host cc (`-c -std=c99 -pedantic-errors`, declared oracle, identity
+ * recorded) is run on the same fixture and its rc recorded. Found 2026-10-28 on f3705dfa: seven violations are
+ * accepted silently (assignment to const, case outside switch, struct redefinition, returning int* as int, incompatible
+ * pointer initialisation, conflicting typedef, duplicate parameter name) -- red rows, plans/defects-c43.md c.negative.
+ *   sh ./unisacc.com tools/c-negative.cx -- ROOT ABS_OUT HOST_CC
+ * Each fixture is one line plus `int main(void){return 0;}` so the only error is the intended one; the C99 clause is
+ * in the row. Whether the product diagnostic carries file:line is recorded as INFO (quality, not contract). */
+#pragma unisa use cxlib.netpack
+
+static char root[4096], outdir[4096], product[4400], hostcc[4096]; static int npass, nfail; static FILE *res;
+static void die(const char *s) { fprintf(stderr, "c-negative: REFUSE %s errno=%d\n", s, errno); exit(2); }
+static void path(char *p, size_t cap, const char *a, const char *b) { int n = snprintf(p, cap, "%s/%s", a, b); if (n < 0 || (size_t)n >= cap) die("path"); }
+static void saved(const char *p, const char *s, size_t n) { int f = open(p, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600); if (f < 0) die("exclusive create"); while (n) { ssize_t k = write(f, s, n); if (k <= 0) die("write"); s += k; n -= (size_t)k; } if (close(f)) die("close"); }
+static void check(int ok, const char *fx, const char *label, const char *detail) { fprintf(res, "%s\tc.negative.%s.%s\t%s\n", ok ? "PASS" : "FAIL", fx, label, detail); printf("%s\t%s.%s\n", ok ? "PASS" : "FAIL", fx, label); if (ok) npass++; else nfail++; }
+static int runin(char *const argv[], np_result *r) { char why[1024]; return np_run(argv, outdir, 0, 20, r, why, sizeof why); }
+static int absent(const char *leaf) { char p[4400]; path(p, sizeof p, outdir, leaf); struct stat st; errno = 0; if (!lstat(p, &st)) return 0; if (errno != ENOENT) die("lstat"); return 1; }
+
+int main(int argc, char **argv) {
+    if (argc != 4 || !realpath(argv[1], root) || argv[2][0] != '/' || !realpath(argv[3], hostcc)) { fputs("usage: ROOT ABS_OUT HOST_CC\n", stderr); return 2; }
+    snprintf(outdir, sizeof outdir, "%s", argv[2]); if (mkdir(outdir, 0700)) die("new out dir must be absent"); path(product, sizeof product, root, "unisacc.com");
+    char rp[4400]; path(rp, sizeof rp, outdir, "results.tsv"); res = fopen(rp, "wbx"); if (!res) die("results");
+    { size_t n; char *b = cx_read(product, &n); if (!b) die("product"); char h[65]; cx_sha256_hex(b, n, h); free(b); np_result r; char *vv[] = { hostcc, "--version", 0 }; char ver[200] = "-"; if (!runin(vv, &r)) { size_t k = 0; while (k < r.outn && r.out[k] != '\n' && k < 199) { ver[k] = r.out[k]; k++; } ver[k] = 0; np_free(&r); } fprintf(res, "IDENTITY\tcandidate=%s\nORACLE\thost_cc=%s\toracle_id=%s\n", h, hostcc, ver); }
+    struct { const char *name, *line, *clause; } fx[] = {
+        { "invalid-octal", "int x = 08;", "6.4.4.1 octal digits" },
+        { "unterminated-string", "const char *s = \"abc;", "6.4.5 string literal" },
+        { "empty-declaration", "int;", "6.7p2 declarator required" },
+        { "object-redefinition", "int d; int d = 1; int d = 2;", "6.9p3 one external definition" },
+        { "assign-to-const", "const int k = 1; void f(void){ k = 2; }", "6.5.16p2 modifiable lvalue" },
+        { "void-return-value", "void g(void){ return 1; }", "6.8.6.4p1" },
+        { "break-outside-loop", "int h(void){ break; }", "6.8.6.3p1" },
+        { "case-outside-switch", "int j(void){ case 1: return 0; }", "6.8.1p2" },
+        { "undefined-label", "int q(void){ goto nolabel; }", "6.8.6.1p1" },
+        { "struct-redefinition", "struct S{int a;}; struct S{int b;};", "6.7.2.3p1" },
+        { "missing-semicolon", "int w(void){ int y = 1 2; return y; }", "6.7 syntax" },
+        { "return-pointer-as-int", "int v(void){ int a[3]; return a; }", "6.8.6.4p3 / 6.5.16.1p1" },
+        { "implicit-function", "int u(void){ undeclared_fn(); return 0; }", "6.5.1p2 (C99 removed implicit declaration)" },
+        { "sizeof-void", "int t = sizeof(void);", "6.5.3.4p1 incomplete type" },
+        { "incompatible-pointer-init", "int r(void){ int *p = 0; char *c = p; return 0; }", "6.7.8p11 / 6.5.16.1p1" },
+        { "conflicting-typedef", "typedef int T; typedef char T;", "6.7p3 (C99: no typedef redefinition)" },
+        { "duplicate-parameter", "void vv(int a, int a){}", "6.9.1p9 / 6.7p3" },
+    };
+    int nfx = (int)(sizeof fx / sizeof *fx);
+    for (int i = 0; i < nfx; i++) { char c[64], o[64]; snprintf(c, sizeof c, "%s.c", fx[i].name); snprintf(o, sizeof o, "%s.o", fx[i].name); char src[400]; snprintf(src, sizeof src, "%s\nint main(void){return 0;}\n", fx[i].line); char p[4400]; path(p, sizeof p, outdir, c); saved(p, src, strlen(src));
+        np_result u, g; char *uv[] = { "sh", product, "-c", "-b", "lnx/x86_64", "-o", o, c, 0 }, *gv[] = { hostcc, "-c", "-std=c99", "-pedantic-errors", "-o", "/dev/null", c, 0 };
+        if (runin(uv, &u)) { check(0, fx[i].name, "product", "transport"); continue; } if (runin(gv, &g)) { check(0, fx[i].name, "host", "transport"); np_free(&u); continue; }
+        char ue[100]; snprintf(ue, sizeof ue, "%.*s", (int)(u.errn > 90 ? 90 : u.errn), u.err); for (char *q = ue; *q; q++) if (*q == '\n') *q = ' ';
+        char d[320]; snprintf(d, sizeof d, "product rc=%d object-absent=%d stderr=%s | host rc=%d | %s", u.rc, absent(o), ue, g.rc, fx[i].clause);
+        check(u.rc && u.errn && absent(o), fx[i].name, "product-refuses", d); fprintf(res, "INFO\tc.negative.%s.host\trc=%d\n", fx[i].name, g.rc);
+        if (u.rc && u.errn) fprintf(res, "INFO\tc.negative.%s.diagnostic-has-file-line\t%d\n", fx[i].name, strstr(u.err, c) != 0);
+        np_free(&u); np_free(&g); }
+    fprintf(res, "SUMMARY\tpass=%d\tfail=%d\n", npass, nfail); fclose(res); printf("C_NEGATIVE\tpass=%d\tfail=%d\n", npass, nfail); return nfail ? 1 : 0;
+}
