@@ -149,7 +149,9 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 <a id="work-tree"></a>
 ### 思维树
 
-**当前分工与下一动作：** cdx保持产品源码冻结，cc独占fresh out/c43-da4e-fixedpoint-*内的新根context/107/PC/两GEN/kind2/selfhost构造，不安装或写共享源。Codex辅助只读审剩余域并在out整理既有interfaces草稿。cdx已修kernel-route三处分号/else解析回归，三路径继承的有界改写与修复差分分别保存在out/c43-da4e-kernel-route-repair-01/；尚未实跑/提交，不授PASS，待重活位空出验证。剩余36个需产品格中15个已有源修复，先验证E3/ELF边界，避免为旧材料重复改源/重建。
+**2026-10-28 单元化重构决定：** 主人要求 crate/Cargo 式结构单元化，并要求为 `.cx` 的 `#pragma unisa` 处理增加独立阶段。目标为 CX0 → E2 → E1 → E3 → E4 → prune → lower → elf；当前产品仍七流，CX0 尚未实现或接入。执行按 [单元化计划](plans/v0.0.43-units.md)，第一闭环是 CX0/E2 两包与 [独立测试件合同](tests/preprocess/CONTRACT.md)。先验证依赖隔离、独立产物和受影响重建范围；不以新增有限 PASS 批数量计收口，不增加 Rust 所有权实现这一隐含前置。
+
+**当前分工与下一动作：** 主线先固定 CX0 输入/单元束输出及完整测试合同，再提取 src/cxmod.c；E2 按单元消费计划，语言宏与普通 pragma 仍归 E2。旧 cc 固定点构造已完成，GEN-A 安装仅改 record 为 dd2385cf、APE 仍 da4e；GEN-B02 与 A/当前根逐字相同，直接 selfhost58/0。登记批原30秒默认-run仍超时；本轮同源码 O2 ELF 在30秒内58/0（out/c43-resume-selfhost-o2-01.run.stdout），只证编译与验证需分相，不回填登记 PASS。其他协作者暂存不动；本轮只提交重构文档。
 
 **边界测试待验（2026-10-28）：** 已审入既有interfaces草稿修订：七流当前pin、由独立参考规则手推的592B Tape字面oracle，以及四个E3 trailer负例的外框长度修复，确保测到目标层。修正attr长度拒绝名与ELF截断位置，保留原271项并新增12项；当前仍NOT_RUN。原e2-input-binding扩展为七流成员与候选逐字核对，含各新增模型一字节差异负控及前后稳定性，仍待实跑；不另造重复批。草稿out/c43-da4e-interfaces-review-01/，严格清单169批/178覆盖/19缺口，仅元数据通过、执行0。formats.md仅据现有attr_strip代码纠正旧描述；冻结helper实测SID仍16219141、产品仍da4e7ef1，不影响cc构造。
 
@@ -266,20 +268,17 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 **目标：开发unisacc.com 0.0.43直到完成。** 日常直接用unisacc.com＋.cx迭代；源码身份、bootstrap身份和同候选资格分别记账。新候选未构建前，不把旧产品局部结果转授给新源码。发布仍须明确授权。
 
 ```text
-0.0.43：完成开发、源码构造闭环与新验收（发布须另授）
-├─ 当前主刀：工作源码已变更，SOURCE_FIXED/PRODUCT_NOT_REBUILT；上一冻结工作SID0d5923...已fresh核0；新forward-result表SID03a5...已fresh核0；scanner12/头oracle及导出prepare/verify/install均0，cf2270仅中间header身份；Root仍P53/record21704/Source329；GEN15仅PREPARED，origin37/0、NI104/0、采用单端永久合同15/0；采用包prepare/pack/seal/verify/snapshot材料均0，union新SOURCE批strict-list实际100批/115覆盖且执行0（此前99批/114覆盖保留历史）；S03a5 partialCTX/三工具及三NN材料已准备，union probe及永久路径各原55实际36/0，全部34gen实际0且31JSON逐字same/3diff，生产者两net外层142仍UNKNOWN；RB3与混合采用schema/installer及新候选待完成，未新slice
-├─ R0 已归档：旧1333队列停止；Source447当前段/记忆原文另存archive，原红/UNKNOWN/局部绿不改写
-├─ R1 待新候选：P53的smoke/RI/库/属性/优化等仍是旧候选证据，不能自动授给变更中的工作源
-├─ R2 新P3生产链：CTX03全部107已执行，106项outer55 rc0/PREPARED；net-warnparse outer142/native0缺终态，仍不计完成
-│  └─ gen13九phase、当前dd6/407的PC04全材料流水与full-SP双端0，新pin gate67/0；材料仅PREPARED/VERIFIED；旧ctx候选A已归档；当前B新ctx重建/smoke16/candidate58/schema79全0，installer实际outer55 rc0/INSTALLED development-only，Root329记录已独立核0；GEN13/14新ctx重wrap全0，Source329原30 selfhost03实际58/0仅保留基线；fclose工作头-I include338/0，新产品未构造
-├─ R3 已通过Source329历史机制：C数学核三处unsigned修复，经独立CX exporter再生两C，39个NN输入字节/provenance不变
-│  └─ 保存P53执行18网8770键/22694判定、28868字段拒绝及恢复、72适配拒绝全0；宿主shiftSan22694/0；永久words9/0、all-nets8/0
-├─ R4 范围保留：经典18数学机制仍复用旧NN数值；当前B仅version/smoke16/candidate58/schema79实证，旧RI/P3消费者不转授新ctx，Windows/完整预算仍待
-├─ R5 待新来源链：旧11/12固定点58、CTX02固定P3链41/拒绝71均属Source447；Source329候选A/包及当前B已构造，新ctx58/79已实跑，本机原30两代selfhost03已58/0；完整N22和外宿主仍待
-├─ R6 pp局部来源：Source447低mask域构造92/配方拒绝23有效但历史；不计Source329重验或全18参数源码重建
-├─ R7 19完整缺口、完整NN/ASM源码构造及同候选跨平台资格仍未收口；签名/Draft/Latest/公开仍禁
-└─ C44旁路：已审修 live record 入 witness 洞——sp_load_ephemeral 严读活记录不入 sp_files；witness 仅冻副本全文SHA+artifact/source投影。补丁 C44 out/.../fix-live-ephemeral-vs-main.diff（lib->6d0a4296…）；origin 107仍绿。
+0.0.43：按 crate/Cargo 式单元化重构收口（发布须另授）
+├─ 当前主刀 U1：提取独立 CX0（CX pragma / 模块 / 编译单元计划），以 src/cxmod.c 为唯一迁移源
+├─ U2：E2 独立包消费 CX0 单元束；先收 CX0、E2、边界三组完整合同，再接产品
+├─ U3：沿公开依赖图迁移其余六流、执行核、模型格式、host 与构造器；分别核构建/接口/装配/测试键
+├─ U4：接回完整十九合同、N22 与同候选宿主验收；不删断言、不放宽预算、不缓存 PASS
+├─ 现行基线：SID16219141 / Rootda4e7ef1 / record dd2385cf；本机两代固定点58/0，非完整N22
+├─ 已有能力：module/use、CXIF v0 文本投影和 cx-plan；尚无 crate 式独立包产物或编译期所有权保证
+└─ 当前交付：plans/v0.0.43-units.md 与 tests/preprocess/CONTRACT.md 为设计；CX0 尚未实现/接入，产品仍七流
 ```
+
+旧思维树原文见 [裁定前历史树](archive/plans/c43-pre-unit-work-tree-20261028.md)。以下 Source329/0d5923/03a5 的构造与缺陷段为历史纪元；其中“当前/下一步”不再调度。现行身份与动作以上树及记忆宫殿首段为准。
 
 **当前源码与已安装Root分离：** 当前最终工作SID为0d59237f3250b59514a55ff529c77b665033e5feb71061f6fcaded0c7ef925c0，已含scanner精确修复及工具正规头再生并fresh helper核0；cf2270b2e103ead1d13859489a34d6eb9e57a127eb0bef5f347b17822cb6c16e仅保留header-only中间实测身份；当前无新源码候选，以下Source329构造/安装/58证据保留为基线，不转授工作源。旧Source329cdb7077891074f638634dc7abdcd59ee39c368ad6ba1c2fcf867c3c63de2e下，完整候选A已由该源码实际构造并归档，当前新tool context候选B已完整重建并获smoke16/candidate58/schema79实证，B已实际本地安装、本机原30两代selfhost03已58/0；完整N22和外宿主仍待。根unisacc.com现是P53e2cd1f669c92fda2c16dd93a9021cd4db97f05c57ab2d1acf9a835cbac9857（4911193B）/Source329，当前record21704e...由真实安装生成；旧S447/source记录完整保留在GEN13/bootstrap-before-install.com及out/c43-u64-checkpoint-01/bootstrap.com。完整重构与实际安装均有证据，旧epoch与旧资格不改贴为Source329。
 
@@ -356,6 +355,10 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 <a id="memory-palace"></a>
 ### 记忆宫殿
 
+**现行重构入口（2026-10-28）：** 主人决定采用 crate/Cargo 式独立单元，并将 CX pragma/模块规划提为 E2 前的独立 CX0。完整目标、U0–U4 与八项失效传播实验在 [单元化计划](plans/v0.0.43-units.md)；CX0/E2/边界三组测试义务在 [测试件合同](tests/preprocess/CONTRACT.md)。当前只完成规划，CX0 未接入，产品仍七流；module/use、文本 CXIF v0 不等于独立包或 Rust 编译期所有权。下一动作提取 CX0，暂不扩张无关有限批。
+
+**本轮基线复核：** APE da4e7ef144186ccf578d282381ac671885094c6dfe30053727ac3f3c4a3e5592；build record dd2385cf4952f95cd7cdb6d4d25b2cf774841becdcbd8506138260a92743abc0（替代下方首次安装 ab5f）。同源固定点 GEN-A / GEN-B02 的原58断言已通过；本轮预编译 O2 验证亦在原30秒内58/0、stderr空，直接 O2 默认-run 原30秒rc142，不冒称登记批通过。下方 cc 独占构造/等待新固定点的语句是交接前状态，不再作为待执行工作。
+
 **已装产品构造：** source context `out/c43-source-1621-context-01/`已在旧Root41下完成107/107实际作业；GEN `out/c43-native-kernel-1621-01/`新建22对象、双核、五片与真deflate APE；PC `out/c43-source-1621-full-pc-01/`包50cc5a96独立VERIFIED。新Rootda4e/SID1621/record ab5f安装rc0，旧Root41及record在GEN的bootstrap-before-install.*。四个正式SOURCE批16/13/29/15均0失败，cc新Root独立-E探针33/33。换产品字节后旧source-context复验按预期rc2 receipt-bytes-mismatch；不手改旧上下文，下次固定点需新Root绑定的fresh context。历史a5ec/ccd29材料不转授。
 
 **本源构造入口：** a0b150aa86/SID16219141；context1621-01已PREPARED且独立复核，SHA d78d5f6a…，本源107/107收据齐，PC1621-01已封条并独立VERIFIED，包50cc5a96；GEN1621-01双核与上一代同字节，五片/APE/kind2准入/开发安装完成。控制器O2 ELF67eb70d0来自未改的13a58d0e源；自身体系编译，外部GCC仅为已声明source-P3种子构造依赖。单工人占out/c43-source-1621-build-01/context-01；主线不改其输出或产品源。注意本机无/usr/include/zlib.h与链接名libz.so，tool-pack需已知/usr/include/node和受控私有链接；不把声明宿主依赖说成hermetic。--all当前177覆盖/19未解/子批0。
@@ -368,7 +371,7 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 
 **当前流入口：** 实际安装体Rootda4e的七流材料out/c43-streams-da4e-01/已重封；stream1=4f3c87fd、stream2=68f08deb。14个正式SOURCE批全PASS：E1 188/501/624/25，E2 103/187/36/21，成员输入绑定24，CLI20/20/23、头位置11、诊断211（known_gaps=2）。逐批日志out/c43-da4e-stream-validation-01/。E2既定62个本机格已重立；E1剩lex-144 oracle及host聚合，不以EOF折叠冒充144键。旧Root41红例和私网日志保留，不代替本代证据；宽行/all-six仍开。
 
-**最新开发根：** SID16219141／APEda4e7ef1／PC50cc5a96，旧Root41b836d7及record c7bc在GEN1621-01应急备份。19矩阵实算319 COVERED_LOCAL/336 MISSING/36 NEEDS_PRODUCT_CHANGE（822必选），E1/E2已按14个本代正式批更新；其他域不转授旧根资格。下一动作：新根绑定的同源固定点与剩余域缺口，不再重复本轮14批。
+**最新开发根：** SID16219141／APEda4e7ef1／PC50cc5a96／record dd2385cf。本机同源 GEN-A/GEN-B02 固定点58/0；完整N22/十九宽合同/五外宿主仍开放。原矩阵319/336/36是旧域账，不作为重构完成率。下一动作按单元化计划先交 CX0 与 E2 独立测试边界，不再重复十四批或重构造已完成的固定点。
 
 **待收口工作域：** cc只写out/c43-da4e-fixedpoint-*的新构造材料；kernel-route三个共享路径现由cdx接管，源码修复未验证。其他协作者暂存原样保留；不把未提交/未实跑草稿当资格。
 
