@@ -154,7 +154,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 <a id="work-tree"></a>
 ### 思维树
 
-**FIFO 构造当前节点：** 冻结ab7fbdc810于仓外unisacc-epoch-fifo-ab7fbdc810，SID b2007a76；context61d040c6已PREPARED，tool-gen实跑rc0有收据。启动/已装仍e955；下一步核模型复用适用性与候选构造，不将context或工具准备记为产品通过。
+**FIFO 构造当前节点：** 冻结ab7fbdc810于仓外unisacc-epoch-fifo-ab7fbdc810，SID b2007a76；context61d040c6及tool-gen已完成。固定两处源码差异核验通过，五切片与APE8147f2e7已实际构造，复用PCff696；native identity-helper已写候选来源记录。启动/已装仍e955；下一步候选格式/行为/材料复核和安装，不将构造记为产品通过。
 
 **FIFO 修复接续：** POSIX模型私有驱动五项5/0（7a90b9e2b3），经典参考驱动同五项0/1/1/0/1，FIFO具名拒绝且空stdout。宿主cxcc由grk跟进；Windows和已装e955不记已修。下一动作补宿主/平台验证及新产品构造安装。
 
