@@ -12,6 +12,7 @@ int main(int argc,char **argv) {
         printf("state %d mode=%d count=%d",i,SMODE[i],ROWC[i]);
         if(ISNET)printf(" lo=%d hi=%d bn=%d bq=%d",NLO[i],NHI[i],BN[i],BQ[i]);
         printf(" ret=%d\n",RETS[i]);
+        if(RETOK[i]) { printf("returns %d",i);for(int j=0;j<NS;j++)if(RETOK[i][j])printf(" %d",j);putchar('\n'); }
         if(ISNET||SMODE[i]==1)for(int j=0;j<ROWC[i];j++)printf("row %d %d %d %d\n",i,ROWK[i][j],ROWN[i][j],ROWQ[i][j]);
     }
     Model m;model_capture(&m);model_release(&m);model_clear();return 0;

@@ -1,0 +1,48 @@
+/* Extract checked P3 members as immutable comparison material.
+ * ROOT P3 NEW_OUT: NEW_OUT's existing parent must be below ROOT/out. */
+#pragma unisa use runtime.packagestruct
+#pragma unisa use runtime.network_structure
+#pragma unisa use runtime.codec
+typedef struct { const char *dir; FILE *manifest; int count; } Extraction;
+static int digest(const char *path,char h[65]) {size_t n;char *p=cx_read(path,&n);if(!p)return 1;cx_sha256_hex(p,n,h);free(p);return 0;}
+static int extract(void *v,const unsigned char *p,long n,long rawlen,unsigned long expected) {
+    Extraction *x=(Extraction *)v; unsigned char *raw=malloc((size_t)rawlen); uint32_t got; CxCodecCrc crc;
+    char path[4400],h[65]; FILE *f;
+    if(!raw)return 2;
+    if(cxcodec_inflate(raw,(unsigned long)rawlen,p,(unsigned long)n)||cxcodec_crc_init(&crc)||cxcodec_crc(&crc,(const char *)raw,(int)rawlen,&got)||got!=(uint32_t)expected||cxns_audit(raw,rawlen)) {free(raw);return 2;}
+    if(cx_fmt(path,sizeof path,"%s/model-%03d.bin",x->dir,x->count)) {free(raw);return 2;}
+    cx_sha256_hex((const char *)raw,(size_t)rawlen,h);
+    f=fopen(path,"wx");if(!f){free(raw);return 2;}
+    int bad=fwrite(raw,1,(size_t)rawlen,f)!=(size_t)rawlen;
+    if(fclose(f))bad=1;free(raw);
+    if(bad || fprintf(x->manifest,"model\t%d\t%ld\t%s\n",x->count,rawlen,h)<0)return 2;
+    x->count++;return 0;
+}
+int main(int argc,char **argv) {
+    char root[4096],base[4400],parent[4400],resolved[4096],out[4400],manifest[4400],pkg[4096],hash[65],after[65];
+    char *slash,*bytes;size_t n;int ver=0,rc;struct stat st;Extraction x={0};
+    const char *deps[]={"tools/extract-p3-models.cx","cx/runtime/packagestruct.cx","cx/runtime/network_structure.cx","cx/runtime/model_number.cx","cx/runtime/codec.cx","unisacc.com"};
+    char dep_paths[6][4400],dep_hash[6][65];
+    if(argc!=4 || argv[3][0]!='/' || !realpath(argv[1],root) || !realpath(argv[2],pkg)) {fputs("extract-p3: usage ROOT P3 NEW_OUT\n",stderr);return 2;}
+    if(cx_fmt(base,sizeof base,"%s/out",root)||!realpath(base,resolved)||cx_fmt(base,sizeof base,"%s/",resolved)||cx_fmt(parent,sizeof parent,"%s",argv[3]))return 2;
+    slash=strrchr(parent,'/');if(!slash||!slash[1]||!strcmp(slash+1,".")||!strcmp(slash+1,".."))return 2;
+    char leaf[256];if(cx_fmt(leaf,sizeof leaf,"%s",slash+1))return 2;*slash=0;
+    if(!realpath(parent,resolved)||strncmp(resolved,base,strlen(base))||cx_fmt(out,sizeof out,"%s/%s",resolved,leaf))return 2;
+    errno=0;if(!lstat(out,&st)||errno!=ENOENT)return 2;
+    bytes=cx_read(pkg,&n);if(!bytes||n>2147483647UL){free(bytes);return 2;}
+    cx_sha256_hex(bytes,n,hash);rc=cxps_audit((const unsigned char *)bytes,(long)n,&ver);
+    if(rc||ver!=3){free(bytes);fputs("extract-p3: structure\n",stderr);return 2;}
+    for(int i=0;i<6;i++)if(cx_fmt(dep_paths[i],sizeof dep_paths[i],"%s/%s",root,deps[i])||digest(dep_paths[i],dep_hash[i])){free(bytes);return 2;}
+    if(mkdir(out,0700)){free(bytes);return 2;}
+    if(cx_fmt(manifest,sizeof manifest,"%s/manifest.tsv",out)){free(bytes);cx_rmtree(out);return 2;}
+    x.dir=out;x.manifest=fopen(manifest,"wx");
+    if(!x.manifest){free(bytes);cx_rmtree(out);return 2;}
+    int bad=fprintf(x.manifest,"P3MODEL_EXTRACT1\npackage\t%s\n",hash)<0;
+    for(int i=0;i<6&&!bad;i++)if(fprintf(x.manifest,"source\t%s\t%s\n",deps[i],dep_hash[i])<0)bad=1;
+    if(!bad)bad=cxps_models((const unsigned char *)bytes,(long)n,&ver,extract,&x)!=0;
+    free(bytes);if(fclose(x.manifest))bad=1;
+    bytes=cx_read(pkg,&n);if(!bytes)bad=1;else{cx_sha256_hex(bytes,n,after);if(strcmp(hash,after))bad=1;free(bytes);}
+    for(int i=0;i<6;i++)if(digest(dep_paths[i],after)||strcmp(after,dep_hash[i]))bad=1;
+    if(bad){if(cx_rmtree(out))fputs("extract-p3: cleanup-failed\n",stderr);fputs("extract-p3: payload-or-input-changed\n",stderr);return 2;}
+    printf("PREPARED\tP3MODEL_EXTRACT1\tmembers=%d\tpackage=%s\n",x.count,hash);return 0;
+}
