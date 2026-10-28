@@ -1,0 +1,344 @@
+/* tools/sim.cx -- the generic delta executor as a .cx diagnostic simulator with state-name coverage.
+ *   sh ./unisacc.com tools/sim.cx -- DELTA.json INPUT [SRC_LABEL] [INCLUDE_DIR] [--cov COV.tsv]
+ * Runs the pre-network delta (seed-gen output, state names intact) on INPUT exactly as exec/pp/sim.py
+ * and exec/c/run.c do: stdout = accepted output, stderr = diagnostics or "reject: NAME", rc 0/1/3(timeout).
+ * --cov writes one "STATE\tKEY" line per distinct (state, observation) taken, sorted, so two runs can be
+ * diffed (comm -13 A B) to find which states handled a byte in one run and not the other.
+ * Semantics follow exec/pp/sim.py (docs/exec/e2-pp-delta.md): obs = byte at the top frame cursor (256 at
+ * end) / result r / control-stack top; W is int64 with 32-bit wrap on ALU and 64-bit wrap on A64;
+ * numeric W addresses (LDX/STX) live in a separate map from named registers, as Python's dict keeps
+ * int and str keys distinct. The oracle for this tool is byte-equality with run.c and sim.py. */
+
+enum { EOFK = 256, MAXSTACK = 4096, MAXFRAMES = 256 };
+static void die(const char *s) { fprintf(stderr, "sim: %s\n", s); exit(2); }
+static void *xmalloc(size_t n) { void *p = malloc(n ? n : 1); if (!p) die("out of memory"); return p; }
+static void *xrealloc(void *p, size_t n) { p = realloc(p, n ? n : 1); if (!p) die("out of memory"); return p; }
+
+/* ---- growable byte buffer ---- */
+typedef struct { unsigned char *s; long n, cap; } Bytes;
+static void bgrow(Bytes *b, long need) { if (b->n + need > b->cap) { long c = b->cap ? b->cap : 256; while (b->n + need > c) c *= 2; b->s = xrealloc(b->s, (size_t)c); b->cap = c; } }
+static void bput(Bytes *b, const unsigned char *s, long n) { bgrow(b, n); memcpy(b->s + b->n, s, (size_t)n); b->n += n; }
+static void bputc(Bytes *b, int c) { bgrow(b, 1); b->s[b->n++] = (unsigned char)c; }
+typedef struct { long long *s; long n, cap; } Words;
+static void wgrow(Words *w, long need) { if (w->n + need > w->cap) { long c = w->cap ? w->cap : 256; while (w->n + need > c) c *= 2; w->s = xrealloc(w->s, (size_t)c * sizeof(long long)); w->cap = c; } }
+static void wput(Words *w, long long v) { wgrow(w, 1); w->s[w->n++] = v; }
+
+/* ---- string-keyed and int-keyed maps (open addressing) ---- */
+typedef struct { char **keys; long long *vals; long n, cap; } SMap;
+static unsigned long shash(const char *s, long n) { unsigned long h = 1469598103934665603UL; for (long i = 0; i < n; i++) { h ^= (unsigned char)s[i]; h *= 1099511628211UL; } return h; }
+static long sfind(SMap *m, const char *k, long n, int insert) {
+    if (!m->cap || (insert && m->n * 2 >= m->cap)) {
+        long oc = m->cap, nc = oc ? oc * 2 : 1024; char **ok = m->keys; long long *ov = m->vals;
+        m->keys = xmalloc((size_t)nc * sizeof(char *)); m->vals = xmalloc((size_t)nc * sizeof(long long)); memset(m->keys, 0, (size_t)nc * sizeof(char *)); m->cap = nc; m->n = 0;
+        for (long i = 0; i < oc; i++) if (ok[i]) { long j = sfind(m, ok[i], (long)strlen(ok[i]), 1); m->keys[j] = ok[i]; m->vals[j] = ov[i]; m->n++; }
+        free(ok); free(ov);
+    }
+    long i = (long)(shash(k, n) & (unsigned long)(m->cap - 1));
+    for (;;) {
+        if (!m->keys[i]) { if (!insert) return -1; return i; }
+        if ((long)strlen(m->keys[i]) == n && !memcmp(m->keys[i], k, (size_t)n)) return i;
+        i = (i + 1) & (m->cap - 1);
+    }
+}
+static long long sget(SMap *m, const char *k) { long i = m->cap ? sfind(m, k, (long)strlen(k), 0) : -1; return i < 0 ? 0 : m->vals[i]; }
+static int shas(SMap *m, const unsigned char *k, long n, long long *out) { long i = m->cap ? sfind(m, (const char *)k, n, 0) : -1; if (i < 0) return 0; *out = m->vals[i]; return 1; }
+static void sset(SMap *m, const unsigned char *k, long n, long long v) {
+    long i = sfind(m, (const char *)k, n, 1);
+    if (!m->keys[i]) { char *c = xmalloc((size_t)n + 1); memcpy(c, k, (size_t)n); c[n] = 0; m->keys[i] = c; m->n++; }
+    m->vals[i] = v;
+}
+static void ssets(SMap *m, const char *k, long long v) { sset(m, (const unsigned char *)k, (long)strlen(k), v); }
+/* string keys may contain NUL (blob ids like "\0cli/source"): keep length-aware copies via a parallel length table */
+typedef struct { unsigned char **keys; long *lens; long long *vals; long n, cap; } BMap;
+static long bfind(BMap *m, const unsigned char *k, long n, int insert) {
+    if (!m->cap || (insert && m->n * 2 >= m->cap)) {
+        long oc = m->cap, nc = oc ? oc * 2 : 1024; unsigned char **ok = m->keys; long *ol = m->lens; long long *ov = m->vals;
+        m->keys = xmalloc((size_t)nc * sizeof(unsigned char *)); m->lens = xmalloc((size_t)nc * sizeof(long)); m->vals = xmalloc((size_t)nc * sizeof(long long)); memset(m->keys, 0, (size_t)nc * sizeof(unsigned char *)); m->cap = nc; m->n = 0;
+        for (long i = 0; i < oc; i++) if (ok[i]) { long j = bfind(m, ok[i], ol[i], 1); m->keys[j] = ok[i]; m->lens[j] = ol[i]; m->vals[j] = ov[i]; m->n++; }
+        free(ok); free(ol); free(ov);
+    }
+    long i = (long)(shash((const char *)k, n) & (unsigned long)(m->cap - 1));
+    for (;;) {
+        if (!m->keys[i]) { if (!insert) return -1; return i; }
+        if (m->lens[i] == n && !memcmp(m->keys[i], k, (size_t)n)) return i;
+        i = (i + 1) & (m->cap - 1);
+    }
+}
+static int bhas(BMap *m, const unsigned char *k, long n, long long *out) { long i = m->cap ? bfind(m, k, n, 0) : -1; if (i < 0) return 0; *out = m->vals[i]; return 1; }
+static void bset(BMap *m, const unsigned char *k, long n, long long v) { long i = bfind(m, k, n, 1); if (!m->keys[i]) { unsigned char *c = xmalloc((size_t)n + 1); memcpy(c, k, (size_t)n); c[n] = 0; m->keys[i] = c; m->lens[i] = n; m->n++; } m->vals[i] = v; }
+typedef struct { long long *keys; long long *vals; unsigned char *used; long n, cap; } IMap;
+static long ifind(IMap *m, long long k, int insert) {
+    if (!m->cap || (insert && m->n * 2 >= m->cap)) {
+        long oc = m->cap, nc = oc ? oc * 2 : 4096; long long *ok = m->keys, *ov = m->vals; unsigned char *ou = m->used;
+        m->keys = xmalloc((size_t)nc * sizeof(long long)); m->vals = xmalloc((size_t)nc * sizeof(long long)); m->used = xmalloc((size_t)nc); memset(m->used, 0, (size_t)nc); m->cap = nc; m->n = 0;
+        for (long i = 0; i < oc; i++) if (ou[i]) { long j = ifind(m, ok[i], 1); m->keys[j] = ok[i]; m->vals[j] = ov[i]; m->used[j] = 1; m->n++; }
+        free(ok); free(ov); free(ou);
+    }
+    unsigned long long h = (unsigned long long)k * 11400714819323198485ULL; long i = (long)(h >> 20) & (m->cap - 1);
+    for (;;) { if (!m->used[i]) { if (!insert) return -1; return i; } if (m->keys[i] == k) return i; i = (i + 1) & (m->cap - 1); }
+}
+static long long iget(IMap *m, long long k) { long i = m->cap ? ifind(m, k, 0) : -1; return i < 0 ? 0 : m->vals[i]; }
+static void iset(IMap *m, long long k, long long v) { long i = ifind(m, k, 1); if (!m->used[i]) { m->used[i] = 1; m->keys[i] = k; m->n++; } m->vals[i] = v; }
+
+/* ---- minimal JSON ---- */
+enum { JNULL, JBOOL, JNUM, JSTR, JARR, JOBJ };
+typedef struct JV { int kind; long long num; char *str; struct JV **items; char **keys; int n; } JV;
+static const char *jp; static long jline;
+static void jskip(void) { while (*jp == ' ' || *jp == '\t' || *jp == '\n' || *jp == '\r') { if (*jp == '\n') jline++; jp++; } }
+static void jfail(const char *w) { fprintf(stderr, "sim: delta JSON: %s near line %ld\n", w, jline); exit(2); }
+static JV *jnew(int k) { JV *v = xmalloc(sizeof *v); memset(v, 0, sizeof *v); v->kind = k; return v; }
+static char *jstring(void) {
+    Bytes b = {0}; if (*jp != '"') jfail("string expected"); jp++;
+    for (;;) { unsigned char c = (unsigned char)*jp; if (!c) jfail("unterminated string"); if (c == '"') { jp++; break; }
+        if (c == '\\') { jp++; c = (unsigned char)*jp; if (c == 'n') bputc(&b, '\n'); else if (c == 't') bputc(&b, '\t'); else if (c == 'r') bputc(&b, '\r'); else if (c == 'b') bputc(&b, '\b'); else if (c == 'f') bputc(&b, '\f'); else if (c == '/' || c == '\\' || c == '"') bputc(&b, c);
+            else if (c == 'u') { unsigned v = 0; for (int i = 1; i <= 4; i++) { int d = jp[i]; v = v * 16 + (unsigned)(d >= '0' && d <= '9' ? d - '0' : d >= 'a' && d <= 'f' ? d - 'a' + 10 : d >= 'A' && d <= 'F' ? d - 'A' + 10 : (jfail("bad \\u"), 0)); } jp += 4;
+                if (v < 0x80) bputc(&b, (int)v); else if (v < 0x800) { bputc(&b, 0xC0 | (int)(v >> 6)); bputc(&b, 0x80 | (int)(v & 63)); } else { bputc(&b, 0xE0 | (int)(v >> 12)); bputc(&b, 0x80 | (int)((v >> 6) & 63)); bputc(&b, 0x80 | (int)(v & 63)); } }
+            else jfail("bad escape"); jp++; }
+        else { bputc(&b, c); jp++; } }
+    bputc(&b, 0); return (char *)b.s;
+}
+static JV *jparse(void) {
+    jskip(); JV *v;
+    if (*jp == '{') { v = jnew(JOBJ); jp++; jskip(); int cap = 0; if (*jp == '}') { jp++; return v; }
+        for (;;) { jskip(); char *k = jstring(); jskip(); if (*jp != ':') jfail("colon expected"); jp++; JV *x = jparse();
+            if (v->n == cap) { cap = cap ? cap * 2 : 8; v->items = xrealloc(v->items, (size_t)cap * sizeof(JV *)); v->keys = xrealloc(v->keys, (size_t)cap * sizeof(char *)); }
+            v->keys[v->n] = k; v->items[v->n++] = x; jskip(); if (*jp == ',') { jp++; continue; } if (*jp == '}') { jp++; return v; } jfail("object syntax"); } }
+    if (*jp == '[') { v = jnew(JARR); jp++; jskip(); int cap = 0; if (*jp == ']') { jp++; return v; }
+        for (;;) { JV *x = jparse(); if (v->n == cap) { cap = cap ? cap * 2 : 8; v->items = xrealloc(v->items, (size_t)cap * sizeof(JV *)); } v->items[v->n++] = x; jskip(); if (*jp == ',') { jp++; continue; } if (*jp == ']') { jp++; return v; } jfail("array syntax"); } }
+    if (*jp == '"') { v = jnew(JSTR); v->str = jstring(); return v; }
+    if (*jp == '-' || (*jp >= '0' && *jp <= '9')) { v = jnew(JNUM); int neg = *jp == '-'; if (neg) jp++; long long n = 0; while (*jp >= '0' && *jp <= '9') { n = n * 10 + (*jp - '0'); jp++; } if (*jp == '.' || *jp == 'e' || *jp == 'E') jfail("non-integer number"); v->num = neg ? -n : n; return v; }
+    if (!strncmp(jp, "true", 4)) { jp += 4; v = jnew(JBOOL); v->num = 1; return v; }
+    if (!strncmp(jp, "false", 5)) { jp += 5; v = jnew(JBOOL); return v; }
+    if (!strncmp(jp, "null", 4)) { jp += 4; return jnew(JNULL); }
+    jfail("value expected"); return 0;
+}
+static JV *jget(JV *o, const char *k) { if (o->kind != JOBJ) return 0; for (int i = 0; i < o->n; i++) if (!strcmp(o->keys[i], k)) return o->items[i]; return 0; }
+
+/* ---- the loaded delta ---- */
+enum { OP_ADV, OP_MARK, OP_JUMP, OP_COPYT, OP_COPY, OP_OUT, OP_LDI, OP_COPYW, OP_ALU, OP_ALUI, OP_CMP, OP_CMPI, OP_A64, OP_A64I, OP_C64, OP_C64U, OP_RLD, OP_LDX, OP_STX, OP_OUTW,
+       OP_SPAN, OP_SPANT, OP_SPAN2, OP_OLAST, OP_ODROP, OP_OLEN, OP_OCUT, OP_ORES, OP_OFILL, OP_OCLR, OP_OSEL, OP_SETOT, OP_XATTR, OP_PUSH, OP_POP, OP_INTERN, OP_SBINTERN,
+       OP_BLOBSAVE, OP_SBSAVE, OP_INPUSH, OP_INPUSHX, OP_INPUSHXE, OP_INPOP, OP_SBCLR, OP_SBOUT, OP_SBSPAN, OP_SBBLOB, OP_SBFIND, OP_BYTE, OP_XLEN, OP_BLEN, OP_DIVMOD10, OP_SWAP, OP_ACCEPT, OP_REJECT, OP_N };
+static const char *opname[OP_N] = { "ADV", "MARK", "JUMP", "COPYT", "COPY", "OUT", "LDI", "COPYW", "ALU", "ALUI", "CMP", "CMPI", "A64", "A64I", "C64", "C64U", "RLD", "LDX", "STX", "OUTW",
+       "SPAN", "SPANT", "SPAN2", "OLAST", "ODROP", "OLEN", "OCUT", "ORES", "OFILL", "OCLR", "OSEL", "SETOT", "XATTR", "PUSH", "POP", "INTERN", "SBINTERN",
+       "BLOBSAVE", "SBSAVE", "INPUSH", "INPUSHX", "INPUSHXE", "INPOP", "SBCLR", "SBOUT", "SBSPAN", "SBBLOB", "SBFIND", "BYTE", "XLEN", "BLEN", "DIVMOD10", "SWAP", "ACCEPT", "REJECT" };
+enum { AL_add, AL_sub, AL_mul, AL_div, AL_rem, AL_and, AL_or, AL_xor, AL_shl, AL_sar, AL_sdiv, AL_srem, AL_udiv, AL_urem, AL_not, AL_shr, AL_N };
+static const char *aluname[AL_N] = { "add", "sub", "mul", "div", "rem", "and", "or", "xor", "shl", "sar", "sdiv", "srem", "udiv", "urem", "not", "shr" };
+typedef struct { int op; int alu; const char *s1, *s2, *s3; long long v; int addr2; int r1, r2, r3; } Act;   /* r1..r3: register ids of s1..s3 (labels keep only sN) */   /* addr2: s2 is absent and v is a numeric W address (Python: W.get(int)) */   /* string args in slot order, numeric arg in v */
+typedef struct { Act *a; int n; } Seq;
+typedef struct { int next; Seq *seq; } Edge;
+typedef struct { const char *name; int mode; Edge *byte; /* 257 for b/r */ char **tkeys; Edge *tedges; int tn; } State;
+static State *S; static int NS; static Seq *SEQS; static int NSEQ; static SMap stateix; static int START;
+
+static int opcode(const char *s) { for (int i = 0; i < OP_N; i++) if (!strcmp(opname[i], s)) return i; fprintf(stderr, "sim: unknown action %s\n", s); exit(2); }
+static int alucode(const char *s) { for (int i = 0; i < AL_N; i++) if (!strcmp(aluname[i], s)) return i; fprintf(stderr, "sim: unknown ALU op %s\n", s); exit(2); }
+static const char *jstr(JV *a, int i) { if (i >= a->n || a->items[i]->kind != JSTR) die("action argument: string expected"); return a->items[i]->str; }
+static long long jnum(JV *a, int i) { if (i >= a->n || a->items[i]->kind != JNUM) die("action argument: number expected"); return a->items[i]->num; }
+static SMap regix; static int NREG;
+static int regid(const char *s) { if (!s) return 0; long i = regix.cap ? sfind(&regix, s, (long)strlen(s), 0) : -1; if (i >= 0) return (int)regix.vals[i]; ssets(&regix, s, ++NREG); return NREG; }
+static void load_seq(Seq *q, JV *arr) {
+    q->n = arr->n; q->a = xmalloc((size_t)(arr->n ? arr->n : 1) * sizeof(Act));
+    for (int i = 0; i < arr->n; i++) {
+        JV *a = arr->items[i]; Act *t = &q->a[i]; memset(t, 0, sizeof *t); if (a->kind != JARR || a->n < 1) die("action shape"); t->op = opcode(jstr(a, 0));
+        switch (t->op) {
+        case OP_MARK: case OP_JUMP: case OP_RLD: case OP_OLEN: case OP_OSEL: case OP_SETOT: case OP_XATTR: case OP_PUSH: case OP_INPUSH: case OP_INPUSHX: case OP_SBBLOB: case OP_SBFIND: case OP_BYTE: case OP_XLEN: case OP_DIVMOD10: case OP_SBINTERN: case OP_SBSAVE: case OP_REJECT: case OP_OUTW: case OP_SPAN: case OP_SPANT:
+            if (t->op == OP_OSEL) t->v = jnum(a, 1); else t->s1 = jstr(a, 1); break;
+        case OP_OUT: case OP_SBOUT: t->v = jnum(a, 1); break;
+        case OP_LDI: t->s1 = jstr(a, 1); t->v = jnum(a, 2); break;
+        case OP_CMP: t->s1 = jstr(a, 1); if (a->n > 2 && a->items[2]->kind == JNUM) { t->addr2 = 1; t->v = a->items[2]->num; } else t->s2 = jstr(a, 2); break;
+        case OP_COPYW: case OP_C64: case OP_C64U: case OP_SPAN2: case OP_INPUSHXE: case OP_SBSPAN: case OP_BLEN: t->s1 = jstr(a, 1); t->s2 = jstr(a, 2); break;
+        case OP_CMPI: case OP_OCUT: t->s1 = jstr(a, 1); if (t->op == OP_OCUT) t->s2 = jstr(a, 2); else t->v = jnum(a, 2); break;
+        case OP_ORES: t->s1 = jstr(a, 1); t->v = jnum(a, 2); break;
+        case OP_OFILL: t->s1 = jstr(a, 1); t->s2 = jstr(a, 2); t->v = jnum(a, 3); break;
+        case OP_ALU: case OP_A64: t->alu = alucode(jstr(a, 1)); t->s1 = jstr(a, 2); t->s2 = jstr(a, 3); t->s3 = jstr(a, 4); break;
+        case OP_ALUI: case OP_A64I: t->alu = alucode(jstr(a, 1)); t->s1 = jstr(a, 2); t->s2 = jstr(a, 3); t->v = jnum(a, 4); break;
+        case OP_LDX: t->s1 = jstr(a, 1); t->s2 = jstr(a, 2); t->v = jnum(a, 3); break;
+        case OP_STX: t->s1 = jstr(a, 1); t->v = jnum(a, 2); t->s2 = jstr(a, 3); break;
+        case OP_INTERN: case OP_BLOBSAVE: t->s1 = jstr(a, 1); t->s2 = jstr(a, 2); t->s3 = jstr(a, 3); break;
+        default: break;   /* ADV COPYT COPY OLAST ODROP OCLR POP INPOP SBCLR SWAP ACCEPT */
+        }
+        if (t->op != OP_PUSH && t->op != OP_REJECT) { t->r1 = regid(t->s1); t->r2 = regid(t->s2); t->r3 = regid(t->s3); }
+    }
+}
+static void load_delta(const char *path) {
+    FILE *f = fopen(path, "rb"); if (!f) die("cannot open delta"); fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    char *text = xmalloc((size_t)n + 1); if (fread(text, 1, (size_t)n, f) != (size_t)n) die("delta read"); text[n] = 0; fclose(f);
+    jp = text; jline = 1; JV *root = jparse(); JV *start = jget(root, "start"), *states = jget(root, "states"), *seqs = jget(root, "seqs");
+    if (!start || !states || !seqs || start->kind != JSTR || states->kind != JOBJ || seqs->kind != JARR) die("delta shape");
+    NSEQ = seqs->n; SEQS = xmalloc((size_t)NSEQ * sizeof(Seq)); for (int i = 0; i < NSEQ; i++) load_seq(&SEQS[i], seqs->items[i]);
+    NS = states->n; S = xmalloc((size_t)NS * sizeof(State)); memset(S, 0, (size_t)NS * sizeof(State));
+    for (int i = 0; i < NS; i++) { S[i].name = states->keys[i]; ssets(&stateix, S[i].name, i); }
+    for (int i = 0; i < NS; i++) {
+        JV *st = states->items[i]; if (st->kind != JARR || st->n != 2 || st->items[0]->kind != JSTR || st->items[1]->kind != JOBJ) die("state shape");
+        const char *m = st->items[0]->str; JV *row = st->items[1]; S[i].mode = m[0];
+        if (m[0] == 't') { S[i].tn = row->n; S[i].tkeys = row->keys; S[i].tedges = xmalloc((size_t)(row->n ? row->n : 1) * sizeof(Edge)); }
+        else { S[i].byte = xmalloc(257 * sizeof(Edge)); for (int k = 0; k < 257; k++) { S[i].byte[k].next = -1; S[i].byte[k].seq = 0; } }
+        for (int k = 0; k < row->n; k++) {
+            JV *e = row->items[k]; if (e->kind != JARR || e->n != 2 || e->items[0]->kind != JSTR || e->items[1]->kind != JNUM) die("edge shape");
+            long ni = sfind(&stateix, e->items[0]->str, (long)strlen(e->items[0]->str), 0); if (ni < 0) { fprintf(stderr, "sim: edge to unknown state %s\n", e->items[0]->str); exit(2); }
+            long long si = e->items[1]->num; if (si < 0 || si >= NSEQ) die("sequence index");
+            Edge ed; ed.next = (int)stateix.vals[ni]; ed.seq = &SEQS[si];
+            if (m[0] == 't') S[i].tedges[k] = ed; else { char *end; long key = strtol(row->keys[k], &end, 10); if (*end || key < 0 || key > 256) die("byte/result key"); S[i].byte[key] = ed; }
+        }
+    }
+    long si = sfind(&stateix, start->str, (long)strlen(start->str), 0); if (si < 0) die("start state"); START = (int)stateix.vals[si];
+}
+
+/* ---- files (read-only dictionary; keys are the delta's path strings) ---- */
+static const char *bundled;
+static BMap filecache; static Bytes *filedata; static long nfiles, filecap;
+static long file_get(const unsigned char *key, long n, const unsigned char **data, long *len) {   /* returns 1 found, 0 absent */
+    long long idx; if (bhas(&filecache, key, n, &idx)) { if (idx < 0) return 0; *data = filedata[idx].s; *len = filedata[idx].n; return 1; }
+    char path[8192]; long off = 0, pn = 0;
+    if (n >= 7 && key[0] == 0 && (!memcmp(key + 1, "inc/q/", 6) || !memcmp(key + 1, "inc/a/", 6))) off = 7;
+    else if (n >= 5 && key[0] == 0 && !memcmp(key + 1, "hdr/", 4)) { if (!bundled) die("\\0hdr/ path needs INCLUDE_DIR"); pn = (long)strlen(bundled); if (pn + 1 + n >= (long)sizeof path) die("path length"); memcpy(path, bundled, (size_t)pn); path[pn++] = '/'; off = 5; }
+    if (n - off + pn >= (long)sizeof path) die("path length"); memcpy(path + pn, key + off, (size_t)(n - off)); path[pn + n - off] = 0;
+    if (memchr(path, 0, (size_t)(pn + n - off))) { bset(&filecache, key, n, -1); return 0; }   /* a NUL inside the path: never a file (Python ValueError) */
+    struct stat st; errno = 0;
+    if (stat(path, &st)) { if (errno == ENOENT) { bset(&filecache, key, n, -1); return 0; } fprintf(stderr, "sim: cannot stat %s (errno %d)\n", path, errno); exit(2); }
+    FILE *f = fopen(path, "rb"); if (!f) { fprintf(stderr, "sim: cannot open %s (errno %d)\n", path, errno); exit(2); }
+    Bytes b = {0}; unsigned char chunk[65536]; size_t k; while ((k = fread(chunk, 1, sizeof chunk, f)) > 0) bput(&b, chunk, (long)k); if (ferror(f)) die("file read"); fclose(f);
+    if (nfiles == filecap) { filecap = filecap ? filecap * 2 : 64; filedata = xrealloc(filedata, (size_t)filecap * sizeof(Bytes)); }
+    filedata[nfiles] = b; bset(&filecache, key, n, nfiles); *data = b.s; *len = b.n; nfiles++; return 1;
+}
+
+/* ---- machine ---- */
+typedef struct { const unsigned char *b; const long long *attr; long cur, end; } Frame;
+static long long w32(long long v) { unsigned long long u = (unsigned long long)v & 0xFFFFFFFFULL; return (u & 0x80000000ULL) ? (long long)u - 0x100000000LL : (long long)u; }
+static long long alu32(int op, long long a, long long b) {
+    a = w32(a); b = w32(b);
+    switch (op) {
+    case AL_add: return w32(a + b); case AL_sub: return w32(a - b); case AL_mul: return w32(a * b);
+    case AL_div: { if (b == 0) return 0; long long aa = a < 0 ? -a : a, bb = b < 0 ? -b : b, q = aa / bb; return w32((a < 0) == (b < 0) ? q : -q); }
+    case AL_rem: { if (b == 0) return 0; long long q = alu32(AL_div, a, b); return w32(a - q * b); }
+    case AL_and: return w32(a & b); case AL_or: return w32(a | b); case AL_xor: return w32(a ^ b);
+    case AL_shl: return w32((long long)((unsigned long long)a << (b & 31)));
+    case AL_sar: return w32(a >> (b & 31));
+    default: die("ALU op not valid for 32-bit"); return 0;
+    }
+}
+static long long w64(unsigned long long u) { return (long long)u; }
+static long long alu64(int op, long long a, long long b, int *dz) {
+    unsigned long long ua = (unsigned long long)a, ub = (unsigned long long)b; *dz = 0;
+    switch (op) {
+    case AL_sdiv: case AL_srem: case AL_udiv: case AL_urem: {
+        if (b == 0) { *dz = 1; return 0; }
+        if (op == AL_udiv) return w64(ua / ub); if (op == AL_urem) return w64(ua % ub);
+        unsigned long long aa = a < 0 ? (unsigned long long)0 - ua : ua, bb = b < 0 ? (unsigned long long)0 - ub : ub, q = aa / bb;
+        long long sq = ((a < 0) == (b < 0)) ? (long long)q : (long long)((unsigned long long)0 - q);
+        if (op == AL_sdiv) return sq; return w64(ua - (unsigned long long)sq * ub);
+    }
+    case AL_add: return w64(ua + ub); case AL_sub: return w64(ua - ub); case AL_mul: return w64(ua * ub);
+    case AL_and: return w64(ua & ub); case AL_or: return w64(ua | ub); case AL_xor: return w64(ua ^ ub); case AL_not: return w64(~ua);
+    case AL_shl: return w64(ua << (b & 63)); case AL_shr: return w64(ua >> (b & 63)); case AL_sar: return a >> (b & 63);
+    default: die("A64 op not valid"); return 0;
+    }
+}
+typedef struct { unsigned char *s; long n; } Blob;
+
+int main(int argc, char **argv) {
+    const char *delta = 0, *input = 0, *srcpath = 0, *covpath = 0; int pos = 0;
+    for (int i = 1; i < argc; i++) { if (!strcmp(argv[i], "--cov") && i + 1 < argc) covpath = argv[++i]; else if (pos == 0) delta = argv[i], pos++; else if (pos == 1) input = argv[i], pos++; else if (pos == 2) srcpath = argv[i], pos++; else if (pos == 3) bundled = argv[i], pos++; else die("usage: DELTA.json INPUT [SRC_LABEL] [INCLUDE_DIR] [--cov COV.tsv]"); }
+    if (!delta || !input) { fputs("usage: sim DELTA.json INPUT [SRC_LABEL] [INCLUDE_DIR] [--cov COV.tsv]\n", stderr); return 2; }
+    if (!srcpath) srcpath = input;
+    load_delta(delta);
+    /* input */
+    Bytes xin = {0}; { FILE *f = strcmp(input, "-") ? fopen(input, "rb") : stdin; if (!f) { fprintf(stderr, "sim: cannot open input %s\n", input); return 2; } unsigned char chunk[65536]; size_t k; while ((k = fread(chunk, 1, sizeof chunk, f)) > 0) bput(&xin, chunk, (long)k); if (f != stdin) fclose(f); }
+    unsigned char *x = xin.s ? xin.s : (unsigned char *)""; long xn = xin.n;
+    long long *xattr = xmalloc((size_t)(xn ? xn : 1) * sizeof(long long)); memset(xattr, 0, (size_t)(xn ? xn : 1) * sizeof(long long));
+    /* store */
+    long long *W = xmalloc((size_t)(NREG + 1) * sizeof(long long)); memset(W, 0, (size_t)(NREG + 1) * sizeof(long long)); IMap WM = {0}; BMap intern = {0}, blobid = {0};
+    Blob *blobs = xmalloc(1024 * sizeof(Blob)); long nblobs = 0, blobcap = 1024;
+#define ADDBLOB(ptr, len) do { if (nblobs == blobcap) { blobcap *= 2; blobs = xrealloc(blobs, (size_t)blobcap * sizeof(Blob)); } blobs[nblobs].s = (unsigned char *)(ptr); blobs[nblobs].n = (len); nblobs++; } while (0)
+    ADDBLOB("", 0); { long sl = (long)strlen(srcpath); unsigned char *c = xmalloc((size_t)sl + 1); memcpy(c, srcpath, (size_t)sl + 1); ADDBLOB(c, sl); }
+    { static const unsigned char k[] = "\0cli/source"; bset(&blobid, k, 11, 1); }
+    Frame frames[MAXFRAMES]; int nfr = 1; frames[0].b = x; frames[0].attr = xattr; frames[0].cur = 0; frames[0].end = xn; Frame *fr = &frames[0];
+    const char *stack[MAXSTACK]; int nst = 0;
+    Bytes o = {0}, e = {0}, sb = {0}; Words oattr = {0}; int osel = 0; long long OT = 0; long long r = 0;
+    int q = START; long long steps = 0;
+    /* coverage: a flag per (state, key) for b/r, a set for t */
+    unsigned char *cov = 0; SMap covt = {0}; if (covpath) { cov = xmalloc((size_t)NS * 257); memset(cov, 0, (size_t)NS * 257); }
+    int result = -1; const char *rejname = 0;
+    for (;;) {
+        steps++;
+        State *st = &S[q]; Edge *ed; int key;
+        if (st->mode == 'b') { key = fr->cur < fr->end ? fr->b[fr->cur] : EOFK; ed = &st->byte[key]; }
+        else if (st->mode == 't') { const char *top = nst ? stack[nst - 1] : "BOT"; ed = 0; for (int k = 0; k < st->tn; k++) if (!strcmp(st->tkeys[k], top)) { ed = &st->tedges[k]; break; }
+            if (!ed) { fprintf(stderr, "sim: state %s has no edge for stack top %s\n", st->name, top); return 2; }
+            if (cov) { char kk[600]; snprintf(kk, sizeof kk, "%s\t%s", st->name, top); ssets(&covt, kk, 1); } key = -1; }
+        else { key = (r >= 0 && r <= 256) ? (int)r : 256; ed = &st->byte[key]; }
+        if (key >= 0) { if (ed->next < 0) { fprintf(stderr, "sim: state %s has no edge for key %d\n", st->name, key); return 2; } if (cov) cov[(long)q * 257 + key] = 1; }
+        q = ed->next; Seq *sq = ed->seq;
+        for (int ai = 0; ai < sq->n; ai++) {
+            Act *a = &sq->a[ai];
+            switch (a->op) {
+            case OP_ADV: fr->cur++; break;
+            case OP_MARK: W[a->r1] = fr->cur; break;
+            case OP_JUMP: fr->cur = (long)W[a->r1]; break;
+            case OP_COPYT: if (fr->cur < fr->end) { if (osel == 0) { bputc(&o, fr->b[fr->cur]); wput(&oattr, OT); } else bputc(&e, fr->b[fr->cur]); } break;
+            case OP_COPY: if (fr->cur < fr->end) { if (osel == 0) { bputc(&o, fr->b[fr->cur]); wput(&oattr, fr->attr ? fr->attr[fr->cur] : OT); } else bputc(&e, fr->b[fr->cur]); } break;
+            case OP_OUT: if (osel == 0) { bputc(&o, (int)a->v); wput(&oattr, OT); } else bputc(&e, (int)a->v); break;
+            case OP_LDI: W[a->r1] = a->v; break;
+            case OP_COPYW: W[a->r1] = W[a->r2]; break;
+            case OP_ALU: W[a->r1] = alu32(a->alu, W[a->r2], W[a->r3]); break;
+            case OP_ALUI: W[a->r1] = alu32(a->alu, W[a->r2], a->v); break;
+            case OP_CMP: case OP_CMPI: { long long u = W[a->r1], v = a->op == OP_CMPI ? a->v : a->addr2 ? iget(&WM, a->v) : W[a->r2]; r = u < v ? 0 : u == v ? 1 : 2; } break;
+            case OP_A64: case OP_A64I: { int dz; long long v = alu64(a->alu, W[a->r2], a->op == OP_A64 ? W[a->r3] : a->v, &dz); W[a->r1] = v; r = dz; } break;
+            case OP_C64: case OP_C64U: { long long u = W[a->r1], v = W[a->r2]; if (a->op == OP_C64U) { unsigned long long uu = (unsigned long long)u, vv = (unsigned long long)v; r = uu < vv ? 0 : uu == vv ? 1 : 2; } else r = u < v ? 0 : u == v ? 1 : 2; } break;
+            case OP_RLD: { long long v = W[a->r1]; r = (v >= 0 && v <= 256) ? v : 256; } break;
+            case OP_LDX: W[a->r1] = iget(&WM, W[a->r2] + a->v); break;
+            case OP_STX: iset(&WM, W[a->r1] + a->v, W[a->r2]); break;
+            case OP_OUTW: { int c = (int)(W[a->r1] & 255); if (osel == 0) { bputc(&o, c); wput(&oattr, OT); } else bputc(&e, c); } break;
+            case OP_SPAN: case OP_SPANT: case OP_SPAN2: { long s0 = (long)W[a->r1]; if (s0 < 0) s0 = 0; long s1 = a->op == OP_SPAN2 ? (long)W[a->r2] : fr->cur; if (s1 > fr->end) s1 = fr->end;
+                if (s0 < s1) { if (osel == 1) bput(&e, fr->b + s0, s1 - s0); else { bput(&o, fr->b + s0, s1 - s0); for (long i = s0; i < s1; i++) wput(&oattr, (a->op == OP_SPANT || !fr->attr) ? OT : fr->attr[i]); } } } break;
+            case OP_OLAST: r = o.n ? o.s[o.n - 1] : 256; break;
+            case OP_ODROP: if (o.n) { o.n--; oattr.n--; } break;
+            case OP_OLEN: W[a->r1] = o.n; break;
+            case OP_OCUT: { long s0 = (long)W[a->r2]; if (s0 < 0) s0 = 0; if (s0 > o.n) s0 = o.n; long len = o.n - s0; unsigned char *c = xmalloc((size_t)len + 1); memcpy(c, o.s + s0, (size_t)len); ADDBLOB(c, len); W[a->r1] = nblobs - 1; o.n = s0; oattr.n = s0; } break;
+            case OP_ORES: W[a->r1] = o.n; for (long long i = 0; i < a->v; i++) { bputc(&o, ' '); wput(&oattr, OT); } break;
+            case OP_OFILL: { char t[32]; int tn = snprintf(t, sizeof t, "%lld", W[a->r2]); long wdt = (long)a->v, at = (long)W[a->r1]; if (at < 0 || at + wdt > o.n) die("fill past the reservation");
+                if (tn <= wdt) { memset(o.s + at, ' ', (size_t)(wdt - tn)); memcpy(o.s + at + wdt - tn, t, (size_t)tn); } else { result = 1; rejname = "field overflow"; goto done; } } break;
+            case OP_OCLR: o.n = 0; oattr.n = 0; break;
+            case OP_OSEL: osel = (int)a->v; break;
+            case OP_SETOT: OT = W[a->r1]; break;
+            case OP_XATTR: W[a->r1] = (fr->attr && fr->cur < fr->end) ? fr->attr[fr->cur] : 0; break;
+            case OP_PUSH: if (nst == MAXSTACK) die("control stack overflow"); stack[nst++] = a->s1; break;
+            case OP_POP: if (!nst) die("pop of an empty stack"); nst--; break;
+            case OP_INTERN: case OP_SBINTERN: { const unsigned char *k; long kn; if (a->op == OP_INTERN) { long s0 = (long)W[a->r2], s1 = (long)W[a->r3]; if (s0 < 0) s0 = 0; if (s1 > fr->end) s1 = fr->end; k = fr->b + s0; kn = s0 < s1 ? s1 - s0 : 0; } else { k = sb.s ? sb.s : (const unsigned char *)""; kn = sb.n; }
+                long long id; if (!bhas(&intern, k, kn, &id)) { id = intern.n + 1; bset(&intern, k, kn, id); } W[a->r1] = id; } break;
+            case OP_BLOBSAVE: case OP_SBSAVE: { const unsigned char *k; long kn; if (a->op == OP_BLOBSAVE) { long s0 = (long)W[a->r2], s1 = (long)W[a->r3]; if (s0 < 0) s0 = 0; if (s1 > fr->end) s1 = fr->end; k = fr->b + s0; kn = s0 < s1 ? s1 - s0 : 0; } else { k = sb.s ? sb.s : (const unsigned char *)""; kn = sb.n; }
+                unsigned char *c = xmalloc((size_t)kn + 1); memcpy(c, k, (size_t)kn); ADDBLOB(c, kn); W[a->r1] = nblobs - 1; } break;
+            case OP_INPUSH: { long long bi = W[a->r1]; if (bi < 0 || bi >= nblobs) die("INPUSH blob index"); if (nfr == MAXFRAMES) die("frame overflow"); frames[nfr].b = blobs[bi].s; frames[nfr].attr = 0; frames[nfr].cur = 0; frames[nfr].end = blobs[bi].n; fr = &frames[nfr++]; } break;
+            case OP_INPUSHX: case OP_INPUSHXE: { if (nfr == MAXFRAMES) die("frame overflow"); frames[nfr].b = x; frames[nfr].attr = xattr; frames[nfr].cur = (long)W[a->r1]; long end = xn; if (a->op == OP_INPUSHXE) { long long ee = W[a->r2]; if (ee < end) end = (long)ee; } frames[nfr].end = end; fr = &frames[nfr++]; } break;
+            case OP_INPOP: if (nfr <= 1) die("INPOP of the base frame"); nfr--; fr = &frames[nfr - 1]; break;
+            case OP_SBCLR: sb.n = 0; break;
+            case OP_SBOUT: bputc(&sb, (int)a->v); break;
+            case OP_SBSPAN: { long s0 = (long)W[a->r1], s1 = (long)W[a->r2]; if (s0 < 0) s0 = 0; if (s1 > fr->end) s1 = fr->end; if (s0 < s1) bput(&sb, fr->b + s0, s1 - s0); } break;
+            case OP_SBBLOB: { long long bi = W[a->r1]; if (bi < 0 || bi >= nblobs) die("SBBLOB blob index"); bput(&sb, blobs[bi].s, blobs[bi].n); } break;
+            case OP_SBFIND: { const unsigned char *k = sb.s ? sb.s : (const unsigned char *)""; long kn = sb.n; long long id; if (!bhas(&blobid, k, kn, &id)) { const unsigned char *d; long dn; if (file_get(k, kn, &d, &dn)) { ADDBLOB(d, dn); id = nblobs - 1; } else id = 0; bset(&blobid, k, kn, id); } W[a->r1] = id; } break;
+            case OP_BYTE: W[a->r1] = fr->cur < fr->end ? fr->b[fr->cur] : 0; break;
+            case OP_XLEN: W[a->r1] = fr->end; break;
+            case OP_BLEN: { long long bi = W[a->r2]; if (bi < 0 || bi >= nblobs) die("BLEN blob index"); W[a->r1] = blobs[bi].n; } break;
+            case OP_DIVMOD10: { unsigned long long v = (unsigned long long)W[a->r1] & 0xFFFFFFFFULL; W[a->r1] = (long long)(v / 10); r = (long long)(v % 10) + (v / 10 == 0 ? 10 : 0); } break;
+            case OP_SWAP: { unsigned char *nx = xmalloc((size_t)o.n + 1); memcpy(nx, o.s, (size_t)o.n); nx[o.n] = 0; long long *na = xmalloc((size_t)(o.n ? o.n : 1) * sizeof(long long)); memcpy(na, oattr.s, (size_t)o.n * sizeof(long long));
+                x = nx; xn = o.n; xattr = na; o.s = 0; o.n = 0; o.cap = 0; oattr.s = 0; oattr.n = 0; oattr.cap = 0; nfr = 1; frames[0].b = x; frames[0].attr = xattr; frames[0].cur = 0; frames[0].end = xn; fr = &frames[0]; } break;
+            case OP_ACCEPT: result = 0; goto done;
+            case OP_REJECT: result = 1; rejname = a->s1; goto done;
+            default: die("unhandled action");
+            }
+        }
+    }
+done:
+    if (covpath) {
+        /* collect, sort, write */
+        long cnt = 0; for (long i = 0; i < (long)NS * 257; i++) cnt += cov[i]; cnt += covt.n;
+        char **lines = xmalloc((size_t)(cnt ? cnt : 1) * sizeof(char *)); long li = 0;
+        for (int s = 0; s < NS; s++) for (int k = 0; k < 257; k++) if (cov[(long)s * 257 + k]) { char *l = xmalloc(strlen(S[s].name) + 16); sprintf(l, "%s\t%d", S[s].name, k); lines[li++] = l; }
+        for (long i = 0; i < covt.cap; i++) if (covt.keys[i]) lines[li++] = covt.keys[i];
+        for (long i = 1; i < li; i++) { char *t = lines[i]; long j = i - 1; while (j >= 0 && strcmp(lines[j], t) > 0) { lines[j + 1] = lines[j]; j--; } lines[j + 1] = t; }
+        FILE *cf = fopen(covpath, "wb"); if (!cf) die("cannot write coverage"); for (long i = 0; i < li; i++) { fputs(lines[i], cf); fputc('\n', cf); } if (fclose(cf)) die("coverage write");
+    }
+    if (result == 0) { if (o.n) fwrite(o.s, 1, (size_t)o.n, stdout); if (e.n) fwrite(e.s, 1, (size_t)e.n, stderr); return 0; }
+    if (rejname && *rejname) fprintf(stderr, "reject: %s\n", rejname);
+    if (e.n) fwrite(e.s, 1, (size_t)e.n, stderr);
+    return 1;
+}
