@@ -2,6 +2,8 @@
 
 ## cxpack.fifo-open — 非普通清单阻塞（Linux 候选切片已复现，待修）
 
+POSIX模型驱动修复开发验证：cxm_rd改为O_NONBLOCK打开、同fd fstat拒非普通文件、EINTR重试及有界read，保留缺席/超限/I/O错误分类。新构造 `out/c43-fifo-driver-01.elf` 搭配显式ff696，`out/c43-fifo-fixed-01.stdout` 五项5/0；FIFO现在rc1具名拒绝且stdout为空。只证明Linux私有驱动，不代表已装e955已修；Windows仍原路径，经典与宿主对应改动尚待接续。
+
 2026-10-28：`out/c43-e955-cxpack-fifo-01/` 实跑候选 slice-lnx-x86_64（冻结 af8429d0cf）及显式 PCff696，前四项通过；第五项真实无写端 FIFO 超过 10 秒，transport-error 为 TimeoutExpired，控制器 rc2。不是具名拒绝通过，不授其他驱动/平台结论。stdout/stderr/status.tsv 和超时原因均保留。下段为复现前分析。
 
 ### e955 CX0 正式批验收

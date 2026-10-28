@@ -280,9 +280,24 @@ static int par_take_paths(FILE *f, int absent) {
 }
 #endif
 int cxm_rd(char *path, char *buf, int cap) {
+#ifndef _WIN32
+    /* Open without waiting for a FIFO writer, then validate that same handle.
+       A path stat followed by fopen would leave a replacement race. */
+    if (!path || !buf || cap <= 0) return -3;
+    int fd=open(path,O_RDONLY|O_NONBLOCK); if(fd<0)return errno==ENOENT?-1:-3;
+    struct stat st; if(fstat(fd,&st)||!S_ISREG(st.st_mode)){close(fd);return -3;}
+    size_t n=0; int bad=0;
+    while(n<(size_t)cap){ssize_t z=read(fd,buf+n,(size_t)cap-n);
+        if(z<0&&errno==EINTR)continue;
+        if(z<0){bad=1;break;} if(!z)break; n+=(size_t)z;
+    }
+    if(close(fd))bad=1;
+    return bad?-3:n>=(size_t)cap?-2:(int)n;
+#else
     FILE *f=fopen(path,"rb"); if (!f) return errno==ENOENT ? -1 : -3;
     size_t n=fread(buf,1,(size_t)cap,f); int bad=ferror(f); if(fclose(f))bad=1;
     return bad ? -3 : n>=(size_t)cap ? -2 : (int)n;
+#endif
 }
 int cxm_wr(char *path, char *buf, int n) {       /* beside it, then renamed: a reader never sees half a file */
 #ifdef _WIN32
