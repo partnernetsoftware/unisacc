@@ -11,7 +11,9 @@
 #endif
 #define UNISA_RUNTIME_LIBRARY
 #define UNISA_CX_CODEC
+#define UNISA_CX_PACKAGEFOOTER
 #include "run.c"
+#undef UNISA_CX_PACKAGEFOOTER
 #undef UNISA_CX_CODEC
 #undef UNISA_RUNTIME_LIBRARY
 #include "tapebin.h"
