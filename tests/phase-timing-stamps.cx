@@ -228,6 +228,51 @@ static void parse_stamps(const char *e, size_t n, stamps *st) {
     }
 }
 
+/* Seven stream identities, not merely seven pairs: tapecheck may legitimately
+ * repeat, but it cannot substitute for E4. Require each stream once, in order,
+ * with its model stamp immediately followed by the matching inference stamp. */
+static int seven_streams(const char *e, size_t n) {
+    const char *names[]={"e2","e1","e3","e4","prune","lower","elf","tapecheck","symbols"};
+    int next=0,pending=-1;
+    size_t at=0;
+    while(at<n){
+        size_t end=at;while(end<n&&e[end]!='\n')end++;
+        const char *line=e+at;size_t len=end-at,k=0;
+        int model=prefixed(line,len,"RR_TIME\tmodel\tstage=",&k);
+        if(!model&&!prefixed(line,len,"RR_TIME\tinference\tstage=",&k)){
+            if(pending>=0)return 0;
+            at=end+(end<n);continue;
+        }
+        size_t stop=k;while(stop<len&&line[stop]!='\t')stop++;
+        int id=-1;
+        for(int i=0;i<9;i++)if(strlen(names[i])==stop-k&&!memcmp(line+k,names[i],stop-k))id=i;
+        if(id<0||stop==len)return 0;
+        if(model){if(pending>=0)return 0;pending=id;}
+        else{
+            if(pending!=id)return 0;
+            pending=-1;
+            if(id<7){if(id!=next)return 0;next++;}
+        }
+        at=end+(end<n);
+    }
+    return pending<0&&next==7;
+}
+static void stage_controls(void) {
+    const char *names[]={"e2","e1","e3","e4","prune","lower","elf"};
+    for(int mode=0;mode<5;mode++){
+        char text[4096];size_t used=0;
+        for(int i=0;i<7;i++){
+            if(mode==1&&i==3)continue;
+            const char *m=mode==2&&i==3?"tapecheck":names[i];
+            const char *inf=mode==3&&i==3?"e3":m;
+            int z=snprintf(text+used,sizeof text-used,"RR_TIME\tmodel\tstage=%s\tsource=inflate\tns=1\nRR_TIME\tinference\tstage=%s\trc=0\tns=1\n",m,inf);
+            if(z<0||(size_t)z>=sizeof text-used)die("stage control bound");used+=z;
+        }
+        if(mode==4){const char *extra="RR_TIME\tmodel\tstage=elf\tsource=inflate\tns=1\n";memcpy(text+used,extra,strlen(extra));used+=strlen(extra);}
+        ck(seven_streams(text,used)==(mode==0),mode==0?"stages.control-valid":mode==1?"stages.refuse-missing-e4":mode==2?"stages.refuse-auxiliary-substitution":mode==3?"stages.refuse-mismatched-pair":"stages.refuse-unpaired-model");
+    }
+}
+
 /* ---- samples ---- */
 typedef struct sample {
     const char *label;
@@ -446,7 +491,7 @@ int main(int argc, char **argv) {
     char *env_cold[] = {env_time, env_off, env_cache, 0};
     char *env_hot[] = {env_time, env_on, env_cache, 0};
     char *v_version[] = {bound, "12", "sh", product, "--version", 0};
-    char *v_run[] = {bound, "12", "sh", product, fixture, "--", 0};
+    char *v_run[] = {bound, "12", "sh", product, "-O2", fixture, "--", 0};
     char *v_obj[] = {bound, "12", "sh", product, "-c", fixture, "-o", object, 0};
     sample ver_cold, ver_hot, run_cold, run_miss, run_hit, obj_miss, obj_hit;
     int all = 0, host = 0, all_after_miss = 0;
@@ -571,9 +616,10 @@ int main(int argc, char **argv) {
     if (cold_stamped) {
         ck(run_cold.st.con_ns < run_cold.e2e_ns && run_cold.st.model_ns + run_cold.st.inf_ns + run_cold.st.out_ns < run_cold.e2e_ns,
            "stamps.in-product-within-own-e2e");
-        ck(run_cold.st.model_n >= 7 && run_cold.st.inf_n == run_cold.st.model_n, "stamps.cold-stages-at-least-seven-model-and-inference-paired");
+        ck(seven_streams(run_cold.r.err,run_cold.r.errn), "stamps.cold-seven-named-streams-ordered-and-paired");
         ck(!run_hit.st.model_n && !run_hit.st.inf_n && run_hit.st.out_n == 1, "stamps.hit-skips-stages-and-prepares-exec");
     }
+    stage_controls();
     put_cell("validation", "cold", run_cold.validation_ns, "harness:exact-compare+stamp-parse+cache-scan+product-sha256");
     put_cell("validation", "hot", run_hit.validation_ns, "harness:exact-compare+stamp-parse+cache-scan+product-sha256");
     int failures_before_report = failures;
