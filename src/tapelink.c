@@ -248,6 +248,7 @@ long tl_ar_dec(char *b, int w, long max) {
     while (k < w) { if (b[k] != 32) return -1; k = k + 1; }
     return v;
 }
+#ifndef TL_PRODUCT
 int tl_field(char *dst, int w, long v, char *s) {   /* left-justified field, space padded */
     char d[24]; int n; int k; k = 0;
     if (s) { while (s[k] && k < w) { dst[k] = s[k]; k = k + 1; } }
@@ -304,6 +305,7 @@ char *tl_ar_member(char *ab, long n, int i, char *nm, long *len) {
     if (at != n) { tl_fail("ar: truncated member header\n"); return 0; }
     return 0;
 }
+#endif /* archive handling in the product is provided by driver.archive */
 /* link-time name sets, for pulling archive members: names defined (.global)
    and names wanted (.extern) by the units taken so far */
 char tl_npool[2097152]; int tl_nend;
@@ -471,11 +473,11 @@ char *tl_tape(char *b, long n, long *len) {
 malformed:
     tl_fail("link: malformed unit tape payload\n"); return 0;
 }
+#ifndef TL_PRODUCT
 /* Validate the operation independently of whether the archive has members. */
 int tl_ar_operation(const char *op) {
     return op[0] == 114 || op[0] == 113 || op[0] == 116 || op[0] == 120;
 }
-#ifndef TL_PRODUCT
 int isobject(char *p) {
     int n; n = 0; while (p[n]) n = n + 1;
     if (n >= 2 && p[n - 2] == 46 && (p[n - 1] == 111 || p[n - 1] == 97)) return 1;              /* .o, .a */
