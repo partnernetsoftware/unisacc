@@ -9,7 +9,10 @@ The existing stream tests still cover Linux x86_64/O2 unless a test says otherwi
 Run each command separately from the repository root:
 
 ```sh
-tools/bound 55 sh ./unisacc.com -O2 -fno-trim-libc tools/stream-runtime.c -o out/stream-runtime.com
+tools/bound 55 sh ./unisacc.com -O0 -DUNISA_CX_CODEC -I include -iquote exec/c -b lnx/x86_64 -c -funit tools/stream-runtime.c -o out/stream-runtime-unit.o
+tools/bound 55 sh ./unisacc.com -O2 -I include -iquote exec/c -b lnx/x86_64 -c -funit cx/runtime/codec.cx -o out/stream-codec-unit.o
+tools/bound 55 sh ./unisacc.com -O2 -I include -iquote exec/c -b lnx/x86_64 -c -funit cx/runtime/process_group.cx -o out/stream-process-unit.o
+tools/bound 55 sh ./unisacc.com -fno-trim-libc -o out/stream-runtime.com out/stream-runtime-unit.o out/stream-codec-unit.o out/stream-process-unit.o
 tools/bound 30 sh ./unisacc.com tools/stream-pack.cx -- out/stream-runtime.com ./unisacc.com out/streams-new
 tools/bound 30 sh ./unisacc.com tools/stream-pack.cx -- out/stream-runtime.com ./unisacc.com out/streams-arm64-new lnx/arm64
 make streams STREAM_DIR=out/streams-new STREAM_OUT=out/stream-check-new
@@ -17,8 +20,11 @@ make streams STREAM_DIR=out/streams-new STREAM_OUT=out/stream-check-new
 
 Both output directories must be new. Material preparation refuses overwrites and
 retains partial output on failure for inspection. The runtime binary is a shared
-C substrate built by the product because executable-format and pipeline behavior
-are under test. All new CX source uses modules and its implicit runtime, without
+C substrate linked with separate CX codec and Linux x86-64 process provider
+units. The large runtime unit uses O0 to fit the command bound; this development
+construction is not a performance claim. The product builds these units because
+executable-format and pipeline behavior are under test. All new CX source uses
+modules and its implicit runtime, without
 manual include directives. No Python or external C compiler is invoked by these
 commands after the existing watchdog is available; the watchdog still has its
 documented host C cold-bootstrap dependency.
