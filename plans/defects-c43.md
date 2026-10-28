@@ -53,6 +53,11 @@ E3=6dd90ec5c6f799a50617cab36d9c39c595d022e44d8474c29365d7e99e7fc168。
 后续cc父进程2637955终止后续作业：shared-e4/shared-o1/shared-prune/shared-nativeabi、
 lnx-arm64与lnx-x86_64各lower/elf、osx-arm64的lower/elf共十项生成全部rc0并有收据。
 累计tool-gen 1项、生成JSON 13/34项完成，余21项；tbl/net未启动，包/准入未做。
+
+`tools/cxpack-source-delta.cx`是待实跑的有限差异检查器，方向为冻结link-896888f424到
+cxpack-af8429d0cf；只允许src/cxmod.c、src/main.c、exec/c/compiler.c三对固定哈希，
+其余八棵产品输入树核目录、类型/模式、字节与符号链接字面值。正向及反向拒绝测试尚未跑，
+不能据代码存在授予复用；生成JSON完整比较与候选身份检查仍独立必需。
 证据沿用冻结根out/cxpack-gen-*-01.*与epoch-context-01/jobs；当前无所属在跑作业。
 
 ## link.undef-function-refusal — 未定义外部函数链接成崩溃镜像（开放）
