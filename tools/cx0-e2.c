@@ -20,13 +20,22 @@ static int cx0_resource(int kind,const unsigned char *name,int n,unsigned char *
 }
 int core_host_fetch(const unsigned char *p,int n,unsigned char **bytes,int *len){
  static unsigned char one=1;*bytes=0;*len=0;
+ /* Present-empty is the E2 ABI's default trimming request. An absent key
+  * is not interchangeable with an empty declared resource. */
+ if(n==18&&!memcmp(p,"\0cli/fno-trim-libc",18)){*bytes=&one;return 1;}
  if(n==7&&!memcmp(p,"\0cli/f1",7)){*bytes=&one;*len=1;return 1;}
  if(n==13&&!memcmp(p,"\0cli/includes",13)){*bytes=cx0_includes;*len=cx0_includes_n;return 1;}
  if(n==11&&!memcmp(p,"\0cli/source",11)){*bytes=(unsigned char *)cx0_unit->name;*len=(int)cx0_unit->name_bytes;return 1;}
  if(n==11&&!memcmp(p,"\0cli/target",11)){*bytes=(unsigned char *)cx0_bundle.target;*len=(int)strlen(cx0_bundle.target);return 1;}
  if(n>=5&&!memcmp(p,"\0hdr/",5))return cx0_resource(1,p+5,n-5,bytes,len);
  if(n>=7&&!memcmp(p,"\0inc/",5)&&(p[5]=='q'||p[5]=='a')&&p[6]=='/')return cx0_resource(2,p+7,n-7,bytes,len);
- if(n&&p[0])return cx0_resource(2,p,n,bytes,len);
+ /* The dependency scanner resolves cli/source through RI, too. Serve the
+  * immutable source carried by the bundle, never a second filesystem read. */
+ if(n&&p[0]){
+  for(int i=0;i<cx0_bundle.unit_count;i++){cxb_unit *u=cx0_bundle.units+i;
+   if(u->name_bytes==(size_t)n&&!memcmp(u->name,p,(size_t)n)){*bytes=(unsigned char *)u->source;*len=(int)u->source_bytes;return 1;}}
+  return cx0_resource(2,p,n,bytes,len);
+ }
  /* Non-file control resources belong to this pinned model package. Neither
   * absent headers nor arbitrary logical paths can reach rf_default_fetch. */
  for(int i=0;i<NR;i++)if(RES[i].n==n&&!memcmp(PB+RES[i].name,p,(size_t)n)){*bytes=PB+RES[i].data;*len=RES[i].len;return 1;}
@@ -53,6 +62,15 @@ static void cx0_load_model(const char *bytes,size_t n){
 int main(int argc,char **argv){
  if(argc!=4){fputs("usage: E2_MODEL_CONTAINER CX0_BUNDLE UNIT_INDEX\n",stderr);return 2;}
  size_t n;char *data=cx0_read_regular(argv[2],&n);char why[256];if(cxb_read(data,n,&cx0_bundle,why,sizeof why)){fprintf(stderr,"cx0-e2: %s\n",why);free(data);return 2;}free(data);
+ /* A logical source name has one meaning throughout this invocation. A
+  * colliding file resource must contain exactly those same sealed bytes. */
+ for(int i=0;i<cx0_bundle.unit_count;i++){cxb_unit *u=cx0_bundle.units+i;
+  for(int j=0;j<i;j++){cxb_unit *v=cx0_bundle.units+j;
+   if(v->name_bytes==u->name_bytes&&!memcmp(v->name,u->name,u->name_bytes)&&
+    (v->source_bytes!=u->source_bytes||memcmp(v->source,u->source,u->source_bytes))){fputs("cx0-e2: conflicting-source-unit\n",stderr);cxb_clear(&cx0_bundle);return 2;}}
+  for(int j=0;j<cx0_bundle.resource_count;j++){cxb_resource *r=cx0_bundle.resources+j;
+   if(r->kind==2&&r->name_bytes==u->name_bytes&&!memcmp(r->name,u->name,u->name_bytes)&&
+    (r->bytes!=u->source_bytes||memcmp(r->data,u->source,u->source_bytes))){fputs("cx0-e2: conflicting-source-resource\n",stderr);cxb_clear(&cx0_bundle);return 2;}}}
  char *end;long index=strtol(argv[3],&end,10);if(!*argv[3]||*end||index<0||index>=cx0_bundle.unit_count||strcmp(cx0_bundle.target,"lnx/x86_64")){fputs("cx0-e2: target-or-unit-unsupported\n",stderr);cxb_clear(&cx0_bundle);return 2;}
  data=cx0_read_regular(argv[1],&n);char hash[65];cx_sha256_hex(data,n,hash);if(strcmp(hash,cx0_bundle.model)){free(data);fputs("cx0-e2: model-identity-mismatch\n",stderr);cxb_clear(&cx0_bundle);return 2;}
  cx0_load_model(data,n);free(data);if(PM!=1||PS!=1||strcmp(STAGES[0].name,"e2")||strcmp(STAGES[0].route,"stream"))die("cx0-e2: exactly-one-e2-model-required");
