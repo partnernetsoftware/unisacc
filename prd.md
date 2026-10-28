@@ -158,7 +158,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 **当前分工与下一动作：** E3成员聚合值返回及最终名义类型核验已正规装入共享产品Rootf3705dfa/源ace3，原pending默认-run实返7；错误类型是带位置的普通类型错误，-Wall不再误报UNCOVERED。正式mixed-v2构造复用31张相同net、实构3张差异net，经完整来源核验、五切片/APE、两相准入安装及精确迁入；不能将历史107和当前43材料并称150项新作业。新产品内嵌模型聚合43/0、内存138/0、ABI55/0、诊断211/0、smoke16/0；私包时期独立E3流17/0仍保留原对象，不移贴新流资格。下一刀sizeof索引后缀私包（仅两实际路由模型），同时继续结构化CX类型/ABI与所有权原生化。详见[E3切片](plans/c43-aggregate-return-2026-10-28.md)及[正规构造安装收据](plans/mixed-f9-ace3-origin-2026-10-28.md)。完整测试清单最近实测仍204批/193覆盖/19未解、--all rc3，未将登记或局部通过当完整发布资格。
 
-**双线推进（2026-10-28）：** 0.0.43现行Rootda4e/SID1621继续补完整流/网/RI、N22与平台，不等待CX重构完工；CX产物独立核身份逐单元接入。E1实际located warnlex已核654状态/168896观测决定及展开动作与正式模型全等，手写规则144类对/24 peek边界293/0；EOF后的12类peek逐项UNOBSERVABLE，不折叠作144源流PASS，矩阵仍MISSING。core.memory有138项正/拒绝/恢复实跑，仅管理API运行期约束；成员struct直接return的正向最小例在tests/pending/struct-return-member.cx当前rc1而期望rc7，保持NEEDS_PRODUCT_CHANGE。
+**双线推进（2026-10-28）：** 0.0.43现行Rootf3705dfa/SIDace3继续补完整流/网/RI、N22与同候选平台证据，不等待整个CX重构完工；CX产物独立核身份逐单元接入，不能把完整Rust式编译期所有权自动扩为发布前置条件。现行版本明确的产品与验收合同仍须完成。历史E1 located warnlex已核654状态/168896观测决定及展开动作与当时正式模型全等，手写规则144类对/24 peek边界293/0；EOF后的12类peek逐项UNOBSERVABLE，不折叠作144源流PASS，也不转授新流资格。新已装产品core.memory138/0只证明管理API运行期约束；成员struct直接return的原始最小例已在共享默认-run真实rc7，sizeof索引后缀原红正在单独修复。
 
 **边界测试待验（2026-10-28）：** 已审入既有interfaces草稿修订：七流当前pin、由独立参考规则手推的592B Tape字面oracle，以及四个E3 trailer负例的外框长度修复，确保测到目标层。修正attr长度拒绝名与ELF截断位置，保留原271项并新增12项；当前仍NOT_RUN。原e2-input-binding扩展为七流成员与候选逐字核对，含各新增模型一字节差异负控及前后稳定性，仍待实跑；不另造重复批。草稿out/c43-da4e-interfaces-review-01/，严格清单169批/178覆盖/19缺口，仅元数据通过、执行0。formats.md仅据现有attr_strip代码纠正旧描述；冻结helper实测SID仍16219141、产品仍da4e7ef1，不影响cc构造。
 
