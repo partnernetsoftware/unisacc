@@ -1,0 +1,92 @@
+#pragma unisa use cxproc
+/* Names the process module. The child must see the environment this program
+   passes. A null environment must not inherit CXPROC_SECRET. The Windows
+   null-inherit body is compiled into the driver slice and is not run here. */
+static int fill_tmpl(char *path, int cap) {
+    int fd;
+    if (cap < 20) return -1;
+    memcpy(path, "/tmp/cxprocXXXXXX", 18);
+    fd = mkstemp(path);
+    if (fd < 0) return -1;
+    if (close(fd) != 0) { unlink(path); return -1; }
+    return 0;
+}
+
+static int slurp(const char *path, char *buf, int cap) {
+    FILE *f;
+    int n;
+    f = fopen(path, "rb");
+    if (!f) return -1;
+    n = (int)fread(buf, 1, (size_t)(cap - 1), f);
+    if (fclose(f) != 0) return -1;
+    if (n < 0) return -1;
+    buf[n] = 0;
+    return n;
+}
+
+int main(void) {
+    char path_yes[64], path_no[64];
+    char cmd_yes[320], cmd_no[320];
+    char envbuf[32];
+    char got[64];
+    char *envp[2];
+    char *av[4];
+    int st = 0;
+    int rc, n;
+    extern int cxproc_run(char **argv, char **envp, int *status);
+
+    got[0] = 0;
+    if (setenv("CXPROC_SECRET", "nope", 1) != 0) {
+        fprintf(stderr, "cxproc-ask: setenv failed\n");
+        return 2;
+    }
+    if (fill_tmpl(path_yes, (int)sizeof path_yes) || fill_tmpl(path_no, (int)sizeof path_no)) {
+        fprintf(stderr, "cxproc-ask: temp failed\n");
+        return 2;
+    }
+    n = snprintf(cmd_yes, sizeof cmd_yes,
+                 "printf '%%s|[%%s]' \"$CXPROC_MARK\" \"$CXPROC_SECRET\" > %s", path_yes);
+    if (n < 0 || n >= (int)sizeof cmd_yes) return 2;
+    n = snprintf(cmd_no, sizeof cmd_no,
+                 "printf '%%s|[%%s]' \"$CXPROC_MARK\" \"$CXPROC_SECRET\" > %s", path_no);
+    if (n < 0 || n >= (int)sizeof cmd_no) return 2;
+    memcpy(envbuf, "CXPROC_MARK=seen", 17);
+    envp[0] = envbuf;
+    envp[1] = 0;
+    av[0] = "/bin/sh";
+    av[1] = "-c";
+    av[2] = cmd_yes;
+    av[3] = 0;
+    rc = cxproc_run(av, envp, &st);
+    if (rc != 0 || st != 0) {
+        fprintf(stderr, "cxproc-ask: explicit rc=%d st=%d\n", rc, st);
+        unlink(path_yes);
+        unlink(path_no);
+        return 3;
+    }
+    if (slurp(path_yes, got, (int)sizeof got) < 0 || strcmp(got, "seen|[]") != 0) {
+        fprintf(stderr, "cxproc-ask: explicit got [%s]\n", got);
+        unlink(path_yes);
+        unlink(path_no);
+        return 4;
+    }
+    av[2] = cmd_no;
+    rc = cxproc_run(av, 0, &st);
+    if (rc != 0 || st != 0) {
+        fprintf(stderr, "cxproc-ask: null rc=%d st=%d\n", rc, st);
+        unlink(path_yes);
+        unlink(path_no);
+        return 5;
+    }
+    got[0] = 0;
+    if (slurp(path_no, got, (int)sizeof got) < 0 || strcmp(got, "|[]") != 0) {
+        fprintf(stderr, "cxproc-ask: null got [%s]\n", got);
+        unlink(path_yes);
+        unlink(path_no);
+        return 6;
+    }
+    unlink(path_yes);
+    unlink(path_no);
+    printf("cxproc-ask ok\n");
+    return 0;
+}

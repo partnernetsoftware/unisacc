@@ -1,4 +1,5 @@
 #pragma unisa module cxcc
+#pragma unisa use cxproc
 /* Host driver behind gcc_cx and clang_cx.
    Blanks a leading #! line, then runs the system compiler with
    -std=c99 -x c -include <repo>/include/cx.h.
@@ -11,10 +12,11 @@
    recorded header closure still match. A header included by an -include
    file is part of that closure. __FILE__ stays the original .cx path.
    This is ordinary C. It does not grant a checked .cx identity.
-   The driver calls POSIX posix_spawnp, waitpid, and mkstemp. gcc and clang
-   are names on PATH. On Linux and OSX those calls are the system libc.
-   On Windows, tools/cxcc-hostinc/spawn.h supplies the same calls with
-   CreateProcessA and open, because MinGW has no spawn.h. The compile line
+   The driver names tools/cxproc.cx. On Linux the caller passes environ, and a
+   null environment is an empty list. On Windows the caller passes null, and
+   CreateProcessA treats that as inherit. gcc and clang are names on PATH.
+   On Windows, tools/cxcc-hostinc/spawn.h supplies posix_spawnp with
+   CreateProcessA, because MinGW has no spawn.h. The compile line
    adds -I tools/cxcc-hostinc so <spawn.h> and <sys/wait.h> are these files
    and not the product headers. Set CX_ROOT when the repository
    is not found from the driver path or the working directory. */
@@ -211,41 +213,24 @@ static int write_temp(const unsigned char *s, size_t n, char *path, size_t path_
 #define CXCC_PLANARGS 256
 #define CXCC_TMP 260
 
-static int cxcc_status(int st) {
-    if (WIFEXITED(st)) return WEXITSTATUS(st);
-    if (WIFSIGNALED(st)) return 128 + WTERMSIG(st);
-    return 2;
-}
-
-/* The file-scope prototype is not an export. The declaration stays inside
-   this static function so the module scan does not require a definition.
-   NULL is not "inherit" for posix_spawnp: an empty environment makes gcc
-   fail to execute cc1. Windows CreateProcessA treats null as inherit. */
-#ifndef _WIN32
-static int cxcc_spawnp(pid_t *pid, const char *file, char *const *argv, char *const *envp) {
-    extern int posix_spawnp(pid_t *pid, const char *file, const void *fa, const void *at,
-                            char *const argv[], char *const envp[]);
-    return posix_spawnp(pid, file, 0, 0, argv, envp);
-}
-#endif
-
 static int cxcc_exec(const char *cmd, const char *what, char **av) {
-    pid_t pid = 0;
     int st = 0;
+    int spr;
+    extern int cxproc_run(char **argv, char **envp, int *status);
 #ifdef _WIN32
-    int spr = posix_spawnp(&pid, av[0], 0, 0, av, 0);
+    spr = cxproc_run(av, 0, &st);
 #else
-    int spr = cxcc_spawnp(&pid, av[0], av, environ);
+    spr = cxproc_run(av, environ, &st);
 #endif
-    if (spr != 0) {
+    if (spr == 127) {
         fprintf(stderr, "%s: cannot run %s\n", cmd, what);
         return 127;
     }
-    if (waitpid(pid, &st, 0) < 0) {
+    if (spr != 0) {
         fprintf(stderr, "%s: lost %s\n", cmd, what);
         return 2;
     }
-    return cxcc_status(st);
+    return st;
 }
 
 static void cxcc_blank_paths(char paths[][CXCC_TMP], int n) {

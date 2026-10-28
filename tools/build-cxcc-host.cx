@@ -5,8 +5,11 @@
    Product file: <cmd>_<lnx|osx|win><64|32>-<x86|arm>.bin
    Windows uses .exe. This Linux x86-64 host writes
    out/cxcc-host/gcc_cx_lnx64-x86.bin and clang_cx_lnx64-x86.bin.
-   Until the six-cell APE is rebuilt, the repo-root .com is a shell
-   that execs that file. 32-bit and win64-arm are names, not slices.
+   write_launcher replaces the repo-root .com with a shell that execs that
+   file. The six-cell APE pack is what leaves gcc_cx.com and clang_cx.com
+   in place. 32-bit and win64-arm are names, not slices.
+   The driver names tools/cxproc.cx. This builder compiles that file too,
+   because stock gcc and clang do not expand `#pragma unisa use`.
 
    Linux, and OSX when the name gcc is on PATH:
    gcc -std=c99 -Werror=implicit-function-declaration -include include/cx.h -x c tools/build-cxcc-host.cx -o out/cxcc-host/build
@@ -130,12 +133,16 @@ static int build_one(const char *cc, const char *cmdname) {
                  cc, cc);
     if (k < 0 || k >= (int)sizeof line || run(line)) return 1;
     k = snprintf(line, sizeof line,
+                 "%s -std=c99 -Werror=implicit-function-declaration -include include/cx.h -x c -c tools/cxproc.cx -o out/cxcc-host/%s-cxproc.o",
+                 cc, cc);
+    if (k < 0 || k >= (int)sizeof line || run(line)) return 1;
+    k = snprintf(line, sizeof line,
                  "%s -std=c99 -Werror=implicit-function-declaration -include include/cx.h -x c -c tools/%s.cx -o out/cxcc-host/%s-main.o",
                  cc, cmdname, cc);
     if (k < 0 || k >= (int)sizeof line || run(line)) return 1;
     k = snprintf(line, sizeof line,
-                 "%s -std=c99 -o out/cxcc-host/%s out/cxcc-host/%s-cxcc.o out/cxcc-host/%s-cxmod.o out/cxcc-host/%s-main.o",
-                 cc, bin, cc, cc, cc);
+                 "%s -std=c99 -o out/cxcc-host/%s out/cxcc-host/%s-cxcc.o out/cxcc-host/%s-cxproc.o out/cxcc-host/%s-cxmod.o out/cxcc-host/%s-main.o",
+                 cc, bin, cc, cc, cc, cc);
     if (k < 0 || k >= (int)sizeof line || run(line)) return 1;
     if (write_launcher(cmdname, bin)) return 1;
     printf("build-cxcc-host: %s\n", bin);
@@ -229,13 +236,15 @@ static int host_bin_name(const char *cmd, char *out, size_t cap) {
 }
 
 static int build_one(const char *cc, const char *cmdname) {
-    char omod[160], occ[160], omain[160], obin[160], srcpath[80], com[80], bin[80];
+    char omod[160], occ[160], oproc[160], omain[160], obin[160], srcpath[80], com[80], bin[80];
     char *av[20];
     int k;
     k = snprintf(omod, sizeof omod, "out/cxcc-host/%s-cxmod.o", cc);
     if (k < 0 || k >= (int)sizeof omod) return 1;
     k = snprintf(occ, sizeof occ, "out/cxcc-host/%s-cxcc.o", cc);
     if (k < 0 || k >= (int)sizeof occ) return 1;
+    k = snprintf(oproc, sizeof oproc, "out/cxcc-host/%s-cxproc.o", cc);
+    if (k < 0 || k >= (int)sizeof oproc) return 1;
     k = snprintf(omain, sizeof omain, "out/cxcc-host/%s-main.o", cc);
     if (k < 0 || k >= (int)sizeof omain) return 1;
     if (host_bin_name(cmdname, bin, sizeof bin)) return 1;
@@ -270,6 +279,9 @@ static int build_one(const char *cc, const char *cmdname) {
     av[14] = occ;
     av[15] = 0;
     if (wrun(av)) return 1;
+    av[12] = "tools/cxproc.cx";
+    av[14] = oproc;
+    if (wrun(av)) return 1;
     /* The entry file needs cx.h, not win.h. Drop the second -include. */
     av[7] = "-x";
     av[8] = "c";
@@ -283,9 +295,10 @@ static int build_one(const char *cc, const char *cmdname) {
     av[2] = "-o";
     av[3] = obin;
     av[4] = occ;
-    av[5] = omod;
-    av[6] = omain;
-    av[7] = 0;
+    av[5] = oproc;
+    av[6] = omod;
+    av[7] = omain;
+    av[8] = 0;
     if (wrun(av)) return 1;
     if (copy_file(obin, com)) return 1;
     return 0;

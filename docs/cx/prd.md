@@ -14,9 +14,13 @@
 
 ## 当前磁盘
 
-仓库根的 `gcc_cx.com` 与 `clang_cx.com` 现在各是一份六格 APE，1551344 字节，`file` 为 PE32+ console x86-64。两个文件被 git 忽略。每一格由 `tools/gcc_cx.cx` 或 `tools/clang_cx.cx` 加上 `src/cxmod.c` 编出，切片名是上一节那五份。本机执行了 Linux x86-64 那一格：无参数 `sh ./gcc_cx.com` 退出 2；构建里 gcc 与 clang 都编过 lex，模块夹具退出 42。`win/x86_64`、`lnx/arm64`、`osx/x86_64`、`osx/arm64` 只写出，没有在对应系统上执行。`win/arm64` 用 `win/x86_64` 那份 PE。
+仓库根的 `gcc_cx.com` 是 1606288 字节，`clang_cx.com` 是 1606304 字节。两份都是六格 APE，`file` 为 PE32+ console x86-64，文件头是 `MZ`，polyglot 文本含 `Linuxx86_64`、`Linuxaarch64`、`Darwinarm64`。两个文件被 git 忽略。每一格由 `tools/gcc_cx.cx` 或 `tools/clang_cx.cx` 加上 `src/cxmod.c` 编出，驱动用 `#pragma unisa use cxproc` 带上 `tools/cxproc.cx`。切片名是上一节那五份。这次 `sh ./unisacc.com -run tools/build-cxcc-ape.cx` 退出 0。构建自己的检查跑过 Linux x86-64：无参数退出 2，gcc 编过 lex，模块夹具退出 42，clang 在本机编过 lex。`win/x86_64`、`lnx/arm64`、`osx/x86_64`、`osx/arm64` 只写出，没有在对应系统上执行。`win/arm64` 用 `win/x86_64` 那份 PE。
 
 没有 `use` 时，一次执行系统编译器：`-std=c99 -x c -include include/cx.h`。
+
+## 进程 API
+
+`tools/cxproc.cx` 是按需模块。不写 `#pragma unisa use cxproc` 的程序不依赖它。导出的是 `cxproc_run`。`posix_spawnp` 的原型在 static 函数体内，不在没有函数体的文件作用域声明上。Linux 上，调用者传入的环境交给子进程；空指针换成只以 NULL 结尾的空表，不是继承。驱动自己在 Linux 上传 `environ`。Windows 上把空指针原样传入，CreateProcessA 把它当作继承；驱动在 Windows 上传空指针。这份 Windows 行为编进 `win/x86_64` 切片，没有执行。这个模块的 `.cx` 源没有 `#include`。前奏头文件没有删，也没有改 `include/cx.h`。
 
 模块 `#include` 是 lint。不在对接前缀里的 `.cx` 新文件必须为 0；`tests/cxinclude.tsv` 旧债只降不升。`include/` 与 `tools/cxcc-hostinc/` 是 libc／POSIX 对接单元，可以用 `#include`。短记 [plans/cx-include-lint.md](../../plans/cx-include-lint.md)。检查是 `sh ./unisacc.com -run tests/cxinclude.cx -- --check`。树上若有别人暂存的新 `#include`，该检查退出 1，这不表示棘轮被抬高。
 
@@ -38,7 +42,7 @@ spec §5 的所有权没有实现。
 
 ## 下一动作
 
-六格 APE 已按现行驱动重打。下一步仍是公开集裁剪：未列入 `cxpack.tsv` 的非 static 函数还在 CXIF 里。那是编译器的事，本篇不改 `src/cxmod.c`。
+六格 APE 已按带 `cxproc` 的驱动重打。下一步仍是公开集裁剪：未列入 `cxpack.tsv` 的非 static 函数还在 CXIF 里。那是编译器的事，本篇不改 `src/cxmod.c`。
 
 ## 索引
 
