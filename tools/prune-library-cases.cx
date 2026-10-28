@@ -1,0 +1,72 @@
+/* tools/prune-library-cases.cx -- stream-prune cells prune.pos.library-exports and prune.ref.library-signatures on a
+ * stream container set whose runtime accepts UNISA_STREAM_RESOURCE=NAME=PATH (tools/stream-runtime.c, cc 2026-10-28;
+ * material out/c43-streams-cc-02). Route (exec/parse2/libraryexports.md, exec/c/librarysignature-v2.md,
+ * exec/prune/libraryroots.md): E3 with resource `\0library/symbols` = LE64 1 emits `USLTAPE1\n` + LE64 tape_len +
+ * LE64 sig_len + tape + USLSIG2; prune with resource `\0library/signatures` keeps every external defined function as a
+ * root. Fixture: `static int dead(int)`, `int pub(int)`, `int main(void){return 7;}`.
+ *   sh ./unisacc.com tools/prune-library-cases.cx -- ROOT STREAMS_DIR ABS_OUT
+ * Rows: envelope.tape-equals-plain (the USLTAPE1 tape == E3 output without the resource); envelope.sig-names (USLSIG2
+ * holds dead, pub, main; dead's linkage byte is 1 = internal); exports.pub-retained-dead-removed (prune with the real
+ * signatures keeps `pub:` and drops `dead:`; without the resource both are dropped: non-vacuous control); refusals:
+ * truncated signatures -> `not covered: typed library signature` (the text the model gives a cut record),
+ * defined flag 0 / duplicate name / USLSIG1 magic on V2 bytes / junk -> `not covered: malformed library signatures or
+ * missing public label`; every refusal rc != 0 with empty stdout. */
+#pragma unisa use cxlib.netpack
+
+static char root[4096], streams[4096], outdir[4096], inc[4400], bound[4400]; static int npass, nfail; static FILE *res;
+static void die(const char *s) { fprintf(stderr, "prune-library-cases: REFUSE %s errno=%d\n", s, errno); exit(2); }
+static void path(char *p, size_t cap, const char *a, const char *b) { int n = snprintf(p, cap, "%s/%s", a, b); if (n < 0 || (size_t)n >= cap) die("path"); }
+static void saved(const char *p, const char *s, size_t n) { int f = open(p, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600); if (f < 0) die("exclusive create"); while (n) { ssize_t k = write(f, s, n); if (k <= 0) die("write"); s += k; n -= (size_t)k; } if (close(f)) die("close"); }
+static void check(int ok, const char *cell, const char *label, const char *detail) { fprintf(res, "%s\t%s\t%s\t%s\n", ok ? "PASS" : "FAIL", cell, label, detail); printf("%s\t%s.%s\n", ok ? "PASS" : "FAIL", cell, label); if (ok) npass++; else nfail++; }
+/* run stream N on IN with an optional resource env; returns transport failure */
+static int stage(int n, const char *in, const char *resource, np_result *r) { char com[4400], leaf[64]; snprintf(leaf, sizeof leaf, "unisacc-stream%d.com", n); path(com, sizeof com, streams, leaf);
+    char *v[] = { bound, "12", com, (char *)in, (char *)in, inc, 0 }; char envr[4600]; char *env[4]; int k = 0; env[k++] = "UNISA_ATTRIBUTES="; env[k++] = "UNISA_MAXSTEPS=200000000"; if (resource) { snprintf(envr, sizeof envr, "UNISA_STREAM_RESOURCE=%s", resource); env[k++] = envr; } env[k] = 0; char why[1024]; return np_run(v, outdir, env, 14, r, why, sizeof why); }
+static unsigned long le64(const unsigned char *p) { unsigned long v = 0; for (int i = 7; i >= 0; i--) v = (v << 8) | p[i]; return v; }
+static int has_label(const char *tape, size_t n, const char *label) { size_t k = strlen(label); for (size_t i = 0; i + k + 1 <= n; i++) if ((i == 0 || tape[i - 1] == '\n') && !memcmp(tape + i, label, k) && tape[i + k] == ':') return 1; return 0; }
+static void refusal(const char *label, const char *sigfile, const char *tape, const char *text) { np_result r; char rs[4500]; snprintf(rs, sizeof rs, "library/signatures=%s", sigfile); if (stage(5, tape, rs, &r)) { check(0, "prune.ref.library-signatures", label, "transport"); return; }
+    int ok = r.rc && !r.outn && r.errn && strstr(r.err, text); char d[300]; snprintf(d, sizeof d, "rc=%d stdout=%zu stderr=%.*s", r.rc, r.outn, (int)(r.errn > 120 ? 120 : r.errn), r.err); for (char *q = d; *q; q++) if (*q == '\n') *q = ' '; check(ok, "prune.ref.library-signatures", label, d); np_free(&r); }
+
+int main(int argc, char **argv) {
+    if (argc != 4 || !realpath(argv[1], root) || !realpath(argv[2], streams) || argv[3][0] != '/') { fputs("usage: ROOT STREAMS_DIR ABS_OUT\n", stderr); return 2; }
+    snprintf(outdir, sizeof outdir, "%s", argv[3]); if (mkdir(outdir, 0700)) die("new out dir must be absent"); path(inc, sizeof inc, root, "include"); path(bound, sizeof bound, root, "tools/bound");
+    char rp[4400]; path(rp, sizeof rp, outdir, "results.tsv"); res = fopen(rp, "wbx"); if (!res) die("results");
+    { char com[4400]; path(com, sizeof com, streams, "unisacc-stream5.com"); size_t n; char *b = cx_read(com, &n); if (!b) die("stream5"); char h[65]; cx_sha256_hex(b, n, h); free(b); path(com, sizeof com, streams, "unisacc-stream3.com"); b = cx_read(com, &n); if (!b) die("stream3"); char h3[65]; cx_sha256_hex(b, n, h3); free(b); fprintf(res, "IDENTITY\tstream3=%s\tstream5=%s\n", h3, h); }
+    const char *src = "static int dead(int x){return x*99;}\nint pub(int a){return a+1;}\nint main(void){return 7;}\n"; char c[4400], pp[4400], tok[4400], tape[4400], env[4400], one[4400], sig[4400];
+    path(c, sizeof c, outdir, "l.c"); saved(c, src, strlen(src)); path(one, sizeof one, outdir, "one.bin"); saved(one, "\1\0\0\0\0\0\0\0", 8);
+    path(pp, sizeof pp, outdir, "l.pp"); path(tok, sizeof tok, outdir, "l.tok"); path(tape, sizeof tape, outdir, "l.tape"); path(env, sizeof env, outdir, "l.env"); path(sig, sizeof sig, outdir, "l.sig");
+    np_result r; if (stage(1, c, 0, &r) || r.rc) die("e2"); saved(pp, r.out, r.outn); np_free(&r); if (stage(2, pp, 0, &r) || r.rc) die("e1"); saved(tok, r.out, r.outn); np_free(&r);
+    if (stage(3, tok, 0, &r) || r.rc) die("e3 plain"); saved(tape, r.out, r.outn); np_free(&r);
+    { char rs[4500]; snprintf(rs, sizeof rs, "library/symbols=%s", one); if (stage(3, tok, rs, &r) || r.rc) die("e3 with symbols"); saved(env, r.out, r.outn); np_free(&r); }
+    /* split the envelope */
+    size_t en, tn; unsigned char *eb = (unsigned char *)cx_read(env, &en); char *tb = cx_read(tape, &tn); if (!eb || !tb) die("read");
+    int framed = en >= 25 && !memcmp(eb, "USLTAPE1\n", 9); unsigned long tl = framed ? le64(eb + 9) : 0, sl = framed ? le64(eb + 17) : 0; int bounds = framed && tl <= en - 25 && sl == en - 25 - tl && sl >= 16 && !memcmp(eb + 25 + tl, "USLSIG2\n", 8);
+    char d[300]; snprintf(d, sizeof d, "framed=%d tape=%lu sig=%lu total=%zu", framed, tl, sl, en); check(bounds, "prune.pos.library-exports", "envelope.usltape1-bounds", d);
+    check(bounds && tl == tn && !memcmp(eb + 25, tb, tn), "prune.pos.library-exports", "envelope.tape-equals-plain", "USLTAPE1 tape == E3 output without the resource");
+    if (!bounds) { fprintf(res, "SUMMARY\tpass=%d\tfail=%d\n", npass, nfail); fclose(res); printf("PRUNE_LIBRARY_CASES\tpass=%d\tfail=%d\n", npass, nfail); return 1; }
+    const unsigned char *sb = eb + 25 + tl; saved(sig, (const char *)sb, sl);
+    { unsigned long nrec = le64(sb + 8); size_t at = 16; int seen_dead = 0, seen_pub = 0, seen_main = 0, dead_internal = 0, ok = nrec == 3; size_t dead_flag_at = 0, main_name_at = 0;
+      for (unsigned long i = 0; ok && i < nrec && i < 3; i++) { if (at + 8 > sl) { ok = 0; break; } unsigned long ln = le64(sb + at); at += 8; if (ln > sl - at - 4) { ok = 0; break; }
+        if (ln == 4 && !memcmp(sb + at, "dead", 4)) { seen_dead = 1; dead_internal = sb[at + 4] == 1; dead_flag_at = at + 4; } if (ln == 3 && !memcmp(sb + at, "pub", 3)) seen_pub = 1; if (ln == 4 && !memcmp(sb + at, "main", 4)) { seen_main = 1; main_name_at = at; }
+        at += ln + 4; /* name, four flag bytes; then parameter_count, result descriptor, ... -- only the first record's prefix is needed below, so stop walking here */ break; }
+      snprintf(d, sizeof d, "records=%lu first=%s internal=%d", nrec, seen_dead ? "dead" : seen_pub ? "pub" : seen_main ? "main" : "?", dead_internal); check(nrec == 3 && seen_dead && dead_internal, "prune.pos.library-exports", "envelope.sig-first-record-dead-internal", d);
+      /* variants: truncated, defined flag of the first record cleared, duplicate name (main -> dead), V1 magic on V2 bytes, junk */
+      char v[5][4400]; const char *vn[5] = { "trunc.sig", "undef.sig", "dup.sig", "v1magic.sig", "junk.sig" }; for (int i = 0; i < 5; i++) path(v[i], sizeof v[i], outdir, vn[i]);
+      saved(v[0], (const char *)sb, sl / 2);
+      { unsigned char *m = malloc(sl); memcpy(m, sb, sl); if (dead_flag_at) m[dead_flag_at + 1] = 0; saved(v[1], (const char *)m, sl); free(m); }
+      { unsigned char *m = malloc(sl); memcpy(m, sb, sl); const unsigned char *q = sb; size_t pos = 0; for (size_t i = 16; i + 4 <= sl; i++) if (!memcmp(q + i, "main", 4)) { pos = i; break; } if (pos) memcpy(m + pos, "dead", 4); saved(v[2], (const char *)m, sl); free(m); (void)main_name_at; }
+      { unsigned char *m = malloc(sl); memcpy(m, sb, sl); memcpy(m, "USLSIG1\n", 8); saved(v[3], (const char *)m, sl); free(m); }
+      saved(v[4], "junk", 4);
+      /* exports */
+      np_result a, b; if (stage(5, tape, 0, &a)) die("prune plain"); char rs[4500]; snprintf(rs, sizeof rs, "library/signatures=%s", sig); if (stage(5, tape, rs, &b)) die("prune with signatures");
+      int plain_ok = !a.rc && !has_label(a.out, a.outn, "dead") && !has_label(a.out, a.outn, "pub") && has_label(a.out, a.outn, "main");
+      int sig_ok = !b.rc && !has_label(b.out, b.outn, "dead") && has_label(b.out, b.outn, "pub") && has_label(b.out, b.outn, "main");
+      snprintf(d, sizeof d, "plain rc=%d dead=%d pub=%d main=%d", a.rc, has_label(a.out, a.outn, "dead"), has_label(a.out, a.outn, "pub"), has_label(a.out, a.outn, "main")); check(plain_ok, "prune.pos.library-exports", "control.without-signatures-prunes-pub", d);
+      snprintf(d, sizeof d, "with signatures rc=%d dead=%d pub=%d main=%d", b.rc, has_label(b.out, b.outn, "dead"), has_label(b.out, b.outn, "pub"), has_label(b.out, b.outn, "main")); check(sig_ok, "prune.pos.library-exports", "exports.pub-retained-dead-removed", d); np_free(&a); np_free(&b);
+      refusal("truncated.named", v[0], tape, "not covered: typed library signature");
+      refusal("defined-flag-0.named", v[1], tape, "not covered: malformed library signatures or missing public label");
+      refusal("duplicate-name.named", v[2], tape, "not covered: malformed library signatures or missing public label");
+      refusal("v1-magic-on-v2-bytes.named", v[3], tape, "not covered: malformed library signatures or missing public label");
+      refusal("junk.named", v[4], tape, "not covered: malformed library signatures or missing public label"); }
+    free(eb); free(tb);
+    fprintf(res, "SUMMARY\tpass=%d\tfail=%d\n", npass, nfail); fclose(res); printf("PRUNE_LIBRARY_CASES\tpass=%d\tfail=%d\n", npass, nfail); return nfail ? 1 : 0;
+}
