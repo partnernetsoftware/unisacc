@@ -94,3 +94,4 @@
 - 17:5x 预处理负向猎取：批 `pp-negative` 8/10（红为设计）——两处真缺陷：`#define 3x 1` 与 `#include <stdio.h`（未闭合却静默包含 stdio.h）均 rc 0 无诊断；四类拒绝文本缺 file:line（INFO）。plans/defects-c43.md。冻结导出 unisacc-cc-f3705-20f6f4361d。
 - 18:0x C 约束负向猎取：批 `c-negative` 10/17（红为设计）——七处约束违反被静默接受并产出对象（赋值给 const、switch 外 case、struct 重定义、指针当 int 返回、不兼容指针初始化、typedef 冲突、重复形参），plans/defects-c43.md c.negative。冻结导出 unisacc-cc-f3705-55b664f4cd。
 - 18:0x c-negative 第二轮：再添 8 处静默接受（int→指针、原型实参过多、函数类型冲突、枚举常量重声明、零长数组、void 值、const 指针写入、int+=字符串），批现 19/34；defects 累计 15 项 C 约束漏检。
+- 18:0x c-negative 第三轮：再添 6 处（不兼容指针比较、块内重定义、重复 case、浮点下标、void 调用作值、丢弃 const），批现 20/41，漏检累计 21。
