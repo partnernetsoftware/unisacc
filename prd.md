@@ -151,7 +151,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 **2026-10-28 单元化重构决定：** 主人要求参考Rust模块化与内存安全设计，去除include引入的隐式耦合；不是换后缀。CX权威源码、公开接口、私有实例、显式资源/构建图、所有权/借用合同共同构成目标。目标CX0 → E2 → E1 → E3 → E4 → prune → lower → elf；现有独立CX0/束/适配已落地，安装产品仍七流。CX0语义控制最终也须网络化，十八张ask事实网不按阶段数机械加一。详见[单元化计划](plans/v0.0.43-units.md)及[cx入口](cx/README.md)。
 
-**当前分工与下一动作：** 运行库声明/provider与最小process分离后，原45秒/阶段12秒内driver自编译217031B成功，其产物native5/0、driver14/0；投影14/0、生成接口constructor唯一注册3/0、sealed source RI17/0。新增原生ABI材料绑定门：profile成对固定provider与声明清单SHA，在封存束实际字节上核provider/逐头身份，错配在进入模型流水线前拒绝；Root94启动编译的新driver实跑11/0（out/c43-runtime-binding-03.stdout），不授类型/所有权证明。已装冻结Root94新negative211/0/known_gaps1；冻结源14批13PASS1FAIL、无UNKNOWN，E1 38/E2 58格新证，长名失败不掩盖。新IRFULLNAME源码事实修复与3PP私包已通过原11头位置+新14探针，29其它模型/全资源逐字不变、lint0ERROR/既有141WARN、辅助sim覆盖修改分支；私包NON_ADMITTED不授安装体，header矩阵仍NEEDS_PRODUCT_CHANGE。下一刀结合cc前奏缓存A正规冻结构造/准入新候选，再换该长名格；结构化迟绑定/类型与所有权合同仍继续，不将C ABI桥当静态安全完成。
+**当前分工与下一动作：** E2完整语义文件名已走正规构造/准入/安装：冻结main778fc68ebc、SIDf9fff160，107/107作业与PC e154c747独立核验，双内核/五切片/APE完成，kind2安装后共享Rootd65c1474（3007277B）/record49465750；旧Root94红记录与private724均保留。新候选10个E2相关SOURCE批加smoke全部PASS，原header11/0、negative211/0/known_gaps1；out/c43-fullname-validation-01/。三个E2语义/容量格仅据新实跑换标，其余候选资格不转授。此前runtime声明/provider拆分、原预算driver自编译及材料绑定门已落地；仍是unsafe C ABI桥。下一刀回到结构化类型/ABI合同直入E3，继续处理结构返回和所有权边界，不将运行期检查当编译期所有权完成。详见[长名构造与安装收据](plans/c43-pp-fullname-fastlane-2026-10-28.md#formal-installation)。
 
 **双线推进（2026-10-28）：** 0.0.43现行Rootda4e/SID1621继续补完整流/网/RI、N22与平台，不等待CX重构完工；CX产物独立核身份逐单元接入。E1实际located warnlex已核654状态/168896观测决定及展开动作与正式模型全等，手写规则144类对/24 peek边界293/0；EOF后的12类peek逐项UNOBSERVABLE，不折叠作144源流PASS，矩阵仍MISSING。core.memory有138项正/拒绝/恢复实跑，仅管理API运行期约束；成员struct直接return的正向最小例在tests/pending/struct-return-member.cx当前rc1而期望rc7，保持NEEDS_PRODUCT_CHANGE。
 
@@ -159,9 +159,9 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 **现行流推进（2026-10-28）：** 已装Rootda4e/SID1621完成同候选七流材料刷新：out/c43-streams-da4e-01/来自实际安装体内嵌包50cc5a96；stream1=4f3c87fd、stream2=68f08deb，独立成员/输入绑定24/0。14个正式SOURCE批全部PASS（out/c43-da4e-stream-validation-01/）：E1 tokens188/0、bytes501/0、refusals624/0、independent25/0；E2 positive103/0、refusal187/0、independent36/0、pp-gold21/0、CLI targets20/0/includes20/0/macros23/0、header-locations11/0、negative-diagnostics211/0（known_gaps=2），另含绑定批。E2既定本机62格现均有本代证据；E1必选本机40格中38格有证，余lex-144流内逐键oracle及其host聚合。UCN产品整链正式13/0，旧Root41同批13/12保留。完整C99、19宽行、N22与五外宿主仍未关闭。
 
-**2026-10-28 最新开发候选（cdx）：** 已装APE94b549d1fbbbb29f9068492c17866aa8ea072f950fe4c7519d86cd989d0bb7f1（3001840B），record fe5d0aec94bdf46fd3816806a0afc412105494684415816af30f7b810fa52f75，来自冻结c590/source d4ada505，107/PC66c797a0/GEN-A/kind2及正规安装后精确转移。迁移时live88fe6313与其不同，不冒充同源；旧da4e/dd2385在out/c43-e3diag-promote-01。共享negative211/0/known_gaps1、reach3:29闭；冻结源十四批13PASS1FAIL、聚合NOT_QUALIFIED。E2长名截62旧新都有，private7241237d已修并11+14绿但未安装；完整N22/其他域/外国宿主未授新资格。
+**2026-10-28 最新开发候选（cdx）：** 已装APE d65c14744390932885660cf62c0ce77db7eeb4cefa46094909f1e05b0ba21b9f（3007277B），record49465750c2bef8b3a5421bc82f3480034a2e776389db25b6ddf65aba67349cb8，源SID f9fff160a091ac0004db69fe8b2713a4c448c22c963b8db89e3a4e2624540ec2，冻结提交778fc68ebc；107/107、PC e154c747、双内核/五切片/APE及kind2正式安装后精确迁入共享树。迁入后共享live SID实测亦为f9fff160；旧Root94/record在out/c43-fullname-promote-01/。同候选10个E2相关SOURCE批与smoke共11批全部PASS，无UNKNOWN；header11/0长名缺口关闭，negative211/0/known_gaps1。N22、其余完整域及外国宿主仍待本候选证据。
 
-**2026-10-28 最新源码纪元（cdx）：** 正规已装Root94b549d1/recordfe5d0aec来自冻结c590/source d4ada505，107作业/PC66c797a0/GEN-A/kind2已核，安装源与共享live源分账。共享迁移时实测live88fe6313；此后A缓存与E2完整文件名属于快车道移动源码，不冒用d4作live同源资格。Root94新negative211/0/known_gaps1；其冻结源14批13PASS1FAIL、无UNKNOWN，header长名语义截断旧新都有，原红保留。IRFULLNAME新私有E2构造正在验证，不授已装Root94；旧UCN构造/固定点材料保留历史不移贴。
+**2026-10-28 最新源码纪元（cdx）：** /home/devali/repos/unisacc-epoch-fullname-778fc68ebc独立冻结已提交main；保存Root94引导与原记录，实际执行5工具+34gen+34tbl+34net，全部start/finish/command rc0，最终上下文复验通过。PC e154c747为本源完整构造，非采用private724；正式声明/pack/seal/独立verify完成。新Rootd65c1474在原预算内完成头位置11/0及smoke16/0后，经candidate-install的两次kind2准入检查安装；candidate-promote保持记录逐字转移，现live源与冻结SID f9fff160相同。旧c590/d4ada505及Root94的13PASS1FAIL仍保留历史，不改旧红。
 
 **本源正式构造（a0b150aa86）：** 新context `out/c43-source-1621-context-01/`已PREPARED，全文SHA d78d5f6a…；bootstrap与原生helper均测得SID16219141，冻结Root41/record c7bc3012。未改控制器的O2 ELF 67eb70d0…已编成（206,585 B），独立--verify-context与--list均rc0；107/107作业的start/finish/command退出码全部0，最终context复验通过。GEN1621双核/22对象已重建；PC1621-01完成34模型/六路线/declare/pack/seal/独立verify，包50cc5a96（1,630,081 B）与私验包逐字相同。P3材料PREPARED/VERIFIED、五片/APE/kind2准入与开发安装完成；功能资格仍逐批取得，不授N22/all-six。当前清单168批/177覆盖/19缺口；实际--all仍rc3、167未跑批、子批0。根产品已按kind2准入开发安装；只计新Root实际运行的正式SOURCE证据，不转授私有13/0。
 
@@ -356,6 +356,8 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 
 <a id="memory-palace"></a>
 ### 记忆宫殿
+
+**现行产品（2026-10-28）：** Rootd65c1474/record49465750，完整源SIDf9fff160、冻结778fc68ebc；107/107、PC e154c747、双内核/五切片/APE、kind2准入/正规安装和共享精确迁入完成。10个E2相关批加smoke共11批全PASS，header11/0长名修复已实际装入，negative211/0/known_gaps1；证据out/c43-fullname-validation-01/与out/c43-fullname-promote-01/。此前Root94私包绿/未安装的表述已成为历史。结构化类型/ABI/所有权直入E3仍未完成；下一刀由此继续。
 
 **现行重构入口（2026-10-28）：** tools/cx-runtime.cx从显式原头生成声明树/无include provider，记录原头、bootstrap、生成器、消费者、ABI与产物哈希；tools/cx-driver.cx的RuntimeProvider只加入一次，tools/runtime/process模块只带进程执行接口。新增可选RuntimeProviderSHA/RuntimeDeclarationsSHA成对绑定，直接核封存束内provider/声明清单/逐头身份，11项正拒绝恢复实跑0失败（out/c43-runtime-binding-03.stdout）；旧profile仍明确无绑定。此前新链driver自编译在原预算内成功，所得静态ELF实跑原生共享malloc/free/errno/stdio/setpgid5/0和driver14/0。consumer接口剥constructor/destructor注册效应，provider独有初始化。CIF文本投影/forced includes仍是兼容桥，原生类型/符号/所有权直入E3及编译期保证未完成；unsafe兼容ABI仍暴露内部声明，不能宣称私有安全完成。
 
