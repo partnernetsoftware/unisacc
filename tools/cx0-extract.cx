@@ -1,47 +1,64 @@
-/* Reproducible first CX0 extraction. The C resolver remains the migration
- * oracle; this emits one private CX module, not a second hand-maintained parser.
- * sh ./unisacc.com tools/cx0-extract.cx -- [--check] */
-static void bad(const char *why){fprintf(stderr,"cx0-extract: %s\n",why);exit(2);}
+/* CX-owned parser -> classic C compatibility projection. plan.cx is the actual
+ * complete module and the single maintained parser. The fixed prefix contains
+ * only the legacy explanation, include and driver callback declarations.
+ * sh ./unisacc.com tools/cx0-extract.cx -- [--check] [--output FILE] [--source CX]
+ * Default target src/cxmod.c remains a live product/reference/host-tool input.
+ * --check never writes; unchanged generation preserves the existing file. */
+static void bad(const char *why){fprintf(stderr,"cx0-extract: %s errno=%d\n",why,errno);exit(2);}
+static char *read_regular(const char *path,size_t *n,int absent){
+ int fd=open(path,O_RDONLY|O_NONBLOCK|O_NOFOLLOW);if(fd<0){if(absent&&errno==ENOENT)return 0;bad("input-open");}struct stat a,b;
+ if(fstat(fd,&a)||!S_ISREG(a.st_mode)||a.st_size<0||a.st_size>8388608){close(fd);bad("bounded-regular-input");}
+ *n=(size_t)a.st_size;char *p=malloc(*n+1);if(!p){close(fd);bad("allocation");}size_t at=0;
+ while(at<*n){ssize_t z=read(fd,p+at,*n-at);if(z<0&&errno==EINTR)continue;if(z<=0){close(fd);free(p);bad("input-read");}at+=(size_t)z;}
+ char tail;ssize_t z;do{z=read(fd,&tail,1);}while(z<0&&errno==EINTR);int invalid=z||fstat(fd,&b)||a.st_size!=b.st_size;if(close(fd))invalid=1;
+ if(invalid||memchr(p,0,*n)){free(p);bad("input-changed-close-or-NUL");}p[*n]=0;return p;
+}
 static char *replace_one(char *s,const char *old,const char *fresh){
- char *p=strstr(s,old);if(!p||strstr(p+1,old))bad("expected unique source anchor");
- size_t n=strlen(s),a=(size_t)(p-s),o=strlen(old),f=strlen(fresh);
- char *r=malloc(n-o+f+1);if(!r)bad("allocation");
- memcpy(r,s,a);memcpy(r+a,fresh,f);memcpy(r+a+f,p+o,n-a-o+1);free(s);return r;
+ char *p=strstr(s,old);if(!p||strstr(p+1,old))bad("expected-unique-compatibility-anchor");
+ size_t n=strlen(s),a=(size_t)(p-s),o=strlen(old),f=strlen(fresh);if(f>8388608||n-o>8388608-f)bad("projection-bound");
+ char *r=malloc(n-o+f+1);if(!r)bad("allocation");memcpy(r,s,a);memcpy(r+a,fresh,f);memcpy(r+a+f,p+o,n-a-o+1);free(s);return r;
+}
+static char *private_body(const char *source){
+ const char *begin="/* CX0_COMPAT_BODY_BEGIN */\n",*end="/* CX0_COMPAT_BODY_END */\n";
+ if(strncmp(source,"#pragma unisa module plan\n",26))bad("complete-CX-module-required");
+ const char *a=strstr(source,begin),*b=strstr(source,end);if(!a||!b||strstr(a+1,begin)||strstr(b+1,end)||b<=a||a==source||a[-1]!='\n'||b[-1]!='\n')bad("unique-ordered-body-markers-required");
+ if(!strstr(b,"cx0_result cx0_plan(")||!strstr(b,"cx0_result cx0_capture_plan("))bad("complete-CX-module-API-required");
+ a+=strlen(begin);size_t n=(size_t)(b-a);/* Two separator newlines belong to the module adapter. */
+ if(n<3||memcmp(a,"#define CXM_MAXU ",17)||a[n-1]!='\n'||a[n-2]!='\n'||a[n-3]!='\n')bad("private-body-boundaries");n-=2;
+ char *body=malloc(n+1);if(!body)bad("allocation");memcpy(body,a,n);body[n]=0;return body;
+}
+static char *classic_visibility(char *body){
+ size_t n=strlen(body),at=0;char *out=malloc(n+1);if(!out)bad("allocation");const char *p=body;int depth=0,comment=0,quote=0,escape=0,removed=0;
+ while(*p){
+  if(!depth&&!comment&&!quote&&!strncmp(p,"static ",7)&&(!strncmp(p+7,"int cxm_",8)||!strncmp(p+7,"char cxm_",9)||!strncmp(p+7,"char *cxm_",10))){p+=7;removed++;}
+  char c=*p;out[at++]=c;
+  if(comment){if(c=='*'&&p[1]=='/'){out[at++]=*++p;comment=0;}}
+  else if(quote){if(escape)escape=0;else if(c=='\\')escape=1;else if(c==quote)quote=0;}
+  else if(c=='/'&&p[1]=='*'){out[at++]=*++p;comment=1;}
+  else if(c=='/'&&p[1]=='/'){while(p[1]&&p[1]!='\n')out[at++]=*++p;}
+  else if(c=='"'||c=='\'')quote=c;else if(c=='{')depth++;else if(c=='}'){if(!depth)bad("unbalanced-private-body");depth--;}
+  p++;
+ }out[at]=0;free(body);if(depth||comment||quote||!removed)bad("unbalanced-or-nonprivate-parser");return out;
+}
+static void publish(const char *path,const char *bytes,size_t n){
+ char temporary[4400];int z=snprintf(temporary,sizeof temporary,"%s.XXXXXX",path);if(z<0||(size_t)z>=sizeof temporary)bad("output-path-bound");
+ int fd=mkstemp(temporary);if(fd<0)bad("output-temporary-create");int failed=fchmod(fd,0644);size_t at=0;
+ while(!failed&&at<n){ssize_t w=write(fd,bytes+at,n-at);if(w<0&&errno==EINTR)continue;if(w<=0){failed=1;break;}at+=(size_t)w;}
+ if(fsync(fd))failed=1;if(close(fd))failed=1;if(!failed&&rename(temporary,path))failed=1;
+ if(failed){int e=errno;if(unlink(temporary)&&errno!=ENOENT)bad("output-failed-cleanup");errno=e;bad("output-write-close-or-publish");}
 }
 int main(int argc,char **argv){
- int check=argc==2&&!strcmp(argv[1],"--check");if(argc!=1&&!check)bad("usage [--check]");
- size_t sn,tn;char *src=cx_read("src/cxmod.c",&sn),*tpl=cx_read("cx/cx0/plan.cx.in",&tn);
- if(!src||!tpl||memchr(src,0,sn)||memchr(tpl,0,tn))bad("read source/template");
- char *start=strstr(src,"#define CXM_MAXU 64\n");if(!start)bad("resolver start");
- char *body=malloc(strlen(start)*2+1024);if(!body)bad("allocation");size_t at=0;
- /* Every resolver symbol is private, including a second declaration on the
-  * same file-scope line. Function-local declarations are left unchanged. */
- const char *p=start;int depth=0,comment=0,quote=0,escape=0;
- while(*p){
-  if(!depth&&!comment&&!quote&&(!strncmp(p,"int cxm_",8)||!strncmp(p,"char cxm_",9)||!strncmp(p,"char *cxm_",10))){memcpy(body+at,"static ",7);at+=7;}
-  char c=*p;body[at++]=c;
-  if(comment){if(c=='*'&&p[1]=='/'){body[at++]=*++p;comment=0;}}
-  else if(quote){if(escape)escape=0;else if(c=='\\')escape=1;else if(c==quote)quote=0;}
-  else if(c=='/'&&p[1]=='*'){body[at++]=*++p;comment=1;}
-  else if(c=='/'&&p[1]=='/'){while(p[1]&&p[1]!='\n')body[at++]=*++p;}
-  else if(c=='"'||c=='\'')quote=c;
-  else if(c=='{')depth++;else if(c=='}')depth--;
-  p++;
- }
- body[at]=0;if(depth||comment||quote)bad("unbalanced resolver");
- body=replace_one(body,"unisa_sha256_hex(cxm_out, (size_t)cxm_nout, hex);","cx_sha256_hex(cxm_out, (size_t)cxm_nout, hex);");
- body=replace_one(body,"unisa_sha256_hex(cxm_src, (size_t)cxm_nsrc, hex);","cx_sha256_hex(cxm_src, (size_t)cxm_nsrc, hex);");
- body=replace_one(body,
- "td = getenv(\"TMPDIR\"); if (td == 0 || td[0] == 0) td = getenv(\"TEMP\");   /* TEMP: Windows, as the forwarding unit */\n    if (td == 0 || td[0] == 0) td = \"/tmp\";",
- "td = cx0_directory; /* explicit per-invocation interface resource */");
- body=replace_one(body,"    if (n < 0) return 0 - 1;\n    cxm_nsrc = n;", "    if (n == -3) return 1;\n    if (n < 0) return 0 - 1;\n    cxm_nsrc = n;");
- body=replace_one(body,"        if (cxm_rd(norm, cxm_cmp, 1) == 0 - 1) {", "        int probe = cxm_rd(norm, cxm_cmp, 1);\n        if (probe == -3) return 1;\n        if (probe == 0 - 1) {");
- char source_sha[65];cx_sha256_hex(src,sn,source_sha);free(src);
- tpl=replace_one(tpl,"@RESOLVER_SHA256@",source_sha);
- tpl=replace_one(tpl,"/* CX0_LEGACY_BODY */",body);free(body);
- size_t n=strlen(tpl);int rc=0;
- if(check){size_t oldn;char *old=cx_read("cx/cx0/plan.cx",&oldn);rc=!old||oldn!=n||memcmp(old,tpl,n);free(old);}
- else rc=cx_write("cx/cx0/plan.cx",tpl,n);
- free(tpl);if(rc)bad(check?"generated module differs":"write module");
- puts(check?"CX0_EXTRACT\tEXACT":"CX0_EXTRACT\tPREPARED");return 0;
+ int check=0;const char *output="src/cxmod.c",*source="cx/cx0/plan.cx",*prefix="cx/cx0/compat-prefix.c.in";int out_given=0,source_given=0;
+ for(int i=1;i<argc;i++){if(!strcmp(argv[i],"--check")&&!check)check=1;else if(!strcmp(argv[i],"--output")&&!out_given&&i+1<argc){output=argv[++i];out_given=1;}else if(!strcmp(argv[i],"--source")&&!source_given&&i+1<argc){source=argv[++i];source_given=1;}else bad("usage-[--check]-[--output-FILE]-[--source-CX]");}
+ struct stat a,b,c;int have_output=!lstat(output,&a);if(!have_output&&errno!=ENOENT)bad("output-stat");if(have_output&&(!S_ISREG(a.st_mode)||stat(source,&b)||stat(prefix,&c)||(a.st_dev==b.st_dev&&a.st_ino==b.st_ino)||(a.st_dev==c.st_dev&&a.st_ino==c.st_ino)))bad("regular-output-must-not-alias-source-or-prefix");
+ size_t sn,pn;char *src=read_regular(source,&sn,0),*pre=read_regular(prefix,&pn,0),*body=private_body(src);free(src);
+ body=replace_one(body,"cx_sha256_hex(cxm_out, (size_t)cxm_nout, hex);","unisa_sha256_hex(cxm_out, (size_t)cxm_nout, hex);");
+ body=replace_one(body,"cx_sha256_hex(cxm_src, (size_t)cxm_nsrc, hex);","unisa_sha256_hex(cxm_src, (size_t)cxm_nsrc, hex);");
+ body=replace_one(body,"td = cx0_directory; /* explicit per-invocation interface resource */","td = getenv(\"TMPDIR\"); if (td == 0 || td[0] == 0) td = getenv(\"TEMP\");   /* TEMP: Windows, as the forwarding unit */\n    if (td == 0 || td[0] == 0) td = \"/tmp\";");
+ body=replace_one(body,"    if (n == -3) return 1;\n    if (n < 0) return 0 - 1;\n    cxm_nsrc = n;","    if (n < 0) return 0 - 1;\n    cxm_nsrc = n;");
+ body=replace_one(body,"        int probe = cxm_rd(norm, cxm_cmp, 1);\n        if (probe == -3) return 1;\n        if (probe == 0 - 1) {","        if (cxm_rd(norm, cxm_cmp, 1) == 0 - 1) {");
+ body=classic_visibility(body);size_t bn=strlen(body);if(pn>8388608-bn)bad("projection-bound");size_t n=pn+bn;char *result=malloc(n+1);if(!result)bad("allocation");memcpy(result,pre,pn);memcpy(result+pn,body,bn+1);free(pre);free(body);
+ size_t oldn=0;char *old=read_regular(output,&oldn,1);int exact=old&&oldn==n&&!memcmp(old,result,n);free(old);
+ if(check&&!exact){free(result);bad("generated-classic-projection-differs");}if(!check&&!exact)publish(output,result,n);
+ char hash[65];cx_sha256_hex(result,n,hash);free(result);printf("CX0_EXTRACT\t%s\tbytes=%zu\tsha256=%s\toutput=%s\tauthority=%s\n",check?"EXACT":exact?"UNCHANGED":"PREPARED",n,hash,output,source);return 0;
 }
