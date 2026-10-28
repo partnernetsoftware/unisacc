@@ -362,7 +362,7 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 <a id="memory-palace"></a>
 ### 记忆宫殿
 
-**sizeof 正规接续（2026-10-28）：** 修复提交e5bade1851已冻结到仓外`unisacc-epoch-sizeof-e5bade1851`；context实际PREPARED，源SID353cb118，保存启动产品f3705dfa/record63e7d703。本轮43项材料作业（tool3/gen34/tbl3/net3）均完成，34份JSON对原f9逐字比较为31同/3异，差异shared-e3/warnparse/errorparse；没有沿用ace3旧结论。比较工具默认-run rc0，两项摘要篡改/符号链接负控具名rc2。新f9-sizeof语义角色合同22/0；新执行profile尚未构造，writer/reader须明确拒绝未准备的执行身份，不能借旧anchors。sizeof私包ff696的20项正拒绝已过，正规包、准入与安装尚未完成，共享产品仍f3705。详情见`plans/c43-sizeof-postfix-2026-10-28.md`；PREPARED不计功能PASS。
+**sizeof 正规接续（2026-10-28）：** 冻结源`unisacc-epoch-sizeof-e5bade1851`/SID353cb118完成43项材料作业（tool3/gen34/tbl3/net3），34份JSON对原f9实测31同/3异。新origin ELF bdf812/profile1286独立核原107/34；双内核KGEN7be6完成。正规mixed包ff696已实际declare/pack/finish/seal，context7d69、manifestcc6c、receipt4c74；独立读取器默认-run通过原107/当前43，误用旧profile与错误源身份均具名拒绝。新产品context93219已核，五切片/APE、准入安装仍待完成；共享产品仍f3705。详情与日志见`plans/c43-sizeof-postfix-2026-10-28.md`及`out/c43-sizeof-origin-exec-01/`。这些是材料构造/核验，不转授私包20项或跨平台功能资格。
 
 **构造接续检查点（2026-10-28）：** ace3冻结根`unisacc-epoch-aggregate-13d8cfe478`完成76项带收据作业（tool5/gen34/tbl34/net3），31张相同net按显式mixed-v2合同复用；历史107与当前union43分别核验，不冒称当前150项新构造。正规PC661c2b02、context8cb8e390、receipt3fb50654已封存并独立读取通过。新KGEN58adde、五切片、APE及逐项finish均完成；产品context fe3650a0。新产品f3705dfa（3,007,351B）已两相准入、冻结根安装及共享迁入，record63e7d703、源ace3，development-only。内嵌模型聚合四组43/0保留独立d65原红对照；内存138/0、ABI55/0、诊断211/0、smoke16/0均在新产品实跑。证据out/c43-f9-origin-exec-01/及out/c43-f3705-promote-01/；迁入前后witness4f7a21c6一致。下一重活窗交sizeof，两路由模型私包基底使用正规661c，不借旧d65证据。安装已改变冻结根产品，不把安装前材料观察冒充安装后未变；跨平台运行与完整发布资格仍开。
 

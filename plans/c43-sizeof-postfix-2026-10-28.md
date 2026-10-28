@@ -219,3 +219,52 @@ through default `-run`: rc2, `material-profile-execution-anchors-UNPREPARED`
 (`out/c43-sizeof-writer-unprepared-01.*`). The reader selects current_spec for
 the current union and has the same unprepared-role boundary; its new branch
 has only been reviewed, not exercised against a new package yet.
+
+The next execution stage now has independent observed identities. The saved
+f3705 bootstrap with explicit regular661c package built the new O2 origin
+executor (session39547, rc0), ELF
+`bdf8125488535521c258ef070ba81741a64a58714c84addf57a1b418b7c4a278`.
+Its actual write-profile produced SHA
+`1286c2cb65cf6c914bd177c3941b69e12969c274fc05ebf2f074c4208035c2c5`;
+the snapshot then independently verified original f9's 107 jobs/34 models,
+1005 physical reads (session44572, rc0). Closure is
+`f4d8e92579494ff114949e3b3e1d25c5755e89c3bb9d554461f8cc9c44de1a8d`.
+All raw evidence is under `out/c43-sizeof-origin-exec-01/`; old profile and
+executor bytes were not changed.
+
+Both new-source kernel pipelines completed bootstrap, material preparation,
+assembler construction, preprocess/assemble/link for x86_64 and arm64,
+all actual rc0. KGEN context is
+`7be6f80638a13423601ab008812653dbfe5d407a3cf8bcd28fe3181d30a67270`.
+The writer now selects separate finite execution identities for f9-ace3 and
+f9-sizeof. Writer source `72ede138…` built O2 ELF `bf653aa5…` (session21761,
+rc0). A prepare attempt with the old profile was rejected rc2 with
+`reviewed-origin-profile-required`, before creating a new package directory.
+The earlier UNPREPARED refusal remains historical evidence of that code state.
+
+Regular mixed package preparation, declare/declare-finish, pack/pack-finish
+and seal completed with actual rc0. The resulting package in
+`out/c43-sizeof-mixed-pc-01/` is byte-identical to the earlier ff696 private
+package; its newly generated material identities are context `7d69c72b…`,
+manifest `cc6c5314…`, receipt `4c74d2cd…`. This equality does not transfer
+private functional results into installed-product qualification.
+
+The independent reader now selects per-invocation execution anchors by
+material role, retaining the old f9 set. Default-run reader verification
+(session8095) exited 0, reporting full origin107/current43, 3 new/31 adopted.
+A supplied ace3 source in place of 353c was rejected rc2 with
+`mixed-context-role-or-controller-mismatch`. Logs are `reader-01.*` and
+`reader-wrong-source-01.*` under the execution evidence directory.
+This completes package material verification, not product admission/install.
+
+The new product-build O0 tool compiled with actual rc0 (session25383), SHA
+`2d3439520d530f9a42c27ef8457952d06c518a36a48a585f7587f948867612d0`.
+Its observe step (23592) verified product context
+`93219be0f6ed7cc7dfd723c69f62f7559c07fbcace7fdeb6d5b16114fc2e42e4`.
+The observation's jobs=150 is original107 plus current43, not 150 new jobs.
+Product commands take OS/ARCH: `slice-win/x86_64` and
+`finish-slice-win/x86_64` (likewise lnx/osx targets), although filenames use
+hyphens. Initial hyphen-spelled commands were refused before construction or
+finish; their logs are retained, not counted as successful steps.
+The correctly named win/x86_64 slice (3220) and independent finish (43379)
+both exited 0; four other slices, wrap, admission and installation remain.
