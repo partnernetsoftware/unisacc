@@ -95,6 +95,12 @@ material-check-02.stdout实际rc0，原55秒预算不变；旧已装产品冒充
 证据out/c43-link-ape-01/material-{check-02,wrong-candidate}.*。只输出有限材料适用CHECKED，
 尚未写产品build record、未两阶段安装；这不是完整发布资格或原始构造执行收据的重建。
 
+随后已由原固定identity-helper实际write并check候选构造记录（两命令rc0），
+记录产品4c28/3007570字节、源8390、提交896888f424fa2b2a98862cd3316063a22dc2dc35，settings为空。
+冻结根原archive补本地Git元数据：首次短提交fetch失败，完整40位fetch成功；update-ref/read-tree仅写元数据和索引，
+tracked diff为空，原始源身份校验通过。记录位于out/c43-link-ape-01/unisacc.com.build.json，
+provenance{,-check}.stdout/stderr保留；这仍是构造身份记录，不冒称kind4原材料准入或已安装。
+
 - 现象：`int used(void); int main(void){return used()+2;}` 经 `-c -b lnx/x86_64 -funit` 得 main.o 后，`unisacc -o img main.o`（或加只定义 `unused` 的归档、或直接 `-o img main.c`）rc 0 并写出镜像；运行 SIGSEGV（rc 139）。预期：`link: undefined reference to used`，rc≠0，无镜像。
 - 定位：src/tapelink.c:351 `tl_check_undef`（R20-3）只检查名字以 `g_` 开头的未定义外部（全局数据对象），函数外部不检查。
 - 同现：经典参考 REF 0ed46192 行为相同（共享缺陷，非回归）；产品==REF 字节差分仍有效，不阻塞候选 f3705dfa。
