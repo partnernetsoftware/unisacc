@@ -1,0 +1,44 @@
+/* tools/prune-route-placement.cx -- stream-prune cell prune.route.placement (prd S3.2 prune row: image and -run routes
+ * call prune before lower; public -S/-c do not).
+ *   sh ./unisacc.com tools/prune-route-placement.cx -- ROOT ABS_OUT
+ * Fixture A has a dead static function with unique literals (99, 12345); fixture B is A without it. Oracles:
+ *   s-keeps-dead: `-S` of A still names `dead:` and carries the literal 12345 (unpruned E4 output);
+ *   c-keeps-dead: `-c` of A still carries the `dead` symbol name;
+ *   image-prunes: the image of A is byte-equal to the image of B (the dead body left no bytes), and runs with exit 7;
+ *   run-prunes: `-run` of A exits 7 (the route accepts the dead function and executes main);
+ *   s-from-b-differs: `-S` of B differs from `-S` of A (the comparison is not vacuous).
+ * O0 placement (image of A at -O0 vs B at -O0) is recorded as INFO, not asserted: the prd row names the route, not the
+ * optimisation level. */
+#pragma unisa use cxlib.netpack
+
+static char root[4096], outdir[4096], product[4400]; static int npass, nfail; static FILE *res;
+static void die(const char *s) { fprintf(stderr, "prune-route-placement: REFUSE %s errno=%d\n", s, errno); exit(2); }
+static void path(char *p, size_t cap, const char *a, const char *b) { int n = snprintf(p, cap, "%s/%s", a, b); if (n < 0 || (size_t)n >= cap) die("path"); }
+static void saved(const char *p, const char *s, size_t n) { int f = open(p, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600); if (f < 0) die("exclusive create"); while (n) { ssize_t k = write(f, s, n); if (k <= 0) die("write"); s += k; n -= (size_t)k; } if (close(f)) die("close"); }
+static void check(int ok, const char *label, const char *detail) { fprintf(res, "%s\tprune.route.placement.%s\t%s\n", ok ? "PASS" : "FAIL", label, detail); printf("%s\t%s\n", ok ? "PASS" : "FAIL", label); if (ok) npass++; else nfail++; }
+static int prod(char *const extra[], np_result *r) { char *v[16]; int n = 0; v[n++] = "sh"; v[n++] = product; for (int i = 0; extra[i]; i++) { if (n >= 15) die("argv"); v[n++] = extra[i]; } v[n] = 0; char why[1024]; return np_run(v, root, 0, 20, r, why, sizeof why); }
+static int compile3(const char *flag, const char *out, const char *in, const char *opt) { char *v[] = { (char *)flag, "-o", (char *)out, (char *)in, (char *)opt, 0 }; if (!opt) v[4] = 0; np_result r; if (prod(v, &r)) return -1; int rc = r.rc; np_free(&r); return rc; }
+static char *load(const char *p, size_t *n) { char *b = cx_read(p, n); if (!b) die(p); return b; }
+static int has(const char *hay, size_t n, const char *needle) { size_t k = strlen(needle); for (size_t i = 0; i + k <= n; i++) if (!memcmp(hay + i, needle, k)) return 1; return 0; }
+
+int main(int argc, char **argv) {
+    if (argc != 3 || !realpath(argv[1], root) || argv[2][0] != '/') { fputs("usage: ROOT ABS_OUT\n", stderr); return 2; }
+    snprintf(outdir, sizeof outdir, "%s", argv[2]); if (mkdir(outdir, 0700)) die("new out dir must be absent"); path(product, sizeof product, root, "unisacc.com");
+    char rp[4400]; path(rp, sizeof rp, outdir, "results.tsv"); res = fopen(rp, "wbx"); if (!res) die("results");
+    { size_t n; char *b = load(product, &n); char h[65]; cx_sha256_hex(b, n, h); free(b); fprintf(res, "IDENTITY\tcandidate=%s\n", h); }
+    const char *A = "static int dead(int x){return x*99+12345;}\nint main(void){return 7;}\n", *B = "int main(void){return 7;}\n";
+    char ac[4400], bc[4400], as[4400], bs[4400], ao[4400], ai[4400], bi[4400], a0[4400], b0[4400];
+    path(ac, sizeof ac, outdir, "a.c"); path(bc, sizeof bc, outdir, "b.c"); saved(ac, A, strlen(A)); saved(bc, B, strlen(B));
+    path(as, sizeof as, outdir, "a.tape"); path(bs, sizeof bs, outdir, "b.tape"); path(ao, sizeof ao, outdir, "a.o"); path(ai, sizeof ai, outdir, "a.img"); path(bi, sizeof bi, outdir, "b.img"); path(a0, sizeof a0, outdir, "a0.img"); path(b0, sizeof b0, outdir, "b0.img");
+    if (compile3("-S", as, ac, 0) || compile3("-S", bs, bc, 0) || compile3("-c", ao, ac, 0) || compile3("-o", ai, ac, 0) == -1) die("routes");
+    size_t n; char *t = load(as, &n); check(has(t, n, "dead:") && has(t, n, "12345"), "s-keeps-dead", "-S names dead: and carries literal 12345"); free(t);
+    t = load(ao, &n); check(has(t, n, "dead"), "c-keeps-dead", "-c object carries the dead symbol name"); free(t);
+    { size_t na, nb; char *x = load(as, &na), *y = load(bs, &nb); check(na != nb || memcmp(x, y, na), "s-from-b-differs", "-S of A differs from -S of B"); free(x); free(y); }
+    { np_result r; char *v[] = { "-o", ai, ac, 0 }; if (prod(v, &r)) die("image A"); int rc = r.rc; np_free(&r); char *w[] = { "-o", bi, bc, 0 }; if (prod(w, &r)) die("image B"); int rb = r.rc; np_free(&r);
+      size_t na, nb; char *x = rc || rb ? 0 : load(ai, &na), *y = rc || rb ? 0 : load(bi, &nb); char d[160]; snprintf(d, sizeof d, "image rc A=%d B=%d bytes %zu/%zu", rc, rb, x ? na : 0, y ? nb : 0);
+      check(x && y && na == nb && !memcmp(x, y, na), "image-prunes.byte-equal-without-dead", d); free(x); free(y);
+      if (chmod(ai, 0700)) die("chmod"); char bound[4400]; path(bound, sizeof bound, root, "tools/bound"); char *e[] = { bound, "5", ai, 0 }; char why[1024]; if (np_run(e, root, 0, 7, &r, why, sizeof why)) die("exec"); snprintf(d, sizeof d, "rc=%d stdout=%zu", r.rc, r.outn); check(r.rc == 7 && !r.outn, "image-prunes.executes-7", d); np_free(&r); }
+    { np_result r; char *v[] = { "-run", ac, 0 }; if (prod(v, &r)) die("run"); char d[80]; snprintf(d, sizeof d, "rc=%d stdout=%zu", r.rc, r.outn); check(r.rc == 7 && !r.outn, "run-prunes.executes-7", d); np_free(&r); }
+    { int ra = compile3("-O0", a0, ac, 0), rb = compile3("-O0", b0, bc, 0); size_t na = 0, nb = 0; char *x = ra || rb ? 0 : cx_read(a0, &na), *y = ra || rb ? 0 : cx_read(b0, &nb); fprintf(res, "INFO\tprune.route.placement.o0-image\trc A=%d B=%d byte-equal=%d (route-level placement; level not asserted)\n", ra, rb, x && y && na == nb && !memcmp(x, y, na)); free(x); free(y); }
+    fprintf(res, "SUMMARY\tpass=%d\tfail=%d\n", npass, nfail); fclose(res); printf("PRUNE_ROUTE_PLACEMENT\tpass=%d\tfail=%d\n", npass, nfail); return nfail ? 1 : 0;
+}
