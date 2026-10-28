@@ -355,6 +355,8 @@ coverage中旧1/4缺陷描述改为本候选实际4/1及明确合同冲突，没
 
 容器修复私有验证（未安装）：src/tapelink.c按ELF/Mach-O/COFF专用节定位载荷，检查字段/区间/目标及有界十进制长度，拒绝畸形归档成员。私有driver ec17e24f+显式ff696、包装身份7f9f52ec；六目标正常对象链接成功（Linux对象由产品生成，另外四目标产品入口具名未实现，改由经典参考生成后交私有驱动链接），本机镜像rc7。out/c43-tapelink-private-01/保留全部材料。新增tools/link-container-cases.cx边界11/0，out/c43-tapelink-boundaries-02.*；首轮归档夹具误用包装器ar入口，10项过后rc2，原01保留。
 
+诊断合同接续：100字节截断现在要求精确原因malformed unit object container；不再把有ELF头但节表缺失的对象归为无载荷。拒绝谓词收紧为rc>0且<128，负信号退出不能被当作拒绝。保留全部11项并在同私有驱动复跑out/c43-tapelink-malformed-02为10/1，唯一余红仍是tape落尾SIGSEGV。未改旧01或已装8147证据；此批仍返回1，不掩盖崩溃。
+
 原批out/c43-tapelink-malformed-01仍9/2：坏魔数及2000字节截断已拒；100字节截断改报malformed unit object container而旧断言要求carries no unit tape，保留该诊断合同差异；tape落尾仍SIGSEGV，未声称关闭。已装8147原批8/3不覆盖。
 
 批 `link-malformed-input`（tools/link-malformed-input.cx，8/11，红行即复现）：
