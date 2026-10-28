@@ -1,0 +1,50 @@
+/* tools/pp-differential.cx -- preprocessor differential: `unisacc -E` vs host `cc -E -P` (declared oracle, identity
+ * recorded) on macro and conditional corner cases; whitespace is not part of the contract, so both outputs are
+ * compared with every space/tab/newline removed and `#`-lines dropped. A fixture also carries a hand-written literal
+ * for its most important line so a row is never vacuous (host and product must both contain it).
+ *   sh ./unisacc.com tools/pp-differential.cx -- ROOT ABS_OUT HOST_CC
+ * Fixtures: object/function macros with nested expansion; stringize (spaces, embedded quotes and backslashes); token
+ * paste into identifiers, numbers and with placemarkers; variadic macros incl. the `, ## __VA_ARGS__` extension;
+ * #if arithmetic (unsigned promotion, shifts, ?:, defined()); #elif chains and nesting; self-referential macros;
+ * function-like macro name without parentheses; empty arguments; #undef/#ifndef; a local header with include guard
+ * included twice; multi-line invocation and __LINE__ afterwards. __FILE__ is excluded (path spelling differs). */
+#pragma unisa use cxlib.netpack
+
+static char root[4096], outdir[4096], product[4400], hostcc[4096]; static int npass, nfail; static FILE *res;
+static void die(const char *s) { fprintf(stderr, "pp-differential: REFUSE %s errno=%d\n", s, errno); exit(2); }
+static void path(char *p, size_t cap, const char *a, const char *b) { int n = snprintf(p, cap, "%s/%s", a, b); if (n < 0 || (size_t)n >= cap) die("path"); }
+static void saved(const char *p, const char *s, size_t n) { int f = open(p, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600); if (f < 0) die("exclusive create"); while (n) { ssize_t k = write(f, s, n); if (k <= 0) die("write"); s += k; n -= (size_t)k; } if (close(f)) die("close"); }
+static void check(int ok, const char *fx, const char *label, const char *detail) { fprintf(res, "%s\tpp.differential.%s.%s\t%s\n", ok ? "PASS" : "FAIL", fx, label, detail); printf("%s\t%s.%s\n", ok ? "PASS" : "FAIL", fx, label); if (ok) npass++; else nfail++; }
+static int runin(char *const argv[], np_result *r) { char why[1024]; return np_run(argv, outdir, 0, 20, r, why, sizeof why); }
+/* drop `#` lines and every whitespace byte */
+static char *squash(const char *s, size_t n, size_t *on) { char *o = malloc(n + 1); if (!o) die("alloc"); size_t k = 0; int bol = 1; for (size_t i = 0; i < n; i++) { char c = s[i]; if (bol && c == '#') { while (i < n && s[i] != '\n') i++; bol = 1; continue; } bol = c == '\n'; if (c == ' ' || c == '\t' || c == '\n' || c == '\r') continue; o[k++] = c; } o[k] = 0; *on = k; return o; }
+static int contains(const char *h, const char *n) { return strstr(h, n) != 0; }
+
+int main(int argc, char **argv) {
+    if (argc != 4 || !realpath(argv[1], root) || argv[2][0] != '/' || !realpath(argv[3], hostcc)) { fputs("usage: ROOT ABS_OUT HOST_CC\n", stderr); return 2; }
+    snprintf(outdir, sizeof outdir, "%s", argv[2]); if (mkdir(outdir, 0700)) die("new out dir must be absent"); path(product, sizeof product, root, "unisacc.com");
+    char rp[4400]; path(rp, sizeof rp, outdir, "results.tsv"); res = fopen(rp, "wbx"); if (!res) die("results");
+    { size_t n; char *b = cx_read(product, &n); if (!b) die("product"); char h[65]; cx_sha256_hex(b, n, h); free(b); np_result r; char *vv[] = { hostcc, "--version", 0 }; char ver[200] = "-"; if (!runin(vv, &r)) { size_t k = 0; while (k < r.outn && r.out[k] != '\n' && k < 199) { ver[k] = r.out[k]; k++; } ver[k] = 0; np_free(&r); } fprintf(res, "IDENTITY\tcandidate=%s\nORACLE\thost_cc=%s\toracle_id=%s\n", h, hostcc, ver); }
+    { char hp[4400]; path(hp, sizeof hp, outdir, "guard.h"); const char *H = "#ifndef GUARD_H\n#define GUARD_H\nint from_header=1;\n#endif\n"; saved(hp, H, strlen(H)); }
+    struct { const char *name, *src, *lit; } fx[] = {
+        { "macros-nested", "#define A 1\n#define B(x) (x+A)\n#define F(x) x\n#define G F(\n#define SELF SELF+1\n#define NOPAREN(x) x\nint v=B(2);int nested=G 7);int self=SELF;int bare=NOPAREN;int e=F();\n", "intv=(2+1);intnested=7;intself=SELF+1;intbare=NOPAREN;inte=;" },
+        { "stringize", "#define STR(x) #x\n#define XSTR(x) STR(x)\n#define N 42\nconst char*a=STR(hello   world);const char*b=STR(\"q\\\"t\");const char*c=STR(N);const char*d=XSTR(N);const char*e=STR( lead );\n", "constchar*a=\"helloworld\";constchar*b=\"\\\"q\\\\\\\"t\\\"\";constchar*c=\"N\";constchar*d=\"42\";constchar*e=\"lead\";" },
+        { "paste", "#define CAT(a,b) a##b\n#define XCAT(a,b) CAT(a,b)\n#define ONE 1\nint CAT(va,r)=CAT(1,2);int h=CAT(0x,1F);int CAT(,alone)=3;int x=XCAT(ONE,ONE);int y=CAT(ONE,ONE);\n", "intvar=12;inth=0x1F;intalone=3;intx=11;inty=ONEONE;" },
+        { "variadic", "#define VA(...) f(__VA_ARGS__)\n#define VA2(fmt,...) g(fmt,##__VA_ARGS__)\n#define CNT(...) h(0,__VA_ARGS__)\nint q=VA(1,2,3);int z=VA2(\"x\");int z2=VA2(\"x\",9);int z3=VA();int z4=CNT(5);\n", "intq=f(1,2,3);intz=g(\"x\");intz2=g(\"x\",9);intz3=f();intz4=h(0,5);" },
+        { "if-arith", "#define A 1\n#if -1 > 0u\nint uns=1;\n#else\nint uns=0;\n#endif\n#if (1<<3)==8 && (A ? 7 : 9)==7 && defined(A) && !defined A_NOT && 7/2==3 && -7%3==-1\nint ar=1;\n#endif\n#if 0x10 == 16 && 010 == 8 && 'A' == 65\nint num=1;\n#endif\n#if 1 || (1/0)\nint sc=1;\n#endif\n", "intuns=1;intar=1;intnum=1;intsc=1;" },
+        { "elif-nesting", "#define L 2\n#if L==1\nint s=1;\n#elif L==2\n# if defined(L)\nint s=22;\n# else\nint s=20;\n# endif\n#elif L==3\nint s=3;\n#else\nint s=0;\n#endif\n#ifdef L\n#undef L\n#endif\n#ifndef L\nint gone=1;\n#endif\n#if defined L\nint back=1;\n#else\nint back=0;\n#endif\n", "ints=22;intgone=1;intback=0;" },
+        { "include-guard", "#include \"guard.h\"\n#include \"guard.h\"\nint after=2;\n", "intfrom_header=1;intafter=2;" },
+        { "multiline-line", "#define ADD(a,b) ((a)+(b))\nint m=ADD(1,\n2);\nint l=__LINE__;\nint s=__STDC__;\nint v=__STDC_VERSION__>=199901L;\n", "intm=((1)+(2));intl=4;ints=1;intv=199901L>=199901L;" },
+    };
+    int nfx = (int)(sizeof fx / sizeof *fx);
+    for (int i = 0; i < nfx; i++) { char c[64], ui[64], gi[64]; snprintf(c, sizeof c, "%s.c", fx[i].name); snprintf(ui, sizeof ui, "%s.u.i", fx[i].name); snprintf(gi, sizeof gi, "%s.g.i", fx[i].name); char p[4400]; path(p, sizeof p, outdir, c); saved(p, fx[i].src, strlen(fx[i].src));
+        np_result u, g; char *uv[] = { "sh", product, "-E", c, 0 }, *gv[] = { hostcc, "-E", "-P", "-std=c99", c, 0 };
+        if (runin(uv, &u)) { check(0, fx[i].name, "product-E", "transport"); continue; } if (runin(gv, &g)) { check(0, fx[i].name, "host-E", "transport"); np_free(&u); continue; }
+        char d[200]; snprintf(d, sizeof d, "product rc=%d stderr=%zu; host rc=%d stderr=%zu", u.rc, u.errn, g.rc, g.errn); check(!u.rc && !g.rc, fx[i].name, "both-rc0", d);
+        path(p, sizeof p, outdir, ui); saved(p, u.out, u.outn); path(p, sizeof p, outdir, gi); saved(p, g.out, g.outn);
+        size_t un, gn; char *us = squash(u.out, u.outn, &un), *gs = squash(g.out, g.outn, &gn); size_t first = 0; while (first < un && first < gn && us[first] == gs[first]) first++;
+        snprintf(d, sizeof d, "squashed %zu/%zu bytes, first difference at %zu: product=%.40s host=%.40s", un, gn, first, us + first, gs + first); check(un == gn && !memcmp(us, gs, un), fx[i].name, "squashed-equal", d);
+        snprintf(d, sizeof d, "literal in product=%d host=%d", contains(us, fx[i].lit), contains(gs, fx[i].lit)); check(contains(us, fx[i].lit) && contains(gs, fx[i].lit), fx[i].name, "hand-literal", d);
+        free(us); free(gs); np_free(&u); np_free(&g); }
+    fprintf(res, "SUMMARY\tpass=%d\tfail=%d\n", npass, nfail); fclose(res); printf("PP_DIFFERENTIAL\tpass=%d\tfail=%d\n", npass, nfail); return nfail ? 1 : 0;
+}
