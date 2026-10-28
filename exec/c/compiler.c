@@ -817,7 +817,6 @@ int main(int argc, char **argv) {
        the key starts with a NUL byte, `n` is the key length WITHOUT a NUL, and
        the value is the path with no terminator.  It is only meaningful when E2
        reads it, so nothing else has to change.  [N17b prerequisite] */
-    { Buf srcbuf={0}; if (src) argbytes(&srcbuf,src); }
     srcres.n=0; if (src) argbytes(&srcres,src);
     ARGRESOURCE(NRI,"\0cli/source",srcres); NRI++;
     ARGRESOURCE(NRI,"\0cli/quote-dir",quotedir); NRI++;
