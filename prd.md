@@ -154,6 +154,8 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 <a id="work-tree"></a>
 ### 思维树
 
+**链接容器当前刀：** 1950138bd5/2fe209f591已入main：ELF/Mach-O/COFF专用节读取、有界字段/载荷长度及目标一致性；私有driver ec17e24f+PCff696六目标正常对象链接通过、新增边界11/0。原畸形批在精确容器诊断断言及正退出码约束下10/1，仅余tape落尾SIGSEGV；原9/2及已装8147的8/3均保留。未安装此刀。下一步落尾模型规则审查与容器候选构造，不能用私有通过替代已装资格。
+
 **当前已装产品（FIFO，2026-10-28）：** 8147f2e7/record c493b971，源b2007a76/冻结ab7fbdc810，prepare/finish两阶段安装完成，旧e955备份out/c43-fifo-install-01/。候选格式68/0、直接内嵌模型五项通过；安装后smoke16/0，FIFO已装入口rc1具名拒绝且空stdout。安装收据d9326852。以下e955及“未安装”段是过程历史。下一步新产品受影响模块/ABI/诊断与完整发布覆盖；开发安装不授完整或外国宿主资格。
 
 **FIFO 构造当前节点：** 冻结ab7fbdc810于仓外unisacc-epoch-fifo-ab7fbdc810，SID b2007a76；context61d040c6及tool-gen已完成。固定两处源码差异核验通过，五切片与APE8147f2e7已实际构造，复用PCff696；native identity-helper已写候选来源记录。启动/已装仍e955；下一步候选格式/行为/材料复核和安装，不将构造记为产品通过。
@@ -377,6 +379,8 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 
 <a id="memory-palace"></a>
 ### 记忆宫殿
+
+**链接私有证据：** out/c43-tapelink-driver-01.elf ec17e24f，wrapper7f9f52ec，显式PCff696；out/c43-tapelink-private-01含六目标对象/镜像（四外国对象由经典参考生成，未外国执行）；boundaries-02为11/0，malformed-02为10/1。容器代码已提交，落尾仍红；当前安装身份仍以下8147。
 
 **当前FIFO安装身份：** product8147f2e72dafeb6a0c367398a3eafff2c1b8c5c555e00eee9018cabf86abd63e，record c493b97153c6a3f363bc5df2c0bb36e6c85a8f7a5364b259665fd8ed648d1be9，installed.tsv d932685226e4e4475a7da1ca2c682ee5e33ecb0c443ce3fabeeca243294a1df4。out/c43-fifo-install-01保留e955备份；smoke16/0与已装FIFO拒绝日志out/c43-fifo-installed-*。下述e955身份与未安装语句仅为历史。
 
