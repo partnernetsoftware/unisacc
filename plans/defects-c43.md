@@ -107,3 +107,13 @@ main.o、main.o none.a均rc1并具名used；m2.o B.a A.a具名inner且rc1；三�
 19. `a[1.5]` — 6.5.2.1p1 下标须为整型。
 20. `int a19(void){ return a18(); }`（a18 返回 void）— 6.8.6.4p1。
 21. `const int c; int *p = &c;` — 6.7.8p11 丢弃限定符。
+
+### c.negative 第四轮（2026-10-28 18:0x，声明层）：声明层覆盖良好，再添两处（批现 20/43，漏检累计 23）
+
+22. `void b15(void x){ }` — 6.7.5.3p10。
+23. `static extern int b16;` — 6.7.1p2 多个存储类。
+位域宽度/类型、VLA 存储、register 取址、函数数组/返回数组、`long long long`、`unsigned float`、不完整类型、union 多初始化器等 18 项均已正确拒绝。
+
+## 观察（有效程序被拒，低）：`int vla_fs[(int)1.0 + 0];`
+
+- 文件作用域数组大小为整型常量表达式（C99 6.6p6 允许把浮点常量强制转换为整型），gcc 接受；产品拒绝（`-c -b`，rc 1）。属 E3 常量折叠对强制转换的覆盖缺口；非安全问题。
