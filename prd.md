@@ -368,7 +368,7 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 <a id="memory-palace"></a>
 ### 记忆宫殿
 
-**CX新源构造准备（2026-10-28）：** af8429d0cf仓外冻结根unisacc-epoch-cxpack-af8429d0cf，初始与宿主独立identity-helper均测SID6e7375f9；context cce326a8已PREPARED，启动产品仍4c2831c3。材料作业、包、候选与安装尚未开始；下一步在重活窗释放后核context并执行受影响构造。收据见plans/defects-c43.md。
+**CX新源构造（2026-10-28）：** af8429d0cf仓外冻结根unisacc-epoch-cxpack-af8429d0cf，初始与宿主独立identity-helper均测SID6e7375f9；context cce326a8复验通过，启动产品仍4c2831c3。tool-gen及E1/E2/E3生成四项实跑rc0并有收据；三份JSON与sizeof纪元哈希一致。其余31份生成内容尚待执行比较，包、候选与安装尚未开始；下一步在重活窗释放后续构造，再按完整依赖比较决定复用。收据见plans/defects-c43.md。
 
 **现行开发安装（2026-10-28）：** 4c2831c3/820b9ae4，冻结源8390b60b；link-candidate-check与link-candidate-install的prepare/finish均实跑，finish重新核材料、暂存产品/记录及旧备份后替换并fsync。installed.tsv SHA13a9f8102b7c018cffbce91a592fcd248fca0f392ca39306017a872ae57a67d2；原3a5b保留。安装后16/0 smoke，静态链接拒绝修复有效；完整发布资格未授。以下sizeof/aggregate记录为来源历史，不再代表现行产品。
 

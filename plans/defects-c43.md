@@ -39,6 +39,12 @@ gen-shared-e1、gen-shared-e3四项，全部rc0并生成source-package-job-v1收
 材料及收据在out/epoch-context-01/jobs/。尚余31项生成JSON未执行；未启动tbl/net，
 应先完成生成内容比较，再按依赖及复用合同决定重建范围，不把四项材料计作功能PASS。
 
+首三份JSON与`unisacc-epoch-sizeof-e5bade1851/out/epoch-context-01/jobs`同名材料
+实测SHA256一致：E1=5392af7e38e4e22062664105563fce385fbfbf338716d0fa9bbe82b6867dd396，
+E2=087a3220858653b2a30590c365f03f6fff64aa8f648eff1ab1293389a60a73e7，
+E3=6dd90ec5c6f799a50617cab36d9c39c595d022e44d8474c29365d7e99e7fc168。
+该局部比较不替代剩余31项及完整复用准入。
+
 ## link.undef-function-refusal — 未定义外部函数链接成崩溃镜像（开放）
 
 2026-10-28 cdx 实测更新：共享3a5b完整原批为1 PASS/4 FAIL，收据
