@@ -7,6 +7,7 @@
  *           prop.meta.forward-reverse, prop.meta.comment-whitespace, prop.meta.identifier-rename
  *   bound : prop.bound.loop-0-1-255-256, prop.bound.int64-arith, prop.bound.div-zero, prop.bound.tape-integer-range
  *   tu    : prop.meta.single-vs-multi-tu (two TUs, static name isolation), prop.det.jobs-invariance (UNISA_JOBS 1 vs 4)
+ *   lower : prop.det.stream-replay.lower (stream6 beside STREAM5_COM), prop.bound.frame-256 (lnx/x86_64 executed; arm64 bytes UNVERIFIED)
  * Subject: the installed product ROOT/unisacc.com (images via `-b TARGET -o`, tapes via `-S`), the E4 and prune
  * stream containers. Inputs are inline (the loop program of tests/pending/properties.cx and its variants, tapes).
  * Non-vacuity guards: determinism rows compile in separate processes and, for no-path-or-time, a different
@@ -166,6 +167,32 @@ static void group_tu(void) {
       else { check(same_file(t1, t4), "prop.det.jobs-invariance", "two-TU.tape-jobs1-vs-jobs4", "byte equality"); check(same_file(i1, i4), "prop.det.jobs-invariance", "two-TU.image-jobs1-vs-jobs4", "byte equality"); check(same_file(i1, mi), "prop.det.jobs-invariance", "two-TU.image-jobs1-vs-default", "byte equality with the default job count"); } }
 }
 
+/* lower stream replay on the stream-lower.cx fixtures, and the >256-byte frame program */
+static const char *lower_head = "@target lnx/x86_64\n@data -\n@src_os lnx\n@data_len 168\n@bss 0\n@relocs -\n_start:\nspinit rsp\nargsave 304, 312, true\n";
+static const char *frame_c =
+    "#include <stdio.h>\nint f(int n){char buf[300];int i,s=0;for(i=0;i<300;i++)buf[i]=(char)(i%7);for(i=0;i<300;i++)s+=buf[i];return s+n;}\n"
+    "int g(void){long big[40];int i;for(i=0;i<40;i++)big[i]=i*3;return (int)(big[39]+big[0]);}\nint main(void){printf(\"%d %d\\n\",f(1),g());return 0;}\n";
+static void group_lower(void) {
+    char stream6[4400]; { char dir[4096]; snprintf(dir, sizeof dir, "%s", stream5); char *s = strrchr(dir, '/'); if (!s) die("stream dir"); *s = 0; path(stream6, sizeof stream6, dir, "unisacc-stream6.com"); }
+    { char h6[65]; if (!shafile(stream6, h6)) die("stream6 missing beside stream5"); fprintf(res, "IDENTITY\tstream6=%s\n", h6); }
+    struct { const char *leaf, *in, *tail; } fx[3] = { { "literal", "_start:\n  imm r0, 7\n  ret\n", "imm rax, 7\nret form=x86\n" },
+        { "arith", "_start:\n  imm r0, 7\n  imm r1, 5\n  add64 r0, r0, r1\n  ret\n", "imm rax, 7\nimm rdi, 5\nadd64 rax, rax, rdi form=x86\nret form=x86\n" },
+        { "opaque", "_start:\n  nonsense r0, r1\n  ret\n", "nonsense r0, r1\nret form=x86\n" } };
+    char *env[] = { "UNISA_ATTRIBUTES=", "UNISA_MAXSTEPS=200000000", 0 };
+    for (int i = 0; i < 3; i++) { char tp[4400], want[1024], lab[160]; snprintf(tp, sizeof tp, "%s/%s.tape", work, fx[i].leaf); saved(tp, fx[i].in, strlen(fx[i].in)); snprintf(want, sizeof want, "%s%s", lower_head, fx[i].tail);
+        np_result a, b; char *v[] = { stream6, tp, tp, inc, 0 };
+        if (run(v, env, 12, &a) || run(v, env, 12, &b)) { row("NOT_RUN", "prop.det.stream-replay.lower", fx[i].leaf, "stream6 did not run"); continue; }
+        snprintf(lab, sizeof lab, "%s.replay-byte-identical", fx[i].leaf); check(!a.rc && !b.rc && a.outn == b.outn && !memcmp(a.out, b.out, a.outn), "prop.det.stream-replay.lower", lab, "two runs, byte equality");
+        snprintf(lab, sizeof lab, "%s.equals-fixture-literal", fx[i].leaf); check(exact(&a, want), "prop.det.stream-replay.lower", lab, "stream-lower.cx literal"); np_free(&a); np_free(&b); }
+    /* frame-256: executed on lnx/x86_64; the other five targets only compile here (arm64 encodings stay UNVERIFIED) */
+    { char src[4400], img[4400]; path(src, sizeof src, work, "frame.c"); saved(src, frame_c, strlen(frame_c)); np_result r;
+      for (int t = 0; t < 6; t++) { snprintf(img, sizeof img, "%s/frame-%s", work, tslug(t)); char lab[160]; snprintf(lab, sizeof lab, "%s.compile", tslug(t));
+        if (compile(src, "-O2", targets[t], img, noenv, &r) || r.rc) { row("NOT_RUN", "prop.bound.frame-256", lab, "compile failed"); np_free(&r); continue; } np_free(&r);
+        if (t == 0) { char *v[] = { img, 0 }; if (run(v, noenv, 3, &r)) row("NOT_RUN", "prop.bound.frame-256", "lnx-x86_64.run", "image did not run"); else { check(exact(&r, "898 117\n"), "prop.bound.frame-256", "lnx-x86_64.300-byte-and-320-byte-frames", "literal 898 117"); np_free(&r); } }
+        else check(1, "prop.bound.frame-256", lab, "rc 0, image written (encoding bytes not checked)"); }
+      fprintf(res, "UNVERIFIED\tprop.bound.frame-256\tarm64.encoding-bytes\tI-22 addressing bytes not checked by this tool\n"); }
+}
+
 static void group_bound(void) {
     np_result r; char src[4400], img[4400]; path(src, sizeof src, work, "forward.c"); write_program(src, fwd); path(img, sizeof img, work, "forward.img");
     if (compile(src, "-O0", targets[0], img, noenv, &r) || r.rc) die("forward compile"); np_free(&r);
@@ -209,14 +236,14 @@ static void group_bound(void) {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 6 || !realpath(argv[1], root) || !realpath(argv[2], stream4) || !realpath(argv[3], stream5) || argv[4][0] != '/') { fputs("usage: ROOT STREAM4_COM STREAM5_COM ABS_OUT det|meta|bound|tu\n", stderr); return 2; }
-    const char *group = argv[5]; if (strcmp(group, "det") && strcmp(group, "meta") && strcmp(group, "bound") && strcmp(group, "tu")) die("group");
+    if (argc != 6 || !realpath(argv[1], root) || !realpath(argv[2], stream4) || !realpath(argv[3], stream5) || argv[4][0] != '/') { fputs("usage: ROOT STREAM4_COM STREAM5_COM ABS_OUT det|meta|bound|tu|lower\n", stderr); return 2; }
+    const char *group = argv[5]; if (strcmp(group, "det") && strcmp(group, "meta") && strcmp(group, "bound") && strcmp(group, "tu") && strcmp(group, "lower")) die("group");
     snprintf(outdir, sizeof outdir, "%s", argv[4]); if (mkdir(outdir, 0700) && errno != EEXIST) die("out dir");
     path(work, sizeof work, outdir, group); if (mkdir(work, 0700)) die("group dir must be absent");
     path(inc, sizeof inc, root, "include"); path(bound, sizeof bound, root, "tools/bound"); path(product, sizeof product, root, "unisacc.com");
     char rp[4400]; snprintf(rp, sizeof rp, "%s/results-%s.tsv", outdir, group); res = fopen(rp, "wbx"); if (!res) die("results exclusive");
     { char hp[65], h4[65], h5[65]; if (!shafile(product, hp) || !shafile(stream4, h4) || !shafile(stream5, h5)) die("identity"); fprintf(res, "IDENTITY\tproduct=%s\tstream4=%s\tstream5=%s\n", hp, h4, h5); }
-    if (!strcmp(group, "det")) group_det(); else if (!strcmp(group, "meta")) group_meta(); else if (!strcmp(group, "tu")) group_tu(); else group_bound();
+    if (!strcmp(group, "det")) group_det(); else if (!strcmp(group, "meta")) group_meta(); else if (!strcmp(group, "tu")) group_tu(); else if (!strcmp(group, "lower")) group_lower(); else group_bound();
     fprintf(res, "SUMMARY\tgroup=%s\tpass=%d\tfail=%d\tvacuous=%d\tnot_run=%d\n", group, npass, nfail, nvac, nnotrun); fclose(res);
     printf("PROPERTY_CASES\tgroup=%s\tpass=%d\tfail=%d\tvacuous=%d\tnot_run=%d\n", group, npass, nfail, nvac, nnotrun);
     return nfail || nvac || nnotrun ? 1 : 0;
