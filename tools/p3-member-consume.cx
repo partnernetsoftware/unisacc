@@ -1,0 +1,444 @@
+#!/usr/bin/env -S unisacc.com -run
+/* P3 member consume formal leaf: live .cx recalculation of D->M, emb==PC04,
+ * inflate(M) vs job via qprefixcheck compact_q + UNINETB1 bdecode (expanded Q eq).
+ * Keeps 34->32 dedupe and five NOT_RUN entries. No hostseed payload-trust edit. */
+#include "../exec/c/codec.h"
+#include "../exec/c/packagefooter.h"
+#pragma unisa use cxlib.netpack
+#include <limits.h>
+
+
+static void cleanup(void) {}
+static void die(const char *kind, const char *msg) {
+  fflush(stdout);
+  if (msg && *msg) fprintf(stderr, "%s: %s\n", kind, msg); else fprintf(stderr, "%s\n", kind);
+  exit(kind && !strcmp(kind,"AssertionError") ? 1 : 2);
+}
+static const char *OPN[] = { "ADV", "MARK", "JUMP", "LDI", "COPYW", "ALU", "ALUI", "CMP", "CMPI", "RLD", "LDX", "STX",
+    "OUT", "OUTW", "COPY", "COPYT", "SPAN", "SPANT", "SPAN2", "OLAST", "ODROP", "OLEN", "OCUT", "ORES", "OFILL", "OCLR",
+    "OSEL", "SETOT", "XATTR", "PUSH", "POP", "INTERN", "BLOBSAVE", "INPUSH", "INPUSHX", "INPUSHXE", "INPOP", "SBCLR",
+    "SBOUT", "SBSPAN", "SBBLOB", "SBINTERN", "SBSAVE", "SBFIND", "BLEN", "BYTE", "XLEN", "DIVMOD10", "SWAP", "ACCEPT",
+    "REJECT", "A64", "A64I", "C64", "C64U", "INC" };
+static const char *OPK[] = { "", "r", "r", "ri", "rr", "arrr", "arri", "rr", "ri", "r", "rri", "rir", "i", "r", "", "",
+    "r", "r", "rr", "", "", "r", "rr", "ri", "rri", "", "i", "r", "r", "g", "", "rrr", "rrr", "r", "r", "rr", "", "", "i",
+    "rr", "r", "r", "r", "r", "rr", "r", "r", "r", "", "", "s", "arrr", "arri", "rr", "rr", "r" };
+#define NOPS ((int)(sizeof OPN / sizeof OPN[0]))
+static int code(const char *n) { int k; for (k = 0; k < NOPS; k++) if (!strcmp(OPN[k], n)) return k; return -1; }
+static int arity(int op) { return (int)strlen(OPK[op]); }
+
+/* ---- byte buffers ---- */
+typedef struct { char *p; size_t n, cap; } Buf;
+static void put(Buf *b, const char *s, size_t n) {
+    if (b->n + n + 1 > b->cap) {
+        size_t c = b->cap ? b->cap : 256; char *g;
+        while (c < b->n + n + 1) c *= 2;
+        if (!(g = realloc(b->p, c))) die("MemoryError", 0);
+        b->p = g; b->cap = c;
+    }
+    if (n) { size_t i=0; while(i<n){ b->p[b->n+i]=s[i]; i++; } }
+    b->n += n; b->p[b->n] = 0;
+}
+static void puts_(Buf *b, const char *s) { put(b, s, strlen(s)); }
+static void putll(Buf *b, long long v) { char t[32]; int zn=snprintf(t, sizeof t, "%lld", v); if(zn<0||(size_t)zn>=sizeof t) die("ValueError","putll"); puts_(b, t); }
+
+/* ---- Q records: words, integers, decode_q (exec/c/pack.py) ---- */
+static int isws(int c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'; }
+/* bytes.split(): word i of [s, s+n); returns the count, words in w/wl (cap max) */
+static int split(const char *s, size_t n, const char **w, size_t *wl, int max) {
+    size_t i = 0; int k = 0;
+    while (i < n) {
+        size_t j;
+        while (i < n && isws((unsigned char)s[i])) i++;
+        if (i >= n) break;
+        j = i; while (j < n && !isws((unsigned char)s[j])) j++;
+        if (k < max) { w[k] = s + i; wl[k] = j - i; }
+        k++; i = j;
+    }
+    return k;
+}
+/* int(word): [+-]?digits with single '_' between digits.  0 not an integer (ValueError), 1 in int64, 2 out of range
+   (value saturated, so every range check the .py makes on it fails the same way) */
+static int pyint(const char *s, size_t n, long long *v) {
+    size_t i = 0; int neg = 0, big = 0, digits = 0; unsigned long long u = 0;
+    if (i < n && (s[i] == '+' || s[i] == '-')) neg = s[i++] == '-';
+    if (i >= n) return 0;
+    for (; i < n; i++) {
+        if (s[i] == '_') { if (!digits || i + 1 >= n || s[i + 1] == '_' || s[i + 1] < '0' || s[i + 1] > '9') return 0; continue; }
+        if (s[i] < '0' || s[i] > '9') return 0;
+        digits = 1;
+        if (u > (ULLONG_MAX - 9) / 10) big = 1; else u = u * 10 + (unsigned)(s[i] - '0');
+    }
+    if (big || (!neg && u > 9223372036854775807ULL) || (neg && u > 9223372036854775808ULL)) {
+        *v = neg ? LLONG_MIN : LLONG_MAX; return 2;
+    }
+    *v = neg ? (long long)(0 - u) : (long long)u;
+    return 1;
+}
+typedef struct { long long *v; size_t nv; int *off; int na; } Seq;   /* action i = v[off[i] .. off[i+1]) */
+static const char *QERR;
+static int seq_add(Seq *q, const long long *a, int len) {
+    q->v = realloc(q->v, (q->nv + (size_t)len + 1) * sizeof *q->v);
+    q->off = realloc(q->off, ((size_t)q->na + 2) * sizeof *q->off);
+    if (!q->v || !q->off) die("MemoryError", 0);
+    if (!q->na) q->off[0] = 0;
+    { size_t i=0; while(i<(size_t)len){ q->v[q->nv+i]=a[i]; i++; } }
+    q->nv += (size_t)len; q->na++; q->off[q->na] = (int)q->nv;
+    return 0;
+}
+/* _actions(flat, count) appended to q; 0 or -1 with QERR */
+static int actions(const char **w, const size_t *wl, int nw, long long count, Seq *q) {
+    int at = 0, k; long long c;
+    long long tmp[16];
+    if (count < 0 || count > nw) { QERR = "bad Q action count"; return -1; }
+    for (c = 0; c < count; c++) {
+        long long op; int ok, end;
+        if (at >= nw) { QERR = "bad Q opcode or truncated action"; return -1; }
+        ok = pyint(w[at], wl[at], &op);
+        if (!ok) { QERR = "invalid literal for int()"; return -1; }
+        if (op < 0 || op >= NOPS) { QERR = "bad Q opcode or truncated action"; return -1; }
+        end = at + 1 + arity((int)op);
+        if (end > nw) { QERR = "truncated Q operands"; return -1; }
+        for (k = at; k < end; k++) {
+            int r = pyint(w[k], wl[k], &tmp[k - at]);
+            if (!r) { QERR = "invalid literal for int()"; return -1; }
+            if (r == 2) { QERR = "Q operand overflow"; return -1; }
+        }
+        seq_add(q, tmp, end - at); at = end;
+    }
+    if (at != nw) { QERR = "extra Q operands"; return -1; }
+    return 0;
+}
+#define MAXW 4096
+static void freeseqs(Seq *s, int n) { int i; for (i = 0; i < n; i++) { free(s[i].v); free(s[i].off); } free(s); }
+/* decode_q(lines): n Seq (calloc'd), or 0 with QERR */
+static Seq *decode_q(const char *const *ls, const size_t *ll, int n) {
+    Seq *d = calloc((size_t)(n ? n : 1), sizeof *d); int qi, wcap = MAXW;
+    const char **w = malloc((size_t)wcap * sizeof *w); size_t *wl = malloc((size_t)wcap * sizeof *wl);
+    if (!d || !w || !wl) die("MemoryError", 0);
+    for (qi = 0; qi < n; qi++) {
+        int nw = split(ls[qi], ll[qi], w, wl, wcap);
+        if (nw > wcap) {   /* a long record: grow the word table and split again */
+            wcap = nw; w = realloc(w, (size_t)wcap * sizeof *w); wl = realloc(wl, (size_t)wcap * sizeof *wl);
+            if (!w || !wl) die("MemoryError", 0);
+            nw = split(ls[qi], ll[qi], w, wl, wcap);
+        }
+        if (nw < 1) { QERR = "truncated Q record"; goto bad; }
+        if (wl[0] == 1 && w[0][0] == 'Q') {
+            long long cnt;
+            if (nw < 2) { QERR = "truncated Q record"; goto bad; }
+            if (!pyint(w[1], wl[1], &cnt)) { QERR = "invalid literal for int()"; goto bad; }
+            { int k; for (k = 2; k < nw; k++) { long long t; if (!pyint(w[k], wl[k], &t)) { QERR = "invalid literal for int()"; goto bad; } } }
+            if (actions(w + 2, wl + 2, nw - 2, cnt, &d[qi])) goto bad;
+        } else if (wl[0] == 1 && w[0][0] == 'C') {
+            long long ref, prefix, tail; int k;
+            if (nw < 4) { QERR = nw < 3 ? "not enough values to unpack" : "not enough values to unpack"; goto bad; }
+            if (!pyint(w[1], wl[1], &ref) || !pyint(w[2], wl[2], &prefix) || !pyint(w[3], wl[3], &tail)) { QERR = "invalid literal for int()"; goto bad; }
+            if (!(0 <= ref && ref < qi) || !(0 < prefix && prefix <= d[ref].na)) { QERR = "bad Q prefix reference"; goto bad; }
+            for (k = 4; k < nw; k++) { long long t; if (!pyint(w[k], wl[k], &t)) { QERR = "invalid literal for int()"; goto bad; } }
+            for (k = 0; k < (int)prefix; k++) seq_add(&d[qi], d[ref].v + d[ref].off[k], d[ref].off[k + 1] - d[ref].off[k]);
+            if (actions(w + 4, wl + 4, nw - 4, tail, &d[qi])) goto bad;
+        } else { QERR = "unknown Q tag"; goto bad; }
+    }
+    free(w); free(wl); return d;
+bad:
+    free(w); free(wl); freeseqs(d, n); return 0;
+}
+static int seq_eq(const Seq *a, const Seq *b) {
+    int i;
+    if (a->na != b->na || a->nv != b->nv) return 0;
+    if (!a->na) return 1;   /* an empty sequence never allocated off[] */
+    for (i = 0; i <= a->na; i++) if (a->off[i] != b->off[i]) return 0;
+    return !a->nv || !memcmp(a->v, b->v, a->nv * sizeof *a->v);
+}
+
+/* ---- the action trie of compact_q: (parent node, action) -> child, each node keeps the first sequence through it ---- */
+typedef struct { int parent; const long long *a; int len; int child; } Edge;
+static Edge *ET; static size_t ETN, ETC; static int *NODEQ; static int NNODE;
+static unsigned long long ehash(int parent, const long long *a, int len) {
+    unsigned long long h = 1469598103934665603ULL ^ (unsigned)parent; int i;
+    for (i = 0; i < len; i++) { h ^= (unsigned long long)a[i]; h *= 1099511628211ULL; h ^= h >> 29; }
+    return h ^ (unsigned long long)len;
+}
+static int efind(int parent, const long long *a, int len, size_t *slot) {
+    size_t i = (size_t)(ehash(parent, a, len) & (ETC - 1));
+    while (ET[i].child) {
+        if (ET[i].parent == parent && ET[i].len == len && !memcmp(ET[i].a, a, (size_t)len * sizeof *a)) return ET[i].child;
+        i = (i + 1) & (ETC - 1);
+    }
+    *slot = i; return 0;
+}
+static void trie_reset(size_t want) {
+    free(ET); free(NODEQ);
+    for (ETC = 1024; ETC < 2 * want + 2; ETC *= 2) ;
+    ET = calloc(ETC, sizeof *ET); NODEQ = malloc((want + 2) * sizeof *NODEQ);
+    if (!ET || !NODEQ) die("MemoryError", 0);
+    ETN = 0; NNODE = 1; NODEQ[0] = -1;   /* node 0: the root; child ids start at 1 */
+}
+
+/* bytes.splitlines(keepends=True) */
+static int splitlines(const char *s, size_t n, const char ***ls, size_t **ll) {
+    size_t i = 0, cap = 64; int k = 0;
+    *ls = malloc(cap * sizeof **ls); *ll = malloc(cap * sizeof **ll);
+    if (!*ls || !*ll) die("MemoryError", 0);
+    while (i < n) {
+        size_t j = i;
+        while (j < n && s[j] != '\n' && s[j] != '\r') j++;
+        if (j < n) { if (s[j] == '\r' && j + 1 < n && s[j + 1] == '\n') j += 2; else j++; }
+        if ((size_t)k == cap) { cap *= 2; *ls = realloc(*ls, cap * sizeof **ls); *ll = realloc(*ll, cap * sizeof **ll); if (!*ls || !*ll) die("MemoryError", 0); }
+        (*ls)[k] = s + i; (*ll)[k] = j - i; k++; i = j;
+    }
+    return k;
+}
+/* compact_q(data) as exec/c/pack.py: H/S bytes and the expanded QA stay exact; malloc'd result in *out */
+static void compact_q(const char *data, size_t n, Buf *out) {
+    const char **ls, **wires; size_t *ll, *wl, total = 0; int nl, i, qi, nq, nstr, start; Seq *dec, *back;
+    const char *hw[8]; size_t hl[8]; long long v; Buf cand = { 0, 0, 0 }, pool = { 0, 0, 0 }; size_t *poolat;
+    nl = splitlines(data, n, &ls, &ll);
+    if (!nl || data[n - 1] != '\n') die("ValueError", "truncated network");
+    if (split(ls[0], ll[0], hw, hl, 8) != 7 || hl[0] != 1 || hw[0][0] != 'N') die("ValueError", "bad network header");
+    if (!pyint(hw[2], hl[2], &v)) die("ValueError", "invalid literal for int()");
+    nq = v > INT_MAX ? INT_MAX : v < INT_MIN ? INT_MIN : (int)v;
+    if (!pyint(hw[4], hl[4], &v)) die("ValueError", "invalid literal for int()");
+    nstr = v > INT_MAX - 1 ? INT_MAX - 1 : v < INT_MIN ? INT_MIN : (int)v;
+    start = 1 + nstr;
+    if (nq <= 0 || nstr < 0 || (long long)start + nq > nl) die("ValueError", "bad network Q extent");
+    dec = decode_q(ls + start, ll + start, nq);
+    if (!dec) die("ValueError", QERR);
+    for (qi = 0; qi < nq; qi++) total += (size_t)dec[qi].na;
+    trie_reset(total);
+    wires = malloc((size_t)nq * sizeof *wires); wl = malloc((size_t)nq * sizeof *wl); poolat = malloc((size_t)nq * sizeof *poolat);
+    if (!wires || !wl || !poolat) die("MemoryError", 0);
+    for (qi = 0; qi < nq; qi++) {
+        Seq *s = &dec[qi]; int node = 0, ref = -1, prefix = 0, ai; size_t slot;
+        for (ai = 0; ai < s->na; ai++) {
+            int c = efind(node, s->v + s->off[ai], s->off[ai + 1] - s->off[ai], &slot);
+            if (!c) break;
+            node = c; ref = NODEQ[c]; prefix = ai + 1;
+        }
+        poolat[qi] = (size_t)-1;
+        if (prefix) {
+            size_t k;
+            cand.n = 0;
+            puts_(&cand, "C "); putll(&cand, ref); puts_(&cand, " "); putll(&cand, prefix); puts_(&cand, " "); putll(&cand, s->na - prefix);
+            for (k = (size_t)s->off[prefix]; k < s->nv; k++) { puts_(&cand, " "); putll(&cand, s->v[k]); }
+            puts_(&cand, "\n");
+            if (cand.n < ll[start + qi]) { poolat[qi] = pool.n; wl[qi] = cand.n; put(&pool, cand.p, cand.n); }
+        }
+        if (poolat[qi] == (size_t)-1) { wires[qi] = ls[start + qi]; wl[qi] = ll[start + qi]; }
+        node = 0;
+        for (ai = 0; ai < s->na; ai++) {
+            const long long *a = s->v + s->off[ai]; int len = s->off[ai + 1] - s->off[ai];
+            int c = efind(node, a, len, &slot);
+            if (!c) {
+                c = NNODE++; ET[slot].parent = node; ET[slot].a = a; ET[slot].len = len; ET[slot].child = c; ETN++;
+                NODEQ[c] = qi;
+            }
+            node = c;
+        }
+    }
+    for (qi = 0; qi < nq; qi++) if (poolat[qi] != (size_t)-1) wires[qi] = pool.p + poolat[qi];
+    back = decode_q(wires, wl, nq);
+    if (!back) die("ValueError", QERR);
+    for (qi = 0; qi < nq; qi++) if (!seq_eq(&back[qi], &dec[qi])) die("ValueError", "Q prefix round trip differs");
+    out->n = 0;
+    for (i = 0; i < start; i++) put(out, ls[i], ll[i]);
+    for (qi = 0; qi < nq; qi++) put(out, wires[qi], wl[qi]);
+    for (i = start + nq; i < nl; i++) put(out, ls[i], ll[i]);
+    freeseqs(dec, nq); freeseqs(back, nq); free(wires); free(wl); free(poolat); free(cand.p); free(pool.p); free(ls); free(ll);
+}
+
+/* ---- UNINETB1 binary records -> canonical text (exec/c/networkformat.py decode) ---- */
+static const unsigned char *BR; static size_t BN, BP;
+static void breq(int ok) { if (!ok) die("ValueError", "invalid binary network"); }
+static long long bint(void) {
+    unsigned long long u = 0; int k;
+    for (k = 0; k < 10; k++) {
+        unsigned c;
+        breq(BP < BN); c = BR[BP++]; breq(k != 9 || c <= 1);
+        u |= (unsigned long long)(c & 127) << (7 * k);
+        if (c < 128) { breq(k == 0 || c != 0); return (long long)((u >> 1) ^ (0 - (u & 1))); }
+    }
+    die("ValueError", "long varint"); return 0;
+}
+static void btag(char t) { breq(BP < BN && BR[BP] == (unsigned char)t); BP++; }
+static void bline(Buf *o, char t, const long long *v, size_t n, int space) {
+    size_t i; char c[2] = { t, 0 };
+    puts_(o, c); puts_(o, " ");
+    for (i = 0; i < n; i++) { if (i) puts_(o, " "); putll(o, v[i]); }
+    if (space) puts_(o, " ");
+    puts_(o, "\n");
+}
+static void bdecode(const unsigned char *raw, size_t n, Buf *o) {
+    long long head[6], ns, nq, nstr, i, j; Buf v = { 0, 0, 0 }; long long *vv; size_t vn, vcap = 64;
+    BR = raw; BN = n; BP = 0; o->n = 0;
+    vv = malloc(vcap * sizeof *vv); if (!vv) die("MemoryError", 0);
+#define VPUSH(x) do { if (vn == vcap) { vcap *= 2; vv = realloc(vv, vcap * sizeof *vv); if (!vv) die("MemoryError", 0); } vv[vn++] = (x); } while (0)
+    breq(n >= 8 && !memcmp(raw, "UNINETB1", 8)); BP = 8;
+    btag('N'); for (i = 0; i < 6; i++) head[i] = bint();
+    ns = head[0]; nq = head[1]; nstr = head[3];
+    breq(0 < ns && ns <= (long long)n && 0 < nq && nq <= (long long)n && 0 <= nstr && nstr <= (long long)n);
+    bline(o, 'N', head, 6, 0);
+    for (i = 0; i < nstr; i++) {
+        long long len;
+        btag('S'); len = bint(); breq(0 <= len && len <= (long long)(BN - BP));
+        puts_(o, "S ");
+        if (len) { static const char hx[] = "0123456789abcdef"; for (j = 0; j < len; j++) { char h[2]; h[0] = hx[BR[BP + j] >> 4]; h[1] = hx[BR[BP + j] & 15]; put(o, h, 2); } }
+        else puts_(o, "-");
+        puts_(o, "\n"); BP += (size_t)len;
+    }
+    for (i = 0; i < nq; i++) {
+        char t; long long act;
+        breq(BP < BN); t = (char)BR[BP++]; breq(t == 'Q' || t == 'C');
+        vn = 0;
+        if (t == 'Q') VPUSH(bint()); else { VPUSH(bint()); VPUSH(bint()); VPUSH(bint()); }
+        act = vv[vn - 1];
+        for (j = 0; j < act; j++) {
+            long long op = bint(); int k;
+            breq(0 <= op && op < NOPS); VPUSH(op);
+            for (k = 0; k < arity((int)op); k++) VPUSH(bint());
+        }
+        bline(o, t, vv, vn, t == 'Q' && vv[0] == 0);
+    }
+    for (i = 0; i < ns; i++) {
+        long long cnt;
+        btag('H'); vn = 0;
+        for (j = 0; j < 6; j++) VPUSH(bint());
+        cnt = vv[3];
+        if (vv[0] == 3) { long long e1 = bint(), e2 = bint(); VPUSH(e1); VPUSH(e2); for (j = 0; j < e2; j++) VPUSH(bint()); }
+        for (j = 0; j < 3 * cnt; j++) VPUSH(bint());
+        bline(o, 'H', vv, vn, vv[3] == 0);
+    }
+    breq(BP == BN);
+    free(vv); free(v.p);
+#undef VPUSH
+}
+
+/* ---- read_package (exec/c/packageformat.py): the package's Nets as canonical text ---- */
+typedef struct { Buf *m; int n; } Models;
+
+/* ---- formal leaf ---- */
+static int checks, failed;
+static char root[4096], ctx[4096], pc[4096], work[4096];
+static void ck(int ok, const char *s){checks++; if(!ok)failed++; printf("%s\tp3-member-consume.%s\n", ok?"PASS":"FAIL", s); if(!ok) die("AssertionError", s);}
+static void path(char *out, size_t cap, const char *a, const char *b){int n=snprintf(out,cap,"%s/%s",a,b); if(n<0||(size_t)n>=cap) die("ValueError", "path");}
+static unsigned char *slurp(const char *p, size_t *n){struct stat st; if(lstat(p,&st)||!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>134217728) die("ValueError","input"); FILE *f=fopen(p,"rb"); if(!f) die("OSError","open"); unsigned char *b=malloc((size_t)st.st_size); if(!b||fread(b,1,(size_t)st.st_size,f)!=(size_t)st.st_size) die("OSError","read"); fclose(f); *n=(size_t)st.st_size; return b;}
+static void hexsha(const void *b, size_t n, char out[65]){cx_sha256_hex(b,n,out);}
+static int parse_u(const unsigned char *s, size_t n, size_t *at, unsigned long *out){unsigned long v=0; size_t i=*at; if(i>=n||s[i]<'0'||s[i]>'9') return 0; while(i<n&&s[i]>='0'&&s[i]<='9'){if(v>(~0UL)/10)return 0; v=v*10+(unsigned)(s[i]-'0'); i++;} *at=i; *out=v; return 1;}
+
+typedef struct { long off, clen, rlen; uint32_t crc; } Memb;
+typedef struct { char route[96]; char name[48]; int model; } Stage;
+
+static int lines_eq_expanded(const char *a, size_t an, const char *b, size_t bn){
+  /* head/tail verbatim + decode_q equality on Q block (qprefixcheck contract) */
+  const char **la,**lb; size_t *lla,*llb; int na,nb,i,nq=0,nstr=0,start; Seq *da,*db; const char *hw[8]; size_t hl[8]; long long v;
+  na=splitlines(a,an,&la,&lla); nb=splitlines(b,bn,&lb,&llb);
+  if(!na||!nb||a[an-1]!='\n'||b[bn-1]!='\n') { free(la);free(lla);free(lb);free(llb); return 0; }
+  if(split(la[0],lla[0],hw,hl,8)!=7||hl[0]!=1||hw[0][0]!='N') { free(la);free(lla);free(lb);free(llb); return 0; }
+  if(!pyint(hw[2],hl[2],&v)) { free(la);free(lla);free(lb);free(llb); return 0; } nq=(int)v;
+  if(!pyint(hw[4],hl[4],&v)) { free(la);free(lla);free(lb);free(llb); return 0; } nstr=(int)v;
+  start=1+nstr;
+  if(na!=nb||start+nq>na) { free(la);free(lla);free(lb);free(llb); return 0; }
+  for(i=0;i<start;i++) if(lla[i]!=llb[i]||memcmp(la[i],lb[i],lla[i])) { free(la);free(lla);free(lb);free(llb); return 0; }
+  for(i=start+nq;i<na;i++) if(lla[i]!=llb[i]||memcmp(la[i],lb[i],lla[i])) { free(la);free(lla);free(lb);free(llb); return 0; }
+  da=decode_q(la+start,lla+start,nq); db=decode_q(lb+start,llb+start,nq);
+  if(!da||!db){ if(da)freeseqs(da,nq); if(db)freeseqs(db,nq); free(la);free(lla);free(lb);free(llb); return 0; }
+  for(i=0;i<nq;i++) if(!seq_eq(&da[i],&db[i])) { freeseqs(da,nq); freeseqs(db,nq); free(la);free(lla);free(lb);free(llb); return 0; }
+  freeseqs(da,nq); freeseqs(db,nq); free(la);free(lla);free(lb);free(llb); return 1;
+}
+
+static void write_corrupt(const unsigned char *ape, size_t ape_n, long pkg_off, const Memb *m, const char *path){
+  unsigned char *a=malloc(ape_n); size_t abs; int fd; if(!a) die("MemoryError",0);
+  { size_t i=0; while(i<ape_n){ a[i]=ape[i]; i++; } } abs=(size_t)pkg_off+(size_t)m->off+16; if(abs>=ape_n) die("ValueError","flip");
+  a[abs]^=1; fd=open(path,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600); if(fd<0) die("OSError","excl");
+  { size_t at=0; while(at<ape_n){ ssize_t z=write(fd,a+at,ape_n-at); if(z<0&&errno==EINTR) continue; if(z<=0) die("OSError","write"); at+=(size_t)z; } }
+  if(fsync(fd)||close(fd)) die("OSError","close"); free(a);
+}
+static int run_prod(const char *ape, char *const *tail, const char *label, int want_icm){
+  char bound[4400], *argv[32]; int n=0; path(bound,sizeof bound,root,"tools/bound");
+  argv[n++]=bound; argv[n++]="12"; argv[n++]="sh"; argv[n++]=(char*)ape; for(int i=0;tail[i];i++) argv[n++]=tail[i]; argv[n]=0;
+  np_result r; char why[1024]; if(np_run(argv,root,0,20,&r,why,sizeof why)) die("OSError", why);
+  int icm=r.rc==2 && r.errn && strstr(r.err,"invalid compressed model");
+  int ok=want_icm?icm:(!r.rc && !icm);
+  ck(ok,label); np_free(&r); return ok;
+}
+
+int main(int argc, char **argv){
+#if !defined(__linux__) || !defined(__x86_64__)
+  fputs("NOT_RUN p3-member-consume needs Linux/x86_64\n", stderr); return 3;
+#endif
+  if(argc!=5||!realpath(argv[1],root)||!realpath(argv[2],ctx)||!realpath(argv[3],pc)||argv[4][0]!='/') die("ValueError","usage ROOT CTX PC NEW_ABS_OUT");
+  { char parent[4096],base[4096],leaf[4096]; {int zn=snprintf(parent,sizeof parent,"%s",argv[4]);if(zn<0||(size_t)zn>=sizeof parent)die("ValueError","out");} char *slash=strrchr(parent,'/'); if(!slash||!slash[1]) die("ValueError","out"); {int zn=snprintf(leaf,sizeof leaf,"%s",slash+1);if(zn<0||(size_t)zn>=sizeof leaf)die("ValueError","out");} if(slash==parent) slash[1]=0; else *slash=0; if(!realpath(parent,base)) die("OSError","parent"); {int zn=snprintf(work,sizeof work,"%s%s%s",base,!strcmp(base,"/")?"":"/",leaf);if(zn<0||(size_t)zn>=sizeof work)die("ValueError","out");} if(mkdir(work,0700)) die("OSError","mkdir"); }
+  crc_init();
+  char product[4400], pkgp[4400], src[4400]; path(product,sizeof product,root,"unisacc.com"); path(pkgp,sizeof pkgp,pc,"compiler.pkg"); path(src,sizeof src,work,"ret7.c");
+  { int fd=open(src,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600); const char *body="int main(void){return 7;}\n"; if(fd<0||write(fd,body,strlen(body))!=(ssize_t)strlen(body)||close(fd)) die("OSError","ret7"); }
+  size_t ape_n, pkg_n; unsigned char *ape=slurp(product,&ape_n), *pcpkg=slurp(pkgp,&pkg_n);
+  PackageFooter ft; if(!packagefooter_locate_bytes(ape,(long)ape_n,&ft)) die("ValueError","footer");
+  ck(ft.package_length==(long)pkg_n && !memcmp(ape+ft.package_offset,pcpkg,pkg_n), "emb-pkg-eq-pc04");
+  char ph[65], eh[65]; hexsha(pcpkg,pkg_n,ph); hexsha(ape+ft.package_offset,(size_t)ft.package_length,eh); ck(!strcmp(ph,eh),"emb-pkg-sha-live");
+  free(pcpkg);
+
+  const unsigned char *b=ape+ft.package_offset; size_t bn=(size_t)ft.package_length, at=0; unsigned long pm,ps,nr;
+  if(bn<4||memcmp(b,"P 3 ",4)) die("ValueError","not-p3"); at=4;
+  if(!parse_u(b,bn,&at,&pm)||b[at++]!=' '||!parse_u(b,bn,&at,&ps)||b[at++]!=' '||!parse_u(b,bn,&at,&nr)||b[at++]!='\n') die("ValueError","hdr");
+  ck(pm==32 && ps==1479, "pm32-ps1479");
+  puts("ACCOUNT\tstage_recipe_refs=34\tpackage_members=32\tdyn_icm_evidence=27\tnot_run=5");
+  puts("NOT_RUN\tM24=tokenpp\tM25=tokenlex\tM28=nativeabi\tM30=librarycontract\tM31=librarypartition\tno-embedded-bypass");
+  puts("DEDUPE\t34-stage-refs-to-32-members\tabsent-distinct-M=shared-e1,shared-e3");
+
+  Stage *stages=calloc(ps,sizeof *stages); Memb *ms=calloc(pm,sizeof *ms); if(!stages||!ms) die("MemoryError",0);
+  for(unsigned long i=0;i<ps;i++){
+    if(at+2>bn||b[at]!='D'||b[at+1]!=' ') die("ValueError","D"); at+=2;
+    size_t s0=at; while(at<bn&&b[at]!=' ') at++; if(at>=bn||at-s0>=sizeof stages[i].route) die("ValueError","route");
+    { size_t k=0,z=at-s0; while(k<z){ stages[i].route[k]=(char)b[s0+k]; k++; } stages[i].route[z]=0; } at++;
+    s0=at; while(at<bn&&b[at]!=' ') at++; if(at>=bn||at-s0>=sizeof stages[i].name) die("ValueError","name");
+    { size_t k=0,z=at-s0; while(k<z){ stages[i].name[k]=(char)b[s0+k]; k++; } stages[i].name[z]=0; } at++;
+    while(at<bn&&b[at]!=' ') at++; if(at>=bn||b[at]!=' ') die("ValueError","in"); at++;
+    while(at<bn&&b[at]!=' ') at++; if(at>=bn||b[at]!=' ') die("ValueError","out"); at++;
+    unsigned long mi; if(!parse_u(b,bn,&at,&mi)||b[at++]!='\n'||mi>=pm) die("ValueError","mi"); stages[i].model=(int)mi;
+  }
+  for(unsigned long i=0;i<pm;i++){
+    unsigned long clen,rlen,codec,crc;
+    if(at+2>bn||b[at]!='M'||b[at+1]!=' ') die("ValueError","M"); at+=2;
+    if(!parse_u(b,bn,&at,&clen)||b[at++]!=' '||!parse_u(b,bn,&at,&rlen)||b[at++]!=' '||!parse_u(b,bn,&at,&codec)||b[at++]!=' '||!parse_u(b,bn,&at,&crc)||b[at++]!='\n') die("ValueError","Mh");
+    if(codec!=1||at+clen>bn) die("ValueError","Mb"); ms[i].off=(long)at; ms[i].clen=(long)clen; ms[i].rlen=(long)rlen; ms[i].crc=(uint32_t)crc; at+=clen;
+  }
+  int m_pp=-1,m_lower=-1;
+  for(unsigned long i=0;i<ps;i++){
+    if(!strcmp(stages[i].route,"lnx/x86_64/pp")&&!strcmp(stages[i].name,"e2")) m_pp=stages[i].model;
+    if(!strcmp(stages[i].route,"lnx/x86_64/image/O0")&&!strcmp(stages[i].name,"lower")) m_lower=stages[i].model;
+  }
+  ck(m_pp==3,"D-shared-pp-e2-M3"); ck(m_lower==13,"D-nonshared-image-lower-M13");
+  puts("ALGORITHM\tlive=bdecode(inflate(M)) expanded-Q-eq compact_q(job.result.net); primitives=qprefixcheck.cx compact_q+UNINETB1-bdecode; raw-.net-TEXT_DIFF-without-cq-expected-not-failure");
+
+  struct { const char *job; const char *model; int mi; const char *tag; } cases[2]={
+    {"net-shared-e2","shared-e2.net",3,"shared"},
+    {"net-lnx-x86_64-lower","lnx-x86_64-lower.net",13,"nonshared"},
+  };
+  for(int c=0;c<2;c++){
+    char jp[4400], mp[4400]; {int zn=snprintf(jp,sizeof jp,"%s/jobs/%s/result.net",ctx,cases[c].job);if(zn<0||(size_t)zn>=sizeof jp)die("ValueError","job-path");} path(mp,sizeof mp,pc,"models"); char mfull[4400]; path(mfull,sizeof mfull,mp,cases[c].model);
+    size_t jn,mn; unsigned char *jb=slurp(jp,&jn), *mb=slurp(mfull,&mn);
+    ck(jn==mn&&!memcmp(jb,mb,jn), cases[c].tag[0]=='s'?"shared-job-eq-pc-text":"nonshared-job-eq-pc-text");
+    int mi=cases[c].mi; unsigned char *raw=malloc((size_t)ms[mi].rlen); if(!raw) die("MemoryError",0);
+    if(unisa_inflate(raw,(unsigned long)ms[mi].rlen,b+ms[mi].off,(unsigned long)ms[mi].clen)||crc((char*)raw,(int)ms[mi].rlen)!=ms[mi].crc) die("ValueError","inflate");
+    ck(ms[mi].rlen>=9&&!memcmp(raw,"UNINETB1N",9), cases[c].tag[0]=='s'?"shared-raw-magic":"nonshared-raw-magic");
+    Buf emb={0}, cq={0}; bdecode(raw,(size_t)ms[mi].rlen,&emb); compact_q((const char*)jb,jn,&cq);
+    ck(lines_eq_expanded(emb.p,emb.n,cq.p,cq.n), cases[c].tag[0]=='s'?"shared-live-cq-eq":"nonshared-live-cq-eq");
+    /* also live SHA of inflate body for receipt */
+    char rh[65], jh[65]; hexsha(raw,(size_t)ms[mi].rlen,rh); hexsha(jb,jn,jh);
+    printf("LIVE_SHA\t%s\tmi=%d\traw=%s\tjob_text=%s\n", cases[c].tag, mi, rh, jh);
+    free(raw); free(jb); free(mb); free(emb.p); free(cq.p);
+  }
+
+  char out_e[4400], out_c[4400], bad3[4400], bad13[4400], bad0[4400];
+  path(out_e,sizeof out_e,work,"clean.i"); path(out_c,sizeof out_c,work,"clean.com");
+  path(bad3,sizeof bad3,work,"corrupt-m3.com"); path(bad13,sizeof bad13,work,"corrupt-m13.com"); path(bad0,sizeof bad0,work,"corrupt-m0.com");
+  write_corrupt(ape,ape_n,ft.package_offset,&ms[3],bad3); write_corrupt(ape,ape_n,ft.package_offset,&ms[13],bad13); write_corrupt(ape,ape_n,ft.package_offset,&ms[0],bad0);
+  { char *te[]={"-b","lnx/x86_64","-E",src,"-o",out_e,0}; char *tc[]={"-b","lnx/x86_64",src,"-o",out_c,0};
+    run_prod(product,te,"clean-E-ok",0); run_prod(bad3,te,"corrupt-M3-E-ICM",1); run_prod(bad0,te,"corrupt-M0-E-still-ok",0);
+    run_prod(product,tc,"clean-compile-ok",0); run_prod(bad13,tc,"corrupt-M13-compile-ICM",1); run_prod(bad3,tc,"corrupt-M3-compile-still-ok",0);
+  }
+  free(stages); free(ms); free(ape);
+  puts("NOT_CLAIMED\thostseed-payload-trust-rewrite-complete-N22-all-32-CLI-routes-foreign-hosts");
+  printf("P3_MEMBER_CONSUME\tassertions=%d\tfailed=%d\tpm=32\tformal_dyn=M3,M13\tdyn_evidence=27\tnot_run=5\n", checks, failed);
+  return failed?1:0;
+}

@@ -42,11 +42,11 @@ typedef struct {char *f[12];int nf;} row_t;
 typedef struct {char *text;row_t *rows;int n;} table_t;
 static void table_load(const char *p,table_t *t){size_t n;char *s=(char *)load(p,&n);char *q;t->text=s;t->rows=calloc(4096,sizeof(row_t));t->n=0;if(!t->rows)die("alloc");q=s;while(q<s+n){char *e=memchr(q,'\n',(size_t)(s+n-q));if(!e)die("table final newline");*e=0;if(*q&&*q!='#'){row_t *r=&t->rows[t->n];char *c=q;r->nf=0;for(;;){char *tab=strchr(c,'\t');if(r->nf==12)die("table width");r->f[r->nf++]=c;if(!tab)break;*tab=0;c=tab+1;}if(t->n==4096)die("table rows");t->n++;}q=e+1;}}
 /* text column: " | " separates lines; "> " marks the line under test. Returns 1-based marked line. */
-static int expand_text(const char *col,char *out,size_t cap,int *marked){size_t o=0;int line=1;const char *s=col;*marked=0;for(;;){const char *e=strstr(s," | ");size_t len=e?(size_t)(e-s):strlen(s);if(len>=2&&s[0]=='>'&&s[1]==' '){if(*marked)return -1;*marked=line;s+=2;len-=2;}if(o+len+2>=cap)return -1;memcpy(out+o,s,len);o+=len;out[o++]='\n';if(!e)break;s=e+3;line++;}out[o]=0;return 0;}
+static int expand_text(const char *col,char *out,size_t cap,int *marked){size_t o=0;int line=1;const char *s=col;*marked=0;for(;;){const char *e=strstr(s," | ");size_t len=e?(size_t)(e-s):strlen(s);if(len>=2&&s[0]=='>'&&s[1]==' '){if(*marked)return -1;*marked=line;s+=2;len-=2;}if(o+len+2>=cap)return -1;{unsigned char *cxb_d=(unsigned char *)(out+o);const unsigned char *cxb_s=(const unsigned char *)(s);size_t cxb_n=(size_t)(len),cxb_i;for(cxb_i=0;cxb_i<cxb_n;cxb_i++)cxb_d[cxb_i]=cxb_s[cxb_i];};o+=len;out[o++]='\n';if(!e)break;s=e+3;line++;}out[o]=0;return 0;}
 /* ---- product children ---- */
 typedef struct {int rc;char err[2048];} run_t;
-static void run(char **v,run_t *r,int secs){np_result x;char why[1024];if(np_run(v,root,0,secs,&x,why,sizeof why)){fprintf(stderr,"kernel-route-test: %s\n",why);die("child start");}r->rc=x.rc;snprintf(r->err,sizeof r->err,"%.*s",(int)(x.errn<2000?x.errn:2000),x.err?x.err:"");if(x.outn&&x.outn<4096&&strstr(group_name,"route"))fwrite(x.out,1,x.outn,stdout);np_free(&x);}
-static void product_as(const char *isa,const char *in,const char *obj,run_t *r){char target[32];snprintf(target,sizeof target,"lnx/%s",isa);char *v[]={bound,"20","sh",product,"as","-b",target,(char *)in,"-o",(char *)obj,0};run(v,r,25);}
+static void run(char **v,run_t *r,int secs){np_result x;char why[1024];if(np_run(v,root,0,secs,&x,why,sizeof why)){fprintf(stderr,"kernel-route-test: %s\n",why);die("child start");}r->rc=x.rc;{int z=snprintf(r->err,sizeof r->err,"%.*s",(int)(x.errn<2000?x.errn:2000),x.err?x.err:"");if(z<0||(size_t)z>=sizeof r->err){fprintf(stderr,"bound-format\n");exit(2);}};if(x.outn&&x.outn<4096&&strstr(group_name,"route"))fwrite(x.out,1,x.outn,stdout);np_free(&x);}
+static void product_as(const char *isa,const char *in,const char *obj,run_t *r){char target[32];{int z=snprintf(target,sizeof target,"lnx/%s",isa);if(z<0||(size_t)z>=sizeof target){fprintf(stderr,"bound-format\n");exit(2);}};char *v[]={bound,"20","sh",product,"as","-b",target,(char *)in,"-o",(char *)obj,0};run(v,r,25);}
 /* ---- an independent minimal ELF64 reader (gABI), not elfkernel ---- */
 typedef struct {unsigned char *p;size_t n;unsigned long long shoff;unsigned shnum,shstrndx;} elf_t;
 static int elf_open(elf_t *e,unsigned char *p,size_t n){e->p=p;e->n=n;if(n<64||memcmp(p,"\177ELF\2\1\1",7))return 0;e->shoff=rd(p+40,8);e->shnum=(unsigned)rd(p+60,2);e->shstrndx=(unsigned)rd(p+62,2);if(e->shnum==0||e->shnum>64||e->shstrndx>=e->shnum||e->shoff>n||(unsigned long long)e->shnum*64>n-e->shoff)return 0;return 1;}
@@ -62,11 +62,11 @@ static void golden_rows(const char *isa,int want_rel){char p[4400],dir[4400];tab
  for(i=0;i<t.n;i++){row_t *r=&t.rows[i];char text[16384],src[4400],obj[4400],name[300];int marked;
   if(r->nf!=10){if(r->nf>=1&&strcmp(r->f[0],"id"))ck(0,"row-width");continue;}if(!strcmp(r->f[0],"id"))continue;
   int is_rel=!strcmp(r->f[1],"rel");if(is_rel!=want_rel)continue;
-  if(strcmp(r->f[1],"enc")&&strcmp(r->f[1],"dir")&&strcmp(r->f[1],"rel")){snprintf(name,sizeof name,"%s.group",r->f[0]);ck(0,name);continue;}
-  if(expand_text(r->f[3],text,sizeof text,&marked)||!marked){snprintf(name,sizeof name,"%s.marked-line",r->f[0]);ck(0,name);continue;}
-  snprintf(name,sizeof name,"%s.s",r->f[0]);path(src,sizeof src,dir,name);snprintf(name,sizeof name,"%s.o",r->f[0]);path(obj,sizeof obj,dir,name);save(src,text,strlen(text));
+  if(strcmp(r->f[1],"enc")&&strcmp(r->f[1],"dir")&&strcmp(r->f[1],"rel")){{int z=snprintf(name,sizeof name,"%s.group",r->f[0]);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};ck(0,name);continue;}
+  if(expand_text(r->f[3],text,sizeof text,&marked)||!marked){{int z=snprintf(name,sizeof name,"%s.marked-line",r->f[0]);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};ck(0,name);continue;}
+  {int z=snprintf(name,sizeof name,"%s.s",r->f[0]);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};path(src,sizeof src,dir,name);{int z=snprintf(name,sizeof name,"%s.o",r->f[0]);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};path(obj,sizeof obj,dir,name);save(src,text,strlen(text));
   run_t x;product_as(isa,src,obj,&x);
-  if(x.rc||absent(obj)){snprintf(name,sizeof name,"%s",r->f[0]);ck(0,name);fprintf(stderr,"DETAIL\t%s\trc=%d\t%s",r->f[0],x.rc,x.err);continue;}
+  if(x.rc||absent(obj)){{int z=snprintf(name,sizeof name,"%s",r->f[0]);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};ck(0,name);fprintf(stderr,"DETAIL\t%s\trc=%d\t%s",r->f[0],x.rc,x.err);continue;}
   size_t n;unsigned char *b=load(obj,&n);elf_t e;unsigned char *sec=0;unsigned long long size=0;unsigned char want[4096];long wn=unhex(r->f[6],want,sizeof want);
   unsigned long long off=strtoull(r->f[5],0,10),expect_size=strtoull(r->f[7],0,10);char got_hex[8300]="",relocs[2048];
   int opened=elf_open(&e,b,n),ok=opened&&rd(b+18,2)==(unsigned long long)(!strcmp(isa,"arm64")?183:62)&&elf_bytes(&e,!strcmp(r->f[4],"data")?".data":".text",&sec,&size)&&sec&&wn>0;
@@ -79,13 +79,13 @@ static void golden_rows(const char *isa,int want_rel){char p[4400],dir[4400];tab
 static void route_material_applies(void){char p[4400],h[65];size_t n;path(p,sizeof p,route,"route.tsv");char *s=(char *)load(p,&n),*q=s;int canonical=0,inputs=0,stale=0,sources=0,objects=0,kernels=0;
  while(q<s+n){char *e=memchr(q,'\n',(size_t)(s+n-q));if(!e)die("route receipt newline");*e=0;char *t1=strchr(q,'\t');
   if(t1){*t1=0;char *a=t1+1,*t2=strchr(a,'\t');if(t2){*t2=0;char *b=t2+1,f[4400];
-   if(!strcmp(q,"input")){if(!strncmp(a,"asm/",4)){char rel[4400];snprintf(rel,sizeof rel,"exec/c/asm/%s",a+4);path(f,sizeof f,root,rel);}else path(f,sizeof f,root,a);sha_file(f,h);inputs++;if(strcmp(h,b)){stale++;fprintf(stderr,"DETAIL\troute-input-changed\t%s\n",a);}}
+   if(!strcmp(q,"input")){if(!strncmp(a,"asm/",4)){char rel[4400];{int z=snprintf(rel,sizeof rel,"exec/c/asm/%s",a+4);if(z<0||(size_t)z>=sizeof rel){fprintf(stderr,"bound-format\n");exit(2);}};path(f,sizeof f,root,rel);}else path(f,sizeof f,root,a);sha_file(f,h);inputs++;if(strcmp(h,b)){stale++;fprintf(stderr,"DETAIL\troute-input-changed\t%s\n",a);}}
    else if(!strcmp(q,"source")||!strcmp(q,"object")||!strcmp(q,"kernel")){path(f,sizeof f,route,a);sha_file(f,h);if(strcmp(h,b)){stale++;fprintf(stderr,"DETAIL\troute-artifact-changed\t%s\n",a);}if(*q=='s')sources++;else if(*q=='o')objects++;else kernels++;}
   }else if(!strcmp(q,"canonical")&&!strcmp(a,"YES"))canonical=1;}
   q=e+1;}
  free(s);if(!canonical||stale||inputs!=33||sources!=22||objects!=22||kernels!=2){fprintf(stderr,"kernel-route-test: canonical=%d stale=%d inputs=%d sources=%d objects=%d kernels=%d\n",canonical,stale,inputs,sources,objects,kernels);die("ROUTE_DIR is not canonical PREPARED material for the current inputs");}
  printf("MATERIAL\troute=%s\tcanonical=YES\tinputs=33\tstatus=PREPARED-and-current\n",route);}
-static unsigned char *route_file(const char *isa,const char *unit,const char *ext,size_t *n){char rel[300],p[4400];if(unit)snprintf(rel,sizeof rel,"%s/%s.%s",isa,unit,ext);else snprintf(rel,sizeof rel,"%s.kernel",isa);path(p,sizeof p,route,rel);return load(p,n);}
+static unsigned char *route_file(const char *isa,const char *unit,const char *ext,size_t *n){char rel[300],p[4400];if(unit){int z=snprintf(rel,sizeof rel,"%s/%s.%s",isa,unit,ext);if(z<0||(size_t)z>=sizeof rel){fprintf(stderr,"bound-format\n");exit(2);}}else {int z=snprintf(rel,sizeof rel,"%s.kernel",isa);if(z<0||(size_t)z>=sizeof rel){fprintf(stderr,"bound-format\n");exit(2);}};path(p,sizeof p,route,rel);return load(p,n);}
 /* ---- (v) coverage ---- */
 static int rel32_branch(int arm,const char *key){if(arm||key[0]!='j')return 0;size_t n=strlen(key);return n>3&&!strcmp(key+n-3," Lt");}
 static void coverage(void){int a,i;for(a=0;a<2;a++){const char *isa=isas[a];int arm=a==1;krs_shapes canon,gold;char why[256],p[4400];memset(&canon,0,sizeof canon);memset(&gold,0,sizeof gold);
@@ -93,19 +93,19 @@ static void coverage(void){int a,i;for(a=0;a<2;a++){const char *isa=isas[a];int 
   table_t t;path(p,sizeof p,golden,arm?"arm64.tsv":"x86_64.tsv");table_load(p,&t);int rows=0,bad=0;
   for(i=0;i<t.n;i++){row_t *r=&t.rows[i];char text[16384],key[300];int marked;if(r->nf!=10||!strcmp(r->f[0],"id")||!strcmp(r->f[1],"rel"))continue;if(expand_text(r->f[3],text,sizeof text,&marked)||!marked){bad++;continue;}
    krs_shapes one;memset(&one,0,sizeof one);if(krs_classify(arm,text,strlen(text),marked,&one,why,sizeof why)||one.n!=1){bad++;fprintf(stderr,"DETAIL\trow-shape\t%s\tshapes=%d\n",r->f[0],one.n);krs_free(&one);continue;}
-   snprintf(key,sizeof key,"%s|%s",one.key[0],r->f[2]);krs_add(&gold,key,r->f[0]);krs_free(&one);rows++;}
-  {char name[100];snprintf(name,sizeof name,"%s.every-oracle-row-has-one-form",isa);ck(!bad,name);}
+   {int z=snprintf(key,sizeof key,"%s|%s",one.key[0],r->f[2]);if(z<0||(size_t)z>=sizeof key){fprintf(stderr,"bound-format\n");exit(2);}};krs_add(&gold,key,r->f[0]);krs_free(&one);rows++;}
+  {char name[100];{int z=snprintf(name,sizeof name,"%s.every-oracle-row-has-one-form",isa);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};ck(!bad,name);}
   int missing=0,unknown=0,instances=0;
   for(i=0;i<canon.n;i++){char k1[300],k2[300];const char *key=canon.key[i];int ok;instances+=canon.count[i];
    if(strchr(key,'?')){unknown++;printf("UNCLASSIFIED\t%s\t%s\t%s\n",isa,key,canon.example[i]);continue;}
-   if(rel32_branch(arm,key)){snprintf(k1,sizeof k1,"%s|rel8",key);snprintf(k2,sizeof k2,"%s|rel32",key);ok=krs_find(&gold,k1)>=0&&krs_find(&gold,k2)>=0;}
+   if(rel32_branch(arm,key)){{int z=snprintf(k1,sizeof k1,"%s|rel8",key);if(z<0||(size_t)z>=sizeof k1){fprintf(stderr,"bound-format\n");exit(2);}};{int z=snprintf(k2,sizeof k2,"%s|rel32",key);if(z<0||(size_t)z>=sizeof k2){fprintf(stderr,"bound-format\n");exit(2);}};ok=krs_find(&gold,k1)>=0&&krs_find(&gold,k2)>=0;}
    else{int j;ok=0;size_t kn=strlen(key);for(j=0;j<gold.n;j++)if(!strncmp(gold.key[j],key,kn)&&gold.key[j][kn]=='|'){ok=1;break;}}
    if(!ok){missing++;printf("MISSING_ORACLE\t%s\t%s\tcount=%d\texample=%s\n",isa,key,canon.count[i],canon.example[i]);}}
   /* detector sensitivity: a form with no oracle row must be reported, not silently covered */
   {krs_shapes probe;memset(&probe,0,sizeof probe);const char *t=arm?"cmn w1,w2\n":"sete %al\n";int seen=0,j;size_t kn;
    if(!krs_classify(arm,t,strlen(t),-1,&probe,why,sizeof why)&&probe.n==1){kn=strlen(probe.key[0]);for(j=0;j<gold.n;j++)if(!strncmp(gold.key[j],probe.key[0],kn)&&gold.key[j][kn]=='|')seen=1;}
-   char name[100];snprintf(name,sizeof name,"%s.detector-reports-a-form-without-a-row",isa);ck(probe.n==1&&!seen,name);krs_free(&probe);}
-  {char name[100];snprintf(name,sizeof name,"%s.no-unclassified-form",isa);ck(!unknown,name);snprintf(name,sizeof name,"%s.every-canonical-form-has-an-oracle-row",isa);ck(!missing,name);}
+   char name[100];{int z=snprintf(name,sizeof name,"%s.detector-reports-a-form-without-a-row",isa);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};ck(probe.n==1&&!seen,name);krs_free(&probe);}
+  {char name[100];{int z=snprintf(name,sizeof name,"%s.no-unclassified-form",isa);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};ck(!unknown,name);{int z=snprintf(name,sizeof name,"%s.every-canonical-form-has-an-oracle-row",isa);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};ck(!missing,name);}
   printf("COVERAGE\t%s\tcanonical_forms=%d\tcanonical_lines=%d\toracle_rows=%d\tmissing=%d\tunclassified=%d\n",isa,canon.n,instances,rows,missing,unknown);
   krs_free(&canon);krs_free(&gold);free(t.rows);free(t.text);}}
 /* ---- AS-8 / AS-7 recomputation over the canonical objects (test-side, not elfkernel) ---- */
@@ -121,9 +121,9 @@ static void kernel_recompute(int a,int mode_reloc){const char *isa=isas[a];int a
  for(k=0;k<11;k++){elf_t *e=&u[k].e;int st=elf_find(e,".symtab");unsigned char *h=elf_sh(e,(unsigned)st);unsigned long long c,cnt=rd(h+32,8)/24;for(c=1;c<cnt;c++){unsigned char *z=e->p+rd(h+24,8)+c*24;if((z[4]>>4)==1&&rd(z+6,2)){const char *nm=elf_symname(e,c);if(!strcmp(nm,"_kernel_entry")){entry=u[k].base[rd(z+6,2)]+rd(z+8,8);have_entry++;}if(!strcmp(nm,"_kernel_service")){slot=u[k].base[rd(z+6,2)]+rd(z+8,8);have_slot++;}}}}
  covered=calloc(total?total:1,1);if(!covered)die("alloc");
  if(!mode_reloc){
-  snprintf(name,sizeof name,"%s.unikern1-header",isa);ck(kn==40+total&&!memcmp(kb,"UNIKERN1",8)&&rd(kb+8,8)==(unsigned long long)(arm?1:2)&&rd(kb+16,8)==entry&&rd(kb+24,8)==slot&&rd(kb+32,8)==total&&have_entry==1&&have_slot==1,name);
+  {int z=snprintf(name,sizeof name,"%s.unikern1-header",isa);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};ck(kn==40+total&&!memcmp(kb,"UNIKERN1",8)&&rd(kb+8,8)==(unsigned long long)(arm?1:2)&&rd(kb+16,8)==entry&&rd(kb+24,8)==slot&&rd(kb+32,8)==total&&have_entry==1&&have_slot==1,name);
   if(kn!=40+total){free(covered);goto done;}
- }else if(kn!=40+total){snprintf(name,sizeof name,"%s.image-length",isa);ck(0,name);free(covered);goto done;}
+ }else if(kn!=40+total){{int z=snprintf(name,sizeof name,"%s.image-length",isa);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};ck(0,name);free(covered);goto done;}
  {int placement_ok=1,patch_total=0,patch_ok=1;
   for(k=0;k<11;k++){elf_t *e=&u[k].e;
    for(i=1;i<(int)e->shnum;i++){unsigned char *s=elf_sh(e,(unsigned)i);unsigned long long size=rd(s+32,8),off=rd(s+24,8),j;if(!(rd(s+8,8)&2))continue;for(j=0;j<size;j++)covered[u[k].base[i]+j]=rd(s+4,4)==8?2:1;
@@ -140,8 +140,8 @@ static void kernel_recompute(int a,int mode_reloc){const char *isa=isas[a];int a
      else{patch_ok=0;continue;}
      if(got!=want){patch_ok=0;fprintf(stderr,"DETAIL\t%s\tpatch\tunit=%s\toffset=%llu\ttype=%llu\tgot=%08llx\twant=%08llx\n",isa,units[k],po,type,got,want);}}}}
   if(!mode_reloc){unsigned long long j;int pad_ok=1;for(j=0;j<total;j++)if(covered[j]!=1&&kb[40+j]){pad_ok=0;break;}
-   snprintf(name,sizeof name,"%s.as8-placement-of-every-allocated-section",isa);ck(placement_ok,name);snprintf(name,sizeof name,"%s.as8-padding-and-bss-zero",isa);ck(pad_ok,name);}
-  else{snprintf(name,sizeof name,"%s.as7-every-relocation-patch-recomputed",isa);ck(patch_ok&&patch_total>0,name);printf("RELOCATIONS\t%s\tpatches=%d\n",isa,patch_total);}}
+   {int z=snprintf(name,sizeof name,"%s.as8-placement-of-every-allocated-section",isa);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};ck(placement_ok,name);{int z=snprintf(name,sizeof name,"%s.as8-padding-and-bss-zero",isa);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};ck(pad_ok,name);}
+  else{{int z=snprintf(name,sizeof name,"%s.as7-every-relocation-patch-recomputed",isa);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};ck(patch_ok&&patch_total>0,name);printf("RELOCATIONS\t%s\tpatches=%d\n",isa,patch_total);}}
  free(covered);
  done:for(k=0;k<11;k++)free(u[k].p);free(kb);}
 /* AS-6 layout formula on one real object. */
@@ -163,42 +163,42 @@ static int as6_layout(unsigned char *p,size_t n,int arm,char *why,size_t wl){elf
  return 1;}
 static void object_rows(void){table_t t;char p[4400];int i;path(p,sizeof p,golden,"object.tsv");table_load(p,&t);
  for(i=0;i<t.n;i++){row_t *r=&t.rows[i];if(r->nf!=6||strcmp(r->f[0],"case"))continue;char text[4096],src[4400],obj[4400],name[200];int marked;unsigned long long total=strtoull(r->f[4],0,10);
-  {const char *c=r->f[3];size_t o=0;for(;;){const char *e=strstr(c," | ");size_t len=e?(size_t)(e-c):strlen(c);memcpy(text+o,c,len);o+=len;text[o++]='\n';if(!e)break;c=e+3;}text[o]=0;(void)marked;}
-  snprintf(name,sizeof name,"object-%s.s",r->f[1]);path(src,sizeof src,work,name);snprintf(name,sizeof name,"object-%s.o",r->f[1]);path(obj,sizeof obj,work,name);save(src,text,strlen(text));
+  {const char *c=r->f[3];size_t o=0;for(;;){const char *e=strstr(c," | ");size_t len=e?(size_t)(e-c):strlen(c);{unsigned char *cxb_d=(unsigned char *)(text+o);const unsigned char *cxb_s=(const unsigned char *)(c);size_t cxb_n=(size_t)(len),cxb_i;for(cxb_i=0;cxb_i<cxb_n;cxb_i++)cxb_d[cxb_i]=cxb_s[cxb_i];};o+=len;text[o++]='\n';if(!e)break;c=e+3;}text[o]=0;(void)marked;}
+  {int z=snprintf(name,sizeof name,"object-%s.s",r->f[1]);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};path(src,sizeof src,work,name);{int z=snprintf(name,sizeof name,"object-%s.o",r->f[1]);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};path(obj,sizeof obj,work,name);save(src,text,strlen(text));
   run_t x;product_as(r->f[2],src,obj,&x);if(x.rc){ck(0,r->f[1]);fprintf(stderr,"DETAIL\t%s\t%s",r->f[1],x.err);continue;}
   unsigned char *want=calloc(total?total:1,1);int j,ok=1;if(!want)die("alloc");
-  for(j=0;j<t.n;j++){row_t *b=&t.rows[j];if(b->nf!=5||strcmp(b->f[0],"bytes")||strcmp(b->f[1],r->f[1]))continue;unsigned char tmp[1024];long bn=unhex(b->f[3],tmp,sizeof tmp);unsigned long long at=strtoull(b->f[2],0,10);if(bn<0||at>total||(unsigned long long)bn>total-at){ok=0;fprintf(stderr,"DETAIL\t%s\tbad bytes row at %s\n",r->f[1],b->f[2]);continue;}memcpy(want+at,tmp,(size_t)bn);}
+  for(j=0;j<t.n;j++){row_t *b=&t.rows[j];if(b->nf!=5||strcmp(b->f[0],"bytes")||strcmp(b->f[1],r->f[1]))continue;unsigned char tmp[1024];long bn=unhex(b->f[3],tmp,sizeof tmp);unsigned long long at=strtoull(b->f[2],0,10);if(bn<0||at>total||(unsigned long long)bn>total-at){ok=0;fprintf(stderr,"DETAIL\t%s\tbad bytes row at %s\n",r->f[1],b->f[2]);continue;}{unsigned char *cxb_d=(unsigned char *)(want+at);const unsigned char *cxb_s=(const unsigned char *)(tmp);size_t cxb_n=(size_t)((size_t)bn),cxb_i;for(cxb_i=0;cxb_i<cxb_n;cxb_i++)cxb_d[cxb_i]=cxb_s[cxb_i];};}
   size_t n;unsigned char *got=load(obj,&n);if(n!=total)ok=0;else if(memcmp(got,want,n)){size_t q;for(q=0;q<n&&got[q]==want[q];q++);fprintf(stderr,"DETAIL\t%s\tfirst-difference=%lu\tgot=%02x\twant=%02x\n",r->f[1],(unsigned long)q,got[q],want[q]);ok=0;}
   if(n!=total)fprintf(stderr,"DETAIL\t%s\tsize=%lu\twant=%llu\n",r->f[1],(unsigned long)n,total);
-  snprintf(name,sizeof name,"as6-whole-object.%s",r->f[1]);ck(ok,name);free(got);free(want);}
+  {int z=snprintf(name,sizeof name,"as6-whole-object.%s",r->f[1]);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};ck(ok,name);free(got);free(want);}
  free(t.rows);free(t.text);}
 /* link.tsv: assemble units, link in-process through the route's own linker module, compare. */
 static int link_fixture(row_t *r,const char *tag,unsigned char **kernel,size_t *kn){char text[8192],src[4400],obj[2][4400],out[4400],name[200],why[256];int u=0;const char *c=r->f[2];
- for(;;){const char *e=strstr(c," || ");size_t len=e?(size_t)(e-c):strlen(c);char unit[4096];if(len>=sizeof unit||u==2)die("link units");memcpy(unit,c,len);unit[len]=0;int marked;
-  {const char *d=unit;size_t o=0;for(;;){const char *f=strstr(d," | ");size_t l=f?(size_t)(f-d):strlen(d);memcpy(text+o,d,l);o+=l;text[o++]='\n';if(!f)break;d=f+3;}text[o]=0;(void)marked;}
-  snprintf(name,sizeof name,"%s-%s-u%d.s",tag,r->f[0],u);path(src,sizeof src,work,name);snprintf(name,sizeof name,"%s-%s-u%d.o",tag,r->f[0],u);path(obj[u],sizeof obj[u],work,name);save(src,text,strlen(text));
+ for(;;){const char *e=strstr(c," || ");size_t len=e?(size_t)(e-c):strlen(c);char unit[4096];if(len>=sizeof unit||u==2)die("link units");{unsigned char *cxb_d=(unsigned char *)(unit);const unsigned char *cxb_s=(const unsigned char *)(c);size_t cxb_n=(size_t)(len),cxb_i;for(cxb_i=0;cxb_i<cxb_n;cxb_i++)cxb_d[cxb_i]=cxb_s[cxb_i];};unit[len]=0;int marked;
+  {const char *d=unit;size_t o=0;for(;;){const char *f=strstr(d," | ");size_t l=f?(size_t)(f-d):strlen(d);{unsigned char *cxb_d=(unsigned char *)(text+o);const unsigned char *cxb_s=(const unsigned char *)(d);size_t cxb_n=(size_t)(l),cxb_i;for(cxb_i=0;cxb_i<cxb_n;cxb_i++)cxb_d[cxb_i]=cxb_s[cxb_i];};o+=l;text[o++]='\n';if(!f)break;d=f+3;}text[o]=0;(void)marked;}
+  {int z=snprintf(name,sizeof name,"%s-%s-u%d.s",tag,r->f[0],u);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};path(src,sizeof src,work,name);{int z=snprintf(name,sizeof name,"%s-%s-u%d.o",tag,r->f[0],u);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};path(obj[u],sizeof obj[u],work,name);save(src,text,strlen(text));
   run_t x;product_as(r->f[1],src,obj[u],&x);if(x.rc){fprintf(stderr,"DETAIL\t%s\t%s",r->f[0],x.err);return 0;}u++;if(!e)break;c=e+4;}
- snprintf(name,sizeof name,"%s-%s.kernel",tag,r->f[0]);path(out,sizeof out,work,name);const char *paths[2]={obj[0],obj[1]};
+ {int z=snprintf(name,sizeof name,"%s-%s.kernel",tag,r->f[0]);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};path(out,sizeof out,work,name);const char *paths[2]={obj[0],obj[1]};
  ek_result k=ek_link(!strcmp(r->f[1],"arm64")?1:2,out,paths,u,why,sizeof why);if(k.status!=EK_OK){fprintf(stderr,"DETAIL\t%s\tlink=%s\n",r->f[0],why);return 0;}
  *kernel=load(out,kn);return 1;}
 static void link_rows(int header_only){table_t t;char p[4400];int i;path(p,sizeof p,golden,"link.tsv");table_load(p,&t);
  for(i=0;i<t.n;i++){row_t *r=&t.rows[i];if(r->nf!=8||!strcmp(r->f[0],"id"))continue;unsigned char *k=0;size_t kn=0;char name[200];unsigned char img[4096];long in=unhex(r->f[3],img,sizeof img);unsigned long long entry=strtoull(r->f[4],0,10),slot=strtoull(r->f[5],0,10),len=strtoull(r->f[6],0,10);
   int ok=link_fixture(r,header_only?"hdr":"img",&k,&kn)&&in==(long)len;
-  if(header_only){unsigned char h[40];memset(h,0,40);memcpy(h,"UNIKERN1",8);wr(h+8,8,!strcmp(r->f[1],"arm64")?1:2);wr(h+16,8,entry);wr(h+24,8,slot);wr(h+32,8,len);ok=ok&&kn==40+len&&!memcmp(k,h,40);snprintf(name,sizeof name,"as8-unikern1-header.%s",r->f[0]);}
-  else{ok=ok&&kn==40+len&&!memcmp(k+40,img,(size_t)len);snprintf(name,sizeof name,"as7-resolved-image.%s",r->f[0]);if(!ok&&k&&kn==40+len){char g[8300];hex(k+40,(size_t)len,g);fprintf(stderr,"DETAIL\t%s\tgot=%s\n",r->f[0],g);}}
+  if(header_only){unsigned char h[40];memset(h,0,40);memcpy(h,"UNIKERN1",8);wr(h+8,8,!strcmp(r->f[1],"arm64")?1:2);wr(h+16,8,entry);wr(h+24,8,slot);wr(h+32,8,len);ok=ok&&kn==40+len&&!memcmp(k,h,40);{int z=snprintf(name,sizeof name,"as8-unikern1-header.%s",r->f[0]);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};}
+  else{ok=ok&&kn==40+len&&!memcmp(k+40,img,(size_t)len);{int z=snprintf(name,sizeof name,"as7-resolved-image.%s",r->f[0]);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};if(!ok&&k&&kn==40+len){char g[8300];hex(k+40,(size_t)len,g);fprintf(stderr,"DETAIL\t%s\tgot=%s\n",r->f[0],g);}}
   ck(ok,name);free(k);}
  free(t.rows);free(t.text);}
 /* ---- (iv) refusals ---- */
-static int as_neg(const char *id,const char *isa,const char *bad,const char *expect,const char *good,const char *good_isa){char src[4400],obj[4400],name[200];run_t x;snprintf(name,sizeof name,"%s-bad.s",id);path(src,sizeof src,work,name);snprintf(name,sizeof name,"%s-bad.o",id);path(obj,sizeof obj,work,name);save(src,bad,strlen(bad));
+static int as_neg(const char *id,const char *isa,const char *bad,const char *expect,const char *good,const char *good_isa){char src[4400],obj[4400],name[200];run_t x;{int z=snprintf(name,sizeof name,"%s-bad.s",id);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};path(src,sizeof src,work,name);{int z=snprintf(name,sizeof name,"%s-bad.o",id);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};path(obj,sizeof obj,work,name);save(src,bad,strlen(bad));
  product_as(isa,src,obj,&x);int ok=x.rc!=0&&strstr(x.err,expect)&&absent(obj);if(!ok)fprintf(stderr,"DETAIL\t%s\trc=%d\terr=%s\n",id,x.rc,x.err);
- snprintf(name,sizeof name,"%s.named-refusal-no-output",id);ck(ok,name);
- snprintf(name,sizeof name,"%s-good.s",id);path(src,sizeof src,work,name);snprintf(name,sizeof name,"%s-good.o",id);path(obj,sizeof obj,work,name);save(src,good,strlen(good));product_as(good_isa,src,obj,&x);
+ {int z=snprintf(name,sizeof name,"%s.named-refusal-no-output",id);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};ck(ok,name);
+ {int z=snprintf(name,sizeof name,"%s-good.s",id);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};path(src,sizeof src,work,name);{int z=snprintf(name,sizeof name,"%s-good.o",id);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};path(obj,sizeof obj,work,name);save(src,good,strlen(good));product_as(good_isa,src,obj,&x);
  int rec=!x.rc&&!absent(obj);if(rec){size_t n;unsigned char *b=load(obj,&n);rec=n>=64&&rd(b+18,2)==(unsigned long long)(!strcmp(good_isa,"arm64")?183:62);free(b);}
- snprintf(name,sizeof name,"%s.clean-recovery",id);ck(rec,name);return ok&&rec;}
-static void assemble_to(const char *isa,const char *id,const char *text,char *obj,size_t cap){char src[4400],name[200];run_t x;snprintf(name,sizeof name,"%s.s",id);path(src,sizeof src,work,name);snprintf(name,sizeof name,"%s.o",id);path(obj,cap,work,name);save(src,text,strlen(text));product_as(isa,src,obj,&x);if(x.rc){fprintf(stderr,"%s",x.err);die("fixture assembly");}}
-static void link_neg(const char *id,int arch,const char *const *bad,int nb,const char *expect,int good_arch,const char *const *good,int ng){char out[4400],name[200],why[256];ek_result r;snprintf(name,sizeof name,"%s-bad.kernel",id);path(out,sizeof out,work,name);r=ek_link((unsigned)arch,out,bad,nb,why,sizeof why);
- int ok=r.status==EK_REJECT&&strstr(why,expect)&&absent(out);if(!ok)fprintf(stderr,"DETAIL\t%s\tstatus=%d\twhy=%s\n",id,r.status,why);snprintf(name,sizeof name,"%s.named-refusal-no-output",id);ck(ok,name);
- snprintf(name,sizeof name,"%s-good.kernel",id);path(out,sizeof out,work,name);r=ek_link((unsigned)good_arch,out,good,ng,why,sizeof why);snprintf(name,sizeof name,"%s.clean-recovery",id);ck(r.status==EK_OK&&!absent(out),name);if(r.status!=EK_OK)fprintf(stderr,"DETAIL\t%s\trecovery=%s\n",id,why);}
+ {int z=snprintf(name,sizeof name,"%s.clean-recovery",id);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};ck(rec,name);return ok&&rec;}
+static void assemble_to(const char *isa,const char *id,const char *text,char *obj,size_t cap){char src[4400],name[200];run_t x;{int z=snprintf(name,sizeof name,"%s.s",id);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};path(src,sizeof src,work,name);{int z=snprintf(name,sizeof name,"%s.o",id);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};path(obj,cap,work,name);save(src,text,strlen(text));product_as(isa,src,obj,&x);if(x.rc){fprintf(stderr,"%s",x.err);die("fixture assembly");}}
+static void link_neg(const char *id,int arch,const char *const *bad,int nb,const char *expect,int good_arch,const char *const *good,int ng){char out[4400],name[200],why[256];ek_result r;{int z=snprintf(name,sizeof name,"%s-bad.kernel",id);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};path(out,sizeof out,work,name);r=ek_link((unsigned)arch,out,bad,nb,why,sizeof why);
+ int ok=r.status==EK_REJECT&&strstr(why,expect)&&absent(out);if(!ok)fprintf(stderr,"DETAIL\t%s\tstatus=%d\twhy=%s\n",id,r.status,why);{int z=snprintf(name,sizeof name,"%s.named-refusal-no-output",id);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};ck(ok,name);
+ {int z=snprintf(name,sizeof name,"%s-good.kernel",id);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};path(out,sizeof out,work,name);r=ek_link((unsigned)good_arch,out,good,ng,why,sizeof why);{int z=snprintf(name,sizeof name,"%s.clean-recovery",id);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};ck(r.status==EK_OK&&!absent(out),name);if(r.status!=EK_OK)fprintf(stderr,"DETAIL\t%s\trecovery=%s\n",id,why);}
 static char *repeat_quads(int lines,const char *head,const char *tail){size_t cap=(size_t)lines*40+strlen(head)+strlen(tail)+16;char *s=malloc(cap);int i;size_t o;if(!s)die("alloc");o=(size_t)snprintf(s,cap,"%s",head);for(i=0;i<lines;i++){memcpy(s+o,".quad 0,0,0,0,0,0,0,0\n",22);o+=22;}snprintf(s+o,cap-o,"%s",tail);return s;}
 static void refusal(void){
  as_neg("x86-unsupported-directive-text","x86_64",".text\n.fill 4\n","directive not in the subset in .text",".text\n.byte 0,0,0,0\n","x86_64");
@@ -236,17 +236,17 @@ static void refusal(void){
  }
  /* AS-1/AS-8: the linker accepts any unit order, so order is a route property. Show that a
   * permutation of real canonical objects links to different bytes; the route refuses it. */
- {const char *fwd[11],*rev[11];char p[11][4400],o1[4400],o2[4400],why[256];int i;for(i=0;i<11;i++){char rel[300];snprintf(rel,sizeof rel,"x86_64/%s.o",units[i]);path(p[i],sizeof p[i],route,rel);fwd[i]=p[i];rev[10-i]=p[i];}
+ {const char *fwd[11],*rev[11];char p[11][4400],o1[4400],o2[4400],why[256];int i;for(i=0;i<11;i++){char rel[300];{int z=snprintf(rel,sizeof rel,"x86_64/%s.o",units[i]);if(z<0||(size_t)z>=sizeof rel){fprintf(stderr,"bound-format\n");exit(2);}};path(p[i],sizeof p[i],route,rel);fwd[i]=p[i];rev[10-i]=p[i];}
   path(o1,sizeof o1,work,"order-canonical.kernel");path(o2,sizeof o2,work,"order-reversed.kernel");ek_result a=ek_link(2,o1,fwd,11,why,sizeof why),b=ek_link(2,o2,rev,11,why,sizeof why);char h1[65]="",h2[65]="",hr[65]="";
   if(a.status==EK_OK)sha_file(o1,h1);if(b.status==EK_OK)sha_file(o2,h2);{char k[4400];path(k,sizeof k,route,"x86_64.kernel");sha_file(k,hr);}
   ck(a.status==EK_OK&&b.status==EK_OK&&!strcmp(h1,hr)&&strcmp(h1,h2),"linker-accepts-a-permutation-with-different-bytes(route-must-refuse)");}
 }
 static void route_cmd(char **extra,int ne,const char *outdir,run_t *x){char tool[4400];path(tool,sizeof tool,root,"tools/kernel-route.cx");char *v[32];int n=0,i;v[n++]=bound;v[n++]="50";v[n++]="sh";v[n++]=product;v[n++]=tool;v[n++]="--";v[n++]=root;v[n++]=(char *)outdir;for(i=0;i<ne;i++)v[n++]=extra[i];v[n]=0;run(v,x,52);}
 static void copy_asm(const char *dir,const char *mutate_unit,const char *prefix){char asmd[4400],p[4400],q[4400];int a,i;mkdir_new(dir);path(asmd,sizeof asmd,dir,"asm");mkdir_new(asmd);
- const char *hs[]={"layout.h","actions.h"};for(i=0;i<2;i++){size_t n;char rel[100];snprintf(rel,sizeof rel,"exec/c/asm/%s",hs[i]);path(p,sizeof p,root,rel);unsigned char *s=load(p,&n);path(q,sizeof q,asmd,hs[i]);save(q,s,n);free(s);}
+ const char *hs[]={"layout.h","actions.h"};for(i=0;i<2;i++){size_t n;char rel[100];{int z=snprintf(rel,sizeof rel,"exec/c/asm/%s",hs[i]);if(z<0||(size_t)z>=sizeof rel){fprintf(stderr,"bound-format\n");exit(2);}};path(p,sizeof p,root,rel);unsigned char *s=load(p,&n);path(q,sizeof q,asmd,hs[i]);save(q,s,n);free(s);}
  {size_t n;path(p,sizeof p,root,"exec/c/core.h");unsigned char *s=load(p,&n);path(q,sizeof q,dir,"core.h");save(q,s,n);free(s);}
- for(a=0;a<2;a++)for(i=0;i<11;i++){char name[200],rel[300];size_t n;snprintf(name,sizeof name,"%s_%s.S",units[i],isas[a]);snprintf(rel,sizeof rel,"exec/c/asm/%s",name);path(p,sizeof p,root,rel);unsigned char *s=load(p,&n);path(q,sizeof q,asmd,name);
-  if(mutate_unit&&!strcmp(name,mutate_unit)){size_t pl=strlen(prefix);unsigned char *m=malloc(n+pl);if(!m)die("alloc");memcpy(m,prefix,pl);memcpy(m+pl,s,n);save(q,m,n+pl);free(m);}else save(q,s,n);free(s);}}
+ for(a=0;a<2;a++)for(i=0;i<11;i++){char name[200],rel[300];size_t n;{int z=snprintf(name,sizeof name,"%s_%s.S",units[i],isas[a]);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};{int z=snprintf(rel,sizeof rel,"exec/c/asm/%s",name);if(z<0||(size_t)z>=sizeof rel){fprintf(stderr,"bound-format\n");exit(2);}};path(p,sizeof p,root,rel);unsigned char *s=load(p,&n);path(q,sizeof q,asmd,name);
+  if(mutate_unit&&!strcmp(name,mutate_unit)){size_t pl=strlen(prefix);unsigned char *m=malloc(n+pl);if(!m)die("alloc");{unsigned char *cxb_d=(unsigned char *)(m);const unsigned char *cxb_s=(const unsigned char *)(prefix);size_t cxb_n=(size_t)(pl),cxb_i;for(cxb_i=0;cxb_i<cxb_n;cxb_i++)cxb_d[cxb_i]=cxb_s[cxb_i];};{unsigned char *cxb_d=(unsigned char *)(m+pl);const unsigned char *cxb_s=(const unsigned char *)(s);size_t cxb_n=(size_t)(n),cxb_i;for(cxb_i=0;cxb_i<cxb_n;cxb_i++)cxb_d[cxb_i]=cxb_s[cxb_i];};save(q,m,n+pl);free(m);}else save(q,s,n);free(s);}}
 static void route_refusal(void){char out[4400],dir[4400],asmd[4400];run_t x;
  {char *e[]={"--isa","x86_64","--units","arith,transition,buffer,memory,intern,bytes,format,stack,action,run,bridge"};path(out,sizeof out,work,"order-permuted");route_cmd(e,4,out,&x);ck(x.rc==2&&strstr(x.err,"unit order differs from AS-1 canonical order")&&absent(out),"unit-order-permutation.named-refusal-no-output");if(x.rc!=2)fprintf(stderr,"DETAIL\t%s\n",x.err);}
  {char *e[]={"--isa","x86_64","--units","transition,arith,buffer,memory,intern,bytes,format,stack,action,run"};path(out,sizeof out,work,"order-missing-bridge");route_cmd(e,4,out,&x);ck(x.rc==2&&strstr(x.err,"unit order differs from AS-1 canonical order")&&absent(out),"unit-set-missing-bridge.named-refusal-no-output");}
@@ -270,25 +270,25 @@ static void pin_mutation(void){char out[4400],dir[4400],asmd[4400],src[4400],obj
   int caught=!x.rc&&h[0]&&strcmp(h,"4d6e45a11f00af6fd32adb2af1bc89ce942756d825c24f479a863262ace31957");if(caught)puts("REGRESSION_PIN_MISMATCH\tarm64\tmutated-S\tdetected-by-pin-not-by-an-oracle");ck(caught,"mutated-S-still-builds-and-differs-from-pin");}
  /* a byte-flipped canonical .s (an immediate changed) re-linked: same detection */
  {size_t n;unsigned char *s=route_file("x86_64","bridge","s",&n);char *hit=strstr((char *)s,"$0,");ck(hit!=0,"mutable-immediate-found");if(hit)hit[1]='1';path(src,sizeof src,work,"bridge-flip.s");save(src,s,n);free(s);
-  path(obj,sizeof obj,work,"bridge-flip.o");product_as("x86_64",src,obj,&x);const char *paths[11];char p[11][4400];int i;for(i=0;i<11;i++){char rel[300];snprintf(rel,sizeof rel,"x86_64/%s.o",units[i]);path(p[i],sizeof p[i],route,rel);paths[i]=p[i];}paths[10]=obj;
+  path(obj,sizeof obj,work,"bridge-flip.o");product_as("x86_64",src,obj,&x);const char *paths[11];char p[11][4400];int i;for(i=0;i<11;i++){char rel[300];{int z=snprintf(rel,sizeof rel,"x86_64/%s.o",units[i]);if(z<0||(size_t)z>=sizeof rel){fprintf(stderr,"bound-format\n");exit(2);}};path(p[i],sizeof p[i],route,rel);paths[i]=p[i];}paths[10]=obj;
   path(k,sizeof k,work,"flip.kernel");ek_result r=ek_link(2,k,paths,11,why,sizeof why);h[0]=0;if(r.status==EK_OK)sha_file(k,h);
   int caught=!x.rc&&r.status==EK_OK&&strcmp(h,"32cecc8a48dd6ccb30be186a161325a3537cce743291752eab427046ff262d97");if(caught)puts("REGRESSION_PIN_MISMATCH\tx86_64\tmutated-s\tdetected-by-pin-not-by-an-oracle");ck(caught,"mutated-s-still-builds-and-differs-from-pin");}}
 static void pins(void){table_t t;char p[4400];int i;path(p,sizeof p,golden,"kernels.tsv");table_load(p,&t);int seen=0;
  for(i=0;i<t.n;i++){row_t *r=&t.rows[i];if(r->nf!=5||!strcmp(r->f[0],"isa"))continue;char k[4400],h[65],name[200],rel[100];if(strcmp(r->f[3],"REGRESSION-PIN")){ck(0,"role-is-regression-pin");continue;}seen++;
-  snprintf(rel,sizeof rel,"%s.kernel",r->f[0]);path(k,sizeof k,route,rel);sha_file(k,h);size_t n;unsigned char *b=load(k,&n);free(b);
-  snprintf(name,sizeof name,"%s.route-kernel-equals-regression-pin",r->f[0]);ck(!strcmp(h,r->f[1])&&n==strtoull(r->f[2],0,10),name);
-  char obs[2048];snprintf(obs,sizeof obs,"%s",r->f[4]);char *c=obs;while(c&&*c){char *semi=strchr(c,';');if(semi)*semi=0;char f[4400];path(f,sizeof f,root,c);if(absent(f))printf("NOT_RUN\tpin-generation\t%s\tabsent-on-this-host\n",c);else{char g[65];sha_file(f,g);snprintf(name,sizeof name,"%s.stored-generation-equals-pin:%s",r->f[0],c);ck(!strcmp(g,r->f[1]),name);}c=semi?semi+1:0;}}
+  {int z=snprintf(rel,sizeof rel,"%s.kernel",r->f[0]);if(z<0||(size_t)z>=sizeof rel){fprintf(stderr,"bound-format\n");exit(2);}};path(k,sizeof k,route,rel);sha_file(k,h);size_t n;unsigned char *b=load(k,&n);free(b);
+  {int z=snprintf(name,sizeof name,"%s.route-kernel-equals-regression-pin",r->f[0]);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};ck(!strcmp(h,r->f[1])&&n==strtoull(r->f[2],0,10),name);
+  char obs[2048];{int z=snprintf(obs,sizeof obs,"%s",r->f[4]);if(z<0||(size_t)z>=sizeof obs){fprintf(stderr,"bound-format\n");exit(2);}};char *c=obs;while(c&&*c){char *semi=strchr(c,';');if(semi)*semi=0;char f[4400];path(f,sizeof f,root,c);if(absent(f))printf("NOT_RUN\tpin-generation\t%s\tabsent-on-this-host\n",c);else{char g[65];sha_file(f,g);{int z=snprintf(name,sizeof name,"%s.stored-generation-equals-pin:%s",r->f[0],c);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};ck(!strcmp(g,r->f[1]),name);}c=semi?semi+1:0;}}
  ck(seen==2,"two-pins");puts("BOUNDARY\tpins-detect-change-only;not-an-oracle;correctness-is-groups-i-to-v");free(t.rows);free(t.text);}
 int main(int argc,char **argv){
  if(argc!=5){fprintf(stderr,"usage: ROOT ROUTE_DIR NEW_ABS_OUT encoding|relocation|object|refusal|route-refusal|route-recovery|pin-mutation|coverage|pins\n");return 2;}
- if(!realpath(argv[1],root)||!realpath(argv[2],route)||argv[3][0]!='/'||strlen(argv[3])>=sizeof work)die("ROOT ROUTE_DIR NEW_ABS_OUT");snprintf(work,sizeof work,"%s",argv[3]);group_name=argv[4];
+ if(!realpath(argv[1],root)||!realpath(argv[2],route)||argv[3][0]!='/'||strlen(argv[3])>=sizeof work)die("ROOT ROUTE_DIR NEW_ABS_OUT");{int z=snprintf(work,sizeof work,"%s",argv[3]);if(z<0||(size_t)z>=sizeof work){fprintf(stderr,"bound-format\n");exit(2);}};group_name=argv[4];
  path(product,sizeof product,root,"unisacc.com");path(bound,sizeof bound,root,"tools/bound");path(golden,sizeof golden,root,"tests/asm-golden");
  {size_t rn=strlen(route);if(!strncmp(work,route,rn)&&(work[rn]=='/'||!work[rn]))die("NEW_ABS_OUT inside ROUTE_DIR");}
  char before[65],after[65];sha_file(product,before);route_material_applies();mkdir_new(work);
  const char *g=group_name;
  if(!strcmp(g,"encoding")){golden_rows("x86_64",0);golden_rows("arm64",0);}
  else if(!strcmp(g,"relocation")){golden_rows("x86_64",1);golden_rows("arm64",1);link_rows(0);kernel_recompute(0,1);kernel_recompute(1,1);}
- else if(!strcmp(g,"object")){int a,i;object_rows();link_rows(1);for(a=0;a<2;a++)for(i=0;i<11;i++){size_t n;char why[100]="",name[100];unsigned char *b=route_file(isas[a],units[i],"o",&n);int ok=as6_layout(b,n,a==1,why,sizeof why);snprintf(name,sizeof name,"as6-layout.%s.%s",isas[a],units[i]);ck(ok,name);if(!ok)fprintf(stderr,"DETAIL\t%s\t%s\n",name,why);free(b);}kernel_recompute(0,0);kernel_recompute(1,0);}
+ else if(!strcmp(g,"object")){int a,i;object_rows();link_rows(1);for(a=0;a<2;a++)for(i=0;i<11;i++){size_t n;char why[100]="",name[100];unsigned char *b=route_file(isas[a],units[i],"o",&n);int ok=as6_layout(b,n,a==1,why,sizeof why);{int z=snprintf(name,sizeof name,"as6-layout.%s.%s",isas[a],units[i]);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};ck(ok,name);if(!ok)fprintf(stderr,"DETAIL\t%s\t%s\n",name,why);free(b);}kernel_recompute(0,0);kernel_recompute(1,0);}
  else if(!strcmp(g,"refusal"))refusal();
  else if(!strcmp(g,"route-refusal"))route_refusal();
  else if(!strcmp(g,"route-recovery"))route_recovery();
