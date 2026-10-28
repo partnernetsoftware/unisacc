@@ -1,0 +1,93 @@
+/* Source-first front door for the explicit CX0 + model pipeline.
+ * --profile FILE --out NEW_ABS_OUT [--emit] SOURCE... [-- PROGRAM_ARGS...]
+ * CXDRIVER1 profile: Target, HeaderRoot, Streams, E2Adapter, StageAdapter,
+ * Product, Pipeline; optional repeated ResourceRoot. Paths are absolute.
+ * No ambient header roots, manual resource manifest or old compiler fallback. */
+#pragma unisa use cx0.bundle
+#pragma unisa use cxlib.netpack
+typedef struct {char *target,*headers,*streams,*e2,*stage,*product,*pipeline,*roots[16];int nr;} Profile;
+static long long deadline;
+static size_t resource_bytes;
+static int resource_count,resource_entries;
+static cxb_input resources[2048];
+static void die(const char *reason,const char *detail){fprintf(stderr,"cx-driver: %s: %s errno=%d\n",reason,detail?detail:"-",errno);exit(2);}
+static long long now(void){struct timespec t={0};
+#if defined(__UNISA__) && defined(__linux__) && defined(__x86_64__)
+ long rc=__syscall6(228,1,(long)&t,0,0,0);if(_unisa_ret(rc))die("monotonic-clock",0);
+#else
+ extern int clock_gettime(int,struct timespec *);if(clock_gettime(1,&t))die("monotonic-clock",0);
+#endif
+ if(t.tv_sec<0||t.tv_nsec<0||t.tv_nsec>=1000000000L)die("monotonic-clock-range",0);return (long long)t.tv_sec*1000000000LL+t.tv_nsec;
+}
+static int remaining(void){long long left=deadline-now();if(left<1000000000LL)die("total-budget-exhausted",0);int n=(int)(left/1000000000LL);return n<45?n:45;}
+static char *copy(const char *s){char *p=malloc(strlen(s)+1);if(!p)die("allocation",0);strcpy(p,s);return p;}
+static void join(char *p,const char *a,const char *b){int z=snprintf(p,4400,"%s/%s",a,b);if(z<0||z>=4400)die("path-bound",b);}
+static int under(const char *p,const char *root){size_t n=strlen(root);if(n==1&&root[0]=='/')return p[0]=='/';return !strncmp(p,root,n)&&(!p[n]||p[n]=='/');}
+static char *regular(const char *path,size_t limit,size_t *n){
+ remaining();int fd=open(path,O_RDONLY|O_NONBLOCK|O_NOFOLLOW);if(fd<0)die("input-open",path);struct stat a,b;
+ if(fstat(fd,&a)||!S_ISREG(a.st_mode)||a.st_size<0||(size_t)a.st_size>limit){close(fd);die("bounded-regular-input",path);}
+ *n=(size_t)a.st_size;char *p=malloc(*n+1);if(!p){close(fd);die("allocation",path);}size_t at=0;
+ while(at<*n){ssize_t z=read(fd,p+at,*n-at);if(z<0&&errno==EINTR)continue;if(z<=0)die("input-read",path);at+=(size_t)z;remaining();}
+ char tail;ssize_t z;do{z=read(fd,&tail,1);}while(z<0&&errno==EINTR);int bad=z||fstat(fd,&b)||a.st_size!=b.st_size||a.st_dev!=b.st_dev||a.st_ino!=b.st_ino;if(close(fd))bad=1;if(bad)die("input-changed-or-close",path);p[*n]=0;return p;
+}
+static void save(const char *path,const void *p,size_t n){remaining();int fd=open(path,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,0600);if(fd<0)die("exclusive-output",path);size_t at=0;int bad=0;while(at<n){ssize_t z=write(fd,(const char *)p+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0){bad=1;break;}at+=(size_t)z;}if(fsync(fd))bad=1;if(close(fd))bad=1;if(bad){unlink(path);die("output-write-or-close",path);}}
+static char *resolve(const char *path,int directory){char p[4096];struct stat st;if(!path||path[0]!='/'||strpbrk(path,"\t\r\n")||!realpath(path,p))die("absolute-existing-path-required",path);if(lstat(p,&st)||(directory?!S_ISDIR(st.st_mode):!S_ISREG(st.st_mode)))die("profile-path-kind",path);return copy(p);}
+static void singleton(char **field,char *value){if(*field)die("duplicate-profile-field",value);*field=value;}
+static Profile profile(char *text,size_t n){
+ Profile p={0};if(n>65536||memchr(text,0,n)||n<10||memcmp(text,"CXDRIVER1\n",10))die("profile-version-or-size",0);char *line=text+10;
+ while(*line){char *end=strchr(line,'\n');if(!end)die("profile-final-newline",0);*end=0;if(*line&&*line!='#'){char *value=strchr(line,'\t');if(!value)die("profile-fields",line);*value++=0;if(!*value||strpbrk(value,"\r\t"))die("profile-fields",line);
+  if(!strcmp(line,"Target"))singleton(&p.target,value);else if(!strcmp(line,"HeaderRoot"))singleton(&p.headers,value);else if(!strcmp(line,"Streams"))singleton(&p.streams,value);else if(!strcmp(line,"E2Adapter"))singleton(&p.e2,value);else if(!strcmp(line,"StageAdapter"))singleton(&p.stage,value);else if(!strcmp(line,"Product"))singleton(&p.product,value);else if(!strcmp(line,"Pipeline"))singleton(&p.pipeline,value);else if(!strcmp(line,"ResourceRoot")){if(p.nr==16)die("resource-root-count",0);p.roots[p.nr++]=value;}else die("unknown-profile-field",line);
+ }line=end+1;}
+ if(!p.target||!p.headers||!p.streams||!p.e2||!p.stage||!p.product||!p.pipeline)die("missing-profile-field",0);
+ if(strcmp(p.target,"lnx/x86_64"))die("unsupported-target",p.target);
+ p.headers=resolve(p.headers,1);p.streams=resolve(p.streams,1);p.e2=resolve(p.e2,0);p.stage=resolve(p.stage,0);p.product=resolve(p.product,0);p.pipeline=resolve(p.pipeline,0);
+ for(int i=0;i<p.nr;i++){p.roots[i]=resolve(p.roots[i],1);for(int j=0;j<i;j++)if(under(p.roots[i],p.roots[j])||under(p.roots[j],p.roots[i]))die("overlapping-resource-roots",p.roots[i]);}
+ return p;
+}
+static int compare(const void *a,const void *b){return strcmp(*(char *const *)a,*(char *const *)b);}
+static void walk(const char *base,const char *relative,int kind,int depth){
+ remaining();if(depth>24)die("resource-depth",base);char absolute[4400];if(*relative)join(absolute,base,relative);else{if(strlen(base)>=sizeof absolute)die("path-bound",base);strcpy(absolute,base);}struct stat st;
+ if(lstat(absolute,&st))die("resource-stat",absolute);
+ if(S_ISDIR(st.st_mode)){
+  DIR *d=opendir(absolute);if(!d)die("resource-directory-open",absolute);char **names=calloc(2048,sizeof *names);if(!names)die("allocation",0);int count=0;struct dirent *e;errno=0;
+  while((e=readdir(d))){if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;if(count==2048||resource_entries++==4096)die("directory-entry-count",absolute);if(strpbrk(e->d_name,"\t\r\n"))die("resource-name",e->d_name);names[count++]=copy(e->d_name);errno=0;}
+  if(errno)die("resource-directory-read",absolute);if(closedir(d))die("resource-directory-close",absolute);qsort(names,(size_t)count,sizeof *names,compare);
+  for(int i=0;i<count;i++){char next[4400];if(*relative)join(next,relative,names[i]);else strcpy(next,names[i]);walk(base,next,kind,depth+1);free(names[i]);}free(names);return;
+ }
+ if(!S_ISREG(st.st_mode))die("resource-nonregular-or-symlink",absolute);
+ if(resource_count==2048)die("resource-count",absolute);const char *logical=kind==1?relative:absolute;if(!*logical||strlen(logical)>4095)die("resource-name",absolute);
+ for(int i=0;i<resource_count;i++)if(resources[i].kind==kind&&!strcmp(resources[i].name,logical))die("duplicate-resource",logical);
+ size_t n;char *bytes=regular(absolute,16777216,&n);if(n>33554432-resource_bytes)die("resource-total-bytes",absolute);resource_bytes+=n;
+ cxb_input *r=&resources[resource_count++];r->kind=kind;r->name=copy(logical);r->data=bytes;r->bytes=n;
+}
+static int seal_bounded(char **sources,int count,const char *interfaces,const cxb_options *options,const char *packet){
+ remaining();pid_t pid=fork();if(pid<0)die("seal-fork",0);
+ if(!pid){if(setpgid(0,0))_exit(2);cxb_result r=cxb_seal(sources,count,interfaces,options,resources,resource_count);if(r.status){fprintf(stderr,"cx-driver: seal: %s\n",r.why);_exit(r.status>0&&r.status<126?r.status:2);}save(packet,r.data,r.bytes);cxb_release(&r);_exit(0);}
+ setpgid(pid,pid);int status=0;for(;;){pid_t got=waitpid(pid,&status,WNOHANG);if(got==pid)break;if(got<0&&errno!=EINTR){kill(-pid,SIGKILL);kill(pid,SIGKILL);die("seal-wait",0);}if(now()>=deadline){kill(-pid,SIGKILL);kill(pid,SIGKILL);while(waitpid(pid,&status,0)<0&&errno==EINTR){}die("seal-total-budget-exhausted",0);}usleep(1000);}
+ if(!WIFEXITED(status))die("seal-signal",0);return WEXITSTATUS(status);
+}
+int main(int argc,char **argv){
+ deadline=now()+45000000000LL;char *profile_path=0,*output=0,*sources[64];int ns=0,emit=0,argstart=argc;
+ for(int i=1;i<argc;i++){
+  if(!strcmp(argv[i],"--")){argstart=i+1;break;}
+  if(!strcmp(argv[i],"--profile")||!strcmp(argv[i],"--out")){int isprofile=!strcmp(argv[i],"--profile");if(++i==argc)die("option-value-required",argv[i-1]);if(isprofile)singleton(&profile_path,argv[i]);else singleton(&output,argv[i]);}
+  else if(!strcmp(argv[i],"--emit")){if(emit)die("duplicate-emit",0);emit=1;}
+  else if(argv[i][0]=='-')die("unknown-option",argv[i]);else {if(ns==64)die("source-count",0);sources[ns++]=argv[i];}
+ }
+ if(!profile_path||!output||!ns||(emit&&argstart<argc))die("usage","--profile FILE --out NEW_ABS_OUT [--emit] SOURCE... [-- PROGRAM_ARGS...]");
+ if(output[0]!='/'||strlen(output)>400||strpbrk(output,"\t\r\n"))die("absolute-output-path",output);
+ char parent[4096],out[4400];strcpy(parent,output);char *slash=strrchr(parent,'/');if(!slash||!slash[1]||!strcmp(slash+1,".")||!strcmp(slash+1,".."))die("output-name",output);char *name=copy(slash+1);if(slash==parent)slash[1]=0;else *slash=0;char realparent[4096];if(!realpath(parent,realparent))die("output-parent",parent);join(out,realparent,name);free(name);
+ size_t pn;char *raw=regular(profile_path,65536,&pn),*parsed=malloc(pn+1);if(!parsed)die("allocation",0);memcpy(parsed,raw,pn+1);Profile p=profile(parsed,pn);
+ if(under(out,p.headers))die("output-inside-input-root",p.headers);for(int i=0;i<p.nr;i++)if(under(out,p.roots[i]))die("output-inside-input-root",p.roots[i]);
+ size_t total=0;for(int i=0;i<ns;i++){sources[i]=resolve(sources[i],0);size_t n;char *s=regular(sources[i],4194304,&n);free(s);if(n>16777216-total)die("source-total-bytes",sources[i]);total+=n;}
+ if(mkdir(out,0700))die("exclusive-output-directory",out);char file[4400],interfaces[4400],packet[4400],pipeline[4400],runout[4400];join(file,out,"profile.tsv");save(file,raw,pn);free(raw);
+ join(interfaces,out,"interfaces");if(mkdir(interfaces,0700))die("interface-directory",interfaces);
+ walk(p.headers,"",1,0);for(int i=0;i<p.nr;i++)walk(p.roots[i],"",2,0);
+ join(file,p.streams,"unisacc-stream1.com");size_t n;char *modelbytes=regular(file,67108864,&n),model[65];cx_sha256_hex(modelbytes,n,model);free(modelbytes);
+ cxb_options options={p.target,"unisa-c99-v1",model};join(packet,out,"bundle.cxb");int sealrc=seal_bounded(sources,ns,interfaces,&options,packet);if(sealrc)return sealrc;remaining();
+ char *binary=regular(p.pipeline,67108864,&n);join(pipeline,out,"pipeline-executor");save(pipeline,binary,n);free(binary);if(chmod(pipeline,0700))die("pipeline-executable",pipeline);join(runout,out,"pipeline");
+ char **v=calloc((size_t)(argc-argstart)+12,sizeof *v);if(!v)die("allocation",0);int k=0;v[k++]=pipeline;if(emit)v[k++]="--emit";v[k++]=packet;v[k++]=p.streams;v[k++]=p.e2;v[k++]=p.stage;v[k++]=p.product;v[k++]=runout;if(argstart<argc){v[k++]="--";for(int i=argstart;i<argc;i++)v[k++]=argv[i];}
+ np_result result={0};char why[1200];char *env[]={"UNISA_ATTRIBUTES=","UNISACC_RF_CAPTURE=",0};if(np_run(v,0,env,remaining(),&result,why,sizeof why))die("pipeline-process",why);
+ if(result.outn)fwrite(result.out,1,result.outn,stdout);if(result.errn)fwrite(result.err,1,result.errn,stderr);int rc=result.rc;np_free(&result);free(v);
+ for(int i=0;i<resource_count;i++){free((void *)resources[i].name);free((void *)resources[i].data);}for(int i=0;i<ns;i++)free(sources[i]);free(parsed);return rc>=0&&rc<256?rc:2;
+}

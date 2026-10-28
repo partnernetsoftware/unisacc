@@ -1,0 +1,33 @@
+/* ROOT DRIVER STREAM_DIR E2_ADAPTER STAGE_ADAPTER PIPELINE PRODUCT NEW_ABS_OUT.
+ * The driver builds its own bundle and resource inventory from source+profile.
+ * Handwritten behavior gold; no cached test results or full compiler fallback. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use bundle
+static char root[4096],driver[4096],streams[4096],e2[4096],stage[4096],pipeline[4096],product[4096],work[4096],headers[4400],sources[4400];
+static int checks,failed;
+static void die(const char *s){fprintf(stderr,"driver-test: %s errno=%d\n",s,errno);exit(2);}
+static void ck(int ok,const char *s){checks++;if(!ok)failed++;printf("%s\tdriver.%s\n",ok?"PASS":"FAIL",s);}
+static void join(char *p,const char *a,const char *b){if(cx_path_join(p,4400,a,b))die("path-bound");}
+static void save(const char *name,const void *p,size_t n){char file[4400];join(file,work,name);if(cx_write(file,p,n))die("save");}
+static void text(const char *name,const char *s){save(name,s,strlen(s));}
+static void row(np_buf *b,const char *key,const char *value){np_puts(b,key);np_puts(b,"\t");np_puts(b,value);np_puts(b,"\n");}
+static void profile(const char *name,const char *target,const char *head,const char *extra,const char *tail){np_buf b={0};np_puts(&b,"CXDRIVER1\n");row(&b,"Target",target);row(&b,"HeaderRoot",head);row(&b,"Streams",streams);row(&b,"E2Adapter",e2);row(&b,"StageAdapter",stage);row(&b,"Pipeline",pipeline);row(&b,"Product",product);if(extra)row(&b,"ResourceRoot",extra);if(tail)np_puts(&b,tail);save(name,b.p,b.n);free(b.p);}
+static np_result run(const char *config,const char *out,const char *source,int emit,const char *arg,const char *option){char p[4400],o[4400],s[4400],why[1200];join(p,work,config);join(o,work,out);join(s,sources,source);char *v[15];int k=0;v[k++]=driver;v[k++]="--profile";v[k++]=p;v[k++]="--out";v[k++]=o;if(emit)v[k++]="--emit";if(option)v[k++]=(char *)option;v[k++]=s;if(arg){v[k++]="--";v[k++]=(char *)arg;}v[k]=0;np_result r={0};char *env[]={"UNISA_ATTRIBUTES=","UNISACC_RF_CAPTURE=",0};if(np_run(v,root,env,20,&r,why,sizeof why))die(why);char name[100];snprintf(name,sizeof name,"%s.stdout",out);save(name,r.out,r.outn);snprintf(name,sizeof name,"%s.stderr",out);save(name,r.err,r.errn);return r;}
+static void inspect_bundle(void){char file[4400],why[256],header[4400];join(file,work,"quoted/bundle.cxb");size_t n;char *bytes=cx_read(file,&n);cxb_bundle b={0};int ok=bytes&&!cxb_read(bytes,n,&b,why,sizeof why);ck(ok,"driver-seals-valid-cx0bnd1");free(bytes);int h=0,f=0;join(header,sources,"quoted.h");if(ok)for(int i=0;i<b.resource_count;i++){cxb_resource *r=b.resources+i;if(r->kind==1&&r->name_bytes==4&&!memcmp(r->name,"cx.h",4))h=1;if(r->kind==2&&r->name_bytes==strlen(header)&&!memcmp(r->name,header,r->name_bytes)&&r->bytes==strlen("#define QUOTED_VALUE 5\n")&&!memcmp(r->data,"#define QUOTED_VALUE 5\n",r->bytes))f=1;}ck(h&&f,"header-relative-and-file-absolute-resources");cxb_clear(&b);}
+int main(int argc,char **argv){
+ if(argc!=9||!realpath(argv[1],root)||!realpath(argv[2],driver)||!realpath(argv[3],streams)||!realpath(argv[4],e2)||!realpath(argv[5],stage)||!realpath(argv[6],pipeline)||!realpath(argv[7],product)||argv[8][0]!='/'||strlen(argv[8])>=sizeof work)die("usage ROOT DRIVER STREAMS E2 STAGE PIPELINE PRODUCT NEW_ABS_OUT");strcpy(work,argv[8]);if(mkdir(work,0700))die("exclusive-output");join(headers,work,"headers");join(sources,work,"sources");if(mkdir(headers,0700)||mkdir(sources,0700))die("fixture-directories");
+ text("headers/cx.h","#define HEADER_SEVEN 7\n");text("sources/one.cx","int main(void){return HEADER_SEVEN;}\n");text("sources/entry.cx","#pragma unisa use dep\nstatic int hidden(void){return 7;}\nint main(void){return hidden()+shown();}\n");text("sources/dep.cx","#pragma unisa module dep\nstatic int hidden(void){return 5;}\nint shown(void){return hidden();}\n");text("sources/quoted.h","#define QUOTED_VALUE 5\n");text("sources/quoted.c","#include \"quoted.h\"\nint main(void){return QUOTED_VALUE;}\n");text("sources/args.c","int main(int argc,char **argv){return argc+argv[1][0]-'a';}\n");text("sources/missing.cx","#pragma unisa use not_present\nint main(void){return 7;}\n");text("sources/real.cx","int main(void){return 7;}\n");
+ profile("local.tsv","lnx/x86_64",headers,sources,0);profile("foreign.tsv","lnx/arm64",headers,sources,0);profile("duplicate.tsv","lnx/x86_64",headers,sources,"Target\tlnx/x86_64\n");char realheaders[4400];join(realheaders,root,"include");profile("real.tsv","lnx/x86_64",realheaders,sources,0);
+ np_result r=run("local.tsv","single","one.cx",0,0,0);ck(r.rc==7&&!r.outn&&!r.errn,"single-cx-default-run-return7");np_free(&r);
+ r=run("local.tsv","module","entry.cx",0,0,0);ck(r.rc==12&&!r.outn&&!r.errn,"module-private-static-default-run-return12");np_free(&r);
+ r=run("local.tsv","quoted","quoted.c",0,0,0);ck(r.rc==5&&!r.outn&&!r.errn,"automatic-extra-root-quoted-header-return5");np_free(&r);inspect_bundle();
+ r=run("local.tsv","args","args.c",0,"abc",0);ck(r.rc==2&&!r.outn&&!r.errn,"runtime-arguments-and-status-preserved");np_free(&r);
+ r=run("local.tsv","emit","entry.cx",1,0,0);ck(!r.rc&&!r.errn&&strstr(r.out,"PREPARED"),"emit-prepares-image");np_free(&r);char image[4400];join(image,work,"emit/pipeline/program.elf");char *v[]={image,0},why[1000];if(np_run(v,root,0,5,&r,why,sizeof why))die(why);ck(r.rc==12&&!r.outn&&!r.errn,"emitted-image-independently-runs-return12");np_free(&r);
+ r=run("local.tsv","unknown","one.cx",0,0,"--unrecognized");ck(r.rc==2&&!r.outn&&strstr(r.err,"unknown-option"),"unknown-option-named-refusal");np_free(&r);
+ r=run("foreign.tsv","foreign","one.cx",0,0,0);ck(r.rc==2&&!r.outn&&strstr(r.err,"unsupported-target"),"unsupported-target-named-refusal");np_free(&r);
+ r=run("duplicate.tsv","duplicate","one.cx",0,0,0);ck(r.rc==2&&!r.outn&&strstr(r.err,"duplicate-profile-field"),"duplicate-profile-field-refused");np_free(&r);
+ r=run("local.tsv","missing","missing.cx",0,0,0);ck(r.rc==1&&!r.outn&&strstr(r.err,"no file"),"unknown-module-refusal-no-compiler-fallback");np_free(&r);
+ r=run("local.tsv","recovery","one.cx",0,0,0);ck(r.rc==7&&!r.outn&&!r.errn,"fresh-run-recovers-after-refusals");np_free(&r);
+ r=run("real.tsv","real-headers","real.cx",0,0,0);ck(r.rc==7&&!r.outn&&!r.errn,"repository-header-root-default-run-return7");np_free(&r);
+ printf("CX_DRIVER\tassertions=%d\tfailed=%d\n",checks,failed);return failed?1:0;
+}
