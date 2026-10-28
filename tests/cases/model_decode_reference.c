@@ -14,6 +14,10 @@ int main(int argc,char **argv) {
         printf(" ret=%d\n",RETS[i]);
         if(RETOK[i]) { printf("returns %d",i);for(int j=0;j<NS;j++)if(RETOK[i][j])printf(" %d",j);putchar('\n'); }
         if(ISNET||SMODE[i]==1)for(int j=0;j<ROWC[i];j++)printf("row %d %d %d %d\n",i,ROWK[i][j],ROWN[i][j],ROWQ[i][j]);
+        else {
+            int dn=ROWN[i][0],dq=ROWQ[i][0];printf("direct %d %d %d\n",i,dn,dq);
+            for(int j=1;j<257;j++)if(ROWN[i][j]!=dn||ROWQ[i][j]!=dq)printf("direct-entry %d %d %d %d\n",i,j,ROWN[i][j],ROWQ[i][j]);
+        }
     }
     Model m;model_capture(&m);model_release(&m);model_clear();return 0;
 }
