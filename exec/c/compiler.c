@@ -393,36 +393,26 @@ static int product_ar(int argc,char **argv) {
     }
     free(b); return 0;
 }
-static void argbytes(Buf *b, const char *s) {
-    while (*s) { bput(b,(unsigned char)*s,0); s++; }
-    bput(b,0,0);
-}
-/* The model receives separate defines/undefines resources. A later -D must
- * cancel earlier -U of the same exact name before those resources are grouped.
- * Keep malformed undef arguments intact so their existing model refusal runs. */
-static void cli_redefine(Buf *undefs, const char *definition) {
-    const char *equal = strchr(definition, '=');
-    size_t name_n = equal ? (size_t)(equal-definition) : strlen(definition);
-    long at=0, used=0;
-    while (at<undefs->n) {
-        long end=at; while (end<undefs->n && undefs->b[end]) end++;
-        if (end==undefs->n) die("malformed CLI undefine list");
-        size_t n=(size_t)(end-at);
-        if (n!=name_n || memcmp(undefs->b+at,definition,n)) {
-            memmove(undefs->b+used,undefs->b+at,n+1); used+=(long)n+1;
-        }
-        at=end+1;
-    }
-    undefs->n=used;
-}
+typedef struct { unsigned char *b; long n,cap; } CliBlock;
+int cxa_record(unsigned char **,long *,long *,const char *,char *,long);
+int cxa_line(unsigned char **,long *,long *,const char *,char *,long);
+int cxa_raw(unsigned char **,long *,long *,const unsigned char *,long,char *,long);
+int cxa_cancel(unsigned char **,long *,const char *,char *,long);
+int cxa_includes(const char *,const unsigned char *,long,const unsigned char *,long,const unsigned char *,long,const unsigned char **,long *,char *,long);
+static void args_check(int rc,const char *why) { if (rc) die(why); }
+static void argbytes(CliBlock *b,const char *s) { char why[96]; int rc=cxa_record(&b->b,&b->n,&b->cap,s,why,sizeof why); args_check(rc,why); }
+static void argline(CliBlock *b,const char *s) { char why[96]; int rc=cxa_line(&b->b,&b->n,&b->cap,s,why,sizeof why); args_check(rc,why); }
+static void argraw(CliBlock *b,const unsigned char *p,long n) { char why[96]; int rc=cxa_raw(&b->b,&b->n,&b->cap,p,n,why,sizeof why); args_check(rc,why); }
+static void cli_redefine(CliBlock *b,const char *s) { char why[96]; int rc=cxa_cancel(&b->b,&b->n,s,why,sizeof why); args_check(rc,why); }
 /* the forced-include list one unit is compiled with: a .cx unit's starts with its built-in prelude cx.h, and one
    that uses modules ends with their interfaces (cxm_lists, CX2a) */
-static Buf *cxm_lists;
-static void unit_includes(ResourceInput *r, const char *path, const Buf *plain, const Buf *withcx) {
-    size_t l=strlen(path); const Buf *b=(l>=3 && !strcmp(path+l-3,".cx")) ? withcx : plain;
+static CliBlock *cxm_lists;
+static void unit_includes(ResourceInput *r, const char *path, const CliBlock *plain, const CliBlock *withcx) {
     int u=cxm_lists ? cxm_find((char *)path) : -1;
-    if (u>=0 && cxm_ninc[u]) b=&cxm_lists[u];
-    r->data=b->b; r->len=b->n;
+    const CliBlock *unit=(u>=0 && cxm_ninc[u]) ? &cxm_lists[u] : 0;
+    const unsigned char *out; long n; char why[96];
+    int rc=cxa_includes(path,plain->b,plain->n,withcx->b,withcx->n,unit?unit->b:0,unit?unit->n:-1,&out,&n,why,sizeof why);
+    args_check(rc,why); r->data=out; r->len=(int)n;
 }
 static char *process_environment(int argc,char **argv,int i) {
 #ifdef __UNISA__
@@ -538,14 +528,14 @@ int main(int argc, char **argv) {
     int deponly=0, depphony=0, ndeptargets=0, sawc=0, funit=0, defrun=0;
     const char *host_symbols_path=0,*host_provider_path=0;
     const char **deptargets=xrealloc(0,argc*sizeof(char *)); int *depquoted=xrealloc(0,argc*sizeof(int));
-    int warnings=0; Buf werror={0}, errorlimit={0};
+    int warnings=0; Buf werror={0}; CliBlock errorlimit={0};
     const char **sources=xrealloc(0,argc*sizeof(char *)); int nsources=0;
-    Buf defs={0}, undefs={0}, forced={0}, incdir={0}, quotedir={0}, nostd={0}, libneed={0}, notrim={0};
+    CliBlock defs={0}, undefs={0}, forced={0}, incdir={0}, quotedir={0}; Buf nostd={0}, libneed={0}, notrim={0};
     if (argc>=2 && !strcmp(argv[1],"ar")) { if(rf_trace_finish())return 2;return product_ar(argc,argv); }   /* R17-3 */
     if (argc>=2 && !strcmp(argv[1],"as")) { if(rf_trace_finish())return 2;return product_as(argc,argv); }   /* R18-1 */
     if (argc>=2 && (!strcmp(argv[1],"nm") || !strcmp(argv[1],"objdump"))) { if(rf_trace_finish())return 2;return product_view(argc,argv); }   /* R18-4 */
     int sawS=0;
-    Buf srcres={0};                   /* \0cli/source: the main source path */
+    CliBlock srcres={0};                   /* \0cli/source: the main source path */
     /* Default mode is RUN (owner 2026-10-01, 0.0.17 R17-10): no mode or output
        flag at all means `-run`; a file is written only on request. */
     { int modeflag=0;
@@ -617,13 +607,13 @@ int main(int argc, char **argv) {
         else if (!strncmp(a,"-iquote",7)) {
             const char *value=a+7;
             if (!*value) { if (++i >= argc) return clierror("missing quote include path"); value=argv[i]; }
-            if (quotedir.n) bput(&quotedir,'\n',0); argbytes(&quotedir,value); quotedir.n--;
+            argline(&quotedir,value);
         }
         else if (!strcmp(a,"-I")) {
             if (++i >= argc) return clierror("missing include path"); INCDIR = argv[i];
-            if (incdir.n) bput(&incdir,'\n',0); argbytes(&incdir,INCDIR); incdir.n--;   /* every -I, in order (R13-0b #22) */
+            argline(&incdir,INCDIR);   /* every -I, in order (R13-0b #22) */
         } else if (a[0]=='-' && a[1]=='I' && a[2]) { INCDIR = a+2;
-            if (incdir.n) bput(&incdir,'\n',0); argbytes(&incdir,INCDIR); incdir.n--; }
+            argline(&incdir,INCDIR); }
         /* -l names are retained for host-library forwarding; -L and -x remain
            accepted compatibility options.  None is an input file name. */
         else if (a[0]=='-' && (a[1]=='l' || a[1]=='L' || a[1]=='x')) {
@@ -779,12 +769,13 @@ int main(int argc, char **argv) {
        Per unit: other units -- a .c beside it, the host-forwarding stub unit -- keep exactly the -include list.
        (No comment line here may begin with the include directive: -ftrim-libc's quotedinc() reads raw lines and a
        non-<...> one turns library trimming off for the whole unit -- it cost 45 KB per slice once.) */
-    Buf forced_cx={0}; argbytes(&forced_cx,"cx.h"); for (int k=0;k<forced.n;k++) bput(&forced_cx,forced.b[k],0);
-    fwd_plain_list=&forced;                      /* fwd_front: the forwarding unit has only the -include list */
+    CliBlock forced_cx={0}; argbytes(&forced_cx,"cx.h"); argraw(&forced_cx,forced.b,forced.n);
+    Buf forced_view={0}; forced_view.b=forced.b; forced_view.n=(int)forced.n;
+    fwd_plain_list=&forced_view;                  /* borrowed byte view for the forwarding unit */
     if (cxm_on && cxm_n) {                       /* a unit that uses modules: cx.h, -include, then the interfaces */
-        cxm_lists=xrealloc(0,cxm_n*sizeof(Buf)); memset(cxm_lists,0,cxm_n*sizeof(Buf));
+        cxm_lists=xrealloc(0,cxm_n*sizeof(CliBlock)); memset(cxm_lists,0,cxm_n*sizeof(CliBlock));
         for (int u=0;u<cxm_n;u++) if (cxm_ninc[u]) {
-            for (int k=0;k<forced_cx.n;k++) bput(&cxm_lists[u],forced_cx.b[k],0);
+            argraw(&cxm_lists[u],forced_cx.b,forced_cx.n);
             for (int k=0;k<cxm_ninc[u];k++) argbytes(&cxm_lists[u],cxm_incpath(u,k));
         }
     }
@@ -1355,11 +1346,9 @@ rr_run_replay:   /* multi-TU hit: the stub pass's post-host_compile tape, then i
         }
     }
     unpackage(); RI=0; NRI=0; ATTR_SLOT=-1;
-    free(defs.b); free(defs.at); free(undefs.b); free(undefs.at);
-    free(forced.b); free(forced.at); free(forced_cx.b); free(forced_cx.at); free(incdir.b); free(incdir.at);
-    if (cxm_lists) { for (int u=0;u<cxm_n;u++) { free(cxm_lists[u].b); free(cxm_lists[u].at); } free(cxm_lists); cxm_lists=0; }
-    free(quotedir.b); free(quotedir.at);
-    free(srcres.b); free(srcres.at);
+    free(defs.b); free(undefs.b); free(forced.b); free(forced_cx.b); free(incdir.b);
+    if (cxm_lists) { for (int u=0;u<cxm_n;u++) free(cxm_lists[u].b); free(cxm_lists); cxm_lists=0; }
+    free(quotedir.b); free(srcres.b); free(errorlimit.b);
     free(werror.b); free(werror.at);
     if (rc) return rc;
     if(rf_trace_finish())return 2;
