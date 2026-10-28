@@ -80,6 +80,14 @@ exec/facts，通用stage清单固定exec前缀，但模板路径来自清单展�
 完整APE上的原链接缺陷批仍4/1，唯一失败direct-C迟绑定合同冲突，其余静态拒绝与正序rc106均通过。
 这是未准入私有候选，不替换共享3a5b，不授外国宿主运行或完整发布资格。
 
+有限源码适用证明入口`tools/link-source-delta.cx`已实跑：对两冻结根逐项核对
+src/exec/unisa/include/weights/kernel/seed/iterate-kernel的完整目录名、类型/模式、普通文件字节、符号链接字面目标，
+只接受src/tapelink.c固定b9af154f→16925f64这对哈希，其余差异拒绝。
+实读1932文件/49目录/8符号链接，唯一允许差异1；witness
+a064ffa55512277cc8f51e7f0739ad08ef808a206b39aee87969a80458b07d94，rc0。
+交换根顺序实测rc2 unapproved-link-source-pair；证据source-delta*.stdout/stderr。
+该证据不是原子文件系统快照或完整仓库身份，也不单独授准入；默认ni_compare仍保持原拒绝。
+
 - 现象：`int used(void); int main(void){return used()+2;}` 经 `-c -b lnx/x86_64 -funit` 得 main.o 后，`unisacc -o img main.o`（或加只定义 `unused` 的归档、或直接 `-o img main.c`）rc 0 并写出镜像；运行 SIGSEGV（rc 139）。预期：`link: undefined reference to used`，rc≠0，无镜像。
 - 定位：src/tapelink.c:351 `tl_check_undef`（R20-3）只检查名字以 `g_` 开头的未定义外部（全局数据对象），函数外部不检查。
 - 同现：经典参考 REF 0ed46192 行为相同（共享缺陷，非回归）；产品==REF 字节差分仍有效，不阻塞候选 f3705dfa。
