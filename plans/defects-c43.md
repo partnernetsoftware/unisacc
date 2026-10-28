@@ -101,6 +101,15 @@ material-check-02.stdout实际rc0，原55秒预算不变；旧已装产品冒充
 tracked diff为空，原始源身份校验通过。记录位于out/c43-link-ape-01/unisacc.com.build.json，
 provenance{,-check}.stdout/stderr保留；这仍是构造身份记录，不冒称kind4原材料准入或已安装。
 
+实际两阶段开发安装完成：tools/link-candidate-install.cx每阶段重新调用有限candidate-check，
+固定旧产品/记录及新产品/记录SHA；prepare独占创建旧备份、暂存pair和绑定工具/检查输出的prepared.tsv；
+finish重核同一上下文、备份与暂存字节后两次rename并fsync，成功后写installed.tsv。
+prepare9653/finish78640均rc0，错误候选finish拒绝时共享仍3a5b，暂存仍4c28。
+共享现4c2831c3/record820b9ae4，installed.tsv SHA13a9f8102b7c018cffbce91a592fcd248fca0f392ca39306017a872ae57a67d2。
+旧备份out/c43-link-install-01/previous.com及记录保留。安装后缺陷批4/1（仅direct-C合同冲突），
+smoke16/0。源码身份指冻结8390；共享源码另有cxmod与stream-runtime后续改动为e4bf22ba，未混称包含。
+此新有限路径不是kind4原构造流程；没有补造历史107作业，没有签名或发布资格。
+
 - 现象：`int used(void); int main(void){return used()+2;}` 经 `-c -b lnx/x86_64 -funit` 得 main.o 后，`unisacc -o img main.o`（或加只定义 `unused` 的归档、或直接 `-o img main.c`）rc 0 并写出镜像；运行 SIGSEGV（rc 139）。预期：`link: undefined reference to used`，rc≠0，无镜像。
 - 定位：src/tapelink.c:351 `tl_check_undef`（R20-3）只检查名字以 `g_` 开头的未定义外部（全局数据对象），函数外部不检查。
 - 同现：经典参考 REF 0ed46192 行为相同（共享缺陷，非回归）；产品==REF 字节差分仍有效，不阻塞候选 f3705dfa。
