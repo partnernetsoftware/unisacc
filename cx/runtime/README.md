@@ -43,6 +43,13 @@ as an undefined host-forwarded declaration. It uses the same negative-syscall
 return/errno convention as the carried runtime. Other platforms and general
 host-library replacement remain unimplemented.
 
+`process_group_osx.cx` is a separate Darwin provider for explicitly linked
+units. Its syscall number is 82 in [XNU's syscall table](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/syscalls.master);
+the x86-64 form carries the BSD syscall class. The two calling conventions have
+host-side mocked tests, and both macOS architectures have been cross-linked
+with a lifecycle-module consumer. Native macOS execution is not measured.
+The runtime projection and product construction do not yet select this provider.
+
 `RuntimeProvider` currently selects a provider during assembly through C symbol
 names and generated declarations. This is the first slice of late binding. The
 next interface must let CX0 declare stable import IDs, type/ABI contracts and

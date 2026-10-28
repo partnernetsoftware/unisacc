@@ -1,0 +1,18 @@
+/* Simulated syscall gate; does not execute on Darwin. */
+#pragma unisa use runtime.process
+static void die(const char *s){fprintf(stderr,"process-group-osx: %s\n",s);exit(2);}
+static np_result call(char **v,const char *root){np_result r={0};char why[512];if(np_run(v,root,0,35,&r,why,sizeof why))die(why);return r;}
+int main(void){
+ char root[4096],bound[4400],src[4400],exe[512],badexe[512];char tmp[]="/tmp/cx-pgroup-osx-XXXXXX";
+ if(!realpath(".",root)||!mkdtemp(tmp)||cx_fmt(bound,sizeof bound,"%s/tools/bound",root)||cx_fmt(src,sizeof src,"%s/tests/cases/process_group_osx_mock.c",root)||cx_fmt(exe,sizeof exe,"%s/mock",tmp)||cx_fmt(badexe,sizeof badexe,"%s/bad",tmp))die("setup");
+ int failed=0;
+ for(int i=0;i<2;i++){
+  char *normal[]={bound,"30","/usr/bin/x86_64-linux-gnu-gcc-11","-std=c11","-O2","-w",src,"-o",exe,0};
+  char *arm[]={bound,"30","/usr/bin/x86_64-linux-gnu-gcc-11","-std=c11","-O2","-w","-DMOCK_ARM",src,"-o",exe,0};
+  np_result r=call(i?arm:normal,root);if(r.rc||r.errn)die("compile");np_free(&r);
+  char *v[]={bound,"10",exe,0};r=call(v,root);const char *want="PROCESS_GROUP_OSX_MOCK ok\n";size_t n=strlen(want);
+  int ok=!r.rc&&!r.errn&&r.outn==n&&!memcmp(r.out,want,n);printf("%s\t%s\n",ok?"PASS":"FAIL",i?"arm64-mock":"x86_64-mock");if(!ok)failed++;np_free(&r);
+ }
+ {char *bad[]={bound,"30","/usr/bin/x86_64-linux-gnu-gcc-11","-std=c11","-O2","-w","-DMOCK_NO_APPLE",src,"-o",badexe,0};np_result r=call(bad,root);struct stat st;errno=0;int ok=r.rc!=0&&r.err&&strstr(r.err,"process_group_osx_requires_darwin_x86_64_or_arm64")&&lstat(badexe,&st)!=0&&errno==ENOENT;printf("%s\treject-other-target\n",ok?"PASS":"FAIL");if(!ok)failed++;np_free(&r);}
+ if(cx_rmtree(tmp))die("cleanup");printf("CXPROCESS_GROUP_OSX\tfailed=%d\n",failed);return failed?1:0;
+}
