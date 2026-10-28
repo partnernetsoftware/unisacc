@@ -1,0 +1,18 @@
+#pragma unisa use runtime.model_decode
+static void *grow(void *p,size_t n){return realloc(p,n);}
+int main(int argc,char **argv){
+ if(argc!=2)return 2;char dir[4096],manifest[4400],path[4400],line[9000],expected[32][65];
+ if(!realpath(argv[1],dir)||cx_fmt(manifest,sizeof manifest,"%s/manifest.tsv",dir))return 2;
+ FILE *f=fopen(manifest,"rb");if(!f)return 2;int count=0;
+ while(fgets(line,sizeof line,f))if(!strncmp(line,"model\t",6)){int id;long len;if(count>=32||sscanf(line+6,"%d %ld %64s",&id,&len,expected[count])!=3||id!=count||len<=0)return 2;count++;}
+ if(ferror(f)||fclose(f)||count!=32)return 2;
+ long long bins[7]={0},states=0,thresholds=0;int maximum=0;
+ for(int i=0;i<count;i++){
+  if(cx_fmt(path,sizeof path,"%s/model-%03d.bin",dir,i))return 2;size_t n;char *b=cx_read(path,&n),hash[65];if(!b||n>2147483647UL)return 2;cx_sha256_hex(b,n,hash);if(strcmp(hash,expected[i]))return 2;
+  CxDecode d={0};d.allocate=grow;d.release=free;if(cxmd_decode(&d,(const unsigned char *)b,(long)n))return 2;
+  if(!d.model.isnet)return 2;
+  for(int q=0;q<d.model.ns;q++){int k=d.model.rowc[q];if(k<0)return 2;states++;thresholds+=k;if(k>maximum)maximum=k;int slot=k==0?0:k==1?1:k<=3?2:k<=7?3:k<=15?4:k<=31?5:6;bins[slot]++;}
+  cxml_release(&d.model,free);free(b);
+ }
+ printf("CORE_TRANSITION_SHAPES models=%d states=%lld thresholds=%lld max=%d bins_0_1_2to3_4to7_8to15_16to31_32plus=%lld,%lld,%lld,%lld,%lld,%lld,%lld\n",count,states,thresholds,maximum,bins[0],bins[1],bins[2],bins[3],bins[4],bins[5],bins[6]);return 0;
+}
