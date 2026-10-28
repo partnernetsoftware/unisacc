@@ -380,3 +380,4 @@ coverage中旧1/4缺陷描述改为本候选实际4/1及明确合同冲突，没
 
 - 批 `link-undefined-function` 在 4c2831c3 上 4/1：object-only、archive-without-definition、cross-archive-order（逆序拒绝 + 工作顺序 106）均转绿——`link: undefined reference to NAME` 已具名；**仅余 direct-c-route**（`-o img main.c`，直接 C 路线不经 tapelink 的未定义检查，cdx 提交注记 "retain direct-C gap"），仍 rc 0 + 崩溃镜像。triage #14 由 S2 降为"direct-C 路线一例开放"。
 - 其余红批在 4c2831c3 上计数与 f3705dfa 相同：driver-diagnostics 7/11、link-malformed-input 8/11、pp-negative 8/10、c-negative 20/43（日志 out/c43-cc-reg-3a5b-01/）。
+- 验收（2026-10-28 20:0x，Root b6f15e82 tapelink 候选）：批 link-malformed-input 10/1——坏魔数与截断对象两例已转具名拒绝；**仅余 tape 落尾 SEGV**（run.tape-falls-off-end.named-no-crash），cdx 另备 tools/tape-fallthrough-cases.cx 作独立合同。
