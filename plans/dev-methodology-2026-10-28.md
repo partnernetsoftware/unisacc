@@ -125,3 +125,11 @@
 - §14 追加组 `lower`（2026-10-28）：stream6（pin c89eabb6，与 STREAM5 同目录）对 stream-lower.cx 三夹具各跑两次字节相等且等于夹具字面；prop.bound.frame-256 的 lnx/x86_64 部分（300 B 与 320 B 帧，输出 898 117）执行通过，其余五目标仅编译 rc0，arm64 编码字节显式 UNVERIFIED，该格不能仅凭此换 PASS。12 PASS / 0 FAIL；批提案增 `properties-cases-lower`。关闭 prop.det.stream-replay.lower；properties 合计 77 PASS。
 - `lower` 组追加 REF 可选参数（2026-10-28 探测：产品与经典参考 /tmp/ua_ref 对 frame.c 在 lnx/x86_64、lnx/arm64、osx/arm64、win/arm64 的镜像字节相同）：六目标产品镜像逐字节等于参考镜像，作为 arm64 I-22 寻址编码的差分 oracle；13 PASS / 0 FAIL，UNVERIFIED 行仅在无 REF 时出现。prop.bound.frame-256 由此完整覆盖；REF 身份与 §12 同一告诫（正式换标须冻结导出 `make ref`）。
 - prop.bound.data-layout-mod8 探后延后：stream6 容器只出 lnx/x86_64 的 `@sym` 布局，产品无六目标 lowering 文本出口；六目标差分需 258 序列 × 6 目标 × 2 编译，远超单次 60 s，须另设计（或接受 stream6 单目标 + 产品镜像差分的降级口径，待裁定）。
+
+## 16. 事实生成用例六：optimization 矩阵 11 格（已实现：tools/opt-corpus-gen.cx）
+
+- 格（fable 子代理裁定 2026-10-28，矩阵未被 cdx 暂存）：corpus.{int64-edges, float-double, calls-abi, switch-dense, pointer-memory, large-frame, multi-tu}、closure.reference-tape、default.native-image、refusal.other-spellings、cross-target.compile-bounds（六旗×五外目标镜像等于参考，强于"容器边界有效"）；determinism.repeat-bytes 与 closure.o2-idempotence 引用 properties det/meta 同一观测。
+- oracle：每程序六旗（-O0 -O1 -O -O2 -O3 -Os）× 六目标：lnx/x86_64 镜像执行到手推字面（stdout+退出码），产品镜像逐字节等于经典参考镜像（REF 参数，`make ref` 冻结导出告诫同 §12）；守卫 O0 tape ≠ O2 tape。closure：产品 -O1/-O2 -S tape 等于参考 tape；无旗 -b 镜像等于 -O0 镜像并执行。cli：-Og/-Ofast/-O-1/-O4/-O5/-O1x 产品具名拒绝 "option not migrated" rc1 无镜像。
+- 2026-10-28 实跑（产品 94b549d1，REF /tmp/ua_ref；日志 out/c43-cc-opt-01；`corpus-N` 每程序一组 ≈28 s，两程序一组会到 56–60 s 故按程序切片）：9 组 = PASS 328（corpus 7×42、closure 28、cli 6）/ FAIL 0 / VACUOUS 0 / NOT_RUN 0。
+- 发现（记录）：经典参考对 -Og/-Ofast/-O-1/-O4/-O5/-O1x 静默接受并产出镜像（rc0、stderr 空），产品具名拒绝；矩阵行要求"具名拒绝或文档化别名"，产品满足，参考宽松——若参考被当 CLI oracle 须先裁定。
+- 延后：corpus.cc-differential（行声明宿主 cc 为 oracle，cx-only 下不可做，需改行为"经典参考"）、closure.o1-round-bound（内部不可观测）。批提案增 9 行（optimization-corpus-0..6、-closure、-cli，材料 `ref`）。
