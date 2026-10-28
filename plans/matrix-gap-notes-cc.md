@@ -59,3 +59,11 @@
 - 拒绝文本：stream-runtime.c:5 `#include "../exec/c/run.c"`，故 `readfile()` 的 `run: cannot open PATH: ENOENT|ENOTDIR|EACCES` + `cannot open input` 同产品（run.c:155-178）✓；目录作为 INPUT 可能 open 成功而在 read 失败，草稿按 INFO 记录 ✓。
 - 步数预算：容器是非产品构建，`UNISA_MAXSTEPS` 经 strtol 生效，status 3 打印 `step budget exhausted (budget N steps)`（run.c:1061-1069），execute() 返回 status 即进程 rc ✓；草稿已改为不传重复变量（91f6e33791）。
 - stream6/7 链：输入输出格式与 pin 见上节 ✓。未核：`UNISA_MAXSTEPS=abc` 被 strtol 变 0（已知产品外分支缺陷，queue 中 res.steps 行），草稿不触碰。
+
+## 附：窗口到来时的执行清单（更新 2026-10-28 15:5x，csr 转 cdx：ace3 冻结根 f3705dfa 已装，共享树仍 d65）
+
+1. 两份草稿首跑（stream-io-cases-gen ×2 容器、stream-semantics ×2）≈3 min，只修工具不登记。
+2. stream-e4-peep-0..7 重跑 ≈6 min（TABLE_SUSPECT 16→12）。
+3. B2 等价核 ≈3 min。
+4. 迁移准备：待共享树产品换到 ace3 根后，在冻结导出重跑 35 批到 out/c43-cc-reg-02，`tools/matrix-flip-gen.cx … --migrate d65c1474 <ace3 候选短 SHA> out/c43-cc-reg-02` 生成并 `--check`，再覆盖五张矩阵（≈12 min，可另开窗）。
+不授跨平台、不换标到未装候选。
