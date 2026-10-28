@@ -2,7 +2,8 @@
 /* Structural audit of one P1, P2, or P3 package span. The caller owns the
  * bytes and locates a UNIPKG1 footer separately. Stage route, name, in, and
  * out use the pword_owned alphabet. P1 and P2 extents must start with N.
- * That byte is not a network parse. P3 extents stay opaque. */
+ * That byte is not a network parse. P3 extents stay opaque. cxps_models
+ * borrows each P3 stored span during one walk and does not copy or retain it. */
 typedef struct { const unsigned char *p; long n; } CxpsField;
 static int blank(unsigned char c) {
     return c == ' ' || c == '\t' || c == '\r' || c == '\v' || c == '\f';
@@ -76,7 +77,9 @@ static int key_conflict(const unsigned char *d, long n, long at, int count, cons
     }
     return 0;
 }
-int cxps_audit(const unsigned char *data, long length, int *version) {
+static int walk(const unsigned char *data, long length, int *version,
+                int (*visit)(void *, const unsigned char *, long, long, unsigned long),
+                void *ctx) {
     CxpsField f[8]; int nf, ver, i; long at = 0, stage_at, res_at;
     unsigned long long nm, nd, nr, cap;
     if (!version || length < 0 || (length > 0 && !data)) return 1;
@@ -108,6 +111,11 @@ int cxps_audit(const unsigned char *data, long length, int *version) {
             if (!u64(&f[2], 2147483647ULL, &rawlen) || rawlen == 0) return 5;
             if (!u64(&f[3], 1, &codec) || codec != 1) return 5;
             if (!u64(&f[4], 4294967295ULL, &sum)) return 5;
+            if (visit) {
+                int stop = visit(ctx, data + at, (long)stored, (long)rawlen, (unsigned long)sum);
+                if (stop == 1) return 8;
+                if (stop) return 9;
+            }
         } else if (data[at] != 'N') return 5;
         at += (long)stored;
     }
@@ -125,4 +133,18 @@ int cxps_audit(const unsigned char *data, long length, int *version) {
     if (at != length) return 7;
     *version = ver;
     return 0;
+}
+int cxps_audit(const unsigned char *data, long length, int *version) {
+    return walk(data, length, version, 0, 0);
+}
+/* One walk. visit is required. It is called only for P3, with a borrowed
+ * stored span plus the declared raw length and checksum. Return 0 from visit
+ * to continue, 1 to interrupt (8), and any other nonzero to refuse (9).
+ * Failure leaves *version unchanged. No inflation or copy. */
+int cxps_models(const unsigned char *data, long length, int *version,
+                int (*visit)(void *ctx, const unsigned char *stored, long nstored,
+                             long rawlen, unsigned long crc),
+                void *ctx) {
+    if (!visit) return 1;
+    return walk(data, length, version, visit, ctx);
 }

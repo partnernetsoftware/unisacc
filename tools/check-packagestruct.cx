@@ -12,6 +12,37 @@ static void audit(const char *s, int want, int ver, const char *name) {
     int v = 9, rc = cxps_audit((const unsigned char *)s, (long)strlen(s), &v);
     ck(rc == want && (rc ? v == 9 : v == ver), name);
 }
+typedef struct {
+    int hits, stop_at, stop_rc;
+    long nstored[4], rawlen[4];
+    unsigned long crc[4];
+    unsigned char b0[4], b1[4];
+} Seen;
+static Seen seen;
+static void reset_seen(int stop_at, int stop_rc) {
+    int i;
+    seen.hits = 0; seen.stop_at = stop_at; seen.stop_rc = stop_rc;
+    for (i = 0; i < 4; i++) {
+        seen.nstored[i] = -1; seen.rawlen[i] = -1; seen.crc[i] = 0;
+        seen.b0[i] = 0; seen.b1[i] = 0;
+    }
+}
+static int on_model(void *ctx, const unsigned char *stored, long nstored,
+                    long rawlen, unsigned long crc) {
+    Seen *s = ctx; int i = s->hits;
+    if (i < 4 && stored) {
+        s->nstored[i] = nstored; s->rawlen[i] = rawlen; s->crc[i] = crc;
+        if (nstored > 0) s->b0[i] = stored[0];
+        if (nstored > 1) s->b1[i] = stored[1];
+    }
+    s->hits = i + 1;
+    if (s->stop_at >= 0 && i == s->stop_at) return s->stop_rc;
+    return 0;
+}
+static void models(const char *s, int want, int ver, int hits, const char *name) {
+    int v = 9, rc = cxps_models((const unsigned char *)s, (long)strlen(s), &v, on_model, &seen);
+    ck(rc == want && (rc ? v == 9 : v == ver) && seen.hits == hits, name);
+}
 int main(void) {
     int v = 9;
     audit("P 1 1 1\nD route stage in out 0\nM 4\nNxxx", 0, 1, "p1-leading-n");
@@ -45,6 +76,31 @@ int main(void) {
     audit("P 1 1 1\nD route stage in out 0\nM 1\nNF 1 1\nkV", 7, 0, "p1-no-resource-section");
     ck(cxps_audit(0, 1, &v) == 1 && v == 9, "null-data");
     ck(cxps_audit((const unsigned char *)"P", 1, 0) == 1, "null-version");
+    {
+        const char *three = "P 3 3 1 0\nD route stage in out 0\nM 2 4 1 11\nABM 1 8 1 22\nCM 3 9 1 33\nDEF";
+        audit(three, 0, 3, "p3-three-audit");
+        reset_seen(-1, 0);
+        models(three, 0, 3, 3, "p3-model-order");
+        ck(seen.nstored[0] == 2 && seen.nstored[1] == 1 && seen.nstored[2] == 3 &&
+           seen.rawlen[0] == 4 && seen.rawlen[1] == 8 && seen.rawlen[2] == 9 &&
+           seen.crc[0] == 11 && seen.crc[1] == 22 && seen.crc[2] == 33 &&
+           seen.b0[0] == 'A' && seen.b1[0] == 'B' && seen.b0[1] == 'C' &&
+           seen.b0[2] == 'D' && seen.b1[2] == 'E' && seen.nstored[3] == -1, "p3-model-fields");
+        reset_seen(-1, 0);
+        models("P 1 1 1\nD route stage in out 0\nM 1\nN", 0, 1, 0, "p1-models-uncalled");
+        reset_seen(-1, 0);
+        models("P 2 1 1 0\nD route stage in out 0\nM 1\nN", 0, 2, 0, "p2-models-uncalled");
+        reset_seen(1, 2);
+        models(three, 9, 0, 2, "p3-model-refuse");
+        ck(seen.nstored[0] == 2 && seen.nstored[1] == 1 && seen.nstored[2] == -1, "p3-model-refuse-stopped");
+        reset_seen(0, 1);
+        models(three, 8, 0, 1, "p3-model-interrupt");
+        ck(seen.nstored[0] == 2 && seen.nstored[1] == -1, "p3-model-interrupt-stopped");
+        reset_seen(-1, 0);
+        models("P 3 1 1 0\nD route stage in out 0\nM 1 1 1 0\nZ!", 7, 0, 1, "p3-model-trailing-keeps-version");
+        v = 9;
+        ck(cxps_models((const unsigned char *)three, (long)strlen(three), &v, 0, 0) == 1 && v == 9, "null-model-callback");
+    }
     printf("NOT_RUN\tp3-inflate-crc-uninet-full-network-text\n");
     printf("NOT_RUN\tfooter-slice-full-file-identity-library-link-builder\n");
     printf("CXPACKAGE_STRUCT\tfailed=%d\n", failed);
