@@ -154,6 +154,8 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 <a id="work-tree"></a>
 ### 思维树
 
+**FIFO 构造当前节点：** 冻结ab7fbdc810于仓外unisacc-epoch-fifo-ab7fbdc810，SID b2007a76；context61d040c6已PREPARED，tool-gen实跑rc0有收据。启动/已装仍e955；下一步核模型复用适用性与候选构造，不将context或工具准备记为产品通过。
+
 **FIFO 修复接续：** POSIX模型私有驱动五项5/0（7a90b9e2b3），经典参考驱动同五项0/1/1/0/1，FIFO具名拒绝且空stdout。宿主cxcc由grk跟进；Windows和已装e955不记已修。下一动作补宿主/平台验证及新产品构造安装。
 
 **CX0 当前验证（2026-10-28）：** e955 上正式 cx0-unit28/0、cx0-bundle38/0、cx0-e2 17/0；新提取七流与候选绑定44/0。fresh workspace读取器已构造。FIFO探针确认候选Linux切片读取无写端清单超过10秒；下一刀修cxm_rd非普通文件边界，原始证据out/c43-e955-cxpack-fifo-01/。严格清单仍19项未解决，不记完整发布通过。
@@ -373,6 +375,8 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 
 <a id="memory-palace"></a>
 ### 记忆宫殿
+
+**FIFO 冻结检查点：** source b2007a76e3fcb9b852dae5d8e28a058af5081ec6638a269373e01cb5fbfeaf7b；context61d040c692914254eb00d930bb83007bc51d5ced8e4cd1ad1a53cbb585b9ab20，路径unisacc-epoch-fifo-ab7fbdc810/out/epoch-context-01。tool-gen已完成；首次context因缺out父目录拒绝，out/c43-fifo-context-01.stderr保留，补目录后context-02成功。尚无FIFO新候选安装。
 
 **FIFO 当前证据：** out/c43-fifo-fixed-01.stdout模型私有5/0；out/c43-fifo-ref-*-01.*经典Linux五项通过；原超时out/c43-e955-cxpack-fifo-01/保留。已装仍e955，未替换；下述“待修”指已装产品，不能抹掉原失败。
 
