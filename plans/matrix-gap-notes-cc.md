@@ -88,3 +88,4 @@
 - 17:4x ccdiff-3（嵌套 struct 值传递、浮点格式化、静态局部+递归、二维数组、位运算、strtol/atoi、enum/offsetof、do-while/三目/复合字面量、指定初始化、整型提升与移位）：20/0，无分歧；批 `optimization-ccdiff-3`，冻结导出 unisacc-cc-f3705-b83873a86f 上 run-batch PASS @f3705dfa。累计差分 30 程序 × 2 级，产品与宿主 gcc 无分歧。
 - 17:5x ccdiff-4（inf/nan 与 printf 转换、string/stdlib 含 qsort/bsearch/div、struct 数组+union+long long switch、double→u64/float 舍入、混合 varargs、u64 除法、负下标、memcpy struct、算术右移）：10/0；批 `optimization-ccdiff-4`，冻结导出 unisacc-cc-f3705-cfbfa22d07 上 run-batch PASS @f3705dfa。累计差分 35 程序，产品与宿主 gcc 仅一处未指定行为分歧（字面量合并，plans/defects-c43.md 记为非缺陷）。
 - 17:5x 链接路线边界猎取（缺陷曾出于此）：8 项合同成立（私有同名不冲突、跨单元 extern 数据、重复 main/对象两次/未定义数据具名拒绝、归档重复成员容忍、空归档、无 main 拒绝），批 `link-edge-cases` 8/0，冻结导出 unisacc-cc-f3705-c328960a2f 上 run-batch PASS @f3705dfa；发现一条诊断质量观察（无 main 的拒绝文本不具名）记入 plans/defects-c43.md。
+- 17:5x 同根第二现象：跨归档逆序（`m2.o B.a A.a`）静默链接成崩溃镜像；已加入批 `link-undefined-function`（现 1/4 红），defects 记录；补丁合入后应与 ld 一致转具名拒绝。
