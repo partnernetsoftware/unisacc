@@ -185,11 +185,28 @@ void dl_load(const char *path, dl_delta *d) {
     dl_jp = text; dl_jline = 1; dl_jv *root = dl_jparse();
     dl_jv *start = dl_jget(root, "start"), *states = dl_jget(root, "states"), *seqs = dl_jget(root, "seqs");
     if (!start || !states || !seqs || start->kind != DLJ_STR || states->kind != DLJ_OBJ || seqs->kind != DLJ_ARR) dl_die("delta shape: start/states/seqs");
-    d->nseq = seqs->n; d->seqs = dl_alloc((size_t)(d->nseq ? d->nseq : 1) * sizeof(dl_seq));
-    for (int i = 0; i < d->nseq; i++) dl_load_seq(d, &d->seqs[i], seqs->items[i]);
-    d->ns = states->n; d->s = dl_alloc((size_t)(d->ns ? d->ns : 1) * sizeof(dl_state)); memset(d->s, 0, (size_t)(d->ns ? d->ns : 1) * sizeof(dl_state));
-    for (int i = 0; i < d->ns; i++) { d->s[i].name = states->keys[i]; dl_mapset(states_ix, d->s[i].name, i); }
-    for (int i = 0; i < d->ns; i++) {
+    /* HALT is the generator's pseudo-target (seed/gen.c:1587-1616): an edge to it runs its sequence (a
+       REJECT) and has no next state; seed/tbl.c resolves it to -1. When a delta names HALT without
+       defining it, a sink state HALT is synthesized: total over 257 keys, each running REJECT "halt" and
+       staying put, so execution and static checks see an ordinary terminal. Deltas that never name HALT
+       load exactly as before. */
+    int halt_needed = 0;
+    for (int i = 0; i < states->n && !halt_needed; i++) {
+        if (!strcmp(states->keys[i], "HALT")) break;
+        dl_jv *st = states->items[i]; if (st->kind != DLJ_ARR || st->n != 2 || st->items[1]->kind != DLJ_OBJ) continue;
+        for (int k = 0; k < st->items[1]->n; k++) { dl_jv *e = st->items[1]->items[k]; if (e->kind == DLJ_ARR && e->n == 2 && e->items[0]->kind == DLJ_STR && !strcmp(e->items[0]->str, "HALT")) { halt_needed = 1; break; } }
+    }
+    for (int i = 0; i < states->n && halt_needed; i++) if (!strcmp(states->keys[i], "HALT")) halt_needed = 0;
+    d->nseq = seqs->n + halt_needed; d->seqs = dl_alloc((size_t)(d->nseq ? d->nseq : 1) * sizeof(dl_seq));
+    for (int i = 0; i < seqs->n; i++) dl_load_seq(d, &d->seqs[i], seqs->items[i]);
+    if (halt_needed) { dl_seq *hq = &d->seqs[seqs->n]; hq->n = 1; hq->a = dl_alloc(sizeof(dl_act)); memset(hq->a, 0, sizeof(dl_act)); hq->a[0].op = DL_REJECT; hq->a[0].s1 = "halt"; }
+    d->ns = states->n + halt_needed; d->s = dl_alloc((size_t)(d->ns ? d->ns : 1) * sizeof(dl_state)); memset(d->s, 0, (size_t)(d->ns ? d->ns : 1) * sizeof(dl_state));
+    for (int i = 0; i < states->n; i++) { d->s[i].name = states->keys[i]; dl_mapset(states_ix, d->s[i].name, i); }
+    if (halt_needed) {
+        int h = states->n; d->s[h].name = "HALT"; d->s[h].mode = 'b'; dl_mapset(states_ix, "HALT", h);
+        d->s[h].byte = dl_alloc(257 * sizeof(dl_edge)); for (int k = 0; k < 257; k++) { d->s[h].byte[k].next = h; d->s[h].byte[k].seq = &d->seqs[seqs->n]; }
+    }
+    for (int i = 0; i < states->n; i++) {
         dl_jv *st = states->items[i]; if (st->kind != DLJ_ARR || st->n != 2 || st->items[0]->kind != DLJ_STR || st->items[1]->kind != DLJ_OBJ) dl_die("state shape");
         const char *m = st->items[0]->str; dl_jv *row = st->items[1]; d->s[i].mode = m[0];
         if (m[0] != 'b' && m[0] != 'r' && m[0] != 't') dl_die("state mode");
