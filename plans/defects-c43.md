@@ -35,3 +35,8 @@
 ## 观察（诊断质量，低）：无 main 的链接拒绝文本不具名（2026-10-28 link-edge-cases）
 
 - `unisacc -o p a.o`（a.o 无 main）：rc 1、无镜像（合同满足），但 stderr 为 `reject: not covered: address or target declaration`，未说明"undefined reference to main"。建议 src 域所有者在 tl_check_undef 补丁同批加 `_start`/`main` 缺失的具名诊断。批 `link-edge-cases` 以 INFO 行记录现文本，不断言。
+
+### 同根第二现象：跨归档顺序（2026-10-28 17:5x，cc 探针）
+
+- `m2.o A.a B.a`（A 含 outer，B 含 inner，outer 调 inner）rc 0 且退出 106；`m2.o B.a A.a` 也 rc 0，镜像运行 SIGSEGV。原因：exec/c/compiler.c:401 / src/tapelink.c:446 归档按给定顺序各自扫到不动点，不回扫前面的归档（与 GNU ld 单遍语义相同——ld 在此情形报 `undefined reference to inner`），而未定义函数又不被 tl_check_undef 拦截，于是静默链接。上述补丁合入后此例转为具名拒绝（与 ld 一致）；是否改为跨归档回扫属产品合同选择，未要求。
+- 复现入口：批 `link-undefined-function` 行 `cross-archive-order.reversed-refused`（工作顺序行 `working-order` 断言 106，保证非空洞）。
