@@ -88,6 +88,13 @@ a064ffa55512277cc8f51e7f0739ad08ef808a206b39aee87969a80458b07d94，rc0。
 交换根顺序实测rc2 unapproved-link-source-pair；证据source-delta*.stdout/stderr。
 该证据不是原子文件系统快照或完整仓库身份，也不单独授准入；默认ni_compare仍保持原拒绝。
 
+统一入口`tools/link-candidate-check.cx`已实际跑通：固定旧产品3a5b/record0523、固定新候选4c28，
+直接提取两APE尾包并逐字比较为原PCff696；固定identity-helper新读两源身份，默认-run调用源码差分
+及34份JSON复验（绑定两工具源码和子输出SHA），结束再次核两源/启动产品/旧记录/候选身份。
+material-check-02.stdout实际rc0，原55秒预算不变；旧已装产品冒充候选的负控rc2 candidate。
+证据out/c43-link-ape-01/material-{check-02,wrong-candidate}.*。只输出有限材料适用CHECKED，
+尚未写产品build record、未两阶段安装；这不是完整发布资格或原始构造执行收据的重建。
+
 - 现象：`int used(void); int main(void){return used()+2;}` 经 `-c -b lnx/x86_64 -funit` 得 main.o 后，`unisacc -o img main.o`（或加只定义 `unused` 的归档、或直接 `-o img main.c`）rc 0 并写出镜像；运行 SIGSEGV（rc 139）。预期：`link: undefined reference to used`，rc≠0，无镜像。
 - 定位：src/tapelink.c:351 `tl_check_undef`（R20-3）只检查名字以 `g_` 开头的未定义外部（全局数据对象），函数外部不检查。
 - 同现：经典参考 REF 0ed46192 行为相同（共享缺陷，非回归）；产品==REF 字节差分仍有效，不阻塞候选 f3705dfa。

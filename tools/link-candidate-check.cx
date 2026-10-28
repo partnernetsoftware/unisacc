@@ -1,0 +1,33 @@
+/* Finite 353c -> 8390 candidate material check. No installation or release. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.kernelsha
+static char root[4096],origin[4096],source[4096],candidate[4096],generated[4096],product[4400];
+static np_buf evidence;
+static void die(const char *s){fprintf(stderr,"link-candidate-check: REFUSE %s\n",s);exit(2);}
+static void path(char *p,const char *a,const char *b){int n=snprintf(p,4400,"%s/%s",a,b);if(n<0||n>=4400)die("path-bound");}
+static char *readfile(const char *p,size_t *n){struct stat st;if(lstat(p,&st)||!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>268435456)die(p);char *s=cx_read(p,n);if(!s||*n!=(size_t)st.st_size)die("read-size");return s;}
+static void digest(const char *p,char h[65]){size_t n;char *s=readfile(p,&n);if(ks_sha256_hex(s,n,h))die("sha256");free(s);}
+static void row(const char *key,const char *value){np_puts(&evidence,key);np_puts(&evidence,"\t");np_puts(&evidence,value);np_puts(&evidence,"\n");}
+static void pin(const char *p,const char *expected,const char *label){char h[65];digest(p,h);if(strcmp(h,expected))die(label);row(label,h);}
+static void execute(char **v,const char *needle,int budget,const char *label){np_result r;char why[1400];if(np_run(v,root,0,budget,&r,why,sizeof why))die(why);if(r.rc||r.errn||!strstr(r.out,needle)){fprintf(stderr,"child %s rc=%d stderr=%.*s\n",label,r.rc,(int)r.errn,r.err);np_free(&r);die(label);}char h[65];if(ks_sha256_hex(r.out,r.outn,h))die("child-sha");row(label,h);np_free(&r);}
+static void embedded(const char *p,const char **body,size_t *bytes,char **owned){size_t n;char *s=readfile(p,&n);if(n<16||memcmp(s+n-16,"UNIPKG1\n",8))die("package-footer");unsigned long long z=0;for(int i=7;i>=0;i--)z=(z<<8)|(unsigned char)s[n-8+i];if(!z||z>n-16)die("package-extent");*body=s+n-16-(size_t)z;*bytes=(size_t)z;*owned=s;}
+int main(int argc,char **argv){
+ if(argc!=6||!realpath(argv[1],root)||!realpath(argv[2],origin)||!realpath(argv[3],source)||!realpath(argv[4],candidate)||!realpath(argv[5],generated)||!strcmp(origin,source))die("usage TOOL_ROOT ORIGIN_ROOT SOURCE_ROOT CANDIDATE GENERATED_JSON_DIR");
+ np_puts(&evidence,"link-candidate-material-check-v1\n");path(product,root,"unisacc.com");
+ pin(product,"3a5b76ab91ba2dc84085015e5b498cea701c5fe4f2e65c69c087d8e64447e34a","executing-bootstrap");
+ char baseline[4400],record[4400],helper[4400],delta[4400],compare[4400],jobs[4400];path(baseline,origin,"unisacc.com");path(record,origin,"unisacc.com.build.json");
+ pin(baseline,"3a5b76ab91ba2dc84085015e5b498cea701c5fe4f2e65c69c087d8e64447e34a","origin-product");
+ pin(record,"0523b6c7f7c166cd5a9ba67da422737e8b7601eafda44278cd1c72529656ea30","origin-record");
+ pin(candidate,"4c2831c3fa1c871f5abf9549bcfd1f98f46f61554639706f698ed3ebd680e5b0","candidate");
+ const char *a,*b;size_t an,bn;char *aa,*bb;embedded(baseline,&a,&an,&aa);embedded(candidate,&b,&bn,&bb);if(an!=bn||memcmp(a,b,an))die("embedded-package-changed");char ph[65];if(ks_sha256_hex(b,bn,ph)||strcmp(ph,"ff696253808d017b4ac81e353729c918eb5c96a7a78bf375f564baa2e40ef955"))die("package-pin");row("preserved-package",ph);free(aa);free(bb);
+ path(helper,origin,"out/epoch-kernel-01/identity-helper");pin(helper,"0b8f5ddadbc897a8f046595288a08b35c99f8de8945889e3b039d522fbab177e","identity-helper");
+ char *oi[]={helper,origin,0},*si[]={helper,source,0};execute(oi,"353cb1189bbdff746a11918584c13c86f74fd4e2a13314a79bf2fb016aadbe88\n",10,"origin-source");execute(si,"8390b60b0b8f40138c1da649a4cd55afa97edefc7a6eb0e8e88cb369d60f6549\n",10,"candidate-source");
+ path(delta,root,"tools/link-source-delta.cx");path(compare,root,"tools/generator-json-compare.cx");path(jobs,origin,"out/epoch-context-01/jobs");char dh[65],ch[65],after[65];digest(delta,dh);digest(compare,ch);row("delta-tool",dh);row("json-tool",ch);
+ char *dv[]={"sh",product,delta,"--",origin,source,0};execute(dv,"witness=a064ffa55512277cc8f51e7f0739ad08ef808a206b39aee87969a80458b07d94\n",20,"source-delta-observation");
+ char *cv[]={"sh",product,compare,"--",jobs,generated,0};execute(cv,"GENERATOR_JSON\tcount=34\tdifferent=0\twitness=9f1d7ec3076f65d812af21da912a192c5834caf46614070e06dc5386b1f118f4\n",35,"generator-observation");
+ digest(delta,after);if(strcmp(dh,after))die("delta-tool-changed");digest(compare,after);if(strcmp(ch,after))die("json-tool-changed");
+ execute(oi,"353cb1189bbdff746a11918584c13c86f74fd4e2a13314a79bf2fb016aadbe88\n",10,"origin-source-after");execute(si,"8390b60b0b8f40138c1da649a4cd55afa97edefc7a6eb0e8e88cb369d60f6549\n",10,"candidate-source-after");
+ pin(product,"3a5b76ab91ba2dc84085015e5b498cea701c5fe4f2e65c69c087d8e64447e34a","executing-bootstrap-after");pin(record,"0523b6c7f7c166cd5a9ba67da422737e8b7601eafda44278cd1c72529656ea30","origin-record-after");
+ pin(candidate,"4c2831c3fa1c871f5abf9549bcfd1f98f46f61554639706f698ed3ebd680e5b0","candidate-after");
+ if(fwrite(evidence.p,1,evidence.n,stdout)!=evidence.n)die("stdout");free(evidence.p);puts("CHECKED\tfinite-material-applicability\tNOT_INSTALLED_NOT_RELEASE_QUALIFIED");return 0;
+}
