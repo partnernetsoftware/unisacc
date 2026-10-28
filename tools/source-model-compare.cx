@@ -1,0 +1,50 @@
+/* Read-only JSON/record comparison, not source-DAG admission or NN testing.
+ * ROOT_CONTEXT ORIGIN_CONTEXT. Read only fixed files below each supplied
+ * canonical context; never follow a filename supplied by a record. A captured
+ * context may retain its original logical context/output labels, reported
+ * explicitly below. Single-writer input is required; no atomic/ABA claim. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.kernelsha
+static const char *smc_ids[]={"shared-e2","shared-e1","shared-e3","shared-e4","shared-o1","shared-prune","shared-nativeabi","lnx-arm64-lower","lnx-arm64-elf","lnx-x86_64-lower","lnx-x86_64-elf","osx-arm64-lower","osx-arm64-elf","osx-x86_64-lower","osx-x86_64-elf","win-arm64-lower","win-arm64-elf","win-x86_64-lower","win-x86_64-elf","warnparse","errorparse","warnunits","warnlex","tokenlex","tokenpp","warnpp-shared","object-lower-arm64","object-lower-x86_64","object-enc-arm64","object-enc-x86_64","tapecheck","hostsymbols","librarycontract","librarypartition"};
+typedef struct {char physical[4096],logical[4096],source[65],hash[65];} SmcContext;
+typedef struct {char hash[65],record[65];size_t n;mode_t mode;char *bytes;} SmcGen;
+static void smc_die(const char *reason,const char *path){fprintf(stderr,"source-model-compare: REFUSE %s path=%s errno=%d\n",reason,path?path:"-",errno);exit(2);}
+static void smc_path(char out[4400],const char *base,const char *leaf){if(cx_path_join(out,4400,base,leaf))smc_die("path-bound",base);}
+static void smc_lexical(const char *p){size_t n=strlen(p);if(!n||n>=4096||p[0]!='/'||p[n-1]=='/'||strpbrk(p,"\t\r\n")||strstr(p,"//")||strstr(p,"/../")||strstr(p,"/./")||(n>=3&&!strcmp(p+n-3,"/.."))||(n>=2&&!strcmp(p+n-2,"/.")))smc_die("absolute-clean-path",p);}
+static void smc_canonical(const char *p){char resolved[4400];smc_lexical(p);if(!realpath(p,resolved)||strcmp(p,resolved))smc_die("canonical-no-symlink-path",p);}
+static char *smc_read(const char *p,size_t maximum,size_t *n,mode_t *mode){
+ struct stat a,b;errno=0;if(lstat(p,&a))smc_die(errno==ENOENT?"input-absent":"input-stat",p);
+ if(!S_ISREG(a.st_mode)||a.st_size<=0||(unsigned long long)a.st_size>maximum)smc_die("bounded-nonempty-regular-input",p);smc_canonical(p);
+ int fd=open(p,O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC);if(fd<0||fstat(fd,&b)||a.st_dev!=b.st_dev||a.st_ino!=b.st_ino||a.st_size!=b.st_size)smc_die("input-descriptor",p);
+ *n=(size_t)a.st_size;char *s=malloc(*n+1);if(!s)smc_die("allocation",p);size_t at=0;
+ while(at<*n){ssize_t z=read(fd,s+at,*n-at);if(z<0&&errno==EINTR)continue;if(z<=0)smc_die("input-extent",p);at+=(size_t)z;}
+ char extra;ssize_t z;do{z=read(fd,&extra,1);}while(z<0&&errno==EINTR);
+ int bad=fstat(fd,&b)||a.st_dev!=b.st_dev||a.st_ino!=b.st_ino||a.st_size!=b.st_size||a.st_mode!=b.st_mode;int closed=close(fd);if(z||bad||closed)smc_die("input-changed-or-close",p);s[*n]=0;if(mode)*mode=a.st_mode;return s;
+}
+static void smc_hash(const char *s,size_t n,char out[65]){if(n>=1024){int rc=ks_sha256_hex(s,n,out);if(rc){fprintf(stderr,"kernel-sha256 rc=%d\n",rc);smc_die("digest-provider",0);}}else cx_sha256_hex(s,n,out);}
+static int smc_hex(const char *s){if(strlen(s)!=64)return 0;for(int i=0;i<64;i++)if(!((s[i]>='0'&&s[i]<='9')||(s[i]>='a'&&s[i]<='f')))return 0;return 1;}
+static void smc_wire(const char *s,size_t n,const char *p){if(!n||s[n-1]!='\n'||memchr(s,0,n)||memchr(s,'\r',n))smc_die("metadata-wire",p);}
+static void smc_field(const char *s,const char *key,char *out,size_t cap,const char *p){
+ int found=0;size_t k=strlen(key);for(const char *at=s;*at;){const char *end=strchr(at,'\n');if(!end)smc_die("metadata-line",p);size_t n=(size_t)(end-at);
+  if(n>k&&at[k]=='\t'&&!memcmp(at,key,k)){size_t v=n-k-1;if(found++||!v||v>=cap||memchr(at+k+1,'\t',v))smc_die("unique-bounded-field",p);memcpy(out,at+k+1,v);out[v]=0;}at=end+1;
+ }if(found!=1)smc_die("required-field",p);
+}
+static void smc_equal_field(const char *s,const char *key,const char *expected,const char *p){char value[4400];smc_field(s,key,value,sizeof value,p);if(strcmp(value,expected))smc_die(key,p);}
+static void smc_context(const char *arg,SmcContext *c){
+ smc_canonical(arg);struct stat st;if(lstat(arg,&st)||!S_ISDIR(st.st_mode))smc_die("context-directory",arg);strcpy(c->physical,arg);char p[4400];smc_path(p,arg,"context.tsv");size_t n;char *s=smc_read(p,65536,&n,0);smc_wire(s,n,p);
+ if(strncmp(s,"source-package-context-v1\n",26)&&strncmp(s,"source-package-context-v2\n",26))smc_die("context-schema",p);
+ smc_equal_field(s,"status","PREPARED_CONTEXT_ONLY",p);smc_field(s,"context",c->logical,sizeof c->logical,p);smc_lexical(c->logical);smc_field(s,"source",c->source,sizeof c->source,p);if(!smc_hex(c->source))smc_die("context-source-sha",p);smc_hash(s,n,c->hash);free(s);
+}
+static SmcGen smc_gen(const SmcContext *c,const char *id){
+ SmcGen g={0};char job[160],leaf[200],dir[4400],p[4400],logical[4400],expected[4400],h[65];int z=snprintf(job,sizeof job,"gen-%s",id);if(z<0||(size_t)z>=sizeof job)smc_die("job-bound",id);z=snprintf(leaf,sizeof leaf,"jobs/%s",job);if(z<0||(size_t)z>=sizeof leaf)smc_die("job-path-bound",id);smc_path(dir,c->physical,leaf);smc_path(logical,c->logical,leaf);smc_path(expected,logical,"result.json");
+ smc_path(p,dir,"record.tsv");size_t rn;char *record=smc_read(p,262144,&rn,0);smc_wire(record,rn,p);if(strncmp(record,"source-package-job-v1\n",22))smc_die("job-record-schema",p);
+ smc_equal_field(record,"status","PREPARED-no-test-result",p);smc_equal_field(record,"context",c->hash,p);smc_equal_field(record,"source",c->source,p);smc_equal_field(record,"job",job,p);smc_equal_field(record,"output",expected,p);smc_hash(record,rn,g.record);
+ smc_path(p,dir,"command.status");size_t sn;char *status=smc_read(p,128,&sn,0);if(sn!=5||memcmp(status,"rc\t0\n",5))smc_die("actual-command-not-rc0",p);smc_hash(status,sn,h);free(status);smc_equal_field(record,"command.status",h,p);
+ smc_path(p,dir,"result.json");g.bytes=smc_read(p,134217728,&g.n,&g.mode);smc_hash(g.bytes,g.n,g.hash);smc_equal_field(record,"output-sha",g.hash,p);free(record);return g;
+}
+int main(int argc,char **argv){
+ if(argc!=3){fputs("usage: ROOT_CONTEXT ORIGIN_CONTEXT\n",stderr);return 2;}SmcContext current={0},origin={0};smc_context(argv[1],&current);smc_context(argv[2],&origin);if(!strcmp(current.physical,origin.physical))smc_die("distinct-contexts-required",argv[1]);
+ np_buf b={0};np_puts(&b,"source-model-comparison-v1\nstatus\tOBSERVED-JSON-record-binding-only-not-DAG-admission-reuse-qualification-or-test-PASS\n");np_puts(&b,"current-context\t");np_puts(&b,current.physical);np_puts(&b,"\ncurrent-logical-context\t");np_puts(&b,current.logical);np_puts(&b,"\ncurrent-source\t");np_puts(&b,current.source);np_puts(&b,"\ncurrent-context-sha\t");np_puts(&b,current.hash);np_puts(&b,"\norigin-context\t");np_puts(&b,origin.physical);np_puts(&b,"\norigin-logical-context\t");np_puts(&b,origin.logical);np_puts(&b,"\norigin-source\t");np_puts(&b,origin.source);np_puts(&b,"\norigin-context-sha\t");np_puts(&b,origin.hash);np_puts(&b,"\nrecipe\tcomparison\tcurrent-bytes\torigin-bytes\tcurrent-sha256\torigin-sha256\tcurrent-record-sha256\torigin-record-sha256\tcurrent-mode\torigin-mode\n");
+ int same=0,diff=0;for(int i=0;i<34;i++){SmcGen a=smc_gen(&current,smc_ids[i]),o=smc_gen(&origin,smc_ids[i]);int equal=a.n==o.n&&!memcmp(a.bytes,o.bytes,a.n);if(equal)same++;else diff++;char line[700];int z=snprintf(line,sizeof line,"%s\t%s\t%lu\t%lu\t%s\t%s\t%s\t%s\t%o\t%o\n",smc_ids[i],equal?"SAME":"DIFF",(unsigned long)a.n,(unsigned long)o.n,a.hash,o.hash,a.record,o.record,(unsigned)(a.mode&07777),(unsigned)(o.mode&07777));if(z<0||(size_t)z>=sizeof line)smc_die("report-bound",smc_ids[i]);np_put(&b,line,(size_t)z);free(a.bytes);free(o.bytes);}
+ SmcContext after={0};smc_context(argv[1],&after);if(strcmp(after.hash,current.hash))smc_die("current-context-changed",argv[1]);smc_context(argv[2],&after);if(strcmp(after.hash,origin.hash))smc_die("origin-context-changed",argv[2]);char summary[120];int z=snprintf(summary,sizeof summary,"summary\tmodels=34\tsame=%d\tdiff=%d\tscope=comparison-only\n",same,diff);if(z<0||(size_t)z>=sizeof summary)smc_die("summary-bound",0);np_put(&b,summary,(size_t)z);if(fwrite(b.p,1,b.n,stdout)!=b.n||fflush(stdout))smc_die("report-write",0);free(b.p);return 0;
+}

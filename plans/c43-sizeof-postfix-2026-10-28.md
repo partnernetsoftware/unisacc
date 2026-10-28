@@ -188,3 +188,34 @@ state coverage UNMEASURED until a correctly framed input is supplied. The
 worker hit service capacity afterward; root did not infer its simulator exit
 code from the log or restart it. This auxiliary fixture error does not replace
 the actual private-package product evidence above.
+
+Regular construction now uses the immutable export
+`/home/devali/repos/unisacc-epoch-sizeof-e5bade1851`, observed source
+`353cb1189bbdff746a11918584c13c86f74fd4e2a13314a79bf2fb016aadbe88`,
+and saved f3705/63e7 bootstrap and record. Context preparation exited 0.
+The product-built `out/epoch-build-01/source-package-O0.elf` controller
+compilation exited 0 (session24118); each subsequent job still executes and
+verifies its own inputs and receipts. Tool-gen/tbl/net and all 34 gen jobs
+completed; the three differing recipes also completed tbl construction.
+
+`tools/source-model-compare.cx` ran through default `-run` (session97384,
+rc0, empty stderr), comparing actual JSON bytes and binding each JSON to its
+record, context and command status. The result is 31 SAME / 3 DIFF against
+the original f9 context: shared-e3, warnparse and errorparse differ. Evidence:
+`out/c43-sizeof-model-compare-01.stdout`. This is comparison evidence, not
+complete origin/current DAG verification, reuse admission or functional PASS.
+All three changed net jobs subsequently completed with actual rc0 and formal
+records: current material totals 43 jobs (3 tools, 34 gen, 3 tbl, 3 net).
+Private fixture mutations of output-sha and a JSON symlink were both rejected
+by the comparer with actual rc2 and their expected named errors; original
+contexts were not modified. Logs are `out/c43-model-compare-{badsha,symlink}-01.*`.
+The new execution profile, regular package and installation remain separate
+steps; the installed product is still f3705.
+
+The finite `f9-sizeof-v1` material role now records these observed identities;
+its 22-assertion role suite exited 0. This does not authorize execution with
+the ace3 profile. The writer's explicit unprepared-profile refusal was run
+through default `-run`: rc2, `material-profile-execution-anchors-UNPREPARED`
+(`out/c43-sizeof-writer-unprepared-01.*`). The reader selects current_spec for
+the current union and has the same unprepared-role boundary; its new branch
+has only been reviewed, not exercised against a new package yet.
