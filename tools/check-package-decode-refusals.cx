@@ -1,0 +1,43 @@
+#pragma unisa use runtime.package_decode
+#pragma unisa use runtime.process
+static int live;
+static void *grow(void *p,size_t n){void *q=realloc(p,n);if(q&&!p)live++;return q;}
+static void drop(void *p){if(p){live--;free(p);}}
+typedef struct {const char *name,*bytes,*why;} Example;
+int main(int argc,char **argv){
+ if(argc!=2&&argc!=3)return 2;char root[4096],dir[]="/tmp/cxpk-refuse-XXXXXX",source[4400],ref[4400],path[4400],bound[4400];
+ if(!realpath(argv[1],root)||!mkdtemp(dir))return 2;
+ if(cx_fmt(source,sizeof source,"%s/tests/cases/package_decode_reference.c",root)||cx_fmt(ref,sizeof ref,"%s/ref",dir)||cx_fmt(path,sizeof path,"%s/input",dir)||cx_fmt(bound,sizeof bound,"%s/tools/bound",root))return 2;
+ char *build[]={bound,"30","/usr/bin/x86_64-linux-gnu-gcc-11","-O2","-w","-ffunction-sections","-fdata-sections","-Wl,--gc-sections",source,"-o",ref,0};np_result r={0};char why[512];
+ if(np_run(build,root,0,35,&r,why,sizeof why)||r.rc||r.errn)return 2;np_free(&r);
+ const Example ex[]={
+  {"version","P 4 1 1\n","unknown package version"},
+  {"number","P 1 x 1\n","bad model number"},
+  {"overflow","P 1 2147483648 1\n","model index overflow"},
+  {"count","P 1 0 1\n","bad package count"},
+  {"resource-count","P 2 1 1 -1\n","bad resource count"},
+  {"stage-tag","P 1 1 1\nX r s in out 0\nM 1\nN","bad model tag"},
+  {"stage-name","P 1 1 1\nD r@ s in out 0\nM 1\nN","bad package name"},
+  {"stage-index","P 1 1 1\nD r s in out 1\nM 1\nN","bad package model index"},
+  {"duplicate-stage","P 1 1 2\nD r s in out 0\nD r s out end 0\nM 1\nN","duplicate package stage"},
+  {"stage-chain","P 1 1 2\nD r s in out 0\nD r t wrong end 0\nM 1\nN","package format mismatch"},
+  {"model-extent","P 1 1 1\nD r s in out 0\nM 9\nN","bad package model extent"},
+  {"model-sentinel","P 1 1 1\nD r s in out 0\nM 1\nX","package requires networks"},
+  {"compressed-header","P 3 1 1 0\nD r s in out 0\nM 1 1 0 0\nX","bad compressed model header"},
+  {"resource-extent","P 2 1 1 1\nD r s in out 0\nM 1\nNF 2 2\nab","bad resource extent"},
+  {"resource-duplicate","P 2 1 1 2\nD r s in out 0\nM 1\nNF 1 1\nabF 1 1\nac","duplicate resource name"},
+  {"trailing","P 1 1 1\nD r s in out 0\nM 1\nNX","trailing package data"}
+ };
+ int fails=0;for(int i=0;i<(int)(sizeof ex/sizeof ex[0]);i++){
+  size_t n=strlen(ex[i].bytes);FILE *f=fopen(path,"wb");if(!f||fwrite(ex[i].bytes,1,n,f)!=n||fclose(f))return 2;
+  CxPackageDecode d={0};d.allocate=grow;d.release=drop;int rc=cxpk_decode(&d,(const unsigned char *)ex[i].bytes,(long)n);
+  char *v[]={bound,"10",ref,path,0};if(np_run(v,root,0,12,&r,why,sizeof why))return 2;
+  char expect[256];int z=snprintf(expect,sizeof expect,"run: %s\n",ex[i].why);
+  int ok=rc&&d.why&&!strcmp(d.why,ex[i].why)&&!live&&r.rc==2&&r.outn==0&&z>=0&&(size_t)z==r.errn&&!memcmp(expect,r.err,r.errn);
+  if(argc==3){char *wv[]={bound,"10",argv[2],path,0};np_result wr={0};if(np_run(wv,root,0,12,&wr,why,sizeof why))return 2;
+   ok=ok&&wr.rc==2&&wr.outn==0&&(size_t)z==wr.errn&&!memcmp(expect,wr.err,wr.errn);np_free(&wr);}
+  if(!ok){fprintf(stderr,"FAIL %s cx=%s live=%d c_rc=%d c_err=%.*s\n",ex[i].name,d.why?d.why:"(none)",live,r.rc,(int)r.errn,r.err);fails++;}else printf("PASS %s\n",ex[i].name);
+  cxpl_release(&d.package,drop);np_free(&r);
+ }
+ unlink(path);unlink(ref);rmdir(dir);printf("CXPACKAGE_REFUSALS failed=%d\n",fails);return fails?1:0;
+}

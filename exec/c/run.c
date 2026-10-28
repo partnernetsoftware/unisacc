@@ -471,6 +471,15 @@ static void package_bind(const Package *p) {
 static void package_unbind(void) {
     PFILE = PB = 0; PN = PM = PS = PVER = 0; POFF = PLEN = PRAW = 0; PCRC = 0; STAGES = 0; RES = 0; NR = 0;
 }
+#ifdef UNISA_CX_PACKAGE_DECODE
+typedef struct {
+    const unsigned char *bytes; long length, at;
+    void *(*allocate)(void *,size_t); void (*release)(void *);
+    Package package; const char *why;
+} CxPackageDecode;
+int cxpk_decode(CxPackageDecode *,const unsigned char *,long);
+static void *package_decode_alloc(void *p,size_t n) { return UNISA_PACKAGE_REALLOC(p,n); }
+#endif
 /* Parse the open package file into p (p must be released/zeroed). The fd is
    consumed and closed. Every format edge is checked before any route runs. */
 static void package_parse(Package *p, long fd, const char *path) {
@@ -484,6 +493,13 @@ static void package_parse(Package *p, long fd, const char *path) {
         if (!packagefooter_locate_bytes(p->file, p->n, &footer)) die("bad or missing package footer");
         p->b += (int)footer.package_offset; p->n = (int)footer.package_length;
     }
+#ifdef UNISA_CX_PACKAGE_DECODE
+    CxPackageDecode d={0};d.allocate=package_decode_alloc;d.release=mfree;
+    if(cxpk_decode(&d,p->b,p->n))die(d.why?d.why:"invalid package input");
+    unsigned char *file=p->file;char *saved_path=p->path;FileStamp stamp=p->stamp;
+    *p=d.package;p->file=file;p->path=saved_path;p->stamp=stamp;
+    if(p->ver==3)crc_init();
+#else
     LBIN = 0; LB = p->b; LN = p->n; LP = 0;
     ltag('P'); int version = lint();
     if (version != 1 && version != 2 && version != 3) die("unknown package version");
@@ -528,6 +544,7 @@ static void package_parse(Package *p, long fd, const char *path) {
     }
     if (LP != LN) die("trailing package data");
     p->complete = 1;
+#endif
 }
 static long package_open(const char *path) {
     long fd = io_open(path);
