@@ -6,8 +6,8 @@
 #undef main
 #include <unistd.h>
 #include <fcntl.h>
-static int stage_write(int fd,const void *data,size_t n){const char *p=data;while(n){ssize_t z=write(fd,p,n);if(z>0){p+=z;n-=z;}else if(z<0&&errno==EINTR)continue;else return 2;}return 0;}
-static int stage_attributes(void){const char *p=getenv("UNISA_ATTRIBUTES");int fd,rc;if(!p||!*p||!ATTRS.n)return 0;fd=open(p,O_WRONLY|O_CREAT|O_TRUNC,0600);if(fd<0)return 2;rc=stage_write(fd,ATTRS.b,ATTRS.n);if(close(fd))rc=2;return rc;}
+int cxs_write(int,const void *,long);
+int cxs_attributes(const char *,const void *,long);
 int main(int argc,char **argv){
  const char *input=argc>1?argv[1]:"-",*source=argc>2?argv[2]:"stdin.c",*ap;unsigned char *bytes,*owned=0;int n,rc,framed;Buf in={0},out={0};static unsigned char one=1;static ResourceInput ri[5];static unsigned char rname[256];
  if(argc>4){fprintf(stderr,"usage: stream.com [INPUT|-] [SOURCE_LABEL] [INCLUDE_DIR]\n");return 2;}
@@ -27,5 +27,5 @@ int main(int argc,char **argv){
  model_clear();MODEL_LOADING=1;loadbytes(bytes,n);free(owned);LB=0;MODEL_LOADING=0;
  rc=execute(in.b,in.n,source,&out);free(in.b);if(rc){unload();unpackage();return rc;}
  if(!strcmp(STAGES[0].name,"e1")&&out.n>=16&&!memcmp(out.b,"USLATTR1",8)){Buf copy=out;copy.b=xrealloc(0,out.n);memcpy(copy.b,out.b,out.n);attr_strip(&copy);free(copy.b);}
- rc=stage_attributes();if(!rc)rc=stage_write(1,out.b,out.n);free(out.b);unload();unpackage();if(rc)fprintf(stderr,"stream: output or attributes write failed\n");return rc;
+ rc=cxs_attributes(getenv("UNISA_ATTRIBUTES"),ATTRS.b,ATTRS.n);if(!rc)rc=cxs_write(1,out.b,out.n);free(out.b);unload();unpackage();if(rc)fprintf(stderr,"stream: output or attributes write failed\n");return rc;
 }
