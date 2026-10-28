@@ -4,10 +4,11 @@
 #include <setjmp.h>
 #include <stdio.h>
 static jmp_buf trap;
-static void *owned[128]; static int nowned, calls, fail_at, invalid;
+static void *owned[128]; static int nowned, calls, fail_at, invalid, growth_attempted, growth_failed;
 static void *injected_realloc(void *p,size_t n) {
-    if(++calls==fail_at)return 0;
-    if(p)return 0; /* the minimal fixture does not grow an existing block */
+    calls++;if(p)growth_attempted++;
+    if(calls==fail_at){if(p)growth_failed++;return 0;}
+    if(p){for(int i=0;i<nowned;i++)if(owned[i]==p){void *q=realloc(p,n);if(q)owned[i]=q;return q;}invalid++;return 0;}
     void *q=malloc(n);if(!q)return 0;memset(q,0xa5,n);owned[nowned++]=q;return q;
 }
 static void injected_free(void *p) {
@@ -22,17 +23,29 @@ static void injected_free(void *p) {
 #include "../../exec/c/run.c"
 int main(void) {
     unsigned char data[]={'U','N','I','N','E','T','B','1','N',2,2,0,2,0,0,'S',0,'Q',0,'H',0,0,128,4,0,0,0};
-    int failures=0, success=0, tested=0;
-    for(int step=1;step<=32;step++) {
-        memset(owned,0,sizeof owned); nowned=calls=invalid=0;fail_at=step;model_clear();
+    char *large=malloc(140000);if(!large)return 2;
+    int used=snprintf(large,140000,"T 1 1 0 0 0\nQ 32769\n");
+    for(int i=0;i<32769;i++){memcpy(large+used,"1 7 ",4);used+=4;}
+    memcpy(large+used,"\nR 0 0 -1 0\n",12);used+=12;
+    int failures=0,tested[2]={0,0},complete=0,saw_growth_failure=0,saw_growth_success=0;
+    for(int fixture=0;fixture<2;fixture++) {
+      int success=0;
+      for(int step=1;step<=40;step++) {
+        memset(owned,0,sizeof owned); nowned=calls=invalid=growth_attempted=growth_failed=0;fail_at=step;model_clear();
         int jumped=setjmp(trap);
-        if(jumped)tested++;
-        if(!jumped){loadbytes(data,sizeof data);success=1;}
+        if(jumped)tested[fixture]++;
+        if(!jumped){loadbytes(fixture?(unsigned char *)large:data,fixture?used:(int)sizeof data);success=1;if(fixture&&(NQA!=65538||QLEN[0]!=32769||QA[65536]!=1||QA[65537]!=7))failures++;}
+        if(fixture&&growth_failed)saw_growth_failure++;
+        if(fixture&&success&&growth_attempted)saw_growth_success++;
         Model m;model_capture(&m);model_release(&m);model_clear();
         int leaks=0;for(int i=0;i<nowned;i++)if(owned[i]){free(owned[i]);leaks++;}
-        if(invalid||leaks){printf("FAIL step=%d invalid=%d leaks=%d\n",step,invalid,leaks);failures++;}
+        if(invalid||leaks){printf("FAIL fixture=%d step=%d invalid=%d leaks=%d\n",fixture,step,invalid,leaks);failures++;}
         if(success)break;
+      }
+      complete+=success;
     }
-    printf("MODEL_ALLOCATION_FAILURE failures=%d complete=%d injected=%d\n",failures,success,tested);
-    return failures||!success;
+    free(large);
+    if(saw_growth_failure!=1||saw_growth_success!=1)failures++;
+    printf("MODEL_ALLOCATION_FAILURE failures=%d complete=%d injected=%d,%d growth=%d,%d\n",failures,complete,tested[0],tested[1],saw_growth_failure,saw_growth_success);
+    return failures||complete!=2;
 }
