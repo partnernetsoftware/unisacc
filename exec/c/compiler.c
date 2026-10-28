@@ -62,18 +62,22 @@ static int tapebin_target(const char *target) {
     for(int i=0;i<6;i++)if(!strcmp(target,names[i]))return i+1;
     return 0;
 }
+int cxi_read(const char *,unsigned char **,long *,char *,long);
 /* Source IO has the public compiler diagnostic; package/resource IO keeps
    the runtime diagnostic. No source interpretation happens in this helper. */
 static unsigned char *source_read(const char *path, int *len) {
-    if (!strcmp(path,"-")) return readstream(0,"stdin",len);
-    long fd=io_open(path);
-    if (fd < 0) {
-        const char *reason=io_open_reason(fd);
-        fprintf(stderr,"unisacc: error: cannot open %s%s%s\n",path,reason?": ":"",reason?reason:"");
+    unsigned char *bytes=0; long length=0; char reason[128];
+    int rc=cxi_read(path,&bytes,&length,reason,sizeof reason);
+    if (rc==1) {
+        fprintf(stderr,"unisacc: error: cannot open %s%s%s\n",path,reason[0]?": ":"",reason);
         exit(1);
     }
-    unsigned char *bytes=readstream(fd,path,len);
-    if (io_close(fd)<0) die("close failed");
+    if (rc==2) { fprintf(stderr,"run: cannot read %s\n",!strcmp(path,"-")?"stdin":path); die("cannot read input"); }
+    if (rc==3) die("close failed");
+    if (rc==4) die("file too large");
+    if (rc==6) die("out of memory");
+    if (rc) die("bad input argument");
+    *len=(int)length;
     return bytes;
 }
 /* Transitional C caller of the independently compiled CX output module.
