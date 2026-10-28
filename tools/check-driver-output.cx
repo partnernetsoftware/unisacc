@@ -1,0 +1,118 @@
+/* Independent check for module output. Not a product driver.
+   tools/driver -> ../cx/driver. This unit consumes that module:
+   the resolver looks beside this file and follows the directory link.
+   Run one source: sh ./unisacc.com tools/check-driver-output.cx
+   Frozen module: cx/driver/output.cx sha256 ce92060c2a7a0e2a. */
+#pragma unisa use driver.output
+
+static int g_fail;
+
+static void note(int ok, const char *name) {
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", name);
+    if (!ok) g_fail = g_fail + 1;
+}
+
+static int same(const char *path, const char *text, long n) {
+    size_t got;
+    char *s;
+    int ok;
+    s = cx_read(path, &got);
+    ok = s && (long)got == n && !memcmp(s, text, (size_t)n);
+    free(s);
+    return ok;
+}
+
+static int residue(const char *dir) {
+    DIR *d;
+    struct dirent *e;
+    d = opendir(dir);
+    if (!d) return 1;
+    while ((e = readdir(d))) if (strstr(e->d_name, ".unisacc-")) { closedir(d); return 1; }
+    closedir(d);
+    return 0;
+}
+
+static int hardlink(const char *old, const char *neu) {
+#if defined(__linux__) && defined(__x86_64__)
+    return __syscall6(86, (long)old, (long)neu, 0, 0, 0) ? -1 : 0;
+#else
+    (void)old; (void)neu;
+    return -1;
+#endif
+}
+
+int main(void) {
+    char dir[64], path[160], other[160], linkpath[160], why[64], saved[160];
+    const char *hello = "hello\n";
+    const char *keep = "KEEP-OLD\n";
+    const char *neu = "NEW-BYTES\n";
+    struct stat st;
+    int rc;
+    g_fail = 0;
+    if (snprintf(dir, sizeof dir, "/tmp/cxoXXXXXX") < 0 || !mkdtemp(dir)) return 2;
+
+    snprintf(path, sizeof path, "%s/fresh", dir);
+    snprintf(saved, sizeof saved, "%s", path);
+    rc = cxo_write_file(path, hello, 6, why, (long)sizeof why);
+    note(rc == 0 && why[0] == 0 && same(path, hello, 6) && !strcmp(path, saved), "fresh");
+
+    snprintf(path, sizeof path, "%s/keep", dir);
+    rc = cxo_write_file(path, keep, 9, why, (long)sizeof why);
+    rc = cxo_write_file(path, neu, 10, why, (long)sizeof why);
+    note(rc == 0 && same(path, neu, 10), "replace");
+
+    snprintf(path, sizeof path, "%s/inode", dir);
+    snprintf(other, sizeof other, "%s/alias", dir);
+    rc = cxo_write_file(path, keep, 9, why, (long)sizeof why);
+#if defined(__linux__) && defined(__x86_64__)
+    if (hardlink(path, other)) note(0, "hardlink");
+    else {
+        rc = cxo_write_file(other, neu, 10, why, (long)sizeof why);
+        note(rc == 0 && same(path, keep, 9) && same(other, neu, 10), "hardlink");
+    }
+#else
+    note(1, "hardlink-skip");
+#endif
+
+    snprintf(path, sizeof path, "%s/target", dir);
+    snprintf(linkpath, sizeof linkpath, "%s/link", dir);
+    rc = cxo_write_file(path, keep, 9, why, (long)sizeof why);
+    if (symlink(path, linkpath) == 0) {
+        rc = cxo_write_file(linkpath, neu, 10, why, (long)sizeof why);
+        note(rc == 0 && !lstat(linkpath, &st) && S_ISLNK(st.st_mode) && same(path, neu, 10), "symlink");
+    } else note(0, "symlink");
+
+    rc = cxo_write_file("/dev/null", hello, 6, why, (long)sizeof why);
+    note(rc == 0 && !lstat("/dev/null", &st) && S_ISCHR(st.st_mode), "dev-null");
+    rc = cxo_write_file("/dev/full", hello, 6, why, (long)sizeof why);
+    note(rc == 2 && why[0] && strstr(why, "short output write") && !lstat("/dev/full", &st) && S_ISCHR(st.st_mode), "dev-full");
+
+    if (geteuid() != 0) {
+        char parent[160];
+        snprintf(parent, sizeof parent, "%s/ro", dir);
+        snprintf(path, sizeof path, "%s/ro/existing", dir);
+        rc = 0;
+        if (mkdir(parent, 0700) || cxo_write_file(path, keep, 9, why, (long)sizeof why) || chmod(parent, 0500)) rc = 1;
+        else {
+            int w = cxo_write_file(path, neu, 10, why, (long)sizeof why);
+            rc = !(w == 1 && strstr(why, "cannot open output") && same(path, keep, 9));
+        }
+        chmod(parent, 0700);
+        note(rc == 0, "readonly-parent");
+    } else note(1, "readonly-parent-skip");
+
+    snprintf(path, sizeof path, "%s/missing/file", dir);
+    rc = cxo_write_file(path, hello, 6, why, (long)sizeof why);
+    note(rc == 1 && strstr(why, "cannot open output") && lstat(path, &st) < 0, "missing-parent");
+
+    rc = cxo_write_file("-", "", 0, why, (long)sizeof why);
+    note(rc == 0, "stdout-empty");
+    rc = cxo_write_file(0, "", 0, why, (long)sizeof why);
+    note(rc == 0, "stdout-null-path");
+    rc = cxo_write_file(path, 0, 4, why, (long)sizeof why);
+    note(rc == 5 && strstr(why, "bad output argument"), "null-data");
+
+    note(!residue(dir), "no-staging-residue");
+    printf("CXO\tfailed=%d\n", g_fail);
+    return g_fail ? 1 : 0;
+}

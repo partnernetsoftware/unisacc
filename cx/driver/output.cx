@@ -1,0 +1,167 @@
+/* module output. One public operation: cxo_write_file.
+   Owns no compiler global and keeps no state after return.
+   path and data are borrowed for this call and are not written.
+   The staging fd and the temporary path live only in this call.
+   Not thread-safe: the caller serializes one destination.
+   A second call may reuse the same pid and attempt number.
+
+   Return 0, or a named failure in why (empty on success):
+     1 cannot open output
+     2 short output write
+     3 cannot close output
+     4 cannot commit output
+     5 bad output argument
+   why is untouched when it is null or whycap <= 0.
+
+   NULL path and "-" write fd 1 and do not close it.
+   An empty path fails before any filesystem change.
+
+   POSIX, ordinary file or ENOENT: same-directory temporary
+   .unisacc-<pid>-<n>.tmp, O_EXCL|O_CLOEXEC|O_NOFOLLOW, mode 0755,
+   rename only after a full write and a successful close.
+   Failure unlinks that temporary only. The destination is not unlinked.
+   A hard link is ordinary: rename installs a new inode; the other name
+   keeps the previous inode.
+   An existing non-regular node (device, fifo, symlink) is opened directly
+   with O_WRONLY|O_CREAT|O_TRUNC. A symlink is followed. A failed direct
+   write does not unlink that path; a followed regular file may already
+   have been truncated. A fifo can block, as the product open does.
+
+   Windows keeps the current product boundary: one truncating open, no
+   rename. Failure does not unlink the path; a short write can leave a
+   truncated file. */
+#pragma unisa module output
+
+static void cxo_setwhy(char *why, long cap, const char *msg) {
+    long i;
+    if (!why || cap <= 0) return;
+    i = 0;
+    if (msg) while (msg[i] && i + 1 < cap) { why[i] = msg[i]; i = i + 1; }
+    why[i] = 0;
+}
+
+static int cxo_arg(const void *data, long length, char *why, long whycap) {
+    if (length < 0) { cxo_setwhy(why, whycap, "bad output argument"); return 5; }
+    if (length > 0 && !data) { cxo_setwhy(why, whycap, "bad output argument"); return 5; }
+    return 0;
+}
+
+static int cxo_pump(int fd, const char *bytes, long length) {
+    long done;
+    done = 0;
+    while (done < length) {
+        long wrote;
+        wrote = (long)write(fd, bytes + done, (size_t)(length - done));
+        if (wrote < 0 && errno == EINTR) continue;
+        if (wrote <= 0 || wrote > length - done) return -1;
+        done = done + wrote;
+    }
+    return 0;
+}
+
+static int cxo_stdout(const void *data, long length, char *why, long whycap) {
+    int bad;
+    bad = cxo_arg(data, length, why, whycap);
+    if (bad) return bad;
+    if (cxo_pump(1, (const char *)data, length)) {
+        cxo_setwhy(why, whycap, "short output write");
+        return 2;
+    }
+    cxo_setwhy(why, whycap, 0);
+    return 0;
+}
+
+#ifdef _WIN32
+static int cxo_store(const char *path, const void *data, long length, char *why, long whycap) {
+    int fd, bad;
+    if (!path || (path[0] == '-' && path[1] == 0)) return cxo_stdout(data, length, why, whycap);
+    if (!path[0]) { cxo_setwhy(why, whycap, "cannot open output"); return 1; }
+    bad = cxo_arg(data, length, why, whycap);
+    if (bad) return bad;
+    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0755);
+    if (fd < 0) { cxo_setwhy(why, whycap, "cannot open output"); return 1; }
+    if (cxo_pump(fd, (const char *)data, length)) {
+        close(fd);
+        cxo_setwhy(why, whycap, "short output write");
+        return 2;
+    }
+    if (close(fd) < 0) { cxo_setwhy(why, whycap, "cannot close output"); return 3; }
+    cxo_setwhy(why, whycap, 0);
+    return 0;
+}
+#else
+static int cxo_direct(const char *path, const void *data, long length, char *why, long whycap) {
+    int fd, bad;
+    bad = cxo_arg(data, length, why, whycap);
+    if (bad) return bad;
+    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0755);
+    if (fd < 0) { cxo_setwhy(why, whycap, "cannot open output"); return 1; }
+    if (cxo_pump(fd, (const char *)data, length)) {
+        close(fd);
+        cxo_setwhy(why, whycap, "short output write");
+        return 2;
+    }
+    if (close(fd) < 0) { cxo_setwhy(why, whycap, "cannot close output"); return 3; }
+    cxo_setwhy(why, whycap, 0);
+    return 0;
+}
+
+static int cxo_transaction(const char *path, const void *data, long length, char *why, long whycap) {
+    size_t cap;
+    char *tmp;
+    const char *slash;
+    int directory, attempt, fd, n, bad;
+    bad = cxo_arg(data, length, why, whycap);
+    if (bad) return bad;
+    cap = strlen(path) + 80;
+    tmp = malloc(cap);
+    if (!tmp) { cxo_setwhy(why, whycap, "cannot open output"); return 1; }
+    slash = strrchr(path, '/');
+    directory = slash ? (int)(slash - path + 1) : 0;
+    fd = -1;
+    for (attempt = 0; attempt < 100; attempt = attempt + 1) {
+        n = snprintf(tmp, cap, "%.*s.unisacc-%ld-%d.tmp", directory, path, (long)getpid(), attempt);
+        if (n < 0 || (size_t)n >= cap) { free(tmp); cxo_setwhy(why, whycap, "cannot open output"); return 1; }
+        fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0755);
+        if (fd >= 0) break;
+        if (errno != EEXIST) { free(tmp); cxo_setwhy(why, whycap, "cannot open output"); return 1; }
+    }
+    if (fd < 0) { free(tmp); cxo_setwhy(why, whycap, "cannot open output"); return 1; }
+    if (cxo_pump(fd, (const char *)data, length)) {
+        close(fd); unlink(tmp); free(tmp);
+        cxo_setwhy(why, whycap, "short output write");
+        return 2;
+    }
+    if (close(fd) < 0) {
+        unlink(tmp); free(tmp);
+        cxo_setwhy(why, whycap, "cannot close output");
+        return 3;
+    }
+    if (rename(tmp, path)) {
+        unlink(tmp); free(tmp);
+        cxo_setwhy(why, whycap, "cannot commit output");
+        return 4;
+    }
+    free(tmp);
+    cxo_setwhy(why, whycap, 0);
+    return 0;
+}
+
+static int cxo_store(const char *path, const void *data, long length, char *why, long whycap) {
+    struct stat st;
+    int ordinary;
+    if (!path || (path[0] == '-' && path[1] == 0)) return cxo_stdout(data, length, why, whycap);
+    if (!path[0]) { cxo_setwhy(why, whycap, "cannot open output"); return 1; }
+    if (lstat(path, &st) == 0) ordinary = S_ISREG(st.st_mode);
+    else {
+        if (errno != ENOENT) { cxo_setwhy(why, whycap, "cannot open output"); return 1; }
+        ordinary = 1;
+    }
+    if (!ordinary) return cxo_direct(path, data, length, why, whycap);
+    return cxo_transaction(path, data, length, why, whycap);
+}
+#endif
+
+int cxo_write_file(const char *path, const void *data, long length, char *why, long whycap) {
+    return cxo_store(path, data, length, why, whycap);
+}
