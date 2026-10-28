@@ -2,7 +2,7 @@
  * --list [--group cx0|e2|boundary]
  * --all [ROOT NEW_ABS_OUT MODEL READER] [--group cx0|e2|boundary]
  * --smoke NEW_ABS_OUT                         (only the finite planner probe)
- * --case ID [NEW_ABS_OUT [READER MODEL]]
+ * --case ID [ROOT NEW_ABS_OUT MODEL READER]
  * bundle probe: --case probe.cx0.bundle NEW_ABS_OUT MODEL
  * E2 probe: --case probe.boundary.e2 NEW_ABS_OUT READER MODEL
  * Required parent contracts remain unsatisfied by finite probes. Original E2
@@ -87,11 +87,12 @@ static int probe(const contract *c,int argc,char **argv){
  puts("TIMING\tchild_compile_and_execute_ns=see-status.tsv\tstartup_construction_loading_inference_output_validation_cold_hot=UNMEASURED");np_free(&r);return ok?0:timed?3:1;
 }
 static int unified(const contract *c,char **v){char canonical[4096];if(!realpath(v[0],canonical)||strcmp(canonical,v[0])||strcmp(canonical,root))die("ROOT-must-match-suite-repository");char *p[3];p[0]=v[1];if(!strcmp(c->probe,"plan"))return probe(c,1,p);if(!strcmp(c->probe,"bundle")){p[1]=v[2];return probe(c,2,p);}p[1]=v[3];p[2]=v[2];return probe(c,3,p);}
+static int leaf_selected(const contract *c,const char *group){if(selected(c,group))return 1;for(int i=0;i<nrows;i++)if(selected(rows+i,group)&&!strcmp(rows[i].probe,c->id))return 1;return 0;}
 static int run_leaves(char **v,const char *group){
  char canonical[4096],output_parent[4096],base[4400],outcanon[4096];if(!realpath(v[0],canonical)||strcmp(canonical,v[0])||strcmp(canonical,root))die("ROOT-must-match-suite-repository");
  size_t vn=strlen(v[1]);if(v[1][0]!='/'||vn>=sizeof output_parent||strpbrk(v[1],"\t\r\n"))die("absolute-wave-output");memcpy(output_parent,v[1],vn+1);char *last=strrchr(output_parent,'/');if(!last||!last[1])die("wave-output-leaf");*last=0;if(!realpath(output_parent,canonical)||strcmp(canonical,output_parent))die("canonical-wave-parent");join(base,root,"out");if(!realpath(base,outcanon))die("root-out");size_t bn=strlen(outcanon);if(strncmp(canonical,outcanon,bn)||(canonical[bn]&&canonical[bn]!='/'))die("wave-output-below-root-out");
  if(mkdir(v[1],0700))die("exclusive-wave-output");int fail=0,executed=0;
- for(int i=0;i<nrows;i++)if(!strcmp(rows[i].kind,"probe")&&selected(rows+i,group)){
+ for(int i=0;i<nrows;i++)if(!strcmp(rows[i].kind,"probe")&&leaf_selected(rows+i,group)){
   long long now=as_now();if(now<0)die("monotonic-clock");if(deadline-now<5000000000LL){printf("NOT_RUN\t%s\treason=outer-command-budget;use-single-case-to-run\n",rows[i].id);continue;}
   char leaf[4400];join(leaf,v[1],rows[i].probe);char *args[]={v[0],leaf,v[2],v[3]};int rc=unified(rows+i,args);executed++;if(rc==1||rc==2)fail++;
  }
@@ -102,7 +103,7 @@ int main(int argc,char **argv){
  const char *outer=getenv("UNISACC_BOUND_DEADLINE_MONO");if(outer&&*outer){char *end;double limit=strtod(outer,&end);if(*end||limit<=(double)started/1e9)die("outer-deadline");if(limit<(double)deadline/1e9)deadline=(long long)(limit*1e9)-2000000000LL;}
  char source[4096];if(!realpath(argv[0],source))die("source-location");const char *suffix="/tests/preprocess/suite.cx";size_t sn=strlen(source),tail=strlen(suffix);if(sn<=tail||strcmp(source+sn-tail,suffix))die("source-layout");source[sn-tail]=0;memcpy(root,source,sn-tail+1);load();
  if(argc<2)die("usage --list | --all [ROOT NEW_OUT MODEL READER] | --smoke NEW_OUT | --case ID [NEW_OUT [READER MODEL]]");
- if(!strcmp(argv[1],"--case")){if(argc<3)die("case-id-required");for(int i=0;i<nrows;i++)if(!strcmp(argv[2],rows[i].id)){if(!strcmp(rows[i].kind,"probe"))return argc==7?unified(rows+i,argv+3):probe(rows+i,argc-3,argv+3);if(argc!=3)die("contract-case-takes-no-input-before-implementation");show(rows+i,"NOT_COVERED");return 3;}die("unknown-contract-id");}
+ if(!strcmp(argv[1],"--case")){if(argc<3)die("case-id-required");for(int i=0;i<nrows;i++)if(!strcmp(argv[2],rows[i].id)){if(!strcmp(rows[i].kind,"probe"))return argc==7?unified(rows+i,argv+3):probe(rows+i,argc-3,argv+3);if(argc!=3&&argc!=7)die("contract-case-takes-ID-or-ID-ROOT-OUT-MODEL-READER");show(rows+i,"NOT_COVERED");if(argc==7&&strcmp(rows[i].probe,"-")){for(int j=0;j<nrows;j++)if(!strcmp(rows[j].id,rows[i].probe)){int rc=unified(rows+j,argv+3);printf("PREPROCESS_CONTRACT\tid=%s\tfinite_probe_rc=%d\tfull_contract=NOT_COVERED\n",rows[i].id,rc);return rc==1||rc==2?rc:3;}}return 3;}die("unknown-contract-id");}
  if(!strcmp(argv[1],"--smoke")){if(argc!=3&&argc!=6)die("smoke-requires-NEW_OUT-or-ROOT-NEW_OUT-MODEL-READER");for(int i=0;i<nrows;i++)if(!strcmp(rows[i].id,"probe.cx0.plan"))return argc==6?unified(rows+i,argv+2):probe(rows+i,1,argv+2);die("planner-probe-missing");}
  int list=!strcmp(argv[1],"--list"),all=!strcmp(argv[1],"--all");if(!list&&!all)die("unknown-mode");const char *group=0;char **inputs=0;
  for(int i=2;i<argc;i++){if(!strcmp(argv[i],"--group")){if(group||++i==argc)die("group-argument");group=argv[i];if(strcmp(group,"cx0")&&strcmp(group,"e2")&&strcmp(group,"boundary"))die("unknown-group");}else if(all&&!inputs&&i+3<argc){inputs=argv+i;i+=3;}else die("mode-arguments");}
