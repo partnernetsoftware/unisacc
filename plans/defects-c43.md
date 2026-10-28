@@ -33,6 +33,10 @@ GCC与Clang各四项-o实跑：正常/缺席编译rc0且执行rc7，超限/目�
 权威源审查发现cx/cx0/plan.cx未含2c949ba577的公开清单过滤；直接提取将丢失后续修复。
 已将同一cxm_listed及函数导出过滤同步回plan.cx，compat-prefix同步当前说明与错误返回合同。
 src/cxmod.c及冻结根不改；`tools/cx0-extract.cx -- --check`逐字复验、CX0路径回归尚待交窗执行。
+交窗后实际--check退出0：EXACT 45858B，SHA c0a385b6ff5f1aa3e9067142b91b033747134718afa7af62bd9236a6a49c7ce6，
+与冻结src/cxmod.c相同。证据out/c43-cxpack-extract-check-01.*。
+独立CX0默认-run回归新增清单公开列表、目录IO拒绝、超限拒绝、无清单恢复四项，
+总28/0，out/c43-cxpack-cx0-01.*；仅本机CX0模块，不授已装产品新行为或完整E2束资格。
 
 构造接续：af8429d0cf已git archive到仓外`/home/devali/repos/unisacc-epoch-cxpack-af8429d0cf`，
 启动产品逐字核为4c2831c3，来源记录一并保存。prepare-context默认-run实返0，
