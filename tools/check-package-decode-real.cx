@@ -1,0 +1,25 @@
+#pragma unisa use runtime.package_decode
+#pragma unisa use runtime.process
+static void *grow(void *p,size_t n){return realloc(p,n);}
+static void drop(void *p){free(p);}
+int main(int argc,char **argv){
+ if(argc!=3){fprintf(stderr,"usage ROOT PACKAGE\n");return 2;}
+ char root[4096],pkg[4096],source[4400],bound[4400],ref[4400],dir[]="/tmp/cxpk-reference-XXXXXX";
+ if(!realpath(argv[1],root)||!realpath(argv[2],pkg)||!mkdtemp(dir))return 2;
+ if(cx_fmt(source,sizeof source,"%s/tests/cases/package_decode_reference.c",root)||cx_fmt(bound,sizeof bound,"%s/tools/bound",root)||cx_fmt(ref,sizeof ref,"%s/ref",dir))return 2;
+ char *build[]={bound,"30","/usr/bin/x86_64-linux-gnu-gcc-11","-O2","-w","-ffunction-sections","-fdata-sections","-Wl,--gc-sections",source,"-o",ref,0};
+ np_result r={0};char why[512];if(np_run(build,root,0,35,&r,why,sizeof why)||r.rc||r.errn){fprintf(stderr,"reference build failed\n");return 2;}np_free(&r);
+ char *v[]={bound,"10",ref,pkg,0};if(np_run(v,root,0,12,&r,why,sizeof why)||r.rc||r.errn){fprintf(stderr,"reference parse failed\n");return 2;}
+ size_t n;char *bytes=cx_read(pkg,&n);if(!bytes||n>2147483647UL)return 2;
+ CxPackageDecode d={0};d.allocate=grow;d.release=drop;
+ if(cxpk_decode(&d,(const unsigned char *)bytes,(long)n)){fprintf(stderr,"CX parse: %s\n",d.why);return 1;}
+ FILE *f=tmpfile();if(!f)return 2;CxPackage *p=&d.package;
+ fprintf(f,"package %d %d %d %d %d\n",p->ver,p->n,p->m,p->s,p->nr);
+ for(int i=0;i<p->s;i++)fprintf(f,"stage %s %s %s %s %d\n",p->stages[i].route,p->stages[i].name,p->stages[i].in,p->stages[i].out,p->stages[i].model);
+ for(int i=0;i<p->m;i++)fprintf(f,"model %d %d %d %u\n",p->off[i],p->len[i],p->raw[i],p->crc[i]);
+ for(int i=0;i<p->nr;i++)fprintf(f,"resource %d %d %d %d\n",p->res[i].name,p->res[i].n,p->res[i].data,p->res[i].len);
+ long pos=ftell(f);if(pos<0||fseek(f,0,SEEK_SET))return 2;char *out=malloc((size_t)pos+1);if(!out)return 2;
+ int ok=fread(out,1,(size_t)pos,f)==(size_t)pos&&(size_t)pos==r.outn&&!memcmp(out,r.out,r.outn);int stages=p->s,models=p->m,resources=p->nr;
+ free(out);fclose(f);cxpl_release(p,drop);free(bytes);np_free(&r);unlink(ref);rmdir(dir);
+ printf("CXPACKAGE_REAL stages=%d models=%d resources=%d failed=%d\n",stages,models,resources,!ok);return ok?0:1;
+}
