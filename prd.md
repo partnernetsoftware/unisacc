@@ -25,7 +25,7 @@
 | 从 tape／tapebin 写目标镜像 | `./unisacc.com INPUT.tape -b OS/ARCH -o OUTPUT` | `.tapebin` 也有现成入口。支持域及具名拒绝仍生效；见 [README](README.md)、[驱动](exec/c/compiler.c)及[当前优化Tape合同](tests/optimization.cx)。 |
 | 写六目标程序 | `./unisacc.com FILE.c -b OS/ARCH -o OUTPUT` | 目标为 `lnx`／`osx`／`win` × `x86_64`／`arm64`；跨目标写出与目标机器原生执行分别记证。 |
 | 查看 `.cx` 模块依赖计划 | `./unisacc.com -cx-plan FILE.cx` | 复用现有模块入口与[当前模块ABI用例](tests/library-abi.cx)，不另造模块扫描器。 |
-| 用系统 GCC／Clang 把 `.cx` 编成普通可执行文件 | `sh ./gcc_cx.com FILE.cx -o OUT`；Clang 用 `sh ./clang_cx.com` | 本机 Linux 的 `-o` 驱动，由 `tools/build-cxcc-host.cx` 用系统 gcc 写出，不入库。不调用 `unisacc.com`。抹掉首行 `#!`。无 `use` 时一次执行系统 `gcc` 或 `clang -std=c99 -x c -include include/cx.h`；没有后续非选项输入时不追加 `-x none`。有 `#pragma unisa use` 时在驱动进程里按 `src/cxmod.c` 展开，再按每个单元编译链接。`-run` 尚未做。六目标 APE 这次没有重打。不授予已检查身份。见 §5.3。 |
+| 用系统 GCC／Clang 把 `.cx` 编成普通可执行文件 | `sh ./gcc_cx.com FILE.cx -o OUT`；Clang 用 `sh ./clang_cx.com`。Windows 上是 `gcc_cx.com FILE.cx -o OUT` | PATH 上的 gcc 或 clang 由 `tools/build-cxcc-host.cx` 在该机链出驱动，不入库。Linux 与 OSX 用 `sh ./gcc_cx.com`；Windows 的 `gcc_cx.com` 是本机程序。本机只跑过 Linux。不调用 `unisacc.com`。抹掉首行 `#!`。无 `use` 时一次执行系统 `gcc` 或 `clang -std=c99 -x c -include include/cx.h`；没有后续非选项输入时不追加 `-x none`。有 `#pragma unisa use` 时在驱动进程里按 `src/cxmod.c` 展开，再按每个单元编译链接。`-run` 尚未做。六目标 APE 这次没有重打。不授予已检查身份。见 §5.3。 |
 
 新动态逻辑优先由 `unisacc.com + .cx` 完成，减少 `.sh`，不新增临时 `.py`。旧脚本尚未迁移的部分如实记为依赖，不把 `.cx` 转调脚本记成迁移完成。经典 C 参考与模型产品是不同实现；对拍前确认实际两端身份，不能笼统判成“对自身验证”。入口已实现不等于任意输入已验证，继续保留原断言、拒绝和预算。
 
@@ -149,9 +149,11 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 <a id="work-tree"></a>
 ### 思维树
 
-**2026-10-28 单元化重构决定：** 主人要求 crate/Cargo 式结构单元化，并要求为 `.cx` 的 `#pragma unisa` 处理增加独立阶段。目标为 CX0 → E2 → E1 → E3 → E4 → prune → lower → elf；当前产品仍七流；CX0 独立 CX 模块/CLI 已实现并三路径实跑24/0，尚未接入产品 E2。执行按 [单元化计划](plans/v0.0.43-units.md)，第一闭环是 CX0/E2 两包与 [独立测试件合同](tests/preprocess/CONTRACT.md)。先验证依赖隔离、独立产物和受影响重建范围；不以新增有限 PASS 批数量计收口，不增加 Rust 所有权实现这一隐含前置。
+**2026-10-28 单元化重构决定：** 主人要求参考Rust模块化与内存安全设计，去除include引入的隐式耦合；不是换后缀。CX权威源码、公开接口、私有实例、显式资源/构建图、所有权/借用合同共同构成目标。目标CX0 → E2 → E1 → E3 → E4 → prune → lower → elf；现有独立CX0/束/适配已落地，安装产品仍七流。CX0语义控制最终也须网络化，十八张ask事实网不按阶段数机械加一。详见[单元化计划](plans/v0.0.43-units.md)及[cx入口](cx/README.md)。
 
-**当前分工与下一动作：** 首个 CX0 提取已落在 cx/cx0/plan.cx（生成器可重现，不手改生成物），调用者只导入公开结果/规划/释放 API；POSIX 子进程隔离旧解析状态。tools/cx0.cx 实际输出 CX0PLAN1，独立测试在 unisacc 默认运行、GCC/Clang 仅-o后运行均24/0，stderr空。下一刀完成不可变单元束/读取器再接 E2，不把带路径的迁移计划当完整资源束。grk负责两宿主入口，主人明确无需-run。其他协作者暂存不动；产品源码SID仍16219141、Rootda4e/recorddd2385cf未变。
+**当前分工与下一动作：** 已交付束38/0（unisacc/GCC/Clang）、E2边界12/0、CX整链11/0、源码优先driver14/0、CX权威倒转18/0+24/0、工作区目录闭包19/0。plan.cx是权威，src/cxmod.c兼容投影42902字节/452fcb3全文不变，旧模板已归档。六包清单可调度；加入G/root新键后正重建当前产物，旧收据不移贴。当前并发：版本线补实际E1 NN词法边界完整oracle；CX线推进memory实例/所有权/借用单元和全六包当前身份构建。grk维护GCC/Clang兼容，cc维护lint；不改他人暂存。主人已撤销旧签名/Draft/Latest/公开禁令。
+
+**双线推进（2026-10-28）：** 0.0.43现行Rootda4e/SID1621继续补完整流/网/RI、N22与平台缺口，不等待CX重构完工；CX演进独立验证并逐单元接入。E1物理源流不能制造EOF后的12种peek，不再用EOF折叠记144键PASS；正在用同候选实际NN的core_transition边界求值建立独立规则oracle。完整矩阵在合同真正满足前保留MISSING。
 
 **边界测试待验（2026-10-28）：** 已审入既有interfaces草稿修订：七流当前pin、由独立参考规则手推的592B Tape字面oracle，以及四个E3 trailer负例的外框长度修复，确保测到目标层。修正attr长度拒绝名与ELF截断位置，保留原271项并新增12项；当前仍NOT_RUN。原e2-input-binding扩展为七流成员与候选逐字核对，含各新增模型一字节差异负控及前后稳定性，仍待实跑；不另造重复批。草稿out/c43-da4e-interfaces-review-01/，严格清单169批/178覆盖/19缺口，仅元数据通过、执行0。formats.md仅据现有attr_strip代码纠正旧描述；冻结helper实测SID仍16219141、产品仍da4e7ef1，不影响cc构造。
 
@@ -269,13 +271,13 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 ```text
 0.0.43：按 crate/Cargo 式单元化重构收口（发布须另授）
-├─ 当前主刀 U1：独立 CX0 模块/CLI 已落地、三路径24/0；补不可变编译单元束与读取器后接 E2，U1/U2尚未完成
-├─ U2：E2 独立包消费 CX0 单元束；先收 CX0、E2、边界三组完整合同，再接产品
+├─ 当前主刀 U1：CX0提取与不可变CX0BND1/严格读者已落地；完整逻辑ID/依赖/配置协议与网络化语义仍开
+├─ U2：独立E2及CX逐阶段流水线已真实消费束，11/0整链；已安装产品入口切换与完整合同尚未完成
 ├─ U3：沿公开依赖图迁移其余六流、执行核、模型格式、host 与构造器；分别核构建/接口/装配/测试键
 ├─ U4：接回完整十九合同、N22 与同候选宿主验收；不删断言、不放宽预算、不缓存 PASS
 ├─ 现行基线：SID16219141 / Rootda4e7ef1 / record dd2385cf；本机两代固定点58/0，非完整N22
 ├─ 已有能力：module/use、CXIF v0 文本投影和 cx-plan；尚无 crate 式独立包产物或编译期所有权保证
-└─ 当前交付：cx/cx0/plan.cx、tools/cx0.cx、tests/preprocess/cx0.cx 实际代码；产品仍七流，完整CX0/E2合同仍开
+└─ 当前交付：CX0束、E2适配、CX工作区、CX流水线与独立suite；统一验收并push，不靠新增plans计进展
 ```
 
 旧思维树原文见 [裁定前历史树](archive/plans/c43-pre-unit-work-tree-20261028.md)。以下 Source329/0d5923/03a5 的构造与缺陷段为历史纪元；其中“当前/下一步”不再调度。现行身份与动作以上树及记忆宫殿首段为准。
@@ -355,7 +357,7 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 <a id="memory-palace"></a>
 ### 记忆宫殿
 
-**现行重构入口（2026-10-28）：** CX0首个独立CX单元已实现：原C解析器可重现提取为私有模块，公开cx0_result/cx0_plan/cx0_release；显式接口目录、CX0PLAN1/CX0IF0、失败无成功输出、POSIX调用隔离。三路径当前源码24/0及使用方法见 cx/cx0/README.md；产品CLI仍走原C规划器，不授第八模型流/不可变单元束/完整U1。下一刀完成资源束读取与E2消费，目标与全合同仍在单元化计划及测试件合同。GCC/Clang仅-o，不要求-run；静态所有权未实现。
+**现行重构入口（2026-10-28）：** tools/cx-driver.cx是源码优先默认运行入口，显式profile供给资源根/模型/适配器，经CX0封存后走实际模型链，14/0及实际include根默认运行已证。工作区G目录快照把66头的名字/长度/内容入键，增删改和私有闭包实际19/0。CX权威反投影已交f2a280553f，C全文不变；旧.c仍活依赖不能归档。新memory单元在实现实例/owner/lease运行期约束，尚不授编译期借用安全。CXIF文本投影/forced includes仍是兼容桥；下一原生接口须把类型/符号/ABI/所有权记录交E3。安装产品未切入口，完整U1/U2、CX0网络化和外国宿主仍开。
 
 **本轮基线复核：** APE da4e7ef144186ccf578d282381ac671885094c6dfe30053727ac3f3c4a3e5592；build record dd2385cf4952f95cd7cdb6d4d25b2cf774841becdcbd8506138260a92743abc0（替代下方首次安装 ab5f）。同源固定点 GEN-A / GEN-B02 的原58断言已通过；本轮预编译 O2 验证亦在原30秒内58/0、stderr空，直接 O2 默认-run 原30秒rc142，不冒称登记批通过。下方 cc 独占构造/等待新固定点的语句是交接前状态，不再作为待执行工作。
 
@@ -801,7 +803,7 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 
 **宿主驱动（2026-10-27）**：本机 gcc 与 clang 在 `-std=c99` 下碰到 `#pragma unisa use` 会丢掉这一行并退出 0；`-Wall` 才给出 `-Wunknown-pragmas`，编译仍然成功。gcc 要在 `-fplugin` 的 `PLUGIN_PRAGMAS` 回调里 `c_register_pragma("unisa", "use", ...)` 才会执行它；clang 要注册 `PragmaHandler` 到 `unisa` 名字空间。两套插件 ABI 不通用，也不能代替跨文件的模块图。当时的驱动因此仍调用本仓库 `unisacc.com -cx-plan`。未声明的函数现在是错误，跨单元调用文件内函数会被拒绝，导出函数仍可链接。单元目标文件按前奏和源字节缓存在 `out/cxcc-cache/`，不写入 `include/`。产物仍是普通 C，不授予已检查身份。
 
-**宿主驱动（2026-10-28，-o）**：`tools/build-cxcc-host.cx` 用系统 gcc 把 `tools/cxcc.cx`、`src/cxmod.c` 与 `tools/gcc_cx.cx`（clang 同理）链成 `out/cxcc-host/` 里的程序。仓库根 `gcc_cx.com` 与 `clang_cx.com` 只负责启动它们，运行时不调用 `unisacc.com`。有 `#pragma unisa use` 时，模块图在驱动进程内展开，再交给系统编译器写出 `-o` 的可执行文件。没有后续非选项输入时不追加 `-x none`；本机 clang 对 `tests/cxcc_one.cx -o OUT` 标准错误为空，程序退出码 5。后面还有目标文件时仍追加 `-x none` 并完成链接。`-run` 尚未做。这次只覆盖本机 Linux，六目标 APE 没有重打。`sh ./gcc_cx.com tests/cxhost_main.cx -o OUT` 与 clang 同样得到退出码 42；缺模块、循环和 `std.absent` 在编译器启动前拒绝。`strace` 没有执行 `unisacc.com`。小套件是 `tests/cxcc/units.tsv`，由 `sh ./gcc_cx.com tests/cxcc/suite.cx -o out/cxcc-suite/suite` 编出后执行；gcc 与 clang 各跑一遍。对象缓存除直接 `-include` 外，还按编译器 `-MMD` 列出的头文件字节失效：只改被包含的 `nested.h` 时，两边都从退出码 8 变为 12。行首 `#pragma  unisa use`（pragma 后两个空格）会展开。编译副本前插 `#line 1`，`__FILE__` 与错误行都是原来的 `.cx` 路径和行号，例如 `tests/cxpriv_bad.cx:3`。热 `-o` 三次中位 gcc 38 ms、clang 69 ms，上限 268 ms 和 227 ms。cdx 用当前源码另建 `out/c43-grk-review-{gcc,clang}-02.elf`，日志 `out/c43-grk-review-02.stdout` 为 `REVIEW findings=0 harness_errors=0`：两边 canonical 与双空格 pragma 均为 7，只改 `nested.h` 为 cold 8、warm 12、forced 12，`__FILE__` 为原始 `.cx` 绝对路径。这只关本机这三项，不授其他平台或 `-run`。
+**宿主驱动（2026-10-28，-o）**：`tools/build-cxcc-host.cx` 用系统 gcc 把 `tools/cxcc.cx`、`src/cxmod.c` 与 `tools/gcc_cx.cx`（clang 同理）链成 `out/cxcc-host/` 里的程序。仓库根 `gcc_cx.com` 与 `clang_cx.com` 只负责启动它们，运行时不调用 `unisacc.com`。有 `#pragma unisa use` 时，模块图在驱动进程内展开，再交给系统编译器写出 `-o` 的可执行文件。没有后续非选项输入时不追加 `-x none`；本机 clang 对 `tests/cxcc_one.cx -o OUT` 标准错误为空，程序退出码 5。后面还有目标文件时仍追加 `-x none` 并完成链接。`-run` 尚未做。这次只覆盖本机 Linux，六目标 APE 没有重打。`sh ./gcc_cx.com tests/cxhost_main.cx -o OUT` 与 clang 同样得到退出码 42；缺模块、循环和 `std.absent` 在编译器启动前拒绝。`strace` 没有执行 `unisacc.com`。小套件是 `tests/cxcc/units.tsv`，由 `sh ./gcc_cx.com tests/cxcc/suite.cx -o out/cxcc-suite/suite` 编出后执行；gcc 与 clang 各跑一遍。对象缓存除直接 `-include` 外，还按编译器 `-MMD` 列出的头文件字节失效：只改被包含的 `nested.h` 时，两边都从退出码 8 变为 12。行首 `#pragma  unisa use`（pragma 后两个空格）会展开。编译副本前插 `#line 1`，`__FILE__` 与错误行都是原来的 `.cx` 路径和行号，例如 `tests/cxpriv_bad.cx:3`。热 `-o` 三次中位 gcc 38 ms、clang 69 ms，上限 268 ms 和 227 ms。cdx 用当前源码另建 `out/c43-grk-review-{gcc,clang}-02.elf`，日志 `out/c43-grk-review-02.stdout` 为 `REVIEW findings=0 harness_errors=0`：两边 canonical 与双空格 pragma 均为 7，只改 `nested.h` 为 cold 8、warm 12、forced 12，`__FILE__` 为原始 `.cx` 绝对路径。这只关本机这三项，不授其他平台或 `-run`。同日补 win/osx 的构建方式：假定 PATH 上有对应的 gcc 或 clang，`tools/build-cxcc-host.cx` 在那台机器上用该编译器链出驱动，不调用 `unisacc.com`。Linux 与 OSX 的 `gcc_cx.com` 仍是 shell，去执行 `out/cxcc-host` 里的本机程序。驱动调用 POSIX 的 `posix_spawnp`、`waitpid` 和 `mkstemp`。Linux 与 OSX 走系统 libc，环境表传 `environ`。Windows 的 `gcc_cx.com` 是本机程序；同一组调用的函数体在 `tools/cxcc-hostinc/spawn.h`，按本仓库 `include/spawn.h` 与 `mkstemp` 的形状用 `CreateProcessA` 和 `open` 实现，不走 `_ux_sym`。`pid_t` 放不下 HANDLE 时用一张小表，空环境在 Windows 上表示继承。编译行加 `-idirafter tools/cxcc-hostinc`，因为 MinGW 没有 `spawn.h`。本机重跑套件 `fails=0`，热 `-o` 中位 gcc 39 ms、clang 72 ms。`strace` 仍由 PATH 找到 `/usr/bin/gcc`，没有 `-idirafter`，也没有执行 `unisacc.com`，程序退出码 5。Windows 与 OSX 没有执行。`-run` 仍未做。六目标 APE 没有重打。
 
 **构建收据（2026-10-26，模块展开之后重打）**：`./unisacc.com -run tools/build-cxcc-ape.cx` 实际 rc 0。`gcc_cx.com` 617424 字节，`clang_cx.com` 617456 字节，`file` 均为 PE32+ console x86-64。构建里 gcc 编出的 `ujs/seed/construct/lex.cx` 对 `ujs/tests/corpus/arith.ujs` 与 `./unisacc.com -run` 逐字节相同；`tests/cxhost_main.cx` 展开 `cxhost_mod` 后退出码 42。同一次构建里 Ubuntu clang 15 编过该扫描器，并编过同一夹具、退出码 42。`-run` 另测：用 gcc 编出的 `gcc_cx` 再编 `tests/cxhost_main.cx`，退出码仍是 42；缺模块 `no_such_mod_zz` 由 unisacc 具名拒绝（rc 1），没有交给 gcc。字符串里的 `#pragma unisa use` 不当作导入。`win/x86_64` 的 `tools/gcc_cx.cx` 只编译通过，没有执行。OSX 切片只写出、未执行。活树棘轮 `tests/cxinclude.cx --check` 与 `tests/cxapis.cx --check` 实际 rc 0：436 个 `.cx`，111 行 include，724 处无界调用。
 
