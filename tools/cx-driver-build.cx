@@ -1,0 +1,45 @@
+/* Independent compilation units, then link. No saved test results.
+ * ROOT BUILDER IDENTITY_HELPER NEW_OR_EXISTING_OUT driver|output|native|deps|link
+ * First native provider is Linux/x86_64; other targets remain explicit work. */
+#pragma unisa use cxlib.netpack
+static void fail(const char *s){fprintf(stderr,"cx-driver-build: %s errno=%d\n",s,errno);exit(2);}
+static void join(char *p,const char *a,const char *b){int n=snprintf(p,4400,"%s/%s",a,b);if(n<0||n>=4400)fail("path-bound");}
+static void hash(const char *p,char h[65]){size_t n;char *s=cx_read(p,&n);if(!s)fail("read-input");cx_sha256_hex(s,n,h);free(s);}
+static void absent(const char *p){struct stat st;errno=0;if(!lstat(p,&st)||errno!=ENOENT)fail("output-must-not-exist");}
+static void save(const char *p,const char *s){FILE *f=fopen(p,"wx");if(!f||fwrite(s,1,strlen(s),f)!=strlen(s)||fclose(f))fail("write-record");}
+static void sid(const char *root,const char *helper,char h[65]){
+ char *v[]={(char *)helper,(char *)root,0};np_result r={0};char why[1024];
+ if(np_run(v,root,0,8,&r,why,sizeof why)||r.rc||r.errn||r.outn!=65||r.out[64]!='\n')fail("source-identity");
+ for(int i=0;i<64;i++)if(!((r.out[i]>='0'&&r.out[i]<='9')||(r.out[i]>='a'&&r.out[i]<='f')))fail("source-identity-shape");
+ memcpy(h,r.out,64);h[64]=0;np_free(&r);
+}
+static void receipt(char *s,size_t cap,const char *source,const char *builder,const char *identity,const char *tool,const char *netpack,const char *step,const char *artifact){
+ int n=snprintf(s,cap,"CXDRIVERUNIT2\nsource\t%s\nbuilder\t%s\nidentity\t%s\ntool\t%s\nnetpack\t%s\ntarget\tlnx/x86_64\nstep\t%s\nartifact\t%s\n",source,builder,identity,tool,netpack,step,artifact);if(n<0||(size_t)n>=cap)fail("receipt-bound");
+}
+int main(int argc,char **argv){
+ if(argc!=6)fail("usage ROOT BUILDER IDENTITY_HELPER OUT STEP");
+ char root[4096],builder[4096],ident[4096],out[4096],self[4096];
+ if(!realpath(argv[1],root)||!realpath(argv[2],builder)||!realpath(argv[3],ident)||!realpath(__FILE__,self))fail("resolve-inputs");
+ if(mkdir(argv[4],0700)&&errno!=EEXIST)fail("mkdir");struct stat st;
+ if(lstat(argv[4],&st)||!S_ISDIR(st.st_mode)||!realpath(argv[4],out))fail("output-directory");
+ const char *names[]={"driver","output","native","deps","link"};int step=-1;for(int i=0;i<5;i++)if(!strcmp(argv[5],names[i]))step=i;if(step<0)fail("unknown-step");
+ char source[65],bh[65],ih[65],th[65],nh[65],after[65],artifact[65],record[1024],netpack[4400];join(netpack,root,"tools/cxlib/netpack.cx");sid(root,ident,source);hash(builder,bh);hash(ident,ih);hash(self,th);hash(netpack,nh);
+ const char *files[]={"driver.o","output.o","native.o","deps.o","driver.elf"};char objs[4][4400],output[4400],rp[4400],leaf[100];
+ for(int i=0;i<4;i++)join(objs[i],out,files[i]);join(output,out,files[step]);absent(output);
+ snprintf(leaf,sizeof leaf,"%s.receipt",names[step]);join(rp,out,leaf);absent(rp);
+ if(step==4)for(int i=0;i<4;i++){
+  hash(objs[i],artifact);receipt(record,sizeof record,source,bh,ih,th,nh,names[i],artifact);
+  char p[4400];snprintf(leaf,sizeof leaf,"%s.receipt",names[i]);join(p,out,leaf);size_t n;char *s=cx_read(p,&n);
+  if(!s||n!=strlen(record)||memcmp(s,record,n))fail("unit-receipt-or-source-mismatch");free(s);
+ }
+ char bound[4400],headers[4400],quotes[4400],src[4400];join(bound,root,"tools/bound");join(headers,root,"include");join(quotes,root,"exec/c");
+ const char *sources[]={"exec/c/asmcompiler.c","cx/driver/output.cx","cx/runtime/process_group.cx","cx/driver/deps.cx"};if(step<4)join(src,root,sources[step]);
+ char *compile[]={bound,"45","sh",builder,"-O2","-I",headers,"-iquote",quotes,"-b","lnx/x86_64","-c","-funit",src,"-o",output,0};
+ char *linkv[]={bound,"45","sh",builder,"-b","lnx/x86_64",objs[0],objs[1],objs[2],objs[3],"-o",output,0};
+ np_result r={0};char why[1024];if(np_run(step==4?linkv:compile,root,0,47,&r,why,sizeof why))fail(why);
+ if(r.outn)fwrite(r.out,1,r.outn,stdout);if(r.errn)fwrite(r.err,1,r.errn,stderr);
+ if(r.rc){fprintf(stderr,"cx-driver-build: step=%s child_rc=%d stdout_bytes=%ld stderr_bytes=%ld\n",names[step],r.rc,(long)r.outn,(long)r.errn);np_free(&r);fail("unit-command-failed");}np_free(&r);
+ sid(root,ident,after);if(strcmp(source,after))fail("source-changed");hash(builder,after);if(strcmp(bh,after))fail("builder-changed");hash(ident,after);if(strcmp(ih,after))fail("identity-helper-changed");hash(self,after);if(strcmp(th,after))fail("tool-changed");hash(netpack,after);if(strcmp(nh,after))fail("netpack-changed");
+ hash(output,artifact);receipt(record,sizeof record,source,bh,ih,th,nh,names[step],artifact);save(rp,record);
+ printf("CXDRIVER_BUILD\tstep=%s\tartifact=%s\tsource=%s\tPREPARED_NOT_TESTED\n",names[step],artifact,source);return 0;
+}

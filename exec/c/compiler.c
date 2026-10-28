@@ -76,100 +76,12 @@ static unsigned char *source_read(const char *path, int *len) {
     if (io_close(fd)<0) die("close failed");
     return bytes;
 }
-static long output_open(const char *path) {
-#ifdef __UNISA__
-#ifdef _WIN32
-    return __open((char *)path, 0x40000000, 2);
-#else
-#ifdef __linux__
-    return __open((char *)path, 1|64|512, 493);
-#else
-    return __open((char *)path, 1|512|1024, 493);
-#endif
-#endif
-#else
-    return open(path, O_WRONLY|O_CREAT|O_TRUNC, 0755);
-#endif
-}
-static long output_write(long fd, const void *p, long n) {
-#ifdef __UNISA__
-    return __write(fd, (char *)p, n);
-#else
-    return write((int)fd, p, (size_t)n);
-#endif
-}
-#ifndef _WIN32
-/* Ordinary named outputs are committed only after a complete write and close.
- * Preserve direct IO for devices/FIFOs/symlinks; never unlink the destination.
- * New inodes use 0755 subject to umask, including replacement of a hardlink.
- * An unwritable parent is a refusal, not a fallback to destructive truncation. */
-static long output_begin(const char *path,char **temporary) {
-    struct stat st;int ordinary;
-    if (lstat(path,&st)==0) ordinary=S_ISREG(st.st_mode);
-    else { if (errno!=ENOENT) return -1; ordinary=1; }
-    if (!ordinary) return output_open(path);
-    size_t cap=strlen(path)+80;
-    char *tmp=xrealloc(0,cap);
-    const char *slash=strrchr(path,'/');
-    int directory=slash ? (int)(slash-path+1) : 0;
-    for (int attempt=0;attempt<100;attempt++) {
-        snprintf(tmp,cap,"%.*s.unisacc-%ld-%d.tmp",directory,path,(long)getpid(),attempt);
-        int fd=open(tmp,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0755);
-        if (fd>=0) { *temporary=tmp;return fd; }
-        if (errno!=EEXIST) break;
-    }
-    free(tmp);return -1;
-}
-#endif
-/* Dependency formatting is a driver/file contract, byte for byte gcc -MM's
-   (mkdeps.cc): one space between names, " \\\n " once a line would pass
-   column 72, make's special characters escaped (space, #, $) in
-   prerequisites and -MQ targets, one phony rule per header under -MP.
-   -M lists what -MM lists: the bundled headers are not files. The read
-   ledger comes from the same host adapter used by C and ASM network execution. */
-static int deps_name(FILE *f,const char *name,int quote,int *col) {
-    char esc[1100]; int n=0;
-    if (quote) {
-        for (const char *s=name;*s && n<1090;s++) {
-            if (*s==' ' || *s=='#') esc[n++]='\\';
-            if (*s=='$') esc[n++]='$';
-            esc[n++]=*s;
-        }
-        esc[n]=0; name=esc;
-    } else n=(int)strlen(name);
-    int bad=0;
-    if (*col) {
-        if (*col+n>72) { bad|=fputs(" \\\n ",f)<0; *col=1; }
-        else { bad|=fputc(' ',f)<0; *col+=1; }
-    }
-    bad|=fputs(name,f)<0; *col+=n;
-    return bad;
-}
-static const char *deps_target(const char *out,const char *src,int deponly) {
-    static char tname[520];
-    if (out && !deponly) return out;
-    const char *base=strrchr(src,'/'); base=base ? base+1 : src;
-    const char *dot=strrchr(base,'.'); size_t n=dot ? (size_t)(dot-base) : strlen(base);
-    if (n>500) n=500;
-    memcpy(tname,base,n); tname[n]='.'; tname[n+1]='o'; tname[n+2]=0;
-    return tname;
-}
-static int deps_write(const char *path,const char *target,const char **sources,int count,
-                      const char **targets,const int *quoted,int ntargets,int phony) {
-    FILE *f=strcmp(path,"-") ? fopen(path,"wb") : stdout;
-    if (!f) return clierror("cannot open dependency output");
-    int bad=0,col=0;
-    if (ntargets) for (int i=0;i<ntargets;i++) bad|=deps_name(f,targets[i],quoted[i],&col);
-    else bad|=deps_name(f,target,1,&col);
-    bad|=fputc(':',f)<0; col++;
-    for (int i=0;i<count;i++) bad|=deps_name(f,sources[i],1,&col);
-    for (int i=0;i<FILE_READ_COUNT;i++) bad|=deps_name(f,FILE_READ_PATHS[i],1,&col);
-    bad|=fputc('\n',f)<0;
-    if (phony) for (int i=0;i<FILE_READ_COUNT;i++) { col=0; bad|=deps_name(f,FILE_READ_PATHS[i],1,&col); bad|=fputs(":\n",f)<0; }
-    if (f==stdout) { if (fflush(f)!=0) bad=1; }
-    else if (fclose(f)!=0) bad=1;
-    return bad ? clierror("cannot write dependency output") : 0;
-}
+/* Transitional C caller of the independently compiled CX output module.
+ * The implementation and resource ownership live only in cx/driver/output.cx. */
+int cxo_write_file(const char *path,const void *data,long length,char *why,long whycap);
+/* Transitional calls into the independent CX dependency module. */
+int cxd_default_target(const char *,char *,long,char *,long);
+int cxd_write(const char *,const char *,const char **,long,const char **,const int *,long,const char **,long,int,char *,long);
 /* 0.0.17 R17-2: the unisacc linker joins -funit unit objects at the tape
    level; the joining is the reference's src/tapelink.c, which only builds a
    tape -- every compilation decision after it is the product route's. */
@@ -780,7 +692,11 @@ int main(int argc, char **argv) {
     }
     if (objwant && strncmp(target,"lnx/",4)) return clierror("object output (-c -b) for this target is not on the product route yet (Linux targets are); the reference compiler writes Mach-O and COFF objects");
     if (funit && !objwant) return clierror("-funit needs -c -b os/arch (a unit object)");
-    if (objwant) { mode = 5; if (!out) out = deps_target(0,src,1); }
+    char default_object_target[520], deps_reason[128];
+    if (objwant) { mode = 5; if (!out) {
+        if (cxd_default_target(src,default_object_target,sizeof default_object_target,deps_reason,sizeof deps_reason)) return clierror(deps_reason);
+        out = default_object_target;
+    } }
     /* unit objects (-funit): joined into one program tape here, before the
        route is chosen, because the program's target is the objects' */
     int linking=object_path(src); Buf linked={0};
@@ -1464,8 +1380,13 @@ rr_run_replay:   /* multi-TU hit: the stub pass's post-host_compile tape, then i
             for (int k=0;k<len;k++) { if (base[k]=='/') { dot=len; if (!out) b=k+1; } else if (base[k]=='.') dot=k; }
             name=xrealloc(0,dot-b+3);memcpy(name,base+b,dot-b);name[dot-b]='.';name[dot-b+1]='d';name[dot-b+2]=0;deps=name;
         }
-        int drc=deps_write(deps,deps_target(out,src,deponly),sources,nsources,deptargets,depquoted,ndeptargets,depphony);
-        free(name);if (drc) return drc;
+        char default_dep_target[520]; const char *dep_target=out;
+        if (!out || deponly) {
+            if (cxd_default_target(src,default_dep_target,sizeof default_dep_target,deps_reason,sizeof deps_reason)) { free(name); return clierror(deps_reason); }
+            dep_target=default_dep_target;
+        }
+        int drc=cxd_write(deps,dep_target,sources,nsources,deptargets,depquoted,ndeptargets,(const char **)FILE_READ_PATHS,FILE_READ_COUNT,depphony,deps_reason,sizeof deps_reason);
+        free(name);if (drc) return clierror(deps_reason);
         if (deponly) { free(sources); free(deptargets); free(depquoted); free(in.b); return 0; }
     }
     free(sources); free(deptargets); free(depquoted);
@@ -1488,42 +1409,11 @@ rr_run_replay:   /* multi-TU hit: the stub pass's post-host_compile tape, then i
     /* No destination is opened before successful compilation. */
     struct timespec ow_t0, ow_t1; int ow_time = !!getenv("UNISACC_RR_TIME");
     if (ow_time) clock_gettime(CLOCK_MONOTONIC, &ow_t0);
-    char *output_tmp=0;
-    long fd=1;
-    if (out && strcmp(out,"-")) {
-#ifdef _WIN32
-        fd=output_open(out);
-#else
-        fd=output_begin(out,&output_tmp);
-#endif
-    }
-    if (fd < 0) { free(in.b); return clierror("cannot open output"); }
-    int done = 0;
-    while (done < in.n) {
-        long wrote = output_write(fd,in.b+done,in.n-done);
-#ifdef __UNISA__
-        if (wrote==-4) continue; /* POSIX EINTR from the raw gate */
-#else
-        if (wrote<0 && errno==EINTR) continue;
-#endif
-        if (wrote <= 0 || wrote > in.n-done) {
-            if (fd != 1) io_close(fd);
-            if (output_tmp) { unlink(output_tmp);free(output_tmp); }
-            free(in.b); return clierror("short output write");
-        }
-        done += (int)wrote;
-    }
+    char output_reason[128];
+    int done=in.n;
+    int output_failed=cxo_write_file(out,in.b,in.n,output_reason,sizeof output_reason);
     free(in.b);
-    if (fd != 1 && io_close(fd) < 0) {
-        if (output_tmp) { unlink(output_tmp);free(output_tmp); }
-        return clierror("cannot close output");
-    }
-    if (output_tmp) {
-        if (rename(output_tmp,out)) {
-            unlink(output_tmp);free(output_tmp);return clierror("cannot commit output");
-        }
-        free(output_tmp);
-    }
+    if(output_failed)return clierror(output_reason);
     if (ow_time) {   /* UNISACC_RR_TIME output stamp: open + write + close of the image/tape */
         clock_gettime(CLOCK_MONOTONIC, &ow_t1);
         fprintf(stderr, "RR_TIME\toutput\tkind=image\tbytes=%d\tns=%lld\n", done,
