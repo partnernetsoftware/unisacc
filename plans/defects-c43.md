@@ -33,6 +33,12 @@ context.tsv SHA `cce326a849ec5d73f3e2e5700bfa6f4c232abb011b0f63b0dec55150f419062
 证据在冻结根out/epoch-context-01与out/cxpack-context-01.*。
 仅PREPARED，材料作业未开；与cc流批出现重叠后停止续派，不能把该准备记作候选或资格。
 
+后续现场无在跑批时完成context复验/list（rc0），再实际执行tool-gen、gen-shared-e2、
+gen-shared-e1、gen-shared-e3四项，全部rc0并生成source-package-job-v1收据。
+各输出在冻结根out/cxpack-{tool-gen,gen-shared-e2,gen-shared-e1,gen-shared-e3}-01.*，
+材料及收据在out/epoch-context-01/jobs/。尚余31项生成JSON未执行；未启动tbl/net，
+应先完成生成内容比较，再按依赖及复用合同决定重建范围，不把四项材料计作功能PASS。
+
 ## link.undef-function-refusal — 未定义外部函数链接成崩溃镜像（开放）
 
 2026-10-28 cdx 实测更新：共享3a5b完整原批为1 PASS/4 FAIL，收据
