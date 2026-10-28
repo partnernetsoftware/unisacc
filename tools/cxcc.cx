@@ -160,6 +160,30 @@ static int read_cap(const char *path, unsigned char **out, size_t *out_n) {
     return 0;
 }
 
+#ifdef _WIN32
+#ifndef CXCC_TEMP_TEMPLATE
+/* Product slices do not include tools/cxcc-hostinc. The host Windows
+   build defines CXCC_TEMP_TEMPLATE and keeps its own GetTempPathA body. */
+static int cxcc_temp_template(char *dst, size_t cap) {
+    const char *td;
+    size_t i, n;
+    const char *suf = "cxccXXXXXX";
+    td = getenv("TMPDIR");
+    if (!td || !td[0]) td = getenv("TEMP");
+    if (!td || !td[0]) td = getenv("TMP");
+    if (!td || !td[0]) td = ".";
+    n = strlen(td);
+    if (n + 16 >= cap) return -1;
+    memcpy(dst, td, n);
+    i = n;
+    if (i && dst[i - 1] != '\\' && dst[i - 1] != '/') dst[i++] = '\\';
+    if (i + 11 >= cap) return -1;
+    memcpy(dst + i, suf, 11);
+    return 0;
+}
+#endif
+#endif
+
 static int write_temp(const unsigned char *s, size_t n, char *path, size_t path_cap) {
     char tmpl[CXCC_PATH];
     int fd;
@@ -193,21 +217,25 @@ static int cxcc_status(int st) {
     return 2;
 }
 
+/* The file-scope prototype is not an export. The declaration stays inside
+   this static function so the module scan does not require a definition.
+   NULL is not "inherit" for posix_spawnp: an empty environment makes gcc
+   fail to execute cc1. Windows CreateProcessA treats null as inherit. */
 #ifndef _WIN32
-int posix_spawnp(pid_t *pid, const char *file, const void *fa, const void *at,
-                 char *const argv[], char *const envp[]);
+static int cxcc_spawnp(pid_t *pid, const char *file, char *const *argv, char *const *envp) {
+    extern int posix_spawnp(pid_t *pid, const char *file, const void *fa, const void *at,
+                            char *const argv[], char *const envp[]);
+    return posix_spawnp(pid, file, 0, 0, argv, envp);
+}
 #endif
 
 static int cxcc_exec(const char *cmd, const char *what, char **av) {
     pid_t pid = 0;
     int st = 0;
-    /* posix_spawnp takes the new environment. NULL is not "inherit":
-       an empty environment makes gcc fail to execute cc1. Windows
-       CreateProcessA treats a null environment as inherit, so pass NULL there. */
 #ifdef _WIN32
     int spr = posix_spawnp(&pid, av[0], 0, 0, av, 0);
 #else
-    int spr = posix_spawnp(&pid, av[0], 0, 0, av, environ);
+    int spr = cxcc_spawnp(&pid, av[0], av, environ);
 #endif
     if (spr != 0) {
         fprintf(stderr, "%s: cannot run %s\n", cmd, what);

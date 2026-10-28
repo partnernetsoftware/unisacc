@@ -14,7 +14,7 @@
 
 ## 当前磁盘
 
-仓库根的 `gcc_cx.com` 与 `clang_cx.com` 现在是 shell，分别 `exec` `out/cxcc-host/gcc_cx_lnx64-x86.bin` 与 `out/cxcc-host/clang_cx_lnx64-x86.bin`。这两个 `.com` 被 git 忽略。它们不满足上面的六格要求。本机只跑过这个 Linux x86-64 入口。Windows／OSX 的对接头在 `tools/cxcc-hostinc/`，没有在对应格子上执行。
+仓库根的 `gcc_cx.com` 与 `clang_cx.com` 现在各是一份六格 APE，1551344 字节，`file` 为 PE32+ console x86-64。两个文件被 git 忽略。每一格由 `tools/gcc_cx.cx` 或 `tools/clang_cx.cx` 加上 `src/cxmod.c` 编出，切片名是上一节那五份。本机执行了 Linux x86-64 那一格：无参数 `sh ./gcc_cx.com` 退出 2；构建里 gcc 与 clang 都编过 lex，模块夹具退出 42。`win/x86_64`、`lnx/arm64`、`osx/x86_64`、`osx/arm64` 只写出，没有在对应系统上执行。`win/arm64` 用 `win/x86_64` 那份 PE。
 
 没有 `use` 时，一次执行系统编译器：`-std=c99 -x c -include include/cx.h`。
 
@@ -34,13 +34,11 @@ spec §5 的所有权没有实现。
 
 宿主 `-run` 没有实现。把 `-run` 传给 `gcc_cx` 或 `clang_cx` 会进系统编译器。
 
-六格 APE 还没按现行驱动重打。磁盘上的 `.com` 仍是 Linux shell，指向 `gcc_cx_lnx64-x86.bin` 与 `clang_cx_lnx64-x86.bin`。
+四份非本机切片已写进 APE，没有在 Windows 或 OSX 上执行。
 
 ## 下一动作
 
-用 `tools/build-cxcc-ape.cx` 按现行 `tools/gcc_cx.cx`、`tools/clang_cx.cx` 和 `tools/cxcc.cx` 重打两份六格 APE，替换仓库根的 shell。切片名用上面的五份。本机只执行 Linux x86-64 那一格；其余四份切片写出即可。这一步还没做。
-
-公开集裁剪仍未做：未列入 `cxpack.tsv` 的非 static 函数还在 CXIF 里。那是下一件编译器的事，本篇不改 `src/cxmod.c`。
+六格 APE 已按现行驱动重打。下一步仍是公开集裁剪：未列入 `cxpack.tsv` 的非 static 函数还在 CXIF 里。那是编译器的事，本篇不改 `src/cxmod.c`。
 
 ## 索引
 

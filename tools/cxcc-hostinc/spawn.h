@@ -269,7 +269,9 @@ static int cxcc_mkstemp(char *t) {
     return -1;
 }
 
-/* Directory for mkstemp. A Windows TMPDIR (drive or UNC), else GetTempPathA. */
+/* Directory for mkstemp. A Windows TMPDIR (drive or UNC), else GetTempPathA.
+   CXCC_TEMP_TEMPLATE tells tools/cxcc.cx to keep this body. */
+#define CXCC_TEMP_TEMPLATE 1
 static int cxcc_temp_template(char *dst, size_t cap) {
     const char *td;
     unsigned long n;
