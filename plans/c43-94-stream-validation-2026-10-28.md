@@ -100,8 +100,10 @@ the old diagnostic record format must remain unchanged.
 The two matrices were clean before editing. An exact-hash CX editor validated
 each mapped fresh receipt's PASS, candidate before/after and frozen SID before
 replacing evidence: 38 E1 cells and 58 E2 cells now point to actual new receipts.
-Status, requirement, citation and oracle columns were retained. The three
-header-location/capacity E2 cells and local E2 host aggregate keep their old
-historical evidence, explicitly marked not granted to candidate94. No
+Requirement, citation and oracle columns were retained. Four current E2 states
+were corrected while preserving their historical evidence: header-line semantics
+is `NEEDS_PRODUCT_CHANGE`, both individually passing capacity leaves are
+`OBSERVED` because their registered batch failed, and the local host aggregate
+is `MISSING`. They are explicitly not granted to candidate94. No
 MISSING/foreign-host obligation was closed, and the old Rootda4 E1 NN boundary
 293/0 supplement was not transferred.
