@@ -370,6 +370,10 @@ coverage中旧1/4缺陷描述改为本候选实际4/1及明确合同冲突，没
 
 ### 容器修复开发安装（冻结ecb5fbe322）
 
+落尾模型实现首轮：exec/lower/fallguard-{manifest,result,byte}.tsv经codeend接入C.done。只对非库、非空full输出追加运行时诊断；使用已有SCR0/SCR1/PRINTLEN和24字节PRINTBUF，分24+12输出36字节诊断；第二次write重置fd/ptr；先走library_exit路由，若回调返回再走SYSCALL.base原生exit127。cc静态审查指出libraryfn会重命名C.done并在包后进入旧后继，故FG入口按lfn_enabled跳过，避免在UNILOWP1后追加文本；该库字节合同仍待实测。空nc跳过。CFG、函数间落穿及准确函数名归因尚未实现。
+
+实测仅私有Linux/x86_64独立镜像：native seed-gen生成out/c43-fallguard-lnx-x86_64-04.json，seed-tbl转表，旧通用run执行lower及PCff696的elf模型。三种原始落尾straight/conditional/returned-call镜像均rc127，stderr精确control falls off the end of _start换行，stdout为空，证据out/c43-fallguard-*-native-04.*。模型生成01缺byte文件、02空plain规则、直接JSON交run的bad model tag均保留；改sectioned规则并转tbl后成功。不称默认-run已修、四合法控制通过或六目标通过；尚未私包/安装，已装仍b6f15。
+
 落尾七例原始基线已在已装b6f15e823db12f42461371e2193c30f8b9b34961367caf2905c497765d147b0d执行：out/c43-fallthrough-baseline-01.stdout/.stderr及同名目录各例输出，工具rc1，7断言/3失败。straight-falloff、conditional-falloff、returned-call-falloff均rc=-11、transport=0；jump-over-tail、return-unreachable-tail、finite-backward-jump、called-function-return均rc7且无输出。四个合法控制成立；三个崩溃均保留，不记修复。下一实现优先评估lower末尾具名运行时guard：只有真正执行到末尾才打印诊断并受控退出，正常ret/jump及不可达尾不受影响；必须同时验证默认-run的library_exit回调和独立镜像六目标退出，不能仅追加trap或把静态末opcode当可达性结论。尚无模型改动。
 
 落尾下一刀新增tools/tape-fallthrough-cases.cx开发合同，尚未编译或运行、未登记资格：三项具名拒绝（直线、条件分支、调用返回后落尾），四项正常exit7控制（跳转越过代码、ret后不可达尾、有限回边、被调用函数返回）。每项默认-run，子调用5s，信号/超时/运输失败均红，前后记录产品SHA，保留stdout/stderr；不以“最后opcode不是ret”判定。当前模型定位：tapecheck只做词法，lower/code-scan-result的C.parsed已缓冲指令，code-shell-result的C.done直接ACCEPT。单纯trap仍违反原named-no-crash；若采用运行时guard须具名并受控终止，且覆盖宿主library_exit绑定及六目标非宿主模式。尚未修改模型或宣称落尾修复。
