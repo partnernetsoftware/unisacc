@@ -4,7 +4,8 @@
  * GROUP (each stays under the 60 s rule; a compile costs about 0.13 s):
  *   corpus-N : one program each (a compile costs about 0.35 s; 72 product + 72 reference compiles per program):
  *              0 corpus.int64-edges, 1 corpus.float-double, 2 corpus.calls-abi, 3 corpus.switch-dense,
- *              4 corpus.pointer-memory, 5 corpus.large-frame, 6 corpus.multi-tu
+ *              4 corpus.pointer-memory, 5 corpus.large-frame, 6 corpus.multi-tu, 7 corpus.varargs,
+ *              8 corpus.deep-recursion, 9 corpus.float-mixed (e4.sem.corpus-breadth)
  *   closure  : closure.reference-tape (product -O1/-O2 -S tape == REF tape, whole corpus), default.native-image
  *              (no-flag image == -O0 image bytes and executes to the literal)
  *   cli      : refusal.other-spellings (-Og, -Ofast, -O-1, -O4, -O5: named refusal, rc 1, no image); REF's behaviour
@@ -57,6 +58,20 @@ static const Prog progs[] = {
     { "corpus.multi-tu", "multi-tu",
       "#include <stdio.h>\nint helper(int);\nstatic int hidden(void){return 7;}\nint main(void){printf(\"%d\\n\",helper(5)+hidden());return 7;}\n",
       "static int hidden(void){return 100;}\nint helper(int x){return x*hidden();}\n", "507\n", 7 },
+    /* corpus-7..9 (2026-10-28): stream-e4 cell e4.sem.corpus-breadth (varargs, deep recursion with struct return and
+       pointer arithmetic, mixed float/double with a sparse switch); same oracles as corpus-0..6 */
+    { "corpus.varargs", "varargs",
+      "#include <stdio.h>\n#include <stdarg.h>\nstatic int sum(int n,...){va_list ap;int i,s=0;va_start(ap,n);for(i=0;i<n;i++)s+=va_arg(ap,int);va_end(ap);return s;}\n"
+      "static double avg(int n,...){va_list ap;int i;double s=0;va_start(ap,n);for(i=0;i<n;i++)s+=va_arg(ap,double);va_end(ap);return s/n;}\n"
+      "int main(void){int a=sum(3,1,2,3),b=sum(0),c=sum(6,10,20,30,40,50,60);int d=(int)(avg(4,1.0,2.0,3.0,4.0)*2);printf(\"%d %d %d %d\\n\",a,b,c,d);return a+b+d;}\n", 0, "6 0 210 5\n", 11 },
+    { "corpus.deep-recursion", "deep-recursion",
+      "#include <stdio.h>\nstruct R{int lo;int hi;};\nstatic int fib(int n){return n<2?n:fib(n-1)+fib(n-2);}\nstatic int depth(int n){return n==0?0:n+depth(n-1);}\n"
+      "static int ack(int m,int n){return m==0?n+1:n==0?ack(m-1,1):ack(m-1,ack(m,n-1));}\nstatic struct R span(const int *p,int n){struct R r;r.lo=p[0];r.hi=p[n-1];return r;}\n"
+      "int main(void){int v[5]={4,8,15,16,23};struct R r=span(v+1,3);printf(\"%d %d %d %d %d\\n\",fib(20),depth(5000),ack(2,3),r.lo,r.hi);return (fib(20)+ack(2,3)+r.hi-r.lo)%256;}\n", 0, "6765 12502500 9 8 16\n", 126 },
+    { "corpus.float-mixed", "float-mixed",
+      "#include <stdio.h>\nstatic int cls(int x){switch(x){case -5:return 1;case 17:return 2;case 300:return 3;case 65536:return 4;default:return 0;}}\n"
+      "int main(void){double a=-2.75;float b=2.75f;long long big=(long long)1e10;int c=(int)a+(int)b;int d=(a<b)+(b>0)+(a==-2.75);double e=(double)big/4;\n"
+      " printf(\"%d %d %lld %d %d\\n\",(int)a,(int)b,big,d,(int)(e/1e9));return c+cls(-5)+cls(17)+cls(300)+cls(65536)+cls(5);}\n", 0, "-2 2 10000000000 3 2\n", 10 },
 };
 #define NPROG ((int)(sizeof progs / sizeof *progs))
 
@@ -114,7 +129,7 @@ static void group_cli(void) {
 }
 
 int main(int argc, char **argv) {
-    if ((argc != 4 && argc != 5) || !realpath(argv[1], root) || argv[2][0] != '/' || (argc == 5 && !realpath(argv[4], ref))) { fputs("usage: ROOT ABS_OUT corpus-0..corpus-6|closure|cli [REF]\n", stderr); return 2; }
+    if ((argc != 4 && argc != 5) || !realpath(argv[1], root) || argv[2][0] != '/' || (argc == 5 && !realpath(argv[4], ref))) { fputs("usage: ROOT ABS_OUT corpus-0..corpus-9|closure|cli [REF]\n", stderr); return 2; }
     const char *group = argv[3]; int gp = -1, gl = !strcmp(group, "closure"), gi = !strcmp(group, "cli");
     if (!strncmp(group, "corpus-", 7) && group[7] >= '0' && group[7] < '0' + NPROG && !group[8]) gp = group[7] - '0';
     if (gp < 0 && !gl && !gi) die("group");
