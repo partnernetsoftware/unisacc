@@ -272,8 +272,9 @@ static void loadbytes(unsigned char *data, int len) {
     if (NS > len || NQ > len || NSTR > len || NSTR == INT32_MAX) die("bad model count extent");
     ISNET = kind == 'N'; TOPMAX = NS - 1;
     if (ISNET) { TOPMAX=lint(); if (TOPMAX < NS-1 || TOPMAX == INT32_MAX) die("bad network domain"); }
-    STR = mrealloc(0, sizeof *STR * (NSTR + 1)); STRL = mrealloc(0, sizeof *STRL * (NSTR + 1));
+    STR = mrealloc(0, sizeof *STR * (NSTR + 1));
     memset(STR, 0, sizeof *STR * (NSTR + 1));
+    STRL = mrealloc(0, sizeof *STRL * (NSTR + 1));
     for (int k = 0; k < NSTR; k++) {
         ltag('S');
         if (LBIN) {
@@ -324,8 +325,9 @@ static void loadbytes(unsigned char *data, int len) {
         }
     }
     SMODE = mrealloc(0, sizeof(int) * NS); ROWC = mrealloc(0, sizeof(int) * NS);
-    ROWK = mrealloc(0, sizeof(int *) * NS); ROWN = mrealloc(0, sizeof(int *) * NS); ROWQ = mrealloc(0, sizeof(int *) * NS);
-    memset(ROWK, 0, sizeof(int *) * NS); memset(ROWN, 0, sizeof(int *) * NS); memset(ROWQ, 0, sizeof(int *) * NS);
+    ROWK = mrealloc(0, sizeof(int *) * NS); memset(ROWK, 0, sizeof(int *) * NS);
+    ROWN = mrealloc(0, sizeof(int *) * NS); memset(ROWN, 0, sizeof(int *) * NS);
+    ROWQ = mrealloc(0, sizeof(int *) * NS); memset(ROWQ, 0, sizeof(int *) * NS);
     NLO = mrealloc(0, sizeof(int) * NS); NHI = mrealloc(0, sizeof(int) * NS);
     BN = mrealloc(0, sizeof(int) * NS); BQ = mrealloc(0, sizeof(int) * NS);
     RETS = mrealloc(0, sizeof(int) * NS); RETOK = mrealloc(0, sizeof(unsigned char *) * NS);
