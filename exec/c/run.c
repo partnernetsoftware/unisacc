@@ -17,6 +17,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <errno.h>
+#include <time.h>
 
 /* Standalone runner default; product drivers may override at compile time. */
 #ifndef UNISA_DEFAULT_MAXSTEPS
@@ -1111,6 +1112,12 @@ static int runroute_range(const char *route, const char *first_stage, const char
         }
         int m = STAGES[i].model;
         Model *slot = CACHE && m < CACHE->nmodels ? &CACHE->models[m] : 0;
+        /* UNISACC_RR_TIME phase stamps (stderr, same family as the driver's RR_TIME lines): the model
+         * decode of this stage (inflate/CRC/parse, or a cache bind) and its inference, both measured
+         * inside this process with the monotonic clock; nothing is printed without the variable. */
+        static int rr_stamp = -1; struct timespec rr_a, rr_b, rr_c; int rr_cached = slot && slot->loaded;
+        if (rr_stamp < 0) rr_stamp = getenv("UNISACC_RR_TIME") != 0;
+        if (rr_stamp) clock_gettime(CLOCK_MONOTONIC, &rr_a);
         if (slot && slot->loaded) model_bind(slot);
         else {
             unsigned char *bytes = PB+POFF[m], *owned = 0; int len = PLEN[m];
@@ -1126,7 +1133,17 @@ static int runroute_range(const char *route, const char *first_stage, const char
             if (slot) { model_capture(slot); slot->loaded = 1; }
             MODEL_LOADING = 0;
         }
+        if (rr_stamp) {
+            clock_gettime(CLOCK_MONOTONIC, &rr_b);
+            fprintf(stderr, "RR_TIME\tmodel\tstage=%s\tsource=%s\tns=%lld\n", STAGES[i].name, rr_cached ? "cache" : "inflate",
+                    (long long)(rr_b.tv_sec - rr_a.tv_sec) * 1000000000LL + (rr_b.tv_nsec - rr_a.tv_nsec));
+        }
         Buf out = {0}; int rc = execute(in->b, in->n, src, &out);
+        if (rr_stamp) {
+            clock_gettime(CLOCK_MONOTONIC, &rr_c);
+            fprintf(stderr, "RR_TIME\tinference\tstage=%s\trc=%d\tns=%lld\n", STAGES[i].name, rc,
+                    (long long)(rr_c.tv_sec - rr_b.tv_sec) * 1000000000LL + (rr_c.tv_nsec - rr_b.tv_nsec));
+        }
         if (!rc) attr_strip(&out);
         if (!slot) unload();
         free(in->b); in->b = out.b; in->n = out.n;

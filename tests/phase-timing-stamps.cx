@@ -14,8 +14,14 @@
  *                                       product re-digest) per sample
  *   report.unmeasured-schema           every phase x {cold,hot} exactly once as a positive ns or the literal
  *                                       UNMEASURED with a reason; the checker refuses eleven malformed reports
- * Phases the product does not stamp (construction, forward-exec loading, member inflate, in-product inference,
- * output duration) are printed UNMEASURED.  No speed threshold: concurrent load only adds noise, so the checks are
+ *   construction.{cold,hot}            product stamp `RR_TIME\tconstruction\tns=N` (compiler.c around package())
+ *   loading.model-inflate.cold         sum of `RR_TIME\tmodel\tstage=S\tsource=inflate\tns=N` (run.c runroute_range);
+ *                                       hot = skipped-by-reuse (a hit runs no stage, so zero model lines, asserted)
+ *   inference.in-product.cold          sum of `RR_TIME\tinference\tstage=S\trc=0\tns=N`; hot = skipped-by-reuse
+ *   output.duration.{cold,hot}         `RR_TIME\toutput\tkind=exec-prepare|image\tbytes=B\tns=N` (compiler.c)
+ * A product without these stamps reports them UNMEASURED with the reason "needs-product-stamp:…" and the batch still
+ * passes; forward-exec itself (the execveat) cannot be stamped from inside.  No speed threshold: concurrent load only
+ * adds noise, so the checks are
  * schema, ordering inside one process and consistency (stamp <= its own e2e wall), not absolute times.
  * Cold = UNISACC_RUN_CACHE=0 process (or the first run on an empty private cache for the lookup miss); not OS-cold.
  */
@@ -168,7 +174,23 @@ static int pair(const char *s, size_t n, const char *key, long long *a, long lon
 typedef struct stamps {
     int lines, bad, lookup_n, art_n, mem_n;
     long long lookup_hit, lookup_ns, art_hit, art_mode, mem_rc, mem_ns;
+    /* in-product phase stamps (exec/c/compiler.c package()/output, exec/c/run.c runroute_range):
+       construction (package parse), model (per stage: inflate or cache bind), inference (per stage), output */
+    int con_n, model_n, model_inflate_n, model_cache_n, inf_n, inf_rc_bad, out_n;
+    long long con_ns, model_ns, inf_ns, out_ns;
 } stamps;
+/* "...\tns=N" as the last field of a stamp line, N positive. */
+static int tail_ns(const char *l, size_t n, long long *ns) {
+    size_t i = n;
+    while (i > 0 && l[i - 1] != '\t') i--;
+    if (i == 0 || n - i < 4 || memcmp(l + i, "ns=", 3)) return 0;
+    return digits(l + i + 3, n - i - 3, ns, 1);
+}
+static int has_field(const char *l, size_t n, const char *f) {
+    size_t fn = strlen(f);
+    for (size_t i = 0; i + fn <= n; i++) if (!memcmp(l + i, f, fn)) return 1;
+    return 0;
+}
 static int prefixed(const char *l, size_t n, const char *p, size_t *k) {
     *k = strlen(p);
     return n >= *k && !memcmp(l, p, *k);
@@ -190,6 +212,17 @@ static void parse_stamps(const char *e, size_t n, stamps *st) {
             st->art_n++; st->art_hit = a; st->art_mode = b;
         } else if (prefixed(l, ln, "RR_TIME\tmemory_bind\trc=", &k) && pair(l + k, ln - k, "ns=", &a, &b, 1)) {
             st->mem_n++; st->mem_rc = a; st->mem_ns = b;
+        } else if (prefixed(l, ln, "RR_TIME\tconstruction\tns=", &k) && digits(l + k, ln - k, &b, 1)) {
+            st->con_n++; st->con_ns += b;
+        } else if (prefixed(l, ln, "RR_TIME\tmodel\tstage=", &k) && tail_ns(l, ln, &b) &&
+                   (has_field(l, ln, "\tsource=inflate\t") || has_field(l, ln, "\tsource=cache\t"))) {
+            st->model_n++; st->model_ns += b;
+            if (has_field(l, ln, "\tsource=cache\t")) st->model_cache_n++; else st->model_inflate_n++;
+        } else if (prefixed(l, ln, "RR_TIME\tinference\tstage=", &k) && tail_ns(l, ln, &b) && has_field(l, ln, "\trc=")) {
+            st->inf_n++; st->inf_ns += b;
+            if (!has_field(l, ln, "\trc=0\t")) st->inf_rc_bad++;
+        } else if (prefixed(l, ln, "RR_TIME\toutput\tkind=", &k) && tail_ns(l, ln, &b) && has_field(l, ln, "\tbytes=")) {
+            st->out_n++; st->out_ns += b;
         } else st->bad++;
         at = end + 1;
     }
@@ -501,8 +534,14 @@ int main(int argc, char **argv) {
     put_cell("startup.isolated", "hot", ver_hot.e2e_ns, "external-proxy:sh-PRODUCT---version-second-process");
     put_cell("run.e2e", "cold", run_cold.e2e_ns, "spawn-to-exit-default-run,UNISACC_RUN_CACHE=0");
     put_cell("run.e2e", "hot", run_hit.e2e_ns, "spawn-to-exit-default-run,reuse-hit");
-    put_cell("construction", "cold", -1, "needs-product-stamp:package-parse/route-select/model-decode");
-    put_cell("construction", "hot", -1, "needs-product-stamp:package-parse/route-select/model-decode");
+    /* In-product stamps: measured when the product printed them on the sample (one construction stamp, per-stage
+       model/inference stamps, one output stamp); products without the stamps report UNMEASURED with the reason.
+       On a reuse hit no stage runs, so model-inflate and inference are skipped-by-reuse and must say so. */
+    int cold_stamped = run_cold.st.con_n == 1, hit_stamped = run_hit.st.con_n == 1;
+    put_cell("construction", "cold", cold_stamped ? run_cold.st.con_ns : -1,
+             cold_stamped ? "product-stamp:RR_TIME-construction(compiler.c-package-parse)" : "needs-product-stamp:no-RR_TIME-construction-line");
+    put_cell("construction", "hot", hit_stamped ? run_hit.st.con_ns : -1,
+             hit_stamped ? "product-stamp:RR_TIME-construction(compiler.c-package-parse),reuse-hit" : "needs-product-stamp:no-RR_TIME-construction-line");
     put_cell("loading.reuse-lookup", "cold", run_miss.st.lookup_ns,
              "product-stamp:RR_TIME-lookup_hit=0(compiler.c:1059),first-run-empty-private-cache");
     put_cell("loading.reuse-lookup", "hot", run_hit.st.lookup_ns,
@@ -515,12 +554,26 @@ int main(int argc, char **argv) {
     put_cell("loading.memory-bind", "hot", -1, "skipped-by-reuse:hit-sets-execrun(compiler.c:1044);also-cold-reason");
     put_cell("loading.forward-exec", "cold", -1, "needs-product-stamp:forward_exec-memfd-write+execveat");
     put_cell("loading.forward-exec", "hot", -1, "needs-product-stamp:forward_exec-memfd-write+execveat");
-    put_cell("loading.model-inflate", "cold", -1, "needs-product-stamp:per-member-inflate/CRC/parse");
-    put_cell("loading.model-inflate", "hot", -1, "needs-product-stamp:per-member-inflate/CRC/parse");
-    put_cell("inference.in-product", "cold", -1, "needs-product-stamp:per-stream-e2/e1/e3/e4/prune/lower/elf");
-    put_cell("inference.in-product", "hot", -1, "needs-product-stamp:per-stream-or-skipped-by-reuse");
-    put_cell("output.duration", "cold", -1, "needs-product-stamp:image-write/stdout-flush;included-in-run.e2e");
-    put_cell("output.duration", "hot", -1, "needs-product-stamp:image-write/stdout-flush;included-in-run.e2e");
+    int cold_models = run_cold.st.model_inflate_n > 0 && !run_cold.st.model_cache_n && run_cold.st.model_n == run_cold.st.inf_n;
+    int cold_inf = run_cold.st.inf_n > 0 && !run_cold.st.inf_rc_bad && run_cold.st.model_n == run_cold.st.inf_n;
+    put_cell("loading.model-inflate", "cold", cold_models ? run_cold.st.model_ns : -1,
+             cold_models ? "product-stamp:sum-of-RR_TIME-model-source=inflate(run.c-runroute_range)-per-stage" : "needs-product-stamp:no-RR_TIME-model-lines");
+    put_cell("loading.model-inflate", "hot", -1, hit_stamped && !run_hit.st.model_n
+             ? "skipped-by-reuse:hit-runs-no-stage(zero-RR_TIME-model-lines-on-hit)" : "needs-product-stamp:no-RR_TIME-model-lines");
+    put_cell("inference.in-product", "cold", cold_inf ? run_cold.st.inf_ns : -1,
+             cold_inf ? "product-stamp:sum-of-RR_TIME-inference-rc=0(run.c-runroute_range)-per-stage" : "needs-product-stamp:no-RR_TIME-inference-lines");
+    put_cell("inference.in-product", "hot", -1, hit_stamped && !run_hit.st.inf_n
+             ? "skipped-by-reuse:hit-runs-no-stage(zero-RR_TIME-inference-lines-on-hit)" : "needs-product-stamp:no-RR_TIME-inference-lines");
+    put_cell("output.duration", "cold", run_cold.st.out_n == 1 ? run_cold.st.out_ns : -1, run_cold.st.out_n == 1
+             ? "product-stamp:RR_TIME-output-kind=exec-prepare(compiler.c-forward_exec:memfd+image-write-up-to-exec)" : "needs-product-stamp:no-RR_TIME-output-line");
+    put_cell("output.duration", "hot", run_hit.st.out_n == 1 ? run_hit.st.out_ns : -1, run_hit.st.out_n == 1
+             ? "product-stamp:RR_TIME-output-kind=exec-prepare(compiler.c-forward_exec),reuse-hit" : "needs-product-stamp:no-RR_TIME-output-line");
+    if (cold_stamped) {
+        ck(run_cold.st.con_ns < run_cold.e2e_ns && run_cold.st.model_ns + run_cold.st.inf_ns + run_cold.st.out_ns < run_cold.e2e_ns,
+           "stamps.in-product-within-own-e2e");
+        ck(run_cold.st.model_n >= 7 && run_cold.st.inf_n == run_cold.st.model_n, "stamps.cold-stages-at-least-seven-model-and-inference-paired");
+        ck(!run_hit.st.model_n && !run_hit.st.inf_n && run_hit.st.out_n == 1, "stamps.hit-skips-stages-and-prepares-exec");
+    }
     put_cell("validation", "cold", run_cold.validation_ns, "harness:exact-compare+stamp-parse+cache-scan+product-sha256");
     put_cell("validation", "hot", run_hit.validation_ns, "harness:exact-compare+stamp-parse+cache-scan+product-sha256");
     int failures_before_report = failures;
@@ -557,6 +610,13 @@ int main(int argc, char **argv) {
     puts("CELL\tloading.memory-bind.hot\tUNMEASURED\tskipped-by-reuse-and-route-not-taken");
     cell_line("validation.cold", run_cold.validation_ns);
     cell_line("validation.hot", run_hit.validation_ns);
+    for (int i = 0; i < ncells; i++) {
+        const cell *c = &cells[i];
+        if (strcmp(c->phase, "construction") && strcmp(c->phase, "loading.model-inflate") &&
+            strcmp(c->phase, "inference.in-product") && strcmp(c->phase, "output.duration")) continue;
+        char id[80]; int n = snprintf(id, sizeof id, "%s.%s", c->phase, c->temp); if (n < 0 || (size_t)n >= sizeof id) die("label bound");
+        if (c->ns > 0) cell_line(id, c->ns); else printf("CELL\t%s\tUNMEASURED\t%s\n", id, c->basis);
+    }
     printf("CELL\treport.unmeasured-schema\t%s\tmutations=%d\n", report_failures ? "FAILED" : "CHECKED",
            M_COUNT - 1);
 
@@ -571,8 +631,8 @@ int main(int argc, char **argv) {
                "lookup_miss_ns=%lld\tlookup_hit_ns=%lld\tno-speed-threshold\n",
                ver_cold.e2e_ns, run_cold.e2e_ns, run_hit.e2e_ns, run_miss.st.lookup_ns, run_hit.st.lookup_ns);
     else puts("OBSERVATION\tINVALID-functional-schema-or-identity-check-failed");
-    puts("NOT_CLAIMED\tconstruction/forward-exec/model-inflate/inference/output-durations;memory-bind-on-this-product;"
-         "OS-cold;p95;foreign-hosts");
+    printf("NOT_CLAIMED\t%sforward-exec-duration;memory-bind-on-this-product;OS-cold;p95;foreign-hosts\n",
+           cold_stamped ? "" : "construction/model-inflate/inference/output-durations(product-has-no-RR_TIME-phase-stamps);");
     np_free(&ver_cold.r); np_free(&ver_hot.r); np_free(&run_cold.r); np_free(&run_miss.r); np_free(&run_hit.r);
     np_free(&obj_miss.r); np_free(&obj_hit.r);
     free(rep.p); free(bad.p);

@@ -534,12 +534,21 @@ static int forward_exec(const Buf *image,char **argv) {
     long err=0; int noloader=0; char **envp=argv;
     while (*envp) envp++;                        /* the environment follows argv's NULL (runargs) */
     envp++;
+    struct timespec fx_t0, fx_t1; int fx_time = !!getenv("UNISACC_RR_TIME");
+    if (fx_time) clock_gettime(CLOCK_MONOTONIC, &fx_t0);
     fflush(stdout); fflush(stderr);
     /* MFD_CLOEXEC|MFD_EXEC; kernels before 6.3 reject MFD_EXEC with EINVAL */
     long fd=fx_sys(FX_MEMFD,(long)"unisacc-run",1|16,0,0,0);
     if (fd==-22) fd=fx_sys(FX_MEMFD,(long)"unisacc-run",1,0,0,0);
     if (fd>=0) {
-        err=fx_fill(fd,image) ? -5 : fx_exec(fd,argv,envp);   /* returns only on failure */
+        int filled = fx_fill(fd,image);
+        if (fx_time) {   /* UNISACC_RR_TIME output stamp: memfd + image write up to the exec; the exec itself replaces this process */
+            clock_gettime(CLOCK_MONOTONIC, &fx_t1);
+            fprintf(stderr, "RR_TIME\toutput\tkind=exec-prepare\tbytes=%d\tns=%lld\n", image->n,
+                    (long long)(fx_t1.tv_sec - fx_t0.tv_sec) * 1000000000LL + (fx_t1.tv_nsec - fx_t0.tv_nsec));
+            fflush(stderr);
+        }
+        err=filled ? -5 : fx_exec(fd,argv,envp);   /* returns only on failure */
         noloader=err==-2;                        /* ENOENT by descriptor: the image's PT_INTERP file */
         fx_sys(FX_CLOSE,fd,0,0,0,0);
     }
@@ -889,7 +898,16 @@ int main(int argc, char **argv) {
     cli[NRI].len=(int)strlen(predefine_target); NRI++;
 
     FILE_READ_RECORD=deps!=0;
-    package(pkg ? pkg : argv[0]);
+    {   /* UNISACC_RR_TIME construction stamp: package parse (footer, members, route table) in this process */
+        struct timespec pk_t0, pk_t1; int pk_time = !!getenv("UNISACC_RR_TIME");
+        if (pk_time) clock_gettime(CLOCK_MONOTONIC, &pk_t0);
+        package(pkg ? pkg : argv[0]);
+        if (pk_time) {
+            clock_gettime(CLOCK_MONOTONIC, &pk_t1);
+            fprintf(stderr, "RR_TIME\tconstruction\tns=%lld\n",
+                    (long long)(pk_t1.tv_sec - pk_t0.tv_sec) * 1000000000LL + (pk_t1.tv_nsec - pk_t0.tv_nsec));
+        }
+    }
     HostCompileContext host_context={host_target,host_filter,mode,runit,host_symbols_path,cli,process_dl[0]};
     if(host_target&&(mode==0||mode==3||host_symbols_path)&&!host_stage_present("host-symbols","symbols")){unpackage();return clierror("bind: required host-symbols model is missing");}
 
@@ -1427,6 +1445,8 @@ rr_run_replay:   /* multi-TU hit: the stub pass's post-host_compile tape, then i
         free(in.b); in.b=asmbuf.b; in.n=asmbuf.n; memset(&asmbuf,0,sizeof asmbuf);
     }
     /* No destination is opened before successful compilation. */
+    struct timespec ow_t0, ow_t1; int ow_time = !!getenv("UNISACC_RR_TIME");
+    if (ow_time) clock_gettime(CLOCK_MONOTONIC, &ow_t0);
     long fd = out && strcmp(out,"-") ? output_open(out) : 1;
     if (fd < 0) { free(in.b); return clierror("cannot open output"); }
     int done = 0;
@@ -1439,5 +1459,10 @@ rr_run_replay:   /* multi-TU hit: the stub pass's post-host_compile tape, then i
     }
     free(in.b);
     if (fd != 1 && io_close(fd) < 0) return clierror("cannot close output");
+    if (ow_time) {   /* UNISACC_RR_TIME output stamp: open + write + close of the image/tape */
+        clock_gettime(CLOCK_MONOTONIC, &ow_t1);
+        fprintf(stderr, "RR_TIME\toutput\tkind=image\tbytes=%d\tns=%lld\n", done,
+                (long long)(ow_t1.tv_sec - ow_t0.tv_sec) * 1000000000LL + (ow_t1.tv_nsec - ow_t0.tv_nsec));
+    }
     return 0;
 }
