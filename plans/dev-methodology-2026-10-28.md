@@ -49,3 +49,10 @@
 1. 第 1 周：`table-lint.cx`、`sim.cx --cov` 落地并接入快车道；E2/E1 至少三张表生成器化（含 `--check`）；本文件规则写入 CLAUDE.md（已做）。
 2. 第 2 周：快车道清 36 个产品格（先验 15 个已有修复），一次慢车道纪元换证；完成门拆分后重算宽行。
 3. 指标：修复"改→探针绿" ≤ 1 h；纪元换证 ≤ 2 h；每周正规纪元 1 次；矩阵迁移由脚本完成（`@旧候选:N/0;旧日志` → `@新候选:N/0;新日志`，按批日志 candidate 字段核）。
+
+## 8. 落地记录
+
+- 2026-10-28 `tools/ucn-pp-gen.cx`（e99742f847）：事实+生成器+`--check`；主树六表由 `c96909e11f` 原始表幂等重现。
+- 2026-10-28 `tools/cxlib/delta.cx` + `tools/sim.cx`（d727dec705/5596cb4310）：delta 模拟器，`--cov` 覆盖集；oracle = 与 `exec/c/run.c` 在 103 探针 + 18 真实源上 stdout/stderr/rc 逐字节相等；`run.c` 1.2 MB 输出 11 s（net 执行器 2.7 s，Python 20 s）。用法：`sh ./unisacc.com tools/sim.cx -- DELTA.json INPUT [SRC] [INCLUDE_DIR] [--cov A.tsv]`，两次运行 `LC_ALL=C comm -13 A B` 即得差异状态。
+- 2026-10-28 `tools/table-lint.cx`（5596cb4310）：构网前静态检查 total/reach/stale-r/t-keys/unwritten/maybe-unwritten/dead-end/sb-read，4242 态 2 s；当前 pp delta 0 ERROR。已知局限：共享子自动机按寄存器 k 返回时，must-write 数据流路径不敏感，会对宿主寄存器报 maybe-unwritten（WARN，不阻断）；UCN 生成器的 `UCN.D2/D3` 行不可达（下次换纪元时在生成器里只生成被引用的链）。
+- 快车道闭环示例：改表 → `seed-gen pp X.json` → `table-lint X.json` → `seed-tbl/seed-net` → 探针 + `sim --cov` 差异 → `-E` 字节等价回归；均不触 SID。
