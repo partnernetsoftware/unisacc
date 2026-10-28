@@ -1,0 +1,28 @@
+/* Real CX units through the selected product and model package; foreign
+ * objects are inspected locally, never reported as foreign execution. */
+#pragma unisa use cxlib.netpack
+int main(int argc,char **argv) {
+    if(argc!=5){fputs("usage: DRIVER MODELS TARGET NEW_OUTDIR\n",stderr);return 2;}
+    const char *targets[]={"osx/x86_64","osx/arm64","win/x86_64","win/arm64"};
+    int which=-1;for(int i=0;i<4;i++)if(!strcmp(argv[3],targets[i]))which=i;
+    if(which<0||mkdir(argv[4],0700)){fputs("invalid target or output directory\n",stderr);return 2;}
+    const char *units[]={"output","cli","compat"};int failed=0;
+    for(int i=0;i<3;i++){
+        char src[256],out[4096],why[512];
+        int a=snprintf(src,sizeof src,"cx/driver/%s.cx",units[i]);
+        int b=snprintf(out,sizeof out,"%s/%s.o",argv[4],units[i]);
+        if(a<0||(size_t)a>=sizeof src||b<0||(size_t)b>=sizeof out)return 2;
+        char *v[]={"tools/bound","15",argv[1],"--models",argv[2],"-I","include","-iquote","exec/c","-c","-funit","-b",argv[3],src,"-o",out,0};
+        np_result r={0};int transport=np_run(v,0,0,17,&r,why,sizeof why);
+        size_t n=0;char *s=transport?0:cx_read(out,&n);int format=0;
+        if(s&&n>=8){const unsigned char *p=(const unsigned char *)s;
+            if(which<2)format=p[0]==0xcf&&p[1]==0xfa&&p[2]==0xed&&p[3]==0xfe&&p[4]==(which?12:7)&&p[5]==0&&p[6]==0&&p[7]==1;
+            else format=p[0]==0x64&&p[1]==(which==2?0x86:0xaa);
+        }
+        int ok=!transport&&!r.rc&&!r.errn&&format;
+        printf("%s\t%s\t%s\n",ok?"PASS":"FAIL",argv[3],units[i]);
+        if(!ok){failed++;if(transport)fprintf(stderr,"%s: %s\n",units[i],why);else if(r.errn)fwrite(r.err,1,r.errn,stderr);}
+        free(s);np_free(&r);
+    }
+    printf("CX_CROSS_UNITS\tchecks=3\tfailed=%d\tscope=local-object-only\n",failed);return failed?1:0;
+}
