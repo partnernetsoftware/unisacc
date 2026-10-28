@@ -49,3 +49,11 @@
 3. `unisacc -o p ok.a`（仅归档链接）：文本 `model driver: tape domain: required tapecheck model is missing`（错因）。预期与无 main 一致的具名拒绝。
 4. `unisacc ar zz empty.a`（空归档上的非法操作）：rc 0 无输出；product_ar 只在遍历成员时校验 op（compiler.c:445），空归档不触发。预期 `ar: operation must be r, q, t or x` rc 2（非空归档已如此）。
 附：`ar q2`/`rcsX` 等后缀不校验（op[0] 判定），低优先。
+
+## pp.negative — 预处理器两处未拒绝的约束违反（开放；E2/E1 模型域，所有者 cdx/grk）
+
+批 `pp-negative`（tools/pp-negative.cx，8/10，红行即复现；宿主 gcc 11 对两者均 rc 1）：
+1. `#define 3x 1`：产品 `-E` rc 0、无 stderr。C99 6.10.3："The identifier immediately following the define…"——宏名须为标识符，须诊断。
+2. `#include <stdio.h`（缺 `>`）：产品 rc 0 且**静默包含了 stdio.h**（stdout 56860 字节），无 stderr。C99 6.4.7 header-name 必须闭合；须拒绝。
+诊断质量（INFO，不断言）：`unterminated conditional directive`、`argument count`、`#if expression`、`unterminated macro call` 四类拒绝文本无 `file:line`，而 `#error`、`#else without #if`、`no such file for #include` 有。
+非缺陷：`#foo bar` 为 6.10 非指令（产品接受合规，gcc 选择报错）；`#define __STDC__ 2` 产品与 gcc 都接受（gcc 仅警告）。

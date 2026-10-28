@@ -1,0 +1,50 @@
+/* tools/pp-negative.cx -- malformed preprocessing input: the product must refuse (rc != 0, non-empty stderr, no
+ * stdout) exactly where C99 requires a diagnostic; the host cc -E (declared oracle, identity recorded) is run on the
+ * same fixture and its rc recorded, and for fixtures where the host's refusal is a C99 constraint the product must
+ * refuse too. Found 2026-10-28 on f3705dfa: `#define 3x 1` (6.10.3p? macro name must be an identifier) and
+ * `#include <stdio.h` (6.4.7 header-name must close) are ACCEPTED silently -- red rows, plans/defects-c43.md.
+ *   sh ./unisacc.com tools/pp-negative.cx -- ROOT ABS_OUT HOST_CC
+ * INFO rows (no contract): `#foo bar` is a C99 6.10 non-directive (product accepts, gcc errors by choice);
+ * `#define __STDC__ 2` (6.10.8p2 constraint; gcc only warns, product silent: both accept -- recorded, not asserted);
+ * product diagnostics without file:line (`reject: ...` forms) are recorded as a quality note. */
+#pragma unisa use cxlib.netpack
+
+static char root[4096], outdir[4096], product[4400], hostcc[4096]; static int npass, nfail; static FILE *res;
+static void die(const char *s) { fprintf(stderr, "pp-negative: REFUSE %s errno=%d\n", s, errno); exit(2); }
+static void path(char *p, size_t cap, const char *a, const char *b) { int n = snprintf(p, cap, "%s/%s", a, b); if (n < 0 || (size_t)n >= cap) die("path"); }
+static void saved(const char *p, const char *s, size_t n) { int f = open(p, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600); if (f < 0) die("exclusive create"); while (n) { ssize_t k = write(f, s, n); if (k <= 0) die("write"); s += k; n -= (size_t)k; } if (close(f)) die("close"); }
+static void check(int ok, const char *fx, const char *label, const char *detail) { fprintf(res, "%s\tpp.negative.%s.%s\t%s\n", ok ? "PASS" : "FAIL", fx, label, detail); printf("%s\t%s.%s\n", ok ? "PASS" : "FAIL", fx, label); if (ok) npass++; else nfail++; }
+static int runin(char *const argv[], np_result *r) { char why[1024]; return np_run(argv, outdir, 0, 20, r, why, sizeof why); }
+
+int main(int argc, char **argv) {
+    if (argc != 4 || !realpath(argv[1], root) || argv[2][0] != '/' || !realpath(argv[3], hostcc)) { fputs("usage: ROOT ABS_OUT HOST_CC\n", stderr); return 2; }
+    snprintf(outdir, sizeof outdir, "%s", argv[2]); if (mkdir(outdir, 0700)) die("new out dir must be absent"); path(product, sizeof product, root, "unisacc.com");
+    char rp[4400]; path(rp, sizeof rp, outdir, "results.tsv"); res = fopen(rp, "wbx"); if (!res) die("results");
+    { size_t n; char *b = cx_read(product, &n); if (!b) die("product"); char h[65]; cx_sha256_hex(b, n, h); free(b); np_result r; char *vv[] = { hostcc, "--version", 0 }; char ver[200] = "-"; if (!runin(vv, &r)) { size_t k = 0; while (k < r.outn && r.out[k] != '\n' && k < 199) { ver[k] = r.out[k]; k++; } ver[k] = 0; np_free(&r); } fprintf(res, "IDENTITY\tcandidate=%s\nORACLE\thost_cc=%s\toracle_id=%s\n", h, hostcc, ver); }
+    /* kind: 1 = constraint, product must refuse; 0 = INFO only */
+    struct { const char *name, *src, *clause; int kind; } fx[] = {
+        { "unterminated-if", "#if 1\nint a;\n", "6.10.1 conditional inclusion: #if without #endif", 1 },
+        { "error-directive", "#error stop here\nint a;\n", "6.10.5", 1 },
+        { "missing-include", "#include \"nope.h\"\nint a;\n", "6.10.2 source file not found", 1 },
+        { "too-few-args", "#define F(a,b) a+b\nint x=F(1);\n", "6.10.3p4 argument count", 1 },
+        { "too-many-args", "#define F(a) a\nint x=F(1,2);\n", "6.10.3p4 argument count", 1 },
+        { "else-without-if", "#else\nint a;\n", "6.10.1", 1 },
+        { "macro-name-not-identifier", "#define 3x 1\nint a;\n", "6.10.3 macro name shall be an identifier", 1 },
+        { "if-expression-malformed", "#if 1 +\nint a;\n#endif\n", "6.10.1 constant expression", 1 },
+        { "unterminated-macro-call", "#define F(a) a\nint x=F(1\n", "6.10.3 unterminated invocation", 1 },
+        { "header-name-unclosed", "#include <stdio.h\nint a;\n", "6.4.7 header-name / 6.10.2", 1 },
+        { "non-directive", "#foo bar\nint a;\n", "6.10 non-directive (conforming to accept)", 0 },
+        { "redefine-stdc", "#define __STDC__ 2\nint a;\n", "6.10.8p2 (gcc warns only)", 0 },
+    };
+    int nfx = (int)(sizeof fx / sizeof *fx);
+    for (int i = 0; i < nfx; i++) { char c[64]; snprintf(c, sizeof c, "%s.c", fx[i].name); char p[4400]; path(p, sizeof p, outdir, c); saved(p, fx[i].src, strlen(fx[i].src));
+        np_result u, g; char *uv[] = { "sh", product, "-E", c, 0 }, *gv[] = { hostcc, "-E", "-P", "-std=c99", c, 0 };
+        if (runin(uv, &u)) { check(0, fx[i].name, "product", "transport"); continue; } if (runin(gv, &g)) { check(0, fx[i].name, "host", "transport"); np_free(&u); continue; }
+        char ue[100]; snprintf(ue, sizeof ue, "%.*s", (int)(u.errn > 90 ? 90 : u.errn), u.err); for (char *q = ue; *q; q++) if (*q == '\n') *q = ' ';
+        char d[300]; snprintf(d, sizeof d, "product rc=%d stdout=%zu stderr=%s | host rc=%d | %s", u.rc, u.outn, ue, g.rc, fx[i].clause);
+        if (fx[i].kind) { check(u.rc && u.errn && !u.outn, fx[i].name, "product-refuses", d); fprintf(res, "INFO\tpp.negative.%s.host\trc=%d\n", fx[i].name, g.rc);
+            if (u.rc && u.errn) fprintf(res, "INFO\tpp.negative.%s.diagnostic-has-file-line\t%d\n", fx[i].name, strstr(u.err, c) != 0); }
+        else fprintf(res, "INFO\tpp.negative.%s.no-contract\t%s\n", fx[i].name, d);
+        np_free(&u); np_free(&g); }
+    fprintf(res, "SUMMARY\tpass=%d\tfail=%d\n", npass, nfail); fclose(res); printf("PP_NEGATIVE\tpass=%d\tfail=%d\n", npass, nfail); return nfail ? 1 : 0;
+}
