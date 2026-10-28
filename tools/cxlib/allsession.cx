@@ -18,6 +18,10 @@
  *   materials  content digest + stat fingerprint per registered material (content hashed once at
  *              registration; later checks compare the stat fingerprint: size/dev/ino/mtime/ctime/mode
  *              at one-second granularity -- a same-second same-size in-place rewrite is NOT detected).
+ *              SHA256 literal declarations instead bind the exact 64 lowercase hex bytes under
+ *              ALLMATERIAL/sha256/v1, without a filesystem read. Wire material rows append
+ *              type=sha256; legacy rows retain their original implicit path type. The sealed map,
+ *              registry type, manifest, split snapshot and receipt must agree on every value/type.
  *
  * Manifest SESSION/session.tsv: an 11-line header, then append-only blocks
  *   BLOCK <seq> <kind> prev=<sha256 of every manifest byte before this line> ... END <seq>
@@ -47,7 +51,7 @@
 #pragma unisa use testplan
 
 typedef struct {char candidate[65],batches[65],coverage[65],registry[65],sid[65],harness[65];} as_ident;
-typedef struct {char name[128],path[4096],content[65],fingerprint[65];long entries;} as_material;
+typedef struct {char name[128],path[4096],content[65],fingerprint[65];long entries;int kind;} as_material;
 typedef struct {char id[128],rel[600],sha[65],verdict[16];int wave;} as_ref;
 typedef struct {int wave,finished,changed,run,superseded;char mode[8],dir[600],ids[1024],nonce[65],snapshot[65];long long start_ns;
  /* split attempts: the sealed RUN facts and the SHA of the whole RUN block */
@@ -116,6 +120,15 @@ static int as_walk(as_walker *w,const char *abs,const char *rel,int depth){
  free(v);return rc;
 }
 int as_tree(const char *path,int content,char hex[65],long *entries,char *why,size_t cap){as_walker w;memset(&w,0,sizeof w);w.content=content;w.why=why;w.cap=cap;np_puts(&w.rec,content?"ALLTREE\tcontent\tv1\n":"ALLTREE\tstat\tv1\n");int rc=as_walk(&w,path,".",0);if(!rc){cx_sha256_hex(w.rec.p,w.rec.n,hex);if(entries)*entries=w.entries;}free(w.rec.p);return rc;}
+/* Literal hashes are values, never filesystem names.  Their identity has its own domain. */
+int as_material_path(const char *value,char *why,size_t cap){struct stat st;char canonical[4096];errno=0;if(lstat(value,&st))return as_bad(why,cap,errno==ENOENT?"material-path-absent":"material-path-stat",value,errno);if(!S_ISREG(st.st_mode)&&!S_ISDIR(st.st_mode))return as_bad(why,cap,"material-path-kind",value,0);if(!realpath(value,canonical))return as_bad(why,cap,"material-path-realpath",value,errno);if(strcmp(value,canonical))return as_bad(why,cap,"material-path-canonical",value,0);return 0;}
+int as_material_measure(int kind,const char *value,int content,char hex[65],long *entries,char *why,size_t cap){
+ if(!tp_material_value(kind,value))return as_bad(why,cap,"material-value",value,0);
+ if(kind==1)return as_material_path(value,why,cap)?-1:as_tree(value,content,hex,entries,why,cap);
+ np_buf b={0,0,0};np_puts(&b,"ALLMATERIAL\tsha256\tv1\n");np_puts(&b,value);np_puts(&b,"\n");cx_sha256_hex(b.p,b.n,hex);free(b.p);if(entries)*entries=0;return 0;
+}
+int as_material_fp(const as_material *m,char hex[65],char *why,size_t cap){return as_material_measure(m->kind,m->path,0,hex,0,why,cap);}
+void as_material_tag(np_buf *b,int kind){if(kind==2)np_puts(b,"\ttype=sha256");}
 int as_harness(const char *root,char hex[65],char *why,size_t cap){
  static const char *trees[3]={"tests","tools","cx"};as_walker w;memset(&w,0,sizeof w);w.content=1;w.why=why;w.cap=cap;np_puts(&w.rec,"ALLHARNESS\tv1\n");
  for(int i=0;i<3;i++){char p[4400];if(as_join(p,sizeof p,root,trees[i])){free(w.rec.p);return as_bad(why,cap,"harness-path",root,0);}if(as_walk(&w,p,trees[i],0)){free(w.rec.p);return -1;}}
@@ -160,11 +173,13 @@ int as_registry_load(const char *root,as_registry *r,char *why,size_t cap){
  free(bt);return 0;
 }
 const as_batch *as_find_batch(const as_registry *r,const char *id){for(int i=0;i<r->nb;i++)if(!strcmp(r->b[i].id,id))return &r->b[i];return 0;}
+int as_material_kind(const as_registry *r,const char *name){int kind=0;for(int i=0;i<r->nb;i++)if(!strcmp(r->b[i].impl,"IMPLEMENTED")){int k=tp_material_kind(r->b[i].materials,name,strlen(name));if(k<0||(k&&kind&&k!=kind))return -1;if(k)kind=k;}return kind;}
 
 /* ---- manifest -------------------------------------------------------------------------------------- */
 void as_free(as_manifest *m){free(m->material);free(m->ref);free(m->wave);free(m->bytes);memset(m,0,sizeof *m);}
 static int as_split(char *line,char **f,int max){int n=0;f[n++]=line;for(char *p=line;*p;p++)if(*p=='\t'){if(n==max)return -1;*p=0;f[n++]=p+1;}return n;}
 static const char *as_kv(const char *field,const char *key){size_t n=strlen(key);return !strncmp(field,key,n)&&field[n]=='='?field+n+1:0;}
+static int as_wire_material_kind(int nf,int legacy,char **f){if(nf==legacy)return 1;if(nf!=legacy+1)return 0;return !strcmp(f[legacy],"type=sha256")?2:!strcmp(f[legacy],"type=path")?1:0;}
 static int as_hexfield(char out[65],const char *v){if(!v||!as_ishex(v))return -1;memcpy(out,v,65);return 0;}
 static int as_digits(const char *s,long long *v){long long x=0;if(!*s||(s[0]=='0'&&s[1]))return -1;for(;*s;s++){if(*s<'0'||*s>'9'||x>(LLONG_MAX-9)/10)return -1;x=x*10+(*s-'0');}*v=x;return 0;}
 static int as_relok(const char *s){size_t n=strlen(s);if(!n||n>=600||s[0]=='/'||strstr(s,".."))return 0;for(size_t i=0;i<n;i++)if(!((s[i]>='a'&&s[i]<='z')||(s[i]>='0'&&s[i]<='9')||s[i]=='-'||s[i]=='_'||s[i]=='.'||s[i]=='/'))return 0;return 1;}
@@ -199,10 +214,10 @@ int as_load(const char *session,as_manifest *m,char *why,size_t cap){
    inblock=0;m->seq=blockseq;continue;}
   body++;
   if(!strcmp(kind,"material")){const char *c,*fp,*en;long long ents;
-   if(body!=1||nf!=6||strcmp(f[0],"MATERIAL")||!(c=as_kv(f[3],"content"))||!(fp=as_kv(f[4],"fingerprint"))||!(en=as_kv(f[5],"entries"))||as_digits(en,&ents)||f[2][0]!='/'){rc=as_bad(why,cap,"manifest-material",s,0);break;}
+   int mk=as_wire_material_kind(nf,6,f);if(body!=1||!mk||strcmp(f[0],"MATERIAL")||!(c=as_kv(f[3],"content"))||!(fp=as_kv(f[4],"fingerprint"))||!(en=as_kv(f[5],"entries"))||as_digits(en,&ents)||!tp_material_value(mk,f[2])||(mk==2&&ents)){rc=as_bad(why,cap,"manifest-material",s,0);break;}
    for(int i=0;i<m->nmaterial;i++)if(!strcmp(m->material[i].name,f[1])){rc=as_bad(why,cap,"manifest-material-duplicate",f[1],0);break;}if(rc)break;
    as_material *g=realloc(m->material,(size_t)(m->nmaterial+1)*sizeof *g);if(!g){rc=as_bad(why,cap,"allocation","material",0);break;}m->material=g;as_material *x=&g[m->nmaterial++];memset(x,0,sizeof *x);
-   if(as_copy(x->name,sizeof x->name,f[1])||as_copy(x->path,sizeof x->path,f[2])||as_hexfield(x->content,c)||as_hexfield(x->fingerprint,fp)){rc=as_bad(why,cap,"manifest-material",s,0);break;}x->entries=(long)ents;continue;}
+   if(as_copy(x->name,sizeof x->name,f[1])||as_copy(x->path,sizeof x->path,f[2])||as_hexfield(x->content,c)||as_hexfield(x->fingerprint,fp)){rc=as_bad(why,cap,"manifest-material",s,0);break;}x->entries=(long)ents;x->kind=mk;continue;}
   if(!strcmp(kind,"executor")){const char *aw,*rb,*cn;long long cns;
    if(body!=1||nf!=4||strcmp(f[0],"EXECUTOR")||m->has_executor||!(aw=as_kv(f[1],"all_waves"))||!(rb=as_kv(f[2],"run_batch"))||!(cn=as_kv(f[3],"compile_ns"))||as_digits(cn,&cns)||as_hexfield(m->exec_sha,aw)||as_hexfield(m->runner_sha,rb)){rc=as_bad(why,cap,"manifest-executor",s,0);break;}
    m->has_executor=1;continue;}
@@ -249,12 +264,26 @@ int as_lock(const char *session,int write_lock,char *why,size_t cap){
  struct flock fl;memset(&fl,0,sizeof fl);fl.l_type=write_lock?F_WRLCK:F_RDLCK;fl.l_whence=SEEK_SET;if(fcntl(fd,F_SETLK,(long)&fl)){close(fd);return as_bad(why,cap,"session-busy",p,errno);}return fd;
 }
 const as_material *as_find_material(const as_manifest *m,const char *name){for(int i=0;i<m->nmaterial;i++)if(!strcmp(m->material[i].name,name))return &m->material[i];return 0;}
+/* Rebind every manifest material to the sealed map and registry type, even when
+ * an attacker has recomputed the manifest block chain. No literal is opened. */
+int as_material_bind(const char *session,const as_manifest *m,char *why,size_t cap){
+ as_registry reg;if(as_registry_load(m->root,&reg,why,cap))return -1;
+ char p[4400],sha[65];size_t n=0;int rc=0;if(as_join(p,sizeof p,session,"materials.tsv")){as_registry_free(&reg);return as_bad(why,cap,"materials-map-path",session,0);}char *map=as_read(p,0,&n,why,cap);if(!map){as_registry_free(&reg);return -1;}cx_sha256_hex(map,n,sha);
+ if(strcmp(sha,m->map_sha)||(n&&map[n-1]!='\n')||memchr(map,0,n)||memchr(map,'\r',n)){rc=as_bad(why,cap,"materials-map-identity",p,0);goto done;}
+ int matched=0;size_t at=0;while(at<n){size_t end=at;while(end<n&&map[end]!='\n')end++;map[end]=0;char *line=map+at;at=end+1;char *tab=strchr(line,'\t');if(!tab||strchr(tab+1,'\t')){rc=as_bad(why,cap,"materials-map-fields",p,0);break;}*tab++=0;int kind=as_material_kind(&reg,line);if(kind<1||!tp_material_value(kind,tab)){rc=as_bad(why,cap,"materials-map-type",line,0);break;}if(kind==1&&as_material_path(tab,why,cap)){rc=-1;break;}
+  /* Earlier names are NUL-terminated in this same buffer. */
+  size_t prior=0;while(prior<(size_t)(line-map)){char *name=map+prior;if(!strcmp(name,line)){rc=as_bad(why,cap,"materials-map-duplicate",line,0);break;}prior+=strlen(name)+1;prior+=strlen(map+prior)+1;}if(rc)break;
+  const as_material *x=as_find_material(m,line);if(x){matched++;if(x->kind!=kind||strcmp(x->path,tab)){rc=as_bad(why,cap,"material-map-binding",line,0);break;}if(kind==2){char h[65];if(as_material_fp(x,h,why,cap)||strcmp(h,x->content)||strcmp(h,x->fingerprint)||x->entries){rc=as_bad(why,cap,"material-literal-identity",line,0);break;}}}
+ }
+ if(!rc&&matched!=m->nmaterial)rc=as_bad(why,cap,"material-map-unbound",session,0);
+ done:free(map);as_registry_free(&reg);return rc;
+}
 /* The entry a batch row executes: ROOT/entry for SOURCE, {material}/suffix for PREPARED. */
 int as_entry(const char *root,const as_batch *b,const as_manifest *m,char out[4400],char *why,size_t cap){
  if(!strcmp(b->mode,"SOURCE"))return as_join(out,4400,root,b->entry)?as_bad(why,cap,"entry-path",b->id,0):0;
  const char *close_brace=strchr(b->entry,'}');if(b->entry[0]!='{'||!close_brace||close_brace[1]!='/')return as_bad(why,cap,"entry-template",b->id,0);
  char name[128];size_t n=(size_t)(close_brace-b->entry-1);if(n>=sizeof name)return as_bad(why,cap,"entry-template",b->id,0);{unsigned char *cxb_d=(unsigned char *)(name);const unsigned char *cxb_s=(const unsigned char *)(b->entry+1);size_t cxb_n=(size_t)(n),cxb_i;for(cxb_i=0;cxb_i<cxb_n;cxb_i++)cxb_d[cxb_i]=cxb_s[cxb_i];};name[n]=0;
- const as_material *x=as_find_material(m,name);if(!x)return as_bad(why,cap,"entry-material-unregistered",name,0);return as_join(out,4400,x->path,close_brace+2)?as_bad(why,cap,"entry-path",b->id,0):0;
+ const as_material *x=as_find_material(m,name);if(!x||x->kind!=1)return as_bad(why,cap,"entry-material-unregistered",name,0);return as_join(out,4400,x->path,close_brace+2)?as_bad(why,cap,"entry-path",b->id,0):0;
 }
 
 /* ---- the one verdict rule ------------------------------------------------------------------------- */
@@ -296,7 +325,7 @@ static int as_runseal_ok(const char *session,const as_wave *w,const char *id){ch
  z=snprintf(rel,sizeof rel,"%s/%s",w->dir,leaf);if(z<0||(size_t)z>=sizeof rel||as_join(p,sizeof p,session,rel))return 0;
  char *v=as_read(p,0,&n,why,sizeof why);if(!v)return 0;int ok=n==65&&!memcmp(v,w->run_sha,64)&&v[64]=='\n';free(v);return ok;}
 typedef struct {char *path;char before[65],after[65];} as_in;
-typedef struct {char name[128],path[4096],content[65],fp[65];} as_snapmat;
+typedef struct {char name[128],path[4096],content[65],fp[65];int kind;} as_snapmat;
 /* Writes the receipt and the FINISH block of one RUN-sealed split attempt.  0 written (verdict/reason
    set), -1 refused with nothing written (why = name<TAB>detail).  The bound rc, child status and
    transcript hashes come only from the sealed RUN block; finish has no rc argument. */
@@ -316,6 +345,7 @@ int as_finish(const char *root,const char *session,const char *id,const char *no
  if(!w->run){as_bad(why,cap,"attempt-not-run","no-sealed-RUN-block-the-attempt-stays-UNKNOWN",0);goto done;}
  if(!as_runseal_ok(session,w,id)){as_bad(why,cap,"run-seal-mismatch",id,0);goto done;}
  if(as_registry_load(root,&reg,why,cap))goto done;
+ if(as_material_bind(session,&m,why,cap))goto done;
  if(!(b=as_find_batch(&reg,id))){as_bad(why,cap,"batch-unregistered",id,0);goto done;}
  if(as_join(base,sizeof base,session,w->dir)){as_bad(why,cap,"attempt-path",w->dir,0);goto done;}
  /* the start snapshot: identity at start, input before-hashes, materials */
@@ -324,13 +354,13 @@ int as_finish(const char *root,const char *session,const char *id,const char *no
   while(!bad&&at<sn){size_t end=at;while(snap[end]!='\n')end++;snap[end]=0;char *s=snap+at;at=end+1;char *f[6];int nf=as_split(s,f,6);if(nf<0||ended){bad=1;break;}
    if(line<10){if(nf!=2||strcmp(f[0],sk[line])){bad=1;break;}sv[line++]=f[1];continue;}
    if(!strcmp(f[0],"input")&&nf==3&&!nmat&&as_ishex(f[2])){as_in *g=realloc(in,(size_t)(nin+1)*sizeof *g);if(!g){bad=1;break;}in=g;memset(&in[nin],0,sizeof *in);in[nin].path=f[1];memcpy(in[nin].before,f[2],65);nin++;continue;}
-   if(!strcmp(f[0],"material")&&nf==5&&nmat<32&&as_ishex(f[3])&&as_ishex(f[4])){as_snapmat *x=&mat[nmat++];if(as_copy(x->name,sizeof x->name,f[1])||as_copy(x->path,sizeof x->path,f[2])){bad=1;break;}memcpy(x->content,f[3],65);memcpy(x->fp,f[4],65);continue;}
+   if(!strcmp(f[0],"material")&&as_wire_material_kind(nf,5,f)&&nmat<32&&as_ishex(f[3])&&as_ishex(f[4])){as_snapmat *x=&mat[nmat++];x->kind=as_wire_material_kind(nf,5,f);if(!tp_material_value(x->kind,f[2])||as_copy(x->name,sizeof x->name,f[1])||as_copy(x->path,sizeof x->path,f[2])){bad=1;break;}memcpy(x->content,f[3],65);memcpy(x->fp,f[4],65);continue;}
    if(nf==1&&!strcmp(f[0],"END")&&at==sn){ended=1;continue;}
    bad=1;}
   if(bad||!ended||line<10||nin<1||strcmp(sv[0],"v1")||strcmp(sv[1],id)||strcmp(sv[2],nonce)||strcmp(sv[3],w->dir)){as_bad(why,cap,"snapshot-grammar",p,0);goto done;}
   snap_same=!strcmp(sv[4],b->row)&&!strcmp(sv[5],m.ident.candidate)&&!strcmp(sv[6],m.ident.registry)&&!strcmp(sv[7],m.ident.sid)&&!strcmp(sv[8],m.ident.harness)&&!strcmp(sv[9],m.map_sha);}
  {int declared=0;if(strcmp(b->materials,"-")){const char *q=b->materials;while(*q){declared++;q=strchr(q,',');if(!q)break;q++;}}
-  if(declared!=nmat){as_bad(why,cap,"snapshot-materials",id,0);goto done;}for(int i=0;i<nmat;i++)if(!as_inlist(b->materials,mat[i].name)||!as_find_material(&m,mat[i].name)){as_bad(why,cap,"snapshot-materials",mat[i].name,0);goto done;}}
+  if(declared!=nmat){as_bad(why,cap,"snapshot-materials",id,0);goto done;}for(int i=0;i<nmat;i++){const as_material *x=as_find_material(&m,mat[i].name);if(tp_material_kind(b->materials,mat[i].name,strlen(mat[i].name))!=mat[i].kind||!x||x->kind!=mat[i].kind){as_bad(why,cap,"snapshot-materials",mat[i].name,0);goto done;}for(int j=0;j<i;j++)if(!strcmp(mat[i].name,mat[j].name)){as_bad(why,cap,"snapshot-materials",mat[i].name,0);goto done;}}}
  /* the transcripts and status file must still be the bytes the RUN block sealed */
  snprintf(leaf,sizeof leaf,"%s.stdout",id);if(as_join(p,sizeof p,base,leaf)||!(out=as_read(p,0,&on,why,cap)))goto done;cx_sha256_hex(out,on,h);if(strcmp(h,w->out_sha)||(long long)on!=w->outn){as_bad(why,cap,"run-transcript-changed",p,0);goto done;}
  snprintf(leaf,sizeof leaf,"%s.stderr",id);if(as_join(p,sizeof p,base,leaf)||!(err=as_read(p,0,&en,why,cap)))goto done;cx_sha256_hex(err,en,h);if(strcmp(h,w->err_sha)||(long long)en!=w->errn){as_bad(why,cap,"run-transcript-changed",p,0);goto done;}
@@ -345,9 +375,9 @@ int as_finish(const char *root,const char *session,const char *id,const char *no
  if(!changed&&!snap_same)changed="start-snapshot";
  int inputs_stable=1;for(int i=0;i<nin;i++){if(as_sha_file(in[i].path,1,in[i].after,0,why2,sizeof why2))memset(in[i].after,'0',64),in[i].after[64]=0;if(strcmp(in[i].before,in[i].after))inputs_stable=0;}
  np_buf ml={0,0,0};int materials_stable=1;
- if(strcmp(b->materials,"-")){const char *q=b->materials;while(*q){const char *e=strchr(q,',');char name[128];size_t z=e?(size_t)(e-q):strlen(q);if(z>=sizeof name)break;memcpy(name,q,z);name[z]=0;const as_material *x=as_find_material(&m,name);const as_snapmat *sm=0;for(int i=0;i<nmat;i++)if(!strcmp(mat[i].name,name))sm=&mat[i];
-   char fp[65];if(as_tree(x->path,0,fp,0,why2,sizeof why2))strcpy(fp,"0000000000000000000000000000000000000000000000000000000000000000");if(strcmp(fp,x->fingerprint)||!sm||strcmp(sm->fp,x->fingerprint)||strcmp(sm->path,x->path)||strcmp(sm->content,x->content))materials_stable=0;
-   np_puts(&ml,"material\t");np_puts(&ml,name);np_puts(&ml,"\t");np_puts(&ml,x->path);np_puts(&ml,"\t");np_puts(&ml,x->content);np_puts(&ml,"\t");np_puts(&ml,x->fingerprint);np_puts(&ml,"\t");np_puts(&ml,fp);np_puts(&ml,"\n");if(!e)break;q=e+1;}}
+ if(strcmp(b->materials,"-")){const char *q=b->materials;tp_material_decl d;while(tp_material_next(&q,&d)>0){const char *name=d.name;const as_material *x=as_find_material(&m,name);const as_snapmat *sm=0;for(int i=0;i<nmat;i++)if(!strcmp(mat[i].name,name))sm=&mat[i];
+   char fp[65];if(!x||x->kind!=d.kind){as_bad(why,cap,"material-type-binding",name,0);free(ml.p);goto done;}if(as_material_fp(x,fp,why2,sizeof why2))strcpy(fp,"0000000000000000000000000000000000000000000000000000000000000000");if(strcmp(fp,x->fingerprint)||!sm||sm->kind!=x->kind||strcmp(sm->fp,x->fingerprint)||strcmp(sm->path,x->path)||strcmp(sm->content,x->content))materials_stable=0;
+   np_puts(&ml,"material\t");np_puts(&ml,name);np_puts(&ml,"\t");np_puts(&ml,x->path);np_puts(&ml,"\t");np_puts(&ml,x->content);np_puts(&ml,"\t");np_puts(&ml,x->fingerprint);np_puts(&ml,"\t");np_puts(&ml,fp);as_material_tag(&ml,x->kind);np_puts(&ml,"\n");}}
  as_facts fa;memset(&fa,0,sizeof fa);fa.id=id;fa.marker=b->expect+4;fa.candidate=m.ident.candidate;fa.bound_rc=w->bound_rc;fa.status_known=status_known;fa.child_status=(int)raw;fa.out=out;fa.outn=on;fa.err=err;fa.errn=en;
  fa.candidate_stable=measured&&!strcmp(sv[5],after.candidate)&&!strcmp(sv[5],m.ident.candidate);fa.identity_stable=!changed;fa.inputs_stable=inputs_stable;fa.materials_stable=materials_stable;
  const char *reason;const char *verdict=as_verdict(&fa,&reason);
@@ -410,9 +440,9 @@ static int as_check_receipt(const char *root,const char *session,const as_manife
    if(as_sha_file(f[1],1,h,0,why,sizeof why)||strcmp(h,f[2])){snprintf(reason,200,"receipt-input-changed-since-run");free(text);return -1;}
    inputs++;continue;}
   if(stage<=1&&!strcmp(f[0],"material")){stage=1;/* material NAME PATH CONTENT BEFORE AFTER, in registry order */
-   if(nf!=6){rc=1;break;}const as_material *x=as_find_material(m,f[1]);
-   if(!x||strcmp(x->path,f[2])||strcmp(x->content,f[3])||strcmp(x->fingerprint,f[4]))materials_ok=0;if(strcmp(f[4],f[5])||(x&&strcmp(x->fingerprint,f[5])))materials_stable=0;
-   if(!as_inlist(b->materials,f[1]))materials_ok=0;mats++;continue;}
+   int mk=as_wire_material_kind(nf,6,f);if(!mk){rc=1;break;}const as_material *x=as_find_material(m,f[1]);
+   if(!x||x->kind!=mk||strcmp(x->path,f[2])||strcmp(x->content,f[3])||strcmp(x->fingerprint,f[4]))materials_ok=0;if(strcmp(f[4],f[5])||(x&&strcmp(x->fingerprint,f[5])))materials_stable=0;
+   {const char *q=b->materials;tp_material_decl d;int index=0,found=0;while(tp_material_next(&q,&d)>0){if(index++==mats)found=!strcmp(d.name,f[1])&&d.kind==mk;}if(!found)materials_ok=0;}mats++;continue;}
   if(stage<=2&&(rv=as_rec_value(f,nf,"verdict"))){stage=3;continue;}
   if(stage==3&&(rr=as_rec_value(f,nf,"reason"))){stage=4;continue;}
   if(stage==4&&nf==1&&!strcmp(f[0],"END")&&at==n){stage=5;continue;}
@@ -467,7 +497,8 @@ int as_aggregate(const char *root_arg,const char *session_arg){
   if(strcmp(live.sid,m.ident.sid)){as_say_refuse("session-sid-mismatch",live.sid);refused=1;}
   if(strcmp(live.harness,m.ident.harness)){as_say_refuse("session-harness-mismatch",live.harness);refused=1;}}
  if(!refused){char mp[4400],h[65];if(as_join(mp,sizeof mp,session,"materials.tsv")||as_sha_file(mp,0,h,0,why,sizeof why)||strcmp(h,m.map_sha)){as_say_refuse("session-materials-map-mismatch",mp);refused=1;}}
- for(int i=0;!refused&&i<m.nmaterial;i++){char fp[65];if(as_tree(m.material[i].path,0,fp,0,why,sizeof why)||strcmp(fp,m.material[i].fingerprint)){as_say_refuse("session-material-changed",m.material[i].name);refused=1;}}
+ if(!refused&&as_material_bind(session,&m,why,sizeof why)){as_say_refuse("session-material-binding",why);refused=1;}
+ for(int i=0;!refused&&i<m.nmaterial;i++){char fp[65];if(as_material_fp(&m.material[i],fp,why,sizeof why)||strcmp(fp,m.material[i].fingerprint)){as_say_refuse("session-material-changed",m.material[i].name);refused=1;}}
  /* the registered native executors (split attempts) must still be the bytes their block names */
  if(!refused&&m.has_executor){char p[4400],h[65];if(as_join(p,sizeof p,session,"executor/all-waves")||as_sha_file(p,0,h,0,why,sizeof why)||strcmp(h,m.exec_sha)||as_join(p,sizeof p,session,"executor/run-batch")||as_sha_file(p,0,h,0,why,sizeof why)||strcmp(h,m.runner_sha)){as_say_refuse("session-executor-changed",p);refused=1;}}
  for(int i=0;!refused&&i<m.nwave;i++)if(m.wave[i].changed){char d[40];{int z=snprintf(d,sizeof d,"wave=%d",m.wave[i].wave);if(z<0||(size_t)z>=sizeof d){fprintf(stderr,"bound-format\n");exit(2);}};as_say_refuse("session-identity-changed-during-wave",d);refused=1;}

@@ -2,6 +2,7 @@
  *
  *   identity  ROOT COM_SHA RECORD_SHA SOURCE_SID COMMIT PLAN_SHA NEGATIVE_REV NEW_ABS_OUT
  *   verify    ROOT CANDIDATE RECORD COM_SHA RECORD_SHA SOURCE_SID COMMIT PLAN_SHA NEW_ABS_OUT
+ *   identity-profile ROOT PROFILE PROFILE_SHA NEW_ABS_OUT
  *
  * The kind2 admission cell is tests/candidate-admission-lnx-x86_64.cx (it
  * needs cxlib.rebuildcontext, ~14 s more compile than this batch can afford).
@@ -15,7 +16,9 @@
  * recomputed here, and record-commit ancestry by git. Every mismatch is refused by
  * name; a verdict is MATCH only with an empty reason set.
  *
- * identity: the matching tuple must MATCH; NEGATIVE_REV (HEAD) must be refused with
+ * identity: the matching tuple must MATCH; explicit NEGATIVE_REV must have a
+ * different measured SID and either precede the record commit or not be an
+ * ancestor of the verification commit. It must be refused with
  * commit-source-sid-mismatch; single-field product/record/plan/SID/ancestry
  * mutations of in-memory copies must give their exact reason sets; a stray file in
  * the private export must make it unclean. Inputs are never written; exports are
@@ -27,7 +30,9 @@
  * artifact, foreign hosts, P3 package, native_construction_sha256 binding, N22,
  * release qualification. */
 #pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.candidateprofile
 static char root[4096],work[4096],bound[4400],product[4400];
+static char configured_record[4096];static cpr_profile profile_data;static const char *profile_input;
 static int checks,failed;
 static void die(const char *s){fprintf(stderr,"candidate-identity: REFUSE %s errno=%d\n",s,errno);exit(2);}
 static void ck(int ok,const char *s){checks++;if(!ok)failed++;printf("%s\tcandidate-identity.%s\n",ok?"PASS":"FAIL",s);}
@@ -161,21 +166,36 @@ static char *replace_once(const char *s,size_t n,const char *old,const char *new
 
 static int identity_mode(char **argv){
  ci_tuple x;tuple_args(&x,argv[3],argv[4],argv[5],argv[6],argv[7]);new_out(argv[9]);
- char rec_path[4400];path(rec_path,sizeof rec_path,root,"unisacc.com.build.json");
+ char rec_path[4400];if(configured_record[0])copy_fit(rec_path,sizeof rec_path,configured_record);else path(rec_path,sizeof rec_path,root,"unisacc.com.build.json");
+ if(profile_data.raw)save("candidate-profile.tsv",profile_data.raw,profile_data.bytes);
  char before_r[65];size_t pn,rn;hash_file(rec_path,before_r,0);
  char *pb=load(product,&pn),*rb=load(rec_path,&rn);ci_product P=product_of(pb,pn);
  char dirp[4400],dirn[4400];ci_export pos=export_commit("positive",x.commit,dirp);
  ci_record rec=parse_record(rb,rn);printf("RECORD\tsha256=%s\tschema=%d\tartifact_sha256=%s\tbytes=%lld\tcommit=%s\tsources_sha256=%s\tnative_construction_sha256=%s\n",before_r,rec.schema,rec.artifact,rec.bytes,rec.commit,rec.sources,rec.has_native?rec.native:"ABSENT");
+ if(profile_data.raw){ck(!strcmp(rec.commit,cpr_get(&profile_data,"record-commit")),"record-commit-equals-external-profile");if(failed)die("candidate-profile-record-commit-mismatch");}
  expect_set("positive-tuple",verdict(&x,&P,rb,rn,&pos),0);
  /* Named negative: another commit whose clean export has a different SID. */
  ci_export neg=export_commit("negative",argv[8],dirn);
  if(!strcmp(neg.sid,x.sid))die("negative-commit-not-applicable-same-source-sid");
- {ci_tuple y=x;copy_fit(y.commit,41,neg.commit);unsigned got=verdict(&y,&P,rb,rn,&neg);char g[1024];reasons_text(got,g,sizeof g);printf("REFUSE\tnegative-commit\tcommit=%s\tsource_sid=%s\treasons=%s\n",neg.commit,neg.sid,g);
+ int historical=strcmp(neg.commit,rec.commit)&&is_ancestor(neg.commit,rec.commit);
+ if(!historical&&is_ancestor(neg.commit,pos.commit))die("negative-ancestry-control-not-applicable-needs-pre-record-or-non-ancestor-revision");
+ {ci_tuple y=x;copy_fit(y.commit,41,neg.commit);unsigned got=verdict(&y,&P,rb,rn,&neg),want=BIT(R_COMMIT_SID);if(strcmp(neg.plan,x.plan))want|=BIT(R_PLAN_SHA);if(!is_ancestor(rec.commit,neg.commit))want|=BIT(R_NOT_DESCENDANT);char g[1024];reasons_text(got,g,sizeof g);printf("REFUSE\tnegative-commit\tcommit=%s\tsource_sid=%s\treasons=%s\n",neg.commit,neg.sid,g);
   ck((got&BIT(R_COMMIT_SID))!=0,"negative-commit.commit-source-sid-mismatch");
-  ck(!(got&~(BIT(R_COMMIT_SID)|BIT(R_PLAN_SHA))),"negative-commit.only-commit-bound-reasons");}
+  ck(got==want,"negative-commit.only-commit-bound-reasons");}
  /* The record names its commit; a record claiming a later commit cannot be verified at an older one. */
- {size_t mn;char old[100],nw[100];{int z=snprintf(old,sizeof old,"\"commit\": \"%s\"",rec.commit);if(z<0||(size_t)z>=sizeof old){fprintf(stderr,"bound-format\n");exit(2);}};{int z=snprintf(nw,sizeof nw,"\"commit\": \"%s\"",neg.commit);if(z<0||(size_t)z>=sizeof nw){fprintf(stderr,"bound-format\n");exit(2);}};char *m=replace_once(rb,rn,old,nw,&mn);
-  expect_set("record-commit-after-verification-commit",verdict(&x,&P,m,mn,&pos),BIT(R_RECORD_SHA)|BIT(R_NOT_DESCENDANT));free(m);}
+ {size_t mn;char old[110],nw[110];char *m;
+  if(historical){
+   /* Use the real older export, not a fabricated commit/SID pair. Alter just
+    * record.sources so other fields can agree with that export; its unchanged
+    * record commit is strictly later. Ancestry must still refuse it. */
+   int z=snprintf(old,sizeof old,"\"sources_sha256\": \"%s\"",rec.sources);if(z<0||(size_t)z>=sizeof old)die("mutation-source-bound");z=snprintf(nw,sizeof nw,"\"sources_sha256\": \"%s\"",neg.sid);if(z<0||(size_t)z>=sizeof nw)die("mutation-source-bound");m=replace_once(rb,rn,old,nw,&mn);
+   ci_tuple older=x;copy_fit(older.commit,sizeof older.commit,neg.commit);copy_fit(older.sid,sizeof older.sid,neg.sid);copy_fit(older.plan,sizeof older.plan,neg.plan);
+   printf("ANCESTRY_NEGATIVE\tmode=real-historical-export\trecord-commit=%s\tverification-commit=%s\tchanged-record-field=sources_sha256\n",rec.commit,neg.commit);
+   expect_set("record-commit-after-verification-commit",verdict(&older,&P,m,mn,&neg),BIT(R_RECORD_SHA)|BIT(R_NOT_DESCENDANT));
+  }else{
+   int z=snprintf(old,sizeof old,"\"commit\": \"%s\"",rec.commit);if(z<0||(size_t)z>=sizeof old)die("mutation-commit-bound");z=snprintf(nw,sizeof nw,"\"commit\": \"%s\"",neg.commit);if(z<0||(size_t)z>=sizeof nw)die("mutation-commit-bound");m=replace_once(rb,rn,old,nw,&mn);
+   expect_set("record-commit-after-verification-commit",verdict(&x,&P,m,mn,&pos),BIT(R_RECORD_SHA)|BIT(R_NOT_DESCENDANT));
+  }free(m);}
  /* Product single-byte and size mutations on a private copy. */
  {char *m=malloc(pn);if(!m)die("alloc");{unsigned char *cxb_d=(unsigned char *)(m);const unsigned char *cxb_s=(const unsigned char *)(pb);size_t cxb_n=(size_t)(pn),cxb_i;for(cxb_i=0;cxb_i<cxb_n;cxb_i++)cxb_d[cxb_i]=cxb_s[cxb_i];};m[pn/2]^=1;ci_product F=product_of(m,pn),T=product_of(pb,pn-1);expect_set("product-byte-flip",verdict(&x,&F,rb,rn,&pos),BIT(R_PRODUCT_SHA)|BIT(R_RECORD_ARTIFACT));
   expect_set("product-truncated",verdict(&x,&T,rb,rn,&pos),BIT(R_PRODUCT_SHA)|BIT(R_RECORD_ARTIFACT)|BIT(R_RECORD_BYTES));free(m);}
@@ -202,7 +222,8 @@ static int identity_mode(char **argv){
  /* Recovery: the original tuple still matches after every control. */
  expect_set("positive-tuple-after-controls",verdict(&x,&P,rb,rn,&pos),0);
  free(pb);free(rb);char after_r[65];size_t an;char *after=load(product,&an);ci_product A=product_of(after,an);free(after);ck(!strcmp(A.sha,P.sha)&&A.n==P.n,"candidate-unchanged");hash_file(rec_path,after_r,0);ck(!strcmp(before_r,after_r),"record-unchanged");
- {np_buf b={0};np_puts(&b,"candidate-identity-v1\nproduct\t");np_puts(&b,x.com);np_puts(&b,"\nrecord\t");np_puts(&b,x.record);np_puts(&b,"\nsource\t");np_puts(&b,pos.sid);np_puts(&b,"\nplan\t");np_puts(&b,pos.plan);np_puts(&b,"\ncommit\t");np_puts(&b,pos.commit);np_puts(&b,"\nnegative-commit\t");np_puts(&b,neg.commit);np_puts(&b,"\nnegative-source\t");np_puts(&b,neg.sid);np_puts(&b,"\nnegative-plan\t");np_puts(&b,neg.plan);np_puts(&b,"\n");save("identity.tsv",b.p,b.n);free(b.p);}
+ if(profile_data.raw){char why[256];int stable=cpr_stable(profile_input,&profile_data,why,sizeof why);ck(!stable,"candidate-profile-unchanged");if(stable)fprintf(stderr,"candidate-profile: %s\n",why);}
+ {np_buf b={0};np_puts(&b,"candidate-identity-v1\nproduct\t");np_puts(&b,x.com);np_puts(&b,"\nrecord\t");np_puts(&b,x.record);np_puts(&b,"\nsource\t");np_puts(&b,pos.sid);np_puts(&b,"\nplan\t");np_puts(&b,pos.plan);np_puts(&b,"\ncommit\t");np_puts(&b,pos.commit);np_puts(&b,"\nnegative-commit\t");np_puts(&b,neg.commit);np_puts(&b,"\nnegative-source\t");np_puts(&b,neg.sid);np_puts(&b,"\nnegative-plan\t");np_puts(&b,neg.plan);np_puts(&b,"\n");if(profile_data.raw){np_puts(&b,"candidate-profile-sha256\t");np_puts(&b,profile_data.sha);np_puts(&b,"\n");}save("identity.tsv",b.p,b.n);free(b.p);}
  if(!failed){purge(dirp);purge(dirn);}
  printf("TIMING\texport_ns=%lld\tclean_walk_ns=%lld\tsource_sid_ns=%lld\tplan_ns=%lld\tstartup_compile=UNMEASURED\n",t_export,t_walk,t_sid,t_plan);
  printf("TUPLE\tproduct=%s\trecord=%s\tsource=%s\tplan=%s\tverification_commit=%s\tverdict=%s\n",x.com,x.record,x.sid,x.plan,x.commit,failed?"FAILED":"MATCH");
@@ -222,7 +243,13 @@ int main(int argc,char **argv){
  if(argc<3||!realpath(argv[2],root))die("usage identity|verify ROOT ...");
  path(bound,sizeof bound,root,"tools/bound");path(product,sizeof product,root,"unisacc.com");
  if(unsetenv("UNISACC_RF_CAPTURE")||unsetenv("UNISA_ATTRIBUTES"))die("clear-resource-ambient");
+ if(argc==6&&!strcmp(argv[1],"identity-profile")){
+  char why[256];profile_input=argv[3];if(cpr_load(argv[3],argv[4],&profile_data,why,sizeof why))die(why);
+  if(!realpath(cpr_get(&profile_data,"candidate-path"),product)||!realpath(cpr_get(&profile_data,"record-path"),configured_record))die("candidate-profile-path");
+  char *v[]={argv[0],"identity",argv[2],(char *)cpr_get(&profile_data,"candidate-sha256"),(char *)cpr_get(&profile_data,"record-sha256"),(char *)cpr_get(&profile_data,"source-sid"),(char *)cpr_get(&profile_data,"verification-commit"),(char *)cpr_get(&profile_data,"plan-sha256"),(char *)cpr_get(&profile_data,"negative-commit"),argv[5],0};
+  int rc=identity_mode(v);cpr_clear(&profile_data);return rc;
+ }
  if(argc==10&&!strcmp(argv[1],"identity"))return identity_mode(argv);
  if(argc==11&&!strcmp(argv[1],"verify"))return verify_mode(argv);
- die("usage identity ROOT COM REC SID COMMIT PLAN NEG OUT | verify ROOT CAND REC COM RECSHA SID COMMIT PLAN OUT");return 2;
+ die("usage identity ROOT COM REC SID COMMIT PLAN NEG OUT | verify ROOT CAND REC COM RECSHA SID COMMIT PLAN OUT | identity-profile ROOT PROFILE PROFILE_SHA OUT");return 2;
 }

@@ -1,0 +1,46 @@
+/* Default-run NEW_ABS_OUT. Test-only expected-profile wire/ownership checks.
+ * The literal fixture and independent fixed SHA contain no observed Root or
+ * candidate data. Parsing this fixture is not candidate qualification.
+ * Profile key order is part of CANDIDATE_PROFILE1. Production expectations
+ * must come from independently prepared GEN/PC/record/workflow inputs. */
+#pragma unisa use cxlib.candidateprofile
+#pragma unisa use cxlib.netpack
+static const char *fixture=
+ "CANDIDATE_PROFILE1\n"
+ "version\t0.0.43\n"
+ "candidate-path\t/candidate.com\n"
+ "candidate-sha256\t0000000000000000000000000000000000000000000000000000000000000000\n"
+ "record-path\t/candidate.json\n"
+ "record-sha256\t1111111111111111111111111111111111111111111111111111111111111111\n"
+ "source-sid\t2222222222222222222222222222222222222222222222222222222222222222\n"
+ "verification-commit\t3333333333333333333333333333333333333333\n"
+ "record-commit\t4444444444444444444444444444444444444444\n"
+ "negative-commit\t5555555555555555555555555555555555555555\n"
+ "plan-sha256\t6666666666666666666666666666666666666666666666666666666666666666\n"
+ "generation-dir\t/generation\n"
+ "package-dir\t/package\n"
+ "package-sha256\t7777777777777777777777777777777777777777777777777777777777777777\n";
+static const char *fixture_sha="d5d8b21bb6f3003606469ecd0aee7819fc1237458a27bb6df5e7d9ea2289474b";
+static char work[4096];static int checks,failed;
+static void die(const char *s){fprintf(stderr,"candidate-profile-test: %s errno=%d\n",s,errno);exit(2);}
+static void ck(int ok,const char *s){checks++;if(!ok)failed++;printf("%s\tcandidate-profile.%s\n",ok?"PASS":"FAIL",s);}
+static void path(char *p,const char *name){if(cx_path_join(p,4400,work,name))die("path");}
+static void save(const char *name,const void *bytes,size_t n){char p[4400];path(p,name);int fd=open(p,O_WRONLY|O_CREAT|O_EXCL,0600);if(fd<0)die("exclusive-output");size_t at=0;while(at<n){ssize_t z=write(fd,(const char *)bytes+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0)die("write");at+=(size_t)z;}if(close(fd))die("close");}
+static int zero(const cpr_profile *p){const unsigned char *v=(const unsigned char *)p;for(size_t i=0;i<sizeof *p;i++)if(v[i])return 0;return 1;}
+static void reject(const char *name,const void *bytes,size_t n,const char *reason){save(name,bytes,n);char file[4400],sha[65],why[256],label[150];path(file,name);cx_sha256_hex(bytes,n,sha);cpr_profile p;memset(&p,0xa5,sizeof p);int rc=cpr_load(file,sha,&p,why,sizeof why);int z=snprintf(label,sizeof label,"%s.named-refusal",name);if(z<0||(size_t)z>=sizeof label)die("label");ck(rc==-1&&strstr(why,reason),label);z=snprintf(label,sizeof label,"%s.result-cleared",name);if(z<0||(size_t)z>=sizeof label)die("label");ck(zero(&p),label);cpr_clear(&p);}
+static void replace_reject(const char *name,const char *old,const char *value,const char *reason){np_buf b={0};size_t n=strlen(fixture);if(np_count(fixture,n,old,strlen(old))!=1)die("fixture-anchor");np_replace(fixture,n,old,strlen(old),value,strlen(value),1,&b);reject(name,b.p,b.n,reason);free(b.p);}
+int main(int argc,char **argv){
+ if(argc!=2||argv[1][0]!='/'||strlen(argv[1])>=sizeof work)die("usage NEW_ABS_OUT");memcpy(work,argv[1],strlen(argv[1])+1);if(mkdir(work,0700))die("exclusive-directory");size_t n=strlen(fixture);save("good.tsv",fixture,n);char file[4400],why[256];path(file,"good.tsv");cpr_profile p={0};int rc=cpr_load(file,fixture_sha,&p,why,sizeof why);ck(!rc,"literal-profile-matches-independent-sha");if(rc)die(why);
+ ck(!strcmp(cpr_get(&p,"candidate-path"),"/candidate.com")&&!strcmp(cpr_get(&p,"verification-commit"),"3333333333333333333333333333333333333333")&&!strcmp(cpr_get(&p,"negative-commit"),"5555555555555555555555555555555555555555"),"explicit-path-and-revision-values");ck(p.bytes==n&&!memcmp(p.raw,fixture,n),"owns-exact-unmodified-wire-bytes");ck(!cpr_get(&p,"unknown"),"unknown-accessor-is-absent");ck(!cpr_stable(file,&p,why,sizeof why),"profile-stable-recheck");
+ char wrong[65];memcpy(wrong,fixture_sha,65);wrong[0]=wrong[0]=='0'?'1':'0';cpr_profile bad;memset(&bad,0xa5,sizeof bad);rc=cpr_load(file,wrong,&bad,why,sizeof why);ck(rc==-1&&strstr(why,"sha-mismatch")&&zero(&bad),"external-sha-mismatch-refused-and-cleared");cpr_clear(&bad);
+ replace_reject("version.tsv","version\t0.0.43\n","version\t0.0.44\n","type-or-version");
+ replace_reject("relative.tsv","candidate-path\t/candidate.com\n","candidate-path\trelative.com\n","type-or-version");
+ replace_reject("revision.tsv","verification-commit\t3333333333333333333333333333333333333333\n","verification-commit\tHEAD\n","type-or-version");
+ replace_reject("unknown.tsv","version\t0.0.43\n","unknown\t0.0.43\n","field-order-or-value");
+ replace_reject("missing.tsv","package-sha256\t7777777777777777777777777777777777777777777777777777777777777777\n","","missing-field");
+ np_buf b={0};np_puts(&b,fixture);np_puts(&b,"version\t0.0.43\n");reject("duplicate.tsv",b.p,b.n,"extra-or-duplicate-field");free(b.p);reject("truncated.tsv",fixture,n-1,"wire");
+ char *nul=malloc(n);if(!nul)die("allocation");memcpy(nul,fixture,n);nul[25]=0;reject("nul.tsv",nul,n,"wire");free(nul);
+ char *large=malloc(65537);if(!large)die("allocation");memset(large,'x',65537);reject("large.tsv",large,65537,"bounded-regular-input");free(large);
+ char absent[4400];path(absent,"does-not-exist");memset(&bad,0xa5,sizeof bad);rc=cpr_load(absent,fixture_sha,&bad,why,sizeof why);ck(rc==-1&&strstr(why,"profile-open errno=")&&zero(&bad),"missing-path-is-named-and-cleared");memset(&bad,0xa5,sizeof bad);rc=cpr_load(work,fixture_sha,&bad,why,sizeof why);ck(rc==-1&&strstr(why,"bounded-regular-input")&&zero(&bad),"directory-refused-and-cleared");
+ cpr_clear(&p);ck(zero(&p),"release-clears-instance");rc=cpr_load(file,fixture_sha,&p,why,sizeof why);ck(!rc&&!cpr_stable(file,&p,why,sizeof why),"recovery-after-all-refusals");cpr_clear(&p);printf("CANDIDATE_PROFILE\tassertions=%d\tfailed=%d\tscope=immutable-expected-input-only\n",checks,failed);return failed?1:0;
+}

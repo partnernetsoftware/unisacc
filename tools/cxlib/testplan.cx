@@ -14,6 +14,10 @@ typedef struct {
 typedef struct {const char *id,*implementation,*layer,*source,*mode,*platform,*budget,*materials,*entry,*args,*coverage,*expect;int source_present;} tp_batch_view;
 typedef struct {const char *id,*layer,*implementation,*expected,*source;int mapped,implemented_batch;} tp_coverage_view;
 typedef struct {void (*batch)(const tp_batch_view *,void *);void (*coverage)(const tp_coverage_view *,void *);void *context;} tp_observer;
+/* Generic material declarations: kind 1=canonical path, 2=SHA256 literal.
+ * A bare name retains the original path contract; explicit :path is allowed.
+ * Decoding copies the base name, never a caller-owned view. */
+typedef struct {char name[128];int kind;} tp_material_decl;
 
 static int tp_bad(char *why,size_t cap,const char *reason,int row,const char *id){snprintf(why,cap,"%s row=%d id=%.127s",reason,row,id?id:"-");return -1;}
 static int tp_name(const char *s){size_t i,n=strlen(s);if(!n||n>127||s[0]<'a'||s[0]>'z')return 0;for(i=1;i<n;i++)if(!((s[i]>='a'&&s[i]<='z')||(s[i]>='0'&&s[i]<='9')||s[i]=='-'||s[i]=='_'||s[i]=='.'))return 0;return 1;}
@@ -35,9 +39,12 @@ static int tp_table(char *s,size_t n,const char *header,int cols,char **fields,i
  }
  if(!count)return tp_bad(why,cap,"empty-table",0,0);*rows=count;return 0;
 }
-static int tp_materials(const char *s){const char *at=s;int count=0;if(!strcmp(s,"-"))return 1;while(*at){const char *end=strchr(at,',');size_t n=end?(size_t)(end-at):strlen(at);char name[128];const char *prior=s;if(!n||n>=sizeof name||++count>32)return 0;memcpy(name,at,n);name[n]=0;if(!tp_name(name)||!strcmp(name,"root")||!strcmp(name,"out")||!strcmp(name,"candidate"))return 0;while(prior<at){const char *pe=strchr(prior,',');size_t pn=pe?(size_t)(pe-prior):strlen(prior);if(pn==n&&!memcmp(prior,at,n))return 0;if(!pe)break;prior=pe+1;}if(!end)return 1;at=end+1;if(!*at)return 0;}return 0;}
-static int tp_has_material(const char *s,const char *name,size_t n){while(*s){const char *end=strchr(s,',');size_t z=end?(size_t)(end-s):strlen(s);if(z==n&&!memcmp(s,name,n))return 1;if(!end)return 0;s=end+1;}return 0;}
-static int tp_placeholder(const char *s,const char *materials,int allow_builtin){const char *end;size_t n;if(s[0]!='{')return 0;end=strchr(s,'}');if(!end)return 0;n=(size_t)(end-s-1);if(!n||n>127)return 0;int builtin=allow_builtin&&((n==4&&!memcmp(s+1,"root",4))||(n==3&&!memcmp(s+1,"out",3))||(n==9&&!memcmp(s+1,"candidate",9)));if(!builtin&&!tp_has_material(materials,s+1,n))return 0;if(!end[1])return 1;return end[1]=='/'&&tp_path(end+2);}
+int tp_material_decode(const char *token,size_t n,tp_material_decl *out){if(out)memset(out,0,sizeof *out);if(!token||!out||!n||n>134)return -1;size_t base=n;for(size_t i=0;i<n;i++)if(token[i]==':'){if(base!=n)return -1;base=i;}if(!base||base>=sizeof out->name)return -1;memcpy(out->name,token,base);out->name[base]=0;if(!tp_name(out->name)||!strcmp(out->name,"root")||!strcmp(out->name,"out")||!strcmp(out->name,"candidate")){memset(out,0,sizeof *out);return -1;}out->kind=1;if(base<n){size_t k=n-base-1;const char *type=token+base+1;if(k==4&&!memcmp(type,"path",4))out->kind=1;else if(k==6&&!memcmp(type,"sha256",6))out->kind=2;else{memset(out,0,sizeof *out);return -1;}}return 0;}
+int tp_material_next(const char **cursor,tp_material_decl *out){if(!cursor||!*cursor||!out)return -1;const char *s=*cursor;if(!*s||!strcmp(s,"-"))return 0;const char *end=strchr(s,',');size_t n=end?(size_t)(end-s):strlen(s);if((end&&!end[1])||tp_material_decode(s,n,out))return -1;*cursor=end?end+1:s+n;return 1;}
+int tp_material_kind(const char *csv,const char *name,size_t n){if(!csv||!name||!n)return -1;if(!strcmp(csv,"-"))return 0;const char *at=csv;tp_material_decl d;int found=0,rc;while((rc=tp_material_next(&at,&d))>0)if(strlen(d.name)==n&&!memcmp(d.name,name,n)){if(found)return -1;found=d.kind;}return rc<0||*at?-1:found;}
+int tp_material_value(int kind,const char *value){if(!value)return 0;size_t n=strlen(value);if(kind==2){if(n!=64)return 0;for(size_t i=0;i<n;i++)if(!((value[i]>='0'&&value[i]<='9')||(value[i]>='a'&&value[i]<='f')))return 0;return 1;}return kind==1&&n&&n<4096&&value[0]=='/'&&!strpbrk(value,"\t\r\n");}
+static int tp_materials(const char *s){if(!strcmp(s,"-"))return 1;const char *at=s;tp_material_decl prior[32],d;int count=0,rc;while((rc=tp_material_next(&at,&d))>0){if(count==32)return 0;for(int i=0;i<count;i++)if(!strcmp(prior[i].name,d.name))return 0;prior[count++]=d;}return rc==0&&!*at;}
+static int tp_placeholder(const char *s,const char *materials,int allow_builtin){const char *end;size_t n;if(s[0]!='{')return 0;end=strchr(s,'}');if(!end)return 0;n=(size_t)(end-s-1);if(!n||n>127)return 0;int builtin=allow_builtin&&((n==4&&!memcmp(s+1,"root",4))||(n==3&&!memcmp(s+1,"out",3))||(n==9&&!memcmp(s+1,"candidate",9)));int kind=builtin?1:tp_material_kind(materials,s+1,n);if(kind<1)return 0;if(!end[1])return 1;return kind==1&&end[1]=='/'&&tp_path(end+2);}
 static int tp_args(const char *s,const char *materials){const char *at=s;int count=0;if(!strcmp(s,"-"))return 1;while(*at){const char *end=strchr(at,';');size_t n=end?(size_t)(end-at):strlen(at);char token[2048];size_t i;if(!n||n>=sizeof token||++count>64)return 0;memcpy(token,at,n);token[n]=0;if(token[0]=='{'){if(!tp_placeholder(token,materials,1))return 0;}else{if(token[0]=='/'||strchr(token,'\\')||!strcmp(token,".")||!strcmp(token,".."))return 0;for(i=0;i<n;i++)if(!((token[i]>='a'&&token[i]<='z')||(token[i]>='A'&&token[i]<='Z')||(token[i]>='0'&&token[i]<='9')||token[i]=='-'||token[i]=='_'||token[i]=='.'||token[i]=='/'||token[i]=='='||token[i]==':'))return 0;if(strchr(token,'/')&&!tp_path(token))return 0;}if(!end)return 1;at=end+1;if(!*at)return 0;}return 0;}
 static int tp_expect(const char *s,int planned){size_t i;if(planned)return !strcmp(s,"NOT_READY");if(strncmp(s,"rc0:",4)||!s[4])return 0;for(i=4;s[i];i++)if(!((s[i]>='A'&&s[i]<='Z')||(s[i]>='0'&&s[i]<='9')||s[i]=='_'))return 0;return 1;}
 
@@ -69,6 +76,7 @@ static int tp_process(const char *root,const char *registry,size_t rn,const char
   if(!tp_platform(v[5],planned)){tp_bad(why,cap,"batch-platform",i+1,v[0]);goto done;}
   if(!tp_budget(v[6])){tp_bad(why,cap,"batch-budget",i+1,v[0]);goto done;}
   if(!tp_materials(v[7])){tp_bad(why,cap,"batch-materials",i+1,v[0]);goto done;}
+  {const char *at=v[7];tp_material_decl d;while(tp_material_next(&at,&d)>0)for(j=0;j<i;j++){int kind=tp_material_kind(bf[j*12+7],d.name,strlen(d.name));if(kind>0&&kind!=d.kind){tp_bad(why,cap,"material-type-conflict",i+1,d.name);goto done;}}}
   if(!strcmp(v[4],"SOURCE")){if(strcmp(v[8],v[3])){tp_bad(why,cap,"entry-source-mismatch",i+1,v[0]);goto done;}}
   else if(!strcmp(v[7],"-")||!tp_placeholder(v[8],v[7],0)||!strstr(v[8],"}/")||strcmp(v[8]+strlen(v[8])-3,".cx")){tp_bad(why,cap,"prepared-entry",i+1,v[0]);goto done;}
   if(!tp_args(v[9],v[7])){tp_bad(why,cap,"batch-args",i+1,v[0]);goto done;}

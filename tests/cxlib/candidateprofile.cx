@@ -1,0 +1,36 @@
+/* Test-only immutable expected candidate input. No observation of Root,
+ * candidate, record, GEN or PC supplies an expected digest. The caller must
+ * provide an independently prepared PROFILE SHA256 before execution.
+ * Fields borrow the owned profile instance until cpr_clear; no static borrow
+ * or signature trust claim. Canonical wire: fixed ordered TSV, final LF. */
+#pragma unisa module candidateprofile
+typedef struct {char *raw,*parsed;size_t bytes;const char *value[13];char sha[65];} cpr_profile;
+static const char *cpr_keys[]={"version","candidate-path","candidate-sha256","record-path","record-sha256","source-sid","verification-commit","record-commit","negative-commit","plan-sha256","generation-dir","package-dir","package-sha256"};
+static int cpr_hex(const char *s,size_t n){if(!s||strlen(s)!=n)return 0;for(size_t i=0;i<n;i++)if(!((s[i]>='0'&&s[i]<='9')||(s[i]>='a'&&s[i]<='f')))return 0;return 1;}
+static int cpr_why(char *why,size_t cap,const char *reason){if(why&&cap){size_t n=strlen(reason);if(n>=cap)n=cap-1;memcpy(why,reason,n);why[n]=0;}return -1;}
+void cpr_clear(cpr_profile *p){if(p){free(p->raw);free(p->parsed);memset(p,0,sizeof *p);}}
+const char *cpr_get(const cpr_profile *p,const char *key){if(!p||!p->raw)return 0;for(int i=0;i<13;i++)if(!strcmp(cpr_keys[i],key))return p->value[i];return 0;}
+/* OUT must be zeroed/cleared. Failure leaves it zeroed; input is never written. */
+int cpr_load(const char *path,const char *expected_sha,cpr_profile *out,char *why,size_t cap){
+ if(out)memset(out,0,sizeof *out);if(why&&cap)why[0]=0;if(!out||!path||!why||!cap||!cpr_hex(expected_sha,64))return cpr_why(why,cap,"candidate-profile-arguments-or-expected-sha");
+ int fd=open(path,O_RDONLY|O_NONBLOCK|O_NOFOLLOW);if(fd<0){snprintf(why,cap,"candidate-profile-open errno=%d",errno);return -1;}struct stat a,b;cpr_profile p={0};
+ if(fstat(fd,&a)||!S_ISREG(a.st_mode)||a.st_size<1||a.st_size>65536){close(fd);return cpr_why(why,cap,"candidate-profile-bounded-regular-input");}
+ p.bytes=(size_t)a.st_size;p.raw=malloc(p.bytes+1);p.parsed=malloc(p.bytes+1);if(!p.raw||!p.parsed){close(fd);cpr_clear(&p);return cpr_why(why,cap,"candidate-profile-allocation");}
+ size_t at=0;int bad=0;while(at<p.bytes){ssize_t n=read(fd,p.raw+at,p.bytes-at);if(n<0&&errno==EINTR)continue;if(n<=0){bad=1;break;}at+=(size_t)n;}
+ char tail;ssize_t n;do{n=read(fd,&tail,1);}while(n<0&&errno==EINTR);if(n||fstat(fd,&b)||a.st_size!=b.st_size||a.st_dev!=b.st_dev||a.st_ino!=b.st_ino)bad=1;if(close(fd))bad=1;
+ if(bad){cpr_clear(&p);return cpr_why(why,cap,"candidate-profile-read-extent-or-change");}p.raw[p.bytes]=0;cx_sha256_hex(p.raw,p.bytes,p.sha);
+ if(strcmp(p.sha,expected_sha)){cpr_clear(&p);return cpr_why(why,cap,"candidate-profile-sha-mismatch");}
+ const char *magic="CANDIDATE_PROFILE1\n";size_t mn=strlen(magic);if(p.bytes<=mn||memcmp(p.raw,magic,mn)||memchr(p.raw,0,p.bytes)||p.raw[p.bytes-1]!='\n'){cpr_clear(&p);return cpr_why(why,cap,"candidate-profile-wire");}
+ memcpy(p.parsed,p.raw,p.bytes+1);char *line=p.parsed+mn;
+ for(int i=0;i<13;i++){
+  char *end=strchr(line,'\n');if(!end){cpr_clear(&p);return cpr_why(why,cap,"candidate-profile-missing-field");}*end=0;char *value=strchr(line,'\t');
+  if(!value||strchr(value+1,'\t')){cpr_clear(&p);return cpr_why(why,cap,"candidate-profile-fields");}*value++=0;
+  if(strcmp(line,cpr_keys[i])||!*value||strpbrk(value,"\r\t")){cpr_clear(&p);return cpr_why(why,cap,"candidate-profile-field-order-or-value");}
+  for(const char *q=value;*q;q++)if((unsigned char)*q<32||(unsigned char)*q==127){cpr_clear(&p);return cpr_why(why,cap,"candidate-profile-control-byte");}
+  p.value[i]=value;int width=(i==6||i==7||i==8)?40:(i==2||i==4||i==5||i==9||i==12)?64:0;
+  if((width&&!cpr_hex(value,(size_t)width))||((i==1||i==3||i==10||i==11)&&(value[0]!='/'||strlen(value)>=4096))||(i==0&&strcmp(value,"0.0.43"))){cpr_clear(&p);return cpr_why(why,cap,"candidate-profile-type-or-version");}line=end+1;
+ }
+ if(*line){cpr_clear(&p);return cpr_why(why,cap,"candidate-profile-extra-or-duplicate-field");}*out=p;return 0;
+}
+/* Re-read the exact profile with the same external SHA, never mint a new one. */
+int cpr_stable(const char *path,const cpr_profile *p,char *why,size_t cap){cpr_profile again={0};if(!p||!p->raw)return cpr_why(why,cap,"candidate-profile-not-loaded");if(cpr_load(path,p->sha,&again,why,cap))return -1;int same=p->bytes==again.bytes&&!memcmp(p->raw,again.raw,p->bytes);cpr_clear(&again);return same?0:cpr_why(why,cap,"candidate-profile-changed");}

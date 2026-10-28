@@ -3,6 +3,9 @@
  * costs ~14 s of compile that the identity batch must not pay).
  *
  *   ROOT GEN PKG COM_SHA SOURCE_SID NEW_ABS_OUT
+ *   profile ROOT GEN PKG PROFILE PROFILE_SHA NEW_ABS_OUT
+ * The explicit tuple CLI remains supported. Profile expectations are prepared
+ * independently; GEN/PKG materials must equal the profile's declared paths.
  *
  * Pre-checks independent of the admission reader: GEN/unisacc-next.com SHA equals
  * COM_SHA, its UNIPKG1 footer payload equals PKG/compiler.pkg byte for byte, and
@@ -18,6 +21,7 @@
  * positive cell is NOT_RUN (rc3), never PASS. Nothing is written except NEW_ABS_OUT. */
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.rebuildcontext
+#pragma unisa use cxlib.candidateprofile
 static char root[4096],work[4096],bound[4400],product[4400];
 static int checks,failed;
 static void die(const char *s){fprintf(stderr,"candidate-admission: REFUSE %s errno=%d\n",s,errno);exit(2);}
@@ -33,7 +37,7 @@ static void new_out(const char *arg){
  char parent[4096],base[4096],leaf[4096];if(arg[0]!='/')die("output-absolute");copy_fit(parent,sizeof parent,arg);char *slash=strrchr(parent,'/');
  if(!slash||!slash[1]||!strcmp(slash+1,".")||!strcmp(slash+1,".."))die("output-leaf");copy_fit(leaf,sizeof leaf,slash+1);if(slash==parent)slash[1]=0;else *slash=0;
  if(!realpath(parent,base))die("output-parent");int z=snprintf(work,sizeof work,"%s%s%s",base,!strcmp(base,"/")?"":"/",leaf);
- if(z<0||(size_t)z>=sizeof work)die("output-bound");if(mkdir(work,0700))die("new-output-required");
+ if(z<0||(size_t)z>=sizeof work)die("output-bound");
 }
 static void measure_sid(const char *tree,char out[65]){char ident[4400],why[1024];path(ident,sizeof ident,tree,"seed/ident.c");
  char *v[]={bound,"30","sh",product,ident,"--",(char *)tree,0};np_result r;memset(&r,0,sizeof r);if(np_run(v,root,0,33,&r,why,sizeof why)){fprintf(stderr,"%s\n",why);die("subprocess-transport");}
@@ -42,14 +46,21 @@ int main(int argc,char **argv){
 #if !defined(__linux__) || !defined(__x86_64__)
  fputs("NOT_RUN candidate-admission needs the Linux/x86_64 builder\n",stderr);return 3;
 #endif
- char gen[4096],pkg[4096];
- if(argc!=7||!realpath(argv[1],root)||!realpath(argv[2],gen)||!realpath(argv[3],pkg)||!hexn(argv[4],64)||!hexn(argv[5],64))die("usage ROOT GEN PKG COM_SHA SOURCE_SID NEW_ABS_OUT");
- const char *com=argv[4],*sid=argv[5];new_out(argv[6]);if(within(work,gen)||within(work,pkg))die("output-aliases-material");
+ char gen[4096],pkg[4096];cpr_profile profile={0};const char *profile_path=0;char profile_why[256];char **args=argv;char *normalized[8];
+ if(argc==8&&!strcmp(argv[1],"profile")){
+  profile_path=argv[5];if(cpr_load(profile_path,argv[6],&profile,profile_why,sizeof profile_why))die(profile_why);
+  normalized[0]=argv[0];normalized[1]=argv[2];normalized[2]=argv[3];normalized[3]=argv[4];normalized[4]=(char *)cpr_get(&profile,"candidate-sha256");normalized[5]=(char *)cpr_get(&profile,"source-sid");normalized[6]=argv[7];normalized[7]=0;args=normalized;
+ }else if(argc!=7)die("usage ROOT GEN PKG COM_SHA SOURCE_SID NEW_ABS_OUT | profile ROOT GEN PKG PROFILE PROFILE_SHA NEW_ABS_OUT");
+ if(!realpath(args[1],root)||!realpath(args[2],gen)||!realpath(args[3],pkg)||!hexn(args[4],64)||!hexn(args[5],64))die("candidate-tuple-paths-or-sha");
+ if(profile.raw){char declared[4096];if(!realpath(cpr_get(&profile,"generation-dir"),declared)||strcmp(gen,declared))die("generation-material-differs-from-profile");if(!realpath(cpr_get(&profile,"package-dir"),declared)||strcmp(pkg,declared))die("package-material-differs-from-profile");}
+ const char *com=args[4],*sid=args[5];new_out(args[6]);if(within(work,gen)||within(work,pkg))die("output-aliases-material");if(mkdir(work,0700))die("new-output-required");
+ if(profile.raw){save("candidate-profile.tsv",profile.raw,profile.bytes);size_t z;char h[65];char *bytes=load(cpr_get(&profile,"candidate-path"),&z);cx_sha256_hex(bytes,z,h);free(bytes);ck(!strcmp(h,com),"profile-candidate-content-sha");bytes=load(cpr_get(&profile,"record-path"),&z);cx_sha256_hex(bytes,z,h);free(bytes);ck(!strcmp(h,cpr_get(&profile,"record-sha256")),"profile-record-content-sha");if(failed)die("candidate-profile-content-mismatch");}
  path(bound,sizeof bound,root,"tools/bound");path(product,sizeof product,root,"unisacc.com");
  if(unsetenv("UNISACC_RF_CAPTURE")||unsetenv("UNISA_ATTRIBUTES"))die("clear-resource-ambient");
  char p[4400],h[65],pkg_sha[65],kind[40];size_t n,cn,kn;
  path(p,sizeof p,gen,"unisacc-next.com");char *c=load(p,&cn);cx_sha256_hex(c,cn,h);ck(!strcmp(h,com),"generation-candidate-sha");
  path(p,sizeof p,pkg,"compiler.pkg");char *k=load(p,&kn);cx_sha256_hex(k,kn,pkg_sha);
+ if(profile.raw)ck(!strcmp(pkg_sha,cpr_get(&profile,"package-sha256")),"package-equals-profile-expected-sha");
  {unsigned long long z=0;if(cn>=16)for(int i=7;i>=0;i--)z=(z<<8)|(unsigned char)c[cn-8+i];
   ck(cn>=16&&!memcmp(c+cn-16,"UNIPKG1\n",8)&&z==kn&&kn<=cn-16&&!memcmp(c+cn-16-kn,k,kn),"embedded-package-equals-prepared");}
  free(c);free(k);
@@ -58,6 +69,7 @@ int main(int argc,char **argv){
  printf("ADMISSION_CONTEXT\tlive_root_source=%s\tcandidate_source=%s\tapplicable=%d\tpackage=%s\tpackage_sha256=%s\n",live,sid,applicable,kind,pkg_sha);
  rb_result r;memset(&r,0xa5,sizeof r);char why[2048];memset(why,'!',sizeof why);int rc=rb_verify_candidate(root,gen,pkg,product,&r,why,sizeof why);long long e=now_ns();
  printf("TIMING\tlive_source_ns=%lld\tadmission_ns=%lld\tstartup_compile=UNMEASURED\n",b-a,e-b);
+ if(profile.raw){ck(!cpr_stable(profile_path,&profile,profile_why,sizeof profile_why),"candidate-profile-unchanged");printf("PROFILE\tsha256=%s\n",profile.sha);}
  np_buf out={0};np_puts(&out,"candidate-admission-v1\nlive-source\t");np_puts(&out,live);np_puts(&out,"\ncandidate-source\t");np_puts(&out,sid);np_puts(&out,"\ncandidate\t");np_puts(&out,com);np_puts(&out,"\npackage\t");np_puts(&out,pkg_sha);np_puts(&out,"\nadmission-rc\t");np_putll(&out,rc);np_puts(&out,"\n");
  if(applicable){
   ck(rc==0&&!why[0],"kind2-admission");
@@ -68,7 +80,7 @@ int main(int argc,char **argv){
    np_puts(&out,"witness\t");np_puts(&out,r.witness);np_puts(&out,"\n");}
   save("admission.tsv",out.p,out.n);free(out.p);
   puts("NOT_CLAIMED\tproducer-artifact-foreign-hosts-N22-release");
-  printf("CANDIDATE_ADMISSION\tassertions=%d\tfailed=%d\tscope=lnx-x86_64-kind2\n",checks,failed);return failed?1:0;
+  printf("CANDIDATE_ADMISSION\tassertions=%d\tfailed=%d\tscope=lnx-x86_64-kind2\n",checks,failed);cpr_clear(&profile);return failed?1:0;
  }
  /* Not applicable: the refusal must be explicit, named, path-bound, and leave nothing behind. */
  int term=memchr(why,0,sizeof why)!=0;const char *pp=term?strstr(why," path="):0,*ep=pp?strstr(pp," errno="):0;
@@ -77,5 +89,5 @@ int main(int argc,char **argv){
  if(term){printf("REFUSAL\tkind2-admission\t%s\n",why);np_puts(&out,"refusal\t");np_puts(&out,why);np_puts(&out,"\n");}
  save("admission.tsv",out.p,out.n);free(out.p);
  puts("NOT_RUN\tid.kind2-admission\tlive-root-source-differs-from-candidate-source\tgeneration-receipts-bind-literal-root-path");
- printf("CANDIDATE_ADMISSION\tassertions=%d\tfailed=%d\tscope=lnx-x86_64-kind2\tpositive=NOT_RUN\n",checks,failed);return failed?1:3;
+ printf("CANDIDATE_ADMISSION\tassertions=%d\tfailed=%d\tscope=lnx-x86_64-kind2\tpositive=NOT_RUN\n",checks,failed);cpr_clear(&profile);return failed?1:3;
 }
