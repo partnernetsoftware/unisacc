@@ -1,7 +1,9 @@
 #!/usr/bin/env -S unisacc.com -run
-/* cxinclude.cx -- CX0 ratchet of plans/cx-modules.md: per tracked .cx file, the number of preprocessor include
-   directives, i.e. lines that are optional blanks, a hash mark, optional blanks, then the word include.  A .cx unit
-   has its prelude (include/cx.h) built in, so this count only goes down, and a new .cx starts and stays at 0.
+/* cxinclude.cx -- CX0 ratchet of plans/cx-modules.md: per tracked .cx module, the number of preprocessor include
+   directives, i.e. lines that are optional blanks, a hash mark, optional blanks, then the word include.  A .cx
+   module has its prelude (include/cx.h) built in and must not use #include.  A new module starts and stays at 0;
+   a row already in tests/cxinclude.tsv is debt and only goes down.  The libc/POSIX docking units listed in
+   tests/cxinclude-boundary.tsv (include/ and tools/cxcc-hostinc/) may use #include; they are not module rows.
    This file itself has none: everything it calls comes from the prelude.
    usage, from the repo root:
      sh ./unisacc.com -run tests/cxinclude.cx -- --check   rc 1 naming each file whose count rose above its row in
@@ -16,11 +18,15 @@
    trouble. */
 
 #define BASELINE "tests/cxinclude.tsv"
+#define BOUNDARY "tests/cxinclude-boundary.tsv"
 #define MAXROWS 4096
+#define MAXPREF 32
 
 typedef struct { char *path; int count; int used; } Row;
 static Row rows[MAXROWS];
 static int nrows;
+static char *pref[MAXPREF];
+static int npref;
 
 /* include directives in b[0..n) */
 static int count_includes(const char *b, size_t n) {
@@ -66,6 +72,57 @@ static Row *find_row(const char *path) {
     return 0;
 }
 
+/* docking prefixes; -1 when the list is missing or a row does not end with / */
+static int load_boundary(void) {
+    size_t n, i = 0, e, t; char *b = cx_read(BOUNDARY, &n);
+    if (!b) { fprintf(stderr, "cxinclude: cannot read %s\n", BOUNDARY); return -1; }
+    while (i < n) {
+        e = i; while (e < n && b[e] != '\n') e++;
+        if (e < n) b[e] = 0;
+        if (e > i && b[e - 1] == '\r') b[e - 1] = 0;
+        if (e > i && b[i] != '#') {
+            char *line = b + i;
+            if (npref == MAXPREF) { fprintf(stderr, "cxinclude: %s: too many prefixes\n", BOUNDARY); free(b); return -1; }
+            t = strlen(line);
+            if (t < 2 || line[t - 1] != '/') { fprintf(stderr, "cxinclude: boundary prefix must end with /: %s\n", line); free(b); return -1; }
+            pref[npref] = malloc(t + 1); memcpy(pref[npref], line, t + 1); npref++;
+        }
+        i = e + 1;
+    }
+    free(b);
+    if (!npref) { fprintf(stderr, "cxinclude: %s: no prefixes\n", BOUNDARY); return -1; }
+    return 0;
+}
+
+static int is_boundary(const char *path) {
+    int k; size_t n;
+    for (k = 0; k < npref; k++) {
+        n = strlen(pref[k]);
+        if (!strncmp(path, pref[k], n)) return 1;
+    }
+    return 0;
+}
+
+/* headers under the docking prefixes; their #include lines are allowed */
+static int boundary_headers(int *files, int *incs) {
+    char *list = 0, *p, *end; size_t ln = 0; int rc;
+    rc = cx_run("git ls-files -z -- include tools/cxcc-hostinc", &list, &ln);
+    if (rc != 0 || !list) { fprintf(stderr, "cxinclude: git ls-files failed (rc %d)\n", rc); return -1; }
+    *files = 0; *incs = 0;
+    for (p = list, end = list + ln; p < end; p += strlen(p) + 1) {
+        size_t n, L; char *src; int c;
+        if (!*p || !is_boundary(p)) continue;
+        L = strlen(p);
+        if (L < 3 || p[L - 2] != '.' || p[L - 1] != 'h') continue;
+        src = cx_read(p, &n);
+        c = src ? count_includes(src, n) : 0;
+        free(src);
+        (*files)++; (*incs) += c;
+    }
+    free(list);
+    return 0;
+}
+
 static int append(char **buf, size_t *len, size_t *cap, const char *s) {
     size_t n = strlen(s); char *t;
     if (*len + n + 1 > *cap) {
@@ -78,19 +135,21 @@ static int append(char **buf, size_t *len, size_t *cap, const char *s) {
 
 int main(int argc, char **argv) {
     char *list = 0, *cdup = 0, *p, *end, *out = 0, line[4200]; size_t ln = 0, cl = 0, olen = 0, ocap = 0;
-    int check, files = 0, total = 0, over = 0, under = 0, base_total = 0, k, rc;
+    int check, files = 0, total = 0, over = 0, under = 0, base_total = 0, bfiles = 0, binc = 0, hfiles = 0, hinc = 0, k, rc;
     if (argc != 2 || (strcmp(argv[1], "--check") && strcmp(argv[1], "--write"))) {
         fprintf(stderr, "usage: cxinclude.cx --check | --write   (from the repo root)\n"); return 2;
     }
     check = !strcmp(argv[1], "--check");
     rc = cx_run("git rev-parse --show-cdup", &cdup, &cl);
     if (rc != 0 || !cdup || cl > 1) { fprintf(stderr, "cxinclude: run from the repo root\n"); return 2; }
+    if (load_boundary() < 0) return 2;
     if (check && load_baseline() < 0) return 2;
     rc = cx_run("git ls-files -z -- '*.cx'", &list, &ln);
     if (rc != 0 || !list) { fprintf(stderr, "cxinclude: git ls-files failed (rc %d)\n", rc); return 2; }
     if (!check) {
-        append(&out, &olen, &ocap, "# tests/cxinclude.tsv -- written by tests/cxinclude.cx --write; per tracked .cx file its include directives.\n");
-        append(&out, &olen, &ocap, "# Rows only for counts above 0 (no row = held at 0). The CX0 ratchet: counts only go down (plans/cx-modules.md).\n");
+        append(&out, &olen, &ocap, "# tests/cxinclude.tsv -- written by tests/cxinclude.cx --write; per tracked .cx module its include directives.\n");
+        append(&out, &olen, &ocap, "# A .cx module must not use #include. Rows are debt and only go down. No row means 0.\n");
+        append(&out, &olen, &ocap, "# include/ and tools/cxcc-hostinc/ are the libc/POSIX docking units and are not rows here.\n");
         append(&out, &olen, &ocap, "# path\tincludes\n");
     }
     for (p = list, end = list + ln; p < end; p += strlen(p) + 1) {
@@ -99,13 +158,18 @@ int main(int argc, char **argv) {
         src = cx_read(p, &n);
         c = src ? count_includes(src, n) : 0;
         free(src);
+        if (is_boundary(p)) {
+            bfiles++; binc += c;
+            if (check && (r = find_row(p))) r->used = 1;
+            continue;
+        }
         files++; total += c;
         if (check) {
             r = find_row(p);
             if (r) r->used = 1;
             if (c > (r ? r->count : 0)) {
-                if (r) printf("cxinclude: %s has %d include lines, baseline %d\n", p, c, r->count);
-                else printf("cxinclude: %s has %d include lines and no baseline row (a new .cx must have 0)\n", p, c);
+                if (r) printf("cxinclude: module %s has %d include lines, baseline %d\n", p, c, r->count);
+                else printf("cxinclude: module %s has %d include lines and no baseline row (a .cx module must not use #include)\n", p, c);
                 over++;
             } else if (r && c < r->count) under++;
         } else if (c > 0) {
@@ -115,6 +179,8 @@ int main(int argc, char **argv) {
         }
     }
     free(list); free(cdup);
+    if (boundary_headers(&hfiles, &hinc) < 0) return 2;
+    bfiles += hfiles; binc += hinc;
     if (!check) {
         if (cx_write(BASELINE, out, olen) != 0) { fprintf(stderr, "cxinclude: cannot write %s\n", BASELINE); return 2; }
         free(out);
@@ -125,7 +191,8 @@ int main(int argc, char **argv) {
         base_total += rows[k].count;
         if (!rows[k].used) printf("cxinclude: stale row %s (not a tracked .cx; --write drops it)\n", rows[k].path);
     }
-    printf("cxinclude: %s: %d .cx files, %d include lines (baseline %d); %d above baseline, %d below (--write ratchets down)\n",
+    printf("cxinclude: %s: %d .cx modules, %d include lines (baseline %d); %d above baseline, %d below (--write ratchets down)\n",
            over ? "FAIL" : "ok", files, total, base_total, over, under);
+    printf("cxinclude: boundary: %d docking headers, %d include lines allowed\n", bfiles, binc);
     return over ? 1 : 0;
 }
