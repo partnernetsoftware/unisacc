@@ -97,6 +97,13 @@ SHA e955714e766f89e324c76812b02624bf0a6960270507c2feba802a977eacfd0f；构造后
 冻结根补af8429d0cf提交元数据（Git对象借用共享objects，只在仓外写index/ref），tracked diff空。
 原生identity-helper write/check均成功，候选记录SHA0fe8abb8b337825fc1b9f927adf668622528cbb10f94bd40f7ae14c11ecb8541；
 记录在冻结根out/candidate-01/unisacc.com.build.json。仍未安装，下一步有限材料准入检查及安装。
+
+`tools/cxpack-candidate-check.cx`有限复核已实跑rc0（out/c43-cxpack-candidate-check-01.*）：
+固定启动/旧产品4c28与记录820b、新候选e955与记录0fe8，逐字比较内嵌PCff696；
+固定原生helper核两冻结源前后身份，实跑三文件差异检查和34模型比较，核工具前后字节。
+两context固定cce326a8/ab98a6ae，比较真实读取job收据与JSON，不复用旧测试结论。
+错误候选传入共享旧4c28时具名REFUSE candidate、rc2（out/c43-cxpack-candidate-wrong-01.*）。
+结果仅CHECKED finite-material-applicability；不冒称kind4重建、安装或发布资格。下一步两阶段安装器接此检查。
 证据沿用冻结根out/cxpack-gen-*-01.*与epoch-context-01/jobs；当前无所属在跑作业。
 
 ## link.undef-function-refusal — 未定义外部函数链接成崩溃镜像（开放）
