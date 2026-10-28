@@ -1,0 +1,69 @@
+/* Bootstrap a native runtime module from carried headers. The implementation
+ * is preprocessed once by the explicitly named installed bootstrap product;
+ * consumers receive generated declarations, types and macros only. */
+typedef struct {const char *p;size_t n,at,start,end;int directive;} Lexer;
+typedef struct {char *p;size_t n,cap;} Text;
+static char root[4096],dest[4096];static int headers,verify;static size_t identity_at;static Text identity,products;
+static void die(const char *s){fprintf(stderr,"cx-runtime: %s errno=%d\n",s,errno);exit(2);}
+static void append(Text *b,const char *p,size_t n){if(n>16777216-b->n)die("text-bound");if(b->n+n+1>b->cap){size_t cap=(b->n+n+1)*2;char *q=realloc(b->p,cap);if(!q)die("allocation");b->p=q;b->cap=cap;}memcpy(b->p+b->n,p,n);b->n+=n;b->p[b->n]=0;}
+static void add(Text *b,const char *s){append(b,s,strlen(s));}
+static int eq(Lexer *l,const char *s){return l->end-l->start==strlen(s)&&!memcmp(l->p+l->start,s,strlen(s));}
+static int next(Lexer *l){const char *p=l->p;size_t n=l->n;
+ for(;;){while(l->at<n&&(unsigned char)p[l->at]<=32)l->at++;if(l->at==n)return 0;
+  if(l->at+1<n&&p[l->at]=='/'&&p[l->at+1]=='*'){l->at+=2;while(l->at+1<n&&(p[l->at]!='*'||p[l->at+1]!='/'))l->at++;if(l->at+1>=n)die("unterminated-comment");l->at+=2;continue;}
+  if(l->at+1<n&&p[l->at]=='/'&&p[l->at+1]=='/'){while(l->at<n&&p[l->at]!='\n')l->at++;continue;}break;}
+ l->start=l->at;l->directive=0;char c=p[l->at++];
+ if(c=='#'){l->directive=1;while(l->at<n){if(p[l->at++]=='\n'&&(l->at<2||p[l->at-2]!='\\'))break;}}
+ else if(c=='\''||c=='"'||((c=='L'||c=='u'||c=='U')&&l->at<n&&(p[l->at]=='\''||p[l->at]=='"'))){if(c!='\''&&c!='"')c=p[l->at++];int closed=0;while(l->at<n){char z=p[l->at++];if(z=='\\'&&l->at<n){l->at++;continue;}if(z==c){closed=1;break;}}if(!closed)die("unterminated-literal");}
+ else if((c>='a'&&c<='z')||(c>='A'&&c<='Z')||c=='_'||(c>='0'&&c<='9')){while(l->at<n){char z=p[l->at];if(!((z>='a'&&z<='z')||(z>='A'&&z<='Z')||(z>='0'&&z<='9')||z=='_'||z=='.'))break;l->at++;}}
+ else {const char *pairs[]={"++","--","->","<<",">>","<=",">=","==","!=","&&","||","*=","/=","%=","+=","-=","&=","^=","|=","...",0};for(int i=0;pairs[i];i++){size_t z=strlen(pairs[i]);if(l->start+z<=n&&!memcmp(p+l->start,pairs[i],z)){l->at=l->start+z;break;}}if(l->at<n&&p[l->at]=='='&&(c=='<'||c=='>')&&l->at-l->start==2)l->at++;}
+ l->end=l->at;return 1;
+}
+static void token(Text *b,Lexer *l){if(l->directive){add(b,"\n");append(b,l->p+l->start,l->end-l->start);add(b,"\n");}else{append(b,l->p+l->start,l->end-l->start);add(b," ");}}
+static void body_skip(Lexer *l){int body=1,levels=0,entry[32],branch[32],alternate[32];
+ while(body&&next(l)){
+  if(l->directive){size_t a=l->start+1;while(a<l->end&&(l->p[a]==' '||l->p[a]=='\t'))a++;
+   if(a+2<=l->end&&!memcmp(l->p+a,"if",2)){if(levels==32)die("conditional-depth");entry[levels]=body;branch[levels]=body;alternate[levels++]=0;}
+   else if((a+4<=l->end&&!memcmp(l->p+a,"else",4))||(a+4<=l->end&&!memcmp(l->p+a,"elif",4))){if(!levels)die("conditional-body");int k=levels-1;if(alternate[k]&&body!=branch[k])die("conditional-body-shape");branch[k]=body;alternate[k]=1;body=entry[k];}
+   else if(a+5<=l->end&&!memcmp(l->p+a,"endif",5)){if(!levels)die("conditional-body");int k=--levels;if(body!=(alternate[k]?branch[k]:entry[k]))die("conditional-body-shape");}
+   continue;}
+  if(eq(l,"{"))body++;else if(eq(l,"}"))body--;
+ }if(body||levels)die("function-body-balance");
+}
+/* C header declarations are projected before preprocessing. Directives keep
+ * their original ordering and branch ownership; function bodies are omitted
+ * as a whole, including their private conditional directives. */
+static Text interface(const char *p,size_t n){Lexer l={p,n,0,0,0,0};Text out={0},decl={0};int depth=0,paren=0,bracket=0,assign=0,isstatic=0,istypedef=0,lastclose=0;
+ while(next(&l)){
+  if(l.directive){if(!decl.n)token(&out,&l);else token(&decl,&l);continue;}
+  if(eq(&l,"__attribute__")){Text attribute={0};token(&attribute,&l);int balance=0;if(!next(&l)||!eq(&l,"("))die("attribute-shape");do{if(eq(&l,"("))balance++;else if(eq(&l,")"))balance--;token(&attribute,&l);if(!balance)break;}while(next(&l));if(balance)die("attribute-balance");if(!strstr(attribute.p,"constructor")&&!strstr(attribute.p,"destructor"))add(&decl,attribute.p);else if(strstr(attribute.p,"aligned")||strstr(attribute.p,"packed"))die("mixed-lifecycle-attribute");free(attribute.p);continue;}
+  if(!depth&&eq(&l,"static")){isstatic=1;add(&decl,"extern ");continue;}
+  if(!depth&&eq(&l,"inline"))continue;
+  if(!depth&&eq(&l,"typedef"))istypedef=1;
+  if(!depth&&!paren&&!bracket&&eq(&l,"=")){assign=1;}
+  if(!depth&&eq(&l,"{")&&lastclose&&!assign&&!istypedef){add(&out,decl.p);add(&out,";\n");body_skip(&l);decl.n=0;if(decl.p)decl.p[0]=0;assign=isstatic=istypedef=lastclose=0;continue;}
+  if(!depth&&!paren&&!bracket&&assign&&isstatic&&eq(&l,",")){assign=0;token(&decl,&l);lastclose=0;continue;}
+  if(eq(&l,"("))paren++;else if(eq(&l,")")){if(!paren)die("header-paren-balance");paren--;}
+  if(eq(&l,"["))bracket++;else if(eq(&l,"]")){if(!bracket)die("header-bracket-balance");bracket--;}
+  if(eq(&l,"{"))depth++;if(eq(&l,"}")){if(!depth)die("header-brace-balance");depth--;}
+  if(!assign||!isstatic)token(&decl,&l);
+  if(!depth&&eq(&l,";")){if(assign&&isstatic)add(&decl,"; ");if(decl.n)add(&out,decl.p);add(&out,"\n");decl.n=0;if(decl.p)decl.p[0]=0;assign=isstatic=istypedef=lastclose=0;}
+  else lastclose=eq(&l,")");
+ }
+ if(depth||decl.n)die("incomplete-header-declaration");free(decl.p);return out;
+}
+static void save(const char *path,const void *p,size_t n){if(cx_write(path,p,n))die("write");}
+static void parents(char *path){for(char *p=path+1;*p;p++)if(*p=='/'){*p=0;if(mkdir(path,0700)&&errno!=EEXIST)die("mkdir");*p='/';}}
+static int project(const char *path,void *unused){(void)unused;size_t n;char *p=cx_read(path,&n);if(!p)die("header-read");size_t rn=strlen(root);if(strncmp(path,root,rn)||path[rn]!='/')die("header-root");char hash[65];cx_sha256_hex(p,n,hash);Text row={0};add(&row,"H\t");add(&row,path+rn+1);add(&row,"\t");add(&row,hash);add(&row,"\n");if(verify){if(row.n>identity.n-identity_at||memcmp(identity.p+identity_at,row.p,row.n))die("header-changed-during-bootstrap");identity_at+=row.n;free(row.p);free(p);return 0;}append(&identity,row.p,row.n);free(row.p);char target[4400];if(cx_path_join(target,sizeof target,dest,path+rn+1))die("header-path");parents(target);
+ Text q=interface(p,n);save(target,q.p?q.p:"",q.n);cx_sha256_hex(q.p,q.n,hash);add(&products,"I\t");add(&products,path+rn+1);add(&products,"\t");add(&products,hash);add(&products,"\n");free(q.p);free(p);headers++;return 0;}
+static Text implementation(const char *p,size_t n){Lexer l={p,n,0,0,0,0};Text out={0};int depth=0;while(next(&l)){if(!l.directive&&!depth&&eq(&l,"static"))continue;if(!l.directive&&eq(&l,"{"))depth++;if(!l.directive&&eq(&l,"}")){if(!depth)die("implementation-brace-balance");depth--;}token(&out,&l);}if(depth)die("implementation-brace-balance");return out;}
+int main(int argc,char **argv){
+ if(argc<5||!realpath(argv[1],root)||argv[2][0]!='/'||strlen(argv[2])>=sizeof dest)die("usage HEADER_ROOT NEW_ABS_OUT BOOTSTRAP_PRODUCT [--abi NATIVE_C] SOURCE...");int first=4;char *abi=0;if(!strcmp(argv[4],"--abi")){if(argc<7)die("abi-and-consumers-required");abi=argv[5];first=6;}strcpy(dest,argv[2]);if(mkdir(dest,0700))die("exclusive-output");
+ if(cx_walk(root,project,0))die("header-walk");
+ Text probe={0};add(&probe,"#if 0\n");for(int i=first;i<argc;i++){size_t n;char *p=cx_read(argv[i],&n);if(!p)die("consumer-read");/* Directive replacements contribute roots, but are never executed. */Lexer l={p,n,0,0,0,0};while(next(&l)){if(l.directive){Lexer d={p+l.start+1,l.end-l.start-1,0,0,0,0};while(next(&d)){char c=d.p[d.start];if((c>='a'&&c<='z')||(c>='A'&&c<='Z')||c=='_'){append(&probe,d.p+d.start,d.end-d.start);add(&probe," ");}}continue;}char c=p[l.start];if((c>='a'&&c<='z')||(c>='A'&&c<='Z')||c=='_'){append(&probe,p+l.start,l.end-l.start);add(&probe," ");}}add(&probe,"\n");free(p);}add(&probe,"#endif\n");
+ char path[4400],provider[4400],prelude[4400];if(cx_path_join(path,sizeof path,dest,"runtime-probe.c")||cx_path_join(provider,sizeof provider,dest,"runtime.c")||cx_path_join(prelude,sizeof prelude,root,"cx.h"))die("output-path");save(path,probe.p,probe.n);free(probe.p);
+ char boot[65],hash[65];size_t bn;char *b=cx_read(argv[3],&bn);if(!b)die("bootstrap-read");cx_sha256_hex(b,bn,boot);free(b);
+ char *v[]={"sh",argv[3],"-b","lnx/x86_64","-E","-I",root,"-include",prelude,path,0};char *pp=0;size_t pn=0;int rc=cx_runv_timeout(v,30,&pp,&pn);if(rc||!pp)die("bootstrap-preprocess");verify=1;if(cx_walk(root,project,0)||identity_at!=identity.n)die("header-set-changed-during-bootstrap");b=cx_read(argv[3],&bn);if(!b)die("bootstrap-recheck");cx_sha256_hex(b,bn,hash);free(b);if(strcmp(hash,boot))die("bootstrap-changed");add(&identity,"B\t");add(&identity,argv[3]);add(&identity,"\t");add(&identity,boot);add(&identity,"\nF\t-b lnx/x86_64 -E -I ROOT -include ROOT/cx.h\n");Text impl=implementation(pp,pn);free(pp);if(abi){size_t an;char *a=cx_read(abi,&an);if(!a)die("abi-read");add(&impl,"\n");append(&impl,a,an);cx_sha256_hex(a,an,hash);add(&identity,"A\t");add(&identity,abi);add(&identity,"\t");add(&identity,hash);add(&identity,"\n");free(a);}save(provider,impl.p,impl.n);cx_sha256_hex(impl.p,impl.n,hash);add(&identity,"P\truntime.c\t");add(&identity,hash);add(&identity,"\n");free(impl.p);if(cx_path_join(path,sizeof path,dest,"source-identity.tsv"))die("identity-path");save(path,identity.p,identity.n);free(identity.p);
+ if(cx_path_join(path,sizeof path,dest,"declaration-identity.tsv"))die("identity-path");save(path,products.p,products.n);free(products.p);
+ printf("CX_RUNTIME\tPREPARED\theaders=%d\tprovider=%s\n",headers,provider);return 0;
+}
