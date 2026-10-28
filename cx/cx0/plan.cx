@@ -559,6 +559,61 @@ static int cxm_typenames(int u, int k, int b, int e, int istypedef, int tb, int 
     }
     return 0;
 }
+/* 1 if nm is on the public list of the cxpack.tsv row for this file.  0 if that row exists and omits nm.
+   2 if there is no manifest, or no row whose path is this file. */
+static int cxm_listed(int u, char *nm, int nl) {
+    char man[CXM_PATHW]; char rel[CXM_PATHW];
+    static char pack[65536];
+    int dl; int k; int n; int i; int hit;
+    char *s;
+    dl = cxm_len(cxm_path[u]);
+    while (dl > 0 && cxm_path[u][dl - 1] != '/') dl = dl - 1;
+    if (dl + 12 >= CXM_PATHW) { cxm_start(u, 1); cxm_m("cxpack.tsv path too long"); cxm_fail(); return -1; }
+    k = 0; while (k < dl) { man[k] = cxm_path[u][k]; k = k + 1; }
+    if (cxm_cpy(man + dl, "cxpack.tsv", CXM_PATHW - dl) < 10) return 2;
+    n = cxm_rd(man, pack, 65535);
+    if (n == -1) return 2;
+    if (n < 0) { cxm_start(u, 1); cxm_m(n == -2 ? "cxpack.tsv too large" : "cannot read cxpack.tsv"); cxm_fail(); return -1; }
+    pack[n] = 0;
+    k = 0;
+    while (dl + k < cxm_len(cxm_path[u]) && k < CXM_PATHW - 1) { rel[k] = cxm_path[u][dl + k]; k = k + 1; }
+    rel[k] = 0;
+    s = pack; i = 0; hit = 0;
+    while (i < n) {
+        int line; int t1; int t2; int rl;
+        line = i;
+        while (i < n && s[i] != '\n') i = i + 1;
+        if (line < i && s[line] != '#') {
+            t1 = line; while (t1 < i && s[t1] != '\t') t1 = t1 + 1;
+            t2 = t1 + 1; while (t2 < i && s[t2] != '\t') t2 = t2 + 1;
+            rl = cxm_len(rel);
+            if (t1 < i && t2 < i && t2 - (t1 + 1) == rl) {
+                int q; q = 0;
+                while (q < rl && s[t1 + 1 + q] == rel[q]) q = q + 1;
+                if (q == rl) {
+                    int p; int end;
+                    hit = 1; p = t2 + 1; end = i;
+                    if (end > p && s[end - 1] == '\r') end = end - 1;
+                    while (p < end) {
+                        int b; int e;
+                        b = p; while (p < end && s[p] != ',') p = p + 1; e = p;
+                        while (b < e && s[b] == ' ') b = b + 1;
+                        while (e > b && (s[e - 1] == ' ' || s[e - 1] == '\r')) e = e - 1;
+                        if (e - b == nl) {
+                            int q2; q2 = 0;
+                            while (q2 < nl && s[b + q2] == nm[q2]) q2 = q2 + 1;
+                            if (q2 == nl) return 1;
+                        }
+                        if (p < end && s[p] == ',') p = p + 1;
+                    }
+                }
+            }
+        }
+        if (i < n && s[i] == '\n') i = i + 1;
+    }
+    if (hit) return 0;
+    return 2;
+}
 /* project the loaded unit u.  lib: a used module -- classify every item, refuse by name, and write its interface
    text into cxm_ift; otherwise only record its non-static function definitions (collision check) */
 static int cxm_project(int u, int lib) {
@@ -641,7 +696,11 @@ static int cxm_project(int u, int lib) {
     k = 0;
     while (k < cxm_nitem) {
         if (cxm_ikind[k] == 2) {
+            int pub;
             cxm_dname(s, cxm_ib[k], cxm_ibody[k], &nb, &nl, &isfn);
+            pub = cxm_listed(u, s + nb, nl);
+            if (pub < 0) return 1;
+            if (pub == 0) { k = k + 1; continue; }
             if (cxm_addsym(s + nb, nl, u, cxm_iline[k], 0, 0, 0)) return 1;
             if (cxm_emit(cxm_ib[k], cxm_ibody[k]) || cxm_nift >= CXM_IFMAX - 2) { cxm_start(u, cxm_iline[k]); cxm_m("interface too large"); return cxm_fail(); }
             cxm_ift[cxm_nift] = ';'; cxm_ift[cxm_nift + 1] = '\n'; cxm_nift = cxm_nift + 2;

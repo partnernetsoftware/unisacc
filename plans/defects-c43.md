@@ -30,6 +30,10 @@ GCC与Clang各四项-o实跑：正常/缺席编译rc0且执行rc7，超限/目�
 工具现逐例独占保存stdout、stderr、status.tsv；传输失败额外保存transport-error，保留现场后拒绝。
 此证据留存改动也尚待实跑，不补造旧回归中未保存的逐例输出。
 
+权威源审查发现cx/cx0/plan.cx未含2c949ba577的公开清单过滤；直接提取将丢失后续修复。
+已将同一cxm_listed及函数导出过滤同步回plan.cx，compat-prefix同步当前说明与错误返回合同。
+src/cxmod.c及冻结根不改；`tools/cx0-extract.cx -- --check`逐字复验、CX0路径回归尚待交窗执行。
+
 构造接续：af8429d0cf已git archive到仓外`/home/devali/repos/unisacc-epoch-cxpack-af8429d0cf`，
 启动产品逐字核为4c2831c3，来源记录一并保存。prepare-context默认-run实返0，
 初始产品观察与新宿主identity-helper观察均为SID
