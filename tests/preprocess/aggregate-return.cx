@@ -1,19 +1,22 @@
 /* MODE ROOT PRODUCT PACKAGE NEW_ABS_OUT; MODE positive|refusal|refusal-warnings|module.
- * Actual NN compilation/default execution. PACKAGE is private, never admitted
- * by this test. The installed product's original member-return red is retained.
+ * --candidate MODE ROOT PRODUCT BASELINE_PRODUCT NEW_ABS_OUT uses only the
+ * candidate's embedded models; the independent baseline retains the old red.
+ * Actual NN compilation/default execution. Legacy PACKAGE is private, never
+ * admitted by this test. The original member-return red is retained separately.
  * Value copies are not a claim of compile-time ownership or Rust borrowing. */
 #pragma unisa use cxlib.netpack
-static char root[4096],product[4096],package[4096],work[4096],bound[4400];
-static int checks,failed,warnings;
+static char root[4096],product[4096],package[4096],baseline[4096],work[4096],bound[4400];
+static int checks,failed,warnings,candidate_mode;
 static void die(const char *s){fprintf(stderr,"aggregate-return: %s errno=%d\n",s,errno);exit(2);}
 static void path(char p[4400],const char *leaf){if(cx_path_join(p,4400,work,leaf))die("path");}
 static void put(const char *leaf,const char *s){char p[4400];path(p,leaf);if(cx_write(p,s,strlen(s)))die("write");}
 static void hash(const char *p,char h[65]){size_t n;char *s=cx_read(p,&n);if(!s)die("read");cx_sha256_hex(s,n,h);free(s);}
 static void ck(int ok,const char *name){checks++;failed+=!ok;printf("%s\taggregate-return.%s\n",ok?"PASS":"FAIL",name);}
 static void run(const char *leaf,const char *text,int want,const char *reason,int patched){
- char source[4400],log[4400],label[200],why[1200];path(source,leaf);if(text)put(leaf,text);char *v[12];int n=0;v[n++]=bound;v[n++]="5";v[n++]="sh";v[n++]=product;if(patched){v[n++]="--models";v[n++]=package;}if(warnings)v[n++]="-Wall";v[n++]=source;v[n]=0;
+ char source[4400],log[4400],label[200],why[1200];path(source,leaf);if(text)put(leaf,text);char *v[12];int n=0;v[n++]=bound;v[n++]="5";v[n++]="sh";v[n++]=candidate_mode&&!patched?baseline:product;if(patched&&!candidate_mode){v[n++]="--models";v[n++]=package;}if(warnings)v[n++]="-Wall";v[n++]=source;v[n]=0;
  np_buf argv={0};for(int i=0;v[i];i++){np_putll(&argv,i);np_puts(&argv,"\t");np_puts(&argv,v[i]);np_puts(&argv,"\n");}snprintf(label,sizeof label,"%s.argv.tsv",leaf);path(log,label);if(cx_write(log,argv.p,argv.n))die("argv");free(argv.p);
- np_result r={0};int transport=np_run(v,work,0,6,&r,why,sizeof why);snprintf(label,sizeof label,"%s.stdout",leaf);path(log,label);if(cx_write(log,r.out,r.outn))die("stdout");snprintf(label,sizeof label,"%s.stderr",leaf);path(log,label);if(cx_write(log,r.err,r.errn))die("stderr");if(transport)die(why);
+ np_result r={0};int transport=np_run(v,work,0,6,&r,why,sizeof why);snprintf(label,sizeof label,"%s.stdout",leaf);path(log,label);if(cx_write(log,r.out,r.outn))die("stdout");snprintf(label,sizeof label,"%s.stderr",leaf);path(log,label);if(cx_write(log,r.err,r.errn))die("stderr");
+ np_buf status={0};np_puts(&status,"transport\t");np_putll(&status,transport);np_puts(&status,"\nrc\t");if(transport)np_puts(&status,"UNOBSERVED");else np_putll(&status,r.rc);np_puts(&status,"\n");snprintf(label,sizeof label,"%s.status",leaf);path(log,label);if(cx_write(log,status.p,status.n))die("status");free(status.p);if(transport)die(why);
  int ok=r.rc==want&&!r.outn&&(reason?strstr(r.err,reason)!=0&&strstr(r.err,source)!=0&&(!patched||!strstr(r.err,"UNCOVERED\t")):!r.errn);ck(ok,leaf);if(!ok)fprintf(stderr,"%s rc=%d stderr=%s\n",leaf,r.rc,r.err);np_free(&r);
 }
 static const char *member="typedef struct {int value;} child;typedef struct {child item;} parent;static child project(parent p){return p.item;}int main(void){parent p;p.item.value=7;child c=project(p);return c.value;}\n";
@@ -47,6 +50,9 @@ static void module(void){
  run("module-copy.cx","#pragma unisa use aggregate_state\nint main(void){set_value(7);Value a=get_value();set_value(9);Value b=get_value();return a.value==7&&b.value==9?7:1;}\n",7,0,1);
 }
 int main(int argc,char **argv){
- if(argc!=6||(!strcmp(argv[1],"positive")+!strcmp(argv[1],"refusal")+!strcmp(argv[1],"refusal-warnings")+!strcmp(argv[1],"module"))!=1||!realpath(argv[2],root)||!realpath(argv[3],product)||!realpath(argv[4],package)||argv[5][0]!='/'||strlen(argv[5])>=sizeof work)die("MODE ROOT PRODUCT PACKAGE NEW_ABS_OUT");warnings=!strcmp(argv[1],"refusal-warnings");strcpy(work,argv[5]);if(mkdir(work,0700))die("exclusive-output");if(cx_path_join(bound,sizeof bound,root,"tools/bound"))die("bound");char ph[65],mh[65],after[65];hash(product,ph);hash(package,mh);
- if(!strcmp(argv[1],"positive"))positive();else if(!strcmp(argv[1],"refusal")||warnings)refusal();else module();hash(product,after);ck(!strcmp(ph,after),"product-unchanged");hash(package,after);ck(!strcmp(mh,after),"package-unchanged");printf("AGGREGATE_RETURN\tmode=%s\tassertions=%d\tfailed=%d\tscope=private-NN-value-return-not-static-ownership\n",argv[1],checks,failed);return failed?1:0;
+ candidate_mode=argc==7&&!strcmp(argv[1],"--candidate");if(candidate_mode){argc--;argv++;}
+ if(argc!=6||(!strcmp(argv[1],"positive")+!strcmp(argv[1],"refusal")+!strcmp(argv[1],"refusal-warnings")+!strcmp(argv[1],"module"))!=1||!realpath(argv[2],root)||!realpath(argv[3],product)||!realpath(argv[4],candidate_mode?baseline:package)||argv[5][0]!='/'||strlen(argv[5])>=sizeof work)die("MODE ROOT PRODUCT PACKAGE NEW_ABS_OUT | --candidate MODE ROOT PRODUCT BASELINE_PRODUCT NEW_ABS_OUT");
+ if(candidate_mode&&!strcmp(product,baseline))die("candidate-and-baseline-paths-must-differ");warnings=!strcmp(argv[1],"refusal-warnings");strcpy(work,argv[5]);if(mkdir(work,0700))die("exclusive-output");if(cx_path_join(bound,sizeof bound,root,"tools/bound"))die("bound");char ph[65],mh[65],after[65];hash(product,ph);hash(candidate_mode?baseline:package,mh);
+ if(candidate_mode){if(!strcmp(ph,mh))die("candidate-and-baseline-bytes-must-differ");printf("MATERIAL\tmode=embedded-candidate\tcandidate=%s\tcandidate-sha256=%s\tbaseline=%s\tbaseline-sha256=%s\n",product,ph,baseline,mh);}
+ if(!strcmp(argv[1],"positive"))positive();else if(!strcmp(argv[1],"refusal")||warnings)refusal();else module();hash(product,after);ck(!strcmp(ph,after),"product-unchanged");if(candidate_mode)printf("MATERIAL_AFTER\tcandidate-sha256=%s\n",after);hash(candidate_mode?baseline:package,after);ck(!strcmp(mh,after),candidate_mode?"baseline-unchanged":"package-unchanged");if(candidate_mode)printf("MATERIAL_AFTER\tbaseline-sha256=%s\n",after);printf("AGGREGATE_RETURN\tmode=%s\tassertions=%d\tfailed=%d\tscope=%s\n",argv[1],checks,failed,candidate_mode?"embedded-candidate-NN-value-return-not-static-ownership":"private-NN-value-return-not-static-ownership");return failed?1:0;
 }
