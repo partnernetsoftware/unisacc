@@ -78,8 +78,8 @@ static int realise(int a, int b, int r, int y, Case *c) {
         aline = "  imm r2, 5\n"; bline = "  mov r0, r2\n"; break;
     case 7: case 8: /* to_next / to_jump: a is a jump; b is the instruction it lands on */
         if (a != 4 && a != 5) return 0;
-        if (b == 16) return 0;
         aline = a == 4 ? "  jump L1\n" : "  jumpz r1, L1\n";
+        if (b == 16) { if (r != 7) return 0; bline = 0; layout = 4; break; }   /* to_next onto a label at the tape end: pk_bcls past ol_n is "none" */
         if (b == 0) bline = "  store64 [r6+16], r1\n";
         else if (b == 1) bline = "  load64 r0, [r6+16]\n";
         else if (b == 2) bline = "  imm r0, 3\n";
@@ -107,14 +107,14 @@ static int realise(int a, int b, int r, int y, Case *c) {
         if (b == 4 || b == 5) layout = 3;
         break;
     case 10: /* dest_to_mov: a simple op writing db, then mov yb, db with db dead */
-        if (!simple_a(a) || a == 0 || b != 3) return 0;
-        if (a == 1) aline = "  load64 r2, [r6+16]\n"; else if (a == 2) aline = "  imm r2, 5\n"; else if (a == 3) aline = "  mov r2, r1\n"; else aline = "  add64 r2, r1, r3\n";
+        if ((!simple_a(a) && a != 7) || a == 0 || b != 3) return 0;
+        if (a == 1) aline = "  load64 r2, [r6+16]\n"; else if (a == 2) aline = "  imm r2, 5\n"; else if (a == 3) aline = "  mov r2, r1\n"; else if (a == 7) { aline = "  .lea r2, g\n"; tail_ret = 2; } else aline = "  add64 r2, r1, r3\n";   /* a=other via the simple op .lea (acls other) */
         bline = "  mov r0, r2\n"; break;
     case 11: /* copy_into: mov rY, rX then a simple op reading rY (not writing it), rY dead after */
-        if (a != 3 || !simple_b(b) || b == 2 || b == 1) return 0;     /* imm and load64 read no register */
+        if (a != 3 || !simple_b(b) || b == 2) return 0;     /* imm reads no register; a load reads its base register */
         /* the copy target must be r2..r5: the reference keeps r0/r1 live at `ret` (ol_scan), so r1 is never dead */
         aline = "  mov r3, r2\n";
-        if (b == 0) bline = "  store64 [r6+16], r3\n"; else if (b == 3) bline = "  mov r0, r3\n";
+        if (b == 0) bline = "  store64 [r6+16], r3\n"; else if (b == 3) bline = "  mov r0, r3\n"; else if (b == 1) bline = "  load64 r0, [r3+0]\n";
         else { snprintf(bb, sizeof bb, "  %s r0, r3, r1\n", abop); bline = bb; }
         break;
     default: return 0;
@@ -124,7 +124,8 @@ static int realise(int a, int b, int r, int y, Case *c) {
     if (layout == 3) { APP(c->in, "%s", aline); if (bline) APP(c->in, "%s", bline); APP(c->in, "  ret\nL1:\n  imm r0, 3\n  ret\n"); }
     else if (layout == 1) { APP(c->in, "%sL1:\n%s", aline, bline); if (b == 4 || b == 5) APP(c->in, "  ret\nL2:\n  imm r0, 3\n  ret\n"); else APP(c->in, "  ret\n"); }
     else if (layout == 2) { APP(c->in, "%s  imm r0, 9\n  ret\nL1:\n%sL2:\n  imm r0, 3\n  ret\n", aline, bline); }
-    else { APP(c->in, "%s", aline); if (bline) APP(c->in, "%s", bline); if (tail_ret) APP(c->in, "  ret\n"); }
+    else if (layout == 4) { APP(c->in, "%sL1:\n", aline); }
+    else { APP(c->in, "%s", aline); if (bline) APP(c->in, "%s", bline); if (tail_ret) APP(c->in, "  ret\n"); if (tail_ret == 2) APP(c->in, "  .bss g 8\n"); }
     /* the expected output under the gold action (mechanical) */
     const char *wa = aline, *wb = bline; char fa[128], fb[128]; fa[0] = fb[0] = 0;
     switch (y) {
@@ -146,7 +147,8 @@ static int realise(int a, int b, int r, int y, Case *c) {
         /* after the retarget the landing jump is unreachable; the container's dead-code pass removes it (measured),
          * which is outside the peep relation: the oracle expects the removed form. */
         if (wb && y != 4) APP(c->want, "%s", wb); APP(c->want, "L2:\n  imm r0, 3\n  ret\n"); }
-    else { if (wa) APP(c->want, "%s", wa); if (wb) APP(c->want, "%s", wb); if (tail_ret) APP(c->want, "  ret\n"); }
+    else if (layout == 4) { if (wa) APP(c->want, "%s", wa); APP(c->want, "L1:\n"); }
+    else { if (wa) APP(c->want, "%s", wa); if (wb) APP(c->want, "%s", wb); if (tail_ret) APP(c->want, "  ret\n"); if (tail_ret == 2) APP(c->want, "  .bss g 8\n"); }
     c->realizable = 1;
     return 1;
 }
