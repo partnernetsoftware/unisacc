@@ -27,6 +27,16 @@ Host1 船闸在 **[`../ujs/tests/`](../ujs/tests/)**（与 unisacc 套件分离�
 
 host1 语料在 [`../ujs/tests/corpus|neg`](../ujs/tests/)。本树 [`ujs2wasm/`](ujs2wasm/) 仅留 archive_only（expect.json 等）。
 
+## gcc_cx / clang_cx cx suite
+
+`tests/cxcc/units.tsv` lists the cx units. Both drivers run every row. `refuse` means a non-zero compile and no output binary. The suite does not call `unisacc.com`. From the repo root:
+
+```
+sh ./gcc_cx.com tests/cxcc/suite.cx -o out/cxcc-suite/suite
+./out/cxcc-suite/suite
+./out/cxcc-suite/suite --list
+```
+
 ## Native test entry and explicit gaps (unisacc CX)
 
 This is a separate batch, with no imported PASS records and no legacy runner dependencies. It does **not** gate `ujs.com`.

@@ -1,0 +1,199 @@
+/* Small cx suite for gcc_cx.com and clang_cx.com. No unisacc.com.
+   From the repo root:
+   sh ./gcc_cx.com tests/cxcc/suite.cx -o out/cxcc-suite/suite
+   ./out/cxcc-suite/suite
+   ./out/cxcc-suite/suite --list
+   Units are tests/cxcc/units.tsv. Both drivers run every row.
+   refuse: the driver exits non-zero and leaves no binary.
+*/
+enum { CXSU_N = 24, CXSU_NAME = 32, CXSU_PATH = 160 };
+
+static int fails;
+
+struct unit {
+    char name[CXSU_NAME];
+    char path[CXSU_PATH];
+    int refuse;
+    int code;
+};
+
+static struct unit units[CXSU_N];
+static int nunits;
+
+static int write_text(const char *path, const char *text) {
+    FILE *f;
+    size_t want, n;
+    f = fopen(path, "wb");
+    if (!f) return -1;
+    want = strlen(text);
+    n = fwrite(text, 1, want, f);
+    if (fclose(f) != 0) return -1;
+    return n == want ? 0 : -1;
+}
+
+static void note(int ok, const char *name) {
+    if (ok) printf("PASS %s\n", name);
+    else { printf("FAIL %s\n", name); fails = fails + 1; }
+}
+
+static int load_units(const char *path) {
+    FILE *f;
+    char line[400];
+    f = fopen(path, "rb");
+    if (!f) { fprintf(stderr, "cxcc suite: cannot read %s\n", path); return -1; }
+    while (fgets(line, (int)sizeof line, f)) {
+        char *tab, *tab2, *end;
+        size_t n;
+        long code;
+        if (line[0] == '#' || line[0] == '\n' || line[0] == 0) continue;
+        n = strlen(line);
+        if (n + 1 >= sizeof line && line[n - 1] != '\n') {
+            fprintf(stderr, "cxcc suite: line too long in %s\n", path);
+            fclose(f);
+            return -1;
+        }
+        if (n > 0 && line[n - 1] == '\n') line[--n] = 0;
+        if (n > 0 && line[n - 1] == '\r') line[--n] = 0;
+        tab = strchr(line, '\t');
+        tab2 = tab ? strchr(tab + 1, '\t') : 0;
+        if (!tab || !tab2 || strchr(tab2 + 1, '\t') || tab == line || tab2 == tab + 1 || !tab2[1]) {
+            fprintf(stderr, "cxcc suite: bad row %s\n", line);
+            fclose(f);
+            return -1;
+        }
+        if (nunits >= CXSU_N) {
+            fprintf(stderr, "cxcc suite: too many units\n");
+            fclose(f);
+            return -1;
+        }
+        *tab = 0;
+        *tab2 = 0;
+        if (strlen(line) >= CXSU_NAME || strlen(tab + 1) >= CXSU_PATH) {
+            fprintf(stderr, "cxcc suite: name or path too long\n");
+            fclose(f);
+            return -1;
+        }
+        memcpy(units[nunits].name, line, strlen(line) + 1);
+        memcpy(units[nunits].path, tab + 1, strlen(tab + 1) + 1);
+        if (!strcmp(tab2 + 1, "refuse")) {
+            units[nunits].refuse = 1;
+            units[nunits].code = -1;
+        } else {
+            code = strtol(tab2 + 1, &end, 10);
+            if (end == tab2 + 1 || *end || code < 0 || code > 255) {
+                fprintf(stderr, "cxcc suite: bad expect %s\n", tab2 + 1);
+                fclose(f);
+                return -1;
+            }
+            units[nunits].refuse = 0;
+            units[nunits].code = (int)code;
+        }
+        nunits = nunits + 1;
+    }
+    if (fclose(f) != 0) return -1;
+    if (nunits == 0) { fprintf(stderr, "cxcc suite: no units\n"); return -1; }
+    return 0;
+}
+
+static int drive(const char *which, const struct unit *u) {
+    char cmd[1200];
+    char out[240];
+    char label[80];
+    char *buf = 0;
+    size_t n = 0;
+    int k, rc, ran, ok;
+    k = snprintf(out, sizeof out, "out/cxcc-suite/%s-%s", which, u->name);
+    if (k < 0 || k >= (int)sizeof out) return 0;
+    unlink(out);
+    k = snprintf(cmd, sizeof cmd, "sh ./%s_cx.com %s -o %s", which, u->path, out);
+    if (k < 0 || k >= (int)sizeof cmd) return 0;
+    rc = cx_run_timeout(cmd, 40, &buf, &n);
+    free(buf);
+    buf = 0;
+    if (u->refuse) ok = rc != 0 && rc != 124 && access(out, F_OK) != 0;
+    else if (rc != 0) ok = 0;
+    else {
+        k = snprintf(cmd, sizeof cmd, "./%s", out);
+        if (k < 0 || k >= (int)sizeof cmd) return 0;
+        ran = cx_run_timeout(cmd, 10, &buf, &n);
+        free(buf);
+        ok = ran == u->code;
+    }
+    k = snprintf(label, sizeof label, "%s %s", which, u->name);
+    if (k < 0 || k >= (int)sizeof label) return 0;
+    note(ok, label);
+    return ok;
+}
+
+static int include_fresh(const char *which) {
+    char cmd[1400];
+    char *buf = 0;
+    size_t n = 0;
+    int k, rc, ran;
+    const char *modp = "out/cxcc-suite/incmod.cx";
+    const char *mainp = "out/cxcc-suite/incmain.cx";
+    const char *hdr = "out/cxcc-suite/extra.h";
+    const char *out = "out/cxcc-suite/incbin";
+    if (write_text(modp, "#pragma unisa module incmod\nint cxcc_inc_anchor(void) { return 1; }\n")) return 0;
+    if (write_text(mainp, "#pragma unisa use incmod\nint main(void) { return EXTRA_VALUE + cxcc_inc_anchor(); }\n")) return 0;
+    if (write_text(hdr, "#define EXTRA_VALUE 7\n")) return 0;
+    unlink(out);
+    k = snprintf(cmd, sizeof cmd, "sh ./%s_cx.com %s -include %s -o %s", which, mainp, hdr, out);
+    if (k < 0 || k >= (int)sizeof cmd) return 0;
+    rc = cx_run_timeout(cmd, 40, &buf, &n);
+    free(buf);
+    buf = 0;
+    if (rc != 0) return 0;
+    k = snprintf(cmd, sizeof cmd, "./%s", out);
+    if (k < 0 || k >= (int)sizeof cmd) return 0;
+    ran = cx_run_timeout(cmd, 10, &buf, &n);
+    free(buf);
+    buf = 0;
+    if (ran != 8) return 0;
+    if (write_text(hdr, "#define EXTRA_VALUE 11\n")) return 0;
+    unlink(out);
+    k = snprintf(cmd, sizeof cmd, "sh ./%s_cx.com %s -include %s -o %s", which, mainp, hdr, out);
+    if (k < 0 || k >= (int)sizeof cmd) return 0;
+    rc = cx_run_timeout(cmd, 40, &buf, &n);
+    free(buf);
+    buf = 0;
+    if (rc != 0) return 0;
+    k = snprintf(cmd, sizeof cmd, "./%s", out);
+    if (k < 0 || k >= (int)sizeof cmd) return 0;
+    ran = cx_run_timeout(cmd, 10, &buf, &n);
+    free(buf);
+    return ran == 12;
+}
+
+int main(int argc, char **argv) {
+    int i;
+    if (load_units("tests/cxcc/units.tsv") != 0) return 2;
+    if (argc > 1 && !strcmp(argv[1], "--list")) {
+        for (i = 0; i < nunits; i++) {
+            if (units[i].refuse) printf("%s\t%s\trefuse\n", units[i].name, units[i].path);
+            else printf("%s\t%s\t%d\n", units[i].name, units[i].path, units[i].code);
+        }
+        printf("include-bytes\tout/cxcc-suite/extra.h\t8-then-12\n");
+        return 0;
+    }
+    if (argc > 1) {
+        fprintf(stderr, "cxcc suite: usage: suite [--list]\n");
+        return 2;
+    }
+    if (access("gcc_cx.com", F_OK) != 0 || access("clang_cx.com", F_OK) != 0) {
+        fprintf(stderr, "cxcc suite: run from the repo root, where gcc_cx.com and clang_cx.com are\n");
+        return 2;
+    }
+    if (cx_run("mkdir -p out/cxcc-suite", 0, 0) != 0) {
+        fprintf(stderr, "cxcc suite: cannot make out/cxcc-suite\n");
+        return 2;
+    }
+    for (i = 0; i < nunits; i++) {
+        drive("gcc", &units[i]);
+        drive("clang", &units[i]);
+    }
+    note(include_fresh("gcc"), "gcc include-bytes");
+    note(include_fresh("clang"), "clang include-bytes");
+    printf("CXCC units=%d drivers=2 fails=%d\n", nunits, fails);
+    return fails ? 1 : 0;
+}
