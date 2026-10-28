@@ -8,18 +8,19 @@ static void ck(int ok,const char *s){checks++;if(!ok)failed++;printf("%s\truntim
 static void join(char *p,const char *a,const char *b){if(cx_path_join(p,4400,a,b))die("path-bound");}
 static void save(const char *p,const char *s){if(cx_write(p,s,strlen(s)))die("write");}
 static int compact_has(const char *p,size_t n,const char *gold){char *b=malloc(n+1);if(!b)die("allocation");size_t k=0;for(size_t i=0;i<n;i++)if((unsigned char)p[i]>32)b[k++]=p[i];b[k]=0;int ok=strstr(b,gold)!=0;free(b);return ok;}
-static void fixture(const char *name,const char *header,const char *want,const char *provider_gold){
- char directory[4400],headers[4400],output[4400],source[4400],file[4400],why[1200];join(directory,work,name);if(mkdir(directory,0700))die("fixture-directory");join(headers,directory,"headers");if(mkdir(headers,0700))die("header-directory");join(output,directory,"projection");join(source,directory,"consumer.c");save(source,"int main(void){return 0;}\n");join(file,headers,"cx.h");save(file,header);
+static void fixture(const char *name,const char *header,const char *want,const char *provider_gold,const char *consumer){
+ char directory[4400],headers[4400],output[4400],source[4400],file[4400],why[1200];join(directory,work,name);if(mkdir(directory,0700))die("fixture-directory");join(headers,directory,"headers");if(mkdir(headers,0700))die("header-directory");join(output,directory,"projection");join(source,directory,"consumer.c");save(source,consumer?consumer:"int main(void){return 0;}\n");join(file,headers,"cx.h");save(file,header);
  char *v[]={tool,headers,output,bootstrap,source,0};np_result r={0};char *env[]={"UNISA_ATTRIBUTES=","UNISACC_RF_CAPTURE=",0};if(np_run(v,root,env,8,&r,why,sizeof why))die(why);
  join(file,directory,"stdout");if(cx_write(file,r.out,r.outn))die("stdout");join(file,directory,"stderr");if(cx_write(file,r.err,r.errn))die("stderr");
  ck(!r.rc&&!r.errn&&strstr(r.out,"PREPARED"),name);if(!r.rc){join(file,output,"cx.h");size_t n;char *p=cx_read(file,&n);ck(p&&compact_has(p,n,want),"declaration-gold");free(p);if(provider_gold){join(file,output,"runtime.c");p=cx_read(file,&n);ck(p&&strstr(p,provider_gold),"provider-token-gold");free(p);}}np_free(&r);
 }
 int main(int argc,char **argv){
  if(argc!=5||!realpath(argv[1],root)||!realpath(argv[2],tool)||!realpath(argv[3],bootstrap)||argv[4][0]!='/'||strlen(argv[4])>=sizeof work)die("usage ROOT PROJECTOR BOOTSTRAP NEW_ABS_OUT");strcpy(work,argv[4]);if(mkdir(work,0700))die("exclusive-output");
- fixture("types-and-function-pointer","typedef struct { int n; } rt_box;\nstatic int (*rt_callback)(int);\nstatic int rt_value(rt_box *p){const char *s=\"} /* not a comment */\";return p->n+s[0];}\n","externint(*rt_callback)(int);externintrt_value(rt_box*p);",0);
- fixture("initialized-declarators","static int rt_first=3,rt_second=5;\n","rt_second",0);
- fixture("wide-literal","static int rt_wide(void){return L'Q';}\n","externintrt_wide(void);","L'Q'");
- fixture("conditional-function-body","static int rt_branch(int n){\n#if 1\nif(n){\n#else\nif(n+1){\n#endif\nreturn 3;}return 4;}\n","externintrt_branch(intn);",0);
- fixture("comments-and-macros","#define RT_TEXT \"{ ; }\"\n/* static int fake(void){ */\nstatic int rt_real(void){return RT_TEXT[0];}\n","externintrt_real(void);",0);
+ fixture("types-and-function-pointer","typedef struct { int n; } rt_box;\nstatic int (*rt_callback)(int);\nstatic int rt_value(rt_box *p){const char *s=\"} /* not a comment */\";return p->n+s[0];}\n","externint(*rt_callback)(int);externintrt_value(rt_box*p);",0,0);
+ fixture("initialized-declarators","static int rt_first=3,rt_second=5;\n","rt_second",0,0);
+ fixture("wide-literal","static int rt_wide(void){return L'Q';}\n","externintrt_wide(void);","L'Q'",0);
+ fixture("conditional-function-body","static int rt_branch(int n){\n#if 1\nif(n){\n#else\nif(n+1){\n#endif\nreturn 3;}return 4;}\n","externintrt_branch(intn);",0,0);
+ fixture("comments-and-macros","#define RT_TEXT \"{ ; }\"\n/* static int fake(void){ */\nstatic int rt_real(void){return RT_TEXT[0];}\n","externintrt_real(void);",0,0);
+ fixture("macro-selected-provider","#if !__UNISA_FTRIM_LIBC || __UN_isblank\nstatic int isblank(int c){return c==32;}\n#endif\n","externintisblank(intc);","int isblank","#define CALL isblank\nint main(void){return CALL(32);}\n");
  printf("RUNTIME_PROJECTION\tassertions=%d\tfailed=%d\n",checks,failed);return failed?1:0;
 }
