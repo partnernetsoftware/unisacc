@@ -534,6 +534,10 @@ static void model_bind(const Model *m) {
     NLO = m->nlo; NHI = m->nhi; BN = m->bn; BQ = m->bq; RETS = m->rets; RETOK = m->retok;
 }
 /* Safe on a partially decoded model (see loadbytes: arrays of pointers are zeroed when allocated). */
+#ifdef UNISA_CX_MODEL_LIFETIME
+void cxml_release(Model *, void (*)(void *));
+static void model_release(Model *m) { cxml_release(m,mfree); }
+#else
 static void model_release(Model *m) {
     if (m->str) for (int i = 0; i < m->nstr; i++) mfree(m->str[i]);
     if (m->rowk) for (int i = 0; i < m->ns; i++) mfree(m->rowk[i]);
@@ -545,6 +549,7 @@ static void model_release(Model *m) {
     mfree(m->nlo); mfree(m->nhi); mfree(m->bn); mfree(m->bq); mfree(m->rets); mfree(m->retok);
     memset(m, 0, sizeof *m);
 }
+#endif
 /* Model lifetime is one stage. No model-specific state survives unload. */
 static void unload(void) {
     Model m; model_capture(&m); model_release(&m); model_clear();

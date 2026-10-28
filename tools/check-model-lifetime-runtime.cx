@@ -1,0 +1,18 @@
+/* Compare the actual runtime's C and CX release adapters. */
+#pragma unisa use runtime.process
+static void die(const char *s){fprintf(stderr,"model-lifetime-runtime: %s\n",s);exit(2);}
+static np_result call(char **v,const char *root){np_result r={0};char why[512];if(np_run(v,root,0,35,&r,why,sizeof why))die(why);return r;}
+int main(void){
+ char root[4096],bound[4400],src[4400],mod[4400],inc[4400],old[512],fresh[512],obj[512];
+ char tmp[]="/tmp/cx-lifetime-XXXXXX";if(!realpath(".",root)||!mkdtemp(tmp))die("setup");
+ if(cx_fmt(bound,sizeof bound,"%s/tools/bound",root)||cx_fmt(src,sizeof src,"%s/tests/cases/model_lifetime_runtime.c",root)||cx_fmt(mod,sizeof mod,"%s/cx/runtime/model_lifetime.cx",root)||cx_fmt(inc,sizeof inc,"%s/include/cx.h",root)||cx_fmt(old,sizeof old,"%s/old",tmp)||cx_fmt(fresh,sizeof fresh,"%s/fresh",tmp)||cx_fmt(obj,sizeof obj,"%s/lifetime.o",tmp))die("path");
+ char *cc="/usr/bin/x86_64-linux-gnu-gcc-11";
+ char *a[]={bound,"30",cc,"-O2","-x","c","-include",inc,"-c",mod,"-o",obj,0};np_result r=call(a,root);if(r.rc||r.errn)die("module-build");np_free(&r);
+ char *b[]={bound,"30",cc,"-O2","-w","-ffunction-sections","-fdata-sections","-Wl,--gc-sections",src,"-o",old,0};r=call(b,root);if(r.rc||r.errn)die("old-build");np_free(&r);
+ char *c[]={bound,"30",cc,"-O2","-w","-ffunction-sections","-fdata-sections","-Wl,--gc-sections","-DUNISA_CX_MODEL_LIFETIME",src,obj,"-o",fresh,0};r=call(c,root);if(r.rc||r.errn)die("new-build");np_free(&r);
+ char *x[]={bound,"10",old,0},*y[]={bound,"10",fresh,0};np_result p=call(x,root),q=call(y,root);
+ const char *want="zero=1 calls=20 2 0 0 4 1 0 0 0 0 0 0 3 0 0 0 0 0 0 0 0\n";size_t n=strlen(want);
+ int ok=!p.rc&&!q.rc&&!p.errn&&!q.errn&&p.outn==n&&q.outn==n&&!memcmp(p.out,want,n)&&!memcmp(q.out,want,n);
+ printf("%s\tpartial-order-and-reset\nCXMODEL_LIFETIME_RUNTIME\tfailed=%d\n",ok?"PASS":"FAIL",!ok);
+ np_free(&p);np_free(&q);if(cx_rmtree(tmp))die("cleanup");return ok?0:1;
+}
