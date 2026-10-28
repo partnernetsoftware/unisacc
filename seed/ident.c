@@ -43,9 +43,11 @@ static const char *suffix(const char *p) {
     const char *base = strrchr(p, '/'), *dot; base = base ? base + 1 : p;
     dot = strrchr(base, '.'); return dot && dot != base ? dot : "";
 }
+static int legacy_projection;
 static int keep(const char *rel) {
     static const char *const exts[] = {".py", ".c", ".cx", ".h", ".inc", ".tsv", ".json", ".sh"};
     const char *sfx = suffix(rel); size_t i; int ok = 0;
+    if (legacy_projection && !strcmp(sfx, ".cx")) return 0;
     for (i = 0; i < sizeof exts / sizeof *exts; i++) if (!strcmp(sfx, exts[i])) ok = 1;
     if (!ok) return 0;
     if (!strncmp(rel, "seed/", 5)) {
@@ -57,7 +59,7 @@ static int keep(const char *rel) {
     }
     if (!strncmp(rel, "exec/", 5)) {   /* 0.0.32 X31: *check.sh and *check.py under exec are verifiers, not inputs */
         size_t n = strlen(rel);
-        if ((n >= 8 && !strcmp(rel + n - 8, "check.sh")) || (n >= 8 && !strcmp(rel + n - 8, "check.py"))) return 0;
+        if ((n >= 8 && !strcmp(rel + n - 8, "check.sh")) || (n >= 8 && !strcmp(rel + n - 8, "check.py")) || (n >= 8 && !strcmp(rel + n - 8, "check.cx"))) return 0;
     }
     if ((!strcmp(sfx, ".c") || !strcmp(sfx, ".h")) && (!strncmp(rel, "probes/", 7) || strstr(rel, "/probes/")))
         return 0;   /* 0.0.35 P8: probe sources are test inputs (same rule as exec/pipeline/models.py closure) */
@@ -99,7 +101,7 @@ static void identity(char hex[65]) {
     Sha h; unsigned char out[32]; size_t i, first; int j;
     npaths = 0;
     sha_init(&h);
-    for (j = 0; j < (int)(sizeof dirs / sizeof *dirs); j++) {
+    for (j = 0; j < (int)(sizeof dirs / sizeof *dirs) - (legacy_projection ? 1 : 0); j++) {
         first = npaths; walk(dirs[j]);
         qsort(paths + first, npaths - first, sizeof *paths, part_cmp);
     }
@@ -326,6 +328,7 @@ int main(int argc, char **argv) {
         stage_manifest(argv[3], t, argv[5]);
         return 0;
     }
+    if (argc == 3 && !strcmp(argv[2], "legacy-projection")) { legacy_projection = 1; identity(hex); puts(hex); return 0; }
     if (!(argc == 1 || argc == 2 || (argc == 5 && !strcmp(argv[2], "write")) || (argc == 4 && !strcmp(argv[2], "check"))))
         die("usage", "ident [ROOT] | ident ROOT write ARTIFACT START | ident ROOT check ARTIFACT");
     /* the artifact path is taken relative to the caller's directory, before entering ROOT */

@@ -29,7 +29,7 @@ def closure(h):
             rel = path.relative_to(ROOT).parts
             if rel[0] == 'seed' and rel[-1] not in ('tbl.c', 'net.c', 'json.h', 'gen.c', 'facts.h', 'ident.c', 'blob.c', 'sha256.h', 'pack.c', 'compilerpack.c', 'ape.c'):
                 continue   # only the tools the build runs (0.0.32 B5: seed/gen.c builds the shared deltas)
-            if rel[0] == 'exec' and path.suffix in ('.sh', '.py') and path.stem.endswith('check'):
+            if rel[0] == 'exec' and path.suffix in ('.sh', '.py', '.cx') and path.stem.endswith('check'):
                 continue   # 0.0.32 X31: exec/**/*check.{sh,py} verify the deltas; no build step runs or imports them
             if 'probes' in rel[:-1] and path.suffix in ('.c', '.h'):
                 continue   # 0.0.35 P8: probe sources are test inputs; no generator reads them (a probe edit kept invalidating every model)
