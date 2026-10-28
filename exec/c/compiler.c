@@ -394,6 +394,15 @@ static int product_ar(int argc,char **argv) {
     free(b); return 0;
 }
 typedef struct { unsigned char *b; long n,cap; } CliBlock;
+/* Transitional ABI shared with cx/driver/cli.cx; fields borrow argv. */
+typedef struct {
+    const char *out,*target,*pkg,*deps,*host_symbols_path,*host_provider_path;
+    const char **deptargets; int *depquoted;
+    int deptarget_cap,ndeptargets,mode,level,explicit_image,runit,force_origin,emitbin;
+    int deponly,depphony,sawc,sawS,funit,warnings,defrun,werror,nostd,notrim;
+} CxcState;
+int cxc_default_run(CxcState *,char **,int,char *,long);
+int cxc_step(CxcState *,char **,int,int *,char *,long);
 int cxa_record(unsigned char **,long *,long *,const char *,char *,long);
 int cxa_line(unsigned char **,long *,long *,const char *,char *,long);
 int cxa_raw(unsigned char **,long *,long *,const unsigned char *,long,char *,long);
@@ -536,109 +545,57 @@ int main(int argc, char **argv) {
     if (argc>=2 && (!strcmp(argv[1],"nm") || !strcmp(argv[1],"objdump"))) { if(rf_trace_finish())return 2;return product_view(argc,argv); }   /* R18-4 */
     int sawS=0;
     CliBlock srcres={0};                   /* \0cli/source: the main source path */
-    /* Default mode is RUN (owner 2026-10-01, 0.0.17 R17-10): no mode or output
-       flag at all means `-run`; a file is written only on request. */
-    { int modeflag=0;
-      for (int i = 1; i < argc; i++) {
-        const char *a = argv[i];
-        if (!strcmp(a,"--")) break;
-        if (a[0]!='-') continue;
-        if (a[1]=='o'||a[1]=='b'||a[1]=='t'||a[1]=='S'||a[1]=='c'||a[1]=='E'||a[1]=='M') modeflag=1;
-        if (!strcmp(a,"-run")||!strcmp(a,"-dump-tokens")||!strcmp(a,"--tapebin")||!strcmp(a,"--version")||!strcmp(a,"-version")) modeflag=1;
-        if (!strcmp(a,"--models")||!strcmp(a,"-I")||!strcmp(a,"-iquote")||!strcmp(a,"-D")||!strcmp(a,"-U")||!strcmp(a,"-include")||!strcmp(a,"-MF")||!strcmp(a,"-MT")||!strcmp(a,"-MQ")||!strcmp(a,"--emit-host-symbols")||!strcmp(a,"--host-provider")) i++;   /* skip the option's argument */
-      }
-      if (!modeflag) { runit=1; defrun=1; } }
-    for (int i = 1; i < argc; i++) {
-        const char *a = argv[i];
+    CxcState opts={0}; char cli_reason[128];
+    opts.deptargets=deptargets; opts.depquoted=depquoted; opts.deptarget_cap=argc;
+    if (cxc_default_run(&opts,argv,argc,cli_reason,sizeof cli_reason)) return clierror(cli_reason);
+    for (int i=1;i<argc;) {
+        const char *a=argv[i]; int next=i;
+        int parsed=cxc_step(&opts,argv,argc,&next,cli_reason,sizeof cli_reason);
+        if (!parsed) { i=next; continue; }
+        if (parsed!=1) return clierror(cli_reason);
         if (!strcmp(a,"--version") || !strcmp(a,"-version")) {
-            if(rf_trace_finish())return 2;printf("unisacc %s\n",UNISACC_VERSION); return 0;
-        }
-        else if (!strcmp(a,"-Wall") || !strcmp(a,"-Wextra")) warnings=1;
-        else if (!strcmp(a,"-Werror")) { warnings=1; if (!werror.n) bput(&werror,1,0); }
-        else if (!strncmp(a,"-ferror-limit=",14)) { errorlimit.n=0; argbytes(&errorlimit,a+14); }
-        else if (!strcmp(a,"-run")) runit = 1;
-        else if (!strcmp(a,"--force-origin")) force_origin=1;
-        else if (!strcmp(a,"--tapebin")) emitbin=1;
-        else if (runit && !strcmp(a,"--")) { argstart=i+1; break; }
-        else if (runit && src && a[0]!='-') {
+            if(rf_trace_finish())return 2;printf("unisacc %s\n",UNISACC_VERSION);return 0;
+        } else if (!strcmp(a,"--help")) {
+            if(rf_trace_finish())return 2;puts("unisacc FILE [-S|-c|-o FILE|-run]\nDiagnostic, non-stable: --emit-host-symbols FILE (-S/-c/-o, not -run)\nDiagnostic, non-stable: --host-provider FILE (12-byte capability filter; no addresses)");return 0;
+        } else if (!strncmp(a,"-ferror-limit=",14)) { errorlimit.n=0;argbytes(&errorlimit,a+14); }
+        else if (opts.runit && !strcmp(a,"--")) { argstart=i+1;break; }
+        else if (opts.runit && src && a[0]!='-') {
             if(tapebin_path(src)||tape_path(src)){argstart=i;break;}
             size_t len=strlen(a);
-            /* .cx script: same as isdotc (src/front_parse.c); break here would turn the rest into argv */
-            if ((len>=2 && !strcmp(a+len-2,".c")) || (len>=3 && !strcmp(a+len-3,".cx")) || object_path(a)) sources[nsources++]=a;
-            else { argstart=i; break; }
-        }
-        else if (!strcmp(a,"-MD") || !strcmp(a,"-MMD")) { if (!deps) deps=""; }
-        else if (!strcmp(a,"-M") || !strcmp(a,"-MM")) { deponly=1; mode=1; if (!deps) deps=""; }   /* gcc: -E implied, only the .d line */
-        else if (!strcmp(a,"-MT") || !strcmp(a,"-MQ")) {
-            if (++i>=argc) return clierror("missing dependency target");
-            deptargets[ndeptargets]=argv[i]; depquoted[ndeptargets]=a[2]=='Q'; ndeptargets++;
-        }
-        else if (!strcmp(a,"--emit-host-symbols")) { if(host_symbols_path||++i>=argc)return clierror("invalid --emit-host-symbols argument");host_symbols_path=argv[i]; }
-        else if (!strcmp(a,"--host-provider")) { if(host_provider_path||++i>=argc)return clierror("invalid --host-provider argument");host_provider_path=argv[i]; }
-        else if (!strcmp(a,"--help")) { if(rf_trace_finish())return 2;puts("unisacc FILE [-S|-c|-o FILE|-run]\nDiagnostic, non-stable: --emit-host-symbols FILE (-S/-c/-o, not -run)\nDiagnostic, non-stable: --host-provider FILE (12-byte capability filter; no addresses)");return 0; }
-        else if (!strcmp(a,"-MP")) depphony=1;
-        else if (!strcmp(a,"-MF")) {
-            if (++i>=argc) return clierror("missing dependency output"); deps=argv[i];
-        }
-        else if (!strcmp(a,"-nostdinc")) { if (!nostd.n) bput(&nostd,1,0); }
-        /* R11-3: library bodies on demand is the model's default; only the opt-out is a resource. */
-        else if (!strcmp(a,"-ftrim-libc") || !strcmp(a,"-libneed")) { notrim.n = 0; }
-        else if (!strcmp(a,"-fno-trim-libc")) { if (!notrim.n) bput(&notrim,1,0); }
-        else if (!strcmp(a,"-dump-tokens")) mode = 4;
-        else if (!strcmp(a,"-E")) mode = 1;
-        else if (!strcmp(a,"-S") || !strcmp(a,"-c")) { mode = 2; if (a[1]=='c') sawc=1; else sawS=1; }
-        else if (!strcmp(a,"-funit")) funit=1;      /* separate compilation (docs/toolchain.md §7) */
-        else if (a[0]=='-' && (a[1]=='D' || a[1]=='U')) {
+            if ((len>=2&&!strcmp(a+len-2,".c")) || (len>=3&&!strcmp(a+len-3,".cx")) || object_path(a)) sources[nsources++]=a;
+            else {argstart=i;break;}
+        } else if (a[0]=='-' && (a[1]=='D' || a[1]=='U')) {
             const char *value=a+2;
-            if (!*value) { if (++i >= argc) return clierror("missing macro argument"); value=argv[i]; }
+            if (!*value) { if (++i>=argc) return clierror("missing macro argument");value=argv[i]; }
             if (a[1]=='D') cli_redefine(&undefs,value);
-            argbytes(a[1]=='D' ? &defs : &undefs,value);
+            argbytes(a[1]=='D'?&defs:&undefs,value);
         } else if (!strcmp(a,"-include")) {
-            if (++i >= argc) return clierror("missing forced include"); argbytes(&forced,argv[i]);
-        }
-        else if (!strcmp(a,"-b") || !strcmp(a,"-t")) {
-            mode = a[1] == 'b' ? 0 : 2; explicit_image = mode == 0;
-            if (++i >= argc) return clierror("missing target"); target = argv[i];
-        } else if (!strcmp(a,"--models")) {
-            if (++i >= argc) return clierror("missing package"); pkg = argv[i];
-        } else if (!strcmp(a,"-o")) {
-            if (++i >= argc) return clierror("missing output path"); out = argv[i];
-        } else if (a[0]=='-' && a[1]=='o' && a[2]) out = a+2;
-        else if (!strncmp(a,"-iquote",7)) {
+            if (++i>=argc) return clierror("missing forced include");argbytes(&forced,argv[i]);
+        } else if (!strncmp(a,"-iquote",7)) {
             const char *value=a+7;
-            if (!*value) { if (++i >= argc) return clierror("missing quote include path"); value=argv[i]; }
+            if (!*value) { if (++i>=argc) return clierror("missing quote include path");value=argv[i]; }
             argline(&quotedir,value);
-        }
-        else if (!strcmp(a,"-I")) {
-            if (++i >= argc) return clierror("missing include path"); INCDIR = argv[i];
-            argline(&incdir,INCDIR);   /* every -I, in order (R13-0b #22) */
-        } else if (a[0]=='-' && a[1]=='I' && a[2]) { INCDIR = a+2;
-            argline(&incdir,INCDIR); }
-        /* -l names are retained for host-library forwarding; -L and -x remain
-           accepted compatibility options.  None is an input file name. */
+        } else if (!strcmp(a,"-I")) {
+            if (++i>=argc) return clierror("missing include path");INCDIR=argv[i];argline(&incdir,INCDIR);
+        } else if (a[0]=='-' && a[1]=='I' && a[2]) { INCDIR=a+2;argline(&incdir,INCDIR); }
         else if (a[0]=='-' && (a[1]=='l' || a[1]=='L' || a[1]=='x')) {
-            const char *value = a+2;
+            const char *value=a+2;
             if (!*value) {
-                if (++i >= argc) return clierror(defrun && src ? "missing compatibility argument (arguments for the program go after --: unisacc prog.c -- -x)" : "missing compatibility argument");
-                value = argv[i];
+                if (++i>=argc) return clierror(opts.defrun && src ? "missing compatibility argument (arguments for the program go after --: unisacc prog.c -- -x)" : "missing compatibility argument");
+                value=argv[i];
             }
-            if (a[1]=='l' && *value && nfwd_libs < 16 && strcmp(value,"m") && strcmp(value,"c") && strcmp(value,"dl")
-                && strcmp(value,"pthread") && strcmp(value,"rt")) fwd_libs[nfwd_libs++] = (char *)value;
-        }
-        else if (!strcmp(a,"-g") || !strncmp(a,"-std=",5)) {
-            /* No separate debug information or dialect switch. */
-        }
-        else if (!strcmp(a,"-O")) level = 1;
-        else if (!strcmp(a,"-O0")) level = 0;
-        else if (!strcmp(a,"-O1")) level = 1;
-        else if (!strcmp(a,"-O2") || !strcmp(a,"-O3")) level = 2;
-        /* Match the classic optimizer: >=2 enables the same local passes;
-           -Os uses level 1 (src/main.c and src/opt.c). Keep package routes canonical. */
-        else if (!strcmp(a,"-Os")) level = 1;
-        else if (cxm_flag((char *)a)) { }           /* -cx-plan, -cx-interface (src/cxmod.c) */
-        else if (a[0]=='-' && a[1]) return clierror(defrun && src ? "option not migrated (arguments for the program go after --: unisacc prog.c -- --flag)" : "option not migrated");
-        else { sources[nsources++]=a; if (!src) src = a; }
+            if (a[1]=='l' && *value && nfwd_libs<16 && strcmp(value,"m") && strcmp(value,"c") && strcmp(value,"dl") && strcmp(value,"pthread") && strcmp(value,"rt")) fwd_libs[nfwd_libs++]=(char *)value;
+        } else if (cxm_flag((char *)a)) { }
+        else if (a[0]=='-' && a[1]) return clierror(opts.defrun && src ? "option not migrated (arguments for the program go after --: unisacc prog.c -- --flag)" : "option not migrated");
+        else { sources[nsources++]=a;if(!src)src=a; }
+        i++;
     }
+    out=opts.out;target=opts.target;pkg=opts.pkg;deps=opts.deps;
+    host_symbols_path=opts.host_symbols_path;host_provider_path=opts.host_provider_path;
+    ndeptargets=opts.ndeptargets;mode=opts.mode;level=opts.level;explicit_image=opts.explicit_image;
+    runit=opts.runit;defrun=opts.defrun;force_origin=opts.force_origin;emitbin=opts.emitbin;
+    deponly=opts.deponly;depphony=opts.depphony;sawc=opts.sawc;sawS=opts.sawS;funit=opts.funit;warnings=opts.warnings;
+    if(opts.werror)bput(&werror,1,0);if(opts.nostd)bput(&nostd,1,0);if(opts.notrim)bput(&notrim,1,0);
     if (!src) return clierror("expected a C source file");
     /* CX2a: a .cx unit's `#pragma unisa use` adds the module's unit after the command-line sources (src/cxmod.c);
        .c units are never scanned.  -cx-interface prints one module's interface, -cx-plan the units and their lists. */
