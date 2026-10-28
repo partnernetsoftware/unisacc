@@ -104,6 +104,12 @@ SHA e955714e766f89e324c76812b02624bf0a6960270507c2feba802a977eacfd0f；构造后
 两context固定cce326a8/ab98a6ae，比较真实读取job收据与JSON，不复用旧测试结论。
 错误候选传入共享旧4c28时具名REFUSE candidate、rc2（out/c43-cxpack-candidate-wrong-01.*）。
 结果仅CHECKED finite-material-applicability；不冒称kind4重建、安装或发布资格。下一步两阶段安装器接此检查。
+
+两阶段安装已完成：tools/cxpack-candidate-install.cx prepare/finish均rc0，分别重新执行完整有限检查，
+核安装器/检查器字节、前后产品/记录、冻结身份、暂存与备份后替换并fsync。
+共享现e955714e/记录0fe8abb8，旧4c28备份在out/c43-cxpack-install-01/previous.com及.build.json。
+installed.tsv SHA f1a20e2e330cb663a7086c5474c65924729a8d557477c6c9944eada07ac30ad5。
+安装后实际默认-run smoke16/0（out/c43-e955-smoke-01.*）。这是有限材料路径开发安装，非原kind4重建或发布资格。
 证据沿用冻结根out/cxpack-gen-*-01.*与epoch-context-01/jobs；当前无所属在跑作业。
 
 ## link.undef-function-refusal — 未定义外部函数链接成崩溃镜像（开放）
