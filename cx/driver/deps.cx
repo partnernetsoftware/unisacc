@@ -1,0 +1,198 @@
+/* module deps. Two public operations: cxd_default_target, cxd_write.
+   Owns no compiler global and keeps no state after return.
+   Every pointer argument is borrowed for this call and is not freed.
+   src, path, target, sources, targets, quoted, and reads are not written.
+   out is caller storage. It is written only when cxd_default_target
+   returns 0; a refusal leaves it unchanged.
+   why is cleared on success and untouched when it is null or whycap <= 0.
+   The FILE opened here dies with the call. There is no static buffer.
+   Not thread-safe on stdout: the caller serializes path "-".
+   File destinations do not share module state.
+
+   cxd_default_target writes the basename stem plus ".o".
+   The stem is the basename up to its last dot, or the whole basename.
+   Return 0, or:
+     4 dependency target too long   stem longer than 500, or cap too small
+     5 bad dependency argument      null src, null out, or cap <= 0
+   A stem of 500 bytes is kept. A longer stem is refused, not shortened.
+
+   cxd_write return 0, or a named failure in why:
+     1 cannot open dependency output
+     2 cannot write dependency output
+     3 dependency name too long
+     4 dependency target too long   not produced by this function
+     5 bad dependency argument
+   ntargets > 0 uses targets[i] and quoted[i]; target may be null.
+   ntargets == 0 writes target and always quotes it.
+   sources and reads are always quoted. quoted != 0 means escape.
+   reads is the borrowed ledger. This file does not read FILE_READ_*.
+   It does not call clierror. phony != 0 adds one "<read>:\n" rule each.
+
+   Successful bytes follow the current driver:
+   one space between names, " \\\n " when the next name would pass column 72,
+   space and # gain a backslash, $ is doubled, then ":", then the sources
+   and reads, then a newline. The first name is not wrapped by itself.
+   "-" is stdout: fflush, never fclose. Any other path is fopen "wb",
+   so a successful open truncates immediately. A later write or close
+   failure can leave a partial file. That file is not unlinked.
+
+   Argument errors and over-long names are refused before open, so they
+   do not create or truncate the destination. A quoted name is too long
+   when another source byte remains after 1090 escaped bytes have already
+   been accepted (the old loop's stop). A name the old loop could finish,
+   including one whose last byte pushes the escaped length to 1091, is
+   written whole. An unquoted name longer than 2147483647 is refused
+   because the column is that integer width. Column overflow is the same
+   refusal. deps_name stays static. */
+#pragma unisa module deps
+
+static void cxd_setwhy(char *why, long cap, const char *msg) {
+    long i;
+    if (!why || cap <= 0) return;
+    i = 0;
+    if (msg) while (msg[i] && i + 1 < cap) { why[i] = msg[i]; i = i + 1; }
+    why[i] = 0;
+}
+
+static int cxd_fail(int rc, char *why, long cap) {
+    const char *msg;
+    if (!rc) msg = 0;
+    else if (rc == 1) msg = "cannot open dependency output";
+    else if (rc == 2) msg = "cannot write dependency output";
+    else if (rc == 3) msg = "dependency name too long";
+    else if (rc == 4) msg = "dependency target too long";
+    else { rc = 5; msg = "bad dependency argument"; }
+    cxd_setwhy(why, cap, msg);
+    return rc;
+}
+
+static int deps_name(FILE *f, const char *name, int quote, long *col) {
+    char esc[1100];
+    const char *out;
+    const char *s;
+    long n;
+    long next;
+    if (!name) return 5;
+    if (!quote) {
+        n = 0;
+        while (name[n]) {
+            if (n >= 2147483647L) return 3;
+            n = n + 1;
+        }
+        out = name;
+    } else {
+        n = 0;
+        s = name;
+        while (*s) {
+            if (n >= 1090) return 3;
+            if (*s == ' ' || *s == '#') { esc[n] = '\\'; n = n + 1; }
+            if (*s == '$') { esc[n] = '$'; n = n + 1; }
+            esc[n] = *s;
+            n = n + 1;
+            s = s + 1;
+        }
+        esc[n] = 0;
+        out = esc;
+    }
+    if (*col) {
+        if (*col + n > 72) next = 1 + n;
+        else next = *col + 1 + n;
+    } else next = n;
+    if (next > 2147483647L) return 3;
+    if (f) {
+        if (*col) {
+            if (*col + n > 72) {
+                if (fputs(" \\\n ", f) < 0) return 2;
+            } else if (fputc(' ', f) < 0) return 2;
+        }
+        if (fputs(out, f) < 0) return 2;
+    }
+    *col = next;
+    return 0;
+}
+
+static int cxd_body(FILE *f, const char *target, const char **sources, long count,
+                    const char **targets, const int *quoted, long ntargets,
+                    const char **reads, long nreads, int phony) {
+    long col;
+    long i;
+    int rc;
+    col = 0;
+    if (ntargets > 0) {
+        for (i = 0; i < ntargets; i = i + 1) {
+            rc = deps_name(f, targets[i], quoted[i], &col);
+            if (rc) return rc;
+        }
+    } else {
+        rc = deps_name(f, target, 1, &col);
+        if (rc) return rc;
+    }
+    if (col >= 2147483647L) return 3;
+    if (f && fputc(':', f) < 0) return 2;
+    col = col + 1;
+    for (i = 0; i < count; i = i + 1) {
+        rc = deps_name(f, sources[i], 1, &col);
+        if (rc) return rc;
+    }
+    for (i = 0; i < nreads; i = i + 1) {
+        rc = deps_name(f, reads[i], 1, &col);
+        if (rc) return rc;
+    }
+    if (f && fputc('\n', f) < 0) return 2;
+    if (!phony) return 0;
+    for (i = 0; i < nreads; i = i + 1) {
+        col = 0;
+        rc = deps_name(f, reads[i], 1, &col);
+        if (rc) return rc;
+        if (f && fputs(":\n", f) < 0) return 2;
+    }
+    return 0;
+}
+
+int cxd_default_target(const char *src, char *out, long cap, char *why, long whycap) {
+    const char *base;
+    const char *dot;
+    const char *s;
+    long n;
+    long i;
+    if (!src || !out || cap <= 0) return cxd_fail(5, why, whycap);
+    base = src;
+    for (s = src; *s; s = s + 1) if (*s == '/') base = s + 1;
+    dot = 0;
+    for (s = base; *s; s = s + 1) if (*s == '.') dot = s;
+    n = dot ? (long)(dot - base) : (long)(s - base);
+    if (n > 500 || n + 3 > cap) return cxd_fail(4, why, whycap);
+    for (i = 0; i < n; i = i + 1) out[i] = base[i];
+    out[n] = '.';
+    out[n + 1] = 'o';
+    out[n + 2] = 0;
+    return cxd_fail(0, why, whycap);
+}
+
+int cxd_write(const char *path, const char *target, const char **sources, long count,
+              const char **targets, const int *quoted, long ntargets,
+              const char **reads, long nreads, int phony, char *why, long whycap) {
+    FILE *f;
+    int rc;
+    int stdout_path;
+    if (!path || count < 0 || ntargets < 0 || nreads < 0) return cxd_fail(5, why, whycap);
+    if (ntargets == 0) {
+        if (!target) return cxd_fail(5, why, whycap);
+    } else if (!targets || !quoted) return cxd_fail(5, why, whycap);
+    if (count > 0 && !sources) return cxd_fail(5, why, whycap);
+    if (nreads > 0 && !reads) return cxd_fail(5, why, whycap);
+    rc = cxd_body(0, target, sources, count, targets, quoted, ntargets, reads, nreads, phony);
+    if (rc) return cxd_fail(rc, why, whycap);
+    if (!path[0]) return cxd_fail(1, why, whycap);
+    stdout_path = path[0] == '-' && path[1] == 0;
+    if (stdout_path) f = stdout;
+    else {
+        f = fopen(path, "wb");
+        if (!f) return cxd_fail(1, why, whycap);
+    }
+    rc = cxd_body(f, target, sources, count, targets, quoted, ntargets, reads, nreads, phony);
+    if (stdout_path) {
+        if (!rc && fflush(f) != 0) rc = 2;
+    } else if (fclose(f) != 0 && !rc) rc = 2;
+    return cxd_fail(rc, why, whycap);
+}

@@ -1,0 +1,202 @@
+/* Independent check for module deps. Not a product driver.
+   tools/driver -> ../cx/driver. This unit consumes that module.
+   Run one source: sh ./unisacc.com tools/check-driver-deps.cx
+   Not run in the turn that added it. */
+#pragma unisa use driver.deps
+
+static int g_fail;
+
+static void note(int ok, const char *name) {
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", name);
+    if (!ok) g_fail = g_fail + 1;
+}
+
+static int same(const char *path, const char *text, long n) {
+    size_t got;
+    char *s;
+    int ok;
+    s = cx_read(path, &got);
+    ok = s && (long)got == n && !memcmp(s, text, (size_t)n);
+    free(s);
+    return ok;
+}
+
+static int absent(const char *path) {
+    struct stat st;
+    return lstat(path, &st) < 0;
+}
+
+static int capture_stdout(const char *dest, char *why, long whycap, int *rc) {
+    const char *src;
+    int saved;
+    int fd;
+    src = "a.c";
+    saved = dup(1);
+    fd = open(dest, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (saved < 0 || fd < 0 || dup2(fd, 1) < 0) {
+        if (fd >= 0) close(fd);
+        if (saved >= 0) close(saved);
+        return 0;
+    }
+    close(fd);
+    *rc = cxd_write("-", "a.o", &src, 1, 0, 0, 0, 0, 0, 0, why, whycap);
+    fflush(stdout);
+    dup2(saved, 1);
+    close(saved);
+    return 1;
+}
+
+int main(void) {
+    char dir[64], path[160], why[80], dest[520], srcbuf[520], name[1092], keep[8];
+    char exp[96], s60[61], t10[11];
+    const char *one;
+    const char *longname;
+    const char *two[2];
+    const char *three[3];
+    const char *tg[2];
+    const char *rd[2];
+    int q[2];
+    int rc;
+    int ready;
+    long i;
+    long n;
+    size_t got;
+    char *body;
+    g_fail = 0;
+    if (snprintf(dir, sizeof dir, "/tmp/cxdXXXXXX") < 0 || !mkdtemp(dir)) return 2;
+
+    snprintf(why, sizeof why, "DIRTY");
+    rc = cxd_default_target("dir/a.b.c", dest, (long)sizeof dest, why, (long)sizeof why);
+    note(rc == 0 && why[0] == 0 && !strcmp(dest, "a.b.o"), "target-stem");
+    rc = cxd_default_target("dir/prog", dest, (long)sizeof dest, why, (long)sizeof why);
+    note(rc == 0 && !strcmp(dest, "prog.o"), "target-nodot");
+
+    memset(srcbuf, 'a', 500);
+    srcbuf[500] = '.';
+    srcbuf[501] = 'c';
+    srcbuf[502] = 0;
+    rc = cxd_default_target(srcbuf, dest, 503, why, (long)sizeof why);
+    note(rc == 0 && dest[0] == 'a' && dest[500] == '.' && dest[501] == 'o' && dest[502] == 0, "stem-500");
+
+    snprintf(dest, sizeof dest, "KEEP");
+    memset(srcbuf, 'b', 501);
+    srcbuf[501] = '.';
+    srcbuf[502] = 'c';
+    srcbuf[503] = 0;
+    rc = cxd_default_target(srcbuf, dest, (long)sizeof dest, why, (long)sizeof why);
+    note(rc == 4 && !strcmp(dest, "KEEP") && strstr(why, "dependency target too long"), "stem-501");
+    snprintf(dest, sizeof dest, "KEEP");
+    rc = cxd_default_target("hi.c", dest, 4, why, (long)sizeof why);
+    note(rc == 4 && !strcmp(dest, "KEEP") && strstr(why, "dependency target too long"), "target-cap");
+    snprintf(dest, sizeof dest, "KEEP");
+    rc = cxd_default_target(0, dest, (long)sizeof dest, why, (long)sizeof why);
+    note(rc == 5 && !strcmp(dest, "KEEP") && strstr(why, "bad dependency argument"), "target-null");
+
+    snprintf(path, sizeof path, "%s/plain.d", dir);
+    two[0] = "a.c";
+    two[1] = "b.c";
+    snprintf(why, sizeof why, "DIRTY");
+    rc = cxd_write(path, "a.o", two, 2, 0, 0, 0, 0, 0, 0, why, (long)sizeof why);
+    one = "a.o: a.c b.c\n";
+    note(rc == 0 && why[0] == 0 && same(path, one, (long)strlen(one)), "plain");
+
+    snprintf(path, sizeof path, "%s/esc.d", dir);
+    three[0] = "a b.c";
+    three[1] = "x#y.c";
+    three[2] = "p$q.c";
+    rc = cxd_write(path, "t.o", three, 3, 0, 0, 0, 0, 0, 0, why, (long)sizeof why);
+    one = "t.o: a\\ b.c x\\#y.c p$$q.c\n";
+    note(rc == 0 && same(path, one, (long)strlen(one)), "escape");
+
+    snprintf(path, sizeof path, "%s/multi.d", dir);
+    tg[0] = "foo.o";
+    tg[1] = "bar baz.o";
+    q[0] = 0;
+    q[1] = 1;
+    one = "a.c";
+    rc = cxd_write(path, 0, &one, 1, tg, q, 2, 0, 0, 0, why, (long)sizeof why);
+    one = "foo.o bar\\ baz.o: a.c\n";
+    note(rc == 0 && same(path, one, (long)strlen(one)), "multi");
+
+    snprintf(path, sizeof path, "%s/phony.d", dir);
+    one = "t.c";
+    rd[0] = "inc.h";
+    rd[1] = "a b.h";
+    rc = cxd_write(path, "t.o", &one, 1, 0, 0, 0, rd, 2, 1, why, (long)sizeof why);
+    one = "t.o: t.c inc.h a\\ b.h\ninc.h:\na\\ b.h:\n";
+    note(rc == 0 && same(path, one, (long)strlen(one)), "phony");
+
+    snprintf(path, sizeof path, "%s/wrap.d", dir);
+    memset(s60, 's', 60);
+    s60[60] = 0;
+    memset(t10, 't', 10);
+    t10[10] = 0;
+    two[0] = s60;
+    two[1] = t10;
+    n = 0;
+    memcpy(exp + n, "a.o: ", 5);
+    n = n + 5;
+    memcpy(exp + n, s60, 60);
+    n = n + 60;
+    memcpy(exp + n, " \\\n ", 4);
+    n = n + 4;
+    memcpy(exp + n, t10, 10);
+    n = n + 10;
+    exp[n] = '\n';
+    n = n + 1;
+    rc = cxd_write(path, "a.o", two, 2, 0, 0, 0, 0, 0, 0, why, (long)sizeof why);
+    note(rc == 0 && same(path, exp, n), "wrap");
+
+    snprintf(path, sizeof path, "%s/longok.d", dir);
+    for (i = 0; i < 1090; i = i + 1) name[i] = 'x';
+    name[1090] = 0;
+    one = name;
+    rc = cxd_write(path, "a.o", &one, 1, 0, 0, 0, 0, 0, 0, why, (long)sizeof why);
+    body = cx_read(path, &got);
+    ready = body && got == 1099 && !memcmp(body, "a.o: \\\n ", 8) && body[1098] == '\n';
+    if (ready) for (i = 8; i < 1098; i = i + 1) if (body[i] != 'x') ready = 0;
+    free(body);
+    note(rc == 0 && ready, "name-1090");
+
+    snprintf(path, sizeof path, "%s/longno.d", dir);
+    name[1090] = 'x';
+    name[1091] = 0;
+    rc = cxd_write(path, "a.o", &one, 1, 0, 0, 0, 0, 0, 0, why, (long)sizeof why);
+    note(rc == 3 && strstr(why, "dependency name too long") && absent(path), "name-1091");
+
+    snprintf(path, sizeof path, "%s/keep.d", dir);
+    two[0] = "a.c";
+    rc = cxd_write(path, "a.o", two, 1, 0, 0, 0, 0, 0, 0, why, (long)sizeof why);
+    one = "a.o: a.c\n";
+    longname = name;
+    rc = cxd_write(path, "a.o", &longname, 1, 0, 0, 0, 0, 0, 0, why, (long)sizeof why);
+    note(rc == 3 && same(path, one, (long)strlen(one)), "keep-on-long");
+
+    snprintf(path, sizeof path, "%s/no/such.d", dir);
+    one = "a.c";
+    rc = cxd_write(path, "a.o", &one, 1, 0, 0, 0, 0, 0, 0, why, (long)sizeof why);
+    note(rc == 1 && strstr(why, "cannot open dependency output") && absent(path), "missing-parent");
+
+    snprintf(path, sizeof path, "%s/bad.d", dir);
+    rc = cxd_write(path, "a.o", 0, -1, 0, 0, 0, 0, 0, 0, why, (long)sizeof why);
+    note(rc == 5 && strstr(why, "bad dependency argument") && absent(path), "bad-count");
+    snprintf(keep, sizeof keep, "KEEP");
+    rc = cxd_write(0, "a.o", 0, 0, 0, 0, 0, 0, 0, 0, keep, 0);
+    note(rc == 5 && !strcmp(keep, "KEEP"), "why-untouched");
+
+    snprintf(path, sizeof path, "%s/repl.d", dir);
+    one = "a.c";
+    rc = cxd_write(path, "a.o", &one, 1, 0, 0, 0, 0, 0, 0, why, (long)sizeof why);
+    one = "b.c";
+    rc = cxd_write(path, "a.o", &one, 1, 0, 0, 0, 0, 0, 0, why, (long)sizeof why);
+    one = "a.o: b.c\n";
+    note(rc == 0 && same(path, one, (long)strlen(one)), "replace");
+
+    snprintf(path, sizeof path, "%s/stdout.d", dir);
+    ready = capture_stdout(path, why, (long)sizeof why, &rc);
+    one = "a.o: a.c\n";
+    note(ready && rc == 0 && same(path, one, (long)strlen(one)), "stdout");
+
+    printf("CXD\tfailed=%d\n", g_fail);
+    return g_fail ? 1 : 0;
+}
