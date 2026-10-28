@@ -12,6 +12,7 @@ static int run(char **v,int expected,const char *label,const char *errtext){
     np_free(&r);return ok;
 }
 static void digest(char h[65]){size_t n;char *s=cx_read(product,&n);if(!s){fputs("candidate read failed\n",stderr);exit(2);}cx_sha256_hex(s,n,h);free(s);}
+static void fixture_digest(const char *relative,char h[65]){char p[4400];size_t n;if(cx_path_join(p,sizeof p,root,relative))exit(2);char *s=cx_read(p,&n);if(!s){fputs("fixture read failed\n",stderr);exit(2);}cx_sha256_hex(s,n,h);free(s);}
 int main(int argc,char **argv){
     if(argc!=4||!realpath(argv[1],root)||!realpath(argv[2],product)||argv[3][0]!='/'||strlen(argv[3])>=sizeof out){fputs("usage: ROOT PRODUCT NEW_OUTDIR\n",stderr);return 2;}
     strcpy(out,argv[3]);if(mkdir(out,0700)){perror("output directory");return 2;}
@@ -20,13 +21,15 @@ int main(int argc,char **argv){
     const char *names[]={"top","mid","leaf"};for(int i=0;i<3;i++)if(snprintf(obj[i],sizeof obj[i],"%s/%s.o",out,names[i])>=(int)sizeof obj[i])return 2;
     if(snprintf(image,sizeof image,"%s/linked.elf",out)>=(int)sizeof image||snprintf(multi,sizeof multi,"%s/multi.o",out)>=(int)sizeof multi||snprintf(mi,sizeof mi,"%s/multi.elf",out)>=(int)sizeof mi||snprintf(missing,sizeof missing,"%s/missing.elf",out)>=(int)sizeof missing)return 2;
     const char *top="tests/cases/cx-unit-graph/top.cx",*mid="tests/cases/cx-unit-graph/mid.cx",*leaf="tests/cases/cx-unit-graph/leaf.cx";
+    const char *src[]={top,mid,leaf};char fixture_before[3][65],fixture_after[65];for(int i=0;i<3;i++)fixture_digest(src[i],fixture_before[i]);
     char *def[]={bound,"45","sh",product,(char *)top,0};int ready=run(def,8,"default-run",0);
-    const char *src[]={top,mid,leaf};for(int i=0;i<3;i++){char *v[]={bound,"45","sh",product,"-c","-funit","-b","lnx/x86_64",(char *)src[i],"-o",obj[i],0};if(!run(v,0,names[i],0))ready=0;}
+    for(int i=0;i<3;i++){char *v[]={bound,"45","sh",product,"-c","-funit","-b","lnx/x86_64",(char *)src[i],"-o",obj[i],0};if(!run(v,0,names[i],0))ready=0;}
     if(ready){char *neg[]={bound,"45","sh",product,obj[0],obj[1],"-o",missing,0};run(neg,1,"missing-leaf","undefined reference to leaf_value");
         struct stat st;errno=0;int absent=lstat(missing,&st)!=0&&errno==ENOENT;checks++;if(!absent)failures++;printf("%s\tmissing-output\n",absent?"PASS":"FAIL");
         char *link[]={bound,"45","sh",product,obj[0],obj[1],obj[2],"-o",image,0};if(run(link,0,"separate-link",0)){char *v[]={bound,"15",image,0};run(v,8,"separate-run",0);}else unverified++;
         char *compile[]={bound,"45","sh",product,"-c","-funit","-b","lnx/x86_64",(char *)top,(char *)mid,"-o",multi,0};if(run(compile,0,"explicit-multi-unit",0)){char *l[]={bound,"45","sh",product,multi,obj[2],"-o",mi,0};if(run(l,0,"multi-link",0)){char *v[]={bound,"15",mi,0};run(v,8,"multi-run",0);}else unverified++;}else unverified++;
     }else unverified++;
     digest(after);if(strcmp(before,after)){fputs("candidate changed\n",stderr);return 2;}
+    for(int i=0;i<3;i++){fixture_digest(src[i],fixture_after);if(strcmp(fixture_before[i],fixture_after)){fputs("fixture changed\n",stderr);return 2;}}
     printf("CX_UNIT_GRAPH\tchecks=%d\tfailed=%d\tunverified=%d\tcandidate=%s\n",checks,failures,unverified,before);return failures?1:unverified?3:0;
 }
