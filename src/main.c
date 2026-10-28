@@ -73,7 +73,31 @@ int askedline(void) {
     return 0;
 }
 /* src/cxmod.c's file access, for this driver */
+#ifndef _WIN32
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#endif
 int cxm_rd(char *path, char *buf, int cap) {
+#ifndef _WIN32
+    int fd; int bad; size_t n; ssize_t z; struct stat st;
+    if (!path || !buf || cap <= 0) return -3;
+    fd = open(path, O_RDONLY | O_NONBLOCK);
+    if (fd < 0) return errno == ENOENT ? -1 : -3;
+    if (fstat(fd, &st) || !S_ISREG(st.st_mode)) { close(fd); return -3; }
+    n = 0; bad = 0;
+    while (n < (size_t)cap) {
+        z = read(fd, buf + n, (size_t)cap - n);
+        if (z < 0 && errno == EINTR) continue;
+        if (z < 0) { bad = 1; break; }
+        if (!z) break;
+        n += (size_t)z;
+    }
+    if (close(fd)) bad = 1;
+    if (bad) return -3;
+    if (n >= (size_t)cap) return -2;
+    return (int)n;
+#else
     FILE *f; size_t n; int bad;
     f = fopen(path, "rb");
     if (!f) return errno == ENOENT ? -1 : -3;
@@ -82,6 +106,7 @@ int cxm_rd(char *path, char *buf, int cap) {
     if (bad) return -3;
     if (n >= (size_t)cap) return -2;
     return (int)n;
+#endif
 }
 int cxm_wr(char *path, char *buf, int n) {
     int fd; int w;

@@ -154,6 +154,8 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 <a id="work-tree"></a>
 ### 思维树
 
+**FIFO 修复接续：** POSIX模型私有驱动五项5/0（7a90b9e2b3），经典参考驱动同五项0/1/1/0/1，FIFO具名拒绝且空stdout。宿主cxcc由grk跟进；Windows和已装e955不记已修。下一动作补宿主/平台验证及新产品构造安装。
+
 **CX0 当前验证（2026-10-28）：** e955 上正式 cx0-unit28/0、cx0-bundle38/0、cx0-e2 17/0；新提取七流与候选绑定44/0。fresh workspace读取器已构造。FIFO探针确认候选Linux切片读取无写端清单超过10秒；下一刀修cxm_rd非普通文件边界，原始证据out/c43-e955-cxpack-fifo-01/。严格清单仍19项未解决，不记完整发布通过。
 
 **当前产品（2026-10-28）：** CX候选e955714e/记录0fe8abb8已通过有限材料复核及prepare/finish两阶段安装，来源冻结af8429d0cf/SID6e7375f9，内嵌PCff696未变。安装后smoke16/0；候选APE格式68/0，CX0权威源投影EXACT及28/0。旧4c28备份在out/c43-cxpack-install-01，installed.tsv f1a20e2e。下一步补新产品模块/ABI/诊断与完整发布清单、流网/RI、N22及同候选平台证据；不把开发安装当发布完成。下列4c28段为上一开发产品来源历史。
@@ -371,6 +373,8 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 
 <a id="memory-palace"></a>
 ### 记忆宫殿
+
+**FIFO 当前证据：** out/c43-fifo-fixed-01.stdout模型私有5/0；out/c43-fifo-ref-*-01.*经典Linux五项通过；原超时out/c43-e955-cxpack-fifo-01/保留。已装仍e955，未替换；下述“待修”指已装产品，不能抹掉原失败。
 
 **CX0 接窗结果：** 正式三批及输入绑定分别28/0、38/0、17/0、44/0，控制器e955，证据out/c43-e955-cx0-batches-01/及对应stdout。FIFO清单超时已复现，待修；前四项通过不掩盖第五项失败。cc矩阵迁标由cc单独维护。
 
