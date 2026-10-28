@@ -145,10 +145,12 @@ LP64. Negative cases require the existing named missing-member/bitfield
 diagnostics with actual source path, rc1 and empty stdout; a valid default-run
 probe after each rejection must return 7 again.
 
-For coverage, first capture actual E1 tokens from the minimal probe with the
-installed product's `-dump-tokens`, preserving its observed framing. Feed that
-input to the new errorparse JSON with `tools/sim.cx --cov` under a 55-second
-bound; do not feed raw C to an E3 token automaton. Check the trace enters the
+For coverage, obtain the actual E1-to-E3 UNITOK wire from a separately
+identified raw stream route; that acquisition remains unimplemented here.
+Do not use `-dump-tokens`: its human-readable token names are not that wire.
+Only feed a correctly framed input to the new errorparse JSON with
+`tools/sim.cx --cov` under a 55-second bound; do not feed raw C or the readable
+token dump to an E3 token automaton. Check the trace enters the
 new SZ.sub continuation and the unevaluated member/shape path. Sim is auxiliary
 and grants no NN execution evidence by itself. Actual private-package runs
 above must be the semantic evidence. Record any input-framing obstacle before
