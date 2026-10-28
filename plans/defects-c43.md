@@ -89,6 +89,14 @@ SHA e955714e766f89e324c76812b02624bf0a6960270507c2feba802a977eacfd0f；构造后
 正常只导出pack_mark，缺席同时导出pack_extra，两拒绝具名且stdout为空。
 证据out/c43-cxpack-read-regression-02/{valid,oversize,directory,absent}/candidate.*。
 新APE仍未准入/安装，外国宿主未运行；候选记录与更完整产品验证继续。
+
+候选e955格式批实际68/0（out/c43-cxpack-ape-formats-01.*），测试ROOT为独立candidate-01，
+其unisacc.com为被测真实APE；六目标写出/重复字节及APE结构不授外国宿主原生执行资格。
+收紧断言及逐例输出留存版本实际4/0（out/c43-cxpack-read-regression-03.*），
+对象为新lnx切片435c7568配显式PCff696，与前述APE内嵌包直接检查分别记证。
+冻结根补af8429d0cf提交元数据（Git对象借用共享objects，只在仓外写index/ref），tracked diff空。
+原生identity-helper write/check均成功，候选记录SHA0fe8abb8b337825fc1b9f927adf668622528cbb10f94bd40f7ae14c11ecb8541；
+记录在冻结根out/candidate-01/unisacc.com.build.json。仍未安装，下一步有限材料准入检查及安装。
 证据沿用冻结根out/cxpack-gen-*-01.*与epoch-context-01/jobs；当前无所属在跑作业。
 
 ## link.undef-function-refusal — 未定义外部函数链接成崩溃镜像（开放）
