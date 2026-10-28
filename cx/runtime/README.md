@@ -48,7 +48,12 @@ units. Its syscall number is 82 in [XNU's syscall table](https://github.com/appl
 the x86-64 form carries the BSD syscall class. The two calling conventions have
 host-side mocked tests, and both macOS architectures have been cross-linked
 with a lifecycle-module consumer. Native macOS execution is not measured.
-The runtime projection and product construction do not yet select this provider.
+`tools/cx-driver-build.cx` selects it for macOS independent-unit construction;
+the runtime projection and multi-source product construction do not yet select it.
+For a bounded cross-link check, run `tools/check-osx-pgroup-link.cx` with
+`ROOT HOST IDENTITY_HELPER P3 NEW_OUT osx/x86_64` or `osx/arm64`. It builds
+the consumer, lifecycle module and provider, checks the selected provider
+object, and records identities; it does not run the resulting image.
 
 `RuntimeProvider` currently selects a provider during assembly through C symbol
 names and generated declarations. This is the first slice of late binding. The

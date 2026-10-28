@@ -5,27 +5,32 @@ static void hash(const char *p,char h[65]){size_t n;char *b=cx_read(p,&n);if(!b)
 static np_result call(char **v,const char *cwd,int sec){np_result r={0};char why[512];if(np_run(v,cwd,0,sec,&r,why,sizeof why))die(why);return r;}
 static void sid(const char *helper,const char *root,char h[65]){char *v[]={(char *)helper,(char *)root,0};np_result r=call(v,root,8);if(r.rc||r.errn||r.outn!=65||r.out[64]!='\n')die("source-identity");memcpy(h,r.out,64);h[64]=0;np_free(&r);}
 int main(int argc,char **argv){
- char root[4096],host[4096],ident[4096],pkg[4096],self[4096],bound[4400],inc[4400],quote[4400],src[3][4400],obj[3][4400],image[4400],before[6][65],after[65];
+ char root[4096],host[4096],ident[4096],pkg[4096],self[4096],bound[4400],inc[4400],quote[4400],src[3][4400],obj[3][4400],image[4400],unittool[4400],bootstrap[4400],unitdir[4400],native[4400],before[8][65],after[65];
  if(argc!=7||!realpath(argv[1],root)||!realpath(argv[2],host)||!realpath(argv[3],ident)||!realpath(argv[4],pkg)||!realpath(__FILE__,self)||argv[5][0]!='/')die("usage ROOT HOST IDENT PACKAGE NEW_OUT osx/TARGET");
  if(strcmp(argv[6],"osx/x86_64")&&strcmp(argv[6],"osx/arm64"))die("target");
  if(mkdir(argv[5],0700))die("new-output-required");
  if(cx_fmt(bound,sizeof bound,"%s/tools/bound",root)||cx_fmt(inc,sizeof inc,"%s/include",root)||cx_fmt(quote,sizeof quote,"%s/exec/c",root)||cx_fmt(image,sizeof image,"%s/check.macho",argv[5]))die("path");
+ if(cx_fmt(unittool,sizeof unittool,"%s/tools/cx-driver-build.cx",root)||cx_fmt(bootstrap,sizeof bootstrap,"%s/unisacc.com",root)||cx_fmt(unitdir,sizeof unitdir,"%s/selected",argv[5])||cx_fmt(native,sizeof native,"%s/native.o",unitdir))die("path");
  const char *names[]={"tools/check-model-lifetime.cx","cx/runtime/model_lifetime.cx","cx/runtime/process_group_osx.cx"};
  for(int i=0;i<3;i++)if(cx_fmt(src[i],sizeof src[i],"%s/%s",root,names[i])||cx_fmt(obj[i],sizeof obj[i],"%s/unit-%d.o",argv[5],i))die("path");
- sid(ident,root,before[0]);hash(host,before[1]);hash(ident,before[2]);hash(pkg,before[3]);hash(src[0],before[4]);hash(self,before[5]);
+ sid(ident,root,before[0]);hash(host,before[1]);hash(ident,before[2]);hash(pkg,before[3]);hash(src[0],before[4]);hash(self,before[5]);hash(unittool,before[6]);hash(bootstrap,before[7]);
  for(int i=0;i<3;i++){
   char *v[]={bound,"45",host,"--models",pkg,"-O2","-I",inc,"-iquote",quote,"-b",argv[6],"-c","-funit",src[i],"-o",obj[i],0};
   np_result r=call(v,root,48);if(r.rc||r.errn){if(r.errn)fwrite(r.err,1,r.errn,stderr);die("unit-build");}np_free(&r);
  }
  char *link[]={bound,"45",host,"--models",pkg,"-b",argv[6],obj[0],obj[1],obj[2],"-o",image,0};
  np_result r=call(link,root,48);if(r.rc||r.errn){if(r.errn)fwrite(r.err,1,r.errn,stderr);die("link");}np_free(&r);
+ char *selected[]={bound,"45","sh",bootstrap,unittool,"--",root,host,ident,unitdir,"native",pkg,before[3],argv[6],0};
+ r=call(selected,root,48);if(r.rc||r.errn){if(r.errn)fwrite(r.err,1,r.errn,stderr);die("provider-selection");}np_free(&r);
+ hash(obj[2],after);char nativehash[65];hash(native,nativehash);if(strcmp(after,nativehash))die("provider-object-mismatch");
  size_t n;unsigned char *p=(unsigned char *)cx_read(image,&n);int arm=!strcmp(argv[6],"osx/arm64");
  if(!p||n<16||memcmp(p,"\xcf\xfa\xed\xfe",4)||p[4]!=(arm?12:7)||p[5]||p[6]||p[7]!=1||p[12]!=2||p[13]||p[14]||p[15])die("image-header");free(p);
  sid(ident,root,after);if(strcmp(before[0],after))die("source-changed");hash(host,after);if(strcmp(before[1],after))die("host-changed");hash(ident,after);if(strcmp(before[2],after))die("identity-helper-changed");hash(pkg,after);if(strcmp(before[3],after))die("package-changed");
  hash(src[0],after);if(strcmp(before[4],after))die("test-source-changed");hash(self,after);if(strcmp(before[5],after))die("tool-changed");
+ hash(unittool,after);if(strcmp(before[6],after))die("unit-tool-changed");hash(bootstrap,after);if(strcmp(before[7],after))die("bootstrap-changed");
  hash(image,after);char imagehash[65],receipt[4400];memcpy(imagehash,after,65);
  if(cx_fmt(receipt,sizeof receipt,"%s/receipt.tsv",argv[5]))die("path");FILE *f=fopen(receipt,"wx");if(!f)die("receipt-open");
- int bad=fprintf(f,"CXOSX_PGROUP_LINK1\ntarget\t%s\nsource\t%s\nhost\t%s\nidentity-helper\t%s\npackage\t%s\ntest-source\t%s\ntool\t%s\n",argv[6],before[0],before[1],before[2],before[3],before[4],before[5])<0;
+ int bad=fprintf(f,"CXOSX_PGROUP_LINK1\ntarget\t%s\nsource\t%s\nhost\t%s\nidentity-helper\t%s\npackage\t%s\ntest-source\t%s\ntool\t%s\nunit-tool\t%s\nbootstrap\t%s\nselected-native\t%s\n",argv[6],before[0],before[1],before[2],before[3],before[4],before[5],before[6],before[7],nativehash)<0;
  for(int i=0;i<3;i++){hash(obj[i],after);if(fprintf(f,"unit\t%d\t%s\n",i,after)<0)bad=1;}
  if(fprintf(f,"image\t%s\nscope\tcross-link-only-NOT_RUN_FOREIGN\n",imagehash)<0)bad=1;if(fclose(f))bad=1;if(bad)die("receipt-write");
  printf("CXOSX_PGROUP_LINK\ttarget=%s\tsource=%s\thost=%s\tpackage=%s\ttest=%s\ttool=%s\timage=%s\tNOT_RUN_FOREIGN\n",argv[6],before[0],before[1],before[3],before[4],before[5],imagehash);return 0;
