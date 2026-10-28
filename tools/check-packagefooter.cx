@@ -6,6 +6,9 @@ static void check(int ok, const char *name) {
     printf("%s\t%s\n", ok ? "PASS" : "FAIL", name);
     if (!ok) failures++;
 }
+static void put32(unsigned char *p, unsigned long v) {
+    for (int i=0;i<4;i++) { p[i]=(unsigned char)(v&255); v>>=8; }
+}
 int main(void) {
     unsigned char image[20] = { 'a','b','c','d','U','N','I','P','K','G','1','\n',4,0,0,0,0,0,0,0 };
     PackageFooter f;
@@ -19,6 +22,19 @@ int main(void) {
     check(!packagefooter_locate_bytes(image, 20, &f), "empty-package");
     check(!packagefooter_locate_bytes(0, 20, &f), "null-input");
     check(!packagefooter_locate_bytes(image, 20, 0), "null-output");
+    /* Minimal PE32+ with one 8-byte section, an 8-byte package and a
+     * synthetic WIN_CERTIFICATE. It checks layout, not a signature. */
+    unsigned char pe[328] = {0}; pe[0]='M'; pe[1]='Z'; put32(pe+60,64);
+    pe[64]='P'; pe[65]='E'; pe[70]=1; pe[84]=160;
+    pe[88]=11; pe[89]=2; put32(pe+148,288); put32(pe+196,5);
+    put32(pe+232,320); put32(pe+236,8); put32(pe+264,8); put32(pe+268,288);
+    memcpy(pe+296,"package!",8); memcpy(pe+304,"UNIPKG1\n",8); pe[312]=8;
+    pe[320]=8; pe[325]=2; pe[326]=2;
+    check(packagefooter_locate_bytes(pe,sizeof pe,&f) && f.package_offset==296 && f.package_length==8 &&
+          f.footer_offset==304 && f.certificate_offset==320 && f.certificate_length==8 && !f.padding, "synthetic-pe-certificate");
+    pe[325]=1; check(!packagefooter_locate_bytes(pe,sizeof pe,&f), "certificate-revision-rejected"); pe[325]=2;
+    put32(pe+232,321); check(!packagefooter_locate_bytes(pe,sizeof pe,&f), "certificate-alignment-rejected"); put32(pe+232,320);
+    put32(pe+236,9); check(!packagefooter_locate_bytes(pe,sizeof pe,&f), "certificate-extent-rejected");
     size_t n = 0; unsigned char *product = (unsigned char *)cx_read("unisacc.com", &n);
     check(product && n <= 2147483647 && packagefooter_locate_bytes(product, (long)n, &f) &&
           f.package_length > 0 && f.package_offset >= 0 &&
