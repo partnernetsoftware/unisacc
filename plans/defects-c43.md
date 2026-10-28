@@ -2,6 +2,8 @@
 
 ## cxpack.fifo-open — 非普通清单阻塞（Linux 候选切片已复现，待修）
 
+宿主接续21ba1f4b52：按现有build-cxcc-host配方私有重链GCC/Clang至out/c43-fifo-{gcc,clang}-host.elf，两端五项-o均实返0/1/1/0/1；valid/absent生成程序均rc7，FIFO具名cannot read cxpack.tsv。证据out/c43-fifo-{gcc,clang}-{case}.{stdout,stderr}，根gcc_cx.com/clang_cx.com未替换。模型驱动osx/arm64切片out/c43-fifo-osx-arm64-01构造rc0，未执行外国平台，不授运行资格。已装e955仍未包含此修复。
+
 经典参考接续：src/main.c 同样采用 POSIX 非阻塞打开及同fd普通文件检查。现有 tools/build_ref.sh（宿主C依赖）构造 out/c43-fifo-ref-01.elf，五项实返0/1/1/0/1，公开函数过滤/缺席兼容保持；超限、目录、FIFO均具名拒绝且stdout为0字节。日志out/c43-fifo-ref-{valid,oversize,directory,absent,fifo}-01.*。未验证Windows或经典自举。
 
 POSIX模型驱动修复开发验证：cxm_rd改为O_NONBLOCK打开、同fd fstat拒非普通文件、EINTR重试及有界read，保留缺席/超限/I/O错误分类。新构造 `out/c43-fifo-driver-01.elf` 搭配显式ff696，`out/c43-fifo-fixed-01.stdout` 五项5/0；FIFO现在rc1具名拒绝且stdout为空。只证明Linux私有驱动，不代表已装e955已修；Windows仍原路径，经典与宿主对应改动尚待接续。
