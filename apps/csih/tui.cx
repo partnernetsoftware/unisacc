@@ -2893,6 +2893,16 @@ static void tui_result_row(char *out, size_t cap, const agent_result *r) {
     snprintf(out, cap, soft ? "◐ 做完未验证: %s" : "✗ 失败: %s", why);
 }
 
+/* Undo depth when the current turn started: the difference at the end is how
+ * many file writes/edits this turn made. */
+static int tui_turn_undo0 = -1;
+
+static void tui_turn_changes(char *out, size_t cap) {
+    int d = tui_turn_undo0 < 0 ? 0 : agent_undo_depth() - tui_turn_undo0;
+    if (d > 0) snprintf(out, cap, " · 改了 %d 处文件（/diff 查看）", d);
+    else if (cap) out[0] = 0;
+}
+
 /* The success row: ✓ 已验收 when the judge accepted, else ✓ 已答.
  * Keeps "本轮结束" (probes wait for it) and drops the judge's English tag. */
 static void tui_done_row(char *out, size_t cap, const agent_result *r) {
@@ -2907,8 +2917,11 @@ static void tui_done_row(char *out, size_t cap, const agent_result *r) {
         long sent = 0;
         char took[24] = "";
         net_progress(&sec, &tokens, &sent, &rsec);
+        char ch[64];
         if (sec > 0) snprintf(took, sizeof took, " · %d秒", sec);
-        snprintf(out, cap, "%s · 本轮结束 %d 轮 %d 步%s%s%s", tag, r->rounds, r->actions, took,
+        /* File changes go before the judge's reason, which may be cut at the row's end. */
+        tui_turn_changes(ch, sizeof ch);
+        snprintf(out, cap, "%s · 本轮结束 %d 轮 %d 步%s%s%s%s", tag, r->rounds, r->actions, took, ch,
                  why[0] ? " · " : "", why);
     }
 }
@@ -3471,6 +3484,7 @@ static int tui_run_prompt(tui_state *st, const char *source_prompt, int clear_ma
     snprintf(st->phase, sizeof st->phase, "等模型");
     tui_redraw(st);
     net_tick_st = st;
+    tui_turn_undo0 = agent_undo_depth();
     shell_set_tick(tui_during_shell);
     {char *context=NULL;
         if(!context_index_packet(st->owned,st->owned_dir,&context) || agent_context_packet(context)!=0){
@@ -3539,8 +3553,12 @@ static void tui_turn_done(tui_state *st) {
         if (r.answer[0])
             snprintf(st->last_answer, sizeof st->last_answer, "%s", r.answer);
         {
-            char fail[360];
+            char fail[360], ch[64];
+            size_t fl;
             tui_result_row(fail, sizeof fail, &r);
+            tui_turn_changes(ch, sizeof ch);
+            fl = strlen(fail);
+            snprintf(fail + fl, sizeof fail - fl, "%s", ch);
             tui_log_plain(st, fail);
         }
     } else {
@@ -4821,6 +4839,7 @@ int tui_entry(int argc, char **argv) {
             snprintf(rr.answer, sizeof rr.answer, "done");
             snprintf(rr.reason, sizeof rr.reason, "semantic acceptance (work): records match");
             net_turn_clock();   /* elapsed 0: the row leaves the time out */
+            tui_turn_undo0 = -1; /* no turn in flight: no file-change note */
             tui_done_row(row, sizeof row, &rr);
             if (strcmp(row, "✓ 已验收 · 本轮结束 1 轮 3 步 · records match")) { printf("FAIL done row: %s\n", row); failures++; }
             else printf("  ok   accepted row reads ✓ 已验收 and keeps 本轮结束\n");
@@ -5311,6 +5330,23 @@ int tui_entry(int argc, char **argv) {
             if (!empty_ok || created != 1 || !plus || once != 1)
                 { printf("FAIL /diff created=%d plus=%d\n", created, plus); failures++; }
             else printf("  ok   /diff lists each changed file once with its diff\n");
+            {
+                /* two writes during a turn show up on its result row; none, nothing */
+                char ch[64], doc[300];
+                int ok2;
+                tui_turn_undo0 = agent_undo_depth();
+                tui_turn_changes(ch, sizeof ch);
+                ok2 = ch[0] == 0;
+                snprintf(doc, sizeof doc, "{\"act\":\"file\",\"op\":\"write\",\"path\":\"/tmp/csih-turnchg-%d.txt\",\"text\":\"a\"}", (int)getpid());
+                s = agent_parse(doc); agent_exec(&s, "/tmp", out, sizeof out);
+                s = agent_parse(doc); agent_exec(&s, "/tmp", out, sizeof out);
+                tui_turn_changes(ch, sizeof ch);
+                ok2 = ok2 && !strcmp(ch, " · 改了 2 处文件（/diff 查看）");
+                agent_undo_last(note, sizeof note); agent_undo_last(note, sizeof note);  /* removes the file */
+                tui_turn_undo0 = -1;
+                if (!ok2) { printf("FAIL turn changes [%s]\n", ch); failures++; }
+                else printf("  ok   result row counts this turn's file changes\n");
+            }
         }
         {
             static tui_state tv;
