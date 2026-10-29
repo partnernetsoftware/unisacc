@@ -1,0 +1,180 @@
+#pragma unisa module rungate
+/* Pure judgments from exec/c/run.c. No libc and no include.
+   A null pointer returns 4. A result that does not fit returns 1 and is not
+   written. An unknown kind returns -1; that code is not the old return.
+   Product calls stay in exec/c/run.c. */
+static int rg_eq(const char *a, const char *b) {
+    int i;
+    i = 0;
+    while (a[i] && a[i] == b[i]) i++;
+    return a[i] == 0 && b[i] == 0;
+}
+static int rg_bytes(const char *a, const char *b, int n) {
+    int i;
+    i = 0;
+    while (i < n) {
+        if ((a[i] & 255) != (b[i] & 255)) return 0;
+        i++;
+    }
+    return 1;
+}
+static int rg_i64s(const long long *a, const long long *b, int n) {
+    int i;
+    i = 0;
+    while (i < n) {
+        if (a[i] != b[i]) return 0;
+        i++;
+    }
+    return 1;
+}
+static int rg_ints(const int *a, const int *b, int n) {
+    int i;
+    i = 0;
+    while (i < n) {
+        if (a[i] != b[i]) return 0;
+        i++;
+    }
+    return 1;
+}
+/* package_parse: the span is already text when it starts with "P ".
+   1 means the footer path, and is not the old return (the old path calls
+   packagefooter_locate_bytes). -1 is not the old return. */
+int rg_pkg_text(const unsigned char *b, int n) {
+    if (n < 0) return -1;
+    if (n < 2) return 1;
+    if (!b) return 4;
+    if ((b[0] & 255) != 'P' || (b[1] & 255) != ' ') return 1;
+    return 0;
+}
+/* checknet: a loaded reference table must not be a network.
+   1 is not the old return; the old path dies with "expected reference table". */
+int rg_net_ref(int isnet) {
+    if (isnet) return 1;
+    return 0;
+}
+/* checknet: keys covered by one state while the reference table is expanded.
+   mode 1 covers -1..top (top+2 keys); every other mode covers 0..256.
+   1 means top+2 does not fit in int and *out is not written.
+   -1 is not the old return; the old code adds without a range check. */
+int rg_obs_count(int mode, int top, int *out) {
+    if (!out) return 4;
+    if (mode == 1) {
+        if (top < -1) return -1;
+        if (top > 2147483645) return 1;
+        *out = top + 2;
+        return 0;
+    }
+    *out = 257;
+    return 0;
+}
+/* checknet: inclusive key ends for that same expansion.
+   -1 is not the old return. Neither pointer is written on failure. */
+int rg_obs_ends(int mode, int top, int *lo, int *hi) {
+    if (!lo || !hi) return 4;
+    if (mode == 1) {
+        if (top < -1) return -1;
+        *lo = -1;
+        *hi = top;
+        return 0;
+    }
+    *lo = 0;
+    *hi = 256;
+    return 0;
+}
+/* checknet: action declarations after load(net), in the old short-circuit
+   order. QA elements are the old I values. 1 means they changed; the old
+   path dies, so 1 is not the old return. -1 is not the old return. */
+int rg_net_decl(int isnet, int ns, int net_ns, int nq, int net_nq, int nr, int net_nr, int nstr, int net_nstr, int start, int net_start, int top, int net_top, int nqa, int net_nqa, const long long *qa, const long long *net_qa, const int *qlen, const int *net_qlen) {
+    if (!isnet || ns != net_ns || nq != net_nq || nr != net_nr || nstr != net_nstr || start != net_start || top != net_top || nqa != net_nqa) return 1;
+    if (nqa < 0 || nq < 0) return -1;
+    if (nqa > 0 && (!qa || !net_qa)) return 4;
+    if (nq > 0 && (!qlen || !net_qlen)) return 4;
+    if (nqa > 0 && !rg_i64s(qa, net_qa, nqa)) return 1;
+    if (nq > 0 && !rg_ints(qlen, net_qlen, nq)) return 1;
+    return 0;
+}
+/* checknet: one reference string against the network string of the same index.
+   1 means it changed; the old path dies, so 1 is not the old return.
+   -1 is not the old return. */
+int rg_net_text(int na, const char *a, int nb, const char *b) {
+    if (na < 0 || nb < 0) return -1;
+    if (na != nb) return 1;
+    if (na == 0) return 0;
+    if (!a || !b) return 4;
+    if (!rg_bytes(a, b, na)) return 1;
+    return 0;
+}
+/* checknet: observation mode of one state.
+   1 means it changed; the old path dies, so 1 is not the old return. */
+int rg_net_mode(int table_mode, int net_mode) {
+    if (table_mode != net_mode) return 1;
+    return 0;
+}
+/* checknet: one expanded observation against the network row.
+   1 is the old return (after the old fprintf, which stays in run.c). */
+int rg_net_step(int n, int en, int s, int es) {
+    if (n != en || s != es) return 1;
+    return 0;
+}
+/* rf_trace_finish. Both old failures return 2.
+   1 (not started) and 3 (unconsumed) are not the old return. */
+int rg_trace_done(int strict, int trace, int started, int cursor, int total) {
+    if (!strict || !trace) return 0;
+    if (!started) return 1;
+    if (cursor != total) return 3;
+    return 0;
+}
+/* main: one leading option word.
+   1 observe-callables, 3 strict-resource-flow,
+   10 package, 11 ri-snapshot, 12 upstream-stage, 13 stage,
+   14 capture-out, 15 resource-ledger.
+   -1 means stop the option scan. That is not the old return: main breaks. */
+int rg_opt(const char *a) {
+    if (!a) return 4;
+    if (rg_eq(a, "--observe-callables")) return 1;
+    if (rg_eq(a, "--strict-resource-flow")) return 3;
+    if (rg_eq(a, "--package")) return 10;
+    if (rg_eq(a, "--ri-snapshot")) return 11;
+    if (rg_eq(a, "--upstream-stage")) return 12;
+    if (rg_eq(a, "--stage")) return 13;
+    if (rg_eq(a, "--capture-out")) return 14;
+    if (rg_eq(a, "--resource-ledger")) return 15;
+    return -1;
+}
+/* main: argv[1] mode. 1 check-net (only when argc is 4), 3 chain,
+   5 embedded, 6 bundle, 0 a plain MODEL path.
+   0 is not an unknown kind. */
+int rg_run_mode(int argc, const char *word) {
+    if (argc > 1 && !word) return 4;
+    if (argc == 4 && word && rg_eq(word, "--check-net")) return 1;
+    if (argc > 1 && rg_eq(word, "--chain")) return 3;
+    if (argc > 1 && rg_eq(word, "--embedded")) return 5;
+    if (argc > 1 && rg_eq(word, "--bundle")) return 6;
+    return 0;
+}
+/* main: usage arity. 1 means the argv list does not fit the mode and nothing
+   is written. The old main returns 2, so this 1 is not the old return.
+   -1 is an unknown mode and is not the old return. */
+int rg_usage_argc(int argc, int mode) {
+    if (mode == 1) {
+        if (argc == 4) return 0;
+        return -1;
+    }
+    if (mode == 3) {
+        if (argc < 6) return 1;
+        return 0;
+    }
+    if (mode == 5) {
+        if (argc < 4) return 1;
+        return 0;
+    }
+    if (mode == 6) {
+        if (argc < 5) return 1;
+        return 0;
+    }
+    if (mode == 0) {
+        if (argc < 3) return 1;
+        return 0;
+    }
+    return -1;
+}
