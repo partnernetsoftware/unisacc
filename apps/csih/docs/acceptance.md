@@ -14,7 +14,7 @@ CSIH_BIN=../../out/csih-e2e-bin/csih UNISACC=../../unisacc.com \
   sh ../../unisacc.com check.cx -- probes            # 11 ok, 0 fail
 ```
 
-## 最近一次结果（2026-10-29，HEAD 18e48c2c77，本机 Linux；第三十九批后重跑）
+## 最近一次结果（2026-10-29，HEAD 37808c4b46，本机 Linux；第四十一批后重跑）
 
 | 门禁 | 结果 |
 | --- | --- |
