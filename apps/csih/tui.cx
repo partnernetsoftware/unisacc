@@ -148,7 +148,7 @@ typedef struct {
     char ex_why[40][96];
     char ex_cmd[40][120];
     char ex_body[40][1024];     /* tool output, drawn only while open */
-    char last_answer[1024];
+    char last_answer[4096];       /* whole answer (agent caps it at 4096), for /copy */
     char errline[240];        /* last error, shown on the status row, not in the log */
     char goal[tui_input_max]; /* /goal text; empty until set */
     int  loop_on;             /* /loop arms automatic resubmit */
@@ -1056,7 +1056,7 @@ static int tui_slash(tui_state *st) {
         tui_log_plain(st, "/model [名]: 显示或设本会话模型；/cwd: 显示工作目录；/cost: 本会话词元与缓存命中");
         tui_log_plain(st, "/perm [read|work|any]: 权限档（read 只读；work 只写工作目录；any 不拦）");
         tui_log_plain(st, "/undo: 撤销 agent 最近一次文件写入/编辑（最多 20 步，不含 exec）；/diff: 看这些改动");
-        tui_log_plain(st, "/view PATH [LINE]: 看文件 20 行（带行号），不经模型");
+        tui_log_plain(st, "/view PATH [LINE]: 看文件 20 行（带行号），不经模型；/copy: 上一轮答复进 tmux 缓冲区");
         tui_log_plain(st, "/allow: 放行下一条危险命令一次；/new: 新上下文（旧转录归档）；/resume [N]: 列出或换回归档");
         tui_log_plain(st, "键：Esc 取消本轮/清输入；空输入 Tab 展开/收起最近工具行；Ctrl-U 清行；Ctrl-W 删词；Ctrl-R 搜历史");
         tui_command_done(st);
@@ -1221,6 +1221,26 @@ static int tui_slash(tui_state *st) {
         tui_command_done(st);
         return 1;
     }
+    if (!strcmp(st->input, "/copy")) {
+        /* Last answer into the tmux paste buffer (prefix ] pastes it anywhere). */
+        static char cmd[4096 * 4 + 64], q[4096 * 4 + 8];
+        if (!st->last_answer[0] || !strcmp(st->last_answer, "(no answer text)"))
+            tui_log_plain(st, "copy: 还没有可复制的答复");
+        else if (!getenv("TMUX") || !getenv("TMUX")[0])
+            tui_log_plain(st, "copy: 不在 tmux 里，无法放进粘贴缓冲区");
+        else {
+            shell_result r;
+            tui_sh_quote(q, sizeof q, st->last_answer);
+            snprintf(cmd, sizeof cmd, "tmux set-buffer -- %s", q);
+            r = shell_run_in(cmd, "/");
+            if (r.ok && r.exited && r.status == 0)
+                snprintf(note, sizeof note, "copy: 已复制上一轮答复（%d 字节）到 tmux 缓冲区，prefix ] 粘贴", (int)strlen(st->last_answer));
+            else snprintf(note, sizeof note, "copy: tmux set-buffer 失败（exit=%d）", r.exited ? r.status : -1);
+            tui_log_plain(st, note);
+        }
+        tui_command_done(st);
+        return 1;
+    }
     if (!strcmp(st->input, "/undo")) {
         char msg[400];
         if (st->busy) tui_log_plain(st, "busy: /undo refused");
@@ -1294,6 +1314,7 @@ static int tui_slash(tui_state *st) {
         (!strncmp(st->input, "/allow", 6) && token == 6) ||
         (!strncmp(st->input, "/undo", 5) && token == 5) ||
         (!strncmp(st->input, "/diff", 5) && token == 5) ||
+        (!strncmp(st->input, "/copy", 5) && token == 5) ||
         (!strncmp(st->input, "/new", 4) && token == 4) ||
         (!strncmp(st->input, "/reload", 7) && token == 7) ||
         (!strncmp(st->input, "/reload-code", 12) && token == 12) ||
@@ -4833,6 +4854,30 @@ int tui_entry(int argc, char **argv) {
             if (tui_selftest_rm(path, 0)) failures++;
             if (!ok) { printf("FAIL /view\n"); failures++; }
             else printf("  ok   /view shows numbered lines and paging\n");
+        }
+        {
+            /* /copy without touching the user's real tmux buffer: the refusals,
+             * and that the quoting survives /bin/sh byte for byte. */
+            static tui_state tc2;
+            static char q[600], cmd[700];
+            const char *tricky = "it's \"quoted\" $HOME `x` \\n 中文";
+            char *tm = getenv("TMUX") ? strdup(getenv("TMUX")) : NULL;
+            shell_result r;
+            int ok;
+            tui_state_init(&tc2, NULL); tc2.mode = 1;
+            tui_type(&tc2, "/copy");
+            ok = strstr(tc2.log[tc2.nlog - 1], "还没有可复制") != NULL;
+            snprintf(tc2.last_answer, sizeof tc2.last_answer, "%s", tricky);
+            unsetenv("TMUX");
+            tui_type(&tc2, "/copy");
+            ok = ok && strstr(tc2.log[tc2.nlog - 1], "不在 tmux") != NULL;
+            if (tm) { setenv("TMUX", tm, 1); free(tm); }
+            tui_sh_quote(q, sizeof q, tricky);
+            snprintf(cmd, sizeof cmd, "printf %%s %s", q);
+            r = shell_run_in(cmd, "/");
+            ok = ok && !strcmp(r.out, tricky);
+            if (!ok) { printf("FAIL /copy [%s]\n", r.out); failures++; }
+            else printf("  ok   /copy refuses when empty or outside tmux; quoting is exact\n");
         }
         {
             static tui_state tk2;
