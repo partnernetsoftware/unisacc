@@ -2405,6 +2405,16 @@ static void tui_put_folded(char *dst, int dstmax, const char *prefix, const char
  * stays within `cols` so a long paste cannot fail the width check. */
 static long tui_tool_t0;      /* when the current exec started, for the busy clock */
 
+/* Ring the terminal bell when a turn that took 10s or more ends, so tmux flags
+ * the window while the user is elsewhere. Only on a tty; CSIH_BELL=0 disables. */
+static int tui_should_bell(int tty, const char *env) {
+    int sec = 0, tokens = 0, rsec = 0;
+    long sent = 0;
+    if (!tty || (env && env[0] == '0')) return 0;
+    net_progress(&sec, &tokens, &sent, &rsec);
+    return sec >= 10;
+}
+
 /* Project status rows. csih only shows them; the numbers belong to whatever
  * tool writes the file (progress, next cut, last refusal), so they are as
  * checkable as that tool. File: $CSIH_STATUS_FILE, else ./.csih-status.
@@ -3157,6 +3167,7 @@ static void tui_turn_done(tui_state *st) {
         }
     }
     tui_redraw(st);
+    if (tui_should_bell(isatty(1), getenv("CSIH_BELL"))) { fputs("\a", stdout); fflush(stdout); }
     if (!cancelled && r.ok && st->loop_on && !from_mail) tui_queue_goal(st);
 }
 
@@ -4738,6 +4749,11 @@ int tui_entry(int argc, char **argv) {
                     || strcmp(b1, "574B") || strcmp(b2, "32.1KB") || strcmp(b3, "3.0MB"))
                     { printf("FAIL busy phase=[%s] bytes=%s %s %s\n", tf2.phase, b1, b2, b3); failures++; }
                 else printf("  ok   busy line names the running command and reads sizes\n");
+                /* bell: never off a tty, never with CSIH_BELL=0, not for a turn just started */
+                net_turn_clock();
+                if (tui_should_bell(0, NULL) || tui_should_bell(1, "0") || tui_should_bell(1, NULL))
+                    { printf("FAIL bell rules\n"); failures++; }
+                else printf("  ok   bell only on a tty, not disabled, after 10s\n");
                 tf2.busy = 0;
             }
         }
