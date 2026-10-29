@@ -16,6 +16,8 @@ int cd_bits_keep(unsigned long long, int, int *);
 int cd_bits_left(int, int, int *);
 int cd_bits_mask(unsigned long long, int, int *);
 int cd_len_step(int, int, int *, int *);
+int cd_in_byte(const unsigned char *, unsigned long long, unsigned long long, int *, unsigned long long *);
+int cd_len_put(short *, int, int);
 unsigned long long cd_crc_step(unsigned long long);
 /* puff.h
   Copyright (C) 2002-2013 Mark Adler, all rights reserved
@@ -81,12 +83,22 @@ local int bits(struct state *s, int need)
     while (cd_bits_more(s->bitcnt, need) == 1) {
         unsigned long long joined = 0;
         int added = 0;
-        if (cd_bits_end(s->incnt, s->inlen) == 2) { s->error = 2; return 0; }
-        if (cd_bits_join((unsigned long long)val, s->in[s->incnt], s->bitcnt, &joined) == 0)
-            val = (long)joined;
-        else
-            val |= (long)s->in[s->incnt] << s->bitcnt;
-        s->incnt++;
+        {
+            int byte = 0;
+            unsigned long long next = 0;
+            int gotb = cd_in_byte(s->in, s->incnt, s->inlen, &byte, &next);
+            if (gotb == 2) { s->error = 2; return 0; }
+            if (gotb != 0) {
+                if (s->incnt == s->inlen) { s->error = 2; return 0; }
+                byte = s->in[s->incnt];
+                next = s->incnt + 1;
+            }
+            if (cd_bits_join((unsigned long long)val, byte, s->bitcnt, &joined) == 0)
+                val = (long)joined;
+            else
+                val |= (long)byte << s->bitcnt;
+            s->incnt = next;
+        }
         if (cd_bits_add(s->bitcnt, 8, &added) == 0) s->bitcnt = added;
         else s->bitcnt += 8;
     }
@@ -111,17 +123,38 @@ local int stored(struct state *s)
 
     if (cd_room(s->incnt, 4, s->inlen, 2) == 2)
         return 2;
-    len = s->in[s->incnt++];
-    len |= s->in[s->incnt++] << 8;
     {
-        int chk = cd_stored_byte((int)len, 0, s->in[s->incnt]);
-        s->incnt++;
-        if (chk == (0 - 2))
-            return (0 - 2);
-        chk = cd_stored_byte((int)len, 1, s->in[s->incnt]);
-        s->incnt++;
-        if (chk == (0 - 2))
-            return (0 - 2);
+        int b = 0;
+        unsigned long long next = 0;
+        if (cd_in_byte(s->in, s->incnt, s->inlen, &b, &next) == 0) {
+            len = (unsigned)b;
+            s->incnt = next;
+        } else
+            len = s->in[s->incnt++];
+        if (cd_in_byte(s->in, s->incnt, s->inlen, &b, &next) == 0) {
+            len |= (unsigned)b << 8;
+            s->incnt = next;
+        } else
+            len |= s->in[s->incnt++] << 8;
+        {
+            int chk;
+            if (cd_in_byte(s->in, s->incnt, s->inlen, &b, &next) != 0) {
+                b = s->in[s->incnt];
+                next = s->incnt + 1;
+            }
+            chk = cd_stored_byte((int)len, 0, b);
+            s->incnt = next;
+            if (chk == (0 - 2))
+                return (0 - 2);
+            if (cd_in_byte(s->in, s->incnt, s->inlen, &b, &next) != 0) {
+                b = s->in[s->incnt];
+                next = s->incnt + 1;
+            }
+            chk = cd_stored_byte((int)len, 1, b);
+            s->incnt = next;
+            if (chk == (0 - 2))
+                return (0 - 2);
+        }
     }
 
     if (cd_room(s->incnt, len, s->inlen, 2) == 2)
@@ -129,8 +162,15 @@ local int stored(struct state *s)
     if (s->out != NIL) {
         if (cd_room(s->outcnt, len, s->outlen, 1) == 1)
             return 1;
-        while (len--)
-            s->out[s->outcnt++] = s->in[s->incnt++];
+        while (len--) {
+            int b = 0;
+            unsigned long long next = 0;
+            if (cd_in_byte(s->in, s->incnt, s->inlen, &b, &next) == 0) {
+                s->out[s->outcnt++] = (unsigned char)b;
+                s->incnt = next;
+            } else
+                s->out[s->outcnt++] = s->in[s->incnt++];
+        }
     }
     else {
         s->outcnt += len;
@@ -180,8 +220,19 @@ local int decode(struct state *s, const struct huffman *h)
         left = (MAXBITS+1) - len;
         if (left == 0)
             break;
-        if (s->incnt == s->inlen) { s->error = 2; return -10; }
-        bitbuf = s->in[s->incnt++];
+        {
+            int b = 0;
+            unsigned long long next = 0;
+            int gotb = cd_in_byte(s->in, s->incnt, s->inlen, &b, &next);
+            if (gotb == 2) { s->error = 2; return -10; }
+            if (gotb != 0) {
+                if (s->incnt == s->inlen) { s->error = 2; return -10; }
+                b = s->in[s->incnt];
+                next = s->incnt + 1;
+            }
+            bitbuf = b;
+            s->incnt = next;
+        }
         if (left > 8)
             left = 8;
     }
@@ -236,7 +287,7 @@ local void fasttable(const struct huffman *h, int *tab) {
 local int fastdecode(struct state *s,const struct huffman *h,int *tab){
  int val;int avail;int entry;int n;
  val=s->bitbuf;avail=s->bitcnt;
- if(s->incnt<s->inlen){val|=((int)s->in[s->incnt])<<avail;avail+=8;}
+ if(s->incnt<s->inlen){int b=0;unsigned long long next=0;if(cd_in_byte(s->in,s->incnt,s->inlen,&b,&next)==0)val|=b<<avail;else val|=((int)s->in[s->incnt])<<avail;avail+=8;}
  entry=tab[val&511];
  if(entry>=0){n=entry&15;if(n<=avail){if(n>s->bitcnt){s->incnt++;s->bitcnt+=8;}else val=s->bitbuf;s->bitbuf=val>>n;s->bitcnt-=n;return entry>>4;}}
  return decode(s,h);
@@ -330,17 +381,17 @@ local int fixed(struct state *s)
         distcode.symbol = distsym;
 
         for (symbol = 0; symbol < 144; symbol++)
-            lengths[symbol] = 8;
+            if (cd_len_put(lengths, symbol, 8) != 0) lengths[symbol] = 8;
         for (; symbol < 256; symbol++)
-            lengths[symbol] = 9;
+            if (cd_len_put(lengths, symbol, 9) != 0) lengths[symbol] = 9;
         for (; symbol < 280; symbol++)
-            lengths[symbol] = 7;
+            if (cd_len_put(lengths, symbol, 7) != 0) lengths[symbol] = 7;
         for (; symbol < FIXLCODES; symbol++)
-            lengths[symbol] = 8;
+            if (cd_len_put(lengths, symbol, 8) != 0) lengths[symbol] = 8;
         construct(&lencode, lengths, FIXLCODES);
 
         for (symbol = 0; symbol < MAXDCODES; symbol++)
-            lengths[symbol] = 5;
+            if (cd_len_put(lengths, symbol, 5) != 0) lengths[symbol] = 5;
         construct(&distcode, lengths, MAXDCODES);
 
         virgin = 0;
@@ -373,10 +424,12 @@ local int dynamic(struct state *s)
     if (nlen > MAXLCODES || ndist > MAXDCODES)
         return -3;
 
-    for (index = 0; index < ncode; index++)
-        lengths[order[index]] = bits(s, 3);
+    for (index = 0; index < ncode; index++) {
+        int v = bits(s, 3);
+        if (cd_len_put(lengths, order[index], v) != 0) lengths[order[index]] = (short)v;
+    }
     for (; index < 19; index++)
-        lengths[order[index]] = 0;
+        if (cd_len_put(lengths, order[index], 0) != 0) lengths[order[index]] = 0;
 
     if (cd_bits_err(s->error)) return 2;
     err = construct(&lencode, lengths, 19);
@@ -391,8 +444,10 @@ local int dynamic(struct state *s)
         symbol = decode(s, &lencode);
         if (symbol < 0)
             return symbol;
-        if (symbol < 16)
-            lengths[index++] = symbol;
+        if (symbol < 16) {
+            if (cd_len_put(lengths, index, symbol) != 0) lengths[index] = (short)symbol;
+            index++;
+        }
         else {
             int bits_n = 7, base = 11, copy = 0, got, room;
             len = 0;
@@ -408,7 +463,7 @@ local int dynamic(struct state *s)
             {
                 int step, ns = 0, ni = 0;
                 while ((step = cd_len_step(symbol, index, &ns, &ni)) == 1) {
-                    lengths[index] = len;
+                    if (cd_len_put(lengths, index, len) != 0) lengths[index] = (short)len;
                     symbol = ns;
                     index = ni;
                 }
