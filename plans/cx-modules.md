@@ -6,10 +6,10 @@
 
 ## 产品面（2026-10-30）
 
-对照已装产品的入口路径。三档：已通、骨架、未做。没实跑的不写已通。临时入口是 `/tmp/grk-cx-line/entry-o2`，两只 `-O2` 对象再加 `src/hostnative.o`，869311 字节，sha256 `fb4021bc90f1c1847a6ce254737ff552f797b517062567a31e2888515a6bb311`。已装产品 3035300 字节。148 格对拍在 `/tmp/grk-cx-line/o2mx/cx-entry-matrix-2026-10-30.tsv`，记在第 143 节。更早的窄格在第 139、140、141、142 节。
+对照已装产品的入口路径。三档：已通、骨架、未做。没实跑的不写已通。临时入口是 `/tmp/grk-cx-line/entry-o2`，两只 `-O2` 对象再加 `src/hostnative.o`，869391 字节，sha256 `59b9f33a06d6d9dcec4fb8c11ea2496628b5c383bf70b682b1b3dabe55f410e3`。已装产品 3035300 字节。148 格对拍在 `/tmp/grk-cx-line/o2mx/cx-entry-matrix-2026-10-30.tsv`，记在第 143 节。ar 权限和 as 缺文件在第 144 节重测。更早的窄格在第 139、140、141、142 节。
 
-- **ar：骨架。** 这只表上，用法、`ar z`、缺成员和产品相同。空归档 8 字节、两成员 146 字节，两边字节相同，入口权限 0755，产品 0644。大归档、替换成员、符号表没跑。
-- **as：骨架。** 用法、`-z`、坏 `-b`、头和 `-b` 冲突、一行汇编、加 `ret`，退出码和对象字节与产品相同。缺文件两边退出 1。产品是 `unisacc: error: cannot open …: ENOENT`，入口是 `as: cannot read`。Mach-O、COFF、大汇编没跑。
+- **ar：骨架。** 用法、`ar z`、缺成员、空归档、两成员和产品相同。空归档 8 字节，两成员 146 字节，权限都是 0644。大归档、替换成员、符号表没跑。
+- **as：骨架。** 用法、`-z`、坏 `-b`、头和 `-b` 冲突、一行汇编、加 `ret`、缺文件，退出码和输出与产品相同。缺文件两边都是 `unisacc: error: cannot open …: ENOENT`。Mach-O、COFF、大汇编没跑。
 - **nm：骨架。** 这只表上用法、坏文件、728 字节对象三行和产品相同。
 - **objdump：骨架。** 这只表上用法、少 `-d`、坏文件、`objdump -d` 四行和产品相同。
 - **-c 对象：骨架。** 没有 `main` 时两边都拒绝。有 `main` 时产品写出 2216 字节对象，入口停在 `NOT_IMPLEMENTED object`，没有对象文件。
@@ -1758,6 +1758,21 @@ flowchart TD
   t["148 格"] --> ok["nm objdump 计划 符号 -D abs 相同"]
   t --> red["dev-run 8 格超时"]
   t --> face["ar 权限 as 缺文件 对象 词法 tapebin 头"]
+```
+
+## 144. 2026-10-30 ar 权限和 as 缺文件改成和产品一样
+
+`src/drive.cx` 的归档写完之后把权限改成 0644。`.tape` 仍走原来的写出，权限保持 0755。`as` 打不开文件时，ENOENT、EACCES、ENOTDIR 用已有的 `bx_read_open_line`，其它读失败仍是 `as: cannot read`。没有新模块。`process_group.cx` 没有改。
+
+驱动对象重新按 `-O2 -c -b lnx/x86_64 -funit` 编译，退出 0。再和原来的执行器对象、`hostnative` 对象链接，没有 `process_group.o`。产物仍是 `/tmp/grk-cx-line/entry-o2`，869391 字节，sha256 `59b9f33a06d6d9dcec4fb8c11ea2496628b5c383bf70b682b1b3dabe55f410e3`。直接执行。
+
+空归档两边 8 字节，权限 0644。两成员两边 146 字节，权限 0644。缺文件的 `as` 两边退出 1，stderr 都是 `unisacc: error: cannot open …: ENOENT`。一行汇编仍是相同对象，权限 0644。三行 `.tape` 仍是相同的 4096 字节，权限 0755。`int x;` 的 `-E` 仍相同。148 格整表没有用这只新入口重跑。这不是产品安装。
+
+```mermaid
+flowchart TD
+  a["dv_ar_write"] --> c["chmod 0644"]
+  s["as 打不开"] --> o["bx_read_open_line"]
+  t[".tape"] --> h["hs_write_out 仍是 0755"]
 ```
 
 ## 64. 2026-10-29 编译器纯拒绝接到 bindhost
