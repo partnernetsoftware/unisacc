@@ -1597,6 +1597,14 @@ int main(void) { char *s = strdup("ab"); return s && s[0]=='a' ? 3 : 1; }
 
 具名红项 `FWD-DLSYM`。`strdup` 这条在进入内存之后于 `dlsym` 崩溃。六目标列和整表没在这只上跑。这不是产品安装。
 
+## 134. 2026-10-30 入口矩阵改由 check-cx-entry.cx 对拍
+
+`tools/check-cx-entry.cx` 是验收程序。命令是 `sh ./unisacc.com tools/check-cx-entry.cx -- ENTRY OUTDIR`。产品侧是仓库根的 `unisacc.com`，新侧是参数 ENTRY。语料和 100 行顺序写在这个文件里：`examples/` 下 9 个 `.c`、`tests/cxstd_main.cx`、`tools/dev-run.cx`，每个先 `-E`、`-S`、`-run`（目标列 `lnx/x86_64`），再 `-o` 六个目标 `lnx/x86_64`、`lnx/arm64`、`osx/x86_64`、`osx/arm64`、`win/x86_64`、`win/arm64`。最后一行是 `dup.c -run`。`dup.c` 的正文在文件里的 `cxe_dup`，运行时写到 `OUTDIR/dup.c`。这一行只实测，不写死裁决。
+
+每一侧经 `tools/bound`。普通格 12 秒，`dev-run.cx` 18 秒。子进程的 cwd 是 `/tmp/notrepo`，环境里去掉 `UNISA_CONTAINER`。`-o` 比映像字节和 `stat` 权限。stderr 含 `NOT_IMPLEMENTED` 记 `NOT_IMPLEMENTED`。退出码大于等于 128 时，142 或墙钟贴近 bound 记 `TIMEOUT`，否则记 `CRASH`。stdout、stderr、退出码一致，且 `-o` 的映像和权限也一致，记 `SAME`，两边都没有映像也记 `SAME`。其余记 `DIFF`。表是 `OUTDIR/cx-entry-matrix-2026-10-30.tsv`。进度是 `OUTDIR/cx-entry-matrix.progress`。没有进度文件就清空表重头写。一次调用在 main 里超过 18 秒就不再开普通格；`dev-run.cx` 只在这次调用的第一秒内开一格。stdout 最后一行是 `LEFT:N`。没跑完退出 2。
+
+这次提交前的探针用的是 `/tmp/grk-cx-line/entry`（985206 字节）和 `/tmp/grk-cx-line/mxrun/probe-out`。那次命令退出 2，墙钟 27194960757 纳秒，写出 8 行，都是 `do.c` 的 `SAME`，`LEFT:92`。探针表不是正式表。正式表用这次提交的程序重跑，旧的 `cells.sh` 行不作数。这不是产品安装。
+
 ## 64. 2026-10-29 编译器纯拒绝接到 bindhost
 
 `compiler.c` 里剩余的纯拒绝改走已有的 `bindhost`。新函数是 `bx_compat_why`、`bx_opt_dash`、`bx_opt_why`、`bx_src_why`、`bx_mix_why`、`bx_tape_need`、`bx_tape_why`、`bx_tapebin_bad`、`bx_tapebin_why`、`bx_name_fit`、`bx_name_why`、`bx_cache_why`、`bx_frame_fit`、`bx_frame_why`、`bx_encode_bad`、`bx_encode_why`、`bx_route_why`、`bx_model_why`。没有新模块。`use` 仍是 32，构造表没有新增参数。`snprintf`、解码、编码和 `clierror` 仍在 C。宿主切片下标仍是 APE 71、本机 70。这次没有实跑 hostseed。`sh ./unisacc.com tools/check-compiler-units.cx` 又两次退出 0，两次 stdout 相同，两次 stderr 相同，都打印 `CHECK_COMPILER_UNITS failed=0`。这次检查直接调用这些函数，没有编译 `compiler.c`。这不是产品安装、六目标或 `--all`。整棵重构还没完成。
