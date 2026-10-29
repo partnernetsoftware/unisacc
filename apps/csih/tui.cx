@@ -2116,6 +2116,13 @@ static void tui_put_folded(char *dst, int dstmax, const char *prefix, const char
 
 /* One input row. A paste keeps its newlines, drawn as ⏎, and the row
  * stays within `cols` so a long paste cannot fail the width check. */
+/* 574B, 32.1KB, 1.2MB: byte counts a person can read at a glance. */
+static void tui_bytes(char *out, size_t cap, long n) {
+    if (n < 1024) snprintf(out, cap, "%ldB", n);
+    else if (n < 1024L * 1024) snprintf(out, cap, "%.1fKB", n / 1024.0);
+    else snprintf(out, cap, "%.1fMB", n / (1024.0 * 1024));
+}
+
 /* Display columns of the first n bytes of s (n < 0: all of it). */
 static int tui_str_cols(const char *s, int n) {
     int i = 0, w = 0;
@@ -2277,18 +2284,22 @@ static r_frame tui_render_state(tui_state *st, int cols) {
         int sec = 0, tokens = 0, hit = 0, miss = 0, seen = 0;
         long sent = 0, got = 0;
         if (st->busy) {
+            char up[16], down[16];
+            /* A finished tool leaves its phase behind; an open request means the model again. */
+            const char *phase = (net_in_flight() && !strncmp(st->phase, "跑命令", 9)) ? "等模型" : st->phase;
             net_progress(&sec, &tokens, &sent, &sec);
             net_recv(&got);
             net_cache(&hit, &miss, &seen);
-            if (seen)
+            tui_bytes(up, sizeof up, sent);
+            tui_bytes(down, sizeof down, got);
+            if (seen && hit + miss > 0)
                 snprintf(hint, sizeof hint,
-                         "请求中 %s %d秒 %d词元 上传 %ld字节 已收 %ld字节 hit %d miss %d",
-                         st->phase, sec, tokens, sent, got, hit, miss);
+                         "⏳ %s %d秒 · %d词元 · ↑%s 已收%s · 缓存命中%d%%",
+                         phase, sec, tokens, up, down, hit * 100 / (hit + miss));
             else
                 snprintf(hint, sizeof hint,
-                         "请求中 %s %d秒 %d词元 上传 %ld字节 已收 %ld字节",
-                         st->phase,
-                         sec, tokens, sent, got);
+                         "⏳ %s %d秒 · %d词元 · ↑%s 已收%s",
+                         phase, sec, tokens, up, down);
         } else if (st->ask_exit)
             snprintf(hint, sizeof hint, "要退出请按 Ctrl-D");
         else if (st->log_skip > 0)
@@ -2566,6 +2577,14 @@ static void tui_agent_event(const char *line, void *ud) {
             snprintf(st->phase, sizeof st->phase, "%s %s", tool[0] ? tool : "工具", sub);
         else
             snprintf(st->phase, sizeof st->phase, "%s", tool[0] ? tool : "工具");
+    } else if (!strncmp(line, "exec\t", 5)) {
+        /* The exec row arrives before the command runs; say so instead of 等模型. */
+        const char *cmd = strrchr(line, '\t');
+        char shortc[40];
+        tui_condense(shortc, (int)sizeof shortc, cmd ? cmd + 1 : "", 24);
+        snprintf(st->phase, sizeof st->phase, "跑命令 %s", shortc);
+    } else if (!strncmp(line, "  evidence ", 11) || !strncmp(line, "  │ ", 6)) {
+        /* Tool output rows: the tool is still the current step. */
     } else if (st->busy) {
         snprintf(st->phase, sizeof st->phase, "等模型");
     }
@@ -4255,6 +4274,17 @@ int tui_entry(int argc, char **argv) {
                 tui_apply_key(&tf2, TERM_KEY_CHAR, '\t');
                 if (tf2.ex_open[1]) { printf("FAIL tab did not close it again\n"); failures++; }
                 else printf("  ok   tab toggles the newest tool row\n");
+            }
+            {
+                char b1[16], b2[16], b3[16];
+                tf2.busy = 1;
+                tui_agent_event("exec\t睡一会\tsleep 3", &tf2);
+                tui_bytes(b1, sizeof b1, 574); tui_bytes(b2, sizeof b2, 32839); tui_bytes(b3, sizeof b3, 3 * 1024 * 1024);
+                if (strcmp(tf2.phase, "跑命令 sleep 3") || !tui_frame_has(&tf2, "⏳ 跑命令")
+                    || strcmp(b1, "574B") || strcmp(b2, "32.1KB") || strcmp(b3, "3.0MB"))
+                    { printf("FAIL busy phase=[%s] bytes=%s %s %s\n", tf2.phase, b1, b2, b3); failures++; }
+                else printf("  ok   busy line names the running command and reads sizes\n");
+                tf2.busy = 0;
             }
         }
 

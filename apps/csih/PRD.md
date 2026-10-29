@@ -142,6 +142,7 @@ agent 模式新增 `/help`、`/status`、`/clear`，均只在本地处理、不�
 - **第七批已落地（2026-10-29）**：输入超出一行宽度时，显示窗口跟着光标滑动，左边被挤出的部分画成 `…`。原来超宽时尾部被直接截掉，正在打的字反而看不见；而且折叠缓冲只有 600 字节，长输入在这一步就丢了尾部，现在放大到能装下整个输入。selftest：`long input scrolls to keep the cursor visible`；tmux 实测中文长句：行尾可见，Ctrl-A 后回到行首。
 - **第八批已落地（2026-10-29）**：成功行从 `↻ 本轮结束 rounds=1 actions=3 · 已答 · semantic acceptance (work): …` 改为 `✓ 已验收 · 本轮结束 1 轮 3 步 · 理由`（未经评审接受的写 `✓ 已答`，没有答复的写 `✓ 已结束（未作答）`），与 `◐`/`✗` 一起凑齐三态。保留「本轮结束」四字，因为 `probes/reload_runtime.py` 靠它判断一轮结束。selftest：`accepted row reads ✓ 已验收 and keeps 本轮结束`；tmux 实测：`✓ 已验收 · 本轮结束 1 轮 1 步 · exec ran date +%Y, exit 0, …`。
 - 下一批候选：正文流式显示；转录按 cwd 分开；exec 三档权限；P0 根治（引用原文，由 harness 定位）。
+- **第十批已落地（2026-10-29）**：忙碌行。原来执行命令时一直显示「等模型」；现在收到 exec 行（命令执行前发出）就显示 `跑命令 <命令>`，下一次请求在途（`net_in_flight()`）时切回「等模型」。文案从 `请求中 等模型 3秒 7745词元 上传 32839字节 已收 574字节 hit 1152 miss 6561` 改为 `⏳ 等模型 3秒 · 7745词元 · ↑32.1KB 已收574B · 缓存命中15%`，保留「已收」二字（已有断言依赖它）。selftest：`busy line names the running command and reads sizes`；tmux 实测已见切换。已知不足：exec 同步执行，期间秒数不走、界面不刷新（PRD 异步一节说文件/exec 保持同步，长命令的进度显示留待以后）。
 - **第九批已落地（2026-10-29）**：评审提示词末尾加一句，要求 reason 用简体中文简述，验收规则本身不变。agent selftest 全部通过。tmux 实测：`✓ 已验收 · 本轮结束 1 轮 1 步 · 执行记录显示 uname -s 输出 Linux、退出码 0，工作目录一致，声称与实际记录相符。`
 - 自迭代：改 `apps/csih` 源后 `/reload` 自动跑 `csih.sh prepare`，绿了再换进程（复用现有 reload 链）。
 
