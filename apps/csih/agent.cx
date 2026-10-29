@@ -1438,11 +1438,14 @@ int agent_chat_role(const char *role, char *out, size_t outlen, int *wrap) {
     return 1;
 }
 
-/* One journal for this home. An explicit CSIH_TRANSCRIPT / CDSH_TRANSCRIPT
- * still wins (tests and probes). Otherwise $HOME/.cdsh/tui.jsonl.
- * Returns 0 when out holds a path. Does not create or delete the file. */
+/* One journal per working directory, so two projects do not share context:
+ * $HOME/.cdsh/cwd/<cwd with / as %, % as %%>/tui.jsonl. An explicit
+ * CSIH_TRANSCRIPT / CDSH_TRANSCRIPT still wins (tests and probes);
+ * CSIH_TRANSCRIPT_SHARED=1, or a cwd too long to encode, uses the old shared
+ * $HOME/.cdsh/tui.jsonl. Creates the directories, never the file. */
 int agent_transcript_path(char *out, size_t outlen) {
-    const char *env, *home;
+    const char *env, *home, *shared;
+    char here[1024], slug[220];
     if (!out || outlen < 16) return 1;
     out[0] = '\0';
     env = getenv("CSIH_TRANSCRIPT");
@@ -1456,6 +1459,26 @@ int agent_transcript_path(char *out, size_t outlen) {
     /* A fresh HOME has no ~/.cdsh; without it the first append fails. */
     snprintf(out, outlen, "%s/.cdsh", home);
     if (mkdir(out, 0700) != 0 && errno != EEXIST) return 1;
+    shared = getenv("CSIH_TRANSCRIPT_SHARED");
+    if (!(shared && shared[0] == '1') && getcwd(here, sizeof here)) {
+        size_t i, n = 0;
+        int fits = 1;
+        for (i = 0; here[i]; i++) {
+            if (n + 3 >= sizeof slug) { fits = 0; break; }
+            if (here[i] == '/') slug[n++] = '%';
+            else if (here[i] == '%') { slug[n++] = '%'; slug[n++] = '%'; }
+            else slug[n++] = here[i];
+        }
+        slug[n] = 0;
+        if (fits && n) {
+            snprintf(out, outlen, "%s/.cdsh/cwd", home);
+            if (mkdir(out, 0700) != 0 && errno != EEXIST) return 1;
+            snprintf(out, outlen, "%s/.cdsh/cwd/%s", home, slug);
+            if (mkdir(out, 0700) != 0 && errno != EEXIST) return 1;
+            snprintf(out, outlen, "%s/.cdsh/cwd/%s/tui.jsonl", home, slug);
+            return 0;
+        }
+    }
     snprintf(out, outlen, "%s/.cdsh/tui.jsonl", home);
     return 0;
 }
