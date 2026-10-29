@@ -110,8 +110,8 @@ int us_forward_sig_decode(const unsigned char *b, unsigned long long n,
     *out = tmp;
     return 0;
 }
-/* Scalar C spelling used by the forwarding stub. No libc and no include.
-   The snprintf of the declarator stays in exec/c/compiler.c. */
+/* Scalar C spelling and the callback declarator. No libc and no include.
+   us_forward_callback_decode stays the byte reader. */
 const char *fw_simple_type(int isvoid, int has_callback, int structbyval,
                            int kind, int depth, unsigned long long base,
                            int width, int uns) {
@@ -134,5 +134,69 @@ const char *fw_simple_type(int isvoid, int has_callback, int structbyval,
         if (width == 4) return uns ? "unsigned int" : "int";
         if (width == 8) return uns ? "unsigned long" : "long";
     }
+    return 0;
+}
+static int fw_len(const char *s) {
+    int n;
+    n = 0;
+    while (s[n]) n++;
+    return n;
+}
+static int fw_digits(int v, char *buf) {
+    char tmp[16];
+    int n, i, neg;
+    unsigned int u;
+    neg = 0;
+    if (v < 0) {
+        neg = 1;
+        u = (unsigned int)(-(v + 1)) + 1;
+    } else u = (unsigned int)v;
+    n = 0;
+    if (u == 0) { tmp[n] = '0'; n = 1; }
+    while (u) { tmp[n] = (char)('0' + (u % 10)); n++; u = u / 10; }
+    i = 0;
+    if (neg) { buf[i] = '-'; i++; }
+    while (n) { n--; buf[i] = tmp[n]; i++; }
+    return i;
+}
+static void fw_put(char *out, int *at, const char *s) {
+    int i;
+    i = 0;
+    while (s[i]) { out[*at] = s[i]; *at = *at + 1; i++; }
+}
+static int fw_need(int *need, int more) {
+    if (more < 0 || *need < 0 || more > 2147483647 - *need) return 1;
+    *need = *need + more;
+    return 0;
+}
+int fw_decl(const char *ret, int index, const char *const *args, int n, char *out, int cap) {
+    int i, need, at, dlen;
+    char dec[16];
+    if (!ret || !out || cap < 1 || n < 0) return 4;
+    if (n > 0 && !args) return 4;
+    for (i = 0; i < n; i++) if (!args[i]) return 4;
+    dlen = fw_digits(index, dec);
+    need = 0;
+    if (fw_need(&need, fw_len(ret)) || fw_need(&need, 4) || fw_need(&need, dlen) || fw_need(&need, 2)) return 1;
+    if (n == 0 && fw_need(&need, 4)) return 1;
+    for (i = 0; i < n; i++) {
+        if (i && fw_need(&need, 2)) return 1;
+        if (fw_need(&need, fw_len(args[i]))) return 1;
+    }
+    if (fw_need(&need, 1)) return 1;
+    if (need >= cap) return 1;
+    at = 0;
+    fw_put(out, &at, ret);
+    fw_put(out, &at, " (*a");
+    for (i = 0; i < dlen; i++) { out[at] = dec[i]; at++; }
+    fw_put(out, &at, ")(");
+    if (n == 0) fw_put(out, &at, "void");
+    for (i = 0; i < n; i++) {
+        if (i) fw_put(out, &at, ", ");
+        fw_put(out, &at, args[i]);
+    }
+    out[at] = ')';
+    at++;
+    out[at] = 0;
     return 0;
 }
