@@ -1138,11 +1138,16 @@ static int agent_path_inside(const char *path, const char *cwd) {
     return !strncmp(path, cwd, cn) && (path[cn] == '/' || !path[cn]);
 }
 
+int agent_sandbox_available(void);
+
 int agent_perm_blocked(int kind, const char *cmd, const char *path, const char *cwd, char *why, int n) {
     if (why && n > 0) why[0] = 0;
     if (agent_perm == 2) return 0;
     if (agent_perm == 0) {
-        if (kind == ACT_WRITE || kind == ACT_EDIT || (kind == ACT_EXEC && !agent_exec_readonly(cmd))) {
+        /* With the sandbox the kernel refuses writes, so any command may try;
+         * without it, only the read-only list runs. */
+        if (kind == ACT_WRITE || kind == ACT_EDIT
+            || (kind == ACT_EXEC && !agent_sandbox_available() && !agent_exec_readonly(cmd))) {
             if (why && n > 1)
                 snprintf(why, (size_t)n, "%s",
                          "blocked: 当前权限 read（只读），不能写文件或运行会改东西的命令。需要的话请用户 /perm work。");
@@ -1383,6 +1388,64 @@ static int file_run(const char *arg, char *out, int outlen) {
 
 static cdsh_plugin file_row = { "file", "read|write|edit", file_run, 0 };
 
+/* ── sandbox ────────────────────────────────────────────────────────────
+ * Tiers read and work run exec inside a private mount namespace
+ * (unshare -Urm, no root needed) where every mount is remounted read-only;
+ * work then reopens the cwd and /tmp for writing. So a write outside the
+ * allowed places fails with EROFS from the kernel, not from a keyword list.
+ * Not covered: network, processes, reads of secrets. CSIH_SANDBOX=0 turns
+ * it off; without unshare the keyword gates are all that is left. */
+static int agent_sandbox_state = -1;   /* -1 unknown, 0 unavailable, 1 works */
+
+int agent_sandbox_available(void) {
+    const char *off = getenv("CSIH_SANDBOX");
+    if (off && off[0] == '0') return 0;
+    if (agent_sandbox_state < 0) {
+        shell_result p = shell_run_in("unshare -Urm true 2>/dev/null", "/");
+        agent_sandbox_state = p.ok && p.exited && p.status == 0;
+    }
+    return agent_sandbox_state;
+}
+
+/* Single-quote s for /bin/sh: ' becomes '\''. Returns bytes written, 0 if no room. */
+static size_t agent_sh_quote(char *out, size_t cap, const char *s) {
+    size_t n = 0;
+    if (cap < 3) return 0;
+    out[n++] = '\'';
+    for (; *s; s++) {
+        if (*s == '\'') {
+            if (n + 5 >= cap) return 0;
+            memcpy(out + n, "'\\''", 4); n += 4;
+        } else {
+            if (n + 2 >= cap) return 0;
+            out[n++] = *s;
+        }
+    }
+    out[n++] = '\'';
+    out[n] = 0;
+    return n;
+}
+
+/* Fill out with the boxed form of cmd. Returns 1 when out should run instead,
+ * 0 when no box applies, -1 when a box applies but cmd does not fit: the
+ * caller must refuse rather than run it unboxed. */
+int agent_sandbox_wrap(const char *cmd, const char *cwd, char *out, size_t cap) {
+    static const char *script =
+        "w=$1; mode=$2; "
+        /* /tmp first: binding it after cwd would hide a cwd that lives under /tmp. */
+        "if [ \"$mode\" = work ]; then mount --bind /tmp /tmp && mount --bind \"$w\" \"$w\" || { echo 'csih sandbox: setup failed' >&2; exit 97; }; fi; "
+        "for m in $(awk \"{print \\$2}\" /proc/self/mounts); do mount -o bind,remount,ro \"$m\" 2>/dev/null; done; "
+        "if [ \"$mode\" = work ]; then mount -o bind,remount,rw /tmp && mount -o bind,remount,rw \"$w\" || { echo 'csih sandbox: setup failed' >&2; exit 97; }; fi; "
+        "cd \"$w\" && exec /bin/sh -c \"$3\"";
+    char qs[2048], qw[2200], qc[8400];
+    if (!cmd || !cmd[0] || agent_perm == 2 || !agent_sandbox_available()) return 0;
+    if (!agent_sh_quote(qs, sizeof qs, script) || !agent_sh_quote(qw, sizeof qw, cwd && cwd[0] ? cwd : ".")
+        || !agent_sh_quote(qc, sizeof qc, cmd))
+        return -1;
+    return (size_t)snprintf(out, cap, "exec unshare -Urm /bin/sh -c %s csih-sandbox %s %s %s",
+                            qs, qw, agent_perm == 0 ? "read" : "work", qc) < cap ? 1 : -1;
+}
+
 /* plugin_run("exec") reaches here; runs the current step's command. */
 static int exec_run(const char *arg, char *out, int outlen) {
     const agent_step *s = &g_exec_step;
@@ -1391,8 +1454,16 @@ static int exec_run(const char *arg, char *out, int outlen) {
     long cap, n;
     int trunc = 0;
     char head[160];
+    static char boxed[9600];
+    int box;
     (void)arg;
-    r = shell_run_in(s->cmd, cwd);
+    box = agent_sandbox_wrap(s->cmd, cwd, boxed, sizeof boxed);
+    if (box < 0) {
+        tool_facts.handled=1;tool_facts.op_success=0;
+        snprintf(out, (size_t)outlen, "blocked: 命令太长，放不进沙箱，未执行。请拆短或用户 /perm any。");
+        return 1;
+    }
+    r = shell_run_in(box ? boxed : s->cmd, cwd);
     tool_facts.handled=s->cmd[0]!=0;tool_facts.op_success=r.ok && !r.err && r.exited && r.status==0 && !r.timed_out;
     tool_facts.err=r.err;tool_facts.exited=r.exited;tool_facts.status=r.status;tool_facts.signal=r.signal;tool_facts.timed_out=r.timed_out;tool_facts.capture_complete=(r.bytes<0 || r.timed_out) ? 0 : -1; /* shell API cannot prove EOF/read completeness. */
     agent_watch_result(s->cmd, &r); /* raw status/receipt before spill or truncation */

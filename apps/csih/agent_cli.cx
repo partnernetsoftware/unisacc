@@ -79,6 +79,8 @@ int agent_may_stop_ans(int judge, int maxn, int answered);
 int agent_mentions_window(const char *s);
 void agent_role_test(const char *role, const char *peer);
 int agent_peer_blocked(int kind, const char *op, const char *cmd, char *why, int n);
+int agent_sandbox_available(void);
+void agent_set_perm(int p);
 typedef struct {
     int ok, err, exited, status, signal, timed_out;
     long bytes;
@@ -421,6 +423,35 @@ static int agent_run_selftest(void) {
     s = agent_parse("{\"act\":\"exec\",\"cmd\":\"echo hi\"}");
     a_expect(agent_exec(&s, "/tmp", out, sizeof out) == 1, "exec runs");
     a_expect(strstr(out, "hi") != NULL, "  exec output captured");
+
+    /* sandbox: the kernel, not a keyword list, refuses writes outside the tier */
+    if (agent_sandbox_available()) {
+        char dir[128], cmd[600];
+        const char *home = getenv("HOME");
+        snprintf(dir, sizeof dir, "/tmp/csih-sbx-%d", (int)getpid());
+        mkdir(dir, 0700);
+        agent_set_perm(0);
+        memset(&s, 0, sizeof s); s.kind = ACT_EXEC;
+        snprintf(s.cmd, sizeof s.cmd, "touch inside && echo wrote");
+        agent_exec(&s, dir, out, sizeof out);
+        a_expect(strstr(out, "Read-only") != NULL && !strstr(out, "wrote"), "read tier: kernel refuses a write in cwd");
+        agent_set_perm(1);
+        agent_exec(&s, dir, out, sizeof out);
+        a_expect(strstr(out, "wrote") != NULL, "work tier: cwd is writable");
+        snprintf(cmd, sizeof cmd, "touch '%s/.csih-sbx-probe' && echo wrote", home ? home : "/root");
+        snprintf(s.cmd, sizeof s.cmd, "%s", cmd);
+        agent_exec(&s, dir, out, sizeof out);
+        a_expect(strstr(out, "Read-only") != NULL && !strstr(out, "wrote"), "work tier: home outside cwd is read-only");
+        memset(s.cmd, 'x', sizeof s.cmd - 1); s.cmd[sizeof s.cmd - 1] = 0;
+        memcpy(s.cmd, "echo ", 5);
+        { int i; for (i = 5; i < (int)sizeof s.cmd - 1; i += 2) s.cmd[i] = '\''; }
+        agent_exec(&s, dir, out, sizeof out);
+        a_expect(strstr(out, "放不进沙箱") != NULL, "a command too long for the box is refused, not run bare");
+        agent_set_perm(1);
+        snprintf(cmd, sizeof cmd, "%s/inside", dir);
+        unlink(cmd);
+        rmdir(dir);
+    } else printf("  skip sandbox: unshare -Urm unavailable here\n");
 
     /* a long result stays in memory unless the CLI asked for spill */
     memset(&s, 0, sizeof s); s.kind = ACT_EXEC;
