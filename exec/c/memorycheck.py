@@ -138,7 +138,10 @@ if kind in ('all','cc') and shard in ('all','1/3'):
     root=pathlib.Path.cwd()
     check=p/'bounds.c';check.write_text('#define UNISA_RUNTIME_LIBRARY\n#include "run.c"\n#include "memory.c"\nint main(int n,char **v){ Buf b={0}; MemoryImage m; if(n!=2)return 1; b.b=readfile(v[1],&b.n,0); memory_image(&b,&m); free(b.b); return 0; }\n')
     for compiler,name in [('cc','bounds-cc'),(ua,'bounds-ua')]:
-        ok([compiler,'-O2','-I'+str(root/'exec/c'),check,'-o',p/name])
+        layout=str(root/'cx/runtime/memlayout.cx')
+        cmd=[compiler,'-O2','-I'+str(root/'exec/c'),check]
+        cmd += ['-x','c',layout] if compiler=='cc' else [layout]
+        ok(cmd+['-o',p/name])
         bads=[]
         bad=bytearray(image);struct.pack_into('<Q',bad,32,text);bads.append(bad)
         bad=bytearray(image);struct.pack_into('<Q',bad,8,text+1);bads.append(bad)
@@ -151,7 +154,7 @@ if kind in ('all','cc') and shard in ('all','1/3'):
     # Compile the production loader with a Windows API-contract double.
     # This checks reserve/commit arguments and failures, not a Windows guest.
     mock=p/'reserve.c';mock.write_text('#include <stdint.h>\n'+(root/'exec/c/memory-contract.c').read_text())
-    ok(['cc','-O2','-I'+str(root/'exec/c'),mock,'-o',p/'reserve'])
+    ok(['cc','-O2','-I'+str(root/'exec/c'),'-x','c',mock,str(root/'cx/runtime/memlayout.cx'),'-o',p/'reserve'])
     got=ok([p/'reserve','0']);assert got==b'reserve and exact-address commit\n',got
     for mode,message in [(1,b'cannot reserve'),(2,b'cannot commit'),
                           (3,b'cannot commit'),(4,b'exceeds reserved')]:
@@ -168,6 +171,6 @@ if kind in ('all','cc') and shard in ('all','1/3'):
                     'memory_reserve(&x);memory_commit(&m,&x);unsigned char *p=x.base+x.dataoff;'
                     'if(p[0] || p[609999999])return 8;p[609999999]=7;'
                     'printf("%d %d\\n",p[0],p[609999999]);munmap(x.base,x.reserved);return 0;}\n')
-    ok(['cc','-O2','-I'+str(root/'exec/c'),lazy,'-o',p/'lazy'])
+    ok(['cc','-O2','-I'+str(root/'exec/c'),'-x','c',lazy,str(root/'cx/runtime/memlayout.cx'),'-o',p/'lazy'])
     got=ok([p/'lazy']);assert got==b'0 7\n',got
     print('memory extent: 610MB virtual range, zero initial pages and final page write pass; host loader only')

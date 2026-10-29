@@ -61,14 +61,16 @@ def build(package,out,cc,ar,cflags,ldflags,target=None,provider=None):
   events=[json.loads(line) for line in qualification.splitlines()]
   expected=('true_C_union','true_C_union_result','ffi_union','ffi_union_result','ffi_struct','ffi_struct_result')
   if tuple(x.get('stage') for x in events)!=expected or any(x.get('rc')!=0 for x in events):raise ValueError('FFI provider actual boundary qualification failed')
+  layout=ROOT/'cx/runtime/memlayout.cx';layout_sha=sha(layout)
+  run(cc+['-std=c11','-O2','-fPIC','-fvisibility=hidden','-x','c','-c',layout,'-o',d/'memlayout.o']+cflags)
   run(common+['-c',runtime/'libunisacc.c','-o',d/'library.o'])
   run(cc+cflags+['-c',runtime/('librarycall_'+arch+'.S'),'-o',d/'bridge.o'])
-  static=d/'libunisacc.a';run(ar+['rcs',static,d/'library.o',d/'bridge.o'])
+  static=d/'libunisacc.a';run(ar+['rcs',static,d/'library.o',d/'memlayout.o',d/'bridge.o'])
   dynamic=d/('libunisacc.dylib' if host.startswith('osx/') else 'libunisacc.so')
   mode=['-dynamiclib','-Wl,-install_name,@rpath/libunisacc.dylib'] if host.startswith('osx/') else ['-shared','-Wl,-soname,libunisacc.so']
-  run(cc+mode+[d/'library.o',d/'bridge.o']+ldflags+['-o',dynamic])
+  run(cc+mode+[d/'library.o',d/'memlayout.o',d/'bridge.o']+ldflags+['-o',dynamic])
   shutil.copy2(runtime/'libunisacc.h',d/'libunisacc.h');shutil.copy2(package,d/'compiler.pkg')
-  if before!={str(p.relative_to(ROOT)):sha(p) for p in sources} or builder_sources!={str(p.relative_to(ROOT)):sha(p) for p in builder_paths} or sha(package)!=package_sha:raise ValueError('source or model package changed during build')
+  if before!={str(p.relative_to(ROOT)):sha(p) for p in sources} or builder_sources!={str(p.relative_to(ROOT)):sha(p) for p in builder_paths} or sha(layout)!=layout_sha or sha(package)!=package_sha:raise ValueError('source or model package changed during build')
   if provider and provider_flags(provider,host)[2]!=provider_manifest:raise ValueError('FFI provider changed during build')
   files=[static,dynamic,d/'libunisacc.h',d/'compiler.pkg']
   if provider:

@@ -18,6 +18,8 @@ int cd_bits_mask(unsigned long long, int, int *);
 int cd_len_step(int, int, int *, int *);
 int cd_in_byte(const unsigned char *, unsigned long long, unsigned long long, int *, unsigned long long *);
 int cd_len_put(short *, int, int);
+int cd_out_byte(unsigned char *, unsigned long long, unsigned long long, int, unsigned long long *);
+int cd_span_byte(unsigned char *, const unsigned char *);
 unsigned long long cd_crc_step(unsigned long long);
 /* puff.h
   Copyright (C) 2002-2013 Mark Adler, all rights reserved
@@ -165,11 +167,16 @@ local int stored(struct state *s)
         while (len--) {
             int b = 0;
             unsigned long long next = 0;
-            if (cd_in_byte(s->in, s->incnt, s->inlen, &b, &next) == 0) {
+            unsigned long long onext = 0;
+            if (cd_in_byte(s->in, s->incnt, s->inlen, &b, &next) != 0) {
+                b = s->in[s->incnt];
+                next = s->incnt + 1;
+            }
+            if (cd_out_byte(s->out, s->outcnt, s->outlen, b, &onext) == 0)
+                s->outcnt = onext;
+            else
                 s->out[s->outcnt++] = (unsigned char)b;
-                s->incnt = next;
-            } else
-                s->out[s->outcnt++] = s->in[s->incnt++];
+            s->incnt = next;
         }
     }
     else {
@@ -325,11 +332,21 @@ local int codes(struct state *s,
         if (symbol < 256) {
 
             if (s->out != NIL) {
-                if (s->outcnt == s->outlen)
+                unsigned long long onext = 0;
+                int put = cd_out_byte(s->out, s->outcnt, s->outlen, symbol, &onext);
+                if (put == 1)
                     return 1;
-                s->out[s->outcnt] = symbol;
+                if (put == 0)
+                    s->outcnt = onext;
+                else {
+                    if (s->outcnt == s->outlen)
+                        return 1;
+                    s->out[s->outcnt] = symbol;
+                    s->outcnt++;
+                }
             }
-            s->outcnt++;
+            else
+                s->outcnt++;
         }
         else if (symbol > 256) {
 
@@ -354,7 +371,7 @@ local int codes(struct state *s,
                 unsigned char *to=s->out+s->outcnt;
                 unsigned char *from=to-dist;
                 s->outcnt+=len;
-                while(len--){*to=*from;to++;from++;}
+                while(len--){if(cd_span_byte(to,from)!=0)*to=*from;to++;from++;}
             }
             else
                 s->outcnt += len;

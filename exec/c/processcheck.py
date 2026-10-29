@@ -32,8 +32,13 @@ int main(int n,char **v){ int size; if(n!=2)return 1;
  long value=process_u32(items[i].data)|(process_u32(items[i].data+4)<<32);
  printf(" %ld\\n",value); } return 0; }
 ''')
+layout=str(root/'cx/runtime/peimport.cx')
 for compiler,name in [('cc','process-cc'),(ua,'process-ua')]:
- r=subprocess.run([compiler,'-O2','-I'+str(root/'exec/c'),str(src),'-o',str(p/name)],capture_output=True,timeout=60);assert r.returncode==0,r.stderr
+ cmd=[compiler,'-O2','-I'+str(root/'exec/c')]
+ if compiler=='cc': cmd+=['-x','c',str(src),layout]
+ else: cmd+=[str(src),layout]
+ cmd+=['-o',str(p/name)]
+ r=subprocess.run(cmd,capture_output=True,timeout=60);assert r.returncode==0,r.stderr
  def check(path):return subprocess.run([str(p/name),str(path)],capture_output=True,timeout=60)
  r=check(p/'process.mem');assert r.returncode==0 and r.stdout==''.join(wanted).encode(),(name,r.returncode,r.stdout,r.stderr)
  bad=bytearray(data);struct.pack_into('<I',bad,first+12,size);(p/'bad-process.mem').write_bytes(bad)

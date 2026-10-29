@@ -3,9 +3,249 @@
 #pragma unisa use compiler.fwdstub
 #pragma unisa use compiler.cxmod
 #pragma unisa use compiler.fwdmerge
+#pragma unisa use runtime.memlayout
+#pragma unisa use compiler.fwdsig
+#pragma unisa use compiler.fwdincrement
+#pragma unisa use compiler.hostbind
+#pragma unisa use compiler.bindtemp
+#pragma unisa use compiler.bindkey
+#pragma unisa use compiler.bindsplit
+#pragma unisa use compiler.bindstage
+#pragma unisa use compiler.bindfilter
+#pragma unisa use compiler.binddep
+#pragma unisa use compiler.bindonly
+#pragma unisa use compiler.bindgate
+#pragma unisa use compiler.bindtarget
+#pragma unisa use compiler.bindret
+#pragma unisa use compiler.bindimage
+#pragma unisa use compiler.bindrun
+#pragma unisa use runtime.routespan
+#pragma unisa use runtime.routestep
+#pragma unisa use runtime.routetime
+#pragma unisa use runtime.modelload
+#pragma unisa use runtime.runexec
+#pragma unisa use runtime.stagehandoff
+#pragma unisa use runtime.model_lifetime
+#pragma unisa use runtime.source_frame
+#pragma unisa use runtime.winprocess
+#pragma unisa use runtime.package_lifetime
+#pragma unisa use core.transition
 /* Upper modules only. Emission and failure stay injected; this file does not
    link a product compiler and does not claim a host or six-target pass. */
 static int failed, die_calls;
+static int step_inflate_calls, step_crc_calls, step_seen_raw, step_seen_plain, step_inflate_rc;
+static int ml_seq[8], ml_n, ml_rc, ml_fail_n;
+static const char *ml_why_text, *ml_failed;
+static void *ml_seen_dec, *ml_seen_model;
+static const unsigned char *ml_seen_data;
+static long ml_seen_len;
+static int ml_decode_cb(void *d, const unsigned char *data, long n) {
+    ml_seq[ml_n++] = 1;
+    ml_seen_dec = d;
+    ml_seen_data = data;
+    ml_seen_len = n;
+    return ml_rc;
+}
+static const char *ml_why_cb(void *d) {
+    ml_seq[ml_n++] = 2;
+    (void)d;
+    return ml_why_text;
+}
+static void ml_take_cb(void *d, void *m) {
+    ml_seq[ml_n++] = 3;
+    ml_seen_dec = d;
+    ml_seen_model = m;
+}
+static void ml_bind_cb(void *m) {
+    ml_seq[ml_n++] = 4;
+    ml_seen_model = m;
+}
+static int sh_seq[16], sh_n, sh_loading_v[4], sh_loading_n, sh_load_len;
+static const char *sh_why;
+static void *sh_bind_seen, *sh_cap_seen, *sh_mark_seen, *sh_rel_seen;
+static unsigned char *sh_load_p;
+static void sh_fail_cb(const char *s) { sh_seq[sh_n++] = 1; sh_why = s; }
+static void sh_bind_cb(void *s) { sh_seq[sh_n++] = 2; sh_bind_seen = s; }
+static void sh_clear_cb(void) { sh_seq[sh_n++] = 3; }
+static void sh_loading_cb(int v) { sh_seq[sh_n++] = 4; if (sh_loading_n < 4) sh_loading_v[sh_loading_n++] = v; }
+static void sh_load_cb(unsigned char *p, int n) { sh_seq[sh_n++] = 5; sh_load_p = p; sh_load_len = n; }
+static void sh_rel_cb(void *p) { sh_seq[sh_n++] = 6; sh_rel_seen = p; }
+static void sh_lb_cb(void) { sh_seq[sh_n++] = 7; }
+static void sh_cap_cb(void *s) { sh_seq[sh_n++] = 8; sh_cap_seen = s; }
+static void sh_mark_cb(void *s) { sh_seq[sh_n++] = 9; sh_mark_seen = s; }
+static void sh_reset(void) {
+    int i;
+    sh_n = 0; sh_loading_n = 0; sh_load_len = -1; sh_why = 0;
+    sh_bind_seen = 0; sh_cap_seen = 0; sh_mark_seen = 0; sh_rel_seen = 0; sh_load_p = 0;
+    for (i = 0; i < 16; i++) sh_seq[i] = 0;
+}
+static int ff_read_n, ff_absent_n;
+static const char *ff_path;
+static void ff_read_cb(const char *p) { ff_read_n++; ff_path = p; }
+static void ff_absent_cb(const char *p) { ff_absent_n++; ff_path = p; }
+static int ff_alloc_n, ff_fail, ff_list_i, ff_byte_i;
+static char *ff_lists[4][4];
+static char ff_bytes[4][32];
+static void *ff_alloc(void *p, size_t n) {
+    ff_alloc_n++;
+    if (n % sizeof(char *) == 0) {
+        if (ff_fail == 1) return 0;
+        if (p) return p;
+        if (ff_list_i >= 4) return 0;
+        return ff_lists[ff_list_i++];
+    }
+    if (ff_fail == 2) return 0;
+    if (ff_byte_i >= 4 || n > 32) return 0;
+    return ff_bytes[ff_byte_i++];
+}
+static int rd_open_n, rd_stream_n, rd_close_n, rd_say_n, rd_raw_n, rd_fail_n;
+static long rd_fd, rd_close_rc, rd_stream_fd;
+static const char *rd_why, *rd_said, *rd_raw_path, *rd_raw_reason, *rd_fail_msg, *rd_open_path;
+static unsigned char rd_blob[1];
+static long rd_open(const char *p) { rd_open_n++; rd_open_path = p; return rd_fd; }
+static const char *rd_reason(long fd) { (void)fd; return rd_why; }
+static void rd_say(const char *s) { rd_say_n++; rd_said = s; }
+static void rd_raw(const char *p, const char *r) { rd_raw_n++; rd_raw_path = p; rd_raw_reason = r; }
+static void rd_fail(const char *s) { rd_fail_n++; rd_fail_msg = s; }
+static unsigned char *rd_stream(long fd, const char *p, int *n) {
+    (void)p;
+    rd_stream_n++;
+    rd_stream_fd = fd;
+    *n = 4;
+    return rd_blob;
+}
+static long rd_close(long fd) { (void)fd; rd_close_n++; return rd_close_rc; }
+static void rd_reset(void) {
+    rd_open_n = rd_stream_n = rd_close_n = rd_say_n = rd_raw_n = rd_fail_n = 0;
+    rd_fd = 3; rd_close_rc = 0; rd_stream_fd = -1;
+    rd_why = 0; rd_said = 0; rd_raw_path = 0; rd_raw_reason = 0; rd_fail_msg = 0; rd_open_path = 0;
+}
+static int rs_stamp_n, rs_stamped, rs_grow_n, rs_null, rs_read_n, rs_fill, rs_seq_n, rs_seq_i, rs_ask, rs_first;
+static long long rs_size, rs_off;
+static long rs_seq[4];
+static size_t rs_bytes;
+static const char *rs_said, *rs_raw_path, *rs_fail_msg;
+static int rs_say_n, rs_raw_n, rs_fail_n;
+static unsigned char rs_buf[8];
+static int rs_stamp(long fd, long long *size, long long *off) {
+    (void)fd;
+    rs_stamp_n++;
+    if (!rs_stamped) return 0;
+    *size = rs_size;
+    *off = rs_off;
+    return 1;
+}
+static void *rs_grow(void *p, size_t n) {
+    (void)p;
+    rs_grow_n++;
+    rs_bytes = n;
+    if (rs_null) return 0;
+    return rs_buf;
+}
+static long rs_read(long fd, unsigned char *p, long n) {
+    (void)fd;
+    (void)p;
+    rs_read_n++;
+    if (!rs_ask) rs_first = (int)n;
+    rs_ask = (int)n;
+    if (rs_fill) return n;
+    if (rs_seq_i < rs_seq_n) return rs_seq[rs_seq_i++];
+    return 0;
+}
+static void rs_say(const char *s) { rs_say_n++; rs_said = s; }
+static void rs_raw(const char *p) { rs_raw_n++; rs_raw_path = p; }
+static void rs_fail(const char *s) { rs_fail_n++; rs_fail_msg = s; }
+static int su_seek_n, su_read_n, su_fail_n, su_bad, su_mode, su_err, su_over, su_gave0, su_gave1;
+static long su_cur, su_end, su_last_at, su_fd_seen, su_asked, su_off[8];
+static int su_whence[8];
+static unsigned char su_b0, su_b1;
+static const char *su_fail_msg;
+static long su_seek(long fd, long off, int whence) {
+    int i;
+    su_fd_seen = fd;
+    i = su_seek_n++;
+    if (i < 8) { su_off[i] = off; su_whence[i] = whence; }
+    if (whence == 0) su_last_at = off;
+    if (i == su_bad) return -1;
+    if (i == 0) return su_cur;
+    if (i == 1) return su_end;
+    return 0;
+}
+static long su_read(long fd, unsigned char *p, long n) {
+    (void)fd;
+    su_read_n++;
+    su_asked = n;
+    if (su_over) return n + 1;
+    if (su_err) return -1;
+    if (su_mode == 0) return 0;
+    if (su_mode == 2) {
+        if (su_gave0) return 0;
+        p[0] = su_b0;
+        p[1] = su_b1;
+        su_gave0 = 1;
+        return 2;
+    }
+    if (su_last_at == 0) {
+        if (su_gave0) return 0;
+        p[0] = su_b0;
+        su_gave0 = 1;
+        return 1;
+    }
+    if (su_gave1) return 0;
+    p[0] = su_b1;
+    su_gave1 = 1;
+    return 1;
+}
+static void su_fail(const char *s) { su_fail_n++; su_fail_msg = s; }
+static void su_clear(void) {
+    int i;
+    su_seek_n = su_read_n = su_fail_n = su_mode = su_err = su_over = su_gave0 = su_gave1 = 0;
+    su_bad = -1;
+    su_cur = su_end = su_last_at = su_fd_seen = su_asked = 0;
+    su_b0 = su_b1 = 0;
+    su_fail_msg = 0;
+    for (i = 0; i < 8; i++) { su_off[i] = 0; su_whence[i] = 0; }
+}
+static void rs_clear(void) {
+    rs_stamp_n = rs_stamped = rs_grow_n = rs_null = rs_read_n = rs_fill = rs_seq_n = rs_seq_i = rs_ask = rs_first = 0;
+    rs_size = rs_off = 0;
+    rs_bytes = 0;
+    rs_said = rs_raw_path = rs_fail_msg = 0;
+    rs_say_n = rs_raw_n = rs_fail_n = 0;
+}
+static int ex_parse_calls, ex_parse_ok;
+static long long ex_parsed;
+static const char *ex_seen_budget;
+static int ex_parse_cb(const char *s, long long *v) {
+    ex_parse_calls++;
+    ex_seen_budget = s;
+    if (!ex_parse_ok) return 0;
+    *v = ex_parsed;
+    return 1;
+}
+static void ml_fail_cb(const char *s) {
+    ml_seq[ml_n++] = 5;
+    ml_fail_n++;
+    ml_failed = s;
+}
+static unsigned step_crc_value;
+static unsigned char step_body[16];
+static int step_inflate(unsigned char *out, unsigned long outlen, const unsigned char *in, unsigned long inlen) {
+    unsigned long i;
+    step_inflate_calls++;
+    step_seen_raw = (int)outlen;
+    step_seen_plain = (int)inlen;
+    (void)in;
+    if (step_inflate_rc) return step_inflate_rc;
+    if (!out || outlen > 16) return 1;
+    for (i = 0; i < outlen; i++) out[i] = step_body[i];
+    return 0;
+}
+static unsigned step_crc(char *p, int n) {
+    (void)p; (void)n;
+    step_crc_calls++;
+    return step_crc_value;
+}
 static void ck(int ok, const char *name) {
     printf("%s %s\n", ok ? "PASS" : "FAIL", name);
     if (!ok) failed++;
@@ -40,6 +280,22 @@ static int ck_write(const char *path, const char *text) {
 static void *ck_alloc(void *p, long long n) { return realloc(p, n ? (size_t)n : 1); }
 static void ck_release(void *p) { free(p); }
 static void ck_fail(char *m) { (void)m; die_calls++; }
+static int front_calls;
+static int ck_replay_on(void) { return 1; }
+static int ck_replay_off(void) { return 0; }
+static int ck_over_on(void) { return 1; }
+static int ck_over_off(void) { return 0; }
+static int ck_count_unused(void) { return 1; }
+static char *ck_text_unused(void) { return (char *)""; }
+static int ck_front(char *route, char *stage, void *tape, char *path) {
+    (void)route; (void)stage; (void)tape; (void)path; front_calls++; return 0;
+}
+static int ck_range(char *route, char *from, char *to, void *tape, char *path) {
+    (void)route; (void)from; (void)to; (void)tape; (void)path; front_calls++; return 0;
+}
+static int ck_merge_unused(const void *base, const void *a, const void *b, int unit, void *merged) {
+    (void)base; (void)a; (void)b; (void)unit; (void)merged; return 1;
+}
 int main(void) {
     char shortb[8], arm[] = "# unisacc -S lnx/arm64\n", x64[] = "# unisacc -S lnx/x86_64\n";
     long len;
@@ -95,6 +351,2570 @@ int main(void) {
         ck(fwm_merge(&empty, &empty, &tape, 1, &out) == 0 && die_calls == before, "truncated-tape-refused");
         for (i = 0; i < 1025; i++) big[i] = 'a';
         ck(fwm_export(big, 1025) == 1 && die_calls == before, "over-limit-export-refused");
+    }
+    {
+        unsigned char img[48], bad[40];
+        int text, extent, stored, entry, i;
+        long long off, size;
+        for (i = 0; i < 48; i++) img[i] = 0;
+        ck(mem_image(img, 8, &text, &extent, &stored, &entry) == 1, "image-short-header");
+        for (i = 0; i < 40; i++) bad[i] = 0;
+        bad[0] = 'U';
+        ck(mem_image(bad, 40, &text, &extent, &stored, &entry) == 1, "image-bad-magic");
+        img[0] = 'U'; img[1] = 'N'; img[2] = 'I'; img[3] = 'M';
+        img[4] = 'E'; img[5] = 'M'; img[6] = '1'; img[7] = '\n';
+        ck(mem_image(img, 40, &text, &extent, &stored, &entry) == 2, "image-zero-text");
+        img[8] = 1; img[16] = 1;
+        ck(mem_image(img, 41, &text, &extent, &stored, &entry) == 0 && text == 1 && extent == 1 && stored == 0 && entry == 0, "image-one-byte-text");
+        img[32] = 1;
+        ck(mem_image(img, 41, &text, &extent, &stored, &entry) == 2, "image-entry-past-text");
+        img[32] = 0; img[16] = 0; img[19] = 0x80;
+        ck(mem_image(img, 41, &text, &extent, &stored, &entry) == 3, "image-extent-overflow");
+        ck(mem_field(img + 16, &extent) == 1, "field-overflow");
+        mem_place(1, 1, &off, &size);
+        ck(off == 16384 && size == 32768, "place-align-1");
+        mem_place(16384, 16384, &off, &size);
+        ck(off == 16384 && size == 32768, "place-exact-page");
+        ck(mem_span_ok(2147483647LL) == 1 && mem_span_ok(2147483647LL + 1) == 0, "span-limit");
+    }
+    {
+        unsigned char trunc[4];
+        USForwardSig sig;
+        FwiBuf base, merged, attrs;
+        FwiRi ri[1];
+        int nri = 0, unit = 0, slot = -1, i;
+        char path[] = "p";
+        for (i = 0; i < 4; i++) trunc[i] = 0;
+        ck(us_forward_sig_decode(trunc, 4, "f", 1, &sig) == 1, "truncated-signature-refused");
+        base.b = 0; base.at = 0; base.n = 0; base.cap = 0;
+        merged = base; attrs = base;
+        ri[0].name = 0; ri[0].n = 0; ri[0].data = 0; ri[0].len = 0;
+        front_calls = 0;
+        ck(fwd_incremental("tgt", 0, &base, 0, &merged, ri, &nri, &attrs, &unit, &slot, path,
+            ck_replay_on, ck_over_off, ck_count_unused, ck_text_unused, ck_alloc, ck_release,
+            ck_front, ck_range, ck_merge_unused) == 0 && front_calls == 0, "replay-skips-front");
+        front_calls = 0;
+        ck(fwd_incremental("tgt", 0, &base, 0, &merged, ri, &nri, &attrs, &unit, &slot, path,
+            ck_replay_off, ck_over_on, ck_count_unused, ck_text_unused, ck_alloc, ck_release,
+            ck_front, ck_range, ck_merge_unused) == 0 && front_calls == 0, "overflow-skips-front");
+    }
+    {
+        unsigned char contract[28], filter[12], bad[12];
+        HbReq req;
+        HbProv prov;
+        HbPlan plan;
+        unsigned mask = 99;
+        char error[160];
+        int i;
+        for (i = 0; i < 28; i++) contract[i] = 0;
+        contract[0] = 'U'; contract[1] = 'N'; contract[2] = 'I'; contract[3] = 'S';
+        contract[4] = 'Y'; contract[5] = 'M'; contract[6] = '1'; contract[7] = '\n';
+        contract[8] = 1; contract[10] = 2; contract[11] = 0;
+        contract[12] = 1; contract[17] = 1;
+        contract[20] = 2; contract[24] = 1; contract[25] = 1;
+        ck(hb_target_id("lnx/x86_64") == 1 && hb_target_id("lnx/arm64") == 2
+            && hb_target_id("osx/x86_64") == 3 && hb_target_id("osx/arm64") == 4
+            && hb_target_id("win/x86_64") == 0, "target-id");
+        ck(hb_requirements(contract, 28, &req, error, sizeof error) == 0
+            && req.target == 1 && req.count == 2 && req.mask == 3, "contract-two-slots");
+        contract[9] = 1;
+        ck(hb_requirements(contract, 28, &req, error, sizeof error) == 1
+            && req.mask == 0 && strcmp(error, "unisacc: bind: invalid-contract framing") == 0, "contract-framing-refused");
+        contract[9] = 0;
+        ck(hb_requirements(contract, 28, &req, error, sizeof error) == 0 && req.mask == 3, "contract-restored");
+        for (i = 0; i < 12; i++) filter[i] = 0;
+        filter[0] = 'U'; filter[1] = 'H'; filter[2] = 'P'; filter[3] = 'R';
+        filter[4] = 'O'; filter[5] = 'V'; filter[6] = '1'; filter[7] = '\n';
+        filter[8] = 1; filter[9] = 15;
+        ck(hb_provider_filter(filter, 12, 1, &mask, error, sizeof error) == 0 && mask == 15, "provider-mask");
+        filter[10] = 1;
+        ck(hb_provider_filter(filter, 12, 1, &mask, error, sizeof error) == 1
+            && strcmp(error, "unisacc: bind: provider-reserved bits are nonzero") == 0, "provider-reserved-refused");
+        prov.target = 1; prov.kind = 2; prov.available = 15;
+        prov.address[0] = 1; prov.address[1] = 0; prov.address[2] = 3; prov.address[3] = 4;
+        ck(hb_bind(&req, &prov, 13, &plan, error, sizeof error) == 1
+            && plan.mask == 0 && plan.address[0] == 0
+            && strcmp(error, "unisacc: bind: missing-provider symbol 2 slot 1") == 0, "missing-provider");
+        prov.address[1] = 2;
+        ck(hb_bind(&req, &prov, 15, &plan, error, sizeof error) == 0
+            && plan.target == 1 && plan.kind == 2 && plan.mask == 3
+            && plan.address[0] == 1 && plan.address[1] == 2, "bind-two-slots");
+        for (i = 0; i < 12; i++) bad[i] = 0;
+        ck(hb_provider_filter(bad, 12, 1, &mask, error, sizeof error) == 1
+            && strcmp(error, "unisacc: bind: invalid-provider framing") == 0, "provider-framing-refused");
+        (void)bad;
+    }
+    {
+        const char *route[4], *name[4];
+        int got[4], n, i;
+        RsCursor span;
+        route[0] = "image"; name[0] = "a";
+        route[1] = "other"; name[1] = "z";
+        route[2] = "image"; name[2] = "b";
+        route[3] = "image"; name[3] = "z";
+        rs_reset(&span, 1, 1);
+        n = 0;
+        for (i = 0; i < 4; i++) {
+            if (!rs_take(&span, route[i], name[i], "image", 0, 0)) continue;
+            got[n++] = i;
+            if (span.stop) break;
+        }
+        ck(rs_ok(&span) && n == 3 && got[0] == 0 && got[1] == 2 && got[2] == 3, "span-whole-route");
+        rs_reset(&span, 1, 0);
+        n = 0;
+        for (i = 0; i < 4; i++) {
+            if (!rs_take(&span, route[i], name[i], "image", 0, "b")) continue;
+            got[n++] = i;
+            if (span.stop) break;
+        }
+        ck(rs_ok(&span) && span.stop && n == 2 && got[0] == 0 && got[1] == 2
+            && rs_take(&span, "image", "z", "image", 0, "b") == 0, "span-last-stops");
+        rs_reset(&span, 0, 1);
+        n = 0;
+        for (i = 0; i < 4; i++) {
+            if (!rs_take(&span, route[i], name[i], "image", "b", 0)) continue;
+            got[n++] = i;
+            if (span.stop) break;
+        }
+        ck(rs_ok(&span) && n == 2 && got[0] == 2 && got[1] == 3, "span-first-starts");
+        rs_reset(&span, 0, 0);
+        n = 0;
+        for (i = 0; i < 4; i++) {
+            if (!rs_take(&span, route[i], name[i], "image", "z", "z")) continue;
+            got[n++] = i;
+            if (span.stop) break;
+        }
+        ck(rs_ok(&span) && n == 1 && got[0] == 3, "span-one-stage");
+        rs_reset(&span, 0, 0);
+        n = 0;
+        for (i = 0; i < 4; i++) {
+            if (!rs_take(&span, route[i], name[i], "image", "b", "a")) continue;
+            got[n++] = i;
+        }
+        ck(!rs_ok(&span) && n == 2 && got[0] == 2 && got[1] == 3, "span-last-before-first");
+        rs_reset(&span, 1, 1);
+        n = 0;
+        for (i = 0; i < 4; i++) if (rs_take(&span, route[i], name[i], "missing", 0, 0)) n++;
+        ck(!rs_ok(&span) && n == 0, "span-unknown-route");
+        rs_reset(0, 1, 1);
+        ck(rs_take(0, "image", "a", "image", 0, 0) == 0 && rs_ok(0) == 0, "span-null-cursor");
+        route[1] = "image"; name[1] = "";
+        rs_reset(&span, 0, 0);
+        n = 0;
+        for (i = 0; i < 4; i++) {
+            if (!rs_take(&span, route[i], name[i], "image", "", "")) continue;
+            got[n++] = i;
+            if (span.stop) break;
+        }
+        ck(rs_ok(&span) && n == 1 && got[0] == 1, "span-empty-name");
+    }
+    {
+        unsigned char owned[16], plain[4], *inb, *outb, *release;
+        int use_owned, out_len, inn, i;
+        char why[80];
+        const char *magic = "UNINETB1N";
+        for (i = 0; i < 9; i++) step_body[i] = (unsigned char)magic[i];
+        step_body[9] = 0;
+        plain[0] = 1; plain[1] = 2; plain[2] = 3; plain[3] = 4;
+        step_inflate_calls = 0; step_crc_calls = 0; step_inflate_rc = 0; step_crc_value = 7;
+        ck(rt_open(3, 0, plain, 4, owned, 9, 7, step_inflate, step_crc, &use_owned, &out_len, why, (long)sizeof why) == 1
+            && use_owned == 1 && out_len == 9 && step_inflate_calls == 1 && step_crc_calls == 1
+            && step_seen_raw == 9 && step_seen_plain == 4 && why[0] == 0
+            && owned[0] == 'U' && owned[8] == 'N', "model-v3-accepted");
+        step_inflate_calls = 0; step_crc_calls = 0; step_inflate_rc = 4;
+        ck(rt_open(3, 0, plain, 4, owned, 9, 7, step_inflate, step_crc, &use_owned, &out_len, why, (long)sizeof why) == 2
+            && use_owned == 0 && step_inflate_calls == 1 && step_crc_calls == 0
+            && strcmp(why, "invalid compressed model") == 0, "model-inflate-refused");
+        step_inflate_calls = 0; step_crc_calls = 0; step_inflate_rc = 0; step_crc_value = 9;
+        ck(rt_open(3, 0, plain, 4, owned, 9, 8, step_inflate, step_crc, &use_owned, &out_len, why, (long)sizeof why) == 2
+            && step_crc_calls == 1 && strcmp(why, "compressed model CRC") == 0, "model-crc-refused");
+        step_crc_value = 8; step_body[8] = 'X';
+        ck(rt_open(3, 0, plain, 4, owned, 9, 8, step_inflate, step_crc, &use_owned, &out_len, why, (long)sizeof why) == 2
+            && step_crc_calls == 2 && strcmp(why, "package requires binary networks") == 0, "model-magic-refused");
+        step_body[8] = 'N';
+        ck(rt_open(3, 0, plain, 4, owned, 8, 8, step_inflate, step_crc, &use_owned, &out_len, why, (long)sizeof why) == 2
+            && step_seen_raw == 8 && strcmp(why, "package requires binary networks") == 0, "model-short-refused");
+        step_inflate_calls = 0; step_crc_calls = 0;
+        ck(rt_open(2, 0, plain, 4, 0, 0, 0, step_inflate, step_crc, &use_owned, &out_len, why, (long)sizeof why) == 1
+            && use_owned == 0 && out_len == 4 && step_inflate_calls == 0 && step_crc_calls == 0, "model-plain");
+        ck(rt_open(3, 1, plain, 4, 0, 9, 7, step_inflate, step_crc, &use_owned, &out_len, why, (long)sizeof why) == 0
+            && use_owned == 0 && step_inflate_calls == 0, "model-cached");
+        ck(rt_open(3, 0, plain, 4, 0, 9, 7, step_inflate, step_crc, &use_owned, &out_len, why, (long)sizeof why) == 3
+            && step_inflate_calls == 0 && strcmp(why, "bad argument") == 0, "model-null-owned");
+        inb = plain; outb = owned; inn = 4; release = 0;
+        rt_swap(&inb, &inn, outb, 9, &release);
+        ck(release == plain && inb == owned && inn == 9, "buffer-swap");
+        rt_swap(&inb, &inn, 0, 0, &release);
+        ck(release == owned && inb == 0 && inn == 0, "buffer-swap-clear");
+        ck(rt_strip(0) == 1 && rt_strip(4) == 0 && rt_strip(-1) == 0, "strip-only-success");
+        ck(rt_after(0, 0) == 0 && rt_after(4, 0) == 1 && rt_after(0, 1) == 2 && rt_after(4, 1) == 1, "after-rc-wins");
+    }
+    {
+        char line[80], held[8];
+        long long ns;
+        int i;
+        ns = rr_ns(1, 2, 1, 5);
+        ck(ns == 3, "rr-ns-small");
+        ns = rr_ns(5, 10, 6, 4);
+        ck(ns == 999999994, "rr-ns-cross");
+        ns = rr_ns(3, 0, 2, 0);
+        ck(ns == -1000000000LL, "rr-ns-back");
+        ck(rr_wanted(0) == 0 && rr_wanted("") == 1 && rr_wanted("0") == 1, "rr-wanted");
+        ck(rr_model("lex", 1, 3, line, (long)sizeof line) == 0
+            && strcmp(line, "RR_TIME\tmodel\tstage=lex\tsource=cache\tns=3\n") == 0, "rr-model-cache");
+        ck(rr_model("lex", 0, rr_ns(5, 10, 6, 4), line, (long)sizeof line) == 0
+            && strcmp(line, "RR_TIME\tmodel\tstage=lex\tsource=inflate\tns=999999994\n") == 0, "rr-model-inflate");
+        ck(rr_model("", 0, 0, line, (long)sizeof line) == 0
+            && strcmp(line, "RR_TIME\tmodel\tstage=\tsource=inflate\tns=0\n") == 0, "rr-model-empty");
+        ck(rr_infer("lex", -12, rr_ns(3, 0, 2, 0), line, (long)sizeof line) == 0
+            && strcmp(line, "RR_TIME\tinference\tstage=lex\trc=-12\tns=-1000000000\n") == 0, "rr-infer-neg");
+        ck(rr_infer("z", 0, 0, line, (long)sizeof line) == 0
+            && strcmp(line, "RR_TIME\tinference\tstage=z\trc=0\tns=0\n") == 0, "rr-infer-zero");
+        for (i = 0; i < 8; i++) held[i] = 'Q';
+        ck(rr_model("lex", 1, 3, held, 4) == 1 && held[0] == 'Q' && held[3] == 'Q', "rr-model-short");
+        for (i = 0; i < 8; i++) held[i] = 'Q';
+        ck(rr_model(0, 1, 3, held, 8) == 2 && held[0] == 'Q' && held[7] == 'Q', "rr-model-null");
+        ck(rr_infer(0, 0, 0, line, (long)sizeof line) == 2, "rr-infer-null");
+        {
+            char wide[320];
+            int sect, w;
+            unsigned long long add;
+            long origins[1];
+            unsigned char raw[2];
+            for (i = 0; i < 8; i++) held[i] = 'Q';
+            ck(rr_construct(3, wide, 320) == 0 && strcmp(wide, "RR_TIME\tconstruction\tns=3\n") == 0, "rr-construct");
+            ck(rr_construct(-2, wide, 320) == 0 && strcmp(wide, "RR_TIME\tconstruction\tns=-2\n") == 0, "rr-construct-neg");
+            ck(rr_construct(3, held, 4) == 1 && held[0] == 'Q' && held[3] == 'Q', "rr-construct-short");
+            ck(rr_construct(3, 0, 8) == 2, "rr-construct-null");
+            ck(rr_lookup_line(2, -5, wide, 320) == 0 && strcmp(wide, "RR_TIME\tlookup_hit=2\tns=-5\n") == 0, "rr-lookup");
+            ck(rr_artifact_line(0, 5, wide, 320) == 0 && strcmp(wide, "RR_TIME\tartifact_hit=0\tmode=5\n") == 0, "rr-artifact");
+            ck(rr_artifact_line(-1, -2, wide, 320) == 0 && strcmp(wide, "RR_TIME\tartifact_hit=-1\tmode=-2\n") == 0, "rr-artifact-neg");
+            ck(rr_memory_line(0, 0, wide, 320) == 0 && strcmp(wide, "RR_TIME\tmemory_bind\trc=0\tns=0\n") == 0, "rr-memory");
+            ck(rr_memory_line(-1, 9, wide, 320) == 0 && strcmp(wide, "RR_TIME\tmemory_bind\trc=-1\tns=9\n") == 0, "rr-memory-neg");
+            ck(rr_output_line(0, 4, 8, wide, 320) == 0 && strcmp(wide, "RR_TIME\toutput\tkind=exec-prepare\tbytes=4\tns=8\n") == 0, "rr-out-exec");
+            ck(rr_output_line(1, 4, -8, wide, 320) == 0 && strcmp(wide, "RR_TIME\toutput\tkind=image\tbytes=4\tns=-8\n") == 0, "rr-out-image");
+            for (i = 0; i < 8; i++) held[i] = 'Q';
+            ck(rr_output_line(2, 4, 8, held, 8) == 2 && held[0] == 'Q', "rr-out-kind");
+            ck(rr_output_line(-1, 1, 1, held, 8) == 2 && held[0] == 'Q', "rr-out-negkind");
+            ck(strcmp(rr_ledger_need(), "unisacc: --resource-ledger needs DIR\n") == 0, "rr-ledger-need");
+            ck(strcmp(rr_ledger_strict(), "unisacc: --strict-resource-flow needs --resource-ledger DIR\n") == 0, "rr-ledger-strict");
+            ck(strcmp(rr_ledger_long(), "unisacc: INTERFACE_ERROR resource-ledger-path-too-long\n") == 0, "rr-ledger-long");
+            for (i = 0; i < 8; i++) held[i] = 'Q';
+            ck(rr_ledger_err(0, held, 8) == 2 && held[0] == 'Q', "rr-ledger-null");
+            ck(rr_ledger_err("nope", wide, 320) == 0 && strcmp(wide, "unisacc: nope\n") == 0, "rr-ledger-err");
+            ck(rr_ledger_err("", wide, 320) == 0 && strcmp(wide, "unisacc: \n") == 0, "rr-ledger-empty");
+            ck(rr_mem_image(13, wide, 320) == 0 && strcmp(wide, "unisacc: model driver: this program calls the host C library, and its image could not be started from an anonymous memory file (errno 13); write the program with -o and run that\n") == 0, "rr-mem-image");
+            ck(rr_mem_image(-4, wide, 320) == 0 && strcmp(wide, "unisacc: model driver: this program calls the host C library, and its image could not be started from an anonymous memory file (errno -4); write the program with -o and run that\n") == 0, "rr-mem-neg");
+            ck(rr_jobs_line(8, wide, 320) == 0 && strcmp(wide, "unisacc: INTERFACE_ERROR resource-capture-parallel-unsupported UNISA_JOBS=8 (capture and strict multi-source runs need UNISA_JOBS=1)\n") == 0, "rr-jobs");
+            ck(bx_ledger_word(0) == 4, "ledger-null");
+            ck(bx_ledger_word("--strict-resource-flow") == 1, "ledger-strict");
+            ck(bx_ledger_word("--resource-ledger") == 2, "ledger-dir");
+            ck(bx_ledger_word("--resource-ledgerx") == 0, "ledger-extra");
+            ck(bx_ledger_word("") == 0, "ledger-empty");
+            ck(strcmp(bx_temp_dir(0, "a", "b"), "a") == 0, "temp-tmp");
+            ck(strcmp(bx_temp_dir(0, "", "b"), "b") == 0, "temp-empty");
+            ck(strcmp(bx_temp_dir(0, 0, "t"), "t") == 0, "temp-null");
+            ck(strcmp(bx_temp_dir(0, 0, 0), "/tmp") == 0, "temp-none");
+            ck(strcmp(bx_temp_dir(0, "", ""), "/tmp") == 0, "temp-both-empty");
+            ck(strcmp(bx_temp_dir(1, "", "b"), "/tmp") == 0, "temp-pool");
+            ck(strcmp(bx_temp_dir(1, "a", "b"), "a") == 0, "temp-pool-set");
+            ck(bx_temp_dir(2, "a", "b") == 0, "temp-kind");
+            ck(strcmp(bx_file_mode(0), "rb") == 0 && strcmp(bx_file_mode(1), "wb") == 0 && strcmp(bx_file_mode(2), "w") == 0 && bx_file_mode(3) == 0 && bx_file_mode(-1) == 0, "file-mode");
+            ck(bx_open_miss(0, 0, 1) == -1 && bx_open_miss(0, 0, 0) == -3 && bx_open_miss(0, 1, 1) == 0, "open-read");
+            ck(bx_open_miss(1, 0, 1) == 1 && bx_open_miss(2, 0, 0) == -1 && bx_open_miss(9, 0, 1) == 4, "open-write");
+            ck(bx_env_temp("a") == 0 && bx_env_temp("") == 1 && bx_env_temp(0) == 1, "env-temp");
+            ck(strcmp(bx_env_dot(0), ".") == 0 && strcmp(bx_env_dot(""), "") == 0 && strcmp(bx_env_dot("t"), "t") == 0, "env-dot");
+            ck(bx_env_set(0) == 0 && bx_env_set("") == 0 && bx_env_set("a") == 1, "env-set");
+            ck(bx_env_blank(0) == 0 && bx_env_blank("") == 0 && strcmp(bx_env_blank("a"), "a") == 0, "env-blank");
+            ck(tb2_quote("A", 1, wide, 320) == 0 && strcmp(wide, "\"A\"") == 0, "tb-quote");
+            ck(tb2_quote(0, 1, wide, 320) == 4, "tb-quote-null");
+            ck(tb2_pool_bad(0, 2, 2, 8) == 0 && tb2_pool_bad(0, 3, 2, 8) == 1 && tb2_pool_bad(1, 2, 2, 8) == 1, "tb-pool");
+            ck(pg_reg("r7") == 7 && pg_reg("r8") == -1 && pg_reg(0) == 4, "pg-reg");
+            ck(pg_op(".frame") == 34 && pg_op("mov") == 1 && pg_op("nope") == -1 && pg_keep(".global") == 1 && pg_keep("mov") == 0, "pg-op");
+            ck(pg_prologue(34, 8, 22, 7, 0, 6, 1, 6, 7, 34, 0) == 1 && pg_prologue(34, 7, 22, 7, 0, 6, 1, 6, 7, 34, 0) == 0, "pg-pro");
+            ck(pg_width(8) == 1 && pg_width(3) == 0 && pg_bss_size(33554433ull) == 1 && pg_comment(59, 0) == 1 && pg_comment(59, 1) == 0, "pg-misc");
+            ck(pg_length(0) == 4 && pg_equal(0, "a", 1) == 4 && pg_equal("ab", "ax", 2) == 0 && pg_cut("r1+2", 4) == 2, "pg-len");
+            ck(fp_set_size(8) == 8 && fp_set_size(3) == -1, "fp-size");
+            ck(pp_wsc(32) == 1 && pp_wsc(65) == 0, "pp-wsc");
+            ck(pp_ucn_null(0, 0, 6) == 4 && pp_ucn_value(0, 0, 6) == 0
+                && pp_ucn_value("\\u0041", 0, 6) == 65ull
+                && pp_ucn_bad(65ull) == 1 && pp_ucn_bad(36ull) == 0
+                && pp_ucn_bad(160ull) == 0 && pp_ucn_bad(55296ull) == 1
+                && pp_ucn_bad(1114112ull) == 1, "pp-ucn");
+            ck(strcmp(pp_ucn_why(0 - 2), "universal character name not permitted in identifier") == 0
+                && strcmp(pp_ucn_why(0 - 3), "universal character name digit cannot start identifier") == 0
+                && strcmp(pp_ucn_why(0 - 1), "invalid universal character name") == 0, "pp-why");
+            {
+                unsigned short row[9];
+                row[0] = 170; row[1] = 170; row[2] = 1;
+                row[3] = 48; row[4] = 57; row[5] = 2;
+                row[6] = 36; row[7] = 36; row[8] = 1;
+                ck(pp_ucn_span(0, 0, 6) == 0
+                    && pp_ucn_span("\\u0041", 0, 6) == 6
+                    && pp_ucn_span("\\u0041", 0, 5) == 0
+                    && pp_ucn_span("\\U00000041", 0, 10) == 10
+                    && pp_ucn_span("no", 0, 2) == 0
+                    && pp_ucn_kind(170, row, 3) == 1
+                    && pp_ucn_kind(50, row, 3) == 2
+                    && pp_ucn_kind(36, row, 3) == 1
+                    && pp_ucn_kind(64, row, 3) == 0
+                    && pp_ucn_kind(170, 0, 3) == 4
+                    && pp_ucn_kind(170, row, 0 - 1) == 4, "pp-span");
+            }
+            ck(pp_ishex(48) == 1 && pp_ishex(57) == 1 && pp_ishex(97) == 1 && pp_ishex(102) == 1
+                && pp_ishex(65) == 1 && pp_ishex(70) == 1
+                && pp_ishex(47) == 0 && pp_ishex(58) == 0 && pp_ishex(96) == 0 && pp_ishex(103) == 0
+                && pp_ishex(64) == 0 && pp_ishex(71) == 0
+                && pp_idch(65) == 1 && pp_idch(48) == 1 && pp_idch(95) == 1 && pp_idch(36) == 0, "pp-hex");
+            ck(bg_seconds("1") == 1 && bg_seconds("60") == 60 && bg_seconds("0") == 0
+                && bg_seconds("61") == 0 && bg_seconds("601") == 0 && bg_seconds("") == 0
+                && bg_seconds(0) == 4
+                && bg_scale(60, "true", "5") == 300 && bg_scale(60, "false", "5") == 60
+                && bg_scale(8, 0, "2") == 8 && bg_scale(0 - 1, "true", "2") == 4
+                && bg_reap_step(1, 0, 0, 10, 4) == 0 && bg_reap_step(0, 0, 0, 10, 4) == 1
+                && bg_reap_step(0, 0, 1, 10, 4) == 3 && bg_reap_step(0 - 1, 10, 0, 10, 4) == 2
+                && bg_reap_step(0 - 1, 4, 1, 10, 4) == 3 && bg_reap_step(0 - 1, 5, 0, 10, 4) == 4
+                && bg_reap_cause(1) == 0 && bg_reap_cause(0) == 2 && bg_reap_cause(0 - 1) == 1
+                && bg_combine(1, 0) == 3 && bg_reason_enum(1) == 1 && bg_reason_enum(2) == 0
+                && bg_reason_deadline(2, 0) == 1 && bg_reason_deadline(0, 1) == 1
+                && bg_reason_deadline(0, 0) == 0 && bg_stop(1, 0) == 142 && bg_stop(0, 0) == 142
+                && bg_tree_room(4095) == 0 && bg_tree_room(4096) == 1 && bg_tree_room(0 - 1) == 4
+                && bg_ps_room(16777214) == 0 && bg_ps_room(16777215) == 1 && bg_ps_room(0 - 1) == 4, "bg-reap");
+            {
+                char nm[1026];
+                int i;
+                i = 0;
+                while (i < 1025) { nm[i] = 97; i = i + 1; }
+                nm[1025] = 0;
+                ck(lt_name(nm) == 0, "lt-long");
+                nm[1024] = 0;
+                ck(lt_name(nm) == 1 && lt_name("a") == 1 && lt_name("_") == 1 && lt_name("a0") == 1
+                    && lt_name("0a") == 0 && lt_name("") == 0 && lt_name(0) == 4 && lt_name("a-b") == 0
+                    && lt_type_ok(0, 1, 0, 4, 0, 1, 8) == 4
+                    && lt_type_ok(1, 0, 0, 0, 0, 1, 8) == 1
+                    && lt_type_ok(1, 0, 0, 0, 0, 0, 8) == 0
+                    && lt_type_ok(1, 1, 0, 4, 0, 0, 8) == 1
+                    && lt_type_ok(1, 1, 0, 3, 0, 0, 8) == 0
+                    && lt_type_ok(1, 2, 1, 8, 0, 0, 8) == 1
+                    && lt_type_ok(1, 2, 1, 4, 0, 0, 8) == 0
+                    && lt_type_ok(1, 3, 0, 8, 0, 0, 8) == 1
+                    && lt_type_ok(1, 5, 0, 0, 0, 0, 8) == 1
+                    && lt_type_ok(1, 7, 0, 0, 0, 0, 8) == 0
+                    && lt_supported(1, 0) == 1 && lt_supported(2, 0) == 1
+                    && lt_supported(0, 1) == 1 && lt_supported(0, 0) == 0 && lt_supported(3, 1) == 0
+                    && lt_count(4095) == 0 && lt_count(4096) == 1 && lt_count(0 - 1) == 4
+                    && lt_args(1024, 1) == 0 && lt_args(1025, 0) == 1 && lt_args(0, 2) == 1
+                    && lt_args(0 - 1, 0) == 4, "lt-name");
+            }
+            ck(cd_inflate(0, 1, 0, 1, 1) == (0 - 12) && cd_inflate(1, 0, 0, 1, 1) == (0 - 12)
+                && cd_inflate(1, 1, 0 - 1, 1, 1) == (0 - 1)
+                && cd_inflate(1, 1, 2, 1, 1) == 2
+                && cd_inflate(1, 1, 0, 0, 1) == 3 && cd_inflate(1, 1, 0, 1, 0) == 3
+                && cd_inflate(1, 1, 0, 1, 1) == 0
+                && cd_puff_type(0) == 0 && cd_puff_type(1) == 0 && cd_puff_type(2) == 0
+                && cd_puff_type(3) == (0 - 1) && cd_puff_type(0 - 1) == 4
+                && cd_bits_err(1) == 2 && cd_bits_err(0) == 0
+                && cd_crc_step(1ull) == 3988292384ull && cd_crc_step(0ull) == 0ull
+                && cd_crc_step(2ull) == 1ull && cd_crc_step(3ull) == 3988292385ull, "cd-crc");
+            {
+                int bits_n = 0, base = 0, copy = 0;
+                ck(cd_len_rep(16, 0, &bits_n, &base, &copy) == (0 - 5)
+                    && cd_len_rep(16, 2, &bits_n, &base, &copy) == 0
+                    && bits_n == 2 && base == 3 && copy == 1
+                    && cd_len_rep(17, 0, &bits_n, &base, &copy) == 0
+                    && bits_n == 3 && base == 3 && copy == 0
+                    && cd_len_rep(18, 1, &bits_n, &base, &copy) == 0
+                    && bits_n == 7 && base == 11 && copy == 0
+                    && cd_len_rep(16, 0 - 1, &bits_n, &base, &copy) == 4
+                    && cd_len_rep(16, 1, 0, &base, &copy) == 4
+                    && cd_len_room(1, 3, 4, 0) == 0
+                    && cd_len_room(2, 3, 4, 0) == (0 - 6)
+                    && cd_len_room(0 - 1, 1, 1, 1) == 4, "cd-len");
+            ck(cd_block_pick(0) == 0 && cd_block_pick(1) == 1 && cd_block_pick(2) == 2
+                && cd_block_pick(3) == (0 - 1) && cd_block_pick(0 - 1) == 4
+                && cd_puff_more(0, 0) == 1 && cd_puff_more(0, 1) == 0
+                && cd_puff_more(2, 0) == 0 && cd_puff_more(0 - 2, 0) == 0
+                && cd_puff_keep(0) == 1 && cd_puff_keep(0 - 2) == 1 && cd_puff_keep(1) == 0
+                && cd_stored_byte(0, 0, 255) == 0 && cd_stored_byte(0, 1, 255) == 0
+                && cd_stored_byte(0, 0, 0) == (0 - 2)
+                && cd_stored_byte(0 - 1, 0, 0) == 4
+                && cd_room(1ull, 4ull, 5ull, 2) == 0
+                && cd_room(1ull, 4ull, 4ull, 2) == 2
+                && cd_room(1ull, 4ull, 4ull, 1) == 1
+                && cd_room(1ull, 1ull, 1ull, 3) == 4, "cd-block");
+            {
+                unsigned long long joined = 0;
+                int added = 0, kept = 0, left = 0, masked = 0, ns = 0, ni = 0;
+                ck(cd_bits_more(0, 3) == 1 && cd_bits_more(3, 3) == 0 && cd_bits_more(0 - 1, 1) == 4
+                    && cd_bits_end(4ull, 4ull) == 2 && cd_bits_end(3ull, 4ull) == 0
+                    && cd_bits_join(1ull, 1, 8, &joined) == 0 && joined == 257ull
+                    && cd_bits_join(1ull, 1, 8, 0) == 4
+                    && cd_bits_add(7, 8, &added) == 0 && added == 15
+                    && cd_bits_keep(15ull, 2, &kept) == 0 && kept == 3
+                    && cd_bits_left(15, 2, &left) == 0 && left == 13
+                    && cd_bits_mask(15ull, 2, &masked) == 0 && masked == 3
+                    && cd_bits_mask(15ull, 0, &masked) == 0 && masked == 0
+                    && cd_bits_mask(1ull, 0 - 1, &masked) == 4
+                    && cd_len_step(0, 2, &ns, &ni) == 0
+                    && cd_len_step(2, 4, &ns, &ni) == 1 && ns == 1 && ni == 5
+                    && cd_len_step(0 - 1, 0, &ns, &ni) == 4
+                    && cd_len_step(1, 0, 0, &ni) == 4, "cd-bits");
+            {
+                unsigned char raw[2];
+                short lens[2];
+                int byte = 0;
+                unsigned long long next = 0;
+                raw[0] = 9;
+                raw[1] = 8;
+                lens[0] = 0;
+                lens[1] = 0;
+                ck(cd_in_byte(raw, 0ull, 2ull, &byte, &next) == 0 && byte == 9 && next == 1ull
+                    && cd_in_byte(raw, 2ull, 2ull, &byte, &next) == 2
+                    && cd_in_byte(0, 0ull, 1ull, &byte, &next) == 4
+                    && cd_len_put(lens, 1, 7) == 0 && lens[1] == 7
+                    && cd_len_put(lens, 0 - 1, 1) == 4
+                    && cd_len_put(0, 0, 1) == 4, "cd-io");
+            }
+            {
+                unsigned char ob[2];
+                unsigned char srcb = 3;
+                unsigned long long on = 0;
+                ob[0] = 0;
+                ob[1] = 0;
+                ck(cd_out_byte(ob, 0ull, 2ull, 9, &on) == 0 && ob[0] == 9 && on == 1ull
+                    && cd_out_byte(ob, 2ull, 2ull, 1, &on) == 1 && ob[1] == 0
+                    && cd_out_byte(0, 0ull, 1ull, 1, &on) == 4
+                    && cd_out_byte(ob, 0ull, 2ull, 256, &on) == 4
+                    && cd_span_byte(ob + 1, &srcb) == 0 && ob[1] == 3
+                    && cd_span_byte(0, &srcb) == 4
+                    && cd_span_byte(ob, 0) == 4, "cd-out");
+            }
+            }
+            }
+            ck(ls_data(0, 1, 1, 1ull, 8ull, 0, 4ull) == 4
+                && ls_data(1, 0, 1, 1ull, 8ull, 0, 4ull) == 1
+                && ls_data(1, 1, 0, 1ull, 8ull, 0, 4ull) == 1
+                && ls_data(1, 1, 1, 1ull, 0ull, 0, 4ull) == 1
+                && ls_data(1, 1, 1, 1ull, 8ull, 2, 4ull) == 1
+                && ls_data(1, 1, 1, 1ull, 3ull, 0, 4ull) == 1
+                && ls_data(1, 1, 1, 1ull, 8ull, 0, 4ull) == 0
+                && ls_data(1, 1, 1, 1ull, 8ull, 0 - 1, 4ull) == 4
+                && ls_data(1, 1, 1, 18446744073709551615ull, 1ull, 0, 1ull) == 1
+                && ls_sig(0, 16) == 4 && ls_sig("USLSIG2\n........", 0 - 1) == 4
+                && ls_sig("USLSIG2\n........", 15) == 1
+                && ls_sig("USLSIG2\n........", 16) == 0
+                && ls_sig("USLSIG3\n........", 16) == 0
+                && ls_sig("USLSIG1\n........", 16) == 1
+                && ls_sig("USLSIG2\n", 8) == 1, "ls-sig");
+            {
+                unsigned char wb[8];
+                int nb;
+                ck(ls_wire_base() == 16 && ls_wire_type() == 48
+                    && ls_wire_tail(0) == 77 && ls_wire_tail(1) == 86 && ls_wire_tail(0 - 1) == 4
+                    && ls_wire_rec(3, 0, 1) == 128 && ls_wire_rec(3, 1, 0) == 89
+                    && ls_wire_rec(0 - 1, 0, 0) == 4 && ls_wire_rec(1, 0 - 1, 0) == 4
+                    && ls_wire_rec(0, 0, 50000000) == 1
+                    && ls_wire_tag(0, 8) == 4 && ls_wire_tag(wb, 7) == 1
+                    && ls_wire_tag(wb, 8) == 0 && wb[0] == 85 && wb[6] == 49 && wb[7] == 10
+                    && ls_wire_flags(0, 4, 1, 0) == 4 && ls_wire_flags(wb, 3, 1, 0) == 1
+                    && ls_wire_flags(wb, 4, 2, 1) == 0 && wb[0] == 2 && wb[1] == 0 && wb[2] == 0 && wb[3] == 1
+                    && ls_wire_flags(wb, 4, 0 - 1, 0) == 4, "ls-wire");
+                ck(ls_bytes(0, &nb) == 0 && nb == 1 && ls_bytes(3, &nb) == 0 && nb == 4
+                    && ls_bytes(0 - 1, &nb) == 4 && ls_bytes(2147483647, &nb) == 1
+                    && ls_bytes(1, 0) == 4, "ls-bytes");
+                ck(lt_type_diff(1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9) == 0
+                    && lt_type_diff(1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) == 1
+                    && lt_wire3_diff(3, 3) == 0 && lt_wire3_diff(3, 2) == 1 && lt_wire3_diff(1, 2) == 0
+                    && lt_v3_diff(1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6) == 0
+                    && lt_v3_diff(1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) == 1
+                    && lt_member_diff(1, 1, 2, 2, 3, 3, 4, 4) == 0
+                    && lt_member_diff(1, 0, 0, 0, 0, 0, 0, 0) == 1
+                    && lt_member_v3(1, 1, 2, 2, 3, 3) == 0 && lt_member_v3(1, 0, 0, 0, 0, 0) == 1
+                    && lt_sig_diff(0, 0, 1, 1, 2, 2, 2, 2) == 0
+                    && lt_sig_diff(0, 0, 1, 1, 2, 2, 3, 3) == 1
+                    && lt_sig_diff(0, 0, 1, 1, 1025, 1025, 1025, 1025) == 1
+                    && lt_member_n(128, 1) == 0 && lt_member_n(129, 1) == 1 && lt_member_n(1, 0) == 1
+                    && lt_null_diff(1, 1) == 0 && lt_null_diff(1, 0) == 1 && lt_null_diff(0 - 1, 0) == 4
+                    && lt_graph_cap() == 16384
+                    && lt_graph_room(0, 16384, 0) == 0 && lt_graph_room(0, 16385, 0) == 1
+                    && lt_graph_room(1, 16384, 0) == 1 && lt_graph_room(1, 16383, 1) == 0
+                    && lt_graph_room(1, 16383, 2) == 1 && lt_graph_room(0, 0 - 1, 0) == 4
+                    && lt_graph_room(2, 0, 0) == 4, "lt-graph");
+            }
+            {
+                int v;
+                unsigned char b[8];
+                v = 9;
+                ck(mm_reserve_size() == 2147467264
+                    && mm_map_api(1) == 1 && mm_map_api(2) == 0 && mm_map_api(9) == 4
+                    && mm_map_prot(4, &v) == 0 && v == 12288
+                    && mm_map_prot(2, &v) == 0 && v == 3
+                    && mm_map_prot(3, &v) == 0 && v == 3
+                    && mm_map_prot(0, &v) == 2 && v == 3
+                    && mm_map_prot(5, &v) == 4 && v == 3
+                    && mm_map_prot(4, 0) == 4
+                    && mm_map_flags(4, &v) == 0 && v == 4
+                    && mm_map_flags(2, &v) == 0 && v == 34
+                    && mm_map_flags(3, &v) == 0 && v == 4098
+                    && mm_map_fd(4, &v) == 0 && v == 0
+                    && mm_map_fd(2, &v) == 0 && v == (0 - 1)
+                    && mm_map_fd(0, &v) == 0 && v == (0 - 1)
+                    && mm_map_fd(1, &v) == 2
+                    && mm_reserve_prot(4, &v) == 0 && v == 8192
+                    && mm_reserve_prot(2, &v) == 0 && v == 0
+                    && mm_reserve_flags(4, &v) == 0 && v == 1
+                    && mm_reserve_flags(2, &v) == 0 && v == 34
+                    && mm_reserve_flags(3, &v) == 0 && v == 4098
+                    && mm_commit_prot(4, &v) == 0 && v == 4096
+                    && mm_commit_prot(2, &v) == 0 && v == 3
+                    && mm_commit_prot(1, &v) == 2
+                    && mm_protect_prot(4, &v) == 0 && v == 32
+                    && mm_protect_prot(3, &v) == 0 && v == 5
+                    && mm_protect_prot(0, &v) == 2
+                    && mm_base_bad(1, 0) == 1 && mm_base_bad(0, 1) == 1
+                    && mm_base_bad(0, 0) == 0 && mm_base_bad(0 - 1, 0) == 4
+                    && mm_layout_same(1, 1, 2, 2, 3, 3) == 0
+                    && mm_layout_same(1, 2, 2, 2, 3, 3) == 1
+                    && mm_layout_same(1, 1, 2, 2, 3, 4) == 1
+                    && mm_commit_over(2, 1) == 1 && mm_commit_over(1, 1) == 0
+                    && mm_copy_at(0) == 40 && mm_copy_at(3) == 43
+                    && mm_copy_at(0 - 1) == 4, "mm-map");
+                ck(lw_put(0, 8, 513ull) == 4 && lw_put(b, 7, 513ull) == 1
+                    && lw_put(b, 8, 513ull) == 0 && b[0] == 1 && b[1] == 2
+                    && b[2] == 0 && b[7] == 0, "lw-put");
+                {
+                    unsigned char nb[24];
+                    ck(mw_image(0) == 0 && mw_image(3) == 3 && mw_image(2) == 2
+                        && mw_image(1) == 1 && mw_image(0 - 1) == 1
+                        && mw_image_why(0) == 0
+                        && strcmp(mw_image_why(3), "memory image extent too large") == 0
+                        && strcmp(mw_image_why(2), "bad memory image bounds") == 0
+                        && strcmp(mw_image_why(1), "bad memory image") == 0
+                        && strcmp(mw_map_why(), "cannot map native memory") == 0
+                        && strcmp(mw_reserve_why(), "cannot reserve native memory") == 0
+                        && strcmp(mw_span_why(), "memory mapping exceeds relative-address range") == 0
+                        && strcmp(mw_commit_why(), "cannot commit reserved native memory") == 0
+                        && strcmp(mw_over_why(), "native image exceeds reserved memory") == 0
+                        && strcmp(mw_layout_why(), "memory layout changed after binding") == 0
+                        && strcmp(mw_protect_why(), "cannot protect native code") == 0
+                        && strcmp(mw_lib_protect_why(), "cannot protect library code") == 0
+                        && strcmp(mw_stack_reserve_why(), "cannot reserve library call stack") == 0
+                        && strcmp(mw_stack_commit_why(), "cannot commit library call stack") == 0
+                        && mw_flush(0, 1) == 1 && mw_flush(1, 0) == 1 && mw_flush(1, 1) == 0
+                        && mw_flush(0 - 1, 1) == 4
+                        && mw_commit_base(1) == 0 && mw_commit_base(0) == 1
+                        && mw_commit_base(0 - 1) == 4, "mw-why");
+                    ck(mr_rows() == 17 && mr_cap_base() == 25 && mr_rec_len() == 8
+                        && mr_cli_text() == 7 && mr_cli_tail() == 8
+                        && mr_name_n(2) == 12 && mr_name_n(0) == 13 && mr_name_n(16) == 21
+                        && mr_name_n(17) == 4
+                        && mr_name(2, 0, 12) == 4 && mr_name(2, nb, 11) == 1
+                        && mr_name(2, nb, 12) == 0 && nb[0] == 0 && nb[1] == 109
+                        && nb[11] == 116
+                        && mr_tail_n(0) == 15 && mr_tail_n(1) == 12 && mr_tail_n(2) == 4
+                        && mr_tail(1, nb, 12) == 0 && nb[1] == 109 && nb[8] == 100
+                        && mr_extra_n(0) == 19 && mr_extra_n(1) == 17 && mr_extra_n(2) == 4
+                        && mr_extra(1, 0, 17) == 4 && mr_extra(1, nb, 16) == 1
+                        && mr_extra(1, nb, 17) == 0 && nb[0] == 0 && nb[1] == 108
+                        && mr_extra(2, nb, 19) == 4
+                        && mr_apple(1) == 32 && mr_apple(0) == 0 && mr_apple(0 - 1) == 4
+                        && mr_host_n() == 4 && mr_host_at(0) == 0 && mr_host_at(3) == 24
+                        && mr_host_at(4) == 4 && mr_host_cli(0) == 9 && mr_host_cli(3) == 12
+                        && mr_host_cli(0 - 1) == 4 && mr_mark() == 1, "mr-slot");
+                }
+            }
+            ck(bl_zerolen(0) == 1 && bl_zerolen(1) == 0, "bl-zero");
+            ck(bl_sym_room(65535, 65536) == 0 && bl_sym_room(65536, 65536) == 1 && bl_sym_room(-1, 65536) == 4
+                && bl_zero_room(65536, 65536) == 1 && bl_blob_room(0, 1) == 0 && bl_blob_room(1, 1) == 1
+                && bl_zero_merge(0, 2, 0, 4, 4) == 0 && bl_zero_merge(3, 1, 8, 4, 12) == 1
+                && bl_zero_merge(3, 1, 8, 4, 13) == 2 && bl_zero_merge(3, -1, 0, 0, 0) == 4
+                && bl_data_room(0, 0, 4194304, 0, 65536) == 0
+                && bl_data_room(4194303, 1, 4194304, 0, 65536) == 1
+                && bl_data_room(0, 1, 4194304, 65536, 65536) == 1
+                && bl_data_room(0, 1, 4194304, 0, 65536) == 2
+                && bl_data_room(-1, 1, 10, 0, 1) == 4, "bl-room");
+            ck(bi_le_len(32) == 4 && bi_le_len(3) == -1, "bi-le");
+            ck(og_pow2(4) == 1 && og_pow2(0) == 0 && og_pow2(6) == 0, "og-pow");
+            ck(be_alias(1, 1, 4) == 4 && be_alias(1, 2, 1) == 11 && be_frame_fit(0) == 0 && be_frame_fit(4096) == 1, "be-alias");
+            ck(be_rel_class(0) == 4 && be_rel_class("rel32") == 0 && be_rel_class("arm26") == 1
+                && be_arm_class(0) == 4 && be_arm_class("arm26") == 26 && be_arm_class("arm19") == 19
+                && be_arm_class("rel32") == -1 && be_rel_miss(-1) == 1 && be_rel_miss(0) == 0, "be-rel");
+            ck(lg_region(0, 10, 3, 4) == 1 && lg_region(0, 10, 8, 4) == 0 && lg_image_head(0, 40) == 4 && lg_gen_full(~0ull) == 1 && lg_frame_bad(1, 1, 1, 1, 1, 7, 0, 0, 0, 0) == 1, "lg-region");
+            ck(lg_own_bits("ownership") == 1 && lg_own_bits("ownership-fixedtyped") == 3
+                && lg_own_bits("ownership-callsite") == 7 && lg_own_bits("ownership-callback") == 11
+                && lg_own_bits("ownership-callback-callsite") == 15
+                && lg_own_bits("ownership-nope") == -1 && lg_own_bits(0) == 4
+                && lg_own_dup(2) == 1 && lg_own_dup(1) == 0 && lg_own_dup(-1) == 4, "lg-own");
+            ck(cg_cb_count(8) == 0 && cg_cb_count(9) == 1 && cg_unit_ord(0) == 0 && cg_unit_ord(-1) == -1 && cg_view_kind(0) == 4, "cg-count");
+            ck(rg_run_mode(4, "--check-net") == 1 && rg_run_mode(2, "--bundle") == 6 && rg_opt("--package") == 10 && rg_net_ref(0) == 0 && rg_pkg_text(0, -1) == -1, "rg-mode");
+            ck(cr_cmp(1, 2) == 0 && cr_cmp(2, 2) == 1 && cr_cmp(3, 2) == 2 && cr_rld(256) == 256 && cr_rld(-1) == 256 && cr_halt(49) == 0 && cr_halt(3) == -1 && cr_arity(0) == 0 && cr_arity(99) == -1, "cr-cmp");
+            ck(bp_prov_rc(0) == 0 && bp_prov_rc(1) == 1 && bp_file_miss(0) == 1 && bp_base_empty(0) == 4, "bp-prov");
+            ck(mg_fwd_full(64) == 1 && mg_fwd_full(63) == 0 && mg_wr_diff(3, 3) == 0 && mg_wr_diff(1, 2) == 1 && mg_tool(1, "ar") == 0 && mg_fwd_maxargs(0) == 0, "mg-full");
+            ck(ig_s_room(1, 33554432) == 1 && ig_s_room(0, 33554432) == 0 && ig_sign_pages(8192) == 1 && ig_sign_pages(8191) == 0 && ig_elf_phnum(1, 0) == 0 && ig_elf_phnum(0, 1) == 4 && ig_elf_phnum(0, 0) == 2 && ig_elf_etype(1, 0) == 1 && ig_elf_shentsize(1) == 64 && ig_elf_shstrsz(0) == 55 && ig_elf_shstrsz(1) == 67, "ig-elf");
+            ck(om_hash(0, 97) == 97 && om_op_slot(-1) == -1 && om_op_slot(128) == -1 && om_op_slot(0) == 0 && om_ctl(0) == 4 && om_ctl("ret") == 1 && om_ctl("mov") == 0 && om_block_room(262144) == 0 && om_frame_reg(2) == 0 && om_frame_reg(3) == 1 && om_lab_line(97, 58, 2) == 1 && om_lab_line(32, 58, 4) == 0, "om-hash");
+            ck(lm_ar_dec("12  ", 4, 100) == 12 && lm_ar_dec("  ", 2, 100) == -1 && lm_ar_dec(0, 1, 9) == -1 && lm_ar_op(0) == 4 && lm_ar_op("r") == 1 && lm_ar_op("z") == 0 && lm_isobject(0) == 4 && lm_isobject("a.o") == 1 && lm_isobject("a.obj") == 1 && lm_isobject("a.c") == 0 && lm_objnum("*", 1, 65535) == 42 && lm_elf_magic(127, 69, 76, 70) == 1 && lm_elf_magic(0, 69, 76, 70) == 0 && lm_unit_line(".unit 2", 7) == 1 && lm_unit_line(".unit 1", 7) == 0, "lm-ar");
+            ck(pm_bits(0, 0) == 0 && pm_bit(0, 1, -1) == 0 && pm_bit(0, 1, 0) == 4 && pm_esc(110) == 10 && pm_esc(113) == 113 && pm_base(2, 48, 120) == 16 && pm_base(2, 48, 49) == 8 && pm_base(1, 49, 0) == 10 && pm_strsame(0, "a") == 4 && pm_strsame("ab", "ab") == 1 && pm_strpre("abc", "ab") == 1 && pm_strpre("ab", "abc") == 0 && pm_f_mbits(1) == 23 && pm_f_mbits(0) == 52, "pm-esc");
+            ck(fg_prec(1) == 24 && fg_prec(0) == 53 && fg_emin(1) == (0 - 126) && fg_emin(0) == (0 - 1022) && fg_e10_cap(401) == 400 && fg_e10_cap(3) == 3 && fg_under(10, -400, 0 - 1022, 52) == 1 && fg_under(10, -10, 0 - 1022, 52) == 0 && fg_s_floor(-3) == 0 && fg_s_floor(4) == 4 && fg_keep_floor(-2) == -1 && fg_round(1, 0, 0) == 0 && fg_round(1, 1, 0) == 1 && fg_ovf(1024, 1023) == 1 && fg_ovf(1023, 1023) == 0 && fg_inf(1) == 2139095040ull && fg_shift_wide(64) == 1 && fg_shift_wide(63) == 0 && fg_esign(45) == -1 && fg_esign(43) == 1, "fg-fit");
+            ck(fg_hex_null(0, 4) == 4 && fg_dec_null(0, 1) == 4 && fg_hex_bits(0, 4, 0) == 0 && fg_dec_bits(0, 1, 0) == 0 && fg_hex_bits("0x1p0", 5, 0) == 4607182418800017408ull && fg_hex_bits("0x1p0", 5, 1) == 1065353216ull && fg_hex_bits("0x1.8p1", 7, 0) == 4613937818241073152ull && fg_dec_bits("1", 1, 0) == 4607182418800017408ull && fg_dec_bits("1", 1, 1) == 1065353216ull && fg_dec_bits("1.5", 3, 0) == 4609434218613702656ull && fg_dec_bits("0.5", 3, 0) == 4602678819172646912ull, "fg-walk");
+            ck(bx_jobs(0) == 8, "jobs-null");
+            ck(bx_jobs("8") == 8, "jobs-8");
+            ck(bx_jobs(" 12") == 12, "jobs-space");
+            ck(bx_jobs("\t8") == 8, "jobs-tab");
+            ck(bx_jobs("+8") == 8, "jobs-plus");
+            ck(bx_jobs("-3") == -3, "jobs-neg");
+            ck(bx_jobs("8abc") == 8, "jobs-tail");
+            ck(bx_jobs("") == 0, "jobs-empty");
+            ck(bx_jobs("abc") == 0, "jobs-text");
+            ck(bx_jobs("2147483648") == 2147483647, "jobs-hi");
+            ck(bx_jobs("-2147483648") == -2147483647 - 1, "jobs-lo");
+            ck(bx_jobs("-2147483649") == -2147483647 - 1, "jobs-lo2");
+            ck(bx_jobs_pool(64) == 64, "jobs-pool-64");
+            ck(bx_jobs_pool(65) == 64, "jobs-pool-65");
+            ck(bx_jobs_pool(-1) == -1, "jobs-pool-neg");
+            ck(bx_jobs_pool(0) == 0, "jobs-pool-0");
+            ck(bx_unit_cache(0, 0) == 1, "cache-null");
+            ck(bx_unit_cache(0, "0") == 0, "cache-off");
+            ck(bx_unit_cache(0, "00") == 1, "cache-00");
+            ck(bx_unit_cache(0, "") == 1, "cache-empty");
+            ck(bx_unit_cache(1, "1") == 0, "cache-deps");
+            ck(bx_unit_cache(-1, 0) == 0, "cache-depsneg");
+            ck(bx_two_pass(0) == 0, "pass-null");
+            ck(bx_two_pass("1") == 1, "pass-1");
+            ck(bx_two_pass("10") == 0, "pass-10");
+            ck(bx_two_pass("") == 0, "pass-empty");
+            ck(bx_two_pass("1 ") == 0, "pass-space");
+            ck(strcmp(bx_pkg_env("a", "b"), "a") == 0, "pkg-keep");
+            ck(strcmp(bx_pkg_env(0, "b"), "b") == 0, "pkg-env");
+            ck(strcmp(bx_pkg_env("", "b"), "") == 0, "pkg-empty");
+            ck(bx_pkg_env(0, 0) == 0, "pkg-none");
+            ck(bx_pkg_path("a", "a") == 0, "pkg-same");
+            ck(strcmp(bx_pkg_path("a", "b"), "a") == 0, "pkg-diff");
+            ck(bx_pkg_path(0, "b") == 0, "pkg-null");
+            ck(strcmp(bx_pkg_path("", "b"), "") == 0, "pkg-blank");
+            ck(bx_pkg_path("a", 0) == 0, "pkg-noargv");
+            for (i = 0; i < 8; i++) held[i] = 'Q';
+            ck(bx_copy_fit(0, held, 8) == 4 && held[0] == 'Q', "copy-null");
+            ck(bx_copy_fit("abcd", held, 4) == 1 && held[0] == 'Q', "copy-short");
+            ck(bx_copy_fit("ab", wide, 320) == 0 && strcmp(wide, "ab") == 0, "copy-ab");
+            ck(bx_copy_fit("", wide, 320) == 0 && strcmp(wide, "") == 0, "copy-empty");
+            ck(bx_s_line(0, held, 8) == 4, "s-null");
+            ck(bx_s_line("bad", wide, 320) == 0 && strcmp(wide, "unisacc: error: -S: bad\n") == 0, "s-bad");
+            ck(bx_route_line(2, 0, 0, 0, 0, wide, 320) == 4, "route-null");
+            for (i = 0; i < 8; i++) held[i] = 'Q';
+            ck(bx_route_line(5, "t", 0, 0, 0, held, 8) == 2 && held[0] == 'Q', "route-kind");
+            ck(bx_route_line(0, "t", 0, 0, 1, wide, 320) == 0 && strcmp(wide, "t/multi/fwdexec/O1") == 0, "route-fwd");
+            ck(bx_route_line(1, "t", 0, 0, -2, wide, 320) == 0 && strcmp(wide, "t/multi/image/O-2") == 0, "route-image");
+            ck(bx_route_line(2, "t", 1, 1, 3, wide, 320) == 0 && strcmp(wide, "t/warn/multi/image/O3") == 0, "route-warn");
+            ck(bx_route_line(2, "t", 0, 0, 0, wide, 320) == 0 && strcmp(wide, "t/image/O0") == 0, "route-plain");
+            ck(bx_route_line(3, "t", 1, 0, 0, wide, 320) == 0 && strcmp(wide, "t/warn/unit") == 0, "route-unit");
+            ck(bx_route_line(3, "t", 0, 1, 9, wide, 320) == 0 && strcmp(wide, "t/unit") == 0, "route-unit-plain");
+            ck(bx_route_line(4, "t", 0, 0, 0, wide, 320) == 0 && strcmp(wide, "t/memory") == 0, "route-mem");
+            ck(bx_route_line(0, "t", 0, 0, 1, held, 4) == 1 && held[0] == 'Q', "route-short");
+            ck(bx_unit_file(0, 1, 2, held, 8) == 4, "unit-null");
+            ck(bx_unit_file("/tmp", 7, 3, wide, 320) == 0 && strcmp(wide, "/tmp/ua-unit-7-3") == 0, "unit-file");
+            ck(bx_unit_file("/tmp", -2, 0, wide, 320) == 0 && strcmp(wide, "/tmp/ua-unit--2-0") == 0, "unit-neg");
+            ck(bx_pid_file(0, 1, held, 8) == 4, "pid-null");
+            ck(bx_pid_file("a.o", 12, wide, 320) == 0 && strcmp(wide, "a.o.12") == 0, "pid-file");
+            ck(bx_pid_file("a.o", -4, wide, 320) == 0 && strcmp(wide, "a.o.-4") == 0, "pid-neg");
+            wide[0] = 'Z';
+            ck(bx_fwd_path(0, 0, 0, 0, 8) == 4, "fwd-null");
+            ck(bx_fwd_path(0, 0, 0, wide, 24) == 1 && wide[0] == 'Z', "fwd-short");
+            ck(bx_fwd_path(1, 0, 1, wide, 320) == 4 && wide[0] == 'Z', "fwd-nodir");
+            ck(bx_fwd_path(0, 0, 0, wide, 25) == 0 && strcmp(wide, "/tmp/unisacc-forward-0.c") == 0, "fwd-zero");
+            ck(bx_fwd_path(0, "ignored", 255, wide, 320) == 0 && strcmp(wide, "/tmp/unisacc-forward-ff.c") == 0, "fwd-ff");
+            ck(bx_fwd_path(0, 0, 16, wide, 320) == 0 && strcmp(wide, "/tmp/unisacc-forward-10.c") == 0, "fwd-10");
+            ck(bx_fwd_path(0, 0, (unsigned long long)-1, wide, 320) == 0 && strcmp(wide, "/tmp/unisacc-forward-ffffffffffffffff.c") == 0, "fwd-all");
+            ck(bx_fwd_path(1, "", 10, wide, 320) == 0 && strcmp(wide, "\\unisacc-forward-a.c") == 0, "fwd-empty");
+            ck(bx_fwd_path(1, "C:\\t", 16, wide, 320) == 0 && strcmp(wide, "C:\\t\\unisacc-forward-10.c") == 0, "fwd-win");
+            for (i = 0; i < 8; i++) held[i] = 'Q';
+            ck(bx_dbg_probe(2, 1, "r", held, 8) == 2 && held[0] == 'Q', "dbg-kind");
+            ck(bx_dbg_probe(-1, 1, "r", held, 8) == 2 && held[0] == 'Q', "dbg-negkind");
+            ck(bx_dbg_probe(0, 1, "", wide, 320) == 4, "dbg-empty");
+            ck(bx_dbg_probe(0, 1, 0, wide, 320) == 4, "dbg-null");
+            ck(bx_dbg_probe(0, -3, "p", wide, 320) == 0 && strcmp(wide, "unisacc: rr early multi-run probe lk=-3 route=p\n") == 0, "dbg-run");
+            ck(bx_dbg_probe(1, 1, "q", wide, 320) == 0 && strcmp(wide, "unisacc: rr early multi-image probe lk=1 route=q\n") == 0, "dbg-image");
+            ck(bx_dbg_probe(0, 1, "route", held, 8) == 1 && held[0] == 'Q', "dbg-short");
+            ck(bx_dbg_hexfail(4, wide, 320) == 0 && strcmp(wide, "unisacc: rr early sources_hex failed nsources=4\n") == 0, "dbg-hex");
+            ck(bx_dbg_hexfail(-2, wide, 320) == 0 && strcmp(wide, "unisacc: rr early sources_hex failed nsources=-2\n") == 0, "dbg-hex-neg");
+            ck(bx_dbg_lookup(1, 0, "r", wide, 320) == 0 && strcmp(wide, "unisacc: rr early lookup lk=1 mode=0 route=r\n") == 0, "dbg-look");
+            ck(bx_dbg_lookup(1, 0, "", wide, 320) == 4, "dbg-look-empty");
+            ck(bx_dbg_lookup(1, -4, 0, wide, 320) == 4, "dbg-look-null");
+            ck(bx_dbg_host(2, 3, -1, wide, 320) == 0 && strcmp(wide, "unisacc: host reuse store failed rc=2 tape_n=3 attrs_n=-1\n") == 0, "dbg-host");
+            ck(bx_dbg_stub(0, 1, 2, wide, 320) == 0 && strcmp(wide, "unisacc: rr stub store rc=0 receipts=1 absent=2\n") == 0, "dbg-stub");
+            ck(bx_loader_why(0, held, 8) == 4 && held[0] == 'Q', "load-null");
+            ck(bx_loader_why("", held, 8) == 4 && held[0] == 'Q', "load-empty");
+            ck(bx_loader_why("/lib64/ld-linux-x86-64.so.2", wide, 320) == 0 && strcmp(wide, "this program calls the host C library, and running it needs the host's dynamic loader /lib64/ld-linux-x86-64.so.2, which could not be opened here (as on a system without glibc); write the program with -o and run it where glibc is installed") == 0, "load-why");
+            for (i = 0; i < 8; i++) held[i] = 'Q';
+            ck(bx_loader_why("/lib64/ld-linux-x86-64.so.2", held, 8) == 1 && held[0] == 'Q', "load-short");
+            sect = 9; add = 7;
+            ck(sg_relo_slot(1, 1, 1, 0, &sect, &add) == 0 && sect == 9, "relo-size");
+            ck(sg_relo_slot(0, 0, 1, 0, &sect, &add) == 0 && sect == 9, "relo-off");
+            ck(sg_relo_slot(0, 1, 1, 0, 0, &add) == 4, "relo-null");
+            ck(sg_relo_slot(0, 1, 4294967296ull - 8ull, 0, &sect, &add) == 2 && sect == 9, "relo-ffi");
+            ck(sg_relo_slot(0, 1, 3, 0, &sect, &add) == 1 && sect == 1 && add == 3, "relo-text");
+            ck(sg_relo_slot(0, 1, 4294967296ull + 4ull, 8, &sect, &add) == 1 && sect == 2 && add == 4, "relo-data");
+            ck(sg_relo_slot(0, 1, 4294967296ull + 9ull, 8, &sect, &add) == 1 && sect == 3 && add == 1, "relo-bss");
+            ck(sg_relcall_add(900) == -4 && sg_relcall_add(901) == 0, "relcall-add");
+            ck(strcmp(sg_interp(1), "/lib/ld-linux-aarch64.so.1") == 0, "interp-arm");
+            ck(strcmp(sg_interp(0), "/lib64/ld-linux-x86-64.so.2") == 0, "interp-x86");
+            ck(sg_fx_nr(1, 0) == 279 && sg_fx_nr(1, 1) == 281 && sg_fx_nr(1, 2) == 57 && sg_fx_nr(1, 3) == 64, "fx-arm");
+            ck(sg_fx_nr(0, 0) == 319 && sg_fx_nr(0, 1) == 322 && sg_fx_nr(0, 2) == 3 && sg_fx_nr(0, 3) == 1, "fx-x86");
+            ck(sg_fx_nr(2, 0) == -1 && sg_fx_nr(1, 4) == -1 && sg_fx_nr(0, -1) == -1, "fx-bad");
+            ck(sg_interp(2) == 0 && sg_elf_machine(1) == 183 && sg_elf_machine(0) == 62 && sg_elf_machine(3) == -1, "elf-mach");
+            ck(sg_rela_type(1) == 1025 && sg_rela_type(0) == 6 && sg_dyn_name(0) == 11 && sg_dyn_name(3) == 32 && sg_dyn_name(4) == -1, "elf-dyn");
+            ck(sg_rotr32(0x80000001u, 1) == 0xc0000000u, "rotr");
+            ck(sg_elf_hdrs(0) == 176 && sg_elf_hdrs(1) == 784 && sg_elf_hdrs(-1) == 784, "elf-hdrs");
+            ck(sg_hex('9') == 9 && sg_hex('a') == 10 && sg_hex('F') == 15, "bk-hex");
+            ck(sg_tape_space(' ') == 1 && sg_tape_space('\n') == 0 && sg_tape_sep(',') == 1 && sg_tape_sep('a') == 0, "tape-sep");
+            ck(sg_regnum(0) == 4 && sg_regnum("rax") == 0 && sg_regnum("r15") == 15 && sg_regnum("x10") == 10 && sg_regnum("nope") == -1, "regnum");
+            ck(sg_isccw(0, 8) == 0 && sg_isccw("__ccw_a", 7) == 1 && sg_isccw("__ccw_", 6) == 0 && sg_isccw("xxccw_a", 7) == 0, "isccw");
+            w = sg_bfenc(3, 5, 4, 1);
+            ck(sg_bfwidth(w) == 3 && sg_bfofs(w) == 5 && sg_bfunit(w) == 4 && sg_bfsig(w) == 1, "bf-enc");
+            ck(sg_isal('A') == 1 && sg_isal('_') == 1 && sg_isal('0') == 0 && sg_isdi('7') == 1 && sg_isdi('a') == 0, "pp-al");
+            raw[0] = 92; wide[0] = 'u'; wide[1] = '0'; wide[2] = '0'; wide[3] = '4'; wide[4] = '1'; wide[5] = 0;
+            held[0] = 92; held[1] = 'u'; held[2] = '0'; held[3] = '0'; held[4] = '4'; held[5] = '1'; held[6] = 0;
+            ck(sg_ucn_span(held, 0, 6) == 6 && sg_ucn_span(held, 0, 4) == 0, "ucn-span");
+            ck(sg_id_same("A", 1, held, 6) == 1 && sg_id_same("B", 1, held, 6) == 0 && sg_id_same(0, 1, "A", 1) == 4, "id-same");
+            origins[0] = 40;
+            ck(sg_source_at(1, 10, 10, origins) == 40 && sg_source_at(0, 10, 3, origins) == 3 && sg_source_at(1, 10, 10, 0) == -1, "src-at");
+            ck(sg_fwd_maxargs(0) == 0 && sg_fwd_maxargs("lnx") == 0 && sg_fwd_maxargs("win") == 4, "fwd-args");
+            ck(sg_fwd_stop(1, 0, 3) == 1 && sg_fwd_stop(1, 1, 0) == 1 && sg_fwd_stop(1, 1, 2) == 0 && sg_fwd_stop(0, 0, 0) == 0, "fwd-stop");
+            ck(sg_isctl("jump") == 1 && sg_isctl("jumpz") == 1 && sg_isctl("ret") == 1 && sg_isctl("add") == 0 && sg_isctl(0) == 0, "opt-ctl");
+            ck(sg_islab('a', 2, ':') == 1 && sg_islab(' ', 2, ':') == 0 && sg_islab('.', 4, ':') == 0 && sg_islab('a', 1, ':') == 0, "opt-lab");
+            raw[0] = 1; raw[1] = 2;
+            ck(sg_le(raw, 2) == 513 && sg_le(0, 2) == 0 && sg_same("ab", "ab", 2) == 1 && sg_same("ab", "ac", 2) == 0 && sg_same(0, "a", 1) == 4 && sg_same(0, 0, 0) == 1, "tb-le");
+            ck(sg_target_id(0) == 4 && sg_target_id("lnx/arm64") == 2 && sg_target_id("win/x86_64") == 5 && sg_target_id("no") == 0, "tb-target");
+            ck(sg_space(' ') == 1 && sg_space('\n') == 1 && sg_space('\r') == 1 && sg_space('a') == 0, "tp-space");
+            ck(sg_namechar('A', 1) == 1 && sg_namechar('0', 1) == 0 && sg_namechar('0', 0) == 1 && sg_namechar('$', 0) == 1 && sg_validname("a.b", 3) == 1 && sg_validname("9a", 2) == 0 && sg_validname(0, 1) == 0, "tp-name");
+        }
+    }
+    {
+        unsigned char bytes[4], dec, model;
+        int i;
+        bytes[0] = 'U'; bytes[1] = 'N'; bytes[2] = 'I'; bytes[3] = 1;
+        ml_n = 0; ml_rc = 0; ml_fail_n = 0; ml_why_text = 0; ml_failed = 0;
+        ml_seen_dec = 0; ml_seen_model = 0; ml_seen_data = 0; ml_seen_len = -1;
+        for (i = 0; i < 8; i++) ml_seq[i] = 0;
+        ck(ml_load(&dec, &model, bytes, 4, ml_decode_cb, ml_why_cb, ml_take_cb, ml_bind_cb, ml_fail_cb) == 0
+            && ml_n == 3 && ml_seq[0] == 1 && ml_seq[1] == 3 && ml_seq[2] == 4
+            && ml_fail_n == 0 && ml_seen_dec == &dec && ml_seen_model == &model
+            && ml_seen_data == bytes && ml_seen_len == 4, "load-order-success");
+        ml_n = 0; ml_rc = 1; ml_fail_n = 0; ml_why_text = "bad header"; ml_failed = 0;
+        ck(ml_load(&dec, &model, bytes, 4, ml_decode_cb, ml_why_cb, ml_take_cb, ml_bind_cb, ml_fail_cb) == 1
+            && ml_n == 3 && ml_seq[0] == 1 && ml_seq[1] == 2 && ml_seq[2] == 5
+            && ml_fail_n == 1 && strcmp(ml_failed, "bad header") == 0, "load-keeps-why");
+        ml_n = 0; ml_rc = 1; ml_fail_n = 0; ml_why_text = 0; ml_failed = 0;
+        ck(ml_load(&dec, &model, bytes, 4, ml_decode_cb, ml_why_cb, ml_take_cb, ml_bind_cb, ml_fail_cb) == 1
+            && ml_seq[1] == 2 && ml_seq[2] == 5 && strcmp(ml_failed, "invalid model input") == 0, "load-default-why");
+        ml_n = 0; ml_rc = 1; ml_fail_n = 0; ml_why_text = ""; ml_failed = 0;
+        ck(ml_load(&dec, &model, bytes, 4, ml_decode_cb, ml_why_cb, ml_take_cb, ml_bind_cb, ml_fail_cb) == 1
+            && ml_failed && ml_failed[0] == 0 && ml_seq[2] == 5, "load-empty-why");
+        ml_n = 0; ml_rc = 0; ml_fail_n = 0; ml_seen_data = bytes; ml_seen_len = 9;
+        ck(ml_load(&dec, &model, 0, 0, ml_decode_cb, ml_why_cb, ml_take_cb, ml_bind_cb, ml_fail_cb) == 0
+            && ml_seen_data == 0 && ml_seen_len == 0 && ml_seq[0] == 1 && ml_seq[1] == 3, "load-empty-span");
+        ml_n = 0; ml_fail_n = 0;
+        ck(ml_load(0, &model, bytes, 4, ml_decode_cb, ml_why_cb, ml_take_cb, ml_bind_cb, ml_fail_cb) == 2
+            && ml_n == 0 && ml_fail_n == 0, "load-null-cursor");
+    }
+    {
+        long long steps;
+        char why[160], reject[80], runmsg[80], blown[80], raw[8];
+        int i;
+        const char *bad = "run: UNISA_MAXSTEPS must be a positive decimal integer <= 9223372036854775807\n";
+        steps = 5; ex_parse_calls = 0; ex_parse_ok = 0; ex_seen_budget = 0;
+        ck(ex_budget(1, "nope", 9, ex_parse_cb, &steps, why, (long)sizeof why) == 0
+            && steps == 9 && ex_parse_calls == 0 && why[0] == 0, "exec-product-ignores-budget");
+        steps = 5; ex_parse_calls = 0;
+        ck(ex_budget(0, 0, 9, ex_parse_cb, &steps, why, (long)sizeof why) == 0
+            && steps == 9 && ex_parse_calls == 0, "exec-absent-budget");
+        steps = 5; ex_parse_calls = 0; ex_parse_ok = 1; ex_parsed = 12;
+        ck(ex_budget(0, "12", 9, ex_parse_cb, &steps, why, (long)sizeof why) == 0
+            && steps == 12 && ex_parse_calls == 1 && strcmp(ex_seen_budget, "12") == 0 && why[0] == 0, "exec-parsed-budget");
+        steps = 5; ex_parse_calls = 0; ex_parse_ok = 0;
+        ck(ex_budget(0, "0", 9, ex_parse_cb, &steps, why, (long)sizeof why) == 2
+            && steps == 5 && ex_parse_calls == 1 && strcmp(why, bad) == 0, "exec-bad-budget");
+        steps = 5; ex_parse_calls = 0;
+        ck(ex_budget(0, "1", 9, 0, &steps, why, (long)sizeof why) == 3
+            && steps == 5 && ex_parse_calls == 0, "exec-null-parse");
+        ck(ex_budget(0, 0, 9, ex_parse_cb, 0, why, (long)sizeof why) == 3, "exec-null-steps");
+        for (i = 0; i < 8; i++) raw[i] = "ab\0cdef"[i];
+        ck(ex_lines(1, "abcdef", 2, 9, reject, (long)sizeof reject, runmsg, (long)sizeof runmsg, blown, (long)sizeof blown) == 0
+            && strcmp(reject, "reject: ab\n") == 0 && runmsg[0] == 0 && blown[0] == 0, "exec-reject-precision");
+        ck(ex_lines(1, raw, 5, 9, reject, (long)sizeof reject, runmsg, (long)sizeof runmsg, blown, (long)sizeof blown) == 0
+            && strcmp(reject, "reject: ab\n") == 0, "exec-reject-stops-at-zero");
+        ck(ex_lines(1, "abcdef", 0, 9, reject, (long)sizeof reject, runmsg, (long)sizeof runmsg, blown, (long)sizeof blown) == 0
+            && reject[0] == 0 && runmsg[0] == 0 && blown[0] == 0, "exec-reject-absent");
+        ck(ex_lines(2, "bad", 0, 9, reject, (long)sizeof reject, runmsg, (long)sizeof runmsg, blown, (long)sizeof blown) == 0
+            && reject[0] == 0 && strcmp(runmsg, "run: bad\n") == 0 && blown[0] == 0, "exec-run-line");
+        ck(ex_lines(3, 0, 0, 400000000000LL, reject, (long)sizeof reject, runmsg, (long)sizeof runmsg, blown, (long)sizeof blown) == 0
+            && strcmp(blown, "step budget exhausted (budget 400000000000 steps)\n") == 0, "exec-budget-line");
+        ck(ex_lines(3, 0, 0, -1, reject, (long)sizeof reject, runmsg, (long)sizeof runmsg, blown, (long)sizeof blown) == 0
+            && strcmp(blown, "step budget exhausted (budget -1 steps)\n") == 0, "exec-budget-negative");
+        for (i = 0; i < 8; i++) { reject[i] = 'Q'; runmsg[i] = 'Q'; blown[i] = 'Q'; }
+        ck(ex_lines(1, "abcdef", 2, 9, reject, 4, runmsg, 8, blown, 8) == 1
+            && reject[0] == 'Q' && runmsg[0] == 'Q' && blown[0] == 'Q', "exec-line-short");
+        ck(ex_lines(2, 0, 0, 9, reject, 8, runmsg, 8, blown, 8) == 3
+            && reject[0] == 'Q' && runmsg[0] == 'Q', "exec-run-null-reason");
+    }
+    {
+        unsigned char plain[4], owned[4];
+        int slot;
+        plain[0] = 'p'; owned[0] = 'o'; slot = 7;
+        sh_reset();
+        ck(sh_apply(2, 1, 9, 1, "compressed model CRC", &slot, plain, 2, owned,
+                    sh_fail_cb, sh_bind_cb, sh_clear_cb, sh_loading_cb, sh_load_cb,
+                    sh_rel_cb, sh_lb_cb, sh_cap_cb, sh_mark_cb) == 2
+            && sh_n == 1 && sh_seq[0] == 1 && strcmp(sh_why, "compressed model CRC") == 0, "handoff-refuse");
+        sh_reset();
+        ck(sh_apply(3, 0, 0, 0, "invalid compressed model", 0, 0, 0, 0,
+                    sh_fail_cb, 0, 0, 0, 0, 0, 0, 0, 0) == 2
+            && sh_n == 1 && strcmp(sh_why, "invalid compressed model") == 0, "handoff-bad-argument");
+        sh_reset();
+        ck(sh_apply(2, 0, 0, 0, "compressed model CRC", 0, 0, 0, 0,
+                    0, sh_bind_cb, 0, 0, 0, 0, 0, 0, 0) == 3
+            && sh_n == 0, "handoff-refuse-null");
+        sh_reset();
+        ck(sh_apply(0, 1, 9, 1, "x", &slot, plain, 2, owned,
+                    sh_fail_cb, sh_bind_cb, sh_clear_cb, sh_loading_cb, sh_load_cb,
+                    sh_rel_cb, sh_lb_cb, sh_cap_cb, sh_mark_cb) == 0
+            && sh_n == 1 && sh_seq[0] == 2 && sh_bind_seen == &slot && sh_rel_seen == 0, "handoff-bind");
+        sh_reset();
+        ck(sh_apply(0, 0, 0, 0, 0, &slot, plain, 2, owned,
+                    0, 0, sh_clear_cb, 0, 0, 0, 0, 0, 0) == 3
+            && sh_n == 0, "handoff-bind-null");
+        sh_reset();
+        ck(sh_apply(1, 0, 9, 0, 0, &slot, plain, 2, owned,
+                    0, 0, sh_clear_cb, sh_loading_cb, sh_load_cb, sh_rel_cb, sh_lb_cb, 0, 0) == 0
+            && sh_n == 6 && sh_seq[0] == 3 && sh_seq[1] == 4 && sh_seq[2] == 5
+            && sh_seq[3] == 6 && sh_seq[4] == 7 && sh_seq[5] == 4
+            && sh_loading_v[0] == 1 && sh_loading_v[1] == 0
+            && sh_load_p == plain && sh_load_len == 2 && sh_rel_seen == owned
+            && sh_cap_seen == 0, "handoff-plain");
+        sh_reset();
+        ck(sh_apply(1, 1, 4, 1, 0, &slot, plain, 2, owned,
+                    0, 0, sh_clear_cb, sh_loading_cb, sh_load_cb, sh_rel_cb, sh_lb_cb,
+                    sh_cap_cb, sh_mark_cb) == 0
+            && sh_n == 8 && sh_seq[2] == 5 && sh_seq[5] == 8 && sh_seq[6] == 9 && sh_seq[7] == 4
+            && sh_load_p == owned && sh_load_len == 4
+            && sh_cap_seen == &slot && sh_mark_seen == &slot
+            && sh_loading_v[1] == 0, "handoff-owned-slot");
+        sh_reset();
+        ck(sh_apply(4, 0, 1, 0, 0, 0, plain, 2, 0,
+                    0, 0, sh_clear_cb, sh_loading_cb, sh_load_cb, sh_rel_cb, sh_lb_cb, 0, 0) == 0
+            && sh_seq[0] == 3 && sh_load_p == plain && sh_rel_seen == 0, "handoff-other-opens");
+        sh_reset();
+        ck(sh_apply(1, 2, 4, 0, 0, 0, plain, 2, owned,
+                    0, 0, sh_clear_cb, sh_loading_cb, sh_load_cb, sh_rel_cb, sh_lb_cb, 0, 0) == 0
+            && sh_load_p == owned && sh_load_len == 4, "handoff-owned-nonzero");
+        sh_reset();
+        ck(sh_apply(1, 0, 0, 0, 0, 0, plain, 2, owned,
+                    0, 0, sh_clear_cb, sh_loading_cb, 0, sh_rel_cb, sh_lb_cb, 0, 0) == 3
+            && sh_n == 0, "handoff-load-null");
+        sh_reset();
+        ck(sh_apply(1, 0, 0, 1, 0, &slot, plain, 2, owned,
+                    0, 0, sh_clear_cb, sh_loading_cb, sh_load_cb, sh_rel_cb, sh_lb_cb,
+                    sh_cap_cb, 0) == 3
+            && sh_n == 0, "handoff-mark-null");
+    }
+    {
+        CxModel view;
+        int sv[8], i, saved;
+        void *pv[16], *expect[16];
+        int *sc[8];
+        void **slot[16];
+        char blob[16];
+        for (i = 0; i < 8; i++) { sv[i] = 100 + i; sc[i] = &sv[i]; }
+        for (i = 0; i < 16; i++) { pv[i] = &blob[i]; expect[i] = &blob[i]; slot[i] = &pv[i]; }
+        view.loaded = 41; view.ns = 77;
+        ck(mv_capture(&view, sc, 8, slot, 16) == 0
+            && view.loaded == 41 && view.ns == 100 && view.nq == 101 && view.nrg == 102
+            && view.nstr == 103 && view.start == 104 && view.isnet == 105
+            && view.topmax == 106 && view.nqa == 107
+            && view.str == (char **)expect[0] && view.strl == (int *)expect[1]
+            && view.qoff == (int *)expect[2] && view.qlen == (int *)expect[3]
+            && view.qa == (int64_t *)expect[4] && view.smode == (int *)expect[5]
+            && view.rowc == (int *)expect[6] && view.rowk == (int **)expect[7]
+            && view.rown == (int **)expect[8] && view.rowq == (int **)expect[9]
+            && view.nlo == (int *)expect[10] && view.nhi == (int *)expect[11]
+            && view.bn == (int *)expect[12] && view.bq == (int *)expect[13]
+            && view.rets == (int *)expect[14] && view.retok == (unsigned char **)expect[15]
+            && sv[0] == 100 && pv[15] == expect[15], "view-capture");
+        ck(mv_clear(sc, 8, slot, 16) == 0
+            && sv[0] == 0 && sv[7] == 0 && pv[0] == 0 && pv[15] == 0
+            && view.loaded == 41 && view.ns == 100 && view.retok == (unsigned char **)expect[15], "view-clear");
+        ck(mv_bind(&view, sc, 8, slot, 16) == 0
+            && sv[0] == 100 && sv[7] == 107 && pv[0] == expect[0] && pv[15] == expect[15]
+            && view.loaded == 41 && view.ns == 100, "view-bind");
+        saved = sv[0];
+        ck(mv_capture(0, sc, 8, slot, 16) == 3 && sv[0] == saved && view.ns == 100, "view-capture-null");
+        ck(mv_bind(0, sc, 8, slot, 16) == 3 && sv[0] == saved, "view-bind-null");
+        ck(mv_clear(sc, 7, slot, 16) == 3 && sv[0] == saved, "view-clear-width");
+        slot[4] = 0;
+        ck(mv_clear(sc, 8, slot, 16) == 3 && sv[0] == saved && pv[0] == expect[0], "view-clear-null-slot");
+    }
+    {
+        char line[64];
+        int next = 9, got = 9, i;
+        const char *reason;
+        for (i = 0; i < 64; i++) line[i] = 'Z';
+        reason = cxsf_open_reason(-2, 0, 2, 20, 13);
+        ck(reason && strcmp(reason, "ENOENT") == 0, "file-reason-enoent");
+        reason = cxsf_open_reason(-20, 0, 2, 20, 13);
+        ck(reason && strcmp(reason, "ENOTDIR") == 0, "file-reason-enotdir");
+        reason = cxsf_open_reason(-13, 0, 2, 20, 13);
+        ck(reason && strcmp(reason, "EACCES") == 0, "file-reason-eacces");
+        ck(cxsf_open_reason(-7, 0, 2, 20, 13) == 0, "file-reason-other");
+        ck(cxsf_open_reason(-2, 1, 2, 20, 13) == 0, "file-reason-windows");
+        ck(cxsf_open_gate(3, 0, 0, 2) == 0 && cxsf_open_gate(0, 1, 1, 2) == 0, "file-gate-open");
+        ck(cxsf_open_gate(-2, 1, 0, 2) == 1 && cxsf_open_gate(-2, 2, 0, 2) == 1, "file-gate-optional-enoent");
+        ck(cxsf_open_gate(-13, 1, 0, 2) == 2 && cxsf_open_gate(-2, 0, 0, 2) == 2, "file-gate-fatal");
+        ck(cxsf_open_gate(-5, 1, 1, 0) == 1 && cxsf_open_gate(-5, 0, 1, 0) == 2, "file-gate-windows");
+        ck(cxsf_open_line(line, 64, "a.cx", 0) == 0
+            && strcmp(line, "run: cannot open a.cx\n") == 0, "file-line-plain");
+        ck(cxsf_open_line(line, 64, "a.cx", "ENOENT") == 0
+            && strcmp(line, "run: cannot open a.cx: ENOENT\n") == 0, "file-line-reason");
+        ck(cxsf_open_line(line, 64, "a.cx", "") == 0
+            && strcmp(line, "run: cannot open a.cx: \n") == 0, "file-line-empty-reason");
+        for (i = 0; i < 64; i++) line[i] = 'Z';
+        ck(cxsf_open_line(line, 22, "a.cx", 0) == 1 && line[0] == 'Z', "file-line-short");
+        ck(cxsf_open_line(0, 64, "a.cx", 0) == 1 && cxsf_open_line(line, 64, 0, 0) == 1
+            && line[0] == 'Z', "file-line-null");
+        ck(cxsf_read_cap(0, 100, 0) == 65536 && cxsf_read_cap(1, 10, 10) == 65536
+            && cxsf_read_cap(1, 10, 20) == 65536, "file-cap-default");
+        ck(cxsf_read_cap(1, 100, 10) == 91 && cxsf_read_cap(1, 5, -3) == 9, "file-cap-span");
+        ck(cxsf_read_cap(1, 1073741823LL, 0) == 1073741824
+            && cxsf_read_cap(1, 1073741824LL, 0) == 65536, "file-cap-limit");
+        ck(cxsf_read_grow(1073741823, &next) == 0 && next == 2147483646, "file-grow-edge");
+        next = 9;
+        ck(cxsf_read_grow(1073741824, &next) == 1 && next == 9, "file-grow-too-large");
+        ck(cxsf_read_grow(8, 0) == 4, "file-grow-null");
+        ck(cxsf_read_take(-4, 10, 3, &got) == 1 && got == 9, "file-take-error");
+        ck(cxsf_read_take(0, 10, 3, &got) == 2 && got == 9, "file-take-eof");
+        ck(cxsf_read_take(5, 10, 3, &got) == 0 && got == 8, "file-take-bytes");
+        got = 9;
+        ck(cxsf_read_take(8, 10, 3, &got) == 3 && got == 9, "file-take-oversize");
+        ck(cxsf_read_take(-1, 10, 3, 0) == 4, "file-take-null");
+        ck(cxsf_package_gate(0) == 0 && cxsf_package_gate(4) == 0, "package-gate-open");
+        ck(cxsf_package_gate(-1) == 2 && cxsf_package_gate(-2) == 2, "package-gate-fatal");
+        for (i = 0; i < 64; i++) line[i] = 'Z';
+        ck(cxsf_open_line(line, 64, "pkg.bin", 0) == 0
+            && strcmp(line, "run: cannot open pkg.bin\n") == 0, "package-line");
+    }
+    {
+        long long a[8], b[8];
+        int k, mark;
+        void *cache = &mark;
+        for (k = 0; k < 8; k++) a[k] = b[k] = 10 + k;
+        ck(cxpl_stamp_match(a, b, 8, 4, 4, 1, 1) == 1, "cache-stamp-same");
+        ck(cxpl_stamp_match(a, b, 8, 4, 4, 2, 1) == 1, "cache-stamp-valid-nonzero");
+        ck(cxpl_stamp_match(a, b, 8, 4, 4, 0, 1) == 0
+            && cxpl_stamp_match(a, b, 8, 4, 4, 1, 0) == 0, "cache-stamp-invalid");
+        ck(cxpl_stamp_match(a, b, 8, 4, 5, 1, 1) == 0, "cache-stamp-tag");
+        b[0] = 99; ck(cxpl_stamp_match(a, b, 8, 4, 4, 1, 1) == 0, "cache-stamp-size");
+        b[0] = a[0]; b[1] = 99; ck(cxpl_stamp_match(a, b, 8, 4, 4, 1, 1) == 0, "cache-stamp-off");
+        b[1] = a[1]; b[7] = 99; ck(cxpl_stamp_match(a, b, 8, 4, 4, 1, 1) == 0, "cache-stamp-dev");
+        b[7] = a[7];
+        ck(cxpl_stamp_match(0, b, 8, 4, 4, 1, 1) == 0
+            && cxpl_stamp_match(a, 0, 8, 4, 4, 1, 1) == 0
+            && cxpl_stamp_match(a, b, 7, 4, 4, 1, 1) == 0, "cache-stamp-guard");
+        ck(cxpl_reuse(1, "pkg.bin", "pkg.bin", 1) == 1, "cache-reuse-hit");
+        ck(cxpl_reuse(0, "pkg.bin", "pkg.bin", 1) == 0, "cache-reuse-incomplete");
+        ck(cxpl_reuse(1, "pkg.bin", "other.bin", 1) == 0, "cache-reuse-path");
+        ck(cxpl_reuse(1, "pkg.bin", "pkg.bin", 0) == 0, "cache-reuse-stamp");
+        ck(cxpl_reuse(1, 0, "pkg.bin", 1) == 0 && cxpl_reuse(1, "pkg.bin", 0, 1) == 0, "cache-reuse-null");
+        ck(cxpl_reuse(1, "", "", 1) == 1, "cache-reuse-empty");
+        ck(cxpl_settle(0) == 0 && cxpl_settle(1) == 1 && cxpl_settle(2) == 1
+            && cxpl_settle(-1) == 1, "cache-settle");
+        ck(cxpl_slot(0, 0, 3) == 0 && cxpl_slot(0, -1, 3) == 0, "cache-slot-absent");
+        ck(cxpl_slot(cache, 0, 3) == 1 && cxpl_slot(cache, 2, 3) == 1, "cache-slot-hit");
+        ck(cxpl_slot(cache, 3, 3) == 0 && cxpl_slot(cache, -1, 3) == 1, "cache-slot-edge");
+    }
+    {
+        long long next = 9;
+        const char *why = "x";
+        ck(core_run_budget(0, 1, &next, &why) == 0 && next == 1 && strcmp(why, "x") == 0, "run-budget-step");
+        next = 9; why = "x";
+        ck(core_run_budget(5, 5, &next, &why) == 3 && next == 9
+            && why && strcmp(why, "timeout") == 0, "run-budget-exact");
+        next = 9; why = "x";
+        ck(core_run_budget(6, 5, &next, &why) == 3 && next == 9
+            && strcmp(why, "timeout") == 0, "run-budget-over");
+        next = 9; why = "x";
+        ck(core_run_budget(-1, 0, &next, &why) == 0 && next == 0 && strcmp(why, "x") == 0, "run-budget-neg");
+        next = 9; why = "x";
+        ck(core_run_budget(1, 2, 0, &why) == 4 && next == 9 && strcmp(why, "x") == 0, "run-budget-null-next");
+        ck(core_run_budget(1, 2, &next, 0) == 4 && next == 9, "run-budget-null-why");
+        ck(core_run_key(1, 0, 7, 0, 1, 65, 3) == -1, "run-key-stack-empty");
+        ck(core_run_key(1, 2, 7, 0, 1, 65, 3) == 7, "run-key-stack");
+        ck(core_run_key(1, -1, 4, 0, 1, 65, 3) == 4, "run-key-stack-nonzero");
+        ck(core_run_key(0, 1, 7, 0, 3, 65, 9) == 65, "run-key-byte");
+        ck(core_run_key(0, 1, 7, 3, 3, 65, 9) == 256, "run-key-eof");
+        ck(core_run_key(2, 1, 7, 0, 3, 65, 0) == 0, "run-key-reg0");
+        ck(core_run_key(2, 0, 0, 0, 0, 0, 256) == 256, "run-key-reg256");
+        ck(core_run_key(2, 0, 0, 0, 0, 0, 257) == 256 && core_run_key(3, 0, 0, 0, 0, 0, -1) == 256, "run-key-reg-out");
+        ck(core_run_key(3, 0, 0, 0, 0, 0, 9) == 9, "run-key-reg");
+        why = "x";
+        ck(core_run_stop("bad", 1, &why) == 2 && strcmp(why, "bad") == 0, "run-stop-reason");
+        why = "x";
+        ck(core_run_stop("", -1, &why) == 2 && why && why[0] == 0, "run-stop-empty");
+        why = "x";
+        ck(core_run_stop(0, -1, &why) == 2 && why && strcmp(why, "no transition") == 0, "run-stop-none");
+        why = "x";
+        ck(core_run_stop(0, 0, &why) == 0 && strcmp(why, "x") == 0, "run-stop-go");
+        why = "x";
+        ck(core_run_stop("bad", -1, 0) == 4 && strcmp(why, "x") == 0, "run-stop-null");
+        ck(core_run_take(0) == 1, "run-take-ok");
+        ck(core_run_take(1) == 0 && core_run_take(2) == 0 && core_run_take(3) == 0
+            && core_run_take(-1) == 0, "run-take-status");
+    }
+    {
+        char errb[4];
+        void *owned;
+        errb[0] = 'e'; errb[1] = 'r'; errb[2] = 'r'; errb[3] = 0;
+        owned = (void *)1;
+        ck(ex_err(errb, 0, &owned) == 0 && owned == (void *)errb, "err-empty");
+        owned = (void *)1;
+        ck(ex_err(0, 0, &owned) == 0 && owned == 0, "err-empty-null");
+        owned = (void *)1;
+        ck(ex_err(errb, 3, &owned) == 1 && owned == (void *)errb && errb[0] == 'e', "err-bytes");
+        owned = (void *)1;
+        ck(ex_err(errb, -2, &owned) == 1 && owned == (void *)errb, "err-negative");
+        owned = (void *)1;
+        ck(ex_err(0, 3, &owned) == 4 && owned == (void *)1, "err-null-bytes");
+        ck(ex_err(errb, 3, 0) == 4, "err-null-owned");
+    }
+    {
+        char path[64], line[96], hex[8], name[32];
+        unsigned char key[2];
+        unsigned long long next;
+        int i;
+        for (i = 0; i < 64; i++) path[i] = 'Z';
+        ck(cxsf_cap_full(4095, 4096) == 0 && cxsf_cap_full(4096, 4096) == 1
+            && cxsf_cap_full(-1, 4096) == 0, "cap-full");
+        ck(cxsf_cap_join(path, 64, "d", "resources.tsv") == 0
+            && strcmp(path, "d/resources.tsv") == 0, "cap-join");
+        ck(cxsf_cap_join(path, 64, "", "a") == 0 && strcmp(path, "/a") == 0, "cap-join-empty-dir");
+        for (i = 0; i < 64; i++) path[i] = 'Z';
+        ck(cxsf_cap_join(path, 4, "d", "resources.tsv") == 1 && path[0] == 'Z', "cap-join-short");
+        ck(cxsf_cap_join(0, 64, "d", "a") == 1 && cxsf_cap_join(path, 64, 0, "a") == 1
+            && path[0] == 'Z', "cap-join-null");
+        ck(cxsf_cap_stage(path, 64, "d", 42) == 0 && strcmp(path, "d/.capture-42") == 0, "cap-stage");
+        ck(cxsf_cap_stage(path, 64, "d", 0) == 0 && strcmp(path, "d/.capture-0") == 0, "cap-stage-zero");
+        ck(cxsf_cap_stage(path, 64, "d", -3) == 0 && strcmp(path, "d/.capture--3") == 0, "cap-stage-neg");
+        for (i = 0; i < 64; i++) path[i] = 'Z';
+        ck(cxsf_cap_stage(path, 4, "d", 42) == 1 && path[0] == 'Z', "cap-stage-short");
+        ck(cxsf_cap_line(line, 96, 0, 0, 0) == 0
+            && strcmp(line, "INTERFACE_ERROR capture-path-too-long") == 0, "cap-line-path");
+        ck(cxsf_cap_line(line, 96, 2, 0, "a.bytes") == 0
+            && strcmp(line, "INTERFACE_ERROR capture-file-write a.bytes") == 0, "cap-line-write");
+        ck(cxsf_cap_line(line, 96, 3, 1, "a.bytes") == 0
+            && strcmp(line, "INTERFACE_ERROR capture-target-exists a.bytes") == 0, "cap-line-exists");
+        ck(cxsf_cap_line(line, 96, 3, 0, "a.bytes") == 0
+            && strcmp(line, "INTERFACE_ERROR capture-publish-failed a.bytes") == 0, "cap-line-publish");
+        ck(cxsf_cap_line(line, 96, 7, 0, 0) == 0
+            && strcmp(line, "INTERFACE_ERROR capture-ledger-write") == 0, "cap-line-append");
+        for (i = 0; i < 96; i++) line[i] = 'Z';
+        ck(cxsf_cap_line(line, 8, 0, 0, 0) == 1 && line[0] == 'Z', "cap-line-short");
+        ck(cxsf_cap_line(line, 96, 2, 0, 0) == 1 && line[0] == 'Z', "cap-line-null-name");
+        ck(cxsf_cap_line(line, 96, 9, 0, 0) == 1 && line[0] == 'Z', "cap-line-kind");
+        ck(cxsf_cap_reg(1, 1, 0, 5) == 0 && cxsf_cap_reg(1, 1, 1, 0) == 0, "cap-reg-ok");
+        ck(cxsf_cap_reg(0, 1, 0, 0) == 1 && cxsf_cap_reg(1, 0, 0, 0) == 1
+            && cxsf_cap_reg(1, 1, 1, 4) == 1, "cap-reg-refuse");
+        next = 9;
+        ck(cxsf_cap_take(-1, 1, 1, 10, &next) == 1 && next == 9, "cap-take-retry");
+        ck(cxsf_cap_take(-1, 0, 1, 10, &next) == 2 && next == 9, "cap-take-fail");
+        ck(cxsf_cap_take(0, 0, 1, 10, &next) == 2 && next == 9, "cap-take-zero");
+        ck(cxsf_cap_take(4, 0, 1, 10, &next) == 0 && next == 5, "cap-take-bytes");
+        next = 9;
+        ck(cxsf_cap_take(4, 0, 8, 10, &next) == 3 && next == 9, "cap-take-over");
+        ck(cxsf_cap_take(4, 0, 1, 10, 0) == 4, "cap-take-null");
+        ck(cxsf_cap_session(1, 1, 1, 1) == 0, "cap-session-ok");
+        ck(cxsf_cap_session(0, 1, 1, 1) == 2 && cxsf_cap_session(1, 0, 1, 1) == 2
+            && cxsf_cap_session(1, 1, 0, 1) == 2 && cxsf_cap_session(1, 1, 1, 0) == 2, "cap-session-refuse");
+        ck(cxsf_cap_key(1, 1) == 0 && cxsf_cap_key(512, 1) == 0, "cap-key-ok");
+        ck(cxsf_cap_key(0, 1) == 1 && cxsf_cap_key(513, 1) == 1 && cxsf_cap_key(1, 0) == 1, "cap-key-refuse");
+        ck(cxsf_cap_answer(0, 0, 0) == 0 && cxsf_cap_answer(1, 0, 0) == 0
+            && cxsf_cap_answer(2, 3, 1) == 0, "cap-answer-ok");
+        ck(cxsf_cap_answer(3, 0, 1) == 1 && cxsf_cap_answer(-1, 0, 1) == 1
+            && cxsf_cap_answer(1, -1, 1) == 1 && cxsf_cap_answer(1, 3, 0) == 1, "cap-answer-refuse");
+        key[0] = 0xab; key[1] = 0x10;
+        ck(cxsf_cap_hex(hex, 8, key, 2) == 0 && strcmp(hex, "ab10") == 0, "cap-hex");
+        ck(cxsf_cap_hex(hex, 8, key, 0) == 0 && hex[0] == 0, "cap-hex-empty");
+        for (i = 0; i < 8; i++) hex[i] = 'Z';
+        ck(cxsf_cap_hex(hex, 4, key, 2) == 1 && hex[0] == 'Z', "cap-hex-short");
+        ck(cxsf_cap_name(name, 32, 0) == 0 && strcmp(name, "resource-000.bytes") == 0, "cap-name-zero");
+        ck(cxsf_cap_name(name, 32, 7) == 0 && strcmp(name, "resource-007.bytes") == 0, "cap-name-pad");
+        ck(cxsf_cap_name(name, 32, 1000) == 0 && strcmp(name, "resource-1000.bytes") == 0, "cap-name-wide");
+        for (i = 0; i < 32; i++) name[i] = 'Z';
+        ck(cxsf_cap_name(name, 32, -1) == 1 && name[0] == 'Z', "cap-name-neg");
+        ck(cxsf_cap_row(line, 96, 0, "ab", 0, 0, 0) == 0
+            && strcmp(line, "ab\t0\t-\t0\t-\n") == 0, "cap-row-absent");
+        ck(cxsf_cap_row(line, 96, 1, "ab", "resource-000.bytes", 2, "aa") == 0
+            && strcmp(line, "ab\t1\tresource-000.bytes\t2\taa\n") == 0, "cap-row-present");
+        for (i = 0; i < 96; i++) line[i] = 'Z';
+        ck(cxsf_cap_row(line, 4, 0, "ab", 0, 0, 0) == 1 && line[0] == 'Z', "cap-row-short");
+        ck(cxsf_cap_row(line, 96, 1, "ab", 0, 2, "aa") == 1 && line[0] == 'Z', "cap-row-null-name");
+    }
+    {
+        char line[160];
+        int empty = 7, i;
+        ck(cxsf_cap_args(1, 1, 0, 0) == 0 && cxsf_cap_args(1, 1, 3, 1) == 0, "cap-args-ok");
+        ck(cxsf_cap_args(0, 1, 0, 0) == 1 && cxsf_cap_args(1, 0, 0, 0) == 1
+            && cxsf_cap_args(1, 1, -1, 1) == 1 && cxsf_cap_args(1, 1, 2, 0) == 1, "cap-args-refuse");
+        ck(cxsf_cap_ledger(1, 1, 0, 0, &empty) == 0 && empty == 1, "cap-ledger-empty");
+        empty = 7;
+        ck(cxsf_cap_ledger(0, 0, 1, 9, &empty) == 0 && empty == 0, "cap-ledger-absent");
+        empty = 7;
+        ck(cxsf_cap_ledger(1, 0, 0, 0, &empty) == 1 && empty == 7, "cap-ledger-reg");
+        ck(cxsf_cap_ledger(1, 1, 0, 4, &empty) == 2 && empty == 7, "cap-ledger-rows");
+        ck(cxsf_cap_ledger(0, 0, 0, 0, &empty) == 3 && empty == 7, "cap-ledger-stat");
+        ck(cxsf_cap_ledger(1, 1, 0, 0, 0) == 4, "cap-ledger-null");
+        ck(cxsf_cap_dent(".", 0) == 0 && cxsf_cap_dent("..", 0) == 0
+            && cxsf_cap_dent(".capture-begin", 0) == 0, "cap-dent-keep");
+        ck(cxsf_cap_dent("resources.tsv", 1) == 0 && cxsf_cap_dent("resources.tsv", 0) == 1, "cap-dent-ledger");
+        ck(cxsf_cap_dent("other", 1) == 1 && cxsf_cap_dent(".capture-begi", 1) == 1
+            && cxsf_cap_dent(0, 1) == 1, "cap-dent-refuse");
+        ck(cxsf_cap_place(1) == 1 && cxsf_cap_place(0) == 0, "cap-place");
+        ck(cxsf_cap_idline(line, 160, "e3:r", "ab") == 0
+            && strcmp(line, "#SC2\tstage=e3:r\tinput_sha256=ab\n") == 0, "cap-idline");
+        ck(cxsf_cap_idline(line, 160, "", "") == 0
+            && strcmp(line, "#SC2\tstage=\tinput_sha256=\n") == 0, "cap-idline-empty");
+        for (i = 0; i < 160; i++) line[i] = 'Z';
+        ck(cxsf_cap_idline(line, 8, "e3", "ab") == 1 && line[0] == 'Z', "cap-idline-short");
+        ck(cxsf_cap_idline(0, 160, "e3", "ab") == 1 && cxsf_cap_idline(line, 160, 0, "ab") == 1
+            && line[0] == 'Z', "cap-idline-null");
+        ck(cxsf_cap_dirline(line, 160, 0) == 0
+            && strcmp(line, "INTERFACE_ERROR capture-bad-arguments") == 0, "cap-dir-args");
+        ck(cxsf_cap_dirline(line, 160, 1) == 0
+            && strcmp(line, "INTERFACE_ERROR capture-dir-create") == 0, "cap-dir-create");
+        ck(cxsf_cap_dirline(line, 160, 2) == 0
+            && strcmp(line, "INTERFACE_ERROR capture-session-busy") == 0, "cap-dir-busy");
+        ck(cxsf_cap_dirline(line, 160, 3) == 0
+            && strcmp(line, "INTERFACE_ERROR capture-ledger-not-regular") == 0, "cap-dir-reg");
+        ck(cxsf_cap_dirline(line, 160, 4) == 0
+            && strcmp(line, "INTERFACE_ERROR capture-ledger-rows-before-identity") == 0, "cap-dir-rows");
+        ck(cxsf_cap_dirline(line, 160, 5) == 0
+            && strcmp(line, "INTERFACE_ERROR capture-ledger-stat") == 0, "cap-dir-stat");
+        ck(cxsf_cap_dirline(line, 160, 6) == 0
+            && strcmp(line, "INTERFACE_ERROR capture-dir-open") == 0, "cap-dir-open");
+        ck(cxsf_cap_dirline(line, 160, 7) == 0
+            && strcmp(line, "INTERFACE_ERROR capture-dir-read-close") == 0, "cap-dir-read");
+        ck(cxsf_cap_dirline(line, 160, 8) == 0
+            && strcmp(line, "INTERFACE_ERROR capture-dir-not-empty") == 0, "cap-dir-scan");
+        ck(cxsf_cap_dirline(line, 160, 9) == 0
+            && strcmp(line, "INTERFACE_ERROR capture-session-cleanup") == 0, "cap-dir-cleanup");
+        ck(cxsf_cap_dirline(line, 160, 10) == 0
+            && strcmp(line, "INTERFACE_ERROR capture-stage-label") == 0, "cap-dir-label");
+        for (i = 0; i < 160; i++) line[i] = 'Z';
+        ck(cxsf_cap_dirline(line, 8, 0) == 1 && line[0] == 'Z', "cap-dir-short");
+        ck(cxsf_cap_dirline(line, 160, 11) == 1 && line[0] == 'Z', "cap-dir-kind");
+        ck(cxsf_cap_row(line, 160, 1, "ab", "e3-identity.tsv", 12, "cd") == 0
+            && strcmp(line, "ab\t1\te3-identity.tsv\t12\tcd\n") == 0, "cap-e3-row");
+        ck(cxsf_e3_args(1, 1, 1, 1) == 0, "e3-args-ok");
+        ck(cxsf_e3_args(0, 1, 1, 1) == 1 && cxsf_e3_args(1, 0, 1, 1) == 1
+            && cxsf_e3_args(1, 1, 0, 1) == 1 && cxsf_e3_args(1, 1, 1, 0) == 1, "e3-args-refuse");
+        ck(cxsf_e3_errno(1, 0) == 0 && cxsf_e3_errno(1, 1) == 0
+            && cxsf_e3_errno(0, 1) == 1 && cxsf_e3_errno(0, 0) == 2, "e3-errno");
+        ck(cxsf_e3_span(1, 1, 512) == 0 && cxsf_e3_span(1, 512, 512) == 0, "e3-span-ok");
+        ck(cxsf_e3_span(1, 0, 512) == 2, "e3-span-empty");
+        ck(cxsf_e3_span(1, 513, 512) == 3, "e3-span-big");
+        ck(cxsf_e3_span(0, 0, 512) == 1, "e3-span-miss");
+        ck(cxsf_e3_line(line, 160, 0, 0) == 0
+            && strcmp(line, "INTERFACE_ERROR resource-e3-identity-absent") == 0, "e3-line-absent");
+        ck(cxsf_e3_line(line, 160, 1, 0) == 0
+            && strcmp(line, "INTERFACE_ERROR resource-e3-identity-path") == 0, "e3-line-path");
+        ck(cxsf_e3_line(line, 160, 2, 0) == 0
+            && strcmp(line, "INTERFACE_ERROR resource-e3-identity-symlink") == 0, "e3-line-link");
+        ck(cxsf_e3_line(line, 160, 3, 0) == 0
+            && strcmp(line, "INTERFACE_ERROR resource-e3-identity-too-large") == 0, "e3-line-large");
+        ck(cxsf_e3_line(line, 160, 4, 0) == 0
+            && strcmp(line, "INTERFACE_ERROR resource-e3-identity-unsupported-platform") == 0, "e3-line-win");
+        ck(cxsf_e3_line(line, 160, 5, 13) == 0
+            && strcmp(line, "INTERFACE_ERROR resource-e3-identity-read-failed errno=13") == 0, "e3-line-errno");
+        ck(cxsf_e3_line(line, 160, 5, -2) == 0
+            && strcmp(line, "INTERFACE_ERROR resource-e3-identity-read-failed errno=-2") == 0, "e3-line-neg");
+        for (i = 0; i < 160; i++) line[i] = 'Z';
+        ck(cxsf_e3_line(line, 8, 0, 0) == 1 && line[0] == 'Z', "e3-line-short");
+        ck(cxsf_e3_line(line, 160, 6, 0) == 1 && line[0] == 'Z', "e3-line-kind");
+    }
+    {
+        unsigned char key[15], badk[15], a[6], b[6];
+        char line[160];
+        int i;
+        key[0] = 0;
+        memcpy(key + 1, "ri/e3-identity", 14);
+        for (i = 0; i < 15; i++) badk[i] = key[i];
+        badk[14] = 'z';
+        memcpy(a, "abcdXY", 6);
+        memcpy(b, "abXdXY", 6);
+        ck(cxsf_e3_ready(1, 1, 1, 0, 1) == 0 && cxsf_e3_ready(1, 1, 1, 0, 2) == 0, "e3-ready-ok");
+        ck(cxsf_e3_ready(0, 1, 1, 0, 1) == 1 && cxsf_e3_ready(1, 0, 1, 0, 1) == 1
+            && cxsf_e3_ready(1, 1, 0, 0, 1) == 1 && cxsf_e3_ready(1, 1, 1, 1, 1) == 1, "e3-ready-refuse");
+        ck(cxsf_e3_row(15, 15, key, key, 1, 1, "e3-identity.tsv") == 0, "e3-row-ok");
+        ck(cxsf_e3_row(14, 15, key, key, 1, 1, "e3-identity.tsv") == 1, "e3-row-kn");
+        ck(cxsf_e3_row(15, 15, key, badk, 1, 1, "e3-identity.tsv") == 1, "e3-row-key");
+        ck(cxsf_e3_row(15, 15, key, key, 0, 1, "e3-identity.tsv") == 1
+            && cxsf_e3_row(15, 15, key, key, 1, 0, "e3-identity.tsv") == 1, "e3-row-slot");
+        ck(cxsf_e3_row(15, 15, key, key, 1, 1, "other.tsv") == 2, "e3-row-blob");
+        ck(cxsf_e3_row(15, 15, 0, key, 1, 1, "e3-identity.tsv") == 4
+            && cxsf_e3_row(15, 15, key, key, 1, 1, 0) == 4, "e3-row-null");
+        ck(cxsf_e3_tail(a, 6, a, 4) == 1, "e3-tail");
+        ck(cxsf_e3_tail(b, 6, a, 4) == 2 && cxsf_e3_tail(a, 4, a, 4) == 2
+            && cxsf_e3_tail(0, 6, a, 4) == 2 && cxsf_e3_tail(a, -1, a, 4) == 2, "e3-tail-malformed");
+        ck(cxsf_e3_match(a, 4, a, 4) == 0 && cxsf_e3_match(a, 0, b, 0) == 0, "e3-match-ok");
+        ck(cxsf_e3_match(a, 4, b, 4) == 1 && cxsf_e3_match(a, 4, a, 6) == 1
+            && cxsf_e3_match(a, -1, a, -1) == 1, "e3-match-diff");
+        ck(cxsf_e3_match(0, 4, a, 4) == 4, "e3-match-null");
+        ck(cxsf_e3_same(a, 4, a, 4) == 0 && cxsf_e3_same(a, 0, b, 0) == 0, "e3-same-ok");
+        ck(cxsf_e3_same(a, 3, a, 4) == 1 && cxsf_e3_same(a, 4, b, 4) == 1, "e3-same-diff");
+        ck(cxsf_e3_same(0, 4, a, 4) == 4, "e3-same-null");
+        ck(cxsf_e3_id("e3", "e3", "ab", "ab") == 0, "e3-id-ok");
+        ck(cxsf_e3_id("e3", "e1", "ab", "ab") == 1 && cxsf_e3_id("e3", "e3", "ab", "cd") == 1, "e3-id-diff");
+        ck(cxsf_e3_id(0, "e3", "ab", "ab") == 4, "e3-id-null");
+        ck(cxsf_e3_cmp_line(line, 160, 0, 0, 0) == 0
+            && strcmp(line, "INTERFACE_ERROR resource-e3-identity-malformed") == 0, "e3-cmp-malformed");
+        ck(cxsf_e3_cmp_line(line, 160, 1, 0, 0) == 0
+            && strcmp(line, "INTERFACE_ERROR resource-e3-identity-trailing") == 0, "e3-cmp-trailing");
+        ck(cxsf_e3_cmp_line(line, 160, 2, 0, 0) == 0
+            && strcmp(line, "INTERFACE_ERROR resource-identity-mismatch input e3-second") == 0, "e3-cmp-input");
+        ck(cxsf_e3_cmp_line(line, 160, 3, 0, 0) == 0
+            && strcmp(line, "INTERFACE_ERROR resource-e3-identity-inconsistent") == 0, "e3-cmp-inconsistent");
+        ck(cxsf_e3_cmp_line(line, 160, 4, "led", "now") == 0
+            && strcmp(line, "INTERFACE_ERROR resource-identity-mismatch stage ledger=led run=now") == 0, "e3-cmp-stage");
+        ck(cxsf_e3_cmp_line(line, 160, 4, "", "now") == 0
+            && strcmp(line, "INTERFACE_ERROR resource-identity-mismatch stage ledger= run=now") == 0, "e3-cmp-empty");
+        for (i = 0; i < 160; i++) line[i] = 'Z';
+        ck(cxsf_e3_cmp_line(line, 8, 0, 0, 0) == 1 && line[0] == 'Z', "e3-cmp-short");
+        ck(cxsf_e3_cmp_line(line, 160, 4, 0, "now") == 1 && line[0] == 'Z', "e3-cmp-null");
+        ck(cxsf_e3_cmp_line(line, 160, 5, 0, 0) == 1 && line[0] == 'Z', "e3-cmp-kind");
+    }
+    {
+        char line[160];
+        int i;
+        ck(cxsf_route_gate(2, "a/tape/O1") == 0 && cxsf_route_gate(0, "b/image/O2") == 0, "route-gate-ok");
+        ck(cxsf_route_gate(2, "b/image/O2") == 1 && cxsf_route_gate(0, "a/tape/O1") == 1
+            && cxsf_route_gate(1, "a/tape/O1") == 1 && cxsf_route_gate(2, 0) == 1
+            && cxsf_route_gate(0, "") == 1 && cxsf_route_gate(2, "/tape/o") == 1, "route-gate-refuse");
+        ck(cxsf_route_e3(0, "b/image/O2") == 0, "route-e3-ok");
+        ck(cxsf_route_e3(2, "b/image/O2") == 1 && cxsf_route_e3(0, "a/tape/O1") == 1
+            && cxsf_route_e3(0, 0) == 1 && cxsf_route_e3(0, "/image/o") == 1, "route-e3-refuse");
+        ck(cxsf_route_line(line, 160, 0, "a/tape/X") == 0
+            && strcmp(line, "INTERFACE_ERROR resource-route-unsupported a/tape/X (strict and capture cover tape and image routes only)") == 0, "route-line-gate");
+        ck(cxsf_route_line(line, 160, 0, 0) == 0
+            && strcmp(line, "INTERFACE_ERROR resource-route-unsupported - (strict and capture cover tape and image routes only)") == 0, "route-line-dash");
+        ck(cxsf_route_line(line, 160, 0, "") == 0
+            && strcmp(line, "INTERFACE_ERROR resource-route-unsupported  (strict and capture cover tape and image routes only)") == 0, "route-line-empty");
+        ck(cxsf_route_line(line, 160, 1, "nope") == 0
+            && strcmp(line, "INTERFACE_ERROR resource-route-unsupported nope (e3 second identity is image-only)") == 0, "route-line-e3");
+        for (i = 0; i < 160; i++) line[i] = 'Z';
+        ck(cxsf_route_line(line, 8, 0, "a") == 1 && line[0] == 'Z', "route-line-short");
+        ck(cxsf_route_line(line, 160, 2, "a") == 1 && line[0] == 'Z', "route-line-kind");
+    }
+    {
+        char label[80];
+        int i;
+        ck(cxsf_stage_join(label, 80, "e3", "lnx/x86_64/image/O1") == 0
+            && strcmp(label, "e3:lnx/x86_64/image/O1") == 0, "stage-join-e3");
+        ck(cxsf_stage_join(label, 80, "lower", "osx/arm64/warn/tape/O0") == 0
+            && strcmp(label, "lower:osx/arm64/warn/tape/O0") == 0, "stage-join-warn");
+        ck(cxsf_stage_join(label, 80, "source", "win/x86_64/multi/object/O9") == 0
+            && strcmp(label, "source:win/x86_64/multi/object/O9") == 0, "stage-join-multi");
+        ck(cxsf_stage_join(label, 80, "e3", "nope") == 2
+            && strcmp(label, "e3:nope") == 0, "stage-join-grammar");
+        ck(cxsf_stage_join(label, 80, "", "") == 2 && strcmp(label, ":") == 0, "stage-join-empty");
+        for (i = 0; i < 80; i++) label[i] = 'Z';
+        ck(cxsf_stage_join(label, 4, "e3", "lnx/x86_64/image/O1") == 1 && label[0] == 'Z', "stage-join-short");
+        ck(cxsf_stage_join(0, 80, "e3", "lnx/x86_64/image/O1") == 1
+            && cxsf_stage_join(label, 80, 0, "lnx/x86_64/image/O1") == 1
+            && cxsf_stage_join(label, 0, "e3", "lnx/x86_64/image/O1") == 1
+            && label[0] == 'Z', "stage-join-null");
+    }
+    {
+        char line[128];
+        int i;
+        ck(cxsf_stage_err(line, 128, 0, "e3:nope") == 0
+            && strcmp(line, "INTERFACE_ERROR snapshot-stage-label e3:nope") == 0, "stage-err-snap");
+        ck(cxsf_stage_err(line, 128, 1, "e3:nope") == 0
+            && strcmp(line, "INTERFACE_ERROR capture-stage-label e3:nope") == 0, "stage-err-cap");
+        ck(cxsf_stage_err(line, 128, 0, "") == 0
+            && strcmp(line, "INTERFACE_ERROR snapshot-stage-label ") == 0, "stage-err-empty");
+        ck(cxsf_stage_err(line, 128, 1, "a%b") == 0
+            && strcmp(line, "INTERFACE_ERROR capture-stage-label a%b") == 0, "stage-err-percent");
+        for (i = 0; i < 128; i++) line[i] = 'Z';
+        ck(cxsf_stage_err(line, 8, 0, "e3:nope") == 1 && line[0] == 'Z', "stage-err-short");
+        ck(cxsf_stage_err(line, 128, 0, 0) == 1 && line[0] == 'Z', "stage-err-null");
+        ck(cxsf_stage_err(0, 128, 0, "e3:nope") == 1, "stage-err-null-buf");
+        ck(cxsf_stage_err(line, 128, 2, "e3:nope") == 1 && line[0] == 'Z', "stage-err-kind");
+    }
+    {
+        char line[64];
+        int i;
+        ck(cxsf_snap_count(0, 999) == 0 && cxsf_snap_count(999, 999) == 0
+            && cxsf_snap_count(1024, 1024) == 0, "snap-count-ok");
+        ck(cxsf_snap_count(-1, 999) == 1 && cxsf_snap_count(1000, 999) == 1
+            && cxsf_snap_count(1025, 1024) == 1, "snap-count-refuse");
+        ck(cxsf_snap_line(line, 64) == 0
+            && strcmp(line, "INTERFACE_ERROR snapshot-too-many-blobs") == 0, "snap-line");
+        for (i = 0; i < 64; i++) line[i] = 'Z';
+        ck(cxsf_snap_line(line, 8) == 1 && line[0] == 'Z', "snap-line-short");
+        ck(cxsf_snap_line(0, 64) == 1, "snap-line-null");
+    }
+    {
+        const unsigned char name[2] = {1, 2}, bytes[3] = {3, 4, 5};
+        const unsigned char *k = 0, *d = 0;
+        int kn = 7, ln = 9;
+        ck(cxsf_snap_slot(name, 2, bytes, 3, &k, &kn, &d, &ln) == 0
+            && k == name && kn == 2 && d == bytes && ln == 3, "snap-slot");
+        ck(cxsf_snap_slot(0, -1, 0, 0, &k, &kn, &d, &ln) == 0
+            && k == 0 && kn == -1 && d == 0 && ln == 0, "snap-slot-empty");
+        kn = 7; ln = 9; k = name; d = bytes;
+        ck(cxsf_snap_slot(name, 2, bytes, 3, 0, &kn, &d, &ln) == 4
+            && kn == 7 && ln == 9 && k == name && d == bytes, "snap-slot-null-key");
+        ck(cxsf_snap_slot(name, 2, bytes, 3, &k, 0, &d, &ln) == 4 && kn == 7, "snap-slot-null-kn");
+        ck(cxsf_snap_slot(name, 2, bytes, 3, &k, &kn, 0, &ln) == 4 && d == bytes, "snap-slot-null-data");
+        ck(cxsf_snap_slot(name, 2, bytes, 3, &k, &kn, &d, 0) == 4 && ln == 9, "snap-slot-null-len");
+    }
+    {
+        unsigned char key[513];
+        char hex[1025];
+        int i;
+        key[0] = 0;
+        ck(cxsf_cap_hex(hex, 1025, key, 1) == 0 && strcmp(hex, "00") == 0, "fetch-hex-nul");
+        ck(cxsf_cap_hex(hex, 1025, key, 0) == 0 && hex[0] == 0, "fetch-hex-zero");
+        for (i = 0; i < 513; i++) key[i] = 0;
+        key[0] = 0xab;
+        key[511] = 0x10;
+        ck(cxsf_cap_hex(hex, 1025, key, 512) == 0 && hex[0] == 'a' && hex[1] == 'b'
+            && hex[1022] == '1' && hex[1023] == '0' && hex[1024] == 0, "fetch-hex-512");
+        for (i = 0; i < 1025; i++) hex[i] = 'Z';
+        ck(cxsf_cap_hex(hex, 1025, key, 513) == 1 && hex[0] == 'Z', "fetch-hex-513");
+    }
+    {
+        char msg[96];
+        int i;
+        ck(cxsf_fetch_miss(msg, 96, 0, "ab", 0) == 0
+            && strcmp(msg, "MISSING_EXPLICIT_RESOURCE ab") == 0, "fetch-miss");
+        ck(cxsf_fetch_miss(msg, 96, 0, "", 4) == 0
+            && strcmp(msg, "MISSING_EXPLICIT_RESOURCE ") == 0, "fetch-miss-empty");
+        ck(cxsf_fetch_miss(msg, 96, 1, "ab", 3) == 0
+            && strcmp(msg, "MISSING_EXPLICIT_RESOURCE ab event=3") == 0, "fetch-miss-event");
+        ck(cxsf_fetch_miss(msg, 96, 1, "ab", 0) == 0
+            && strcmp(msg, "MISSING_EXPLICIT_RESOURCE ab event=0") == 0, "fetch-miss-zero");
+        ck(cxsf_fetch_miss(msg, 96, 1, "ab", -2) == 0
+            && strcmp(msg, "MISSING_EXPLICIT_RESOURCE ab event=-2") == 0, "fetch-miss-neg");
+        for (i = 0; i < 96; i++) msg[i] = 'Z';
+        ck(cxsf_fetch_miss(msg, 8, 0, "ab", 0) == 1 && msg[0] == 'Z', "fetch-miss-short");
+        ck(cxsf_fetch_miss(msg, 96, 0, 0, 0) == 1 && msg[0] == 'Z', "fetch-miss-null");
+        ck(cxsf_fetch_miss(0, 96, 0, "ab", 0) == 1, "fetch-miss-null-buf");
+        ck(cxsf_fetch_miss(msg, 96, 2, "ab", 0) == 1 && msg[0] == 'Z', "fetch-miss-kind");
+    }
+    {
+        char msg[128];
+        int i;
+        ck(cxsf_fetch_mismatch(msg, 128, "ab", 3) == 0
+            && strcmp(msg, "INTERFACE_ERROR resource-trace-key-mismatch ab event=3") == 0, "fetch-mismatch");
+        ck(cxsf_fetch_mismatch(msg, 128, "", 0) == 0
+            && strcmp(msg, "INTERFACE_ERROR resource-trace-key-mismatch  event=0") == 0, "fetch-mismatch-empty");
+        ck(cxsf_fetch_mismatch(msg, 128, "ab", -2) == 0
+            && strcmp(msg, "INTERFACE_ERROR resource-trace-key-mismatch ab event=-2") == 0, "fetch-mismatch-neg");
+        for (i = 0; i < 128; i++) msg[i] = 'Z';
+        ck(cxsf_fetch_mismatch(msg, 8, "ab", 3) == 1 && msg[0] == 'Z', "fetch-mismatch-short");
+        ck(cxsf_fetch_mismatch(msg, 128, 0, 3) == 1 && msg[0] == 'Z', "fetch-mismatch-null");
+        ck(cxsf_fetch_mismatch(0, 128, "ab", 3) == 1, "fetch-mismatch-null-buf");
+    }
+    {
+        unsigned char blob[3];
+        unsigned char *out;
+        int n;
+        blob[0] = 'a'; blob[1] = 'b'; blob[2] = 'c';
+        out = 0; n = -1;
+        ck(cxsf_fetch_hand(1, blob, 3, &out, &n) == 1 && out == blob && n == 3, "fetch-hand");
+        out = blob; n = 9;
+        ck(cxsf_fetch_hand(0, blob, 3, &out, &n) == 0 && out == blob && n == 9, "fetch-hand-absent");
+        out = blob; n = 9;
+        ck(cxsf_fetch_hand(1, 0, -3, &out, &n) == 1 && out == 0 && n == -3, "fetch-hand-empty");
+        out = blob; n = 9;
+        ck(cxsf_fetch_hand(1, blob, 3, 0, &n) == 4 && out == blob && n == 9, "fetch-hand-null-bytes");
+        ck(cxsf_fetch_hand(1, blob, 3, &out, 0) == 4 && out == blob, "fetch-hand-null-len");
+    }
+    {
+        unsigned char key[2];
+        unsigned char name[2];
+        unsigned char data[3];
+        unsigned char *out;
+        int n;
+        key[0] = 'a'; key[1] = 'b';
+        name[0] = 'a'; name[1] = 'b';
+        data[0] = 'x'; data[1] = 'y'; data[2] = 'z';
+        out = 0; n = -1;
+        ck(cxsf_fetch_row(key, 2, name, 2, data, 3, &out, &n) == 1
+            && out == data && n == 3, "fetch-row");
+        out = data; n = 9;
+        name[1] = 'c';
+        ck(cxsf_fetch_row(key, 2, name, 2, data, 3, &out, &n) == 0
+            && out == data && n == 9, "fetch-row-bytes");
+        ck(cxsf_fetch_row(key, 2, name, 1, data, 3, &out, &n) == 0
+            && out == data && n == 9, "fetch-row-len");
+        ck(cxsf_fetch_row(0, 0, 0, 0, data, -3, &out, &n) == 1
+            && out == data && n == -3, "fetch-row-empty");
+        name[1] = 'b';
+        out = data; n = 9;
+        ck(cxsf_fetch_row(key, 2, name, 2, 0, 0, &out, &n) == 1
+            && out == 0 && n == 0, "fetch-row-null-data");
+        out = data; n = 9;
+        ck(cxsf_fetch_row(key, -1, name, -1, data, 3, &out, &n) == 0
+            && out == data && n == 9, "fetch-row-neg");
+        ck(cxsf_fetch_row(0, 2, name, 2, data, 3, &out, &n) == 4
+            && out == data && n == 9, "fetch-row-null-key");
+        name[1] = 'b';
+        ck(cxsf_fetch_row(key, 2, 0, 2, data, 3, &out, &n) == 0
+            && out == data && n == 9, "fetch-row-null-name");
+        ck(cxsf_fetch_row(key, 2, name, 2, data, 3, 0, &n) == 4 && n == 9, "fetch-row-null-bytes");
+        ck(cxsf_fetch_row(key, 2, name, 2, data, 3, &out, 0) == 4 && out == data, "fetch-row-null-len");
+    }
+    {
+        unsigned char key[16];
+        char path[32];
+        int i;
+        for (i = 0; i < 32; i++) path[i] = 'Z';
+        key[0] = 'a'; key[1] = 'b';
+        ck(cxsf_fetch_path(path, 32, key, 2, 0) == 0 && strcmp(path, "ab") == 0, "fetch-path");
+        for (i = 0; i < 32; i++) path[i] = 'Z';
+        ck(cxsf_fetch_path(path, 32, 0, 0, 0) == 0 && path[0] == 0, "fetch-path-empty");
+        key[0] = 0; key[1] = 'i'; key[2] = 'n'; key[3] = 'c'; key[4] = '/'; key[5] = 'q'; key[6] = '/';
+        key[7] = 'a'; key[8] = 'b';
+        ck(cxsf_fetch_path(path, 32, key, 9, "unused") == 0 && strcmp(path, "ab") == 0, "fetch-path-q");
+        key[5] = 'a';
+        ck(cxsf_fetch_path(path, 32, key, 9, 0) == 0 && strcmp(path, "ab") == 0, "fetch-path-a");
+        key[5] = 'q'; key[7] = 0;
+        for (i = 0; i < 32; i++) path[i] = 'Z';
+        ck(cxsf_fetch_path(path, 32, key, 7, 0) == 0 && path[0] == 0, "fetch-path-q-empty");
+        key[5] = 'Q'; key[7] = 'a'; key[8] = 'b';
+        for (i = 0; i < 32; i++) path[i] = 'Z';
+        ck(cxsf_fetch_path(path, 32, key, 9, "I") == 2 && path[0] == 'Z', "fetch-path-case");
+        key[0] = 0; key[1] = 'h'; key[2] = 'd'; key[3] = 'r'; key[4] = '/';
+        key[5] = 'f'; key[6] = 'o'; key[7] = 'o';
+        ck(cxsf_fetch_path(path, 32, key, 8, "I") == 0 && strcmp(path, "I/foo") == 0, "fetch-path-hdr");
+        for (i = 0; i < 32; i++) path[i] = 'Z';
+        ck(cxsf_fetch_path(path, 32, key, 8, 0) == 1 && path[0] == 'Z', "fetch-path-no-inc");
+        ck(cxsf_fetch_path(path, 32, key, 5, "I") == 0 && strcmp(path, "I/") == 0, "fetch-path-hdr-empty");
+        ck(cxsf_fetch_path(path, 32, key, 8, "") == 0 && strcmp(path, "/foo") == 0, "fetch-path-blank-inc");
+        key[0] = 0; key[1] = 'i'; key[2] = 'n'; key[3] = 'c'; key[4] = '/'; key[5] = 'q'; key[6] = '/';
+        key[7] = 0; key[8] = 'h'; key[9] = 'd'; key[10] = 'r'; key[11] = '/';
+        key[12] = 'f'; key[13] = 'o'; key[14] = 'o';
+        ck(cxsf_fetch_path(path, 32, key, 15, "I") == 0 && strcmp(path, "I/foo") == 0, "fetch-path-both");
+        key[0] = 'a'; key[1] = 0; key[2] = 'b';
+        for (i = 0; i < 32; i++) path[i] = 'Z';
+        ck(cxsf_fetch_path(path, 32, key, 3, 0) == 2 && path[0] == 'Z', "fetch-path-nul");
+        key[0] = 'a'; key[1] = 'b'; key[2] = 'c'; key[3] = 'd';
+        ck(cxsf_fetch_path(path, 4, key, 4, 0) == 2 && path[0] == 'Z', "fetch-path-short");
+        key[0] = 0; key[1] = 'h'; key[2] = 'd'; key[3] = 'r'; key[4] = '/';
+        key[5] = 'a'; key[6] = 0; key[7] = 'b';
+        ck(cxsf_fetch_path(path, 32, key, 8, "I") == 2 && path[0] == 'Z', "fetch-path-hdr-nul");
+        ck(cxsf_fetch_path(0, 32, key, 2, "I") == 4, "fetch-path-null");
+        ck(cxsf_fetch_path(path, 32, key, -1, "I") == 4 && path[0] == 'Z', "fetch-path-neg");
+        ck(cxsf_fetch_path(path, 32, 0, 2, "I") == 4 && path[0] == 'Z', "fetch-path-null-key");
+    }
+    {
+        unsigned char blob[1];
+        const char *file = "a.c";
+        blob[0] = 0;
+        ff_read_n = 0; ff_absent_n = 0; ff_path = 0;
+        ck(cxsf_fetch_file(blob, file, ff_read_cb, ff_absent_cb) == 2
+            && ff_read_n == 1 && ff_absent_n == 0 && ff_path == file, "fetch-file");
+        ff_read_n = 0; ff_absent_n = 0; ff_path = 0;
+        ck(cxsf_fetch_file(0, file, ff_read_cb, ff_absent_cb) == 0
+            && ff_read_n == 0 && ff_absent_n == 1 && ff_path == file, "fetch-file-absent");
+        ff_read_n = 0; ff_absent_n = 0; ff_path = 0;
+        ck(cxsf_fetch_file(blob, "", ff_read_cb, ff_absent_cb) == 2
+            && ff_read_n == 1 && ff_path[0] == 0, "fetch-file-empty");
+        ff_read_n = 0; ff_absent_n = 0;
+        ck(cxsf_fetch_file(blob, 0, ff_read_cb, ff_absent_cb) == 4
+            && ff_read_n == 0 && ff_absent_n == 0, "fetch-file-null-path");
+        ck(cxsf_fetch_file(blob, file, 0, ff_absent_cb) == 4
+            && ff_read_n == 0 && ff_absent_n == 0, "fetch-file-null-read");
+        ck(cxsf_fetch_file(0, file, ff_read_cb, 0) == 4
+            && ff_read_n == 0 && ff_absent_n == 0, "fetch-file-null-absent");
+    }
+    {
+        char *mine[1];
+        char *sentinel[1];
+        char **out;
+        int n;
+        ff_alloc_n = 0; ff_fail = 0; ff_list_i = 0; ff_byte_i = 0;
+        out = sentinel; n = 7;
+        ck(cxsf_file_keep(0, 0, 0, 0, 0, 0, 0, &out, &n) == 0
+            && ff_alloc_n == 0 && out == sentinel && n == 7, "file-keep-off");
+        ck(cxsf_file_keep(1, 0, 0, 0, 0, "ab", ff_alloc, &out, &n) == 2
+            && n == 1 && out && strcmp(out[0], "ab") == 0 && ff_alloc_n == 2, "file-keep");
+        ff_alloc_n = 0;
+        ck(cxsf_file_keep(1, out, 1, 0, 0, "ab", ff_alloc, &out, &n) == 1
+            && n == 1 && ff_alloc_n == 0, "file-keep-dup");
+        ck(cxsf_file_keep(1, out, 1, 0, 0, "cd", ff_alloc, &out, &n) == 2
+            && n == 2 && strcmp(out[0], "ab") == 0 && strcmp(out[1], "cd") == 0, "file-keep-next");
+        mine[0] = "ab";
+        out = sentinel; n = 7; ff_alloc_n = 0;
+        ck(cxsf_file_keep(1, 0, 0, mine, 1, "ab", ff_alloc, &out, &n) == 1
+            && ff_alloc_n == 0 && out == sentinel && n == 7, "file-keep-other");
+        ck(cxsf_file_keep(1, 0, 0, mine, 1, "", ff_alloc, &out, &n) == 2
+            && n == 1 && out[0][0] == 0, "file-keep-empty");
+        out = sentinel; n = 7; ff_alloc_n = 0;
+        ck(cxsf_file_keep(1, 0, 0, 0, 0, 0, ff_alloc, &out, &n) == 4
+            && ff_alloc_n == 0 && out == sentinel && n == 7, "file-keep-null-path");
+        ck(cxsf_file_keep(1, 0, 0, 0, 0, "ab", 0, &out, &n) == 4
+            && out == sentinel && n == 7, "file-keep-null-alloc");
+        ck(cxsf_file_keep(1, 0, 0, 0, 0, "ab", ff_alloc, 0, &n) == 4 && n == 7, "file-keep-null-list");
+        ck(cxsf_file_keep(1, 0, 0, 0, 0, "ab", ff_alloc, &out, 0) == 4 && out == sentinel, "file-keep-null-count");
+        ck(cxsf_file_keep(1, 0, -1, 0, 0, "ab", ff_alloc, &out, &n) == 4 && n == 7, "file-keep-neg");
+        ck(cxsf_file_keep(1, 0, 1, 0, 0, "ab", ff_alloc, &out, &n) == 4 && n == 7, "file-keep-null-mine");
+        ck(cxsf_file_keep(1, 0, 0, 0, 1, "ab", ff_alloc, &out, &n) == 4 && n == 7, "file-keep-null-other");
+        mine[0] = 0;
+        ck(cxsf_file_keep(1, mine, 1, 0, 0, "ab", ff_alloc, &out, &n) == 4
+            && ff_alloc_n == 0 && n == 7, "file-keep-null-slot");
+        ff_fail = 1; ff_alloc_n = 0; out = sentinel; n = 7;
+        ck(cxsf_file_keep(1, 0, 0, 0, 0, "ab", ff_alloc, &out, &n) == 3
+            && out == sentinel && n == 7, "file-keep-alloc-list");
+        ff_fail = 2; ff_alloc_n = 0; out = sentinel; n = 7;
+        ck(cxsf_file_keep(1, 0, 0, 0, 0, "ab", ff_alloc, &out, &n) == 3
+            && out != sentinel && n == 0, "file-keep-alloc-copy");
+    }
+    {
+        unsigned char *out;
+        char line[64];
+        int n;
+        rd_reset();
+        rd_blob[0] = 'Z';
+        n = 9; out = (unsigned char *)1;
+        ck(cxsf_readfile("a.c", &n, 0, 0, 2, line, 64, rd_open, rd_reason, rd_say, rd_raw,
+                         rd_fail, rd_stream, rd_close, &out) == 0
+            && out == rd_blob && n == 4 && rd_open_n == 1 && rd_open_path[0] == 'a'
+            && rd_stream_n == 1 && rd_stream_fd == 3 && rd_close_n == 1
+            && rd_say_n == 0 && rd_fail_n == 0, "read-file");
+        rd_reset();
+        rd_fd = -2; n = 9; out = (unsigned char *)1;
+        ck(cxsf_readfile("a.c", &n, 1, 0, 2, line, 64, rd_open, rd_reason, rd_say, rd_raw,
+                         rd_fail, rd_stream, rd_close, &out) == 1
+            && out == 0 && n == 9 && rd_stream_n == 0 && rd_close_n == 0 && rd_fail_n == 0, "read-file-miss");
+        rd_reset();
+        rd_fd = -13; rd_why = "EACCES"; n = 9; out = (unsigned char *)1;
+        ck(cxsf_readfile("a.c", &n, 0, 0, 2, line, 64, rd_open, rd_reason, rd_say, rd_raw,
+                         rd_fail, rd_stream, rd_close, &out) == 2
+            && n == 9 && out == (unsigned char *)1 && rd_stream_n == 0 && rd_close_n == 0
+            && rd_say_n == 1 && strcmp(rd_said, "run: cannot open a.c: EACCES\n") == 0
+            && rd_raw_n == 0 && rd_fail_n == 1 && strcmp(rd_fail_msg, "cannot open input") == 0, "read-file-error");
+        rd_reset();
+        rd_fd = -1; n = 9; out = (unsigned char *)1;
+        ck(cxsf_readfile("a.c", &n, 1, 1, 0, line, 64, rd_open, rd_reason, rd_say, rd_raw,
+                         rd_fail, rd_stream, rd_close, &out) == 1
+            && out == 0 && n == 9 && rd_fail_n == 0 && rd_close_n == 0, "read-file-win");
+        rd_reset();
+        rd_fd = -1; rd_why = 0;
+        ck(cxsf_readfile("a.c", &n, 0, 1, 0, line, 64, rd_open, rd_reason, rd_say, rd_raw,
+                         rd_fail, rd_stream, rd_close, &out) == 2
+            && rd_say_n == 1 && strcmp(rd_said, "run: cannot open a.c\n") == 0
+            && strcmp(rd_fail_msg, "cannot open input") == 0, "read-file-win-die");
+        rd_reset();
+        rd_close_rc = -1; n = 9; out = (unsigned char *)1;
+        ck(cxsf_readfile("a.c", &n, 0, 0, 2, line, 64, rd_open, rd_reason, rd_say, rd_raw,
+                         rd_fail, rd_stream, rd_close, &out) == 3
+            && n == 4 && out == (unsigned char *)1 && rd_stream_n == 1 && rd_close_n == 1
+            && rd_fail_n == 1 && strcmp(rd_fail_msg, "close failed") == 0, "read-file-close");
+        rd_reset();
+        rd_fd = -13; rd_why = "ENOENT";
+        ck(cxsf_readfile("abcd", &n, 0, 0, 2, line, 4, rd_open, rd_reason, rd_say, rd_raw,
+                         rd_fail, rd_stream, rd_close, &out) == 2
+            && rd_say_n == 0 && rd_raw_n == 1 && rd_raw_path[0] == 'a' && strcmp(rd_raw_reason, "ENOENT") == 0
+            && strcmp(rd_fail_msg, "cannot open input") == 0, "read-file-short");
+        rd_reset();
+        rd_open_n = 0;
+        ck(cxsf_readfile(0, &n, 0, 0, 2, line, 64, rd_open, rd_reason, rd_say, rd_raw,
+                         rd_fail, rd_stream, rd_close, &out) == 4 && rd_open_n == 0, "read-file-null");
+        ck(cxsf_readfile("a.c", 0, 0, 0, 2, line, 64, rd_open, rd_reason, rd_say, rd_raw,
+                         rd_fail, rd_stream, rd_close, &out) == 4 && rd_open_n == 0, "read-file-null-len");
+        ck(cxsf_readfile("a.c", &n, 0, 0, 2, line, 64, 0, rd_reason, rd_say, rd_raw,
+                         rd_fail, rd_stream, rd_close, &out) == 4, "read-file-null-open");
+    }
+    {
+        unsigned char *slot;
+        unsigned char *got;
+        char line[64];
+        int n;
+        rs_clear();
+        rs_seq[0] = 2; rs_seq[1] = 0; rs_seq_n = 2;
+        slot = 0; got = (unsigned char *)1; n = 9;
+        ck(cxsf_readstream(4, "a.c", &n, line, 64, rs_stamp, rs_grow, rs_read, rs_say, rs_raw, rs_fail, &slot, &got) == 0
+            && n == 2 && got == rs_buf && slot == rs_buf && rs_first == 65536
+            && rs_grow_n == 1 && rs_read_n == 2 && rs_fail_n == 0, "read-stream");
+        rs_clear();
+        rs_stamped = 1; rs_size = 4; rs_off = 0;
+        rs_seq[0] = 4; rs_seq[1] = 0; rs_seq_n = 2;
+        slot = 0; got = (unsigned char *)1; n = 9;
+        ck(cxsf_readstream(4, "a.c", &n, line, 64, rs_stamp, rs_grow, rs_read, rs_say, rs_raw, rs_fail, &slot, &got) == 0
+            && n == 4 && rs_bytes == 5 && rs_first == 5 && rs_stamp_n == 1, "read-stream-stamp");
+        rs_clear();
+        rs_seq[0] = 0; rs_seq_n = 1;
+        n = 9; got = (unsigned char *)1;
+        ck(cxsf_readstream(4, "a.c", &n, line, 64, rs_stamp, rs_grow, rs_read, rs_say, rs_raw, rs_fail, &slot, &got) == 0
+            && n == 0 && got == rs_buf && rs_grow_n == 1, "read-stream-empty");
+        rs_clear();
+        rs_stamped = 1; rs_size = 1073741823LL; rs_off = 0; rs_fill = 1;
+        n = 9; got = (unsigned char *)1; slot = 0;
+        ck(cxsf_readstream(4, "a.c", &n, line, 64, rs_stamp, rs_grow, rs_read, rs_say, rs_raw, rs_fail, &slot, &got) == 2
+            && n == 9 && got == (unsigned char *)1 && slot == rs_buf
+            && rs_fail_n == 1 && strcmp(rs_fail_msg, "file too large") == 0 && rs_say_n == 0, "read-stream-large");
+        rs_clear();
+        rs_seq[0] = -1; rs_seq_n = 1;
+        n = 9; got = (unsigned char *)1; slot = 0;
+        ck(cxsf_readstream(4, "a.c", &n, line, 64, rs_stamp, rs_grow, rs_read, rs_say, rs_raw, rs_fail, &slot, &got) == 1
+            && n == 9 && got == (unsigned char *)1 && slot == rs_buf
+            && rs_say_n == 1 && strcmp(rs_said, "run: cannot read a.c\n") == 0
+            && rs_fail_n == 1 && strcmp(rs_fail_msg, "cannot read input") == 0, "read-stream-error");
+        rs_clear();
+        rs_seq[0] = -1; rs_seq_n = 1;
+        ck(cxsf_readstream(4, "", &n, line, 64, rs_stamp, rs_grow, rs_read, rs_say, rs_raw, rs_fail, &slot, &got) == 1
+            && strcmp(rs_said, "run: cannot read \n") == 0, "read-stream-blank");
+        rs_clear();
+        rs_seq[0] = 65537; rs_seq_n = 1;
+        n = 9; got = (unsigned char *)1;
+        ck(cxsf_readstream(4, "a.c", &n, line, 64, rs_stamp, rs_grow, rs_read, rs_say, rs_raw, rs_fail, &slot, &got) == 5
+            && n == 9 && rs_say_n == 0 && rs_fail_n == 1 && strcmp(rs_fail_msg, "invalid read length") == 0, "read-stream-over");
+        rs_clear();
+        rs_seq[0] = -1; rs_seq_n = 1;
+        ck(cxsf_readstream(4, "abcd", &n, line, 4, rs_stamp, rs_grow, rs_read, rs_say, rs_raw, rs_fail, &slot, &got) == 1
+            && rs_say_n == 0 && rs_raw_n == 1 && rs_raw_path[0] == 'a'
+            && strcmp(rs_fail_msg, "cannot read input") == 0, "read-stream-short");
+        rs_clear();
+        slot = (unsigned char *)1; n = 9;
+        ck(cxsf_readstream(4, 0, &n, line, 64, rs_stamp, rs_grow, rs_read, rs_say, rs_raw, rs_fail, &slot, &got) == 4
+            && slot == (unsigned char *)1 && n == 9 && rs_stamp_n == 0, "read-stream-null");
+        ck(cxsf_readstream(4, "a.c", 0, line, 64, rs_stamp, rs_grow, rs_read, rs_say, rs_raw, rs_fail, &slot, &got) == 4
+            && rs_stamp_n == 0, "read-stream-null-len");
+        rs_null = 1; n = 9; got = (unsigned char *)1; slot = (unsigned char *)1;
+        ck(cxsf_readstream(4, "a.c", &n, line, 64, rs_stamp, rs_grow, rs_read, rs_say, rs_raw, rs_fail, &slot, &got) == 3
+            && slot == 0 && got == (unsigned char *)1 && n == 9 && rs_read_n == 0 && rs_fail_n == 0, "read-stream-null-buf");
+    }
+    {
+        long long size = 7, off = 7, mt = 7, mtn = 7, ct = 7, ctn = 7, ino = 7, dev = 7;
+        unsigned tag = 7;
+        int valid = 7;
+        ck(cxsf_stamp_reg(1, 1, 4, 11, 12, 13, 14, 15, 16,
+                          &size, &off, &mt, &mtn, &ct, &ctn, &ino, &dev, &tag, &valid) == 1
+            && size == 4 && off == 0 && mt == 11 && mtn == 12 && ct == 13 && ctn == 14
+            && ino == 15 && dev == 16 && tag == 0 && valid == 1, "stamp-reg");
+        size = 7; off = 7; mt = 7; valid = 7; tag = 7;
+        ck(cxsf_stamp_reg(1, 0, 4, 11, 12, 13, 14, 15, 16,
+                          &size, &off, &mt, &mtn, &ct, &ctn, &ino, &dev, &tag, &valid) == 0
+            && size == 7 && off == 7 && valid == 7 && tag == 7, "stamp-reg-dir");
+        ck(cxsf_stamp_reg(0, 1, 4, 11, 12, 13, 14, 15, 16,
+                          &size, &off, &mt, &mtn, &ct, &ctn, &ino, &dev, &tag, &valid) == 0
+            && size == 7 && off == 7, "stamp-reg-miss");
+        size = 7;
+        ck(cxsf_stamp_reg(1, 1, -3, 0, 0, 0, 0, 0, 0,
+                          &size, &off, &mt, &mtn, &ct, &ctn, &ino, &dev, &tag, &valid) == 1
+            && size == -3 && off == 0 && valid == 1, "stamp-reg-neg");
+        size = 7;
+        ck(cxsf_stamp_reg(1, 1, 4, 11, 12, 13, 14, 15, 16,
+                          &size, &off, &mt, &mtn, &ct, &ctn, &ino, &dev, &tag, 0) == 4
+            && size == 7, "stamp-reg-null");
+    }
+    {
+        ck(cxsf_read_errno(5, 9) == 5, "read-errno-keep");
+        ck(cxsf_read_errno(0, 9) == 0, "read-errno-zero");
+        ck(cxsf_read_errno(-1, 2) == -2, "read-errno-neg");
+        ck(cxsf_read_errno(-1, 0) == 0, "read-errno-zero-err");
+        ck(cxsf_read_errno(-4, 13) == -13, "read-errno-drop");
+    }
+    {
+        ck(cxsf_open_errno(5, 9) == 5, "open-errno-keep");
+        ck(cxsf_open_errno(0, 9) == 0, "open-errno-zero");
+        ck(cxsf_open_errno(-1, 2) == -2, "open-errno-neg");
+        ck(cxsf_open_errno(-1, 0) == 0, "open-errno-zero-err");
+        ck(cxsf_open_errno(-4, 13) == -13, "open-errno-drop");
+    }
+    {
+        ck(cxsf_open_flags(0, 0x8000, 0) == 0, "open-flags-host");
+        ck(cxsf_open_flags(7, 8, 0) == 7, "open-flags-host-keep");
+        ck(cxsf_open_flags(0, 0x8000, 1) == 0x8000, "open-flags-win");
+        ck(cxsf_open_flags(1, 2, 1) == 3, "open-flags-or");
+        ck(cxsf_open_flags(0, 0, 1) == 0, "open-flags-win-zero");
+        ck(cxsf_open_flags(1, 2, 2) == 3, "open-flags-nonzero");
+        ck(cxsf_open_flags(-1, 8, 0) == -1, "open-flags-neg");
+    }
+    {
+        long long size, off;
+        unsigned tag;
+        int valid;
+        su_clear();
+        su_cur = 4; su_end = 0;
+        size = 9; off = 9; tag = 9; valid = 9;
+        ck(cxsf_stamp_unisa(7, su_seek, su_read, su_fail, &size, &off, &tag, &valid) == 1
+            && size == 0 && off == 4 && tag == 2166136261u && valid == 1
+            && su_fd_seen == 7 && su_fail_n == 0 && su_seek_n == 4 && su_read_n == 1
+            && su_whence[0] == 1 && su_off[0] == 0 && su_whence[1] == 2 && su_off[1] == 0
+            && su_whence[2] == 0 && su_off[2] == 0 && su_whence[3] == 0 && su_off[3] == 4
+            && su_asked == 4096, "stamp-unisa-empty");
+        su_clear();
+        su_cur = 2; su_end = 1; su_mode = 1; su_b0 = 0x61;
+        ck(cxsf_stamp_unisa(7, su_seek, su_read, su_fail, &size, &off, &tag, &valid) == 1
+            && size == 1 && off == 2 && tag == 3826002220u && valid == 1 && su_seek_n == 4, "stamp-unisa-byte");
+        su_clear();
+        su_cur = 0; su_end = 2; su_mode = 2; su_b0 = 0x61; su_b1 = 0x62;
+        ck(cxsf_stamp_unisa(7, su_seek, su_read, su_fail, &size, &off, &tag, &valid) == 1
+            && size == 2 && off == 0 && tag == 1294271946u && su_seek_n == 4, "stamp-unisa-two");
+        su_clear();
+        su_cur = 1; su_end = 4096;
+        ck(cxsf_stamp_unisa(7, su_seek, su_read, su_fail, &size, &off, &tag, &valid) == 1
+            && size == 4096 && off == 1 && tag == 2166136261u && su_seek_n == 4, "stamp-unisa-exact");
+        su_clear();
+        su_cur = 3; su_end = 4097; su_mode = 1; su_b0 = 0x11; su_b1 = 0x22;
+        ck(cxsf_stamp_unisa(7, su_seek, su_read, su_fail, &size, &off, &tag, &valid) == 1
+            && size == 4097 && off == 3 && tag == 765170874u && su_seek_n == 5
+            && su_off[2] == 0 && su_off[3] == 1 && su_off[4] == 3, "stamp-unisa-tail");
+        su_clear();
+        su_cur = 0; su_end = 5000; su_mode = 1; su_b0 = 0x11; su_b1 = 0x22;
+        ck(cxsf_stamp_unisa(7, su_seek, su_read, su_fail, &size, &off, &tag, &valid) == 1
+            && tag == 765170874u && su_off[3] == 904, "stamp-unisa-far");
+        su_clear();
+        su_bad = 0; size = 9; off = 9; tag = 9; valid = 9;
+        ck(cxsf_stamp_unisa(7, su_seek, su_read, su_fail, &size, &off, &tag, &valid) == 0
+            && size == 9 && off == 9 && tag == 9 && valid == 9 && su_seek_n == 1 && su_read_n == 0, "stamp-unisa-cur");
+        su_clear();
+        su_bad = 1; su_cur = 4; size = 9;
+        ck(cxsf_stamp_unisa(7, su_seek, su_read, su_fail, &size, &off, &tag, &valid) == 0
+            && size == 9 && su_seek_n == 2 && su_read_n == 0 && su_fail_n == 0, "stamp-unisa-end");
+        su_clear();
+        su_bad = 2; su_cur = 4; su_end = 8; size = 9;
+        ck(cxsf_stamp_unisa(7, su_seek, su_read, su_fail, &size, &off, &tag, &valid) == 0
+            && size == 9 && su_read_n == 0 && su_fail_n == 0 && su_seek_n == 4
+            && su_whence[3] == 0 && su_off[3] == 4, "stamp-unisa-win");
+        su_clear();
+        su_cur = 4; su_end = 8; su_err = 1; size = 9;
+        ck(cxsf_stamp_unisa(7, su_seek, su_read, su_fail, &size, &off, &tag, &valid) == 0
+            && size == 9 && tag == 9 && su_fail_n == 0 && su_seek_n == 4, "stamp-unisa-read");
+        su_clear();
+        su_cur = 4; su_end = 8; su_bad = 3; size = 9;
+        ck(cxsf_stamp_unisa(7, su_seek, su_read, su_fail, &size, &off, &tag, &valid) == 2
+            && size == 9 && su_fail_n == 1 && strcmp(su_fail_msg, "cannot read input") == 0, "stamp-unisa-restore");
+        su_clear();
+        su_cur = 4; su_end = 8; su_over = 1; size = 9;
+        ck(cxsf_stamp_unisa(7, su_seek, su_read, su_fail, &size, &off, &tag, &valid) == 0
+            && size == 9 && su_fail_n == 0, "stamp-unisa-over");
+        su_clear();
+        size = 9;
+        ck(cxsf_stamp_unisa(7, 0, su_read, su_fail, &size, &off, &tag, &valid) == 4
+            && size == 9 && su_seek_n == 0, "stamp-unisa-null");
+        ck(cxsf_stamp_unisa(7, su_seek, su_read, su_fail, &size, &off, &tag, 0) == 4
+            && su_seek_n == 0, "stamp-unisa-null-out");
+    }
+    {
+        ck(cxsf_close_rc(0, 9) == 0, "close-rc-zero");
+        ck(cxsf_close_rc(1, 9) == 1, "close-rc-keep");
+        ck(cxsf_close_rc(-1, 2) == -1, "close-rc-neg");
+        ck(cxsf_close_rc(-1, 0) == -1, "close-rc-zero-err");
+        ck(cxsf_close_rc(-4, 13) == -4, "close-rc-raw");
+    }
+    {
+        su_clear();
+        ck(cxsf_close_fail(0, su_fail) == 0 && su_fail_n == 0, "close-fail-ok");
+        ck(cxsf_close_fail(1, su_fail) == 0 && su_fail_n == 0, "close-fail-pos");
+        ck(cxsf_close_fail(-1, su_fail) == 1 && su_fail_n == 1
+            && strcmp(su_fail_msg, "close failed") == 0, "close-fail-neg");
+        su_clear();
+        ck(cxsf_close_fail(-4, su_fail) == 1 && su_fail_n == 1
+            && strcmp(su_fail_msg, "close failed") == 0, "close-fail-raw");
+        su_clear();
+        ck(cxsf_close_fail(-1, 0) == 4 && su_fail_n == 0, "close-fail-null");
+    }
+    {
+        ck(wp_u32(0, 0, 0, 0) == 0, "win-u32-zero");
+        ck(wp_u32(1, 2, 3, 4) == 0x04030201L, "win-u32-le");
+        ck(wp_u32(255, 255, 255, 255) == 4294967295L, "win-u32-ff");
+        ck(wp_page(0) == 0 && wp_page(4095) == 0 && wp_page(4096) == 4096, "win-page-base");
+        ck(wp_page(5000) == 4096 && wp_page(65536) == 65536, "win-page-up");
+        ck(wp_page(65536 + 100) == 65536, "win-page-mid");
+        ck(wp_down(8192) == 4096 && wp_down(4096) == 0, "win-down");
+        ck(wp_keep(65537) == 1 && wp_keep(65536) == 0 && wp_keep(0) == 0, "win-keep");
+        ck(wp_mz('M', 'Z') == 1 && wp_mz('M', 'z') == 0 && wp_mz('m', 'Z') == 0, "win-mz");
+        ck(wp_pe(0, 0x4550) == 1 && wp_pe(4095, 0x4550) == 1, "win-pe-ok");
+        ck(wp_pe(4096, 0x4550) == 0 && wp_pe(0, 0x4551) == 0, "win-pe-no");
+        ck(wp_pe(-1, 0x4550) == 1, "win-pe-neg");
+    }
+    {
+        char path[4100], out[4100];
+        int i;
+        const char *why;
+        out[0] = 'Z'; out[1] = 0;
+        ck(bx_tmp_name("sym", out, 16) == 0 && strcmp(out, "sym.XXXXXX") == 0, "bind-tmp-sym");
+        out[0] = 'Z'; out[1] = 0;
+        ck(bx_tmp_name("sym", out, 10) == 1 && out[0] == 'Z', "bind-tmp-short");
+        ck(bx_tmp_name("", out, 8) == 0 && strcmp(out, ".XXXXXX") == 0, "bind-tmp-empty");
+        out[0] = 'Z';
+        ck(bx_tmp_name("", out, 7) == 1 && out[0] == 'Z', "bind-tmp-empty-full");
+        ck(bx_tmp_name("a", out, 9) == 0 && strcmp(out, "a.XXXXXX") == 0, "bind-tmp-one");
+        out[0] = 'Z';
+        ck(bx_tmp_name("a", out, 8) == 1 && out[0] == 'Z', "bind-tmp-one-full");
+        for (i = 0; i < 4088; i++) path[i] = 'b';
+        path[4088] = 0;
+        out[0] = 'Z';
+        ck(bx_tmp_name(path, out, 4096) == 0 && out[0] == 'b' && out[4087] == 'b'
+            && out[4088] == '.' && out[4094] == 'X' && out[4095] == 0, "bind-tmp-fit");
+        path[4088] = 'b'; path[4089] = 0;
+        out[0] = 'Z';
+        ck(bx_tmp_name(path, out, 4096) == 1 && out[0] == 'Z', "bind-tmp-over");
+        ck(bx_tmp_name(0, out, 4096) == 4 && out[0] == 'Z', "bind-tmp-null");
+        ck(bx_tmp_name("a", 0, 4096) == 4, "bind-tmp-null-out");
+        ck(bx_tmp_name("a", out, 0) == 4 && out[0] == 'Z', "bind-tmp-cap");
+        why = bx_tmp_why();
+        ck(why && strcmp(why, "bind: symbol-stream path too long") == 0, "bind-tmp-why");
+    }
+    {
+        ck(bx_key_len(0) == 1, "bind-key-empty");
+        ck(bx_key_len(1) == 0, "bind-key-one");
+        ck(bx_key_len(4095) == 0, "bind-key-fit");
+        ck(bx_key_len(4096) == 1, "bind-key-full");
+        ck(bx_key_len(4097) == 1, "bind-key-over");
+        ck(bx_key_len(-1) == 4, "bind-key-neg");
+        ck(bx_key_fit(3, 1, 6) == 0, "bind-key-join");
+        ck(bx_key_fit(3, 1, 5) == 1, "bind-key-join-eq");
+        ck(bx_key_fit(3, 1, 4) == 1, "bind-key-join-short");
+        ck(bx_key_fit(0, 0, 2) == 0, "bind-key-slash");
+        ck(bx_key_fit(0, 0, 1) == 1, "bind-key-slash-full");
+        ck(bx_key_fit(4093, 1, 4096) == 0, "bind-key-wide");
+        ck(bx_key_fit(4094, 1, 4096) == 1, "bind-key-wide-full");
+        ck(bx_key_fit(-1, 1, 4096) == 4, "bind-key-left-neg");
+        ck(bx_key_fit(1, -1, 4096) == 4, "bind-key-right-neg");
+        ck(bx_key_fit(1, 1, 0) == 4, "bind-key-cap");
+    }
+    {
+        char parent[16], base[4200], big[4200];
+        int i;
+        parent[0] = 'Z'; base[0] = 'Y';
+        ck(bx_key_split("foo", parent, 16, base, 16) == 0
+            && strcmp(parent, ".") == 0 && strcmp(base, "foo") == 0, "bind-split-file");
+        ck(bx_key_split("a/b", parent, 16, base, 16) == 0
+            && strcmp(parent, "a") == 0 && strcmp(base, "b") == 0, "bind-split-one");
+        ck(bx_key_split("a/b/c", parent, 16, base, 16) == 0
+            && strcmp(parent, "a/b") == 0 && strcmp(base, "c") == 0, "bind-split-two");
+        ck(bx_key_split("/foo", parent, 16, base, 16) == 0
+            && strcmp(parent, "/") == 0 && strcmp(base, "foo") == 0, "bind-split-root");
+        ck(bx_key_split("/", parent, 16, base, 16) == 0
+            && strcmp(parent, "/") == 0 && base[0] == 0, "bind-split-slash");
+        ck(bx_key_split("//foo", parent, 16, base, 16) == 0
+            && strcmp(parent, "/") == 0 && strcmp(base, "foo") == 0, "bind-split-double");
+        ck(bx_key_split("/foo/bar", parent, 16, base, 16) == 0
+            && strcmp(parent, "/foo") == 0 && strcmp(base, "bar") == 0, "bind-split-abs");
+        ck(bx_key_split("foo/", parent, 16, base, 16) == 0
+            && strcmp(parent, "foo") == 0 && base[0] == 0, "bind-split-trail");
+        ck(bx_key_split("", parent, 16, base, 16) == 0
+            && strcmp(parent, ".") == 0 && base[0] == 0, "bind-split-empty");
+        parent[0] = 'Z'; base[0] = 'Y';
+        ck(bx_key_split("foo", parent, 1, base, 16) == 1
+            && parent[0] == 'Z' && base[0] == 'Y', "bind-split-parent-cap");
+        ck(bx_key_split("foo", parent, 16, base, 3) == 1
+            && parent[0] == 'Z' && base[0] == 'Y', "bind-split-base-cap");
+        ck(bx_key_split(0, parent, 16, base, 16) == 4
+            && parent[0] == 'Z' && base[0] == 'Y', "bind-split-null");
+        ck(bx_key_split("foo", 0, 16, base, 16) == 4 && base[0] == 'Y', "bind-split-null-parent");
+        ck(bx_key_split("foo", parent, 16, 0, 16) == 4 && parent[0] == 'Z', "bind-split-null-base");
+        ck(bx_key_split("foo", parent, 0, base, 16) == 4
+            && parent[0] == 'Z' && base[0] == 'Y', "bind-split-cap0");
+        for (i = 0; i < 4095; i++) big[i] = 'q';
+        big[4095] = 0;
+        parent[0] = 'Z'; base[0] = 'Y';
+        ck(bx_key_split(big, parent, 8, base, 4096) == 0
+            && strcmp(parent, ".") == 0 && base[0] == 'q' && base[4094] == 'q' && base[4095] == 0,
+            "bind-split-long");
+        big[4095] = 'q'; big[4096] = 0;
+        parent[0] = 'Z'; base[0] = 'Y';
+        ck(bx_key_split(big, parent, 8, base, 4200) == 1
+            && parent[0] == 'Z' && base[0] == 'Y', "bind-split-4096");
+    }
+    {
+        const char *routes[] = {"host-symbols", "compile", "host-symbols"};
+        const char *names[] = {"elf", "symbols", "symbols"};
+        const char *empty_r[] = {""};
+        const char *empty_n[] = {""};
+        const char *bad_r[] = {"host-symbols", 0};
+        const char *bad_n[] = {"nope", "symbols"};
+        const char *early_r[] = {"host-symbols", 0};
+        const char *early_n[] = {"symbols", "symbols"};
+        ck(bx_stage_present("host-symbols", "symbols", routes, names, 3) == 1, "bind-stage-hit");
+        ck(bx_stage_present("host-symbols", "elf", routes, names, 3) == 1, "bind-stage-elf");
+        ck(bx_stage_present("compile", "symbols", routes, names, 3) == 1, "bind-stage-mid");
+        ck(bx_stage_present("compile", "elf", routes, names, 3) == 0, "bind-stage-miss");
+        ck(bx_stage_present("host-symbols", "Symbols", routes, names, 3) == 0, "bind-stage-case");
+        ck(bx_stage_present("host-symbol", "symbols", routes, names, 3) == 0, "bind-stage-prefix");
+        ck(bx_stage_present("host-symbols", "symbols", routes, names, 0) == 0, "bind-stage-none");
+        ck(bx_stage_present("host-symbols", "symbols", 0, 0, 0) == 0, "bind-stage-null-table");
+        ck(bx_stage_present("", "", empty_r, empty_n, 1) == 1, "bind-stage-empty");
+        ck(bx_stage_present("", "a", empty_r, empty_n, 1) == 0, "bind-stage-empty-miss");
+        ck(bx_stage_present("host-symbols", "symbols", early_r, early_n, 2) == 1, "bind-stage-early");
+        ck(bx_stage_present("host-symbols", "symbols", bad_r, bad_n, 2) == 4, "bind-stage-null-row");
+        ck(bx_stage_present(0, "symbols", routes, names, 3) == 4, "bind-stage-null-route");
+        ck(bx_stage_present("host-symbols", 0, routes, names, 3) == 4, "bind-stage-null-name");
+        ck(bx_stage_present("host-symbols", "symbols", 0, names, 1) == 4, "bind-stage-null-routes");
+        ck(bx_stage_present("host-symbols", "symbols", routes, 0, 1) == 4, "bind-stage-null-names");
+        ck(bx_stage_present("host-symbols", "symbols", routes, names, -1) == 4, "bind-stage-neg");
+        const char *outs[] = {"text", "object-v1", "symbols"};
+        const char *bad_o[] = {"object-v1", 0};
+        ck(bx_stage_out("compile", "symbols", "object-v1", routes, names, outs, 3) == 1, "bind-out-hit");
+        ck(bx_stage_out("host-symbols", "elf", "text", routes, names, outs, 3) == 1, "bind-out-elf");
+        ck(bx_stage_out("host-symbols", "elf", "object-v1", routes, names, outs, 3) == 0, "bind-out-elf-miss");
+        ck(bx_stage_out("compile", "symbols", "text", routes, names, outs, 3) == 0, "bind-out-name-miss");
+        ck(bx_stage_out("compile", "symbols", "Object-v1", routes, names, outs, 3) == 0, "bind-out-case");
+        ck(bx_stage_out("compile", "symbols", "object-v1", routes, names, outs, 0) == 0, "bind-out-none");
+        ck(bx_stage_out("compile", "symbols", "object-v1", 0, 0, 0, 0) == 0, "bind-out-null-table");
+        ck(bx_stage_out("", "", "", empty_r, empty_n, empty_r, 1) == 1, "bind-out-empty");
+        ck(bx_stage_out("compile", "symbols", "object-v1", bad_r, bad_n, bad_o, 2) == 4, "bind-out-null-row");
+        ck(bx_stage_out(0, "symbols", "object-v1", routes, names, outs, 3) == 4, "bind-out-null-route");
+        ck(bx_stage_out("compile", 0, "object-v1", routes, names, outs, 3) == 4, "bind-out-null-name");
+        ck(bx_stage_out("compile", "symbols", 0, routes, names, outs, 3) == 4, "bind-out-null-out");
+        ck(bx_stage_out("compile", "symbols", "object-v1", 0, names, outs, 1) == 4, "bind-out-null-routes");
+        ck(bx_stage_out("compile", "symbols", "object-v1", routes, 0, outs, 1) == 4, "bind-out-null-names");
+        ck(bx_stage_out("compile", "symbols", "object-v1", routes, names, 0, 1) == 4, "bind-out-null-outs");
+        ck(bx_stage_out("compile", "symbols", "object-v1", routes, names, outs, -1) == 4, "bind-out-neg");
+        const char *ins[] = {"text", "object-v1", "symbols"};
+        const int models[] = {2, 7, 3};
+        int slot;
+        slot = -1;
+        ck(bx_stage_in("compile", "symbols", "object-v1", routes, names, ins, 3) == 1
+            && bx_stage_model("compile", "symbols", routes, names, models, 3, &slot) == 1
+            && slot == 7
+            && bx_stage_in("compile", "symbols", 0, routes, names, ins, 3) == 4
+            && bx_stage_model(0, "symbols", routes, names, models, 3, &slot) == 4
+            && slot == 7, "bind-field");
+        ck(bx_stage_route("compile", routes, 3) == 1
+            && bx_stage_route("host-symbols", early_r, 2) == 1
+            && bx_stage_route("nope", routes, 3) == 0
+            && bx_stage_route(0, routes, 3) == 4
+            && bx_stage_route("compile", 0, 0) == 0
+            && bx_stage_route("compile", routes, -1) == 4
+            && bx_stage_route("nope", bad_r, 2) == 4, "bind-route");
+        ck(bx_stage_join("object-v1", "object-v1") == 0
+            && bx_stage_join("object-v1", "text") == 1
+            && bx_stage_join(0, "text") == 4
+            && bx_stage_model_ok(0, 3) == 0
+            && bx_stage_model_ok(3, 3) == 1
+            && bx_stage_model_ok(-1, 3) == 1
+            && bx_stage_model_ok(0, 0) == 4, "bind-join");
+    }
+    {
+        unsigned mask;
+        mask = 0;
+        ck(bx_filter_none(0, 7, &mask) == 0 && mask == 15, "bind-filter-null");
+        mask = 3;
+        ck(bx_filter_none(0, 0, &mask) == 0 && mask == 15, "bind-filter-zero-target");
+        mask = 9;
+        ck(bx_filter_none("", 7, &mask) == 2 && mask == 9, "bind-filter-empty");
+        mask = 4;
+        ck(bx_filter_none("a", 1, &mask) == 2 && mask == 4, "bind-filter-path");
+        ck(bx_filter_none(0, 7, 0) == 4, "bind-filter-null-mask");
+        ck(bx_filter_none("a", 7, 0) == 4, "bind-filter-path-mask");
+    }
+    {
+        int b, dot;
+        const char *why;
+        b = 9; dot = 9;
+        ck(bx_dep_mark("a.c", 0, &b, &dot) == 0 && b == 0 && dot == 1, "bind-dep-file");
+        ck(bx_dep_mark("dir/a.c", 0, &b, &dot) == 0 && b == 4 && dot == 5, "bind-dep-src");
+        ck(bx_dep_mark("dir/a.c", 1, &b, &dot) == 0 && b == 0 && dot == 5, "bind-dep-out");
+        ck(bx_dep_mark("dir/a.c", 2, &b, &dot) == 0 && b == 0 && dot == 5, "bind-dep-out-any");
+        ck(bx_dep_mark("dir/foo", 0, &b, &dot) == 0 && b == 4 && dot == 7, "bind-dep-nodot");
+        ck(bx_dep_mark("a.b.c", 0, &b, &dot) == 0 && b == 0 && dot == 3, "bind-dep-lastdot");
+        ck(bx_dep_mark("foo/bar.baz/qux", 0, &b, &dot) == 0 && b == 12 && dot == 15, "bind-dep-mid");
+        ck(bx_dep_mark("/a.c", 0, &b, &dot) == 0 && b == 1 && dot == 2, "bind-dep-root");
+        ck(bx_dep_mark("a.c/", 0, &b, &dot) == 0 && b == 4 && dot == 4, "bind-dep-trail");
+        ck(bx_dep_mark(".c", 0, &b, &dot) == 0 && b == 0 && dot == 0, "bind-dep-dot");
+        ck(bx_dep_mark("", 0, &b, &dot) == 0 && b == 0 && dot == 0, "bind-dep-empty");
+        b = 9; dot = 9;
+        ck(bx_dep_mark(0, 0, &b, &dot) == 4 && b == 9 && dot == 9, "bind-dep-null");
+        ck(bx_dep_mark("a.c", 0, 0, &dot) == 4 && dot == 9, "bind-dep-null-b");
+        ck(bx_dep_mark("a.c", 0, &b, 0) == 4 && b == 9, "bind-dep-null-dot");
+        ck(bx_dep_len(4093, 0, 4096) == 0, "bind-dep-fit");
+        ck(bx_dep_len(4094, 0, 4096) == 1, "bind-dep-over");
+        ck(bx_dep_len(0, 0, 4096) == 0, "bind-dep-zero");
+        ck(bx_dep_len(0, 0, 3) == 0, "bind-dep-exact");
+        ck(bx_dep_len(0, 0, 2) == 1, "bind-dep-short");
+        ck(bx_dep_len(1, 0, 4) == 0, "bind-dep-one");
+        ck(bx_dep_len(2, 0, 4) == 1, "bind-dep-two");
+        ck(bx_dep_len(5, 4, 4096) == 0, "bind-dep-stem");
+        ck(bx_dep_len(1, 2, 4096) == 4, "bind-dep-order");
+        ck(bx_dep_len(1, -1, 4096) == 4, "bind-dep-neg-b");
+        ck(bx_dep_len(1, 0, 0) == 4, "bind-dep-cap");
+        ck(bx_dep_mark("a.c", 0, &b, &dot) == 0 && bx_dep_len(dot, b, 4096) == 0, "bind-dep-join");
+        why = bx_dep_why();
+        ck(why && strcmp(why, "bind: dependency path too long") == 0, "bind-dep-why");
+    }
+    {
+        const char *chosen, *out, *empty, *sent;
+        sent = "SENT";
+        chosen = sent;
+        out = "a.out";
+        empty = "";
+        ck(bx_dep_only("", 1, out, &chosen) == 1 && chosen == out, "bind-only-out");
+        ck(bx_dep_only("", 1, 0, &chosen) == 1 && strcmp(chosen, "-") == 0, "bind-only-dash");
+        ck(bx_dep_only("", 1, empty, &chosen) == 1 && chosen == empty, "bind-only-empty-out");
+        ck(bx_dep_only("", 2, out, &chosen) == 1 && chosen == out, "bind-only-nonzero");
+        ck(bx_dep_only("", -1, 0, &chosen) == 1 && strcmp(chosen, "-") == 0, "bind-only-neg");
+        chosen = sent;
+        ck(bx_dep_only("", 0, out, &chosen) == 2 && chosen == sent, "bind-only-off");
+        ck(bx_dep_only("foo.d", 1, out, &chosen) == 2 && chosen == sent, "bind-only-given");
+        ck(bx_dep_only("foo.d", 1, out, 0) == 2, "bind-only-given-null");
+        ck(bx_dep_only(0, 1, out, &chosen) == 4 && chosen == sent, "bind-only-null-deps");
+        ck(bx_dep_only("", 1, out, 0) == 4, "bind-only-null-chosen");
+    }
+    {
+        ck(bx_dep_gate(0, 1, 0, 0) == 0, "bind-gate-null");
+        ck(bx_dep_gate("", 1, 1, 1) == 1, "bind-gate-deponly");
+        ck(bx_dep_gate("", 2, 1, 1) == 1, "bind-gate-nonzero");
+        ck(bx_dep_gate("", -1, 4, 1) == 1, "bind-gate-neg");
+        ck(bx_dep_gate("foo.d", 0, 0, 0) == 1, "bind-gate-mode0");
+        ck(bx_dep_gate("foo.d", 0, 2, 0) == 1, "bind-gate-mode2");
+        ck(bx_dep_gate("foo.d", 0, 3, 0) == 1, "bind-gate-mode3");
+        ck(bx_dep_gate("foo.d", 0, 5, 0) == 1, "bind-gate-mode5");
+        ck(bx_dep_gate("", 0, 0, 0) == 1, "bind-gate-empty");
+        ck(bx_dep_gate("foo.d", 0, 1, 0) == 0, "bind-gate-mode1");
+        ck(bx_dep_gate("foo.d", 0, 4, 0) == 0, "bind-gate-mode4");
+        ck(bx_dep_gate("foo.d", 0, 0, 1) == 0, "bind-gate-run");
+        ck(bx_dep_gate("foo.d", 0, 2, 2) == 0, "bind-gate-run-any");
+        ck(bx_dep_gate("foo.d", 1, 1, 1) == 1, "bind-gate-deponly-run");
+    }
+    {
+        const char *chosen, *out, *empty, *sent;
+        sent = "SENT";
+        chosen = sent;
+        out = "a.out";
+        empty = "";
+        ck(bx_dep_target(out, 0, &chosen) == 0 && chosen == out, "bind-target-out");
+        ck(bx_dep_target(empty, 0, &chosen) == 0 && chosen == empty, "bind-target-empty");
+        chosen = sent;
+        ck(bx_dep_target(0, 0, &chosen) == 1 && chosen == sent, "bind-target-null-out");
+        ck(bx_dep_target(out, 1, &chosen) == 1 && chosen == sent, "bind-target-deponly");
+        ck(bx_dep_target(out, 2, &chosen) == 1 && chosen == sent, "bind-target-nonzero");
+        ck(bx_dep_target(out, -1, &chosen) == 1 && chosen == sent, "bind-target-neg");
+        ck(bx_dep_target(0, 1, &chosen) == 1 && chosen == sent, "bind-target-both");
+        ck(bx_dep_target(0, 0, 0) == 1, "bind-target-null-slot");
+        ck(bx_dep_target(out, 0, 0) == 4, "bind-target-null-chosen");
+    }
+    {
+        ck(bx_dep_ret(0, 1) == 0, "bind-ret-only");
+        ck(bx_dep_ret(0, 2) == 0, "bind-ret-nonzero");
+        ck(bx_dep_ret(0, -1) == 0, "bind-ret-neg");
+        ck(bx_dep_ret(0, 0) == 1, "bind-ret-continue");
+        ck(bx_dep_ret(1, 1) == 2, "bind-ret-write");
+        ck(bx_dep_ret(1, 0) == 2, "bind-ret-write-off");
+        ck(bx_dep_ret(-1, 1) == 2, "bind-ret-write-neg");
+    }
+    {
+        const char *chosen, *out, *empty, *sent;
+        sent = "SENT";
+        chosen = sent;
+        out = "prog";
+        empty = "";
+        ck(bx_image_name(0, 0, 0, 0, &chosen) == 1 && strcmp(chosen, "a.out") == 0, "bind-image-aout");
+        ck(bx_image_name(0, 0, 0, 1, &chosen) == 1 && strcmp(chosen, "a.exe") == 0, "bind-image-exe");
+        ck(bx_image_name(0, 0, 0, 2, &chosen) == 1 && strcmp(chosen, "a.exe") == 0, "bind-image-win");
+        ck(bx_image_name(0, 0, 0, -1, &chosen) == 1 && strcmp(chosen, "a.exe") == 0, "bind-image-win-neg");
+        chosen = sent;
+        ck(bx_image_name(out, 0, 0, 0, &chosen) == 2 && chosen == sent, "bind-image-given");
+        ck(bx_image_name(empty, 0, 0, 1, &chosen) == 2 && chosen == sent, "bind-image-empty");
+        ck(bx_image_name(0, 1, 0, 0, &chosen) == 2 && chosen == sent, "bind-image-mode");
+        ck(bx_image_name(0, 2, 0, 1, &chosen) == 2 && chosen == sent, "bind-image-mode2");
+        ck(bx_image_name(0, -1, 0, 0, &chosen) == 2 && chosen == sent, "bind-image-mode-neg");
+        ck(bx_image_name(0, 0, 1, 0, &chosen) == 2 && chosen == sent, "bind-image-explicit");
+        ck(bx_image_name(0, 0, 2, 1, &chosen) == 2 && chosen == sent, "bind-image-explicit-nonzero");
+        ck(bx_image_name(0, 0, -1, 0, &chosen) == 2 && chosen == sent, "bind-image-explicit-neg");
+        ck(bx_image_name(out, 0, 0, 0, 0) == 2, "bind-image-keep-null");
+        ck(bx_image_name(0, 0, 0, 0, 0) == 4, "bind-image-null-chosen");
+    }
+    {
+        ck(bx_run_enter(1) == 0, "bind-run-enter");
+        ck(bx_run_enter(2) == 0, "bind-run-nonzero");
+        ck(bx_run_enter(-1) == 0, "bind-run-neg");
+        ck(bx_run_enter(0) == 1, "bind-run-continue");
+    }
+    {
+        ck(bx_exec_forward(1) == 0, "bind-exec-forward");
+        ck(bx_exec_forward(2) == 0, "bind-exec-nonzero");
+        ck(bx_exec_forward(-1) == 0, "bind-exec-neg");
+        ck(bx_exec_forward(0) == 1, "bind-exec-continue");
+    }
+    {
+        ck(bx_run_args(0, 0, 0) == 0, "bind-args-off");
+        ck(bx_run_args(0, 0, 1) == 0, "bind-args-linux-off");
+        ck(bx_run_args(1, 0, 0) == 1, "bind-args-runit");
+        ck(bx_run_args(2, 0, 0) == 1, "bind-args-runit-nonzero");
+        ck(bx_run_args(-1, 0, 1) == 1, "bind-args-runit-neg");
+        ck(bx_run_args(0, 1, 1) == 1, "bind-args-exec");
+        ck(bx_run_args(0, 2, 1) == 1, "bind-args-exec-nonzero");
+        ck(bx_run_args(0, -1, 1) == 1, "bind-args-exec-neg");
+        ck(bx_run_args(0, 1, 0) == 0, "bind-args-exec-host");
+        ck(bx_run_args(0, 2, 0) == 0, "bind-args-exec-host-nonzero");
+        ck(bx_run_args(0, -1, 0) == 0, "bind-args-exec-host-neg");
+        ck(bx_run_args(1, 1, 1) == 1, "bind-args-both");
+        ck(bx_run_args(0, 1, 2) == 1, "bind-args-linux-nonzero");
+        ck(bx_run_args(0, 1, -1) == 1, "bind-args-linux-neg");
+        ck(bx_run_args(0, 0, 2) == 0, "bind-args-linux-empty");
+    }
+    {
+        ck(bx_run_count(1, 1) == 1, "bind-count-one");
+        ck(bx_run_count(4, 1) == 4, "bind-count-args");
+        ck(bx_run_count(5, 2) == 4, "bind-count-start");
+        ck(bx_run_count(0, 0) == 1, "bind-count-zero");
+        ck(bx_run_count(3, 3) == 1, "bind-count-empty");
+        ck(bx_run_count(10, 0) == 11, "bind-count-all");
+        ck(bx_run_count(2, 4) == -1, "bind-count-neg");
+        ck(bx_run_count(2, 3) == 0, "bind-count-past");
+    }
+    {
+        const char *chosen, *out, *empty, *sent;
+        int maxargs;
+        sent = "SENT";
+        chosen = sent;
+        out = "prog";
+        empty = "";
+        ck(bx_sym_out(0, 0, 0, 0, &chosen) == 1 && strcmp(chosen, "a.out") == 0, "bind-sym-aout");
+        chosen = sent;
+        ck(bx_sym_out(0, 0, 0, 1, &chosen) == 2 && chosen == sent, "bind-sym-run");
+        ck(bx_sym_out(0, 0, 0, 2, &chosen) == 2 && chosen == sent, "bind-sym-run-nonzero");
+        ck(bx_sym_out(0, 0, 0, -1, &chosen) == 2 && chosen == sent, "bind-sym-run-neg");
+        ck(bx_sym_out(out, 0, 0, 0, &chosen) == 2 && chosen == sent, "bind-sym-given");
+        ck(bx_sym_out(empty, 0, 0, 0, &chosen) == 2 && chosen == sent, "bind-sym-empty");
+        ck(bx_sym_out(0, 1, 0, 0, &chosen) == 2 && chosen == sent, "bind-sym-mode");
+        ck(bx_sym_out(0, -1, 0, 0, &chosen) == 2 && chosen == sent, "bind-sym-mode-neg");
+        ck(bx_sym_out(0, 0, 1, 0, &chosen) == 2 && chosen == sent, "bind-sym-explicit");
+        ck(bx_sym_out(0, 0, -1, 0, &chosen) == 2 && chosen == sent, "bind-sym-explicit-neg");
+        ck(bx_sym_out(out, 0, 0, 0, 0) == 2, "bind-sym-keep-null");
+        ck(bx_sym_out(0, 0, 0, 0, 0) == 4, "bind-sym-null-chosen");
+        ck(bx_diag_opt(0, 0, 0, 1, 1, 1) == 0, "bind-diag-neither");
+        ck(bx_diag_opt("a", 0, 1, 0, 0, 0) == 0, "bind-diag-ok");
+        ck(bx_diag_opt("a", 0, 0, 0, 0, 0) == 1, "bind-diag-target");
+        ck(bx_diag_opt(0, "b", 0, 0, 0, 0) == 1, "bind-diag-provider");
+        ck(bx_diag_opt("", 0, 1, 0, 0, 0) == 0, "bind-diag-empty");
+        ck(bx_diag_opt("a", 0, 1, 1, 0, 0) == 1, "bind-diag-mode1");
+        ck(bx_diag_opt("a", 0, 1, 4, 0, 0) == 1, "bind-diag-mode4");
+        ck(bx_diag_opt("a", 0, 1, 5, 0, 0) == 1, "bind-diag-mode5");
+        ck(bx_diag_opt("a", 0, 1, 2, 0, 0) == 0, "bind-diag-mode2");
+        ck(bx_diag_opt("a", 0, 1, 3, 0, 0) == 0, "bind-diag-mode3");
+        ck(bx_diag_opt("a", 0, 1, 0, 1, 0) == 1, "bind-diag-emit");
+        ck(bx_diag_opt("a", 0, 1, 0, 2, 0) == 1, "bind-diag-emit-nonzero");
+        ck(bx_diag_opt("a", 0, 1, 0, -1, 0) == 1, "bind-diag-emit-neg");
+        ck(bx_diag_opt("a", 0, 1, 0, 0, 1) == 1, "bind-diag-asm");
+        ck(bx_diag_opt("a", 0, 1, 0, 0, -1) == 1, "bind-diag-asm-neg");
+        ck(bx_diag_opt("a", "b", 2, 0, 0, 0) == 0, "bind-diag-both");
+        ck(bx_diag_run(0, 1) == 0, "bind-runout-null");
+        ck(bx_diag_run("a", 0) == 0, "bind-runout-file");
+        ck(bx_diag_run("-", 0) == 1, "bind-runout-dash");
+        ck(bx_diag_run("-x", 0) == 0, "bind-runout-dashx");
+        ck(bx_diag_run("", 0) == 0, "bind-runout-empty");
+        ck(bx_diag_run("a", 1) == 1, "bind-runout-run");
+        ck(bx_diag_run("a", 2) == 1, "bind-runout-nonzero");
+        ck(bx_diag_run("a", -1) == 1, "bind-runout-neg");
+        ck(strcmp(bx_same_why(1, 0), "bind: symbol-stream and output are the same path") == 0, "bind-same-out");
+        ck(strcmp(bx_same_why(2, 0), "bind: symbol-stream and output are the same path") == 0, "bind-same-out-nonzero");
+        ck(strcmp(bx_same_why(1, 1), "bind: symbol-stream and dependency output are the same path") == 0, "bind-same-dep");
+        ck(strcmp(bx_same_why(-1, 0), "bind: cannot-check-symbol-stream path") == 0, "bind-same-check");
+        ck(strcmp(bx_same_why(-1, 1), "bind: cannot-check-symbol-stream path") == 0, "bind-same-check-dep");
+        ck(bx_same_why(0, 0) == 0, "bind-same-zero");
+        ck(bx_same_why(1, 2) == 0, "bind-same-kind");
+        ck(bx_sym_need(0, 0, "a") == 0, "bind-need-target");
+        ck(bx_sym_need(1, 0, 0) == 1, "bind-need-mode0");
+        ck(bx_sym_need(1, 3, 0) == 1, "bind-need-mode3");
+        ck(bx_sym_need(1, 1, 0) == 0, "bind-need-mode1");
+        ck(bx_sym_need(1, 2, 0) == 0, "bind-need-mode2");
+        ck(bx_sym_need(1, 2, "a") == 1, "bind-need-path");
+        ck(bx_sym_need(1, 2, "") == 1, "bind-need-empty");
+        ck(bx_sym_need(-1, 0, 0) == 1, "bind-need-neg");
+        ck(bx_sym_need(2, 5, "x") == 1, "bind-need-other");
+        ck(bx_fwd_want(0, 1, 0, 0, 0, 0) == 0, "bind-fwd-mode");
+        ck(bx_fwd_want(0, 1, 0, 0, 0, "lnx/x") == 0, "bind-fwd-mode-name");
+        ck(bx_fwd_want(0, 0, 0, 0, 0, 0) == 4, "bind-fwd-null");
+        ck(bx_fwd_want(1, 5, 0, 0, 0, 0) == 4, "bind-fwd-run-null");
+        ck(bx_fwd_want(1, 0, 1, 0, 0, 0) == 0, "bind-fwd-second");
+        ck(bx_fwd_want(1, 0, 0, 1, 0, 0) == 0, "bind-fwd-tape");
+        ck(bx_fwd_want(1, 0, 0, 0, 1, 0) == 0, "bind-fwd-link");
+        ck(bx_fwd_want(1, 0, 0, 0, -1, "lnx/x") == 0, "bind-fwd-link-neg");
+        ck(bx_fwd_want(0, 0, 0, 0, 0, "osx/arm") == 1, "bind-fwd-osx");
+        ck(bx_fwd_want(0, 0, 0, 0, 0, "lnx/x") == 1, "bind-fwd-lnx");
+        ck(bx_fwd_want(0, 0, 0, 0, 0, "win/x") == 1, "bind-fwd-win");
+        ck(bx_fwd_want(2, 5, 0, 0, 0, "lnx/a") == 1, "bind-fwd-run-nonzero");
+        ck(bx_fwd_want(-1, 1, 0, 0, 0, "win/a") == 1, "bind-fwd-run-neg");
+        ck(bx_fwd_want(0, -1, 0, 0, 0, "lnx/a") == 0, "bind-fwd-mode-neg");
+        ck(bx_fwd_want(0, 0, 2, 0, 0, "lnx/a") == 0, "bind-fwd-second-nonzero");
+        ck(bx_fwd_want(0, 0, 0, 0, 0, "osx") == 0, "bind-fwd-short");
+        ck(bx_fwd_want(0, 0, 0, 0, 0, "OSX/a") == 0, "bind-fwd-case");
+        ck(bx_fwd_want(0, 0, 0, 0, 0, "") == 0, "bind-fwd-empty");
+        maxargs = 9;
+        ck(bx_fwd_maxargs(0, &maxargs) == 4 && maxargs == 9, "bind-max-null");
+        ck(bx_fwd_maxargs("win/a", 0) == 4, "bind-max-slot");
+        maxargs = 9;
+        ck(bx_fwd_maxargs("win/a", &maxargs) == 0 && maxargs == 4, "bind-max-win");
+        ck(bx_fwd_maxargs("win/", &maxargs) == 0 && maxargs == 4, "bind-max-win-exact");
+        ck(bx_fwd_maxargs("lnx/a", &maxargs) == 0 && maxargs == 0, "bind-max-lnx");
+        ck(bx_fwd_maxargs("osx/a", &maxargs) == 0 && maxargs == 0, "bind-max-osx");
+        ck(bx_fwd_maxargs("", &maxargs) == 0 && maxargs == 0, "bind-max-empty");
+        ck(bx_fwd_maxargs("win", &maxargs) == 0 && maxargs == 0, "bind-max-short");
+        ck(bx_fwd_maxargs("WIN/a", &maxargs) == 0 && maxargs == 0, "bind-max-case");
+        ck(bx_obj_foreign(0, 0) == 0, "bind-obj-off-null");
+        ck(bx_obj_foreign(0, "osx/a") == 0, "bind-obj-off");
+        ck(bx_obj_foreign(1, 0) == 4, "bind-obj-null");
+        ck(bx_obj_foreign(1, "lnx/x") == 0, "bind-obj-lnx");
+        ck(bx_obj_foreign(1, "lnx/") == 0, "bind-obj-lnx-exact");
+        ck(bx_obj_foreign(1, "osx/x") == 1, "bind-obj-osx");
+        ck(bx_obj_foreign(1, "win/x") == 1, "bind-obj-win");
+        ck(bx_obj_foreign(1, "") == 1, "bind-obj-empty");
+        ck(bx_obj_foreign(1, "lnx") == 1, "bind-obj-short");
+        ck(bx_obj_foreign(2, "osx/a") == 1, "bind-obj-nonzero");
+        ck(bx_obj_foreign(-1, "lnx/a") == 0, "bind-obj-neg-lnx");
+        ck(bx_obj_foreign(-1, "osx/a") == 1, "bind-obj-neg");
+        ck(bx_obj_route(1, 1) == 0, "bind-route-both");
+        ck(bx_obj_route(2, -1) == 0, "bind-route-nonzero");
+        ck(bx_obj_route(0, 1) == 1, "bind-route-lower");
+        ck(bx_obj_route(1, 0) == 1, "bind-route-encoder");
+        ck(bx_obj_route(0, 0) == 1, "bind-route-none");
+        ck(bx_obj_route(-1, 0) == 1, "bind-route-neg");
+    }
+    {
+        unsigned char head[12];
+        int bit, i;
+        ck(bx_sym_model(0) == 1, "bind-model-miss");
+        ck(bx_sym_model(1) == 0, "bind-model-hit");
+        ck(bx_sym_model(2) == 0, "bind-model-nonzero");
+        ck(bx_sym_model(-1) == 0, "bind-model-neg");
+        ck(bx_sym_span(0) == 0, "bind-span-zero");
+        ck(bx_sym_span(-1) == 0, "bind-span-neg");
+        ck(bx_sym_span(2147483637) == 0, "bind-span-fit");
+        ck(bx_sym_span(2147483638) == 1, "bind-span-over");
+        ck(bx_sym_span(2147483647) == 1, "bind-span-max");
+        ck(bx_sym_bytes(0) == 10, "bind-bytes-zero");
+        ck(bx_sym_bytes(4) == 14, "bind-bytes-four");
+        ck(bx_sym_bytes(-10) == 0, "bind-bytes-neg");
+        ck(bx_sym_bytes(2147483637) == 2147483647, "bind-bytes-edge");
+        for (i = 0; i < 12; i++) head[i] = 9;
+        ck(bx_sym_head(0, 0) == 4, "bind-head-null");
+        ck(head[0] == 9, "bind-head-untouched");
+        ck(bx_sym_head(0, head) == 0, "bind-head-zero");
+        ck(head[0] == 'U' && head[1] == 'S' && head[2] == 'L' && head[3] == 'S', "bind-head-usls");
+        ck(head[4] == 'Y' && head[5] == 'M' && head[6] == '1' && head[7] == '\n', "bind-head-ym");
+        ck(head[8] == 0 && head[9] == 0 && head[10] == 9, "bind-head-tail");
+        ck(bx_sym_head(65, head) == 0 && head[8] == 65, "bind-head-byte");
+        ck(bx_sym_head(256, head) == 0 && head[8] == 0, "bind-head-wrap");
+        ck(bx_sym_head(255, head) == 0 && head[8] == 255, "bind-head-full");
+        ck(bx_sym_head(-1, head) == 0 && head[8] == 255, "bind-head-neg");
+        ck(bx_host_skip(0, 0) == 1, "bind-skip-target");
+        ck(bx_host_skip(0, 3) == 1, "bind-skip-target-mode");
+        ck(bx_host_skip(1, 0) == 0, "bind-skip-mode0");
+        ck(bx_host_skip(2, 3) == 0, "bind-skip-mode3");
+        ck(bx_host_skip(-1, 0) == 0, "bind-skip-neg");
+        ck(bx_host_skip(1, 1) == 1, "bind-skip-mode1");
+        ck(bx_host_skip(1, 2) == 1, "bind-skip-mode2");
+        ck(bx_host_skip(1, 4) == 1, "bind-skip-mode4");
+        ck(bx_host_skip(1, -1) == 1, "bind-skip-mode-neg");
+        ck(bx_host_from(0) == 0, "bind-from-null");
+        ck(bx_host_from("a") == 1, "bind-from-name");
+        ck(bx_host_from("") == 1, "bind-from-empty");
+        ck(bx_host_side(0, "a") == 1, "bind-side-write");
+        ck(bx_host_side(0, "") == 1, "bind-side-empty");
+        ck(bx_host_side(0, 0) == 0, "bind-side-null");
+        ck(bx_host_side(1, "a") == 0, "bind-side-rc");
+        ck(bx_host_side(2, "a") == 0, "bind-side-nonzero");
+        ck(bx_host_side(-1, "a") == 0, "bind-side-neg");
+        ck(bx_host_kind(0) == 1, "bind-kind-host");
+        ck(bx_host_kind(1) == 2, "bind-kind-native");
+        ck(bx_host_kind(2) == 2, "bind-kind-nonzero");
+        ck(bx_host_kind(-1) == 2, "bind-kind-neg");
+        ck(bx_host_fill(0) == 1, "bind-fill-import");
+        ck(bx_host_fill(1) == 0, "bind-fill-native");
+        ck(bx_host_fill(2) == 0, "bind-fill-nonzero");
+        ck(bx_host_fill(-1) == 0, "bind-fill-neg");
+        bit = 9;
+        ck(bx_host_bit(0, 1, &bit) == 0 && bit == 1, "bind-bit-0");
+        ck(bx_host_bit(1, 1, &bit) == 0 && bit == 2, "bind-bit-1");
+        ck(bx_host_bit(2, 1, &bit) == 0 && bit == 4, "bind-bit-2");
+        ck(bx_host_bit(3, 1, &bit) == 0 && bit == 8, "bind-bit-3");
+        ck(bx_host_bit(3, 2, &bit) == 0 && bit == 8, "bind-bit-nonzero");
+        ck(bx_host_bit(1, -1, &bit) == 0 && bit == 2, "bind-bit-neg");
+        bit = 9;
+        ck(bx_host_bit(2, 0, &bit) == 0 && bit == 0, "bind-bit-off");
+        bit = 9;
+        ck(bx_host_bit(4, 1, &bit) == 4 && bit == 9, "bind-bit-high");
+        ck(bx_host_bit(-1, 1, &bit) == 4 && bit == 9, "bind-bit-low");
+        ck(bx_host_bit(1, 1, 0) == 4, "bind-bit-null");
+        ck(bx_host_keyn() == 13, "bind-keyn");
+        ck(bx_host_elf(3, 0) == 1, "bind-elf-miss");
+        ck(bx_host_elf(3, 1) == 0, "bind-elf-hit");
+        ck(bx_host_elf(3, 2) == 0, "bind-elf-nonzero");
+        ck(bx_host_elf(3, -1) == 0, "bind-elf-neg");
+        ck(bx_host_elf(0, 0) == 0, "bind-elf-mode0");
+        ck(bx_host_elf(4, 0) == 0, "bind-elf-mode4");
+        ck(bx_compat_why(0, 1, "a.c") == 0, "bind-compat-rc0");
+        ck(bx_compat_why(1, 1, "a.c") == 0, "bind-compat-rc1");
+        ck(bx_compat_why(8, 1, "a.c") == 0, "bind-compat-rc8");
+        ck(strcmp(bx_compat_why(9, 0, "a.c"), "missing compatibility argument") == 0, "bind-compat-off");
+        ck(strcmp(bx_compat_why(9, 1, 0), "missing compatibility argument") == 0, "bind-compat-nosrc");
+        ck(strcmp(bx_compat_why(9, 1, ""), "missing compatibility argument (arguments for the program go after --: unisacc prog.c -- -x)") == 0, "bind-compat-empty");
+        ck(strcmp(bx_compat_why(9, 1, "a.c"), "missing compatibility argument (arguments for the program go after --: unisacc prog.c -- -x)") == 0, "bind-compat-long");
+        ck(strcmp(bx_compat_why(9, 2, "a.c"), "missing compatibility argument (arguments for the program go after --: unisacc prog.c -- -x)") == 0, "bind-compat-two");
+        ck(strcmp(bx_compat_why(9, -1, "a.c"), "missing compatibility argument (arguments for the program go after --: unisacc prog.c -- -x)") == 0, "bind-compat-neg");
+        ck(bx_opt_dash(0) == 4, "bind-dash-null");
+        ck(bx_opt_dash("") == 0, "bind-dash-empty");
+        ck(bx_opt_dash("-") == 0, "bind-dash-bare");
+        ck(bx_opt_dash("a.c") == 0, "bind-dash-file");
+        ck(bx_opt_dash("-x") == 1, "bind-dash-short");
+        ck(bx_opt_dash("--flag") == 1, "bind-dash-long");
+        ck(strcmp(bx_opt_why(0, "a.c"), "option not migrated") == 0, "bind-opt-off");
+        ck(strcmp(bx_opt_why(1, 0), "option not migrated") == 0, "bind-opt-nosrc");
+        ck(strcmp(bx_opt_why(1, ""), "option not migrated (arguments for the program go after --: unisacc prog.c -- --flag)") == 0, "bind-opt-empty");
+        ck(strcmp(bx_opt_why(1, "a.c"), "option not migrated (arguments for the program go after --: unisacc prog.c -- --flag)") == 0, "bind-opt-long");
+        ck(strcmp(bx_opt_why(-1, "a.c"), "option not migrated (arguments for the program go after --: unisacc prog.c -- --flag)") == 0, "bind-opt-neg");
+        ck(strcmp(bx_src_why(0), "expected a C source file") == 0, "bind-src-null");
+        ck(bx_src_why("") == 0, "bind-src-empty");
+        ck(bx_src_why("a.c") == 0, "bind-src-file");
+        ck(strcmp(bx_mix_why(0), "mix of objects and sources: compile each source with -c -b os/arch -funit first") == 0, "bind-mix-src");
+        ck(bx_mix_why(1) == 0, "bind-mix-obj");
+        ck(bx_mix_why(2) == 0, "bind-mix-nonzero");
+        ck(bx_mix_why(-1) == 0, "bind-mix-neg");
+        ck(bx_tape_need(1, 0) == 0, "bind-tape-mode1");
+        ck(bx_tape_need(4, 0) == 0, "bind-tape-mode4");
+        ck(bx_tape_need(0, 0) == 1, "bind-tape-miss");
+        ck(bx_tape_need(0, 1) == 0, "bind-tape-hit");
+        ck(bx_tape_need(2, 0) == 1, "bind-tape-mode2");
+        ck(bx_tape_need(2, 2) == 0, "bind-tape-nonzero");
+        ck(bx_tape_need(3, -1) == 0, "bind-tape-neg");
+        ck(bx_tape_need(5, 0) == 1, "bind-tape-mode5");
+        ck(bx_tape_need(-1, 0) == 1, "bind-tape-mode-neg");
+        ck(strcmp(bx_tape_why(), "tape domain: required tapecheck model is missing") == 0, "bind-tape-why");
+        ck(bx_tapebin_bad(0, 0) == 1, "bind-bin-origin");
+        ck(bx_tapebin_bad(1, 0) == 0, "bind-bin-ok");
+        ck(bx_tapebin_bad(2, 0) == 0, "bind-bin-two");
+        ck(bx_tapebin_bad(-1, 0) == 0, "bind-bin-neg");
+        ck(bx_tapebin_bad(1, 1) == 1, "bind-bin-decode");
+        ck(bx_tapebin_bad(1, -1) == 1, "bind-bin-dec-neg");
+        ck(bx_tapebin_bad(0, 1) == 1, "bind-bin-both");
+        ck(strcmp(bx_tapebin_why(), "invalid tapebin or origin target mismatch") == 0, "bind-bin-why");
+        ck(bx_name_fit(0, 96) == 0, "bind-name-zero");
+        ck(bx_name_fit(95, 96) == 0, "bind-name-fit");
+        ck(bx_name_fit(96, 96) == 1, "bind-name-full");
+        ck(bx_name_fit(-1, 96) == 1, "bind-name-neg");
+        ck(bx_name_fit(0, 0) == 4, "bind-name-cap0");
+        ck(bx_name_fit(0, -1) == 4, "bind-name-capneg");
+        ck(strcmp(bx_name_why(), "target name too long") == 0, "bind-name-why");
+        ck(bx_cache_why(0, 0) == 0, "bind-cache-zero");
+        ck(bx_cache_why(1, 0) == 0, "bind-cache-hit");
+        ck(strcmp(bx_cache_why(-1, 0), "reuse: cache read failed") == 0, "bind-cache-reuse");
+        ck(strcmp(bx_cache_why(-1, 1), "host reuse: cache read failed") == 0, "bind-cache-host");
+        ck(strcmp(bx_cache_why(-1, 2), "e3 reuse: cache read failed") == 0, "bind-cache-e3");
+        ck(strcmp(bx_cache_why(-1, 3), "artifact reuse: cache read failed") == 0, "bind-cache-art");
+        ck(bx_cache_why(-1, 4) == 0, "bind-cache-kind");
+        ck(bx_cache_why(-1, -1) == 0, "bind-cache-kindneg");
+        ck(bx_frame_fit(0, 0) == 0, "bind-frame-zero");
+        ck(bx_frame_fit(-1, 0) == 0, "bind-frame-neg");
+        ck(bx_frame_fit(100, 10) == 0, "bind-frame-small");
+        ck(bx_frame_fit(2147483643, 0) == 0, "bind-frame-edge");
+        ck(bx_frame_fit(2147483644, 0) == 1, "bind-frame-over");
+        ck(bx_frame_fit(2147483647, 0) == 1, "bind-frame-max");
+        ck(bx_frame_fit(2147483640, 3) == 0, "bind-frame-name");
+        ck(bx_frame_fit(2147483640, 4) == 1, "bind-frame-nameover");
+        ck(strcmp(bx_frame_why(), "unit frame too large") == 0, "bind-frame-why");
+        ck(bx_encode_bad(0, 1) == 0, "bind-enc-off");
+        ck(bx_encode_bad(1, 0) == 0, "bind-enc-ok");
+        ck(bx_encode_bad(1, 1) == 1, "bind-enc-bad");
+        ck(bx_encode_bad(1, -1) == 1, "bind-enc-neg");
+        ck(bx_encode_bad(2, 1) == 1, "bind-enc-two");
+        ck(bx_encode_bad(-1, 1) == 1, "bind-enc-emitneg");
+        ck(strcmp(bx_encode_why(), "cannot encode tapebin") == 0, "bind-enc-why");
+        ck(strcmp(bx_route_why(), "object unit route is absent from the selected package") == 0, "bind-route-why");
+        ck(strcmp(bx_model_why(), "bind: required host-symbols model is missing") == 0, "bind-model-why");
+        ck(bx_tool(0) == 4, "bind-tool-null");
+        ck(bx_tool("ar") == 1, "bind-tool-ar");
+        ck(bx_tool("as") == 2, "bind-tool-as");
+        ck(bx_tool("nm") == 3, "bind-tool-nm");
+        ck(bx_tool("objdump") == 3, "bind-tool-dump");
+        ck(bx_tool("AR") == 0, "bind-tool-case");
+        ck(bx_tool("") == 0, "bind-tool-empty");
+        ck(bx_tool("cc") == 0, "bind-tool-cc");
+        ck(bx_cli_word(0) == 4, "bind-word-null");
+        ck(bx_cli_word("--version") == 1, "bind-word-ver");
+        ck(bx_cli_word("-version") == 1, "bind-word-vershort");
+        ck(bx_cli_word("--help") == 2, "bind-word-help");
+        ck(bx_cli_word("-help") == 0, "bind-word-helpshort");
+        ck(bx_cli_word("--") == 3, "bind-word-dd");
+        ck(bx_cli_word("---") == 0, "bind-word-ddd");
+        ck(bx_cli_word("") == 0, "bind-word-empty");
+        ck(bx_more_src(0, 1) == 4, "bind-more-null");
+        ck(bx_more_src("a.c", 0) == 1, "bind-more-c");
+        ck(bx_more_src(".c", 0) == 1, "bind-more-dotc");
+        ck(bx_more_src("a.cx", 0) == 1, "bind-more-cx");
+        ck(bx_more_src(".cx", 0) == 1, "bind-more-dotcx");
+        ck(bx_more_src("a.C", 0) == 0, "bind-more-case");
+        ck(bx_more_src("ac", 0) == 0, "bind-more-ac");
+        ck(bx_more_src("a.txt", 0) == 0, "bind-more-txt");
+        ck(bx_more_src("a.txt", 1) == 1, "bind-more-obj");
+        ck(bx_more_src("a.txt", 2) == 1, "bind-more-obj2");
+        ck(bx_more_src("a.txt", -1) == 1, "bind-more-objneg");
+        ck(bx_more_src("", 0) == 0, "bind-more-empty");
+        ck(bx_read_act(0) == 0, "bind-read-ok");
+        ck(bx_read_act(1) == 1, "bind-read-open");
+        ck(bx_read_act(2) == 2, "bind-read-read");
+        ck(bx_read_act(3) == 3, "bind-read-close");
+        ck(bx_read_act(4) == 4, "bind-read-big");
+        ck(bx_read_act(6) == 6, "bind-read-mem");
+        ck(bx_read_act(5) == 5, "bind-read-other");
+        ck(bx_read_act(-1) == 5, "bind-read-neg");
+        ck(bx_read_stdin(0) == 4, "bind-stdin-null");
+        ck(bx_read_stdin("-") == 1, "bind-stdin-dash");
+        ck(bx_read_stdin("--") == 0, "bind-stdin-dd");
+        ck(bx_read_stdin("") == 0, "bind-stdin-empty");
+        ck(bx_read_stdin("a.c") == 0, "bind-stdin-file");
+        ck(bx_as_arch(0) == 4, "bind-as-null");
+        ck(bx_as_arch("lnx/x86_64") == 0, "bind-as-x86");
+        ck(bx_as_arch("lnx/arm64") == 1, "bind-as-arm");
+        ck(bx_as_arch("osx/arm64") == 2, "bind-as-osx");
+        ck(bx_as_arch("") == 2, "bind-as-empty");
+        ck(bx_native_arm(0) == 4, "bind-native-null");
+        ck(bx_native_arm("arm64") == 1, "bind-native-arm");
+        ck(bx_native_arm("x86_64") == 0, "bind-native-x86");
+        ck(bx_native_arm("") == 0, "bind-native-empty");
+        ck(strcmp(fw_simple_type(1, 1, 1, 1, 1, 0, 0, 0), "void") == 0, "fwd-type-void");
+        ck(fw_simple_type(0, 1, 0, 0, 0, 0, 1, 0) == 0, "fwd-type-cb");
+        ck(fw_simple_type(0, 0, 1, 0, 0, 0, 1, 0) == 0, "fwd-type-struct");
+        ck(fw_simple_type(0, 0, -1, 0, 0, 0, 1, 0) == 0, "fwd-type-structneg");
+        ck(strcmp(fw_simple_type(0, 0, 0, 1, 1, 0, 0, 0), "void *") == 0, "fwd-type-vp");
+        ck(strcmp(fw_simple_type(0, 0, 0, 1, 1, 1, 0, 0), "char *") == 0, "fwd-type-cp");
+        ck(strcmp(fw_simple_type(0, 0, 0, 1, 1, 2, 0, 0), "short *") == 0, "fwd-type-sp");
+        ck(strcmp(fw_simple_type(0, 0, 0, 1, 1, 4, 0, 0), "int *") == 0, "fwd-type-ip");
+        ck(strcmp(fw_simple_type(0, 0, 0, 1, 1, 8, 0, 0), "long *") == 0, "fwd-type-lp");
+        ck(fw_simple_type(0, 0, 0, 1, 2, 1, 0, 0) == 0, "fwd-type-depth");
+        ck(fw_simple_type(0, 0, 0, 1, 1, 3, 0, 0) == 0, "fwd-type-base");
+        ck(strcmp(fw_simple_type(0, 0, 0, 4, 0, 0, 0, 0), "float") == 0, "fwd-type-float");
+        ck(strcmp(fw_simple_type(0, 0, 0, 8, 0, 0, 0, 0), "double") == 0, "fwd-type-double");
+        ck(strcmp(fw_simple_type(0, 0, 0, 0, 0, 0, 1, 0), "signed char") == 0, "fwd-type-sc");
+        ck(strcmp(fw_simple_type(0, 0, 0, 0, 0, 0, 1, 1), "unsigned char") == 0, "fwd-type-uc");
+        ck(strcmp(fw_simple_type(0, 0, 0, 0, 0, 0, 1, 2), "unsigned char") == 0, "fwd-type-uc2");
+        ck(strcmp(fw_simple_type(0, 0, 0, 0, 0, 0, 1, -1), "unsigned char") == 0, "fwd-type-ucneg");
+        ck(strcmp(fw_simple_type(0, 0, 0, 0, 0, 0, 2, 0), "short") == 0, "fwd-type-short");
+        ck(strcmp(fw_simple_type(0, 0, 0, 0, 0, 0, 2, 1), "unsigned short") == 0, "fwd-type-ushort");
+        ck(strcmp(fw_simple_type(0, 0, 0, 0, 0, 0, 4, 0), "int") == 0, "fwd-type-int");
+        ck(strcmp(fw_simple_type(0, 0, 0, 0, 0, 0, 4, 1), "unsigned int") == 0, "fwd-type-uint");
+        ck(strcmp(fw_simple_type(0, 0, 0, 0, 0, 0, 8, 0), "long") == 0, "fwd-type-long");
+        ck(strcmp(fw_simple_type(0, 0, 0, 0, 0, 0, 8, 1), "unsigned long") == 0, "fwd-type-ulong");
+        ck(fw_simple_type(0, 0, 0, 0, 0, 0, 3, 0) == 0, "fwd-type-width");
+        ck(fw_simple_type(0, 0, 0, 2, 0, 0, 0, 0) == 0, "fwd-type-kind");
+        {
+            char decl[64];
+            int i;
+            const char *two[2];
+            const char *one[1];
+            const char *badrow[1];
+            for (i = 0; i < 64; i++) decl[i] = 'Z';
+            ck(fw_decl(0, 0, 0, 0, decl, 64) == 4 && decl[0] == 'Z', "fwd-decl-nullret");
+            ck(fw_decl("int", 0, 0, 0, 0, 64) == 4, "fwd-decl-nullout");
+            ck(fw_decl("int", 0, 0, -1, decl, 64) == 4 && decl[0] == 'Z', "fwd-decl-negn");
+            ck(fw_decl("int", 0, 0, 1, decl, 64) == 4 && decl[0] == 'Z', "fwd-decl-nullargs");
+            badrow[0] = 0;
+            ck(fw_decl("int", 0, badrow, 1, decl, 64) == 4 && decl[0] == 'Z', "fwd-decl-nullarg");
+            ck(fw_decl("int", 0, 0, 0, decl, 0) == 4 && decl[0] == 'Z', "fwd-decl-cap0");
+            ck(fw_decl("int", 0, 0, 0, decl, 15) == 1 && decl[0] == 'Z', "fwd-decl-short");
+            ck(fw_decl("int", 0, 0, 0, decl, 16) == 0 && strcmp(decl, "int (*a0)(void)") == 0, "fwd-decl-void");
+            ck(fw_decl("", 0, 0, 0, decl, 32) == 0 && strcmp(decl, " (*a0)(void)") == 0, "fwd-decl-empty");
+            ck(fw_decl("int", -3, 0, 0, decl, 32) == 0 && strcmp(decl, "int (*a-3)(void)") == 0, "fwd-decl-neg");
+            one[0] = "char *";
+            ck(fw_decl("void", 1, one, 1, decl, 32) == 0 && strcmp(decl, "void (*a1)(char *)") == 0, "fwd-decl-one");
+            two[0] = "int";
+            two[1] = "char *";
+            ck(fw_decl("void *", 12, two, 2, decl, 26) == 1, "fwd-decl-two-short");
+            for (i = 0; i < 64; i++) decl[i] = 'Z';
+            ck(fw_decl("void *", 12, two, 2, decl, 27) == 0 && strcmp(decl, "void * (*a12)(int, char *)") == 0, "fwd-decl-two");
+            ck(fw_side_head(0, 0) == 1, "fwd-head-shortnull");
+            ck(fw_side_head(0, 6) == 1, "fwd-head-six");
+            ck(fw_side_head(0, 7) == 4, "fwd-head-null");
+            ck(fw_side_head((const unsigned char *)"USLFW1\n", 7) == 0, "fwd-head-ok");
+            ck(fw_side_head((const unsigned char *)"USLFW1x", 7) == 1, "fwd-head-bad");
+            ck(fw_side_head((const unsigned char *)"uslfw1\n", 7) == 1, "fwd-head-case");
+            ck(fw_side_bad(0, 4, 10, 6) == 0, "fwd-span-fit");
+            ck(fw_side_bad(0, 5, 10, 6) == 1, "fwd-span-over");
+            ck(fw_side_bad(256, 0, 10, 0) == 0, "fwd-span-ccw");
+            ck(fw_side_bad(257, 0, 10, 0) == 1, "fwd-span-ccwhi");
+            ck(strcmp(fw_side_why(0), "unisacc: error: forwarding side-car missing\n") == 0, "fwd-side-miss");
+            ck(strcmp(fw_side_why(1), "unisacc: error: forwarding side-car malformed\n") == 0, "fwd-side-bad");
+            ck(fw_side_why(2) == 0, "fwd-side-kind");
+            ck(fw_undef(0, 0, 0, 0) == 0, "fwd-undef-ok");
+            ck(fw_undef(0, 0, 0, 32) == 0, "fwd-undef-32");
+            ck(fw_undef(0, 0, 0, 33) == 1, "fwd-undef-33");
+            ck(fw_undef(0, 0, 0, -1) == 0, "fwd-undef-negn");
+            ck(fw_undef(1, 0, 0, 0) == 1, "fwd-undef-bad");
+            ck(fw_undef(2, 0, 0, 0) == 1, "fwd-undef-bad2");
+            ck(fw_undef(0, 1, 0, 0) == 1, "fwd-undef-struct");
+            ck(fw_undef(0, -1, 0, 0) == 1, "fwd-undef-structneg");
+            ck(fw_undef(0, 0, 1, 0) == 1, "fwd-undef-ret");
+            ck(fw_emit_miss(0) == 1, "fwd-emit-miss");
+            ck(fw_emit_miss(1) == 0, "fwd-emit-ok");
+            ck(fw_emit_miss(2) == 0, "fwd-emit-two");
+            ck(fw_emit_miss(-1) == 0, "fwd-emit-neg");
+            for (i = 0; i < 64; i++) decl[i] = 'Z';
+            ck(fw_undef_line(0, 1, decl, 64) == 4 && decl[0] == 'Z', "fwd-line-null");
+            ck(fw_undef_line("a", -1, decl, 64) == 4 && decl[0] == 'Z', "fwd-line-negn");
+            ck(fw_undef_line("a", 1, 0, 64) == 4, "fwd-line-nullout");
+            ck(fw_undef_line("foo", 3, decl, 40) == 1 && decl[0] == 'Z', "fwd-line-short");
+            ck(fw_undef_line("foo", 3, decl, 64) == 0 && strcmp(decl, "unisacc: error: undefined function 'foo'\n") == 0, "fwd-line-foo");
+            ck(fw_undef_line(0, 0, decl, 64) == 0 && strcmp(decl, "unisacc: error: undefined function ''\n") == 0, "fwd-line-empty");
+            ck(fw_undef_line("abcd", 2, decl, 64) == 0 && strcmp(decl, "unisacc: error: undefined function 'ab'\n") == 0, "fwd-line-prec");
+            ck(bx_read_die(0) == 0, "read-die-ok");
+            ck(bx_read_die(1) == 0, "read-die-open");
+            ck(strcmp(bx_read_die(2), "cannot read input") == 0, "read-die-read");
+            ck(strcmp(bx_read_die(3), "close failed") == 0, "read-die-close");
+            ck(strcmp(bx_read_die(4), "file too large") == 0, "read-die-big");
+            ck(strcmp(bx_read_die(6), "out of memory") == 0, "read-die-mem");
+            ck(strcmp(bx_read_die(5), "bad input argument") == 0, "read-die-other");
+            ck(strcmp(bx_read_die(-1), "bad input argument") == 0, "read-die-neg");
+            for (i = 0; i < 64; i++) decl[i] = 'Z';
+            ck(bx_read_open_line(0, "", decl, 64) == 4 && decl[0] == 'Z', "read-open-null");
+            ck(bx_read_open_line("a.c", 0, decl, 64) == 4 && decl[0] == 'Z', "read-open-nullwhy");
+            ck(bx_read_open_line("a.c", "", decl, 30) == 1 && decl[0] == 'Z', "read-open-short");
+            ck(bx_read_open_line("a.c", "", decl, 64) == 0 && strcmp(decl, "unisacc: error: cannot open a.c\n") == 0, "read-open-empty");
+            ck(bx_read_open_line("a.c", "nope", decl, 64) == 0 && strcmp(decl, "unisacc: error: cannot open a.c: nope\n") == 0, "read-open-why");
+            for (i = 0; i < 64; i++) decl[i] = 'Z';
+            ck(bx_read_fail_line(0, decl, 64) == 4 && decl[0] == 'Z', "read-fail-null");
+            ck(bx_read_fail_line("stdin", decl, 22) == 1 && decl[0] == 'Z', "read-fail-short");
+            ck(bx_read_fail_line("stdin", decl, 64) == 0 && strcmp(decl, "run: cannot read stdin\n") == 0, "read-fail-stdin");
+            ck(bx_cli_line(0, decl, 64) == 4, "cli-line-null");
+            ck(bx_cli_line("missing", decl, 64) == 0 && strcmp(decl, "unisacc: model driver: missing\n") == 0, "cli-line-miss");
+            ck(strcmp(bx_as_targets(), "as: targets are lnx/x86_64 and lnx/arm64 (Mach-O and COFF text: 0.0.19)\n") == 0, "as-targets");
+            ck(strcmp(bx_as_usage(), "usage: unisacc as [-b lnx/x86_64|lnx/arm64] FILE.s [-o FILE.o]\n") == 0, "as-usage");
+            ck(strcmp(bx_view_usage(0), "usage: unisacc nm FILE.o\n") == 0, "view-nm");
+            ck(strcmp(bx_view_usage(1), "usage: unisacc objdump -d FILE.o\n") == 0, "view-dump");
+            ck(strcmp(bx_view_usage(-1), "usage: unisacc objdump -d FILE.o\n") == 0, "view-dumpneg");
+            ck(strcmp(bx_ar_usage(), "usage: unisacc ar rcs|t|x LIB.a [MEMBER...]\n") == 0, "ar-usage");
+            ck(strcmp(bx_ar_big(), "ar: archive too large\n") == 0, "ar-big");
+            ck(strcmp(bx_ar_kind(), "ar: not an archive\n") == 0, "ar-kind");
+            ck(strcmp(bx_ar_op(), "ar: operation must be r, q, t or x\n") == 0, "ar-op");
+            for (i = 0; i < 64; i++) decl[i] = 'Z';
+            ck(bx_as_opt_line(0, decl, 64) == 4 && decl[0] == 'Z', "as-opt-null");
+            ck(bx_as_opt_line("-z", decl, 64) == 0 && strcmp(decl, "as: unknown option -z\n") == 0, "as-opt-z");
+            ck(bx_as_write_line(0, decl, 64) == 4, "as-write-null");
+            ck(bx_as_write_line("a.o", decl, 64) == 0 && strcmp(decl, "as: cannot write a.o\n") == 0, "as-write");
+            ck(bx_as_head_line("f.s", decl, 64) == 0 && strcmp(decl, "as: f.s: -S header target conflicts with -b\n") == 0, "as-head");
+            for (i = 0; i < 64; i++) decl[i] = 'Z';
+            ck(bx_as_err_line(0, 1, "bad", decl, 64) == 4 && decl[0] == 'Z', "as-err-null");
+            ck(bx_as_err_line("f.s", 1, 0, decl, 64) == 4 && decl[0] == 'Z', "as-err-nullerr");
+            ck(bx_as_err_line("f.s", 3, "", decl, 64) == 0 && strcmp(decl, "as: f.s:3: error\n") == 0, "as-err-empty");
+            ck(bx_as_err_line("f.s", -3, "bad", decl, 64) == 0 && strcmp(decl, "as: f.s:-3: bad\n") == 0, "as-err-neg");
+            ck(bx_ar_write_line("l.a", decl, 64) == 0 && strcmp(decl, "ar: cannot write l.a\n") == 0, "ar-write");
+            ck(bx_link_none_line("a.o", decl, 64) == 0 && strcmp(decl, "link: no input unit selected from a.o\n") == 0, "link-none");
+            ck(bx_link_start_line("a.o", decl, 64) == 0 && strcmp(decl, "link: missing _start entry in a.o\n") == 0, "link-start");
+            {
+                char tape[256];
+                for (i = 0; i < 256; i++) tape[i] = 'Z';
+                ck(bx_link_target_line(0, "b", tape, 256) == 4 && tape[0] == 'Z', "link-tgt-null");
+                ck(bx_link_target_line("x86", "arm", tape, 256) == 0 && strcmp(tape, "unisacc: error: the objects were compiled for different targets (x86, arm)\n") == 0, "link-tgt");
+                ck(bx_view_err_line(0, "a.o", "bad", tape, 256) == 0 && strcmp(tape, "nm: a.o: bad (Linux objects; Mach-O and COFF: 0.0.19)\n") == 0, "view-err-nm");
+                ck(bx_view_err_line(1, "a.o", "bad", tape, 256) == 0 && strcmp(tape, "objdump: a.o: bad (Linux objects; Mach-O and COFF: 0.0.19)\n") == 0, "view-err-dump");
+                for (i = 0; i < 256; i++) tape[i] = 'Z';
+                ck(bx_view_err_line(1, 0, "bad", tape, 256) == 4 && tape[0] == 'Z', "view-err-null");
+                ck(bx_link_tape_line(0, tape, 256) == 4 && tape[0] == 'Z', "link-tape-null");
+                ck(bx_link_tape_line("p.o", tape, 256) == 0 && strcmp(tape, "unisacc: error: p.o carries no unit tape (compile it with -c -b os/arch -funit; objects from other compilers are not linked yet)\n") == 0, "link-tape");
+            }
+        }
     }
     printf("CHECK_COMPILER_UNITS failed=%d\n", failed);
     return failed ? 1 : 0;

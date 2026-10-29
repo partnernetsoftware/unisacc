@@ -98,6 +98,12 @@ typedef struct { long long size, off, mtime, mtime_ns, ctime, ctime_ns, ino, dev
 /* No stat gate: the stamp is the size plus an FNV-1a tag of the first and last
    4 KiB (two seeks and <= 8 KiB of reads per call). A same-size replacement
    that differs only in the middle is not seen. The offset is restored. */
+#ifdef UNISA_CX_SOURCE_FRAME
+int cxsf_stamp_unisa(long, long (*)(long, long, int), long (*)(long, unsigned char *, long),
+                     void (*)(const char *), long long *, long long *, unsigned *, int *);
+static long us_seek(long fd, long off, int whence) { return __lseek(fd, off, whence); }
+static long us_read(long fd, unsigned char *p, long n) { return __read(fd, p, n); }
+#else
 static unsigned stamp_tag(long fd, long at, unsigned h, int *ok) {
     unsigned char b[4096]; long n = 0, r;
     if (__lseek(fd, at, 0) < 0) { *ok = 0; return h; }
@@ -105,8 +111,13 @@ static unsigned stamp_tag(long fd, long at, unsigned h, int *ok) {
     for (long i = 0; i < n; i++) h = (h ^ b[i]) * 16777619u;
     return h;
 }
+#endif
 static int io_stamp(long fd, FileStamp *s) {
     memset(s, 0, sizeof *s);
+#ifdef UNISA_CX_SOURCE_FRAME
+    return cxsf_stamp_unisa(fd, us_seek, us_read, die,
+                            &s->size, &s->off, &s->tag, &s->valid) == 1;
+#else
     long cur = __lseek(fd, 0, 1); if (cur < 0) return 0;
     long end = __lseek(fd, 0, 2); if (end < 0) return 0;
     int ok = 1; unsigned h = 2166136261u;
@@ -114,28 +125,96 @@ static int io_stamp(long fd, FileStamp *s) {
     if (__lseek(fd, cur, 0) < 0) die("cannot read input");
     if (!ok) return 0;
     s->size = end; s->off = cur; s->tag = h; s->valid = 1; return 1;
+#endif
 }
 #else
 #include <unistd.h>
 #include <fcntl.h>
+#ifdef UNISA_CX_SOURCE_FRAME
+int cxsf_open_flags(int, int, int);
+long cxsf_open_errno(long, long);
+long cxsf_read_errno(long, long);
+long cxsf_close_rc(long, long);
+#endif
 static long io_open(const char *path) {
+#ifdef UNISA_CX_SOURCE_FRAME
+#ifdef _WIN32
+    /* CRT text mode rewrites CRLF and stops on 0x1a in model packages. */
+    int flags = cxsf_open_flags(O_RDONLY, O_BINARY, 1);
+#else
+    int flags = cxsf_open_flags(O_RDONLY, 0, 0);
+#endif
+#else
     int flags = O_RDONLY;
 #ifdef _WIN32
     /* CRT text mode rewrites CRLF and stops on 0x1a in model packages. */
     flags |= O_BINARY;
 #endif
-    int fd = open(path, flags); return fd < 0 ? -errno : fd;
+#endif
+    int fd = open(path, flags);
+#ifdef UNISA_CX_SOURCE_FRAME
+    return cxsf_open_errno(fd, errno);
+#else
+    return fd < 0 ? -errno : fd;
+#endif
 }
-static long io_read(long fd, void *p, long n) { long r = read((int)fd, p, (size_t)n); return r < 0 ? -errno : r; }
-static long io_close(long fd) { return close((int)fd); }
+static long io_read(long fd, void *p, long n) {
+    long r = read((int)fd, p, (size_t)n);
+#ifdef UNISA_CX_SOURCE_FRAME
+    return cxsf_read_errno(r, errno);
+#else
+    return r < 0 ? -errno : r;
+#endif
+}
+static long io_close(long fd) {
+    long r = close((int)fd);
+#ifdef UNISA_CX_SOURCE_FRAME
+    return cxsf_close_rc(r, errno);
+#else
+    return r;
+#endif
+}
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <dirent.h>
 /* Identity of an input file as far as the build can observe it; off is the
    read position at stamp time (size - off is what a read will see). */
 typedef struct { long long size, off, mtime, mtime_ns, ctime, ctime_ns, ino, dev; unsigned tag; int valid; } FileStamp;
+#ifdef UNISA_CX_SOURCE_FRAME
+int cxsf_stamp_reg(int, int, long long, long long, long long, long long, long long, long long, long long,
+                   long long *, long long *, long long *, long long *, long long *, long long *,
+                   long long *, long long *, unsigned *, int *);
+#endif
 static int io_stamp(long fd, FileStamp *s) {
     memset(s, 0, sizeof *s);
+#ifdef UNISA_CX_SOURCE_FRAME
+    int stat_ok = 0, is_reg = 0;
+    long long size = 0, mtime = 0, mtime_ns = 0, ctime = 0, ctime_ns = 0, ino = 0, dev = 0;
+#ifdef _WIN32
+    struct _stat64 st;
+    if (!_fstat64((int)fd, &st)) stat_ok = 1;
+#else
+    struct stat st;
+    if (!fstat((int)fd, &st)) stat_ok = 1;
+#endif
+    if (stat_ok) {
+#ifdef S_ISREG
+        is_reg = S_ISREG(st.st_mode) ? 1 : 0;
+#else
+        is_reg = ((st.st_mode & S_IFMT) == S_IFREG) ? 1 : 0;
+#endif
+        size = st.st_size; mtime = st.st_mtime; ctime = st.st_ctime;
+        ino = (long long)st.st_ino; dev = (long long)st.st_dev;
+#if defined(__linux__) && defined(st_mtime)
+        mtime_ns = st.st_mtim.tv_nsec; ctime_ns = st.st_ctim.tv_nsec;
+#elif defined(__APPLE__)
+        mtime_ns = st.st_mtimespec.tv_nsec; ctime_ns = st.st_ctimespec.tv_nsec;
+#endif
+    }
+    return cxsf_stamp_reg(stat_ok, is_reg, size, mtime, mtime_ns, ctime, ctime_ns, ino, dev,
+                          &s->size, &s->off, &s->mtime, &s->mtime_ns, &s->ctime, &s->ctime_ns,
+                          &s->ino, &s->dev, &s->tag, &s->valid) == 1;
+#else
 #ifdef _WIN32
     struct _stat64 st; if (_fstat64((int)fd, &st)) return 0;
 #else
@@ -154,10 +233,82 @@ static int io_stamp(long fd, FileStamp *s) {
     s->mtime_ns = st.st_mtimespec.tv_nsec; s->ctime_ns = st.st_ctimespec.tv_nsec;
 #endif
     s->valid = 1; return 1;
+#endif
 }
 #endif
 /* Regular files are read into one buffer sized from the stamp (one spare
    byte lets the final read observe EOF); streams keep the doubling buffer. */
+static unsigned char *readstream(long fd, const char *path, int *len);
+#ifdef UNISA_CX_SOURCE_FRAME
+const char *cxsf_open_reason(long fd, int windows, long enoent, long enotdir, long eacces);
+int cxsf_open_gate(long fd, int optional, int unisa_windows, long enoent);
+int cxsf_open_line(char *dst, int cap, const char *path, const char *reason);
+int cxsf_read_cap(int stamped, long long size, long long off);
+int cxsf_read_grow(int cap, int *next);
+int cxsf_read_take(long r, int cap, int n, int *out);
+int cxsf_readfile(const char *, int *, int, int, long, char *, int,
+                  long (*)(const char *), const char *(*)(long),
+                  void (*)(const char *), void (*)(const char *, const char *),
+                  void (*)(const char *),
+                  unsigned char *(*)(long, const char *, int *),
+                  long (*)(long), unsigned char **);
+int cxsf_read_err(char *, int, const char *);
+int cxsf_close_fail(long, void (*)(const char *));
+int cxsf_readstream(long, const char *, int *, char *, int,
+                    int (*)(long, long long *, long long *),
+                    void *(*)(void *, size_t),
+                    long (*)(long, unsigned char *, long),
+                    void (*)(const char *), void (*)(const char *), void (*)(const char *),
+                    unsigned char **, unsigned char **);
+static int rf_stamp(long fd, long long *size, long long *off) {
+    FileStamp st;
+    if (!io_stamp(fd, &st)) return 0;
+    *size = st.size;
+    *off = st.off;
+    return 1;
+}
+static void rf_read_say(const char *line) { fputs(line, stderr); }
+static void rf_read_raw(const char *path) { fprintf(stderr, "run: cannot read %s\n", path); }
+static long rf_read(long fd, unsigned char *p, long n) { return io_read(fd, p, n); }
+static unsigned char *readstream_with(long fd, const char *path, int *len, void *(*grow)(void *, size_t), unsigned char **own) {
+    unsigned char *tmp = 0, *b = 0, **slot = own ? own : &tmp;
+    char line[4096];
+    int code = cxsf_readstream(fd, path, len, line, (int)sizeof line,
+                               rf_stamp, grow, rf_read, rf_read_say, rf_read_raw,
+                               die, slot, &b);
+    if (code == 4) return 0;
+    return b;
+}
+static const char *io_open_reason(long fd) {
+#ifdef _WIN32
+    return cxsf_open_reason(fd, 1, 0, 0, 0);
+#else
+    return cxsf_open_reason(fd, 0, ENOENT, ENOTDIR, EACCES);
+#endif
+}
+static void rf_open_say(const char *line) { fputs(line, stderr); }
+static void rf_open_raw(const char *path, const char *reason) {
+    fprintf(stderr, "run: cannot open %s%s%s\n", path,
+            reason ? ": " : "", reason ? reason : "");
+}
+static unsigned char *readfile(const char *path, int *len, int optional) {
+    unsigned char *b = 0;
+    char line[4096];
+    int code;
+#if defined(__UNISA__) && defined(_WIN32)
+    code = cxsf_readfile(path, len, optional, 1, 0, line, (int)sizeof line,
+                         io_open, io_open_reason, rf_open_say, rf_open_raw,
+                         die, readstream, io_close, &b);
+#else
+    code = cxsf_readfile(path, len, optional, 0, ENOENT, line, (int)sizeof line,
+                         io_open, io_open_reason, rf_open_say, rf_open_raw,
+                         die, readstream, io_close, &b);
+#endif
+    if (code == 1 || code == 4) return 0;
+    return b;
+}
+#else
+int cxsf_close_fail(long, void (*)(const char *));
 static unsigned char *readstream_with(long fd, const char *path, int *len, void *(*grow)(void *, size_t), unsigned char **own) {
     int n = 0, cap = 65536; FileStamp st; unsigned char *tmp;
     if (!own) own = &tmp;   /* *own holds the buffer from the first allocation on, so a die() can still free it */
@@ -175,7 +326,6 @@ static unsigned char *readstream_with(long fd, const char *path, int *len, void 
     }
     *len = n; return b;
 }
-static unsigned char *readstream(long fd, const char *path, int *len) { return readstream_with(fd, path, len, xrealloc, 0); }
 static const char *io_open_reason(long fd) {
 #ifdef _WIN32
     (void)fd; return 0;
@@ -200,9 +350,11 @@ static unsigned char *readfile(const char *path, int *len, int optional) {
         die("cannot open input");
     }
     unsigned char *b = readstream(fd,path,len);
-    if (io_close(fd) < 0) die("close failed");
+    cxsf_close_fail(io_close(fd), die);
     return b;
 }
+#endif
+static unsigned char *readstream(long fd, const char *path, int *len) { return readstream_with(fd, path, len, xrealloc, 0); }
 
 /* Decimal model reader: no scanf dependency, and 64-bit arguments are
    checked before multiply/add (including the INT64_MIN magnitude). */
@@ -453,6 +605,10 @@ static char *pword_owned(void) {
    and stage names are zeroed before they are filled. */
 #ifdef UNISA_CX_PACKAGE_LIFETIME
 void cxpl_release(Package *, void (*)(void *));
+int cxpl_stamp_match(const long long *, const long long *, int, unsigned, unsigned, int, int);
+int cxpl_reuse(int, const char *, const char *, int);
+int cxpl_settle(int);
+int cxpl_slot(const void *, int, int);
 static void package_release(Package *p) { cxpl_release(p,mfree); }
 #else
 static void package_release(Package *p) {
@@ -484,7 +640,11 @@ static void *package_decode_alloc(void *p,size_t n) { return UNISA_PACKAGE_REALL
    consumed and closed. Every format edge is checked before any route runs. */
 static void package_parse(Package *p, long fd, const char *path) {
     p->file = 0; readstream_with(fd, path, &p->n, mrealloc, &p->file); p->b = p->file;   /* p->file owns the buffer if the read dies */
+#ifdef UNISA_CX_SOURCE_FRAME
+    if (cxsf_close_fail(io_close(fd), die)) return;
+#else
     if (io_close(fd) < 0) die("close failed");
+#endif
     if (p->n < 2 || p->b[0] != 'P' || p->b[1] != ' ') {
         PackageFooter footer;
         /* Signature records follow the package footer in Authenticode APEs.
@@ -546,11 +706,25 @@ static void package_parse(Package *p, long fd, const char *path) {
     p->complete = 1;
 #endif
 }
+#ifdef UNISA_CX_SOURCE_FRAME
+int cxsf_package_gate(long fd);
+static long package_open(const char *path) {
+    long fd = io_open(path);
+    if (cxsf_package_gate(fd)) {
+        char line[4096];
+        if (!cxsf_open_line(line, (int)sizeof line, path, 0)) fputs(line, stderr);
+        else fprintf(stderr, "run: cannot open %s\n", path);
+        die("cannot open input");
+    }
+    return fd;
+}
+#else
 static long package_open(const char *path) {
     long fd = io_open(path);
     if (fd < 0) { fprintf(stderr, "run: cannot open %s\n", path); die("cannot open input"); }
     return fd;
 }
+#endif
 #ifndef UNISA_PACKAGE_CACHE
 /* Command-line package: parsed on every call, released by unpackage(). */
 UNISA_RUNTIME_STATE Package CLIPKG;
@@ -564,6 +738,32 @@ static void unpackage(void) {
 }
 #endif
 
+#ifdef UNISA_CX_MODEL_LIFETIME
+int mv_clear(int **sc, int nsc, void ***slot, int nslot);
+int mv_capture(void *model, int **sc, int nsc, void ***slot, int nslot);
+int mv_bind(void *model, int **sc, int nsc, void ***slot, int nslot);
+static void mv_addrs(int **sc, void ***slot) {
+    sc[0] = &NS; sc[1] = &NQ; sc[2] = &NRG; sc[3] = &NSTR; sc[4] = &START; sc[5] = &ISNET; sc[6] = &TOPMAX; sc[7] = &NQA;
+    slot[0] = (void **)&STR; slot[1] = (void **)&STRL; slot[2] = (void **)&QOFF; slot[3] = (void **)&QLEN; slot[4] = (void **)&QA;
+    slot[5] = (void **)&SMODE; slot[6] = (void **)&ROWC; slot[7] = (void **)&ROWK; slot[8] = (void **)&ROWN; slot[9] = (void **)&ROWQ;
+    slot[10] = (void **)&NLO; slot[11] = (void **)&NHI; slot[12] = (void **)&BN; slot[13] = (void **)&BQ; slot[14] = (void **)&RETS; slot[15] = (void **)&RETOK;
+}
+static void model_clear(void) {
+    int *sc[8]; void **slot[16];
+    mv_addrs(sc, slot);
+    if (mv_clear(sc, 8, slot, 16)) die("model view");
+}
+static void model_capture(Model *m) {
+    int *sc[8]; void **slot[16];
+    mv_addrs(sc, slot);
+    if (mv_capture(m, sc, 8, slot, 16)) die("model view");
+}
+static void model_bind(const Model *m) {
+    int *sc[8]; void **slot[16];
+    mv_addrs(sc, slot);
+    if (mv_bind((void *)m, sc, 8, slot, 16)) die("model view");
+}
+#else
 static void model_clear(void) {
     NS = NQ = NRG = NSTR = START = ISNET = TOPMAX = NQA = 0;
     STR = 0; STRL = QOFF = QLEN = 0; QA = 0;
@@ -581,6 +781,7 @@ static void model_bind(const Model *m) {
     SMODE = m->smode; ROWC = m->rowc; ROWK = m->rowk; ROWN = m->rown; ROWQ = m->rowq;
     NLO = m->nlo; NHI = m->nhi; BN = m->bn; BQ = m->bq; RETS = m->rets; RETOK = m->retok;
 }
+#endif
 #ifdef UNISA_CX_MODEL_DECODE
 /* The CX decoder owns partial results locally and releases them before an
  * error reaches the runtime's longjmp/exit boundary. A successful model is
@@ -589,11 +790,28 @@ typedef struct CxDecode { Model model; void *(*allocate)(void *,size_t); void (*
 int cxmd_decode(CxDecode *,const unsigned char *,long);
 void cxmd_take(CxDecode *,Model *);
 static void *model_decode_alloc(void *p,size_t n) { return UNISA_PACKAGE_REALLOC(p,n); }
+#ifdef UNISA_CX_MODELLOAD
+int ml_load(void *dec, void *model, const unsigned char *data, long len,
+            int (*decode)(void *, const unsigned char *, long),
+            const char *(*whyof)(void *),
+            void (*take)(void *, void *),
+            void (*bindfn)(void *),
+            void (*fail)(const char *));
+static int load_decode(void *p, const unsigned char *data, long n) { return cxmd_decode((CxDecode *)p, data, n); }
+static const char *load_why(void *p) { return ((CxDecode *)p)->why; }
+static void load_take(void *p, void *m) { cxmd_take((CxDecode *)p, (Model *)m); }
+static void load_bind(void *p) { model_bind((const Model *)p); }
+static void load_fail(const char *s) { die(s); }
+#endif
 static void loadbytes(unsigned char *data, int len) {
     CxDecode d={0}; Model model={0};
     d.allocate=model_decode_alloc; d.release=mfree;
+#ifdef UNISA_CX_MODELLOAD
+    ml_load(&d, &model, data, len, load_decode, load_why, load_take, load_bind, load_fail);
+#else
     if(cxmd_decode(&d,data,len)) die(d.why ? d.why : "invalid model input");
     cxmd_take(&d,&model); model_bind(&model);
+#endif
 }
 #endif
 /* Safe on a partially decoded model (see loadbytes: arrays of pointers are zeroed when allocated). */
@@ -625,9 +843,18 @@ static void unload(void) {
    frees the tables the globals still own; a package that failed to parse is
    never reused. */
 static int stamp_equal(const FileStamp *a, const FileStamp *b) {
+#ifdef UNISA_CX_PACKAGE_LIFETIME
+    long long ax[8], bx[8];
+    ax[0] = a->size; ax[1] = a->off; ax[2] = a->mtime; ax[3] = a->mtime_ns;
+    ax[4] = a->ctime; ax[5] = a->ctime_ns; ax[6] = a->ino; ax[7] = a->dev;
+    bx[0] = b->size; bx[1] = b->off; bx[2] = b->mtime; bx[3] = b->mtime_ns;
+    bx[4] = b->ctime; bx[5] = b->ctime_ns; bx[6] = b->ino; bx[7] = b->dev;
+    return cxpl_stamp_match(ax, bx, 8, a->tag, b->tag, a->valid, b->valid);
+#else
     return a->valid && b->valid && a->size == b->size && a->off == b->off && a->tag == b->tag &&
            a->mtime == b->mtime && a->mtime_ns == b->mtime_ns && a->ctime == b->ctime && a->ctime_ns == b->ctime_ns &&
            a->ino == b->ino && a->dev == b->dev;
+#endif
 }
 static void cache_release(Cache *k) {
     if (k->models) for (int i = 0; i < k->nmodels; i++) model_release(&k->models[i]);
@@ -635,15 +862,27 @@ static void cache_release(Cache *k) {
     package_release(&k->package);
 }
 static void cache_settle(void) {
+#ifdef UNISA_CX_PACKAGE_LIFETIME
+    if (cxpl_settle(MODEL_LOADING)) { Model m; model_capture(&m); model_release(&m); MODEL_LOADING = 0; }
+#else
     if (MODEL_LOADING) { Model m; model_capture(&m); model_release(&m); MODEL_LOADING = 0; }
+#endif
     model_clear(); package_unbind(); CACHE = 0;
 }
 static void cache_package(Cache *k, const char *path) {
     Package *p = &k->package;
     long fd = package_open(path);
     FileStamp stamp; io_stamp(fd, &stamp);
+#ifdef UNISA_CX_PACKAGE_LIFETIME
+    if (cxpl_reuse(p->complete, path, p->path, p->complete && p->path && stamp_equal(&stamp, &p->stamp))) {
+#else
     if (p->complete && p->path && !strcmp(p->path, path) && stamp_equal(&stamp, &p->stamp)) {
+#endif
+#ifdef UNISA_CX_SOURCE_FRAME
+        if (cxsf_close_fail(io_close(fd), die)) return;
+#else
         if (io_close(fd) < 0) die("close failed");
+#endif
     } else {
         cache_release(k);
         size_t n = strlen(path) + 1; p->path = mrealloc(0, n); memcpy(p->path, path, n);
@@ -724,18 +963,39 @@ UNISA_RUNTIME_STATE int FILE_READ_RECORD=0, FILE_READ_COUNT=0;
 UNISA_RUNTIME_STATE char **FILE_READ_PATHS=0;
 UNISA_RUNTIME_STATE int FILE_ABSENT_COUNT=0;
 UNISA_RUNTIME_STATE char **FILE_ABSENT_PATHS=0;
+#ifdef UNISA_CX_SOURCE_FRAME
+int cxsf_file_keep(int, char **, int, char **, int, const char *,
+                   void *(*)(void *, size_t), char ***, int *);
+#endif
 static void record_file_read(const char *path) {
+#ifdef UNISA_CX_SOURCE_FRAME
+    char **list = FILE_READ_PATHS;
+    int n = FILE_READ_COUNT;
+    cxsf_file_keep(FILE_READ_RECORD, FILE_READ_PATHS, FILE_READ_COUNT,
+                   0, 0, path, xrealloc, &list, &n);
+    FILE_READ_PATHS = list;
+    FILE_READ_COUNT = n;
+#else
     if (!FILE_READ_RECORD) return;
     for (int i=0;i<FILE_READ_COUNT;i++) if (!strcmp(FILE_READ_PATHS[i],path)) return;
     FILE_READ_PATHS=xrealloc(FILE_READ_PATHS,(FILE_READ_COUNT+1)*sizeof(char *));
     int n=strlen(path)+1;
     FILE_READ_PATHS[FILE_READ_COUNT]=xrealloc(0,n);
     memcpy(FILE_READ_PATHS[FILE_READ_COUNT++],path,n);
+#endif
 }
 /* When recording for E3 reuse, remember optional disk probes that were absent
    so a later-created path invalidates the cache.  readfile(optional) returns
    NULL only for ENOENT on reuse-enabled Linux. */
 static void record_file_absent(const char *path) {
+#ifdef UNISA_CX_SOURCE_FRAME
+    char **list = FILE_ABSENT_PATHS;
+    int n = FILE_ABSENT_COUNT;
+    cxsf_file_keep(FILE_READ_RECORD, FILE_ABSENT_PATHS, FILE_ABSENT_COUNT,
+                   FILE_READ_PATHS, FILE_READ_COUNT, path, xrealloc, &list, &n);
+    FILE_ABSENT_PATHS = list;
+    FILE_ABSENT_COUNT = n;
+#else
     if (!FILE_READ_RECORD) return;
     for (int i=0;i<FILE_ABSENT_COUNT;i++) if (!strcmp(FILE_ABSENT_PATHS[i],path)) return;
     for (int i=0;i<FILE_READ_COUNT;i++) if (!strcmp(FILE_READ_PATHS[i],path)) return;
@@ -743,6 +1003,7 @@ static void record_file_absent(const char *path) {
     int n=strlen(path)+1;
     FILE_ABSENT_PATHS[FILE_ABSENT_COUNT]=xrealloc(0,n);
     memcpy(FILE_ABSENT_PATHS[FILE_ABSENT_COUNT++],path,n);
+#endif
 }
 
 /* S step 1 strict resource flow (opt-in: --strict-resource-flow --resource-ledger DIR).  The ledger is the only source;
@@ -763,7 +1024,13 @@ UNISA_RUNTIME_STATE const char *rf_capture_set = 0;
 static const char *rf_capture_dir(void) {
     UNISA_RUNTIME_STATE int init=0;UNISA_RUNTIME_STATE const char *d=0;
     if (rf_capture_set && *rf_capture_set) return rf_capture_set;
-    if (!init) {init=1;d=getenv("UNISACC_RF_CAPTURE");if(d&&!*d)d=0;}return d;
+    if (!init) {init=1;d=getenv("UNISACC_RF_CAPTURE");
+#ifdef UNISA_CX_FILEMODE
+        d=bx_env_blank(d);
+#else
+        if(d&&!*d)d=0;
+#endif
+    }return d;
 }
 /* SC2 is an ordered host-fetch trace. Repeated keys may legitimately answer
  * differently in another execution/unit. No answer or test verdict is cached. */
@@ -771,52 +1038,176 @@ UNISA_RUNTIME_STATE int RF_CAPC,RF_CAPACTIVE;
 UNISA_RUNTIME_STATE long RF_CAPOWNER;
 UNISA_RUNTIME_STATE char RF_CAPDIR[4096];
 enum { RF_CAP_MAX = 4096 };
+#ifdef UNISA_CX_SOURCE_FRAME
+int cxsf_cap_full(int, int);
+int cxsf_cap_join(char *, int, const char *, const char *);
+int cxsf_cap_stage(char *, int, const char *, long);
+int cxsf_cap_line(char *, int, int, int, const char *);
+int cxsf_cap_reg(int, int, int, long long);
+int cxsf_cap_take(long, int, unsigned long long, unsigned long long, unsigned long long *);
+int cxsf_cap_session(int, int, int, int);
+int cxsf_cap_key(int, int);
+int cxsf_cap_answer(int, int, int);
+int cxsf_cap_hex(char *, int, const unsigned char *, int);
+int cxsf_cap_name(char *, int, int);
+int cxsf_cap_row(char *, int, int, const char *, const char *, int, const char *);
+int cxsf_cap_args(int, int, int, int);
+int cxsf_cap_ledger(int, int, int, long long, int *);
+int cxsf_cap_dent(const char *, int);
+int cxsf_cap_place(int);
+int cxsf_cap_idline(char *, int, const char *, const char *);
+int cxsf_cap_dirline(char *, int, int);
+int cxsf_e3_args(int, int, int, int);
+int cxsf_e3_errno(int, int);
+int cxsf_e3_span(int, unsigned long long, unsigned long long);
+int cxsf_e3_line(char *, int, int, int);
+int cxsf_e3_ready(int, int, int, int, int);
+int cxsf_e3_row(int, int, const unsigned char *, const unsigned char *, int, int, const char *);
+int cxsf_e3_tail(const unsigned char *, int, const unsigned char *, int);
+int cxsf_e3_match(const unsigned char *, int, const unsigned char *, int);
+int cxsf_e3_same(const unsigned char *, int, const unsigned char *, int);
+int cxsf_e3_id(const char *, const char *, const char *, const char *);
+int cxsf_e3_cmp_line(char *, int, int, const char *, const char *);
+int cxsf_route_gate(int, const char *);
+int cxsf_route_e3(int, const char *);
+int cxsf_route_line(char *, int, int, const char *);
+int cxsf_stage_join(char *, int, const char *, const char *);
+int cxsf_stage_err(char *, int, int, const char *);
+int cxsf_snap_count(int, int);
+int cxsf_snap_line(char *, int);
+int cxsf_snap_slot(const unsigned char *, int, const unsigned char *, int, const unsigned char **, int *, const unsigned char **, int *);
+int cxsf_fetch_miss(char *, int, int, const char *, int);
+int cxsf_fetch_mismatch(char *, int, const char *, int);
+int cxsf_fetch_hand(int, unsigned char *, int, unsigned char **, int *);
+int cxsf_fetch_row(const unsigned char *, int, const unsigned char *, int, const unsigned char *, int, unsigned char **, int *);
+int cxsf_fetch_path(char *, int, const unsigned char *, int, const char *);
+int cxsf_fetch_file(const void *, const char *, void (*)(const char *), void (*)(const char *));
+#endif
 /* Same capacity contract for front-end rows and the e3-identity tip row. */
 static int rf_cap_full(void) {
+#ifdef UNISA_CX_SOURCE_FRAME
+    return cxsf_cap_full(RF_CAPC, RF_CAP_MAX);
+#else
     return RF_CAPC >= RF_CAP_MAX;
+#endif
 }
 static int rf_cap_path(char *p, size_t cap, const char *dir, const char *name, char *err, size_t errn) {
+#ifdef UNISA_CX_SOURCE_FRAME
+    if (!cxsf_cap_join(p, cap > 2147483647u ? 2147483647 : (int)cap, dir, name)) return 0;
+    if (cxsf_cap_line(err, errn > 2147483647u ? 2147483647 : (int)errn, 0, 0, 0))
+        snprintf(err, errn, "INTERFACE_ERROR capture-path-too-long");
+    return 1;
+#else
     int z = snprintf(p, cap, "%s/%s", dir, name);
     if (z < 0 || (size_t)z >= cap) { snprintf(err, errn, "INTERFACE_ERROR capture-path-too-long"); return 1; }
     return 0;
+#endif
 }
 #ifndef _WIN32
 /* Existing files are never opened for truncation. A private mkdir reserves the
  * staging name and link publishes each new file without replacing a target. */
 static int rf_cap_new_file(const char *dir, const char *name, const unsigned char *bytes, size_t n, char *err, size_t errn) {
     char tmp[4096], from[4096], to[4096]; FILE *f; int bad = 0, saved = 0;
+#ifdef UNISA_CX_SOURCE_FRAME
+    if (cxsf_cap_stage(tmp, (int)sizeof tmp, dir, (long)getpid())
+        || cxsf_cap_join(from, (int)sizeof from, tmp, "bytes")
+        || cxsf_cap_join(to, (int)sizeof to, dir, name)) {
+        if (cxsf_cap_line(err, (int)errn, 0, 0, 0))
+            snprintf(err, errn, "INTERFACE_ERROR capture-path-too-long");
+        return 1;
+    }
+#else
     int z = snprintf(tmp, sizeof tmp, "%s/.capture-%ld", dir, (long)getpid());
     if (z < 0 || (size_t)z >= sizeof tmp || rf_cap_path(from,sizeof from,tmp,"bytes",err,errn) || rf_cap_path(to,sizeof to,dir,name,err,errn)) {
         snprintf(err,errn,"INTERFACE_ERROR capture-path-too-long"); return 1;
     }
-    if (mkdir(tmp,0700)) { snprintf(err,errn,"INTERFACE_ERROR capture-staging-create"); return 1; }
+#endif
+    if (mkdir(tmp,0700)) {
+#ifdef UNISA_CX_SOURCE_FRAME
+        if (cxsf_cap_line(err, (int)errn, 1, 0, 0))
+#endif
+        snprintf(err,errn,"INTERFACE_ERROR capture-staging-create"); return 1; }
+#ifdef UNISA_CX_FILEMODE
+    f = fopen(from,bx_file_mode(1));
+#else
     f = fopen(from,"wb");
+#endif
     if (!f) bad = 1;
     else {
         if (n && fwrite(bytes,1,n,f) != n) bad = 1;
         if (fflush(f)) bad = 1;
         if (fclose(f)) bad = 1;
     }
-    if (bad) snprintf(err,errn,"INTERFACE_ERROR capture-file-write %s",name);
-    else if (rl_snap_link(from,to)) { saved = errno; bad = 1; snprintf(err,errn,saved == EEXIST ? "INTERFACE_ERROR capture-target-exists %s" : "INTERFACE_ERROR capture-publish-failed %s",name); }
-    if (unlink(from) && !bad) { bad = 1; snprintf(err,errn,"INTERFACE_ERROR capture-staging-cleanup"); }
-    if (rmdir(tmp) && !bad) { bad = 1; snprintf(err,errn,"INTERFACE_ERROR capture-staging-cleanup"); }
+    if (bad) {
+#ifdef UNISA_CX_SOURCE_FRAME
+        if (cxsf_cap_line(err, (int)errn, 2, 0, name))
+#endif
+        snprintf(err,errn,"INTERFACE_ERROR capture-file-write %s",name);
+    } else if (rl_snap_link(from,to)) { saved = errno; bad = 1;
+#ifdef UNISA_CX_SOURCE_FRAME
+        if (cxsf_cap_line(err, (int)errn, 3, saved == EEXIST, name))
+#endif
+        snprintf(err,errn,saved == EEXIST ? "INTERFACE_ERROR capture-target-exists %s" : "INTERFACE_ERROR capture-publish-failed %s",name); }
+    if (unlink(from) && !bad) { bad = 1;
+#ifdef UNISA_CX_SOURCE_FRAME
+        if (cxsf_cap_line(err, (int)errn, 4, 0, 0))
+#endif
+        snprintf(err,errn,"INTERFACE_ERROR capture-staging-cleanup"); }
+    if (rmdir(tmp) && !bad) { bad = 1;
+#ifdef UNISA_CX_SOURCE_FRAME
+        if (cxsf_cap_line(err, (int)errn, 4, 0, 0))
+#endif
+        snprintf(err,errn,"INTERFACE_ERROR capture-staging-cleanup"); }
     return bad;
 }
 static int rf_cap_append(const char *path, const unsigned char *bytes, size_t n, int require_empty, char *err, size_t errn) {
     struct stat st; size_t at = 0;
     int fd = open(path,O_WRONLY|O_APPEND|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC);
-    if (fd < 0) { snprintf(err,errn,"INTERFACE_ERROR capture-ledger-open"); return 1; }
+    if (fd < 0) {
+#ifdef UNISA_CX_SOURCE_FRAME
+        if (cxsf_cap_line(err, (int)errn, 5, 0, 0))
+#endif
+        snprintf(err,errn,"INTERFACE_ERROR capture-ledger-open"); return 1; }
+#ifdef UNISA_CX_SOURCE_FRAME
+    {
+        int stat_ok = !fstat(fd,&st);
+        int is_reg = stat_ok && S_ISREG(st.st_mode);
+        if (cxsf_cap_reg(stat_ok, is_reg, require_empty, stat_ok ? (long long)st.st_size : 0)) {
+            close(fd);
+            if (cxsf_cap_line(err, (int)errn, 6, 0, 0))
+                snprintf(err,errn,"INTERFACE_ERROR capture-ledger-not-empty-regular");
+            return 1;
+        }
+    }
+#else
     if (fstat(fd,&st) || !S_ISREG(st.st_mode) || (require_empty && st.st_size != 0)) {
         close(fd); snprintf(err,errn,"INTERFACE_ERROR capture-ledger-not-empty-regular"); return 1;
     }
+#endif
     while (at < n) {
         ssize_t z = write(fd,bytes+at,n-at);
+#ifdef UNISA_CX_SOURCE_FRAME
+        {
+            unsigned long long next = at;
+            int took = cxsf_cap_take((long)z, errno == EINTR, at, n, &next);
+            if (took == 1) continue;
+            if (took == 0) { at = (size_t)next; continue; }
+            close(fd);
+            if (cxsf_cap_line(err, (int)errn, 7, 0, 0))
+                snprintf(err,errn,"INTERFACE_ERROR capture-ledger-write");
+            return 1;
+        }
+#else
         if (z < 0 && errno == EINTR) continue;
         if (z <= 0) { close(fd); snprintf(err,errn,"INTERFACE_ERROR capture-ledger-write"); return 1; }
         at += (size_t)z;
+#endif
     }
-    if (close(fd)) { snprintf(err,errn,"INTERFACE_ERROR capture-ledger-close"); return 1; }
+    if (close(fd)) {
+#ifdef UNISA_CX_SOURCE_FRAME
+        if (cxsf_cap_line(err, (int)errn, 8, 0, 0))
+#endif
+        snprintf(err,errn,"INTERFACE_ERROR capture-ledger-close"); return 1; }
     return 0;
 }
 #endif
@@ -825,16 +1216,41 @@ static void rf_capture_record(const unsigned char *p,int n,int owned,unsigned ch
     (void)p;(void)n;(void)owned;(void)bytes;(void)len;die("INTERFACE_ERROR capture-unsupported-platform");
 #else
     char path[4096],hex[1025],sha[65],name[64],row[1280],err[512];int z,present=owned!=0;const char *dir=rf_capture_dir();
+#ifdef UNISA_CX_SOURCE_FRAME
+    if (cxsf_cap_session(dir != 0, RF_CAPACTIVE, dir && strcmp(dir, RF_CAPDIR) == 0, RF_CAPOWNER == (long)getpid()))
+        die("INTERFACE_ERROR capture-session-not-initialized");
+    if (cxsf_cap_key(n, p != 0)) die("INTERFACE_ERROR capture-key-length");
+    if (cxsf_cap_answer(owned, len, bytes != 0)) die("INTERFACE_ERROR capture-answer-invalid");
+#else
     if (!dir || !RF_CAPACTIVE || strcmp(dir,RF_CAPDIR) || RF_CAPOWNER!=(long)getpid()) die("INTERFACE_ERROR capture-session-not-initialized");
     if (n<=0||n>512||!p) die("INTERFACE_ERROR capture-key-length");
     if (owned<0||owned>2||len<0||(present&&len>0&&!bytes)) die("INTERFACE_ERROR capture-answer-invalid");
+#endif
     if (rf_cap_full()) die("INTERFACE_ERROR capture-capacity-exceeded");
+#ifdef UNISA_CX_SOURCE_FRAME
+    if (cxsf_cap_hex(hex, (int)sizeof hex, p, n)) die("INTERFACE_ERROR capture-key-length");
+#else
     for(int i=0;i<n;i++){hex[2*i]="0123456789abcdef"[p[i]>>4];hex[2*i+1]="0123456789abcdef"[p[i]&15];}hex[2*n]=0;
+#endif
     if(present){
-        unisa_sha256_hex(bytes,(size_t)len,sha);snprintf(name,sizeof name,"resource-%03d.bytes",RF_CAPC);
+        unisa_sha256_hex(bytes,(size_t)len,sha);
+#ifdef UNISA_CX_SOURCE_FRAME
+        if (cxsf_cap_name(name, (int)sizeof name, RF_CAPC)) die("INTERFACE_ERROR capture-row-too-long");
+#else
+        snprintf(name,sizeof name,"resource-%03d.bytes",RF_CAPC);
+#endif
         if(rf_cap_new_file(dir,name,bytes,(size_t)len,err,sizeof err))die(err);
+#ifdef UNISA_CX_SOURCE_FRAME
+        z = cxsf_cap_row(row, (int)sizeof row, 1, hex, name, len, sha) ? -1 : (int)strlen(row);
+#else
         z=snprintf(row,sizeof row,"%s\t1\t%s\t%d\t%s\n",hex,name,len,sha);
-    }else z=snprintf(row,sizeof row,"%s\t0\t-\t0\t-\n",hex);
+#endif
+    }else
+#ifdef UNISA_CX_SOURCE_FRAME
+        z = cxsf_cap_row(row, (int)sizeof row, 0, hex, 0, 0, 0) ? -1 : (int)strlen(row);
+#else
+        z=snprintf(row,sizeof row,"%s\t0\t-\t0\t-\n",hex);
+#endif
     if(z<0||(size_t)z>=sizeof row)die("INTERFACE_ERROR capture-row-too-long");
     if(rf_cap_path(path,sizeof path,dir,"resources.tsv",err,sizeof err)||rf_cap_append(path,(const unsigned char*)row,(size_t)z,0,err,sizeof err))die(err);
     RF_CAPC++;
@@ -848,22 +1264,91 @@ static int rf_identity_write_capture(const char *dir,const char *stage,const uns
     (void)dir;(void)stage;(void)input;(void)n;snprintf(err,errn,"INTERFACE_ERROR capture-unsupported-platform");return 1;
 #else
     char path[4096],guard[4096],line[512],hex[65];struct stat st;int empty=0,bad=1;
+#ifdef UNISA_CX_SOURCE_FRAME
+    if (cxsf_cap_args(dir != 0, stage != 0, n, input != 0)) {
+        if (cxsf_cap_dirline(err, (int)errn, 0))
+            snprintf(err,errn,"INTERFACE_ERROR capture-bad-arguments");
+        return 1;
+    }
+#else
     if(!dir||!stage||n<0||(n>0&&!input)){snprintf(err,errn,"INTERFACE_ERROR capture-bad-arguments");return 1;}
+#endif
     if(rf_cap_path(path,sizeof path,dir,"resources.tsv",err,errn)||rf_cap_path(guard,sizeof guard,dir,".capture-begin",err,errn))return 1;
-    if(mkdir(dir,0700)&&errno!=EEXIST){snprintf(err,errn,"INTERFACE_ERROR capture-dir-create");return 1;}
-    if(mkdir(guard,0700)){snprintf(err,errn,"INTERFACE_ERROR capture-session-busy");return 1;}
-    errno=0;if(!lstat(path,&st)){
+    if(mkdir(dir,0700)&&errno!=EEXIST){
+#ifdef UNISA_CX_SOURCE_FRAME
+        if (cxsf_cap_dirline(err, (int)errn, 1))
+#endif
+        snprintf(err,errn,"INTERFACE_ERROR capture-dir-create");return 1;}
+    if(mkdir(guard,0700)){
+#ifdef UNISA_CX_SOURCE_FRAME
+        if (cxsf_cap_dirline(err, (int)errn, 2))
+#endif
+        snprintf(err,errn,"INTERFACE_ERROR capture-session-busy");return 1;}
+    errno=0;
+#ifdef UNISA_CX_SOURCE_FRAME
+    {
+        int stat_ok = !lstat(path,&st);
+        int is_reg = stat_ok && S_ISREG(st.st_mode);
+        int absent = !stat_ok && errno == ENOENT;
+        int cls = cxsf_cap_ledger(stat_ok, is_reg, absent, stat_ok ? (long long)st.st_size : 0, &empty);
+        if (cls) {
+            int kind = cls == 1 ? 3 : cls == 2 ? 4 : 5;
+            if (cxsf_cap_dirline(err, (int)errn, kind)) {
+                if (cls == 1) snprintf(err,errn,"INTERFACE_ERROR capture-ledger-not-regular");
+                else if (cls == 2) snprintf(err,errn,"INTERFACE_ERROR capture-ledger-rows-before-identity");
+                else snprintf(err,errn,"INTERFACE_ERROR capture-ledger-stat");
+            }
+            goto done;
+        }
+    }
+#else
+    if(!lstat(path,&st)){
         if(!S_ISREG(st.st_mode)){snprintf(err,errn,"INTERFACE_ERROR capture-ledger-not-regular");goto done;}
         if(st.st_size!=0){snprintf(err,errn,"INTERFACE_ERROR capture-ledger-rows-before-identity");goto done;}empty=1;
     }else if(errno!=ENOENT){snprintf(err,errn,"INTERFACE_ERROR capture-ledger-stat");goto done;}
-    {DIR *d=opendir(dir);struct dirent *e;if(!d){snprintf(err,errn,"INTERFACE_ERROR capture-dir-open");goto done;}
-     for(;;){errno=0;e=readdir(d);if(!e){int saved=errno,closed=closedir(d);if(saved||closed){snprintf(err,errn,"INTERFACE_ERROR capture-dir-read-close");goto done;}break;}
+#endif
+    {DIR *d=opendir(dir);struct dirent *e;if(!d){
+#ifdef UNISA_CX_SOURCE_FRAME
+        if (cxsf_cap_dirline(err, (int)errn, 6))
+#endif
+        snprintf(err,errn,"INTERFACE_ERROR capture-dir-open");goto done;}
+     for(;;){errno=0;e=readdir(d);if(!e){int saved=errno,closed=closedir(d);if(saved||closed){
+#ifdef UNISA_CX_SOURCE_FRAME
+        if (cxsf_cap_dirline(err, (int)errn, 7))
+#endif
+        snprintf(err,errn,"INTERFACE_ERROR capture-dir-read-close");goto done;}break;}
+#ifdef UNISA_CX_SOURCE_FRAME
+      if (cxsf_cap_dent(e->d_name, empty)) { closedir(d);
+        if (cxsf_cap_dirline(err, (int)errn, 8))
+            snprintf(err,errn,"INTERFACE_ERROR capture-dir-not-empty");
+        goto done; }
+      continue;
+#else
       if(!strcmp(e->d_name,".")||!strcmp(e->d_name,"..")||!strcmp(e->d_name,".capture-begin")||(empty&&!strcmp(e->d_name,"resources.tsv")))continue;
-      closedir(d);snprintf(err,errn,"INTERFACE_ERROR capture-dir-not-empty");goto done;}}
-    rl_input_hex(input,n,hex);if(!rl_identity_line(line,sizeof line,stage,hex)){snprintf(err,errn,"INTERFACE_ERROR capture-stage-label");goto done;}line[3]='2';
+      closedir(d);snprintf(err,errn,"INTERFACE_ERROR capture-dir-not-empty");goto done;
+#endif
+     }}
+    rl_input_hex(input,n,hex);
+#ifdef UNISA_CX_SOURCE_FRAME
+    if (cxsf_cap_idline(line,(int)sizeof line,stage,hex)) {
+        if (cxsf_cap_dirline(err, (int)errn, 10))
+            snprintf(err,errn,"INTERFACE_ERROR capture-stage-label");
+        goto done;
+    }
+#else
+    if(!rl_identity_line(line,sizeof line,stage,hex)){snprintf(err,errn,"INTERFACE_ERROR capture-stage-label");goto done;}line[3]='2';
+#endif
+#ifdef UNISA_CX_SOURCE_FRAME
+    bad=cxsf_cap_place(empty)?rf_cap_append(path,(const unsigned char*)line,strlen(line),1,err,errn):rf_cap_new_file(dir,"resources.tsv",(const unsigned char*)line,strlen(line),err,errn);
+#else
     bad=empty?rf_cap_append(path,(const unsigned char*)line,strlen(line),1,err,errn):rf_cap_new_file(dir,"resources.tsv",(const unsigned char*)line,strlen(line),err,errn);
+#endif
 done:
-    if(rmdir(guard)&&!bad){bad=1;snprintf(err,errn,"INTERFACE_ERROR capture-session-cleanup");}
+    if(rmdir(guard)&&!bad){bad=1;
+#ifdef UNISA_CX_SOURCE_FRAME
+        if (cxsf_cap_dirline(err, (int)errn, 9))
+#endif
+        snprintf(err,errn,"INTERFACE_ERROR capture-session-cleanup");}
     if(!bad){strcpy(RF_CAPDIR,dir);RF_CAPC=0;RF_CAPOWNER=(long)getpid();RF_CAPACTIVE=1;}
     return bad;
 #endif
@@ -871,18 +1356,33 @@ done:
 /* Shared identity label constructor. Both the gate and witnesses use the
    caller's actual stage/route; no independent label grammar in a runner. */
 static int rf_stage_label(char *dst,size_t cap,const char *stage_name,const char *route) {
+#ifdef UNISA_CX_SOURCE_FRAME
+    return cxsf_stage_join(dst, cap > 2147483647u ? 2147483647 : (int)cap, stage_name, route) == 0;
+#else
     int n;
     if (!dst || !stage_name || !route || !cap) return 0;
     n=snprintf(dst,cap,"%s:%s",stage_name,route);
     return n>=0 && (size_t)n<cap && rl_stage_label_ok(dst);
+#endif
 }
 static int rf_identity_gate(const unsigned char *input,int n,int mode,const char *route,const char *stage_name) {
     char err[512], stage[160];
-    int tape_ok = mode == 2 && route && strstr(route,"/tape/O");
     /* Image RI: e3 identity may bind …/image/O* when mode is image.
        Tape keeps its existing mode==2+/tape/O contract. Other routes still refuse. */
+#ifdef UNISA_CX_SOURCE_FRAME
+    if (cxsf_route_gate(mode, route)) {
+        if (cxsf_route_line(err, (int)sizeof err, 0, route))
+            fprintf(stderr, "unisacc: INTERFACE_ERROR resource-route-unsupported %s (strict and capture cover tape and image routes only)\n", route?route:"-");
+        else fprintf(stderr, "unisacc: %s\n", err);
+        return 2;
+    }
+#else
+    {
+    int tape_ok = mode == 2 && route && strstr(route,"/tape/O");
     int image_ok = mode == 0 && route && strstr(route,"/image/O");
     if (!tape_ok && !image_ok) { fprintf(stderr, "unisacc: INTERFACE_ERROR resource-route-unsupported %s (strict and capture cover tape and image routes only)\n", route?route:"-"); return 2; }
+    }
+#endif
     if (!rf_stage_label(stage,sizeof stage,stage_name,route)) { fprintf(stderr,"unisacc: INTERFACE_ERROR capture-stage-label\n"); return 2; }
     if (RF_STRICT && rl_check_identity(&RF_LEDGER, stage, input, n, err, sizeof err)) { fprintf(stderr, "unisacc: %s\n", err); return 2; }
     if (rf_capture_dir() && rf_identity_write_capture(rf_capture_dir(), stage, input, n, err, sizeof err)) { fprintf(stderr, "unisacc: %s\n", err); return 2; }
@@ -948,10 +1448,26 @@ enum { RF_E3_ID_KEY_N = 15, RF_E3_ID_MAX = 512 };
 static int rf_e3_read_companion(const char *dir, unsigned char **out, int *out_n, char *err, size_t errn) {
 #ifdef _WIN32
     (void)dir; (void)out; (void)out_n;
+#ifdef UNISA_CX_SOURCE_FRAME
+    if (cxsf_e3_line(err, (int)errn, 4, 0))
+#endif
     snprintf(err, errn, "INTERFACE_ERROR resource-e3-identity-unsupported-platform");
     return 1;
 #else
-    char path[4096]; unsigned char *b; size_t n = 0; int z;
+    char path[4096]; unsigned char *b; size_t n = 0;
+#ifdef UNISA_CX_SOURCE_FRAME
+    if (cxsf_e3_args(dir != 0, dir && *dir, out != 0, out_n != 0)) {
+        if (cxsf_e3_line(err, (int)errn, 0, 0))
+            snprintf(err, errn, "INTERFACE_ERROR resource-e3-identity-absent");
+        return 1;
+    }
+    if (cxsf_cap_join(path, (int)sizeof path, dir, "e3-identity.tsv")) {
+        if (cxsf_e3_line(err, (int)errn, 1, 0))
+            snprintf(err, errn, "INTERFACE_ERROR resource-e3-identity-path");
+        return 1;
+    }
+#else
+    int z;
     if (!dir || !*dir || !out || !out_n) {
         snprintf(err, errn, "INTERFACE_ERROR resource-e3-identity-absent"); return 1;
     }
@@ -959,18 +1475,43 @@ static int rf_e3_read_companion(const char *dir, unsigned char **out, int *out_n
     if (z < 0 || (size_t)z >= sizeof path) {
         snprintf(err, errn, "INTERFACE_ERROR resource-e3-identity-path"); return 1;
     }
+#endif
     errno = 0; b = rl_readfile(path, &n);
     if (!b) {
+#ifdef UNISA_CX_SOURCE_FRAME
+        {
+            int cls = cxsf_e3_errno(errno == ENOENT, errno == ELOOP);
+            int kind = cls == 0 ? 0 : cls == 1 ? 2 : 5;
+            if (cxsf_e3_line(err, (int)errn, kind, errno)) {
+                if (cls == 0) snprintf(err, errn, "INTERFACE_ERROR resource-e3-identity-absent");
+                else if (cls == 1) snprintf(err, errn, "INTERFACE_ERROR resource-e3-identity-symlink");
+                else snprintf(err, errn, "INTERFACE_ERROR resource-e3-identity-read-failed errno=%d", errno);
+            }
+        }
+#else
         if (errno == ENOENT) snprintf(err, errn, "INTERFACE_ERROR resource-e3-identity-absent");
         else if (errno == ELOOP) snprintf(err, errn, "INTERFACE_ERROR resource-e3-identity-symlink");
         else snprintf(err, errn, "INTERFACE_ERROR resource-e3-identity-read-failed errno=%d", errno);
+#endif
         return 1;
     }
+#ifdef UNISA_CX_SOURCE_FRAME
+    {
+        int span = cxsf_e3_span(1, (unsigned long long)n, (unsigned long long)RF_E3_ID_MAX);
+        if (span) {
+            free(b);
+            if (cxsf_e3_line(err, (int)errn, span == 3 ? 3 : 0, 0))
+                snprintf(err, errn, n ? "INTERFACE_ERROR resource-e3-identity-too-large" : "INTERFACE_ERROR resource-e3-identity-absent");
+            return 1;
+        }
+    }
+#else
     if (n == 0 || n > (size_t)RF_E3_ID_MAX) {
         free(b);
         snprintf(err, errn, n ? "INTERFACE_ERROR resource-e3-identity-too-large" : "INTERFACE_ERROR resource-e3-identity-absent");
         return 1;
     }
+#endif
     *out = b; *out_n = (int)n; return 0;
 #endif
 }
@@ -979,16 +1520,29 @@ static int rf_e3_read_companion(const char *dir, unsigned char **out, int *out_n
 static int rf_e3_second_identity(const unsigned char *input,int n,int mode,const char *route) {
     char stage[160], err[512], line[512], hex[65], got_stage[160], got_hex[65];
     const char *dir; int ln;
+#ifdef UNISA_CX_SOURCE_FRAME
+    if (cxsf_route_e3(mode, route)) {
+        if (cxsf_route_line(err, (int)sizeof err, 1, route))
+            fprintf(stderr,"unisacc: INTERFACE_ERROR resource-route-unsupported %s (e3 second identity is image-only)\n", route?route:"-");
+        else fprintf(stderr,"unisacc: %s\n", err);
+        return 2;
+    }
+#else
     if (mode != 0 || !route || !strstr(route,"/image/O")) {
         fprintf(stderr,"unisacc: INTERFACE_ERROR resource-route-unsupported %s (e3 second identity is image-only)\n", route?route:"-");
         return 2;
     }
+#endif
     if (!rf_stage_label(stage,sizeof stage,"e3",route)) {
         fprintf(stderr,"unisacc: INTERFACE_ERROR capture-stage-label\n"); return 2;
     }
     rl_input_hex(input,n,hex);
+#ifdef UNISA_CX_SOURCE_FRAME
+    if (cxsf_cap_idline(line,(int)sizeof line,stage,hex)) { fprintf(stderr,"unisacc: INTERFACE_ERROR capture-stage-label\n"); return 2; }
+#else
     if (!rl_identity_line(line,sizeof line,stage,hex)) { fprintf(stderr,"unisacc: INTERFACE_ERROR capture-stage-label\n"); return 2; }
     line[3] = '2';
+#endif
     ln = (int)strlen(line);
     if (ln <= 0 || ln >= (int)sizeof line) { fprintf(stderr,"unisacc: INTERFACE_ERROR capture-stage-label\n"); return 2; }
     /* Capture: capacity first (same 4096 contract as rf_capture_record), then companion + SC2 row.
@@ -997,7 +1551,7 @@ static int rf_e3_second_identity(const unsigned char *input,int n,int mode,const
 #ifdef _WIN32
         fprintf(stderr,"unisacc: INTERFACE_ERROR capture-unsupported-platform\n"); return 2;
 #else
-        char e3path[4096], path[4096], row[1280], hkey[64], sha[65]; int i, rz;
+        char e3path[4096], path[4096], row[1280], hkey[64], sha[65]; int rz;
         dir = rf_capture_dir();
         if (rf_cap_full()) {
             fprintf(stderr,"unisacc: INTERFACE_ERROR capture-capacity-exceeded\n"); return 2;
@@ -1005,13 +1559,24 @@ static int rf_e3_second_identity(const unsigned char *input,int n,int mode,const
         if (rf_cap_new_file(dir,"e3-identity.tsv",(const unsigned char *)line,(size_t)ln,err,sizeof err)) {
             fprintf(stderr,"unisacc: %s\n", err); return 2;
         }
+#ifdef UNISA_CX_SOURCE_FRAME
+        if (cxsf_cap_hex(hkey, (int)sizeof hkey, RF_E3_ID_KEY, RF_E3_ID_KEY_N)) {
+            fprintf(stderr,"unisacc: INTERFACE_ERROR capture-key-length\n"); return 2;
+        }
+#else
+        { int i;
         for (i = 0; i < RF_E3_ID_KEY_N; i++) {
             hkey[2 * i] = "0123456789abcdef"[RF_E3_ID_KEY[i] >> 4];
             hkey[2 * i + 1] = "0123456789abcdef"[RF_E3_ID_KEY[i] & 15];
         }
-        hkey[2 * RF_E3_ID_KEY_N] = 0;
+        hkey[2 * RF_E3_ID_KEY_N] = 0; }
+#endif
         unisa_sha256_hex((const unsigned char *)line,(size_t)ln,sha);
+#ifdef UNISA_CX_SOURCE_FRAME
+        rz = cxsf_cap_row(row,(int)sizeof row,1,hkey,"e3-identity.tsv",ln,sha) ? -1 : (int)strlen(row);
+#else
         rz = snprintf(row,sizeof row,"%s\t1\te3-identity.tsv\t%d\t%s\n",hkey,ln,sha);
+#endif
         if (rz < 0 || (size_t)rz >= sizeof row) {
             if (!rf_cap_path(e3path,sizeof e3path,dir,"e3-identity.tsv",err,sizeof err)) unlink(e3path);
             fprintf(stderr,"unisacc: INTERFACE_ERROR capture-row-too-long\n"); return 2;
@@ -1027,25 +1592,74 @@ static int rf_e3_second_identity(const unsigned char *input,int n,int mode,const
     }
     if (!RF_STRICT) return 0;
     /* Strict: SC2 next event is e3-identity row; companion file is re-read in full (no fgets). */
+#ifdef UNISA_CX_SOURCE_FRAME
+    if (cxsf_e3_ready(RF_TRACE_STARTED, RF_LEDGER.trace, RF_LEDGER_DIR[0] != 0, RF_LEDGER.cursor, RF_LEDGER.n)) {
+        fprintf(stderr,"unisacc: INTERFACE_ERROR resource-e3-identity-absent\n"); return 2;
+    }
+#else
     if (!RF_TRACE_STARTED || !RF_LEDGER.trace || !RF_LEDGER_DIR[0]) {
         fprintf(stderr,"unisacc: INTERFACE_ERROR resource-e3-identity-absent\n"); return 2;
     }
     if (RF_LEDGER.cursor >= RF_LEDGER.n) {
         fprintf(stderr,"unisacc: INTERFACE_ERROR resource-e3-identity-absent\n"); return 2;
     }
+#endif
     {
         const RLRow *r = &RF_LEDGER.rows[RF_LEDGER.cursor];
         unsigned char *fileb = 0; int filen = 0;
+#ifdef UNISA_CX_SOURCE_FRAME
+        {
+            int row = cxsf_e3_row(r->kn, RF_E3_ID_KEY_N, r->key, RF_E3_ID_KEY, r->present, r->value != 0, r->blob);
+            if (row == 2) {
+                if (cxsf_e3_cmp_line(err, (int)sizeof err, 0, 0, 0))
+                    fprintf(stderr,"unisacc: INTERFACE_ERROR resource-e3-identity-malformed\n");
+                else fprintf(stderr,"unisacc: %s\n", err);
+                return 2;
+            }
+            if (row) {
+                fprintf(stderr,"unisacc: INTERFACE_ERROR resource-e3-identity-absent\n"); return 2;
+            }
+        }
+#else
         if (r->kn != RF_E3_ID_KEY_N || memcmp(r->key,RF_E3_ID_KEY,RF_E3_ID_KEY_N) || !r->present || !r->value) {
             fprintf(stderr,"unisacc: INTERFACE_ERROR resource-e3-identity-absent\n"); return 2;
         }
         if (strcmp(r->blob,"e3-identity.tsv")) {
             fprintf(stderr,"unisacc: INTERFACE_ERROR resource-e3-identity-malformed\n"); return 2;
         }
+#endif
         if (rf_e3_read_companion(RF_LEDGER_DIR,&fileb,&filen,err,sizeof err)) {
             fprintf(stderr,"unisacc: %s\n", err); return 2;
         }
         /* Full-file authority: size, unique trailing LF, no NUL/extra lines, 64 lowercase hex. */
+#ifdef UNISA_CX_SOURCE_FRAME
+        if (!rf_parse_e3_identity_bytes(fileb,filen,got_stage,sizeof got_stage,got_hex)) {
+            int tail = cxsf_e3_tail(fileb, filen, (const unsigned char *)line, ln);
+            if (cxsf_e3_cmp_line(err, (int)sizeof err, tail == 1 ? 1 : 0, 0, 0))
+                fprintf(stderr, tail == 1 ? "unisacc: INTERFACE_ERROR resource-e3-identity-trailing\n"
+                                          : "unisacc: INTERFACE_ERROR resource-e3-identity-malformed\n");
+            else fprintf(stderr,"unisacc: %s\n", err);
+            free(fileb); return 2;
+        }
+        if (cxsf_e3_match(fileb, filen, (const unsigned char *)line, ln)) {
+            if (cxsf_e3_cmp_line(err, (int)sizeof err, 2, 0, 0))
+                fprintf(stderr,"unisacc: INTERFACE_ERROR resource-identity-mismatch input e3-second\n");
+            else fprintf(stderr,"unisacc: %s\n", err);
+            free(fileb); return 2;
+        }
+        if (cxsf_e3_same(r->value, r->vn, fileb, filen)) {
+            if (cxsf_e3_cmp_line(err, (int)sizeof err, 3, 0, 0))
+                fprintf(stderr,"unisacc: INTERFACE_ERROR resource-e3-identity-inconsistent\n");
+            else fprintf(stderr,"unisacc: %s\n", err);
+            free(fileb); return 2;
+        }
+        if (cxsf_e3_id(got_stage, stage, got_hex, hex)) {
+            if (cxsf_e3_cmp_line(err, (int)sizeof err, 4, got_stage, stage))
+                fprintf(stderr,"unisacc: INTERFACE_ERROR resource-identity-mismatch stage ledger=%s run=%s\n", got_stage, stage);
+            else fprintf(stderr,"unisacc: %s\n", err);
+            free(fileb); return 2;
+        }
+#else
         if (!rf_parse_e3_identity_bytes(fileb,filen,got_stage,sizeof got_stage,got_hex)) {
             /* Prefix-equal but longer => trailing junk after the identity line. */
             if (filen > ln && ln > 0 && !memcmp(fileb,line,(size_t)ln))
@@ -1066,6 +1680,7 @@ static int rf_e3_second_identity(const unsigned char *input,int n,int mode,const
             fprintf(stderr,"unisacc: INTERFACE_ERROR resource-identity-mismatch stage ledger=%s run=%s\n", got_stage, stage);
             free(fileb); return 2;
         }
+#endif
         free(fileb);
         RF_LEDGER.cursor++;
     }
@@ -1102,9 +1717,30 @@ static RLLedger RI_SNAP; static int RI_SNAP_ON = 0;
 static inline int rf_snapshot_write_ri(const char *dir, const char *stage_label, const unsigned char *input, int inputn,
                                        const ResourceInput *ri, int nri, char *err, size_t errn) {
     RLBlob b[RL_SNAP_MAX]; int i;
-    if (!rl_stage_label_ok(stage_label)) { snprintf(err, errn, "INTERFACE_ERROR snapshot-stage-label %s", stage_label); return 1; }
+    if (!rl_stage_label_ok(stage_label)) {
+#ifdef UNISA_CX_SOURCE_FRAME
+        if (cxsf_stage_err(err, errn > 2147483647u ? 2147483647 : (int)errn, 0, stage_label))
+#endif
+        snprintf(err, errn, "INTERFACE_ERROR snapshot-stage-label %s", stage_label);
+        return 1;
+    }
+#ifdef UNISA_CX_SOURCE_FRAME
+    if (cxsf_snap_count(nri, RL_SNAP_MAX)) {
+        if (cxsf_snap_line(err, errn > 2147483647u ? 2147483647 : (int)errn))
+            snprintf(err, errn, "INTERFACE_ERROR snapshot-too-many-blobs");
+        return 1;
+    }
+#else
     if (nri < 0 || nri > RL_SNAP_MAX) { snprintf(err, errn, "INTERFACE_ERROR snapshot-too-many-blobs"); return 1; }
-    for (i = 0; i < nri; i++) { b[i].key = ri[i].name; b[i].kn = ri[i].n; b[i].data = ri[i].data; b[i].len = ri[i].len; }
+#endif
+    for (i = 0; i < nri; i++) {
+#ifdef UNISA_CX_SOURCE_FRAME
+        if (cxsf_snap_slot(ri[i].name, ri[i].n, ri[i].data, ri[i].len, &b[i].key, &b[i].kn, &b[i].data, &b[i].len))
+            return 1;
+#else
+        b[i].key = ri[i].name; b[i].kn = ri[i].n; b[i].data = ri[i].data; b[i].len = ri[i].len;
+#endif
+    }
     return rl_snapshot_write(dir, stage_label, input, inputn, b, nri, err, errn);
 }
 static inline int rf_snapshot_load_ri(const char *dir, const char *upstream_stage_label, RLLedger *L, int observe, char *err, size_t errn) {
@@ -1113,8 +1749,22 @@ static inline int rf_snapshot_load_ri(const char *dir, const char *upstream_stag
 /* capture header for an independent consumer (standalone lower): the directory must be absent or empty; the header is the
    consumer's own identity (its label and its real input bytes), written by the same identity writer as the e3 gate */
 static inline int rf_capture_begin(const char *dir, const char *stage_label, const unsigned char *input, int inputn, char *err, size_t errn) {
+#ifdef UNISA_CX_SOURCE_FRAME
+    if (cxsf_cap_args(1, stage_label != 0, inputn, input != 0)) {
+        if (cxsf_cap_dirline(err, (int)errn, 0))
+            snprintf(err,errn,"INTERFACE_ERROR capture-bad-arguments");
+        return 1;
+    }
+#else
     if (!stage_label || inputn < 0 || (inputn > 0 && !input)) { snprintf(err,errn,"INTERFACE_ERROR capture-bad-arguments");return 1; }
-    if (!rl_stage_label_ok(stage_label)) { snprintf(err, errn, "INTERFACE_ERROR capture-stage-label %s", stage_label); return 1; }
+#endif
+    if (!rl_stage_label_ok(stage_label)) {
+#ifdef UNISA_CX_SOURCE_FRAME
+        if (cxsf_stage_err(err, errn > 2147483647u ? 2147483647 : (int)errn, 1, stage_label))
+#endif
+        snprintf(err, errn, "INTERFACE_ERROR capture-stage-label %s", stage_label);
+        return 1;
+    }
     return rf_identity_write_capture(dir, stage_label, input, inputn, err, errn);
 }
 int core_host_fetch(const unsigned char *p,int n,unsigned char **bytes,int *len) {
@@ -1124,13 +1774,25 @@ int core_host_fetch(const unsigned char *p,int n,unsigned char **bytes,int *len)
     if(RF_STRICT){
         static char msg[1280];char h[1025];const RLRow *r=0;
         if(n>512)die("resource key too long");
+#ifdef UNISA_CX_SOURCE_FRAME
+        if (cxsf_cap_hex(h, (int)sizeof h, p, n)) die("resource key too long");
+#else
         for(int i=0;i<n;i++){h[2*i]="0123456789abcdef"[p[i]>>4];h[2*i+1]="0123456789abcdef"[p[i]&15];}h[2*n]=0;
+#endif
         if(RF_LEDGER.trace){
 #ifdef UNISA_CX_SOURCE_FRAME
             int index=0, code=cxsf_ledger_next(RF_LEDGER.rows,RF_LEDGER.n,RF_TRACE_STARTED,&RF_LEDGER.cursor,p,n,&index);
             if(code==1)die("INTERFACE_ERROR resource-trace-not-started");
-            if(code==2){snprintf(msg,sizeof msg,"MISSING_EXPLICIT_RESOURCE %s event=%d",h,RF_LEDGER.cursor);die(msg);}
-            if(code==3){snprintf(msg,sizeof msg,"INTERFACE_ERROR resource-trace-key-mismatch %s event=%d",h,RF_LEDGER.cursor);die(msg);}
+            if(code==2){
+                if (cxsf_fetch_miss(msg, (int)sizeof msg, 1, h, RF_LEDGER.cursor))
+                    snprintf(msg,sizeof msg,"MISSING_EXPLICIT_RESOURCE %s event=%d",h,RF_LEDGER.cursor);
+                die(msg);
+            }
+            if(code==3){
+                if (cxsf_fetch_mismatch(msg, (int)sizeof msg, h, RF_LEDGER.cursor))
+                    snprintf(msg,sizeof msg,"INTERFACE_ERROR resource-trace-key-mismatch %s event=%d",h,RF_LEDGER.cursor);
+                die(msg);
+            }
             r=&RF_LEDGER.rows[index];
 #else
             if(!RF_TRACE_STARTED)die("INTERFACE_ERROR resource-trace-not-started");
@@ -1140,28 +1802,70 @@ int core_host_fetch(const unsigned char *p,int n,unsigned char **bytes,int *len)
             RF_LEDGER.cursor++;
 #endif
         }else r=rl_find(&RF_LEDGER,p,n);
-        if(!r){snprintf(msg,sizeof msg,"MISSING_EXPLICIT_RESOURCE %s",h);die(msg);}
+        if(!r){
+#ifdef UNISA_CX_SOURCE_FRAME
+            if (cxsf_fetch_miss(msg, (int)sizeof msg, 0, h, 0))
+#endif
+            snprintf(msg,sizeof msg,"MISSING_EXPLICIT_RESOURCE %s",h);
+            die(msg);
+        }
         /* Strict: ledger answers only. Do not re-read host disk for inc/hdr (offline replay). */
+#ifdef UNISA_CX_SOURCE_FRAME
+        {
+            int owned = cxsf_fetch_hand(r->present, r->value, r->vn, bytes, len);
+            if (owned == 4) return 1;
+            if(rf_capture_dir())rf_capture_record(p,n,r->present,*bytes,*len);
+            return owned;
+        }
+#else
         if(r->present){*bytes=r->value;*len=r->vn;}
         if(rf_capture_dir())rf_capture_record(p,n,r->present,*bytes,*len);
         return r->present?1:0;
+#endif
     }
     if(RI_SNAP_ON){
         const RLRow *r=rl_find(&RI_SNAP,p,n);
-        if(r){if(r->present){*bytes=r->value;*len=r->vn;}if(rf_capture_dir())rf_capture_record(p,n,r->present,*bytes,*len);return r->present?1:0;}
+        if(r){
+#ifdef UNISA_CX_SOURCE_FRAME
+            int owned = cxsf_fetch_hand(r->present, r->value, r->vn, bytes, len);
+            if (owned == 4) return 1;
+            if(rf_capture_dir())rf_capture_record(p,n,r->present,*bytes,*len);
+            return owned;
+#else
+            if(r->present){*bytes=r->value;*len=r->vn;}
+            if(rf_capture_dir())rf_capture_record(p,n,r->present,*bytes,*len);
+            return r->present?1:0;
+#endif
+        }
     }
     int owned=rf_default_fetch(p,n,bytes,len);
     if(rf_capture_dir())rf_capture_record(p,n,owned,*bytes,*len);
     return owned;
 }
 static int rf_default_fetch(const unsigned char *p,int n,unsigned char **bytes,int *len) {
+#ifdef UNISA_CX_SOURCE_FRAME
+    for (int j=0;j<NRI;j++) {
+        int hit = cxsf_fetch_row(p, n, RI[j].name, RI[j].n, RI[j].data, RI[j].len, bytes, len);
+        if (hit == 4) return 0;
+        if (hit == 1) return 1;
+    }
+    for (int j=0;j<NR;j++) {
+        int hit = cxsf_fetch_row(p, n, PB + RES[j].name, RES[j].n, PB + RES[j].data, RES[j].len, bytes, len);
+        if (hit == 4) return 0;
+        if (hit == 1) return 1;
+    }
+#else
     for (int j=0;j<NRI;j++) if (RI[j].n==n && !memcmp(RI[j].name,p,n)) {
         *bytes=(unsigned char *)RI[j].data; *len=RI[j].len; return 1;
     }
     for (int j=0;j<NR;j++) if (RES[j].n==n && !memcmp(PB+RES[j].name,p,n)) {
         *bytes=PB+RES[j].data; *len=RES[j].len; return 1;
     }
+#endif
     char path[4096];
+#ifdef UNISA_CX_SOURCE_FRAME
+    if (cxsf_fetch_path(path, (int)sizeof path, p, n, INCDIR)) return 0;
+#else
     /* S2: a logical include key \0inc/q|a/NAME names a cwd-relative file: the prefix is stripped here, on the host side */
     if (n>=7 && p[0]==0 && !memcmp(p+1,"inc/",4) && (p[5]=='q'||p[5]=='a') && p[6]=='/') { p+=7; n-=7; }
     int header=n>=5 && !memcmp(p,"\0hdr/",5);
@@ -1179,10 +1883,19 @@ static int rf_default_fetch(const unsigned char *p,int n,unsigned char **bytes,i
         snprintf(path,sizeof path,"%s/%.*s",INCDIR,n-5,p+5);
     }
     if ((int)strlen(path)!=(header ? (int)strlen(INCDIR)+1+n-5 : n)) return 0;
+#endif
     *bytes=readfile(path,len,1);
+#ifdef UNISA_CX_SOURCE_FRAME
+    {
+        int owned = cxsf_fetch_file(*bytes, path, record_file_read, record_file_absent);
+        if (owned == 4) return 0;
+        return owned;
+    }
+#else
     if (*bytes) record_file_read(path);
     else record_file_absent(path);
     return *bytes ? 2 : 0;
+#endif
 }
 #ifdef UNISA_RUNTIME_LIBRARY
 /* CLI byte framing is host IO, not a machine action. */
@@ -1215,28 +1928,101 @@ static int runtime_step_budget(const char *s,I *value) {
 #endif
 }
 #endif
+#ifdef UNISA_CX_RUNEXEC
+int ex_budget(int product, const char *budget, long long fallback,
+              int (*parse)(const char *, long long *),
+              long long *steps, char *why, long cap);
+int ex_lines(int status, const char *reason, int reason_n, long long steps,
+             char *reject, long reject_cap, char *runmsg, long run_cap,
+             char *blown, long blown_cap);
+int ex_err(const void *bytes, int n, void **owned);
+static int ex_parse(const char *s, long long *v) {
+#ifndef UNISA_PRODUCT_BUILD
+    I parsed;
+    if (!runtime_step_budget(s, &parsed)) return 0;
+    *v = (long long)parsed;
+    return 1;
+#else
+    (void)s; (void)v; return 0;
+#endif
+}
+#endif
 static int execute(unsigned char *input,int inputn,const char *src,Buf *result) {
     CoreModel m; core_model(&m);
-#ifdef UNISA_PRODUCT_BUILD
-    I maxsteps=UNISA_DEFAULT_MAXSTEPS;   /* shipped: a build constant, the host environment has no say */
-#else
     I maxsteps=UNISA_DEFAULT_MAXSTEPS;
-    const char *budget=getenv("UNISA_MAXSTEPS");
-    if (budget && !runtime_step_budget(budget,&maxsteps)) {
-        fprintf(stderr,"run: UNISA_MAXSTEPS must be a positive decimal integer <= 9223372036854775807\n");
-        memset(result,0,sizeof *result);
-        return 2;
+#ifdef UNISA_CX_RUNEXEC
+    {
+        long long chosen = maxsteps;
+        char why[160];
+        const char *budget = 0;
+        int gate;
+#ifndef UNISA_PRODUCT_BUILD
+        budget = getenv("UNISA_MAXSTEPS");
+#endif
+        gate = ex_budget(
+#ifdef UNISA_PRODUCT_BUILD
+            1
+#else
+            0
+#endif
+            , budget, (long long)UNISA_DEFAULT_MAXSTEPS, ex_parse, &chosen, why, (long)sizeof why);
+        if (gate == 2) { fputs(why, stderr); memset(result, 0, sizeof *result); return 2; }
+        if (gate == 1) {
+            fprintf(stderr, "run: UNISA_MAXSTEPS must be a positive decimal integer <= 9223372036854775807\n");
+            memset(result, 0, sizeof *result);
+            return 2;
+        }
+        maxsteps = (I)chosen;
     }
+#else
+#ifdef UNISA_PRODUCT_BUILD
+    /* shipped: a build constant, the host environment has no say */
+#else
+    {
+        const char *budget=getenv("UNISA_MAXSTEPS");
+        if (budget && !runtime_step_budget(budget,&maxsteps)) {
+            fprintf(stderr,"run: UNISA_MAXSTEPS must be a positive decimal integer <= 9223372036854775807\n");
+            memset(result,0,sizeof *result);
+            return 2;
+        }
+    }
+#endif
 #endif
     CoreResult r; int status=core_run(&m,input,inputn,src,maxsteps,&r);
 #ifdef UNISA_RUNTIME_DIAGNOSTIC
     UNISA_RUNTIME_DIAGNOSTIC(status,r.reason,r.reason_n,&r.err);
 #endif
+#ifdef UNISA_CX_RUNEXEC
+    {
+        char reject[1024], runmsg[1024], blown[256];
+        int lines = ex_lines(status, r.reason, r.reason_n, (long long)maxsteps,
+                             reject, (long)sizeof reject, runmsg, (long)sizeof runmsg,
+                             blown, (long)sizeof blown);
+        if (lines == 0) {
+            if (reject[0]) fputs(reject, stderr);
+            if (runmsg[0]) fputs(runmsg, stderr);
+            if (blown[0]) fputs(blown, stderr);
+        } else {
+            if (status==1 && r.reason_n) fprintf(stderr,"reject: %.*s\n",r.reason_n,r.reason);
+            if (status==2) fprintf(stderr,"run: %s\n",r.reason);
+            if (status==3) fprintf(stderr,"step budget exhausted (budget %lld steps)\n",(long long)maxsteps);
+        }
+        {
+            void *owned = 0;
+            int gate = ex_err(r.err.b, r.err.n, &owned);
+            if (gate == 1) fwrite(owned, 1, (size_t)r.err.n, stderr);
+            if (gate == 4) free(r.err.b);
+            else free(owned);
+        }
+    }
+#else
     if (status==1 && r.reason_n) fprintf(stderr,"reject: %.*s\n",r.reason_n,r.reason);
     if (status==2) fprintf(stderr,"run: %s\n",r.reason);
     if (status==3) fprintf(stderr,"step budget exhausted (budget %lld steps)\n",(long long)maxsteps);
     if (r.err.n) fwrite(r.err.b,1,r.err.n,stderr);
-    free(r.err.b); result->b=r.out.b; result->n=r.out.n;
+    free(r.err.b);
+#endif
+    result->b=r.out.b; result->n=r.out.n;
     return status;
 }
 
@@ -1292,22 +2078,101 @@ static int attr_strip(Buf *out) {
     return 1;
 }
 #endif
+#ifdef UNISA_CX_ROUTESPAN
+typedef struct { int ready, ended, count, stop; } RsCursor;
+void rs_reset(RsCursor *c, int first_absent, int last_absent);
+int rs_take(RsCursor *c, const char *stage_route, const char *stage_name, const char *route, const char *first, const char *last);
+int rs_ok(const RsCursor *c);
+#endif
+#ifdef UNISA_CX_ROUTESTEP
+int rt_open(int ver, int cached, const unsigned char *plain, int plain_len,
+            unsigned char *owned, int raw_len, unsigned expect,
+            int (*inflate)(unsigned char *, unsigned long, const unsigned char *, unsigned long),
+            unsigned (*crc32)(char *, int),
+            int *use_owned, int *out_len, char *why, long cap);
+void rt_swap(unsigned char **in_b, int *in_n, unsigned char *out_b, int out_n, unsigned char **release);
+int rt_after(int rc, int stop);
+int rt_strip(int rc);
+int sh_apply(int opened, int use_owned, int out_len, int has_slot,
+             const char *why, void *slot,
+             unsigned char *plain, int plain_len, unsigned char *owned,
+             void (*fail)(const char *),
+             void (*bindfn)(void *),
+             void (*clear)(void),
+             void (*set_loading)(int),
+             void (*load)(unsigned char *, int),
+             void (*release)(void *),
+             void (*clear_lb)(void),
+             void (*capture)(void *),
+             void (*mark)(void *));
+static void sh_fail(const char *s) { die(s); }
+static void sh_bind(void *slot) { model_bind((const Model *)slot); }
+static void sh_clear(void) { model_clear(); }
+static void sh_loading(int v) { MODEL_LOADING = v; }
+static void sh_load(unsigned char *b, int n) { loadbytes(b, n); }
+static void sh_release(void *p) { free(p); }
+static void sh_lb(void) { LB = 0; }
+static void sh_capture(void *slot) { model_capture((Model *)slot); }
+static void sh_mark(void *slot) { ((Model *)slot)->loaded = 1; }
+#endif
+#ifdef UNISA_CX_ROUTETIME
+long long rr_ns(long long a_sec, long long a_nsec, long long b_sec, long long b_nsec);
+int rr_wanted(const char *value);
+int rr_model(const char *stage, int cached, long long ns, char *out, long cap);
+int rr_infer(const char *stage, int rc, long long ns, char *out, long cap);
+#endif
 static int runroute_range(const char *route, const char *first_stage, const char *last_stage, Buf *in, const char *src) {
+#ifdef UNISA_CX_ROUTESPAN
+    RsCursor span;
+    rs_reset(&span, first_stage == 0, last_stage == 0);
+#else
     int count = 0, ready = first_stage == 0, ended = last_stage == 0;
+#endif
     for (int i = 0; i < PS; i++) {
+#ifdef UNISA_CX_ROUTESPAN
+        if (!rs_take(&span, STAGES[i].route, STAGES[i].name, route, first_stage, last_stage)) continue;
+#else
         if (strcmp(STAGES[i].route, route)) continue;
         if (!ready) {
             if (strcmp(STAGES[i].name,first_stage)) continue;
             ready=1;
         }
+#endif
         int m = STAGES[i].model;
+#ifdef UNISA_CX_PACKAGE_LIFETIME
+        Model *slot = cxpl_slot(CACHE, m, CACHE ? CACHE->nmodels : 0) ? &CACHE->models[m] : 0;
+#else
         Model *slot = CACHE && m < CACHE->nmodels ? &CACHE->models[m] : 0;
+#endif
         /* UNISACC_RR_TIME phase stamps (stderr, same family as the driver's RR_TIME lines): the model
          * decode of this stage (inflate/CRC/parse, or a cache bind) and its inference, both measured
          * inside this process with the monotonic clock; nothing is printed without the variable. */
         static int rr_stamp = -1; struct timespec rr_a, rr_b, rr_c; int rr_cached = slot && slot->loaded;
+#ifdef UNISA_CX_ROUTETIME
+        if (rr_stamp < 0) rr_stamp = rr_wanted(getenv("UNISACC_RR_TIME"));
+#else
         if (rr_stamp < 0) rr_stamp = getenv("UNISACC_RR_TIME") != 0;
+#endif
         if (rr_stamp) clock_gettime(CLOCK_MONOTONIC, &rr_a);
+#ifdef UNISA_CX_ROUTESTEP
+        {
+            int cached = slot && slot->loaded;
+            unsigned char *bytes = 0, *owned = 0;
+            int len = 0, use_owned = 0, out_len = 0, opened;
+            char why[80];
+            if (!cached) { bytes = PB + POFF[m]; len = PLEN[m]; }
+            if (!cached && PVER == 3) owned = xrealloc(0, (size_t)PRAW[m]);
+            opened = rt_open(PVER, cached, bytes, len, owned,
+                             (!cached && PVER == 3) ? PRAW[m] : 0,
+                             (!cached && PVER == 3) ? PCRC[m] : 0,
+                             unisa_inflate, crc, &use_owned, &out_len, why, (long)sizeof why);
+            if (sh_apply(opened, use_owned, out_len, slot != 0, why, slot,
+                         bytes, len, owned,
+                         sh_fail, sh_bind, sh_clear, sh_loading,
+                         sh_load, sh_release, sh_lb, sh_capture, sh_mark) == 3)
+                die("slot handoff");
+        }
+#else
         if (slot && slot->loaded) model_bind(slot);
         else {
             unsigned char *bytes = PB+POFF[m], *owned = 0; int len = PLEN[m];
@@ -1323,25 +2188,80 @@ static int runroute_range(const char *route, const char *first_stage, const char
             if (slot) { model_capture(slot); slot->loaded = 1; }
             MODEL_LOADING = 0;
         }
+#endif
         if (rr_stamp) {
             clock_gettime(CLOCK_MONOTONIC, &rr_b);
+#ifdef UNISA_CX_ROUTETIME
+            {
+                long long ns = rr_ns((long long)rr_a.tv_sec, (long long)rr_a.tv_nsec, (long long)rr_b.tv_sec, (long long)rr_b.tv_nsec);
+                char line[1024];
+                if (rr_model(STAGES[i].name, rr_cached, ns, line, (long)sizeof line) == 0) fputs(line, stderr);
+                else fprintf(stderr, "RR_TIME\tmodel\tstage=%s\tsource=%s\tns=%lld\n", STAGES[i].name, rr_cached ? "cache" : "inflate", ns);
+            }
+#else
             fprintf(stderr, "RR_TIME\tmodel\tstage=%s\tsource=%s\tns=%lld\n", STAGES[i].name, rr_cached ? "cache" : "inflate",
                     (long long)(rr_b.tv_sec - rr_a.tv_sec) * 1000000000LL + (rr_b.tv_nsec - rr_a.tv_nsec));
+#endif
         }
         Buf out = {0}; int rc = execute(in->b, in->n, src, &out);
         if (rr_stamp) {
             clock_gettime(CLOCK_MONOTONIC, &rr_c);
+#ifdef UNISA_CX_ROUTETIME
+            {
+                long long ns = rr_ns((long long)rr_b.tv_sec, (long long)rr_b.tv_nsec, (long long)rr_c.tv_sec, (long long)rr_c.tv_nsec);
+                char line[1024];
+                if (rr_infer(STAGES[i].name, rc, ns, line, (long)sizeof line) == 0) fputs(line, stderr);
+                else fprintf(stderr, "RR_TIME\tinference\tstage=%s\trc=%d\tns=%lld\n", STAGES[i].name, rc, ns);
+            }
+#else
             fprintf(stderr, "RR_TIME\tinference\tstage=%s\trc=%d\tns=%lld\n", STAGES[i].name, rc,
                     (long long)(rr_c.tv_sec - rr_b.tv_sec) * 1000000000LL + (rr_c.tv_nsec - rr_b.tv_nsec));
+#endif
         }
+#ifdef UNISA_CX_ROUTESTEP
+        if (rt_strip(rc)) attr_strip(&out);
+#else
         if (!rc) attr_strip(&out);
+#endif
         if (!slot) unload();
+#ifdef UNISA_CX_ROUTESTEP
+        {
+            unsigned char *release = 0;
+            rt_swap(&in->b, &in->n, out.b, out.n, &release);
+            free(release);
+        }
+#else
         free(in->b); in->b = out.b; in->n = out.n;
-        if (rc) return rc;
+#endif
+#ifdef UNISA_CX_ROUTESTEP
+        {
+            int stop_now = 0;
+#ifdef UNISA_CX_ROUTESPAN
+            stop_now = span.stop;
+#endif
+            int next = rt_after(rc, stop_now);
+            if (next == 1) return rc;
+            if (next == 2) break;
+        }
+#ifndef UNISA_CX_ROUTESPAN
         count++;
         if (last_stage && !strcmp(STAGES[i].name,last_stage)) { ended=1; break; }
+#endif
+#else
+        if (rc) return rc;
+#ifdef UNISA_CX_ROUTESPAN
+        if (span.stop) break;
+#else
+        count++;
+        if (last_stage && !strcmp(STAGES[i].name,last_stage)) { ended=1; break; }
+#endif
+#endif
     }
+#ifdef UNISA_CX_ROUTESPAN
+    if (!rs_ok(&span)) die("unknown package route or stage boundary");
+#else
     if (!count || !ended) die("unknown package route or stage boundary");
+#endif
     return 0;
 }
 static int runroute_from(const char *route, const char *first_stage, Buf *in, const char *src) {
@@ -1404,7 +2324,13 @@ int main(int argc, char **argv) {
     /* --ri-snapshot: the snapshot is the producer's complete RI, so the standalone built-ins (cli/f1, cli/attributes, cli/source)
        are not added; a key the snapshot lacks answers as the API does (default fetch, absent).  Without a snapshot: unchanged. */
     if (!RI && !run_snap) { RI = sres; NRI = 3; ATTR_SLOT = 1; }
-    { const char *ap = getenv("UNISA_ATTRIBUTES"); if (ap && *ap) { int an = 0; unsigned char *ab = readfile(ap, &an, 1);
+    { const char *ap = getenv("UNISA_ATTRIBUTES");
+#ifdef UNISA_CX_FILEMODE
+      if (bx_env_set(ap))
+#else
+      if (ap && *ap)
+#endif
+      { int an = 0; unsigned char *ab = readfile(ap, &an, 1);
         if (ab) { ATTRS.b = ab; ATTRS.n = an; ATTRS.cap = an; sres[1].data = ab; sres[1].len = an; } } }
     Buf in = {0}; in.b = readfile(argv[inputarg], &in.n, 0);
     if (run_pkg) package(run_pkg);   /* PRODUCT resources stay loaded for this process; MODEL is loaded below */
@@ -1447,8 +2373,13 @@ int main(int argc, char **argv) {
     if(rf_trace_finish())return 2;
     if (run_attributes) {
         const char *ap = getenv("UNISA_ATTRIBUTES");
+#ifdef UNISA_CX_FILEMODE
+        if (bx_env_set(ap)) {
+            FILE *af = fopen(ap, bx_file_mode(1)); int bad = !af;
+#else
         if (ap && *ap) {
             FILE *af = fopen(ap, "wb"); int bad = !af;
+#endif
             if (af) { if (fwrite(ATTRS.b,1,ATTRS.n,af)!=(size_t)ATTRS.n) bad=1; if(fclose(af)) bad=1; }
             if(bad)die("cannot write UNISA_ATTRIBUTES");
         }

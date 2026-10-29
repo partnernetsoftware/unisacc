@@ -117,7 +117,7 @@ static int rr_hash_file(const char *path, char hex[65]) {
     unsigned char *all;
     size_t off = 0, n;
     if (rr_stat_reg(path, &st)) return 1;
-    f = fopen(path, "rb");
+    f = fopen(path, bx_file_mode(0));
     if (!f) return 1;
     all = (unsigned char *)malloc((size_t)st.st_size ? (size_t)st.st_size : 1);
     if (!all) { fclose(f); return 1; }
@@ -223,7 +223,7 @@ static int rr_sources_hex(char **sources, int nsources, char hex[65]) {
         memcpy(acc + at, sources[j], pl);
         at += pl;
         acc[at++] = 0;
-        f = fopen(sources[j], "rb");
+        f = fopen(sources[j], bx_file_mode(0));
         if (!f) { free(acc); return 1; }
         chunk = acc + at;
         n = 0;
@@ -356,7 +356,7 @@ static int rr_lookup(const char *product, const char *route, const char *target,
     if (rr_key(key, product, route, target, level, src_hex)) return 0;
     snprintf(cpath, sizeof cpath, "%s/%s", dir, key);
     if (lstat(cpath, &st) || !S_ISREG(st.st_mode) || st.st_size < (off_t)sizeof fixed) return 0;
-    f = fopen(cpath, "rb");
+    f = fopen(cpath, bx_file_mode(0));
     if (!f) return 0;
     if (fread(fixed, 1, sizeof fixed, f) != sizeof fixed) { fclose(f); return 0; }
     if (memcmp(fixed, "USE33\n\0\0", 8)) { fclose(f); return 0; }
@@ -449,7 +449,7 @@ static int rr_store_host(const char *product, const char *route, const char *tar
     snprintf(e3path, sizeof e3path, "%s/%s", dir, key);
     snprintf(hostpath, sizeof hostpath, "%s/%s.host", dir, key);
     if (lstat(e3path, &st) || !S_ISREG(st.st_mode)) return 1;
-    f = fopen(e3path, "rb");
+    f = fopen(e3path, bx_file_mode(0));
     if (!f) return 1;
     if (fread(fixed, 1, sizeof fixed, f) != sizeof fixed || memcmp(fixed, "USE33\n\0\0", 8)) {
         fclose(f); return 1;
@@ -533,7 +533,7 @@ static int rr_lookup_host(const char *product, const char *route, const char *ta
     if (rr_key(key, product, route, target, level, src_hex)) return 0;
     snprintf(cpath, sizeof cpath, "%s/%s.host", dir, key);
     if (lstat(cpath, &st) || !S_ISREG(st.st_mode) || st.st_size < (off_t)sizeof fixed) return 0;
-    f = fopen(cpath, "rb");
+    f = fopen(cpath, bx_file_mode(0));
     if (!f) return 0;
     if (fread(fixed, 1, sizeof fixed, f) != sizeof fixed) { fclose(f); return 0; }
     if (memcmp(fixed, "USE34\n\0\0", 8)) { fclose(f); return 0; }

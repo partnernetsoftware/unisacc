@@ -189,6 +189,8 @@ static void untracked_free(void *p) { free(p); }
 #define open tracked_open
 #define close tracked_close
 #include "run.c"
+int bx_stage_present(const char *, const char *, const char *const *, const char *const *, int);
+int bx_stage_route(const char *, const char *const *, int);
 #undef open
 #undef close
 #undef realloc
@@ -355,7 +357,7 @@ API const void *us_binding_contract(us_context *c,const char *target,size_t *len
  if(!setjmp(failure)){
   RI=NULL;NRI=0;NR=0;FILE_READ_RECORD=0;FILE_READ_COUNT=0;FILE_READ_PATHS=NULL;
   library_package(c);
-  int found=0;for(int i=0;i<PS;i++)if(!strcmp(STAGES[i].route,"library-contract")&&!strcmp(STAGES[i].name,"contract"))found=1;
+  int found=0;for(int i=0;i<PS;i++){const char *rowr=STAGES[i].route,*rown=STAGES[i].name;if(bx_stage_present("library-contract","contract",&rowr,&rown,1)==1)found=1;}
   if(!found)__us_panic("library contract: required model is missing");
   Buf input={0};input.b=tracked_realloc(NULL,size);memcpy(input.b,frame,size);input.n=(int)size;
   rc=runroute("library-contract",&input,"binding-contract");
@@ -579,7 +581,7 @@ static int library_carrier_model(us_context *c,const char *target,const void *wi
         RI=0;NRI=0;NR=0;FILE_READ_RECORD=0;FILE_READ_COUNT=0;FILE_READ_PATHS=0;
         library_package(c);
         char route[64];snprintf(route,sizeof route,"%s/nativeabi",target);
-        int present=0;for(int i=0;i<PS;i++)if(!strcmp(STAGES[i].route,route))present=1;
+        int present=0;for(int i=0;i<PS;i++){const char *rowr=STAGES[i].route;if(bx_stage_route(route,&rowr,1)==1)present=1;}
         if(!present)rc=2;
         else{
             ResourceInput resource={0};resource.name=(const unsigned char*)"\0cli/target";resource.n=11;
@@ -746,7 +748,7 @@ API int us_compile(us_context *c,const char *target,int level) {
         INCDIR=c->include_path;
         library_package(c);
         ResourceInput resources[15]; memset(resources,0,sizeof resources);
-        unsigned char callable_values[2][8];resource_u64(callable_values[0],(uintptr_t)library_callable_make_dispatch);resource_u64(callable_values[1],(uintptr_t)library_callable_call_dispatch);
+        unsigned char callable_values[2][8];lw_put(callable_values[0],8,(unsigned long long)(uintptr_t)library_callable_make_dispatch);lw_put(callable_values[1],8,(unsigned long long)(uintptr_t)library_callable_call_dispatch);
         unsigned char library_request[8]={1,0,0,0,0,0,0,0};
         unsigned char signature_request[8]={3,0,0,0,0,0,0,0};
         RI=resources; NRI=0;
@@ -878,8 +880,9 @@ static int symbol_order(const void *a,const void *b) {
 }
 static void library_image(us_context *c,Buf *bytes,MemoryImage *m,MemoryMap *mapping) {
     if (bytes->n<40 || memcmp(bytes->b,"UNILIB1\n",8)) __us_panic("library model output not supported");
-    m->text=memory_field(bytes->b+8);m->extent=memory_field(bytes->b+16);
-    m->stored=memory_field(bytes->b+24);m->entry=memory_field(bytes->b+32);
+    int text=0,extent=0,stored=0,entry=0;
+    if(mem_field(bytes->b+8,&text)||mem_field(bytes->b+16,&extent)||mem_field(bytes->b+24,&stored)||mem_field(bytes->b+32,&entry))__us_panic("bad library image bounds");
+    m->text=text;m->extent=extent;m->stored=stored;m->entry=entry;
     size_t at=40+(size_t)m->text+m->stored;
     if (m->text<=0 || m->entry>=m->text || m->stored>m->extent ||
         at>(size_t)bytes->n || (size_t)bytes->n-at<14 || memcmp(bytes->b+at,"SYMS1\n",6))
@@ -1168,7 +1171,7 @@ API int us_relocate(us_context *c) {
         uint64_t vals[]={c->argc,(uintptr_t)c->argv,(uintptr_t)mapping.base,mapping.reserved,1,(uintptr_t)library_exit,(uintptr_t)library_mmap,(uintptr_t)library_munmap,
             host_dl_slot(0),host_dl_slot(1),host_dl_slot(2),host_dl_slot(3),1,(uintptr_t)c->process_slots,1,(uintptr_t)library_callable_make_dispatch,(uintptr_t)library_callable_call_dispatch};
         int lengths[]={13,13,12,15,16,13,13,15,13,13,13,13,15,16,18,21,21};
-        for (int i=0;i<17;i++) {resource_u64(scalar[i],vals[i]);actual[i].name=(const unsigned char *)names[i];actual[i].n=lengths[i];actual[i].data=scalar[i];actual[i].len=8;}
+        for (int i=0;i<mr_rows();i++) {lw_put(scalar[i],mr_rec_len(),(unsigned long long)vals[i]);actual[i].name=(const unsigned char *)names[i];actual[i].n=lengths[i];actual[i].data=scalar[i];actual[i].len=mr_rec_len();}
         RI=actual;NRI=17;
         if (c->signatures) {
             actual[NRI].name=(const unsigned char *)"\0library/signatures";actual[NRI].n=19;
@@ -1214,7 +1217,7 @@ API int us_relocate(us_context *c) {
             MemoryImage m;library_image(c,&input,&m,&mapping);memory_commit(&m,&mapping);
             c->image_dataoff=mapping.dataoff;c->image_entry=m.entry;c->image_text_size=m.text;c->image_data_size=m.extent;
             memcpy(mapping.base,input.b+40,m.text);memcpy(mapping.base+mapping.dataoff,input.b+40+m.text,m.stored);
-            if (memory_protect_code(&mapping,m.text)) __us_panic("cannot protect library code");
+            if (memory_protect_code(&mapping,m.text)) __us_panic(mw_lib_protect_why());
             if(c->signatures && us_exports_load_bridge(&c->exports,c->signatures,c->signatures_length,c->error,sizeof c->error)) rc=1;
         }
     } else rc=1;
@@ -1249,12 +1252,12 @@ static int library_stack_alloc(us_context *c,unsigned char **base,size_t *size) 
     size_t total=usable+2*page;
 #ifdef _WIN32
     unsigned char *p=VirtualAlloc(0,total,MEM_RESERVE,PAGE_NOACCESS);
-    if(!p)return error(c,"cannot reserve library call stack");
-    if(VirtualAlloc(p+page,usable,MEM_COMMIT,PAGE_READWRITE)!=p+page){library_release_map(p,total);return error(c,"cannot commit library call stack");}
+    if(!p)return error(c,mw_stack_reserve_why());
+    if(VirtualAlloc(p+page,usable,MEM_COMMIT,PAGE_READWRITE)!=p+page){library_release_map(p,total);return error(c,mw_stack_commit_why());}
 #else
     unsigned char *p=mmap(0,total,PROT_NONE,MAP_PRIVATE|MAP_ANON,-1,0);
-    if(p==MAP_FAILED)return error(c,"cannot reserve library call stack");
-    if(mprotect(p+page,usable,PROT_READ|PROT_WRITE)){library_release_map(p,total);return error(c,"cannot commit library call stack");}
+    if(p==MAP_FAILED)return error(c,mw_stack_reserve_why());
+    if(mprotect(p+page,usable,PROT_READ|PROT_WRITE)){library_release_map(p,total);return error(c,mw_stack_commit_why());}
 #endif
     *base=p;*size=total;return 0;
 }

@@ -1031,7 +1031,7 @@ static void tui_complete_command(tui_state *st) {
     static const char *builtin[] = {
         "/help", "/status", "/clear", "/goal", "/loop", "/reload", "/reload-code", "/export-state",
         "/exit", "/quit", "/model", "/cwd", "/cost", "/perm", "/allow", "/new", "/resume", "/undo",
-        "/diff", "/view", "/copy", "/retry", "/context", "/compact", "/net", NULL
+        "/diff", "/view", "/copy", "/retry", "/context", "/compact", "/net", "/export", NULL
     };
     static char names[64][64];
     char dirs[2][600], listing[8192], line[240];
@@ -1135,6 +1135,48 @@ static int tui_compact(const char *path, const char *last_answer, char *note, si
     return 0;
 }
 
+/* /export: the transcript as Markdown. User text under "## 你", the answer
+ * text out of each act=answer object under "## csih", tool output in a fence
+ * (first 1500 bytes each). Judge rows, decisions and other internals are left
+ * out. Returns the number of sections written, -1 on error. */
+static int tui_export(const char *transcript, const char *dest, char *note, size_t cap) {
+    session_records recs = session_read(transcript);
+    FILE *f;
+    size_t i;
+    int sections = 0;
+    if (!recs.count) { session_free(&recs); snprintf(note, cap, "export: 当前没有对话记录"); return -1; }
+    f = fopen(dest, "w");
+    if (!f) { session_free(&recs); snprintf(note, cap, "export: cannot write %.200s: %s", dest, strerror(errno)); return -1; }
+    fprintf(f, "# csih 对话导出\n\n");
+    for (i = 0; i < recs.count; i++) {
+        char err[128];
+        jvalue *v = json_parse(recs.lines[i], strlen(recs.lines[i]), err, sizeof err);
+        const char *role = v ? jstr(jget(v, "role")) : NULL, *text = v ? jstr(jget(v, "text")) : NULL;
+        if (!role || !text) { if (v) jfree(v); continue; }
+        if (!strcmp(role, "user")) {
+            fprintf(f, "## 你\n\n%s\n\n", text); sections++;
+        } else if (!strcmp(role, "assistant")) {
+            /* Only answers: the text of an act=answer object, or plain prose. */
+            jvalue *a = json_parse(text, strlen(text), err, sizeof err);
+            const char *act = a ? jstr(jget(a, "act")) : NULL, *body = a ? jstr(jget(a, "text")) : NULL;
+            if (a && act && !strcmp(act, "answer") && body) { fprintf(f, "## csih\n\n%s\n\n", body); sections++; }
+            else if (!a && text[0] != '{') { fprintf(f, "## csih\n\n%s\n\n", text); sections++; }
+            if (a) jfree(a);
+        } else if (!strcmp(role, "tool")) {
+            const char *name = jstr(jget(v, "name"));
+            size_t n = strlen(text);
+            fprintf(f, "### 工具 %s\n\n```\n%.*s%s\n```\n\n", name ? name : "", (int)(n > 1500 ? 1500 : n), text,
+                    n > 1500 ? "\n…（截断）" : "");
+            sections++;
+        }
+        jfree(v);
+    }
+    session_free(&recs);
+    if (fclose(f) != 0) { snprintf(note, cap, "export: write failed"); return -1; }
+    snprintf(note, cap, "export: %d 段写入 %.200s", sections, dest);
+    return sections;
+}
+
 static void tui_command_done(tui_state *st) {
     st->input[0] = 0;
     st->ninput = 0;
@@ -1156,6 +1198,7 @@ static int tui_slash(tui_state *st) {
         tui_log_plain(st, "/undo: 撤销 agent 最近一次文件写入/编辑（最多 20 步，不含 exec）；/diff: 看这些改动");
         tui_log_plain(st, "/view PATH [LINE]: 看文件 20 行（带行号），不经模型；/copy: 上一轮答复进 tmux 缓冲区；/retry: 重发上一条输入");
         tui_log_plain(st, "/context: 对话记录条数、大小和裁剪规则；/compact: 归档并只保留最近请求和答复的原文摘录");
+        tui_log_plain(st, "/export [路径]: 对话导出为 Markdown（默认 ./csih-<时间>.md）");
         tui_log_plain(st, "/allow: 放行下一条危险命令一次；/new: 新上下文（旧转录归档）；/resume [N]: 列出或换回归档");
         tui_log_plain(st, "键：Esc 取消本轮/清输入；Alt-Enter 换行；空输入 Tab 展开/收起工具行；Ctrl-U/W 清行/删词；Ctrl-R 搜历史");
         tui_command_done(st);
@@ -1176,6 +1219,19 @@ static int tui_slash(tui_state *st) {
             snprintf(note, sizeof note, "model set: %s (this session)", st->model);
         }
         tui_log_plain(st, note);
+        tui_command_done(st);
+        return 1;
+    }
+    if (!strncmp(st->input, "/export", 7) && token == 7) {
+        char path[512], dest[600], msg[400];
+        const char *arg = st->input + 7;
+        while (*arg == ' ') arg++;
+        if (st->owned) snprintf(path, sizeof path, "%s", st->journal_path);
+        else if (agent_transcript_path(path, sizeof path) != 0) path[0] = 0;
+        if (*arg) snprintf(dest, sizeof dest, "%s", arg);
+        else snprintf(dest, sizeof dest, "csih-%ld.md", (long)net_now());
+        if (!path[0]) tui_log_plain(st, "export: no transcript path");
+        else { tui_export(path, dest, msg, sizeof msg); tui_log_plain(st, msg); }
         tui_command_done(st);
         return 1;
     }
@@ -4973,9 +5029,33 @@ int tui_entry(int argc, char **argv) {
                 f = fopen(cpath, "r"); line[0] = 0;
                 if (f) { if (!fgets(line, sizeof line, f)) line[0] = 0; fclose(f); }
                 ok = ok && strstr(line, "答复Y") && !strstr(line, "请求7");
-                if (tui_selftest_rm(cdir, 1)) failures++;
                 if (!ok) printf("  (compact) %s\n", msg);
                 else printf("  ok   /compact keeps the last 5 requests and answer, quoted\n");
+                /* /export: user, answer text and tool output; judge rows and decisions left out */
+                {
+                    char md[300], all[4096];
+                    size_t got = 0;
+                    int sec;
+                    f = fopen(cpath, "w");
+                    if (f) {
+                        fputs("{\"role\":\"user\",\"text\":\"列一下文件\"}\n", f);
+                        fputs("{\"role\":\"tool\",\"name\":\"exec\",\"text\":\"cwd=/x\\nexit=0\\na.txt\\n\"}\n", f);
+                        fputs("{\"role\":\"assistant\",\"text\":\"{\\\"act\\\":\\\"answer\\\",\\\"outcome\\\":\\\"completed\\\",\\\"text\\\":\\\"只有 a.txt\\\",\\\"evidence\\\":[]}\"}\n", f);
+                        fputs("{\"role\":\"assistant\",\"text\":\"{\\\"go\\\":\\\"stop\\\",\\\"acceptance\\\":\\\"accepted\\\",\\\"reason\\\":\\\"JUDGE\\\"}\"}\n", f);
+                        fputs("{\"role\":\"decision\",\"go\":\"stop\"}\n", f);
+                        fclose(f);
+                    }
+                    snprintf(md, sizeof md, "%s/out.md", cdir);
+                    sec = tui_export(cpath, md, msg, sizeof msg);
+                    f = fopen(md, "r");
+                    if (f) { got = fread(all, 1, sizeof all - 1, f); fclose(f); }
+                    all[got] = 0;
+                    ok = sec == 3 && strstr(all, "## 你\n\n列一下文件") && strstr(all, "### 工具 exec") && strstr(all, "a.txt")
+                        && strstr(all, "## csih\n\n只有 a.txt") && !strstr(all, "JUDGE") && !strstr(all, "\"act\"");
+                    if (!ok) { printf("FAIL /export sec=%d\n%s\n", sec, all); failures++; }
+                    else printf("  ok   /export writes user, answers and tool output as Markdown\n");
+                }
+                if (tui_selftest_rm(cdir, 1)) failures++;
             }
             if (!ok) { printf("FAIL /resume n1=%d n2=%d last=%s\n", n1, n2, msg); failures++; }
             else printf("  ok   /resume lists and swaps archived transcripts\n");
