@@ -795,7 +795,12 @@ API int us_compile(us_context *c,const char *target,int level) {
             for (Source *s=c->sources;s;s=s->next,i++) { names[i]=s->name; bytes[i]=(const unsigned char *)s->bytes; lens[i]=(int)strlen(s->bytes); }
             unsigned char *fb=rf_source_frame(count,names,bytes,lens,&fn);
             rc = fb ? rf_identity_gate(fb,fn,2,route,"e3") : 2;
-            free(fb); free(names); free(bytes); free(lens);
+#ifdef UNISA_CX_SOURCE_FRAME
+            tracked_free(fb);
+#else
+            free(fb);
+#endif
+            free(names); free(bytes); free(lens);
         }
         if (!rc) for (Source *s=c->sources;s;s=s->next) {
             size_t n=strlen(s->bytes); if (n>=INT_MAX) __us_panic("source too large");

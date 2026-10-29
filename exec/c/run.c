@@ -1058,6 +1058,13 @@ static int rf_e3_second_identity(const unsigned char *input,int n,int mode,const
 }
 /* SC1 multi-source identity input: the source frame, per source in order: u32le name length, name, u32le byte count, bytes.
    Built from the sources, not from the unit outputs, so it exists before the first unit row is recorded. */
+#ifdef UNISA_CX_SOURCE_FRAME
+int cxsf_encode(int,const char **,const unsigned char **,const int *,unsigned char **,int *,void *(*)(void *,size_t));
+static unsigned char *rf_source_frame(int count,const char **names,const unsigned char **bytes,const int *lens,int *out_n) {
+    unsigned char *frame=0;
+    return cxsf_encode(count,names,bytes,lens,&frame,out_n,realloc) ? 0 : frame;
+}
+#else
 static unsigned char *rf_source_frame(int count,const char **names,const unsigned char **bytes,const int *lens,int *out_n) {
     size_t total=0; int i, j; unsigned char *b, *p;
     for (i=0;i<count;i++) total+=8+strlen(names[i])+(size_t)lens[i];
@@ -1073,6 +1080,7 @@ static unsigned char *rf_source_frame(int count,const char **names,const unsigne
     }
     *out_n=(int)total; return b;
 }
+#endif
 /* RI snapshot overlay (standalone import only; API and default runs never set it) */
 static RLLedger RI_SNAP; static int RI_SNAP_ON = 0;
 /* shared RI-array writer: converts the caller's ResourceInput rows (ATTR slot included as its key) to the row interface */
