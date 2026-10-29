@@ -151,7 +151,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 **2026-10-25 主人重新裁定：0.0.43 现在重构。** 旧1333项测试套件整体归档，退出开发和发布的主验收路径；新套件按产品合同重新设计，直接由 `unisacc.com + .cx` 驱动。此项属于本版，不等待0.0.44。保留现有产品、源码、夹具及原始结果作为历史和迁移依据，不把旧结果自动计入新验收。
 
-**当前入口（2026-10-30）：** 入口 1122568 字节。`.cx` 经 `cxm_bind` 展开 use，模型 `result.err` 写回 stderr。本只实测 `netpack.cx -S`、`hello.c -run`、`cxstd_main.cx -E` 与产品一致。`dev-run -S` 未重跑。FWD-DLSYM 仍是红项。正式表未在这只上重跑。细节在 [plans/cx-modules.md](plans/cx-modules.md)。
+**当前入口（2026-10-30）：** 在用的入口仍是 O0 的 1122568 字节。整只 `-O2 -o` 冷构造超过 55 秒，bound 退出 142，墙钟 55069059812 ns，没有新产物。这是构造红项。细节在 [plans/cx-modules.md](plans/cx-modules.md)。
 
 <a id="work-tree"></a>
 ### 思维树
