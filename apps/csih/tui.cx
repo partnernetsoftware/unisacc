@@ -1031,7 +1031,7 @@ static void tui_complete_command(tui_state *st) {
     static const char *builtin[] = {
         "/help", "/status", "/clear", "/goal", "/loop", "/reload", "/reload-code", "/export-state",
         "/exit", "/quit", "/model", "/cwd", "/cost", "/perm", "/allow", "/new", "/resume", "/undo",
-        "/diff", "/view", "/copy", "/retry", "/context", "/compact", NULL
+        "/diff", "/view", "/copy", "/retry", "/context", "/compact", "/net", NULL
     };
     static char names[64][64];
     char dirs[2][600], listing[8192], line[240];
@@ -1152,7 +1152,7 @@ static int tui_slash(tui_state *st) {
         tui_log_plain(st, "/reload: 空闲重载密钥缓存；/reload-code: managed idle actor");
         tui_log_plain(st, "/export-state HANDOFF: owned idle 状态导出；/exit /quit: 退出");
         tui_log_plain(st, "/model [名]: 显示或设本会话模型；/cwd: 显示工作目录；/cost: 本会话词元与缓存命中");
-        tui_log_plain(st, "/perm [read|work|any]: 权限档（read 只读；work 只写工作目录；any 不拦）");
+        tui_log_plain(st, "/perm [read|work|any]: 权限档（read 只读；work 只写工作目录；any 不拦）；/net on|off: work 档网络");
         tui_log_plain(st, "/undo: 撤销 agent 最近一次文件写入/编辑（最多 20 步，不含 exec）；/diff: 看这些改动");
         tui_log_plain(st, "/view PATH [LINE]: 看文件 20 行（带行号），不经模型；/copy: 上一轮答复进 tmux 缓冲区；/retry: 重发上一条输入");
         tui_log_plain(st, "/context: 对话记录条数、大小和裁剪规则；/compact: 归档并只保留最近请求和答复的原文摘录");
@@ -1394,6 +1394,20 @@ static int tui_slash(tui_state *st) {
         char msg[400];
         if (st->busy) tui_log_plain(st, "busy: /undo refused");
         else { agent_undo_last(msg, sizeof msg); tui_log_plain(st, msg); }
+        tui_command_done(st);
+        return 1;
+    }
+    if (!strncmp(st->input, "/net", 4) && token == 4) {
+        const char *arg = st->input + 4;
+        while (*arg == ' ') arg++;
+        if (!strcmp(arg, "on") || !strcmp(arg, "off")) {
+            if (st->busy) snprintf(note, sizeof note, "busy: net unchanged");
+            else { agent_set_net(!strcmp(arg, "on")); snprintf(note, sizeof note, "net: work 档命令%s网络", agent_get_net() ? "可以用" : "不能用"); }
+        } else if (!*arg)
+            snprintf(note, sizeof note, "net: %s（read 档始终断网；any 档不进沙箱，不受影响%s）", agent_get_net() ? "on" : "off",
+                     agent_sandbox_available() ? "" : "；本机没有沙箱，此开关无效");
+        else snprintf(note, sizeof note, "usage: /net [on|off]");
+        tui_log_plain(st, note);
         tui_command_done(st);
         return 1;
     }
@@ -2776,7 +2790,7 @@ static void tui_title_info(char *out, size_t cap, const char *model, const char 
     /* cwd last: it is the longest, so a narrow window cuts it, not the key. */
     const char *ks = src == 1 ? "env" : src == 2 ? "file" : "missing";
     static const char *perm[] = { "read", "work", "any" };
-    const char *pm = perm[agent_get_perm()];
+    const char *pm = agent_get_perm() == 1 && !agent_get_net() ? "work·断网" : perm[agent_get_perm()];
     if (hn && cwd && !strncmp(cwd, home, hn) && (cwd[hn] == '/' || !cwd[hn]))
         snprintf(out, cap, "%s · key=%s · %s · ~%s", model, ks, pm, cwd + hn);
     else

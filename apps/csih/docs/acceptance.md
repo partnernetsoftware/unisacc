@@ -43,6 +43,7 @@ CSIH_BIN=../../out/csih-e2e-bin/csih UNISACC=../../unisacc.com \
 | 会话：按目录存放、/new、/resume、/resume shared | `/new archives…`、`/resume lists and swaps…`；agent_cli 中按目录的路径 | 两个目录上下文互不相通；导入 77KB 旧记录 |
 | 权限：/perm read/work/any | `/perm read|work|any gates writes and commands` | read 档拦写入，work 档拦 /tmp 写入 |
 | 沙箱：read/work 档 exec 跑在只读 mount namespace | agent_cli：read 档 cwd 写入被内核拒绝；work 档 cwd 可写、家目录只读；超长命令被拒绝 | `touch ~/x` 报 Read-only |
+| /net off：work 档也断网 | agent_cli：work 档默认有网、/net off 后只有 lo | curl 报 Could not resolve host，本轮照常验收 |
 | 沙箱：机密遮蔽、私有 PID、read 档断网 | agent_cli：`~/env.jsonl` 读出为空、PID 空间独立、read 档只有 lo | `wc -c ~/env.jsonl` 为 0，`ps -e` 只有 4 个进程 |
 | /undo 撤销文件写入/编辑（20 步） | agent_cli：`a write records one undo step`、`undo restores the overwrite`、`undo of a created file removes it` | 改写 u.txt 后 /undo 恢复原内容 |
 | /diff 查看 agent 本次的文件改动 | `/diff lists each changed file once with its diff` | edit 与新建都显示 diff |
@@ -59,7 +60,7 @@ CSIH_BIN=../../out/csih-e2e-bin/csih UNISACC=../../unisacc.com \
 
 ## 已知边界（不算缺陷，但要知道）
 
-- 沙箱管文件系统写入、常见机密（env.jsonl、.netrc、.git-credentials、.ssh、.aws、.gnupg、.config/gh、.docker）、进程可见性、每条命令 4GB 内存和 120 秒 CPU 配额，read 档还断网；不管清单之外的机密和 work 档网络。没有 `unshare` 的机器上退回关键字门。
+- 沙箱管文件系统写入、常见机密（env.jsonl、.netrc、.git-credentials、.ssh、.aws、.gnupg、.config/gh、.docker）、进程可见性、每条命令 4GB 内存和 120 秒 CPU 配额，read 档还断网，work 档可用 `/net off` 断网；不管清单之外的机密。没有 `unshare` 的机器上退回关键字门。
 - 危险命令门是关键字匹配。
 - exec 同步执行，每 200ms 刷新一次界面；单条命令最长 60 秒（`CSIH_EXEC_TIMEOUT_SEC`）。
 - 回答正文不流式显示（REJECT，理由见 PRD）。
