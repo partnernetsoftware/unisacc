@@ -1514,18 +1514,22 @@ flowchart TD
 
 `cx/core/execute.cx` 去掉了 `UNISA_EXEC_CORE_H` 和 `__ASSEMBLER__` 守卫。文件级「声明了但不定义」改成函数体内的 `extern`。`action_run` 写成字面 `static`，`core_run` 写成字面名。这份文件也是旧库构造的输入。`executor.cx` 使用 `core.execute`，以及 alu、transition、stack、output、sparse、bytes。`bind.cx` 只留 `bd_touch`。`-cx-plan src/unisacc.cx` 退出 0，62 个单元。
 
-`core_host_fetch` 借用回答 `\0cli/target`（`lnx/x86_64`）和 `\0predefines/lnx/x86_64`。`\0inc/q/` 与 `\0inc/a/` 去掉 7 字节前缀后按当前目录读文件，读到返回 2；`ENOENT` 返回 0。`\0hdr/` 仍是 absent。
+`core_host_fetch` 先用这次命令放上的目标、源路径。输入是 `.cx` 时再放 `cx.h` 前导。然后按名字在包里找预定义和头文件。尖括号头文件去掉 `\0inc/a/` 或 `\0inc/q/` 前 7 个字节，按当前目录读。没写 `-b` 时这台机器的默认目标是 `lnx/x86_64`。
 
-`-E examples/hello.c`：新入口退出 0，stdout 61357 字节，stderr 0。当场再跑已装产品，同样退出 0、61357 字节、stderr 0，两份 stdout 逐字节相同。`-S`、`-o`、`-run` 这版入口没有重跑。
+16 格在 `out/cx-entry-matrix-2026-10-30.tsv`。四个 `-E` 和当场已装产品逐字节相同：`examples/hello.c` 是 61357 字节，带 `stdio.h` 和 `#if` 的 `macro.c` 是 58895 字节，空 `main` 的 `empty.cx` 是 507429 字节。`a.cx` 加 `b.cx` 的 `-E` 两边都是退出 1，stderr 67 字节，整句是 `multiple preprocessing outputs not migrated`。另外 12 格新入口退出 2，stdout 空。`-S` 写 `NOT_IMPLEMENTED tapecheck`，`-o` 写 `NOT_IMPLEMENTED elf`，`-run` 写 `NOT_IMPLEMENTED memory`。多单元这三格先跑完单元路线，帧没有交给外层，外层仍是这三处缺口。`UNISACC_RR_TIME` 只打出 read 和 package。模型推理没有相位，记 UNMEASURED。多单元 `-E` 在打相位之前就返回，这两相也是 UNMEASURED。
+
+`-b win/x86_64 -E examples/hello.c` 两边都是 61593 字节，退出 0，stderr 0。`-E -b win/x86_64 examples/hello.c` 已装产品退出 0，stdout 是 37376 字节的 PE32+，和单独 `-b win/x86_64` 逐字节相同。新入口退出 2，`route=win/x86_64/image/O0`，`NOT_IMPLEMENTED elf`。模式和产品一致，缺口仍是 elf。没有改 `cli.cx`。
+
+自举命令是 `sh ./unisacc.com -o /tmp/grk-cx-line/entry src/unisacc.cx`。退出 0，stderr 空，冷耗时 50.710 秒，产物 1231636 字节，动态链接 ELF。热耗时没测。
 
 具名红项：
 
 1. `FILE-DECL`。文件级函数声明若本文件不定义，cxmod 拒绝 `declares NAME but does not define it`。最小复现是 `execute.cx` 顶层 `void core_host_panic(const char *);`。现象是扫到第一个这种声明就停。绕法是块内 `extern`，由 `host.cx` 定义并导出。没有改 cxmod。
 2. `CXM-MAXU`。`CXM_MAXU` 是 64。这次 `-cx-plan` 是 62/64，只剩 2 个单元。没有改上限。
 
-旁解析仍靠这两条符号链接。`HOST-CLOCK`：顶层 `clock_gettime` 同样被拒，声明放进 `hs_ns`。`CX-PRELUDE`：用户 `.cx` 还没有产品那种 `cx.h` 前导。
+旁解析仍靠这两条符号链接。`HOST-CLOCK`：顶层 `clock_gettime` 同样被拒，声明放进 `hs_ns`。`CX-PRELUDE`：`.cx` 的 `-E` 已经和产品相同。
 
-这不是产品安装，不是 `-E` 逐字节，不是四种语料的完整矩阵。整棵重写还没完成。
+这不是产品安装。`-S`、`-o`、`-run` 还没有逐字节相同。整棵重写还没完成。
 
 ## 64. 2026-10-29 编译器纯拒绝接到 bindhost
 
