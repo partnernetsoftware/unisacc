@@ -358,7 +358,13 @@ P3 消费工具已使用 CX codec（`d238debe0b`）和只借用字节区的包�
 
 跨目标单元进展：冻结 d2a13b5935 的 131/131 作业、双内核和 42 模型已封装并重读核验 P3 包 6fd5520d（out/cx-source-xtarget-pc-03；材料身份，不授功能资格）。驱动在 5a63eb5460 按选中包检查非 Linux 单元路由：私有宿主驱动实编 macOS／Windows 的 x86-64、arm64 各两个对象并链接，四目标均成功；旧包缺路由和目标不匹配均具名拒绝。产品编译器构造的八单元私有驱动 8e80ffa1 与该包也完成四目标编译链接，与宿主驱动产物逐字节相同；证据为本机交叉构造，含 long 的 ABI 有真实缺口：工具 c450b2e60f 的目标宽度探针 Linux／macOS 通过、Windows x86-64／arm64 两项失败，产品生成 long=8 而 Windows LLP64 需 4（out/cx-target-long-check-01）；真实 CX 单元探针 0eb61138d4 在旧包 6fd5520d 的 Windows arm64 原为 0/3；2805a9c98c 新表重建两张 arm 编码网络后，私有未准入替换包 efc5a50b 上真实 output／cli／compat 为 3/0，直接／传递依赖三单元亦已链接 PE，原红保留；真实驱动整体交叉单元在 macOS x86-64 因 object host FFI slot 被拒（探针 56229f572d，原红保留），实际产品重建及外国执行尚未验证。
 
-**宿主绑定帧（2026-10-29）：** 合同帧、提供者过滤和绑定计划从 `exec/c/bind.h` 收到 `cx/compiler/hostbind.cx`。`bind.c` 仍负责打开文件、临时符号流和地址注入。`sh ./unisacc.com tools/check-compiler-units.cx` 本机实跑 `CHECK_COMPILER_UNITS failed=0`，含目标号、两槽合同、帧拒绝、保留位拒绝、缺符号拒绝和两槽绑定。这不是产品安装、六目标或 `--all`。文件 IO 和 `run.c` 仍在 C。
+**宿主绑定帧（2026-10-29）：** 合同帧、提供者过滤和绑定计划从 `exec/c/bind.h` 收到 `cx/compiler/hostbind.cx`。`bind.c` 仍负责打开文件、临时符号流和地址注入。`sh ./unisacc.com tools/check-compiler-units.cx` 本机实跑 `CHECK_COMPILER_UNITS failed=0`，含目标号、两槽合同、帧拒绝、保留位拒绝、缺符号拒绝和两槽绑定。这不是产品安装、六目标或 `--all`。文件 IO 和 `run.c` 的膨胀、计时、执行仍在 C。
+
+**阶段边界（2026-10-29）：** 包路线的起止阶段选择收到 `cx/runtime/routespan.cx`（`rs_reset`、`rs_take`、`rs_ok`）。产品驱动在 `UNISA_CX_ROUTESPAN` 下走它；找不到路线或起止仍死于 `unknown package route or stage boundary`。膨胀、时钟、`execute` 和缓冲交换留在 `exec/c/run.c`。未定义该宏的独立 `run.c` 和库仍走原来的 C 循环。`sh ./unisacc.com tools/check-compiler-units.cx` 连续两次实跑，stdout 相同，都是 `CHECK_COMPILER_UNITS failed=0`，含整段路线、末阶段停下、首阶段起跑、单阶段、末阶段出现在首阶段之前、未知路线、空游标和空名字。这不是产品安装、六目标或 `--all`。
+
+**阶段字节与交接（2026-10-29）：** 版本 3 的膨胀结果、CRC 和 `UNINETB1N` 判定，以及执行后的缓冲交接，收到 `cx/runtime/routestep.cx`（`rt_open`、`rt_swap`、`rt_strip`、`rt_after`）。产品驱动在 `UNISA_CX_ROUTESTEP` 下调用它们。拒绝文案仍是 `invalid compressed model`、`compressed model CRC`、`package requires binary networks`。分配、`loadbytes`、时钟和 `execute` 留在 `exec/c/run.c`。未定义该宏的独立 `run.c` 和库仍走原来的 C 分支。`sh ./unisacc.com tools/check-compiler-units.cx` 再连续两次实跑，stdout 相同，都是 `CHECK_COMPILER_UNITS failed=0`，含版本 3 接受、膨胀拒绝、CRC 拒绝、魔数拒绝、短缓冲拒绝、非 3 版本明文、缓存不调用膨胀、空缓冲拒绝、两次交接、只在成功时剥离、失败优先于停止。这不是产品安装、六目标或 `--all`。
+
+**阶段计时行（2026-10-29）：** `runroute_range` 的两行 `RR_TIME` 文本和纳秒差收到 `cx/runtime/routetime.cx`（`rr_ns`、`rr_wanted`、`rr_model`、`rr_infer`）。产品驱动在 `UNISA_CX_ROUTETIME` 下调用它们。环境变量是否存在由 `rr_wanted` 判断；`clock_gettime` 和 stderr 仍在 `exec/c/run.c`。行放不下时仍用原来的 `fprintf`。`sh ./unisacc.com tools/check-compiler-units.cx` 再连续两次实跑，stdout 相同，都是 `CHECK_COMPILER_UNITS failed=0`，含小差值、跨秒差值、倒退差值、空串也算打开、cache 行、inflate 行、空阶段名、负的 rc 和纳秒、零、短缓冲不改内容、空指针拒绝。这不是产品安装、六目标或 `--all`。`loadbytes` 和 `execute` 仍在 C。
 
 **当前节点（驱动/链接诊断）：** 已装79fb84e6/record4608b9ac，冻结207195a597/SID5675f557，内嵌PC7b806ec2。五切片及APE实构，固定两文件差异核验和两阶段开发安装完成；收据out/c43-driverdiag-install-01/installed.tsv，旧cb743c27保留。已装driver-diagnostics11/0、smoke16/0；候选archive-ar17/0、formats68/0。归档main两路线旧新均拒绝，显式main对象旧新均rc7，无本刀回归；支持缺口仍留。直接C未定义函数原断言仍4/1，不以迟绑定合同解释冒充通过。以下产品段均为历史身份。后续私有验证攒批、集中安装，不逐刀69批迁标；优先完成门产品缺口，cc并行核MISSING与BLOCKED草稿。完整发布和外国宿主资格未完成。
 
@@ -594,7 +600,7 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 
 **落尾当前身份与收据：** 共享cb743c27b736119a3c88b1146187c35a8dec955149590eb38b860520a62c1e55，记录9783c93d2bdc5a4cfdfe6f564871dbce168dea75cd94c178906f56ba700c2798；迁入收据out/c43-fallguard-install-01/receipt.tsv SHA5266380d11788f59e974b78c861d28155f5065b94ee2441aba895cc08c957d8a。候选证据out/c43-fallguard-candidate-{seven,malformed,formats,library,smoke}-01，已装smoke/seven为16/0与7/0。source-root冻结648fe13db9的unisacc.com仍b6f15，包7b806ec2和工具身份未替换；旧协议与仅PREPARED收据拒绝，独立目标迁入试验通过。不迁旧矩阵或外国平台资格。
 
-**csih 一次过 C->CX（现行，csr /goal）：** 树内 0 个 `.c`。`check.cx -- modules|loop|probes-tui|probes-libc|probes-net` 绿；`probes-e2e` 待结。不重打产品 `.com`。
+**csih 一次过 C->CX（现行，csr /goal）：** 树内 0 个 `.c`。`check.cx -- modules|loop|probes-tui|probes-libc|probes-net|probes-e2e` 绿。e2e 依赖 `out/csih-e2e-bin/csih`（`sh $UNISACC csih.cx -o …`）；冷 `-run csih.cx` 每次约 47s 且 `UNISACC_RUN_CACHE` lookup_hit=0，不能嵌进 60s。不重打产品 `.com`。
 
 **csih 仓外轻切片（2026-10-28，grk）：** 主人要求仓外试 cx；未改 `apps/csih`、未重打 `.com`、未占 cc 余 57 批／总 900s 重活窗。`out/c43-csih-cx-try-01`：`cols`+`home` 与 `clock` 在 `-run`／`gcc_cx`／`clang_cx` 均 rc0（RECEIPT.txt）。`home` 去掉三处 include（前奏已有）；`clock` 未 include `time.h`，Linux 函数内 `extern clock_gettime`、字面量 `1`＝CLOCK_MONOTONIC，未跑 macOS/Windows。整份 tui/agent 未动。仅仓外探针，不授产品迁移或资格。
 

@@ -6,10 +6,27 @@ ROOT=$(CDPATH= cd -- "$(dirname "$0")" && pwd) || exit 1
 cd "$ROOT" || exit 1
 R=$(cd "$ROOT/../.." && pwd) || exit 1
 TMP=$(mktemp -d) || exit 1
-trap '[ -z "$TMP" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$TMP"' EXIT
+trap '[ -z "$TMP" ] || sh "$R/tools/cxbin" "$R/tools/safedel.cx" --purge -- "$TMP"' EXIT
 rc=0
 ITERS=${ITERS:-200000}
 CFLAGS="-std=c99 -g -O1 -fsanitize=address,undefined -fno-sanitize-recover=undefined -w -I$ROOT"
+# Prefer native ELF so selftest/context-index stay under 60s (cold -run ~47s).
+if [ -z "$CSIH_BIN" ] && [ -x "$R/out/csih-e2e-bin/csih" ]; then
+    CSIH_BIN=$R/out/csih-e2e-bin/csih
+fi
+[ -n "$CSIH_BIN" ] && export CSIH_BIN
+UNISACC=${UNISACC:-$R/unisacc.com}
+export UNISACC
+# Rebuild ELF when missing (prepare); nested e2e/check expect it.
+if [ ! -x "$CSIH_BIN" ]; then
+    mkdir -p "$R/out/csih-e2e-bin"
+    echo "check.sh: building CSIH_BIN=$R/out/csih-e2e-bin/csih"
+    if ! sh "$UNISACC" "$ROOT/csih.cx" -o "$R/out/csih-e2e-bin/csih"; then
+        echo "FAIL 0: cannot build CSIH_BIN"; rc=1
+    else
+        CSIH_BIN=$R/out/csih-e2e-bin/csih; export CSIH_BIN
+    fi
+fi
 
 # 1. product roots must not be leftover .c
 if find . -maxdepth 1 -name '*.c' | grep -q .; then
@@ -28,13 +45,22 @@ fi
 # 3. fuzz under ASan+UBSan. cc only takes .c, so copy .cx providers to $TMP as .c.
 cp json.cx "$TMP/json.c" && cp csih_message.cx "$TMP/csih_message.c" && cp csih_message.h "$TMP/" \
   && cp fuzz/fuzz_json.cx "$TMP/fuzz_json.c" && cp fuzz/fuzz_msg.cx "$TMP/fuzz_msg.c" || rc=1
-if cc $CFLAGS -include json.h -I"$ROOT" -o "$TMP/fuzz_json" "$TMP/fuzz_json.c" "$TMP/json.c" \
+# Fuzz wants ASan/UBSan for memory bugs; leak exit is noise on intentional short runs.
+# Library TUs use CX prelude (cx.h) for libc types; drivers -include the .h API only —
+# json.cx/csih_message.cx already define those types for CXIF (cannot also -include .h).
+export ASAN_OPTIONS="${ASAN_OPTIONS:+$ASAN_OPTIONS:}detect_leaks=0"
+CXINC="-include $R/include/cx.h"
+if cc $CFLAGS $CXINC -c -o "$TMP/json.o" "$TMP/json.c" \
+   && cc $CFLAGS -include json.h -c -o "$TMP/fuzz_json.o" "$TMP/fuzz_json.c" \
+   && cc $CFLAGS -o "$TMP/fuzz_json" "$TMP/fuzz_json.o" "$TMP/json.o" \
    && "$TMP/fuzz_json" "$ITERS" > "$TMP/fuzz_json.out" 2>&1; then
     echo "ok   3a: json fuzz $(cat "$TMP/fuzz_json.out")"
 else
     echo "FAIL 3a: json fuzz"; cat "$TMP/fuzz_json.out" 2>/dev/null; rc=1
 fi
-if cc $CFLAGS -include json.h -include csih_message.h -o "$TMP/fuzz_msg" "$TMP/fuzz_msg.c" "$TMP/csih_message.c" "$TMP/json.c" \
+if cc $CFLAGS $CXINC -include json.h -c -o "$TMP/csih_message.o" "$TMP/csih_message.c" \
+   && cc $CFLAGS -include json.h -include csih_message.h -c -o "$TMP/fuzz_msg.o" "$TMP/fuzz_msg.c" \
+   && cc $CFLAGS -o "$TMP/fuzz_msg" "$TMP/fuzz_msg.o" "$TMP/csih_message.o" "$TMP/json.o" \
    && "$TMP/fuzz_msg" "$ITERS" > "$TMP/fuzz_msg.out" 2>&1 \
    && grep -q 'decoded_ok=[1-9]' "$TMP/fuzz_msg.out"; then
     echo "ok   3b: msg fuzz $(cat "$TMP/fuzz_msg.out")"

@@ -282,10 +282,37 @@ int main(int argc, char **argv) {
     if (want_probe(argc, argv, "probes-e2e") || want_phase(argc, argv, "probes")) {
     printf("\nTUI end to end (probes/tui_e2e.cx):\n");
     {
+        /* Cold `unisacc -run csih.cx` is ~47s every launch (run-cache miss on CXIF
+         * temps). E2E needs a native ELF: sh $UNISACC csih.cx -o ../../out/csih-e2e-bin/csih */
+        char cwd[512], bin[640];
+        const char *eb = getenv("CSIH_BIN");
         char *a[] = {"-run", "probes/tui_e2e.cx"};
+        if (!(eb && eb[0] && access(eb, 1) == 0)) {
+            if (!getcwd(cwd, sizeof cwd)) { no("getcwd for CSIH_BIN"); goto e2e_done; }
+            snprintf(bin, sizeof bin, "%s/../../out/csih-e2e-bin/csih", cwd);
+            if (access(bin, 1) != 0) {
+                char *ba[] = {"csih.cx", "-o", bin};
+                mkdir("../../out", 0755);
+                mkdir("../../out/csih-e2e-bin", 0755);
+                printf("  (building CSIH_BIN %s)\n", bin);
+                if (u_spawn(U, ba, 3, NULL, out, (int)sizeof out, &rc) != 0 || rc != 0) {
+                    snprintf(msg, sizeof msg,
+                        "CSIH_BIN missing/build rc=%d; run: sh \"$UNISACC\" csih.cx -o ../../out/csih-e2e-bin/csih",
+                        rc);
+                    no(msg);
+                    goto e2e_done;
+                }
+            }
+            setenv("CSIH_BIN", bin, 1);
+        }
+        setenv("CSIH_E2E_FIRST_FRAME_S", "8", 1);
         run_args(a, 2, out, (int)sizeof out, &rc);
         if (rc == 0) ok("typed text reaches the transcript and a verdict is rendered");
-        else no("tui e2e failed");
+        else {
+            snprintf(msg, sizeof msg, "tui e2e failed rc=%d out=%s", rc, out[0] ? out : "(empty)");
+            no(msg);
+        }
+    e2e_done: ;
     }
     }
 

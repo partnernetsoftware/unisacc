@@ -6,17 +6,19 @@ SRCS = sys.argv[3]
 # concurrent runs (check.sh runs this probe, and a person may run it too) write
 # the same file, so one would delete the other's evidence mid-assertion.
 TR  = os.path.join(sys.argv[4], "tui-e2e.jsonl")
-# Deletions go through the one deletion guard's argv CLI (include/unisa_safedel.h, tests/safedel.cx).
-SAFEDEL = ["sh", os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../tests/cxbin"),
-           os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../tests/safedel.cx"), "--purge", "--"]
+# Deletions go through the one deletion guard's argv CLI (include/unisa_safedel.h).
+_REPO = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../.."))
+SAFEDEL = ["sh", os.path.join(_REPO, "tools/cxbin"),
+           os.path.join(_REPO, "tools/safedel.cx"), "--purge", "--"]
 fail = 0
 
-# How long to wait for the FIRST FRAME before typing. unisacc compiles the
-# sources in-process — measured 24s for this source list on an idle machine, and
-# more under load — so the fixed 0.4s sleep this probe used to have raced the
-# compile: the keystrokes went into a pty whose program had not started, and the
-# probe then reported an empty screen as if the TUI had lost the input.
-FIRST_FRAME_S = 120
+# Cold `unisacc -run csih.cx` recompiles the whole module graph every time
+# (~47s here; UNISACC_RUN_CACHE lookup_hit=0). Prefer CSIH_BIN=native ELF from
+# `unisacc.com csih.cx -o …` so first frame is milliseconds and the probe fits
+# the 60s outer bound. Without CSIH_BIN, keep a long first-frame wait.
+_BIN = os.environ.get("CSIH_BIN", "").strip()
+FIRST_FRAME_S = int(os.environ.get("CSIH_E2E_FIRST_FRAME_S",
+                                   "8" if _BIN and os.path.isfile(_BIN) else "45"))
 
 def run(txt, per_char):
     lines = txt if isinstance(txt, (list, tuple)) else [txt]
@@ -24,9 +26,12 @@ def run(txt, per_char):
         f.write('{"role":"model","p":0.830000}\n')
     mfd, sfd = pty.openpty()
     fcntl.ioctl(sfd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 70, 0, 0))
-    # csih.sh is unisacc.com csih.c plus the file table.
-    csih = os.path.join(ROOT, "csih.sh")
-    cmd = "exec %s run %s" % (shlex.quote(csih), shlex.quote(TR))
+    # Prefer a prebuilt native ELF (CSIH_BIN); else csih.sh -> -run (cold ~47s).
+    if _BIN and os.path.isfile(_BIN) and os.access(_BIN, os.X_OK):
+        cmd = "exec %s run %s" % (shlex.quote(_BIN), shlex.quote(TR))
+    else:
+        csih = os.path.join(ROOT, "csih.sh")
+        cmd = "exec %s run %s" % (shlex.quote(csih), shlex.quote(TR))
     p = subprocess.Popen(["/bin/sh", "-c", cmd], stdout=sfd, stderr=sfd, stdin=sfd, close_fds=True)
     os.close(sfd)
     # Wait for the frame, do not sleep a guess at it. Reading the first bytes is
