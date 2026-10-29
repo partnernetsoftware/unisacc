@@ -1024,6 +1024,58 @@ static int tui_resume(const char *path, int pick, char *note, size_t cap) {
     return 0;
 }
 
+/* Tab after "/pre": one match completes it (plus a space), several complete
+ * the shared prefix and list the candidates. Built-ins and custom commands
+ * from ./.csih/commands and ~/.csih/commands. */
+static void tui_complete_command(tui_state *st) {
+    static const char *builtin[] = {
+        "/help", "/status", "/clear", "/goal", "/loop", "/reload", "/reload-code", "/export-state",
+        "/exit", "/quit", "/model", "/cwd", "/cost", "/perm", "/allow", "/new", "/resume", "/undo",
+        "/diff", "/view", "/copy", "/retry", "/context", NULL
+    };
+    static char names[64][64];
+    char dirs[2][600], listing[8192], line[240];
+    const char *home = getenv("HOME");
+    int n = 0, i, d, plen = (int)strlen(st->input), common = -1;
+    for (i = 0; builtin[i] && n < 64; i++)
+        if (!strncmp(builtin[i], st->input, (size_t)plen)) snprintf(names[n++], sizeof names[0], "%s", builtin[i]);
+    snprintf(dirs[0], sizeof dirs[0], ".csih/commands");
+    snprintf(dirs[1], sizeof dirs[1], "%s/.csih/commands", home ? home : "");
+    for (d = 0; d < 2; d++) {
+        const char *p;
+        if (!file_list(dirs[d], listing, sizeof listing).ok) continue;
+        for (p = listing; *p && n < 64; ) {
+            const char *nl = strchr(p, '\n');
+            size_t len = nl ? (size_t)(nl - p) : strlen(p);
+            if (len > 3 && len < 60 && !strncmp(p + len - 3, ".md", 3)) {
+                char cand[64];
+                int dup = 0;
+                snprintf(cand, sizeof cand, "/%.*s", (int)(len - 3), p);
+                for (i = 0; i < n; i++) if (!strcmp(names[i], cand)) dup = 1;
+                if (!dup && !strncmp(cand, st->input, (size_t)plen)) snprintf(names[n++], sizeof names[0], "%s", cand);
+            }
+            if (!nl) break;
+            p = nl + 1;
+        }
+    }
+    if (!n) { st->notice = "没有匹配的命令"; return; }
+    for (i = 0; i < n; i++) {
+        int k = 0;
+        if (common < 0) { common = (int)strlen(names[0]); continue; }
+        while (k < common && names[i][k] == names[0][k]) k++;
+        common = k;
+    }
+    if (n == 1) snprintf(st->input, TUI_INPUT_MAX, "%s ", names[0]);
+    else if (common > plen) snprintf(st->input, TUI_INPUT_MAX, "%.*s", common, names[0]);
+    st->ninput = (int)strlen(st->input);
+    st->back = 0;
+    if (n > 1) {
+        size_t o = (size_t)snprintf(line, sizeof line, "可选：");
+        for (i = 0; i < n && o + 20 < sizeof line; i++) o += (size_t)snprintf(line + o, sizeof line - o, "%s ", names[i]);
+        tui_log_plain(st, line);
+    }
+}
+
 /* Single-quote s for /bin/sh. */
 static void tui_sh_quote(char *out, size_t cap, const char *s) {
     size_t n = 0;
@@ -1641,6 +1693,10 @@ static void tui_apply_key(tui_state *st, int kind, char ch) {
         st->ticks++;
         return;
     case TERM_KEY_CHAR:
+        if (ch == '\t' && st->input[0] == '/' && !strchr(st->input, ' ') && !st->pasting) {
+            tui_complete_command(st);
+            return;
+        }
         if (ch == '\t' && st->ninput == 0 && !st->pasting) {
             /* Tab on an empty line: open or close the newest tool row. */
             int i;
@@ -4621,6 +4677,25 @@ int tui_entry(int argc, char **argv) {
             ok = ok && !strcmp(th.input, "zzz") && th.notice && strstr(th.notice, "没有匹配");
             if (!ok) { printf("FAIL ctrl-r [%s]\n", th.input); failures++; }
             else printf("  ok   ctrl-r searches history newest first\n");
+            /* Tab completes slash commands */
+            tui_apply_key(&th, TERM_KEY_CHAR, 0x15);
+            for (s = "/res"; *s; s++) tui_apply_key(&th, TERM_KEY_CHAR, *s);
+            tui_apply_key(&th, TERM_KEY_CHAR, '\t');
+            ok = !strcmp(th.input, "/resume ");
+            tui_apply_key(&th, TERM_KEY_CHAR, 0x15);
+            for (s = "/re"; *s; s++) tui_apply_key(&th, TERM_KEY_CHAR, *s);
+            tui_apply_key(&th, TERM_KEY_CHAR, '\t');
+            ok = ok && !strcmp(th.input, "/re") && strstr(th.log[th.nlog - 1], "/retry") && strstr(th.log[th.nlog - 1], "/reload");
+            tui_apply_key(&th, TERM_KEY_CHAR, 0x15);
+            for (s = "/rel"; *s; s++) tui_apply_key(&th, TERM_KEY_CHAR, *s);
+            tui_apply_key(&th, TERM_KEY_CHAR, '\t');
+            ok = ok && !strcmp(th.input, "/reload");          /* shared prefix of /reload, /reload-code */
+            tui_apply_key(&th, TERM_KEY_CHAR, 0x15);
+            for (s = "/zzz"; *s; s++) tui_apply_key(&th, TERM_KEY_CHAR, *s);
+            tui_apply_key(&th, TERM_KEY_CHAR, '\t');
+            ok = ok && !strcmp(th.input, "/zzz") && th.notice && strstr(th.notice, "没有匹配");
+            if (!ok) { printf("FAIL tab complete [%s]\n", th.input); failures++; }
+            else printf("  ok   tab completes slash commands\n");
         }
         {
             static tui_state hl;
