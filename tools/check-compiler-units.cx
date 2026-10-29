@@ -1,6 +1,8 @@
 #pragma unisa use compiler.tapelink
 #pragma unisa use compiler.asmtext
 #pragma unisa use compiler.fwdstub
+#pragma unisa use compiler.cxmod
+#pragma unisa use compiler.fwdmerge
 /* Upper modules only. Emission and failure stay injected; this file does not
    link a product compiler and does not claim a host or six-target pass. */
 static int failed, die_calls;
@@ -11,6 +13,33 @@ static void ck(int ok, const char *name) {
 static int injected_emit(int c) { (void)c; return 0; }
 static int injected_die(char *m) { (void)m; die_calls++; return 1; }
 static int asm_emit(char *p, long n) { (void)p; (void)n; return 0; }
+static int ck_rd(char *path, char *buf, int cap) {
+    FILE *f; int n; int bad;
+    f = fopen(path, "rb"); if (!f) return -1;
+    n = (int)fread(buf, 1, (size_t)cap, f); bad = ferror(f); fclose(f);
+    if (bad) return -3;
+    return n >= cap ? -2 : n;
+}
+static int ck_wr(char *path, char *buf, int n) {
+    FILE *f; int bad;
+    f = fopen(path, "wb"); if (!f) return 1;
+    bad = (int)fwrite(buf, 1, (size_t)n, f) != n; if (fclose(f)) bad = 1;
+    return bad;
+}
+static int ck_say(int fd, char *s, int n) {
+    fwrite(s, 1, (size_t)n, fd == 1 ? stdout : stderr); return 0;
+}
+static void ck_sha(char *p, int n, char *hex) {
+    int i; (void)p; (void)n;
+    for (i = 0; i < 64; i++) hex[i] = '0';
+    hex[64] = 0;
+}
+static int ck_write(const char *path, const char *text) {
+    return ck_wr((char *)path, (char *)text, (int)strlen(text));
+}
+static void *ck_alloc(void *p, long long n) { return realloc(p, n ? (size_t)n : 1); }
+static void ck_release(void *p) { free(p); }
+static void ck_fail(char *m) { (void)m; die_calls++; }
 int main(void) {
     char shortb[8], arm[] = "# unisacc -S lnx/arm64\n", x64[] = "# unisacc -S lnx/x86_64\n";
     long len;
@@ -32,6 +61,40 @@ int main(void) {
         kinds[0] = 0; widths[0] = 4; uns[0] = 0;
         ck(fwd_emit("foo", 3, 1, kinds, widths, uns, 0, 0, 4, 0) == 1, "emit-int");
         ck(fwd_count() > 0 && fwd_text()[0] == '#', "emit-prologue");
+    }
+    {
+        char good[] = "/tmp/uacxmini.cx";
+        char bad[] = "/tmp/uacxbad.cx";
+        char user[] = "/tmp/uacxuser.cx";
+        char *paths[1];
+        const char *mini = "#pragma unisa module uacxmini\nint uacxmini_ok(void) { return 1; }\n";
+        const char *obj = "#pragma unisa module uacxbad\nint uacxbad_obj;\n";
+        const char *uses = "#pragma unisa use uacxbad\nint uacxuser_ok(void) { return 1; }\n";
+        unsigned char big[1025];
+        Buf tape; Buf empty; Buf out;
+        int i; int before;
+        ck(cxm_bind(ck_rd, ck_wr, ck_say, ck_sha, "/tmp") == 0, "loader-bind");
+        ck(ck_write(good, mini) == 0, "write-one-module");
+        paths[0] = good;
+        ck(cxm_plan(paths, 1) == 0 && cxm_count() == 1, "unit-count-1");
+        ck(cxm_unit_path(0) && strcmp(cxm_unit_path(0), good) == 0, "unit-path");
+        printf("PASS unit-path-bytes %s\n", cxm_unit_path(0));
+        ck(ck_write(bad, obj) == 0 && ck_write(user, uses) == 0, "write-public-object");
+        paths[0] = user;
+        ck(cxm_plan(paths, 1) != 0, "public-object-refused");
+        before = die_calls;
+        ck(fwm_bind(ck_alloc, ck_release, ck_fail) == 0, "merge-bind");
+        fwm_reset();
+        ck(fwm_export((const unsigned char *)"hi", 2) == 0 && fwm_seen((const unsigned char *)"hi", 2) == 1, "export-visible");
+        fwm_reset();
+        ck(fwm_seen((const unsigned char *)"hi", 2) == 0, "reset-hides-export");
+        ck(fwm_export((const unsigned char *)"hi", 2) == 0, "export-again");
+        tape.b = (unsigned char *)"no-newline"; tape.at = 0; tape.n = 10; tape.cap = 10;
+        empty.b = (unsigned char *)"\n"; empty.at = 0; empty.n = 1; empty.cap = 1;
+        out.b = 0; out.at = 0; out.n = 0; out.cap = 0;
+        ck(fwm_merge(&empty, &empty, &tape, 1, &out) == 0 && die_calls == before, "truncated-tape-refused");
+        for (i = 0; i < 1025; i++) big[i] = 'a';
+        ck(fwm_export(big, 1025) == 1 && die_calls == before, "over-limit-export-refused");
     }
     printf("CHECK_COMPILER_UNITS failed=%d\n", failed);
     return failed ? 1 : 0;

@@ -1,7 +1,7 @@
 /* Compile only the generated forwarding source through E2/E1/E3, then attach
    its tape to the first E3 result. Unsupported tape shapes use the full replay. */
 static int fwd_incremental(const char *target,int level,const Buf *base,int unit,Buf *merged) {
-    if (getenv("UNISA_FWD_REPLAY") || fwm_overflow) return 0;
+    if (getenv("UNISA_FWD_REPLAY") || fwm_overflowed()) return 0;
     static const char dummy[]="\nint main(void){return 0;}\n";
     if (fwd_count()<=0 || fwd_count()>131000) return 0;
     Buf unit_tape={0};

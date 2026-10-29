@@ -156,10 +156,28 @@ void fwd_set_maxargs(int);
 void fwd_set_ptype(int, char *);
 char **fwd_lib_slot(void);
 int *fwd_lib_count(void);
-#include "fwdmerge.c"
-/* CX2a: .cx modules (`#pragma unisa use NAME`) and their derived interfaces -- src/cxmod.c, the same code as the
-   reference driver's; its file access (cxm_rd, cxm_wr, cxm_say) follows fwdpaths.h, after <unistd.h> */
-#include "../../src/cxmod.c"
+/* Forward merge and the module loader are upper CX units (cx/compiler/fwdmerge.cx,
+   cx/compiler/cxmod.cx). src/cxmod.c stays the reference. */
+void fwm_reset(void);
+int fwm_export(const unsigned char *, int);
+int fwm_overflowed(void);
+int fwm_merge(const Buf *, const Buf *, const Buf *, int, Buf *);
+int fwm_bind(void *(*alloc)(void *, long long), void (*release)(void *), void (*fail)(char *));
+int cxm_bind(int (*rd)(char *, char *, int), int (*wr)(char *, char *, int), int (*say)(int, char *, int), void (*sha)(char *, int, char *), char *tmpdir);
+int cxm_find(char *);
+int cxm_flag(char *);
+int cxm_wants_interface(void);
+int cxm_interface(char *);
+void cxm_set_on(int);
+int cxm_wants_plan(void);
+int cxm_iscxpath(char *);
+int cxm_plan(char **, int);
+int cxm_count(void);
+char *cxm_unit_path(int);
+int cxm_planprint(char **, int);
+int cxm_on_now(void);
+int cxm_include_count(int);
+char *cxm_incpath(int, int);
 /* The callback graph carries a C function-pointer type.  Scalar pointees
    are enough for glob's errfunc and similar host APIs; other graphs retain
    the named refusal until their declaration can be printed exactly. */
@@ -264,6 +282,8 @@ static int par_take_paths(FILE *f, int absent) {
     return 1;
 }
 #endif
+#include "../../include/unisa_sha256.h"
+#define CXM_PATHW 512
 int cxm_rd(char *path, char *buf, int cap) {
 #ifndef _WIN32
     /* Open without waiting for a FIFO writer, then validate that same handle.
@@ -297,6 +317,10 @@ int cxm_wr(char *path, char *buf, int n) {       /* beside it, then renamed: a r
 #endif
 }
 int cxm_say(int fd, char *s, int n) { fwrite(s,1,(size_t)n,fd==1 ? stdout : stderr); return 0; }
+static void cxm_sha_host(char *p, int n, char *hex) { unisa_sha256_hex(p, (size_t)n, hex); }
+static void *fwm_host_alloc(void *p, long long n) { return xrealloc(p, n ? (size_t)n : 1); }
+static void fwm_host_release(void *p) { free(p); }
+static void fwm_host_fail(char *m) { die(m); }
 static int fwd_sidecar(Buf *in, Buf *tape) {     /* 0: no records (tape set); 1: stubs written; -1: error */
     size_t at=0,n=(size_t)in->n; const unsigned char *b=in->b; uint64_t tl=0,cnt=0;
     if (n<7 || memcmp(b,"USLFW1\n",7)) { fputs("unisacc: error: forwarding side-car missing\n",stderr); return -1; }
@@ -502,7 +526,7 @@ static void argraw(CliBlock *b,const unsigned char *p,long n) { char why[96]; in
 static CliBlock *cxm_lists;
 static void unit_includes(ResourceInput *r, const char *path, const CliBlock *plain, const CliBlock *withcx) {
     int u=cxm_lists ? cxm_find((char *)path) : -1;
-    const CliBlock *unit=(u>=0 && cxm_ninc[u]) ? &cxm_lists[u] : 0;
+    const CliBlock *unit=(u>=0 && cxm_include_count(u)) ? &cxm_lists[u] : 0;
     const unsigned char *out; long n; char why[96];
     int rc=cxa_includes(path,plain->b,plain->n,withcx->b,withcx->n,unit?unit->b:0,unit?unit->n:-1,&out,&n,why,sizeof why);
     args_check(rc,why); r->data=out; r->len=(int)n;
@@ -587,6 +611,11 @@ static int forward_exec(const Buf *image,char **argv) {
 
 int main(int argc, char **argv) {
     RF_TRACE_STARTED = 0;
+    { char *td = getenv("TMPDIR");
+      if (!td || !td[0]) td = getenv("TEMP");
+      if (!td || !td[0]) td = "/tmp";
+      if (cxm_bind(cxm_rd, cxm_wr, cxm_say, cxm_sha_host, td)) return 1;
+      if (fwm_bind(fwm_host_alloc, fwm_host_release, fwm_host_fail)) return 1; }
     /* S step 1 (opt-in, non-stable CLI): --strict-resource-flow --resource-ledger DIR are taken out of argv first, so the
        option loops below never see the ledger directory as a source. */
     {   int w = 1;
@@ -666,25 +695,25 @@ int main(int argc, char **argv) {
     /* Resolve the whole graph for interfaces; only explicit sources belong to
        a separate -funit object. Other routes still compile dependencies. */
     int explicit_sources=nsources;
-    if (cxm_wantif) { if(rf_trace_finish())return 2;return cxm_interface((char *)src); }
-    cxm_on=0;
+    if (cxm_wants_interface()) { if(rf_trace_finish())return 2;return cxm_interface((char *)src); }
+    cxm_set_on(0);
     if (!object_path(src) && !tapebin_path(src) && !tape_path(src)) {
-        int anycx=cxm_wantplan;
+        int anycx=cxm_wants_plan();
         for (int j=0;j<nsources;j++) if (cxm_iscxpath((char *)sources[j])) anycx=1;
         if (anycx) {
             if (cxm_plan((char **)sources,nsources)) return 1;
-            if (cxm_n>nsources) sources=xrealloc(sources,cxm_n*sizeof(char *));
-            for (int j=0;j<cxm_n;j++) sources[j]=cxm_arg[j];
-            nsources=cxm_n;
+            if (cxm_count()>nsources) sources=xrealloc(sources,cxm_count()*sizeof(char *));
+            for (int j=0;j<cxm_count();j++) sources[j]=cxm_unit_path(j);
+            nsources=cxm_count();
         }
     }
-    if (cxm_wantplan) {
+    if (cxm_wants_plan()) {
         if(rf_trace_finish())return 2;
         const char **opt=xrealloc(0,(forced.n+1)*sizeof(char *)); int nopt=0;
         for (int k=0;k<forced.n;k++) if (!k || !forced.b[k-1]) opt[nopt++]=(const char *)forced.b+k;
         cxm_planprint((char **)opt,nopt); free(opt); return 0;
     }
-    if (funit && sawc && target && cxm_on) nsources=explicit_sources;
+    if (funit && sawc && target && cxm_on_now()) nsources=explicit_sources;
     /* -c with -b: an object (R17-1).  The product writes objects through its
        own route (\0cli/object, \0cli/funit; exec/enc, in progress) -- until
        that route exists the driver says so instead of writing a tape. */
@@ -780,11 +809,11 @@ int main(int argc, char **argv) {
     CliBlock forced_cx={0}; argbytes(&forced_cx,"cx.h"); argraw(&forced_cx,forced.b,forced.n);
     Buf forced_view={0}; forced_view.b=forced.b; forced_view.n=(int)forced.n;
     fwd_plain_list=&forced_view;                  /* borrowed byte view for the forwarding unit */
-    if (cxm_on && cxm_n) {                       /* a unit that uses modules: cx.h, -include, then the interfaces */
-        cxm_lists=xrealloc(0,cxm_n*sizeof(CliBlock)); memset(cxm_lists,0,cxm_n*sizeof(CliBlock));
-        for (int u=0;u<cxm_n;u++) if (cxm_ninc[u]) {
+    if (cxm_on_now() && cxm_count()) {                       /* a unit that uses modules: cx.h, -include, then the interfaces */
+        cxm_lists=xrealloc(0,cxm_count()*sizeof(CliBlock)); memset(cxm_lists,0,cxm_count()*sizeof(CliBlock));
+        for (int u=0;u<cxm_count();u++) if (cxm_include_count(u)) {
             argraw(&cxm_lists[u],forced_cx.b,forced_cx.n);
-            for (int k=0;k<cxm_ninc[u];k++) argbytes(&cxm_lists[u],cxm_incpath(u,k));
+            for (int k=0;k<cxm_include_count(u);k++) argbytes(&cxm_lists[u],cxm_incpath(u,k));
         }
     }
 #define UNIT_INCLUDES(path) unit_includes(&cli[2],(path),&forced,&forced_cx)
@@ -1363,7 +1392,7 @@ rr_run_replay:   /* multi-TU hit: the stub pass's post-host_compile tape, then i
     }
     unpackage(); RI=0; NRI=0; ATTR_SLOT=-1;
     free(defs.b); free(undefs.b); free(forced.b); free(forced_cx.b); free(incdir.b);
-    if (cxm_lists) { for (int u=0;u<cxm_n;u++) free(cxm_lists[u].b); free(cxm_lists); cxm_lists=0; }
+    if (cxm_lists) { for (int u=0;u<cxm_count();u++) free(cxm_lists[u].b); free(cxm_lists); cxm_lists=0; }
     free(quotedir.b); free(srcres.b); free(errorlimit.b);
     free(werror.b); free(werror.at);
     if (rc) return rc;
