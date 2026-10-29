@@ -41,6 +41,17 @@ fi
 if [ -n "$CSIH_BIN" ] && [ -x "$CSIH_BIN" ]; then
     # agent/run work in the caller's directory, not in apps/csih.
     case "$1" in agent|run) cd "$CALLER" || exit 1 ;; esac
+    # unisacc's signal() never reaches the kernel, so csih cannot restore the
+    # tty itself when killed. Run it as a child and restore here on a signal exit.
+    if [ -t 0 ] && TTY_SAVED=$(stty -g 2>/dev/null); then
+        "$CSIH_BIN" "$@"
+        rc=$?
+        if [ $rc -gt 128 ]; then
+            stty "$TTY_SAVED" 2>/dev/null
+            printf '\033[?1000l\033[?1006l\033[?2004l\033[?25h\033[0m\ncsih: 被信号 %d 结束，已恢复终端\n' $((rc - 128)) >&2
+        fi
+        exit $rc
+    fi
     exec "$CSIH_BIN" "$@"
 fi
 if [ -z "$CSIH_COLD" ]; then
