@@ -49,7 +49,8 @@ int tp_number(int at,int n,us_i64 *out){us_u64 value;int neg,leading_zero;
  if(value>(neg?9223372036854775808UL:9223372036854775807UL))return 0;
  *out=neg?(us_i64)(0UL-value):(us_i64)value;return 1;}
 int tp_getreg(int at,int n){int i;for(i=0;i<tp_NREGS;i++)if(tp_same(at,n,tp_regnames[i]))return i;return -1;}
-int tp_getop(int at,int n){int i;for(i=0;i<tp_NOPS;i++)if(tp_same(at,n,tp_opnames[i]))return i;return -1;}
+int pg_span(const char *, int);
+int tp_getop(int at,int n){int op,i;if(!tp_input)return -1;op=pg_span(tp_input+at,n);if(op!=4)return op;for(i=0;i<tp_NOPS;i++)if(tp_same(at,n,tp_opnames[i]))return i;return -1;}
 int tp_token(int at,int n){if(tp_nt>=16){tp_bad=1;return 0;}tp_tstart[tp_nt]=at;tp_tlen[tp_nt]=n;tp_nt++;return 1;}
 int tp_tokenize(int p,int end){int s,i,cut;tp_nt=0;while(p<end){while(p<end&&(tp_space(tp_input[p])||tp_input[p]==','||tp_input[p]=='['||tp_input[p]==']'))p++;
  if(p==end)break;s=p;while(p<end&&!tp_space(tp_input[p])&&tp_input[p]!=','&&tp_input[p]!='['&&tp_input[p]!=']')p++;
