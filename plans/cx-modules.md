@@ -4,6 +4,23 @@
 
 > 提出：2026-10-23（主人重申，强制要求，逐步实现）· 执行：cc · 依据：`docs/cx-spec-draft.md` v0.3、9df1417c（`.cx` 内置 prelude 已落地）
 
+## 产品面（2026-10-30）
+
+对照已装产品的入口路径。三档：已通、骨架、未做。没实跑的不写已通。临时入口是 `/tmp/grk-cx-line/entry`，O0，1126911 字节，sha256 `8b2e87a31b491af41f86031e202f5535fe6cae761d5997503218405c9890c5ef`。已装产品 3035300 字节。实测记在下面第 139 节。
+
+- **ar：骨架。** 用法、坏操作、缺文件、空归档、两成员 r/q、列表、抽出，退出码和归档字节与产品相同。写出权限 0755，产品 0644。大归档、替换成员、符号表没跑。
+- **as：骨架。** 用法、坏选项、坏目标、头和 `-b` 冲突，退出码和 stderr 相同。一行 `# unisacc -S lnx/x86_64` 两边都是 728 字节对象，权限都是 0644。加上 `  ret` 两边都是 744 字节。缺文件两边退出 1，产品印打不开，入口印 `as: cannot read`。Mach-O、COFF、大汇编没跑。
+- **nm：骨架。** 用法和坏文件与产品相同。对那份 728 字节对象，两边 stdout 都是空的。
+- **objdump：骨架。** 用法、少 `-d`、坏文件与产品相同。`objdump -d` 那份对象，两边 stdout 都是 95 字节。
+- **-c 对象：骨架。** 没有 `main` 时两边都拒绝，stderr 相同。有 `main` 时产品写出 2216 字节对象，入口停在 `NOT_IMPLEMENTED object`，没有对象文件。
+- **.tape / .tapebin 输入：未做。** 入口把这两种输入写成 0，不读。tapegate 里的容器头不在这条入口上，不算这一面。
+- **-cx-plan / -cx-interface：未做。** 入口把这两个旗当成还没迁的选项。产品会打出计划，或按模块接口拒绝。
+- **-dump-tokens：骨架。** 旗认到了。产品打出 token。入口停在 `NOT_IMPLEMENTED tokens`。
+- **--emit-host-symbols：骨架。** 和 `-c -b` 一起用时，两边都拒绝，stderr 相同。没有一格写出符号文件。
+- **-O1 / -O2：骨架。** `-O1 -E` 对 `int x;` 两边 stdout 相同。没有对拍优化后的对象。整只入口按 `-O2` 冷构造仍超过 55 秒。
+- **-D / -U / -I / -include：未做。** `-DFOO=1 -E` 产品打出源文，入口印 `bad argument`。不带这些旗的 `-E` 两边相同。
+- **库接口：未做。** 活入口没有单独的库路径。
+
 ## 0. 一句话
 
 `.cx` 是 POSIX C99 的**模块**：源码里不写 `#include`，所需 API 由 unisacc 按后缀内置提供（prelude，带版次）；模块间引用由 unisacc 解析（类 Rust `mod`/`use`），
@@ -1645,6 +1662,33 @@ flowchart TD
   d["dv_ar"] --> a["cxr_append 与 cxr_member"]
   d --> w["hs_write_out 权限 0755"]
   p["已装产品 fopen"] --> m["权限 0644"]
+```
+
+## 139. 2026-10-30 产品面窄对拍（as、nm、objdump、-c、几个旗）
+
+没有改入口。用的就是上一节那只 1126911 字节的临时入口，对已装产品。环境去掉 `UNISA_CONTAINER`。工作目录在 `/tmp`。
+
+`as` 的用法、`as -z`、`as -b nope`、头是 `lnx/x86_64` 再写 `-b lnx/arm64`，退出码和 stderr 相同。一行 `# unisacc -S lnx/x86_64` 两边都写出 728 字节对象，退出 0，权限都是 0644，`file` 都认成 x86-64 ELF。再加上一行 `  ret`，两边都是 744 字节。缺文件两边退出 1：产品是 `unisacc: error: cannot open …/nope.s: ENOENT`，入口是 `as: cannot read …/nope.s`。
+
+`nm` 少了文件、`objdump` 少了文件或少了 `-d`，两边退出 2，stderr 相同。拿一份不是对象的文件给 `nm` 和 `objdump -d`，两边退出 1，stderr 相同。对那份 728 字节对象，`nm` 两边 stdout 都是 0；`objdump -d` 两边 stdout 都是 95 字节。入口自己编出的那份同样如此。
+
+`int x;` 走 `-c -b lnx/x86_64` 或 `-S -b lnx/x86_64`，两边退出 1，stderr 都是 63 字节，说没有 `main`。`int main(void) { return 0; }` 走 `-c -b lnx/x86_64 -o`，产品退出 0，写出 2216 字节对象，权限 0755。入口退出 2，stderr 是 `route=lnx/x86_64/object/O0` 和 `NOT_IMPLEMENTED object`，没有对象文件。
+
+`-dump-tokens` 对 `int x;`：产品退出 0，stdout 25 字节。入口退出 2，印 `route=tokens` 和 `NOT_IMPLEMENTED tokens`。
+
+`-cx-plan` 对一份 `int x;` 的 `.cx`：产品退出 0，stdout 12 字节。入口退出 1，印 `option not migrated`。`-cx-interface` 对同一份：产品退出 1，说这个模块导出了对象；入口仍是 `option not migrated`。
+
+`--emit-host-symbols` 配 `-c -b`：两边退出 1，stderr 都是 73 字节，`diagnostic option mode/target not supported`。配 `-S -b` 时两边先报没有 `main`，都没有写出符号文件。
+
+`-E` 和 `-O1 -E` 对 `int x;`：两边退出 0，stdout 都是 7 字节。`-DFOO=1 -E`：产品退出 0，stdout 仍是源文；入口退出 1，印 `bad argument`。
+
+`.tape`、`.tapebin`、库接口没跑。整只 `-O2` 入口冷构造仍是构造红项。这不是产品安装。
+
+```mermaid
+flowchart TD
+  e["1126911 入口"] --> as["as nm objdump 窄格字节相同"]
+  e --> c["有 main 的 -c 停在 NOT_IMPLEMENTED object"]
+  e --> f["-cx-plan 仍是 option not migrated"]
 ```
 
 ## 64. 2026-10-29 编译器纯拒绝接到 bindhost
