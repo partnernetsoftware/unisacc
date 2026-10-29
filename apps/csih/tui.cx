@@ -1404,7 +1404,41 @@ static int tui_slash(tui_state *st) {
         st->ninput = 0;
         return 1;
     }
-    snprintf(note, sizeof note, "unknown command: %.*s (/help 查看)", token, st->input);
+    {
+        /* Custom command: ./.csih/commands/NAME.md, else ~/.csih/commands/NAME.md.
+         * Its text, with $ARGS replaced by what followed the name, is sent as
+         * the prompt (return 0: the caller sends st->input). */
+        char file[1200], body[TUI_INPUT_MAX], out[TUI_INPUT_MAX], args[TUI_INPUT_MAX];
+        const char *home = getenv("HOME"), *p, *a;
+        size_t n = 0, o = 0;
+        FILE *f;
+        snprintf(args, sizeof args, "%s", st->input[token] == ' ' ? st->input + token + 1 : "");
+        snprintf(file, sizeof file, ".csih/commands/%.*s.md", token - 1, st->input + 1);
+        f = fopen(file, "r");
+        if (!f && home) {
+            snprintf(file, sizeof file, "%s/.csih/commands/%.*s.md", home, token - 1, st->input + 1);
+            f = fopen(file, "r");
+        }
+        if (f) {
+            n = fread(body, 1, sizeof body - 1, f);
+            fclose(f);
+            body[n] = 0;
+            for (p = body; *p && o + 1 < sizeof out; ) {
+                if (!strncmp(p, "$ARGS", 5)) {
+                    for (a = args; *a && o + 1 < sizeof out; a++) out[o++] = *a;
+                    p += 5;
+                } else out[o++] = *p++;
+            }
+            out[o] = 0;
+            while (o > 0 && (out[o - 1] == '\n' || out[o - 1] == ' ')) out[--o] = 0;
+            if (!out[0]) { snprintf(note, sizeof note, "command %.*s: %s 是空的", token, st->input, file); tui_log_plain(st, note); tui_command_done(st); return 1; }
+            /* A leading / would be read as a command again; send it literally. */
+            snprintf(st->input, TUI_INPUT_MAX, "%s%s", out[0] == '/' ? " " : "", out);
+            st->ninput = (int)strlen(st->input);
+            return 0;
+        }
+    }
+    snprintf(note, sizeof note, "unknown command: %.*s (/help 查看；自定义命令放 .csih/commands/名字.md)", token, st->input);
     tui_log_plain(st, note);
     tui_command_done(st);
     return 1;
@@ -4908,6 +4942,31 @@ int tui_entry(int argc, char **argv) {
             if (tui_selftest_rm(path, 0)) failures++;
             if (!ok) { printf("FAIL click path y=%d x=%d\n", y, x); failures++; }
             else printf("  ok   clicking a file path opens it in /view at path:LINE\n");
+        }
+
+        {
+            /* custom command from ~/.csih/commands: expanded, then queued like a prompt */
+            static tui_state tcc;
+            char home[128], d[200], p[260];
+            char *oldhome = getenv("HOME") ? strdup(getenv("HOME")) : NULL;
+            FILE *f;
+            int ok;
+            snprintf(home, sizeof home, "/tmp/csih-cmd-%d", (int)getpid());
+            mkdir(home, 0700);
+            snprintf(d, sizeof d, "%s/.csih", home); mkdir(d, 0700);
+            snprintf(d, sizeof d, "%s/.csih/commands", home); mkdir(d, 0700);
+            snprintf(p, sizeof p, "%s/greet.md", d);
+            f = fopen(p, "w"); if (f) { fputs("用中文问候 $ARGS，再说一遍 $ARGS\n", f); fclose(f); }
+            setenv("HOME", home, 1);
+            tui_state_init(&tcc, NULL); tcc.mode = 1; tcc.busy = 1;
+            tui_type(&tcc, "/greet 小王");
+            ok = tcc.npending == 1 && !strcmp(tcc.pending[0], "用中文问候 小王，再说一遍 小王");
+            tui_type(&tcc, "/nosuchcmd");
+            ok = ok && tcc.npending == 1 && strstr(tcc.log[tcc.nlog - 1], "unknown command: /nosuchcmd");
+            if (oldhome) { setenv("HOME", oldhome, 1); free(oldhome); }
+            if (tui_selftest_rm(home, 1)) failures++;
+            if (!ok) { printf("FAIL custom command pending=%d [%s]\n", tcc.npending, tcc.npending ? tcc.pending[0] : ""); failures++; }
+            else printf("  ok   custom /command expands $ARGS from ~/.csih/commands\n");
         }
 
         printf("%s\n", failures ? "SELFTEST FAILED" : "selftest ok");
