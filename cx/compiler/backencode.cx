@@ -1,0 +1,497 @@
+#pragma unisa module backencode
+/* Pure judgments from src/back_encode.c. No libc and no include.
+   sg_relcall_add and sg_relo_slot stay in srcgate. FILE, malloc, and
+   object-file writes stay in C. A null pointer returns 4. A value or
+   buffer that does not fit returns 1 and does not write. */
+static int be_eq(const char *a, const char *b) {
+    int i;
+    i = 0;
+    while (a[i] && a[i] == b[i]) i++;
+    return a[i] == 0 && b[i] == 0;
+}
+static int be_len(const char *s) {
+    int n;
+    n = 0;
+    while (s[n]) n++;
+    return n;
+}
+static int be_fit32(long long v) {
+    if (v > 2147483647LL) return 0;
+    if (v < -2147483647LL - 1) return 0;
+    return 1;
+}
+static int be_copy(unsigned char *out, int cap, const unsigned char *b, int n, int *nbyte) {
+    int i;
+    if (!out || !nbyte) return 4;
+    if (n > cap) return 1;
+    i = 0;
+    while (i < n) { out[i] = b[i]; i++; }
+    *nbyte = n;
+    return 0;
+}
+static void be_le4(unsigned char *b, int *n, unsigned long long u) {
+    b[*n] = (unsigned char)(u & 255ull); *n = *n + 1;
+    b[*n] = (unsigned char)((u >> 8) & 255ull); *n = *n + 1;
+    b[*n] = (unsigned char)((u >> 16) & 255ull); *n = *n + 1;
+    b[*n] = (unsigned char)((u >> 24) & 255ull); *n = *n + 1;
+}
+/* rex 位不是 0 或 1 时返回 -1，不是旧返回 */
+int be_rex(int w, int r, int x, int b, unsigned char *out, int cap) {
+    if (!out) return 4;
+    if ((w & 1) != w || (r & 1) != r || (x & 1) != x || (b & 1) != b) return -1;
+    if (cap < 1) return 1;
+    out[0] = (unsigned char)(64 | (w << 3) | (r << 2) | (x << 1) | b);
+    return 0;
+}
+/* mod 不在 0..3 时返回 -1，不是旧返回 */
+int be_modrm(int mod, int reg, int rm, unsigned char *out, int cap) {
+    if (!out) return 4;
+    if (mod < 0 || mod > 3) return -1;
+    if (cap < 1) return 1;
+    out[0] = (unsigned char)((mod << 6) | ((reg & 7) << 3) | (rm & 7));
+    return 0;
+}
+/* 寄存器不在 0..15 时返回 -1，不是旧返回 */
+int be_push(int r, unsigned char *out, int cap, int *nbyte) {
+    unsigned char b[2];
+    int n;
+    if (!out || !nbyte) return 4;
+    if (r < 0 || r > 15) return -1;
+    n = 0;
+    if (r >= 8) { b[n] = 0x41; n++; }
+    b[n] = (unsigned char)(0x50 | (r & 7));
+    n++;
+    return be_copy(out, cap, b, n, nbyte);
+}
+/* 寄存器不在 0..15 时返回 -1，不是旧返回 */
+int be_pop(int r, unsigned char *out, int cap, int *nbyte) {
+    unsigned char b[2];
+    int n;
+    if (!out || !nbyte) return 4;
+    if (r < 0 || r > 15) return -1;
+    n = 0;
+    if (r >= 8) { b[n] = 0x41; n++; }
+    b[n] = (unsigned char)(0x58 | (r & 7));
+    n++;
+    return be_copy(out, cap, b, n, nbyte);
+}
+int be_rel8(long long d, unsigned char *out, int cap) {
+    if (!out) return 4;
+    if (d < -128 || d > 127) return 1;
+    if (cap < 1) return 1;
+    out[0] = (unsigned char)((unsigned long long)d & 255ull);
+    return 0;
+}
+int be_d32(long long v, unsigned char *out, int cap) {
+    unsigned long long u;
+    if (!out) return 4;
+    if (!be_fit32(v)) return 1;
+    if (cap < 4) return 1;
+    u = (unsigned long long)v;
+    out[0] = (unsigned char)(u & 255ull);
+    out[1] = (unsigned char)((u >> 8) & 255ull);
+    out[2] = (unsigned char)((u >> 16) & 255ull);
+    out[3] = (unsigned char)((u >> 24) & 255ull);
+    return 0;
+}
+/* 重定位类不是 rel32 时返回 -1，不是旧返回 */
+int be_x_rel(int cls, long long disp, unsigned char *out, int cap) {
+    if (!out) return 4;
+    if (cls != 32) return -1;
+    return be_d32(disp, out, cap);
+}
+/* 位宽不是 19 或 26 时返回 -1，不是旧返回 */
+int be_arm_disp(long long bytes, int bits, long long *v) {
+    long long lim, d;
+    if (!v) return 4;
+    if (bits != 19 && bits != 26) return -1;
+    d = bytes >> 2;
+    lim = 1LL << (bits - 1);
+    if (d < 0 - lim || d >= lim) return 1;
+    *v = d;
+    return 0;
+}
+/* 重定位类不是 19 或 26 时返回 -1，不是旧返回 */
+int be_arm_relf(int bits, long long bytes, long long *field) {
+    long long d;
+    int rc;
+    if (!field) return 4;
+    if (bits != 19 && bits != 26) return -1;
+    rc = be_arm_disp(bytes, bits, &d);
+    if (rc) return rc;
+    if (bits == 26) *field = (long long)((unsigned long long)d & 0x3fffffffull);
+    else *field = (long long)(((unsigned long long)d & 0x7ffffull) << 5);
+    return 0;
+}
+/* 未知宽度返回 -1，不是旧返回 */
+long long be_ls(int store, int wd, int scaled) {
+    if (wd != 8 && wd != 4 && wd != 2 && wd != 1) return -1;
+    if (scaled) {
+        if (store) {
+            if (wd == 8) return 0xF9000000LL;
+            if (wd == 4) return 0xB9000000LL;
+            if (wd == 2) return 0x79000000LL;
+            return 0x39000000LL;
+        }
+        if (wd == 8) return 0xF9400000LL;
+        if (wd == 4) return 0xB9800000LL;
+        if (wd == 2) return 0x79800000LL;
+        return 0x39800000LL;
+    }
+    if (store) {
+        if (wd == 8) return 0xF8000000LL;
+        if (wd == 4) return 0xB8000000LL;
+        if (wd == 2) return 0x78000000LL;
+        return 0x38000000LL;
+    }
+    if (wd == 8) return 0xF8400000LL;
+    if (wd == 4) return 0xB8800000LL;
+    if (wd == 2) return 0x78800000LL;
+    return 0x38800000LL;
+}
+/* 未知宽度返回 -1，不是旧返回。mode 0 是按比例无符号 12 位，1 是 9 位，2 是 IP0 */
+int be_mem_mode(long long off, int wd, int *mode, long long *imm) {
+    long long q;
+    if (!mode || !imm) return 4;
+    if (wd != 1 && wd != 2 && wd != 4 && wd != 8) return -1;
+    if (off >= 0) {
+        q = off / (long long)wd;
+        if (off % (long long)wd == 0 && q < 4096) {
+            *mode = 0;
+            *imm = q;
+            return 0;
+        }
+    }
+    if (off >= -256 && off < 256) {
+        *mode = 1;
+        *imm = (long long)((unsigned long long)off & 511ull);
+        return 0;
+    }
+    *mode = 2;
+    if (off < 0) *imm = 0 - off;
+    else *imm = off;
+    return 0;
+}
+/* fixed 不在 0..4 时返回 -1，不是旧返回 */
+int be_movimm_n(unsigned long long v, int fixed, int *n) {
+    int sh, count;
+    unsigned long long part;
+    if (!n) return 4;
+    if (fixed < 0 || fixed > 4) return -1;
+    count = 1;
+    sh = 1;
+    while (sh <= 3) {
+        part = (v >> (16 * sh)) & 0xffffull;
+        if (part || (fixed && count < fixed)) count = count + 1;
+        sh = sh + 1;
+    }
+    *n = count;
+    return 0;
+}
+int be_x_mem_mod(long long disp, int base, int *mod, int *sib) {
+    if (!mod || !sib) return 4;
+    if (disp == 0 && (base & 7) != 5) {
+        *mod = 0;
+        *sib = (base & 7) == 4;
+        return 0;
+    }
+    if (disp >= -128 && disp <= 127) {
+        *mod = 1;
+        *sib = (base & 7) == 4;
+        return 0;
+    }
+    if (!be_fit32(disp)) return 1;
+    *mod = 2;
+    *sib = (base & 7) == 4;
+    return 0;
+}
+/* 寄存器、宽度或操作码超出范围时返回 -1，不是旧返回 */
+int be_x_mem(int opc, int opc2, int r, int b, long long disp, int w, unsigned char *out, int cap, int *nbyte) {
+    unsigned char buf[12];
+    unsigned long long u;
+    int n, mod, sib;
+    if (!out || !nbyte) return 4;
+    if (w != 0 && w != 1) return -1;
+    if (r < 0 || r > 15 || b < 0 || b > 15) return -1;
+    if (opc < 0 || opc > 255 || opc2 > 255) return -1;
+    n = 0;
+    buf[n] = (unsigned char)(64 | (w << 3) | ((r >> 3) << 2) | (b >> 3));
+    n++;
+    buf[n] = (unsigned char)opc;
+    n++;
+    if (opc2 >= 0) { buf[n] = (unsigned char)opc2; n++; }
+    sib = (b & 7) == 4;
+    if (disp == 0 && (b & 7) != 5) mod = 0;
+    else if (disp >= -128 && disp <= 127) mod = 1;
+    else {
+        if (!be_fit32(disp)) return 1;
+        mod = 2;
+    }
+    buf[n] = (unsigned char)((mod << 6) | ((r & 7) << 3) | (b & 7));
+    n++;
+    if (sib) { buf[n] = 0x24; n++; }
+    if (mod == 1) {
+        buf[n] = (unsigned char)((unsigned long long)disp & 255ull);
+        n++;
+    } else if (mod == 2) {
+        u = (unsigned long long)disp;
+        be_le4(buf, &n, u);
+    }
+    return be_copy(out, cap, buf, n, nbyte);
+}
+/* 寄存器不在 0..15 或扩展码不在 0..7 时返回 -1，不是旧返回 */
+int be_aluimm(int d, int opc, long long n, unsigned char *out, int cap, int *nbyte) {
+    unsigned char b[8];
+    int len, at;
+    if (!out || !nbyte) return 4;
+    if (d < 0 || d > 15 || opc < 0 || opc > 7) return -1;
+    b[0] = (unsigned char)(0x48 | (d >> 3));
+    b[2] = (unsigned char)((3 << 6) | ((opc & 7) << 3) | (d & 7));
+    if (n >= -128 && n <= 127) {
+        b[1] = 0x83;
+        b[3] = (unsigned char)((unsigned long long)n & 255ull);
+        len = 4;
+    } else {
+        if (!be_fit32(n)) return 1;
+        b[1] = 0x81;
+        at = 0;
+        be_le4(b + 3, &at, (unsigned long long)n);
+        len = 7;
+    }
+    return be_copy(out, cap, b, len, nbyte);
+}
+/* 寄存器不在 0..15 时返回 -1，不是旧返回 */
+int be_movri(int d, unsigned long long imm, unsigned char *out, int cap, int *nbyte) {
+    unsigned char b[12];
+    int n;
+    if (!out || !nbyte) return 4;
+    if (d < 0 || d > 15) return -1;
+    n = 0;
+    if ((imm >> 32) == 0) {
+        if (d >= 8) { b[n] = 0x41; n++; }
+        b[n] = (unsigned char)(0xB8 + (d & 7));
+        n++;
+        be_le4(b, &n, imm);
+    } else {
+        b[n] = (unsigned char)(0x48 | (d >> 3));
+        n++;
+        b[n] = (unsigned char)(0xB8 + (d & 7));
+        n++;
+        be_le4(b, &n, imm);
+        be_le4(b, &n, imm >> 32);
+    }
+    return be_copy(out, cap, b, n, nbyte);
+}
+/* 未知宽度返回 -1，不是旧返回 */
+int be_load_form(int wd, int *opc, int *opc2, int *w) {
+    if (!opc || !opc2 || !w) return 4;
+    if (wd == 8) { *opc = 0x8B; *opc2 = -1; *w = 1; return 0; }
+    if (wd == 4) { *opc = 0x63; *opc2 = -1; *w = 1; return 0; }
+    if (wd == 1) { *opc = 0x0F; *opc2 = 0xBE; *w = 1; return 0; }
+    if (wd == 2) { *opc = 0x0F; *opc2 = 0xBF; *w = 1; return 0; }
+    return -1;
+}
+/* 未知宽度返回 -1，不是旧返回。prefix 为 -1 表示没有 0x66 */
+int be_store_form(int wd, int *prefix, int *opc, int *w) {
+    if (!prefix || !opc || !w) return 4;
+    if (wd == 8) { *prefix = -1; *opc = 0x89; *w = 1; return 0; }
+    if (wd == 4) { *prefix = -1; *opc = 0x89; *w = 0; return 0; }
+    if (wd == 2) { *prefix = 0x66; *opc = 0x89; *w = 0; return 0; }
+    if (wd == 1) { *prefix = -1; *opc = 0x88; *w = 0; return 0; }
+    return -1;
+}
+/* 返回 1 是 bk_tcell 的旧“不是线程格” */
+long long be_tcell(int threads, long long target, long long shift, long long scr0) {
+    long long o;
+    if (threads == 0) return 1;
+    o = target - shift - scr0;
+    if (o == 0) return 0 - 8;
+    if (o == 8) return 0 - 16;
+    if (o == 16) return 0 - 24;
+    if (o >= 24 && o < 48) return o - 72;
+    if (o >= 80 && o < 128) return o - 176;
+    if (o == 128) return 0 - 104;
+    if (o == 136) return 0 - 112;
+    return 1;
+}
+/* 架构不是 0 或 1 时返回 -1，不是旧返回 */
+int be_relcall_type(int arm, int objmode, int lab) {
+    if (arm != 0 && arm != 1) return -1;
+    if (objmode && lab < 0) {
+        if (arm == 1) return 901;
+        return 900;
+    }
+    return 0;
+}
+/* 未知操作返回 -1，不是旧返回。10 call，11 callr，12 jump，13 jumpz，14 ret */
+int be_call_kind(const char *op) {
+    if (!op) return 4;
+    if (be_eq(op, "call")) return 10;
+    if (be_eq(op, "callr")) return 11;
+    if (be_eq(op, "jump")) return 12;
+    if (be_eq(op, "jumpz")) return 13;
+    if (be_eq(op, "ret")) return 14;
+    return -1;
+}
+/* 签名桩没有固定长度时返回 -1，不是旧返回。个数是字 */
+int be_arm_host_n(int os, int has_sig) {
+    if (has_sig) return -1;
+    if (os == 2) return 36;
+    return 30;
+}
+/* 签名桩没有固定长度时返回 -1，不是旧返回。个数是字节 */
+int be_x_host_n(int os, int has_sig) {
+    if (os == 2) return 167;
+    if (has_sig) return -1;
+    return 112;
+}
+/* 未知架构或参数类返回 -1，不是旧返回 */
+int be_hs_plan(unsigned long long sig, int arm, int darwin, int *kind, int *reg, int *off, int *w, int ncap) {
+    int lk[16], lr[16], lo[16], lw[16];
+    int n, k, c, ni, nf, so, ww;
+    if (!kind || !reg || !off || !w) return 4;
+    if (arm != 0 && arm != 1) return -1;
+    n = (int)((sig >> 2) & 31ull);
+    if (ncap < 0 || n > ncap || n > 16) return 1;
+    ni = 0;
+    nf = 0;
+    so = 0;
+    k = 0;
+    while (k < n) {
+        c = (int)((sig >> (8 + 3 * k)) & 7ull);
+        if (c > 4) return -1;
+        lk[k] = c;
+        lr[k] = -1;
+        lo[k] = 0;
+        lw[k] = 0;
+        if (c == 1 || c == 2) {
+            if (nf < 8) { lr[k] = nf; nf = nf + 1; }
+        } else {
+            if (ni < (arm ? 8 : 6)) { lr[k] = ni; ni = ni + 1; }
+        }
+        if (lr[k] < 0) {
+            ww = 8;
+            if (arm && darwin && (c == 3 || c == 2)) ww = 4;
+            so = (so + ww - 1) / ww * ww;
+            lo[k] = so;
+            lw[k] = ww;
+            so = so + ww;
+        }
+        k = k + 1;
+    }
+    k = 0;
+    while (k < n) {
+        kind[k] = lk[k];
+        reg[k] = lr[k];
+        off[k] = lo[k];
+        w[k] = lw[k];
+        k = k + 1;
+    }
+    return (so + 15) / 16 * 16;
+}
+/* 寄存器不在 0..15 时返回 -1，不是旧返回。不发出 mov */
+int be_alias(int d, int s1, int s2) {
+    if (d < 0 || d > 15 || s1 < 0 || s1 > 15 || s2 < 0 || s2 > 15) return -1;
+    if (d == s1) return s2;
+    if (s2 == d) return 11;
+    return s2;
+}
+/* 对齐不是正数时返回 -1，不是旧返回 */
+int be_round(long long v, long long a, long long *out) {
+    if (!out) return 4;
+    if (a <= 0) return -1;
+    *out = (v + a - 1) / a * a;
+    return 0;
+}
+int be_frame_fit(long long n) {
+    if (n > -4096 && n < 4096) return 0;
+    return 1;
+}
+int be_got_off(int objmode, int os, unsigned long long target) {
+    if (!objmode || os == 2) return 0;
+    if (target < 34359738368ull) return 0;
+    if ((target - 34359738368ull) & 1048575ull) return 1;
+    return 0;
+}
+int be_zero_wd(long long left, int *wd) {
+    int w;
+    if (!wd) return 4;
+    if (left <= 0) return 1;
+    w = 8;
+    while (left < (long long)w) w = w / 2;
+    *wd = w;
+    return 0;
+}
+/* 未知宽度返回 -1，不是旧返回 */
+int be_sext_lsb(int width) {
+    if (width == 1 || width == 2 || width == 4 || width == 8) return 8 * width - 1;
+    return -1;
+}
+/* extra 为负时返回 -1，不是旧返回 */
+int be_align_n(int extra) {
+    if (extra < 0) return -1;
+    return 32 + ((extra * 8 + 15) / 16) * 16;
+}
+int be_nimp(int os, int dyn) {
+    if (os == 2 && dyn) return 26;
+    return 22;
+}
+static const int be_implen[26] = {
+    12, 9, 8, 11, 11, 11, 15, 12, 14, 11, 21, 14, 11, 11, 14, 19,
+    18, 16, 12, 17, 19, 18, 12, 14, 11, 12
+};
+int be_idata(int os, int dyn, long long *cfg, long long *iat, long long *len) {
+    long long off;
+    int nimp, k, L;
+    if (!cfg || !iat || !len) return 4;
+    nimp = be_nimp(os, dyn);
+    off = 40 + (long long)(nimp + 1) * 16;
+    k = 0;
+    while (k < nimp) {
+        L = 2 + be_implen[k] + 1;
+        if (L % 2) L = L + 1;
+        off = off + L;
+        k = k + 1;
+    }
+    off = off + 13;
+    off = (off + 7) / 8 * 8;
+    *cfg = off;
+    *iat = 40 + (long long)(nimp + 1) * 8;
+    *len = off + 320;
+    return 0;
+}
+long long be_macho_hdrs(void) {
+    return 32 + (72 + 152 + 232 + 72 + 32 + 56 + 24 + 24 + 48 + 24 + 80 + 16) + 156;
+}
+/* 未知操作返回 -1，不是旧返回 */
+int be_fp_kind(const char *op, int *kind, int *dbl) {
+    int k, d;
+    if (!op || !kind || !dbl) return 4;
+    k = -1;
+    if (op[0] == 102 && op[1] == 97) k = 0;
+    if (op[0] == 102 && op[1] == 115 && op[2] == 117) k = 1;
+    if (op[0] == 102 && op[1] == 109) k = 2;
+    if (op[0] == 102 && op[1] == 100) k = 3;
+    if (op[0] == 102 && op[1] == 108 && op[2] == 116) k = 4;
+    if (op[0] == 102 && op[1] == 108 && op[2] == 101) k = 5;
+    if (op[0] == 102 && op[1] == 101) k = 6;
+    if (k < 0) {
+        if (be_eq(op, "cvtid")) k = 7;
+        else if (be_eq(op, "cvtud")) k = 8;
+        else if (be_eq(op, "cvtis")) k = 9;
+        else if (be_eq(op, "cvtus")) k = 10;
+        else if (be_eq(op, "cvtdi")) k = 11;
+        else if (be_eq(op, "cvtdu")) k = 12;
+        else if (be_eq(op, "cvtsd")) k = 13;
+        else if (be_eq(op, "cvtds")) k = 14;
+        else if (be_eq(op, "fsqrt64")) k = 15;
+        else if (be_eq(op, "fsqrt32")) k = 16;
+    }
+    if (k < 0) return -1;
+    d = 0;
+    if (k <= 6) d = be_len(op) >= 2 && op[be_len(op) - 2] == 54 && op[be_len(op) - 1] == 52;
+    if (k == 7 || k == 8 || k == 11 || k == 12 || k == 14 || k == 15) d = 1;
+    *kind = k;
+    *dbl = d;
+    return 0;
+}

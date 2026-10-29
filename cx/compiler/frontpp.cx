@@ -1,0 +1,318 @@
+#pragma unisa module frontpp
+#pragma unisa use srcgate
+/* Pure judgments from src/front_pp.c. No libc and no include.
+   sg_isal, sg_isdi, sg_ucn_span, sg_id_same, and sg_source_at stay in srcgate.
+   malloc, FILE, the macro table, and expansion stay in front_pp.c. */
+static unsigned long long pp_uval(const char *b, int i, int n) {
+    int k, c, d;
+    unsigned long long value;
+    value = 0;
+    k = 2;
+    while (k < n) {
+        c = b[i + k] & 255;
+        d = c - 48;
+        if (c >= 65 && c <= 70) d = c - 55;
+        if (c >= 97 && c <= 102) d = c - 87;
+        value = value * 16ull + (unsigned long long)d;
+        k = k + 1;
+    }
+    return value;
+}
+static int pp_at(const char *s, int n, int i) {
+    if (i < 0 || i >= n) return -1;
+    return s[i] & 255;
+}
+int pp_wsc(int c) {
+    if (c == 32) return 1;
+    if (c == 9) return 1;
+    if (c == 10) return 1;
+    return 0;
+}
+int pp_wsat(int c) {
+    if (c == 32) return 1;
+    if (c == 9) return 1;
+    return 0;
+}
+int pp_skip_ws(const char *s, int i, int n) {
+    if (!s) return 4;
+    while (i < n) {
+        if (s[i] != 32 && s[i] != 9) {
+            if ((s[i] & 255) != 10) break;
+        }
+        i = i + 1;
+    }
+    return i;
+}
+int pp_ishex(int c) {
+    if (c >= 48 && c <= 57) return 1;
+    if (c >= 97 && c <= 102) return 1;
+    if (c >= 65 && c <= 70) return 1;
+    return 0;
+}
+int pp_hexv(int c) {
+    if (c >= 48 && c <= 57) return c - 48;
+    if (c >= 97 && c <= 102) return c - 87;
+    if (c >= 65 && c <= 70) return c - 55;
+    return -1;
+}
+int pp_idch(int c) {
+    if (sg_isal(c)) return 1;
+    return sg_isdi(c);
+}
+int pp_id_chars(const char *s, int n) {
+    int at, count, width;
+    if (!s) return 4;
+    at = 0;
+    count = 0;
+    if (n < 0) n = 0;
+    while (at < n) {
+        width = sg_ucn_span(s, at, n);
+        at = at + (width ? width : 1);
+        count = count + 1;
+    }
+    return count;
+}
+int pp_name_long(const char *s, int n) {
+    int count;
+    if (!s) return 4;
+    if (n < 0) n = 0;
+    count = pp_id_chars(s, n);
+    if (n < 640 && count <= 63) return 0;
+    return 1;
+}
+int pp_id_end(const char *b, int i, int e) {
+    int j, n, c;
+    if (!b) return 4;
+    j = i;
+    while (j < e) {
+        c = b[j] & 255;
+        if (sg_isal(c) || (j > i && sg_isdi(c))) { j = j + 1; continue; }
+        n = sg_ucn_span(b, j, e);
+        if (n == 0) break;
+        j = j + n;
+    }
+    return j;
+}
+int pp_mac_hash(const char *s, int n) {
+    int i, h, u;
+    unsigned long long value;
+    if (!s) return 4;
+    h = 131;
+    i = 0;
+    if (n < 0) n = 0;
+    while (i < n) {
+        u = sg_ucn_span(s, i, n);
+        value = u ? pp_uval(s, i, u) : (unsigned long long)(s[i] & 255);
+        h = (h * 31 + (int)(value & 16777215ull)) & 16777215;
+        i = i + (u ? u : 1);
+    }
+    h = h & 8191;
+    if (h < 0) h = 0 - h;
+    return h;
+}
+int pp_mac_is(const char *slot, const char *s, int n) {
+    int k;
+    if (!slot || !s) return 4;
+    k = 0;
+    while (slot[k]) k = k + 1;
+    return sg_id_same(slot, k, s, n);
+}
+int pp_vhash(const char *s, int n) {
+    int h, k;
+    if (!s) return 4;
+    if (n < 0) n = 0;
+    h = n;
+    k = 0;
+    while (k < n) { h = (h * 31 + (s[k] & 255)) & 16777215; k = k + 1; }
+    return h & 4095;
+}
+int pp_vsame(const char *v, int p, const char *s, int slen) {
+    int k;
+    if (!v || !s) return 4;
+    k = 0;
+    while (k < slen) {
+        if (v[p + k] != s[k]) return 0;
+        if (v[p + k] == 0) return 0;
+        k = k + 1;
+    }
+    return v[p + k] == 0;
+}
+int pp_span_eq(const char *a, int L, const char *nm) {
+    int k;
+    if (!a || !nm) return 4;
+    k = 0;
+    while (k < L) {
+        if (nm[k] == 0) return 0;
+        if ((a[k] & 255) != (nm[k] & 255)) return 0;
+        k = k + 1;
+    }
+    if (nm[L] != 0) return 0;
+    return 1;
+}
+int pp_num_ok(const char *s, int n) {
+    int q, digits, isfloat, hasdot, octbad, firstzero, c, uns;
+    if (!s) return 4;
+    if (n < 0) n = 0;
+    q = 0;
+    digits = 0;
+    isfloat = 0;
+    hasdot = 0;
+    octbad = 0;
+    firstzero = pp_at(s, n, q) == 48;
+    if (firstzero && (pp_at(s, n, q + 1) == 120 || pp_at(s, n, q + 1) == 88)) {
+        q = q + 2;
+        while (q < n && pp_ishex(pp_at(s, n, q))) { q = q + 1; digits = digits + 1; }
+        if (q < n && pp_at(s, n, q) == 46) {
+            hasdot = 1;
+            q = q + 1;
+            while (q < n && pp_ishex(pp_at(s, n, q))) { q = q + 1; digits = digits + 1; }
+        }
+        if (digits == 0) return 0;
+        if (q < n && (pp_at(s, n, q) == 112 || pp_at(s, n, q) == 80)) {
+            isfloat = 1;
+            q = q + 1;
+            if (q < n && (pp_at(s, n, q) == 43 || pp_at(s, n, q) == 45)) q = q + 1;
+            digits = 0;
+            while (q < n && sg_isdi(pp_at(s, n, q))) { q = q + 1; digits = digits + 1; }
+            if (digits == 0) return 0;
+        } else if (hasdot) return 0;
+    } else {
+        while (q < n && sg_isdi(pp_at(s, n, q))) {
+            if (firstzero && pp_at(s, n, q) >= 56) octbad = 1;
+            q = q + 1;
+            digits = digits + 1;
+        }
+        if (q < n && pp_at(s, n, q) == 46) {
+            isfloat = 1;
+            q = q + 1;
+            while (q < n && sg_isdi(pp_at(s, n, q))) { q = q + 1; digits = digits + 1; }
+        }
+        if (digits == 0) return 0;
+        if (q < n && (pp_at(s, n, q) == 101 || pp_at(s, n, q) == 69)) {
+            isfloat = 1;
+            q = q + 1;
+            if (q < n && (pp_at(s, n, q) == 43 || pp_at(s, n, q) == 45)) q = q + 1;
+            digits = 0;
+            while (q < n && sg_isdi(pp_at(s, n, q))) { q = q + 1; digits = digits + 1; }
+            if (digits == 0) return 0;
+        }
+        if (isfloat == 0 && octbad) return 0;
+    }
+    if (isfloat) {
+        if (q < n && (pp_at(s, n, q) == 102 || pp_at(s, n, q) == 70 || pp_at(s, n, q) == 108 || pp_at(s, n, q) == 76)) q = q + 1;
+        return q == n;
+    }
+    uns = 0;
+    if (q < n && (pp_at(s, n, q) == 117 || pp_at(s, n, q) == 85)) { uns = 1; q = q + 1; }
+    if (q < n && (pp_at(s, n, q) == 108 || pp_at(s, n, q) == 76)) {
+        c = pp_at(s, n, q);
+        q = q + 1;
+        if (q < n && pp_at(s, n, q) == c) q = q + 1;
+    }
+    if (uns == 0 && q < n && (pp_at(s, n, q) == 117 || pp_at(s, n, q) == 85)) q = q + 1;
+    return q == n;
+}
+int pp_lead_dec(const char *s, int i, int e, int *out) {
+    int v;
+    if (!s || !out) return 4;
+    if (i < 0 || i >= e || !sg_isdi(s[i] & 255)) { *out = 0; return 0; }
+    v = 0;
+    while (i < e && sg_isdi(s[i] & 255)) {
+        v = v * 10 + ((s[i] & 255) - 48);
+        i = i + 1;
+    }
+    *out = v;
+    return 1;
+}
+int pp_lt(long a, long b, int u) {
+    unsigned long ua, ub;
+    if (u) {
+        ua = (unsigned long)a;
+        ub = (unsigned long)b;
+        if (ua < ub) return 1;
+        return 0;
+    }
+    if (a < b) return 1;
+    return 0;
+}
+int pp_div0(long b, int skip) {
+    if (b == 0 && skip == 0) return 1;
+    return 0;
+}
+int pp_cond_live(const int *take, int n) {
+    int k, live;
+    if (!take) return 4;
+    if (n < 0) n = 0;
+    live = 1;
+    k = 0;
+    while (k < n) {
+        if (take[k] == 0) live = 0;
+        k = k + 1;
+    }
+    return live;
+}
+int pp_cond_outer(const int *take, const int *seen, int n) {
+    int ol, k;
+    if (!take || !seen) return 4;
+    ol = 0;
+    if (n > 0 && seen[n - 1] == 0) {
+        ol = 1;
+        k = 0;
+        while (k < n - 1) {
+            if (take[k] == 0) ol = 0;
+            k = k + 1;
+        }
+    }
+    return ol;
+}
+int pp_cond_take(int act, int live) {
+    if (act == 0 && live) return 1;
+    return 0;
+}
+int pp_cond_else(int act, int seen) {
+    if (act == 0 && seen == 0) return 1;
+    return 0;
+}
+int pp_cond_pop(int act, int depth) {
+    if (act == 2 && depth > 0) return 1;
+    return 0;
+}
+int pp_nest_full(int depth) {
+    if (depth >= 64) return 1;
+    return 0;
+}
+/* 未知种类返回 -1，不是旧返回。 */
+int pp_dir_act(int d, int on) {
+    int take;
+    take = on == 1;
+    if (d == 5) return 2;
+    if (d == 6 || d == 7 || d == 8) return 3;
+    if (d == 0) return take ? 0 : 1;
+    if (d == 1) return take ? 1 : 0;
+    if (d == 2 || d == 3 || d == 4) return take ? 0 : 1;
+    return -1;
+}
+/* 未知种类返回 2，不是旧返回。 */
+int pp_stack_op(int d) {
+    if (d >= 0 && d < 3) return 0;
+    if (d == 3) return 1;
+    if (d == 4) return 3;
+    if (d == 5) return 4;
+    if (d == 6 || d == 7 || d == 8) return 5;
+    return 2;
+}
+/* 未知种类返回 2，不是旧返回。 */
+int pp_ucn_gate(int kind, int initial, int span) {
+    if (kind == 0) return -2;
+    if (initial && kind == 2) return -3;
+    if (kind == 1 || kind == 2) return span;
+    return 2;
+}
+int pp_hs_has(const int *mem, const int *nxt, int h, int m) {
+    if (!mem || !nxt) return 4;
+    while (h) {
+        if (mem[h] == m) return 1;
+        h = nxt[h];
+    }
+    return 0;
+}

@@ -1,0 +1,111 @@
+#pragma unisa module tapegate
+/* LEB and quote decisions from src/tapebin.c. The old functions set tb_bad
+   and write a global buffer. These return codes instead. Return 1 is the
+   old fail path and does not set a global. Return 4 is not on the old path. */
+static int tb2_hex(int b, char *out, int *at, int cap) {
+    const char *hex = "0123456789abcdef";
+    if (*at + 2 >= cap) return 1;
+    out[*at] = hex[(b >> 4) & 15];
+    *at = *at + 1;
+    out[*at] = hex[b & 15];
+    *at = *at + 1;
+    return 0;
+}
+static int tb2_put(int ch, char *out, int *at, int cap) {
+    if (*at + 1 >= cap) return 1;
+    out[*at] = ch;
+    *at = *at + 1;
+    return 0;
+}
+static int tb2_word(const char *s, char *out, int *at, int cap) {
+    int i;
+    i = 0;
+    while (s[i]) {
+        if (tb2_put(s[i], out, at, cap)) return 1;
+        i++;
+    }
+    return 0;
+}
+int tb2_quote(const char *p, int n, char *out, int cap) {
+    int i, c, at;
+    if (!out || cap < 1) return 4;
+    if (n > 0 && !p) return 4;
+    if (n < 0) return 4;
+    at = 0;
+    if (tb2_put(34, out, &at, cap)) return 1;
+    i = 0;
+    while (i < n) {
+        c = p[i] & 255;
+        if (c == 10) { if (tb2_word("\\n", out, &at, cap)) return 1; }
+        else if (c == 9) { if (tb2_word("\\t", out, &at, cap)) return 1; }
+        else if (c == 13) { if (tb2_word("\\r", out, &at, cap)) return 1; }
+        else if (c == 0) { if (tb2_word("\\0", out, &at, cap)) return 1; }
+        else if (c == 92) { if (tb2_word("\\\\", out, &at, cap)) return 1; }
+        else if (c == 34) { if (tb2_word("\\\"", out, &at, cap)) return 1; }
+        else if (c >= 32 && c < 127) { if (tb2_put(c, out, &at, cap)) return 1; }
+        else {
+            if (tb2_word("\\x", out, &at, cap)) return 1;
+            if (tb2_hex(c, out, &at, cap)) return 1;
+        }
+        i++;
+    }
+    if (tb2_put(34, out, &at, cap)) return 1;
+    out[at] = 0;
+    return 0;
+}
+int tb2_uleb(const unsigned char *buf, int *pos, int end, unsigned long long *value) {
+    unsigned long long v;
+    int shift, b, k, p;
+    if (!buf || !pos || !value) return 4;
+    v = 0;
+    shift = 0;
+    k = 0;
+    p = *pos;
+    while (k < 10) {
+        if (p >= end) return 1;
+        b = buf[p] & 255;
+        p++;
+        if (shift == 63 && (b & 127) > 1) return 1;
+        v = v | ((unsigned long long)(b & 127) << shift);
+        k++;
+        if ((b & 128) == 0) {
+            if (k > 1 && (b & 127) == 0) return 1;
+            *pos = p;
+            *value = v;
+            return 0;
+        }
+        shift = shift + 7;
+    }
+    return 1;
+}
+int tb2_sleb(const unsigned char *buf, int *pos, int end, unsigned long long *value) {
+    unsigned long long v;
+    int shift, b, k, p;
+    if (!buf || !pos || !value) return 4;
+    v = 0;
+    shift = 0;
+    k = 0;
+    p = *pos;
+    while (k < 10) {
+        if (p >= end) return 1;
+        b = buf[p] & 255;
+        p++;
+        if (shift == 63 && b != 0 && b != 127) return 1;
+        v = v | ((unsigned long long)(b & 127) << shift);
+        k++;
+        if ((b & 128) == 0) {
+            if (shift < 57 && (b & 64)) v = v | (~0ull << (shift + 7));
+            if (k > 1 && ((b == 0 && (buf[p - 2] & 64) == 0) || (b == 127 && (buf[p - 2] & 64) != 0))) return 1;
+            *pos = p;
+            *value = v;
+            return 0;
+        }
+        shift = shift + 7;
+    }
+    return 1;
+}
+int tb2_pool_bad(int bad, int n, int expect, int maxpool) {
+    if (bad) return 1;
+    if (n < 0 || n != expect || n > maxpool) return 1;
+    return 0;
+}

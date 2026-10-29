@@ -1,0 +1,479 @@
+#pragma unisa module frontparse
+/* Pure judgments from src/front_parse.c. No libc and no include.
+   sg_bfenc / sg_bfwidth / sg_bfofs / sg_bfunit / sg_bfsig stay in srcgate.
+   Token tables, FILE, and the heap stay in the C front end. */
+static int fp_eq(const char *a, const char *b) {
+    int i;
+    i = 0;
+    while (a[i] && a[i] == b[i]) i = i + 1;
+    return a[i] == 0 && b[i] == 0;
+}
+static int fp_len(const char *s) {
+    int n;
+    n = 0;
+    while (s[n]) n = n + 1;
+    return n;
+}
+static int fp_typeword(const char *w) {
+    if (fp_eq(w, "int") || fp_eq(w, "char") || fp_eq(w, "long") || fp_eq(w, "short")) return 1;
+    if (fp_eq(w, "void") || fp_eq(w, "unsigned") || fp_eq(w, "signed")) return 1;
+    if (fp_eq(w, "float") || fp_eq(w, "double") || fp_eq(w, "const") || fp_eq(w, "static")) return 1;
+    if (fp_eq(w, "_Bool") || fp_eq(w, "extern") || fp_eq(w, "volatile")) return 1;
+    if (fp_eq(w, "register") || fp_eq(w, "auto") || fp_eq(w, "inline") || fp_eq(w, "restrict")) return 1;
+    return 0;
+}
+
+/* valuekind: flt other than 0, 4, or 8 returns -1, not that flt. */
+int fp_valuekind(int width, int ptr, int uns, int flt, int bl) {
+    if (ptr) return 1;
+    if (bl) return 9;
+    if (flt == 4 || flt == 8) return flt;
+    if (flt) return -1;
+    if (uns) { if (width == 8) return 1; }
+    return 0;
+}
+int fp_dkind(int declsz, int declptr, int declunsigned, int flt, int declbool) {
+    return fp_valuekind(declsz, declptr, declunsigned, flt, declbool);
+}
+/* fkind: a float kind other than 4 or 8 returns -1, not the stored curflt. */
+int fp_fkind(int curptr, int curflt, int curuns, int cursize) {
+    if (curptr) return 1;
+    if (curflt == 4 || curflt == 8) return curflt;
+    if (curflt) return -1;
+    if (curuns) { if (cursize == 8) return 1; }
+    return 0;
+}
+/* setkind: only 9, 4, 8, and 1 assign a size. Any other k returns -1. */
+int fp_set_size(int k) {
+    if (k == 9) return 1;
+    if (k == 4 || k == 8) return k;
+    if (k == 1) return 8;
+    return -1;
+}
+/* fconv emits nothing for 0. Kinds other than 0, 1, 4, 8, 9 return -1, not d2i.
+   1 deq, 2 seq, 3 ne, 4 s2d, 5 d2s, 6 d2u, 7 d2i, 8 u2d, 9 i2d, 10 u2s, 11 i2s,
+   12 s2d then d2u, 13 s2d then d2i. */
+int fp_fconv(int from, int to) {
+    if (from != 0 && from != 1 && from != 4 && from != 8 && from != 9) return -1;
+    if (to != 0 && to != 1 && to != 4 && to != 8 && to != 9) return -1;
+    if (to == 9) {
+        if (from == 8) return 1;
+        if (from == 4) return 2;
+        return 3;
+    }
+    if (from == 9) from = 0;
+    if (from == to) return 0;
+    if (from < 4 && to < 4) return 0;
+    if (from == 4) {
+        if (to == 8) return 4;
+        if (to == 1) return 12;
+        return 13;
+    }
+    if (from == 8) {
+        if (to == 4) return 5;
+        if (to == 1) return 6;
+        return 7;
+    }
+    if (to == 8) {
+        if (from == 1) return 8;
+        return 9;
+    }
+    if (from == 1) return 10;
+    return 11;
+}
+/* ftruthy: 0 means no test, 8 is deq, 4 is seq. Any other curflt returns -1, not seq. */
+int fp_ftruthy(int curflt, int curptr) {
+    if (curflt == 0 || curptr) return 0;
+    if (curflt == 8) return 8;
+    if (curflt == 4) return 4;
+    return -1;
+}
+/* kindsize's tyinfo size. kb outside 0..6, or un other than 0 or 1, returns -1, not i32. */
+int fp_kindsize(int kb, int un) {
+    if (un != 0 && un != 1) return -1;
+    if (kb == 0 || kb == 1) return 1;
+    if (kb == 2) return 2;
+    if (kb == 3) return 4;
+    if (kb == 4) return 8;
+    if (kb == 5) return 4;
+    if (kb == 6) return 8;
+    return -1;
+}
+/* kindsize's type name. Unknown kb or un returns 0, not "i32". */
+const char *fp_kind_name(int kb, int un) {
+    if (un != 0 && un != 1) return 0;
+    if (kb == 0) return "void";
+    if (kb == 1) return un ? "u8" : "i8";
+    if (kb == 2) return un ? "u16" : "i16";
+    if (kb == 3) return un ? "u32" : "i32";
+    if (kb == 4) return un ? "u64" : "i64";
+    if (kb == 5) return "f32";
+    if (kb == 6) return "f64";
+    return 0;
+}
+/* tyax's axis name. An integer width other than 1, 2, 4, or 8 returns 0, not i64 or u64. */
+const char *fp_tyname(int curptr, int curstruct, int curflt, int curuns, int cursize) {
+    if (curptr) return "ptr";
+    if (curstruct >= 0) return "struct";
+    if (curflt == 8) return "f64";
+    if (curflt == 4) return "f32";
+    if (cursize != 1 && cursize != 2 && cursize != 4 && cursize != 8) return 0;
+    if (curuns) {
+        if (cursize == 1) return "u8";
+        if (cursize == 2) return "u16";
+        if (cursize == 4) return "u32";
+        return "u64";
+    }
+    if (cursize == 1) return "i8";
+    if (cursize == 2) return "i16";
+    if (cursize == 4) return "i32";
+    return "i64";
+}
+/* declspec's specifier loop. A word it does not consume returns -1, not the incoming kb. */
+int fp_decl_kb(const char *w, int kb) {
+    if (!w) return 4;
+    if (fp_eq(w, "char") || fp_eq(w, "_Bool")) return 1;
+    if (fp_eq(w, "short")) return 2;
+    if (fp_eq(w, "long")) return 4;
+    if (fp_eq(w, "void")) return 0;
+    if (fp_eq(w, "float")) return 5;
+    if (fp_eq(w, "double")) return 6;
+    if (fp_typeword(w)) return kb;
+    return -1;
+}
+/* declspec's unsigned bit. A word outside that loop returns -1, not the old flag. */
+int fp_decl_uns(const char *w, int uns) {
+    if (!w) return 4;
+    if (fp_eq(w, "_Bool") || fp_eq(w, "unsigned")) return 1;
+    if (fp_decl_kb(w, 0) < 0) return -1;
+    return uns;
+}
+/* declspec's float kind. A word outside that loop returns -1, not the old kind. */
+int fp_decl_flt(const char *w, int flt) {
+    if (!w) return 4;
+    if (fp_eq(w, "float")) return 4;
+    if (fp_eq(w, "double")) return 8;
+    if (fp_decl_kb(w, 0) < 0) return -1;
+    return flt;
+}
+/* isqual. is_type other than 0 or 1 returns -1. */
+int fp_isqual(int is_type, const char *w) {
+    if (!w) return 4;
+    if (is_type != 0 && is_type != 1) return -1;
+    if (is_type == 0) return 0;
+    if (fp_eq(w, "const") || fp_eq(w, "volatile") || fp_eq(w, "restrict")) return 1;
+    return 0;
+}
+/* isspecq. is_type other than 0 or 1 returns -1. */
+int fp_isspecq(int is_type, const char *w) {
+    if (!w) return 4;
+    if (is_type != 0 && is_type != 1) return -1;
+    if (is_type == 0) return 0;
+    if (fp_isqual(1, w)) return 1;
+    if (fp_eq(w, "static") || fp_eq(w, "extern") || fp_eq(w, "register")) return 1;
+    if (fp_eq(w, "inline") || fp_eq(w, "auto")) return 1;
+    return 0;
+}
+int fp_typetok(const char *w) {
+    if (!w) return 4;
+    if (fp_eq(w, "struct") || fp_eq(w, "union")) return 1;
+    return fp_typeword(w);
+}
+/* is_typeat without the typedef table. A non-keyword returns 0, which is C only when tdfind misses. */
+int fp_typeat(const char *w) {
+    if (!w) return 4;
+    if (fp_typetok(w)) return 1;
+    if (fp_eq(w, "enum")) return 1;
+    return 0;
+}
+int fp_bare_ok(int declenum, int declstruct, int tag_nonempty) {
+    if (declenum) return 1;
+    if (declstruct >= 0 && tag_nonempty) return 1;
+    return 0;
+}
+int fp_tdarr(int tdn, int is_ptr, int pd, int bracket) {
+    if (tdn <= 0) return 0;
+    if (is_ptr || pd > 0 || bracket) return 0;
+    return 1;
+}
+int fp_stw(int curptr, int curelem) {
+    if (curptr) return 8;
+    return curelem;
+}
+/* iswide. is_str other than 0 or 1 returns -1, not a wide flag. */
+int fp_iswide(int is_str, int lead) {
+    if (is_str != 0 && is_str != 1) return -1;
+    if (is_str == 0) return 0;
+    if ((lead & 255) == 76) return 1;
+    return 0;
+}
+int fp_strw(int is_str, int lead) {
+    int w;
+    w = fp_iswide(is_str, lead);
+    if (w < 0) return -1;
+    if (w) return 4;
+    return 1;
+}
+int fp_utf_need(int c) {
+    c = c & 255;
+    if (c >= 240) return 3;
+    if (c >= 224) return 2;
+    if (c >= 192) return 1;
+    return 0;
+}
+/* wdecode's one-byte escape. 'x' returns -1: the value is the hex run, not this byte. */
+int fp_wesc(int c) {
+    c = c & 255;
+    if (c == 110) return 10;
+    if (c == 116) return 9;
+    if (c == 114) return 13;
+    if (c == 48) return 0;
+    if (c == 120) return -1;
+    return c;
+}
+/* hexv. A byte that is not a hex digit returns -1, not c-48 or c-87. */
+int fp_hexv(int c) {
+    if (c >= 48 && c <= 57) return c - 48;
+    if (c >= 65 && c <= 70) return c - 55;
+    if (c >= 97 && c <= 102) return c - 87;
+    return -1;
+}
+/* hexd. A nibble outside 0..15 returns -1, not 87+v. */
+int fp_hexd(int v) {
+    if (v >= 0 && v < 10) return 48 + v;
+    if (v >= 10 && v < 16) return 87 + v;
+    return -1;
+}
+int fp_quote_off(const char *s) {
+    int n;
+    int c;
+    if (!s) return 4;
+    n = fp_len(s);
+    c = s[0] & 255;
+    if (n > 1 && c == 39) return 0;
+    if (n > 2 && (c == 76 || c == 117 || c == 85) && (s[1] & 255) == 39) return 1;
+    if (n > 3 && c == 117 && (s[1] & 255) == 56 && (s[2] & 255) == 39) return 2;
+    return -1;
+}
+int fp_fltlit(const char *s) {
+    int k;
+    int n;
+    int c;
+    int hex;
+    if (!s) return 4;
+    n = fp_len(s);
+    k = 0;
+    hex = 0;
+    if (n > 1 && (s[0] & 255) == 48) {
+        c = s[1] & 255;
+        if (c == 120 || c == 88) hex = 1;
+    }
+    if (hex) {
+        while (k < n) {
+            c = s[k] & 255;
+            if (c == 112 || c == 80) {
+                c = s[n - 1] & 255;
+                if (c == 102 || c == 70) return 4;
+                return 8;
+            }
+            k = k + 1;
+        }
+        return 0;
+    }
+    if (fp_quote_off(s) >= 0) return 0;
+    while (k < n) {
+        c = s[k] & 255;
+        if (c == 46 || c == 101 || c == 69) {
+            c = s[n - 1] & 255;
+            if (c == 102 || c == 70) return 4;
+            return 8;
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+/* fmtneedsrt. s is the raw string token, quotes included. */
+int fp_fmt_rt(const char *s) {
+    int k;
+    int e;
+    int n;
+    int c;
+    int c2;
+    if (!s) return 4;
+    n = fp_len(s);
+    if (n < 2) return 0;
+    k = 1;
+    e = n - 1;
+    while (k < e) {
+        if ((s[k] & 255) == 92) { k = k + 2; continue; }
+        if ((s[k] & 255) == 37) {
+            c = s[k + 1] & 255;
+            if (c == 37) { k = k + 2; continue; }
+            if (c == 102 || c == 70 || c == 101 || c == 69 || c == 103 || c == 71 || c == 97 || c == 65) return 1;
+            if (c == 108 || c == 122 || c == 106 || c == 116) {
+                c2 = 0;
+                if (k + 2 < n) c2 = s[k + 2] & 255;
+                if (c2 == 108 && k + 3 < n) c2 = s[k + 3] & 255;
+                if (c2 == 117 || c2 == 120 || c2 == 88 || c2 == 111) return 1;
+            }
+            if (c == 45 || c == 43 || c == 32 || c == 35 || c == 46) return 1;
+            if (c >= 48 && c <= 57) return 1;
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+/* skipparen over token spellings. 1 if `...` is seen before the matching ')'. */
+int fp_skipparen(const char *s) {
+    int i;
+    int depth;
+    int var;
+    if (!s) return 4;
+    i = 0;
+    depth = 0;
+    var = 0;
+    while (s[i]) {
+        if (s[i] == 40) depth = depth + 1;
+        else if (s[i] == 41) {
+            depth = depth - 1;
+            if (depth == 0) return var;
+        } else if (s[i] == 46 && s[i + 1] != 0 && s[i + 1] == 46 && s[i + 2] != 0 && s[i + 2] == 46) {
+            var = 1;
+            i = i + 2;
+        }
+        i = i + 1;
+    }
+    return var;
+}
+/* aop. 1 +, 2 -, 3 *, 4 /, 5 %, 6 &, 7 |, 8 ^, 9 <<, 10 >>. Unknown spelling returns -1. */
+int fp_aop(const char *op) {
+    if (!op) return 4;
+    if (fp_eq(op, "+=")) return 1;
+    if (fp_eq(op, "-=")) return 2;
+    if (fp_eq(op, "*=")) return 3;
+    if (fp_eq(op, "/=")) return 4;
+    if (fp_eq(op, "%=")) return 5;
+    if (fp_eq(op, "&=")) return 6;
+    if (fp_eq(op, "|=")) return 7;
+    if (fp_eq(op, "^=")) return 8;
+    if (fp_eq(op, "<<=")) return 9;
+    if (fp_eq(op, ">>=")) return 10;
+    return -1;
+}
+/* mbslots. A struct whose stsize is not positive returns -1, not a division by zero. */
+int fp_mbslots(int skip, int st, int bytes, int stsize, int slots, int width, int elem) {
+    if (skip) return 0;
+    if (st >= 0) {
+        if (stsize <= 0) return -1;
+        return (bytes / stsize) * slots;
+    }
+    if (width == 0) {
+        if (elem > 0) return bytes / elem;
+        return 1;
+    }
+    return 1;
+}
+int fp_member_bytes(int sz, int stsize, int is_st, int is_ptr, int marr, int flex, int n) {
+    int msz;
+    msz = sz;
+    if (is_st) msz = stsize;
+    if (is_ptr) msz = 8;
+    if (marr && flex == 0) msz = msz * n;
+    if (flex) msz = 0;
+    return msz;
+}
+int fp_member_width(int sz, int is_st, int is_ptr, int marr, int flex) {
+    int mw;
+    mw = sz;
+    if (is_st) mw = 0;
+    if (is_ptr) mw = 8;
+    if (marr && flex == 0) mw = 0;
+    if (flex) mw = 0;
+    return mw;
+}
+int fp_member_align(int sz, int stalign, int is_st, int is_ptr) {
+    int mal;
+    mal = sz;
+    if (is_st) mal = stalign;
+    if (is_ptr) mal = 8;
+    if (mal > 8) mal = 8;
+    return mal;
+}
+/* stbody's bit-field start. sz <= 0 returns -1. A union field starts at 0. */
+int fp_bf_pos(int is_union, int bitpos, int bw, int sz) {
+    int unit;
+    int pos;
+    if (sz <= 0) return -1;
+    if (is_union) return 0;
+    unit = sz * 8;
+    pos = bitpos;
+    if (bw == 0) pos = (pos + unit - 1) / unit * unit;
+    else if (pos % unit + bw > unit) pos = (pos + unit - 1) / unit * unit;
+    return pos;
+}
+int fp_bf_sig(int muns, int menum, int enumneg) {
+    int sig;
+    sig = 1;
+    if (muns) sig = 0;
+    if (menum) { if (enumneg == 0) sig = 0; }
+    return sig;
+}
+/* argconv's target kind. -1 means C does not convert; it is not kind 0. */
+int fp_arg_to(int si, int kind, int npk, int k, int pk, int curflt, int curptr) {
+    if (si >= 0 && kind == 2 && npk > k) return pk;
+    if (curflt == 4 && curptr == 0) return 8;
+    return -1;
+}
+int fp_call_width(int si, int kind, int is_ptr, int symflt, int symretw, int symstruct, int symelem) {
+    int cursize;
+    cursize = 8;
+    if (si >= 0 && kind == 2 && is_ptr == 0 && symflt) cursize = symflt;
+    if (si >= 0 && kind == 2 && symretw) cursize = symretw;
+    if (si >= 0 && kind == 2 && is_ptr == 0 && symflt == 0 && symstruct < 0 && symelem == 0) cursize = 0;
+    return cursize;
+}
+/* callres's float result. A symflt other than 4 or 8 returns -1, not that value. */
+int fp_call_flt(int si, int kind, int is_ptr, int symflt) {
+    if (si >= 0 && kind == 2 && is_ptr == 0 && symflt) {
+        if (symflt != 4 && symflt != 8) return -1;
+        return symflt;
+    }
+    return 0;
+}
+int fp_call_uns(int si, int kind, int is_ptr, int symuns, int symflt) {
+    int uns;
+    uns = 0;
+    if (si >= 0 && kind == 2 && is_ptr == 0) uns = symuns;
+    if (si >= 0 && kind == 2 && is_ptr == 0 && symflt) uns = 0;
+    return uns;
+}
+int fp_call_void(int si, int kind, int is_ptr, int symflt, int symstruct, int symelem) {
+    if (si >= 0 && kind == 2 && is_ptr == 0 && symflt == 0 && symstruct < 0 && symelem == 0) return 1;
+    return 0;
+}
+/* pf_check. 0 is silent. 1 %s, 2 %p, 3 pointer, 4 float, 5 int-vs-long, 6 long-vs-int, 7 double-vs-int. */
+int fp_pf_check(int c, int lng, int curcall, int curptr, int curfn, int curflt, int cursize, int curstruct) {
+    if (curcall) return 0;
+    if (c == 115) { if (curptr == 0 && curfn == 0) return 1; }
+    if (c == 112) { if (curptr == 0 && curfn == 0) return 2; }
+    if (c == 100 || c == 105 || c == 117 || c == 120 || c == 88 || c == 111 || c == 99) {
+        if (curptr) return 3;
+        if (curflt) return 4;
+        if (lng == 0) { if (cursize == 8 && curstruct < 0) return 5; }
+        else { if (cursize < 8) return 6; }
+    }
+    if (c == 102 || c == 101 || c == 103 || c == 70 || c == 69 || c == 71) { if (curflt == 0) return 7; }
+    return 0;
+}
+/* bracedstr. A flag other than 0 or 1 returns -1. 1 means C's string token, 0 means C's miss.
+   rbrace is the '}' test after the optional comma. */
+int fp_braced_str(int lbrace, int is_str, int wide, int rbrace) {
+    if (lbrace != 0 && lbrace != 1) return -1;
+    if (is_str != 0 && is_str != 1) return -1;
+    if (wide != 0 && wide != 1) return -1;
+    if (rbrace != 0 && rbrace != 1) return -1;
+    if (lbrace == 0) return 0;
+    if (is_str == 0 || wide) return 0;
+    if (rbrace == 0) return 0;
+    return 1;
+}

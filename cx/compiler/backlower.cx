@@ -1,0 +1,379 @@
+#pragma unisa module backlower
+/* Pure judgments from src/back_lower.c. No libc and no include.
+   bk_map, bk_regrow, bk_parse, and the image writes stay in that file.
+   elf headers, hex, tape space, tape separators, register numbers, and
+   __ccw_ already live in srcgate.cx. */
+static const char *bl_ops[69] = {
+    "imm", "mov", "add64", "sub64", "mul64", "xor64", "and64", "or64",
+    "shl64", "shr64", "lshr64", ".div", ".mod", ".udiv", ".umod",
+    "slt64", "sle64", "ult64", "ule64", "eq", "ne",
+    "load64", "store64", ".ld", ".st", ".lea", ".zero",
+    "jump", "jumpz", "call", "callr", "ret",
+    ".frame", ".arg", ".print", ".write", ".exit", ".sys", ".sys6",
+    ".argc", ".argv", "nop",
+    "fadd64", "fsub64", "fmul64", "fdiv64", "flt64", "fle64", "feq64",
+    "fadd32", "fsub32", "fmul32", "fdiv32", "flt32", "fle32", "feq32",
+    "cvtid", "cvtud", "cvtis", "cvtus", "cvtdi", "cvtdu", "cvtsd", "cvtds",
+    "fsqrt64", "fsqrt32", ".hostcall", ".hostaddr", "callm"
+};
+static int bl_eq(const char *a, int an, const char *b) {
+    int i;
+    i = 0;
+    while (b[i]) {
+        if (i >= an || a[i] != b[i]) return 0;
+        i = i + 1;
+    }
+    return i == an;
+}
+static int bl_lit(const char *a, const char *b) {
+    int i;
+    if (!a || !b) return 0;
+    i = 0;
+    while (a[i] && a[i] == b[i]) i = i + 1;
+    return a[i] == 0 && b[i] == 0;
+}
+int bl_hashof(const char *s, int n) {
+    unsigned long long h;
+    int k;
+    if (!s) return 4;
+    if (n < 0) n = 0;
+    h = 5381;
+    k = 0;
+    while (k < n) {
+        h = (h * 33ull + (unsigned long long)(s[k] & 255)) & 4294967295ull;
+        k = k + 1;
+    }
+    return (int)(h & 262143ull);
+}
+int bl_same(const char *a, int an, const char *b, int bn) {
+    int k;
+    if ((!a && an > 0) || (!b && bn > 0)) return 4;
+    if (an != bn || an < 0) return 0;
+    k = 0;
+    while (k < an) {
+        if (a[k] != b[k]) return 0;
+        k = k + 1;
+    }
+    return 1;
+}
+/* bk_zeros and bk_bytes return 0 and store nothing when n <= 0.
+   This is that test: 1 means the length is empty. */
+int bl_zerolen(long long n) {
+    if (n <= 0) return 1;
+    return 0;
+}
+int bl_nzlen(const char *b, int n) {
+    int k;
+    if (!b) return 4;
+    if (n <= 0) return 0;
+    k = n - 1;
+    while (k >= 0) {
+        if (b[k] & 255) return k + 1;
+        k = k - 1;
+    }
+    return 0;
+}
+int bl_opof(const char *s, int n) {
+    int i;
+    if (!s) return 4;
+    if (n < 0) n = 0;
+    i = 0;
+    while (i < 69) {
+        if (bl_eq(s, n, bl_ops[i])) return i;
+        i = i + 1;
+    }
+    /* 不是旧返回：bk_opof 经 vfind 缺名字时返回 -1 */
+    return 2;
+}
+int bl_is(int op, const char *nm) {
+    int n;
+    if (!nm) return 4;
+    if (op < 0 || op >= 69) {
+        /* 不是旧返回：越界下标会走出 BKOPS，bk_is 不返回 2 */
+        return 2;
+    }
+    n = 0;
+    while (nm[n]) n = n + 1;
+    return bl_eq(nm, n, bl_ops[op]);
+}
+int bl_num(const char *s, int n, long long *out) {
+    unsigned long long v;
+    int k, neg, c, base;
+    if (!s || !out) return 4;
+    v = 0;
+    k = 0;
+    neg = 0;
+    base = 10;
+    if (n < 0) n = 0;
+    if (k < n) {
+        if (s[k] == 45) { neg = 1; k = k + 1; }
+        else if (s[k] == 43) k = k + 1;
+    }
+    if (k + 1 < n && s[k] == 48 && ((s[k + 1] | 32) == 120)) {
+        base = 16;
+        k = k + 2;
+    }
+    while (k < n) {
+        c = s[k] & 255;
+        if (c >= 48 && c <= 57) c = c - 48;
+        else if ((c | 32) >= 97 && (c | 32) <= 102) c = (c | 32) - 87;
+        else break;
+        v = v * (unsigned long long)base + (unsigned long long)c;
+        k = k + 1;
+    }
+    if (neg) v = 0ull - v;
+    *out = (long long)v;
+    return 0;
+}
+int bl_tape_fit(int neg, unsigned long long v) {
+    if (neg && v > 9223372036854775808ull) return 0;
+    return 1;
+}
+int bl_destfirst(const char *sh) {
+    if (!sh) return 4;
+    if (bl_lit(sh, "rrr") || bl_lit(sh, "rr") || bl_lit(sh, "ri")) return 1;
+    if (bl_lit(sh, "rs") || bl_lit(sh, "rri") || bl_lit(sh, "rrii")) return 1;
+    return 0;
+}
+int bl_needno(int hasno, int os, int winimp) {
+    if (os < 0 || os > 2) {
+        /* 不是旧返回：未知 os 时 bk_needno 退出或放行，不返回 2 */
+        return 2;
+    }
+    if ((hasno == 0 && os != 2) || (os == 2 && winimp == 0)) return 1;
+    return 0;
+}
+int bl_hasno(const char *nm) {
+    if (!nm) return 4;
+    if (nm[0] == 110) return 0;
+    return 1;
+}
+/* Numbers are the catalog spellings bk_facts_ask reads for the cops
+   bk_lower names. none is not a number. */
+int bl_sysno(int os, int arch, const char *op, long long *out) {
+    int has;
+    unsigned long long no;
+    if (!op || !out) return 4;
+    if (os < 0 || os > 2 || arch < 0 || arch > 1) {
+        /* 不是旧返回：bk_facts_ask 不拒绝未知 os/arch */
+        return 2;
+    }
+    has = 0;
+    no = 0;
+    if (bl_lit(op, "write")) {
+        has = 1;
+        if (os == 0 && arch == 0) no = 1;
+        else if (os == 0 && arch == 1) no = 64;
+        else if (os == 1) no = 33554436ull;
+        else has = 0;
+    } else if (bl_lit(op, "exit")) {
+        has = 1;
+        if (os == 0 && arch == 0) no = 60;
+        else if (os == 0 && arch == 1) no = 93;
+        else if (os == 1) no = 33554433ull;
+        else has = 0;
+    } else if (bl_lit(op, "syscall")) {
+        has = 1;
+        if (os == 0) no = 0;
+        else if (os == 1) no = 33554432ull;
+        else has = 0;
+    } else if (bl_lit(op, "add64") || bl_lit(op, "load64") || bl_lit(op, "call")
+            || bl_lit(op, "callr") || bl_lit(op, "jump") || bl_lit(op, "jumpz")) {
+        has = 0;
+    } else {
+        /* 不是旧返回：bk_cop 缺名字时返回 -1 */
+        return 2;
+    }
+    if (!has) {
+        /* 不是旧返回：none 在 bk_facts_ask 里是 hasno=0 */
+        return -1;
+    }
+    *out = (long long)no;
+    return 0;
+}
+int bl_sys_cop(const char *tape) {
+    if (!tape) return 4;
+    if (bl_lit(tape, ".write") || bl_lit(tape, ".print")) return 1;
+    if (bl_lit(tape, ".exit")) return 2;
+    if (bl_lit(tape, ".sys")) return 3;
+    if (bl_lit(tape, ".sys6")) return 5;
+    return 0;
+}
+int bl_argshape(const char *sh, int *k) {
+    if (!sh || !k) return 4;
+    if (bl_lit(sh, "plain")) { *k = 0; return 0; }
+    if (bl_lit(sh, "atfd_1")) { *k = 1; return 0; }
+    if (bl_lit(sh, "atfd_1_zero")) { *k = 2; return 0; }
+    if (bl_lit(sh, "atfd_2_zero5")) { *k = 3; return 0; }
+    if (bl_lit(sh, "zero4")) { *k = 4; return 0; }
+    /* 不是旧返回：未知 shape 走默认三参数，bk_lower 不返回 2 */
+    return 2;
+}
+int bl_sys6_cell(const char *nm) {
+    if (!nm) return 4;
+    if (bl_lit(nm, "syscall")) return 1;
+    return 0;
+}
+int bl_fuse_shift(long long c, int *lg) {
+    int n;
+    if (!lg) return 4;
+    if (c <= 0 || (c & (c - 1))) return 0;
+    n = 0;
+    while (c > 1) { c = c / 2; n = n + 1; }
+    *lg = n;
+    return 1;
+}
+int bl_addi_ok(long long v) {
+    if (v < 0 || v > 4095) return 0;
+    return 1;
+}
+int bl_sext_trip(int arch, int room, int lab1, int lab2, int lab3,
+                 const char *frame, long long frame_n,
+                 const char *st, long long st_r, long long st_d, long long st_w,
+                 const char *ld, long long ld_r, long long ld_d, long long ld_w,
+                 const char *back, long long back_n) {
+    if (arch != 0 && arch != 1) {
+        /* 不是旧返回：bk_sext_trip 没有未知 arch 这一支 */
+        return -1;
+    }
+    if (arch != 1 || !room || lab1 || lab2 || lab3) return 0;
+    if (!frame || !st || !ld || !back) return 4;
+    if (!bl_lit(frame, ".frame") || frame_n != 8) return 0;
+    if (!bl_lit(back, ".frame") || back_n != -8) return 0;
+    if (!bl_lit(st, ".st") || !bl_lit(ld, ".ld")) return 0;
+    if (st_r != 7 || st_d != 0 || ld_r != 7 || ld_d != 0) return 0;
+    if (st_w != ld_w) return 0;
+    if (st_w != 1 && st_w != 2 && st_w != 4) return 0;
+    return 1;
+}
+int bl_host_areg(int arch, int k) {
+    if (arch != 0 && arch != 1) {
+        /* 不是旧返回：未知 arch 没有寄存器号 */
+        return -1;
+    }
+    if (k < 0 || k > 5) {
+        /* 不是旧返回：bk_lower 只填 0..5 */
+        return -1;
+    }
+    if (arch == 1) return k;
+    if (k == 0) return 7;
+    if (k == 1) return 6;
+    if (k == 2) return 2;
+    if (k == 3) return 1;
+    if (k == 4) return 8;
+    return 9;
+}
+int bl_callm_scratch(int arch) {
+    if (arch == 1) return 16;
+    if (arch == 0) return 11;
+    /* 不是旧返回：未知 arch 旧表达式落到 r11，不返回 -1 */
+    return -1;
+}
+int bl_is_push(int arch, const char *op, long long n, int open,
+               const char *next, long long reg, long long disp) {
+    if (!op || !next) return 4;
+    if (arch != 0 && arch != 1) {
+        /* 不是旧返回：未知 arch 不当成 push，也不返回 -1 */
+        return -1;
+    }
+    if (arch != 0 || !open) return 0;
+    if (!bl_lit(op, ".frame") || n != 8) return 0;
+    if (!bl_lit(next, "store64") || reg != 7 || disp != 0) return 0;
+    return 1;
+}
+int bl_is_pop(int arch, const char *op, long long base, long long disp, int open,
+              const char *next, long long frame) {
+    if (!op || !next) return 4;
+    if (arch != 0 && arch != 1) {
+        /* 不是旧返回：未知 arch 不当成 pop，也不返回 -1 */
+        return -1;
+    }
+    if (arch != 0 || !open) return 0;
+    if (!bl_lit(op, "load64") || base != 7 || disp != 0) return 0;
+    if (!bl_lit(next, ".frame") || frame != -8) return 0;
+    return 1;
+}
+int bl_branch_key(const char *op) {
+    if (!op) return 4;
+    if (bl_lit(op, "jump")) return 0;
+    if (bl_lit(op, "jumpz")) return 1;
+    if (bl_lit(op, "call")) return 2;
+    /* 不是旧返回：其它操作不进 reloc 键，旧路径没有 -1 */
+    return -1;
+}
+int bl_lower_op(const char *nm) {
+    if (!nm) return 4;
+    if (bl_lit(nm, "setreg")) return 100;
+    if (bl_lit(nm, "setmem")) return 101;
+    if (bl_lit(nm, "itoa")) return 102;
+    if (bl_lit(nm, "gate")) return 103;
+    if (bl_lit(nm, "winsave")) return 104;
+    if (bl_lit(nm, "winrest")) return 105;
+    if (bl_lit(nm, "winstdh")) return 106;
+    if (bl_lit(nm, "spinit")) return 107;
+    if (bl_lit(nm, "argsave")) return 108;
+    if (bl_lit(nm, "argvget")) return 109;
+    if (bl_lit(nm, "winargs")) return 110;
+    if (bl_lit(nm, "push")) return 111;
+    if (bl_lit(nm, "pop")) return 112;
+    if (bl_lit(nm, "addi")) return 113;
+    if (bl_lit(nm, "subi")) return 114;
+    if (bl_lit(nm, "lsli")) return 115;
+    if (bl_lit(nm, "sext")) return 116;
+    if (bl_lit(nm, "hostcall")) return 117;
+    if (bl_lit(nm, "hostaddr")) return 118;
+    if (bl_lit(nm, "hentry")) return 119;
+    if (bl_lit(nm, "hleave")) return 120;
+    /* 不是旧返回：TO_* 是宏，没有查找失败码 */
+    return -1;
+}
+int bl_pad8(long long n) {
+    long long m;
+    if (n < 0) {
+        /* 不是旧返回：bkdlen 不为负，取模没有失败码 2 */
+        return 2;
+    }
+    m = n % 8;
+    return (int)((8 - m) % 8);
+}
+int bl_reserve(int os) {
+    if (os == 2) return 776;
+    if (os == 0 || os == 1) return 168;
+    /* 不是旧返回：未知 os 旧路径仍按非 Windows 留 168 */
+    return 2;
+}
+int bl_sp_own(int os, int arch) {
+    if (os < 0 || os > 2 || arch < 0 || arch > 1) {
+        /* 不是旧返回：未知目标旧表达式给出 -1，不返回 2 */
+        return 2;
+    }
+    if (os == 2 && arch == 1) return 1;
+    return 0;
+}
+int bl_is_start(const char *s, int n) {
+    if (!s) return 4;
+    if (n != 6) return 0;
+    return bl_eq(s, n, "_start");
+}
+int bl_is_threads(int os, const char *s, int n) {
+    if (!s) return 4;
+    if (os < 0 || os > 2) {
+        /* 不是旧返回：未知 os 不参与这个名字比较 */
+        return -1;
+    }
+    if (os == 2 || n != 17) return 0;
+    return bl_eq(s, n, "g___unisa_threads");
+}
+int bl_host_sig(long long imm) {
+    if (((imm >> 56) & 255) == 124) return 1;
+    return 0;
+}
+int bl_hostaddr(long long ix) {
+    if (ix >= 0 && ix < 4) return 1;
+    /* 不是旧返回：越界时 bk_lower 退出，不返回 2 */
+    return 2;
+}
+int bl_retreg(int ret) {
+    if (ret < 0) return 31;
+    return ret;
+}

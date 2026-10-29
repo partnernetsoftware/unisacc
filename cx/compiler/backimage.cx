@@ -1,0 +1,471 @@
+#pragma unisa module backimage
+/* Pure decisions from src/back_image.c. No libc and no include.
+   wb, wflush, FILE, and the symbol tables stay in C.
+   sg_interp, sg_elf_machine, sg_rela_type, sg_dyn_name, and sg_rotr32
+   stay in srcgate. A null pointer returns 4. An unknown kind returns
+   -1 or 2, and that return is not the old one. A short buffer returns
+   1 and is left unwritten. */
+static int bi_put_str(const char *s, char *out, int cap) {
+    int n, i;
+    n = 0;
+    while (s[n]) n = n + 1;
+    if (n + 1 > cap) return 1;
+    i = 0;
+    while (i < n) { out[i] = s[i]; i = i + 1; }
+    out[n] = 0;
+    return 0;
+}
+static const char *bi_pick(int fmt, int which) {
+    if (fmt == 0) {
+        if (which == 0) return "";
+        if (which == 1) return ".text";
+        if (which == 2) return ".data";
+        if (which == 3) return ".bss";
+        if (which == 4) return ".rela.text";
+        if (which == 5) return ".symtab";
+        if (which == 6) return ".strtab";
+        if (which == 7) return ".shstrtab";
+        if (which == 8) return ".unisa.tape";
+        return 0;
+    }
+    if (fmt == 1) {
+        if (which == 0) return "__text";
+        if (which == 1) return "__data";
+        if (which == 2) return "__bss";
+        if (which == 3) return "__unisa_tape";
+        return 0;
+    }
+    /* Mach-O segment paired with the section index, then the image-only ones. */
+    if (fmt == 2) {
+        if (which == 0) return "__TEXT";
+        if (which == 1) return "__DATA";
+        if (which == 2) return "__DATA";
+        if (which == 3) return "__UNISA";
+        if (which == 4) return "__PAGEZERO";
+        if (which == 5) return "__LINKEDIT";
+        return 0;
+    }
+    if (fmt == 3) {
+        if (which == 0) return ".text";
+        if (which == 1) return ".data";
+        if (which == 2) return ".bss";
+        if (which == 3) return ".unisatp";
+        return 0;
+    }
+    if (fmt == 4) {
+        if (which == 0) return ".text";
+        if (which == 1) return ".rdata";
+        if (which == 2) return ".data";
+        if (which == 3) return ".reloc";
+        return 0;
+    }
+    return 0;
+}
+int bi_le_len(int width) {
+    if (width == 16) return 2;
+    if (width == 32) return 4;
+    if (width == 64) return 8;
+    /* 不是旧返回 */
+    return -1;
+}
+int bi_le_put(unsigned long long v, int width, char *out, int cap) {
+    int n, i;
+    if (!out) return 4;
+    if (cap < 0) return 4;
+    n = bi_le_len(width);
+    if (n < 0) {
+        /* 不是旧返回 */
+        return -1;
+    }
+    if (n > cap) return 1;
+    i = 0;
+    while (i < n) {
+        out[i] = (char)(v & 255ull);
+        v = v >> 8;
+        i = i + 1;
+    }
+    return 0;
+}
+int bi_be_put(unsigned long long v, int width, char *out, int cap) {
+    int n, i, shift;
+    if (!out) return 4;
+    if (cap < 0) return 4;
+    if (width == 32) n = 4;
+    else if (width == 64) n = 8;
+    else {
+        /* 不是旧返回 */
+        return -1;
+    }
+    if (n > cap) return 1;
+    shift = (n - 1) * 8;
+    i = 0;
+    while (i < n) {
+        out[i] = (char)((v >> shift) & 255ull);
+        shift = shift - 8;
+        i = i + 1;
+    }
+    return 0;
+}
+int bi_zero(int n, char *out, int cap) {
+    int i;
+    if (!out) return 4;
+    if (n < 0 || cap < 0) return 4;
+    if (n > cap) return 1;
+    i = 0;
+    while (i < n) { out[i] = 0; i = i + 1; }
+    return 0;
+}
+int bi_name_put(const char *s, int n, char *out, int cap) {
+    int k;
+    if (!s || !out) return 4;
+    if (n < 0 || cap < 0) return 4;
+    if (n > cap) return 1;
+    k = 0;
+    while (s[k] && k < n) { out[k] = s[k]; k = k + 1; }
+    while (k < n) { out[k] = 0; k = k + 1; }
+    return 0;
+}
+int bi_sprefix(int kind, const char *name, int n) {
+    if (n < 0) return 4;
+    if (n > 0 && !name) return 4;
+    if (kind < 0 || kind > 3) {
+        /* 不是旧返回 */
+        return -1;
+    }
+    if (kind >= 2 && n > 2 && name[0] == 103 && name[1] == 95) return 2;
+    if (kind == 3 && n > 6 && name[0] == 95 && name[1] == 95 && name[2] == 99
+        && name[3] == 99 && name[4] == 120 && name[5] == 95) return 6;
+    if (kind == 2 && n > 6 && name[0] == 95 && name[1] == 95 && name[2] == 99
+        && name[3] == 99 && name[4] == 119 && name[5] == 95) return 6;
+    return 0;
+}
+int bi_hasccw(int any, int kind, const char *name, int n, const char *wrap, int wn) {
+    int k;
+    if (n < 0 || wn < 0) return 4;
+    if (n > 0 && !name) return 4;
+    if (wn > 0 && !wrap) return 4;
+    if (kind < 0 || kind > 3) {
+        /* 不是旧返回 */
+        return -1;
+    }
+    if (!any || kind != 1) return 0;
+    if (wn != n + 6) return 0;
+    if (wrap[0] != 95 || wrap[1] != 95 || wrap[2] != 99 || wrap[3] != 99 || wrap[4] != 119 || wrap[5] != 95) return 0;
+    k = 0;
+    while (k < n && wrap[6 + k] == name[k]) k = k + 1;
+    if (k == n) return 1;
+    return 0;
+}
+int bi_snamelen(int nlen, int prefix, int us, int ccw) {
+    if ((us != 0 && us != 1) || (ccw != 0 && ccw != 1)) {
+        /* 不是旧返回 */
+        return -1;
+    }
+    return nlen - prefix + us + (ccw ? 5 : 0);
+}
+int bi_sname_put(const char *name, int n, int prefix, int us, int ccw, char *out, int cap) {
+    int k, at, need;
+    if (!name || !out) return 4;
+    if (n < 0 || prefix < 0 || cap < 0) return 4;
+    if (prefix > n || (us != 0 && us != 1) || (ccw != 0 && ccw != 1)) {
+        /* 不是旧返回 */
+        return -1;
+    }
+    need = us + (n - prefix) + (ccw ? 5 : 0) + 1;
+    if (need > cap) return 1;
+    at = 0;
+    if (us) { out[at] = 95; at = at + 1; }
+    k = prefix;
+    while (k < n) { out[at] = name[k]; at = at + 1; k = k + 1; }
+    if (ccw) {
+        out[at] = 46; out[at + 1] = 98; out[at + 2] = 111; out[at + 3] = 100; out[at + 4] = 121;
+        at = at + 5;
+    }
+    out[at] = 0;
+    return 0;
+}
+int bi_oname(const char *name, int n, char *out, int cap) {
+    int k;
+    if (!name || !out) return 4;
+    if (n < 0 || cap < 0) return 4;
+    if (n + 2 > cap) return 1;
+    out[0] = 95;
+    k = 0;
+    while (k < n) { out[1 + k] = name[k]; k = k + 1; }
+    out[1 + n] = 0;
+    return n + 2;
+}
+int bi_cname(const char *s, int n, char *out, int cap, long *strpos) {
+    int k;
+    if (!s || !out) return 4;
+    if (n < 0 || cap < 0) return 4;
+    if (n > 8 && !strpos) return 4;
+    if (cap < 8) return 1;
+    if (n <= 8) {
+        k = 0;
+        while (k < n) { out[k] = s[k]; k = k + 1; }
+        while (k < 8) { out[k] = 0; k = k + 1; }
+        return 0;
+    }
+    bi_le_put(0, 32, out, cap);
+    bi_le_put((unsigned long long)*strpos, 32, out + 4, cap - 4);
+    *strpos = *strpos + n + 1;
+    return 0;
+}
+int bi_sect_name(int fmt, int which, char *out, int cap) {
+    const char *s;
+    if (!out) return 4;
+    if (cap < 0) return 4;
+    if (fmt < 0 || fmt > 4) {
+        /* 不是旧返回 */
+        return 2;
+    }
+    s = bi_pick(fmt, which);
+    if (!s) {
+        /* 不是旧返回 */
+        return -1;
+    }
+    return bi_put_str(s, out, cap);
+}
+int bi_shstr_off(int which) {
+    if (which == 0) return 0;
+    if (which == 1) return 1;
+    if (which == 2) return 7;
+    if (which == 3) return 13;
+    if (which == 4) return 18;
+    if (which == 5) return 29;
+    if (which == 6) return 37;
+    if (which == 7) return 45;
+    if (which == 8) return 55;
+    /* 不是旧返回 */
+    return -1;
+}
+int bi_elf_bind(int kind) {
+    if (kind == 1) return 0;
+    if (kind == 2 || kind == 3) return 16;
+    /* 不是旧返回 */
+    return -1;
+}
+int bi_macho_ntype(int kind) {
+    if (kind == 1) return 14;
+    if (kind == 2) return 15;
+    if (kind == 3) return 1;
+    /* 不是旧返回 */
+    return -1;
+}
+int bi_coff_cls(int kind) {
+    if (kind == 1) return 3;
+    if (kind == 2 || kind == 3) return 2;
+    /* 不是旧返回 */
+    return -1;
+}
+int bi_reloc_ty(int os, int arm, int ty) {
+    if (os < 0 || os > 2) {
+        /* 不是旧返回 */
+        return 2;
+    }
+    if (arm != 0 && arm != 1) {
+        /* 不是旧返回 */
+        return -1;
+    }
+    if (os == 0) {
+        if (ty == 900) return 4;
+        if (ty == 901) return 283;
+        /* 不是旧返回 */
+        return -1;
+    }
+    if (os == 1) {
+        if (ty == 901 || ty == 900) return 2;
+        if (arm == 1) {
+            if (ty == 275) return 3;
+            if (ty == 311) return 5;
+            if (ty == 312) return 6;
+            return 4;
+        }
+        if (ty == 9) return 3;
+        return 1;
+    }
+    if (arm == 0) return 4;
+    if (ty == 901) return 3;
+    if (ty == 275) return 4;
+    return 6;
+}
+int bi_macho_cpu(int arm) {
+    if (arm == 1) return 0x0100000C;
+    if (arm == 0) return 0x01000007;
+    /* 不是旧返回 */
+    return -1;
+}
+int bi_coff_mach(int arm) {
+    if (arm == 1) return 0xAA64;
+    if (arm == 0) return 0x8664;
+    /* 不是旧返回 */
+    return -1;
+}
+int bi_def(long tpc, long addr) {
+    if (tpc >= 0 || addr >= 0) return 1;
+    return 0;
+}
+int bi_symkind(int defined, int global, int is_start, int undef_ref) {
+    if ((defined != 0 && defined != 1) || (global != 0 && global != 1)
+        || (is_start != 0 && is_start != 1) || (undef_ref != 0 && undef_ref != 1)) {
+        /* 不是旧返回 */
+        return -1;
+    }
+    if (defined) {
+        if (global || is_start) return 2;
+        return 1;
+    }
+    if (undef_ref) return 3;
+    return 0;
+}
+int bi_obj_os(const char *target, int *os, int *arm) {
+    int n, o, a;
+    if (!target || !os || !arm) return 4;
+    n = 0;
+    while (target[n]) n = n + 1;
+    if (n < 5) {
+        /* 不是旧返回 */
+        return -1;
+    }
+    if (target[0] == 111) o = 1;
+    else if (target[0] == 119) o = 2;
+    else if (target[0] == 108) o = 0;
+    else {
+        /* 不是旧返回 */
+        return 2;
+    }
+    if (target[4] == 97) a = 1;
+    else a = 0;
+    *os = o;
+    *arm = a;
+    return 0;
+}
+long bi_tapelen(int unit, const char *tape, long tapen, const char *target) {
+    long v, d;
+    int tl;
+    if (unit == 0 || !tape) return 0;
+    if (!target || tapen < 0) return 4;
+    v = tapen;
+    d = 1;
+    while (v >= 10) { v = v / 10; d = d + 1; }
+    tl = 0;
+    while (target[tl]) tl = tl + 1;
+    return 11 + tl + 1 + d + 1 + tapen;
+}
+int bi_rd(const char *p, int n, int cap, unsigned long long *out) {
+    unsigned long long v;
+    int i;
+    if (!p || !out) return 4;
+    if (cap < 0) return 4;
+    if (n != 4 && n != 8) {
+        /* 不是旧返回 */
+        return -1;
+    }
+    if (n > cap) return 1;
+    v = 0;
+    i = n - 1;
+    while (i >= 0) {
+        v = (v << 8) | (unsigned long long)(p[i] & 255);
+        i = i - 1;
+    }
+    *out = v;
+    return 0;
+}
+int bi_imp_put(const char *nm, int n, char *out, int cap) {
+    int q, take, need;
+    if (!nm || !out) return 4;
+    if (n < 0 || cap < 0) return 4;
+    take = n;
+    if (take > 40) take = 40;
+    need = 6 + take + 1;
+    if (need > cap) return 1;
+    out[0] = 95; out[1] = 95; out[2] = 105; out[3] = 109; out[4] = 112; out[5] = 95;
+    q = 0;
+    while (q < take) { out[6 + q] = nm[q]; q = q + 1; }
+    out[6 + take] = 0;
+    return 0;
+}
+int bi_hostsym(int i, char *out, int cap) {
+    const char *s;
+    if (!out) return 4;
+    if (cap < 0) return 4;
+    if (i == 0) s = "dlopen";
+    else if (i == 1) s = "dlsym";
+    else if (i == 2) s = "dlclose";
+    else if (i == 3) s = "dlerror";
+    else {
+        /* 不是旧返回 */
+        return -1;
+    }
+    return bi_put_str(s, out, cap);
+}
+int bi_sect_flags(int fmt, int which, unsigned int *flags) {
+    unsigned int f;
+    if (!flags) return 4;
+    if (fmt < 0 || fmt > 4 || fmt == 2) {
+        /* 不是旧返回 */
+        return 2;
+    }
+    f = 0;
+    if (fmt == 0) {
+        if (which == 0 || which == 5 || which == 6 || which == 7 || which == 8) f = 0;
+        else if (which == 1) f = 6;
+        else if (which == 2 || which == 3) f = 3;
+        else if (which == 4) f = 64;
+        else {
+            /* 不是旧返回 */
+            return -1;
+        }
+    } else if (fmt == 1) {
+        if (which == 0) f = 0x80000400u;
+        else if (which == 1) f = 0;
+        else if (which == 2) f = 1;
+        else if (which == 3) f = 0x02000000u;
+        else {
+            /* 不是旧返回 */
+            return -1;
+        }
+    } else if (fmt == 3) {
+        if (which == 0) f = 0x60500020u;
+        else if (which == 1) f = 0xC0500040u;
+        else if (which == 2) f = 0xC0500080u;
+        else if (which == 3) f = 0x00100A00u;
+        else {
+            /* 不是旧返回 */
+            return -1;
+        }
+    } else {
+        if (which == 0) f = 0x60000020u;
+        else if (which == 1) f = 0x40000040u;
+        else if (which == 2) f = 0xC0000040u;
+        else if (which == 3) f = 0x42000040u;
+        else {
+            /* 不是旧返回 */
+            return -1;
+        }
+    }
+    *flags = f;
+    return 0;
+}
+int bi_nsect(int fmt, int tape) {
+    if (tape != 0 && tape != 1) {
+        /* 不是旧返回 */
+        return -1;
+    }
+    if (fmt == 0) return tape ? 9 : 8;
+    if (fmt == 1) return tape ? 4 : 3;
+    if (fmt == 3) return tape ? 4 : 3;
+    if (fmt == 4) return 4;
+    /* 不是旧返回 */
+    return 2;
+}
+int bi_mrel(unsigned int sym, int pcrel, int ext, int type, unsigned int *out) {
+    if (!out) return 4;
+    if ((pcrel != 0 && pcrel != 1) || (ext != 0 && ext != 1) || type < 0 || type > 15) {
+        /* 不是旧返回 */
+        return -1;
+    }
+    *out = (sym & 16777215u) | ((unsigned int)pcrel << 24) | (2u << 25) | ((unsigned int)ext << 27) | ((unsigned int)type << 28);
+    return 0;
+}
