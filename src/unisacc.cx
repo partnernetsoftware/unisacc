@@ -3,6 +3,7 @@
    Seven byte streams from Paper A. Word class comes from bindhost. */
 #pragma unisa use compiler.bindhost
 #pragma unisa use driver.cli
+#pragma unisa use driver.archive
 /* 1 ar, 2 as, 3 nm/objdump, 11 version, 12 help, 13 --, 20 source.
    0 is an ordinary word. A null pointer returns 4. */
 int us_word(const char *word, int is_object) {
@@ -47,6 +48,62 @@ int us_stream_name(int index, const char **out) {
     if (index == 6) { *out = "elf"; return 0; }
     return 2;
 }
+int us_as(int argc, char **argv) {
+    const char *in;
+    char line[256];
+    int i;
+    int arch;
+    in = 0;
+    i = 2;
+    while (i < argc) {
+        if (argv[i][0] == '-' && argv[i][1]) {
+            if (!strcmp(argv[i], "-o") && i + 1 < argc) {
+                i = i + 2;
+                continue;
+            }
+            if (!strcmp(argv[i], "-b") && i + 1 < argc) {
+                arch = bx_as_arch(argv[i + 1]);
+                if (arch != 0 && arch != 1) {
+                    fputs(bx_as_targets(), stderr);
+                    return 2;
+                }
+                i = i + 2;
+                continue;
+            }
+            if (bx_as_opt_line(argv[i], line, 256) == 0) fputs(line, stderr);
+            else fprintf(stderr, "as: unknown option %s\n", argv[i]);
+            return 2;
+        }
+        in = argv[i];
+        i = i + 1;
+    }
+    if (!in) {
+        fputs(bx_as_usage(), stderr);
+        return 2;
+    }
+    return 2;
+}
+int us_view(int argc, char **argv) {
+    int dis;
+    dis = argv[1][0] == 'o';
+    if (dis ? (argc != 4 || strcmp(argv[2], "-d")) : argc != 3) {
+        fputs(bx_view_usage(dis), stderr);
+        return 2;
+    }
+    return 2;
+}
+int us_ar(int argc, char **argv) {
+    char why[128];
+    if (argc < 4) {
+        fputs(bx_ar_usage(), stderr);
+        return 2;
+    }
+    if (cxr_operation(argv[2], why, 128)) {
+        fputs(why, stderr);
+        return 2;
+    }
+    return 2;
+}
 int us_fail(const char *s) {
     char line[512];
     if (!s) return 1;
@@ -61,29 +118,17 @@ int main(int argc, char **argv) {
     static CxcState opts;
     char why[128];
     const char *src;
-    const char *name;
     const char *text;
     int i;
-    int n;
     int next;
     int parsed;
     int kind;
     src = 0;
-    if (argc < 2) {
-        n = us_stream_count();
-        i = 0;
-        while (i < n) {
-            if (us_stream_name(i, &name) != 0) return 1;
-            printf("%s\n", name);
-            i = i + 1;
-        }
-        return 0;
-    }
+    if (argc < 2) return us_fail(bx_src_why(0));
     kind = us_word(argv[1], 0);
-    if (kind == 1 || kind == 2 || kind == 3) {
-        printf("tool %d\n", kind);
-        return 2;
-    }
+    if (kind == 1) return us_ar(argc, argv);
+    if (kind == 2) return us_as(argc, argv);
+    if (kind == 3) return us_view(argc, argv);
     if (cxc_default_run(&opts, argv, argc, why, 128)) return us_fail(why);
     i = 1;
     while (i < argc) {
@@ -111,6 +156,7 @@ int main(int argc, char **argv) {
         if (!src) src = argv[i];
         i = i + 1;
     }
+    if (!src) return us_fail(bx_src_why(0));
     printf("out=%s\n", opts.out ? opts.out : "-");
     printf("src=%s\n", src ? src : "-");
     printf("target=%s\n", opts.target ? opts.target : "-");

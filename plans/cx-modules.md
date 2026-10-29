@@ -644,6 +644,18 @@ flowchart TD
   cap["检查文件 32 个 use"] --> pull["bindargs.cx 的 use bindcount"]
 ```
 
+## 123. 2026-10-29 入口去掉七流名单和 tool N
+
+构造脚本不改。无参数退出 1，stderr 48，`expected a C source file`。`ar` 退出 2，stderr 44，是用法行。`ar zzz lib.a` 退出 2，stderr 35。`as` 退出 2，stderr 63。`as -b nope x.s` 退出 2，stderr 72。`as x.s` 和 `nm a.o` 退出 2，stdout 0，stderr 0，文件读写还在归档 C。`nm` 退出 2，stderr 25。`objdump` 退出 2，stderr 33。单独 `-c a.c` 退出 0，stdout 38，`mode=2`。`-c -b lnx/x86_64 a.c` 退出 0，stdout 47，`mode=0`，因为 `-b` 覆盖了 `-c` 的 mode。`--version` 仍是 stdout 15。没有产品安装，没有 hostseed，没有 `--all`。整棵重写还没完成。
+
+```mermaid
+flowchart TD
+  entry["src/unisacc.cx"] --> nosrc["无源文件则 expected a C source file"]
+  entry --> ar["ar/as/nm/objdump 的用法和操作检查"]
+  entry --> cmode["-c a.c 的 mode=2"]
+  cmode --> miss["后面再 -b 时 mode 变成 0"]
+```
+
 ## 122. 2026-10-29 入口改走 driver.cli 的选项行走
 
 构造脚本不改。`src/driver` 指向 `../cx/driver`。`src/unisacc.cx` 调用 `cxc_default_run` 和 `cxc_step`。未知 `-z` 退出 1，stderr 是 `option not migrated`。已有源文件后再遇 `-z` 用长拒绝。缺 `-o` 参数退出 1，stderr 是 `missing output path`。`-o out a.c` 退出 0，stdout 40：`out=out`、`src=a.c`、`mode=0`、`runit=0`。`-c -b lnx/x86_64 a.c` 退出 0，`target=lnx/x86_64`，`mode=0`，因为后面的 `-b` 把 mode 写成 0。版本、帮助、`ar`、无参数仍按上一刀。这还不编译源文件。没有产品安装，没有 hostseed，没有 `--all`。整棵重写还没完成。
