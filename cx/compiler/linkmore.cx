@@ -1,0 +1,210 @@
+#pragma unisa module linkmore
+/* Pure judgments from src/tapelink.c that tapelink.cx does not export.
+   No libc and no include. The walk, the pool, and the writes stay in C.
+   A null pointer returns 4, except lm_ar_dec and lm_objnum, which
+   return -1. 同旧返回 means the old if returns that code.
+   不是旧返回 means the old if does not. */
+static int same_span(const char *s, int n, const char *w) {
+    int k;
+    k = 0;
+    while (w[k]) {
+        if (k >= n || (s[k] & 255) != (w[k] & 255)) return 0;
+        k = k + 1;
+    }
+    return k == n;
+}
+/* tl_ar_dec: digits, then spaces, else -1. */
+int lm_ar_dec(const char *b, int w, int max) {
+    int v;
+    int k;
+    int digit;
+    int d;
+    if (!b) return -1; /* 不是旧返回 */
+    v = 0;
+    k = 0;
+    digit = 0;
+    while (k < w && (b[k] & 255) >= 48 && (b[k] & 255) <= 57) {
+        d = (b[k] & 255) - 48;
+        if (d > max || v > (max - d) / 10) return -1; /* 同旧返回 */
+        v = v * 10 + d;
+        digit = 1;
+        k = k + 1;
+    }
+    if (!digit) return -1; /* 同旧返回 */
+    while (k < w) {
+        if ((b[k] & 255) != 32) return -1; /* 同旧返回 */
+        k = k + 1;
+    }
+    return v; /* 同旧返回 */
+}
+/* tl_ar_operation: first byte is r, q, t, or x. */
+int lm_ar_op(const char *op) {
+    int c;
+    if (!op) return 4; /* 不是旧返回 */
+    c = op[0] & 255;
+    if (c == 114 || c == 113 || c == 116 || c == 120) return 1; /* 同旧返回 */
+    return 0; /* 同旧返回 */
+}
+/* isobject: .o, .a, or .obj. */
+int lm_isobject(const char *p) {
+    int n;
+    if (!p) return 4; /* 不是旧返回 */
+    n = 0;
+    while (p[n]) n = n + 1;
+    if (n >= 2 && (p[n - 2] & 255) == 46 && ((p[n - 1] & 255) == 111 || (p[n - 1] & 255) == 97)) return 1; /* 同旧返回 */
+    if (n >= 4 && (p[n - 4] & 255) == 46 && (p[n - 3] & 255) == 111 && (p[n - 2] & 255) == 98 && (p[n - 1] & 255) == 106) return 1; /* 同旧返回 */
+    return 0; /* 同旧返回 */
+}
+/* tl_objnum: little-endian field, or -1 when it does not fit. */
+int lm_objnum(const char *p, int w, int max) {
+    int v;
+    int d;
+    if (!p) return -1; /* 不是旧返回 */
+    if (w < 0) return -1; /* 不是旧返回 */
+    v = 0;
+    while (w > 0) {
+        w = w - 1;
+        d = p[w] & 255;
+        if (d > max || v > (max - d) / 256) return -1; /* 同旧返回 */
+        v = v * 256 + d;
+    }
+    return v; /* 同旧返回 */
+}
+/* archive magic !<arch> plus a newline. */
+int lm_ar_magic(int b0, int b1, int b2, int b3, int b4, int b5, int b6, int b7) {
+    if (b0 == 33 && b1 == 60 && b2 == 97 && b3 == 114 && b4 == 99 && b5 == 104 && b6 == 62 && b7 == 10) return 1; /* 同旧返回 */
+    return 0; /* 同旧返回 */
+}
+int lm_elf_magic(int b0, int b1, int b2, int b3) {
+    if (b0 == 127 && b1 == 69 && b2 == 76 && b3 == 70) return 1; /* 同旧返回 */
+    return 0; /* 同旧返回 */
+}
+int lm_macho_magic(int b0, int b1, int b2, int b3) {
+    if ((b0 & 255) == 207 && (b1 & 255) == 250 && (b2 & 255) == 237 && (b3 & 255) == 254) return 1; /* 同旧返回 */
+    return 0; /* 同旧返回 */
+}
+/* ELF class, data, and version bytes are 2, 1, 1. */
+int lm_elf_class(int cls, int data, int ver) {
+    if (cls == 2 && data == 1 && ver == 1) return 1; /* 同旧返回 */
+    return 0; /* 同旧返回 */
+}
+/* 62 is lnx/x86_64, 183 is lnx/arm64. 1 and 2 are not old returns. */
+int lm_elf_mach(int machine) {
+    if (machine == 62) return 1; /* 不是旧返回 */
+    if (machine == 183) return 2; /* 不是旧返回 */
+    return 0; /* 同旧拒绝 */
+}
+/* 16777223 is osx/x86_64, 16777228 is osx/arm64. */
+int lm_macho_mach(int machine) {
+    if (machine == 16777223) return 1; /* 不是旧返回 */
+    if (machine == 16777228) return 2; /* 不是旧返回 */
+    return 0; /* 同旧拒绝 */
+}
+/* 34404 is win/x86_64, 43620 is win/arm64. */
+int lm_coff_mach(int machine) {
+    if (machine == 34404) return 1; /* 不是旧返回 */
+    if (machine == 43620) return 2; /* 不是旧返回 */
+    return 0; /* 同旧拒绝 */
+}
+/* the first record is exactly ".unit 2". */
+int lm_unit_line(const char *s, int n) {
+    if (!s) return 4; /* 不是旧返回 */
+    if (n == 7 && same_span(s, n, ".unit 2")) return 1; /* 同旧返回 */
+    return 0; /* 同旧返回 */
+}
+int lm_keep(const char *s, int n) {
+    if (!s) return 4; /* 不是旧返回 */
+    if (same_span(s, n, "_start") || same_span(s, n, "__init")) return 1; /* 同旧返回 */
+    return 0; /* 同旧返回 */
+}
+int lm_init_u(const char *s, int n) {
+    if (!s) return 4; /* 不是旧返回 */
+    if (same_span(s, n, "__init_u")) return 1; /* 同旧返回 */
+    return 0; /* 同旧返回 */
+}
+/* GNU "/" and "//", an empty name, or BSD "__.SYMDEF". */
+int lm_symskip(int c0, int c1, int c2, int c3) {
+    if (c0 == 47 || c0 == 0) return 1; /* 同旧返回 */
+    if (c0 == 95 && c1 == 95 && c2 == 46 && c3 == 83) return 1; /* 同旧返回 */
+    return 0; /* 同旧返回 */
+}
+int lm_hdr_end(int c58, int c59) {
+    if (c58 == 96 && c59 == 10) return 1; /* 同旧返回 */
+    return 0; /* 同旧返回 */
+}
+int lm_longname(int c0, int c1, int c2) {
+    if (c0 == 35 && c1 == 49 && c2 == 47) return 1; /* 同旧返回 */
+    return 0; /* 同旧返回 */
+}
+/* an odd body takes one pad byte. */
+int lm_pad(int body) {
+    if (body < 0) return 4; /* 不是旧返回 */
+    if (body % 2) return 1; /* 同旧返回 */
+    return 0; /* 同旧返回 */
+}
+/* offset of the byte after the last slash. 0 means there is none. */
+int lm_base_at(const char *name, int n) {
+    int k;
+    if (!name) return 4; /* 不是旧返回 */
+    if (n < 0) return 4; /* 不是旧返回 */
+    k = n;
+    while (k > 0 && (name[k - 1] & 255) != 47) k = k - 1;
+    return k; /* 同旧返回 */
+}
+int lm_tape_mark(const char *s, int n) {
+    if (!s) return 4; /* 不是旧返回 */
+    if (n < 11) return 0; /* 同旧返回 */
+    if ((s[0] & 255) == 85 && (s[1] & 255) == 78 && (s[2] & 255) == 73 && (s[3] & 255) == 83 && (s[4] & 255) == 65 && (s[5] & 255) == 84 && (s[6] & 255) == 65 && (s[7] & 255) == 80 && (s[8] & 255) == 69 && (s[9] & 255) == 49 && (s[10] & 255) == 32) return 1; /* 同旧返回 */
+    return 0; /* 同旧返回 */
+}
+int lm_sys_tok(const char *s, int n) {
+    if (!s) return 4; /* 不是旧返回 */
+    if (same_span(s, n, ".sys") || same_span(s, n, ".sys6")) return 1; /* 同旧返回 */
+    return 0; /* 同旧返回 */
+}
+int lm_names_full(int cnt, int end, int n) {
+    if (cnt >= 65536 || end + n >= 2097152) return 1; /* 同旧返回 */
+    return 0; /* 同旧返回 */
+}
+int lm_gpool_full(int cnt, int end, int n) {
+    if (cnt >= 65536 || end + n >= 1048576) return 1; /* 同旧返回 */
+    return 0; /* 同旧返回 */
+}
+/* tl_field: left-justified, space padded. A negative value returns 4. */
+int lm_field(char *dst, int w, int v, const char *s) {
+    char d[24];
+    int n;
+    int k;
+    k = 0;
+    if (!dst) return 4; /* 不是旧返回 */
+    if (w < 0) return 4; /* 不是旧返回 */
+    if (s) {
+        while (s[k] && k < w) {
+            dst[k] = s[k];
+            k = k + 1;
+        }
+    } else {
+        if (v < 0) return 4; /* 不是旧返回 */
+        n = 0;
+        if (v == 0) {
+            d[n] = 48;
+            n = n + 1;
+        }
+        while (v > 0) {
+            if (n >= 24) return 1; /* 不是旧返回 */
+            d[n] = 48 + (v % 10);
+            v = v / 10;
+            n = n + 1;
+        }
+        while (n > 0 && k < w) {
+            n = n - 1;
+            dst[k] = d[n];
+            k = k + 1;
+        }
+    }
+    while (k < w) {
+        dst[k] = 32;
+        k = k + 1;
+    }
+    return 0; /* 同旧返回 */
+}
