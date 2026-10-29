@@ -143,6 +143,11 @@ agent 模式新增 `/help`、`/status`、`/clear`，均只在本地处理、不�
 - **第八批已落地（2026-10-29）**：成功行从 `↻ 本轮结束 rounds=1 actions=3 · 已答 · semantic acceptance (work): …` 改为 `✓ 已验收 · 本轮结束 1 轮 3 步 · 理由`（未经评审接受的写 `✓ 已答`，没有答复的写 `✓ 已结束（未作答）`），与 `◐`/`✗` 一起凑齐三态。保留「本轮结束」四字，因为 `probes/reload_runtime.py` 靠它判断一轮结束。selftest：`accepted row reads ✓ 已验收 and keeps 本轮结束`；tmux 实测：`✓ 已验收 · 本轮结束 1 轮 1 步 · exec ran date +%Y, exit 0, …`。
 - 下一批候选：正文流式显示；转录按 cwd 分开；exec 三档权限；P0 根治（引用原文，由 harness 定位）。
 - **第十批已落地（2026-10-29）**：忙碌行。原来执行命令时一直显示「等模型」；现在收到 exec 行（命令执行前发出）就显示 `跑命令 <命令>`，下一次请求在途（`net_in_flight()`）时切回「等模型」。文案从 `请求中 等模型 3秒 7745词元 上传 32839字节 已收 574字节 hit 1152 miss 6561` 改为 `⏳ 等模型 3秒 · 7745词元 · ↑32.1KB 已收574B · 缓存命中15%`，保留「已收」二字（已有断言依赖它）。selftest：`busy line names the running command and reads sizes`；tmux 实测已见切换。原来 exec 同步执行时秒数不走、界面不刷新，第十一批已解决。
+- **第十八批已落地（2026-10-29）**：项目状态行。回应机房的提议（希望一眼看到进度、余刀/下一刀、拒绝句）。
+  - 评估：进度和下一刀**不做成 csih 内置**（REJECT）。csih 是通用 harness，不掌握 unisacc 的盘点分母；自己去数等于第二套口径，跟盘点对不上时就是「看起来可核验」的假进度。拒绝句和失败原因 ACCEPT，已有 `✗/◐` 结果行、`blocked:` 原因和错误行。
+  - 做法：csih 只负责显示。读 `$CSIH_STATUS_FILE`（默认是当前目录的 `.csih-status`）的前 3 行非空内容，显示在标题下方，形如 `项目> …`；首行附带文件多久前写的，超过 `$CSIH_STATUS_STALE_SEC`（默认 600 秒）标「陈旧」。每帧重读，文件改了画面跟着变；文件不存在就不占行。日志区让出相应行数。
+  - 内容由项目自己的工具写，例如机房的 `.cx` 输出 `进度 37/52 .cx（来源 inventory）`、`下一刀 grk: …`、`拒绝 not covered: …`。数字可不可核验，取决于写它的工具。
+  - selftest：`project status file shows up to 3 rows with age`。tmux 实测：三行都显示，改写文件后 1.5 秒内画面更新。
 - **第十七批已落地（2026-10-29）**：P0 根治（引用原文，由 harness 定位）。
   - observation_refs 增加可选第六键 `quote`（非空，≤200 字节）。正文里能找到它时，用它的字节位置作为引用范围（`at_ref_resolve`），不管模型数的 start/end；找不到再走 `at_ref_span` 收拢。评审拿到的仍是真实原文。
   - 去重把 quote 也算进去（两条 0,0 但 quote 不同的引用是合法的）。顺手修了原有的 `strcmp(NULL,NULL)`：两条引用的 json_pointer 都为 null 时会走到这里（`agent_streq`）。

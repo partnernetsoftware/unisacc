@@ -165,6 +165,8 @@ typedef struct {
     char mail_error[256];     /* last take/finish failure reason */
     char model[96];           /* /model override for this session; empty uses CSIH_MODEL */
     int  back;                /* cursor distance from the end of input, in bytes; 0 = at end */
+    char status[3][240];      /* project status rows, read from the status file each frame */
+    int  nstatus;
 } tui_state;
 
 static int tui_mail_meta(tui_state *st, const char *id, const char *result, const char *reason);
@@ -1952,7 +1954,7 @@ static int tui_log_room(const tui_state *st) {
     int rows = st->rows > 0 ? st->rows : 24;
     int sys_rows = st->sys_open ? TUI_SYS_N : 0;
     int mind_rows = st->mind_open ? TUI_MIND_N : 0;
-    int room = rows - TUI_FIXED_ROWS - sys_rows - mind_rows - st->npending;
+    int room = rows - TUI_FIXED_ROWS - sys_rows - mind_rows - st->npending - st->nstatus;
     if (room < 1) room = 1;
     if (room > TUI_LOG_VIEW) room = TUI_LOG_VIEW;
     return room;
@@ -2134,6 +2136,43 @@ static void tui_put_folded(char *dst, int dstmax, const char *prefix, const char
 /* One input row. A paste keeps its newlines, drawn as ⏎, and the row
  * stays within `cols` so a long paste cannot fail the width check. */
 static long tui_tool_t0;      /* when the current exec started, for the busy clock */
+
+/* Project status rows. csih only shows them; the numbers belong to whatever
+ * tool writes the file (progress, next cut, last refusal), so they are as
+ * checkable as that tool. File: $CSIH_STATUS_FILE, else ./.csih-status.
+ * Up to 3 non-empty lines; the first row says how old the file is, and
+ * marks it 陈旧 past $CSIH_STATUS_STALE_SEC (default 600). */
+static void tui_status_load(tui_state *st) {
+    const char *path = getenv("CSIH_STATUS_FILE");
+    const char *stale_env = getenv("CSIH_STATUS_STALE_SEC");
+    char line[600];
+    struct stat sb;
+    FILE *f;
+    long age, stale = 600;
+    st->nstatus = 0;
+    if (!path || !path[0]) path = ".csih-status";
+    if (stat(path, &sb) != 0 || !S_ISREG(sb.st_mode)) return;
+    f = fopen(path, "r");
+    if (!f) return;
+    if (stale_env && atol(stale_env) > 0) stale = atol(stale_env);
+    age = (long)net_now() - (long)sb.st_mtime;
+    if (age < 0) age = 0;
+    while (st->nstatus < 3 && fgets(line, sizeof line, f)) {
+        size_t n = strcspn(line, "\r\n");
+        char ago[48];
+        line[n] = 0;
+        if (!line[0]) continue;
+        if (st->nstatus == 0) {
+            if (age < 60) snprintf(ago, sizeof ago, "%ld秒前", age);
+            else if (age < 3600) snprintf(ago, sizeof ago, "%ld分钟前", age / 60);
+            else snprintf(ago, sizeof ago, "%ld小时前", age / 3600);
+            snprintf(st->status[0], sizeof st->status[0], "项目> %.150s · %s%s",
+                     line, age > stale ? "陈旧 " : "", ago);
+        } else snprintf(st->status[st->nstatus], sizeof st->status[0], "项目> %.200s", line);
+        st->nstatus++;
+    }
+    fclose(f);
+}
 
 /* 574B, 32.1KB, 1.2MB: byte counts a person can read at a glance. */
 static void tui_bytes(char *out, size_t cap, long n) {
@@ -2363,6 +2402,11 @@ static r_frame tui_render_state(tui_state *st, int cols) {
          * Fewer log lines are padded so the block does not collapse.
          * Mind and system drawers add their rows only while open. */
         int show, starti = 0, endi = 0, view_at, filled;
+        tui_status_load(st);
+        for (i = 0; i < st->nstatus && n < 40; i++) {
+            tui_utf8_fit(st->status[i], cols, line[n]);
+            rs.body[n] = line[n]; n++;
+        }
         tui_log_clamp(st);
         tui_log_range(st, &starti, &endi, &show);
         view_at = n;
@@ -4365,6 +4409,34 @@ int tui_entry(int argc, char **argv) {
                 else printf("  ok   busy line names the running command and reads sizes\n");
                 tf2.busy = 0;
             }
+        }
+
+        {
+            static tui_state ts;
+            char path[256];
+            FILE *f;
+            int ok = 0, room0, room1;
+            snprintf(path, sizeof path, "/tmp/csih-status-%d.txt", (int)getpid());
+            f = fopen(path, "w");
+            if (f) {
+                fputs("进度 37/52 .cx（盘点 tools/inventory）\n\n下一刀 grk: cx/runtime/routespan\n拒绝 not covered: x\n第四行不显示\n", f);
+                fclose(f);
+                /* Short terminal, so the log room is not at its cap and the 3 rows show. */
+                tui_state_init(&ts, NULL); ts.mode = 1; ts.rows = 16;
+                room0 = tui_log_room(&ts);
+                setenv("CSIH_STATUS_FILE", path, 1);
+                ok = tui_frame_has(&ts, "项目> 进度 37/52") && strstr(ts.status[0], "秒前")
+                    && tui_frame_has(&ts, "项目> 下一刀 grk") && tui_frame_has(&ts, "项目> 拒绝 not")
+                    && !tui_frame_has(&ts, "第四行") && ts.nstatus == 3;
+                room1 = tui_log_room(&ts);
+                ok = ok && room1 == room0 - 3;
+                setenv("CSIH_STATUS_FILE", "/nonexistent/csih-status", 1);
+                ok = ok && !tui_frame_has(&ts, "项目>") && ts.nstatus == 0;
+                unsetenv("CSIH_STATUS_FILE");
+                if (tui_selftest_rm(path, 0)) failures++;
+            }
+            if (!ok) { printf("FAIL project status rows n=%d\n", ts.nstatus); failures++; }
+            else printf("  ok   project status file shows up to 3 rows with age\n");
         }
 
         printf("%s\n", failures ? "SELFTEST FAILED" : "selftest ok");
