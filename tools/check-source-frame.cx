@@ -1,0 +1,29 @@
+#pragma unisa use runtime.source_frame
+static int failures, calls;
+static void *allocate(void *p, size_t n) { calls++; return realloc(p, n); }
+static void *fail_allocate(void *p, size_t n) { (void)p; (void)n; calls++; return 0; }
+static void check(int ok, const char *name) { printf("%s %s\n", ok ? "PASS" : "FAIL", name); if (!ok) failures++; }
+int main(void) {
+    const char *names[] = {"a.c", ""};
+    const unsigned char first[] = {0, 255, 65};
+    const unsigned char *bytes[] = {first, 0};
+    int lengths[] = {3, 0};
+    const unsigned char expected[] = {3,0,0,0,'a','.','c',3,0,0,0,0,255,65,0,0,0,0,0,0,0,0};
+    unsigned char *out = 0; int n = -1;
+    check(cxsf_encode(2,names,bytes,lengths,&out,&n,allocate)==0 && n==(int)sizeof expected && !memcmp(out,expected,sizeof expected), "ordered-binary-frame");
+    free(out); out=0; n=-1;
+    check(cxsf_encode(0,0,0,0,&out,&n,allocate)==0 && out && n==0, "empty-frame-owned"); free(out);
+    out=(unsigned char *)names; n=41; calls=0;
+    lengths[0]=-1;
+    check(cxsf_encode(2,names,bytes,lengths,&out,&n,allocate)==1 && out==(unsigned char *)names && n==41 && calls==0, "negative-length-untouched");
+    lengths[0]=3; bytes[0]=0;
+    check(cxsf_encode(2,names,bytes,lengths,&out,&n,allocate)==1 && out==(unsigned char *)names && n==41 && calls==0, "missing-bytes-untouched");
+    bytes[0]=first;
+    lengths[0]=2147483647;
+    check(cxsf_encode(2,names,bytes,lengths,&out,&n,allocate)==2 && out==(unsigned char *)names && n==41 && calls==0, "extent-rejected-before-allocation");
+    lengths[0]=3;
+    check(cxsf_encode(2,names,bytes,lengths,&out,&n,fail_allocate)==3 && out==(unsigned char *)names && n==41 && calls==1, "allocation-failure-untouched");
+    check(cxsf_encode(-1,names,bytes,lengths,&out,&n,allocate)==1 && calls==1, "negative-count");
+    printf("CXSOURCE_FRAME failed=%d\n", failures);
+    return failures ? 1 : 0;
+}

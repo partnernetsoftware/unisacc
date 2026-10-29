@@ -1,0 +1,36 @@
+#pragma unisa module source_frame
+/* A source identity frame contains, in source order, little-endian u32
+ * name length, name bytes, u32 source length, and source bytes. Inputs are
+ * borrowed. The caller owns the returned block and supplies its allocator.
+ * Failure leaves both outputs untouched and performs no allocation when
+ * an argument or the total size is invalid. */
+int cxsf_encode(int count, const char **names, const unsigned char **bytes,
+                const int *lengths, unsigned char **out, int *out_n,
+                void *(*alloc)(void *, size_t)) {
+    size_t total = 0;
+    if (count < 0 || !out || !out_n || !alloc ||
+        (count && (!names || !bytes || !lengths))) return 1;
+    for (int i = 0; i < count; i++) {
+        if (!names[i] || lengths[i] < 0 || (lengths[i] && !bytes[i])) return 1;
+        size_t name_n = strlen(names[i]);
+        if (name_n > 2147483647u || total > 2147483647u - name_n) return 2;
+        total += name_n;
+        if (total > 2147483647u - 8u || (size_t)lengths[i] > 2147483647u - total - 8u) return 2;
+        total += 8u + (size_t)lengths[i];
+    }
+    unsigned char *block = alloc(0, total ? total : 1);
+    if (!block) return 3;
+    unsigned char *p = block;
+    for (int i = 0; i < count; i++) {
+        size_t name_n = strlen(names[i]);
+        for (int j = 0; j < 4; j++) *p++ = (unsigned char)(name_n >> (8 * j));
+        if (name_n) memcpy(p, names[i], name_n);
+        p += name_n;
+        for (int j = 0; j < 4; j++) *p++ = (unsigned char)((unsigned)lengths[i] >> (8 * j));
+        if (lengths[i]) memcpy(p, bytes[i], (size_t)lengths[i]);
+        p += lengths[i];
+    }
+    *out = block;
+    *out_n = (int)total;
+    return 0;
+}
