@@ -1,0 +1,223 @@
+#pragma unisa module bindpure
+/* Judgments still inline in exec/c/bind.c. No libc and no include.
+   fopen, fread, fclose, realpath, mkstemp, fdopen, fwrite, rename, and
+   unlink stay there. A null pointer returns 4 and is not read.
+   A return that matches the old if is marked 同旧返回.
+   A 4, a 1 that the old if did not return, or a -1 the old if did not
+   return, is marked 不是旧返回. */
+/* host_stage_present: p==1 returns 1, p==4 returns 0. Both 同旧返回.
+   Any other code with more rows returns -1, 不是旧返回.
+   Any other code on the last row returns 0, 同旧返回. */
+int bp_stage_row(int code, int more) {
+    if (code == 1) return 1;
+    if (code == 4) return 0;
+    if (more) return -1;
+    return 0;
+}
+/* host_filter_file: fr==0 returns 0, fr==4 returns 1. Both 同旧返回.
+   Any other code returns -1. The old if then opens the file. 不是旧返回. */
+int bp_filter_row(int code) {
+    if (code == 0) return 0;
+    if (code == 4) return 1;
+    return -1;
+}
+/* host_filter_file: if(!f) returns clierror, and clierror returns 1.
+   opened==0 returns 1, 同旧返回. opened!=0 returns 0, 不是旧返回. */
+int bp_file_miss(int opened) {
+    if (!opened) return 1;
+    return 0;
+}
+/* host_filter_file: ferror or a nonzero fclose sets failed, then
+   if(failed) returns clierror, which returns 1. That 1 is 同旧返回.
+   Both clear returns 0. The old if does not return there. 不是旧返回. */
+int bp_read_bad(int ferr, int close_rc) {
+    if (ferr || close_rc) return 1;
+    return 0;
+}
+/* host_filter_file: a nonzero host_provider_filter returns 1, else 0.
+   Both 同旧返回. fprintf stays in C. */
+int bp_prov_rc(int rc) {
+    if (rc) return 1;
+    return 0;
+}
+/* host_path_key: if(realpath(path,key)) return 0. got!=0 returns 0, 同旧返回.
+   got==0 returns -1. The old if falls through to errno. 不是旧返回. */
+int bp_real_hit(int got) {
+    if (got) return 0;
+    return -1;
+}
+/* host_path_key: if(errno!=ENOENT) return 1. That 1 is 同旧返回.
+   err==enoent returns 0. The old if does not return there. 不是旧返回. */
+int bp_errno_keep(int err, int enoent) {
+    if (err != enoent) return 1;
+    return 0;
+}
+/* host_path_key: !*base makes the || return 1. An empty base returns 1, 同旧返回.
+   A null base returns 4 and is not read, 不是旧返回.
+   A non-empty base returns 0. The old if may still call realpath. 不是旧返回. */
+int bp_base_empty(const char *base) {
+    if (!base) return 4;
+    if (base[0] == 0) return 1;
+    return 0;
+}
+/* host_path_key: !realpath(parent,resolved) makes the || return 1.
+   got==0 returns 1, 同旧返回. got!=0 returns 0, 不是旧返回. */
+int bp_parent_miss(int got) {
+    if (!got) return 1;
+    return 0;
+}
+/* host_path_key: return snprintf(...)>=(int)cap. 1 and 0 both 同旧返回.
+   No extra null or unknown code. A negative wrote stays on the old side. */
+int bp_wrote_over(int wrote, int cap) {
+    if (wrote >= cap) return 1;
+    return 0;
+}
+/* host_same_output: if(!b||!strcmp(b,"-")) return !strcmp(a,"-").
+   Inside that if, 1 and 0 are 同旧返回. A null a there returns 4 and is
+   not read, 不是旧返回. A b that is present and not "-" returns -1.
+   The old if does not return on that arm. 不是旧返回. */
+int bp_dash_same(const char *a, const char *b) {
+    int dash;
+    if (!b) {
+        if (!a) return 4;
+        if (a[0] == '-' && a[1] == 0) return 1;
+        return 0;
+    }
+    dash = b[0] == '-' && b[1] == 0;
+    if (!dash) return -1;
+    if (!a) return 4;
+    if (a[0] == '-' && a[1] == 0) return 1;
+    return 0;
+}
+/* host_same_output: a stat error other than ENOENT returns -1, 同旧返回.
+   Otherwise 0. The old if does not return there. 不是旧返回. */
+int bp_stat_pair(int ax, int ae, int by, int be, int enoent) {
+    if ((ax && ae != enoent) || (by && be != enoent)) return -1;
+    return 0;
+}
+/* host_same_output: both stats succeeded and dev plus ino match returns 1, 同旧返回.
+   Otherwise 0. The old if does not return there. 不是旧返回. */
+int bp_dev_ino(int ax, int by, unsigned long long dx, unsigned long long ix, unsigned long long dy, unsigned long long iy) {
+    if (!ax && !by && dx == dy && ix == iy) return 1;
+    return 0;
+}
+/* host_same_output: either path-key failure returns -1, 同旧返回.
+   Both clear returns 0. The old if then compares the keys. 不是旧返回. */
+int bp_keys_bad(int ka, int kb) {
+    if (ka || kb) return -1;
+    return 0;
+}
+/* host_same_output: return !strcmp(ka,kb). Equal is 1, else 0. Both 同旧返回.
+   A null key returns 4 and is not read, 不是旧返回. */
+int bp_keys_eq(const char *a, const char *b) {
+    int i;
+    if (!a || !b) return 4;
+    i = 0;
+    while (a[i] && a[i] == b[i]) i++;
+    if (a[i] == b[i]) return 1;
+    return 0;
+}
+/* host_side_write: fd<0 returns clierror, which returns 1, 同旧返回.
+   fd>=0 returns 0. The old if does not return there. 不是旧返回. */
+int bp_fd_bad(int fd) {
+    if (fd < 0) return 1;
+    return 0;
+}
+/* host_side_write: fdopen null returns clierror, which returns 1, 同旧返回.
+   opened!=0 returns 0, 不是旧返回. close and unlink stay in C. */
+int bp_fdopen_miss(int opened) {
+    if (!opened) return 1;
+    return 0;
+}
+/* host_side_write: fwrite length differs, or fclose is nonzero, then
+   if(failed) returns clierror, which returns 1, 同旧返回.
+   A full write and a zero close return 0, 不是旧返回. */
+int bp_body_bad(unsigned long long wrote, unsigned long long need, int close_rc) {
+    if (wrote != need || close_rc) return 1;
+    return 0;
+}
+/* host_side_write: a nonzero rename returns clierror, which returns 1, 同旧返回.
+   A zero rename returns 0, the function's final return, 同旧返回. */
+int bp_commit_bad(int renamed) {
+    if (renamed) return 1;
+    return 0;
+}
+/* The non-Apple host_same_output returns -1. kind 0 returns -1, 同旧返回.
+   The non-Apple host_side_write returns clierror, which returns 1.
+   kind 1 returns 1, 同旧返回. Any other kind returns -1, 不是旧返回. */
+int bp_off_host(int kind) {
+    if (kind == 0) return -1;
+    if (kind == 1) return 1;
+    return -1;
+}
+/* if(rc)return rc after tape_domain, after the host-symbols runroute,
+   after prune, and after free. A nonzero rc is returned unchanged, 同旧返回.
+   rc==0 returns 0. Those ifs do not return there. 不是旧返回. */
+int bp_propagate(int rc) {
+    if (rc) return rc;
+    return 0;
+}
+/* host_symbol_stream: a nonzero host_requirements returns 1, else 0.
+   Both 同旧返回. fprintf stays in C. */
+int bp_req_rc(int rc) {
+    if (rc) return 1;
+    return 0;
+}
+/* host_compile: a nonzero host_bind returns 1, else 0. Both 同旧返回.
+   fprintf stays in C. */
+int bp_plan_rc(int rc) {
+    if (rc) return 1;
+    return 0;
+}
+/* host_compile: the skip if chooses a call, and that call's rc is the old
+   return, not these codes. 0 means the if is false. 1 means runroute_from.
+   2 means runroute. All three are 不是旧返回. */
+int bp_skip_pick(int skip, int has_first) {
+    if (!skip) return 0;
+    if (has_first) return 1;
+    return 2;
+}
+/* host_compile: if(!rc) the lower range runs. 1 means take that call.
+   0 means rc was already nonzero. Neither is the old if's return. 不是旧返回. */
+int bp_lower_when(int rc) {
+    if (!rc) return 1;
+    return 0;
+}
+/* host_compile: a true fill assigns available=15. 15 is that assignment,
+   not the if's return, 不是旧返回. A false fill returns -1 and enters
+   the address loop. 不是旧返回. */
+int bp_fill_mask(int fill) {
+    if (fill) return 15;
+    return -1;
+}
+/* host_compile: bit_rc==0 is the ==0 test that ors the bit. 1 means or it.
+   0 means do not. Neither value is an old return. 不是旧返回. */
+int bp_bit_use(int bit_rc) {
+    if (bit_rc == 0) return 1;
+    return 0;
+}
+/* host_compile: cli[9+j]. j outside 0..3 returns -1, 不是旧返回.
+   Otherwise the old subscript 9+j. That number is not an if return, 不是旧返回. */
+int bp_cli_at(int j) {
+    if (j < 0 || j > 3) return -1;
+    return 9 + j;
+}
+/* host_compile: a true elf gate returns 0, 同旧返回.
+   A false gate returns -1. The old code calls runroute_from. 不是旧返回. */
+int bp_elf_stop(int gate) {
+    if (gate) return 0;
+    return -1;
+}
+/* Texts passed to clierror. The pointer is not the old if's int return, 不是旧返回.
+   0 open-provider, 1 read-provider, 2 write-stream, 3 commit-stream,
+   4 unsupported target, 5 symbol input too large.
+   An unknown kind returns a null pointer and does not read it, 不是旧返回. */
+const char *bp_why(int kind) {
+    if (kind == 0) return "bind: cannot-open-provider file";
+    if (kind == 1) return "bind: cannot-read-provider file";
+    if (kind == 2) return "bind: cannot-write-symbol-stream";
+    if (kind == 3) return "bind: cannot-commit-symbol-stream";
+    if (kind == 4) return "bind: symbol-stream target not supported";
+    if (kind == 5) return "bind: symbol input too large";
+    return 0;
+}

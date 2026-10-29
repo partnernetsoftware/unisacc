@@ -1,0 +1,123 @@
+#pragma unisa module coregate
+/* exec/c/core.c 里尚未单独抽出的纯判断。不分配、不写缓冲。
+   空指针返回 4。装不下返回 1。未知种类返回 -1，不是旧返回。 */
+static const int cr_ar[56] = {
+    0, 1, 1, 2, 2, 4, 4, 2, 2, 1, 3, 3, 1, 1, 0, 0, 1, 1, 2, 0, 0, 1, 2, 2, 3, 0, 1, 1, 1, 1,
+    0, 3, 3, 1, 1, 2, 0, 0, 1, 2, 1, 1, 1, 1, 2, 1, 1, 1, 0, 0, 1, 4, 4, 2, 2, 1
+};
+static int cr_bounds(long long s0, long long s1, long long end, long long *lo, long long *hi) {
+    if (!lo || !hi) return 4;
+    if (end < 0) return 1;
+    if (s0 < 0) s0 = 0;
+    if (s1 > end) s1 = end;
+    if (s0 > s1) return 1;
+    *lo = s0;
+    *hi = s1;
+    return 0;
+}
+/* action_run：CMP、CMPI、C64。0 小于，1 相等，2 大于。1 是旧的相等类，不是装不下。 */
+int cr_cmp(long long u, long long v) {
+    if (u < v) return 0;
+    if (u == v) return 1;
+    return 2;
+}
+/* action_run：C64U。0 小于，1 相等，2 大于。比较的是无符号值。 */
+int cr_cmpu(unsigned long long u, unsigned long long v) {
+    if (u < v) return 0;
+    if (u == v) return 1;
+    return 2;
+}
+/* action_run：RLD。0..256 原样返回。范围外是旧哨兵 256，不是装不下。 */
+int cr_rld(long long v) {
+    if (v >= 0 && v <= 256) return (int)v;
+    return 256;
+}
+/* action_run：SPAN、SPANT、SPAN2。16 和 17 的终点是 cursor，18 的终点是 s1。
+   未知种类返回 -1，不是旧返回。起点越过终点时返回 1。 */
+int cr_span(int op, long long s0, long long s1, long long cursor, long long end, long long *lo, long long *hi) {
+    if (!lo || !hi) return 4;
+    if (op != 16 && op != 17 && op != 18) return -1;
+    if (op != 18) s1 = cursor;
+    return cr_bounds(s0, s1, end, lo, hi);
+}
+/* action_run：OLAST。空输出写入 256。长度为负返回 1。 */
+int cr_olast(const unsigned char *b, int n, int *out) {
+    if (!out) return 4;
+    if (n < 0) return 1;
+    if (n == 0) {
+        *out = 256;
+        return 0;
+    }
+    if (!b) return 4;
+    *out = b[n - 1];
+    return 0;
+}
+/* action_run：OCUT。负起点夹到 0。起点超过长度返回 1，不写切点。 */
+int cr_ocut(long long s0, long long n, long long *cut) {
+    if (!cut) return 4;
+    if (n < 0) return 1;
+    if (s0 < 0) s0 = 0;
+    if (s0 > n) return 1;
+    *cut = s0;
+    return 0;
+}
+/* action_run：XATTR。属性道为空或下标到头时值为 0。负下标或负长度返回 1。 */
+int cr_xattr(const long long *at, long long i, long long end, long long *v) {
+    if (!v) return 4;
+    if (i < 0 || end < 0) return 1;
+    if (!at || i >= end) {
+        *v = 0;
+        return 0;
+    }
+    *v = at[i];
+    return 0;
+}
+/* action_run：INTERN、BLOBSAVE、SBSPAN 共用这个夹紧。空区间可以，起点越过终点返回 1。 */
+int cr_slice(long long s0, long long s1, long long end, long long *lo, long long *hi) {
+    return cr_bounds(s0, s1, end, lo, hi);
+}
+/* action_run：INPUSH、INPUSHX、INPUSHXE。33 用 blob 长度，34 用 xn，35 可缩短终点。
+   未知种类返回 -1，不是旧返回。终点早于起点返回 1。 */
+int cr_inpush(int op, long long blob_n, long long i, long long lim, long long xn, long long *out_i, long long *out_end) {
+    long long e;
+    if (!out_i || !out_end) return 4;
+    if (op != 33 && op != 34 && op != 35) return -1;
+    if (op == 33) {
+        if (blob_n < 0) return 1;
+        *out_i = 0;
+        *out_end = blob_n;
+        return 0;
+    }
+    if (xn < 0 || i < 0) return 1;
+    e = xn;
+    if (op == 35 && lim < xn) e = lim;
+    if (e < i) return 1;
+    *out_i = i;
+    *out_end = e;
+    return 0;
+}
+/* action_run：CORE_BYTE。下标到头时值为 0。负下标或负长度返回 1。 */
+int cr_byte(const unsigned char *b, long long i, long long end, int *out) {
+    if (!out) return 4;
+    if (i < 0 || end < 0) return 1;
+    if (i >= end) {
+        *out = 0;
+        return 0;
+    }
+    if (!b) return 4;
+    *out = b[i];
+    return 0;
+}
+/* action_run：ACCEPT、REJECT。49 接受，返回旧 status 0；50 拒绝，返回旧 status 1。
+   其它种类返回 -1，不是旧返回。 */
+int cr_halt(int op) {
+    if (op == 49) return 0;
+    if (op == 50) return 1;
+    return -1;
+}
+/* core_run：动作字步长是 1 加这个元数。未知种类返回 -1，不是旧返回。
+   返回值是元数，0 和 1 都是合法元数，不是装不下。 */
+int cr_arity(int op) {
+    if (op < 0 || op >= 56) return -1;
+    return cr_ar[op];
+}
