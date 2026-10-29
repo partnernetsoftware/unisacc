@@ -34,6 +34,12 @@ static void rl_clear(RLLedger *L) {
     free(L->rows); memset(L, 0, sizeof *L);
 }
 
+#ifdef UNISA_CX_SOURCE_FRAME
+int cxsf_hex_digit(int);
+int cxsf_length(const char *,int *);
+#define rl_hexv cxsf_hex_digit
+#define rl_length cxsf_length
+#else
 static int rl_hexv(int c) {
     if (c >= '0' && c <= '9') return c - '0';
     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
@@ -47,6 +53,7 @@ static int rl_length(const char *s, int *out) {
     for (; *p; p++) { if (*p < '0' || *p > '9') return 0; v = v * 10 + (*p - '0'); if (v > 2147483647LL) return 0; }
     *out = (int)v; return 1;
 }
+#endif
 static unsigned char *rl_readfile(const char *path, size_t *n) {
     unsigned char *b; int saved;
 #ifndef _WIN32
