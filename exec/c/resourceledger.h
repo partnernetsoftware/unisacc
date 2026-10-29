@@ -26,12 +26,22 @@
 typedef struct { unsigned char *key; int kn; int present; unsigned char *value; int vn; char blob[64]; } RLRow;
 typedef struct { RLRow *rows; int n; int has_id; int trace, cursor; char stage[128]; char input_hex[65]; } RLLedger;
 typedef struct { const char *name; const unsigned char *bytes; size_t n; } RLFileView;
+#ifdef UNISA_CX_SOURCE_FRAME
+void cxsf_ledger_clear(void *,void (*)(void *));
+#define RL_ALLOC(n) realloc(0,(n))
+#else
+#define RL_ALLOC(n) malloc(n)
+#endif
 /* Clear only zeroed or loader-produced ledgers. Rows returned by rl_find are
  * borrowed until this call; failure outputs are always empty and clearable. */
 static void rl_clear(RLLedger *L) {
+#ifdef UNISA_CX_SOURCE_FRAME
+    cxsf_ledger_clear(L,free);
+#else
     int i; if (!L) return;
     for (i = 0; i < L->n; i++) { free(L->rows[i].key); free(L->rows[i].value); }
     free(L->rows); memset(L, 0, sizeof *L);
+#endif
 }
 
 #ifdef UNISA_CX_SOURCE_FRAME
@@ -70,7 +80,7 @@ static unsigned char *rl_readfile(const char *path, size_t *n) {
     if (fstat(fd, &st)) { saved = errno ? errno : EIO; close(fd); errno = saved; return 0; }
     if (!S_ISREG(st.st_mode)) { saved = S_ISDIR(st.st_mode) ? EISDIR : EINVAL; close(fd); errno = saved; return 0; }
     if (st.st_size < 0 || st.st_size > 2147483647L) { close(fd); errno = EFBIG; return 0; }
-    size = (size_t)st.st_size; b = malloc(size + 1);
+    size = (size_t)st.st_size; b = RL_ALLOC(size + 1);
     if (!b) { close(fd); errno = ENOMEM; return 0; }
     while (at < size) {
         ssize_t z = read(fd, b + at, size - at);
@@ -93,7 +103,7 @@ static unsigned char *rl_readfile(const char *path, size_t *n) {
         saved = errno ? errno : EIO; fclose(f); errno = saved; return 0;
     }
     if (sz > 2147483647L) { fclose(f); errno = EFBIG; return 0; }
-    b = malloc((size_t)sz + 1); if (!b) { fclose(f); errno = ENOMEM; return 0; }
+    b = RL_ALLOC((size_t)sz + 1); if (!b) { fclose(f); errno = ENOMEM; return 0; }
     if (sz && fread(b, 1, (size_t)sz, f) != (size_t)sz) {
         saved = errno ? errno : EIO; fclose(f); free(b); errno = saved; return 0;
     }
@@ -108,7 +118,7 @@ static unsigned char *rl_file_bytes(const char *dir, const char *name,
     char path[4096]; int i, z; unsigned char *b;
     if (views) {
         for (i = 0; i < count; i++) if (!strcmp(name, views[i].name)) {
-            b = malloc(views[i].n + 1);
+            b = RL_ALLOC(views[i].n + 1);
             if (!b) { errno = ENOMEM; return 0; }
             if (views[i].n) memcpy(b, views[i].bytes, views[i].n);
             *n = views[i].n; return b;
@@ -159,7 +169,7 @@ static int rl_load_parse(const char *dir, const RLFileView *views, int count, RL
         /* Validate the complete byte row before C string parsing. Otherwise an
            embedded NUL hides a suffix in either the identity or a data row. */
         if (memchr(b + at, 0, L2)) { free(b); snprintf(err, errn, "INTERFACE_ERROR resource-row-nul"); return 1; }
-        line = malloc(L2 + 1); if (!line) { free(b); return 1; }
+        line = RL_ALLOC(L2 + 1); if (!line) { free(b); return 1; }
         memcpy(line, b + at, L2); line[L2] = 0; at = e + 1;
         if (!strncmp(line, "#SC1\t", 5) || !strncmp(line, "#SC2\t", 5)) {
             /* identity header: the first line only, at most once */
@@ -178,7 +188,7 @@ static int rl_load_parse(const char *dir, const RLFileView *views, int count, RL
         {   /* key */
             size_t kl = strlen(f[0]); unsigned char *kb; size_t q;
             if (!kl || kl % 2) { free(line); free(b); snprintf(err, errn, "INTERFACE_ERROR resource-key-malformed"); return 1; }
-            kb = malloc(kl / 2); if (!kb) { free(line); free(b); return 1; }
+            kb = RL_ALLOC(kl / 2); if (!kb) { free(line); free(b); return 1; }
 #ifdef UNISA_CX_SOURCE_FRAME
             if (!cxsf_ledger_key(f[0],kl,kb)) { free(kb); free(line); free(b); snprintf(err, errn, "INTERFACE_ERROR resource-key-malformed"); return 1; }
 #else

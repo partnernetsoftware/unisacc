@@ -1,5 +1,7 @@
 #pragma unisa use runtime.source_frame
 static int failures, calls;
+static int releases;
+static void release(void *p) { if(p) releases++; free(p); }
 static void *allocate(void *p, size_t n) { calls++; return realloc(p, n); }
 static void *fail_allocate(void *p, size_t n) { (void)p; (void)n; calls++; return 0; }
 static void check(int ok, const char *name) { printf("%s %s\n", ok ? "PASS" : "FAIL", name); if (!ok) failures++; }
@@ -78,6 +80,11 @@ int main(void) {
     check(cxsf_ledger_next(rows,3,1,&cursor,kb,2,&index)==3 && cursor==0 && index==77, "ledger-trace-mismatch-unchanged");
     check(cxsf_ledger_next(rows,3,1,&cursor,ka,2,&index)==0 && index==0 && cursor==1 && cxsf_ledger_next(rows,3,1,&cursor,ka,2,&index)==0 && index==1 && cursor==2, "ledger-trace-duplicate-and-absent");
     check(cxsf_ledger_next(rows,3,1,&cursor,kb,2,&index)==0 && cursor==3 && cxsf_ledger_next(rows,3,1,&cursor,kb,2,&index)==2 && cursor==3, "ledger-trace-end");
+    CxLedger owned={0}; owned.rows=calloc(2,sizeof(CxLedgerRow));owned.n=2;
+    owned.rows[0].key=malloc(1);owned.rows[0].value=malloc(1);owned.rows[1].key=malloc(1);
+    releases=0;cxsf_ledger_clear(&owned,release);
+    check(releases==4 && !owned.rows && !owned.n && !owned.has_id, "ledger-clear-owned-and-partial");
+    cxsf_ledger_clear(&owned,release);check(releases==4 && !owned.rows, "ledger-clear-idempotent");
     check(cxsf_stage_label("e3:lnx/x86_64/warn/multi/tape/O2") && cxsf_stage_label("source:win/arm64/image/O0"), "ledger-stage-valid");
     check(!cxsf_stage_label("e3:lnx/x86_64/multi/warn/tape/O2") && !cxsf_stage_label("e3:lnx/x86_64/tape/O10") && !cxsf_stage_label("bad:lnx/x86_64/tape/O2") && !cxsf_stage_label(0), "ledger-stage-invalid");
     printf("CXSOURCE_FRAME\tfailed=%d\n", failures);
