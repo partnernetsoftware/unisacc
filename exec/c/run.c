@@ -911,6 +911,12 @@ static unsigned char *rf_e3_identity_bytes(const unsigned char *tokens,int tn,co
 }
 #endif
 /* Parse exact single-line e3 companion bytes (must end in '\n', no NULs/extra lines). */
+#ifdef UNISA_CX_SOURCE_FRAME
+int cxsf_companion(const unsigned char *,int,char *,size_t,char *);
+static int rf_parse_e3_identity_bytes(const unsigned char *b,int n,char *stage,size_t stage_cap,char hex[65]) {
+    return cxsf_companion(b,n,stage,stage_cap,hex);
+}
+#else
 static int rf_parse_e3_identity_bytes(const unsigned char *b,int n,char *stage,size_t stage_cap,char hex[65]) {
     const char *s, *t, *v; size_t sn, i;
     if (n < 20 || !b || b[n - 1] != '\n') return 0;
@@ -933,6 +939,7 @@ static int rf_parse_e3_identity_bytes(const unsigned char *b,int n,char *stage,s
     }
     return 1;
 }
+#endif
 /* Key that binds the e3 companion into the same SC2 ordered pack as front-end events. */
 static const unsigned char RF_E3_ID_KEY[] = {'\0','r','i','/','e','3','-','i','d','e','n','t','i','t','y'};
 enum { RF_E3_ID_KEY_N = 15, RF_E3_ID_MAX = 512 };
