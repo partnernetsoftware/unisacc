@@ -1054,6 +1054,7 @@ static int tui_slash(tui_state *st) {
         tui_log_plain(st, "/model [名]: 显示或设本会话模型；/cwd: 显示工作目录；/cost: 本会话词元与缓存命中");
         tui_log_plain(st, "/perm [read|work|any]: 权限档（read 只读；work 只写工作目录；any 不拦）");
         tui_log_plain(st, "/undo: 撤销 agent 最近一次文件写入/编辑（最多 20 步，不含 exec）；/diff: 看这些改动");
+        tui_log_plain(st, "/view PATH [LINE]: 看文件 20 行（带行号），不经模型");
         tui_log_plain(st, "/allow: 放行下一条危险命令一次；/new: 新上下文（旧转录归档）；/resume [N]: 列出或换回归档");
         tui_log_plain(st, "键：Esc 取消本轮/清输入；空输入 Tab 展开/收起最近工具行；Ctrl-U 清行；Ctrl-W 删词");
         tui_command_done(st);
@@ -1140,6 +1141,46 @@ static int tui_slash(tui_state *st) {
         else if (st->busy) snprintf(note, sizeof note, "busy: perm unchanged");
         else { agent_set_perm(want); snprintf(note, sizeof note, "perm set: %s", names[want]); }
         tui_log_plain(st, note);
+        tui_command_done(st);
+        return 1;
+    }
+    if (!strncmp(st->input, "/view", 5) && token == 5) {
+        /* /view PATH [LINE]: 20 numbered lines from LINE (default 1), local only. */
+        char path[1024], here[1024], full[2100], buf[1024];
+        const char *arg = st->input + 5, *sp;
+        int from = 1, ln = 0, shown = 0;
+        FILE *f;
+        while (*arg == ' ') arg++;
+        sp = strrchr(arg, ' ');
+        if (sp && sp[1] >= '0' && sp[1] <= '9') { from = atoi(sp + 1); snprintf(path, sizeof path, "%.*s", (int)(sp - arg), arg); }
+        else snprintf(path, sizeof path, "%s", arg);
+        if (from < 1) from = 1;
+        if (!path[0]) { tui_log_plain(st, "usage: /view PATH [LINE]"); tui_command_done(st); return 1; }
+        if (path[0] == '~' && path[1] == '/' && getenv("HOME")) snprintf(full, sizeof full, "%s%s", getenv("HOME"), path + 1);
+        else if (path[0] == '/') snprintf(full, sizeof full, "%s", path);
+        else {
+            const char *cwd = csih_env("CSIH_CWD", "CDSH_CWD");
+            if (!cwd) { if (!getcwd(here, sizeof here)) strcpy(here, "."); cwd = here; }
+            snprintf(full, sizeof full, "%s/%s", cwd, path);
+        }
+        f = fopen(full, "r");
+        if (!f) { snprintf(note, sizeof note, "view: cannot open %.180s: %s", path, strerror(errno)); tui_log_plain(st, note); tui_command_done(st); return 1; }
+        snprintf(note, sizeof note, "view: %.180s 从第 %d 行", path, from);
+        tui_log_plain(st, note);
+        while (shown < 20 && fgets(buf, sizeof buf, f)) {
+            ln++;
+            if (ln < from) continue;
+            buf[strcspn(buf, "\r\n")] = 0;
+            snprintf(note, sizeof note, "%5d│ %.220s", ln, buf);
+            tui_log_plain(st, note);
+            shown++;
+        }
+        if (!shown) tui_log_plain(st, "view: （此范围没有内容）");
+        else if (fgets(buf, sizeof buf, f)) {
+            snprintf(note, sizeof note, "view: 还有更多，/view %.150s %d", path, ln + 1);
+            tui_log_plain(st, note);
+        }
+        fclose(f);
         tui_command_done(st);
         return 1;
     }
@@ -4583,6 +4624,27 @@ int tui_entry(int argc, char **argv) {
             if (!empty_ok || created != 1 || !plus || once != 1)
                 { printf("FAIL /diff created=%d plus=%d\n", created, plus); failures++; }
             else printf("  ok   /diff lists each changed file once with its diff\n");
+        }
+        {
+            static tui_state tv;
+            char path[128];
+            FILE *f;
+            int i, ok;
+            snprintf(path, sizeof path, "/tmp/csih-view-%d.txt", (int)getpid());
+            f = fopen(path, "w");
+            if (f) { for (i = 1; i <= 30; i++) fprintf(f, "line %d\n", i); fclose(f); }
+            tui_state_init(&tv, NULL); tv.mode = 1;
+            snprintf(tv.input, sizeof tv.input, "/view %s 25", path); tv.ninput = (int)strlen(tv.input);
+            tui_apply_key(&tv, TERM_KEY_ENTER, 0);
+            ok = strstr(tv.log[1], "   25│ line 25") && strstr(tv.log[tv.nlog - 1], "line 30") && !tv.npending && !tv.busy;
+            snprintf(tv.input, sizeof tv.input, "/view %s", path); tv.ninput = (int)strlen(tv.input);
+            tui_apply_key(&tv, TERM_KEY_ENTER, 0);
+            ok = ok && strstr(tv.log[tv.nlog - 1], "还有更多") && strstr(tv.log[tv.nlog - 1], " 21");
+            tui_type(&tv, "/view /nonexistent/x");
+            ok = ok && strstr(tv.log[tv.nlog - 1], "cannot open");
+            if (tui_selftest_rm(path, 0)) failures++;
+            if (!ok) { printf("FAIL /view\n"); failures++; }
+            else printf("  ok   /view shows numbered lines and paging\n");
         }
 
         printf("%s\n", failures ? "SELFTEST FAILED" : "selftest ok");
