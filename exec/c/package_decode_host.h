@@ -12,4 +12,8 @@ typedef struct UnisaPackage {
 void cxpl_release(CxPackage *,void (*)(void *));
 int cxmn_tag(const unsigned char *,long,long *,int,int *);
 int cxmn_number(const unsigned char *,long,long *,int,long long *);
+int bx_stage_present(const char *,const char *,const char *const *,const char *const *,int);
+int bx_stage_route(const char *,const char *const *,int);
+int bx_stage_join(const char *,const char *);
+int bx_stage_model_ok(int,int);
 #endif

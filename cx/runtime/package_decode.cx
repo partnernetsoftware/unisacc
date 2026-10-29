@@ -1,6 +1,7 @@
 #pragma unisa module package_decode
 #pragma unisa use package_lifetime
 #pragma unisa use model_number
+#pragma unisa use compiler.bindstage
 /* Decode directory tables from one borrowed package span.  On success the
  * caller owns the returned allocations; file and path remain unowned. */
 typedef struct {
@@ -60,11 +61,18 @@ static int decode(CxPackageDecode *d) {
         if(tag(d,'D'))return 1;CxPackageStage *s=&p->stages[i];
         s->route=word(d);if(!s->route)return 1;s->name=word(d);if(!s->name)return 1;
         s->in=word(d);if(!s->in)return 1;s->out=word(d);if(!s->out)return 1;
-        if(integer(d,&s->model))return 1;if(s->model<0||s->model>=pm)return bad(d,"bad package model index");
-        int previous=-1;for(int j=0;j<i;j++)if(!strcmp(s->route,p->stages[j].route)){
-            if(!strcmp(s->name,p->stages[j].name))return bad(d,"duplicate package stage");previous=j;
+        if(integer(d,&s->model))return 1;
+        if(bx_stage_model_ok(s->model,pm)!=0)return bad(d,"bad package model index");
+        int previous=-1;
+        for(int j=0;j<i;j++){
+            const char *routes[1];const char *names[1];
+            routes[0]=p->stages[j].route;names[0]=p->stages[j].name;
+            if(bx_stage_route(s->route,routes,1)==1){
+                if(bx_stage_present(s->route,s->name,routes,names,1)==1)return bad(d,"duplicate package stage");
+                previous=j;
+            }
         }
-        if(previous>=0&&strcmp(p->stages[previous].out,s->in))return bad(d,"package format mismatch");
+        if(previous>=0&&bx_stage_join(p->stages[previous].out,s->in)!=0)return bad(d,"package format mismatch");
     }
     for(int i=0;i<pm;i++){
         int n;if(tag(d,'M')||integer(d,&n))return 1;p->raw[i]=n;p->crc[i]=0;

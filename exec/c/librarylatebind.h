@@ -1,6 +1,10 @@
 #ifndef US_LIBRARY_LATEBIND_H
 #define US_LIBRARY_LATEBIND_H
 #include "libraryrelocate.h"
+int lg_own_bits(const char *);
+int lg_own_dup(int);
+int bx_stage_present(const char *,const char *,const char *const *,const char *const *,int);
+int bx_stage_route(const char *,const char *const *,int);
 /* Protocol-only decoder design for the 2b host adapter. No Tape scanning. */
 static uint32_t us_late_u32(const unsigned char *p){uint32_t v=0;for(int i=0;i<4;i++)v|=(uint32_t)p[i]<<(8*i);return v;}
 /* Must only be called with validated USLCON1 and model-produced USLSEL1. */
@@ -69,17 +73,21 @@ static int us_late_prepare(us_context *c,const char *target){
   RI=NULL;NRI=0;NR=0;FILE_READ_RECORD=0;FILE_READ_COUNT=0;FILE_READ_PATHS=NULL;library_package(c);
   int contract_found=0,selection_found=0;c->late_typed_enabled=0;c->late_callsite_enabled=0;c->late_callback_enabled=0;
   for(int i=0;i<PS;i++){
-   if(!strcmp(STAGES[i].route,"library-contract")&&!strcmp(STAGES[i].name,"contract"))contract_found=1;
-   if(!strcmp(STAGES[i].route,"library-selection")){
-    if(!strcmp(STAGES[i].name,"ownership"))selection_found++;
-    else if(!strcmp(STAGES[i].name,"ownership-fixedtyped")){selection_found++;c->late_typed_enabled=1;}
-    else if(!strcmp(STAGES[i].name,"ownership-callsite")){selection_found++;c->late_typed_enabled=1;c->late_callsite_enabled=1;}
-    else if(!strcmp(STAGES[i].name,"ownership-callback")){selection_found++;c->late_typed_enabled=1;c->late_callback_enabled=1;}
-    else if(!strcmp(STAGES[i].name,"ownership-callback-callsite")){selection_found++;c->late_typed_enabled=1;c->late_callsite_enabled=1;c->late_callback_enabled=1;}
-    else __us_panic("library selection: unknown ownership capability");
+   const char *one_r[1];const char *one_n[1];int on_sel,bits;
+   one_r[0]=STAGES[i].route;one_n[0]=STAGES[i].name;
+   if(bx_stage_present("library-contract","contract",one_r,one_n,1)==1)contract_found=1;
+   on_sel=bx_stage_route("library-selection",one_r,1);
+   if(on_sel==4)__us_panic("library selection: unknown ownership capability");
+   if(on_sel==1){
+    bits=lg_own_bits(STAGES[i].name);
+    if(bits<0||bits==4)__us_panic("library selection: unknown ownership capability");
+    selection_found++;
+    if(bits&2)c->late_typed_enabled=1;
+    if(bits&4){c->late_typed_enabled=1;c->late_callsite_enabled=1;}
+    if(bits&8){c->late_typed_enabled=1;c->late_callback_enabled=1;}
    }
   }
-  if(selection_found>1)__us_panic("library selection: duplicate ownership capability");
+  if(lg_own_dup(selection_found))__us_panic("library selection: duplicate ownership capability");
   if(!contract_found||!selection_found)__us_panic("library selection: required model is missing");
   Buf input={0};input.b=tracked_realloc(NULL,size);memcpy(input.b,frame,size);input.n=(int)size;
   rc=runroute("library-contract",&input,"binding-contract");
