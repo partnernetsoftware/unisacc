@@ -644,6 +644,18 @@ flowchart TD
   cap["检查文件 32 个 use"] --> pull["bindargs.cx 的 use bindcount"]
 ```
 
+## 115. 2026-10-29 prune 流的操作码跨度收进已有 prunegate
+
+没有新模块，没有新的 `use`。检查行首 `use` 仍是 32。这刀是论文 A 的 prune 字节流，不是 18 张决策网。`pg_span` 按 `src/tapeprune.c` 的 69 个 `tp_opnames` 返回下标。空指针或负长度返回 4。空跨度或未知名字返回 -1。`tp_getop` 仍在 C 里扫描。先跑检查，退出 1，stderr 是 `undefined function 'pg_span'`。补上函数后两次 `pg-span` 退出 0，stdout 25982，stderr 103，相同，`^FAIL` 为 0。第 125 行 `PASS pg-span`，第 1313 行 `failed=0`。检查没有编译 `tapeprune.c`。五份表没改。没有 hostseed，没有产品安装，没有 `--all`。整棵重构还没完成。提交 `1411273345`，2 个文件，增加 28 行。父提交 `04c360af26`。
+
+```mermaid
+flowchart TD
+  prune["论文 A 的 prune 字节流"] --> names["tapeprune.c 的 69 个 tp_opnames"]
+  names --> span["prunegate.cx 的 pg_span"]
+  getop["tp_getop"] --> stay["仍在 src/tapeprune.c"]
+  nets["18 张决策网"] --> other["这刀不问它们"]
+```
+
 ## 114. 2026-10-29 puff 读字节和长度写入收进已有 codecgate
 
 没有新模块，没有新的 `use`。检查行首 `use` 仍是 32。`cd_in_byte` 和 `cd_len_put` 进 `codecgate.cx`。输入耗尽返回 2。空指针或越过末尾返回 4。成功写出字节和 `incnt+1`。长度 0 到 32767 写入短整型表。空表、负下标或越界返回 4。返回 4 不从 `bits`、`stored`、`decode`、`fixed`、`dynamic` 返回。`fastdecode` 不采用下一位置。写出 `s->out`、霍夫曼循环和 `construct` 仍在 `codec.h`。宿主链接退出 0，程序 21888 字节，stderr 539 字节，是原有格式警告。两个新符号是 T。`codeccheck.py` 对这份程序退出 0，1655 条向量，stdout 103 字节，stderr 0。没有跑产品 `UA`。检查两次 `check-io` 退出 0，stdout 25957，stderr 103，相同，`^FAIL` 为 0。第 141 行 `PASS cd-io`，第 1311 行 `failed=0`。检查没有编译 `codec.h`。五份表没改。没有 hostseed，没有产品安装，没有 `--all`，没有再跑库构造。整棵重构还没完成。提交 `fd3a0d93e7`，2 个文件，增加 107 行，删 32 行。父提交 `fb6903cabb`。检查和库清单没有提交。
