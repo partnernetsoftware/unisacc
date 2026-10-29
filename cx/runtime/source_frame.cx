@@ -345,3 +345,58 @@ int cxsf_stage_label(const char *label) {
     if(!cxsf_token(r,n,"tape") && !cxsf_token(r,n,"image") && !cxsf_token(r,n,"run") && !cxsf_token(r,n,"object"))return 0;
     r=q+1;return r[0]=='O' && r[1]>='0' && r[1]<='9' && r[2]==0;
 }
+
+/* Complete ledger parsing. File lookup, allocation, errno and SHA remain
+ * caller supplied. On failure, committed rows stay owned by the ledger so
+ * its caller can release them; transient input, line and blob are released. */
+typedef struct {
+    void *context; unsigned char *(*file_bytes)(void *,const char *,size_t *);
+    void *(*alloc)(void *,size_t); void (*release)(void *);
+    int (*get_error)(void); void (*hash_hex)(const void *,size_t,char *);
+} CxLedgerParseOps;
+int cxsf_ledger_parse(const char *dir,void *ledger,char *err,size_t errn,const void *callbacks) {
+    if(!dir||!ledger||!callbacks)return 1;
+    CxLedgerParseOps io;memcpy(&io,callbacks,sizeof io);
+    if(!io.file_bytes||!io.alloc||!io.release||!io.get_error||!io.hash_hex)return 1;
+    CxLedger l={0};memcpy(ledger,&l,sizeof l);size_t n=0,at=0;int cap=0;
+    unsigned char *b=io.file_bytes(io.context,"resources.tsv",&n);
+    if(!b){int e=io.get_error();snprintf(err,errn,e==ENOENT?"INTERFACE_ERROR resource-ledger-absent %s":e==ENOMEM?"INTERFACE_ERROR resource-ledger-allocation-failed %s":"INTERFACE_ERROR resource-ledger-read-failed %s errno=%d",dir,e);return 1;}
+    while(at<n){
+        size_t start=0,width=0;int code=cxsf_ledger_line(b,n,&at,&start,&width);
+        if(code!=1){io.release(b);snprintf(err,errn,code==3?"INTERFACE_ERROR resource-row-nul":"INTERFACE_ERROR resource-row-truncated");return 1;}
+        char *line=io.alloc(0,width+1);if(!line){io.release(b);return 1;}
+        memcpy(line,b+start,width);line[width]=0;
+        if(!strncmp(line,"#SC1\t",5)||!strncmp(line,"#SC2\t",5)){
+            memcpy(&l,ledger,sizeof l);
+            int ok=start==0&&!l.has_id&&cxsf_ledger_identity(line,l.stage,sizeof l.stage,l.input_hex);
+            if(ok){l.has_id=1;l.trace=line[3]=='2';memcpy(ledger,&l,sizeof l);}
+            io.release(line);
+            if(!ok){io.release(b);snprintf(err,errn,"INTERFACE_ERROR resource-identity-malformed");return 1;}
+            continue;
+        }
+        char fields[5][4096];int nf=cxsf_ledger_fields(line,fields[0]);
+        if(nf!=5){io.release(line);io.release(b);snprintf(err,errn,nf==-3?"INTERFACE_ERROR resource-row-field-too-long":"INTERFACE_ERROR resource-row-fields");return 1;}
+        size_t kl=strlen(fields[0]);
+        if(!kl||kl%2){io.release(line);io.release(b);snprintf(err,errn,"INTERFACE_ERROR resource-key-malformed");return 1;}
+        unsigned char *key=io.alloc(0,kl/2);
+        if(!key){io.release(line);io.release(b);return 1;}
+        if(!cxsf_ledger_key(fields[0],kl,key)){io.release(key);io.release(line);io.release(b);snprintf(err,errn,"INTERFACE_ERROR resource-key-malformed");return 1;}
+        code=cxsf_ledger_add(ledger,&cap,key,(int)(kl/2),io.alloc);
+        if(code){io.release(key);io.release(line);io.release(b);if(code==1)snprintf(err,errn,"INTERFACE_ERROR duplicate-resource-key %s",fields[0]);else if(code==3)snprintf(err,errn,"INTERFACE_ERROR resource-ledger-allocation-failed");return 1;}
+        memcpy(&l,ledger,sizeof l);unsigned char *slot=(unsigned char *)l.rows+(size_t)(l.n-1)*sizeof(CxLedgerRow);
+        CxLedgerRow row;memcpy(&row,slot,sizeof row);int len=0;
+        code=cxsf_ledger_metadata(fields[1],fields[2],fields[3],fields[4],&row.present,&len);
+        if(code){io.release(line);io.release(b);snprintf(err,errn,code==1?"INTERFACE_ERROR resource-presence-invalid":code==2?"INTERFACE_ERROR resource-length-invalid":code==3?"INTERFACE_ERROR resource-absent-malformed":"INTERFACE_ERROR resource-blob-malformed");return 1;}
+        memcpy(slot,&row,sizeof row);
+        if(row.present){
+            size_t bl=0;unsigned char *value=io.file_bytes(io.context,fields[2],&bl);
+            if(!value){int e=io.get_error();io.release(line);io.release(b);snprintf(err,errn,e==ENOENT?"INTERFACE_ERROR resource-bytes-absent %s":e==ENOMEM?"INTERFACE_ERROR resource-ledger-allocation-failed %s":"INTERFACE_ERROR resource-bytes-read-failed %s errno=%d",fields[0],e);return 1;}
+            if(bl!=(size_t)len){io.release(value);io.release(line);io.release(b);snprintf(err,errn,"INTERFACE_ERROR resource-bytes-length-mismatch %s",fields[0]);return 1;}
+            char hex[65];io.hash_hex(value,bl,hex);
+            if(strcmp(hex,fields[4])){io.release(value);io.release(line);io.release(b);snprintf(err,errn,"INTERFACE_ERROR resource-hash-mismatch %s",fields[0]);return 1;}
+            row.value=value;row.vn=(int)bl;snprintf(row.blob,sizeof row.blob,"%s",fields[2]);memcpy(slot,&row,sizeof row);
+        }
+        io.release(line);
+    }
+    io.release(b);return 0;
+}

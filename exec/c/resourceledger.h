@@ -206,6 +206,24 @@ static int rl_parse_identity(const char *line, RLLedger *L) {
 }
 #endif
 /* 0: loaded; otherwise err holds the named reason (INTERFACE_ERROR <reason> ...) */
+#ifdef UNISA_CX_SOURCE_FRAME
+typedef struct {const char *dir;const RLFileView *views;int count;} RLParseContext;
+typedef struct {
+    void *context;unsigned char *(*file_bytes)(void *,const char *,size_t *);
+    void *(*alloc)(void *,size_t);void (*release)(void *);
+    int (*get_error)(void);void (*hash_hex)(const void *,size_t,char *);
+} RLParseOps;
+int cxsf_ledger_parse(const char *,void *,char *,size_t,const void *);
+static unsigned char *rl_parse_file(void *p,const char *name,size_t *n) {
+    RLParseContext *c=p;return rl_file_bytes(c->dir,name,c->views,c->count,n);
+}
+static int rl_parse_error(void) { return errno; }
+static int rl_load_parse(const char *dir,const RLFileView *views,int count,RLLedger *L,char *err,size_t errn) {
+    RLParseContext c={dir,views,count};
+    RLParseOps ops={&c,rl_parse_file,realloc,free,rl_parse_error,unisa_sha256_hex};
+    return cxsf_ledger_parse(dir,L,err,errn,&ops);
+}
+#else
 static int rl_load_parse(const char *dir, const RLFileView *views, int count, RLLedger *L, char *err, size_t errn) {
     unsigned char *b; size_t n = 0, at = 0; int cap = 0;
     L->rows = 0; L->n = 0; L->has_id = 0; L->trace = 0; L->cursor = 0; L->stage[0] = 0; L->input_hex[0] = 0;
@@ -295,6 +313,7 @@ static int rl_load_parse(const char *dir, const RLFileView *views, int count, RL
     free(b);
     return 0;
 }
+#endif
 /* Output may be fresh/uninitialized or previously cleared. A live ledger must
  * be released before reuse. Every failure produces an empty, clearable output;
  * rl_find borrows a row only until rl_clear. No compile-time ownership claim. */
