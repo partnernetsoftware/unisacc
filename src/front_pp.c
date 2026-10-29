@@ -209,17 +209,13 @@ int pp_ucn_span(char *b, int i, int e) {
     }
     return n;
 }
-us_i64 pp_ucn_value(char *b, int i, int n) {
-    int k; int c; int d; us_i64 value;
-    value = 0; k = 2;
-    while (k < n) {
-        c = b[i + k] & 255; d = c - 48;
-        if (c >= 65 && c <= 70) d = c - 55;
-        if (c >= 97 && c <= 102) d = c - 87;
-        value = value * 16 + d; k = k + 1;
-    }
-    return value;
-}
+/* Hex value, scalar range, kind gate, and reason live in cx/compiler/frontpp.cx.
+   A null or a negative index makes pp_ucn_value return 0 and not read.
+   pp_ucn_bad 1 is the old scalar refusal. pp_ucn_gate 2 is not an old return. */
+unsigned long long pp_ucn_value(const char *b, int i, int n);
+int pp_ucn_bad(unsigned long long v);
+int pp_ucn_gate(int kind, int initial, int span);
+const char *pp_ucn_why(int code);
 int pp_idend(char *b, int i, int e) {
     int j; int n; int c;
     j = i;
@@ -2376,26 +2372,17 @@ int ucnlen(int j) {
 /* Identifier conversion is an E1 constraint. E2's spelling scanner is
    separate; both public streams retain their original identifier bytes. */
 int lex_ucnlen(int j, int initial) {
-    int n; int k; int c; int d; int kind; us_i64 v;
+    int n; int kind; int g; unsigned long long v;
     n = ucnlen(j); if (n == 0) return 0 - 1;
-    v = 0; k = 2;
-    while (k < n) {
-        c = src[j + k] & 255; d = c - 48;
-        if (c >= 65 && c <= 70) d = c - 55;
-        if (c >= 97 && c <= 102) d = c - 87;
-        v = v * 16 + d; k = k + 1;
-    }
-    if (v > 1114111 || (v >= 55296 && v <= 57343)
-        || (v < 160 && v != 36 && v != 64 && v != 96)) return 0 - 1;
+    v = pp_ucn_value(src, j, n);
+    if (pp_ucn_bad(v) == 1) return 0 - 1;
     kind = unisa_ucn_kind((int)v);
-    if (kind == 0) return 0 - 2;
-    if (initial && kind == 2) return 0 - 3;
+    g = pp_ucn_gate(kind, initial, n);
+    if (g < 0) return g;
     return n;
 }
 char *lex_ucn_reason(int code) {
-    if (code == 0 - 2) return "universal character name not permitted in identifier";
-    if (code == 0 - 3) return "universal character name digit cannot start identifier";
-    return "invalid universal character name";
+    return (char *)pp_ucn_why(code);
 }
 
 int identend(int i) {
