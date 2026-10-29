@@ -644,6 +644,19 @@ flowchart TD
   cap["检查文件 32 个 use"] --> pull["bindargs.cx 的 use bindcount"]
 ```
 
+## 125. 2026-10-29 入口打印对象路线并拒绝非 Linux 对象
+
+构造脚本不改。`src/unisacc.cx` 增加 `use driver.route`。有源文件后先 `cxt_object`，再 `cxt_decide`，再 `cxt_text`。`sh ./tools/bound 55 sh ./unisacc.com src/unisacc.cx -- -c -b lnx/x86_64 a.c` 退出 0，stdout 80，stderr 0：`route=lnx/x86_64/object/O0`，`obj=1`，`mode=2`。`-E a.c` 退出 0，stdout 64，stderr 0：`route=lnx/x86_64/pp`，`obj=0`，`mode=1`。`-c -b win/x86_64 a.c` 退出 1，stdout 0，stderr 168，是非 Linux 对象还没上路的那句。`need_default_name` 没有拿来起名。没有调用前端。没有产品安装，没有 hostseed，没有 `--all`。整棵重写还没完成。
+
+```mermaid
+flowchart TD
+  src["有源文件"] --> obj["cxt_object"]
+  obj --> linux["Linux 对象 mode 内部改成 5"]
+  obj --> refuse["非 Linux -c -b 退出 1"]
+  linux --> decide["cxt_decide"]
+  decide --> text["cxt_text 打印 route 和 obj"]
+```
+
 ## 124. 2026-10-29 -c 后再 -b 保持 mode=2，as/nm 开始读写
 
 构造脚本不改。`-b` 在 `sawc` 或 `sawS` 已经是 1 时只写 target。`step-c-b` 先红：检查退出 1，stdout 3427，第 125 行 `FAIL step-c-b`，`failed=1`。改 `cxc_step` 后检查退出 0，stdout 3427，第 125 行 `PASS step-c-b`，`failed=0`。入口 `-c -b lnx/x86_64 a.c` 退出 0，stdout 47，`mode=2`。单独 `-b` 仍是 `mode=0`。`-S -b lnx/arm64 a.c` 是 `mode=2`。一行 `# unisacc -S lnx/x86_64` 经 `as` 写出 728 字节对象，退出 0。`nm` 该对象 stdout 0。`objdump -d` stdout 95。没有产品安装，没有 hostseed，没有 `--all`。整棵重写还没完成。
