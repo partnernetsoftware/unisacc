@@ -1368,6 +1368,8 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 
 - **`include/cx.h` 缺独立 stderr 捕获（cx-lab 实验副产物，2026-10-09，未修）**：`cx_run`/`cx_run_timeout`/`cx_runv_timeout` 只把子进程 stdout 接进调用方给的缓冲区（`dup2(fd,1)`），stderr 原样继承自父进程，没有单独通道。把 `tests/runtimeiocheck.py` port 成 `examples/cx-lab/runtimeiocheck.cx` 时需要同时断言“stdout 等于某行”和“stderr 为空”（原 Python 版本分别拿 `subprocess.run` 的 `stdout`/`stderr` 两个字段判断），cx.h 现状做不到分别拿到两路输出，只能退一步在命令字符串里 `2>&1` 合流后整体比对期望字符串——如果 stderr 真的非空，合流后的内容就不会精确等于期望行，等价地抓住了错误，但拿不到 stderr 本身的内容用于诊断信息。影响：任何要迁的 `.py` 测试如果像这样既要分别看 stdout 又要分别看 stderr（不少 tests/*.py 用 `subprocess.run(capture_output=True)` 正是这种模式），都会撞上同一个缺口。没有改 include/cx.h；如果 0.0.38–0.0.39 真要批量迁 tests/ 下的 170 个 `.py`（§5 路线），这里需要先补一个 `cx_run_timeout` 的变体（例如把 stderr 另 dup2 到第二个临时文件）。
 
+- **signal() 不向内核注册处理函数（2026-10-29，未修、有复现、csih 已兜底）**：rcg2 报告，unisacc 运行时的 `signal()` 不调用 `rt_sigaction`。`signal(SIGTERM, h)` 返回成功；本进程 `raise(SIGTERM)` 会调用 `h`；外部信号（`kill -TERM`、关 pane 的 SIGHUP）直接杀死进程，`h` 不执行。`-run` 和 `-o` 都这样。复现目录 `out/csih-signal-repro/`（`sigprobe.cx`、`README.txt`）。`strace -e trace=rt_sigaction` 跑 `-o` 编出的二进制，报告里没有 `rt_sigaction`。这次登记没有重跑 strace。影响：csih 被杀掉或崩溃时停在 raw 模式、鼠标上报还开着；csih 自己的 SIGINT 处理也没被外部信号真正调用。csih 已在 `csih.sh` 外层用子进程兜底，信号退出时由 shell 还原 termios。代码在 `apps/csih/term.cx` 的 `term_install_exit_handler`。运行时修好后这条兜底不用改就会走到真正的处理函数。另外 unisacc 头文件没有定义 `SIGBUS`。这次不改运行时。
+
 ### 6.1 研究问题立项：表的可解释性与完备性（主人 2026-10-03，立项不打断 K2）
 
 主人原问：① 构造出来的表数据（即使由 LLM 起草）如何具备**可解释性**；② 如何**计算并证明完备性**——现在只靠 TDD 检验，没有机制说明编译器还有多少不完备，“很没底气”；现有推论只挽回一点信心，缺严谨理论推导，需研究补上。
