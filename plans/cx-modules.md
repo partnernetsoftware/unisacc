@@ -644,6 +644,18 @@ flowchart TD
   cap["检查文件 32 个 use"] --> pull["bindargs.cx 的 use bindcount"]
 ```
 
+## 121. 2026-10-29 入口按归档编译器回答版本和帮助
+
+构造脚本不改。`src/unisacc.cx` 的 `us_version` 交出 `0.0.43`。`us_help` 交出归档 `compiler.c` 的三行帮助。第一个词是工具时返回 2，打印 `tool N`。`--version` 和 `-version` 打印 `unisacc 0.0.43`。改前 `--version` 的 stdout 是 `--version 11`。改后 `--version` 退出 0，stdout 15，stderr 0。`--help` 退出 0，stdout 191，stderr 0。`ar` 退出 2，stdout 7。无参数仍是七流，stdout 28。`a.c --version` 也打印版本。没有产品安装，没有 hostseed，没有 `--all`。整棵重写还没完成。
+
+```mermaid
+flowchart TD
+  entry["src/unisacc.cx"] --> tool["argv1 是 ar/as/nm 则 tool N 并返回 2"]
+  entry --> ver["us_version 打印 unisacc 0.0.43"]
+  entry --> help["us_help 打印三行帮助"]
+  build["构造脚本"] --> later["cx 写完再改"]
+```
+
 ## 120. 2026-10-29 编译器入口放在 src/unisacc.cx
 
 `cx/` 放架构。编译器源码放 `src/unisacc.cx`。`src/compiler` 指向 `../cx/compiler`。无参数实跑退出 0，stdout 28，stderr 0。五个命令词实跑退出 0，stdout 39，stderr 0。构造脚本不改。没有产品安装，没有 hostseed，没有 `--all`。整棵重写还没完成。
