@@ -175,8 +175,9 @@ static int action_run(CoreMachine *s,const I *a) {
     }
     return 0;
 }
-/* Step decisions live in cx/core/transition.cx, which is linked beside this
- * object. Allocation, the transition call and actions stay here.
+/* Budget, key, stop and take are written in this loop. The same four
+ * functions stay in cx/core/transition.cx for direct callers. Allocation,
+ * the transition call and actions stay here.
  * Run one model; all mutable ownership is explicit and invocation-local. */
 #ifndef CORE_RUN_NAME
 #define CORE_RUN_NAME core_run
@@ -185,11 +186,7 @@ int core_run(const CoreModel *m,unsigned char *input,
              int inputn,const char *src,I maxsteps,CoreResult *result) {
     extern int core_blob_add(CoreBlobs *,const unsigned char *,int);
     extern void core_frame_push(CoreFrames *,const CoreFrame *);
-    extern int core_run_budget(long long,long long,long long *,const char **);
-    extern int core_run_key(int,int,int,long long,long long,int,long long);
     extern const char *CORE_TRANSITION_NAME(const CoreModel *,int,int,int *,int *);
-    extern int core_run_stop(const char *,int,const char **);
-    extern int core_run_take(int);
     memset(result,0,sizeof *result);
     CoreMachine s={0}; s.model=m; s.result=result; s.input=input; s.x=input;
     s.regs=calloc(m->nrg+1,sizeof(I));
@@ -202,33 +199,43 @@ int core_run(const CoreModel *m,unsigned char *input,
     frame_push(&s.frames,&first);
     I steps=0; int q=m->start;
     for (;;) {
-        long long next_steps = steps;
-        const char *blown = 0;
-        if (core_run_budget(steps, maxsteps, &next_steps, &blown)) {
-            result->reason = blown ? blown : "timeout";
+        int mode;
+        int key;
+        const char *why;
+        CoreFrame *F;
+        int nx=-1,sq=-1;
+        const I *a;
+        int k;
+        if (steps >= maxsteps) {
+            result->reason = "timeout";
             s.status = 3;
             break;
         }
-        steps = (I)next_steps;
-        CoreFrame *F=&s.frames.entries[s.frames.n-1]; int nx=-1,sq=-1;
-        int key=core_run_key(m->mode[q], s.stack.n,
-            s.stack.n ? s.stack.entries[s.stack.n-1] : 0,
-            F->i, F->end, F->i < F->end ? F->b[F->i] : 0, s.r);
-        const char *why=CORE_TRANSITION_NAME(m,q,key,&nx,&sq);
-        const char *kept=0;
-        if (core_run_stop(why, nx, &kept)) {
-            result->reason = kept ? kept : why;
+        steps = steps + 1;
+        F=&s.frames.entries[s.frames.n-1];
+        mode = m->mode[q];
+        if (mode == 1) key = s.stack.n ? s.stack.entries[s.stack.n-1] : -1;
+        else if (mode == 0) key = F->i < F->end ? F->b[F->i] : 256;
+        else key = (s.r >= 0 && s.r <= 256) ? (int)s.r : 256;
+        why=CORE_TRANSITION_NAME(m,q,key,&nx,&sq);
+        if (why) {
+            result->reason = why;
             s.status = 2;
             break;
         }
-        q=nx; const I *a=m->qa+m->qoff[sq];
-        for (int k=0;k<m->qlen[sq];k++) {
+        if (nx < 0) {
+            result->reason = "no transition";
+            s.status = 2;
+            break;
+        }
+        q=nx; a=m->qa+m->qoff[sq];
+        for (k=0;k<m->qlen[sq];k++) {
             if (action_run(&s,a)) goto finished;
             a+=1+ARITY[(int)a[0]];
         }
     }
 finished:
-    if (core_run_take(s.status)) { result->out.b=s.out.b; result->out.n=s.out.n; s.out.b=0; }
+    if (!s.status) { result->out.b=s.out.b; result->out.n=s.out.n; s.out.b=0; }
     result->err.b=s.err.b; result->err.n=s.err.n; s.err.b=0;
     free(s.out.b);free(s.out.at);free(s.err.b);free(s.err.at);free(s.scratch.b);free(s.scratch.at);
     free(s.frames.entries);free(s.stack.entries);if (s.x!=input) free(s.x);free(s.xattr);free(s.regs);

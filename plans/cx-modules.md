@@ -6,7 +6,7 @@
 
 ## 产品面（2026-10-30）
 
-对照已装产品的入口路径。三档：已通、骨架、未做。没实跑的不写已通。临时入口是 `/tmp/grk-cx-line/entry-o2`，两只 `-O2` 对象再加 `src/hostnative.o`，939879 字节，sha256 `c95ae71a60000180bb2762d8d1206cbf0480e92598480d26ac5586cc16ccd397`。已装产品 3035300 字节。12 面那张表是上一只 873487 字节入口的，`out/grk-face-01/cx-entry-matrix-2026-10-30.tsv`：表头加 48 行，48 行都是 SAME，进度起点 100、下一格 148。按面计 SAME：ar 5、as 7、nm 3、objdump 4、-c 2、tape 2、tapebin 2、cx-plan 6、cx-interface 2、dump-tokens 1、emit-host-symbols 2、-O1 2、-O2 2、-D 7、lib 1。这只新入口没有整表重跑。语料前 100 格没有重跑。上一只整表仍是 `/tmp/grk-cx-line/o2mx/cx-entry-matrix-2026-10-30.tsv`，第 143 节。对象抽查在 `out/grk-obj-01/recheck.tsv`，第 145 节。12 面在第 146 节。摘要这一刀在第 147 节。目录行这一刀在第 148 节。解码这一刀在第 149 节，对拍表是 `out/grk-tapebin-02/cmp.tsv`。
+对照已装产品的入口路径。三档：已通、骨架、未做。没实跑的不写已通。临时入口是 `/tmp/grk-cx-line/entry-o2`，两只 `-O2` 对象再加 `src/hostnative.o`，939895 字节，sha256 `600ae023cafa6ef4194ac9b7d5824dd5ce992635bb896bedf05334836bddf9f0`。已装产品 3035300 字节。12 面那张表是上一只 873487 字节入口的，`out/grk-face-01/cx-entry-matrix-2026-10-30.tsv`：表头加 48 行，48 行都是 SAME，进度起点 100、下一格 148。按面计 SAME：ar 5、as 7、nm 3、objdump 4、-c 2、tape 2、tapebin 2、cx-plan 6、cx-interface 2、dump-tokens 1、emit-host-symbols 2、-O1 2、-O2 2、-D 7、lib 1。这只新入口没有整表重跑。语料前 100 格没有重跑。上一只整表仍是 `/tmp/grk-cx-line/o2mx/cx-entry-matrix-2026-10-30.tsv`，第 143 节。对象抽查在 `out/grk-obj-01/recheck.tsv`，第 145 节。12 面在第 146 节。摘要这一刀在第 147 节。目录行这一刀在第 148 节。解码这一刀在第 149 节，对拍表是 `out/grk-tapebin-02/cmp.tsv`。热循环这一刀在第 150 节。
 
 - **ar：已通。** 检查器五行和产品相同：用法、`ar z`、缺成员、空归档、两成员。空归档 8 字节，两成员 146 字节，权限都是 0644。大归档、替换成员、符号表没跑。
 - **as：已通。** 七行相同：用法、`-z`、坏 `-b`、头和 `-b` 冲突、一行汇编、加 `ret`、缺文件。一行汇编 728 字节，加 `ret` 744 字节，权限 0644。缺文件两边 stderr 都是 86 字节。Mach-O、COFF、大汇编没跑。
@@ -17,7 +17,7 @@
 - **-cx-plan / -cx-interface：已通。** 计划、接口、两个旗、缺文件、只有旗、`-include` 八行相同。多个模块的 `use` 没跑。
 - **-dump-tokens：已通。** `int x;` 两边 stdout 都是 25 字节。别的源文件没跑。
 - **--emit-host-symbols：已通。** 配 `-c -b` 两边 stderr 73 字节，配 `-S -b` 两边 106 字节，都是拒绝，退出 1。没有一格写出符号文件。
-- **-O1 / -O2：已通（限检查器这些格），性能红项另记。** 检查器这 4 格是 `-O1 -E`、`-O2 -E`、`-O1 -c`、`-O2 -c`，都是 SAME。`-E` 对 `int x;`。有 `main` 的 `-c` 两边都是 2216 字节，权限 0755。`dev-run` 的 8 格超时不在这 4 格里，这一轮没跑，仍是性能红项。
+- **-O1 / -O2：已通（限检查器这些格），性能红项另记。** 检查器这 4 格是 `-O1 -E`、`-O2 -E`、`-O1 -c`、`-O2 -c`，都是 SAME。`-E` 对 `int x;`。有 `main` 的 `-c` 两边都是 2216 字节，权限 0755。`dev-run` 的 8 格超时不在这 4 格里。这一轮把 `core_run` 里每步四次外部调用按原来的语义写进循环，`hello.c` 和 `fib.c` 的 `-S` 文本与产品逐字节相同。`dev-run.cx -S` 这只入口墙钟 25.200 秒，产品 4.189 秒，仍超过检查器 18 秒，性能红项还在。数字在第 150 节。
 - **-D / -U / -I / -include：已通。** `-DFOO`、`-UFOO`、先定义再取消、`-I` 引号、`-I` 尖括号、`-include`、`-iquote` 七行相同。多个目录、缺参数没跑。
 - **库接口：已通（只到检查器这一格）。** `int abs(int); int main(void){return abs(-3);}` 默认执行，两边退出 3，stdout 和 stderr 都是空的。`tests/library-abi.cx` 没跑。`us_*` 没接到这条入口。这不是库路径已经接上。`dup.c` 的 `strdup` 不在这 12 面里，这一轮没跑。
 
@@ -1852,6 +1852,23 @@ flowchart TD
   h["tb2 头、摘要、目录"] --> bad["不符: invalid tapebin"]
   h --> t["tb2_text 规范文本"]
   t --> tape["原有 tape 路线"]
+```
+
+## 150. 2026-10-30 core_run 热循环少四次每步调用
+
+`cx/core/execute.cx` 的 `core_run` 循环原来每步调用 `core_run_budget`、`core_run_key`、`core_run_stop`，结束时调用 `core_run_take`。这四个函数仍留在 `cx/core/transition.cx`，检查器还是直接调用它们。循环里按这四个函数原来的返回值写开：步数到顶就写 `timeout` 并把状态设为 3；模式 1 用栈顶，模式 0 用当前字节，其它模式用寄存器；转换函数返回原因或下一状态小于 0 就停，状态设为 2；状态是 0 才把输出交出去。模型和阈值没有改。转换调用和动作函数还在。
+
+执行器对象按 `sh ./unisacc.com -O2 -c -b lnx/x86_64 -funit` 重编，17.630 秒，1254648 字节，stdout 和 stderr 都是 0。再和原来的驱动对象、`hostnative` 对象链接，4.931 秒。入口 `/tmp/grk-cx-line/entry-o2`，939895 字节，sha256 `600ae023cafa6ef4194ac9b7d5824dd5ce992635bb896bedf05334836bddf9f0`。直接执行。重编第二次哈希相同。
+
+对拍参数是 `-b lnx/x86_64 -S`，cwd `/tmp/notrepo`，环境去掉 `UNISA_CONTAINER`。改之前这只入口：`hello.c` 的 e2 推理 150635389 纳秒，墙钟 848589185 纳秒；`fib.c` 的 e2 推理 160916703 纳秒，墙钟 864127870 纳秒。改之后：`hello.c` e2 137543957 纳秒，墙钟 754880835 纳秒；`fib.c` e2 138096783 纳秒，墙钟 766198976 纳秒。两边退出 0。文本和产品逐字节相同：`hello.c` 172298 字节，`fib.c` 173580 字节。产品同一参数的 e2 推理是 `hello.c` 41894569 纳秒、`fib.c` 40134193 纳秒。
+
+`tools/dev-run.cx -S` 改之后墙钟 25199846579 纳秒，退出 1，stdout 0。e2 推理三次：7441975848、7574697974、4692268174 纳秒。然后 e3 推理 4295289320 纳秒，stderr 是 `undefined function 'strdup'` 和 `undefined function 'setpgid'`。已装产品同一条命令墙钟 4189426592 纳秒，退出 1，stdout 0，没有 e2 行；units 推理 226170457 纳秒，e3 推理 1202077024 纳秒，stderr 是同样两句。检查器给 `dev-run.cx` 的上限是 18 秒。25.200 秒仍会记超时。这 8 格没有转绿。48 行检查器没有整表重跑。这不是产品安装。
+
+```mermaid
+flowchart TD
+  loop["core_run 循环"] --> four["预算、键、停止、取结果写在循环里"]
+  four --> same["hello 与 fib 的 -S 文本不变"]
+  same --> slow["dev-run.cx -S 仍是 25.2 秒"]
 ```
 
 ## 64. 2026-10-29 编译器纯拒绝接到 bindhost
