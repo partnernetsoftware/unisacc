@@ -2131,9 +2131,73 @@ static void tui_hit_add(int y, int logi) {
     tui_hit_n++;
 }
 
+static int tui_log_y0, tui_log_y1;   /* log rows on screen, set by the renderer */
+
+/* The word under screen cell (x, y), if it names an existing regular file:
+ * full path into out, "path:LINE" gives *line. Words split on space, quotes,
+ * brackets, commas and any non-ASCII byte (so │ and → never join a path;
+ * the cost is that non-ASCII paths are not found). Returns 1 on a file. */
+static int tui_path_at(tui_state *st, int x, int y, char *out, size_t cap, int *line) {
+    r_frame f = tui_render_state(st, st->cols > 0 ? st->cols : 80);
+    const char *s;
+    char word[1024], here[1024];
+    static int off[R_LINE_MAX + 1], sep[R_LINE_MAX + 1];
+    int i = 0, n = 0, col = 1, k = -1, a, b;
+    struct stat sb;
+    *line = 1;
+    if (y < 1 || y > f.n) return 0;
+    s = f.lines[y - 1];
+    /* One entry per code point: byte offset, first column, separator or not. */
+    while (s[i] && n < R_LINE_MAX) {
+        unsigned int cp = 0;
+        int need = tui_next_cp(s + i, &cp);
+        if (need <= 0) break;
+        off[n] = i;
+        sep[n] = cp >= 0x80 || strchr(" \t\"'()[],<>`", (int)cp) != NULL;
+        if (x >= col && x < col + tui_cp_cols(cp)) k = n;
+        col += tui_cp_cols(cp);
+        i += need; n++;
+    }
+    off[n] = i;
+    if (k < 0 || sep[k]) return 0;
+    for (a = k; a > 0 && !sep[a - 1]; a--) ;
+    for (b = k; b + 1 < n && !sep[b + 1]; b++) ;
+    if (off[b + 1] - off[a] >= (int)sizeof word) return 0;
+    snprintf(word, sizeof word, "%.*s", off[b + 1] - off[a], s + off[a]);
+    {
+        /* path:LINE or path:LINE:COL */
+        char *c = strchr(word, ':');
+        if (c && c[1] >= '0' && c[1] <= '9') { *line = atoi(c + 1); *c = 0; }
+        else if (c && !c[1]) *c = 0;
+    }
+    while (word[0] && strchr(".;:", word[strlen(word) - 1])) word[strlen(word) - 1] = 0;
+    if (!word[0]) return 0;
+    if (word[0] == '~' && word[1] == '/' && getenv("HOME")) snprintf(out, cap, "%s%s", getenv("HOME"), word + 1);
+    else if (word[0] == '/') snprintf(out, cap, "%s", word);
+    else {
+        const char *cwd = csih_env("CSIH_CWD", "CDSH_CWD");
+        if (!cwd) { if (!getcwd(here, sizeof here)) strcpy(here, "."); cwd = here; }
+        snprintf(out, cap, "%s/%s", cwd, word);
+    }
+    return stat(out, &sb) == 0 && S_ISREG(sb.st_mode);
+}
+
 static void tui_click(tui_state *st, int x, int y) {
     int h;
-    (void)x;
+    if (y >= tui_log_y0 && y < tui_log_y1 && !st->busy) {
+        /* A file path under the click opens in /view; anything else falls through. */
+        char path[2048], saved[TUI_INPUT_MAX];
+        int line, nsaved = st->ninput, back = st->back;
+        if (tui_path_at(st, x, y, path, sizeof path, &line)) {
+            snprintf(saved, sizeof saved, "%s", st->input);
+            snprintf(st->input, TUI_INPUT_MAX, "/view %s %d", path, line);
+            st->ninput = (int)strlen(st->input);
+            tui_slash(st);
+            snprintf(st->input, TUI_INPUT_MAX, "%s", saved);
+            st->ninput = nsaved; st->back = back;
+            return;
+        }
+    }
     if (y == tui_sys_rule_y && tui_sys_rule_y > 0) {
         st->sys_open = !st->sys_open;
         st->sys_top = 0;
@@ -2230,9 +2294,8 @@ static void tui_log_scroll(tui_state *st, int delta) {
     tui_log_clamp(st);
 }
 
-/* Screen rows of the log viewport. Filled by the render that just ran. */
-static int tui_log_y0;
-static int tui_log_y1;
+/* tui_log_y0/y1 (declared above tui_click): screen rows of the log viewport,
+ * filled by the render that just ran. */
 
 /* Wheel over the open system rows still moves that block.
  * dir 1 moves down, dir 2 moves up. A wheel on the log viewport
@@ -4754,6 +4817,36 @@ int tui_entry(int argc, char **argv) {
             if (tui_selftest_rm(path, 0)) failures++;
             if (!ok) { printf("FAIL /view\n"); failures++; }
             else printf("  ok   /view shows numbered lines and paging\n");
+        }
+        {
+            static tui_state tk2;
+            char path[128], text[300];
+            FILE *f;
+            r_frame fr;
+            int i, y = 0, x = 0, ok = 0, before;
+            snprintf(path, sizeof path, "/tmp/csih-click-%d.txt", (int)getpid());
+            f = fopen(path, "w");
+            if (f) { for (i = 1; i <= 5; i++) fprintf(f, "row %d\n", i); fclose(f); }
+            tui_state_init(&tk2, NULL); tk2.mode = 1; tk2.rows = 24; tk2.cols = 120;
+            snprintf(text, sizeof text, "see %s:3 for details", path);
+            tui_log_plain(&tk2, text);
+            fr = tui_render_state(&tk2, 120);
+            for (i = 0; i < fr.n; i++) {
+                const char *p = strstr(fr.lines[i], "/tmp/csih-click-");
+                if (p) { y = i + 1; x = tui_str_cols(fr.lines[i], (int)(p - fr.lines[i])) + 5; break; }
+            }
+            if (y) {
+                before = tk2.nlog;
+                tui_click(&tk2, x, y);
+                ok = tk2.nlog > before && strstr(tk2.log[before], "view:") && strstr(tk2.log[before + 1], "    3│ row 3");
+                /* the word "details" is not a file: nothing opens */
+                before = tk2.nlog;
+                tui_click(&tk2, x + (int)strlen(path) + 8, y);
+                ok = ok && tk2.nlog == before;
+            }
+            if (tui_selftest_rm(path, 0)) failures++;
+            if (!ok) { printf("FAIL click path y=%d x=%d\n", y, x); failures++; }
+            else printf("  ok   clicking a file path opens it in /view at path:LINE\n");
         }
 
         printf("%s\n", failures ? "SELFTEST FAILED" : "selftest ok");
