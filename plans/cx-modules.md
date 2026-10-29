@@ -6,14 +6,14 @@
 
 ## 产品面（2026-10-30）
 
-对照已装产品的入口路径。三档：已通、骨架、未做。没实跑的不写已通。临时入口是 `/tmp/grk-cx-line/entry-o2`，两只 `-O2` 对象再加 `src/hostnative.o`，889911 字节，sha256 `f6c4431dd26873fe60d7a1d4fd91ad25da843dc42eb7dbaec58654081cae22e6`。已装产品 3035300 字节。12 面那张表是上一只 873487 字节入口的，`out/grk-face-01/cx-entry-matrix-2026-10-30.tsv`：表头加 48 行，48 行都是 SAME，进度起点 100、下一格 148。按面计 SAME：ar 5、as 7、nm 3、objdump 4、-c 2、tape 2、tapebin 2、cx-plan 6、cx-interface 2、dump-tokens 1、emit-host-symbols 2、-O1 2、-O2 2、-D 7、lib 1。这只新入口没有整表重跑。语料前 100 格没有重跑。上一只整表仍是 `/tmp/grk-cx-line/o2mx/cx-entry-matrix-2026-10-30.tsv`，第 143 节。对象抽查在 `out/grk-obj-01/recheck.tsv`，第 145 节。12 面在第 146 节。摘要这一刀在第 147 节。目录行这一刀在第 148 节。
+对照已装产品的入口路径。三档：已通、骨架、未做。没实跑的不写已通。临时入口是 `/tmp/grk-cx-line/entry-o2`，两只 `-O2` 对象再加 `src/hostnative.o`，939879 字节，sha256 `c95ae71a60000180bb2762d8d1206cbf0480e92598480d26ac5586cc16ccd397`。已装产品 3035300 字节。12 面那张表是上一只 873487 字节入口的，`out/grk-face-01/cx-entry-matrix-2026-10-30.tsv`：表头加 48 行，48 行都是 SAME，进度起点 100、下一格 148。按面计 SAME：ar 5、as 7、nm 3、objdump 4、-c 2、tape 2、tapebin 2、cx-plan 6、cx-interface 2、dump-tokens 1、emit-host-symbols 2、-O1 2、-O2 2、-D 7、lib 1。这只新入口没有整表重跑。语料前 100 格没有重跑。上一只整表仍是 `/tmp/grk-cx-line/o2mx/cx-entry-matrix-2026-10-30.tsv`，第 143 节。对象抽查在 `out/grk-obj-01/recheck.tsv`，第 145 节。12 面在第 146 节。摘要这一刀在第 147 节。目录行这一刀在第 148 节。解码这一刀在第 149 节，对拍表是 `out/grk-tapebin-02/cmp.tsv`。
 
 - **ar：已通。** 检查器五行和产品相同：用法、`ar z`、缺成员、空归档、两成员。空归档 8 字节，两成员 146 字节，权限都是 0644。大归档、替换成员、符号表没跑。
 - **as：已通。** 七行相同：用法、`-z`、坏 `-b`、头和 `-b` 冲突、一行汇编、加 `ret`、缺文件。一行汇编 728 字节，加 `ret` 744 字节，权限 0644。缺文件两边 stderr 都是 86 字节。Mach-O、COFF、大汇编没跑。
 - **nm：已通。** 用法、坏文件、728 字节对象三行相同。
 - **objdump：已通。** 用法、少 `-d`、坏文件、`objdump -d` 四行相同。
 - **-c 对象：已通。** 没有 `main` 时两边都拒绝，stderr 106 字节。有 `main` 的 `-c` 两边都写出 2216 字节，权限 0755。Mach-O、COFF、多文件没跑。
-- **.tape / .tapebin 输入：已通（只到检查器这四行）。** 三行 `_start` 的 `.tape` 两边都是 4096 字节，权限 0755。内容是 `?` 的 `.tape`，两边 stderr 都是 71 字节。内容是 `XXXX` 的 `.tapebin`，两边 stderr 都是 65 字节。`UTAPEBIN` 后面再跟 128 个 0，两边都是 `invalid tapebin or origin target mismatch`，也是 65 字节。固定字段能过、摘要是 0 的 136 字节头，两边也是这句，退出 1。摘要对得上、目录行是 0 的头，两边也是这句，退出 1。目录三行对齐、三节长度是 0 的头，产品仍是这句，入口仍是 `tapebin decode`，退出 2。有效包没跑。记录文本仍在 C。
+- **.tape / .tapebin 输入：已通（检查器那四行仍是上一只入口的表；这只入口另有解码对拍）。** 检查器里三行 `_start` 的 `.tape` 两边都是 4096 字节，权限 0755。内容是 `?` 的 `.tape`，两边 stderr 都是 71 字节。内容是 `XXXX` 的 `.tapebin`，两边 stderr 都是 65 字节。`UTAPEBIN` 后面再跟 128 个 0，两边都是 `invalid tapebin or origin target mismatch`。这只入口上，三行手写 `.tape` 的 `-S` 仍是原文 26 字节，`-o` 镜像 4096 字节和产品相同。已装产品从 C 源生成的包，`-S` 文本和 `-o` 镜像都和产品逐字节相同：`return 7` 文本 663、镜像 4096、退出 7；arith 文本 1118、镜像 4096、退出 7；loop 文本 1824、镜像 4096、退出 5；call-str 文本 1964、镜像 4103、退出 7；global-bss 文本 1379、镜像 4096、退出 9。拒绝类各一，两边退出 1，stderr 都是 65 字节那句：魔数、固定字段、节数、origin、`-b lnx/arm64`、摘要、目录行、补零、结尾、名字、池个数、记录种类、opcode、第四节、空节 dirok。`-run` 仍走原来的 C 内存路径。库接口没动。
 - **-cx-plan / -cx-interface：已通。** 计划、接口、两个旗、缺文件、只有旗、`-include` 八行相同。多个模块的 `use` 没跑。
 - **-dump-tokens：已通。** `int x;` 两边 stdout 都是 25 字节。别的源文件没跑。
 - **--emit-host-symbols：已通。** 配 `-c -b` 两边 stderr 73 字节，配 `-S -b` 两边 106 字节，都是拒绝，退出 1。没有一格写出符号文件。
@@ -1837,6 +1837,21 @@ flowchart TD
   s["摘要通过"] --> d["tb2 目录行"]
   d --> bad["目录不符: invalid tapebin"]
   d --> ok["目录能过: tapebin decode"]
+```
+
+## 149. 2026-10-30 tapebin 一次校验并解码成规范文本
+
+`src/drive.cx` 用 `cx/compiler/tapegate.cx` 里已有的 `tb2_magic`、`tb2_fixed`、`tb2_nsec`、`tb2_origin`、`tb2_align`、`tb2_row`、`tb2_zeros`、`tb2_extra`、`tb2_end`，加上原来的 `cx_sha256`，一次看完头、摘要和目录。通过之后 `tb2_text` 按 `exec/c/tapebin.h` 的规范打印把记录解成 tape 文本，再走原来的 `.tape` 路线（`-S` 经 tapecheck 原文写出，`-o` 经 prune 出镜像）。opcode 名字和 shape 与 `src/tapebin_shape.inc` 的 72 项相同。没有新模块，没有搬编码器。失败仍是产品那句 `invalid tapebin or origin target mismatch`。
+
+驱动对象重新按 `-O2 -c -b lnx/x86_64 -funit` 编译，再和原来的执行器对象、`hostnative` 对象链接。产物 `/tmp/grk-cx-line/entry-o2`，939879 字节，sha256 `c95ae71a60000180bb2762d8d1206cbf0480e92598480d26ac5586cc16ccd397`。直接执行。
+
+对拍表 `out/grk-tapebin-02/cmp.tsv`。正例是已装产品自己生成的包。`-S` 文本和 `-o` 镜像都逐字节相同，镜像退出码是 return 7 → 7、arith → 7、loop → 5、call-str → 7、global-bss → 9。三行手写 `.tape` 的 `-S` 仍是 26 字节原文，镜像 4096 字节和产品相同。反例十五个都是退出 1、stderr 65 字节、逐字节相同，其中包括以前停在 `tapebin decode` 的空节 dirok。`-run` 仍走 C 的内存路径，这一刀没有改。48 行检查器没有整表重跑。库接口没动。这不是产品安装。
+
+```mermaid
+flowchart TD
+  h["tb2 头、摘要、目录"] --> bad["不符: invalid tapebin"]
+  h --> t["tb2_text 规范文本"]
+  t --> tape["原有 tape 路线"]
 ```
 
 ## 64. 2026-10-29 编译器纯拒绝接到 bindhost

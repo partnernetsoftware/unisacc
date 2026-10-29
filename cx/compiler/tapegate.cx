@@ -1,9 +1,10 @@
 #pragma unisa module tapegate
-/* LEB, quote, and container-header decisions from src/tapebin.c.
+/* LEB, quote, container-header decisions, and canonical record text.
    The old functions set tb_bad and write a global buffer. These return
    codes instead. Return 1 is the old fail path and does not set a global.
-   Return 4 is not on the old path. SHA, record text, and file reads stay
-   in src/tapebin.c. */
+   Return 4 is not on the old path. SHA and file reads stay outside.
+   tb2_text prints the same tape text as exec/c/tapebin.h tbc_insn.
+   Opcode names and shapes match src/tapebin_shape.inc (72 entries). */
 static unsigned long long tb2_u(const unsigned char *p, int n) {
     unsigned long long v;
     int i;
@@ -239,5 +240,436 @@ int tb2_sleb(const unsigned char *buf, int *pos, int end, unsigned long long *va
 int tb2_pool_bad(int bad, int n, int expect, int maxpool) {
     if (bad) return 1;
     if (n < 0 || n != expect || n > maxpool) return 1;
+    return 0;
+}
+static const char *tb2_oname(int op) {
+    static const char *names[72] = {
+        "imm", "mov", "add64", "sub64", "mul64", "xor64", "and64", "or64", "shl64", "shr64", "lshr64",
+        ".div", ".mod", ".udiv", ".umod", "slt64", "sle64", "ult64", "ule64", "eq", "ne",
+        "load64", "store64", ".ld", ".st", ".lea", ".zero", "jump", "jumpz", "call", "callr",
+        "callm", ".hostcall", ".librarycall", ".libraryaddr", ".libraryfn", ".hostaddr", "ret",
+        ".frame", ".arg", ".print", ".write", ".exit", ".sys", ".sys6", ".argc", ".argv", "nop",
+        "fadd64", "fsub64", "fmul64", "fdiv64", "flt64", "fle64", "feq64",
+        "fadd32", "fsub32", "fmul32", "fdiv32", "flt32", "fle32", "feq32",
+        "cvtid", "cvtud", "cvtis", "cvtus", "cvtdi", "cvtdu", "cvtsd", "cvtds", "fsqrt64", "fsqrt32"
+    };
+    if (op < 0 || op >= 72) return 0;
+    return names[op];
+}
+static const char *tb2_oshape(int op) {
+    static const char *shapes[72] = {
+        "ri", "rr",
+        "rrr", "rrr", "rrr", "rrr", "rrr", "rrr", "rrr", "rrr", "rrr", "rrr",
+        "rrr", "rrr", "rrr", "rrr", "rrr", "rrr", "rrr", "rrr", "rrr",
+        "rri", "rir", "rrii", "riri", "rs", "rii", "L", "rL", "L", "r",
+        "ri", "rr", "rr", "rsiiii", "ri", "ri", "", "i", "ir", "r", "rr", "r", "srrr", "srrrrrr", "r", "rr", "",
+        "rrr", "rrr", "rrr", "rrr", "rrr", "rrr", "rrr", "rrr", "rrr", "rrr", "rrr", "rrr", "rrr", "rrr",
+        "rr", "rr", "rr", "rr", "rr", "rr", "rr", "rr", "rr", "rr"
+    };
+    if (op < 0 || op >= 72) return 0;
+    return shapes[op];
+}
+static int tb2_room(char **buf, int *cap, int n, int add) {
+    int need;
+    int ncap;
+    char *p;
+    if (add < 0 || n < 0 || add > 33554432) return 1;
+    if (n > 33554432 - add) return 1;
+    need = n + add + 1;
+    if (*cap >= need) return 0;
+    ncap = *cap > 64 ? *cap : 64;
+    while (ncap < need) {
+        if (ncap > 16777216) {
+            ncap = need;
+            break;
+        }
+        ncap = ncap * 2;
+    }
+    p = (char *)realloc(*buf, (size_t)ncap);
+    if (!p) return 1;
+    *buf = p;
+    *cap = ncap;
+    return 0;
+}
+static int tb2_app(char **buf, int *n, int *cap, const char *s, int k) {
+    if (k == 0) return 0;
+    if (k < 0 || !s) return 1;
+    if (tb2_room(buf, cap, *n, k)) return 1;
+    memcpy(*buf + *n, s, (size_t)k);
+    *n = *n + k;
+    (*buf)[*n] = 0;
+    return 0;
+}
+static int tb2_ch(char **buf, int *n, int *cap, int c) {
+    char x;
+    x = (char)c;
+    return tb2_app(buf, n, cap, &x, 1);
+}
+static int tb2_str(char **buf, int *n, int *cap, const char *s) {
+    int k;
+    if (!s) return 1;
+    k = 0;
+    while (s[k]) k = k + 1;
+    return tb2_app(buf, n, cap, s, k);
+}
+static int tb2_sdec(char **buf, int *n, int *cap, long long v) {
+    char tmp[32];
+    int k;
+    k = snprintf(tmp, 32, "%lld", v);
+    if (k < 0 || k >= 32) return 1;
+    return tb2_app(buf, n, cap, tmp, k);
+}
+static int tb2_udec(char **buf, int *n, int *cap, unsigned long long v) {
+    char tmp[32];
+    int k;
+    k = snprintf(tmp, 32, "%llu", v);
+    if (k < 0 || k >= 32) return 1;
+    return tb2_app(buf, n, cap, tmp, k);
+}
+static int tb2_qbytes(char **buf, int *n, int *cap, const unsigned char *p, int len) {
+    int i;
+    int c;
+    const char *hex = "0123456789abcdef";
+    char pair[2];
+    if (len < 0 || (len > 0 && !p)) return 1;
+    if (tb2_ch(buf, n, cap, 34)) return 1;
+    i = 0;
+    while (i < len) {
+        c = p[i] & 255;
+        if (c == 10) { if (tb2_str(buf, n, cap, "\\n")) return 1; }
+        else if (c == 9) { if (tb2_str(buf, n, cap, "\\t")) return 1; }
+        else if (c == 13) { if (tb2_str(buf, n, cap, "\\r")) return 1; }
+        else if (c == 0) { if (tb2_str(buf, n, cap, "\\0")) return 1; }
+        else if (c == 92) { if (tb2_str(buf, n, cap, "\\\\")) return 1; }
+        else if (c == 34) { if (tb2_str(buf, n, cap, "\\\"")) return 1; }
+        else if (c >= 32 && c < 127) { if (tb2_ch(buf, n, cap, c)) return 1; }
+        else {
+            if (tb2_str(buf, n, cap, "\\x")) return 1;
+            pair[0] = hex[(c >> 4) & 15];
+            pair[1] = hex[c & 15];
+            if (tb2_app(buf, n, cap, pair, 2)) return 1;
+        }
+        i = i + 1;
+    }
+    return tb2_ch(buf, n, cap, 34);
+}
+static int tb2_take_pool(const unsigned char *b, int off, int len, int expect, int names,
+                         int **starts, int **sizes) {
+    int pos;
+    int end;
+    int i;
+    int j;
+    int bad;
+    int nvi;
+    unsigned long long nv;
+    unsigned long long sz;
+    int *st;
+    int *szs;
+    st = 0;
+    szs = 0;
+    if (!b || !starts || !sizes) return 4;
+    if (off < 0 || len < 0 || expect < 0 || expect > 262144) return 1;
+    if (off > 2147483647 - len) return 1;
+    pos = off;
+    end = off + len;
+    nv = 0;
+    bad = tb2_uleb(b, &pos, end, &nv);
+    if (!bad && nv > 262144ull) bad = 1;
+    nvi = bad ? 0 : (int)nv;
+    if (tb2_pool_bad(bad, nvi, expect, 262144)) return 1;
+    st = (int *)malloc(((size_t)expect + 1) * sizeof(int));
+    szs = (int *)malloc(((size_t)expect + 1) * sizeof(int));
+    if (!st || !szs) {
+        free(st);
+        free(szs);
+        return 1;
+    }
+    i = 0;
+    while (i < expect) {
+        sz = 0;
+        if (tb2_uleb(b, &pos, end, &sz)) goto fail;
+        if (sz > 2147483647ull) goto fail;
+        if (tb2_span((long long)sz, (long long)(end - pos))) goto fail;
+        if (tb2_name_empty(names, (long long)sz)) goto fail;
+        if (names) {
+            j = 0;
+            while (j < (int)sz) {
+                if (tb2_name_byte(b[pos + j])) goto fail;
+                j = j + 1;
+            }
+        }
+        st[i] = pos;
+        szs[i] = (int)sz;
+        pos = pos + (int)sz;
+        i = i + 1;
+    }
+    if (pos != end) goto fail;
+    *starts = st;
+    *sizes = szs;
+    return 0;
+fail:
+    free(st);
+    free(szs);
+    return 1;
+}
+static int tb2_mem(char **buf, int *n, int *cap, unsigned long long reg, unsigned long long off) {
+    if (tb2_ch(buf, n, cap, '[')) return 1;
+    if (tb2_ch(buf, n, cap, 'r')) return 1;
+    if (tb2_ch(buf, n, cap, '0' + (int)reg)) return 1;
+    if ((long long)off >= 0) {
+        if (tb2_ch(buf, n, cap, '+')) return 1;
+    }
+    if (tb2_sdec(buf, n, cap, (long long)off)) return 1;
+    return tb2_ch(buf, n, cap, ']');
+}
+static int tb2_arg(char **buf, int *n, int *cap, int typ, int tag, unsigned long long val,
+                   const unsigned char *b, const int *st, const int *sz, int nn) {
+    if (typ == 'r') {
+        if (tb2_ch(buf, n, cap, 'r')) return 1;
+        return tb2_ch(buf, n, cap, '0' + (int)val);
+    }
+    if (tag == 1 && typ != 'i') {
+        if (val >= (unsigned long long)nn) return 1;
+        return tb2_app(buf, n, cap, (const char *)(b + st[(int)val]), sz[(int)val]);
+    }
+    if (tag == 1) return tb2_udec(buf, n, cap, val);
+    return tb2_sdec(buf, n, cap, (long long)val);
+}
+static int tb2_insn(char **buf, int *n, int *cap, int op, const unsigned long long *v, const int *tag,
+                    const unsigned char *b, const int *st, const int *sz, int nn) {
+    const char *name;
+    const char *shape;
+    int pad;
+    int k;
+    int i;
+    name = tb2_oname(op);
+    shape = tb2_oshape(op);
+    if (!name || !shape) return 1;
+    if (tb2_str(buf, n, cap, "  ")) return 1;
+    if (tb2_str(buf, n, cap, name)) return 1;
+    k = 0;
+    while (name[k]) k = k + 1;
+    if (shape[0]) {
+        pad = 7 - k;
+        while (pad > 0) {
+            if (tb2_ch(buf, n, cap, ' ')) return 1;
+            pad = pad - 1;
+        }
+        if (tb2_ch(buf, n, cap, ' ')) return 1;
+    }
+    if (op == 31) {
+        if (tb2_mem(buf, n, cap, v[0], v[1])) return 1;
+    } else if (op == 21 || op == 23) {
+        if (tb2_arg(buf, n, cap, 'r', 0, v[0], b, st, sz, nn)) return 1;
+        if (tb2_str(buf, n, cap, ", ")) return 1;
+        if (tb2_mem(buf, n, cap, v[1], v[2])) return 1;
+        if (op == 23) {
+            if (tb2_str(buf, n, cap, ", ")) return 1;
+            if (tb2_arg(buf, n, cap, 'i', tag[3], v[3], b, st, sz, nn)) return 1;
+        }
+    } else if (op == 22 || op == 24) {
+        if (tb2_mem(buf, n, cap, v[0], v[1])) return 1;
+        if (tb2_str(buf, n, cap, ", ")) return 1;
+        if (tb2_arg(buf, n, cap, 'r', 0, v[2], b, st, sz, nn)) return 1;
+        if (op == 24) {
+            if (tb2_str(buf, n, cap, ", ")) return 1;
+            if (tb2_arg(buf, n, cap, 'i', tag[3], v[3], b, st, sz, nn)) return 1;
+        }
+    } else if (op == 26) {
+        if (tb2_mem(buf, n, cap, v[0], v[1])) return 1;
+        if (tb2_str(buf, n, cap, ", ")) return 1;
+        if (tb2_arg(buf, n, cap, 'i', tag[2], v[2], b, st, sz, nn)) return 1;
+    } else {
+        i = 0;
+        while (shape[i]) {
+            if (i) {
+                if (tb2_str(buf, n, cap, ", ")) return 1;
+            }
+            if (tb2_arg(buf, n, cap, shape[i], tag[i], v[i], b, st, sz, nn)) return 1;
+            i = i + 1;
+        }
+    }
+    return tb2_ch(buf, n, cap, '\n');
+}
+static int tb2_records(const unsigned char *b, int off, int len, int expect, int minor,
+                       const int *nst, const int *nsz, int nn,
+                       const int *cst, const int *csz, int nc,
+                       char **buf, int *n, int *cap) {
+    int pos;
+    int end;
+    int kind;
+    int op;
+    int arity;
+    int nregs;
+    int ri;
+    int i;
+    int unit;
+    int row;
+    int tg;
+    unsigned long long nr;
+    unsigned long long id;
+    unsigned long long amount;
+    unsigned long long ci;
+    unsigned long long v[8];
+    int tag[8];
+    const char *shape;
+    const unsigned char *packed;
+    if (off < 0 || len < 0 || expect < 0) return 1;
+    if (off > 2147483647 - len) return 1;
+    pos = off;
+    end = off + len;
+    nr = 0;
+    if (tb2_uleb(b, &pos, end, &nr)) return 1;
+    if (nr != (unsigned long long)expect || nr > (unsigned long long)len) return 1;
+    unit = 0;
+    row = 0;
+    while ((unsigned long long)row < nr) {
+        if (pos >= end) return 1;
+        kind = b[pos] & 255;
+        pos = pos + 1;
+        if (kind == 6) {
+            if (minor != 1 || row != 0) return 1;
+            id = 0;
+            if (tb2_uleb(b, &pos, end, &id) || id != 2) return 1;
+            unit = 1;
+            if (tb2_str(buf, n, cap, ".unit 2\n")) return 1;
+        } else if (kind == 4 || kind == 5 || kind == 7) {
+            if (kind == 7 && (!unit || minor != 1)) return 1;
+            id = 0;
+            if (tb2_uleb(b, &pos, end, &id) || id >= (unsigned long long)nn) return 1;
+            if (kind == 4) {
+                if (tb2_str(buf, n, cap, ".global ")) return 1;
+            } else if (kind == 5) {
+                if (tb2_str(buf, n, cap, ".extern ")) return 1;
+            } else if (tb2_str(buf, n, cap, ".gdef ")) return 1;
+            if (tb2_app(buf, n, cap, (const char *)(b + nst[(int)id]), nsz[(int)id])) return 1;
+            if (tb2_ch(buf, n, cap, '\n')) return 1;
+        } else if (kind <= 2) {
+            id = 0;
+            if (tb2_uleb(b, &pos, end, &id) || id >= (unsigned long long)nn) return 1;
+            if (kind == 0) {
+                if (tb2_app(buf, n, cap, (const char *)(b + nst[(int)id]), nsz[(int)id])) return 1;
+                if (tb2_str(buf, n, cap, ":\n")) return 1;
+            } else if (kind == 1) {
+                ci = 0;
+                if (tb2_uleb(b, &pos, end, &ci) || ci >= (unsigned long long)nc) return 1;
+                if (tb2_str(buf, n, cap, ".str ")) return 1;
+                if (tb2_app(buf, n, cap, (const char *)(b + nst[(int)id]), nsz[(int)id])) return 1;
+                if (tb2_ch(buf, n, cap, ' ')) return 1;
+                if (tb2_qbytes(buf, n, cap, b + cst[(int)ci], csz[(int)ci])) return 1;
+                if (tb2_ch(buf, n, cap, '\n')) return 1;
+            } else {
+                amount = 0;
+                if (tb2_uleb(b, &pos, end, &amount) || amount > 9223372036854775807ull) return 1;
+                if (tb2_str(buf, n, cap, ".bss ")) return 1;
+                if (tb2_app(buf, n, cap, (const char *)(b + nst[(int)id]), nsz[(int)id])) return 1;
+                if (tb2_ch(buf, n, cap, ' ')) return 1;
+                if (tb2_udec(buf, n, cap, amount)) return 1;
+                if (tb2_ch(buf, n, cap, '\n')) return 1;
+            }
+        } else if (kind == 3) {
+            if (pos >= end) return 1;
+            op = b[pos] & 255;
+            pos = pos + 1;
+            shape = tb2_oshape(op);
+            if (!shape) return 1;
+            arity = 0;
+            while (shape[arity]) arity = arity + 1;
+            if (arity > 8) return 1;
+            nregs = 0;
+            i = 0;
+            while (i < arity) {
+                if (shape[i] == 'r') nregs = nregs + 1;
+                i = i + 1;
+            }
+            if ((nregs + 1) / 2 > end - pos) return 1;
+            packed = b + pos;
+            pos = pos + (nregs + 1) / 2;
+            if ((nregs & 1) && (packed[nregs / 2] >> 4) != 15) return 1;
+            i = 0;
+            while (i < 8) {
+                v[i] = 0;
+                tag[i] = 0;
+                i = i + 1;
+            }
+            ri = 0;
+            i = 0;
+            while (i < arity) {
+                if (shape[i] == 'r') {
+                    v[i] = (unsigned long long)((packed[ri / 2] >> (4 * (ri % 2))) & 15);
+                    ri = ri + 1;
+                    if (v[i] > 7) return 1;
+                } else {
+                    if (pos >= end) return 1;
+                    tg = b[pos] & 255;
+                    pos = pos + 1;
+                    if (tg > 1) return 1;
+                    tag[i] = tg;
+                    if (tg) {
+                        if (tb2_uleb(b, &pos, end, &v[i])) return 1;
+                    } else if (tb2_sleb(b, &pos, end, &v[i])) return 1;
+                    if (tg && shape[i] != 'i' && v[i] >= (unsigned long long)nn) return 1;
+                }
+                i = i + 1;
+            }
+            if (tb2_insn(buf, n, cap, op, v, tag, b, nst, nsz, nn)) return 1;
+        } else return 1;
+        if (*n > 33554432) return 1;
+        row = row + 1;
+    }
+    if (pos != end) return 1;
+    if (minor == 1 && !unit) return 1;
+    return 0;
+}
+/* 0: *out is malloc text, *outn excludes the trailing NUL. 1: refused. 4: null argument.
+   On 1 or 4, *out and *outn stay unchanged. Section 4 is not printed. */
+int tb2_text(const unsigned char *b, int n, int minor, const int *off, const int *len, const int *cnt,
+             char **out, int *outn) {
+    int *nst;
+    int *nsz;
+    int *cst;
+    int *csz;
+    char *buf;
+    int bn;
+    int cap;
+    int rc;
+    int i;
+    if (!b || !off || !len || !cnt || !out || !outn) return 4;
+    if (n < 136 || minor < 0 || minor > 1) return 1;
+    i = 0;
+    while (i < 3) {
+        if (off[i] < 0 || len[i] < 0 || cnt[i] < 0 || cnt[i] > 262144) return 1;
+        if (off[i] > n || len[i] > n - off[i]) return 1;
+        i = i + 1;
+    }
+    nst = 0;
+    nsz = 0;
+    cst = 0;
+    csz = 0;
+    buf = 0;
+    bn = 0;
+    cap = 0;
+    if (tb2_take_pool(b, off[0], len[0], cnt[0], 1, &nst, &nsz)) return 1;
+    if (tb2_take_pool(b, off[1], len[1], cnt[1], 0, &cst, &csz)) {
+        free(nst);
+        free(nsz);
+        return 1;
+    }
+    rc = tb2_records(b, off[2], len[2], cnt[2], minor, nst, nsz, cnt[0], cst, csz, cnt[1], &buf, &bn, &cap);
+    free(nst);
+    free(nsz);
+    free(cst);
+    free(csz);
+    if (rc) {
+        free(buf);
+        return 1;
+    }
+    if (!buf) {
+        buf = (char *)malloc(1);
+        if (!buf) return 1;
+        buf[0] = 0;
+    }
+    *out = buf;
+    *outn = bn;
     return 0;
 }

@@ -26,8 +26,9 @@
    caller-owned args blocks. executor and packmodel are linked from
    src/entryexec.cx; this file calls them by name. A .tape source is tapecheck, then the
    backend from prune or e4. A .tapebin that is not a container, or whose
-   digest does not match the bytes after the header, or whose directory
-   rows do not line up, is the product refusal. Record text stays in C. */
+   digest does not match, or whose directory or records do not line up,
+   is the product refusal. A package that passes is canonical tape text
+   and then follows the tape route. */
 static char dv_in[262144];
 static char dv_obj[1048576];
 static long dv_objn;
@@ -60,18 +61,6 @@ static int dv_fail(const char *s) {
     fprintf(stderr, "unisacc: model driver: %s\n", s);
     return 1;
 }
-static unsigned dv_leu(const unsigned char *p, int n) {
-    unsigned v;
-    int i;
-    v = 0;
-    i = n;
-    while (i > 0) {
-        i = i - 1;
-        v = (v << 8) | p[i];
-    }
-    return v;
-}
-/* Header fields tbc_decode rejects before it hashes or walks sections. */
 static int dv_tapebin_sha_bad(const unsigned char *b, long n) {
     unsigned char dig[32];
     int i;
@@ -82,58 +71,6 @@ static int dv_tapebin_sha_bad(const unsigned char *b, long n) {
         if (dig[i] != b[28 + i]) return 1;
         i = i + 1;
     }
-    return 0;
-}
-/* Directory rows tbc_decode checks after the digest. A passing directory
-   still does not decode records. */
-static int dv_tapebin_dir_bad(const unsigned char *b, long n) {
-    int count;
-    int i;
-    int end;
-    int aligned;
-    long long off;
-    long long len;
-    long long cnt;
-    long long last_len;
-    long long last_cnt;
-    if (!b || n < 136 || n > 2147483647L) return 1;
-    if (tb2_nsec(b, (int)n, &count)) return 1;
-    end = 64 + 24 * count;
-    last_len = 0;
-    last_cnt = 0;
-    i = 0;
-    while (i < count) {
-        aligned = tb2_align(end);
-        if (aligned < 0) return 1;
-        off = -1;
-        len = -1;
-        cnt = -1;
-        if (tb2_row(b, (int)n, i, aligned, &off, &len, &cnt)) return 1;
-        if (cnt < 0 || cnt > n) return 1;
-        if (tb2_zeros(b, (int)n, end, (int)off)) return 1;
-        end = (int)off + (int)len;
-        last_len = len;
-        last_cnt = cnt;
-        i = i + 1;
-    }
-    if (tb2_extra(count, last_len, last_cnt)) return 1;
-    if (tb2_end(end, (int)n)) return 1;
-    return 0;
-}
-static int dv_tapebin_prefix_bad(const unsigned char *b, long n, int expected) {
-    unsigned minor;
-    unsigned count;
-    unsigned origin;
-    if (!b || n < 136 || n > 33554432L) return 1;
-    minor = dv_leu(b + 10, 2);
-    if (dv_leu(b + 8, 2) != 1 || minor > 1 || dv_leu(b + 12, 2) != 1 ||
-        dv_leu(b + 14, 2) || dv_leu(b + 16, 4) || dv_leu(b + 24, 4) != 64)
-        return 1;
-    count = dv_leu(b + 20, 4);
-    origin = dv_leu(b + 60, 4);
-    if (count < 3 || count > 4 || origin > 6) return 1;
-    if (64u + 24u * count > (unsigned long)n) return 1;
-    if (expected && origin && origin != (unsigned)expected) return 1;
     return 0;
 }
 static int dv_emit(char *p, long n) {
@@ -1300,11 +1237,13 @@ int dv_main(int argc, char **argv) {
         int need;
         int obj;
         int asmw;
+        int as_tape;
         int rc;
         mode2 = opts.mode;
         need = 0;
         obj = 0;
         asmw = 0;
+        as_tape = 0;
         rc = cxt_object(opts.mode, opts.sawc, opts.sawS, opts.funit, opts.target, opts.out, 0, &mode2, &need, &obj, &asmw, why2, 512);
         if (rc == 4) {
             fputs(why2, stderr);
@@ -1398,17 +1337,68 @@ int dv_main(int argc, char **argv) {
                 if (gotb[k] != mag[k]) magic = 0;
                 k = k + 1;
             }
-            /* Fixed fields, digest, then directory rows. Any of those
-               failures is the product refusal. Rows that line up still
-               stop here: record text stays in C. */
-            if (!origin || !magic || dv_tapebin_prefix_bad(gotb, gotn, origin) ||
-                dv_tapebin_sha_bad(gotb, gotn) || dv_tapebin_dir_bad(gotb, gotn)) {
+            int minor;
+            int nsec;
+            int aligned;
+            int end;
+            int i;
+            int bad;
+            int textn;
+            int soff[4];
+            int slen[4];
+            int scnt[4];
+            long long roff;
+            long long rlen;
+            long long rcnt;
+            char *text;
+            minor = 0;
+            nsec = 0;
+            bad = 0;
+            text = 0;
+            textn = 0;
+            /* magic, fixed fields, section count, origin, digest, then
+               every directory row. Records that fail also use the product
+               sentence. Text that passes replaces the bytes and follows
+               the tape route. */
+            if (!origin || !magic || gotn > 33554432L) bad = 1;
+            else if (tb2_magic(gotb, (int)gotn) || tb2_fixed(gotb, (int)gotn, &minor) ||
+                     tb2_nsec(gotb, (int)gotn, &nsec) ||
+                     tb2_origin(gotb, (int)gotn, origin, 0) ||
+                     dv_tapebin_sha_bad(gotb, gotn)) bad = 1;
+            else {
+                end = 64 + 24 * nsec;
+                i = 0;
+                while (i < nsec && !bad) {
+                    aligned = tb2_align(end);
+                    roff = -1;
+                    rlen = -1;
+                    rcnt = -1;
+                    if (aligned < 0 || tb2_row(gotb, (int)gotn, i, aligned, &roff, &rlen, &rcnt) ||
+                        rcnt < 0 || rcnt > gotn || roff > 2147483647LL || rlen > 2147483647LL ||
+                        tb2_zeros(gotb, (int)gotn, end, (int)roff)) bad = 1;
+                    else {
+                        soff[i] = (int)roff;
+                        slen[i] = (int)rlen;
+                        scnt[i] = (int)rcnt;
+                        end = (int)roff + (int)rlen;
+                    }
+                    i = i + 1;
+                }
+                if (!bad && (i != nsec ||
+                             tb2_extra(nsec, nsec == 4 ? rlen : 0, nsec == 4 ? rcnt : 0) ||
+                             tb2_end(end, (int)gotn) ||
+                             tb2_text(gotb, (int)gotn, minor, soff, slen, scnt, &text, &textn)))
+                    bad = 1;
+            }
+            if (bad) {
+                free(text);
                 free(gotb);
                 return dv_fail("invalid tapebin or origin target mismatch");
             }
             free(gotb);
-            fputs("unisacc: model driver: tapebin decode\n", stderr);
-            return 2;
+            gotb = (unsigned char *)text;
+            gotn = textn;
+            as_tape = 1;
         }
         if (ex_touch()) {
             free(gotb);
@@ -1554,7 +1544,7 @@ int dv_main(int argc, char **argv) {
             if (mode2 == 3)
                 pr = dv_run_lower(route, tgt, src, dv_cx(src), opts.level, nsrc,
                                   gotb, gotn, &body, &bodyn, preason, 128);
-            else if (cxp_tape_path(src)) {
+            else if (as_tape || cxp_tape_path(src)) {
                 unsigned char *mid;
                 long midn;
                 const char *from;
