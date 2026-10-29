@@ -1,12 +1,15 @@
 #pragma unisa use cxlib.netpack
-/* Entry matrix. sh ./unisacc.com tools/check-cx-entry.cx -- ENTRY OUTDIR
+/* Entry matrix. sh ./unisacc.com tools/check-cx-entry.cx -- ENTRY OUTDIR [START]
    Compares ENTRY with ROOT/unisacc.com. Corpus and the expected row list
    are this file. Each compiler runs under ROOT/tools/bound, cwd
    /tmp/notrepo, UNISA_CONTAINER unset. One invocation stops before the
    slice budget and leaves OUTDIR/cx-entry-matrix.progress. Re-invoke the
    same command until stdout says LEFT:0. The table is
    OUTDIR/cx-entry-matrix-2026-10-30.tsv. A missing progress file starts
-   over and truncates that table. A progress file counts rows, so a new
+   at START, or at cell 0 when START is omitted, and truncates that table.
+   The progress file then stores the origin and the next cell. An old
+   progress file with one integer still means origin 0. START on a later
+   run must match that origin. Rows are counted from the origin, so a new
    row list needs a fresh OUTDIR.
 
    Expected rows, in order. First 100: for each corpus except dup.c,
@@ -299,25 +302,89 @@ static void cxe_judge(const struct cxe_side *p, const struct cxe_side *n, const 
     *note = "image";
 }
 
-static int cxe_load_at(const char *path, int *at) {
+/* 0 = loaded. 2 = missing file (origin 0, cell 0). 1 = unreadable.
+   One integer is an old table: origin 0. Two integers are origin, then cell. */
+static int cxe_load_span(const char *path, int *origin, int *at) {
     FILE *f;
-    int c, n = 0, saw = 0;
+    int c, n, saw, nums, val0, val1;
     f = fopen(path, "r");
     if (!f) {
-        if (errno == ENOENT) { *at = 0; return 0; }
+        if (errno == ENOENT) {
+            *origin = 0;
+            *at = 0;
+            return 2;
+        }
         return 1;
     }
-    while ((c = fgetc(f)) != EOF && c >= '0' && c <= '9') {
-        saw = 1;
-        n = n * 10 + (c - '0');
-        if (n > CXE_N) { fclose(f); return 1; }
+    n = 0;
+    saw = 0;
+    nums = 0;
+    val0 = 0;
+    val1 = 0;
+    while ((c = fgetc(f)) != EOF) {
+        if (c >= '0' && c <= '9') {
+            saw = 1;
+            n = n * 10 + (c - '0');
+            if (n > CXE_N) {
+                fclose(f);
+                return 1;
+            }
+        } else if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            if (saw) {
+                if (nums == 0) val0 = n;
+                else if (nums == 1) val1 = n;
+                else {
+                    fclose(f);
+                    return 1;
+                }
+                nums = nums + 1;
+                n = 0;
+                saw = 0;
+            }
+        } else {
+            fclose(f);
+            return 1;
+        }
     }
-    if (fclose(f) != 0 || !saw) return 1;
-    *at = n;
+    if (saw) {
+        if (nums == 0) val0 = n;
+        else if (nums == 1) val1 = n;
+        else {
+            fclose(f);
+            return 1;
+        }
+        nums = nums + 1;
+    }
+    if (fclose(f) != 0 || nums < 1 || nums > 2) return 1;
+    if (nums == 1) {
+        *origin = 0;
+        *at = val0;
+    } else {
+        *origin = val0;
+        *at = val1;
+    }
+    if (*at < *origin || *at > CXE_N) return 1;
     return 0;
 }
 
-static void cxe_save_at(const char *path, int at) {
+static int cxe_parse_start(const char *s, int *start) {
+    int n, i;
+    n = 0;
+    i = 0;
+    if (!s || !s[0]) return 1;
+    while (s[i]) {
+        if (s[i] < '0' || s[i] > '9') return 1;
+        n = n * 10 + (s[i] - '0');
+        if (n > CXE_N) return 1;
+        i = i + 1;
+        if (i > 4) return 1;
+    }
+    if (n >= CXE_N) return 1;
+    *start = n;
+    return 0;
+}
+
+static void cxe_save_at(const char *path, int origin, int at) {
     FILE *f;
     char tmp[4096];
     int n;
@@ -325,7 +392,7 @@ static void cxe_save_at(const char *path, int at) {
     if (n < 0 || (size_t)n >= sizeof tmp) cxe_die("progress path");
     f = fopen(tmp, "w");
     if (!f) cxe_die("progress");
-    fprintf(f, "%d\n", at);
+    fprintf(f, "%d\n%d\n", origin, at);
     if (fflush(f) != 0 || fclose(f) != 0) cxe_die("progress");
     if (rename(tmp, path) != 0) cxe_die("progress rename");
 }
@@ -595,11 +662,19 @@ int main(int argc, char **argv) {
     FILE *tsv;
     struct stat st;
     long long t0, bytes;
-    int at, lines, file, phase, secs;
+    int at, origin, lines, file, phase, secs, span, start_arg, have_start;
     int mkdir(const char *, unsigned);
-    if (argc == 4 && !strcmp(argv[1], "--")) { argv++; argc--; }
-    if (argc != 3) {
-        fprintf(stderr, "usage: ENTRY OUTDIR\n");
+    have_start = 0;
+    start_arg = 0;
+    if ((argc == 4 || argc == 5) && !strcmp(argv[1], "--")) { argv++; argc--; }
+    if (argc == 4) {
+        if (cxe_parse_start(argv[3], &start_arg)) {
+            fprintf(stderr, "usage: ENTRY OUTDIR [START]\n");
+            return 2;
+        }
+        have_start = 1;
+    } else if (argc != 3) {
+        fprintf(stderr, "usage: ENTRY OUTDIR [START]\n");
         return 2;
     }
     if ((int)(sizeof cxe_name / sizeof cxe_name[0]) != CXE_FILES) cxe_die("corpus");
@@ -627,7 +702,18 @@ int main(int argc, char **argv) {
     cxe_join(progpath, (int)sizeof progpath, outdir, "cx-entry-matrix.progress");
     cxe_join(pimg, (int)sizeof pimg, outdir, "cxe-p.img");
     cxe_join(nimg, (int)sizeof nimg, outdir, "cxe-n.img");
-    if (cxe_load_at(progpath, &at)) cxe_die("progress unreadable");
+    span = cxe_load_span(progpath, &origin, &at);
+    if (span == 1) cxe_die("progress unreadable");
+    if (span == 2) {
+        origin = 0;
+        at = 0;
+        if (have_start) {
+            origin = start_arg;
+            at = start_arg;
+        }
+    } else if (have_start && start_arg != origin) {
+        cxe_die("START does not match progress");
+    }
     if (at >= CXE_N) {
         printf("LEFT:0\n");
         return 0;
@@ -636,24 +722,25 @@ int main(int argc, char **argv) {
     if (!fx) cxe_die("memory");
     cxe_prep(outdir, bound, product, fx);
     lines = cxe_lines(tsvpath);
-    if (at == 0) {
+    if (at == origin) {
+        if (span != 2 && lines > 1) cxe_die("progress does not match the table");
         tsv = fopen(tsvpath, "wb");
         if (!tsv) cxe_die("tsv");
         fputs("corpus\tmode\ttarget\tprod_rc\tnew_rc\tprod_stdout_n\tnew_stdout_n\tprod_stderr_n\tnew_stderr_n\tprod_image_n\tnew_image_n\tprod_perm\tnew_perm\tverdict\tnote\tprod_wall_ns\tnew_wall_ns\n", tsv);
         if (fflush(tsv) != 0) cxe_die("tsv");
     } else {
         if (lines < 0) cxe_die("tsv missing");
-        if (lines == at + 2) at = lines - 1;
-        else if (lines != at + 1) cxe_die("progress does not match the table");
+        if (lines == 2 + (at - origin)) at = origin + (lines - 1);
+        else if (lines != 1 + (at - origin)) cxe_die("progress does not match the table");
         if (at >= CXE_N) {
-            cxe_save_at(progpath, at);
+            cxe_save_at(progpath, origin, at);
             printf("LEFT:0\n");
             return 0;
         }
         tsv = fopen(tsvpath, "ab");
         if (!tsv) cxe_die("tsv");
     }
-    fprintf(stderr, "check-cx-entry entry=%s bytes=%lld at=%d\n", entry, bytes, at);
+    fprintf(stderr, "check-cx-entry entry=%s bytes=%lld at=%d origin=%d\n", entry, bytes, at, origin);
     t0 = cxe_ns();
     while (at < CXE_N) {
         long long el = cxe_ns() - t0;
@@ -713,7 +800,7 @@ int main(int argc, char **argv) {
         unlink(pimg);
         unlink(nimg);
         at++;
-        cxe_save_at(progpath, at);
+        cxe_save_at(progpath, origin, at);
         printf("%s %s %s %s\n", verdict, name, mode, target);
         fflush(stdout);
     }
