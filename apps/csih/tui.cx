@@ -1022,6 +1022,19 @@ static int tui_resume(const char *path, int pick, char *note, size_t cap) {
     return 0;
 }
 
+/* Single-quote s for /bin/sh. */
+static void tui_sh_quote(char *out, size_t cap, const char *s) {
+    size_t n = 0;
+    if (cap < 3) { if (cap) out[0] = 0; return; }
+    out[n++] = '\'';
+    for (; *s && n + 6 < cap; s++) {
+        if (*s == '\'') { memcpy(out + n, "'\\''", 4); n += 4; }
+        else out[n++] = *s;
+    }
+    out[n++] = '\'';
+    out[n] = 0;
+}
+
 static void tui_command_done(tui_state *st) {
     st->input[0] = 0;
     st->ninput = 0;
@@ -1040,7 +1053,7 @@ static int tui_slash(tui_state *st) {
         tui_log_plain(st, "/export-state HANDOFF: owned idle 状态导出；/exit /quit: 退出");
         tui_log_plain(st, "/model [名]: 显示或设本会话模型；/cwd: 显示工作目录；/cost: 本会话词元与缓存命中");
         tui_log_plain(st, "/perm [read|work|any]: 权限档（read 只读；work 只写工作目录；any 不拦）");
-        tui_log_plain(st, "/undo: 撤销 agent 最近一次文件写入/编辑（最多 20 步，不含 exec）");
+        tui_log_plain(st, "/undo: 撤销 agent 最近一次文件写入/编辑（最多 20 步，不含 exec）；/diff: 看这些改动");
         tui_log_plain(st, "/allow: 放行下一条危险命令一次；/new: 新上下文（旧转录归档）；/resume [N]: 列出或换回归档");
         tui_log_plain(st, "键：Esc 取消本轮/清输入；空输入 Tab 展开/收起最近工具行；Ctrl-U 清行；Ctrl-W 删词");
         tui_command_done(st);
@@ -1130,6 +1143,41 @@ static int tui_slash(tui_state *st) {
         tui_command_done(st);
         return 1;
     }
+    if (!strcmp(st->input, "/diff")) {
+        /* Each undo step against what is on disk now: diff -u, a few lines each.
+         * Several steps on one file show the first backup only, i.e. the whole change. */
+        int i, j, n = agent_undo_depth(), shown = 0, rows = 0;
+        if (!n) tui_log_plain(st, "diff: agent 本次运行还没有改过文件");
+        for (i = 0; i < n && rows < 30; i++) {
+            const char *path, *bak, *pj, *bj;
+            int existed, ej, dup = 0;
+            char cmd[2400], qp[1100], qb[700];
+            shell_result r;
+            agent_undo_entry(i, &path, &bak, &existed);
+            for (j = 0; j < i; j++) { agent_undo_entry(j, &pj, &bj, &ej); if (!strcmp(pj, path)) dup = 1; }
+            if (dup) continue;
+            tui_sh_quote(qp, sizeof qp, path);
+            tui_sh_quote(qb, sizeof qb, existed ? bak : "/dev/null");
+            snprintf(cmd, sizeof cmd, "diff -u %s %s | tail -n +3 | head -12; true", qb, qp);
+            snprintf(note, sizeof note, "diff: %s %.200s", existed ? "改动" : "新建", path);
+            tui_log_plain(st, note); rows++; shown++;
+            r = shell_run_in(cmd, "/");
+            {
+                char *p = r.out;
+                while (*p && rows < 30) {
+                    char *nl = strchr(p, '\n');
+                    if (nl) *nl = 0;
+                    snprintf(note, sizeof note, "  %.230s", p);
+                    tui_log_plain(st, note); rows++;
+                    if (!nl) break;
+                    p = nl + 1;
+                }
+            }
+        }
+        if (shown) tui_log_plain(st, "diff: /undo 可逐步撤销；exec 的改动不在此列");
+        tui_command_done(st);
+        return 1;
+    }
     if (!strcmp(st->input, "/undo")) {
         char msg[400];
         if (st->busy) tui_log_plain(st, "busy: /undo refused");
@@ -1202,6 +1250,7 @@ static int tui_slash(tui_state *st) {
         (!strncmp(st->input, "/cost", 5) && token == 5) ||
         (!strncmp(st->input, "/allow", 6) && token == 6) ||
         (!strncmp(st->input, "/undo", 5) && token == 5) ||
+        (!strncmp(st->input, "/diff", 5) && token == 5) ||
         (!strncmp(st->input, "/new", 4) && token == 4) ||
         (!strncmp(st->input, "/reload", 7) && token == 7) ||
         (!strncmp(st->input, "/reload-code", 12) && token == 12) ||
@@ -4506,6 +4555,34 @@ int tui_entry(int argc, char **argv) {
             }
             if (!ok) { printf("FAIL project status rows n=%d\n", ts.nstatus); failures++; }
             else printf("  ok   project status file shows up to 3 rows with age\n");
+        }
+
+        {
+            static tui_state td;
+            char dir[128], out[4096], note[400];
+            agent_step s;
+            int k, created = 0, plus = 0, once = 0, empty_ok;
+            snprintf(dir, sizeof dir, "/tmp/csih-diff-%d", (int)getpid());
+            mkdir(dir, 0700);
+            tui_state_init(&td, NULL); td.mode = 1;
+            while (agent_undo_depth() > 0) agent_undo_last(note, sizeof note);
+            tui_type(&td, "/diff");
+            empty_ok = strstr(td.log[td.nlog - 1], "还没有改过文件") != NULL;
+            s = agent_parse("{\"act\":\"file\",\"op\":\"write\",\"path\":\"d.txt\",\"text\":\"first\"}");
+            agent_exec(&s, dir, out, sizeof out);
+            s = agent_parse("{\"act\":\"file\",\"op\":\"write\",\"path\":\"d.txt\",\"text\":\"second\"}");
+            agent_exec(&s, dir, out, sizeof out);
+            tui_type(&td, "/diff");
+            for (k = 0; k < td.nlog; k++) {
+                if (strstr(td.log[k], "diff: 新建") && strstr(td.log[k], "d.txt")) { created++; once++; }
+                if (strstr(td.log[k], "+second")) plus = 1;
+            }
+            while (agent_undo_depth() > 0) agent_undo_last(note, sizeof note);
+            rmdir(dir);
+            /* two writes to one new file: listed once, as new, with its current text */
+            if (!empty_ok || created != 1 || !plus || once != 1)
+                { printf("FAIL /diff created=%d plus=%d\n", created, plus); failures++; }
+            else printf("  ok   /diff lists each changed file once with its diff\n");
         }
 
         printf("%s\n", failures ? "SELFTEST FAILED" : "selftest ok");
