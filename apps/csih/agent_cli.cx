@@ -80,6 +80,8 @@ int agent_mentions_window(const char *s);
 void agent_role_test(const char *role, const char *peer);
 int agent_peer_blocked(int kind, const char *op, const char *cmd, char *why, int n);
 int agent_sandbox_available(void);
+int agent_undo_depth(void);
+int agent_undo_last(char *note, size_t cap);
 void agent_set_perm(int p);
 typedef struct {
     int ok, err, exited, status, signal, timed_out;
@@ -562,6 +564,22 @@ static int agent_run_selftest(void) {
             fclose(f);
             got[n] = 0;
             a_expect(strcmp(got, "hello") == 0, "  relative content");
+        }
+        /* undo: overwrite, then step back twice: old content, then gone */
+        {
+            char note[400];
+            int depth = agent_undo_depth();
+            strncpy(s.text, "changed", sizeof s.text - 1);
+            agent_exec(&s, dir, out, sizeof out);
+            a_expect(agent_undo_depth() == depth + 1, "a write records one undo step");
+            a_expect(agent_undo_last(note, sizeof note) == 0, "undo restores the overwrite");
+            f = fopen(rel, "r"); got[0] = 0;
+            if (f) { size_t n = fread(got, 1, sizeof got - 1, f); fclose(f); got[n] = 0; }
+            a_expect(strcmp(got, "hello") == 0, "  old content is back");
+            a_expect(agent_undo_last(note, sizeof note) == 0 && access(rel, F_OK) != 0,
+                     "undo of a created file removes it");
+            while (agent_undo_depth() > 0) agent_undo_last(note, sizeof note);
+            a_expect(agent_undo_last(note, sizeof note) == 1, "undo with nothing left says so");
         }
         remove(rel);
         rmdir(dir);

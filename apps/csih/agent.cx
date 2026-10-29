@@ -1191,11 +1191,88 @@ static int agent_role_line(char *dst, int n) {
     return 0;
 }
 
+/* ── undo ───────────────────────────────────────────────────────────────
+ * Before each file write/edit the old bytes go to ~/.csih/undo/<pid>-<n>.bak
+ * (or "did not exist" is noted). /undo restores the newest one: the old
+ * content comes back, or a file the agent created is removed. 20 levels,
+ * this process only. exec side effects are not covered. */
+#define AGENT_UNDO_MAX 20
+static struct { char path[512]; char bak[600]; int existed; } agent_undo[AGENT_UNDO_MAX];
+static int agent_undo_n, agent_undo_seq;
+
+static int agent_copy_file(const char *from, const char *to) {
+    char buf[8192];
+    size_t n;
+    FILE *in = fopen(from, "rb"), *out;
+    if (!in) return -1;
+    out = fopen(to, "wb");
+    if (!out) { fclose(in); return -1; }
+    while ((n = fread(buf, 1, sizeof buf, in)) > 0)
+        if (fwrite(buf, 1, n, out) != n) { fclose(in); fclose(out); return -1; }
+    fclose(in);
+    return fclose(out) == 0 ? 0 : -1;
+}
+
+/* Undo lives as long as this process; its backups go with it. */
+static void agent_undo_cleanup(void) {
+    int i;
+    for (i = 0; i < agent_undo_n; i++) if (agent_undo[i].existed) unlink(agent_undo[i].bak);
+    agent_undo_n = 0;
+}
+
+static void agent_undo_snapshot(const char *path) {
+    const char *home = getenv("HOME");
+    char dir[512];
+    int slot;
+    static int hooked;
+    if (!path || !path[0] || !home || !home[0]) return;
+    if (!hooked) { atexit(agent_undo_cleanup); hooked = 1; }
+    snprintf(dir, sizeof dir, "%s/.csih", home); mkdir(dir, 0700);
+    snprintf(dir, sizeof dir, "%s/.csih/undo", home); mkdir(dir, 0700);
+    if (agent_undo_n == AGENT_UNDO_MAX) {
+        unlink(agent_undo[0].bak);
+        memmove(&agent_undo[0], &agent_undo[1], sizeof agent_undo[0] * (AGENT_UNDO_MAX - 1));
+        agent_undo_n--;
+    }
+    slot = agent_undo_n;
+    snprintf(agent_undo[slot].path, sizeof agent_undo[slot].path, "%s", path);
+    snprintf(agent_undo[slot].bak, sizeof agent_undo[slot].bak, "%s/%d-%d.bak", dir, (int)getpid(), ++agent_undo_seq);
+    agent_undo[slot].existed = access(path, F_OK) == 0;
+    if (agent_undo[slot].existed && agent_copy_file(path, agent_undo[slot].bak) != 0) return; /* no snapshot, no entry */
+    agent_undo_n++;
+}
+
+int agent_undo_depth(void) { return agent_undo_n; }
+
+/* Restore the newest snapshot. Returns 0 and a note on success. */
+int agent_undo_last(char *note, size_t cap) {
+    int i;
+    if (agent_undo_n == 0) { snprintf(note, cap, "undo: 没有可撤销的文件改动"); return 1; }
+    i = agent_undo_n - 1;
+    if (agent_undo[i].existed) {
+        if (agent_copy_file(agent_undo[i].bak, agent_undo[i].path) != 0) {
+            snprintf(note, cap, "undo: 恢复 %.300s 失败: %s", agent_undo[i].path, strerror(errno));
+            return 1;
+        }
+        unlink(agent_undo[i].bak);
+        snprintf(note, cap, "undo: 已恢复 %.300s（还可撤销 %d 步）", agent_undo[i].path, i);
+    } else {
+        if (unlink(agent_undo[i].path) != 0 && errno != ENOENT) {
+            snprintf(note, cap, "undo: 删除 %.300s 失败: %s", agent_undo[i].path, strerror(errno));
+            return 1;
+        }
+        snprintf(note, cap, "undo: 已删除 agent 新建的 %.300s（还可撤销 %d 步）", agent_undo[i].path, i);
+    }
+    agent_undo_n--;
+    return 0;
+}
+
 int agent_exec(const agent_step *s, const char *cwd, char *out, size_t outlen) {
     char path[512];
     out[0] = '\0';
     agent_tool_reset();
     agent_under(cwd, s->path, path, sizeof path);
+    if (s->kind == ACT_WRITE || s->kind == ACT_EDIT) agent_undo_snapshot(path);
     switch (s->kind) {
     case ACT_EXEC:
         g_exec_step = *s;

@@ -44,6 +44,7 @@ CSIH_BIN=../../out/csih-e2e-bin/csih UNISACC=../../unisacc.com \
 | 权限：/perm read/work/any | `/perm read|work|any gates writes and commands` | read 档拦写入，work 档拦 /tmp 写入 |
 | 沙箱：read/work 档 exec 跑在只读 mount namespace | agent_cli：read 档 cwd 写入被内核拒绝；work 档 cwd 可写、家目录只读；超长命令被拒绝 | `touch ~/x` 报 Read-only |
 | 沙箱：机密遮蔽、私有 PID、read 档断网 | agent_cli：`~/env.jsonl` 读出为空、PID 空间独立、read 档只有 lo | `wc -c ~/env.jsonl` 为 0，`ps -e` 只有 4 个进程 |
+| /undo 撤销文件写入/编辑（20 步） | agent_cli：`a write records one undo step`、`undo restores the overwrite`、`undo of a created file removes it` | 改写 u.txt 后 /undo 恢复原内容 |
 | 危险命令门 + /allow 一次 | `dangerous exec is blocked until /allow`、`/allow lets exactly one through` | 拦截 → 说明 → /allow → 执行 |
 | 证据引用：quote 定位、0,0 整段、格式错误给出规则 | agent_cli：`observation_refs accept optional quote…` | write→read→sh 6/6 通过 |
 | 项目状态行 + 生成器 | `project status file shows up to 3 rows with age` | `tools/status.cx` 显示 108/142，`find` 复核一致 |
