@@ -644,6 +644,18 @@ flowchart TD
   cap["检查文件 32 个 use"] --> pull["bindargs.cx 的 use bindcount"]
 ```
 
+## 119. 2026-10-29 入口开始分辨命令词
+
+构造脚本先不改。`cx/unisacc.cx` 用已有 `bindhost` 的 `bx_tool`、`bx_cli_word`、`bx_more_src`。`us_word` 对 `ar` 返回 1，`--help` 返回 12，`a.c` 返回 20，`objdump` 返回 3，其它返回 0。无参数仍打印七流。无参数实跑退出 0，stdout 28，stderr 0。带五个词实跑退出 0，stdout 39，stderr 0。没有产品安装，没有 hostseed，没有 `--all`。整棵重写还没完成。
+
+```mermaid
+flowchart TD
+  entry["cx/unisacc.cx"] --> words["us_word"]
+  words --> host["已有 bindhost"]
+  entry --> streams["无参数时打印七流"]
+  build["构造脚本"] --> later["等 cx 写完再改"]
+```
+
 ## 118. 2026-10-29 旧编译器 C 归档，入口改到 cx/unisacc.cx
 
 `unisacc.c` 和 `exec/c/compiler.c` 挪到 `archive/reference-c/`。`src/*.c` 和产品驱动收进来的 C 一起过去。新入口 `cx/unisacc.cx` 只报论文 A 的七段字节流。`sh ./unisacc.com cx/unisacc.cx` 退出 0，stdout 28 字节，stderr 0，七行是 `e2`、`e1`、`e3`、`e4`、`prune`、`lower`、`elf`。构造表没改。没有 hostseed，没有产品安装，没有 `--all`。整棵重写还没完成。提交 `e16028ffa1`，27 个文件，增加 33 行。父提交 `b902c8fbfb`。
