@@ -1,0 +1,46 @@
+#pragma unisa module bindsplit
+/* Last-slash split used by host_path_key. No libc and no include.
+   realpath, errno, the empty-base refusal, and the 4096 length gate's
+   caller stay in exec/c/bind.c. No slash stores "." and the whole path.
+   A slash at the first byte stores "/" and the rest. Any later slash
+   drops that byte and splits there. A path of 4096 bytes or more is
+   refused before a copy, matching parent[4096]. */
+int bx_key_split(const char *path, char *parent, int parent_cap, char *base, int base_cap) {
+    int n, slash, i, plen, blen;
+    if (!path || !parent || !base || parent_cap < 1 || base_cap < 1) return 4;
+    n = 0;
+    slash = -1;
+    while (path[n]) {
+        if (path[n] == '/') slash = n;
+        n++;
+        if (n >= 4096) return 1;
+    }
+    if (slash < 0) {
+        plen = 1;
+        blen = n;
+    } else if (slash == 0) {
+        plen = 1;
+        blen = n - 1;
+    } else {
+        plen = slash;
+        blen = n - slash - 1;
+    }
+    if (plen + 1 > parent_cap || blen + 1 > base_cap) return 1;
+    if (slash < 0) {
+        parent[0] = '.';
+        parent[1] = 0;
+        for (i = 0; i < n; i++) base[i] = path[i];
+        base[n] = 0;
+    } else if (slash == 0) {
+        parent[0] = '/';
+        parent[1] = 0;
+        for (i = 0; i < blen; i++) base[i] = path[1 + i];
+        base[blen] = 0;
+    } else {
+        for (i = 0; i < plen; i++) parent[i] = path[i];
+        parent[plen] = 0;
+        for (i = 0; i < blen; i++) base[i] = path[slash + 1 + i];
+        base[blen] = 0;
+    }
+    return 0;
+}
