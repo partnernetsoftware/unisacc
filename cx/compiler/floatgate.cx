@@ -1,7 +1,9 @@
 #pragma unisa module floatgate
+#pragma unisa use parsemore
 /* Pure fit decisions from fhex2bin and fdec2bin in src/front_parse.c.
-   No libc and no include. The digit walk, long division, fbA, and
-   the writers stay in C. pm_f_mbits, pm_f_bias, and pm_f_emax stay
+   No libc and no include. fg_hex_bits and fg_dec_bits walk a caller
+   buffer. src/front_parse.c still has its own walk and was not switched.
+   pm_f_mbits, pm_f_bias, and pm_f_emax stay
    in parsemore. A shift width that does not fit returns 4.
    同旧赋值 means the number is the old assignment.
    不是旧返回 means the 0 or 1 is a decision, not the old return. */
@@ -103,4 +105,321 @@ int fg_ev_room(int ev) {
 int fg_hex_room(unsigned long long m) {
     if ((m >> 60) == 0) return 1; /* 不是旧返回 */
     return 0; /* 不是旧返回 */
+}
+/* 4 means do not read. The bit functions return 0 for that case too. */
+int fg_hex_null(const char *s, int n) {
+    if (!s) return 4; /* 不是旧返回 */
+    if (n < 0) return 4; /* 不是旧返回 */
+    return 0;
+}
+int fg_dec_null(const char *s, int n) {
+    if (!s) return 4; /* 不是旧返回 */
+    if (n < 0) return 4; /* 不是旧返回 */
+    return 0;
+}
+static int fg_hexdig(int c) {
+    int d;
+    d = 0 - 1;
+    if (c >= 48 && c <= 57) d = c - 48;
+    if (c >= 97 && c <= 102) d = c - 87;
+    if (c >= 65 && c <= 70) d = c - 55;
+    return d;
+}
+static void fg_zero(unsigned long long *a) {
+    int i;
+    i = 0;
+    while (i < 160) {
+        a[i] = 0;
+        i = i + 1;
+    }
+}
+/* fhex2bin on a caller buffer. Index 0 is the '0' of the 0x prefix.
+   A null pointer returns 0 and does not read. That 0 is also a real value. */
+unsigned long long fg_hex_bits(const char *s, int n, int f32) {
+    int k;
+    int c;
+    int d;
+    int fr;
+    int nf;
+    int sticky;
+    int top;
+    int e2;
+    int mbits;
+    int bias;
+    int emax;
+    int neg;
+    int shift;
+    int biased;
+    long long ev;
+    unsigned long long m;
+    unsigned long long half;
+    unsigned long long rem;
+    unsigned long long out;
+    if (!s || n < 0) return 0; /* 不读 */
+    mbits = pm_f_mbits(f32);
+    bias = pm_f_bias(f32);
+    emax = pm_f_emax(f32);
+    k = 2;
+    m = 0;
+    fr = 0;
+    nf = 0;
+    sticky = 0;
+    while (k < n) {
+        c = s[k] & 255;
+        if (c == 46) {
+            fr = 1;
+            k = k + 1;
+            continue;
+        }
+        d = fg_hexdig(c);
+        if (d < 0) break;
+        if (fg_hex_room(m)) {
+            m = m * 16 + (unsigned long long)d;
+            if (fr) nf = nf + 1;
+        } else {
+            if (d) sticky = 1;
+            if (fr == 0) nf = nf - 1;
+        }
+        k = k + 1;
+    }
+    ev = 0;
+    neg = 0;
+    if (k < n) {
+        if ((s[k] & 255) == 112 || (s[k] & 255) == 80) {
+            k = k + 1;
+            if (k < n) {
+                if (fg_esign(s[k] & 255) < 0) {
+                    neg = 1;
+                    k = k + 1;
+                } else {
+                    if ((s[k] & 255) == 43) k = k + 1;
+                }
+            }
+            while (k < n) {
+                c = s[k] & 255;
+                if (c < 48 || c > 57) break;
+                if (fg_ev_room((int)ev)) ev = ev * 10 + (c - 48);
+                k = k + 1;
+            }
+        }
+    }
+    if (neg) ev = 0 - ev;
+    if (m == 0) return 0; /* 同旧返回 */
+    top = 63;
+    while (((m >> top) & 1ull) == 0) top = top - 1;
+    e2 = (int)ev - 4 * nf + top;
+    biased = e2 + bias;
+    if (fg_hex_inf(biased, emax)) return fg_inf(f32); /* 同旧返回 */
+    shift = top - mbits;
+    if (fg_hex_sub(biased)) shift = shift + (1 - biased);
+    if (shift > 0) {
+        if (fg_shift_wide(shift)) {
+            rem = m;
+            m = 0;
+            half = 0;
+        } else {
+            rem = m & (((unsigned long long)1 << shift) - 1);
+            half = (unsigned long long)1 << (shift - 1);
+            m = m >> shift;
+        }
+        if (fg_shift_wide(shift) == 0) {
+            if (rem > half) m = m + 1;
+            else {
+                if (fg_tie(rem == half, sticky, (int)(m & 1ull))) m = m + 1;
+            }
+        }
+    } else {
+        if (fg_shift_wide(0 - shift)) return 4; /* 不是旧返回 */
+        m = m << (0 - shift);
+    }
+    if (fg_hex_sub(biased)) return m; /* 同旧返回 */
+    if (fg_hex_carry(m, mbits)) {
+        m = m >> 1;
+        biased = biased + 1;
+    }
+    if (fg_hex_inf(biased, emax)) return fg_inf(f32); /* 同旧返回 */
+    out = ((unsigned long long)biased << mbits) | (m & (((unsigned long long)1 << mbits) - 1));
+    return out; /* 同旧返回 */
+}
+/* fdec2bin on a caller buffer. Limbs stay here. The C writer is not called. */
+unsigned long long fg_dec_bits(const char *s, int n, int f32) {
+    unsigned long long A[160];
+    unsigned long long Q[160];
+    unsigned long long D[160];
+    unsigned long long R[160];
+    int An;
+    int Qn;
+    int Dn;
+    int Rn;
+    int e10;
+    int k;
+    int seen;
+    int c;
+    int fr;
+    int es;
+    int ev;
+    int j;
+    int prec;
+    int emin;
+    int bias;
+    int mbits;
+    int lead;
+    int keep;
+    int drop;
+    int sh;
+    int L;
+    int sticky;
+    int exp;
+    int half;
+    int rest;
+    int nb;
+    int i;
+    unsigned long long m;
+    unsigned long long bitsout;
+    if (!s || n < 0) return 0; /* 不读 */
+    fg_zero(A);
+    fg_zero(Q);
+    fg_zero(D);
+    fg_zero(R);
+    An = 1;
+    A[0] = 0;
+    e10 = 0;
+    fr = 0;
+    seen = 0;
+    k = 0;
+    while (k < n) {
+        c = s[k] & 255;
+        if (c == 46) {
+            fr = 1;
+            k = k + 1;
+            continue;
+        }
+        if (c < 48 || c > 57) break;
+        An = pm_mul(A, An, 10);
+        An = pm_add(A, An, (unsigned long long)(c - 48));
+        if (fr) e10 = e10 - 1;
+        seen = 1;
+        k = k + 1;
+    }
+    if (k < n) {
+        c = s[k] & 255;
+        if (c == 101 || c == 69) {
+            k = k + 1;
+            es = 1;
+            ev = 0;
+            if (k < n) {
+                if (fg_esign(s[k] & 255) < 0) {
+                    es = 0 - 1;
+                    k = k + 1;
+                } else {
+                    if ((s[k] & 255) == 43) k = k + 1;
+                }
+            }
+            while (k < n) {
+                c = s[k] & 255;
+                if (c < 48 || c > 57) break;
+                if (fg_ev_room(ev)) ev = ev * 10 + (c - 48);
+                k = k + 1;
+            }
+            e10 = e10 + es * ev;
+        }
+    }
+    prec = fg_prec(f32);
+    emin = fg_emin(f32);
+    bias = pm_f_bias(f32);
+    mbits = pm_f_mbits(f32);
+    if (seen == 0) return 0;
+    if (pm_bits(A, An) == 0) return 0; /* 同旧返回 */
+    e10 = fg_e10_cap(e10);
+    if (fg_under(pm_bits(A, An), e10, emin, mbits)) return 0; /* 同旧返回 */
+    sh = 0;
+    if (e10 >= 0) {
+        j = 0;
+        while (j < e10) {
+            An = pm_mul(A, An, 10);
+            j = j + 1;
+        }
+        sticky = 0;
+        Qn = An;
+        j = 0;
+        while (j < An) {
+            Q[j] = A[j];
+            j = j + 1;
+        }
+    } else {
+        Dn = 1;
+        D[0] = 1;
+        j = 0;
+        while (j < 0 - e10) {
+            Dn = pm_mul(D, Dn, 10);
+            j = j + 1;
+        }
+        sh = prec + 3 + pm_bits(D, Dn) - pm_bits(A, An);
+        sh = fg_s_floor(sh);
+        j = 0;
+        while (j < sh) {
+            An = pm_shl1(A, An);
+            j = j + 1;
+        }
+        Rn = 1;
+        R[0] = 0;
+        Qn = An;
+        j = 0;
+        while (j < Qn) {
+            Q[j] = 0;
+            j = j + 1;
+        }
+        nb = pm_bits(A, An);
+        i = nb - 1;
+        while (i >= 0) {
+            Rn = pm_shl1(R, Rn);
+            R[0] = R[0] | (unsigned long long)pm_bit(A, An, i);
+            if (pm_cmp(R, Rn, D, Dn) >= 0) {
+                Rn = pm_sub(R, Rn, D, Dn);
+                Q[i / 32] = Q[i / 32] | ((unsigned long long)1 << (i % 32));
+            }
+            i = i - 1;
+        }
+        sticky = 0;
+        if (pm_bits(R, Rn) != 0) sticky = 1;
+    }
+    L = pm_bits(Q, Qn);
+    lead = L - 1 - sh;
+    keep = prec;
+    if (lead < emin) keep = prec - (emin - lead);
+    keep = fg_keep_floor(keep);
+    drop = L - keep;
+    m = 0;
+    j = L - 1;
+    while (j >= drop) {
+        m = (m << 1) | (unsigned long long)pm_bit(Q, Qn, j);
+        j = j - 1;
+    }
+    if (keep < 0) m = 0;
+    half = pm_bit(Q, Qn, drop - 1);
+    rest = sticky;
+    j = drop - 2;
+    while (j >= 0) {
+        if (pm_bit(Q, Qn, j)) {
+            rest = 1;
+            break;
+        }
+        j = j - 1;
+    }
+    if (drop <= 0) {
+        half = 0;
+        rest = 0;
+    }
+    if (fg_round(half, rest, (int)(m & 1ull))) m = m + 1;
+    exp = drop - sh;
+    if (fg_carry(m, prec)) {
+        m = m >> 1;
+        exp = exp + 1;
+    }
+    if (m == 0) return 0; /* 同旧返回 */
+    lead = exp + prec - 1;
+    if (m < ((unsigned long long)1 << (prec - 1))) return m; /* 同旧返回 */
+    if (fg_ovf(lead, bias)) return fg_inf(f32); /* 同旧返回 */
+    bitsout = ((unsigned long long)(lead + bias) << mbits) | (m & (((unsigned long long)1 << mbits) - 1));
+    return bitsout; /* 同旧返回 */
 }
