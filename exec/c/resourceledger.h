@@ -51,6 +51,7 @@ int cxsf_ledger_fields(const char *,char *);
 int cxsf_ledger_line(const unsigned char *,size_t,size_t *,size_t *,size_t *);
 int cxsf_ledger_key(const char *,size_t,unsigned char *);
 int cxsf_ledger_metadata(const char *,const char *,const char *,const char *,int *,int *);
+int cxsf_ledger_add(void *,int *,unsigned char *,int,void *(*)(void *,size_t));
 int cxsf_ledger_find(const void *,int,int,const unsigned char *,int);
 int cxsf_ledger_next(const void *,int,int,int *,const unsigned char *,int,int *);
 int cxsf_stage_label(const char *);
@@ -253,10 +254,15 @@ static int rl_load_parse(const char *dir, const RLFileView *views, int count, RL
             for (q = 0; q < kl; q += 2) { int hi = rl_hexv((unsigned char)f[0][q]), lo = rl_hexv((unsigned char)f[0][q+1]); if (hi < 0 || lo < 0) { free(kb); free(line); free(b); snprintf(err, errn, "INTERFACE_ERROR resource-key-malformed"); return 1; } kb[q/2] = (unsigned char)(hi * 16 + lo); }
 #endif
             /* SC1 duplicate keys are refused; SC2 preserves the ordered queries. */
+#ifdef UNISA_CX_SOURCE_FRAME
+            { int code=cxsf_ledger_add(L,&cap,kb,(int)(kl/2),realloc);
+              if(code){free(kb);free(line);free(b);if(code==1)snprintf(err,errn,"INTERFACE_ERROR duplicate-resource-key %s",f[0]);else if(code==3)snprintf(err,errn,"INTERFACE_ERROR resource-ledger-allocation-failed");return 1;} }
+#else
             { int j; if (!L->trace) for (j = 0; j < L->n; j++) if (L->rows[j].kn == (int)(kl / 2) && !memcmp(L->rows[j].key, kb, kl / 2)) { free(kb); free(line); free(b); snprintf(err, errn, "INTERFACE_ERROR duplicate-resource-key %s", f[0]); return 1; } }
             if (L->n == cap) { RLRow *grown; cap = cap ? cap * 2 : 16; grown = realloc(L->rows, (size_t)cap * sizeof *L->rows); if (!grown) { free(kb); free(line); free(b); return 1; } L->rows = grown; }
             L->rows[L->n].key = kb; L->rows[L->n].kn = (int)(kl / 2); L->rows[L->n].present = 0; L->rows[L->n].value = 0; L->rows[L->n].vn = 0;
             L->n++;
+#endif
             {   RLRow *r = &L->rows[L->n - 1]; int len = 0;
                 r->blob[0] = 0;
 #ifdef UNISA_CX_SOURCE_FRAME

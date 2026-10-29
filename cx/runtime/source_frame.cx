@@ -179,6 +179,26 @@ typedef struct {
 typedef struct {
     CxLedgerRow *rows; int n; int has_id; int trace, cursor; char stage[128]; char input_hex[65];
 } CxLedger;
+/* Takes key ownership only after a row is committed. 0 success, 1 duplicate,
+ * 2 allocation failure, 3 invalid size. Caller releases key on failure. */
+int cxsf_ledger_add(void *ledger,int *cap,unsigned char *key,int kn,
+                    void *(*alloc)(void *,size_t)) {
+    if(!ledger||!cap||!key||kn<=0||!alloc)return 3;
+    CxLedger l;memcpy(&l,ledger,sizeof l);
+    if(l.n<0||*cap<0||l.n>*cap||(l.n&&!l.rows))return 3;
+    if(!l.trace)for(int i=0;i<l.n;i++){CxLedgerRow row;memcpy(&row,(unsigned char *)l.rows+(size_t)i*sizeof row,sizeof row);
+        if(row.kn==kn&&!memcmp(row.key,key,(size_t)kn))return 1;}
+    if(l.n==*cap){
+        if(*cap>2147483647/2)return 3;
+        int next=*cap?*cap*2:16;
+        if((size_t)next>(size_t)-1/sizeof(CxLedgerRow))return 3;
+        void *p=alloc(l.rows,(size_t)next*sizeof(CxLedgerRow));if(!p)return 2;
+        l.rows=p;*cap=next;
+    }
+    CxLedgerRow row={0};row.key=key;row.kn=kn;
+    memcpy((unsigned char *)l.rows+(size_t)l.n*sizeof row,&row,sizeof row);
+    l.n++;memcpy(ledger,&l,sizeof l);return 0;
+}
 typedef struct {const char *name;const unsigned char *bytes;size_t n;} CxLedgerView;
 /* Snapshot views are borrowed; successful copies belong to the caller.
  * 0 found, 1 missing, 2 allocation failure, 3 invalid or overflowing view. */
