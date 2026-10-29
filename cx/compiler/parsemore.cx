@@ -1,0 +1,240 @@
+#pragma unisa module parsemore
+/* Pure judgments from src/front_parse.c that frontparse does not export.
+   No libc and no include. The float walk and the writers stay in C.
+   A null pointer returns 4. A limb count outside 0..160 returns 1.
+   同旧返回 means the old if returns that code.
+   不是旧返回 means the old if does not. */
+static int pm_len(const char *s) {
+    int n;
+    n = 0;
+    while (s[n]) n = n + 1;
+    return n;
+}
+/* strpre: a starts with p. An empty p returns 1. */
+int pm_strpre(const char *a, const char *p) {
+    int k;
+    if (!a || !p) return 4; /* 不是旧返回 */
+    k = 0;
+    while (p[k]) {
+        if ((a[k] & 255) != (p[k] & 255)) return 0; /* 同旧返回 */
+        k = k + 1;
+    }
+    return 1; /* 同旧返回 */
+}
+/* strsame: both sides end together. */
+int pm_strsame(const char *a, const char *b) {
+    int k;
+    if (!a || !b) return 4; /* 不是旧返回 */
+    k = 0;
+    while (a[k] && b[k]) {
+        if ((a[k] & 255) != (b[k] & 255)) return 0; /* 同旧返回 */
+        k = k + 1;
+    }
+    if ((a[k] & 255) == (b[k] & 255)) return 1; /* 同旧返回 */
+    return 0; /* 同旧返回 */
+}
+/* numval: \n \t \r \v \f \b \a. Any other byte is itself. */
+int pm_esc(int c) {
+    if (c == 110) return 10; /* 同旧返回 */
+    if (c == 116) return 9; /* 同旧返回 */
+    if (c == 114) return 13; /* 同旧返回 */
+    if (c == 118) return 11; /* 同旧返回 */
+    if (c == 102) return 12; /* 同旧返回 */
+    if (c == 98) return 8; /* 同旧返回 */
+    if (c == 97) return 7; /* 同旧返回 */
+    return c & 255; /* 同旧返回 */
+}
+/* numval: 0x and 0X are 16, a leading 0 is 8, otherwise 10. */
+int pm_base(int n, int c0, int c1) {
+    if (n > 1 && (c0 & 255) == 48) {
+        if ((c1 & 255) == 120 || (c1 & 255) == 88) return 16; /* 同旧返回 */
+        return 8; /* 同旧返回 */
+    }
+    return 10; /* 同旧返回 */
+}
+/* The index where the digits start. */
+int pm_base_k(int n, int c0, int c1) {
+    if (n > 1 && (c0 & 255) == 48) {
+        if ((c1 & 255) == 120 || (c1 & 255) == 88) return 2; /* 同旧返回 */
+        return 1; /* 同旧返回 */
+    }
+    return 0; /* 同旧返回 */
+}
+/* A digit in this base, or -1 when the old loop stops. */
+int pm_digit(int c, int base) {
+    int d;
+    d = -1;
+    c = c & 255;
+    if (c >= 48 && c <= 57) d = c - 48;
+    if (base == 16) {
+        if (c >= 97 && c <= 102) d = c - 87;
+        if (c >= 65 && c <= 70) d = c - 55;
+    }
+    if (d < 0 || d >= base) return -1; /* 同旧停止 */
+    return d; /* 同旧返回 */
+}
+/* fhex2bin: binary32 uses 23 significand bits, binary64 uses 52. */
+int pm_f_mbits(int f32) {
+    if (f32) return 23; /* 同旧返回 */
+    return 52; /* 同旧返回 */
+}
+int pm_f_bias(int f32) {
+    if (f32) return 127; /* 同旧返回 */
+    return 1023; /* 同旧返回 */
+}
+int pm_f_emax(int f32) {
+    if (f32) return 255; /* 同旧返回 */
+    return 2047; /* 同旧返回 */
+}
+/* FB_L is 160. 1 means another limb still fits. */
+int pm_limb_room(int n) {
+    if (n < 160) return 1; /* 同旧返回 */
+    return 0; /* 同旧返回 */
+}
+/* fb_bits. n == 0 does not read. */
+int pm_bits(const unsigned long long *a, int n) {
+    unsigned long long t;
+    int b;
+    if (n < 0) return 4; /* 不是旧返回 */
+    if (n == 0) return 0; /* 同旧返回 */
+    if (!a) return 4; /* 不是旧返回 */
+    while (n > 0) {
+        if (a[n - 1] != 0) break;
+        n = n - 1;
+    }
+    if (n == 0) return 0; /* 同旧返回 */
+    t = a[n - 1];
+    b = 0;
+    while (t) {
+        b = b + 1;
+        t = t >> 1;
+    }
+    return (n - 1) * 32 + b; /* 同旧返回 */
+}
+/* fb_bit. A negative index returns 0 and does not read. */
+int pm_bit(const unsigned long long *a, int n, int i) {
+    unsigned long long w;
+    if (i < 0) return 0; /* 同旧返回 */
+    if (n < 0) return 4; /* 不是旧返回 */
+    if (i / 32 >= n) return 0; /* 同旧返回 */
+    if (!a) return 4; /* 不是旧返回 */
+    w = a[i / 32];
+    return (int)((w >> (i % 32)) & 1ull); /* 同旧返回 */
+}
+/* fb_cmp: 1, 0, or -1. A zero count does not read that side. */
+int pm_cmp(const unsigned long long *a, int an, const unsigned long long *b, int bn) {
+    int j;
+    if (an < 0 || bn < 0) return 4; /* 不是旧返回 */
+    if (!a && an > 0) return 4; /* 不是旧返回 */
+    if (!b && bn > 0) return 4; /* 不是旧返回 */
+    while (an > 0) {
+        if (a[an - 1] != 0) break;
+        an = an - 1;
+    }
+    while (bn > 0) {
+        if (b[bn - 1] != 0) break;
+        bn = bn - 1;
+    }
+    if (an != bn) {
+        if (an > bn) return 1; /* 同旧返回 */
+        return -1; /* 同旧返回 */
+    }
+    j = an - 1;
+    while (j >= 0) {
+        if (a[j] != b[j]) {
+            if (a[j] > b[j]) return 1; /* 同旧返回 */
+            return -1; /* 同旧返回 */
+        }
+        j = j - 1;
+    }
+    return 0; /* 同旧返回 */
+}
+/* fb_mul. A carry past 160 limbs is dropped, as the old if does. */
+int pm_mul(unsigned long long *a, int n, unsigned long long m) {
+    unsigned long long c;
+    unsigned long long t;
+    int j;
+    if (n < 0 || n > 160) return 1; /* 不是旧返回 */
+    if (!a && n > 0) return 4; /* 不是旧返回 */
+    c = 0;
+    j = 0;
+    while (j < n) {
+        t = a[j] * m + c;
+        a[j] = t & 4294967295ull;
+        c = t >> 32;
+        j = j + 1;
+    }
+    if (c) {
+        if (n < 160) {
+            a[n] = c;
+            n = n + 1;
+        }
+    }
+    return n; /* 同旧返回 */
+}
+/* fb_add. */
+int pm_add(unsigned long long *a, int n, unsigned long long v) {
+    int j;
+    unsigned long long t;
+    if (n < 0 || n > 160) return 1; /* 不是旧返回 */
+    if (!a && (n > 0 || v != 0)) return 4; /* 不是旧返回 */
+    j = 0;
+    while (v) {
+        if (j >= n) {
+            if (n < 160) {
+                a[n] = 0;
+                n = n + 1;
+            } else break;
+        }
+        t = a[j] + v;
+        a[j] = t & 4294967295ull;
+        v = t >> 32;
+        j = j + 1;
+    }
+    return n; /* 同旧返回 */
+}
+/* fb_shl1. */
+int pm_shl1(unsigned long long *a, int n) {
+    unsigned long long c;
+    unsigned long long t;
+    int j;
+    if (n < 0 || n > 160) return 1; /* 不是旧返回 */
+    if (!a && n > 0) return 4; /* 不是旧返回 */
+    c = 0;
+    j = 0;
+    while (j < n) {
+        t = (a[j] << 1) | c;
+        c = t >> 32;
+        a[j] = t & 4294967295ull;
+        j = j + 1;
+    }
+    if (c) {
+        if (n < 160) {
+            a[n] = c;
+            n = n + 1;
+        }
+    }
+    return n; /* 同旧返回 */
+}
+/* fb_sub. The caller still promises a >= b. */
+int pm_sub(unsigned long long *a, int an, const unsigned long long *b, int bn) {
+    long long t;
+    long long br;
+    int j;
+    if (an < 0 || bn < 0 || an > 160) return 1; /* 不是旧返回 */
+    if (!a && an > 0) return 4; /* 不是旧返回 */
+    if (!b && bn > 0) return 4; /* 不是旧返回 */
+    br = 0;
+    j = 0;
+    while (j < an) {
+        t = (long long)a[j] - br;
+        if (j < bn) t = t - (long long)b[j];
+        if (t < 0) {
+            t = t + 4294967296ll;
+            br = 1;
+        } else br = 0;
+        a[j] = (unsigned long long)t;
+        j = j + 1;
+    }
+    return an; /* 同旧返回 */
+}
