@@ -46,7 +46,8 @@ typedef enum {
     TERM_KEY_UNKNOWN,
     TERM_KEY_CHAR,
     TERM_KEY_MOUSE,         /* left press; x and y are 1-based cells */
-    TERM_KEY_WHEEL          /* button 64 up (ch=2) or 65 down (ch=1) */
+    TERM_KEY_WHEEL,         /* button 64 up (ch=2) or 65 down (ch=1) */
+    TERM_KEY_ESC            /* a lone ESC byte */
 } term_key_kind;
 
 typedef struct {

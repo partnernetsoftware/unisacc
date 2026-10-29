@@ -163,6 +163,7 @@ typedef struct {
     int  mail_blocked;        /* 1 when take() yielded nothing usable */
     long mail_next_ms;        /* next poll deadline, from clock_now_ms */
     char mail_error[256];     /* last take/finish failure reason */
+    char model[96];           /* /model override for this session; empty uses CSIH_MODEL */
 } tui_state;
 
 static int tui_mail_meta(tui_state *st, const char *id, const char *result, const char *reason);
@@ -464,6 +465,7 @@ static void tui_log_hold(tui_state *st);
 static void tui_log_scroll(tui_state *st, int delta);
 static int tui_log_room(const tui_state *st);
 static r_frame tui_render_state(tui_state *st, int cols);
+static const char *csih_env(const char *neu, const char *old);
 
 /* ── the key queue ──────────────────────────────────────────────────────── */
 
@@ -724,12 +726,21 @@ static void tui_body_add(tui_state *st, int i, const char *s) {
     b[n] = 0;
 }
 
+static int tui_looks_err(const char *s);
+
 static void tui_log_event(tui_state *st, const char *line) {
     char tag[12], why[96], cmd[120];
     const char *bar = tui_bar_text(line);
+    /* The evidence label belongs to the tool row above, so its body still folds. */
+    if (line && !strncmp(line, "  evidence ", 11) && st->nlog > 0 && st->ex_on[st->nlog - 1]) {
+        tui_body_add(st, st->nlog - 1, line + 2);
+        return;
+    }
     if (bar && st->nlog > 0 && st->ex_on[st->nlog - 1]) {
         tui_body_add(st, st->nlog - 1, bar);
         tui_note_err(st, line);
+        /* A failing tool shows its body without a click. */
+        if (tui_looks_err(bar)) st->ex_open[st->nlog - 1] = 1;
         return;
     }
     tui_log_make_room(st);
@@ -772,6 +783,8 @@ static int tui_looks_err(const char *s) {
     if (strstr(s, "is alive again")) return 1;
     if (strstr(s, "✗")) return 1;
     if (strstr(s, "◐ 做完未验证")) return 1;
+    if (strstr(s, "操作失败")) return 1;
+    if (strncmp(s, "命令退出 ", 13) == 0 && strcmp(s + 13, "0")) return 1;
     if (strstr(s, "exit=") && !strstr(s, "exit=0")) return 1;
     return 0;
 }
@@ -871,6 +884,34 @@ static int tui_slash(tui_state *st) {
         tui_log_plain(st, "/loop [text]: 切换目标循环，参数当前不解析");
         tui_log_plain(st, "/reload: 空闲重载密钥缓存；/reload-code: managed idle actor");
         tui_log_plain(st, "/export-state HANDOFF: owned idle 状态导出；/exit /quit: 退出");
+        tui_log_plain(st, "/model [名]: 显示或设本会话模型；/cwd: 显示工作目录");
+        tui_command_done(st);
+        return 1;
+    }
+    if (!strncmp(st->input, "/model", 6) && token == 6) {
+        const char *arg = st->input + 6;
+        while (*arg == ' ') arg++;
+        if (!*arg) {
+            const char *m = st->model[0] ? st->model : csih_env("CSIH_MODEL", "CDSH_MODEL");
+            snprintf(note, sizeof note, "model: %s%s", m ? m : "deepseek-chat", st->model[0] ? " (/model)" : "");
+        } else if (st->busy) {
+            snprintf(note, sizeof note, "busy: model unchanged");
+        } else if (strlen(arg) >= sizeof st->model || strchr(arg, ' ') || strchr(arg, '"') || strchr(arg, '\\')) {
+            snprintf(note, sizeof note, "usage: /model NAME (one word, under %d bytes)", (int)sizeof st->model);
+        } else {
+            snprintf(st->model, sizeof st->model, "%s", arg);
+            snprintf(note, sizeof note, "model set: %s (this session)", st->model);
+        }
+        tui_log_plain(st, note);
+        tui_command_done(st);
+        return 1;
+    }
+    if (!strcmp(st->input, "/cwd")) {
+        char here[1024];
+        const char *cwd = csih_env("CSIH_CWD", "CDSH_CWD");
+        if (!cwd) { if (!getcwd(here, sizeof here)) strcpy(here, "?"); cwd = here; }
+        snprintf(note, sizeof note, "cwd: %.200s", cwd);
+        tui_log_plain(st, note);
         tui_command_done(st);
         return 1;
     }
@@ -910,6 +951,7 @@ static int tui_slash(tui_state *st) {
     if (st->input[token] == ' ' && ((!strncmp(st->input, "/help", 5) && token == 5) ||
         (!strncmp(st->input, "/status", 7) && token == 7) ||
         (!strncmp(st->input, "/clear", 6) && token == 6) ||
+        (!strncmp(st->input, "/cwd", 4) && token == 4) ||
         (!strncmp(st->input, "/reload", 7) && token == 7) ||
         (!strncmp(st->input, "/reload-code", 12) && token == 12) ||
         (!strncmp(st->input, "/exit", 5) && token == 5) ||
@@ -1181,6 +1223,15 @@ static void tui_apply_key(tui_state *st, int kind, char ch) {
     case TERM_KEY_END:
         if (st->mode != 1) { st->notice = "arrow keys not bound yet"; return; }
         st->log_skip = 0;
+        return;
+    case TERM_KEY_ESC:
+        /* Busy: cancel this turn (tools already run stay done). Idle: clear the line. */
+        if (st->busy) {
+            st->cancel = 1; net_cancel();
+            st->notice = "Esc: 取消本轮，已执行的工具保留";
+            return;
+        }
+        st->input[0] = '\0'; st->ninput = 0; st->ask_exit = 0;
         return;
     case TERM_KEY_UNKNOWN:
         /* Never swallowed: an ignored key reads as "the UI is broken". */
@@ -1936,6 +1987,7 @@ static r_frame tui_render_state(tui_state *st, int cols) {
         const char *model = csih_env("CSIH_MODEL", "CDSH_MODEL");
         const char *cwd = csih_env("CSIH_CWD", "CDSH_CWD");
         if (!cwd) { if (!getcwd(here, sizeof here)) strcpy(here, "."); cwd = here; }
+        if (st->model[0]) model = st->model;
         tui_title_info(info, sizeof info, model ? model : "deepseek-chat", cwd);
         snprintf(title, sizeof title, "%s · %s", rs.title, info);
         rs.title = title;
@@ -2017,6 +2069,23 @@ static r_frame tui_render_state(tui_state *st, int cols) {
                     snprintf(head, sizeof head, "%s · %s", st->ex_why[i], cond);
                 else
                     snprintf(head, sizeof head, "%s", st->ex_why[i]);
+                if (!st->ex_open[i]) {
+                    /* Closed: one row, with the first status line of the body. */
+                    const char *b = st->ex_body[i];
+                    while (*b && !strncmp(b, "evidence ", 9)) {
+                        b = strchr(b, '\n');
+                        b = b ? b + 1 : "";
+                    }
+                    if (*b) {
+                        size_t hl = strlen(head);
+                        int sl = (int)strcspn(b, "\n");
+                        if (sl > 60) {
+                            sl = 60;
+                            while (sl > 0 && ((unsigned char)b[sl] & 0xC0) == 0x80) sl--;
+                        }
+                        snprintf(head + hl, sizeof head - hl, " · %.*s", sl, b);
+                    }
+                }
                 {
                     const char *p = head;
                     int cont = 0;
@@ -2048,18 +2117,29 @@ static r_frame tui_render_state(tui_state *st, int cols) {
                     }
                 }
                 if (st->ex_open[i] && n < 40 && st->ex_body[i][0]) {
-                    const char *p = st->ex_body[i];
-                    int cont = 0, brows = 0;
-                    while (*p && n < 40 && brows < 8) {
-                        int used = tui_put_folded_n(line[n], (int)sizeof line[n],
-                                                    "  ", p, cols, cont);
-                        rs.body[n] = line[n];
-                        tui_hit_add(n + 2, i);
-                        n++;
-                        brows++;
-                        if (used <= 0) break;
-                        p += used;
-                        cont = 1;
+                    /* One body line per row, each under its own bar. */
+                    const char *seg = st->ex_body[i];
+                    int brows = 0;
+                    while (*seg && n < 40 && brows < 8) {
+                        char one[1024];
+                        size_t sl = strcspn(seg, "\n");
+                        const char *p = one;
+                        int cont = 0;
+                        if (sl >= sizeof one) sl = sizeof one - 1;
+                        memcpy(one, seg, sl); one[sl] = 0;
+                        seg += sl; if (*seg == '\n') seg++;
+                        if (!one[0]) continue;
+                        while (*p && n < 40 && brows < 8) {
+                            int used = tui_put_folded_n(line[n], (int)sizeof line[n],
+                                                        "  │ ", p, cols, cont);
+                            rs.body[n] = line[n];
+                            tui_hit_add(n + 2, i);
+                            n++;
+                            brows++;
+                            if (used <= 0) break;
+                            p += used;
+                            cont = 1;
+                        }
                     }
                 }
             } else {
@@ -2301,6 +2381,7 @@ static int tui_run_prompt(tui_state *st, const char *source_prompt, int clear_ma
 
     if (!endpoint) endpoint = "https://api.deepseek.com/v1/chat/completions";
     if (!model)    model = "deepseek-chat";
+    if (st->model[0]) model = st->model;
     if (!cwd) { if (!getcwd(real_cwd, sizeof real_cwd)) strcpy(real_cwd, "."); cwd = real_cwd; }
     /* Same file across turns and across the cache re-exec. Do not delete it. */
     if (st->owned) {
@@ -3723,6 +3804,63 @@ int tui_entry(int argc, char **argv) {
             tui_apply_key(&tk, TERM_KEY_CHAR, 0x17);
             if (strcmp(tk.input, "git ")) { printf("FAIL ctrl-w left: [%s]\n", tk.input); failures++; }
             else printf("  ok   ctrl-w deletes one word\n");
+        }
+        {
+            static tui_state te;
+            const char *s;
+            tui_state_init(&te, NULL); te.mode = 1;
+            te.busy = 1;
+            tui_apply_key(&te, TERM_KEY_ESC, 0);
+            net_reset();
+            if (!te.cancel) { printf("FAIL esc did not cancel the busy turn\n"); failures++; }
+            else printf("  ok   esc cancels a busy turn\n");
+            te.busy = 0; te.cancel = 0;
+            for (s = "draft"; *s; s++) tui_apply_key(&te, TERM_KEY_CHAR, *s);
+            tui_apply_key(&te, TERM_KEY_ESC, 0);
+            if (te.ninput || te.cancel) { printf("FAIL esc idle left [%s]\n", te.input); failures++; }
+            else printf("  ok   esc clears idle input\n");
+        }
+        {
+            static tui_state tm;
+            int k, help = 0;
+            tui_state_init(&tm, NULL); tm.mode = 1;
+            tui_type(&tm, "/model m-two");
+            setenv("CSIH_CWD", "/srv/cwdtest", 1);
+            if (strcmp(tm.model, "m-two") || !strstr(tm.log[tm.nlog - 1], "model set: m-two")
+                || !tui_frame_has(&tm, "m-two") || tm.npending || tm.busy)
+                { printf("FAIL /model: [%s] %s\n", tm.model, tm.nlog ? tm.log[tm.nlog - 1] : ""); failures++; }
+            else printf("  ok   /model sets the session model\n");
+            tui_type(&tm, "/cwd");
+            unsetenv("CSIH_CWD");
+            if (!strstr(tm.log[tm.nlog - 1], "cwd: /srv/cwdtest") || tm.npending)
+                { printf("FAIL /cwd: %s\n", tm.log[tm.nlog - 1]); failures++; }
+            else printf("  ok   /cwd shows the working directory\n");
+            tui_type(&tm, "/help");
+            for (k = 0; k < tm.nlog; k++)
+                if (strstr(tm.log[k], "/model [名]") && strstr(tm.log[k], "/cwd")) help = 1;
+            if (!help) { printf("FAIL help misses /model or /cwd\n"); failures++; }
+            else printf("  ok   help lists /model and /cwd\n");
+        }
+        {
+            static tui_state tf2;
+            tui_state_init(&tf2, NULL); tf2.mode = 1; tf2.rows = 24;
+            tui_log_event(&tf2, "exec\t跑测试\tmake test");
+            tui_log_event(&tf2, "  evidence 9-1-1-1");
+            tui_log_event(&tf2, "  │ 命令退出 2");
+            tui_log_event(&tf2, "exec\t看目录\tls");
+            tui_log_event(&tf2, "  evidence 9-1-1-2");
+            tui_log_event(&tf2, "  │ 命令退出 0");
+            tui_log_event(&tf2, "  │ FOLDED-BODY");
+            if (tf2.nlog != 2 || !tf2.ex_open[0] || tf2.ex_open[1])
+                { printf("FAIL failed tool row nlog=%d open=%d ok row open=%d\n", tf2.nlog, tf2.ex_open[0], tf2.ex_open[1]); failures++; }
+            else printf("  ok   failed tool row opens by itself\n");
+            if (!tui_frame_has(&tf2, "· 命令退出 0") || tui_frame_has(&tf2, "FOLDED-BODY"))
+                { printf("FAIL closed tool row lacks status or shows body\n"); failures++; }
+            else printf("  ok   closed tool row is one line with status\n");
+            if (!tui_frame_has(&tf2, "  │ 命令退出 2") || !tui_frame_has(&tf2, "  │ evidence 9-1-1-1")
+                || tui_frame_has(&tf2, "⏎"))
+                { printf("FAIL open tool body not one line per row\n"); failures++; }
+            else printf("  ok   open tool body is one line per row\n");
         }
 
         printf("%s\n", failures ? "SELFTEST FAILED" : "selftest ok");
