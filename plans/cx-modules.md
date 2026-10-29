@@ -1514,7 +1514,9 @@ flowchart TD
 
 `cx/core/execute.cx` 去掉了 `UNISA_EXEC_CORE_H` 和 `__ASSEMBLER__` 守卫。文件级「声明了但不定义」改成函数体内的 `extern`。`action_run` 写成字面 `static`，`core_run` 写成字面名。这份文件也是旧库构造的输入。`executor.cx` 使用 `core.execute`，以及 alu、transition、stack、output、sparse、bytes。`bind.cx` 只留 `bd_touch`。`-cx-plan src/unisacc.cx` 退出 0，62 个单元。
 
-`-E examples/hello.c` 这次跑了 e2：退出 2，stdout 0 字节，stderr 是 `unisacc: model driver: not covered: missing target predefinition selector`。正文还没出来，对拍不算数。`-S`、`-o`、`-run` 这版入口没有重跑。
+`core_host_fetch` 借用回答 `\0cli/target`（`lnx/x86_64`）和 `\0predefines/lnx/x86_64`。`\0inc/q/` 与 `\0inc/a/` 去掉 7 字节前缀后按当前目录读文件，读到返回 2；`ENOENT` 返回 0。`\0hdr/` 仍是 absent。
+
+`-E examples/hello.c`：新入口退出 0，stdout 61357 字节，stderr 0。当场再跑已装产品，同样退出 0、61357 字节、stderr 0，两份 stdout 逐字节相同。`-S`、`-o`、`-run` 这版入口没有重跑。
 
 具名红项：
 

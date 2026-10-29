@@ -2,7 +2,8 @@
 /* Host file and clock. time.h is not in the prelude (edition 2).
    clock_gettime is declared inside hs_ns so this module does not export it.
    core_host_panic and core_host_fetch are the execution core's host hooks.
-   Fetch stays absent until a resource bind exists. */
+   Include keys \0inc/q/ and \0inc/a/ are cwd-relative files. \0hdr/ stays
+   absent until an include directory is bound. Other keys stay absent. */
 struct hs_ts { long sec; long nsec; };
 
 static void hs_why(char *why, int cap, const char *msg) {
@@ -82,10 +83,104 @@ void core_host_panic(const char *reason) {
     exit(1);
 }
 
+static int hs_key(const unsigned char *key, int n, const char *lit, int ln) {
+    int i;
+    if (n != ln + 1 || key[0] != 0) return 0;
+    i = 0;
+    while (i < ln) {
+        if (key[i + 1] != (unsigned char)lit[i]) return 0;
+        i = i + 1;
+    }
+    return 1;
+}
+
+static int hs_file(const unsigned char *p, int n, unsigned char **bytes, int *len) {
+    char path[4096];
+    unsigned char *b;
+    unsigned char *nb;
+    long room;
+    long nroom;
+    long gotn;
+    size_t got;
+    FILE *f;
+    int i;
+    if (n < 0 || n >= 4096) return 0;
+    i = 0;
+    while (i < n) {
+        if (p[i] == 0) return 0;
+        path[i] = (char)p[i];
+        i = i + 1;
+    }
+    path[n] = 0;
+    f = fopen(path, "rb");
+    if (!f) {
+        if (errno == ENOENT) return 0;
+        core_host_panic("cannot open input");
+    }
+    b = 0;
+    gotn = 0;
+    room = 0;
+    for (;;) {
+        if (gotn == room) {
+            if (room > 1073741824L) {
+                free(b);
+                fclose(f);
+                core_host_panic("file too large");
+            }
+            nroom = room ? room * 2 : 4096;
+            nb = realloc(b, (size_t)nroom);
+            if (!nb) {
+                free(b);
+                fclose(f);
+                core_host_panic("out of memory");
+            }
+            b = nb;
+            room = nroom;
+        }
+        got = fread(b + gotn, 1, (size_t)(room - gotn), f);
+        gotn = gotn + (long)got;
+        if (got == 0) break;
+    }
+    if (ferror(f)) {
+        free(b);
+        fclose(f);
+        core_host_panic("cannot read input");
+    }
+    if (fclose(f)) {
+        free(b);
+        core_host_panic("cannot close input");
+    }
+    if (gotn > 2147483647L) {
+        free(b);
+        core_host_panic("file too large");
+    }
+    *bytes = b ? b : (unsigned char *)realloc(0, 1);
+    if (!*bytes) core_host_panic("out of memory");
+    *len = (int)gotn;
+    return 2;
+}
+
 int core_host_fetch(const unsigned char *key, int n, unsigned char **bytes, int *len) {
-    (void)key;
-    (void)n;
-    if (bytes) *bytes = 0;
-    if (len) *len = 0;
+    static const unsigned char target[] = "lnx/x86_64";
+    static const unsigned char predef[] =
+        "__linux__\0__unix__\0__ELF__\0__x86_64__\0__LP64__\0__UNISA__\0";
+    if (n < 0 || (n > 0 && !key) || !bytes || !len)
+        core_host_panic("INTERFACE_ERROR resource-fetch-bad-arguments");
+    *bytes = 0;
+    *len = 0;
+    if (!key || n == 0) return 0;
+    if (hs_key(key, n, "cli/target", 10)) {
+        *bytes = (unsigned char *)target;
+        *len = 10;
+        return 1;
+    }
+    if (hs_key(key, n, "predefines/lnx/x86_64", 21)) {
+        *bytes = (unsigned char *)predef;
+        *len = (int)sizeof(predef) - 1;
+        return 1;
+    }
+    if (n >= 7 && key[0] == 0 && key[1] == 'i' && key[2] == 'n' && key[3] == 'c' &&
+        key[4] == '/' && (key[5] == 'q' || key[5] == 'a') && key[6] == '/')
+        return hs_file(key + 7, n - 7, bytes, len);
     return 0;
 }
