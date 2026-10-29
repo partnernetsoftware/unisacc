@@ -14,12 +14,12 @@ CSIH_BIN=../../out/csih-e2e-bin/csih UNISACC=../../unisacc.com \
   sh ../../unisacc.com check.cx -- probes            # 11 ok, 0 fail
 ```
 
-## 最近一次结果（2026-10-29，HEAD c9de59c2a1，本机 Linux；第五十一批后重跑）
+## 最近一次结果（2026-10-29，HEAD e16028ffa1，其中 apps/csih 停在 b902c8fbfb，本机 Linux；第五十三批后重跑）
 
 | 门禁 | 结果 |
 | --- | --- |
 | prepare | up to date |
-| tui selftest | 71 项 ok，selftest ok |
+| tui selftest | 73 项 ok，selftest ok |
 | agent_cli / shell_cli / term_cli / net_cli selftest | 全部通过 |
 | check.sh | rc=0，check ok（6 项，含第 5 项字面量长度检查） |
 | check.cx probes | rc=0，11 ok，0 fail（含真实 HTTP 与真实 LLM 往返） |
@@ -43,6 +43,7 @@ CSIH_BIN=../../out/csih-e2e-bin/csih UNISACC=../../unisacc.com \
 | 会话：按目录存放、/new、/resume、/resume shared | `/new archives…`、`/resume lists and swaps…`；agent_cli 中按目录的路径 | 两个目录上下文互不相通；导入 77KB 旧记录 |
 | 权限：/perm read/work/any | `/perm read|work|any gates writes and commands` | read 档拦写入，work 档拦 /tmp 写入 |
 | 沙箱：read/work 档 exec 跑在只读 mount namespace | agent_cli：read 档 cwd 写入被内核拒绝；work 档 cwd 可写、家目录只读；超长命令被拒绝 | `touch ~/x` 报 Read-only |
+| /why 最近失败/拦截原因；blocked 进错误行；/status 中文概览 | `/why lists the last 5 reasons…`、`/status shows a readable overview…` | read 档被拦后 /why 列出拒绝句 |
 | /net off：work 档也断网 | agent_cli：work 档默认有网、/net off 后只有 lo | curl 报 Could not resolve host，本轮照常验收 |
 | 沙箱：机密遮蔽、私有 PID、read 档断网 | agent_cli：`~/env.jsonl` 读出为空、PID 空间独立、read 档只有 lo | `wc -c ~/env.jsonl` 为 0，`ps -e` 只有 4 个进程 |
 | /undo 撤销文件写入/编辑（20 步） | agent_cli：`a write records one undo step`、`undo restores the overwrite`、`undo of a created file removes it` | 改写 u.txt 后 /undo 恢复原内容 |
