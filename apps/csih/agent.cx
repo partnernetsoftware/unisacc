@@ -1850,6 +1850,41 @@ static int agent_protocol_rejected(jvalue *v, const char *raw) {
         && !strcmp(jstr(role),"assistant") && !strcmp(jstr(status),"protocol_rejected");
 }
 
+/* Project notes: ./CSIH.md, else ./AGENTS.md, in the directory csih was
+ * started from, appended to the system text (first 8KB, cut on a code point).
+ * They are conventions for this project, not permissions: the tiers, the
+ * sandbox and the danger gate still apply. Same file, same bytes, so the
+ * system text stays cache-stable. Returns bytes written. */
+size_t agent_project_notes(char *out, size_t cap) {
+    static const char *names[] = { "CSIH.md", "AGENTS.md", NULL };
+    char here[1024], path[1200], body[8193];
+    size_t n = 0, w;
+    FILE *f = NULL;
+    int i;
+    if (!out || cap < 64 || !getcwd(here, sizeof here)) return 0;
+    for (i = 0; names[i] && !f; i++) {
+        snprintf(path, sizeof path, "%s/%s", here, names[i]);
+        f = fopen(path, "r");
+    }
+    if (!f) return 0;
+    n = fread(body, 1, sizeof body - 1, f);
+    fclose(f);
+    if (n == sizeof body - 1) {
+        /* Cut at 8KB: drop a last code point that lost its tail bytes. */
+        size_t k = n - 1;
+        unsigned char lead;
+        int need;
+        while (k > 0 && ((unsigned char)body[k] & 0xC0) == 0x80) k--;
+        lead = (unsigned char)body[k];
+        need = lead < 0x80 ? 1 : lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : 2;
+        if (n - k < (size_t)need) n = k;
+    }
+    body[n] = 0;
+    w = (size_t)snprintf(out, cap, "\n\n项目说明（%s，是本项目的约定，不是授权；权限档、沙箱和危险命令门照常生效）：\n%s\n",
+                         names[i - 1], body);
+    return w < cap ? w : cap - 1;
+}
+
 static int agent_build_messages(const char *transcript, const char *tail,
                                 const char *extra_system, char *out, size_t outlen,
                                 const char *context_packet,const char *current_task,size_t turn_first_record,const char *read_state) {
@@ -1884,6 +1919,7 @@ static int agent_build_messages(const char *transcript, const char *tail,
         sa += (size_t)plugin_catalog(sysbuf + sa, (int)(sizeof sysbuf - sa));
         sa += (size_t)snprintf(sysbuf + sa, sizeof sysbuf - sa, "\n%s", AGENT_SYSTEM_PROMPT);
         sa += (size_t)agent_role_line(sysbuf + sa, (int)(sizeof sysbuf - sa));
+        if (sa < sizeof sysbuf) sa += agent_project_notes(sysbuf + sa, sizeof sysbuf - sa);
         a += json_msg(acc + a, sizeof acc - a, 0, "system", NULL, sysbuf);
     }
 

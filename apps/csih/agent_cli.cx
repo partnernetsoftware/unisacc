@@ -81,6 +81,7 @@ void agent_role_test(const char *role, const char *peer);
 int agent_peer_blocked(int kind, const char *op, const char *cmd, char *why, int n);
 int agent_sandbox_available(void);
 int agent_undo_depth(void);
+size_t agent_project_notes(char *out, size_t cap);
 int agent_undo_last(char *note, size_t cap);
 void agent_set_perm(int p);
 typedef struct {
@@ -425,6 +426,44 @@ static int agent_run_selftest(void) {
     s = agent_parse("{\"act\":\"exec\",\"cmd\":\"echo hi\"}");
     a_expect(agent_exec(&s, "/tmp", out, sizeof out) == 1, "exec runs");
     a_expect(strstr(out, "hi") != NULL, "  exec output captured");
+
+    /* project notes: CSIH.md, else AGENTS.md, from the start directory */
+    {
+        char dir[128], old[1024], p[200], notes[9000];
+        size_t got;
+        int i, valid = 1;
+        FILE *f;
+        snprintf(dir, sizeof dir, "/tmp/csih-notes-%d", (int)getpid());
+        mkdir(dir, 0700);
+        if (getcwd(old, sizeof old) && chdir(dir) == 0) {
+            a_expect(agent_project_notes(notes, sizeof notes) == 0, "no notes file: nothing added");
+            snprintf(p, sizeof p, "%s/AGENTS.md", dir);
+            f = fopen(p, "w"); if (f) { fputs("用 tab 缩进", f); fclose(f); }
+            got = agent_project_notes(notes, sizeof notes);
+            a_expect(got > 0 && strstr(notes, "AGENTS.md") && strstr(notes, "用 tab 缩进") && strstr(notes, "不是授权"),
+                     "AGENTS.md is read when there is no CSIH.md");
+            snprintf(p, sizeof p, "%s/CSIH.md", dir);
+            f = fopen(p, "w");
+            if (f) { for (i = 0; i < 3000; i++) fputs("中", f); fclose(f); }   /* 9000 bytes */
+            got = agent_project_notes(notes, sizeof notes);
+            a_expect(got > 0 && strstr(notes, "CSIH.md") && !strstr(notes, "用 tab 缩进"), "CSIH.md wins over AGENTS.md");
+            /* cut at 8KB on a code point: every 中 after the header is whole */
+            {
+                const char *b = strstr(notes, "）：\n");
+                size_t k, len;
+                if (b) { b += strlen("）：\n"); len = strlen(b) - 1; /* trailing \n */
+                    for (k = 0; k + 3 <= len; k += 3) if (memcmp(b + k, "中", 3)) valid = 0;
+                    if (len % 3) valid = 0;
+                    if (len > 8192) valid = 0;
+                } else valid = 0;
+            }
+            a_expect(valid, "long notes are cut to 8KB on a code point boundary");
+            remove(p);
+            snprintf(p, sizeof p, "%s/AGENTS.md", dir); remove(p);
+            if (chdir(old) != 0) a_expect(0, "restore cwd");
+        }
+        rmdir(dir);
+    }
 
     /* sandbox: the kernel, not a keyword list, refuses writes outside the tier */
     if (agent_sandbox_available()) {

@@ -49,6 +49,8 @@ CSIH_BIN=../../out/csih-e2e-bin/csih UNISACC=../../unisacc.com \
 | /view 本地看文件（行号、翻页） | `/view shows numbered lines and paging` | `/view apps/csih/csih.sh 20` |
 | 点击日志里的文件路径打开 | `clicking a file path opens it in /view at path:LINE` | SGR 鼠标序列点击 clickme.txt |
 | Ctrl-R 历史搜索，历史跨重启 | `ctrl-r searches history newest first`、`history persists across restarts…` | 关窗重开后 Ctrl-R 找回 |
+| 项目说明 CSIH.md / AGENTS.md 进系统提示词 | agent_cli：没有文件不追加、AGENTS.md 兜底、CSIH.md 优先、8KB 按码位截断 | 约定「末尾加【约定生效】」被遵守 |
+| /copy、长回合响铃 | `/copy refuses…`、`bell only on a tty…` | 缓冲区内容原样；后台窗口 bell=1 |
 | 危险命令门 + /allow 一次 | `dangerous exec is blocked until /allow`、`/allow lets exactly one through` | 拦截 → 说明 → /allow → 执行 |
 | 证据引用：quote 定位、0,0 整段、格式错误给出规则 | agent_cli：`observation_refs accept optional quote…` | write→read→sh 6/6 通过 |
 | 项目状态行 + 生成器 | `project status file shows up to 3 rows with age` | `tools/status.cx` 显示 108/142，`find` 复核一致 |
