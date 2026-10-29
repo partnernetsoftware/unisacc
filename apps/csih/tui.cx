@@ -92,6 +92,9 @@ enum {
     TUI_LOG_VIEW = 40
 };
 
+/* Last 5 failure/refusal reasons for /why (see the why member below). */
+typedef struct { char text[5][240]; long t[5]; int n; } tui_why_ring;
+
 typedef struct {
     char input[tui_input_max];   /* what the user has typed */
     int  ninput;
@@ -169,6 +172,10 @@ typedef struct {
     int  nstatus;
     char rsearch[256];        /* Ctrl-R needle, taken from the input at the first press */
     int  rsearch_at;          /* 1 + index of the last match; 0 = not searching */
+    /* Last 5 failure/refusal reasons for /why, as a ring; n counts all pushed,
+     * the newest is text[(n-1)%5]. One nested member: unisacc caps how many
+     * members a struct may have, and tui_state is at that cap. */
+    tui_why_ring why;
 } tui_state;
 
 static int tui_mail_meta(tui_state *st, const char *id, const char *result, const char *reason);
@@ -790,6 +797,7 @@ static int tui_looks_err(const char *s) {
     if (strstr(s, "✗")) return 1;
     if (strstr(s, "◐ 做完未验证")) return 1;
     if (strstr(s, "操作失败")) return 1;
+    if (strstr(s, "blocked:")) return 1;       /* the refusal sentence is the useful reason */
     if (strncmp(s, "命令退出 ", 13) == 0 && strcmp(s + 13, "0")) return 1;
     if (strstr(s, "exit=") && !strstr(s, "exit=0")) return 1;
     return 0;
@@ -821,6 +829,12 @@ static void tui_note_err(tui_state *st, const char *s) {
         st->errline[o++] = c;
     }
     st->errline[o] = 0;
+    /* Keep the last 5 reasons for /why; the error row itself is overwritten. */
+    if (st->why.n == 0 || strcmp(st->why.text[(st->why.n - 1) % 5], st->errline)) {
+        snprintf(st->why.text[st->why.n % 5], sizeof st->why.text[0], "%s", st->errline);
+        st->why.t[st->why.n % 5] = (long)net_now();
+        st->why.n++;
+    }
 }
 
 /* The line a live turn actually runs. Only the user's goal. The write gate
@@ -1031,7 +1045,7 @@ static void tui_complete_command(tui_state *st) {
     static const char *builtin[] = {
         "/help", "/status", "/clear", "/goal", "/loop", "/reload", "/reload-code", "/export-state",
         "/exit", "/quit", "/model", "/cwd", "/cost", "/perm", "/allow", "/new", "/resume", "/undo",
-        "/diff", "/view", "/copy", "/retry", "/context", "/compact", "/net", "/export", NULL
+        "/diff", "/view", "/copy", "/retry", "/context", "/compact", "/net", "/export", "/why", NULL
     };
     static char names[64][64];
     char dirs[2][600], listing[8192], line[240];
@@ -1198,7 +1212,7 @@ static int tui_slash(tui_state *st) {
         tui_log_plain(st, "/undo: 撤销 agent 最近一次文件写入/编辑（最多 20 步，不含 exec）；/diff: 看这些改动");
         tui_log_plain(st, "/view PATH [LINE]: 看文件 20 行（带行号），不经模型；/copy: 上一轮答复进 tmux 缓冲区；/retry: 重发上一条输入");
         tui_log_plain(st, "/context: 对话记录条数、大小和裁剪规则；/compact: 归档并只保留最近请求和答复的原文摘录");
-        tui_log_plain(st, "/export [路径]: 对话导出为 Markdown（默认 ./csih-<时间>.md）");
+        tui_log_plain(st, "/export [路径]: 对话导出为 Markdown（默认 ./csih-<时间>.md）；/why: 最近 5 条失败/拦截原因");
         tui_log_plain(st, "/allow: 放行下一条危险命令一次；/new: 新上下文（旧转录归档）；/resume [N]: 列出或换回归档");
         tui_log_plain(st, "键：Esc 取消本轮/清输入；Alt-Enter 换行；空输入 Tab 展开/收起工具行；Ctrl-U/W 清行/删词；Ctrl-R 搜历史");
         tui_command_done(st);
@@ -1412,6 +1426,31 @@ static int tui_slash(tui_state *st) {
         tui_command_done(st);
         return 1;
     }
+    if (!strcmp(st->input, "/why")) {
+        /* Recent failure / refusal reasons, oldest first, newest last. */
+        int i, first = st->why.n > 5 ? st->why.n - 5 : 0;
+        char rows[5][300];
+        int nr = 0;
+        if (!st->why.n) { tui_log_plain(st, "why: 本次还没有失败或被拦截"); tui_command_done(st); return 1; }
+        /* Build first, then log: logging an error-looking row would push it again. */
+        for (i = first; i < st->why.n; i++) {
+            long age = (long)net_now() - st->why.t[i % 5];
+            snprintf(rows[nr++], sizeof rows[0], "why %d（%ld秒前）: %.230s", i - first + 1, age < 0 ? 0 : age, st->why.text[i % 5]);
+        }
+        {
+            /* Listing is not a new failure: the rows quote ✗/exit= text, so
+             * logging them would push into (and overwrite) the ring. Restore it. */
+            static tui_why_ring keep;
+            char line[240];
+            keep = st->why;
+            snprintf(line, sizeof line, "%s", st->errline);
+            for (i = 0; i < nr; i++) tui_log_plain(st, rows[i]);
+            st->why = keep;
+            snprintf(st->errline, sizeof st->errline, "%s", line);
+        }
+        tui_command_done(st);
+        return 1;
+    }
     if (!strcmp(st->input, "/retry")) {
         /* Send the last prompt again (it is the newest history line). */
         if (!st->nhistory) {
@@ -1547,6 +1586,7 @@ static int tui_slash(tui_state *st) {
         (!strncmp(st->input, "/copy", 5) && token == 5) ||
         (!strncmp(st->input, "/retry", 6) && token == 6) ||
         (!strncmp(st->input, "/context", 8) && token == 8) ||
+        (!strncmp(st->input, "/why", 4) && token == 4) ||
         (!strncmp(st->input, "/new", 4) && token == 4) ||
         (!strncmp(st->input, "/compact", 8) && token == 8) ||
         (!strncmp(st->input, "/reload", 7) && token == 7) ||
@@ -5385,6 +5425,23 @@ int tui_entry(int argc, char **argv) {
                 && strstr(tcc.log[tcc.nlog - 1], "busy=");
             if (!ok) { printf("FAIL /status overview\n"); failures++; }
             else printf("  ok   /status shows a readable overview above the raw fields\n");
+            {
+                /* /why keeps the last 5 distinct reasons, and listing them adds none */
+                int i3;
+                char r[64];
+                tui_state_init(&tcc, NULL); tcc.mode = 1;
+                tui_type(&tcc, "/why");
+                ok = strstr(tcc.log[tcc.nlog - 1], "还没有失败") != NULL;
+                for (i3 = 1; i3 <= 7; i3++) { snprintf(r, sizeof r, "✗ 失败: 原因%d", i3); tui_log_plain(&tcc, r); }
+                tui_log_plain(&tcc, "✗ 失败: 原因7");          /* repeat: not stored twice */
+                tui_type(&tcc, "/why");
+                ok = ok && tcc.why.n == 7 && strstr(tcc.log[tcc.nlog - 5], "原因3") && strstr(tcc.log[tcc.nlog - 1], "原因7")
+                    && !strstr(tcc.log[tcc.nlog - 5], "原因2");
+                tui_type(&tcc, "/why");
+                ok = ok && tcc.why.n == 7 && strstr(tcc.log[tcc.nlog - 5], "原因3");
+                if (!ok) { printf("FAIL /why n=%d\n", tcc.why.n); failures++; }
+                else printf("  ok   /why lists the last 5 reasons, listing adds none\n");
+            }
             {
                 char tp[128];
                 char *oldt = getenv("CSIH_TRANSCRIPT") ? strdup(getenv("CSIH_TRANSCRIPT")) : NULL;
