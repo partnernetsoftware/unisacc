@@ -142,7 +142,20 @@ int at_line(void);
    them with their USLSIG3 signatures; the stub text is src/fwdstub.c's, the
    same bytes the reference front end writes. */
 #include "forwardsignature.h"
-#include "../../src/fwdstub.c"
+/* Stub text lives in cx/compiler/fwdstub.cx. src/fwdstub.c stays the reference oracle. */
+int fwd_emit(char *, int, int *, int *, int *, int, int, int, int);
+int fwd_emit_var(char *, int, int *, int *, int, int, int, int, int);
+int fwd_emit_libs(void);
+int fwd_pclear(void);
+void fwd_reset(void);
+int fwd_count(void);
+char *fwd_text(void);
+void fwd_set_ccw(int);
+int fwd_ccw_on(void);
+void fwd_set_maxargs(int);
+void fwd_set_ptype(int, char *);
+char **fwd_lib_slot(void);
+int *fwd_lib_count(void);
 #include "fwdmerge.c"
 /* CX2a: .cx modules (`#pragma unisa use NAME`) and their derived interfaces -- src/cxmod.c, the same code as the
    reference driver's; its file access (cxm_rd, cxm_wr, cxm_say) follows fwdpaths.h, after <unistd.h> */
@@ -292,9 +305,9 @@ static int fwd_sidecar(Buf *in, Buf *tape) {     /* 0: no records (tape set); 1:
     if (us_fw_u64(b,n,&at,&tl) || us_fw_u64(b,n,&at,&cnt) || us_fw_u64(b,n,&at,&ccwc) || ccwc>256 || tl>n-at) { fputs("unisacc: error: forwarding side-car malformed\n",stderr); return -1; }
     tape->b=xrealloc(0,tl+1); memcpy(tape->b,b+at,tl); tape->n=(int)tl; at+=tl;
     fwm_reset();
-    fwd_ccw=ccwc>0;
+    fwd_set_ccw(ccwc>0);
     if (cnt==0) return 0;
-    nfwdsrc=0;
+    fwd_reset();
     for (uint64_t r=0;r<cnt;r++) {
         uint64_t nl=0,sl=0;
         if (us_fw_u64(b,n,&at,&nl) || nl>n-at || nl>1024) return -1;
@@ -313,7 +326,7 @@ static int fwd_sidecar(Buf *in, Buf *tape) {     /* 0: no records (tape set); 1:
                 fwd_pclear();
                 fprintf(stderr,"unisacc: error: undefined function '%.*s'\n",(int)nl,nm); return -1;
             }
-            fwd_ptype[k]=cbdecl[k];
+            fwd_set_ptype(k,cbdecl[k]);
         }
         int emitted = sig.variadic
             ? fwd_emit_var((char *)nm,(int)nl,sig.n,kk,ww,sig.ret.isvoid,sig.ret.kind,sig.ret.width,sig.ret.uns)
@@ -321,14 +334,14 @@ static int fwd_sidecar(Buf *in, Buf *tape) {     /* 0: no records (tape set); 1:
         fwd_pclear();
         if (!emitted) { fprintf(stderr,"unisacc: error: undefined function '%.*s'\n",(int)nl,nm); return -1; }
     }
-    if (nfwdsrc > 0) fwd_emit_libs();
+    if (fwd_count() > 0) fwd_emit_libs();
 #ifdef _WIN32
     { const char *td=getenv("TEMP"); snprintf(fwd_path,sizeof fwd_path,"%s\\unisacc-forward-%lx.c",td ? td : ".",(unsigned long)(uintptr_t)&at); }
 #else
     snprintf(fwd_path,sizeof fwd_path,"/tmp/unisacc-forward-%lx.c",(unsigned long)(uintptr_t)&at);
 #endif
     FILE *f=fopen(fwd_path,"wb"); if (!f) return -1;
-    int werr=fwrite(fwdsrc,1,nfwdsrc,f)!=(size_t)nfwdsrc; werr|=fclose(f)!=0;
+    int werr=fwrite(fwd_text(),1,(size_t)fwd_count(),f)!=(size_t)fwd_count(); werr|=fclose(f)!=0;
     return werr ? -1 : 1;
 }
 #include "fwdincrement.c"
@@ -608,7 +621,7 @@ int main(int argc, char **argv) {
     if (argc>=2 && (!strcmp(argv[1],"nm") || !strcmp(argv[1],"objdump"))) { if(rf_trace_finish())return 2;return product_view(argc,argv); }   /* R18-4 */
     int sawS=0;
     CliBlock srcres={0};                   /* \0cli/source: the main source path */
-    CxcState opts={0}; char cli_reason[128]; CxpState compat={fwd_libs,&nfwd_libs,16};
+    CxcState opts={0}; char cli_reason[128]; CxpState compat={fwd_lib_slot(),fwd_lib_count(),16};
     CxcResources resources={&defs.b,&undefs.b,&forced.b,&incdir.b,&quotedir.b,&errorlimit.b,
         &defs.n,&undefs.n,&forced.n,&incdir.n,&quotedir.n,&errorlimit.n,
         &defs.cap,&undefs.cap,&forced.cap,&incdir.cap,&quotedir.cap,&errorlimit.cap,0};
@@ -739,7 +752,7 @@ int main(int argc, char **argv) {
     if(route_rc)return cxt_error(route_rc,route_reason);
     if (!pkg) pkg = getenv("UNISA_CONTAINER");
     rr_pkg_path = pkg && strcmp(pkg, argv[0]) ? pkg : 0;
-    rr_special_input = !!(host_symbols_path || host_provider_path || nfwd_libs);
+    rr_special_input = !!(host_symbols_path || host_provider_path || *fwd_lib_count());
     ResourceInput cli[256]; memset(cli,0,sizeof cli);int nimports=0;
     unsigned char process_argc[8],process_argv[8],memory_text[8],memory_data[8],process_dl[4][8];
     char **runargs=0;
@@ -813,9 +826,9 @@ int main(int argc, char **argv) {
         && (!strncmp(target,"osx/",4) || !strncmp(target,"lnx/",4) || !strncmp(target,"win/",4));
     /* 0.0.33 W2: win forwards too (ucrtbase/kernel32/ws2_32 by GetProcAddress, like the reference);
        its hostcall delivers four register arguments, so a wider call is refused by name (src/main.c:26) */
-    fwd_maxargs = !strncmp(target,"win/",4) ? 4 : 0;
+    fwd_set_maxargs(!strncmp(target,"win/",4) ? 4 : 0);
     if (fwdwant) { cli[NRI].name=(const unsigned char *)"\0cli/run-forward"; cli[NRI].n=16; cli[NRI].data=&fwd_one; cli[NRI].len=1; NRI++; }
-    if (fwd_second && fwd_ccw) { cli[NRI].name=(const unsigned char *)"\0cli/ccw"; cli[NRI].n=8; cli[NRI].data=&fwd_one; cli[NRI].len=1; NRI++; }
+    if (fwd_second && fwd_ccw_on()) { cli[NRI].name=(const unsigned char *)"\0cli/ccw"; cli[NRI].n=8; cli[NRI].data=&fwd_one; cli[NRI].len=1; NRI++; }
     int fwd_restart = 0;
     Buf objres={0}, funitres={0};
     if (objwant) bput(&objres,1,0);
@@ -1208,7 +1221,7 @@ rr_after_units:
                             } else if (runit) rr_can=0;
 #endif
                             Buf merged={0};
-                            int fast=fwd_ccw ? 0 : fwd_incremental(target,level,&tape,nsources,&merged);
+                            int fast=fwd_ccw_on() ? 0 : fwd_incremental(target,level,&tape,nsources,&merged);
                             if (fast>0) {
                                 free(in.b); free(tape.b); in=merged;
                                 rc=tape_domain(route,&in,src);

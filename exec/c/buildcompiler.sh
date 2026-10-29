@@ -244,8 +244,8 @@ pack_driver() {
         pids=
         for t in win/x86_64 lnx/x86_64 lnx/arm64 osx/x86_64 osx/arm64; do
             # JOBS=1 runs the slices one after another (host load); default keeps them parallel
-            if [ "${JOBS:-0}" = 1 ]; then b $via -O2 -b "$t" exec/c/asmcompiler.c cx/compiler/tapelink.cx cx/compiler/asmtext.cx -o "$T/slice-$(echo "$t" | tr / -)"
-            else b $via -O2 -b "$t" exec/c/asmcompiler.c cx/compiler/tapelink.cx cx/compiler/asmtext.cx -o "$T/slice-$(echo "$t" | tr / -)" & pids="$pids $!"; fi
+            if [ "${JOBS:-0}" = 1 ]; then b $via -O2 -b "$t" exec/c/asmcompiler.c cx/compiler/tapelink.cx cx/compiler/asmtext.cx cx/compiler/fwdstub.cx -o "$T/slice-$(echo "$t" | tr / -)"
+            else b $via -O2 -b "$t" exec/c/asmcompiler.c cx/compiler/tapelink.cx cx/compiler/asmtext.cx cx/compiler/fwdstub.cx -o "$T/slice-$(echo "$t" | tr / -)" & pids="$pids $!"; fi
         done
         for p in $pids; do wait "$p"; done
         b "$T/seedbin/ape" --payload "$T/compiler.pkg" --product Unisacc "$product_version" "$T/unisacc-next.com" \

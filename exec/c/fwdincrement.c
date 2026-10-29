@@ -3,12 +3,12 @@
 static int fwd_incremental(const char *target,int level,const Buf *base,int unit,Buf *merged) {
     if (getenv("UNISA_FWD_REPLAY") || fwm_overflow) return 0;
     static const char dummy[]="\nint main(void){return 0;}\n";
-    if (nfwdsrc<=0 || nfwdsrc>131000) return 0;
+    if (fwd_count()<=0 || fwd_count()>131000) return 0;
     Buf unit_tape={0};
-    unit_tape.n=nfwdsrc+(int)sizeof(dummy)-1;
+    unit_tape.n=fwd_count()+(int)sizeof(dummy)-1;
     unit_tape.b=xrealloc(0,(size_t)unit_tape.n+1);
-    memcpy(unit_tape.b,fwdsrc,(size_t)nfwdsrc);
-    memcpy(unit_tape.b+nfwdsrc,dummy,sizeof(dummy)-1);
+    memcpy(unit_tape.b,fwd_text(),(size_t)fwd_count());
+    memcpy(unit_tape.b+fwd_count(),dummy,sizeof(dummy)-1);
     unit_tape.b[unit_tape.n]=0;
     char route[96];
     int rn=snprintf(route,sizeof route,"%s/tape/O%d",target,level);
