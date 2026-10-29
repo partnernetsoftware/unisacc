@@ -54,4 +54,4 @@ CSIH_BIN=../../out/csih-e2e-bin/csih UNISACC=../../unisacc.com \
 - 危险命令门是关键字匹配。
 - exec 同步执行，每 200ms 刷新一次界面；单条命令最长 60 秒（`CSIH_EXEC_TIMEOUT_SEC`）。
 - 回答正文不流式显示（REJECT，理由见 PRD）。
-- 模型目前很少主动使用 quote；不用时 harness 收拢偏移或取整段正文。
+- 第二十四批加了答复示例后，实测 4/4 用了 quote，且第一遍就通过；不用时 harness 收拢偏移或取整段正文。
