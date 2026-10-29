@@ -2116,10 +2116,25 @@ static void tui_put_folded(char *dst, int dstmax, const char *prefix, const char
 
 /* One input row. A paste keeps its newlines, drawn as ⏎, and the row
  * stays within `cols` so a long paste cannot fail the width check. */
+/* Display columns of the first n bytes of s (n < 0: all of it). */
+static int tui_str_cols(const char *s, int n) {
+    int i = 0, w = 0;
+    while (s[i] && (n < 0 || i < n)) {
+        unsigned int cp = 0;
+        int need = tui_next_cp(s + i, &cp);
+        if (need <= 0) break;
+        w += tui_cp_cols(cp);
+        i += need;
+    }
+    return w;
+}
+
 static void tui_input_row(char *dst, int dstmax, const char *input, int cols, int back) {
-    char shown[R_LINE_MAX + 1];
+    /* ⏎ is 3 bytes for 1, so the folded copy can be three times the input. */
+    static char shown[TUI_INPUT_MAX * 3 + 8];
     char piece[R_LINE_MAX + 1];
     char marked[TUI_INPUT_MAX + 4];
+    const char *from, *caret;
     int width, len = input ? (int)strlen(input) : 0;
     /* Cursor away from the end: draw a thin bar where the next byte goes. */
     if (back > 0 && back <= len) {
@@ -2130,7 +2145,24 @@ static void tui_input_row(char *dst, int dstmax, const char *input, int cols, in
     tui_put_folded(shown, (int)sizeof shown, "", input ? input : "");
     width = cols - 2;
     if (width < 1) width = 1;
-    tui_utf8_fit(shown, width, piece);
+    /* Too wide: slide the window so the cursor stays on screen, with … for
+     * what scrolled off the left. Without this, typing past the edge vanished. */
+    caret = back > 0 ? strstr(shown, "▏") : NULL;
+    if (!caret) caret = shown + strlen(shown);
+    from = shown;
+    if (tui_str_cols(shown, -1) > width && width > 2) {
+        while (*from && tui_str_cols(from, (int)(caret - from)) > width - 2) {
+            unsigned int cp = 0;
+            int need = tui_next_cp(from, &cp);
+            if (need <= 0) break;
+            from += need;
+        }
+    }
+    if (from != shown) {
+        char rest[R_LINE_MAX + 1];
+        tui_utf8_fit(from, width - 1, rest);
+        snprintf(piece, sizeof piece, "…%s", rest);
+    } else tui_utf8_fit(shown, width, piece);
     snprintf(dst, (size_t)dstmax, "> %s", piece);
 }
 
@@ -4058,6 +4090,15 @@ int tui_entry(int argc, char **argv) {
             if (strcmp(tq.input, "你a好")) okc = 0;
             if (!okc) { printf("FAIL cursor editing: [%s] back=%d\n", tq.input, tq.back); failures++; }
             else printf("  ok   cursor moves and edits mid-line\n");
+            tui_apply_key(&tq, TERM_KEY_CHAR, 0x15);
+            for (s = "0123456789abcdefghijklmnopqrstuvwxyz0123456789"; *s; s++) tui_apply_key(&tq, TERM_KEY_CHAR, *s);
+            for (s = "汉字结尾END"; *s; s++) tui_apply_key(&tq, TERM_KEY_CHAR, *s);
+            okc = tui_frame_has(&tq, "> …") && tui_frame_has(&tq, "汉字结尾END");
+            tui_apply_key(&tq, TERM_KEY_CHAR, 0x01);
+            okc = okc && tui_frame_has(&tq, "> ▏0123456789") && !tui_frame_has(&tq, "> …");
+            tui_apply_key(&tq, TERM_KEY_CHAR, 0x15);
+            if (!okc) { printf("FAIL long input does not follow the cursor\n"); failures++; }
+            else printf("  ok   long input scrolls to keep the cursor visible\n");
         }
         {
             static tui_state te;
