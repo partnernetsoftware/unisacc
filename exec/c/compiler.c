@@ -108,17 +108,35 @@ int cxd_write(const char *,const char *,const char **,long,const char **,const i
 /* 0.0.17 R17-2: the unisacc linker joins -funit unit objects at the tape
    level; the joining is the reference's src/tapelink.c, which only builds a
    tape -- every compilation decision after it is the product route's. */
+/* libc/posix stays in this driver. The linker and assembler modules only
+   receive these two callbacks and never call the host themselves. */
 static Buf linkbuf;
-int tl_o(int c) { bput(&linkbuf,(unsigned char)c,0); return 0; }
-int tl_fail(char *m) { fputs(m,stderr); exit(1); return 1; }
-#define TL_PRODUCT 1
-#include "../../src/tapelink.c"
-/* 0.0.18 R18-1/R18-2: assembly text (-S -b lnx/ARCH) and `unisacc as` are the
-   reference's src/asmtext.c, which reads and writes ELF bytes only */
+static int tl_emit(int c) { bput(&linkbuf,(unsigned char)c,0); return 0; }
+static int tl_die(char *m) { fputs(m,stderr); exit(1); return 1; }
+int tl_bind(int (*emit)(int), int (*die)(char *));
+int tl_begin(void);
+void tl_adopt_first(void);
+int tl_target_differs(void);
+const char *tl_first_text(void);
+const char *tl_target_text(void);
+int tl_entry_missing(void);
+int tl_unitver(char *, int);
+int tl_unit(char *, int, int);
+int tl_note_links(char *, long);
+char *tl_tape(char *, long, long *);
+int tl_needs(char *, long);
+int tl_check_undef(void);
+int tl_os(char *, int);
+int tl_num(int);
 static Buf asmbuf;
-int at_wr(char *p, long n) { for (long k=0;k<n;k++) bput(&asmbuf,(unsigned char)p[k],0); return 0; }
-#define AT_PRODUCT 1
-#include "../../src/asmtext.c"
+static int asm_emit(char *p, long n) { for (long k=0;k<n;k++) bput(&asmbuf,(unsigned char)p[k],0); return 0; }
+int at_bind(int (*emit)(char *, long));
+int at_dis(char *, long long);
+int at_nm(char *, long long);
+int at_asm(char *, long long, int);
+int at_header_arch(char *, long long);
+const char *at_error(void);
+int at_line(void);
 /* 0.0.19 R19-10: -run on macOS forwards prototyped undefined functions to the
    host libc.  E3 (with \0cli/run-forward) appends a USLFW1 side-car naming
    them with their USLSIG3 signatures; the stub text is src/fwdstub.c's, the
@@ -319,7 +337,8 @@ static int product_view(int argc,char **argv) {
     if (dis ? (argc!=4 || strcmp(argv[2],"-d")) : argc!=3) { fputs(dis ? "usage: unisacc objdump -d FILE.o\n" : "usage: unisacc nm FILE.o\n",stderr); return 2; }
     const char *f=argv[dis ? 3 : 2]; int len=0; unsigned char *b=source_read(f,&len);
     asmbuf.n=0;
-    if (dis ? at_dis((char *)b,len) : at_nm((char *)b,len)) { fprintf(stderr,"%s: %s: %s (Linux objects; Mach-O and COFF: 0.0.19)\n",dis ? "objdump" : "nm",f,at_err); free(b); return 1; }
+    if (at_bind(asm_emit)) return 1;
+    if (dis ? at_dis((char *)b,len) : at_nm((char *)b,len)) { fprintf(stderr,"%s: %s: %s (Linux objects; Mach-O and COFF: 0.0.19)\n",dis ? "objdump" : "nm",f,at_error()); free(b); return 1; }
     free(b); fwrite(asmbuf.b,1,asmbuf.n,stdout); return 0;
 }
 static int product_as(int argc,char **argv) {
@@ -337,9 +356,10 @@ static int product_as(int argc,char **argv) {
     if (!in) { fputs("usage: unisacc as [-b lnx/x86_64|lnx/arm64] FILE.s [-o FILE.o]\n",stderr); return 2; }
     int len=0; unsigned char *b=source_read(in,&len);
     asmbuf.n=0;
+    if (at_bind(asm_emit)) { free(b); return 1; }
     /* without -b the -S header names the target; an explicit -b must agree with it */
     if (explicit && at_header_arch((char *)b,len)>=0 && at_header_arch((char *)b,len)!=arch) { fprintf(stderr,"as: %s: -S header target conflicts with -b\n",in); free(b); return 1; }
-    if (at_asm((char *)b,len,arch)) { fprintf(stderr,"as: %s:%d: %s\n",in,at_lineno,at_err ? at_err : "error"); free(b); return 1; }
+    if (at_asm((char *)b,len,arch)) { fprintf(stderr,"as: %s:%d: %s\n",in,at_line(),at_error()[0] ? at_error() : "error"); free(b); return 1; }
     free(b);
     FILE *f=fopen(out,"wb"); if (!f) { fprintf(stderr,"as: cannot write %s\n",out); return 1; }
     int bad=fwrite(asmbuf.b,1,asmbuf.n,f)!=(size_t)asmbuf.n; bad|=fclose(f)!=0;
@@ -355,15 +375,16 @@ int cxt_decide(const CxtIn *,CxtOut *,char *,long);
 int cxt_text(const char *,int,int,int,int,char *,long,char *,long);
 static int cxt_error(int rc,const char *why) { if(rc==4){fputs(why,stderr);return 1;} return clierror(why); }
 static int take_unit(char *t,long tl,int u) {
-    if (u==0) { strncpy(tl_first,tl_target,31); tl_first[31]=0; }
-    else if (strcmp(tl_first,tl_target)) { fprintf(stderr,"unisacc: error: the objects were compiled for different targets (%s, %s)\n",tl_first,tl_target); return 1; }
+    if (u==0) tl_adopt_first();
+    else if (tl_target_differs()) { fprintf(stderr,"unisacc: error: the objects were compiled for different targets (%s, %s)\n",tl_first_text(),tl_target_text()); return 1; }
     tl_unitver(t,(int)tl); tl_unit(t,(int)tl,u); tl_note_links(t,tl);
     return 0;
 }
 int cxr_member(char *,long,int,char *,long,char **,long *,char *,long);
 static int link_objects(const char **paths,int n,Buf *out) {
     int u=0;
-    linkbuf.n=0; tl_ng=0; tl_gend=0; tl_nend=0; tl_ndef=0; tl_next=0; tl_ngdef=0; tl_has_entry=0;
+    if (tl_bind(tl_emit,tl_die) || tl_begin()) return 1;
+    linkbuf.n=0;
     for (int p=0;p<n;p++) {                      /* every object is taken */
         if (archive_path(paths[p])) continue;
         int len=0; unsigned char *b=source_read(paths[p],&len); long tl=0;
@@ -392,7 +413,7 @@ static int link_objects(const char **paths,int n,Buf *out) {
     }
     if (!u) { fprintf(stderr,"link: no input unit selected from %s\n",paths[0]); return 1; }
     if (tl_check_undef()) return 1;              /* R20-3: shared with the reference linker */
-    if (!tl_has_entry) { fprintf(stderr,"link: missing _start entry in %s\n",paths[0]); return 1; }
+    if (tl_entry_missing()) { fprintf(stderr,"link: missing _start entry in %s\n",paths[0]); return 1; }
     tl_os("__init:\n",8);
     for (int k=0;k<u;k++) { tl_os("  call __init_u",15); tl_num(k); tl_o(10); }
     tl_os("  ret\n",6);
@@ -686,7 +707,7 @@ int main(int argc, char **argv) {
     int execrun=fwd_exec && runit;
     restart=fwd_exec;
 #endif
-    CxtIn route_in={mode,level,warnings,nsources,runit,emitbin,deponly,istape,isbin,linking,single,restart,target,NATIVE_OS "/" NATIVE_ARCH,linking?tl_first:0,only_target};
+    CxtIn route_in={mode,level,warnings,nsources,runit,emitbin,deponly,istape,isbin,linking,single,restart,target,NATIVE_OS "/" NATIVE_ARCH,linking?tl_first_text():0,only_target};
     CxtOut route_out={&target,&mode,&runit,&clear_deps};
     route_rc=cxt_decide(&route_in,&route_out,route_reason,sizeof route_reason);
     if(route_rc)return cxt_error(route_rc,route_reason);
@@ -1368,7 +1389,8 @@ rr_run_replay:   /* multi-TU hit: the stub pass's post-host_compile tape, then i
     }
     if (asmwant) {
         asmbuf.n=0;
-        if (at_dis((char *)in.b,in.n)) { fprintf(stderr,"unisacc: error: -S: %s\n",at_err); free(in.b); return 1; }
+        if (at_bind(asm_emit)) { free(in.b); return 1; }
+        if (at_dis((char *)in.b,in.n)) { fprintf(stderr,"unisacc: error: -S: %s\n",at_error()); free(in.b); return 1; }
         free(in.b); in.b=asmbuf.b; in.n=asmbuf.n; memset(&asmbuf,0,sizeof asmbuf);
     }
     /* No destination is opened before successful compilation. */
