@@ -1,0 +1,542 @@
+#pragma unisa module maingate
+/* Pure judgments from src/main.c. No libc and no include.
+   fopen, malloc, printf, write, and exit stay in that file.
+   A null pointer returns 4. A value that does not fit returns 1
+   and is not written. An unknown kind returns -1.
+   Those codes are marked 不是旧返回 unless the old if already
+   returned them. A match with the old if is marked 同旧返回. */
+static int mg_eq(const char *a, const char *b) {
+    int k;
+    k = 0;
+    while (a[k] && b[k]) {
+        if (a[k] != b[k]) return 0;
+        k = k + 1;
+    }
+    return a[k] == b[k];
+}
+static int mg_pre(const char *a, const char *p) {
+    int k;
+    k = 0;
+    while (p[k]) {
+        if (a[k] != p[k]) return 0;
+        k = k + 1;
+    }
+    return 1;
+}
+static int mg_ends(const char *p, const char *suf) {
+    int n, m, i;
+    n = 0;
+    while (p[n]) n = n + 1;
+    m = 0;
+    while (suf[m]) m = m + 1;
+    if (n < m) return 0;
+    i = 0;
+    while (i < m) {
+        if (p[n - m + i] != suf[i]) return 0;
+        i = i + 1;
+    }
+    return 1;
+}
+/* isobject: .o .a, or .obj. */
+static int mg_object(const char *p) {
+    int n;
+    n = 0;
+    while (p[n]) n = n + 1;
+    if (n >= 2 && p[n - 2] == 46 && (p[n - 1] == 111 || p[n - 1] == 97)) return 1;
+    if (n >= 4 && p[n - 4] == 46 && p[n - 3] == 111 && p[n - 2] == 98 && p[n - 1] == 106) return 1;
+    return 0;
+}
+/* isdotc: "-" , .tapebin, object, .c, .cx, .tape. */
+static int mg_dotc(const char *p) {
+    int n;
+    if (p[0] == 45 && p[1] == 0) return 1;
+    if (mg_ends(p, ".tapebin")) return 1;
+    if (mg_object(p)) return 1;
+    n = 0;
+    while (p[n]) n = n + 1;
+    if (n >= 2 && p[n - 2] == 46 && p[n - 1] == 99) return 1;
+    if (n >= 3 && p[n - 3] == 46 && p[n - 2] == 99 && p[n - 1] == 120) return 1;
+    if (mg_ends(p, ".tape")) return 1;
+    return 0;
+}
+/* fe_units_fwd: r1 && (fwdrun == 0 || nfwdsrc == 0) then return 1.
+   1 同旧返回. This does not clear fwdrun. */
+int mg_fwd_stop(int failed, int fwdrun, int nstub) {
+    if (failed && (fwdrun == 0 || nstub == 0)) return 1;
+    return 0;
+}
+/* fe_units_fwd: fwd_maxargs is 4 when t[0] is 'w' (119), else 0.
+   4 和 0 同旧返回. 4 是参数个数，不是空指针码.
+   空指针与旧条件 t != 0 一样得到 0，同旧返回. */
+int mg_fwd_maxargs(const char *t) {
+    if (!t) return 0;
+    if ((t[0] & 255) == 119) return 4;
+    return 0;
+}
+/* fe_units_fwd: *ninput >= 64 then return 1. 1 同旧返回. */
+int mg_fwd_full(int ninput) {
+    if (ninput >= 64) return 1;
+    return 0;
+}
+/* cxm_rd, both hosts: !path || !buf || cap <= 0 then return -3.
+   -3 同旧返回. */
+int mg_rd_reject(const char *path, const char *buf, int cap) {
+    if (!path || !buf || cap <= 0) return -3;
+    return 0;
+}
+/* cxm_rd: n >= cap then return -2. -2 同旧返回.
+   负数长度或 cap <= 0 返回 -1，不是旧返回. */
+int mg_rd_over(int n, int cap) {
+    if (n < 0 || cap <= 0) return -1;
+    if (n >= cap) return -2;
+    return 0;
+}
+/* cxm_wr: return w != n. 0 和 1 同旧返回. */
+int mg_wr_diff(int wrote, int n) {
+    if (wrote != n) return 1;
+    return 0;
+}
+/* main: argc >= 2 and argv[1] is ar, as, nm, or objdump.
+   1 ar, 2 as, 3 nm or objdump. 这些分类不是旧返回.
+   空指针返回 4，不是旧返回. argc < 2 返回 0. */
+int mg_tool(int argc, const char *name) {
+    if (argc < 2) return 0;
+    if (!name) return 4;
+    if (mg_eq(name, "ar")) return 1;
+    if (mg_eq(name, "as")) return 2;
+    if (mg_eq(name, "nm") || mg_eq(name, "objdump")) return 3;
+    return 0;
+}
+/* First scan, the ifs that set j = 1. `--` breaks first and does not set j.
+   Letters o b t S c E M, or -run -dump-tokens --tapebin --version
+   -version --check-oracle. 返回 1 表示 j 会被置 1.
+   空指针返回 4，不是旧返回. */
+int mg_mode_arg(const char *a) {
+    int c;
+    if (!a) return 4;
+    if (a[0] == 45 && a[1] == 45 && a[2] == 0) return 0;
+    if (a[0] != 45) return 0;
+    c = a[1] & 255;
+    if (c == 111 || c == 98 || c == 116 || c == 83 || c == 99 || c == 69 || c == 77) return 1;
+    if (mg_eq(a, "-run") || mg_eq(a, "-dump-tokens") || mg_eq(a, "--tapebin")) return 1;
+    if (mg_eq(a, "--version") || mg_eq(a, "-version") || mg_eq(a, "--check-oracle")) return 1;
+    return 0;
+}
+/* After that scan: j == 0 sets runit = 1, and runit started at 0.
+   0 和 1 同旧返回. */
+int mg_run_default(int marked) {
+    if (marked == 0) return 1;
+    return 0;
+}
+/* First scan: exact "-iquote" skips the next argv. Not the attached form.
+   空指针返回 4，不是旧返回. */
+int mg_iquote_exact(const char *a) {
+    if (!a) return 4;
+    if (mg_eq(a, "-iquote")) return 1;
+    return 0;
+}
+/* Second scan: a[1..6] is i q u o t e (105,113,117,111,116,101).
+   "-iquote" and "-iquotePATH" both match. 空指针返回 4，不是旧返回. */
+int mg_opt_iquote(const char *a) {
+    if (!a) return 4;
+    if (a[0] != 45) return 0;
+    if ((a[1] & 255) != 105) return 0;
+    if ((a[2] & 255) != 113) return 0;
+    if ((a[3] & 255) != 117) return 0;
+    if ((a[4] & 255) != 111) return 0;
+    if ((a[5] & 255) != 116) return 0;
+    if ((a[6] & 255) != 101) return 0;
+    return 1;
+}
+/* -iquote with an empty path takes the next argv. d[0] == 0.
+   空指针返回 4，不是旧返回. */
+int mg_quote_blank(const char *d) {
+    if (!d) return 4;
+    if (d[0] == 0) return 1;
+    return 0;
+}
+/* That next index: i >= argc then emsg, which returns 1. 1 同旧返回.
+   负的下标返回 -1，不是旧返回. */
+int mg_past_end(int i, int argc) {
+    if (i < 0 || argc < 0) return -1;
+    if (i >= argc) return 1;
+    return 0;
+}
+/* noptquote >= 16 then emsg, which returns 1. 1 同旧返回. */
+int mg_quote_full(int n) {
+    if (n >= 16) return 1;
+    return 0;
+}
+/* -I -D -U -o: a[2] means the value is glued on. Otherwise the next argv.
+   空指针返回 4，不是旧返回. 短于两个字符返回 -1，不是旧返回. */
+int mg_glued(const char *a) {
+    if (!a) return 4;
+    if (a[0] == 0 || a[1] == 0) return -1;
+    if (a[2] != 0) return 1;
+    return 0;
+}
+/* -D cancels a -U whose text equals the name before '=' (61).
+   命中返回 1。旧代码就地删除，不返回这个 1.
+   空指针返回 4，不是旧返回. */
+int mg_def_hits(const char *d, const char *u) {
+    int n, k;
+    if (!d || !u) return 4;
+    n = 0;
+    while (d[n] && (d[n] & 255) != 61) n = n + 1;
+    k = 0;
+    while (u[k] && k < n && u[k] == d[k]) k = k + 1;
+    if (k == n && u[k] == 0) return 1;
+    return 0;
+}
+/* -ferror-limit= then the following digits become maxerr.
+   前缀不对返回 -1，不是旧返回. 空指针返回 4，不是旧返回.
+   结果装不进 int 时返回 1 且不写，不是旧返回. */
+int mg_err_limit(const char *a, int *out) {
+    int k, v, d;
+    if (!a || !out) return 4;
+    if (!mg_pre(a, "-ferror-limit=")) return -1;
+    k = 14;
+    v = 0;
+    while (a[k] >= 48 && a[k] <= 57) {
+        d = (a[k] & 255) - 48;
+        if (v > 214748364 || (v == 214748364 && d > 7)) return 1;
+        v = v * 10 + d;
+        k = k + 1;
+    }
+    *out = v;
+    return 0;
+}
+/* -l (a[1] == 108), non-empty, under 16, and not m c dl pthread rt.
+   返回 1 表示旧 if 会记下这个库. -L 返回 0.
+   空指针返回 4，不是旧返回. nlibs < 0 返回 -1，不是旧返回. */
+int mg_take_lib(const char *flag, const char *ln, int nlibs) {
+    if (!flag || !ln) return 4;
+    if (flag[0] != 45 || (flag[1] & 255) != 108) return 0;
+    if (ln[0] == 0) return 0;
+    if (nlibs < 0) return -1;
+    if (nlibs >= 16) return 0;
+    if (mg_eq(ln, "m") || mg_eq(ln, "c") || mg_eq(ln, "dl")) return 0;
+    if (mg_eq(ln, "pthread") || mg_eq(ln, "rt")) return 0;
+    return 1;
+}
+/* Trailing letter class: W w g O f s p m (87,119,103,79,102,115,112,109).
+   This is that else-if only; -Wall -Werror -ftrim-libc were already taken.
+   空指针返回 4，不是旧返回. */
+int mg_keep_flag(const char *a) {
+    int c;
+    if (!a) return 4;
+    if (a[0] != 45) return 0;
+    c = a[1] & 255;
+    if (c == 87 || c == 119 || c == 103 || c == 79) return 1;
+    if (c == 102 || c == 115 || c == 112 || c == 109) return 1;
+    return 0;
+}
+/* Inside that class, a[1] == 'O' (79): digit a[2] or else 1.
+   档位同旧返回. 不是 -O 返回 -1，不是旧返回.
+   空指针返回 4，不是旧返回. */
+int mg_optlevel(const char *a) {
+    int c;
+    if (!a) return 4;
+    if (a[0] != 45 || (a[1] & 255) != 79) return -1;
+    c = a[2] & 255;
+    if (c >= 48 && c <= 57) return c - 48;
+    return 1;
+}
+/* a[1] == 'b' (98) sets dump = 2. a[1] == 't' (116) sets dump = 1.
+   2 和 1 同旧返回. 其它返回 -1，不是旧返回.
+   空指针返回 4，不是旧返回. */
+int mg_bt_dump(const char *a) {
+    int c;
+    if (!a) return 4;
+    if (a[0] != 45) return -1;
+    c = a[1] & 255;
+    if (c == 98) return 2;
+    if (c == 116) return 1;
+    return -1;
+}
+/* a[1] == 'c' (99) or 'S' (83) sets dump = 1. 1 同旧返回.
+   空指针返回 4，不是旧返回. */
+int mg_cs_dump(const char *a) {
+    int c;
+    if (!a) return 4;
+    if (a[0] != 45) return 0;
+    c = a[1] & 255;
+    if (c == 99 || c == 83) return 1;
+    return 0;
+}
+/* a[1] == 'c' also sets objwant = 1. 1 同旧返回.
+   空指针返回 4，不是旧返回. */
+int mg_cs_obj(const char *a) {
+    if (!a) return 4;
+    if (a[0] == 45 && (a[1] & 255) == 99) return 1;
+    return 0;
+}
+/* a[1] == 'S' sets asmwant = 1 and sgiven = 1. 1 同旧返回.
+   空指针返回 4，不是旧返回. */
+int mg_cs_asm(const char *a) {
+    if (!a) return 4;
+    if (a[0] == 45 && (a[1] & 255) == 83) return 1;
+    return 0;
+}
+/* a[1] == 'r' (114) sets runit = 1, including -run. 1 同旧返回.
+   空指针返回 4，不是旧返回. */
+int mg_run_flag(const char *a) {
+    if (!a) return 4;
+    if (a[0] == 45 && (a[1] & 255) == 114) return 1;
+    return 0;
+}
+/* Unknown option: j == 0 && fi uses the "--" message, else the other.
+   Both old paths return emsg, which is 1. 这里 1 只选前一句，不是旧返回. */
+int mg_bad_opt(int mode, int fi) {
+    if (mode == 0 && fi) return 1;
+    return 0;
+}
+/* Positional args: ninput < 64 stores one. n >= 64 is dropped, no return.
+   装不下返回 1，不是旧返回. n < 0 返回 -1，不是旧返回. */
+int mg_inputs_full(int n) {
+    if (n < 0) return -1;
+    if (n >= 64) return 1;
+    return 0;
+}
+/* -MT/-MQ: argv is null then emsg, which returns 1. 1 同旧返回.
+   这里的 1 就是空指针那条，不用 4. */
+int mg_dep_argv(const char *s) {
+    if (!s) return 1;
+    return 0;
+}
+/* -MQ sets depquoted from a[2] == 'Q' (81). -MT is 0.
+   0 和 1 同旧返回. 空指针返回 4，不是旧返回.
+   短于 3 个字符返回 -1，不是旧返回. */
+int mg_dep_quote(const char *a) {
+    if (!a) return 4;
+    if (a[0] == 0 || a[1] == 0) return -1;
+    if ((a[2] & 255) == 81) return 1;
+    return 0;
+}
+/* Empty depfile and not deponly: basename of base, suffix replaced by .d.
+   from_out == 0 strips at '/'; from_out != 0 keeps directories.
+   The scan stops at 512, as the old loop does.
+   写出的字节与旧 dname 相同. 装不下返回 1 且不写，不是旧返回.
+   空指针返回 4，不是旧返回. 跨度异常返回 -1，不是旧返回. */
+int mg_dep_name(const char *base, int from_out, char *dst, int cap) {
+    int k, dot, b, n, i;
+    if (!base || !dst) return 4;
+    if (cap <= 0) return 1;
+    k = 0;
+    dot = 0 - 1;
+    b = 0;
+    while (base[k] && k < 512) {
+        if ((base[k] & 255) == 47) {
+            dot = 0 - 1;
+            if (from_out == 0) b = k + 1;
+        }
+        if ((base[k] & 255) == 46) dot = k;
+        k = k + 1;
+    }
+    if (dot < b) dot = k;
+    n = dot - b;
+    if (n < 0 || n > 512) return -1;
+    if (n + 3 > cap) return 1;
+    i = 0;
+    while (i < n) {
+        dst[i] = base[b + i];
+        i = i + 1;
+    }
+    dst[n] = 46;
+    dst[n + 1] = 100;
+    dst[n + 2] = 0;
+    return 0;
+}
+/* Empty depfile and deponly, with no -o: the name is "-".
+   "-" 同旧返回. 其它情况返回 0，表示不是这个字面量. */
+const char *mg_dep_dash(int deponly, int has_out) {
+    if (deponly == 0 || has_out) return 0;
+    return "-";
+}
+/* fi == 0 then the usage emsg, which returns 1. 1 同旧返回. */
+int mg_no_file(int fi) {
+    if (fi == 0) return 1;
+    return 0;
+}
+/* ninput > 0 and the first input is not tapebin, tape, or object:
+   that is the .cx scan. 返回 1 表示进入扫描.
+   空指针返回 4，不是旧返回. ninput <= 0 时不看指针. */
+int mg_cx_scan(int ninput, const char *p) {
+    if (ninput <= 0) return 0;
+    if (!p) return 4;
+    if (mg_ends(p, ".tapebin") || mg_ends(p, ".tape") || mg_object(p)) return 0;
+    return 1;
+}
+/* cxm_n > 63 then emsg, which returns 1. 1 同旧返回. */
+int mg_cx_span(int n) {
+    if (n > 63) return 1;
+    return 0;
+}
+/* emitbin && dump == 0 && runit == 0 sets dump = 1. 1 同旧返回.
+   否则原样返回 dump，同旧返回. */
+int mg_emit_dump(int emitbin, int dump, int runit) {
+    if (emitbin && dump == 0 && runit == 0) return 1;
+    return dump;
+}
+/* objwant = objwant && bgiven && dump == 2. 0 和 1 同旧返回. */
+int mg_obj_on(int objwant, int bgiven, int dump) {
+    if (objwant && bgiven && dump == 2) return 1;
+    return 0;
+}
+/* asmwant = asmwant && bgiven && pponly == 0 && outpath != 0.
+   0 和 1 同旧返回. */
+int mg_asm_on(int asmwant, int bgiven, int pponly, int has_out) {
+    if (asmwant && bgiven && pponly == 0 && has_out) return 1;
+    return 0;
+}
+/* Then k > 2 && outpath[k-2] == '.' && outpath[k-1] == 's'.
+   0 和 1 同旧返回. 空指针返回 4，不是旧返回. */
+int mg_asm_s(const char *path) {
+    int n;
+    if (!path) return 4;
+    n = 0;
+    while (path[n]) n = n + 1;
+    if (n > 2 && path[n - 2] == 46 && path[n - 1] == 115) return 1;
+    return 0;
+}
+/* Assembly text requires t[0..3] == "lnx/". Otherwise emsg, which returns 1.
+   1 同旧返回. 空指针返回 4，不是旧返回. */
+int mg_asm_linux(const char *t) {
+    if (!t) return 4;
+    if (t[0] == 108 && t[1] == 110 && t[2] == 120 && t[3] == 47) return 0;
+    return 1;
+}
+/* funit && objwant == 0 && (dump != 1 || pponly) then emsg.
+   1 同旧返回. */
+int mg_funit_bad(int funit, int objwant, int dump, int pponly) {
+    if (funit && objwant == 0 && (dump != 1 || pponly)) return 1;
+    return 0;
+}
+/* bgiven && t: 'w' (119) is 2, 'o' (111) is 1, anything else is 0.
+   0、1、2 同旧返回. 没有 -b 返回 -1，不是旧返回.
+   空指针返回 4，不是旧返回. */
+int mg_ccx_os(int bgiven, const char *t) {
+    int c;
+    if (!bgiven) return -1;
+    if (!t) return 4;
+    c = t[0] & 255;
+    if (c == 119) return 2;
+    if (c == 111) return 1;
+    return 0;
+}
+/* Same if: ccx_arm is t[4] == 'a' (97). 0 和 1 同旧返回.
+   没有 -b 返回 -1，不是旧返回. 空指针返回 4，不是旧返回.
+   短于 4 个非零字符时不读 t[4]，返回 -1，不是旧返回. */
+int mg_ccx_arm(int bgiven, const char *t) {
+    if (!bgiven) return -1;
+    if (!t) return 4;
+    if (t[0] == 0 || t[1] == 0 || t[2] == 0 || t[3] == 0) return -1;
+    if ((t[4] & 255) == 97) return 1;
+    return 0;
+}
+/* -Werror && nwarn > 0 then return 1, on both the run path and the write path.
+   1 同旧返回. */
+int mg_werror_stop(int werror, int nwarn) {
+    if (werror && nwarn > 0) return 1;
+    return 0;
+}
+/* n = argc - (fi + ncli) + 1; a leading "--" subtracts one; clamp to 1..255.
+   dash is 1 only when j < argc and that argv is "--".
+   夹紧后的值同旧返回. 负数或 int 加法装不下返回 -1，不是旧返回. */
+int mg_run_argc(int argc, int fi, int ncli, int dash) {
+    long long sum, n;
+    if (argc < 0 || fi < 0 || ncli < 0) return -1;
+    sum = (long long)fi + (long long)ncli;
+    if (sum > 2147483647LL) return -1;
+    n = (long long)argc - sum + 1;
+    if (dash) n = n - 1;
+    if (n > 2147483647LL) return -1;
+    if (n > 255) n = 255;
+    if (n < 1) n = 1;
+    return (int)n;
+}
+/* Run of sources: HOST_TARGET[0] == 'o' (111) or 'l' (108) turns forwarding on.
+   0 和 1 同旧返回. 空指针返回 4，不是旧返回. */
+int mg_host_fwd(const char *t) {
+    int c;
+    if (!t) return 4;
+    c = t[0] & 255;
+    if (c == 111 || c == 108) return 1;
+    return 0;
+}
+/* Run and dump dispatch: istapebin, else istape, else isobject, else source.
+   1 tapebin, 2 tape, 3 object, 0 source. 分类不是旧返回.
+   空指针返回 4，不是旧返回. */
+int mg_run_kind(const char *p) {
+    if (!p) return 4;
+    if (mg_ends(p, ".tapebin")) return 1;
+    if (mg_ends(p, ".tape")) return 2;
+    if (mg_object(p)) return 3;
+    return 0;
+}
+/* -run: isdotc(a) == 0 breaks the input list. 返回 1 表示结束输入.
+   空指针返回 4，不是旧返回. */
+int mg_run_more(const char *p) {
+    if (!p) return 4;
+    if (mg_dotc(p)) return 0;
+    return 1;
+}
+/* Run of tapebin or tape, and dump of tapebin: ninput != 1 then return 1.
+   Dump of a plain tape does not use this count. 1 同旧返回. */
+int mg_need_one(int ninput) {
+    if (ninput != 1) return 1;
+    return 0;
+}
+/* Objects with -b: the target must equal tl_first, else emsg returns 1.
+   1 同旧返回. 没有 -b 返回 0，旧代码改用对象自己的目标.
+   空指针返回 4，不是旧返回. */
+int mg_obj_target(int bgiven, const char *want, const char *got) {
+    if (!bgiven) return 0;
+    if (!want || !got) return 4;
+    if (!mg_eq(want, got)) return 1;
+    return 0;
+}
+/* Write path forwards when not -E, not an object, not tapebin, and
+   (dump == 2 or bare -S to stdout) and t[0] is o, l, or w.
+   返回 1 表示旧 if 调用 fe_units_fwd. 前面的条件不过时不读 t.
+   空指针返回 4，不是旧返回. */
+int mg_image_fwd(int pponly, int objwant, int emitbin, int dump, int sgiven, int bgiven, int has_out, const char *t) {
+    int c;
+    if (pponly != 0 || objwant != 0 || emitbin != 0) return 0;
+    if (!(dump == 2 || (dump == 1 && sgiven && bgiven == 0 && has_out == 0))) return 0;
+    if (!t) return 4;
+    c = t[0] & 255;
+    if (c == 111 || c == 108 || c == 119) return 1;
+    return 0;
+}
+/* dump == 0 && dumptok == 0 and no -o: "a.exe" on Windows, else "a.out".
+   这两个字面量同旧返回. 不改名时返回 0. */
+const char *mg_default_out(int dump, int dumptok, int has_out, int win) {
+    if (dump != 0 || dumptok != 0) return 0;
+    if (has_out) return 0;
+    if (win) return "a.exe";
+    return "a.out";
+}
+/* Token dump: fd < 0 then enoinput, which returns 1. 1 同旧返回. */
+int mg_open_bad(int fd) {
+    if (fd < 0) return 1;
+    return 0;
+}
+/* Token dump: nsrc >= MAXSRC - 1 then emsg, which returns 1. 1 同旧返回.
+   maxsrc <= 0 or nsrc < 0 返回 -1，不是旧返回. */
+int mg_src_big(int nsrc, int maxsrc) {
+    if (maxsrc <= 0 || nsrc < 0) return -1;
+    if (nsrc >= maxsrc - 1) return 1;
+    return 0;
+}
+/* Token dump: lex() < 0 then return 1. 1 同旧返回. */
+int mg_lex_bad(int r) {
+    if (r < 0) return 1;
+    return 0;
+}
+/* Token dump: kind 2, 3, or 4 also writes the source text.
+   返回 1 表示要写. 这不是旧返回. */
+int mg_tok_text(int kind) {
+    if (kind == 2 || kind == 3 || kind == 4) return 1;
+    return 0;
+}
