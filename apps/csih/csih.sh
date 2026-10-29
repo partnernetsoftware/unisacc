@@ -3,6 +3,7 @@
 # Daily use: `./csih.sh prepare` once (rebuilds out/csih-e2e-bin/csih only when the
 # source digest changed), then `./csih.sh` opens the TUI at once.
 # CSIH_BIN=native ELF overrides; CSIH_COLD=1 forces cold -run (~47s/module graph).
+CALLER=$(pwd)
 ROOT=$(CDPATH= cd -- "$(dirname "$0")" && pwd) || exit 1
 REPO=$(CDPATH= cd -- "$ROOT/../.." && pwd) || exit 1
 UNI=${UNISACC:-$REPO/unisacc.com}
@@ -38,6 +39,8 @@ if [ -z "$CSIH_BIN" ] && [ -z "$CSIH_COLD" ] && [ -x "$BIN" ]; then
     fi
 fi
 if [ -n "$CSIH_BIN" ] && [ -x "$CSIH_BIN" ]; then
+    # agent/run work in the caller's directory, not in apps/csih.
+    case "$1" in agent|run) cd "$CALLER" || exit 1 ;; esac
     exec "$CSIH_BIN" "$@"
 fi
 if [ -z "$CSIH_COLD" ]; then
