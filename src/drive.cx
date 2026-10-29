@@ -19,7 +19,8 @@
 #pragma unisa use compiler.cxmod
 /* Command walk, route text, then the model chain.
    A missing model step prints NOT_IMPLEMENTED and the stop name.
-   ar, as, nm, and objdump stay on the tools already wired. */
+   ar members go through cxr_append and cxr_member. as, nm, and objdump
+   stay on the tools already wired. */
 static char dv_in[262144];
 static char dv_obj[1048576];
 static long dv_objn;
@@ -173,17 +174,166 @@ static int dv_view(int argc, char **argv) {
     if (dv_objn) fwrite(dv_obj, 1, (size_t)dv_objn, stdout);
     return 0;
 }
-static int dv_ar(int argc, char **argv) {
+static int dv_ar_read(const char *path, unsigned char **b, long *n) {
+    char reason[128];
+    char line[512];
+    int rc;
+    int act;
+    const char *shown;
+    *b = 0;
+    *n = 0;
+    rc = cxi_read(path, b, n, reason, 128);
+    act = bx_read_act(rc);
+    if (!act && *n > 2147483647L) act = 4;
+    if (!act) return 0;
+    free(*b);
+    *b = 0;
+    *n = 0;
+    if (act == 1) {
+        if (bx_read_open_line(path, reason, line, 512) == 0) fputs(line, stderr);
+        else fprintf(stderr, "unisacc: error: cannot open %s%s%s\n", path, reason[0] ? ": " : "", reason);
+        return 1;
+    }
+    if (act == 2) {
+        shown = bx_read_stdin(path) == 1 ? "stdin" : path;
+        if (bx_read_fail_line(shown, line, 512) == 0) fputs(line, stderr);
+        else fprintf(stderr, "run: cannot read %s\n", shown);
+        fputs("run: cannot read input\n", stderr);
+        return 1;
+    }
+    fprintf(stderr, "run: %s\n", bx_read_die(act));
+    return 1;
+}
+static int dv_ar_room(long cap, long n, long namesz) {
+    long long need;
+    if (n < 0 || namesz < 0) return 1;
+    need = (long long)n + 400 + (long long)namesz;
+    if (need < 0) return 1;
+    if ((long long)cap > 9223372036854775807LL - need) return 1;
+    return 0;
+}
+static int dv_ar_write(const char *path, const unsigned char *data, long n) {
     char why[128];
+    char line[512];
+    if (!hs_write_out(path, data, n, why, 128)) return 0;
+    if (bx_ar_write_line(path, line, 512) == 0) fputs(line, stderr);
+    else fprintf(stderr, "ar: cannot write %s\n", path);
+    return 1;
+}
+static int dv_ar(int argc, char **argv) {
+    const char *op;
+    const char *lib;
+    char why[128];
+    int op0;
+    int i;
     if (argc < 4) {
         fputs(bx_ar_usage(), stderr);
         return 2;
     }
-    if (cxr_operation(argv[2], why, 128)) {
+    op = argv[2];
+    lib = argv[3];
+    if (cxr_operation(op, why, 128)) {
         fputs(why, stderr);
         return 2;
     }
-    return 2;
+    op0 = op[0] & 255;
+    if (op0 == 'r' || op0 == 'q') {
+        long cap;
+        unsigned char *ab;
+        long at;
+        cap = 8;
+        i = 4;
+        while (i < argc) {
+            unsigned char *b;
+            long n;
+            long namesz;
+            if (dv_ar_read(argv[i], &b, &n)) return 1;
+            namesz = dv_len(argv[i]);
+            free(b);
+            if (dv_ar_room(cap, n, namesz)) {
+                fputs(bx_ar_big(), stderr);
+                return 1;
+            }
+            cap = cap + n + 400 + namesz;
+            i = i + 1;
+        }
+        ab = malloc((size_t)cap);
+        if (!ab) {
+            fprintf(stderr, "run: %s\n", bx_read_die(6));
+            return 1;
+        }
+        memcpy(ab, "!<arch>\n", 8);
+        at = 8;
+        i = 4;
+        while (i < argc) {
+            unsigned char *b;
+            long n;
+            long next;
+            int rc;
+            if (dv_ar_read(argv[i], &b, &n)) {
+                free(ab);
+                return 1;
+            }
+            next = 0;
+            rc = cxr_append((char *)ab, cap, at, argv[i], (char *)b, n, &next, why, 128);
+            free(b);
+            if (rc) {
+                fputs(why, stderr);
+                free(ab);
+                return 1;
+            }
+            at = next;
+            i = i + 1;
+        }
+        if (dv_ar_write(lib, ab, at)) {
+            free(ab);
+            return 1;
+        }
+        free(ab);
+        return 0;
+    }
+    {
+        unsigned char *b;
+        long n;
+        char nm[256];
+        if (dv_ar_read(lib, &b, &n)) return 1;
+        if (n < 8 || memcmp(b, "!<arch>\n", 8)) {
+            free(b);
+            fputs(bx_ar_kind(), stderr);
+            return 1;
+        }
+        i = 0;
+        for (;;) {
+            long ml;
+            char *m;
+            int rc;
+            ml = 0;
+            m = 0;
+            rc = cxr_member((char *)b, n, i, nm, 256, &m, &ml, why, 128);
+            if (rc == 1) break;
+            if (rc) {
+                fputs(why, stderr);
+                free(b);
+                return 1;
+            }
+            if (op0 == 't') {
+                fputs(nm, stdout);
+                fputc('\n', stdout);
+            } else if (op0 == 'x') {
+                if (dv_ar_write(nm, (const unsigned char *)m, ml)) {
+                    free(b);
+                    return 1;
+                }
+            } else {
+                free(b);
+                fputs(bx_ar_op(), stderr);
+                return 2;
+            }
+            i = i + 1;
+        }
+        free(b);
+        return 0;
+    }
 }
 static int dv_cx(const char *s) {
     int n;

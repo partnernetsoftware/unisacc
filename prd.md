@@ -151,7 +151,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 **2026-10-25 主人重新裁定：0.0.43 现在重构。** 旧1333项测试套件整体归档，退出开发和发布的主验收路径；新套件按产品合同重新设计，直接由 `unisacc.com + .cx` 驱动。此项属于本版，不等待0.0.44。保留现有产品、源码、夹具及原始结果作为历史和迁移依据，不把旧结果自动计入新验收。
 
-**当前入口（2026-10-30）：** 在用的入口仍是 O0 的 1122568 字节。整只 `-O2 -o` 冷构造仍是构造红项，没有可运行的 -O2 入口。tapebin 容器头的判断已收进已有的 `tapegate`。`sh ./unisacc.com tools/check-compiler-units.cx` 两次退出 0，两次 stdout 相同，两次 stderr 相同，都打印 `CHECK_COMPILER_UNITS failed=0`。记录正文、哈希和读文件还在 C。细节在 [plans/cx-modules.md](plans/cx-modules.md)。
+**当前入口（2026-10-30）：** 临时入口是 `/tmp/grk-cx-line/entry`，O0，1126911 字节，sha256 `8b2e87a31b491af41f86031e202f5535fe6cae761d5997503218405c9890c5ef`。冷构造墙钟 40232777969 ns，退出 0。`ar` 的用法、坏操作、缺文件、空归档、两成员 r/q、列表、抽出，和已装产品的退出码、stdout、stderr、归档字节相同。写出的权限是 0755，产品是 0644。整只 `-O2 -o` 冷构造仍是构造红项。已装产品仍是 3035300 字节。这不是产品安装。细节在 [plans/cx-modules.md](plans/cx-modules.md)。
 
 <a id="work-tree"></a>
 ### 思维树

@@ -1632,6 +1632,21 @@ flowchart TD
   lists["构造表已有 tapegate"] --> mod["tapegate.cx"]
 ```
 
+## 138. 2026-10-30 入口 ar 接上归档成员
+
+`src/drive.cx` 的 `dv_ar` 原先认出 r/q/t/x 之后仍返回 2。现在 r 和 q 用已有的 `cxr_append` 把成员写入归档，t 和 x 用已有的 `cxr_member` 列出或抽出。缺文件沿用读源的那几句。短语放在 `src/entrybind.cx`，入口不把整条 bindhost 链拉进来。没有新模块，构造表没有新增参数。
+
+临时入口是 `sh ./unisacc.com -o /tmp/grk-cx-line/entry src/unisacc.cx`，没有 `-O`。退出 0，stdout 0，stderr 0，墙钟 40232777969 ns。文件 1126911 字节，sha256 `8b2e87a31b491af41f86031e202f5535fe6cae761d5997503218405c9890c5ef`。已装 `unisacc.com` 仍是 3035300 字节。
+
+对拍在 `/tmp/grk-cx-line/arwork`，环境去掉 `UNISA_CONTAINER`。用法、`ar z`、缺文件、`ar t` 坏归档：两边退出码、stdout、stderr 相同。两个成员的 `ar r` 和 `ar q`，以及没有成员的 `ar r`，归档字节相同，`file` 认成 ar。`ar t` 的名单相同。`ar x` 抽出的两个文件和原件字节相同。写出的权限这边是 0755，产品是 0644，因为走的是已有的 `hs_write_out`。大归档、替换已有成员、符号表没有跑。整只 `-O2` 入口冷构造仍是构造红项。这不是产品安装。
+
+```mermaid
+flowchart TD
+  d["dv_ar"] --> a["cxr_append 与 cxr_member"]
+  d --> w["hs_write_out 权限 0755"]
+  p["已装产品 fopen"] --> m["权限 0644"]
+```
+
 ## 64. 2026-10-29 编译器纯拒绝接到 bindhost
 
 `compiler.c` 里剩余的纯拒绝改走已有的 `bindhost`。新函数是 `bx_compat_why`、`bx_opt_dash`、`bx_opt_why`、`bx_src_why`、`bx_mix_why`、`bx_tape_need`、`bx_tape_why`、`bx_tapebin_bad`、`bx_tapebin_why`、`bx_name_fit`、`bx_name_why`、`bx_cache_why`、`bx_frame_fit`、`bx_frame_why`、`bx_encode_bad`、`bx_encode_why`、`bx_route_why`、`bx_model_why`。没有新模块。`use` 仍是 32，构造表没有新增参数。`snprintf`、解码、编码和 `clierror` 仍在 C。宿主切片下标仍是 APE 71、本机 70。这次没有实跑 hostseed。`sh ./unisacc.com tools/check-compiler-units.cx` 又两次退出 0，两次 stdout 相同，两次 stderr 相同，都打印 `CHECK_COMPILER_UNITS failed=0`。这次检查直接调用这些函数，没有编译 `compiler.c`。这不是产品安装、六目标或 `--all`。整棵重构还没完成。
