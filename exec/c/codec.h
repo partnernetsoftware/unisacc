@@ -8,6 +8,14 @@ int cd_puff_more(int, int);
 int cd_puff_keep(int);
 int cd_stored_byte(int, int, int);
 int cd_room(unsigned long long, unsigned long long, unsigned long long, int);
+int cd_bits_more(int, int);
+int cd_bits_end(unsigned long long, unsigned long long);
+int cd_bits_join(unsigned long long, int, int, unsigned long long *);
+int cd_bits_add(int, int, int *);
+int cd_bits_keep(unsigned long long, int, int *);
+int cd_bits_left(int, int, int *);
+int cd_bits_mask(unsigned long long, int, int *);
+int cd_len_step(int, int, int *, int *);
 unsigned long long cd_crc_step(unsigned long long);
 /* puff.h
   Copyright (C) 2002-2013 Mark Adler, all rights reserved
@@ -70,15 +78,27 @@ local int bits(struct state *s, int need)
     long val;
 
     val = s->bitbuf;
-    while (s->bitcnt < need) {
-        if (s->incnt == s->inlen) { s->error = 2; return 0; }
-        val |= (long)(s->in[s->incnt++]) << s->bitcnt;
-        s->bitcnt += 8;
+    while (cd_bits_more(s->bitcnt, need) == 1) {
+        unsigned long long joined = 0;
+        int added = 0;
+        if (cd_bits_end(s->incnt, s->inlen) == 2) { s->error = 2; return 0; }
+        if (cd_bits_join((unsigned long long)val, s->in[s->incnt], s->bitcnt, &joined) == 0)
+            val = (long)joined;
+        else
+            val |= (long)s->in[s->incnt] << s->bitcnt;
+        s->incnt++;
+        if (cd_bits_add(s->bitcnt, 8, &added) == 0) s->bitcnt = added;
+        else s->bitcnt += 8;
     }
 
-    s->bitbuf = (int)(val >> need);
-    s->bitcnt -= need;
-
+    {
+        int kept = 0, left = 0, masked = 0;
+        if (cd_bits_keep((unsigned long long)val, need, &kept) == 0) s->bitbuf = kept;
+        else s->bitbuf = (int)(val >> need);
+        if (cd_bits_left(s->bitcnt, need, &left) == 0) s->bitcnt = left;
+        else s->bitcnt -= need;
+        if (cd_bits_mask((unsigned long long)val, need, &masked) == 0) return masked;
+    }
     return (int)(val & ((1L << need) - 1));
 }
 
@@ -385,8 +405,14 @@ local int dynamic(struct state *s)
             if (cd_bits_err(s->error)) return 2;
             room = cd_len_room(index, symbol, nlen, ndist);
             if (room == (0 - 6)) return (0 - 6);
-            while (symbol--)
-                lengths[index++] = len;
+            {
+                int step, ns = 0, ni = 0;
+                while ((step = cd_len_step(symbol, index, &ns, &ni)) == 1) {
+                    lengths[index] = len;
+                    symbol = ns;
+                    index = ni;
+                }
+            }
         }
     }
 
