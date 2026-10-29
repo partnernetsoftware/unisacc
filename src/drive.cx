@@ -17,6 +17,7 @@
 #pragma unisa use compiler.fwdmerge
 #pragma unisa use compiler.fwdincrement
 #pragma unisa use compiler.cxmod
+#pragma unisa use compiler.tapegate
 /* Command walk, route text, then the model chain.
    A missing model step prints NOT_IMPLEMENTED and the stop name.
    ar members go through cxr_append and cxr_member. as, nm, and objdump
@@ -25,8 +26,8 @@
    caller-owned args blocks. executor and packmodel are linked from
    src/entryexec.cx; this file calls them by name. A .tape source is tapecheck, then the
    backend from prune or e4. A .tapebin that is not a container, or whose
-   digest does not match the bytes after the header, is the product
-   refusal. Section text stays in C. */
+   digest does not match the bytes after the header, or whose directory
+   rows do not line up, is the product refusal. Record text stays in C. */
 static char dv_in[262144];
 static char dv_obj[1048576];
 static long dv_objn;
@@ -81,6 +82,42 @@ static int dv_tapebin_sha_bad(const unsigned char *b, long n) {
         if (dig[i] != b[28 + i]) return 1;
         i = i + 1;
     }
+    return 0;
+}
+/* Directory rows tbc_decode checks after the digest. A passing directory
+   still does not decode records. */
+static int dv_tapebin_dir_bad(const unsigned char *b, long n) {
+    int count;
+    int i;
+    int end;
+    int aligned;
+    long long off;
+    long long len;
+    long long cnt;
+    long long last_len;
+    long long last_cnt;
+    if (!b || n < 136 || n > 2147483647L) return 1;
+    if (tb2_nsec(b, (int)n, &count)) return 1;
+    end = 64 + 24 * count;
+    last_len = 0;
+    last_cnt = 0;
+    i = 0;
+    while (i < count) {
+        aligned = tb2_align(end);
+        if (aligned < 0) return 1;
+        off = -1;
+        len = -1;
+        cnt = -1;
+        if (tb2_row(b, (int)n, i, aligned, &off, &len, &cnt)) return 1;
+        if (cnt < 0 || cnt > n) return 1;
+        if (tb2_zeros(b, (int)n, end, (int)off)) return 1;
+        end = (int)off + (int)len;
+        last_len = len;
+        last_cnt = cnt;
+        i = i + 1;
+    }
+    if (tb2_extra(count, last_len, last_cnt)) return 1;
+    if (tb2_end(end, (int)n)) return 1;
     return 0;
 }
 static int dv_tapebin_prefix_bad(const unsigned char *b, long n, int expected) {
@@ -1361,11 +1398,11 @@ int dv_main(int argc, char **argv) {
                 if (gotb[k] != mag[k]) magic = 0;
                 k = k + 1;
             }
-            /* Fixed fields, then the digest over the bytes after the
-               64-byte header. A mismatch is the product refusal. A match
-               still stops here: section rows and record text stay in C. */
+            /* Fixed fields, digest, then directory rows. Any of those
+               failures is the product refusal. Rows that line up still
+               stop here: record text stays in C. */
             if (!origin || !magic || dv_tapebin_prefix_bad(gotb, gotn, origin) ||
-                dv_tapebin_sha_bad(gotb, gotn)) {
+                dv_tapebin_sha_bad(gotb, gotn) || dv_tapebin_dir_bad(gotb, gotn)) {
                 free(gotb);
                 return dv_fail("invalid tapebin or origin target mismatch");
             }
