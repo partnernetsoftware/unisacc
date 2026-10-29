@@ -6,20 +6,20 @@
 
 ## 产品面（2026-10-30）
 
-对照已装产品的入口路径。三档：已通、骨架、未做。没实跑的不写已通。临时入口是 `/tmp/grk-cx-line/entry`，O0，1126911 字节，sha256 `90f11a4cf090176e49e1ff956161621d74e96c4a08c76e78f34c107459dddc31`。已装产品 3035300 字节。实测记在下面第 139、140 节。
+对照已装产品的入口路径。三档：已通、骨架、未做。没实跑的不写已通。临时入口是 `/tmp/grk-cx-line/entry`，O0，1156319 字节，sha256 `e215b2eb76924b1ee04d8f679a8c8b8a842064381d19b5b0e758216c685a3787`。已装产品 3035300 字节。实测记在下面第 139、140、141 节。
 
 - **ar：骨架。** 用法、坏操作、缺文件、空归档、两成员 r/q、列表、抽出，退出码和归档字节与产品相同。写出权限 0755，产品 0644。大归档、替换成员、符号表没跑。
 - **as：骨架。** 用法、坏选项、坏目标、头和 `-b` 冲突，退出码和 stderr 相同。一行 `# unisacc -S lnx/x86_64` 两边都是 728 字节对象，权限都是 0644。加上 `  ret` 两边都是 744 字节。缺文件两边退出 1，产品印打不开，入口印 `as: cannot read`。Mach-O、COFF、大汇编没跑。
 - **nm：骨架。** 用法和坏文件与产品相同。对那份 728 字节对象，两边 stdout 都是空的。
 - **objdump：骨架。** 用法、少 `-d`、坏文件与产品相同。`objdump -d` 那份对象，两边 stdout 都是 95 字节。
 - **-c 对象：骨架。** 没有 `main` 时两边都拒绝，stderr 相同。有 `main` 时产品写出 2216 字节对象，入口停在 `NOT_IMPLEMENTED object`，没有对象文件。
-- **.tape / .tapebin 输入：未做。** 入口把这两种输入写成 0，不读。tapegate 里的容器头不在这条入口上，不算这一面。
-- **-cx-plan / -cx-interface：骨架。** 不带 `-include` 时，计划、接口、缺文件、两个旗一起用，退出码和输出与产品相同。带 `-include` 时入口仍印 `bad argument`。多个模块的 `use` 没跑。
+- **.tape / .tapebin 输入：骨架。** `.tape` 加 `-b lnx/x86_64 -o`，三行 `_start`、`imm r0, 7`、`ret`，两边都是 4096 字节 ELF，权限都是 0755。内容是 `?` 的 `.tape`，两边 stderr 都是 71 字节，`unknown opcode`。内容是 `XXXX` 的 `.tapebin`，两边 stderr 都是 65 字节，`invalid tapebin or origin target mismatch`。`UTAPEBIN` 后面再跟 128 个 0，产品仍是这句，入口停在 `tapebin decode`。解码仍在 C。有效包没跑。
+- **-cx-plan / -cx-interface：骨架。** 不带 `-include` 时，计划、接口、缺文件、两个旗一起用，退出码和输出与产品相同。`-include extra.h -cx-plan` 两边 stdout 都是 20 字节。多个模块的 `use` 没跑。
 - **-dump-tokens：骨架。** 旗认到了。产品打出 token。入口停在 `NOT_IMPLEMENTED tokens`。
 - **--emit-host-symbols：骨架。** 和 `-c -b` 一起用时，两边都拒绝，stderr 相同。没有一格写出符号文件。
 - **-O1 / -O2：骨架。** `-O1 -E` 对 `int x;` 两边 stdout 相同。没有对拍优化后的对象。整只入口按 `-O2` 冷构造仍超过 55 秒。
-- **-D / -U / -I / -include：未做。** `-DFOO=1 -E` 产品打出源文，入口印 `bad argument`。不带这些旗的 `-E` 两边相同。
-- **库接口：未做。** 活入口没有单独的库路径。
+- **-D / -U / -I / -include：骨架。** 不带这些旗的 `-E` 对 `int x;` 仍是 7 字节。`-DFOO -E` 留下 `int a;`。`-UFOO -E` 和先 `-DFOO` 再 `-UFOO` 留下 `int b;`。这三格都是 38 字节。`-I inc` 对引号和尖括号都是 9 字节。`-include inc/z.h -E` 是 16 字节。`-iquote inc -E` 是 9 字节。`-include extra.h -cx-plan` 两边 stdout 都是 20 字节，行里有 `extra.h`。多个目录、缺参数没跑。
+- **库接口：骨架。** 没有单独的库命令。`int abs(int); int main(void){return abs(-3);}` 默认执行，两边退出 3，stdout 和 stderr 都是 0。`tests/library-abi.cx` 没跑。`us_*` 那套库 API 没接到这条入口。
 
 ## 0. 一句话
 
@@ -1705,6 +1705,22 @@ flowchart TD
   f --> i["cxm_interface"]
   f --> p["cxm_plan 再 cxm_planprint"]
   inc["-include"] --> bad["入口仍是 bad argument"]
+```
+
+## 141. 2026-10-30 入口接上 -D 族、.tape 和坏 .tapebin
+
+`src/drive.cx` 增加 `use driver.args` 和 `use driver.path`。命令行把 `cxa_record`、`cxa_line`、`cxa_cancel` 填进调用方的 `CxcOps`。长度大于 0 才放入 defines、undefines、include-dir、quote-dir、error-limit。`.cx` 的 includes 仍是 `cx.h`，后面再接 `-include`。`-cx-plan` 把这些 `-include` 记录交给 `cxm_planprint`。`.tape` 先跑 `tapecheck`，O0 再从 `prune` 跑到路线尾，写出仍走 `hs_write_out`。`.tapebin` 在入口上认后缀。短文件或魔数不对，用产品那句拒绝。魔数在、长度不少于 136 时停在 `tapebin decode`，因为 `tbc_decode` 仍在 C。没有新模块。没有改 `cli.cx`。
+
+临时入口重新构造，没有 `-O`。退出 0，stdout 0，stderr 0，墙钟 39513201919 ns。文件 1156319 字节，sha256 `e215b2eb76924b1ee04d8f679a8c8b8a842064381d19b5b0e758216c685a3787`。已装产品仍是 3035300 字节。这只入口是本机 ELF，直接执行。已装产品仍用 `sh`。
+
+对拍在 `/tmp/grk-cx-line/tri`，环境去掉 `UNISA_CONTAINER`。上面清单里这三面的窄格，退出码和字节与产品相同。`UTAPEBIN` 加 128 个 0 这一格不同：产品 65 字节仍是 invalid，入口 38 字节是 `tapebin decode`。有效 `.tapebin` 没跑，这一面不标已通。`abs(-3)` 两边退出 3。整份 `tests/library-abi.cx` 没跑。整只 `-O2` 入口冷构造仍是构造红项。这不是产品安装。
+
+```mermaid
+flowchart TD
+  d["dv_main"] --> a["cxa_record 与 cxa_line"]
+  d --> t[".tape 先 tapecheck 再 prune"]
+  d --> b["坏 .tapebin 用产品那句"]
+  b --> c["有效包的解码仍在 C"]
 ```
 
 ## 64. 2026-10-29 编译器纯拒绝接到 bindhost
