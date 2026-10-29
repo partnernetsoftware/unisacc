@@ -1,0 +1,291 @@
+#pragma unisa module imagegate
+/* Judgments from src/back_image.c that backimage.cx does not export.
+   No libc and no include. wb, wflush, SHA blocks, and the writers stay in C.
+   A null pointer returns 4 and is not read. A value that does not fit
+   returns 1 and is not written. An unknown kind returns -1.
+   A return that matches the old if is marked 同旧返回.
+   A 4, a 1, or a -1 the old if did not return is marked 不是旧返回. */
+/* wflush: at_capn + bkwn > 33554432 then exit. 1 不是旧返回.
+   装得下时 wflush 结尾 return 0，同旧返回.
+   负数长度不是旧路径，返回 -1，不是旧返回. */
+int ig_s_room(long at, int n) {
+    unsigned long long u;
+    if (at < 0 || n < 0) return -1;
+    u = (unsigned long long)at + (unsigned long long)n;
+    if (u > 33554432ull) return 1;
+    return 0;
+}
+/* wb and bk_sign_end: npage >= 8192 then exit. 1 不是旧返回.
+   未满时收页后的函数 return 0，同旧返回.
+   负数页号返回 -1，不是旧返回. */
+int ig_sign_pages(int npage) {
+    if (npage < 0) return -1;
+    if (npage >= 8192) return 1;
+    return 0;
+}
+/* wdata: a stored run, a zero run, or the gap that exits.
+   2 和 3 不是旧返回. 空洞旧路径 __exit(1)，这里返回 1，不是旧返回.
+   下标为负返回 -1，不是旧返回. */
+int ig_data_span(int a, int nd, long at, long p, int z, int nz, long zat) {
+    if (a < 0 || nd < 0 || z < 0 || nz < 0) return -1;
+    if (a < nd && at == p) return 2;
+    if (z < nz && zat == p) return 3;
+    return 1;
+}
+/* e_phnum. Object writes 0. A dynamic image writes 4. A static image writes 2.
+   0、4、2 同旧返回. 4 是程序头个数，不是空指针码.
+   obj 或 dyn 不是 0 或 1 时返回 -1，不是旧返回. 对象路径不看 dyn. */
+int ig_elf_phnum(int obj, int dyn) {
+    if ((obj != 0 && obj != 1) || (dyn != 0 && dyn != 1)) return -1;
+    if (obj) return 0;
+    if (dyn) return 4;
+    return 2;
+}
+/* e_type. An object writes 1. Both images write 2, including the dynamic one.
+   1 和 2 同旧返回. 1 是 ET_REL，不是装不下.
+   标志不是 0 或 1 时返回 -1，不是旧返回. */
+int ig_elf_etype(int obj, int dyn) {
+    if ((obj != 0 && obj != 1) || (dyn != 0 && dyn != 1)) return -1;
+    if (obj) return 1;
+    return 2;
+}
+/* e_phentsize. An image writes 56. An object writes 0.
+   56 和 0 同旧返回. 标志非法返回 -1，不是旧返回. */
+int ig_elf_phentsize(int obj) {
+    if (obj != 0 && obj != 1) return -1;
+    if (obj) return 0;
+    return 56;
+}
+/* e_shentsize. An object writes 64. An image writes 0.
+   64 和 0 同旧返回. 标志非法返回 -1，不是旧返回. */
+int ig_elf_shentsize(int obj) {
+    if (obj != 0 && obj != 1) return -1;
+    if (obj) return 64;
+    return 0;
+}
+/* shstrtab size. A unit tape makes it 67, otherwise 55.
+   67 和 55 同旧返回. tlen < 0 返回 -1，不是旧返回.
+   旧条件把任何非 0 都当成有带. */
+int ig_elf_shstrsz(long tlen) {
+    if (tlen < 0) return -1;
+    if (tlen != 0) return 67;
+    return 55;
+}
+/* bk_symplan: kind 2 adds n1, kind 3 adds n1+n2, kind 0 and 1 stay.
+   写进 *out 的位置同旧返回. 成功返回 0，bk_symplan 也 return 0，同旧返回.
+   空指针返回 4，不是旧返回. 种类或计数非法返回 -1，不是旧返回.
+   加法装不下返回 1，且不写，不是旧返回. */
+int ig_sym_ord(int kind, int pos, int n1, int n2, int *out) {
+    int s;
+    if (!out) return 4;
+    if (kind < 0 || kind > 3 || pos < 0 || n1 < 0 || n2 < 0) return -1;
+    if (kind == 2) {
+        if (pos > 2147483647 - n1) return 1;
+        s = pos + n1;
+    } else if (kind == 3) {
+        if (n1 > 2147483647 - n2) return 1;
+        if (pos > 2147483647 - (n1 + n2)) return 1;
+        s = pos + n1 + n2;
+    } else s = pos;
+    *out = s;
+    return 0;
+}
+/* ELF symbol type bits only. Bind stays in bi_elf_bind.
+   Undefined is 0. Text is 2 when global, else 0. Data is 1 when global, else 0.
+   0、1、2 同旧返回. 1 是 STT_OBJECT，不是装不下.
+   kind 不在 1..3 返回 -1，不是旧返回. */
+int ig_elf_stt(int kind, long tpc) {
+    if (kind < 1 || kind > 3) return -1;
+    if (kind == 3) return 0;
+    if (tpc >= 0) {
+        if (kind == 2) return 2;
+        return 0;
+    }
+    if (kind == 2) return 1;
+    return 0;
+}
+/* Section ordinal shared by the ELF, Mach-O, and COFF symbol loops.
+   Undefined 0, text 1, bss 3, data 2. The data base subtracted here is 256.
+   0、1、2、3 同旧返回. 1 是 .text 的节号，不是装不下.
+   kind 不在 1..3，或 nz < 0，返回 -1，不是旧返回. */
+int ig_sym_sect(int kind, long tpc, long addr, long nz) {
+    long v;
+    if (kind < 1 || kind > 3) return -1;
+    if (nz < 0) return -1;
+    if (kind == 3) return 0;
+    if (tpc >= 0) return 1;
+    v = addr - 256;
+    if (v >= nz) return 3;
+    return 2;
+}
+/* MH_FILETYPE. An object writes 1. An image writes 2.
+   1 和 2 同旧返回. 1 是 MH_OBJECT，不是装不下.
+   标志不是 0 或 1 返回 -1，不是旧返回. */
+int ig_macho_file(int obj) {
+    if (obj != 0 && obj != 1) return -1;
+    if (obj) return 1;
+    return 2;
+}
+/* cpusubtype. arm64 writes 0. x86_64 writes 3. The cpu type stays in bi_macho_cpu.
+   0 和 3 同旧返回. arm 不是 0 或 1 返回 -1，不是旧返回. */
+int ig_macho_sub(int arm) {
+    if (arm != 0 && arm != 1) return -1;
+    if (arm == 1) return 0;
+    return 3;
+}
+/* ncmds. An object writes 4. An image writes 12.
+   4 和 12 同旧返回. 4 是命令条数，不是空指针码.
+   标志非法返回 -1，不是旧返回. */
+int ig_macho_ncmds(int obj) {
+    if (obj != 0 && obj != 1) return -1;
+    if (obj) return 4;
+    return 12;
+}
+/* MH_FLAGS. An object writes 0. An image writes 0x200085.
+   0 和 0x200085 同旧返回. 标志非法返回 -1，不是旧返回. */
+int ig_macho_flags(int obj) {
+    if (obj != 0 && obj != 1) return -1;
+    if (obj) return 0;
+    return 0x200085;
+}
+/* Mach-O name: id != start passes us = 1. _start itself passes 0.
+   start may be -1 when bk_find missed it. 0 和 1 同旧返回.
+   1 是要加下划线，不是装不下. id < 0 返回 -1，不是旧返回. */
+int ig_macho_us(int id, int start) {
+    if (id < 0) return -1;
+    if (id != start) return 1;
+    return 0;
+}
+/* Relocation symbol index. fmt 0 is ELF, 1 is Mach-O, 3 is COFF.
+   The index written to *out matches the old arithmetic, 同旧返回.
+   成功返回 0，三个对象函数都 return 0，同旧返回.
+   空指针返回 4，不是旧返回. 未知 fmt 或负下标返回 -1，不是旧返回.
+   加法装不下返回 1，且不写，不是旧返回.
+   sect 为 0 时 Mach-O 和 COFF 的结果是 -1，与旧减法相同，同旧返回. */
+int ig_reloc_sym(int fmt, int sect, int pos, int base_imp, int *out) {
+    int s;
+    int span;
+    if (!out) return 4;
+    if (sect < 0 || pos < 0) return -1;
+    if (fmt == 0) {
+        if (sect >= 1000) {
+            if (pos > 2147483647 - 4) return 1;
+            s = 4 + pos;
+        } else s = sect;
+    } else if (fmt == 1) {
+        if (sect >= 1000) {
+            if (pos > 2147483647 - 3) return 1;
+            s = 3 + pos;
+        } else s = sect - 1;
+    } else if (fmt == 3) {
+        if (base_imp < 0) return -1;
+        if (sect >= 1000) {
+            if (pos > 2147483647 - 3) return 1;
+            s = 3 + pos;
+        } else if (sect >= 100) {
+            span = sect - 100;
+            if (base_imp > 2147483647 - span) return 1;
+            s = base_imp + span;
+        } else s = sect - 1;
+    } else return -1;
+    *out = s;
+    return 0;
+}
+/* bk_coffobj: bknro > 65535 then exit. 1 不是旧返回.
+   未超过时对象函数 return 0，同旧返回.
+   n < 0 返回 -1，不是旧返回. */
+int ig_coff_nrel(int n) {
+    if (n < 0) return -1;
+    if (n > 65535) return 1;
+    return 0;
+}
+/* COFF arm64: add < -1048576 or add >= 1048576 then exit. 1 不是旧返回.
+   范围内继续改指令，对象函数 return 0，同旧返回. */
+int ig_coff_add(long add) {
+    if (add < -1048576 || add >= 1048576) return 1;
+    return 0;
+}
+/* bk_object: os 1 calls Mach-O, os 2 calls COFF, os 0 calls ELF.
+   这里的 0、1、2 只是这三支的编号。旧 if 不返回它们，不是旧返回.
+   其它 os 旧 else 仍写 ELF，这里返回 -1，不是旧返回. */
+int ig_obj_which(int os) {
+    if (os == 1) return 1;
+    if (os == 2) return 2;
+    if (os == 0) return 0;
+    return -1;
+}
+/* bk_build: os 1 sets bk_sign to 1. That 1 is 同旧返回, not 装不下.
+   os 0 and os 2 do not assign it. Returning 0 there is 不是旧返回.
+   Any other os returns -1, 不是旧返回. */
+int ig_need_sign(int os) {
+    if (os == 1) return 1;
+    if (os == 0 || os == 2) return 0;
+    return -1;
+}
+/* bk_run: Windows passes 0x20. Anything else passes 5.
+   0x20 和 5 同旧返回. win 不是 0 或 1 返回 -1，不是旧返回. */
+int ig_mprot(int win) {
+    if (win != 0 && win != 1) return -1;
+    if (win) return 0x20;
+    return 5;
+}
+/* PE data directories, j in 0..15. Sizes are 40, 12, 320, (nimp+1)*8, or 0.
+   这些大小同旧返回. j 不在 0..15，或 nimp < 0，返回 -1，不是旧返回.
+   (nimp+1)*8 装不进 int 时返回 1，不是旧返回. 1 不是目录大小. */
+int ig_pe_dirsz(int j, int nimp) {
+    if (j < 0 || j > 15) return -1;
+    if (nimp < 0) return -1;
+    if (j == 1) return 40;
+    if (j == 5) return 12;
+    if (j == 10) return 320;
+    if (j == 12) {
+        if (nimp > 2147483647 / 8 - 1) return 1;
+        return (nimp + 1) * 8;
+    }
+    return 0;
+}
+/* Import hint + name + NUL, then one pad byte when that length is odd.
+   偶数长度同旧返回. nlen < 0 返回 -1，不是旧返回.
+   加出来装不下返回 1，不是旧返回. */
+int ig_imp_span(int nlen) {
+    int n;
+    if (nlen < 0) return -1;
+    if (nlen > 2147483647 - 3) return 1;
+    n = 2 + nlen + 1;
+    if (n % 2) {
+        if (n == 2147483647) return 1;
+        n = n + 1;
+    }
+    return n;
+}
+/* bk_win_imports: the first two bytes are 77, 90.
+   命中返回 0。旧 if 不返回 0，不是旧返回.
+   不是 MZ 返回 -1，不是旧返回.
+   空指针返回 4，不是旧返回. n < 2 返回 1，装不下，不是旧返回. */
+int ig_mz(const unsigned char *p, int n) {
+    if (!p) return 4;
+    if (n < 2) return 1;
+    if ((p[0] & 255) == 77 && (p[1] & 255) == 90) return 0;
+    return -1;
+}
+/* Import name compare. ok stays 1, or becomes 0 on the first mismatch.
+   1 和 0 同旧返回. 1 是旧 ok，不是装不下.
+   空指针返回 4，且不读，不是旧返回. */
+int ig_imp_eq(const char *a, const char *b) {
+    int j;
+    if (!a || !b) return 4;
+    j = 0;
+    while (a[j] || b[j]) {
+        if (a[j] != b[j]) return 0;
+        j = j + 1;
+    }
+    return 1;
+}
+/* A nonzero slot whose top bit is clear is imported by name.
+   按名返回 1。旧 if 不返回 1，不是旧返回. 1 不是装不下.
+   空槽或序号返回 0。旧 if 不进内层，0 不是旧返回. */
+int ig_imp_byname(unsigned long long nrva) {
+    if (nrva == 0) return 0;
+    if ((nrva >> 63) != 0) return 0;
+    return 1;
+}
