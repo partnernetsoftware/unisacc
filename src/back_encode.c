@@ -179,14 +179,21 @@ us_i64 a_disp(us_i64 bytes, int bits) {
     if (v < 0 - lim || v >= lim) { __write(2, "arm64: branch does not fit\n", 27); __exit(1); }
     return v;
 }
+/* Class predicates live in cx/compiler/backencode.cx.
+   1 from be_rel_miss or be_rel_class is the old exit.
+   be_arm_class -1 is the old arm exit. 4 is a null name and is not an old exit. */
+int be_rel_class(const char *name);
+int be_arm_class(const char *name);
+int be_rel_miss(int id);
 /* the reloc stage's answer IS the displacement field (emit_arm.RELFIELD) */
 us_i64 a_relf(int i, us_i64 d) {
-    char *r;
-    if (tkg_rel[i] < 0) { __write(2, "back end: branch without a reloc answer\n", 40); __exit(1); }
+    char *r; int k;
+    if (be_rel_miss(tkg_rel[i]) == 1) { __write(2, "back end: branch without a reloc answer\n", 40); __exit(1); }
     r = bk_nth(BH_RELOC_Y, tkg_rel[i]);
-    if (strsame(r, "arm26")) return a_disp(d, 26) & 0x3FFFFFF;
-    if (strsame(r, "arm19")) return (a_disp(d, 19) & 0x7FFFF) << 5;
-    __write(2, "back end: reloc class has no arm field\n", 39); __exit(1);
+    k = be_arm_class(r);
+    if (k == 26) return a_disp(d, 26) & 0x3FFFFFF;
+    if (k == 19) return (a_disp(d, 19) & 0x7FFFF) << 5;
+    if (k == 0 - 1) { __write(2, "back end: reloc class has no arm field\n", 39); __exit(1); }
     return 0;
 }
 int a_ldr(int rt, int rn, us_i64 off) { ow(0xF9400000 | ((off / 8) << 10) | (rn << 5) | rt); return 0; }
@@ -677,11 +684,12 @@ int x_rel8(us_i64 d) {                  /* a short branch's displacement */
     return 0;
 }
 int x_rel(int i, us_i64 d) {          /* emit_x86.RELBYTES */
-    char *r;
-    if (tkg_rel[i] < 0) { __write(2, "back end: branch without a reloc answer\n", 40); __exit(1); }
+    char *r; int k;
+    if (be_rel_miss(tkg_rel[i]) == 1) { __write(2, "back end: branch without a reloc answer\n", 40); __exit(1); }
     r = bk_nth(BH_RELOC_Y, tkg_rel[i]);
-    if (strsame(r, "rel32")) { x_d32(d); return 0; }
-    __write(2, "back end: reloc class has no x86 field\n", 39); __exit(1);
+    k = be_rel_class(r);
+    if (k == 0) { x_d32(d); return 0; }
+    if (k == 1) { __write(2, "back end: reloc class has no x86 field\n", 39); __exit(1); }
     return 0;
 }
 /* mem: opc may be two bytes (0x0F 0xBE); w is REX.W */
