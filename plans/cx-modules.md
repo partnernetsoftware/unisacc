@@ -644,6 +644,18 @@ flowchart TD
   cap["检查文件 32 个 use"] --> pull["bindargs.cx 的 use bindcount"]
 ```
 
+## 126. 2026-10-29 入口在 Linux 对象上补默认对象名
+
+构造脚本不改。`need_default_name` 为 1 时 `cxd_default_target` 把基名收成 `out`。`-c -b lnx/x86_64 a.c` 退出 0，stdout 82，stderr 0，`out=a.o`。`-E a.c` 仍是 stdout 64，`out=-`。`-c -o keep.o -b lnx/x86_64 a.c` 退出 0，stdout 85，`out=keep.o`。`dir/foo.c` 退出 0，stdout 90，`out=foo.o`。`win/x86_64` 仍退出 1，stderr 168。没有写出对象文件，没有调用前端。没有产品安装，没有 hostseed，没有 `--all`。整棵重写还没完成。
+
+```mermaid
+flowchart TD
+  obj["cxt_object 的 need"] --> name["cxd_default_target 写成基名.o"]
+  given["已有 -o"] --> keep["out 保持给出的名字"]
+  pp["-E"] --> dash["out 仍是 -"]
+  win["非 Linux -c -b"] --> stop["起名之前退出 1"]
+```
+
 ## 125. 2026-10-29 入口打印对象路线并拒绝非 Linux 对象
 
 构造脚本不改。`src/unisacc.cx` 增加 `use driver.route`。有源文件后先 `cxt_object`，再 `cxt_decide`，再 `cxt_text`。`sh ./tools/bound 55 sh ./unisacc.com src/unisacc.cx -- -c -b lnx/x86_64 a.c` 退出 0，stdout 80，stderr 0：`route=lnx/x86_64/object/O0`，`obj=1`，`mode=2`。`-E a.c` 退出 0，stdout 64，stderr 0：`route=lnx/x86_64/pp`，`obj=0`，`mode=1`。`-c -b win/x86_64 a.c` 退出 1，stdout 0，stderr 168，是非 Linux 对象还没上路的那句。`need_default_name` 没有拿来起名。没有调用前端。没有产品安装，没有 hostseed，没有 `--all`。整棵重写还没完成。
