@@ -883,12 +883,106 @@ static int tui_new_context(const char *path, char *note, size_t cap) {
         return 1;
     }
     fclose(f);
-    snprintf(old, sizeof old, "%s.%ld.jsonl", path, (long)net_now());
+    {
+        /* Never overwrite an archive: two moves in one second bump the stamp. */
+        long stamp = (long)net_now();
+        int tries = 0;
+        do snprintf(old, sizeof old, "%s.%ld.jsonl", path, stamp++);
+        while (access(old, F_OK) == 0 && ++tries < 100);
+        if (tries >= 100) { snprintf(note, cap, "new: no free archive name"); return 1; }
+    }
     if (rename(path, old) != 0) {
         snprintf(note, cap, "new: cannot move transcript: %s", strerror(errno));
         return 1;
     }
     snprintf(note, cap, "new: 已开新上下文；旧转录存为 %.180s", old);
+    return 0;
+}
+
+/* Archived transcripts next to PATH, newest first: PATH.<seconds>.jsonl.
+ * Fills stamps[] and returns how many (at most max). */
+static int tui_archives(const char *path, long *stamps, int max) {
+    static char names[65536];
+    char dir[512];
+    const char *base = strrchr(path, '/');
+    const char *p;
+    size_t bl;
+    int n = 0, i, j;
+    if (!base) return 0;
+    snprintf(dir, sizeof dir, "%.*s", (int)(base - path), path);
+    base++;
+    bl = strlen(base);
+    if (!file_list(dir[0] ? dir : "/", names, sizeof names).ok) return 0;
+    for (p = names; *p; ) {
+        const char *nl = strchr(p, '\n');
+        size_t len = nl ? (size_t)(nl - p) : strlen(p);
+        /* base "." digits ".jsonl" */
+        if (len > bl + 7 && !strncmp(p, base, bl) && p[bl] == '.'
+            && !strncmp(p + len - 6, ".jsonl", 6)) {
+            long v = 0;
+            size_t k;
+            int digits = 1;
+            for (k = bl + 1; k < len - 6; k++) {
+                if (p[k] < '0' || p[k] > '9') { digits = 0; break; }
+                v = v * 10 + (p[k] - '0');
+            }
+            if (digits && v > 0) {
+                /* Insert sorted, newest first; drop the oldest past max. */
+                for (i = 0; i < n && stamps[i] > v; i++) ;
+                if (i < max) {
+                    for (j = (n < max ? n : max - 1); j > i; j--) stamps[j] = stamps[j - 1];
+                    stamps[i] = v;
+                    if (n < max) n++;
+                }
+            }
+        }
+        if (!nl) break;
+        p = nl + 1;
+    }
+    return n;
+}
+
+/* First user line of a transcript, for the /resume list. */
+static void tui_first_user(const char *file, char *out, size_t cap) {
+    static char buf[8192];
+    const char *u = NULL, *t, *e;
+    int lines = 0;
+    /* Transcripts are large; file_read refuses those, so read the head only. */
+    FILE *f = fopen(file, "r");
+    out[0] = 0;
+    if (!f) return;
+    while (lines++ < 64 && fgets(buf, sizeof buf, f))
+        if ((u = strstr(buf, "\"role\":\"user\""))) break;
+    fclose(f);
+    if (!u) return;
+    t = strstr(u, "\"text\":\"");
+    if (!t) return;
+    t += 8;
+    e = strchr(t, '"');
+    if (!e) e = t + strlen(t);
+    {
+        int len = (int)(e - t);
+        if (len > 120) {
+            len = 120;
+            while (len > 0 && ((unsigned char)t[len] & 0xC0) == 0x80) len--;
+        }
+        snprintf(out, cap, "%.*s", len, t);
+    }
+}
+
+/* /resume N: archive the live transcript, then bring archive N back. */
+static int tui_resume(const char *path, int pick, char *note, size_t cap) {
+    long stamps[9];
+    char from[600], why[400];
+    int n = tui_archives(path, stamps, 9);
+    if (pick < 1 || pick > n) { snprintf(note, cap, "resume: 没有第 %d 个归档（共 %d 个）", pick, n); return 1; }
+    snprintf(from, sizeof from, "%s.%ld.jsonl", path, stamps[pick - 1]);
+    if (tui_new_context(path, why, sizeof why) != 0) { snprintf(note, cap, "%s", why); return 1; }
+    if (rename(from, path) != 0) {
+        snprintf(note, cap, "resume: cannot restore: %s", strerror(errno));
+        return 1;
+    }
+    snprintf(note, cap, "resume: 已换回 %ld 的转录；之前的已归档", stamps[pick - 1]);
     return 0;
 }
 
@@ -908,7 +1002,8 @@ static int tui_slash(tui_state *st) {
         tui_log_plain(st, "/loop [text]: 切换目标循环，参数当前不解析");
         tui_log_plain(st, "/reload: 空闲重载密钥缓存；/reload-code: managed idle actor");
         tui_log_plain(st, "/export-state HANDOFF: owned idle 状态导出；/exit /quit: 退出");
-        tui_log_plain(st, "/model [名]: 显示或设本会话模型；/cwd: 显示工作目录；/cost: 本会话词元与缓存命中；/allow: 放行下一条危险命令一次；/new: 新上下文（旧转录归档）");
+        tui_log_plain(st, "/model [名]: 显示或设本会话模型；/cwd: 显示工作目录；/cost: 本会话词元与缓存命中");
+        tui_log_plain(st, "/allow: 放行下一条危险命令一次；/new: 新上下文（旧转录归档）；/resume [N]: 列出或换回归档");
         tui_log_plain(st, "键：Esc 取消本轮/清输入；空输入 Tab 展开/收起最近工具行；Ctrl-U 清行；Ctrl-W 删词");
         tui_command_done(st);
         return 1;
@@ -938,6 +1033,36 @@ static int tui_slash(tui_state *st) {
         else if (agent_transcript_path(path, sizeof path) != 0) tui_log_plain(st, "new: no transcript path");
         else {
             tui_new_context(path, msg, sizeof msg);
+            tui_log_plain(st, msg);
+            st->last_answer[0] = 0; st->errline[0] = 0; st->ended = 0;
+        }
+        tui_command_done(st);
+        return 1;
+    }
+    if (!strncmp(st->input, "/resume", 7) && token == 7) {
+        char path[512], msg[400];
+        const char *arg = st->input + 7;
+        while (*arg == ' ') arg++;
+        if (st->busy) tui_log_plain(st, "busy: /resume refused");
+        else if (st->owned) tui_log_plain(st, "resume: owned session keeps its journal; not supported");
+        else if (agent_transcript_path(path, sizeof path) != 0) tui_log_plain(st, "resume: no transcript path");
+        else if (!*arg) {
+            long stamps[9];
+            int n = tui_archives(path, stamps, 9), i;
+            if (!n) tui_log_plain(st, "resume: 没有归档（/new 会产生）");
+            for (i = 0; i < n; i++) {
+                char file[600], first[160];
+                long age = (long)net_now() - stamps[i];
+                snprintf(file, sizeof file, "%s.%ld.jsonl", path, stamps[i]);
+                tui_first_user(file, first, sizeof first);
+                if (age < 3600) snprintf(msg, sizeof msg, "%d) %ld 分钟前 · %s", i + 1, age / 60, first[0] ? first : "(空)");
+                else if (age < 86400) snprintf(msg, sizeof msg, "%d) %ld 小时前 · %s", i + 1, age / 3600, first[0] ? first : "(空)");
+                else snprintf(msg, sizeof msg, "%d) %ld 天前 · %s", i + 1, age / 86400, first[0] ? first : "(空)");
+                tui_log_plain(st, msg);
+            }
+            if (n) tui_log_plain(st, "resume N 换回第 N 个；当前转录会先归档");
+        } else {
+            tui_resume(path, atoi(arg), msg, sizeof msg);
             tui_log_plain(st, msg);
             st->last_answer[0] = 0; st->errline[0] = 0; st->ended = 0;
         }
@@ -4006,6 +4131,35 @@ int tui_entry(int argc, char **argv) {
                     { printf("FAIL /new on empty: %s\n", msg); failures++; }
                 else printf("  ok   /new archives the transcript and starts fresh\n");
             }
+        }
+        {
+            char dir[256], path[300], msg[400], first[160], body[256];
+            long stamps[9];
+            FILE *f;
+            int ok = 0, n1 = -1, n2 = -1;
+            snprintf(dir, sizeof dir, "/tmp/csih-resume-%d", (int)getpid());
+            snprintf(path, sizeof path, "%s/t.jsonl", dir);
+            if (mkdir(dir, 0700) == 0) {
+                f = fopen(path, "w"); if (f) { fputs("{\"role\":\"user\",\"text\":\"任务甲\"}\n", f); fclose(f); }
+                tui_new_context(path, msg, sizeof msg);
+                f = fopen(path, "w"); if (f) { fputs("{\"role\":\"user\",\"text\":\"任务乙\"}\n", f); fclose(f); }
+                n1 = tui_archives(path, stamps, 9);
+                if (n1 == 1 && tui_resume(path, 1, msg, sizeof msg) == 0) {
+                    n2 = tui_archives(path, stamps, 9);
+                    f = fopen(path, "r");
+                    body[0] = 0;
+                    if (f) { if (!fgets(body, sizeof body, f)) body[0] = 0; fclose(f); }
+                    if (n2 >= 1) {
+                        snprintf(msg, sizeof msg, "%s.%ld.jsonl", path, stamps[0]);
+                        tui_first_user(msg, first, sizeof first);
+                    } else first[0] = 0;
+                    ok = strstr(body, "任务甲") && n2 == 1 && !strcmp(first, "任务乙")
+                        && tui_resume(path, 5, msg, sizeof msg) != 0;
+                }
+                if (tui_selftest_rm(dir, 1)) failures++;
+            }
+            if (!ok) { printf("FAIL /resume n1=%d n2=%d\n", n1, n2); failures++; }
+            else printf("  ok   /resume lists and swaps archived transcripts\n");
         }
         {
             static tui_state ta;

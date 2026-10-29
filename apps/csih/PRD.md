@@ -134,7 +134,12 @@ agent 模式新增 `/help`、`/status`、`/clear`，均只在本地处理、不�
   - selftest：`usage with nested details sums per response`、`/cost shows session usage`、`dangerous exec is blocked until /allow`、`/allow lets exactly one through`、`tab toggles the newest tool row`；agent_cli selftest 全部通过。
 - **第四批已落地（2026-10-29）**：输入框光标。`back` 记光标离行尾的字节数（用时夹紧，旧代码直接改写 input 也不会越界）；左右键按码位移动，中文算一步；Ctrl-A/Ctrl-E 到行首/行尾；字符插入、退格、Ctrl-W 都以光标为准；光标不在行尾时画 `▏`，不往帧里写终端转义。提交和浏览历史时光标回到行尾。selftest：`cursor moves and edits mid-line`；tmux 实测：`运行 echo ▏世界` → 插入 → `用 sh ▏运行 echo 你好世界`。
 - **第五批已落地（2026-10-29）**：`/new` 把当前转录改名为 `PATH.<秒>.jsonl` 归档（不删除），下一轮从空历史开始；转录不存在时报「已是空上下文」；忙时或 owned 会话拒绝。selftest：`/new archives the transcript and starts fresh`。tmux 实测：先告诉模型暗号，`/new` 后再问，模型答「不知道」。
-- 下一批候选：`/resume` 列出并换回归档的转录；正文流式显示；转录按 cwd 分开；exec 三档权限；P0 根治（引用原文，由 harness 定位）；输入框超宽时随光标横向滚动。
+- **第六批已落地（2026-10-29）**：
+  - `/resume` 列出最近 9 个归档（多久以前 + 第一句用户话），`/resume N` 先把当前转录归档，再换回第 N 个。归档名同一秒内冲突时秒数加一，绝不覆盖已有归档（`/new` 和 `/resume` 连续操作时会撞名）。首句只读文件开头 64 行（`file_read` 会拒绝大文件），按码位截断。selftest：`/resume lists and swaps archived transcripts`。tmux 实测：换回旧转录后，模型答出了 `/new` 之前给的暗号。
+  - 修 mind add 写成 `- - 文本` 的问题：模型自带的 `- ` 前缀先去掉。tmux 实测写入 `- 测试条目XYZ`（测试条目已从 `~/.csih/记忆宫殿.md` 删除）。
+  - `/help` 原来一行超过 240 字节的日志上限会被截断，拆成两行。
+  - 注意：`/new` 只清转录，不清 mind 两页；模型若把内容存进宫殿，新上下文仍读得到。
+- 下一批候选：正文流式显示；转录按 cwd 分开；exec 三档权限；P0 根治（引用原文，由 harness 定位）；输入框超宽时随光标横向滚动。
 - 自迭代：改 `apps/csih` 源后 `/reload` 自动跑 `csih.sh prepare`，绿了再换进程（复用现有 reload 链）。
 
 ### P3 以后
