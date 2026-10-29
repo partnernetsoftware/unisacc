@@ -6,7 +6,7 @@
 
 ## 产品面（2026-10-30）
 
-对照已装产品的入口路径。三档：已通、骨架、未做。没实跑的不写已通。临时入口是 `/tmp/grk-cx-line/entry`，O0，1156319 字节，sha256 `e215b2eb76924b1ee04d8f679a8c8b8a842064381d19b5b0e758216c685a3787`。已装产品 3035300 字节。实测记在下面第 139、140、141 节。
+对照已装产品的入口路径。三档：已通、骨架、未做。没实跑的不写已通。临时入口是 `/tmp/grk-cx-line/entry-o2`，两只 `-O2` 对象再加 `src/hostnative.o`，869311 字节，sha256 `fb4021bc90f1c1847a6ce254737ff552f797b517062567a31e2888515a6bb311`。已装产品 3035300 字节。实测记在下面第 139、140、141、142 节。
 
 - **ar：骨架。** 用法、坏操作、缺文件、空归档、两成员 r/q、列表、抽出，退出码和归档字节与产品相同。写出权限 0755，产品 0644。大归档、替换成员、符号表没跑。
 - **as：骨架。** 用法、坏选项、坏目标、头和 `-b` 冲突，退出码和 stderr 相同。一行 `# unisacc -S lnx/x86_64` 两边都是 728 字节对象，权限都是 0644。加上 `  ret` 两边都是 744 字节。缺文件两边退出 1，产品印打不开，入口印 `as: cannot read`。Mach-O、COFF、大汇编没跑。
@@ -17,7 +17,7 @@
 - **-cx-plan / -cx-interface：骨架。** 不带 `-include` 时，计划、接口、缺文件、两个旗一起用，退出码和输出与产品相同。`-include extra.h -cx-plan` 两边 stdout 都是 20 字节。多个模块的 `use` 没跑。
 - **-dump-tokens：骨架。** 旗认到了。产品打出 token。入口停在 `NOT_IMPLEMENTED tokens`。
 - **--emit-host-symbols：骨架。** 和 `-c -b` 一起用时，两边都拒绝，stderr 相同。没有一格写出符号文件。
-- **-O1 / -O2：骨架。** `-O1 -E` 对 `int x;` 两边 stdout 相同。没有对拍优化后的对象。整只入口按 `-O2` 冷构造仍超过 55 秒。
+- **-O1 / -O2：骨架。** 入口拆成执行器、驱动两只 `-O2 -funit`，再链上入口专用的 `src/hostnative.o`。`process_group.cx` 仍只有 `setpgid`。三只编译都低于 55 秒。这只入口对 `int x;` 做 `-E`，stdout 和产品相同。没有对拍优化后的对象。`-O1` 没在这只上重跑。
 - **-D / -U / -I / -include：骨架。** 不带这些旗的 `-E` 对 `int x;` 仍是 7 字节。`-DFOO -E` 留下 `int a;`。`-UFOO -E` 和先 `-DFOO` 再 `-UFOO` 留下 `int b;`。这三格都是 38 字节。`-I inc` 对引号和尖括号都是 9 字节。`-include inc/z.h -E` 是 16 字节。`-iquote inc -E` 是 9 字节。`-include extra.h -cx-plan` 两边 stdout 都是 20 字节，行里有 `extra.h`。多个目录、缺参数没跑。
 - **库接口：骨架。** 没有单独的库命令。`int abs(int); int main(void){return abs(-3);}` 默认执行，两边退出 3，stdout 和 stderr 都是 0。`tests/library-abi.cx` 没跑。`us_*` 那套库 API 没接到这条入口。
 
@@ -1721,6 +1721,26 @@ flowchart TD
   d --> t[".tape 先 tapecheck 再 prune"]
   d --> b["坏 .tapebin 用产品那句"]
   b --> c["有效包的解码仍在 C"]
+```
+
+## 142. 2026-10-30 入口按两只 -O2 对象构造
+
+整只 `src/unisacc.cx` 的 `-O2 -funit` 是 54.5 秒，再链接缺 `clock_gettime`。现在拆开。`src/entryexec.cx` 使用 `executor` 和 `packmodel`。`src/drive.cx` 和 `src/stages.cx` 不再 `use` 这两份，改成函数里声明后按名字调用。宿主符号放在 `src/hostnative.cx`，只链进这只入口。`cx/runtime/process_group.cx` 没有改，仍只有 `setpgid`。`hostnative` 定义 `clock_gettime`、`mmap`、`mprotect`、`munmap`。`dlopen`、`dlsym`、`dlclose`、`dlerror` 不能在对象文件里写成 host FFI 槽，所以调用时从已经映射的 libc 符号表里找。
+
+三只都是 `sh ./unisacc.com -O2 -c -b lnx/x86_64 -funit`，退出 0，stdout 0，stderr 0。执行器对象 1254152 字节，墙钟 16698966748 ns。驱动对象 3998448 字节，墙钟 38656618611 ns。`hostnative` 对象 68888 字节，墙钟 2532400590 ns。
+
+链接是 `sh ./unisacc.com -b lnx/x86_64` 加上驱动、执行器、`hostnative` 这三个对象，没有 `process_group.o`。退出 0，stdout 0，stderr 0，墙钟 4787732468 ns。产物 `/tmp/grk-cx-line/entry-o2`，869311 字节，sha256 `fb4021bc90f1c1847a6ce254737ff552f797b517062567a31e2888515a6bb311`。`file` 看是静态链接的 ELF。直接执行，不经过 `sh`。
+
+`int x;` 的 `-E`：这只入口和已装产品都是退出 0，stdout 7 字节，stderr 0，内容相同。`dlopen` 没实跑。没有对拍优化后的对象。`-O1` 没在这只上重跑。这一面仍是骨架。已装产品仍是 3035300 字节。这不是产品安装。
+
+```mermaid
+flowchart TD
+  e["entryexec.cx"] --> x["executor 与 packmodel"]
+  u["unisacc.cx"] --> d["drive 与 stages"]
+  p["hostnative.cx"] --> h["clock_gettime 与 mmap"]
+  x --> link["三只对象链接"]
+  d --> link
+  h --> link
 ```
 
 ## 64. 2026-10-29 编译器纯拒绝接到 bindhost

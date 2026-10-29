@@ -1,0 +1,209 @@
+#pragma unisa module hostnative
+/* Entry-only host symbols for the -O2 object link.
+   Not on the cx-driver-build source list. process_group stays setpgid.
+   clock and memory use the image gates. The four loader names cannot be
+   host FFI slots in an object file, so each call finds the symbol in the
+   libc already mapped into this process. */
+#if !defined(__linux__) || (!defined(__x86_64__) && !defined(__aarch64__))
+#error hostnative_requires_linux_x86_64_or_arm64
+#endif
+struct hn_ts { long sec; long nsec; };
+int clock_gettime(int clock,struct hn_ts *ts) {
+#if defined(__aarch64__)
+    long result=__syscall6(113,(long)clock,(long)ts,0,0,0);
+#else
+    long result=__syscall6(228,(long)clock,(long)ts,0,0,0);
+#endif
+    if(result<0){errno=(int)-result;return -1;}
+    return 0;
+}
+void *mmap(void *addr,size_t len,int prot,int flags,int fd,long off) {
+    long result=__mmap((long)addr,(long)len,(long)prot,(long)flags,(long)fd,off);
+    return (void *)result;
+}
+int munmap(void *addr,size_t len) {
+    long result=__munmap((long)addr,(long)len);
+    if(result<0){errno=(int)-result;return -1;}
+    return 0;
+}
+int mprotect(void *addr,size_t len,int prot) {
+    long result=__mprotect((long)addr,(long)len,(long)prot);
+    if(result<0){errno=(int)-result;return -1;}
+    return 0;
+}
+static unsigned hn_u32(const unsigned char *p) {
+    return (unsigned)p[0]|((unsigned)p[1]<<8)|((unsigned)p[2]<<16)|((unsigned)p[3]<<24);
+}
+static unsigned long long hn_u64(const unsigned char *p) {
+    unsigned long long v; int i;
+    v=0; i=0;
+    while(i<8){ v=v|((unsigned long long)p[i]<<(8*i)); i=i+1; }
+    return v;
+}
+static int hn_hex(int c) {
+    if(c>='0'&&c<='9') return c-'0';
+    if(c>='a'&&c<='f') return c-'a'+10;
+    if(c>='A'&&c<='F') return c-'A'+10;
+    return -1;
+}
+static int hn_has(const char *s,const char *end,const char *w) {
+    int n,i,k;
+    n=0; while(w[n]) n=n+1;
+    i=0;
+    while(s+i+n<=end){
+        k=0; while(k<n && s[i+k]==w[k]) k=k+1;
+        if(k==n) return 1;
+        i=i+1;
+    }
+    return 0;
+}
+static int hn_eq(const char *a,const char *b) {
+    int i; i=0;
+    while(a[i] && a[i]==b[i]) i=i+1;
+    return a[i]==0 && b[i]==0;
+}
+static unsigned long hn_elfhash(const char *s) {
+    unsigned long h,g;
+    h=0;
+    while(*s){
+        h=(h<<4)+(unsigned char)(*s);
+        g=h & 0xf0000000UL;
+        if(g) h=h^(g>>24);
+        h=h & ~g;
+        s=s+1;
+    }
+    return h;
+}
+static long hn_openat(const char *path) {
+#if defined(__aarch64__)
+    return __syscall6(56,-100,(long)path,0,0,0);
+#else
+    return __syscall6(257,-100,(long)path,0,0,0);
+#endif
+}
+static long hn_read(int fd,char *buf,long n) {
+#if defined(__aarch64__)
+    return __syscall6(63,fd,(long)buf,n,0,0);
+#else
+    return __syscall6(0,fd,(long)buf,n,0,0);
+#endif
+}
+static void hn_close(int fd) {
+#if defined(__aarch64__)
+    __syscall6(57,fd,0,0,0,0);
+#else
+    __syscall6(3,fd,0,0,0,0);
+#endif
+}
+static unsigned char *hn_libc_base(void) {
+    char *text; long fd,got,k; int i;
+    unsigned long addr; int d;
+    const char *line,*end;
+    text=malloc(131072);
+    if(!text) return 0;
+    fd=hn_openat("/proc/self/maps");
+    if(fd<0){ free(text); return 0; }
+    got=0;
+    while(got<131071){
+        k=hn_read((int)fd,text+got,131071-got);
+        if(k<0){ hn_close((int)fd); free(text); return 0; }
+        if(k==0) break;
+        got=got+k;
+    }
+    hn_close((int)fd);
+    text[got]=0;
+    i=0;
+    while(text[i]){
+        line=text+i;
+        while(text[i] && text[i]!='\n') i=i+1;
+        end=text+i;
+        if(hn_has(line,end,"libc.so.6") && hn_has(line,end," 00000000 ")){
+            addr=0; d=0;
+            while(line[d] && line[d]!='-'){
+                int h=hn_hex(line[d]);
+                if(h<0) break;
+                addr=(addr<<4)+(unsigned)h;
+                d=d+1;
+            }
+            free(text);
+            return (unsigned char *)addr;
+        }
+        if(text[i]=='\n') i=i+1;
+    }
+    free(text);
+    return 0;
+}
+static void *hn_libc(const char *name) {
+    unsigned char *base,*dyn,*hash,*sym,*str;
+    unsigned long long phoff,tag,val;
+    int phentsize,phnum,i,syment,dynsz;
+    unsigned nbucket,nchain,idx,guard;
+    unsigned long h;
+    unsigned char *ent;
+    base=hn_libc_base();
+    if(!base || base[0]!=0x7f || base[1]!='E' || base[2]!='L' || base[3]!='F') return 0;
+    phoff=hn_u64(base+32);
+    phentsize=base[54]| (base[55]<<8);
+    phnum=base[56]| (base[57]<<8);
+    if(phentsize<56 || phnum<1 || phnum>64) return 0;
+    dyn=0; dynsz=0; i=0;
+    while(i<phnum){
+        unsigned char *ph=base+phoff+i*phentsize;
+        if(hn_u32(ph)==2){
+            dyn=base+hn_u64(ph+16);
+            dynsz=(int)hn_u64(ph+40);
+        }
+        i=i+1;
+    }
+    if(!dyn || dynsz<16) return 0;
+    hash=0; sym=0; str=0; syment=24; i=0;
+    while(i+16<=dynsz){
+        tag=hn_u64(dyn+i); val=hn_u64(dyn+i+8);
+        if(tag==4) hash=(unsigned char *)val;
+        else if(tag==5) str=(unsigned char *)val;
+        else if(tag==6) sym=(unsigned char *)val;
+        else if(tag==11 && val) syment=(int)val;
+        else if(tag==0) break;
+        i=i+16;
+    }
+    if(!hash || !sym || !str) return 0;
+    if((unsigned long)hash<(unsigned long)base) hash=base+(unsigned long)hash;
+    if((unsigned long)sym<(unsigned long)base) sym=base+(unsigned long)sym;
+    if((unsigned long)str<(unsigned long)base) str=base+(unsigned long)str;
+    nbucket=hn_u32(hash); nchain=hn_u32(hash+4);
+    if(!nbucket || !nchain) return 0;
+    h=hn_elfhash(name);
+    idx=hn_u32(hash+8+(h%nbucket)*4);
+    guard=0;
+    while(idx && idx<nchain && guard<nchain){
+        ent=sym+(unsigned long)idx*(unsigned)syment;
+        if(hn_eq((const char *)(str+hn_u32(ent)),name)) return (void *)((unsigned long)base+hn_u64(ent+8));
+        idx=hn_u32(hash+8+nbucket*4+idx*4);
+        guard=guard+1;
+    }
+    return 0;
+}
+void *dlopen(const char *path,int mode) {
+    void *(*real)(const char *,int);
+    real=hn_libc("dlopen");
+    if(!real) return 0;
+    return real(path,mode);
+}
+void *dlsym(void *handle,const char *name) {
+    void *(*real)(void *,const char *);
+    real=hn_libc("dlsym");
+    if(!real) return 0;
+    return real(handle,name);
+}
+int dlclose(void *handle) {
+    int (*real)(void *);
+    real=hn_libc("dlclose");
+    if(!real) return -1;
+    return real(handle);
+}
+char *dlerror(void) {
+    char *(*real)(void);
+    real=hn_libc("dlerror");
+    if(!real) return "loader symbol missing";
+    return real();
+}
