@@ -2729,7 +2729,8 @@ static int at_retry_http(const char *what) {
     at_event(ev);
     for (i = 0; i < wait_s[at_net_retry] * 10; i++) {
         unsigned short r0 = 0, r1 = 0;
-        if (net_stopped()) return 0;          /* Esc/Ctrl-C during the wait: give up */
+        /* The UI only reads keys when pumped; without this Esc waited out the back-off. */
+        if (shell_call_tick() || net_stopped()) return -1;   /* Esc/Ctrl-C: cancel the turn */
         shell_poll2(-1, -1, 100, &r0, &r1);   /* no fds: a 100ms sleep (no nanosleep in unisacc) */
     }
     at_net_retry++;
@@ -2747,7 +2748,9 @@ static int at_after_http(void) {
         char what[48];
         if (!r.ok) snprintf(what, sizeof what, "连接失败");
         else snprintf(what, sizeof what, "返回 HTTP %d", r.status);
-        if (at_retry_http(what)) return 1;
+        rc = at_retry_http(what);
+        if (rc > 0) return 1;
+        if (rc < 0) return at_fail(-5);           /* cancelled while waiting to retry */
     }
     if (!r.ok) {
         if (r.err == -2004) return at_fail(-5);
