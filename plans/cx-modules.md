@@ -1574,6 +1574,29 @@ flowchart TD
 
 六目标列没在这只上重跑。矩阵文件没改。这不是产品安装。
 
+## 133. 2026-10-30 -run 在 e3 后接一次转发
+
+`st_span` 增加 `first` 和 `last`。空指针表示这一端不截。`st_extra_pop` 去掉最后一条额外资源。`st_attr_exchange` 交换属性表。`-S` 和 `-o` 仍整段跑，不发布 `\0cli/run-forward`。
+
+`-run` 在编译路线上发布 `\0cli/run-forward`（1 字节，值 1），`st_span` 停在 e3，然后弹出这一条。侧车魔数是 `USLFW1`。没有记录时从 `prune` 接着跑（`level` 大于 0 时从 `e4`）。有记录时生成桩，调用 `fwd_incremental` 一次。桩自己的磁带路线会再走 e1 和 e3。主程序不调用第二次 `main`。`fwd_incremental` 返回 0 时写 `forwarding increment refused` 并停，不重跑整程序 e3。回调参数直接拒绝。入口 `use` 了 `compiler.fwdsig`、`compiler.fwdstub`、`compiler.fwdmerge`、`compiler.fwdincrement`。
+
+`cx/compiler/fwdmerge.cx` 的类型名从 `Buf` 改成 `FwmBuf`。布局没变：两个指针，然后两个 int。原来的名字和 `core.execute` 的 `Buf` 撞车，入口闭包编不过。`tools/check-compiler-units.cx` 只改了这个类型名。这份检查这次没重跑。
+
+`sh ./tools/bound 55 sh ./unisacc.com -o /tmp/grk-cx-line/entry src/unisacc.cx` 退出 0，stdout 和 stderr 都是 0。产物 985206 字节。冷耗时 37485744965 纳秒。没设 `UNISACC_RR_TIME`。
+
+非仓根 `/tmp/notrepo`，没设 `UNISA_CONTAINER`。这只上 `examples/hello.c -run` 退出 0，stdout 13 字节，正文是 `from hello.c\n`，stderr 0，墙钟 2294 毫秒。这只没有再对已装产品。
+
+最小复现 `dup.c`：
+
+```c
+#include <string.h>
+int main(void) { char *s = strdup("ab"); return s && s[0]=='a' ? 3 : 1; }
+```
+
+已装产品此前退出 3，stdout 和 stderr 都是 0。985206 这只 `-run` 退出 139，stdout 0，stderr 0，墙钟 1596 毫秒。随后一只有三行诊断，989381 字节，同一条 `-run` 先写出桩源 734 字节，`fwd_incremental` 返回 1，stderr 打出紧挨在 `hs_enter` 之前的那一行，然后退出 139。`LD_PRELOAD` 回溯落在 `dlsym`，返回地址 `0x40250f`，是入口里六参数宿主调用块 `call *%r11` 的下一条。没有第二遍主程序 e3。诊断行已从源码去掉。
+
+具名红项 `FWD-DLSYM`。`strdup` 这条在进入内存之后于 `dlsym` 崩溃。六目标列和整表没在这只上跑。这不是产品安装。
+
 ## 64. 2026-10-29 编译器纯拒绝接到 bindhost
 
 `compiler.c` 里剩余的纯拒绝改走已有的 `bindhost`。新函数是 `bx_compat_why`、`bx_opt_dash`、`bx_opt_why`、`bx_src_why`、`bx_mix_why`、`bx_tape_need`、`bx_tape_why`、`bx_tapebin_bad`、`bx_tapebin_why`、`bx_name_fit`、`bx_name_why`、`bx_cache_why`、`bx_frame_fit`、`bx_frame_why`、`bx_encode_bad`、`bx_encode_why`、`bx_route_why`、`bx_model_why`。没有新模块。`use` 仍是 32，构造表没有新增参数。`snprintf`、解码、编码和 `clierror` 仍在 C。宿主切片下标仍是 APE 71、本机 70。这次没有实跑 hostseed。`sh ./unisacc.com tools/check-compiler-units.cx` 又两次退出 0，两次 stdout 相同，两次 stderr 相同，都打印 `CHECK_COMPILER_UNITS failed=0`。这次检查直接调用这些函数，没有编译 `compiler.c`。这不是产品安装、六目标或 `--all`。整棵重构还没完成。
