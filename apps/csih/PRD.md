@@ -133,7 +133,8 @@ agent 模式新增 `/help`、`/status`、`/clear`，均只在本地处理、不�
   - 空输入时按 Tab 展开或收起最近的工具行；`/help` 新增一行按键说明。
   - selftest：`usage with nested details sums per response`、`/cost shows session usage`、`dangerous exec is blocked until /allow`、`/allow lets exactly one through`、`tab toggles the newest tool row`；agent_cli selftest 全部通过。
 - **第四批已落地（2026-10-29）**：输入框光标。`back` 记光标离行尾的字节数（用时夹紧，旧代码直接改写 input 也不会越界）；左右键按码位移动，中文算一步；Ctrl-A/Ctrl-E 到行首/行尾；字符插入、退格、Ctrl-W 都以光标为准；光标不在行尾时画 `▏`，不往帧里写终端转义。提交和浏览历史时光标回到行尾。selftest：`cursor moves and edits mid-line`；tmux 实测：`运行 echo ▏世界` → 插入 → `用 sh ▏运行 echo 你好世界`。
-- 下一批候选：正文流式显示；`/new` 和 `/resume`（转录按 cwd 分开）；exec 三档权限；P0 根治（引用原文，由 harness 定位）；输入框超宽时随光标横向滚动。
+- **第五批已落地（2026-10-29）**：`/new` 把当前转录改名为 `PATH.<秒>.jsonl` 归档（不删除），下一轮从空历史开始；转录不存在时报「已是空上下文」；忙时或 owned 会话拒绝。selftest：`/new archives the transcript and starts fresh`。tmux 实测：先告诉模型暗号，`/new` 后再问，模型答「不知道」。
+- 下一批候选：`/resume` 列出并换回归档的转录；正文流式显示；转录按 cwd 分开；exec 三档权限；P0 根治（引用原文，由 harness 定位）；输入框超宽时随光标横向滚动。
 - 自迭代：改 `apps/csih` 源后 `/reload` 自动跑 `csih.sh prepare`，绿了再换进程（复用现有 reload 链）。
 
 ### P3 以后

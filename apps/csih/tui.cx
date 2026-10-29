@@ -870,6 +870,28 @@ static int tui_command_len(const char *text) {
     return text[i] == 0 || text[i] == ' ' ? i : 0;
 }
 
+/* /new: move the transcript aside so the next turn starts with no history.
+ * The old file is kept as PATH.<seconds>.jsonl. Returns 0 on success. */
+static int tui_new_context(const char *path, char *note, size_t cap) {
+    char old[4200];
+    FILE *f;
+    if (!path || !path[0]) { snprintf(note, cap, "new: no transcript path"); return 1; }
+    f = fopen(path, "r");
+    if (!f) {
+        if (errno == ENOENT) { snprintf(note, cap, "new: 已是空上下文"); return 0; }
+        snprintf(note, cap, "new: cannot open %s: %s", path, strerror(errno));
+        return 1;
+    }
+    fclose(f);
+    snprintf(old, sizeof old, "%s.%ld.jsonl", path, (long)net_now());
+    if (rename(path, old) != 0) {
+        snprintf(note, cap, "new: cannot move transcript: %s", strerror(errno));
+        return 1;
+    }
+    snprintf(note, cap, "new: 已开新上下文；旧转录存为 %.180s", old);
+    return 0;
+}
+
 static void tui_command_done(tui_state *st) {
     st->input[0] = 0;
     st->ninput = 0;
@@ -886,7 +908,7 @@ static int tui_slash(tui_state *st) {
         tui_log_plain(st, "/loop [text]: 切换目标循环，参数当前不解析");
         tui_log_plain(st, "/reload: 空闲重载密钥缓存；/reload-code: managed idle actor");
         tui_log_plain(st, "/export-state HANDOFF: owned idle 状态导出；/exit /quit: 退出");
-        tui_log_plain(st, "/model [名]: 显示或设本会话模型；/cwd: 显示工作目录；/cost: 本会话词元与缓存命中；/allow: 放行下一条危险命令一次");
+        tui_log_plain(st, "/model [名]: 显示或设本会话模型；/cwd: 显示工作目录；/cost: 本会话词元与缓存命中；/allow: 放行下一条危险命令一次；/new: 新上下文（旧转录归档）");
         tui_log_plain(st, "键：Esc 取消本轮/清输入；空输入 Tab 展开/收起最近工具行；Ctrl-U 清行；Ctrl-W 删词");
         tui_command_done(st);
         return 1;
@@ -906,6 +928,19 @@ static int tui_slash(tui_state *st) {
             snprintf(note, sizeof note, "model set: %s (this session)", st->model);
         }
         tui_log_plain(st, note);
+        tui_command_done(st);
+        return 1;
+    }
+    if (!strcmp(st->input, "/new")) {
+        char path[512], msg[400];
+        if (st->busy) tui_log_plain(st, "busy: /new refused");
+        else if (st->owned) tui_log_plain(st, "new: owned session keeps its journal; not supported");
+        else if (agent_transcript_path(path, sizeof path) != 0) tui_log_plain(st, "new: no transcript path");
+        else {
+            tui_new_context(path, msg, sizeof msg);
+            tui_log_plain(st, msg);
+            st->last_answer[0] = 0; st->errline[0] = 0; st->ended = 0;
+        }
         tui_command_done(st);
         return 1;
     }
@@ -973,6 +1008,7 @@ static int tui_slash(tui_state *st) {
         (!strncmp(st->input, "/cwd", 4) && token == 4) ||
         (!strncmp(st->input, "/cost", 5) && token == 5) ||
         (!strncmp(st->input, "/allow", 6) && token == 6) ||
+        (!strncmp(st->input, "/new", 4) && token == 4) ||
         (!strncmp(st->input, "/reload", 7) && token == 7) ||
         (!strncmp(st->input, "/reload-code", 12) && token == 12) ||
         (!strncmp(st->input, "/exit", 5) && token == 5) ||
@@ -3953,6 +3989,23 @@ int tui_entry(int argc, char **argv) {
             if (!strstr(tc.log[tc.nlog - 1], "cost: 请求 ") || !strstr(tc.log[tc.nlog - 1], "缓存命中") || tc.npending || tc.busy)
                 { printf("FAIL /cost: %s\n", tc.log[tc.nlog - 1]); failures++; }
             else printf("  ok   /cost shows session usage\n");
+        }
+        {
+            char path[256], msg[400];
+            const char *arch;
+            FILE *f;
+            snprintf(path, sizeof path, "/tmp/csih-new-%d.jsonl", (int)getpid());
+            f = fopen(path, "w");
+            if (f) { fputs("{\"role\":\"user\",\"text\":\"old\"}\n", f); fclose(f); }
+            if (!f || tui_new_context(path, msg, sizeof msg) != 0 || access(path, F_OK) == 0
+                || !(arch = strstr(msg, "存为 ")) || access(arch + strlen("存为 "), F_OK) != 0) {
+                printf("FAIL /new: %s\n", msg); failures++;
+            } else {
+                if (tui_selftest_rm(arch + strlen("存为 "), 0)) failures++;
+                if (tui_new_context(path, msg, sizeof msg) != 0 || !strstr(msg, "已是空上下文"))
+                    { printf("FAIL /new on empty: %s\n", msg); failures++; }
+                else printf("  ok   /new archives the transcript and starts fresh\n");
+            }
         }
         {
             static tui_state ta;
