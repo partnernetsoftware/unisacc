@@ -370,6 +370,8 @@ P3 消费工具已使用 CX codec（`d238debe0b`）和只借用字节区的包�
 
 **执行门与状态行（2026-10-29）：** 产品 `execute` 在 `UNISA_CX_RUNEXEC` 下把步数预算门和三条状态行交给 `cx/runtime/runexec.cx` 的 `ex_budget`、`ex_lines`。产品构建忽略预算字符串，不调用解析。失败文案仍是 `run: UNISA_MAXSTEPS must be a positive decimal integer <= 9223372036854775807` 加换行。状态 1 按 `reason_n` 拷贝并在零字节停下；状态 2 拷贝 C 字符串；状态 3 打印步数，含负号。行放不下时产品仍走原来的 `fprintf`。`core_run`、`getenv`、`clock_gettime`、文件 IO 和诊断宏留在 `exec/c/run.c`。未定义该宏的独立 `run.c` 和库仍走原来的预算分支。`sh ./unisacc.com tools/check-compiler-units.cx` 再连续两次实跑，两次退出 0，stdout 相同，stderr 相同，都是 `CHECK_COMPILER_UNITS failed=0`，含产品忽略预算、缺预算、解析成功、坏预算、空解析、空步数指针、拒绝精度、嵌入零字节、`reason_n` 为 0、`run:` 行、预算行、负步数、短缓冲不改内容、状态 2 空原因。这次直接调用这两个函数，没有跑 `core_run`。这不是产品安装、六目标或 `--all`。源码计数：宿主切片 `char *v[64]` 的 APE 空指针在下标 53，本机在 52。这次没有实跑 hostseed。
 
+**阶段槽交接（2026-10-29）：** `rt_open` 之后的绑定或装入顺序收到 `cx/runtime/stagehandoff.cx` 的 `sh_apply`。产品仍用已有的 `UNISA_CX_ROUTESTEP`。返回 2 或 3 时只调用失败回调并停下，why 原样送去。返回 0 只绑定槽，不装入、不释放。其余返回值走装入：`use_owned` 非 0 时改用膨胀缓冲和 `out_len`，然后清模型、标记载入、装入、释放膨胀缓冲、清行缓冲；有槽时再捕获并标 `loaded`，最后清除载入标记。缺了该路径需要的回调就返回 3，并且什么都不调用。未定义 `UNISA_CX_ROUTESTEP` 的独立 `run.c` 和库仍走原来的 C 分支。`sh ./unisacc.com tools/check-compiler-units.cx` 再连续两次实跑，两次退出 0，stdout 相同，stderr 相同，都是 `CHECK_COMPILER_UNITS failed=0`，含拒绝停下、opened 3 转发 why、空失败回调、只绑定、空绑定回调、明文装入、膨胀缓冲加槽、其它 opened、非 1 的 use_owned、空装入回调、空标记回调。这次注入回调，没有跑 `loadbytes`，也没有解模型。这不是产品安装、六目标或 `--all`。源码计数：宿主切片 APE 空指针在下标 54，本机在 53。这次没有实跑 hostseed。
+
 **当前节点（驱动/链接诊断）：** 已装79fb84e6/record4608b9ac，冻结207195a597/SID5675f557，内嵌PC7b806ec2。五切片及APE实构，固定两文件差异核验和两阶段开发安装完成；收据out/c43-driverdiag-install-01/installed.tsv，旧cb743c27保留。已装driver-diagnostics11/0、smoke16/0；候选archive-ar17/0、formats68/0。归档main两路线旧新均拒绝，显式main对象旧新均rc7，无本刀回归；支持缺口仍留。直接C未定义函数原断言仍4/1，不以迟绑定合同解释冒充通过。以下产品段均为历史身份。后续私有验证攒批、集中安装，不逐刀69批迁标；优先完成门产品缺口，cc并行核MISSING与BLOCKED草稿。完整发布和外国宿主资格未完成。
 
 **当前已装产品（落尾修复）：** cb743c27/record9783c93d，冻结648fe13db9/SID95b23dc9，内嵌正式包7b806ec2。完整来源107项与当前59项独立核验、双内核、五切片及APE均完成；暂存候选prepare+verify-prepared后以staged-v2迁入共享根，冻结启动产品b6f15保留，安装收据5266380d，备份out/c43-fallguard-install-01。候选七例7/0、原畸形批11/0（原10/1转绿）、格式68/0、库成员27/0；已装smoke16/0、落尾7/0。这只修物理代码末尾的具名运行时保护；CFG、函数间落穿、准确函数名归因、完整发布覆盖与外国宿主资格仍未闭合。下一步已装受影响资格和剩余诊断/类型ABI/所有权主线；以下b6f15等为历史身份。
@@ -604,7 +606,7 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 
 **落尾当前身份与收据：** 共享cb743c27b736119a3c88b1146187c35a8dec955149590eb38b860520a62c1e55，记录9783c93d2bdc5a4cfdfe6f564871dbce168dea75cd94c178906f56ba700c2798；迁入收据out/c43-fallguard-install-01/receipt.tsv SHA5266380d11788f59e974b78c861d28155f5065b94ee2441aba895cc08c957d8a。候选证据out/c43-fallguard-candidate-{seven,malformed,formats,library,smoke}-01，已装smoke/seven为16/0与7/0。source-root冻结648fe13db9的unisacc.com仍b6f15，包7b806ec2和工具身份未替换；旧协议与仅PREPARED收据拒绝，独立目标迁入试验通过。不迁旧矩阵或外国平台资格。
 
-**csih 一次过 C->CX（现行，csr /goal）：** 树内 0 个 `.c`。`check.cx -- modules|loop|probes-tui|probes-libc|probes-net|probes-e2e` 绿。e2e 依赖 `out/csih-e2e-bin/csih`（`sh $UNISACC csih.cx -o …`）；冷 `-run csih.cx` 每次约 47s 且 `UNISACC_RUN_CACHE` lookup_hit=0，不能嵌进 60s。不重打产品 `.com`。
+**csih 一次过 C->CX（已结，csr /goal）：** 树内 0 个 `.c`；modules|loop|probes-* 与 check.sh 绿；e2e 靠 `out/csih-e2e-bin/csih`（冷 `-run` 约 47s 且 run-cache 对 CXIF 临时头 `lookup_hit=0`）。短结全文 [apps/csih/docs/c-to-cx-report.md](apps/csih/docs/c-to-cx-report.md)。经验（摘要）：广度优先 + 分桶 TDD；下层才 `#include`、上层只 `use`；`setjmp` 须在守卫帧（`rc_guard`）；CXIF 禁条件导出（cc fuzz 分 TU）；`use` 闭包约 63；夹具/argv 残留 `.c` 与旧 `tests/cxbin` 会假红。工具缺口 P0–P3 已登记 [§5.2](#52-未排期研究与构想不自动开工)，标明后面再探索改进方案。不重打产品 `.com`。
 
 **csih 仓外轻切片（2026-10-28，grk）：** 主人要求仓外试 cx；未改 `apps/csih`、未重打 `.com`、未占 cc 余 57 批／总 900s 重活窗。`out/c43-csih-cx-try-01`：`cols`+`home` 与 `clock` 在 `-run`／`gcc_cx`／`clang_cx` 均 rc0（RECEIPT.txt）。`home` 去掉三处 include（前奏已有）；`clock` 未 include `time.h`，Linux 函数内 `extern clock_gettime`、字面量 `1`＝CLOCK_MONOTONIC，未跑 macOS/Windows。整份 tui/agent 未动。仅仓外探针，不授产品迁移或资格。
 
@@ -1069,6 +1071,7 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 - 权重表示及推理成本：优先研究同权阈值段精确聚合、类型化动作模板/银行归一化；分别量权重、运行内存与同身份延迟。包压缩不冒称权重减少，结构统计不冒称真实提速；网络语义及完整接口保持是前提。
 - 可移植Tape包、嵌入式库/API与包管理、wasm第七目标；表解释性/语义完备性与证明；向量化、工具链去脚本及队列改进。已有实施部分归当前计划，不重复排队。
 - DSL 批量重构工具（主人 2026-10-29，仅登记）：设计并制作代码重构工具，范围含迁移。它是 file 工具的增强版，能对指定 DSL 文件批量并发修改，用来提高代码进化速度。当前不设计、不实现，也不插入进行中的 CX 粗迁。
+- **csih C->CX 导出的工具／脚手架缺口（2026-10-29，政委收口；后面再探索改进方案，不自动开工）：** 经验与测据见短结 [apps/csih/docs/c-to-cx-report.md](apps/csih/docs/c-to-cx-report.md)，宫殿已指该文。P0：CX `-run` 跨进程内容寻址缓存（键勿绑 `/tmp/ua-cxif-*`）；正式 `CSIH_BIN`／源摘要变则重建与缺产物具名拒绝。P1：`.c`→`.cx`／`#include`→`use`／残留 `.c` 扫描／下层 include 白名单一条命令；`check.cx` 滚动分桶门禁（输入哈希、嵌套超时与直跑分账）；cc fuzz「库 TU+cx.h／驱动 TU+API.h」配方入文档。P2：CXIF 导出面 diff、`use` 闭包计数与超限诊断、禁上层 include 静态闸；e2e 减 Python（pty 见证 CX 化或最小宿主助手）；`-cx-plan` 可读摘要。P3：测用 native 缓存与产品默认 `-run` 合同分离；`self-iter.md` 等旧 `.c` 路径随手清。与上文 0.0.44 启动复用登记相关但不合并开工；不授 Draft/Latest/签/公开。
 - 原FX-1–FX-8细稿及旧测量完整留在[构想归档](archive/plans/ideas.md)，旧收官排期在[路线图归档](archive/plans/roadmap-0.0.x.md)。构想不构成产品/发布授权。
 
 ### 5.3 0.1.x：其他 C 编译器接入 `.cx`
