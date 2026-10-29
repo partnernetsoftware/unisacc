@@ -151,7 +151,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 **2026-10-25 主人重新裁定：0.0.43 现在重构。** 旧1333项测试套件整体归档，退出开发和发布的主验收路径；新套件按产品合同重新设计，直接由 `unisacc.com + .cx` 驱动。此项属于本版，不等待0.0.44。保留现有产品、源码、夹具及原始结果作为历史和迁移依据，不把旧结果自动计入新验收。
 
-**当前入口（2026-10-30）：** 入口 891211 字节，动态 ELF，冷构造 33.666 秒（55 秒上限内）。`-cx-plan` 37 单元，入口 `use runtime.memlayout`，不再整份 `use` bindhost/bindsym/hostbind。非仓根下 `macro.c` 的 `-S -o`（758 字节、0755）、`-o`（4096、0755）和单源 `-run`（`macro.c` 退出 3、`empty.cx` 退出 0、`hello.c` stdout 13 字节、`argc` 与 `--` 后参数）与已装产品相同。`UNISACC_RR_TIME=1` 再构造一次，冷墙钟 32.537 秒，最慢一行是 e3 推理 5.541 秒，产物与上一只同字节。多单元 `-run` 和六目标列还没在这只上记。细节在 [plans/cx-modules.md](plans/cx-modules.md)。
+**当前入口（2026-10-30）：** 入口 891181 字节。多单元 `-run` 与已装产品相同：`a.cx` 加 `b.cx` 退出 0，跨单元调用退出 7，两单元 `printf` 的 stdout 是 `hi`，两单元 `argc` 在 `-- a b` 下退出 3。`macro.c -run` 在这只上仍退出 3。没有第二遍 e3。这只冷耗时没记。六目标列还没记。细节在 [plans/cx-modules.md](plans/cx-modules.md)。
 
 <a id="work-tree"></a>
 ### 思维树

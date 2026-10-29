@@ -1558,6 +1558,22 @@ flowchart TD
 
 六目标 `-o`/`-S`、多单元、四个 `-run` 里的多单元，都没在这只上重跑。矩阵文件没改。这不是产品安装。
 
+## 68. 2026-10-30 多单元 -run 进入内存
+
+`drive.cx` 里 `-run` 的内存进入不再限 `nsrc == 1`。多单元先走原来的单元帧，再走 `目标/multi/run/O0`，然后和单源同一条 `目标/memory`。`process/argc` 与 `process/argv` 也在多单元的编译路线期间发布。没有停在 e3 再重启，没有写转发桩，没有第二遍 e3。
+
+`sh ./tools/bound 55 sh ./unisacc.com -o /tmp/grk-cx-line/entry src/unisacc.cx` 退出 0，stdout 和 stderr 都是 0。产物 891181 字节。这次没记冷耗时，也没设 `UNISACC_RR_TIME`。
+
+非仓根 `/tmp/notrepo`、没设 `UNISA_CONTAINER`。对照已装产品：
+
+- `a.cx` 与 `b.cx` 的 `-run`：stdout 0，stderr 0，退出 0/0。
+- `ca.c` 定义 `a` 返回 7，`cb.c` 的 `main` 调用它：退出 7/7。
+- `pa.c` 的 `printf("hi\n")`，`pb.c` 调用它：stdout 都是 `hi\n`，退出 0/0。
+- `ea.c` 加 `eb.c -run -- a b`：退出 3/3。`argv[0]` 仍是第一个源。
+- `macro.c -run`：退出 3/3。
+
+六目标列没在这只上重跑。矩阵文件没改。这不是产品安装。
+
 ## 64. 2026-10-29 编译器纯拒绝接到 bindhost
 
 `compiler.c` 里剩余的纯拒绝改走已有的 `bindhost`。新函数是 `bx_compat_why`、`bx_opt_dash`、`bx_opt_why`、`bx_src_why`、`bx_mix_why`、`bx_tape_need`、`bx_tape_why`、`bx_tapebin_bad`、`bx_tapebin_why`、`bx_name_fit`、`bx_name_why`、`bx_cache_why`、`bx_frame_fit`、`bx_frame_why`、`bx_encode_bad`、`bx_encode_why`、`bx_route_why`、`bx_model_why`。没有新模块。`use` 仍是 32，构造表没有新增参数。`snprintf`、解码、编码和 `clierror` 仍在 C。宿主切片下标仍是 APE 71、本机 70。这次没有实跑 hostseed。`sh ./unisacc.com tools/check-compiler-units.cx` 又两次退出 0，两次 stdout 相同，两次 stderr 相同，都打印 `CHECK_COMPILER_UNITS failed=0`。这次检查直接调用这些函数，没有编译 `compiler.c`。这不是产品安装、六目标或 `--all`。整棵重构还没完成。
