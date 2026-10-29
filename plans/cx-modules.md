@@ -1522,7 +1522,11 @@ flowchart TD
 
 `stages.cx` 的 `st_span` 按包内顺序走完一条路线。`rs_reset`、`rs_take`、`rs_ok` 选阶段，`rt_open` 和 `sh_apply` 装载，`ex_exec` 执行，`rt_swap` 把上一段输出交给下一段。资源只经 `core_host_fetch`。`-S` 把最后一段写到 stdout，`-o` 写成镜像，`-run` 在这条编译路线之后停住。没有按 `e3`、`tapecheck`、`prune`、`lower`、`elf` 各写一支。
 
-自举命令是 `sh ./unisacc.com -o /tmp/grk-cx-line/entry src/unisacc.cx`。退出 0，stderr 空，冷耗时 52.395 秒，产物 1289883 字节，动态链接 ELF。热耗时没测。
+自举命令是 `sh ./unisacc.com -o /tmp/grk-cx-line/entry src/unisacc.cx`。上一只退出 0，stderr 空，冷耗时 52.395 秒，产物 1289883 字节，动态链接 ELF。热耗时没测。
+
+这一只是 1331445 字节，动态链接 ELF，退出 0。冷耗时这次没记。`-S` 和 `-o` 有输出路径时走同一条落盘：同目录临时文件、模式 0755、写完再改名。没有路径或路径是 `-` 时写 stdout。包路径先看 `UNISA_CONTAINER`。没设时用 `/proc/self/exe`：文件尾是 `UNIPKG1` 就用它，否则用它旁边的 `unisacc.com`。两条都不是包时拒绝，并写明要设 `UNISA_CONTAINER=/path/to/unisacc.com`。不按当前目录找 `unisacc.com`。
+
+非仓根 `/tmp/notrepo`、没设 `UNISA_CONTAINER`、入口旁有 `unisacc.com` 时，对已装产品：`macro.c -S -o` 两边 758 字节、权限 0755、stdout 0、stderr 0、退出 0；`macro.c -o` 两边镜像 4096、0755、直接运行退出 3；`empty.cx -o` 两边镜像 4096、0755、直接运行退出 0；`macro.c -S` 和 `macro.c -S -o -` 两边 stdout 758；`macro.c -E` 两边 stdout 56941。墙钟没记。入口拷到没有 `unisacc.com` 的目录后，仓根和非仓根都退出 1，stdout 0，stderr 111 字节，正文点明入口路径和 `UNISA_CONTAINER`。同一只入口设绝对路径 `UNISA_CONTAINER` 后，`macro.c -S -o` 又与产品相同。hello、多单元和四个 `-run` 没在这只上重跑。
 
 具名红项：
 
