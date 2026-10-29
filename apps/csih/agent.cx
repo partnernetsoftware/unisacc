@@ -2709,17 +2709,52 @@ static int at_judge_retry(const char *why) {
     }
     AT.phase=PH_GO;return 1;
 }
+/* Transient failures (no connection, 429, 5xx) are retried twice, after 2s
+ * and 5s; the same request is rebuilt from the transcript, so a retry sends
+ * exactly what the failed one did. Not retried: cancel, timeout, other 4xx. */
+static int at_net_retry;
+
+/* 1 when this response is worth sending again. */
+int agent_transient_http(int ok, int err, int status) {
+    if (!ok) return err != -2004 && err != -2005;
+    return status == 429 || (status >= 500 && status <= 599);
+}
+
+static int at_retry_http(const char *what) {
+    static const int wait_s[] = { 2, 5 };
+    char ev[160];
+    int i;
+    if (at_net_retry >= 2) return 0;
+    snprintf(ev, sizeof ev, "↻ 模型请求%s，%d 秒后重试（第 %d 次）", what, wait_s[at_net_retry], at_net_retry + 1);
+    at_event(ev);
+    for (i = 0; i < wait_s[at_net_retry] * 10; i++) {
+        unsigned short r0 = 0, r1 = 0;
+        if (net_stopped()) return 0;          /* Esc/Ctrl-C during the wait: give up */
+        shell_poll2(-1, -1, 100, &r0, &r1);   /* no fds: a 100ms sleep (no nanosleep in unisacc) */
+    }
+    at_net_retry++;
+    AT.phase = PH_GO;
+    return 1;
+}
+
 static int at_after_http(void) {
     net_response r = net_async_end();
     int rc;
     agent_last_http = r.status;
     agent_last_err[0] = '\0';
     AT.content[0] = '\0';
+    if (agent_transient_http(r.ok, r.err, r.status)) {
+        char what[48];
+        if (!r.ok) snprintf(what, sizeof what, "连接失败");
+        else snprintf(what, sizeof what, "返回 HTTP %d", r.status);
+        if (at_retry_http(what)) return 1;
+    }
     if (!r.ok) {
         if (r.err == -2004) return at_fail(-5);
         if (r.err == -2005) return at_fail(-6);
         return at_fail(-2);
     }
+    at_net_retry = 0;
     if (r.status < 200 || r.status >= 300) {
         int i, j = 0;
         for (i = 0; r.body[i] && j < (int)sizeof agent_last_err - 1; i++) {
@@ -3107,6 +3142,7 @@ int agent_turn_begin(const char *prompt, const char *transcript,
     char tree[2048], palace[2048];
     {int i;for(i=0;i<AT.nrecords;i++)free(AT.records[i]);free(AT.judge_feedback);free(AT.context_packet);free(AT.claim_packet);for(i=0;i<AT.page_results_n;i++)free(AT.page_results[i]);for(i=0;i<AT.page_concerns_n;i++)free(AT.page_concerns[i]);}
     memset(&AT, 0, sizeof AT);
+    at_net_retry = 0;
     AT.context_packet=agent_context_next;agent_context_next=NULL;
     AT.delivery_required=agent_delivery_next;agent_delivery_next=0;
     if(AT.delivery_required)snprintf(AT.delivery_peer,sizeof AT.delivery_peer,"%s",agent_peer_get());
