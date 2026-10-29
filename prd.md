@@ -592,7 +592,7 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 
 **落尾当前身份与收据：** 共享cb743c27b736119a3c88b1146187c35a8dec955149590eb38b860520a62c1e55，记录9783c93d2bdc5a4cfdfe6f564871dbce168dea75cd94c178906f56ba700c2798；迁入收据out/c43-fallguard-install-01/receipt.tsv SHA5266380d11788f59e974b78c861d28155f5065b94ee2441aba895cc08c957d8a。候选证据out/c43-fallguard-candidate-{seven,malformed,formats,library,smoke}-01，已装smoke/seven为16/0与7/0。source-root冻结648fe13db9的unisacc.com仍b6f15，包7b806ec2和工具身份未替换；旧协议与仅PREPARED收据拒绝，独立目标迁入试验通过。不迁旧矩阵或外国平台资格。
 
-**csih 一次过 C->CX（现行，csr /goal）：** 已提交 `3a4199f5b5`。分层：下层才 `#include`；真根 `csih.cx`；suite/check 单入口 `-run`。cli 与 `csih.cx -- selftest` 已绿。check 按片：`check.cx -- gate json` / `-- tui`（整闸超 60s 外限）。下一刀：check 余相（loop/probes）与删 `suite.c`。不重打产品 `.com`。
+**csih 一次过 C->CX（现行，csr /goal）：** `3a4199f5b5`/`1575e02dd6`/`995ad84a63`。分层 + 真根 `csih.cx`；`suite.c` 已删。cli 与 `check.cx -- modules` 绿。下一刀：check loop/probes 相、`probes/slice_env.py` 改 `suite_cli.cx`、reload_candidate 运行时 SIGSEGV。不重打产品 `.com`。
 
 **csih 仓外轻切片（2026-10-28，grk）：** 主人要求仓外试 cx；未改 `apps/csih`、未重打 `.com`、未占 cc 余 57 批／总 900s 重活窗。`out/c43-csih-cx-try-01`：`cols`+`home` 与 `clock` 在 `-run`／`gcc_cx`／`clang_cx` 均 rc0（RECEIPT.txt）。`home` 去掉三处 include（前奏已有）；`clock` 未 include `time.h`，Linux 函数内 `extern clock_gettime`、字面量 `1`＝CLOCK_MONOTONIC，未跑 macOS/Windows。整份 tui/agent 未动。仅仓外探针，不授产品迁移或资格。
 

@@ -75,7 +75,7 @@ def main():
             # agent_slice returns first lines only. Independently rerun its real row
             # to retain full genuine selftest body; never synthesize child output.
             prefix=PREFIX if mode=='new' else 'exec '
-            rows_cmd=prefix+shlex.quote(str(compiler))+' suite.c suite_cli.c rows tui.c'
+            rows_cmd=prefix+shlex.quote(str(compiler))+' -run suite_cli.cx -- rows tui.cx'
             result['rows']=run(['/bin/sh','-c',rows_cmd],app,env);assert result['rows']['rc']==0,result['rows']
             rows=[shlex.split(line) for line in result['rows']['stdout'].splitlines() if line.strip()];assert len(rows)==1 and rows[0][0]=='tui',rows
             gate_cmd=prefix+shlex.quote(str(compiler))+' '+shlex.join(rows[0][1:])
