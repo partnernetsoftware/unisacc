@@ -1084,8 +1084,81 @@ int agent_is_danger(const char *cmd) {
     return 0;
 }
 
+/* Permission tier: 0 read (look only), 1 work (write inside cwd; dangerous
+ * exec needs /allow), 2 any (no gate). Default work. */
+static int agent_perm = 1;
+void agent_set_perm(int p) { if (p >= 0 && p <= 2) agent_perm = p; }
+int agent_get_perm(void) { return agent_perm; }
+
+/* Commands that only look. The first word decides; pipes and redirects to a
+ * file disqualify, since `cat x > y` writes. */
+static int agent_exec_readonly(const char *cmd) {
+    static const char *ok[] = {
+        "ls", "cat", "head", "tail", "wc", "grep", "rg", "find", "pwd", "echo",
+        /* no env (prints the API key), no awk/sed (system(), w and e run or write) */
+        "stat", "file", "du", "df", "tree", "which", "date", "uname",
+        "diff", "sort", "uniq", "cut", NULL
+    };
+    char word[32];
+    int i = 0;
+    if (!cmd) return 0;
+    while (*cmd == ' ') cmd++;
+    if (strchr(cmd, '>') || strchr(cmd, ';') || strchr(cmd, '&') || strchr(cmd, '`') || strstr(cmd, "$("))
+        return 0;
+    if (strstr(cmd, " -delete") || strstr(cmd, " -exec") || strstr(cmd, " -ok") || strstr(cmd, " -fprint"))
+        return 0;
+    if (!strncmp(cmd, "git ", 4)) {
+        const char *sub = cmd + 4;
+        while (*sub == ' ') sub++;
+        return !strncmp(sub, "status", 6) || !strncmp(sub, "log", 3) || !strncmp(sub, "diff", 4)
+            || !strncmp(sub, "show", 4) || !strncmp(sub, "blame", 5);
+    }
+    while (cmd[i] && cmd[i] != ' ' && cmd[i] != '|' && i < (int)sizeof word - 1) { word[i] = cmd[i]; i++; }
+    word[i] = 0;
+    for (i = 0; ok[i]; i++) if (!strcmp(word, ok[i])) {
+        /* Every piped stage must be read-only too. */
+        const char *bar = strchr(cmd, '|');
+        return bar ? agent_exec_readonly(bar + 1) : 1;
+    }
+    return 0;
+}
+
+/* 1 when path stays inside cwd: relative without "..", or absolute under cwd. */
+static int agent_path_inside(const char *path, const char *cwd) {
+    size_t cn;
+    if (!path || !path[0]) return 0;
+    if (strstr(path, "..")) return 0;
+    if (path[0] != '/') return path[0] != '~';
+    if (!cwd || !cwd[0]) return 0;
+    cn = strlen(cwd);
+    while (cn > 1 && cwd[cn - 1] == '/') cn--;
+    return !strncmp(path, cwd, cn) && (path[cn] == '/' || !path[cn]);
+}
+
+int agent_perm_blocked(int kind, const char *cmd, const char *path, const char *cwd, char *why, int n) {
+    if (why && n > 0) why[0] = 0;
+    if (agent_perm == 2) return 0;
+    if (agent_perm == 0) {
+        if (kind == ACT_WRITE || kind == ACT_EDIT || (kind == ACT_EXEC && !agent_exec_readonly(cmd))) {
+            if (why && n > 1)
+                snprintf(why, (size_t)n, "%s",
+                         "blocked: 当前权限 read（只读），不能写文件或运行会改东西的命令。需要的话请用户 /perm work。");
+            return 1;
+        }
+        return 0;
+    }
+    if ((kind == ACT_WRITE || kind == ACT_EDIT) && !agent_path_inside(path, cwd)) {
+        if (why && n > 1)
+            snprintf(why, (size_t)n, "blocked: 当前权限 work 只允许写工作目录 %s 以内；%s 在外面。需要的话请用户 /perm any。",
+                     cwd && cwd[0] ? cwd : ".", path ? path : "");
+        return 1;
+    }
+    return 0;
+}
+
 int agent_danger_blocked(int kind, const char *cmd, char *why, int n) {
     if (why && n > 0) why[0] = 0;
+    if (agent_perm == 2) return 0;
     if (kind != ACT_EXEC || !agent_is_danger(cmd)) return 0;
     if (agent_danger_left > 0) { agent_danger_left--; return 0; }
     if (why && n > 1)
@@ -2649,6 +2722,8 @@ static int at_after_http(void) {
             agent_tool_reset();
             agent_read_path[0]=0;agent_read_exact=agent_read_lines=0;agent_read_observation[0]=0;AT.evidence_source[0]=0;
             if (agent_peer_blocked(s.kind, s.op, s.cmd, result, (int)sizeof result)) {
+                tool_facts.handled=1;tool_facts.op_success=0;
+            } else if (agent_perm_blocked(s.kind, s.cmd, s.path, AT.run_cwd[0] ? AT.run_cwd : AT.cwd, result, (int)sizeof result)) {
                 tool_facts.handled=1;tool_facts.op_success=0;
             } else if (agent_danger_blocked(s.kind, s.cmd, result, (int)sizeof result)) {
                 tool_facts.handled=1;tool_facts.op_success=0;

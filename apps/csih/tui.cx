@@ -1003,6 +1003,7 @@ static int tui_slash(tui_state *st) {
         tui_log_plain(st, "/reload: 空闲重载密钥缓存；/reload-code: managed idle actor");
         tui_log_plain(st, "/export-state HANDOFF: owned idle 状态导出；/exit /quit: 退出");
         tui_log_plain(st, "/model [名]: 显示或设本会话模型；/cwd: 显示工作目录；/cost: 本会话词元与缓存命中");
+        tui_log_plain(st, "/perm [read|work|any]: 权限档（read 只读；work 只写工作目录；any 不拦）");
         tui_log_plain(st, "/allow: 放行下一条危险命令一次；/new: 新上下文（旧转录归档）；/resume [N]: 列出或换回归档");
         tui_log_plain(st, "键：Esc 取消本轮/清输入；空输入 Tab 展开/收起最近工具行；Ctrl-U 清行；Ctrl-W 删词");
         tui_command_done(st);
@@ -1066,6 +1067,22 @@ static int tui_slash(tui_state *st) {
             tui_log_plain(st, msg);
             st->last_answer[0] = 0; st->errline[0] = 0; st->ended = 0;
         }
+        tui_command_done(st);
+        return 1;
+    }
+    if (!strncmp(st->input, "/perm", 5) && token == 5) {
+        static const char *names[] = { "read", "work", "any" };
+        const char *arg = st->input + 5;
+        int i, want = -1;
+        while (*arg == ' ') arg++;
+        for (i = 0; i < 3; i++) if (!strcmp(arg, names[i])) want = i;
+        if (!*arg)
+            snprintf(note, sizeof note, "perm: %s（read 只读；work 只写工作目录、危险命令要 /allow；any 不拦）",
+                     names[agent_get_perm()]);
+        else if (want < 0) snprintf(note, sizeof note, "usage: /perm read|work|any");
+        else if (st->busy) snprintf(note, sizeof note, "busy: perm unchanged");
+        else { agent_set_perm(want); snprintf(note, sizeof note, "perm set: %s", names[want]); }
+        tui_log_plain(st, note);
         tui_command_done(st);
         return 1;
     }
@@ -2202,7 +2219,12 @@ static void tui_result_row(char *out, size_t cap, const agent_result *r) {
     const char *why = r->reason;
     int soft = r->acceptance == AGENT_ACCEPT_UNVERIFIED || r->outcome == AGENT_OUTCOME_PARTIAL
         || r->outcome == AGENT_OUTCOME_UNVERIFIED || !strncmp(why, "unfinished:", 11);
+    /* The model itself said it failed: that is ✗, whatever the reason prefix. */
+    if (r->outcome == AGENT_OUTCOME_FAILED) soft = 0;
     if (!strncmp(why, "unfinished: ", 12)) why += 12;
+    if (!strcmp(why, "answer outcome=failed")) why = "模型报告未能完成";
+    else if (!strcmp(why, "answer outcome=partial")) why = "模型报告只完成了一部分";
+    else if (!strcmp(why, "answer outcome=unverified")) why = "模型报告结果未经核实";
     snprintf(out, cap, soft ? "◐ 做完未验证: %s" : "✗ 失败: %s", why);
 }
 
@@ -2225,10 +2247,12 @@ static void tui_title_info(char *out, size_t cap, const char *model, const char 
     size_t hn = home ? strlen(home) : 0;
     /* cwd last: it is the longest, so a narrow window cuts it, not the key. */
     const char *ks = src == 1 ? "env" : src == 2 ? "file" : "missing";
+    static const char *perm[] = { "read", "work", "any" };
+    const char *pm = perm[agent_get_perm()];
     if (hn && cwd && !strncmp(cwd, home, hn) && (cwd[hn] == '/' || !cwd[hn]))
-        snprintf(out, cap, "%s · key=%s · ~%s", model, ks, cwd + hn);
+        snprintf(out, cap, "%s · key=%s · %s · ~%s", model, ks, pm, cwd + hn);
     else
-        snprintf(out, cap, "%s · key=%s · %s", model, ks, cwd ? cwd : "?");
+        snprintf(out, cap, "%s · key=%s · %s · %s", model, ks, pm, cwd ? cwd : "?");
 }
 
 static const char *tui_role_title(const tui_state *st) {
@@ -4078,6 +4102,12 @@ int tui_entry(int argc, char **argv) {
             if (strcmp(row, "✗ 失败: http 401")) { printf("FAIL failed row: %s\n", row); failures++; }
             else printf("  ok   failed row uses ✗ 失败\n");
             memset(&rr, 0, sizeof rr);
+            rr.outcome = AGENT_OUTCOME_FAILED;
+            snprintf(rr.reason, sizeof rr.reason, "unfinished: answer outcome=failed");
+            tui_result_row(row, sizeof row, &rr);
+            if (strcmp(row, "✗ 失败: 模型报告未能完成")) { printf("FAIL model-failed row: %s\n", row); failures++; }
+            else printf("  ok   model-reported failure is ✗ with a Chinese reason\n");
+            memset(&rr, 0, sizeof rr);
             rr.ok = 1; rr.rounds = 1; rr.actions = 3; rr.acceptance = AGENT_ACCEPT_ACCEPTED;
             snprintf(rr.answer, sizeof rr.answer, "done");
             snprintf(rr.reason, sizeof rr.reason, "semantic acceptance (work): records match");
@@ -4265,6 +4295,37 @@ int tui_entry(int argc, char **argv) {
             if (b2 || !b3 || ta.npending)
                 { printf("FAIL /allow first=%d second=%d\n", b2, b3); failures++; }
             else printf("  ok   /allow lets exactly one through\n");
+        }
+        {
+            static tui_state tp;
+            char why[300];
+            int bad = 0;
+            tui_state_init(&tp, NULL); tp.mode = 1;
+            tui_type(&tp, "/perm read");
+            if (agent_get_perm() != 0) bad |= 1;
+            if (!agent_perm_blocked(ACT_WRITE, "", "a.txt", "/w", why, (int)sizeof why) || !strstr(why, "/perm work")) bad |= 2;
+            if (agent_perm_blocked(ACT_EXEC, "ls -la | grep x", "", "/w", why, (int)sizeof why)) bad |= 4;
+            if (agent_perm_blocked(ACT_EXEC, "git status", "", "/w", why, (int)sizeof why)) bad |= 8;
+            if (!agent_perm_blocked(ACT_EXEC, "cat a > b", "", "/w", why, (int)sizeof why)) bad |= 16;
+            if (!agent_perm_blocked(ACT_EXEC, "env", "", "/w", why, (int)sizeof why)) bad |= 32;
+            if (!agent_perm_blocked(ACT_EXEC, "find . -delete", "", "/w", why, (int)sizeof why)) bad |= 64;
+            if (!agent_perm_blocked(ACT_EXEC, "ls; rm x", "", "/w", why, (int)sizeof why)) bad |= 128;
+            tui_type(&tp, "/perm work");
+            if (agent_perm_blocked(ACT_WRITE, "", "src/a.c", "/w", why, (int)sizeof why)) bad |= 256;
+            if (agent_perm_blocked(ACT_WRITE, "", "/w/src/a.c", "/w", why, (int)sizeof why)) bad |= 512;
+            if (!agent_perm_blocked(ACT_WRITE, "", "/etc/passwd", "/w", why, (int)sizeof why)) bad |= 1024;
+            if (!agent_perm_blocked(ACT_EDIT, "", "../x", "/w", why, (int)sizeof why)) bad |= 2048;
+            if (!agent_perm_blocked(ACT_WRITE, "", "/wx/a", "/w", why, (int)sizeof why)) bad |= 4096;
+            if (agent_perm_blocked(ACT_EXEC, "make test", "", "/w", why, (int)sizeof why)) bad |= 8192;
+            tui_type(&tp, "/perm any");
+            agent_allow_danger(0);
+            if (agent_perm_blocked(ACT_WRITE, "", "/etc/x", "/w", why, (int)sizeof why)
+                || agent_danger_blocked(ACT_EXEC, "rm -rf x", why, (int)sizeof why)) bad |= 16384;
+            tui_type(&tp, "/perm bogus");
+            if (!strstr(tp.log[tp.nlog - 1], "usage: /perm")) bad |= 32768;
+            agent_set_perm(1);
+            if (bad) { printf("FAIL perm tiers bad=%d\n", bad); failures++; }
+            else printf("  ok   /perm read|work|any gates writes and commands\n");
         }
         {
             static tui_state tf2;
