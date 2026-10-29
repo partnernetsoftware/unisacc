@@ -1,0 +1,80 @@
+#pragma unisa module boundgate
+/* Pure gates from tools/bound.c. No libc and no include.
+   fork, waitpid, clock_gettime, signals, and the ps pipe stay in tools/bound.c.
+   A null seconds string returns 4. That 4 is not the old usage path.
+   A rejected seconds value returns 0. 1 through 60 is the accepted count.
+   Reap step 0 is continue, 1 is sleep, 2 is done, 3 is deadline, 4 is enum.
+   Those five match the old enum order. Cause 1 is enumeration and 2 is deadline.
+   Stop always returns 142. Tree 4096 and a ps buffer at the cap return 1. */
+int bg_seconds(const char *s) {
+    int seconds, k, c;
+    if (!s) return 4;
+    if (!s[0]) return 0;
+    seconds = 0;
+    k = 0;
+    while (s[k]) {
+        c = s[k] & 255;
+        if (c < 48 || c > 57) return 0;
+        if (seconds > 60) return 0;
+        seconds = seconds * 10 + (c - 48);
+        k = k + 1;
+    }
+    if (seconds < 1) return 0;
+    if (seconds > 60) return 0;
+    return seconds;
+}
+int bg_scale(int seconds, const char *ga, const char *sc) {
+    int d;
+    if (seconds < 0) return 4;
+    if (!ga) return seconds;
+    if (!sc) return seconds;
+    if (ga[0] != 116 || ga[1] != 114 || ga[2] != 117 || ga[3] != 101 || ga[4] != 0) return seconds;
+    if (!sc[0] || sc[1]) return seconds;
+    d = sc[0] & 255;
+    if (d < 49 || d > 53) return seconds;
+    return seconds * (d - 48);
+}
+int bg_reap_step(int got, int err, int past, int echild, int eintr) {
+    if (got > 0) return 0;
+    if (got == 0) {
+        if (past) return 3;
+        return 1;
+    }
+    if (err == echild) return 2;
+    if (err == eintr) {
+        if (past) return 3;
+        return 1;
+    }
+    return 4;
+}
+int bg_reap_cause(int reap) {
+    if (reap == 1) return 0;
+    if (reap == 0) return 2;
+    return 1;
+}
+int bg_combine(int snapshot, int reap) {
+    return snapshot | bg_reap_cause(reap);
+}
+int bg_reason_enum(int cause) {
+    if ((cause & 1) != 0) return 1;
+    return 0;
+}
+int bg_reason_deadline(int cause, int past) {
+    if ((cause & 2) != 0) return 1;
+    if (past) return 1;
+    return 0;
+}
+int bg_stop(int cause, int past) {
+    if (cause == past) return 142;
+    return 142;
+}
+int bg_tree_room(int n) {
+    if (n < 0) return 4;
+    if (n == 4096) return 1;
+    return 0;
+}
+int bg_ps_room(int n) {
+    if (n < 0) return 4;
+    if (n + 1 >= 16777216) return 1;
+    return 0;
+}
