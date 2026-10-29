@@ -1031,7 +1031,7 @@ static void tui_complete_command(tui_state *st) {
     static const char *builtin[] = {
         "/help", "/status", "/clear", "/goal", "/loop", "/reload", "/reload-code", "/export-state",
         "/exit", "/quit", "/model", "/cwd", "/cost", "/perm", "/allow", "/new", "/resume", "/undo",
-        "/diff", "/view", "/copy", "/retry", "/context", NULL
+        "/diff", "/view", "/copy", "/retry", "/context", "/compact", NULL
     };
     static char names[64][64];
     char dirs[2][600], listing[8192], line[240];
@@ -1089,6 +1089,52 @@ static void tui_sh_quote(char *out, size_t cap, const char *s) {
     out[n] = 0;
 }
 
+/* /compact: archive the transcript like /new, then start the new one with a
+ * single user record quoting the last 5 user requests and the last answer.
+ * Quoted, not summarised by the model: no tokens spent, every word checkable,
+ * nothing invented. Returns 0 on success. */
+static int tui_compact(const char *path, const char *last_answer, char *note, size_t cap) {
+    static char summary[6000], rec[20000];
+    char why[400];
+    const char *users[5];
+    jvalue *held[5];
+    session_records recs = session_read(path);
+    size_t i, o;
+    int nu = 0, k;
+    FILE *f;
+    memset(held, 0, sizeof held);
+    for (i = recs.count; i > 0 && nu < 5; i--) {
+        char err[128];
+        jvalue *v = json_parse(recs.lines[i - 1], strlen(recs.lines[i - 1]), err, sizeof err);
+        const char *role = v ? jstr(jget(v, "role")) : NULL, *text = v ? jstr(jget(v, "text")) : NULL;
+        if (role && text && !strcmp(role, "user") && text[0] && strncmp(text, "此前对话摘录", 18)) {
+            held[nu] = v; users[nu++] = text;
+        } else if (v) jfree(v);
+    }
+    if (!nu && !(last_answer && last_answer[0])) {
+        session_free(&recs);
+        snprintf(note, cap, "compact: 没有可保留的内容，用 /new 即可");
+        return 1;
+    }
+    o = (size_t)snprintf(summary, sizeof summary, "此前对话摘录（csih /compact 原文摘录，不是模型总结；完整记录已归档，可 /resume 换回）：\n用户最近的请求（旧→新）：\n");
+    for (k = nu - 1; k >= 0 && o + 8 < sizeof summary; k--)
+        o += (size_t)snprintf(summary + o, sizeof summary - o, "- %.600s\n", users[k]);
+    if (last_answer && last_answer[0] && o + 8 < sizeof summary)
+        o += (size_t)snprintf(summary + o, sizeof summary - o, "上一轮答复：%.2000s\n", last_answer);
+    for (k = 0; k < nu; k++) jfree(held[k]);
+    session_free(&recs);
+    if (tui_new_context(path, why, sizeof why) != 0) { snprintf(note, cap, "%s", why); return 1; }
+    if (!json_rec(rec, sizeof rec, "role", "user", "text", summary, NULL, NULL)) {
+        snprintf(note, cap, "compact: 摘录太长"); return 1;
+    }
+    f = fopen(path, "w");
+    if (!f) { snprintf(note, cap, "compact: cannot write %s", path); return 1; }
+    fprintf(f, "%s\n", rec);
+    fclose(f);
+    snprintf(note, cap, "compact: 已归档完整记录，新上下文保留 %d 条请求%s的原文摘录", nu, last_answer && last_answer[0] ? "和上一轮答复" : "");
+    return 0;
+}
+
 static void tui_command_done(tui_state *st) {
     st->input[0] = 0;
     st->ninput = 0;
@@ -1109,7 +1155,7 @@ static int tui_slash(tui_state *st) {
         tui_log_plain(st, "/perm [read|work|any]: 权限档（read 只读；work 只写工作目录；any 不拦）");
         tui_log_plain(st, "/undo: 撤销 agent 最近一次文件写入/编辑（最多 20 步，不含 exec）；/diff: 看这些改动");
         tui_log_plain(st, "/view PATH [LINE]: 看文件 20 行（带行号），不经模型；/copy: 上一轮答复进 tmux 缓冲区；/retry: 重发上一条输入");
-        tui_log_plain(st, "/context: 对话记录条数、大小和裁剪规则");
+        tui_log_plain(st, "/context: 对话记录条数、大小和裁剪规则；/compact: 归档并只保留最近请求和答复的原文摘录");
         tui_log_plain(st, "/allow: 放行下一条危险命令一次；/new: 新上下文（旧转录归档）；/resume [N]: 列出或换回归档");
         tui_log_plain(st, "键：Esc 取消本轮/清输入；空输入 Tab 展开/收起最近工具行；Ctrl-U 清行；Ctrl-W 删词；Ctrl-R 搜历史");
         tui_command_done(st);
@@ -1130,6 +1176,15 @@ static int tui_slash(tui_state *st) {
             snprintf(note, sizeof note, "model set: %s (this session)", st->model);
         }
         tui_log_plain(st, note);
+        tui_command_done(st);
+        return 1;
+    }
+    if (!strcmp(st->input, "/compact")) {
+        char path[512], msg[400];
+        if (st->busy) tui_log_plain(st, "busy: /compact refused");
+        else if (st->owned) tui_log_plain(st, "compact: owned session keeps its journal; not supported");
+        else if (agent_transcript_path(path, sizeof path) != 0) tui_log_plain(st, "compact: no transcript path");
+        else { tui_compact(path, st->last_answer, msg, sizeof msg); tui_log_plain(st, msg); }
         tui_command_done(st);
         return 1;
     }
@@ -1412,6 +1467,7 @@ static int tui_slash(tui_state *st) {
         (!strncmp(st->input, "/retry", 6) && token == 6) ||
         (!strncmp(st->input, "/context", 8) && token == 8) ||
         (!strncmp(st->input, "/new", 4) && token == 4) ||
+        (!strncmp(st->input, "/compact", 8) && token == 8) ||
         (!strncmp(st->input, "/reload", 7) && token == 7) ||
         (!strncmp(st->input, "/reload-code", 12) && token == 12) ||
         (!strncmp(st->input, "/exit", 5) && token == 5) ||
@@ -4828,6 +4884,33 @@ int tui_entry(int argc, char **argv) {
                     }
                 }
                 if (tui_selftest_rm(dir, 1)) failures++;
+            }
+            /* /compact in its own directory: newest 5 requests + last answer survive */
+            if (ok) {
+                char cdir[200], cpath[260], line[8192];
+                int i2, lines = 0;
+                snprintf(cdir, sizeof cdir, "/tmp/csih-compact-%d", (int)getpid());
+                snprintf(cpath, sizeof cpath, "%s/t.jsonl", cdir);
+                mkdir(cdir, 0700);
+                f = fopen(cpath, "w");
+                if (f) {
+                    for (i2 = 1; i2 <= 7; i2++)
+                        fprintf(f, "{\"role\":\"user\",\"text\":\"请求%d\"}\n{\"role\":\"assistant\",\"text\":\"x\"}\n", i2);
+                    fclose(f);
+                }
+                ok = tui_compact(cpath, "答复X", msg, sizeof msg) == 0 && tui_archives(cpath, stamps, 9) == 1;
+                f = fopen(cpath, "r"); line[0] = 0;
+                if (f) { while (fgets(line + strlen(line), (int)(sizeof line - strlen(line)), f)) lines++; fclose(f); }
+                ok = ok && lines == 1 && strstr(line, "请求3") && strstr(line, "请求7") && !strstr(line, "请求2")
+                    && strstr(line, "答复X") && strstr(line, "不是模型总结");
+                /* compacting again does not quote the previous excerpt inside itself */
+                ok = ok && tui_compact(cpath, "答复Y", msg, sizeof msg) == 0;
+                f = fopen(cpath, "r"); line[0] = 0;
+                if (f) { if (!fgets(line, sizeof line, f)) line[0] = 0; fclose(f); }
+                ok = ok && strstr(line, "答复Y") && !strstr(line, "请求7");
+                if (tui_selftest_rm(cdir, 1)) failures++;
+                if (!ok) printf("  (compact) %s\n", msg);
+                else printf("  ok   /compact keeps the last 5 requests and answer, quoted\n");
             }
             if (!ok) { printf("FAIL /resume n1=%d n2=%d last=%s\n", n1, n2, msg); failures++; }
             else printf("  ok   /resume lists and swaps archived transcripts\n");

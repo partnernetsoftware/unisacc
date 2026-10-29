@@ -50,6 +50,7 @@ CSIH_BIN=../../out/csih-e2e-bin/csih UNISACC=../../unisacc.com \
 | 点击日志里的文件路径打开 | `clicking a file path opens it in /view at path:LINE` | SGR 鼠标序列点击 clickme.txt |
 | Ctrl-R 历史搜索，历史跨重启 | `ctrl-r searches history newest first`、`history persists across restarts…` | 关窗重开后 Ctrl-R 找回 |
 | 项目说明 CSIH.md / AGENTS.md 进系统提示词 | agent_cli：没有文件不追加、AGENTS.md 兜底、CSIH.md 优先、8KB 按码位截断 | 约定「末尾加【约定生效】」被遵守 |
+| /context、/compact、/retry、Tab 补全命令 | `/context reports…`、`/compact keeps…`、`/retry sends…`、`tab completes slash commands` | compact 后只剩 1 条记录，模型仍记得代号 |
 | 自定义斜杠命令 .csih/commands/名字.md | `custom /command expands $ARGS from ~/.csih/commands` | `/lines four.txt` 展开并执行 |
 | /copy、长回合响铃 | `/copy refuses…`、`bell only on a tty…` | 缓冲区内容原样；后台窗口 bell=1 |
 | 危险命令门 + /allow 一次 | `dangerous exec is blocked until /allow`、`/allow lets exactly one through` | 拦截 → 说明 → /allow → 执行 |
