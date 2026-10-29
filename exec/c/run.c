@@ -890,6 +890,13 @@ static int rf_identity_gate(const unsigned char *input,int n,int mode,const char
     return 0;
 }
 /* E3 identity material: E1 token bytes + attribute stream + route is in the stage label. */
+#ifdef UNISA_CX_SOURCE_FRAME
+int cxsf_pair(const unsigned char *,int,const unsigned char *,int,unsigned char **,int *,void *(*)(void *,size_t));
+static unsigned char *rf_e3_identity_bytes(const unsigned char *tokens,int tn,const unsigned char *attrs,int an,int *out_n) {
+    unsigned char *frame=0;
+    return cxsf_pair(tokens,tn,attrs,an,&frame,out_n,realloc) ? 0 : frame;
+}
+#else
 static unsigned char *rf_e3_identity_bytes(const unsigned char *tokens,int tn,const unsigned char *attrs,int an,int *out_n) {
     size_t total; unsigned char *b; int j;
     if (tn < 0 || an < 0 || (tn > 0 && !tokens) || (an > 0 && !attrs) || !out_n) return 0;
@@ -902,6 +909,7 @@ static unsigned char *rf_e3_identity_bytes(const unsigned char *tokens,int tn,co
     if (an) memcpy(b + 8 + tn, attrs, (size_t)an);
     *out_n = (int)total; return b;
 }
+#endif
 /* Parse exact single-line e3 companion bytes (must end in '\n', no NULs/extra lines). */
 static int rf_parse_e3_identity_bytes(const unsigned char *b,int n,char *stage,size_t stage_cap,char hex[65]) {
     const char *s, *t, *v; size_t sn, i;
