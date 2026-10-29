@@ -6,7 +6,7 @@
 
 ## 产品面（2026-10-30）
 
-对照已装产品的入口路径。三档：已通、骨架、未做。没实跑的不写已通。临时入口是 `/tmp/grk-cx-line/entry-o2`，两只 `-O2` 对象再加 `src/hostnative.o`，939895 字节，sha256 `600ae023cafa6ef4194ac9b7d5824dd5ce992635bb896bedf05334836bddf9f0`。已装产品 3035300 字节。12 面那张表是上一只 873487 字节入口的，`out/grk-face-01/cx-entry-matrix-2026-10-30.tsv`：表头加 48 行，48 行都是 SAME，进度起点 100、下一格 148。按面计 SAME：ar 5、as 7、nm 3、objdump 4、-c 2、tape 2、tapebin 2、cx-plan 6、cx-interface 2、dump-tokens 1、emit-host-symbols 2、-O1 2、-O2 2、-D 7、lib 1。这只新入口没有整表重跑。语料前 100 格没有重跑。上一只整表仍是 `/tmp/grk-cx-line/o2mx/cx-entry-matrix-2026-10-30.tsv`，第 143 节。对象抽查在 `out/grk-obj-01/recheck.tsv`，第 145 节。12 面在第 146 节。摘要这一刀在第 147 节。目录行这一刀在第 148 节。解码这一刀在第 149 节，对拍表是 `out/grk-tapebin-02/cmp.tsv`。热循环这一刀在第 150 节。
+对照已装产品的入口路径。三档：已通、骨架、未做。没实跑的不写已通。临时入口是 `/tmp/grk-cx-line/entry-o2`，两只 `-O2` 对象再加 `src/hostnative.o`，939895 字节，sha256 `600ae023cafa6ef4194ac9b7d5824dd5ce992635bb896bedf05334836bddf9f0`。已装产品 3035300 字节。12 面那张表是上一只 873487 字节入口的，`out/grk-face-01/cx-entry-matrix-2026-10-30.tsv`：表头加 48 行，48 行都是 SAME，进度起点 100、下一格 148。按面计 SAME：ar 5、as 7、nm 3、objdump 4、-c 2、tape 2、tapebin 2、cx-plan 6、cx-interface 2、dump-tokens 1、emit-host-symbols 2、-O1 2、-O2 2、-D 7、lib 1。这只新入口没有整表重跑。语料前 100 格没有重跑。上一只整表仍是 `/tmp/grk-cx-line/o2mx/cx-entry-matrix-2026-10-30.tsv`，第 143 节。对象抽查在 `out/grk-obj-01/recheck.tsv`，第 145 节。12 面在第 146 节。摘要这一刀在第 147 节。目录行这一刀在第 148 节。解码这一刀在第 149 节，对拍表是 `out/grk-tapebin-02/cmp.tsv`。热循环这一刀在第 150 节。自身尾部候选在第 151 节，文件在 `out/grk-self-01/candidate`。
 
 - **ar：已通。** 检查器五行和产品相同：用法、`ar z`、缺成员、空归档、两成员。空归档 8 字节，两成员 146 字节，权限都是 0644。大归档、替换成员、符号表没跑。
 - **as：已通。** 七行相同：用法、`-z`、坏 `-b`、头和 `-b` 冲突、一行汇编、加 `ret`、缺文件。一行汇编 728 字节，加 `ret` 744 字节，权限 0644。缺文件两边 stderr 都是 86 字节。Mach-O、COFF、大汇编没跑。
@@ -1869,6 +1869,21 @@ flowchart TD
   loop["core_run 循环"] --> four["预算、键、停止、取结果写在循环里"]
   four --> same["hello 与 fib 的 -S 文本不变"]
   same --> slow["dev-run.cx -S 仍是 25.2 秒"]
+```
+
+## 151. 2026-10-30 入口读自身尾部的 P3
+
+`src/host.cx` 的 `hs_container` 本来就是：没设 `UNISA_CONTAINER` 时，先看自己的文件尾是不是 `UNIPKG1`，是就用自己，否则才找旁边的 `unisacc.com`。这一刀没有改这段，也没有改五份构造脚本，没有覆盖仓库根的 `unisacc.com`。
+
+已装产品 3035300 字节，尾部 16 字节是 `UNIPKG1` 加小端长度 1636004。包从偏移 1399280 开始，连尾一共 1636020 字节，开头是 `P 3 32 1`。把第 150 节那只 939895 字节的静态 ELF 后面接上这一段，写出 `out/grk-self-01/candidate`。拼接墙钟 29506675 纳秒。候选 2575915 字节，权限 0755，sha256 `1038cc9706a88d6adcf8c8e4ef6d5fa1cd3fcb4a1c2f55c87ecdd6aef09d24c5`。`file` 仍是静态链接 ELF。同目录没有 `unisacc.com`。
+
+冷跑：cwd `/tmp/notrepo`，环境去掉 `UNISA_CONTAINER`，命令是这只候选 `-b lnx/x86_64 -S examples/hello.c`。退出 0，stdout 172298 字节，和已装产品逐字节相同，墙钟 775247915 纳秒，stderr 0。这只说明自身尾部能当包用。没有换掉已装产品。
+
+```mermaid
+flowchart TD
+  elf["939895 字节 ELF"] --> cat["尾部接上已装产品的 P3"]
+  cat --> one["out/grk-self-01/candidate"]
+  one --> hello["不设 UNISA_CONTAINER，hello -S 与产品相同"]
 ```
 
 ## 64. 2026-10-29 编译器纯拒绝接到 bindhost
