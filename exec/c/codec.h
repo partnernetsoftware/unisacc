@@ -3,6 +3,11 @@ int cd_puff_type(int);
 int cd_bits_err(int);
 int cd_len_rep(int, int, int *, int *, int *);
 int cd_len_room(int, int, int, int);
+int cd_block_pick(int);
+int cd_puff_more(int, int);
+int cd_puff_keep(int);
+int cd_stored_byte(int, int, int);
+int cd_room(unsigned long long, unsigned long long, unsigned long long, int);
 unsigned long long cd_crc_step(unsigned long long);
 /* puff.h
   Copyright (C) 2002-2013 Mark Adler, all rights reserved
@@ -84,18 +89,25 @@ local int stored(struct state *s)
     s->bitbuf = 0;
     s->bitcnt = 0;
 
-    if (s->incnt + 4 > s->inlen)
+    if (cd_room(s->incnt, 4, s->inlen, 2) == 2)
         return 2;
     len = s->in[s->incnt++];
     len |= s->in[s->incnt++] << 8;
-    if (s->in[s->incnt++] != (~len & 0xff) ||
-        s->in[s->incnt++] != ((~len >> 8) & 0xff))
-        return -2;
+    {
+        int chk = cd_stored_byte((int)len, 0, s->in[s->incnt]);
+        s->incnt++;
+        if (chk == (0 - 2))
+            return (0 - 2);
+        chk = cd_stored_byte((int)len, 1, s->in[s->incnt]);
+        s->incnt++;
+        if (chk == (0 - 2))
+            return (0 - 2);
+    }
 
-    if (s->incnt + len > s->inlen)
+    if (cd_room(s->incnt, len, s->inlen, 2) == 2)
         return 2;
     if (s->out != NIL) {
-        if (s->outcnt + len > s->outlen)
+        if (cd_room(s->outcnt, len, s->outlen, 1) == 1)
             return 1;
         while (len--)
             s->out[s->outcnt++] = s->in[s->incnt++];
@@ -399,7 +411,7 @@ static int puff(unsigned char *dest,
 {
     struct state s;
     int last, type;
-    int err;
+    int err = 0;
 
     s.out = dest;
     s.outlen = *destlen;
@@ -415,19 +427,20 @@ static int puff(unsigned char *dest,
     {
 
         do {
+            int pick;
             last = bits(&s, 1);
             type = bits(&s, 2);
             if (cd_bits_err(s.error)) { err = 2; break; }
-            if (cd_puff_type(type) == 0)
-                err = type == 0 ? stored(&s) : type == 1 ? fixed(&s) : dynamic(&s);
-            else
-                err = -1;
-            if (err != 0)
-                break;
-        } while (!last);
+            pick = cd_block_pick(type);
+            if (pick == 0) err = stored(&s);
+            else if (pick == 1) err = fixed(&s);
+            else if (pick == 2) err = dynamic(&s);
+            else err = -1;
+            if (cd_puff_more(err, last) != 1) break;
+        } while (1);
     }
 
-    if (err <= 0) {
+    if (cd_puff_keep(err)) {
         *destlen = s.outcnt;
         *sourcelen = s.incnt;
     }
