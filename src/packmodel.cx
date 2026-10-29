@@ -1,0 +1,85 @@
+#pragma unisa module packmodel
+#pragma unisa use runtime.packagefooter
+#pragma unisa use runtime.codec
+#pragma unisa use runtime.package_decode
+#pragma unisa use runtime.package_lifetime
+#pragma unisa use runtime.model_decode
+#pragma unisa use runtime.modelload
+/* Locate the installed container footer and decode its package directory.
+   Model bodies stay with the stage that asks for them. */
+static void pm_why(char *why, int cap, const char *msg) {
+    int i;
+    if (!why || cap <= 0) return;
+    i = 0;
+    if (msg) while (msg[i] && i + 1 < cap) { why[i] = msg[i]; i = i + 1; }
+    why[i] = 0;
+}
+static void *pm_alloc(void *p, size_t n) { return realloc(p, n ? n : 1); }
+static void pm_drop(void *p) { free(p); }
+static CxPackageDecode pm_dec;
+static int pm_held;
+
+int pm_close(void) {
+    if (pm_held) cxpl_release(&pm_dec.package, pm_drop);
+    pm_held = 0;
+    return 0;
+}
+
+int pm_open(const unsigned char *data, long n, char *why, int cap) {
+    PackageFooter foot;
+    CxCodecCrc crc;
+    const unsigned char *span;
+    const char *msg;
+    if (!data || n < 0) { pm_why(why, cap, "bad argument"); return 4; }
+    if (ml_load(0, 0, 0, 0, 0, 0, 0, 0, 0) != 2) {
+        pm_why(why, cap, "modelload"); return 1;
+    }
+    if (cxcodec_crc_init(&crc)) { pm_why(why, cap, "codec"); return 1; }
+    if (!packagefooter_locate_bytes(data, n, &foot)) {
+        pm_why(why, cap, "bad or missing package footer"); return 1;
+    }
+    if (foot.package_offset < 0 || foot.package_length < 0 ||
+        foot.package_offset > n || foot.package_length > n - foot.package_offset) {
+        pm_why(why, cap, "bad or missing package footer"); return 1;
+    }
+    span = data + foot.package_offset;
+    pm_close();
+    memset(&pm_dec, 0, sizeof pm_dec);
+    pm_dec.allocate = pm_alloc;
+    pm_dec.release = pm_drop;
+    if (cxpk_decode(&pm_dec, span, foot.package_length)) {
+        msg = pm_dec.why ? pm_dec.why : "invalid package input";
+        pm_why(why, cap, msg);
+        cxpl_release(&pm_dec.package, pm_drop);
+        return 1;
+    }
+    pm_held = 1;
+    pm_why(why, cap, 0);
+    return 0;
+}
+
+int pm_model(const char *route, const char *stage, const unsigned char **bytes, long *n,
+             int *raw, unsigned *crc, int *compressed) {
+    int i;
+    CxPackage *p;
+    if (!pm_held || !route || !stage || !bytes || !n || !raw || !crc || !compressed) return 4;
+    p = &pm_dec.package;
+    i = 0;
+    while (i < p->s) {
+        CxPackageStage *s;
+        int mi;
+        s = &p->stages[i];
+        if (!strcmp(s->route, route) && !strcmp(s->name, stage)) {
+            mi = s->model;
+            if (mi < 0 || mi >= p->m) return 1;
+            *bytes = p->b + p->off[mi];
+            *n = p->len[mi];
+            *raw = p->raw[mi];
+            *crc = p->crc[mi];
+            *compressed = p->ver >= 3;
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 2;
+}

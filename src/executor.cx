@@ -1,0 +1,146 @@
+#pragma unisa module executor
+#pragma unisa use core.execute
+#pragma unisa use core.alu
+#pragma unisa use core.transition
+#pragma unisa use core.stack
+#pragma unisa use core.output
+#pragma unisa use core.sparse
+#pragma unisa use core.bytes
+#pragma unisa use runtime.codec
+#pragma unisa use runtime.model_decode
+#pragma unisa use runtime.model_lifetime
+/* Host hooks are defined in host.cx. Image and memory bind stay in bind.cx.
+   -E runs the e2 model and returns its output bytes. */
+int ex_touch(void) {
+    char dig[32];
+    long long next;
+    const char *why;
+    int z;
+    if (core_alu32(0, 1, 2) != 3) return 1;
+    if (core_alu64(0, 1, 2, &z) != 3 || z) return 1;
+    if (core_run_take(0) != 1) return 1;
+    if (core_run_budget(0, 1, &next, &why)) return 1;
+    if (core_decimal(dig, 0) != 1 || dig[0] != '0') return 1;
+    (void)core_stack_push;
+    (void)core_frame_pop;
+    (void)core_memory_get;
+    (void)core_memory_set;
+    (void)core_blob_add;
+    (void)core_resource_find;
+    return 0;
+}
+
+static void ex_why(char *why, int cap, const char *msg) {
+    int i;
+    if (!why || cap <= 0) return;
+    i = 0;
+    if (msg) while (msg[i] && i + 1 < cap) { why[i] = msg[i]; i = i + 1; }
+    why[i] = 0;
+}
+static void *ex_alloc(void *p, size_t n) { return realloc(p, n ? n : 1); }
+static void ex_drop(void *p) { free(p); }
+
+static void ex_model(CoreModel *m, CxModel *src) {
+    memset(m, 0, sizeof *m);
+    m->ns = src->ns;
+    m->nq = src->nq;
+    m->nrg = src->nrg;
+    m->start = src->start;
+    m->isnet = src->isnet;
+    m->str = src->str;
+    m->strl = src->strl;
+    m->qoff = src->qoff;
+    m->qlen = src->qlen;
+    m->qa = src->qa;
+    m->mode = src->smode;
+    m->count = src->rowc;
+    m->keys = src->rowk;
+    m->next = src->rown;
+    m->seq = src->rowq;
+    m->lo = src->nlo;
+    m->hi = src->nhi;
+    m->base_next = src->bn;
+    m->base_seq = src->bq;
+    m->ret_seq = src->rets;
+    m->ret_ok = src->retok;
+}
+
+int ex_pp(const unsigned char *comp, long n, int raw, unsigned crc, int compressed,
+          unsigned char *input, int inputn, const char *src,
+          unsigned char **outb, long *outn, char *why, int cap) {
+    unsigned char *rawb;
+    int own;
+    CxDecode dec;
+    CxCodecCrc ctx;
+    CoreModel model;
+    CoreResult result;
+    uint32_t got;
+    int st;
+    if (!outb || !outn || n < 0 || raw <= 0 || inputn < 0 || (n > 0 && !comp) || (inputn > 0 && !input)) {
+        ex_why(why, cap, "bad argument");
+        return 4;
+    }
+    *outb = 0;
+    *outn = 0;
+    if (raw > 1073741824 || n > 1073741824L) {
+        ex_why(why, cap, "model too large");
+        return 1;
+    }
+    own = 0;
+    rawb = 0;
+    if (compressed) {
+        rawb = malloc((size_t)raw);
+        if (!rawb) { ex_why(why, cap, "out of memory"); return 1; }
+        own = 1;
+        if (cxcodec_inflate(rawb, (unsigned long)raw, comp, (unsigned long)n)) {
+            free(rawb);
+            ex_why(why, cap, "inflate");
+            return 1;
+        }
+        if (cxcodec_crc_init(&ctx) || cxcodec_crc(&ctx, (const char *)rawb, raw, &got) || got != (uint32_t)crc) {
+            free(rawb);
+            ex_why(why, cap, "model crc");
+            return 1;
+        }
+    } else {
+        rawb = (unsigned char *)comp;
+    }
+    memset(&dec, 0, sizeof dec);
+    dec.allocate = ex_alloc;
+    dec.release = ex_drop;
+    if (cxmd_decode(&dec, rawb, raw)) {
+        ex_why(why, cap, dec.why ? dec.why : "invalid model input");
+        cxml_release(&dec.model, ex_drop);
+        if (own) free(rawb);
+        return 1;
+    }
+    if (own) free(rawb);
+    ex_model(&model, &dec.model);
+    memset(&result, 0, sizeof result);
+    st = core_run(&model, input, inputn, src ? src : "", 400000000000LL, &result);
+    if (st) {
+        int lim;
+        int i;
+        char msg[160];
+        lim = 0;
+        if (result.reason) {
+            if (result.reason_n > 0) lim = result.reason_n;
+            else while (result.reason[lim] && lim < 120) lim = lim + 1;
+        }
+        if (lim > 120) lim = 120;
+        i = 0;
+        while (i < lim) { msg[i] = result.reason[i]; i = i + 1; }
+        msg[i] = 0;
+        cxml_release(&dec.model, ex_drop);
+        if (result.err.b) free(result.err.b);
+        free(result.out.b);
+        ex_why(why, cap, msg[0] ? msg : "e2");
+        return st;
+    }
+    cxml_release(&dec.model, ex_drop);
+    if (result.err.b) free(result.err.b);
+    *outb = result.out.b;
+    *outn = result.out.n;
+    ex_why(why, cap, 0);
+    return 0;
+}

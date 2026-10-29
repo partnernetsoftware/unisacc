@@ -1,0 +1,440 @@
+#pragma unisa module drive
+#pragma unisa use host
+#pragma unisa use packmodel
+#pragma unisa use executor
+#pragma unisa use stages
+#pragma unisa use bind
+#pragma unisa use driver.cli
+#pragma unisa use driver.archive
+#pragma unisa use driver.route
+#pragma unisa use driver.deps
+#pragma unisa use driver.input
+#pragma unisa use compiler.bindhost
+#pragma unisa use compiler.bindsym
+#pragma unisa use compiler.hostbind
+#pragma unisa use compiler.asmtext
+/* Command walk, route text, then the model chain.
+   A missing model step prints NOT_IMPLEMENTED and the stop name.
+   ar, as, nm, and objdump stay on the tools already wired. */
+static char dv_in[262144];
+static char dv_obj[1048576];
+static long dv_objn;
+
+static int dv_word(const char *word, int is_object) {
+    int tool;
+    int cli;
+    int src;
+    if (!word) return 4;
+    tool = bx_tool(word);
+    if (tool == 4) return 4;
+    if (tool == 1 || tool == 2 || tool == 3) return tool;
+    cli = bx_cli_word(word);
+    if (cli == 4) return 4;
+    if (cli == 1) return 11;
+    if (cli == 2) return 12;
+    if (cli == 3) return 13;
+    src = bx_more_src(word, is_object);
+    if (src == 4) return 4;
+    if (src == 1) return 20;
+    return 0;
+}
+static int dv_fail(const char *s) {
+    char line[512];
+    if (!s) return 1;
+    if (bx_cli_line(s, line, 512) == 0) {
+        fputs(line, stderr);
+        return 1;
+    }
+    fprintf(stderr, "unisacc: model driver: %s\n", s);
+    return 1;
+}
+static int dv_emit(char *p, long n) {
+    long i;
+    if (!p || n < 0 || dv_objn > 1048576 - n) return 1;
+    i = 0;
+    while (i < n) {
+        dv_obj[dv_objn] = p[i];
+        dv_objn = dv_objn + 1;
+        i = i + 1;
+    }
+    return 0;
+}
+static int dv_read(const char *path, long *n) {
+    FILE *f;
+    long got;
+    if (!path || !n) return 4;
+    f = fopen(path, "rb");
+    if (!f) return 1;
+    got = (long)fread(dv_in, 1, 262143, f);
+    if (fclose(f)) return 1;
+    dv_in[got] = 0;
+    *n = got;
+    return 0;
+}
+static int dv_as(int argc, char **argv) {
+    const char *in;
+    const char *out;
+    char line[256];
+    int i;
+    int arch;
+    int explicit;
+    int head;
+    long n;
+    FILE *f;
+    in = 0;
+    out = "a.out";
+    arch = 0;
+    explicit = 0;
+    i = 2;
+    while (i < argc) {
+        if (argv[i][0] == '-' && argv[i][1]) {
+            if (!strcmp(argv[i], "-o") && i + 1 < argc) {
+                out = argv[i + 1];
+                i = i + 2;
+                continue;
+            }
+            if (!strcmp(argv[i], "-b") && i + 1 < argc) {
+                arch = bx_as_arch(argv[i + 1]);
+                if (arch != 0 && arch != 1) {
+                    fputs(bx_as_targets(), stderr);
+                    return 2;
+                }
+                explicit = 1;
+                i = i + 2;
+                continue;
+            }
+            if (bx_as_opt_line(argv[i], line, 256) == 0) fputs(line, stderr);
+            else fprintf(stderr, "as: unknown option %s\n", argv[i]);
+            return 2;
+        }
+        in = argv[i];
+        i = i + 1;
+    }
+    if (!in) {
+        fputs(bx_as_usage(), stderr);
+        return 2;
+    }
+    if (dv_read(in, &n)) {
+        fprintf(stderr, "as: cannot read %s\n", in);
+        return 1;
+    }
+    dv_objn = 0;
+    if (at_bind(dv_emit)) return 1;
+    head = at_header_arch(dv_in, n);
+    if (explicit && head >= 0 && head != arch) {
+        if (bx_as_head_line(in, line, 256) == 0) fputs(line, stderr);
+        else fprintf(stderr, "as: %s: -S header target conflicts with -b\n", in);
+        return 1;
+    }
+    if (at_asm(dv_in, n, arch)) {
+        if (bx_as_err_line(in, at_line(), at_error(), line, 256) == 0) fputs(line, stderr);
+        else fprintf(stderr, "as: %s:%d: %s\n", in, at_line(), at_error()[0] ? at_error() : "error");
+        return 1;
+    }
+    f = fopen(out, "wb");
+    if (!f) {
+        if (bx_as_write_line(out, line, 256) == 0) fputs(line, stderr);
+        else fprintf(stderr, "as: cannot write %s\n", out);
+        return 1;
+    }
+    if (fwrite(dv_obj, 1, (size_t)dv_objn, f) != (size_t)dv_objn || fclose(f)) {
+        if (bx_as_write_line(out, line, 256) == 0) fputs(line, stderr);
+        else fprintf(stderr, "as: cannot write %s\n", out);
+        return 1;
+    }
+    return 0;
+}
+static int dv_view(int argc, char **argv) {
+    int dis;
+    const char *path;
+    char line[256];
+    long n;
+    dis = argv[1][0] == 'o';
+    if (dis ? (argc != 4 || strcmp(argv[2], "-d")) : argc != 3) {
+        fputs(bx_view_usage(dis), stderr);
+        return 2;
+    }
+    path = argv[dis ? 3 : 2];
+    if (dv_read(path, &n)) {
+        fprintf(stderr, "%s: cannot read %s\n", dis ? "objdump" : "nm", path);
+        return 1;
+    }
+    dv_objn = 0;
+    if (at_bind(dv_emit)) return 1;
+    if (dis ? at_dis(dv_in, n) : at_nm(dv_in, n)) {
+        if (bx_view_err_line(dis, path, at_error(), line, 256) == 0) fputs(line, stderr);
+        else fprintf(stderr, "%s: %s: %s\n", dis ? "objdump" : "nm", path, at_error());
+        return 1;
+    }
+    if (dv_objn) fwrite(dv_obj, 1, (size_t)dv_objn, stdout);
+    return 0;
+}
+static int dv_ar(int argc, char **argv) {
+    char why[128];
+    if (argc < 4) {
+        fputs(bx_ar_usage(), stderr);
+        return 2;
+    }
+    if (cxr_operation(argv[2], why, 128)) {
+        fputs(why, stderr);
+        return 2;
+    }
+    return 2;
+}
+static int dv_cx(const char *s) {
+    int n;
+    if (!s) return 0;
+    n = 0;
+    while (s[n]) n = n + 1;
+    if (n >= 3 && s[n - 3] == '.' && s[n - 2] == 'c' && s[n - 1] == 'x') return 1;
+    return 0;
+}
+static void dv_time(const char *phase, long long a, long long b) {
+    const char *env;
+    env = getenv("UNISACC_RR_TIME");
+    if (!env || !env[0] || a < 0 || b < 0) return;
+    fprintf(stderr, "RR_TIME %s ns=%lld\n", phase, b - a);
+}
+
+int dv_main(int argc, char **argv) {
+    static CxcState opts;
+    char why[128];
+    const char *src;
+    const char *text;
+    const char *shown;
+    static char objname[520];
+    unsigned char *gotb;
+    unsigned char *pkg;
+    long gotn;
+    long pkgn;
+    int i;
+    int next;
+    int parsed;
+    int kind;
+    int nsrc;
+    char cont[512];
+    char gap[32];
+    char preason[128];
+    long long t0;
+    long long t1;
+    src = 0;
+    nsrc = 0;
+    if (argc < 2) return dv_fail(bx_src_why(0));
+    kind = dv_word(argv[1], 0);
+    if (kind == 1) return dv_ar(argc, argv);
+    if (kind == 2) return dv_as(argc, argv);
+    if (kind == 3) return dv_view(argc, argv);
+    if (cxc_default_run(&opts, argv, argc, why, 128)) return dv_fail(why);
+    i = 1;
+    while (i < argc) {
+        next = i;
+        parsed = cxc_step(&opts, argv, argc, &next, why, 128);
+        if (parsed == 0) {
+            i = next;
+            continue;
+        }
+        if (parsed == 5 || parsed == 7) return dv_fail(why);
+        if (parsed != 1) return dv_fail(why);
+        kind = dv_word(argv[i], 0);
+        if (kind == 11) {
+            text = "0.0.43";
+            printf("unisacc %s\n", text);
+            return 0;
+        }
+        if (kind == 12) {
+            text = "unisacc FILE [-S|-c|-o FILE|-run]\nDiagnostic, non-stable: --emit-host-symbols FILE (-S/-c/-o, not -run)\nDiagnostic, non-stable: --host-provider FILE (12-byte capability filter; no addresses)\n";
+            printf("%s", text);
+            return 0;
+        }
+        if (kind == 13) break;
+        if (bx_opt_dash(argv[i]) == 1) return dv_fail(bx_opt_why(opts.defrun, src));
+        if (!src) src = argv[i];
+        nsrc = nsrc + 1;
+        i = i + 1;
+    }
+    if (!src) return dv_fail(bx_src_why(0));
+    shown = opts.out;
+    gotb = 0;
+    gotn = 0;
+    pkg = 0;
+    pkgn = 0;
+    {
+        CxtIn in;
+        CxtOut outv;
+        char why2[512];
+        char route[96];
+        const char *tgt;
+        int mode2;
+        int runit2;
+        int clear2;
+        int need;
+        int obj;
+        int asmw;
+        int rc;
+        mode2 = opts.mode;
+        need = 0;
+        obj = 0;
+        asmw = 0;
+        rc = cxt_object(opts.mode, opts.sawc, opts.sawS, opts.funit, opts.target, opts.out, 0, &mode2, &need, &obj, &asmw, why2, 512);
+        if (rc == 4) {
+            fputs(why2, stderr);
+            return 1;
+        }
+        if (rc) return dv_fail(why2);
+        tgt = opts.target;
+        runit2 = opts.runit;
+        clear2 = 0;
+        in.mode = mode2;
+        in.level = opts.level;
+        in.warnings = opts.warnings;
+        in.nsources = nsrc;
+        in.runit = runit2;
+        in.emitbin = opts.emitbin;
+        in.deponly = opts.deponly;
+        in.src_tape = 0;
+        in.src_tapebin = 0;
+        in.linking = 0;
+        in.single = 0;
+        in.exec_restart = 0;
+        in.target = tgt;
+        in.native = "lnx/x86_64";
+        in.linked_target = 0;
+        in.only_target = 0;
+        outv.target = &tgt;
+        outv.mode = &mode2;
+        outv.runit = &runit2;
+        outv.clear_deps = &clear2;
+        rc = cxt_decide(&in, &outv, why2, 512);
+        if (rc == 4) {
+            fputs(why2, stderr);
+            return 1;
+        }
+        if (rc) return dv_fail(why2);
+        if (bx_diag_opt(opts.host_symbols_path, opts.host_provider_path, hb_target_id(tgt), mode2, opts.emitbin, asmw))
+            return dv_fail("bind: diagnostic option mode/target not supported");
+        if (bx_diag_run(opts.host_symbols_path, runit2))
+            return dv_fail("bind: --emit-host-symbols cannot be used with -run or stdout");
+        rc = cxt_text(tgt, mode2, nsrc, opts.warnings, opts.level, route, 96, why2, 512);
+        if (rc) return dv_fail(why2);
+        if (need) {
+            rc = cxd_default_target(src, objname, 520, why2, 512);
+            if (rc) return dv_fail(why2);
+            shown = objname;
+        }
+        (void)shown;
+        (void)obj;
+        {
+            char reason[128];
+            char line[512];
+            int act;
+            const char *shown_in;
+            t0 = hs_ns();
+            rc = cxi_read(src, &gotb, &gotn, reason, 128);
+            t1 = hs_ns();
+            dv_time("read", t0, t1);
+            act = bx_read_act(rc);
+            if (act == 1) {
+                if (bx_read_open_line(src, reason, line, 512) == 0) fputs(line, stderr);
+                else fprintf(stderr, "unisacc: error: cannot open %s%s%s\n", src, reason[0] ? ": " : "", reason);
+                return 1;
+            }
+            if (act == 2) {
+                shown_in = bx_read_stdin(src) == 1 ? "stdin" : src;
+                if (bx_read_fail_line(shown_in, line, 512) == 0) fputs(line, stderr);
+                else fprintf(stderr, "run: cannot read %s\n", shown_in);
+                fputs("run: cannot read input\n", stderr);
+                return 1;
+            }
+            if (act) {
+                fprintf(stderr, "run: %s\n", bx_read_die(act));
+                return 1;
+            }
+            if (gotn > 2147483647L) {
+                free(gotb);
+                fprintf(stderr, "run: %s\n", bx_read_die(4));
+                return 1;
+            }
+        }
+        if (ex_touch()) {
+            free(gotb);
+            fputs("unisacc: model driver: alu\n", stderr);
+            return 1;
+        }
+        if (bd_touch()) {
+            free(gotb);
+            fputs("unisacc: model driver: bind\n", stderr);
+            return 1;
+        }
+        if (st_touch()) {
+            free(gotb);
+            fputs("unisacc: model driver: stages\n", stderr);
+            return 1;
+        }
+        if (hs_container(cont, 512) || hs_read(cont, &pkg, &pkgn, preason, 128)) {
+            free(gotb);
+            fprintf(stderr, "unisacc: model driver: package %s\n", preason[0] ? preason : "cannot open");
+            return 1;
+        }
+        t0 = hs_ns();
+        rc = pm_open(pkg, pkgn, preason, 128);
+        t1 = hs_ns();
+        dv_time("package", t0, t1);
+        if (rc) {
+            free(pkg);
+            free(gotb);
+            fprintf(stderr, "unisacc: model driver: %s\n", preason[0] ? preason : "package");
+            return 1;
+        }
+        if (st_gap(mode2, opts.level, nsrc, dv_cx(src), gap, 32)) {
+            pm_close();
+            free(pkg);
+            free(gotb);
+            return 1;
+        }
+        if (!strcmp(gap, "e2")) {
+            const unsigned char *mb;
+            unsigned char *body;
+            long mn;
+            long bodyn;
+            int raw;
+            int compressed;
+            unsigned crcsum;
+            int pr;
+            mb = 0;
+            body = 0;
+            mn = 0;
+            bodyn = 0;
+            raw = 0;
+            compressed = 0;
+            crcsum = 0;
+            pr = pm_model(route, "e2", &mb, &mn, &raw, &crcsum, &compressed);
+            if (pr) {
+                pm_close();
+                free(pkg);
+                free(gotb);
+                fputs("unisacc: model driver: e2 model\n", stderr);
+                return 1;
+            }
+            pr = ex_pp(mb, mn, raw, crcsum, compressed, gotb, (int)gotn, src, &body, &bodyn, preason, 128);
+            pm_close();
+            free(pkg);
+            free(gotb);
+            if (pr) {
+                fprintf(stderr, "unisacc: model driver: %s\n", preason[0] ? preason : "e2");
+                return 2;
+            }
+            if (bodyn && fwrite(body, 1, (size_t)bodyn, stdout) != (size_t)bodyn) {
+                free(body);
+                return 1;
+            }
+            free(body);
+            return 0;
+        }
+        fprintf(stderr, "route=%s\n", route);
+        fprintf(stderr, "NOT_IMPLEMENTED %s\n", gap);
+        pm_close();
+        free(pkg);
+        free(gotb);
+        return 2;
+    }
+}

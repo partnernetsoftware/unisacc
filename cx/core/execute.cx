@@ -3,10 +3,7 @@
 /* Generic machine interface. No compiler, file format or OS semantics.
    Models are immutable, decoded arrays owned by the loader. One execution
    may be active at a time; all working state is discarded on return. */
-#ifndef UNISA_EXEC_CORE_H
-#define UNISA_EXEC_CORE_H
 #define CORE_ACTION_ARITIES 0,1,1,2,2,4,4,2,2,1,3,3,1,1,0,0,1,1,2,0,0,1,2,2,3,0,1,1,1,1,0,3,3,1,1,2,0,0,1,2,1,1,1,1,2,1,1,1,0,0,1,4,4,2,2,1
-#ifndef __ASSEMBLER__
 typedef int64_t I;
 enum { ADV, MARK, JUMP, LDI, COPYW, ALU, ALUI, CMP, CMPI, RLD, LDX, STX, CORE_OUT, OUTW, COPY, COPYT,
        SPAN, SPANT, SPAN2, OLAST, ODROP, OLEN, OCUT, ORES, OFILL, OCLR, OSEL, SETOT, XATTR, PUSH, POP,
@@ -34,9 +31,10 @@ typedef struct {
     int *ret_seq; unsigned char **ret_ok;   /* declared returns; ret_ok[q] may be NULL */
 } CoreModel;
 /* Host linkage: absent=0, borrowed=1, malloc-owned=2. No key syntax
-   is interpreted by the core; even NUL bytes are ordinary key bytes. */
-int core_host_fetch(const unsigned char *key,int n,unsigned char **bytes,int *len);
-void core_host_panic(const char *reason); /* fatal; must not return */
+   is interpreted by the core; even NUL bytes are ordinary key bytes.
+   core_host_fetch and core_host_panic are supplied by the host.
+   A file-scope prototype would be exported without a definition, so
+   each call uses a block extern. The C header remains exec/c/core.h. */
 typedef struct { Buf out, err; const char *reason; int reason_n; } CoreResult;
 /* Mutable state shared with the action engine. Byte owners are cleaned up by
    core_run; model/result and the original input are borrowed. */
@@ -48,38 +46,25 @@ typedef struct {
     CoreStack stack; CoreFrames frames; CoreMemory memory;
     CoreBlobs blobs; CoreIntern strings; CoreResources resources;
 } CoreMachine;
-const char *core_transition(const CoreModel *m, int q, int key, int *nx, int *sq);
-int core_run(const CoreModel *m, unsigned char *input,
-             int inputn, const char *src, I maxsteps, CoreResult *result);
-#endif /* C interface */
-#endif
 /* The complete C execution kernel: inference, actions and their working
    storage. Loader, IO, route selection and diagnostic printing are outside.
    libc memory primitives are linked dependencies, not hidden compiler rules. */
-static void core_die(const char *s) { core_host_panic(s); abort(); }
+static void core_die(const char *s) {{extern void core_host_panic(const char *);core_host_panic(s);}abort();}
 static void *core_alloc(void *p,size_t n) { p=realloc(p,n ? n : 1); if (!p) core_die("out of memory"); return p; }
 
-int core_decimal(char *s,I v);
-int core_field_fill(Buf *o,I at,I width,I value);
 #define decimal core_decimal
 #define field_fill core_field_fill
 /* The selected bank is sparse evaluation of a one-hot state-conditioned net.
    Each hidden activation is H(key-threshold); output weights are signed.
    No answer table is materialised. int weights/count bound sums within int64. */
 /* ---- byte buffers ---- */
-void core_buffer_put(Buf *o,int c,I at);
 #define core_put core_buffer_put
 
 /* ---- W: registers and the indexed memory (a hash map) ---- */
-I core_memory_get(const CoreMemory *m,I k);
-void core_memory_set(CoreMemory *m,I k,I v);
 #define core_mget core_memory_get
 #define core_mset core_memory_set
 
 /* ---- blobs and interning ---- */
-int core_blob_add(CoreBlobs *t,const unsigned char *b,int n);
-I core_string_intern(CoreIntern *t,const unsigned char *b,int n);
-int core_resource_find(CoreResources *t,CoreBlobs *bs,const unsigned char *p,int n);
 #define core_badd core_blob_add
 #define core_rfind core_resource_find
 #define core_intern core_string_intern
@@ -88,14 +73,8 @@ int core_resource_find(CoreResources *t,CoreBlobs *bs,const unsigned char *p,int
 #define CORE_TRANSITION_NAME core_transition
 #endif
 
-I core_alu32(int op,I a,I b);
-I core_alu64(int op,I a,I b,int *z);
 #define alu32 core_alu32
 #define alu64 core_alu64
-void core_stack_push(CoreStack *s,int value);
-void core_stack_pop(CoreStack *s);
-void core_frame_push(CoreFrames *s,const CoreFrame *value);
-void core_frame_pop(CoreFrames *s);
 #define stack_push core_stack_push
 #define stack_pop core_stack_pop
 #define frame_push core_frame_push
@@ -103,7 +82,20 @@ void core_frame_pop(CoreFrames *s);
 #ifndef CORE_ACTION_LINKAGE
 #define CORE_ACTION_LINKAGE static
 #endif
-CORE_ACTION_LINKAGE int action_run(CoreMachine *s,const I *a) {
+static int action_run(CoreMachine *s,const I *a) {
+    extern I core_alu32(int,I,I);
+    extern I core_alu64(int,I,I,int *);
+    extern I core_memory_get(const CoreMemory *,I);
+    extern void core_memory_set(CoreMemory *,I,I);
+    extern void core_buffer_put(Buf *,int,I);
+    extern int core_blob_add(CoreBlobs *,const unsigned char *,int);
+    extern int core_field_fill(Buf *,I,I,I);
+    extern void core_stack_push(CoreStack *,int);
+    extern void core_stack_pop(CoreStack *);
+    extern I core_string_intern(CoreIntern *,const unsigned char *,int);
+    extern void core_frame_push(CoreFrames *,const CoreFrame *);
+    extern void core_frame_pop(CoreFrames *);
+    extern int core_resource_find(CoreResources *,CoreBlobs *,const unsigned char *,int);
     const CoreModel *m=s->model; CoreResult *result=s->result; I *R=s->regs;
     CoreFrame *F=&s->frames.entries[s->frames.n-1]; int op=(int)a[0];
     switch (op) {
@@ -184,26 +176,28 @@ CORE_ACTION_LINKAGE int action_run(CoreMachine *s,const I *a) {
     return 0;
 }
 /* Step decisions live in cx/core/transition.cx, which is linked beside this
- * object. Allocation, the transition call and actions stay here. */
-int core_run_budget(long long steps, long long maxsteps, long long *next, const char **why);
-int core_run_key(int mode, int stack_n, int stack_top, long long i, long long end, int byte, long long r);
-int core_run_stop(const char *reason, int nx, const char **out);
-int core_run_take(int status);
-
-/* Run one model; all mutable ownership is explicit and invocation-local. */
+ * object. Allocation, the transition call and actions stay here.
+ * Run one model; all mutable ownership is explicit and invocation-local. */
 #ifndef CORE_RUN_NAME
 #define CORE_RUN_NAME core_run
 #endif
-int CORE_RUN_NAME(const CoreModel *m,unsigned char *input,
+int core_run(const CoreModel *m,unsigned char *input,
              int inputn,const char *src,I maxsteps,CoreResult *result) {
+    extern int core_blob_add(CoreBlobs *,const unsigned char *,int);
+    extern void core_frame_push(CoreFrames *,const CoreFrame *);
+    extern int core_run_budget(long long,long long,long long *,const char **);
+    extern int core_run_key(int,int,int,long long,long long,int,long long);
+    extern const char *CORE_TRANSITION_NAME(const CoreModel *,int,int,int *,int *);
+    extern int core_run_stop(const char *,int,const char **);
+    extern int core_run_take(int);
     memset(result,0,sizeof *result);
     CoreMachine s={0}; s.model=m; s.result=result; s.input=input; s.x=input;
     s.regs=calloc(m->nrg+1,sizeof(I));
-    if (!s.regs) core_host_panic("out of memory");
+    if (!s.regs) {extern void core_host_panic(const char *);core_host_panic("out of memory");}
     core_badd(&s.blobs,(const unsigned char *)"",0);
     core_badd(&s.blobs,(const unsigned char *)src,(int)strlen(src));
     s.xattr=calloc(inputn+1,sizeof(I)); s.xn=inputn;
-    if (!s.xattr) core_host_panic("out of memory");
+    if (!s.xattr) {extern void core_host_panic(const char *);core_host_panic("out of memory");}
     CoreFrame first; first.b=s.x; first.at=s.xattr; first.i=0; first.end=s.xn;
     frame_push(&s.frames,&first);
     I steps=0; int q=m->start;

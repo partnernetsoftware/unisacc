@@ -1,0 +1,91 @@
+#pragma unisa module host
+/* Host file and clock. time.h is not in the prelude (edition 2).
+   clock_gettime is declared inside hs_ns so this module does not export it.
+   core_host_panic and core_host_fetch are the execution core's host hooks.
+   Fetch stays absent until a resource bind exists. */
+struct hs_ts { long sec; long nsec; };
+
+static void hs_why(char *why, int cap, const char *msg) {
+    int i;
+    if (!why || cap <= 0) return;
+    i = 0;
+    if (msg) while (msg[i] && i + 1 < cap) { why[i] = msg[i]; i = i + 1; }
+    why[i] = 0;
+}
+
+int hs_container(char *dst, int cap) {
+    const char *e;
+    int i;
+    if (!dst || cap <= 0) return 4;
+    e = getenv("UNISA_CONTAINER");
+    if (!e || !e[0]) e = "unisacc.com";
+    i = 0;
+    while (e[i] && i + 1 < cap) { dst[i] = e[i]; i = i + 1; }
+    if (e[i]) { dst[0] = 0; return 1; }
+    dst[i] = 0;
+    return 0;
+}
+
+int hs_read(const char *path, unsigned char **out, long *n, char *why, int cap) {
+    FILE *f;
+    unsigned char *b;
+    unsigned char *nb;
+    long len;
+    long room;
+    long nroom;
+    size_t got;
+    if (!path || !out || !n) return 4;
+    *out = 0;
+    *n = 0;
+    f = fopen(path, "rb");
+    if (!f) { hs_why(why, cap, "cannot open"); return 1; }
+    b = 0;
+    len = 0;
+    room = 0;
+    for (;;) {
+        if (len == room) {
+            if (room > 1073741824L) {
+                free(b); fclose(f); hs_why(why, cap, "file too large"); return 1;
+            }
+            nroom = room ? room * 2 : 4096;
+            nb = realloc(b, (size_t)nroom);
+            if (!nb) {
+                free(b); fclose(f); hs_why(why, cap, "out of memory"); return 1;
+            }
+            b = nb;
+            room = nroom;
+        }
+        got = fread(b + len, 1, (size_t)(room - len), f);
+        len = len + (long)got;
+        if (got == 0) break;
+    }
+    if (ferror(f)) {
+        free(b); fclose(f); hs_why(why, cap, "cannot read"); return 1;
+    }
+    if (fclose(f)) { free(b); hs_why(why, cap, "cannot close"); return 1; }
+    *out = b;
+    *n = len;
+    hs_why(why, cap, 0);
+    return 0;
+}
+
+long long hs_ns(void) {
+    struct hs_ts ts;
+    int clock_gettime(int, struct hs_ts *);
+    if (clock_gettime(1, &ts)) return -1;
+    return (long long)ts.sec * 1000000000LL + (long long)ts.nsec;
+}
+
+void core_host_panic(const char *reason) {
+    fputs(reason ? reason : "panic", stderr);
+    fputc('\n', stderr);
+    exit(1);
+}
+
+int core_host_fetch(const unsigned char *key, int n, unsigned char **bytes, int *len) {
+    (void)key;
+    (void)n;
+    if (bytes) *bytes = 0;
+    if (len) *len = 0;
+    return 0;
+}
