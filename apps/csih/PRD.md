@@ -140,7 +140,8 @@ agent 模式新增 `/help`、`/status`、`/clear`，均只在本地处理、不�
   - `/help` 原来一行超过 240 字节的日志上限会被截断，拆成两行。
   - 注意：`/new` 只清转录，不清 mind 两页；模型若把内容存进宫殿，新上下文仍读得到。
 - **第七批已落地（2026-10-29）**：输入超出一行宽度时，显示窗口跟着光标滑动，左边被挤出的部分画成 `…`。原来超宽时尾部被直接截掉，正在打的字反而看不见；而且折叠缓冲只有 600 字节，长输入在这一步就丢了尾部，现在放大到能装下整个输入。selftest：`long input scrolls to keep the cursor visible`；tmux 实测中文长句：行尾可见，Ctrl-A 后回到行首。
-- 下一批候选：正文流式显示；转录按 cwd 分开；exec 三档权限；P0 根治（引用原文，由 harness 定位）。
+- **第八批已落地（2026-10-29）**：成功行从 `↻ 本轮结束 rounds=1 actions=3 · 已答 · semantic acceptance (work): …` 改为 `✓ 已验收 · 本轮结束 1 轮 3 步 · 理由`（未经评审接受的写 `✓ 已答`，没有答复的写 `✓ 已结束（未作答）`），与 `◐`/`✗` 一起凑齐三态。保留「本轮结束」四字，因为 `probes/reload_runtime.py` 靠它判断一轮结束。selftest：`accepted row reads ✓ 已验收 and keeps 本轮结束`；tmux 实测：`✓ 已验收 · 本轮结束 1 轮 1 步 · exec ran date +%Y, exit 0, …`。
+- 下一批候选：正文流式显示；转录按 cwd 分开；exec 三档权限；P0 根治（引用原文，由 harness 定位）；评审理由是英文，可要求评审用中文。
 - 自迭代：改 `apps/csih` 源后 `/reload` 自动跑 `csih.sh prepare`，绿了再换进程（复用现有 reload 链）。
 
 ### P3 以后

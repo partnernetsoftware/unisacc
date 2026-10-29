@@ -2197,6 +2197,18 @@ static void tui_result_row(char *out, size_t cap, const agent_result *r) {
     snprintf(out, cap, soft ? "◐ 做完未验证: %s" : "✗ 失败: %s", why);
 }
 
+/* The success row: ✓ 已验收 when the judge accepted, else ✓ 已答.
+ * Keeps "本轮结束" (probes wait for it) and drops the judge's English tag. */
+static void tui_done_row(char *out, size_t cap, const agent_result *r) {
+    const char *why = r->reason[0] ? r->reason : "";
+    const char *tag = r->acceptance == AGENT_ACCEPT_ACCEPTED ? "✓ 已验收" : "✓ 已答";
+    const char *colon = strstr(why, "): ");
+    if (!strncmp(why, "semantic acceptance", 19) && colon) why += colon - why + 3;
+    if (!r->answer[0]) tag = "✓ 已结束（未作答）";
+    snprintf(out, cap, "%s · 本轮结束 %d 轮 %d 步%s%s", tag, r->rounds, r->actions,
+             why[0] ? " · " : "", why);
+}
+
 /* Model · cwd · key source, so a bad key or wrong place shows at a glance. */
 static void tui_title_info(char *out, size_t cap, const char *model, const char *cwd) {
     int len = 0, src = net_deepseek_key_probe(&len);
@@ -2767,18 +2779,7 @@ static void tui_turn_done(tui_state *st) {
                  r.answer[0] ? r.answer : "(no answer text)");
         {
             char sum[240];
-            /* The answer text is already the ✓ row. This line is only the
-             * round result, so a long answer is not cut mid-sentence. */
-            if (r.answer[0])
-                snprintf(sum, sizeof sum,
-                         "↻ 本轮结束 rounds=%d actions=%d · 已答 · %s",
-                         r.rounds, r.actions,
-                         r.reason[0] ? r.reason : "已结束");
-            else
-                snprintf(sum, sizeof sum,
-                         "↻ 本轮结束 rounds=%d actions=%d · 未作答，动作 %d 次 · %s",
-                         r.rounds, r.actions, r.actions,
-                         r.reason[0] ? r.reason : "已结束");
+            tui_done_row(sum, sizeof sum, &r);
             tui_log_plain(st, sum);
         }
     }
@@ -4039,6 +4040,13 @@ int tui_entry(int argc, char **argv) {
             tui_result_row(row, sizeof row, &rr);
             if (strcmp(row, "✗ 失败: http 401")) { printf("FAIL failed row: %s\n", row); failures++; }
             else printf("  ok   failed row uses ✗ 失败\n");
+            memset(&rr, 0, sizeof rr);
+            rr.ok = 1; rr.rounds = 1; rr.actions = 3; rr.acceptance = AGENT_ACCEPT_ACCEPTED;
+            snprintf(rr.answer, sizeof rr.answer, "done");
+            snprintf(rr.reason, sizeof rr.reason, "semantic acceptance (work): records match");
+            tui_done_row(row, sizeof row, &rr);
+            if (strcmp(row, "✓ 已验收 · 本轮结束 1 轮 3 步 · records match")) { printf("FAIL done row: %s\n", row); failures++; }
+            else printf("  ok   accepted row reads ✓ 已验收 and keeps 本轮结束\n");
         }
         {
             static tui_state ti;
