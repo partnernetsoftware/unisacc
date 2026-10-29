@@ -1,5 +1,9 @@
 #pragma unisa module host
+#include <sys/mman.h>
+#include <dlfcn.h>
 /* Host file and clock. time.h is not in the prelude (edition 2).
+   This is the only layer that includes a host header. mmap, mprotect,
+   and the four loader symbols stay here.
    clock_gettime is declared inside hs_ns so this module does not export it.
    core_host_panic and core_host_fetch are the execution core's host hooks.
    Drive-supplied CLI resources win, then package resources (predefines and
@@ -451,4 +455,72 @@ int core_host_fetch(const unsigned char *key, int n, unsigned char **bytes, int 
         key[4] == '/' && (key[5] == 'q' || key[5] == 'a') && key[6] == '/')
         return hs_file(key + 7, n - 7, bytes, len);
     return 0;
+}
+
+int hs_le64(unsigned char *dst, unsigned long long v) {
+    int i;
+    if (!dst) return 4;
+    i = 0;
+    while (i < 8) {
+        dst[i] = (unsigned char)(v & 255ull);
+        v = v >> 8;
+        i = i + 1;
+    }
+    return 0;
+}
+
+int hs_dl_le(int slot, unsigned char *dst) {
+    unsigned long long v;
+    if (!dst || slot < 0 || slot > 3) return 4;
+    if (slot == 0) v = (unsigned long long)(uintptr_t)dlopen;
+    else if (slot == 1) v = (unsigned long long)(uintptr_t)dlsym;
+    else if (slot == 2) v = (unsigned long long)(uintptr_t)dlclose;
+    else v = (unsigned long long)(uintptr_t)dlerror;
+    return hs_le64(dst, v);
+}
+
+int hs_reserve(unsigned char **base, long *reserved) {
+    void *p;
+    long n;
+    if (!base || !reserved) return 4;
+    *base = 0;
+    *reserved = 0;
+    n = 2147467264L;
+    p = mmap(0, (size_t)n, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (p == MAP_FAILED || !p) return 1;
+    *base = (unsigned char *)p;
+    *reserved = n;
+    return 0;
+}
+
+int hs_release(unsigned char *base, long reserved) {
+    if (!base || reserved < 0) return 4;
+    if (munmap(base, (size_t)reserved)) return 1;
+    return 0;
+}
+
+int hs_commit(unsigned char *base, long size) {
+    if (!base || size < 0) return 4;
+    if (mprotect(base, (size_t)size, PROT_READ | PROT_WRITE)) return 1;
+    return 0;
+}
+
+int hs_copy_image(unsigned char *base, long dataoff, const unsigned char *bytes, long text, long stored) {
+    if (!base || !bytes || dataoff < 0 || text < 0 || stored < 0) return 4;
+    memcpy(base, bytes + 40, (size_t)text);
+    if (stored) memcpy(base + dataoff, bytes + 40 + text, (size_t)stored);
+    return 0;
+}
+
+int hs_protect_code(unsigned char *base, long dataoff) {
+    if (!base || dataoff < 0) return 4;
+    if (mprotect(base, (size_t)dataoff, PROT_READ | PROT_EXEC)) return 1;
+    return 0;
+}
+
+int hs_enter(unsigned char *base, int entryoff) {
+    int (*entry)(long, long);
+    if (!base || entryoff < 0) return 1;
+    entry = (int (*)(long, long))(base + entryoff);
+    return entry(0, 0);
 }

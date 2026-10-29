@@ -1537,6 +1537,27 @@ flowchart TD
 
 这不是产品安装。`-run` 的内存进入还没有。整棵重写还没完成。
 
+## 67. 2026-10-30 单源 -run 与入口闭包
+
+入口不再 `#pragma unisa use` `compiler.bindhost`、`compiler.bindsym`、`compiler.hostbind`。这三个里面，bindhost 的 `use` 把 srcgate、tapegate、prunegate、frontparse、frontpp、backlower、backimage、optgate、backencode、libgate、compilergate、rungate、bindpure、maingate、imagegate、optmore、linkmore、parsemore、floatgate、boundgate、libtype、codecgate、libsig、memgate、leword 拖进闭包。入口实际只调用其中一批纯函数。这些函数放到新文件 `src/entrybind.cx`，不 `use` 任何 gate。原三份文件没改，产品检查仍走它们。布局改 `use runtime.memlayout`，调用 `mem_image`、`mem_place`、`mem_span_ok`。不再在 `drive.cx` 里抄这三份算法。
+
+`sh ./unisacc.com -cx-plan src/unisacc.cx` 退出 0，37 行。上限仍是 64。还在闭包里的 `src/core/coregate.cx` 来自 `core.execute` 和 `core.transition`。`src/runtime/compiler/bindstage.cx` 来自 `runtime.package_decode`。这两份不是 bindhost 那条死链。
+
+自举：`sh ./tools/bound 55 sh ./unisacc.com -o /tmp/grk-cx-line/entry src/unisacc.cx` 退出 0，stdout 和 stderr 都是 0。冷耗时 33665829161 纳秒（33.666 秒）。产物 891211 字节，权限 0755，`file` 是动态链接 ELF。这次没设 `UNISACC_RR_TIME`，最慢阶段记 UNMEASURED。上一只冷耗时约 52 秒、1331445 字节。
+
+`-run` 在 `lower` 之后保留已打开的包，再走 `目标/memory`。`host.cx` 做 `mmap` 预留、`mprotect` 提交、按 UNIMEM1 拷贝、代码段改成读和执行、然后 `entry(0, 0)`。只有这一层 `#include <sys/mman.h>` 和 `<dlfcn.h>`。`process/argc` 与 `process/argv` 在编译路线期间发布。`memory/text`、`memory/reserve` 和四个 `process/dl` 在 memory 路线期间发布。多单元 `-run` 仍是 `NOT_IMPLEMENTED`。转发重启没做。
+
+非仓根 `/tmp/notrepo`、没设 `UNISA_CONTAINER`、入口旁有 `unisacc.com`。对照已装产品，这一只上：
+
+- `macro.c -S -o`：文件 758/758，权限 0755/0755，stdout 0，stderr 0，退出 0/0。
+- `macro.c -o`：文件 4096/4096，权限 0755/0755，stdout 0，stderr 0，退出 0/0。
+- `macro.c -run`：stdout 0，stderr 0，退出 3/3。
+- `empty.cx -run`：stdout 0，stderr 0，退出 0/0。
+- `examples/hello.c -run`：stdout 13/13，stderr 0，退出 0/0。
+- `argc.c -run`：退出 1/1。`argc.c -run -- a b`：退出 3/3。`argv.c -run -- hi`：stdout 相同，退出 2/2。源路径是 argv[0]，`--` 后面是程序参数。
+
+六目标 `-o`/`-S`、多单元、四个 `-run` 里的多单元，都没在这只上重跑。矩阵文件没改。这不是产品安装。
+
 ## 64. 2026-10-29 编译器纯拒绝接到 bindhost
 
 `compiler.c` 里剩余的纯拒绝改走已有的 `bindhost`。新函数是 `bx_compat_why`、`bx_opt_dash`、`bx_opt_why`、`bx_src_why`、`bx_mix_why`、`bx_tape_need`、`bx_tape_why`、`bx_tapebin_bad`、`bx_tapebin_why`、`bx_name_fit`、`bx_name_why`、`bx_cache_why`、`bx_frame_fit`、`bx_frame_why`、`bx_encode_bad`、`bx_encode_why`、`bx_route_why`、`bx_model_why`。没有新模块。`use` 仍是 32，构造表没有新增参数。`snprintf`、解码、编码和 `clierror` 仍在 C。宿主切片下标仍是 APE 71、本机 70。这次没有实跑 hostseed。`sh ./unisacc.com tools/check-compiler-units.cx` 又两次退出 0，两次 stdout 相同，两次 stderr 相同，都打印 `CHECK_COMPILER_UNITS failed=0`。这次检查直接调用这些函数，没有编译 `compiler.c`。这不是产品安装、六目标或 `--all`。整棵重构还没完成。

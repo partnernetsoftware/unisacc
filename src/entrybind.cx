@@ -1,0 +1,220 @@
+#pragma unisa module entrybind
+/* Entry subset of compiler.bindhost, compiler.bindsym, and compiler.hostbind.
+   Those three pull the archived gate chain (srcgate through bindstage).
+   The entry does not. No libc and no include. */
+static int bx_nz(int v) {
+    return v != 0;
+}
+static int bx_eq(const char *a, const char *b) {
+    int i;
+    i = 0;
+    while (a[i] && a[i] == b[i]) i++;
+    return a[i] == b[i];
+}
+static int bx_nlen(const char *s) {
+    int n;
+    n = 0;
+    while (s[n]) n++;
+    return n;
+}
+static int bx_part(const char *s) {
+    if (!s) return 0;
+    return bx_nlen(s);
+}
+static int bx_need(int *need, int more) {
+    if (more < 0 || *need < 0 || more > 2147483647 - *need) return 1;
+    *need = *need + more;
+    return 0;
+}
+static void bx_put(char *out, int *at, const char *s) {
+    int i;
+    i = 0;
+    while (s[i]) { out[*at] = s[i]; *at = *at + 1; i++; }
+}
+static int bx_join5(const char *a, const char *b, const char *c, const char *d, const char *e, char *out, int cap) {
+    int need, at;
+    need = 0;
+    if (!out || cap < 1) return 4;
+    if (bx_need(&need, bx_part(a)) || bx_need(&need, bx_part(b)) || bx_need(&need, bx_part(c)) || bx_need(&need, bx_part(d)) || bx_need(&need, bx_part(e))) return 1;
+    if (need >= cap) return 1;
+    at = 0;
+    if (a) bx_put(out, &at, a);
+    if (b) bx_put(out, &at, b);
+    if (c) bx_put(out, &at, c);
+    if (d) bx_put(out, &at, d);
+    if (e) bx_put(out, &at, e);
+    out[at] = 0;
+    return 0;
+}
+static int bx_digits(int v, char *buf) {
+    char tmp[16];
+    int n, i, neg;
+    unsigned int u;
+    neg = 0;
+    if (v < 0) {
+        neg = 1;
+        u = (unsigned int)(-(v + 1)) + 1;
+    } else u = (unsigned int)v;
+    n = 0;
+    if (u == 0) { tmp[n] = '0'; n = 1; }
+    while (u) { tmp[n] = (char)('0' + (u % 10)); n++; u = u / 10; }
+    i = 0;
+    if (neg) { buf[i] = '-'; i++; }
+    while (n) { n--; buf[i] = tmp[n]; i++; }
+    return i;
+}
+static int hb_eq(const unsigned char *a, const char *b, int n) {
+    int i;
+    if (!a) return 0;
+    for (i = 0; i < n; i++) if (a[i] != (unsigned char)b[i]) return 0;
+    return 1;
+}
+int bx_opt_dash(const char *a) {
+    if (!a) return 4;
+    if (a[0] == '-' && a[1]) return 1;
+    return 0;
+}
+const char *bx_opt_why(int defrun, const char *src) {
+    if (bx_nz(defrun) && src)
+        return "option not migrated (arguments for the program go after --: unisacc prog.c -- --flag)";
+    return "option not migrated";
+}
+const char *bx_src_why(const char *src) {
+    if (!src) return "expected a C source file";
+    return 0;
+}
+int bx_tool(const char *name) {
+    if (!name) return 4;
+    if (bx_eq(name, "ar")) return 1;
+    if (bx_eq(name, "as")) return 2;
+    if (bx_eq(name, "nm") || bx_eq(name, "objdump")) return 3;
+    return 0;
+}
+int bx_cli_word(const char *a) {
+    if (!a) return 4;
+    if (bx_eq(a, "--version") || bx_eq(a, "-version")) return 1;
+    if (bx_eq(a, "--help")) return 2;
+    if (bx_eq(a, "--")) return 3;
+    return 0;
+}
+int bx_more_src(const char *a, int is_object) {
+    int n;
+    if (!a) return 4;
+    n = 0;
+    while (a[n]) n++;
+    if (n >= 2 && a[n - 2] == '.' && a[n - 1] == 'c') return 1;
+    if (n >= 3 && a[n - 3] == '.' && a[n - 2] == 'c' && a[n - 1] == 'x') return 1;
+    if (bx_nz(is_object)) return 1;
+    return 0;
+}
+int bx_read_act(int rc) {
+    if (rc == 0) return 0;
+    if (rc == 1) return 1;
+    if (rc == 2) return 2;
+    if (rc == 3) return 3;
+    if (rc == 4) return 4;
+    if (rc == 6) return 6;
+    return 5;
+}
+int bx_read_stdin(const char *path) {
+    if (!path) return 4;
+    if (path[0] == '-' && path[1] == 0) return 1;
+    return 0;
+}
+int bx_as_arch(const char *t) {
+    if (!t) return 4;
+    if (bx_eq(t, "lnx/x86_64")) return 0;
+    if (bx_eq(t, "lnx/arm64")) return 1;
+    return 2;
+}
+const char *bx_read_die(int act) {
+    if (act == 2) return "cannot read input";
+    if (act == 3) return "close failed";
+    if (act == 4) return "file too large";
+    if (act == 6) return "out of memory";
+    if (act == 0 || act == 1) return 0;
+    return "bad input argument";
+}
+int bx_read_open_line(const char *path, const char *reason, char *out, int cap) {
+    const char *sep;
+    if (!path || !reason) return 4;
+    sep = reason[0] ? ": " : "";
+    return bx_join5("unisacc: error: cannot open ", path, sep, reason, "\n", out, cap);
+}
+int bx_read_fail_line(const char *shown, char *out, int cap) {
+    if (!shown) return 4;
+    return bx_join5("run: cannot read ", shown, "\n", 0, 0, out, cap);
+}
+int bx_cli_line(const char *s, char *out, int cap) {
+    if (!s) return 4;
+    return bx_join5("unisacc: model driver: ", s, "\n", 0, 0, out, cap);
+}
+const char *bx_as_targets(void) {
+    return "as: targets are lnx/x86_64 and lnx/arm64 (Mach-O and COFF text: 0.0.19)\n";
+}
+const char *bx_as_usage(void) {
+    return "usage: unisacc as [-b lnx/x86_64|lnx/arm64] FILE.s [-o FILE.o]\n";
+}
+const char *bx_view_usage(int dis) {
+    if (dis) return "usage: unisacc objdump -d FILE.o\n";
+    return "usage: unisacc nm FILE.o\n";
+}
+const char *bx_ar_usage(void) {
+    return "usage: unisacc ar rcs|t|x LIB.a [MEMBER...]\n";
+}
+int bx_as_opt_line(const char *opt, char *out, int cap) {
+    if (!opt) return 4;
+    return bx_join5("as: unknown option ", opt, "\n", 0, 0, out, cap);
+}
+int bx_as_write_line(const char *path, char *out, int cap) {
+    if (!path) return 4;
+    return bx_join5("as: cannot write ", path, "\n", 0, 0, out, cap);
+}
+int bx_as_head_line(const char *path, char *out, int cap) {
+    if (!path) return 4;
+    return bx_join5("as: ", path, ": -S header target conflicts with -b\n", 0, 0, out, cap);
+}
+int bx_as_err_line(const char *path, int line, const char *err, char *out, int cap) {
+    char dec[16], gap[24];
+    int dn, i, at;
+    const char *text;
+    if (!path) return 4;
+    if (!err) return 4;
+    text = err[0] ? err : "error";
+    dn = bx_digits(line, dec);
+    at = 0;
+    gap[at] = ':';
+    at++;
+    for (i = 0; i < dn; i++) { gap[at] = dec[i]; at++; }
+    gap[at] = ':';
+    at++;
+    gap[at] = ' ';
+    at++;
+    gap[at] = 0;
+    return bx_join5("as: ", path, gap, text, "\n", out, cap);
+}
+int bx_view_err_line(int dis, const char *file, const char *err, char *out, int cap) {
+    const char *tool;
+    if (!file || !err) return 4;
+    tool = dis ? "objdump: " : "nm: ";
+    return bx_join5(tool, file, ": ", err, " (Linux objects; Mach-O and COFF: 0.0.19)\n", out, cap);
+}
+int bx_diag_opt(const char *symbols, const char *provider, int host_target,
+                int mode, int emitbin, int asmwant) {
+    if (!symbols && !provider) return 0;
+    if (!host_target || mode == 1 || mode == 4 || mode == 5 || bx_nz(emitbin) || bx_nz(asmwant))
+        return 1;
+    return 0;
+}
+int bx_diag_run(const char *path, int runit) {
+    if (!path) return 0;
+    if (bx_nz(runit) || (path[0] == '-' && path[1] == 0)) return 1;
+    return 0;
+}
+int hb_target_id(const char *target) {
+    if (hb_eq((const unsigned char *)target, "lnx/x86_64", 10) && target[10] == 0) return 1;
+    if (hb_eq((const unsigned char *)target, "lnx/arm64", 9) && target[9] == 0) return 2;
+    if (hb_eq((const unsigned char *)target, "osx/x86_64", 10) && target[10] == 0) return 3;
+    if (hb_eq((const unsigned char *)target, "osx/arm64", 9) && target[9] == 0) return 4;
+    return 0;
+}

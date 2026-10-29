@@ -9,9 +9,8 @@
 #pragma unisa use driver.route
 #pragma unisa use driver.deps
 #pragma unisa use driver.input
-#pragma unisa use compiler.bindhost
-#pragma unisa use compiler.bindsym
-#pragma unisa use compiler.hostbind
+#pragma unisa use entrybind
+#pragma unisa use runtime.memlayout
 #pragma unisa use compiler.asmtext
 /* Command walk, route text, then the model chain.
    A missing model step prints NOT_IMPLEMENTED and the stop name.
@@ -354,6 +353,156 @@ static int dv_units(const char *tgt, int nsrc, unsigned char **out, long *outn, 
     return 0;
 }
 
+static unsigned char dv_argc_b[8];
+static unsigned char dv_argv_b[8];
+static unsigned char dv_text_b[8];
+static unsigned char dv_res_b[8];
+static unsigned char dv_dl_b[4][8];
+static const char *dv_dl_key[4] = {
+    "\0process/dl/0", "\0process/dl/1", "\0process/dl/2", "\0process/dl/3"
+};
+static char **dv_runargs;
+
+static int dv_join(char *dst, int cap, const char *a, const char *b) {
+    int i;
+    int j;
+    if (!dst || cap <= 0 || !a || !b) return 1;
+    i = 0;
+    while (a[i]) {
+        if (i + 1 >= cap) return 1;
+        dst[i] = a[i];
+        i = i + 1;
+    }
+    j = 0;
+    while (b[j]) {
+        if (i + 1 >= cap) return 1;
+        dst[i] = b[j];
+        i = i + 1;
+        j = j + 1;
+    }
+    dst[i] = 0;
+    return 0;
+}
+
+static int dv_bind_args(int argc, char **argv, int argstart, const char *src) {
+    int count;
+    int envn;
+    int j;
+    char **v;
+    count = 1 + argc - argstart;
+    if (!src || count < 1) return 1;
+    envn = 0;
+    if (environ) while (environ[envn]) envn = envn + 1;
+    v = malloc((size_t)(count + envn + 2) * sizeof(char *));
+    if (!v) return 1;
+    v[0] = (char *)src;
+    j = argstart;
+    while (j < argc) {
+        v[j - argstart + 1] = argv[j];
+        j = j + 1;
+    }
+    v[count] = 0;
+    j = 0;
+    while (j < envn) {
+        v[count + 1 + j] = environ[j];
+        j = j + 1;
+    }
+    v[count + 1 + envn] = 0;
+    free(dv_runargs);
+    dv_runargs = v;
+    if (hs_le64(dv_argc_b, (unsigned long long)count)) return 1;
+    if (hs_le64(dv_argv_b, (unsigned long long)(uintptr_t)v)) return 1;
+    return 0;
+}
+
+static int dv_memory(const char *tgt, const char *src, int cx,
+                     unsigned char *lower, long lowern,
+                     unsigned char *base, long reserved,
+                     char *why, int cap, int *code) {
+    char mroute[96];
+    unsigned char *image;
+    long imagen;
+    long long dataoff;
+    long long size;
+    int text;
+    int extent;
+    int stored;
+    int entry;
+    int pr;
+    int i;
+    if (!code) return 4;
+    *code = 0;
+    if (dv_join(mroute, 96, tgt, "/memory")) {
+        free(lower);
+        return 1;
+    }
+    if (hs_le64(dv_text_b, (unsigned long long)(uintptr_t)base) ||
+        hs_le64(dv_res_b, (unsigned long long)reserved)) {
+        free(lower);
+        return 1;
+    }
+    if (st_extra_put("\0memory/text", 12, dv_text_b, 8) ||
+        st_extra_put("\0memory/reserve", 15, dv_res_b, 8)) {
+        free(lower);
+        return 1;
+    }
+    i = 0;
+    while (i < 4) {
+        if (hs_dl_le(i, dv_dl_b[i]) || st_extra_put(dv_dl_key[i], 13, dv_dl_b[i], 8)) {
+            free(lower);
+            return 1;
+        }
+        i = i + 1;
+    }
+    image = 0;
+    imagen = 0;
+    pr = st_span(mroute, tgt, src, cx, 0, lower, lowern, &image, &imagen, why, cap);
+    if (pr) return pr;
+    if (!image || imagen < 0 || imagen > 2147483647L) {
+        free(image);
+        return 1;
+    }
+    pr = mem_image(image, (int)imagen, &text, &extent, &stored, &entry);
+    if (pr) {
+        free(image);
+        if (pr == 3) {
+            if (why && cap > 0) {
+                const char *m;
+                m = "memory image extent too large";
+                i = 0;
+                while (m[i] && i + 1 < cap) { why[i] = m[i]; i = i + 1; }
+                why[i] = 0;
+            }
+        } else if (pr == 2) {
+            if (why && cap > 0) {
+                const char *m;
+                m = "bad memory image bounds";
+                i = 0;
+                while (m[i] && i + 1 < cap) { why[i] = m[i]; i = i + 1; }
+                why[i] = 0;
+            }
+        }
+        return 1;
+    }
+    mem_place(text, extent, &dataoff, &size);
+    if (!mem_span_ok(size) || size > reserved || dataoff < 0 || dataoff > 2147483647LL || size > 2147483647LL) {
+        free(image);
+        return 1;
+    }
+    if (hs_commit(base, (long)size)) {
+        free(image);
+        return 1;
+    }
+    if (hs_copy_image(base, (long)dataoff, image, text, stored)) {
+        free(image);
+        return 1;
+    }
+    free(image);
+    if (hs_protect_code(base, (long)dataoff)) return 1;
+    *code = hs_enter(base, entry);
+    return 0;
+}
+
 int dv_main(int argc, char **argv) {
     static CxcState opts;
     char why[128];
@@ -370,6 +519,7 @@ int dv_main(int argc, char **argv) {
     int parsed;
     int kind;
     int nsrc;
+    int argstart;
     char cont[512];
     char gap[32];
     char preason[128];
@@ -377,6 +527,7 @@ int dv_main(int argc, char **argv) {
     long long t1;
     src = 0;
     nsrc = 0;
+    argstart = argc;
     if (argc < 2) return dv_fail(bx_src_why(0));
     kind = dv_word(argv[1], 0);
     if (kind == 1) return dv_ar(argc, argv);
@@ -404,7 +555,14 @@ int dv_main(int argc, char **argv) {
             printf("%s", text);
             return 0;
         }
-        if (kind == 13) break;
+        if (kind == 13) {
+            if (opts.runit) argstart = i + 1;
+            break;
+        }
+        if (opts.runit && src && kind != 20) {
+            argstart = i;
+            break;
+        }
         if (bx_opt_dash(argv[i]) == 1) return dv_fail(bx_opt_why(opts.defrun, src));
         if (nsrc >= 64) return dv_fail("too many sources");
         dv_srcv[nsrc] = argv[i];
@@ -603,6 +761,16 @@ int dv_main(int argc, char **argv) {
             return 0;
         }
         st_attr_reset();
+        st_extra_reset();
+        if (mode2 == 3 && nsrc == 1) {
+            if (dv_bind_args(argc, argv, argstart, src) ||
+                st_extra_put("\0process/argc", 13, dv_argc_b, 8) ||
+                st_extra_put("\0process/argv", 13, dv_argv_b, 8)) {
+                free(gotb);
+                fputs("unisacc: model driver: argv\n", stderr);
+                return 1;
+            }
+        }
         if (nsrc > 1) {
             unsigned char *framed;
             long framedn;
@@ -643,17 +811,53 @@ int dv_main(int argc, char **argv) {
             body = 0;
             bodyn = 0;
             pr = st_span(route, tgt, src, dv_cx(src), 0, gotb, gotn, &body, &bodyn, preason, 128);
-            pm_close();
-            free(pkg);
             if (pr == 3) {
+                pm_close();
+                free(pkg);
                 fprintf(stderr, "route=%s\n", route);
                 fprintf(stderr, "NOT_IMPLEMENTED %s\n", gap);
                 return 2;
             }
             if (pr) {
+                pm_close();
+                free(pkg);
                 fprintf(stderr, "unisacc: model driver: %s\n", preason[0] ? preason : gap);
                 return pr == 2 ? 2 : 1;
             }
+            if (mode2 == 3 && nsrc == 1) {
+                unsigned char *base;
+                long reserved;
+                int code;
+                int mr;
+                base = 0;
+                reserved = 0;
+                code = 0;
+                if (hs_reserve(&base, &reserved)) {
+                    pm_close();
+                    free(pkg);
+                    free(body);
+                    fputs("unisacc: model driver: cannot reserve native memory\n", stderr);
+                    return 1;
+                }
+                mr = dv_memory(tgt, src, dv_cx(src), body, bodyn, base, reserved, preason, 128, &code);
+                pm_close();
+                free(pkg);
+                if (mr == 3) {
+                    hs_release(base, reserved);
+                    fprintf(stderr, "route=%s/memory\n", tgt);
+                    fprintf(stderr, "NOT_IMPLEMENTED %s\n", gap);
+                    return 2;
+                }
+                if (mr) {
+                    hs_release(base, reserved);
+                    fprintf(stderr, "unisacc: model driver: %s\n", preason[0] ? preason : "memory");
+                    fprintf(stderr, "route=%s/memory\n", tgt);
+                    return mr == 2 ? 2 : 1;
+                }
+                return code;
+            }
+            pm_close();
+            free(pkg);
             if (mode2 == 3) {
                 free(body);
                 fprintf(stderr, "route=%s\n", route);
