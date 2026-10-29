@@ -114,6 +114,14 @@ static unsigned char *rl_file_bytes(const char *dir, const char *name,
     return rl_readfile(path, n);
 }
 /* the header line  #SC1<TAB>stage=ID<TAB>input_sha256=HEX  (ID: no TAB, 1..127 bytes; HEX: 64 lowercase digits) */
+#ifdef UNISA_CX_SOURCE_FRAME
+int cxsf_ledger_identity(const char *,char *,size_t,char *);
+static int rl_parse_identity(const char *line, RLLedger *L) {
+    if (!cxsf_ledger_identity(line,L->stage,sizeof L->stage,L->input_hex)) return 0;
+    L->has_id=1;
+    return 1;
+}
+#else
 static int rl_parse_identity(const char *line, RLLedger *L) {
     const char *s = line + 5, *t = strchr(s, '\t'), *v; size_t sn, j;
     if (!t || strncmp(s, "stage=", 6)) return 0;
@@ -129,6 +137,7 @@ static int rl_parse_identity(const char *line, RLLedger *L) {
     L->has_id = 1;
     return 1;
 }
+#endif
 /* 0: loaded; otherwise err holds the named reason (INTERFACE_ERROR <reason> ...) */
 static int rl_load_parse(const char *dir, const RLFileView *views, int count, RLLedger *L, char *err, size_t errn) {
     unsigned char *b; size_t n = 0, at = 0; int cap = 0;
