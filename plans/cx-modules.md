@@ -644,6 +644,17 @@ flowchart TD
   cap["检查文件 32 个 use"] --> pull["bindargs.cx 的 use bindcount"]
 ```
 
+## 132. 2026-10-29 入口 -E 只点出 e2 流和 pp 网
+
+`src/stream.cx`、`src/network.cx` 没有 `#include`。入口也没有。`-E` 不再走手写预处理。7 字节 `int x;` 加换行，两遍退出 0，stdout 100，stderr 0，`stream=e2`，`model=e2.net`，`net=pp`，`bytes=7`。没有预处理正文，没有调用 `infer`。没有产品安装，没有 hostseed，没有 `--all`。整棵重写还没完成。
+
+```mermaid
+flowchart TD
+  entry["src/unisacc.cx 无 include"] --> st["stream.cx 七条流"]
+  entry --> nw["network.cx 十八张网"]
+  entry --> nope["不再调用 pp_expand"]
+```
+
 ## 131. 2026-10-29 #、## 和 include 再 include
 
 构造脚本不改。没有新文件。每条两遍，stdout 和 stderr 相同。`STR(hi)` stdout 100，`pp=23`，末行 `"hi"`。`CAT(foo, bar)` stdout 107，`pp=30`，末行 `foobar`。对象宏 `XY` stdout 96，`pp=19`，末行 `xy`。`#include <glob.h>` 再 `int *p = NULL;` stdout 1950，`bytes=33`，`pp=1871`，末行 `int *p = 0;`。`glob.h` 包含了 `stddef.h`。`#x` 不是参数时 stderr 30。`F(2)` 仍是 stdout 98。没有写出对象。没有产品安装，没有 hostseed，没有 `--all`。整棵重写还没完成。
