@@ -73,7 +73,26 @@ static int rl_length(const char *s, int *out) {
     *out = (int)v; return 1;
 }
 #endif
+#if defined(UNISA_CX_SOURCE_FRAME) && !defined(_WIN32)
+typedef struct {
+    int (*open_file)(const char *); int (*stat_file)(int,long long *,int *);
+    ssize_t (*read_file)(int,void *,size_t); int (*close_file)(int);
+    void *(*alloc)(void *,size_t); void (*release)(void *);
+    int (*get_error)(void); void (*set_error)(int);
+} RLLedgerIO;
+unsigned char *cxsf_ledger_readfile(const char *,size_t *,const void *);
+static int rl_io_open(const char *p) { return open(p,O_RDONLY|O_NONBLOCK|O_CLOEXEC|O_NOFOLLOW); }
+static int rl_io_stat(int fd,long long *size,int *kind) { struct stat s; if(fstat(fd,&s))return -1; *size=s.st_size;*kind=S_ISREG(s.st_mode)?0:S_ISDIR(s.st_mode)?1:2;return 0; }
+static ssize_t rl_io_read(int fd,void *p,size_t n) { return read(fd,p,n); }
+static int rl_io_close(int fd) { return close(fd); }
+static int rl_io_error(void) { return errno; }
+static void rl_io_set_error(int e) { errno=e; }
+#endif
 static unsigned char *rl_readfile(const char *path, size_t *n) {
+#if defined(UNISA_CX_SOURCE_FRAME) && !defined(_WIN32)
+    RLLedgerIO io={rl_io_open,rl_io_stat,rl_io_read,rl_io_close,realloc,free,rl_io_error,rl_io_set_error};
+    return cxsf_ledger_readfile(path,n,&io);
+#else
     unsigned char *b; int saved;
 #ifndef _WIN32
     int fd; struct stat st; size_t size, at = 0;
@@ -112,6 +131,7 @@ static unsigned char *rl_readfile(const char *path, size_t *n) {
     }
     if (fclose(f)) { saved = errno ? errno : EIO; free(b); errno = saved; return 0; }
     *n = (size_t)sz; return b;
+#endif
 #endif
 }
 /* Snapshot views are verified, invocation-owned bytes. Copying them gives each

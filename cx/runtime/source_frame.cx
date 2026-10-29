@@ -200,6 +200,37 @@ int cxsf_ledger_view_copy(const void *views,int count,const char *name,
     }
     return 1;
 }
+/* IO and memory are caller supplied so descriptors, errno and allocations
+ * remain in the runtime's own domain. No fd or buffer survives a failure. */
+typedef struct {
+    int (*open_file)(const char *); int (*stat_file)(int,long long *,int *);
+    ssize_t (*read_file)(int,void *,size_t); int (*close_file)(int);
+    void *(*alloc)(void *,size_t); void (*release)(void *);
+    int (*get_error)(void); void (*set_error)(int);
+} CxLedgerIO;
+unsigned char *cxsf_ledger_readfile(const char *path,size_t *out_n,const void *callbacks) {
+    CxLedgerIO io;if(!path||!out_n||!callbacks)return 0;memcpy(&io,callbacks,sizeof io);
+    if(!io.open_file||!io.stat_file||!io.read_file||!io.close_file||!io.alloc||!io.release||!io.get_error||!io.set_error)return 0;
+    io.set_error(0);int fd=io.open_file(path);if(fd<0)return 0;
+    long long file_size;int kind,saved;
+    if(io.stat_file(fd,&file_size,&kind)){saved=io.get_error();if(!saved)saved=EIO;io.close_file(fd);io.set_error(saved);return 0;}
+    if(kind){saved=kind==1?EISDIR:EINVAL;io.close_file(fd);io.set_error(saved);return 0;}
+    if(file_size<0 || file_size>2147483647LL){io.close_file(fd);io.set_error(EFBIG);return 0;}
+    size_t size=(size_t)file_size,at=0;unsigned char *b=io.alloc(0,size+1);
+    if(!b){io.close_file(fd);io.set_error(ENOMEM);return 0;}
+    while(at<size){ssize_t z=io.read_file(fd,b+at,size-at);int e=io.get_error();
+        if(z<0 && e==EINTR)continue;
+        if(z<=0){saved=z<0&&e?e:EIO;io.close_file(fd);io.release(b);io.set_error(saved);return 0;}
+        at+=(size_t)z;
+    }
+    for(;;){unsigned char extra;ssize_t z=io.read_file(fd,&extra,1);int e=io.get_error();
+        if(z<0 && e==EINTR)continue;
+        if(z!=0){saved=z<0&&e?e:EIO;io.close_file(fd);io.release(b);io.set_error(saved);return 0;}
+        break;
+    }
+    if(io.close_file(fd)){saved=io.get_error();if(!saved)saved=EIO;io.release(b);io.set_error(saved);return 0;}
+    *out_n=size;return b;
+}
 /* The caller supplies the release function for the allocation domain that
  * produced every row. The ledger and its row metadata are copied as bytes. */
 void cxsf_ledger_clear(void *ledger,void (*release)(void *)) {
