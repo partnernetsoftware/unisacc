@@ -644,6 +644,19 @@ flowchart TD
   cap["检查文件 32 个 use"] --> pull["bindargs.cx 的 use bindcount"]
 ```
 
+## 124. 2026-10-29 -c 后再 -b 保持 mode=2，as/nm 开始读写
+
+构造脚本不改。`-b` 在 `sawc` 或 `sawS` 已经是 1 时只写 target。`step-c-b` 先红：检查退出 1，stdout 3427，第 125 行 `FAIL step-c-b`，`failed=1`。改 `cxc_step` 后检查退出 0，stdout 3427，第 125 行 `PASS step-c-b`，`failed=0`。入口 `-c -b lnx/x86_64 a.c` 退出 0，stdout 47，`mode=2`。单独 `-b` 仍是 `mode=0`。`-S -b lnx/arm64 a.c` 是 `mode=2`。一行 `# unisacc -S lnx/x86_64` 经 `as` 写出 728 字节对象，退出 0。`nm` 该对象 stdout 0。`objdump -d` stdout 95。没有产品安装，没有 hostseed，没有 `--all`。整棵重写还没完成。
+
+```mermaid
+flowchart TD
+  cflag["-c 或 -S 先把 mode 写成 2"] --> bflag["后面的 -b 只写 target"]
+  bflag --> keep["mode 留在 2"]
+  bareb["单独 -b"] --> image["mode 写成 0"]
+  ascmd["as FILE.s"] --> atasm["at_asm 写出对象"]
+  ncmd["nm 与 objdump -d"] --> atnm["at_nm 与 at_dis"]
+```
+
 ## 123. 2026-10-29 入口去掉七流名单和 tool N
 
 构造脚本不改。无参数退出 1，stderr 48，`expected a C source file`。`ar` 退出 2，stderr 44，是用法行。`ar zzz lib.a` 退出 2，stderr 35。`as` 退出 2，stderr 63。`as -b nope x.s` 退出 2，stderr 72。`as x.s` 和 `nm a.o` 退出 2，stdout 0，stderr 0，文件读写还在归档 C。`nm` 退出 2，stderr 25。`objdump` 退出 2，stderr 33。单独 `-c a.c` 退出 0，stdout 38，`mode=2`。`-c -b lnx/x86_64 a.c` 退出 0，stdout 47，`mode=0`，因为 `-b` 覆盖了 `-c` 的 mode。`--version` 仍是 stdout 15。没有产品安装，没有 hostseed，没有 `--all`。整棵重写还没完成。
