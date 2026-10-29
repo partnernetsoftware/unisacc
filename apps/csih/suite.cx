@@ -1,0 +1,131 @@
+#pragma unisa module suite
+/*
+ * suite.cx — argv table for csih CX selftests. No main.
+ * Each slice is one .cx program root (-run ENTRY -- selftest). Module graphs
+ * come from `#pragma unisa use`, not multi-file link lists or -include globals.
+ */
+enum { SUITE_N = 17, SUITE_MAX_SRC = 4 };
+
+static const char *slice_name[SUITE_N] = {
+    "gate", "json", "session", "render", "term", "tui", "chat", "edit",
+    "tools", "shell", "net", "llm", "clock", "agent", "file", "loop", "suite"
+};
+static const int slice_n[SUITE_N] = {
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1
+};
+static const char *slice_src[SUITE_N][SUITE_MAX_SRC] = {
+    { "gate_cli.cx" },
+    { "json_cli.cx" },
+    { "session_cli.cx" },
+    { "render_cli.cx" },
+    { "term_cli.cx" },
+    { "csih.cx" },
+    { "chat_cli.cx" },
+    { "edit_cli.cx" },
+    { "tools_cli.cx" },
+    { "shell_cli.cx" },
+    { "net_cli.cx" },
+    { "llm_cli.cx" },
+    { "clock_cli.cx" },
+    { "agent_cli.cx" },
+    { "file_cli.cx" },
+    { "loop.cx" },
+    { "suite_cli.cx" }
+};
+
+static int suite_red;
+static char suite_why[180];
+
+void suite_mark(int red, const char *why) {
+    suite_red = red ? 1 : 0;
+    if (!suite_red) { suite_why[0] = 0; return; }
+    snprintf(suite_why, sizeof suite_why, "%s", why ? why : "slice red");
+}
+
+int suite_slice_count(void) { return SUITE_N; }
+
+/* Fill argv for: unisacc.com -run ENTRY.cx -- selftest */
+int suite_slice_fill(int i, const char **argv, int cap, const char **name) {
+    int k;
+    if (name) *name = NULL;
+    if (i < 0 || i >= SUITE_N || cap < 4) return 0;
+    if (name) *name = slice_name[i];
+    argv[0] = "-run";
+    argv[1] = slice_src[i][0];
+    argv[2] = "--";
+    argv[3] = "selftest";
+    for (k = 1; k < slice_n[i] && 3 + k < cap - 1; k++) {
+        /* reserved: multi-entry slices unused in CX mode */
+        (void)slice_src[i][k];
+    }
+    return 4;
+}
+
+int suite_failing(char *why, int n) {
+    if (!suite_red) return 0;
+    if (why && n > 0) snprintf(why, (size_t)n, "%s", suite_why);
+    return 1;
+}
+
+static const char *suite_base(const char *path) {
+    const char *s;
+    if (!path || !path[0]) return "";
+    s = strrchr(path, '/');
+    return s ? s + 1 : path;
+}
+
+static int suite_named(const char *base) {
+    int i, k;
+    if (!base || !base[0]) return 0;
+    for (i = 0; i < SUITE_N; i++)
+        for (k = 0; k < slice_n[i]; k++)
+            if (!strcmp(slice_src[i][k], base)) return 1;
+    /* Also accept library stems that map to a cli/root slice. */
+    if (!strcmp(base, "tui.cx") || !strcmp(base, "tui.c")) return 1;
+    if (!strcmp(base, "agent.cx") || !strcmp(base, "agent.c")) return 1;
+    if (!strcmp(base, "gate.cx") || !strcmp(base, "json.cx") || !strcmp(base, "session.cx")) return 1;
+    if (!strcmp(base, "render.cx") || !strcmp(base, "term.cx") || !strcmp(base, "chat.cx")) return 1;
+    if (!strcmp(base, "edit.cx") || !strcmp(base, "tools.cx") || !strcmp(base, "shell.cx")) return 1;
+    if (!strcmp(base, "net.cx") || !strcmp(base, "llm.cx") || !strcmp(base, "clock.cx")) return 1;
+    if (!strcmp(base, "file.cx") || !strcmp(base, "suite.cx") || !strcmp(base, "csih.cx")) return 1;
+    if (!strcmp(base, "plugin.cx") || !strcmp(base, "plugin.c") || !strcmp(base, "loop.cx")) return 1;
+    return 0;
+}
+
+int suite_match_path(const char *path, const char *cwd) {
+    const char *base = suite_base(path);
+    if (!suite_named(base)) return 0;
+    if (path && strstr(path, "/apps/csih/")) return 1;
+    if (cwd && strstr(cwd, "/apps/csih") && path && !strchr(path, '/')) return 1;
+    return 0;
+}
+
+int suite_run_selftest(void) {
+    int fail = 0;
+    const char *root = "/home/devali/repos/unisacc/apps/csih";
+    if (suite_match_path("/tmp/json.c", "/tmp")) fail++;
+    if (!suite_match_path("json.cx", root)) fail++;
+    if (!suite_match_path("/home/devali/repos/unisacc/apps/csih/plugin.cx", "/tmp")) fail++;
+    if (suite_match_path("README.md", root)) fail++;
+    if (suite_slice_count() < 16) fail++;
+    if (!suite_match_path("csih.cx", root)) fail++;
+    if (!suite_match_path("tui.cx", root)) fail++;
+    {
+        int i, tui_n = -1;
+        for (i = 0; i < suite_slice_count(); i++) {
+            const char *av[48];
+            const char *nm = 0;
+            int n = suite_slice_fill(i, av, 48, &nm);
+            if (nm && !strcmp(nm, "tui")) {
+                tui_n = n;
+                if (!av[0] || strcmp(av[0], "-run")) fail++;
+                if (!av[1] || strcmp(av[1], "csih.cx")) fail++;
+                if (!av[2] || strcmp(av[2], "--")) fail++;
+                if (!av[3] || strcmp(av[3], "selftest")) fail++;
+            }
+        }
+        if (tui_n != 4) fail++;
+    }
+    if (fail) printf("FAIL suite match %d\n", fail);
+    return fail ? 1 : 0;
+}

@@ -154,6 +154,212 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 <a id="work-tree"></a>
 ### 思维树
 
+独立 macOS CX 单元曾因内置 cx.h 的 setpgid 引用在链接期拒绝，原红保留于 out/cx-lifetime-foreign-01/osx-x86-link.stderr。新增独立 Darwin 进程组提供者 `cx/runtime/process_group_osx.cx`：系统调用参数及错误传播经宿主模拟，另核非 Darwin 目标拒绝，登记批 3/0（out/cx-process-group-osx-test-02）；固定源码 SID `c5ffbe15`、HOST `c7ad1bfe`、私有旧 P3 `efc5a50b` 的 x86_64 与 arm64 分别将生命周期模块、消费者和提供者三单元链接成 Mach-O，收据记源码、构造器、包与各单元身份（out/cx-osx-pgroup-source-01）。P3 为旧模型，未授 LLP64、新产品或目标宿主执行。
+
+独立单元构造入口现按目标选择 Linux 或 Darwin 进程组提供者。macOS x86_64/arm64 的自动选取对象与上述三单元链接中的提供者对象逐字节相同；Linux x86_64 的 native 单元仍可构造，win 目标与缺少 macOS 路由的旧包具名拒绝（out/cx-osx-driver-source-02）。这是私有交叉对象及链接验证，不含完整 macOS 驱动构造或宿主执行；多源产品构造仍未自动选取 Darwin 提供者。
+
+无全局 CX 模型解码器已提交 `ad2f8db833`。固定 P3 `7b806ec2` 的 32 个模型逐个核对输入摘要，并分别重新执行 C 参考解码与 CX 解码，规范化结构逐字节一致，32/0（`out/cx-model-decode-real-03.log`；源码快照 `out/cx-model-decode-real-source-01`，材料清单 SHA `f0b6d8f6`）。该记录是本机私有对拍，不授外宿主资格。独立参考夹具另有文本与二进制 N/T、前缀复制及具名拒绝 8/0（`out/cx-model-reference-extended-01`）。
+
+CX 模型解码器已接入本机库与驱动构造：固定 P3 的私有静态库和动态库构造成功，静态库含 `model_decode.o`（`out/cx-model-decode-lib-01`）。真实运行时分配域注入三种形态的 20、19、21 个失败点均清理成功；静态库三次拒绝后重试均调用返回 7（`out/cx-model-decode-runtime-01`）。固定 P3 的全部 32 个模型重新经旧 C 解码、独立 CX 解码及接线后的 CX 运行时三路对拍，结构逐字节一致（`out/cx-model-decode-wired-32-01.log`）。模块与构造器拒绝检查各通过。源码身份 `83079fbf` 的 18 个独立单元和链接收据完成，Linux 私有驱动 `6dcb189e` 以固定 P3 运行返回 7（`out/cx-model-decode-units-01`）；三条构造工具仅做了无参入口检查。未运行正式 HOST、产品构造或外国宿主。
+
+包的拥有项释放迁为 `cx/runtime/package_lifetime.cx` 并接入本机库与驱动构造：模块检查覆盖部分阶段、借用的包内指针、重复释放和清零；固定 P3 的私有静态与动态库构造成功，静态库的三轮拒绝后重试和调用均成功（`out/cx-package-lifetime-lib-01`、`out/cx-package-lifetime-cache-01.log`）。源码身份 `5dbbe459` 的 19 个独立单元及链接收据完成，Linux 私有驱动 `ab4e5a83` 以固定 P3 运行返回 7（`out/cx-package-lifetime-units-01`）；三条构造工具仅做无参入口检查。正式 HOST、产品构造与外国宿主尚未验证，包解析仍在 C 路径。
+
+CX 包目录解析器 `cx/runtime/package_decode.cx` 借用包字节、调用方注入分配与释放，失败清理部分表；最小 P1、坏模型和逐分配失败检查通过（`out/cx-package-decode-check-02.log`）。固定 P3 的 32 模型、1479 阶段、74 资源以及最小 P1/P2 均与真实 C 解析器逐字段一致；16 个畸形输入的错误与接线后运行时逐字一致（`out/cx-package-decode-real-01.log`、`out/cx-package-refusals-wired-01.log`）。解析器已接入私有本机库，固定 P3 静态与动态库构造成功，三次拒绝后重试并调用成功（`out/cx-package-decode-lib-01`、`out/cx-package-decode-cache-01.log`）。源码身份 `9afc671e` 的 20 个独立单元及链接收据完成，Linux 私有驱动 `9f84fa72` 以固定 P3 运行返回 7（`out/cx-package-decode-units-01`）；三条构造工具仅做无参入口检查。完整拒绝面、正式 HOST、产品构造与外国宿主仍未验证，不能视为产品资格。
+
+网络状态转移已提取为 `cx/core/transition.cx` 并经现有外部转移接口接入私有库与驱动；核心 `exec/c/core.c` 未改，`core-compat` 仍为 16/0。手写边界 641 组，以及固定 P3 的 32 个真实模型各状态 0..256 观察值、网络域和阈值边界、声明的返回状态，共 24,310,640 次比较均与 C 一致（`out/cx-core-transition-real-02.log`）；不涵盖全部 int32 观察值、动作执行或外国宿主。本机库以固定 P3 构造并三轮调用成功；源码身份 `ab92bcd2` 的 21 个驱动单元链接为 Linux 私有产物 `826c311d`，实际运行返回 7（`out/cx-core-transition-units-02`）。产品入口由汇编 blob 改为过渡 C 执行循环调用 CX 转移；旧 blob 和 CX 同时链接导致重复定义的失败保留于 `out/cx-core-transition-compare-01/unit-link.log`。三条构造工具只做无参入口检查，正式 HOST、性能、完整产品构造及外国宿主均未验证。
+
+过渡 C 执行循环已独立成 O2 单元：22 单元 Linux 私有驱动 `24e5ac49` 以固定 P3 运行返回 7（`out/cx-core-split-units-01`）。同一 `examples/fib.c` 输出 tape 六次逐字节一致；本机墙钟旧汇编三次 0.33–0.34s，拆分后的 CX 路线三次 0.84–0.85s，属于明确的性能红项（`out/cx-core-transition-perf-01`），不授性能通过。初版未拆分路线一次 0.95s；冷/热及外国宿主均未测。新增单元使宿主切片参数向量的 ape 模式达到 32 项，终止空指针需要第 33 格；已扩大两份向量，正式 HOST 尚未重构。
+
+同一输入的单次相位观测显示旧汇编到 CX 路线 E2 推理约 58ms→182ms、E3 推理约 103ms→412ms；宿主 GCC 构造的 CX 算法分别约 40ms、91ms，产物一致，不能将两种不同构造器直接归因于单一函数。去掉每次转移的额外包装调用后，混合对象私有候选三次为 0.78–0.80s，tape 与旧汇编逐字节一致（`out/cx-core-transition-perf-01/direct*.stderr`）；固定 P3 的 32 模型 24,310,640 次比较重跑为 0 失败。混合对象不是同源收据构造或产品资格，性能红项继续保留。
+
+固定 P3 的 91,086 个网络状态中，60,132 个阈值表为空，最大表有 2,229 个阈值（`out/cx-core-transition-perf-01/shapes.log`）；这是静态分布，不表示执行热度。针对空表的提前返回私有试验与原版本交替测量均为 0.81–0.83s，tape 一致，未见收益，已撤回该优化；性能红项保持。
+
+私有插桩的 `fib.c` 编译前 530 万次转移中，空阈值表 1,956,362 次、1 个阈值 491,498 次、2–3 个 1,259,749 次、4 个以上 1,592,391 次（`out/cx-core-profile-01/fib.stderr`）；插桩会改变成本，结果不用于计时。最多 3 个阈值合并查找与求和的私有试验，交替墙钟 0.79–0.84s 对原版 0.80–0.82s，输出一致但未见明确收益，已撤回。`tools/core-transition-profile.cx` 可生成同字节插桩副本，不修改产品源码；采样未覆盖其他输入或宿主。
+
+过渡执行循环已迁入独立 CX 模块 `cx/core/execute.cx`：它保留原 C 算法和显式机器状态，目前仍须继续按职责拆分。宿主编译的 CX 循环与 C 循环对固定 P3 的 32 模型各三种输入执行，共 96 例状态和输出一致（`out/cx-core-transition-perf-01/execute-real.log`）。驱动构造已换用 CX 执行单元，源码身份 `528bf24c` 的 22 单元链接为 Linux 私有驱动 `b16f667d`，实际运行返回 7 且 `fib.c` tape 与旧汇编一致（`out/cx-execute-driver-units-01`）；三条构造工具只做无参入口检查。私有本机库构造也接入 CX 执行单元，通过链接时桥接沿用库原有线程局部分配跟踪；固定 P3 三次执行一步预算失败后同上下文重试成功，ASan 测试进程未报告泄漏（`out/cx-core-execute-lib-01`、`out/cx-core-execute-recovery-01.log`），库对象本身未插桩。正式 HOST、完整动作覆盖、并发、性能和外国宿主仍未验证，性能红项保持。
+
+32/64 位运算已拆为无状态 CX 模块 `cx/core/alu.cx` 并接入私有本机库与驱动。产品编译器实际运行的 9,600 组运算边界与 C 一致（`out/cx-core-alu-product-compare-01.log`）；宿主 CX 执行循环在 32 模型各三种输入共 96 例与 C 一致（`out/cx-core-alu-execute-real-01.log`）。源码身份 `fb05b880` 的 23 单元驱动 `7572d9f7` 运行返回 7，`fib.c` tape 一致，单次 0.79s；本机库经三次超时后重试成功（`out/cx-alu-driver-units-01`、`out/cx-core-alu-recovery-01.log`）。构造工具仅做无参检查，完整动作覆盖、外国宿主和性能资格均未授。
+
+执行栈与输入帧已拆为 CX 模块 `cx/core/stack.cx`，保留调用方持有、帧借用与既有扩容合同；产品编译器执行 4,173 项与 C 对拍一致，空栈弹出具名拒绝（`out/cx-core-stack-product-compare-01.log`、`out/cx-core-stack-empty-01.stderr`）。本机库沿原线程局部分配跟踪构造，三次超时后重试成功；源码身份 `92502a8a` 的 24 单元驱动 `73570b17` 运行返回 7、`fib.c` tape 与旧汇编一致，单次 0.85s（`out/cx-core-stack-lib-01`、`out/cx-stack-driver-units-01`）。正式 HOST、并发、外国宿主及性能资格仍未验证。
+
+执行输出缓冲与定宽格式化已拆为 `cx/core/output.cx`，保留字节位置和分配域；产品编译器执行 1,439 项与 C 对拍一致（`out/cx-core-output-product-compare-01.log`），本机库三次超时后重试成功。源码身份 `05085ac7` 的 25 单元驱动 `2611c2a1` 运行返回 7（`out/cx-core-output-lib-01`、`out/cx-core-output-driver-units-01`）。库构造命令数组已预留更多槽位；正式 HOST、并发、外国宿主及性能仍未验证。
+
+执行器稀疏内存已拆为 `cx/core/sparse.cx`，保留写零占槽和覆盖前扩容。产品编译器执行 65,538 项与 C 对拍一致，含容量、占用表、键值表及覆盖触发扩容（`out/cx-core-sparse-product-compare-01.log`）。本机库沿原跟踪分配域构造，三次超时后重试成功；源码身份 `1a755152` 的 26 单元驱动 `44582950` 运行返回 7，`fib.c` tape 与旧汇编一致、单次 0.82s（`out/cx-core-sparse-lib-01`、`out/cx-core-sparse-driver-units-01`）。正式 HOST、并发、外国宿主及性能资格仍未验证。
+
+字节块、字符串驻留和资源缓存已拆入 `cx/core/bytes.cx`，驱动与私有库构造均已接入，库保留原分配跟踪域。本机 27 单元驱动 `2678ad09` 链接成功、运行探针返回 7，并执行 607 项与 C 实现的对照，覆盖空块、借用和拥有的资源、缺失缓存与扩容，全部一致（`out/cx-core-bytes-product-compare-02.log`）。私有库构造成功，预算耗尽后的三次恢复探针通过；探针进程启用 ASan，库本身未插桩。正式 HOST、外国宿主、并发和性能资格仍未验证。
+
+执行器 CX 真源已删去已迁出模块的条件编译副本，保留现行模块接口与动作循环。宿主预处理结果逐字节不变；产品编译新执行单元后，用前一批其余单元混合链接的本机驱动 `8888def2` 运行返回 7，fib tape 与旧汇编一致。对象字节不同；使用 CX 候选自身链接在 50 秒上限超时，固定本机启动驱动链接成功，完整同源构造和性能资格仍未验证（`out/cx-execute-prune-link-01.log`、`out/cx-execute-prune-link-02.log`）。
+
+多源身份帧 `cx/runtime/source_frame.cx` 已接入驱动与本机库构造：调用方提供分配器并持有结果，长度越界和坏参数在分配前拒绝，失败不改输出。真实 use 源检查 7/0。源码身份 `a11c809a` 的 28 单元私有驱动 `22343733` 与上一驱动对同一多源输入捕获的 `resources.tsv` 和 tape 逐字节一致（`out/cx-sourceframe-capture-01`）。库多源捕获实测暴露帧已登记跟踪却用普通 free 的重复释放，改为 tracked_free 后重构 `out/cx-sourceframe-lib-02`，捕获、编译、调用返回 7，三次预算耗尽后的恢复探针也通过。库修复改变源码身份，前述驱动不是最终同树候选；正式 HOST、完整构造、外国宿主和性能资格尚未验证。五条构造工具只做了无参入口检查。
+
+源码身份 `48ebad08` 的 28 单元同树驱动已重建，产物仍为 `22343733`；多源 tape 与资源账本再次与旧驱动逐字节一致（`out/cx-sourceframe-driver-units-02`、`out/cx-sourceframe-capture-01/final`）。身份帧模块已登记独立 SOURCE 批，并由已装 `79fb84e6` 实跑 7/0、批 PASS（`out/cx-sourceframe-batch-03.log`）；首次批因标记后使用空格而非制表符记 FAIL，原始结果保留于 `out/cx-sourceframe-batch-02.log`。该批只授模块源检查，不授新驱动安装或外国宿主资格。
+
+E3 tokens 与属性字节的身份帧也已迁到同一 CX 模块，保留调用方分配和失败不改输出；登记源批扩为 12/0（`out/cx-sourceframe-pair-batch-01.log`）。源码身份 `0d12fc01` 的 28 单元本机驱动 `c9b4a631` 与上一驱动对同一多源 image 的镜像、完整捕获目录和 E3 身份伴随文件逐字节一致，镜像返回 7（`out/cx-e3frame-capture-01`）。同源私有库重新构造，多源捕获和调用返回 7。正式 HOST、完整产品、外国宿主及性能资格仍未验证。
+
+E3 身份伴随文件的整行解析已迁入 CX：合法行、大小写、NUL、换行和容量拒绝的源批扩为 17/0（`out/cx-e3companion-batch-01.log`）；对真实旧 C 解析器的逐字节变异及截断共 26,471 次对拍一致。新驱动与模块单元混合旧候选其余单元后，真实多源 image 严格重放成功且镜像一致；篡改伴随文件被资源长度检查具名拒绝。固定 P3 的私有库重构成功（`out/cx-companion-lib-01`）。混合驱动不是同树完整候选，外国宿主及完整拒绝域仍未授资格。
+
+源码身份 `47ae8f01` 的 28 单元驱动 `718c4d79` 已同树构造并严格重放真实多源 image，镜像与原捕获一致。对伴随文件的 SHA 语法做等长篡改并同步更新账本摘要后，新驱动在解析层具名拒绝 `resource-e3-identity-malformed`，无镜像（`out/cx-companion-semantic-bad-01`）。该负例已加入 image 单源 RI 检查，由已装产品实跑 30/0（`out/cx-companion-ri-single-01.log`）；不把已装产品批转授新候选或外国宿主。
+
+资源账本的十六进制字符与规范十进制长度解析已迁入 CX，原文件读写、资源顺序和拒绝诊断保持在账本调用方。源批扩为 20/0（`out/cx-ledger-numbers-batch-01.log`），与真实旧 C 解析器对拍 10,271 项一致。新驱动及模块混合旧候选其余单元的 `0c009152` 严格重放真实多源 image，镜像一致；私有库重构并通过多源捕获与调用（`out/cx-ledger-numbers-lib-01`）。混合驱动不授同树构造、安装或外国宿主资格。
+
+资源账本 SC1/SC2 身份头解析也迁入 CX：源批 22/0（`out/cx-ledger-identity-batch-01.log`）；数字与身份头对真实旧 C 实现的逐字节变异共 35,103 项一致。私有混合驱动 `d469ad2f` 严格重放真实多源 image 且镜像一致；私有库重新构造，多源捕获与调用返回 7（`out/cx-ledger-identity-lib-01`）。仍未完成新源码同树驱动、正式 HOST、安装和外国宿主验证。
+
+资源账本五字段拆分已迁入 CX，保留字段数量及 4095 字节上限的原拒绝顺序；源批 26/0（`out/cx-ledger-fields-batch-01.log`）。私有混合驱动 `2571a2b6` 严格重放真实多源 image 且镜像一致；附加 4096 字节字段的账本具名拒绝 `resource-row-field-too-long`、无镜像。私有库重构，多源捕获和调用返回 7（`out/cx-ledger-fields-lib-01`）。未完成同树驱动、安装或外国宿主验证。
+
+资源账本十六进制键解码已迁入 CX，原调用方继续负责分配与释放。源批 28/0（`out/cx-ledger-key-batch-01.log`）；含全部 65,536 种双字节输入的旧新解析对照共 100,639 项一致。私有混合驱动 `b756d2b1` 严格重放真实多源 image 且镜像一致，私有库重构后多源捕获与调用返回 7（`out/cx-ledger-key-lib-01`）。未授同树驱动、安装或外国宿主资格。
+
+资源行的存在状态、长度与 blob 元数据校验已迁入 CX，保留旧拒绝顺序；源批 32/0（`out/cx-ledger-metadata-batch-01.log`），旧规则组合及既有解析对照共 100,879 项一致。私有混合驱动 `0d9e3843` 严格重放真实多源 image 且镜像一致；四种错误资源行分别具名拒绝且不生成镜像。私有库重构、多源捕获与调用返回 7（`out/cx-ledger-metadata-lib-01`）；未授同树驱动、安装或外国宿主资格。
+
+资源账本 SC1 无序查找与 SC2 有序游标已迁入 CX，保留重复键、显式缺失与仅匹配后推进的合同；源批 37/0（`out/cx-ledger-lookup-batch-02.log`），宿主结构大小和字段偏移核对通过。私有混合驱动 `330ea143` 严格重放真实账本且镜像一致；交换前两条事件后具名拒绝 `resource-trace-key-mismatch`、无镜像。私有库重构，多源捕获和调用返回 7（`out/cx-ledger-lookup-lib-01`）。仍未授同树驱动、并发或外国宿主资格。
+
+资源身份的阶段与路由标签校验已迁入 CX；源批 39/0（`out/cx-stage-label-batch-01.log`），3,600 种阶段、目标、架构、选项与格式组合和旧 C 校验一致，连同既有对照共 104,485 项。私有混合驱动 `94fe3500` 严格重放真实多源 image 且镜像一致；私有库重构、多源捕获及调用返回 7（`out/cx-stage-label-lib-01`）。同树驱动、正式 HOST 与外国宿主仍未验证。
+
+资源账本清理已迁入 CX，调用方注入释放器；CX 路径的账本加载分配统一使用调用方的 realloc 域，修正库侧普通 malloc 与跟踪 free 不匹配。源批 41/0（`out/cx-ledger-clear-batch-01.log`）；真实加载器在注入分配域的 8 个失败点均清理并可恢复，账本结构宿主布局已核（`out/cx-ledger-clear-ownership-01`）。私有混合驱动 `24439e1e` 严格重放真实多源账本且镜像一致，私有库重构与多源调用返回 7（`out/cx-ledger-clear-lib-01`）。注入测试不等于完整库并发或外宿主验证；同树驱动及正式 HOST 未验证。
+
+账本身份比对已迁入 CX，摘要函数由调用方注入，保留缺身份、阶段不符、输入不符的诊断顺序及阶段失败时不计算摘要；源批 45/0（`out/cx-ledger-check-batch-01.log`），实际 C/CX 诊断对照及既有解析对照共 104,493 项一致。私有混合驱动 `3722814e` 严格重放真实多源 image 且镜像一致；私有库重构、多源捕获与调用返回 7（`out/cx-ledger-check-lib-01`）。同树驱动、正式 HOST、并发与外国宿主尚未验证。
+
+资源账本完整行扫描已迁入 CX，行字节借用且失败不推进游标，保留先拒绝截断、再拒绝嵌入 NUL 的顺序；源批 50/0（`out/cx-ledger-line-batch-01.log`），真实加载器 8 个分配失败点清理通过。私有混合驱动 `186cd403` 严格重放真实多源账本且镜像一致；截断行和嵌入 NUL 均具名拒绝、无镜像。私有库重构并多源调用返回 7（`out/cx-ledger-line-lib-01`）。同树驱动、正式 HOST、并发与外国宿主未验证。
+
+快照资源视图复制已迁入 CX，输入借用、成功副本归调用方，缺失及失败不改输出，空值仍分配一字节；源批 55/0（`out/cx-ledger-view-batch-01.log`）。真实账本加载器 8 个分配失败点清理通过，视图宿主布局已核；私有混合驱动 `2ab7a86c` 严格重放真实多源账本且镜像一致，私有库重构、多源捕获及调用返回 7（`out/cx-ledger-view-lib-01`）。该驱动重放走磁盘账本，视图路径证据来自加载器注入测试，不授完整快照、同树驱动或外国宿主资格。
+
+新增 `snapshots-cx` 独立 SOURCE 批：使用现有材料工具构造真实快照夹具，另生成 CX 接线副本并执行，随后复验原材料身份。已装 `79fb84e6` 本机实跑 265/0、87 个分配故障点及恢复通过（`out/cx-snapshot-cx-batch-01.log`）。这是 CX 账本操作与原 C I/O 组合的源码验证，不是已安装候选、同树驱动或外国宿主资格。
+
+POSIX 账本文件读取流程已迁入 CX，open/fstat/read/close、错误码和分配释放由调用方注入；保留禁止符号链接、普通文件检查、EINTR 重试和增长拒绝。`snapshots-cx` 源批重新实跑 265/0、87 分配故障点通过（`out/cx-ledger-io-snapshot-batch-01.log`）；私有混合驱动 `98fd7aaf` 严格重放真实多源账本且镜像一致，私有库重构、多源捕获及调用返回 7（`out/cx-ledger-io-lib-01`）。正式 HOST、同树驱动、并发及外国宿主未验证。
+
+Windows 账本 stdio 读取流程现也迁入 CX，调用方注入打开、定位、读取、关闭、错误码和分配释放；源批 64/0（`out/cx-ledger-win-stream-batch-01.log`），其中 Windows 读取用本机模拟回调覆盖成功、空文件及七种失败清理。旧私有 P3 下 win/x86_64 与 win/arm64 驱动及身份模块单元均可交叉构造；没有 Windows 链接或实机运行。Linux 快照源批重新通过 265/0、87 分配故障点，私有库重构、多源调用返回 7（`out/cx-ledger-win-stream-lib-01`）。同树完整候选、正式 HOST 和外国宿主资格仍未验证。
+
+资源行对象追加、SC1 重复键拒绝及 SC2 重复保留已迁入 CX，键只在追加成功后转移所有权，扩容失败保持调用方所有；源批 68/0（`out/cx-ledger-add-batch-01.log`），真实快照批 265/0、87 分配失败点及恢复通过。私有混合驱动 `9d539143` 严格重放多源账本且镜像一致，私有库重构、多源捕获及调用返回 7（`out/cx-ledger-add-lib-01`）。同树驱动、正式 HOST、并发及外国宿主仍未验证。
+
+资源账本主解析循环已迁入 CX；文件读取、分配释放、错误码及 SHA 由调用方注入，失败后账本清理由调用方完成。真实快照 SOURCE 批 265/0、87 个分配失败点及恢复通过（`out/cx-ledger-parser-snapshot-batch-01.log`），真实加载器另核 8 个分配失败点。私有混合驱动 `f1acf9ea` 严格重放多源账本且镜像一致，六类畸形行的退出码、诊断与既有证据一致且无镜像；私有库重构、多源调用返回 7（`out/cx-ledger-parser-lib-01`）。旧私有 P3 下 win/x86_64 驱动和解析器单元可交叉构造，未在 Windows 链接或实跑；同树驱动、正式 HOST 和外国宿主仍未验证。
+
+解析器当前源码身份 `757979c3` 的 28 单元同树私有驱动已构造，摘要仍为 `f1acf9ea`；真实多源严格重放镜像一致，六类畸形账本诊断与旧结果一致、无镜像（`out/cx-ledger-parser-driver-units-01`、`out/cx-ledger-parser-final-bad-*`）。旧 C 与 CX 主解析器各自加载含显式缺失、空值、非空值和 SC2 重复键的账本，对逐字节变异和截断共 105,115 项输出及诊断一致（`out/cx-ledger-parser-diff-03`；夹具 `tests/cases/ledger_parser_{adapter,compare}.c`）。正式 HOST、完整候选、并发与外国宿主仍未验证。
+
+固定 P3 `7b806ec2` 已用 CX 提取器两次解压、核 CRC 与结构，32 个模型逐字节一致；第二次材料清单 SHA `f0b6d8f6` 记录工具、模块及声明的启动产品摘要。旧运行时逐个解码生成含返回集合的 32 份结构快照，清单 SHA `980ecf61`（out/cx-p3-model-material-01），供新解码器对拍；损坏 CRC 输入被拒且不留输出。这些是私有对拍材料，不是功能通过。
+
+P3 提取器的登记材料批已在固定 P3 实跑 4/0：逐项复核 32 个成员和源码摘要、重复目标拒绝且保留清单与模型、CRC 损坏拒绝且不留输出、执行工具与声明 ROOT 不符时拒绝（out/cx-p3-extract-binding-01）。收据里的启动器摘要是 ROOT 下文件的声明值，提取器本身不能独立证明实际启动进程身份；不缓存解码结论，也未覆盖外宿主。
+
+模型标签读取和文本十六进制解码已接入 CX model_number：真实运行时 C/CX 路径按字面预期对拍 27/0，包含截断、坏标签、二进制标签及大小写拒绝（out/cx-model-tag-runtime-01）；CX 读取与 CX 释放同时启用时，最小模型 20 个分配失败点仍全部清理（out/cx-model-tag-allocation-01）。固定 P3 私有静态库重构并调用返回 7（out/cx-model-tag-source-01）；产品和外宿主未重建或运行。
+
+模型加载的部分分配失败清理修复：指针数组分配后立即清零，避免后续分配失败时释放未初始化指针。真实加载器最小模型的 20 个分配点逐一注入失败，C 与 CX 生命周期清理均无非法释放和遗留块，登记批 1/0（out/cx-model-allocation-01）；修前第 2、10、11 次分配失败的红项保留在 out/model-allocation-before.log。固定 P3 本机私有库重构后 API 返回 7（out/cx-alloc-fix-source-01）；未重建或安装产品，外宿主未测。
+
+同一分配注入批已增加 32769 条 MARK 的文本模型，实际触发动作数组从 65536 元素扩容；19 个失败点包含一次 realloc 失败，核对失败时旧块释放与成功后的动作末尾。C、CX 清理、CX 读取加清理三路均通过（out/cx-model-allocation-growth-01）；这是本机有限夹具，不覆盖所有模型形态。
+
+分配注入批又加入非空字符串、返回集合和非空行的 N 模型，逐项测试 21 个分配失败点；连同前两模型分别为 20、19、21 点，C、CX 清理及 CX 读取加清理三路通过（out/cx-model-allocation-return-01）。新 CX 解码器模块检查也对这三种形态注入了分配失败；接线后的库路径仍须独立验证。
+
+CX 模型释放已接入产品驱动与四条构造清单。冻结源码 SID `1c09224b`、P3 `7b806ec2` 经独立单元入口完成 17 单元和链接收据，Linux 私有驱动 `2d62ee4f` 实际运行返回 7（out/cx-lifetime-driver-source-01）；四构造工具无参入口语法检查均具名拒绝。此冻结树的 native-first v4 身份与 HOST `c7ad1bfe` 已构造（out/cx-lifetime-host-context-01），HOST 与前述单元构造所用宿主驱动逐字节相同，并以固定 P3 实际运行返回 7；HOST 只记 PREPARED，不授完整构造资格。宿主混合构造初次因旧 modelnumber 对象缺 `cxmn_budget` 链接失败，更新该对象后通过。其他切片与安装尚未验证，旧收据不迁。
+
+同一冻结树与 HOST 的 Linux arm64 路线完成 17 单元及链接收据，产物 `7640e271` 经 readelf 确认为 AArch64 ELF（out/cx-lifetime-driver-source-01/out/units-arm64）；没有 arm64 宿主执行，不授功能资格。grk 的网络结构模块 `43568fdafc` 对 P3 `7b806ec2` 全 32 个成员经解压、CRC 和结构读取，工具 `tools/check-network-real.cx` 返回 0；不覆盖网络执行或完整语义。
+
+CX 模型生命周期模块已接入本机库构造，调用方注入所属分配域的释放函数；部分模型释放顺序和清零与原 C 路径及手写期望一致（正式对拍批 1/0），模块源批 6/0。固定 P3 构造的私有静态库经 API 调用返回 7，归档实际含 model_lifetime.o（out/cx-lifetime-build-source-01）。正式独立批以该构造器重建库，在宿主 ASan 下进行三轮非法预算拒绝、同上下文重试成功、调用和释放，1/0（out/cx-library-cache-batch-01）；库对象自身未插桩，此结果不覆盖所有失败路径、HOST、产品驱动或外宿主，不授安装资格。
+
+独立执行器与库使用的正十进制步数预算解析已接入 CX model_number；原 C 与 CX 路径按字面预期对拍 19/0，含零、溢出、符号、空白及旧模型数字合同。固定 P3 的本机私有静态库以合法预算调用返回 7，零预算具名拒绝；产品构造路径仍使用编译期预算，未授安装或外宿主资格（out/cx-runtime-budget-source-01）。
+
+CX 模型载荷模块提供 P3 成员的精确解压、CRC、UNINETB1N 标记和注入的网络结构检查，载荷批 9/0；网络结构批 49/0，仍不检查完整网络执行语义。库构造器按需启动审核器，固定 P3 的 32 成员通过并实际构造库、静态库 API 返回 7；CRC、压缩流、标记及 CRC 正确的截断网络拒绝批 4/0（out/cx-network-builder-source-01、out/cx-network-integration-01）。审核源码与启动产品身份记录并在发布前复核；旧拒绝批 12/0 的证据属先前身份。首次直接引入时拒绝批超时的失败仍保留于 out/cx-library-payload-source-01。系统 libffi 独立联合体探针在本机观察到浮点参数错误，不授 FFI ABI 资格。
+
+同一构造快照以已装 APE 作为完整输入成功构造动态库，输出记录完整文件 SHA `79fb84e6`，API 编译并调用函数返回 7；历史 M3 损坏 APE 经包审核具名拒绝、不创建输出（out/cx-library-payload-lazy-01）。这是本机私有构造和真实文件损坏验证，仍不授完整网络语义、已装候选或外宿主资格。
+
+库构造前 CX 包结构检查与 grk 模块已接入提交 `c57abbaeb0`；固定快照结构批 31/0、构造器拒绝批 12/0，含非法阶段字段、P1/P2 首字节及合法最后模型索引。固定 P3 与带页脚 APE 均实际构造库，静态/动态库 API 探针分别返回 7；原红和构造器 marker 失败保留。构造器记录原始文件与检查模块身份；P3 模型解压、CRC、网络语义、FFI ABI 与外宿主仍未验证，未安装。
+
+CX 模型数字解码接线的冻结 SID `530a6461` 已建立 native-first v4 context 与 HOST `78699c44`（`out/cx-number-host-context-01`），固定 P3 下多单元 constructor 与宿主转发探针返回 7。仅 PREPARED 与本机探针，未重建五切片或安装；包结构检查工作区未纳入该冻结树。
+
+库构造前 CX 包结构检查的旧试验副本 `out/cx-library-structure-source-02` 拒绝批 10/0；`out/cx-library-structure-source-01` 对固定 P3 与带页脚 APE 各成功构造库。旧版错误接受含 `@` 的阶段名及非 `N` 开头 P1 模型，后续快照 `out/cx-packagestruct-audit-source-03` 的边界夹具另有 24/1；这些失败均保留，修复与当前结果见上。
+
+CX 数字解码接线后的 Linux driver 已由 HOST `dd41051f` 在冻结 SID `530a6461`、固定 P3 `7b806ec2` 下构造全部 16 单元并校验链接收据（`out/cx-model-number-driver-units-01`）；结果 `d190d7ea` 与先前混合链接字节相同。私有自嵌包 ELF `e30e88db` 经薄入口 `48cda94d` 实跑模块图 11/0，ELF 与入口哈希前后不变；测试自报入口身份，非已装产品资格。新 HOST 见上，其他目标未构造。
+
+真实 `run.c` 的 C 与 CX 数字适配器已用宿主夹具对拍并核字面预期（`4959609cc4`）：十个十进制/二进制边界、截断、非规范和溢出输入的结果、退出码及完整诊断一致；登记批 10/0（`out/cx-model-number-runtime-batch-01`）。范围是本机 GCC 驱动的适配器，不是完整畸形 P3、已装产品或外国宿主资格。
+
+CX 宿主库构造器已将模型整数解码接入真实静态/动态库（`bd18b35560`），归档为 library、bridge、codec、footer、attribute_frame、model_number 六单元。固定 P3 的私有库成员及分配账本批 35/0；新静态库、动态库各经 API 编译并调用普通函数返回 7，证据 `out/cx-library-model-number-source-01`。仅 Linux x86-64；包结构接线见上，FFI ABI 资格仍未核，不授安装或外宿主。
+
+产品 driver 构造已接入 CX 模型整数解码（`bc413bca5c`），私有 driver `d190d7ea` 在固定 P3 上多单元/宿主转发返回 7；新增单元由 HOST 构造收据绑定 SID `530a6461`，三条构造入口的用法拒绝正常。同树 16 单元与新 HOST 见上；五切片与完整畸形模型差分未做，不授安装或跨平台资格。
+
+grk 的 CX 宿主库构造器与拒绝检查已入库（`ace2ec6b9b`）：Linux x86-64 下构造真实静态库和动态库，分别用库 API 编译含属性声明的源码并调用普通函数返回 7；归档成员核为 library、bridge、codec、footer、attribute_frame。登记的拒绝批 8/0；首次因 marker 空格被登记器拒绝，修成制表符后重跑通过，原失败保留。当前只记包摘要，未做包格式及 FFI ABI 资格探针，未做外宿主或安装；遗留 Python 构造器仍不可用。
+
+独立流执行器的二进制/十进制模型整数解码已迁入无状态 CX 模块（`46fe091fd1`），借用输入并由调用方持有游标；源批 14/0，私有九单元七流 47/0（`out/cx-model-number-source-01/out/streams-batch`，控制器 `79fb84e6`）。driver 接线见上；已装产品、库及其他运行器仍走 C 解码，畸形真实模型差分与外宿主未测，未安装。
+
+私有 Linux driver 自嵌包 ELF `ebc0abb6` 经薄入口 `9c4c03d0` 实跑 `tests/cx-unit-graph.cx` 11/0（`out/cx-host-native-builder-graph-01`），含默认运行、独立单元、多显式源及缺依赖拒绝；测试自报候选是入口脚本，ELF 哈希另在执行前后核为 `ebc0abb6`，不冒称直接候选或已装产品的正式批资格。
+
+arm64 分单元链接的身份负控已实测：把完整 arm64 对象与收据用于 x86-64 目标，或保留 arm64 目标但替换为不同 P3 包，均 rc2 `unit-receipt-or-source-mismatch` 且不生成链接产物；原件保留在 `out/cx-arm-mixed-receipt-01`。固定 P3 `7b806ec2` 只有 Linux 两目标 object/O 路由，另一私包 `efc5a50b` 含 osx/win 路由但身份不同，不能拿来冒充固定包。
+
+Linux arm64 的 driver 已支持固定 P3 下按 15 个独立单元构造（`50de20a800`）：SID `5c142957`、HOST `dd41051f`、包 `7b806ec2`，链接收据与 AArch64 ELF `e6b4e765` 见 `out/cx-arm-unit-build-01`；native provider 使用 Linux arm64 setpgid syscall 154，反汇编已核，Linux x86-64 单元与原对象逐字节相同。未知目标具名拒绝。仅构造和静态格式检查，未在 arm64 宿主运行，不等于 HOST 全源 O2 或产品资格；固定 P3 无 osx/win 对象路由。
+
+直接绑定 HOST 的独立单元构造器已在 SID `42586cfa`、固定 P3 `7b806ec2` 上完成全部 15 单元和链接收据（`out/cx-host-native-builder-units-01`）；每份 builder 均为 `dd41051f`，driver `006deaa6` 与先前薄 shell 路径逐字节相同。私有自嵌包 ELF `ebc0abb6` 的多单元 constructor/宿主转发返回 7；仍限 Linux x86-64，未替代超时的全源 O2 路线或完成其他目标。
+
+独立单元构造器支持直接执行 ELF HOST（`17a5413ae9`），收据的 builder 现在实际绑定 HOST 哈希；固定 P3 下属性帧单元由 HOST 构造与此前字节相同，APE 启动器的 path 单元也在显式 P3 下通过。两次无显式模型尝试被 `unbound-model-override` 拒绝，保留拒绝，不计作通过；完整 15 单元结果见上一段。
+
+针对原 HOST 全源 `-O2` 40 秒超时，在同冻结 SID `42586cfa` 上用 HOST `dd41051f` 通过薄 shell 逐个构造 15 个 Linux x86-64 单元并链接出私有 driver `006deaa6`（`out/cx-allocator-host-units-01`）；driver 单元 O0、其余 O2，均有逐步收据，多单元 constructor/宿主转发缓存开关各返回 7。构造前后 HOST 哈希均为 `dd41051f`，但收据里的 builder 是薄 shell 而非 HOST 本体，此为有限端点证据，不等于全源 O2 切片/完整 HOST 链或跨目标产品。固定 P3 的非 Linux 对象路由仍需核实，其他切片未完成。
+
+分配器修复源码冻结 SID `42586cfa` 已建立 native-first v4 context `9e8d7f85` 和 HOST `dd41051f`（`out/cx-allocator-host-context-01`），仅 PREPARED。首个 Linux x86-64 切片的 HOST 全源 `-O2` 在原有 40 秒内部预算返回 142，`out/cx-allocator-host-stage-01/slice-lnx-x86_64.*` 保留，未产出切片；其余切片/APE 未开，须先解决构造耗时或用同合同的有界分单元构造，不能把前代 APE 迁作新证据。
+
+属性帧现由调用方注入分配器（`52cae6a537`）：库传 tracked_realloc，driver/流传自身 realloc；原账本红例已转绿并纳入 `p3-library-members-cxruntime`，冻结源码的库批 34/0，模块 28/0，私有流 47/0；混合私有 driver 的两单元 constructor/宿主转发缓存开关均返回 7。先前 `e95a06d4` APE 是修复前身份，不能作新源码证据；新 HOST 和切片进度见上一段，不授外国宿主与完整并发资格。
+
+库属性帧分配归属直接账本探针（`263925e51d`）保留修复前证据：私有 CX 帧版 `out/cx-attribute-owner-red-01` rc1 `attribute allocation untracked`，原 C 帧对照 `out/cx-attribute-owner-baseline-01` rc0 且 cleanup 后账本为空。修复后的结果见上一段。
+
+属性帧接线的冻结 SID `87f7470e` 已建立 native-first v4 context 与 HOST `4ce923d6`；五切片及 fixed-P3 APE `e95a06d4` 均为 PREPARED（`out/cx-attribute-host-{context,stage}-01`），HOST 与 APE 的 Linux 多单元 constructor/宿主转发探针均返回 7。构造使用固定 P3，不代表 NN/ASM 独立重建、安装或外国宿主运行。该候选早于分配器修复，旧私有库 31/0 不证明分配清理；修复后的结果见上。
+
+私有八单元流执行器的七流批次现含 E3 真实属性帧拒绝：截断头、载荷长度不符、缺记录和计数超限均 rc2 且完整具名诊断，`aee9a26b61` 实跑 47/0，材料为 `out/cx-attribute-frame-material-01`。旧接口批仍受其原材料身份钉约束，没有迁标。
+
+属性帧接线后的 driver 已按同一冻结树重新构造 15 单元与链接收据（SID `87f7470e`，P3 `7b806ec2`，私有 driver `836e907a`，`out/cx-attribute-driver-units-02`）；双单元 constructor + 宿主转发在缓存开关各返回 7 且输出一致，自嵌包返回 7、缺包尾 rc2 具名拒绝。独立流材料试跑 `interfaces-lnx-x86_64` 被该批旧流 SHA 钉拒绝，`out/cx-attribute-frame-interfaces-01` 保留，未改变钉或计 PASS。此仍非 HOST／五切片或安装资格。
+
+库新增私有 CX runtime 构造批 `p3-library-members-cxruntime`（`c7aaa21730`）：codec、包尾、属性帧三模块同时链接，固定 P3 干净及损坏成员合同 31/0，本机 Linux x86-64。含 constructor 声明的库源可编译、relocate 并调用普通函数返回 7；单独探针发现 constructor 未运行（全 C 对照同样返回 0），保留 `out/cx-library-attribute-probe-{01,baseline-01}.*`，不授 constructor 语义通过。正式库构造尚未切换，未授并发或外国宿主资格。
+
+产品 driver 与流执行器的属性帧剥离、缓存记录重打单元号已接入 CX 模块（`2fd624feee`，grk 实现）；源批 21/0，私有八单元流执行器七流 43/0。私有驱动使用新 driver/属性模块与上一冻结同源单元链接，多单元 constructor + 宿主转发在缓存开/关时均输出相同并返回 7；此为有限混合验证，非同树完整候选。库仍走 C 帧实现；HOST、五切片和外国宿主未测，未安装。
+
+产品 driver 构造已接入 CX 包尾定位（`6ebc023a8a`），14 单元私有候选 `00b947e3` 在冻结 SID `d9407cc4`、P3 `7b806ec2` 下编译链接，外部包及自嵌包各运行返回 7，无包具名 rc2；三个构造工具无参用法拒绝正常。HOST 与五切片尚未正式构造，库仍走 C 包尾；未安装、不授旧矩阵或外宿主资格。
+
+流执行器的包尾定位已接入 `cx/runtime/packagefooter.cx`，原工具路径链接同一真源（`7b1d5c7767`）；包尾正式源批 11/0、私有七单元 runner 七流 43/0。控制器为 `79fb84e6`、仅本机 Linux x86-64；已装产品和库仍用 C 路径，未安装新 runner，也不授外国宿主资格。
+
+stream 外部属性表校验已迁入调用方借用输入的 CX 模块（`01c5a457a1`）；正式源批 6/0，私有六单元 runner 七流 43/0，短表、缺记录与超限均 rc2 具名拒绝、stdout 为空（`ceb3788ad8`）。控制器为已装 `79fb84e6`，验证限 Linux x86-64；runner 未安装，产品完整执行器仍保留属性帧处理的 C 实现，下一步拆分该共享职责。
+
+stream 的 `UNISA_STREAM_RESOURCE` 名称／路径解析已迁到 CX 借用接口（`73499ae7f5`）；正式源批 10/0。含别名拒绝的私有五单元 runner 使用已装 `79fb84e6` 的材料，七流 40/0、带资源的 prune-library 10/0；最终 runner 复用同冻结源的其他四个单元，资源单元单独重编，未安装或授外宿主资格。
+
+独立 stream runner 的输出与属性写入已迁入借用字节区的 CX 单元（`bf0ae8bde0`），四单元构造和七流私有容器已在包含 LLP64 头文件更新的冻结导出上运行，`streams` 40/0；模块正式源批 11/0。控制器为已装 `79fb84e6`、目标 Linux x86-64，未安装新产品，不授外国宿主或完整运行库迁移资格。
+
+独立 stream runner 已在冻结旧头文件的 Linux x86-64 导出上以 C runtime、CX codec 与 CX process_group 三单元由产品构造；七流私有容器的 `streams` 批 40/0，产物未授发布资格。实际构造步骤已记录 `a8ed5f5a4e`；runtime 源仍是 C，其他构造入口尚未统一。cc 的 LLP64 配套 `0042d510ef` 已提交，当前头文件改动需要新候选重测，不能转授旧快照结果。
+
+新增独立正式源批 `p3-library-members-cxcodec`（`fd83f758f6`），用私有 host 库链接 CX codec，在固定 P3 上保留全部干净／M28／M30／M31 控制；已装 `79fb84e6` 作控制器实跑 29/0。原 C codec 批同材料 27/0，仍保留。两批均不授已装库、完整并发或外国宿主资格。
+
+CX codec 产品迁移新增 Linux x86-64 私有库探针：以 `UNISA_CX_CODEC` 编译库并链接该模块，干净合同／编译／carrier 均通过、M30 损坏具名拒绝；双线程分别运行干净与损坏合同得到成功和拒绝，`cx_runtime_crc` 确认为 4096 字节 TLS。仅有限探针，正式库构造和完整并发资格仍未迁移。
+
+产品 driver 的 run.c 已以过渡开关使用 `cx/runtime/codec.cx`，工具通过原路径链接同一真源（`8778aefc1a`）；其他 runner 与库正式路径仍走旧 C codec。同源 13 单元候选 `714db896` 模块图 11/0，干净 P3 可用、损坏 M3 解压与 CRC 均具名拒绝、qprefix 32 模型通过；HOST PREPARED（`out/cx-runtime-codec-host-context-01`），未安装，不授库线程或跨平台资格。
+
+CX codec CRC 已改为调用方持有上下文和结果缓冲的检查式接口（`1cb8e54293`）：空指针、负长度拒绝且不改结果；正式源批 9/0，固定 P3 的 qprefix 32 模型及私有完整 P3 88/0。运行库仍使用旧 codec，接入方案正由 grk 审核。
+
+route 模块的真实 use 合同已登记进现行批（`21ea891425`），已装 `79fb84e6` 运行该源批 126/0、严格 --list 通过；这只验证模块源，不把它算作已装驱动已接入。
+
+路由决策 CX 模块、驱动和构造已一并提交 `e5b3396470`；借用目标 ABI 模块检查 126/0，同树 12 单元候选 `7dbc1749` 的模块图 11/0、驱动诊断 11/0、目标预定义 6/0；HOST 正式入口 PREPARED（`out/cx-route-host-context-01`）。仍未安装或验证外国宿主。
+
+P3 完整消费批当前仍以 `tools/p3-member-consume.c` 构造宿主 helper（88 项合同）；轻量 `tools/p3-member-consume.cx` 只核两个模型。新的完整 CX 入口 `tools/p3-member-full.cx`（`50d104ca4f`）在恢复负控第 28 成员的私有材料和 Root7a 上，以产品编译的 O2 本机工具完成 88/0；未恢复的负控唯一失败为 member-binary-28，88 项其余通过。默认 -run 在 55 秒预算内未完成（停于第 26 成员），原始日志保留；完整正式批仍用 C，尚未切换，以上不授当前已装产品资格。
+
+更正目标预定义：已装产品 `-b win/x86_64 -E` 实测使用 Windows 宏；缺陷是 `-dump-tokens` 固定使用 Linux 宏。驱动修复及正式回归批已提交 `63f60b70be`：已装 `79fb84e6` 的 Windows/macOS 两项红、其余四项绿；产品编译的混合私有候选 6/0（`out/cx-token-target-product-cases-01`），未安装。目标切换只是预定义选择，不证明 LLP64 已完成。
+
+CX codec 与包尾模块合同已登记进现行批清单（`be1118a3e4`），两批对已装 `79fb84e6` 正式入口实跑通过，分别为 8/0 和 11/0；严格 --list 通过，不转授其他候选。cc 的 LLP64 协调批进行中，头文件宏自动生成表既有漂移须另行核对；目标预定义缺陷及 `-E` 更正见上文。
+
+产品模型校验工具 `exec/c/qprefixcheck.cx` 已改用 CX codec，入口持有 CRC 上下文并借给包解析（`922f56d73f`）；固定 P3 包 32 个真实模型、tiny 对拍及 8 个畸形例通过，CX include 检查 107 行、低于原 108 基线一行。运行库仍使用旧 codec，未安装新产品。
+
+CX codec 已验证安装产品 P3 全部成员的精确解压、模型标识与包内 CRC（`1053f52564`，总检查 8/0）；不等于所有成员的运行路由资格或完整 P3 对拍。Windows LLP64 的 E3 第一阶段 `4788c718f9` 仅表级验证，cc 正协调预定义、头文件和 64 位宿主桥，配套完成前不装入产品；外国宿主运行未测。
+
+CX 包尾模块的合成 PE 证书区定位与非法修订、错位、越界拒绝已测（`b6dc775567`），连同其他边界为 11/0；这是格式检查，不验证签名真实性。
+
+P3 消费工具已使用 CX codec（`d238debe0b`）和只借用字节区的包尾模块（`fc46ee8d16`）；CRC 表由调用方持有。CX include 检查 0 超基线（678 模块、108 行）。这是从旧 C 头移植的独立实现；运行库仍使用旧实现，P3 正式完整材料路径尚未重跑，不宣称运行库迁移完成。grk 的 route 模块仍在编辑，尚未接入。
+
+归档调用方的容量求和现检查溢出、分配失败受控退出、输出打开失败释放缓冲（`5aab7465d4`）；宿主及产品编译混合候选归档合同各 18/0（`out/cx-archive-cap-cases-01`、`out/cx-archive-cap-product-cases-01`）。极限容量与分配失败未注入，未安装。
+
+归档旧实现已从产品的条件编译输入中排除，参考编译器继续保留（`5117e6da8b`）；新增截断归档链接拒绝合同（`0c58c9cc0f`），私有宿主及产品编译混合候选各 18/0（`out/cx-no-legacy-cases-01`、`out/cx-no-legacy-product-cases-01`），参考编译器另行构建并读取归档成功。尚未安装或验证外国宿主。grk 正实现独立的路由选择模块。
+
+产品链接器的归档成员读取也已切换至 CX 模块（`3a8774e456`）；私有宿主和产品编译混合候选 `7649b74d` 各通过归档及按需链接 17/0，截断归档链接具名拒绝（`out/cx-archive-link-product-cases-01`）。其余单元沿用上一冻结树，非新同树正式构造、未安装；参考编译器保留独立实现。
+
+归档单元及驱动、构造接线已一并提交 `dc5664a2dc`。冻结源 SID `3091b04c` 的 11 单元及链接收据在 `out/cx-archive-unit-01`，候选 `bf4a75e7`，单元图 11/0；同候选归档产品检查 17/0（`out/cx-archive-product-cases-03`），模块检查 100/0；正式 HOST 构造 PREPARED（`out/cx-archive-host-context-01`），不等于产品安装或跨平台资格。以下较早的混合候选说明保留作为过程证据。
+
+归档补充验证：产品编译器分别编出 archive 和过渡驱动，再与先前快照、同 P3 的模块链接成混合私有候选 `bf4a75e7`；该候选经薄包装运行归档产品检查为 17/0（`out/cx-archive-product-cases-03`）。此结果不等于同冻结树构造或安装资格；完整构造接线仍在协作中。
+
+**最新节点：** environment 已拆为独立 CX 单元并由驱动与构造接入（14a3b9fe4b）；十单元私有候选 `out/cx-env-unit-02/driver.elf` 的模块图 11/0、CLI 190/0，宿主构造 PREPARED，未安装。archive 模块与过渡驱动接入仍为工作区改动；私有宿主加固定 P3 的归档产品检查 `out/cx-archive-product-cases-02` 为 17/0，记录中的 candidate 是薄包装的 SHA，实际驱动为 `out/cx-archive-driver-host.elf`；构造接线及独立单元候选待完成。第一次检查 `out/cx-archive-product-cases-01` 因隔离根缺 watchdog 源文件为 16/1，原始失败保留。旧 C 聚合仍未替换，不能归档。
+
+**当前重构节点：** 全面 CX 结构重写进行中；驱动 output、deps、input、path、args、cli、compat 已拆成独立 CX 单元并由过渡 C 驱动调用（027e0190ab、0bf324ad3c、78ab578877、e5bc4cd88a、d2a13b5935、a93e3b6864、253833f6d0）。私有 Linux x86-64 七单元候选 7df3aac4 已验证默认运行、`-U/-D`、`-I`、`-include`、`-M`、参数模块 43/0 和输出模块 12/0；其构造使用固定模型 7b806ec2 和冻结快照 SID 0e05e684。八单元私有候选 9b06768b 已独立链接并验证宏／包含参数和 CLI 190/0；此前 8fa5cb7c 验证版本、宏参数、依赖输出及 CLI 141/0；九单元私有候选 17602022 已链接并验证 compat 41/0 和 -lm／缺参；已装产品仍为下述 79fb84e6，私有结果不等于安装或跨平台资格。身份 v4 在冻结 ce65c6ffab 上完成旧投影和 CX 身份观测，并按正式入口构造 HOST，`-U/-D` 返回 7、参数模块 43/0（out/cx-bridge-v4-context-03）；这不是完整身份迁移证明。正式切片入口仍是多源编译且曾超时；当前产品拒绝非 Linux `-c -funit`，跨目标独立构造待产品支持，Mach-O 和 COFF 单元容器已完成表级验证。独立 use 单元重复定义已由 6e88fde35e 修复：九单元私有候选 f08a5bb3 的分编、缺模块拒绝、链接与运行 5/0，默认-run 41/0；原红保留。直接／传递依赖和显式多源 Linux 测试 dfb7a83eb0 在私有候选 11/0；正式产品批 193ad29a33 已登记，b6a1eb7cbc 增加夹具前后哈希；已装79fb实跑为3失败／2未验证（重复定义，out/cx-graph-registered-02），保留红项；macOS／Windows x86-64 三单元交叉链接成功（未外国执行）。旧 C 聚合、运行库及其构造路线仍须逐步替换，不能归档或宣称全面重写完成。
+
+跨目标单元进展：冻结 d2a13b5935 的 131/131 作业、双内核和 42 模型已封装并重读核验 P3 包 6fd5520d（out/cx-source-xtarget-pc-03；材料身份，不授功能资格）。驱动在 5a63eb5460 按选中包检查非 Linux 单元路由：私有宿主驱动实编 macOS／Windows 的 x86-64、arm64 各两个对象并链接，四目标均成功；旧包缺路由和目标不匹配均具名拒绝。产品编译器构造的八单元私有驱动 8e80ffa1 与该包也完成四目标编译链接，与宿主驱动产物逐字节相同；证据为本机交叉构造，含 long 的 ABI 有真实缺口：工具 c450b2e60f 的目标宽度探针 Linux／macOS 通过、Windows x86-64／arm64 两项失败，产品生成 long=8 而 Windows LLP64 需 4（out/cx-target-long-check-01）；真实 CX 单元探针 0eb61138d4 在旧包 6fd5520d 的 Windows arm64 原为 0/3；2805a9c98c 新表重建两张 arm 编码网络后，私有未准入替换包 efc5a50b 上真实 output／cli／compat 为 3/0，直接／传递依赖三单元亦已链接 PE，原红保留；真实驱动整体交叉单元在 macOS x86-64 因 object host FFI slot 被拒（探针 56229f572d，原红保留），实际产品重建及外国执行尚未验证。
+
+**当前节点（驱动/链接诊断）：** 已装79fb84e6/record4608b9ac，冻结207195a597/SID5675f557，内嵌PC7b806ec2。五切片及APE实构，固定两文件差异核验和两阶段开发安装完成；收据out/c43-driverdiag-install-01/installed.tsv，旧cb743c27保留。已装driver-diagnostics11/0、smoke16/0；候选archive-ar17/0、formats68/0。归档main两路线旧新均拒绝，显式main对象旧新均rc7，无本刀回归；支持缺口仍留。直接C未定义函数原断言仍4/1，不以迟绑定合同解释冒充通过。以下产品段均为历史身份。后续私有验证攒批、集中安装，不逐刀69批迁标；优先完成门产品缺口，cc并行核MISSING与BLOCKED草稿。完整发布和外国宿主资格未完成。
+
 **当前已装产品（落尾修复）：** cb743c27/record9783c93d，冻结648fe13db9/SID95b23dc9，内嵌正式包7b806ec2。完整来源107项与当前59项独立核验、双内核、五切片及APE均完成；暂存候选prepare+verify-prepared后以staged-v2迁入共享根，冻结启动产品b6f15保留，安装收据5266380d，备份out/c43-fallguard-install-01。候选七例7/0、原畸形批11/0（原10/1转绿）、格式68/0、库成员27/0；已装smoke16/0、落尾7/0。这只修物理代码末尾的具名运行时保护；CFG、函数间落穿、准确函数名归因、完整发布覆盖与外国宿主资格仍未闭合。下一步已装受影响资格和剩余诊断/类型ABI/所有权主线；以下b6f15等为历史身份。
 
 **当前已装产品（链接容器）：** b6f15e82/record db7af545，冻结ecb5fbe322/SID003166c6，五切片与APE实构、固定单文件差异和内嵌PCff696核验、prepare/finish两阶段安装完成，收据544011da；旧8147备份out/c43-tapelink-install-01。候选格式68/0、容器边界11/0、原畸形批10/1（唯一余红tape落尾SIGSEGV）；安装后smoke16/0、已装入口边界11/0。原8147的8/3及旧证据保留，矩阵不自动迁标。下一步补新身份受影响资格与独立落尾模型合同；完整发布覆盖及外国宿主资格仍未完成。以下FIFO/CX当前措辞均为历史节点。
@@ -382,7 +588,13 @@ tools/carried-header-export.cx SHA432bf38606d945a1acb8508e04ab784127842593c3ac2a
 <a id="memory-palace"></a>
 ### 记忆宫殿
 
+**诊断当前身份与收据：** 79fb84e6/record4608b9ac已开发安装，out/c43-driverdiag-install-01/installed.tsv SHA1b180548。已装诊断out/c43-driverdiag-installed-diag-01为11/0；归档入口旧新对比out/c43-archive-entry-compare-03.stdout，四路线结果一致（两归档入口拒绝、显式main返回7、只有main声明拒绝）。旧日志与私有失败不覆盖；旧矩阵不迁标。工具和固定driverdiag-v1复用核验不授完整发布资格。
+
 **落尾当前身份与收据：** 共享cb743c27b736119a3c88b1146187c35a8dec955149590eb38b860520a62c1e55，记录9783c93d2bdc5a4cfdfe6f564871dbce168dea75cd94c178906f56ba700c2798；迁入收据out/c43-fallguard-install-01/receipt.tsv SHA5266380d11788f59e974b78c861d28155f5065b94ee2441aba895cc08c957d8a。候选证据out/c43-fallguard-candidate-{seven,malformed,formats,library,smoke}-01，已装smoke/seven为16/0与7/0。source-root冻结648fe13db9的unisacc.com仍b6f15，包7b806ec2和工具身份未替换；旧协议与仅PREPARED收据拒绝，独立目标迁入试验通过。不迁旧矩阵或外国平台资格。
+
+**csih 一次过 C->CX（现行，csr /goal）：** 分层硬规：仅下层（libc/POSIX：net/term/file/shell/https_post/reload_io/os_safedel/u_run/check）可用 `#include`；上层只 pragma。真根 `csih.cx`（`tui_entry`），`csih.sh` 优先；suite/check 已 CX 单入口 `-run`。下一刀 TDD：suite_cli/csih selftest 与 check 全闸收敛；停用树内 `tui.c`/`suite.c`/`check.c` 出货路径。不重打产品 `.com`。
+
+**csih 仓外轻切片（2026-10-28，grk）：** 主人要求仓外试 cx；未改 `apps/csih`、未重打 `.com`、未占 cc 余 57 批／总 900s 重活窗。`out/c43-csih-cx-try-01`：`cols`+`home` 与 `clock` 在 `-run`／`gcc_cx`／`clang_cx` 均 rc0（RECEIPT.txt）。`home` 去掉三处 include（前奏已有）；`clock` 未 include `time.h`，Linux 函数内 `extern clock_gettime`、字面量 `1`＝CLOCK_MONOTONIC，未跑 macOS/Windows。整份 tui/agent 未动。仅仓外探针，不授产品迁移或资格。
 
 **落尾历史基线：** out/c43-fallthrough-baseline-01为b6f15的4/3；私包seven-02为7/0、library-01为27/0。reader-01/02路径拒绝、早期构造失败和原SIGSEGV证据全部保留；正式候选与已装结果见上段。
 
@@ -844,6 +1056,7 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 
 - 权重表示及推理成本：优先研究同权阈值段精确聚合、类型化动作模板/银行归一化；分别量权重、运行内存与同身份延迟。包压缩不冒称权重减少，结构统计不冒称真实提速；网络语义及完整接口保持是前提。
 - 可移植Tape包、嵌入式库/API与包管理、wasm第七目标；表解释性/语义完备性与证明；向量化、工具链去脚本及队列改进。已有实施部分归当前计划，不重复排队。
+- DSL 批量重构工具（主人 2026-10-29，仅登记）：设计并制作代码重构工具，范围含迁移。它是 file 工具的增强版，能对指定 DSL 文件批量并发修改，用来提高代码进化速度。当前不设计、不实现，也不插入进行中的 CX 粗迁。
 - 原FX-1–FX-8细稿及旧测量完整留在[构想归档](archive/plans/ideas.md)，旧收官排期在[路线图归档](archive/plans/roadmap-0.0.x.md)。构想不构成产品/发布授权。
 
 ### 5.3 0.1.x：其他 C 编译器接入 `.cx`

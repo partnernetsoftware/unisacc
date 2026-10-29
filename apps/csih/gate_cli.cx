@@ -1,0 +1,52 @@
+#pragma unisa use gate
+/* Program root for gate. Types come from CXIF via use. */
+enum { GATE_CLI_MAX_TEXT = 65536 };
+
+int main(int argc, char **argv)
+{
+    gate_config cfg;
+    static char text[GATE_CLI_MAX_TEXT];
+    size_t len;
+    gate_decision d;
+    int i;
+    size_t k, n, bad;
+    struct { const char *in; int ok; double p; int cont; } cases[9];
+
+    cfg.threshold = 0.5;
+    for (i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "threshold") == 0 && i + 1 < argc) {
+            cfg.threshold = strtod(argv[++i], NULL);
+        } else if (strcmp(argv[i], "selftest") == 0) {
+            cases[0].in = "0.83"; cases[0].ok = 1; cases[0].p = 0.83; cases[0].cont = 1;
+            cases[1].in = "0"; cases[1].ok = 1; cases[1].p = 0.00; cases[1].cont = 0;
+            cases[2].in = "The probability is 0.9"; cases[2].ok = 1; cases[2].p = 0.90; cases[2].cont = 1;
+            cases[3].in = "0.2\nActually 0.7"; cases[3].ok = 1; cases[3].p = 0.70; cases[3].cont = 1;
+            cases[4].in = "80%"; cases[4].ok = 1; cases[4].p = 0.80; cases[4].cont = 1;
+            cases[5].in = "1.4"; cases[5].ok = 1; cases[5].p = 1.00; cases[5].cont = 1;
+            cases[6].in = "-0.2"; cases[6].ok = 1; cases[6].p = 0.00; cases[6].cont = 0;
+            cases[7].in = "no number here"; cases[7].ok = 0; cases[7].p = 0.00; cases[7].cont = 0;
+            cases[8].in = ""; cases[8].ok = 0; cases[8].p = 0.00; cases[8].cont = 0;
+            n = 9; bad = 0;
+            for (k = 0; k < n; k++) {
+                d = gate_decide(cases[k].in, &cfg);
+                if (!((d.ok == cases[k].ok) &&
+                      (!d.ok || (d.p > cases[k].p - 0.001 && d.p < cases[k].p + 0.001)) &&
+                      (d.cont == cases[k].cont))) {
+                    bad++;
+                    printf("FAIL [%s] got ok=%d p=%.3f cont=%d\n",
+                           cases[k].in, d.ok, d.p, d.cont);
+                }
+            }
+            printf("%lu/%lu self-test cases pass\n",
+                   (unsigned long)(n - bad), (unsigned long)n);
+            return bad == 0 ? 0 : 1;
+        }
+    }
+
+    len = fread(text, 1, sizeof(text) - 1, stdin);
+    text[len] = '\0';
+    d = gate_decide(text, &cfg);
+    if (!d.ok) { printf("STOP reason=\"%s\"\n", d.why); return 2; }
+    printf("%s p=%.4f reason=\"%s\"\n", d.cont ? "CONTINUE" : "STOP", d.p, d.why);
+    return d.cont ? 0 : 1;
+}

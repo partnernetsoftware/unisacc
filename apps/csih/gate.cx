@@ -1,0 +1,81 @@
+#pragma unisa module gate
+/* Continuation gate: last number in reply -> probability decision. No #include. */
+enum { GATE_DEFAULT_THRESHOLD_X100 = 50 };
+
+typedef struct {
+    double threshold;
+} gate_config;
+
+typedef struct {
+    int    cont;
+    double p;
+    int    ok;
+    char   why[128];
+} gate_decision;
+
+static int parse_last_number(const char *text, double *out)
+{
+    const char *p = text;
+    const char *last_start = NULL;
+    size_t last_len = 0;
+    int    last_pct = 0;
+
+    while (*p) {
+        if (isdigit((unsigned char)*p) ||
+            (*p == '-' && isdigit((unsigned char)p[1])) ||
+            (*p == '.' && isdigit((unsigned char)p[1]))) {
+            const char *start = p;
+            if (*p == '-') p++;
+            while (isdigit((unsigned char)*p)) p++;
+            if (*p == '.') { p++; while (isdigit((unsigned char)*p)) p++; }
+            last_start = start;
+            last_len = (size_t)(p - start);
+            last_pct = (*p == '%');
+            if (last_pct) p++;
+        } else {
+            p++;
+        }
+    }
+    if (last_start == NULL) return 0;
+
+    {
+        char buf[64];
+        size_t n = last_len < sizeof(buf) - 1 ? last_len : sizeof(buf) - 1;
+        char *end = NULL;
+        double v;
+        memcpy(buf, last_start, n);
+        buf[n] = '\0';
+        v = strtod(buf, &end);
+        if (end == buf) return 0;
+        if (last_pct) v /= 100.0;
+        if (v < 0.0) v = 0.0;
+        if (v > 1.0) v = 1.0;
+        *out = v;
+        return 1;
+    }
+}
+
+static gate_decision decide(const char *reply, const gate_config *cfg)
+{
+    gate_decision d;
+    double p = 0.0;
+    memset(&d, 0, sizeof(d));
+    if (!parse_last_number(reply, &p)) {
+        d.ok = 0;
+        d.cont = 0;
+        snprintf(d.why, sizeof(d.why), "no number in reply");
+        return d;
+    }
+    d.ok = 1;
+    d.p = p;
+    d.cont = (p >= cfg->threshold) ? 1 : 0;
+    if (d.cont) snprintf(d.why, sizeof(d.why), "p=%.2f >= %.2f", p, cfg->threshold);
+    else        snprintf(d.why, sizeof(d.why), "p=%.2f < %.2f", p, cfg->threshold);
+    return d;
+}
+
+gate_decision gate_decide(const char *reply, const gate_config *cfg)
+{
+    gate_decision d = decide(reply, cfg);
+    return d;
+}

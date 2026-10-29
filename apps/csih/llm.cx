@@ -1,0 +1,190 @@
+#pragma unisa module llm
+#pragma unisa use json
+#pragma unisa use gate
+#pragma unisa use session
+#pragma unisa use net
+/* LLM step: POST via net, parse body, append model record, gate. */
+
+/* ── results ────────────────────────────────────────────────────────────── */
+
+enum {
+    LLM_TEXT_MAX = 4096,
+    LLM_NO_PROBABILITY = -3001,
+    LLM_BAD_JSON = -3002,
+    LLM_TEXT_TOO_LONG = -3003,
+    LLM_NO_TEXT = -3004,
+    LLM_NO_URL = -3005
+};
+
+typedef struct {
+    int    ok;                   /* 1 = a model record was appended */
+    int    err;                  /* ours when ok == 0 */
+    int    status;               /* HTTP status, for the caller to print */
+    int    appended;             /* 1 = the record really reached the file */
+    double p;                    /* the probability the gate judged */
+    int    decision;             /* 0 = stop, 1 = continue (valid only if ok) */
+    char   text[LLM_TEXT_MAX];   /* the model's text, escaped-into-record form */
+    char   reason[128];
+} llm_turn;
+
+/* ── escaping (the same boundary chat.c guards for user text) ───────────── */
+
+/*
+ * Escape `in` for a JSON string literal. Returns bytes that WOULD be written,
+ * snprintf-style, so truncation is detectable rather than silent.
+ */
+static size_t llm_escape(const char *in, char *out, size_t outlen, size_t *in_used) {
+    return json_escape(in, out, outlen, in_used);
+}
+
+/*
+ * Pull the model's reply text and probability out of a response body.
+ *
+ * The accepted shapes, in order — the first one found wins, and this ORDER is
+ * the contract:
+ *   {"p":0.83,"text":"..."}          csih's own shape, what llm_server.py emits
+ *   {"choices":[{"message":{"content":"..."}}],"p":0.83}  OpenAI-ish, p beside it
+ * Alternates are tried only when the previous shape is absent, never merged:
+ * a body carrying both must resolve to one record, not two.
+ */
+int llm_extract(const char *body, size_t len, llm_turn *t) {
+    char errbuf[128];
+    jvalue *root, *v;
+    const char *text = NULL;
+    int have_p = 0;
+
+    root = json_parse(body, len, errbuf, sizeof errbuf);
+    if (!root) { t->err = LLM_BAD_JSON; snprintf(t->reason, sizeof t->reason, "body is not JSON"); return -1; }
+    if (root->kind != J_OBJ) { jfree(root); t->err = LLM_BAD_JSON; snprintf(t->reason, sizeof t->reason, "body is not a JSON object"); return -1; }
+
+    /* p: must be a NUMBER present in the object. `jnum` needs a default, so the
+     * presence test is done on the value's kind, not on the returned double —
+     * otherwise 0.0 and "absent" would be the same thing. */
+    v = jget(root, "p");
+    if (v && v->kind == J_NUM) { t->p = v->n; have_p = 1; }
+
+    v = jget(root, "text");
+    if (v && v->kind == J_STR) text = jstr(v);
+
+    if (!text) {
+        v = jget(root, "content");
+        if (v && v->kind == J_STR) text = jstr(v);
+    }
+    if (!text) {
+        v = jget(root, "choices");
+        if (v && v->kind == J_ARR && v->len > 0) {
+            jvalue *c0 = v->items[0];
+            jvalue *m = c0 && c0->kind == J_OBJ ? jget(c0, "message") : NULL;
+            jvalue *ct = m && m->kind == J_OBJ ? jget(m, "content") : NULL;
+            if (ct && ct->kind == J_STR) text = jstr(ct);
+        }
+    }
+
+    if (!have_p) {
+        jfree(root);
+        t->err = LLM_NO_PROBABILITY;
+        snprintf(t->reason, sizeof t->reason, "reply has no numeric p (absent is not zero)");
+        return -1;
+    }
+    if (!text) {
+        jfree(root);
+        t->err = LLM_NO_TEXT;
+        snprintf(t->reason, sizeof t->reason, "reply has no string text/content");
+        return -1;
+    }
+    {
+        size_t seen = 0;
+        llm_escape(text, t->text, sizeof t->text, &seen);
+        if (text[seen]) {
+            jfree(root);
+            t->err = LLM_TEXT_TOO_LONG;
+            snprintf(t->reason, sizeof t->reason, "model text exceeds %d bytes", LLM_TEXT_MAX);
+            return -1;
+        }
+    }
+    jfree(root);
+    return 0;
+}
+
+/*
+ * One turn: POST the user text, read the model's `p`, let the gate judge, and
+ * append the model record so the next turn can see it.
+ *
+ * Returns a value; the caller (CLI or another library) prints, which keeps
+ * stdio out of this function's output path beyond snprintf.
+ */
+llm_turn llm_turn_run(const char *url, const char *transcript,
+                      const char *user_text, gate_config cfg) {
+    llm_turn t;
+    char esc[2048];
+    char body[2560];
+    char rec[LLM_TEXT_MAX + 256];
+    net_response r;
+    gate_decision d;
+    size_t blen;
+
+    memset(&t, 0, sizeof t);
+    t.p = 0.0;
+    t.decision = 0;
+
+    if (!url || !url[0]) { t.err = LLM_NO_URL; snprintf(t.reason, sizeof t.reason, "no endpoint URL given"); return t; }
+
+    /* 1. the request body. The prompt is escaped HERE because this is the
+     *    boundary where a stray quote would otherwise produce non-JSON. */
+    llm_escape(user_text ? user_text : "", esc, sizeof esc, NULL);
+    blen = (size_t)snprintf(body, sizeof body, "{\"prompt\":\"%s\"}", esc);
+    if (blen >= sizeof body) { t.err = LLM_TEXT_TOO_LONG; snprintf(t.reason, sizeof t.reason, "prompt too long for request body"); return t; }
+
+    /* 2. the request itself */
+    r = net_http("POST", url, "application/json", body);
+    if (!r.ok) {
+        t.err = r.err;
+        snprintf(t.reason, sizeof t.reason, "network: %s", r.err == -2003 ? "libcurl did not load" : "request failed");
+        return t;
+    }
+    t.status = r.status;
+    if (r.status < 200 || r.status >= 300) {
+        t.err = r.status;
+        snprintf(t.reason, sizeof t.reason, "HTTP %d is not a model reply", r.status);
+        return t;
+    }
+
+    /* 3. the parse. A 200 whose body is not JSON is still a failure. */
+    if (llm_extract(r.body, (size_t)(r.body_bytes > 0 ? r.body_bytes : 0), &t) != 0) return t;
+
+    /* 4. the gate judges the NUMBER, not the prose. We already hold the number
+     *    (t.p, read from the reply's `p` field); pass it to the SAME decision
+     *    policy every caller uses, so "what counts as continue" stays in one
+     *    place (gate.c). Re-parsing t.p from a formatted string also exercises
+     *    the shared policy on both backends. */
+    {
+        char probbuf[32];
+        snprintf(probbuf, sizeof probbuf, "%.4f", t.p);
+        d = gate_decide(probbuf, &cfg);
+    }
+    if (!d.ok) { t.err = LLM_NO_PROBABILITY; snprintf(t.reason, sizeof t.reason, "gate could not read a probability"); return t; }
+    t.decision = d.cont;
+
+    /* 5. write back, so the next turn sees the model's line. Only after a
+     *    successful judgment — a record that the gate could not judge would be
+     *    a transcript entry with no meaning attached. */
+    if (transcript && transcript[0]) {
+        if ((size_t)snprintf(rec, sizeof rec, "{\"role\":\"model\",\"text\":\"%s\",\"p\":%.4f}", t.text, t.p) >= sizeof rec) {
+            t.err = LLM_TEXT_TOO_LONG;
+            snprintf(t.reason, sizeof t.reason, "record too long for the transcript line");
+            return t;
+        }
+        if (session_append(transcript, rec) != 0) {
+            t.err = LLM_NO_TEXT;
+            snprintf(t.reason, sizeof t.reason, "cannot write transcript");
+            return t;
+        }
+        t.appended = 1;
+    }
+
+    t.ok = 1;
+    snprintf(t.reason, sizeof t.reason, "%s (p=%.2f)", d.cont ? "continue" : "stop", t.p);
+    return t;
+}
+
+/* llm_cli.c owns the self-test. */
