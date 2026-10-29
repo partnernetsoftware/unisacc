@@ -167,6 +167,8 @@ typedef struct {
     int  back;                /* cursor distance from the end of input, in bytes; 0 = at end */
     char status[3][240];      /* project status rows, read from the status file each frame */
     int  nstatus;
+    char rsearch[256];        /* Ctrl-R needle, taken from the input at the first press */
+    int  rsearch_at;          /* 1 + index of the last match; 0 = not searching */
 } tui_state;
 
 static int tui_mail_meta(tui_state *st, const char *id, const char *result, const char *reason);
@@ -1056,7 +1058,7 @@ static int tui_slash(tui_state *st) {
         tui_log_plain(st, "/undo: 撤销 agent 最近一次文件写入/编辑（最多 20 步，不含 exec）；/diff: 看这些改动");
         tui_log_plain(st, "/view PATH [LINE]: 看文件 20 行（带行号），不经模型");
         tui_log_plain(st, "/allow: 放行下一条危险命令一次；/new: 新上下文（旧转录归档）；/resume [N]: 列出或换回归档");
-        tui_log_plain(st, "键：Esc 取消本轮/清输入；空输入 Tab 展开/收起最近工具行；Ctrl-U 清行；Ctrl-W 删词");
+        tui_log_plain(st, "键：Esc 取消本轮/清输入；空输入 Tab 展开/收起最近工具行；Ctrl-U 清行；Ctrl-W 删词；Ctrl-R 搜历史");
         tui_command_done(st);
         return 1;
     }
@@ -1486,6 +1488,8 @@ static void tui_submit(tui_state *st) {
 }
 
 static void tui_apply_key(tui_state *st, int kind, char ch) {
+    /* Any key but Ctrl-R (and the idle tick) ends a history search. */
+    if (kind != -1 && !(kind == TERM_KEY_CHAR && ch == 0x12)) st->rsearch_at = 0;
     switch (kind) {
     case -1:
         st->ticks++;
@@ -1500,6 +1504,20 @@ static void tui_apply_key(tui_state *st, int kind, char ch) {
         }
         if (ch == 0x15) {           /* Ctrl-U: drop the whole line */
             st->input[0] = '\0'; st->ninput = 0; st->back = 0; st->ask_exit = 0;
+            return;
+        }
+        if (ch == 0x12) {
+            /* Ctrl-R: newest history line containing what was typed; again goes older. */
+            int i, from;
+            if (!st->rsearch_at) snprintf(st->rsearch, sizeof st->rsearch, "%s", st->input);
+            from = st->rsearch_at ? st->rsearch_at - 2 : st->nhistory - 1;
+            for (i = from; i >= 0; i--)
+                if (strstr(st->history[i], st->rsearch)) break;
+            if (i < 0) { st->notice = st->rsearch_at ? "没有更早的匹配" : "历史里没有匹配"; return; }
+            snprintf(st->input, TUI_INPUT_MAX, "%s", st->history[i]);
+            st->ninput = (int)strlen(st->input);
+            st->back = 0;
+            st->rsearch_at = i + 1;
             return;
         }
         if (ch == 0x01) { st->back = st->ninput; return; }   /* Ctrl-A: line start */
@@ -4358,6 +4376,31 @@ int tui_entry(int argc, char **argv) {
             tui_apply_key(&tq, TERM_KEY_CHAR, 0x15);
             if (!okc) { printf("FAIL long input does not follow the cursor\n"); failures++; }
             else printf("  ok   long input scrolls to keep the cursor visible\n");
+        }
+        {
+            static tui_state th;
+            const char *s;
+            int ok;
+            tui_state_init(&th, NULL); th.mode = 1;
+            snprintf(th.history[0], sizeof th.history[0], "git status");
+            snprintf(th.history[1], sizeof th.history[1], "make test");
+            snprintf(th.history[2], sizeof th.history[2], "git log -3");
+            th.nhistory = 3;
+            for (s = "git"; *s; s++) tui_apply_key(&th, TERM_KEY_CHAR, *s);
+            tui_apply_key(&th, TERM_KEY_CHAR, 0x12);
+            ok = !strcmp(th.input, "git log -3");
+            tui_apply_key(&th, TERM_KEY_CHAR, 0x12);
+            ok = ok && !strcmp(th.input, "git status");
+            tui_apply_key(&th, TERM_KEY_CHAR, 0x12);
+            ok = ok && !strcmp(th.input, "git status") && th.notice && strstr(th.notice, "没有更早");
+            tui_apply_key(&th, TERM_KEY_CHAR, 'x');
+            ok = ok && th.rsearch_at == 0 && !strcmp(th.input, "git statusx");
+            tui_apply_key(&th, TERM_KEY_CHAR, 0x15);
+            for (s = "zzz"; *s; s++) tui_apply_key(&th, TERM_KEY_CHAR, *s);
+            tui_apply_key(&th, TERM_KEY_CHAR, 0x12);
+            ok = ok && !strcmp(th.input, "zzz") && th.notice && strstr(th.notice, "没有匹配");
+            if (!ok) { printf("FAIL ctrl-r [%s]\n", th.input); failures++; }
+            else printf("  ok   ctrl-r searches history newest first\n");
         }
         {
             static tui_state te;
