@@ -644,6 +644,18 @@ flowchart TD
   cap["检查文件 32 个 use"] --> pull["bindargs.cx 的 use bindcount"]
 ```
 
+## 131. 2026-10-29 #、## 和 include 再 include
+
+构造脚本不改。没有新文件。每条两遍，stdout 和 stderr 相同。`STR(hi)` stdout 100，`pp=23`，末行 `"hi"`。`CAT(foo, bar)` stdout 107，`pp=30`，末行 `foobar`。对象宏 `XY` stdout 96，`pp=19`，末行 `xy`。`#include <glob.h>` 再 `int *p = NULL;` stdout 1950，`bytes=33`，`pp=1871`，末行 `int *p = 0;`。`glob.h` 包含了 `stddef.h`。`#x` 不是参数时 stderr 30。`F(2)` 仍是 stdout 98。没有写出对象。没有产品安装，没有 hostseed，没有 `--all`。整棵重写还没完成。
+
+```mermaid
+flowchart TD
+  body["宏体"] --> hash["# 参数收成字符串"]
+  body --> paste["## 拼成一个词"]
+  inc["include"] --> slot["正文放在工作缓冲后面"]
+  slot --> again["头文件里可以再 include"]
+```
+
 ## 130. 2026-10-29 函数式宏、尖括号 include 和 #if
 
 构造脚本不改。没有新文件。每条两遍，stdout 和 stderr 相同。`F(2)` 在 `#define F(a) a+1` 之后 stdout 98，`pp=21`，末行 `2+1`。`ADD(1, 2)` stdout 103，`pp=26`，末行 `1+2`。`#if 0` / `#else` stdout 113，`pp=36`，留下 `int yes;`。`#ifdef N` stdout 114，`pp=37`。`#ifndef NOPE` stdout 106，`pp=29`。`#if defined(N)` stdout 120，`pp=43`。`#include <stdbool.h>` 再 `int x = true;` stdout 241，`pp=163`，末行 `int x = 1;`。`F()` 对一个参数的宏退出 1，stderr 37。对象宏仍是 stdout 100。拼接仍是 stdout 85。没有写出对象。没有产品安装，没有 hostseed，没有 `--all`。整棵重写还没完成。
