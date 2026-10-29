@@ -1493,6 +1493,17 @@ static int tui_slash(tui_state *st) {
         return 1;
     }
     if (!strcmp(st->input, "/status")) {
+        /* A readable overview first; the raw fields stay as the last row (tests read it). */
+        static const char *perm[] = { "read", "work", "any" };
+        const char *m = st->model[0] ? st->model : csih_env("CSIH_MODEL", "CDSH_MODEL");
+        int calls = 0;
+        long h0 = 0, m0 = 0, o0 = 0;
+        net_session_usage(&calls, &h0, &m0, &o0);
+        snprintf(note, sizeof note, "状态：%s · 权限 %s%s · 沙箱%s · %s · 可撤销 %d 步 · 待发送 %d · 本会话请求 %d 次",
+                 m ? m : "deepseek-chat", perm[agent_get_perm()], agent_get_net() ? "" : "（断网）",
+                 agent_sandbox_available() ? "开" : "无", st->busy ? "执行中" : "空闲",
+                 agent_undo_depth(), st->npending, calls);
+        tui_log_plain(st, note);
         snprintf(note, sizeof note,
             "busy=%d mode=%s owned=%d owner=%d goal=%d loop=%d left=%d history=%d pending=%d keys=%d",
             st->busy, st->mode == 1 ? "agent" : "chat", st->owned != NULL,
@@ -5369,6 +5380,11 @@ int tui_entry(int argc, char **argv) {
             ok = ok && tcc.npending == 1 && !strcmp(tcc.pending[0], "跑一下测试");
             if (!ok) { printf("FAIL /retry\n"); failures++; }
             else printf("  ok   /retry sends the last prompt again\n");
+            tui_type(&tcc, "/status");
+            ok = tcc.nlog >= 2 && strstr(tcc.log[tcc.nlog - 2], "状态：") && strstr(tcc.log[tcc.nlog - 2], "权限 ")
+                && strstr(tcc.log[tcc.nlog - 1], "busy=");
+            if (!ok) { printf("FAIL /status overview\n"); failures++; }
+            else printf("  ok   /status shows a readable overview above the raw fields\n");
             {
                 char tp[128];
                 char *oldt = getenv("CSIH_TRANSCRIPT") ? strdup(getenv("CSIH_TRANSCRIPT")) : NULL;
