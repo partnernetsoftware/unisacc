@@ -1,0 +1,29 @@
+/* Run the real ledger snapshot fixture with the CX-owned ledger operations.
+ * Material is prepared and verified by the existing source-preserving tool;
+ * the CX-wired copy is separate and never changes the prepared material. */
+#pragma unisa use cxlib.netpack
+static void die(const char *s){fprintf(stderr,"snapshots-cx: %s\n",s);exit(2);}
+static void path(char *p,const char *a,const char *b){int n=snprintf(p,4400,"%s/%s",a,b);if(n<0||n>=4400)die("path");}
+static void call(char **v,const char *cwd,int seconds,const char *out,const char *label){
+    np_result r={0};char why[1024],p[4400],name[128];
+    if(np_run(v,cwd,0,seconds,&r,why,sizeof why))die(why);
+    snprintf(name,sizeof name,"%s.stdout",label);path(p,out,name);if(cx_write(p,r.out,r.outn))die("stdout");
+    snprintf(name,sizeof name,"%s.stderr",label);path(p,out,name);if(cx_write(p,r.err,r.errn))die("stderr");
+    if(r.outn)fwrite(r.out,1,r.outn,stdout);if(r.errn)fwrite(r.err,1,r.errn,stderr);
+    int rc=r.rc;np_free(&r);if(rc)exit(rc<0?128-rc:rc);
+}
+int main(int argc,char **argv){
+    char root[4096],product[4400],bound[4400],tool[4400],material[4400],program[4400],wired[4400],runtime[4400],link[4400],cases[4400];
+    if(argc!=3||!realpath(argv[1],root)||argv[2][0]!='/'||mkdir(argv[2],0700))die("usage ROOT ABS_NEW_OUT");
+    path(product,root,"unisacc.com");path(bound,root,"tools/bound");path(tool,root,"tools/ledger-material.cx");
+    path(material,argv[2],"material");path(program,material,"snapshot.cx");path(wired,argv[2],"snapshot-cx.cx");
+    path(runtime,root,"cx/runtime");path(link,argv[2],"runtime");path(cases,argv[2],"cases");
+    char *prep[]={bound,"18","sh",product,tool,"--",root,material,"tests/cases/snapshot.cx",0};call(prep,root,20,argv[2],"prepare");
+    if(symlink(runtime,link))die("module link");
+    size_t n;char *s=cx_read(program,&n);if(!s)die("prepared fixture");
+    const char *prefix="#pragma unisa use runtime.source_frame\n#define UNISA_CX_SOURCE_FRAME\n";
+    FILE *f=fopen(wired,"wb");if(!f||fwrite(prefix,1,strlen(prefix),f)!=strlen(prefix)||fwrite(s,1,n,f)!=n||fclose(f))die("wired fixture");free(s);
+    char *run[]={bound,"16","sh",product,wired,"--",cases,0};call(run,root,18,argv[2],"execute");
+    char *verify[]={bound,"18","sh",product,tool,"--","--verify",root,material,"tests/cases/snapshot.cx",0};call(verify,root,20,argv[2],"verify");
+    puts("SNAPSHOTS_CX\tscope=source-wired-CX-ledger-operations-linux-x86_64-not-installed-or-foreign");return 0;
+}
