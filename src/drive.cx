@@ -16,6 +16,7 @@
 #pragma unisa use compiler.fwdstub
 #pragma unisa use compiler.fwdmerge
 #pragma unisa use compiler.fwdincrement
+#pragma unisa use compiler.cxmod
 /* Command walk, route text, then the model chain.
    A missing model step prints NOT_IMPLEMENTED and the stop name.
    ar, as, nm, and objdump stay on the tools already wired. */
@@ -200,6 +201,50 @@ static void dv_time(const char *phase, long long a, long long b) {
 }
 static const unsigned char dv_cxh[] = "cx.h";
 static const char *dv_srcv[64];
+/* One .cx on the command line: cxm_plan appends its use closure.
+   The paths stay in dv_srcv. CXIF includes are published per unit later. */
+static int dv_expand(int *nsrc) {
+    char td[512];
+    char *paths[64];
+    int i;
+    int any;
+    int n;
+    if (!nsrc || *nsrc < 1) return 1;
+    any = 0;
+    i = 0;
+    while (i < *nsrc) {
+        if (cxm_iscxpath((char *)dv_srcv[i])) any = 1;
+        i = i + 1;
+    }
+    if (!any) return 0;
+    if (hs_cxm_tmpdir(td, 512)) {
+        fputs("unisacc: model driver: tmpdir\n", stderr);
+        return 1;
+    }
+    if (cxm_bind(hs_cxm_rd, hs_cxm_wr, hs_cxm_say, hs_cxm_sha, td)) {
+        fputs("unisacc: model driver: modules\n", stderr);
+        return 1;
+    }
+    cxm_set_on(0);
+    i = 0;
+    while (i < *nsrc) {
+        paths[i] = (char *)dv_srcv[i];
+        i = i + 1;
+    }
+    if (cxm_plan(paths, *nsrc)) return 1;
+    n = cxm_count();
+    if (n < 1 || n > 64) {
+        fputs("unisacc: model driver: modules\n", stderr);
+        return 1;
+    }
+    i = 0;
+    while (i < n) {
+        dv_srcv[i] = cxm_unit_path(i);
+        i = i + 1;
+    }
+    *nsrc = n;
+    return 0;
+}
 static int dv_len(const char *s) {
     int n;
     n = 0;
@@ -874,6 +919,7 @@ int dv_main(int argc, char **argv) {
         i = i + 1;
     }
     if (!src) return dv_fail(bx_src_why(0));
+    if (dv_expand(&nsrc)) return 1;
     shown = opts.out;
     gotb = 0;
     gotn = 0;
@@ -1099,7 +1145,11 @@ int dv_main(int argc, char **argv) {
             if (ur) {
                 pm_close();
                 free(pkg);
-                fprintf(stderr, "unisacc: model driver: %s\n", preason[0] ? preason : "units");
+                if (!preason[0]) {
+                    if (ur == 1 || ur == 2 || ur == 3) return ur;
+                    return 1;
+                }
+                fprintf(stderr, "unisacc: model driver: %s\n", preason);
                 return ur == 2 ? 2 : 1;
             }
             gotb = framed;
@@ -1128,7 +1178,11 @@ int dv_main(int argc, char **argv) {
             if (pr) {
                 pm_close();
                 free(pkg);
-                fprintf(stderr, "unisacc: model driver: %s\n", preason[0] ? preason : gap);
+                if (!preason[0]) {
+                    if (pr == 1 || pr == 2 || pr == 3) return pr;
+                    return 1;
+                }
+                fprintf(stderr, "unisacc: model driver: %s\n", preason);
                 return pr == 2 ? 2 : 1;
             }
             if (mode2 == 3 && nsrc >= 1) {

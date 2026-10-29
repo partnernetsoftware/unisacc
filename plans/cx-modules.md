@@ -1605,6 +1605,14 @@ int main(void) { char *s = strdup("ab"); return s && s[0]=='a' ? 3 : 1; }
 
 这次提交前的探针用的是 `/tmp/grk-cx-line/entry`（985206 字节）和 `/tmp/grk-cx-line/mxrun/probe-out`。那次命令退出 2，墙钟 27194960757 纳秒，写出 8 行，都是 `do.c` 的 `SAME`，`LEFT:92`。探针表不是正式表。正式表用这次提交的程序重跑，旧的 `cells.sh` 行不作数。这不是产品安装。
 
+## 135. 2026-10-30 use 展开与模型 stderr
+
+入口在源收集之后、路线决定之前调用已有 `cxm_bind` 和 `cxm_plan`。宿主回调是 `src/host.cx` 的 `hs_cxm_rd`、`hs_cxm_wr`、`hs_cxm_say`、`hs_cxm_sha`、`hs_cxm_tmpdir`。有 `.cx` 才展开，闭包路径写回源列表。`src/stages.cx` 在 `cxm_on` 且该单元有接口头时，把 `cx.h` 和 `cxm_incpath` 放进 `\0cli/includes`。没有 use 时仍只放 `cx.h`。`-E` 且展开后多于一个单元，仍由已有路线句拒绝，不另写解析器。
+
+`src/executor.cx` 的 `ex_exec` 按产品 `execute` 把 `result.err` 写到 stderr。状态 1 且 `reason_n` 大于 0 时写 `reject:`，状态 2 写 `run:`，状态 3 写步数用尽。已经写出诊断时，驱动不再补 `unisacc: model driver:`。阶段失败返回模型状态，不再把 1 收成 2。
+
+本只入口 `/tmp/grk-cx-line/entry` 1122568 字节，构造退出 0，stdout 和 stderr 都是 0。对拍 cwd 是 `/tmp/notrepo`，环境去掉 `UNISA_CONTAINER`。`tools/cxlib/netpack.cx -S` 两边退出 1，stdout 0，stderr 111 字节相同，正文是 `not covered: no main`。`examples/hello.c -run` 两边退出 0，stdout 13 字节，stderr 0。`tests/cxstd_main.cx -E` 两边退出 1，stdout 0，stderr 67 字节相同。这三格只说明这三格。`tools/dev-run.cx -S` 没在这只上重跑。对上之后再用 `UNISACC_RR_TIME` 记最慢相位，作为性能红项，这一波不深挖。`dup.c` 的 `FWD-DLSYM` 没改。985206 的正式表不能算到 1122568。这不是产品安装。
+
 ## 64. 2026-10-29 编译器纯拒绝接到 bindhost
 
 `compiler.c` 里剩余的纯拒绝改走已有的 `bindhost`。新函数是 `bx_compat_why`、`bx_opt_dash`、`bx_opt_why`、`bx_src_why`、`bx_mix_why`、`bx_tape_need`、`bx_tape_why`、`bx_tapebin_bad`、`bx_tapebin_why`、`bx_name_fit`、`bx_name_why`、`bx_cache_why`、`bx_frame_fit`、`bx_frame_why`、`bx_encode_bad`、`bx_encode_why`、`bx_route_why`、`bx_model_why`。没有新模块。`use` 仍是 32，构造表没有新增参数。`snprintf`、解码、编码和 `clierror` 仍在 C。宿主切片下标仍是 APE 71、本机 70。这次没有实跑 hostseed。`sh ./unisacc.com tools/check-compiler-units.cx` 又两次退出 0，两次 stdout 相同，两次 stderr 相同，都打印 `CHECK_COMPILER_UNITS failed=0`。这次检查直接调用这些函数，没有编译 `compiler.c`。这不是产品安装、六目标或 `--all`。整棵重构还没完成。

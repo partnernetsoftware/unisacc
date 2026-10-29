@@ -7,6 +7,7 @@
 #pragma unisa use packmodel
 #pragma unisa use executor
 #pragma unisa use host
+#pragma unisa use compiler.cxmod
 /* One package route, in package order. rs_reset/rs_take/rs_ok select
    the span, rt_open and sh_apply load each stage, core_run executes it,
    and rt_swap hands the bytes to the next stage. Resources go out only
@@ -53,6 +54,43 @@ static long st_an;
 static long st_ac;
 static unsigned char st_f1 = 1;
 static const unsigned char st_cxh[] = "cx.h";
+static unsigned char st_inc[64 * 520];
+
+static int st_includes(const char *src, const unsigned char **b, int *n) {
+    int u;
+    int k;
+    int at;
+    int i;
+    char *p;
+    *b = st_cxh;
+    *n = (int)sizeof st_cxh;
+    if (!cxm_on_now()) return 0;
+    u = cxm_find((char *)src);
+    if (u < 0 || cxm_include_count(u) <= 0) return 0;
+    at = 0;
+    while (at < (int)sizeof st_cxh) {
+        st_inc[at] = st_cxh[at];
+        at = at + 1;
+    }
+    k = 0;
+    while (k < cxm_include_count(u)) {
+        p = cxm_incpath(u, k);
+        i = 0;
+        while (p && p[i]) {
+            if (at + 2 >= (int)sizeof st_inc) return 1;
+            st_inc[at] = (unsigned char)p[i];
+            at = at + 1;
+            i = i + 1;
+        }
+        if (at + 1 >= (int)sizeof st_inc) return 1;
+        st_inc[at] = 0;
+        at = at + 1;
+        k = k + 1;
+    }
+    *b = st_inc;
+    *n = at;
+    return 0;
+}
 static const unsigned char *st_xk[8];
 static int st_xn[8];
 static const unsigned char *st_xb[8];
@@ -128,7 +166,10 @@ static int st_pub(const char *tgt, const char *src, int cx) {
     if (st_key("\0cli/defines", (int)(sizeof "\0cli/defines" - 1), 0, 0)) return 1;
     if (st_key("\0cli/undefines", (int)(sizeof "\0cli/undefines" - 1), 0, 0)) return 1;
     if (cx) {
-        if (st_key("\0cli/includes", (int)(sizeof "\0cli/includes" - 1), st_cxh, (int)sizeof st_cxh)) return 1;
+        const unsigned char *ib;
+        int il;
+        if (st_includes(src, &ib, &il)) return 1;
+        if (st_key("\0cli/includes", (int)(sizeof "\0cli/includes" - 1), ib, il)) return 1;
     } else if (st_key("\0cli/includes", (int)(sizeof "\0cli/includes" - 1), 0, 0)) return 1;
     if (st_key("\0cli/include-dir", (int)(sizeof "\0cli/include-dir" - 1), 0, 0)) return 1;
     if (st_key("\0cli/nostdinc", (int)(sizeof "\0cli/nostdinc" - 1), 0, 0)) return 1;
@@ -292,7 +333,8 @@ int st_span(const char *route, const char *tgt, const char *src, int cx, unsigne
         st_stamp(stage, erc, t1, t2);
         if (erc) {
             free(curb);
-            return erc == 4 ? 4 : 2;
+            if (erc == 4) return 4;
+            return erc;
         }
         if (rt_strip(0)) {
             ar = cxaf_strip(&st_ab, &st_an, &st_ac, ob, &on, unit, realloc);
