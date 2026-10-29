@@ -507,6 +507,38 @@ static int agent_run_selftest(void) {
         agent_exec(&s, dir, out, sizeof out);
         a_expect(strstr(out, "net=3") != NULL, "/net off: work tier has loopback only");
         agent_set_net(1);
+        /* user secret list: a file in cwd listed in ~/.csih/secrets reads empty */
+        {
+            char sec[300], list[300], had[4096];
+            FILE *lf;
+            size_t hn = 0;
+            snprintf(sec, sizeof sec, "%s/token.txt", dir);
+            lf = fopen(sec, "w"); if (lf) { fputs("SECRET123", lf); fclose(lf); }
+            snprintf(list, sizeof list, "%s/.csih/secrets", home ? home : "/tmp");
+            lf = fopen(list, "r");
+            if (lf) { hn = fread(had, 1, sizeof had - 1, lf); fclose(lf); }
+            had[hn] = 0;
+            lf = fopen(list, "a");
+            if (lf) {
+                char tilde[300];
+                FILE *tf;
+                snprintf(tilde, sizeof tilde, "%s/.csih/csih-sbx-tilde-%d.txt", home ? home : "/tmp", (int)getpid());
+                tf = fopen(tilde, "w"); if (tf) { fputs("TILDE456", tf); fclose(tf); }
+                fprintf(lf, "%s# csih selftest\n%s\n~/.csih/csih-sbx-tilde-%d.txt\n",
+                        hn && had[hn - 1] != '\n' ? "\n" : "", sec, (int)getpid());
+                fclose(lf);
+                snprintf(s.cmd, sizeof s.cmd, "echo got=$(cat token.txt) tilde=$(cat \"$HOME/.csih/csih-sbx-tilde-%d.txt\")", (int)getpid());
+                agent_exec(&s, dir, out, sizeof out);
+                a_expect(strstr(out, "got=") && !strstr(out, "SECRET123"),
+                         "a path listed in ~/.csih/secrets reads empty in the sandbox");
+                a_expect(strstr(out, "tilde=") && !strstr(out, "TILDE456"), "  ~/ paths in the list are expanded");
+                remove(tilde);
+                /* put the user's list back exactly as it was */
+                if (hn) { lf = fopen(list, "w"); if (lf) { fwrite(had, 1, hn, lf); fclose(lf); } }
+                else remove(list);
+            }
+            remove(sec);
+        }
         memset(s.cmd, 'x', sizeof s.cmd - 1); s.cmd[sizeof s.cmd - 1] = 0;
         memcpy(s.cmd, "echo ", 5);
         { int i; for (i = 5; i < (int)sizeof s.cmd - 1; i += 2) s.cmd[i] = '\''; }

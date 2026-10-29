@@ -60,7 +60,7 @@ CSIH_BIN=../../out/csih-e2e-bin/csih UNISACC=../../unisacc.com \
 
 ## 已知边界（不算缺陷，但要知道）
 
-- 沙箱管文件系统写入、常见机密（env.jsonl、.netrc、.git-credentials、.ssh、.aws、.gnupg、.config/gh、.docker）、进程可见性、每条命令 4GB 内存和 120 秒 CPU 配额，read 档还断网，work 档可用 `/net off` 断网；不管清单之外的机密。没有 `unshare` 的机器上退回关键字门。
+- 沙箱管文件系统写入、常见机密（env.jsonl、.netrc、.git-credentials、.ssh、.aws、.gnupg、.config/gh、.docker）、进程可见性、每条命令 4GB 内存和 120 秒 CPU 配额，read 档还断网，work 档可用 `/net off` 断网；内置清单之外的机密可写进 `~/.csih/secrets` 一并遮蔽，没写进去的不管。没有 `unshare` 的机器上退回关键字门。
 - 危险命令门是关键字匹配。
 - exec 同步执行，每 200ms 刷新一次界面；单条命令最长 60 秒（`CSIH_EXEC_TIMEOUT_SEC`）。
 - 回答正文不流式显示（REJECT，理由见 PRD）。
