@@ -2116,6 +2116,8 @@ static void tui_put_folded(char *dst, int dstmax, const char *prefix, const char
 
 /* One input row. A paste keeps its newlines, drawn as ⏎, and the row
  * stays within `cols` so a long paste cannot fail the width check. */
+static long tui_tool_t0;      /* when the current exec started, for the busy clock */
+
 /* 574B, 32.1KB, 1.2MB: byte counts a person can read at a glance. */
 static void tui_bytes(char *out, size_t cap, long n) {
     if (n < 1024) snprintf(out, cap, "%ldB", n);
@@ -2288,6 +2290,9 @@ static r_frame tui_render_state(tui_state *st, int cols) {
             /* A finished tool leaves its phase behind; an open request means the model again. */
             const char *phase = (net_in_flight() && !strncmp(st->phase, "跑命令", 9)) ? "等模型" : st->phase;
             net_progress(&sec, &tokens, &sent, &sec);
+            /* While a command runs, show how long it has been running. */
+            if (phase == st->phase && !strncmp(phase, "跑命令", 9) && tui_tool_t0)
+                sec = (int)((long)net_now() - tui_tool_t0);
             net_recv(&got);
             net_cache(&hit, &miss, &seen);
             tui_bytes(up, sizeof up, sent);
@@ -2583,6 +2588,7 @@ static void tui_agent_event(const char *line, void *ud) {
         char shortc[40];
         tui_condense(shortc, (int)sizeof shortc, cmd ? cmd + 1 : "", 24);
         snprintf(st->phase, sizeof st->phase, "跑命令 %s", shortc);
+        tui_tool_t0 = (long)net_now();
     } else if (!strncmp(line, "  evidence ", 11) || !strncmp(line, "  │ ", 6)) {
         /* Tool output rows: the tool is still the current step. */
     } else if (st->busy) {
@@ -2639,6 +2645,15 @@ static void tui_during_net(void) {
     st->ticks++;
     tui_repaint = 1;
     tui_redraw(st);
+}
+
+/* exec runs synchronously; shell calls this every ~200ms meanwhile, so keys
+ * (Esc/Ctrl-C cancel) and the clock keep working. Nonzero kills the command. */
+static int tui_during_shell(void) {
+    tui_state *st = net_tick_st;
+    if (!st || !st->busy) return 0;
+    tui_during_net();
+    return st->cancel;
 }
 
 static const char *csih_env(const char *neu, const char *old) {
@@ -2721,6 +2736,8 @@ static int tui_run_prompt(tui_state *st, const char *source_prompt, int clear_ma
     st->busy_tick = st->ticks;
     snprintf(st->phase, sizeof st->phase, "等模型");
     tui_redraw(st);
+    net_tick_st = st;
+    shell_set_tick(tui_during_shell);
     {char *context=NULL;
         if(!context_index_packet(st->owned,st->owned_dir,&context) || agent_context_packet(context)!=0){
             free(context);st->busy=0;tui_log_plain(st,"context-index unavailable: capture/encoding failed");tui_redraw(st);return 1;

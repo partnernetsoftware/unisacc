@@ -14,6 +14,11 @@ typedef struct {
 shell_result shell_run(const char *command);
 shell_result shell_run_in(const char *command, const char *cwd);
 int          shell_run_selftest(void);
+void         shell_set_tick(int (*fn)(void));
+
+/* Stops the running command on the third ~200ms tick. */
+static int cli_ticks;
+static int cli_stop_tick(void) { return ++cli_ticks >= 3; }
 
 int main(int argc, char **argv) {
     const char *cmd = argc > 1 ? argv[1] : "";
@@ -138,6 +143,18 @@ static void run_selftest(void) {
     r = shell_run("echo alive");
     expect(!strcmp(r.out, "alive\n"), "a normal command still works after a timeout");
     unsetenv("CSIH_EXEC_TIMEOUT_SEC");
+
+    /* --- a tick that asks to stop (Esc) kills the command and its children */
+    cli_ticks = 0;
+    shell_set_tick(cli_stop_tick);
+    r = shell_run("sleep 27.25 & sleep 27.25; echo late");
+    shell_set_tick(NULL);
+    expect(r.timed_out == 1 && r.err == ECANCELED, "a tick asking to stop cancels the command");
+    expect(cli_ticks >= 3 && cli_ticks < 10, "after the tick said so, not at the deadline");
+    expect(strstr(r.out, "late") == NULL, "the rest of the command did not run");
+    /* The bracket keeps this grep's own command line from matching itself. */
+    r = shell_run("pgrep -f 'sleep 27[.]25' | wc -l | tr -d ' '");
+    expect(!strcmp(r.out, "0\n"), "the backgrounded child died with the group");
 }
 
 int shell_run_selftest(void) {

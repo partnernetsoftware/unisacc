@@ -152,6 +152,12 @@ int shell_poll2(int fd0, int fd1, int timeout_ms, unsigned short *re0, unsigned 
  *
  * cwd == NULL means "wherever we are", preserving the old behaviour exactly.
  */
+/* Called about every 200ms while a command runs. Returning nonzero kills the
+ * command (the user pressed Esc). NULL: no tick, plain wait. */
+typedef int (*shell_tick_fn)(void);
+static shell_tick_fn shell_tick;
+void shell_set_tick(shell_tick_fn fn) { shell_tick = fn; }
+
 shell_result shell_run_in(const char *command, const char *cwd) {
     shell_result r;
     int pipefd[2];
@@ -175,6 +181,9 @@ shell_result shell_run_in(const char *command, const char *cwd) {
 
     if (pid == 0) {
         /* ---- child ---- */
+        /* Own process group, so a timeout or Esc kills the whole command,
+         * not just /bin/sh while its children keep running. */
+        setpgid(0, 0);
         /* The directory is changed HERE, in the child, so the parent process's
          * own cwd never moves — see the note above. A failed chdir exits 125,
          * a code the parent can distinguish from "the command ran and failed"
@@ -247,10 +256,23 @@ shell_result shell_run_in(const char *command, const char *cwd) {
         size_t off = 0;
         ssize_t n;
         while (off + 1 < sizeof r.out) {
-            if (shell_poll_deadline(pipefd[0], &deadline, NULL) == 0) {
-                r.timed_out = 1;
-                break;
+            /* Wake every 200ms so the UI can redraw and the user can cancel.
+             * The overall deadline is unchanged. */
+            int stop = 0;
+            for (;;) {
+                struct timespec slice;
+                int last;
+                clock_gettime(CLOCK_MONOTONIC, &slice);
+                slice.tv_nsec += 200000000L;
+                if (slice.tv_nsec >= 1000000000L) { slice.tv_sec += 1; slice.tv_nsec -= 1000000000L; }
+                last = slice.tv_sec > deadline.tv_sec
+                    || (slice.tv_sec == deadline.tv_sec && slice.tv_nsec >= deadline.tv_nsec);
+                if (last) slice = deadline;
+                if (shell_poll_deadline(pipefd[0], &slice, NULL) != 0) break;
+                if (last) { r.timed_out = 1; stop = 1; break; }
+                if (shell_tick && shell_tick()) { r.timed_out = 1; r.err = ECANCELED; stop = 1; break; }
             }
+            if (stop) break;
             n = read(pipefd[0], r.out + off, sizeof r.out - 1 - off);
             if (n < 0) {
                 if (errno == EINTR) continue;
@@ -285,6 +307,7 @@ shell_result shell_run_in(const char *command, const char *cwd) {
          * reading, kill now; otherwise wait with the same deadline's
          * remaining time, never a fresh budget. */
         if (r.timed_out) {
+            kill(-pid, SIGKILL);
             kill(pid, SIGKILL);
             do { w = waitpid(pid, &st, 0); } while (w < 0 && errno == EINTR);
         } else {
@@ -300,6 +323,7 @@ shell_result shell_run_in(const char *command, const char *cwd) {
                     ms = (long)(deadline.tv_sec - now.tv_sec) * 1000L
                        + (deadline.tv_nsec - now.tv_nsec) / 1000000L;
                     if (ms <= 0) {
+                        kill(-pid, SIGKILL);
                         kill(pid, SIGKILL);
                         r.timed_out = 1;
                         do { w = waitpid(pid, &st, 0); } while (w < 0 && errno == EINTR);
