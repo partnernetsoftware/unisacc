@@ -37,6 +37,7 @@ static void rl_clear(RLLedger *L) {
 #ifdef UNISA_CX_SOURCE_FRAME
 int cxsf_hex_digit(int);
 int cxsf_length(const char *,int *);
+int cxsf_ledger_fields(const char *,char *);
 #define rl_hexv cxsf_hex_digit
 #define rl_length cxsf_length
 #else
@@ -163,7 +164,11 @@ static int rl_load_parse(const char *dir, const RLFileView *views, int count, RL
             if (!ok) { free(b); snprintf(err, errn, "INTERFACE_ERROR resource-identity-malformed"); return 1; }
             continue;
         }
+#ifdef UNISA_CX_SOURCE_FRAME
+        nf=cxsf_ledger_fields(line,f[0]);
+#else
         { char *p = line; for (k = 0; k < 5; k++) { char *t = strchr(p, '\t'); if (k < 4 && !t) { nf = -1; break; } if (k == 4 && strchr(p, '\t')) { nf = -2; break; } size_t width = t ? (size_t)(t - p) : strlen(p); if (width >= sizeof f[k]) { nf = -3; break; } memcpy(f[k], p, width); f[k][width] = 0; p = t ? t + 1 : p + strlen(p); } nf = nf < 0 ? nf : 5; }
+#endif
         if (nf != 5) { free(line); free(b); snprintf(err, errn, nf == -3 ? "INTERFACE_ERROR resource-row-field-too-long" : "INTERFACE_ERROR resource-row-fields"); return 1; }
         {   /* key */
             size_t kl = strlen(f[0]); unsigned char *kb; size_t q;
