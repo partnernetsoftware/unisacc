@@ -19,6 +19,16 @@
 #include <time.h>
 #include <dirent.h>
 #include <ctype.h>
+int bg_seconds(const char *);
+int bg_scale(int, const char *, const char *);
+int bg_reap_step(int, int, int, int, int);
+int bg_reap_cause(int);
+int bg_combine(int, int);
+int bg_reason_enum(int);
+int bg_reason_deadline(int, int);
+int bg_stop(int, int);
+int bg_tree_room(int);
+int bg_ps_room(int);
 #ifdef __linux__
 #include <sys/prctl.h>
 #endif
@@ -101,11 +111,7 @@ static int reap_until(pid_t pid, int *status, double until, int honor_interrupt)
    error is a named enumeration failure, never a silent success. */
 enum { REAP_STEP_CONTINUE, REAP_STEP_SLEEP, REAP_STEP_DONE, REAP_STEP_DEADLINE, REAP_STEP_ENUM };
 static int reap_step(pid_t got, int err, int past) {
-    if (got > 0) return REAP_STEP_CONTINUE;          /* a child was reaped: look for more */
-    if (got == 0) return past ? REAP_STEP_DEADLINE : REAP_STEP_SLEEP;   /* children remain, none exited yet */
-    if (err == ECHILD) return REAP_STEP_DONE;        /* nothing left to reap: the only clean end */
-    if (err == EINTR) return past ? REAP_STEP_DEADLINE : REAP_STEP_SLEEP; /* retry within the same deadline */
-    return REAP_STEP_ENUM;                           /* any other waitpid error: named, not green */
+    return bg_reap_step((int)got, err, past, ECHILD, EINTR);
 }
 
 static int has(pid_t pid) {
@@ -118,11 +124,11 @@ static int has(pid_t pid) {
    child is SIGKILLed and the snapshot is refused; its reap is bounded like any other. */
 /* Maps a reap result to a cause: reaped -> none; the clock reached first (0) -> deadline; waitpid failed (-1) ->
    enumeration failure.  The reap error is not a deadline and is never reported as one. */
-static int reap_cause(int reap) { return reap == 1 ? 0 : reap == 0 ? CAUSE_DEADLINE : CAUSE_ENUM; }
+static int reap_cause(int reap) { return bg_reap_cause(reap); }
 /* The snapshot's own cause wins; otherwise the reap result decides. */
 /* Causes are bit flags (CAUSE_ENUM | CAUSE_DEADLINE): a snapshot cause never hides a reap cause, so when both hold,
    both are kept and both are named. */
-static int combine_cause(int snapshot_cause, int reap) { return snapshot_cause | reap_cause(reap); }
+static int combine_cause(int snapshot_cause, int reap) { return bg_combine(snapshot_cause, reap); }
 
 /* The snapshot's own budget: a third of the remaining time, at most 0.5 s, so the adopted sweep always keeps time. */
 /* Monotonic cleanup timestamps: written only when UNISACC_BOUND_CLEANUP_TRACE names a file.  Marks: kill (after the
@@ -169,7 +175,7 @@ static int ps_snapshot(char **out, size_t *outlen) {
     if (kill_at < mono_now()) kill_at = mono_now();
     while (!cause) {
         if (mono_now() >= kill_at) { trace_mark("ps_deadline"); cause = CAUSE_DEADLINE; break; }
-        if (n + 1 >= PS_OUTPUT_MAX) { cause = CAUSE_ENUM; break; }
+        if (bg_ps_room(n > 2147483647u ? 16777215 : (int)n) == 1) { cause = CAUSE_ENUM; break; }
         if (n + 1 >= cap) {
             char *larger = realloc(buf, cap * 2);
             if (!larger) { cause = CAUSE_ENUM; break; }
@@ -214,7 +220,7 @@ static int freeze_tree(pid_t root) {
     sigaddset(&blocked, SIGTERM); sigaddset(&blocked, SIGINT); sigaddset(&blocked, SIGHUP);
     sigprocmask(SIG_BLOCK, &blocked, &previous);
     if (!has(root)) {
-        if (tree_n == TREE_MAX) cause = CAUSE_ENUM;
+        if (bg_tree_room((int)tree_n) == 1) cause = CAUSE_ENUM;
         else tree[tree_n++] = root;
     }
     kill(root, SIGSTOP);
@@ -235,7 +241,7 @@ static int freeze_tree(pid_t root) {
             if (e2 == e1) break;
             p = e2;
             if (pid <= 0 || !has((pid_t)parent) || has((pid_t)pid)) continue;
-            if (tree_n == TREE_MAX) { cause = CAUSE_ENUM; break; }
+            if (bg_tree_room((int)tree_n) == 1) { cause = CAUSE_ENUM; break; }
             tree[tree_n++] = (pid_t)pid;
             kill((pid_t)pid, SIGSTOP);
             added = 1;
@@ -253,8 +259,8 @@ static int freeze_tree(pid_t root) {
 /* Pure reason matrix: which texts a stop names.  An enumeration failure names itself; a deadline names itself when
    the clock is the cause, or when the clock has reached the hard deadline at the report (both are then named). */
 static void reason_flags(int cause, int past, int *enumeration, int *deadline) {
-    *enumeration = (cause & CAUSE_ENUM) != 0;
-    *deadline = (cause & CAUSE_DEADLINE) != 0 || past;
+    *enumeration = bg_reason_enum(cause);
+    *deadline = bg_reason_deadline(cause, past);
 }
 /* The composed reason text for a stop.  Pure: no I/O, no pids. */
 static void reason_text(int cause, int past, char *out, size_t cap) {
@@ -266,7 +272,7 @@ static void reason_text(int cause, int past, char *out, size_t cap) {
     if (deadline) strncat(out, BOUND_REASON_DEADLINE, cap - strlen(out) - 1);
 }
 /* The exit code of a stop.  It takes the cause but ignores it: the reason text is diagnostic, never a code. */
-static int stop_rc(int cause, int past) { (void)cause; (void)past; return BOUND_STOP_RC; }
+static int stop_rc(int cause, int past) { return bg_stop(cause, past); }
 
 /* One named report for every stop, and the stop's exit code.  Both causes are named when both hold. */
 /* The fixed cleanup sequence, the same on every exit path (normal, deadline, enumeration failure).
@@ -303,7 +309,7 @@ static int sweep_adopted(pid_t child) {
         if (!rp || sscanf(rp + 2, "%c %ld", &st, &ppid) != 2) continue;
         if (ppid != (long)getpid() || st == 'Z') continue;   /* zombies are reaped by waitpid, not killed */
         kill(q, SIGKILL);
-        if (!has(q) && tree_n < TREE_MAX) tree[tree_n++] = q;
+        if (!has(q) && bg_tree_room((int)tree_n) == 0) tree[tree_n++] = q;
         live_hits++;
     }
     closedir(d);
@@ -390,17 +396,16 @@ int main(int argc, char **argv) {
         status_path = argv[first + 1]; first += 2;
     }
     if (argc < first + 2 || !argv[first][0]) goto usage;
-    unsigned seconds = 0;
-    for (const char *p = argv[first]; *p; p++) {
-        if (*p < '0' || *p > '9' || seconds > 60) goto usage;
-        seconds = seconds * 10 + (unsigned)(*p - '0');
-    }
-    if (seconds < 1 || seconds > 60) goto usage;
+    int sec = bg_seconds(argv[first]);
+    if (sec < 1) goto usage;
+    unsigned seconds = (unsigned)sec;
     trace_mark("bound_start");
     {   /* 0.0.27 C1: on GitHub's hosted runners (GITHUB_ACTIONS=true) UNISACC_TIME_SCALE 1..5 stretches
            every bound with the slower machine; locally the scale is always 1. */
         const char *ga = getenv("GITHUB_ACTIONS"), *sc = getenv("UNISACC_TIME_SCALE");
-        if (ga && !strcmp(ga, "true") && sc && sc[0] >= '1' && sc[0] <= '5' && !sc[1]) seconds *= (unsigned)(sc[0] - '0');
+        int scaled = bg_scale((int)seconds, ga, sc);
+        if (scaled < 1) goto usage;
+        seconds = (unsigned)scaled;
     }
     struct sigaction action;
     memset(&action, 0, sizeof action); action.sa_handler = interrupt;

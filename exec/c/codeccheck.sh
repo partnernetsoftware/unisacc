@@ -10,9 +10,9 @@ trap '[ -z "$D" ] || sh "$R/tests/cxbin" "$R/tests/safedel.cx" --purge -- "$D"' 
 if [ "$UA" = /tmp/ua_ref ]; then UA="$D/ref"; fi
 ua_ready
 bound 30 "$UA" -O2 exec/c/codeccheck.c -o "$D/ua"
-bound 30 "${CC:-cc}" -O2 exec/c/codeccheck.c -o "$D/cc"
+bound 30 "${CC:-cc}" -O2 -Wno-unknown-pragmas -x c cx/compiler/codecgate.cx -x none exec/c/codeccheck.c -o "$D/cc"
 bound 45 python3 exec/c/codeccheck.py "$D/cc" "$D/ua"
 if [ "${CODEC_SANITIZE:-0}" = 1 ]; then
- bound 30 "${CC:-cc}" -O1 -g -fsanitize=address,undefined exec/c/codeccheck.c -o "$D/san"
+ bound 30 "${CC:-cc}" -O1 -g -fsanitize=address,undefined -Wno-unknown-pragmas -x c cx/compiler/codecgate.cx -x none exec/c/codeccheck.c -o "$D/san"
  bound 45 python3 exec/c/codeccheck.py "$D/san"
 fi

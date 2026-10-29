@@ -9,6 +9,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+int lt_name(const char *);
+int lt_type_ok(int, int, int, int, int, int, int);
+int lt_supported(int, int);
+int lt_count(int);
+int lt_args(int, int);
+int ls_data(int, int, int, unsigned long long, unsigned long long, int, unsigned long long);
+int ls_sig(const char *, int);
 
 typedef struct us_binding_type {uint64_t depth,base,shape,kind,width,uns;} us_binding_type;
 typedef struct us_binding {char *name;uintptr_t address;unsigned kind,variadic,supported,writable;size_t count;us_binding_type result,*args;uint64_t extent;unsigned char *signature;size_t signature_length;struct us_exports *typed;void (*typed_clear)(struct us_exports*);} us_binding;
@@ -16,24 +23,26 @@ typedef struct us_bindings {us_binding *items;size_t count;} us_bindings;
 static int us_binding_error(char *error,size_t capacity,const char *message){if(error&&capacity)snprintf(error,capacity,"%s",message);return 1;}
 static void us_bindings_clear(us_bindings *b){if(!b)return;for(size_t i=0;i<b->count;i++){free(b->items[i].name);free(b->items[i].args);free(b->items[i].signature);if(b->items[i].typed){b->items[i].typed_clear(b->items[i].typed);free(b->items[i].typed);}}free(b->items);memset(b,0,sizeof *b);}
 static int us_binding_type_valid(const us_binding_type *t,int result){
- if(!t||t->kind>6||t->uns>1)return 0;
- if(t->kind==0)return result&&!t->depth&&!t->width&&!t->uns;
- if(t->kind==1)return !t->depth&&(t->width==1||t->width==2||t->width==4||t->width==8);
- if(t->kind==2)return t->depth>0&&t->width==sizeof(void*)&&!t->uns;
- if(t->kind==3)return !t->depth&&(t->width==4||t->width==8)&&!t->uns;
- if(t->kind==4)return t->depth>0&&t->width==sizeof(void*)&&!t->uns;
- return 1; /* Aggregate/unknown opaque facts are preserved, never called. */
+ int kind,depth,width,uns,r;
+ if(!t)return 0;
+ kind=t->kind>2147483647ull?7:(int)t->kind;
+ depth=t->depth>2147483647ull?1:(int)t->depth;
+ width=t->width>2147483647ull?3:(int)t->width;
+ uns=t->uns>2147483647ull?2:(int)t->uns;
+ r=lt_type_ok(1,kind,depth,width,uns,result,(int)sizeof(void*));
+ if(r==4)return 0;
+ return r;
 }
-static int us_binding_type_supported(const us_binding_type *t,int result){return t->kind==1||t->kind==2||(result&&t->kind==0);}
-static int us_binding_name(const char *s){if(!s||!*s)return 0;size_t i=0;for(;s[i];i++){unsigned c=(unsigned char)s[i];int a=(c>=65&&c<=90)||(c>=97&&c<=122)||c==95;if(i>=1024||(!a&&!(i&&c>=48&&c<=57)))return 0;}return 1;}
+static int us_binding_type_supported(const us_binding_type *t,int result){if(t->kind>6)return 0;return lt_supported((int)t->kind,result);}
+static int us_binding_name(const char *s){int r=lt_name(s);if(r==4)return 0;return r;}
 static int us_binding_unique(const us_bindings *b,const char *name){for(size_t i=0;i<b->count;i++)if(!strcmp(name,b->items[i].name))return 0;return 1;}
 static int us_binding_append(us_bindings *b,us_binding *x,char *error,size_t cap){
- if(b->count>=4096)return us_binding_error(error,cap,"binding count capacity exceeded");
+ if(lt_count(b->count>2147483647ull?4096:(int)b->count))return us_binding_error(error,cap,"binding count capacity exceeded");
  us_binding *items=realloc(b->items,(b->count+1)*sizeof *items);if(!items)return us_binding_error(error,cap,"binding allocation failed");b->items=items;items[b->count++]=*x;return 0;
 }
 static int us_bindings_add_function(us_bindings *b,const char *name,uintptr_t address,
  const us_binding_type *result,const us_binding_type *args,size_t count,unsigned variadic,char *error,size_t cap){
- if(!b||!us_binding_name(name)||!address||sizeof(uintptr_t)!=8||variadic>1||count>1024||(count&&!args)||!us_binding_type_valid(result,1))return us_binding_error(error,cap,"invalid native function declaration");
+ if(!b||!us_binding_name(name)||!address||sizeof(uintptr_t)!=8||lt_args(count>2147483647ull?1025:(int)count,variadic>2147483647u?2:(int)variadic)||(count&&!args)||!us_binding_type_valid(result,1))return us_binding_error(error,cap,"invalid native function declaration");
  if(!us_binding_unique(b,name))return us_binding_error(error,cap,"duplicate binding name");
  for(size_t i=0;i<count;i++)if(!us_binding_type_valid(args+i,0))return us_binding_error(error,cap,"invalid native parameter declaration");
  us_binding x={0};size_t n=strlen(name)+1;x.name=malloc(n);x.args=count?malloc(count*sizeof *args):NULL;if(!x.name||(count&&!x.args)){free(x.name);free(x.args);return us_binding_error(error,cap,"binding allocation failed");}
@@ -43,7 +52,7 @@ static int us_bindings_add_function(us_bindings *b,const char *name,uintptr_t ad
 }
 static int us_bindings_add_data(us_bindings *b,const char *name,uintptr_t address,
  const us_binding_type *type,uint64_t extent,unsigned writable,char *error,size_t cap){
- if(!b||!us_binding_name(name)||!address||sizeof(uintptr_t)!=8||!extent||extent>UINTPTR_MAX-address||writable>1||!us_binding_type_valid(type,0)||extent<type->width)return us_binding_error(error,cap,"invalid native data declaration");
+ if(!b||!us_binding_name(name)||ls_data(1,address!=0,sizeof(uintptr_t)==8,(unsigned long long)address,extent,writable>1?2:(int)writable,0)||!us_binding_type_valid(type,0)||extent<type->width)return us_binding_error(error,cap,"invalid native data declaration");
  if(!us_binding_unique(b,name))return us_binding_error(error,cap,"duplicate binding name");
  us_binding x={0};size_t n=strlen(name)+1;x.name=malloc(n);if(!x.name)return us_binding_error(error,cap,"binding allocation failed");memcpy(x.name,name,n);x.kind=1;x.address=address;x.result=*type;x.extent=extent;x.writable=writable;x.supported=us_binding_type_supported(type,0);
  if(us_binding_append(b,&x,error,cap)){free(x.name);return 1;}return 0;
@@ -52,7 +61,7 @@ static int us_bindings_add_data(us_bindings *b,const char *name,uintptr_t addres
 #include "librarycallplans.h"
 static void us_binding_owned_clear(us_binding *x){if(!x)return;free(x->name);free(x->args);free(x->signature);if(x->typed){us_exports_clear(x->typed);free(x->typed);}memset(x,0,sizeof *x);}
 static int us_bindings_add_function_typed_capability(us_bindings *b,const char *name,uintptr_t address,const void *signature,size_t length,int bridge,char *error,size_t cap){
- if(!b||!us_binding_name(name)||!address||!signature||length<16||(memcmp(signature,"USLSIG2\n",8)&&memcmp(signature,"USLSIG3\n",8))||!us_binding_unique(b,name))return us_binding_error(error,cap,"invalid or duplicate typed function declaration");
+ if(!b||!us_binding_name(name)||!address||ls_sig(signature?(const char *)signature:0,length>2147483647ull?16:(int)length)||!us_binding_unique(b,name))return us_binding_error(error,cap,"invalid or duplicate typed function declaration");
  us_binding x={0};x.typed_clear=us_exports_clear;x.typed=calloc(1,sizeof *x.typed);if(!x.typed)return us_binding_error(error,cap,"typed declaration allocation failed");
  if(us_exports_load_capability(x.typed,signature,length,bridge,error,cap)||x.typed->count!=1)goto bad;
  us_export *f=x.typed->items;if(strcmp(name,f->name)||f->linkage||f->defined!=1)goto bad;
