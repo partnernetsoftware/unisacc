@@ -16,6 +16,13 @@ int lt_count(int);
 int lt_args(int, int);
 int ls_data(int, int, int, unsigned long long, unsigned long long, int, unsigned long long);
 int ls_sig(const char *, int);
+int ls_wire_base(void);
+int ls_wire_type(void);
+int ls_wire_tail(int);
+int ls_wire_rec(int, int, int);
+int ls_wire_tag(unsigned char *, int);
+int ls_wire_flags(unsigned char *, int, int, int);
+int lw_put(unsigned char *, int, unsigned long long);
 
 typedef struct us_binding_type {uint64_t depth,base,shape,kind,width,uns;} us_binding_type;
 typedef struct us_binding {char *name;uintptr_t address;unsigned kind,variadic,supported,writable;size_t count;us_binding_type result,*args;uint64_t extent;unsigned char *signature;size_t signature_length;struct us_exports *typed;void (*typed_clear)(struct us_exports*);} us_binding;
@@ -112,18 +119,18 @@ static int us_binding_graph_equal(const us_export_type *a,const us_export_type *
 done:free(work);free(seen);return equal;
 }
 #endif
-static void us_binding_put64(unsigned char *p,uint64_t value){for(unsigned i=0;i<8;i++)p[i]=(unsigned char)(value>>(8*i));}
+static void us_binding_put64(unsigned char *p,uint64_t value){(void)lw_put(p,8,(unsigned long long)value);}
 static void us_binding_puttype(unsigned char *p,const us_binding_type *t){us_binding_put64(p,t->depth);us_binding_put64(p+8,t->base);us_binding_put64(p+16,t->shape);us_binding_put64(p+24,t->kind);us_binding_put64(p+32,t->width);us_binding_put64(p+40,t->uns);}
 /* Allocates one caller-owned byte blob. Full unsupported descriptors are kept.
    origin=0 injected, abi=0 native-system. No pointer ownership is transferred. */
 static int us_bindings_serialize(const us_bindings *b,unsigned char **out,size_t *length,char *error,size_t cap){
- if(!b||!out||!length||b->count>4096||(b->count&&!b->items))return us_binding_error(error,cap,"invalid binding output");*out=NULL;*length=0;size_t total=16;
- for(size_t i=0;i<b->count;i++){const us_binding *x=b->items+i;if(x->typed)return us_binding_error(error,cap,"typed bindings require V3 freeze");size_t record=strlen(x->name)+(x->kind?86:77)+48*x->count;if(record>SIZE_MAX-total-8)return us_binding_error(error,cap,"binding wire length overflow");total+=8+record;}
- unsigned char *p=malloc(total);if(!p)return us_binding_error(error,cap,"binding wire allocation failed");memcpy(p,"USBIND1\n",8);us_binding_put64(p+8,b->count);size_t at=16;
+ if(!b||!out||!length||b->count>4096||(b->count&&!b->items))return us_binding_error(error,cap,"invalid binding output");*out=NULL;*length=0;size_t total=(size_t)ls_wire_base();
+ for(size_t i=0;i<b->count;i++){const us_binding *x=b->items+i;if(x->typed)return us_binding_error(error,cap,"typed bindings require V3 freeze");int rec=ls_wire_rec((int)strlen(x->name),x->kind?1:0,x->count>2147483647ull?2147483647:(int)x->count);if(rec==1||rec==4||(size_t)rec>SIZE_MAX-total-8)return us_binding_error(error,cap,"binding wire length overflow");total+=8+(size_t)rec;}
+ unsigned char *p=malloc(total);if(!p)return us_binding_error(error,cap,"binding wire allocation failed");if(ls_wire_tag(p,8)){free(p);return us_binding_error(error,cap,"binding wire allocation failed");}us_binding_put64(p+8,b->count);size_t at=(size_t)ls_wire_base();
  for(size_t i=0;i<b->count;i++){
-  const us_binding *x=b->items+i;size_t n=strlen(x->name),record=n+(x->kind?86:77)+48*x->count;us_binding_put64(p+at,record);at+=8;us_binding_put64(p+at,n);at+=8;memcpy(p+at,x->name,n);at+=n;
-  p[at++]=(unsigned char)x->kind;p[at++]=0;p[at++]=0;p[at++]=(unsigned char)x->variadic;us_binding_put64(p+at,x->address);at+=8;us_binding_put64(p+at,x->count);at+=8;us_binding_puttype(p+at,&x->result);at+=48;
-  for(size_t j=0;j<x->count;j++){us_binding_puttype(p+at,x->args+j);at+=48;}
+  const us_binding *x=b->items+i;size_t n=strlen(x->name);int rec=ls_wire_rec((int)n,x->kind?1:0,x->count>2147483647ull?2147483647:(int)x->count);us_binding_put64(p+at,(uint64_t)rec);at+=8;us_binding_put64(p+at,n);at+=8;memcpy(p+at,x->name,n);at+=n;
+  if(ls_wire_flags(p+at,4,(int)x->kind,(int)x->variadic)){free(p);return us_binding_error(error,cap,"binding wire allocation failed");}at+=4;us_binding_put64(p+at,x->address);at+=8;us_binding_put64(p+at,x->count);at+=8;us_binding_puttype(p+at,&x->result);at+=(size_t)ls_wire_type();
+  for(size_t j=0;j<x->count;j++){us_binding_puttype(p+at,x->args+j);at+=(size_t)ls_wire_type();}
   if(x->kind){us_binding_put64(p+at,x->extent);at+=8;p[at++]=(unsigned char)x->writable;}p[at++]=(unsigned char)x->supported;
  }
  if(at!=total){free(p);return us_binding_error(error,cap,"binding wire length mismatch");}*out=p;*length=total;return 0;
