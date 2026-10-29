@@ -7,6 +7,7 @@ int cxsf_ledger_key(const char *,size_t,unsigned char *);
 int cxsf_ledger_metadata(const char *,const char *,const char *,const char *,int *,int *);
 int cxsf_ledger_find(const void *,int,int,const unsigned char *,int);
 int cxsf_ledger_next(const void *,int,int,int *,const unsigned char *,int,int *);
+int cxsf_stage_label(const char *);
 typedef struct {unsigned char *key;int kn;int present;unsigned char *value;int vn;char blob[64];} CxLedgerRowCheck;
 _Static_assert(sizeof(CxLedgerRowCheck)==sizeof(RLRow),"ledger row size");
 _Static_assert(offsetof(CxLedgerRowCheck,blob)==offsetof(RLRow,blob),"ledger blob offset");
@@ -41,6 +42,12 @@ int main(void) {
         checks++;if(a!=z||(!a&&(ap!=bp||an!=bn)))failed++;
     }
     for(int i=0;i<10000;i++){int a=99,b=99;snprintf(text,sizeof text,"%u",(unsigned)i*429497u);int x=rl_length(text,&a),y=cxsf_length(text,&b);checks++;if(x!=y||a!=b)failed++;}
+    const char *st[]={"e3","lower","source","bad"},*os[]={"lnx","osx","win","bad"},*arch[]={"x86_64","arm64","bad"},*mods[]={"","warn/","multi/","warn/multi/","multi/warn/"},*fmt[]={"tape","image","run","object","bad"};
+    char label[160];
+    for(int s=0;s<4;s++)for(int o=0;o<4;o++)for(int a=0;a<3;a++)for(int m=0;m<5;m++)for(int f=0;f<5;f++)for(int v=0;v<3;v++){
+        snprintf(label,sizeof label,"%s:%s/%s/%s%s/O%d",st[s],os[o],arch[a],mods[m],fmt[f],v);
+        checks++;if(rl_stage_label_ok(label)!=cxsf_stage_label(label))failed++;
+    }
     char line[160], stage[128], hex[65];
     int n=snprintf(line,sizeof line,"#SC2\tstage=e3:lnx/x86_64\tinput_sha256=%064d",0);
     for(int i=5;i<n;i++){unsigned char save=(unsigned char)line[i];for(int c=0;c<256;c++){

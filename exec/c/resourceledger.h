@@ -42,6 +42,7 @@ int cxsf_ledger_key(const char *,size_t,unsigned char *);
 int cxsf_ledger_metadata(const char *,const char *,const char *,const char *,int *,int *);
 int cxsf_ledger_find(const void *,int,int,const unsigned char *,int);
 int cxsf_ledger_next(const void *,int,int,int *,const unsigned char *,int,int *);
+int cxsf_stage_label(const char *);
 #define rl_hexv cxsf_hex_digit
 #define rl_length cxsf_length
 #else
@@ -284,6 +285,9 @@ typedef struct { const unsigned char *key; int kn; const unsigned char *data; in
 /* stage labels: "<stage>:<route>", stage in the registered table.  The route is the driver's own shape (compiler.c:674-677,889;
    the only grammar authority): "<target>/<arch>/[warn/][multi/]<format>/O<digit>", target lnx|osx|win, arch x86_64|arm64,
    format tape|image|run|object, warn before multi.  A prefix before the target is not a driver shape and is refused. */
+#ifdef UNISA_CX_SOURCE_FRAME
+#define rl_stage_label_ok cxsf_stage_label
+#else
 static inline int rl_token_is(const char *p, size_t n, const char *tok) { return strlen(tok) == n && !memcmp(p, tok, n); }
 static inline int rl_stage_label_ok(const char *label) {
     /* "source" binds image front-end input; e3 binds the token input. */
@@ -309,6 +313,7 @@ static inline int rl_stage_label_ok(const char *label) {
     r = q + 1;
     return r[0] == 'O' && r[1] >= '0' && r[1] <= '9' && r[2] == 0;
 }
+#endif
 #if defined(_WIN32)   /* Windows no-replace commit remains a separate platform contract. */
 static inline int rl_snapshot_write(const char *dir, const char *stage_label, const unsigned char *input, int inputn,
                                     const RLBlob *b, int nb, char *err, size_t errn) {
