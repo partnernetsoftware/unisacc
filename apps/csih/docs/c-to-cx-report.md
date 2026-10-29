@@ -51,3 +51,12 @@ P3：
 
 - 测套加速：热点模块的 native 缓存与产品 `-run` 合同分离（测用 ELF，产品仍默认 `-run`）。
 - 文档合同：`self-iter.md` 等仍写旧 `.c` 路径处随手清；不扩 scope 的话可挂债。
+
+## 本机可日用的前置（2026-10-29 落地，P0 最小集）
+
+- 准备：`sh apps/csih/csih.sh prepare`。源（`*.cx *.h`）摘要写在 `out/csih-e2e-bin/csih.src`；摘要未变秒返，变了才有界（300s）重建 `out/csih-e2e-bin/csih`，失败看同目录 `build.err`。
+- 日常：`sh apps/csih/csih.sh`（默认 agent）或 `csih.sh run` 直接用已备且摘要匹配的 ELF，秒开 TUI。产物缺或陈旧时具名报错并提示 prepare，不再静默冷 `-run` 约 47s；确要冷跑设 `CSIH_COLD=1`。`CSIH_BIN` 仍可覆盖。
+- 密钥合同：`DEEPSEEK_API_KEY` 优先；否则读 `~/env.jsonl` 中含 `"deepseek"` 的首行的 `"api_key"`，没有则 `"key"`。`csih.sh keyprobe` 只报长度与来源，不打印密钥。模型默认 `deepseek-chat`，`CSIH_MODEL` 覆盖。
+- 首次 agent 自建 `~/.cdsh/`（之前缺目录时报 cannot write transcript）。
+- Ctrl-C：有输入清输入；输入空且不忙时同时清结果/错误行，提示为「清空输入/结果」。
+- 实窗证据：tmux 中 agent 真打 DeepSeek，write→read→sh(cat) 三步成功。遗留：旧式工具完成缺结构化 claims，本轮仍判「未验证」（门禁合同，不在本轮改）。工作目录为 `apps/csih`（csih.sh 会 cd 过去）。
