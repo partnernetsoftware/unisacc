@@ -182,14 +182,12 @@ int vlen(char *v, int idx) {
     return k;
 }
 
-/* ---- character predicates (needed by both pp and lex) ---------------- */
-int isal(int c) {
-    if (c >= 97) { if (c <= 122) return 1; }
-    if (c >= 65) { if (c <= 90) return 1; }
-    if (c == 95) return 1;
-    return 0;
-}
-int isdi(int c) { if (c >= 48) { if (c <= 57) return 1; } return 0; }
+/* ---- character predicates (needed by both pp and lex) ----------------
+   Letters and digits live in cx/compiler/srcgate.cx. */
+int sg_isal(int c);
+int sg_isdi(int c);
+int isal(int c) { return sg_isal(c); }
+int isdi(int c) { return sg_isdi(c); }
 
 /* E2 scans spelling, independently of the E1 identifier constraint check.
    Keep a complete UCN in its preprocessing token, even when E1 must later
@@ -204,6 +202,8 @@ int pp_ucn_bad(unsigned long long v);
 int pp_ucn_gate(int kind, int initial, int span);
 int pp_ucn_kind(int c, const unsigned short *row, int n);
 const char *pp_ucn_why(int code);
+int pp_ishex(int c);
+int pp_idch(int c);
 int pp_idend(char *b, int i, int e) {
     int j; int n; int c;
     j = i;
@@ -1844,7 +1844,7 @@ int preprocess(void) {
    include guards make a second copy free.  printf is special: the walker
    desugars it, so <stdio.h> is only needed for a format that needs the
    runtime formatter (a width, a flag, a precision). */
-int idch(int c) { if (isal(c)) return 1; return isdi(c); }
+int idch(int c) { return pp_idch(c); }
 
 /* Where each identifier occurs, built once for autoinc.  srcfind scanned
    the whole source per header function asked about -- 39% of the
@@ -2337,12 +2337,7 @@ int eputsrc(int from, int to) {
    four hex digits, or `\U` and eight.  How many bytes it spans at j, or 0.
    The identifier keeps its SPELLING -- `caf\u00e9` is one name, spelled
    the same wherever it is used -- which is all a program can observe. */
-int ishexc(int c) {
-    if (c >= 48 && c <= 57) return 1;
-    if (c >= 97 && c <= 102) return 1;
-    if (c >= 65 && c <= 70) return 1;
-    return 0;
-}
+/* Hex digits for a preprocessing number live in pp_ishex. */
 int ucnlen(int j) {
     return pp_ucn_span(src, j, nsrc);
 }
@@ -3106,10 +3101,10 @@ int lex_numeric_valid(int begin, int end) {
     q = begin; digits = 0; isfloat = 0; hasdot = 0; octbad = 0; firstzero = at(q) == 48;
     if (firstzero && (at(q + 1) == 120 || at(q + 1) == 88)) {
         q = q + 2;
-        while (q < end && ishexc(at(q))) { q = q + 1; digits = digits + 1; }
+        while (q < end && pp_ishex(at(q))) { q = q + 1; digits = digits + 1; }
         if (q < end && at(q) == 46) {
             hasdot = 1; q = q + 1;
-            while (q < end && ishexc(at(q))) { q = q + 1; digits = digits + 1; }
+            while (q < end && pp_ishex(at(q))) { q = q + 1; digits = digits + 1; }
         }
         if (digits == 0) return 0;
         if (q < end && (at(q) == 112 || at(q) == 80)) {
