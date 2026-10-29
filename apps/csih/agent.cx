@@ -1227,6 +1227,25 @@ static void agent_undo_snapshot(const char *path) {
     static int hooked;
     if (!path || !path[0] || !home || !home[0]) return;
     if (!hooked) { atexit(agent_undo_cleanup); hooked = 1; }
+    {
+        /* atexit does not run when the pane is killed (SIGHUP), so each
+         * snapshot also sweeps backups of processes that no longer exist.
+         * The directory holds a handful of files; the scan is cheap. */
+        DIR *d;
+        struct dirent *e;
+        snprintf(dir, sizeof dir, "%s/.csih/undo", home);
+        if ((d = opendir(dir))) {
+            while ((e = readdir(d))) {
+                int pid = atoi(e->d_name);
+                char stale[1024];
+                if (pid <= 0 || pid == (int)getpid() || !strstr(e->d_name, ".bak")) continue;
+                if (kill(pid, 0) == 0 || errno != ESRCH) continue;
+                snprintf(stale, sizeof stale, "%s/%s", dir, e->d_name);
+                unlink(stale);
+            }
+            closedir(d);
+        }
+    }
     snprintf(dir, sizeof dir, "%s/.csih", home); mkdir(dir, 0700);
     snprintf(dir, sizeof dir, "%s/.csih/undo", home); mkdir(dir, 0700);
     if (agent_undo_n == AGENT_UNDO_MAX) {
