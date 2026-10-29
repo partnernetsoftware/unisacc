@@ -147,7 +147,24 @@ int term_raw_leave(void) {
 }
 
 /* Install the restore-on-exit handler. signal(), not sigaction — see q5. */
+/* A kill, a closed pane or a crash must not leave the shell in raw mode with
+ * mouse reporting on. Restore with async-signal-safe calls only (write,
+ * tcsetattr), then die of the same signal so the exit status and any core
+ * dump are what they would have been. */
+static void term_on_fatal(int sig) {
+    static const char off[] = "\033[?1000l\033[?1006l\033[?2004l\033[?25h\033[0m\n";
+    if (write(1, off, sizeof off - 1) < 0) { /* best effort */ }
+    if (term_saved_ok) tcsetattr(0, TCSANOW, &term_saved);
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
 int term_install_exit_handler(void (*fn)(int)) {
+    /* No SIGBUS: unisacc's headers do not define it, and its number differs
+     * between Linux (7) and macOS (10), so it is not hard-coded either. */
+    static const int fatal[] = { SIGTERM, SIGHUP, SIGQUIT, SIGSEGV, SIGABRT, SIGFPE };
+    size_t i;
+    for (i = 0; i < sizeof fatal / sizeof fatal[0]; i++) signal(fatal[i], term_on_fatal);
     return signal(SIGINT, fn ? fn : term_on_signal) == SIG_ERR ? -1 : 0;
 }
 int term_interrupted(void) { return (int)term_got_int; }
