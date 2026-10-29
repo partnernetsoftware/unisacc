@@ -1126,11 +1126,19 @@ int core_host_fetch(const unsigned char *p,int n,unsigned char **bytes,int *len)
         if(n>512)die("resource key too long");
         for(int i=0;i<n;i++){h[2*i]="0123456789abcdef"[p[i]>>4];h[2*i+1]="0123456789abcdef"[p[i]&15];}h[2*n]=0;
         if(RF_LEDGER.trace){
+#ifdef UNISA_CX_SOURCE_FRAME
+            int index=0, code=cxsf_ledger_next(RF_LEDGER.rows,RF_LEDGER.n,RF_TRACE_STARTED,&RF_LEDGER.cursor,p,n,&index);
+            if(code==1)die("INTERFACE_ERROR resource-trace-not-started");
+            if(code==2){snprintf(msg,sizeof msg,"MISSING_EXPLICIT_RESOURCE %s event=%d",h,RF_LEDGER.cursor);die(msg);}
+            if(code==3){snprintf(msg,sizeof msg,"INTERFACE_ERROR resource-trace-key-mismatch %s event=%d",h,RF_LEDGER.cursor);die(msg);}
+            r=&RF_LEDGER.rows[index];
+#else
             if(!RF_TRACE_STARTED)die("INTERFACE_ERROR resource-trace-not-started");
             if(RF_LEDGER.cursor>=RF_LEDGER.n){snprintf(msg,sizeof msg,"MISSING_EXPLICIT_RESOURCE %s event=%d",h,RF_LEDGER.cursor);die(msg);}
             r=&RF_LEDGER.rows[RF_LEDGER.cursor];
             if(r->kn!=n||memcmp(r->key,p,(size_t)n)){snprintf(msg,sizeof msg,"INTERFACE_ERROR resource-trace-key-mismatch %s event=%d",h,RF_LEDGER.cursor);die(msg);}
             RF_LEDGER.cursor++;
+#endif
         }else r=rl_find(&RF_LEDGER,p,n);
         if(!r){snprintf(msg,sizeof msg,"MISSING_EXPLICIT_RESOURCE %s",h);die(msg);}
         /* Strict: ledger answers only. Do not re-read host disk for inc/hdr (offline replay). */

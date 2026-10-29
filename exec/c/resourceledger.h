@@ -40,6 +40,8 @@ int cxsf_length(const char *,int *);
 int cxsf_ledger_fields(const char *,char *);
 int cxsf_ledger_key(const char *,size_t,unsigned char *);
 int cxsf_ledger_metadata(const char *,const char *,const char *,const char *,int *,int *);
+int cxsf_ledger_find(const void *,int,int,const unsigned char *,int);
+int cxsf_ledger_next(const void *,int,int,int *,const unsigned char *,int,int *);
 #define rl_hexv cxsf_hex_digit
 #define rl_length cxsf_length
 #else
@@ -263,9 +265,14 @@ static void rl_write_identity(FILE *f, const char *stage, const unsigned char *i
 }
 /* exact key lookup: the row, or NULL when the ledger does not list the key (MISSING for the caller) */
 static const RLRow *rl_find(const RLLedger *L, const unsigned char *key, int kn) {
+#ifdef UNISA_CX_SOURCE_FRAME
+    int i=cxsf_ledger_find(L->rows,L->n,L->trace,key,kn);
+    return i<0 ? 0 : &L->rows[i];
+#else
     int j; if (L->trace) return 0; /* SC2 is ordered, never a first-entry map. */
     for (j = 0; j < L->n; j++) if (L->rows[j].kn == kn && !memcmp(L->rows[j].key, key, (size_t)kn)) return &L->rows[j];
     return 0;
+#endif
 }
 
 typedef struct { const unsigned char *key; int kn; const unsigned char *data; int len; } RLBlob;

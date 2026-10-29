@@ -5,6 +5,11 @@ int cxsf_length(const char *,int *);
 int cxsf_ledger_identity(const char *,char *,size_t,char *);
 int cxsf_ledger_key(const char *,size_t,unsigned char *);
 int cxsf_ledger_metadata(const char *,const char *,const char *,const char *,int *,int *);
+int cxsf_ledger_find(const void *,int,int,const unsigned char *,int);
+int cxsf_ledger_next(const void *,int,int,int *,const unsigned char *,int,int *);
+typedef struct {unsigned char *key;int kn;int present;unsigned char *value;int vn;char blob[64];} CxLedgerRowCheck;
+_Static_assert(sizeof(CxLedgerRowCheck)==sizeof(RLRow),"ledger row size");
+_Static_assert(offsetof(CxLedgerRowCheck,blob)==offsetof(RLRow,blob),"ledger blob offset");
 static int legacy_metadata(const char *presence,const char *blob,const char *length,const char *digest,int *p,int *n) {
     if (!strcmp(presence,"0")) *p=0; else if (!strcmp(presence,"1")) *p=1; else return 1;
     if (!rl_length(length,n)) return 2;
@@ -16,6 +21,13 @@ int main(void) {
     long checks=0,failed=0; char text[64];
     const char *cases[]={"", "0", "00", "01", "1", "2147483647", "2147483648", "999999999999999999999", "-1", "+1", " 1", "1 ", "1x", 0};
     for(int i=-1;i<=256;i++){checks++;if(rl_hexv(i)!=cxsf_hex_digit(i))failed++;}
+    unsigned char ka[]={0,1},kb[]={0,2};RLRow rows[3]={{ka,2,1,0,0,{0}},{ka,2,0,0,0,{0}},{kb,2,1,0,0,{0}}};
+    RLLedger ledger={0};ledger.rows=rows;ledger.n=3;
+    for(int trace=0;trace<2;trace++)for(int q=0;q<3;q++){
+        ledger.trace=trace;const unsigned char *key=q==0?ka:q==1?kb:(unsigned char *)"xx";
+        const RLRow *r=rl_find(&ledger,key,2);int i=cxsf_ledger_find(rows,3,trace,key,2);
+        checks++;if((r? (int)(r-rows):-1)!=i)failed++;
+    }
     for(int a=0;a<256;a++)for(int b=0;b<256;b++){
         char key[2]={(char)a,(char)b};unsigned char out=0;int hi=rl_hexv(a),lo=rl_hexv(b);
         int ok=cxsf_ledger_key(key,2,&out);checks++;

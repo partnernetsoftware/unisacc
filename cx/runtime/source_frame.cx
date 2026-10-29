@@ -156,3 +156,28 @@ int cxsf_ledger_metadata(const char *presence,const char *blob,const char *lengt
     *present=p; *size=n;
     return 0;
 }
+
+/* Rows and keys are borrowed. A successful ordered lookup alone advances the
+ * caller-owned cursor. An absent row remains an ordinary matched row. */
+typedef struct {
+    unsigned char *key; int kn; int present; unsigned char *value; int vn; char blob[64];
+} CxLedgerRow;
+int cxsf_ledger_find(const void *rows,int count,int trace,const unsigned char *key,int n) {
+    const unsigned char *r=(const unsigned char *)rows;
+    if (trace || count<0 || n<0 || (count && !r) || (n && !key)) return -1;
+    for(int i=0;i<count;i++) { CxLedgerRow row; memcpy(&row,r+(size_t)i*sizeof row,sizeof row);
+        if(row.kn==n && (!n || !memcmp(row.key,key,(size_t)n))) return i; }
+    return -1;
+}
+/* 0 found, 1 not started, 2 missing event, 3 mismatched key. */
+int cxsf_ledger_next(const void *rows,int count,int started,int *cursor,
+                     const unsigned char *key,int n,int *index) {
+    const unsigned char *r=(const unsigned char *)rows;
+    if (!started) return 1;
+    if (!cursor || !index || *cursor<0 || *cursor>=count || !r) return 2;
+    int i=*cursor;
+    CxLedgerRow row; memcpy(&row,r+(size_t)i*sizeof row,sizeof row);
+    if(n<0 || (n && !key) || row.kn!=n || (n && memcmp(row.key,key,(size_t)n))) return 3;
+    *index=i; *cursor=i+1;
+    return 0;
+}
