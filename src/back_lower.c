@@ -130,6 +130,13 @@ int bkstored;                       /* how much of bkdata is in use */
 us_i64 bkz_at[BK_MAXZ]; us_i64 bkz_len[BK_MAXZ]; int bknz;
 us_i64 bkd_at[BK_MAXZ]; int bkd_off[BK_MAXZ]; int bkd_len[BK_MAXZ]; int bknd;
 int bkds_id[BK_MAXZ]; int bknds;     /* data symbols, each one ONCE */
+/* Room predicates live in cx/compiler/backlower.cx. 1 is the old exit.
+   4 is a negative count and is not an old exit. n<=0 still returns 0. */
+int bl_sym_room(int runs, int cap);
+int bl_zero_room(int runs, int cap);
+int bl_blob_room(int runs, int cap);
+int bl_zero_merge(long long n, int runs, long long prev_at, long long prev_len, long long cursor);
+int bl_data_room(int stored, int n, int cap, int runs, int rcap);
 int bk_dsym(int id) {
     int i;
     /* lower.zero_last reads a DICT of symbols, so a name appears once there
@@ -138,23 +145,27 @@ int bk_dsym(int id) {
        make bk_repack rewrite the same symbol's address twice, the second
        time from an address it had already moved. */
     i = 0; while (i < bknds) { if (bkds_id[i] == id) return 0; i = i + 1; }
-    if (bknds >= BK_MAXZ) { __write(2, "back end: too many data symbols\n", 32); __exit(1); }
+    if (bl_sym_room(bknds, BK_MAXZ) == 1) { __write(2, "back end: too many data symbols\n", 32); __exit(1); }
     bkds_id[bknds] = id; bknds = bknds + 1; return 0;
 }
 
 int bk_zeros(us_i64 n) {
-    if (n <= 0) return 0;
-    if (bknz > 0) { if (bkz_at[bknz - 1] + bkz_len[bknz - 1] == bkdlen) {
-        bkz_len[bknz - 1] = bkz_len[bknz - 1] + n; bkdlen = bkdlen + n; return 0; } }
-    if (bknz >= BK_MAXZ) { __write(2, "back end: too many zero runs\n", 29); __exit(1); }
+    long long prev_at; long long prev_len; int m;
+    prev_at = 0; prev_len = 0;
+    if (bknz > 0) { prev_at = bkz_at[bknz - 1]; prev_len = bkz_len[bknz - 1]; }
+    m = bl_zero_merge((long long)n, bknz, prev_at, prev_len, (long long)bkdlen);
+    if (m == 0 || n <= 0) return 0;
+    if (m == 1) { bkz_len[bknz - 1] = bkz_len[bknz - 1] + n; bkdlen = bkdlen + n; return 0; }
+    if (bl_zero_room(bknz, BK_MAXZ) == 1) { __write(2, "back end: too many zero runs\n", 29); __exit(1); }
     bkz_at[bknz] = bkdlen; bkz_len[bknz] = n; bknz = bknz + 1;
     bkdlen = bkdlen + n;
     return 0;
 }
 int bk_bytes(char *b, int n) {
-    int k;
-    if (n <= 0) return 0;
-    if (bkstored + n >= BK_MAXDATA || bknd >= BK_MAXZ) { __write(2, "back end: data too large\n", 25); __exit(1); }
+    int k; int room;
+    room = bl_data_room(bkstored, n, BK_MAXDATA, bknd, BK_MAXZ);
+    if (room == 0 || n <= 0) return 0;
+    if (room == 1) { __write(2, "back end: data too large\n", 25); __exit(1); }
     bkd_at[bknd] = bkdlen; bkd_off[bknd] = bkstored; bkd_len[bknd] = n; bknd = bknd + 1;
     k = 0; while (k < n) { bkdata[bkstored + k] = b[k]; k = k + 1; }
     bkstored = bkstored + n; bkdlen = bkdlen + n;
@@ -185,7 +196,7 @@ int bk_repack(void) {
         b = bknb;                           /* insertion sort: nearly sorted */
         while (b > 0 && bkb_s[b - 1] > o) b = b - 1;
         if (b == 0 || bkb_s[b - 1] != o) {  /* a repeat is not a new blob */
-            if (bknb >= BK_MAXZ) { __write(2, "back end: too many blobs\n", 25); __exit(1); }
+            if (bl_blob_room(bknb, BK_MAXZ) == 1) { __write(2, "back end: too many blobs\n", 25); __exit(1); }
             k = bknb;
             while (k > b) { bkb_s[k] = bkb_s[k - 1]; k = k - 1; }
             bkb_s[b] = o; bknb = bknb + 1;
