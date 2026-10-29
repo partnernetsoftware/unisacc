@@ -6,7 +6,7 @@
 
 ## 产品面（2026-10-30）
 
-对照已装产品的入口路径。三档：已通、骨架、未做。没实跑的不写已通。临时入口是 `/tmp/grk-cx-line/entry`，O0，1126911 字节，sha256 `8b2e87a31b491af41f86031e202f5535fe6cae761d5997503218405c9890c5ef`。已装产品 3035300 字节。实测记在下面第 139 节。
+对照已装产品的入口路径。三档：已通、骨架、未做。没实跑的不写已通。临时入口是 `/tmp/grk-cx-line/entry`，O0，1126911 字节，sha256 `90f11a4cf090176e49e1ff956161621d74e96c4a08c76e78f34c107459dddc31`。已装产品 3035300 字节。实测记在下面第 139、140 节。
 
 - **ar：骨架。** 用法、坏操作、缺文件、空归档、两成员 r/q、列表、抽出，退出码和归档字节与产品相同。写出权限 0755，产品 0644。大归档、替换成员、符号表没跑。
 - **as：骨架。** 用法、坏选项、坏目标、头和 `-b` 冲突，退出码和 stderr 相同。一行 `# unisacc -S lnx/x86_64` 两边都是 728 字节对象，权限都是 0644。加上 `  ret` 两边都是 744 字节。缺文件两边退出 1，产品印打不开，入口印 `as: cannot read`。Mach-O、COFF、大汇编没跑。
@@ -14,7 +14,7 @@
 - **objdump：骨架。** 用法、少 `-d`、坏文件与产品相同。`objdump -d` 那份对象，两边 stdout 都是 95 字节。
 - **-c 对象：骨架。** 没有 `main` 时两边都拒绝，stderr 相同。有 `main` 时产品写出 2216 字节对象，入口停在 `NOT_IMPLEMENTED object`，没有对象文件。
 - **.tape / .tapebin 输入：未做。** 入口把这两种输入写成 0，不读。tapegate 里的容器头不在这条入口上，不算这一面。
-- **-cx-plan / -cx-interface：未做。** 入口把这两个旗当成还没迁的选项。产品会打出计划，或按模块接口拒绝。
+- **-cx-plan / -cx-interface：骨架。** 不带 `-include` 时，计划、接口、缺文件、两个旗一起用，退出码和输出与产品相同。带 `-include` 时入口仍印 `bad argument`。多个模块的 `use` 没跑。
 - **-dump-tokens：骨架。** 旗认到了。产品打出 token。入口停在 `NOT_IMPLEMENTED tokens`。
 - **--emit-host-symbols：骨架。** 和 `-c -b` 一起用时，两边都拒绝，stderr 相同。没有一格写出符号文件。
 - **-O1 / -O2：骨架。** `-O1 -E` 对 `int x;` 两边 stdout 相同。没有对拍优化后的对象。整只入口按 `-O2` 冷构造仍超过 55 秒。
@@ -1689,6 +1689,22 @@ flowchart TD
   e["1126911 入口"] --> as["as nm objdump 窄格字节相同"]
   e --> c["有 main 的 -c 停在 NOT_IMPLEMENTED object"]
   e --> f["-cx-plan 仍是 option not migrated"]
+```
+
+## 140. 2026-10-30 入口接上 -cx-plan 和 -cx-interface
+
+`src/drive.cx` 看见这两个旗就交给已经在入口里的 `cxm_plan`、`cxm_planprint` 和 `cxm_interface`，然后返回。没有新模块，没有新的 `use`。`-include` 仍走原来的命令行记录，这条还没接，所以计划行上还不会出现 `-include` 的文件。
+
+临时入口重新构造，没有 `-O`。退出 0，stdout 0，stderr 0，墙钟 38741812839 ns。文件仍是 1126911 字节，sha256 `90f11a4cf090176e49e1ff956161621d74e96c4a08c76e78f34c107459dddc31`。已装产品仍是 3035300 字节。
+
+对拍在 `/tmp/grk-cx-line/planwork`，环境去掉 `UNISA_CONTAINER`。`int x;` 的 `.cx`：`-cx-plan` 两边退出 0，stdout 12 字节；`-cx-interface` 两边退出 1，stderr 76 字节。`int id_n(int n) { return n; }`：`-cx-plan` stdout 13 字节，`-cx-interface` stdout 168 字节，都相同。`.c` 的 `-cx-plan` stdout 6 字节，相同。缺文件的 `-cx-plan` 两边退出 0，stdout 15 字节；缺文件的 `-cx-interface` 两边退出 1，stderr 24 字节。只有旗、没有文件，两边退出 1，stderr 48 字节。两个旗一起用时走接口，stdout 168 字节，相同。`-include extra.h -cx-plan`：产品退出 0，计划行里有 `extra.h`；入口退出 1，印 `bad argument`。不带这些旗的 `-E` 仍是 7 字节源文。`as` 用法仍退出 2。一行汇编头仍是 728 字节，权限 0644。多个模块的 `use` 没有跑。这不是产品安装。
+
+```mermaid
+flowchart TD
+  d["dv_main"] --> f["cxm_flag"]
+  f --> i["cxm_interface"]
+  f --> p["cxm_plan 再 cxm_planprint"]
+  inc["-include"] --> bad["入口仍是 bad argument"]
 ```
 
 ## 64. 2026-10-29 编译器纯拒绝接到 bindhost

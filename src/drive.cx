@@ -20,7 +20,8 @@
 /* Command walk, route text, then the model chain.
    A missing model step prints NOT_IMPLEMENTED and the stop name.
    ar members go through cxr_append and cxr_member. as, nm, and objdump
-   stay on the tools already wired. */
+   stay on the tools already wired. -cx-plan and -cx-interface return
+   through cxm_planprint and cxm_interface. */
 static char dv_in[262144];
 static char dv_obj[1048576];
 static long dv_objn;
@@ -351,10 +352,39 @@ static void dv_time(const char *phase, long long a, long long b) {
 }
 static const unsigned char dv_cxh[] = "cx.h";
 static const char *dv_srcv[64];
+static int dv_cxm_open(void) {
+    char td[512];
+    if (hs_cxm_tmpdir(td, 512)) {
+        fputs("unisacc: model driver: tmpdir\n", stderr);
+        return 1;
+    }
+    if (cxm_bind(hs_cxm_rd, hs_cxm_wr, hs_cxm_say, hs_cxm_sha, td)) {
+        fputs("unisacc: model driver: modules\n", stderr);
+        return 1;
+    }
+    return 0;
+}
+/* -cx-interface prints one module and returns. -cx-plan prints the unit
+   list and returns. Other commands return -1 so the compile walk continues. */
+static int dv_cx_flags(int nsrc) {
+    char *paths[64];
+    int i;
+    if (!cxm_wants_interface() && !cxm_wants_plan()) return -1;
+    if (nsrc < 1) return 1;
+    if (dv_cxm_open()) return 1;
+    if (cxm_wants_interface()) return cxm_interface((char *)dv_srcv[0]);
+    cxm_set_on(0);
+    i = 0;
+    while (i < nsrc) {
+        paths[i] = (char *)dv_srcv[i];
+        i = i + 1;
+    }
+    if (cxm_plan(paths, nsrc)) return 1;
+    return cxm_planprint(0, 0);
+}
 /* One .cx on the command line: cxm_plan appends its use closure.
    The paths stay in dv_srcv. CXIF includes are published per unit later. */
 static int dv_expand(int *nsrc) {
-    char td[512];
     char *paths[64];
     int i;
     int any;
@@ -367,14 +397,7 @@ static int dv_expand(int *nsrc) {
         i = i + 1;
     }
     if (!any) return 0;
-    if (hs_cxm_tmpdir(td, 512)) {
-        fputs("unisacc: model driver: tmpdir\n", stderr);
-        return 1;
-    }
-    if (cxm_bind(hs_cxm_rd, hs_cxm_wr, hs_cxm_say, hs_cxm_sha, td)) {
-        fputs("unisacc: model driver: modules\n", stderr);
-        return 1;
-    }
+    if (dv_cxm_open()) return 1;
     cxm_set_on(0);
     i = 0;
     while (i < *nsrc) {
@@ -1061,6 +1084,10 @@ int dv_main(int argc, char **argv) {
             argstart = i;
             break;
         }
+        if (cxm_flag(argv[i])) {
+            i = i + 1;
+            continue;
+        }
         if (bx_opt_dash(argv[i]) == 1) return dv_fail(bx_opt_why(opts.defrun, src));
         if (nsrc >= 64) return dv_fail("too many sources");
         dv_srcv[nsrc] = argv[i];
@@ -1069,6 +1096,11 @@ int dv_main(int argc, char **argv) {
         i = i + 1;
     }
     if (!src) return dv_fail(bx_src_why(0));
+    {
+        int fr;
+        fr = dv_cx_flags(nsrc);
+        if (fr >= 0) return fr;
+    }
     if (dv_expand(&nsrc)) return 1;
     shown = opts.out;
     gotb = 0;
