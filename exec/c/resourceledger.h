@@ -53,6 +53,7 @@ int cxsf_ledger_metadata(const char *,const char *,const char *,const char *,int
 int cxsf_ledger_find(const void *,int,int,const unsigned char *,int);
 int cxsf_ledger_next(const void *,int,int,int *,const unsigned char *,int,int *);
 int cxsf_stage_label(const char *);
+int cxsf_ledger_check_identity(const void *,const char *,const unsigned char *,int,char *,size_t,void (*)(const unsigned char *,int,char *));
 #define rl_hexv cxsf_hex_digit
 #define rl_length cxsf_length
 #else
@@ -259,12 +260,16 @@ static void rl_input_hex(const unsigned char *input, int inputn, char hex[65]) {
     unisa_sha256_hex(input ? input : none, (size_t)(inputn < 0 ? 0 : inputn), hex);
 }
 static int rl_check_identity(const RLLedger *L, const char *stage, const unsigned char *input, int inputn, char *err, size_t errn) {
+#ifdef UNISA_CX_SOURCE_FRAME
+    return cxsf_ledger_check_identity(L,stage,input,inputn,err,errn,rl_input_hex);
+#else
     char hex[65];
     if (!L->has_id) { snprintf(err, errn, "INTERFACE_ERROR resource-identity-absent"); return 1; }
     if (strcmp(L->stage, stage)) { snprintf(err, errn, "INTERFACE_ERROR resource-identity-mismatch stage ledger=%s run=%s", L->stage, stage); return 1; }
     rl_input_hex(input, inputn, hex);
     if (strcmp(L->input_hex, hex)) { snprintf(err, errn, "INTERFACE_ERROR resource-identity-mismatch input ledger=%s run=%s", L->input_hex, hex); return 1; }
     return 0;
+#endif
 }
 /* writes the header line for a capture (stage label and the sha256 of the input bytes the capture runs on) */
 static inline int rl_identity_line(char *b, size_t cap, const char *stage, const char *hex) {

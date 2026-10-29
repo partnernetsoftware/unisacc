@@ -8,6 +8,7 @@ int cxsf_ledger_metadata(const char *,const char *,const char *,const char *,int
 int cxsf_ledger_find(const void *,int,int,const unsigned char *,int);
 int cxsf_ledger_next(const void *,int,int,int *,const unsigned char *,int,int *);
 int cxsf_stage_label(const char *);
+int cxsf_ledger_check_identity(const void *,const char *,const unsigned char *,int,char *,size_t,void (*)(const unsigned char *,int,char *));
 typedef struct {unsigned char *key;int kn;int present;unsigned char *value;int vn;char blob[64];} CxLedgerRowCheck;
 _Static_assert(sizeof(CxLedgerRowCheck)==sizeof(RLRow),"ledger row size");
 _Static_assert(offsetof(CxLedgerRowCheck,blob)==offsetof(RLRow,blob),"ledger blob offset");
@@ -29,6 +30,12 @@ int main(void) {
         const RLRow *r=rl_find(&ledger,key,2);int i=cxsf_ledger_find(rows,3,trace,key,2);
         checks++;if((r? (int)(r-rows):-1)!=i)failed++;
     }
+    {const unsigned char data[]="abc";char a[512],b[512],good[65];rl_input_hex(data,3,good);
+     for(int id=0;id<2;id++)for(int stage=0;stage<2;stage++)for(int digest=0;digest<2;digest++){
+        ledger.has_id=id;strcpy(ledger.stage,stage?"right":"wrong");strcpy(ledger.input_hex,digest?good:"bad");a[0]=b[0]=0;
+        int x=rl_check_identity(&ledger,"right",data,3,a,sizeof a),y=cxsf_ledger_check_identity(&ledger,"right",data,3,b,sizeof b,rl_input_hex);
+        checks++;if(x!=y||strcmp(a,b))failed++;
+     }}
     for(int a=0;a<256;a++)for(int b=0;b<256;b++){
         char key[2]={(char)a,(char)b};unsigned char out=0;int hi=rl_hexv(a),lo=rl_hexv(b);
         int ok=cxsf_ledger_key(key,2,&out);checks++;
