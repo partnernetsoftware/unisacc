@@ -1508,6 +1508,23 @@ flowchart TD
   lists["构造表已有 fwdsig 与 bindhost"] --> mods["fwdsig.cx 与 bindhost.cx"]
 ```
 
+## 65. 2026-10-30 入口六层与执行器接线
+
+`src/unisacc.cx` 只 `use drive`。六层是 `src/host.cx`、`src/packmodel.cx`、`src/executor.cx`、`src/stages.cx`、`src/drive.cx`、`src/bind.cx`。`src/runtime` 和 `src/core` 是指向 `cx` 下同名目录的符号链接。构造脚本没改。`exec/c/core.h` 没改。
+
+`cx/core/execute.cx` 去掉了 `UNISA_EXEC_CORE_H` 和 `__ASSEMBLER__` 守卫。文件级「声明了但不定义」改成函数体内的 `extern`。`action_run` 写成字面 `static`，`core_run` 写成字面名。这份文件也是旧库构造的输入。`executor.cx` 使用 `core.execute`，以及 alu、transition、stack、output、sparse、bytes。`bind.cx` 只留 `bd_touch`。`-cx-plan src/unisacc.cx` 退出 0，62 个单元。
+
+`-E examples/hello.c` 这次跑了 e2：退出 2，stdout 0 字节，stderr 是 `unisacc: model driver: not covered: missing target predefinition selector`。正文还没出来，对拍不算数。`-S`、`-o`、`-run` 这版入口没有重跑。
+
+具名红项：
+
+1. `FILE-DECL`。文件级函数声明若本文件不定义，cxmod 拒绝 `declares NAME but does not define it`。最小复现是 `execute.cx` 顶层 `void core_host_panic(const char *);`。现象是扫到第一个这种声明就停。绕法是块内 `extern`，由 `host.cx` 定义并导出。没有改 cxmod。
+2. `CXM-MAXU`。`CXM_MAXU` 是 64。这次 `-cx-plan` 是 62/64，只剩 2 个单元。没有改上限。
+
+旁解析仍靠这两条符号链接。`HOST-CLOCK`：顶层 `clock_gettime` 同样被拒，声明放进 `hs_ns`。`CX-PRELUDE`：用户 `.cx` 还没有产品那种 `cx.h` 前导。
+
+这不是产品安装，不是 `-E` 逐字节，不是四种语料的完整矩阵。整棵重写还没完成。
+
 ## 64. 2026-10-29 编译器纯拒绝接到 bindhost
 
 `compiler.c` 里剩余的纯拒绝改走已有的 `bindhost`。新函数是 `bx_compat_why`、`bx_opt_dash`、`bx_opt_why`、`bx_src_why`、`bx_mix_why`、`bx_tape_need`、`bx_tape_why`、`bx_tapebin_bad`、`bx_tapebin_why`、`bx_name_fit`、`bx_name_why`、`bx_cache_why`、`bx_frame_fit`、`bx_frame_why`、`bx_encode_bad`、`bx_encode_why`、`bx_route_why`、`bx_model_why`。没有新模块。`use` 仍是 32，构造表没有新增参数。`snprintf`、解码、编码和 `clierror` 仍在 C。宿主切片下标仍是 APE 71、本机 70。这次没有实跑 hostseed。`sh ./unisacc.com tools/check-compiler-units.cx` 又两次退出 0，两次 stdout 相同，两次 stderr 相同，都打印 `CHECK_COMPILER_UNITS failed=0`。这次检查直接调用这些函数，没有编译 `compiler.c`。这不是产品安装、六目标或 `--all`。整棵重构还没完成。
