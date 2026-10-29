@@ -6,7 +6,7 @@
 
 ## 产品面（2026-10-30）
 
-对照已装产品的入口路径。三档：已通、骨架、未做。没实跑的不写已通。临时入口是 `/tmp/grk-cx-line/entry-o2`，两只 `-O2` 对象再加 `src/hostnative.o`，939895 字节，sha256 `600ae023cafa6ef4194ac9b7d5824dd5ce992635bb896bedf05334836bddf9f0`。已装产品 3035300 字节。12 面那张表是上一只 873487 字节入口的，`out/grk-face-01/cx-entry-matrix-2026-10-30.tsv`：表头加 48 行，48 行都是 SAME，进度起点 100、下一格 148。按面计 SAME：ar 5、as 7、nm 3、objdump 4、-c 2、tape 2、tapebin 2、cx-plan 6、cx-interface 2、dump-tokens 1、emit-host-symbols 2、-O1 2、-O2 2、-D 7、lib 1。这只新入口没有整表重跑。语料前 100 格没有重跑。上一只整表仍是 `/tmp/grk-cx-line/o2mx/cx-entry-matrix-2026-10-30.tsv`，第 143 节。对象抽查在 `out/grk-obj-01/recheck.tsv`，第 145 节。12 面在第 146 节。摘要这一刀在第 147 节。目录行这一刀在第 148 节。解码这一刀在第 149 节，对拍表是 `out/grk-tapebin-02/cmp.tsv`。热循环这一刀在第 150 节。自身尾部候选在第 151 节，文件在 `out/grk-self-01/candidate`。
+对照已装产品的入口路径。三档：已通、骨架、未做。没实跑的不写已通。临时入口是 `/tmp/grk-cx-line/entry-o2`，两只 `-O2` 对象再加 `src/hostnative.o`，939895 字节，sha256 `600ae023cafa6ef4194ac9b7d5824dd5ce992635bb896bedf05334836bddf9f0`。已装产品 3035300 字节。12 面那张表是上一只 873487 字节入口的，`out/grk-face-01/cx-entry-matrix-2026-10-30.tsv`：表头加 48 行，48 行都是 SAME，进度起点 100、下一格 148。按面计 SAME：ar 5、as 7、nm 3、objdump 4、-c 2、tape 2、tapebin 2、cx-plan 6、cx-interface 2、dump-tokens 1、emit-host-symbols 2、-O1 2、-O2 2、-D 7、lib 1。这只新入口没有整表重跑。语料前 100 格没有重跑。上一只整表仍是 `/tmp/grk-cx-line/o2mx/cx-entry-matrix-2026-10-30.tsv`，第 143 节。对象抽查在 `out/grk-obj-01/recheck.tsv`，第 145 节。12 面在第 146 节。摘要这一刀在第 147 节。目录行这一刀在第 148 节。解码这一刀在第 149 节，对拍表是 `out/grk-tapebin-02/cmp.tsv`。热循环这一刀在第 150 节。自身尾部候选在第 151 节，文件在 `out/grk-self-01/candidate`。库调用对拍在第 152 节。
 
 - **ar：已通。** 检查器五行和产品相同：用法、`ar z`、缺成员、空归档、两成员。空归档 8 字节，两成员 146 字节，权限都是 0644。大归档、替换成员、符号表没跑。
 - **as：已通。** 七行相同：用法、`-z`、坏 `-b`、头和 `-b` 冲突、一行汇编、加 `ret`、缺文件。一行汇编 728 字节，加 `ret` 744 字节，权限 0644。缺文件两边 stderr 都是 86 字节。Mach-O、COFF、大汇编没跑。
@@ -19,7 +19,7 @@
 - **--emit-host-symbols：已通。** 配 `-c -b` 两边 stderr 73 字节，配 `-S -b` 两边 106 字节，都是拒绝，退出 1。没有一格写出符号文件。
 - **-O1 / -O2：已通（限检查器这些格），性能红项另记。** 检查器这 4 格是 `-O1 -E`、`-O2 -E`、`-O1 -c`、`-O2 -c`，都是 SAME。`-E` 对 `int x;`。有 `main` 的 `-c` 两边都是 2216 字节，权限 0755。`dev-run` 的 8 格超时不在这 4 格里。这一轮把 `core_run` 里每步四次外部调用按原来的语义写进循环，`hello.c` 和 `fib.c` 的 `-S` 文本与产品逐字节相同。`dev-run.cx -S` 这只入口墙钟 25.200 秒，产品 4.189 秒，仍超过检查器 18 秒，性能红项还在。数字在第 150 节。
 - **-D / -U / -I / -include：已通。** `-DFOO`、`-UFOO`、先定义再取消、`-I` 引号、`-I` 尖括号、`-include`、`-iquote` 七行相同。多个目录、缺参数没跑。
-- **库接口：已通（只到检查器这一格）。** `int abs(int); int main(void){return abs(-3);}` 默认执行，两边退出 3，stdout 和 stderr 都是空的。`tests/library-abi.cx` 没跑。`us_*` 没接到这条入口。这不是库路径已经接上。`dup.c` 的 `strdup` 不在这 12 面里，这一轮没跑。
+- **库接口：已通（检查器那一格，外加一份把 `library_abi_values` 里的库调用写在一起的 `.c`）。** `int abs(int); int main(void){return abs(-3);}` 默认执行，两边退出 3，stdout 和 stderr 都是空的。这一轮另写一份 `/tmp/grk-lib-01/lib.c`，里面有 `qsort`、`bsearch`、`snprintf`、`memchr`、`memcmp`、`strtol`、`strtoul`、`strtod`、`calloc`、`realloc`、`free`、`memmove`、`strcmp`。`-S` 两边 342381 字节，逐字节相同。`-o` 两边 65596 字节，逐字节相同。两个镜像都退出 200。`tests/library-abi.cx` 整份没跑。模块那几项（八个 int64、整数和 double 混排、结构体进出、可变参数、`va_copy`）没跑。`us_*` 没有另接一条入口。`dup.c` 的 `strdup` 没跑。数字在第 152 节。
 
 ## 0. 一句话
 
@@ -1884,6 +1884,21 @@ flowchart TD
   elf["939895 字节 ELF"] --> cat["尾部接上已装产品的 P3"]
   cat --> one["out/grk-self-01/candidate"]
   one --> hello["不设 UNISA_CONTAINER，hello -S 与产品相同"]
+```
+
+## 152. 2026-10-30 库调用从 abs 一格扩到一份对照
+
+检查器原来只有 `abs(-3)`，两边退出 3。`tests/library-abi.cx` 里 `library_abi_values` 用到的库函数，写进 `/tmp/grk-lib-01/lib.c` 一份：`qsort`、`bsearch`、`snprintf`、`memchr`、`memcmp`、`strtol`、`strtoul`、`strtod`、`calloc`、`realloc`、`free`、`memmove`、`strcmp`。源文件不在仓库里。
+
+cwd `/tmp/notrepo`，环境去掉 `UNISA_CONTAINER`。入口是第 150 节那只 `/tmp/grk-cx-line/entry-o2`。参数 `-b lnx/x86_64 -S`：两边退出 0，stderr 0，stdout 都是 342381 字节，逐字节相同。参数 `-b lnx/x86_64 -o`：两边退出 0，stderr 0，镜像都是 65596 字节，逐字节相同。两个镜像直接执行，退出码都是 200。
+
+`tests/library-abi.cx` 整份没跑。它核对的是仓库根 `unisacc.com` 的身份，不是这只入口。模块边界那几项没跑：八个 int64 参数、整数和 double 混排、结构体当参数和返回值、可变参数、`va_copy`。`us_*` 没有新接线。`dup.c` 的 `strdup` 没跑。这不是产品安装。
+
+```mermaid
+flowchart TD
+  abs["检查器 abs 一格"] --> lib["一份 lib.c 覆盖 library_abi_values 的库调用"]
+  lib --> same["-S 与 -o 和产品逐字节相同，执行都退出 200"]
+  same --> left["整份 library-abi 和模块边界项没跑"]
 ```
 
 ## 64. 2026-10-29 编译器纯拒绝接到 bindhost
