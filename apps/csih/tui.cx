@@ -1057,6 +1057,7 @@ static int tui_slash(tui_state *st) {
         tui_log_plain(st, "/perm [read|work|any]: 权限档（read 只读；work 只写工作目录；any 不拦）");
         tui_log_plain(st, "/undo: 撤销 agent 最近一次文件写入/编辑（最多 20 步，不含 exec）；/diff: 看这些改动");
         tui_log_plain(st, "/view PATH [LINE]: 看文件 20 行（带行号），不经模型；/copy: 上一轮答复进 tmux 缓冲区；/retry: 重发上一条输入");
+        tui_log_plain(st, "/context: 对话记录条数、大小和裁剪规则");
         tui_log_plain(st, "/allow: 放行下一条危险命令一次；/new: 新上下文（旧转录归档）；/resume [N]: 列出或换回归档");
         tui_log_plain(st, "键：Esc 取消本轮/清输入；空输入 Tab 展开/收起最近工具行；Ctrl-U 清行；Ctrl-W 删词；Ctrl-R 搜历史");
         tui_command_done(st);
@@ -1221,6 +1222,33 @@ static int tui_slash(tui_state *st) {
         tui_command_done(st);
         return 1;
     }
+    if (!strcmp(st->input, "/context")) {
+        char path[512], up[16], sz[16];
+        int per_turn = 0, keep = 0, calls = 0, tokens = 0, sec = 0, rsec = 0;
+        long trim = 0, sent = 0, hit = 0, miss = 0, out = 0;
+        struct stat sb;
+        agent_context_limits(&per_turn, &trim, &keep);
+        if (st->owned) snprintf(path, sizeof path, "%s", st->journal_path);
+        else if (agent_transcript_path(path, sizeof path) != 0) path[0] = 0;
+        if (!path[0] || stat(path, &sb) != 0) {
+            tui_log_plain(st, "context: 当前没有对话记录（新上下文）");
+        } else {
+            session_records recs = session_read(path);
+            tui_bytes(sz, sizeof sz, (long)sb.st_size);
+            snprintf(note, sizeof note, "context: %zu 条记录 · %s · %.150s", recs.count, sz, path);
+            tui_log_plain(st, note);
+            session_free(&recs);
+        }
+        net_progress(&sec, &tokens, &sent, &rsec);
+        net_session_usage(&calls, &hit, &miss, &out);
+        tui_bytes(up, sizeof up, sent);
+        tui_bytes(sz, sizeof sz, trim);
+        snprintf(note, sizeof note, "context: 每轮送最近 %d 条；文件超过 %s 时裁到最近 %d 条；上次请求上传 %s，本会话输入 %ld 词元",
+                 per_turn, sz, keep, up, hit + miss);
+        tui_log_plain(st, note);
+        tui_command_done(st);
+        return 1;
+    }
     if (!strcmp(st->input, "/retry")) {
         /* Send the last prompt again (it is the newest history line). */
         if (!st->nhistory) {
@@ -1330,6 +1358,7 @@ static int tui_slash(tui_state *st) {
         (!strncmp(st->input, "/diff", 5) && token == 5) ||
         (!strncmp(st->input, "/copy", 5) && token == 5) ||
         (!strncmp(st->input, "/retry", 6) && token == 6) ||
+        (!strncmp(st->input, "/context", 8) && token == 8) ||
         (!strncmp(st->input, "/new", 4) && token == 4) ||
         (!strncmp(st->input, "/reload", 7) && token == 7) ||
         (!strncmp(st->input, "/reload-code", 12) && token == 12) ||
@@ -4991,6 +5020,24 @@ int tui_entry(int argc, char **argv) {
             ok = ok && tcc.npending == 1 && !strcmp(tcc.pending[0], "跑一下测试");
             if (!ok) { printf("FAIL /retry\n"); failures++; }
             else printf("  ok   /retry sends the last prompt again\n");
+            {
+                char tp[128];
+                char *oldt = getenv("CSIH_TRANSCRIPT") ? strdup(getenv("CSIH_TRANSCRIPT")) : NULL;
+                snprintf(tp, sizeof tp, "/tmp/csih-ctx-%d.jsonl", (int)getpid());
+                f = fopen(tp, "w");
+                if (f) { fputs("{\"role\":\"user\",\"text\":\"a\"}\n{\"role\":\"assistant\",\"text\":\"b\"}\n{\"role\":\"user\",\"text\":\"c\"}\n", f); fclose(f); }
+                setenv("CSIH_TRANSCRIPT", tp, 1);
+                tui_state_init(&tcc, NULL); tcc.mode = 1;
+                tui_type(&tcc, "/context");
+                ok = tcc.nlog >= 2 && strstr(tcc.log[tcc.nlog - 2], "3 条记录") && strstr(tcc.log[tcc.nlog - 1], "每轮送最近 50 条");
+                setenv("CSIH_TRANSCRIPT", "/nonexistent/csih-ctx.jsonl", 1);
+                tui_type(&tcc, "/context");
+                ok = ok && strstr(tcc.log[tcc.nlog - 2], "没有对话记录");
+                if (oldt) { setenv("CSIH_TRANSCRIPT", oldt, 1); free(oldt); } else unsetenv("CSIH_TRANSCRIPT");
+                if (tui_selftest_rm(tp, 0)) failures++;
+                if (!ok) { printf("FAIL /context\n"); failures++; }
+                else printf("  ok   /context reports records, size and the trim rule\n");
+            }
         }
 
         printf("%s\n", failures ? "SELFTEST FAILED" : "selftest ok");
