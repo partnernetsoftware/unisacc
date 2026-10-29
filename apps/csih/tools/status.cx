@@ -1,0 +1,97 @@
+/* CX */
+/* status.cx — write a .csih-status that csih shows under its title.
+ *
+ *   sh unisacc.com apps/csih/tools/status.cx -- [OPTIONS] [OUT]
+ *     count DIR DONE_EXT TODO_EXT   进度 done/(done+todo) DONE_EXT, counted on disk
+ *     next CHECKLIST.md             下一刀 = first "- [ ]" item of that file
+ *     line TEXT                     any fixed row, e.g. the last refusal
+ *     OUT                           output file (default ./.csih-status)
+ *
+ * Each option adds one row, in order; csih shows the first three. The
+ * numbers come from the filesystem at run time, so they can be rechecked
+ * with find(1). Dot directories (.git, .csih ...) are skipped.
+ * Exit 0 written, 1 a source could not be read, 2 usage.
+ */
+
+static int ends_with(const char *s, const char *ext) {
+    size_t n = strlen(s), m = strlen(ext);
+    return n >= m && !strcmp(s + n - m, ext);
+}
+
+/* Files under dir ending in ext, recursively. -1 when dir cannot be opened. */
+static long count_ext(const char *dir, const char *ext) {
+    DIR *d = opendir(dir);
+    struct dirent *e;
+    long n = 0;
+    if (!d) return -1;
+    while ((e = readdir(d))) {
+        char sub[4096];
+        struct stat sb;
+        if (e->d_name[0] == '.') continue;
+        snprintf(sub, sizeof sub, "%s/%s", dir, e->d_name);
+        if (lstat(sub, &sb) != 0) continue;
+        if (S_ISDIR(sb.st_mode)) {
+            long k = count_ext(sub, ext);
+            if (k > 0) n += k;
+        } else if (S_ISREG(sb.st_mode) && ends_with(e->d_name, ext)) n++;
+    }
+    closedir(d);
+    return n;
+}
+
+/* First unchecked "- [ ] item" line of a markdown checklist, into out. */
+static int first_open(const char *path, char *out, size_t cap) {
+    char line[1024];
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    out[0] = 0;
+    while (fgets(line, sizeof line, f)) {
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (!strncmp(p, "- [ ] ", 6) || !strncmp(p, "* [ ] ", 6)) {
+            p += 6;
+            p[strcspn(p, "\r\n")] = 0;
+            snprintf(out, cap, "%s", p);
+            break;
+        }
+    }
+    fclose(f);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    char rows[3][600], item[700];
+    const char *out = ".csih-status";
+    int nrows = 0, i, bad = 0;
+    FILE *f;
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "count") && i + 3 < argc) {
+            long done = count_ext(argv[i + 1], argv[i + 2]);
+            long todo = count_ext(argv[i + 1], argv[i + 3]);
+            if (done < 0 || todo < 0) { fprintf(stderr, "status: cannot read %s\n", argv[i + 1]); bad = 1; }
+            else if (nrows < 3)
+                snprintf(rows[nrows++], sizeof rows[0], "进度 %ld/%ld %s（%s 还剩 %ld，扫描 %s）",
+                         done, done + todo, argv[i + 2], argv[i + 3], todo, argv[i + 1]);
+            i += 3;
+        } else if (!strcmp(argv[i], "next") && i + 1 < argc) {
+            if (first_open(argv[i + 1], item, sizeof item) != 0) { fprintf(stderr, "status: cannot read %s\n", argv[i + 1]); bad = 1; }
+            else if (nrows < 3)
+                snprintf(rows[nrows++], sizeof rows[0], "%s%s", item[0] ? "下一刀 " : "清单已全部勾选", item);
+            i += 1;
+        } else if (!strcmp(argv[i], "line") && i + 1 < argc) {
+            if (nrows < 3) snprintf(rows[nrows++], sizeof rows[0], "%s", argv[i + 1]);
+            i += 1;
+        } else if (i == argc - 1 && argv[i][0] != '-') {
+            out = argv[i];
+        } else {
+            fprintf(stderr, "usage: status.cx -- [count DIR DONE_EXT TODO_EXT] [next LIST.md] [line TEXT] [OUT]\n");
+            return 2;
+        }
+    }
+    if (!nrows) { fprintf(stderr, "status: nothing to write\n"); return bad ? 1 : 2; }
+    f = fopen(out, "w");
+    if (!f) { fprintf(stderr, "status: cannot write %s\n", out); return 1; }
+    for (i = 0; i < nrows; i++) fprintf(f, "%s\n", rows[i]);
+    fclose(f);
+    return bad;
+}
