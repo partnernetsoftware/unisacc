@@ -2690,6 +2690,18 @@ static void tui_put_folded(char *dst, int dstmax, const char *prefix, const char
  * stays within `cols` so a long paste cannot fail the width check. */
 static long tui_tool_t0;      /* when the current exec started, for the busy clock */
 
+/* The exit line. Returns 0 (print nothing) when the session made no request. */
+static int tui_session_summary(char *out, size_t cap) {
+    int calls = 0, steps = agent_undo_depth();
+    long hit = 0, miss = 0, outk = 0;
+    net_session_usage(&calls, &hit, &miss, &outk);
+    if (!calls) return 0;
+    snprintf(out, cap, "csih 本次会话：请求 %d 次 · 输入 %ld 词元（缓存命中 %d%%）· 输出 %ld 词元 · 文件改动 %d 步%s",
+             calls, hit + miss, hit + miss ? (int)(hit * 100 / (hit + miss)) : 0, outk, steps,
+             steps ? "（退出后不能再 /undo）" : "");
+    return 1;
+}
+
 /* Ring the terminal bell when a turn that took 10s or more ends, so tmux flags
  * the window while the user is elsewhere. Only on a tty; CSIH_BELL=0 disables. */
 static int tui_should_bell(int tty, const char *env) {
@@ -4948,6 +4960,13 @@ int tui_entry(int argc, char **argv) {
             if (!strstr(tc.log[tc.nlog - 1], "cost: 请求 ") || !strstr(tc.log[tc.nlog - 1], "缓存命中") || tc.npending || tc.busy)
                 { printf("FAIL /cost: %s\n", tc.log[tc.nlog - 1]); failures++; }
             else printf("  ok   /cost shows session usage\n");
+            {
+                /* usage was fed above, so the exit line has something to say */
+                char sum[300];
+                if (!tui_session_summary(sum, sizeof sum) || !strstr(sum, "请求 ") || !strstr(sum, "缓存命中"))
+                    { printf("FAIL exit summary: %s\n", sum); failures++; }
+                else printf("  ok   exit summary reports requests, tokens and file changes\n");
+            }
         }
         {
             char path[256], msg[400];
@@ -5574,8 +5593,16 @@ int tui_entry(int argc, char **argv) {
             if (first) { tui_write_all("\x1b[?25l", 6); first = 0; }
         }
         if (!managed_mode || (!tui_managed.retired && tui_managed.raw && st.owner_fd >= 0)) {
+            char sum[300];
             term_raw_leave();
-            tui_write_all("\x1b[?25h\x1b[0m\n", 9);
+            /* 11 bytes. A hard-coded 9 cut "\x1b[0m" to "\x1b[0", and the next
+             * byte printed (the shell prompt, or this summary's 'c') finished
+             * it as "\x1b[0c", a device-attributes query: the character
+             * vanished and the terminal's ^[[?1;2c reply was echoed. */
+            static const char restore[] = "\x1b[?25h\x1b[0m\n";
+            tui_write_all(restore, sizeof restore - 1);
+            /* One line left in the terminal: what this session cost and changed. */
+            if (!managed_mode && tui_session_summary(sum, sizeof sum)) printf("%s\n", sum);
         }
         if (managed_mode) close(tui_managed.fd);
         /* Successful retirement must not restore TTY state over the new actor. */
