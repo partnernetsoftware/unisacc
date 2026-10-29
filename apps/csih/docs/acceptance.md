@@ -14,12 +14,12 @@ CSIH_BIN=../../out/csih-e2e-bin/csih UNISACC=../../unisacc.com \
   sh ../../unisacc.com check.cx -- probes            # 11 ok, 0 fail
 ```
 
-## 最近一次结果（2026-10-29，HEAD 1ad56b7d15，本机 Linux；第三十五批后重跑）
+## 最近一次结果（2026-10-29，HEAD 18e48c2c77，本机 Linux；第三十九批后重跑）
 
 | 门禁 | 结果 |
 | --- | --- |
 | prepare | up to date |
-| tui selftest | 62 项 ok，selftest ok |
+| tui selftest | 66 项 ok，selftest ok |
 | agent_cli / shell_cli / term_cli / net_cli selftest | 全部通过 |
 | check.sh | rc=0，check ok |
 | check.cx probes | rc=0，11 ok，0 fail（含真实 HTTP 与真实 LLM 往返） |
