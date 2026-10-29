@@ -1066,6 +1066,34 @@ int agent_peer_blocked(int kind, const char *op, const char *cmd, char *why, int
     return 1;
 }
 
+/* Commands that destroy work or reach outside. They need the user's /allow
+ * first; one /allow lets exactly one such command through. */
+static int agent_danger_left;
+void agent_allow_danger(int n) { agent_danger_left = n > 0 ? n : 0; }
+int agent_danger_pending(void) { return agent_danger_left; }
+
+int agent_is_danger(const char *cmd) {
+    static const char *pat[] = {
+        "rm -rf", "rm -fr", "rm -r ", "git push", "git reset --hard", "git clean",
+        "git checkout -- ", "mkfs", "dd if=", "> /dev/sd", "shutdown", "reboot",
+        "chmod -R 777", ":(){", "kill -9 -1", NULL
+    };
+    int i;
+    if (!cmd) return 0;
+    for (i = 0; pat[i]; i++) if (strstr(cmd, pat[i])) return 1;
+    return 0;
+}
+
+int agent_danger_blocked(int kind, const char *cmd, char *why, int n) {
+    if (why && n > 0) why[0] = 0;
+    if (kind != ACT_EXEC || !agent_is_danger(cmd)) return 0;
+    if (agent_danger_left > 0) { agent_danger_left--; return 0; }
+    if (why && n > 1)
+        snprintf(why, (size_t)n, "%s",
+                 "blocked: 危险命令（删除/强推/重置等）未执行。请在 answer 里说明要跑什么、为什么，等用户输入 /allow 后再发同一条命令。");
+    return 1;
+}
+
 static int agent_role_line(char *dst, int n) {
     const char *role = agent_role_get();
     const char *peer = agent_peer_get();
@@ -2488,7 +2516,7 @@ static int at_after_http(void) {
                          "  → stop（停止，未独立验收）");
             else if (s.kind == ACT_GO_CONTINUE) snprintf(ev, sizeof ev, "  → continue");
             else
-                snprintf(ev, sizeof ev, "无法解析");
+                snprintf(ev, sizeof ev, "%s", "↻ 模型回复不是单个动作（一次多步或夹带文字），已让它重发");
             if (ev[0]) at_event(ev);
         }
         if ((s.kind == ACT_ANSWER && s.outcome == AGENT_OUTCOME_COMPLETED) || s.kind == ACT_GO_STOP) {
@@ -2613,6 +2641,8 @@ static int at_after_http(void) {
             agent_tool_reset();
             agent_read_path[0]=0;agent_read_exact=agent_read_lines=0;agent_read_observation[0]=0;AT.evidence_source[0]=0;
             if (agent_peer_blocked(s.kind, s.op, s.cmd, result, (int)sizeof result)) {
+                tool_facts.handled=1;tool_facts.op_success=0;
+            } else if (agent_danger_blocked(s.kind, s.cmd, result, (int)sizeof result)) {
                 tool_facts.handled=1;tool_facts.op_success=0;
             } else if (s.kind == ACT_EXEC && agent_note_cd(AT.run_cwd, sizeof AT.run_cwd, s.cmd, result, sizeof result)) {
                 tool_facts.handled=1; /* cd currently has no separate success API. */

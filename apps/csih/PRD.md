@@ -126,7 +126,13 @@ agent 模式新增 `/help`、`/status`、`/clear`，均只在本地处理、不�
 - 会话：`/new` 开新上下文、`/resume` 列最近转录接着做；转录按 cwd 分目录，不再全写一个 `~/.cdsh/tui.jsonl`。
 - 权限：`exec` 分「只读 / 写工作区 / 任意」三档，危险命令（`rm -rf`、`git push`、`reset`）先确认一键 y/n。
 - `/model`、`/cwd` 本地命令；`/cost` 显示本会话 token 与命中率。**第二批已落地**：`/model` 显示当前模型，`/model NAME` 设本会话模型（单词、<96 字节，忙时拒绝），请求与标题都随之变化；`/cwd` 显示工作目录；两者都列入 `/help`，都不发起模型回合。selftest：`/model sets the session model`、`/cwd shows the working directory`、`help lists /model and /cwd`。`/cost` 未做。
-- 下一批候选：「无法解析」行改成可读说明（模型一次发了多步、已要求重发）；工具行键盘切换；正文流式显示；`/new` 和 `/resume`；危险命令确认。
+- **第三批已落地（2026-10-29）**：
+  - 「无法解析」改为 `↻ 模型回复不是单个动作（一次多步或夹带文字），已让它重发`（重发本来就由 `parse_fail` 有界驱动）。
+  - `/cost`：本会话请求次数、输入词元、缓存命中及其比例、输出词元。每个响应只计一次（`net_req_counted`）。同时修了 usage 解析的原有 bug：DeepSeek 的 usage 里嵌着 `prompt_tokens_details{...}`，用首个 `}` 当结尾会漏读 hit/miss，现在按括号深度匹配。实测：`请求 6 次 · 输入 47754（缓存命中 6016，12%）· 输出 1180 词元`。
+  - 危险命令门：`rm -rf`、`rm -r `、`git push`、`git reset --hard`、`git clean`、`git checkout -- `、`mkfs`、`dd if=`、`shutdown`、`reboot` 等先拦截，告诉模型在 answer 里说明后等用户 `/allow`；一次 `/allow` 只放行一条。tmux 实测：拦截 → 模型说明风险 → `/allow` → 删除成功并「语义接受」。这是关键字门，不是沙箱。
+  - 空输入时按 Tab 展开或收起最近的工具行；`/help` 新增一行按键说明。
+  - selftest：`usage with nested details sums per response`、`/cost shows session usage`、`dangerous exec is blocked until /allow`、`/allow lets exactly one through`、`tab toggles the newest tool row`；agent_cli selftest 全部通过。
+- 下一批候选：正文流式显示；`/new` 和 `/resume`（转录按 cwd 分开）；输入框光标（Ctrl-A/E、左右键）；exec 三档权限；P0 根治（引用原文，由 harness 定位）。
 - 自迭代：改 `apps/csih` 源后 `/reload` 自动跑 `csih.sh prepare`，绿了再换进程（复用现有 reload 链）。
 
 ### P3 以后

@@ -264,6 +264,8 @@ static int net_tokens;
 static long net_sent;
 static long net_got;
 static int net_hit, net_miss, net_usage_seen;
+static int net_req_counted, net_sess_calls;
+static long net_sess_hit, net_sess_miss, net_sess_out;
 void net_set_tick(net_tick_fn fn) { net_tick_cb = fn; }
 void net_cancel(void) { net_stop = 1; }
 void net_reset(void) { net_stop = 0; }
@@ -305,7 +307,15 @@ static void net_note_usage(const char *tail) {
     if (!u) { net_hit = net_miss = net_usage_seen = 0; return; }
     brace = strchr(u, '{');
     if (!brace) { net_hit = net_miss = net_usage_seen = 0; return; }
-    end = strchr(brace, '}');
+    /* usage nests prompt_tokens_details{...}; the first '}' is not its end. */
+    {
+        int depth = 0;
+        for (end = brace; *end; end++) {
+            if (*end == '{') depth++;
+            else if (*end == '}' && --depth == 0) break;
+        }
+        if (!*end) end = 0;
+    }
     if (!end) { net_hit = net_miss = net_usage_seen = 0; return; }
     k = strstr(brace, "\"prompt_cache_hit_tokens\"");
     if (k && k < end) {
@@ -320,6 +330,34 @@ static void net_note_usage(const char *tail) {
     net_hit = hit;
     net_miss = miss;
     net_usage_seen = 1;
+    /* Progress polls re-read the same tail; count each response once. */
+    if (!net_req_counted) {
+        int out = 0;
+        k = strstr(brace, "\"completion_tokens\"");
+        if (k && k < end) {
+            k = strchr(k, ':');
+            if (k && k < end) out = atoi(k + 1);
+        }
+        net_req_counted = 1;
+        net_sess_calls++;
+        net_sess_hit += hit;
+        net_sess_miss += miss;
+        net_sess_out += out;
+    }
+}
+
+/* Whole-process totals for /cost. */
+void net_session_usage(int *calls, long *hit, long *miss, long *out) {
+    if (calls) *calls = net_sess_calls;
+    if (hit) *hit = net_sess_hit;
+    if (miss) *miss = net_sess_miss;
+    if (out) *out = net_sess_out;
+}
+
+/* Self-test hook: feed one response tail as a fresh request. */
+void net_test_usage(const char *tail) {
+    net_req_counted = 0;
+    net_note_usage(tail);
 }
 
 /* Prefer the API's total_tokens once it is on disk. Until then, bytes/4. */
@@ -545,6 +583,7 @@ int net_async_begin(const char *method, const char *url,
     net_got = 0;
     /* This call has no usage yet. Do not keep the previous hit/miss on screen. */
     net_hit = net_miss = net_usage_seen = 0;
+    net_req_counted = 0;
     return 0;
 }
 

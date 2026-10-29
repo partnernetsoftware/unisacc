@@ -884,7 +884,8 @@ static int tui_slash(tui_state *st) {
         tui_log_plain(st, "/loop [text]: 切换目标循环，参数当前不解析");
         tui_log_plain(st, "/reload: 空闲重载密钥缓存；/reload-code: managed idle actor");
         tui_log_plain(st, "/export-state HANDOFF: owned idle 状态导出；/exit /quit: 退出");
-        tui_log_plain(st, "/model [名]: 显示或设本会话模型；/cwd: 显示工作目录");
+        tui_log_plain(st, "/model [名]: 显示或设本会话模型；/cwd: 显示工作目录；/cost: 本会话词元与缓存命中；/allow: 放行下一条危险命令一次");
+        tui_log_plain(st, "键：Esc 取消本轮/清输入；空输入 Tab 展开/收起最近工具行；Ctrl-U 清行；Ctrl-W 删词");
         tui_command_done(st);
         return 1;
     }
@@ -902,6 +903,22 @@ static int tui_slash(tui_state *st) {
             snprintf(st->model, sizeof st->model, "%s", arg);
             snprintf(note, sizeof note, "model set: %s (this session)", st->model);
         }
+        tui_log_plain(st, note);
+        tui_command_done(st);
+        return 1;
+    }
+    if (!strcmp(st->input, "/allow")) {
+        agent_allow_danger(1);
+        tui_log_plain(st, "allow: 下一条危险命令放行一次（rm -rf / git push / reset 等）");
+        tui_command_done(st);
+        return 1;
+    }
+    if (!strcmp(st->input, "/cost")) {
+        int calls = 0;
+        long hit = 0, miss = 0, out = 0;
+        net_session_usage(&calls, &hit, &miss, &out);
+        snprintf(note, sizeof note, "cost: 请求 %d 次 · 输入 %ld（缓存命中 %ld，%d%%）· 输出 %ld 词元",
+                 calls, hit + miss, hit, hit + miss ? (int)(hit * 100 / (hit + miss)) : 0, out);
         tui_log_plain(st, note);
         tui_command_done(st);
         return 1;
@@ -952,6 +969,8 @@ static int tui_slash(tui_state *st) {
         (!strncmp(st->input, "/status", 7) && token == 7) ||
         (!strncmp(st->input, "/clear", 6) && token == 6) ||
         (!strncmp(st->input, "/cwd", 4) && token == 4) ||
+        (!strncmp(st->input, "/cost", 5) && token == 5) ||
+        (!strncmp(st->input, "/allow", 6) && token == 6) ||
         (!strncmp(st->input, "/reload", 7) && token == 7) ||
         (!strncmp(st->input, "/reload-code", 12) && token == 12) ||
         (!strncmp(st->input, "/exit", 5) && token == 5) ||
@@ -1139,6 +1158,13 @@ static void tui_apply_key(tui_state *st, int kind, char ch) {
         st->ticks++;
         return;
     case TERM_KEY_CHAR:
+        if (ch == '\t' && st->ninput == 0 && !st->pasting) {
+            /* Tab on an empty line: open or close the newest tool row. */
+            int i;
+            for (i = st->nlog - 1; i >= 0; i--)
+                if (st->ex_on[i]) { st->ex_open[i] = !st->ex_open[i]; break; }
+            return;
+        }
         if (ch == 0x15) {           /* Ctrl-U: drop the whole line */
             st->input[0] = '\0'; st->ninput = 0; st->ask_exit = 0;
             return;
@@ -3842,6 +3868,45 @@ int tui_entry(int argc, char **argv) {
             else printf("  ok   help lists /model and /cwd\n");
         }
         {
+            static tui_state tc;
+            int calls0 = 0, calls1 = 0;
+            long h0 = 0, m0 = 0, o0 = 0, h1 = 0, m1 = 0, o1 = 0;
+            const char *tail = "{\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":50,\"total_tokens\":1050,"
+                "\"prompt_tokens_details\":{\"cached_tokens\":800},\"prompt_cache_hit_tokens\":800,"
+                "\"prompt_cache_miss_tokens\":200}}";
+            net_session_usage(&calls0, &h0, &m0, &o0);
+            net_test_usage(tail);
+            net_test_usage(tail);
+            net_session_usage(&calls1, &h1, &m1, &o1);
+            if (calls1 - calls0 != 2 || h1 - h0 != 1600 || m1 - m0 != 400 || o1 - o0 != 100)
+                { printf("FAIL usage sums calls=%d hit=%ld miss=%ld out=%ld\n", calls1 - calls0, h1 - h0, m1 - m0, o1 - o0); failures++; }
+            else printf("  ok   usage with nested details sums per response\n");
+            tui_state_init(&tc, NULL); tc.mode = 1;
+            tui_type(&tc, "/cost");
+            if (!strstr(tc.log[tc.nlog - 1], "cost: 请求 ") || !strstr(tc.log[tc.nlog - 1], "缓存命中") || tc.npending || tc.busy)
+                { printf("FAIL /cost: %s\n", tc.log[tc.nlog - 1]); failures++; }
+            else printf("  ok   /cost shows session usage\n");
+        }
+        {
+            static tui_state ta;
+            char why[300];
+            int b1, b2, b3;
+            agent_allow_danger(0);
+            b1 = agent_danger_blocked(ACT_EXEC, "rm -rf build", why, (int)sizeof why);
+            if (!b1 || !strstr(why, "/allow") || agent_danger_blocked(ACT_EXEC, "ls -la", why, (int)sizeof why)
+                || agent_danger_blocked(ACT_READ, "rm -rf x", why, (int)sizeof why))
+                { printf("FAIL danger gate blocked=%d why=%s\n", b1, why); failures++; }
+            else printf("  ok   dangerous exec is blocked until /allow\n");
+            tui_state_init(&ta, NULL); ta.mode = 1;
+            tui_type(&ta, "/allow");
+            b2 = agent_danger_blocked(ACT_EXEC, "git push origin main", why, (int)sizeof why);
+            b3 = agent_danger_blocked(ACT_EXEC, "git push origin main", why, (int)sizeof why);
+            agent_allow_danger(0);
+            if (b2 || !b3 || ta.npending)
+                { printf("FAIL /allow first=%d second=%d\n", b2, b3); failures++; }
+            else printf("  ok   /allow lets exactly one through\n");
+        }
+        {
             static tui_state tf2;
             tui_state_init(&tf2, NULL); tf2.mode = 1; tf2.rows = 24;
             tui_log_event(&tf2, "exec\t跑测试\tmake test");
@@ -3861,6 +3926,13 @@ int tui_entry(int argc, char **argv) {
                 || tui_frame_has(&tf2, "⏎"))
                 { printf("FAIL open tool body not one line per row\n"); failures++; }
             else printf("  ok   open tool body is one line per row\n");
+            tui_apply_key(&tf2, TERM_KEY_CHAR, '\t');
+            if (!tf2.ex_open[1] || tf2.ninput) { printf("FAIL tab did not open newest tool row\n"); failures++; }
+            else {
+                tui_apply_key(&tf2, TERM_KEY_CHAR, '\t');
+                if (tf2.ex_open[1]) { printf("FAIL tab did not close it again\n"); failures++; }
+                else printf("  ok   tab toggles the newest tool row\n");
+            }
         }
 
         printf("%s\n", failures ? "SELFTEST FAILED" : "selftest ok");
