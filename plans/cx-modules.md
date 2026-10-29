@@ -6,7 +6,7 @@
 
 ## 产品面（2026-10-30）
 
-对照已装产品的入口路径。三档：已通、骨架、未做。没实跑的不写已通。临时入口是 `/tmp/grk-cx-line/entry-o2`，两只 `-O2` 对象再加 `src/hostnative.o`，873487 字节，sha256 `313206b1c4761f2fa56ecc7245087ec0a39b3e811253daace609f6b44efbaf92`。已装产品 3035300 字节。148 格整表仍是上一只入口的 `/tmp/grk-cx-line/o2mx/cx-entry-matrix-2026-10-30.tsv`，记在第 143 节，没有用这只新入口重跑。这轮重测的格子在 `out/grk-obj-01/recheck.tsv`，记在第 145 节。ar 权限和 as 缺文件在第 144 节。运行参数向量的下标在第 146 节，还没接到产品。
+对照已装产品的入口路径。三档：已通、骨架、未做。没实跑的不写已通。临时入口是 `/tmp/grk-cx-line/entry-o2`，两只 `-O2` 对象再加 `src/hostnative.o`，873487 字节，sha256 `313206b1c4761f2fa56ecc7245087ec0a39b3e811253daace609f6b44efbaf92`。已装产品 3035300 字节。148 格整表仍是上一只入口的 `/tmp/grk-cx-line/o2mx/cx-entry-matrix-2026-10-30.tsv`，记在第 143 节，没有用这只新入口重跑。这轮重测的格子在 `out/grk-obj-01/recheck.tsv`，记在第 145 节。ar 权限和 as 缺文件在第 144 节。
 
 - **ar：骨架。** 用法、`ar z`、缺成员、空归档、两成员和产品相同。空归档 8 字节，两成员 146 字节，权限都是 0644。大归档、替换成员、符号表没跑。
 - **as：骨架。** 用法、`-z`、坏 `-b`、头和 `-b` 冲突、一行汇编、加 `ret`、缺文件，退出码和输出与产品相同。缺文件两边都是 `unisacc: error: cannot open …: ENOENT`。Mach-O、COFF、大汇编没跑。
@@ -1791,21 +1791,6 @@ flowchart TD
   k["mode 4 tokens"] --> o["stdout"]
   h["坏 UTAPEBIN 头"] --> s["invalid tapebin"]
   p["字段能过的头"] --> d["tapebin decode"]
-```
-
-## 146. 2026-10-30 运行参数向量的下标
-
-`cx/compiler/bindvec.cx` 是新骨架。四个函数是 `bx_run_slots`、`bx_run_arg_at`、`bx_run_nul`、`bx_run_env_at`。源在 0 号槽，后面是从 `argstart` 起的参数，空指针在 `count`，再后面是环境变量和它自己的空指针。槽数是 `count+envn+2`。零和负数也按这个式子返回，旧赋值并不拒绝。没有 `#include`。`xrealloc` 和填指针仍在 `exec/c/compiler.c`，这次没有改它，也没有改归档里的那份。没有新宏。五份构造表没有加这个文件。
-
-`tools/check-compiler-units.cx` 仍是 32 个 `use`。那一次编译已经有 64 个单元，再挂一个模块会报 `more than 64 units in one program`，所以没有把 `bindvec` 写进 `bindcount` 的 `use`。窄检查是 `tools/check-bindvec.cx`，只有一个 `use compiler.bindvec`。`sh ./unisacc.com tools/check-bindvec.cx` 连续两次，两次退出 0，stdout 相同，stderr 都是空的，都打印 12 行 `PASS` 和 `BINDVEC failed=0`。这不是产品安装，也没有跑 `xrealloc`。整棵重构还没完成。
-
-```mermaid
-flowchart TD
-  c["count 和 envn"] --> s["bx_run_slots"]
-  a["argstart 和 j"] --> i["bx_run_arg_at"]
-  n["count"] --> z["bx_run_nul"]
-  e["count 和 j"] --> v["bx_run_env_at"]
-  f["xrealloc 填指针"] --> old["仍在 compiler.c"]
 ```
 
 ## 64. 2026-10-29 编译器纯拒绝接到 bindhost
