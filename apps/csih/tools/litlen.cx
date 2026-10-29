@@ -1,0 +1,120 @@
+/* CX */
+/* litlen.cx — find hard-coded lengths that do not match their string literal.
+ *
+ *   sh unisacc.com apps/csih/tools/litlen.cx -- FILE...
+ *
+ * Looks at calls of strncmp, memcmp, memcpy, write and tui_write_all whose
+ * last two arguments are a string literal and a decimal count, e.g. the
+ * 11-byte cursor/reset/newline literal once written with a count of 9. The
+ * literal is decoded (\n \t \\ \"
+ * \' \xHH, octal, UTF-8 bytes as they are) and its byte length compared with
+ * the count. memcpy may also copy the NUL (count = length + 1).
+ * Prints FILE:LINE for each mismatch. Exit 0 clean, 1 mismatches, 2 usage/IO.
+ * A literal split over several "..." pieces, or a count that is an
+ * expression, is not checked.
+ */
+
+static int hexval(int c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Byte length of the literal starting after the opening quote at s.
+ * *end is set past the closing quote. -1 on a malformed literal. */
+static long lit_len(const char *s, const char **end) {
+    long n = 0;
+    while (*s && *s != '"') {
+        if (*s == '\\') {
+            s++;
+            if (*s == 'x') {
+                s++;
+                if (hexval(*s) < 0) return -1;
+                while (hexval(*s) >= 0) s++;
+            } else if (*s >= '0' && *s <= '7') {
+                int k = 0;
+                while (k < 3 && *s >= '0' && *s <= '7') { s++; k++; }
+            } else if (*s) s++;
+            else return -1;
+            n++;
+        } else { s++; n++; }
+    }
+    if (*s != '"') return -1;
+    *end = s + 1;
+    return n;
+}
+
+static const char *fns[] = { "strncmp", "memcmp", "memcpy", "tui_write_all", "write", NULL };
+
+/* The called function whose argument list the literal at q sits in, or NULL. */
+static const char *callee(const char *line, const char *q) {
+    int depth = 0;
+    const char *p = q;
+    while (p > line) {
+        p--;
+        if (*p == ')') depth++;
+        else if (*p == '(') {
+            if (depth == 0) {
+                const char *e = p, *b;
+                int i;
+                while (e > line && e[-1] == ' ') e--;
+                b = e;
+                while (b > line && (isalnum((unsigned char)b[-1]) || b[-1] == '_')) b--;
+                for (i = 0; fns[i]; i++)
+                    if ((size_t)(e - b) == strlen(fns[i]) && !strncmp(b, fns[i], (size_t)(e - b))) return fns[i];
+                return NULL;
+            }
+            depth--;
+        }
+    }
+    return NULL;
+}
+
+static int check_file(const char *path) {
+    char line[16384];
+    int ln = 0, bad = 0;
+    FILE *f = fopen(path, "r");
+    if (!f) { fprintf(stderr, "litlen: cannot open %s\n", path); return -1; }
+    while (fgets(line, sizeof line, f)) {
+        const char *q = line;
+        ln++;
+        while ((q = strchr(q, '"'))) {
+            const char *end, *p, *fn;
+            long len, count;
+            char *stop;
+            /* skip a quote inside a char literal like '"' */
+            if (q > line && q[-1] == '\'' && q[1] == '\'') { q += 2; continue; }
+            len = lit_len(q + 1, &end);
+            if (len < 0) break;
+            p = end;
+            while (*p == ' ') p++;
+            if (*p != ',') { q = end; continue; }
+            p++;
+            while (*p == ' ') p++;
+            if (!isdigit((unsigned char)*p)) { q = end; continue; }
+            count = strtol(p, &stop, 10);
+            while (*stop == ' ') stop++;
+            if (*stop != ')') { q = end; continue; }
+            fn = callee(line, q);
+            if (fn && count != len && !(!strcmp(fn, "memcpy") && count == len + 1)) {
+                printf("%s:%d: %s literal is %ld bytes, count says %ld\n", path, ln, fn, len, count);
+                bad++;
+            }
+            q = end;
+        }
+    }
+    fclose(f);
+    return bad;
+}
+
+int main(int argc, char **argv) {
+    int i, bad = 0, io = 0;
+    if (argc < 2) { fprintf(stderr, "usage: litlen.cx -- FILE...\n"); return 2; }
+    for (i = 1; i < argc; i++) {
+        int b = check_file(argv[i]);
+        if (b < 0) io = 1; else bad += b;
+    }
+    if (io) return 2;
+    return bad ? 1 : 0;
+}

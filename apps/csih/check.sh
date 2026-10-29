@@ -79,5 +79,12 @@ else
     echo "FAIL 4: context-index golden mismatch (see $TMP/ci/norm.json vs fixtures/context_index.golden.json)"; head -c 400 "$TMP/ci/err.log" 2>/dev/null; rc=1
 fi
 
+# 5. hard-coded lengths match their string literals (a 9 for an 11-byte escape once ate a char)
+if sh "$UNISACC" "$ROOT/tools/litlen.cx" -- "$ROOT"/*.cx "$ROOT"/*.h "$ROOT"/tools/*.cx > "$TMP/litlen.out" 2>&1; then
+    echo "ok   5: literal lengths match their counts"
+else
+    echo "FAIL 5: literal length mismatch"; cat "$TMP/litlen.out"; rc=1
+fi
+
 [ $rc -eq 0 ] && echo "check ok" || echo "check FAILED"
 exit $rc
