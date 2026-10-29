@@ -38,6 +38,7 @@ static void rl_clear(RLLedger *L) {
 int cxsf_hex_digit(int);
 int cxsf_length(const char *,int *);
 int cxsf_ledger_fields(const char *,char *);
+int cxsf_ledger_key(const char *,size_t,unsigned char *);
 #define rl_hexv cxsf_hex_digit
 #define rl_length cxsf_length
 #else
@@ -174,7 +175,11 @@ static int rl_load_parse(const char *dir, const RLFileView *views, int count, RL
             size_t kl = strlen(f[0]); unsigned char *kb; size_t q;
             if (!kl || kl % 2) { free(line); free(b); snprintf(err, errn, "INTERFACE_ERROR resource-key-malformed"); return 1; }
             kb = malloc(kl / 2); if (!kb) { free(line); free(b); return 1; }
+#ifdef UNISA_CX_SOURCE_FRAME
+            if (!cxsf_ledger_key(f[0],kl,kb)) { free(kb); free(line); free(b); snprintf(err, errn, "INTERFACE_ERROR resource-key-malformed"); return 1; }
+#else
             for (q = 0; q < kl; q += 2) { int hi = rl_hexv((unsigned char)f[0][q]), lo = rl_hexv((unsigned char)f[0][q+1]); if (hi < 0 || lo < 0) { free(kb); free(line); free(b); snprintf(err, errn, "INTERFACE_ERROR resource-key-malformed"); return 1; } kb[q/2] = (unsigned char)(hi * 16 + lo); }
+#endif
             /* SC1 duplicate keys are refused; SC2 preserves the ordered queries. */
             { int j; if (!L->trace) for (j = 0; j < L->n; j++) if (L->rows[j].kn == (int)(kl / 2) && !memcmp(L->rows[j].key, kb, kl / 2)) { free(kb); free(line); free(b); snprintf(err, errn, "INTERFACE_ERROR duplicate-resource-key %s", f[0]); return 1; } }
             if (L->n == cap) { RLRow *grown; cap = cap ? cap * 2 : 16; grown = realloc(L->rows, (size_t)cap * sizeof *L->rows); if (!grown) { free(kb); free(line); free(b); return 1; } L->rows = grown; }
