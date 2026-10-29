@@ -84,7 +84,38 @@ static int pty_size(char *out, int cap) {
     return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
 }
 
-int main(void) {
+static int heavy_slice(const char *name) {
+    return name && (!strcmp(name, "tui") || !strcmp(name, "agent"));
+}
+
+static int want_slice(int argc, char **argv, const char *name) {
+    int i;
+    if (argc <= 1) {
+        /* Full modules pass skips heavy slices: nesting check+tui exceeds the 60s bound. */
+        return !heavy_slice(name);
+    }
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "modules")) return !heavy_slice(name);
+        if (!strcmp(argv[i], "all")) return 1;
+        if (name && !strcmp(argv[i], name)) return 1;
+    }
+    return 0;
+}
+
+static int want_phase(int argc, char **argv, const char *phase) {
+    int i;
+    if (argc <= 1) return 1;
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "all")) return 1;
+        if (!strcmp(argv[i], phase)) return 1;
+        /* named module slice implies modules phase only */
+        if (!strcmp(argv[i], "modules")) return !strcmp(phase, "modules");
+    }
+    /* argv lists slice names: only modules phase */
+    return !strcmp(phase, "modules");
+}
+
+int main(int argc, char **argv) {
     char out[8192], path[96], msg[300];
     int rc;
     FILE *f;
@@ -95,19 +126,46 @@ int main(void) {
     if (mkdir(work, 0700) != 0) { printf("no temp\n"); return 2; }
 
     printf("csih — backend=unisacc (%s)\n\n", U);
-    printf("each module alone (via its cli file):\n");
-    {
+    if (want_phase(argc, argv, "modules")) {
         int i;
-        if (suite_run_selftest() == 0) ok("suite match rules");
-        else no("suite match rules");
+        printf("each module alone (via its cli file):\n");
+        if (argc <= 1 || want_slice(argc, argv, "suite")) {
+            if (suite_run_selftest() == 0) ok("suite match rules");
+            else no("suite match rules");
+        }
         for (i = 0; i < suite_slice_count(); i++) {
             const char *av[48];
             const char *name = NULL;
             int n = suite_slice_fill(i, av, 48, &name);
             char label[64];
+            if (!want_slice(argc, argv, name)) continue;
+            /* Single heavy slice: replace via sh (APE needs it). Still pays
+             * check compile once; prefer direct `unisacc -run csih.cx -- selftest`. */
+            if (argc == 2 && heavy_slice(name) && n >= 4) {
+                char *xav[10];
+                xav[0] = (char *)"sh";
+                xav[1] = (char *)"-c";
+                xav[2] = (char *)"exec \"$0\" \"$@\"";
+                xav[3] = (char *)U;
+                xav[4] = (char *)av[0];
+                xav[5] = (char *)av[1];
+                xav[6] = (char *)av[2];
+                xav[7] = (char *)av[3];
+                xav[8] = NULL;
+                printf("exec %s %s %s %s %s\n", U, av[0], av[1], av[2], av[3]);
+                fflush(stdout);
+                execv("/bin/sh", xav);
+                snprintf(label, sizeof label, "%s exec", name ? name : "?");
+                no(label);
+                continue;
+            }
             snprintf(label, sizeof label, "%s selftest", name ? name : "?");
             selftest(label, (char **)av, n);
         }
+    }
+    if (!want_phase(argc, argv, "loop")) {
+        printf("\n  %d ok, %d fail\n", pass_n, fail_n);
+        return fail_n ? 1 : 0;
     }
     printf("\nthe closed loop (session -> field -> gate -> write back):\n");
 
