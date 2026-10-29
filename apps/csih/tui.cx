@@ -1056,7 +1056,7 @@ static int tui_slash(tui_state *st) {
         tui_log_plain(st, "/model [名]: 显示或设本会话模型；/cwd: 显示工作目录；/cost: 本会话词元与缓存命中");
         tui_log_plain(st, "/perm [read|work|any]: 权限档（read 只读；work 只写工作目录；any 不拦）");
         tui_log_plain(st, "/undo: 撤销 agent 最近一次文件写入/编辑（最多 20 步，不含 exec）；/diff: 看这些改动");
-        tui_log_plain(st, "/view PATH [LINE]: 看文件 20 行（带行号），不经模型；/copy: 上一轮答复进 tmux 缓冲区");
+        tui_log_plain(st, "/view PATH [LINE]: 看文件 20 行（带行号），不经模型；/copy: 上一轮答复进 tmux 缓冲区；/retry: 重发上一条输入");
         tui_log_plain(st, "/allow: 放行下一条危险命令一次；/new: 新上下文（旧转录归档）；/resume [N]: 列出或换回归档");
         tui_log_plain(st, "键：Esc 取消本轮/清输入；空输入 Tab 展开/收起最近工具行；Ctrl-U 清行；Ctrl-W 删词；Ctrl-R 搜历史");
         tui_command_done(st);
@@ -1221,6 +1221,20 @@ static int tui_slash(tui_state *st) {
         tui_command_done(st);
         return 1;
     }
+    if (!strcmp(st->input, "/retry")) {
+        /* Send the last prompt again (it is the newest history line). */
+        if (!st->nhistory) {
+            tui_log_plain(st, "retry: 还没有发过输入");
+            tui_command_done(st);
+            return 1;
+        }
+        snprintf(note, sizeof note, "retry: 重发「%.180s」", st->history[st->nhistory - 1]);
+        tui_log_plain(st, note);
+        snprintf(st->input, TUI_INPUT_MAX, "%s%s", st->history[st->nhistory - 1][0] == '/' ? " " : "",
+                 st->history[st->nhistory - 1]);
+        st->ninput = (int)strlen(st->input);
+        return 0;
+    }
     if (!strcmp(st->input, "/copy")) {
         /* Last answer into the tmux paste buffer (prefix ] pastes it anywhere). */
         static char cmd[4096 * 4 + 64], q[4096 * 4 + 8];
@@ -1315,6 +1329,7 @@ static int tui_slash(tui_state *st) {
         (!strncmp(st->input, "/undo", 5) && token == 5) ||
         (!strncmp(st->input, "/diff", 5) && token == 5) ||
         (!strncmp(st->input, "/copy", 5) && token == 5) ||
+        (!strncmp(st->input, "/retry", 6) && token == 6) ||
         (!strncmp(st->input, "/new", 4) && token == 4) ||
         (!strncmp(st->input, "/reload", 7) && token == 7) ||
         (!strncmp(st->input, "/reload-code", 12) && token == 12) ||
@@ -4967,6 +4982,15 @@ int tui_entry(int argc, char **argv) {
             if (tui_selftest_rm(home, 1)) failures++;
             if (!ok) { printf("FAIL custom command pending=%d [%s]\n", tcc.npending, tcc.npending ? tcc.pending[0] : ""); failures++; }
             else printf("  ok   custom /command expands $ARGS from ~/.csih/commands\n");
+            /* /retry queues the newest history line again */
+            tui_state_init(&tcc, NULL); tcc.mode = 1; tcc.busy = 1;
+            tui_type(&tcc, "/retry");
+            ok = tcc.npending == 0 && strstr(tcc.log[tcc.nlog - 1], "还没有发过");
+            snprintf(tcc.history[0], sizeof tcc.history[0], "跑一下测试"); tcc.nhistory = 1;
+            tui_type(&tcc, "/retry");
+            ok = ok && tcc.npending == 1 && !strcmp(tcc.pending[0], "跑一下测试");
+            if (!ok) { printf("FAIL /retry\n"); failures++; }
+            else printf("  ok   /retry sends the last prompt again\n");
         }
 
         printf("%s\n", failures ? "SELFTEST FAILED" : "selftest ok");
