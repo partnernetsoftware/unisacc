@@ -144,3 +144,87 @@ int ex_pp(const unsigned char *comp, long n, int raw, unsigned crc, int compress
     ex_why(why, cap, 0);
     return 0;
 }
+
+static CxDecode ex_dec;
+static CoreModel ex_core;
+static int ex_held;
+
+int ex_inflate(unsigned char *out, unsigned long outlen,
+               const unsigned char *in, unsigned long inlen) {
+    return cxcodec_inflate(out, outlen, in, inlen);
+}
+
+unsigned ex_crc32(char *p, int n) {
+    CxCodecCrc ctx;
+    uint32_t got;
+    if (!p || n < 0) return 0;
+    if (cxcodec_crc_init(&ctx) || cxcodec_crc(&ctx, p, n, &got)) return 0;
+    return got;
+}
+
+void ex_unload(void) {
+    if (!ex_held) return;
+    cxml_release(&ex_dec.model, ex_drop);
+    ex_held = 0;
+}
+
+int ex_load(const unsigned char *raw, int n, char *why, int cap) {
+    if (ex_held) ex_unload();
+    if (!raw || n <= 0) {
+        ex_why(why, cap, "bad argument");
+        return 4;
+    }
+    memset(&ex_dec, 0, sizeof ex_dec);
+    ex_dec.allocate = ex_alloc;
+    ex_dec.release = ex_drop;
+    if (cxmd_decode(&ex_dec, raw, n)) {
+        ex_why(why, cap, ex_dec.why ? ex_dec.why : "invalid model input");
+        cxml_release(&ex_dec.model, ex_drop);
+        return 1;
+    }
+    ex_model(&ex_core, &ex_dec.model);
+    ex_held = 1;
+    ex_why(why, cap, 0);
+    return 0;
+}
+
+int ex_exec(unsigned char *input, int inputn, const char *src,
+            unsigned char **outb, long *outn, char *why, int cap) {
+    CoreResult result;
+    int st;
+    char msg[160];
+    int lim;
+    int i;
+    if (!outb || !outn || inputn < 0 || (inputn > 0 && !input)) {
+        ex_why(why, cap, "bad argument");
+        return 4;
+    }
+    *outb = 0;
+    *outn = 0;
+    if (!ex_held) {
+        ex_why(why, cap, "model");
+        return 1;
+    }
+    memset(&result, 0, sizeof result);
+    st = core_run(&ex_core, input, inputn, src ? src : "", 400000000000LL, &result);
+    lim = 0;
+    if (st && result.reason) {
+        if (result.reason_n > 0) lim = result.reason_n;
+        else while (result.reason[lim] && lim < 120) lim = lim + 1;
+    }
+    if (lim > 120) lim = 120;
+    i = 0;
+    while (i < lim) { msg[i] = result.reason[i]; i = i + 1; }
+    msg[i] = 0;
+    ex_unload();
+    if (result.err.b) free(result.err.b);
+    if (st) {
+        free(result.out.b);
+        ex_why(why, cap, msg[0] ? msg : "model");
+        return st;
+    }
+    *outb = result.out.b;
+    *outn = result.out.n;
+    ex_why(why, cap, 0);
+    return 0;
+}

@@ -1516,11 +1516,13 @@ flowchart TD
 
 `core_host_fetch` 先用这次命令放上的目标、源路径。输入是 `.cx` 时再放 `cx.h` 前导。然后按名字在包里找预定义和头文件。尖括号头文件去掉 `\0inc/a/` 或 `\0inc/q/` 前 7 个字节，按当前目录读。没写 `-b` 时这台机器的默认目标是 `lnx/x86_64`。
 
-16 格在 `out/cx-entry-matrix-2026-10-30.tsv`。四个 `-E` 和当场已装产品逐字节相同：`examples/hello.c` 是 61357 字节，带 `stdio.h` 和 `#if` 的 `macro.c` 是 58895 字节，空 `main` 的 `empty.cx` 是 507429 字节。`a.cx` 加 `b.cx` 的 `-E` 两边都是退出 1，stderr 67 字节，整句是 `multiple preprocessing outputs not migrated`。另外 12 格新入口退出 2，stdout 空。`-S` 写 `NOT_IMPLEMENTED tapecheck`，`-o` 写 `NOT_IMPLEMENTED elf`，`-run` 写 `NOT_IMPLEMENTED memory`。多单元这三格先跑完单元路线，帧没有交给外层，外层仍是这三处缺口。`UNISACC_RR_TIME` 只打出 read 和 package。模型推理没有相位，记 UNMEASURED。多单元 `-E` 在打相位之前就返回，这两相也是 UNMEASURED。
+16 格在 `out/cx-entry-matrix-2026-10-30.tsv`。四个 `-E` 仍和已装产品逐字节相同。这次又核对了 `hello.c`（61357 字节）和 `macro.c`（58895 字节）。`empty.cx` 和多单元 `-E` 沿用上一份入口的结果，没有在这只二进制上重跑。四个 `-S` 的 stdout 逐字节相同：`hello.c` 172298 字节，`macro.c` 758 字节，`empty.cx` 12999 字节，`a.cx` 加 `b.cx` 25887 字节。四个 `-o` 的镜像逐字节相同：32808、4096、4096、8192 字节，stdout 和 stderr 都是 0。四个 `-run` 新入口退出 2，stdout 空。stderr 第一行是路线，第二行是 `NOT_IMPLEMENTED memory`。单文件这行 stderr 是 47 字节，多单元是 53 字节，路线是 `lnx/x86_64/multi/run/O0`。已装 `macro.c -run` 退出 3，那是程序返回值。编译路线已经跑完，内存进入还没有。这次没开 `UNISACC_RR_TIME`，模型相位和推理相位记 UNMEASURED。
 
-`-b win/x86_64 -E examples/hello.c` 两边都是 61593 字节，退出 0，stderr 0。`-E -b win/x86_64 examples/hello.c` 已装产品退出 0，stdout 是 37376 字节的 PE32+，和单独 `-b win/x86_64` 逐字节相同。新入口退出 2，`route=win/x86_64/image/O0`，`NOT_IMPLEMENTED elf`。模式和产品一致，缺口仍是 elf。没有改 `cli.cx`。
+`-b win/x86_64 -E examples/hello.c` 这格没重跑，上一份是 61593 字节。`-E -b win/x86_64 examples/hello.c` 两边 stdout 都是 37376 字节，退出 0，stderr 0，`file` 看产品那份是 PE32+。没有留下 `a.out`。没有改 `cli.cx`。
 
-自举命令是 `sh ./unisacc.com -o /tmp/grk-cx-line/entry src/unisacc.cx`。退出 0，stderr 空，冷耗时 50.710 秒，产物 1231636 字节，动态链接 ELF。热耗时没测。
+`stages.cx` 的 `st_span` 按包内顺序走完一条路线。`rs_reset`、`rs_take`、`rs_ok` 选阶段，`rt_open` 和 `sh_apply` 装载，`ex_exec` 执行，`rt_swap` 把上一段输出交给下一段。资源只经 `core_host_fetch`。`-S` 把最后一段写到 stdout，`-o` 写成镜像，`-run` 在这条编译路线之后停住。没有按 `e3`、`tapecheck`、`prune`、`lower`、`elf` 各写一支。
+
+自举命令是 `sh ./unisacc.com -o /tmp/grk-cx-line/entry src/unisacc.cx`。退出 0，stderr 空，冷耗时 52.395 秒，产物 1289883 字节，动态链接 ELF。热耗时没测。
 
 具名红项：
 
@@ -1529,7 +1531,7 @@ flowchart TD
 
 旁解析仍靠这两条符号链接。`HOST-CLOCK`：顶层 `clock_gettime` 同样被拒，声明放进 `hs_ns`。`CX-PRELUDE`：`.cx` 的 `-E` 已经和产品相同。
 
-这不是产品安装。`-S`、`-o`、`-run` 还没有逐字节相同。整棵重写还没完成。
+这不是产品安装。`-run` 的内存进入还没有。整棵重写还没完成。
 
 ## 64. 2026-10-29 编译器纯拒绝接到 bindhost
 

@@ -3,12 +3,15 @@
 #pragma unisa use runtime.routestep
 #pragma unisa use runtime.stagehandoff
 #pragma unisa use runtime.runexec
-/* Stop names follow exec/c/compiler-routes.tsv.
-   pp stops at e2. tape/O0 stops at tapecheck (after e3).
-   tape/O1 and tape/O2 stop at e4. image stops at elf.
-   run stops at lower, then the memory entry, which is still absent.
-   A .cx prelude and a multi-unit pass are applied by the driver before
-   this stop name is chosen. */
+#pragma unisa use runtime.attribute_frame
+#pragma unisa use packmodel
+#pragma unisa use executor
+#pragma unisa use host
+/* One package route, in package order. rs_reset/rs_take/rs_ok select
+   the span, rt_open and sh_apply load each stage, core_run executes it,
+   and rt_swap hands the bytes to the next stage. Resources go out only
+   through core_host_fetch. Stop names are what the driver still lacks
+   after the span: tape bytes, an image, or the memory enter. */
 static void st_put(char *out, int cap, const char *s) {
     int i;
     if (!out || cap <= 0) return;
@@ -42,5 +45,237 @@ int st_gap(int mode, int level, char *out, int cap) {
     else if (mode == 3) name = "memory";
     else name = "elf";
     st_put(out, cap, name);
+    return 0;
+}
+
+static unsigned char *st_ab;
+static long st_an;
+static long st_ac;
+static unsigned char st_f1 = 1;
+static const unsigned char st_cxh[] = "cx.h";
+static char *st_why;
+static int st_wcap;
+static int st_load_rc;
+
+int st_attr_reset(void) {
+    free(st_ab);
+    st_ab = 0;
+    st_an = 0;
+    st_ac = 0;
+    return 0;
+}
+
+static void st_fail(const char *s) { (void)s; }
+static void st_clear(void) {}
+static void st_loading(int v) { (void)v; }
+static void st_lb(void) {}
+static void st_release(void *p) { free(p); }
+static void st_load(unsigned char *b, int n) {
+    st_load_rc = ex_load(b, n, st_why, st_wcap);
+}
+
+static int st_key(const char *key, int n, const unsigned char *b, int len) {
+    return hs_cli_put((const unsigned char *)key, n, b, len);
+}
+
+static int st_pub(const char *tgt, const char *src, int cx) {
+    int n;
+    if (!tgt || !src) return 4;
+    if (hs_cli_reset()) return 1;
+    if (st_key("\0cli/defines", (int)(sizeof "\0cli/defines" - 1), 0, 0)) return 1;
+    if (st_key("\0cli/undefines", (int)(sizeof "\0cli/undefines" - 1), 0, 0)) return 1;
+    if (cx) {
+        if (st_key("\0cli/includes", (int)(sizeof "\0cli/includes" - 1), st_cxh, (int)sizeof st_cxh)) return 1;
+    } else if (st_key("\0cli/includes", (int)(sizeof "\0cli/includes" - 1), 0, 0)) return 1;
+    if (st_key("\0cli/include-dir", (int)(sizeof "\0cli/include-dir" - 1), 0, 0)) return 1;
+    if (st_key("\0cli/nostdinc", (int)(sizeof "\0cli/nostdinc" - 1), 0, 0)) return 1;
+    n = 0;
+    while (src[n]) n = n + 1;
+    if (st_key("\0cli/source", (int)(sizeof "\0cli/source" - 1), (const unsigned char *)src, n + 1)) return 1;
+    if (st_key("\0cli/quote-dir", (int)(sizeof "\0cli/quote-dir" - 1), 0, 0)) return 1;
+    if (st_key("\0cli/fno-trim-libc", (int)(sizeof "\0cli/fno-trim-libc" - 1), 0, 0)) return 1;
+    if (st_key("\0cli/werror", (int)(sizeof "\0cli/werror" - 1), 0, 0)) return 1;
+    if (st_key("\0cli/error-limit", (int)(sizeof "\0cli/error-limit" - 1), 0, 0)) return 1;
+    if (st_key("\0cli/f1", (int)(sizeof "\0cli/f1" - 1), &st_f1, 1)) return 1;
+    if (st_an > 2147483647L) return 1;
+    if (st_key("\0cli/attributes", (int)(sizeof "\0cli/attributes" - 1), st_an ? st_ab : 0, (int)st_an)) return 1;
+    n = 0;
+    while (tgt[n]) n = n + 1;
+    if (st_key("\0cli/target", (int)(sizeof "\0cli/target" - 1), (const unsigned char *)tgt, n)) return 1;
+    return 0;
+}
+
+static void st_attr_why(char *why, int cap, int rc) {
+    const char *m;
+    if (rc == 2) m = "malformed USLATTR1 side-car";
+    else if (rc == 4) m = "attribute table too large";
+    else if (rc == 6) m = "out of memory";
+    else m = "invalid attribute table";
+    st_put(why, cap, m);
+}
+
+static void st_stamp(const char *stage, int rc, long long a, long long b) {
+    const char *env;
+    env = getenv("UNISACC_RR_TIME");
+    if (!env || !env[0] || a < 0 || b < 0) return;
+    if (rc < 0) fprintf(stderr, "RR_TIME\tmodel\tstage=%s\tsource=inflate\tns=%lld\n", stage, b - a);
+    else fprintf(stderr, "RR_TIME\tinference\tstage=%s\trc=%d\tns=%lld\n", stage, rc, b - a);
+}
+
+int st_span(const char *route, const char *tgt, const char *src, int cx, unsigned unit,
+            unsigned char *in, long inn, unsigned char **out, long *outn,
+            char *why, int cap) {
+    RsCursor cur;
+    unsigned char *curb;
+    int curn;
+    int index;
+    if (!out || !outn) return 4;
+    *out = 0;
+    *outn = 0;
+    if (!route || !tgt || !src || inn < 0 || inn > 2147483647L || (inn > 0 && !in)) {
+        free(in);
+        st_put(why, cap, "bad argument");
+        return 4;
+    }
+    curb = in;
+    curn = (int)inn;
+    ex_unload();
+    rs_reset(&cur, 1, 1);
+    index = 0;
+    while (1) {
+        const char *stage;
+        const unsigned char *mb;
+        unsigned char *owned;
+        unsigned char *ob;
+        long mn;
+        long on;
+        int raw;
+        int compressed;
+        int ver;
+        int opened;
+        int use_owned;
+        int out_len;
+        int pr;
+        int erc;
+        int ar;
+        int next;
+        unsigned crcsum;
+        long long t0;
+        long long t1;
+        long long t2;
+        char openwhy[80];
+        unsigned char *rel;
+        int cn;
+        int nn;
+        pr = pm_along(route, index, &stage);
+        if (pr == 2) break;
+        if (pr) {
+            free(curb);
+            ex_unload();
+            st_put(why, cap, "model");
+            return 1;
+        }
+        index = index + 1;
+        if (!rs_take(&cur, route, stage, route, 0, 0)) continue;
+        if (st_pub(tgt, src, cx)) {
+            free(curb);
+            ex_unload();
+            st_put(why, cap, "cli");
+            return 1;
+        }
+        mb = 0;
+        mn = 0;
+        raw = 0;
+        compressed = 0;
+        crcsum = 0;
+        pr = pm_model(route, stage, &mb, &mn, &raw, &crcsum, &compressed);
+        if (pr) {
+            free(curb);
+            ex_unload();
+            st_put(why, cap, pr == 2 ? "model" : "model");
+            return pr == 4 ? 4 : 1;
+        }
+        ver = pm_ver();
+        owned = 0;
+        if (ver == 3) {
+            if (raw <= 0 || raw > 1073741824 || mn < 0 || mn > 2147483647L) {
+                free(curb);
+                st_put(why, cap, "model too large");
+                return 1;
+            }
+            owned = malloc((size_t)raw);
+            if (!owned) {
+                free(curb);
+                st_put(why, cap, "out of memory");
+                return 1;
+            }
+        }
+        use_owned = 0;
+        out_len = 0;
+        openwhy[0] = 0;
+        t0 = hs_ns();
+        opened = rt_open(ver, 0, mb, (int)mn, owned, ver == 3 ? raw : 0, ver == 3 ? crcsum : 0,
+                         ex_inflate, ex_crc32, &use_owned, &out_len, openwhy, 80);
+        st_why = why;
+        st_wcap = cap;
+        st_load_rc = 0;
+        pr = sh_apply(opened, use_owned, out_len, 0, openwhy, 0, (unsigned char *)mb, (int)mn, owned,
+                      st_fail, 0, st_clear, st_loading, st_load, st_release, st_lb, 0, 0);
+        t1 = hs_ns();
+        st_stamp(stage, -1, t0, t1);
+        if (pr == 2 || pr == 3) {
+            if (pr == 3) free(owned);
+            if (pr == 2) free(owned);
+            free(curb);
+            ex_unload();
+            if (!why || cap <= 0 || !why[0]) st_put(why, cap, openwhy[0] ? openwhy : "model");
+            return 1;
+        }
+        if (st_load_rc) {
+            free(curb);
+            ex_unload();
+            return st_load_rc == 2 ? 2 : st_load_rc;
+        }
+        ob = 0;
+        on = 0;
+        erc = ex_exec(curb, curn, src, &ob, &on, why, cap);
+        t2 = hs_ns();
+        st_stamp(stage, erc, t1, t2);
+        if (erc) {
+            free(curb);
+            return erc == 4 ? 4 : 2;
+        }
+        if (rt_strip(0)) {
+            ar = cxaf_strip(&st_ab, &st_an, &st_ac, ob, &on, unit, realloc);
+            if (ar != 0 && ar != 1) {
+                free(ob);
+                free(curb);
+                st_attr_why(why, cap, ar);
+                return 1;
+            }
+        }
+        if (on < 0 || on > 2147483647L) {
+            free(ob);
+            free(curb);
+            st_put(why, cap, "model too large");
+            return 1;
+        }
+        rel = 0;
+        cn = curn;
+        nn = (int)on;
+        rt_swap(&curb, &cn, ob, nn, &rel);
+        free(rel);
+        curn = cn;
+        next = rt_after(0, cur.stop);
+        if (next == 2) break;
+    }
+    if (!rs_ok(&cur)) {
+        free(curb);
+        ex_unload();
+        st_put(why, cap, "unknown package route or stage boundary");
+        return 3;
+    }
+    *out = curb;
+    *outn = curn;
     return 0;
 }

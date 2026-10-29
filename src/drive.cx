@@ -280,12 +280,10 @@ static int dv_units(const char *tgt, int nsrc, unsigned char **out, long *outn, 
         long curn;
         long nextn;
         long srcn;
-        int step;
         int pr;
         int act;
         int namelen;
         long framed;
-        const char *stage;
         char reason[128];
         char line[512];
         cur = 0;
@@ -312,60 +310,19 @@ static int dv_units(const char *tgt, int nsrc, unsigned char **out, long *outn, 
             fprintf(stderr, "run: %s\n", bx_read_die(4));
             return 5;
         }
-        if (dv_cli(tgt, dv_srcv[j], dv_cx(dv_srcv[j]))) {
-            free(cur);
+        next = 0;
+        nextn = 0;
+        pr = st_span(uroute, tgt, dv_srcv[j], dv_cx(dv_srcv[j]), (unsigned)j,
+                     cur, srcn, &next, &nextn, why, cap);
+        if (pr) {
             free(frame);
-            if (why && cap > 0) why[0] = 0;
-            return 1;
-        }
-        curn = srcn;
-        step = 0;
-        while (pm_along(uroute, step, &stage) == 0) {
-            const unsigned char *mb;
-            long mn;
-            int raw;
-            int compressed;
-            unsigned crcsum;
-            mb = 0;
-            mn = 0;
-            raw = 0;
-            compressed = 0;
-            crcsum = 0;
-            pr = pm_model(uroute, stage, &mb, &mn, &raw, &crcsum, &compressed);
-            if (pr) {
-                free(cur);
-                free(frame);
-                if (why && cap > 8) {
-                    why[0] = 'u'; why[1] = 'n'; why[2] = 'i'; why[3] = 't'; why[4] = 's'; why[5] = 0;
-                }
-                return pr == 2 ? 3 : 1;
-            }
-            if (curn > 2147483647L) {
-                free(cur);
-                free(frame);
-                if (why && cap > 0) why[0] = 0;
-                return 1;
-            }
-            next = 0;
-            nextn = 0;
-            pr = ex_pp(mb, mn, raw, crcsum, compressed, cur, (int)curn, dv_srcv[j], &next, &nextn, why, cap);
-            free(cur);
-            if (pr) {
-                free(frame);
-                return pr;
-            }
-            cur = next;
-            curn = nextn;
-            step = step + 1;
-        }
-        if (step == 0) {
-            free(cur);
-            free(frame);
-            if (why && cap > 8) {
+            if (pr == 3 && why && cap > 8) {
                 why[0] = 'u'; why[1] = 'n'; why[2] = 'i'; why[3] = 't'; why[4] = 's'; why[5] = 0;
             }
-            return 3;
+            return pr == 4 ? 1 : pr;
         }
+        cur = next;
+        curn = nextn;
         namelen = dv_len(dv_srcv[j]);
         framed = curn + 4 + namelen;
         if (dv_need(&frame, &fn, &fcap, 4 + framed)) {
@@ -594,36 +551,6 @@ int dv_main(int argc, char **argv) {
             free(gotb);
             return 1;
         }
-        if (nsrc > 1) {
-            unsigned char *framed;
-            long framedn;
-            int ur;
-            framed = 0;
-            framedn = 0;
-            free(gotb);
-            gotb = 0;
-            gotn = 0;
-            ur = dv_units(tgt, nsrc, &framed, &framedn, preason, 128);
-            free(framed);
-            if (ur == 5) {
-                pm_close();
-                free(pkg);
-                return 1;
-            }
-            if (ur == 3) {
-                pm_close();
-                free(pkg);
-                fprintf(stderr, "route=%s/unit\n", tgt);
-                fprintf(stderr, "NOT_IMPLEMENTED units\n");
-                return 2;
-            }
-            if (ur) {
-                pm_close();
-                free(pkg);
-                fprintf(stderr, "unisacc: model driver: %s\n", preason[0] ? preason : "units");
-                return ur == 2 ? 2 : 1;
-            }
-        }
         if (!strcmp(gap, "e2")) {
             if (dv_cli(tgt, src, dv_cx(src))) {
                 pm_close();
@@ -670,11 +597,93 @@ int dv_main(int argc, char **argv) {
             free(body);
             return 0;
         }
-        fprintf(stderr, "route=%s\n", route);
-        fprintf(stderr, "NOT_IMPLEMENTED %s\n", gap);
-        pm_close();
-        free(pkg);
-        free(gotb);
-        return 2;
+        st_attr_reset();
+        if (nsrc > 1) {
+            unsigned char *framed;
+            long framedn;
+            int ur;
+            framed = 0;
+            framedn = 0;
+            free(gotb);
+            gotb = 0;
+            gotn = 0;
+            ur = dv_units(tgt, nsrc, &framed, &framedn, preason, 128);
+            if (ur == 5) {
+                pm_close();
+                free(pkg);
+                return 1;
+            }
+            if (ur == 3) {
+                pm_close();
+                free(pkg);
+                fprintf(stderr, "route=%s/unit\n", tgt);
+                fprintf(stderr, "NOT_IMPLEMENTED units\n");
+                return 2;
+            }
+            if (ur) {
+                pm_close();
+                free(pkg);
+                fprintf(stderr, "unisacc: model driver: %s\n", preason[0] ? preason : "units");
+                return ur == 2 ? 2 : 1;
+            }
+            gotb = framed;
+            gotn = framedn;
+        }
+        {
+            unsigned char *body;
+            long bodyn;
+            int pr;
+            FILE *outf;
+            body = 0;
+            bodyn = 0;
+            pr = st_span(route, tgt, src, dv_cx(src), 0, gotb, gotn, &body, &bodyn, preason, 128);
+            pm_close();
+            free(pkg);
+            if (pr == 3) {
+                fprintf(stderr, "route=%s\n", route);
+                fprintf(stderr, "NOT_IMPLEMENTED %s\n", gap);
+                return 2;
+            }
+            if (pr) {
+                fprintf(stderr, "unisacc: model driver: %s\n", preason[0] ? preason : gap);
+                return pr == 2 ? 2 : 1;
+            }
+            if (mode2 == 3) {
+                free(body);
+                fprintf(stderr, "route=%s\n", route);
+                fprintf(stderr, "NOT_IMPLEMENTED %s\n", gap);
+                return 2;
+            }
+            if (mode2 == 2 || (mode2 == 0 && (!shown || !strcmp(shown, "-")))) {
+                if (bodyn && fwrite(body, 1, (size_t)bodyn, stdout) != (size_t)bodyn) {
+                    free(body);
+                    return 1;
+                }
+                free(body);
+                return 0;
+            }
+            if (mode2 == 0) {
+                outf = fopen(shown, "wb");
+                if (!outf) {
+                    free(body);
+                    return 1;
+                }
+                if (bodyn && fwrite(body, 1, (size_t)bodyn, outf) != (size_t)bodyn) {
+                    fclose(outf);
+                    free(body);
+                    return 1;
+                }
+                if (fclose(outf)) {
+                    free(body);
+                    return 1;
+                }
+                free(body);
+                return 0;
+            }
+            free(body);
+            fprintf(stderr, "route=%s\n", route);
+            fprintf(stderr, "NOT_IMPLEMENTED %s\n", gap);
+            return 2;
+        }
     }
 }
