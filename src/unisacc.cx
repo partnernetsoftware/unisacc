@@ -190,6 +190,43 @@ int us_ar(int argc, char **argv) {
     }
     return 2;
 }
+int us_inc_read(void *ud, const char *path, int n, char *dst, int cap, int *outn) {
+    char name[1024];
+    unsigned char *b;
+    long len;
+    char why[64];
+    int i;
+    int rc;
+    (void)ud;
+    if (!path || !dst || !outn || n < 0 || cap < 0) return 4;
+    if (n >= 1024) return 4;
+    i = 0;
+    while (i < n) {
+        name[i] = path[i];
+        i = i + 1;
+    }
+    name[n] = 0;
+    b = 0;
+    len = 0;
+    rc = cxi_read(name, &b, &len, why, 64);
+    if (rc) {
+        free(b);
+        if (rc == 1) return 1;
+        return 2;
+    }
+    if (len > cap) {
+        free(b);
+        return 2;
+    }
+    i = 0;
+    while (i < (int)len) {
+        dst[i] = (char)b[i];
+        i = i + 1;
+    }
+    *outn = (int)len;
+    free(b);
+    return 0;
+}
 int us_fail(const char *s) {
     char line[512];
     if (!s) return 1;
@@ -357,6 +394,46 @@ int main(int argc, char **argv) {
                 if (pr) {
                     free(gotb);
                     return us_fail("preprocess failed");
+                }
+                {
+                    char *outb;
+                    char *work;
+                    char why3[128];
+                    int outn;
+                    long cap;
+                    cap = (long)ppn * 8 + 4096;
+                    outb = (char *)malloc((size_t)cap);
+                    work = (char *)malloc(65536);
+                    if (!outb || !work) {
+                        free(outb);
+                        free(work);
+                        free(gotb);
+                        fprintf(stderr, "run: %s\n", bx_read_die(6));
+                        return 1;
+                    }
+                    outn = 0;
+                    pr = pp_expand((char *)gotb, ppn, outb, (int)cap, &outn, work, 65536, us_inc_read, 0, why3, 128);
+                    free(work);
+                    if (pr == 2) {
+                        free(outb);
+                        free(gotb);
+                        fputs("unisacc: error: unterminated comment\n", stderr);
+                        return 1;
+                    }
+                    if (pr == 3) {
+                        free(outb);
+                        free(gotb);
+                        fprintf(stderr, "unisacc: error: %s\n", why3);
+                        return 1;
+                    }
+                    if (pr) {
+                        free(outb);
+                        free(gotb);
+                        return us_fail("preprocess failed");
+                    }
+                    free(gotb);
+                    gotb = (unsigned char *)outb;
+                    ppn = outn;
                 }
                 didpp = 1;
             }

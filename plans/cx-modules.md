@@ -644,6 +644,18 @@ flowchart TD
   cap["检查文件 32 个 use"] --> pull["bindargs.cx 的 use bindcount"]
 ```
 
+## 129. 2026-10-29 入口展开对象宏并插入引号 include
+
+构造脚本不改。没有新文件。`pp_expand` 在已有 `frontpp.cx`。每条两遍，stdout 和 stderr 相同。23 字节 `#define N 5` 再 `int x = N;`，stdout 100，`pp=23`，结果行是 `int x = 5;`。26 字节 `A` 到 `B` 到 `1`，stdout 103，`pp=26`，末行是 `1`。58 字节 `#include "src/version.h"`，stdout 139，`pp=62`，末行是 `const char *v = "0.0.43";`。函数式宏 stderr 49。缺文件 include stderr 36。尖括号 include stderr 43。15 字节拼接仍是 stdout 85，`pp=9`。没有写出对象。没有产品安装，没有 hostseed，没有 `--all`。整棵重写还没完成。
+
+```mermaid
+flowchart TD
+  phases["pp_splice 与 pp_decomment"] --> exp["pp_expand"]
+  exp --> defn["对象宏换成宏体"]
+  exp --> inc["引号 include 用 cxi_read 插进来"]
+  exp --> stop["函数式宏、尖括号、其它指令退出"]
+```
+
 ## 128. 2026-10-29 入口读源，-E 做换行拼接和去注释
 
 构造脚本不改。没有新文件。读文件用已有 `driver.input` 的 `cxi_read`。`-E` 用已有 `frontpp.cx` 的 `pp_splice` 和 `pp_decomment`。每条命令两遍，stdout 和 stderr 都相同。缺文件 stderr 61，`ENOENT`。目录 `.` stderr 42。`src/unisacc.cx/nope` stderr 57，`ENOTDIR`。标准输入 8 字节走 `-c -b lnx/x86_64 -`，stdout 88，`bytes=8`，`out=-.o`。18 字节里的注释去掉后 stdout 91，`pp=14`，反斜杠加字母 n 没有拼接。15 字节含真正换行，stdout 85，`pp=9`，正文 `int   a;` 加换行。引号里的 `/*` stdout 81，`pp=6`。没关上的块注释 stderr 37。没有宏，没有 `#include`，没有写出对象。没有产品安装，没有 hostseed，没有 `--all`。整棵重写还没完成。
