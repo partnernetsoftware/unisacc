@@ -3092,15 +3092,36 @@ static int tui_repaint;
 /* Rewrite every row. frame_diff skips unchanged lines, so a kernel line
  * (nfs server localhost:/: not responding) stays painted on a rule until
  * that row's text changes. A tick repaint puts the frame back. */
+/* Colour on the way out only: frames stay plain text, so widths, diffs and
+ * every test that reads a frame are unchanged. ✓ green, ◐ yellow, ✗ and
+ * blocked red, project rows cyan. NO_COLOR or CSIH_COLOR=0 turns it off. */
+static const char *tui_line_color(const char *line) {
+    static int off = -1;
+    if (off < 0) {
+        const char *nc = getenv("NO_COLOR"), *cc = getenv("CSIH_COLOR");
+        off = (nc && nc[0]) || (cc && cc[0] == '0');
+    }
+    if (off || !line) return NULL;
+    if (!strncmp(line, "✓ ", 4)) return "\x1b[32m";
+    if (!strncmp(line, "◐ ", 4)) return "\x1b[33m";
+    if (!strncmp(line, "✗ ", 4) || !strncmp(line, "  │ blocked:", 14)) return "\x1b[31m";
+    if (!strncmp(line, "项目> ", 8)) return "\x1b[36m";
+    return NULL;
+}
+
+static size_t tui_put_line(char *out, size_t cap, int row, const char *line) {
+    const char *c = tui_line_color(line);
+    return (size_t)snprintf(out, cap, c ? "\x1b[%d;1H%s%s\x1b[0m\x1b[K" : "\x1b[%d;1H%s%s\x1b[K",
+                            row, c ? c : "", line);
+}
+
 static void tui_paint_all(const r_frame *f) {
-    char out[R_FRAME_BYTES + R_MAX_LINES * 24];
+    char out[R_FRAME_BYTES + R_MAX_LINES * 32];
     size_t used = 0;
     int i;
     used += (size_t)snprintf(out + used, sizeof out - used, "\x1b[H");
-    for (i = 0; i < f->n && used + 32 < sizeof out; i++) {
-        used += (size_t)snprintf(out + used, sizeof out - used,
-                                 "\x1b[%d;1H%s\x1b[K", i + 1, f->lines[i]);
-    }
+    for (i = 0; i < f->n && used + 32 < sizeof out; i++)
+        used += tui_put_line(out + used, sizeof out - used, i + 1, f->lines[i]);
     if (used + 16 < sizeof out)
         used += (size_t)snprintf(out + used, sizeof out - used, "\x1b[J");
     if (used > 0) tui_write_all(out, used);
@@ -3108,7 +3129,7 @@ static void tui_paint_all(const r_frame *f) {
 
 static void tui_redraw(tui_state *st) {
     r_frame next = tui_render_state(st, st->cols);
-    char out[R_FRAME_BYTES + R_MAX_LINES * 16];
+    char out[R_FRAME_BYTES + R_MAX_LINES * 32];   /* room for colour escapes on every row */
     /* A bad-width line would write a shorter frame over a longer one and leave
      * the previous frame's tail on screen — the classic redraw artifact. */
     if (tui_frame_bad_width(&next, st->cols)) return;
@@ -3116,9 +3137,16 @@ static void tui_redraw(tui_state *st) {
         tui_paint_all(&next);
         tui_repaint = 0;
     } else {
-        out[0] = '\0';
-        frame_diff(&tui_prev, &next, out, sizeof out);
-        if (out[0]) tui_write_all(out, strlen(out));
+        /* frame_diff, plus colour: rewrite only changed rows. */
+        size_t used = 0;
+        int i, lines = next.n > tui_prev.n ? next.n : tui_prev.n;
+        for (i = 0; i < lines && used + 32 < sizeof out; i++) {
+            const char *a = i < tui_prev.n ? tui_prev.lines[i] : "";
+            const char *b = i < next.n ? next.lines[i] : "";
+            if (!strcmp(a, b)) continue;
+            used += tui_put_line(out + used, sizeof out - used, i + 1, b);
+        }
+        if (used) tui_write_all(out, used < sizeof out ? used : sizeof out - 1);
     }
     tui_prev = next;
 }
@@ -5025,6 +5053,22 @@ int tui_entry(int argc, char **argv) {
                 if (tui_should_bell(0, NULL) || tui_should_bell(1, "0") || tui_should_bell(1, NULL))
                     { printf("FAIL bell rules\n"); failures++; }
                 else printf("  ok   bell only on a tty, not disabled, after 10s\n");
+            {
+                /* colour is added only on output: frames stay plain */
+                char o[600];
+                int okc = tui_line_color("✓ 已验收 · x") && !strcmp(tui_line_color("✓ 已验收 · x"), "\x1b[32m")
+                    && tui_line_color("✗ 失败: x") && tui_line_color("  │ blocked: x")
+                    && !tui_line_color("exec[展开]> x") && !tui_line_color("普通行");
+                tui_put_line(o, sizeof o, 3, "✓ ok");
+                okc = okc && !strcmp(o, "\x1b[3;1H\x1b[32m✓ ok\x1b[0m\x1b[K");
+                tui_put_line(o, sizeof o, 4, "plain");
+                okc = okc && !strcmp(o, "\x1b[4;1Hplain\x1b[K");
+                okc = okc && !tui_frame_has(&tf2, "\x1b[");
+                if ((getenv("NO_COLOR") && getenv("NO_COLOR")[0]) || (getenv("CSIH_COLOR") && getenv("CSIH_COLOR")[0] == '0'))
+                    printf("  skip colour: turned off by NO_COLOR/CSIH_COLOR here\n");
+                else if (!okc) { printf("FAIL colour\n"); failures++; }
+                else printf("  ok   status rows are coloured on output, frames stay plain\n");
+            }
                 tf2.busy = 0;
             }
         }
