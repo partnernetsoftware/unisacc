@@ -6,18 +6,18 @@
 
 ## 产品面（2026-10-30）
 
-对照已装产品的入口路径。三档：已通、骨架、未做。没实跑的不写已通。临时入口是 `/tmp/grk-cx-line/entry-o2`，两只 `-O2` 对象再加 `src/hostnative.o`，869391 字节，sha256 `59b9f33a06d6d9dcec4fb8c11ea2496628b5c383bf70b682b1b3dabe55f410e3`。已装产品 3035300 字节。148 格对拍在 `/tmp/grk-cx-line/o2mx/cx-entry-matrix-2026-10-30.tsv`，记在第 143 节。ar 权限和 as 缺文件在第 144 节重测。更早的窄格在第 139、140、141、142 节。
+对照已装产品的入口路径。三档：已通、骨架、未做。没实跑的不写已通。临时入口是 `/tmp/grk-cx-line/entry-o2`，两只 `-O2` 对象再加 `src/hostnative.o`，873487 字节，sha256 `313206b1c4761f2fa56ecc7245087ec0a39b3e811253daace609f6b44efbaf92`。已装产品 3035300 字节。148 格整表仍是上一只入口的 `/tmp/grk-cx-line/o2mx/cx-entry-matrix-2026-10-30.tsv`，记在第 143 节，没有用这只新入口重跑。这轮重测的格子在 `out/grk-obj-01/recheck.tsv`，记在第 145 节。ar 权限和 as 缺文件在第 144 节。
 
 - **ar：骨架。** 用法、`ar z`、缺成员、空归档、两成员和产品相同。空归档 8 字节，两成员 146 字节，权限都是 0644。大归档、替换成员、符号表没跑。
 - **as：骨架。** 用法、`-z`、坏 `-b`、头和 `-b` 冲突、一行汇编、加 `ret`、缺文件，退出码和输出与产品相同。缺文件两边都是 `unisacc: error: cannot open …: ENOENT`。Mach-O、COFF、大汇编没跑。
 - **nm：骨架。** 这只表上用法、坏文件、728 字节对象三行和产品相同。
 - **objdump：骨架。** 这只表上用法、少 `-d`、坏文件、`objdump -d` 四行和产品相同。
-- **-c 对象：骨架。** 没有 `main` 时两边都拒绝。有 `main` 时产品写出 2216 字节对象，入口停在 `NOT_IMPLEMENTED object`，没有对象文件。
-- **.tape / .tapebin 输入：骨架。** 三行 `_start` 的 `.tape` 两边都是 4096 字节 ELF。内容是 `?` 的 `.tape`，两边 stderr 都是 71 字节。内容是 `XXXX` 的 `.tapebin`，两边 stderr 都是 65 字节。`UTAPEBIN` 后面再跟 128 个 0，产品 65 字节仍是 invalid，入口 38 字节是 `tapebin decode`。解码仍在 C。有效包没跑。
+- **-c 对象：骨架。** 没有 `main` 时两边都拒绝。有 `main` 的 `-c` 走 `lnx/x86_64/object/O0`，两边都写出 2216 字节，权限 0755，逐字节相同。Mach-O、COFF、多文件没跑。
+- **.tape / .tapebin 输入：骨架。** 三行 `_start` 的 `.tape` 两边都是 4096 字节 ELF，权限 0755。内容是 `?` 的 `.tape`，两边 stderr 都是 71 字节。内容是 `XXXX` 的 `.tapebin`，两边 stderr 都是 65 字节。`UTAPEBIN` 后面再跟 128 个 0，两边都是 `invalid tapebin or origin target mismatch`。固定字段能过、节内容过不了的头仍停在 `tapebin decode`。解码仍在 C。有效包没跑。
 - **-cx-plan / -cx-interface：骨架。** 这只表上计划、接口、两个旗、缺文件、只有旗、`-include` 八行和产品相同。多个模块的 `use` 没跑。
-- **-dump-tokens：骨架。** 产品 stdout 25 字节。入口停在 `NOT_IMPLEMENTED tokens`。
+- **-dump-tokens：骨架。** `int x;` 走 `tokens` 上的 tokenpp、tokenlex，两边 stdout 都是 25 字节，逐字节相同。别的源文件没跑。
 - **--emit-host-symbols：骨架。** 配 `-c -b` 和配 `-S -b` 两边都拒绝，stderr 相同。没有一格写出符号文件。
-- **-O1 / -O2：骨架。** `-O1 -E` 和 `-O2 -E` 对 `int x;` 与产品相同。`-O1 -c` 和 `-O2 -c` 有 `main` 时，产品写出 2216 字节，入口停在 `NOT_IMPLEMENTED object`。
+- **-O1 / -O2：骨架。** `-O1 -E` 和 `-O2 -E` 对 `int x;` 与产品相同。`-O1 -c` 和 `-O2 -c` 有 `main` 时，两边都是 2216 字节，权限 0755，和 `-c` 那只对象逐字节相同。
 - **-D / -U / -I / -include：骨架。** 这只表上 `-DFOO`、`-UFOO`、先定义再取消、`-I` 引号、`-I` 尖括号、`-include`、`-iquote` 七行和产品相同。多个目录、缺参数没跑。
 - **库接口：骨架。** `int abs(int); int main(void){return abs(-3);}` 默认执行，两边退出 3。`tests/library-abi.cx` 没跑。`us_*` 没接到这条入口。`dup.c` 的 `strdup` 不在这 12 面里：产品退出 3，入口退出 127，stderr 是 `unisacc: no host function strdup`。
 
@@ -1773,6 +1773,24 @@ flowchart TD
   a["dv_ar_write"] --> c["chmod 0644"]
   s["as 打不开"] --> o["bx_read_open_line"]
   t[".tape"] --> h["hs_write_out 仍是 0755"]
+```
+
+## 145. 2026-10-30 对象、词法和坏 tapebin 头
+
+`src/drive.cx` 在路线跑完之后，模式 4 把 tokenpp、tokenlex 的结果写到标准输出。模式 5 且不是汇编路径时，把 lower 之后的对象 ELF 用原来的 `hs_write_out` 写出，权限仍是 0755。汇编 `-S` 仍停在原来的 `NOT_IMPLEMENTED`。没有新模块，没有改 `hs_write_out` 的 0755。
+
+坏的 `UTAPEBIN` 头先对固定字段：主版本、次版本、opset、flags、target、节数、头长、来源目标。对不上就用产品那句 `invalid tapebin or origin target mismatch`。字段能过的头仍停在 `tapebin decode`，记录解码还在 C。没有把 `tbc_decode` 整份搬过来。
+
+驱动对象重新按 `-O2 -c -b lnx/x86_64 -funit` 编译，再和原来的执行器对象、`hostnative` 对象链接。产物 `/tmp/grk-cx-line/entry-o2`，873487 字节，sha256 `313206b1c4761f2fa56ecc7245087ec0a39b3e811253daace609f6b44efbaf92`。直接执行。
+
+`int main(void){return 0;}` 的 `-c`、`-O1 -c`、`-O2 -c` 都退出 0，对象 2216 字节，权限 0755，和已装产品逐字节相同。`-dump-tokens` 对 `int x;` 两边 stdout 25 字节相同。没有 `main` 的 `-c` 两边仍是 `not covered: no main`。`-E` 仍相同。三行 `.tape` 仍是 4096 字节，权限 0755。`UTAPEBIN` 加 128 个 0，两边退出 1，stderr 都是那句 invalid。`XXXX` 仍是同一句。固定字段能过的 136 字节头，入口仍是 `tapebin decode`。重测表在 `out/grk-obj-01/recheck.tsv`。148 格整表没有用这只新入口重跑。`dev-run` 8 格和 `dup.c` 的 `strdup` 没动。这不是产品安装。没有一面改成已通。
+
+```mermaid
+flowchart TD
+  m["mode 5 对象"] --> w["hs_write_out 0755"]
+  k["mode 4 tokens"] --> o["stdout"]
+  h["坏 UTAPEBIN 头"] --> s["invalid tapebin"]
+  p["字段能过的头"] --> d["tapebin decode"]
 ```
 
 ## 64. 2026-10-29 编译器纯拒绝接到 bindhost
