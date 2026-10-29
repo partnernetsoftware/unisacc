@@ -473,6 +473,16 @@ struct PpMac {
     int nlen;
     char body[256];
     int blen;
+    int fn;
+    int np;
+    char parm[8][32];
+    int plen[8];
+};
+
+struct PpCond {
+    int take[64];
+    int seen[64];
+    int depth;
 };
 
 static int pp_ws(int c) {
@@ -501,14 +511,150 @@ static int pp_mac_at(struct PpMac *mac, int nmac, const char *s, int n) {
     int i;
     i = 0;
     while (i < nmac) {
-        if (pp_mac_is(mac[i].name, s, n) == 1) return i;
+        if (mac[i].nlen > 0 && pp_mac_is(mac[i].name, s, n) == 1) return i;
         i = i + 1;
     }
     return -1;
 }
 
+static int pp_live(struct PpCond *cond) {
+    int k;
+    if (!cond) return 1;
+    k = 0;
+    while (k < cond->depth) {
+        if (cond->take[k] == 0) return 0;
+        k = k + 1;
+    }
+    return 1;
+}
+
+static int pp_blank_line(const char *src, int n, int i, char *dst, int cap, int *at, int *ni) {
+    int e;
+    e = i;
+    while (e < n && (src[e] & 255) != 10) e = e + 1;
+    while (i < e) {
+        if (pp_put(dst, cap, at, 32)) return 1;
+        i = i + 1;
+    }
+    if (e < n && (src[e] & 255) == 10) {
+        if (pp_put(dst, cap, at, 10)) return 1;
+        i = e + 1;
+    } else i = e;
+    *ni = i;
+    return 0;
+}
+
+static int pp_subst(struct PpMac *m, const char *src, const int *as, const int *al, char *dst, int cap, int *outn) {
+    int i;
+    int j;
+    int k;
+    int o;
+    int p;
+    o = 0;
+    i = 0;
+    while (i < m->blen) {
+        if (sg_isal(m->body[i] & 255)) {
+            j = i + 1;
+            while (j < m->blen && pp_idch(m->body[j] & 255)) j = j + 1;
+            k = 0;
+            while (k < m->np) {
+                if (m->plen[k] == j - i && pp_mac_is(m->parm[k], m->body + i, j - i) == 1) {
+                    if (o > cap - al[k]) return 1;
+                    p = 0;
+                    while (p < al[k]) {
+                        dst[o] = src[as[k] + p];
+                        o = o + 1;
+                        p = p + 1;
+                    }
+                    i = j;
+                    break;
+                }
+                k = k + 1;
+            }
+            if (k < m->np) continue;
+        }
+        if (o >= cap) return 1;
+        dst[o] = m->body[i];
+        o = o + 1;
+        i = i + 1;
+    }
+    *outn = o;
+    return 0;
+}
+
+static int pp_if_num(const char *s, int n, int *out) {
+    int i;
+    int v;
+    int any;
+    i = 0;
+    any = 0;
+    v = 0;
+    while (i < n && pp_ws(s[i] & 255)) i = i + 1;
+    while (i < n && sg_isdi(s[i] & 255)) {
+        any = 1;
+        v = v * 10 + (s[i] & 255) - 48;
+        i = i + 1;
+    }
+    while (i < n && pp_ws(s[i] & 255)) i = i + 1;
+    if (!any || i != n) return 0;
+    *out = v != 0;
+    return 1;
+}
+
+static int pp_if_on(const char *s, int n, struct PpMac *mac, int nmac, int *out, char *why, int whycap) {
+    int i;
+    int b;
+    int e;
+    int mi;
+    i = 0;
+    while (i < n && pp_ws(s[i] & 255)) i = i + 1;
+    if (n - i >= 7 && pp_span_eq(s + i, 7, "defined") == 1 && (i + 7 == n || !pp_idch(s[i + 7] & 255))) {
+        i = i + 7;
+        while (i < n && pp_ws(s[i] & 255)) i = i + 1;
+        if (i < n && (s[i] & 255) == 40) {
+            i = i + 1;
+            while (i < n && pp_ws(s[i] & 255)) i = i + 1;
+            b = i;
+            while (i < n && pp_idch(s[i] & 255)) i = i + 1;
+            e = i;
+            while (i < n && pp_ws(s[i] & 255)) i = i + 1;
+            if (i >= n || (s[i] & 255) != 41 || b == e) {
+                pp_why(why, whycap, "bad if");
+                return 3;
+            }
+            i = i + 1;
+        } else {
+            b = i;
+            while (i < n && pp_idch(s[i] & 255)) i = i + 1;
+            e = i;
+            if (b == e) {
+                pp_why(why, whycap, "bad if");
+                return 3;
+            }
+        }
+        while (i < n && pp_ws(s[i] & 255)) i = i + 1;
+        if (i != n) {
+            pp_why(why, whycap, "if expression not migrated");
+            return 3;
+        }
+        *out = pp_mac_at(mac, nmac, s + b, e - b) >= 0;
+        return 0;
+    }
+    if (pp_if_num(s + i, n - i, out)) return 0;
+    if (i < n && sg_isal(s[i] & 255)) {
+        b = i;
+        while (i < n && pp_idch(s[i] & 255)) i = i + 1;
+        e = i;
+        while (i < n && pp_ws(s[i] & 255)) i = i + 1;
+        mi = pp_mac_at(mac, nmac, s + b, e - b);
+        if (mi >= 0 && !mac[mi].fn && i == n && pp_if_num(mac[mi].body, mac[mi].blen, out)) return 0;
+    }
+    pp_why(why, whycap, "if expression not migrated");
+    return 3;
+}
+
 static int pp_expand_span(const char *src, int n, char *dst, int cap, int *at,
-                          struct PpMac *mac, int *nmac, int depth, int in_inc,
+                          struct PpMac *mac, int *nmac, struct PpCond *cond, int depth, int in_inc,
                           char *work, int workcap,
                           int (*readinc)(void *, const char *, int, char *, int, int *),
                           void *ud, char *why, int whycap,
@@ -535,6 +681,11 @@ static int pp_expand_span(const char *src, int n, char *dst, int cap, int *at,
                 ne = j;
                 if (pp_span_eq(src + ns, ne - ns, "define") == 1) {
                     gn = e;
+                    if (!pp_live(cond)) {
+                        if (pp_blank_line(src, n, i, dst, cap, at, &i)) return 1;
+                        bol = 1;
+                        continue;
+                    }
                     while (j < e && pp_ws(src[j] & 255)) j = j + 1;
                     if (j >= e || !sg_isal(src[j] & 255)) {
                         pp_why(why, whycap, "bad define");
@@ -543,10 +694,6 @@ static int pp_expand_span(const char *src, int n, char *dst, int cap, int *at,
                     bs = j;
                     while (j < e && pp_idch(src[j] & 255)) j = j + 1;
                     be = j;
-                    if (j < e && (src[j] & 255) == 40) {
-                        pp_why(why, whycap, "function-like macro not migrated");
-                        return 3;
-                    }
                     if (be - bs >= 64 || *nmac >= 64) return 1;
                     while (j < e && pp_ws(src[j] & 255)) j = j + 1;
                     while (e > j && pp_ws(src[e - 1] & 255)) e = e - 1;
@@ -563,6 +710,48 @@ static int pp_expand_span(const char *src, int n, char *dst, int cap, int *at,
                         nam = nam + 1;
                     }
                     mac[mi].name[mac[mi].nlen] = 0;
+                    mac[mi].fn = 0;
+                    mac[mi].np = 0;
+                    if (j < gn && (src[j] & 255) == 40) {
+                        int pk;
+                        j = j + 1;
+                        pk = 0;
+                        while (j < gn) {
+                            while (j < gn && pp_ws(src[j] & 255)) j = j + 1;
+                            if (j < gn && (src[j] & 255) == 41) break;
+                            if (j >= gn || !sg_isal(src[j] & 255)) {
+                                pp_why(why, whycap, "bad define");
+                                return 3;
+                            }
+                            bs = j;
+                            while (j < gn && pp_idch(src[j] & 255)) j = j + 1;
+                            if (pk >= 8 || j - bs >= 32) return 1;
+                            mac[mi].plen[pk] = j - bs;
+                            nam = 0;
+                            while (nam < mac[mi].plen[pk]) {
+                                mac[mi].parm[pk][nam] = src[bs + nam];
+                                nam = nam + 1;
+                            }
+                            mac[mi].parm[pk][mac[mi].plen[pk]] = 0;
+                            pk = pk + 1;
+                            while (j < gn && pp_ws(src[j] & 255)) j = j + 1;
+                            if (j < gn && (src[j] & 255) == 44) {
+                                j = j + 1;
+                                continue;
+                            }
+                            break;
+                        }
+                        if (j >= gn || (src[j] & 255) != 41) {
+                            pp_why(why, whycap, "bad define");
+                            return 3;
+                        }
+                        j = j + 1;
+                        mac[mi].fn = 1;
+                        mac[mi].np = pk;
+                    }
+                    while (j < e && pp_ws(src[j] & 255)) j = j + 1;
+                    while (e > j && pp_ws(src[e - 1] & 255)) e = e - 1;
+                    if (e - j >= 256) return 1;
                     mac[mi].blen = e - j;
                     nam = 0;
                     while (nam < mac[mi].blen) {
@@ -582,29 +771,61 @@ static int pp_expand_span(const char *src, int n, char *dst, int cap, int *at,
                     continue;
                 }
                 if (pp_span_eq(src + ns, ne - ns, "include") == 1) {
+                    int ang;
+                    int pend;
+                    char ip[320];
+                    const char *ipath;
+                    int iplen;
+                    if (!pp_live(cond)) {
+                        if (pp_blank_line(src, n, i, dst, cap, at, &i)) return 1;
+                        bol = 1;
+                        continue;
+                    }
                     if (in_inc) {
                         pp_why(why, whycap, "nested include not migrated");
                         return 3;
                     }
                     while (j < e && pp_ws(src[j] & 255)) j = j + 1;
+                    ang = 0;
+                    pend = 34;
                     if (j < e && (src[j] & 255) == 60) {
-                        pp_why(why, whycap, "angle include not migrated");
+                        ang = 1;
+                        pend = 62;
+                    } else if (j >= e || (src[j] & 255) != 34) {
+                        pp_why(why, whycap, "bad include");
                         return 3;
                     }
-                    if (j >= e || (src[j] & 255) != 34) {
+                    if (j >= e) {
                         pp_why(why, whycap, "bad include");
                         return 3;
                     }
                     j = j + 1;
                     bs = j;
-                    while (j < e && (src[j] & 255) != 34) j = j + 1;
+                    while (j < e && (src[j] & 255) != pend) j = j + 1;
                     if (j >= e) {
                         pp_why(why, whycap, "bad include");
                         return 3;
                     }
                     if (!readinc) return 4;
+                    ipath = src + bs;
+                    iplen = j - bs;
+                    if (ang) {
+                        if (iplen + 8 >= 320) return 1;
+                        nam = 0;
+                        while (nam < 8) {
+                            ip[nam] = "include/"[nam];
+                            nam = nam + 1;
+                        }
+                        while (nam - 8 < iplen) {
+                            ip[nam] = src[bs + nam - 8];
+                            nam = nam + 1;
+                        }
+                        ip[nam] = 0;
+                        ipath = ip;
+                        iplen = nam;
+                    }
                     gn = 0;
-                    rc = readinc(ud, src + bs, j - bs, work, workcap, &gn);
+                    rc = readinc(ud, ipath, iplen, work, workcap, &gn);
                     if (rc == 1) {
                         pp_why(why, whycap, "cannot open include");
                         return 3;
@@ -618,15 +839,108 @@ static int pp_expand_span(const char *src, int n, char *dst, int cap, int *at,
                     if (rc) return rc;
                     rc = pp_decomment(work, sn, work, gn, &sn);
                     if (rc) return rc;
-                    rc = pp_expand_span(work, sn, dst, cap, at, mac, nmac, depth, 1, work, workcap, readinc, ud, why, whycap, 0, 0);
+                    rc = pp_expand_span(work, sn, dst, cap, at, mac, nmac, cond, depth, 1, work, workcap, readinc, ud, why, whycap, 0, 0);
                     if (rc) return rc;
                     if (e < n && (src[e] & 255) == 10) i = e + 1;
                     else i = e;
                     bol = 1;
                     continue;
                 }
+                if (pp_span_eq(src + ns, ne - ns, "ifdef") == 1 || pp_span_eq(src + ns, ne - ns, "ifndef") == 1
+                    || pp_span_eq(src + ns, ne - ns, "if") == 1 || pp_span_eq(src + ns, ne - ns, "elif") == 1
+                    || pp_span_eq(src + ns, ne - ns, "else") == 1 || pp_span_eq(src + ns, ne - ns, "endif") == 1
+                    || pp_span_eq(src + ns, ne - ns, "undef") == 1) {
+                    int kind;
+                    int on;
+                    int act;
+                    int want;
+                    kind = 0;
+                    if (pp_span_eq(src + ns, ne - ns, "ifndef") == 1) kind = 1;
+                    if (pp_span_eq(src + ns, ne - ns, "if") == 1) kind = 2;
+                    if (pp_span_eq(src + ns, ne - ns, "elif") == 1) kind = 3;
+                    if (pp_span_eq(src + ns, ne - ns, "else") == 1) kind = 4;
+                    if (pp_span_eq(src + ns, ne - ns, "endif") == 1) kind = 5;
+                    if (pp_span_eq(src + ns, ne - ns, "undef") == 1) kind = 8;
+                    if (kind == 8) {
+                        if (pp_live(cond)) {
+                            while (j < e && pp_ws(src[j] & 255)) j = j + 1;
+                            bs = j;
+                            while (j < e && pp_idch(src[j] & 255)) j = j + 1;
+                            mi = pp_mac_at(mac, *nmac, src + bs, j - bs);
+                            if (mi >= 0) mac[mi].nlen = 0;
+                        }
+                    } else if (kind == 5) {
+                        if (cond->depth <= 0) {
+                            pp_why(why, whycap, "#endif without #if");
+                            return 3;
+                        }
+                        cond->depth = cond->depth - 1;
+                    } else if (kind == 4 || kind == 3) {
+                        int outer;
+                        if (cond->depth <= 0) {
+                            pp_why(why, whycap, kind == 4 ? "#else without #if" : "#elif without #if");
+                            return 3;
+                        }
+                        outer = pp_cond_outer(cond->take, cond->seen, cond->depth);
+                        on = 0;
+                        if (kind == 4) {
+                            if (cond->seen[cond->depth - 1] == 0) on = 1;
+                            act = pp_dir_act(4, on);
+                            cond->take[cond->depth - 1] = 0;
+                            if (pp_cond_else(act, cond->seen[cond->depth - 1])) cond->take[cond->depth - 1] = 1;
+                        } else {
+                            want = outer;
+                            on = 0;
+                            if (want) {
+                                rc = pp_if_on(src + j, e - j, mac, *nmac, &on, why, whycap);
+                                if (rc) return rc;
+                            }
+                            act = pp_dir_act(3, on);
+                            cond->take[cond->depth - 1] = 0;
+                            if (act == 0 && outer && cond->seen[cond->depth - 1] == 0) cond->take[cond->depth - 1] = 1;
+                        }
+                        if (cond->take[cond->depth - 1]) cond->seen[cond->depth - 1] = 1;
+                    } else {
+                        on = 0;
+                        want = pp_live(cond);
+                        if (kind == 0 || kind == 1) {
+                            while (j < e && pp_ws(src[j] & 255)) j = j + 1;
+                            bs = j;
+                            while (j < e && pp_idch(src[j] & 255)) j = j + 1;
+                            if (bs == j) {
+                                pp_why(why, whycap, "bad ifdef");
+                                return 3;
+                            }
+                            on = pp_mac_at(mac, *nmac, src + bs, j - bs) >= 0;
+                            act = pp_dir_act(kind, on);
+                        } else {
+                            if (want) {
+                                rc = pp_if_on(src + j, e - j, mac, *nmac, &on, why, whycap);
+                                if (rc) return rc;
+                            }
+                            act = pp_dir_act(2, on);
+                        }
+                        if (cond->depth >= 64) return 1;
+                        cond->take[cond->depth] = pp_cond_take(act, want);
+                        cond->seen[cond->depth] = cond->take[cond->depth];
+                        cond->depth = cond->depth + 1;
+                    }
+                    if (pp_blank_line(src, n, i, dst, cap, at, &i)) return 1;
+                    bol = 1;
+                    continue;
+                }
+                if (!pp_live(cond)) {
+                    if (pp_blank_line(src, n, i, dst, cap, at, &i)) return 1;
+                    bol = 1;
+                    continue;
+                }
                 pp_why(why, whycap, "directive not migrated");
                 return 3;
+            }
+            if (!pp_live(cond)) {
+                if (pp_blank_line(src, n, i, dst, cap, at, &i)) return 1;
+                bol = 1;
+                continue;
             }
         }
         c = src[i] & 255;
@@ -660,8 +974,102 @@ static int pp_expand_span(const char *src, int n, char *dst, int cap, int *at,
             mi = -1;
             if (!(hide && hiden == j - i && pp_mac_is(hide, src + i, j - i) == 1))
                 mi = pp_mac_at(mac, *nmac, src + i, j - i);
+            if (mi >= 0 && mac[mi].fn) {
+                int k;
+                int nargs;
+                int depthp;
+                int qch;
+                int as[8];
+                int al[8];
+                int substn;
+                char subst[1024];
+                k = j;
+                while (k < n && ((src[k] & 255) == 32 || (src[k] & 255) == 9)) k = k + 1;
+                if (k >= n || (src[k] & 255) != 40) {
+                    while (i < j) {
+                        if (pp_put(dst, cap, at, src[i] & 255)) return 1;
+                        i = i + 1;
+                    }
+                    continue;
+                }
+                k = k + 1;
+                nargs = 0;
+                depthp = 0;
+                qch = 0;
+                bs = k;
+                while (k < n) {
+                    c = src[k] & 255;
+                    if (qch) {
+                        if (c == 92 && k + 1 < n) {
+                            k = k + 2;
+                            continue;
+                        }
+                        if (c == qch) qch = 0;
+                        k = k + 1;
+                        continue;
+                    }
+                    if (c == 34 || c == 39) {
+                        qch = c;
+                        k = k + 1;
+                        continue;
+                    }
+                    if (c == 40) {
+                        depthp = depthp + 1;
+                        k = k + 1;
+                        continue;
+                    }
+                    if (c == 41 && depthp == 0) break;
+                    if (c == 41) {
+                        depthp = depthp - 1;
+                        k = k + 1;
+                        continue;
+                    }
+                    if (c == 44 && depthp == 0) {
+                        if (nargs >= 8) {
+                            pp_why(why, whycap, "macro argument count");
+                            return 3;
+                        }
+                        be = k;
+                        while (bs < be && pp_ws(src[bs] & 255)) bs = bs + 1;
+                        while (be > bs && pp_ws(src[be - 1] & 255)) be = be - 1;
+                        as[nargs] = bs;
+                        al[nargs] = be - bs;
+                        nargs = nargs + 1;
+                        k = k + 1;
+                        bs = k;
+                        continue;
+                    }
+                    k = k + 1;
+                }
+                if (k >= n || (src[k] & 255) != 41) {
+                    pp_why(why, whycap, "bad macro call");
+                    return 3;
+                }
+                be = k;
+                while (bs < be && pp_ws(src[bs] & 255)) bs = bs + 1;
+                while (be > bs && pp_ws(src[be - 1] & 255)) be = be - 1;
+                if (!(nargs == 0 && bs == be)) {
+                    if (nargs >= 8) {
+                        pp_why(why, whycap, "macro argument count");
+                        return 3;
+                    }
+                    as[nargs] = bs;
+                    al[nargs] = be - bs;
+                    nargs = nargs + 1;
+                }
+                if (nargs != mac[mi].np) {
+                    pp_why(why, whycap, "macro argument count");
+                    return 3;
+                }
+                substn = 0;
+                if (pp_subst(&mac[mi], src, as, al, subst, 1024, &substn)) return 1;
+                rc = pp_expand_span(subst, substn, dst, cap, at, mac, nmac, cond, depth + 1, 1, work, workcap, readinc, ud, why, whycap, mac[mi].name, mac[mi].nlen);
+                if (rc) return rc;
+                i = k + 1;
+                continue;
+            }
             if (mi >= 0) {
-                rc = pp_expand_span(mac[mi].body, mac[mi].blen, dst, cap, at, mac, nmac, depth + 1, 1, work, workcap, readinc, ud, why, whycap, mac[mi].name, mac[mi].nlen);
+                rc = pp_expand_span(mac[mi].body, mac[mi].blen, dst, cap, at, mac, nmac, cond, depth + 1, 1, work, workcap, readinc, ud, why, whycap, mac[mi].name, mac[mi].nlen);
                 if (rc) return rc;
             } else {
                 while (i < j) {
@@ -684,6 +1092,7 @@ int pp_expand(const char *src, int n, char *dst, int cap, int *outn,
               int (*readinc)(void *, const char *, int, char *, int, int *),
               void *ud, char *why, int whycap) {
     struct PpMac mac[64];
+    struct PpCond cond;
     int nmac;
     int at;
     int rc;
@@ -693,7 +1102,8 @@ int pp_expand(const char *src, int n, char *dst, int cap, int *outn,
     if (workcap > 0 && !work) return 4;
     nmac = 0;
     at = 0;
-    rc = pp_expand_span(src, n, dst, cap, &at, mac, &nmac, 0, 0, work, workcap, readinc, ud, why, whycap, 0, 0);
+    cond.depth = 0;
+    rc = pp_expand_span(src, n, dst, cap, &at, mac, &nmac, &cond, 0, 0, work, workcap, readinc, ud, why, whycap, 0, 0);
     if (rc) return rc;
     *outn = at;
     return 0;

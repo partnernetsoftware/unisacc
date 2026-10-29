@@ -644,6 +644,18 @@ flowchart TD
   cap["检查文件 32 个 use"] --> pull["bindargs.cx 的 use bindcount"]
 ```
 
+## 130. 2026-10-29 函数式宏、尖括号 include 和 #if
+
+构造脚本不改。没有新文件。每条两遍，stdout 和 stderr 相同。`F(2)` 在 `#define F(a) a+1` 之后 stdout 98，`pp=21`，末行 `2+1`。`ADD(1, 2)` stdout 103，`pp=26`，末行 `1+2`。`#if 0` / `#else` stdout 113，`pp=36`，留下 `int yes;`。`#ifdef N` stdout 114，`pp=37`。`#ifndef NOPE` stdout 106，`pp=29`。`#if defined(N)` stdout 120，`pp=43`。`#include <stdbool.h>` 再 `int x = true;` stdout 241，`pp=163`，末行 `int x = 1;`。`F()` 对一个参数的宏退出 1，stderr 37。对象宏仍是 stdout 100。拼接仍是 stdout 85。没有写出对象。没有产品安装，没有 hostseed，没有 `--all`。整棵重写还没完成。
+
+```mermaid
+flowchart TD
+  exp["pp_expand"] --> fn["函数式宏按参数替换"]
+  exp --> cond["#if #ifdef #ifndef #else #endif"]
+  exp --> ang["尖括号 include 读 include/名字"]
+  fn --> bad["参数个数不对则退出"]
+```
+
 ## 129. 2026-10-29 入口展开对象宏并插入引号 include
 
 构造脚本不改。没有新文件。`pp_expand` 在已有 `frontpp.cx`。每条两遍，stdout 和 stderr 相同。23 字节 `#define N 5` 再 `int x = N;`，stdout 100，`pp=23`，结果行是 `int x = 5;`。26 字节 `A` 到 `B` 到 `1`，stdout 103，`pp=26`，末行是 `1`。58 字节 `#include "src/version.h"`，stdout 139，`pp=62`，末行是 `const char *v = "0.0.43";`。函数式宏 stderr 49。缺文件 include stderr 36。尖括号 include stderr 43。15 字节拼接仍是 stdout 85，`pp=9`。没有写出对象。没有产品安装，没有 hostseed，没有 `--all`。整棵重写还没完成。
