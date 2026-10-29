@@ -119,7 +119,7 @@ agent 模式新增 `/help`、`/status`、`/clear`，均只在本地处理、不�
 - 工具行：默认一行摘要 + 退出码 / 字节数；失败自动展开最后几行输出。`[展开]` 支持键盘（Tab 选中，Enter 切换），不只靠鼠标。**第二批已落地（2026-10-29）**：修了原有 bug——agent 在工具行后先发 `  evidence ID`，它自成一行，后面的 `│` 正文挂不上，导致正文从不折叠、`[展开]` 形同虚设；现在 evidence 归入该行正文。收起时一行 `why · 命令 · 命令退出 N`（取正文首条状态）；`操作失败`/非 0 `命令退出` 自动展开；展开时正文逐行各带 `  │ `，最多 8 行，不再用 `⏎` 连成一行。selftest：`failed tool row opens by itself`、`closed tool row is one line with status`、`open tool body is one line per row`。键盘切换未做。
 - 输入：多行编辑（Alt-Enter 换行）、Ctrl-A/E/W/U、历史按前缀搜索（Ctrl-R）。**已落地**：Ctrl-U 清整行、Ctrl-W 删末尾空白加一个词（输入无光标，Ctrl-A/E 等光标模型落地后再做）。selftest：`ctrl-u clears the line`、`ctrl-w deletes one word`。
 - 中断：Esc 等同忙时 Ctrl-C（取消本轮），并在日志写一行「已取消，工具已执行的部分保留」。**第二批已落地**：新增 `TERM_KEY_ESC`。忙时 Esc 取消本轮并提示「已执行的工具保留」；闲时清输入。修了 `term_read_keys` 原有的问题：缓冲末尾单独的 ESC 一直留在 pending 里等下一个键，导致 Esc 没有反应；现在 25ms 内没有后续字节就当作 Esc 键（`ESC [` 序列照旧拼接）。term 测试中「裸 ESC」一条改为期望 `TERM_KEY_ESC`，仍要求不能吞键。selftest：`esc cancels a busy turn`、`esc clears idle input`。
-- 头部一行：模型名 · cwd · 本轮轮次/预算 · key 来源（env/file），出错时一眼看出是 key、网络还是模型。**已落地**（轮次/预算未加）：`csih · agent · deepseek-chat · ~/目录 · key=file|env|missing`，home 前缀画成 `~`，按列宽截断。selftest：`title shows model, cwd and key source`；tmux 实窗已见。
+- 头部一行：模型名 · cwd · 本轮轮次/预算 · key 来源（env/file），出错时一眼看出是 key、网络还是模型。**已落地**（轮次/预算未加）：`csih · agent · deepseek-chat · key=file|env|missing · ~/目录`，home 前缀画成 `~`，按列宽截断（第十四批把目录挪到最后：窄窗口下截掉的是最长的目录，而不是 key；tmux 宽 70 时原先截成 `key=fil`）。selftest：`title shows model, cwd and key source`；tmux 实窗已见。
 
 ### P2 功能
 
