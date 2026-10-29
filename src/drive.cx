@@ -24,8 +24,9 @@
    through cxm_planprint and cxm_interface. -D/-U/-I/-include fill the
    caller-owned args blocks. executor and packmodel are linked from
    src/entryexec.cx; this file calls them by name. A .tape source is tapecheck, then the
-   backend from prune or e4. A .tapebin that is not a container is the
-   product refusal; the decoder itself stays in C. */
+   backend from prune or e4. A .tapebin that is not a container, or whose
+   digest does not match the bytes after the header, is the product
+   refusal. Section text stays in C. */
 static char dv_in[262144];
 static char dv_obj[1048576];
 static long dv_objn;
@@ -69,8 +70,19 @@ static unsigned dv_leu(const unsigned char *p, int n) {
     }
     return v;
 }
-/* Header fields tbc_decode rejects before it hashes or walks sections.
-   A header that passes these still stops at tapebin decode. */
+/* Header fields tbc_decode rejects before it hashes or walks sections. */
+static int dv_tapebin_sha_bad(const unsigned char *b, long n) {
+    unsigned char dig[32];
+    int i;
+    if (!b || n < 136) return 1;
+    cx_sha256(b + 64, (size_t)(n - 64), dig);
+    i = 0;
+    while (i < 32) {
+        if (dig[i] != b[28 + i]) return 1;
+        i = i + 1;
+    }
+    return 0;
+}
 static int dv_tapebin_prefix_bad(const unsigned char *b, long n, int expected) {
     unsigned minor;
     unsigned count;
@@ -1349,12 +1361,11 @@ int dv_main(int argc, char **argv) {
                 if (gotb[k] != mag[k]) magic = 0;
                 k = k + 1;
             }
-            /* tbc_decode still lives in the C reader. A short file, a file
-               that does not start with the container magic, or a magic
-               header whose fixed fields the product rejects, uses the
-               product sentence. A header that passes those fields is not
-               decoded here. */
-            if (!origin || !magic || dv_tapebin_prefix_bad(gotb, gotn, origin)) {
+            /* Fixed fields, then the digest over the bytes after the
+               64-byte header. A mismatch is the product refusal. A match
+               still stops here: section rows and record text stay in C. */
+            if (!origin || !magic || dv_tapebin_prefix_bad(gotb, gotn, origin) ||
+                dv_tapebin_sha_bad(gotb, gotn)) {
                 free(gotb);
                 return dv_fail("invalid tapebin or origin target mismatch");
             }

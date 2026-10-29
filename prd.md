@@ -151,7 +151,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 **2026-10-25 主人重新裁定：0.0.43 现在重构。** 旧1333项测试套件整体归档，退出开发和发布的主验收路径；新套件按产品合同重新设计，直接由 `unisacc.com + .cx` 驱动。此项属于本版，不等待0.0.44。保留现有产品、源码、夹具及原始结果作为历史和迁移依据，不把旧结果自动计入新验收。
 
-**当前入口（2026-10-30）：** 临时入口是 `/tmp/grk-cx-line/entry-o2`，两只 `-O2` 对象再加 `src/hostnative.o`，873487 字节，sha256 `313206b1c4761f2fa56ecc7245087ec0a39b3e811253daace609f6b44efbaf92`。`process_group.cx` 仍只有 `setpgid`。检查器从第 100 格起跑完 12 面 48 行，表在 `out/grk-face-01/cx-entry-matrix-2026-10-30.tsv`，48 行都是 SAME，按这张表逐面标成已通。-O1/-O2 是已通（限检查器这 4 格），性能红项另记。有效 `.tapebin` 包和库接口路径还没做。还红的是 `dev-run` 8 格超时，以及 `dup.c` 的 `strdup`。语料前 100 格没有用这只入口重跑。产品面清单在 [plans/cx-modules.md](plans/cx-modules.md) 顶部。已装产品仍是 3035300 字节。这不是产品安装。
+**当前入口（2026-10-30）：** 临时入口是 `/tmp/grk-cx-line/entry-o2`，两只 `-O2` 对象再加 `src/hostnative.o`，877583 字节，sha256 `135139bdd4e48992a9baf3dd635e93e4f8204d0f3a75dd7a8e8772ca89add7a3`。`process_group.cx` 仍只有 `setpgid`。摘要对不上的 `.tapebin` 头已和产品一样拒绝；摘要对得上的头仍停在 `tapebin decode`，节文本还在 C。检查器 12 面 48 行仍是上一只入口的 `out/grk-face-01/cx-entry-matrix-2026-10-30.tsv`。-O1/-O2 是已通（限检查器这 4 格），性能红项另记。库接口路径还没做。还红的是 `dev-run` 8 格超时，以及 `dup.c` 的 `strdup`。产品面清单在 [plans/cx-modules.md](plans/cx-modules.md) 顶部。已装产品仍是 3035300 字节。这不是产品安装。
 
 <a id="work-tree"></a>
 ### 思维树

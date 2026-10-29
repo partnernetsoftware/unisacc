@@ -6,14 +6,14 @@
 
 ## 产品面（2026-10-30）
 
-对照已装产品的入口路径。三档：已通、骨架、未做。没实跑的不写已通。临时入口是 `/tmp/grk-cx-line/entry-o2`，两只 `-O2` 对象再加 `src/hostnative.o`，873487 字节，sha256 `313206b1c4761f2fa56ecc7245087ec0a39b3e811253daace609f6b44efbaf92`。已装产品 3035300 字节。这一轮只跑 12 面，表在 `out/grk-face-01/cx-entry-matrix-2026-10-30.tsv`：表头加 48 行，48 行都是 SAME，进度起点 100、下一格 148。按面计 SAME：ar 5、as 7、nm 3、objdump 4、-c 2、tape 2、tapebin 2、cx-plan 6、cx-interface 2、dump-tokens 1、emit-host-symbols 2、-O1 2、-O2 2、-D 7、lib 1。语料前 100 格没有用这只入口重跑。上一只整表仍是 `/tmp/grk-cx-line/o2mx/cx-entry-matrix-2026-10-30.tsv`，第 143 节。对象抽查在 `out/grk-obj-01/recheck.tsv`，第 145 节。这一轮在第 146 节。
+对照已装产品的入口路径。三档：已通、骨架、未做。没实跑的不写已通。临时入口是 `/tmp/grk-cx-line/entry-o2`，两只 `-O2` 对象再加 `src/hostnative.o`，877583 字节，sha256 `135139bdd4e48992a9baf3dd635e93e4f8204d0f3a75dd7a8e8772ca89add7a3`。已装产品 3035300 字节。12 面那张表是上一只 873487 字节入口的，`out/grk-face-01/cx-entry-matrix-2026-10-30.tsv`：表头加 48 行，48 行都是 SAME，进度起点 100、下一格 148。按面计 SAME：ar 5、as 7、nm 3、objdump 4、-c 2、tape 2、tapebin 2、cx-plan 6、cx-interface 2、dump-tokens 1、emit-host-symbols 2、-O1 2、-O2 2、-D 7、lib 1。这只新入口没有整表重跑。语料前 100 格没有重跑。上一只整表仍是 `/tmp/grk-cx-line/o2mx/cx-entry-matrix-2026-10-30.tsv`，第 143 节。对象抽查在 `out/grk-obj-01/recheck.tsv`，第 145 节。12 面在第 146 节。摘要这一刀在第 147 节。
 
 - **ar：已通。** 检查器五行和产品相同：用法、`ar z`、缺成员、空归档、两成员。空归档 8 字节，两成员 146 字节，权限都是 0644。大归档、替换成员、符号表没跑。
 - **as：已通。** 七行相同：用法、`-z`、坏 `-b`、头和 `-b` 冲突、一行汇编、加 `ret`、缺文件。一行汇编 728 字节，加 `ret` 744 字节，权限 0644。缺文件两边 stderr 都是 86 字节。Mach-O、COFF、大汇编没跑。
 - **nm：已通。** 用法、坏文件、728 字节对象三行相同。
 - **objdump：已通。** 用法、少 `-d`、坏文件、`objdump -d` 四行相同。
 - **-c 对象：已通。** 没有 `main` 时两边都拒绝，stderr 106 字节。有 `main` 的 `-c` 两边都写出 2216 字节，权限 0755。Mach-O、COFF、多文件没跑。
-- **.tape / .tapebin 输入：已通（只到检查器这四行）。** 三行 `_start` 的 `.tape` 两边都是 4096 字节，权限 0755。内容是 `?` 的 `.tape`，两边 stderr 都是 71 字节。内容是 `XXXX` 的 `.tapebin`，两边 stderr 都是 65 字节。`UTAPEBIN` 后面再跟 128 个 0，两边都是 `invalid tapebin or origin target mismatch`，也是 65 字节。固定字段能过的头仍停在 `tapebin decode`，这一格不在检查器里。有效包没跑，解码仍在 C。
+- **.tape / .tapebin 输入：已通（只到检查器这四行）。** 三行 `_start` 的 `.tape` 两边都是 4096 字节，权限 0755。内容是 `?` 的 `.tape`，两边 stderr 都是 71 字节。内容是 `XXXX` 的 `.tapebin`，两边 stderr 都是 65 字节。`UTAPEBIN` 后面再跟 128 个 0，两边都是 `invalid tapebin or origin target mismatch`，也是 65 字节。固定字段能过、摘要是 0 的 136 字节头，两边也是这句，退出 1。摘要对得上、目录行是 0 的头，产品仍是这句，入口仍是 `tapebin decode`，退出 2。有效包没跑。节文本仍在 C。
 - **-cx-plan / -cx-interface：已通。** 计划、接口、两个旗、缺文件、只有旗、`-include` 八行相同。多个模块的 `use` 没跑。
 - **-dump-tokens：已通。** `int x;` 两边 stdout 都是 25 字节。别的源文件没跑。
 - **--emit-host-symbols：已通。** 配 `-c -b` 两边 stderr 73 字节，配 `-S -b` 两边 106 字节，都是拒绝，退出 1。没有一格写出符号文件。
@@ -1807,6 +1807,21 @@ flowchart TD
   t --> a["十二面按 SAME 标已通"]
   t --> o["-O 限这 4 格，dev-run 另记"]
   t --> g["有效 tapebin 与库路径仍缺"]
+```
+
+## 147. 2026-10-30 摘要对不上的 tapebin 头用产品那句
+
+`src/drive.cx` 在固定字段通过之后，用前奏里的 `cx_sha256` 对头后面的字节做摘要，和头内 32 字节比较。对不上就用产品那句 `invalid tapebin or origin target mismatch`。对得上仍停在 `tapebin decode`。没有新模块，没有走目录行，没有搬记录文本。
+
+驱动对象重新按 `-O2 -c -b lnx/x86_64 -funit` 编译，再和原来的执行器对象、`hostnative` 对象链接。产物 `/tmp/grk-cx-line/entry-o2`，877583 字节，sha256 `135139bdd4e48992a9baf3dd635e93e4f8204d0f3a75dd7a8e8772ca89add7a3`。直接执行。
+
+固定字段能过、摘要是 0 的 `out/grk-tapebin-01/shaped.tapebin`，两边退出 1，stderr 65 字节，逐字节相同。检查器里的 `XXXX` 和 `UTAPEBIN` 加 128 个 0 仍是这句。摘要对得上、目录行是 0 的 `out/grk-tapebin-01/goodsha.tapebin`，产品退出 1，入口退出 2，stderr 是 `tapebin decode`。三行 `.tape` 仍是 4096 字节，权限 0755，逐字节相同。48 行检查器没有整表重跑。库接口没动。这不是产品安装。
+
+```mermaid
+flowchart TD
+  h["固定字段通过"] --> s["cx_sha256"]
+  s --> bad["摘要不符: invalid tapebin"]
+  s --> ok["摘要相符: tapebin decode"]
 ```
 
 ## 64. 2026-10-29 编译器纯拒绝接到 bindhost
