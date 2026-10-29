@@ -111,15 +111,15 @@ agent 模式新增 `/help`、`/status`、`/clear`，均只在本地处理、不�
 
 - 现状：工具链全部成功，模型答 DONE，仍报 `✗ agent failed`。原因有二：一是模型漏了 `claims`，二是 `observation_refs` 要模型自己数 UTF-8 字节偏移，LLM 数不准。实测根因是模型把 ref 的 `id` 写成自编的 `o1/o2`。已修：提示词写明 id 必须是 evidence ID；缺 claims 或 id 未知时有界重答（共用 `parse_fail`，最多 2 次），并列出当前可用 ID；字节偏移由 harness 收拢到正文内的码位边界（`at_ref_span`）。修后 tmux 实测 write→read→sh 一次「语义接受」。下面是根治方向。
 - 方向：把 grounding 交给 harness。模型只给 `evidence` ID 加一段原文引用（`quote`），由 harness 在该工具记录正文里定位出字节范围；定位不到才拒绝。验收强度不变，模型负担大减。
-- 文案：「未验证」不等于「失败」。结果行分三种：`✓ 已验收`、`◐ 做完未验证（原因）`、`✗ 失败（原因）`，不再一律用 `agent failed`。
+- 文案：「未验证」不等于「失败」。结果行分三种：`✓ 已验收`、`◐ 做完未验证（原因）`、`✗ 失败（原因）`，不再一律用 `agent failed`。**已落地（2026-10-29）**：`tui_result_row`，acceptance=unverified、outcome=partial/unverified 或 reason 以 `unfinished:` 开头记 `◐`，并进错误行；其余记 `✗ 失败`。selftest：`unverified row uses ◐`、`failed row uses ✗ 失败`。
 
 ### P1 交互手感
 
 - 流式正文：answer 的 text 边收边画，不要等整包回来；忙时状态行的秒、词元已有，再补一个「当前在做什么」（等模型 / 跑工具 名字）。
 - 工具行：默认一行摘要 + 退出码 / 字节数；失败自动展开最后几行输出。`[展开]` 支持键盘（Tab 选中，Enter 切换），不只靠鼠标。
-- 输入：多行编辑（Alt-Enter 换行）、Ctrl-A/E/W/U、历史按前缀搜索（Ctrl-R）。
+- 输入：多行编辑（Alt-Enter 换行）、Ctrl-A/E/W/U、历史按前缀搜索（Ctrl-R）。**已落地**：Ctrl-U 清整行、Ctrl-W 删末尾空白加一个词（输入无光标，Ctrl-A/E 等光标模型落地后再做）。selftest：`ctrl-u clears the line`、`ctrl-w deletes one word`。
 - 中断：Esc 等同忙时 Ctrl-C（取消本轮），并在日志写一行「已取消，工具已执行的部分保留」。
-- 头部一行：模型名 · cwd · 本轮轮次/预算 · key 来源（env/file），出错时一眼看出是 key、网络还是模型。
+- 头部一行：模型名 · cwd · 本轮轮次/预算 · key 来源（env/file），出错时一眼看出是 key、网络还是模型。**已落地**（轮次/预算未加）：`csih · agent · deepseek-chat · ~/目录 · key=file|env|missing`，home 前缀画成 `~`，按列宽截断。selftest：`title shows model, cwd and key source`；tmux 实窗已见。
 
 ### P2 功能
 

@@ -771,6 +771,7 @@ static int tui_looks_err(const char *s) {
     if (strstr(s, "not responding")) return 1;
     if (strstr(s, "is alive again")) return 1;
     if (strstr(s, "✗")) return 1;
+    if (strstr(s, "◐ 做完未验证")) return 1;
     if (strstr(s, "exit=") && !strstr(s, "exit=0")) return 1;
     return 0;
 }
@@ -1096,6 +1097,17 @@ static void tui_apply_key(tui_state *st, int kind, char ch) {
         st->ticks++;
         return;
     case TERM_KEY_CHAR:
+        if (ch == 0x15) {           /* Ctrl-U: drop the whole line */
+            st->input[0] = '\0'; st->ninput = 0; st->ask_exit = 0;
+            return;
+        }
+        if (ch == 0x17) {           /* Ctrl-W: trailing spaces, then one word */
+            int i = st->ninput;
+            while (i > 0 && (st->input[i - 1] == ' ' || st->input[i - 1] == '\t')) i--;
+            while (i > 0 && st->input[i - 1] != ' ' && st->input[i - 1] != '\t') i--;
+            st->input[i] = '\0'; st->ninput = i; st->ask_exit = 0;
+            return;
+        }
         tui_input_byte(st, ch);
         return;
     case TERM_KEY_BACKSPACE:
@@ -1862,6 +1874,29 @@ static const char *idle_last(tui_state *st) {
     return buf;
 }
 
+static const char *csih_env(const char *neu, const char *old);
+
+/* A turn that did the work but could not be verified is not a failure.
+ * ◐ for unverified/partial, ✗ only for a real failure. */
+static void tui_result_row(char *out, size_t cap, const agent_result *r) {
+    const char *why = r->reason;
+    int soft = r->acceptance == AGENT_ACCEPT_UNVERIFIED || r->outcome == AGENT_OUTCOME_PARTIAL
+        || r->outcome == AGENT_OUTCOME_UNVERIFIED || !strncmp(why, "unfinished:", 11);
+    if (!strncmp(why, "unfinished: ", 12)) why += 12;
+    snprintf(out, cap, soft ? "◐ 做完未验证: %s" : "✗ 失败: %s", why);
+}
+
+/* Model · cwd · key source, so a bad key or wrong place shows at a glance. */
+static void tui_title_info(char *out, size_t cap, const char *model, const char *cwd) {
+    int len = 0, src = net_deepseek_key_probe(&len);
+    const char *home = getenv("HOME");
+    size_t hn = home ? strlen(home) : 0;
+    if (hn && cwd && !strncmp(cwd, home, hn) && (cwd[hn] == '/' || !cwd[hn]))
+        snprintf(out, cap, "%s · ~%s · key=%s", model, cwd + hn, src == 1 ? "env" : src == 2 ? "file" : "missing");
+    else
+        snprintf(out, cap, "%s · %s · key=%s", model, cwd ? cwd : "?", src == 1 ? "env" : src == 2 ? "file" : "missing");
+}
+
 static const char *tui_role_title(const tui_state *st) {
     static char buf[64];
     const char *role = st->owned ? st->owned->role : getenv("CSIH_ROLE");
@@ -1895,6 +1930,16 @@ static r_frame tui_render_state(tui_state *st, int cols) {
     tui_log_y0 = 0;
     tui_log_y1 = 0;
     rs.title = (st->mode == 1) ? tui_role_title(st) : "csih";
+    if (st->mode == 1) {
+        static char title[R_LINE_MAX + 1];
+        char info[1400], here[1024];
+        const char *model = csih_env("CSIH_MODEL", "CDSH_MODEL");
+        const char *cwd = csih_env("CSIH_CWD", "CDSH_CWD");
+        if (!cwd) { if (!getcwd(here, sizeof here)) strcpy(here, "."); cwd = here; }
+        tui_title_info(info, sizeof info, model ? model : "deepseek-chat", cwd);
+        snprintf(title, sizeof title, "%s · %s", rs.title, info);
+        rs.title = title;
+    }
     if (st->owned) {
         static char bound_title[160];
         snprintf(bound_title, sizeof bound_title, "%s · %.64s", rs.title, st->owned->candidate_hash);
@@ -2314,8 +2359,8 @@ static int tui_run_prompt(tui_state *st, const char *source_prompt, int clear_ma
         r = agent_turn_take();
         st->busy = 0;
         {
-            char fail[240];
-            snprintf(fail, sizeof fail, "✗ agent failed: %s", r.reason);
+            char fail[360];
+            snprintf(fail, sizeof fail, "✗ 失败: %s", r.reason);
             tui_log_plain(st, fail);
         }
         tui_redraw(st);
@@ -2372,8 +2417,8 @@ static void tui_turn_done(tui_state *st) {
             tui_log_plain(st, r.answer);
         }
         {
-            char fail[240];
-            snprintf(fail, sizeof fail, "✗ agent failed: %s", r.reason);
+            char fail[360];
+            tui_result_row(fail, sizeof fail, &r);
             tui_log_plain(st, fail);
         }
     } else {
@@ -3637,6 +3682,47 @@ int tui_entry(int argc, char **argv) {
                 failures++;
             } else printf("  ok   cli read matches tui frame\n");
             if (tui_selftest_rm(path, 0)) failures++;
+        }
+        {
+            agent_result rr;
+            char row[360];
+            memset(&rr, 0, sizeof rr);
+            rr.acceptance = AGENT_ACCEPT_UNVERIFIED;
+            snprintf(rr.reason, sizeof rr.reason, "unfinished: no claims");
+            tui_result_row(row, sizeof row, &rr);
+            if (strcmp(row, "◐ 做完未验证: no claims")) { printf("FAIL unverified row: %s\n", row); failures++; }
+            else printf("  ok   unverified row uses ◐\n");
+            memset(&rr, 0, sizeof rr);
+            rr.err = 1;
+            snprintf(rr.reason, sizeof rr.reason, "http 401");
+            tui_result_row(row, sizeof row, &rr);
+            if (strcmp(row, "✗ 失败: http 401")) { printf("FAIL failed row: %s\n", row); failures++; }
+            else printf("  ok   failed row uses ✗ 失败\n");
+        }
+        {
+            static tui_state ti;
+            r_frame tf;
+            tui_state_init(&ti, NULL); ti.mode = 1;
+            setenv("CSIH_MODEL", "m-test", 1);
+            setenv("CSIH_CWD", "/srv/w", 1);
+            tf = tui_render_state(&ti, 120);
+            unsetenv("CSIH_MODEL"); unsetenv("CSIH_CWD");
+            if (tf.n < 1 || !strstr(tf.lines[0], "csih · agent · m-test · /srv/w · key="))
+                { printf("FAIL title: %s\n", tf.n ? tf.lines[0] : "(none)"); failures++; }
+            else printf("  ok   title shows model, cwd and key source\n");
+        }
+        {
+            static tui_state tk;
+            tui_state_init(&tk, NULL); tk.mode = 1;
+            const char *s;
+            for (s = "hello world"; *s; s++) tui_apply_key(&tk, TERM_KEY_CHAR, *s);
+            tui_apply_key(&tk, TERM_KEY_CHAR, 0x15);
+            if (tk.ninput != 0 || tk.input[0]) { printf("FAIL ctrl-u left: %s\n", tk.input); failures++; }
+            else printf("  ok   ctrl-u clears the line\n");
+            for (s = "git commit  "; *s; s++) tui_apply_key(&tk, TERM_KEY_CHAR, *s);
+            tui_apply_key(&tk, TERM_KEY_CHAR, 0x17);
+            if (strcmp(tk.input, "git ")) { printf("FAIL ctrl-w left: [%s]\n", tk.input); failures++; }
+            else printf("  ok   ctrl-w deletes one word\n");
         }
 
         printf("%s\n", failures ? "SELFTEST FAILED" : "selftest ok");
