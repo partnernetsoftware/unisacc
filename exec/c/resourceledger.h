@@ -48,6 +48,7 @@ static void rl_clear(RLLedger *L) {
 int cxsf_hex_digit(int);
 int cxsf_length(const char *,int *);
 int cxsf_ledger_fields(const char *,char *);
+int cxsf_ledger_line(const unsigned char *,size_t,size_t *,size_t *,size_t *);
 int cxsf_ledger_key(const char *,size_t,unsigned char *);
 int cxsf_ledger_metadata(const char *,const char *,const char *,const char *,int *,int *);
 int cxsf_ledger_find(const void *,int,int,const unsigned char *,int);
@@ -164,6 +165,13 @@ static int rl_load_parse(const char *dir, const RLFileView *views, int count, RL
     while (at < n) {
         size_t e = at; char f[5][4096]; int nf = 0, k; char *line;
         size_t L2;
+#ifdef UNISA_CX_SOURCE_FRAME
+        size_t start=0; int row=cxsf_ledger_line(b,n,&at,&start,&L2);
+        if (row!=1) { free(b); snprintf(err,errn,row==3 ? "INTERFACE_ERROR resource-row-nul" : "INTERFACE_ERROR resource-row-truncated"); return 1; }
+        e=start+L2;
+        line = RL_ALLOC(L2 + 1); if (!line) { free(b); return 1; }
+        memcpy(line,b+start,L2); line[L2]=0;
+#else
         while (e < n && b[e] != '\n') e++;
         if (e == n) { free(b); snprintf(err, errn, "INTERFACE_ERROR resource-row-truncated"); return 1; }
         L2 = e - at;
@@ -172,6 +180,7 @@ static int rl_load_parse(const char *dir, const RLFileView *views, int count, RL
         if (memchr(b + at, 0, L2)) { free(b); snprintf(err, errn, "INTERFACE_ERROR resource-row-nul"); return 1; }
         line = RL_ALLOC(L2 + 1); if (!line) { free(b); return 1; }
         memcpy(line, b + at, L2); line[L2] = 0; at = e + 1;
+#endif
         if (!strncmp(line, "#SC1\t", 5) || !strncmp(line, "#SC2\t", 5)) {
             /* identity header: the first line only, at most once */
             int ok = e == L2 && !L->has_id && rl_parse_identity(line, L);
