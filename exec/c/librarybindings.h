@@ -22,7 +22,18 @@ int ls_wire_tail(int);
 int ls_wire_rec(int, int, int);
 int ls_wire_tag(unsigned char *, int);
 int ls_wire_flags(unsigned char *, int, int, int);
+int ls_bytes(int, int *);
 int lw_put(unsigned char *, int, unsigned long long);
+int lt_type_diff(unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long);
+int lt_wire3_diff(unsigned long long, unsigned long long);
+int lt_v3_diff(unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long);
+int lt_member_diff(unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long);
+int lt_member_v3(unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long);
+int lt_sig_diff(unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long);
+int lt_member_n(unsigned long long, int);
+int lt_null_diff(int, int);
+int lt_graph_cap(void);
+int lt_graph_room(int, int, int);
 
 typedef struct us_binding_type {uint64_t depth,base,shape,kind,width,uns;} us_binding_type;
 typedef struct us_binding {char *name;uintptr_t address;unsigned kind,variadic,supported,writable;size_t count;us_binding_type result,*args;uint64_t extent;unsigned char *signature;size_t signature_length;struct us_exports *typed;void (*typed_clear)(struct us_exports*);} us_binding;
@@ -52,7 +63,7 @@ static int us_bindings_add_function(us_bindings *b,const char *name,uintptr_t ad
  if(!b||!us_binding_name(name)||!address||sizeof(uintptr_t)!=8||lt_args(count>2147483647ull?1025:(int)count,variadic>2147483647u?2:(int)variadic)||(count&&!args)||!us_binding_type_valid(result,1))return us_binding_error(error,cap,"invalid native function declaration");
  if(!us_binding_unique(b,name))return us_binding_error(error,cap,"duplicate binding name");
  for(size_t i=0;i<count;i++)if(!us_binding_type_valid(args+i,0))return us_binding_error(error,cap,"invalid native parameter declaration");
- us_binding x={0};size_t n=strlen(name)+1;x.name=malloc(n);x.args=count?malloc(count*sizeof *args):NULL;if(!x.name||(count&&!x.args)){free(x.name);free(x.args);return us_binding_error(error,cap,"binding allocation failed");}
+ us_binding x={0};int nb;if(ls_bytes(strlen(name)>2147483646ull?2147483647:(int)strlen(name),&nb))return us_binding_error(error,cap,"binding allocation failed");size_t n=(size_t)nb;x.name=malloc(n);x.args=count?malloc(count*sizeof *args):NULL;if(!x.name||(count&&!x.args)){free(x.name);free(x.args);return us_binding_error(error,cap,"binding allocation failed");}
  memcpy(x.name,name,n);if(count)memcpy(x.args,args,count*sizeof *args);x.address=address;x.result=*result;x.count=count;x.variadic=variadic;x.supported=!variadic&&count<=6&&us_binding_type_supported(result,1);
  for(size_t i=0;i<count;i++)if(!us_binding_type_supported(args+i,0))x.supported=0;
  if(us_binding_append(b,&x,error,cap)){free(x.name);free(x.args);return 1;}return 0;
@@ -61,7 +72,7 @@ static int us_bindings_add_data(us_bindings *b,const char *name,uintptr_t addres
  const us_binding_type *type,uint64_t extent,unsigned writable,char *error,size_t cap){
  if(!b||!us_binding_name(name)||ls_data(1,address!=0,sizeof(uintptr_t)==8,(unsigned long long)address,extent,writable>1?2:(int)writable,0)||!us_binding_type_valid(type,0)||extent<type->width)return us_binding_error(error,cap,"invalid native data declaration");
  if(!us_binding_unique(b,name))return us_binding_error(error,cap,"duplicate binding name");
- us_binding x={0};size_t n=strlen(name)+1;x.name=malloc(n);if(!x.name)return us_binding_error(error,cap,"binding allocation failed");memcpy(x.name,name,n);x.kind=1;x.address=address;x.result=*type;x.extent=extent;x.writable=writable;x.supported=us_binding_type_supported(type,0);
+ us_binding x={0};int nb;if(ls_bytes(strlen(name)>2147483646ull?2147483647:(int)strlen(name),&nb))return us_binding_error(error,cap,"binding allocation failed");size_t n=(size_t)nb;x.name=malloc(n);if(!x.name)return us_binding_error(error,cap,"binding allocation failed");memcpy(x.name,name,n);x.kind=1;x.address=address;x.result=*type;x.extent=extent;x.writable=writable;x.supported=us_binding_type_supported(type,0);
  if(us_binding_append(b,&x,error,cap)){free(x.name);return 1;}return 0;
 }
 #ifdef UNISACC_LIBRARYNATIVE_H
@@ -72,7 +83,7 @@ static int us_bindings_add_function_typed_capability(us_bindings *b,const char *
  us_binding x={0};x.typed_clear=us_exports_clear;x.typed=calloc(1,sizeof *x.typed);if(!x.typed)return us_binding_error(error,cap,"typed declaration allocation failed");
  if(us_exports_load_capability(x.typed,signature,length,bridge,error,cap)||x.typed->count!=1)goto bad;
  us_export *f=x.typed->items;if(strcmp(name,f->name)||f->linkage||f->defined!=1)goto bad;
- x.name=malloc(strlen(name)+1);x.signature=malloc(length);if(!x.name||!x.signature)goto bad;
+ {int nb;if(ls_bytes(strlen(name)>2147483646ull?2147483647:(int)strlen(name),&nb))goto bad;x.name=malloc((size_t)nb);}x.signature=malloc(length);if(!x.name||!x.signature)goto bad;
  strcpy(x.name,name);memcpy(x.signature,signature,length);x.signature_length=length;x.address=address;x.count=(size_t)f->count;x.variadic=f->variadic;x.supported=bridge && us_export_has_callbacks(f) ? us_export_bridge_supported(f):us_export_supported(f);
  if(us_binding_append(b,&x,error,cap))goto bad;return 0;
  bad:us_binding_owned_clear(&x);return us_binding_error(error,cap,"invalid typed function declaration");
@@ -82,34 +93,32 @@ static int us_bindings_add_function_typed_bridge(us_bindings *b,const char *name
 /* Binding declarations obey the same recursive callback ABI equality as plans.
    IDs/sharing/support are not ABI; nested arguments/results/mode are. */
 static int us_binding_graph_equal(const us_export_type *a,const us_export_type *b){
-    us_native_type_pair *work=calloc(16384,sizeof *work);
-    us_native_signature_pair *seen=calloc(16384,sizeof *seen);
+    us_native_type_pair *work=calloc((size_t)lt_graph_cap(),sizeof *work);
+    us_native_signature_pair *seen=calloc((size_t)lt_graph_cap(),sizeof *seen);
     size_t pending=0,visited=0,steps=0;int equal=0;
     if(!work||!seen)goto done;
     work[pending++]=(us_native_type_pair){a,b};
     while(pending){
         us_native_type_pair pair=work[--pending];a=pair.a;b=pair.b;
-        if(!a||!b||++steps>16384)goto done;
-        if(a->depth!=b->depth||a->kind!=b->kind||a->width!=b->width||a->uns!=b->uns||a->alignment!=b->alignment||a->tag!=b->tag||a->nmembers!=b->nmembers||a->count!=b->count||a->stride!=b->stride)goto done;
-        if((a->wire_version==3)!=(b->wire_version==3))goto done;
-        if(a->wire_version==3 && (a->fp_rank!=b->fp_rank||a->fp_format!=b->fp_format||
-           a->natural_alignment!=b->natural_alignment||a->layout_flags!=b->layout_flags||
-           a->layout_known_mask!=b->layout_known_mask||a->layout_origin!=b->layout_origin))goto done;
-        if((a->element==NULL)!=(b->element==NULL)||(a->signature==NULL)!=(b->signature==NULL))goto done;
-        if(a->nmembers>128 || (a->nmembers && (!a->members||!b->members)))goto done;
-        if(a->element){if(pending>=16384)goto done;work[pending++]=(us_native_type_pair){a->element,b->element};}
+        if(!a||!b||lt_graph_room(0,(int)++steps,0))goto done;
+        if(lt_type_diff(a->depth,b->depth,a->kind,b->kind,a->width,b->width,a->uns,b->uns,a->alignment,b->alignment,a->tag,b->tag,a->nmembers,b->nmembers,a->count,b->count,a->stride,b->stride))goto done;
+        if(lt_wire3_diff(a->wire_version,b->wire_version))goto done;
+        if(a->wire_version==3 && lt_v3_diff(a->fp_rank,b->fp_rank,a->fp_format,b->fp_format,a->natural_alignment,b->natural_alignment,a->layout_flags,b->layout_flags,a->layout_known_mask,b->layout_known_mask,a->layout_origin,b->layout_origin))goto done;
+        if(lt_null_diff(a->element==NULL,b->element==NULL)||lt_null_diff(a->signature==NULL,b->signature==NULL))goto done;
+        if(lt_member_n(a->nmembers,a->members&&b->members))goto done;
+        if(a->element){if(lt_graph_room(1,(int)pending,0))goto done;work[pending++]=(us_native_type_pair){a->element,b->element};}
         for(size_t i=0;i<(size_t)a->nmembers;i++){
             const us_export_member *x=a->members+i,*y=b->members+i;
-            if(x->offset!=y->offset||x->bit_offset!=y->bit_offset||x->bit_width!=y->bit_width||x->storage!=y->storage||pending>=16384)goto done;
-            if(a->wire_version==3 && (x->ordinal!=y->ordinal||x->entry_kind!=y->entry_kind||x->effective_alignment!=y->effective_alignment))goto done;
+            if(lt_member_diff(x->offset,y->offset,x->bit_offset,y->bit_offset,x->bit_width,y->bit_width,x->storage,y->storage)||lt_graph_room(1,(int)pending,0))goto done;
+            if(a->wire_version==3 && lt_member_v3(x->ordinal,y->ordinal,x->entry_kind,y->entry_kind,x->effective_alignment,y->effective_alignment))goto done;
             work[pending++]=(us_native_type_pair){x->type,y->type};
         }
         if(a->signature){
             const us_export_signature *x=a->signature,*y=b->signature;size_t i;
             for(i=0;i<visited;i++)if(seen[i].a==x && seen[i].b==y)break;
             if(i<visited)continue;
-            if(visited>=16384||x->variadic!=y->variadic||x->mode!=y->mode||x->count!=y->count||x->stored!=y->stored||x->stored!=x->count||x->count>1024||
-               (x->count && (!x->argtypes||!y->argtypes))||pending+1+x->count>16384)goto done;
+            if(lt_graph_room(1,(int)visited,0)||lt_sig_diff(x->variadic,y->variadic,x->mode,y->mode,x->count,y->count,x->stored,y->stored)||
+               (x->count && (!x->argtypes||!y->argtypes))||lt_graph_room(1,(int)pending,1+(int)x->count))goto done;
             seen[visited++]=(us_native_signature_pair){x,y};
             work[pending++]=(us_native_type_pair){&x->result,&y->result};
             for(i=0;i<(size_t)x->count;i++)work[pending++]=(us_native_type_pair){&x->argtypes[i],&y->argtypes[i]};
