@@ -88,10 +88,30 @@ static int rl_io_close(int fd) { return close(fd); }
 static int rl_io_error(void) { return errno; }
 static void rl_io_set_error(int e) { errno=e; }
 #endif
+#if defined(UNISA_CX_SOURCE_FRAME) && defined(_WIN32)
+typedef struct {
+    void *(*open_file)(const char *); int (*seek_end)(void *); long long (*tell)(void *);
+    int (*seek_start)(void *); size_t (*read_file)(void *,void *,size_t); int (*close_file)(void *);
+    void *(*alloc)(void *,size_t); void (*release)(void *);
+    int (*get_error)(void); void (*set_error)(int);
+} RLLedgerStreamIO;
+unsigned char *cxsf_ledger_readstream(const char *,size_t *,const void *);
+static void *rl_stream_open(const char *p) { return fopen(p,"rb"); }
+static int rl_stream_end(void *f) { return fseek((FILE *)f,0,SEEK_END); }
+static long long rl_stream_tell(void *f) { return ftell((FILE *)f); }
+static int rl_stream_start(void *f) { return fseek((FILE *)f,0,SEEK_SET); }
+static size_t rl_stream_read(void *f,void *p,size_t n) { return fread(p,1,n,(FILE *)f); }
+static int rl_stream_close(void *f) { return fclose((FILE *)f); }
+static int rl_stream_error(void) { return errno; }
+static void rl_stream_set_error(int e) { errno=e; }
+#endif
 static unsigned char *rl_readfile(const char *path, size_t *n) {
 #if defined(UNISA_CX_SOURCE_FRAME) && !defined(_WIN32)
     RLLedgerIO io={rl_io_open,rl_io_stat,rl_io_read,rl_io_close,realloc,free,rl_io_error,rl_io_set_error};
     return cxsf_ledger_readfile(path,n,&io);
+#elif defined(UNISA_CX_SOURCE_FRAME) && defined(_WIN32)
+    RLLedgerStreamIO io={rl_stream_open,rl_stream_end,rl_stream_tell,rl_stream_start,rl_stream_read,rl_stream_close,realloc,free,rl_stream_error,rl_stream_set_error};
+    return cxsf_ledger_readstream(path,n,&io);
 #else
     unsigned char *b; int saved;
 #ifndef _WIN32

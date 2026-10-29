@@ -231,6 +231,30 @@ unsigned char *cxsf_ledger_readfile(const char *path,size_t *out_n,const void *c
     if(io.close_file(fd)){saved=io.get_error();if(!saved)saved=EIO;io.release(b);io.set_error(saved);return 0;}
     *out_n=size;return b;
 }
+/* Windows ledger reading keeps its existing stdio seek/read semantics. */
+typedef struct {
+    void *(*open_file)(const char *); int (*seek_end)(void *); long long (*tell)(void *);
+    int (*seek_start)(void *); size_t (*read_file)(void *,void *,size_t); int (*close_file)(void *);
+    void *(*alloc)(void *,size_t); void (*release)(void *);
+    int (*get_error)(void); void (*set_error)(int);
+} CxLedgerStreamIO;
+unsigned char *cxsf_ledger_readstream(const char *path,size_t *out_n,const void *callbacks) {
+    CxLedgerStreamIO io;if(!path||!out_n||!callbacks)return 0;memcpy(&io,callbacks,sizeof io);
+    if(!io.open_file||!io.seek_end||!io.tell||!io.seek_start||!io.read_file||!io.close_file||!io.alloc||!io.release||!io.get_error||!io.set_error)return 0;
+    io.set_error(0);void *f=io.open_file(path);if(!f)return 0;
+    long long size;int saved;
+    if(io.seek_end(f)||(size=io.tell(f))<0||io.seek_start(f)){
+        saved=io.get_error();if(!saved)saved=EIO;io.close_file(f);io.set_error(saved);return 0;
+    }
+    if(size>2147483647LL){io.close_file(f);io.set_error(EFBIG);return 0;}
+    unsigned char *b=io.alloc(0,(size_t)size+1);
+    if(!b){io.close_file(f);io.set_error(ENOMEM);return 0;}
+    if(size && io.read_file(f,b,(size_t)size)!=(size_t)size){
+        saved=io.get_error();if(!saved)saved=EIO;io.close_file(f);io.release(b);io.set_error(saved);return 0;
+    }
+    if(io.close_file(f)){saved=io.get_error();if(!saved)saved=EIO;io.release(b);io.set_error(saved);return 0;}
+    *out_n=(size_t)size;return b;
+}
 /* The caller supplies the release function for the allocation domain that
  * produced every row. The ledger and its row metadata are copied as bytes. */
 void cxsf_ledger_clear(void *ledger,void (*release)(void *)) {

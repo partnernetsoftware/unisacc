@@ -1,6 +1,17 @@
 #pragma unisa use runtime.source_frame
 static int failures, calls;
 static int hash_calls;
+static int sio_error,sio_mode,sio_closed,sio_allocs,sio_frees;
+static void *sio_open(const char *p){(void)p;if(sio_mode==1){sio_error=ENOENT;return 0;}return &sio_mode;}
+static int sio_end(void *f){(void)f;if(sio_mode==2){sio_error=EACCES;return -1;}return 0;}
+static long long sio_tell(void *f){(void)f;if(sio_mode==3)return -1;if(sio_mode==4)return 2147483648LL;return sio_mode==5?0:3;}
+static int sio_start(void *f){(void)f;return 0;}
+static size_t sio_read(void *f,void *p,size_t n){(void)f;if(sio_mode==6){sio_error=EIO;return 0;}memcpy(p,"abc",n);return n;}
+static int sio_close(void *f){(void)f;sio_closed++;if(sio_mode==7){sio_error=EIO;return -1;}return 0;}
+static void *sio_alloc(void *p,size_t n){(void)p;sio_allocs++;if(sio_mode==8)return 0;return malloc(n);}
+static void sio_free(void *p){if(p)sio_frees++;free(p);}
+static int sio_get(void){return sio_error;}
+static void sio_set(int e){sio_error=e;}
 static void test_hash(const unsigned char *p,int n,char *hex) { (void)p;(void)n;hash_calls++;memset(hex,'a',64);hex[64]=0; }
 static int releases;
 static void release(void *p) { if(p) releases++; free(p); }
@@ -101,6 +112,15 @@ int main(void) {
     viewout=ka;viewlen=99;check(cxsf_ledger_view_copy(views,2,"missing",&viewout,&viewlen,allocate)==1 && viewout==ka && viewlen==99, "ledger-view-missing-unchanged");
     check(cxsf_ledger_view_copy(views,2,"one",&viewout,&viewlen,fail_allocate)==2 && viewout==ka && viewlen==99, "ledger-view-allocation-failure");
     views[0].n=(size_t)-1;check(cxsf_ledger_view_copy(views,2,"one",&viewout,&viewlen,allocate)==3 && viewout==ka && viewlen==99, "ledger-view-overflow");
+    CxLedgerStreamIO io={sio_open,sio_end,sio_tell,sio_start,sio_read,sio_close,sio_alloc,sio_free,sio_get,sio_set};
+    sio_mode=0;sio_closed=sio_allocs=sio_frees=0;viewlen=99;viewout=cxsf_ledger_readstream("x",&viewlen,&io);
+    check(viewout && viewlen==3 && !memcmp(viewout,"abc",3) && sio_closed==1, "ledger-stream-read");sio_free(viewout);
+    sio_mode=5;sio_closed=0;viewlen=99;viewout=cxsf_ledger_readstream("x",&viewlen,&io);
+    check(viewout && viewlen==0 && sio_closed==1, "ledger-stream-empty");sio_free(viewout);
+    int modes[]={1,2,3,4,6,7,8}, errors[]={ENOENT,EACCES,EIO,EFBIG,EIO,EIO,ENOMEM};
+    for(int j=0;j<7;j++) {sio_mode=modes[j];sio_error=0;sio_closed=sio_allocs=sio_frees=0;viewlen=99;
+        viewout=cxsf_ledger_readstream("x",&viewlen,&io);
+        check(!viewout && viewlen==99 && sio_error==errors[j] && sio_closed==(sio_mode!=1) && sio_frees==((sio_mode==6)||(sio_mode==7)), "ledger-stream-failure-cleanup");}
     CxLedger identity={0};char error[256]={0};hash_calls=0;
     check(cxsf_ledger_check_identity(&identity,"stage",0,0,error,sizeof error,test_hash)==1 && strstr(error,"resource-identity-absent") && !hash_calls, "ledger-check-absent-no-hash");
     identity.has_id=1;strcpy(identity.stage,"other");
