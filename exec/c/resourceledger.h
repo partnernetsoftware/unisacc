@@ -54,6 +54,7 @@ int cxsf_ledger_metadata(const char *,const char *,const char *,const char *,int
 int cxsf_ledger_find(const void *,int,int,const unsigned char *,int);
 int cxsf_ledger_next(const void *,int,int,int *,const unsigned char *,int,int *);
 int cxsf_stage_label(const char *);
+int cxsf_ledger_view_copy(const void *,int,const char *,unsigned char **,size_t *,void *(*)(void *,size_t));
 int cxsf_ledger_check_identity(const void *,const char *,const unsigned char *,int,char *,size_t,void (*)(const unsigned char *,int,char *));
 #define rl_hexv cxsf_hex_digit
 #define rl_length cxsf_length
@@ -119,6 +120,12 @@ static unsigned char *rl_file_bytes(const char *dir, const char *name,
                                     const RLFileView *views, int count, size_t *n) {
     char path[4096]; int i, z; unsigned char *b;
     if (views) {
+#ifdef UNISA_CX_SOURCE_FRAME
+        int rc=cxsf_ledger_view_copy(views,count,name,&b,n,realloc);
+        if (!rc) return b;
+        errno=rc==1 ? ENOENT : rc==2 ? ENOMEM : EINVAL;
+        return 0;
+#else
         for (i = 0; i < count; i++) if (!strcmp(name, views[i].name)) {
             b = RL_ALLOC(views[i].n + 1);
             if (!b) { errno = ENOMEM; return 0; }
@@ -126,6 +133,7 @@ static unsigned char *rl_file_bytes(const char *dir, const char *name,
             *n = views[i].n; return b;
         }
         errno = ENOENT; return 0;
+#endif
     }
     z = snprintf(path, sizeof path, "%s/%s", dir, name);
     if (z < 0 || (size_t)z >= sizeof path) { errno = ENAMETOOLONG; return 0; }

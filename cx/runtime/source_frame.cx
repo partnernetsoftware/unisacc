@@ -179,6 +179,27 @@ typedef struct {
 typedef struct {
     CxLedgerRow *rows; int n; int has_id; int trace, cursor; char stage[128]; char input_hex[65];
 } CxLedger;
+typedef struct {const char *name;const unsigned char *bytes;size_t n;} CxLedgerView;
+/* Snapshot views are borrowed; successful copies belong to the caller.
+ * 0 found, 1 missing, 2 allocation failure, 3 invalid or overflowing view. */
+int cxsf_ledger_view_copy(const void *views,int count,const char *name,
+                          unsigned char **out,size_t *length,
+                          void *(*alloc)(void *,size_t)) {
+    if (!views || count<0 || !name || !out || !length || !alloc) return 3;
+    const unsigned char *p=(const unsigned char *)views;
+    for(int i=0;i<count;i++) {
+        CxLedgerView view;memcpy(&view,p+(size_t)i*sizeof view,sizeof view);
+        if (!view.name) return 3;
+        if (!strcmp(name,view.name)) {
+            if (view.n==(size_t)-1 || (view.n && !view.bytes)) return 3;
+            unsigned char *b=alloc(0,view.n+1);
+            if (!b) return 2;
+            if (view.n) memcpy(b,view.bytes,view.n);
+            *out=b;*length=view.n;return 0;
+        }
+    }
+    return 1;
+}
 /* The caller supplies the release function for the allocation domain that
  * produced every row. The ledger and its row metadata are copied as bytes. */
 void cxsf_ledger_clear(void *ledger,void (*release)(void *)) {

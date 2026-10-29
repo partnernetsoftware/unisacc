@@ -23,9 +23,12 @@ static void tracked_release(void *p) {
 #undef realloc
 typedef struct {unsigned char *key;int kn,present;unsigned char *value;int vn;char blob[64];} RowShape;
 typedef struct {RowShape *rows;int n,has_id,trace,cursor;char stage[128],input_hex[65];} LedgerShape;
+typedef struct {const char *name;const unsigned char *bytes;size_t n;} ViewShape;
 _Static_assert(sizeof(RowShape)==sizeof(RLRow),"row size");
 _Static_assert(sizeof(LedgerShape)==sizeof(RLLedger),"ledger size");
 _Static_assert(offsetof(LedgerShape,input_hex)==offsetof(RLLedger,input_hex),"ledger offset");
+_Static_assert(sizeof(ViewShape)==sizeof(RLFileView),"view size");
+_Static_assert(offsetof(ViewShape,n)==offsetof(RLFileView,n),"view offset");
 int main(void) {
     const char text[]="#SC1\tstage=e3:lnx/x86_64/tape/O0\tinput_sha256=0000000000000000000000000000000000000000000000000000000000000000\n00\t0\t-\t0\t-\n01\t1\tempty\t0\te3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n";
     RLFileView views[]={{"resources.tsv",(const unsigned char *)text,sizeof text-1},{"empty",(const unsigned char *)"",0}};
