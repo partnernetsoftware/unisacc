@@ -6,20 +6,20 @@
 
 ## 产品面（2026-10-30）
 
-对照已装产品的入口路径。三档：已通、骨架、未做。没实跑的不写已通。临时入口是 `/tmp/grk-cx-line/entry-o2`，两只 `-O2` 对象再加 `src/hostnative.o`，869311 字节，sha256 `fb4021bc90f1c1847a6ce254737ff552f797b517062567a31e2888515a6bb311`。已装产品 3035300 字节。实测记在下面第 139、140、141、142 节。
+对照已装产品的入口路径。三档：已通、骨架、未做。没实跑的不写已通。临时入口是 `/tmp/grk-cx-line/entry-o2`，两只 `-O2` 对象再加 `src/hostnative.o`，869311 字节，sha256 `fb4021bc90f1c1847a6ce254737ff552f797b517062567a31e2888515a6bb311`。已装产品 3035300 字节。148 格对拍在 `/tmp/grk-cx-line/o2mx/cx-entry-matrix-2026-10-30.tsv`，记在第 143 节。更早的窄格在第 139、140、141、142 节。
 
-- **ar：骨架。** 用法、坏操作、缺文件、空归档、两成员 r/q、列表、抽出，退出码和归档字节与产品相同。写出权限 0755，产品 0644。大归档、替换成员、符号表没跑。
-- **as：骨架。** 用法、坏选项、坏目标、头和 `-b` 冲突，退出码和 stderr 相同。一行 `# unisacc -S lnx/x86_64` 两边都是 728 字节对象，权限都是 0644。加上 `  ret` 两边都是 744 字节。缺文件两边退出 1，产品印打不开，入口印 `as: cannot read`。Mach-O、COFF、大汇编没跑。
-- **nm：骨架。** 用法和坏文件与产品相同。对那份 728 字节对象，两边 stdout 都是空的。
-- **objdump：骨架。** 用法、少 `-d`、坏文件与产品相同。`objdump -d` 那份对象，两边 stdout 都是 95 字节。
-- **-c 对象：骨架。** 没有 `main` 时两边都拒绝，stderr 相同。有 `main` 时产品写出 2216 字节对象，入口停在 `NOT_IMPLEMENTED object`，没有对象文件。
-- **.tape / .tapebin 输入：骨架。** `.tape` 加 `-b lnx/x86_64 -o`，三行 `_start`、`imm r0, 7`、`ret`，两边都是 4096 字节 ELF，权限都是 0755。内容是 `?` 的 `.tape`，两边 stderr 都是 71 字节，`unknown opcode`。内容是 `XXXX` 的 `.tapebin`，两边 stderr 都是 65 字节，`invalid tapebin or origin target mismatch`。`UTAPEBIN` 后面再跟 128 个 0，产品仍是这句，入口停在 `tapebin decode`。解码仍在 C。有效包没跑。
-- **-cx-plan / -cx-interface：骨架。** 不带 `-include` 时，计划、接口、缺文件、两个旗一起用，退出码和输出与产品相同。`-include extra.h -cx-plan` 两边 stdout 都是 20 字节。多个模块的 `use` 没跑。
-- **-dump-tokens：骨架。** 旗认到了。产品打出 token。入口停在 `NOT_IMPLEMENTED tokens`。
-- **--emit-host-symbols：骨架。** 和 `-c -b` 一起用时，两边都拒绝，stderr 相同。没有一格写出符号文件。
-- **-O1 / -O2：骨架。** 入口拆成执行器、驱动两只 `-O2 -funit`，再链上入口专用的 `src/hostnative.o`。`process_group.cx` 仍只有 `setpgid`。三只编译都低于 55 秒。这只入口对 `int x;` 做 `-E`，stdout 和产品相同。没有对拍优化后的对象。`-O1` 没在这只上重跑。
-- **-D / -U / -I / -include：骨架。** 不带这些旗的 `-E` 对 `int x;` 仍是 7 字节。`-DFOO -E` 留下 `int a;`。`-UFOO -E` 和先 `-DFOO` 再 `-UFOO` 留下 `int b;`。这三格都是 38 字节。`-I inc` 对引号和尖括号都是 9 字节。`-include inc/z.h -E` 是 16 字节。`-iquote inc -E` 是 9 字节。`-include extra.h -cx-plan` 两边 stdout 都是 20 字节，行里有 `extra.h`。多个目录、缺参数没跑。
-- **库接口：骨架。** 没有单独的库命令。`int abs(int); int main(void){return abs(-3);}` 默认执行，两边退出 3，stdout 和 stderr 都是 0。`tests/library-abi.cx` 没跑。`us_*` 那套库 API 没接到这条入口。
+- **ar：骨架。** 这只表上，用法、`ar z`、缺成员和产品相同。空归档 8 字节、两成员 146 字节，两边字节相同，入口权限 0755，产品 0644。大归档、替换成员、符号表没跑。
+- **as：骨架。** 用法、`-z`、坏 `-b`、头和 `-b` 冲突、一行汇编、加 `ret`，退出码和对象字节与产品相同。缺文件两边退出 1。产品是 `unisacc: error: cannot open …: ENOENT`，入口是 `as: cannot read`。Mach-O、COFF、大汇编没跑。
+- **nm：骨架。** 这只表上用法、坏文件、728 字节对象三行和产品相同。
+- **objdump：骨架。** 这只表上用法、少 `-d`、坏文件、`objdump -d` 四行和产品相同。
+- **-c 对象：骨架。** 没有 `main` 时两边都拒绝。有 `main` 时产品写出 2216 字节对象，入口停在 `NOT_IMPLEMENTED object`，没有对象文件。
+- **.tape / .tapebin 输入：骨架。** 三行 `_start` 的 `.tape` 两边都是 4096 字节 ELF。内容是 `?` 的 `.tape`，两边 stderr 都是 71 字节。内容是 `XXXX` 的 `.tapebin`，两边 stderr 都是 65 字节。`UTAPEBIN` 后面再跟 128 个 0，产品 65 字节仍是 invalid，入口 38 字节是 `tapebin decode`。解码仍在 C。有效包没跑。
+- **-cx-plan / -cx-interface：骨架。** 这只表上计划、接口、两个旗、缺文件、只有旗、`-include` 八行和产品相同。多个模块的 `use` 没跑。
+- **-dump-tokens：骨架。** 产品 stdout 25 字节。入口停在 `NOT_IMPLEMENTED tokens`。
+- **--emit-host-symbols：骨架。** 配 `-c -b` 和配 `-S -b` 两边都拒绝，stderr 相同。没有一格写出符号文件。
+- **-O1 / -O2：骨架。** `-O1 -E` 和 `-O2 -E` 对 `int x;` 与产品相同。`-O1 -c` 和 `-O2 -c` 有 `main` 时，产品写出 2216 字节，入口停在 `NOT_IMPLEMENTED object`。
+- **-D / -U / -I / -include：骨架。** 这只表上 `-DFOO`、`-UFOO`、先定义再取消、`-I` 引号、`-I` 尖括号、`-include`、`-iquote` 七行和产品相同。多个目录、缺参数没跑。
+- **库接口：骨架。** `int abs(int); int main(void){return abs(-3);}` 默认执行，两边退出 3。`tests/library-abi.cx` 没跑。`us_*` 没接到这条入口。`dup.c` 的 `strdup` 不在这 12 面里：产品退出 3，入口退出 127，stderr 是 `unisacc: no host function strdup`。
 
 ## 0. 一句话
 
@@ -1741,6 +1741,23 @@ flowchart TD
   x --> link["三只对象链接"]
   d --> link
   h --> link
+```
+
+## 143. 2026-10-30 用这只 -O2 入口跑完 148 格
+
+`tools/check-cx-entry.cx` 在原来 100 格后面加了 48 格，12 面各有自己的对拍行。入口是上面那只 869311 字节的 `/tmp/grk-cx-line/entry-o2`。表在 `/tmp/grk-cx-line/o2mx/cx-entry-matrix-2026-10-30.tsv`。进度走到 148，stdout 是 `LEFT:0`。没有一面改成已通。
+
+100 格语料里，`do.c` 到 `cxstd_main.cx` 都和产品相同。`dev-run.cx` 的 `-E` 相同，两边退出 1，stderr 67 字节。`-S`、`-run` 和六个 `-o` 都是入口撞上 18 秒上限，退出 142，stderr 0。产品这边 `-S` 用 4.4 秒退出 1，stderr 是 `undefined function 'strdup'` 和 `setpgid`。`-run` 用 0.1 秒退出 2，stderr 是用法拒绝。六个 `-o` 里四个写出对象，两个 Windows 目标退出 1。`dup.c` 的 `-run`：产品退出 3；入口退出 127，stderr 是 `unisacc: no host function strdup`。
+
+12 面里和产品相同的行：`nm` 三行，`objdump` 四行，`-cx-plan`/`-cx-interface` 八行，`--emit-host-symbols` 两行，`-D` 族七行，`abs(-3)` 一行，`as` 除缺文件外的六行，`.tape` 好文件和坏文件，坏 `.tapebin`，没有 `main` 的 `-c`，`-O1 -E` 和 `-O2 -E`。
+
+还红的行：`ar` 空归档和两成员，字节相同，权限 0755 对 0644。`as` 缺文件，句子不同。有 `main` 的 `-c`、`-O1 -c`、`-O2 -c`，入口停在 `NOT_IMPLEMENTED object`。`UTAPEBIN` 加 128 个 0，句子不同。`-dump-tokens` 停在 `NOT_IMPLEMENTED tokens`。按红格数量，`dev-run` 8 格，`-O` 和 `ar` 各 2 格，其余各 1 格。这不是产品安装。
+
+```mermaid
+flowchart TD
+  t["148 格"] --> ok["nm objdump 计划 符号 -D abs 相同"]
+  t --> red["dev-run 8 格超时"]
+  t --> face["ar 权限 as 缺文件 对象 词法 tapebin 头"]
 ```
 
 ## 64. 2026-10-29 编译器纯拒绝接到 bindhost

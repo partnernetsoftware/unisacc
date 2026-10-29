@@ -6,13 +6,19 @@
    slice budget and leaves OUTDIR/cx-entry-matrix.progress. Re-invoke the
    same command until stdout says LEFT:0. The table is
    OUTDIR/cx-entry-matrix-2026-10-30.tsv. A missing progress file starts
-   over and truncates that table.
+   over and truncates that table. A progress file counts rows, so a new
+   row list needs a fresh OUTDIR.
 
-   Expected rows, in order (100). For each corpus except dup.c:
+   Expected rows, in order. First 100: for each corpus except dup.c,
      -E, -S, -run on lnx/x86_64, then -o on
      lnx/x86_64, lnx/arm64, osx/x86_64, osx/arm64, win/x86_64, win/arm64.
-   Last row: dup.c -run on lnx/x86_64. dup.c is the text below, written
-   to OUTDIR/dup.c. Its row is measured. It is not given a canned verdict. */
+   Then dup.c -run on lnx/x86_64. dup.c is the text below, written to
+   OUTDIR/dup.c. Its row is measured. It is not given a canned verdict.
+   Then 48 product-face rows (ar, as, nm, objdump, -c, tape/tapebin,
+   -cx-plan/-cx-interface, -dump-tokens, --emit-host-symbols, -O1/-O2,
+   -D/-U/-I/-include/-iquote, lib). Fixtures are written under OUTDIR.
+   Each face row runs the same argv on both compilers. An image row also
+   compares that invocation's output file bytes and permission. */
 static const char *const cxe_name[] = {
     "do.c", "fact.c", "fib.c", "hello.c", "host.c", "indirect6.c",
     "ptr.c", "struct.c", "switch.c", "cxstd_main.cx", "dev-run.cx"
@@ -33,7 +39,64 @@ static const char *const cxe_tgt[] = {
 static const char cxe_dup[] =
     "#include <string.h>\n"
     "int main(void) { char *s = strdup(\"ab\"); return s && s[0]=='a' ? 3 : 1; }\n";
-enum { CXE_FILES = 11, CXE_PHASES = 9, CXE_N = 100 };
+enum { CXE_FILES = 11, CXE_PHASES = 9, CXE_CORPUS = 100, CXE_FACE_N = 48, CXE_N = 148 };
+static const char *const cxe_face_name[CXE_FACE_N] = {
+    "ar", "ar", "ar", "ar", "ar",
+    "as", "as", "as", "as", "as", "as", "as",
+    "nm", "nm", "nm",
+    "objdump", "objdump", "objdump", "objdump",
+    "-c", "-c",
+    "tape", "tape", "tapebin", "tapebin",
+    "cx-plan", "cx-interface", "cx-plan", "cx-interface",
+    "cx-plan", "cx-plan", "cx-plan", "cx-plan",
+    "dump-tokens",
+    "emit-host-symbols", "emit-host-symbols",
+    "-O1", "-O2", "-O1", "-O2",
+    "-D", "-D", "-D", "-D", "-D", "-D", "-D",
+    "lib"
+};
+static const char *const cxe_face_mode[CXE_FACE_N] = {
+    "usage", "z", "r-missing", "r-empty", "r-two",
+    "usage", "-z", "-b-nope", "header-b", "one.s", "ret.s", "missing",
+    "usage", "bad", "one.o",
+    "usage", "no-d", "bad", "-d",
+    "no-main", "main",
+    "ok", "bad", "bad", "head",
+    "x.cx", "x.cx", "id.cx", "id.cx", "both", "missing", "only", "-include",
+    "x.c",
+    "-c", "-S",
+    "-E", "-E", "-c", "-c",
+    "-DFOO", "-UFOO", "-D-U", "-I-quote", "-I-angle", "-include", "-iquote",
+    "abs"
+};
+static const char *const cxe_face_tgt[CXE_FACE_N] = {
+    "-", "-", "-", "-", "-",
+    "-", "-", "-", "lnx/arm64", "lnx/x86_64", "lnx/x86_64", "-",
+    "-", "-", "-",
+    "-", "-", "-", "-",
+    "lnx/x86_64", "lnx/x86_64",
+    "lnx/x86_64", "lnx/x86_64", "lnx/x86_64", "lnx/x86_64",
+    "-", "-", "-", "-", "-", "-", "-", "-",
+    "-",
+    "lnx/x86_64", "lnx/x86_64",
+    "-", "-", "lnx/x86_64", "lnx/x86_64",
+    "-", "-", "-", "-", "-", "-", "-",
+    "-"
+};
+static const char cxe_face_img[CXE_FACE_N] = {
+    0, 0, 0, 1, 1,
+    0, 0, 0, 1, 1, 1, 0,
+    0, 0, 0,
+    0, 0, 0, 0,
+    0, 1,
+    1, 1, 1, 1,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0,
+    1, 1,
+    0, 0, 1, 1,
+    0, 0, 0, 0, 0, 0, 0,
+    0
+};
 /* Stop starting a normal cell after this much of main. A dev-run.cx cell
    starts only in the first second, so one of those cells is the invocation. */
 static const long long CXE_SLICE_NS = 18000000000LL;
@@ -140,31 +203,13 @@ static void cxe_side_free(struct cxe_side *s) {
     s->err = 0;
 }
 
-static void cxe_run(const char *bound, int secs, const char *bin, const char *mode,
-                    const char *target, const char *img, const char *src, struct cxe_side *s) {
-    char sec[16];
-    char *av[10];
+static void cxe_exec(char **av, int secs, const char *img, int image, struct cxe_side *s) {
     char why[1024];
     np_result r;
     long long t0, t1;
-    int n = 0;
     int pr;
     cxe_side_clear(s);
-    snprintf(sec, sizeof sec, "%d", secs);
-    av[n++] = (char *)bound;
-    av[n++] = sec;
-    av[n++] = (char *)bin;
-    if (!strcmp(mode, "-o")) {
-        av[n++] = "-b";
-        av[n++] = (char *)target;
-        av[n++] = "-o";
-        av[n++] = (char *)img;
-    } else {
-        av[n++] = (char *)mode;
-    }
-    av[n++] = (char *)src;
-    av[n] = 0;
-    unlink(img);
+    if (image) unlink(img);
     memset(&r, 0, sizeof r);
     t0 = cxe_ns();
     pr = np_run(av, "/tmp/notrepo", 0, secs + 8, &r, why, sizeof why);
@@ -184,7 +229,29 @@ static void cxe_run(const char *bound, int secs, const char *bin, const char *mo
         s->err = r.err;
         s->errn = r.errn;
     }
-    if (!strcmp(mode, "-o")) cxe_perm(img, &s->image_n, s->perm, (int)sizeof s->perm);
+    if (image) cxe_perm(img, &s->image_n, s->perm, (int)sizeof s->perm);
+}
+
+static void cxe_run(const char *bound, int secs, const char *bin, const char *mode,
+                    const char *target, const char *img, const char *src, struct cxe_side *s) {
+    char sec[16];
+    char *av[10];
+    int n = 0;
+    snprintf(sec, sizeof sec, "%d", secs);
+    av[n++] = (char *)bound;
+    av[n++] = sec;
+    av[n++] = (char *)bin;
+    if (!strcmp(mode, "-o")) {
+        av[n++] = "-b";
+        av[n++] = (char *)target;
+        av[n++] = "-o";
+        av[n++] = (char *)img;
+    } else {
+        av[n++] = (char *)mode;
+    }
+    av[n++] = (char *)src;
+    av[n] = 0;
+    cxe_exec(av, secs, img, !strcmp(mode, "-o"), s);
 }
 
 static int cxe_near(long long wall, int secs) {
@@ -281,12 +348,250 @@ static int cxe_repo(char *root, int cap) {
     return 0;
 }
 
+struct cxe_fx {
+    char inc[4096], xc[4096], dc[4096], qc[4096], ac[4096], ec[4096], mc[4096];
+    char tcx[4096], idcx[4096], extra[4096], zh[4096], abs[4096];
+    char ones[4096], rets[4096], bad[4096], btape[4096], otape[4096];
+    char bbin[4096], hbin[4096], atxt[4096], btxt[4096], oneo[4096];
+    char nopes[4096], nopecx[4096], nosuch[4096], missa[4096];
+};
+
+static void cxe_put(const char *path, const char *s) {
+    if (np_writefile(path, s, strlen(s))) cxe_die("fixture");
+}
+
+static void cxe_headbin(const char *path) {
+    FILE *f;
+    char z[128];
+    memset(z, 0, sizeof z);
+    f = fopen(path, "wb");
+    if (!f) cxe_die("head.tapebin");
+    if (fwrite("UTAPEBIN", 1, 8, f) != 8 || fwrite(z, 1, 128, f) != 128 || fclose(f) != 0)
+        cxe_die("head.tapebin");
+}
+
+static void cxe_once(const char *bound, const char *bin, const char *a, const char *b,
+                     const char *c, const char *d) {
+    char *av[8];
+    char why[1024];
+    np_result r;
+    int n = 0;
+    int pr;
+    av[n++] = (char *)bound;
+    av[n++] = "12";
+    av[n++] = (char *)bin;
+    av[n++] = (char *)a;
+    av[n++] = (char *)b;
+    av[n++] = (char *)c;
+    av[n++] = (char *)d;
+    av[n] = 0;
+    memset(&r, 0, sizeof r);
+    pr = np_run(av, "/tmp/notrepo", 0, 20, &r, why, sizeof why);
+    if (pr || r.rc) {
+        if (r.err && r.errn) fwrite(r.err, 1, r.errn, stderr);
+        if (pr) fprintf(stderr, "check-cx-entry: %s\n", why);
+        np_free(&r);
+        cxe_die("fixture object");
+    }
+    np_free(&r);
+}
+
+static void cxe_prep(const char *outdir, const char *bound, const char *product, struct cxe_fx *fx) {
+    int mkdir(const char *, unsigned);
+    cxe_join(fx->inc, (int)sizeof fx->inc, outdir, "inc");
+    if (mkdir(fx->inc, 0755) != 0 && errno != EEXIST) cxe_die("inc");
+    cxe_join(fx->zh, (int)sizeof fx->zh, fx->inc, "z.h");
+    cxe_join(fx->xc, (int)sizeof fx->xc, outdir, "x.c");
+    cxe_join(fx->dc, (int)sizeof fx->dc, outdir, "d.c");
+    cxe_join(fx->qc, (int)sizeof fx->qc, outdir, "q.c");
+    cxe_join(fx->ac, (int)sizeof fx->ac, outdir, "a.c");
+    cxe_join(fx->ec, (int)sizeof fx->ec, outdir, "e.c");
+    cxe_join(fx->mc, (int)sizeof fx->mc, outdir, "m.c");
+    cxe_join(fx->tcx, (int)sizeof fx->tcx, outdir, "t.cx");
+    cxe_join(fx->idcx, (int)sizeof fx->idcx, outdir, "id.cx");
+    cxe_join(fx->extra, (int)sizeof fx->extra, outdir, "extra.h");
+    cxe_join(fx->abs, (int)sizeof fx->abs, outdir, "abs.c");
+    cxe_join(fx->ones, (int)sizeof fx->ones, outdir, "one.s");
+    cxe_join(fx->rets, (int)sizeof fx->rets, outdir, "ret.s");
+    cxe_join(fx->bad, (int)sizeof fx->bad, outdir, "bad.bin");
+    cxe_join(fx->btape, (int)sizeof fx->btape, outdir, "bad.tape");
+    cxe_join(fx->otape, (int)sizeof fx->otape, outdir, "one.tape");
+    cxe_join(fx->bbin, (int)sizeof fx->bbin, outdir, "bad.tapebin");
+    cxe_join(fx->hbin, (int)sizeof fx->hbin, outdir, "head.tapebin");
+    cxe_join(fx->atxt, (int)sizeof fx->atxt, outdir, "a.txt");
+    cxe_join(fx->btxt, (int)sizeof fx->btxt, outdir, "b.txt");
+    cxe_join(fx->oneo, (int)sizeof fx->oneo, outdir, "one.o");
+    cxe_join(fx->nopes, (int)sizeof fx->nopes, outdir, "nope.s");
+    cxe_join(fx->nopecx, (int)sizeof fx->nopecx, outdir, "nope.cx");
+    cxe_join(fx->nosuch, (int)sizeof fx->nosuch, outdir, "nosuch");
+    cxe_join(fx->missa, (int)sizeof fx->missa, outdir, "miss.a");
+    cxe_put(fx->zh, "int z;\n");
+    cxe_put(fx->xc, "int x;\n");
+    cxe_put(fx->dc, "#ifdef FOO\nint a;\n#else\nint b;\n#endif\n");
+    cxe_put(fx->qc, "#include \"z.h\"\n");
+    cxe_put(fx->ac, "#include <z.h>\n");
+    cxe_put(fx->ec, "int e;\n");
+    cxe_put(fx->mc, "int main(void) { return 0; }\n");
+    cxe_put(fx->tcx, "int x;\n");
+    cxe_put(fx->idcx, "int id_n(int n) { return n; }\n");
+    cxe_put(fx->extra, "int extra;\n");
+    cxe_put(fx->abs, "int abs(int);\nint main(void){return abs(-3);}\n");
+    cxe_put(fx->ones, "# unisacc -S lnx/x86_64\n");
+    cxe_put(fx->rets, "# unisacc -S lnx/x86_64\n  ret\n");
+    cxe_put(fx->bad, "not-an-object\n");
+    cxe_put(fx->btape, "?\n");
+    cxe_put(fx->otape, "_start:\n  imm r0, 7\n  ret\n");
+    cxe_put(fx->bbin, "XXXX");
+    cxe_put(fx->atxt, "hello\n");
+    cxe_put(fx->btxt, "world-wide\n");
+    cxe_headbin(fx->hbin);
+    unlink(fx->oneo);
+    cxe_once(bound, product, "as", fx->ones, "-o", fx->oneo);
+}
+
+static void cxe_push(char **av, int *n, char *s) {
+    if (*n >= 15) cxe_die("argv");
+    av[(*n)++] = s;
+    av[*n] = 0;
+}
+
+static int cxe_face(int id, char **av, const char *bound, const char *sec, const char *bin,
+                    const char *img, const struct cxe_fx *fx,
+                    const char **name, const char **mode, const char **target) {
+    int n = 0;
+    if (id < 0 || id >= CXE_FACE_N) cxe_die("face");
+    *name = cxe_face_name[id];
+    *mode = cxe_face_mode[id];
+    *target = cxe_face_tgt[id];
+    cxe_push(av, &n, (char *)bound);
+    cxe_push(av, &n, (char *)sec);
+    cxe_push(av, &n, (char *)bin);
+    switch (id) {
+    case 0: cxe_push(av, &n, "ar"); break;
+    case 1:
+        cxe_push(av, &n, "ar"); cxe_push(av, &n, "z"); cxe_push(av, &n, (char *)fx->nosuch); break;
+    case 2:
+        cxe_push(av, &n, "ar"); cxe_push(av, &n, "r");
+        cxe_push(av, &n, (char *)fx->missa); cxe_push(av, &n, (char *)fx->nosuch); break;
+    case 3:
+        cxe_push(av, &n, "ar"); cxe_push(av, &n, "r"); cxe_push(av, &n, (char *)img); break;
+    case 4:
+        cxe_push(av, &n, "ar"); cxe_push(av, &n, "r"); cxe_push(av, &n, (char *)img);
+        cxe_push(av, &n, (char *)fx->atxt); cxe_push(av, &n, (char *)fx->btxt); break;
+    case 5: cxe_push(av, &n, "as"); break;
+    case 6:
+        cxe_push(av, &n, "as"); cxe_push(av, &n, "-z"); cxe_push(av, &n, (char *)fx->ones); break;
+    case 7:
+        cxe_push(av, &n, "as"); cxe_push(av, &n, "-b"); cxe_push(av, &n, "nope");
+        cxe_push(av, &n, (char *)fx->ones); break;
+    case 8:
+        cxe_push(av, &n, "as"); cxe_push(av, &n, (char *)fx->ones);
+        cxe_push(av, &n, "-b"); cxe_push(av, &n, "lnx/arm64");
+        cxe_push(av, &n, "-o"); cxe_push(av, &n, (char *)img); break;
+    case 9:
+        cxe_push(av, &n, "as"); cxe_push(av, &n, (char *)fx->ones);
+        cxe_push(av, &n, "-o"); cxe_push(av, &n, (char *)img); break;
+    case 10:
+        cxe_push(av, &n, "as"); cxe_push(av, &n, (char *)fx->rets);
+        cxe_push(av, &n, "-o"); cxe_push(av, &n, (char *)img); break;
+    case 11:
+        cxe_push(av, &n, "as"); cxe_push(av, &n, (char *)fx->nopes); break;
+    case 12: cxe_push(av, &n, "nm"); break;
+    case 13:
+        cxe_push(av, &n, "nm"); cxe_push(av, &n, (char *)fx->bad); break;
+    case 14:
+        cxe_push(av, &n, "nm"); cxe_push(av, &n, (char *)fx->oneo); break;
+    case 15: cxe_push(av, &n, "objdump"); break;
+    case 16:
+        cxe_push(av, &n, "objdump"); cxe_push(av, &n, (char *)fx->ones); break;
+    case 17:
+        cxe_push(av, &n, "objdump"); cxe_push(av, &n, "-d"); cxe_push(av, &n, (char *)fx->bad); break;
+    case 18:
+        cxe_push(av, &n, "objdump"); cxe_push(av, &n, "-d"); cxe_push(av, &n, (char *)fx->oneo); break;
+    case 19:
+        cxe_push(av, &n, "-c"); cxe_push(av, &n, "-b"); cxe_push(av, &n, "lnx/x86_64");
+        cxe_push(av, &n, (char *)fx->xc); break;
+    case 20:
+        cxe_push(av, &n, "-c"); cxe_push(av, &n, "-b"); cxe_push(av, &n, "lnx/x86_64");
+        cxe_push(av, &n, "-o"); cxe_push(av, &n, (char *)img); cxe_push(av, &n, (char *)fx->mc); break;
+    case 21:
+        cxe_push(av, &n, "-b"); cxe_push(av, &n, "lnx/x86_64");
+        cxe_push(av, &n, (char *)fx->otape); cxe_push(av, &n, "-o"); cxe_push(av, &n, (char *)img); break;
+    case 22:
+        cxe_push(av, &n, "-b"); cxe_push(av, &n, "lnx/x86_64");
+        cxe_push(av, &n, (char *)fx->btape); cxe_push(av, &n, "-o"); cxe_push(av, &n, (char *)img); break;
+    case 23:
+        cxe_push(av, &n, "-b"); cxe_push(av, &n, "lnx/x86_64");
+        cxe_push(av, &n, (char *)fx->bbin); cxe_push(av, &n, "-o"); cxe_push(av, &n, (char *)img); break;
+    case 24:
+        cxe_push(av, &n, "-b"); cxe_push(av, &n, "lnx/x86_64");
+        cxe_push(av, &n, (char *)fx->hbin); cxe_push(av, &n, "-o"); cxe_push(av, &n, (char *)img); break;
+    case 25: cxe_push(av, &n, "-cx-plan"); cxe_push(av, &n, (char *)fx->tcx); break;
+    case 26: cxe_push(av, &n, "-cx-interface"); cxe_push(av, &n, (char *)fx->tcx); break;
+    case 27: cxe_push(av, &n, "-cx-plan"); cxe_push(av, &n, (char *)fx->idcx); break;
+    case 28: cxe_push(av, &n, "-cx-interface"); cxe_push(av, &n, (char *)fx->idcx); break;
+    case 29:
+        cxe_push(av, &n, "-cx-plan"); cxe_push(av, &n, "-cx-interface");
+        cxe_push(av, &n, (char *)fx->idcx); break;
+    case 30: cxe_push(av, &n, "-cx-plan"); cxe_push(av, &n, (char *)fx->nopecx); break;
+    case 31: cxe_push(av, &n, "-cx-plan"); break;
+    case 32:
+        cxe_push(av, &n, "-include"); cxe_push(av, &n, (char *)fx->extra);
+        cxe_push(av, &n, "-cx-plan"); cxe_push(av, &n, (char *)fx->tcx); break;
+    case 33: cxe_push(av, &n, "-dump-tokens"); cxe_push(av, &n, (char *)fx->xc); break;
+    case 34:
+        cxe_push(av, &n, "--emit-host-symbols"); cxe_push(av, &n, (char *)img);
+        cxe_push(av, &n, "-c"); cxe_push(av, &n, "-b"); cxe_push(av, &n, "lnx/x86_64");
+        cxe_push(av, &n, (char *)fx->xc); break;
+    case 35:
+        cxe_push(av, &n, "--emit-host-symbols"); cxe_push(av, &n, (char *)img);
+        cxe_push(av, &n, "-S"); cxe_push(av, &n, "-b"); cxe_push(av, &n, "lnx/x86_64");
+        cxe_push(av, &n, (char *)fx->xc); break;
+    case 36:
+        cxe_push(av, &n, "-O1"); cxe_push(av, &n, "-E"); cxe_push(av, &n, (char *)fx->xc); break;
+    case 37:
+        cxe_push(av, &n, "-O2"); cxe_push(av, &n, "-E"); cxe_push(av, &n, (char *)fx->xc); break;
+    case 38:
+        cxe_push(av, &n, "-O1"); cxe_push(av, &n, "-c"); cxe_push(av, &n, "-b");
+        cxe_push(av, &n, "lnx/x86_64"); cxe_push(av, &n, "-o"); cxe_push(av, &n, (char *)img);
+        cxe_push(av, &n, (char *)fx->mc); break;
+    case 39:
+        cxe_push(av, &n, "-O2"); cxe_push(av, &n, "-c"); cxe_push(av, &n, "-b");
+        cxe_push(av, &n, "lnx/x86_64"); cxe_push(av, &n, "-o"); cxe_push(av, &n, (char *)img);
+        cxe_push(av, &n, (char *)fx->mc); break;
+    case 40:
+        cxe_push(av, &n, "-DFOO"); cxe_push(av, &n, "-E"); cxe_push(av, &n, (char *)fx->dc); break;
+    case 41:
+        cxe_push(av, &n, "-UFOO"); cxe_push(av, &n, "-E"); cxe_push(av, &n, (char *)fx->dc); break;
+    case 42:
+        cxe_push(av, &n, "-DFOO"); cxe_push(av, &n, "-UFOO"); cxe_push(av, &n, "-E");
+        cxe_push(av, &n, (char *)fx->dc); break;
+    case 43:
+        cxe_push(av, &n, "-I"); cxe_push(av, &n, (char *)fx->inc);
+        cxe_push(av, &n, "-E"); cxe_push(av, &n, (char *)fx->qc); break;
+    case 44:
+        cxe_push(av, &n, "-I"); cxe_push(av, &n, (char *)fx->inc);
+        cxe_push(av, &n, "-E"); cxe_push(av, &n, (char *)fx->ac); break;
+    case 45:
+        cxe_push(av, &n, "-include"); cxe_push(av, &n, (char *)fx->zh);
+        cxe_push(av, &n, "-E"); cxe_push(av, &n, (char *)fx->ec); break;
+    case 46:
+        cxe_push(av, &n, "-iquote"); cxe_push(av, &n, (char *)fx->inc);
+        cxe_push(av, &n, "-E"); cxe_push(av, &n, (char *)fx->qc); break;
+    case 47:
+        cxe_push(av, &n, (char *)fx->abs); break;
+    default: cxe_die("face id");
+    }
+    return cxe_face_img[id];
+}
+
 int main(int argc, char **argv) {
     char root[4096], entry[4096], outdir[4096];
     char product[4096], bound[4096], tsvpath[4096], progpath[4096], dups[4096];
     char src[4096], pimg[4096], nimg[4096];
     char row[1024];
     const char *name, *mode, *target, *rel;
+    struct cxe_fx *fx;
     FILE *tsv;
     struct stat st;
     long long t0, bytes;
@@ -299,7 +604,12 @@ int main(int argc, char **argv) {
     }
     if ((int)(sizeof cxe_name / sizeof cxe_name[0]) != CXE_FILES) cxe_die("corpus");
     if ((int)(sizeof cxe_mode / sizeof cxe_mode[0]) != CXE_PHASES) cxe_die("phases");
-    if (CXE_FILES * CXE_PHASES + 1 != CXE_N) cxe_die("count");
+    if ((int)(sizeof cxe_face_name / sizeof cxe_face_name[0]) != CXE_FACE_N) cxe_die("faces");
+    if ((int)(sizeof cxe_face_mode / sizeof cxe_face_mode[0]) != CXE_FACE_N) cxe_die("face modes");
+    if ((int)(sizeof cxe_face_tgt / sizeof cxe_face_tgt[0]) != CXE_FACE_N) cxe_die("face targets");
+    if ((int)sizeof cxe_face_img != CXE_FACE_N) cxe_die("face image");
+    if (CXE_FILES * CXE_PHASES + 1 != CXE_CORPUS) cxe_die("count");
+    if (CXE_CORPUS + CXE_FACE_N != CXE_N) cxe_die("count");
     if (cxe_repo(root, (int)sizeof root)) cxe_die("repo root");
     if (!realpath(argv[1], entry)) cxe_die("ENTRY");
     if (!realpath(argv[2], outdir)) cxe_die("OUTDIR");
@@ -322,6 +632,9 @@ int main(int argc, char **argv) {
         printf("LEFT:0\n");
         return 0;
     }
+    fx = calloc(1, sizeof *fx);
+    if (!fx) cxe_die("memory");
+    cxe_prep(outdir, bound, product, fx);
     lines = cxe_lines(tsvpath);
     if (at == 0) {
         tsv = fopen(tsvpath, "wb");
@@ -346,30 +659,48 @@ int main(int argc, char **argv) {
         long long el = cxe_ns() - t0;
         struct cxe_side ps, ns;
         const char *verdict, *note;
-        if (at == CXE_FILES * CXE_PHASES) {
-            name = "dup.c";
-            mode = "-run";
-            target = "lnx/x86_64";
-            snprintf(src, sizeof src, "%s", dups);
+        const char *jmode;
+        if (at >= CXE_CORPUS) {
+            char secb[16];
+            char *av[16];
+            int fid;
+            int image;
+            if (el > CXE_SLICE_NS) break;
+            fid = at - CXE_CORPUS;
+            secs = 12;
+            snprintf(secb, sizeof secb, "%d", secs);
+            image = cxe_face(fid, av, bound, secb, product, pimg, fx, &name, &mode, &target);
+            cxe_exec(av, secs, pimg, image, &ps);
+            image = cxe_face(fid, av, bound, secb, entry, nimg, fx, &name, &mode, &target);
+            cxe_exec(av, secs, nimg, image, &ns);
+            jmode = image ? "-o" : "-E";
         } else {
-            file = at / CXE_PHASES;
-            phase = at % CXE_PHASES;
-            name = cxe_name[file];
-            rel = cxe_rel[file];
-            mode = cxe_mode[phase];
-            target = cxe_tgt[phase];
-            cxe_join(src, (int)sizeof src, root, rel);
+            if (at == CXE_FILES * CXE_PHASES) {
+                name = "dup.c";
+                mode = "-run";
+                target = "lnx/x86_64";
+                snprintf(src, sizeof src, "%s", dups);
+            } else {
+                file = at / CXE_PHASES;
+                phase = at % CXE_PHASES;
+                name = cxe_name[file];
+                rel = cxe_rel[file];
+                mode = cxe_mode[phase];
+                target = cxe_tgt[phase];
+                cxe_join(src, (int)sizeof src, root, rel);
+            }
+            if (stat(src, &st) != 0 || !S_ISREG(st.st_mode)) cxe_die("corpus missing");
+            secs = !strcmp(name, "dev-run.cx") ? 18 : 12;
+            if (!strcmp(name, "dev-run.cx")) {
+                if (el > 1000000000LL) break;
+            } else if (el > CXE_SLICE_NS) {
+                break;
+            }
+            cxe_run(bound, secs, product, mode, target, pimg, src, &ps);
+            cxe_run(bound, secs, entry, mode, target, nimg, src, &ns);
+            jmode = mode;
         }
-        if (stat(src, &st) != 0 || !S_ISREG(st.st_mode)) cxe_die("corpus missing");
-        secs = !strcmp(name, "dev-run.cx") ? 18 : 12;
-        if (!strcmp(name, "dev-run.cx")) {
-            if (el > 1000000000LL) break;
-        } else if (el > CXE_SLICE_NS) {
-            break;
-        }
-        cxe_run(bound, secs, product, mode, target, pimg, src, &ps);
-        cxe_run(bound, secs, entry, mode, target, nimg, src, &ns);
-        cxe_judge(&ps, &ns, mode, pimg, nimg, secs, &verdict, &note);
+        cxe_judge(&ps, &ns, jmode, pimg, nimg, secs, &verdict, &note);
         snprintf(row, sizeof row,
                  "%s\t%s\t%s\t%d\t%d\t%llu\t%llu\t%llu\t%llu\t%lld\t%lld\t%s\t%s\t%s\t%s\t%lld\t%lld\n",
                  name, mode, target, ps.rc, ns.rc,
