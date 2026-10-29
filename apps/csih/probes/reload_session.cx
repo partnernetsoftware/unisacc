@@ -1,0 +1,234 @@
+/* CX probe */
+/* reload_session.c -- C port of probes/reload_session.py.
+ * Strict undeployed v2 automatic-execution state through the real session CLI
+ * (roundtrip mode of reload_session_cli.c), run mode per case.
+ *
+ * Run from apps/csih:
+ *   /bin/sh /Users/wjc/repos/unisacc/unisacc.com -include ABS/json.h json.cx reload_state.c \
+ *       reload_session_decode.c reload_session_encode.c reload_session_cli.c roundtrip FIXTURE
+ *
+ * Deviations from the Python original:
+ *   - json.c is not in apps/csih any more; the source is json.cx (the unit
+ *     reload_state.c builds with);
+ *   - the Python compared json.loads(restored) == json.loads(raw). Without a JSON
+ *     parser in the probe, valid cases check the restored output (whitespace
+ *     removed) for each field as a `"key":value` token, so key order and spacing
+ *     are not part of the verdict. Failure cases compare the FAIL line exactly;
+ *   - FNV-1a 64 stands in for sha256 in the before/after hash check.
+ */
+#include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <time.h>
+#include "unisa_safedel.h"
+#include <unistd.h>
+
+#include "csih_flat.h"
+
+#define SHA_A "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+#define ROOT_BIN CSIH_ROOT "/unisacc.com"
+
+static char FIX[1100];
+
+static const char *WATCH[] = {
+    CSIH_APP "/json.cx", CSIH_APP "/reload_state.c", CSIH_APP "/reload_session_decode.c",
+    CSIH_APP "/reload_session_encode.c", CSIH_APP "/reload_session_cli.c",
+    CSIH_APP "/reload_session.h", ROOT_BIN, NULL
+};
+
+static unsigned long long fnv_file(const char *path, int *ok) {
+    unsigned long long h = 1469598103934665603ULL;
+    unsigned char buf[4096];
+    ssize_t n;
+    int fd = open(path, O_RDONLY);
+    *ok = fd >= 0;
+    if (fd < 0) return 0;
+    while ((n = read(fd, buf, sizeof buf)) > 0) {
+        ssize_t i;
+        for (i = 0; i < n; i++) { h ^= buf[i]; h *= 1099511628211ULL; }
+    }
+    close(fd);
+    return h;
+}
+
+static void hashes_take(unsigned long long *out) {
+    int i, ok;
+    for (i = 0; WATCH[i]; i++) out[i] = fnv_file(WATCH[i], &ok);
+}
+
+static int hashes_same(const unsigned long long *before) {
+    int i, ok;
+    for (i = 0; WATCH[i]; i++) {
+        unsigned long long h = fnv_file(WATCH[i], &ok);
+        if (!ok || h != before[i]) return 0;
+    }
+    return 1;
+}
+
+/* merged stdout+stderr of argv, 60 s limit (run mode compiles per case) */
+static int run_merged(char *const argv[], char *out, size_t cap, int *rc) {
+    int p[2], st, open_fd = 1, timed_out = 0;
+    pid_t pid;
+    size_t on = 0;
+    time_t deadline = time(NULL) + 60;
+    out[0] = 0; *rc = 127;
+    if (pipe(p) != 0) return -1;
+    pid = fork();
+    if (pid < 0) { close(p[0]); close(p[1]); return -1; }
+    if (pid == 0) {
+        if (chdir(CSIH_APP) != 0) _exit(126);
+        dup2(p[1], 1); dup2(p[1], 2);
+        close(p[0]); close(p[1]);
+        execv(argv[0], argv);
+        _exit(127);
+    }
+    close(p[1]);
+    while (open_fd) {
+        struct pollfd f;
+        if (time(NULL) > deadline) { timed_out = 1; kill(pid, SIGKILL); break; }
+        f.fd = p[0]; f.events = POLLIN;
+        if (poll(&f, 1, 100) <= 0) continue;
+        if (on + 1 >= cap) { open_fd = 0; break; }
+        {
+            ssize_t got = read(p[0], out + on, cap - 1 - on);
+            if (got <= 0) open_fd = 0; else on += (size_t)got;
+        }
+    }
+    out[on] = 0;
+    close(p[0]);
+    if (waitpid(pid, &st, 0) < 0) return -1;
+    if (timed_out) return -1;
+    *rc = WIFEXITED(st) ? WEXITSTATUS(st) : 128;
+    return 0;
+}
+
+/* Remove all whitespace in place. */
+static void squeeze(char *s) {
+    char *w = s, *r = s;
+    while (*r) { if (*r != ' ' && *r != '\n' && *r != '\t' && *r != '\r') *w++ = *r; r++; }
+    *w = 0;
+}
+
+/* state fixture as json.dumps(state) renders it. loop_on/loop_left NULL = omit;
+ * extra is appended before the closing brace (duplicate/unknown key cases). */
+static void state_json(char *buf, size_t cap, const char *loop_on, const char *loop_left, const char *extra) {
+    char on[64], left[64];
+    if (loop_on) snprintf(on, sizeof on, "\"loop_on\": %s, ", loop_on); else on[0] = 0;
+    if (loop_left) snprintf(left, sizeof left, "\"loop_left\": %s, ", loop_left); else left[0] = 0;
+    snprintf(buf, cap,
+             "{\"version\": 2, \"session_id\": \"sess\", \"handoff_id\": \"h1\", "
+             "\"candidate_hash\": \"%s\", \"goal\": \"目标\", %s%s"
+             "\"cwd\": \"/tmp\", \"role\": \"agent\", \"peer\": \"\", \"input\": \"输入\", "
+             "\"journal\": {\"path\": \"/tmp/session.jsonl\", \"offset\": 0}, "
+             "\"pending_queue\": [\"待办\"], \"history\": [\"历史\"], \"history_pos\": 1, "
+             "\"history_browsing\": false, \"history_draft\": \"草稿\"%s}",
+             SHA_A, on, left, extra ? extra : "");
+}
+
+static int failed = 0, passed = 0;
+
+/* Run one fixture. reason NULL: must PASS and restored output must contain every
+ * whitespace-free token in tokens[] (NULL-terminated). */
+static void run_case(const char *name, const char *raw, const char *reason,
+                     const char *const *tokens) {
+    char *argv[12];
+    static char out[8192], norm[8192];
+    int rc = 0, ok = 1, i;
+    FILE *f = fopen(FIX, "wb");
+    if (!f) { printf("FAIL %s: fixture write\n", name); failed++; return; }
+    if (fwrite(raw, 1, strlen(raw), f) != strlen(raw)) { fclose(f); printf("FAIL %s: fixture write\n", name); failed++; return; }
+    fclose(f);
+    argv[0] = (char *)"/bin/sh"; argv[1] = (char *)ROOT_BIN; argv[2] = (char *)"-include";
+    argv[3] = (char *)CSIH_APP "/json.h"; argv[4] = (char *)"json.cx"; argv[5] = (char *)"reload_state.c";
+    argv[6] = (char *)"reload_session_decode.c"; argv[7] = (char *)"reload_session_encode.c";
+    argv[8] = (char *)"reload_session_cli.c"; argv[9] = (char *)"roundtrip"; argv[10] = FIX; argv[11] = NULL;
+    if (run_merged(argv, out, sizeof out, &rc) != 0) { printf("FAIL %s: timeout\n", name); failed++; return; }
+    if (reason) {
+        size_t k = strlen(out);
+        char want[300];
+        while (k && (out[k - 1] == '\n' || out[k - 1] == ' ')) out[--k] = 0;
+        snprintf(want, sizeof want, "FAIL decode_v2 input: %s", reason);
+        if (rc != 1 || strcmp(out, want) != 0) { ok = 0; printf("FAIL %s: rc %d out=%s\n", name, rc, out); }
+    } else {
+        if (rc != 0 || strncmp(out, "PASS\n", 5) != 0) {
+            ok = 0; printf("FAIL %s: rc %d out=%.200s\n", name, rc, out);
+        } else {
+            strncpy(norm, out + 5, sizeof norm - 1);
+            norm[sizeof norm - 1] = 0;
+            squeeze(norm);
+            if (tokens) {
+                for (i = 0; tokens[i]; i++) {
+                    if (!strstr(norm, tokens[i])) { ok = 0; printf("FAIL %s: missing %s\n", name, tokens[i]); break; }
+                }
+            }
+        }
+    }
+    if (ok) { printf("PASS %s\n", name); passed++; } else failed++;
+}
+
+/* Field tokens of the valid state, whitespace-free. Static lists: no local pointer arrays. */
+#define BASE_TOKENS \
+    "\"version\":2", "\"session_id\":\"sess\"", "\"handoff_id\":\"h1\"", \
+    "\"candidate_hash\":\"" SHA_A "\"", "\"goal\":\"目标\"", "\"cwd\":\"/tmp\"", \
+    "\"role\":\"agent\"", "\"peer\":\"\"", "\"input\":\"输入\"", \
+    "\"journal\":{\"path\":\"/tmp/session.jsonl\",\"offset\":0}", "\"pending_queue\":[\"待办\"]", \
+    "\"history\":[\"历史\"]", "\"history_pos\":1", "\"history_browsing\":false", \
+    "\"history_draft\":\"草稿\""
+
+static const char *const TOK_TRUE[] = { BASE_TOKENS, "\"loop_on\":true", "\"loop_left\":8", NULL };
+static const char *const TOK_FALSE[] = { BASE_TOKENS, "\"loop_on\":false", "\"loop_left\":8", NULL };
+static const char *const TOK_ZERO[] = { BASE_TOKENS, "\"loop_on\":true", "\"loop_left\":0", NULL };
+
+int main(void) {
+    char tmpl[1024];   /* under the temp root: the deletion guard's whitelist */
+    char *tmp;
+    static char raw[4096], buf[4096];
+    unsigned long long before[8];
+    int rc = 1;
+
+    {   const char *td = getenv("TMPDIR"); if (!td || !td[0]) td = "/tmp";
+        snprintf(tmpl, sizeof tmpl, "%s/csih-session-loop-XXXXXX", td); }
+    hashes_take(before);
+    tmp = mkdtemp(tmpl);
+    if (!tmp) { puts("FAIL mkdtemp"); return 1; }
+    snprintf(FIX, sizeof FIX, "%s/state.json", tmp);
+
+    state_json(raw, sizeof raw, "true", "8", NULL);
+    run_case("True", raw, NULL, TOK_TRUE);
+    state_json(raw, sizeof raw, "false", "8", NULL);
+    run_case("False", raw, NULL, TOK_FALSE);
+    state_json(raw, sizeof raw, NULL, "8", NULL);
+    run_case("missing", raw, "missing: loop_on", NULL);
+    state_json(raw, sizeof raw, "0", "8", NULL);
+    run_case("number0", raw, "loop_on: not bool", NULL);
+    state_json(raw, sizeof raw, "1", "8", NULL);
+    run_case("number1", raw, "loop_on: not bool", NULL);
+    state_json(raw, sizeof raw, "true", "8", ", \"loop_on\": false");
+    run_case("duplicate", raw, "loop_on: duplicate", NULL);
+    state_json(buf, sizeof buf, "true", "8", ", \"bogus\": 1");
+    run_case("unknown", buf, "unknown key: bogus", NULL);
+    state_json(raw, sizeof raw, "true", "0", NULL);
+    run_case("true_zero", raw, NULL, TOK_ZERO);
+    state_json(raw, sizeof raw, "true", NULL, NULL);
+    run_case("missing_left", raw, "missing: loop_left", NULL);
+    state_json(raw, sizeof raw, "true", "1.5", NULL);
+    run_case("fraction_left", raw, "loop_left: not integer", NULL);
+    state_json(raw, sizeof raw, "true", "9", NULL);
+    run_case("range_left9", raw, "loop_left: not number in 0..8", NULL);
+    state_json(raw, sizeof raw, "true", "1e+300", NULL);
+    run_case("range_left1e300", raw, "loop_left: not number in 0..8", NULL);
+
+    printf("TOTAL: %d passed, %d failed\n", passed, failed);
+    rc = (failed == 0 && passed == 12) ? 0 : 1;
+    {   char why[700];   /* the one deletion guard (include/unisa_safedel.h; commissar ruling 2026-10-23) */
+        if (unisa_safedel(tmp, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 0, why, (int)sizeof why)) fprintf(stderr, "safedel: %s\n", why); }
+    if (!hashes_same(before)) { printf("FAIL: source/compiler changed during probe\n"); rc = 1; }
+    else if (rc == 0) printf("source/compiler hashes unchanged\n");
+    printf("RESULT %s reload_session\n", rc == 0 ? "PASS" : "FAIL");
+    return rc;
+}
