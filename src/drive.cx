@@ -195,6 +195,207 @@ static void dv_time(const char *phase, long long a, long long b) {
     if (!env || !env[0] || a < 0 || b < 0) return;
     fprintf(stderr, "RR_TIME %s ns=%lld\n", phase, b - a);
 }
+static const unsigned char dv_cxh[] = "cx.h";
+static const char *dv_srcv[64];
+static int dv_len(const char *s) {
+    int n;
+    n = 0;
+    if (!s) return 0;
+    while (s[n]) n = n + 1;
+    return n;
+}
+static int dv_cli(const char *tgt, const char *src, int cx) {
+    int n;
+    if (!tgt || !src) return 4;
+    if (hs_cli_reset()) return 1;
+    n = dv_len(tgt);
+    if (hs_cli_put((const unsigned char *)"\0cli/target", 11, (const unsigned char *)tgt, n)) return 1;
+    n = dv_len(src);
+    if (hs_cli_put((const unsigned char *)"\0cli/source", 11, (const unsigned char *)src, n + 1)) return 1;
+    if (cx && hs_cli_put((const unsigned char *)"\0cli/includes", 13, dv_cxh, (int)sizeof dv_cxh)) return 1;
+    return 0;
+}
+static int dv_unit_route(char *dst, int cap, const char *tgt) {
+    int i;
+    int k;
+    const char *suf;
+    suf = "/unit";
+    i = 0;
+    while (tgt[i]) {
+        if (i + 1 >= cap) return 1;
+        dst[i] = tgt[i];
+        i = i + 1;
+    }
+    k = 0;
+    while (suf[k]) {
+        if (i + 1 >= cap) return 1;
+        dst[i] = suf[k];
+        i = i + 1;
+        k = k + 1;
+    }
+    dst[i] = 0;
+    return 0;
+}
+static int dv_need(unsigned char **b, long *n, long *cap, long more) {
+    unsigned char *nb;
+    long room;
+    if (more < 0 || *n > 2147483647L - more) return 1;
+    if (*n + more <= *cap) return 0;
+    room = *cap ? *cap : 4096;
+    while (room < *n + more) {
+        if (room > 1073741824L) return 1;
+        room = room * 2;
+    }
+    nb = realloc(*b, (size_t)room);
+    if (!nb) return 1;
+    *b = nb;
+    *cap = room;
+    return 0;
+}
+static void dv_le(unsigned char *b, long at, long v) {
+    int k;
+    k = 0;
+    while (k < 4) {
+        b[at + k] = (unsigned char)((v >> (8 * k)) & 255);
+        k = k + 1;
+    }
+}
+static int dv_units(const char *tgt, int nsrc, unsigned char **out, long *outn, char *why, int cap) {
+    char uroute[96];
+    unsigned char *frame;
+    long fn;
+    long fcap;
+    int j;
+    if (dv_unit_route(uroute, 96, tgt)) {
+        if (why && cap > 0) why[0] = 0;
+        return 1;
+    }
+    frame = 0;
+    fn = 0;
+    fcap = 0;
+    j = 0;
+    while (j < nsrc) {
+        unsigned char *cur;
+        unsigned char *next;
+        long curn;
+        long nextn;
+        long srcn;
+        int step;
+        int pr;
+        int act;
+        int namelen;
+        long framed;
+        const char *stage;
+        char reason[128];
+        char line[512];
+        cur = 0;
+        srcn = 0;
+        pr = cxi_read(dv_srcv[j], &cur, &srcn, reason, 128);
+        act = bx_read_act(pr);
+        if (act) {
+            free(frame);
+            if (act == 1) {
+                if (bx_read_open_line(dv_srcv[j], reason, line, 512) == 0) fputs(line, stderr);
+                else fprintf(stderr, "unisacc: error: cannot open %s%s%s\n", dv_srcv[j], reason[0] ? ": " : "", reason);
+            } else if (act == 2) {
+                const char *shown_in;
+                shown_in = bx_read_stdin(dv_srcv[j]) == 1 ? "stdin" : dv_srcv[j];
+                if (bx_read_fail_line(shown_in, line, 512) == 0) fputs(line, stderr);
+                else fprintf(stderr, "run: cannot read %s\n", shown_in);
+                fputs("run: cannot read input\n", stderr);
+            } else fprintf(stderr, "run: %s\n", bx_read_die(act));
+            return 5;
+        }
+        if (srcn > 2147483647L) {
+            free(cur);
+            free(frame);
+            fprintf(stderr, "run: %s\n", bx_read_die(4));
+            return 5;
+        }
+        if (dv_cli(tgt, dv_srcv[j], dv_cx(dv_srcv[j]))) {
+            free(cur);
+            free(frame);
+            if (why && cap > 0) why[0] = 0;
+            return 1;
+        }
+        curn = srcn;
+        step = 0;
+        while (pm_along(uroute, step, &stage) == 0) {
+            const unsigned char *mb;
+            long mn;
+            int raw;
+            int compressed;
+            unsigned crcsum;
+            mb = 0;
+            mn = 0;
+            raw = 0;
+            compressed = 0;
+            crcsum = 0;
+            pr = pm_model(uroute, stage, &mb, &mn, &raw, &crcsum, &compressed);
+            if (pr) {
+                free(cur);
+                free(frame);
+                if (why && cap > 8) {
+                    why[0] = 'u'; why[1] = 'n'; why[2] = 'i'; why[3] = 't'; why[4] = 's'; why[5] = 0;
+                }
+                return pr == 2 ? 3 : 1;
+            }
+            if (curn > 2147483647L) {
+                free(cur);
+                free(frame);
+                if (why && cap > 0) why[0] = 0;
+                return 1;
+            }
+            next = 0;
+            nextn = 0;
+            pr = ex_pp(mb, mn, raw, crcsum, compressed, cur, (int)curn, dv_srcv[j], &next, &nextn, why, cap);
+            free(cur);
+            if (pr) {
+                free(frame);
+                return pr;
+            }
+            cur = next;
+            curn = nextn;
+            step = step + 1;
+        }
+        if (step == 0) {
+            free(cur);
+            free(frame);
+            if (why && cap > 8) {
+                why[0] = 'u'; why[1] = 'n'; why[2] = 'i'; why[3] = 't'; why[4] = 's'; why[5] = 0;
+            }
+            return 3;
+        }
+        namelen = dv_len(dv_srcv[j]);
+        framed = curn + 4 + namelen;
+        if (dv_need(&frame, &fn, &fcap, 4 + framed)) {
+            free(cur);
+            free(frame);
+            if (why && cap > 0) why[0] = 0;
+            return 1;
+        }
+        dv_le(frame, fn, framed);
+        fn = fn + 4;
+        dv_le(frame, fn, namelen);
+        fn = fn + 4;
+        {
+            int k;
+            k = 0;
+            while (k < namelen) {
+                frame[fn] = (unsigned char)dv_srcv[j][k];
+                fn = fn + 1;
+                k = k + 1;
+            }
+        }
+        if (curn) memcpy(frame + fn, cur, (size_t)curn);
+        fn = fn + curn;
+        free(cur);
+        j = j + 1;
+    }
+    *out = frame;
+    *outn = fn;
+    return 0;
+}
 
 int dv_main(int argc, char **argv) {
     static CxcState opts;
@@ -248,6 +449,8 @@ int dv_main(int argc, char **argv) {
         }
         if (kind == 13) break;
         if (bx_opt_dash(argv[i]) == 1) return dv_fail(bx_opt_why(opts.defrun, src));
+        if (nsrc >= 64) return dv_fail("too many sources");
+        dv_srcv[nsrc] = argv[i];
         if (!src) src = argv[i];
         nsrc = nsrc + 1;
         i = i + 1;
@@ -385,13 +588,50 @@ int dv_main(int argc, char **argv) {
             fprintf(stderr, "unisacc: model driver: %s\n", preason[0] ? preason : "package");
             return 1;
         }
-        if (st_gap(mode2, opts.level, nsrc, dv_cx(src), gap, 32)) {
+        if (st_gap(mode2, opts.level, gap, 32)) {
             pm_close();
             free(pkg);
             free(gotb);
             return 1;
         }
+        if (nsrc > 1) {
+            unsigned char *framed;
+            long framedn;
+            int ur;
+            framed = 0;
+            framedn = 0;
+            free(gotb);
+            gotb = 0;
+            gotn = 0;
+            ur = dv_units(tgt, nsrc, &framed, &framedn, preason, 128);
+            free(framed);
+            if (ur == 5) {
+                pm_close();
+                free(pkg);
+                return 1;
+            }
+            if (ur == 3) {
+                pm_close();
+                free(pkg);
+                fprintf(stderr, "route=%s/unit\n", tgt);
+                fprintf(stderr, "NOT_IMPLEMENTED units\n");
+                return 2;
+            }
+            if (ur) {
+                pm_close();
+                free(pkg);
+                fprintf(stderr, "unisacc: model driver: %s\n", preason[0] ? preason : "units");
+                return ur == 2 ? 2 : 1;
+            }
+        }
         if (!strcmp(gap, "e2")) {
+            if (dv_cli(tgt, src, dv_cx(src))) {
+                pm_close();
+                free(pkg);
+                free(gotb);
+                fputs("unisacc: model driver: cli\n", stderr);
+                return 1;
+            }
             const unsigned char *mb;
             unsigned char *body;
             long mn;
