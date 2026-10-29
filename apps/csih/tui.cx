@@ -1426,6 +1426,50 @@ static void tui_input_byte(tui_state *st, char ch) {
 /* Manual Enter path. Records the line into history only when tui_submit
  * actually accepted it (input was non-empty and got cleared). The queue-full
  * path keeps the input, so it is not recorded. */
+/* History survives restarts in ~/.csih/history, one line per entry, newlines
+ * inside an entry stored as \x1e. Only the real agent/run entry sets the
+ * file, so self-tests never read or write it. */
+static char tui_hist_file[600];
+
+static void tui_history_save(const char *line) {
+    FILE *f;
+    if (!tui_hist_file[0] || !line || !line[0]) return;
+    f = fopen(tui_hist_file, "a");
+    if (!f) return;
+    for (; *line; line++) fputc(*line == '\n' ? 0x1e : *line, f);
+    fputc('\n', f);
+    fclose(f);
+}
+
+/* Load the newest entries into st (at most the 16 it holds). */
+static void tui_history_load(tui_state *st, const char *file) {
+    static char ring[16][TUI_INPUT_MAX];
+    char line[TUI_INPUT_MAX];
+    int n = 0, i, start;
+    FILE *f;
+    snprintf(tui_hist_file, sizeof tui_hist_file, "%s", file);
+    f = fopen(file, "r");
+    if (!f) return;
+    while (fgets(line, sizeof line, f)) {
+        char *p;
+        line[strcspn(line, "\n")] = 0;
+        if (!line[0]) continue;
+        for (p = line; *p; p++) if (*p == 0x1e) *p = '\n';
+        snprintf(ring[n % 16], TUI_INPUT_MAX, "%s", line);
+        n++;
+    }
+    fclose(f);
+    start = n > 16 ? n - 16 : 0;
+    st->nhistory = 0;
+    for (i = start; i < n; i++)
+        snprintf(st->history[st->nhistory++], sizeof st->history[0], "%s", ring[i % 16]);
+    /* Keep the file bounded: past 1000 entries, rewrite it as the kept 16. */
+    if (n > 1000 && (f = fopen(file, "w"))) {
+        fclose(f);
+        for (i = 0; i < st->nhistory; i++) tui_history_save(st->history[i]);
+    }
+}
+
 static void tui_manual_submit(tui_state *st) {
     char captured[TUI_INPUT_MAX];
     snprintf(captured, TUI_INPUT_MAX, "%s", st->input);
@@ -1433,8 +1477,11 @@ static void tui_manual_submit(tui_state *st) {
     tui_submit(st);
     if (had && st->input[0] == '\0' &&
         !(st->mode == 1 && tui_command_len(captured)) &&
-        strcmp(captured, "/exit") && strcmp(captured, "/quit"))
-        tui_history_add(st, st->mode == 1 && captured[0] == '/' && captured[1] == '/' ? captured + 1 : captured);
+        strcmp(captured, "/exit") && strcmp(captured, "/quit")) {
+        const char *keep = st->mode == 1 && captured[0] == '/' && captured[1] == '/' ? captured + 1 : captured;
+        tui_history_add(st, keep);
+        tui_history_save(keep);
+    }
 }
 
 static void tui_submit(tui_state *st) {
@@ -4403,6 +4450,25 @@ int tui_entry(int argc, char **argv) {
             else printf("  ok   ctrl-r searches history newest first\n");
         }
         {
+            static tui_state hl;
+            char hf[128], e[32];
+            int i, ok;
+            snprintf(hf, sizeof hf, "/tmp/csih-hist-%d", (int)getpid());
+            tui_state_init(&hl, NULL);
+            tui_history_load(&hl, hf);              /* missing file: empty, path set */
+            ok = hl.nhistory == 0;
+            for (i = 1; i <= 20; i++) { snprintf(e, sizeof e, "entry %d", i); tui_history_save(e); }
+            tui_history_save("two\nlines");
+            tui_state_init(&hl, NULL);
+            tui_history_load(&hl, hf);
+            ok = ok && hl.nhistory == 16 && !strcmp(hl.history[0], "entry 6")
+                && !strcmp(hl.history[15], "two\nlines");
+            tui_hist_file[0] = 0;
+            if (tui_selftest_rm(hf, 0)) failures++;
+            if (!ok) { printf("FAIL history persist n=%d first=[%s]\n", hl.nhistory, hl.history[0]); failures++; }
+            else printf("  ok   history persists across restarts, newest 16, multi-line kept\n");
+        }
+        {
             static tui_state te;
             const char *s;
             tui_state_init(&te, NULL); te.mode = 1;
@@ -4773,6 +4839,13 @@ int tui_entry(int argc, char **argv) {
                 else if (!transcript) transcript = argv[ai];
             }
             tui_state_init(&st, transcript);
+            /* Plain agent/run sessions share one input history across restarts. */
+            if (!owned_mode && getenv("HOME") && getenv("HOME")[0]) {
+                char hf[600];
+                snprintf(hf, sizeof hf, "%s/.csih", getenv("HOME")); mkdir(hf, 0750);
+                snprintf(hf, sizeof hf, "%s/.csih/history", getenv("HOME"));
+                tui_history_load(&st, hf);
+            }
         }
         if (managed_mode && tui_managed_init(argv[2], argv[3], standby_mode ? argv[4] : "initial",
                 standby_mode ? argv[5] : argv[4], standby_mode ? argv[6] : argv[5], standby_mode) != 0) {
