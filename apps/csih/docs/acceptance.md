@@ -14,12 +14,12 @@ CSIH_BIN=../../out/csih-e2e-bin/csih UNISACC=../../unisacc.com \
   sh ../../unisacc.com check.cx -- probes            # 11 ok, 0 fail
 ```
 
-## 最近一次结果（2026-10-29，HEAD ce0d7791d5，本机 Linux；第三十一批后重跑）
+## 最近一次结果（2026-10-29，HEAD 1ad56b7d15，本机 Linux；第三十五批后重跑）
 
 | 门禁 | 结果 |
 | --- | --- |
 | prepare | up to date |
-| tui selftest | 59 项 ok，selftest ok |
+| tui selftest | 62 项 ok，selftest ok |
 | agent_cli / shell_cli / term_cli / net_cli selftest | 全部通过 |
 | check.sh | rc=0，check ok |
 | check.cx probes | rc=0，11 ok，0 fail（含真实 HTTP 与真实 LLM 往返） |
@@ -50,6 +50,7 @@ CSIH_BIN=../../out/csih-e2e-bin/csih UNISACC=../../unisacc.com \
 | 点击日志里的文件路径打开 | `clicking a file path opens it in /view at path:LINE` | SGR 鼠标序列点击 clickme.txt |
 | Ctrl-R 历史搜索，历史跨重启 | `ctrl-r searches history newest first`、`history persists across restarts…` | 关窗重开后 Ctrl-R 找回 |
 | 项目说明 CSIH.md / AGENTS.md 进系统提示词 | agent_cli：没有文件不追加、AGENTS.md 兜底、CSIH.md 优先、8KB 按码位截断 | 约定「末尾加【约定生效】」被遵守 |
+| 自定义斜杠命令 .csih/commands/名字.md | `custom /command expands $ARGS from ~/.csih/commands` | `/lines four.txt` 展开并执行 |
 | /copy、长回合响铃 | `/copy refuses…`、`bell only on a tty…` | 缓冲区内容原样；后台窗口 bell=1 |
 | 危险命令门 + /allow 一次 | `dangerous exec is blocked until /allow`、`/allow lets exactly one through` | 拦截 → 说明 → /allow → 执行 |
 | 证据引用：quote 定位、0,0 整段、格式错误给出规则 | agent_cli：`observation_refs accept optional quote…` | write→read→sh 6/6 通过 |
