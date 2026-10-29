@@ -132,7 +132,8 @@ agent 模式新增 `/help`、`/status`、`/clear`，均只在本地处理、不�
   - 危险命令门：`rm -rf`、`rm -r `、`git push`、`git reset --hard`、`git clean`、`git checkout -- `、`mkfs`、`dd if=`、`shutdown`、`reboot` 等先拦截，告诉模型在 answer 里说明后等用户 `/allow`；一次 `/allow` 只放行一条。tmux 实测：拦截 → 模型说明风险 → `/allow` → 删除成功并「语义接受」。这是关键字门，不是沙箱。
   - 空输入时按 Tab 展开或收起最近的工具行；`/help` 新增一行按键说明。
   - selftest：`usage with nested details sums per response`、`/cost shows session usage`、`dangerous exec is blocked until /allow`、`/allow lets exactly one through`、`tab toggles the newest tool row`；agent_cli selftest 全部通过。
-- 下一批候选：正文流式显示；`/new` 和 `/resume`（转录按 cwd 分开）；输入框光标（Ctrl-A/E、左右键）；exec 三档权限；P0 根治（引用原文，由 harness 定位）。
+- **第四批已落地（2026-10-29）**：输入框光标。`back` 记光标离行尾的字节数（用时夹紧，旧代码直接改写 input 也不会越界）；左右键按码位移动，中文算一步；Ctrl-A/Ctrl-E 到行首/行尾；字符插入、退格、Ctrl-W 都以光标为准；光标不在行尾时画 `▏`，不往帧里写终端转义。提交和浏览历史时光标回到行尾。selftest：`cursor moves and edits mid-line`；tmux 实测：`运行 echo ▏世界` → 插入 → `用 sh ▏运行 echo 你好世界`。
+- 下一批候选：正文流式显示；`/new` 和 `/resume`（转录按 cwd 分开）；exec 三档权限；P0 根治（引用原文，由 harness 定位）；输入框超宽时随光标横向滚动。
 - 自迭代：改 `apps/csih` 源后 `/reload` 自动跑 `csih.sh prepare`，绿了再换进程（复用现有 reload 链）。
 
 ### P3 以后

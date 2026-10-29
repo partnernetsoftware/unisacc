@@ -164,6 +164,7 @@ typedef struct {
     long mail_next_ms;        /* next poll deadline, from clock_now_ms */
     char mail_error[256];     /* last take/finish failure reason */
     char model[96];           /* /model override for this session; empty uses CSIH_MODEL */
+    int  back;                /* cursor distance from the end of input, in bytes; 0 = at end */
 } tui_state;
 
 static int tui_mail_meta(tui_state *st, const char *id, const char *result, const char *reason);
@@ -568,6 +569,7 @@ static void tui_history_add(tui_state *st, const char *text) {
 }
 
 static void tui_history_move(tui_state *st, int delta) {
+    st->back = 0;
     if (st->nhistory <= 0) return;
     if (!st->history_browsing) {
         if (delta >= 0) return;
@@ -1079,10 +1081,20 @@ static int tui_frame_has(tui_state *st, const char *needle) {
 }
 
 /* One byte into the input. A paste newline uses this too. */
+/* Byte offset of the cursor. Code that rewrites input without touching
+ * back leaves it stale, so clamp here rather than trust it. */
+static int tui_cursor(tui_state *st) {
+    if (st->back < 0 || st->back > st->ninput) st->back = st->back < 0 ? 0 : st->ninput;
+    return st->ninput - st->back;
+}
+
 static void tui_input_byte(tui_state *st, char ch) {
     st->ask_exit = 0;
     if (st->ninput < TUI_INPUT_MAX - 1) {
-        st->input[st->ninput++] = ch;
+        int at = tui_cursor(st);
+        memmove(st->input + at + 1, st->input + at, (size_t)(st->ninput - at));
+        st->input[at] = ch;
+        st->ninput++;
         st->input[st->ninput] = '\0';
     } else {
         st->notice = "input full";
@@ -1105,6 +1117,7 @@ static void tui_manual_submit(tui_state *st) {
 
 static void tui_submit(tui_state *st) {
     st->ask_exit = 0;
+    st->back = 0;
     if (!strcmp(st->input, "/exit") || !strcmp(st->input, "/quit")) {
         st->input[0] = '\0';
         st->ninput = 0;
@@ -1166,26 +1179,47 @@ static void tui_apply_key(tui_state *st, int kind, char ch) {
             return;
         }
         if (ch == 0x15) {           /* Ctrl-U: drop the whole line */
-            st->input[0] = '\0'; st->ninput = 0; st->ask_exit = 0;
+            st->input[0] = '\0'; st->ninput = 0; st->back = 0; st->ask_exit = 0;
             return;
         }
-        if (ch == 0x17) {           /* Ctrl-W: trailing spaces, then one word */
-            int i = st->ninput;
+        if (ch == 0x01) { st->back = st->ninput; return; }   /* Ctrl-A: line start */
+        if (ch == 0x05) { st->back = 0; return; }            /* Ctrl-E: line end */
+        if (ch == 0x17) {           /* Ctrl-W: spaces, then one word, before the cursor */
+            int at = tui_cursor(st), i = at;
             while (i > 0 && (st->input[i - 1] == ' ' || st->input[i - 1] == '\t')) i--;
             while (i > 0 && st->input[i - 1] != ' ' && st->input[i - 1] != '\t') i--;
-            st->input[i] = '\0'; st->ninput = i; st->ask_exit = 0;
+            memmove(st->input + i, st->input + at, (size_t)(st->ninput - at) + 1);
+            st->ninput -= at - i; st->ask_exit = 0;
             return;
         }
         tui_input_byte(st, ch);
         return;
     case TERM_KEY_BACKSPACE:
         st->ask_exit = 0;
-        /* One code point. A continuation byte is not its own character. */
-        if (st->ninput > 0) {
-            int i = st->ninput - 1;
-            while (i > 0 && ((unsigned char)st->input[i] & 0xC0) == 0x80) i--;
-            st->input[i] = '\0';
-            st->ninput = i;
+        /* One code point before the cursor. A continuation byte is not its own character. */
+        {
+            int at = tui_cursor(st);
+            if (at > 0) {
+                int i = at - 1;
+                while (i > 0 && ((unsigned char)st->input[i] & 0xC0) == 0x80) i--;
+                memmove(st->input + i, st->input + at, (size_t)(st->ninput - at) + 1);
+                st->ninput -= at - i;
+            }
+        }
+        return;
+    case TERM_KEY_LEFT:
+    case TERM_KEY_RIGHT:
+        if (st->pasting) return;
+        {
+            int at = tui_cursor(st);
+            if (kind == TERM_KEY_LEFT && at > 0) {
+                at--;
+                while (at > 0 && ((unsigned char)st->input[at] & 0xC0) == 0x80) at--;
+            } else if (kind == TERM_KEY_RIGHT && at < st->ninput) {
+                at++;
+                while (at < st->ninput && ((unsigned char)st->input[at] & 0xC0) == 0x80) at++;
+            }
+            st->back = st->ninput - at;
         }
         return;
     case TERM_KEY_PASTE_ON:
@@ -1921,10 +1955,17 @@ static void tui_put_folded(char *dst, int dstmax, const char *prefix, const char
 
 /* One input row. A paste keeps its newlines, drawn as ⏎, and the row
  * stays within `cols` so a long paste cannot fail the width check. */
-static void tui_input_row(char *dst, int dstmax, const char *input, int cols) {
+static void tui_input_row(char *dst, int dstmax, const char *input, int cols, int back) {
     char shown[R_LINE_MAX + 1];
     char piece[R_LINE_MAX + 1];
-    int width;
+    char marked[TUI_INPUT_MAX + 4];
+    int width, len = input ? (int)strlen(input) : 0;
+    /* Cursor away from the end: draw a thin bar where the next byte goes. */
+    if (back > 0 && back <= len) {
+        int at = len - back;
+        snprintf(marked, sizeof marked, "%.*s▏%s", at, input, input + at);
+        input = marked;
+    }
     tui_put_folded(shown, (int)sizeof shown, "", input ? input : "");
     width = cols - 2;
     if (width < 1) width = 1;
@@ -2212,7 +2253,7 @@ static r_frame tui_render_state(tui_state *st, int cols) {
                 }
             }
         }
-        tui_input_row(line[n], (int)sizeof line[n], st->input, cols);
+        tui_input_row(line[n], (int)sizeof line[n], st->input, cols, st->ninput - tui_cursor(st));
         rs.body[n] = line[n]; n++;
         snprintf(line[n], sizeof line[n], "%s", hint);
         rs.body[n] = line[n]; n++;
@@ -2221,7 +2262,7 @@ static r_frame tui_render_state(tui_state *st, int cols) {
         tui_mind_rule(&rs, line, &n, cols, st);
         tui_mind_block(&rs, line, &n, cols, st);
     } else {
-        tui_input_row(line[n], (int)sizeof line[n], st->input, cols);
+        tui_input_row(line[n], (int)sizeof line[n], st->input, cols, st->ninput - tui_cursor(st));
         rs.body[n] = line[n]; n++;
         snprintf(line[n], sizeof line[n], "%s", hint);
         rs.body[n] = line[n]; n++;
@@ -3830,6 +3871,32 @@ int tui_entry(int argc, char **argv) {
             tui_apply_key(&tk, TERM_KEY_CHAR, 0x17);
             if (strcmp(tk.input, "git ")) { printf("FAIL ctrl-w left: [%s]\n", tk.input); failures++; }
             else printf("  ok   ctrl-w deletes one word\n");
+        }
+        {
+            static tui_state tq;
+            const char *s;
+            int okc = 1;
+            tui_state_init(&tq, NULL); tq.mode = 1;
+            for (s = "helo"; *s; s++) tui_apply_key(&tq, TERM_KEY_CHAR, *s);
+            tui_apply_key(&tq, TERM_KEY_LEFT, 0);
+            tui_apply_key(&tq, TERM_KEY_CHAR, 'l');
+            if (strcmp(tq.input, "hello") || !tui_frame_has(&tq, "> hell▏o")) okc = 0;
+            tui_apply_key(&tq, TERM_KEY_CHAR, 0x01);
+            tui_apply_key(&tq, TERM_KEY_CHAR, 'X');
+            if (strcmp(tq.input, "Xhello")) okc = 0;
+            tui_apply_key(&tq, TERM_KEY_RIGHT, 0);
+            tui_apply_key(&tq, TERM_KEY_BACKSPACE, 0);
+            if (strcmp(tq.input, "Xello")) okc = 0;
+            tui_apply_key(&tq, TERM_KEY_CHAR, 0x05);
+            if (tui_frame_has(&tq, "▏") || tq.back) okc = 0;
+            /* A Chinese character is one step, not three. */
+            tui_apply_key(&tq, TERM_KEY_CHAR, 0x15);
+            for (s = "你好"; *s; s++) tui_apply_key(&tq, TERM_KEY_CHAR, *s);
+            tui_apply_key(&tq, TERM_KEY_LEFT, 0);
+            tui_apply_key(&tq, TERM_KEY_CHAR, 'a');
+            if (strcmp(tq.input, "你a好")) okc = 0;
+            if (!okc) { printf("FAIL cursor editing: [%s] back=%d\n", tq.input, tq.back); failures++; }
+            else printf("  ok   cursor moves and edits mid-line\n");
         }
         {
             static tui_state te;
