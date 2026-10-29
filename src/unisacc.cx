@@ -8,6 +8,7 @@
 #pragma unisa use driver.archive
 #pragma unisa use driver.route
 #pragma unisa use driver.deps
+#pragma unisa use driver.input
 #pragma unisa use compiler.asmtext
 /* 1 ar, 2 as, 3 nm/objdump, 11 version, 12 help, 13 --, 20 source.
    0 is an ordinary word. A null pointer returns 4. */
@@ -206,6 +207,10 @@ int main(int argc, char **argv) {
     const char *text;
     const char *shown;
     static char objname[520];
+    unsigned char *gotb;
+    long gotn;
+    int ppn;
+    int didpp;
     int i;
     int next;
     int parsed;
@@ -245,6 +250,10 @@ int main(int argc, char **argv) {
     }
     if (!src) return us_fail(bx_src_why(0));
     shown = opts.out;
+    gotb = 0;
+    gotn = 0;
+    ppn = 0;
+    didpp = 0;
     {
         CxtIn in;
         CxtOut outv;
@@ -308,6 +317,50 @@ int main(int argc, char **argv) {
             if (rc) return us_fail(why2);
             shown = objname;
         }
+        {
+            char reason[128];
+            char line[512];
+            int act;
+            int pr;
+            const char *shown_in;
+            rc = cxi_read(src, &gotb, &gotn, reason, 128);
+            act = bx_read_act(rc);
+            if (act == 1) {
+                if (bx_read_open_line(src, reason, line, 512) == 0) fputs(line, stderr);
+                else fprintf(stderr, "unisacc: error: cannot open %s%s%s\n", src, reason[0] ? ": " : "", reason);
+                return 1;
+            }
+            if (act == 2) {
+                shown_in = bx_read_stdin(src) == 1 ? "stdin" : src;
+                if (bx_read_fail_line(shown_in, line, 512) == 0) fputs(line, stderr);
+                else fprintf(stderr, "run: cannot read %s\n", shown_in);
+                fputs("run: cannot read input\n", stderr);
+                return 1;
+            }
+            if (act) {
+                fprintf(stderr, "run: %s\n", bx_read_die(act));
+                return 1;
+            }
+            if (gotn > 2147483647L) {
+                free(gotb);
+                fprintf(stderr, "run: %s\n", bx_read_die(4));
+                return 1;
+            }
+            if (mode2 == 1) {
+                pr = pp_splice((char *)gotb, (int)gotn, (char *)gotb, (int)gotn, &ppn);
+                if (pr == 0) pr = pp_decomment((char *)gotb, ppn, (char *)gotb, (int)gotn, &ppn);
+                if (pr == 2) {
+                    free(gotb);
+                    fputs("unisacc: error: unterminated comment\n", stderr);
+                    return 1;
+                }
+                if (pr) {
+                    free(gotb);
+                    return us_fail("preprocess failed");
+                }
+                didpp = 1;
+            }
+        }
         printf("route=%s\n", route);
         printf("obj=%d\n", obj);
     }
@@ -316,5 +369,14 @@ int main(int argc, char **argv) {
     printf("target=%s\n", opts.target ? opts.target : "-");
     printf("mode=%d\n", opts.mode);
     printf("runit=%d\n", opts.runit);
+    printf("bytes=%ld\n", gotn);
+    if (didpp) {
+        printf("pp=%d\n", ppn);
+        if (ppn > 0 && fwrite(gotb, 1, (size_t)ppn, stdout) != (size_t)ppn) {
+            free(gotb);
+            return 1;
+        }
+    }
+    free(gotb);
     return 0;
 }

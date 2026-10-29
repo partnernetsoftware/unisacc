@@ -644,6 +644,18 @@ flowchart TD
   cap["检查文件 32 个 use"] --> pull["bindargs.cx 的 use bindcount"]
 ```
 
+## 128. 2026-10-29 入口读源，-E 做换行拼接和去注释
+
+构造脚本不改。没有新文件。读文件用已有 `driver.input` 的 `cxi_read`。`-E` 用已有 `frontpp.cx` 的 `pp_splice` 和 `pp_decomment`。每条命令两遍，stdout 和 stderr 都相同。缺文件 stderr 61，`ENOENT`。目录 `.` stderr 42。`src/unisacc.cx/nope` stderr 57，`ENOTDIR`。标准输入 8 字节走 `-c -b lnx/x86_64 -`，stdout 88，`bytes=8`，`out=-.o`。18 字节里的注释去掉后 stdout 91，`pp=14`，反斜杠加字母 n 没有拼接。15 字节含真正换行，stdout 85，`pp=9`，正文 `int   a;` 加换行。引号里的 `/*` stdout 81，`pp=6`。没关上的块注释 stderr 37。没有宏，没有 `#include`，没有写出对象。没有产品安装，没有 hostseed，没有 `--all`。整棵重写还没完成。
+
+```mermaid
+flowchart TD
+  gate["路线和诊断"] --> read["cxi_read"]
+  read --> miss["打不开或读失败则退出"]
+  read --> eflag["mode 1 才 pp_splice 再 pp_decomment"]
+  eflag --> body["打印 bytes 和 pp，再写预处理正文"]
+```
+
 ## 127. 2026-10-29 入口拒绝不匹配的宿主符号诊断
 
 构造脚本不改。`cxt_decide` 之后走 `bx_diag_opt` 和 `bx_diag_run`。对象路线回归仍是 stdout 82，`out=a.o`。`--emit-host-symbols sym` 配 `-c -b lnx/x86_64 a.c` 或 `-E a.c` 都退出 1，stderr 73。`--emit-host-symbols - a.c` 退出 1，stderr 84。`--emit-host-symbols sym -S -b lnx/x86_64 a.c` 退出 0，stdout 78，`route=lnx/x86_64/tape/O0`，`out=-`。没有写出符号文件，没有调用前端。没有产品安装，没有 hostseed，没有 `--all`。整棵重写还没完成。
