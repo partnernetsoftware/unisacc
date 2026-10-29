@@ -872,6 +872,8 @@ static int tui_command_len(const char *text) {
     return text[i] == 0 || text[i] == ' ' ? i : 0;
 }
 
+static int tui_archives(const char *path, long *stamps, int max);
+
 /* /new: move the transcript aside so the next turn starts with no history.
  * The old file is kept as PATH.<seconds>.jsonl. Returns 0 on success. */
 static int tui_new_context(const char *path, char *note, size_t cap) {
@@ -886,9 +888,11 @@ static int tui_new_context(const char *path, char *note, size_t cap) {
     }
     fclose(f);
     {
-        /* Never overwrite an archive: two moves in one second bump the stamp. */
-        long stamp = (long)net_now();
+        /* Never overwrite an archive: two moves in one second bump the stamp.
+         * And stay newest, so /resume 1 is always the one just moved aside. */
+        long stamp = (long)net_now(), have[1];
         int tries = 0;
+        if (tui_archives(path, have, 1) == 1 && have[0] >= stamp) stamp = have[0] + 1;
         do snprintf(old, sizeof old, "%s.%ld.jsonl", path, stamp++);
         while (access(old, F_OK) == 0 && ++tries < 100);
         if (tries >= 100) { snprintf(note, cap, "new: no free archive name"); return 1; }
@@ -970,6 +974,36 @@ static void tui_first_user(const char *file, char *out, size_t cap) {
         }
         snprintf(out, cap, "%.*s", len, t);
     }
+}
+
+/* /resume shared: copy the old shared journal (one file for every cwd, before
+ * per-directory journals) in as this cwd's newest archive. The original is
+ * left alone. Returns 0 on success. */
+static int tui_import_shared(const char *path, const char *shared, char *note, size_t cap) {
+    static char buf[65536];
+    char dst[600];
+    FILE *in, *out;
+    size_t n;
+    long stamp = (long)net_now();
+    int tries = 0;
+    in = fopen(shared, "r");
+    if (!in) { snprintf(note, cap, "resume: 没有旧的共享对话记录 %.200s", shared); return 1; }
+    {
+        /* Newest, so it is archive 1: archives bumped past now must not outrank it. */
+        long have[1];
+        if (tui_archives(path, have, 1) == 1 && have[0] >= stamp) stamp = have[0] + 1;
+    }
+    do snprintf(dst, sizeof dst, "%s.%ld.jsonl", path, stamp++);
+    while (access(dst, F_OK) == 0 && ++tries < 100);
+    /* access() above found dst free; "wx" is not available on every libc here. */
+    out = tries < 100 ? fopen(dst, "w") : NULL;
+    if (!out) { fclose(in); snprintf(note, cap, "resume: cannot create %s", dst); return 1; }
+    while ((n = fread(buf, 1, sizeof buf, in)) > 0)
+        if (fwrite(buf, 1, n, out) != n) { fclose(in); fclose(out); snprintf(note, cap, "resume: copy failed"); return 1; }
+    fclose(in);
+    if (fclose(out) != 0) { snprintf(note, cap, "resume: copy failed"); return 1; }
+    snprintf(note, cap, "resume: 已把旧的共享对话记录复制为本目录的归档 1，/resume 1 换回");
+    return 0;
 }
 
 /* /resume N: archive the live transcript, then bring archive N back. */
@@ -1064,6 +1098,13 @@ static int tui_slash(tui_state *st) {
                 tui_log_plain(st, msg);
             }
             if (n) tui_log_plain(st, "resume N 换回第 N 个；当前转录会先归档");
+            tui_log_plain(st, "resume shared: 导入按目录分开之前的旧共享对话记录");
+        } else if (!strcmp(arg, "shared")) {
+            char shared[512];
+            const char *home = getenv("HOME");
+            snprintf(shared, sizeof shared, "%s/.cdsh/tui.jsonl", home ? home : "");
+            if (!strcmp(shared, path)) tui_log_plain(st, "resume: 当前就在用共享对话记录");
+            else { tui_import_shared(path, shared, msg, sizeof msg); tui_log_plain(st, msg); }
         } else {
             tui_resume(path, atoi(arg), msg, sizeof msg);
             tui_log_plain(st, msg);
@@ -4315,10 +4356,24 @@ int tui_entry(int argc, char **argv) {
                     } else first[0] = 0;
                     ok = strstr(body, "任务甲") && n2 == 1 && !strcmp(first, "任务乙")
                         && tui_resume(path, 5, msg, sizeof msg) != 0;
+                    /* import an old shared journal as the newest archive */
+                    {
+                        char shared[320];
+                        snprintf(shared, sizeof shared, "%s/shared.jsonl", dir);
+                        f = fopen(shared, "w"); if (f) { fputs("{\"role\":\"user\",\"text\":\"旧任务丙\"}\n", f); fclose(f); }
+                        ok = ok && tui_import_shared(path, shared, msg, sizeof msg) == 0
+                            && tui_archives(path, stamps, 9) == 2 && access(shared, F_OK) == 0;
+                        if (ok) {
+                            snprintf(msg, sizeof msg, "%s.%ld.jsonl", path, stamps[0]);
+                            tui_first_user(msg, first, sizeof first);
+                            ok = !strcmp(first, "旧任务丙");
+                        }
+                        ok = ok && tui_import_shared(path, "/nonexistent/x.jsonl", msg, sizeof msg) != 0;
+                    }
                 }
                 if (tui_selftest_rm(dir, 1)) failures++;
             }
-            if (!ok) { printf("FAIL /resume n1=%d n2=%d\n", n1, n2); failures++; }
+            if (!ok) { printf("FAIL /resume n1=%d n2=%d last=%s\n", n1, n2, msg); failures++; }
             else printf("  ok   /resume lists and swaps archived transcripts\n");
         }
         {
