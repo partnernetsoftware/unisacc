@@ -1,6 +1,8 @@
 int cd_inflate(int, int, int, int, int);
 int cd_puff_type(int);
 int cd_bits_err(int);
+int cd_len_rep(int, int, int *, int *, int *);
+int cd_len_room(int, int, int, int);
 unsigned long long cd_crc_step(unsigned long long);
 /* puff.h
   Copyright (C) 2002-2013 Mark Adler, all rights reserved
@@ -360,20 +362,17 @@ local int dynamic(struct state *s)
         if (symbol < 16)
             lengths[index++] = symbol;
         else {
+            int bits_n = 7, base = 11, copy = 0, got, room;
             len = 0;
-            if (symbol == 16) {
-                if (index == 0)
-                    return -5;
-                len = lengths[index - 1];
-                symbol = 3 + bits(s, 2);
+            got = cd_len_rep(symbol, index, &bits_n, &base, &copy);
+            if (got == (0 - 5)) return (0 - 5);
+            if (got == 0) {
+                if (copy) len = lengths[index - 1];
+                symbol = base + bits(s, bits_n);
             }
-            else if (symbol == 17)
-                symbol = 3 + bits(s, 3);
-            else
-                symbol = 11 + bits(s, 7);
             if (cd_bits_err(s->error)) return 2;
-            if (index + symbol > nlen + ndist)
-                return -6;
+            room = cd_len_room(index, symbol, nlen, ndist);
+            if (room == (0 - 6)) return (0 - 6);
             while (symbol--)
                 lengths[index++] = len;
         }
