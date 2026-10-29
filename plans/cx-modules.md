@@ -1543,7 +1543,7 @@ flowchart TD
 
 `sh ./unisacc.com -cx-plan src/unisacc.cx` 退出 0，37 行。上限仍是 64。还在闭包里的 `src/core/coregate.cx` 来自 `core.execute` 和 `core.transition`。`src/runtime/compiler/bindstage.cx` 来自 `runtime.package_decode`。这两份不是 bindhost 那条死链。
 
-自举：`sh ./tools/bound 55 sh ./unisacc.com -o /tmp/grk-cx-line/entry src/unisacc.cx` 退出 0，stdout 和 stderr 都是 0。冷耗时 33665829161 纳秒（33.666 秒）。产物 891211 字节，权限 0755，`file` 是动态链接 ELF。这次没设 `UNISACC_RR_TIME`，最慢阶段记 UNMEASURED。上一只冷耗时约 52 秒、1331445 字节。
+自举：`sh ./tools/bound 55 sh ./unisacc.com -o /tmp/grk-cx-line/entry src/unisacc.cx` 退出 0，stdout 和 stderr 都是 0。冷耗时 33665829161 纳秒（33.666 秒）。产物 891211 字节，权限 0755，`file` 是动态链接 ELF。上一只冷耗时约 52 秒、1331445 字节。随后 `UNISACC_RR_TIME=1` 再构造到 `/tmp/grk-cx-line/entry-rr`，退出 0，冷墙钟 32537268896 纳秒（32.537 秒），与上一只产物逐字节相同。stderr 有 28 行 `RR_TIME`。最慢一行是 `RR_TIME inference stage=e3 rc=0 ns=5540967059`。下一行也是 e3 推理，5440425485 纳秒。其后是 lower 2537928434、units 1542710997、elf 1477181103。
 
 `-run` 在 `lower` 之后保留已打开的包，再走 `目标/memory`。`host.cx` 做 `mmap` 预留、`mprotect` 提交、按 UNIMEM1 拷贝、代码段改成读和执行、然后 `entry(0, 0)`。只有这一层 `#include <sys/mman.h>` 和 `<dlfcn.h>`。`process/argc` 与 `process/argv` 在编译路线期间发布。`memory/text`、`memory/reserve` 和四个 `process/dl` 在 memory 路线期间发布。多单元 `-run` 仍是 `NOT_IMPLEMENTED`。转发重启没做。
 
