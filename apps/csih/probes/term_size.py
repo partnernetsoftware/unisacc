@@ -5,7 +5,7 @@ U = sys.argv[1]
 def run(rows, cols, timeout=30):
     mfd, sfd = pty.openpty()
     fcntl.ioctl(sfd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
-    cmd = "exec %s term.c term_cli.c size" % shlex.quote(U)
+    cmd = "exec %s -run term_cli.cx -- size" % shlex.quote(U)
     p = subprocess.Popen(["/bin/sh", "-c", cmd], stdout=sfd, stderr=sfd, stdin=sfd, close_fds=True)
     os.close(sfd)
     out, deadline = b"", time.time() + timeout

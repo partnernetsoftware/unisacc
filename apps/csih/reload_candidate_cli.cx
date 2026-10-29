@@ -1,16 +1,27 @@
 #pragma unisa use reload_candidate
+#pragma unisa use reload_io
 /* reload_candidate CLI: build | verify (same stdout JSON and exit codes as reload_candidate.py). */
 
-int rc_setjmp(void *jb);
-void rc_fail_push(void *jb);
-char *rc_err_buf(void);
+static Result g_res;
+static int g_argc;
+static char **g_argv;
+
+static void rc_cli_body(void *ud) {
+    (void)ud;
+    if (g_argc == 5 && !strcmp(g_argv[1], "build"))
+        g_res = build(g_argv[2], g_argv[3], g_argv[4]);
+    else if (g_argc == 3 && !strcmp(g_argv[1], "verify"))
+        g_res = verify(g_argv[2]);
+    else
+        fail("usage: build SOURCE_APP COMPILER PRIVATE_ROOT | verify CANDIDATE_DIR");
+}
 
 int main(int argc, char **argv) {
-    __u_word jb[8];
-    Result res;
     Buf o = {0, 0, 0};
-    rc_fail_push(jb);
-    if (rc_setjmp(jb)) {
+    g_argc = argc;
+    g_argv = argv;
+    memset(&g_res, 0, sizeof g_res);
+    if (rc_guard(rc_cli_body, 0)) {
         Buf e = {0, 0, 0};
         bs(&e, "{\"error\": ");
         bjs(&e, rc_err_buf());
@@ -18,17 +29,14 @@ int main(int argc, char **argv) {
         fputs(e.p, stdout);
         return 1;
     }
-    if (argc == 5 && !strcmp(argv[1], "build")) res = build(argv[2], argv[3], argv[4]);
-    else if (argc == 3 && !strcmp(argv[1], "verify")) res = verify(argv[2]);
-    else fail("usage: build SOURCE_APP COMPILER PRIVATE_ROOT | verify CANDIDATE_DIR");
     bs(&o, "{\"binary\": ");
-    bjs(&o, res.binary);
+    bjs(&o, g_res.binary);
     bs(&o, ", \"candidate_dir\": ");
-    bjs(&o, res.candidate_dir);
+    bjs(&o, g_res.candidate_dir);
     bs(&o, ", \"hash\": ");
-    bjs(&o, res.hash);
+    bjs(&o, g_res.hash);
     bs(&o, ", \"receipt\": ");
-    bjs(&o, res.receipt);
+    bjs(&o, g_res.receipt);
     bs(&o, "}\n");
     fputs(o.p, stdout);
     return 0;
