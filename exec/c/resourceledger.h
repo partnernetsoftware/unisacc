@@ -39,6 +39,7 @@ int cxsf_hex_digit(int);
 int cxsf_length(const char *,int *);
 int cxsf_ledger_fields(const char *,char *);
 int cxsf_ledger_key(const char *,size_t,unsigned char *);
+int cxsf_ledger_metadata(const char *,const char *,const char *,const char *,int *,int *);
 #define rl_hexv cxsf_hex_digit
 #define rl_length cxsf_length
 #else
@@ -187,13 +188,22 @@ static int rl_load_parse(const char *dir, const RLFileView *views, int count, RL
             L->n++;
             {   RLRow *r = &L->rows[L->n - 1]; int len = 0;
                 r->blob[0] = 0;
+#ifdef UNISA_CX_SOURCE_FRAME
+                { int code=cxsf_ledger_metadata(f[1],f[2],f[3],f[4],&r->present,&len);
+                  if (code) { free(line); free(b); snprintf(err,errn,code==1 ? "INTERFACE_ERROR resource-presence-invalid" : code==2 ? "INTERFACE_ERROR resource-length-invalid" : code==3 ? "INTERFACE_ERROR resource-absent-malformed" : "INTERFACE_ERROR resource-blob-malformed"); return 1; } }
+#else
                 if (!strcmp(f[1], "0")) r->present = 0; else if (!strcmp(f[1], "1")) r->present = 1; else { free(line); free(b); snprintf(err, errn, "INTERFACE_ERROR resource-presence-invalid"); return 1; }
                 if (!rl_length(f[3], &len)) { free(line); free(b); snprintf(err, errn, "INTERFACE_ERROR resource-length-invalid"); return 1; }
+#endif
                 if (!r->present) {
+#ifndef UNISA_CX_SOURCE_FRAME
                     if (strcmp(f[2], "-") || len != 0 || strcmp(f[4], "-")) { free(line); free(b); snprintf(err, errn, "INTERFACE_ERROR resource-absent-malformed"); return 1; }
+#endif
                 } else {
                     char hex[65]; size_t bl = 0; unsigned char *v;
+#ifndef UNISA_CX_SOURCE_FRAME
                     if (!strcmp(f[2], "-") || strchr(f[2], '/') || !strcmp(f[2], "..") || strlen(f[2]) >= sizeof r->blob || strlen(f[4]) != 64) { free(line); free(b); snprintf(err, errn, "INTERFACE_ERROR resource-blob-malformed"); return 1; }
+#endif
                     v = rl_file_bytes(dir, f[2], views, count, &bl);
                     if (!v) { int saved = errno; free(line); free(b); snprintf(err, errn, saved == ENOENT ? "INTERFACE_ERROR resource-bytes-absent %s" : saved == ENOMEM ? "INTERFACE_ERROR resource-ledger-allocation-failed %s" : "INTERFACE_ERROR resource-bytes-read-failed %s errno=%d", f[0], saved); return 1; }
                     if (bl != (size_t)len) { free(v); free(line); free(b); snprintf(err, errn, "INTERFACE_ERROR resource-bytes-length-mismatch %s", f[0]); return 1; }
