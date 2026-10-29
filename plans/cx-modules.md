@@ -1621,6 +1621,17 @@ int main(void) { char *s = strdup("ab"); return s && s[0]=='a' ? 3 : 1; }
 
 分开的一步：`sh ./unisacc.com -O2 -c -b lnx/x86_64 -funit -o /tmp/grk-cx-line/objs/u00.o src/unisacc.cx` 退出 0，墙钟 54473614395 ns，对象 5081760 字节，ELF relocatable，里面有 `main`、`dv_main`、`core_run`、`ex_exec`。产品再 `-o` 这个对象，退出 1，stderr 是 `link: undefined reference to clock_gettime`。不带 `-funit` 的 `-O2 -c -b lnx/x86_64` 退出 1，墙钟 23285541657 ns，stderr 是 `reject: not covered: cc interop call signature (requires a prototype and at most six integer/pointer arguments)`。没有可运行的 -O2 入口。O0 那只 `examples/hello.c -run` 仍退出 0，stdout 13 字节。正式表不在 -O2 上重跑。这不是产品安装。
 
+## 137. 2026-10-30 tapebin 容器头收进 tapegate
+
+`src/tapebin.c` 里容器头、节目录、填充和名字池边界的纯判断改走已有的 `tapegate`。新函数是 `tb2_magic`、`tb2_fixed`、`tb2_nsec`、`tb2_origin`、`tb2_align`、`tb2_row`、`tb2_zeros`、`tb2_extra`、`tb2_end`、`tb2_name_byte`、`tb2_name_empty`、`tb2_span`。没有新模块，没有新的 `use`，构造表没有新增参数。哈希、记录正文和读文件仍在 C。`sh ./unisacc.com tools/check-compiler-units.cx` 两次退出 0，两次 stdout 相同，两次 stderr 相同，都打印 `CHECK_COMPILER_UNITS failed=0`。这次检查直接调用这些函数，没有编译 `tapebin.c`。这不是产品安装、六目标或 `--all`。整只 `-O2` 入口冷构造仍是构造红项。整棵重构还没完成。
+
+```mermaid
+flowchart TD
+  t["src/tapebin.c 容器头"] --> g["tapegate 的 tb2_magic 到 tb2_span"]
+  t --> io["SHA 记录正文 读文件 仍在 C"]
+  lists["构造表已有 tapegate"] --> mod["tapegate.cx"]
+```
+
 ## 64. 2026-10-29 编译器纯拒绝接到 bindhost
 
 `compiler.c` 里剩余的纯拒绝改走已有的 `bindhost`。新函数是 `bx_compat_why`、`bx_opt_dash`、`bx_opt_why`、`bx_src_why`、`bx_mix_why`、`bx_tape_need`、`bx_tape_why`、`bx_tapebin_bad`、`bx_tapebin_why`、`bx_name_fit`、`bx_name_why`、`bx_cache_why`、`bx_frame_fit`、`bx_frame_why`、`bx_encode_bad`、`bx_encode_why`、`bx_route_why`、`bx_model_why`。没有新模块。`use` 仍是 32，构造表没有新增参数。`snprintf`、解码、编码和 `clierror` 仍在 C。宿主切片下标仍是 APE 71、本机 70。这次没有实跑 hostseed。`sh ./unisacc.com tools/check-compiler-units.cx` 又两次退出 0，两次 stdout 相同，两次 stderr 相同，都打印 `CHECK_COMPILER_UNITS failed=0`。这次检查直接调用这些函数，没有编译 `compiler.c`。这不是产品安装、六目标或 `--all`。整棵重构还没完成。

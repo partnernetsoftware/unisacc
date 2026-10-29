@@ -1,7 +1,139 @@
 #pragma unisa module tapegate
-/* LEB and quote decisions from src/tapebin.c. The old functions set tb_bad
-   and write a global buffer. These return codes instead. Return 1 is the
-   old fail path and does not set a global. Return 4 is not on the old path. */
+/* LEB, quote, and container-header decisions from src/tapebin.c.
+   The old functions set tb_bad and write a global buffer. These return
+   codes instead. Return 1 is the old fail path and does not set a global.
+   Return 4 is not on the old path. SHA, record text, and file reads stay
+   in src/tapebin.c. */
+static unsigned long long tb2_u(const unsigned char *p, int n) {
+    unsigned long long v;
+    int i;
+    v = 0;
+    i = n - 1;
+    while (i >= 0) {
+        v = (v << 8) | (unsigned long long)(p[i] & 255);
+        i = i - 1;
+    }
+    return v;
+}
+/* bytes < 136 or a magic other than UTAPEBIN is the old fail. */
+int tb2_magic(const unsigned char *b, int n) {
+    const char *m;
+    int i;
+    if (!b) return 4;
+    if (n < 136) return 1;
+    m = "UTAPEBIN";
+    i = 0;
+    while (i < 8) {
+        if (b[i] != (unsigned char)m[i]) return 1;
+        i = i + 1;
+    }
+    return 0;
+}
+/* Fixed words after a long-enough header. *minor is written only on success. */
+int tb2_fixed(const unsigned char *b, int n, int *minor) {
+    int m;
+    if (!b) return 4;
+    if (n < 136) return 1;
+    if (tb2_u(b + 8, 2) != 1) return 1;
+    m = (int)tb2_u(b + 10, 2);
+    if (m != 0 && m != 1) return 1;
+    if (tb2_u(b + 12, 2) != 1) return 1;
+    if (tb2_u(b + 14, 2) != 0) return 1;
+    if (tb2_u(b + 16, 4) != 0) return 1;
+    if (tb2_u(b + 24, 4) != 64) return 1;
+    if (minor) *minor = m;
+    return 0;
+}
+/* Section count is 3 or 4 and the directory fits in n. *out is written only on success. */
+int tb2_nsec(const unsigned char *b, int n, int *out) {
+    unsigned long long c;
+    if (!b) return 4;
+    if (n < 136) return 1;
+    c = tb2_u(b + 20, 4);
+    if (c < 3 || c > 4) return 1;
+    if (64 + 24 * (int)c > n) return 1;
+    if (out) *out = (int)c;
+    return 0;
+}
+/* Origin at +60 is 0..6. A nonzero target must match unless force is set or the word is 0. */
+int tb2_origin(const unsigned char *b, int n, int target, int force) {
+    unsigned long long o;
+    if (!b) return 4;
+    if (n < 136) return 1;
+    o = tb2_u(b + 60, 4);
+    if (o > 6) return 1;
+    if (!force && target && o != 0 && o != (unsigned long long)target) return 1;
+    return 0;
+}
+/* Next section starts on an 8-byte boundary. A negative cursor is not on the old path. */
+int tb2_align(int p) {
+    if (p < 0) return -1;
+    return p + ((8 - (p % 8)) % 8);
+}
+/* One directory row. Outputs stay unchanged when the row is refused. */
+int tb2_row(const unsigned char *b, int n, int index, int expected, long long *off, long long *len, long long *count) {
+    int d;
+    int kind;
+    int flags;
+    unsigned long long o;
+    unsigned long long L;
+    unsigned long long c;
+    if (!b || !off || !len || !count) return 4;
+    if (index < 0 || index > 3 || expected < 0 || n < 0) return 4;
+    d = 64 + 24 * index;
+    if (n < d + 24) return 1;
+    kind = (int)tb2_u(b + d, 2);
+    flags = (int)tb2_u(b + d + 2, 2);
+    if (kind != index + 1) return 1;
+    if (flags != (kind < 4 ? 1 : 0)) return 1;
+    o = tb2_u(b + d + 4, 8);
+    L = tb2_u(b + d + 12, 8);
+    c = tb2_u(b + d + 20, 4);
+    if (o > 9223372036854775807ull || L > 9223372036854775807ull) return 1;
+    if ((long long)o != (long long)expected) return 1;
+    if ((long long)o > n) return 1;
+    if ((long long)L > (long long)n - (long long)o) return 1;
+    *off = (long long)o;
+    *len = (long long)L;
+    *count = (long long)c;
+    return 0;
+}
+/* Padding bytes in [from, to) must be 0. A range outside the buffer is not on the old path. */
+int tb2_zeros(const unsigned char *b, int n, int from, int to) {
+    int i;
+    if (!b) return 4;
+    if (from < 0 || to < from || to > n) return 4;
+    i = from;
+    while (i < to) {
+        if (b[i] != 0) return 1;
+        i = i + 1;
+    }
+    return 0;
+}
+/* A fourth section is 32 bytes and one record. Fewer sections do not look. */
+int tb2_extra(int nsec, long long len, long long count) {
+    if (nsec != 4) return 0;
+    if (len != 32 || count != 1) return 1;
+    return 0;
+}
+int tb2_end(int p, int bytes) {
+    if (p != bytes) return 1;
+    return 0;
+}
+/* A name byte of NUL, space, tab, CR, LF, or ':' is the old pool fail. */
+int tb2_name_byte(int c) {
+    c = c & 255;
+    if (c == 0 || c == 32 || c == 9 || c == 10 || c == 13 || c == 58) return 1;
+    return 0;
+}
+int tb2_name_empty(int names, long long size) {
+    if (names && size == 0) return 1;
+    return 0;
+}
+int tb2_span(long long size, long long room) {
+    if (size < 0 || room < 0 || size > room) return 1;
+    return 0;
+}
 static int tb2_hex(int b, char *out, int *at, int cap) {
     const char *hex = "0123456789abcdef";
     if (*at + 2 >= cap) return 1;
