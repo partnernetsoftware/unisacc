@@ -2,6 +2,7 @@
    archive/reference-c/exec/c/compiler.c are reference only.
    Seven byte streams from Paper A. Word class comes from bindhost. */
 #pragma unisa use compiler.bindhost
+#pragma unisa use driver.cli
 /* 1 ar, 2 as, 3 nm/objdump, 11 version, 12 help, 13 --, 20 source.
    0 is an ordinary word. A null pointer returns 4. */
 int us_word(const char *word, int is_object) {
@@ -46,21 +47,54 @@ int us_stream_name(int index, const char **out) {
     if (index == 6) { *out = "elf"; return 0; }
     return 2;
 }
+int us_fail(const char *s) {
+    char line[512];
+    if (!s) return 1;
+    if (bx_cli_line(s, line, 512) == 0) {
+        fputs(line, stderr);
+        return 1;
+    }
+    fprintf(stderr, "unisacc: model driver: %s\n", s);
+    return 1;
+}
 int main(int argc, char **argv) {
-    int i;
-    int n;
-    int kind;
+    static CxcState opts;
+    char why[128];
+    const char *src;
     const char *name;
     const char *text;
-    if (argc >= 2) {
-        kind = us_word(argv[1], 0);
-        if (kind == 1 || kind == 2 || kind == 3) {
-            printf("tool %d\n", kind);
-            return 2;
+    int i;
+    int n;
+    int next;
+    int parsed;
+    int kind;
+    src = 0;
+    if (argc < 2) {
+        n = us_stream_count();
+        i = 0;
+        while (i < n) {
+            if (us_stream_name(i, &name) != 0) return 1;
+            printf("%s\n", name);
+            i = i + 1;
         }
+        return 0;
     }
+    kind = us_word(argv[1], 0);
+    if (kind == 1 || kind == 2 || kind == 3) {
+        printf("tool %d\n", kind);
+        return 2;
+    }
+    if (cxc_default_run(&opts, argv, argc, why, 128)) return us_fail(why);
     i = 1;
     while (i < argc) {
+        next = i;
+        parsed = cxc_step(&opts, argv, argc, &next, why, 128);
+        if (parsed == 0) {
+            i = next;
+            continue;
+        }
+        if (parsed == 5 || parsed == 7) return us_fail(why);
+        if (parsed != 1) return us_fail(why);
         kind = us_word(argv[i], 0);
         if (kind == 11) {
             if (us_version(&text) != 0) return 1;
@@ -72,22 +106,15 @@ int main(int argc, char **argv) {
             printf("%s", text);
             return 0;
         }
+        if (kind == 13) break;
+        if (bx_opt_dash(argv[i]) == 1) return us_fail(bx_opt_why(opts.defrun, src));
+        if (!src) src = argv[i];
         i = i + 1;
     }
-    if (argc > 1) {
-        i = 1;
-        while (i < argc) {
-            printf("%s %d\n", argv[i], us_word(argv[i], 0));
-            i = i + 1;
-        }
-        return 0;
-    }
-    n = us_stream_count();
-    i = 0;
-    while (i < n) {
-        if (us_stream_name(i, &name) != 0) return 1;
-        printf("%s\n", name);
-        i = i + 1;
-    }
+    printf("out=%s\n", opts.out ? opts.out : "-");
+    printf("src=%s\n", src ? src : "-");
+    printf("target=%s\n", opts.target ? opts.target : "-");
+    printf("mode=%d\n", opts.mode);
+    printf("runit=%d\n", opts.runit);
     return 0;
 }

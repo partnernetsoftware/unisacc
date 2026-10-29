@@ -644,6 +644,18 @@ flowchart TD
   cap["检查文件 32 个 use"] --> pull["bindargs.cx 的 use bindcount"]
 ```
 
+## 122. 2026-10-29 入口改走 driver.cli 的选项行走
+
+构造脚本不改。`src/driver` 指向 `../cx/driver`。`src/unisacc.cx` 调用 `cxc_default_run` 和 `cxc_step`。未知 `-z` 退出 1，stderr 是 `option not migrated`。已有源文件后再遇 `-z` 用长拒绝。缺 `-o` 参数退出 1，stderr 是 `missing output path`。`-o out a.c` 退出 0，stdout 40：`out=out`、`src=a.c`、`mode=0`、`runit=0`。`-c -b lnx/x86_64 a.c` 退出 0，`target=lnx/x86_64`，`mode=0`，因为后面的 `-b` 把 mode 写成 0。版本、帮助、`ar`、无参数仍按上一刀。这还不编译源文件。没有产品安装，没有 hostseed，没有 `--all`。整棵重写还没完成。
+
+```mermaid
+flowchart TD
+  entry["src/unisacc.cx"] --> cli["cx/driver/cli.cx 的 cxc_step"]
+  cli --> known["-o -b -c 等记下 out target mode"]
+  cli --> bad["未知减号经 bx_opt_why 拒绝"]
+  entry --> stop["还不编译源文件"]
+```
+
 ## 121. 2026-10-29 入口按归档编译器回答版本和帮助
 
 构造脚本不改。`src/unisacc.cx` 的 `us_version` 交出 `0.0.43`。`us_help` 交出归档 `compiler.c` 的三行帮助。第一个词是工具时返回 2，打印 `tool N`。`--version` 和 `-version` 打印 `unisacc 0.0.43`。改前 `--version` 的 stdout 是 `--version 11`。改后 `--version` 退出 0，stdout 15，stderr 0。`--help` 退出 0，stdout 191，stderr 0。`ar` 退出 2，stdout 7。无参数仍是七流，stdout 28。`a.c --version` 也打印版本。没有产品安装，没有 hostseed，没有 `--all`。整棵重写还没完成。
