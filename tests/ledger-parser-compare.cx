@@ -1,0 +1,25 @@
+/* Compare the real C and CX ledger parsers over valid, mutated and truncated inputs. */
+#pragma unisa use cxlib.netpack
+static void fail(const char *s){fprintf(stderr,"ledger-parser-compare: %s\n",s);exit(2);}
+static void path(char *p,const char *a,const char *b){int n=snprintf(p,4400,"%s/%s",a,b);if(n<0||n>=4400)fail("path");}
+static void run(char **v,const char *root,const char *out,const char *name,int expect){
+ np_result r={0};char why[1024],p[4400],leaf[128];
+ if(np_run(v,root,0,12,&r,why,sizeof why))fail(why);
+ snprintf(leaf,sizeof leaf,"%s.stdout",name);path(p,out,leaf);if(cx_write(p,r.out,r.outn))fail("stdout");
+ snprintf(leaf,sizeof leaf,"%s.stderr",name);path(p,out,leaf);if(cx_write(p,r.err,r.errn))fail("stderr");
+ if(r.rc){if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);fail("child failed");}
+ if(expect){const char *want="LEDGER_PARSER_COMPARE checks=105115 failed=0\n";if(r.outn!=strlen(want)||memcmp(r.out,want,r.outn))fail("unexpected result");fwrite(r.out,1,r.outn,stdout);}
+ np_free(&r);
+}
+int main(int argc,char **argv){
+ char root[4096],bound[4400],header[4400],module[4400],adapter[4400],compare[4400],mo[4400],old[4400],cx[4400],exe[4400];
+ if(argc!=3||!realpath(argv[1],root)||argv[2][0]!='/'||mkdir(argv[2],0700))fail("usage ROOT ABS_NEW_OUT");
+ path(bound,root,"tools/bound");path(header,root,"include/cx.h");path(module,root,"cx/runtime/source_frame.cx");path(adapter,root,"tests/cases/ledger_parser_adapter.c");path(compare,root,"tests/cases/ledger_parser_compare.c");
+ path(mo,argv[2],"module.o");path(old,argv[2],"old.o");path(cx,argv[2],"cx.o");path(exe,argv[2],"compare");
+ char *m[]={bound,"10","/usr/bin/cc","-O2","-x","c","-include",header,"-c",module,"-o",mo,0};run(m,root,argv[2],"module",0);
+ char *a[]={bound,"10","/usr/bin/cc","-D_GNU_SOURCE","-O2","-ffunction-sections","-fdata-sections","-Dledger_probe=old_probe","-c",adapter,"-o",old,0};run(a,root,argv[2],"old",0);
+ char *b[]={bound,"10","/usr/bin/cc","-D_GNU_SOURCE","-O2","-ffunction-sections","-fdata-sections","-DUSE_CX","-Dledger_probe=cx_probe","-c",adapter,"-o",cx,0};run(b,root,argv[2],"cx",0);
+ char *l[]={bound,"10","/usr/bin/cc","-O2","-Wl,--gc-sections",compare,old,cx,mo,"-o",exe,0};run(l,root,argv[2],"link",0);
+ char *t[]={bound,"10",exe,0};run(t,root,argv[2],"compare",1);
+ puts("LEDGER_PARSER_COMPARE_BATCH\tscope=host-source-differential-linux-x86_64");return 0;
+}
