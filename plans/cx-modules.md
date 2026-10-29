@@ -644,6 +644,19 @@ flowchart TD
   cap["检查文件 32 个 use"] --> pull["bindargs.cx 的 use bindcount"]
 ```
 
+## 117. 2026-10-29 prune 的根名字和落穿边收进 prunegate
+
+没有新模块，没有新的 `use`。这次不改 C。`pg_root` 交出四个根名字。空指针返回 4。越界返回 2。`pg_fall` 对 ret、jump、exit 返回 0，其它返回 1。先红：检查退出 1，`pg_root` 和 `pg_fall` 未定义。补上后再两次 `pg-root` 退出 0，stdout 25995，stderr 103，相同，`^FAIL` 为 0。第 126 行 `PASS pg-root`，第 1314 行 `failed=0`。检查没有编译 `tapeprune.c`。五份表没改。没有 hostseed，没有产品安装，没有 `--all`。整棵重构还没完成。提交 `855e9ca475`，2 个文件，增加 21 行。父提交 `d7a7fa7fe7`。
+
+```mermaid
+flowchart TD
+  analyze["tp_analyze 仍在 src/tapeprune.c"] --> stay["这次不改它"]
+  cx["prunegate.cx"] --> root["pg_root"]
+  cx --> fall["pg_fall"]
+  check["check-compiler-units.cx"] --> root
+  check --> fall
+```
+
 ## 116. 2026-10-29 prune 的 tp_getop 改走 pg_span
 
 没有新模块，没有新的 `use`。`tp_getop` 调用 `pg_span`。返回 4 才回到 `tp_opnames` 扫描。空的 `tp_input` 返回 -1。宿主 `gcc` 把 `prunegate.cx` 和 `src/tapeprune.c` 链在一起，退出 0，stderr 0。`pg_span` 在 `0x2bd0`，`tp_getop` 在 `0x3400`，都是 T。`0x341e` 调用 `pg_span`。`0x3455` 是 4 的回退，调用 `tp_same`。程序退出 0，打印 `tp_getop wired`。`add64` 得 2，短跨度得 -1，负长度得 -1，`callm` 得 68，`mov` 得 1。检查两次 `pg-wire` 退出 0，stdout 25982，stderr 103，相同，`^FAIL` 为 0。第 125 行 `PASS pg-span`，第 1313 行 `failed=0`。这次单元检查没有编译 `tapeprune.c`。五份表没改。没有 hostseed，没有产品安装，没有 `--all`。整棵重构还没完成。提交 `2dd5a7cb0c`，1 个文件，增加 2 行，删 1 行。父提交 `4c1ebed01a`。
