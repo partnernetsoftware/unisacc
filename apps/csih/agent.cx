@@ -1393,7 +1393,9 @@ static cdsh_plugin file_row = { "file", "read|write|edit", file_run, 0 };
  * (unshare -Urm, no root needed) where every mount is remounted read-only;
  * work then reopens the cwd and /tmp for writing. So a write outside the
  * allowed places fails with EROFS from the kernel, not from a keyword list.
- * Not covered: network, processes, reads of secrets. CSIH_SANDBOX=0 turns
+ * Also: ~/env.jsonl and ~/.ssh read as empty, a private PID space, and
+ * (read tier) no network. Not covered: other secret files, the network in
+ * the work tier, CPU/memory limits. CSIH_SANDBOX=0 turns
  * it off; without unshare the keyword gates are all that is left. */
 static int agent_sandbox_state = -1;   /* -1 unknown, 0 unavailable, 1 works */
 
@@ -1401,7 +1403,7 @@ int agent_sandbox_available(void) {
     const char *off = getenv("CSIH_SANDBOX");
     if (off && off[0] == '0') return 0;
     if (agent_sandbox_state < 0) {
-        shell_result p = shell_run_in("unshare -Urm true 2>/dev/null", "/");
+        shell_result p = shell_run_in("unshare -Urmn -p --fork --mount-proc true 2>/dev/null", "/");
         agent_sandbox_state = p.ok && p.exited && p.status == 0;
     }
     return agent_sandbox_state;
@@ -1434,6 +1436,10 @@ int agent_sandbox_wrap(const char *cmd, const char *cwd, char *out, size_t cap) 
         "w=$1; mode=$2; "
         /* /tmp first: binding it after cwd would hide a cwd that lives under /tmp. */
         "if [ \"$mode\" = work ]; then mount --bind /tmp /tmp && mount --bind \"$w\" \"$w\" || { echo 'csih sandbox: setup failed' >&2; exit 97; }; fi; "
+        /* Secrets read as empty: the API key file and ssh keys. Before the
+         * read-only pass, since that pass would also cover these mounts. */
+        "if [ -f \"$HOME/env.jsonl\" ]; then mount --bind /dev/null \"$HOME/env.jsonl\" || exit 97; fi; "
+        "if [ -d \"$HOME/.ssh\" ]; then mount -t tmpfs -o ro,size=4k none \"$HOME/.ssh\" || exit 97; fi; "
         "for m in $(awk \"{print \\$2}\" /proc/self/mounts); do mount -o bind,remount,ro \"$m\" 2>/dev/null; done; "
         "if [ \"$mode\" = work ]; then mount -o bind,remount,rw /tmp && mount -o bind,remount,rw \"$w\" || { echo 'csih sandbox: setup failed' >&2; exit 97; }; fi; "
         "cd \"$w\" && exec /bin/sh -c \"$3\"";
@@ -1442,8 +1448,10 @@ int agent_sandbox_wrap(const char *cmd, const char *cwd, char *out, size_t cap) 
     if (!agent_sh_quote(qs, sizeof qs, script) || !agent_sh_quote(qw, sizeof qw, cwd && cwd[0] ? cwd : ".")
         || !agent_sh_quote(qc, sizeof qc, cmd))
         return -1;
-    return (size_t)snprintf(out, cap, "exec unshare -Urm /bin/sh -c %s csih-sandbox %s %s %s",
-                            qs, qw, agent_perm == 0 ? "read" : "work", qc) < cap ? 1 : -1;
+    /* -p --fork --mount-proc: own PID space, so other processes are invisible
+     * and unkillable. -n (read only): no network at all. */
+    return (size_t)snprintf(out, cap, "exec unshare -Urm%s -p --fork --mount-proc /bin/sh -c %s csih-sandbox %s %s %s",
+                            agent_perm == 0 ? "n" : "", qs, qw, agent_perm == 0 ? "read" : "work", qc) < cap ? 1 : -1;
 }
 
 /* plugin_run("exec") reaches here; runs the current step's command. */

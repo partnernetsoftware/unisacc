@@ -143,6 +143,12 @@ agent 模式新增 `/help`、`/status`、`/clear`，均只在本地处理、不�
 - **第八批已落地（2026-10-29）**：成功行从 `↻ 本轮结束 rounds=1 actions=3 · 已答 · semantic acceptance (work): …` 改为 `✓ 已验收 · 本轮结束 1 轮 3 步 · 理由`（未经评审接受的写 `✓ 已答`，没有答复的写 `✓ 已结束（未作答）`），与 `◐`/`✗` 一起凑齐三态。保留「本轮结束」四字，因为 `probes/reload_runtime.py` 靠它判断一轮结束。selftest：`accepted row reads ✓ 已验收 and keeps 本轮结束`；tmux 实测：`✓ 已验收 · 本轮结束 1 轮 1 步 · exec ran date +%Y, exit 0, …`。
 - 候选清单的去向（2026-10-29 更新）：转录按 cwd 分开 → 第十六批；exec 三档权限 → 第十五批；P0 根治 → 第十二、十七批。**正文流式显示：REJECT**。模型每次回复都是一个完整的 JSON 动作对象，正文只是其中 `text` 字段的值；边收边画要么露出半截 JSON，要么得写一个流式 JSON 解析器，只为提前几秒看到文字。忙碌行已经实时显示已收字节，回复通常几秒内收完。以后若改为工具调用 API（正文与动作分开下发），再重新评估。
 - **第十批已落地（2026-10-29）**：忙碌行。原来执行命令时一直显示「等模型」；现在收到 exec 行（命令执行前发出）就显示 `跑命令 <命令>`，下一次请求在途（`net_in_flight()`）时切回「等模型」。文案从 `请求中 等模型 3秒 7745词元 上传 32839字节 已收 574字节 hit 1152 miss 6561` 改为 `⏳ 等模型 3秒 · 7745词元 · ↑32.1KB 已收574B · 缓存命中15%`，保留「已收」二字（已有断言依赖它）。selftest：`busy line names the running command and reads sizes`；tmux 实测已见切换。原来 exec 同步执行时秒数不走、界面不刷新，第十一批已解决。
+- **第二十二批已落地（2026-10-29）**：沙箱补上第十九批写明的三个缺口。
+  - 机密：沙箱里 `~/env.jsonl` 被 /dev/null 盖住，`~/.ssh` 被空的只读 tmpfs 盖住，模型跑的命令读不到 API key 和 ssh 私钥。harness 进程本身不在沙箱里，照常读 key、调用模型。
+  - 进程：`-p --fork --mount-proc` 建私有 PID namespace，命令看不见、也杀不掉沙箱外的进程。
+  - 网络：read 档加 `-n`，只剩 loopback；work 档保留网络（`git fetch`、装依赖要用）。
+  - 仍然管不到：其他机密文件（只遮了这两处）、work 档的网络、CPU/内存配额。
+  - agent_cli selftest 新增：work 档 `~/env.jsonl` 读出为空、沙箱有自己的 PID 空间、read 档 `/proc/net/dev` 只有 lo。tmux 实测：`wc -c ~/env.jsonl` 为 0，`ps -e | wc -l` 为 4，本轮 `✓ 已验收`。
 - **第二十一批已落地（2026-10-29）**：状态行的参考生成器 `tools/status.cx`，这样状态行不必非得靠别人写的工具。
   - 用法：`sh unisacc.com apps/csih/tools/status.cx -- [count DIR 完成后缀 待办后缀] [next 清单.md] [line 文本] [输出文件]`，每个选项写一行，默认输出 `./.csih-status`。
   - `count` 递归数文件系统，跳过点目录，输出 `进度 完成/总数 .cx（.py 还剩 N，扫描 DIR）`；`next` 取 Markdown 清单里第一个未勾选的 `- [ ]` 项；`line` 写固定一行（比如最近的拒绝句）。

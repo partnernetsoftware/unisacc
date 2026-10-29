@@ -442,6 +442,19 @@ static int agent_run_selftest(void) {
         snprintf(s.cmd, sizeof s.cmd, "%s", cmd);
         agent_exec(&s, dir, out, sizeof out);
         a_expect(strstr(out, "Read-only") != NULL && !strstr(out, "wrote"), "work tier: home outside cwd is read-only");
+        /* secrets read empty, own PID space, and (read tier) no network */
+        snprintf(s.cmd, sizeof s.cmd, "echo env=$(cat \"$HOME/env.jsonl\" 2>/dev/null | wc -c) pids=$(ls /proc | grep -c '^[0-9]') net=$(wc -l < /proc/net/dev)");
+        agent_exec(&s, dir, out, sizeof out);
+        a_expect(strstr(out, "env=0 ") != NULL, "work tier: ~/env.jsonl reads as empty");
+        {
+            const char *p = strstr(out, "pids=");
+            a_expect(p && atoi(p + 5) > 0 && atoi(p + 5) < 10, "sandbox has its own PID space");
+        }
+        agent_set_perm(0);
+        agent_exec(&s, dir, out, sizeof out);
+        /* /proc/net/dev: two header lines plus lo only. */
+        a_expect(strstr(out, "net=3") != NULL, "read tier: no network but loopback");
+        agent_set_perm(1);
         memset(s.cmd, 'x', sizeof s.cmd - 1); s.cmd[sizeof s.cmd - 1] = 0;
         memcpy(s.cmd, "echo ", 5);
         { int i; for (i = 5; i < (int)sizeof s.cmd - 1; i += 2) s.cmd[i] = '\''; }
