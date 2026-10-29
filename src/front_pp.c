@@ -194,27 +194,15 @@ int isdi(int c) { if (c >= 48) { if (c <= 57) return 1; } return 0; }
 /* E2 scans spelling, independently of the E1 identifier constraint check.
    Keep a complete UCN in its preprocessing token, even when E1 must later
    reject its value. Never rewrite bytes used by -E or stringization. */
-int pp_ucn_span(char *b, int i, int e) {
-    int n; int k; int c;
-    if (i + 1 >= e || (b[i] & 255) != 92) return 0;
-    n = 0;
-    if (b[i + 1] == 117) n = 6;
-    if (b[i + 1] == 85) n = 10;
-    if (n == 0 || n > e - i) return 0;
-    k = 2;
-    while (k < n) {
-        c = b[i + k] & 255;
-        if (!((c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102))) return 0;
-        k = k + 1;
-    }
-    return n;
-}
-/* Hex value, scalar range, kind gate, and reason live in cx/compiler/frontpp.cx.
-   A null or a negative index makes pp_ucn_value return 0 and not read.
-   pp_ucn_bad 1 is the old scalar refusal. pp_ucn_gate 2 is not an old return. */
+/* Span, hex value, scalar range, kind, gate, and reason live in cx/compiler/frontpp.cx.
+   A null span returns 0 and does not read. That 0 is not the old crash.
+   A null kind table returns 4. pp_ucn_bad 1 is the old scalar refusal.
+   pp_ucn_gate 2 is not an old return. */
+int pp_ucn_span(const char *b, int i, int e);
 unsigned long long pp_ucn_value(const char *b, int i, int n);
 int pp_ucn_bad(unsigned long long v);
 int pp_ucn_gate(int kind, int initial, int span);
+int pp_ucn_kind(int c, const unsigned short *row, int n);
 const char *pp_ucn_why(int code);
 int pp_idend(char *b, int i, int e) {
     int j; int n; int c;
@@ -2356,17 +2344,7 @@ int ishexc(int c) {
     return 0;
 }
 int ucnlen(int j) {
-    int n; int k;
-    if (j + 1 >= nsrc) return 0;
-    if ((src[j] & 255) != 92) return 0;
-    n = 0;
-    if ((src[j + 1] & 255) == 117) n = 4;
-    if ((src[j + 1] & 255) == 85) n = 8;
-    if (n == 0) return 0;
-    if (j + 2 + n > nsrc) return 0;
-    k = 0;
-    while (k < n) { if (ishexc(src[j + 2 + k] & 255) == 0) return 0; k = k + 1; }
-    return 2 + n;
+    return pp_ucn_span(src, j, nsrc);
 }
 
 /* Identifier conversion is an E1 constraint. E2's spelling scanner is
@@ -2376,7 +2354,7 @@ int lex_ucnlen(int j, int initial) {
     n = ucnlen(j); if (n == 0) return 0 - 1;
     v = pp_ucn_value(src, j, n);
     if (pp_ucn_bad(v) == 1) return 0 - 1;
-    kind = unisa_ucn_kind((int)v);
+    kind = pp_ucn_kind((int)v, &unisa_ucn_ranges[0][0], (int)(sizeof unisa_ucn_ranges / sizeof unisa_ucn_ranges[0]));
     g = pp_ucn_gate(kind, initial, n);
     if (g < 0) return g;
     return n;
