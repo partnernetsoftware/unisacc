@@ -14,14 +14,14 @@ CSIH_BIN=../../out/csih-e2e-bin/csih UNISACC=../../unisacc.com \
   sh ../../unisacc.com check.cx -- probes            # 11 ok, 0 fail
 ```
 
-## 最近一次结果（2026-10-29，HEAD 777db11b59，本机 Linux；第四十八批后重跑）
+## 最近一次结果（2026-10-29，HEAD c9de59c2a1，本机 Linux；第五十一批后重跑）
 
 | 门禁 | 结果 |
 | --- | --- |
 | prepare | up to date |
 | tui selftest | 71 项 ok，selftest ok |
 | agent_cli / shell_cli / term_cli / net_cli selftest | 全部通过 |
-| check.sh | rc=0，check ok |
+| check.sh | rc=0，check ok（6 项，含第 5 项字面量长度检查） |
 | check.cx probes | rc=0，11 ok，0 fail（含真实 HTTP 与真实 LLM 往返） |
 
 只有本机证据：没有跑 macOS/Windows，也没有 CI。
@@ -62,6 +62,7 @@ CSIH_BIN=../../out/csih-e2e-bin/csih UNISACC=../../unisacc.com \
 
 - 沙箱管文件系统写入、常见机密（env.jsonl、.netrc、.git-credentials、.ssh、.aws、.gnupg、.config/gh、.docker）、进程可见性、每条命令 4GB 内存和 120 秒 CPU 配额，read 档还断网，work 档可用 `/net off` 断网；内置清单之外的机密可写进 `~/.csih/secrets` 一并遮蔽，没写进去的不管。没有 `unshare` 的机器上退回关键字门。
 - 危险命令门是关键字匹配。
+- unisacc 运行时的 `signal()` 不向内核注册（复现见 `out/csih-signal-repro/`），csih 自己收不到外部信号；被 kill 时由 `csih.sh` 兜底恢复终端，直接运行二进制时没有这层兜底。
 - exec 同步执行，每 200ms 刷新一次界面；单条命令最长 60 秒（`CSIH_EXEC_TIMEOUT_SEC`）。
 - 回答正文不流式显示（REJECT，理由见 PRD）。
 - 第二十四批加了答复示例后，实测 4/4 用了 quote，且第一遍就通过；不用时 harness 收拢偏移或取整段正文。
