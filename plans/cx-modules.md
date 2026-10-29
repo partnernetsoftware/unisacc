@@ -644,6 +644,17 @@ flowchart TD
   cap["检查文件 32 个 use"] --> pull["bindargs.cx 的 use bindcount"]
 ```
 
+## 118. 2026-10-29 旧编译器 C 归档，入口改到 cx/unisacc.cx
+
+`unisacc.c` 和 `exec/c/compiler.c` 挪到 `archive/reference-c/`。`src/*.c` 和产品驱动收进来的 C 一起过去。新入口 `cx/unisacc.cx` 只报论文 A 的七段字节流。`sh ./unisacc.com cx/unisacc.cx` 退出 0，stdout 28 字节，stderr 0，七行是 `e2`、`e1`、`e3`、`e4`、`prune`、`lower`、`elf`。构造表没改。没有 hostseed，没有产品安装，没有 `--all`。整棵重写还没完成。提交 `e16028ffa1`，27 个文件，增加 33 行。父提交 `b902c8fbfb`。
+
+```mermaid
+flowchart TD
+  old["unisacc.c 与 compiler.c"] --> arc["archive/reference-c 只供对照"]
+  neu["cx/unisacc.cx"] --> streams["e2 e1 e3 e4 prune lower elf"]
+  build["构造脚本仍写 exec/c/asmcompiler.c"] --> wait["这次没有替换已装产品"]
+```
+
 ## 117. 2026-10-29 prune 的根名字和落穿边收进 prunegate
 
 没有新模块，没有新的 `use`。这次不改 C。`pg_root` 交出四个根名字。空指针返回 4。越界返回 2。`pg_fall` 对 ret、jump、exit 返回 0，其它返回 1。先红：检查退出 1，`pg_root` 和 `pg_fall` 未定义。补上后再两次 `pg-root` 退出 0，stdout 25995，stderr 103，相同，`^FAIL` 为 0。第 126 行 `PASS pg-root`，第 1314 行 `failed=0`。检查没有编译 `tapeprune.c`。五份表没改。没有 hostseed，没有产品安装，没有 `--all`。整棵重构还没完成。提交 `855e9ca475`，2 个文件，增加 21 行。父提交 `d7a7fa7fe7`。
