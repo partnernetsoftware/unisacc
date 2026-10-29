@@ -1,0 +1,87 @@
+#pragma unisa module routestep
+/* One package stage's model bytes and the buffer handoff.
+   No libc and no include. Allocation, loadbytes, clocks, and
+   execute stay in exec/c/run.c.
+   A cached stage returns 0 and does not call inflate or CRC.
+   Version other than 3 returns 1 and keeps the plain bytes.
+   Version 3 calls inflate, then CRC, then the UNINETB1N check.
+   Refusal strings are the historical die texts:
+   "invalid compressed model", "compressed model CRC",
+   "package requires binary networks".
+   rt_swap always installs the stage output and names the old
+   input for the caller to free. rt_strip is 1 only when rc is 0.
+   rt_after returns 1 when rc is nonzero, else 2 when stop is
+   nonzero, else 0. A failing stage wins over the span stop. */
+static void rt_say(char *why, long cap, const char *msg) {
+    long i;
+    if (!why || cap <= 0) return;
+    i = 0;
+    if (msg) while (msg[i] && i + 1 < cap) { why[i] = msg[i]; i++; }
+    why[i] = 0;
+}
+
+static int rt_magic(const unsigned char *p) {
+    const char *m = "UNINETB1N";
+    int i;
+    for (i = 0; i < 9; i++) if (p[i] != (unsigned char)m[i]) return 0;
+    return 1;
+}
+
+int rt_open(int ver, int cached, const unsigned char *plain, int plain_len,
+            unsigned char *owned, int raw_len, unsigned expect,
+            int (*inflate)(unsigned char *, unsigned long, const unsigned char *, unsigned long),
+            unsigned (*crc32)(char *, int),
+            int *use_owned, int *out_len, char *why, long cap) {
+    unsigned sum;
+    if (!use_owned || !out_len) {
+        rt_say(why, cap, "bad argument");
+        return 3;
+    }
+    *use_owned = 0;
+    if (cached) {
+        rt_say(why, cap, 0);
+        return 0;
+    }
+    if (ver != 3) {
+        *out_len = plain_len;
+        rt_say(why, cap, 0);
+        return 1;
+    }
+    if (!plain || !owned || !inflate || !crc32 || raw_len < 0) {
+        rt_say(why, cap, "bad argument");
+        return 3;
+    }
+    if (inflate(owned, (unsigned long)raw_len, plain, (unsigned long)plain_len)) {
+        rt_say(why, cap, "invalid compressed model");
+        return 2;
+    }
+    sum = crc32((char *)owned, raw_len);
+    if (sum != expect) {
+        rt_say(why, cap, "compressed model CRC");
+        return 2;
+    }
+    if (raw_len < 9 || !rt_magic(owned)) {
+        rt_say(why, cap, "package requires binary networks");
+        return 2;
+    }
+    *use_owned = 1;
+    *out_len = raw_len;
+    rt_say(why, cap, 0);
+    return 1;
+}
+
+void rt_swap(unsigned char **in_b, int *in_n, unsigned char *out_b, int out_n,
+             unsigned char **release) {
+    if (!in_b || !in_n || !release) return;
+    *release = *in_b;
+    *in_b = out_b;
+    *in_n = out_n;
+}
+
+int rt_strip(int rc) { return rc == 0; }
+
+int rt_after(int rc, int stop) {
+    if (rc) return 1;
+    if (stop) return 2;
+    return 0;
+}

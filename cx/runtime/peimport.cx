@@ -1,0 +1,86 @@
+#pragma unisa module peimport
+/* PE32+ named-import layout. No libc and no include.
+   Returns the import count, or a negative code the bottom adapter maps back
+   to the historical die string: -1 outside image, -2 bad name, -3 not MZ,
+   -4 not PE32+, -5 no import-name table, -6 bad RVA, -7 too many.
+   Ordinals are skipped. Allocation is injected. The current-process walk
+   stays in the Windows adapter. u32 reads are unsigned long long so a
+   32-bit long on LLP64 does not shift the high byte. */
+typedef struct {
+    const unsigned char *name;
+    int n;
+    const unsigned char *data;
+    int len;
+} PeiItem;
+static const unsigned char pei_prefix[16] = {
+    0, 'p', 'r', 'o', 'c', 'e', 's', 's', '/', 'i', 'm', 'p', 'o', 'r', 't', '/'
+};
+static unsigned long long pei_u32(const unsigned char *p) {
+    return (unsigned long long)p[0]
+         | ((unsigned long long)p[1] << 8)
+         | ((unsigned long long)p[2] << 16)
+         | ((unsigned long long)p[3] << 24);
+}
+static int pei_span(long long at, long long n, long long extent) {
+    if (at < 0 || n < 0 || at > extent || n > extent - at) return -1;
+    return 0;
+}
+static int pei_string(const unsigned char *p, long long at, long long extent, int *out) {
+    long long n = 0;
+    if (pei_span(at, 1, extent)) return -1;
+    while (at + n < extent && p[at + n]) n++;
+    if (at + n == extent || n > 4095) return -2;
+    *out = (int)n;
+    return 0;
+}
+int pei_imports(PeiItem *items, int capacity, const unsigned char *base, long long extent,
+                void *(*alloc)(void *, long long)) {
+    long long pe, d, k, dll, ilt, iat, name;
+    int count = 0, dn, nn, pn = 16, j, rc;
+    unsigned char *entry, *key, *value;
+    if (pei_span(0, 64, extent)) return -1;
+    if (base[0] != 'M' || base[1] != 'Z') return -3;
+    pe = (long long)pei_u32(base + 60);
+    if (pei_span(pe, 24 + 128, extent)) return -1;
+    if (pei_u32(base + pe) != 0x4550 || base[pe + 24] != 0x0b || base[pe + 25] != 2) return -4;
+    d = (long long)pei_u32(base + pe + 24 + 120);
+    if (!d) return 0;
+    for (;;) {
+        if (pei_span(d, 20, extent)) return -1;
+        dll = (long long)pei_u32(base + d + 12);
+        if (!dll) break;
+        rc = pei_string(base, dll, extent, &dn);
+        if (rc) return rc;
+        ilt = (long long)pei_u32(base + d);
+        iat = (long long)pei_u32(base + d + 16);
+        if (!ilt) return -5;
+        for (k = 0;; k += 8) {
+            if (pei_span(ilt + k, 8, extent) || pei_span(iat + k, 8, extent)) return -1;
+            entry = (unsigned char *)base + ilt + k;
+            name = (long long)pei_u32(entry);
+            if (!name && !pei_u32(entry + 4)) break;
+            if (entry[7] & 128) continue;
+            if (pei_u32(entry + 4)) return -6;
+            if (pei_span(name, 3, extent)) return -1;
+            name += 2;
+            rc = pei_string(base, name, extent, &nn);
+            if (rc) return rc;
+            if (count == capacity) return -7;
+            key = alloc(0, pn + dn + 1 + nn);
+            value = alloc(0, 8);
+            for (j = 0; j < pn; j++) key[j] = pei_prefix[j];
+            for (j = 0; j < dn; j++) {
+                int c = base[dll + j];
+                key[pn + j] = (unsigned char)(c >= 'A' && c <= 'Z' ? c + 32 : c);
+            }
+            key[pn + dn] = '/';
+            for (j = 0; j < nn; j++) key[pn + dn + 1 + j] = base[name + j];
+            for (j = 0; j < 8; j++) value[j] = base[iat + k + j];
+            items[count].name = key; items[count].n = pn + dn + 1 + nn;
+            items[count].data = value; items[count].len = 8;
+            count++;
+        }
+        d += 20;
+    }
+    return count;
+}

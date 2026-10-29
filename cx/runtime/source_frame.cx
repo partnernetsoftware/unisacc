@@ -400,3 +400,826 @@ int cxsf_ledger_parse(const char *dir,void *ledger,char *err,size_t errn,const v
     }
     io.release(b);return 0;
 }
+
+/* Open and read decisions for the product readfile path. The caller still
+ * performs open, read, close, stamp, fprintf, and die. A null pointer is
+ * refused before any write; that guard is not part of the old C path. */
+const char *cxsf_open_reason(long fd, int windows, long enoent, long enotdir, long eacces) {
+    if (windows) return 0;
+    if (fd == -enoent) return "ENOENT";
+    if (fd == -enotdir) return "ENOTDIR";
+    if (fd == -eacces) return "EACCES";
+    return 0;
+}
+int cxsf_open_gate(long fd, int optional, int unisa_windows, long enoent) {
+    if (fd >= 0) return 0;
+    if (unisa_windows) return optional ? 1 : 2;
+    if (optional && fd == -enoent) return 1;
+    return 2;
+}
+int cxsf_open_line(char *dst, int cap, const char *path, const char *reason) {
+    const char *prefix = "run: cannot open ";
+    size_t pn, rn, need;
+    if (!dst || !path || cap < 1) return 1;
+    pn = strlen(path);
+    rn = reason ? strlen(reason) : 0;
+    if (pn > 2147483647u || rn > 2147483647u) return 1;
+    need = strlen(prefix) + pn + 1;
+    if (reason) {
+        if (need > 2147483647u - 2 - rn) return 1;
+        need += 2 + rn;
+    }
+    if (need > 2147483646u || need + 1 > (size_t)cap) return 1;
+    if (reason) snprintf(dst, (size_t)cap, "run: cannot open %s: %s\n", path, reason);
+    else snprintf(dst, (size_t)cap, "run: cannot open %s\n", path);
+    return 0;
+}
+int cxsf_read_cap(int stamped, long long size, long long off) {
+    long long span;
+    if (!stamped || size <= off) return 65536;
+    span = size - off;
+    if (span > 1073741823LL) return 65536;
+    return (int)span + 1;
+}
+int cxsf_read_grow(int cap, int *next) {
+    if (!next) return 4;
+    if (cap > 1073741823) return 1;
+    *next = cap * 2;
+    return 0;
+}
+int cxsf_read_take(long r, int cap, int n, int *out) {
+    if (!out) return 4;
+    if (r < 0) return 1;
+    if (r == 0) return 2;
+    if (r > (long)(cap - n)) return 3;
+    *out = n + (int)r;
+    return 0;
+}
+/* package_open has no reason suffix and no optional miss. */
+int cxsf_package_gate(long fd) {
+    return fd < 0 ? 2 : 0;
+}
+
+/* Capture write decisions. mkdir, open, write, link and unlink stay with
+ * the caller. A short buffer or a null pointer returns 1 or 4 and writes
+ * nothing. A negative file index is refused; the old snprintf was not. */
+static int cxsf_dec(char *tmp, int v) {
+    unsigned int u;
+    int n, neg;
+    neg = v < 0;
+    u = neg ? (unsigned int)(-(v + 1)) + 1u : (unsigned int)v;
+    n = 0;
+    do { tmp[n++] = (char)('0' + (int)(u % 10u)); u /= 10u; } while (u && n < 15);
+    if (neg && n < 16) tmp[n++] = '-';
+    return n;
+}
+int cxsf_cap_full(int count, int max) { return count >= max; }
+int cxsf_cap_join(char *dst, int cap, const char *dir, const char *name) {
+    size_t dn, nn, need;
+    if (!dst || !dir || !name || cap < 1) return 1;
+    dn = strlen(dir);
+    nn = strlen(name);
+    if (dn > 2147483647u || nn > 2147483647u) return 1;
+    need = dn + 1 + nn;
+    if (need > 2147483646u || need + 1 > (size_t)cap) return 1;
+    memcpy(dst, dir, dn);
+    dst[dn] = '/';
+    if (nn) memcpy(dst + dn + 1, name, nn);
+    dst[need] = 0;
+    return 0;
+}
+int cxsf_cap_stage(char *dst, int cap, const char *dir, long pid) {
+    char rev[32];
+    unsigned long u;
+    int n, neg, i, at;
+    size_t dn, need;
+    if (!dst || !dir || cap < 1) return 1;
+    neg = pid < 0;
+    u = neg ? (unsigned long)(-(pid + 1)) + 1ul : (unsigned long)pid;
+    n = 0;
+    do { rev[n++] = (char)('0' + (int)(u % 10ul)); u /= 10ul; } while (u && n < 31);
+    dn = strlen(dir);
+    need = dn + 10 + (size_t)(neg + n);
+    if (need > 2147483646u || need + 1 > (size_t)cap) return 1;
+    if (dn) memcpy(dst, dir, dn);
+    memcpy(dst + dn, "/.capture-", 10);
+    at = (int)dn + 10;
+    if (neg) dst[at++] = '-';
+    for (i = n - 1; i >= 0; i--) dst[at++] = rev[i];
+    dst[at] = 0;
+    return 0;
+}
+int cxsf_cap_line(char *err, int errn, int kind, int exists, const char *name) {
+    const char *msg, *head;
+    size_t need, nn;
+    if (!err || errn < 1) return 1;
+    if (kind == 0) msg = "INTERFACE_ERROR capture-path-too-long";
+    else if (kind == 1) msg = "INTERFACE_ERROR capture-staging-create";
+    else if (kind == 4) msg = "INTERFACE_ERROR capture-staging-cleanup";
+    else if (kind == 5) msg = "INTERFACE_ERROR capture-ledger-open";
+    else if (kind == 6) msg = "INTERFACE_ERROR capture-ledger-not-empty-regular";
+    else if (kind == 7) msg = "INTERFACE_ERROR capture-ledger-write";
+    else if (kind == 8) msg = "INTERFACE_ERROR capture-ledger-close";
+    else if (kind == 2 || kind == 3) {
+        if (!name) return 1;
+        head = kind == 2 ? "INTERFACE_ERROR capture-file-write " :
+            (exists ? "INTERFACE_ERROR capture-target-exists " : "INTERFACE_ERROR capture-publish-failed ");
+        nn = strlen(name);
+        need = strlen(head) + nn;
+        if (need > 2147483646u || need + 1 > (size_t)errn) return 1;
+        memcpy(err, head, strlen(head));
+        if (nn) memcpy(err + strlen(head), name, nn);
+        err[need] = 0;
+        return 0;
+    } else return 1;
+    need = strlen(msg);
+    if (need + 1 > (size_t)errn) return 1;
+    memcpy(err, msg, need + 1);
+    return 0;
+}
+int cxsf_cap_reg(int stat_ok, int is_reg, int require_empty, long long size) {
+    if (!stat_ok || !is_reg) return 1;
+    if (require_empty && size != 0) return 1;
+    return 0;
+}
+int cxsf_cap_take(long z, int interrupted, unsigned long long at, unsigned long long n, unsigned long long *next) {
+    if (z < 0 && interrupted) return 1;
+    if (z <= 0) return 2;
+    if (!next) return 4;
+    if (at > n || (unsigned long long)z > n - at) return 3;
+    *next = at + (unsigned long long)z;
+    return 0;
+}
+int cxsf_cap_session(int has_dir, int active, int same_dir, int same_owner) {
+    if (!has_dir || !active || !same_dir || !same_owner) return 2;
+    return 0;
+}
+int cxsf_cap_key(int n, int has_key) {
+    if (n <= 0 || n > 512 || !has_key) return 1;
+    return 0;
+}
+int cxsf_cap_answer(int owned, int len, int has_bytes) {
+    if (owned < 0 || owned > 2 || len < 0 || (owned && len > 0 && !has_bytes)) return 1;
+    return 0;
+}
+int cxsf_cap_hex(char *dst, int cap, const unsigned char *key, int n) {
+    const char *digits = "0123456789abcdef";
+    int i;
+    if (!dst || !key || n < 0 || cap < 1) return 1;
+    if ((unsigned)n > 1073741823u || (size_t)n * 2u + 1u > (size_t)cap) return 1;
+    for (i = 0; i < n; i++) {
+        dst[2 * i] = digits[key[i] >> 4];
+        dst[2 * i + 1] = digits[key[i] & 15];
+    }
+    dst[2 * n] = 0;
+    return 0;
+}
+int cxsf_cap_name(char *dst, int cap, int index) {
+    char rev[16];
+    unsigned v;
+    int n, i, at;
+    size_t need;
+    if (!dst || cap < 1 || index < 0) return 1;
+    v = (unsigned)index;
+    n = 0;
+    do { rev[n++] = (char)('0' + (int)(v % 10u)); v /= 10u; } while (v && n < 16);
+    while (n < 3 && n < 16) rev[n++] = '0';
+    need = 9u + (size_t)n + 6u;
+    if (need + 1 > (size_t)cap) return 1;
+    memcpy(dst, "resource-", 9);
+    at = 9;
+    for (i = n - 1; i >= 0; i--) dst[at++] = rev[i];
+    memcpy(dst + at, ".bytes", 6);
+    dst[at + 6] = 0;
+    return 0;
+}
+int cxsf_cap_row(char *dst, int cap, int present, const char *hex, const char *name, int len, const char *sha) {
+    char num[16];
+    int nd, i, at;
+    size_t hn, nn, sn, need;
+    if (!dst || !hex || cap < 1) return 1;
+    hn = strlen(hex);
+    if (!present) {
+        need = hn + 10;
+        if (need > 2147483646u || need + 1 > (size_t)cap) return 1;
+        if (hn) memcpy(dst, hex, hn);
+        memcpy(dst + hn, "\t0\t-\t0\t-\n", 10);
+        dst[need] = 0;
+        return 0;
+    }
+    if (!name || !sha) return 1;
+    nn = strlen(name);
+    sn = strlen(sha);
+    nd = cxsf_dec(num, len);
+    need = hn + 3 + nn + 1 + (size_t)nd + 1 + sn + 1;
+    if (need > 2147483646u || need + 1 > (size_t)cap) return 1;
+    at = 0;
+    if (hn) { memcpy(dst + at, hex, hn); at += (int)hn; }
+    memcpy(dst + at, "\t1\t", 3); at += 3;
+    if (nn) { memcpy(dst + at, name, nn); at += (int)nn; }
+    dst[at++] = '\t';
+    for (i = nd - 1; i >= 0; i--) dst[at++] = num[i];
+    dst[at++] = '\t';
+    if (sn) { memcpy(dst + at, sha, sn); at += (int)sn; }
+    dst[at++] = '\n';
+    dst[at] = 0;
+    return 0;
+}
+int cxsf_cap_args(int has_dir, int has_stage, int n, int has_input) {
+    if (!has_dir || !has_stage || n < 0 || (n > 0 && !has_input)) return 1;
+    return 0;
+}
+int cxsf_cap_ledger(int stat_ok, int is_reg, int absent, long long size, int *empty) {
+    if (!empty) return 4;
+    if (stat_ok) {
+        if (!is_reg) return 1;
+        if (size != 0) return 2;
+        *empty = 1;
+        return 0;
+    }
+    if (absent) { *empty = 0; return 0; }
+    return 3;
+}
+int cxsf_cap_dent(const char *name, int empty_ledger) {
+    if (!name) return 1;
+    if (!strcmp(name, ".") || !strcmp(name, "..") || !strcmp(name, ".capture-begin")) return 0;
+    if (empty_ledger && !strcmp(name, "resources.tsv")) return 0;
+    return 1;
+}
+int cxsf_cap_place(int empty) { return empty ? 1 : 0; }
+int cxsf_cap_idline(char *dst, int cap, const char *stage, const char *hex) {
+    size_t sn, hn, need;
+    int at;
+    if (!dst || !stage || !hex || cap < 1) return 1;
+    sn = strlen(stage);
+    hn = strlen(hex);
+    need = 11u + sn + 14u + hn + 1u;
+    if (need > 2147483646u || need + 1 > (size_t)cap) return 1;
+    memcpy(dst, "#SC2\tstage=", 11);
+    at = 11;
+    if (sn) { memcpy(dst + at, stage, sn); at += (int)sn; }
+    memcpy(dst + at, "\tinput_sha256=", 14); at += 14;
+    if (hn) { memcpy(dst + at, hex, hn); at += (int)hn; }
+    dst[at++] = '\n';
+    dst[at] = 0;
+    return 0;
+}
+int cxsf_cap_dirline(char *err, int errn, int kind) {
+    const char *msg;
+    size_t need;
+    if (!err || errn < 1) return 1;
+    if (kind == 0) msg = "INTERFACE_ERROR capture-bad-arguments";
+    else if (kind == 1) msg = "INTERFACE_ERROR capture-dir-create";
+    else if (kind == 2) msg = "INTERFACE_ERROR capture-session-busy";
+    else if (kind == 3) msg = "INTERFACE_ERROR capture-ledger-not-regular";
+    else if (kind == 4) msg = "INTERFACE_ERROR capture-ledger-rows-before-identity";
+    else if (kind == 5) msg = "INTERFACE_ERROR capture-ledger-stat";
+    else if (kind == 6) msg = "INTERFACE_ERROR capture-dir-open";
+    else if (kind == 7) msg = "INTERFACE_ERROR capture-dir-read-close";
+    else if (kind == 8) msg = "INTERFACE_ERROR capture-dir-not-empty";
+    else if (kind == 9) msg = "INTERFACE_ERROR capture-session-cleanup";
+    else if (kind == 10) msg = "INTERFACE_ERROR capture-stage-label";
+    else return 1;
+    need = strlen(msg);
+    if (need + 1 > (size_t)errn) return 1;
+    memcpy(err, msg, need + 1);
+    return 0;
+}
+int cxsf_e3_args(int has_dir, int dir_nonempty, int has_out, int has_out_n) {
+    if (!has_dir || !dir_nonempty || !has_out || !has_out_n) return 1;
+    return 0;
+}
+int cxsf_e3_errno(int enoent, int eloop) {
+    if (enoent) return 0;
+    if (eloop) return 1;
+    return 2;
+}
+int cxsf_e3_span(int got, unsigned long long n, unsigned long long max) {
+    if (!got) return 1;
+    if (n == 0) return 2;
+    if (n > max) return 3;
+    return 0;
+}
+int cxsf_e3_line(char *err, int errn, int kind, int errnum) {
+    const char *msg, *head;
+    char num[16];
+    int nd, i, at;
+    size_t need, hn;
+    if (!err || errn < 1) return 1;
+    if (kind == 0) msg = "INTERFACE_ERROR resource-e3-identity-absent";
+    else if (kind == 1) msg = "INTERFACE_ERROR resource-e3-identity-path";
+    else if (kind == 2) msg = "INTERFACE_ERROR resource-e3-identity-symlink";
+    else if (kind == 3) msg = "INTERFACE_ERROR resource-e3-identity-too-large";
+    else if (kind == 4) msg = "INTERFACE_ERROR resource-e3-identity-unsupported-platform";
+    else if (kind == 5) {
+        head = "INTERFACE_ERROR resource-e3-identity-read-failed errno=";
+        hn = strlen(head);
+        nd = cxsf_dec(num, errnum);
+        need = hn + (size_t)nd;
+        if (need > 2147483646u || need + 1 > (size_t)errn) return 1;
+        memcpy(err, head, hn);
+        at = (int)hn;
+        for (i = nd - 1; i >= 0; i--) err[at++] = num[i];
+        err[at] = 0;
+        return 0;
+    } else return 1;
+    need = strlen(msg);
+    if (need + 1 > (size_t)errn) return 1;
+    memcpy(err, msg, need + 1);
+    return 0;
+}
+int cxsf_e3_ready(int started, int has_trace, int has_dir, int cursor, int n) {
+    if (!started || !has_trace || !has_dir || cursor >= n) return 1;
+    return 0;
+}
+int cxsf_e3_row(int kn, int key_n, const unsigned char *key, const unsigned char *want,
+                int present, int has_value, const char *blob) {
+    if (kn != key_n || kn < 0 || !present || !has_value) return 1;
+    if (!key || !want) return 4;
+    if (kn > 0 && memcmp(key, want, (size_t)kn)) return 1;
+    if (!blob) return 4;
+    if (strcmp(blob, "e3-identity.tsv")) return 2;
+    return 0;
+}
+int cxsf_e3_tail(const unsigned char *fileb, int filen, const unsigned char *line, int ln) {
+    if (ln < 0 || filen < 0 || !fileb || !line) return 2;
+    if (filen > ln && ln > 0 && !memcmp(fileb, line, (size_t)ln)) return 1;
+    return 2;
+}
+int cxsf_e3_match(const unsigned char *fileb, int filen, const unsigned char *line, int ln) {
+    if (filen < 0 || ln < 0 || filen != ln) return 1;
+    if (filen == 0) return 0;
+    if (!fileb || !line) return 4;
+    return memcmp(fileb, line, (size_t)filen) ? 1 : 0;
+}
+int cxsf_e3_same(const unsigned char *value, int vn, const unsigned char *fileb, int filen) {
+    if (vn < 0 || filen < 0 || vn != filen) return 1;
+    if (filen == 0) return 0;
+    if (!value || !fileb) return 4;
+    return memcmp(value, fileb, (size_t)filen) ? 1 : 0;
+}
+int cxsf_e3_id(const char *got_stage, const char *stage, const char *got_hex, const char *hex) {
+    if (!got_stage || !stage || !got_hex || !hex) return 4;
+    if (strcmp(got_stage, stage) || strcmp(got_hex, hex)) return 1;
+    return 0;
+}
+int cxsf_e3_cmp_line(char *err, int errn, int kind, const char *got, const char *run) {
+    const char *msg, *head, *mid;
+    size_t need, hn, mn, gn, rn;
+    int at;
+    if (!err || errn < 1) return 1;
+    if (kind == 0) msg = "INTERFACE_ERROR resource-e3-identity-malformed";
+    else if (kind == 1) msg = "INTERFACE_ERROR resource-e3-identity-trailing";
+    else if (kind == 2) msg = "INTERFACE_ERROR resource-identity-mismatch input e3-second";
+    else if (kind == 3) msg = "INTERFACE_ERROR resource-e3-identity-inconsistent";
+    else if (kind == 4) {
+        if (!got || !run) return 1;
+        head = "INTERFACE_ERROR resource-identity-mismatch stage ledger=";
+        mid = " run=";
+        hn = strlen(head);
+        mn = strlen(mid);
+        gn = strlen(got);
+        rn = strlen(run);
+        need = hn + gn + mn + rn;
+        if (need > 2147483646u || need + 1 > (size_t)errn) return 1;
+        memcpy(err, head, hn);
+        at = (int)hn;
+        if (gn) { memcpy(err + at, got, gn); at += (int)gn; }
+        memcpy(err + at, mid, mn); at += (int)mn;
+        if (rn) memcpy(err + at, run, rn);
+        err[need] = 0;
+        return 0;
+    } else return 1;
+    need = strlen(msg);
+    if (need + 1 > (size_t)errn) return 1;
+    memcpy(err, msg, need + 1);
+    return 0;
+}
+int cxsf_route_gate(int mode, const char *route) {
+    if (!route) return 1;
+    if (mode == 2 && strstr(route, "/tape/O")) return 0;
+    if (mode == 0 && strstr(route, "/image/O")) return 0;
+    return 1;
+}
+int cxsf_route_e3(int mode, const char *route) {
+    if (mode != 0 || !route || !strstr(route, "/image/O")) return 1;
+    return 0;
+}
+int cxsf_route_line(char *err, int errn, int kind, const char *route) {
+    const char *head, *tail, *shown;
+    size_t hn, tn, rn, need;
+    int at;
+    if (!err || errn < 1) return 1;
+    head = "INTERFACE_ERROR resource-route-unsupported ";
+    if (kind == 0) tail = " (strict and capture cover tape and image routes only)";
+    else if (kind == 1) tail = " (e3 second identity is image-only)";
+    else return 1;
+    shown = route ? route : "-";
+    hn = strlen(head);
+    tn = strlen(tail);
+    rn = strlen(shown);
+    need = hn + rn + tn;
+    if (need > 2147483646u || need + 1 > (size_t)errn) return 1;
+    memcpy(err, head, hn);
+    at = (int)hn;
+    if (rn) { memcpy(err + at, shown, rn); at += (int)rn; }
+    memcpy(err + at, tail, tn);
+    err[need] = 0;
+    return 0;
+}
+int cxsf_stage_join(char *dst, int cap, const char *stage, const char *route) {
+    size_t sn, rn, need;
+    if (!dst || !stage || !route || cap < 1) return 1;
+    sn = strlen(stage);
+    rn = strlen(route);
+    need = sn + 1u + rn;
+    if (need > 2147483646u || need + 1 > (size_t)cap) return 1;
+    if (sn) memcpy(dst, stage, sn);
+    dst[sn] = ':';
+    if (rn) memcpy(dst + sn + 1, route, rn);
+    dst[need] = 0;
+    if (!cxsf_stage_label(dst)) return 2;
+    return 0;
+}
+int cxsf_stage_err(char *err, int errn, int kind, const char *label) {
+    const char *head;
+    size_t hn, ln, need;
+    if (!err || errn < 1 || !label) return 1;
+    if (kind == 0) head = "INTERFACE_ERROR snapshot-stage-label ";
+    else if (kind == 1) head = "INTERFACE_ERROR capture-stage-label ";
+    else return 1;
+    hn = strlen(head);
+    ln = strlen(label);
+    need = hn + ln;
+    if (need > 2147483646u || need + 1 > (size_t)errn) return 1;
+    memcpy(err, head, hn);
+    if (ln) memcpy(err + hn, label, ln);
+    err[need] = 0;
+    return 0;
+}
+int cxsf_snap_count(int n, int max) {
+    if (n < 0 || n > max) return 1;
+    return 0;
+}
+int cxsf_snap_line(char *err, int errn) {
+    const char *msg = "INTERFACE_ERROR snapshot-too-many-blobs";
+    size_t need;
+    if (!err || errn < 1) return 1;
+    need = strlen(msg);
+    if (need + 1 > (size_t)errn) return 1;
+    memcpy(err, msg, need + 1);
+    return 0;
+}
+int cxsf_snap_slot(const unsigned char *name, int kn, const unsigned char *data, int len,
+                   const unsigned char **out_key, int *out_kn,
+                   const unsigned char **out_data, int *out_len) {
+    if (!out_key || !out_kn || !out_data || !out_len) return 4;
+    *out_key = name;
+    *out_kn = kn;
+    *out_data = data;
+    *out_len = len;
+    return 0;
+}
+int cxsf_fetch_miss(char *dst, int cap, int kind, const char *hex, int event) {
+    const char *head = "MISSING_EXPLICIT_RESOURCE ";
+    char num[16];
+    int nd, i, at;
+    size_t hn, xn, need;
+    if (!dst || !hex || cap < 1) return 1;
+    hn = strlen(head);
+    xn = strlen(hex);
+    if (kind == 0) {
+        need = hn + xn;
+        if (need > 2147483646u || need + 1 > (size_t)cap) return 1;
+        memcpy(dst, head, hn);
+        if (xn) memcpy(dst + hn, hex, xn);
+        dst[need] = 0;
+        return 0;
+    }
+    if (kind != 1) return 1;
+    nd = cxsf_dec(num, event);
+    need = hn + xn + 7u + (size_t)nd;
+    if (need > 2147483646u || need + 1 > (size_t)cap) return 1;
+    memcpy(dst, head, hn);
+    at = (int)hn;
+    if (xn) { memcpy(dst + at, hex, xn); at += (int)xn; }
+    memcpy(dst + at, " event=", 7);
+    at += 7;
+    for (i = nd - 1; i >= 0; i--) dst[at++] = num[i];
+    dst[at] = 0;
+    return 0;
+}
+int cxsf_fetch_hand(int present, unsigned char *value, int vn,
+                    unsigned char **bytes, int *len) {
+    if (!bytes || !len) return 4;
+    if (!present) return 0;
+    *bytes = value;
+    *len = vn;
+    return 1;
+}
+int cxsf_fetch_mismatch(char *dst, int cap, const char *hex, int event) {
+    const char *head = "INTERFACE_ERROR resource-trace-key-mismatch ";
+    char num[16];
+    int nd, i, at;
+    size_t hn, xn, need;
+    if (!dst || !hex || cap < 1) return 1;
+    hn = strlen(head);
+    xn = strlen(hex);
+    nd = cxsf_dec(num, event);
+    need = hn + xn + 7u + (size_t)nd;
+    if (need > 2147483646u || need + 1 > (size_t)cap) return 1;
+    memcpy(dst, head, hn);
+    at = (int)hn;
+    if (xn) { memcpy(dst + at, hex, xn); at += (int)xn; }
+    memcpy(dst + at, " event=", 7);
+    at += 7;
+    for (i = nd - 1; i >= 0; i--) dst[at++] = num[i];
+    dst[at] = 0;
+    return 0;
+}
+int cxsf_fetch_row(const unsigned char *key, int kn,
+                   const unsigned char *name, int nn,
+                   const unsigned char *data, int len,
+                   unsigned char **bytes, int *out_len) {
+    if (!bytes || !out_len) return 4;
+    if (kn < 0 || nn < 0 || kn != nn) return 0;
+    if (kn > 0) {
+        if (!key) return 4;
+        if (!name || memcmp(key, name, (size_t)kn) != 0) return 0;
+    }
+    *bytes = (unsigned char *)data;
+    *out_len = len;
+    return 1;
+}
+int cxsf_fetch_path(char *dst, int cap, const unsigned char *p, int n, const char *incdir) {
+    const unsigned char *s;
+    int sn, i, name_n;
+    size_t dn, need;
+    if (!dst || cap < 1 || n < 0 || (n > 0 && !p)) return 4;
+    s = p;
+    sn = n;
+    if (sn >= 7 && (!memcmp(s, "\0inc/q/", 7) || !memcmp(s, "\0inc/a/", 7))) {
+        s += 7;
+        sn -= 7;
+    }
+    if (!(sn >= 5 && !memcmp(s, "\0hdr/", 5))) {
+        for (i = 0; i < sn; i++) if (s[i] == 0) return 2;
+        need = (size_t)sn;
+        if (need > 2147483646u || need + 1 > (size_t)cap) return 2;
+        if (sn) memcpy(dst, s, need);
+        dst[sn] = 0;
+        return 0;
+    }
+    if (!incdir) return 1;
+    dn = strlen(incdir);
+    name_n = sn - 5;
+    for (i = 0; i < name_n; i++) if (s[5 + i] == 0) return 2;
+    if (dn > 2147483646u) return 2;
+    need = dn + 1u + (size_t)name_n;
+    if (need > 2147483646u || need + 1 > (size_t)cap) return 2;
+    if (dn) memcpy(dst, incdir, dn);
+    dst[dn] = '/';
+    if (name_n) memcpy(dst + dn + 1, s + 5, (size_t)name_n);
+    dst[need] = 0;
+    return 0;
+}
+int cxsf_fetch_file(const void *bytes, const char *path,
+                    void (*readfn)(const char *), void (*absentfn)(const char *)) {
+    if (!path || !readfn || !absentfn) return 4;
+    if (bytes) {
+        readfn(path);
+        return 2;
+    }
+    absentfn(path);
+    return 0;
+}
+int cxsf_file_keep(int record, char **mine, int mine_n, char **other, int other_n,
+                   const char *path, void *(*alloc)(void *, size_t),
+                   char ***out_list, int *out_n) {
+    int i;
+    size_t pn;
+    char **list;
+    char *copy;
+    if (!record) return 0;
+    if (!path || !alloc || !out_list || !out_n) return 4;
+    if (mine_n < 0 || other_n < 0 || (mine_n > 0 && !mine) || (other_n > 0 && !other)) return 4;
+    for (i = 0; i < mine_n; i++) {
+        if (!mine[i]) return 4;
+        if (strcmp(mine[i], path) == 0) return 1;
+    }
+    for (i = 0; i < other_n; i++) {
+        if (!other[i]) return 4;
+        if (strcmp(other[i], path) == 0) return 1;
+    }
+    list = alloc(mine, ((size_t)mine_n + 1u) * sizeof(char *));
+    if (!list) return 3;
+    pn = strlen(path) + 1u;
+    copy = alloc(0, pn);
+    if (!copy) {
+        *out_list = list;
+        *out_n = mine_n;
+        return 3;
+    }
+    memcpy(copy, path, pn);
+    list[mine_n] = copy;
+    *out_list = list;
+    *out_n = mine_n + 1;
+    return 2;
+}
+int cxsf_close_fail(long, void (*)(const char *));
+int cxsf_readfile(const char *path, int *len, int optional, int windows, long enoent,
+                  char *line, int line_cap,
+                  long (*openfn)(const char *),
+                  const char *(*reasonfn)(long),
+                  void (*say)(const char *),
+                  void (*raw)(const char *, const char *),
+                  void (*failfn)(const char *),
+                  unsigned char *(*streamfn)(long, const char *, int *),
+                  long (*closefn)(long),
+                  unsigned char **out) {
+    long fd;
+    int gate;
+    const char *reason;
+    unsigned char *b;
+    if (!path || !len || !out || !openfn || !reasonfn || !say || !raw || !failfn || !streamfn || !closefn)
+        return 4;
+    fd = openfn(path);
+    gate = cxsf_open_gate(fd, optional, windows, enoent);
+    if (gate == 1) {
+        *out = 0;
+        return 1;
+    }
+    if (gate) {
+        reason = reasonfn(fd);
+        if (!line || line_cap < 1 || cxsf_open_line(line, line_cap, path, reason)) raw(path, reason);
+        else say(line);
+        failfn("cannot open input");
+        return 2;
+    }
+    b = streamfn(fd, path, len);
+    if (cxsf_close_fail(closefn(fd), failfn)) return 3;
+    *out = b;
+    return 0;
+}
+int cxsf_read_err(char *dst, int cap, const char *path) {
+    const char *head = "run: cannot read ";
+    size_t hn, pn, need;
+    if (!dst || !path || cap < 1) return 1;
+    hn = strlen(head);
+    pn = strlen(path);
+    need = hn + pn + 1u;
+    if (pn > 2147483646u || need > 2147483646u || need + 1u > (size_t)cap) return 1;
+    memcpy(dst, head, hn);
+    if (pn) memcpy(dst + hn, path, pn);
+    dst[hn + pn] = '\n';
+    dst[need] = 0;
+    return 0;
+}
+int cxsf_readstream(long fd, const char *path, int *len, char *line, int line_cap,
+                    int (*stamp)(long, long long *, long long *),
+                    void *(*grow)(void *, size_t),
+                    long (*readfn)(long, unsigned char *, long),
+                    void (*say)(const char *),
+                    void (*raw)(const char *),
+                    void (*failfn)(const char *),
+                    unsigned char **own, unsigned char **out) {
+    int n, cap, stamped;
+    long long size, off;
+    unsigned char *b;
+    if (!path || !len || !own || !out || !stamp || !grow || !readfn || !say || !raw || !failfn)
+        return 4;
+    size = 0;
+    off = 0;
+    stamped = stamp(fd, &size, &off);
+    cap = cxsf_read_cap(stamped, stamped ? size : 0, stamped ? off : 0);
+    b = grow(0, (size_t)cap);
+    *own = b;
+    if (!b) return 3;
+    n = 0;
+    for (;;) {
+        long r;
+        int nn, took, next;
+        if (n == cap) {
+            next = cap;
+            if (cxsf_read_grow(cap, &next)) {
+                failfn("file too large");
+                return 2;
+            }
+            cap = next;
+            b = grow(b, (size_t)cap);
+            *own = b;
+            if (!b) return 3;
+        }
+        r = readfn(fd, b + n, (long)(cap - n));
+        nn = n;
+        took = cxsf_read_take(r, cap, n, &nn);
+        if (took == 1) {
+            if (!line || line_cap < 1 || cxsf_read_err(line, line_cap, path)) raw(path);
+            else say(line);
+            failfn("cannot read input");
+            return 1;
+        }
+        if (took == 2) break;
+        if (took) {
+            failfn("invalid read length");
+            return 5;
+        }
+        n = nn;
+    }
+    *len = n;
+    *out = b;
+    return 0;
+}
+int cxsf_stamp_reg(int stat_ok, int is_reg,
+                   long long size, long long mtime, long long mtime_ns,
+                   long long ctime, long long ctime_ns, long long ino, long long dev,
+                   long long *out_size, long long *out_off,
+                   long long *out_mtime, long long *out_mtime_ns,
+                   long long *out_ctime, long long *out_ctime_ns,
+                   long long *out_ino, long long *out_dev,
+                   unsigned *out_tag, int *out_valid) {
+    if (!out_size || !out_off || !out_mtime || !out_mtime_ns || !out_ctime || !out_ctime_ns
+        || !out_ino || !out_dev || !out_tag || !out_valid)
+        return 4;
+    if (!stat_ok || !is_reg) return 0;
+    *out_size = size;
+    *out_off = 0;
+    *out_mtime = mtime;
+    *out_mtime_ns = mtime_ns;
+    *out_ctime = ctime;
+    *out_ctime_ns = ctime_ns;
+    *out_ino = ino;
+    *out_dev = dev;
+    *out_tag = 0;
+    *out_valid = 1;
+    return 1;
+}
+long cxsf_read_errno(long r, long err) {
+    if (r < 0) return -err;
+    return r;
+}
+long cxsf_open_errno(long fd, long err) {
+    if (fd < 0) return -err;
+    return fd;
+}
+int cxsf_open_flags(int base, int binary, int windows) {
+    if (windows) return base | binary;
+    return base;
+}
+static int cxsf_stamp_window(long fd, long at, unsigned *h,
+                             long (*seekfn)(long, long, int),
+                             long (*readfn)(long, unsigned char *, long)) {
+    unsigned char b[4096];
+    long n, r, i;
+    if (seekfn(fd, at, 0) < 0) return 0;
+    n = 0;
+    while (n < 4096) {
+        r = readfn(fd, b + n, 4096 - n);
+        if (r < 0 || r > 4096 - n) return 0;
+        if (!r) break;
+        n += r;
+    }
+    for (i = 0; i < n; i++) *h = (*h ^ b[i]) * 16777619u;
+    return 1;
+}
+int cxsf_stamp_unisa(long fd,
+                     long (*seekfn)(long, long, int),
+                     long (*readfn)(long, unsigned char *, long),
+                     void (*failfn)(const char *),
+                     long long *out_size, long long *out_off,
+                     unsigned *out_tag, int *out_valid) {
+    long cur, end;
+    unsigned h;
+    int ok;
+    if (!seekfn || !readfn || !failfn || !out_size || !out_off || !out_tag || !out_valid)
+        return 4;
+    cur = seekfn(fd, 0, 1);
+    if (cur < 0) return 0;
+    end = seekfn(fd, 0, 2);
+    if (end < 0) return 0;
+    h = 2166136261u;
+    ok = cxsf_stamp_window(fd, 0, &h, seekfn, readfn);
+    if (ok && end > 4096) ok = cxsf_stamp_window(fd, end - 4096, &h, seekfn, readfn);
+    if (seekfn(fd, cur, 0) < 0) {
+        failfn("cannot read input");
+        return 2;
+    }
+    if (!ok) return 0;
+    *out_size = end;
+    *out_off = cur;
+    *out_tag = h;
+    *out_valid = 1;
+    return 1;
+}
+long cxsf_close_rc(long r, long err) {
+    (void)err;
+    return r;
+}
+int cxsf_close_fail(long rc, void (*failfn)(const char *)) {
+    if (!failfn) return 4;
+    if (rc < 0) {
+        failfn("close failed");
+        return 1;
+    }
+    return 0;
+}

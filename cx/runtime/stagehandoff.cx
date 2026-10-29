@@ -1,0 +1,54 @@
+#pragma unisa module stagehandoff
+/* Post-rt_open slot handoff. No libc and no include.
+   opened 2 or 3 calls fail with the existing why and stops.
+   opened 0 binds the slot and does not load or release.
+   Any other opened value is the load path: a nonzero use_owned
+   selects the owned bytes and out_len; otherwise the plain bytes
+   stay. Then clear, mark loading, load, release the owned pointer,
+   clear the line buffer, capture and mark when a slot is present,
+   and clear loading. A missing callback that this path needs
+   returns 3 and calls nothing. */
+int sh_apply(int opened, int use_owned, int out_len, int has_slot,
+             const char *why, void *slot,
+             unsigned char *plain, int plain_len, unsigned char *owned,
+             void (*fail)(const char *),
+             void (*bindfn)(void *),
+             void (*clear)(void),
+             void (*set_loading)(int),
+             void (*load)(unsigned char *, int),
+             void (*release)(void *),
+             void (*clear_lb)(void),
+             void (*capture)(void *),
+             void (*mark)(void *)) {
+    unsigned char *view;
+    int n;
+    if (opened == 2 || opened == 3) {
+        if (!fail) return 3;
+        fail(why);
+        return 2;
+    }
+    if (opened == 0) {
+        if (!bindfn) return 3;
+        bindfn(slot);
+        return 0;
+    }
+    if (!clear || !set_loading || !load || !release || !clear_lb) return 3;
+    if (has_slot && (!capture || !mark)) return 3;
+    view = plain;
+    n = plain_len;
+    if (use_owned) {
+        view = owned;
+        n = out_len;
+    }
+    clear();
+    set_loading(1);
+    load(view, n);
+    release(owned);
+    clear_lb();
+    if (has_slot) {
+        capture(slot);
+        mark(slot);
+    }
+    set_loading(0);
+    return 0;
+}

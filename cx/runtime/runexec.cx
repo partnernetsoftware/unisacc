@@ -1,0 +1,157 @@
+#pragma unisa module runexec
+/* Execute gate and status lines. No libc and no include.
+   core_run, getenv, and stderr stay in exec/c/run.c.
+   A product build ignores the budget string and does not call parse.
+   A null budget keeps the fallback and does not call parse.
+   A failed parse returns 2 and leaves steps unchanged. why receives
+   "run: UNISA_MAXSTEPS must be a positive decimal integer <= 9223372036854775807\n"
+   when it fits. If why cannot hold that line, return 1 and write nothing.
+   Return 3 when steps is null, or a budget is present and parse is null.
+   ex_lines writes the historical status lines. Status 1 copies reason
+   up to reason_n and also stops at a zero byte. Status 2 copies the
+   C string. Status 3 prints the step count, including a minus sign.
+   A line that is not selected becomes an empty string. A short buffer
+   or a null reason where a line needs it writes nothing. */
+static int ex_ulen(unsigned long long u) {
+    int n;
+    n = 1;
+    while (u > 9) { u = u / 10; n++; }
+    return n;
+}
+
+static void ex_mag(long long v, int *sign, int *digits, unsigned long long *mag) {
+    if (v < 0) {
+        *sign = 1;
+        *mag = (unsigned long long)(-(v + 1)) + 1;
+    } else {
+        *sign = 0;
+        *mag = (unsigned long long)v;
+    }
+    *digits = ex_ulen(*mag);
+}
+
+static void ex_udigits(char *out, long at, int digits, unsigned long long u) {
+    int i;
+    for (i = digits - 1; i >= 0; i--) {
+        out[at + i] = (char)('0' + (int)(u % 10));
+        u = u / 10;
+    }
+}
+
+static long ex_copy(char *out, long cap, long at, const char *s) {
+    long i;
+    i = 0;
+    while (s[i]) {
+        if (out && at + 1 < cap) out[at] = s[i];
+        at++;
+        i++;
+    }
+    return at;
+}
+
+static int ex_put(char *out, long cap, const char *msg) {
+    long n, i;
+    if (!msg) return 0;
+    n = 0;
+    while (msg[n]) n++;
+    if (!out || n + 1 > cap) return 0;
+    for (i = 0; i < n; i++) out[i] = msg[i];
+    out[n] = 0;
+    return 1;
+}
+
+int ex_budget(int product, const char *budget, long long fallback,
+              int (*parse)(const char *, long long *),
+              long long *steps, char *why, long cap) {
+    long long parsed;
+    const char *msg = "run: UNISA_MAXSTEPS must be a positive decimal integer <= 9223372036854775807\n";
+    if (!steps) return 3;
+    if (product || !budget) {
+        *steps = fallback;
+        if (why && cap > 0) why[0] = 0;
+        return 0;
+    }
+    if (!parse) return 3;
+    if (!parse(budget, &parsed)) {
+        if (!ex_put(why, cap, msg)) return 1;
+        return 2;
+    }
+    *steps = parsed;
+    if (why && cap > 0) why[0] = 0;
+    return 0;
+}
+
+static long ex_reason_n(const char *reason, int reason_n) {
+    long n;
+    n = 0;
+    while (n < reason_n && reason[n]) n++;
+    return n;
+}
+
+int ex_lines(int status, const char *reason, int reason_n, long long steps,
+             char *reject, long reject_cap, char *runmsg, long run_cap,
+             char *blown, long blown_cap) {
+    int want_reject, want_run, want_budget, sign, digits;
+    unsigned long long mag;
+    long rn, need, at;
+    want_reject = status == 1 && reason_n > 0;
+    want_run = status == 2;
+    want_budget = status == 3;
+    if (want_reject && !reason) return 3;
+    if (want_run && !reason) return 3;
+    if (reason_n < 0) return 3;
+    rn = want_reject ? ex_reason_n(reason, reason_n) : 0;
+    if (want_budget) ex_mag(steps, &sign, &digits, &mag);
+    else { sign = 0; digits = 0; mag = 0; }
+    if (want_reject && (!reject || 8 + rn + 1 + 1 > reject_cap)) return 1;
+    if (want_run) {
+        need = 0;
+        need = ex_copy(0, 0, need, "run: ");
+        need = ex_copy(0, 0, need, reason);
+        need = need + 1;
+        if (!runmsg || need + 1 > run_cap) return 1;
+    }
+    if (want_budget) {
+        need = 0;
+        need = ex_copy(0, 0, need, "step budget exhausted (budget ");
+        need = need + sign + digits;
+        need = ex_copy(0, 0, need, " steps)\n");
+        if (!blown || need + 1 > blown_cap) return 1;
+    }
+    if (reject && reject_cap > 0) reject[0] = 0;
+    if (runmsg && run_cap > 0) runmsg[0] = 0;
+    if (blown && blown_cap > 0) blown[0] = 0;
+    if (want_reject) {
+        at = ex_copy(reject, reject_cap, 0, "reject: ");
+        while (rn) { reject[at++] = *reason++; rn--; }
+        reject[at++] = '\n';
+        reject[at] = 0;
+    }
+    if (want_run) {
+        at = ex_copy(runmsg, run_cap, 0, "run: ");
+        at = ex_copy(runmsg, run_cap, at, reason);
+        runmsg[at++] = '\n';
+        runmsg[at] = 0;
+    }
+    if (want_budget) {
+        at = ex_copy(blown, blown_cap, 0, "step budget exhausted (budget ");
+        if (sign) blown[at++] = '-';
+        ex_udigits(blown, at, digits, mag);
+        at = at + digits;
+        at = ex_copy(blown, blown_cap, at, " steps)\n");
+        blown[at] = 0;
+    }
+    return 0;
+}
+
+/* Err bytes stay with the caller. Return 1 when n is nonzero and bytes
+ * is present: the caller writes those bytes, then frees *owned.
+ * Return 0 when n is 0: nothing is written, and *owned is still freed.
+ * Return 4 and write nothing when owned is null, or n is nonzero and
+ * bytes is null. That null-bytes refusal is not on the old C path. */
+int ex_err(const void *bytes, int n, void **owned) {
+    if (!owned) return 4;
+    if (n && !bytes) return 4;
+    *owned = (void *)bytes;
+    return n ? 1 : 0;
+}

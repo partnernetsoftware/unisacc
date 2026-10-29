@@ -1,0 +1,44 @@
+#pragma unisa module memlayout
+/* UNIMEM1 layout only. No libc, no include, no mapping.
+   The bottom adapter in exec/c/memory.c owns mmap, VirtualAlloc, and die().
+   long long is 8 bytes on LP64 and LLP64. Field values that do not fit in a
+   signed 32-bit int are refused. Page placement matches the historical
+   (n + 16383) & -16384 rounding. */
+static int mem_sig(const unsigned char *b) {
+    return b[0] == 'U' && b[1] == 'N' && b[2] == 'I' && b[3] == 'M' &&
+           b[4] == 'E' && b[5] == 'M' && b[6] == '1' && b[7] == '\n';
+}
+int mem_field(const unsigned char *p, int *out) {
+    long long n;
+    int j;
+    n = 0;
+    for (j = 7; j >= 0; j = j - 1) {
+        if (n > (2147483647LL - p[j]) / 256) return 1;
+        n = n * 256 + p[j];
+    }
+    *out = (int)n;
+    return 0;
+}
+int mem_image(const unsigned char *b, int n, int *text, int *extent, int *stored, int *entry) {
+    int t, e, s, ent;
+    if (n < 40 || !mem_sig(b)) return 1;
+    if (mem_field(b + 8, &t) || mem_field(b + 16, &e) || mem_field(b + 24, &s) || mem_field(b + 32, &ent))
+        return 3;
+    if (t <= 0 || ent >= t || s > e || (long long)t + s + 40 != n) return 2;
+    *text = t;
+    *extent = e;
+    *stored = s;
+    *entry = ent;
+    return 0;
+}
+void mem_place(int text, int extent, long long *dataoff, long long *size) {
+    long long t, e, off;
+    t = text;
+    e = extent;
+    off = (t + 16383) & -16384;
+    *dataoff = off;
+    *size = off + ((e + 16383) & -16384);
+}
+int mem_span_ok(long long size) {
+    return size <= 2147483647LL;
+}

@@ -1,4 +1,5 @@
 #pragma unisa module execute
+#pragma unisa use coregate
 /* Generic machine interface. No compiler, file format or OS semantics.
    Models are immutable, decoded arrays owned by the loader. One execution
    may be active at a time; all working state is discarded on return. */
@@ -113,12 +114,12 @@ CORE_ACTION_LINKAGE int action_run(CoreMachine *s,const I *a) {
     case COPYW: R[a[1]] = R[a[2]]; break;
     case ALU: R[a[2]] = alu32((int)a[1], R[a[3]], R[a[4]]); break;
     case ALUI: R[a[2]] = alu32((int)a[1], R[a[3]], a[4]); break;
-    case CMP: case CMPI: { I u = R[a[1]], v = op == CMP ? R[a[2]] : a[2]; s->r = u < v ? 0 : u == v ? 1 : 2; } break;
+    case CMP: case CMPI: { I u = R[a[1]], v = op == CMP ? R[a[2]] : a[2]; s->r = cr_cmp(u, v); } break;
     case A64: case A64I: { int z; R[a[2]] = alu64((int)a[1], R[a[3]], op == A64 ? R[a[4]] : a[4], &z); s->r = z; } break;
-    case C64: { I u = R[a[1]], v = R[a[2]]; s->r = u < v ? 0 : u == v ? 1 : 2; } break;
-    case C64U: { uint64_t u = (uint64_t)R[a[1]], v = (uint64_t)R[a[2]]; s->r = u < v ? 0 : u == v ? 1 : 2; } break;
+    case C64: { I u = R[a[1]], v = R[a[2]]; s->r = cr_cmp(u, v); } break;
+    case C64U: { uint64_t u = (uint64_t)R[a[1]], v = (uint64_t)R[a[2]]; s->r = cr_cmpu(u, v); } break;
     case INC: R[a[1]] = (I)(((uint64_t)R[a[1]] + 1) & 0xFFFFFFFFull); break;
-    case RLD: { I v = R[a[1]]; s->r = v >= 0 && v <= 256 ? v : 256; } break;
+    case RLD: { I v = R[a[1]]; s->r = cr_rld(v); } break;
     case LDX: R[a[1]] = core_mget(&s->memory,R[a[2]] + a[3]); break;
     case STX: core_mset(&s->memory,R[a[1]] + a[2], R[a[3]]); break;
     case CORE_OUT: if (s->osel == 0) core_put(&s->out, (int)a[1], s->ot); else core_put(&s->err, (int)a[1], 0); break;
@@ -182,6 +183,13 @@ CORE_ACTION_LINKAGE int action_run(CoreMachine *s,const I *a) {
     }
     return 0;
 }
+/* Step decisions live in cx/core/transition.cx, which is linked beside this
+ * object. Allocation, the transition call and actions stay here. */
+int core_run_budget(long long steps, long long maxsteps, long long *next, const char **why);
+int core_run_key(int mode, int stack_n, int stack_top, long long i, long long end, int byte, long long r);
+int core_run_stop(const char *reason, int nx, const char **out);
+int core_run_take(int status);
+
 /* Run one model; all mutable ownership is explicit and invocation-local. */
 #ifndef CORE_RUN_NAME
 #define CORE_RUN_NAME core_run
@@ -200,14 +208,25 @@ int CORE_RUN_NAME(const CoreModel *m,unsigned char *input,
     frame_push(&s.frames,&first);
     I steps=0; int q=m->start;
     for (;;) {
-        if (steps>=maxsteps) { result->reason="timeout"; s.status=3; break; }
-        steps++;
+        long long next_steps = steps;
+        const char *blown = 0;
+        if (core_run_budget(steps, maxsteps, &next_steps, &blown)) {
+            result->reason = blown ? blown : "timeout";
+            s.status = 3;
+            break;
+        }
+        steps = (I)next_steps;
         CoreFrame *F=&s.frames.entries[s.frames.n-1]; int nx=-1,sq=-1;
-        int key=m->mode[q]==1 ? (s.stack.n ? s.stack.entries[s.stack.n-1] : -1) :
-            m->mode[q]==0 ? (F->i<F->end ? F->b[F->i] : 256) : (s.r>=0 && s.r<=256 ? (int)s.r : 256);
-        result->reason=CORE_TRANSITION_NAME(m,q,key,&nx,&sq);
-        if (result->reason) { s.status=2; break; }
-        if (nx<0) { result->reason="no transition"; s.status=2; break; }
+        int key=core_run_key(m->mode[q], s.stack.n,
+            s.stack.n ? s.stack.entries[s.stack.n-1] : 0,
+            F->i, F->end, F->i < F->end ? F->b[F->i] : 0, s.r);
+        const char *why=CORE_TRANSITION_NAME(m,q,key,&nx,&sq);
+        const char *kept=0;
+        if (core_run_stop(why, nx, &kept)) {
+            result->reason = kept ? kept : why;
+            s.status = 2;
+            break;
+        }
         q=nx; const I *a=m->qa+m->qoff[sq];
         for (int k=0;k<m->qlen[sq];k++) {
             if (action_run(&s,a)) goto finished;
@@ -215,7 +234,7 @@ int CORE_RUN_NAME(const CoreModel *m,unsigned char *input,
         }
     }
 finished:
-    if (!s.status) { result->out.b=s.out.b; result->out.n=s.out.n; s.out.b=0; }
+    if (core_run_take(s.status)) { result->out.b=s.out.b; result->out.n=s.out.n; s.out.b=0; }
     result->err.b=s.err.b; result->err.n=s.err.n; s.err.b=0;
     free(s.out.b);free(s.out.at);free(s.err.b);free(s.err.at);free(s.scratch.b);free(s.scratch.at);
     free(s.frames.entries);free(s.stack.entries);if (s.x!=input) free(s.x);free(s.xattr);free(s.regs);
