@@ -644,6 +644,17 @@ flowchart TD
   cap["检查文件 32 个 use"] --> pull["bindargs.cx 的 use bindcount"]
 ```
 
+## 127. 2026-10-29 入口拒绝不匹配的宿主符号诊断
+
+构造脚本不改。`cxt_decide` 之后走 `bx_diag_opt` 和 `bx_diag_run`。对象路线回归仍是 stdout 82，`out=a.o`。`--emit-host-symbols sym` 配 `-c -b lnx/x86_64 a.c` 或 `-E a.c` 都退出 1，stderr 73。`--emit-host-symbols - a.c` 退出 1，stderr 84。`--emit-host-symbols sym -S -b lnx/x86_64 a.c` 退出 0，stdout 78，`route=lnx/x86_64/tape/O0`，`out=-`。没有写出符号文件，没有调用前端。没有产品安装，没有 hostseed，没有 `--all`。整棵重写还没完成。
+
+```mermaid
+flowchart TD
+  decide["cxt_decide"] --> diag["bx_diag_opt 与 bx_diag_run"]
+  diag --> stop["返回 1 则退出，不打印路线"]
+  diag --> pass["两关都过才 cxt_text"]
+```
+
 ## 126. 2026-10-29 入口在 Linux 对象上补默认对象名
 
 构造脚本不改。`need_default_name` 为 1 时 `cxd_default_target` 把基名收成 `out`。`-c -b lnx/x86_64 a.c` 退出 0，stdout 82，stderr 0，`out=a.o`。`-E a.c` 仍是 stdout 64，`out=-`。`-c -o keep.o -b lnx/x86_64 a.c` 退出 0，stdout 85，`out=keep.o`。`dir/foo.c` 退出 0，stdout 90，`out=foo.o`。`win/x86_64` 仍退出 1，stderr 168。没有写出对象文件，没有调用前端。没有产品安装，没有 hostseed，没有 `--all`。整棵重写还没完成。
