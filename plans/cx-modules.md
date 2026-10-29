@@ -644,6 +644,17 @@ flowchart TD
   cap["检查文件 32 个 use"] --> pull["bindargs.cx 的 use bindcount"]
 ```
 
+## 120. 2026-10-29 编译器入口放在 src/unisacc.cx
+
+`cx/` 放架构。编译器源码放 `src/unisacc.cx`。`src/compiler` 指向 `../cx/compiler`。无参数实跑退出 0，stdout 28，stderr 0。五个命令词实跑退出 0，stdout 39，stderr 0。构造脚本不改。没有产品安装，没有 hostseed，没有 `--all`。整棵重写还没完成。
+
+```mermaid
+flowchart TD
+  src["src/unisacc.cx"] --> link["src/compiler 指向 cx/compiler"]
+  link --> host["bindhost"]
+  cxdir["cx/ 只放架构"] --> link
+```
+
 ## 119. 2026-10-29 入口开始分辨命令词
 
 构造脚本先不改。`cx/unisacc.cx` 用已有 `bindhost` 的 `bx_tool`、`bx_cli_word`、`bx_more_src`。`us_word` 对 `ar` 返回 1，`--help` 返回 12，`a.c` 返回 20，`objdump` 返回 3，其它返回 0。无参数仍打印七流。无参数实跑退出 0，stdout 28，stderr 0。带五个词实跑退出 0，stdout 39，stderr 0。没有产品安装，没有 hostseed，没有 `--all`。整棵重写还没完成。
