@@ -1,0 +1,216 @@
+#pragma unisa module routetime
+/* RR_TIME text for one package stage. No libc and no include.
+   The caller still reads the environment, takes the monotonic
+   clock, and writes stderr. A null environment value is off.
+   Any other pointer, including an empty string, is on.
+   rr_ns is (b_sec-a_sec)*1000000000 + (b_nsec-a_nsec), with no
+   borrow adjustment. A line that does not fit is not written.
+   Model source is "cache" when cached is nonzero, otherwise
+   "inflate". Inference rc is a signed decimal. */
+static int rr_ulen(unsigned long long u) {
+    int n;
+    n = 1;
+    while (u > 9) { u = u / 10; n++; }
+    return n;
+}
+
+static void rr_mag(long long v, int *sign, int *digits, unsigned long long *mag) {
+    if (v < 0) {
+        *sign = 1;
+        *mag = (unsigned long long)(-(v + 1)) + 1;
+    } else {
+        *sign = 0;
+        *mag = (unsigned long long)v;
+    }
+    *digits = rr_ulen(*mag);
+}
+
+static void rr_udigits(char *out, long at, int digits, unsigned long long u) {
+    int i;
+    for (i = digits - 1; i >= 0; i--) {
+        out[at + i] = (char)('0' + (int)(u % 10));
+        u = u / 10;
+    }
+}
+
+static long rr_copy(char *out, long cap, long at, const char *s) {
+    long i;
+    i = 0;
+    while (s[i]) {
+        if (out && at + 1 < cap) out[at] = s[i];
+        at++;
+        i++;
+    }
+    return at;
+}
+
+long long rr_ns(long long a_sec, long long a_nsec, long long b_sec, long long b_nsec) {
+    return (b_sec - a_sec) * 1000000000LL + (b_nsec - a_nsec);
+}
+
+int rr_wanted(const char *value) { return value != 0; }
+
+static int rr_finish(char *out, long cap, long at) {
+    if (!out || cap <= 0) return 2;
+    if (at + 1 > cap) return 1;
+    out[at] = 0;
+    return 0;
+}
+
+int rr_model(const char *stage, int cached, long long ns, char *out, long cap) {
+    const char *source;
+    int sign, digits;
+    unsigned long long mag;
+    long at, need;
+    if (!stage) return 2;
+    source = cached ? "cache" : "inflate";
+    rr_mag(ns, &sign, &digits, &mag);
+    need = 0;
+    need = rr_copy(0, 0, need, "RR_TIME\tmodel\tstage=");
+    need = rr_copy(0, 0, need, stage);
+    need = rr_copy(0, 0, need, "\tsource=");
+    need = rr_copy(0, 0, need, source);
+    need = rr_copy(0, 0, need, "\tns=");
+    need = need + sign + digits + 1;
+    if (!out || cap <= 0) return 2;
+    if (need + 1 > cap) return 1;
+    at = 0;
+    at = rr_copy(out, cap, at, "RR_TIME\tmodel\tstage=");
+    at = rr_copy(out, cap, at, stage);
+    at = rr_copy(out, cap, at, "\tsource=");
+    at = rr_copy(out, cap, at, source);
+    at = rr_copy(out, cap, at, "\tns=");
+    if (sign) out[at++] = '-';
+    rr_udigits(out, at, digits, mag);
+    at = at + digits;
+    out[at++] = '\n';
+    return rr_finish(out, cap, at);
+}
+
+int rr_infer(const char *stage, int rc, long long ns, char *out, long cap) {
+    int s1, d1, s2, d2;
+    unsigned long long m1, m2;
+    long at, need;
+    if (!stage) return 2;
+    rr_mag((long long)rc, &s1, &d1, &m1);
+    rr_mag(ns, &s2, &d2, &m2);
+    need = 0;
+    need = rr_copy(0, 0, need, "RR_TIME\tinference\tstage=");
+    need = rr_copy(0, 0, need, stage);
+    need = rr_copy(0, 0, need, "\trc=");
+    need = need + s1 + d1;
+    need = rr_copy(0, 0, need, "\tns=");
+    need = need + s2 + d2 + 1;
+    if (!out || cap <= 0) return 2;
+    if (need + 1 > cap) return 1;
+    at = 0;
+    at = rr_copy(out, cap, at, "RR_TIME\tinference\tstage=");
+    at = rr_copy(out, cap, at, stage);
+    at = rr_copy(out, cap, at, "\trc=");
+    if (s1) out[at++] = '-';
+    rr_udigits(out, at, d1, m1);
+    at = at + d1;
+    at = rr_copy(out, cap, at, "\tns=");
+    if (s2) out[at++] = '-';
+    rr_udigits(out, at, d2, m2);
+    at = at + d2;
+    out[at++] = '\n';
+    return rr_finish(out, cap, at);
+}
+
+static int rr_stamp(const char *pre, long long a, const char *mid, long long b, const char *post, char *out, long cap) {
+    int s1, d1, s2, d2, use_b;
+    unsigned long long m1, m2;
+    long need, at;
+    use_b = mid != 0;
+    rr_mag(a, &s1, &d1, &m1);
+    s2 = 0;
+    d2 = 0;
+    m2 = 0;
+    if (use_b) rr_mag(b, &s2, &d2, &m2);
+    need = 0;
+    need = rr_copy(0, 0, need, pre);
+    need = need + s1 + d1;
+    if (use_b) {
+        need = rr_copy(0, 0, need, mid);
+        need = need + s2 + d2;
+    }
+    if (post) need = rr_copy(0, 0, need, post);
+    need = need + 1;
+    if (!out || cap <= 0) return 2;
+    if (need + 1 > cap) return 1;
+    at = 0;
+    at = rr_copy(out, cap, at, pre);
+    if (s1) out[at++] = '-';
+    rr_udigits(out, at, d1, m1);
+    at = at + d1;
+    if (use_b) {
+        at = rr_copy(out, cap, at, mid);
+        if (s2) out[at++] = '-';
+        rr_udigits(out, at, d2, m2);
+        at = at + d2;
+    }
+    if (post) at = rr_copy(out, cap, at, post);
+    out[at++] = '\n';
+    return rr_finish(out, cap, at);
+}
+
+int rr_construct(long long ns, char *out, long cap) {
+    return rr_stamp("RR_TIME\tconstruction\tns=", ns, 0, 0, 0, out, cap);
+}
+
+int rr_lookup_line(int hit, long long ns, char *out, long cap) {
+    return rr_stamp("RR_TIME\tlookup_hit=", (long long)hit, "\tns=", ns, 0, out, cap);
+}
+
+int rr_artifact_line(int hit, int mode, char *out, long cap) {
+    return rr_stamp("RR_TIME\tartifact_hit=", (long long)hit, "\tmode=", (long long)mode, 0, out, cap);
+}
+
+int rr_memory_line(int rc, long long ns, char *out, long cap) {
+    return rr_stamp("RR_TIME\tmemory_bind\trc=", (long long)rc, "\tns=", ns, 0, out, cap);
+}
+
+int rr_output_line(int kind, int bytes, long long ns, char *out, long cap) {
+    const char *pre;
+    if (kind == 0) pre = "RR_TIME\toutput\tkind=exec-prepare\tbytes=";
+    else if (kind == 1) pre = "RR_TIME\toutput\tkind=image\tbytes=";
+    else return 2;
+    return rr_stamp(pre, (long long)bytes, "\tns=", ns, 0, out, cap);
+}
+
+const char *rr_ledger_need(void) {
+    return "unisacc: --resource-ledger needs DIR\n";
+}
+
+const char *rr_ledger_strict(void) {
+    return "unisacc: --strict-resource-flow needs --resource-ledger DIR\n";
+}
+
+const char *rr_ledger_long(void) {
+    return "unisacc: INTERFACE_ERROR resource-ledger-path-too-long\n";
+}
+
+int rr_ledger_err(const char *err, char *out, long cap) {
+    long need, at;
+    if (!err) return 2;
+    need = 0;
+    need = rr_copy(0, 0, need, "unisacc: ");
+    need = rr_copy(0, 0, need, err);
+    need = need + 1;
+    if (!out || cap <= 0) return 2;
+    if (need + 1 > cap) return 1;
+    at = 0;
+    at = rr_copy(out, cap, at, "unisacc: ");
+    at = rr_copy(out, cap, at, err);
+    out[at++] = '\n';
+    return rr_finish(out, cap, at);
+}
+
+int rr_mem_image(long long shown, char *out, long cap) {
+    return rr_stamp("unisacc: model driver: this program calls the host C library, and its image could not be started from an anonymous memory file (errno ", shown, 0, 0, "); write the program with -o and run that", out, cap);
+}
+
+int rr_jobs_line(int jobs, char *out, long cap) {
+    return rr_stamp("unisacc: INTERFACE_ERROR resource-capture-parallel-unsupported UNISA_JOBS=", (long long)jobs, 0, 0, " (capture and strict multi-source runs need UNISA_JOBS=1)", out, cap);
+}
