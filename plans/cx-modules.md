@@ -6,7 +6,7 @@
 
 ## 产品面（2026-10-30）
 
-对照已装产品的入口路径。三档：已通、骨架、未做。没实跑的不写已通。临时入口是 `/tmp/grk-cx-line/entry-o2`，两只 `-O2` 对象再加 `src/hostnative.o`，873487 字节，sha256 `313206b1c4761f2fa56ecc7245087ec0a39b3e811253daace609f6b44efbaf92`。已装产品 3035300 字节。这一轮只跑 12 面，表在 `out/grk-face-01/cx-entry-matrix-2026-10-30.tsv`：表头加 48 行，48 行都是 SAME，进度起点 100、下一格 148。语料前 100 格没有用这只入口重跑。上一只整表仍是 `/tmp/grk-cx-line/o2mx/cx-entry-matrix-2026-10-30.tsv`，第 143 节。对象抽查在 `out/grk-obj-01/recheck.tsv`，第 145 节。这一轮在第 146 节。
+对照已装产品的入口路径。三档：已通、骨架、未做。没实跑的不写已通。临时入口是 `/tmp/grk-cx-line/entry-o2`，两只 `-O2` 对象再加 `src/hostnative.o`，873487 字节，sha256 `313206b1c4761f2fa56ecc7245087ec0a39b3e811253daace609f6b44efbaf92`。已装产品 3035300 字节。这一轮只跑 12 面，表在 `out/grk-face-01/cx-entry-matrix-2026-10-30.tsv`：表头加 48 行，48 行都是 SAME，进度起点 100、下一格 148。按面计 SAME：ar 5、as 7、nm 3、objdump 4、-c 2、tape 2、tapebin 2、cx-plan 6、cx-interface 2、dump-tokens 1、emit-host-symbols 2、-O1 2、-O2 2、-D 7、lib 1。语料前 100 格没有用这只入口重跑。上一只整表仍是 `/tmp/grk-cx-line/o2mx/cx-entry-matrix-2026-10-30.tsv`，第 143 节。对象抽查在 `out/grk-obj-01/recheck.tsv`，第 145 节。这一轮在第 146 节。
 
 - **ar：已通。** 检查器五行和产品相同：用法、`ar z`、缺成员、空归档、两成员。空归档 8 字节，两成员 146 字节，权限都是 0644。大归档、替换成员、符号表没跑。
 - **as：已通。** 七行相同：用法、`-z`、坏 `-b`、头和 `-b` 冲突、一行汇编、加 `ret`、缺文件。一行汇编 728 字节，加 `ret` 744 字节，权限 0644。缺文件两边 stderr 都是 86 字节。Mach-O、COFF、大汇编没跑。
@@ -17,7 +17,7 @@
 - **-cx-plan / -cx-interface：已通。** 计划、接口、两个旗、缺文件、只有旗、`-include` 八行相同。多个模块的 `use` 没跑。
 - **-dump-tokens：已通。** `int x;` 两边 stdout 都是 25 字节。别的源文件没跑。
 - **--emit-host-symbols：已通。** 配 `-c -b` 两边 stderr 73 字节，配 `-S -b` 两边 106 字节，都是拒绝，退出 1。没有一格写出符号文件。
-- **-O1 / -O2：已通。** `-O1 -E` 和 `-O2 -E` 对 `int x;` 相同。`-O1 -c` 和 `-O2 -c` 有 `main` 时都是 2216 字节，权限 0755。
+- **-O1 / -O2：已通（限检查器这些格），性能红项另记。** 检查器这 4 格是 `-O1 -E`、`-O2 -E`、`-O1 -c`、`-O2 -c`，都是 SAME。`-E` 对 `int x;`。有 `main` 的 `-c` 两边都是 2216 字节，权限 0755。`dev-run` 的 8 格超时不在这 4 格里，这一轮没跑，仍是性能红项。
 - **-D / -U / -I / -include：已通。** `-DFOO`、`-UFOO`、先定义再取消、`-I` 引号、`-I` 尖括号、`-include`、`-iquote` 七行相同。多个目录、缺参数没跑。
 - **库接口：已通（只到检查器这一格）。** `int abs(int); int main(void){return abs(-3);}` 默认执行，两边退出 3，stdout 和 stderr 都是空的。`tests/library-abi.cx` 没跑。`us_*` 没接到这条入口。这不是库路径已经接上。`dup.c` 的 `strdup` 不在这 12 面里，这一轮没跑。
 
@@ -1799,12 +1799,13 @@ flowchart TD
 
 这一轮起点是 100。入口是 `/tmp/grk-cx-line/entry-o2`，873487 字节，sha256 `313206b1c4761f2fa56ecc7245087ec0a39b3e811253daace609f6b44efbaf92`。表 `out/grk-face-01/cx-entry-matrix-2026-10-30.tsv` 是表头加 48 行，48 行判词都是 SAME。进度文件是 100 和 148。stdout 最后一行是 `LEFT:0`。再跑同一条命令仍是 `LEFT:0`。带起点 0 会被拒绝，因为和已有起点不符。只有一个整数 `100` 的进度，再带起点 100 也会被拒绝。只有一个整数 `148` 时直接 `LEFT:0`。语料前 100 格没有跑。驱动没有改。
 
-十二面因此从骨架改成已通。有效 `.tapebin` 包仍没跑，字段能过的头仍停在 `tapebin decode`，解码仍在 C。库接口这一格两边退出 3，`us_*` 没接到入口，`tests/library-abi.cx` 没跑。`--emit-host-symbols` 两格都是两边拒绝，没有写出符号文件。`dev-run` 8 格和 `dup.c` 没跑。这不是产品安装。
+十二面按这张表的 SAME 从骨架改成已通。格数是 ar 5、as 7、nm 3、objdump 4、-c 2、tape 2、tapebin 2、cx-plan 6、cx-interface 2、dump-tokens 1、emit-host-symbols 2、-O1 2、-O2 2、-D 7、lib 1。-O1/-O2 写成已通（限检查器这些格），性能红项另记：`dev-run` 的 8 格超时不在这 4 格里。有效 `.tapebin` 包仍没跑，字段能过的头仍停在 `tapebin decode`，解码仍在 C。库接口这一格两边退出 3，`us_*` 没接到入口，`tests/library-abi.cx` 没跑。`--emit-host-symbols` 两格都是两边拒绝，没有写出符号文件。`dev-run` 8 格和 `dup.c` 没跑。这不是产品安装。
 
 ```mermaid
 flowchart TD
   s["起点 100"] --> t["48 行 SAME"]
-  t --> a["十二面标已通"]
+  t --> a["十二面按 SAME 标已通"]
+  t --> o["-O 限这 4 格，dev-run 另记"]
   t --> g["有效 tapebin 与库路径仍缺"]
 ```
 
