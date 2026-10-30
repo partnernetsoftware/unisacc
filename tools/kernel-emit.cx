@@ -1,0 +1,710 @@
+/* tools/kernel-emit.cx -- the native `python3 -m unisa emit-kernel`: writes the 41 kernel/ files
+ * (weight.<stage>.inc and dense.<stage>.inc for the 18 stages, unisa_model.inc, unisa_cases.inc,
+ * unisa_core.c, unisa_self.c, unisa_headers.inc) byte for byte as unisa/ckernel.py does.
+ *
+ *   sh ./unisacc.com tools/kernel-emit.cx -- --write ROOT OUTDIR    (OUTDIR must exist)
+ *   sh ./unisacc.com tools/kernel-emit.cx -- --check ROOT OUTDIR    (SAME/DIFF per file; exit 1 on DIFF)
+ *
+ * Inputs, each read as data:
+ *   weights/built.json           the constructed nets (unisa/__main__.py _built() loads this file)
+ *   weights/gold/<stage>.tsv     each stage's fields in order, head names and every key with its gold
+ *                                labels, in gold.py keys() order (the gold-export form)
+ *   exec/facts/kernel-emit.tsv   stage order, back-end stages, provenance inputs, vocabularies, ENCSPEC map
+ *   exec/facts/enc-literals.tsv  the ENCSPEC opcode rows
+ *   unisa/ckernel.py             KERNEL_BODY, the C kernel text, taken between its unique markers
+ *   include/**.h                 the carried headers; the -ftrim-libc closure comes from the native
+ *                                seed/unisa_libneed.c `table`
+ * The provenance comments hash the same paths as the Python writer, unisa/*.py included.
+ * Exit 0 written or equal, 1 a file differs (named), 2 usage, input or refusal.
+ */
+#pragma unisa use text.text
+#pragma unisa use mem.arena
+#define KE_MAXS 32
+#define KE_MAXF 4
+#define KE_MAXH 16
+
+static int ke_ar;
+static char ke_root[4096], ke_out[4096];
+static int ke_check, ke_bad;
+
+typedef struct { char *p; long n, cap; } Ob;
+static void ke_die(const char *a, const char *b) { fprintf(stderr, "kernel-emit: %s%s%s\n", a, b ? ": " : "", b ? b : ""); exit(2); }
+static void *ke_alloc(long n) { void *p = ar_alloc(ke_ar, n > 0 ? n : 1); if (!p) ke_die("out of memory", 0); return p; }
+static void ob_put(Ob *o, const char *s, long n) {
+    long i;
+    if (o->n + n + 1 > o->cap) {
+        long c = (o->n + n + 1) * 2 + 65536;
+        char *t = ke_alloc(c);
+        for (i = 0; i < o->n; i++) t[i] = o->p[i];
+        o->p = t; o->cap = c;
+    }
+    for (i = 0; i < n; i++) o->p[o->n + i] = s[i];
+    o->n += n;
+    o->p[o->n] = 0;
+}
+static void ob_z(Ob *o, const char *s) { ob_put(o, s, tx_len(s, 1L << 30)); }
+static void ob_f(Ob *o, const char *fmt, long a, long b) { char t[256]; cx_fmt(t, sizeof t, fmt, a, b); ob_z(o, t); }
+static void ob_nl(Ob *o, const char *s) { ob_z(o, s); ob_put(o, "\n", 1); }   /* one line of the "\n".join */
+
+static char *ke_read(const char *rel, long *n) {
+    char p[8400];
+    size_t sz;
+    char *b;
+    cx_fmt(p, sizeof p, "%s/%s", ke_root, rel);
+    b = cx_read(p, &sz);
+    if (!b) ke_die("cannot read", p);
+    *n = (long)sz;
+    return b;
+}
+static char *ke_dup(const char *s, long n) { char *p = ke_alloc(n + 1); long i; for (i = 0; i < n; i++) p[i] = s[i]; p[n] = 0; return p; }
+
+/* ---- output ---- */
+static void ke_emit(const char *name, Ob *o) {
+    char p[8400];
+    size_t n;
+    char *cur;
+    cx_fmt(p, sizeof p, "%s/%s", ke_out, name);
+    if (!ke_check) {
+        if (cx_write(p, o->p, (size_t)o->n)) ke_die("cannot write", p);
+        return;
+    }
+    cur = cx_read(p, &n);
+    if (cur && (long)n == o->n && tx_same(cur, (long)n, o->p, o->n)) { printf("SAME\t%s\n", name); return; }
+    {
+        long i = 0, line = 1;
+        if (cur) while (i < (long)n && i < o->n && cur[i] == o->p[i]) { if (cur[i] == '\n') line++; i++; }
+        printf("DIFF\t%s\tfirst difference at byte %ld, line %ld (%s %ld bytes, generated %ld)\n", name, i, line, cur ? "file" : "absent", cur ? (long)n : 0L, o->n);
+    }
+    ke_bad = 1;
+}
+
+/* _provenance: what may hold newlines, already followed by " * " in the text. */
+static void ke_prov(Ob *o, const char *what, char **paths, int np) {
+    int i;
+    ob_nl(o, "/* GENERATED -- do not edit.  `python3 -m unisa emit-kernel` writes this");
+    ob_nl(o, " * file; tests/kernel.sh fails when it differs from a fresh run.");
+    ob_z(o, " * "); ob_nl(o, what);
+    ob_z(o, " * Inputs (sha256, first 12 hex digits):");
+    for (i = 0; i < np; i++) {
+        char p[8400], hex[65], line[600];
+        size_t n;
+        char *b;
+        long pl = tx_len(paths[i], 4096), k;
+        cx_fmt(p, sizeof p, "%s/%s", ke_root, paths[i]);
+        b = cx_read(p, &n);
+        if (b) { cx_sha256_hex(b, n, hex); hex[12] = 0; } else tx_copy(hex, sizeof hex, "(absent)", 8);
+        ob_put(o, "\n", 1);
+        ob_z(o, " *   "); ob_z(o, paths[i]);
+        for (k = pl; k < 28; k++) ob_put(o, " ", 1);
+        cx_fmt(line, sizeof line, " %s", hex); ob_z(o, line);
+    }
+    ob_z(o, " */");
+}
+/* _cstr(b, name): returns the lines; first is "char *NAME =", last ends in "\";" */
+static void ke_cstr(Ob *o, const unsigned char *b, long n, const char *name, int drop_semicolon) {
+    static const char hx[] = "0123456789abcdef";
+    long i;
+    if (name) { ob_z(o, "char *"); ob_z(o, name); ob_z(o, " =\n"); }
+    if (n == 0) { ob_z(o, drop_semicolon ? "  \"\"" : "  \"\";"); return; }
+    for (i = 0; i < n; i++) {
+        char e[4];
+        if (i % 20 == 0) { if (i) ob_z(o, "\"\n"); ob_z(o, "  \""); }
+        e[0] = '\\'; e[1] = 'x'; e[2] = hx[b[i] >> 4]; e[3] = hx[b[i] & 15];
+        ob_put(o, e, 4);
+    }
+    ob_z(o, drop_semicolon ? "\"" : "\";");
+}
+
+/* ---- exec/facts/kernel-emit.tsv ---- */
+typedef struct { char **c; int n; } Row;
+static Row ke_rows[512];
+static int ke_nrows;
+static void ke_facts(void) {
+    long n, at = 0;
+    char *b = ke_read("exec/facts/kernel-emit.tsv", &n);
+    while (at < n) {
+        long e = at, k, c = 1;
+        while (e < n && b[e] != '\n') e++;
+        if (e > at && b[at] != '#') {
+            Row *r = &ke_rows[ke_nrows];
+            if (ke_nrows == 512) ke_die("too many fact rows", 0);
+            for (k = at; k < e; k++) if (b[k] == '\t') c++;
+            r->c = ke_alloc((long)sizeof(char *) * c);
+            r->n = 0;
+            for (k = at; ; ) {
+                long s = k;
+                while (k < e && b[k] != '\t') k++;
+                r->c[r->n++] = ke_dup(b + s, k - s);
+                if (k >= e) break;
+                k++;
+            }
+            ke_nrows++;
+        }
+        at = e + 1;
+    }
+}
+
+/* ---- weights/gold/<stage>.tsv ---- */
+typedef struct {
+    int nf; char *fname[KE_MAXF]; int nv[KE_MAXF]; char **val[KE_MAXF];
+    int nh; char *hname[KE_MAXH];
+    long nk; int *kidx; char **lab;     /* kidx[key*nf + i], lab[key*nh + h] */
+} Gold;
+static void ke_gold(const char *st, Gold *g) {
+    char rel[256];
+    long n, at = 0, cap = 0;
+    char *b;
+    cx_fmt(rel, sizeof rel, "weights/gold/%s.tsv", st);
+    b = ke_read(rel, &n);
+    g->nf = 0; g->nh = 0; g->nk = 0;
+    while (at < n) {
+        long e = at, k, c = 0;
+        char *cell[1024];
+        while (e < n && b[e] != '\n') e++;
+        b[e < n ? e : n - 1] = e < n ? 0 : b[n - 1];
+        for (k = at; k < e; ) {
+            long s = k;
+            while (k < e && b[k] != '\t') k++;
+            if (c == 1024) ke_die("gold line too wide", rel);
+            b[k < e ? k : e] = 0;
+            cell[c++] = b + s;
+            if (k < e) k++;
+        }
+        if (c && tx_eq(cell[0], "#field", 8)) {
+            if (g->nf == KE_MAXF) ke_die("more than four fields", rel);
+            g->fname[g->nf] = cell[1]; g->nv[g->nf] = (int)(c - 2); g->val[g->nf] = ke_alloc((long)sizeof(char *) * c);
+            for (k = 2; k < c; k++) g->val[g->nf][k - 2] = cell[k];
+            g->nf++;
+        } else if (c && tx_eq(cell[0], "#head", 8)) {
+            if (g->nh == KE_MAXH) ke_die("too many heads", rel);
+            g->hname[g->nh++] = cell[1];
+        } else if (c && cell[0][0] != '#' && !(c > g->nf && tx_prefix(cell[g->nf], tx_len(cell[g->nf], 64), "=> ", 3))) {
+            int i;
+            if (c != g->nf + g->nh) ke_die("bad gold row", rel);
+            if (g->nk == cap) {
+                long nc = cap ? cap * 2 : 4096, j;
+                int *ki = ke_alloc((long)sizeof(int) * nc * KE_MAXF);
+                char **lb = ke_alloc((long)sizeof(char *) * nc * KE_MAXH);
+                for (j = 0; j < g->nk * g->nf; j++) ki[j] = g->kidx[j];
+                for (j = 0; j < g->nk * g->nh; j++) lb[j] = g->lab[j];
+                g->kidx = ki; g->lab = lb; cap = nc;
+            }
+            for (i = 0; i < g->nf; i++) {
+                int v, hit = -1;
+                for (v = 0; v < g->nv[i]; v++) if (tx_eq(g->val[i][v], cell[i], 4096)) { hit = v; break; }
+                if (hit < 0) ke_die("gold key value not in its field", rel);
+                g->kidx[g->nk * g->nf + i] = hit;
+            }
+            for (i = 0; i < g->nh; i++) g->lab[g->nk * g->nh + i] = cell[g->nf + i];
+            g->nk++;
+        }
+        at = e + 1;
+    }
+}
+
+/* ---- a small JSON reader for weights/built.json ---- */
+typedef struct Jn { int t; long num; char *s; int n; struct Jn **kid; char **key; } Jn;   /* t: 0 null 1 num 2 str 3 arr 4 obj */
+static const char *jp;
+static void j_ws(void) { while (*jp == ' ' || *jp == '\n' || *jp == '\t' || *jp == '\r') jp++; }
+static char *j_str(void) {
+    const char *s = ++jp;
+    while (*jp && *jp != '"') { if (*jp == '\\') ke_die("escaped JSON string", 0); jp++; }
+    if (!*jp) ke_die("unterminated JSON string", 0);
+    jp++;
+    return ke_dup(s, (long)(jp - 1 - s));
+}
+static Jn *j_val(void) {
+    Jn *v = ke_alloc((long)sizeof(Jn));
+    j_ws();
+    if (*jp == '"') { v->t = 2; v->s = j_str(); return v; }
+    if (*jp == '[' || *jp == '{') {
+        int obj = *jp == '{', cap = 8;
+        jp++;
+        v->t = obj ? 4 : 3; v->n = 0;
+        v->kid = ke_alloc((long)sizeof(Jn *) * cap); v->key = obj ? ke_alloc((long)sizeof(char *) * cap) : 0;
+        j_ws();
+        if (*jp == (obj ? '}' : ']')) { jp++; return v; }
+        for (;;) {
+            char *k = 0;
+            j_ws();
+            if (obj) { if (*jp != '"') ke_die("JSON key", 0); k = j_str(); j_ws(); if (*jp++ != ':') ke_die("JSON colon", 0); }
+            if (v->n == cap) {
+                int i; Jn **nk = ke_alloc((long)sizeof(Jn *) * cap * 2); char **kk = obj ? ke_alloc((long)sizeof(char *) * cap * 2) : 0;
+                for (i = 0; i < v->n; i++) { nk[i] = v->kid[i]; if (obj) kk[i] = v->key[i]; }
+                v->kid = nk; v->key = kk; cap *= 2;
+            }
+            if (obj) v->key[v->n] = k;
+            v->kid[v->n++] = j_val();
+            j_ws();
+            if (*jp == ',') { jp++; continue; }
+            if (*jp == (obj ? '}' : ']')) { jp++; return v; }
+            ke_die("bad JSON", 0);
+        }
+    }
+    if (*jp == 'n' && tx_prefix(jp, 4, "null", 4)) { jp += 4; v->t = 0; return v; }
+    if (*jp == '-' || (*jp >= '0' && *jp <= '9')) {
+        char *e;
+        v->t = 1; v->num = strtol(jp, &e, 10);
+        if (*e == '.' || *e == 'e' || *e == 'E') ke_die("non-integer JSON number", 0);
+        jp = e;
+        return v;
+    }
+    ke_die("unsupported JSON value", 0);
+    return 0;
+}
+static Jn *j_get(Jn *o, const char *k) { int i; if (o->t != 4) ke_die("JSON object expected", k); for (i = 0; i < o->n; i++) if (tx_eq(o->key[i], k, 256)) return o->kid[i]; ke_die("JSON key absent", k); return 0; }
+
+/* ---- one stage: its net and gold ---- */
+typedef struct {
+    char *name; Gold g;
+    long H; long *offs; int noffs; long *b1;
+    int nh; char *hn[KE_MAXH]; int ncl[KE_MAXH]; char **cl[KE_MAXH];
+    int ncoord; int *nfeed; long **feed;
+    int *nw2[KE_MAXH]; long **w2k[KE_MAXH]; long **w2w[KE_MAXH];
+} Stage;
+static Stage ke_st[KE_MAXS];
+static int ke_ns;
+static long *j_longs(Jn *a, int *n) { long *v; int i; if (a->t != 3) ke_die("JSON list expected", 0); v = ke_alloc((long)sizeof(long) * (a->n + 1)); for (i = 0; i < a->n; i++) { if (a->kid[i]->t != 1) ke_die("JSON integer expected", 0); v[i] = a->kid[i]->num; } if (n) *n = a->n; return v; }
+static void ke_net(Stage *S, Jn *d) {
+    Jn *heads = j_get(d, "heads"), *feeds = j_get(d, "feeds"), *w2 = j_get(d, "w2");
+    int h, j;
+    S->H = j_get(d, "H")->num;
+    S->offs = j_longs(j_get(d, "offs"), &S->noffs);
+    S->b1 = j_longs(j_get(d, "b1"), 0);
+    if (heads->n > KE_MAXH) ke_die("too many heads", S->name);
+    S->nh = heads->n;
+    for (h = 0; h < S->nh; h++) {
+        Jn *p = heads->kid[h], *cl = p->kid[1], *rows;
+        S->hn[h] = p->kid[0]->s;
+        S->ncl[h] = cl->n;
+        S->cl[h] = ke_alloc((long)sizeof(char *) * (cl->n + 1));
+        for (j = 0; j < cl->n; j++) { if (cl->kid[j]->t != 2) ke_die("non-string class", S->name); S->cl[h][j] = cl->kid[j]->s; }
+        rows = j_get(w2, S->hn[h]);
+        if (rows->n != S->H) ke_die("w2 rows differ from H", S->name);
+        S->nw2[h] = ke_alloc((long)sizeof(int) * S->H);
+        S->w2k[h] = ke_alloc((long)sizeof(long *) * S->H);
+        S->w2w[h] = ke_alloc((long)sizeof(long *) * S->H);
+        for (j = 0; j < S->H; j++) {
+            Jn *r = rows->kid[j];
+            int t;
+            S->nw2[h][j] = r->n;
+            S->w2k[h][j] = ke_alloc((long)sizeof(long) * (r->n + 1));
+            S->w2w[h][j] = ke_alloc((long)sizeof(long) * (r->n + 1));
+            for (t = 0; t < r->n; t++) { S->w2k[h][j][t] = r->kid[t]->kid[0]->num; S->w2w[h][j][t] = r->kid[t]->kid[1]->num; }
+        }
+    }
+    S->ncoord = feeds->n;
+    S->nfeed = ke_alloc((long)sizeof(int) * (feeds->n + 1));
+    S->feed = ke_alloc((long)sizeof(long *) * (feeds->n + 1));
+    for (j = 0; j < feeds->n; j++) S->feed[j] = j_longs(feeds->kid[j], &S->nfeed[j]);
+}
+/* intnet.predict: class index per head for key indices kidx */
+static void ke_predict(Stage *S, const int *kidx, int *out, int *hit, long *z) {
+    int i, h;
+    long j;
+    for (j = 0; j < S->H; j++) hit[j] = 0;
+    for (i = 0; i < S->g.nf; i++) {
+        long c = S->offs[i] + kidx[i], t;
+        if (c < 0 || c >= S->ncoord) ke_die("coordinate outside feeds", S->name);
+        for (t = 0; t < S->nfeed[c]; t++) hit[S->feed[c][t]]++;
+    }
+    for (h = 0; h < S->nh; h++) {
+        int k, best = 0;
+        for (k = 0; k < S->ncl[h]; k++) z[k] = 0;
+        for (j = 0; j < S->H; j++) if (hit[j] + S->b1[j] > 0) {
+            int t;
+            for (t = 0; t < S->nw2[h][j]; t++) z[S->w2k[h][j][t]] += S->w2w[h][j][t];
+        }
+        for (k = 1; k < S->ncl[h]; k++) if (z[k] > z[best]) best = k;
+        out[h] = best;
+    }
+}
+static int ke_maskw(Gold *g) { int i, w = 1; for (i = 0; i < g->nf; i++) if ((g->nv[i] + 63) / 64 > w) w = (g->nv[i] + 63) / 64; return w; }
+static int ke_class(Stage *S, int h, const char *lab) { int k; for (k = 0; k < S->ncl[h]; k++) if (tx_eq(S->cl[h][k], lab, 4096)) return k; ke_die("gold label not a net class", S->name); return -1; }
+static int ke_ghead(Stage *S, const char *hn) { int i; for (i = 0; i < S->g.nh; i++) if (tx_eq(S->g.hname[i], hn, 256)) return i; ke_die("net head absent from gold", S->name); return -1; }
+
+static char *ke_modelsrc[16];
+static int ke_nmodelsrc;
+static char *ke_upper(const char *s) { long n = tx_len(s, 256), i; char *u = ke_alloc(n + 1); for (i = 0; i < n; i++) u[i] = (s[i] >= 'a' && s[i] <= 'z') ? (char)(s[i] - 32) : s[i]; u[n] = 0; return u; }
+static void ke_packed(Ob *o, char **v, int n, const char *sep) { int i; for (i = 0; i < n; i++) { ob_z(o, v[i]); ob_z(o, sep); } }
+
+/* ---- unisa_core.c / unisa_self.c: KERNEL_BODY from unisa/ckernel.py ---- */
+static char *ke_body;
+static long ke_bodyn, ke_mainat;
+static void ke_kernel_body(void) {
+    long n, s, e;
+    char *b = ke_read("unisa/ckernel.py", &n);
+    static const char open_[] = "\nKERNEL_BODY = r'''";
+    s = tx_find(b, n, open_, (long)sizeof open_ - 1);
+    if (s < 0 || tx_find(b + s + 1, n - s - 1, open_, (long)sizeof open_ - 1) >= 0) ke_die("KERNEL_BODY marker not unique", "unisa/ckernel.py");
+    s += (long)sizeof open_ - 1;
+    e = tx_find(b + s, n - s, "'''", 3);
+    if (e < 0) ke_die("KERNEL_BODY end", "unisa/ckernel.py");
+    ke_body = b + s; ke_bodyn = e;
+    ke_mainat = tx_find(ke_body, ke_bodyn, "int main(void)", 14);
+    if (ke_mainat < 0) ke_mainat = ke_bodyn;
+}
+
+/* ---- unisa_headers.inc: every include/**.h as a string, then the -ftrim-libc closure ---- */
+static char *ke_hdr[1024];
+static int ke_nhdr;
+static int ke_take(const char *path, void *ctx) {
+    long n = tx_len(path, 8192), rl = tx_len(ke_root, 4096) + 9;   /* ROOT + "/include/" */
+    (void)ctx;
+    if (n > 2 && path[n - 2] == '.' && path[n - 1] == 'h') {
+        if (ke_nhdr == 1024) ke_die("too many headers", 0);
+        ke_hdr[ke_nhdr++] = ke_dup(path + rl, n - rl);
+    }
+    return 0;
+}
+static int ke_less(const char *a, const char *b) { long i = 0; while (a[i] && a[i] == b[i]) i++; return (unsigned char)a[i] < (unsigned char)b[i]; }
+static int ke_index(char **v, int n, const char *s) { int i; for (i = 0; i < n; i++) if (tx_eq(v[i], s, 256)) return i; ke_die("closure names an unknown body", s); return -1; }
+static void ke_headers(void) {
+    Ob o = {0, 0, 0};
+    char dir[4400], **paths;
+    static char *body[2048], *key[2048], **clo[2048], *root[256];
+    static int nclo[2048];
+    int i, j, nb = 0, nk = 0, nr = 0;
+    long ndep = 0;
+    cx_fmt(dir, sizeof dir, "%s/include", ke_root);
+    if (cx_walk(dir, ke_take, 0)) ke_die("cannot walk", dir);
+    for (i = 1; i < ke_nhdr; i++) { char *x = ke_hdr[i]; for (j = i - 1; j >= 0 && ke_less(x, ke_hdr[j]); j--) ke_hdr[j + 1] = ke_hdr[j]; ke_hdr[j + 1] = x; }
+    paths = ke_alloc((long)sizeof(char *) * (ke_nhdr + 1));
+    for (i = 0; i < ke_nhdr; i++) { long n = tx_len(ke_hdr[i], 4096); paths[i] = ke_alloc(n + 9); tx_copy(paths[i], n + 9, "include/", 8); tx_copy(paths[i] + 8, n + 1, ke_hdr[i], n); }
+    {   /* the native seed/unisa_libneed.c, as tools/facts-gen.cx runs it */
+        char bound[4400], com[4400], src[4400], *argv[9], *out, *p, *end;
+        size_t on;
+        cx_fmt(bound, sizeof bound, "%s/tools/bound", ke_root); cx_fmt(com, sizeof com, "%s/unisacc.com", ke_root);
+        cx_fmt(src, sizeof src, "%s/seed/unisa_libneed.c", ke_root);
+        argv[0] = bound; argv[1] = "50"; argv[2] = "sh"; argv[3] = com; argv[4] = src; argv[5] = "--"; argv[6] = "table"; argv[7] = dir; argv[8] = 0;
+        if (cx_runv_timeout(argv, 55, &out, &on) != 0 || !out) ke_die("seed/unisa_libneed.c table failed", 0);
+        for (p = out, end = out + on; p < end; ) {
+            long off = tx_chr(p, (long)(end - p), '\n'), k;
+            char *cell[2100];
+            int c = 0;
+            if (off < 0) off = (long)(end - p);
+            p[off] = 0;
+            for (k = 0; p[k]; ) {
+                while (p[k] == ' ') p[k++] = 0;
+                if (!p[k]) break;
+                if (c == 2100) ke_die("libneed line too long", 0);
+                cell[c++] = p + k;
+                while (p[k] && p[k] != ' ') k++;
+            }
+            if (c && tx_eq(cell[0], "NAMES", 8)) { for (k = 1; k < c; k++) { if (nb == 2048) ke_die("too many bodies", 0); body[nb++] = cell[k]; } }
+            else if (c >= 2 && tx_eq(cell[0], "KEY", 4)) {
+                if (nk == 2048) ke_die("too many keys", 0);
+                key[nk] = cell[1]; nclo[nk] = c - 2; clo[nk] = ke_alloc((long)sizeof(char *) * c);
+                for (k = 2; k < c; k++) clo[nk][k - 2] = cell[k];
+                nk++;
+            } else if (c && tx_eq(cell[0], "ROOTS_CLOSURE", 16)) { for (k = 1; k < c; k++) { if (nr == 256) ke_die("too many roots", 0); root[nr++] = cell[k]; } }
+            p += off + 1;
+        }
+    }
+    ke_prov(&o, "The C library the compiler carries: each include/*.h packed as a string,\n * because a shipped binary has no include/ to read.", paths, ke_nhdr);
+    ob_put(&o, "\n", 1); ob_nl(&o, "");
+    ob_z(&o, "char *HDR_NAMES = \""); ke_packed(&o, ke_hdr, ke_nhdr, "\\000"); ob_nl(&o, "\";");
+    ob_f(&o, "#define NHDR %ld\n", ke_nhdr, 0); ob_nl(&o, "");
+    for (i = 0; i < ke_nhdr; i++) {
+        char nm[64], line[600];
+        long n;
+        char *b = ke_read(paths[i], &n);
+        cx_fmt(line, sizeof line, "/* HDR_%d: include/%s, verbatim */", i, ke_hdr[i]); ob_nl(&o, line);
+        cx_fmt(nm, sizeof nm, "HDR_%d", i);
+        ke_cstr(&o, (unsigned char *)b, n, nm, 0); ob_put(&o, "\n", 1);
+        ob_nl(&o, "");
+    }
+    ob_nl(&o, "/* the i-th header's text */"); ob_nl(&o, "char *hdr_text(int i) {");
+    for (i = 0; i < ke_nhdr; i++) ob_f(&o, "  if (i == %ld) return HDR_%ld;\n", i, i);
+    ob_nl(&o, "  return 0;"); ob_nl(&o, "}"); ob_nl(&o, "");
+    ob_nl(&o, "/* LIBKEY k reaches carried bodies LIBKEY_DEP[LIBKEY_OFF[k]..LIBKEY_OFF[k+1]) */");
+    ob_z(&o, "char *LIBKEY_NAMES = \""); ke_packed(&o, key, nk, "\\000"); ob_nl(&o, "\";");
+    ob_f(&o, "#define NLIBKEY %ld\n", nk, 0);
+    ob_f(&o, "long LIBKEY_OFF[%ld] = {0", nk + 1, 0);
+    for (i = 0; i < nk; i++) { ndep += nclo[i]; ob_f(&o, ", %ld", ndep, 0); }
+    ob_nl(&o, "};");
+    ob_f(&o, "long LIBKEY_DEP[%ld] = {", ndep > 0 ? ndep : 1, 0);
+    {
+        int first = 1;
+        for (i = 0; i < nk; i++) for (j = 0; j < nclo[i]; j++) { ob_f(&o, first ? "%ld" : ", %ld", ke_index(body, nb, clo[i][j]), 0); first = 0; }
+        if (first) ob_z(&o, "0");
+    }
+    ob_nl(&o, "};");
+    ob_z(&o, "char *LIBBODY_NAMES = \""); ke_packed(&o, body, nb, "\\000"); ob_nl(&o, "\";");
+    ob_f(&o, "#define NLIBBODY %ld\n", nb, 0);
+    ob_nl(&o, "/* bodies the compiler itself reaches (libneed.ROOTS), needed whenever pruning is on */");
+    ob_f(&o, "long LIBROOT_DEP[%ld] = {", nr > 0 ? nr : 1, 0);
+    for (i = 0; i < nr; i++) ob_f(&o, i ? ", %ld" : "%ld", ke_index(body, nb, root[i]), 0);
+    if (!nr) ob_z(&o, "0");
+    ob_nl(&o, "};");
+    ob_f(&o, "#define NLIBROOT %ld\n", nr, 0); ob_nl(&o, "");
+    ke_emit("unisa_headers.inc", &o);
+}
+
+int main(int argc, char **argv) {
+    Ob model = {0, 0, 0}, dense_all = {0, 0, 0}, blob = {0, 0, 0}, cases = {0, 0, 0};
+    long *soff, *doff, ncase = 0;
+    int i, h, j, *hit, *cls;
+    long *z;
+    Jn *nets;
+    char **backend = 0;
+    int nbackend = 0;
+    ke_ar = ar_new(1L << 33);
+    if (!ke_ar) ke_die("cannot create the arena", 0);
+    if (argc != 4 || (!tx_eq(argv[1], "--write", 16) && !tx_eq(argv[1], "--check", 16))) ke_die("usage", "--write|--check ROOT OUTDIR");
+    ke_check = tx_eq(argv[1], "--check", 16);
+    if (!realpath(argv[2], ke_root)) ke_die("bad ROOT", argv[2]);
+    if (!realpath(argv[3], ke_out)) ke_die("OUTDIR must exist", argv[3]);
+    ke_facts();
+    backend = ke_alloc((long)sizeof(char *) * 64);
+    for (i = 0; i < ke_nrows; i++) {
+        Row *r = &ke_rows[i];
+        if (tx_eq(r->c[0], "stage", 8) && r->n == 2) { if (ke_ns == KE_MAXS) ke_die("too many stages", 0); ke_st[ke_ns++].name = r->c[1]; }
+        else if (tx_eq(r->c[0], "backend", 8) && r->n == 2) backend[nbackend++] = r->c[1];
+        else if (tx_eq(r->c[0], "modelsrc", 12) && r->n == 2) ke_modelsrc[ke_nmodelsrc++] = r->c[1];
+    }
+    {
+        long n;
+        char *b = ke_read("weights/built.json", &n);
+        jp = b;
+        nets = j_val();
+        if (nets->t != 4 || nets->n != ke_ns) ke_die("weights/built.json does not hold one net per stage", 0);
+    }
+    for (i = 0; i < ke_ns; i++) {
+        Stage *S = &ke_st[i];
+        Jn *d = j_get(nets, S->name);
+        if (!tx_eq(j_get(d, "stage")->s, S->name, 64)) ke_die("net stage name", S->name);
+        ke_gold(S->name, &S->g);
+        ke_net(S, d);
+        if (S->noffs != S->g.nf) ke_die("net offs differ from gold fields", S->name);
+    }
+    hit = ke_alloc((long)sizeof(int) * 65536);
+    z = ke_alloc((long)sizeof(long) * 65536);
+    cls = ke_alloc((long)sizeof(int) * KE_MAXH);
+    soff = ke_alloc((long)sizeof(long) * (ke_ns + 1));
+    doff = ke_alloc((long)sizeof(long) * (ke_ns + 1));
+
+    /* _blob: per unit, per field W little-endian u64 literal masks (all values set = 0), then the w2 entries */
+    for (i = 0; i < ke_ns; i++) {
+        Stage *S = &ke_st[i];
+        Gold *g = &S->g;
+        int W = ke_maskw(g), f, ncol = 0, offs[KE_MAXF];
+        unsigned char *cols;
+        long c, nents = 0;
+        if (S->nh > KE_MAXH) ke_die("heads > HEADS_MAX", S->name);
+        for (f = 0; f < g->nf; f++) { offs[f] = ncol; ncol += g->nv[f]; }
+        if (ncol != S->ncoord) ke_die("feeds differ from the gold coordinates", S->name);
+        cols = ke_alloc(S->H * ncol);
+        for (c = 0; c < ncol; c++) { int t; for (t = 0; t < S->nfeed[c]; t++) cols[S->feed[c][t] * ncol + c] = 1; }
+        soff[i] = blob.n;
+        for (j = 0; j < S->H; j++) for (f = 0; f < g->nf; f++) {
+            unsigned char word[8 * 8];
+            int k, all = 1, wi;
+            for (k = 0; k < 8 * W; k++) word[k] = 0;
+            for (k = 0; k < g->nv[f]; k++) { if (cols[j * ncol + offs[f] + k]) word[k / 8] |= (unsigned char)(1 << (k % 8)); else all = 0; }
+            if (all) for (k = 0; k < 8 * W; k++) word[k] = 0;
+            for (wi = 0; wi < W; wi++) ob_put(&blob, (char *)word + 8 * wi, 8);
+        }
+        for (h = 0; h < S->nh; h++) for (j = 0; j < S->H; j++) nents += S->nw2[h][j];
+        { unsigned char nb[4]; nb[0] = (unsigned char)nents; nb[1] = (unsigned char)(nents >> 8); nb[2] = (unsigned char)(nents >> 16); nb[3] = (unsigned char)(nents >> 24); ob_put(&blob, (char *)nb, 4); }
+        for (h = 0; h < S->nh; h++) for (j = 0; j < S->H; j++) {
+            int t;
+            for (t = 0; t < S->nw2[h][j]; t++) {
+                long k = S->w2k[h][j][t], w = S->w2w[h][j][t];
+                unsigned char e[7];
+                e[0] = (unsigned char)(j & 0xFF); e[1] = (unsigned char)((j >> 8) & 0xFF); e[2] = (unsigned char)h;
+                e[3] = (unsigned char)(k & 0xFF); e[4] = (unsigned char)((k >> 8) & 0xFF); e[5] = (unsigned char)(w & 0xFF); e[6] = (unsigned char)((w >> 8) & 0xFF);
+                ob_put(&blob, (char *)e, 7);
+            }
+        }
+    }
+    soff[ke_ns] = blob.n;
+
+    /* weight.<stage>.inc */
+    for (i = 0; i < ke_ns; i++) {
+        Ob w = {0, 0, 0};
+        char what[256], fn[256];
+        cx_fmt(what, sizeof what, "Constructed weight literal for stage %s", ke_st[i].name);
+        ke_prov(&w, what, ke_modelsrc, ke_nmodelsrc); ob_put(&w, "\n", 1);
+        ke_cstr(&w, (unsigned char *)blob.p + soff[i], soff[i + 1] - soff[i], 0, 1);
+        ob_put(&w, "\n", 1);
+        cx_fmt(fn, sizeof fn, "weight.%s.inc", ke_st[i].name);
+        ke_emit(fn, &w);
+    }
+    /* dense: the net over every gold key, head-minor */
+    for (i = 0; i < ke_ns; i++) {
+        Stage *S = &ke_st[i];
+        long k;
+        doff[i] = dense_all.n;
+        for (k = 0; k < S->g.nk; k++) {
+            ke_predict(S, S->g.kidx + k * S->g.nf, cls, hit, z);
+            for (h = 0; h < S->nh; h++) { char c = (char)cls[h]; if (cls[h] >= 256) ke_die("class index >= 256", S->name); ob_put(&dense_all, &c, 1); }
+        }
+    }
+    doff[ke_ns] = dense_all.n;
+    for (i = 0; i < ke_ns; i++) {
+        Ob w = {0, 0, 0};
+        char what[256], fn[256];
+        cx_fmt(what, sizeof what, "Network-evaluated dense literal for stage %s", ke_st[i].name);
+        ke_prov(&w, what, ke_modelsrc, ke_nmodelsrc); ob_put(&w, "\n", 1);
+        ke_cstr(&w, (unsigned char *)dense_all.p + doff[i], doff[i + 1] - doff[i], 0, 1);
+        ob_put(&w, "\n", 1);
+        cx_fmt(fn, sizeof fn, "dense.%s.inc", ke_st[i].name);
+        ke_emit(fn, &w);
+    }
+
+    /* unisa_model.inc */
+    ke_prov(&model, "The model: every stage's constructed weights, their dimensions, and the\n * vocabularies both sides key by.  "
+            "Nothing here is typed by hand: the weights\n * are weights/built.json, which `unisa build-weights` CONSTRUCTS from the\n * "
+            "gold tables in unisa/gold.py (no training); the vocabularies are the\n * tuples named at each string.  The kernel that reads this is unisa_core.c.",
+            ke_modelsrc, ke_nmodelsrc);
+    ob_put(&model, "\n", 1);
+    ob_nl(&model, ""); ob_nl(&model, "#ifndef UNISA_MODEL_INC"); ob_nl(&model, "#define UNISA_MODEL_INC"); ob_nl(&model, "");
+    ob_nl(&model, "/* S_<stage>: the stage order of gold.ALL */");
+    for (i = 0; i < ke_ns; i++) { ob_z(&model, "#define S_"); ob_z(&model, ke_upper(ke_st[i].name)); ob_f(&model, " %ld\n", i, 0); }
+    ob_nl(&model, "");
+    ob_nl(&model, "/* MODEL: every stage's units, packed: per stage [nfields][field masks][nw2][(unit, class, w2)...]");
+    ob_nl(&model, " * -- the constructed weights of weights/built.json, in gold.ALL order */");
+    ob_nl(&model, "char *MODEL =");
+    for (i = 0; i < ke_ns; i++) { ob_z(&model, "#include \"weight."); ob_z(&model, ke_st[i].name); ob_nl(&model, ".inc\""); }
+    ob_nl(&model, ";");
+    ob_nl(&model, ""); ob_f(&model, "#define NSTAGE %ld\n", ke_ns, 0); ob_nl(&model, "");
+    ob_f(&model, "int STAGE_M[%ld];\n", ke_ns, 0); ob_f(&model, "int STAGE_H[%ld];\n", ke_ns, 0);
+    ob_f(&model, "int STAGE_OFF[%ld];\n", ke_ns, 0); ob_f(&model, "int STAGE_NCLS[%ld];\n", (long)ke_ns * KE_MAXH, 0);
+    ob_f(&model, "int STAGE_MW[%ld];\n", ke_ns, 0); ob_f(&model, "int STAGE_VN[%ld];\n", (long)ke_ns * 4, 0);
+    ob_nl(&model, "int act[4096];"); ob_nl(&model, "int z[512];"); ob_nl(&model, "");
+    ob_nl(&model, "/* DENSE: each stage's answers for every key, head-minor, as the constructed net\n * computes them (intnet.predict over the full domain) -- the net compiled to a\n * table [J1] */");
+    ob_nl(&model, "char *DENSE =");
+    for (i = 0; i < ke_ns; i++) { ob_z(&model, "#include \"dense."); ob_z(&model, ke_st[i].name); ob_nl(&model, ".inc\""); }
+    ob_nl(&model, ";");
+    ob_f(&model, "#define DENSE_LEN %ld\n", dense_all.n, 0);
+    ob_f(&model, "int STAGE_DOFF[%ld]; int STAGE_NH[%ld];\n", ke_ns, ke_ns); ob_nl(&model, "");
+    ob_nl(&model, "int model_dims(void) {");
+    for (i = 0; i < ke_ns; i++) { ob_f(&model, "  STAGE_DOFF[%ld] = %ld;", i, doff[i]); ob_f(&model, " STAGE_NH[%ld] = %ld;\n", i, ke_st[i].nh); }
+    for (i = 0; i < ke_ns; i++) {
+        Stage *S = &ke_st[i];
+        ob_f(&model, "  STAGE_M[%ld] = %ld;", i, S->g.nf); ob_f(&model, " STAGE_H[%ld] = %ld;", i, S->H);
+        ob_f(&model, " STAGE_OFF[%ld] = %ld;", i, soff[i]); ob_f(&model, "  STAGE_MW[%ld] = %ld;\n", i, ke_maskw(&S->g));
+        for (h = 0; h < S->nh; h++) ob_f(&model, "  STAGE_NCLS[%ld] = %ld;\n", (long)i * KE_MAXH + h, S->ncl[h]);
+        for (h = 0; h < S->g.nf; h++) ob_f(&model, "  STAGE_VN[%ld] = %ld;\n", (long)i * 4 + h, S->g.nv[h]);
+    }
+    ob_f(&model, "  return %ld;\n", ke_ns, 0); ob_nl(&model, "}"); ob_nl(&model, "");
+    for (i = 0; i < ke_nrows; i++) {
+        Row *r = &ke_rows[i];
+        if (!tx_eq(r->c[0], "vocab", 8)) continue;
+        if (r->n < 3) ke_die("bad vocab row", r->c[1]);
+        ob_z(&model, "/* "); ob_z(&model, r->c[1]); ob_z(&model, ": "); ob_z(&model, r->c[2]); ob_nl(&model, " */");
+        ob_z(&model, "char *"); ob_z(&model, r->c[1]); ob_z(&model, " = \""); ke_packed(&model, r->c + 3, r->n - 3, "\\0"); ob_nl(&model, "\";");
+        ob_z(&model, "#define N"); ob_z(&model, r->c[1]); ob_f(&model, " %ld\n", r->n - 3, 0); ob_nl(&model, "");
+    }
+    for (j = 0; j < nbackend; j++) {
+        Stage *S = 0;
+        char *U = ke_upper(backend[j]);
+        for (i = 0; i < ke_ns; i++) if (tx_eq(ke_st[i].name, backend[j], 64)) S = &ke_st[i];
+        if (!S) ke_die("back-end stage absent", backend[j]);
+        for (i = 0; i < S->g.nf; i++) {
+            char nm[128], line[512];
+            cx_fmt(nm, sizeof nm, "BF_%s_%d", U, i);
+            cx_fmt(line, sizeof line, "/* %s: unisa/gold.py STAGES[\"%s\"].fields[%d] (%s) */", nm, S->name, i, S->g.fname[i]);
+            ob_nl(&model, line);
+            ob_z(&model, "char *"); ob_z(&model, nm); ob_z(&model, " = \""); ke_packed(&model, S->g.val[i], S->g.nv[i], "\\000"); ob_nl(&model, "\";");
+            ob_z(&model, "#define N"); ob_z(&model, nm); ob_f(&model, " %ld\n", S->g.nv[i], 0); ob_nl(&model, "");
+        }
+        for (h = 0; h < S->nh; h++) {
+            char nm[128], line[512];
+            char *HN = ke_upper(S->hn[h]);
+            cx_fmt(nm, sizeof nm, "BH_%s_%s", U, HN);
+            cx_fmt(line, sizeof line, "/* %s: the classes of head \"%s\" of stage \"%s\", in the constructed net's order (weights/built.json) */", nm, S->hn[h], S->name);
+            ob_nl(&model, line);
+            ob_z(&model, "char *"); ob_z(&model, nm); ob_z(&model, " = \""); ke_packed(&model, S->cl[h], S->ncl[h], "\\000"); ob_nl(&model, "\";");
+            ob_z(&model, "#define N"); ob_z(&model, nm); ob_f(&model, " %ld\n", S->ncl[h], 0);
+            ob_z(&model, "#define HD_"); ob_z(&model, U); ob_z(&model, "_"); ob_z(&model, HN); ob_f(&model, " %ld\n", h, 0); ob_nl(&model, "");
+        }
+    }
+    {
+        long n, at = 0;
+        char *el = ke_read("exec/facts/enc-literals.tsv", &n);
+        char *ek[512], *en[512], *ev[512];
+        int ne = 0;
+        while (at < n) {
+            long e = at, t1, t2;
+            while (e < n && el[e] != '\n') e++;
+            el[e < n ? e : n - 1] = e < n ? 0 : el[n - 1];
+            if (el[at] != '#' && e > at) {
+                t1 = tx_chr(el + at, e - at, '\t'); t2 = t1 < 0 ? -1 : tx_chr(el + at + t1 + 1, e - at - t1 - 1, '\t');
+                if (t1 < 0 || t2 < 0 || ne == 512) ke_die("bad enc-literals row", el + at);
+                el[at + t1] = 0; el[at + t1 + 1 + t2] = 0;
+                ek[ne] = el + at; en[ne] = el + at + t1 + 1; ev[ne] = el + at + t1 + 1 + t2 + 1; ne++;
+            }
+            at = e + 1;
+        }
+        for (i = 0; i < ke_nrows; i++) {
+            Row *r = &ke_rows[i];
+            char line[512];
+            int k, cnt = 0;
+            if (!tx_eq(r->c[0], "enc", 8)) continue;
+            if (r->n != 5) ke_die("bad enc row", r->c[1]);
+            cx_fmt(line, sizeof line, "/* %s: unisa/catalog.py ENCSPEC[\"%s\"][\"%s\"] -- opcode data, not a decision */", r->c[1], r->c[2], r->c[3]);
+            ob_nl(&model, line);
+            ob_z(&model, "char *"); ob_z(&model, r->c[1]); ob_z(&model, " = \"");
+            for (k = 0; k < ne; k++) if (tx_eq(ek[k], r->c[4], 64)) { ob_z(&model, en[k]); ob_z(&model, "\\000"); cnt++; }
+            ob_nl(&model, "\";");
+            ob_z(&model, "#define N"); ob_z(&model, r->c[1]); ob_f(&model, " %ld\n", cnt, 0);
+            ob_z(&model, "long "); ob_z(&model, r->c[1]); ob_nl(&model, "_V(int i) {");
+            cnt = 0;
+            for (k = 0; k < ne; k++) if (tx_eq(ek[k], r->c[4], 64)) {   /* the value is the fact cell, verbatim */
+                ob_f(&model, "  if (i == %ld) return ", cnt, 0); ob_z(&model, ev[k]); ob_z(&model, ";\n"); cnt++;
+            }
+            ob_nl(&model, "  return 0 - 1;"); ob_nl(&model, "}"); ob_nl(&model, "");
+        }
+    }
+    ob_nl(&model, "#endif /* UNISA_MODEL_INC */");
+    ke_emit("unisa_model.inc", &model);
+
+    /* unisa_cases.inc */
+    for (i = 0; i < ke_ns; i++) {
+        Stage *S = &ke_st[i];
+        int gh[KE_MAXH];
+        long k;
+        for (h = 0; h < S->nh; h++) gh[h] = ke_ghead(S, S->hn[h]);
+        for (k = 0; k < S->g.nk; k++) for (h = 0; h < S->nh; h++) {
+            unsigned char rec[8];
+            int f, e = ke_class(S, h, S->g.lab[k * S->g.nh + gh[h]]);
+            rec[0] = (unsigned char)i; rec[1] = (unsigned char)h;
+            for (f = 0; f < 4; f++) rec[2 + f] = f < S->g.nf ? (unsigned char)S->g.kidx[k * S->g.nf + f] : 0;
+            rec[6] = (unsigned char)(e & 0xFF); rec[7] = (unsigned char)((e >> 8) & 0xFF);
+            ob_put(&cases, (char *)rec, 8);
+            ncase++;
+        }
+    }
+    {
+        Ob c = {0, 0, 0};
+        char *src2[2];
+        src2[0] = "unisa/gold.py"; src2[1] = "unisa/catalog.py";
+        ke_prov(&c, "Every key of every stage with the class its gold label gives -- the\n * full domain the self test enumerates "
+                "[P-3]: unisa/gold.py STAGES[s].keys()\n * and .label(), packed as [stage][key indices][class per head].", src2, 2);
+        ob_put(&c, "\n", 1); ob_nl(&c, "");
+        ke_cstr(&c, (unsigned char *)cases.p, cases.n, "CASES", 0); ob_put(&c, "\n", 1);
+        ob_nl(&c, ""); ob_f(&c, "#define NCASE %ld\n", ncase, 0); ob_nl(&c, "");
+        ke_emit("unisa_cases.inc", &c);
+    }
+    /* unisa_core.c and unisa_self.c */
+    ke_kernel_body();
+    {
+        Ob k = {0, 0, 0}, s = {0, 0, 0};
+        char *src1[1];
+        src1[0] = "unisa/ckernel.py";
+        ke_prov(&k, "The decision layer as C: the integer kernel [K-5], from KERNEL_BODY in\n * unisa/ckernel.py.  The model it reads is the file "
+                "included below.\n * No softmax, no libm, no malloc, no multiply, no float.", src1, 1);
+        ob_put(&k, "\n", 1); ob_nl(&k, ""); ob_nl(&k, "#include \"unisa_model.inc\""); ob_nl(&k, "");
+        ob_put(&k, ke_body, ke_mainat); ob_put(&k, "\n", 1);
+        ke_emit("unisa_core.c", &k);
+        ke_prov(&s, "The kernel, self-testing over the FULL gold corpus [P-3]: KERNEL_BODY in\n * unisa/ckernel.py.  The model and the cases "
+                "are the files included below.", src1, 1);
+        ob_put(&s, "\n", 1); ob_nl(&s, ""); ob_nl(&s, "#include \"unisa_model.inc\""); ob_nl(&s, "#include \"unisa_cases.inc\""); ob_nl(&s, "");
+        ob_put(&s, ke_body, ke_bodyn); ob_put(&s, "\n", 1);
+        ke_emit("unisa_self.c", &s);
+    }
+    ke_headers();
+    return ke_bad;
+}
