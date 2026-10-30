@@ -6,6 +6,11 @@
    appended after them), refuses cycles and a used module that defines main, and gives every .cx unit its forced
    includes: cx.h, the -include list, then the derived interface (CXIF v0) of each module in its use closure in
    dependency order -- the whole CXIF of a direct use, only the type part of a transitive one.
+   A call is refused when the callee is a function defined by some unit in this program and this unit
+   neither defines nor declares it, and does not directly use the module that exports it. The diagnostic names the
+   callee, the module (or file) that declares it, and this unit's file. Transitive use does not export
+   the prototype. A name no unit in the program defines is left to the prelude or the later undefined-
+   function check.
    CXIF v0 is text: one pass over the module source (splices joined, comments removed, strings respected) that splits
    file-scope items at a depth-0 ';' or at the '}' closing a function body, and exports the prototype of each
    non-static function definition and every typedef / struct-union-enum definition, whitespace collapsed.  When
@@ -21,7 +26,7 @@
    (bytes to fd 1 or 2), a sha256 hex callback, and the temp directory.  Inspection: -cx-interface M.cx prints the CXIF, -cx-plan prints the units as TSV:
    index, compile path, forced includes. */
 #define CXM_MAXU 64
-#define CXM_MAXUSE 32
+#define CXM_MAXUSE 48
 #define CXM_PATHW 512
 #define CXM_NAMEW 128
 #define CXM_SRCMAX 1048576
@@ -78,6 +83,11 @@ static int cxm_symb[CXM_SYMS]; static int cxm_syme[CXM_SYMS]; static int cxm_nsy
 static int cxm_ib[CXM_ITEMS]; static int cxm_ie[CXM_ITEMS]; static int cxm_ibody[CXM_ITEMS]; static int cxm_iline[CXM_ITEMS]; static int cxm_icond[CXM_ITEMS];
 static int cxm_ikind[CXM_ITEMS]; static int cxm_nitem;
 static char cxm_mac[CXM_MACROS][CXM_SYMW]; static int cxm_nmac;
+/* function declarators this unit itself writes (a prototype or a definition). A call is visible when the
+   name is here or exported by a module this unit directly uses. */
+#define CXM_LOCS 4096
+static char cxm_locn[CXM_LOCS][CXM_SYMW]; static int cxm_locu[CXM_LOCS]; static int cxm_nloc;
+static int cxm_badcalls;
 static int cxm_tokb; static int cxm_tokl;
 
 int cxm_len(char *s) { int n; n = 0; while (s[n]) n = n + 1; return n; }
@@ -342,7 +352,7 @@ int cxm_adduse(int u, char *w, int n, int line) {
     if (!cxm_lib[v]) cxm_cpyn(cxm_name[v], w, n, CXM_NAMEW);   /* a command-line unit used by name takes that name */
     cxm_lib[v] = 1;
     k = 0; while (k < cxm_nuse[u]) { if (cxm_use[u][k] == v) return 0; k = k + 1; }
-    if (cxm_nuse[u] >= CXM_MAXUSE) { cxm_start(u, line); cxm_m("more than 32 uses in one unit"); return cxm_fail(); }
+    if (cxm_nuse[u] >= CXM_MAXUSE) { cxm_start(u, line); cxm_m("more than 48 uses in one unit"); return cxm_fail(); }
     cxm_use[u][cxm_nuse[u]] = v; cxm_nuse[u] = cxm_nuse[u] + 1;
     return 0;
 }
@@ -793,6 +803,140 @@ int cxm_collisions(void) {
     }
     return 0;
 }
+/* a word that opens a declaration (storage class or type specifier), not sizeof */
+int cxm_declword(char *t, int l) {
+    char *k; int i; int b;
+    k = "auto char const double enum extern float inline int long register restrict short signed static struct "
+        "typedef union unsigned void volatile _Bool _Complex _Imaginary _Noreturn __inline __inline__ __restrict "
+        "__restrict__ __const __volatile__ __signed__ __extension__ _Thread_local ";
+    i = 0;
+    while (k[i]) {
+        b = i; while (k[i] != ' ') i = i + 1;
+        if (i - b == l) { int j; j = 0; while (j < l && k[b + j] == t[j]) j = j + 1; if (j == l) return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+int cxm_addloc(int u, char *t, int l) {
+    int i;
+    if (l <= 0 || l >= CXM_SYMW) return 0;
+    i = 0;
+    while (i < cxm_nloc) { if (cxm_locu[i] == u && cxm_eqn(t, l, cxm_locn[i])) return 0; i = i + 1; }
+    if (cxm_nloc >= CXM_LOCS) { cxm_start(u, 1); cxm_m("too many local declarations for the call check"); return cxm_fail(); }
+    cxm_cpyn(cxm_locn[cxm_nloc], t, l, CXM_SYMW);
+    cxm_locu[cxm_nloc] = u; cxm_nloc = cxm_nloc + 1;
+    return 0;
+}
+/* 1 when unit u defines the name or directly uses the module that exports it */
+int cxm_sees(int u, char *nm) {
+    int i; int k; int v;
+    i = 0;
+    while (i < cxm_nloc) { if (cxm_locu[i] == u && cxm_eq(cxm_locn[i], nm)) return 1; i = i + 1; }
+    k = 0;
+    while (k < cxm_nuse[u]) {
+        v = cxm_use[u][k];
+        i = 0;
+        while (i < cxm_nsym) {
+            if (cxm_symk[i] == 0 && cxm_symu[i] == v && cxm_eq(cxm_sym[i], nm)) return 1;
+            i = i + 1;
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+/* kind 0 (module export) or kind 2 (a non-module unit's function). At most one: collisions already refused two. */
+int cxm_owner(char *nm, int *ou) {
+    int i;
+    i = 0;
+    while (i < cxm_nsym) {
+        if ((cxm_symk[i] == 0 || cxm_symk[i] == 2) && cxm_eq(cxm_sym[i], nm)) { *ou = cxm_symu[i]; return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+int cxm_base(char *p, char *out) {
+    int n; int b;
+    n = cxm_len(p); b = n;
+    while (b > 0 && p[b - 1] != '/') b = b - 1;
+    return cxm_cpy(out, p + b, CXM_NAMEW);
+}
+int cxm_callerr(int u, int line, char *nm, int owner) {
+    char base[CXM_NAMEW]; char who[CXM_NAMEW];
+    cxm_start(u, line);
+    cxm_m("call to undeclared function "); cxm_m(nm); cxm_m(" (declared in ");
+    if (cxm_lib[owner] && cxm_name[owner][0]) cxm_m(cxm_name[owner]);
+    else { cxm_base(cxm_arg[owner], who); cxm_m(who); }
+    cxm_m(", which "); cxm_base(cxm_arg[u], base); cxm_m(base); cxm_m(" does not use)");
+    return cxm_fail();
+}
+int cxm_isskip(char *t, int l) {
+    if (cxm_eqn(t, l, "__attribute__") || cxm_eqn(t, l, "__attribute")) return 1;
+    if (cxm_eqn(t, l, "__asm__") || cxm_eqn(t, l, "__asm") || cxm_eqn(t, l, "asm")) return 1;
+    if (cxm_eqn(t, l, "__declspec") || cxm_eqn(t, l, "_Alignas")) return 1;
+    return 0;
+}
+/* one file-scope item. A declaration's function declarator is local. Anything else followed by '(' is a call.
+   A call whose name some other unit defines, and this unit cannot see, is refused. */
+int cxm_scanreg(int u, char *s, int b, int e, int line) {
+    int i; int from; int paren; int indecl; int seeneq;
+    i = b; from = b; paren = 0; indecl = 0; seeneq = 0;
+    while (i < e) {
+        int tb; int tl; int after; int look; int line_here;
+        i = cxm_tok(s, i, e);
+        if (cxm_tokl == 0) break;
+        while (from < cxm_tokb) { if (s[from] == '\n') line = line + 1; from = from + 1; }
+        tb = cxm_tokb; tl = cxm_tokl; after = i; line_here = line; from = after;
+        if (tl == 1 && !cxm_idch(s[tb] & 255)) {
+            if (s[tb] == '(') paren = paren + 1;
+            else if (s[tb] == ')') { if (paren > 0) paren = paren - 1; }
+            else if (s[tb] == '{' || s[tb] == '}') { indecl = 0; seeneq = 0; }
+            else if (s[tb] == ';' && paren == 0) { indecl = 0; seeneq = 0; }
+            else if (s[tb] == '=' && paren == 0) { seeneq = 1; indecl = 0; }
+            continue;
+        }
+        if (!cxm_idch(s[tb] & 255) || (s[tb] >= '0' && s[tb] <= '9')) continue;
+        if (paren == 0 && !indecl && !seeneq && cxm_declword(s + tb, tl)) { indecl = 1; continue; }
+        look = cxm_tok(s, after, e);
+        if (cxm_tokl == 0) break;
+        if (cxm_tokl == 1 && s[cxm_tokb] == '(' && cxm_isskip(s + tb, tl)) {
+            i = cxm_skipgrp(s, look, e); from = after; continue;
+        }
+        if (cxm_tokl == 1 && s[cxm_tokb] == '(') {
+            if (indecl && paren == 0 && !seeneq) { if (cxm_addloc(u, s + tb, tl)) return 1; }
+            else if (!cxm_ismac(s + tb, tl)) {
+                char nm[CXM_SYMW]; int owner;
+                cxm_cpyn(nm, s + tb, tl, CXM_SYMW);
+                if (!cxm_sees(u, nm) && cxm_owner(nm, &owner) && owner != u) {
+                    cxm_callerr(u, line_here, nm, owner); cxm_badcalls = 1;
+                }
+            }
+            i = cxm_tokb; from = after; continue;
+        }
+        i = cxm_tokb; from = after;
+    }
+    return 0;
+}
+/* reload each .cx unit and refuse a call that would be compiled as an implicit declaration */
+int cxm_checkcalls(void) {
+    int u;
+    cxm_nloc = 0; cxm_badcalls = 0;
+    u = 0;
+    while (u < cxm_n) {
+        int r; int k;
+        if (!cxm_iscx[u]) { u = u + 1; continue; }
+        r = cxm_load(cxm_arg[u], u);
+        if (r > 0) return 1;
+        if (r < 0) { u = u + 1; continue; }
+        if (cxm_scan(u, 1)) return 1;
+        k = 0;
+        while (k < cxm_nitem) {
+            if (cxm_scanreg(u, cxm_src, cxm_ib[k], cxm_ie[k], cxm_iline[k])) return 1;
+            k = k + 1;
+        }
+        u = u + 1;
+    }
+    return cxm_badcalls;
+}
 /* the program's units: paths[0..n) as given (the command line), then every module their `use` closure reaches.
    0 with cxm_n units (cxm_arg[u] is the path to compile, the given string for a command-line unit), 1 refused. */
 int cxm_plan(char **paths, int n) {
@@ -849,6 +993,7 @@ int cxm_plan(char **paths, int n) {
         u = u + 1;
     }
     if (cxm_collisions()) { cxm_on = 0; return 1; }
+    if (cxm_checkcalls()) { cxm_on = 0; return 1; }
     u = 0;
     while (u < cxm_n) {
         if (cxm_lib[u]) {
