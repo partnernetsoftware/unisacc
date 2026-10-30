@@ -1,3 +1,8 @@
+#pragma unisa use text.fmt
+#pragma unisa use text.num
+#pragma unisa use sys.io
+#pragma unisa use mem.bytes
+#pragma unisa use sys.env
 #pragma unisa use agentwit
 #pragma unisa use srccopy
 #pragma unisa use mem.heap
@@ -53,15 +58,15 @@ typedef struct {
 static void snap_add(Snap *s, const char *path, unsigned char *data, size_t len) {
     if (s->n == s->cap) {
         s->cap = s->cap ? s->cap * 2 : 64;
-        s->path = realloc(s->path, s->cap * sizeof *s->path);
-        s->data = realloc(s->data, s->cap * sizeof *s->data);
-        s->len = realloc(s->len, s->cap * sizeof *s->len);
+        s->path = mm_grow(s->path, s->cap * sizeof *s->path);
+        s->data = mm_grow(s->data, s->cap * sizeof *s->data);
+        s->len = mm_grow(s->len, s->cap * sizeof *s->len);
         if (!s->path || !s->data || !s->len) exit(1);
     }
     /* not strdup: unisacc's strdup result cannot be free()d (crashes) */
     {
         size_t pl = strlen(path);
-        char *cp = malloc(pl + 1);
+        char *cp = mm_alloc(pl + 1);
         if (!cp) exit(1);
         memcpy(cp, path, pl + 1);
         s->path[s->n] = cp;
@@ -73,8 +78,8 @@ static void snap_add(Snap *s, const char *path, unsigned char *data, size_t len)
 
 static void snap_free(Snap *s) {
     size_t i;
-    for (i = 0; i < s->n; i++) { free(s->path[i]); free(s->data[i]); }
-    free(s->path); free(s->data); free(s->len);
+    for (i = 0; i < s->n; i++) { mm_free(s->path[i]); mm_free(s->data[i]); }
+    mm_free(s->path); mm_free(s->data); mm_free(s->len);
     memset(s, 0, sizeof *s);
 }
 
@@ -103,7 +108,7 @@ static void walk(const char *dir, Snap *s) {
         char full[4200];
         struct stat st;
         if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
-        snprintf(full, sizeof full, "%s/%s", dir, e->d_name);
+        tx_snprintf(full, sizeof full, "%s/%s", dir, e->d_name);
         if (lstat(full, &st) != 0) { s->bad = 1; continue; }
         if (S_ISLNK(st.st_mode)) { if (is_src(e->d_name)) s->bad = 1; continue; }
         if (S_ISDIR(st.st_mode)) { walk(full, s); continue; }
@@ -124,7 +129,7 @@ static int snapshot(Snap *s) {
     char rootpath[4200];
     memset(s, 0, sizeof *s);
     walk(APP, s);
-    snprintf(rootpath, sizeof rootpath, "%s/../../unisacc.com", APP);
+    tx_snprintf(rootpath, sizeof rootpath, "%s/../../unisacc.com", APP);
     root = read_file(rootpath, &len);
     if (!root) s->bad = 1; else snap_add(s, rootpath, root, len);
     for (i = 1; i < s->n; i++)
@@ -142,7 +147,7 @@ static int snap_equal(const Snap *a, const Snap *b) {
     for (i = 0; i < a->n; i++) {
         if (strcmp(a->path[i], b->path[i]) != 0) return 0;
         if (a->len[i] != b->len[i]) return 0;
-        if (memcmp(a->data[i], b->data[i], a->len[i]) != 0) return 0;
+        if (mm_cmp(a->data[i], b->data[i], a->len[i]) != 0) return 0;
     }
     return 1;
 }
@@ -151,7 +156,7 @@ static int snap_equal(const Snap *a, const Snap *b) {
 static void mkdir_p(const char *path) {
     char tmp[4200];
     char *p;
-    snprintf(tmp, sizeof tmp, "%s", path);
+    tx_snprintf(tmp, sizeof tmp, "%s", path);
     for (p = tmp + 1; *p; p++) {
         if (*p == '/') { *p = 0; mkdir(tmp, 0755); *p = '/'; }
     }
@@ -160,7 +165,7 @@ static void mkdir_p(const char *path) {
 
 /* P (a tree) through the one guard (cx_rmtree), never a raw unlink/rmdir; a refusal is reported, the probe's verdict stands */
 static void sd_gone(const char *p) {
-    if (cx_rmtree(p) != 0) fprintf(stderr, "probe: cx_rmtree refused %s\n", p);
+    if (cx_rmtree(p) != 0) sy_eprintf("probe: cx_rmtree refused %s\n", p);
 }
 
 /* Whole seconds. unisacc's gettimeofday tv_usec is not usable, so sub-second
@@ -180,7 +185,7 @@ static int run_timed_for(double limit, const char *dir, const char *envs, const 
     pid_t pid;
     double start;
     if (nargs + 6 > 96) return -1;
-    snprintf(script, sizeof script, "cd '%s' && %s exec \"$0\" \"$@\"", dir, envs);
+    tx_snprintf(script, sizeof script, "cd '%s' && %s exec \"$0\" \"$@\"", dir, envs);
     argv[n++] = (char *)"sh";
     argv[n++] = (char *)"-c";
     argv[n++] = script;
@@ -223,7 +228,7 @@ static int run_timed(const char *dir, const char *envs, const char *bin,
 
 /* env for every private run; `extra` is appended (e.g. CSIH_ENDPOINT). */
 static void build_env(char *envs, size_t cap, const char *extra) {
-    snprintf(envs, cap,
+    tx_snprintf(envs, cap,
              "export HOME='%s'; export DEEPSEEK_API_KEY=LOCAL_STUB_ONLY; "
              "export CSIH_ROLE=; export CSIH_PEER=; export CSIH_CWD='%s'; "
              "export CSIH_TRANSCRIPT='%s/journal.jsonl'; export CSIH_MODEL=local-stub; "
@@ -239,13 +244,13 @@ static void build_env(char *envs, size_t cap, const char *extra) {
  * root, ignored by git), removed at the end. */
 static int make_home(void) {
     char repo[4096], tmpl[4300];
-    snprintf(tmpl, sizeof tmpl, "%s/../..", APP);
+    tx_snprintf(tmpl, sizeof tmpl, "%s/../..", APP);
     if (!realpath(tmpl, repo)) return -1;
-    snprintf(tmpl, sizeof tmpl, "%s/out", repo);
+    tx_snprintf(tmpl, sizeof tmpl, "%s/out", repo);
     mkdir(tmpl, 0755);
-    snprintf(tmpl, sizeof tmpl, "%s/out/csih-net-timeout-home-XXXXXX", repo);
+    tx_snprintf(tmpl, sizeof tmpl, "%s/out/csih-net-timeout-home-XXXXXX", repo);
     if (!mkdtemp(tmpl)) return -1;
-    snprintf(HOMEDIR, sizeof HOMEDIR, "%s", tmpl);
+    tx_snprintf(HOMEDIR, sizeof HOMEDIR, "%s", tmpl);
     return 0;
 }
 
@@ -260,10 +265,10 @@ static int build_agent(const char *envs, const char **why) {
     char compiler[4200], bin[4200], out_f[4200], err_f[4200];
     int rc = 0, st;
     unsigned char *so, *se;
-    snprintf(compiler, sizeof compiler, "%s/unisacc.com", PRIV);
-    if (snprintf(bin, sizeof bin, "%s/agent_cli.bin", BUILD) >= (int)sizeof bin) { *why = "agent binary path too long"; return -1; }
-    snprintf(out_f, sizeof out_f, "%s/agent_build.out", PRIV);
-    snprintf(err_f, sizeof err_f, "%s/agent_build.err", PRIV);
+    tx_snprintf(compiler, sizeof compiler, "%s/unisacc.com", PRIV);
+    if (tx_snprintf(bin, sizeof bin, "%s/agent_cli.bin", BUILD) >= (int)sizeof bin) { *why = "agent binary path too long"; return -1; }
+    tx_snprintf(out_f, sizeof out_f, "%s/agent_build.out", PRIV);
+    tx_snprintf(err_f, sizeof err_f, "%s/agent_build.err", PRIV);
     args[0] = compiler;
     args[1] = (char *)"agent_cli.cx";
     args[2] = (char *)"-o";
@@ -272,7 +277,7 @@ static int build_agent(const char *envs, const char **why) {
     if (st != 0) { *why = "agent build timed out or spawn failed"; return -1; }
     se = read_file(err_f, NULL);
     st = rc == 0 && se && se[0] == 0;
-    if (!st) fprintf(stderr, "agent compile rc=%d stderr=%.400s\n", rc, se ? (const char *)se : "");
+    if (!st) sy_eprintf("agent compile rc=%d stderr=%.400s\n", rc, se ? (const char *)se : "");
     mm_free(se);
     if (!st) { *why = "agent compile failed (need rc 0, empty stderr)"; return -1; }
     args[0] = (char *)"build-check";
@@ -282,11 +287,11 @@ static int build_agent(const char *envs, const char **why) {
     se = read_file(err_f, NULL);
     st = rc == 64 && so && !strncmp((const char *)so, "usage: agent_cli", 16) && se && se[0] == 0;
     if (!st) {
-        fprintf(stderr, "agent build rc=%d stdout=%.200s stderr=%.400s\n", rc,
+        sy_eprintf("agent build rc=%d stdout=%.200s stderr=%.400s\n", rc,
                 so ? (const char *)so : "", se ? (const char *)se : "");
         *why = "agent build gate failed (need rc 64 usage line, empty stderr)";
     }
-    free(so); free(se);
+    mm_free(so); mm_free(se);
     return st ? 0 : -1;
 }
 
@@ -296,7 +301,7 @@ static void last_line(const char *buf, char *dst, size_t cap) {
     while (end > buf && (end[-1] == '\n' || end[-1] == '\r')) end--;
     q = end;
     while (q > buf && q[-1] != '\n') q--;
-    snprintf(dst, cap, "%.*s", (int)(end - q), q);
+    tx_snprintf(dst, cap, "%.*s", (int)(end - q), q);
 }
 
 /* The installed product binary, copied to OUT_BIN once its stamp matches the
@@ -304,33 +309,33 @@ static void last_line(const char *buf, char *dst, size_t cap) {
 static int install_tui(const char *out_bin, const char **why) {
     static char msg[700];
     char bin[4200], stamp_p[4300], script_p[4300], dig[200], want[200];
-    const char *b = getenv("CSIH_BIN");
+    const char *b = sy_env("CSIH_BIN");
     char *av[4], *o = NULL;
     size_t ol = 0, bl = 0;
     unsigned char *stamp, *bytes;
     int rc;
-    if (b && b[0]) snprintf(bin, sizeof bin, "%s", b);
-    else snprintf(bin, sizeof bin, "%s/../../out/csih-e2e-bin/csih", APP);
-    snprintf(stamp_p, sizeof stamp_p, "%s.src", bin);
-    snprintf(script_p, sizeof script_p, "%s/csih.sh", APP);
+    if (b && b[0]) tx_snprintf(bin, sizeof bin, "%s", b);
+    else tx_snprintf(bin, sizeof bin, "%s/../../out/csih-e2e-bin/csih", APP);
+    tx_snprintf(stamp_p, sizeof stamp_p, "%s.src", bin);
+    tx_snprintf(script_p, sizeof script_p, "%s/csih.sh", APP);
     av[0] = (char *)"sh"; av[1] = script_p; av[2] = (char *)"digest"; av[3] = NULL;
     rc = cx_runv_timeout(av, 20, &o, &ol);
-    if (rc != 0 || !o) { free(o); *why = "csih.sh digest failed"; return -1; }
+    if (rc != 0 || !o) { mm_free(o); *why = "csih.sh digest failed"; return -1; }
     last_line(o, dig, sizeof dig);
-    free(o);
+    mm_free(o);
     stamp = read_file(stamp_p, NULL);
-    if (!stamp) { snprintf(msg, sizeof msg, "no stamp %s (run csih.sh prepare)", stamp_p); *why = msg; return -1; }
+    if (!stamp) { tx_snprintf(msg, sizeof msg, "no stamp %s (run csih.sh prepare)", stamp_p); *why = msg; return -1; }
     last_line((const char *)stamp, want, sizeof want);
-    free(stamp);
+    mm_free(stamp);
     if (strncmp(dig, "digest ", 7) != 0 || strcmp(dig + 7, want) != 0) {
-        snprintf(msg, sizeof msg, "%s is stale: stamp %s, sources %s (run csih.sh prepare)", bin, want, dig);
+        tx_snprintf(msg, sizeof msg, "%s is stale: stamp %s, sources %s (run csih.sh prepare)", bin, want, dig);
         *why = msg;
         return -1;
     }
     bytes = read_file(bin, &bl);
     if (!bytes) { *why = "cannot read CSIH_BIN"; return -1; }
-    if (write_file(out_bin, bytes, bl) != 0 || chmod(out_bin, 0755) != 0) { free(bytes); *why = "tui copy failed"; return -1; }
-    free(bytes);
+    if (write_file(out_bin, bytes, bl) != 0 || chmod(out_bin, 0755) != 0) { mm_free(bytes); *why = "tui copy failed"; return -1; }
+    mm_free(bytes);
     return 0;
 }
 
@@ -339,7 +344,7 @@ static unsigned char *replace_net(const unsigned char *buf, size_t len, size_t *
     const char *hit = strstr((const char *)buf, NET_NEEDLE);
     size_t pre = (size_t)(hit - (const char *)buf);
     size_t nl = strlen(NET_REPL), ol = strlen(NET_NEEDLE);
-    unsigned char *o = malloc(len - ol + nl + 1);
+    unsigned char *o = mm_alloc(len - ol + nl + 1);
     if (!o) exit(1);
     memcpy(o, buf, pre);
     memcpy(o + pre, NET_REPL, nl);
@@ -383,7 +388,7 @@ static void serve_child(int lfd) {
                 hdr = (size_t)(e - req) + 4;
                 cl = strstr(req, "Content-Length:");
                 if (!cl) cl = strstr(req, "content-length:");
-                if (cl) want = (size_t)strtoul(cl + 15, NULL, 10);
+                if (cl) want = (size_t)tx_strtoul(cl + 15, NULL, 10);
             }
             if (got && have >= hdr + want) break;
         }
@@ -391,13 +396,13 @@ static void serve_child(int lfd) {
             /* this child is the only writer: the log is rewritten whole, one line per request */
             char lp[4200];
             int j;
-            snprintf(lp, sizeof lp, "%s/requests.log", PRIV);
+            tx_snprintf(lp, sizeof lp, "%s/requests.log", PRIV);
             for (j = 0; j < 8; j++) logbuf[nlog * 8 + j] = "request\n"[j];
             if (nlog + 1 < (int)(sizeof logbuf / 8)) nlog++;
             cx_write(lp, logbuf, (size_t)nlog * 8);
         }
         sleep(3);
-        rl = snprintf(resp, sizeof resp,
+        rl = tx_snprintf(resp, sizeof resp,
                       "HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n", bl);
         aw_send(c, resp, rl);   /* a gone client is fine: MSG_NOSIGNAL */
         aw_send(c, body, bl);
@@ -424,22 +429,22 @@ static const char *probe(void) {
     memset(&before, 0, sizeof before);
     if (snapshot(&before) != 0) { snap_free(&before); return "snapshot before failed"; }
 
-    snprintf(netc, sizeof netc, "%s/net.cx", APP);
+    tx_snprintf(netc, sizeof netc, "%s/net.cx", APP);
     netdata = read_file(netc, &len);
     if (!netdata) { err = "cannot read app net.cx"; goto out; }
     if (count_sub((const char *)netdata, NET_NEEDLE) != 1) { err = "app net.cx: NET_TOTAL_SEC = 60 count != 1"; goto out; }
 
-    tbase = getenv("CSIH_PROBE_TMP");
-    if (!tbase || !tbase[0]) tbase = getenv("TMPDIR");
+    tbase = sy_env("CSIH_PROBE_TMP");
+    if (!tbase || !tbase[0]) tbase = sy_env("TMPDIR");
     if (!tbase || !tbase[0]) tbase = "/tmp";
-    snprintf(tbase_buf, sizeof tbase_buf, "%s", tbase);
-    snprintf(tmpl, sizeof tmpl, "%s/csih-net-timeout-XXXXXX", tbase_buf);
+    tx_snprintf(tbase_buf, sizeof tbase_buf, "%s", tbase);
+    tx_snprintf(tmpl, sizeof tmpl, "%s/csih-net-timeout-XXXXXX", tbase_buf);
     if (!mkdtemp(tmpl)) { err = "mkdtemp failed"; goto out; }
-    snprintf(PRIV, sizeof PRIV, "%s", tmpl);
-    snprintf(app_copy, sizeof app_copy, "%s/app", PRIV);
-    snprintf(tui_bin, sizeof tui_bin, "%s/tui", PRIV);
-    snprintf(log_p, sizeof log_p, "%s/requests.log", PRIV);
-    snprintf(BUILD, sizeof BUILD, "%s/csih-probe-build-%d/net_timeout/app", tbase_buf, (int)getuid());
+    tx_snprintf(PRIV, sizeof PRIV, "%s", tmpl);
+    tx_snprintf(app_copy, sizeof app_copy, "%s/app", PRIV);
+    tx_snprintf(tui_bin, sizeof tui_bin, "%s/tui", PRIV);
+    tx_snprintf(log_p, sizeof log_p, "%s/requests.log", PRIV);
+    tx_snprintf(BUILD, sizeof BUILD, "%s/csih-probe-build-%d/net_timeout/app", tbase_buf, (int)getuid());
     {
         struct stat bs;
         if (lstat(BUILD, &bs) == 0 && cx_rmtree(BUILD) != 0) { err = "cannot clear the private agent tree"; goto out; }
@@ -459,8 +464,8 @@ static const char *probe(void) {
         roots[1] = BUILD;
         if (strncmp(p, APP, al) != 0 || p[al] != '/' || !is_src(p)) continue;
         for (r = 0; r < 2; r++) {
-            snprintf(dst, sizeof dst, "%s/%s", roots[r], p + al + 1);
-            snprintf(dir, sizeof dir, "%s", dst);
+            tx_snprintf(dst, sizeof dst, "%s/%s", roots[r], p + al + 1);
+            tx_snprintf(dir, sizeof dir, "%s", dst);
             *strrchr(dir, '/') = 0;
             mkdir_p(dir);
             if (write_file(dst, before.data[i], before.len[i]) != 0) { err = "copy failed"; goto out; }
@@ -473,14 +478,14 @@ static const char *probe(void) {
         size_t pl = strlen(p);
         if (pl > 12 && strcmp(p + pl - 12, "/unisacc.com") == 0) {
             char cp[4300];
-            snprintf(cp, sizeof cp, "%s/unisacc.com", PRIV);
+            tx_snprintf(cp, sizeof cp, "%s/unisacc.com", PRIV);
             if (write_file(cp, before.data[i], before.len[i]) != 0) { err = "compiler copy failed"; goto out; }
         }
     }
     {
         char hd[4300];
         if (make_home() != 0) { err = "private home under <repo>/out failed"; goto out; }
-        snprintf(hd, sizeof hd, "%s/env.jsonl", HOMEDIR);
+        tx_snprintf(hd, sizeof hd, "%s/env.jsonl", HOMEDIR);
         if (write_file(hd, (const unsigned char *)"{\"DEEPSEEK_API_KEY\":\"LOCAL_STUB_ONLY\"}\n", 39) != 0) { err = "env write failed"; goto out; }
     }
 
@@ -490,8 +495,8 @@ static const char *probe(void) {
     if (install_tui(tui_bin, &err) != 0) goto out;
 
     /* selftest: unchanged private snapshot, 60s threshold */
-    snprintf(out_f, sizeof out_f, "%s/tui_self.out", PRIV);
-    snprintf(err_f, sizeof err_f, "%s/tui_self.err", PRIV);
+    tx_snprintf(out_f, sizeof out_f, "%s/tui_self.out", PRIV);
+    tx_snprintf(err_f, sizeof err_f, "%s/tui_self.err", PRIV);
     args[0] = (char *)"selftest";
     st = run_timed(app_copy, envs, tui_bin, args, 1, out_f, err_f, &rc);
     if (st != 0) { err = "tui selftest timed out or spawn failed"; goto out; }
@@ -506,10 +511,10 @@ static const char *probe(void) {
         {
             const char *q = end;
             while (q > s && q[-1] != '\n') q--;
-            ok = rc == 0 && end - q == 11 && memcmp(q, "selftest ok", 11) == 0 &&
+            ok = rc == 0 && end - q == 11 && mm_cmp(q, "selftest ok", 11) == 0 &&
                  strstr(s, "FAIL") == NULL && e2[0] == 0 && end > s;
         }
-        free(so); free(se);
+        mm_free(so); mm_free(se);
         if (!ok) { err = "tui selftest gate failed (need rc 0, last line 'selftest ok', no FAIL, empty stderr)"; goto out; }
     }
 
@@ -518,13 +523,13 @@ static const char *probe(void) {
         char netp[4300];
         size_t nl = 0;
         unsigned char *nb;
-        snprintf(netp, sizeof netp, "%s/net.cx", BUILD);
+        tx_snprintf(netp, sizeof netp, "%s/net.cx", BUILD);
         nb = read_file(netp, &nl);
-        if (!nb || count_sub((const char *)nb, NET_NEEDLE) != 1) { free(nb); err = "private net.cx count != 1"; goto out; }
+        if (!nb || count_sub((const char *)nb, NET_NEEDLE) != 1) { mm_free(nb); err = "private net.cx count != 1"; goto out; }
         o = replace_net(nb, nl, &ol);
-        free(nb);
-        if (write_file(netp, o, ol) != 0) { free(o); err = "private net.cx write failed"; goto out; }
-        free(o);
+        mm_free(nb);
+        if (write_file(netp, o, ol) != 0) { mm_free(o); err = "private net.cx write failed"; goto out; }
+        mm_free(o);
     }
 
     /* private agent build (the -run compile), clean rc/stderr */
@@ -542,14 +547,14 @@ static const char *probe(void) {
     lfd = -1;
 
     /* agent run against the stub */
-    snprintf(out_f, sizeof out_f, "%s/agent.out", PRIV);
-    snprintf(err_f, sizeof err_f, "%s/agent.err", PRIV);
+    tx_snprintf(out_f, sizeof out_f, "%s/agent.out", PRIV);
+    tx_snprintf(err_f, sizeof err_f, "%s/agent.err", PRIV);
     {
         char extra[256];
-        snprintf(extra, sizeof extra, "export CSIH_ENDPOINT=http://127.0.0.1:%d/v1/chat/completions;", PORT);
+        tx_snprintf(extra, sizeof extra, "export CSIH_ENDPOINT=http://127.0.0.1:%d/v1/chat/completions;", PORT);
         build_env(agent_envs, sizeof agent_envs, extra);
     }
-    snprintf(agent_bin, sizeof agent_bin, "%s/agent_cli.bin", BUILD);
+    tx_snprintf(agent_bin, sizeof agent_bin, "%s/agent_cli.bin", BUILD);
     args[0] = (char *)"agent";
     args[1] = (char *)"TIMEOUT_PROBE";
     t0 = now_sec();
@@ -560,19 +565,19 @@ static const char *probe(void) {
         unsigned char *lg = read_file(log_p, NULL);
         int requests = lg ? count_sub((const char *)lg, "request\n") : 0;
         unsigned char *ao = read_file(out_f, NULL);
-        free(lg);
+        mm_free(lg);
         if (rc != 1 || requests != 1) {
-            snprintf(msg, sizeof msg, "agent rc=%d requests=%d (want rc 1, 1 request)", rc, requests);
-            free(ao);
+            tx_snprintf(msg, sizeof msg, "agent rc=%d requests=%d (want rc 1, 1 request)", rc, requests);
+            mm_free(ao);
             err = msg;
             goto out;
         }
         if (!ao || !strstr((const char *)ao, AGENT_MSG)) {
-            free(ao);
+            mm_free(ao);
             err = "agent stdout missing timeout message (err=-6)";
             goto out;
         }
-        free(ao);
+        mm_free(ao);
     }
     if (t1 - t0 >= 5.0) { err = "agent run took 5s or more"; goto out; }
 
@@ -581,7 +586,7 @@ out:
     if (lfd >= 0) close(lfd);
     if (PRIV[0]) sd_gone(PRIV);
     if (HOMEDIR[0]) sd_gone(HOMEDIR);
-    free(netdata);
+    mm_free(netdata);
     {
         Snap after;
         memset(&after, 0, sizeof after);
@@ -597,13 +602,13 @@ out:
 }
 
 int main(void) {
-    const char *cwd_env = getenv("CSIH_APP");
+    const char *cwd_env = sy_env("CSIH_APP");
     const char *reason;
-    if (cwd_env && cwd_env[0]) snprintf(APP, sizeof APP, "%s", cwd_env);
-    else if (!getcwd(APP, sizeof APP)) { printf("FAIL getcwd\n"); return 1; }
-    if (APP[0] != '/') { printf("FAIL app dir must be absolute\n"); return 1; }
+    if (cwd_env && cwd_env[0]) tx_snprintf(APP, sizeof APP, "%s", cwd_env);
+    else if (!getcwd(APP, sizeof APP)) { sy_printf("FAIL getcwd\n"); return 1; }
+    if (APP[0] != '/') { sy_printf("FAIL app dir must be absolute\n"); return 1; }
     reason = probe();
-    if (reason) { printf("FAIL %s\n", reason); return 1; }
-    printf("%s\n", PASS_LINE);
+    if (reason) { sy_printf("FAIL %s\n", reason); return 1; }
+    sy_printf("%s\n", PASS_LINE);
     return 0;
 }

@@ -1,3 +1,9 @@
+#pragma unisa use text.fmt
+#pragma unisa use text.num
+#pragma unisa use sys.io
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use sys.env
 #pragma unisa use agentwit
 #pragma unisa use srccopy
 /* CX probe */
@@ -47,12 +53,12 @@ static char MA_SELF[4200];    /* this probe source */
 /* ---------- heap / files ---------- */
 
 static void die(const char *msg) {
-    printf("FAIL %s\n", msg);
+    sy_printf("FAIL %s\n", msg);
     exit(1);
 }
 
 static void *xmalloc(size_t n) {
-    void *p = malloc(n ? n : 1);
+    void *p = mm_alloc(n ? n : 1);
     if (!p) die("oom");
     return p;
 }
@@ -91,9 +97,9 @@ static void snap_add(snap_t *s, const char *path) {
     if (!d) die("snapshot read");
     if (s->n == s->cap) {
         s->cap = s->cap ? s->cap * 2 : 64;
-        s->path = realloc(s->path, s->cap * sizeof *s->path);
-        s->data = realloc(s->data, s->cap * sizeof *s->data);
-        s->len = realloc(s->len, s->cap * sizeof *s->len);
+        s->path = mm_grow(s->path, s->cap * sizeof *s->path);
+        s->data = mm_grow(s->data, s->cap * sizeof *s->data);
+        s->len = mm_grow(s->len, s->cap * sizeof *s->len);
         if (!s->path || !s->data || !s->len) die("oom");
     }
     /* not strdup: unisacc strdup yields blocks that corrupt the heap on free() */
@@ -113,7 +119,7 @@ static void walk(snap_t *s, const char *dir, int srconly) {
         char child[4096];
         struct stat st;
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-        snprintf(child, sizeof child, "%s/%s", dir, e->d_name);
+        tx_snprintf(child, sizeof child, "%s/%s", dir, e->d_name);
         if (lstat(child, &st) != 0) continue;
         if (S_ISDIR(st.st_mode)) walk(s, child, srconly);
         else if (S_ISREG(st.st_mode) && (!srconly || is_src(e->d_name))) snap_add(s, child);
@@ -123,8 +129,8 @@ static void walk(snap_t *s, const char *dir, int srconly) {
 
 static void snap_free(snap_t *s) {
     size_t i;
-    for (i = 0; i < s->n; i++) { free(s->path[i]); free(s->data[i]); }
-    free(s->path); free(s->data); free(s->len);
+    for (i = 0; i < s->n; i++) { mm_free(s->path[i]); mm_free(s->data[i]); }
+    mm_free(s->path); mm_free(s->data); mm_free(s->len);
     memset(s, 0, sizeof *s);
 }
 
@@ -136,7 +142,7 @@ static int snap_same(const snap_t *a, const snap_t *b) {
         for (j = 0; j < b->n; j++) {
             if (strcmp(a->path[i], b->path[j])) continue;
             found = 1;
-            if (a->len[i] != b->len[j] || memcmp(a->data[i], b->data[j], a->len[i])) return 0;
+            if (a->len[i] != b->len[j] || mm_cmp(a->data[i], b->data[j], a->len[i])) return 0;
             break;
         }
         if (!found) return 0;
@@ -161,8 +167,8 @@ static void copy_tree(const char *src, const char *dst) {
         char cs[4096], cd[4096];
         struct stat st;
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-        snprintf(cs, sizeof cs, "%s/%s", src, e->d_name);
-        snprintf(cd, sizeof cd, "%s/%s", dst, e->d_name);
+        tx_snprintf(cs, sizeof cs, "%s/%s", src, e->d_name);
+        tx_snprintf(cd, sizeof cd, "%s/%s", dst, e->d_name);
         if (lstat(cs, &st) != 0) continue;
         if (S_ISDIR(st.st_mode)) {
             mkdir(cd, 0700);
@@ -174,7 +180,7 @@ static void copy_tree(const char *src, const char *dst) {
             unsigned char *b = read_file(cs, &len);
             if (!b) die("copy read");
             if (write_file(cd, b, len, 0644) != 0) die("copy write");
-            free(b);
+            mm_free(b);
         }
     }
     closedir(d);
@@ -251,7 +257,7 @@ static void spawn(const char *script, const char *bin, char **args, int nargs, i
 }
 
 static const char *tmpbase(void) {
-    const char *t = getenv("TMPDIR");
+    const char *t = sy_env("TMPDIR");
     return (t && t[0]) ? t : "/tmp";
 }
 
@@ -264,7 +270,7 @@ static int read_int(const char *path) {
     char b[32];
     int v = 0;
     if (!f) return 0;
-    if (fgets(b, sizeof b, f)) v = atoi(b);
+    if (fgets(b, sizeof b, f)) v = (int)tx_atol(b);
     fclose(f);
     return v;
 }
@@ -295,7 +301,7 @@ static long content_length(const char *h, const char *end) {
     while (p < end) {
         const char *eol = strstr(p, "\r\n");
         if (!eol || eol > end) eol = end;
-        if (eol - p > 15 && ci_eq(p, "content-length:", 15)) return atol(p + 15);
+        if (eol - p > 15 && ci_eq(p, "content-length:", 15)) return tx_atol(p + 15);
         if (eol >= end) break;
         p = eol + 2;
     }
@@ -315,7 +321,7 @@ static char *json_wrap(const char *content) {
         else if (c == '\n') { b[o++] = '\\'; b[o++] = 'n'; }
         else if (c == '\r') { b[o++] = '\\'; b[o++] = 'r'; }
         else if (c == '\t') { b[o++] = '\\'; b[o++] = 't'; }
-        else if (c < 0x20) { o += (size_t)snprintf(b + o, 7, "\\u%04x", c);   /* 6 bytes and the NUL, as sprintf wrote */ }
+        else if (c < 0x20) { o += (size_t)tx_snprintf(b + o, 7, "\\u%04x", c);   /* 6 bytes and the NUL, as sprintf wrote */ }
         else b[o++] = (char)c;
     }
     memcpy(b + o, tail, strlen(tail));
@@ -362,11 +368,11 @@ static void stub_one(int c, const stub_t *st, int *count) {
         if (f) { fprintf(f, "%d\n", *count); fclose(f); }
         body = json_wrap(content);
         bl = strlen(body);
-        hl = (size_t)snprintf(hdr, sizeof hdr,
+        hl = (size_t)tx_snprintf(hdr, sizeof hdr,
               "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n", bl);
         send_all(c, hdr, hl);
         send_all(c, body, bl);
-        free(body);
+        mm_free(body);
     }
 }
 
@@ -417,7 +423,7 @@ static int jget(const char *line, const char *key, char *dst, size_t cap) {
     char pat[96];
     const char *p = line, *q = NULL;
     size_t o = 0;
-    snprintf(pat, sizeof pat, "\"%s\"", key);
+    tx_snprintf(pat, sizeof pat, "\"%s\"", key);
     while ((p = strstr(p, pat)) != NULL) {
         q = p + strlen(pat);
         while (*q == ' ' || *q == '\t') q++;
@@ -479,8 +485,8 @@ static int trace_count(const char *buf, const char *k1, const char *v1, const ch
         if (ok && k2) { if (!jget(lb, k2, tmp, len + 1) || strcmp(tmp, v2)) ok = 0; }
         if (ok && ksub) { if (!jget(lb, ksub, tmp, len + 1) || !strstr(tmp, sub)) ok = 0; }
         if (ok) count++;
-        free(lb);
-        free(tmp);
+        mm_free(lb);
+        mm_free(tmp);
         p = e ? e + 1 : NULL;
     }
     return count;
@@ -550,15 +556,15 @@ static int run_case(const case_t *c, ctx_t *x) {
     int tmo;
     char path1[800], path2[800];
 
-#define MADDR(...) do { size_t _l = strlen(reasons); snprintf(reasons + _l, sizeof reasons - _l, __VA_ARGS__); ok = 0; } while (0)
+#define MADDR(...) do { size_t _l = strlen(reasons); tx_snprintf(reasons + _l, sizeof reasons - _l, __VA_ARGS__); ok = 0; } while (0)
 
-    snprintf(cwd, sizeof cwd, "%s/%s", x->root, c->name);
+    tx_snprintf(cwd, sizeof cwd, "%s/%s", x->root, c->name);
     mkdir(cwd, 0700);
-    snprintf(home, sizeof home, "%s/home", cwd);
-    snprintf(trace, sizeof trace, "%s/trace.jsonl", cwd);
-    snprintf(countp, sizeof countp, "%s/reqs.txt", cwd);
+    tx_snprintf(home, sizeof home, "%s/home", cwd);
+    tx_snprintf(trace, sizeof trace, "%s/trace.jsonl", cwd);
+    tx_snprintf(countp, sizeof countp, "%s/reqs.txt", cwd);
     mkdir(home, 0700);
-    snprintf(line, sizeof line, "%s/env.jsonl", home);
+    tx_snprintf(line, sizeof line, "%s/env.jsonl", home);
     write_file(line, "{\"DEEPSEEK_API_KEY\":\"LOCAL_STUB_ONLY\"}\n", 36, 0600);
 
     lsock = listen_local(&port);
@@ -574,12 +580,12 @@ static int run_case(const case_t *c, ctx_t *x) {
         if (stub == 0) stub_serve(&st);
     }
     close(lsock);
-    snprintf(ep, sizeof ep, "http://127.0.0.1:%d/v1/chat/completions", port);
+    tx_snprintf(ep, sizeof ep, "http://127.0.0.1:%d/v1/chat/completions", port);
 
     remaining = x->deadline - now_s();
     if (remaining <= 0) MADDR("selector deadline before run; ");
     tmo = remaining < 9 ? (int)remaining + 1 : 9;
-    snprintf(script, sizeof script,
+    tx_snprintf(script, sizeof script,
              "unset CSIH_ROLE CSIH_PEER OPENAI_API_KEY HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; "
              "export NO_PROXY='127.0.0.1,localhost' no_proxy='127.0.0.1,localhost' "
              "HOME='%s' DEEPSEEK_API_KEY='LOCAL_STUB_ONLY' CSIH_ENDPOINT='%s' CSIH_MODEL='multi-action-stub' "
@@ -597,8 +603,8 @@ static int run_case(const case_t *c, ctx_t *x) {
     if (rc != c->rc || reqs != c->reqs) MADDR("rc/reqs %d/%d != %d/%d; ", rc, reqs, c->rc, c->reqs);
 
     /* private side effects: exact bytes for first.txt / second.txt */
-    snprintf(path1, sizeof path1, "%s/first.txt", cwd);
-    snprintf(path2, sizeof path2, "%s/second.txt", cwd);
+    tx_snprintf(path1, sizeof path1, "%s/first.txt", cwd);
+    tx_snprintf(path2, sizeof path2, "%s/second.txt", cwd);
     {
         size_t l1 = 0, l2 = 0;
         unsigned char *b1 = read_file(path1, &l1), *b2 = read_file(path2, &l2);
@@ -609,10 +615,10 @@ static int run_case(const case_t *c, ctx_t *x) {
         if (!strcmp(c->name, "double-write-recovery")) { want1 = 1; want2 = 1; }
         if ((b1 != NULL) != want1) MADDR("first.txt existence mismatch; ");
         if ((b2 != NULL) != want2) MADDR("second.txt existence mismatch; ");
-        if (b1 && want1 && (l1 != strlen(c->f1) || memcmp(b1, c->f1, l1))) MADDR("first.txt content mismatch; ");
-        if (b2 && want2 && (l2 != strlen(c->f2) || memcmp(b2, c->f2, l2))) MADDR("second.txt content mismatch; ");
-        free(b1);
-        free(b2);
+        if (b1 && want1 && (l1 != strlen(c->f1) || mm_cmp(b1, c->f1, l1))) MADDR("first.txt content mismatch; ");
+        if (b2 && want2 && (l2 != strlen(c->f2) || mm_cmp(b2, c->f2, l2))) MADDR("second.txt content mismatch; ");
+        mm_free(b1);
+        mm_free(b2);
     }
     if (c->cause && (!strstr(out, "unfinished") || !strstr(out, c->cause))) MADDR("missing unfinished cause; ");
 
@@ -622,17 +628,17 @@ static int run_case(const case_t *c, ctx_t *x) {
         char *t2 = xmalloc(tlen + 1);
         memcpy(t2, tbuf, tlen);
         t2[tlen] = 0;
-        free(tbuf);
+        mm_free(tbuf);
         tbuf = t2;
     }
     if (!strncmp(c->name, "double-", 7) && !trace_count(tbuf, "name", "error", NULL, NULL, NULL, NULL))
         MADDR("no actual rejected-action error trace; ");
     if (!strcmp(c->name, "no-tools-braces") && !trace_count(tbuf, "role", "assistant", "text", c->resp[0], NULL, NULL))
         MADDR("no-tools assistant trace missing; ");
-    free(tbuf);
+    mm_free(tbuf);
 
-    printf("case %-24s %s%s%s\n", c->name, ok ? "PASS" : "FAIL", reasons[0] ? "  reasons: " : "", reasons);
-    if (!ok && out[0]) printf("%.1200s\n", out);
+    sy_printf("case %-24s %s%s%s\n", c->name, ok ? "PASS" : "FAIL", reasons[0] ? "  reasons: " : "", reasons);
+    if (!ok && out[0]) sy_printf("%.1200s\n", out);
     (void)path1;
     (void)path2;
     return ok;
@@ -653,22 +659,22 @@ int main(int argc, char **argv) {
     unsigned char *e;
 
     {
-        const char *app = getenv("CSIH_APP");
-        if (app && app[0]) snprintf(CSIH_APP, sizeof CSIH_APP, "%s", app);
+        const char *app = sy_env("CSIH_APP");
+        if (app && app[0]) tx_snprintf(CSIH_APP, sizeof CSIH_APP, "%s", app);
         else if (!getcwd(CSIH_APP, sizeof CSIH_APP)) die("getcwd");
         if (CSIH_APP[0] != '/') die("app dir must be absolute");
-        snprintf(MA_UNISACC, sizeof MA_UNISACC, "%s/../../unisacc.com", CSIH_APP);
-        snprintf(MA_SELF, sizeof MA_SELF, "%s/probes/agent_multi_action.cx", CSIH_APP);
+        tx_snprintf(MA_UNISACC, sizeof MA_UNISACC, "%s/../../unisacc.com", CSIH_APP);
+        tx_snprintf(MA_SELF, sizeof MA_SELF, "%s/probes/agent_multi_action.cx", CSIH_APP);
     }
     snap_hashes(&before);
-    snprintf(root, sizeof root, "%s/csih-agent-multi-XXXXXX", tmpbase());
+    tx_snprintf(root, sizeof root, "%s/csih-agent-multi-XXXXXX", tmpbase());
     if (!mkdtemp(root)) die("mkdtemp root");
     /* the fixed private source (the -run cache key), cleared and recopied */
-    snprintf(source, sizeof source, "%s/csih-probe-build-%d", tmpbase(), (int)getuid());
+    tx_snprintf(source, sizeof source, "%s/csih-probe-build-%d", tmpbase(), (int)getuid());
     mkdir(source, 0700);
-    snprintf(source, sizeof source, "%s/csih-probe-build-%d/agent_multi_action", tmpbase(), (int)getuid());
+    tx_snprintf(source, sizeof source, "%s/csih-probe-build-%d/agent_multi_action", tmpbase(), (int)getuid());
     mkdir(source, 0700);
-    snprintf(source, sizeof source, "%s/csih-probe-build-%d/agent_multi_action/source", tmpbase(), (int)getuid());
+    tx_snprintf(source, sizeof source, "%s/csih-probe-build-%d/agent_multi_action/source", tmpbase(), (int)getuid());
     {
         struct stat sst;
         if (lstat(source, &sst) == 0 && cx_rmtree(source) != 0) die("cannot clear the private source");
@@ -676,7 +682,7 @@ int main(int argc, char **argv) {
     if (mkdir(source, 0700) != 0) die("mkdir private source");
     copy_tree(CSIH_APP, source);
     if (csih_copy_l0(CSIH_APP, source) != 0) die("copy of the L0 dirs (sys, mem, text) failed");   /* links the walk skips */
-    snprintf(compiler, sizeof compiler, "%s/compiler.com", root);
+    tx_snprintf(compiler, sizeof compiler, "%s/compiler.com", root);
     {
         size_t len = 0;
         unsigned char *b = read_file(MA_UNISACC, &len);
@@ -684,15 +690,15 @@ int main(int argc, char **argv) {
         if (write_file(compiler, b, len, 0600) != 0) die("write compiler");
         /* compiler copy must be byte-identical to the frozen unisacc.com */
         for (j = 0; (size_t)j < before.n; j++) if (!strcmp(before.path[j], MA_UNISACC)) break;
-        if ((size_t)j >= before.n || before.len[j] != len || memcmp(before.data[j], b, len)) die("compiler copy differs");
-        free(b);
+        if ((size_t)j >= before.n || before.len[j] != len || mm_cmp(before.data[j], b, len)) die("compiler copy differs");
+        mm_free(b);
     }
     /* the agent is agent_cli.cx compiled once by the compiler copy (-o; the cold
      * compile is ~28s, so a -run per case would not fit the probe's 55s); build
      * gate: that binary with an unknown subcommand -> usage line, rc 64, empty stderr */
-    snprintf(binary, sizeof binary, "%s/agent_cli.bin", root);
-    snprintf(errp, sizeof errp, "%s/build-err.txt", root);
-    snprintf(script, sizeof script, "cd '%s' && exec /bin/sh \"$0\" \"$@\" 2>'%s'", source, errp);
+    tx_snprintf(binary, sizeof binary, "%s/agent_cli.bin", root);
+    tx_snprintf(errp, sizeof errp, "%s/build-err.txt", root);
+    tx_snprintf(script, sizeof script, "cd '%s' && exec /bin/sh \"$0\" \"$@\" 2>'%s'", source, errp);
     {
         char *bav[3];
         bav[0] = (char *)"agent_cli.cx";
@@ -700,22 +706,22 @@ int main(int argc, char **argv) {
         bav[2] = binary;
         spawn(script, compiler, bav, 3, 50, ebuf, sizeof ebuf, &rc, &timed);
         if (rc != 0 || timed) {
-            printf("compile rc=%d timed=%d out=%.200s\n", rc, timed, ebuf);
+            sy_printf("compile rc=%d timed=%d out=%.200s\n", rc, timed, ebuf);
             die("multi-action build failed");
         }
     }
-    if (snprintf(script, sizeof script, "cd '%s' && exec \"$0\" \"$@\" 2>'%s'", source, errp) >= (int)sizeof script)
+    if (tx_snprintf(script, sizeof script, "cd '%s' && exec \"$0\" \"$@\" 2>'%s'", source, errp) >= (int)sizeof script)
         die("build-check script too long");
     args[n++] = (char *)"build-check";
     spawn(script, binary, args, n, 10, ebuf, sizeof ebuf, &rc, &timed);
     if (rc != 64 || timed || !strstr(ebuf, "usage: agent_cli")) {
-        printf("build rc=%d timed=%d out=%.200s\n", rc, timed, ebuf);
+        sy_printf("build rc=%d timed=%d out=%.200s\n", rc, timed, ebuf);
         die("multi-action build failed");
     }
     e = read_file(errp, &cl);
     if (!e) die("multi-action build stderr unreadable");
-    if (cl) { printf("build stderr: %.400s\n", (char *)e); die("multi-action build wrote stderr"); }
-    free(e);
+    if (cl) { sy_printf("build stderr: %.400s\n", (char *)e); die("multi-action build wrote stderr"); }
+    mm_free(e);
     rm_rf(errp);
 
     memset(&priv_before, 0, sizeof priv_before);
@@ -730,7 +736,7 @@ int main(int argc, char **argv) {
     for (i = 1; i < argc; i++) {
         int found = 0;
         for (j = 0; j < NCASES; j++) if (!strcmp(argv[i], CASES[j].name)) found = 1;
-        if (!found) { printf("FAIL unknown case %s\n", argv[i]); rm_rf(root); return 1; }
+        if (!found) { sy_printf("FAIL unknown case %s\n", argv[i]); rm_rf(root); return 1; }
     }
     for (j = 0; j < NCASES; j++) {
         int keep = argc == 1, k;
@@ -745,11 +751,11 @@ int main(int argc, char **argv) {
     private_same = snap_same(&priv_before, &priv_after);
     snap_hashes(&after);
     frozen = snap_same(&before, &after);
-    if (!frozen) printf("production input changed during run\n");
-    if (!private_same) printf("private sources changed during run\n");
+    if (!frozen) sy_printf("production input changed during run\n");
+    if (!private_same) sy_printf("private sources changed during run\n");
     {
         int passed = all && nsel > 0 && frozen && private_same;
-        printf("%s agent multi-action\n", passed ? "PASS" : "FAIL");
+        sy_printf("%s agent multi-action\n", passed ? "PASS" : "FAIL");
         rm_rf(root);
         return passed ? 0 : 1;
     }
