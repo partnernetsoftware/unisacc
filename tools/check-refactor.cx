@@ -1,0 +1,100 @@
+/* Checks tools/refactor.cx: sh ./unisacc.com tools/check-refactor.cx   (from the repo root)
+   find: the truth rule takes exactly the five truth-value uses in tools/refactor/truth-cases.txt and
+   none of the nine value, comparison, argument, '!' and bitwise uses; the '!' rule takes only line 11.
+   apply, on a copy in out/: a check whose output does not change keeps the edit (OK); a check that
+   prints the file sees the edit and restores the copy byte for byte (REVERT, rc 1).
+   Prints PASS/FAIL lines and CHECK_REFACTOR<TAB>failed=N. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+
+static int failed;
+static void ck(int ok, const char *name) { if (!ok) failed++; printf("%s\trefactor.%s\n", ok ? "PASS" : "FAIL", name); }
+
+/* runs sh ./unisacc.com tools/refactor.cx -- A...; stdout into out (cap bytes, terminated); returns the exit code or -1 */
+static int tool(char **args, char *out, long cap) {
+    char *argv[16]; int i = 0, k, ofd, efd, pid, ex = 0, code = 0, sig = 0; long n = 0, r; char junk[4096];
+    argv[i++] = "sh"; argv[i++] = "./unisacc.com"; argv[i++] = "tools/refactor.cx"; argv[i++] = "--";
+    for (k = 0; args[k] && i < 15; k++) argv[i++] = args[k];
+    argv[i] = 0;
+    pid = sy_spawn_pipe(argv, 0, SY_SPAWN_STDERR_SPLIT, &ofd, &efd);
+    if (pid < 0) return -1;
+    while ((r = sy_read(ofd, out + n, cap - 1 - n)) > 0) n += r;
+    out[n] = 0;
+    while (sy_read(ofd, junk, sizeof junk) > 0) {}
+    while (sy_read(efd, junk, sizeof junk) > 0) {}
+    sy_close(ofd); sy_close(efd);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
+    return code;
+}
+
+/* the line field (4th) of every row naming FILE, as " 3 4" */
+static void lines_of(const char *tsv, const char *file, char *dst, long cap) {
+    const char *p = tsv; long fl = tx_len(file, 4096), dn = 0;
+    dst[0] = 0;
+    while (*p) {
+        const char *e = p, *f[5]; int k = 0;
+        while (*e && *e != '\n') e++;
+        f[0] = p;
+        for (const char *q = p; q < e && k < 4; q++) if (*q == '\t') f[++k] = q + 1;
+        if (k == 4 && tx_prefix(f[1], e - f[1], file, fl) && f[1][fl] == '\t') {
+            long ln = 0; while (f[3][ln] != '\t') ln++;
+            if (dn + ln + 2 < cap) { dst[dn++] = ' '; tx_copy(dst + dn, cap - dn, f[3], ln); dn += ln; }
+        }
+        p = *e ? e + 1 : e;
+    }
+}
+
+static int put_file(const char *path, const char *s, long n) {
+    int fd = sy_open_new(path, 0644), bad;
+    if (fd < 0) return 1;
+    bad = sy_write_all(fd, s, n) != 0;
+    return sy_close(fd) != 0 || bad;
+}
+
+int main(void) {
+    static char out[1 << 16], got[256], dir[256], copy[300], cands[300], acc[1 << 16];
+    const char *cases = "tools/refactor/truth-cases.txt";
+    size_t sn, an; char *src = cx_read(cases, &sn), *after; long i, n;
+    int rc;
+    char *truth[] = {"find", "tools/refactor/strcmp-truth.tsv", (char *)cases, 0};
+    char *bang[] = {"find", "tools/refactor/strcmp-eq.tsv", (char *)cases, 0};
+
+    ck(src != 0, "fixture-readable");
+    rc = tool(truth, out, sizeof out); lines_of(out, cases, got, sizeof got);
+    ck(rc == 0 && tx_eq(got, " 3 4 5 6 14", 64), "find-truth-takes-only-truth-uses");
+    rc = tool(bang, out, sizeof out); lines_of(out, cases, got, sizeof got);
+    ck(rc == 0 && tx_eq(got, " 11", 64), "find-bang-takes-only-bang");
+
+    /* apply on a copy: accept every row of the truth rule */
+    if (cx_fmt(dir, sizeof dir, "out/check-refactor-%d", sy_pid()) || cx_fmt(copy, sizeof copy, "%s/t.cx", dir)
+        || cx_fmt(cands, sizeof cands, "%s/cands.tsv", dir) || !src) return 2;
+    sy_mkdir("out", 0755);
+    if (sy_mkdir(dir, 0755) != 0 || put_file(copy, src, (long)sn)) { ck(0, "scratch-copy"); goto done; }
+    {   char *find[] = {"find", "tools/refactor/strcmp-truth.tsv", copy, 0};
+        rc = tool(find, out, sizeof out);
+        n = tx_len(out, sizeof out); an = 0;
+        for (i = 0; i < n; i++) {   /* "-\t" at a row start becomes "accept\t" */
+            if ((i == 0 || out[i - 1] == '\n') && out[i] == '-' && i + 1 < n && out[i + 1] == '\t') { tx_copy(acc + an, 8, "accept", 6); an += 6; continue; }
+            acc[an++] = out[i];
+        }
+        ck(rc == 0 && put_file(cands, acc, (long)an) == 0, "candidates-written");
+    }
+    {   char *revert[] = {"apply", cands, "2", "cat {file}", 0};
+        rc = tool(revert, out, sizeof out); after = cx_read(copy, &an);
+        ck(rc == 1 && tx_find(out, tx_len(out, sizeof out), "REVERT\t", 7) >= 0 && after && tx_same(after, (long)an, src, (long)sn),
+           "apply-changed-output-reverts-byte-for-byte");
+    }
+    {   char *keep[] = {"apply", cands, "2", "true", 0};
+        rc = tool(keep, out, sizeof out); after = cx_read(copy, &an);
+        ck(rc == 0 && tx_find(out, tx_len(out, sizeof out), "OK\t", 3) >= 0 && after
+           && tx_find(after, (long)an, "if (!tx_eq(v[0], \"a\", 1L << 20)) n++;", 37) >= 0
+           && tx_find(after, (long)an, "if (strcmp(v[0], \"e\") < 0) n++;", 31) >= 0
+           && tx_find(after, (long)an, "#pragma unisa use text.text", 27) >= 0,
+           "apply-same-output-keeps-edit");
+    }
+    sy_unlink(copy); sy_unlink(cands);   /* the empty scratch directory stays in out/ */
+done:
+    printf("CHECK_REFACTOR\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
