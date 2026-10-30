@@ -1,0 +1,339 @@
+#pragma unisa module capsulezip
+/* release/ci/capsulezip.cx -- the strict ZIP32 parser of the private evidence capsule transport:
+ * the CX port of parseZip in release/capsule-zip.mjs (archived at
+ * archive/reference-js/release/capsule-zip.mjs), used by release/capsule-export.cx.
+ *
+ *   const char *cz_parse(const unsigned char *raw, long n, cz_zip *z)
+ *
+ * 0 with Z filled (members in central-directory order), or the refusal message of the first check
+ * that fails, in the mjs order and with the mjs text: ZIP size, ZIP end/comment (no comment), ZIP
+ * disk/inventory (one disk, 1..19999 entries, central directory ending at the end record), per
+ * entry the central header, unsupported ZIP features (flags only 0x800|0x8, stored or deflate, no
+ * file comment, disk 0, name 1..1023 bytes), extra fields (only 0x5855, 8 bytes central / 12
+ * local, each id once), unsafe/duplicate ZIP path (segments [A-Za-z0-9_. -]+, not . or ..,
+ * one trailing / for a directory), ZIP link/special file, the local header identity, sizes and
+ * CRC (0 allowed with a data descriptor), local extent, the optional descriptor, the member bytes
+ * (size and CRC-32; a directory is empty), a 64 MiB inflated budget, the central extent, members
+ * tiling the payload with no gap or overlap, and no file used as a directory.
+ *
+ * Deflate: cx/runtime/codec.cx cxcodec_inflate (puff) replaces node zlib.inflateRawSync with
+ * maxOutputLength 64 MiB.  As with zlib, bytes after the final deflate block are ignored (the
+ * shortest prefix on which the stream completes is searched); a stream longer than the declared
+ * size is inflated on to 64 MiB, so it is "ZIP size/CRC", or node's "Cannot create a Buffer
+ * larger than 67108864 bytes", or the zlib fault met later.  Input that ends inside the stream is
+ * zlib's "unexpected end of file"; puff's other faults get zlib's text for the same fault
+ * ("invalid block type", "invalid stored block lengths", ...).  Known text differences, all on
+ * input refused either way: puff has one code for a bad literal/length or distance symbol (zlib:
+ * "invalid literal/length code" or "invalid distance code"), and zlib may notice some malformed
+ * dynamic-block headers under another name; puff does not say where it stopped, so end-of-input
+ * is told from a fault by re-running with 64 KiB of 0x00 and of 0xff after the input (a fault
+ * repeats unchanged, an end-of-input does not; both pads matching it by chance is the residue).
+ * "ZIP arena" (allocation failure) has no mjs counterpart (node would fail with its own error).
+ * Memory: one module arena per parse (cz_free drops it); stored members point into RAW. */
+#pragma unisa use runtime.codec
+#pragma unisa use mem.arena
+#pragma unisa use mem.bytes
+
+#define CZ_MAX (64L * 1024 * 1024)
+#define CZ_HASH 65536
+
+typedef struct {
+    const char *name;            /* NUL-terminated copy */
+    long nl;
+    const unsigned char *data;   /* member bytes (into RAW when stored) */
+    long len;
+    unsigned method, flags, mode;
+    int descriptor, extra, local_extra;   /* extra/local_extra: 1 when the 0x5855 field is there */
+} cz_member;
+
+typedef struct {
+    cz_member *m;
+    long count;
+    int arena;
+} cz_zip;
+
+static unsigned long cz_u16(const unsigned char *b, long n, long at) {
+    if (at < 0 || at + 2 > n) return 0;
+    return (unsigned long)b[at] | ((unsigned long)b[at + 1] << 8);
+}
+static unsigned long cz_u32(const unsigned char *b, long n, long at) {
+    if (at < 0 || at + 4 > n) return 0;
+    return (unsigned long)b[at] | ((unsigned long)b[at + 1] << 8) | ((unsigned long)b[at + 2] << 16) |
+           ((unsigned long)b[at + 3] << 24);
+}
+
+/* extras(): 0, or the message; *HAS 1 when the one allowed field is there. */
+static const char *cz_extras(const unsigned char *b, long n, int local, int *has) {
+    long p = 0;
+    unsigned long ids[2];
+    int k = 0, i, dup;
+    *has = 0;
+    while (p < n) {
+        unsigned long id, len;
+        if (!(p + 4 <= n)) return "ZIP extra header";
+        id = cz_u16(b, n, p); len = cz_u16(b, n, p + 2);
+        dup = 0;
+        for (i = 0; i < k; i++) if (ids[i] == id) dup = 1;
+        if (!(p + 4 + (long)len <= n && !dup)) return "ZIP extra extent/duplicate";
+        if (!(id == 0x5855 && (long)len == (local ? 12 : 8))) return "unsupported ZIP extra";
+        if (k < 2) ids[k++] = id;
+        *has = 1;
+        p += 4 + (long)len;
+    }
+    return 0;
+}
+
+/* name.toString('utf8') re-encoded equals the bytes, every '/'-part (one trailing '/' dropped)
+   matches ^[A-Za-z0-9_. -]+$ and is not . or ..  The class is ASCII, so it implies the UTF-8 test. */
+static int cz_safe_name(const unsigned char *s, long n) {
+    long i = 0, e = n, start;
+    if (e > 0 && s[e - 1] == '/') e--;
+    for (;;) {
+        start = i;
+        while (i < e && s[i] != '/') {
+            unsigned c = s[i];
+            if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '.' ||
+                  c == ' ' || c == '-'))
+                return 0;
+            i++;
+        }
+        if (i == start) return 0;
+        if (i - start == 1 && s[start] == '.') return 0;
+        if (i - start == 2 && s[start] == '.' && s[start + 1] == '.') return 0;
+        if (i >= e) return 1;
+        i++;
+    }
+}
+
+static unsigned long cz_hash(const char *s, long n) {
+    unsigned long h = 2166136261UL;
+    long i;
+    for (i = 0; i < n; i++) h = ((h ^ (unsigned char)s[i]) * 16777619UL) & 0xffffffffUL;
+    return h;
+}
+/* index+1 of the member named S[0..N) in TAB, or 0 */
+static long cz_find(const long *tab, const cz_member *m, const char *s, long n) {
+    unsigned long h = cz_hash(s, n) & (CZ_HASH - 1);
+    while (tab[h]) {
+        const cz_member *x = &m[tab[h] - 1];
+        if (x->nl == n && mm_same(x->name, s, n)) return tab[h];
+        h = (h + 1) & (CZ_HASH - 1);
+    }
+    return 0;
+}
+static void cz_put(long *tab, const cz_member *m, long idx) {
+    unsigned long h = cz_hash(m[idx].name, m[idx].nl) & (CZ_HASH - 1);
+    while (tab[h]) h = (h + 1) & (CZ_HASH - 1);
+    tab[h] = idx + 1;
+}
+
+/* zlib's text for a puff error that is not the end of the input */
+static const char *cz_zmsg(int rc) {
+    switch (rc) {
+    case -1: return "invalid block type";
+    case -2: return "invalid stored block lengths";
+    case -3: return "too many length or distance symbols";
+    case -4: return "invalid code lengths set";
+    case -5: case -6: return "invalid bit length repeat";
+    case -7: return "invalid literal/lengths set";
+    case -8: return "invalid distances set";
+    case -9: return "invalid code -- missing end-of-block";
+    case -10: return "invalid literal/length code";
+    case -11: return "invalid distance too far back";
+    default: return "unexpected end of file";
+    }
+}
+
+#define CZ_PAD 65536
+/* The message of a failed inflate (RC, output cap CAP).  zlib inflates incrementally, so input
+   that ends inside the stream is "unexpected end of file" whatever puff then says.  puff does not
+   report where it stopped: a fault met before the end of IN repeats unchanged when IN is followed
+   by 64 KiB of 0x00 and again of 0xff, an end-of-input does not (rc 2 is one at once). */
+static const char *cz_err(int ar, unsigned char *out, long cap, const unsigned char *in, long n, int rc) {
+    unsigned char *buf;
+    int z, f;
+    if (rc == 2) return "unexpected end of file";
+    buf = ar_alloc(ar, n + CZ_PAD);
+    if (!buf) return "ZIP arena";
+    if (n > 0 && mm_copy(buf, n + CZ_PAD, in, n) != 0) return "ZIP arena";
+    z = cxcodec_inflate(out, (unsigned long)cap, buf, (unsigned long)(n + CZ_PAD));   /* pad is zeroed */
+    if (mm_fill(buf + n, CZ_PAD, 0xff, CZ_PAD) != 0) return "ZIP arena";
+    f = cxcodec_inflate(out, (unsigned long)cap, buf, (unsigned long)(n + CZ_PAD));
+    return z == rc && f == rc ? cz_zmsg(rc) : "unexpected end of file";
+}
+
+/* zlib.inflateRawSync(IN, {maxOutputLength: 64 MiB}) and then the length test: 0 when IN
+   inflates to exactly LEN bytes into OUT (bytes after the final block are ignored, as by zlib);
+   "ZIP size/CRC" when the stream is whole but another length; else zlib's or node's message. */
+static const char *cz_inflate(int ar, unsigned char *out, long len, const unsigned char *in, long n) {
+    int rc = cxcodec_inflate(out, (unsigned long)len, in, (unsigned long)n);
+    unsigned char *big;
+    long lo, hi;
+    if (rc == 0) return 0;
+    if (rc == 3) {
+        /* whole stream: output short, or input left after the final block.  The shortest prefix on
+           which the stream completes (rc 0 or 3; a shorter one runs out) is where it ends. */
+        lo = 0; hi = n;
+        while (lo < hi) {
+            long mid = lo + (hi - lo) / 2, r = cxcodec_inflate(out, (unsigned long)len, in, (unsigned long)mid);
+            if (r == 0 || r == 3) hi = mid; else lo = mid + 1;
+        }
+        return cxcodec_inflate(out, (unsigned long)len, in, (unsigned long)lo) == 0 ? 0 : "ZIP size/CRC";
+    }
+    if (rc != 1) return cz_err(ar, out, len, in, n, rc);
+    /* more than LEN bytes: zlib goes on to the end of the stream or to maxOutputLength */
+    big = ar_alloc(ar, CZ_MAX);
+    if (!big) return "ZIP arena";
+    rc = cxcodec_inflate(big, (unsigned long)CZ_MAX, in, (unsigned long)n);
+    if (rc == 1) return "Cannot create a Buffer larger than 67108864 bytes";
+    if (rc == 0 || rc == 3) return "ZIP size/CRC";
+    return cz_err(ar, big, CZ_MAX, in, n, rc);
+}
+
+static unsigned long cz_crc(const unsigned char *p, long n) {
+    static CxCodecCrc ctx;
+    static int ready;
+    uint32_t c = 0;
+    if (!ready) { cxcodec_crc_init(&ctx); ready = 1; }
+    if (cxcodec_crc(&ctx, (const char *)p, (int)n, &c) != 0) return 0xffffffffUL + 1;   /* never a CRC */
+    return c;
+}
+
+typedef struct { long a, b; } cz_span;
+
+static void cz_sift(cz_span *v, long root, long n) {
+    long child;
+    cz_span t;
+    while ((child = 2 * root + 1) < n) {
+        if (child + 1 < n && v[child + 1].a > v[child].a) child++;
+        if (!(v[root].a < v[child].a)) return;
+        t = v[root]; v[root] = v[child]; v[child] = t;
+        root = child;
+    }
+}
+/* intervals.sort((a, b) => a[0] - b[0]); equal starts are refused next whatever their order */
+static void cz_sort(cz_span *v, long n) {
+    long i;
+    cz_span t;
+    for (i = n / 2 - 1; i >= 0; i--) cz_sift(v, i, n);
+    for (i = n - 1; i > 0; i--) { t = v[0]; v[0] = v[i]; v[i] = t; cz_sift(v, 0, i); }
+}
+
+/* Drop the arena of a parse (members and inflated bytes). */
+void cz_free(cz_zip *z) {
+    if (z && z->arena) ar_drop(z->arena);
+    if (z) { z->arena = 0; z->m = 0; z->count = 0; }
+}
+
+const char *cz_parse(const unsigned char *raw, long n, cz_zip *z) {
+    long end, count, size, start, p, total = 0, i, k;
+    long *tab;
+    cz_span *iv;
+    cz_member *m;
+    int ar;
+    z->m = 0; z->count = 0; z->arena = 0;
+    if (!(raw && n >= 22 && n <= CZ_MAX)) return "ZIP size";
+    end = n - 22;
+    if (!(cz_u32(raw, n, end) == 0x06054b50UL && !cz_u16(raw, n, end + 20))) return "ZIP end/comment";
+    count = (long)cz_u16(raw, n, end + 10); size = (long)cz_u32(raw, n, end + 12); start = (long)cz_u32(raw, n, end + 16);
+    if (!(!cz_u16(raw, n, end + 4) && !cz_u16(raw, n, end + 6) && count == (long)cz_u16(raw, n, end + 8) && count > 0 &&
+          count < 20000 && start + size == end))
+        return "ZIP disk/inventory";
+    ar = ar_new(1L << 30);
+    if (!ar) return "ZIP arena";
+    z->arena = ar;
+    m = ar_alloc(ar, count * (long)sizeof(cz_member));
+    iv = ar_alloc(ar, count * (long)sizeof(cz_span));
+    tab = ar_alloc(ar, CZ_HASH * (long)sizeof(long));
+    if (!m || !iv || !tab) return "ZIP arena";
+    z->m = m;
+    p = start;
+    for (i = 0; i < count; i++) {
+        unsigned long f, method, crc, packed, len, nl, xl, cl, disk, mode, at, lnl, lxl, want;
+        long begin, finish, type;
+        int dir, has;
+        const unsigned char *nb;
+        const char *why;
+        cz_member *e = &m[i];
+        static const long offs[3] = {14, 18, 22};
+        if (!(p + 46 <= end && cz_u32(raw, n, p) == 0x02014b50UL)) return "ZIP central header";
+        f = cz_u16(raw, n, p + 8); method = cz_u16(raw, n, p + 10); crc = cz_u32(raw, n, p + 16);
+        packed = cz_u32(raw, n, p + 20); len = cz_u32(raw, n, p + 24); nl = cz_u16(raw, n, p + 28);
+        xl = cz_u16(raw, n, p + 30); cl = cz_u16(raw, n, p + 32); disk = cz_u16(raw, n, p + 34);
+        mode = cz_u32(raw, n, p + 38) >> 16; at = cz_u32(raw, n, p + 42);
+        if (!(p + 46 + (long)(nl + xl + cl) <= end && nl > 0 && nl < 1024 && !cl && !disk && !(f & ~0x808UL) &&
+              (method == 0 || method == 8)))
+            return "unsupported ZIP features";
+        if ((why = cz_extras(raw + p + 46 + nl, (long)xl, 0, &has)) != 0) return why;
+        e->extra = has;
+        nb = raw + p + 46;
+        if (!(cz_safe_name(nb, (long)nl) && !cz_find(tab, m, (const char *)nb, (long)nl))) return "unsafe/duplicate ZIP path";
+        e->name = ar_dup(ar, (const char *)nb, (long)nl);
+        if (!e->name) return "ZIP arena";
+        e->nl = (long)nl;
+        dir = nb[nl - 1] == '/';
+        type = (long)(mode & 0xf000);
+        if (!(type == 0 || type == (dir ? 0x4000 : 0x8000))) return "ZIP link/special file";
+        if (!((long)at + 30 <= start && cz_u32(raw, n, (long)at) == 0x04034b50UL && cz_u16(raw, n, (long)at + 6) == f &&
+              cz_u16(raw, n, (long)at + 8) == method))
+            return "ZIP local identity";
+        for (k = 0; k < 3; k++) {
+            unsigned long got = cz_u32(raw, n, (long)at + offs[k]);
+            want = k == 0 ? crc : k == 1 ? packed : len;
+            if (!(got == want || ((f & 8) && got == 0))) return "ZIP local size/CRC";
+        }
+        lnl = cz_u16(raw, n, (long)at + 26); lxl = cz_u16(raw, n, (long)at + 28);
+        begin = (long)at + 30 + (long)lnl + (long)lxl;
+        if (!(lnl == nl && (long)at + 30 + (long)lnl <= n && mm_same(raw + at + 30, nb, (long)lnl) &&
+              begin + (long)packed <= start && (long)len <= CZ_MAX))
+            return "ZIP local extent";
+        if ((why = cz_extras(raw + at + 30 + lnl, begin - ((long)at + 30 + (long)lnl), 1, &has)) != 0) return why;
+        e->local_extra = has;
+        finish = begin + (long)packed;
+        if (f & 8) {
+            long d = finish;
+            if (!(finish + 12 <= start)) return "ZIP descriptor extent";
+            if (cz_u32(raw, n, d) == 0x08074b50UL) {
+                d += 4;
+                if (!(d + 12 <= start)) return "ZIP signed descriptor extent";
+            }
+            if (!(cz_u32(raw, n, d) == crc && cz_u32(raw, n, d + 4) == packed && cz_u32(raw, n, d + 8) == len))
+                return "ZIP descriptor identity";
+            finish = d + 12;
+        }
+        if (method == 0) {
+            e->data = raw + begin;
+            if ((long)packed != (long)len) return "ZIP size/CRC";
+        } else {
+            unsigned char *out = ar_alloc(ar, (long)len + 1);
+            if (!out) return "ZIP arena";
+            if ((why = cz_inflate(ar, out, (long)len, raw + begin, (long)packed)) != 0) return why;
+            e->data = out;
+        }
+        if (!(cz_crc(e->data, (long)len) == crc && (!dir || len == 0))) return "ZIP size/CRC";
+        total += (long)len;
+        if (!(total <= CZ_MAX)) return "ZIP inflated budget";
+        e->len = (long)len; e->method = (unsigned)method; e->flags = (unsigned)f; e->mode = (unsigned)mode;
+        e->descriptor = (f & 8) != 0;
+        cz_put(tab, m, i);
+        z->count = i + 1;
+        iv[i].a = (long)at; iv[i].b = finish;
+        p += 46 + (long)(nl + xl + cl);
+    }
+    if (!(p == end)) return "ZIP central extent";
+    cz_sort(iv, count);
+    {
+        long offset = 0;
+        for (i = 0; i < count; i++) {
+            if (!(iv[i].a == offset)) return "ZIP gap/overlap";
+            offset = iv[i].b;
+        }
+        if (!(offset == start)) return "ZIP payload extent";
+    }
+    /* A regular-file ancestor must never be used as a directory by extraction. */
+    for (i = 0; i < count; i++) {
+        for (k = 0; k < m[i].nl; k++)
+            if (m[i].name[k] == '/' && cz_find(tab, m, m[i].name, k)) return "ZIP file/directory collision";
+    }
+    return 0;
+}

@@ -1,0 +1,820 @@
+/* release/capsule-export.cx -- private Draft -> Actions transport only.  Never publishes or executes
+ * capsule code.  The CX port of release/capsule-export.mjs (archived, with its parser
+ * release/capsule-zip.mjs, at archive/reference-js/release/); the parser is cz_parse in
+ * release/ci/capsulezip.cx.  Run from the repository root:
+ *
+ *   ./unisacc.com release/capsule-export.cx -- export             (.github/workflows/admission-capsule.yml)
+ *   ./unisacc.com release/capsule-export.cx -- parse-zip FILE...  (offline: inventory or refusal per file)
+ *   ./unisacc.com release/capsule-export.cx -- replay DIR...       (offline: export against recorded files)
+ *
+ * export, as the mjs: the four owner inputs CAPSULE_RELEASE_ID, CAPSULE_ASSET_ID, CAPSULE_SHA256,
+ * CANDIDATE_SOURCE_SHA and the producer GITHUB_REPOSITORY/GITHUB_REF/GITHUB_SHA must be the fixed
+ * identities; GET releases/ID must be that existing Draft holding exactly one evidence.zip with
+ * the given asset id, state uploaded, size 1..64 MiB, URL and (when the API gives one) digest;
+ * the asset bytes must have that size and sha256 and parse as a strict ZIP whose members all lie
+ * under evidence/ and outside evidence/work, evidence/state.json and evidence/manifest.json; the
+ * release is read again and must give the same binding.  Then evidence.zip is written (mode 0600,
+ * exclusive) into a new $RUNNER_TEMP/unisacc-evidence-capsule-output (0700) and the receipt is
+ * printed as one compact JSON line.  Every refusal prints "capsule export refused: MSG" on stderr
+ * and exits 1; the messages, their order and the receipt fields are the mjs ones.  Everything runs
+ * against one 55-second deadline; each GitHub read gets min(50 s, what is left).
+ *
+ * replay DIR: the same flow (argument, token, inputs, bindings, bytes, write, receipt) with the
+ * process environment replaced by DIR/env (NAME=VALUE lines; an absent name is unset) and the two
+ * API reads and the download replaced by DIR/release.json, DIR/release-after.json (default: the
+ * first file again) and DIR/evidence.zip.  One line per DIR: "DIR<TAB>OK<TAB>RECEIPT" or
+ * "DIR<TAB>REFUSED<TAB>MSG".  It has no network and never reads the real environment.
+ *
+ * Transport (the semantic differences from the mjs fetch, stated honestly):
+ * - CX has no TLS client here.  Each GitHub read runs curl (on PATH; GitHub's Ubuntu runners have
+ *   it) as an external process: -q (no .curlrc), https only (--proto =https), no redirect
+ *   following, --max-time = the read's budget.  The token is not put on curl's command line: the
+ *   Authorization, Accept and X-GitHub-Api-Version headers go in a curl config file created
+ *   exclusively with mode 0600 under $RUNNER_TEMP (else $TMPDIR, else /tmp) and removed when curl
+ *   has exited, and on every refusal.  A token holding CR or LF is refused before that ("source
+ *   Actions token is not a header value"; fetch would throw its own TypeError there).  When that
+ *   directory cannot take the config the export stops before any read ("capsule transport: cannot
+ *   create private curl config"); the mjs would read first and fail later at realpath/mkdir.
+ * - The asset read asks for application/octet-stream.  Only a 302 is followed, by hand, as in the
+ *   mjs: the target (curl's %{redirect_url}, the Location resolved against the request) must be
+ *   https, without user name or password, on the default port, and on release-assets. or
+ *   objects.githubusercontent.com, else "untrusted Draft asset redirect".  Stricter than the WHATWG
+ *   URL of the mjs: an "@" anywhere in the authority, or a '%' or non-ASCII byte in the host, is
+ *   refused; a relative Location, which the mjs refused with "Invalid URL", resolves to
+ *   api.github.com and is refused by the host list.  The second read carries no Authorization
+ *   header and any 3xx there is "fetch failed" (fetch redirect: 'error').
+ * - curl exit 28 (time limit) is "The operation was aborted due to timeout" (AbortSignal.timeout),
+ *   any other curl failure (DNS, TLS, reset, curl missing) is "fetch failed".
+ * - The body is read before the status is tested, so a non-2xx answer whose body passes the bound
+ *   is "bounded Draft response" where fetch would say "...read denied...".  Bounds: 4 MiB JSON,
+ *   64 MiB asset.  fetch decodes a gzip/br answer; curl asks for none, so the bound sees the same
+ *   bytes either way.
+ * - JSON.parse: read with release/ci/json.cx, with NaN and Infinity (not JSON for JSON.parse)
+ *   refused; any failure is "invalid JSON in Draft API response" instead of V8's SyntaxError text.
+ *   Stricter: bytes that are not UTF-8 (JSON.parse would see U+FFFD), integers past 4300 digits
+ *   and nesting past Python's recursion limit are refused.
+ * - Property reads follow JavaScript: String(x) === id (a JSON number whose value is that integer,
+ *   a string, or a one-element array of either match), === for strings and true,
+ *   Number.isSafeInteger, JavaScript truthiness for digest, "Cannot read properties of null
+ *   (reading 'K')" for a null release or asset; the two bindings are compared as JSON.stringify
+ *   would print them (array-index keys first, numbers by value).
+ * - RUNNER_TEMP is resolved as fs.realpathSync: unset is the relative path "undefined", errors are
+ *   "CODE: description, lstat 'PATH'" with node's code and text for the usual errno values; a
+ *   symlink in the path is resolved with realpath(3) (node walks it itself; an error inside a
+ *   link target can name another path).  mkdir and the exclusive write fail as fs does
+ *   ("EEXIST: file already exists, mkdir 'PATH'"). */
+#pragma unisa use ci.capsulezip
+#pragma unisa use ci.json
+#pragma unisa use ci.sys.fs
+#pragma unisa use ci.sys.env
+#pragma unisa use ci.sys.proc
+#pragma unisa use ci.sys.time
+#pragma unisa use ci.sys.guard
+#pragma unisa use ci.text.text
+#pragma unisa use ci.mem.arena
+#pragma unisa use ci.mem.bytes
+
+#define CE_REPO "partnernetsoftware/unisacc"
+#define CE_SOURCE "cd30109850f1d8958cc004d82821c36c46543db3"
+#define CE_MAX (64L * 1024 * 1024)
+#define CE_API "https://api.github.com/repos/" CE_REPO "/"
+
+typedef struct { const char *release_id, *asset_id, *evidence_sha256, *source_sha; } ce_req;
+typedef struct { char *canon; long size; } ce_bind;
+
+static int ce_ar;
+static long ce_deadline;
+static char ce_msg[2048];
+static char ce_cfg[4200];      /* curl config to remove, or "" */
+static int ce_child;           /* running curl, or 0 */
+static int ce_ofd = -1, ce_efd = -1;
+static int ce_replay;          /* 1: replay mode */
+static const char *ce_dir;     /* replay DIR */
+static char *ce_envtext;       /* replay DIR/env */
+static long ce_envn;
+static int ce_api_calls;
+
+static void ce_cleanup(void) {
+    if (ce_child > 0) { sy_kill(ce_child); ce_child = 0; }
+    if (ce_ofd >= 0) { sy_close(ce_ofd); ce_ofd = -1; }
+    if (ce_efd >= 0) { sy_close(ce_efd); ce_efd = -1; }
+    if (ce_cfg[0]) { sy_unlink(ce_cfg); ce_cfg[0] = 0; }
+}
+
+/* throw Error(m): the message, the curl child and config dropped, back to the guard */
+static void ce_refuse(const char *m) {
+    long n = tx_len(m, (long)sizeof ce_msg - 1);
+    if (tx_copy(ce_msg, (long)sizeof ce_msg, m, n) != 0) ce_msg[0] = 0;
+    ce_cleanup();
+    sy_guard_fail();
+}
+static void need(int ok, const char *m) { if (!ok) ce_refuse(m); }
+
+static void *ce_mem(long n) {
+    void *p;
+    if (!ce_ar) ce_ar = ar_new(1L << 34);
+    p = ce_ar ? ar_alloc(ce_ar, n < 1 ? 1 : n) : 0;
+    if (!p) ce_refuse("Array buffer allocation failed");
+    return p;
+}
+static char *ce_cat3(const char *a, const char *b, const char *c) {
+    long an = tx_len(a, 1L << 20), bn = tx_len(b, 1L << 20), cn = tx_len(c, 1L << 20);
+    char *p = ce_mem(an + bn + cn + 1);
+    mm_copy(p, an + bn + cn + 1, a, an);
+    mm_copy(p + an, bn + cn + 1, b, bn);
+    mm_copy(p + an + bn, cn + 1, c, cn);
+    p[an + bn + cn] = 0;
+    return p;
+}
+
+/* ── environment ───────────────────────────────────────────────────────── */
+
+/* process.env[NAME]: the real environment, or the replay DIR/env line NAME=VALUE; 0 when unset */
+static const char *ce_env(const char *name) {
+    long i = 0, nl = tx_len(name, 256);
+    if (!ce_replay) return sy_env(name);
+    while (ce_envtext && i < ce_envn) {
+        long e = i;
+        while (e < ce_envn && ce_envtext[e] != '\n') e++;
+        if (e - i > nl && ce_envtext[i + nl] == '=' && tx_same(ce_envtext + i, nl, name, nl)) {
+            char *v = ce_mem(e - i - nl);
+            tx_copy(v, e - i - nl, ce_envtext + i + nl + 1, e - i - nl - 1);
+            return v;
+        }
+        i = e + 1;
+    }
+    return 0;
+}
+
+/* ── the deadline ──────────────────────────────────────────────────────── */
+
+static long ce_budget(void) {
+    long n = ce_deadline - sy_now_ms();
+    if (n > 50000) n = 50000;
+    need(n > 0, "capsule transport55-second deadline");
+    return n;
+}
+
+/* ── exportRequest ─────────────────────────────────────────────────────── */
+
+static int ce_hex(const char *s, long n) {
+    long i;
+    if (!s || tx_len(s, n + 1) != n) return 0;
+    for (i = 0; i < n; i++) if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))) return 0;
+    return 1;
+}
+/* /^[1-9][0-9]{0,15}$/ and Number.isSafeInteger(Number(s)) */
+static int ce_id(const char *s) {
+    long n, i;
+    if (!s) return 0;
+    n = tx_len(s, 17);
+    if (n < 1 || n > 16 || s[0] < '1' || s[0] > '9') return 0;
+    for (i = 1; i < n; i++) if (s[i] < '0' || s[i] > '9') return 0;
+    return n < 16 || tx_cmp(s, n, "9007199254740991", 16) <= 0;
+}
+static int ce_is(const char *s, const char *lit) { return s && tx_eqz(s, lit); }
+
+/* exportRequest(q, e).  Object.keys(q) is the fixed four here: q is built from them in main. */
+static void ce_request(const ce_req *q) {
+    need(ce_id(q->release_id) && ce_id(q->asset_id) && ce_hex(q->evidence_sha256, 64) && ce_is(q->source_sha, CE_SOURCE),
+         "fixed owner release/asset/SHA/candidate identity required");
+    need(ce_is(ce_env("GITHUB_REPOSITORY"), CE_REPO) && ce_is(ce_env("GITHUB_REF"), "refs/heads/main") &&
+             ce_hex(ce_env("GITHUB_SHA"), 40),
+         "owned source-repository main producer required");
+}
+
+/* ── JavaScript views of parsed JSON ───────────────────────────────────── */
+
+/* v[key] in JavaScript: a TypeError for null, undefined (0) for a missing key or a non-object */
+static jv_t *ce_prop(const jv_t *v, const char *key) {
+    char m[160];
+    if (v && v->kind == JV_NULL) {
+        cx_fmt(m, sizeof m, "Cannot read properties of null (reading '%s')", key);
+        ce_refuse(m);
+    }
+    if (!v || v->kind != JV_OBJ) return 0;
+    return jv_get(v, key);
+}
+static int ce_num(const jv_t *v, double *d) {
+    if (!v || (v->kind != JV_INT && v->kind != JV_FLT)) return 0;
+    *d = jv_to_double(v);
+    return 1;
+}
+/* Number.isSafeInteger */
+static int ce_safe(const jv_t *v, double *d) {
+    if (!ce_num(v, d)) return 0;
+    if (!(*d >= -9007199254740991.0 && *d <= 9007199254740991.0)) return 0;
+    return (double)(long long)*d == *d;
+}
+static int ce_str_is(const jv_t *v, const char *lit) {
+    long n = tx_len(lit, 1L << 20);
+    return v && v->kind == JV_STR && tx_same(v->s, v->n, lit, n);
+}
+/* JavaScript truthiness of a JSON value; undefined (0) is falsy */
+static int ce_truthy(const jv_t *v) {
+    double d;
+    if (!v) return 0;
+    switch (v->kind) {
+    case JV_NULL: case JV_FALSE: return 0;
+    case JV_STR: return v->n > 0;
+    case JV_INT: case JV_FLT: ce_num(v, &d); return d == d && d != 0;
+    default: return 1;
+    }
+}
+
+typedef struct { char *b; long n, cap; } ce_buf;
+static void ce_put(ce_buf *o, const char *s, long n) {
+    if (o->n + n + 1 > o->cap) {
+        long cap = o->cap ? o->cap : 256;
+        char *b;
+        while (o->n + n + 1 > cap) cap *= 2;
+        b = ce_mem(cap);
+        if (o->n) mm_copy(b, cap, o->b, o->n);
+        o->b = b; o->cap = cap;
+    }
+    if (n) mm_copy(o->b + o->n, o->cap - o->n, s, n);
+    o->n += n;
+    o->b[o->n] = 0;
+}
+static void ce_putz(ce_buf *o, const char *s) { ce_put(o, s, tx_len(s, 1L << 20)); }
+
+/* String(v) into O (top: undefined/null print their names; inside an array they are empty) */
+static void ce_jsstr(ce_buf *o, const jv_t *v, int top) {
+    double d;
+    long i;
+    char t[64];
+    if (!v) { if (top) ce_putz(o, "undefined"); return; }
+    switch (v->kind) {
+    case JV_NULL: if (top) ce_putz(o, "null"); return;
+    case JV_TRUE: ce_putz(o, "true"); return;
+    case JV_FALSE: ce_putz(o, "false"); return;
+    case JV_STR: ce_put(o, v->s, v->n); return;
+    case JV_OBJ: ce_putz(o, "[object Object]"); return;
+    case JV_ARR:
+        for (i = 0; i < v->n; i++) { if (i) ce_putz(o, ","); ce_jsstr(o, v->v[i], 0); }
+        return;
+    default:
+        ce_num(v, &d);
+        /* exact for an integer below 1e21 (the only form an id can equal); otherwise a marker
+           that is never an id (JavaScript would print a fraction or an exponent) */
+        if (d == d && d > -1e21 && d < 1e21 && (double)(long long)d == d) {
+            cx_fmt(t, sizeof t, "%lld", (long long)d);
+            ce_putz(o, t);
+        } else ce_putz(o, "~");
+        return;
+    }
+}
+static int ce_string_is(const jv_t *v, const char *s) {
+    ce_buf o = {0, 0, 0};
+    ce_jsstr(&o, v, 1);
+    return tx_eqz(o.b, s);
+}
+
+/* An array index key: "0" or [1-9][0-9]* up to 4294967294 */
+static int ce_index_key(const jv_t *k, unsigned long *out) {
+    unsigned long x = 0;
+    long i;
+    if (k->n < 1 || k->n > 10 || (k->n > 1 && k->s[0] == '0')) return 0;
+    for (i = 0; i < k->n; i++) {
+        if (k->s[i] < '0' || k->s[i] > '9') return 0;
+        x = x * 10 + (unsigned long)(k->s[i] - '0');
+    }
+    if (x > 4294967294UL) return 0;
+    *out = x;
+    return 1;
+}
+static void ce_canon(ce_buf *o, const jv_t *v);
+static void ce_canon_str(ce_buf *o, const char *s, long n) {
+    long i;
+    ce_putz(o, "\"");
+    for (i = 0; i < n; i++) {
+        if (s[i] == '"' || s[i] == '\\') ce_putz(o, "\\");
+        ce_put(o, s + i, 1);
+    }
+    ce_putz(o, "\"");
+}
+/* JSON.stringify(v), up to equality: two values print the same here exactly when JSON.stringify
+   prints them the same (numbers by value with -0 as 0, key order as JavaScript keeps it). */
+static void ce_canon(ce_buf *o, const jv_t *v) {
+    double d;
+    long i, j, first = 1;
+    char t[64];
+    switch (v->kind) {
+    case JV_NULL: ce_putz(o, "null"); return;
+    case JV_TRUE: ce_putz(o, "true"); return;
+    case JV_FALSE: ce_putz(o, "false"); return;
+    case JV_STR: ce_canon_str(o, v->s, v->n); return;
+    case JV_ARR:
+        ce_putz(o, "[");
+        for (i = 0; i < v->n; i++) { if (i) ce_putz(o, ","); ce_canon(o, v->v[i]); }
+        ce_putz(o, "]");
+        return;
+    case JV_OBJ: {
+        /* integer-like keys ascending first, then the others in insertion order */
+        unsigned long last = 0, best, x;
+        long bi;
+        int have = 0;
+        ce_putz(o, "{");
+        for (;;) {
+            bi = -1; best = 0;
+            for (j = 0; j < v->n; j++)
+                if (ce_index_key(v->k[j], &x) && (!have || x > last) && (bi < 0 || x < best)) { bi = j; best = x; }
+            if (bi < 0) break;
+            if (!first) ce_putz(o, ",");
+            first = 0;
+            ce_canon_str(o, v->k[bi]->s, v->k[bi]->n); ce_putz(o, ":"); ce_canon(o, v->v[bi]);
+            last = best; have = 1;
+        }
+        for (j = 0; j < v->n; j++) {
+            if (ce_index_key(v->k[j], &x)) continue;
+            if (!first) ce_putz(o, ",");
+            first = 0;
+            ce_canon_str(o, v->k[j]->s, v->k[j]->n); ce_putz(o, ":"); ce_canon(o, v->v[j]);
+        }
+        ce_putz(o, "}");
+        return;
+    }
+    default:
+        ce_num(v, &d);
+        if (d != d || d > 1.7976931348623157e308 || d < -1.7976931348623157e308) { ce_putz(o, "null"); return; }
+        if (d == 0) d = 0;
+        cx_fmt(t, sizeof t, "%.17g", d);
+        ce_putz(o, t);
+        return;
+    }
+}
+static void ce_field(ce_buf *o, int *first, const char *key, const jv_t *v) {
+    if (!v) return;            /* undefined is left out */
+    if (!*first) ce_putz(o, ",");
+    *first = 0;
+    ce_canon_str(o, key, tx_len(key, 64)); ce_putz(o, ":"); ce_canon(o, v);
+}
+
+/* ── releaseBinding ────────────────────────────────────────────────────── */
+
+static ce_bind ce_binding(const jv_t *r, const ce_req *q) {
+    ce_bind b;
+    ce_buf o = {0, 0, 0};
+    const jv_t *assets, *a = 0, *digest;
+    jv_t nul;
+    char *url;
+    double size = 0;
+    long i, named = 0;
+    int first = 1;
+    url = ce_cat3(CE_API, "releases/", q->release_id);
+    need(ce_string_is(ce_prop(r, "id"), q->release_id) && ce_prop(r, "draft") && ce_prop(r, "draft")->kind == JV_TRUE &&
+             ce_str_is(ce_prop(r, "url"), url),
+         "fixed existing private Draft release required");
+    assets = ce_prop(r, "assets");
+    need(assets && assets->kind == JV_ARR && assets->n < 1000, "bounded release inventory");
+    for (i = 0; i < assets->n; i++)
+        if (ce_str_is(ce_prop(assets->v[i], "name"), "evidence.zip")) { if (!named) a = assets->v[i]; named++; }
+    need(named == 1, "unique evidence.zip asset required");
+    url = ce_cat3(CE_API, "releases/assets/", q->asset_id);
+    need(ce_string_is(ce_prop(a, "id"), q->asset_id) && ce_str_is(ce_prop(a, "state"), "uploaded") &&
+             ce_safe(ce_prop(a, "size"), &size) && size > 0 && size <= (double)CE_MAX && ce_str_is(ce_prop(a, "url"), url),
+         "fixed asset ID/name/size/state/URL");
+    digest = ce_prop(a, "digest");
+    url = ce_cat3("sha256:", q->evidence_sha256, "");
+    need(!ce_truthy(digest) || ce_str_is(digest, url), "asset API digest mismatch");
+    /* {id, name, size, digest: a.digest || null, created_at, updated_at} */
+    mm_fill(&nul, (long)sizeof nul, 0, (long)sizeof nul);
+    nul.kind = JV_NULL;
+    ce_putz(&o, "{");
+    ce_field(&o, &first, "id", ce_prop(a, "id"));
+    ce_field(&o, &first, "name", ce_prop(a, "name"));
+    ce_field(&o, &first, "size", ce_prop(a, "size"));
+    ce_field(&o, &first, "digest", ce_truthy(digest) ? digest : &nul);
+    ce_field(&o, &first, "created_at", ce_prop(a, "created_at"));
+    ce_field(&o, &first, "updated_at", ce_prop(a, "updated_at"));
+    ce_putz(&o, "}");
+    b.canon = o.b;
+    b.size = (long)size;
+    return b;
+}
+
+/* ── evidenceBytes ─────────────────────────────────────────────────────── */
+
+static int ce_member_ok(const char *s, long n) {
+    static const char *const bad[3] = {"work", "state.json", "manifest.json"};
+    long k, bn;
+    if (!(n >= 9 && tx_same(s, 9, "evidence/", 9))) return 0;
+    for (k = 0; k < 3; k++) {
+        bn = tx_len(bad[k], 32);
+        if (n - 9 >= bn && tx_same(s + 9, bn, bad[k], bn) && (n - 9 == bn || s[9 + bn] == '/')) return 0;
+    }
+    return 1;
+}
+
+static void ce_evidence(const unsigned char *raw, long n, const ce_req *q, const ce_bind *a) {
+    char hex[65];
+    cz_zip z;
+    const char *why;
+    long i;
+    int ok = n == a->size;
+    if (ok) { cx_sha256_hex((const char *)raw, (size_t)n, hex); ok = tx_eqz(hex, q->evidence_sha256); }
+    need(ok, "owner evidence raw SHA/size mismatch");
+    why = cz_parse(raw, n, &z);
+    if (why) { char m[256]; tx_copy(m, sizeof m, why, tx_len(why, 255)); cz_free(&z); ce_refuse(m); }
+    if (!(z.count > 0)) { cz_free(&z); ce_refuse("empty evidence archive"); }
+    for (i = 0; i < z.count; i++)
+        if (!ce_member_ok(z.m[i].name, z.m[i].nl)) { cz_free(&z); ce_refuse("proof-only evidence/ inventory required"); }
+    cz_free(&z);
+}
+
+/* ── JSON.parse ────────────────────────────────────────────────────────── */
+
+static jv_t *ce_json(const char *b, long n) {
+    const char *err = 0;
+    long i;
+    int instr = 0;
+    jv_t *v;
+    /* JSON.parse knows no NaN/Infinity: outside strings JSON has no 'N' or 'I' */
+    for (i = 0; i < n; i++) {
+        char c = b[i];
+        if (instr) { if (c == '\\') i++; else if (c == '"') instr = 0; }
+        else if (c == '"') instr = 1;
+        else if (c == 'N' || c == 'I') ce_refuse("invalid JSON in Draft API response");
+    }
+    v = jv_parse(b, n, &err);
+    need(v != 0, "invalid JSON in Draft API response");
+    return v;
+}
+
+/* ── transport: curl ───────────────────────────────────────────────────── */
+
+typedef struct { char *body; long n; int status; char location[2048]; } ce_resp;
+
+/* the curl config holding the private headers; its path in ce_cfg */
+static void ce_config(const char *token, const char *accept) {
+    static int seq;
+    const char *base = sy_env("RUNNER_TEMP");
+    ce_buf o = {0, 0, 0};
+    long i, tn = tx_len(token, 1L << 16);
+    int fd, bad;
+    if (!base || !base[0]) base = sy_env("TMPDIR");
+    if (!base || !base[0]) base = "/tmp";
+    for (i = 0; i < tn; i++) need(token[i] != '\r' && token[i] != '\n', "source Actions token is not a header value");
+    ce_putz(&o, "header = \"Authorization: Bearer ");
+    for (i = 0; i < tn; i++) { if (token[i] == '"' || token[i] == '\\') ce_putz(&o, "\\"); ce_put(&o, token + i, 1); }
+    ce_putz(&o, "\"\nheader = \"Accept: ");
+    ce_putz(&o, accept);
+    ce_putz(&o, "\"\nheader = \"X-GitHub-Api-Version: 2022-11-28\"\n");
+    if (cx_fmt(ce_cfg, sizeof ce_cfg, "%s/.unisacc-capsule-curl-%d-%d.cfg", base, sy_pid(), ++seq) != 0) {
+        ce_cfg[0] = 0;
+        ce_refuse("capsule transport: private curl config path too long");
+    }
+    fd = sy_open_new(ce_cfg, 0600);
+    if (fd < 0) { ce_cfg[0] = 0; ce_refuse("capsule transport: cannot create private curl config"); }
+    bad = sy_write_all(fd, o.b, o.n) != 0;
+    if (sy_close(fd) != 0 || bad) ce_refuse("capsule transport: cannot write private curl config");
+}
+
+/* One GET by curl, no redirect followed, until STOP (sy_now_ms) and the global deadline; the body
+   bounded by LIMIT.  AUTH: send the config of ce_config.  Fills R. */
+static void ce_curl(const char *url, int auth, long stop, long limit, ce_resp *r) {
+    char secs[32], err[65536];
+    char *argv[24];
+    long en = 0, k, left;
+    int i = 0, ex = 0, code = 0, sig = 0, pid;
+    left = stop - sy_now_ms();
+    if (left < 1) left = 1;
+    cx_fmt(secs, sizeof secs, "%ld.%03ld", left / 1000, left % 1000);
+    argv[i++] = "curl"; argv[i++] = "-q"; argv[i++] = "--silent"; argv[i++] = "--show-error";
+    argv[i++] = "--proto"; argv[i++] = "=https"; argv[i++] = "--max-redirs"; argv[i++] = "0";
+    argv[i++] = "--max-time"; argv[i++] = secs;
+    if (auth) { argv[i++] = "--config"; argv[i++] = ce_cfg; }
+    argv[i++] = "--output"; argv[i++] = "-";
+    argv[i++] = "--write-out"; argv[i++] = "%{stderr}\nCX-CURL-STATUS %{http_code} %{redirect_url}\n";
+    argv[i++] = (char *)url; argv[i] = 0;
+    pid = sy_spawn_pipe(argv, 0, SY_SPAWN_STDERR_SPLIT, &ce_ofd, &ce_efd);
+    if (pid < 0) { ce_ofd = ce_efd = -1; ce_refuse("fetch failed"); }
+    ce_child = pid;
+    r->body = ce_mem(limit + 65536 + 1);
+    r->n = 0;
+    for (;;) {
+        long w = stop - sy_now_ms() + 2000, got;   /* curl's own --max-time ends it first */
+        if (w < 1 || sy_readable(ce_ofd, w) <= 0) ce_refuse("The operation was aborted due to timeout");
+        got = sy_read(ce_ofd, r->body + r->n, 65536);
+        if (got <= 0) break;
+        r->n += got;
+        ce_budget();
+        need(r->n <= limit, "bounded Draft response");
+    }
+    for (;;) {
+        long w = stop - sy_now_ms() + 2000, got;
+        if (w < 1 || sy_readable(ce_efd, w) <= 0) ce_refuse("The operation was aborted due to timeout");
+        got = sy_read(ce_efd, err + en, (long)sizeof err - 1 - en);
+        if (got <= 0) break;
+        en += got;
+        if (en >= (long)sizeof err - 1) break;
+    }
+    err[en] = 0;
+    sy_close(ce_ofd); sy_close(ce_efd); ce_ofd = ce_efd = -1;
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid) { ce_child = 0; ce_refuse("fetch failed"); }
+    ce_child = 0;
+    if (ce_cfg[0]) { sy_unlink(ce_cfg); ce_cfg[0] = 0; }
+    if (ex && code == 28) ce_refuse("The operation was aborted due to timeout");
+    need(ex && code == 0, "fetch failed");
+    /* the last "CX-CURL-STATUS CODE URL" line */
+    r->status = 0; r->location[0] = 0;
+    k = tx_find(err, en, "\nCX-CURL-STATUS ", 16);
+    need(k >= 0, "fetch failed");
+    {
+        const char *p = err + k + 16, *u;
+        long un;
+        while (*p >= '0' && *p <= '9') { r->status = r->status * 10 + (*p - '0'); p++; }
+        if (*p == ' ') p++;
+        u = p;
+        un = tx_chr(u, en - (u - err), '\n');
+        if (un < 0) un = en - (u - err);
+        if (un >= (long)sizeof r->location) un = 0;
+        tx_copy(r->location, sizeof r->location, u, un);
+    }
+}
+
+/* new URL(location) checked as the mjs: https, no user name or password, no port, an allowed
+   host.  The URL to fetch into OUT. */
+static void ce_redirect(const char *loc, char *out, long cap) {
+    long n = tx_len(loc, 2047), i, hs, he, ae;
+    char host[256];
+    int ok = n > 8;
+    for (i = 0; ok && i < 8; i++) {
+        char c = loc[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        if (c != "https://"[i]) ok = 0;
+    }
+    if (ok) {
+        hs = 8;
+        for (ae = hs; ae < n && loc[ae] != '/' && loc[ae] != '?' && loc[ae] != '#' && loc[ae] != '\\'; ae++)
+            if (loc[ae] == '@' || loc[ae] == '%' || (unsigned char)loc[ae] >= 0x80) ok = 0;
+        he = ae;
+        if (ok) {
+            long c = tx_chr(loc + hs, ae - hs, ':');
+            if (c >= 0) {
+                long port = 0, d;
+                he = hs + c;
+                for (d = he + 1; d < ae; d++) {
+                    if (loc[d] < '0' || loc[d] > '9' || port > 100000) { ok = 0; break; }
+                    port = port * 10 + (loc[d] - '0');
+                }
+                if (ok && he + 1 < ae && port != 443) ok = 0;
+            }
+        }
+        if (ok && (he - hs < 1 || he - hs >= (long)sizeof host)) ok = 0;
+        if (ok) {
+            for (i = hs; i < he; i++) {
+                char c = loc[i];
+                host[i - hs] = (char)(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+            }
+            host[he - hs] = 0;
+            ok = tx_eqz(host, "release-assets.githubusercontent.com") || tx_eqz(host, "objects.githubusercontent.com");
+        }
+        if (ok) {
+            long fe = tx_chr(loc + ae, n - ae, '#');
+            if (fe < 0) fe = n - ae;
+            ok = cx_fmt(out, (size_t)cap, "https://%s%.*s", host, (int)fe, loc + ae) == 0;
+        }
+    }
+    need(ok, "untrusted Draft asset redirect");
+}
+
+/* get(e, suffix, binary) */
+static char *ce_get(const char *token, const char *suffix, int binary, long *n) {
+    long stop = sy_now_ms() + ce_budget(), limit = binary ? CE_MAX : 4L * 1024 * 1024;
+    char *url = ce_cat3(CE_API, suffix, "");
+    ce_resp r;
+    ce_config(token, binary ? "application/octet-stream" : "application/vnd.github+json");
+    ce_curl(url, 1, stop, limit, &r);
+    if (binary && r.status == 302) {
+        char next[2100];
+        ce_redirect(r.location, next, (long)sizeof next);
+        ce_curl(next, 0, stop, limit, &r);
+        need(!(r.status >= 300 && r.status < 400), "fetch failed");
+    }
+    need(r.status >= 200 && r.status <= 299,
+         "existing Draft/asset read denied; contents write token is required for private Draft visibility; no credential fallback");
+    *n = r.n;
+    return r.body;
+}
+
+/* ── the two transports ────────────────────────────────────────────────── */
+
+static jv_t *ce_api(const char *token, const char *suffix) {
+    long n;
+    char *b;
+    if (ce_replay) {
+        size_t sn;
+        char path[4200];
+        ce_api_calls++;
+        cx_fmt(path, sizeof path, "%s/%s", ce_dir, ce_api_calls > 1 && sy_exists(ce_cat3(ce_dir, "/release-after.json", "")) == 1
+                                                      ? "release-after.json" : "release.json");
+        b = cx_read(path, &sn);
+        if (!b) ce_refuse("replay: cannot read recorded release JSON");
+        return ce_json(b, (long)sn);
+    }
+    b = ce_get(token, suffix, 0, &n);
+    return ce_json(b, n);
+}
+static unsigned char *ce_download(const char *token, const char *suffix, long *n) {
+    if (ce_replay) {
+        size_t sn;
+        char *b = cx_read(ce_cat3(ce_dir, "/evidence.zip", ""), &sn);
+        if (!b) ce_refuse("replay: cannot read recorded evidence.zip");
+        *n = (long)sn;
+        return (unsigned char *)b;
+    }
+    return (unsigned char *)ce_get(token, suffix, 1, n);
+}
+
+/* ── node fs error text ────────────────────────────────────────────────── */
+
+static void ce_fs_fail(int rc, const char *syscall, const char *path) {
+    static const struct { int e; const char *code, *text; } tab[] = {
+        {ENOENT, "ENOENT", "no such file or directory"}, {EEXIST, "EEXIST", "file already exists"},
+        {EACCES, "EACCES", "permission denied"}, {ENOTDIR, "ENOTDIR", "not a directory"},
+        {EISDIR, "EISDIR", "illegal operation on a directory"}, {ELOOP, "ELOOP", "too many symbolic links encountered"},
+        {ENAMETOOLONG, "ENAMETOOLONG", "name too long"}, {ENOSPC, "ENOSPC", "no space left on device"},
+        {EROFS, "EROFS", "read-only file system"}, {EPERM, "EPERM", "operation not permitted"},
+        {EIO, "EIO", "i/o error"}, {EDQUOT, "EDQUOT", "disk quota exceeded"}, {EINVAL, "EINVAL", "invalid argument"}};
+    char m[4400], at[4200];
+    int k;
+    if (path) cx_fmt(at, sizeof at, " '%s'", path); else at[0] = 0;   /* write/close name no path */
+    for (k = 0; k < (int)(sizeof tab / sizeof tab[0]); k++)
+        if (-rc == tab[k].e) {
+            cx_fmt(m, sizeof m, "%s: %s, %s%s", tab[k].code, tab[k].text, syscall, at);
+            ce_refuse(m);
+        }
+    cx_fmt(m, sizeof m, "Unknown system error %d: Unknown system error %d, %s%s", rc, rc, syscall, at);
+    ce_refuse(m);
+}
+
+/* path.resolve(P): absolute, '.', '..' and repeated '/' removed, no trailing '/' */
+static char *ce_resolve(const char *p) {
+    char cwd[4096];
+    ce_buf in = {0, 0, 0}, o = {0, 0, 0};
+    long i = 0, n;
+    if (p[0] != '/') {
+        if (sy_cwd(cwd, sizeof cwd) < 0) ce_refuse("process.cwd failed");
+        ce_putz(&in, cwd); ce_putz(&in, "/");
+    }
+    ce_putz(&in, p);
+    n = in.n;
+    ce_putz(&o, "");
+    while (i < n) {
+        long s;
+        while (i < n && in.b[i] == '/') i++;
+        s = i;
+        while (i < n && in.b[i] != '/') i++;
+        if (i == s || (i - s == 1 && in.b[s] == '.')) continue;
+        if (i - s == 2 && in.b[s] == '.' && in.b[s + 1] == '.') {
+            long c = tx_rchr(o.b, o.n, '/');
+            o.n = c < 0 ? 0 : c;
+            o.b[o.n] = 0;
+            continue;
+        }
+        ce_putz(&o, "/"); ce_put(&o, in.b + s, i - s);
+    }
+    if (!o.n) ce_putz(&o, "/");
+    return o.b;
+}
+
+/* fs.realpathSync(P) (P 0: process.env.RUNNER_TEMP unset, which node takes as "undefined"):
+   lstat each component from the root; a symlink is stat'ed, replaced by its resolved target and
+   the walk goes on after it. */
+static char *ce_realpath(const char *p) {
+    char *abs = ce_resolve(p ? p : "undefined"), *cur, out[4096];
+    long pos = 0, n, e;
+    sy_stat_t st;
+    int rc;
+    for (;;) {
+        n = tx_len(abs, 1L << 16);
+        if (pos >= n || (n == 1 && abs[0] == '/')) break;
+        e = pos + 1;
+        while (e < n && abs[e] != '/') e++;
+        cur = ce_mem(e + 1);
+        tx_copy(cur, e + 1, abs, e);
+        rc = sy_lstat(cur, &st);
+        if (rc != 0) ce_fs_fail(rc, "lstat", cur);
+        if (st.kind == 'l') {
+            rc = sy_stat(cur, &st);
+            if (rc != 0) ce_fs_fail(rc, "stat", cur);
+            rc = sy_realpath(cur, out, (int)sizeof out);
+            if (rc < 0) ce_fs_fail(rc, "readlink", cur);
+            abs = ce_cat3(rc == 1 ? "" : out, abs + e, "");
+            if (!abs[0]) abs = "/";
+            pos = rc == 1 ? 0 : rc;
+            continue;
+        }
+        pos = e;
+    }
+    return abs;
+}
+
+/* ── main flow ─────────────────────────────────────────────────────────── */
+
+static int ce_argc;
+static char **ce_argv;
+static char ce_receipt[1024];
+
+static void ce_main(void *ud) {
+    const char *token, *base;
+    char *out, *file;
+    ce_req q;
+    ce_bind before, after;
+    unsigned char *raw;
+    long n;
+    int fd, bad, rc;
+    (void)ud;
+    ce_receipt[0] = 0;
+    ce_api_calls = 0;
+    need(ce_replay || (ce_argc > 1 && tx_eqz(ce_argv[1], "export")), "expected export");
+    token = ce_env("GH_TOKEN");
+    need(token && token[0], "source Actions token absent");
+    q.release_id = ce_env("CAPSULE_RELEASE_ID");
+    q.asset_id = ce_env("CAPSULE_ASSET_ID");
+    q.evidence_sha256 = ce_env("CAPSULE_SHA256");
+    q.source_sha = ce_env("CANDIDATE_SOURCE_SHA");
+    /* exportApproved */
+    ce_request(&q);
+    before = ce_binding(ce_api(token, ce_cat3("releases/", q.release_id, "")), &q);
+    raw = ce_download(token, ce_cat3("releases/assets/", q.asset_id, ""), &n);
+    ce_evidence(raw, n, &q, &before);
+    after = ce_binding(ce_api(token, ce_cat3("releases/", q.release_id, "")), &q);
+    need(tx_eqz(before.canon, after.canon), "Draft asset changed during download");
+    cx_fmt(ce_receipt, sizeof ce_receipt,
+           "{\"schema\":1,\"kind\":\"unisacc-private-evidence-capsule-transport-v1\",\"source_repository\":\"%s\","
+           "\"source_sha\":\"%s\",\"producer_head_sha\":\"%s\",\"release_id\":\"%s\",\"asset_id\":\"%s\","
+           "\"asset_name\":\"evidence.zip\",\"bytes\":%ld,\"evidence_sha256\":\"%s\",\"release_eligible\":false,"
+           "\"admission\":\"NOT_ATTESTED: immutable owner capsule transport only\"}",
+           CE_REPO, CE_SOURCE, ce_env("GITHUB_SHA"), q.release_id, q.asset_id, n, q.evidence_sha256);
+    ce_budget();
+    base = ce_realpath(ce_env("RUNNER_TEMP"));
+    out = ce_cat3(base, tx_eqz(base, "/") ? "" : "/", "unisacc-evidence-capsule-output");
+    rc = sy_mkdir(out, 0700);
+    if (rc != 0) ce_fs_fail(rc, "mkdir", out);
+    file = ce_cat3(out, "/", "evidence.zip");
+    fd = sy_open_new(file, 0600);
+    if (fd < 0) ce_fs_fail(fd, "open", file);
+    bad = sy_write_all(fd, raw, n);
+    rc = sy_close(fd);
+    if (bad) ce_fs_fail(bad, "write", 0);
+    if (rc) ce_fs_fail(rc, "close", 0);
+    ce_budget();
+}
+
+/* parse-zip FILE...: "FILE<TAB>OK<TAB>COUNT<TAB>name,method,len,flags,mode,extra,local_extra|..."
+   or "FILE<TAB>REFUSED<TAB>MSG"; exit 1 when any is refused or unreadable. */
+static int ce_parse_zip(int argc, char **argv) {
+    int i, bad = 0;
+    for (i = 2; i < argc; i++) {
+        size_t sn;
+        char *b = cx_read(argv[i], &sn);
+        cz_zip z;
+        const char *why;
+        long k;
+        if (!b) { printf("%s\tUNREADABLE\n", argv[i]); bad = 1; continue; }
+        why = cz_parse((const unsigned char *)b, (long)sn, &z);
+        if (why) { printf("%s\tREFUSED\t%s\n", argv[i], why); bad = 1; }
+        else {
+            printf("%s\tOK\t%ld\t", argv[i], z.count);
+            for (k = 0; k < z.count; k++)
+                printf("%s%s,%u,%ld,%u,%u,%d,%d", k ? "|" : "", z.m[k].name, z.m[k].method, z.m[k].len, z.m[k].flags,
+                       z.m[k].mode, z.m[k].extra, z.m[k].local_extra);
+            printf("\n");
+        }
+        cz_free(&z);   /* the file buffer lives to exit */
+    }
+    return bad;
+}
+
+int main(int argc, char **argv) {
+    int i;
+    ce_argc = argc; ce_argv = argv;
+    ce_deadline = sy_now_ms() + 55000;
+    if (argc > 1 && tx_eqz(argv[1], "parse-zip")) {
+        if (argc < 3) { fprintf(stderr, "usage: capsule-export.cx parse-zip FILE...\n"); return 2; }
+        return ce_parse_zip(argc, argv);
+    }
+    if (argc > 1 && tx_eqz(argv[1], "replay")) {
+        if (argc < 3) { fprintf(stderr, "usage: capsule-export.cx replay DIR...\n"); return 2; }
+        ce_replay = 1;
+        for (i = 2; i < argc; i++) {
+            size_t en;
+            ce_dir = argv[i];
+            ce_deadline = sy_now_ms() + 55000;
+            ce_envtext = cx_read(ce_cat3(ce_dir, "/env", ""), &en);
+            ce_envn = ce_envtext ? (long)en : 0;
+            if (sy_guard(ce_main, 0) != 0) printf("%s\tREFUSED\t%s\n", ce_dir, ce_msg);
+            else printf("%s\tOK\t%s\n", ce_dir, ce_receipt);
+            ce_envtext = 0;
+        }
+        return 0;
+    }
+    if (sy_guard(ce_main, 0) != 0) {
+        fprintf(stderr, "capsule export refused: %s\n", ce_msg);
+        return 1;
+    }
+    printf("%s\n", ce_receipt);
+    return 0;
+}

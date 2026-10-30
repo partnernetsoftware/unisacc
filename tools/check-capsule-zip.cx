@@ -1,0 +1,876 @@
+/* Checks release/capsule-export.cx and its parser release/ci/capsulezip.cx offline:
+ *   sh ./unisacc.com tools/check-capsule-zip.cx -- [OUTDIR [--prepare-only]]   (repo root; default out/capsule-zips)
+ *
+ * Writes crafted ZIP files to OUTDIR/zip/ (stored and deflated members, data descriptors with and
+ * without signature, the 0x5855 extra, bad CRC, duplicate and unsafe names, symlink and special
+ * modes, an archive comment, gap/overlap, file/directory collision, oversize, an inflated budget
+ * overrun, trailing and truncated deflate data, zlib faults, ...) and recorded GitHub release JSON
+ * cases to OUTDIR/replay/NAME/ (env, release.json, release-after.json, evidence.zip), then runs
+ *   release/capsule-export.cx parse-zip OUTDIR/zip/*.zip    (one process)
+ *   release/capsule-export.cx replay OUTDIR/replay/*        (one process, no network)
+ * and compares each line with the expected one.  The expected lines are the results of the
+ * original node code on the same files (release/capsule-zip.mjs parseZip; capsule-export.mjs
+ * exportRequest/releaseBinding/evidenceBytes/exportApproved with the same recorded reads and
+ * main's RUNNER_TEMP steps), recorded 2026-10-30 before the mjs went to
+ * archive/reference-js/release/; the differences that remain are the justified ones listed in
+ * plans/python-residue-2026-10-30.md and are spelled out where they occur below.
+ * In the expected text {dir} is the case directory, {sha} the sha256 and {bytes} the size of the
+ * replay evidence.zip.  Prints PASS/FAIL lines and CHECK_CAPSULE_ZIP<TAB>failed=N. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use text.deflate
+#pragma unisa use mem.arena
+#pragma unisa use mem.bytes
+#pragma unisa use runtime.codec
+
+#define MIB (1024L * 1024)
+
+static int failed, ar;
+static char root[4096];        /* OUTDIR */
+static char cwd[4096];
+
+static void ck(int ok, const char *name) { if (!ok) failed++; printf("%s\tcapsule.%s\n", ok ? "PASS" : "FAIL", name); }
+
+static void *mem(long n) {
+    void *p = ar_alloc(ar, n < 1 ? 1 : n);
+    if (!p) { fprintf(stderr, "check-capsule-zip: out of memory\n"); exit(2); }
+    return p;
+}
+static char *fmt(const char *f, const char *a, const char *b) {
+    long n = tx_len(f, 1L << 20) + tx_len(a ? a : "", 1L << 20) + tx_len(b ? b : "", 1L << 20) + 1;
+    char *p = mem(n);
+    cx_fmt(p, (size_t)n, f, a ? a : "", b ? b : "");
+    return p;
+}
+static int put_file(const char *path, const void *s, long n) {
+    int fd = sy_open_new(path, 0644), bad;
+    if (fd < 0) return 1;
+    bad = sy_write_all(fd, s, n) != 0;
+    return sy_close(fd) != 0 || bad;
+}
+
+static unsigned long crc_of(const unsigned char *p, long n) {
+    static CxCodecCrc ctx;
+    static int ready;
+    uint32_t c = 0;
+    if (!ready) { cxcodec_crc_init(&ctx); ready = 1; }
+    cxcodec_crc(&ctx, (const char *)p, (int)n, &c);
+    return c;
+}
+static unsigned char *deflate_of(const unsigned char *p, long n, long *out) {
+    long cap = dz_bound(n);
+    unsigned char *o = mem(cap);
+    *out = dz_deflate(p, n, o, cap);
+    return o;
+}
+
+/* ── ZIP writer ─────────────────────────────────────────────────────────── */
+
+typedef struct {
+    const char *name;
+    const unsigned char *data; long len;    /* member content */
+    int method;                             /* 0 stored, 8 deflate */
+    unsigned flags;                         /* besides 8 for a descriptor */
+    unsigned mode;                          /* external attributes >> 16 */
+    int desc;                               /* 0 none, 1 descriptor, 2 signed descriptor */
+    int cx, lx;                             /* 1: the 0x5855 extra field (8 / 12 bytes) */
+    const unsigned char *packed; long pn;   /* compressed bytes instead of deflate(data) */
+    long declared;                          /* size written in the headers; -1: len */
+} ze;
+
+static unsigned char *zb;
+static long zn;
+static long zloc[8], zcen[8], zcd, zend;
+
+static void b8(unsigned v) { zb[zn++] = (unsigned char)v; }
+static void b16(unsigned long v) { b8(v & 255); b8((v >> 8) & 255); }
+static void b32(unsigned long v) { b16(v & 0xffff); b16((v >> 16) & 0xffff); }
+static void bs(const void *s, long n) { mm_copy(zb + zn, 16 * MIB - zn, s, n); zn += n; }
+static void p16(long at, unsigned long v) { zb[at] = (unsigned char)(v & 255); zb[at + 1] = (unsigned char)((v >> 8) & 255); }
+static void p32(long at, unsigned long v) { p16(at, v & 0xffff); p16(at + 2, (v >> 16) & 0xffff); }
+
+/* ZIP of E[0..n): locals, central directory, end record (no comment).  Offsets in zloc/zcen/zcd/zend. */
+static void zbuild(ze *e, int n) {
+    int i;
+    long cl[8];
+    const unsigned char *cd[8];
+    unsigned long crc[8];
+    static const unsigned char ext_c[12] = {0x55, 0x58, 8, 0, 1, 0, 0, 0, 2, 0, 0, 0};
+    static const unsigned char ext_l[16] = {0x55, 0x58, 12, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0xe8, 3, 0xe8, 3};
+    zn = 0;
+    for (i = 0; i < n; i++) {
+        long nl = tx_len(e[i].name, 4096), dl = e[i].declared >= 0 ? e[i].declared : e[i].len;
+        unsigned f = e[i].flags | (e[i].desc ? 8u : 0u);
+        crc[i] = crc_of(e[i].data, e[i].len);
+        if (e[i].packed) { cd[i] = e[i].packed; cl[i] = e[i].pn; }
+        else if (e[i].method == 8) cd[i] = deflate_of(e[i].data, e[i].len, &cl[i]);
+        else { cd[i] = e[i].data; cl[i] = e[i].len; }
+        zloc[i] = zn;
+        b32(0x04034b50); b16(20); b16(f); b16(e[i].method); b16(0); b16(0x21);
+        b32(e[i].desc ? 0 : crc[i]); b32(e[i].desc ? 0 : (unsigned long)cl[i]); b32(e[i].desc ? 0 : (unsigned long)dl);
+        b16(nl); b16(e[i].lx ? 16 : 0);
+        bs(e[i].name, nl);
+        if (e[i].lx) bs(ext_l, 16);
+        bs(cd[i], cl[i]);
+        if (e[i].desc == 2) b32(0x08074b50);
+        if (e[i].desc) { b32(crc[i]); b32((unsigned long)cl[i]); b32((unsigned long)dl); }
+    }
+    zcd = zn;
+    for (i = 0; i < n; i++) {
+        long nl = tx_len(e[i].name, 4096), dl = e[i].declared >= 0 ? e[i].declared : e[i].len;
+        unsigned f = e[i].flags | (e[i].desc ? 8u : 0u);
+        zcen[i] = zn;
+        b32(0x02014b50); b16(0x031e); b16(20); b16(f); b16(e[i].method); b16(0); b16(0x21);
+        b32(crc[i]); b32((unsigned long)cl[i]); b32((unsigned long)dl);
+        b16(nl); b16(12 * (unsigned long)e[i].cx); b16(0); b16(0); b16(0); b32((unsigned long)e[i].mode << 16); b32((unsigned long)zloc[i]);
+        bs(e[i].name, nl);
+        if (e[i].cx) bs(ext_c, 12);
+        if (e[i].cx == 2) bs(ext_c, 12);
+    }
+    zend = zn;
+    b32(0x06054b50); b16(0); b16(0); b16(n); b16(n); b32((unsigned long)(zend - zcd)); b32((unsigned long)zcd); b16(0);
+}
+
+static ze E(const char *name, const char *text, int method) {
+    ze e;
+    mm_fill(&e, (long)sizeof e, 0, (long)sizeof e);
+    e.name = name; e.data = (const unsigned char *)text; e.len = tx_len(text, 1L << 20); e.method = method;
+    e.mode = 0x81a4; e.declared = -1;
+    return e;
+}
+static ze D(const char *name) { ze e = E(name, "", 0); e.mode = 0x41ed; return e; }
+
+/* ── cases ─────────────────────────────────────────────────────────────── */
+
+typedef struct { const char *name, *expect; } zcase;
+#define NZ 64
+static zcase zc[NZ];
+static int nzc;
+
+static void zsave(const char *name, const char *expect) {
+    char *path = fmt("%s/zip/%s.zip", root, name);
+    if (put_file(path, zb, zn)) { fprintf(stderr, "check-capsule-zip: cannot write %s\n", path); exit(2); }
+    zc[nzc].name = name; zc[nzc].expect = expect; nzc++;
+}
+
+static const char *TXT = "proof line one\nproof line two\nproof line two\nproof line two\n";
+
+static void make_zips(void) {
+    static unsigned char big[34 * MIB];        /* zeros */
+    ze e[4];
+    long bn;
+    unsigned char *bz;
+
+    /* accepted shapes */
+    e[0] = D("evidence/"); e[1] = E("evidence/a.txt", "hello\n", 0); e[2] = E("evidence/b.txt", TXT, 8);
+    zbuild(e, 3);
+    zsave("ok-stored-deflated-dir", "OK\t3\tevidence/,0,0,0,16877,0,0|evidence/a.txt,0,6,0,33188,0,0|evidence/b.txt,8,60,0,33188,0,0");
+    e[0] = E("evidence/d.txt", TXT, 8); e[0].desc = 1; e[1] = E("evidence/s.txt", "x", 0); e[1].desc = 1;
+    zbuild(e, 2);
+    zsave("ok-descriptor", "OK\t2\tevidence/d.txt,8,60,8,33188,0,0|evidence/s.txt,0,1,8,33188,0,0");
+    e[0] = E("evidence/d.txt", TXT, 8); e[0].desc = 2;
+    zbuild(e, 1);
+    zsave("ok-descriptor-signed", "OK\t1\tevidence/d.txt,8,60,8,33188,0,0");
+    e[0] = E("evidence/x.txt", "abc", 0); e[0].cx = 1; e[0].lx = 1; e[0].flags = 0x800;
+    zbuild(e, 1);
+    zsave("ok-extra-utf8flag", "OK\t1\tevidence/x.txt,0,3,2048,33188,1,1");
+    e[0] = E("a b-c_d.e/f", "z", 0); e[0].mode = 0;
+    zbuild(e, 1);
+    zsave("ok-mode0-charset", "OK\t1\ta b-c_d.e/f,0,1,0,0,0,0");
+    {   /* bytes after the final deflate block: zlib ignores them, size and CRC still hold */
+        static unsigned char tail[200];
+        long cn;
+        unsigned char *c = deflate_of((const unsigned char *)TXT, 60, &cn);
+        mm_copy(tail, sizeof tail, c, cn); tail[cn] = 0xde; tail[cn + 1] = 0xad;
+        e[0] = E("evidence/t.txt", TXT, 8); e[0].packed = tail; e[0].pn = cn + 2;
+        zbuild(e, 1);
+        zsave("ok-deflate-trailing-bytes", "OK\t1\tevidence/t.txt,8,60,0,33188,0,0");
+        /* the same stream cut short */
+        e[0].packed = c; e[0].pn = cn - 3;
+        zbuild(e, 1);
+        zsave("deflate-truncated", "REFUSED\tunexpected end of file");
+        /* declared shorter / longer than the stream inflates to */
+        e[0].packed = 0; e[0].declared = 59;
+        zbuild(e, 1);
+        zsave("deflate-longer-than-declared", "REFUSED\tZIP size/CRC");
+        e[0].declared = 61;
+        zbuild(e, 1);
+        zsave("deflate-shorter-than-declared", "REFUSED\tZIP size/CRC");
+    }
+    {   static const unsigned char btype3[3] = {0x07, 0, 0}, stored_bad[8] = {0x01, 5, 0, 5, 0, 'a', 'b', 'c'};
+        static const unsigned char toofar[4] = {0x03, 0x02, 0x00, 0x00};
+        e[0] = E("evidence/z", "abc", 8); e[0].packed = btype3; e[0].pn = 3;
+        zbuild(e, 1);
+        zsave("deflate-invalid-block-type", "REFUSED\tinvalid block type");
+        e[0].packed = stored_bad; e[0].pn = 8;
+        zbuild(e, 1);
+        zsave("deflate-invalid-stored-lengths", "REFUSED\tinvalid stored block lengths");
+        e[0].packed = toofar; e[0].pn = 4;
+        zbuild(e, 1);
+        zsave("deflate-distance-too-far", "REFUSED\tinvalid distance too far back");
+        e[0] = E("evidence/z", "", 8); e[0].packed = btype3; e[0].pn = 0;
+        zbuild(e, 1);
+        zsave("deflate-empty-stream", "REFUSED\tunexpected end of file");
+    }
+    /* refusals in parse order */
+    zn = 10; mm_fill(zb, 10, 0, 10);
+    zsave("size-too-small", "REFUSED\tZIP size");
+    e[0] = E("evidence/a", "a", 0);
+    zbuild(e, 1); zn -= 2; b16(5); bs("note!", 5);
+    zsave("end-comment", "REFUSED\tZIP end/comment");
+    zbuild(e, 1); p16(zend + 4, 1);
+    zsave("disk-number", "REFUSED\tZIP disk/inventory");
+    zbuild(e, 1); p16(zend + 8, 2);
+    zsave("inventory-count-mismatch", "REFUSED\tZIP disk/inventory");
+    zbuild(e, 1); p32(zcen[0], 0x02014b51);
+    zsave("central-signature", "REFUSED\tZIP central header");
+    e[0] = E("evidence/a", "a", 12);
+    zbuild(e, 1);
+    zsave("method-12", "REFUSED\tunsupported ZIP features");
+    e[0] = E("evidence/a", "a", 0); e[0].flags = 1;
+    zbuild(e, 1);
+    zsave("flag-encrypted", "REFUSED\tunsupported ZIP features");
+    e[0] = E("evidence/a", "a", 0);
+    zbuild(e, 1); p16(zcen[0] + 32, 1);  /* comment length 1, past the end of the directory */
+    zsave("file-comment", "REFUSED\tunsupported ZIP features");
+    e[0] = E("evidence/a", "a", 0); e[0].cx = 1;
+    zbuild(e, 1); p16(zcen[0] + 46 + 10, 0x5455);
+    zsave("extra-unsupported-id", "REFUSED\tunsupported ZIP extra");
+    zbuild(e, 1); p16(zcen[0] + 46 + 10 + 2, 9);
+    zsave("extra-extent", "REFUSED\tZIP extra extent/duplicate");
+    e[0] = E("evidence/a", "a", 0); e[0].cx = 2;                     /* two valid 0x5855 fields */
+    zbuild(e, 1);
+    zsave("extra-duplicate", "REFUSED\tZIP extra extent/duplicate");
+    zbuild(e, 1); p16(zcen[0] + 30, 14);                               /* one valid field, then 2 bytes */
+    zsave("extra-header-short", "REFUSED\tZIP extra header");
+    e[0].cx = 0; e[0].lx = 1;
+    zbuild(e, 1); p16(zloc[0] + 30 + 10 + 2, 8);                       /* local field 8 bytes, 4 left */
+    zsave("extra-local-length", "REFUSED\tunsupported ZIP extra");
+    e[0] = E("evidence/a", "a", 0); e[1] = E("evidence/a", "b", 0);
+    zbuild(e, 2);
+    zsave("duplicate-name", "REFUSED\tunsafe/duplicate ZIP path");
+    e[0] = E("evidence/../x", "a", 0); zbuild(e, 1);
+    zsave("unsafe-dotdot", "REFUSED\tunsafe/duplicate ZIP path");
+    e[0] = E("/evidence/x", "a", 0); zbuild(e, 1);
+    zsave("unsafe-absolute", "REFUSED\tunsafe/duplicate ZIP path");
+    e[0] = E("evidence//x", "a", 0); zbuild(e, 1);
+    zsave("unsafe-empty-segment", "REFUSED\tunsafe/duplicate ZIP path");
+    e[0] = E("evidence/./x", "a", 0); zbuild(e, 1);
+    zsave("unsafe-dot", "REFUSED\tunsafe/duplicate ZIP path");
+    e[0] = E("evidence\\x", "a", 0); zbuild(e, 1);
+    zsave("unsafe-backslash", "REFUSED\tunsafe/duplicate ZIP path");
+    e[0] = E("evid\xc3\xa9nce/x", "a", 0); zbuild(e, 1);
+    zsave("unsafe-non-ascii", "REFUSED\tunsafe/duplicate ZIP path");
+    e[0] = D("evidence//"); zbuild(e, 1);
+    zsave("unsafe-double-trailing-slash", "REFUSED\tunsafe/duplicate ZIP path");
+    e[0] = E("evidence/link", "target", 0); e[0].mode = 0xa1ff; zbuild(e, 1);
+    zsave("symlink-mode", "REFUSED\tZIP link/special file");
+    e[0] = D("evidence/"); e[0].mode = 0x81a4; zbuild(e, 1);
+    zsave("dir-with-file-mode", "REFUSED\tZIP link/special file");
+    e[0] = E("evidence/fifo", "", 0); e[0].mode = 0x11a4; zbuild(e, 1);
+    zsave("fifo-mode", "REFUSED\tZIP link/special file");
+    e[0] = E("evidence/a", "a", 0);
+    zbuild(e, 1); p32(zloc[0], 0x04034b51);
+    zsave("local-signature", "REFUSED\tZIP local identity");
+    zbuild(e, 1); p16(zloc[0] + 8, 8);
+    zsave("local-method-differs", "REFUSED\tZIP local identity");
+    zbuild(e, 1); p32(zloc[0] + 14, 1);
+    zsave("local-crc-differs", "REFUSED\tZIP local size/CRC");
+    zbuild(e, 1); p16(zloc[0] + 30, 'E');
+    zsave("local-name-differs", "REFUSED\tZIP local extent");
+    e[0] = E("evidence/a", "a", 0); e[0].declared = 64 * MIB + 1;
+    zbuild(e, 1);
+    zsave("oversize-declared", "REFUSED\tZIP local extent");
+    e[0] = E("evidence/a", "a", 8); e[0].desc = 1; e[0].declared = 64 * MIB + 1;
+    zbuild(e, 1);
+    zsave("oversize-declared-descriptor", "REFUSED\tZIP local extent");
+    e[0] = E("evidence/d.txt", TXT, 8); e[0].desc = 1;
+    zbuild(e, 1); p32(zcd - 12, 1);
+    zsave("descriptor-identity", "REFUSED\tZIP descriptor identity");
+    zbuild(e, 1); p32(zcd - 4, 0); p32(zcen[0] + 24, 0); p32(zloc[0] + 18 + 4, 0);
+    zsave("descriptor-length-zero", "REFUSED\tZIP size/CRC");
+    e[0] = E("evidence/a", "abc", 0);
+    zbuild(e, 1); p32(zcen[0] + 16, 0x12345678); p32(zloc[0] + 14, 0x12345678);
+    zsave("bad-crc", "REFUSED\tZIP size/CRC");
+    e[0] = E("evidence/a", "abc", 0); e[0].declared = 2;
+    zbuild(e, 1);
+    zsave("stored-size-differs", "REFUSED\tZIP size/CRC");
+    e[0] = D("evidence/"); e[0].data = (const unsigned char *)"x"; e[0].len = 1;
+    zbuild(e, 1);
+    zsave("dir-with-data", "REFUSED\tZIP size/CRC");
+    e[0] = E("evidence/x", "a", 0); e[1] = E("evidence/x/y", "b", 0);
+    zbuild(e, 2);
+    zsave("file-dir-collision", "REFUSED\tZIP file/directory collision");
+    e[0] = E("evidence/x", "a", 0); e[1] = D("evidence/x/");
+    zbuild(e, 2);
+    zsave("file-dir-collision-dir-entry", "REFUSED\tZIP file/directory collision");
+    {   /* a gap: 4 junk bytes between the two members (central offsets moved) */
+        e[0] = E("evidence/a", "a", 0); e[1] = E("evidence/b", "b", 0);
+        zbuild(e, 2);
+        mm_move(zb + zloc[1] + 4, 16 * MIB - zloc[1] - 4, zb + zloc[1], zn - zloc[1]);
+        p32(zloc[1], 0x2a2a2a2a);
+        zn += 4; zcd += 4; zcen[0] += 4; zcen[1] += 4; zend += 4;
+        p32(zcen[1] + 42, (unsigned long)zloc[1] + 4);
+        p32(zend + 16, (unsigned long)zcd);
+        zsave("gap", "REFUSED\tZIP gap/overlap");
+        /* junk between the last member and the central directory */
+        zbuild(e, 2);
+        mm_move(zb + zcd + 4, 16 * MIB - zcd - 4, zb + zcd, zn - zcd);
+        p32(zcd, 0x2a2a2a2a);
+        zn += 4; zcd += 4; zend += 4;
+        p32(zend + 16, (unsigned long)zcd);
+        zsave("payload-extent", "REFUSED\tZIP payload extent");
+    }
+    {   /* overlap: member b's local header and data sit inside member a's stored data */
+        static unsigned char blob[80];
+        long k = 0;
+        unsigned long cb = crc_of((const unsigned char *)"b", 1);
+        const char *pre = "AAAA";
+        mm_copy(blob, sizeof blob, pre, 4); k = 4;
+        blob[k++] = 0x50; blob[k++] = 0x4b; blob[k++] = 3; blob[k++] = 4; blob[k++] = 20; blob[k++] = 0;
+        blob[k++] = 0; blob[k++] = 0; blob[k++] = 0; blob[k++] = 0; blob[k++] = 0; blob[k++] = 0; blob[k++] = 0x21; blob[k++] = 0;
+        blob[k++] = (unsigned char)(cb & 255); blob[k++] = (unsigned char)((cb >> 8) & 255);
+        blob[k++] = (unsigned char)((cb >> 16) & 255); blob[k++] = (unsigned char)((cb >> 24) & 255);
+        blob[k++] = 1; blob[k++] = 0; blob[k++] = 0; blob[k++] = 0; blob[k++] = 1; blob[k++] = 0; blob[k++] = 0; blob[k++] = 0;
+        blob[k++] = 10; blob[k++] = 0; blob[k++] = 0; blob[k++] = 0;
+        mm_copy(blob + k, sizeof blob - k, "evidence/b", 10); k += 10;
+        blob[k++] = 'b';
+        e[0] = E("evidence/a", "", 0); e[0].data = blob; e[0].len = k;
+        e[1] = E("evidence/b", "b", 0);
+        zbuild(e, 2);
+        /* drop b's real local header and data: the directory moves down */
+        {
+            long cut = zcd - zloc[1];
+            mm_move(zb + zloc[1], 16 * MIB - zloc[1], zb + zcd, zn - zcd);
+            zn -= cut; zcd -= cut; zcen[0] -= cut; zcen[1] -= cut; zend -= cut;
+            p32(zcen[1] + 42, (unsigned long)(zloc[0] + 30 + 10 + 4));
+            p32(zend + 16, (unsigned long)zcd);
+        }
+        zsave("overlap", "REFUSED\tZIP gap/overlap");
+    }
+    e[0] = E("evidence/a", "a", 0);
+    zbuild(e, 1);                                                      /* 4 bytes after the one entry */
+    mm_move(zb + zend + 4, 16 * MIB - zend - 4, zb + zend, 22);
+    p32(zend, 0x2a2a2a2a); zend += 4; zn += 4;
+    p32(zend + 12, (unsigned long)(zend - zcd));
+    zsave("central-extent", "REFUSED\tZIP central extent");
+    zbuild(e, 1); p32(zend + 12, (unsigned long)(zend - zcd) - 2); p32(zend + 16, (unsigned long)zcd + 2);
+    zsave("central-start-moved", "REFUSED\tZIP central header");
+    /* 64 MiB inflated budget: two 34 MiB zero members */
+    bz = deflate_of(big, 34 * MIB, &bn);
+    e[0] = E("evidence/z1", "", 8); e[0].data = big; e[0].len = 34 * MIB; e[0].packed = bz; e[0].pn = bn;
+    e[1] = e[0]; e[1].name = "evidence/z2";
+    zbuild(e, 2);
+    zsave("inflated-budget", "REFUSED\tZIP inflated budget");
+    /* a stream that inflates past 64 MiB while 10 bytes are declared (node: maxOutputLength) */
+    {
+        static unsigned char huge[65 * MIB];
+        unsigned char *hz = deflate_of(huge, 65 * MIB, &bn);
+        e[0] = E("evidence/h", "", 8); e[0].data = huge; e[0].len = 10; e[0].packed = hz; e[0].pn = bn;
+        zbuild(e, 1);
+        zsave("deflate-past-64mib", "REFUSED\tCannot create a Buffer larger than 67108864 bytes");
+    }
+}
+
+/* ── replay cases (recorded release JSON) ───────────────────────────────── */
+
+#define REL "https://api.github.com/repos/partnernetsoftware/unisacc/releases/"
+static unsigned char *evz;                  /* the replay evidence.zip */
+static long evn;
+static char evsha[65], evbytes[32];
+static unsigned char *badz; static long badn;   /* member outside evidence/ */
+static unsigned char *workz; static long workn; /* evidence/work/x */
+static unsigned char *crcz; static long crcn;   /* a bad CRC */
+static char badsha[65], worksha[65], crcsha[65], badnum[32], worknum[32], crcnum[32];
+
+static char *subst(const char *s, const char *from, const char *to);
+/* @SIZE@ @SHA@ @BADSHA@ @BADN@ @WORKSHA@ @WORKN@ @CRCSHA@ @CRCN@ filled in */
+static const char *fill(const char *s) {
+    if (!s) return 0;
+    s = subst(s, "@SIZE@", evbytes); s = subst(s, "@SHA@", evsha);
+    s = subst(s, "@BADSHA@", badsha); s = subst(s, "@BADN@", badnum);
+    s = subst(s, "@WORKSHA@", worksha); s = subst(s, "@WORKN@", worknum);
+    s = subst(s, "@CRCSHA@", crcsha); s = subst(s, "@CRCN@", crcnum);
+    return s;
+}
+/* DIR made absolute against the working directory */
+static char *absdir(const char *dir) { return dir[0] == '/' ? fmt("%s%s", dir, 0) : fmt("%s/%s", cwd, dir); }
+
+typedef struct { const char *name, *expect; } rcase;
+#define NR 64
+static rcase rc_[NR];
+static int nrc;
+
+static const char *asset(const char *over) {
+    /* the default asset object, with OVER (",\"k\":v...") appended: a repeated key keeps the
+       first key's place and the last value, in JSON.parse and in release/ci/json.cx alike */
+    return fmt("{\"url\":\"" REL "assets/456\",\"id\":456,\"name\":\"evidence.zip\",\"state\":\"uploaded\","
+               "\"size\":%s,\"digest\":null,\"created_at\":\"2026-10-30T00:00:00Z\",\"updated_at\":\"2026-10-30T00:00:00Z\"%s}",
+               evbytes, over);
+}
+static const char *release(const char *over, const char *assets) {
+    return fmt("{\"url\":\"" REL "123\",\"id\":123,\"draft\":true%s,\"assets\":[%s]}", over, assets);
+}
+
+/* ENVX: "KEY=VALUE" lines replacing the default, or "KEY" alone to leave it unset */
+static void rsave(const char *name, const char *envx, const char *rel, const char *after, int zipkind, int rt,
+                  const char *expect) {
+    static const char *keys[9] = {"GH_TOKEN", "CAPSULE_RELEASE_ID", "CAPSULE_ASSET_ID", "CAPSULE_SHA256",
+                                  "CANDIDATE_SOURCE_SHA", "GITHUB_REPOSITORY", "GITHUB_REF", "GITHUB_SHA", "RUNNER_TEMP"};
+    const char *vals[9];
+    char *dir = fmt("%s/replay/%s", root, name), env[8192];
+    long en = 0, i, k;
+    vals[0] = "tok"; vals[1] = "123"; vals[2] = "456"; vals[3] = evsha;
+    vals[4] = "cd30109850f1d8958cc004d82821c36c46543db3"; vals[5] = "partnernetsoftware/unisacc";
+    vals[6] = "refs/heads/main"; vals[7] = "0123456789abcdef0123456789abcdef01234567";
+    vals[8] = fmt("%s/rt", absdir(dir), 0);
+    envx = fill(envx); rel = fill(rel); after = fill(after);
+    if (sy_mkdir(dir, 0755) != 0) { fprintf(stderr, "check-capsule-zip: cannot make %s\n", dir); exit(2); }
+    env[0] = 0;
+    for (k = 0; k < 9; k++) {
+        const char *v = vals[k];
+        long kl = tx_len(keys[k], 64), p = 0, n = tx_len(envx, 4096);
+        int unset = 0;
+        while (p < n) {
+            long e = p;
+            while (e < n && envx[e] != '\n') e++;
+            if (e - p == kl && tx_same(envx + p, kl, keys[k], kl)) unset = 1;
+            if (e - p > kl && envx[p + kl] == '=' && tx_same(envx + p, kl, keys[k], kl)) {
+                char *x = mem(e - p - kl);
+                tx_copy(x, e - p - kl, envx + p + kl + 1, e - p - kl - 1);
+                v = x;
+            }
+            p = e + 1;
+        }
+        if (unset) continue;
+        cx_fmt(env + en, sizeof env - (size_t)en, "%s=%s\n", keys[k], v);
+        en += tx_len(env + en, 4096);
+    }
+    if (put_file(fmt("%s/env", dir, 0), env, en) || put_file(fmt("%s/release.json", dir, 0), rel, tx_len(rel, 1L << 20)) ||
+        (after && put_file(fmt("%s/release-after.json", dir, 0), after, tx_len(after, 1L << 20))) ||
+        put_file(fmt("%s/evidence.zip", dir, 0), zipkind == 1 ? badz : zipkind == 2 ? workz : zipkind == 3 ? crcz : evz,
+                 zipkind == 1 ? badn : zipkind == 2 ? workn : zipkind == 3 ? crcn : evn) ||
+        (rt == 1 && sy_mkdir(fmt("%s/rt", dir, 0), 0755) != 0) ||
+        (rt == 2 && (sy_mkdir(fmt("%s/rt", dir, 0), 0755) != 0 || sy_mkdir(fmt("%s/rt/unisacc-evidence-capsule-output", dir, 0), 0755) != 0))) {
+        fprintf(stderr, "check-capsule-zip: cannot write case %s\n", dir);
+        exit(2);
+    }
+    (void)i;
+    rc_[nrc].name = name; rc_[nrc].expect = expect; nrc++;
+}
+
+#define RECEIPT "OK\t{\"schema\":1,\"kind\":\"unisacc-private-evidence-capsule-transport-v1\",\"source_repository\":\"partnernetsoftware/unisacc\",\"source_sha\":\"cd30109850f1d8958cc004d82821c36c46543db3\",\"producer_head_sha\":\"0123456789abcdef0123456789abcdef01234567\",\"release_id\":\"123\",\"asset_id\":\"456\",\"asset_name\":\"evidence.zip\",\"bytes\":{bytes},\"evidence_sha256\":\"{sha}\",\"release_eligible\":false,\"admission\":\"NOT_ATTESTED: immutable owner capsule transport only\"}"
+#define R(m) "REFUSED\t" m
+
+static void make_replays(void) {
+    ze e[4];
+    const char *A, *ok;
+    e[0] = D("evidence/"); e[1] = E("evidence/proof.txt", TXT, 8); e[2] = E("evidence/manifest.jsonx", "{}", 0);
+    zbuild(e, 3);
+    evz = mem(zn); mm_copy(evz, zn, zb, zn); evn = zn;
+    cx_sha256_hex((const char *)evz, (size_t)evn, evsha);
+    cx_fmt(evbytes, sizeof evbytes, "%ld", evn);
+    e[0] = E("other/x", "x", 0); zbuild(e, 1);
+    badz = mem(zn); mm_copy(badz, zn, zb, zn); badn = zn;
+    e[0] = E("evidence/work/x", "x", 0); zbuild(e, 1);
+    workz = mem(zn); mm_copy(workz, zn, zb, zn); workn = zn;
+    e[0] = E("evidence/c", "abc", 0); zbuild(e, 1); p32(zcen[0] + 16, 0x12345678); p32(zloc[0] + 14, 0x12345678);
+    crcz = mem(zn); mm_copy(crcz, zn, zb, zn); crcn = zn;
+    cx_sha256_hex((const char *)badz, (size_t)badn, badsha); cx_fmt(badnum, sizeof badnum, "%ld", badn);
+    cx_sha256_hex((const char *)workz, (size_t)workn, worksha); cx_fmt(worknum, sizeof worknum, "%ld", workn);
+    cx_sha256_hex((const char *)crcz, (size_t)crcn, crcsha); cx_fmt(crcnum, sizeof crcnum, "%ld", crcn);
+    A = asset("");
+    ok = release("", A);
+
+    rsave("ok", "", ok, 0, 0, 1, RECEIPT);
+    /* String(123.0) and String(["456"]) are the ids; 1234.0 is a safe integer */
+    rsave("ok-id-forms", "", release(",\"id\":123.0", asset(",\"id\":[\"456\"],\"size\":@SIZE@.0")), 0, 0, 1, RECEIPT);
+    rsave("ok-digest-match", "", release("", asset(",\"digest\":\"sha256:@SHA@\"")), 0, 0, 1, RECEIPT);
+    rsave("ok-digest-falsy", "", release("", asset(",\"digest\":0")), release("", asset(",\"digest\":\"\"")), 0, 1, RECEIPT);
+    rsave("ok-after-same-by-stringify", "", release("", asset(",\"created_at\":{\"b\":1,\"1\":2,\"0\":3}")),
+          release("", asset(",\"created_at\":{\"0\":3,\"b\":1.0,\"1\":2}")), 0, 1, RECEIPT);
+    rsave("token-absent", "GH_TOKEN", ok, 0, 0, 1, R("source Actions token absent"));
+    rsave("token-empty", "GH_TOKEN=", ok, 0, 0, 1, R("source Actions token absent"));
+    rsave("release-id-leading-zero", "CAPSULE_RELEASE_ID=0123", ok, 0, 0, 1, R("fixed owner release/asset/SHA/candidate identity required"));
+    rsave("asset-id-unsafe", "CAPSULE_ASSET_ID=9007199254740993", ok, 0, 0, 1, R("fixed owner release/asset/SHA/candidate identity required"));
+    rsave("sha-uppercase", "CAPSULE_SHA256=ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789", ok, 0, 0, 1,
+          R("fixed owner release/asset/SHA/candidate identity required"));
+    rsave("source-sha-other", "CANDIDATE_SOURCE_SHA=0000000000000000000000000000000000000000", ok, 0, 0, 1,
+          R("fixed owner release/asset/SHA/candidate identity required"));
+    rsave("source-sha-unset", "CANDIDATE_SOURCE_SHA", ok, 0, 0, 1, R("fixed owner release/asset/SHA/candidate identity required"));
+    rsave("repo-other", "GITHUB_REPOSITORY=someone/unisacc", ok, 0, 0, 1, R("owned source-repository main producer required"));
+    rsave("ref-other", "GITHUB_REF=refs/heads/dev", ok, 0, 0, 1, R("owned source-repository main producer required"));
+    rsave("producer-sha-short", "GITHUB_SHA=0123", ok, 0, 0, 1, R("owned source-repository main producer required"));
+    rsave("release-null", "", "null", 0, 0, 1, R("Cannot read properties of null (reading 'id')"));
+    rsave("release-array", "", "[1]", 0, 0, 1, R("fixed existing private Draft release required"));
+    rsave("release-not-draft", "", release(",\"draft\":false", A), 0, 0, 1, R("fixed existing private Draft release required"));
+    rsave("release-draft-string", "", release(",\"draft\":\"true\"", A), 0, 0, 1, R("fixed existing private Draft release required"));
+    rsave("release-id-other", "", release(",\"id\":124", A), 0, 0, 1, R("fixed existing private Draft release required"));
+    rsave("release-id-fraction", "", release(",\"id\":123.5", A), 0, 0, 1, R("fixed existing private Draft release required"));
+    rsave("release-url-other", "", release(",\"url\":\"https://api.github.com/repos/x/y/releases/123\"", A), 0, 0, 1,
+          R("fixed existing private Draft release required"));
+    rsave("assets-not-array", "", "{\"url\":\"" REL "123\",\"id\":123,\"draft\":true,\"assets\":{}}", 0, 0, 1, R("bounded release inventory"));
+    rsave("assets-two-evidence", "", release("", fmt("%s,%s", A, A)), 0, 0, 1, R("unique evidence.zip asset required"));
+    rsave("assets-none", "", release("", ""), 0, 0, 1, R("unique evidence.zip asset required"));
+    rsave("asset-null-element", "", release("", fmt("null,%s", A, 0)), 0, 0, 1, R("Cannot read properties of null (reading 'name')"));
+    rsave("asset-state-other", "", release("", asset(",\"state\":\"starter\"")), 0, 0, 1, R("fixed asset ID/name/size/state/URL"));
+    rsave("asset-size-string", "", release("", asset(",\"size\":\"1\"")), 0, 0, 1, R("fixed asset ID/name/size/state/URL"));
+    rsave("asset-size-zero", "", release("", asset(",\"size\":0")), 0, 0, 1, R("fixed asset ID/name/size/state/URL"));
+    rsave("asset-size-over", "", release("", asset(",\"size\":67108865")), 0, 0, 1, R("fixed asset ID/name/size/state/URL"));
+    rsave("asset-id-other", "", release("", asset(",\"id\":457")), 0, 0, 1, R("fixed asset ID/name/size/state/URL"));
+    rsave("asset-url-other", "", release("", asset(",\"url\":\"" REL "assets/457\"")), 0, 0, 1, R("fixed asset ID/name/size/state/URL"));
+    rsave("asset-digest-other", "", release("", asset(",\"digest\":\"sha256:00\"")), 0, 0, 1, R("asset API digest mismatch"));
+    rsave("asset-digest-empty-object", "", release("", asset(",\"digest\":{}")), 0, 0, 1, R("asset API digest mismatch"));
+    rsave("evidence-size-other", "", release("", asset(",\"size\":1")), 0, 0, 1, R("owner evidence raw SHA/size mismatch"));
+    rsave("evidence-sha-other", "CAPSULE_SHA256=0000000000000000000000000000000000000000000000000000000000000000", ok, 0, 0, 1,
+          R("owner evidence raw SHA/size mismatch"));
+    rsave("inventory-outside-evidence", "CAPSULE_SHA256=@BADSHA@", release("", asset(",\"size\":@BADN@")), 0, 1, 1,
+          R("proof-only evidence/ inventory required"));
+    rsave("inventory-work", "CAPSULE_SHA256=@WORKSHA@", release("", asset(",\"size\":@WORKN@")), 0, 2, 1,
+          R("proof-only evidence/ inventory required"));
+    rsave("zip-refused", "CAPSULE_SHA256=@CRCSHA@", release("", asset(",\"size\":@CRCN@")), 0, 3, 1, R("ZIP size/CRC"));
+    rsave("after-changed", "", ok, release("", asset(",\"updated_at\":\"2026-10-30T00:00:01Z\"")), 0, 1, R("Draft asset changed during download"));
+    rsave("after-key-order", "", release("", asset(",\"created_at\":{\"a\":1,\"b\":2}")),
+          release("", asset(",\"created_at\":{\"b\":2,\"a\":1}")), 0, 1, R("Draft asset changed during download"));
+    rsave("after-not-draft", "", ok, release(",\"draft\":false", A), 0, 1, R("fixed existing private Draft release required"));
+    /* the one justified text difference here: JSON.parse throws V8's SyntaxError text
+       (Unexpected token 'N', ...); the CX JSON reader says this */
+    rsave("json-nan", "", release("", asset(",\"size\":NaN")), 0, 0, 1, R("invalid JSON in Draft API response"));
+    rsave("runner-temp-missing", "", ok, 0, 0, 0, R("ENOENT: no such file or directory, lstat '{dir}/rt'"));
+    rsave("output-exists", "", ok, 0, 0, 2, R("EEXIST: file already exists, mkdir '{dir}/rt/unisacc-evidence-capsule-output'"));
+}
+
+/* ── transport: export against a fake curl ─────────────────────────────── */
+
+#define TOKEN "ghs_FAKE_TOKEN_0123456789"
+#define RECEIPT_LINE "{\"schema\":1,\"kind\":\"unisacc-private-evidence-capsule-transport-v1\",\"source_repository\":\"partnernetsoftware/unisacc\",\"source_sha\":\"cd30109850f1d8958cc004d82821c36c46543db3\",\"producer_head_sha\":\"0123456789abcdef0123456789abcdef01234567\",\"release_id\":\"123\",\"asset_id\":\"456\",\"asset_name\":\"evidence.zip\",\"bytes\":{bytes},\"evidence_sha256\":\"{sha}\",\"release_eligible\":false,\"admission\":\"NOT_ATTESTED: immutable owner capsule transport only\"}\n"
+
+/* --fake-curl ARGS: stands in for curl on PATH.  FAKE_CURL_DIR/route lines
+   "URL<TAB>STATUS<TAB>REDIRECT<TAB>BODYFILE|-<TAB>EXIT" give the answer; each call is logged to
+   FAKE_CURL_DIR/call-N as "URL<TAB>q proto=https max-redirs=0<TAB>auth<TAB>cfgmode<TAB>argvtoken<TAB>CFGPATH". */
+static int fake_curl(int argc, char **argv) {
+    const char *dir = sy_env("FAKE_CURL_DIR"), *cfg = 0, *url = argv[argc - 1];
+    char *route, *cfgtext = 0, logl[8192], st_line[2600];
+    size_t rn, cn;
+    long p = 0, n, ul = tx_len(url, 4096);
+    int i, fd, k, tokargv = 0, safe = argc > 3 && tx_eqz(argv[2], "-q"), mode = 0, auth = 0, code = 7;
+    sy_stat_t st;
+    if (!dir) return 99;
+    for (i = 2; i < argc - 1; i++) {
+        if (tx_find(argv[i], tx_len(argv[i], 1L << 16), "ghs_FAKE", 8) >= 0) tokargv = 1;
+        if (tx_eqz(argv[i], "--config") && i + 1 < argc - 1) cfg = argv[i + 1];
+        if (tx_eqz(argv[i], "--proto") && i + 1 < argc - 1 && !tx_eqz(argv[i + 1], "=https")) safe = 0;
+        if (tx_eqz(argv[i], "--max-redirs") && i + 1 < argc - 1 && !tx_eqz(argv[i + 1], "0")) safe = 0;
+        if (tx_eqz(argv[i], "-L") || tx_eqz(argv[i], "--location")) safe = 0;
+    }
+    if (cfg) {
+        if (sy_stat(cfg, &st) == 0) mode = st.mode & 0777;
+        cfgtext = cx_read(cfg, &cn);
+        {   static const char want[] = "header = \"Authorization: Bearer " TOKEN "\"\n";
+            auth = cfgtext && tx_find(cfgtext, (long)cn, want, (long)sizeof want - 1) >= 0;
+        }
+    }
+    cx_fmt(logl, sizeof logl, "%s\t%s\t%d\t%o\t%d\t%s\n", url, safe ? "safe" : "UNSAFE", auth, mode, tokargv, cfg ? cfg : "-");
+    for (k = 1; k < 40; k++) {
+        char name[4200];
+        cx_fmt(name, sizeof name, "%s/call-%02d", dir, k);
+        fd = sy_open_new(name, 0644);
+        if (fd >= 0) { sy_write_all(fd, logl, tx_len(logl, sizeof logl)); sy_close(fd); break; }
+    }
+    route = cx_read(fmt("%s/route", dir, 0), &rn);
+    n = route ? (long)rn : 0;
+    st_line[0] = 0;
+    while (p < n) {
+        long e = p, f[5], nf = 1;
+        while (e < n && route[e] != '\n') e++;
+        f[0] = p;
+        for (i = (int)p; i < e && nf < 5; i++) if (route[i] == '\t') f[nf++] = i + 1;
+        if (nf == 5 && f[1] - 1 - p == ul && tx_same(route + p, ul, url, ul)) {
+            char status[16], redirect[2048], body[256], ex[16];
+            tx_copy(status, sizeof status, route + f[1], f[2] - 1 - f[1]);
+            tx_copy(redirect, sizeof redirect, route + f[2], f[3] - 1 - f[2]);
+            tx_copy(body, sizeof body, route + f[3], f[4] - 1 - f[3]);
+            tx_copy(ex, sizeof ex, route + f[4], e - f[4]);
+            if (!tx_eqz(body, "-")) {
+                size_t bn;
+                char *b = cx_read(fmt("%s/%s", dir, body), &bn);
+                if (b) sy_write_all(1, b, (long)bn);
+            }
+            code = atoi(ex);
+            cx_fmt(st_line, sizeof st_line, "\nCX-CURL-STATUS %s %s\n", status, redirect);
+            break;
+        }
+        p = e + 1;
+    }
+    if (code) { char m[64]; cx_fmt(m, sizeof m, "curl: (%d) fake failure\n", code); sy_write_all(2, m, tx_len(m, 64)); }
+    if (!st_line[0]) cx_fmt(st_line, sizeof st_line, "\nCX-CURL-STATUS 000 \n");
+    sy_write_all(2, st_line, tx_len(st_line, sizeof st_line));
+    return code;
+}
+
+typedef struct { const char *name, *route, *out, *err, *calls; int rc; } tcase;
+
+/* runs export with PATH led by OUTDIR/bin (the fake curl) and the fixed inputs */
+static int run_export(const char *dir, char **out, char **err) {
+    char *argv[24], junk[65536];
+    const char *path = sy_env("PATH");
+    int i = 0, ofd, efd, pid, ex = 0, code = 0, sig = 0;
+    long n = 0, en = 0, r, cap = 1 << 16;
+    char *b = mem(cap), *eb = mem(cap);
+    argv[i++] = "env";
+    argv[i++] = fmt("PATH=%s/bin:%s", absdir(root), path ? path : "/usr/bin:/bin");
+    argv[i++] = "GH_TOKEN=" TOKEN;
+    argv[i++] = "CAPSULE_RELEASE_ID=123"; argv[i++] = "CAPSULE_ASSET_ID=456";
+    argv[i++] = fmt("CAPSULE_SHA256=%s", evsha, 0);
+    argv[i++] = "CANDIDATE_SOURCE_SHA=cd30109850f1d8958cc004d82821c36c46543db3";
+    argv[i++] = "GITHUB_REPOSITORY=partnernetsoftware/unisacc"; argv[i++] = "GITHUB_REF=refs/heads/main";
+    argv[i++] = "GITHUB_SHA=0123456789abcdef0123456789abcdef01234567";
+    argv[i++] = fmt("RUNNER_TEMP=%s/rt", absdir(dir), 0);
+    argv[i++] = fmt("FAKE_CURL_DIR=%s", absdir(dir), 0);
+    argv[i++] = "sh"; argv[i++] = "./unisacc.com"; argv[i++] = "release/capsule-export.cx"; argv[i++] = "--"; argv[i++] = "export";
+    argv[i] = 0;
+    pid = sy_spawn_pipe(argv, 0, SY_SPAWN_STDERR_SPLIT, &ofd, &efd);
+    if (pid < 0) return -1;
+    while ((r = sy_read(ofd, b + n, cap - 1 - n)) > 0) n += r;
+    b[n] = 0;
+    while (sy_read(ofd, junk, sizeof junk) > 0) {}
+    while ((r = sy_read(efd, eb + en, cap - 1 - en)) > 0) en += r;
+    eb[en] = 0;
+    sy_close(ofd); sy_close(efd);
+    *out = b; *err = eb;
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
+    return code;
+}
+
+/* the calls logged by the fake curl, as "URL safe auth mode argvtoken;" per call; each config gone */
+static char *calls_of(const char *dir, int *cfg_left) {
+    char *acc = fmt("%s%s", "", 0);
+    int k;
+    *cfg_left = 0;
+    for (k = 1; k < 40; k++) {
+        char name[4200], *t, *tab;
+        size_t tn;
+        long i, c = 0;
+        cx_fmt(name, sizeof name, "%s/call-%02d", dir, k);
+        t = cx_read(name, &tn);
+        if (!t) break;
+        for (i = 0; i < (long)tn; i++) if (t[i] == '\t' && ++c == 5) break;
+        tab = t + i;                                        /* before the config path */
+        if (i < (long)tn) {
+            char *cfg = mem((long)tn - i);
+            tx_copy(cfg, (long)tn - i, tab + 1, (long)tn - i - 2);
+            if (!tx_eqz(cfg, "-") && sy_exists(cfg) != 0) (*cfg_left)++;
+            *tab = 0;
+        }
+        acc = fmt("%s%s;", acc, t);
+    }
+    return acc;
+}
+
+static void transport_cases(void) {
+    static const char *const RJ = "release.json";
+    char *tdir = fmt("%s/transport", root, 0), *bin = fmt("%s/bin", root, 0), *wrap;
+    char big[4096];
+    const char *rel = release("", asset(""));
+    int i, fd;
+    const char *API = "https://api.github.com/repos/partnernetsoftware/unisacc/releases/";
+    const char *OBJ = "https://objects.githubusercontent.com/github-production-release-asset/1?sig=x";
+    tcase t[] = {
+        {"ok-redirect", 0, RECEIPT_LINE, "", "R200;A302;O200;R200;", 0},
+        {"ok-direct", 0, RECEIPT_LINE, "", "R200;A200;R200;", 0},
+        {"redirect-untrusted-host", 0, "", "capsule export refused: untrusted Draft asset redirect\n", "R200;A302;", 1},
+        {"redirect-port", 0, "", "capsule export refused: untrusted Draft asset redirect\n", "R200;A302;", 1},
+        {"redirect-userinfo", 0, "", "capsule export refused: untrusted Draft asset redirect\n", "R200;A302;", 1},
+        {"redirect-http", 0, "", "capsule export refused: untrusted Draft asset redirect\n", "R200;A302;", 1},
+        {"redirect-again", 0, "", "capsule export refused: fetch failed\n", "R200;A302;O302;", 1},
+        {"release-404", 0, "",
+         "capsule export refused: existing Draft/asset read denied; contents write token is required for private Draft visibility; no credential fallback\n",
+         "R404;", 1},
+        {"asset-301", 0, "",
+         "capsule export refused: existing Draft/asset read denied; contents write token is required for private Draft visibility; no credential fallback\n",
+         "R200;A301;", 1},
+        {"curl-failed", 0, "", "capsule export refused: fetch failed\n", "R6;", 1},
+        {"curl-timeout", 0, "", "capsule export refused: The operation was aborted due to timeout\n", "R28;", 1},
+        {"release-over-4mib", 0, "", "capsule export refused: bounded Draft response\n", "Rbig;", 1},
+    };
+    (void)RJ;
+    if (sy_mkdir(tdir, 0755) != 0 || sy_mkdir(bin, 0755) != 0) { ck(0, "transport.scratch"); return; }
+    /* the thin PATH entry: exec this checker in --fake-curl mode */
+    wrap = fmt("#!/bin/sh\nexec sh '%s/unisacc.com' '%s/tools/check-capsule-zip.cx' -- --fake-curl \"$@\"\n", cwd, cwd);
+    if (put_file(fmt("%s/curl", bin, 0), wrap, tx_len(wrap, 8192)) || sy_chmod(fmt("%s/curl", bin, 0), 0755) != 0) {
+        ck(0, "transport.fake-curl"); return;
+    }
+    for (i = 0; i < (int)(sizeof t / sizeof t[0]); i++) {
+        char *dir = fmt("%s/%s", tdir, t[i].name), *route, *out, *err, *calls, *want_calls;
+        const char *redirect = OBJ, *s;
+        int rc, left, ok;
+        sy_mkdir(dir, 0755);
+        sy_mkdir(fmt("%s/rt", dir, 0), 0755);
+        put_file(fmt("%s/release.json", dir, 0), rel, tx_len(rel, 1L << 20));
+        put_file(fmt("%s/evidence.zip", dir, 0), evz, evn);
+        s = t[i].name;
+        if (tx_eqz(s, "redirect-untrusted-host")) redirect = "https://objects.githubusercontent.com.evil.example/x";
+        if (tx_eqz(s, "redirect-port")) redirect = "https://objects.githubusercontent.com:8443/x";
+        if (tx_eqz(s, "redirect-userinfo")) redirect = "https://u:p@objects.githubusercontent.com/x";
+        if (tx_eqz(s, "redirect-http")) redirect = "http://objects.githubusercontent.com/x";
+        route = fmt("%s123\t%s\t\trelease.json\t0\n", API, tx_eqz(s, "release-404") ? "404" : "200");
+        if (tx_eqz(s, "curl-failed")) route = fmt("%s123\t000\t\t-\t6\n", API, 0);
+        if (tx_eqz(s, "curl-timeout")) route = fmt("%s123\t000\t\t-\t28\n", API, 0);
+        if (tx_eqz(s, "release-over-4mib")) {
+            route = fmt("%s123\t200\t\tbig.json\t0\n", API, 0);
+            fd = sy_open_new(fmt("%s/big.json", dir, 0), 0644);
+            mm_fill(big, sizeof big, ' ', sizeof big);
+            for (left = 0; left < 1025; left++) sy_write_all(fd, big, sizeof big);
+            sy_close(fd);
+        }
+        if (tx_eqz(s, "ok-direct")) route = fmt("%s%sassets/456\t200\t\tevidence.zip\t0\n", route, API);
+        else if (tx_eqz(s, "asset-301")) route = fmt("%s%sassets/456\t301\t" "https://objects.githubusercontent.com/x\t-\t0\n", route, API);
+        else {
+            route = fmt("%s%s", route, fmt("%sassets/456\t302\t%s\t-\t0\n", API, redirect));
+            route = fmt("%s%s", route, fmt("%s\t%s\t\tevidence.zip\t0\n", OBJ, tx_eqz(s, "redirect-again") ? "302" : "200"));
+        }
+        put_file(fmt("%s/route", dir, 0), route, tx_len(route, 1L << 20));
+        rc = run_export(dir, &out, &err);
+        calls = calls_of(dir, &left);
+        /* expected calls: R = release read (auth), A = asset read (auth), O = object read (no auth) */
+        want_calls = fmt("%s%s", "", 0);
+        {
+            const char *w = t[i].calls;
+            while (*w) {
+                const char *e = w;
+                char kind = *w, code[8];
+                while (*e && *e != ';') e++;
+                tx_copy(code, sizeof code, w + 1, e - w - 1);
+                if (kind == 'R') want_calls = fmt("%s%s", want_calls, fmt("%s123\tsafe\t1\t600\t0;", API, 0));
+                if (kind == 'A') want_calls = fmt("%s%s", want_calls, fmt("%sassets/456\tsafe\t1\t600\t0;", API, 0));
+                if (kind == 'O') want_calls = fmt("%s%s\tsafe\t0\t0\t0;", want_calls, OBJ);
+                (void)code;
+                w = *e ? e + 1 : e;
+            }
+        }
+        ok = rc == t[i].rc && tx_eqz(subst(out, evsha, "{sha}"), subst(t[i].out, "{bytes}", evbytes)) && tx_eqz(err, t[i].err) &&
+             tx_eqz(calls, want_calls) && left == 0;
+        if (ok && rc == 0) {
+            size_t wn;
+            char *w = cx_read(fmt("%s/rt/unisacc-evidence-capsule-output/evidence.zip", dir, 0), &wn);
+            ok = w && (long)wn == evn && mm_same(w, evz, evn);
+        }
+        if (!ok) printf("note\t%s: rc=%d out=[%s] err=[%s] calls=[%s] want=[%s] configs-left=%d\n", s, rc, out, err, calls, want_calls, left);
+        ck(ok, fmt("transport.%s", s, 0));
+    }
+}
+
+/* ── run and compare ───────────────────────────────────────────────────── */
+
+/* sh ./unisacc.com release/capsule-export.cx -- ARGS: stdout into a fresh buffer; the exit code or -1 */
+static int tool(char **args, int na, char **out, long *outn) {
+    char **argv = mem((long)(na + 6) * (long)sizeof(char *)), junk[4096];
+    int i = 0, k, ofd, efd, pid, ex = 0, code = 0, sig = 0;
+    long cap = 4 * MIB, n = 0, r;
+    char *b = mem(cap);
+    argv[i++] = "sh"; argv[i++] = "./unisacc.com"; argv[i++] = "release/capsule-export.cx"; argv[i++] = "--";
+    for (k = 0; k < na; k++) argv[i++] = args[k];
+    argv[i] = 0;
+    pid = sy_spawn_pipe(argv, 0, SY_SPAWN_STDERR_SPLIT, &ofd, &efd);
+    if (pid < 0) return -1;
+    while ((r = sy_read(ofd, b + n, cap - 1 - n)) > 0) n += r;
+    b[n] = 0;
+    while (sy_read(ofd, junk, sizeof junk) > 0) {}
+    while ((r = sy_read(efd, junk, sizeof junk - 1)) > 0) { junk[r] = 0; fputs(junk, stderr); }
+    sy_close(ofd); sy_close(efd);
+    *out = b; *outn = n;
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
+    return code;
+}
+
+/* the line of OUT that starts with KEY<TAB>, after it (in a fresh buffer), or 0 */
+static char *line_of(const char *out, long n, const char *key) {
+    long kl = tx_len(key, 4096), p = 0;
+    while (p < n) {
+        long e = p;
+        while (e < n && out[e] != '\n') e++;
+        if (e - p > kl && out[p + kl] == '\t' && tx_same(out + p, kl, key, kl)) {
+            char *x = mem(e - p - kl);
+            tx_copy(x, e - p - kl, out + p + kl + 1, e - p - kl - 1);
+            return x;
+        }
+        p = e + 1;
+    }
+    return 0;
+}
+
+/* S with every FROM replaced by TO */
+static char *subst(const char *s, const char *from, const char *to) {
+    long n = tx_len(s, 1L << 20), fl = tx_len(from, 4096), tl = tx_len(to, 4096), i = 0, o = 0;
+    char *b = mem(n * (tl + 1) + 1);
+    while (i < n) {
+        if (fl && i + fl <= n && tx_same(s + i, fl, from, fl)) { mm_copy(b + o, tl + 1, to, tl); o += tl; i += fl; }
+        else b[o++] = s[i++];
+    }
+    b[o] = 0;
+    return b;
+}
+
+int main(int argc, char **argv) {
+    char *out, **args;
+    long on, k;
+    int rc, i;
+    const char *base = argc > 1 ? argv[1] : "out/capsule-zips";
+    ar = ar_new(1L << 32);
+    if (!ar || sy_cwd(cwd, sizeof cwd) != 0) return 2;
+    if (argc > 1 && tx_eqz(argv[1], "--fake-curl")) return fake_curl(argc, argv);
+    zb = mem(16 * MIB);
+    if (tx_copy(root, sizeof root, base, tx_len(base, 4000)) != 0) return 2;
+    sy_mkdir("out", 0755);
+    if (sy_mkdir(root, 0755) != 0 && sy_exists(root) != 1) { fprintf(stderr, "check-capsule-zip: cannot make %s\n", root); return 2; }
+    if (sy_mkdir(fmt("%s/zip", root, 0), 0755) != 0 || sy_mkdir(fmt("%s/replay", root, 0), 0755) != 0) {
+        fprintf(stderr, "check-capsule-zip: %s/zip or %s/replay already there (use a fresh OUTDIR)\n", root, root);
+        return 2;
+    }
+    make_zips();
+    make_replays();
+    printf("note\t%d zip cases, %d replay cases in %s\n", nzc, nrc, root);
+    if (argc > 2 && tx_eqz(argv[2], "--prepare-only")) {   /* fixtures for an outside oracle; nothing checked */
+        printf("PREPARED\t%s\n", root);
+        return 0;
+    }
+
+    args = mem((long)(nzc + nrc + 2) * (long)sizeof(char *));
+    args[0] = "parse-zip";
+    for (i = 0; i < nzc; i++) args[i + 1] = fmt("%s/zip/%s.zip", root, zc[i].name);
+    rc = tool(args, nzc + 1, &out, &on);
+    ck(rc == 1, "parse-zip-runs-and-refuses-some");
+    for (i = 0; i < nzc; i++) {
+        char *got = line_of(out, on, args[i + 1]);
+        int ok = got && tx_eqz(got, zc[i].expect);
+        if (!ok) printf("note\t%s: got [%s] want [%s]\n", zc[i].name, got ? got : "(none)", zc[i].expect);
+        ck(ok, fmt("zip.%s", zc[i].name, 0));
+    }
+
+    args[0] = "replay";
+    for (i = 0; i < nrc; i++) args[i + 1] = fmt("%s/replay/%s", root, rc_[i].name);
+    rc = tool(args, nrc + 1, &out, &on);
+    ck(rc == 0, "replay-runs");
+    for (i = 0; i < nrc; i++) {
+        char *got = line_of(out, on, args[i + 1]), *want, real[4096];
+        want = subst(subst(subst(rc_[i].expect, "{bytes}", evbytes), "{sha}", evsha), "{dir}", absdir(args[i + 1]));
+        if (got && sy_realpath(args[i + 1], real, sizeof real) > 0) got = subst(got, real, absdir(args[i + 1]));
+        k = got && tx_eqz(got, want);
+        if (!k) printf("note\t%s: got [%s] want [%s]\n", rc_[i].name, got ? got : "(none)", want);
+        ck((int)k, fmt("replay.%s", rc_[i].name, 0));
+        if (k && tx_prefixz(want, "OK\t", 3)) {   /* the written capsule: these bytes, 0700 directory, 0600 file */
+            size_t wn;
+            sy_stat_t ds, fs;
+            char *d = fmt("%s/rt/unisacc-evidence-capsule-output", args[i + 1], 0), *f = fmt("%s/evidence.zip", d, 0);
+            char *w = cx_read(f, &wn);
+            ck(w && (long)wn == evn && mm_same(w, evz, evn) && sy_stat(d, &ds) == 0 && (ds.mode & 0777) == 0700 &&
+                   sy_stat(f, &fs) == 0 && (fs.mode & 0777) == 0600,
+               fmt("replay.%s.written", rc_[i].name, 0));
+        }
+    }
+    transport_cases();
+    printf("CHECK_CAPSULE_ZIP\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
