@@ -26,7 +26,7 @@
   - 标识符改名：`refactor.cx rename`。
   - 按行段替换：`tools/edit-span.cx`。
   - 改动影响了哪些测试批次、并行重跑它们：`tools/affected.cx`。
-  - 四个棘轮一次跑完：`tools/ratchets.cx`。
+  - 五个棘轮一次跑完：`tools/ratchets.cx`（cxraw、cxinclude、cxapis、cxtrunc、cxlibc）。其中 cxlibc 管上层：除 L0 外，所有直接调用 libc/POSIX 的地方（名单由前导自动推导）只降不升，新文件必须是 0。
   - 把一个检查登记成批次：`tools/register.cx`。
   - 查目标的 lowering 缺口：`tools/tape-gap.cx`。
   - 核对格式结构：`tools/formats-*.cx`。
