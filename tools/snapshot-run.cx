@@ -1,0 +1,74 @@
+/* tools/snapshot-run.cx -- run a command in a clean snapshot of a commit, away from the shared working tree.
+ *
+ *   sh ./unisacc.com tools/snapshot-run.cx -- [--rev REV] [--cwd SUBDIR] [--seconds N] -- CMD ARG...
+ *
+ * Exports REV (default HEAD) with `git archive` into out/snapshot-<sha10>/ (reused when it already holds
+ * that commit: the directory name is the identity, and a marker file records it), copies the installed
+ * ./unisacc.com beside it, and runs CMD in SUBDIR of the snapshot under tools/bound N (default 55).  Other
+ * agents' uncommitted edits cannot change the inputs mid-run ("production input changed during run"), and
+ * the result is about exactly that commit.  Prints the command's output, then
+ *   SNAPSHOT_RUN<TAB>rev=<sha10><TAB>cwd=<SUBDIR><TAB>rc=<code><TAB>elapsed_ms=<ms><TAB>dir=<snapshot>
+ * and exits with the command's code (2 on usage or setup failure).  The archive takes a few seconds; the
+ * snapshot is about 130 MB and stays in out/ for reuse. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+
+static void sr_die(const char *a, const char *b) { fprintf(stderr, "snapshot-run: %s%s%s\n", a, b ? ": " : "", b ? b : ""); exit(2); }
+
+/* run ARGV in CWD, passing its output through when PASS, else into OUT; exit code, 128+sig or -1 */
+static int run(char **argv, const char *cwd, int pass, char *out, long cap) {
+    int ofd, pid, ex = 0, code = 0, sig = 0; long n = 0, r; char chunk[8192];
+    pid = sy_spawn_pipe(argv, cwd, 0, &ofd, 0);
+    if (pid < 0) return -1;
+    while ((r = sy_read(ofd, chunk, sizeof chunk)) > 0) {
+        if (pass) sy_write_all(1, chunk, r);
+        else { long k; for (k = 0; k < r && n + 1 < cap; k++) out[n++] = chunk[k]; }
+    }
+    if (out && cap > 0) { while (n > 0 && (out[n - 1] == '\n' || out[n - 1] == '\r')) n--; out[n] = 0; }
+    sy_close(ofd);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid) return -1;
+    return ex ? code : 128 + sig;
+}
+
+int main(int argc, char **argv) {
+    const char *rev = "HEAD", *sub = ".", *secs = "55"; char sha[64], dir[400], mark[460], cwd[900], root[4096], cmp[64];
+    int a = 1, k, rc; long t0;
+    while (a < argc && !tx_eqz(argv[a], "--")) {
+        if (a + 1 >= argc) sr_die("usage", "[--rev REV] [--cwd SUBDIR] [--seconds N] -- CMD ARG...");
+        if (tx_eqz(argv[a], "--rev")) rev = argv[a + 1];
+        else if (tx_eqz(argv[a], "--cwd")) sub = argv[a + 1];
+        else if (tx_eqz(argv[a], "--seconds")) secs = argv[a + 1];
+        else sr_die("unknown option", argv[a]);
+        a += 2;
+    }
+    if (a >= argc || a + 1 >= argc) sr_die("usage", "[--rev REV] [--cwd SUBDIR] [--seconds N] -- CMD ARG...");
+    a++;
+    if (sy_realpath(".", root, sizeof root) < 0) sr_die("cannot resolve the root", 0);
+    {   char *v[] = {"git", "rev-parse", "--short=10", "--verify", (char *)rev, 0};
+        if (run(v, 0, 0, sha, sizeof sha) != 0 || tx_len(sha, 64) != 10) sr_die("no such revision", rev);
+    }
+    if (tx_snprintf(dir, sizeof dir, "out/snapshot-%s", sha) >= (int)sizeof dir || tx_snprintf(mark, sizeof mark, "%s/.snapshot-rev", dir) >= (int)sizeof mark) sr_die("path", 0);
+    {   size_t mn; char *m = cx_read(mark, &mn);
+        if (!(m && mn >= 10 && tx_same(m, 10, sha, 10))) {   /* (re)build the snapshot */
+            char sh[1200];
+            if (sy_exists(dir)) sr_die("the snapshot directory exists without a matching marker; remove it first", dir);
+            if (sy_mkdir(dir, 0755) != 0) sr_die("cannot make", dir);
+            if (tx_snprintf(sh, sizeof sh, "git archive %s | tar -x -C %s && cp unisacc.com %s/ && printf %%s %s > %s", sha, dir, dir, sha, mark) >= (int)sizeof sh) sr_die("path", 0);
+            {   char *v[] = {"sh", "-c", sh, 0}; if (run(v, 0, 0, cmp, sizeof cmp) != 0) sr_die("git archive or copy failed", dir); }
+        }
+    }
+    if (tx_snprintf(cwd, sizeof cwd, "%s/%s/%s", root, dir, sub) >= (int)sizeof cwd || !sy_exists(cwd)) sr_die("no such directory in the snapshot", sub);
+    {   char bound[4400], *v[64]; int n = 0;
+        if (tx_snprintf(bound, sizeof bound, "%s/tools/bound", root) >= (int)sizeof bound) sr_die("path", 0);
+        v[n++] = bound; v[n++] = (char *)secs;
+        for (k = a; k < argc && n < 63; k++) v[n++] = argv[k];
+        v[n] = 0;
+        t0 = sy_now_ms();
+        rc = run(v, cwd, 1, 0, 0);
+    }
+    printf("SNAPSHOT_RUN\trev=%s\tcwd=%s\trc=%d\telapsed_ms=%ld\tdir=%s\n", sha, sub, rc, sy_now_ms() - t0, dir);
+    return rc < 0 ? 2 : rc;
+}

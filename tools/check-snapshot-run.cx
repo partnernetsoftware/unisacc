@@ -1,0 +1,58 @@
+/* Checks tools/snapshot-run.cx: sh ./unisacc.com tools/check-snapshot-run.cx   (from the repo root)
+   In the HEAD snapshot: the command's exit code comes back (sh -c 'exit 3' gives 3) and the SNAPSHOT_RUN
+   line names rev=<HEAD sha10>; the snapshot holds this check program (it is the committed tree, not the
+   working tree: a file that exists only untracked in the working tree is absent there); a second run reuses
+   the snapshot; an unknown revision and a missing --cwd are refused with 2.
+   Prints PASS/FAIL lines and CHECK_SNAPSHOT_RUN<TAB>failed=N. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+
+static int failed;
+static void ck(int ok, const char *name) { if (!ok) failed++; printf("%s\tsnapshot-run.%s\n", ok ? "PASS" : "FAIL", name); }
+
+static int sr(char **args, char *out, long cap) {
+    char *argv[16]; int i = 0, k, ofd, pid, ex = 0, code = 0, sig = 0; long n = 0, r; char junk[4096];
+    argv[i++] = "sh"; argv[i++] = "./unisacc.com"; argv[i++] = "tools/snapshot-run.cx"; argv[i++] = "--";
+    for (k = 0; args[k] && i < 15; k++) argv[i++] = args[k];
+    argv[i] = 0;
+    pid = sy_spawn_pipe(argv, 0, 0, &ofd, 0);
+    if (pid < 0) return -1;
+    while ((r = sy_read(ofd, out + n, cap - 1 - n)) > 0) n += r;
+    out[n] = 0;
+    while (sy_read(ofd, junk, sizeof junk) > 0) {}
+    sy_close(ofd);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
+    return code;
+}
+static int has(const char *o, const char *s) { return tx_find(o, tx_len(o, 1 << 16), s, tx_len(s, 256)) >= 0; }
+
+int main(void) {
+    static char o[1 << 16]; char sha[64], want[80], probe[120]; int rc, fd;
+    {   char *v[] = {"git", "rev-parse", "--short=10", "HEAD", 0}; int ofd, pid; long n = 0, r;
+        pid = sy_spawn_pipe(v, 0, 0, &ofd, 0); if (pid < 0) return 2;
+        while ((r = sy_read(ofd, sha + n, sizeof sha - 1 - n)) > 0) n += r;
+        sy_close(ofd); sy_wait_status(pid, 0, 0, 0, 0);
+        while (n > 0 && sha[n - 1] == '\n') n--; sha[n] = 0;
+    }
+    if (tx_snprintf(want, sizeof want, "SNAPSHOT_RUN\trev=%s\tcwd=.\trc=3\t", sha) >= (int)sizeof want) return 2;
+    {   char *a[] = {"--", "sh", "-c", "exit 3", 0}; rc = sr(a, o, sizeof o); }
+    ck(rc == 3 && has(o, want), "exit-code-and-rev");
+    if (tx_snprintf(probe, sizeof probe, "out/check-snapshot-run-%d.untracked", sy_pid()) >= (int)sizeof probe) return 2;
+    fd = sy_open_new(probe, 0644); if (fd >= 0) sy_close(fd);
+    {   char cmd[300]; char *a[] = {"--cwd", "tools", "--", "sh", "-c", cmd, 0};
+        if (tx_snprintf(cmd, sizeof cmd, "test -f check-snapshot-run.cx && test ! -e ../%s", probe) >= (int)sizeof cmd) return 2;
+        rc = sr(a, o, sizeof o);
+    }
+    sy_unlink(probe);
+    ck(rc == 0 && has(o, "\tcwd=tools\trc=0\t"), "committed-tree-not-working-tree");
+    {   char *a[] = {"--", "true", 0}; rc = sr(a, o, sizeof o); }
+    ck(rc == 0 && has(o, "\trc=0\t"), "snapshot-reused");
+    {   char *a[] = {"--rev", "no-such-rev-xyz", "--", "true", 0}; rc = sr(a, o, sizeof o); }
+    ck(rc == 2, "unknown-rev-refused");
+    {   char *a[] = {"--cwd", "no/such/dir", "--", "true", 0}; rc = sr(a, o, sizeof o); }
+    ck(rc == 2, "missing-cwd-refused");
+    printf("CHECK_SNAPSHOT_RUN\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
