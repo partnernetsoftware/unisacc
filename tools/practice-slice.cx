@@ -1,0 +1,32 @@
+/* practice-slice.cx: a practice suite that uses the borrow slice to detect a
+   UTF-8 BOM at the head of a file without copying.  It borrows the buffer via
+   ms_of, takes a sub-slice via ms_at, and compares via ms_eq -- all read-only,
+   all bounds-checked.  usage: sh ./unisacc.com tools/practice-slice.cx -- FILE */
+#pragma unisa use mem.slice
+#pragma unisa use mem.grow
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+static int bad;
+static void ok(int c, const char *n) { printf("%s\t%s\n", c ? "PASS" : "FAIL", n); if (!c) bad = 1; }
+int main(int argc, char **argv) {
+    long rn = 0; char *raw; mg_buf b;
+    if (argc != 2) { fputs("usage: -- FILE\n", stderr); return 2; }
+    raw = cx_read(argv[1], &rn);
+    if (!raw) return 1;
+    mg_init(&b);
+    if (mg_append(&b, raw, rn)) { mm_free(raw); return 1; }
+    mm_free(raw);
+    {
+        ms_slice whole = ms_of(&b);
+        ms_slice head;
+        const unsigned char bom[] = { 0xEF, 0xBB, 0xBF };
+        ms_slice bom_s = { bom, 3 };
+        int is_bom = ms_at(&whole, 0, 3, &head) == 0 && ms_eq(&head, &bom_s);
+        printf("%s\n", is_bom ? "BOM" : "no-BOM");
+        ok(ms_len(&whole) == rn, "slice-len-matches");
+        ok(ms_at(&whole, rn + 1, 1, &head) == -1, "sub-slice-past-end-refused");
+    }
+    mg_free(&b);
+    printf("PRACTICE_SLICE\tfailed=%d\n", bad);
+    return bad;
+}
