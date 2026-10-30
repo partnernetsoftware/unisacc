@@ -25,6 +25,7 @@
 
 - 错误码显式：所有接口返回 0 或 -errno（或 -EINVAL/-ENOMEM 等），不依赖 errno 跨模块（坑三）。
 - 空指针/空路径/负长度 → -EINVAL，失败不留半开 fd。
+- 平台差异收在本层：`sy_*_os` 这类 static 助手里写 `#ifdef`（如 fs.cx 的 `sy_symlink_os`/`sy_exists_os`），公开接口无平台分支，上层不看 `_WIN32`/`__linux__`（主人范式「优雅简约」：平台差异进 L0 或表）。
 - 这是 L0（`cx/sys/` 在 cxraw 白名单），可直接用 libc；上层经 use 消费。
 
 ## 检查
