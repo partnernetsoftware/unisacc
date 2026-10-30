@@ -168,9 +168,94 @@ static int uses(const char *path) {
     return 0;
 }
 
+/* --fio: stdio file streams to fio (same shapes): the identifier FILE becomes
+   fio_t and the stream calls their fio_* names. A file is left alone (and
+   reported) when it names stdin, stdout or stderr, a stream call fio lacks
+   (fflush, fseek, ftell, rewind, fileno, feof, ferror, fdopen, popen, getline,
+   fscanf), or errno: fio sets its own unit's errno, so a caller reading errno
+   after a failed fio call would read a stale one (fio_errno() is the code). */
+static const ren_t FIO[] = {
+    { "FILE", "fio_t" },
+    { "fopen(", "fio_open(" }, { "fclose(", "fio_close(" }, { "fgets(", "fio_gets(" },
+    { "fread(", "fio_read(" }, { "fwrite(", "fio_write(" }, { "fputs(", "fio_puts(" },
+    { "fputc(", "fio_putc(" }, { "fprintf(", "fio_printf(" },
+};
+#define NFIO ((int)(sizeof FIO / sizeof FIO[0]))
+static const char *FIO_STOP[] = { "stdin", "stdout", "stderr", "fflush", "fseek", "ftell", "rewind", "fileno",
+    "feof", "ferror", "fdopen", "popen", "getline", "fscanf", "errno", 0 };
+
+static int fio_one(const char *path) {
+    size_t n = 0;
+    char *s = cx_read(path, &n);
+    long i = 0, o = 0, len = (long)n;
+    int k, total = 0;
+    if (!s) { printf("delibc: cannot read %s\n", path); return 1; }
+    for (int pass = 0; pass < 2; pass++) {       /* 0: look for a stop word; 1: rewrite */
+        i = 0; o = 0;
+        while (i < len) {
+            char c = s[i];
+            if (o + 64 >= (long)sizeof out) { printf("delibc: %s too large\n", path); return 1; }
+            if (c == '/' && i + 1 < len && s[i + 1] == '*') {
+                long e = tx_find(s + i + 2, len - i - 2, "*/", 2), stop = e < 0 ? len : i + 2 + e + 2;
+                while (i < stop) out[o++] = s[i++];
+                continue;
+            }
+            if (c == '/' && i + 1 < len && s[i + 1] == '/') { while (i < len && s[i] != '\n') out[o++] = s[i++]; continue; }
+            if (c == '"' || c == '\'') {
+                out[o++] = s[i++];
+                while (i < len && s[i] != c) { if (s[i] == '\\' && i + 1 < len) out[o++] = s[i++]; out[o++] = s[i++]; }
+                if (i < len) out[o++] = s[i++];
+                continue;
+            }
+            if (!ident(c) || (i > 0 && (ident(s[i - 1]) || s[i - 1] == '.' || s[i - 1] == '>'))) { out[o++] = s[i++]; continue; }
+            {
+                long a = i, e = i;
+                while (e < len && ident(s[e])) e++;
+                if (pass == 0) {
+                    for (k = 0; FIO_STOP[k]; k++)
+                        if (tx_len(FIO_STOP[k], 16) == e - a && tx_same(s + a, e - a, FIO_STOP[k], e - a)) {
+                            printf("%s\t0\tleft alone: names %s\n", path, FIO_STOP[k]);
+                            return 0;
+                        }
+                    while (i < e) out[o++] = s[i++];
+                    continue;
+                }
+                for (k = 0; k < NFIO; k++) {
+                    long fl = tx_len(FIO[k].from, 16), nl = FIO[k].from[fl - 1] == '(' ? fl - 1 : fl;
+                    if (nl == e - a && tx_same(s + a, nl, FIO[k].from, nl) && (nl == fl || (e < len && s[e] == '('))) break;
+                }
+                if (k == NFIO) { while (i < e) out[o++] = s[i++]; continue; }
+                {
+                    long fl = tx_len(FIO[k].from, 16), nl = FIO[k].from[fl - 1] == '(' ? fl - 1 : fl;
+                    long tl = tx_len(FIO[k].to, 16), tn = FIO[k].to[tl - 1] == '(' ? tl - 1 : tl;
+                    tx_copy(out + o, (long)sizeof out - o, FIO[k].to, tn);
+                    o += tn; i = a + nl; total++;
+                }
+            }
+        }
+    }
+    if (total && tx_find(out, o, "#pragma unisa use fio\n", 22) < 0) {
+        static char tmp[1 << 22];
+        long m = tx_find(out, o, "#pragma unisa module ", 21), e = m < 0 ? 0 : m + tx_chr(out + m, o - m, '\n') + 1;
+        if (count_uses(out, o) >= 32) { printf("delibc: %s would pass 32 uses (needs fio)\n", path); return 1; }
+        tx_copy(tmp, (long)sizeof tmp, out, e);
+        tx_copy(tmp + e, (long)sizeof tmp - e, "#pragma unisa use fio\n", 22);
+        tx_copy(tmp + e + 22, (long)sizeof tmp - e - 22, out + e, o - e);
+        o += 22;
+        tx_copy(out, (long)sizeof out, tmp, o);
+    }
+    if (total && cx_write(path, out, (size_t)o) != 0) { printf("delibc: cannot write %s\n", path); return 1; }
+    printf("%s\t%d\tfio\n", path, total);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     int i, bad = 0;
-    if (argc < 2) { printf("usage: delibc.cx -- [--uses] FILE...\n"); return 2; }
+    if (argc < 2) { printf("usage: delibc.cx -- [--uses | --fio] FILE...\n"); return 2; }
+    if (tx_eq(argv[1], "--fio", 16)) {
+        for (i = 2; i < argc; i++) bad |= fio_one(argv[i]);
+        return bad;
+    }
     if (tx_eq(argv[1], "--uses", 16)) {
         for (i = 2; i < argc; i++) bad |= uses(argv[i]);
         return bad;
