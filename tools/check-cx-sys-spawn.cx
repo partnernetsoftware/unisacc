@@ -6,6 +6,7 @@
 #pragma unisa use sys.proc
 #pragma unisa use sys.fs
 #pragma unisa use sys.env
+#pragma unisa use sys.net
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
 #pragma unisa use text.text
@@ -76,6 +77,19 @@ int main(void) {
         char a[4096], b[4096], tiny[4]; int na = sy_realpath("tools/sys/fs.cx", a, sizeof a), nb = sy_realpath("cx/sys/fs.cx", b, sizeof b);
         ck(na > 0 && na == nb && tx_eq(a, b, 4096) && a[0] == '/', "realpath-link-and-direct-same");
         ck(sy_realpath("no/such/file.cx", a, sizeof a) == -ENOENT && sy_realpath("cx/sys/fs.cx", tiny, sizeof tiny) == -ENAMETOOLONG, "realpath-enoent-and-too-small");
+    }
+    {   /* sy_stat_t.kind: a pipe end is 'p', a socket is 's' */
+        int pf[2] = {-1, -1}, so = sy_tcp_listen(0, 1); sy_stat_t sp, ss;
+        ck(sy_pipe(pf) == 0 && sy_fstat(pf[0], &sp) == 0 && sp.kind == 'p', "kind-fifo-p");
+        ck(so >= 0 && sy_fstat(so, &ss) == 0 && ss.kind == 's', "kind-socket-s");
+        sy_close(pf[0]); sy_close(pf[1]); if (so >= 0) sy_close(so);
+    }
+    {   /* sy_chdir: into /tmp and back; an empty or missing path is refused and the cwd stays */
+        char home[4096], there[4096], tmp[4096], back[4096];
+        int nh = sy_realpath(".", home, sizeof home), nt = sy_realpath("/tmp", tmp, sizeof tmp);
+        int in = sy_chdir("/tmp"), nw = sy_realpath(".", there, sizeof there), out = sy_chdir(home);
+        ck(nh > 0 && nt > 0 && in == 0 && nw > 0 && tx_eq(there, tmp, 4096) && out == 0, "chdir-into-and-back");
+        ck(sy_chdir("") == -EINVAL && sy_chdir("/no/such/dir") == -ENOENT && sy_realpath(".", back, sizeof back) > 0 && tx_eq(back, home, 4096), "chdir-refusals-keep-cwd");
     }
     {   /* sy_stat_t.dev: a hard link shares (dev, ino); another file differs in ino; /proc is another device */
         sy_stat_t s1, s2, s3, sp; const char *f1 = "/tmp/cx-sys-dev-a", *f2 = "/tmp/cx-sys-dev-b", *f3 = "/tmp/cx-sys-dev-c";
