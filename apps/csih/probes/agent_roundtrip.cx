@@ -1,3 +1,7 @@
+#pragma unisa use text.fmt
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
 #pragma unisa use u_run
 #pragma unisa use netwit
 /* agent_roundtrip.cx — agent loop against probes/agent-stub.cx (run with -run). No gcc, no python.
@@ -26,7 +30,7 @@ static int wait_port(int port) {
 }
 
 int main(void) {
-    const char *u = getenv("UNISACC");
+    const char *u = sy_env("UNISACC");
     char dir[64], work[80], tr[96], ep[96], script[512], out[4096];
     char *pav[7], *args[16];
     int rc, st, bad = 0, port;
@@ -34,14 +38,14 @@ int main(void) {
     const char *stub = "probes/agent-stub.cx";
     if (!u || !u[0]) u = "../../unisacc.com";   /* cwd is apps/csih */
     if (access(stub, 0) != 0) stub = "agent-stub.cx";
-    snprintf(dir, sizeof dir, "/tmp/csih-agent-%d", (int)getpid());
-    snprintf(work, sizeof work, "%s/work", dir);
-    snprintf(tr, sizeof tr, "%s/tr.jsonl", dir);
-    if (mkdir(dir, 0700) || mkdir(work, 0700)) { printf("no temp\n"); return 2; }
-    port = 18000 + ((int)getpid() % 20000);
+    tx_snprintf(dir, sizeof dir, "/tmp/csih-agent-%d", (int)sy_pid());
+    tx_snprintf(work, sizeof work, "%s/work", dir);
+    tx_snprintf(tr, sizeof tr, "%s/tr.jsonl", dir);
+    if (mkdir(dir, 0700) || mkdir(work, 0700)) { sy_printf("no temp\n"); return 2; }
+    port = 18000 + ((int)sy_pid() % 20000);
     {
         char portbuf[8];
-        snprintf(portbuf, sizeof portbuf, "%d", port);
+        tx_snprintf(portbuf, sizeof portbuf, "%d", port);
         pid = fork();
         if (pid == 0) {
             pav[0] = (char *)"sh"; pav[1] = (char *)u; pav[2] = (char *)"-run"; pav[3] = (char *)stub;
@@ -50,9 +54,9 @@ int main(void) {
             _exit(127);
         }
     }
-    if (wait_port(port) != 0) { u_stop(pid); printf("  FAIL  stub did not listen\n"); return 1; }
-    snprintf(ep, sizeof ep, "http://127.0.0.1:%d/v1/chat/completions", port);
-    snprintf(script, sizeof script,
+    if (wait_port(port) != 0) { u_stop(pid); sy_printf("  FAIL  stub did not listen\n"); return 1; }
+    tx_snprintf(ep, sizeof ep, "http://127.0.0.1:%d/v1/chat/completions", port);
+    tx_snprintf(script, sizeof script,
         "export CSIH_ENDPOINT='%s'; export CSIH_MODEL=stub; "
         "export CSIH_CWD='%s'; export CSIH_TRANSCRIPT='%s'; exec \"$0\" \"$@\"",
         ep, work, tr);
@@ -60,17 +64,17 @@ int main(void) {
     args[2] = (char *)"--"; args[3] = (char *)"agent";
     args[4] = (char *)"请做一个简单任务";
     u_spawn_sh(u, args, 5, script, out, (int)sizeof out, &rc);
-    if (contains(tr, "hello-from-agent")) printf("  ok    exec action actually ran\n");
-    else { printf("  FAIL  exec action not seen rc=%d out=%.160s\n", rc, out); bad++; }
+    if (contains(tr, "hello-from-agent")) sy_printf("  ok    exec action actually ran\n");
+    else { sy_printf("  FAIL  exec action not seen rc=%d out=%.160s\n", rc, out); bad++; }
     /* Stub finishes via assistant text embedding {\"act\":\"answer\"...};
      * production judge path still writes role=decision go=stop. */
     if (contains(tr, "\"role\":\"decision\",\"go\":\"stop\"")
         || contains(tr, "\\\"act\\\":\\\"answer\\\""))
-        printf("  ok    loop reached a terminal act\n");
-    else { printf("  FAIL  no terminal act\n"); bad++; }
-    if (contains(tr, "完成了")) printf("  ok    final answer recorded\n");
-    else { printf("  FAIL  no answer\n"); bad++; }
+        sy_printf("  ok    loop reached a terminal act\n");
+    else { sy_printf("  FAIL  no terminal act\n"); bad++; }
+    if (contains(tr, "完成了")) sy_printf("  ok    final answer recorded\n");
+    else { sy_printf("  FAIL  no answer\n"); bad++; }
     u_stop(pid); waitpid(pid, &st, 0);
-    printf(bad ? "agent roundtrip: %d FAIL\n" : "agent roundtrip: PASS\n", bad);
+    sy_printf(bad ? "agent roundtrip: %d FAIL\n" : "agent roundtrip: PASS\n", bad);
     return bad ? 1 : 0;
 }
