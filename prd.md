@@ -173,7 +173,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 │  ├─ B1 E2 每个 #include 整缓冲重扫：空 main 的 .cx 一次 E2 换入 5084 万字节（模型规则，最大）
 │  ├─ B2 执行器自编 -O2 代码质量：同模型慢 3.3–3.9 倍（路线待主人定：汇编执行循环 / 改进自身 O2）
 │  └─ B3 每次运行固定开销约 113 ms（包解析 + 模型解压）；候选无 run-cache
-├─ 去 Python：191 个已归档 archive/reference-py/；活路径剩 42 个为两个生成器闭包（exec/facts/export.py、unisa emit-kernel），另 release/ 18、apps/ 各自域
+├─ 去 Python：191 个已归档 archive/reference-py/；活路径剩 42 个为两个生成器闭包（exec/facts/export.py、unisa emit-kernel），另 release/ 18、apps/ 各自域；gold 表的检查与重写已原生化（tools/gold-table.cx，20 张，11 张有 seed 规则形），不再需要 `unisa gold-export`
 └─ 卫生：cx 三棘轮（cxinclude/cxapis/cxtrunc）已不计 archive/，但 HEAD 超基线 52/71/170 行（多在 apps/csih）
 ```
 
