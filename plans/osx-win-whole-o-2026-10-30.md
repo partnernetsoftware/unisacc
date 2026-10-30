@@ -61,3 +61,33 @@ unisacc: error: undefined function 'getuid'
 ```
 
 这三处调用是 `src/host.cx:80` 的 `readlink("/proc/self/exe")`、`cx/sys/fs.cx:154` 的 `stat`（`sy_stat`）、`cx/sys/env.cx:49` 的 `getuid`（`sy_uid`）。没有文件，没有 PE。这一次没有再改。
+
+## readlink 和 getuid 收进帮手（2026-10-30）
+
+`78bc1b53c4` 是 `cx/sys/env.cx`、`fs.cx`。`sy_self_path` 在 Linux 上读 `/proc/self/exe`，在 Windows 上经 `_ux_sym` / `_ux_call` 调 `GetModuleFileNameA`。`sy_stat` 的 Windows 分支用 `GetFileAttributesExA` 填 size、mtime、kind，ino 和 dev 填 0，注释写明 Windows 上不能用 `(dev, ino)` 判断是不是同一个文件。`sy_uid` 在 Windows 上返回 0，缓存目录起名用这个数，固定值够了。导出函数没有 `#if`。`6c3ede8ea7` 里 `src/host.cx` 的 `hs_self` 改调 `sy_self_path`，函数里声明，没有 `use sys.fs`。
+
+`check-cx-sys` 是 103/0。`check-cx-sys-net`、`spawn`、`ffi`、`guard` 都是 failed=0。
+
+对上这刀源码的 Linux 候选是 `8660d14d8dbddd223003647b232099efd334a1783ef2059cd4b254e6cda01487`，2980148 字节。runcache 12/0，冷 576 ms，命中 41 ms。对拍前 10 格 SAME。切片写出 21 格全 SAME，LEFT 127，退出 2。这只二进制后来被下一刀覆盖，sha 留在这里。
+
+同一只已装产品，外层 `tools/bound 55`，`UNISACC_RR_TIME=1`，32 源，`-b win/x86_64 -o out/grk-win3-o/slice-win-x86_64`。墙钟 13.745 秒，退出 1。units 推理退出 0，e3 推理退出 1。标准错误只剩一条，没有行号：
+
+```
+unisacc: error: undefined function 'stat'
+```
+
+`readlink` 和 `getuid` 没有了。没有文件，没有 PE。
+
+## 再把 lstat 收进去（2026-10-30）
+
+前导里 Windows 的 `lstat` 就是去调 `stat`。`sy_lstat`、`sy_exists` 的 Windows 分支改走 `sy_stat` 那条属性读取，不报 kind `'l'`。`hs_write_out` 改调 `sy_is_reg`，不再写 `lstat`。Linux 上仍是 `lstat`。
+
+Linux 候选 `out/grk-win3/candidate` 2980148 字节，sha256 `ea57700cfe910f73ab32344eaf922ad008964e4bc12b7f581079fd07127feb3f`。`host.o` 里 `sy_self_path` 和 `sy_is_reg` 是 U，`drive.o` 里各有一个 T，`sy_fstat` 仍只有一份 T。runcache 12/0，冷 578 ms，命中 41 ms。对拍前 10 格 SAME。切片写出 23 格全 SAME，LEFT 125，退出 2。
+
+再跑一次 32 源，`-o out/grk-win3-o2/slice-win-x86_64`。墙钟 13.840 秒，退出 1。units 推理退出 0，e3 推理退出 1。标准错误仍是一条：
+
+```
+unisacc: error: undefined function 'stat'
+```
+
+这时 `src` 里已经没有活的 `stat(` 或 `lstat(`。`fs.cx` 里剩下的三处都在非 Windows 的 `#else`。没有文件，没有 PE。没有再追下一处调用。
