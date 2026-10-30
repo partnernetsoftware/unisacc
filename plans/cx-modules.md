@@ -493,3 +493,22 @@ flowchart TD
   cand --> run["dup 退出 3，hello 退出 0"]
 ```
 
+## 159. 2026-10-30 入口改走汇编核心
+
+`src/executor.cx` 改为 `#pragma unisa use core.kernel`。`core_run` 走包里的 UNIKERN1 汇编核心，签名仍是 `cx/core/execute.cx` 那份。`ex_touch` 只留 `core_run_take` 和 `core_run_budget`，所以 `transition.o` 还在。`alu`、`stack`、`output`、`sparse`、`bytes` 只给旧的 `core.execute` 用，已从 `tools/entry-build.cx` 拿掉。表里本来没有单独的 `execute`、`coregate`、`memory` 对象。对象数从 38 收到 33。`cx/core/execute.cx` 和 `cx/core/kernel.cx` 正文没改。
+
+第一代是 `out/grk-entry-build-12`。构造器是仓库根 `unisacc.com`，sha256 `79fb84e65a10b55ce40be5f68746748acbd38f441944046c0a5dfa5718bc0c32`，3035300 字节，via=sh。33 只对象都成功。`executor.o` sha256 `7e43832ce6f40fd34bd6c22bd1e812ddef09f843d1b588b4d175d4db9e3216bc`，308632 字节，ns=2646934991，最慢 e4 推理 ns=1001281213。`entry.elf` sha256 `8ec81c4d2f3746e662610ff8dd31ea2dec4fa3165dd99b748978b05251fb0f1f`，995040 字节，ns=5492598339，最慢 lower 推理 ns=2084739749。package_offset 1399280，package_bytes 1636020。候选 sha256 `11b7a23ad760970590a28350da189f8391cde3649c8053f936b3756b7715747d`，2631060 字节。拼接 ns=16494322，slow_kind=UNMEASURED。
+
+第二代是 `out/grk-entry-build-13`。构造器就是 12 的候选，via=exec。33 只 `.o`、`entry.elf`、候选和第一代逐字节相同：same 35，diff 0，miss 0。候选 sha 与第一代相同。候选侧 `drive.o` sha256 仍是 `f29d42cf917d22100987f71fdc264424d1ac25de4eb9dd9fa08db05e0c5b1b10`，ns=3864793742，最慢 e4 推理 ns=1403011081。上一只 CX 核心候选（11）编同一只 `drive.o` 是 ns=11608953444，e4 推理 ns=4019976213。`driveface.o` sha256 `b6c590c3ee2eccfe9604892bd9f48931d428a16726f55d69d32c3b5ac98672d3`，ns=11794761865，最慢 e4 推理 ns=5386000902；11 上是 ns=34415356768，e4 推理 ns=14840487407。`driveroute.o` ns=4877628028，最慢 e4 推理 ns=1650756112；11 上是 ns=14037410263，e4 推理 ns=4933233568。`entry.elf` ns=4939334180，最慢 lower 推理 ns=2296916595；11 上是 ns=13406527014，lower 推理 ns=6759420788。最慢对象仍是 `driveface.o`，低于 55 秒。链接低于 40 秒。
+
+`dup.c` 和 `hello.c` 在 12 的候选和已装产品上实跑过。cwd 是 `/tmp/notrepo`，去掉 `UNISA_CONTAINER`，外层 `tools/bound 12`。`dup.c -run` 两边退出 3，stdout 0，stderr 0。`examples/hello.c -run` 两边退出 0，stdout 13 字节 `from hello.c`，stderr 0。148 格这轮没重跑。热循环源码没改。bound 没有加长。没有换掉已装产品。10 和 11 没有覆盖。
+
+```mermaid
+flowchart TD
+  prod["已装产品 via=sh"] --> g1["12：33 只对象，core.kernel"]
+  g1 --> cand["候选 sha 11b7a23a"]
+  cand --> g2["13：直接执行这只候选"]
+  g2 --> same["35 个文件与 12 逐字节相同"]
+  g2 --> fast["driveface 34.4s 降到 11.8s"]
+```
+
