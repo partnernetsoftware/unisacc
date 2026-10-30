@@ -3,6 +3,14 @@
 
      sh ./unisacc.com tools/refactor.cx -- find [--auto] RULES FILE...   > CANDIDATES.tsv
      sh ./unisacc.com tools/refactor.cx -- apply CANDIDATES.tsv JOBS VERIFY...
+     sh ./unisacc.com tools/refactor.cx -- sweep RULES JOBS (FILE... | --tracked) -- VERIFY...
+     sh ./unisacc.com tools/refactor.cx -- rename [--auto] OLD NEW (FILE... | --tracked)   > CANDIDATES.tsv
+     sh ./unisacc.com tools/refactor.cx -- sites NAME[,NAME...] (FILE... | --tracked)
+
+   sweep is one resumable round of find --auto + apply (apply's deadline 36 s, so the whole call stays
+   under 60 s): files apply SKIPs or REVERTs go on out/refactor-verify/skip-<rules path>.txt and are not
+   retried; it ends with SWEEP ok= skip= revert= defer= remaining=N and exits 0 when nothing remains,
+   3 when it should be called again, 1 on any revert.  Repeat the same call until it exits 0.
 
    RULES (TSV, '#' comments): id  call  prefix  argc  template  use  class  [context  [where]]
      call     the called name; prefix: the characters that must sit right before it ('-': none), replaced too;
@@ -579,6 +587,88 @@ static int scan_tracked(Buf *out, int autoacc) {
     return 0;
 }
 
+/* ---------- sweep: find + apply as one resumable round ---------- */
+/* 1 when FILE is a line of the skip list S (n bytes) */
+static int skipped(const char *s, long n, const char *file) {
+    long at = 0, fl = tx_len(file, CAP);
+    while (at < n) {
+        long e = tx_chr(s + at, n - at, '\n'), ln = e < 0 ? n - at : e;
+        if (tx_same(s + at, ln, file, fl)) return 1;
+        at += ln + 1;
+    }
+    return 0;
+}
+/* the candidate rows (with header) for TARGETS minus the skip list; *accepted counts accept rows */
+static void sweep_find(Buf *out, char **targets, int nt, int tracked, const char *sk, long skn, long *accepted) {
+    Buf all = {0, 0, 0}; long at = 0;
+    puts_(out, "# verdict\tfile\toffset\tline\trule\tclass\twhy\toriginal\treplacement\tuse\n");
+    if (tracked) { if (scan_tracked(&all, 1) < 0) die("cannot scan the tracked files"); }
+    else { int k; for (k = 0; k < nt; k++) if (find_file(&all, targets[k], 1) < 0) die("cannot read a target"); }
+    *accepted = 0;
+    while (at < all.n) {   /* drop rows of skip-listed files */
+        char *l = all.p + at; long e = tx_chr(l, all.n - at, '\n'), ln = e < 0 ? all.n - at : e + 1, t1 = tx_chr(l, ln, '\t'), t2;
+        char file[4400];
+        t2 = t1 < 0 ? -1 : tx_chr(l + t1 + 1, ln - t1 - 1, '\t');
+        if (t1 >= 0 && t2 >= 0 && t2 < (long)sizeof file && !tx_copy(file, sizeof file, l + t1 + 1, t2) && !skipped(sk, skn, file)) {
+            put(out, l, ln);
+            if (tx_prefix(l, ln, "accept\t", 7)) (*accepted)++;
+        }
+        at += ln;
+    }
+}
+static int sweep(char **argv, int argc) {
+    /* sweep RULES JOBS (FILE... | --tracked) -- CHECK...  */
+    char skp[4400], cand[4400], *sk; size_t skn0; long skn, acc = 0, after = 0, k, dash = -1;
+    Buf c = {0, 0, 0}, v = {0, 0, 0}, log = {0, 0, 0}, sl = {0, 0, 0}; int jobs, tracked, ok = 0, sk2 = 0, rev = 0, def = 0;
+    for (k = 4; k < argc; k++) if (tx_eq(argv[k], "--", 4)) { dash = k; break; }
+    if (dash < 0 || dash + 1 >= argc) die("sweep RULES JOBS (FILE... | --tracked) -- CHECK...");
+    jobs = (int)strtol(argv[3], 0, 10);
+    if (jobs < 1 || jobs > MAXJOBS) die("JOBS 1..16");
+    load_rules(argv[2]);
+    tracked = dash == 5 && tx_eq(argv[4], "--tracked", 16);
+    {   long i; char *rb = zdup(argv[2]);   /* the skip list is per rules file: out/refactor-verify/skip-<rules path with / as _>.txt */
+        for (i = 0; rb[i]; i++) if (rb[i] == '/') rb[i] = '_';
+        sy_mkdir("out/refactor-verify", 0700);
+        if (cx_fmt(skp, sizeof skp, "out/refactor-verify/skip-%s.txt", rb) || cx_fmt(cand, sizeof cand, "out/refactor-verify/sweep-%d.tsv", sy_pid())) die("path");
+    }
+    sk = cx_read(skp, &skn0); skn = sk ? (long)skn0 : 0; if (!sk) sk = "";
+    sweep_find(&c, argv + 4, (int)(dash - 4), tracked, sk, skn, &acc);
+    if (!acc) { printf("SWEEP\tok=0\tskip=0\trevert=0\tdefer=0\tremaining=0\tskip_list=%s\n", skp); return 0; }
+    if (cx_write(cand, c.p, (size_t)c.n) != 0) die("cannot write the candidates");
+    for (k = dash + 1; k < argc; k++) { if (k > dash + 1) put(&v, " ", 1); puts_(&v, argv[k]); }
+    {   char jb[16], *av[10]; int ofd, pid; long r; char chunk[8192];
+        if (cx_fmt(jb, sizeof jb, "%d", jobs)) die("format");
+        av[0] = "sh"; av[1] = "./unisacc.com"; av[2] = "tools/refactor.cx"; av[3] = "--"; av[4] = "apply"; av[5] = cand; av[6] = jb; av[7] = v.p; av[8] = 0;
+        sy_setenv("REFACTOR_DEADLINE_MS", "36000", 1);   /* two finds of the whole tree take up to about 10 s */
+        pid = sy_spawn_pipe(av, 0, 0, &ofd, 0);
+        if (pid < 0) die("cannot start apply");
+        while ((r = sy_read(ofd, chunk, sizeof chunk)) > 0) { put(&log, chunk, r); sy_write_all(1, chunk, r); }
+        sy_close(ofd); sy_wait_status(pid, 0, 0, 0, 0);
+    }
+    {   long at = 0;   /* SKIP and REVERT files go on the skip list, so the next round does not retry them */
+        put(&sl, sk, skn);
+        while (at < log.n) {
+            char *l = log.p + at; long e = tx_chr(l, log.n - at, '\n'), ln = e < 0 ? log.n - at : e, t2;
+            int isskip = tx_prefix(l, ln, "SKIP\t", 5), isrev = tx_prefix(l, ln, "REVERT\t", 7);
+            if (tx_prefix(l, ln, "OK\t", 3)) ok++;
+            if (tx_prefix(l, ln, "DEFER\t", 6)) def++;
+            if (isskip || isrev) {
+                long s = isskip ? 5 : 7; t2 = tx_chr(l + s, ln - s, '\t'); if (t2 < 0) t2 = ln - s;
+                if (isskip) sk2++; else rev++;
+                put(&sl, l + s, t2); put(&sl, "\n", 1);
+            }
+            at += ln + 1;
+        }
+        if (sk2 + rev && cx_write(skp, sl.p, (size_t)sl.n) != 0) die("cannot write the skip list");
+    }
+    {   Buf again = {0, 0, 0}; size_t n2; char *s2 = cx_read(skp, &n2);
+        sweep_find(&again, argv + 4, (int)(dash - 4), tracked, s2 ? s2 : "", s2 ? (long)n2 : 0, &after);
+    }
+    sy_unlink(cand);
+    printf("SWEEP\tok=%d\tskip=%d\trevert=%d\tdefer=%d\tremaining=%ld\tskip_list=%s\n", ok, sk2, rev, def, after, skp);
+    return rev ? 1 : after ? 3 : 0;
+}
+
 int main(int argc, char **argv) {
     arena = ar_new(1L << 32);
     if (!arena) die("cannot create the arena");
@@ -627,7 +717,9 @@ int main(int argc, char **argv) {
         else for (k = a + 2; k < argc; k++) if (find_file(&out, argv[k], autoacc) < 0) return 2;
         return sy_write_all(1, out.p, out.n) == 0 ? 0 : 2;
     }
+    if (argc >= 7 && tx_eq(argv[1], "sweep", 8)) return sweep(argv, argc);
     if (argc >= 5 && tx_eq(argv[1], "apply", 8)) {
+        if (sy_env("REFACTOR_DEADLINE_MS")) deadline_ms = strtol(sy_env("REFACTOR_DEADLINE_MS"), 0, 10);   /* sweep leaves room for its finds */
         Buf v = {0, 0, 0}; int k, jobs = (int)strtol(argv[3], 0, 10);
         if (jobs < 1 || jobs > MAXJOBS) die("JOBS 1..16");
         if (argc >= 8 && tx_eq(argv[4], "--range", 8)) {
@@ -651,6 +743,6 @@ int main(int argc, char **argv) {
         for (k = 4; k < argc; k++) { if (k > 4) put(&v, " ", 1); puts_(&v, argv[k]); }
         return apply(argv[2], jobs, v.p);
     }
-    fprintf(stderr, "usage: refactor.cx sites NAME[,NAME...] (FILE... | --tracked) | find [--auto] RULES FILE... | apply CANDIDATES JOBS (VERIFY... | --verify-from REGISTRY)\n");
+    fprintf(stderr, "usage: refactor.cx sweep RULES JOBS (FILE... | --tracked) -- CHECK... | rename [--auto] OLD NEW (FILE... | --tracked) | sites NAME[,NAME...] (FILE... | --tracked) | find [--auto] RULES FILE... | apply CANDIDATES JOBS (VERIFY... | --verify-from REGISTRY)\n");
     return 2;
 }

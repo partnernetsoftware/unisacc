@@ -116,6 +116,36 @@ int main(void) {
            "apply-same-output-keeps-edit");
     }
     sy_unlink(copy); sy_unlink(cands);   /* the empty scratch directory stays in out/ */
+    {   /* sweep in a scratch dir with its own text link and its own copy of the rules (so its skip list is its own):
+           one fixable file OK, one whose compile fails before the edit SKIP and skip-listed, nothing remaining;
+           a second sweep finds nothing to do */
+        char sd[300], good[340], bad[340], rules[340], *sk; size_t skn, rn; char *rsrc = cx_read("tools/refactor/strcmp-eq.tsv", &rn);
+        const char *gsrc = "int main(int c, char **v) { if (!strcmp(v[0], \"x\")) return 1; return c; }\n";
+        const char *bsrc = "int main(void) { return !strcmp(\"a\", \"b\") + nosuchfn(); }\n";
+        if (cx_fmt(sd, sizeof sd, "out/check-refactor-%d-sweep", sy_pid()) || cx_fmt(good, sizeof good, "%s/g.cx", sd)
+            || cx_fmt(bad, sizeof bad, "%s/b.cx", sd) || cx_fmt(rules, sizeof rules, "%s/rules.tsv", sd) || !rsrc) return 2;
+        {   char *lnv[] = {"ln", "-s", "../../cx/text", "text", 0}; int lpid, lfd = -1;
+            if (sy_mkdir(sd, 0755) != 0 || put_file(good, gsrc, tx_len(gsrc, 4096)) || put_file(bad, bsrc, tx_len(bsrc, 4096)) || put_file(rules, rsrc, (long)rn)) { ck(0, "sweep-scratch"); goto done; }
+            lpid = sy_spawn_pipe(lnv, sd, 0, &lfd, 0);
+            if (lpid > 0) { char junk[256]; while (sy_read(lfd, junk, sizeof junk) > 0) {} sy_close(lfd); sy_wait_status(lpid, 0, 0, 0, 0); }
+        }
+        {   char *sw[] = {"sweep", rules, "2", good, bad, "--", "sh ./unisacc.com -c -b lnx/x86_64 {file} -o /dev/null && echo compiled", 0};
+            rc = tool(sw, out, sizeof out); after = cx_read(good, &an);
+            ck(rc == 0 && tx_find(out, tx_len(out, sizeof out), "SWEEP\tok=1\tskip=1\trevert=0\tdefer=0\tremaining=0\t", 44) >= 0
+               && after && tx_find(after, (long)an, "tx_eq(v[0], \"x\", 1L << 20)", 26) >= 0, "sweep-fixes-one-skips-one");
+        }
+        {   char skp[400]; long i; char rb[340];
+            tx_copy(rb, sizeof rb, rules, tx_len(rules, sizeof rb)); for (i = 0; rb[i]; i++) if (rb[i] == '/') rb[i] = '_';
+            if (cx_fmt(skp, sizeof skp, "out/refactor-verify/skip-%s.txt", rb)) return 2;
+            sk = cx_read(skp, &skn);
+            ck(sk && tx_find(sk, (long)skn, bad, tx_len(bad, 340)) >= 0 && tx_find(sk, (long)skn, good, tx_len(good, 340)) < 0, "sweep-skip-list-has-only-the-failed-file");
+            {   char *sw2[] = {"sweep", rules, "2", good, bad, "--", "true", 0};
+                rc = tool(sw2, out, sizeof out);
+                ck(rc == 0 && tx_find(out, tx_len(out, sizeof out), "SWEEP\tok=0\tskip=0\trevert=0\tdefer=0\tremaining=0\t", 44) >= 0, "sweep-again-nothing-to-do");
+            }
+            sy_unlink(skp);
+        }
+    }
 done:
     printf("CHECK_REFACTOR\tfailed=%d\n", failed);
     return failed ? 1 : 0;
