@@ -113,3 +113,23 @@ reject: not covered: win/x86_64 lowering
 没有文件，没有 PE。`stat` 没有了。
 
 `undefined function` 带上首个调用点这一刀没做。这句话由 `fw_undef_line` 拼出来，手里只有符号名；转发边车这段没有源位置。
+
+## lowering 拒绝说出操作码（2026-10-30）
+
+`reject: not covered: win/x86_64 lowering` 来自 `exec/lower/codeend-manifest.tsv` 的 `code-shell` exit 行，`@rej` 在 `seed/gen.c` 生成期把 `{target}` 换成 `os/arch`，整句写进模型。已装产品编 `int main(void){return 0;}` 为 win 带时，`strace` 不打开 `exec/lower`。`{op}` 不是当时的环境键，写进去会留下字面量 `{op}`，不是这次编译没盖住的那条。
+
+`code-shell-result.tsv` 的 `C.fail` 原来只有 `[["@","reject"]]`。现在先把诊断流切过去，打出 `of `、操作码文本（`TXT[op]`），`na` 不是 0 时再打一个空格和 `a0`，然后换行，再走原来的 `REJECT`。`tests/stream-lower-domain.cx` 的精确拒绝仍描述钉死的 stream，那只二进制还不会打出这一行。下一趟慢车道生成之后，这几格的标准错误会多一行，到那时再改断言。本刀不跑生成，不安装。
+
+探针在 `out/grk-ccw-probe/`，已装产品：
+
+| 输入 | 目标 | 结果 |
+|---|---|---|
+| `cb.c` 函数指针、`ap.c` 把函数传进调用 | win/x86_64 | PE32+，退出 0 |
+| `poll.tape`：`.sys poll, r0, r1, r2` | win/x86_64 | 退出 1，只有 `reject: not covered: win/x86_64 lowering` |
+| 同一条 `poll.tape` | osx/x86_64 | Mach-O 64-bit x86_64 |
+| `ccw.tape`：`__ccw_0:` | win/x86_64 | 退出 1，同一句 |
+| 同一条 `ccw.tape` | osx/x86_64 | Mach-O 64-bit x86_64 |
+
+`exec/facts/lower-abi.tsv` 里 win/x86_64 的 `poll` 系统号是 `none`、门是 0；osx/x86_64 的 `poll` 是 `0x20000e6`、门是 1。同形的还有 `stat`、`lstat`、`fstat`、`execve`、`socket`、`connect`、`ioctl`、`fcntl`、`mkdir`、`chmod`、`futex`、`clone`、`getpid`、`gettimeofday`、`ftruncate`、`getdirentries64`、`bind`、`listen`、`accept`、`syscall`。32 源的 e3 已经过了，所以不是「未定义函数」。停在哪一条要等新拒绝句。`ccw-win` 的 `CCW.set` 直接进 `C.fail`，osx 走 `ccw-x86` 把六个宿主参数搬进寄存器。
+
+已装产品 `tests/runcache.cx`，目录 `out/grk-lower-rcache`：12/0，冷 587 ms，命中 61 ms。没有重编候选。
