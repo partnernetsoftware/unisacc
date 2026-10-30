@@ -6,7 +6,7 @@
 其中`tools/sourceflat.cx`已原生替代源码导出逻辑。下文涉及历史探针的条目仅描述来源，
 不能据此恢复旧队列或借用旧通过结果。
 
-**产品**是 C99 编译器 `unisacc.com`（C99 = ISO/IEC 9899:1999 含 TC1–TC3，文本 WG14 N1256；条款覆盖账本见 archive/plans/v0.0.14.md R14-6；`#line` 主文件内已支持（0.0.14）；随带 C 库是有清单的子集，见 README 限制表）（六目标单文件）及随带的 `include/`。编译器入口是 `src/unisacc.cx`（六层，见第 2 节），由 `tools/entry-build.cx` 构造；各阶段声明与构造器在 `exec/` 对应目录。原 Python 种子 `unisa/` 已归档到 `archive/reference-py/unisa/`（清单见 [archive/reference-py/README.md](archive/reference-py/README.md)），经典 C 参考（`unisacc.c`、`src/*.c`，以及 `exec/c/` 的驱动与运行核 C 源如 `compiler.c`、`asmcompiler.c`、`run.c`）已归档到 `archive/reference-c/`（见 [archive/reference-c/README.md](archive/reference-c/README.md)），两者只供对照，活路径不回调。生成表与 `kernel/` 改由第 3 节的 CX 工具写出；活路径上剩余的 Python 见 [plans/python-residue-2026-10-30.md](plans/python-residue-2026-10-30.md)。下面区分产品、参考、数据与开发工具：
+**产品**是 C99 编译器 `unisacc.com`（C99 = ISO/IEC 9899:1999 含 TC1–TC3，文本 WG14 N1256；条款覆盖账本见 archive/plans/v0.0.14.md R14-6；`#line` 主文件内已支持（0.0.14）；随带 C 库是有清单的子集，见 README 限制表）（六目标单文件）及随带的 `include/`。编译器入口是 `src/unisacc.cx`（六层，见第 2 节），由 `tools/entry-build.cx` 构造；各阶段声明与构造器在 `exec/` 对应目录。原 Python 种子 `unisa/` 已归档到 `archive/reference-py/unisa/`（清单见 [archive/reference-py/README.md](archive/reference-py/README.md)），经典 C 参考（`unisacc.c`、`src/*.c`，以及 `exec/c/` 的驱动与运行核 C 源如 `compiler.c`、`asmcompiler.c`、`run.c`）已归档到 `archive/reference-c/`（见 [archive/reference-c/README.md](archive/reference-c/README.md)），两者只供对照，活路径不回调。生成表与 `kernel/` 改由第 3 节的 CX 工具写出；活路径上剩余的 Python 见 [plans/python-residue-2026-10-30.md](archive/plans/2026-10-30/python-residue-2026-10-30.md)。下面区分产品、参考、数据与开发工具：
 
 | 类别 | 位置 | 说明 |
 |---|---|---|
@@ -28,7 +28,7 @@
 ## 模型路线：发布基线与当前本地候选
 
 `Makefile` 的 `make com` 仍走 `exec/c/buildcompiler.sh`，该链因 Python 与参考 C
-归档已起不来（见 [python-residue](plans/python-residue-2026-10-30.md) 第 5 行）；经典回退
+归档已起不来（见 [python-residue](archive/plans/2026-10-30/python-residue-2026-10-30.md) 第 5 行）；经典回退
 `classic-com` 已不在 `Makefile` 中。新入口换成产品的步骤见
 [candidate-to-product](plans/candidate-to-product-2026-10-30.md)。模型拒绝不隐式改走经典路线。规范入口是
 [prd §0.3 当前流水线](prd.md#pipeline-design)，当前字节账见
@@ -141,7 +141,7 @@ Windows Authenticode 单列验收。Mach-O ad-hoc 签名仅满足运行格式要
 
 使用方经 `#pragma unisa use text.text`、`mem.arena`、`sys.fs` 等引用 L0 包；`include/cx-nested.h` 里的 `cx_*` 帮手（`cx_read`、`cx_write`、`cx_run*`、`cx_fmt` 等）原地算 L0 接口。L0 各包的检查是 `tools/check-cx-text.cx`、`tools/check-cx-arena.cx`、`tools/check-cx-sys.cx`。
 
-**`#include` 边界**：新 `.cx` 不手写 `#include`。只有 `include/`、`tools/cxcc-hostinc/` 与 `cx/sys/` 可以用，白名单是 [`tests/cxinclude-boundary.tsv`](tests/cxinclude-boundary.tsv)；白名单外的旧债记在 `tests/cxinclude.tsv`，只降不升。`src/host.cx` 的 3 个 `#include` 怎么处置尚未定，见 [python-residue](plans/python-residue-2026-10-30.md) 的“只有底层能 include”一节。
+**`#include` 边界**：新 `.cx` 不手写 `#include`。只有 `include/`、`tools/cxcc-hostinc/` 与 `cx/sys/` 可以用，白名单是 [`tests/cxinclude-boundary.tsv`](tests/cxinclude-boundary.tsv)；白名单外的旧债记在 `tests/cxinclude.tsv`，只降不升。`src/host.cx` 的 3 个 `#include` 怎么处置尚未定，见 [python-residue](archive/plans/2026-10-30/python-residue-2026-10-30.md) 的“只有底层能 include”一节。
 
 **棘轮**（各自基线只降不升，新文件为 0）：
 

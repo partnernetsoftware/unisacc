@@ -1,6 +1,6 @@
 # 候选换成产品：慢车道步骤（未执行，以新 CX 入口为准）
 
-2026-10-30 修订。上一版 `f091575044` 把 `tools/product-build.cx` 当成现成的两代工具。那一步跑不通：它编的是已经归档的旧 C，编出来也不是新入口。这份改成以新入口为准。慢车道本身还没跑：没有 `source-job-wave`、`pc-wave`、`kernel-build`、`product-build`、`selfhost`，没有 wrap，没有安装，没有换标，没有改已装 `unisacc.com`。四目标只编了对象，见 [entry-target-probe-2026-10-30.md](entry-target-probe-2026-10-30.md)。
+2026-10-30 修订。上一版 `f091575044` 把 `tools/product-build.cx` 当成现成的两代工具。那一步跑不通：它编的是已经归档的旧 C，编出来也不是新入口。这份改成以新入口为准。慢车道本身还没跑：没有 `source-job-wave`、`pc-wave`、`kernel-build`、`product-build`、`selfhost`，没有 wrap，没有安装，没有换标，没有改已装 `unisacc.com`。四目标只编了对象，见 [entry-target-probe-2026-10-30.md](../archive/plans/2026-10-30/entry-target-probe-2026-10-30.md)。
 
 ## 现在是什么
 
@@ -87,11 +87,11 @@ GEN 的工具换成下面的新入口构造。现在的 `product-build.cx` 不�
 | `seed/ape.c` | 留下当 wrap | 已接受五片和 `--payload`。不负责编入口。win 片必须是它能挪头的 PE |
 | `tools/cx-flatten.cx` | 留下 | 展平头的生成器。包刷新前用 `--check` |
 | `tools/source-package-pack.cx`、`tools/cxlib/sourcepackage.cx`、`tools/source-package-mixed.cx` | 留下 | `CARRIED_HEADERS` 把 `include/` 打进新 P3 |
-| `exec/c/buildcompiler.sh` | 退场 | 和 `product-build` 一起退。`SEED_GEN=0` 时第 30、31、45、57、59 行调用 `exec/c/tbl.py`、`net.py`、`exec/build/gen.py`、`exec/c/provenance.py`。这四个活路径不存在，副本在 `archive/reference-py/`。默认 `SEED_GEN=1` 改走 `seed/*.c`，旧 C 也已归档，这条入口现在起不来。见 [python-residue-2026-10-30.md](python-residue-2026-10-30.md) 第 5 项 |
+| `exec/c/buildcompiler.sh` | 退场 | 和 `product-build` 一起退。`SEED_GEN=0` 时第 30、31、45、57、59 行调用 `exec/c/tbl.py`、`net.py`、`exec/build/gen.py`、`exec/c/provenance.py`。这四个活路径不存在，副本在 `archive/reference-py/`。默认 `SEED_GEN=1` 改走 `seed/*.c`，旧 C 也已归档，这条入口现在起不来。见 [python-residue-2026-10-30.md](../archive/plans/2026-10-30/python-residue-2026-10-30.md) 第 5 项 |
 | `Makefile` 的 `model-com`、`comboot-seed-step`、`comboot-stage2-step`、`comboot-stage3-step` | 退场 | 第 63–69 行都去跑 `exec/c/buildcompiler.sh`。这是 model、seed、comb 三步，跟着上面那条一起退 |
 | `release/tools/seal_candidate.sh` | 切换时重写 | 第 4 行读旧 generation 里的 `unisacc-next.com`、`unisacc-next.com.build.json`、`model-audit/models.json`。第 7–8 行内联 `python3`，写 `release/candidate.json`。新收据定下来之后用 jq 和 sha256sum 重写。见 python-residue 第 7 项。这次不改这个脚本 |
 
-工具退场与注册表里那几批同时处理。`hostseed-*`、`ri-material-*`、`package-controls` 依赖 `product-build`、`hostseed-step` 这些旧工具。归档还是标不可运行，等主人裁定，见 [archived-c-batches-2026-10-30.md](archived-c-batches-2026-10-30.md)。这份清单不改注册表行。
+工具退场与注册表里那几批同时处理。`hostseed-*`、`ri-material-*`、`package-controls` 依赖 `product-build`、`hostseed-step` 这些旧工具。归档还是标不可运行，等主人裁定，见 [archived-c-batches-2026-10-30.md](../archive/plans/2026-10-30/archived-c-batches-2026-10-30.md)。这份清单不改注册表行。
 
 ## 这次明确不做
 

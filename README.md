@@ -86,7 +86,7 @@ sources. `tools/package-refresh.cx` ([packages](tools/packages.md)) still compar
 `exec/c/core.c`, which is archived, so it too must be reworked before the
 switch's package refresh. `unisacc-next.com` is only a build-directory output
 name. The live Python left on any path is listed in
-[python residue](plans/python-residue-2026-10-30.md).
+[python residue](archive/plans/2026-10-30/python-residue-2026-10-30.md).
 
 Published versions, their sizes, SHA-256 and acceptance receipts:
 [GitHub releases](https://github.com/partnernetsoftware/unisacc/releases), with
@@ -299,7 +299,7 @@ stages, drive, bind); `tools/entry-build.cx` builds a candidate from it.
 counts so they only go down (`sh ./unisacc.com -run tests/cxinclude.cx -- --check`;
 on 2026-10-30 it still fails, with 29 files above their baseline).
 Python still left on live paths is listed in
-[plans/python-residue-2026-10-30.md](plans/python-residue-2026-10-30.md).
+[plans/python-residue-2026-10-30.md](archive/plans/2026-10-30/python-residue-2026-10-30.md).
 
 `iterate/` holds development tools written in C (a weight constructor and a
 kernel-data generator); they are not part of the product.

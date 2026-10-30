@@ -80,6 +80,6 @@ The E3 source fix now parses the complete returned expression and checks its
 final aggregate type before copying the value. A private, non-admitted model
 package passes the direct member-return, value independence and module tests
 (43 assertions), plus this unchanged managed-memory batch (138/0). Evidence and
-scope are in [the E3 cut](../../plans/c43-aggregate-return-2026-10-28.md).
+scope are in [the E3 cut](../../archive/plans/2026-10-30/c43-aggregate-return-2026-10-28.md).
 The installed Rootd65 still rejects the pending positive; the local-copy helpers
 remain until formal product integration. Compile-time ownership remains open.
