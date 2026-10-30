@@ -99,7 +99,8 @@ static void file_entry(Sha *h, const char *rel) {
     sha_put(h, dg, 32);
 }
 static void identity(char hex[65]) {
-    static const char *const dirs[] = {"exec", "unisa", "src", "kernel", "include", "weights", "seed", "cx"};
+    /* "unisa" left the list on 2026-10-30: its last Python files were archived and their data moved to exec/ */
+    static const char *const dirs[] = {"exec", "src", "kernel", "include", "weights", "seed", "cx"};
     Sha h; unsigned char out[32]; size_t i, first; int j;
     npaths = 0;
     sha_init(&h);
