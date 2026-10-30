@@ -64,6 +64,17 @@
 - **复测（build-13，汇编核心，仓库根，空 main 的 `.cx`）：**
   - 候选每次约 325 ms：解压合计约 80 ms（e3 45、e2 11、lower 10、e1 9、elf 4、prune 2），推理约 187 ms（e2 98），其余约 60 ms。
   - 已装产品冷跑 330 ms，命中 run-cache 后 58 ms。run-cache 是最大的单项缺口，已交给 grk。
+- **产品 run-cache 的实现（移植依据）：** `exec/c/runreuse.h`（612 行 C）。
+  - 实测：同一个空 main 的 `.cx`，第一次 `lookup_hit=0`，334 ms；第二次 `lookup_hit=2`，58 ms。缓存目录是 `/tmp/unisacc-e3cache-<uid>/`。
+  - **USE33：** 存 E3 产出的 tape、ATTRS 和 include 回执。
+    - 键 = sha256(`USE33`、版本 `RR_VER`、产品文件 sha、包 sha（包在别处时）、路由、目标、优化级别、源身份)。
+    - 源身份 = sha256(cwd、全部 CLI 参数（`--` 之前）、每个源的"路径\0内容")。软链按目标内容算。
+  - **USE34（`<key>.host`）：** 存宿主编译之后的 tape，回执从匹配的 USE33 条目克隆。
+  - **命中校验：** 头魔数和各段长度有上限；每个 present 回执要重新哈希对应文件并比对；每个 absent 回执要求那个路径仍然只是 ENOENT（ENOTDIR、EACCES 都使缓存失效）；最后核对 tape 的 sha。
+  - **写入：** 先写临时文件再原子改名。
+  - **不用缓存的情形：** `UNISACC_RUN_CACHE=0`、转发第二遍、带警告、tape 输入、带 deps 输出、strict/capture 模式、源多于 16 个，或者目标不是 lnx/x86_64。
+  - 命中后仍要走 lower/elf 和执行；被缓存的只是前端产物，运行期资源每次重新绑定。
+  - 候选移植成 CX 模块时，键里的"产品 sha"要换成候选自己的身份（候选文件加附带的 P3）。
 - **包内嵌头：** cwd 不在仓库根时，E2 从包资源 `\0hdr/` 取的是旧版嵌套 cx.h，同一个空 main 的 e2 要 1.6 s。展平前导要随下一次包刷新进包，才会处处生效。
 
 ### B4　多单元的重复工作
