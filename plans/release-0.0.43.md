@@ -89,6 +89,9 @@ cc	ri,resources,negative,hosts,library,interfaces,properties
   第一代构造器是快照里的已装 unisacc.com（via=sh，sha=79fb84e65a10b55ce40be5f68746748acbd38f441944046c0a5dfa5718bc0c32）。第二代构造器是第一代 candidate（via=exec）。
   工具时钟：第一代六只 -O1 ns=31485383890，27 只 ns=24720043367，link ns=9093827509。第二代六只 -O1 ns=29852339534，27 只 ns=26229984423，link ns=8744013468。
   同一冻结快照上手跑整程序 -o（还没收进 release-build，收据外记 route=whole-o，镜像不带 P3）。33 个源含 hostnative.cx。osx/x86_64：Mach-O，sha=52dcc0252ee6d71324df36cc637d34774e4c0e0a4ef29633c9271cb7c95460af bytes=1552354，rc=0，落在 55 秒界内。win/x86_64：PE32+，sha=9ae0cf6d034ad1cea71ddde2eb6c790acfc8de298e67a25034daf9a381e86034 bytes=1589760，formats-macho-pe --pe 12/0，rc=0。arm64 未跑。
+  WHOLE-O-TOOL：slice --target 已收 osx/x86_64 与 win/x86_64，route=whole-o。冻结 rev=5ed7ba69bf9e86b91843c608ce00a1daff231dc8。工具写 OUT/receipt.txt。镜像不带 P3。子作业 tools/bound 55，外层不再套 bound。
+  WHOLE-O-TOOL：osx/x86_64 sha=52dcc0252ee6d71324df36cc637d34774e4c0e0a4ef29633c9271cb7c95460af bytes=1552354 ns=36426580344 rc=0。与手跑整程序 -o 逐字节相同。
+  WHOLE-O-TOOL：win/x86_64 sha=9ae0cf6d034ad1cea71ddde2eb6c790acfc8de298e67a25034daf9a381e86034 bytes=1589760 ns=22000334071 rc=0。与手跑整程序 -o 逐字节相同。
 - [ ] 3 object 模型步
 - [ ] 4 测试到 QUALIFIED
 - [ ] 主人授权发布

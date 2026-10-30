@@ -12,10 +12,13 @@
    resource \0hdr/cx-flat.h must then match that include/cx-flat.h byte for
    byte. Models are not rebuilt and package-refresh is not called.
 
-   slice runs one entry-build invocation. lnx/x86_64 stays the 33-object
-   route. osx and win are refused here until the whole -o route is wired.
-   Pass --only / --link-only through so one invocation stays inside the
-   per-compile bound. This does not install and does not wrap. */
+   slice runs one child under tools/bound 55. The caller does not add a
+   second bound around this process. lnx/x86_64 stays the 33-object
+   entry-build route; pass --only / --link-only through so one invocation
+   stays inside that bound. osx/x86_64 and win/x86_64 are one whole -o of
+   the same 33 sources (route=whole-o). That image has no P3 trailer.
+   The tool writes OUT/receipt.txt. Other targets are refused.
+   This does not install and does not wrap. */
 #pragma unisa use runtime.package_decode
 #pragma unisa use runtime.package_lifetime
 #pragma unisa use runtime.packagefooter
@@ -418,13 +421,167 @@ static void rb_freeze(const char *rev, char **root_slot) {
     sy_printf("%s", cmd);
 }
 
-static int rb_target_ok(int argc, char **argv) {
+static const char *rb_whole_src[33] = {
+    "src/unisacc.cx",
+    "src/host.cx",
+    "src/stages.cx",
+    "src/runtime/routestep.cx",
+    "src/runtime/stagehandoff.cx",
+    "src/runtime/runexec.cx",
+    "src/runtime/attribute_frame.cx",
+    "src/bind.cx",
+    "src/driver/cli.cx",
+    "src/driver/compat.cx",
+    "src/driver/route.cx",
+    "src/driver/deps.cx",
+    "src/driver/input.cx",
+    "src/driver/args.cx",
+    "src/driver/path.cx",
+    "src/entrybind.cx",
+    "src/runtime/memlayout.cx",
+    "src/driveface.cx",
+    "src/driveroute.cx",
+    "src/compiler/cxmod.cx",
+    "src/compiler/tapegate.cx",
+    "src/compiler/fwdstub.cx",
+    "src/executor.cx",
+    "src/core/transition.cx",
+    "src/runtime/codec.cx",
+    "src/runtime/model_decode.cx",
+    "src/runtime/model_number.cx",
+    "src/packmodel.cx",
+    "src/runtime/modelload.cx",
+    "src/runtime/compiler/bindstage.cx",
+    "src/entryexec.cx",
+    "src/hostnative.cx",
+    "src/compiler/tapelink.cx"
+};
+
+static int rb_is_whole(const char *t) {
+    return tx_eqz(t, "osx/x86_64") || tx_eqz(t, "win/x86_64");
+}
+
+static const char *rb_whole_slug(const char *t) {
+    if (tx_eqz(t, "osx/x86_64")) return "slice-osx-x86_64";
+    if (tx_eqz(t, "win/x86_64")) return "slice-win-x86_64";
+    return 0;
+}
+
+/* --target value, or lnx/x86_64 when the flag is absent. */
+static const char *rb_slice_target(int argc, char **argv) {
+    const char *t = "lnx/x86_64";
+    int i, seen = 0;
+    for (i = 5; i < argc; i++) {
+        if (!tx_eqz(argv[i], "--target")) continue;
+        if (seen || i + 1 >= argc) rb_die("slice target");
+        t = argv[i + 1];
+        seen = 1;
+    }
+    return t;
+}
+
+static void rb_whole_flags(int argc, char **argv) {
     int i;
     for (i = 5; i < argc; i++) {
         if (tx_eqz(argv[i], "--target")) {
-            if (i + 1 >= argc || !tx_eqz(argv[i + 1], "lnx/x86_64")) rb_die("slice target");
+            if (i + 1 >= argc) rb_die("slice target");
+            i++;
+            continue;
         }
+        rb_die("slice target");
     }
+}
+
+static void rb_wline(int fd, const char *s) {
+    long n = tx_len(s, 240);
+    if (n < 0 || sy_write_all(fd, s, n)) rb_die("receipt");
+}
+
+/* One whole -o. The child is tools/bound 55. The image is not spliced with P3. */
+static int rb_whole(int argc, char **argv, const char *target) {
+    char *v[48];
+    char bound[RB_FULL], image[RB_FULL], rec[RB_FULL], line[240];
+    char srcs[33][RB_FULL];
+    char sha[65];
+    const char *slug;
+    RbBuf cap;
+    sy_ts_t t0, t1;
+    int n, i, fd, pid, exited, code, rfd;
+    long bytes;
+    size_t zn;
+    char *img;
+    slug = rb_whole_slug(target);
+    if (!slug) rb_die("slice target");
+    if (!argv[3] || !argv[3][0] || !sy_exists(argv[3])) rb_die("pkg");
+    rb_whole_flags(argc, argv);
+    sy_mkdir(argv[4], 0755);
+    if (sy_realpath(argv[4], rb_out_abs, RB_FULL) < 0) rb_die("out");
+    argv[4] = rb_out_abs;
+    rb_cat(image, RB_FULL, argv[4], 1, slug);
+    rb_cat(bound, RB_FULL, argv[2], 1, "tools/bound");
+    if (sy_mono(&t0)) rb_die("clock");
+    n = 0;
+    v[n++] = bound;
+    v[n++] = "55";
+    v[n++] = "sh";
+    v[n++] = "unisacc.com";
+    v[n++] = "-b";
+    v[n++] = (char *)target;
+    v[n++] = "-o";
+    v[n++] = image;
+    for (i = 0; i < 33; i++) {
+        rb_cat(srcs[i], RB_FULL, argv[2], 1, rb_whole_src[i]);
+        v[n++] = srcs[i];
+    }
+    v[n] = 0;
+    pid = sy_spawn_pipe(v, argv[2], SY_SPAWN_NO_PATH, &fd, 0);
+    if (pid < 0) rb_die("spawn");
+    cap.p = 0;
+    cap.n = 0;
+    cap.cap = 0;
+    for (;;) {
+        char tmp[4096];
+        long k = sy_read(fd, tmp, 4096);
+        if (k < 0) rb_die("read child");
+        if (k == 0) break;
+        rb_put(&cap, tmp, k);
+    }
+    if (sy_close(fd)) rb_die("close child");
+    if (sy_wait_status(pid, 0, &exited, &code, 0) < 0) rb_die("wait");
+    rb_put(&cap, "", 1);
+    sy_printf("%s", (char *)cap.p);
+    mm_free(cap.p);
+    if (sy_mono(&t1)) rb_die("clock");
+    if (!exited || code) rb_die("whole-o");
+    img = cx_read(image, &zn);
+    if (!img || zn > 2147483647UL) rb_die("image");
+    cx_sha256_hex(img, zn, sha);
+    bytes = (long)zn;
+    mm_free(img);
+    rb_cat(rec, RB_FULL, argv[4], 1, "receipt.txt");
+    rfd = sy_open(rec, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (rfd < 0) rb_die("receipt");
+    if (cx_fmt(line, sizeof line, "route\twhole-o\n")) rb_die("receipt");
+    rb_wline(rfd, line);
+    if (cx_fmt(line, sizeof line, "target\t%s\n", target)) rb_die("receipt");
+    rb_wline(rfd, line);
+    if (cx_fmt(line, sizeof line, "rev\t%s\n", rb_rev_full)) rb_die("receipt");
+    rb_wline(rfd, line);
+    if (cx_fmt(line, sizeof line, "image\t%s\n", slug)) rb_die("receipt");
+    rb_wline(rfd, line);
+    if (cx_fmt(line, sizeof line, "sha\t%s\n", sha)) rb_die("receipt");
+    rb_wline(rfd, line);
+    if (cx_fmt(line, sizeof line, "bytes\t%ld\n", bytes)) rb_die("receipt");
+    rb_wline(rfd, line);
+    if (cx_fmt(line, sizeof line, "ns\t%lld\n", rb_span(&t0, &t1))) rb_die("receipt");
+    rb_wline(rfd, line);
+    if (cx_fmt(line, sizeof line, "rc\t0\n")) rb_die("receipt");
+    rb_wline(rfd, line);
+    if (sy_close(rfd)) rb_die("receipt");
+    if (cx_fmt(line, sizeof line, "release-build\twhole-o\ttarget=%s\tsha=%s\tbytes=%ld\tns=%lld\trc=0\n",
+               target, sha, bytes, rb_span(&t0, &t1)))
+        rb_die("report");
+    sy_printf("%s", line);
     return 0;
 }
 
@@ -435,9 +592,12 @@ static int rb_slice(int argc, char **argv) {
     sy_ts_t t0, t1;
     int n, i, fd, pid, exited, code;
     char sha_line[160];
+    const char *target;
     if (argc < 5) rb_die("usage: slice ROOT PKG OUT [entry-build flags]");
     if (argc - 5 > 66) rb_die("argv");
-    rb_target_ok(argc, argv);
+    target = rb_slice_target(argc, argv);
+    if (rb_is_whole(target)) return rb_whole(argc, argv, target);
+    if (!tx_eqz(target, "lnx/x86_64")) rb_die("slice target");
     sy_mkdir(argv[4], 0755);
     if (sy_realpath(argv[4], rb_out_abs, RB_FULL) < 0) rb_die("out");
     argv[4] = rb_out_abs;
