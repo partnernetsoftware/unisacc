@@ -252,3 +252,35 @@
 - plans/pending/tapebin-selfheal/tapebinref-selfheal.partial.patch
 
 - exec/pipeline/stages.tsv（旧 Python 流水线定义，无活使用方）
+
+## 第三批（2026-10-30）
+
+依赖已归档参考 C（ua_ref/build_ref/export_ref/compiler.c）或 Python 的旧 `exec/*` 检查 .cx，及只被它们使用的 cxlib 符号链接。三份 cx 棘轮已改为不计 archive/（`332208a9fd`），挪动不新增棘轮行。`exec/c/qprefixcheck.cx` 与 `exec/c/cxlib` 仍被覆盖清单引用，留在原处。
+
+- exec/c/embeddedcheck.cx
+- exec/c/linuxbridgecheck.cx
+- exec/enc/cxlib/hostcheck.cx
+- exec/enc/cxlib/pytempfile.cx
+- exec/enc/windowshostbridgecheck.cx
+- exec/lex/f1sidecarcheck.cx
+- exec/lex/locationcheck.cx
+- exec/lex/positioncheck.cx
+- exec/lex/sourcefactscheck.cx
+- exec/parse2/cxlib/pytempfile.cx
+- exec/parse2/f1attributescheck.cx
+- exec/parse2/libraryimportscheck.cx
+- exec/parse2/locationcheck.cx
+- exec/parse2/r21check.cx
+- exec/parse2/returnwarningcheck.cx
+- exec/parse2/unitlocationcheck.cx
+- exec/pp/cxlib/e2stream.cx
+- exec/pp/cxlib/pytempfile.cx
+- exec/pp/cxlib/runtimecopy.cx
+- exec/pp/directivecheck.cx
+- exec/pp/e2bench.cx
+- exec/pp/literalcheck.cx
+- exec/pp/locationcheck.cx
+- exec/pp/macrocheck.cx
+- exec/pp/objectpredefinecheck.cx
+- exec/pp/pragmacheck.cx
+- exec/prune/check.cx
