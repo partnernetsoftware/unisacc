@@ -325,6 +325,10 @@ void hs_free(void *p) {
     free(p);
 }
 
+int hs_pid(void) {
+    return (int)getpid();
+}
+
 long long hs_ns(void) {
     struct hs_ts ts;
     int clock_gettime(int, struct hs_ts *);
@@ -341,6 +345,14 @@ void core_host_panic(const char *reason) {
 struct hs_slot { const unsigned char *key; int n; const unsigned char *b; int len; };
 static struct hs_slot hs_tab[24];
 static int hs_ntab;
+/* Set while a run-cache compile wants include receipts. NULL the rest of the time.
+   present is 1 after a full read, 0 when the open failed with ENOENT only. */
+static void (*hs_file_note)(const char *path, int present);
+
+int hs_file_note_set(void (*fn)(const char *, int)) {
+    hs_file_note = fn;
+    return 0;
+}
 
 int hs_cli_reset(void) {
     hs_ntab = 0;
@@ -397,7 +409,10 @@ static int hs_file(const unsigned char *p, int n, unsigned char **bytes, int *le
     path[n] = 0;
     f = fopen(path, "rb");
     if (!f) {
-        if (errno == ENOENT) return 0;
+        if (errno == ENOENT) {
+            if (hs_file_note) hs_file_note(path, 0);
+            return 0;
+        }
         core_host_panic("cannot open input");
     }
     b = 0;
@@ -440,6 +455,7 @@ static int hs_file(const unsigned char *p, int n, unsigned char **bytes, int *le
     *bytes = b ? b : (unsigned char *)realloc(0, 1);
     if (!*bytes) core_host_panic("out of memory");
     *len = (int)gotn;
+    if (hs_file_note) hs_file_note(path, 1);
     return 2;
 }
 

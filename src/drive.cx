@@ -1,5 +1,6 @@
 #pragma unisa module drive
 #pragma unisa use text.text
+#pragma unisa use runcache
 /* Layouts match cx/driver/cli.cx, compat.cx, and route.cx. Those modules
    are other objects; this file only names their functions. */
 typedef struct {
@@ -1248,6 +1249,16 @@ static int dv_link_objects(int n, unsigned char **out, long *outn) {
     return 0;
 }
 
+/* Store a forward ELF, then exec it with this run's argv. The bytes are the
+   image from after the process slots were popped, so they do not carry argv. */
+static int dv_store_exec(const unsigned char *body, long bodyn, char **args) {
+    int rc_store_elf(const unsigned char *, long);
+    int hs_forward_exec(const unsigned char *, long, char **);
+    if (body && bodyn >= 4 && body[0] == 127 && body[1] == 'E' && body[2] == 'L' && body[3] == 'F')
+        (void)rc_store_elf(body, bodyn);
+    return hs_forward_exec(body, bodyn, args);
+}
+
 int dv_main(int argc, char **argv) {
     static CxcState opts;
     char why[128];
@@ -1322,8 +1333,12 @@ int dv_main(int argc, char **argv) {
     int st_attr_reset(void);
     int st_extra_reset(void);
     int st_extra_put(const char *, int, const unsigned char *, int);
+    int st_dirs(const unsigned char *, int, const unsigned char *, int);
     int st_span(const char *, const char *, const char *, int, unsigned, const char *, const char *, unsigned char *, long, unsigned char **, long *, char *, int);
     int hs_forward_exec(const unsigned char *, long, char **);
+    int rc_open(const char *, int, char **, const char **, int, const char *, int, int, int, int);
+    int rc_lookup_elf(unsigned char **, long *);
+    int rc_arm(void);
     int hs_reserve(unsigned char **, long *);
     int hs_release(unsigned char *, long);
     int hs_write_out(const char *, const unsigned char *, long, char *, int);
@@ -1742,7 +1757,8 @@ int dv_main(int argc, char **argv) {
            every call defined in another unit as an undefined function.
            These stay under the process slots; a replay does not push them again. */
         if ((obj && st_extra_put("\0cli/object", 11, &dv_one, 1)) ||
-            (opts.funit && st_extra_put("\0cli/funit", 10, &dv_one, 1))) {
+            (opts.funit && st_extra_put("\0cli/funit", 10, &dv_one, 1)) ||
+            st_dirs(dv_incdir, (int)dv_incdir_n, dv_quotedir, (int)dv_quotedir_n)) {
             pm_close();
             free(pkg);
             free(gotb);
@@ -1757,6 +1773,27 @@ dv_replay:
                 free(gotb);
                 fputs("unisacc: model driver: argv\n", stderr);
                 return 1;
+            }
+            /* Pass 1 only. A hit execs the forward image and skips units.
+               The saved key keeps this source list; pass 2 does not look up. */
+            if (!dv_fwd_pass) {
+                int ready;
+                unsigned char *cached;
+                long cachedn;
+                int code;
+                cached = 0;
+                cachedn = 0;
+                ready = rc_open(cont, argc, argv, dv_srcv, nsrc, tgt, opts.level, opts.warnings,
+                                (as_tape || cxp_tape_path(src)) ? 1 : 0, opts.deponly);
+                if (ready && rc_lookup_elf(&cached, &cachedn) == 1) {
+                    code = hs_forward_exec(cached, cachedn, dv_runargs);
+                    pm_close();
+                    hs_free(cached);
+                    hs_free(pkg);
+                    hs_free(gotb);
+                    return code;
+                }
+                if (ready) (void)rc_arm();
             }
         }
         /* Single-source restart compiles every unit with ccw already published.
@@ -1908,7 +1945,7 @@ dv_replay:
             }
             if (dv_fwd_exec) {
                 int code;
-                code = hs_forward_exec(body, bodyn, dv_runargs);
+                code = dv_store_exec(body, bodyn, dv_runargs);
                 pm_close();
                 hs_free(pkg);
                 hs_free(body);
@@ -1917,7 +1954,7 @@ dv_replay:
             if (mode2 == 3 && nsrc >= 1) {
                 if (execf) {
                     int code;
-                    code = hs_forward_exec(body, bodyn, dv_runargs);
+                    code = dv_store_exec(body, bodyn, dv_runargs);
                     pm_close();
                     free(pkg);
                     free(body);

@@ -1,0 +1,679 @@
+#pragma unisa module runcache
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+/* Cross-process reuse of a -run frontend tape (USE33) and of the forward ELF
+   (USE34, file <key>.host). The key binds the candidate file (entry plus the
+   attached P3), the route, and the sources. Arguments after "--" are not part
+   of the key.
+   \0process/argc and \0process/argv are 8-byte pointers to this process.
+   drive pushes them before the stages. The forward ELF is built only after
+   those two resources are popped, and hs_forward_exec supplies the argv of
+   this run. The e3 tape is replayed through the later stages, which bind the
+   pointers again. Neither cache entry is the tape dv_run_lower returns while
+   those resources are still published.
+   Direct libc stays out of this file: cx_read, cx_write, cx_sha256_hex, tx_*,
+   sy_stat / sy_lstat (follow vs not), sy_env, sy_uid, sy_cwd. */
+static int rc_on;
+static int rc_armed;
+static int rc_broken;
+static char rc_prod[65];
+static char rc_src[65];
+static char rc_target[96];
+static int rc_level;
+static int rc_nsrc;
+static char **rc_have;
+static int rc_nh;
+static char **rc_miss;
+static int rc_nm;
+
+static void *rc_alloc(long n) {
+    void *hs_alloc(long);
+    return hs_alloc(n);
+}
+
+static void rc_release(void *p) {
+    void hs_free(void *);
+    hs_free(p);
+}
+
+static int rc_cat(char *dst, int cap, int *at, const char *s) {
+    long tx_len(const char *, long);
+    int tx_copy(char *, long, const char *, long);
+    long n;
+    if (!dst || !at || !s || *at < 0 || *at >= cap) return 1;
+    n = tx_len(s, 4096);
+    if (n < 0) return 1;
+    if (tx_copy(dst + *at, (long)(cap - *at), s, n)) return 1;
+    *at = *at + (int)n;
+    return 0;
+}
+
+static int rc_cat_u(char *dst, int cap, int *at, unsigned long long v) {
+    char rev[24];
+    char tmp[24];
+    int r;
+    int i;
+    r = 0;
+    if (v == 0) rev[r++] = '0';
+    while (v) {
+        rev[r++] = (char)('0' + (int)(v % 10));
+        v = v / 10;
+    }
+    i = 0;
+    while (r) tmp[i++] = rev[--r];
+    tmp[i] = 0;
+    return rc_cat(dst, cap, at, tmp);
+}
+
+static int rc_say(const char *s) {
+    long tx_len(const char *, long);
+    int hs_cxm_say(int, char *, int);
+    long n;
+    n = tx_len(s, 4000);
+    if (n < 0) return 1;
+    return hs_cxm_say(2, (char *)s, (int)n);
+}
+
+static int rc_debug(void) {
+    const char *sy_env(const char *);
+    const char *e;
+    e = sy_env("UNISACC_RR_DEBUG");
+    return e && e[0] ? 1 : 0;
+}
+
+static int rc_time_on(void) {
+    const char *sy_env(const char *);
+    const char *e;
+    e = sy_env("UNISACC_RR_TIME");
+    return e && e[0] ? 1 : 0;
+}
+
+static void rc_report(int hit, long long ns) {
+    char line[160];
+    int at;
+    if (!rc_time_on()) return;
+    at = 0;
+    if (rc_cat(line, 160, &at, "RR_TIME\tlookup_hit=")) return;
+    if (rc_cat_u(line, 160, &at, (unsigned long long)hit)) return;
+    if (rc_cat(line, 160, &at, "\tns=")) return;
+    if (rc_cat_u(line, 160, &at, ns < 0 ? 0 : (unsigned long long)ns)) return;
+    if (rc_cat(line, 160, &at, "\n")) return;
+    rc_say(line);
+}
+
+static void rc_dbg_path(const char *tag, const char *path) {
+    char line[4200];
+    int at;
+    if (!rc_debug() || !tag || !path) return;
+    at = 0;
+    if (rc_cat(line, 4200, &at, tag)) return;
+    if (rc_cat(line, 4200, &at, "\t")) return;
+    if (rc_cat(line, 4200, &at, path)) return;
+    if (rc_cat(line, 4200, &at, "\n")) return;
+    rc_say(line);
+}
+
+static void rc_drop(char **list, int n) {
+    int i;
+    if (!list) return;
+    i = 0;
+    while (i < n) {
+        rc_release(list[i]);
+        i = i + 1;
+    }
+    rc_release(list);
+}
+
+static int rc_has(char **list, int n, const char *path) {
+    int tx_eq(const char *, const char *, long);
+    int i;
+    i = 0;
+    while (i < n) {
+        if (tx_eq(list[i], path, 4096)) return 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
+static int rc_push(char ***list, int *n, const char *path) {
+    long tx_len(const char *, long);
+    int tx_copy(char *, long, const char *, long);
+    char **next;
+    char *copy;
+    long ln;
+    int i;
+    if (*n >= 4096) return 1;
+    ln = tx_len(path, 4096);
+    if (ln < 0) return 1;
+    copy = rc_alloc(ln + 1);
+    if (!copy) return 1;
+    if (tx_copy(copy, ln + 1, path, ln)) {
+        rc_release(copy);
+        return 1;
+    }
+    next = rc_alloc((long)(*n + 1) * (long)sizeof(char *));
+    if (!next) {
+        rc_release(copy);
+        return 1;
+    }
+    i = 0;
+    while (i < *n) {
+        next[i] = (*list)[i];
+        i = i + 1;
+    }
+    next[*n] = copy;
+    rc_release(*list);
+    *list = next;
+    *n = *n + 1;
+    return 0;
+}
+
+static void rc_on_file(const char *path, int present) {
+    if (!rc_armed || rc_broken || !path || !path[0]) return;
+    if (present) {
+        if (rc_has(rc_have, rc_nh, path)) return;
+        if (rc_push(&rc_have, &rc_nh, path)) rc_broken = 1;
+        return;
+    }
+    if (rc_has(rc_have, rc_nh, path) || rc_has(rc_miss, rc_nm, path)) return;
+    if (rc_push(&rc_miss, &rc_nm, path)) rc_broken = 1;
+}
+
+static int rc_app(unsigned char **b, long *n, long *cap, const void *p, long k) {
+    int tx_copy(char *, long, const char *, long);
+    unsigned char *nb;
+    long c;
+    long i;
+    if (k < 0) return 1;
+    if (*n > 2147483647L - k - 1) return 1;
+    if (*n + k + 1 > *cap) {
+        c = *cap > 0 ? *cap : 256;
+        while (c < *n + k + 1) {
+            if (c > 1073741824L) return 1;
+            c = c * 2;
+        }
+        nb = rc_alloc(c);
+        if (!nb) return 1;
+        i = 0;
+        while (i < *n) {
+            nb[i] = (*b)[i];
+            i = i + 1;
+        }
+        rc_release(*b);
+        *b = nb;
+        *cap = c;
+    }
+    if (k == 0) return 0;
+    if (tx_copy((char *)(*b + *n), k + 1, (const char *)p, k)) return 1;
+    *n = *n + k;
+    return 0;
+}
+
+static int rc_hex_file(const char *path, char hex[65]) {
+    int sy_stat(const char *, sy_stat_t *);
+    sy_stat_t st;
+    char *b;
+    size_t n;
+    if (!path || !path[0]) return 1;
+    if (sy_stat(path, &st) || st.kind != 'f' || st.size < 0 || st.size > (1L << 26)) return 1;
+    b = cx_read(path, &n);
+    if (!b || (long)n != st.size) {
+        rc_release(b);
+        return 1;
+    }
+    cx_sha256_hex(b, n, hex);
+    rc_release(b);
+    return 0;
+}
+
+static int rc_hex_sources(int argc, char **argv, const char **sources, int nsrc, char hex[65]) {
+    int sy_cwd(char *, int);
+    int sy_stat(const char *, sy_stat_t *);
+    long tx_len(const char *, long);
+    int tx_eq(const char *, const char *, long);
+    char cwd[4096];
+    unsigned char *acc;
+    long n;
+    long cap;
+    int j;
+    if (sy_cwd(cwd, 4096)) return 1;
+    acc = 0;
+    n = 0;
+    cap = 0;
+    if (rc_app(&acc, &n, &cap, cwd, tx_len(cwd, 4096) + 1)) goto bad;
+    j = 1;
+    while (j < argc) {
+        long ln;
+        if (!argv[j]) goto bad;
+        if (tx_eq(argv[j], "--", 8)) break;
+        ln = tx_len(argv[j], 4096);
+        if (ln < 0) goto bad;
+        if (rc_app(&acc, &n, &cap, argv[j], ln + 1)) goto bad;
+        j = j + 1;
+    }
+    j = 0;
+    while (j < nsrc) {
+        sy_stat_t st;
+        char *body;
+        size_t bn;
+        long pl;
+        if (!sources[j]) goto bad;
+        pl = tx_len(sources[j], 4096);
+        if (pl < 0) goto bad;
+        if (sy_stat(sources[j], &st) || st.kind != 'f' || st.size < 0 || st.size > (1L << 26)) goto bad;
+        if (rc_app(&acc, &n, &cap, sources[j], pl + 1)) goto bad;
+        body = cx_read(sources[j], &bn);
+        if (!body || (long)bn != st.size) {
+            rc_release(body);
+            goto bad;
+        }
+        if (rc_app(&acc, &n, &cap, body, (long)bn)) {
+            rc_release(body);
+            goto bad;
+        }
+        rc_release(body);
+        j = j + 1;
+    }
+    cx_sha256_hex(acc, (size_t)n, hex);
+    rc_release(acc);
+    return 0;
+bad:
+    rc_release(acc);
+    return 1;
+}
+
+static int rc_off(void) {
+    const char *sy_env(const char *);
+    int tx_eq(const char *, const char *, long);
+    const char *e;
+    e = sy_env("UNISACC_RUN_CACHE");
+    return e && tx_eq(e, "0", 8) ? 1 : 0;
+}
+
+static int rc_dir(char *out, int cap) {
+    const char *sy_env(const char *);
+    int sy_uid(void);
+    int sy_mkdir(const char *, int);
+    int sy_lstat(const char *, sy_stat_t *);
+    const char *e;
+    const char *td;
+    sy_stat_t st;
+    int at;
+    int mk;
+    at = 0;
+    e = sy_env("UNISACC_E3CACHE");
+    if (e && e[0]) {
+        if (rc_cat(out, cap, &at, e)) return 1;
+    } else {
+        td = sy_env("TMPDIR");
+        if (!td || !td[0]) td = "/tmp";
+        if (rc_cat(out, cap, &at, td)) return 1;
+        if (rc_cat(out, cap, &at, "/unisacc-e3cache-")) return 1;
+        if (rc_cat_u(out, cap, &at, (unsigned long long)sy_uid())) return 1;
+    }
+    mk = sy_mkdir(out, 0700);
+    if (mk == 0) return 0;
+    if (mk != -EEXIST) return 1;
+    if (sy_lstat(out, &st) == 0 && st.kind == 'd' && (st.mode & 0777) == 0700) return 0;
+    return 1;
+}
+
+static int rc_route(char *dst, int cap, int elf) {
+    int at;
+    at = 0;
+    if (rc_cat(dst, cap, &at, rc_target)) return 1;
+    if (rc_nsrc > 1) {
+        if (rc_cat(dst, cap, &at, elf ? "/multi/fwdexec/O" : "/multi/run/O")) return 1;
+    } else if (rc_cat(dst, cap, &at, elf ? "/image/O" : "/run/O")) return 1;
+    if (rc_cat_u(dst, cap, &at, (unsigned long long)rc_level)) return 1;
+    return 0;
+}
+
+static int rc_key(char key[65], const char *route) {
+    char blob[640];
+    int at;
+    at = 0;
+    if (rc_cat(blob, 640, &at, "USE33\nver=11\nprod=")) return 1;
+    if (rc_cat(blob, 640, &at, rc_prod)) return 1;
+    if (rc_cat(blob, 640, &at, "\npkg=")) return 1;
+    if (rc_cat(blob, 640, &at, rc_prod)) return 1;
+    if (rc_cat(blob, 640, &at, "\nroute=")) return 1;
+    if (rc_cat(blob, 640, &at, route)) return 1;
+    if (rc_cat(blob, 640, &at, "\ntarget=")) return 1;
+    if (rc_cat(blob, 640, &at, rc_target)) return 1;
+    if (rc_cat(blob, 640, &at, "\nlevel=")) return 1;
+    if (rc_cat_u(blob, 640, &at, (unsigned long long)rc_level)) return 1;
+    if (rc_cat(blob, 640, &at, "\nsrc=")) return 1;
+    if (rc_cat(blob, 640, &at, rc_src)) return 1;
+    if (rc_cat(blob, 640, &at, "\n")) return 1;
+    cx_sha256_hex(blob, (size_t)at, key);
+    return 0;
+}
+
+static int rc_join(char *dst, int cap, const char *dir, const char *key, int host) {
+    int at;
+    at = 0;
+    if (rc_cat(dst, cap, &at, dir)) return 1;
+    if (rc_cat(dst, cap, &at, "/")) return 1;
+    if (rc_cat(dst, cap, &at, key)) return 1;
+    if (host && rc_cat(dst, cap, &at, ".host")) return 1;
+    return 0;
+}
+
+static void rc_put32(unsigned char *p, unsigned v) {
+    p[0] = (unsigned char)(v & 255u);
+    p[1] = (unsigned char)((v >> 8) & 255u);
+    p[2] = (unsigned char)((v >> 16) & 255u);
+    p[3] = (unsigned char)((v >> 24) & 255u);
+}
+
+static void rc_put64(unsigned char *p, unsigned long long v) {
+    int i;
+    i = 0;
+    while (i < 8) {
+        p[i] = (unsigned char)(v & 255ull);
+        v = v >> 8;
+        i = i + 1;
+    }
+}
+
+static unsigned rc_get32(const unsigned char *p) {
+    return (unsigned)p[0] | ((unsigned)p[1] << 8) | ((unsigned)p[2] << 16) | ((unsigned)p[3] << 24);
+}
+
+static int rc_still_absent(const char *path) {
+    int sy_stat(const char *, sy_stat_t *);
+    sy_stat_t st;
+    int rc;
+    /* Follow links. Only ENOENT is still absent. ENOTDIR and EACCES invalidate. */
+    rc = sy_stat(path, &st);
+    if (rc == 0) return 0;
+    return rc == -ENOENT;
+}
+
+static int rc_atomic(const char *final_path, const unsigned char *data, long n) {
+    int sy_rename(const char *, const char *);
+    int sy_unlink(const char *);
+    int hs_pid(void);
+    long long hs_ns(void);
+    char tmp[700];
+    int at;
+    long long ns;
+    int pid;
+    at = 0;
+    if (rc_cat(tmp, 700, &at, final_path)) return 1;
+    if (rc_cat(tmp, 700, &at, ".")) return 1;
+    pid = hs_pid();
+    if (pid < 0) pid = 0;
+    if (rc_cat_u(tmp, 700, &at, (unsigned long long)pid)) return 1;
+    if (rc_cat(tmp, 700, &at, ".")) return 1;
+    ns = hs_ns();
+    if (ns < 0) ns = 0;
+    if (rc_cat_u(tmp, 700, &at, (unsigned long long)ns)) return 1;
+    if (rc_cat(tmp, 700, &at, ".tmp")) return 1;
+    if (cx_write(tmp, data, (size_t)n)) return 1;
+    if (sy_rename(tmp, final_path)) {
+        sy_unlink(tmp);
+        return 1;
+    }
+    return 0;
+}
+
+static int rc_store_kind(int elf, const unsigned char *tape, long tn) {
+    int sy_stat(const char *, sy_stat_t *);
+    long tx_len(const char *, long);
+    char dir[400];
+    char route[160];
+    char key[65];
+    char path[560];
+    char hex[65];
+    unsigned char *payload;
+    long at;
+    long cap;
+    unsigned i;
+    unsigned hn;
+    unsigned abn;
+    if (!rc_on || rc_broken || !tape || tn < 0 || tn > (1L << 26)) return 1;
+    hn = (unsigned)rc_nh;
+    abn = (unsigned)rc_nm;
+    if (rc_dir(dir, 400)) return 1;
+    if (rc_route(route, 160, elf)) return 1;
+    if (rc_key(key, route)) return 1;
+    if (rc_join(path, 560, dir, key, elf)) return 1;
+    payload = 0;
+    at = 0;
+    cap = 0;
+    if (rc_app(&payload, &at, &cap, elf ? "USE34\n\0\0" : "USE33\n\0\0", 8)) goto bad;
+    {
+        unsigned char le[16];
+        rc_put32(le, (unsigned)tn);
+        rc_put32(le + 4, 0);
+        rc_put32(le + 8, hn);
+        rc_put32(le + 12, abn);
+        if (rc_app(&payload, &at, &cap, le, 16)) goto bad;
+    }
+    cx_sha256_hex(tape, (size_t)tn, hex);
+    if (rc_app(&payload, &at, &cap, hex, 64)) goto bad;
+    i = 0;
+    while (i < hn) {
+        sy_stat_t st;
+        unsigned char meta[16];
+        unsigned char lb[2];
+        long pl;
+        char one[65];
+        pl = tx_len(rc_have[i], 4096);
+        if (pl <= 0 || pl > 4096) goto bad;
+        if (sy_stat(rc_have[i], &st) || st.kind != 'f' || rc_hex_file(rc_have[i], one)) goto bad;
+        lb[0] = (unsigned char)(pl & 255);
+        lb[1] = (unsigned char)((pl >> 8) & 255);
+        rc_put64(meta, (unsigned long long)st.size);
+        rc_put64(meta + 8, (unsigned long long)st.mtime);
+        if (rc_app(&payload, &at, &cap, lb, 2) || rc_app(&payload, &at, &cap, rc_have[i], pl) ||
+            rc_app(&payload, &at, &cap, meta, 16) || rc_app(&payload, &at, &cap, one, 64))
+            goto bad;
+        if (rc_debug()) rc_dbg_path("RR_PRESENT", rc_have[i]);
+        i = i + 1;
+    }
+    i = 0;
+    while (i < abn) {
+        unsigned char lb[2];
+        long pl;
+        pl = tx_len(rc_miss[i], 4096);
+        if (pl <= 0 || pl > 4096) goto bad;
+        lb[0] = (unsigned char)(pl & 255);
+        lb[1] = (unsigned char)((pl >> 8) & 255);
+        if (rc_app(&payload, &at, &cap, lb, 2) || rc_app(&payload, &at, &cap, rc_miss[i], pl)) goto bad;
+        if (rc_debug()) rc_dbg_path("RR_ABSENT", rc_miss[i]);
+        i = i + 1;
+    }
+    if (tn && rc_app(&payload, &at, &cap, tape, tn)) goto bad;
+    if (rc_atomic(path, payload, at)) goto bad;
+    rc_release(payload);
+    return 0;
+bad:
+    rc_release(payload);
+    return 1;
+}
+
+static int rc_lookup_kind(int elf, unsigned char **out, long *outn) {
+    int sy_lstat(const char *, sy_stat_t *);
+    int tx_same(const char *, long, const char *, long);
+    long long hs_ns(void);
+    char dir[400];
+    char route[160];
+    char key[65];
+    char path[560];
+    char hex[65];
+    char got[65];
+    unsigned char *file;
+    unsigned char *tape;
+    size_t fn;
+    long n;
+    long at;
+    unsigned tn;
+    unsigned an;
+    unsigned hn;
+    unsigned abn;
+    unsigned i;
+    long long t0;
+    long long t1;
+    const char *magic;
+    if (out) *out = 0;
+    if (outn) *outn = 0;
+    if (!rc_on || !out || !outn) return 0;
+    t0 = hs_ns();
+    magic = elf ? "USE34\n\0\0" : "USE33\n\0\0";
+    if (rc_dir(dir, 400) || rc_route(route, 160, elf) || rc_key(key, route) || rc_join(path, 560, dir, key, elf)) {
+        t1 = hs_ns();
+        rc_report(0, t1 - t0);
+        return 0;
+    }
+    {
+        sy_stat_t st;
+        if (sy_lstat(path, &st) || st.kind != 'f' || st.size < 88 || st.size > (1L << 26)) {
+            t1 = hs_ns();
+            rc_report(0, t1 - t0);
+            return 0;
+        }
+    }
+    file = (unsigned char *)cx_read(path, &fn);
+    if (!file) {
+        t1 = hs_ns();
+        rc_report(0, t1 - t0);
+        return 0;
+    }
+    n = (long)fn;
+    if (n < 88 || !tx_same((const char *)file, 8, magic, 8)) goto miss;
+    tn = rc_get32(file + 8);
+    an = rc_get32(file + 12);
+    hn = rc_get32(file + 16);
+    abn = rc_get32(file + 20);
+    if (tn > (1u << 26) || an > (1u << 26) || hn > 65536u || abn > 65536u) goto miss;
+    at = 24;
+    if (at + 64 > n) goto miss;
+    i = 0;
+    while (i < 64) {
+        got[i] = (char)file[at + i];
+        i = i + 1;
+    }
+    got[64] = 0;
+    at = at + 64;
+    i = 0;
+    while (i < hn) {
+        unsigned pl;
+        char pp[4097];
+        char cur[65];
+        int tx_copy(char *, long, const char *, long);
+        if (at + 2 > n) goto miss;
+        pl = (unsigned)file[at] | ((unsigned)file[at + 1] << 8);
+        at = at + 2;
+        if (!pl || pl > 4096 || at + (long)pl + 16 + 64 > n) goto miss;
+        if (tx_copy(pp, 4097, (const char *)(file + at), (long)pl)) goto miss;
+        at = at + (long)pl + 16;
+        if (rc_hex_file(pp, cur) || !tx_same(cur, 64, (const char *)(file + at), 64)) {
+            if (rc_debug()) rc_dbg_path("RR_MISS\tpresent", pp);
+            goto miss;
+        }
+        at = at + 64;
+        i = i + 1;
+    }
+    i = 0;
+    while (i < abn) {
+        unsigned pl;
+        char pp[4097];
+        int tx_copy(char *, long, const char *, long);
+        if (at + 2 > n) goto miss;
+        pl = (unsigned)file[at] | ((unsigned)file[at + 1] << 8);
+        at = at + 2;
+        if (!pl || pl > 4096 || at + (long)pl > n) goto miss;
+        if (tx_copy(pp, 4097, (const char *)(file + at), (long)pl)) goto miss;
+        at = at + (long)pl;
+        if (!rc_still_absent(pp)) {
+            if (rc_debug()) rc_dbg_path("RR_MISS\tabsent", pp);
+            goto miss;
+        }
+        i = i + 1;
+    }
+    if (n - at != (long)tn + (long)an) goto miss;
+    cx_sha256_hex(file + at, (size_t)tn, hex);
+    if (!tx_same(hex, 64, got, 64)) goto miss;
+    tape = rc_alloc(tn ? (long)tn : 1);
+    if (!tape) goto miss;
+    i = 0;
+    while (i < tn) {
+        tape[i] = file[at + i];
+        i = i + 1;
+    }
+    rc_release(file);
+    *out = tape;
+    *outn = (long)tn;
+    t1 = hs_ns();
+    rc_report(elf ? 2 : 1, t1 - t0);
+    return 1;
+miss:
+    rc_release(file);
+    t1 = hs_ns();
+    rc_report(0, t1 - t0);
+    return 0;
+}
+
+int rc_open(const char *product, int argc, char **argv, const char **sources, int nsrc,
+            const char *target, int level, int warnings, int tape, int deps) {
+    int tx_eq(const char *, const char *, long);
+    int tx_copy(char *, long, const char *, long);
+    long tx_len(const char *, long);
+    long n;
+    rc_drop(rc_have, rc_nh);
+    rc_drop(rc_miss, rc_nm);
+    rc_have = 0;
+    rc_nh = 0;
+    rc_miss = 0;
+    rc_nm = 0;
+    rc_on = 0;
+    rc_armed = 0;
+    rc_broken = 0;
+    rc_prod[0] = 0;
+    rc_src[0] = 0;
+    if (rc_off() || warnings || tape || deps) return 0;
+    if (nsrc < 1 || nsrc > 16 || level < 0 || !product || !target || !sources) return 0;
+    if (!tx_eq(target, "lnx/x86_64", 32)) return 0;
+    n = tx_len(target, 96);
+    if (n < 0 || tx_copy(rc_target, 96, target, n)) return 0;
+    rc_level = level;
+    rc_nsrc = nsrc;
+    if (rc_hex_file(product, rc_prod)) return 0;
+    if (rc_hex_sources(argc, argv, sources, nsrc, rc_src)) return 0;
+    rc_on = 1;
+    if (rc_debug()) {
+        char line[180];
+        int at;
+        at = 0;
+        if (rc_cat(line, 180, &at, "RR_PROD\t") == 0 && rc_cat(line, 180, &at, rc_prod) == 0 &&
+            rc_cat(line, 180, &at, "\n") == 0)
+            rc_say(line);
+    }
+    return 1;
+}
+
+int rc_arm(void) {
+    int hs_file_note_set(void (*)(const char *, int));
+    if (!rc_on) return 0;
+    rc_armed = 1;
+    return hs_file_note_set(rc_on_file);
+}
+
+int rc_lookup_elf(unsigned char **b, long *n) {
+    return rc_lookup_kind(1, b, n);
+}
+
+int rc_lookup_e3(unsigned char **b, long *n) {
+    return rc_lookup_kind(0, b, n);
+}
+
+int rc_store_elf(const unsigned char *b, long n) {
+    return rc_store_kind(1, b, n);
+}
+
+int rc_store_e3(const unsigned char *b, long n) {
+    return rc_store_kind(0, b, n);
+}

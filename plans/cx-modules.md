@@ -550,5 +550,34 @@ flowchart TD
 
 四个 unix `-o` 两边退出 0，stderr 0，权限 755。映像字节两边相同：`lnx/x86_64` 272197，`lnx/arm64` 340985，`osx/x86_64` 280930，`osx/arm64` 363490。
 
-两个 Windows `-o` 两边退出 1，stderr 2770 字节，没有映像。`dup.c -run` 两边退出 3。后面 48 个产品面也是 SAME。这些墙钟没有单独证明窗口是空的。已装产品没换。bound 没有加长。run-cache 还没做。
+两个 Windows `-o` 两边退出 1，stderr 2770 字节，没有映像。`dup.c -run` 两边退出 3。后面 48 个产品面也是 SAME。这些墙钟没有单独证明窗口是空的。已装产品没换。bound 没有加长。run-cache 在下一节。
+
+## 162. 2026-10-30 -run 运行缓存
+
+`src/runcache.cx` 是新模块，由 `src/drive.cx` 的 `#pragma unisa use runcache` 编进 `drive.o`，没有第 34 只对象。`src/sys` 指向 `../cx/sys`。这个文件不直接调用 libc。读写和哈希用 `cx_read`、`cx_write`、`cx_sha256_hex`。比较和拷贝用 `tx_*`。目录、改名、删除、工作目录、用户号走 `cx/sys`。`cx/sys/env.cx` 加了 `sy_uid`、`sy_cwd`。`cx/sys/fs.cx` 加了 `sy_rename`、`sy_unlink`。cc 在仓库根用 `sh ./unisacc.com tools/check-cx-sys.cx` 跑过，原有检查是 `CHECK_CX_SYS PASS ok=87 fail=0`。新函数的检查留给 unisacc-00。
+
+`src/host.cx` 只多了两处：打开头文件时的回调 `hs_file_note_set`，以及 `hs_pid`。读过和缺席的路径记在 `runcache.cx`。缺席用 `sy_stat` 跟随链接，只有 `-ENOENT` 仍算缺席。`ENOTDIR` 和 `EACCES` 让缓存失效。缓存文件先写到带 pid 和时间戳的临时名，再 `sy_rename`。
+
+键里的产品身份是候选整文件的 sha256，含后面的 P3。`UNISACC_RR_DEBUG` 打出的 `RR_PROD` 是 `5a9cb1b4bbf188119a48b80b59910f40a36b7c4cced45a71f0576827254aa02a`，和 `out/grk-entry-build-15/candidate` 一致，不是已装产品 `79fb84e6…`。`--` 后面的参数不进键。
+
+切在两处。`cnt>0` 时，进程槽弹出之后、`hs_forward_exec` 之前，若产出以 ELF 魔数开头，存成 USE34（`<key>.host`）。下次在编单元之前命中，用这一次的参数执行，单元和 e3 都不跑。第二遍转发不查。`cnt==0` 时只存 e3 的 side-car（USE33）。命中后跳过 e3，prune、lower、elf 和执行照旧，所以参数是这一次重新绑定的。`cnt==0` 的 `dv_run_lower` 最终产出不进缓存。`UNISACC_RUN_CACHE=0`、警告、tape、deps、源不在 1 到 16 个、目标不是 `lnx/x86_64` 时不缓存。`-o` 不打开缓存。
+
+`-I` 和 `-iquote` 原先在 `st_pub` 里被写成空目录，模型看不见。现在 `drive` 把解析到的目录交给 `st_dirs`，`st_pub` 按这些字节发布。不占用那 8 个 extra 槽，内存阶段的槽数不变。
+
+对象没有全重编。`out/grk-entry-build-15` 里新的是：
+
+| 对象 | 字节 | sha256 |
+|---|---|---|
+| drive.o | 920720 | `c1597c8dbf77f9d4a9985eaaa7c1c92772b47ca3fa9ae5127b08098bfbcca6f9` |
+| host.o | 379776 | `602715f8ec0bf27634ce17f5608f29cf5d6fa1ead171cdab56a9fa3d6edac6fb` |
+| stages.o | 249464 | `401959fa09347b0278839073f42b21dd39f830b793788f3a0566888dcffaa6d5` |
+| driveroute.o | 555632 | `470493a951a3976ebf8a62a468c00012a5940dc028f4839adc88d0e378b447cb` |
+
+其余来自 `out/grk-entry-build-13`。`entry.elf` 1073664 字节，sha256 `94bf3eb83bde9ee8fb72035a7215409be61c9124b3830386c560ead9eb3ca6d1`。P3 是 build-14 的 `pkg.bin`，1636020 字节，接缝是 `P 3 `。候选 2709684 字节，权限 0755，sha256 `5a9cb1b4bbf188119a48b80b59910f40a36b7c4cced45a71f0576827254aa02a`。已装产品没换。链接时没有别的 `unisacc.com`。
+
+`tests/runcache.cx`（`73ff0f2758`）对这只候选：12 项都过，失败 0。输出行是 `TIMING cold_ms=728 hit_ms=506`。这 12 项盖住了首次和命中输出相同、命中不改缓存文件、换参数后输出跟着变且参数不进键、补上原先缺的头、改头、改源码、`UNISACC_RUN_CACHE=0` 不建缓存目录。
+
+另外在窗口空着时量了 `tools/dev-run.cx -run`（`UNISACC_RR_TIME=1`，私有 `UNISACC_E3CACHE`）。冷跑墙钟 6.624 秒，退出 2。热跑墙钟 0.343 秒，退出 2，只有 `RR_TIME lookup_hit=2 ns=62046927`，没有 e2，stderr 仍是 `dev-run: REFUSE usage ROOT [--opt=0|--opt=2] SOURCE.cx [-- PROGRAM_ARGS] errno=0`。空的 `empty.cx` 冷跑有 e2、e1、e3，热跑 `lookup_hit=1`，这三段不再出现，prune、lower、elf 还在。
+
+`tests/cxraw.cx --check` 退出 0：625 个 `.cx`，19790 次调用，基线 19790，超过基线的是 0。基线文件没有为这一刀改写。148 格没有在这只候选上重跑。bound 没有加长。
 

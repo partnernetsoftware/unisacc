@@ -343,11 +343,15 @@ int dv_run_lower(const char *route, const char *tgt, const char *src, int cx,
     unsigned long long cnt;
     unsigned long long ccwc;
     int pr;
+    int e3hit;
     const char *cont;
     char img[96];
     int st_extra_put(const char *, int, const unsigned char *, int);
     int st_extra_pop(void);
     int st_span(const char *, const char *, const char *, int, unsigned, const char *, const char *, unsigned char *, long, unsigned char **, long *, char *, int);
+    int rc_lookup_e3(unsigned char **, long *);
+    int rc_store_e3(const unsigned char *, long);
+    void hs_free(void *);
     dv_fwd_again = 0;
     if (execf) *execf = 0;
     if (!out || !outn) {
@@ -363,7 +367,15 @@ int dv_run_lower(const char *route, const char *tgt, const char *src, int cx,
     }
     e3 = 0;
     e3n = 0;
-    pr = st_span(route, tgt, src, cx, 0, 0, "e3", in, inn, &e3, &e3n, why, cap);
+    e3hit = 0;
+    /* A hit is the e3 side-car only. The process slots stay published, and
+       the caller binds them again for e4, memory, or the forward image. */
+    if (rc_lookup_e3(&e3, &e3n) == 1) {
+        hs_free(in);
+        pr = 0;
+        e3hit = 1;
+    } else
+        pr = st_span(route, tgt, src, cx, 0, 0, "e3", in, inn, &e3, &e3n, why, cap);
     st_extra_pop();
     if (pr) return pr;
     n = (unsigned long long)e3n;
@@ -390,6 +402,9 @@ int dv_run_lower(const char *route, const char *tgt, const char *src, int cx,
     at = at + tl;
     cont = level ? "e4" : "prune";
     if (cnt == 0) {
+        /* The memory path replays this side-car. A forward image is stored
+           later, after these slots are gone, so it is not saved here. */
+        if (!e3hit) (void)rc_store_e3(e3, e3n);
         free(e3);
         return st_span(route, tgt, src, cx, 0, cont, 0, tape, (long)tl, out, outn, why, cap);
     }
