@@ -11,7 +11,7 @@
 | `mem.bytes` | `bytes.cx` | 带长度/容量的 copy/move/fill/compare，越界拒绝、失败原子 | `slice` 的带界原语 |
 | `mem.arena` | `arena.cx` | 句柄式分组分配，一次释放一组（编译阶段临时表） | `bumpalo::Bump` |
 | `mem.grow` | `grow.cx` | 可增长字节缓冲区（倍增扩容），`mg_move`/`mg_take` 所有权转移 | `Vec<u8>` |
-| `mem.slice` | `slice.cx` | 不可变借用切片，子切片越界拒绝、相等、查找（find/rfind/contains/starts_with/ends_with） | `&[u8]` |
+| `mem.slice` | `slice.cx` | 不可变借用切片，子切片越界拒绝、相等、查找（find/rfind/contains/starts_with/ends_with）；`ms_none`/`ms_is_none` 区分「空切片」与「无值」（Option::None） | `&[u8]` / `Option<&[u8]>` |
 
 ## 所有权生命周期（grow）
 
