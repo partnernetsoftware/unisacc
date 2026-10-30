@@ -21,8 +21,16 @@
                    frame pushed at sp would land on live tape frames: handlers run on an
                    alternate stack (sigaltstack, 256 KiB, SA_ONSTACK) and the thunk starts the
                    tape just under the frame there. No restorer: the kernel's vdso returns.
-     macOS, Windows: no handler entry here (-ENOSYS). macOS ignore/default are real sigaction
-                   calls; Windows has no POSIX dispositions (-ENOSYS).
+     macOS x86_64: the raw __sigaction (46) takes a trampoline, and there is no libsystem
+                   _sigtramp: the thunk itself is it. Entered as tramp(handler, infostyle,
+                   sig, siginfo, uctx), it saves uctx/infostyle on the stack, calls
+                   syg_dispatch(sig) and ends with sigreturn(uctx, infostyle) (0x20000b8).
+     macOS arm64:  the same trampoline contract (x0..x4) on an alternate stack (sigaltstack 53,
+                   SA_ONSTACK) as on Linux arm64; x1/x4 kept above sp, the tape below them,
+                   sigreturn through svc #0x80 with x16 = 184.
+                   2026-10-30: written from the contract, compiled for osx/x86_64 and osx/arm64;
+                   never run on a Mac here (UNMEASURED), so a fault would show up there first.
+     Windows: no POSIX dispositions (-ENOSYS).
    Flags: SA_RESTART (a read interrupted by a handled signal is restarted, as BSD signal()), the
    signal itself is blocked while its handler runs (no SA_NODEFER), so "default, then raise"
    inside a handler takes effect when the handler returns.
@@ -90,6 +98,46 @@ static int syg_code(unsigned char *p) {
     syg_put32(p + 20, 0xd503201fu);                         /* nop */
     syg_put64(p + 24, (unsigned long)syg_dispatch);
     return 0;
+#elif defined(__APPLE__) && defined(__x86_64__)
+    /* The raw __sigaction makes this thunk the trampoline: the kernel enters it as
+       tramp(handler rdi, infostyle esi, sig edx, siginfo rcx, uctx r8) and it must
+       end with sigreturn(uctx, infostyle) itself (no libsystem _sigtramp here). */
+    p[0] = 0x41; p[1] = 0x50;                               /* push %r8   (uctx) */
+    p[2] = 0x56;                                            /* push %rsi  (infostyle) */
+    p[3] = 0x48; p[4] = 0x83; p[5] = 0xec; p[6] = 0x08;     /* sub $8,%rsp (call alignment) */
+    p[7] = 0x89; p[8] = 0xd0;                               /* mov %edx,%eax (sig: tape argument 0) */
+    p[9] = 0x48; p[10] = 0xb9;                              /* movabs $syg_dispatch,%rcx */
+    syg_put64(p + 11, (unsigned long)syg_dispatch);
+    p[19] = 0xff; p[20] = 0xd1;                             /* call *%rcx */
+    p[21] = 0x48; p[22] = 0x83; p[23] = 0xc4; p[24] = 0x08; /* add $8,%rsp */
+    p[25] = 0x5e;                                           /* pop %rsi   (infostyle) */
+    p[26] = 0x5f;                                           /* pop %rdi   (uctx) */
+    p[27] = 0xb8; syg_put32(p + 28, 0x20000b8u);            /* mov $0x20000b8,%eax (sigreturn) */
+    p[32] = 0x0f; p[33] = 0x05;                             /* syscall */
+    p[34] = 0x0f; p[35] = 0x0b;                             /* ud2: sigreturn does not return */
+    return 0;
+#elif defined(__APPLE__) && defined(__aarch64__)
+    /* Entered as tramp(handler x0, infostyle x1, sig x2, siginfo x3, uctx x4) on the
+       alternate stack (SA_ONSTACK, as on Linux arm64: the tape runs below sp). Keep
+       x1/x4 above sp, run syg_dispatch on a tape under them, then sigreturn. */
+    syg_put32(p + 0, 0xd10083ffu);                          /* sub sp, sp, #32 */
+    syg_put32(p + 4, 0xa90013e1u);                          /* stp x1, x4, [sp] */
+    syg_put32(p + 8, 0xaa0203e0u);                          /* mov x0, x2 (sig: tape argument 0) */
+    syg_put32(p + 12, 0x100000deu);                         /* adr x30, back (offset 36) */
+    syg_put32(p + 16, 0x910003f0u);                         /* mov x16, sp */
+    syg_put32(p + 20, 0xd1004207u);                         /* sub x7, x16, #16 */
+    syg_put32(p + 24, 0xf90000feu);                         /* str x30, [x7] */
+    syg_put32(p + 28, 0x58000130u);                         /* ldr x16, =syg_dispatch (offset 64) */
+    syg_put32(p + 32, 0xd61f0200u);                         /* br x16 */
+    syg_put32(p + 36, 0xa94013e1u);                         /* back: ldp x1, x4, [sp] */
+    syg_put32(p + 40, 0x910083ffu);                         /* add sp, sp, #32 */
+    syg_put32(p + 44, 0xaa0403e0u);                         /* mov x0, x4 (uctx; x1 is infostyle) */
+    syg_put32(p + 48, 0xd2801710u);                         /* mov x16, #184 (sigreturn) */
+    syg_put32(p + 52, 0xd4001001u);                         /* svc #0x80 */
+    syg_put32(p + 56, 0xd4200000u);                         /* brk #0: sigreturn does not return */
+    syg_put32(p + 60, 0xd503201fu);                         /* nop */
+    syg_put64(p + 64, (unsigned long)syg_dispatch);
+    return 0;
 #else
     (void)p;
     return -ENOSYS;
@@ -129,6 +177,22 @@ static int syg_altstack(void) {
     if (r < 0) { sy_unmap(st, SYG_ALT); return (int)r; }
     done = 1;
     return 0;
+#elif defined(__APPLE__) && defined(__aarch64__)
+    static int done;
+    struct { void *sp; unsigned long size; int flags; } ss;      /* Darwin stack_t: sp, size, flags */
+    void *st = 0;
+    long r;
+    int rc;
+    if (done) return 0;
+    rc = sy_map_none(&st, SYG_ALT);
+    if (rc != 0) return rc;
+    rc = sy_protect_rw(st, SYG_ALT);
+    if (rc != 0) { sy_unmap(st, SYG_ALT); return rc; }
+    ss.sp = st; ss.size = SYG_ALT; ss.flags = 0;
+    r = __syscall6(_UNISA_SC(53), (long)&ss, 0, 0, 0, 0);     /* sigaltstack */
+    if (r < 0) { sy_unmap(st, SYG_ALT); return (int)r; }
+    done = 1;
+    return 0;
 #else
     return 0;
 #endif
@@ -144,8 +208,21 @@ static int syg_act(int sig, int kind) {
 #elif defined(__APPLE__)
     struct { void *handler; void *tramp; unsigned int mask; int flags; } a;
     long r;
-    if (kind == 2) return -ENOSYS;
     a.handler = (void *)(long)kind; a.tramp = 0; a.mask = 0; a.flags = 0;
+    if (kind == 2) {
+#if defined(__x86_64__) || defined(__aarch64__)
+        /* the kernel calls tramp; the handler value is only handed to it (and not
+           SIG_DFL/SIG_IGN), so both point at the thunk */
+        a.handler = (void *)syg_page;
+        a.tramp = (void *)syg_page;
+        a.flags = 0x0002;                                        /* SA_RESTART */
+#if defined(__aarch64__)
+        a.flags = a.flags | 0x0001;                              /* SA_ONSTACK */
+#endif
+#else
+        return -ENOSYS;
+#endif
+    }
     r = __syscall6(_UNISA_SC(46), (long)sig, (long)&a, 0, 0, 0);   /* sigaction */
     return r < 0 ? (int)r : 0;
 #elif defined(__linux__) && (defined(__x86_64__) || defined(__aarch64__))
