@@ -358,6 +358,29 @@ static int smoke(void) {
     return bad ? 1 : 0;
 }
 
+/* In a snapshot only (./.commit exists: the sources cannot change), record the
+   source digest beside a slice compiled directly with
+     sh ./unisacc.com SRC -b TARGET -o out/csih-ape/FILE
+   (the compile alone is 50-57s; with this tool's own -run start it would not fit
+   one 60s call). The slice must exist and be newer than .commit. */
+static int mark(const char *target) {
+    char path[256], side[300], d[65];
+    sy_stat_t a, b;
+    int i, k = -1;
+    for (i = 0; i < NS; i++) if (eq(targets[i], target)) k = i;
+    if (k < 0) { fprintf(stderr, "csih-ape: unknown target %s\n", target); return 2; }
+    if (sy_exists(".commit") != 1) { fprintf(stderr, "csih-ape: mark only inside a snapshot (out/csih-ape/tree)\n"); return 2; }
+    if (cx_fmt(path, sizeof path, "%s/%s", OUT, files[k]) || cx_fmt(side, sizeof side, "%s.src", path)) return 2;
+    if (sy_stat(path, &a) != 0 || sy_stat(".commit", &b) != 0 || a.mtime < b.mtime) {
+        fprintf(stderr, "csih-ape: %s missing or older than the snapshot: compile it first\n", path);
+        return 1;
+    }
+    if (src_digest(d) != 0) { fprintf(stderr, "csih-ape: cannot read the source digest\n"); return 1; }
+    if (cx_write(side, d, 64) != 0) { fprintf(stderr, "csih-ape: cannot write %s\n", side); return 1; }
+    printf("CSIH_APE\tMARKED\t%s\t%s\tsrc=%s\n", target, path, d);
+    return 0;
+}
+
 /* Export REV's csih sources into OUT/tree with git archive, so a build there is
    that commit's and nothing another session has not committed leaks into it.
    The compiler is copied in (it is not tracked); its bytes are in the digest. */
@@ -393,7 +416,9 @@ static int snapshot(const char *rev) {
     }
     if (cx_fmt(path, sizeof path, "%s/.commit", tree) || cx_write(path, hash, 40) != 0) return 1;
     printf("CSIH_APE\tSNAPSHOT\t%s\t%s\n", hash, tree);
-    printf("next, one per call:  cd %s && sh ./unisacc.com tools/csih-ape.cx -- slice TARGET | pack | verify | smoke\n", tree);
+    printf("next, in %s, one per call: for each target\n"
+           "  sh ./unisacc.com SRC -b TARGET -o out/csih-ape/FILE   then   sh ./unisacc.com tools/csih-ape.cx -- mark TARGET\n"
+           "  (SRC apps/csih/csih.cx; win/x86_64: apps/csih/tools/win-unsupported.cx), then pack, verify, smoke\n", tree);
     printf("then, from the repo root:  sh ./unisacc.com tools/csih-ape.cx -- install\n");
     return 0;
 }
@@ -437,6 +462,7 @@ int main(int argc, char **argv) {
     if (argc == 2 && eq(argv[1], "smoke")) return smoke();
     if ((argc == 2 || argc == 3) && eq(argv[1], "snapshot")) return snapshot(argc == 3 ? argv[2] : "HEAD");
     if (argc == 2 && eq(argv[1], "install")) return install();
-    fprintf(stderr, "usage: csih-ape.cx -- snapshot [REV] | slice TARGET | pack | verify | smoke | install\n");
+    if (argc == 3 && eq(argv[1], "mark")) return mark(argv[2]);
+    fprintf(stderr, "usage: csih-ape.cx -- snapshot [REV] | slice TARGET | mark TARGET | pack | verify | smoke | install\n");
     return 2;
 }
