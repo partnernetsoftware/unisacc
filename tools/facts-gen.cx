@@ -1830,6 +1830,224 @@ static void lex_gen(Ob *o) {
 #undef ISDI
 }
 
+/* A facts() cell as JSON: an integer or a JSON string literal is re-dumped, anything else is a string. */
+static void ob_cell(Ob *o, const char *s) {
+    long n = tx_len(s, FG_CAP), i;
+    int digits = n > 0;
+    for (i = 0; i < n; i++) if (!((s[i] >= '0' && s[i] <= '9') || (i == 0 && s[i] == '-' && n > 1))) digits = 0;
+    if (digits) { ob_z(o, s); return; }
+    if (n >= 2 && s[0] == '"' && s[n - 1] == '"') { char *d = jstr(s, n); if (!d) fg_die("bad JSON string cell", s); ob_str(o, d); return; }
+    if (tx_eq(s, "true", 8) || tx_eq(s, "false", 8) || tx_eq(s, "null", 8)) fg_die("unsupported JSON literal cell", s);
+    ob_str(o, s);
+}
+static void ob_strn(Ob *o, const char *s, long n) {   /* json.dumps of n bytes that may include NUL */
+    long i;
+    ob_put(o, "\"", 1);
+    for (i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == '"' || c == '\\') { ob_put(o, "\\", 1); ob_put(o, s + i, 1); }
+        else if (c < 0x20 || c > 0x7f) { char b[8]; cx_fmt(b, sizeof b, "\\u%04x", c); ob_z(o, b); }
+        else ob_put(o, s + i, 1);
+    }
+    ob_put(o, "\"", 1);
+}
+
+static int pp_pdfind(char **kind, char **sel, int n, const char *k, const char *s) {
+    int q, r = -1;
+    for (q = 0; q < n; q++) if (tx_eq(kind[q], k, 16) && tx_eq(sel[q], s, 64)) r = q;
+    return r;
+}
+
+/* pp-gen: E2 delta facts (directive ids, pp-init spellings, XE precedences, per-target predefine chains,
+   the directive switch keys, directive-action instances, simple escapes, PREC_* layout). */
+static void pp_gen(Ob *o) {
+    static char *dirv[64], *ppt_d[256], *ppt_y[256], *tg[16], *pdk[32], *pdsel[32], *pdn[32][32];
+    static int ppt_b[256], npdn[32];
+    static int xcode[300], xprec[300];
+    static char *initw[64], *initk[64], *inita[64];
+    int ndir = 0, nppt = 0, ntg = 0, npd = 0, nx = 0, ninit = 0, i, j;
+    long XPRB = fg_const("pp-layout", "XPRB"), XOB = fg_const("pp-layout", "XOB");
+    {
+        Lines L = fg_lines("weights/gold/pp.tsv");
+        for (i = 0; i < L.n; i++) {
+            char *cells[64], *line = fg_dupz(L.l[i]);
+            int c = fg_split(line, cells, 64), k;
+            if (c > 2 && tx_eq(cells[0], "#field", 8) && tx_eq(cells[1], "dir", 4)) for (k = 2; k < c; k++) dirv[ndir++] = cells[k];
+            if (L.l[i][0] == '#' || c != 3 || tx_eq(cells[0], "dir", 4)) continue;
+            ppt_d[nppt] = cells[0]; ppt_b[nppt] = (int)strtol(cells[1], 0, 10); ppt_y[nppt++] = cells[2];
+        }
+    }
+    {
+        Lines L = fg_lines("exec/facts/pp-targets.tsv");
+        for (i = 1; i < L.n; i++) {
+            char *cells[4], *line = fg_dupz(L.l[i]), t[64];
+            if (!*line || line[0] == '#') continue;
+            if (fg_split(line, cells, 4) != 2) fg_die("bad pp-targets row", L.l[i]);
+            cx_fmt(t, sizeof t, "%s/%s", cells[0], cells[1]);
+            tg[ntg++] = fg_dupz(t);
+        }
+    }
+    {
+        Lines L = fg_lines("exec/pp/predefines.tsv");
+        for (i = 0; i < L.n; i++) {
+            char *cells[40], *line = fg_dupz(L.l[i]);
+            int c, k;
+            if (!*line || line[0] == '#') continue;
+            c = fg_split(line, cells, 40);
+            if (c < 3 || npd == 32 || pp_pdfind(pdk, pdsel, npd, cells[0], cells[1]) >= 0) fg_die("invalid or duplicate predefinition row", L.l[i]);
+            pdk[npd] = cells[0]; pdsel[npd] = cells[1]; npdn[npd] = c - 2;
+            for (k = 2; k < c; k++) {
+                char *nm = cells[k];
+                long q, nl = tx_len(nm, 256);
+                int m;
+                for (q = 0; q < nl; q++) {
+                    char ch = nm[q];
+                    int ok = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || ch == '_' || (q > 0 && ch >= '0' && ch <= '9');
+                    if (!ok) fg_die("invalid predefinition name", nm);
+                }
+                for (m = 2; m < k; m++) if (tx_eq(cells[m], nm, 256)) fg_die("repeated predefinition name", nm);
+                if (nl < 1) fg_die("empty predefinition name", L.l[i]);
+                pdn[npd][k - 2] = nm;
+            }
+            npd++;
+        }
+        {   /* required: os lnx/osx/win, arch x86_64/arm64, common *; optional model per os; nothing else */
+            static const char *req[6][2] = {{"os", "lnx"}, {"os", "osx"}, {"os", "win"}, {"arch", "x86_64"}, {"arch", "arm64"}, {"common", "*"}};
+            int r;
+            for (r = 0; r < 6; r++) if (pp_pdfind(pdk, pdsel, npd, req[r][0], req[r][1]) < 0) fg_die("expected OS, architecture, optional data-model and common declarations", req[r][1]);
+            for (r = 0; r < npd; r++) {
+                int known = 0, q;
+                for (q = 0; q < 6; q++) if (tx_eq(pdk[r], req[q][0], 16) && tx_eq(pdsel[r], req[q][1], 64)) known = 1;
+                if (tx_eq(pdk[r], "model", 8) && (tx_eq(pdsel[r], "lnx", 8) || tx_eq(pdsel[r], "osx", 8) || tx_eq(pdsel[r], "win", 8))) known = 1;
+                if (!known) fg_die("unexpected predefinition row", pdsel[r]);
+            }
+        }
+    }
+    {
+        Lines L = fg_lines("exec/pp/operators.tsv");
+        for (i = 0; i < L.n; i++) {
+            char *cells[6], *line = fg_dupz(L.l[i]);
+            if (!*line || line[0] == '#') continue;
+            if (fg_split(line, cells, 6) != 4 || nx == 300) fg_die("bad operators row", L.l[i]);
+            xcode[nx] = (int)strtol(cells[0], 0, 10); xprec[nx++] = (int)strtol(cells[2], 0, 10);
+        }
+    }
+    {
+        Lines L = fg_lines("exec/facts/pp-init.tsv");
+        for (i = 1; i < L.n; i++) {
+            char *cells[4], *line = fg_dupz(L.l[i]);
+            if (!*line || line[0] == '#') continue;
+            if (fg_split(line, cells, 4) != 3 || ninit == 64) fg_die("bad pp-init row", L.l[i]);
+            initw[ninit] = cells[0]; initk[ninit] = cells[1]; inita[ninit++] = cells[2];
+        }
+    }
+    ob_z(o, "=dirrows\tjson\t[");
+    {
+        int first = 1;
+        for (i = 0; i < ndir; i++) { if (!first) ob_z(o, ", "); ob_z(o, "{\"word\": "); ob_str(o, dirv[i]); ob_z(o, ", \"arg\": "); ob_int(o, i + 1); ob_z(o, "}"); first = 0; }
+        for (i = 0; i < ninit; i++) if (tx_eq(initk[i], "dir", 4)) { if (!first) ob_z(o, ", "); ob_z(o, "{\"word\": "); ob_cell(o, initw[i]); ob_z(o, ", \"arg\": "); ob_cell(o, inita[i]); ob_z(o, "}"); first = 0; }
+        ob_z(o, "]\n=internrows\tjson\t[");
+        first = 1;
+        for (i = 0; i < ninit; i++) if (!tx_eq(initk[i], "dir", 4)) { if (!first) ob_z(o, ", "); ob_z(o, "{\"word\": "); ob_cell(o, initw[i]); ob_z(o, ", \"arg\": "); ob_cell(o, inita[i]); ob_z(o, "}"); first = 0; }
+    }
+    ob_z(o, "]\n=xerows\tjson\t[");
+    for (i = 0; i <= nx; i++) {
+        if (i) ob_z(o, ", ");
+        ob_z(o, "{\"slot\": "); ob_int(o, XPRB + (i < nx ? xcode[i] : 0)); ob_z(o, ", \"precedence\": "); ob_int(o, i < nx ? xprec[i] : -1); ob_z(o, "}");
+    }
+    ob_z(o, "]\n=predef\tjson\t{");
+    for (i = 0; i < ntg; i++) {
+        char os[32], arch[32], *names[96];
+        int nn = 0, parts[4], np = 0, q, k;
+        long sl = tx_chr(tg[i], tx_len(tg[i], 64), '/');
+        tx_copy(os, sizeof os, tg[i], sl); tx_copy(arch, sizeof arch, tg[i] + sl + 1, tx_len(tg[i] + sl + 1, 32));
+        parts[np++] = pp_pdfind(pdk, pdsel, npd, "os", os); parts[np++] = pp_pdfind(pdk, pdsel, npd, "arch", arch);
+        parts[np++] = pp_pdfind(pdk, pdsel, npd, "model", os); parts[np++] = pp_pdfind(pdk, pdsel, npd, "common", "*");
+        for (q = 0; q < np; q++) if (parts[q] >= 0) for (k = 0; k < npdn[parts[q]]; k++) names[nn++] = pdn[parts[q]][k];
+        if (i) ob_z(o, ", ");
+        ob_str(o, tg[i]); ob_z(o, ": [");
+        for (k = 0; k < nn; k++) {
+            char e[32];
+            if (k) ob_z(o, ", ");
+            cx_fmt(e, sizeof e, "P3PD%d", k); ob_z(o, "{\"entry\": "); ob_str(o, e);
+            cx_fmt(e, sizeof e, "P3PDR%d", k); ob_z(o, ", \"resume\": "); ob_str(o, e);
+            if (k + 1 < nn) cx_fmt(e, sizeof e, "P3PD%d", k + 1); else cx_fmt(e, sizeof e, "CLI.D");
+            ob_z(o, ", \"next\": "); ob_str(o, e); ob_z(o, ", \"name\": "); ob_str(o, names[k]); ob_z(o, "}");
+        }
+        ob_z(o, "]");
+    }
+    ob_z(o, "}\n=cases\tjson\t[");
+    for (i = 0; i < ndir; i++) { char t[64]; if (i) ob_z(o, ", "); cx_fmt(t, sizeof t, "D_%s", dirv[i]); ob_z(o, "{\"key\": "); ob_int(o, i + 1); ob_z(o, ", \"target\": "); ob_str(o, t); ob_z(o, "}"); }
+    ob_z(o, "]\n=dswkeys\tjson\t[0");
+    for (i = 0; i < ndir; i++) { ob_z(o, ", "); ob_int(o, i + 1); }   /* sorted: 0, 1..n, then 100-102 */
+    ob_z(o, ", 100, 101, 102]\n=dactions\tjson\t[");
+    if (ndir >= 100) fg_die("too many directives for the fixed switch keys", 0);
+    for (i = 0; i < ndir; i++) {
+        int fl;
+        for (fl = 0; fl < 2; fl++) {
+            char nm[96], sec[96];
+            char *y = 0;
+            for (j = 0; j < nppt; j++) if (tx_eq(ppt_d[j], dirv[i], 64) && ppt_b[j] == fl) y = ppt_y[j];
+            if (!y) fg_die("pp.tsv lacks a directive answer", dirv[i]);
+            cx_fmt(nm, sizeof nm, "D_%s_a%d", dirv[i], fl); cx_fmt(sec, sizeof sec, "%s/%s", dirv[i], y);
+            if (i || fl) ob_z(o, ", ");
+            ob_z(o, "{\"name\": "); ob_str(o, nm); ob_z(o, ", \"section\": "); ob_str(o, sec); ob_z(o, "}");
+        }
+    }
+    ob_z(o, "]\n=esc\tjson\t[");
+    {
+        Lines L = fg_lines("exec/facts/pp-escapes.tsv");
+        static int ec[64], ev[64];
+        int ne = 0, first = 1;
+        for (i = 0; i < L.n; i++) {
+            char *cells[4], *line = fg_dupz(L.l[i]), *ch;
+            if (!*line || line[0] == '#') continue;
+            if (fg_split(line, cells, 4) != 2) fg_die("bad pp-escapes row", L.l[i]);
+            ch = jstr(cells[0], tx_len(cells[0], 16));
+            if (!ch || tx_len(ch, 4) != 1) {
+                if (tx_eq(cells[0], "\"0\"", 8)) { static char zero[2] = {'0', 0}; ch = zero; } else fg_die("bad escape char", cells[0]);
+            }
+            if (tx_chr("01234567x", 9, ch[0]) >= 0) continue;
+            ec[ne] = (unsigned char)ch[0]; ev[ne++] = (int)strtol(cells[1], 0, 10);
+        }
+        for (i = 0; i < ne; i++) { if (!first) ob_z(o, ", "); ob_z(o, "{\"code\": "); ob_int(o, ec[i]); ob_z(o, ", \"value\": "); ob_int(o, ev[i]); ob_z(o, "}"); first = 0; }
+        ob_z(o, "]\n=esckeys\tjson\t[");
+        for (i = 0; i < ne; i++) { if (i) ob_z(o, ", "); ob_int(o, ec[i]); }
+    }
+    ob_z(o, "]\n=xelayout\tjson\t{");
+    for (i = 0; i < nx; i++) {
+        char k[32];
+        int dup;
+        for (dup = 0, j = 0; j < i; j++) if (xcode[j] == xcode[i]) dup = 1;
+        if (dup) fg_die("duplicate operator code", 0);
+        if (i) ob_z(o, ", ");
+        cx_fmt(k, sizeof k, "PREC_%d", xcode[i]); ob_str(o, k); ob_z(o, ": "); ob_int(o, xprec[i]);
+    }
+    ob_z(o, nx ? ", \"XOB_PREV\": " : "\"XOB_PREV\": "); ob_int(o, XOB - 1);
+    ob_z(o, "}\n=predefres\tjson\t{");
+    {
+        int order[16], k, q;
+        for (k = 0; k < ntg; k++) order[k] = k;
+        for (k = 1; k < ntg; k++) { int x = order[k]; for (q = k - 1; q >= 0 && byte_less(tg[x], tg[order[q]]); q--) order[q + 1] = order[q]; order[q + 1] = x; }
+        for (k = 0; k < ntg; k++) {
+            char os[32], arch[32], buf[2048];
+            long at = 0, sl = tx_chr(tg[order[k]], tx_len(tg[order[k]], 64), '/');
+            int parts[4], p, m;
+            tx_copy(os, sizeof os, tg[order[k]], sl); tx_copy(arch, sizeof arch, tg[order[k]] + sl + 1, tx_len(tg[order[k]] + sl + 1, 32));
+            parts[0] = pp_pdfind(pdk, pdsel, npd, "os", os); parts[1] = pp_pdfind(pdk, pdsel, npd, "arch", arch);
+            parts[2] = pp_pdfind(pdk, pdsel, npd, "model", os); parts[3] = pp_pdfind(pdk, pdsel, npd, "common", "*");
+            for (p = 0; p < 4; p++) if (parts[p] >= 0) for (m = 0; m < npdn[parts[p]]; m++) {
+                long nl = tx_len(pdn[parts[p]][m], 256), c;
+                for (c = 0; c < nl; c++) buf[at++] = pdn[parts[p]][m][c];
+                buf[at++] = 0;
+            }
+            if (k) ob_z(o, ", ");
+            ob_str(o, tg[order[k]]); ob_z(o, ": "); ob_strn(o, buf, at);
+        }
+    }
+    ob_z(o, "}\n");
+}
+
 static void enc_pe(Ob *o) { pe_fields(o, 0); }
 static void enc_pe_forward(Ob *o) { pe_fields(o, 1); }
 
@@ -1863,6 +2081,8 @@ static const Table fg_tables[] = {
                          "exec/parse2/units-counters.tsv", "exec/parse2/units-separators.tsv", "exec/parse2/units-trailer.tsv", "tools/facts-gen.cx", 0}, k2_units_tokens},
     {"lex-gen", {"weights/gold/parse.tsv", "iterate/kernel/typekw.tsv", "weights/gold/lexcls.tsv", "weights/gold/lexword.tsv", "weights/gold/lex.tsv",
                  "exec/lex/spelling.tsv", "exec/facts/lex-consts.tsv", "tools/facts-gen.cx", 0}, lex_gen},
+    {"pp-gen", {"exec/facts/pp-targets.tsv", "exec/facts/pp-init.tsv", "exec/facts/pp-layout.tsv", "exec/facts/pp-escapes.tsv",
+                "exec/pp/operators.tsv", "exec/pp/predefines.tsv", "weights/gold/pp.tsv", "tools/facts-gen.cx", 0}, pp_gen},
     {0, {0}, 0}
 };
 
