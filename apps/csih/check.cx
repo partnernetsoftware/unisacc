@@ -1,6 +1,7 @@
 #pragma unisa module check
 #pragma unisa use suite
 #pragma unisa use u_run
+#pragma unisa use probes.tmuxwit
 /*
  * check.cx — unisacc-only suite driver. Lower: may #include libc/posix.
  *   unisacc.com -run check.cx
@@ -55,33 +56,30 @@ static int read_file(const char *path, char *buf, int cap) {
     return n;
 }
 
+/* `term_cli size` on a COLSxROWS tty (a private tmux pane): its one line, or a reason. */
+static void tty_size_line(const char *sess, int cols, int rows, char *line, int cap) {
+    static char pane[32768];
+    char *cmd[] = { "sh", "-c", "\"$0\" -run term_cli.cx -- size; echo __TW_END__; sleep 30", (char *)U };
+    const char *p;
+    int n = 0;
+    snprintf(line, cap, "(no output)");
+    if (tw_new(sess, cols, rows, NULL, cmd, 4) != 0) { snprintf(line, cap, "(tmux new-session failed)"); return; }
+    if (!tw_wait_text(sess, "__TW_END__", 30000, pane, sizeof pane)) { snprintf(line, cap, "(timed out)"); return; }
+    p = strstr(pane, "cols=");
+    if (!p) return;
+    while (p[n] && p[n] != '\n' && n < cap - 1) n++;
+    snprintf(line, cap, "%.*s", n, p);
+}
+
+/* Same report as the old pty witness: "uni=<100x30 line>|uni-small=<5x2 line>". */
 static int pty_size(char *out, int cap) {
-    char *av[4];
-    int st, pfd[2];
-    pid_t pid;
-    int off = 0;
-    if (pipe(pfd) != 0) return -1;
-    pid = fork();
-    if (pid == 0) {
-        dup2(pfd[1], 1); dup2(pfd[1], 2);
-        close(pfd[0]); close(pfd[1]);
-        av[0] = (char *)"python3";
-        av[1] = (char *)"probes/term_size.py";
-        av[2] = (char *)U;
-        av[3] = NULL;
-        execvp("python3", av);
-        _exit(127);
-    }
-    close(pfd[1]);
-    while (off + 1 < cap) {
-        int k = (int)read(pfd[0], out + off, (size_t)cap - 1 - off);
-        if (k <= 0) break;
-        off += k;
-    }
-    out[off] = 0;
-    close(pfd[0]);
-    waitpid(pid, &st, 0);
-    return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+    char big[256], small[256];
+    if (!tw_open("check")) { snprintf(out, cap, "tmux missing"); return -1; }
+    tty_size_line("big", 100, 30, big, sizeof big);
+    tty_size_line("small", 5, 2, small, sizeof small);
+    tw_close();
+    snprintf(out, cap, "uni=%s|uni-small=%s", big, small);
+    return 0;
 }
 
 static int heavy_slice(const char *name) {

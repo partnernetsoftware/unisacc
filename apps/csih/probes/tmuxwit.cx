@@ -1,0 +1,119 @@
+#pragma unisa module tmuxwit
+/*
+ * tmuxwit.cx — a terminal witness over a private tmux server, for probes
+ * that need a real tty without a pty library. Lower: the two includes are
+ * what the implicit runtime lacks (poll for sleeping, a monotonic clock).
+ *
+ * The server is private (-L csih-TAG-PID) and reads no config (-f /dev/null):
+ * a user config that errors puts the first session in view mode, which then
+ * swallows every key sent to it. tw_close() kills the whole server.
+ */
+#include <poll.h>
+#include <time.h>
+
+static char tw_sock[96];
+
+void tw_sleep_ms(int ms) {
+    poll(NULL, 0, ms);
+}
+
+long tw_now_ms(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+
+/* argv[0] via PATH; stdout+stderr into OUT (NUL-terminated, may be NULL). Exit code, or -1. */
+int tw_run(char **argv, char *out, int cap) {
+    int p[2], st;
+    size_t off = 0;
+    pid_t pid;
+    if (pipe(p) != 0) return -1;
+    pid = fork();
+    if (pid < 0) { close(p[0]); close(p[1]); return -1; }
+    if (pid == 0) {
+        dup2(p[1], 1); dup2(p[1], 2);
+        close(p[0]); close(p[1]);
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+    close(p[1]);
+    for (;;) {
+        char tmp[4096];
+        ssize_t k = read(p[0], tmp, sizeof tmp);
+        if (k <= 0) break;
+        if (out && cap > 1) {
+            size_t take = (size_t)k;
+            if (off + take > (size_t)cap - 1) take = (size_t)cap - 1 - off;
+            memcpy(out + off, tmp, take);
+            off += take;
+        }
+    }
+    if (out && cap > 0) out[off] = 0;
+    close(p[0]);
+    if (waitpid(pid, &st, 0) < 0) return -1;
+    return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+}
+
+/* 1 when tmux is on PATH. */
+int tw_open(const char *tag) {
+    char *av[] = { "tmux", "-V", NULL };
+    snprintf(tw_sock, sizeof tw_sock, "csih-%s-%d", tag, (int)getpid());
+    return tw_run(av, NULL, 0) == 0;
+}
+
+static int tw_tmux(char **args, int n, char *out, int cap) {
+    char *av[48];
+    int i, k = 0;
+    av[k++] = "tmux";
+    av[k++] = "-L";
+    av[k++] = tw_sock;
+    av[k++] = "-f";
+    av[k++] = "/dev/null";
+    for (i = 0; i < n && k < 47; i++) av[k++] = args[i];
+    av[k] = NULL;
+    return tw_run(av, out, cap);
+}
+
+/* A detached COLSxROWS session running CMD (argv form, NCMD words) in CWD. 0 on success. */
+int tw_new(const char *sess, int cols, int rows, const char *cwd, char **cmd, int ncmd) {
+    char *a[48], cs[16], rs[16];
+    int i, k = 0;
+    snprintf(cs, sizeof cs, "%d", cols);
+    snprintf(rs, sizeof rs, "%d", rows);
+    a[k++] = "new-session"; a[k++] = "-d"; a[k++] = "-s"; a[k++] = (char *)sess;
+    a[k++] = "-x"; a[k++] = cs; a[k++] = "-y"; a[k++] = rs;
+    if (cwd && cwd[0]) { a[k++] = "-c"; a[k++] = (char *)cwd; }
+    for (i = 0; i < ncmd && k < 47; i++) a[k++] = cmd[i];
+    return tw_tmux(a, k, NULL, 0);
+}
+
+/* Send K: literal text when LITERAL, else a key name (Enter, Escape, C-c). */
+void tw_keys(const char *sess, const char *k, int literal) {
+    char *a[] = { "send-keys", "-t", (char *)sess, literal ? "-l" : "--", (char *)k };
+    tw_tmux(a, 5, NULL, 0);
+}
+
+/* The pane with its history, wrapped lines joined. 0 on success. */
+int tw_capture(const char *sess, char *out, int cap) {
+    char *a[] = { "capture-pane", "-p", "-J", "-S", "-500", "-t", (char *)sess };
+    int rc = tw_tmux(a, 7, out, cap);
+    if (rc != 0 && cap > 0) out[0] = 0;
+    return rc;
+}
+
+/* 1 once NEEDLE is on the pane within MS; OUT holds the last capture. */
+int tw_wait_text(const char *sess, const char *needle, int ms, char *out, int cap) {
+    long until = tw_now_ms() + ms;
+    for (;;) {
+        tw_capture(sess, out, cap);
+        if (strstr(out, needle)) return 1;
+        if (tw_now_ms() > until) return 0;
+        tw_sleep_ms(50);
+    }
+}
+
+void tw_close(void) {
+    char *a[] = { "kill-server" };
+    tw_tmux(a, 1, NULL, 0);
+}

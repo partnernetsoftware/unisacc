@@ -1,8 +1,9 @@
 #pragma unisa use u_run
 /* CX probe root; lower includes kept */
-/* http_roundtrip.c — csih net.c GET against a local python http.server.
- *   unisacc probes/http_roundtrip.c probes/u_run.c
- * python only serves the file. The client under test is unisacc. No gcc.
+/* http_roundtrip.cx — csih net.c GET against a local file server.
+ *   unisacc probes/http_roundtrip.cx
+ * A forked child of this probe serves the one file (serve_file); the client
+ * under test is unisacc's net_cli. No gcc, no python.
  */
 #include "../../../include/unisa_safedel.h"   /* the one deletion guard (commissar ruling 2026-10-23); first: its feature macro */
 #include <arpa/inet.h>
@@ -34,6 +35,45 @@ static int wait_port(int port) {
     return -1;
 }
 
+/* Child: answer every request on 127.0.0.1:PORT with 200 and the bytes of
+ * PATH, until killed. The request is read up to the blank line and ignored:
+ * there is one file, and the probe checks the client, not routing. */
+static void serve_file(int port, const char *path) {
+    static char body[4096], req[8192];
+    char head[160];
+    struct sockaddr_in a;
+    int s, one = 1, n = 0;
+    FILE *f = fopen(path, "rb");
+    if (f) { n = (int)fread(body, 1, sizeof body, f); fclose(f); }
+    s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) _exit(1);
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_port = htons((unsigned short)port);
+    a.sin_addr.s_addr = htonl(0x7f000001);
+    if (bind(s, (struct sockaddr *)&a, sizeof a) != 0 || listen(s, 4) != 0) _exit(1);
+    for (;;) {
+        int c = accept(s, NULL, NULL), have = 0, hl;
+        ssize_t k;
+        if (c < 0) continue;
+        while (have < (int)sizeof req - 1 && (k = read(c, req + have, sizeof req - 1 - have)) > 0) {
+            have += (int)k;
+            req[have] = 0;
+            if (strstr(req, "\r\n\r\n")) break;
+        }
+        /* wait_port connects and closes without a request: answer nothing.
+         * send(MSG_NOSIGNAL), not write: unisacc's signal() cannot ignore
+         * SIGPIPE, and a write to a closed peer would kill this server. */
+        if (have > 0) {
+            hl = snprintf(head, sizeof head,
+                          "HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n", n);
+            if (send(c, head, (size_t)hl, MSG_NOSIGNAL) == hl && n > 0) send(c, body, (size_t)n, MSG_NOSIGNAL);
+        }
+        close(c);
+    }
+}
+
 /* P (a tree) through the one guard, never a raw unlink/rmdir; a refusal is reported, the probe's verdict stands */
 static void sd_gone(const char *p) {
     char why[600];
@@ -42,7 +82,7 @@ static void sd_gone(const char *p) {
 int main(void) {
     const char *u = getenv("UNISACC");
     char dir[1024], www[1100], idx[1200], port[16], url[80], out[2048];
-    char *pav[10], *args[4];
+    char *args[6];
     int rc, st;
     pid_t pid;
     FILE *f;
@@ -55,13 +95,7 @@ int main(void) {
     fputs("hello from cdsh\n", f); fclose(f);
     snprintf(port, sizeof port, "18937");
     pid = fork();
-    if (pid == 0) {
-        pav[0] = (char *)"python3"; pav[1] = (char *)"-m"; pav[2] = (char *)"http.server";
-        pav[3] = port; pav[4] = (char *)"--bind"; pav[5] = (char *)"127.0.0.1";
-        pav[6] = (char *)"--directory"; pav[7] = www; pav[8] = NULL;
-        execvp("python3", pav);
-        _exit(127);
-    }
+    if (pid == 0) serve_file(atoi(port), idx);
     if (wait_port(18937) != 0) { u_stop(pid); printf("  FAIL  server did not listen\n"); return 1; }
     snprintf(url, sizeof url, "http://127.0.0.1:18937/index.txt");
     args[0] = (char *)"-run"; args[1] = (char *)"net_cli.cx";
