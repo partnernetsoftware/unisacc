@@ -308,3 +308,7 @@
 - release/macosbundle.py
 - release/tools/apple-sign.sh
 - release/tools/release_prep.sh
+- release/tools/commitgate.sh
+- release/tools/derivedcheck.py
+- release/tools/hooks/pre-commit
+- release/tools/install_hooks.sh
