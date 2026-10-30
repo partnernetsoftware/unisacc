@@ -1,0 +1,40 @@
+#pragma unisa use mem.grow
+#pragma unisa use mem.heap
+/* practice-grow.cx: a practice suite that drives mg_buf at its boundaries
+   (large growth, move invalidation, take hand-off).  It is a real consumer of
+   mem.grow beyond its own check, and it surfaces interface defects when they
+   appear.  usage: sh ./unisacc.com tools/practice-grow.cx */
+static int bad;
+static void ok(int c, const char *n) { printf("%s\t%s\n", c ? "PASS" : "FAIL", n); if (!c) bad = 1; }
+int main(void) {
+    {
+        /* large growth stays O(N) and the boundary byte reads back */
+        mg_buf g; long i;
+        mg_init(&g);
+        for (i = 0; i < 100000; i++) if (mg_push(&g, (i & 255))) bad = 1;
+        ok(g.len == 100000, "grow-large");
+        ok(g.data[0] == 0 && g.data[99999] == (99999 & 255), "grow-large-content");
+        mg_free(&g);
+        ok(g.data == 0 && g.len == 0, "grow-large-freed");
+    }
+    {
+        /* move invalidates the source: a later free of the source is a no-op */
+        mg_buf a, b;
+        mg_init(&a); mg_init(&b);
+        mg_append(&a, "xyz", 3);
+        ok(mg_move(&b, &a) == 0 && b.len == 3 && a.data == 0, "move-invalidates-source");
+        mg_free(&a);
+        mg_free(&b);
+    }
+    {
+        /* take hands the block out: the caller becomes the sole owner */
+        mg_buf t; unsigned char *p; long n, c;
+        mg_init(&t);
+        mg_append(&t, "abc", 3);
+        ok(mg_take(&t, &p, &n, &c) == 0 && n == 3 && p[0] == 'a' && p[2] == 'c', "take-hands-out");
+        ok(t.data == 0 && t.len == 0, "take-zeros-buffer");
+        mm_free(p);
+    }
+    printf("PRACTICE_GROW\tfailed=%d\n", bad);
+    return bad;
+}
