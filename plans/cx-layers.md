@@ -283,12 +283,15 @@ feedback 反复指出「内存安全未触及更广的 Rust 式所有权/借用�
 3. **坑三，errno 每编译单元一份**：跨模块错误码只能走返回值。见 plans/errno-per-unit-2026-10-30.md。本目标的 cx/sys 接口全部显式返回 -errno，不依赖 errno 跨模块，遵守此约定。
 
 
-## 产品重编后的收敛清单（modid 候选已实测可用，等 grk install）
+## 收敛阻塞更正：cli.cx 是 closure-once，不是软链归一（grk 2026-10-30）
 
-out/grk-modid/candidate 已实测修好软链归一（含 sy_realpath，use mem.grow + use text.build 不再报 defined twice）。grk install/promote 成已装产品后，以下项可立即落地：
+grk 澄清：cli.cx 收敛 use text.text 的真正阻塞不是软链归一，而是 **closure-once**（plans/closure-once-2026-10-30.md）：`-c -funit` 把 use 闭包的函数体编进每只对象，符号是全局的。drive.o 已经 use text.text（tx_eqz 在 drive.o），cli.o 再 use text.text 会再带一份 tx_eqz，33 只对象链接重复符号。sy_realpath 只折叠软链，不去掉两只对象里的同一份函数。所以 cli.cx 用模块内 static cxc_eqz/cxc_prefixz 是**当前正确设计**，不是「未收敛」。等 closure-once（每模块只进一只对象）解决后，再统一收敛 use text.text。cx/driver/text 软链已删（它会让已装产品把同一模块算两次）。
 
 1. cli.cx 收敛 use text.text：删 enum CXC_ZCAP + cxc_eqz + cxc_prefixz 三个 static 段，加 use text.text，cxc_eqz->tx_eqz（55 处）、cxc_prefixz->tx_prefixz（3 处）。cx/driver/text 软链已就位（grk 加的）。验收 check-driver-cli -> CXC failed=0。
 2. practice-vec.cx 转正：从 expected-FAIL 改成通过的实践套件，注释去 expected-FAIL 说明。
 3. csv2tsv 可改用 mem.grow：产品重编后可改成 mem.grow 读 buffer + slice 借用，展示完整 mem 库链路。
 
-这三项都因已装产品缺 sy_realpath 被阻塞，modid 候选已解除，等 grk install 即可执行。不是死胡同，是有明确解除路径的待办。
+1. practice-vec.cx 转正：软链归一已在 modid 候选上跑绿，但已装产品未带。转正要等 closure-once + 下一次正式候选。
+2. cli.cx 收敛 use text.text：被 closure-once 阻塞（见上），不是软链归一。
+3. csv2tsv 可改用 mem.grow：同受 closure-once 约束（use mem.grow 的模块只进一只对象）。
+这三项的解除路径是 closure-once（每模块只进一只对象的架构改造），是 grk 的慢车道。当前 static 方案（cli.cx 的 cxc_eqz）是正确的过渡，不是缺陷。
