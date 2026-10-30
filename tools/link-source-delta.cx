@@ -1,6 +1,7 @@
 /* Finite link-fix applicability observation; never an admission or test PASS. */
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.kernelsha
+#pragma unisa use text.text
 static char oldroot[4096],newroot[4096];static int files,dirs,links,delta;static np_buf record;
 static void die(const char *s,const char *p){fprintf(stderr,"link-source-delta: REFUSE %s path=%s errno=%d\n",s,p,errno);exit(2);}
 static void path(char *p,const char *a,const char *b){int n=snprintf(p,4400,"%s/%s",a,b);if(n<0||n>=4400)die("path-bound",b);}
@@ -8,7 +9,7 @@ static void hash(const void *p,size_t n,char h[65]){if(ks_sha256_hex(p,n,h))die(
 static char *readfile(const char *p,size_t *n){struct stat st;if(lstat(p,&st)||!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>268435456)die("regular-file",p);char *s=cx_read(p,n);if(!s||*n!=(size_t)st.st_size)die("read-size",p);return s;}
 static int order(const void *a,const void *b){return strcmp(*(char *const *)a,*(char *const *)b);}
 static char **entries(const char *p,int *count){DIR *d=opendir(p);if(!d)die("directory",p);char **v=calloc(16384,sizeof *v);if(!v)die("allocation",p);*count=0;
- for(;;){errno=0;struct dirent *e=readdir(d);if(!e){if(errno)die("readdir",p);break;}if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;if(*count==16384||strpbrk(e->d_name,"\r\n\t"))die("entry-bound",p);v[*count]=strdup(e->d_name);if(!v[(*count)++])die("allocation",p);}
+ for(;;){errno=0;struct dirent *e=readdir(d);if(!e){if(errno)die("readdir",p);break;}if(tx_eq(e->d_name, ".", 1L << 20)||tx_eq(e->d_name, "..", 1L << 20))continue;if(*count==16384||strpbrk(e->d_name,"\r\n\t"))die("entry-bound",p);v[*count]=strdup(e->d_name);if(!v[(*count)++])die("allocation",p);}
  if(closedir(d))die("closedir",p);qsort(v,(size_t)*count,sizeof *v,order);return v;
 }
 static void walk(const char *rel,int depth){
@@ -20,12 +21,12 @@ static void walk(const char *rel,int depth){
  }
  if(S_ISLNK(sa.st_mode)){char x[4400],y[4400];ssize_t nx=readlink(a,x,sizeof x),ny=readlink(b,y,sizeof y);if(nx<0||ny<0||nx>=sizeof x||ny>=sizeof y||nx!=ny||memcmp(x,y,(size_t)nx))die("literal-symlink-mismatch",rel);hash(x,(size_t)nx,ha);{ if (cx_fmt(hb, sizeof hb, "%s",ha)) { fprintf(stderr, "link-source-delta: text too long for hb\n"); exit(2); } }links++;}
  else if(S_ISREG(sa.st_mode)){size_t an,bn;char *x=readfile(a,&an),*y=readfile(b,&bn);hash(x,an,ha);hash(y,bn,hb);
-  if(!strcmp(rel,"src/tapelink.c")){if(strcmp(ha,"b9af154fed85f68a58f3a64de866665c4a64df836842da93cfeb7f3d9d574fc0")||strcmp(hb,"16925f6467ed351302a1854023d670f75412b72d90f09a19c3ca5c46d2b13ea4"))die("unapproved-link-source-pair",rel);delta++;}
+  if(tx_eq(rel, "src/tapelink.c", 1L << 20)){if(strcmp(ha,"b9af154fed85f68a58f3a64de866665c4a64df836842da93cfeb7f3d9d574fc0")||strcmp(hb,"16925f6467ed351302a1854023d670f75412b72d90f09a19c3ca5c46d2b13ea4"))die("unapproved-link-source-pair",rel);delta++;}
   else if(an!=bn||memcmp(x,y,an))die("unexpected-content-delta",rel);free(x);free(y);files++;
  }else die("special-file",rel);
  np_puts(&record,"\t");np_puts(&record,ha);np_puts(&record,"\t");np_puts(&record,hb);np_puts(&record,"\n");
 }
-int main(int argc,char **argv){if(argc!=3||!realpath(argv[1],oldroot)||!realpath(argv[2],newroot)||!strcmp(oldroot,newroot))die("usage DISTINCT_ORIGIN_ROOT CURRENT_ROOT","-");
+int main(int argc,char **argv){if(argc!=3||!realpath(argv[1],oldroot)||!realpath(argv[2],newroot)||tx_eq(oldroot, newroot, 1L << 20))die("usage DISTINCT_ORIGIN_ROOT CURRENT_ROOT","-");
  const char *trees[]={"src","exec","unisa","include","weights","kernel","seed","iterate/kernel"};
  np_puts(&record,"link-source-delta-v1\n");for(int i=0;i<8;i++)walk(trees[i],0);if(delta!=1)die("exactly-one-pinned-delta-required","src/tapelink.c");char h[65];hash(record.p,record.n,h);free(record.p);
  printf("LINK_SOURCE_DELTA\tfiles=%d\tdirectories=%d\tliteral-symlinks=%d\tapproved-deltas=%d\twitness=%s\n",files,dirs,links,delta,h);

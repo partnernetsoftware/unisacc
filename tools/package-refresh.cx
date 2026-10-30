@@ -9,6 +9,7 @@
  * Full source identity is recorded separately; this tool grants no test PASS.
  */
 #pragma unisa use cxlib.netpack
+#pragma unisa use text.text
 static const char *baseline_sha="7f709378fa84a36edac2fcf1c36a62a13d45c26d34e57f1f7b50af74b2de4d1a";
 static char root[4096],oldroot[4096],work[4096];
 static np_buf closure={0};static int checked,core_guarded;static char core_current[65],compat_helper[65];
@@ -16,22 +17,22 @@ static void die(const char *s){fprintf(stderr,"package-refresh: REFUSE %s\n",s);
 static void path(char *p,size_t cap,const char *a,const char *b){int k=snprintf(p,cap,"%s/%s",a,b);if(k<0||(size_t)k>=cap)die("path bound");}
 static char *load(const char *p,size_t *n){struct stat s;size_t z;if(lstat(p,&s)||!S_ISREG(s.st_mode)||s.st_size<0||s.st_size>268435456)die(p);char *b=cx_read(p,&z);if(!b||z!=(size_t)s.st_size)die("read/size changed");*n=z;return b;}
 static void saved(const char *name,const char *b,size_t n){char p[4400];path(p,sizeof p,work,name);int f=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0600);if(f<0)die("exclusive output");while(n){ssize_t k=write(f,b,n);if(k<0&&errno==EINTR)continue;if(k<=0)die("write; partial retained");b+=k;n-=(size_t)k;}if(fsync(f)||close(f))die("fsync/close");}
-static int suffix(const char *p,const char *s){size_t n=strlen(p),k=strlen(s);return n>=k&&!strcmp(p+n-k,s);}
+static int suffix(const char *p,const char *s){size_t n=strlen(p),k=strlen(s);return n>=k&&tx_eq(p+n-k, s, 1L << 20);}
 static int source(const char *p){
  if(!strncmp(p,"exec/",5)){
   if(!strncmp(p,"exec/c/",7)||!strncmp(p,"exec/pipeline/",14))return 0;
   if(!strncmp(p,"exec/build/",11))return !strchr(p+11,'/')&&suffix(p,".py");
   return suffix(p,".tsv")||suffix(p,".json")||(suffix(p,".py")&&!suffix(p,"check.py"));
  }
- if(!strncmp(p,"seed/",5)){const char *s=p+5;return !strcmp(s,"gen.c")||!strcmp(s,"facts.h")||!strcmp(s,"json.h")||!strcmp(s,"tbl.c")||!strcmp(s,"net.c")||!strcmp(s,"compilerpack.c")||!strcmp(s,"pack.c");}
+ if(!strncmp(p,"seed/",5)){const char *s=p+5;return tx_eq(s, "gen.c", 1L << 20)||tx_eq(s, "facts.h", 1L << 20)||tx_eq(s, "json.h", 1L << 20)||tx_eq(s, "tbl.c", 1L << 20)||tx_eq(s, "net.c", 1L << 20)||tx_eq(s, "compilerpack.c", 1L << 20)||tx_eq(s, "pack.c", 1L << 20);}
  return suffix(p,".py")||suffix(p,".c")||suffix(p,".h")||suffix(p,".inc")||suffix(p,".tsv")||suffix(p,".json");
 }
-static void equal_file(const char *relative,int append){char a[4400],b[4400],h[65];size_t an,bn;path(a,sizeof a,root,relative);path(b,sizeof b,oldroot,relative);char *av=load(a,&an),*bv=load(b,&bn);if(!strcmp(relative,"exec/c/core.c")){int old=cc_kind(bv,bn),now=cc_kind(av,an);if(old!=0||now<0)die("core-source-compat-unapproved");core_guarded=now;cx_sha256_hex(av,an,core_current);}else if(an!=bn||memcmp(av,bv,an))die(relative);if(append){cx_sha256_hex(av,an,h);np_puts(&closure,relative);np_puts(&closure,"\t");np_puts(&closure,h);np_puts(&closure,"\n");checked++;}free(av);free(bv);}
+static void equal_file(const char *relative,int append){char a[4400],b[4400],h[65];size_t an,bn;path(a,sizeof a,root,relative);path(b,sizeof b,oldroot,relative);char *av=load(a,&an),*bv=load(b,&bn);if(tx_eq(relative, "exec/c/core.c", 1L << 20)){int old=cc_kind(bv,bn),now=cc_kind(av,an);if(old!=0||now<0)die("core-source-compat-unapproved");core_guarded=now;cx_sha256_hex(av,an,core_current);}else if(an!=bn||memcmp(av,bv,an))die(relative);if(append){cx_sha256_hex(av,an,h);np_puts(&closure,relative);np_puts(&closure,"\t");np_puts(&closure,h);np_puts(&closure,"\n");checked++;}free(av);free(bv);}
 /* Compare both directory sets. A new or removed constructor input is refused.
  * Symlinks are excluded only where the selector excludes their suffix, e.g.
  * migrated CX test helpers; selected constructor symlinks are refused by load.
  */
-static void walk(const char *relative,int reverse){char p[4400],sub[4400];struct stat st;if(!strcmp(relative,"exec/c")||!strcmp(relative,"exec/pipeline"))return;path(p,sizeof p,reverse?oldroot:root,relative);if(lstat(p,&st))die(p);if(!strncmp(relative,"exec/build/",11)&&(S_ISDIR(st.st_mode)||!source(relative)))return;if(S_ISDIR(st.st_mode)){DIR *d=opendir(p);struct dirent *e;if(!d)die(p);while((e=readdir(d))){if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;path(sub,sizeof sub,relative,e->d_name);walk(sub,reverse);}if(closedir(d))die("closedir");}else if(source(relative))equal_file(relative,!reverse);}
+static void walk(const char *relative,int reverse){char p[4400],sub[4400];struct stat st;if(tx_eq(relative, "exec/c", 1L << 20)||tx_eq(relative, "exec/pipeline", 1L << 20))return;path(p,sizeof p,reverse?oldroot:root,relative);if(lstat(p,&st))die(p);if(!strncmp(relative,"exec/build/",11)&&(S_ISDIR(st.st_mode)||!source(relative)))return;if(S_ISDIR(st.st_mode)){DIR *d=opendir(p);struct dirent *e;if(!d)die(p);while((e=readdir(d))){if(tx_eq(e->d_name, ".", 1L << 20)||tx_eq(e->d_name, "..", 1L << 20))continue;path(sub,sizeof sub,relative,e->d_name);walk(sub,reverse);}if(closedir(d))die("closedir");}else if(source(relative))equal_file(relative,!reverse);}
 static void compare_sources(void){int i;const char *dirs[]={"exec","kernel","weights","include","seed","iterate/kernel"};for(i=0;i<6;i++)walk(dirs[i],0);for(i=0;i<6;i++)walk(dirs[i],1);equal_file("exec/c/core.h",1);equal_file("exec/c/core.c",1);}
 typedef struct {const char *p;size_t n,at;} Reader;
 static int line(Reader *r,char words[8][256]){size_t k=0;int n=0;if(r->at>=r->n)die("missing header");for(;;){if(r->at==r->n)die("truncated header");unsigned char c=r->p[r->at++];if(c=='\n'||c==' '){if(!k)die("empty header word");words[n++][k]=0;k=0;if(c=='\n')return n;if(n==8)die("header fields");}else{if(c<33||c>126||k==255)die("header word");words[n][k++]=(char)c;}}}

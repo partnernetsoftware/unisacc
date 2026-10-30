@@ -15,6 +15,7 @@
  * mechanically is ORACLE_MISSING, counted and never PASS. Output: ABS_OUT/cases/OP.{a,b}.tape|.out|.want,
  * ABS_OUT/results-FIRST-COUNT.tsv and a SUMMARY line. */
 #pragma unisa use cxlib.netpack
+#pragma unisa use text.text
 
 static char root[4096], stream4[4096], outdir[4096], inc[4400], bound[4400], cases[4400];
 static void die(const char *s) { fprintf(stderr, "opinfo-cases: REFUSE %s errno=%d\n", s, errno); exit(2); }
@@ -26,7 +27,7 @@ enum { PEEP_MAX = 2048 };
 static char peep_k[PEEP_MAX][96], peep_y[PEEP_MAX][24]; static int npeep;
 static const char *peep(const char *a, const char *b, const char *rel) {
     char k[96]; { if (cx_fmt(k, sizeof k, "%s\t%s\t%s", a, b, rel)) { fprintf(stderr, "opinfo-cases-gen: text too long for k\n"); exit(2); } }
-    for (int i = 0; i < npeep; i++) if (!strcmp(peep_k[i], k)) return peep_y[i];
+    for (int i = 0; i < npeep; i++) if (tx_eq(peep_k[i], k, 1L << 20)) return peep_y[i];
     die("peep key missing"); return 0;
 }
 static void load_peep(void) {
@@ -67,7 +68,7 @@ static const Form forms[] = {
     { "fsqrt64", "  fsqrt64 r2, r1\n", 1 }, { "fsqrt32", "  fsqrt32 r2, r1\n", 1 },
     { "other", "  .unknownop r2, r1\n", 1 },
 };
-static const Form *form(const char *op) { for (size_t i = 0; i < sizeof forms / sizeof *forms; i++) if (!strcmp(forms[i].op, op)) return &forms[i]; die("op without a form"); return 0; }
+static const Form *form(const char *op) { for (size_t i = 0; i < sizeof forms / sizeof *forms; i++) if (tx_eq(forms[i].op, op, 1L << 20)) return &forms[i]; die("op without a form"); return 0; }
 
 #define APP(dst, ...) do { size_t _l = strlen(dst); int _n = snprintf(dst + _l, sizeof dst - _l, __VA_ARGS__); if (_n < 0 || (size_t)_n >= sizeof dst - _l) die("case text bound"); } while (0)
 
@@ -101,15 +102,15 @@ int main(int argc, char **argv) {
         /* A test */
         char in[1024] = "", want[1024] = "", key[96]; { if (cx_fmt(key, sizeof key, "%02d.%s.a", k, op)) { fprintf(stderr, "opinfo-cases-gen: text too long for key\n"); exit(2); } }
         const char *rel = (simple && f->writes) ? "a_dead" : "none"; const char *y = peep(acls, "add64", rel);
-        int far = !strcmp(op, "jump") || !strcmp(op, "jumpz") || !strcmp(op, "call");
-        int is_ret = !strcmp(op, "ret");
+        int far = tx_eq(op, "jump", 1L << 20) || tx_eq(op, "jumpz", 1L << 20) || tx_eq(op, "call", 1L << 20);
+        int is_ret = tx_eq(op, "ret", 1L << 20);
         APP(in, "_start:\n%s", f->line);
         if (!is_ret) APP(in, "  add64 r0, r1, r3\n  ret\n");
         if (far) APP(in, "L1:\n  imm r0, 3\n  ret\n");
-        if (!strcmp(op, ".lea")) APP(in, "  .bss g 8\n");
+        if (tx_eq(op, ".lea", 1L << 20)) APP(in, "  .bss g 8\n");
         char note[64]; { if (cx_fmt(note, sizeof note, "simple=%d acls=%s rel=%s y=%s", simple, acls, rel, y)) { fprintf(stderr, "opinfo-cases-gen: text too long for note\n"); exit(2); } }
-        if (!strcmp(y, "keep")) { { if (cx_fmt(want, sizeof want, "%s", in)) { fprintf(stderr, "opinfo-cases-gen: text too long for want\n"); exit(2); } } }
-        else if (!strcmp(y, "drop_a")) { APP(want, "_start:\n  add64 r0, r1, r3\n  ret\n"); if (far) APP(want, "L1:\n  imm r0, 3\n  ret\n"); }
+        if (tx_eq(y, "keep", 1L << 20)) { { if (cx_fmt(want, sizeof want, "%s", in)) { fprintf(stderr, "opinfo-cases-gen: text too long for want\n"); exit(2); } } }
+        else if (tx_eq(y, "drop_a", 1L << 20)) { APP(want, "_start:\n  add64 r0, r1, r3\n  ret\n"); if (far) APP(want, "L1:\n  imm r0, 3\n  ret\n"); }
         else { nmiss++; fprintf(res, "ORACLE_MISSING\t%s\t%s\n", key, note); goto btest; }
         { int r = run_case(key, in, want, res, note); if (r == 0) npass++; else if (r == 1) nfail++; else nnotrun++; }
     btest:
@@ -118,8 +119,8 @@ int main(int argc, char **argv) {
         in[0] = want[0] = 0; y = peep("imm", bcls, "const0");
         APP(in, "_start:\n  imm r2, 0\n  %s r0, r1, r2\n  ret\n", op);
         { if (cx_fmt(note, sizeof note, "bcls=%s rel=const0 y=%s", bcls, y)) { fprintf(stderr, "opinfo-cases-gen: text too long for note\n"); exit(2); } }
-        if (!strcmp(y, "keep")) { if (cx_fmt(want, sizeof want, "%s", in)) { fprintf(stderr, "opinfo-cases-gen: text too long for want\n"); exit(2); } }
-        else if (!strcmp(y, "to_mov")) APP(want, "_start:\n  mov r0, r1\n  ret\n");
+        if (tx_eq(y, "keep", 1L << 20)) { if (cx_fmt(want, sizeof want, "%s", in)) { fprintf(stderr, "opinfo-cases-gen: text too long for want\n"); exit(2); } }
+        else if (tx_eq(y, "to_mov", 1L << 20)) APP(want, "_start:\n  mov r0, r1\n  ret\n");
         else { nmiss++; fprintf(res, "ORACLE_MISSING\t%s\t%s\n", key, note); continue; }
         { int r = run_case(key, in, want, res, note); if (r == 0) npass++; else if (r == 1) nfail++; else nnotrun++; }
     }

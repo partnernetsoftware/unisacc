@@ -20,6 +20,7 @@
  * the same observations as tools/properties-cases-gen.cx det/meta and are not repeated here.
  * Programs are UB-free C99 (no signed overflow, no shifts of negative values beyond implementation-defined >>). */
 #pragma unisa use cxlib.netpack
+#pragma unisa use text.text
 
 static char root[4096], outdir[4096], work[4200], bound[4400], product[4400], ref[4096];
 static FILE *res; static int npass, nfail, nvac, nnotrun;
@@ -28,7 +29,7 @@ static void path(char *p, size_t cap, const char *a, const char *b) { int n = sn
 static void saved(const char *p, const char *s, size_t n) { int f = open(p, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600); if (f < 0) die("exclusive create"); while (n) { ssize_t k = write(f, s, n); if (k <= 0) die("write"); s += k; n -= (size_t)k; } if (close(f)) die("close"); }
 static int shafile(const char *p, char h[65]) { size_t n; char *s = cx_read(p, &n); if (!s) { if (errno != ENOENT) die("read for digest"); return 0; } cx_sha256_hex(s, n, h); free(s); return 1; }
 static int same_file(const char *a, const char *b) { size_t na, nb; char *x = cx_read(a, &na), *y = cx_read(b, &nb); int ok = x && y && na == nb && !memcmp(x, y, na); free(x); free(y); return ok; }
-static void row(const char *state, const char *cell, const char *label, const char *detail) { fprintf(res, "%s\t%s\t%s\t%s\n", state, cell, label, detail); if (!strcmp(state, "PASS")) npass++; else if (!strcmp(state, "FAIL")) nfail++; else if (!strcmp(state, "VACUOUS")) nvac++; else if (!strcmp(state, "NOT_RUN")) nnotrun++; }
+static void row(const char *state, const char *cell, const char *label, const char *detail) { fprintf(res, "%s\t%s\t%s\t%s\n", state, cell, label, detail); if (tx_eq(state, "PASS", 1L << 20)) npass++; else if (tx_eq(state, "FAIL", 1L << 20)) nfail++; else if (tx_eq(state, "VACUOUS", 1L << 20)) nvac++; else if (tx_eq(state, "NOT_RUN", 1L << 20)) nnotrun++; }
 static void check(int ok, const char *cell, const char *label, const char *detail) { row(ok ? "PASS" : "FAIL", cell, label, detail); }
 static int run(char *const argv[], int secs, np_result *r) { char why[1024]; char *v[64]; int n = 0; v[n++] = bound; char s[16]; { if (cx_fmt(s, sizeof s, "%d", secs)) { fprintf(stderr, "opt-corpus-gen: text too long for s\n"); exit(2); } } v[n++] = s; for (int i = 0; argv[i]; i++) { if (n >= 62) die("argv bound"); v[n++] = argv[i]; } v[n] = 0; char *env[] = { 0 }; return np_run(v, root, env, secs + 2, r, why, sizeof why); }
 static const char *targets[6] = { "lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64" };
@@ -83,7 +84,7 @@ static void sources(const Prog *p, char *a, size_t ac, char *b, size_t bc) {
     if (p->src2) { snprintf(b, bc, "%s/%s-b.c", work, p->name); saved(b, p->src2, strlen(p->src2)); }
 }
 static int compile_with(const char *tool, const char *a, const char *b, const char *flag, const char *target, const char *out, np_result *r) {
-    char *v[16]; int n = 0; if (!strcmp(tool, "product")) { v[n++] = "sh"; v[n++] = product; } else v[n++] = (char *)tool;
+    char *v[16]; int n = 0; if (tx_eq(tool, "product", 1L << 20)) { v[n++] = "sh"; v[n++] = product; } else v[n++] = (char *)tool;
     v[n++] = (char *)a; if (b[0]) v[n++] = (char *)b; if (flag) v[n++] = (char *)flag;
     if (target) { v[n++] = "-b"; v[n++] = (char *)target; } else v[n++] = "-S";
     v[n++] = "-o"; v[n++] = (char *)out; v[n] = 0; return run(v, 20, r);
@@ -195,7 +196,7 @@ static void group_ccdiff(const Prog *tbl, int count) {
 
 int main(int argc, char **argv) {
     if ((argc != 4 && argc != 5) || !realpath(argv[1], root) || argv[2][0] != '/' || (argc == 5 && !realpath(argv[4], ref))) { fputs("usage: ROOT ABS_OUT corpus-0..corpus-9|closure|cli [REF] | ccdiff|ccdiff-2|ccdiff-3|ccdiff-4 HOST_CC\n", stderr); return 2; }
-    const char *group = argv[3]; int gp = -1, gl = !strcmp(group, "closure"), gi = !strcmp(group, "cli"), gc = !strcmp(group, "ccdiff"), gc2 = !strcmp(group, "ccdiff-2"), gc3 = !strcmp(group, "ccdiff-3"), gc4 = !strcmp(group, "ccdiff-4");
+    const char *group = argv[3]; int gp = -1, gl = tx_eq(group, "closure", 1L << 20), gi = tx_eq(group, "cli", 1L << 20), gc = tx_eq(group, "ccdiff", 1L << 20), gc2 = tx_eq(group, "ccdiff-2", 1L << 20), gc3 = tx_eq(group, "ccdiff-3", 1L << 20), gc4 = tx_eq(group, "ccdiff-4", 1L << 20);
     if (!strncmp(group, "corpus-", 7) && group[7] >= '0' && group[7] < '0' + NPROG && !group[8]) gp = group[7] - '0';
     if (gp < 0 && !gl && !gi && !gc && !gc2 && !gc3 && !gc4) die("group");
     { if (cx_fmt(outdir, sizeof outdir, "%s", argv[2])) { fprintf(stderr, "opt-corpus-gen: text too long for outdir\n"); exit(2); } } if (mkdir(outdir, 0700) && errno != EEXIST) die("out dir"); path(work, sizeof work, outdir, group); if (mkdir(work, 0700)) die("group dir must be absent");

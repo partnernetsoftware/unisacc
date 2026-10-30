@@ -6,6 +6,7 @@
 #pragma unisa use cxlib.kernelcontext
 #pragma unisa use cxlib.rebuildcontext
 #pragma unisa use cxlib.mixedprofiles
+#pragma unisa use text.text
 static void die(const char *s){fprintf(stderr,"candidate-install: REFUSE %s\n",s);exit(2);}
 static void path(char *p,size_t cap,const char *a,const char *b){int n=snprintf(p,cap,"%s/%s",a,b);if(n<0||(size_t)n>=cap)die("path");}
 static char *load(const char *p,size_t *n){struct stat st;if(lstat(p,&st)||!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>268435456)die(p);char *s=cx_read(p,n);if(!s||*n!=(size_t)st.st_size)die("read/size changed");return s;}
@@ -55,15 +56,15 @@ static int finish_prepared(int argc,char **argv){
  /* A frozen root may itself be the immutable package bootstrap. Verify the
   * identical final admission without overwriting it; promotion consumes the
   * staged bytes and this distinct receipt, never a fabricated install. */
- if(!strcmp(argv[1],"verify-prepared")){printf("VERIFIED\tstaged-development-candidate\tno-release-qualification\nartifact\t%s\nsource\t%s\nprevious\t%s\n",admitted.product,admitted.source,admitted.root_product);return 0;}
+ if(tx_eq(argv[1], "verify-prepared", 1L << 20)){printf("VERIFIED\tstaged-development-candidate\tno-release-qualification\nartifact\t%s\nsource\t%s\nprevious\t%s\n",admitted.product,admitted.source,admitted.root_product);return 0;}
  path(target,sizeof target,root,"unisacc.com");path(targetrecord,sizeof targetrecord,root,"unisacc.com.build.json");
  if(rename(next,target))die("replace product");if(rename(nextrecord,targetrecord))die("product replaced but provenance rename failed; backup retained");
  int fd=open(root,O_RDONLY|O_DIRECTORY|O_CLOEXEC);if(fd<0||fsync(fd)||close(fd))die("directory fsync");
  printf("INSTALLED\tdevelopment-only\tno-release-qualification\nartifact\t%s\nsource\t%s\nprevious\t%s\n",admitted.product,admitted.source,admitted.root_product);return 0;
 }
 int main(int argc,char **argv){
- if(argc==6&&(!strcmp(argv[1],"finish")||!strcmp(argv[1],"verify-prepared")))return finish_prepared(argc,argv);
- int prepare_only=argc==6&&!strcmp(argv[1],"prepare");if(prepare_only){argc--;argv++;}
+ if(argc==6&&(tx_eq(argv[1], "finish", 1L << 20)||tx_eq(argv[1], "verify-prepared", 1L << 20)))return finish_prepared(argc,argv);
+ int prepare_only=argc==6&&tx_eq(argv[1], "prepare", 1L << 20);if(prepare_only){argc--;argv++;}
  if(argc!=5){fputs("usage: ROOT KERNEL_GENERATION CANDIDATE_COM PREPARED_PACKAGE\n",stderr);return 2;}char root[4096],generation[4096],package_file[4096],package_dir[4096],candidate[4096],sha[65],after[65],hash[65],oldhash[65],p[4400],helper[4400],watch[4400],why[1024];if(!realpath(argv[1],root)||!realpath(argv[2],generation)||!realpath(argv[3],candidate)||!realpath(argv[4],package_file))die("paths");int mode=package_mode(package_file,package_dir);rb_result admitted={0};{char expected[4400];path(expected,sizeof expected,generation,"unisacc-next.com");if(strcmp(candidate,expected))die("candidate-must-be-generation-unisacc-next-com");admitted=admit_candidate(root,generation,package_dir,mode);}kc_check(root,generation,sha);if(strcmp(sha,admitted.source))die("candidate-initial-source-changed");
  size_t cn,pn,on,rn;char *c=load(candidate,&cn),*pkg=load(package_file,&pn);if(cn<16||memcmp(c+cn-16,"UNIPKG1\n",8)||little(c+cn-8)!=pn||pn>cn-16||memcmp(c+cn-16-pn,pkg,pn))die("candidate/prepared package mismatch");char prepared_hash[65];cx_sha256_hex(pkg,pn,prepared_hash);free(pkg);cx_sha256_hex(c,cn,hash);if(strcmp(hash,admitted.product)||strcmp(prepared_hash,admitted.package))die("candidate-loaded-material-differs-from-admission");
  path(helper,sizeof helper,generation,"identity-helper");path(watch,sizeof watch,root,"tools/bound");char *v[]={watch,"15",helper,root,"write",candidate,sha,0};np_result r;if(np_run(v,root,0,20,&r,why,sizeof why))die(why);if(r.rc||r.errn)die("candidate provenance write");np_free(&r);int k=snprintf(p,sizeof p,"%s.build.json",candidate);if(k<0||(size_t)k>=sizeof p)die("record path");char *record=load(p,&rn);
