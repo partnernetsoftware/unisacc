@@ -20,3 +20,26 @@ src/hostnative.cx:8:1: error: #error hostnative_requires_linux_x86_64_or_arm64
 `src/hostnative.cx` 第 7 行要求 `__linux__` 并且是 x86_64 或 aarch64。osx 和 win 不满足，预处理就停了。没有 Mach-O，没有 PE，也就没有可核对的 P3。
 
 结论：以现在这 33 个源，整程序 `-o` 不能在 55 秒内交出 osx 片或 win 片。不是慢，是 e2 拒绝。没有进入后面的阶段，所以没有超时，也没有按源分批的内存和时间可量。单文件 `examples/hello.c` 的 `-o` 仍能出 Mach-O 和 PE，那是上一页的事，不是这 33 个源。
+
+## 去掉 hostnative.cx 再试（2026-10-30，不改源）
+
+`src/hostnative.cx` 还在盘上，没有改，也没有改 `tools/entry-build.cx`。这次命令行不带它，用入口表里另外 32 个源，顺序不变，`tapelink.cx` 仍在最后。构造器仍是上面那只已装产品。外层 `tools/bound 55`。`UNISACC_RR_TIME=1`。`UNISA_CONTAINER` 和 `UNISACC_CONTAINER` 都去掉了。目录 `out/grk-slice-o32`。
+
+| 目标 | 墙钟 | 退出码 | 结果 |
+|---|---|---|---|
+| `-b osx/x86_64 -o out/grk-slice-o32/slice-osx-x86_64` | 36.025 秒 | 0 | 写出文件 |
+| `-b win/x86_64 -o out/grk-slice-o32/slice-win-x86_64` | 11.218 秒 | 1 | 没有文件 |
+
+osx 这只是 Mach-O 64 位 x86_64 可执行文件，0755，1486306 字节，sha256 `382995ac179949a0570fe34cc7ea0b92beaa15420947a5f5ccbb6075d5c547a4`。开头 `cf fa ed fe`，cpu `0x01000007`，filetype 2（MH_EXECUTE）。`file` 的标志是 `NOUNDEFS|DYLDLINK|TWOLEVEL|PIE`。计时里有一段名叫 `elf`，那是 `src/stages.cx` 第 42 行给镜像阶段起的名字，不是文件格式。
+
+这只文件里没有 `UNIPKG1`。尾部 16 字节不是包尾。整文件比已装产品里那段 1636020 字节的包还小，所以没有带上 P3。`-o` 只写了镜像，没有像入口构造那样在后面接包。本机是 Linux，没有跑这只 Mach-O。
+
+win 停在 e3。units 那一段退出码 0，e3 推理退出码 1。标准错误一共 5 条，第一条是：
+
+```
+src/host.cx:265:50: error: unknown identifier
+          fd = open(tmp,  1  |  0x100  |  0x400  | O_CLOEXEC | O_NOFOLLOW, 0755);
+                                                   ^
+```
+
+源文件同一行写的是 `O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW`。前三个已经换成数字，`O_CLOEXEC` 没有。后面四条是 `src/host.cx:622` 的 `O_NONBLOCK`、`src/drive.cx:908` 的 `environ`、`src/sys/mem.cx:63` 和 `:69` 的 `PROT_READ`。没有 PE，没有 P3，没有执行。这一刀不改这些行。
