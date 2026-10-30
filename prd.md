@@ -48,7 +48,7 @@
 | L2 | **Net** | ask 事实网：一张有限表 + 全键穷举 exact | **18**（8770 键）· **10**（3677 键）· **3** | `unisa/gold.py` · `ujs/seed/construct/gold.py` |
 | L3 | **Segment** | 训练合并段（多网合一的 masked 多任务模型） | 3（s1/s2/s3） | `unisa/control/segment.py` |
 | L4 | **Book phase** | 一次推导中 ask 的记账阶段 | 由 contract 声明 | `flownet/contract.cx` 的 `phase` 行 |
-| L5 | **Release phase** | 发布流程阶段 | 10 | `release/tools/stagelog.py` |
+| L5 | **Release phase** | 发布流程阶段 | 10 | `archive/reference-py/release/tools/stagelog.py`（2026-10-30 随发布队列链归档） |
 
 ### 0.2 六条常见误解（逐条对照，不要按直觉读）
 
