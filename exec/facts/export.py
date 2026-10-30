@@ -562,24 +562,7 @@ def lowercode():
 
 
 
-def lowerarmfuse():
-    """ARM immediate fusion: TAPE SHAPE ops eligible under exec/lower/armfuse-shapes.tsv
-    (shape / exclude / read policy), with the operand positions read (was armfuse.py)."""
-    import json
-    sys.path.insert(0, str(ROOT))
-    from unisa.tape import SHAPE
-    pol = [x.split("\t") for x in (ROOT / "exec/lower/armfuse-shapes.tsv").read_text().splitlines() if x and not x.startswith("#")]
-    shapes = {tuple(v.split(",")) for k, v in pol if k == "shape"}
-    excl = {v for k, v in pol if k == "exclude"}
-    reads = {v for k, v in pol if k == "read"}
-    out = ["=none\tjson\t[]"]
-    out += ["@shapes\ti:int\top:str\treads:json\tfirst:json\trest:json"]
-    sel = [(o, sh) for o, sh in SHAPE.items() if sh in shapes and o not in excl]
-    for i, (o, sh) in enumerate(sel):
-        out.append("\t%d\t%s\t%s\t%s\t%s" % (i, _esc(o), json.dumps([j for j, k in enumerate(sh[1:], 1) if k in reads]),
-                                             json.dumps([1] if i == 0 else []), json.dumps([] if i == 0 else [1])))
-    return out
-
+# lower-armfuse moved to tools/facts-gen.cx (facts: exec/facts/tape-shape.tsv) on 2026-10-30.
 
 
 def lowerabi():
@@ -1030,7 +1013,6 @@ TABLES = [
     ("pp-autoinc-gen", ["exec/facts/pp-bytes.tsv", "unisa/libneed.py", "exec/facts/pp-autoinc.tsv", "exec/facts/pp-layout.tsv", "exec/facts/export.py",
                          *sorted(str(p.relative_to(ROOT)) for p in (ROOT / "include").rglob("*.h"))], ppautoinc),
     ("nativeabi", ["exec/nativeabi/rules.tsv", "exec/nativeabi/ordered-result.tsv", "exec/nativeabi/gen-fresh.tsv", "exec/nativeabi/ordered-fresh.tsv", "exec/facts/nativeabi-gen-reject.tsv", "exec/facts/top-modelgraphequality-banks.tsv", "exec/facts/export.py"], nativeabi),
-    ("lower-armfuse", ["unisa/tape.py", "exec/lower/armfuse-shapes.tsv", "exec/facts/export.py"], lowerarmfuse),
     ("lower-abi", ["unisa/catalog.py", "unisa/lower.py", "exec/lower/code-abi-sources.tsv", "weights/gold/abi.tsv", "weights/gold/enc.tsv", "exec/facts/export.py"], lowerabi),
     ("lower-code", ["unisa/tape.py", "unisa/lower.py", "weights/gold/regmap.tsv", "weights/gold/enc.tsv", "weights/gold/reloc.tsv", "unisa/emit_x86.py", "unisa/emit_arm.py", "exec/facts/top-modelbindings-banks.tsv", "exec/facts/top-modelbindings-const.tsv", "exec/facts/export.py"], lowercode),
 ]

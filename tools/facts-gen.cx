@@ -1234,6 +1234,54 @@ static void enc_elf(Ob *o) {
     fc_used_bytes(o);
 }
 
+/* lower-armfuse: TAPE SHAPE ops eligible for ARM immediate fusion (shape / exclude / read policy). */
+static void lower_armfuse(Ob *o) {
+    static char *pk[128], *pv[128], *op[512], *sh[512];
+    int np = 0, ns = 0, i, j, sel = 0;
+    Lines P = fg_lines("exec/lower/armfuse-shapes.tsv"), S = fg_lines("exec/facts/tape-shape.tsv");
+    for (i = 0; i < P.n; i++) {
+        char *cells[4], *line = fg_dupz(P.l[i]);
+        if (!*line || line[0] == '#') continue;
+        if (fg_split(line, cells, 4) != 2 || np == 128) fg_die("bad armfuse-shapes row", P.l[i]);
+        pk[np] = cells[0]; pv[np++] = cells[1];
+    }
+    for (i = 0; i < S.n; i++) {
+        char *cells[4], *line = fg_dupz(S.l[i]);
+        if (!*line || line[0] == '#') continue;
+        if (fg_split(line, cells, 4) != 2 || ns == 512) fg_die("bad tape-shape row", S.l[i]);
+        op[ns] = cells[0]; sh[ns++] = cells[1];
+    }
+    ob_z(o, "=none\tjson\t[]\n@shapes\ti:int\top:str\treads:json\tfirst:json\trest:json\n");
+    for (i = 0; i < ns; i++) {
+        int ok = 0, ex = 0;
+        for (j = 0; j < np; j++) {
+            if (tx_eq(pk[j], "shape", 8) && tx_eq(pv[j], sh[i], FG_CAP)) ok = 1;
+            if (tx_eq(pk[j], "exclude", 8) && tx_eq(pv[j], op[i], FG_CAP)) ex = 1;
+        }
+        if (!ok || ex) continue;
+        ob_z(o, "\t"); ob_int(o, sel); ob_z(o, "\t"); ob_z(o, op[i]); ob_z(o, "\t[");
+        {   /* 1-based operand positions after the first whose kind is a read kind */
+            char *kinds = fg_dupz(sh[i]), *cell[16], *p = kinds;
+            int nk = 0, q, first = 1;
+            while (*kinds && nk < 16) {          /* comma-separated operand kinds */
+                cell[nk++] = p;
+                while (*p && *p != ',') p++;
+                if (!*p) break;
+                *p++ = 0;
+            }
+            for (q = 1; q < nk; q++) {
+                int rd = 0;
+                for (j = 0; j < np; j++) if (tx_eq(pk[j], "read", 8) && tx_eq(pv[j], cell[q], 64)) rd = 1;
+                if (!rd) continue;
+                if (!first) ob_z(o, ", ");
+                ob_int(o, q); first = 0;
+            }
+        }
+        ob_z(o, sel == 0 ? "]\t[1]\t[]\n" : "]\t[]\t[1]\n");
+        sel++;
+    }
+}
+
 static void enc_pe(Ob *o) { pe_fields(o, 0); }
 static void enc_pe_forward(Ob *o) { pe_fields(o, 1); }
 
@@ -1259,6 +1307,7 @@ static const Table fg_tables[] = {
     {"enc-pe-forward", {"exec/facts/image-pe.tsv", "tools/facts-gen.cx", 0}, enc_pe_forward},
     {"enc-macho", {"exec/facts/image-macho.tsv", "tools/facts-gen.cx", 0}, enc_macho},
     {"enc-elf", {"exec/facts/image-elf.tsv", "exec/facts/image-pe.tsv", "tools/facts-gen.cx", 0}, enc_elf},
+    {"lower-armfuse", {"exec/facts/tape-shape.tsv", "exec/lower/armfuse-shapes.tsv", "tools/facts-gen.cx", 0}, lower_armfuse},
     {0, {0}, 0}
 };
 
