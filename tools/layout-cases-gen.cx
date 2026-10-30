@@ -27,7 +27,7 @@ static void saved(const char *p, const char *s, size_t n) { int f = open(p, O_WR
 static int shafile(const char *p, char h[65]) { size_t n; char *s = cx_read(p, &n); if (!s) { if (errno != ENOENT) die("read for digest"); return 0; } cx_sha256_hex(s, n, h); free(s); return 1; }
 static int same_file(const char *a, const char *b) { size_t na, nb; char *x = cx_read(a, &na), *y = cx_read(b, &nb); int ok = x && y && na == nb && !memcmp(x, y, na); free(x); free(y); return ok; }
 static void row(const char *state, const char *label, const char *detail) { fprintf(res, "%s\tprop.bound.data-layout-mod8\t%s\t%s\n", state, label, detail); if (!strcmp(state, "PASS")) npass++; else if (!strcmp(state, "FAIL")) nfail++; else nnotrun++; }
-static int run(char *const argv[], char *const env[], int secs, np_result *r) { char why[1024]; char *v[64]; int n = 0; v[n++] = bound; char s[16]; snprintf(s, sizeof s, "%d", secs); v[n++] = s; for (int i = 0; argv[i]; i++) v[n++] = argv[i]; v[n] = 0; return np_run(v, root, env, secs + 2, r, why, sizeof why); }
+static int run(char *const argv[], char *const env[], int secs, np_result *r) { char why[1024]; char *v[64]; int n = 0; v[n++] = bound; char s[16]; { if (cx_fmt(s, sizeof s, "%d", secs)) { fprintf(stderr, "layout-cases-gen: text too long for s\n"); exit(2); } } v[n++] = s; for (int i = 0; argv[i]; i++) v[n++] = argv[i]; v[n] = 0; return np_run(v, root, env, secs + 2, r, why, sizeof why); }
 static char *noenv[] = { 0 };
 #define APPN(dst, cap, ...) do { size_t _l = strlen(dst); int _n = snprintf(dst + _l, (cap) - _l, __VA_ARGS__); if (_n < 0 || (size_t)_n >= (cap) - _l) die("text bound"); } while (0)
 
@@ -62,17 +62,17 @@ int main(int argc, char **argv) {
     if ((argc != 5 && argc != 6) || !realpath(argv[1], root) || !realpath(argv[2], stream6) || argv[3][0] != '/' || (argc == 6 && !realpath(argv[5], ref))) { fputs("usage: ROOT STREAM6_COM ABS_OUT len12|len3-0..len3-5 [REF]\n", stderr); return 2; }
     const char *slice = argv[4]; int lo = -1, hi = -1, len12 = !strcmp(slice, "len12");
     if (!strncmp(slice, "len3-", 5) && slice[5] >= '0' && slice[5] <= '5' && !slice[6]) lo = hi = slice[5] - '0'; else if (!len12) die("slice");
-    snprintf(outdir, sizeof outdir, "%s", argv[3]); if (mkdir(outdir, 0700) && errno != EEXIST) die("out dir"); path(work, sizeof work, outdir, slice); if (mkdir(work, 0700)) die("slice dir must be absent");
+    { if (cx_fmt(outdir, sizeof outdir, "%s", argv[3])) { fprintf(stderr, "layout-cases-gen: text too long for outdir\n"); exit(2); } } if (mkdir(outdir, 0700) && errno != EEXIST) die("out dir"); path(work, sizeof work, outdir, slice); if (mkdir(work, 0700)) die("slice dir must be absent");
     path(inc, sizeof inc, root, "include"); path(bound, sizeof bound, root, "tools/bound"); path(product, sizeof product, root, "unisacc.com");
-    char rp[4400]; snprintf(rp, sizeof rp, "%s/results-%s.tsv", outdir, slice); res = fopen(rp, "wbx"); if (!res) die("results exclusive");
-    snprintf(rp, sizeof rp, "%s/layout-table-%s.tsv", outdir, slice); table = fopen(rp, "wbx"); if (!table) die("table exclusive"); fprintf(table, "sequence\tsym_d0\tsym_d1\tsym_d2\tsym_o\tused\tdata_hex_len\n");
+    char rp[4400]; { if (cx_fmt(rp, sizeof rp, "%s/results-%s.tsv", outdir, slice)) { fprintf(stderr, "layout-cases-gen: text too long for rp\n"); exit(2); } } res = fopen(rp, "wbx"); if (!res) die("results exclusive");
+    { if (cx_fmt(rp, sizeof rp, "%s/layout-table-%s.tsv", outdir, slice)) { fprintf(stderr, "layout-cases-gen: text too long for rp\n"); exit(2); } } table = fopen(rp, "wbx"); if (!table) die("table exclusive"); fprintf(table, "sequence\tsym_d0\tsym_d1\tsym_d2\tsym_o\tused\tdata_hex_len\n");
     { char hp[65], h6[65], hr[65]; if (!shafile(product, hp) || !shafile(stream6, h6)) die("identity"); fprintf(res, "IDENTITY\tproduct=%s\tstream6=%s\n", hp, h6); if (ref[0]) { if (!shafile(ref, hr)) die("ref"); fprintf(res, "IDENTITY\tref=%s\n", hr); } }
     int any_order = 0, any_zero = 0, nseq = 0;
     for (int n = 1; n <= 3; n++) for (int a = 0; a < 6; a++) for (int b = 0; b < (n >= 2 ? 6 : 1); b++) for (int c = 0; c < (n == 3 ? 6 : 1); c++) {
         if (len12 ? n == 3 : (n != 3 || a < lo || a > hi)) continue;
         Layout L; L.n = n; L.k[0] = &kinds[a]; L.k[1] = &kinds[b]; L.k[2] = &kinds[c]; layout(&L); nseq++;
-        char seq[32]; snprintf(seq, sizeof seq, "%s%s%s%s%s", kinds[a].tag, n >= 2 ? "." : "", n >= 2 ? kinds[b].tag : "", n == 3 ? "." : "", n == 3 ? kinds[c].tag : "");
-        { char s1[24] = "-", s2[24] = "-"; if (n >= 2) snprintf(s1, sizeof s1, "%llu", L.sym[1]); if (n == 3) snprintf(s2, sizeof s2, "%llu", L.sym[2]); fprintf(table, "%s\t%llu\t%s\t%s\t%llu\t%llu\t%llu\n", seq, L.sym[0], s1, s2, L.sym[n], L.used, L.stored); }
+        char seq[32]; { if (cx_fmt(seq, sizeof seq, "%s%s%s%s%s", kinds[a].tag, n >= 2 ? "." : "", n >= 2 ? kinds[b].tag : "", n == 3 ? "." : "", n == 3 ? kinds[c].tag : "")) { fprintf(stderr, "layout-cases-gen: text too long for seq\n"); exit(2); } }
+        { char s1[24] = "-", s2[24] = "-"; if (n >= 2) { if (cx_fmt(s1, sizeof s1, "%llu", L.sym[1])) { fprintf(stderr, "layout-cases-gen: text too long for s1\n"); exit(2); } } if (n == 3) { if (cx_fmt(s2, sizeof s2, "%llu", L.sym[2])) { fprintf(stderr, "layout-cases-gen: text too long for s2\n"); exit(2); } } fprintf(table, "%s\t%llu\t%s\t%s\t%llu\t%llu\t%llu\n", seq, L.sym[0], s1, s2, L.sym[n], L.used, L.stored); }
         if (L.order_differs) any_order = 1; if (L.zero_tail) any_zero = 1;
         /* the tape: deltas addr(dk)-addr(d0) stored as bytes into o, then written */
         static char tape[2048]; tape[0] = 0; APPN(tape, sizeof tape, "_start:\n  .lea r1, d0\n  .lea r3, o\n");
@@ -80,17 +80,17 @@ int main(int argc, char **argv) {
         APPN(tape, sizeof tape, "  imm r4, %d\n  .write r3, r4\n  imm r0, 0\n  .exit r0\n", n - 1);
         for (int k = 0; k < n; k++) APPN(tape, sizeof tape, "%s d%d %s\n", L.k[k]->bss ? ".bss" : ".str", k, L.k[k]->bss ? (L.k[k]->len == 1 ? "1" : "8") : L.k[k]->spell);
         APPN(tape, sizeof tape, ".bss o 8\n");
-        char tp[4400], lab[200]; snprintf(tp, sizeof tp, "%s/%s.tape", work, seq); saved(tp, tape, strlen(tape));
+        char tp[4400], lab[200]; { if (cx_fmt(tp, sizeof tp, "%s/%s.tape", work, seq)) { fprintf(stderr, "layout-cases-gen: text too long for tp\n"); exit(2); } } saved(tp, tape, strlen(tape));
         /* (i) stream6 head */
-        { char *v[] = { stream6, tp, tp, inc, 0 }; char *env[] = { "UNISA_ATTRIBUTES=", "UNISA_MAXSTEPS=200000000", 0 }; np_result r; snprintf(lab, sizeof lab, "%s.stream6-head", seq);
-          if (run(v, env, 12, &r)) row("NOT_RUN", lab, "stream6 did not run"); else { size_t hl = strlen(L.head); int ok = !r.rc && r.outn >= hl && !memcmp(r.out, L.head, hl); if (!ok) { char wp[4400]; snprintf(wp, sizeof wp, "%s/%s.stream6.out", work, seq); saved(wp, r.out, r.outn); } row(ok ? "PASS" : "FAIL", lab, ok ? "@data/@sym/@data_len equal the table" : "head differs (see .stream6.out)"); np_free(&r); } }
+        { char *v[] = { stream6, tp, tp, inc, 0 }; char *env[] = { "UNISA_ATTRIBUTES=", "UNISA_MAXSTEPS=200000000", 0 }; np_result r; { if (cx_fmt(lab, sizeof lab, "%s.stream6-head", seq)) { fprintf(stderr, "layout-cases-gen: text too long for lab\n"); exit(2); } }
+          if (run(v, env, 12, &r)) row("NOT_RUN", lab, "stream6 did not run"); else { size_t hl = strlen(L.head); int ok = !r.rc && r.outn >= hl && !memcmp(r.out, L.head, hl); if (!ok) { char wp[4400]; { if (cx_fmt(wp, sizeof wp, "%s/%s.stream6.out", work, seq)) { fprintf(stderr, "layout-cases-gen: text too long for wp\n"); exit(2); } } saved(wp, r.out, r.outn); } row(ok ? "PASS" : "FAIL", lab, ok ? "@data/@sym/@data_len equal the table" : "head differs (see .stream6.out)"); np_free(&r); } }
         /* (ii) lnx execution of the deltas; (iii) six-target REF differential */
-        for (int t = 0; t < 6; t++) { char img[4400]; snprintf(img, sizeof img, "%s/%s.%s", work, seq, tslug[t]); np_result r;
-            char *v[] = { "sh", product, tp, "-b", (char *)targets[t], "-o", img, 0 }; snprintf(lab, sizeof lab, "%s.%s", seq, tslug[t]);
+        for (int t = 0; t < 6; t++) { char img[4400]; { if (cx_fmt(img, sizeof img, "%s/%s.%s", work, seq, tslug[t])) { fprintf(stderr, "layout-cases-gen: text too long for img\n"); exit(2); } } np_result r;
+            char *v[] = { "sh", product, tp, "-b", (char *)targets[t], "-o", img, 0 }; { if (cx_fmt(lab, sizeof lab, "%s.%s", seq, tslug[t])) { fprintf(stderr, "layout-cases-gen: text too long for lab\n"); exit(2); } }
             if (run(v, noenv, 20, &r) || r.rc) { row("NOT_RUN", lab, "product compile failed"); np_free(&r); continue; } np_free(&r);
-            if (t == 0) { char *rv[] = { img, 0 }; char want[8]; for (int k = 1; k < n; k++) want[k - 1] = (char)(L.sym[k] - L.sym[0]); snprintf(lab, sizeof lab, "%s.lnx-x86_64.deltas-execute", seq);
+            if (t == 0) { char *rv[] = { img, 0 }; char want[8]; for (int k = 1; k < n; k++) want[k - 1] = (char)(L.sym[k] - L.sym[0]); { if (cx_fmt(lab, sizeof lab, "%s.lnx-x86_64.deltas-execute", seq)) { fprintf(stderr, "layout-cases-gen: text too long for lab\n"); exit(2); } }
                 if (run(rv, noenv, 3, &r)) row("NOT_RUN", lab, "image did not run"); else { int ok = !r.rc && !r.errn && r.outn == (size_t)(n - 1) && !memcmp(r.out, want, (size_t)(n - 1)); row(ok ? "PASS" : "FAIL", lab, ok ? "addr(dk)-addr(d0) bytes equal the table" : "deltas differ"); np_free(&r); } }
-            if (ref[0]) { char rimg[4400]; snprintf(rimg, sizeof rimg, "%s.ref", img); char *rv[] = { ref, tp, "-b", (char *)targets[t], "-o", rimg, 0 }; snprintf(lab, sizeof lab, "%s.%s.image-equals-reference", seq, tslug[t]);
+            if (ref[0]) { char rimg[4400]; { if (cx_fmt(rimg, sizeof rimg, "%s.ref", img)) { fprintf(stderr, "layout-cases-gen: text too long for rimg\n"); exit(2); } } char *rv[] = { ref, tp, "-b", (char *)targets[t], "-o", rimg, 0 }; { if (cx_fmt(lab, sizeof lab, "%s.%s.image-equals-reference", seq, tslug[t])) { fprintf(stderr, "layout-cases-gen: text too long for lab\n"); exit(2); } }
                 if (run(rv, noenv, 20, &r) || r.rc) row("NOT_RUN", lab, "reference compile failed"); else row(same_file(img, rimg) ? "PASS" : "FAIL", lab, "byte equality"); np_free(&r); } }
     }
     if (!any_order || !any_zero) { fprintf(res, "VACUOUS\tprop.bound.data-layout-mod8\t%s.guard\torder_differs=%d zero_tail=%d\n", slice, any_order, any_zero); nnotrun++; }
