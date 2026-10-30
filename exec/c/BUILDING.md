@@ -1,5 +1,11 @@
 # Model container construction
 
+> **Historical (2026-10-30).** This page describes the old C product's build.
+> - `exec/c/buildcompiler.sh` is archived at `archive/reference-py/exec/c/buildcompiler.sh`: it ran Python (`tbl.py`, `net.py`, `gen.py`, `provenance.py`) that is itself archived, and it compiled the archived C reference.
+> - `make com`, `model-com` and `comboot-*` are gone from the Makefile.
+>
+> The CX entry is built by `tools/entry-build.cx`. The path to a product is in `plans/candidate-to-product-2026-10-30.md`.
+
 `make com` builds the model compiler in at most two parallel build slots,
 with a 55-second process-tree bound inside the 60-second make bound. Shared
 and six target stages finish before packaging; only a successful build
