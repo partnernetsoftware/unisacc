@@ -7,6 +7,7 @@
 #pragma unisa use sys.fs
 #pragma unisa use sys.env
 #pragma unisa use mem.bytes
+#pragma unisa use mem.heap
 #pragma unisa use text.text
 
 static int failed;
@@ -93,6 +94,20 @@ int main(void) {
         for (i = 0; i < 16; i++) big[i] = (char)i;
         ck(mm_same(big, big, 16) && !mm_same(big, big + 1, 15) && mm_same(0, 0, 0) && !mm_same(big, big, -1), "same");
         ck(mm_cmp("\x01", "\xff", 1) < 0 && mm_cmp("b", "a", 1) > 0 && mm_cmp("ab", "ab", 2) == 0, "cmp-unsigned");
+    }
+    {   /* mem.heap: libc semantics under mm_* names */
+        char *p = mm_alloc(16), *z = mm_zalloc(64), *g, *d; int i, zero = 1;
+        for (i = 0; i < 64; i++) if (z && z[i]) zero = 0;
+        ck(p != 0 && z != 0 && zero && mm_alloc(0) == 0 && mm_alloc(-1) == 0 && mm_zalloc(0) == 0, "alloc-zalloc");
+        if (p) { mm_copy(p, 16, "keep", 5); }
+        g = mm_grow(p, 1 << 20);
+        ck(g != 0 && tx_eq(g, "keep", 8), "grow-keeps-contents");
+        ck(mm_grow(g, 0) == 0 && tx_eq(g, "keep", 8), "grow-to-zero-refused-block-kept");
+        d = mm_strdup("dup me");
+        ck(d && d != (char *)"dup me" && tx_eq(d, "dup me", 16) && mm_strdup(0) == 0, "strdup");
+        { char *fresh = mm_grow(0, 32); ck(fresh != 0, "grow-null-allocates"); mm_free(fresh); }
+        mm_free(g); mm_free(z); mm_free(d); mm_free(0);
+        ck(1, "free-null-is-noop");
     }
     printf("CX_SYS_SPAWN\tfailed=%d\n", failed);
     return failed ? 1 : 0;
