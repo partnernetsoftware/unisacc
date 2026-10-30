@@ -3,11 +3,12 @@
  * retry_stub.cx — scripted chat/completions stand-in for the retry probe.
  * Lower: libc/posix includes OK.
  *
- * rs_stub_start(port, script, log): the Nth POST gets the Nth status of the
- * comma list SCRIPT ("503,200"); past the end every POST gets 200. A 200
- * body has the DeepSeek shape and an answer (or {"go":"stop"} for the
- * round-end question). Each served status is appended to LOG, one per line,
- * so the probe counts what csih really sent. The child exits after 40s.
+ * rs_stub_start(port, script, log): the Nth POST gets the Nth token of the
+ * comma list SCRIPT ("503,200", "~P,R,S"; tokens at rs_status_at); past the
+ * end every POST gets 200. A 200 body has the DeepSeek shape and an answer
+ * (or {"go":"stop"} for the round-end question). Each served status is
+ * appended to LOG, one per line, so the probe counts what csih really sent;
+ * the Nth request body is saved as LOG.reqN. The child exits after 40s.
  */
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -22,12 +23,33 @@
 
 long rs_now_ms(void);
 
-/* The Nth token: a status, or 'x' = 200 carrying an exec action (returned as -200). */
-static int rs_status_at(const char *script, int n) {
+/* The Nth token: a status, or a 200 with a scripted reply (returned negative):
+ *   x  exec `echo stub-exec`        -200
+ *   P  exec `pwd`                   -201
+ *   R  answer RESUME_DONE           -202
+ *   S  {"go":"stop"}                -203
+ *   V  a completed answer RESUME_DONE in the current protocol: evidence,
+ *      claims and observation_refs naming the first "[harness action_id]"
+ *      of the request                  -204
+ *   J  the judge's accepted stop citing that id   -205
+ * A leading '~' delays that reply by 500ms (*DELAY set). */
+static int rs_status_at(const char *script, int n, int *delay) {
     const char *p = script;
     int i = 0;
+    *delay = 0;
     while (p && *p) {
-        if (i == n) return *p == 'x' ? -200 : atoi(p);
+        if (i == n) {
+            if (*p == '~') { *delay = 1; p++; }
+            switch (*p) {
+            case 'x': return -200;
+            case 'P': return -201;
+            case 'R': return -202;
+            case 'S': return -203;
+            case 'V': return -204;
+            case 'J': return -205;
+            default: return atoi(p);
+            }
+        }
         p = strchr(p, ',');
         if (p) p++;
         i++;
@@ -45,9 +67,9 @@ static void rs_write_all(int fd, const char *b, size_t n) {
 
 static void rs_serve_one(int c, const char *script, int n, const char *log) {
     static char req[RS_REQ];
-    char head[256], body[512];
+    char head[256], body[2048];
     size_t have = 0, want = 0, hdr_end = 0;
-    int got_hdr = 0, status, fd;
+    int got_hdr = 0, status, fd, delay;
     ssize_t k;
     for (;;) {
         if (have + 1 >= RS_REQ) break;
@@ -67,9 +89,47 @@ static void rs_serve_one(int c, const char *script, int n, const char *log) {
         }
         if (got_hdr && have >= hdr_end + want) break;
     }
-    status = rs_status_at(script, n);
-    if (status == 200 || status == -200) {
-        const char *content = strstr(req, "Decide only: continue") ? "{\\\"go\\\":\\\"stop\\\"}"
+    status = rs_status_at(script, n, &delay);
+    {
+        /* the request body, for probes that check what csih sent: LOG.reqN */
+        char rp[700];
+        snprintf(rp, sizeof rp, "%s.req%d", log, n);
+        fd = open(rp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd >= 0) { if (have > hdr_end) rs_write_all(fd, req + hdr_end, have - hdr_end); close(fd); }
+    }
+    if (delay) poll(NULL, 0, 500);
+    if (status == -204 || status == -205) {
+        /* the first action id the harness put in the request (JSON-escaped: it ends at "\n") */
+        /* V cites the action id the request names; J cites the same one (the
+         * judge request also carries older ids, so it is remembered, not re-read). */
+        static char cited[96] = "none";
+        char id[96], content[1200];
+        const char *a = status == -204 ? strstr(req + hdr_end, "[harness action_id] ") : NULL;
+        if (a) {
+            size_t i = 0;
+            a += 20;
+            while (a[i] && a[i] != '\\' && a[i] != '"' && i + 1 < sizeof cited) { cited[i] = a[i]; i++; }
+            cited[i] = 0;
+        }
+        snprintf(id, sizeof id, "%s", cited);
+        if (status == -204)
+            snprintf(content, sizeof content,
+                     "{\\\"act\\\":\\\"answer\\\",\\\"outcome\\\":\\\"completed\\\",\\\"text\\\":\\\"RESUME_DONE\\\",\\\"evidence\\\":[\\\"%s\\\"],"
+                     "\\\"claims\\\":[{\\\"id\\\":\\\"c1\\\",\\\"text\\\":\\\"pwd ran in the restored cwd\\\",\\\"scope\\\":\\\"cwd\\\","
+                     "\\\"state\\\":\\\"supported\\\",\\\"support\\\":[0],\\\"counter\\\":[],\\\"unknown\\\":\\\"\\\"}],"
+                     "\\\"observation_refs\\\":[{\\\"id\\\":\\\"%s\\\",\\\"start\\\":0,\\\"end\\\":0,\\\"layer\\\":\\\"tool_output\\\",\\\"json_pointer\\\":null}]}",
+                     id, id);
+        else
+            snprintf(content, sizeof content,
+                     "{\\\"go\\\":\\\"stop\\\",\\\"acceptance\\\":\\\"accepted\\\",\\\"scope\\\":\\\"work\\\",\\\"evidence\\\":[\\\"%s\\\"],\\\"reason\\\":\\\"scripted\\\"}", id);
+        status = 200;
+        snprintf(body, sizeof body,
+                 "{\"id\":\"stub\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"%s\"}}],"
+                 "\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12}}", content);
+    } else if (status == 200 || status <= -200) {
+        const char *content = status == -201 ? "{\\\"act\\\":\\\"exec\\\",\\\"cmd\\\":\\\"pwd\\\",\\\"why\\\":\\\"verify snapshot cwd\\\"}"
+                            : status == -202 ? "{\\\"act\\\":\\\"answer\\\",\\\"text\\\":\\\"RESUME_DONE\\\"}"
+                            : status == -203 || strstr(req, "Decide only: continue") ? "{\\\"go\\\":\\\"stop\\\"}"
                             : status == -200 ? "{\\\"act\\\":\\\"exec\\\",\\\"cmd\\\":\\\"echo stub-exec\\\",\\\"why\\\":\\\"探针\\\"}"
                                              : "{\\\"act\\\":\\\"answer\\\",\\\"text\\\":\\\"完成了\\\"}";
         status = 200;

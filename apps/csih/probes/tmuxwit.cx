@@ -78,14 +78,15 @@ int tw_open(const char *tag) {
 }
 
 static int tw_tmux(char **args, int n, char *out, int cap) {
-    char *av[48];
+    char *av[96];
     int i, k = 0;
+    if (n + 6 > 96) return -1;   /* refuse, never truncate: a cut argv runs the wrong command */
     av[k++] = "tmux";
     av[k++] = "-L";
     av[k++] = tw_sock;
     av[k++] = "-f";
     av[k++] = "/dev/null";
-    for (i = 0; i < n && k < 47; i++) av[k++] = args[i];
+    for (i = 0; i < n; i++) av[k++] = args[i];
     av[k] = NULL;
     return tw_run(av, out, cap);
 }
@@ -95,8 +96,9 @@ static int tw_tmux(char **args, int n, char *out, int cap) {
  * reaches tw_close, and its csih kept running for an hour. With the command
  * gone the session ends, and an empty server exits by itself. */
 int tw_new(const char *sess, int cols, int rows, const char *cwd, char **cmd, int ncmd) {
-    char *a[48], cs[16], rs[16];
+    char *a[88], cs[16], rs[16];
     int i, k = 0;
+    if (ncmd + 15 > 88) return -1;   /* refuse, never truncate */
     snprintf(cs, sizeof cs, "%d", cols);
     snprintf(rs, sizeof rs, "%d", rows);
     a[k++] = "new-session"; a[k++] = "-d"; a[k++] = "-s"; a[k++] = (char *)sess;
@@ -104,14 +106,17 @@ int tw_new(const char *sess, int cols, int rows, const char *cwd, char **cmd, in
     if (cwd && cwd[0]) { a[k++] = "-c"; a[k++] = (char *)cwd; }
     /* --foreground: in its own process group the TUI could not read the tty */
     a[k++] = "timeout"; a[k++] = "--foreground"; a[k++] = "-k"; a[k++] = "2"; a[k++] = "120";
-    for (i = 0; i < ncmd && k < 47; i++) a[k++] = cmd[i];
+    for (i = 0; i < ncmd; i++) a[k++] = cmd[i];
     return tw_tmux(a, k, NULL, 0);
 }
 
 /* Send K: literal text when LITERAL, else a key name (Enter, Escape, C-c). */
 void tw_keys(const char *sess, const char *k, int literal) {
-    char *a[] = { "send-keys", "-t", (char *)sess, literal ? "-l" : "--", (char *)k };
-    tw_tmux(a, 5, NULL, 0);
+    /* "--" before the text: a literal like "-EDIT" was parsed as send-keys flags */
+    char *lit[] = { "send-keys", "-t", (char *)sess, "-l", "--", (char *)k };
+    char *key[] = { "send-keys", "-t", (char *)sess, "--", (char *)k };
+    if (literal) tw_tmux(lit, 6, NULL, 0);
+    else tw_tmux(key, 5, NULL, 0);
 }
 
 /* The pane with its history, wrapped lines joined. 0 on success. */
