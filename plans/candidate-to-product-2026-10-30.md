@@ -35,7 +35,7 @@ GEN 的工具换成下面的新入口构造。现在的 `product-build.cx` 不�
 2. `lnx/x86_64` 的链接结果叫 `entry.elf`。现在这只是 ELF（开头 `\x7fELF`）。另外四个目标各留自己的映像，文件名沿用 `slice-win-x86_64`、`slice-lnx-arm64`、`slice-osx-x86_64`、`slice-osx-arm64`，加上 `slice-lnx-x86_64`（就是这份 `entry.elf`）。
 3. 五片都是链接结果，不接 P3。P3 只在 wrap 时附一次。`entry-build` 现在的 `eb_splice` 是 ELF 候选的做法，不用它来生成 `unisacc-next.com`。
 4. wrap 仍用 `seed/ape.c`。参数顺序是 `OUT WIN_X86_64 LNX_X86_64 LNX_ARM64 OSX_X86_64 OSX_ARM64`，加上 `--payload` 第 1 步的新包、`--product Unisacc` 和 `src/version.h` 里的版本。产物叫 `unisacc-next.com`。开头应是 `MZqFpD`。win 片必须是 PE，头在 64..1024，`seed/ape.c` 才能把它挪到偏移 0 并写入壳脚本。
-5. 现在还编不了五片。`entry-build` 的编译（第 189 行）和链接（第 209 行）把 `-b` 写死成 `lnx/x86_64`。整表一次超过 60 秒，而且 `entry-build` 不在正规构造链的例外名单里，所以每个目标仍要拆开，用已有的 `--only` / `--link-only`，不能五个目标一次进程跑完。
+5. 现在还编不了五片。`entry-build` 的编译和链接把 `-b` 写死成 `lnx/x86_64`。整表一次超过 60 秒。60 秒例外名单现在是 `source-job-wave`、`pc-wave`、`kernel-build`、`product-build`、`selfhost`（`AGENTS.md`）。把这条新链写进例外名单等于改规则，待主人裁定，cc 去报。裁定之前每批仍不超过 55 秒，不把五个目标一次进程跑完。
 6. 对拍里用户程序的两个 Windows `-o` 两边都退出 1（[cx-modules.md](cx-modules.md) 第 161 节）。那是用户程序，不是编译器自己的 win 片。不能当成新入口已经能交出 `seed/ape.c` 要的 PE。win 片没实测通过之前，wrap 不能开始。
 
 ### 3. 两代判词
@@ -85,6 +85,8 @@ GEN 的工具换成下面的新入口构造。现在的 `product-build.cx` 不�
 | `seed/ape.c` | 留下当 wrap | 已接受五片和 `--payload`。不负责编入口。win 片必须是它能挪头的 PE |
 | `tools/cx-flatten.cx` | 留下 | 展平头的生成器。包刷新前用 `--check` |
 | `tools/source-package-pack.cx`、`tools/cxlib/sourcepackage.cx`、`tools/source-package-mixed.cx` | 留下 | `CARRIED_HEADERS` 把 `include/` 打进新 P3 |
+
+工具退场与注册表里那几批同时处理。`hostseed-*`、`ri-material-*`、`package-controls` 依赖 `product-build`、`hostseed-step` 这些旧工具。归档还是标不可运行，等主人裁定，见 [archived-c-batches-2026-10-30.md](archived-c-batches-2026-10-30.md)。这份清单不改注册表行。
 
 ## 这次明确不做
 
