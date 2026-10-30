@@ -1,0 +1,85 @@
+/* tests/route-chains.cx -- the stage chain each public route runs (interfaces if.route.prune-placement), read from the
+ * installed product's UNISACC_RR_TIME=1 inference lines, in order.
+ *
+ *   sh ./unisacc.com tests/route-chains.cx            (from the repo root; writes out/route-chains-batch/)
+ *
+ * Routes on `int main(void){return 7;}`, -b lnx/x86_64, each under a 20 s bound:
+ *   image -O0 / -O1 (-o FILE), -run, -c, -c -funit  -- prune runs, and before lower;
+ *   -S -O0 / -O1 (the public tape route)             -- no prune;
+ * and two separately compiled -c -funit units (helper; main calling it) link and the image exits 7, so pruning a
+ * unit keeps what other units call.  Prints PASS/FAIL per case and ROUTE_CHAINS<TAB>assertions=N<TAB>failed=M. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+
+static char root[4096], work[4400], com[4400], bound[4400];
+static int assertions, failures;
+
+static void die(const char *s) { sy_eprintf("route-chains: REFUSE %s\n", s); sy_exit(2); }
+static void ck(int ok, const char *name) { assertions++; if (ok) sy_printf("PASS\troute-chains.%s\n", name); else { failures++; sy_printf("FAIL\troute-chains.%s\n", name); } }
+static void put(const char *leaf, const char *s) { char p[4600]; if (cx_fmt(p, sizeof p, "%s/%s", work, leaf) || cx_write(p, s, (size_t)tx_len(s, 4096))) die(leaf); }
+
+/* run the product with ARGS (0-terminated) and UNISACC_RR_TIME=1; CHAIN gets " e2 e1 ... " from the inference lines */
+static int chain_of(char **args, char *chain, int cap) {
+    /* UNISACC_RUN_CACHE=0: a cross-process run-cache hit (artifact_hit=1) would skip the stages and show no chain */
+    char *v[24]; int n = 0, k; char why[1024]; np_result r; char *env[] = {"UNISACC_RR_TIME=1", "UNISACC_RUN_CACHE=0", 0}; long at = 0, c = 0;
+    v[n++] = bound; v[n++] = "20"; v[n++] = "sh"; v[n++] = com;
+    for (k = 0; args[k] && n < 23; k++) v[n++] = args[k];
+    v[n] = 0;
+    if (np_run(v, work, env, 25, &r, why, sizeof why)) die(why);
+    chain[c++] = ' '; chain[c] = 0;
+    while (at < (long)r.errn) {
+        long e = tx_chr(r.err + at, (long)r.errn - at, '\n'), l = e < 0 ? (long)r.errn - at : e;
+        const char *s = r.err + at;
+        const char *pre = "RR_TIME\tinference\tstage="; long pl = tx_len(pre, 64);
+        if (tx_prefix(s, l, pre, pl)) {
+            long q = pl; while (q < l && s[q] != '\t') q++;
+            if (c + (q - pl) + 2 >= cap) die("chain bound");
+            tx_copy(chain + c, cap - c, s + pl, q - pl); c += q - pl; chain[c++] = ' '; chain[c] = 0;
+        }
+        at += l + 1;
+    }
+    k = r.rc; np_free(&r);
+    return k;
+}
+static long pos(const char *chain, const char *stage) { char w[32]; if (cx_fmt(w, sizeof w, " %s ", stage)) die("stage"); return tx_find(chain, tx_len(chain, 1024), w, tx_len(w, 32)); }
+
+static void pruned(const char *name, char **args) {
+    char chain[1024]; int rc = chain_of(args, chain, sizeof chain); long p = pos(chain, "prune"), l = pos(chain, "lower");
+    int ok = rc == 0 && p >= 0 && l > p; ck(ok, name); if (!ok) sy_printf("  rc=%d chain=[%s]\n", rc, chain);
+}
+static void unpruned(const char *name, char **args) {
+    char chain[1024]; int rc = chain_of(args, chain, sizeof chain);
+    int ok = rc == 0 && pos(chain, "tapecheck") >= 0 && pos(chain, "prune") < 0 && pos(chain, "lower") < 0; ck(ok, name); if (!ok) sy_printf("  rc=%d chain=[%s]\n", rc, chain);
+}
+
+int main(void) {
+    if (sy_cwd(root, sizeof root) < 0) die("cwd");
+    if (cx_fmt(work, sizeof work, "%s/out/route-chains-batch", root) || cx_fmt(com, sizeof com, "%s/unisacc.com", root) || cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) die("paths");
+    if (sy_exists(work) == 1 && cx_rmtree(work)) die("old work");
+    if (sy_mkdir(work, 0700)) die("work");
+    put("ok.c", "int main(void){return 7;}\n");
+    put("u1.c", "int helper(void){return 3;}\nstatic int unused_static(void){return 9;}\n");
+    put("u2.c", "int helper(void);\nint main(void){return helper()+4;}\n");
+
+    {   char *a[] = {"-O0", "-b", "lnx/x86_64", "ok.c", "-o", "ok0.elf", 0}; pruned("image-O0-prune-before-lower", a); }
+    {   char *a[] = {"-O1", "-b", "lnx/x86_64", "ok.c", "-o", "ok1.elf", 0}; pruned("image-O1-prune-before-lower", a); }
+    {   char *a[] = {"-run", "ok.c", 0}; char chain[1024]; int rc = chain_of(a, chain, sizeof chain); long p = pos(chain, "prune"), l = pos(chain, "lower");
+        ck(rc == 7 && p >= 0 && l > p, "run-prune-before-lower"); }
+    {   char *a[] = {"-O0", "-b", "lnx/x86_64", "-c", "ok.c", "-o", "ok.o", 0}; pruned("c-prune-before-lower", a); }
+    {   char *a[] = {"-O0", "-b", "lnx/x86_64", "-c", "-funit", "u1.c", "-o", "u1.o", 0}; pruned("c-funit-prune-before-lower", a); }
+    {   char *a[] = {"-O0", "-b", "lnx/x86_64", "-S", "ok.c", "-o", "-", 0}; unpruned("S-O0-no-prune", a); }
+    {   char *a[] = {"-O1", "-b", "lnx/x86_64", "-S", "ok.c", "-o", "-", 0}; unpruned("S-O1-no-prune", a); }
+    {   char *c2[] = {"-O0", "-b", "lnx/x86_64", "-c", "-funit", "u2.c", "-o", "u2.o", 0}; char chain[1024];
+        char *ln[] = {"-b", "lnx/x86_64", "u1.o", "u2.o", "-o", "u.elf", 0}; char img[4600], *run[] = {bound, "5", img, 0}; char why[1024]; np_result r;
+        int ok = chain_of(c2, chain, sizeof chain) == 0 && chain_of(ln, chain, sizeof chain) == 0;
+        if (cx_fmt(img, sizeof img, "%s/u.elf", work)) die("path");
+        if (ok) { if (np_run(run, work, 0, 8, &r, why, sizeof why)) die(why); ok = r.rc == 7; np_free(&r); }
+        ck(ok, "funit-units-link-and-run-7"); }
+
+    sy_printf("ROUTE_CHAINS\tassertions=%d\tfailed=%d\n", assertions, failures);
+    return failures ? 1 : 0;
+}

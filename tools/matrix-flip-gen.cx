@@ -9,7 +9,10 @@
  * relabel the slow lane applies; it never writes into tests/.
  * Migration (next epoch): after re-running the 35 batches on the new candidate into LOGDIR, append `--migrate OLDHEX
  * NEWHEX LOGDIR`: mapped cells must then be COVERED_LOCAL with @OLDHEX evidence; their evidence is re-tagged to @NEWHEX
- * and LOGDIR, a migration note is added, and --check works the same way. */
+ * and LOGDIR, a migration note is added, and --check works the same way.
+ * Amendment: append `--amend` and give MAP rows matrix<TAB>cell<TAB>requirement<TAB>basis; the cell (any state) keeps
+ * its state and evidence and its requirement (column 6) becomes "requirement [amended: basis]" -- for a requirement
+ * that contradicts its own source (the basis must name it), never to make a failing cell green. */
 #pragma unisa use cxlib.netpack
 #pragma unisa use text.text
 
@@ -26,12 +29,15 @@ int main(int argc, char **argv) {
      * to @NEWHEX and LOGDIR (the next epoch's rerun), instead of flipping MISSING cells */
     const char *mig_old = 0, *mig_new = 0, *mig_log = 0; int ac = argc;
     if (argc >= 7 && tx_eqz(argv[argc - 4], "--migrate")) { mig_old = argv[argc - 3]; mig_new = argv[argc - 2]; mig_log = argv[argc - 1]; ac = argc - 4; }
-    if ((ac != 4 && ac != 5) || !realpath(argv[1], root)) { fputs("usage: ROOT MAP.tsv OUT_DIR | ROOT MAP.tsv --check [OUT_DIR]  [--migrate OLDHEX NEWHEX LOGDIR]\n", stderr); return 2; }
+    /* optional trailing `--amend`: MAP rows are matrix<TAB>cell<TAB>requirement<TAB>basis; the cell's requirement text
+     * (column 6) becomes "requirement [amended: basis]", state and evidence unchanged, any state; no batch check */
+    int amend = 0; if (!mig_old && ac >= 5 && tx_eqz(argv[ac - 1], "--amend")) { amend = 1; ac--; }
+    if ((ac != 4 && ac != 5) || !realpath(argv[1], root)) { fputs("usage: ROOT MAP.tsv OUT_DIR | ROOT MAP.tsv --check [OUT_DIR]  [--migrate OLDHEX NEWHEX LOGDIR | --amend]\n", stderr); return 2; }
     int check = tx_eqz(argv[3], "--check"); const char *outdir = check ? (ac == 5 ? argv[4] : 0) : argv[3];
     size_t mn; char *m = cx_read(argv[2], &mn); if (!m) die("map");
     for (char *at = m; at < m + mn;) { char *e = memchr(at, '\n', (size_t)(m + mn - at)); if (!e) e = m + mn; *e = 0; if (at[0] != '#' && strncmp(at, "matrix\t", 7) && *at) { if (nmap >= 128) die("map size"); Map *x = &maps[nmap]; if (!field(at, 0, x->matrix, sizeof x->matrix) || !field(at, 1, x->cell, sizeof x->cell) || !field(at, 2, x->batches, sizeof x->batches) || !field(at, 3, x->evidence, sizeof x->evidence)) die("map row shape"); nmap++; } at = e + 1; }
     char rp[4400]; path(rp, sizeof rp, root, "tests/batches.tsv"); size_t rn; char *reg = cx_read(rp, &rn); if (!reg) die("batches.tsv");
-    for (int i = 0; i < nmap; i++) { char b[1024]; { if (cx_fmt(b, sizeof b, "%s", maps[i].batches)) { fprintf(stderr, "matrix-flip-gen: text too long for b\n"); exit(2); } } for (char *t = strtok(b, ","); t; t = strtok(0, ",")) if (!batch_implemented(reg, rn, t)) { fprintf(stderr, "matrix-flip: REFUSE batch-not-implemented %s (cell %s)\n", t, maps[i].cell); return 2; } }
+    for (int i = 0; i < nmap && !amend; i++) { char b[1024]; { if (cx_fmt(b, sizeof b, "%s", maps[i].batches)) { fprintf(stderr, "matrix-flip-gen: text too long for b\n"); exit(2); } } for (char *t = strtok(b, ","); t; t = strtok(0, ",")) if (!batch_implemented(reg, rn, t)) { fprintf(stderr, "matrix-flip: REFUSE batch-not-implemented %s (cell %s)\n", t, maps[i].cell); return 2; } }
     /* the matrices are the distinct matrix column of the map (tests/<name>-domain-matrix.tsv) */
     const char *names[128]; size_t nnames = 0; int flipped = 0;
     for (int i = 0; i < nmap; i++) { size_t j = 0; while (j < nnames && !tx_eqz(names[j], maps[i].matrix)) j++; if (j == nnames) names[nnames++] = maps[i].matrix; }
@@ -47,7 +53,7 @@ int main(int argc, char **argv) {
             if (!header_done && !memcmp(at, note, strlen(note))) header_done = 1; char *e = memchr(at, '\n', (size_t)(s + n - at)); size_t ln = e ? (size_t)(e - at) : (size_t)(s + n - at); char line[8192]; if (ln >= sizeof line) die("line bound"); { void *cx_kept = memcpy(line, at, ln); (void)cx_kept; } line[ln] = 0;
             char cell[128], state[64]; int hit = -1;
             if (line[0] != '#' && field(line, 1, cell, sizeof cell) && field(line, 3, state, sizeof state)) for (int i = 0; i < nmap; i++) if (tx_eqz(maps[i].matrix, names[k]) && tx_eqz(maps[i].cell, cell)) { char ev[4096]; if (!field(line, 4, ev, sizeof ev)) die("evidence column"); char oldtag[80]; { if (cx_fmt(oldtag, sizeof oldtag, "@%s", mig_old ? mig_old : "")) { fprintf(stderr, "matrix-flip-gen: text too long for oldtag\n"); exit(2); } }
-                if (mig_old ? (strcmp(state, "COVERED_LOCAL") || !strstr(ev, oldtag)) : strcmp(state, "MISSING")) { fprintf(stderr, "matrix-flip: REFUSE %s %s/%s state=%s\n", mig_old ? "cell-not-covered-by-old-candidate" : "cell-not-missing", names[k], cell, state); return 2; } if (maps[i].used) { fprintf(stderr, "matrix-flip: REFUSE duplicate-cell %s/%s\n", names[k], cell); return 2; } maps[i].used = 1; hit = i; }
+                if (!amend && (mig_old ? (strcmp(state, "COVERED_LOCAL") || !strstr(ev, oldtag)) : strcmp(state, "MISSING"))) { fprintf(stderr, "matrix-flip: REFUSE %s %s/%s state=%s\n", mig_old ? "cell-not-covered-by-old-candidate" : "cell-not-missing", names[k], cell, state); return 2; } if (maps[i].used) { fprintf(stderr, "matrix-flip: REFUSE duplicate-cell %s/%s\n", names[k], cell); return 2; } maps[i].used = 1; hit = i; }
             if (hit < 0) { if (ln > ocap - on) die("output bound"); { void *cx_kept = memcpy(out + on, at, ln); (void)cx_kept; } on += ln; }
             else { /* rebuild: columns 0-2 as is, 3 = COVERED_LOCAL, 4 = evidence, 5.. as is */
                 char *cols[16]; int nc = 0; char copy[8192]; { void *cx_kept = memcpy(copy, line, ln + 1); (void)cx_kept; } for (char *p = copy; nc < 16; ) { cols[nc++] = p; char *t = strchr(p, '\t'); if (!t) break; *t = 0; p = t + 1; }
@@ -56,6 +62,14 @@ int main(int argc, char **argv) {
                     char tmp[2048], o1[80], n1[80]; { if (cx_fmt(o1, sizeof o1, "@%s", mig_old)) { fprintf(stderr, "matrix-flip-gen: text too long for o1\n"); exit(2); } } { if (cx_fmt(n1, sizeof n1, "@%s", mig_new)) { fprintf(stderr, "matrix-flip-gen: text too long for n1\n"); exit(2); } }
                     const char *pairs[2][2] = { { o1, n1 }, { "out/c43-cc-reg-01", mig_log } };
                     for (int q = 0; q < 2; q++) { tmp[0] = 0; const char *src = evd; size_t ol = strlen(pairs[q][0]); for (const char *f; (f = strstr(src, pairs[q][0])); src = f + ol) { size_t l = strlen(tmp); if (l + (size_t)(f - src) + strlen(pairs[q][1]) + 1 >= sizeof tmp) die("evidence bound"); { void *cx_kept = memcpy(tmp + l, src, (size_t)(f - src)); (void)cx_kept; } tmp[l + (size_t)(f - src)] = 0; { size_t tl = strlen(tmp); if (cx_fmt(tmp + tl, sizeof tmp - tl, "%s", pairs[q][1])) die("evidence bound"); } } { size_t tl = strlen(tmp); if (cx_fmt(tmp + tl, sizeof tmp - tl, "%s", src)) die("evidence bound"); } { if (cx_fmt(evd, sizeof evd, "%s", tmp)) { fprintf(stderr, "matrix-flip-gen: text too long for evd\n"); exit(2); } } } }
+                if (amend) {   /* columns 0-4 and 6.. as is; 5 = the new requirement with its basis */
+                    char al[8192]; long w = 0; const char *c5 = maps[hit].batches;
+                    if (cx_fmt(al, sizeof al, "%s\t%s\t%s\t%s\t%s\t%s [amended: %s]", cols[0], cols[1], cols[2], cols[3], cols[4], c5, maps[hit].evidence)) die("row bound");
+                    w = tx_len(al, sizeof al);
+                    for (int c = 6; c < nc; c++) { if (cx_fmt(al + w, sizeof al - (size_t)w, "\t%s", cols[c])) die("row bound"); w = tx_len(al, sizeof al); }
+                    if ((size_t)w + 1 > ocap - on || tx_copy(out + on, (long)(ocap - on), al, w)) die("output bound"); on += (size_t)w; flipped++;
+                    if (e) { if (on >= ocap) die("output bound"); out[on++] = '\n'; } at = e ? e + 1 : s + n; continue;
+                }
                 char nl[8192]; int w = snprintf(nl, sizeof nl, "%s\t%s\t%s\tCOVERED_LOCAL\t%s", cols[0], cols[1], cols[2], evd); for (int c = 5; c < nc; c++) { int z = snprintf(nl + w, sizeof nl - (size_t)w, "\t%s", cols[c]); if (z < 0 || (size_t)z >= sizeof nl - (size_t)w) die("row bound"); w += z; }
                 if ((size_t)w > ocap - on) die("output bound"); { void *cx_kept = memcpy(out + on, nl, (size_t)w); (void)cx_kept; } on += (size_t)w; flipped++; }
             if (e) { if (on >= ocap) die("output bound"); out[on++] = '\n'; } at = e ? e + 1 : s + n; }
