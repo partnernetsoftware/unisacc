@@ -604,3 +604,13 @@ flowchart TD
 
 `tests/cxraw.cx --check` 退出 0：628 个 `.cx`，19639 次调用，基线 19639，超过基线的是 0。基线文件没有改。`tests/cxtrunc.cx --check` 整次仍失败，超基线的是 csih 新文件和过期行；`src/drive.cx`、`src/driveroute.cx`、`src/host.cx`、`cx/sys/sha.cx` 不在超基线名单里。没有 `--write`。148 格没有在这只候选上重跑。bound 没有加长。
 
+## 164. 2026-10-30 混合候选 148 格全 SAME，六个驱动对象 -O1 改成默认
+
+对拍的是 `out/grk-opt2-o1/candidate`。2959636 字节，权限 0755，sha256 `e477a4c70be28c11b86f9fce129fae2acf4e6c6813aa7d8436a8881d75160970`。这只是显式 `--o1-drivers` 编的：drive、host、driveface、driveroute、cxmod、tapegate 为 `-O1`，其余 `-O2`。构造数字在 [plans/perf-bottlenecks-2026-10-30.md](perf-bottlenecks-2026-10-30.md) 的 B5。已装产品没换。
+
+检查器是 `tools/check-cx-entry.cx`。表是 `out/grk-opt2-mx/cx-entry-matrix-2026-10-30.tsv`。进度文件 `out/grk-opt2-mx/cx-entry-matrix.progress` 是 0 和 148。148 行数据全是 SAME，没有 DIFF，没有 TIMEOUT，没有 CRASH。最后一片从格 98 跑到 148，stdout 以 `SAME -D -iquote -`、`SAME lib abs -`、`LEFT:0` 结尾，退出 0。前面几片退出 2，是那一片没跑完。每次开工没有别的 `unisacc.com`。`UNISA_CONTAINER` 和 `UNISACC_CONTAINER` 都去掉了。跑的时候没改检查器、候选、产品和语料。
+
+build-14 的 56 格和 build-13 的 143 格不算进这只。这 148 格不是域矩阵换标，也不是产品安装。表在 `out/`，不提交。
+
+全表 SAME 之后，`tools/entry-build.cx` 不带旗标也编那六只 `-O1`。`--o1-drivers` 还接受，选的是同一六只。没有按新默认重编整只候选。无旗标探针在 `out/grk-opt2-default`，只编 tapegate.o 和 path.o。构造器是已装产品经 `sh`，sha256 `79fb84e65a10b55ce40be5f68746748acbd38f441944046c0a5dfa5718bc0c32`。P3 仍是 build-14 的 `pkg.bin`，sha256 `b976719eb971fceae766398fe531c0cd16c25bbffab9ef2a7ab6d8184af70fd3`。回执是 `mode=o1-drivers`，`other=-O2`。tapegate.o 478584 字节，sha256 `1310b3c403ad29d9bc3c8ababf50774f561d8f4acd9848b272957aaa16133d3d`，与混合候选那只逐字节相同。path.o 24736 字节，sha256 `8322dfd20e44f434000bb37af5cf43310cc87920f1959c4a204cb6bc2952574a`，与全 `-O2` 候选 `out/grk-opt2-o2/path.o` 逐字节相同。`tests/cxraw.cx --check` 退出 0：628 个 `.cx`，19639 次调用，基线 19639，超过基线的是 0，低于基线的也是 0。bound 没有加长。
+

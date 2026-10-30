@@ -117,13 +117,14 @@
   - 混合候选 `out/grk-opt2-o1/candidate`，2959636 字节，sha256 `e477a4c70be28c11b86f9fce129fae2acf4e6c6813aa7d8436a8881d75160970`。`tests/runcache.cx` 12/0，`TIMING cold_ms=515 hit_ms=41`。`tools/dev-run.cx` 不带参数的冷 `-run` 编译加上一次用法拒绝，6112 ms，退出 2。这不是 dev-run 自己的运行时间。runcache 的冷跑和命中没有变快。
   - 同一份 `out/grk-opt-cmp/main.c`，两边 `-run -- z` 的 stdout 和 stderr 逐字节相同，都退出 0，stdout 是 `opt-cmp z`。
   - `-O0` 没有再试。这 6 只的 e4 已经降到 1.2 s，再降优化级别主要会把 elf 和链接再拉长。
+- **默认（148 格全 SAME 之后）：** `tools/entry-build.cx` 不带旗标也编那六只 `-O1`，`--o1-drivers` 仍接受，选的是同一六只。上面的计时仍属于改默认之前的那份源（sha256 `f7231608…`）。依据是 `out/grk-opt2-o1/candidate`（sha256 `e477a4c70be28c11b86f9fce129fae2acf4e6c6813aa7d8436a8881d75160970`）上 148 格全 SAME，表在 `out/grk-opt2-mx`。没有按新默认重编整只候选。无旗标只编了 tapegate.o 和 path.o，目录 `out/grk-opt2-default`，构造器是已装产品经 `sh`。tapegate.o sha256 `1310b3c403ad29d9bc3c8ababf50774f561d8f4acd9848b272957aaa16133d3d`，与混合候选逐字节相同。path.o sha256 `8322dfd20e44f434000bb37af5cf43310cc87920f1959c4a204cb6bc2952574a`，与全 `-O2` 的 path.o 逐字节相同。回执是 `mode=o1-drivers`，`other=-O2`。
 
 ## 三、建议顺序
 
 1. B1（单项最大，`.cx` 冷编译可望从数秒降到数百毫秒级）：先写规则方案与私有包对拍，再走慢车道构造。
 2. B3（与 B1 正交、改动在运行时一层）：模型解码缓存，带身份核对。
 3. B2：等主人定执行器路线；在此之前不动热循环。
-4. B5 已测：六个驱动对象加 `--o1-drivers`，对象加链接 61.4 s → 52.8 s。B4 仍随前三项再复测。
+4. B5 已测：六个驱动对象 `-O1`，对象加链接 61.4 s → 52.8 s。148 格全 SAME 之后，这已是 `tools/entry-build.cx` 的默认。B4 仍随前三项再复测。
 
 复现：参考执行器回放工具在仓外 `/tmp/claude-1001/w/`（`archive/reference-c/exec/c/run.c` 加 SWAP 计数，宿主 GCC 仅作测量，不作产品证据）。
 
