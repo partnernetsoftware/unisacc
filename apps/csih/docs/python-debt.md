@@ -31,7 +31,7 @@
 
 - **已有 `.cx` 移植，活调用方已切到 `.cx`**：`fixtures/context_index_fixture.py`。`check.sh` 第 4 步改用 `.cx`，生成的目录树与原来逐文件相同，golden 仍然一致。
 - **已有 `.cx` 移植，`.py` 没有调用方**：`reload_candidate.py`，以及 probes 下的 `agent_loop_bound`、`agent_multi_action`、`context_preview`、`file_observation`、`net_timeout`、`reload_owner`、`reload_session`、`reload_state`。
-- **`.cx` 只移植了一部分，`.py` 没有调用方**：`message_send.py`、`reload_launcher.py`。见下面的 BLOCKED 一节。归档的 `.py` 是这两处唯一完整的参考实现。
+- **`.cx` 当时只移植了一部分，`.py` 没有调用方**：`message_send.py`、`reload_launcher.py`。两处都已在 2026-10-30 补完（见下面的 BLOCKED 一节）；归档的 `.py` 仍是对照用的参考实现。
 - **没有 `.cx` 移植、也不在任何门禁里的探针**：probes 下的 `claim_grounding`、`completion_contract`、`evidence_reconciliation`、`managed_handoff`、`owned_session`、`reload_runtime`、`resume_pending`、`task_context`、`task_working_set`、`tool_result`、`rejected_context`、`message_inbox`、`reload_launcher_lock`、`slice_env`、`reload_launcher`，以及它们共用的 `_flat.py`。归档没有让实跑的覆盖变少，但这些合同目前没有 `.cx` 测试，属于**覆盖缺口，不算 PASS**。
 
 ## BLOCKED：要走产品慢车道（2026-10-30 在 0.0.43 已装产品上实测）
@@ -40,8 +40,8 @@
 
 | 接口 | 卡住的 csih 功能 |
 | --- | --- |
-| `tcgetpgrp`、`socketpair`、`killpg`、`setsid` | `reload_launcher.cx` 的运行循环（`lr_run` 直接 fail） |
-| `openat`、`linkat`、`lockf` | `message_send.cx` 的 publish |
+| `tcgetpgrp`、`socketpair`、`killpg`、`setsid` | `reload_launcher.cx` 的运行循环（当时 `lr_run` 直接 fail；2026-10-30 已经 cx/sys 移植，见下） |
+| `openat`、`linkat`、`lockf` | `message_send.cx` 的 publish（2026-10-30 已经 cx/sys 移植，见下） |
 | `signal()`（没有 `rt_sigaction`） | csih 收不到外部信号；被 kill 时靠 `csih.sh` 恢复终端；探针桩没法忽略 SIGPIPE |
 
 补这些要改 `include/unistd.h`、`include/signal.h` 等携带头（`signal` 还要写信号返回跳板），会牵动 `kernel/` 生成物和产品重建，属于慢车道，不在 csih 快车道里做。源码里"missing in unisacc 0.0.39"的说法，在 0.0.43 上仍然成立。
@@ -53,5 +53,12 @@
   - 和归档的 `message_send.py` 逐例对照：published、already-published、内容冲突、锁忙、未知条目、inbox 是符号链接、相对路径这几种情况，回执、rc、原因、目录树、权限、信封字节全部一致。
   - 唯一的差异是会话目录过不了 `trusted()` 时：.py 的原因是 "filesystem error errno=None"，.cx 给的是具体原因，回执和 rc 相同。
   - 探针 `probes/message_publish.cx` 20 条；合同 message-send-publish 由 BLOCKED 转为 IMPLEMENTED。
-- `reload_launcher.cx` 的运行循环现在也可以改用这些接口移植，不必再等慢车道。这一部分还没做，在合同表里仍是 BLOCKED，等移植完成并实跑通过后再改。
+- **`reload_launcher.cx` 的运行循环已移植**（2026-10-30），对照归档的 `reload_launcher.py`：
+  - 前台控制终端检查（`sy_tcgetpgrp(0)==getpgid(0)`）、基线 termios 保存并在每条退出路径上以 TCSAFLUSH 恢复、supervisor flock、`launcher-events.jsonl`（键排序、分隔符与 `json.dumps(sort_keys=True)` 同字节）、socketpair 控制通道、actor 留在启动器的前台进程组并把子端 fd 传过去、构建在独立会话里跑且超时 55s 用 killpg 杀组、FREEZE/RELEASE/COMMIT/ACTIVATE/RETIRE 换手、失败回滚 RESUME、清理失败报 `cleanup unconfirmed`/BLOCKED。
+  - cx/sys 为此补了：proc 的 `sy_spawn_inherit`（同进程组、保留一个 fd、exec 失败回传 errno）、`sy_fork_session`（新会话子进程跑函数、stdout/stderr 分管道）、`sy_signal`；posix 的 `sy_tty_get`/`sy_tty_set`/`sy_tty_same`（内核 termios ioctl，不需要 `<termios.h>`）。`tools/check-cx-sys.cx` 87 条通过（Linux x86_64 实跑；arm64/macOS 调用号未实跑）。
+  - 构建不再起 python3 子进程，而是在 fork 出的会话首进程里直接调 reload_candidate 的 `build()`，stdout 与 CLI 同一份 JSON。
+  - 运行库的 `strerror` 表缺若干项（0.0.43 上 EAGAIN 是 "Unknown error"），启动器按符号自带了 Python 的文字（"Resource temporarily unavailable" 等）。
+  - 探针 `probes/reload_launcher_run.cx`：私有 tmux 窗格里跑启动器和真实 csih actor，覆盖初始构建+ACTIVATE、REQUEST 触发并提交的换手（旧 actor 退役、草稿带过去）、第二个启动器被 supervisor 锁拒绝、无 tty 被拒且锁不残留、COMMIT 失败回滚（handoff-failed、candidate-exited、RESUMED，旧 actor 继续收键）、`/exit` 后 rc 0 且 `stty -g` 前后相同。合同 reload-launcher-run 由 BLOCKED 转为 IMPLEMENTED。
+  - 已知限制：`reload_candidate.cx` 的 `build()` 用真编译器做不出 csih 候选——每条命令只有 14s（csih 冷编译约 50s，agent_cli 约 28s），而且命令行是 `-run ENTRY -o OUT`，当前 unisacc 把它当作"运行 ENTRY"而不是编译（实测输出 tui 的 usage）。探针因此给启动器一个回放编译器（复制已装的 csih 和探针编译的 agent_cli），冻结、两道闸、回执和校验仍是真跑。这一点要在 reload_candidate 里修，不在本次范围。
+  - 依赖启动器运行循环的其余归档探针（reload-launcher、reload-launcher-lock、managed-handoff、reload-runtime、task-context、tool-result、rejected-context、message-inbox）不再是 BLOCKED，改记 GAP：还没有 `.cx` 移植，属覆盖缺口，不算 PASS。
 - `signal()` 的内核投递不在这批里：它要 `rt_sigaction` 加信号返回跳板，仍然 BLOCKED。
