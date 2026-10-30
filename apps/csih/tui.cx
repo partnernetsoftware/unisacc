@@ -3889,20 +3889,40 @@ static void tui_print_event(const char *line, void *ud) {
    the same per-directory transcript as the TUI, so -p and the TUI continue one
    conversation. stdout: the answer; stderr: the steps and, on failure, the
    reason. Exit 0 when the turn completed (the review accepted it), 1 when it did
-   not, 64 for an empty prompt. */
+   not, 64 for an empty prompt or a bad option.
+   Options before the prompt, since nobody is there to type /perm or /allow:
+     --perm read|work|any   the permission tier (default work, as in the TUI)
+     --allow N              let the first N dangerous commands of this turn run
+                            (default 0: they are blocked and reported) */
 static int tui_print_mode(int argc, char **argv) {
     const char *endpoint = csih_env("CSIH_ENDPOINT", "CDSH_ENDPOINT");
     const char *model    = csih_env("CSIH_MODEL", "CDSH_MODEL");
     const char *cwd      = csih_env("CSIH_CWD", "CDSH_CWD");
     static char prompt[TUI_INPUT_MAX];
-    char journal[512], real_cwd[1024];
+    char journal[512], real_cwd[1024], extra[400];
     agent_result r;
     long k = 0;
-    int i;
+    int i, allowed = 0;
     if (!endpoint) endpoint = "https://api.deepseek.com/v1/chat/completions";
     if (!model)    model = "deepseek-chat";
     if (!cwd) { if (!tui_getcwd(real_cwd, (int)sizeof real_cwd)) zs_set(real_cwd, (long)sizeof real_cwd, "."); cwd = real_cwd; }
-    for (i = 2; i < argc && k < (long)sizeof prompt - 2; i++) {
+    agent_allow_danger(0);
+    for (i = 2; i + 1 < argc && argv[i][0] == '-' && argv[i][1] == '-'; i += 2) {
+        if (!zs_cmp(argv[i], "--perm")) {
+            static const char *const tiers[3] = { "read", "work", "any" };
+            int t;
+            for (t = 0; t < 3 && zs_cmp(argv[i + 1], tiers[t]); t++) {}
+            if (t == 3) { sy_eprintf("csih -p: --perm takes read, work or any\n"); return 64; }
+            agent_set_perm(t);
+        } else if (!zs_cmp(argv[i], "--allow")) {
+            char *end = 0;
+            long n = tx_strtol(argv[i + 1], &end, 10);
+            if (!end || *end || n < 0 || n > 100) { sy_eprintf("csih -p: --allow takes a count 0..100\n"); return 64; }
+            agent_allow_danger((int)n);
+            allowed = (int)n;
+        } else { sy_eprintf("csih -p: unknown option %s (--perm, --allow)\n", argv[i]); return 64; }
+    }
+    for (; i < argc && k < (long)sizeof prompt - 2; i++) {
         int n = tx_snprintf(prompt + k, sizeof prompt - (size_t)k, "%s%s", k ? " " : "", argv[i]);
         if (n < 0) break;
         k += n;
@@ -3926,7 +3946,14 @@ static int tui_print_mode(int argc, char **argv) {
     }
     if (agent_transcript_path(journal, sizeof journal) != 0)
         tx_snprintf(journal, sizeof journal, "/tmp/csih-agent-%d.jsonl", (int)sy_pid());
-    r = agent_run_cb(prompt, journal, endpoint, model, cwd, NULL, tui_print_event, NULL);
+    /* The TUI's /allow is followed by the user resending the command; here the
+       model only sees a history where that command was blocked, and does not try
+       again. Tell it the caller allowed this turn's dangerous commands. */
+    if (allowed > 0)
+        tx_snprintf(extra, sizeof extra,
+                    "本轮调用方已通过 --allow 放行至多 %d 条危险命令（相当于 /allow）。任务需要时直接执行，不要因先前被拦截就不执行。",
+                    allowed);
+    r = agent_run_cb(prompt, journal, endpoint, model, cwd, allowed > 0 ? extra : NULL, tui_print_event, NULL);
     if (r.answer[0]) sy_printf("%s\n", r.answer);
     if (!r.ok) { sy_eprintf("csih: not completed: %s\n", r.reason[0] ? r.reason : "(no reason)"); return 1; }
     return 0;

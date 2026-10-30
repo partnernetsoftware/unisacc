@@ -78,6 +78,10 @@ sh apps/csih/csih.com keyprobe
 - 评审验收通过时退出码为 0；没有完成为 1，原因打到 stderr；提示词为空时为 64。
 - 和 TUI 共用 endpoint、模型、工作目录，也共用按目录分开的会话记录，所以 `-p` 和交互模式接着的是同一段对话。
 - 没有 DeepSeek key 时直接说明缺什么，不会发出请求再收到一个 401。
+- 没人能输入 `/perm`、`/allow`，所以在提示词前用参数代替：
+  - `--perm read|work|any`：权限档，默认 work。
+  - `--allow N`：本轮放行前 N 条危险命令，默认 0，即拦下并报告。设了这个参数时，系统提示里会告诉模型已经放行，否则它看到历史里被拦过，就不会再试。
+  - 例：`sh csih.com -p --allow 1 "清掉 build 目录"`。
 
 csih.com 是自包含的二进制，不需要 `apps/csih` 源码树，也不读 `csih.sh` 的产物戳。在 macOS 上和 unisacc.com 一样，要用 `sh csih.com` 启动（直接 `execve` 一个 APE 会得到 ENOEXEC）。
 

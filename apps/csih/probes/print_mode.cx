@@ -12,6 +12,7 @@
  *   cd apps/csih && sh ../../unisacc.com probes/print_mode.cx
  * Cases (expected values from tui_print_mode's comment, 2026-10-30):
  *   empty prompt (no args, stdin /dev/null)  rc 64, usage on stderr, stdout empty
+ *   --perm bogus / --allow -1                rc 64, what the option takes
  *   no key, DeepSeek endpoint                rc 1, "no DeepSeek key" on stderr, stdout empty
  *   local agent-stub (exec, then a bare answer)
  *                                            stdout is the answer only (完成了), the exec
@@ -89,6 +90,22 @@ int main(void) {
     tx_snprintf(env, sizeof env, "export HOME='%s';", home);
     rc = run_p(env, 0, out, sizeof out, err, sizeof err);
     check(rc == 64 && has(err, "usage: csih -p") && out[0] == 0, "empty prompt: rc 64, usage on stderr, nothing on stdout");
+
+    /* 1b. options: a bad --perm or --allow is a usage error before any request */
+    {
+        char script[600];
+        char *args[4];
+        int r2 = -1;
+        args[0] = "-p"; args[1] = "--perm"; args[2] = "bogus"; args[3] = "x";
+        tx_snprintf(script, sizeof script, "export HOME='%s'; exec \"$0\" \"$@\" </dev/null 2>'%s'", home, errp);
+        u_spawn_sh(bin, args, 4, script, out, sizeof out, &r2);
+        { size_t en = 0; char *e = cx_read(errp, &en); tx_snprintf(err, sizeof err, "%s", e ? e : ""); }
+        check(r2 == 64 && has(err, "--perm takes read, work or any"), "--perm bogus: rc 64 and what it takes");
+        args[1] = "--allow"; args[2] = "-1";
+        u_spawn_sh(bin, args, 4, script, out, sizeof out, &r2);
+        { size_t en = 0; char *e = cx_read(errp, &en); tx_snprintf(err, sizeof err, "%s", e ? e : ""); }
+        check(r2 == 64 && has(err, "--allow takes a count"), "--allow -1: rc 64 and what it takes");
+    }
 
     /* 2. no key for the DeepSeek endpoint */
     tx_snprintf(env, sizeof env, "unset DEEPSEEK_API_KEY CSIH_ENDPOINT CDSH_ENDPOINT; export HOME='%s';", home);
