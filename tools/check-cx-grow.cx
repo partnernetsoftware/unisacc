@@ -1,0 +1,67 @@
+/* Checks cx/mem/grow.cx: sh ./unisacc.com tools/check-cx-grow.cx; exit 1 on any FAIL. */
+#pragma unisa use mem.grow
+#pragma unisa use mem.heap
+static int bad;
+static void ok(int c, const char *name) { printf("%s\t%s\n", c ? "PASS" : "FAIL", name); if (!c) bad = 1; }
+int main(void) {
+    mg_buf b;
+    mg_init(&b);
+    ok(b.data == 0 && b.len == 0 && b.cap == 0, "init-zero");
+    ok(mg_push(&b, 'a') == 0 && mg_push(&b, 'b') == 0 && mg_push(&b, 'c') == 0, "push-three");
+    ok(b.len == 3 && b.cap >= 3 && b.data[0] == 'a' && b.data[2] == 'c', "push-content");
+    ok(mg_append(&b, "def", 3) == 0 && b.len == 6 && b.data[5] == 'f', "append");
+    ok(mg_append(&b, 0, 0) == 0 && b.len == 6, "append-empty");
+    ok(mg_append(&b, 0, 1) == -1 && b.len == 6, "append-null-nonzero-refused");
+    ok(mg_reserve(&b, 100) == 0 && b.cap >= 100, "reserve-grow");
+    ok(mg_reserve(&b, 0) == 0 && mg_reserve(&b, 50) == 0 && b.len == 6, "reserve-no-shrink-no-len-change");
+    ok(mg_push(0, 'x') == -1 && mg_append(0, "x", 1) == -1, "null-buf-refused");
+    ok(mg_reserve(&b, -1) == -1, "reserve-negative-refused");
+    {
+        /* amortized: 1000 pushes stay linear, not 1000 reallocs */
+        mg_buf g; int i, all = 1;
+        long cap0;
+        mg_init(&g);
+        for (i = 0; i < 1000; i++) if (mg_push(&g, (i & 255))) all = 0;
+        cap0 = g.cap;
+        ok(all && g.len == 1000 && g.cap < 2000, "amortized-doubling");
+        ok(g.data[0] == 0 && g.data[999] == (999 & 255), "amortized-content");
+        (void)cap0;
+        mg_free(&g);
+        ok(g.data == 0 && g.len == 0 && g.cap == 0, "free-zeros");
+        mg_free(&g);  /* double free is a no-op */
+    }
+    {
+        /* append with move semantics: source may overlap the tail */
+        mg_buf h; int i;
+        mg_init(&h);
+        for (i = 0; i < 8; i++) mg_push(&h, (i & 1));
+        ok(mg_append(&h, h.data, 4) == 0 && h.len == 12 && h.data[8] == 0, "append-overlap");
+        mg_free(&h);
+    }
+    {
+        /* mg_move: ownership transfer, the old handle is invalidated */
+        mg_buf s, d;
+        mg_init(&s); mg_init(&d);
+        mg_push(&s, 'x'); mg_push(&s, 'y');
+        ok(mg_move(&d, &s) == 0 && d.len == 2 && d.data[0] == 'x' && d.data[1] == 'y', "move-transfers");
+        ok(s.data == 0 && s.len == 0 && s.cap == 0, "move-zeros-source");
+        mg_free(&s);  /* no-op: source already zeroed */
+        mg_free(&d);
+        ok(mg_move(&d, &d) == 0, "move-self-noop");
+        ok(mg_move(0, &s) == -1 && mg_move(&d, 0) == -1, "move-null-refused");
+    }
+    {
+        /* mg_take: hand the block out, caller becomes the owner */
+        mg_buf t; unsigned char *p; long n, c;
+        mg_init(&t);
+        mg_append(&t, "abc", 3);
+        ok(mg_take(&t, &p, &n, &c) == 0 && n == 3 && p[0] == 'a' && p[2] == 'c', "take-hands-out");
+        ok(t.data == 0 && t.len == 0 && t.cap == 0, "take-zeros");
+        ok(mg_take(&t, 0, &n, &c) == -1, "take-null-refused");
+        if (p) mm_free(p);
+    }
+    mg_free(&b);
+    printf("%s\tcheck-cx-grow\n", bad ? "FAIL" : "PASS");
+    printf("CX_GROW\tfailed=%d\n", bad);
+    return bad;
+}
