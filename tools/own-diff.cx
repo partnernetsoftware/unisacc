@@ -69,32 +69,42 @@ int main(int argc, char **argv) {
         if (!base) od_die("cannot run git show", file);
     }
     b = split(base, bn, &nb); w = split(work, (long)wn, &nw);
-    for (i = 0; i < nw; i++)   /* pair equal lines; what is left over is added (work) or removed (base) */
+    long *pair = mm_alloc((nw + 1) * (long)sizeof(long)), *after = mm_alloc((nw + 1) * (long)sizeof(long)), last = -1;
+    int *rep = mm_alloc((nb + 1) * (long)sizeof(int));
+    if (!pair || !after || !rep) od_die("out of memory", 0);
+    for (i = 0; i < nw; i++) {   /* pair equal lines; what is left over is added (work) or removed (base) */
+        pair[i] = -1;
         for (j = 0; j < nb; j++)
-            if (!b[j].used && tx_same(w[i].p, w[i].n, b[j].p, b[j].n)) { b[j].used = 1; w[i].used = 1; break; }
-    for (i = 0; i < nw; i++) if (!w[i].used) { if (mine(&w[i], argv + a + 1, nk)) own++; else { foreign++; printf("FOREIGN\t+\t%.*s\n", (int)w[i].n, w[i].p); } }
-    for (j = 0; j < nb; j++) if (!b[j].used) { if (mine(&b[j], argv + a + 1, nk)) own++; else { foreign++; printf("FOREIGN\t-\t%.*s\n", (int)b[j].n, b[j].p); } }
-    if (emit) {
-        /* the base with only the own changes: own removed lines dropped, foreign removed lines kept, own added
-           lines placed after the base line their preceding unchanged work line was paired with, foreign added
-           lines left out.  This is what commit-own commits for FILE. */
-        long *pair = mm_alloc((nw + 1) * (long)sizeof(long)), *after = mm_alloc((nw + 1) * (long)sizeof(long)), last = -1;
-        int fd;
-        if (!pair || !after) od_die("out of memory", 0);
-        for (i = 0; i < nw; i++) pair[i] = -1;
-        {   int *taken = mm_alloc((nb + 1) * (long)sizeof(int));   /* redo the pairing, remembering which base line */
-            if (!taken) od_die("out of memory", 0);
-            for (j = 0; j < nb; j++) taken[j] = 0;
-            for (i = 0; i < nw; i++) for (j = 0; j < nb; j++)
-                if (!taken[j] && tx_same(w[i].p, w[i].n, b[j].p, b[j].n)) { taken[j] = 1; pair[i] = j; break; }
+            if (!b[j].used && tx_same(w[i].p, w[i].n, b[j].p, b[j].n)) { b[j].used = 1; w[i].used = 1; pair[i] = j; break; }
+    }
+    for (i = 0; i < nw; i++) { if (pair[i] >= 0) last = pair[i]; after[i] = last; }
+    /* a removed base line without a key is still own when an own added line takes its slot (the line was
+       edited: the old text lacks the key the new text has) */
+    for (j = 0; j < nb; j++) rep[j] = 0;
+    for (j = 0, last = -1; j <= nb; j++) {   /* per slot (removed lines between two kept base lines): own added lines
+                                                beyond the slot's keyed removed lines replace that many unkeyed ones */
+        if (j < nb && !b[j].used) continue;
+        {   long s0 = last + 1, k2; int added = 0, keyed = 0, surplus;
+            for (i = 0; i < nw; i++) if (pair[i] < 0 && after[i] == last && mine(&w[i], argv + a + 1, nk)) added++;
+            for (k2 = s0; k2 < j; k2++) if (mine(&b[k2], argv + a + 1, nk)) keyed++;
+            surplus = added - keyed;
+            for (k2 = s0; k2 < j && surplus > 0; k2++) if (!mine(&b[k2], argv + a + 1, nk)) { rep[k2] = 1; surplus--; }
         }
-        for (i = 0; i < nw; i++) { if (pair[i] >= 0) last = pair[i]; after[i] = last; }
+        last = j;
+    }
+    for (i = 0; i < nw; i++) if (!w[i].used) { if (mine(&w[i], argv + a + 1, nk)) own++; else { foreign++; printf("FOREIGN\t+\t%.*s\n", (int)w[i].n, w[i].p); } }
+    for (j = 0; j < nb; j++) if (!b[j].used) { if (rep[j] || mine(&b[j], argv + a + 1, nk)) own++; else { foreign++; printf("FOREIGN\t-\t%.*s\n", (int)b[j].n, b[j].p); } }
+    if (emit) {
+        /* the base with only the own changes: own removed lines (and lines own lines replaced) dropped, foreign
+           removed lines kept, own added lines placed after the base line their preceding unchanged work line was
+           paired with, foreign added lines left out.  This is what commit-own commits for FILE. */
+        int fd;
         fd = sy_open_new(emit, 0644);
         if (fd < 0) od_die("cannot write", emit);
         for (i = 0; i < nw; i++)   /* own added lines that come before every unchanged line */
             if (pair[i] < 0 && after[i] < 0 && mine(&w[i], argv + a + 1, nk)) { sy_write_all(fd, w[i].p, w[i].n); sy_write_all(fd, "\n", 1); }
         for (j = 0; j < nb; j++) {
-            if (b[j].used || !mine(&b[j], argv + a + 1, nk)) { sy_write_all(fd, b[j].p, b[j].n); sy_write_all(fd, "\n", 1); }
+            if (b[j].used || (!rep[j] && !mine(&b[j], argv + a + 1, nk))) { sy_write_all(fd, b[j].p, b[j].n); sy_write_all(fd, "\n", 1); }
             for (i = 0; i < nw; i++)
                 if (pair[i] < 0 && after[i] == j && mine(&w[i], argv + a + 1, nk)) { sy_write_all(fd, w[i].p, w[i].n); sy_write_all(fd, "\n", 1); }
         }
