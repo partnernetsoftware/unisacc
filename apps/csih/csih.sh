@@ -10,9 +10,31 @@ UNI=${UNISACC:-$REPO/unisacc.com}
 OUT=$REPO/out/csih-e2e-bin
 BIN=$OUT/csih
 cd "$ROOT" || exit 1
-src_digest() {
-    ls *.cx *.h 2>/dev/null | LC_ALL=C sort | xargs cat | sha256sum | cut -d' ' -f1
+# The product's inputs only: the module closure unisacc itself plans for
+# csih.cx (column 2 of -cx-plan), the root .h files the modules #include, and
+# the compiler. Hashing every *.cx made a change to check.cx or a *_cli.cx
+# rebuild the product (~50s); a new compiler did not.
+src_files() {
+    plan=$(sh "$UNI" -cx-plan "$ROOT/csih.cx" 2>/dev/null | cut -f2) || return 1
+    [ -n "$plan" ] || return 1
+    { printf '%s\n' $plan; ls *.h 2>/dev/null; } | LC_ALL=C sort -u
+    echo "$UNI"
 }
+src_digest() {
+    files=$(src_files) || { echo "csih: cannot plan csih.cx with $UNI" >&2; return 1; }
+    # names relative to apps/csih (the compiler as "unisacc"): a moved checkout is not stale
+    for f in $files; do
+        if [ "$f" = "$UNI" ]; then echo unisacc; else printf '%s\n' "${f#$ROOT/}"; fi
+        cat "$f" || return 1
+    done | sha256sum | cut -d' ' -f1
+}
+if [ "$1" = digest ]; then
+    files=$(src_files) || { echo "csih: cannot plan csih.cx with $UNI" >&2; exit 1; }
+    for f in $files; do echo "file $f"; done
+    d=$(src_digest) || exit 1
+    echo "digest $d"
+    exit 0
+fi
 if [ $# -eq 0 ]; then
     set -- agent
 fi

@@ -28,7 +28,7 @@ mind 的 JSON：`{"act":"mind","op":"add|read","target":"tree|palace","text":"..
 
 ## 怎么跑
 
-日用（2026-10-29）：`sh apps/csih/csih.sh prepare` 一次（源 `*.cx *.h` 摘要变才重建 `out/csih-e2e-bin/csih`，未变秒返）；之后 `csih.sh`（默认 agent）或 `csih.sh run` 秒开，在调用者当前目录工作。产物缺或陈旧时具名报错，`CSIH_COLD=1` 才冷 `-run`。密钥：`DEEPSEEK_API_KEY` 优先，否则 `~/env.jsonl` deepseek 行的 `api_key`，再退 `key`；`csih.sh keyprobe` 只报长度与来源。模型默认 `deepseek-chat`，`CSIH_MODEL` 覆盖。下面是迁移前的历史说明，`.c` 路径已换成 `.cx`。
+日用（2026-10-29）：`sh apps/csih/csih.sh prepare` 一次（产品源摘要变了才重建 `out/csih-e2e-bin/csih`，没变立即返回。产品源指三样：`unisacc.com -cx-plan csih.cx` 给出的模块闭包、根目录的 `.h`、编译器本身；`csih.sh digest` 列出参与的文件和摘要）；之后 `csih.sh`（默认 agent）或 `csih.sh run` 秒开，在调用者当前目录工作。产物缺或陈旧时具名报错，`CSIH_COLD=1` 才冷 `-run`。密钥：`DEEPSEEK_API_KEY` 优先，否则 `~/env.jsonl` deepseek 行的 `api_key`，再退 `key`；`csih.sh keyprobe` 只报长度与来源。模型默认 `deepseek-chat`，`CSIH_MODEL` 覆盖。下面是迁移前的历史说明，`.c` 路径已换成 `.cx`。
 
 不要 `gcc` / `cc` / `clang`。macOS 对 APE 直接 `execve` 得到 ENOEXEC，所以用 `/bin/sh` 当加载器。开发期入口是同目录的 `csih.sh`：`unisacc.com csih.c` 加上文件表。`csih.c` 含 `tui.c`，不再单独占一个翻译单元。`~/.csih/run.c` 读密钥后执行 `csih.sh agent`。`bin/llm` 和 `bin/rawcsih` 只认 `CSIH_*`。
 
@@ -145,6 +145,12 @@ agent 模式新增 `/help`、`/status`、`/clear`，均只在本地处理、不�
 - **第十批已落地（2026-10-29）**：忙碌行。原来执行命令时一直显示「等模型」；现在收到 exec 行（命令执行前发出）就显示 `跑命令 <命令>`，下一次请求在途（`net_in_flight()`）时切回「等模型」。文案从 `请求中 等模型 3秒 7745词元 上传 32839字节 已收 574字节 hit 1152 miss 6561` 改为 `⏳ 等模型 3秒 · 7745词元 · ↑32.1KB 已收574B · 缓存命中15%`，保留「已收」二字（已有断言依赖它）。selftest：`busy line names the running command and reads sizes`；tmux 实测已见切换。原来 exec 同步执行时秒数不走、界面不刷新，第十一批已解决。
 - **第四十二批已落地（2026-10-29）**：状态行上色：`✓` 绿、`◐` 黄、`✗` 和 `│ blocked:` 红、`项目>` 青。颜色只在写终端时加（`tui_put_line`），帧本身仍是纯文本，宽度计算、差量比较和所有读取帧的测试都不受影响；差量刷新改用 tui 自己的循环，`render.cx` 的 `frame_diff` 没动。遵守 `NO_COLOR`，也可以用 `CSIH_COLOR=0` 关闭。写屏缓冲按每行 32 字节预留，满屏彩色行也放得下。selftest：`status rows are coloured on output, frames stay plain`（设了 NO_COLOR 时打印 skip）；tmux `capture-pane -e` 实测 `◐` 行带 `ESC[33m`。
   - 观察（不是本批改动引起）：一道不用工具的算术题，这次评审判为「未验证」（理由是没有工具记录可核实）；之前同类问题判过「已验收（answer_only）」。评审对纯问答的判法不稳定，第四十三批处理。
+- **第六十批已落地（2026-10-30）**：`csih.sh prepare` 的源摘要只算产品真正的输入。
+  - 原来算的是根目录全部 `*.cx *.h`，所以只改 `check.cx` 或某个 `*_cli.cx` 也要重建产品，约 50 秒。上一批的验收第一次就是因此超时。反过来，换了编译器却不会重建。
+  - 现在的摘要只算三样：`unisacc.com -cx-plan csih.cx` 的第 2 列（31 个模块）、根目录 14 个 `.h`、`unisacc.com` 的内容。文件名按相对 apps/csih 记，所以检出目录换了位置也不算陈旧。
+  - 新增 `csih.sh digest`，列出参与的文件和摘要。
+  - 实测：在仓外副本里改 `check.cx` 和 `probes/net_retry.cx`，摘要不变；改 `shell.cx`，摘要变。整个 `csih.sh keyprobe` 约 165ms，含 `-cx-plan` 约 90ms。
+  - 定义换了之后，已装产品重新构造了一次再盖章，没有只改戳。
 - **第五十九批已落地（2026-10-30）**：去掉 agent 每一步在 TUI 循环里的空等。新探针 `probes/turn_latency.cx`：3 个已装 TUI 各接一个本地桩，桩先回一条 `echo` exec，再回答复；桩记下每个请求的时刻，取 3 次的中位数。
   - 基线：Enter 到第 1 个请求 263ms，第 1 到第 2 个请求 930ms（中间的 exec 只要几毫秒），Enter 到答复上屏 1.45 秒。桩是即时回复的，这些时间几乎全花在 csih 自己身上。
   - 原因有两处：
