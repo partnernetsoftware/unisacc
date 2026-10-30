@@ -43,3 +43,21 @@ src/host.cx:265:50: error: unknown identifier
 ```
 
 源文件同一行写的是 `O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW`。前三个已经换成数字，`O_CLOEXEC` 没有。后面四条是 `src/host.cx:622` 的 `O_NONBLOCK`、`src/drive.cx:908` 的 `environ`、`src/sys/mem.cx:63` 和 `:69` 的 `PROT_READ`。没有 PE，没有 P3，没有执行。这一刀不改这些行。
+
+## 收进 cx/sys 后再跑 win（2026-10-30）
+
+五条都收进 `cx/sys`，上层不再写这些名字。`90fbd3f37b` 是 `cx/sys/fs.cx`、`env.cx`、`mem.cx`：`sy_open_new`、`sy_open_read`、`sy_env_vec`，保护函数改传种类。Linux 上原来的标志值留在 static 帮手里。`src/host.cx` 改调前两个，`src/drive.cx` 改调 `sy_env_vec`。调用处只声明，没有 `use sys.fs`：`drive.o` 经 `runcache` 已经有这些函数体。
+
+`check-cx-sys` 是 100/0。`check-cx-sys-net`、`spawn`、`ffi`、`guard` 都是 failed=0。
+
+Linux 候选不是逐字节相同。`out/grk-winfix/candidate` 2980140 字节，sha256 `96369ef9fb483cb74498f65158933971a7e0f372f100428f20252755a89eb165`。`tests/runcache.cx` 对这只是 12/0，冷 563 ms，命中 44 ms。对拍切片写出 18 格，全是 SAME：要求的前 10 格（`do.c` 的 `-E`/`-S`/`-run`，六个目标的 `-o`，再加 `fact.c -E`）都在里面，后面 `fact.c` 又有 8 格 SAME。LEFT 130。切片自己退出 2，是 18 秒到了，不是有一格不同。
+
+同一只已装产品，外层 `tools/bound 55`，`UNISACC_RR_TIME=1`，32 个源、不带 `hostnative.cx`，`-b win/x86_64 -o out/grk-win-o/slice-win-x86_64`。墙钟 13.761 秒，退出 1。units 推理退出 0，e3 推理退出 1。标准错误三条，没有行号：
+
+```
+unisacc: error: undefined function 'readlink'
+unisacc: error: undefined function 'stat'
+unisacc: error: undefined function 'getuid'
+```
+
+这三处调用是 `src/host.cx:80` 的 `readlink("/proc/self/exe")`、`cx/sys/fs.cx:154` 的 `stat`（`sy_stat`）、`cx/sys/env.cx:49` 的 `getuid`（`sy_uid`）。没有文件，没有 PE。这一次没有再改。

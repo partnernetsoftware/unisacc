@@ -2,8 +2,10 @@
 #pragma unisa use sys.mem
 #pragma unisa use sys.dl
 /* Host file and clock. time.h is not in the prelude (edition 2).
-   Open flags come from the prelude. mmap and the loader symbols are
-   sys.mem and sys.dl. This file has no #include.
+   Exclusive create and nonblocking read go through sys.fs (sy_open_new,
+   sy_open_read), declared at the call: drive.o already contains those
+   bodies via runcache, and a second use would define sy_fstat twice.
+   mmap and the loader symbols are sys.mem and sys.dl. This file has no #include.
    clock_gettime is declared inside hs_ns so this module does not export it.
    core_host_panic and core_host_fetch are the execution core's host hooks.
    Drive-supplied CLI resources win, then package resources (predefines and
@@ -245,6 +247,7 @@ static int hs_out_commit(const char *path, const unsigned char *data, long lengt
     int fd;
     int n;
     int bad;
+    int sy_open_new(const char *, int);
     bad = hs_out_arg(data, length, why, cap);
     if (bad) return bad;
     plen = 0;
@@ -262,9 +265,9 @@ static int hs_out_commit(const char *path, const unsigned char *data, long lengt
             hs_why(why, cap, "cannot open output");
             return 1;
         }
-        fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0755);
+        fd = sy_open_new(tmp, 0755);
         if (fd >= 0) break;
-        if (errno != EEXIST) {
+        if (fd != -EEXIST) {
             free(tmp);
             hs_why(why, cap, "cannot open output");
             return 1;
@@ -618,9 +621,10 @@ int hs_cxm_rd(char *path, char *buf, int cap) {
     int bad;
     struct stat st;
     ssize_t z;
+    int sy_open_read(const char *);
     if (!path || !buf || cap <= 0) return -3;
-    fd = open(path, O_RDONLY | O_NONBLOCK);
-    if (fd < 0) return errno == ENOENT ? -1 : -3;
+    fd = sy_open_read(path);
+    if (fd < 0) return fd == -ENOENT ? -1 : -3;
     if (fstat(fd, &st) || !S_ISREG(st.st_mode)) {
         close(fd);
         return -3;
