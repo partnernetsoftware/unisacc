@@ -33,6 +33,7 @@
 #pragma unisa module output
 #pragma unisa use sys.fs
 #pragma unisa use mem.heap
+#pragma unisa use sys.proc
 
 static void cxo_setwhy(char *why, long cap, const char *msg) {
     long i;
@@ -99,21 +100,98 @@ static int cxo_direct(const char *path, const void *data, long length, char *why
     return 0;
 }
 
+/* Bytes before the first NUL, or -1 when none appears within 1<<20.
+   Past that ceiling the temporary name is refused, same as cannot open.
+   The ceiling stays inside the function: a file-scope enum under #else
+   is a conditional module export. */
+static long cxo_zlen(const char *s) {
+    long i;
+    for (i = 0; i < (1 << 20); i++) if (!s[i]) return i;
+    return -1;
+}
+
+/* Decimal digits of v, least-significant digit first. rev holds 24 bytes. */
+static int cxo_digits(long v, char *rev) {
+    unsigned long u;
+    int n;
+    int neg;
+    neg = v < 0;
+    u = neg ? (unsigned long)0 - (unsigned long)v : (unsigned long)v;
+    n = 0;
+    do {
+        rev[n] = (char)('0' + (int)(u % 10UL));
+        n = n + 1;
+        u = u / 10UL;
+    } while (u);
+    if (neg) { rev[n] = '-'; n = n + 1; }
+    return n;
+}
+
+/* Same spelling as the old snprintf: the directory prefix, then
+   .unisacc-<pid>-<attempt>.tmp. Returns the byte count without the NUL,
+   or -1 when the name does not fit in cap. */
+static int cxo_tmpname(char *dst, size_t cap, const char *path, int directory, int pid, int attempt) {
+    char rev[24];
+    size_t at;
+    int nd;
+    int i;
+    const char *mid;
+    const char *tail;
+    mid = ".unisacc-";
+    tail = ".tmp";
+    if (directory < 0 || (size_t)directory >= cap) return -1;
+    for (i = 0; i < directory; i++) dst[i] = path[i];
+    at = (size_t)directory;
+    for (i = 0; mid[i]; i++) {
+        if (at + 1 >= cap) return -1;
+        dst[at] = mid[i];
+        at = at + 1;
+    }
+    nd = cxo_digits((long)pid, rev);
+    for (i = nd - 1; i >= 0; i--) {
+        if (at + 1 >= cap) return -1;
+        dst[at] = rev[i];
+        at = at + 1;
+    }
+    if (at + 1 >= cap) return -1;
+    dst[at] = '-';
+    at = at + 1;
+    nd = cxo_digits((long)attempt, rev);
+    for (i = nd - 1; i >= 0; i--) {
+        if (at + 1 >= cap) return -1;
+        dst[at] = rev[i];
+        at = at + 1;
+    }
+    for (i = 0; tail[i]; i++) {
+        if (at + 1 >= cap) return -1;
+        dst[at] = tail[i];
+        at = at + 1;
+    }
+    if (at >= cap) return -1;
+    dst[at] = 0;
+    return (int)at;
+}
+
 static int cxo_transaction(const char *path, const void *data, long length, char *why, long whycap) {
     size_t cap;
     char *tmp;
-    const char *slash;
+    long plen;
+    long slash;
+    long i;
     int directory, attempt, fd, n, bad;
     bad = cxo_arg(data, length, why, whycap);
     if (bad) return bad;
-    cap = strlen(path) + 80;
+    plen = cxo_zlen(path);
+    if (plen < 0) { cxo_setwhy(why, whycap, "cannot open output"); return 1; }
+    cap = (size_t)plen + 80;
     tmp = mm_alloc(cap);
     if (!tmp) { cxo_setwhy(why, whycap, "cannot open output"); return 1; }
-    slash = strrchr(path, '/');
-    directory = slash ? (int)(slash - path + 1) : 0;
+    slash = -1;
+    for (i = 0; i < plen; i++) if (path[i] == '/') slash = i;
+    directory = slash >= 0 ? (int)(slash + 1) : 0;
     fd = -1;
     for (attempt = 0; attempt < 100; attempt = attempt + 1) {
-        n = snprintf(tmp, cap, "%.*s.unisacc-%ld-%d.tmp", directory, path, (long)getpid(), attempt);
+        n = cxo_tmpname(tmp, cap, path, directory, sy_pid(), attempt);
         if (n < 0 || (size_t)n >= cap) { mm_free(tmp); cxo_setwhy(why, whycap, "cannot open output"); return 1; }
         fd = sy_open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0755);
         if (fd >= 0) break;
