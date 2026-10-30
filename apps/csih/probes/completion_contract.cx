@@ -1,0 +1,1128 @@
+#pragma unisa use text.text
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.net
+#pragma unisa use sys.time
+/*
+ * completion_contract.cx — native protocol hard gates of the csih agent;
+ * ported from the archived probes/completion_contract.py
+ * (archive/reference-py/apps/csih/probes/). Scripted acceptance is not
+ * semantic proof: the accepted/rejected judge answers test the structural
+ * gates only, not semantic detection of a false completion.
+ *   cd apps/csih && sh ../../unisacc.com -run probes/completion_contract.cx
+ * Last line: "completion_contract: PASS (0 failed)" or FAIL with the count;
+ * exit 0 only when every case passes.
+ *
+ * Cases and assertions are the python original's (31 cases: 17 protocol
+ * cases, 13 judge-feedback cases, context-capacity), plus its build gate,
+ * selftest and source freeze. Mechanical differences:
+ *  - the agent is the injected source copy run as `<compiler copy> -run
+ *    source/agent_cli.cx -- ...` from the fixed per-uid work tree
+ *    SCRATCH/csih-probe-build-UID/completion_contract (SCRATCH: PROBE_SCRATCH,
+ *    else TMPDIR, else /tmp): unisacc's -run cache is keyed by cwd + root path
+ *    + content, so only the first run after a source change compiles (~28s);
+ *    every case still runs. The build gate is `-- build-check` (rc 64, the
+ *    usage line, empty stderr), as in probes/file_observation.cx. The process
+ *    cwd is therefore the work tree; each case's own cwd is its CSIH_CWD.
+ *  - the injected `required-agent` / `context-capacity` entries are the
+ *    original's, inserted after main's brace of the copied agent_cli.cx.
+ *  - the scripted model is served in this process (one loopback listener per
+ *    case, polled while the agent runs); the timeout kills the agent's group.
+ *  - the copy and the freeze cover the app's .c/.h/.inc/.cx regular files;
+ *    symlinked directories (probes/sys, probes/text, tests/mem, tests/text:
+ *    links to cx/) are skipped where the original asserted there were none.
+ *  - the selftest HOME is under <repo>/out/ (as file_observation.cx): the
+ *    agent selftest's sandbox keeps /tmp writable, so its "home outside cwd
+ *    is read-only" row cannot hold for a HOME under the temp root.
+ *  - "x in json.dumps(...)" is a search of the decoded strings (keys and
+ *    values) of the parsed document; the needles have no JSON-escaped bytes.
+ *  - stdout "�" (python decoded it with errors='replace'): a U+FFFD in
+ *    the bytes or any invalid UTF-8.
+ *  - no --receipt file is written.
+ * Upper root: no #include, no direct libc calls (cx/sys, cx/text, prelude).
+ */
+
+#define POOL_CAP (96L << 20)
+#define MAXREQ 32
+#define MAXIDS 64
+
+static char g_app[4096], g_repo[4096], g_probe_src[4300], g_unisacc[4300];
+static char g_root[1200], g_src[1300], g_comp[1300], g_selfhome[4400];
+static long g_deadline;
+static int g_failed;
+static char g_why[1200];
+#define NEED(c, ...) do { if (!(c)) { snprintf(g_why, sizeof g_why, __VA_ARGS__); goto fail; } } while (0)
+
+/* ---------- pool (reset per case; never freed) ---------- */
+static char g_pool[POOL_CAP];
+static long g_used;
+static void *pa(long n) {
+    char *p;
+    long i;
+    n = (n + 15) & ~15L;
+    if (n <= 0 || g_used + n > POOL_CAP) { printf("completion_contract: pool exhausted\n"); exit(9); }
+    p = g_pool + g_used;
+    g_used += n;
+    for (i = 0; i < n; i++) p[i] = 0;
+    return p;
+}
+static long zl(const char *s) { return s ? tx_len(s, 1L << 30) : 0; }
+static char *pdup(const char *s, long n) {
+    char *p = pa(n + 1);
+    long i;
+    for (i = 0; i < n; i++) p[i] = s[i];
+    p[n] = 0;
+    return p;
+}
+static int has(const char *h, long hn, const char *needle) { return h && tx_find(h, hn, needle, zl(needle)) >= 0; }
+
+/* ---------- byte buffer ---------- */
+typedef struct { char *p; long n, cap; } sbuf;
+static void sb_put(sbuf *b, const char *d, long k) {
+    long i;
+    if (b->n + k + 1 > b->cap) {
+        long nc = b->cap ? b->cap : 256;
+        char *np;
+        while (nc < b->n + k + 1) nc *= 2;
+        np = pa(nc);
+        for (i = 0; i < b->n; i++) np[i] = b->p[i];
+        b->p = np;
+        b->cap = nc;
+    }
+    for (i = 0; i < k; i++) b->p[b->n + i] = d[i];
+    b->n += k;
+    b->p[b->n] = 0;
+}
+static void sb_puts(sbuf *b, const char *s) { sb_put(b, s, zl(s)); }
+static void sb_rep(sbuf *b, const char *s, int times) { int i; for (i = 0; i < times; i++) sb_puts(b, s); }
+static const char *sb_z(sbuf *b) { if (!b->p) sb_put(b, "", 0); return b->p; }
+/* a python json.dumps(ensure_ascii=False) string */
+static void sb_jstr(sbuf *b, const char *s, long n) {
+    long i;
+    char u[8];
+    sb_put(b, "\"", 1);
+    for (i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == '"') sb_puts(b, "\\\"");
+        else if (c == '\\') sb_puts(b, "\\\\");
+        else if (c == '\n') sb_puts(b, "\\n");
+        else if (c == '\r') sb_puts(b, "\\r");
+        else if (c == '\t') sb_puts(b, "\\t");
+        else if (c == '\b') sb_puts(b, "\\b");
+        else if (c == '\f') sb_puts(b, "\\f");
+        else if (c < 0x20) { snprintf(u, sizeof u, "\\u%04x", (unsigned)c); sb_puts(b, u); }
+        else sb_put(b, (const char *)&s[i], 1);
+    }
+    sb_put(b, "\"", 1);
+}
+
+/* ---------- id list ---------- */
+typedef struct { char *v[MAXIDS]; long l[MAXIDS]; int n; } slist;
+static void sl_add(slist *s, const char *x, long k) {
+    int i;
+    for (i = 0; i < s->n; i++) if (tx_same(s->v[i], s->l[i], x, k)) return;
+    if (s->n < MAXIDS) { s->v[s->n] = pdup(x, k); s->l[s->n] = k; s->n++; }
+}
+
+/* ---------- python-shaped JSON object writer: {"k": v, "k2": v2} ---------- */
+static void ob_key(sbuf *b, const char *k) {
+    sb_puts(b, b->n > 1 ? ", " : "");
+    sb_jstr(b, k, zl(k));
+    sb_puts(b, ": ");
+}
+static void ob_begin(sbuf *b) { b->n = 0; sb_puts(b, "{"); }
+static void ob_str(sbuf *b, const char *k, const char *v, long n) { ob_key(b, k); sb_jstr(b, v, n); }
+static void ob_z(sbuf *b, const char *k, const char *v) { ob_str(b, k, v, zl(v)); }
+static void ob_list(sbuf *b, const char *k, slist *l, int times) {
+    int i, t, first = 1;
+    ob_key(b, k);
+    sb_puts(b, "[");
+    for (t = 0; t < times; t++)
+        for (i = 0; i < l->n; i++) { if (!first) sb_puts(b, ", "); first = 0; sb_jstr(b, l->v[i], l->l[i]); }
+    sb_puts(b, "]");
+}
+static void ob_end(sbuf *b) { sb_puts(b, "}"); }
+
+/* ---------- JSON tree ---------- */
+enum { J_NULL, J_BOOL, J_NUM, J_STR, J_ARR, J_OBJ };
+typedef struct jn { int t, b; char *s; long sl; char *k; long kl; struct jn *first, *last, *next; long n; } jn;
+static const char *jp, *jend;
+static void jws(void) { while (jp < jend && (*jp == ' ' || *jp == '\t' || *jp == '\n' || *jp == '\r')) jp++; }
+static jn *jnew(int t) { jn *v = pa((long)sizeof *v); v->t = t; return v; }
+static void jadd(jn *o, jn *v) { if (o->last) o->last->next = v; else o->first = v; o->last = v; o->n++; }
+static int jhex4(const char *p) {
+    int i, v = 0;
+    for (i = 0; i < 4; i++) {
+        char c = p[i];
+        int d;
+        if (c >= '0' && c <= '9') d = c - '0';
+        else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+        else return -1;
+        v = v * 16 + d;
+    }
+    return v;
+}
+static void jutf8(sbuf *b, unsigned long cp) {
+    char t[4];
+    if (cp < 0x80) { t[0] = (char)cp; sb_put(b, t, 1); }
+    else if (cp < 0x800) { t[0] = (char)(0xC0 | (cp >> 6)); t[1] = (char)(0x80 | (cp & 0x3F)); sb_put(b, t, 2); }
+    else if (cp < 0x10000) {
+        t[0] = (char)(0xE0 | (cp >> 12)); t[1] = (char)(0x80 | ((cp >> 6) & 0x3F)); t[2] = (char)(0x80 | (cp & 0x3F));
+        sb_put(b, t, 3);
+    } else {
+        t[0] = (char)(0xF0 | (cp >> 18)); t[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+        t[2] = (char)(0x80 | ((cp >> 6) & 0x3F)); t[3] = (char)(0x80 | (cp & 0x3F));
+        sb_put(b, t, 4);
+    }
+}
+static char *jstring(long *len) {
+    sbuf b = {0, 0, 0};
+    const char *run;
+    if (jp >= jend || *jp != '"') return NULL;
+    jp++;
+    run = jp;
+    while (jp < jend && *jp != '"') {
+        if (*jp == '\\') {
+            unsigned long cp;
+            int h;
+            sb_put(&b, run, (long)(jp - run));
+            jp++;
+            if (jp >= jend) return NULL;
+            switch (*jp) {
+            case '"': sb_put(&b, "\"", 1); break;
+            case '\\': sb_put(&b, "\\", 1); break;
+            case '/': sb_put(&b, "/", 1); break;
+            case 'b': sb_put(&b, "\b", 1); break;
+            case 'f': sb_put(&b, "\f", 1); break;
+            case 'n': sb_put(&b, "\n", 1); break;
+            case 'r': sb_put(&b, "\r", 1); break;
+            case 't': sb_put(&b, "\t", 1); break;
+            case 'u':
+                if (jend - jp < 5) return NULL;
+                h = jhex4(jp + 1);
+                if (h < 0) return NULL;
+                cp = (unsigned long)h;
+                jp += 4;
+                if (cp >= 0xD800 && cp < 0xDC00 && jend - jp >= 7 && jp[1] == '\\' && jp[2] == 'u') {
+                    int lo = jhex4(jp + 3);
+                    if (lo >= 0xDC00 && lo < 0xE000) { cp = 0x10000 + ((cp - 0xD800) << 10) + (unsigned long)(lo - 0xDC00); jp += 6; }
+                }
+                jutf8(&b, cp);
+                break;
+            default: return NULL;
+            }
+            jp++;
+            run = jp;
+        } else jp++;
+    }
+    if (jp >= jend) return NULL;
+    sb_put(&b, run, (long)(jp - run));
+    jp++;
+    *len = b.n;
+    return (char *)sb_z(&b);
+}
+static jn *jvalue(void) {
+    jws();
+    if (jp >= jend) return NULL;
+    if (*jp == '{' || *jp == '[') {
+        int obj = *jp == '{';
+        char close = obj ? '}' : ']';
+        jn *o = jnew(obj ? J_OBJ : J_ARR);
+        jp++;
+        jws();
+        if (jp < jend && *jp == close) { jp++; return o; }
+        for (;;) {
+            char *k = NULL;
+            long kl = 0;
+            jn *v;
+            if (obj) {
+                jws();
+                k = jstring(&kl);
+                if (!k) return NULL;
+                jws();
+                if (jp >= jend || *jp != ':') return NULL;
+                jp++;
+            }
+            v = jvalue();
+            if (!v) return NULL;
+            v->k = k; v->kl = kl;
+            jadd(o, v);
+            jws();
+            if (jp >= jend) return NULL;
+            if (*jp == ',') { jp++; continue; }
+            if (*jp == close) { jp++; return o; }
+            return NULL;
+        }
+    }
+    if (*jp == '"') {
+        jn *v = jnew(J_STR);
+        v->s = jstring(&v->sl);
+        return v->s ? v : NULL;
+    }
+    if (jend - jp >= 4 && tx_same(jp, 4, "true", 4)) { jn *v = jnew(J_BOOL); v->b = 1; jp += 4; return v; }
+    if (jend - jp >= 5 && tx_same(jp, 5, "false", 5)) { jp += 5; return jnew(J_BOOL); }
+    if (jend - jp >= 4 && tx_same(jp, 4, "null", 4)) { jp += 4; return jnew(J_NULL); }
+    if (*jp == '-' || (*jp >= '0' && *jp <= '9')) {
+        while (jp < jend && (*jp == '-' || *jp == '+' || *jp == '.' || *jp == 'e' || *jp == 'E' || (*jp >= '0' && *jp <= '9'))) jp++;
+        return jnew(J_NUM);
+    }
+    return NULL;
+}
+static jn *jparse(const char *s, long n) {
+    jn *v;
+    jp = s; jend = s + n;
+    v = jvalue();
+    if (!v) return NULL;
+    jws();
+    return jp == jend ? v : NULL;
+}
+static jn *jget(jn *o, const char *k) {
+    jn *c, *r = NULL;
+    long kl = zl(k);
+    if (!o || o->t != J_OBJ) return NULL;
+    for (c = o->first; c; c = c->next) if (tx_same(c->k, c->kl, k, kl)) r = c;
+    return r;
+}
+static jn *jat(jn *a, long i) {
+    jn *c;
+    if (!a || a->t != J_ARR) return NULL;
+    for (c = a->first; c && i > 0; c = c->next) i--;
+    return c;
+}
+static int jis(jn *v, const char *s, long n) { return v && v->t == J_STR && tx_same(v->s, v->sl, s, n); }
+static int jisz(jn *v, const char *s) { return jis(v, s, zl(s)); }
+static int jtrue(jn *v) { return v && v->t == J_BOOL && v->b; }
+static int jhaskey(jn *o, const char *k) { return jget(o, k) != NULL; }
+/* needle in any decoded string (key or value) of the document */
+static int jdeep(jn *v, const char *needle) {
+    jn *c;
+    if (!v) return 0;
+    if (v->k && has(v->k, v->kl, needle)) return 1;
+    if (v->t == J_STR && has(v->s, v->sl, needle)) return 1;
+    for (c = v->first; c; c = c->next) if (jdeep(c, needle)) return 1;
+    return 0;
+}
+static int str_prefix(jn *v, const char *p) { return v && v->t == J_STR && tx_prefix(v->s, v->sl, p, zl(p)); }
+
+/* ---------- files ---------- */
+static int mkdirp(const char *path) {
+    char t[1500];
+    long i, l = zl(path);
+    if (tx_copy(t, (long)sizeof t, path, l)) return -1;
+    for (i = 1; i <= l; i++)
+        if (t[i] == '/' || t[i] == 0) {
+            char c = t[i];
+            int r;
+            t[i] = 0;
+            r = sy_mkdir(t, 0700);
+            t[i] = c;
+            if (r != 0 && r != -EEXIST) return -1;
+        }
+    return 0;
+}
+static int is_file(const char *p) { sy_stat_t s; return sy_stat(p, &s) == 0 && s.kind == 'f'; }
+
+/* ---------- freeze + copy of the app's source files ---------- */
+typedef struct { char *path; char *data; size_t n; int ok; } snapent;
+typedef struct { snapent e[4096]; int n; int overflow; } snapset;
+static snapset g_before, g_after;
+static int is_src(const char *p) {
+    long l = zl(p);
+    return (l > 2 && (tx_same(p + l - 2, 2, ".c", 2) || tx_same(p + l - 2, 2, ".h", 2))) ||
+           (l > 4 && tx_same(p + l - 4, 4, ".inc", 4)) || (l > 3 && tx_same(p + l - 3, 3, ".cx", 3));
+}
+static void snap_add(snapset *s, const char *path) {
+    snapent *e;
+    if (s->n == 4096) { s->overflow = 1; return; }
+    e = &s->e[s->n++];
+    e->path = pdup(path, zl(path));
+    e->data = cx_read(path, &e->n);
+    e->ok = e->data != NULL;
+}
+static int snap_cb(const char *path, void *ctx) { if (is_src(path)) snap_add((snapset *)ctx, path); return 0; }
+static void take_snapshot(snapset *s) {
+    s->n = 0; s->overflow = 0;
+    cx_walk(g_app, snap_cb, s);
+    snap_add(s, g_unisacc);
+    snap_add(s, g_probe_src);
+}
+static int snap_same(snapset *a, snapset *b) {
+    int i;
+    if (a->n != b->n || a->overflow || b->overflow) return 0;
+    for (i = 0; i < a->n; i++) {
+        if (!tx_eq(a->e[i].path, b->e[i].path, 1L << 20) || !a->e[i].ok || !b->e[i].ok) return 0;
+        if (!tx_same(a->e[i].data, (long)a->e[i].n, b->e[i].data, (long)b->e[i].n)) return 0;
+    }
+    return 1;
+}
+static int copy_source(void) {
+    int i;
+    long al = zl(g_app);
+    for (i = 0; i < g_before.n - 2; i++) {
+        char to[2600], dir[2600];
+        long k;
+        snapent *e = &g_before.e[i];
+        if (!e->ok) return -1;
+        snprintf(to, sizeof to, "%s/%s", g_src, e->path + al + 1);
+        snprintf(dir, sizeof dir, "%s", to);
+        for (k = zl(dir) - 1; k > 0 && dir[k] != '/'; k--) {}
+        dir[k] = 0;
+        if (mkdirp(dir) != 0 || cx_write(to, e->data, e->n) != 0) return -1;
+    }
+    return 0;
+}
+static const char ENTRY[] = "int main(int argc, char **argv) {";
+static const char INJ_REQUIRED[] =
+    "\n    if(argc>1&&!strcmp(argv[1],\"required-agent\")){agent_role_test(\"watch\",\"0:private-peer\");if(agent_delivery_require_next(1))return 8;argv[1]=\"agent\";}\n";
+static const char INJ_CAP_DECL[] = "int agent_context_packet(const char *packet);\n";
+static const char INJ_CAP[] =
+    "\n    if(argc>1&&!strcmp(argv[1],\"context-capacity\")){char *b=malloc(32768);FILE *f;size_t n;if(!b)return 9;f=fopen(getenv(\"CSIH_PRIVATE_CONTEXT_PACKET\"),\"rb\");if(!f){free(b);return 9;}n=fread(b,1,32767,f);if(ferror(f)||fclose(f)!=0){free(b);return 9;}b[n]=0;if(agent_context_packet(b)!=0){free(b);return 9;}free(b);argv[1]=\"agent\";}\n";
+/* python: required-agent after the entry, then the capacity entry replaces
+ * the entry again: decl + entry + capacity + required + rest */
+static int inject(void) {
+    char cli[1400];
+    size_t n = 0;
+    long i, pos = -1, occ = 0, el = zl(ENTRY);
+    char *t;
+    sbuf o = {0, 0, 0};
+    snprintf(cli, sizeof cli, "%s/agent_cli.cx", g_src);
+    t = cx_read(cli, &n);
+    if (!t) return -1;
+    for (i = 0; i + el <= (long)n; i++) if (tx_same(t + i, el, ENTRY, el)) { occ++; pos = i; }
+    if (occ != 1) return -2;
+    sb_put(&o, t, pos);
+    sb_puts(&o, INJ_CAP_DECL);
+    sb_puts(&o, ENTRY);
+    sb_puts(&o, INJ_CAP);
+    sb_puts(&o, INJ_REQUIRED);
+    sb_put(&o, t + pos + el, (long)n - pos - el);
+    return cx_write(cli, o.p, (size_t)o.n);
+}
+
+/* ---------- agent runner + in-process model stub ---------- */
+typedef struct { int rc, timed; char *out, *err; long outn, errn; } runres;
+typedef struct { char *body; long n; jn *j; } req_t;
+static req_t g_req[MAXREQ];
+static int g_nreq;
+static char *g_resp[MAXREQ];
+static long g_respn[MAXREQ];
+static int g_nresp;
+static char g_case[64], g_cwd[1400], g_journal[1500], g_note[600];
+/* the case's answer to request N (1-based, already in g_req): 0 respond, 1 drop */
+typedef int (*resp_fn)(int n, jn *req, sbuf *out);
+
+static void sq(sbuf *b, const char *s) {
+    sb_put(b, "'", 1);
+    for (; *s; s++) { if (*s == '\'') sb_puts(b, "'\\''"); else sb_put(b, s, 1); }
+    sb_put(b, "'", 1);
+}
+static long clen(const char *h, long hn) {
+    long i = 0;
+    const char *want = "content-length:";
+    while (i < hn) {
+        long j = i, k, v = 0;
+        int ok = 1;
+        while (j < hn && h[j] != '\n') j++;
+        if (j - i >= 15) {
+            for (k = 0; k < 15; k++) {
+                char c = h[i + k];
+                if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+                if (c != want[k]) { ok = 0; break; }
+            }
+            if (ok) {
+                k = i + 15;
+                while (k < j && h[k] == ' ') k++;
+                while (k < j && h[k] >= '0' && h[k] <= '9') v = v * 10 + (h[k++] - '0');
+                return v;
+            }
+        }
+        i = j + 1;
+    }
+    return 0;
+}
+static void serve_one(int c, int capacity, resp_fn fn) {
+    sbuf b = {0, 0, 0}, out = {0, 0, 0}, w = {0, 0, 0};
+    char tmp[16384], head[200];
+    long hdr = -1, want = 0;
+    jn *j;
+    for (;;) {
+        long k;
+        if (sy_readable(c, 3000) != 1) break;
+        k = sy_recv(c, tmp, (long)sizeof tmp);
+        if (k <= 0) break;
+        sb_put(&b, tmp, k);
+        if (hdr < 0) {
+            long e = tx_find(b.p, b.n, "\r\n\r\n", 4);
+            if (e >= 0) { hdr = e + 4; want = clen(b.p, e); }
+        }
+        if (hdr >= 0 && b.n - hdr >= want) break;
+    }
+    if (hdr < 0 || b.n - hdr < want) { sy_close(c); return; }
+    if (capacity) {
+        if (g_nreq < MAXREQ) { g_req[g_nreq].body = b.p + hdr; g_req[g_nreq].n = want; g_nreq++; }
+        sy_send_all(c, "HTTP/1.0 500 Internal Server Error\r\nConnection: close\r\n\r\n", 56);
+        sy_close(c);
+        return;
+    }
+    j = jparse(b.p + hdr, want);
+    if (!j || g_nreq >= MAXREQ) { sy_close(c); return; }   /* python: json.loads raised, no answer */
+    g_req[g_nreq].body = b.p + hdr; g_req[g_nreq].n = want; g_req[g_nreq].j = j;
+    g_nreq++;
+    if (fn(g_nreq, j, &out) != 0) { sy_close(c); return; }  /* the handler raised */
+    if (g_nresp < MAXREQ) { g_resp[g_nresp] = (char *)sb_z(&out); g_respn[g_nresp] = out.n; g_nresp++; }
+    {
+        sbuf body = {0, 0, 0};
+        sb_puts(&body, "{\"choices\":[{\"message\":{\"content\":");
+        sb_jstr(&body, out.p, out.n);
+        sb_puts(&body, "}}]}");
+        snprintf(head, sizeof head, "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: %ld\r\n\r\n", body.n);
+        sb_puts(&w, head);
+        sb_put(&w, body.p, body.n);
+    }
+    sy_send_all(c, w.p, w.n);
+    sy_close(c);
+}
+/* runs `agent ARGS` (kv: K, V, ... NULL) against a fresh listener for LIMIT_MS */
+static int run_agent(const char **kv, const char *a1, const char *a2, int capacity, resp_fn fn, long limit_ms, runres *r) {
+    sbuf s = {0, 0, 0};
+    char ep[120], outp[1500], errp[1500];
+    char *argv[8];
+    int ls, port, pid, i;
+    long end;
+    size_t n;
+    r->rc = -1; r->timed = 0;
+    ls = sy_tcp_listen(0, 16);
+    if (ls < 0) return -1;
+    port = sy_tcp_port(ls);
+    snprintf(ep, sizeof ep, "http://127.0.0.1:%d/v1/chat/completions", port);
+    snprintf(outp, sizeof outp, "%s/%s.stdout", g_root, g_case);
+    snprintf(errp, sizeof errp, "%s/%s.stderr", g_root, g_case);
+    sb_puts(&s, "unset CSIH_ROLE CSIH_PEER OPENAI_API_KEY HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; ");
+    sb_puts(&s, "export NO_PROXY='127.0.0.1,localhost' no_proxy='127.0.0.1,localhost' CSIH_ENDPOINT=");
+    sq(&s, ep);
+    sb_puts(&s, "; ");
+    for (i = 0; kv && kv[i]; i += 2) { sb_puts(&s, "export "); sb_puts(&s, kv[i]); sb_puts(&s, "="); sq(&s, kv[i + 1]); sb_puts(&s, "; "); }
+    sb_puts(&s, "cd "); sq(&s, g_root);
+    sb_puts(&s, " && exec /bin/sh \"$0\" -run source/agent_cli.cx -- \"$@\" >"); sq(&s, outp);
+    sb_puts(&s, " 2>"); sq(&s, errp);
+    argv[0] = "sh"; argv[1] = "-c"; argv[2] = (char *)sb_z(&s); argv[3] = g_comp;
+    argv[4] = (char *)a1; argv[5] = (char *)a2; argv[6] = NULL;
+    pid = sy_spawn(argv);
+    if (pid < 0) { sy_close(ls); return -1; }
+    end = sy_now_ms() + limit_ms;
+    for (;;) {
+        int c = sy_tcp_accept(ls, 10), w;
+        if (c >= 0) serve_one(c, capacity, fn);
+        w = sy_wait(pid, 1);
+        if (w != -EAGAIN) { r->rc = w; break; }
+        if (sy_now_ms() >= end) { sy_kill(pid); r->timed = 1; r->rc = -9; break; }
+    }
+    sy_close(ls);
+    r->out = cx_read(outp, &n); r->outn = r->out ? (long)n : 0;
+    if (!r->out) r->out = pdup("", 0);
+    r->err = cx_read(errp, &n); r->errn = r->err ? (long)n : 0;
+    if (!r->err) r->err = pdup("", 0);
+    return 0;
+}
+static long case_limit(void) {
+    long left = g_deadline - sy_now_ms();
+    return left < 9000 ? (left > 0 ? left : 1) : 9000;
+}
+
+/* ---------- request/journal helpers ---------- */
+static void join_contents(jn *req, sbuf *t) {
+    jn *m;
+    int first = 1;
+    jn *msgs = jget(req, "messages");
+    if (!msgs || msgs->t != J_ARR) return;
+    for (m = msgs->first; m; m = m->next) {
+        jn *c = jget(m, "content");
+        if (!first) sb_put(t, "\n", 1);
+        first = 0;
+        if (c && c->t == J_STR) sb_put(t, c->s, c->sl);
+    }
+    sb_z(t);
+}
+/* [harness action_id] X lines, then "action_id": "X" pairs; deduplicated in order */
+static void extract_ids(jn *req, slist *out) {
+    sbuf tb = {0, 0, 0};
+    const char *t, *p, *end;
+    const char *pa_ = "[harness action_id] ", *pb = "\"action_id\"";
+    long pal = zl(pa_), pbl = zl(pb), at;
+    out->n = 0;
+    join_contents(req, &tb);
+    t = sb_z(&tb); end = t + tb.n; p = t;
+    while ((at = tx_find(p, (long)(end - p), pa_, pal)) >= 0) {
+        const char *q = p + at + pal, *e = q;
+        while (e < end && *e != '\n') e++;
+        if (e > q) sl_add(out, q, (long)(e - q));
+        p = e;
+    }
+    p = t;
+    while ((at = tx_find(p, (long)(end - p), pb, pbl)) >= 0) {
+        const char *q = p + at + pbl, *e;
+        p = p + at + 1;
+        while (q < end && (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r' || *q == '\f' || *q == '\v')) q++;
+        if (q >= end || *q != ':') continue;
+        q++;
+        while (q < end && (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r' || *q == '\f' || *q == '\v')) q++;
+        if (q >= end || *q != '"') continue;
+        q++;
+        e = q;
+        while (e < end && *e != '"' && *e != '\n') e++;
+        if (e > q && e < end && *e == '"') sl_add(out, q, (long)(e - q));
+    }
+}
+typedef struct { jn *r[4096]; int n; } journal_t;
+static journal_t g_jr;
+/* journal (or journal-before when journal is no regular file), one record per line */
+static int load_journal(void) {
+    char p[1600];
+    size_t n = 0;
+    long i = 0;
+    char *b;
+    g_jr.n = 0;
+    if (is_file(g_journal)) snprintf(p, sizeof p, "%s", g_journal);
+    else snprintf(p, sizeof p, "%s/journal-before", g_cwd);
+    b = cx_read(p, &n);
+    if (!b) return -1;
+    while (i < (long)n) {
+        long e = i;
+        jn *v;
+        while (e < (long)n && b[e] != '\n') e++;
+        v = jparse(b + i, e - i);
+        if (!v || g_jr.n == 4096) return -1;
+        g_jr.r[g_jr.n++] = v;
+        i = e + 1;
+    }
+    return 0;
+}
+static int journal_deep(const char *needle) {
+    int i;
+    for (i = 0; i < g_jr.n; i++) if (jdeep(g_jr.r[i], needle)) return 1;
+    return 0;
+}
+static int journal_has_assistant(const char *text, long n) {
+    int i;
+    for (i = 0; i < g_jr.n; i++)
+        if (jisz(jget(g_jr.r[i], "role"), "assistant") && jis(jget(g_jr.r[i], "text"), text, n)) return 1;
+    return 0;
+}
+static int tools_of(jn **tools, int cap) {
+    int i, k = 0;
+    for (i = 0; i < g_jr.n; i++) if (jhaskey(g_jr.r[i], "action_id") && k < cap) tools[k++] = g_jr.r[i];
+    return k;
+}
+static int out_has(runres *r, const char *s) { return has(r->out, r->outn, s); }
+/* python decoded stdout with errors='replace': a U+FFFD there or any invalid UTF-8 */
+static int has_replacement(const char *s, long n) {
+    long i = 0;
+    if (has(s, n, "\xef\xbf\xbd")) return 1;
+    while (i < n) {
+        unsigned char c = (unsigned char)s[i];
+        long k, len = c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : (c >> 3) == 30 ? 4 : 0;
+        if (!len || i + len > n) return 1;
+        for (k = 1; k < len; k++) if (((unsigned char)s[i + k] >> 6) != 2) return 1;
+        i += len;
+    }
+    return 0;
+}
+static int ends_with(jn *v, const char *suf) {
+    long l = zl(suf);
+    return v && v->t == J_STR && v->sl >= l && tx_same(v->s + v->sl - l, l, suf, l);
+}
+static int prefixed(const char *name, const char *p) { return tx_prefix(name, zl(name), p, zl(p)); }
+static int named(const char *name, const char *w) { return tx_eq(name, w, 1L << 20); }
+static int contains(const char *name, const char *w) { return has(name, zl(name), w); }
+static int ends(const char *name, const char *suf) {
+    long l = zl(name), s = zl(suf);
+    return l >= s && tx_same(name + l - s, s, suf, s);
+}
+static int case_setup(const char *name) {
+    char home[1500];
+    g_used = 0;
+    g_nreq = 0; g_nresp = 0; g_note[0] = 0;
+    snprintf(g_case, sizeof g_case, "%s", name);
+    snprintf(g_cwd, sizeof g_cwd, "%s/%s", g_root, name);
+    snprintf(g_journal, sizeof g_journal, "%s/journal", g_cwd);
+    snprintf(home, sizeof home, "%s/home", g_cwd);
+    return sy_mkdir(g_cwd, 0777) == 0 && sy_mkdir(home, 0777) == 0 ? 0 : -1;
+}
+/* python: journal.rename(cwd/'journal-before'); journal.mkdir() */
+static int rotate_journal(void) {
+    char before[1600];
+    char *mv[5];
+    snprintf(before, sizeof before, "%s/journal-before", g_cwd);
+    mv[0] = "mv"; mv[1] = g_journal; mv[2] = before; mv[3] = NULL;
+    if (sy_exists(before) != 0) return -1;   /* rename onto a taken name raised */
+    if (sy_run(mv, NULL, 0, NULL) != 0) return -1;
+    return sy_mkdir(g_journal, 0777) == 0 ? 0 : -1;
+}
+
+/* ---------- protocol cases (python run) ---------- */
+static int resp_run(int n, jn *req, sbuf *o) {
+    const char *name = g_case;
+    slist ids;
+    extract_ids(req, &ids);
+    if (named(name, "audit-failure") && rotate_journal() != 0) return 1;
+    ob_begin(o);
+    if (prefixed(name, "required-")) {
+        if (n == 1 && !named(name, "required-missing")) {
+            ob_z(o, "act", "exec");
+            ob_z(o, "cmd", named(name, "required-fake") ? "echo 'envelope \xe2\x86\x92 0:private-peer: 1 chars'"
+                                                        : "/Users/wjc/repos/moltbaby/bin/envelope 0:wrong-peer title body");
+            ob_z(o, "why", "private denied fake delivery");
+        } else {
+            slist none; none.n = 0;
+            ob_z(o, "act", "answer"); ob_z(o, "outcome", "completed"); ob_z(o, "text", "REQUIRED_BODY_PRESERVED");
+            ob_list(o, "evidence", &none, 1);
+        }
+    } else if (prefixed(name, "watch-")) {
+        slist none; none.n = 0;
+        if (n == 1) {
+            ob_z(o, "act", "answer"); ob_z(o, "outcome", name + 6); ob_z(o, "text", "WATCH_BODY_PRESERVED");
+            ob_list(o, "evidence", &none, 1);
+        } else {
+            ob_z(o, "go", "stop"); ob_z(o, "acceptance", "accepted"); ob_z(o, "scope", "answer_only");
+            ob_list(o, "evidence", &none, 1); ob_z(o, "reason", "consultation has no delivery requirement");
+        }
+    } else if (named(name, "budget-continue")) ob_z(o, "go", "continue");
+    else if (named(name, "continue-invalidates") && n == 3) ob_z(o, "go", "continue");
+    else if (named(name, "continue-invalidates") && n == 4) {
+        ob_z(o, "go", "stop"); ob_z(o, "acceptance", "accepted"); ob_z(o, "scope", "work");
+        ob_list(o, "evidence", &ids, 1); ob_z(o, "reason", "stale claim must not pass");
+    } else if (named(name, "duplicate-evidence") && n >= 2) {
+        ob_z(o, "act", "answer"); ob_z(o, "outcome", "completed"); ob_z(o, "text", "duplicate");
+        ob_list(o, "evidence", &ids, 2);
+    } else if (named(name, "legacy-answer") && n == 2) {
+        ob_z(o, "act", "answer"); ob_z(o, "outcome", "completed"); ob_z(o, "text", "missing evidence");
+    } else if (named(name, "consultation")) {
+        slist none; none.n = 0;
+        if (n == 1) {
+            ob_z(o, "act", "answer"); ob_z(o, "outcome", "completed"); ob_z(o, "text", "\xe5\x92\xa8\xe8\xaf\xa2\xe7\xad\x94\xe5\xa4\x8d");
+            ob_list(o, "evidence", &none, 1);
+        } else {
+            ob_z(o, "go", "stop"); ob_z(o, "acceptance", "accepted"); ob_z(o, "scope", "answer_only");
+            ob_list(o, "evidence", &none, 1); ob_z(o, "reason", "scripted consultation assessment");
+        }
+    } else if (n == 1) {
+        ob_z(o, "act", "exec");
+        ob_z(o, "cmd", named(name, "audit-failure") ? "touch forbidden-marker" : "printf 'ACTUAL_BODY\n'");
+        ob_z(o, "why", "private fact");
+    } else if (n == 2) {
+        ob_z(o, "act", "answer"); ob_z(o, "outcome", "completed"); ob_z(o, "text", "\xe5\xa3\xb0\xe6\x98\x8e");
+        if (named(name, "missing-evidence")) { slist old; old.n = 0; sl_add(&old, "old-turn-1", 10); ob_list(o, "evidence", &old, 1); }
+        else ob_list(o, "evidence", &ids, 1);
+    } else if (named(name, "legacy-stop")) ob_z(o, "go", "stop");
+    else if (named(name, "invalid-recovery") && n == 3) { ob_key(o, "not_a_judgment"); sb_puts(o, "true"); }
+    else {
+        ob_z(o, "go", "stop"); ob_z(o, "acceptance", named(name, "rejected") ? "rejected" : "accepted"); ob_z(o, "scope", "work");
+        ob_list(o, "evidence", &ids, 1); ob_z(o, "reason", "scripted protocol assessment only");
+    }
+    ob_end(o);
+    return 0;
+}
+static int case_run(const char *name) {
+    const char *kv[16];
+    char home[1500];
+    int k = 0, expected_rc, expected_n, i, nt, anchors_n = 0;
+    runres r;
+    jn *tools[64], *anchor[3] = {0, 0, 0};
+    NEED(case_setup(name) == 0, "case dir");
+    snprintf(home, sizeof home, "%s/home", g_cwd);
+    kv[k++] = "HOME"; kv[k++] = home;
+    kv[k++] = "DEEPSEEK_API_KEY"; kv[k++] = "LOCAL_ONLY";
+    kv[k++] = "CSIH_TRANSCRIPT"; kv[k++] = g_journal;
+    kv[k++] = "CSIH_CWD"; kv[k++] = g_cwd;
+    if (prefixed(name, "watch-") || prefixed(name, "required-")) { kv[k++] = "CSIH_ROLE"; kv[k++] = "watch"; kv[k++] = "CSIH_PEER"; kv[k++] = "0:private-peer"; }
+    kv[k] = NULL;
+    NEED(run_agent(kv, prefixed(name, "required-") ? "required-agent" : "agent",
+                   named(name, "consultation") ? "\xe4\xb8\x8d\xe7\x94\xa8\xe5\xb7\xa5\xe5\x85\xb7\xef\xbc\x8c\xe7\x9b\xb4\xe6\x8e\xa5\xe5\x9b\x9e\xe7\xad\x94" : "private protocol test",
+                   0, resp_run, case_limit(), &r) == 0, "agent did not start");
+    NEED(load_journal() == 0, "journal unreadable (rc=%d timed=%d)", r.rc, r.timed);
+    expected_rc = (named(name, "accepted-work") || named(name, "consultation") || named(name, "invalid-recovery") || named(name, "watch-completed")) ? 0 : 1;
+    if (prefixed(name, "required-")) expected_n = named(name, "required-missing") ? 1 : 2;
+    else if (prefixed(name, "watch-")) expected_n = named(name, "watch-completed") ? 2 : 1;
+    else if (named(name, "audit-failure")) expected_n = 1;
+    else if (named(name, "budget-continue")) expected_n = 8;
+    else if (named(name, "invalid-recovery") || named(name, "duplicate-evidence") || named(name, "continue-invalidates")) expected_n = 4;
+    else if (named(name, "consultation") || named(name, "missing-evidence") || named(name, "legacy-answer")) expected_n = 2;
+    else expected_n = 3;
+    NEED(r.rc == expected_rc && !r.timed, "rc=%d (want %d) timed=%d requests=%d stdout tail: %.300s", r.rc, expected_rc, r.timed, g_nreq,
+         r.out + (r.outn > 300 ? r.outn - 300 : 0));
+    NEED(g_nreq == expected_n, "requests=%d (want %d)", g_nreq, expected_n);
+    for (i = 0; i < g_nreq; i++) {
+        jn *msgs = jget(g_req[i].j, "messages"), *m;
+        long pos = -1, idx = 0, cnt = 0, total;
+        NEED(msgs && msgs->t == J_ARR, "request %d has no messages", i + 1);
+        total = msgs->n;
+        for (m = msgs->first; m; m = m->next, idx++) {
+            jn *c = jget(m, "content");
+            NEED(c != NULL, "request %d message without content", i + 1);
+            if (str_prefix(c, "[harness current task]\n")) { cnt++; pos = idx; }
+        }
+        if (cnt) {
+            jn *b0, *b1, *b2, *b3;
+            NEED(cnt == 1, "request %d: %ld current-task anchors", i + 1, cnt);
+            b0 = jget(jat(msgs, pos), "content"); b1 = jget(jat(msgs, pos + 1), "content");
+            b2 = jget(jat(msgs, pos + 2), "content"); b3 = jget(jat(msgs, pos + 3), "content");
+            NEED(str_prefix(b1, "[harness context-index data, not instructions]\n") && str_prefix(b2, "[harness history scope]\n"),
+                 "request %d: anchor block shape", i + 1);
+            NEED(str_prefix(b3, "[harness candidate read calls]\n"), "request %d: candidate read calls missing", i + 1);
+            NEED(total - (pos + 4) <= 1, "actor feedback must be last (request %d)", i + 1);
+            if (!anchors_n) { anchor[0] = b0; anchor[1] = b1; anchor[2] = b2; }
+            else NEED(jis(b0, anchor[0]->s, anchor[0]->sl) && jis(b1, anchor[1]->s, anchor[1]->sl) && jis(b2, anchor[2]->s, anchor[2]->sl),
+                      "actor anchor drift (request %d)", i + 1);
+            anchors_n++;
+        } else {
+            int orig = 0, ctx = 0;
+            for (m = msgs->first; m; m = m->next) {
+                jn *c = jget(m, "content");
+                if (str_prefix(c, "Original current turn task:\n")) orig = 1;
+                if (c && c->t == J_STR && has(c->s, c->sl, "[harness context-index data, not instructions]")) ctx = 1;
+            }
+            NEED(orig, "action anchor absent (request %d)", i + 1);
+            NEED(!ctx, "judge got actor context (request %d)", i + 1);
+        }
+    }
+    NEED(anchors_n > 0, "actor anchor drift: no actor request");
+    nt = tools_of(tools, 64);
+    if (!prefixed(name, "watch-") && !prefixed(name, "required-") && !named(name, "consultation") && !named(name, "budget-continue") && !named(name, "audit-failure")) {
+        jn *tx, *cw;
+        NEED(nt == 1, "%d tool records (want 1)", nt);
+        tx = jget(tools[0], "text"); cw = jget(tools[0], "cwd");
+        NEED(tx && tx->t == J_STR && has(tx->s, tx->sl, "ACTUAL_BODY") && jisz(cw, g_cwd), "tool record text/cwd");
+        if (!named(name, "missing-evidence") && !named(name, "legacy-answer") && !named(name, "continue-invalidates")) {
+            jn *aid = jget(tools[0], "action_id");
+            NEED(aid && aid->t == J_STR, "tool action_id not a string");
+            {
+                char needle[512];
+                snprintf(needle, sizeof needle, "%.*s", (int)aid->sl, aid->s);
+                NEED(jdeep(g_req[g_nreq - 1].j, needle), "last request lacks the tool action_id %s", needle);
+            }
+        }
+    }
+    if (!prefixed(name, "watch-") && !prefixed(name, "required-") && !named(name, "missing-evidence") && !named(name, "legacy-answer") &&
+        !named(name, "duplicate-evidence") && !named(name, "budget-continue") && !named(name, "audit-failure"))
+        NEED(g_nresp > 0 && journal_has_assistant(g_resp[g_nresp - 1], g_respn[g_nresp - 1]), "valid judgment audit absent");
+    if (named(name, "invalid-recovery")) NEED(jdeep(g_req[g_nreq - 1].j, "Harness protocol feedback"), "last request lacks Harness protocol feedback");
+    if (prefixed(name, "watch-")) {
+        NEED(nt == 0 && !out_has(&r, "peer mail not delivered"), "watch: tools=%d or peer mail not delivered", nt);
+        NEED(out_has(&r, "WATCH_BODY_PRESERVED"), "WATCH_BODY_PRESERVED not in stdout");
+        NEED(!out_has(&r, "peer mail not delivered") && !journal_deep("\xe5\x85\x88\xe7\xbb\x99\xe5\x90\x8c\xe4\xbc\xb4\xe5\x8f\x91 envelope"),
+             "peer mail text in stdout/journal");
+    } else if (named(name, "audit-failure")) {
+        char mk[1600];
+        snprintf(mk, sizeof mk, "%s/forbidden-marker", g_cwd);
+        NEED(nt == 0 && out_has(&r, "audit write failed") && sy_exists(mk) == 0, "audit-failure: tools=%d audit-msg=%d marker=%d", nt,
+             out_has(&r, "audit write failed"), sy_exists(mk));
+    } else if (expected_rc) NEED(out_has(&r, "unfinished"), "'unfinished' not in stdout");
+    if (prefixed(name, "required-")) {
+        NEED(out_has(&r, "REQUIRED_BODY_PRESERVED") && out_has(&r, "explicit current-turn delivery not confirmed"), "required: stdout lacks body/delivery text");
+        if (named(name, "required-wrong-peer"))
+            for (i = 0; i < g_jr.n; i++)
+                NEED(!(jisz(jget(g_jr.r[i], "role"), "tool") && jtrue(jget(jget(g_jr.r[i], "status"), "op_success"))), "wrong peer: a tool op succeeded");
+        if (named(name, "required-fake")) {
+            int found = 0;
+            for (i = 0; i < g_jr.n; i++) if (jisz(jget(jget(g_jr.r[i], "action"), "input"), "echo 'envelope \xe2\x86\x92 0:private-peer: 1 chars'")) found = 1;
+            NEED(found, "fake envelope action not in the journal");
+        }
+    }
+    return 0;
+fail:
+    return 1;
+}
+
+/* ---------- judge-feedback cases (python run_feedback) ---------- */
+static slist g_claim;
+static int resp_feedback(int n, jn *req, sbuf *o) {
+    const char *name = g_case;
+    slist ids, ev;
+    int bad, ev_times = 1;
+    sbuf reason = {0, 0, 0};
+    extract_ids(req, &ids);
+    if (named(name, "feedback-audit-failure") && n == 4 && rotate_journal() != 0) return 1;
+    ob_begin(o);
+    if (n <= 2) {
+        char cmd[64];
+        snprintf(cmd, sizeof cmd, "printf 'ACTUAL_%d\n'", n);
+        ob_z(o, "act", "exec"); ob_z(o, "cmd", cmd); ob_z(o, "why", "private distinct evidence");
+        ob_end(o);
+        return 0;
+    }
+    if (n == 3) {
+        if (ids.n != 2) { snprintf(g_note, sizeof g_note, "request 3 carried %d ids (want 2)", ids.n); return 1; }  /* assert len(ids)==2 */
+        g_claim.n = 0;
+        sl_add(&g_claim, ids.v[1], ids.l[1]);
+        ob_z(o, "act", "answer"); ob_z(o, "outcome", "completed"); ob_z(o, "text", "DECLARATION_PRESERVED");
+        ob_list(o, "evidence", &g_claim, 1);
+        ob_end(o);
+        return 0;
+    }
+    ev = g_claim;
+    sb_puts(&reason, "scripted acceptance, not semantic proof");
+    bad = n == 4 || ends(name, "-exhaust");
+    if (named(name, "feedback-319")) { reason.n = 0; sb_rep(&reason, "x", 319); }
+    else if (named(name, "feedback-utf8-319")) { reason.n = 0; sb_rep(&reason, "\xe4\xb8\xad", 105); sb_puts(&reason, "abcd"); }
+    else if (bad) {
+        if (contains(name, "320")) { reason.n = 0; if (contains(name, "utf8")) { sb_rep(&reason, "\xe4\xb8\xad", 106); sb_puts(&reason, "ab"); } else sb_rep(&reason, "x", 320); }
+        else if (contains(name, "473") || contains(name, "length")) { reason.n = 0; sb_rep(&reason, "x", 473); }
+        else if (contains(name, "extra") || named(name, "feedback-audit-failure")) ev = ids;
+        else if (contains(name, "missing")) ev.n = 0;
+        else if (contains(name, "duplicate")) ev_times = 2;
+        else if (contains(name, "old")) { ev.n = 0; sl_add(&ev, "999-0-1-1", 9); }
+        else if (contains(name, "unknown")) {
+            char u[600];
+            ev.n = 0;
+            snprintf(u, sizeof u, "%.*s999", (int)g_claim.l[0], g_claim.v[0]);
+            sl_add(&ev, u, zl(u));
+        }
+    }
+    ob_z(o, "go", "stop"); ob_z(o, "acceptance", "accepted"); ob_z(o, "scope", "work");
+    ob_list(o, "evidence", &ev, ev_times);
+    ob_str(o, "reason", sb_z(&reason), reason.n);
+    ob_end(o);
+    return 0;
+}
+static int case_feedback(const char *name) {
+    const char *kv[12];
+    char home[1500];
+    int k = 0, expected_rc, expected_n, nt, i;
+    runres r;
+    jn *tools[64];
+    const char *diag = NULL;
+    NEED(case_setup(name) == 0, "case dir");
+    g_claim.n = 0;
+    snprintf(home, sizeof home, "%s/home", g_cwd);
+    kv[k++] = "HOME"; kv[k++] = home;
+    kv[k++] = "DEEPSEEK_API_KEY"; kv[k++] = "LOCAL_ONLY";
+    kv[k++] = "CSIH_TRANSCRIPT"; kv[k++] = g_journal;
+    kv[k++] = "CSIH_CWD"; kv[k++] = g_cwd;
+    kv[k] = NULL;
+    NEED(run_agent(kv, "agent", "private protocol feedback test", 0, resp_feedback, case_limit(), &r) == 0, "agent did not start");
+    expected_rc = (ends(name, "-exhaust") || named(name, "feedback-audit-failure")) ? 1 : 0;
+    expected_n = ends(name, "-exhaust") ? 6 : (named(name, "feedback-319") || named(name, "feedback-utf8-319") || named(name, "feedback-audit-failure")) ? 4 : 5;
+    NEED(load_journal() == 0, "journal unreadable (rc=%d timed=%d)", r.rc, r.timed);
+    NEED(r.rc == expected_rc && !r.timed, "rc=%d (want %d) timed=%d requests=%d %s stdout tail: %.300s", r.rc, expected_rc, r.timed, g_nreq, g_note,
+         r.out + (r.outn > 300 ? r.outn - 300 : 0));
+    NEED(g_nreq == expected_n, "requests=%d (want %d) %s", g_nreq, expected_n, g_note);
+    nt = tools_of(tools, 64);
+    NEED(nt == 2, "%d tool records (want 2)", nt);
+    NEED(ends_with(jget(tools[0], "text"), "ACTUAL_1\n") && ends_with(jget(tools[1], "text"), "ACTUAL_2\n"), "tool texts do not end ACTUAL_1/ACTUAL_2");
+    {
+        jn *aid = jget(tools[1], "action_id");
+        NEED(g_claim.n == 1 && aid && jis(aid, g_claim.v[0], g_claim.l[0]), "claim is not the last tool action_id");
+    }
+    {
+        sbuf sys = {0, 0, 0};
+        jn *m, *msgs = jget(g_req[3].j, "messages");
+        int first = 1;
+        for (m = msgs ? msgs->first : NULL; m; m = m->next)
+            if (jisz(jget(m, "role"), "system")) {
+                jn *c = jget(m, "content");
+                if (!first) sb_puts(&sys, "\n");
+                first = 0;
+                if (c && c->t == J_STR) sb_put(&sys, c->s, c->sl);
+            }
+        sb_z(&sys);
+        NEED(has(sys.p, sys.n, "UTF-8 bytes 1..319") && has(sys.p, sys.n, "exactly equal the claim reference set"), "request 4 system text lacks the judge rules");
+    }
+    if (contains(name, "320")) diag = "reason_utf8_bytes=320";
+    else if (contains(name, "473") || contains(name, "length")) diag = "reason_utf8_bytes=473";
+    else if (contains(name, "extra")) diag = "extra_current_id=";
+    else if (contains(name, "missing")) diag = "missing_claim_id=";
+    else if (contains(name, "duplicate")) diag = "duplicate evidence reference";
+    else if (contains(name, "old") || contains(name, "unknown")) diag = "not_current_id=";
+    if (diag) {
+        int ne = 0, all = 1;
+        jn *first = NULL;
+        char want[700];
+        for (i = 0; i < g_jr.n; i++)
+            if (jisz(jget(g_jr.r[i], "role"), "tool") && jisz(jget(g_jr.r[i], "name"), "error")) {
+                jn *t = jget(g_jr.r[i], "text");
+                if (!first) first = t;
+                ne++;
+                if (!(t && t->t == J_STR && has(t->s, t->sl, diag))) all = 0;
+            }
+        NEED(ne > 0 && all, "error records: %d, all carry %s: %d", ne, diag, all);
+        snprintf(want, sizeof want, "expected_evidence=[%.*s]", (int)g_claim.l[0], g_claim.v[0]);
+        NEED(first && first->t == J_STR && has(first->s, first->sl, want), "first error lacks %s", want);
+        if (expected_n >= 5) NEED(jdeep(g_req[4].j, diag), "request 5 lacks %s", diag);
+    }
+    for (i = 3; i < g_nresp; i++)
+        if (!named(name, "feedback-audit-failure")) NEED(journal_has_assistant(g_resp[i], g_respn[i]), "judgment audit missing (response %d)", i + 1);
+    if (ends(name, "-exhaust")) {
+        NEED(out_has(&r, diag) && out_has(&r, "acceptance=3"), "exhaust: stdout lacks %s / acceptance=3", diag);
+        NEED(!out_has(&r, "semantic acceptance (work)"), "exhaust: stdout has semantic acceptance (work)");
+        NEED(out_has(&r, "unfinished: acceptance protocol invalid;"), "exhaust: stdout lacks 'unfinished: acceptance protocol invalid;'");
+    }
+    if (named(name, "feedback-audit-failure")) NEED(out_has(&r, "audit write failed") && !out_has(&r, "acceptance=1"), "audit failure stdout");
+    if (contains(name, "utf8")) NEED(!has_replacement(r.out, r.outn), "UTF-8 reason cut mid-codepoint");
+    return 0;
+fail:
+    return 1;
+}
+
+/* ---------- context-capacity (python run_capacity) ---------- */
+static int resp_none(int n, jn *req, sbuf *o) { (void)n; (void)req; (void)o; return 1; }
+static int case_capacity(const char *name) {
+    const char *kv[14];
+    char home[1500], packet[1500];
+    int k = 0, i, found = 0;
+    runres r;
+    sbuf raw = {0, 0, 0};
+    NEED(case_setup(name) == 0, "case dir");
+    snprintf(home, sizeof home, "%s/home", g_cwd);
+    snprintf(packet, sizeof packet, "%s/packet.json", g_cwd);
+    sb_puts(&raw, "{\"data\":\"");
+    sb_rep(&raw, "\\\"", 15500);
+    sb_puts(&raw, "\"}");
+    NEED(raw.n < 32768, "packet too large");
+    NEED(cx_write(packet, raw.p, (size_t)raw.n) == 0, "packet write");
+    kv[k++] = "HOME"; kv[k++] = home;
+    kv[k++] = "DEEPSEEK_API_KEY"; kv[k++] = "LOCAL_ONLY";
+    kv[k++] = "CSIH_PRIVATE_CONTEXT_PACKET"; kv[k++] = packet;
+    kv[k++] = "CSIH_TRANSCRIPT"; kv[k++] = g_journal;
+    kv[k++] = "CSIH_CWD"; kv[k++] = g_cwd;
+    kv[k] = NULL;
+    NEED(run_agent(kv, "context-capacity", "CURRENT_TASK_MUST_NOT_BE_DROPPED", 1, resp_none, case_limit(), &r) == 0, "agent did not start");
+    {
+        size_t n;
+        char *b = cx_read(g_journal, &n);   /* python: journal.read_text() */
+        NEED(b != NULL && load_journal() == 0, "journal unreadable (rc=%d)", r.rc);
+    }
+    NEED(r.rc == 1 && !r.timed && g_nreq == 0, "rc=%d timed=%d requests=%d stdout tail: %.300s", r.rc, r.timed, g_nreq, r.out + (r.outn > 300 ? r.outn - 300 : 0));
+    NEED(out_has(&r, "current task/context-index exceeds capacity"), "stdout lacks the capacity message");
+    for (i = 0; i < g_jr.n; i++)
+        if (jisz(jget(g_jr.r[i], "role"), "user") && jisz(jget(g_jr.r[i], "text"), "CURRENT_TASK_MUST_NOT_BE_DROPPED")) found = 1;
+    NEED(found, "user record CURRENT_TASK_MUST_NOT_BE_DROPPED absent");
+    return 0;
+fail:
+    return 1;
+}
+
+static const char *CASES[] = {
+    "accepted-work", "consultation", "legacy-stop", "missing-evidence", "rejected", "invalid-recovery", "legacy-answer",
+    "duplicate-evidence", "continue-invalidates", "budget-continue", "audit-failure", "watch-completed", "watch-partial",
+    "watch-failed", "required-missing", "required-fake", "required-wrong-peer", "context-capacity",
+    "feedback-319", "feedback-320-recover", "feedback-473-recover", "feedback-utf8-319", "feedback-utf8-320-recover",
+    "feedback-extra-recover", "feedback-missing-recover", "feedback-duplicate-recover", "feedback-old-recover",
+    "feedback-unknown-recover", "feedback-extra-exhaust", "feedback-length-exhaust", "feedback-audit-failure", NULL};
+
+static void report(int ok, const char *what) {
+    if (ok) printf("  ok    %s\n", what);
+    else { printf("  FAIL  %s: %s\n", what, g_why); g_failed++; }
+}
+
+static int prepare(void) {
+    runres r;
+    size_t n = 0;
+    char *u;
+    char *av[8];
+    sbuf s = {0, 0, 0};
+    const char *scratch = sy_env_or("PROBE_SCRATCH", sy_env_or("TMPDIR", "/tmp"));
+    int st;
+    char outp[1400], errp[1400];
+    snprintf(g_root, sizeof g_root, "%s/csih-probe-build-%d/completion_contract", scratch, (int)getuid());
+    st = sy_exists(g_root);
+    NEED(st >= 0, "work tree %s: errno %d", g_root, -st);
+    if (st == 1) NEED(cx_rmtree(g_root) == 0, "cannot clear the work tree %s", g_root);
+    NEED(mkdirp(g_root) == 0, "mkdir %s", g_root);
+    snprintf(g_src, sizeof g_src, "%s/source", g_root);
+    snprintf(g_comp, sizeof g_comp, "%s/compiler.com", g_root);
+    NEED(copy_source() == 0, "source copy failed");
+    st = inject();
+    NEED(st == 0, "agent_cli.cx injection failed (%d)", st);
+    u = cx_read(g_unisacc, &n);
+    NEED(u != NULL && cx_write(g_comp, u, n) == 0, "compiler copy");
+    /* build gate: the -run compile of the injected source; an unknown subcommand gives the usage line, rc 64 */
+    snprintf(outp, sizeof outp, "%s/build.stdout", g_root);
+    snprintf(errp, sizeof errp, "%s/build.stderr", g_root);
+    sb_puts(&s, "cd "); sq(&s, g_root);
+    sb_puts(&s, " && exec /bin/sh \"$0\" -run source/agent_cli.cx -- \"$@\" >"); sq(&s, outp); sb_puts(&s, " 2>"); sq(&s, errp);
+    av[0] = "sh"; av[1] = "-c"; av[2] = (char *)sb_z(&s); av[3] = g_comp; av[4] = "build-check"; av[5] = NULL;
+    {
+        int pid = sy_spawn(av), w = -EAGAIN;
+        long end = sy_now_ms() + 50000;
+        NEED(pid > 0, "build did not start");
+        while ((w = sy_wait(pid, 1)) == -EAGAIN && sy_now_ms() < end) sy_sleep_ms(20);
+        if (w == -EAGAIN) { sy_kill(pid); r.timed = 1; } else r.timed = 0;
+        r.rc = w;
+        r.out = cx_read(outp, &n); r.outn = r.out ? (long)n : 0;
+        r.err = cx_read(errp, &n); r.errn = r.err ? (long)n : 0;
+    }
+    NEED(r.rc == 64 && !r.timed && has(r.out, r.outn, "usage: agent_cli"), "build gate: rc=%d timed=%d (want 64 with the usage line)", r.rc, r.timed);
+    NEED(r.errn == 0, "build stderr not empty: %.300s", r.err);
+    printf("  ok    build: injected agent compiles (-run, usage rc 64, empty stderr)\n");
+    /* selftest */
+    st = sy_exists(g_selfhome);
+    if (st == 1) cx_rmtree(g_selfhome);
+    NEED(mkdirp(g_selfhome) == 0, "selftest home");
+    snprintf(outp, sizeof outp, "%s/selftest.stdout", g_root);
+    snprintf(errp, sizeof errp, "%s/selftest.stderr", g_root);
+    s.n = 0;
+    sb_puts(&s, "unset CSIH_ROLE CSIH_PEER OPENAI_API_KEY HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; ");
+    sb_puts(&s, "export NO_PROXY='127.0.0.1,localhost' no_proxy='127.0.0.1,localhost' HOME="); sq(&s, g_selfhome);
+    sb_puts(&s, "; cd "); sq(&s, g_root);
+    sb_puts(&s, " && exec /bin/sh \"$0\" -run source/agent_cli.cx -- \"$@\" >"); sq(&s, outp); sb_puts(&s, " 2>"); sq(&s, errp);
+    av[2] = (char *)sb_z(&s); av[4] = "selftest";
+    {
+        int pid = sy_spawn(av), w = -EAGAIN;
+        long end = sy_now_ms() + 9000;
+        NEED(pid > 0, "selftest did not start");
+        while ((w = sy_wait(pid, 1)) == -EAGAIN && sy_now_ms() < end) sy_sleep_ms(20);
+        if (w == -EAGAIN) { sy_kill(pid); r.timed = 1; } else r.timed = 0;
+        r.rc = w;
+        r.out = cx_read(outp, &n); r.outn = r.out ? (long)n : 0;
+        r.err = cx_read(errp, &n); r.errn = r.err ? (long)n : 0;
+    }
+    NEED(r.rc == 0 && !r.timed && r.errn == 0 && has(r.out, r.outn, "agent: all cases pass"), "selftest rc=%d timed=%d stderr=%.200s stdout tail=%.300s",
+         r.rc, r.timed, r.err ? r.err : "", r.out ? r.out + (r.outn > 300 ? r.outn - 300 : 0) : "");
+    printf("  ok    selftest: agent: all cases pass\n");
+    cx_rmtree(g_selfhome);
+    return 0;
+fail:
+    return 1;
+}
+
+int main(int argc, char **argv) {
+    int i, pass = 0;
+    long t0 = sy_now_ms();
+    const char *app = sy_env("CSIH_APP"), *uni = sy_env("UNISACC");
+    char t[4300];
+    if (app && app[0]) snprintf(g_app, sizeof g_app, "%s", app);
+    else if (!getcwd(g_app, sizeof g_app)) { printf("completion_contract: FAIL (getcwd)\n"); return 1; }
+    snprintf(t, sizeof t, "%s/../..", g_app);
+    if (g_app[0] != '/' || !realpath(t, g_repo)) { printf("completion_contract: FAIL (app dir must be absolute)\n"); return 1; }
+    snprintf(g_probe_src, sizeof g_probe_src, "%s/probes/completion_contract.cx", g_app);
+    if (uni && uni[0]) snprintf(g_unisacc, sizeof g_unisacc, "%s", uni);
+    else snprintf(g_unisacc, sizeof g_unisacc, "%s/unisacc.com", g_repo);
+    snprintf(g_selfhome, sizeof g_selfhome, "%s/out/csih-completion-selftest-home-%d", g_repo, sy_pid());
+    (void)argc; (void)argv;
+    g_deadline = t0 + 55000;   /* python: deadline = monotonic() + 55 */
+    take_snapshot(&g_before);
+    if (prepare() != 0) { printf("  FAIL  prepare: %s\n", g_why); g_failed++; }
+    else {
+        g_deadline = sy_now_ms() + 55000;   /* cases share 55s after the build, as the python's deadline mostly did */
+        for (i = 0; CASES[i]; i++) {
+            int rc;
+            const char *nm = CASES[i];
+            g_why[0] = 0;
+            if (named(nm, "context-capacity")) rc = case_capacity(nm);
+            else if (prefixed(nm, "feedback-")) rc = case_feedback(nm);
+            else rc = case_run(nm);
+            report(rc == 0, nm);
+            if (rc == 0) pass++;
+        }
+    }
+    g_used = 0;
+    take_snapshot(&g_after);
+    snprintf(g_why, sizeof g_why, "frozen sources changed during the run");
+    report(snap_same(&g_before, &g_after), "freeze: app sources, unisacc.com and this probe unchanged");
+    if (g_root[0]) cx_rmtree(g_root);
+    printf("  (%d/31 cases passed, %.1fs)\n", pass, (double)(sy_now_ms() - t0) / 1000.0);
+    printf("completion_contract: %s (%d failed)\n", g_failed ? "FAIL" : "PASS", g_failed);
+    return g_failed ? 1 : 0;
+}
