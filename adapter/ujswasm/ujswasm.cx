@@ -28,9 +28,11 @@
      negative ROOT  the checks are not decorative: a mutated net, gold drive (fallbacks), a missing table, a flipped
                     label in the gold file (stock source) and in the injected label source, each red
      d1 ROOT        D1/red line 3: no "ujs" and no "python" in flownet/*.cx
-     accepts ROOT   the 5 negatives ujs accepts (no bytes recorded in the baseline) and 2 literal boundaries just inside
-                    what wat2wasm takes (2^64-1, DBL_MAX by rounding): flownet's bytes == the m4 oracle's
-                    (`python3 -m m4 build`, a child process; the only Python step, and outside flownet/)
+     accepts ROOT REFDIR   the 5 negatives ujs accepts (no bytes recorded in the baseline) and 2 literal boundaries
+                    just inside what wat2wasm takes (2^64-1, DBL_MAX by rounding): flownet's bytes == the m4 oracle's
+                    recorded REFDIR/NAME.wasm.  The oracle (Python m4 over the ujs Python front end) is archived in
+                    archive/reference-py/m4/ and is never run here; `accepts-sources ROOT DIR` writes its inputs
+     accepts-sources ROOT DIR   the inputs of `accepts`, for a recording run of the archived oracle
      selftest ROOT [K/N|NET,...]   (W4) the decision measure, no Python: each net lying (m4's shift and trap, as an
                     injected label source the nets are constructed from) over the 33 recorded programs; the kinds
                     each net decides == EXPECT_W4 (m4's EXPECT plus the promotions type, shape, ic); share 1 checks
@@ -2398,19 +2400,20 @@ static Buf long_source(int e) {
     return b;
 }
 
-/* SRC built through flownet and through the m4 oracle (`python3 -m m4 build SRC -o REF`, a child; nothing of it is
-   imported): both accept and the bytes are equal */
-static int same_as_oracle(const char *src, const char *label, const char *mine, const char *ref) {
-    Child c; char *av[8], *o = 0, *x, *y; size_t on = 0, a = 0, b = 0; int rc, ok;
+/* SRC built through flownet and compared with the m4 oracle's recorded bytes REFDIR/<basename of LABEL>.wasm.  The
+   oracle (the Python m4 package over the ujs Python front end) is archived (archive/reference-py/m4/, procedure in
+   archive/reference-py/README.md); it is never run from here.  `accepts-sources ROOT DIR` writes the inputs it needs. */
+static const char *base_of(const char *p) { const char *s = strrchr(p, '/'); return s ? s + 1 : p; }
+static int same_as_oracle(const char *src, const char *label, const char *mine, const char *refdir) {
+    Child c; char *x, *y, *ref; size_t a = 0, b = 0; int ok;
     cx_remove(mine);
     c = build_child(src, mine, DEFAULT_TABLES, "built");
     if (c.rc) { badf("%s: refused: %s", label, c.err); free(c.out); free(c.err); return 0; }
     free(c.out); free(c.err);
-    av[0] = "python3"; av[1] = "-m"; av[2] = "m4"; av[3] = "build"; av[4] = (char *)src; av[5] = "-o"; av[6] = (char *)ref; av[7] = 0;
-    cx_remove(ref);
-    rc = cx_runv_timeout(av, 20, &o, &on); free(o);
-    if (rc) { badf("%s: the m4 oracle failed (rc %d)", label, rc); return 0; }
+    ref = xf("%s/%s.wasm", refdir, base_of(label));
     x = cx_read(mine, &a); y = cx_read(ref, &b);
+    if (!y) { badf("%s: no recorded oracle bytes %s", label, ref); free(x); free(ref); return 0; }
+    free(ref);
     ok = x && y && a == b && !memcmp(x, y, a);
     if (!ok) badf("%s: flownet %ld bytes, m4 %ld bytes: differ", label, (long)a, (long)b);
     else printf("same\t%s\t%ld bytes\n", label, (long)a);
@@ -2418,22 +2421,23 @@ static int same_as_oracle(const char *src, const char *label, const char *mine, 
     return ok;
 }
 
-/* the negatives that ujs (and m4) accept have no recorded bytes in the baseline: each one is built through flownet
-   and through the m4 oracle (`python3 -m m4 build SRC -o OUT`, run as a child; nothing of it is imported) and the bytes
-   must be equal.  This is the only Python step of the adapter's checks; flownet/ itself never runs it. */
-static int cmd_accepts(const char *root) {
-    char *tmp, *mine, *ref; int r, n = 0, ok = 0, nedge = 0, edgeok = 0, e;
+/* the negatives that ujs (and m4) accept have no recorded bytes in the baseline: each one is built through flownet and
+   compared with the m4 oracle's recorded bytes in REFDIR (NAME.wasm per input; `accepts-sources ROOT DIR` writes the
+   inputs, the archived oracle records DIR/NAME.wasm from them).  No Python runs here. */
+static int cmd_accepts(const char *root, const char *refdir_arg) {
+    char *tmp, *mine, refdir[4096]; int r, n = 0, ok = 0, nedge = 0, edgeok = 0, e;
+    if (!refdir_arg || !realpath(refdir_arg, refdir)) { fprintf(stderr, "ujswasm-accepts: REFDIR of recorded oracle bytes required (got %s)\n", refdir_arg ? refdir_arg : "none"); return 2; }
     load_baseline(root);
     if (chdir(root)) { fprintf(stderr, "ujswasm-accepts: cannot enter %s\n", root); return 1; }
     tmp = xf("%s/ujswasmaXXXXXX", tmproot());
     if (!mkdtemp(tmp)) return 1;
-    mine = xf("%s/mine.wasm", tmp); ref = xf("%s/ref.wasm", tmp);
+    mine = xf("%s/mine.wasm", tmp);
     for (r = 0; r < nrows; r++) {
         Row *w = &rows[r]; char *path;
         if (strcmp(w->f[0], "check") || strcmp(w->f[1], "accept") || w->n != 4) continue;
         path = neg_path(w->f[2]);
         n++;
-        if (same_as_oracle(path, path, mine, ref)) ok++;
+        if (same_as_oracle(path, path, mine, refdir)) ok++;
         free(path);
     }
     /* generated accepts: (1) the literal boundaries just inside what wat2wasm takes (the refuse step holds the ones
@@ -2446,13 +2450,37 @@ static int cmd_accepts(const char *root) {
         if (cx_write(path, body.s, body.n)) { bad("cannot write ", path); free(path); free(body.s); continue; }
         free(body.s);
         nedge++;
-        if (same_as_oracle(path, LONGS[e].name, mine, ref)) edgeok++;
+        if (same_as_oracle(path, LONGS[e].name, mine, refdir)) edgeok++;
         cx_remove(path); free(path);
     }
-    cx_remove(mine); cx_remove(ref); cx_remove(tmp); free(tmp); free(mine); free(ref);
+    cx_remove(mine); cx_remove(tmp); free(tmp); free(mine);
     if (fails || n != 5 || nedge != NLONG) { fprintf(stderr, "ujswasm-accepts: %d failure(s), %d/%d the same (want the 5 recorded accepts), generated %d/%d\n", fails, ok, n, edgeok, nedge); return 1; }
-    printf("ujswasm-accepts: PASS (%d/%d known accepts and %d/%d generated accepts -- 2 literal boundaries, 4 long texts -- byte-identical to python3 -m m4 build)\n", ok, n, edgeok, nedge);
+    printf("ujswasm-accepts: PASS (%d/%d known accepts and %d/%d generated accepts -- 2 literal boundaries, 4 long texts -- byte-identical to the recorded m4 oracle bytes)\n", ok, n, edgeok, nedge);
     return 0;
+}
+
+/* the inputs of `accepts`, written to DIR for a recording run of the archived oracle: the 5 recorded accepts (copied
+   under their names) and the NLONG generated sources */
+static int cmd_accepts_sources(const char *root, const char *dir_arg) {
+    char dir[4096]; int r, e, n = 0;
+    if (!dir_arg || !realpath(dir_arg, dir)) { fprintf(stderr, "ujswasm-accepts-sources: existing DIR required\n"); return 2; }
+    load_baseline(root);
+    if (chdir(root)) { fprintf(stderr, "ujswasm-accepts-sources: cannot enter %s\n", root); return 1; }
+    for (r = 0; r < nrows; r++) {
+        Row *w = &rows[r]; char *path, *out, *b; size_t bn;
+        if (strcmp(w->f[0], "check") || strcmp(w->f[1], "accept") || w->n != 4) continue;
+        path = neg_path(w->f[2]); out = xf("%s/%s", dir, base_of(path));
+        b = cx_read(path, &bn);
+        if (!b || cx_write(out, b, bn)) bad("cannot copy ", path); else n++;
+        free(b); free(path); free(out);
+    }
+    for (e = 0; e < NLONG; e++) {
+        char *out = xf("%s/%s", dir, LONGS[e].name); Buf body = long_source(e);
+        if (cx_write(out, body.s, body.n)) bad("cannot write ", out); else n++;
+        free(body.s); free(out);
+    }
+    printf("ujswasm-accepts-sources: %d inputs in %s\n", n, dir);
+    return fails ? 1 : 0;
 }
 
 /* the wat2wasm last resort, reached on purpose: (1) a wrapper wat2wasm first on PATH rewrites one literal of the
@@ -2900,8 +2928,7 @@ static int in_cls(const char *s, char **cls) { int i; for (i = 0; cls[i]; i++) i
 static char **net_classes(const char *net) {
     static char **cls[NSELF]; int s, n = 0; const char *d, *p;
     for (s = 0; SELF_NETS[s] && strcmp(SELF_NETS[s], net); s++) ;
-    if (!SELF_NETS[s]) { fprintf(stderr, "ujswasm-selftest: %s is not a ujs net
-", net); exit(1); }
+    if (!SELF_NETS[s]) { fprintf(stderr, "ujswasm-selftest: %s is not a ujs net\n", net); exit(1); }
     if (cls[s]) return cls[s];
     if (!(d = ujsgold_domain(0, net)) || !(p = strstr(d, "class\t")) || (p != d && p[-1] != '\n')) {
         fprintf(stderr, "ujswasm-selftest: %s: no class row in its domain\n", net); exit(1);
@@ -3113,8 +3140,9 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "refuse")) return cmd_refuse(argc > 2 ? argv[2] : ".");
     if (!strcmp(cmd, "negative")) return cmd_negative(argc > 2 ? argv[2] : ".");
     if (!strcmp(cmd, "d1")) return cmd_d1(argc > 2 ? argv[2] : ".");
-    if (!strcmp(cmd, "accepts")) return cmd_accepts(argc > 2 ? argv[2] : ".");
+    if (!strcmp(cmd, "accepts")) return cmd_accepts(argc > 2 ? argv[2] : ".", argc > 3 ? argv[3] : 0);
+    if (!strcmp(cmd, "accepts-sources")) return cmd_accepts_sources(argc > 2 ? argv[2] : ".", argc > 3 ? argv[3] : 0);
     if (!strcmp(cmd, "selftest")) return cmd_selftest(argc > 2 ? argv[2] : ".", argc > 3 ? argv[3] : "1/1");
-    fprintf(stderr, "ujswasm: usage: build SRC -o OUT [--tables DIR] [--wat FILE] | check ROOT | refuse ROOT | negative ROOT | d1 ROOT | accepts ROOT | selftest ROOT [K/N|NET,...]\n");
+    fprintf(stderr, "ujswasm: usage: build SRC -o OUT [--tables DIR] [--wat FILE] | check ROOT | refuse ROOT | negative ROOT | d1 ROOT | accepts ROOT REFDIR | accepts-sources ROOT DIR | selftest ROOT [K/N|NET,...]\n");
     return 2;
 }
