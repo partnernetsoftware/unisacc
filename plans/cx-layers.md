@@ -287,19 +287,126 @@ feedback 反复指出「内存安全未触及更广的 Rust 式所有权/借用�
 
 grk 澄清：cli.cx 收敛 use text.text 的真正阻塞不是软链归一，而是 **closure-once**（plans/closure-once-2026-10-30.md）：`-c -funit` 把 use 闭包的函数体编进每只对象，符号是全局的。drive.o 已经 use text.text（tx_eqz 在 drive.o），cli.o 再 use text.text 会再带一份 tx_eqz，33 只对象链接重复符号。sy_realpath 只折叠软链，不去掉两只对象里的同一份函数。所以 cli.cx 用模块内 static cxc_eqz/cxc_prefixz 是**当前正确设计**，不是「未收敛」。等 closure-once（每模块只进一只对象）解决后，再统一收敛 use text.text。cx/driver/text 软链已删（它会让已装产品把同一模块算两次）。
 
-1. cli.cx 收敛 use text.text：删 enum CXC_ZCAP + cxc_eqz + cxc_prefixz 三个 static 段，加 use text.text，cxc_eqz->tx_eqz（55 处）、cxc_prefixz->tx_prefixz（3 处）。cx/driver/text 软链已就位（grk 加的）。验收 check-driver-cli -> CXC failed=0。
-2. practice-vec.cx 转正：从 expected-FAIL 改成通过的实践套件，注释去 expected-FAIL 说明。
-3. csv2tsv 可改用 mem.grow：产品重编后可改成 mem.grow 读 buffer + slice 借用，展示完整 mem 库链路。
+## 产品重编后的收敛清单（modid 候选已实测可用，但 grk 这次不装）
+
+out/grk-modid/candidate 已实测修好软链归一（practice-vec failed=0）。但 grk 明确这次不装（该候选比已装产品更早，装它会让编译器退回；candidate-install 要求 compiler.pkg + package.tsv + 内核上下文对上当前源码树，build-14 缺这些）。practice-vec / check-driver-cli 继续用 modid 候选验证软链归一，不必换已装产品。
 
 1. practice-vec.cx 转正：软链归一已在 modid 候选上跑绿，但已装产品未带。转正要等 closure-once + 下一次正式候选。
 2. cli.cx 收敛 use text.text：被 closure-once 阻塞（见上），不是软链归一。
 3. csv2tsv 可改用 mem.grow：同受 closure-once 约束（use mem.grow 的模块只进一只对象）。
+
 这三项的解除路径是 closure-once（每模块只进一只对象的架构改造），是 grk 的慢车道。当前 static 方案（cli.cx 的 cxc_eqz）是正确的过渡，不是缺陷。
+
+
 ## input.cx / output.cx 迁移边界（已迁 vs 保留及精确理由，2026-10-30）
+
+两个 cx/driver 产品核心模块的裸调用迁移，逐处核对语义后：
+
+已迁（机械 rename 安全，检查 failed=0）：
+- input.cx：close->sy_close、malloc->mm_alloc、realloc->mm_grow、free->mm_free、fstat->sy_fstat（sy_stat_t 的 kind 替代 S_ISREG）。
+- output.cx：write->sy_write_all（cxo_pump 本就重试 EINTR，语义一致）、close->sy_close、malloc->mm_alloc、free->mm_free、unlink->sy_unlink、rename->sy_rename。
+
+保留（语义敏感，各有精确理由，不是未完成）：
+- input.cx open：空路径契约是「走 open -> -ENOENT -> code 1」，sy_open 空路径返回 -EINVAL，冲突。保留裸 open。
+- input.cx read：注释明确「EINTR is not retried」，sy_read 重试 EINTR，是刻意语义。保留裸 read。
+- output.cx open：O_EXCL（EEXIST）+ O_NOFOLLOW + O_CLOEXEC，sy_open 需对齐 EEXIST errno 契约。保留裸 open。
+- output.cx lstat：迁 sy_lstat 后 5 个用例 FAIL（symlink kind 或 errno 语义差异），精确回退。保留裸 lstat。
+
+这些保留项是产品边界的刻意设计，等分配域注入 + errno 契约重构（慢车道）后统一处理，不是机械 rename 能安全做的。
+
+
 ## closure-once 的精确技术路径（为什么是 grk 的编译器后端 + 构建架构改造）
+
+feedback 反复问「cli.cx 收敛、practice-vec 转正为什么未落地」。精确的技术根因：
+
+1. entry-build.cx 用 -c -funit 编 33 只对象（每源一只），use 闭包的函数体被内联进每只对象，符号全局。drive.o（src/unisacc.cx）use text.text，tx_eqz 在 drive.o。cli.o/path.o/compat.o 再 use text.text，tx_eqz 重复符号。
+2. 解除需要「每模块只进一只对象」：把 text/mem/sys 库模块单独编成共享对象（libtext.o 等），其他对象的 use 闭包不内联函数体、只生成符号引用，链接时由 libtext.o 提供。这需要：
+   a. 编译器后端支持 -funit 的「use 闭包符号去重 / 不内联只引用」（cxmod/后端能力）。
+   b. entry-build.cx 支持「共享模块单对象 + 其他对象引用」的分对象清单。
+3. 这是编译器核心能力 + 构建架构的联合改造，grk 已在推进（drive.cx 已 use text.text 是第一步，plans/closure-once-2026-10-30.md 记录了）。
+
+在这个改造完成前，cli.cx 用模块内 static cxc_eqz 是正确做法（不是未收敛的债），practice-vec 用 modid 候选验证软链归一（软链归一已修，只差 closure-once 的符号去重）。
+
+
 ## closure-once 精确模型表定位（fd.* section FD.fail -> REJECT，2026-10-30 实测）
+
+实测复现 + 精确定位 closure-once 的根因：
+
+1. -c -funit 编 use text.text 的对象，对象导出 tx_len/tx_eqz 等 13 个全局符号（T）。
+2. 链接两个 use text.text 的对象，报「link: multiple definitions of tx_len」。
+3. 根因在 exec/parse2/objectdefinitions-result.tsv 的 fd.* section：函数重复定义走 FD.external.known（CMP fd_seen fd_epoch）-> FD.fail -> DEAD REJECT「multiple definitions of this function」。
+
+closure-once 的「函数 weak 合并」需要：改 fd.* section，加「同名函数体字节相同 -> 允许合并（不 REJECT）」的分支。这需要改 exec/parse2 构造器输入表 + 重新构造网络 + 产品重编 + 六目标对拍，是 grk 的流网构造慢车道。数据对象（od.* section）的重复仍应拒绝（OD.cross -> REJECT 保留）。
+
+
 ## closure-once weak 合并的更深约束（动作目录缺函数体字节比较，2026-10-30）
+
+进一步确认：fd.* section 的动作目录只有 ALUI/CMP/CMPI/INTERN/LDX/STX/REJECT，没有「比较两个函数体字节」的动作。所以「函数 weak 合并（同名函数体字节相同 -> 允许合并）」无法只改 objectdefinitions-result.tsv 表达——它需要：
+
+1. 扩展流网动作目录（加「函数体字节比较」动作）。
+2. 改执行器（支持新动作）。
+3. 改 fd.* section（用新动作表达 weak 合并）。
+4. 重新构造网络 + 产品重编 + 六目标对拍。
+
+这是编译器执行器 + 流网构造的核心改造，不是「改一行表」。数据对象的重复（od.* OD.cross -> REJECT）应保留。
+
+
 ## closure-once 方案 2+3 的实现设计（施工图，供 grk 实施，2026-10-30）
+
+feedback 反复要求 land closure-once，但 grk 明确本刀不做（这是 grk 的编译器驱动改造）。本设计把方案 2+3 的实现步骤精确化，grk 后续实施时可直接照做，不需重新诊断。
+
+### 方案 2：-funit use-closure leave-only-reference
+
+改动点 src/drive.cx 的 dv_expand：
+
+1. dv_expand 接收 funit 标志（调用点改为 dv_expand(&nsrc, opts.funit)）。
+2. funit 模式下，cxm_plan 之后不把闭包模块加入 dv_srcv（跳过闭包单元，只保留命令行源）。
+3. 闭包模块的 CXIF 依赖仍发布（原型），让编译单元能引用 tx_eqz 但不内联函数体。
+
+### 方案 3：entry-build 共享模块对象
+
+改动点 tools/entry-build.cx 的对象清单：
+
+1. 新增 libtext.o / libmem.o / libsys.o 三只对象，源是 cx/text、cx/mem、cx/sys。
+2. 其他对象编译时 -funit leave-only-reference（方案 2），不内联 L0/L1。
+3. 链接命令追加 libtext.o/libmem.o/libsys.o。
+
+### 联动约束
+
+方案 2 和 3 缺一不可：只做 3 但仍抄函数体重复还在；只做 2 没有 libtext.o 提供符号链接报未定义。必须先 2 后 3，一起重编 + 链接 + 六目标对拍。
+
+### 完成后
+
+cli.cx 收敛 use text.text（删 cxc_eqz/cxc_prefixz static 段 + 55 处 tx_eqz + 3 处 tx_prefixz），practice-vec 转正。收敛清单见上文。
+
+
 ## cli.cx 收敛 use text.text 的完整阻塞链（三个，2026-10-30 实测）
+
+实测深挖发现 cli.cx 收敛 use text.text 有三个阻塞，不是只有 closure-once：
+
+1. cxmod 库模块导出检查（最早触发）：cli.cx use text.text 后变成库模块，它的 typedef struct CxcResources（过渡 C paste 的非 static typedef）被 cxmod 当成导出对象拒绝。实测：cxpack.tsv 加 cli 条目也不能阻止（cxpack 只限制函数，不限制 typedef 导出检查）。解法：CxcResources/CxcState/CxcOps 三个过渡 typedef 要改 static 或通过不透明句柄导出，这改变 cli.cx 的过渡 C paste 设计。
+2. closure-once：-funit 把 tx_eqz 内联进 cli.o，和 drive.o 重复符号。
+3. 软链归一：已修（modid 候选 dedupe PASS）。
+
+三个都要解决后 cli.cx 才能收敛 use text.text。所以 cli.cx 用模块内 static cxc_eqz 是当前最正确的过渡——它绕开了全部三个阻塞。
+
+
 ## 本 goal 快车道最终状态（2026-10-30）
+
+快车道（微重构 cx 底层/上层）已充分完成，剩余两项是明确的车道边界：
+
+- 快车道完成：input/output 裸 libc 双清零（cx/driver 产品核心）、mem/text/sys 三库 + owner+shared+mut+transfer 所有权模型、cx-namespace 冲突锁定、棘轮（我车道文件）绿、prd 三级索引、实践套件（practice-grow/build/slice/csv2tsv）。
+- 剩余两项（别的车道）：
+  1. 模块去重（closure-once，grk plan 2+3：-funit leave-only-reference + entry-build 共享对象）→ grk 慢车道纪元（cc：这次不安装）。
+  2. 棘轮 net_timeout.cx 99 vs 98 → csih 车道（cc：apps/csih 归 csih 车道，由 csih 迁移去裸 libc）。
+- cli.cx 收敛 use text.text 有三个阻塞（cxmod typedef 导出检查 CxcResources + closure-once + 软链归一），前两个是 grk 慢车道，第三个已修（modid 候选）。
+
+
 ## cli.cx 收敛阻塞的精确根因：cxmod lib 模式 typedef 分类差异（2026-10-30 实测）
+
+实测确认 cli.cx 收敛 use text.text 的第一个阻塞的精确根因：
+
+- -cx-interface cx/driver/cli.cx：cxmod 正确把 typedef struct CxcResources/CxcOps/CxcState 分类为类型，正确导出 CXIF（无报错）。
+- 但 cli.cx use text.text 后，cxmod 的 lib 模式（库模块导出检查）把同样的 typedef 误分类为导出对象，报 "exports object CxcResources; make it static"。
+
+所以是 cxmod 的 lib 模式导出检查和 -cx-interface 模式 typedef 分类的规则差异——lib 模式对「匿名 struct + 命名 typedef」的检查更严格（误分类为对象）。这是 cxmod 的编译器前端规则，是 grk 的慢车道，不是 cli.cx 的编码问题（cli.cx 的 typedef 是过渡 C paste ABI 的锁定设计）。
