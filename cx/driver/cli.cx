@@ -143,6 +143,31 @@
    Success clears why when the buffer is usable. Return 1 does not. */
 #pragma unisa module cli
 
+/* Bounded z-string comparison, replacing the unbounded strcmp/strncmp.  A z-string
+   is read at most CXC_ZCAP bytes; a missing terminator compares unequal.  The
+   ceiling is the argument-length bound check-driver-cli already uses for tx_eq,
+   so a command-line token longer than it never matches a built-in option. */
+enum { CXC_ZCAP = 1 << 20 };
+
+static int cxc_eqz(const char *a, const char *b) {
+    long i;
+    if (!a || !b) return a == b;
+    for (i = 0; i < CXC_ZCAP; i++) {
+        if (a[i] != b[i]) return 0;
+        if (!a[i]) return 1;
+    }
+    return 0;
+}
+
+static int cxc_prefixz(const char *a, const char *lit, int n) {
+    long i;
+    if (!a || !lit || n < 0) return 0;
+    for (i = 0; i < n; i++) {
+        if (!a[i] || a[i] != lit[i]) return 0;
+    }
+    return 1;
+}
+
 typedef struct {
     unsigned char **defs;
     unsigned char **undefs;
@@ -221,15 +246,15 @@ static int cxc_ok(char *why, long whycap) {
 }
 
 static int cxc_skips(const char *a) {
-    return !strcmp(a, "--models") || !strcmp(a, "-I") || !strcmp(a, "-iquote")
-        || !strcmp(a, "-D") || !strcmp(a, "-U") || !strcmp(a, "-include")
-        || !strcmp(a, "-MF") || !strcmp(a, "-MT") || !strcmp(a, "-MQ")
-        || !strcmp(a, "--emit-host-symbols") || !strcmp(a, "--host-provider");
+    return cxc_eqz(a, "--models") || cxc_eqz(a, "-I") || cxc_eqz(a, "-iquote")
+        || cxc_eqz(a, "-D") || cxc_eqz(a, "-U") || cxc_eqz(a, "-include")
+        || cxc_eqz(a, "-MF") || cxc_eqz(a, "-MT") || cxc_eqz(a, "-MQ")
+        || cxc_eqz(a, "--emit-host-symbols") || cxc_eqz(a, "--host-provider");
 }
 
 static int cxc_mode_word(const char *a) {
-    return !strcmp(a, "-run") || !strcmp(a, "-dump-tokens") || !strcmp(a, "--tapebin")
-        || !strcmp(a, "--version") || !strcmp(a, "-version");
+    return cxc_eqz(a, "-run") || cxc_eqz(a, "-dump-tokens") || cxc_eqz(a, "--tapebin")
+        || cxc_eqz(a, "--version") || cxc_eqz(a, "-version");
 }
 
 static int cxc_need(char **argv, int argc, int index, char **out) {
@@ -347,7 +372,7 @@ int cxc_default_run(CxcState *st, char **argv, int argc, char *why, long whycap)
     for (i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (!a) return cxc_fail(5, "bad argument", why, whycap);
-        if (!strcmp(a, "--")) break;
+        if (cxc_eqz(a, "--")) break;
         if (a[0] != '-') continue;
         if (a[1] == 'o' || a[1] == 'b' || a[1] == 't' || a[1] == 'S' || a[1] == 'c'
             || a[1] == 'E' || a[1] == 'M') modeflag = 1;
@@ -369,59 +394,59 @@ int cxc_step(CxcState *st, char **argv, int argc, int *index, char *why, long wh
         return cxc_fail(5, "bad argument", why, whycap);
     a = argv[*index];
     if (!a) return cxc_fail(5, "bad argument", why, whycap);
-    if (!strcmp(a, "-Wall") || !strcmp(a, "-Wextra")) {
+    if (cxc_eqz(a, "-Wall") || cxc_eqz(a, "-Wextra")) {
         st->warnings = 1;
         *index = *index + 1;
         return cxc_ok(why, whycap);
     }
-    if (!strcmp(a, "-Werror")) {
+    if (cxc_eqz(a, "-Werror")) {
         st->warnings = 1;
         st->werror = 1;
         *index = *index + 1;
         return cxc_ok(why, whycap);
     }
-    if (!strcmp(a, "-nostdinc")) {
+    if (cxc_eqz(a, "-nostdinc")) {
         st->nostd = 1;
         *index = *index + 1;
         return cxc_ok(why, whycap);
     }
-    if (!strcmp(a, "-ftrim-libc") || !strcmp(a, "-libneed")) {
+    if (cxc_eqz(a, "-ftrim-libc") || cxc_eqz(a, "-libneed")) {
         st->notrim = 0;
         *index = *index + 1;
         return cxc_ok(why, whycap);
     }
-    if (!strcmp(a, "-fno-trim-libc")) {
+    if (cxc_eqz(a, "-fno-trim-libc")) {
         st->notrim = 1;
         *index = *index + 1;
         return cxc_ok(why, whycap);
     }
-    if (!strcmp(a, "-run")) { st->runit = 1; *index = *index + 1; return cxc_ok(why, whycap); }
-    if (!strcmp(a, "--force-origin")) { st->force_origin = 1; *index = *index + 1; return cxc_ok(why, whycap); }
-    if (!strcmp(a, "--tapebin")) { st->emitbin = 1; *index = *index + 1; return cxc_ok(why, whycap); }
-    if (!strcmp(a, "-funit")) { st->funit = 1; *index = *index + 1; return cxc_ok(why, whycap); }
-    if (!strcmp(a, "-dump-tokens")) { st->mode = 4; *index = *index + 1; return cxc_ok(why, whycap); }
-    if (!strcmp(a, "-E")) { st->mode = 1; *index = *index + 1; return cxc_ok(why, whycap); }
-    if (!strcmp(a, "-S") || !strcmp(a, "-c")) {
+    if (cxc_eqz(a, "-run")) { st->runit = 1; *index = *index + 1; return cxc_ok(why, whycap); }
+    if (cxc_eqz(a, "--force-origin")) { st->force_origin = 1; *index = *index + 1; return cxc_ok(why, whycap); }
+    if (cxc_eqz(a, "--tapebin")) { st->emitbin = 1; *index = *index + 1; return cxc_ok(why, whycap); }
+    if (cxc_eqz(a, "-funit")) { st->funit = 1; *index = *index + 1; return cxc_ok(why, whycap); }
+    if (cxc_eqz(a, "-dump-tokens")) { st->mode = 4; *index = *index + 1; return cxc_ok(why, whycap); }
+    if (cxc_eqz(a, "-E")) { st->mode = 1; *index = *index + 1; return cxc_ok(why, whycap); }
+    if (cxc_eqz(a, "-S") || cxc_eqz(a, "-c")) {
         st->mode = 2;
         if (a[1] == 'c') st->sawc = 1;
         else st->sawS = 1;
         *index = *index + 1;
         return cxc_ok(why, whycap);
     }
-    if (!strcmp(a, "-MP")) { st->depphony = 1; *index = *index + 1; return cxc_ok(why, whycap); }
-    if (!strcmp(a, "-MD") || !strcmp(a, "-MMD")) {
+    if (cxc_eqz(a, "-MP")) { st->depphony = 1; *index = *index + 1; return cxc_ok(why, whycap); }
+    if (cxc_eqz(a, "-MD") || cxc_eqz(a, "-MMD")) {
         if (!st->deps) st->deps = "";
         *index = *index + 1;
         return cxc_ok(why, whycap);
     }
-    if (!strcmp(a, "-M") || !strcmp(a, "-MM")) {
+    if (cxc_eqz(a, "-M") || cxc_eqz(a, "-MM")) {
         st->deponly = 1;
         st->mode = 1;
         if (!st->deps) st->deps = "";
         *index = *index + 1;
         return cxc_ok(why, whycap);
     }
-    if (!strcmp(a, "-MT") || !strcmp(a, "-MQ")) {
+    if (cxc_eqz(a, "-MT") || cxc_eqz(a, "-MQ")) {
         got = cxc_need(argv, argc, *index, &arg);
         if (got == 0) return cxc_fail(5, "missing dependency target", why, whycap);
         if (got < 0) return cxc_fail(5, "bad argument", why, whycap);
@@ -434,7 +459,7 @@ int cxc_step(CxcState *st, char **argv, int argc, int *index, char *why, long wh
         *index = *index + 2;
         return cxc_ok(why, whycap);
     }
-    if (!strcmp(a, "--emit-host-symbols") || !strcmp(a, "--host-provider")) {
+    if (cxc_eqz(a, "--emit-host-symbols") || cxc_eqz(a, "--host-provider")) {
         const char *phrase = a[2] == 'e' ? "invalid --emit-host-symbols argument"
                                          : "invalid --host-provider argument";
         if ((a[2] == 'e' && st->host_symbols_path) || (a[2] != 'e' && st->host_provider_path))
@@ -447,7 +472,7 @@ int cxc_step(CxcState *st, char **argv, int argc, int *index, char *why, long wh
         *index = *index + 2;
         return cxc_ok(why, whycap);
     }
-    if (!strcmp(a, "-MF")) {
+    if (cxc_eqz(a, "-MF")) {
         got = cxc_need(argv, argc, *index, &arg);
         if (got == 0) return cxc_fail(5, "missing dependency output", why, whycap);
         if (got < 0) return cxc_fail(5, "bad argument", why, whycap);
@@ -455,7 +480,7 @@ int cxc_step(CxcState *st, char **argv, int argc, int *index, char *why, long wh
         *index = *index + 2;
         return cxc_ok(why, whycap);
     }
-    if (!strcmp(a, "--models")) {
+    if (cxc_eqz(a, "--models")) {
         got = cxc_need(argv, argc, *index, &arg);
         if (got == 0) return cxc_fail(5, "missing package", why, whycap);
         if (got < 0) return cxc_fail(5, "bad argument", why, whycap);
@@ -463,7 +488,7 @@ int cxc_step(CxcState *st, char **argv, int argc, int *index, char *why, long wh
         *index = *index + 2;
         return cxc_ok(why, whycap);
     }
-    if (!strcmp(a, "-b") || !strcmp(a, "-t")) {
+    if (cxc_eqz(a, "-b") || cxc_eqz(a, "-t")) {
         int mode, image;
         got = cxc_need(argv, argc, *index, &arg);
         if (got == 0) return cxc_fail(5, "missing target", why, whycap);
@@ -483,7 +508,7 @@ int cxc_step(CxcState *st, char **argv, int argc, int *index, char *why, long wh
         *index = *index + 2;
         return cxc_ok(why, whycap);
     }
-    if (!strcmp(a, "-o")) {
+    if (cxc_eqz(a, "-o")) {
         got = cxc_need(argv, argc, *index, &arg);
         if (got == 0) return cxc_fail(5, "missing output path", why, whycap);
         if (got < 0) return cxc_fail(5, "bad argument", why, whycap);
@@ -496,19 +521,19 @@ int cxc_step(CxcState *st, char **argv, int argc, int *index, char *why, long wh
         *index = *index + 1;
         return cxc_ok(why, whycap);
     }
-    if (!strcmp(a, "-g") || !strncmp(a, "-std=", 5)) {
+    if (cxc_eqz(a, "-g") || cxc_prefixz(a, "-std=", 5)) {
         *index = *index + 1;
         return cxc_ok(why, whycap);
     }
-    if (!strcmp(a, "-O")) { st->level = 1; *index = *index + 1; return cxc_ok(why, whycap); }
-    if (!strcmp(a, "-O0")) { st->level = 0; *index = *index + 1; return cxc_ok(why, whycap); }
-    if (!strcmp(a, "-O1")) { st->level = 1; *index = *index + 1; return cxc_ok(why, whycap); }
-    if (!strcmp(a, "-O2") || !strcmp(a, "-O3")) { st->level = 2; *index = *index + 1; return cxc_ok(why, whycap); }
-    if (!strcmp(a, "-Os")) { st->level = 1; *index = *index + 1; return cxc_ok(why, whycap); }
-    if (!strncmp(a, "-ferror-limit=", 14)) return cxc_limit(st, index, a, why, whycap);
-    if (!strcmp(a, "-include")) return cxc_include(st, argv, argc, index, why, whycap);
-    if (!strncmp(a, "-iquote", 7)) return cxc_quote(st, argv, argc, index, a, why, whycap);
-    if (!strcmp(a, "-I") || (a[0] == '-' && a[1] == 'I' && a[2]))
+    if (cxc_eqz(a, "-O")) { st->level = 1; *index = *index + 1; return cxc_ok(why, whycap); }
+    if (cxc_eqz(a, "-O0")) { st->level = 0; *index = *index + 1; return cxc_ok(why, whycap); }
+    if (cxc_eqz(a, "-O1")) { st->level = 1; *index = *index + 1; return cxc_ok(why, whycap); }
+    if (cxc_eqz(a, "-O2") || cxc_eqz(a, "-O3")) { st->level = 2; *index = *index + 1; return cxc_ok(why, whycap); }
+    if (cxc_eqz(a, "-Os")) { st->level = 1; *index = *index + 1; return cxc_ok(why, whycap); }
+    if (cxc_prefixz(a, "-ferror-limit=", 14)) return cxc_limit(st, index, a, why, whycap);
+    if (cxc_eqz(a, "-include")) return cxc_include(st, argv, argc, index, why, whycap);
+    if (cxc_prefixz(a, "-iquote", 7)) return cxc_quote(st, argv, argc, index, a, why, whycap);
+    if (cxc_eqz(a, "-I") || (a[0] == '-' && a[1] == 'I' && a[2]))
         return cxc_incdir(st, argv, argc, index, a, why, whycap);
     if (a[0] == '-' && (a[1] == 'D' || a[1] == 'U'))
         return cxc_macro(st, argv, argc, index, a, why, whycap);
