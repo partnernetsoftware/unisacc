@@ -1,3 +1,5 @@
+#pragma unisa use text.fmt
+#pragma unisa use sys.io
 #pragma unisa use tmuxwit
 #pragma unisa use text.text
 #pragma unisa use sys.env
@@ -62,7 +64,7 @@ static const char *csih;
 static long slen(const char *s) { return tx_len(s, 1 << 22); }
 static int has(const char *hay, const char *needle) { return tx_find(hay, slen(hay), needle, slen(needle)) >= 0; }
 static void check(int ok, const char *what) {
-    printf("  %s  %s\n", ok ? "ok  " : "FAIL", what);
+    sy_printf("  %s  %s\n", ok ? "ok  " : "FAIL", what);
     if (!ok) fails++;
 }
 
@@ -75,7 +77,7 @@ static int plan_key(const char *file, char key[65]) {
     size_t n = 0, len;
     long at = 0, used = 0;
     int rc;
-    snprintf(u, sizeof u, "%s/unisacc.com", repo);
+    tx_snprintf(u, sizeof u, "%s/unisacc.com", repo);
     rc = cx_runv_timeout(av, 20, &out, &n);
     if (rc != 0 || !out) { if (out) tw_free(out); return -1; }
     {
@@ -83,7 +85,7 @@ static int plan_key(const char *file, char key[65]) {
         if (!b) { tw_free(out); return -1; }
         cx_sha256_hex(b, len, h);
         tw_free(b);
-        used += snprintf(list + used, sizeof list - used, "unisacc %s\n", h);
+        used += tx_snprintf(list + used, sizeof list - used, "unisacc %s\n", h);
     }
     while (at < (long)n) {
         long e = at, t1, t2;
@@ -98,7 +100,7 @@ static int plan_key(const char *file, char key[65]) {
             if (!b) { tw_free(out); return -1; }
             cx_sha256_hex(b, len, h);
             tw_free(b);
-            used += snprintf(list + used, sizeof list - used, "%s %s\n", name, h);
+            used += tx_snprintf(list + used, sizeof list - used, "%s %s\n", name, h);
             if (used >= (long)sizeof list) { tw_free(out); return -1; }
         }
         at = e + 1;
@@ -114,7 +116,7 @@ static int cached(const char *bin, const char *key) {
     size_t n;
     int ok;
     sy_stat_t s;
-    snprintf(kp, sizeof kp, "%s.key", bin);
+    tx_snprintf(kp, sizeof kp, "%s.key", bin);
     if (sy_stat(bin, &s) != 0 || s.kind != 'f') return 0;
     b = cx_read(kp, &n);
     if (!b) return 0;
@@ -130,26 +132,26 @@ static int prepare_bins(void) {
     char key[2][65], u[800], kp[1100];
     int pid[2] = { 0, 0 }, k, ok = 1;
     long end = sy_now_ms() + 50000;
-    snprintf(u, sizeof u, "%s/unisacc.com", repo);
+    tx_snprintf(u, sizeof u, "%s/unisacc.com", repo);
     for (k = 0; k < 2; k++) {
-        if (plan_key(file[k], key[k]) != 0) { printf("  note  cannot plan %s\n", file[k]); return 0; }
-        if (cached(bin[k], key[k])) { printf("  note  cache hit %s (key %.12s)\n", file[k], key[k]); continue; }
-        snprintf(kp, sizeof kp, "%s.key", bin[k]);
+        if (plan_key(file[k], key[k]) != 0) { sy_printf("  note  cannot plan %s\n", file[k]); return 0; }
+        if (cached(bin[k], key[k])) { sy_printf("  note  cache hit %s (key %.12s)\n", file[k], key[k]); continue; }
+        tx_snprintf(kp, sizeof kp, "%s.key", bin[k]);
         if (sy_exists(kp) == 1) cx_remove(kp);
         {
             char *av[] = { "sh", u, (char *)file[k], "-o", (char *)bin[k], 0 };
             pid[k] = sy_spawn(av);
         }
-        printf("  note  compiling %s (cache miss, key %.12s)\n", file[k], key[k]);
+        sy_printf("  note  compiling %s (cache miss, key %.12s)\n", file[k], key[k]);
     }
     for (k = 0; k < 2; k++) {
         int r = -EAGAIN;
         if (pid[k] <= 0) continue;
         while ((r = sy_wait(pid[k], 1)) == -EAGAIN && sy_now_ms() < end) sy_sleep_ms(100);
         if (r == -EAGAIN) { sy_kill(pid[k]); r = -1; }
-        snprintf(kp, sizeof kp, "%s.key", bin[k]);
+        tx_snprintf(kp, sizeof kp, "%s.key", bin[k]);
         if (r == 0 && sy_chmod(bin[k], 0700) == 0 && cx_write(kp, key[k], 64) == 0) continue;
-        printf("  note  compile of %s failed (status %d)\n", file[k], r);
+        sy_printf("  note  compile of %s failed (status %d)\n", file[k], r);
         ok = 0;
     }
     return ok;
@@ -180,7 +182,7 @@ static int copy_sources(void) {
             char to[1200], *b;
             size_t len;
             b = cx_read(name, &len);
-            snprintf(to, sizeof to, "%s/%s", src, name);
+            tx_snprintf(to, sizeof to, "%s/%s", src, name);
             if (!b || cx_write(to, b, len) != 0 || sy_chmod(to, 0600) != 0) { if (b) tw_free(b); return -1; }
             tw_free(b);
             copied++;
@@ -196,7 +198,7 @@ static int touch_tui(const char *text) {
     size_t n;
     long t = slen(text);
     int ok;
-    snprintf(p, sizeof p, "%s/tui.cx", src);
+    tx_snprintf(p, sizeof p, "%s/tui.cx", src);
     b = cx_read(p, &n);
     if (!b || (long)n + t + 1 > (long)sizeof big) { if (b) tw_free(b); return -1; }
     tx_copy(big, sizeof big, b, (long)n);
@@ -208,7 +210,7 @@ static int touch_tui(const char *text) {
 
 static int write_compiler(void) {
     static char s[8192];
-    int n = snprintf(s, sizeof s,
+    int n = tx_snprintf(s, sizeof s,
         "#!/bin/sh\n"
         "# Replay compiler written by probes/reload_launcher_run.cx. reload_candidate runs\n"
         "# \"compiler.com ROOT -o OUT\" in the frozen app dir; a cold csih compile does not fit\n"
@@ -244,7 +246,7 @@ static void load_events(void) {
 static long ev_at(const char *name, int k) {
     char pat[96];
     long at = 0, n = slen(evbuf), f;
-    snprintf(pat, sizeof pat, "{\"event\": \"%s\"", name);
+    tx_snprintf(pat, sizeof pat, "{\"event\": \"%s\"", name);
     while ((f = tx_find(evbuf + at, n - at, pat, slen(pat))) >= 0) {
         if (--k == 0) return at + f;
         at += f + 1;
@@ -275,7 +277,7 @@ static int ev_field(long at, const char *key, char *out, int cap) {
     char pat[64];
     long e = at, f, q;
     while (evbuf[e] && evbuf[e] != '\n') e++;
-    snprintf(pat, sizeof pat, "\"%s\": ", key);
+    tx_snprintf(pat, sizeof pat, "\"%s\": ", key);
     f = tx_find(evbuf + at, e - at, pat, slen(pat));
     if (f < 0) return 0;
     f += at + slen(pat);
@@ -310,7 +312,7 @@ static int received_in_order(long from, const char *const *ops, int n) {
     for (k = 0; k < n; k++) {
         char pat[160];
         long f, len = slen(evbuf);
-        snprintf(pat, sizeof pat, "{\"event\": \"received\", ");
+        tx_snprintf(pat, sizeof pat, "{\"event\": \"received\", ");
         for (;;) {
             f = tx_find(evbuf + at, len - at, pat, slen(pat));
             if (f < 0) return 0;
@@ -359,7 +361,7 @@ static int side_launcher(const char *dir, const char *sid, char *out, int cap) {
 static int lock_free(const char *dir) {
     char p[1100];
     int fd, r;
-    snprintf(p, sizeof p, "%s/supervisor.lock", dir);
+    tx_snprintf(p, sizeof p, "%s/supervisor.lock", dir);
     fd = sy_openat(sy_at_fdcwd(), p, O_RDWR, 0);
     if (fd < 0) return 0;
     r = sy_flock(fd, 2 | 4);
@@ -377,45 +379,45 @@ int main(void) {
     sy_stat_t s;
 
     if (!getcwd(here, sizeof here)) return 2;
-    snprintf(repo, sizeof repo, "%s/../..", here);
-    snprintf(ws, sizeof ws, "%s/out/csih-launcher-run", repo);
-    snprintf(cache, sizeof cache, "%s/cache", ws);
-    snprintf(run, sizeof run, "%s/run", ws);
-    snprintf(src, sizeof src, "%s/src", run);
-    snprintf(cand, sizeof cand, "%s/candidates", run);
-    snprintf(sess, sizeof sess, "%s/session", run);
-    snprintf(home, sizeof home, "%s/home", run);
-    snprintf(cwdd, sizeof cwdd, "%s/cwd", run);
-    snprintf(comp, sizeof comp, "%s/replay-compiler.sh", run);
-    snprintf(before, sizeof before, "%s/stty-before", run);
-    snprintf(after, sizeof after, "%s/stty-after", run);
-    snprintf(events, sizeof events, "%s/launcher-events.jsonl", sess);
-    snprintf(launcher, sizeof launcher, "%s/reload_launcher", cache);
-    snprintf(agentbin, sizeof agentbin, "%s/agent-selftest", cache);
-    snprintf(e_home, sizeof e_home, "HOME=%s", home);
-    snprintf(e_cwd, sizeof e_cwd, "CSIH_CWD=%s", cwdd);
+    tx_snprintf(repo, sizeof repo, "%s/../..", here);
+    tx_snprintf(ws, sizeof ws, "%s/out/csih-launcher-run", repo);
+    tx_snprintf(cache, sizeof cache, "%s/cache", ws);
+    tx_snprintf(run, sizeof run, "%s/run", ws);
+    tx_snprintf(src, sizeof src, "%s/src", run);
+    tx_snprintf(cand, sizeof cand, "%s/candidates", run);
+    tx_snprintf(sess, sizeof sess, "%s/session", run);
+    tx_snprintf(home, sizeof home, "%s/home", run);
+    tx_snprintf(cwdd, sizeof cwdd, "%s/cwd", run);
+    tx_snprintf(comp, sizeof comp, "%s/replay-compiler.sh", run);
+    tx_snprintf(before, sizeof before, "%s/stty-before", run);
+    tx_snprintf(after, sizeof after, "%s/stty-after", run);
+    tx_snprintf(events, sizeof events, "%s/launcher-events.jsonl", sess);
+    tx_snprintf(launcher, sizeof launcher, "%s/reload_launcher", cache);
+    tx_snprintf(agentbin, sizeof agentbin, "%s/agent-selftest", cache);
+    tx_snprintf(e_home, sizeof e_home, "HOME=%s", home);
+    tx_snprintf(e_cwd, sizeof e_cwd, "CSIH_CWD=%s", cwdd);
     {
         static char absbin[800];
         if (bin_env && bin_env[0]) csih = bin_env;
-        else { snprintf(absbin, sizeof absbin, "%s/out/csih-e2e-bin/csih", repo); csih = absbin; }
+        else { tx_snprintf(absbin, sizeof absbin, "%s/out/csih-e2e-bin/csih", repo); csih = absbin; }
     }
-    if (sy_stat(csih, &s) != 0) { printf("reload_launcher_run: FAIL no csih binary at %s (csih.sh prepare)\n", csih); return 1; }
-    if (!tw_open("launcher")) { printf("reload_launcher_run: FAIL tmux is not on PATH\n"); return 1; }
+    if (sy_stat(csih, &s) != 0) { sy_printf("reload_launcher_run: FAIL no csih binary at %s (csih.sh prepare)\n", csih); return 1; }
+    if (!tw_open("launcher")) { sy_printf("reload_launcher_run: FAIL tmux is not on PATH\n"); return 1; }
 
     /* workspace: the cache is kept, the run dir is new every time */
-    if (sy_exists(ws) == 0 && !mkpriv(ws)) { printf("reload_launcher_run: FAIL cannot make %s\n", ws); return 1; }
-    if (sy_exists(cache) == 0 && !mkpriv(cache)) { printf("reload_launcher_run: FAIL cannot make %s\n", cache); return 1; }
-    if (sy_exists(run) != 0 && cx_rmtree(run) != 0) { printf("reload_launcher_run: FAIL cannot clear %s\n", run); return 1; }
+    if (sy_exists(ws) == 0 && !mkpriv(ws)) { sy_printf("reload_launcher_run: FAIL cannot make %s\n", ws); return 1; }
+    if (sy_exists(cache) == 0 && !mkpriv(cache)) { sy_printf("reload_launcher_run: FAIL cannot make %s\n", cache); return 1; }
+    if (sy_exists(run) != 0 && cx_rmtree(run) != 0) { sy_printf("reload_launcher_run: FAIL cannot clear %s\n", run); return 1; }
     if (!mkpriv(run) || !mkpriv(src) || !mkpriv(cand) || !mkpriv(sess) || !mkpriv(home) || !mkpriv(cwdd)) {
-        printf("reload_launcher_run: FAIL cannot make the run dirs under %s\n", run);
+        sy_printf("reload_launcher_run: FAIL cannot make the run dirs under %s\n", run);
         return 1;
     }
     check(prepare_bins(), "launcher and agent_cli binaries ready (cache keyed by compiler + -cx-plan closure)");
-    if (fails) { printf("reload_launcher_run: FAIL (setup)\n"); return 1; }
+    if (fails) { sy_printf("reload_launcher_run: FAIL (setup)\n"); return 1; }
     n = copy_sources();
     check(n >= 30, "private copy of the app's top-level sources");
     check(write_compiler() == 0, "replay compiler written");
-    printf("  note  setup %ldms\n", sy_now_ms() - t0);
+    sy_printf("  note  setup %ldms\n", sy_now_ms() - t0);
 
     /* 1 start */
     check(start_pane() == 0, "launcher started in a private tmux pane");
@@ -429,7 +431,7 @@ int main(void) {
     if (at >= 0) ev_field(at, "hash", h1, sizeof h1);
     pid_old = at >= 0 ? ev_int(at, "pid") : -1;
     check(tw_wait_text("lr", "owned session", 8000, pane, sizeof pane), "the initial actor draws on the launcher's tty");
-    printf("  note  start %ldms\n", sy_now_ms() - t0);
+    sy_printf("  note  start %ldms\n", sy_now_ms() - t0);
 
     /* 2 REQUEST -> build -> committed handoff */
     check(touch_tui("\n/* private candidate version1 */\n") == 0, "private source changed (new candidate)");
@@ -454,7 +456,7 @@ int main(void) {
     check(pid_new > 0 && pid_new != pid_old && sy_signal(pid_new, 0) == 0, "the new actor runs");
     tw_keys("lr", "-NEW", 1);
     check(tw_wait_text("lr", "DRAFT-ONE-NEW", 3000, pane, sizeof pane), "the new actor carries the draft and takes keys");
-    printf("  note  commit %ldms\n", sy_now_ms() - t0);
+    sy_printf("  note  commit %ldms\n", sy_now_ms() - t0);
 
     /* 3 a second launcher on the live session: refused by the supervisor lock */
     {
@@ -466,11 +468,11 @@ int main(void) {
         check(rc == 1 && has(out, "reload launcher: [Errno 11] Resource temporarily unavailable"),
               "a second launcher on the same session dir exits 1: supervisor lock held");
         check(tx_eq(evbuf, evcopy, sizeof evcopy), "the refused launcher wrote no event");
-        printf("        second launcher rc=%d: %s", rc, out);
+        sy_printf("        second launcher rc=%d: %s", rc, out);
     }
     {
         char other[1100];
-        snprintf(other, sizeof other, "%s/no-tty", run);
+        tx_snprintf(other, sizeof other, "%s/no-tty", run);
         rc = mkpriv(other) ? side_launcher(other, "sess", out, sizeof out) : -1;
         check(rc == 1 && has(out, "launcher requires foreground controlling TTY") && lock_free(other),
               "a launcher without a tty is refused and leaves its lock free");
@@ -488,7 +490,7 @@ int main(void) {
     at = ev_at("handoff-failed", 1);
     check(at >= 0 && ev_has(at, "\"freeze_sent\": true") && ev_count("committed") == 1,
           "handoff-failed after FREEZE (freeze_sent true), nothing committed");
-    if (at >= 0 && ev_field(at, "reason", tmpv, sizeof tmpv)) printf("        reason: %s\n", tmpv);
+    if (at >= 0 && ev_field(at, "reason", tmpv, sizeof tmpv)) sy_printf("        reason: %s\n", tmpv);
     at2 = ev_at("candidate-exited", 1);
     check(at2 > at && ev_at("resumed", 1) > at2 && ev_int(at2, "pid") > 0 && ev_field(at2, "rc", tmpv, sizeof tmpv),
           "the failed candidate is stopped (candidate-exited, rc) before RESUME");
@@ -501,7 +503,7 @@ int main(void) {
     }
     tw_keys("lr", "-RESUMED", 1);
     check(tw_wait_text("lr", "DRAFT-TWO-RESUMED", 3000, pane, sizeof pane), "the resumed actor keeps its draft and takes keys");
-    printf("  note  rollback %ldms\n", sy_now_ms() - t0);
+    sy_printf("  note  rollback %ldms\n", sy_now_ms() - t0);
 
     /* 5 exit: rc 0, terminal back as it was, lock free */
     tw_keys("lr", "C-u", 0);
@@ -526,11 +528,11 @@ int main(void) {
     }
     if (fails) {
         tw_capture("lr", pane, sizeof pane);
-        printf("---- pane ----\n%s\n---- events ----\n%s", pane, evbuf);
+        sy_printf("---- pane ----\n%s\n---- events ----\n%s", pane, evbuf);
     }
     tw_close();
-    printf("  note  total %ldms\n", sy_now_ms() - t0);
-    if (fails) { printf("reload_launcher_run: FAIL (%d)\n", fails); return 1; }
-    printf("%s\n", PASSLINE);
+    sy_printf("  note  total %ldms\n", sy_now_ms() - t0);
+    if (fails) { sy_printf("reload_launcher_run: FAIL (%d)\n", fails); return 1; }
+    sy_printf("%s\n", PASSLINE);
     return 0;
 }

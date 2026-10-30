@@ -1,3 +1,9 @@
+#pragma unisa use text.fmt
+#pragma unisa use text.num
+#pragma unisa use sys.io
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use sys.env
 #pragma unisa use agentwit
 /* CX probe */
 /* context_preview.cx — port of probes/context_preview.py (run with -run; upper
@@ -30,12 +36,12 @@ static char CP_SELF[4200];    /* this probe source */
 #define NOTICES 10
 
 static void die(const char *msg) {
-    printf("FAIL %s\n", msg);
+    sy_printf("FAIL %s\n", msg);
     exit(1);
 }
 
 static void *xmalloc(size_t n) {
-    void *p = malloc(n ? n : 1);
+    void *p = mm_alloc(n ? n : 1);
     if (!p) die("oom");
     return p;
 }
@@ -77,9 +83,9 @@ static void snap_add(snap_t *s, const char *path) {
     if (!d) die("snapshot read");
     if (s->n == s->cap) {
         s->cap = s->cap ? s->cap * 2 : 64;
-        s->path = realloc(s->path, s->cap * sizeof *s->path);
-        s->data = realloc(s->data, s->cap * sizeof *s->data);
-        s->len = realloc(s->len, s->cap * sizeof *s->len);
+        s->path = mm_grow(s->path, s->cap * sizeof *s->path);
+        s->data = mm_grow(s->data, s->cap * sizeof *s->data);
+        s->len = mm_grow(s->len, s->cap * sizeof *s->len);
         if (!s->path || !s->data || !s->len) die("oom");
     }
     /* not strdup: unisacc strdup yields blocks that corrupt the heap on free() */
@@ -98,7 +104,7 @@ static void walk(snap_t *s, const char *dir, int srconly) {
         char child[4096];
         struct stat st;
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-        snprintf(child, sizeof child, "%s/%s", dir, e->d_name);
+        tx_snprintf(child, sizeof child, "%s/%s", dir, e->d_name);
         if (lstat(child, &st) != 0) continue;
         if (S_ISDIR(st.st_mode)) walk(s, child, srconly);
         else if (S_ISREG(st.st_mode) && (!srconly || is_src(e->d_name))) snap_add(s, child);
@@ -108,8 +114,8 @@ static void walk(snap_t *s, const char *dir, int srconly) {
 
 static void snap_free(snap_t *s) {
     size_t i;
-    for (i = 0; i < s->n; i++) { free(s->path[i]); free(s->data[i]); }
-    free(s->path); free(s->data); free(s->len);
+    for (i = 0; i < s->n; i++) { mm_free(s->path[i]); mm_free(s->data[i]); }
+    mm_free(s->path); mm_free(s->data); mm_free(s->len);
     memset(s, 0, sizeof *s);
 }
 
@@ -121,7 +127,7 @@ static int snap_same(const snap_t *a, const snap_t *b) {
         for (j = 0; j < b->n; j++) {
             if (strcmp(a->path[i], b->path[j])) continue;
             found = 1;
-            if (a->len[i] != b->len[j] || memcmp(a->data[i], b->data[j], a->len[i])) return 0;
+            if (a->len[i] != b->len[j] || mm_cmp(a->data[i], b->data[j], a->len[i])) return 0;
             break;
         }
         if (!found) return 0;
@@ -145,8 +151,8 @@ static void copy_tree(const char *src, const char *dst) {
         char cs[4096], cd[4096];
         struct stat st;
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-        snprintf(cs, sizeof cs, "%s/%s", src, e->d_name);
-        snprintf(cd, sizeof cd, "%s/%s", dst, e->d_name);
+        tx_snprintf(cs, sizeof cs, "%s/%s", src, e->d_name);
+        tx_snprintf(cd, sizeof cd, "%s/%s", dst, e->d_name);
         if (lstat(cs, &st) != 0) continue;
         if (S_ISDIR(st.st_mode)) {
             mkdir(cd, 0700);
@@ -158,7 +164,7 @@ static void copy_tree(const char *src, const char *dst) {
             unsigned char *b = read_file(cs, &len);
             if (!b) die("copy read");
             if (write_file(cd, b, len, 0644) != 0) die("copy write");
-            free(b);
+            mm_free(b);
         }
     }
     closedir(d);
@@ -234,7 +240,7 @@ static void spawn(const char *script, const char *bin, char **args, int nargs, i
 }
 
 static const char *tmpbase(void) {
-    const char *t = getenv("TMPDIR");
+    const char *t = sy_env("TMPDIR");
     return (t && t[0]) ? t : "/tmp";
 }
 
@@ -250,7 +256,7 @@ static void last_line(const char *buf, char *dst, size_t cap) {
     while (end > buf && (end[-1] == '\n' || end[-1] == '\r')) end--;
     q = end;
     while (q > buf && q[-1] != '\n') q--;
-    snprintf(dst, cap, "%.*s", (int)(end - q), q);
+    tx_snprintf(dst, cap, "%.*s", (int)(end - q), q);
 }
 
 /* The installed product binary, copied to OUT_BIN once its stamp CSIH_BIN.src
@@ -258,22 +264,22 @@ static void last_line(const char *buf, char *dst, size_t cap) {
 static void install_tui(const char *out_bin) {
     static char msg[900];
     char bin[4200], stamp_p[4300], script_p[4300], dig[200], want[200];
-    const char *b = getenv("CSIH_BIN");
+    const char *b = sy_env("CSIH_BIN");
     char *av[4], *o = NULL;
     size_t ol = 0, bl = 0;
     unsigned char *stamp, *bytes;
-    if (b && b[0]) snprintf(bin, sizeof bin, "%s", b);
-    else snprintf(bin, sizeof bin, "%s/../../out/csih-e2e-bin/csih", CSIH_APP);
-    snprintf(stamp_p, sizeof stamp_p, "%s.src", bin);
-    snprintf(script_p, sizeof script_p, "%s/csih.sh", CSIH_APP);
+    if (b && b[0]) tx_snprintf(bin, sizeof bin, "%s", b);
+    else tx_snprintf(bin, sizeof bin, "%s/../../out/csih-e2e-bin/csih", CSIH_APP);
+    tx_snprintf(stamp_p, sizeof stamp_p, "%s.src", bin);
+    tx_snprintf(script_p, sizeof script_p, "%s/csih.sh", CSIH_APP);
     av[0] = (char *)"sh"; av[1] = script_p; av[2] = (char *)"digest"; av[3] = NULL;
     if (cx_runv_timeout(av, 20, &o, &ol) != 0 || !o) die("csih.sh digest failed");
     last_line(o, dig, sizeof dig);
     stamp = (unsigned char *)cx_read(stamp_p, NULL);
-    if (!stamp) { snprintf(msg, sizeof msg, "no stamp %s (run csih.sh prepare)", stamp_p); die(msg); }
+    if (!stamp) { tx_snprintf(msg, sizeof msg, "no stamp %s (run csih.sh prepare)", stamp_p); die(msg); }
     last_line((const char *)stamp, want, sizeof want);
     if (strncmp(dig, "digest ", 7) != 0 || strcmp(dig + 7, want) != 0) {
-        snprintf(msg, sizeof msg, "%s is stale: stamp %s, sources %s (run csih.sh prepare)", bin, want, dig);
+        tx_snprintf(msg, sizeof msg, "%s is stale: stamp %s, sources %s (run csih.sh prepare)", bin, want, dig);
         die(msg);
     }
     bytes = (unsigned char *)cx_read(bin, &bl);
@@ -310,7 +316,7 @@ static unsigned hex4(const char *p) {
 static const char *jfind(const char *from, const char *key) {
     char pat[96];
     const char *p = from;
-    snprintf(pat, sizeof pat, "\"%s\"", key);
+    tx_snprintf(pat, sizeof pat, "\"%s\"", key);
     while ((p = strstr(p, pat)) != NULL) {
         const char *q = p + strlen(pat);
         while (*q == ' ' || *q == '\t' || *q == '\n') q++;
@@ -373,7 +379,7 @@ static char *json_esc(const unsigned char *raw, size_t n) {
         else if (c == '\n') { b[o++] = '\\'; b[o++] = 'n'; }
         else if (c == '\r') { b[o++] = '\\'; b[o++] = 'r'; }
         else if (c == '\t') { b[o++] = '\\'; b[o++] = 't'; }
-        else if (c < 0x20) o += (size_t)snprintf(b + o, 7, "\\u%04x", c);   /* 6 bytes and the NUL, as sprintf wrote */
+        else if (c < 0x20) o += (size_t)tx_snprintf(b + o, 7, "\\u%04x", c);   /* 6 bytes and the NUL, as sprintf wrote */
         else b[o++] = (char)c;
     }
     b[o] = 0;
@@ -392,7 +398,7 @@ static void make_body(int n, unsigned char *b, size_t *len) {
         *len = strlen(s);
         memcpy(b, s, *len);
     } else {
-        *len = (size_t)snprintf((char *)b, 32, "notice %d", n);   /* "notice " and an int fit 32 */
+        *len = (size_t)tx_snprintf((char *)b, 32, "notice %d", n);   /* "notice " and an int fit 32 */
     }
 }
 
@@ -404,16 +410,16 @@ static int notice_file(const char *dir, int n, const char *session, char *path, 
     char *json;
     size_t jcap;
     int rc;
-    snprintf(id, sizeof id, "%032x", n);
-    snprintf(path, cap, "%s/%s.json", dir, id);
+    tx_snprintf(id, sizeof id, "%032x", n);
+    tx_snprintf(path, cap, "%s/%s.json", dir, id);
     make_body(n, raw, &rl);
     esc = json_esc(raw, rl);
     jcap = strlen(esc) + 256;
     json = xmalloc(jcap);
-    snprintf(json, jcap, "{\"version\":1,\"id\":\"%s\",\"session\":\"%s\",\"kind\":\"notice\",\"body\":\"%s\"}", id, session, esc);
+    tx_snprintf(json, jcap, "{\"version\":1,\"id\":\"%s\",\"session\":\"%s\",\"kind\":\"notice\",\"body\":\"%s\"}", id, session, esc);
     rc = write_file(path, json, strlen(json), 0600);
-    free(esc);
-    free(json);
+    mm_free(esc);
+    mm_free(json);
     return rc;
 }
 
@@ -430,7 +436,7 @@ static int run_packet(const char *binary, const char *session, const char *home,
     size_t el = 0;
     memset(hash, 'a', 64);
     hash[64] = 0;
-    snprintf(script, sizeof script,
+    tx_snprintf(script, sizeof script,
              "unset CSIH_ROLE CSIH_PEER OPENAI_API_KEY DEEPSEEK_API_KEY HTTP_PROXY HTTPS_PROXY ALL_PROXY "
              "http_proxy https_proxy all_proxy; export HOME='%s' CSIH_CWD='%s'; "
              "cd '%s' && exec \"$0\" \"$@\" 2>'%s'", home, session, source, errp);
@@ -439,12 +445,12 @@ static int run_packet(const char *binary, const char *session, const char *home,
     args[2] = (char *)"sess";
     args[3] = hash;
     spawn(script, binary, args, 4, 3, out, sizeof out, &rc, &timed);
-    snprintf(pk, pkcap, "%s", out);
+    tx_snprintf(pk, pkcap, "%s", out);
     e = read_file(errp, &el);
     if (timed) { *why = "timed out"; return 0; }
-    if (rc != 0) { *why = "rc != 0"; free(e); return 0; }
-    if (e && el) { *why = "stderr not empty"; free(e); return 0; }
-    free(e);
+    if (rc != 0) { *why = "rc != 0"; mm_free(e); return 0; }
+    if (e && el) { *why = "stderr not empty"; mm_free(e); return 0; }
+    mm_free(e);
     rm_rf(errp);
     return 1;
 }
@@ -452,12 +458,12 @@ static int run_packet(const char *binary, const char *session, const char *home,
 static int run_check(int cond, char *reasons, size_t cap, const char *msg) {
     if (!cond) {
         size_t l = strlen(reasons);
-        snprintf(reasons + l, cap - l, "%s; ", msg);
+        tx_snprintf(reasons + l, cap - l, "%s; ", msg);
     }
     return cond;
 }
 
-static int atoi_at(const char *v) { return v ? atoi(v) : 0; }
+static int atoi_at(const char *v) { return v ? (int)tx_atol(v) : 0; }
 
 int main(void) {
     static char root[700], source[760], compiler[800], binary[800], session[800], home[800];
@@ -475,25 +481,25 @@ int main(void) {
     size_t olen = 0;
 
     {
-        const char *app = getenv("CSIH_APP");
-        if (app && app[0]) snprintf(CSIH_APP, sizeof CSIH_APP, "%s", app);
+        const char *app = sy_env("CSIH_APP");
+        if (app && app[0]) tx_snprintf(CSIH_APP, sizeof CSIH_APP, "%s", app);
         else if (!getcwd(CSIH_APP, sizeof CSIH_APP)) die("getcwd");
         if (CSIH_APP[0] != '/') die("app dir must be absolute");
-        snprintf(CP_UNISACC, sizeof CP_UNISACC, "%s/../../unisacc.com", CSIH_APP);
-        snprintf(CP_SELF, sizeof CP_SELF, "%s/probes/context_preview.cx", CSIH_APP);
+        tx_snprintf(CP_UNISACC, sizeof CP_UNISACC, "%s/../../unisacc.com", CSIH_APP);
+        tx_snprintf(CP_SELF, sizeof CP_SELF, "%s/probes/context_preview.cx", CSIH_APP);
     }
     snap_hashes(&before);
-    snprintf(root, sizeof root, "%s/csih-preview-XXXXXX", tmpbase());
+    tx_snprintf(root, sizeof root, "%s/csih-preview-XXXXXX", tmpbase());
     if (!mkdtemp(root)) die("mkdtemp root");
-    snprintf(source, sizeof source, "%s/source", root);
-    snprintf(session, sizeof session, "%s/session", root);
-    snprintf(home, sizeof home, "%s/home", root);
+    tx_snprintf(source, sizeof source, "%s/source", root);
+    tx_snprintf(session, sizeof session, "%s/session", root);
+    tx_snprintf(home, sizeof home, "%s/home", root);
     mkdir(source, 0700);
     mkdir(session, 0700);
     mkdir(home, 0700);
     copy_tree(CSIH_APP, source);
 
-    snprintf(compiler, sizeof compiler, "%s/compiler.com", root);
+    tx_snprintf(compiler, sizeof compiler, "%s/compiler.com", root);
     {
         size_t len = 0;
         unsigned char *b = read_file(CP_UNISACC, &len);
@@ -501,13 +507,13 @@ int main(void) {
         if (!b) die("read unisacc");
         if (write_file(compiler, b, len, 0600) != 0) die("write compiler");
         for (j = 0; j < before.n; j++) if (!strcmp(before.path[j], CP_UNISACC)) break;
-        if (j >= before.n || before.len[j] != len || memcmp(before.data[j], b, len)) die("compiler copy differs");
-        free(b);
+        if (j >= before.n || before.len[j] != len || mm_cmp(before.data[j], b, len)) die("compiler copy differs");
+        mm_free(b);
     }
 
     /* the product binary (stamp == current source digest), private copy */
-    snprintf(binary, sizeof binary, "%s/context-native", root);
-    snprintf(errp, sizeof errp, "%s/build-err.txt", root);
+    tx_snprintf(binary, sizeof binary, "%s/context-native", root);
+    tx_snprintf(errp, sizeof errp, "%s/build-err.txt", root);
     install_tui(binary);
     (void)args; (void)n; (void)ebuf; (void)rc; (void)timed;
 
@@ -518,19 +524,19 @@ int main(void) {
     {
         char inbox[820], st[860], lock[880];
         const char *states[3] = {"ready", "started", "done"};
-        snprintf(inbox, sizeof inbox, "%s/inbox", session);
+        tx_snprintf(inbox, sizeof inbox, "%s/inbox", session);
         mkdir(inbox, 0700);
         for (i = 0; i < 3; i++) {
-            snprintf(st, sizeof st, "%s/%s", inbox, states[i]);
+            tx_snprintf(st, sizeof st, "%s/%s", inbox, states[i]);
             mkdir(st, 0700);
         }
-        snprintf(lock, sizeof lock, "%s/mailbox.lock", inbox);
+        tx_snprintf(lock, sizeof lock, "%s/mailbox.lock", inbox);
         write_file(lock, "", 0, 0600);
     }
     {
         char done[880];
         int m;
-        snprintf(done, sizeof done, "%s/inbox/done", session);
+        tx_snprintf(done, sizeof done, "%s/inbox/done", session);
         for (m = 0; m < NOTICES; m++) {
             char path[1024];
             unsigned char raw[400];
@@ -543,7 +549,7 @@ int main(void) {
             bodies_text[m][rl] = 0;
             if (notice_file(done, m, "sess", path, sizeof path) != 0) die("notice write");
             aw_utime(path, stamp);
-            if (m == 8) snprintf(file8, sizeof file8, "%s", path);
+            if (m == 8) tx_snprintf(file8, sizeof file8, "%s", path);
         }
     }
 
@@ -573,7 +579,7 @@ int main(void) {
             for (k = 0; k < 8; k++) {
                 char exp[33];
                 v = jfind(cur, "id");
-                snprintf(exp, sizeof exp, "%032x", want[k]);
+                tx_snprintf(exp, sizeof exp, "%032x", want[k]);
                 if (!v || !jstr(v, idbuf, sizeof idbuf, NULL) || strcmp(idbuf, exp)) {
                     run_check(0, reasons, sizeof reasons, "notice id order mismatch");
                     break;
@@ -590,7 +596,7 @@ int main(void) {
             v = jfind(cur, "body_preview");
             if (!v || !jstr(v, pv, sizeof pv, &pl)) { run_check(0, reasons, sizeof reasons, "missing body_preview"); break; }
             run_check(pl <= 256, reasons, sizeof reasons, "preview > 256 bytes");
-            run_check(bodies_len[m] >= pl && !memcmp(bodies_raw[m], pv, pl), reasons, sizeof reasons, "preview not body prefix");
+            run_check(bodies_len[m] >= pl && !mm_cmp(bodies_raw[m], pv, pl), reasons, sizeof reasons, "preview not body prefix");
             {
                 const char *bb = jfind(v, "body_bytes");
                 run_check(atoi_at(bb) == (int)bodies_len[m], reasons, sizeof reasons, "body_bytes mismatch");
@@ -608,10 +614,10 @@ int main(void) {
             char pv[1024];
             size_t pl = 0;
             v = jfind(pk, "body_preview");
-            run_check(v && jstr(v, pv, sizeof pv, &pl) && pl == 255 && !memcmp(pv, bodies_text[8], 255),
+            run_check(v && jstr(v, pv, sizeof pv, &pl) && pl == 255 && !mm_cmp(pv, bodies_text[8], 255),
                       reasons, sizeof reasons, "notice 8 preview not 255 a");
             v = v ? jfind(v + 1, "body_preview") : NULL;
-            run_check(v && jstr(v, pv, sizeof pv, &pl) && pl == bodies_len[9] && !memcmp(pv, bodies_raw[9], pl),
+            run_check(v && jstr(v, pv, sizeof pv, &pl) && pl == bodies_len[9] && !mm_cmp(pv, bodies_raw[9], pl),
                       reasons, sizeof reasons, "notice 9 preview not full body");
         }
         run_check(strstr(pk, "unreviewed") != NULL, reasons, sizeof reasons, "notice_trust lacks unreviewed");
@@ -625,7 +631,7 @@ int main(void) {
         char backup[800];
         orig = read_file(file8, &olen);
         if (!orig) die("read notice 8");
-        snprintf(backup, sizeof backup, "%s/backup.json", root);
+        tx_snprintf(backup, sizeof backup, "%s/backup.json", root);
         for (i = 0; i < 3; i++) {
             char bad[1 << 17];
             const char *v;
@@ -633,7 +639,7 @@ int main(void) {
             if (i == 0) write_file(file8, "{bad", 4, 0600);
             else if (i == 1) {
                 char other[600];
-                snprintf(other, sizeof other, "{\"version\":1,\"id\":\"%032x\",\"session\":\"other\",\"kind\":\"notice\",\"body\":\"x\"}", 8);
+                tx_snprintf(other, sizeof other, "{\"version\":1,\"id\":\"%032x\",\"session\":\"other\",\"kind\":\"notice\",\"body\":\"x\"}", 8);
                 write_file(file8, other, strlen(other), 0600);
             } else {
                 write_file(backup, orig, olen, 0600);
@@ -654,7 +660,7 @@ int main(void) {
             if (i == 2) rm_rf(file8);
             write_file(file8, orig, olen, 0600);
         }
-        free(orig);
+        mm_free(orig);
     }
 
     memset(&priv_after, 0, sizeof priv_after);
@@ -664,11 +670,11 @@ int main(void) {
         snap_hashes(&after);
         {
             int frozen = snap_same(&before, &after);
-            if (!frozen) printf("production input changed during run\n");
-            if (!private_same) printf("private sources changed during run\n");
+            if (!frozen) sy_printf("production input changed during run\n");
+            if (!private_same) sy_printf("private sources changed during run\n");
             ok = ok && reasons[0] == 0 && frozen && private_same;
-            if (reasons[0]) printf("reasons: %s\n", reasons);
-            printf("%s context preview\n", ok ? "PASS" : "FAIL");
+            if (reasons[0]) sy_printf("reasons: %s\n", reasons);
+            sy_printf("%s context preview\n", ok ? "PASS" : "FAIL");
             snap_free(&priv_before);
             snap_free(&priv_after);
             snap_free(&before);

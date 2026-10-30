@@ -1,3 +1,6 @@
+#pragma unisa use text.fmt
+#pragma unisa use sys.io
+#pragma unisa use sys.env
 #pragma unisa use tmuxwit
 #pragma unisa use retry_stub
 /*
@@ -17,7 +20,7 @@
 int main(void) {
     static const int delay_ms[NCASE] = { 0, 50, 150, 400 };
     static char pane[65536];
-    const char *bin = getenv("CSIH_BIN"), *tmp = getenv("TMPDIR");
+    const char *bin = sy_env("CSIH_BIN"), *tmp = sy_env("TMPDIR");
     char cwd[512], absbin[700], root[600], home[NCASE][700], log[NCASE][700], sess[NCASE][8];
     char served[256];
     long t_esc[NCASE], t_cancel[NCASE], t_enter[NCASE];
@@ -25,31 +28,31 @@ int main(void) {
     int stub[NCASE], i, pid = rs_pid(), passed = 0, port0 = 30000 + (rs_pid() % 3000) * 4;
 
     if (!getcwd(cwd, sizeof cwd)) return 2;
-    if (!bin || !bin[0]) { snprintf(absbin, sizeof absbin, "%s/../../out/csih-e2e-bin/csih", cwd); bin = absbin; }
-    if (access(bin, X_OK) != 0) { printf("esc_cancel: no csih binary at %s (csih.sh prepare)\n", bin); return 2; }
-    if (!tw_open("esc")) { printf("esc_cancel: tmux is not on PATH\n"); return 2; }
-    snprintf(root, sizeof root, "%s/csih-esc-%d", tmp && tmp[0] ? tmp : "/tmp", pid);
-    if (mkdir(root, 0700) != 0) { printf("esc_cancel: mkdir %s failed\n", root); return 2; }
+    if (!bin || !bin[0]) { tx_snprintf(absbin, sizeof absbin, "%s/../../out/csih-e2e-bin/csih", cwd); bin = absbin; }
+    if (access(bin, X_OK) != 0) { sy_printf("esc_cancel: no csih binary at %s (csih.sh prepare)\n", bin); return 2; }
+    if (!tw_open("esc")) { sy_printf("esc_cancel: tmux is not on PATH\n"); return 2; }
+    tx_snprintf(root, sizeof root, "%s/csih-esc-%d", tmp && tmp[0] ? tmp : "/tmp", pid);
+    if (mkdir(root, 0700) != 0) { sy_printf("esc_cancel: mkdir %s failed\n", root); return 2; }
 
     for (i = 0; i < NCASE; i++) {
         char e_home[760], e_ep[160], e_cwd[760];
-        snprintf(home[i], sizeof home[i], "%s/h%d", root, i);
-        snprintf(log[i], sizeof log[i], "%s/posts%d.txt", root, i);
-        snprintf(sess[i], sizeof sess[i], "e%d", i);
+        tx_snprintf(home[i], sizeof home[i], "%s/h%d", root, i);
+        tx_snprintf(log[i], sizeof log[i], "%s/posts%d.txt", root, i);
+        tx_snprintf(sess[i], sizeof sess[i], "e%d", i);
         mkdir(home[i], 0700);
         stub[i] = rs_stub_start(port0 + i, "503,503,503,503,503", log[i]);
-        snprintf(e_home, sizeof e_home, "HOME=%s", home[i]);
-        snprintf(e_ep, sizeof e_ep, "CSIH_ENDPOINT=http://127.0.0.1:%d/v1/chat/completions", port0 + i);
-        snprintf(e_cwd, sizeof e_cwd, "CSIH_CWD=%s", home[i]);
+        tx_snprintf(e_home, sizeof e_home, "HOME=%s", home[i]);
+        tx_snprintf(e_ep, sizeof e_ep, "CSIH_ENDPOINT=http://127.0.0.1:%d/v1/chat/completions", port0 + i);
+        tx_snprintf(e_cwd, sizeof e_cwd, "CSIH_CWD=%s", home[i]);
         {
             char *cmd[] = { "env", e_home, e_ep, e_cwd, "CSIH_MODEL=stub", "CSIH_BELL=0", (char *)bin, "agent" };
-            if (stub[i] < 0 || tw_new(sess[i], 140, 45, home[i], cmd, 8) != 0) { printf("FAIL esc+%dms: setup\n", delay_ms[i]); stub[i] = -1; }
+            if (stub[i] < 0 || tw_new(sess[i], 140, 45, home[i], cmd, 8) != 0) { sy_printf("FAIL esc+%dms: setup\n", delay_ms[i]); stub[i] = -1; }
         }
     }
     /* type everywhere first, then Enter and Esc per case with its own delay */
     for (i = 0; i < NCASE; i++) {
         if (stub[i] < 0) continue;
-        if (!tw_wait_text(sess[i], "Enter 发送", 8000, pane, sizeof pane)) { printf("FAIL esc+%dms: TUI not ready\n", delay_ms[i]); stub[i] = -1; continue; }
+        if (!tw_wait_text(sess[i], "Enter 发送", 8000, pane, sizeof pane)) { sy_printf("FAIL esc+%dms: TUI not ready\n", delay_ms[i]); stub[i] = -1; continue; }
     }
     for (i = 0; i < NCASE; i++) {
         int k;
@@ -87,7 +90,7 @@ int main(void) {
         if (stub[i] < 0) continue;
         n = rs_posts(log[i], served, sizeof served, at, 8);
         pass = t_cancel[i] && t_cancel[i] - t_esc[i] < 1500 && n <= 1;
-        printf("%s esc+%dms posts=%d served=%s esc_to_cancel_ms=%ld enter_to_request_ms=%ld\n", pass ? "PASS" : "FAIL",
+        sy_printf("%s esc+%dms posts=%d served=%s esc_to_cancel_ms=%ld enter_to_request_ms=%ld\n", pass ? "PASS" : "FAIL",
                delay_ms[i], n, served[0] ? served : "-", t_cancel[i] ? t_cancel[i] - t_esc[i] : -1L,
                n ? at[0] - t_enter[i] : -1L);
         if (!pass) {
@@ -96,13 +99,13 @@ int main(void) {
             tw_capture(sess[i], pane, sizeof pane);
             p = pane + strlen(pane);
             while (p > pane && lines < 12) { p--; if (*p == '\n') lines++; }
-            printf("  screen tail:\n%s\n", p);
+            sy_printf("  screen tail:\n%s\n", p);
         }
         passed += pass;
     }
     tw_close();
     for (i = 0; i < NCASE; i++) rs_stop(stub[i]);
-    if (cx_rmtree(root) != 0) printf("esc_cancel: scratch %s left behind\n", root);
-    printf("esc_cancel: %d/%d PASS\n", passed, NCASE);
+    if (cx_rmtree(root) != 0) sy_printf("esc_cancel: scratch %s left behind\n", root);
+    sy_printf("esc_cancel: %d/%d PASS\n", passed, NCASE);
     return passed == NCASE ? 0 : 1;
 }

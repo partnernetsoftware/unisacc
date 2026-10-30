@@ -1,3 +1,6 @@
+#pragma unisa use text.fmt
+#pragma unisa use text.num
+#pragma unisa use sys.io
 #pragma unisa use srccopy
 #pragma unisa use text.text
 #pragma unisa use sys.env
@@ -47,7 +50,7 @@ static void *al(long n) {
     long a = (g_hp + 15) & ~15L, i;
     char *p;
     if (n < 1) n = 1;
-    if (a + n > HEAP) { printf("evidence_reconciliation: arena exhausted\n"); exit(9); }
+    if (a + n > HEAP) { sy_printf("evidence_reconciliation: arena exhausted\n"); exit(9); }
     g_hp = a + n;
     p = g_heap + a;
     for (i = 0; i < n; i++) p[i] = 0;
@@ -59,7 +62,7 @@ static int seq(const char *a, const char *b) { return tx_same(a, sl(a), b, sl(b)
 static int has(const char *h, long hn, const char *nd) { return h && tx_find(h, hn, nd, sl(nd)) >= 0; }
 
 static char g_why[1200];
-#define NEED(c, ...) do { if (!(c)) { snprintf(g_why, sizeof g_why, __VA_ARGS__); goto fail; } } while (0)
+#define NEED(c, ...) do { if (!(c)) { tx_snprintf(g_why, sizeof g_why, __VA_ARGS__); goto fail; } } while (0)
 
 /* ---------- byte buffer ---------- */
 typedef struct { char *p; long n, cap; } sb;
@@ -83,14 +86,14 @@ static void sb_fmt(sb *b, const char *fmt, ...) {
     int k;
     char tmp[2048];
     va_start(ap, fmt);
-    k = vsnprintf(tmp, sizeof tmp, fmt, ap);
+    k = tx_vsnprintf(tmp, sizeof tmp, fmt, ap);
     va_end(ap);
     if (k < 0) return;
     if (k < (int)sizeof tmp) { sb_put(b, tmp, k); return; }
     {
         char *big = al(k + 1);
         va_start(ap, fmt);
-        vsnprintf(big, (size_t)k + 1, fmt, ap);
+        tx_vsnprintf(big, (size_t)k + 1, fmt, ap);
         va_end(ap);
         sb_put(b, big, k);
     }
@@ -254,7 +257,7 @@ static jn *jvalue(void) {
         while (jp < e) tmp[k++] = *jp++;
         tmp[k] = 0;
         v = jnew(J_NUM);
-        v->num = strtod(tmp, NULL);
+        v->num = tx_strtod(tmp, NULL);
         return v;
     }
     return NULL;
@@ -461,10 +464,10 @@ static void take_snapshot(int which) {
 }
 static int snap_same(void) {
     int i;
-    if (g_nsnap[0] != g_nsnap[1]) { printf("        freeze: %d files before, %d after\n", g_nsnap[0], g_nsnap[1]); return 0; }
+    if (g_nsnap[0] != g_nsnap[1]) { sy_printf("        freeze: %d files before, %d after\n", g_nsnap[0], g_nsnap[1]); return 0; }
     for (i = 0; i < g_nsnap[0]; i++)
         if (!seq(g_snap[0][i].path, g_snap[1][i].path) || !g_snap[0][i].ok || !g_snap[1][i].ok ||
-            !tx_same(g_snap[0][i].hex, 64, g_snap[1][i].hex, 64)) { printf("        freeze: %s changed\n", g_snap[0][i].path); return 0; }
+            !tx_same(g_snap[0][i].hex, 64, g_snap[1][i].hex, 64)) { sy_printf("        freeze: %s changed\n", g_snap[0][i].path); return 0; }
     return 1;
 }
 static int g_copy_err;
@@ -476,8 +479,8 @@ static int copy_cb(const char *path, void *ctx) {
     (void)ctx;
     while (base > path && base[-1] != '/') base--;
     if (!is_src_name(base)) return 0;
-    snprintf(to, sizeof to, "%s/%s", g_src, rel);
-    snprintf(dir, sizeof dir, "%s", to);
+    tx_snprintf(to, sizeof to, "%s/%s", g_src, rel);
+    tx_snprintf(dir, sizeof dir, "%s", to);
     k = sl(dir);
     while (k > 0 && dir[k - 1] != '/') k--;
     if (k > 0) { dir[k - 1] = 0; if (mkdirp(dir) != 0) { g_copy_err = 1; return 1; } }
@@ -530,7 +533,7 @@ static void serve_one(int c, long deadline) {
                     if (j - i >= 15) {
                         int ok = 1;
                         for (q = 0; q < 15; q++) { char ch = b.p[i + q]; if (ch >= 'A' && ch <= 'Z') ch += 32; if (ch != cl[q]) { ok = 0; break; } }
-                        if (ok) want = atol(b.p + i + 15);
+                        if (ok) want = tx_atol(b.p + i + 15);
                     }
                     i = j + 1;
                 }
@@ -820,8 +823,8 @@ static int expected_of(const char *name, int *rc, int *nreq) {
 }
 static void show_run(void) {
     long from = g_run.outn > 1500 ? g_run.outn - 1500 : 0;
-    printf("        rc=%d timed=%d requests=%d\n        stdout tail: %s\n", g_run.rc, g_run.timed, g_nreq, g_run.out + from);
-    if (g_run.errn) printf("        stderr: %.600s\n", g_run.err);
+    sy_printf("        rc=%d timed=%d requests=%d\n        stdout tail: %s\n", g_run.rc, g_run.timed, g_nreq, g_run.out + from);
+    if (g_run.errn) sy_printf("        stderr: %.600s\n", g_run.err);
 }
 
 static int run_case(const char *name, const char *parent) {
@@ -837,19 +840,19 @@ static int run_case(const char *name, const char *parent) {
     g_recs = NULL; g_nrec = 0;
     g_why[0] = 0;
     g_run.out = ""; g_run.outn = 0; g_run.err = ""; g_run.errn = 0; g_run.rc = -1; g_run.timed = 0;
-    snprintf(g_cwd, sizeof g_cwd, "%s/%s", parent, name);
+    tx_snprintf(g_cwd, sizeof g_cwd, "%s/%s", parent, name);
     NEED(sy_mkdir(g_cwd, 0700) == 0, "mkdir %s", g_cwd);
-    snprintf(home, sizeof home, "%s/%s-%s", g_homes, parent + sl(g_root) + 1, name);
+    tx_snprintf(home, sizeof home, "%s/%s-%s", g_homes, parent + sl(g_root) + 1, name);
     NEED(sy_mkdir(home, 0700) == 0, "mkdir home %s", home);
-    snprintf(g_journal, sizeof g_journal, "%s/journal", g_cwd);
-    snprintf(g_backup, sizeof g_backup, "%s/backup", g_cwd);
-    snprintf(g_notice, sizeof g_notice, "%s/notice.json", g_cwd);
-    snprintf(g_context, sizeof g_context, "%s/context.json", g_cwd);
+    tx_snprintf(g_journal, sizeof g_journal, "%s/journal", g_cwd);
+    tx_snprintf(g_backup, sizeof g_backup, "%s/backup", g_cwd);
+    tx_snprintf(g_notice, sizeof g_notice, "%s/notice.json", g_cwd);
+    tx_snprintf(g_context, sizeof g_context, "%s/context.json", g_cwd);
     NEED(cx_write(g_notice, "CURRENT_RECEIPT_DATA\n", 21) == 0, "write notice");
     if (is("no-candidates")) sb_puts(&ctx, "{\"status\": \"available\", \"notices\": []}");
     else {
         const char *path = g_notice;
-        if (is("long-path")) { snprintf(cbuf, sizeof cbuf, "%s/%s", g_cwd, rep('x', 500)); path = cbuf; }
+        if (is("long-path")) { tx_snprintf(cbuf, sizeof cbuf, "%s/%s", g_cwd, rep('x', 500)); path = cbuf; }
         sb_puts(&ctx, "{\"status\": \"available\", \"notices\": [{\"id\": \"");
         sb_puts(&ctx, rep('a', 32));
         sb_puts(&ctx, "\", \"path\": ");
@@ -860,7 +863,7 @@ static int run_case(const char *name, const char *parent) {
     lfd = sy_tcp_listen(0, 16);
     NEED(lfd >= 0, "stub cannot listen");
     port = sy_tcp_port(lfd);
-    snprintf(ep, sizeof ep, "http://127.0.0.1:%d/v1/chat/completions", port);
+    tx_snprintf(ep, sizeof ep, "http://127.0.0.1:%d/v1/chat/completions", port);
     i = 0;
     kv[i++] = "HOME"; kv[i++] = home;
     kv[i++] = "DEEPSEEK_API_KEY"; kv[i++] = "LOCAL_ONLY";
@@ -973,7 +976,7 @@ static int schema_check(const char *sub, const char *home, const char *label, jn
     char *args[2];
     runres r;
     int un;
-    snprintf(path, sizeof path, "%s/%s.jsonl", sub, label);
+    tx_snprintf(path, sizeof path, "%s/%s.jsonl", sub, label);
     if (raw) sb_puts(&text, raw); else jdump(&text, value, 1);
     sb_puts(&text, "\n");
     NEED(cx_write(path, text.p, (size_t)text.n) == 0, "%s: write", label);
@@ -988,7 +991,7 @@ static int schema_check(const char *sub, const char *home, const char *label, jn
     g_schema_n++;
     return 0;
 fail:
-    printf("        schema %s\n", g_why);
+    sy_printf("        schema %s\n", g_why);
     return 1;
 }
 static int run_schema(void) {
@@ -1002,10 +1005,10 @@ static int run_schema(void) {
         {"verified", "read_call", "verified", 't', 0}, {"success-mismatch", "read_call", "call_success", 'f', 0},
         {"unhandled", "status", "handled", 'f', 0}, {NULL, NULL, NULL, 0, 0} };
     int i;
-    snprintf(sub, sizeof sub, "%s/schema-root", g_root);
+    tx_snprintf(sub, sizeof sub, "%s/schema-root", g_root);
     NEED(sy_mkdir(sub, 0700) == 0, "mkdir schema-root");
-    if (run_case("recover", sub) != 0) { char w[1200]; snprintf(w, sizeof w, "%s", g_why); NEED(0, "base recover run: %s", w); }
-    snprintf(home, sizeof home, "%s/schema-proof", g_homes);
+    if (run_case("recover", sub) != 0) { char w[1200]; tx_snprintf(w, sizeof w, "%s", g_why); NEED(0, "base recover run: %s", w); }
+    tx_snprintf(home, sizeof home, "%s/schema-proof", g_homes);
     NEED(sy_mkdir(home, 0700) == 0, "mkdir schema home");
     for (k = 0; k < g_nrec; k++) if (truthy(jget(g_recs[k], "read_call"))) { record = g_recs[k]; break; }
     NEED(record, "base run has no read_call record");
@@ -1067,32 +1070,32 @@ int main(void) {
     int fails = 0, i;
     long t_start = sy_now_ms(), n = 0;
     char *u;
-    if (app && app[0]) snprintf(CSIH_APP, sizeof CSIH_APP, "%s", app);
-    else if (!getcwd(CSIH_APP, sizeof CSIH_APP)) { printf("evidence_reconciliation: FAIL (getcwd)\n"); return 1; }
-    snprintf(t, sizeof t, "%s/../..", CSIH_APP);
-    if (CSIH_APP[0] != '/' || !realpath(t, REPO)) { printf("evidence_reconciliation: FAIL (app dir)\n"); return 1; }
-    snprintf(PROBE_SRC, sizeof PROBE_SRC, "%s/probes/evidence_reconciliation.cx", CSIH_APP);
-    if (uc && uc[0]) snprintf(UNISACC_PATH, sizeof UNISACC_PATH, "%s", uc);
-    else snprintf(UNISACC_PATH, sizeof UNISACC_PATH, "%s/unisacc.com", REPO);
+    if (app && app[0]) tx_snprintf(CSIH_APP, sizeof CSIH_APP, "%s", app);
+    else if (!getcwd(CSIH_APP, sizeof CSIH_APP)) { sy_printf("evidence_reconciliation: FAIL (getcwd)\n"); return 1; }
+    tx_snprintf(t, sizeof t, "%s/../..", CSIH_APP);
+    if (CSIH_APP[0] != '/' || !realpath(t, REPO)) { sy_printf("evidence_reconciliation: FAIL (app dir)\n"); return 1; }
+    tx_snprintf(PROBE_SRC, sizeof PROBE_SRC, "%s/probes/evidence_reconciliation.cx", CSIH_APP);
+    if (uc && uc[0]) tx_snprintf(UNISACC_PATH, sizeof UNISACC_PATH, "%s", uc);
+    else tx_snprintf(UNISACC_PATH, sizeof UNISACC_PATH, "%s/unisacc.com", REPO);
     take_snapshot(0);
 
     scratch = sy_env_or("PROBE_SCRATCH", sy_env_or("TMPDIR", "/tmp"));
-    snprintf(g_root, sizeof g_root, "%s/csih-probe-build-%d/evidence_reconciliation", scratch, (int)getuid());
-    { sy_stat_t st; if (sy_lstat(g_root, &st) == 0 && cx_rmtree(g_root) != 0) { printf("evidence_reconciliation: FAIL (cannot clear %s)\n", g_root); return 1; } }
-    snprintf(g_src, sizeof g_src, "%s/source", g_root);
-    snprintf(g_comp, sizeof g_comp, "%s/compiler.com", g_root);
-    snprintf(g_out, sizeof g_out, "%s/run.out", g_root);
-    snprintf(g_err, sizeof g_err, "%s/run.err", g_root);
-    snprintf(cases_dir, sizeof cases_dir, "%s/cases", g_root);
-    snprintf(t, sizeof t, "%s/out", REPO);
+    tx_snprintf(g_root, sizeof g_root, "%s/csih-probe-build-%d/evidence_reconciliation", scratch, (int)getuid());
+    { sy_stat_t st; if (sy_lstat(g_root, &st) == 0 && cx_rmtree(g_root) != 0) { sy_printf("evidence_reconciliation: FAIL (cannot clear %s)\n", g_root); return 1; } }
+    tx_snprintf(g_src, sizeof g_src, "%s/source", g_root);
+    tx_snprintf(g_comp, sizeof g_comp, "%s/compiler.com", g_root);
+    tx_snprintf(g_out, sizeof g_out, "%s/run.out", g_root);
+    tx_snprintf(g_err, sizeof g_err, "%s/run.err", g_root);
+    tx_snprintf(cases_dir, sizeof cases_dir, "%s/cases", g_root);
+    tx_snprintf(t, sizeof t, "%s/out", REPO);
     sy_mkdir(t, 0755);
-    snprintf(g_homes, sizeof g_homes, "%s/out/csih-evidence-home-%d", REPO, sy_pid());
-    if (mkdirp(g_src) || mkdirp(cases_dir) || sy_mkdir(g_homes, 0700)) { printf("evidence_reconciliation: FAIL (work dirs)\n"); return 1; }
+    tx_snprintf(g_homes, sizeof g_homes, "%s/out/csih-evidence-home-%d", REPO, sy_pid());
+    if (mkdirp(g_src) || mkdirp(cases_dir) || sy_mkdir(g_homes, 0700)) { sy_printf("evidence_reconciliation: FAIL (work dirs)\n"); return 1; }
 
     /* private source copy + injection (copy only) */
     cx_walk(CSIH_APP, copy_cb, NULL);
     if (!g_copy_err && csih_copy_l0(CSIH_APP, g_src) != 0) g_copy_err = 1;   /* sys, mem, text: links the walk skips */
-    if (g_copy_err) { printf("evidence_reconciliation: FAIL (source copy)\n"); fails++; goto end; }
+    if (g_copy_err) { sy_printf("evidence_reconciliation: FAIL (source copy)\n"); fails++; goto end; }
     {
         static const char entry[] = "int main(int argc, char **argv) {";
         static const char pre[] = "int agent_context_packet(const char *packet);\n";
@@ -1103,28 +1106,28 @@ int main(void) {
         long cl = 0, pos = -1, occ = 0, p = 0, el = sl(entry);
         char *text;
         sb nt = {0, 0, 0};
-        snprintf(cli, sizeof cli, "%s/agent_cli.cx", g_src);
+        tx_snprintf(cli, sizeof cli, "%s/agent_cli.cx", g_src);
         text = slurp(cli, &cl);
-        if (!text) { printf("evidence_reconciliation: FAIL (agent_cli.cx unreadable)\n"); fails++; goto end; }
+        if (!text) { sy_printf("evidence_reconciliation: FAIL (agent_cli.cx unreadable)\n"); fails++; goto end; }
         for (;;) { long f = tx_find(text + p, cl - p, entry, el); if (f < 0) break; occ++; pos = p + f; p = pos + 1; }
-        if (occ != 1) { printf("evidence_reconciliation: FAIL (main anchor occurs %ld times)\n", occ); fails++; goto end; }
+        if (occ != 1) { sy_printf("evidence_reconciliation: FAIL (main anchor occurs %ld times)\n", occ); fails++; goto end; }
         sb_put(&nt, text, pos); sb_puts(&nt, pre); sb_put(&nt, entry, el); sb_puts(&nt, post);
         sb_put(&nt, text + pos + el, cl - pos - el);
-        if (cx_write(cli, nt.p, (size_t)nt.n) != 0) { printf("evidence_reconciliation: FAIL (write agent_cli.cx)\n"); fails++; goto end; }
+        if (cx_write(cli, nt.p, (size_t)nt.n) != 0) { sy_printf("evidence_reconciliation: FAIL (write agent_cli.cx)\n"); fails++; goto end; }
     }
     u = slurp(UNISACC_PATH, &n);
-    if (!u || cx_write(g_comp, u, (size_t)n) != 0) { printf("evidence_reconciliation: FAIL (compiler copy)\n"); fails++; goto end; }
+    if (!u || cx_write(g_comp, u, (size_t)n) != 0) { sy_printf("evidence_reconciliation: FAIL (compiler copy)\n"); fails++; goto end; }
     {
         char *bargs[1];
         const char *kv[] = { "HOME", g_homes, NULL };
         long tb = sy_now_ms();
         bargs[0] = "build-check";
         if (run_agent(g_root, kv, bargs, 1, 50000, -1, &r) != 0 || r.rc != 64 || r.timed || !has(r.out, r.outn, "usage: agent_cli") || r.errn) {
-            printf("  FAIL  build: rc=%d timed=%d stderr=%.600s\n", r.rc, r.timed, r.err);
+            sy_printf("  FAIL  build: rc=%d timed=%d stderr=%.600s\n", r.rc, r.timed, r.err);
             fails++;
             goto end;
         }
-        printf("  ok    build gate (%.1fs)\n", (sy_now_ms() - tb) / 1000.0);
+        sy_printf("  ok    build gate (%.1fs)\n", (sy_now_ms() - tb) / 1000.0);
     }
     g_deadline = sy_now_ms() + 55000;
     for (i = 0; CASES[i]; i++) {
@@ -1132,17 +1135,17 @@ int main(void) {
         int bad = seq(CASES[i], "schema") ? run_schema() : run_case(CASES[i], cases_dir);
         if (bad) {
             fails++;
-            printf("  FAIL  %s: %s (%.1fs)\n", CASES[i], g_why, (sy_now_ms() - tc) / 1000.0);
+            sy_printf("  FAIL  %s: %s (%.1fs)\n", CASES[i], g_why, (sy_now_ms() - tc) / 1000.0);
             if (!seq(CASES[i], "schema")) show_run();
-        } else if (seq(CASES[i], "schema")) printf("  ok    schema: recover base + %d schema-proof records (%.1fs)\n", g_schema_n, (sy_now_ms() - tc) / 1000.0);
-        else printf("  ok    %s (%.1fs)\n", CASES[i], (sy_now_ms() - tc) / 1000.0);
+        } else if (seq(CASES[i], "schema")) sy_printf("  ok    schema: recover base + %d schema-proof records (%.1fs)\n", g_schema_n, (sy_now_ms() - tc) / 1000.0);
+        else sy_printf("  ok    %s (%.1fs)\n", CASES[i], (sy_now_ms() - tc) / 1000.0);
     }
 end:
     take_snapshot(1);
-    if (!snap_same()) { printf("  FAIL  frozen: product inputs changed during the run\n"); fails++; }
+    if (!snap_same()) { sy_printf("  FAIL  frozen: product inputs changed during the run\n"); fails++; }
     cx_rmtree(g_root);
     cx_rmtree(g_homes);
-    printf("  (total %.1fs)\n", (sy_now_ms() - t_start) / 1000.0);
-    printf("evidence_reconciliation: %s (%d failed)\n", fails ? "FAIL" : "PASS", fails);
+    sy_printf("  (total %.1fs)\n", (sy_now_ms() - t_start) / 1000.0);
+    sy_printf("evidence_reconciliation: %s (%d failed)\n", fails ? "FAIL" : "PASS", fails);
     return fails ? 1 : 0;
 }
