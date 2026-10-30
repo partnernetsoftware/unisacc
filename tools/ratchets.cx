@@ -1,0 +1,92 @@
+/* tools/ratchets.cx -- run the four repo ratchets at once and show only what is wrong.
+ *
+ *   sh ./unisacc.com tools/ratchets.cx [-- --only PATH-PREFIX]
+ *
+ * Starts tests/cxraw.cx, tests/cxinclude.cx, tests/cxapis.cx and tests/cxtrunc.cx with --check in parallel
+ * (each under tools/bound 55) and prints, per ratchet, one line
+ *   RATCHET<TAB>name<TAB>ok|FAIL|ERROR<TAB>its summary line
+ * followed by the rows that make it fail (a row naming a file above its baseline or with no row), but not the
+ * "stale row" or "below baseline" notes.  With --only PREFIX, only offending rows whose file starts with PREFIX
+ * are printed (the status still covers the whole tree).  Ends with RATCHETS<TAB>ok=N<TAB>fail=M<TAB>elapsed_ms=T
+ * and exits 0 only when all four are ok.  One call instead of four serial ones (about 4 x 10 s). */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+typedef struct { const char *name; int pid, ofd, efd; char *out; long n; int rc; } Rk;
+
+static void slurp(int fd, char **buf, long *n) {
+    long cap = 1 << 16, r; char *b = mm_alloc(cap);
+    *n = 0;
+    while (b && (r = sy_read(fd, b + *n, cap - 1 - *n)) > 0) {
+        *n += r;
+        if (*n + 1 >= cap) { char *g = mm_grow(b, cap * 2); if (!g) break; b = g; cap *= 2; }
+    }
+    if (b) b[*n] = 0;
+    *buf = b;
+}
+
+/* 1 when LINE (len n) names a failing file: "<tool>: <path> has ..." without "stale row" */
+static int offending(const char *l, long n, const char *only) {
+    long c = tx_chr(l, n, ':'), s;
+    if (c < 0 || c + 2 >= n || l[c + 1] != ' ') return 0;
+    if (tx_find(l, n, "stale row", 9) >= 0 || tx_find(l, n, " has ", 5) < 0) return 0;
+    s = c + 2;
+    if (tx_prefix(l + s, n - s, "module ", 7)) s += 7;   /* cxinclude: "module PATH has N include lines" */
+    if (only && !tx_prefix(l + s, n - s, only, tx_len(only, 4096))) return 0;
+    return 1;
+}
+
+int main(int argc, char **argv) {
+    static Rk rk[4] = {{"cxraw"}, {"cxinclude"}, {"cxapis"}, {"cxtrunc"}};
+    const char *only = 0; long t0 = sy_now_ms(); int k, ok = 0, fail = 0;
+    if ((argc == 3 || argc == 5) && tx_eqz(argv[1], "--rows")) {   /* --rows SAVED [--only P]: the filter alone, on a saved ratchet output */
+        size_t n; char *b = cx_read(argv[2], &n); long at = 0;
+        if (!b) { fprintf(stderr, "ratchets: cannot read %s\n", argv[2]); return 2; }
+        if (argc == 5) { if (!tx_eqz(argv[3], "--only")) return 2; only = argv[4]; }
+        while (at < (long)n) {
+            long e = tx_chr(b + at, (long)n - at, '\n'), ln = e < 0 ? (long)n - at : e;
+            if (offending(b + at, ln, only)) printf("%.*s\n", (int)ln, b + at);
+            at += ln + 1;
+        }
+        return 0;
+    }
+    if (argc == 3 && tx_eqz(argv[1], "--only")) only = argv[2];
+    else if (argc != 1) { fprintf(stderr, "usage: tools/ratchets.cx [--only PATH-PREFIX | --rows SAVED [--only PATH-PREFIX]]\n"); return 2; }
+    for (k = 0; k < 4; k++) {
+        char script[64];
+        if (cx_fmt(script, sizeof script, "tests/%s.cx", rk[k].name)) return 2;
+        {   char *v[] = {"./tools/bound", "55", "sh", "./unisacc.com", script, "--", "--check", 0};
+            rk[k].pid = sy_spawn_pipe(v, 0, 0, &rk[k].ofd, 0);   /* stderr merged: the ratchets print their rows there */
+        }
+        if (rk[k].pid < 0) { fprintf(stderr, "ratchets: cannot start %s\n", rk[k].name); return 2; }
+    }
+    for (k = 0; k < 4; k++) {
+        int ex = 0, code = 0, sig = 0;
+        slurp(rk[k].ofd, &rk[k].out, &rk[k].n);
+        sy_close(rk[k].ofd);
+        rk[k].rc = sy_wait_status(rk[k].pid, 0, &ex, &code, &sig) == rk[k].pid && ex ? code : -1;
+    }
+    for (k = 0; k < 4; k++) {
+        const char *o = rk[k].out ? rk[k].out : ""; long at = 0, summary = -1, sn = 0;
+        int isok;
+        while (at < rk[k].n) {   /* the summary is the line with " ok: " or " FAIL: " */
+            long e = tx_chr(o + at, rk[k].n - at, '\n'), ln = e < 0 ? rk[k].n - at : e;
+            if (tx_find(o + at, ln, ": ok: ", 6) >= 0 || tx_find(o + at, ln, ": FAIL: ", 8) >= 0) { summary = at; sn = ln; }
+            at += ln + 1;
+        }
+        isok = rk[k].rc == 0 && summary >= 0 && tx_find(o + summary, sn, ": ok: ", 6) >= 0;
+        if (isok) ok++; else fail++;
+        printf("RATCHET\t%s\t%s\t%.*s\n", rk[k].name, isok ? "ok" : summary >= 0 ? "FAIL" : "ERROR", (int)(summary >= 0 ? sn : 0), summary >= 0 ? o + summary : "");
+        at = 0;
+        while (at < rk[k].n) {
+            long e = tx_chr(o + at, rk[k].n - at, '\n'), ln = e < 0 ? rk[k].n - at : e;
+            if (offending(o + at, ln, only)) printf("  %.*s\n", (int)ln, o + at);
+            at += ln + 1;
+        }
+    }
+    printf("RATCHETS\tok=%d\tfail=%d\telapsed_ms=%ld\n", ok, fail, sy_now_ms() - t0);
+    return fail ? 1 : 0;
+}

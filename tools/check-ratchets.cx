@@ -1,0 +1,52 @@
+/* Checks tools/ratchets.cx: sh ./unisacc.com tools/check-ratchets.cx   (from the repo root)
+   --rows on tools/ratchets/sample.txt keeps exactly the three rows that name a file above or without a
+   baseline (cxraw, cxinclude "module PATH", cxtrunc) and drops the stale-row note, the FAIL summary and the
+   boundary note; --only src/ keeps only the cxinclude row, --only apps/ only the cxraw row.  A full run prints
+   four RATCHET lines and a RATCHETS line whose ok+fail is 4, with exit 0 exactly when fail is 0.
+   Prints PASS/FAIL lines and CHECK_RATCHETS<TAB>failed=N. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+
+static int failed;
+static void ck(int ok, const char *name) { if (!ok) failed++; printf("%s\tratchets.%s\n", ok ? "PASS" : "FAIL", name); }
+
+static int run(char **args, char *out, long cap) {
+    char *argv[12]; int i = 0, k, ofd, pid, ex = 0, code = 0, sig = 0; long n = 0, r; char junk[4096];
+    argv[i++] = "sh"; argv[i++] = "./unisacc.com"; argv[i++] = "tools/ratchets.cx"; argv[i++] = "--";
+    for (k = 0; args[k] && i < 11; k++) argv[i++] = args[k];
+    argv[i] = 0;
+    pid = sy_spawn_pipe(argv, 0, 0, &ofd, 0);
+    if (pid < 0) return -1;
+    while ((r = sy_read(ofd, out + n, cap - 1 - n)) > 0) n += r;
+    out[n] = 0;
+    while (sy_read(ofd, junk, sizeof junk) > 0) {}
+    sy_close(ofd);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
+    return code;
+}
+static int lines(const char *s) { int c = 0; for (; *s; s++) if (*s == '\n') c++; return c; }
+static int has(const char *out, const char *s) { return tx_find(out, tx_len(out, 1 << 16), s, tx_len(s, 512)) >= 0; }
+
+int main(void) {
+    static char o[1 << 16];
+    char *all[] = {"--rows", "tools/ratchets/sample.txt", 0};
+    char *src[] = {"--rows", "tools/ratchets/sample.txt", "--only", "src/", 0};
+    char *apps[] = {"--rows", "tools/ratchets/sample.txt", "--only", "apps/", 0};
+    char *full[] = {0};
+    int rc = run(all, o, sizeof o);
+    ck(rc == 0 && lines(o) == 3 && has(o, "context_preview.cx has 102") && has(o, "module src/host.cx has 1") && has(o, "tools/new-tool.cx has 8")
+       && !has(o, "stale row") && !has(o, "FAIL:") && !has(o, "boundary:"), "rows-keeps-three-offenders");
+    rc = run(src, o, sizeof o);
+    ck(rc == 0 && lines(o) == 1 && has(o, "module src/host.cx"), "only-src-through-module-word");
+    rc = run(apps, o, sizeof o);
+    ck(rc == 0 && lines(o) == 1 && has(o, "apps/csih/probes/context_preview.cx"), "only-apps");
+    rc = run(full, o, sizeof o);
+    {   int okn = -1, failn = -1; long at = tx_find(o, tx_len(o, sizeof o), "RATCHETS\tok=", 12);
+        if (at >= 0) sscanf(o + at, "RATCHETS\tok=%d\tfail=%d", &okn, &failn);
+        ck(has(o, "RATCHET\tcxraw\t") && has(o, "RATCHET\tcxinclude\t") && has(o, "RATCHET\tcxapis\t") && has(o, "RATCHET\tcxtrunc\t")
+           && okn + failn == 4 && (rc == 0) == (failn == 0), "full-run-four-and-exit");
+    }
+    printf("CHECK_RATCHETS\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
