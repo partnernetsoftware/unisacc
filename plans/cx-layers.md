@@ -278,6 +278,6 @@ feedback 反复指出「内存安全未触及更广的 Rust 式所有权/借用�
 
 ## 三个坑（cc 2026-10-30 提醒，本目标设计须遵守）
 
-1. **坑一，模块经两条软链路径进入**：`cx/text/mem` 软链让 build.cx 经 `cx/text/mem/grow.cx` 引 mem.grow；若使用方同时经 `tools/mem` 再 `use mem.*`，已装产品报 "defined twice"（复现 out/rf-dedupe）。grk 的 modid 候选已修，未安装。本目标的 build.cx 已用 `void* inner` 消除 CXIF 的 mg_buf 类型泄漏，但「直接 use mem.grow + use text.build」仍撞软链归一（已装产品缺 sy_realpath），待产品重编。
+1. **坑一，模块经两条软链路径进入**：`cx/text/mem` 软链让 build.cx 经 `cx/text/mem/grow.cx` 引 mem.grow；若使用方同时经 `tools/mem` 再 `use mem.*`，已装产品报 "defined twice"（复现 out/rf-dedupe）。grk 的 modid 候选已修，未安装。本目标的 build.cx 已用 `void* inner` 消除 CXIF 的 mg_buf 类型泄漏，但「直接 use mem.grow + use text.build」仍撞软链归一（已装产品缺 sy_realpath）。**2026-10-30 实测验证**：`out/grk-modid/candidate`（modid 候选，含 sy_realpath）跑 `tools/practice-vec.cx`（use mem.grow + use text.build）→ `PRACTICE_VEC failed=0`（10 用例全 PASS），跑 `check-driver-cli`（use text.text）→ `CXC failed=0`，跑 `check-cx-build` → `CX_BUILD failed=0`。即软链归一修复**已存在且可用**，只差 grk 把 modid 候选 install/promote 成已装产品。产品重编后，cli.cx 收敛 use text.text、practice-vec 转正都可直接落地。
 2. **坑二，间接可见函数无原型**：A use mid，mid use text.fmt，A 调 tx_snprintf/tx_strtod 会调错甚至段错误。约定：用到哪个模块的函数就直接 use 那个模块。见 plans/indirect-proto-2026-10-30.md。本目标的 consumers（read-all/check-*）都直接 use 了所用模块，遵守此约定。
 3. **坑三，errno 每编译单元一份**：跨模块错误码只能走返回值。见 plans/errno-per-unit-2026-10-30.md。本目标的 cx/sys 接口全部显式返回 -errno，不依赖 errno 跨模块，遵守此约定。
