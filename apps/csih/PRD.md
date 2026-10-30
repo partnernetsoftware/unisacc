@@ -153,6 +153,14 @@ agent 模式新增 `/help`、`/status`、`/clear`，均只在本地处理、不�
   - 25 个 `*_cli.cx` 全部过一遍 delibc：每个改前改后各跑一次，selftest 退出码和末行一致才保留（agent_cli 两边各编一次，输出逐字节相同）。reload_io/load/consume、journal_checkpoint、reload_candidate 的 CLI 没有 selftest，只核了用法退出码并人工读 diff。
   - 探针目录不能放 `.cx` 名字的软链（复制源码树的探针会拒绝），改用目录链 `probes/csih -> ..`。
   - 还没做的：CLI 里约 150 处 stdio 文件流（文件同时用 stdout 等，`--fio` 不动）；libc_cover、errno_cover、tui-q5-*、tty-*、fs-* 这些探针本身就是测 libc/前导的，不改。
+  - 后续（同日）：
+    - 探针和探针辅助模块、message_send、loop、suite、reload_candidate、reload_launcher 都过了 delibc（探针用 `--zstr none`）。libcscan 统计的直接调用从 3126 降到 1348 处。
+    - agent_multi_action 9/9、agent_loop_bound 31/31（按裁定 A，见 `docs/agent-probes-ruling.md`），net_timeout、message_publish 也转绿；agent-loop-bound、agent-multi-action 两条合同改记 IMPLEMENTED。
+    - 写死的 `/Users/wjc` 编译器和 envelope 路径去掉了，版本升到 0.1.1。
+    - 我改写 tmuxwit 时把 check-loop 弄坏了：它和 suite 各自 use text.fmt，check.cx 同时用到两者，同一个文件被当成两个模块。已把 tmuxwit 还原，check-loop 恢复。
+    - 为此新造 `tools/affected.cx`：按 `-cx-plan` 闭包算出某次改动影响哪些 csih 合同。用它把本轮改过的 64 个文件过了一遍，命中 47 条合同，全部 PASS。
+    - 首轮有 5 条没过，都不是改写造成的：e2e 二进制没重新 prepare 过期了 2 条，冷编译把 50～55 秒的时限顶破 3 条；重跑都过了。
+    - 时限风险还在：reload-launcher-run 的耗时随缓存冷热在 13～56 秒之间摆动，冷编译时可能超时。
 - **第六十六批已落地（2026-10-30）**：产品闭包去 `#include`（主人：libc 的函数和符号不直接用，经 cx 底层包装）。
   - file、u_run、term、shell、reload_io、net 六个模块不再有 `#include`，改用 cx/sys：
     - term：`sy_tty_get/set/raw/size` 取代 termios、cfmakeraw、TIOCGWINSZ；`sy_poll` 取代 poll。
