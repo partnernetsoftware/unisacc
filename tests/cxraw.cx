@@ -160,8 +160,19 @@ static int append(char **buf, size_t *len, size_t *cap, const char *s) {
     *len += (size_t)n; return 0;
 }
 
+/* One `git ls-files -s -z` record, "MODE SHA STAGE<TAB>PATH": the path, or 0 for a tracked symlink
+   (mode 120000), whose target is counted once under its own tracked path. */
+static char *ls_path(char *rec) {
+    static const char link[] = "120000 ";
+    int k;
+    for (k = 0; link[k] && rec[k] == link[k]; k++) ;
+    if (!link[k]) return 0;
+    while (*rec && *rec != '\t') rec++;
+    return *rec ? rec + 1 : 0;
+}
+
 int main(int argc, char **argv) {
-    char *list = 0, *cdup = 0, *p, *end, *out = 0, line[4200]; size_t ln = 0, cl = 0, olen = 0, ocap = 0;
+    char *list = 0, *cdup = 0, *rec, *p, *end, *out = 0, line[4200]; size_t ln = 0, cl = 0, olen = 0, ocap = 0;
     int check, files = 0, total = 0, over = 0, under = 0, base_total = 0, k, rc;
     arena = ar_new(1L << 32);
     if (!arena) { fprintf(stderr, "cxraw: cannot create the arena\n"); return 2; }
@@ -177,7 +188,7 @@ int main(int argc, char **argv) {
     rc = cx_run("git rev-parse --show-cdup", &cdup, &cl);
     if (rc != 0 || !cdup || cl > 1) { fprintf(stderr, "cxraw: run from the repo root\n"); return 2; }
     if (check && load_baseline() < 0) return 2;
-    rc = cx_run("git ls-files -z -- '*.cx' ':(exclude)archive/'", &list, &ln);   /* archive/ is reference-only */
+    rc = cx_run("git ls-files -s -z -- '*.cx' ':(exclude)archive/'", &list, &ln);   /* archive/ is reference-only */
     if (rc != 0 || !list) { fprintf(stderr, "cxraw: git ls-files failed (rc %d)\n", rc); return 2; }
     if (!check) {
         append(&out, &olen, &ocap, "# tests/cxraw.tsv -- written by tests/cxraw.cx --write.\n");
@@ -185,10 +196,10 @@ int main(int argc, char **argv) {
         append(&out, &olen, &ocap, "# Rows only for counts above 0. Counts only go down (plans/cx-layers.md).\n");
         append(&out, &olen, &ocap, "# path\tcalls\n");
     }
-    for (p = list, end = list + ln; p < end; p += tx_len(p, (long)(end - p)) + 1) {
+    for (rec = list, end = list + ln; rec < end; rec += tx_len(rec, (long)(end - rec)) + 1) {
         size_t n; char *src; int c; Row *r;
-        if (tx_len(p, (long)(end - p)) < 0) break;
-        if (!*p || is_bottom(p)) continue;
+        if (tx_len(rec, (long)(end - rec)) < 0) break;
+        if (!(p = ls_path(rec)) || !*p || is_bottom(p)) continue;
         src = cx_read(p, &n);                /* process-lifetime buffer */
         c = src ? count_calls(src, n) : 0;
         files++; total += c;

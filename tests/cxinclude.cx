@@ -12,9 +12,9 @@
      sh ./unisacc.com -run tests/cxinclude.cx -- --write   rewrite tests/cxinclude.tsv only when every module count is
                                                            at or below its row.  A new include or a higher count
                                                            leaves the file unchanged and exits 1.
-   The files are `git ls-files -z '*.cx' ':(exclude)archive/'` (tracked or staged; an untracked scratch .cx is not a
-   module of the tree and is ignored on purpose; archive/ is reference-only and outside the ratchet), read from the
-   work tree; a tracked file missing there counts 0.
+   The files are `git ls-files -s -z '*.cx' ':(exclude)archive/'` (tracked or staged; an untracked scratch .cx is not
+   a module of the tree and is ignored on purpose; archive/ is reference-only and outside the ratchet), read from the
+   work tree; a tracked file missing there counts 0.  A tracked symlink is skipped: its target counts under its own path.
    tests/cxinclude.tsv rows are PATH<TAB>COUNT, written only for counts above 0: a file without a row is held at 0,
    so the baseline only lists what is still to remove.  Lines of the .tsv that start with a hash mark are comments.
    A stale row (file no longer tracked) is reported and ignored.  rc 2: usage, not at the repo root, git or I/O
@@ -136,8 +136,19 @@ static int append(char **buf, size_t *len, size_t *cap, const char *s) {
     memcpy(*buf + *len, s, n + 1); *len += n; return 0;
 }
 
+/* One `git ls-files -s -z` record, "MODE SHA STAGE<TAB>PATH": the path, or 0 for a tracked symlink
+   (mode 120000), whose target is counted once under its own tracked path. */
+static char *ls_path(char *rec) {
+    static const char link[] = "120000 ";
+    int k;
+    for (k = 0; link[k] && rec[k] == link[k]; k++) ;
+    if (!link[k]) return 0;
+    while (*rec && *rec != '\t') rec++;
+    return *rec ? rec + 1 : 0;
+}
+
 int main(int argc, char **argv) {
-    char *list = 0, *cdup = 0, *p, *end, *out = 0, line[4200]; size_t ln = 0, cl = 0, olen = 0, ocap = 0;
+    char *list = 0, *cdup = 0, *rec, *p, *end, *out = 0, line[4200]; size_t ln = 0, cl = 0, olen = 0, ocap = 0;
     int check, files = 0, total = 0, over = 0, under = 0, base_total = 0, bfiles = 0, binc = 0, hfiles = 0, hinc = 0, k, rc;
     if (argc != 2 || (strcmp(argv[1], "--check") && strcmp(argv[1], "--write"))) {
         fprintf(stderr, "usage: cxinclude.cx --check | --write   (from the repo root)\n"); return 2;
@@ -147,7 +158,7 @@ int main(int argc, char **argv) {
     if (rc != 0 || !cdup || cl > 1) { fprintf(stderr, "cxinclude: run from the repo root\n"); return 2; }
     if (load_boundary() < 0) return 2;
     if (load_baseline() < 0) return 2;
-    rc = cx_run("git ls-files -z -- '*.cx' ':(exclude)archive/'", &list, &ln);
+    rc = cx_run("git ls-files -s -z -- '*.cx' ':(exclude)archive/'", &list, &ln);
     if (rc != 0 || !list) { fprintf(stderr, "cxinclude: git ls-files failed (rc %d)\n", rc); return 2; }
     if (!check) {
         append(&out, &olen, &ocap, "# tests/cxinclude.tsv -- written by tests/cxinclude.cx --write; per tracked .cx module its include directives.\n");
@@ -156,9 +167,9 @@ int main(int argc, char **argv) {
         append(&out, &olen, &ocap, "# --write refuses a new row or a higher count and leaves this file unchanged.\n");
         append(&out, &olen, &ocap, "# path\tincludes\n");
     }
-    for (p = list, end = list + ln; p < end; p += strlen(p) + 1) {
+    for (rec = list, end = list + ln; rec < end; rec += strlen(rec) + 1) {
         size_t n; char *src; int c; Row *r;
-        if (!*p) continue;
+        if (!(p = ls_path(rec)) || !*p) continue;
         src = cx_read(p, &n);
         c = src ? count_includes(src, n) : 0;
         free(src);
