@@ -1,0 +1,95 @@
+#pragma unisa module grow
+#pragma unisa use heap
+#pragma unisa use bytes
+/* L0 mem/grow: an owned, growable byte buffer (a C Vec<u8>).  The caller owns the
+   mg_buf struct; its data block is heap memory from mem.heap.  Length and capacity
+   travel with the buffer, so append is bounds-checked against capacity and growth
+   doubles capacity (amortized O(1) append, not O(n^2) per-byte realloc).  Single-
+   threaded; the caller frees exactly once with mg_free.  No operation returns an
+   interior pointer that outlives the call.  On failure the buffer is unchanged.
+     mg_init(b)          zero the struct (call before any other op on an uninit b)
+     mg_reserve(b, n)    ensure cap >= n; 0, or -1 (b unchanged)
+     mg_push(b, c)       append one byte; 0, or -1
+     mg_append(b, p, n)  append n bytes; 0, or -1
+     mg_free(b)          free the block and zero the struct
+     mg_move(dst, src)    transfer ownership src -> dst; src zeroed (Rust move)
+     mg_take(b, &p, &n, &c) hand the block out; b zeroed (Vec::into_raw_parts)
+   Speed: reserve doubles the capacity (16, 32, 64, ...), so N pushes cost O(N)
+   total, matching Rust's Vec growth.  The block is never shrunk in place. */
+
+typedef struct { unsigned char *data; long len, cap; } mg_buf;
+
+void mg_init(mg_buf *b) {
+    if (!b) return;
+    b->data = 0; b->len = 0; b->cap = 0;
+}
+
+/* Grow capacity to hold at least need bytes (need > cap).  Double from 16, or
+   exactly need when that overshoots; refuse a negative or absurd need. */
+static int mg_growto(mg_buf *b, long need) {
+    long cap = b->cap ? b->cap : 16;
+    void *p;
+    if (need <= 0) return -1;
+    while (cap < need) {
+        if (cap > 0x3fffffffffffffffL / 2) return -1;
+        cap = cap * 2;
+    }
+    p = mm_grow(b->data, cap);
+    if (!p) return -1;
+    b->data = (unsigned char *)p;
+    b->cap = cap;
+    return 0;
+}
+
+int mg_reserve(mg_buf *b, long n) {
+    if (!b || n < 0) return -1;
+    if (n <= b->cap) return 0;
+    return mg_growto(b, n);
+}
+
+int mg_push(mg_buf *b, int c) {
+    if (!b) return -1;
+    if (b->len >= b->cap && mg_growto(b, b->len + 1)) return -1;
+    b->data[b->len] = (unsigned char)(c & 255);
+    b->len = b->len + 1;
+    return 0;
+}
+
+int mg_append(mg_buf *b, const void *p, long n) {
+    if (!b || n < 0 || (n > 0 && !p)) return -1;
+    if (n == 0) return 0;
+    if (b->len + n < b->len) return -1;               /* overflow */
+    if (b->len + n > b->cap && mg_growto(b, b->len + n)) return -1;
+    { void *kept = mm_move(b->data + b->len, b->cap - b->len, p, n); (void)kept; }
+    b->len = b->len + n;
+    return 0;
+}
+
+void mg_free(mg_buf *b) {
+    if (!b) return;
+    if (b->data) mm_free(b->data);
+    mg_init(b);
+}
+
+/* Move the block from SRC to DST: DST takes the data, len and cap, and SRC is
+   zeroed, so a later mg_free(SRC) is a no-op and DST is the sole owner.  This is
+   Rust's move (and Vec's ownership transfer): after the move the old handle is
+   invalidated, not aliased.  DST must not already own a block (it is overwritten;
+   call mg_free first if it does).  0, or -1 (neither changed). */
+int mg_move(mg_buf *dst, mg_buf *src) {
+    if (!dst || !src) return -1;
+    if (dst == src) return 0;
+    *dst = *src;
+    mg_init(src);
+    return 0;
+}
+
+/* Hand the block back to the caller: *data, *len, *cap receive the fields and the
+   buffer is zeroed.  The caller now owns the block and frees it with mm_free.
+   This is Rust's Vec::into_raw_parts.  0, or -1 (nothing changed). */
+int mg_take(mg_buf *b, unsigned char **data, long *len, long *cap) {
+    if (!b || !data || !len || !cap) return -1;
+    *data = b->data; *len = b->len; *cap = b->cap;
+    mg_init(b);
+    return 0;
+}

@@ -1,0 +1,39 @@
+#pragma unisa use mem.grow
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+/* Concatenate every named file into one output: each file is read whole with the
+   prelude cx_read, appended into an owned growable buffer (mem.grow), then the
+   buffer is written once.  A real consumer of mg_buf: append doubles capacity as
+   files arrive, the block is freed exactly once, and length/capacity travel with
+   the buffer so no separate len/cap bookkeeping is needed.
+     sh ./unisacc.com tools/read-all.cx -- FILE...
+     sh ./unisacc.com tools/read-all.cx --check FILE   (self-check: byte-identical) */
+int main(int argc, char **argv) {
+    if (argc >= 3 && tx_eqz(argv[1], "--check")) {
+        mg_buf b; long i, rn; char *raw = 0; int bad = 0;
+        mg_init(&b);
+        raw = cx_read(argv[2], &rn);
+        if (!raw) bad = 1;
+        else if (mg_append(&b, raw, rn)) bad = 1;
+        else for (i = 0; i < rn; i++) if ((char)b.data[i] != raw[i]) bad = 1;
+        printf("READ_ALL\tfailed=%d\n", bad);
+        if (raw) mm_free(raw);
+        mg_free(&b);
+        return bad;
+    }
+    if (argc < 2) { fprintf(stderr, "read-all: FILE...\n"); return 2; }
+    {
+        mg_buf b; int i;
+        mg_init(&b);
+        for (i = 1; i < argc; i++) {
+            long rn = 0; char *raw = cx_read(argv[i], &rn);
+            if (!raw) { fprintf(stderr, "read-all: cannot read %s\n", argv[i]); mg_free(&b); return 1; }
+            if (mg_append(&b, raw, rn)) { mm_free(raw); mg_free(&b); return 1; }
+            mm_free(raw);
+        }
+        if (b.len && sy_write_all(1, b.data, b.len)) { mg_free(&b); return 1; }
+        mg_free(&b);
+    }
+    return 0;
+}

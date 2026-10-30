@@ -1,0 +1,84 @@
+#pragma unisa module build
+#pragma unisa use mem.grow
+#pragma unisa use mem.heap
+/* L1 text/build: an owned string builder (a C String, Rust's String, Node's
+   Buffer built by appends).  It wraps mem.grow's mg_buf behind an opaque
+   pointer, so the inner Vec type never appears in build's public interface:
+   a consumer can use mem.grow and use text.build in one unit with no type
+   clash (the module-graph edge build -> mem.grow stays, but the type does not
+   leak).  Length and capacity travel with the inner buffer, append doubles
+   capacity (amortized O(1) per byte), and the block is freed exactly once.
+     sb_new()            a fresh empty builder (heap), or 0
+     sb_free(b)          free the inner block and the builder struct
+     sb_puts(b, s)       append the z-string s (a missing NUL is not read past cap)
+     sb_putn(b, s, n)    append exactly n bytes
+     sb_len(b)           the byte length
+     sb_cstr(b)          a NUL-terminated view; valid until the next append
+     sb_join(b, s, n, sep) append s[0..n) joined by sep (Rust slice::join / Array.join)
+   Speed: sb_puts/sb_putn never shrink and only reserve when the capacity is
+   short, so a sequence of appends is O(total bytes) with few reallocs. */
+
+typedef struct sb sb;
+
+struct sb { void *inner; };
+
+static mg_buf *sb_g(sb *b) { return (mg_buf *)b->inner; }
+
+sb *sb_new(void) {
+    sb *b = (sb *)mm_alloc((long)sizeof *b);
+    if (!b) return 0;
+    b->inner = mm_alloc((long)sizeof(mg_buf));
+    if (!b->inner) { mm_free(b); return 0; }
+    mg_init(b->inner);
+    return b;
+}
+
+void sb_free(sb *b) {
+    if (!b) return;
+    if (b->inner) { mg_free(b->inner); mm_free(b->inner); }
+    mm_free(b);
+}
+
+long sb_len(const sb *b) {
+    return b && b->inner ? sb_g((sb *)b)->len : 0;
+}
+
+int sb_putn(sb *b, const char *s, long n) {
+    if (!b || !b->inner || n < 0 || (n > 0 && !s)) return -1;
+    return mg_append(sb_g(b), s, n);
+}
+
+static long sb_zlen(const char *s, long cap) {
+    long i;
+    for (i = 0; i < cap; i++) if (!s[i]) return i;
+    return -1;
+}
+
+int sb_puts(sb *b, const char *s) {
+    long n;
+    if (!b || !b->inner || !s) return -1;
+    n = sb_zlen(s, 1L << 20);
+    if (n < 0) return -1;
+    return mg_append(sb_g(b), s, n);
+}
+
+const char *sb_cstr(sb *b) {
+    if (!b || !b->inner) return "";
+    if (mg_reserve(sb_g(b), sb_g(b)->len + 1)) return "";
+    sb_g(b)->data[sb_g(b)->len] = 0;
+    return (const char *)sb_g(b)->data;
+}
+
+/* Join N strings with a separator: append s[0], sep, s[1], sep, ...  (sep is
+   omitted between empty and one element; a null sep appends nothing between).
+   0, or -1 (the builder is left with whatever was appended before the failure).
+   This is Rust's slice::join and Node's Array.join over z-strings. */
+int sb_join(sb *b, const char *const *s, long n, const char *sep) {
+    long i;
+    if (!b || !b->inner || !s || n < 0 || (n > 0 && !s[0])) return -1;
+    for (i = 0; i < n; i++) {
+        if (i && sep && sb_puts(b, sep)) return -1;
+        if (sb_puts(b, s[i])) return -1;
+    }
+    return 0;
+}

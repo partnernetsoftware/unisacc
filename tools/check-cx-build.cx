@@ -1,0 +1,40 @@
+/* Checks cx/text/build.cx: sh ./unisacc.com tools/check-cx-build.cx; exit 1 on any FAIL. */
+#pragma unisa use text.build
+#pragma unisa use text.text
+static int bad;
+static void ok(int c, const char *name) { printf("%s\t%s\n", c ? "PASS" : "FAIL", name); if (!c) bad = 1; }
+int main(void) {
+    sb *b = sb_new();
+    ok(b != 0 && sb_len(b) == 0, "new-empty");
+    ok(sb_puts(b, "hello") == 0 && sb_len(b) == 5, "puts-five");
+    ok(sb_puts(b, " world") == 0 && sb_len(b) == 11, "puts-eleven");
+    ok(tx_eq(sb_cstr(b), "hello world", 64), "cstr-view");
+    ok(sb_putn(b, "!", 1) == 0 && sb_len(b) == 12 && tx_eq(sb_cstr(b), "hello world!", 64), "putn-one");
+    ok(sb_putn(b, 0, 0) == 0 && sb_len(b) == 12, "putn-empty");
+    ok(sb_putn(b, 0, 1) == -1 && sb_len(b) == 12, "putn-null-refused");
+    ok(sb_puts(b, 0) == -1, "puts-null-refused");
+    ok(sb_puts(0, "x") == -1 && sb_putn(0, "x", 1) == -1, "null-builder-refused");
+    {
+        /* amortized growth: many appends stay linear (opaque sb, so no cap peek) */
+        sb *g = sb_new(); int i;
+        for (i = 0; i < 1000; i++) if (sb_puts(g, "x")) bad = 1;
+        ok(sb_len(g) == 1000, "amortized-doubling");
+        ok(sb_cstr(g)[999] == 'x' && sb_cstr(g)[1000] == 0, "cstr-terminated");
+        sb_free(g);
+    }
+    {
+        /* sb_join: Rust slice::join / Array.join */
+        sb *j = sb_new();
+        const char *three[] = {"a", "bb", "ccc"};
+        ok(sb_join(j, three, 3, ",") == 0 && sb_len(j) == 8 && tx_eq(sb_cstr(j), "a,bb,ccc", 64), "join-three");
+        ok(sb_join(j, three, 1, ",") == 0 && sb_len(j) == 9 && tx_eq(sb_cstr(j), "a,bb,ccca", 64), "join-one-appends");
+        ok(sb_join(j, three, 0, ",") == 0 && sb_len(j) == 9, "join-zero-noop");
+        ok(sb_join(j, three, 3, 0) == 0 && tx_eq(sb_cstr(j), "a,bb,cccaabbccc", 64), "join-null-sep");
+        ok(sb_join(0, three, 3, ",") == -1, "join-null-builder-refused");
+        sb_free(j);
+    }
+    sb_free(b);
+    printf("%s\tcheck-cx-build\n", bad ? "FAIL" : "PASS");
+    printf("CX_BUILD\tfailed=%d\n", bad);
+    return bad;
+}
