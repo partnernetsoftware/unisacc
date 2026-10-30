@@ -22,9 +22,15 @@
 
 ## 每轮怎么做
 
-1. 看 `git log -6`、`mux capture 1:grk`，跑 `sh ./unisacc.com tools/ratchets.cx`。
-2. grk 停着或跑偏了，就发信封给它下一刀；有人卡住，就去疏通。棘轮超基线，找那个车道的主人。
-3. 汇报只说三件事：推进到第几项、比上一轮多了什么、卡在谁身上。没有新事实就一句话结束。
+管项目靠计数，不靠通知。
+
+1. **量**：跑 `sh ./unisacc.com tools/release-board.cx > out/board-now.txt`，和上一轮的 `out/board-last.txt` 比较各 OWNER 的 open 数；比完把 now 复制成 last。再跑 `tools/ratchets.cx`，看 `git log -6`。
+2. **追**：
+   - 谁的 open 两轮没降，就直接在它的窗口里要具体结果：哪一格、哪个提交、什么时候。不发"不用回"的知会。
+   - 谁在做任务板以外的事（比如 bdy 继续做架构），当轮叫停，并指明它该做的格。
+   - 卡住的，cc 当轮动手疏通。
+3. **干**：cc 自己也是干活的人。每轮至少推进自己名下（ri、resources、negative）的一格，并提交。
+4. **报**：只报四件事：RELEASE 行的数字及变化、关键路径推进到第几项、谁没动、卡在哪。
 
 ## 底线
 
