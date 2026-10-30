@@ -441,7 +441,7 @@ enumeration over the whole domain.
 
 ## UJS（平行 JS 产品）
 
-开箱：**浏览器 / Node / Bun** `wasm_run`；原 Python 构造已归档到 `archive/ujs-legacy-py-c/`。
+开箱：**浏览器 / Node / Bun** `wasm_run`；Python 仅在 `ujs/construct/` 做出货。
 
 ```js
 import { bootRuntime, wasm_run } from "./ujs/core/wasm_run.js";
@@ -456,7 +456,7 @@ console.log((await wasm_run("return 1+2;", {}, {})).ok);
 | 论文 B | [`research/ujs-paper-outline.md`](research/ujs-paper-outline.md) · [`research/README.md`](research/README.md) |
 | 演示 | `cd ujs && npm run demo` |
 | 验收 | `./tests/ujs.sh` · `cd ujs && npm run test:uxe:all` |
-| 本地产物 | `ujs/core/` 是已提交的产物；原生成器 `python3 -m ujs web-build` 已归档（`archive/ujs-legacy-py-c/construct/build/web.py`）。`ujs/scripts/` 里已无 Python，指纹核对与 RELEASE.txt 由 node 助手 `ujs/scripts/release-check.mjs` 完成 |
+| 本地产物 | `python3 -m ujs web-build` |
 | 发版附件 | `./ujs/scripts/release-artifacts.sh` → `dist/`（上传 GitHub Release） |
 
 与 C 线共享构造代数；**不**把 Web 并入 `unisa` 交付范围。
