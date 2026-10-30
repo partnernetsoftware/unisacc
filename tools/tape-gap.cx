@@ -1,0 +1,85 @@
+/* tools/tape-gap.cx -- which raw system calls and calling-convention stubs in a tape a target cannot lower.
+ *
+ *   sh ./unisacc.com tools/tape-gap.cx -- TAPE TARGET [ABI_TSV]
+ *
+ * Reads every `.sys OP, ...` / `.sys6 OP, ...` line and every `__ccw_N:` label of TAPE, and looks each OP up in
+ * the @abi rows of ABI_TSV (default exec/facts/lower-abi.tsv; columns target op sysno args ret gate nrreg
+ * argshape retconv winimp winapi form selected).  An op is a gap when TARGET has no row for it or its row has
+ * selected 0 (e.g. win/x86_64 poll and syscall).  A __ccw_ label is reported as a stub to look at, since its
+ * lowering is per target.  Prints
+ *   GAP<TAB>op<TAB>uses=N<TAB>first_line=L<TAB>no-row|selected-0
+ *   CCW<TAB>label<TAB>line=L
+ *   TAPE_GAP<TAB>target=T<TAB>sys_ops=N<TAB>gaps=G<TAB>ccw=C
+ * and exits 0 when G and C are 0, 1 when not, 2 on usage or I/O.  One pass over the tape and the table instead
+ * of grepping the tape and reading the table by hand (plans/osx-win-whole-o-2026-10-30.md, the win stop at
+ * hs_fx's .sys6 syscall). */
+#pragma unisa use text.text
+
+#define TG_MAXOP 512
+#define TG_CAP (1L << 30)
+
+typedef struct { char name[64]; long uses, first; } TgOp;
+static TgOp ops[TG_MAXOP];
+static int nops;
+
+static void tg_die(const char *a, const char *b) { fprintf(stderr, "tape-gap: %s%s%s\n", a, b ? ": " : "", b ? b : ""); exit(2); }
+
+static void tg_note(const char *s, long n, long line) {
+    int k;
+    if (n <= 0 || n >= 64) return;
+    for (k = 0; k < nops; k++) if (tx_same(ops[k].name, tx_len(ops[k].name, 64), s, n)) { ops[k].uses++; return; }
+    if (nops == TG_MAXOP) tg_die("too many distinct ops", 0);
+    tx_copy(ops[nops].name, 64, s, n); ops[nops].uses = 1; ops[nops].first = line; nops++;
+}
+
+/* the selected field (0 or 1) of TARGET's @abi row for OP in the table, or -1 when there is no row */
+static int tg_selected(const char *tab, long tn, const char *target, const char *op) {
+    long at = 0, tl = tx_len(target, 64), ol = tx_len(op, 64);
+    int in_abi = 0;
+    while (at < tn) {
+        long e = tx_chr(tab + at, tn - at, '\n'), ln = e < 0 ? tn - at : e;
+        const char *l = tab + at, *f[16]; long fl[16]; int k = 0; long p = 0, s = 0;
+        if (ln > 0 && l[0] == '@') in_abi = tx_prefix(l, ln, "@abi\t", 5);
+        else if (in_abi && ln > 0 && l[0] == '\t') {
+            for (p = 0; p <= ln && k < 16; p++) if (p == ln || l[p] == '\t') { f[k] = l + s; fl[k] = p - s; k++; s = p + 1; }
+            if (k == 14 && tx_same(f[1], fl[1], target, tl) && tx_same(f[2], fl[2], op, ol)) return fl[13] == 1 && f[13][0] == '1' ? 1 : 0;
+        }
+        at += ln + 1;
+    }
+    return -1;
+}
+
+int main(int argc, char **argv) {
+    size_t n, tn;
+    char *tape, *tab;
+    long at = 0, line = 1, sys = 0;
+    int gaps = 0, ccw = 0, k;
+    if (argc != 3 && argc != 4) tg_die("usage", "TAPE TARGET [ABI_TSV]");
+    tape = cx_read(argv[1], &n); if (!tape) tg_die("cannot read", argv[1]);
+    tab = cx_read(argc == 4 ? argv[3] : "exec/facts/lower-abi.tsv", &tn); if (!tab) tg_die("cannot read the abi table", argc == 4 ? argv[3] : 0);
+    while (at < (long)n) {
+        long e = tx_chr(tape + at, (long)n - at, '\n'), ln = e < 0 ? (long)n - at : e, i = 0;
+        const char *l = tape + at;
+        while (i < ln && (l[i] == ' ' || l[i] == '\t')) i++;
+        if (tx_prefix(l + i, ln - i, ".sys", 4)) {
+            long j = i + 4, s;
+            while (j < ln && l[j] >= '0' && l[j] <= '9') j++;
+            if (j < ln && (l[j] == ' ' || l[j] == '\t')) {
+                while (j < ln && (l[j] == ' ' || l[j] == '\t')) j++;
+                s = j; while (j < ln && l[j] != ',' && l[j] != ' ' && l[j] != '\t') j++;
+                tg_note(l + s, j - s, line); sys++;
+            }
+        } else if (i == 0 && tx_prefix(l, ln, "__ccw_", 6) && ln > 0 && l[ln - 1] == ':') {
+            printf("CCW\t%.*s\tline=%ld\n", (int)(ln - 1), l, line); ccw++;
+        }
+        at += ln + 1; line++;
+    }
+    for (k = 0; k < nops; k++) {
+        int sel = tg_selected(tab, (long)tn, argv[2], ops[k].name);
+        if (sel == 1) continue;
+        printf("GAP\t%s\tuses=%ld\tfirst_line=%ld\t%s\n", ops[k].name, ops[k].uses, ops[k].first, sel < 0 ? "no-row" : "selected-0");
+        gaps++;
+    }
+    printf("TAPE_GAP\ttarget=%s\tsys_ops=%ld\tgaps=%d\tccw=%d\n", argv[2], sys, gaps, ccw);
+    return gaps || ccw ? 1 : 0;
+}

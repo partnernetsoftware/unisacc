@@ -1,0 +1,39 @@
+/* Checks tools/tape-gap.cx: sh ./unisacc.com tools/check-tape-gap.cx   (from the repo root)
+   On tools/tape-gap/cases.tape (write twice, .sys6 syscall, poll, an op with no row, one __ccw_ label):
+   win/x86_64 reports syscall and poll as selected-0, nosuchop as no-row, the stub, and exits 1;
+   lnx/x86_64 reports only nosuchop and the stub; write (covered on both) is never a gap, and its two
+   uses count once as an op.  Prints PASS/FAIL lines and CHECK_TAPE_GAP<TAB>failed=N. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+
+static int failed;
+static void ck(int ok, const char *name) { if (!ok) failed++; printf("%s\ttape-gap.%s\n", ok ? "PASS" : "FAIL", name); }
+
+/* runs sh ./unisacc.com tools/tape-gap.cx -- tools/tape-gap/cases.tape TARGET; stdout into out; the exit code or -1 */
+static int gap(const char *target, char *out, long cap) {
+    char *argv[] = {"sh", "./unisacc.com", "tools/tape-gap.cx", "--", "tools/tape-gap/cases.tape", (char *)target, 0};
+    int ofd, efd, pid, ex = 0, code = 0, sig = 0; long n = 0, r; char junk[4096];
+    pid = sy_spawn_pipe(argv, 0, SY_SPAWN_STDERR_SPLIT, &ofd, &efd);
+    if (pid < 0) return -1;
+    while ((r = sy_read(ofd, out + n, cap - 1 - n)) > 0) n += r;
+    out[n] = 0;
+    while (sy_read(ofd, junk, sizeof junk) > 0) {}
+    while (sy_read(efd, junk, sizeof junk) > 0) {}
+    sy_close(ofd); sy_close(efd);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
+    return code;
+}
+static int has(const char *out, const char *s) { return tx_find(out, tx_len(out, 1 << 16), s, tx_len(s, 256)) >= 0; }
+
+int main(void) {
+    static char w[1 << 16], l[1 << 16];
+    int rw = gap("win/x86_64", w, sizeof w), rl = gap("lnx/x86_64", l, sizeof l);
+    ck(rw == 1 && has(w, "GAP\tsyscall\tuses=1\tfirst_line=3\tselected-0\n") && has(w, "GAP\tpoll\tuses=1\tfirst_line=4\tselected-0\n"), "win-syscall-poll-selected-0");
+    ck(has(w, "GAP\tnosuchop\tuses=1\tfirst_line=5\tno-row\n") && has(l, "GAP\tnosuchop\tuses=1\tfirst_line=5\tno-row\n"), "unknown-op-no-row");
+    ck(has(w, "CCW\t__ccw_0\tline=7\n") && has(l, "CCW\t__ccw_0\tline=7\n"), "ccw-stub-reported");
+    ck(!has(w, "GAP\twrite") && !has(l, "GAP\twrite") && !has(l, "GAP\tsyscall") && !has(l, "GAP\tpoll"), "covered-ops-not-gaps");
+    ck(has(w, "TAPE_GAP\ttarget=win/x86_64\tsys_ops=5\tgaps=3\tccw=1\n") && rl == 1 && has(l, "TAPE_GAP\ttarget=lnx/x86_64\tsys_ops=5\tgaps=1\tccw=1\n"), "summary-and-exit");
+    printf("CHECK_TAPE_GAP\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
