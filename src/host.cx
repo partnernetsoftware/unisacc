@@ -1,25 +1,27 @@
 #pragma unisa module host
 #pragma unisa use sys.mem
 #pragma unisa use sys.dl
-/* Host file and clock. time.h is not in the prelude (edition 2).
+#pragma unisa use sys.time
+/* Host file and clock.
    Exclusive create and nonblocking read go through sys.fs (sy_open_new,
    sy_open_read). The executable path goes through sy_self_path. Replacing
    an output asks sy_is_reg instead of lstat. Each is declared at the call:
    drive.o already contains those bodies via runcache, and a second use
    would define sy_fstat twice.
    mmap and the loader symbols are sys.mem and sys.dl.
-   hs_ns includes time.h and calls its static clock_gettime. A local extern
-   declaration was forwarded to the host; on win that pointer was wrapped
-   with __unisa_ccw_of and lowering rejected the wrapper. The header already
-   reads the monotonic clock per target (Win32 performance counter, Linux
-   syscall, macOS gettimeofday) and is not exported from this module.
+   hs_ns calls sy_mono and scales that reading to nanoseconds. time.h stays
+   in the L0 unit cx/sys/time.cx. This module does not include it: src/ is
+   not an L0 include site. A local extern clock_gettime was forwarded to the
+   host; on win that pointer was wrapped with __unisa_ccw_of. No other
+   product unit uses sys.time, so its bodies are defined once, in this object.
+   The 32-source list does not name cx/sys/time.cx; use resolves it, as it
+   does for sys.mem and sys.dl.
    core_host_panic and core_host_fetch are the execution core's host hooks.
    Drive-supplied CLI resources win, then package resources (predefines and
    \0hdr/), then cwd-relative \0inc/q/ and \0inc/a/ files.
    The package path is UNISA_CONTAINER when that is set. Otherwise it is the
    entry executable if that file carries a UNIPKG1 trailer, else unisacc.com
    beside that executable (/proc/self/exe). It does not use the working directory. */
-#include <time.h>
 
 static void hs_why(char *why, int cap, const char *msg) {
     int i;
@@ -338,9 +340,9 @@ int hs_pid(void) {
 }
 
 long long hs_ns(void) {
-    struct timespec ts;
-    if (clock_gettime(CLOCK_MONOTONIC, &ts)) return -1;
-    return (long long)ts.tv_sec * 1000000000LL + (long long)ts.tv_nsec;
+    sy_ts_t t;
+    if (sy_mono(&t)) return -1;
+    return (long long)t.sec * 1000000000LL + (long long)t.nsec;
 }
 
 void core_host_panic(const char *reason) {

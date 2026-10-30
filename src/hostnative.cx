@@ -1,7 +1,7 @@
 #pragma unisa module hostnative
 /* Entry-only host symbols for the -O2 object link.
    Not on the cx-driver-build source list. process_group stays setpgid.
-   clock and memory use the image gates. The four loader names cannot be
+   clock, utimes and memory use the image gates. The four loader names cannot be
    host FFI slots in an object file, so each call finds the symbol in the
    libc already mapped into this process. */
 #if !defined(__linux__) || (!defined(__x86_64__) && !defined(__aarch64__))
@@ -13,6 +13,27 @@ int clock_gettime(int clock,struct hn_ts *ts) {
     long result=__syscall6(113,(long)clock,(long)ts,0,0,0);
 #else
     long result=__syscall6(228,(long)clock,(long)ts,0,0,0);
+#endif
+    if(result<0){errno=(int)-result;return -1;}
+    return 0;
+}
+/* sys/time.h only forwards utimes. host.o references it: use sys.time pulls
+   sy_set_mtime, and this object link has no libc. utimensat, AT_FDCWD -100.
+   x86_64 number 280, aarch64 number 88. */
+struct hn_tv { long sec; long usec; };
+int utimes(const char *path,const struct hn_tv t[2]) {
+    long ts[4];
+    long tp;
+    long result;
+    if(t){
+        ts[0]=t[0].sec; ts[1]=t[0].usec*1000L;
+        ts[2]=t[1].sec; ts[3]=t[1].usec*1000L;
+        tp=(long)ts;
+    }else tp=0;
+#if defined(__aarch64__)
+    result=__syscall6(88,-100,(long)path,tp,0,0);
+#else
+    result=__syscall6(280,-100,(long)path,tp,0,0);
 #endif
     if(result<0){errno=(int)-result;return -1;}
     return 0;

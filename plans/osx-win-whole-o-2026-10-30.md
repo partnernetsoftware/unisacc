@@ -147,3 +147,31 @@ reject: not covered: win/x86_64 lowering
 同一只已装产品，外层 `tools/bound 55`，32 源，`-b win/x86_64 -o out/grk-win-gap/slice-win-fix2.com`。lower 退出 0，elf 退出 0。文件是 PE32+ console x86-64，1535488 字节，sha256 `ea1ceff674898bde77e9444c2884f22634f591f2e3cf4835d107c48cbadfb287`。没有 `UNIPKG1`，没有 P3。本机是 Linux，没有跑这只 PE。
 
 已装产品 `tests/runcache.cx`，目录 `out/grk-win-gap-rcache`：12/0，冷 566 ms，命中 61 ms。没有重编候选，没有安装。
+
+## 去掉 host 的 include，并验 PE 结构（2026-10-30）
+
+`src/host.cx` 的 `#include <time.h>` 不在 L0 白名单里，`tests/cxinclude.cx --check` 因此失败。`hs_ns` 改为 `#pragma unisa use sys.time`，调用 `sy_mono` 后把秒和纳秒换成纳秒。32 源清单不追加 `cx/sys/time.cx`。use 会把该模块的非 static 函数体编进 `host.o`，再把文件单列就会把 `sy_*` 定义两次。`sys.mem` 和 `sys.dl` 同样不在这份清单上。
+
+`sh ./unisacc.com tools/refactor.cx -- sites clock_gettime --tracked`：`src/host.cx` 没有调用。`src/` 只命中 `src/hostnative.cx:11`，那一行是 `clock_gettime` 自己的定义。
+
+`tests/cxinclude.cx --check`：ok。671 个模块，0 行 include。
+
+`use` 把 `sy_set_mtime` 带进 Linux 对象。`include/sys/time.h` 只把 `utimes` 声明成转发给宿主 libc。33 只对象链接没有 libc，第一次 `--link-only` 报 `undefined reference to utimes`。`src/hostnative.cx` 用 `utimensat` 补了这个符号：x86_64 号 280，aarch64 号 88，目录参数 `-100`。产品源码没有调用 `sy_set_mtime`，符号只为这次链接存在。win 和 osx 的 32 源不链 `hostnative.cx`。
+
+`tools/formats-macho-pe.cx` 增加 `--pe FILE`，走原来的 PE 判据，不放宽。入口用字节比较，不调用 `memcmp`，缓冲区留到进程退出，不加 `free`。`tests/cxraw.cx --check`：661 个文件，15843 次，基线 17243，0 超基线，18 处低于基线。没有改 `tests/cxraw.tsv`。
+
+`out/grk-win-gap/slice-win-fix2.com` 用 `--pe` 实测 12/0。四个节区的原始范围都在文件内，导入目录 26 个名字全是 `KERNEL32.dll`，load config 320 字节且 SecurityCookie 落在 `.data`，1 条 DIR64 打在 cookie 字段上，入口在可执行 `.text`。
+
+去掉 include 之后的 32 源，外层 `tools/bound 55`，`-b win/x86_64 -o out/grk-pe-sy/slice-win.com`。lower 退出 0，elf 退出 0。文件是 PE32+ console x86-64，1569280 字节，sha256 `031e8594b020de07047f336577cbcd3ef759e0d2bf44ee524945c67b6f9f5bde`。没有 `UNIPKG1`。同一套 `--pe` 判据 12/0。
+
+osx 32 源，外层 `tools/bound 55`，`-b osx/x86_64 -o out/grk-pe-osx/slice-osx.com`。退出 0。Mach-O 64-bit x86_64，1535842 字节，sha256 `0b506aa63bc1d6961aac623d6b2d1be66852ac0ab593c8f604941d2e5fe5a223`。没有 `UNIPKG1`。
+
+Linux 候选 `out/grk-pe-cand/candidate`，3013188 字节，sha256 `4167af03489fc0e85eb192fa49e511ff47c642426c5151f2d8820014ee636dca`。entry.elf 1377168 字节。P3 仍是 `out/grk-entry-build-14/pkg.bin`，sha256 `b976719eb971fceae766398fe531c0cd16c25bbffab9ef2a7ab6d8184af70fd3`。没有安装。
+
+这只候选跑 `tests/runcache.cx`，目录 `out/grk-pe-cand-rcache`：12/0，冷 526 ms，命中 41 ms。
+
+对拍目录 `out/grk-pe-cmp`。写出 22 格全是 SAME：do.c 和 fact.c 的 `-E`、`-S`、`-run` 以及六个 `-o`，再加上 fib.c 的 `-E`、`-S`、`-run` 和 `lnx/x86_64` 的 `-o`。LEFT 126。退出 2 是切片时限。前 10 格 SAME。
+
+`hs_fx` 在 Windows 上返回 -1。32 源里靠它的是替换当前进程的 `-run`：`dv_store_exec` 以及运行缓存命中后的 forward ELF 都进 `hs_forward_exec`。memfd 失败时打印匿名内存文件那句，并告诉用户改用 `-o` 再运行那个文件。`-o` 写盘不调用 `hs_fx`。没有另做 Win32 的内存执行。
+
+PE 已出、结构已验、未在 Windows 上运行。本机没有 wine，没有为这次测试 push。真机运行留给慢车道 Windows CI。

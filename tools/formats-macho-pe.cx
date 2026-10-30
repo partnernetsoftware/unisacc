@@ -2,6 +2,9 @@
  *   macho.{x86_64,arm64}.load-commands, macho.{x86_64,arm64}.codesign,
  *   pe.{x86_64,arm64}.sections, pe.{x86_64,arm64}.imports-reloc-loadconfig
  *   sh ./unisacc.com tools/formats-macho-pe.cx -- ROOT ABS_OUT
+ *   sh ./unisacc.com tools/formats-macho-pe.cx -- --pe FILE
+ * --pe runs the same PE cells on one existing file and writes them to stdout.
+ * It does not compile fixtures and it does not loosen the cells.
  * Two inline fixtures (a bare `return 7` and a data + printf program) are compiled by the installed product at -O2 for
  * osx/x86_64, osx/arm64, win/x86_64, win/arm64 (8 images). Every oracle below is written from the published layouts
  * (Mach-O loader.h / codesign.h, PE/COFF specification), never from product output:
@@ -150,8 +153,23 @@ typedef struct { const char *name, *src; } Fx;
 static const Fx fixtures[2] = { { "ret7", "int main(void){return 7;}\n" }, { "data-print", "#include <stdio.h>\nstatic int tbl[64]={1,2,3};\nstatic const char *msg=\"hello, formats\";\nint main(void){int i,s=0;for(i=0;i<64;i++){tbl[i]+=i;s+=tbl[i];}printf(\"%s %d\\n\",msg,s);return s%256;}\n" } };
 static const char *targets[4] = { "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64" }; static const char *tslug[4] = { "osx-x86_64", "osx-arm64", "win-x86_64", "win-arm64" };
 
+static int pe_file(const char *path) {
+    size_t n; unsigned char *p = (unsigned char *)cx_read(path, &n); int arm = 0;
+    if (!p) die("read");
+    res = stdout;
+    /* Byte tests, not memcmp, and the buffer stays until exit: cxraw counts memcmp and free. */
+    if (n >= 64 && p[0] == 'M' && p[1] == 'Z') {
+        unsigned long long peoff = get(p + 60, 4);
+        if (span(n, peoff, 6) && p[peoff] == 'P' && p[peoff + 1] == 'E' && p[peoff + 2] == 0 && p[peoff + 3] == 0 && get(p + peoff + 4, 2) == 0xaa64ULL) arm = 1;
+    }
+    pe_cells(p, n, arm, "file");
+    printf("SUMMARY\tpass=%d\tfail=%d\tnot_run=%d\n", npass, nfail, nnotrun);
+    return nfail || nnotrun ? 1 : 0;
+}
+
 int main(int argc, char **argv) {
-    if (argc != 3 || !realpath(argv[1], root) || argv[2][0] != '/') { fputs("usage: ROOT ABS_OUT\n", stderr); return 2; }
+    if (argc == 3 && tx_eqz(argv[1], "--pe")) return pe_file(argv[2]);
+    if (argc != 3 || !realpath(argv[1], root) || argv[2][0] != '/') { fputs("usage: ROOT ABS_OUT\n       --pe FILE\n", stderr); return 2; }
     { if (cx_fmt(outdir, sizeof outdir, "%s", argv[2])) { fprintf(stderr, "formats-macho-pe: text too long for outdir\n"); exit(2); } } if (mkdir(outdir, 0700)) die("new out dir must be absent");
     path(bound, sizeof bound, root, "tools/bound"); path(product, sizeof product, root, "unisacc.com");
     char rp[4400]; path(rp, sizeof rp, outdir, "results.tsv"); res = fopen(rp, "wbx"); if (!res) die("results");
