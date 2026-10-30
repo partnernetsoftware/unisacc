@@ -46,12 +46,11 @@
 - FOREIGN 的格：安装之后由 CI 在各宿主上实跑。
 
 grk	stream-e3,stream-elf,stream-lower,stream-e1,stream-e2,stream-e4,stream-prune,bootstrap,candidate,phase-timing,optimization,formats
-bdy	library,interfaces,properties
-cc	ri,resources,negative,hosts
+cc	ri,resources,negative,hosts,library,interfaces,properties
 
-- **grk**：先做发布链（hostnative → release-build → 安装），再做所负责域的 PRODUCT 格和 MISSING 格。
-- **bdy**：只做 library、interfaces、properties 三个域的 MISSING 格，暂停架构改进。
-- **cc**：做 ri、resources、negative 三个域的 MISSING 格；安装后负责 FOREIGN 格的 CI。
+- **grk**：先做发布链（hostnative → release-build → 安装），再做所负责域的 PRODUCT 格和 MISSING 格。libunisacc 的 us_* 库 API 在活跃区没有实现（实现随 e16028ffa1 一起归档了），这是产品缺口，也归 grk。
+- **cc**：做 ri、resources、negative、library、interfaces、properties 这几个域的 MISSING 格；安装之后负责在 CI 上跑 FOREIGN 格。
+- **bdy 不在发布板上**：主人安排它专做 cx 核心底层和上层封装，cc 不给它派发布格。
 
 ### bdy 域格的材料依赖（2026-10-30，bdy 实测）
 
