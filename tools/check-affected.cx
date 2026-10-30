@@ -1,0 +1,111 @@
+/* Checks tools/affected.cx: sh ./unisacc.com tools/check-affected.cx   (from the repo root)
+   Expected values come from reading the sources (2026-10-30):
+   - cx/sys/time.cx: tools/check-cx-sys-spawn.cx uses sys.net and cx/sys/net.cx uses time, so
+     cx-l0-sys-spawn is affected via use; tools/check-refactor.cx names "tools/refactor.cx", which uses
+     sys.time, so refactor-tool is affected via literal-use; tools/check-tape-gap.cx reaches no time.cx.
+   - tools/tape-gap.cx is named only by tools/check-tape-gap.cx (and this file): tape-gap-tool via
+     literal and no other batch but affected-tool itself.
+   - tools/refactor/strcmp-truth.tsv likewise: refactor-tool via literal, no other batch but affected-tool.
+   - cx/text/text.cx: tools/check-cx-fmt.cx uses text.text directly (cx-l0-fmt via use), and most
+     batches do (at least 100); tools/text/text.cx is the same file through the tools/text link, so it
+     gives the same summary and reports why=cx/text/text.cx.
+   - prd.md and a path that does not exist are named by no batch: batches=0, rc 0.
+   - --users cx/mem/heap.cx lists tools/check-cx-sys-spawn.cx (it uses mem.heap) and not
+     tools/check-tape-gap.cx (text.text, sys.fs, sys.proc only).
+   - --ids with --start-deadline-ms 0 --run starts nothing: both DEFERRED, rc 3; an unknown id and no
+     selection are rc 2.
+   - --run -j 2 --ids tape-gap-tool runs the real batch through tests/run-batch.cx: one BATCH_RUN line
+     with status=PASS, AFFECTED_RUN pass=1 fail=0 deferred=0, rc 0.
+   Prints PASS/FAIL lines and CHECK_AFFECTED<TAB>failed=N. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+
+#define OUTCAP (1L << 20)
+static int failed;
+static void ck(int ok, const char *name) { if (!ok) failed++; printf("%s\taffected.%s\n", ok ? "PASS" : "FAIL", name); }
+
+/* sh ./unisacc.com tools/affected.cx -- ARGS...; stdout into OUT; the exit code, or -1 */
+static int tool(char **args, char *out, long cap) {
+    char *argv[16]; int i = 0, k, ofd, efd, pid, ex = 0, code = 0, sig = 0; long n = 0, r; char junk[4096];
+    argv[i++] = "sh"; argv[i++] = "./unisacc.com"; argv[i++] = "tools/affected.cx"; argv[i++] = "--";
+    for (k = 0; args[k] && i < 15; k++) argv[i++] = args[k];
+    argv[i] = 0;
+    pid = sy_spawn_pipe(argv, 0, SY_SPAWN_STDERR_SPLIT, &ofd, &efd);
+    if (pid < 0) return -1;
+    while (n < cap - 1 && (r = sy_read(ofd, out + n, cap - 1 - n)) > 0) n += r;
+    out[n] = 0;
+    while (sy_read(ofd, junk, sizeof junk) > 0) {}
+    while (sy_read(efd, junk, sizeof junk) > 0) {}
+    sy_close(ofd); sy_close(efd);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
+    return code;
+}
+static int has(const char *out, const char *s) { return tx_find(out, tx_len(out, OUTCAP), s, tx_len(s, 512)) >= 0; }
+/* the number after KEY in OUT, or -1 */
+static long num(const char *out, const char *key) {
+    long at = tx_find(out, tx_len(out, OUTCAP), key, tx_len(key, 64)), v = 0;
+    if (at < 0) return -1;
+    at += tx_len(key, 64);
+    if (out[at] < '0' || out[at] > '9') return -1;
+    while (out[at] >= '0' && out[at] <= '9') v = v * 10 + (out[at++] - '0');
+    return v;
+}
+/* AFFECTED lines other than this check's own batch (affected-tool names the same paths in its literals) */
+static int others(const char *out) {
+    long at = 0, n = tx_len(out, OUTCAP); int c = 0;
+    while (at < n) {
+        long e = at;
+        while (e < n && out[e] != '\n') e++;
+        if (tx_prefix(out + at, e - at, "AFFECTED\t", 9) && !tx_prefix(out + at, e - at, "AFFECTED\taffected-tool\t", 23)) c++;
+        at = e + 1;
+    }
+    return c;
+}
+
+int main(void) {
+    static char o[OUTCAP], p[OUTCAP];
+    int rc, rc2;
+    {   char *a[] = {"--files", "cx/sys/time.cx", 0};
+        rc = tool(a, o, OUTCAP);
+        ck(rc == 0 && has(o, "AFFECTED\tcx-l0-sys-spawn\twhy=cx/sys/time.cx\tvia=use\n"), "time-via-net-use");
+        ck(has(o, "AFFECTED\trefactor-tool\twhy=cx/sys/time.cx\tvia=literal-use\n") && !has(o, "\ttape-gap-tool\t"), "time-literal-use-only-where-reached");
+    }
+    {   char *a[] = {"--files", "tools/tape-gap.cx", "--list-only", 0};
+        rc = tool(a, o, OUTCAP);
+        ck(rc == 0 && has(o, "AFFECTED\ttape-gap-tool\twhy=tools/tape-gap.cx\tvia=literal\n") && others(o) == 1, "tape-gap-literal");
+    }
+    {   char *a[] = {"--files", "tools/refactor/strcmp-truth.tsv", 0};
+        rc = tool(a, o, OUTCAP);
+        ck(rc == 0 && has(o, "AFFECTED\trefactor-tool\twhy=tools/refactor/strcmp-truth.tsv\tvia=literal\n") && others(o) == 1, "fixture-literal");
+    }
+    {   char *a[] = {"--files", "cx/text/text.cx", 0}, *b[] = {"--files", "tools/text/text.cx", 0};
+        rc = tool(a, o, OUTCAP); rc2 = tool(b, p, OUTCAP);
+        ck(rc == 0 && has(o, "AFFECTED\tcx-l0-fmt\twhy=cx/text/text.cx\tvia=use\n") && num(o, "\tbatches=") >= 100, "text-many-batches");
+        ck(rc2 == 0 && num(o, "\tbatches=") == num(p, "\tbatches=") && has(p, "AFFECTED\tcx-l0-fmt\twhy=cx/text/text.cx\tvia=use\n"), "link-is-one-file");
+    }
+    {   char *a[] = {"--files", "prd.md", 0}, *b[] = {"--files", "tools/no-such-affected-input.cx", 0};
+        rc = tool(a, o, OUTCAP); rc2 = tool(b, p, OUTCAP);
+        ck(rc == 0 && has(o, "AFFECTED_SUMMARY\tchanged=1\tbatches=0\t") && !has(o, "AFFECTED\t"), "unused-file-none");
+        ck(rc2 == 0 && has(p, "AFFECTED_SUMMARY\tchanged=1\tbatches=0\t"), "absent-file-none");
+    }
+    {   char *a[] = {"--users", "cx/mem/heap.cx", 0};
+        rc = tool(a, o, OUTCAP);
+        ck(rc == 0 && has(o, "USER\ttools/check-cx-sys-spawn.cx\n") && !has(o, "USER\ttools/check-tape-gap.cx\n") && num(o, "\tusers=") >= 1, "users-reverse");
+    }
+    {   char *a[] = {"--ids", "tape-gap-tool", "refactor-tool", "--run", "--start-deadline-ms", "0", 0};
+        rc = tool(a, o, OUTCAP);
+        ck(rc == 3 && has(o, "DEFERRED\ttape-gap-tool\tstart-deadline\n") && has(o, "DEFERRED\trefactor-tool\tstart-deadline\n")
+           && has(o, "AFFECTED_RUN\tpass=0\tfail=0\tdeferred=2\t") && !has(o, "BATCH_RUN"), "deadline-defers");
+    }
+    {   char *a[] = {"--ids", "no-such-batch-id", 0}, *b[] = {0};
+        rc = tool(a, o, OUTCAP); rc2 = tool(b, p, OUTCAP);
+        ck(rc == 2 && rc2 == 2, "refusals");
+    }
+    {   char *a[] = {"--run", "-j", "2", "--ids", "tape-gap-tool", 0};
+        rc = tool(a, o, OUTCAP);
+        ck(rc == 0 && has(o, "BATCH_RUN\tid=tape-gap-tool\tstatus=PASS\t") && has(o, "AFFECTED_RUN\tpass=1\tfail=0\tdeferred=0\t"), "real-run");
+    }
+    printf("CHECK_AFFECTED\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

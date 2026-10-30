@@ -1,0 +1,532 @@
+/* tools/affected.cx -- "I changed these files: which registered test batches must run again?", and run them.
+   From the repo root:
+
+     sh ./unisacc.com tools/affected.cx -- (--since REV | --files F... | --ids ID...) [--list-only | --run [-j N]]
+     sh ./unisacc.com tools/affected.cx -- --users FILE
+
+   Changed files: --since REV is `git diff --name-only REV --` (tracked files changed between REV and the
+   working tree; untracked files are not listed), --files names them (repo-relative or absolute; a file that
+   no longer exists still matches by its spelling).  --ids skips the search and names batches to run.
+   Batches: every tests/batches.tsv row with implementation IMPLEMENTED and mode SOURCE (the registry is read
+   and validated with cxlib.testplan).  Its roots are the source field, the entry field when it holds no
+   {placeholder}, and the plain path tokens of its args field.  A batch is affected by a changed file that is
+     source   one of its root sources;
+     use      in the transitive `#pragma unisa use` / `#include "..."` closure of a root (a use resolves beside
+              the using file, dots are directories, std is the prelude -- as cx/compiler/cxmod.cx does);
+     literal  named inside a string literal of a root source as a repo-relative path that exists (a leading ./
+              or / is dropped; a directory with two or more components matches every file below it);
+     literal-use  in the use closure of a .cx file named that way (a check that spawns a tool);
+     arg / arg-use  the same for a path token of the args field.
+   Files are compared by sy_realpath, so two link spellings of one file are one file.
+   Prints AFFECTED<TAB>id<TAB>why=FILE<TAB>via=KIND per batch (the strongest match, first changed file on a
+   tie) and AFFECTED_SUMMARY<TAB>changed=N<TAB>batches=M<TAB>scanned=K.  --list-only (the default) stops there.
+   --run [-j N] (N 1..8, default 1): each affected batch through tests/run-batch.cx into
+   out/affected-PID/ (its output in out/affected-PID/ID.log), at most N at once; prints each BATCH_RUN line
+   (RUN_REFUSED<TAB>id when run-batch printed none) and AFFECTED_RUN<TAB>pass=..<TAB>fail=..<TAB>deferred=..
+   <TAB>elapsed_ms=..  No batch is started after 45 s; batches still running at 54 s are killed with their
+   process groups (Linux: descendants found with pgrep -P) -- both are reported DEFERRED<TAB>id, to be run
+   again with --ids.  A batch that declares materials is DEFERRED (run-batch needs them supplied).
+   rc: 0 every run batch PASS (or nothing to run), 1 any FAIL/UNKNOWN/RUN_REFUSED, 3 only deferrals,
+   2 usage, registry or I/O error.
+   --users FILE: every tracked .cx (archive/ and symlinks skipped) whose use closure holds FILE, as
+   USER<TAB>path, then USERS_SUMMARY<TAB>file=..<TAB>users=N<TAB>scanned=K.
+   Not modelled: generated inputs, files read through a computed path, and anything run-batch adds itself
+   (unisacc.com is matched only where a root names ./unisacc.com).  Notes go to stderr as NOTE lines. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use sys.poll
+#pragma unisa use sys.posix
+#pragma unisa use mem.arena
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+#pragma unisa use cxlib.testplan
+
+#define CAP (1L << 24)
+#define MAXNODE 16384
+#define HASHN 32768
+#define MAXBATCH 2048
+#define MAXJOBS 8
+
+static int arena;
+static char root[4096];
+static long root_n;
+static void die(const char *s) { fprintf(stderr, "affected: %s\n", s); exit(2); }
+static char *keep(const char *s, long n) { char *p = ar_dup(arena, s, n); if (!p) die("out of memory"); return p; }
+static char *zkeep(const char *s) { return keep(s, tx_len(s, CAP)); }
+
+/* ---------- a growable buffer in the arena ---------- */
+typedef struct { char *p; long n, cap; } Buf;
+static void put(Buf *b, const char *s, long n) {
+    if (b->n + n + 1 > b->cap) {
+        long c = (b->n + n + 1) * 2; char *t = ar_alloc(arena, c);
+        if (!t) die("out of memory");
+        if (b->n && mm_copy(t, c, b->p, b->n)) die("buffer copy");
+        b->p = t; b->cap = c;
+    }
+    if (n && mm_copy(b->p + b->n, b->cap - b->n, s, n)) die("buffer copy");
+    b->n += n; b->p[b->n] = 0;
+}
+static void puts_(Buf *b, const char *s) { put(b, s, tx_len(s, CAP)); }
+
+/* ---------- files: one node per realpath ---------- */
+enum { V_NONE = 0, V_SOURCE, V_USE, V_LIT, V_LITUSE, V_ARG, V_ARGUSE };
+static const char *via_name[] = {"-", "source", "use", "literal", "literal-use", "arg", "arg-use"};
+typedef struct {
+    char *key;      /* realpath, or the absolute spelling when it does not resolve */
+    char *given;    /* the repo-relative spelling it was first reached by: uses resolve beside it */
+    int parsed, cx, isdir, mark, via;
+    int *use; int nuse;
+    char **tok; int ntok, tokcap;   /* path-like string-literal tokens (raw) */
+} Node;
+static Node node[MAXNODE];
+static int nnode, hslot[HASHN], epoch;
+
+static unsigned long hash(const char *s) { unsigned long h = 1469598103934665603UL; while (*s) { h ^= (unsigned char)*s++; h *= 1099511628211UL; } return h; }
+static int lookup(const char *key, const char *given, int create) {
+    unsigned long h = hash(key) & (HASHN - 1);
+    long kl = tx_len(key, 8192);
+    while (hslot[h]) {
+        if (tx_eqz(node[hslot[h] - 1].key, key)) return hslot[h] - 1;
+        h = (h + 1) & (HASHN - 1);
+    }
+    if (!create) return -1;
+    if (nnode == MAXNODE) die("too many files");
+    {   Node *N = &node[nnode];
+        N->key = keep(key, kl); N->given = zkeep(given);
+        N->cx = kl > 3 && tx_eqz(key + kl - 3, ".cx");
+        hslot[h] = ++nnode;
+        return nnode - 1;
+    }
+}
+/* REL repo-relative (or absolute): its node */
+static int path_node(const char *rel, int create) {
+    char abs[8192], real[4096]; int r; const char *given = rel;
+    if (rel[0] == '/') { if (cx_fmt(abs, sizeof abs, "%s", rel)) die("path too long"); }
+    else if (cx_fmt(abs, sizeof abs, "%s/%s", root, rel)) die("path too long");
+    if (rel[0] == '/' && tx_prefix(rel, tx_len(rel, 8192), root, root_n) && rel[root_n] == '/') given = rel + root_n + 1;
+    r = sy_realpath(abs, real, sizeof real);
+    if (r < 0 && r != -ENOENT && r != -ENOTDIR) fprintf(stderr, "NOTE\trealpath\t%s\terr=%d\n", rel, r);
+    return lookup(r >= 0 ? real : abs, given, create);
+}
+static const char *display(int ni) {
+    const char *k = node[ni].key;
+    if (tx_prefix(k, tx_len(k, 8192), root, root_n) && k[root_n] == '/') return k + root_n + 1;
+    return k;
+}
+
+static int is_pathc(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.' || c == '/' || c == '+'; }
+static void add_tok(Node *N, const char *s, long n) {
+    long i = 0; int dot = 0, slash = 0;
+    if (n >= 2 && s[0] == '.' && s[1] == '/') { s += 2; n -= 2; dot = 1; }
+    while (n > 0 && s[0] == '/') { s++; n--; }
+    while (n > 0 && s[n - 1] == '/') n--;
+    if (n < 1 || n > 1000) return;
+    for (i = 0; i < n; i++) {
+        if (s[i] == '/') { slash = 1; if (i + 1 < n && s[i + 1] == '/') return; }
+        if (s[i] == '.' && i + 1 < n && s[i + 1] == '.' && (i == 0 || s[i - 1] == '/')) return;
+    }
+    if (!slash && !dot) return;
+    if (N->ntok == N->tokcap) {
+        int c = N->tokcap ? N->tokcap * 2 : 16; char **t = ar_alloc(arena, (long)c * (long)sizeof *t);
+        if (!t) die("out of memory");
+        if (N->ntok && mm_copy(t, (long)c * (long)sizeof *t, N->tok, (long)N->ntok * (long)sizeof *t)) die("copy");
+        N->tok = t; N->tokcap = c;
+    }
+    N->tok[N->ntok++] = keep(s, n);
+}
+static void add_literal(Node *N, const char *s, long n) {
+    long i = 0, a;
+    while (i < n) {
+        while (i < n && !is_pathc((unsigned char)s[i])) i++;
+        a = i;
+        while (i < n && is_pathc((unsigned char)s[i])) i++;
+        if (i > a) add_tok(N, s + a, i - a);
+    }
+}
+static void add_dep(int ni, const char *rel) {
+    Node *N; int d, k;
+    d = path_node(rel, 1);
+    N = &node[ni];
+    if (sy_exists(node[d].key) != 1) { fprintf(stderr, "NOTE\tunresolved\t%s\tin=%s\n", rel, N->given); return; }
+    for (k = 0; k < N->nuse; k++) if (N->use[k] == d) return;
+    if (N->nuse == 64) die("more than 64 uses in one file");
+    N->use[N->nuse++] = d;
+}
+static long skip_blank(const char *b, long i, long n) { while (i < n && (b[i] == ' ' || b[i] == '\t')) i++; return i; }
+static long word(const char *b, long i, long n, const char *w) {
+    long wl = tx_len(w, 64);
+    if (i + wl <= n && tx_prefix(b + i, n - i, w, wl) && (i + wl == n || b[i + wl] == ' ' || b[i + wl] == '\t' || b[i + wl] == '"')) return i + wl;
+    return -1;
+}
+/* "#pragma unisa use NAME" or "#include \"FILE\"" at B[i] (the '#') */
+static void directive(int ni, const char *b, long i, long n) {
+    char dir[4096], rel[8192]; long dl = tx_len(node[ni].given, 4095), j, a;
+    while (dl > 0 && node[ni].given[dl - 1] != '/') dl--;
+    if (tx_copy(dir, sizeof dir, node[ni].given, dl)) die("path too long");
+    i = skip_blank(b, i + 1, n);
+    if ((j = word(b, i, n, "pragma")) >= 0) {
+        char name[256]; long k;
+        i = skip_blank(b, j, n);
+        if ((j = word(b, i, n, "unisa")) < 0) return;
+        i = skip_blank(b, j, n);
+        if ((j = word(b, i, n, "use")) < 0) return;
+        i = skip_blank(b, j, n);
+        a = i;
+        while (i < n && ((b[i] >= 'a' && b[i] <= 'z') || (b[i] >= 'A' && b[i] <= 'Z') || (b[i] >= '0' && b[i] <= '9') || b[i] == '_' || b[i] == '.')) i++;
+        if (i == a || i - a > 200) return;
+        if ((i - a == 3 && tx_prefix(b + a, 3, "std", 3)) || (i - a == 6 && tx_prefix(b + a, 6, "std.cx", 6)) || tx_prefix(b + a, i - a, "std.", 4)) return;
+        for (k = 0; k < i - a; k++) name[k] = b[a + k] == '.' ? '/' : b[a + k];   /* dots are directories */
+        name[i - a] = 0;
+        if (cx_fmt(rel, sizeof rel, "%s%s.cx", dir, name)) die("path too long");
+        add_dep(ni, rel);
+    } else if ((j = word(b, i, n, "include")) >= 0) {
+        i = skip_blank(b, j, n);
+        if (i >= n || b[i] != '"') return;
+        a = ++i;
+        while (i < n && b[i] != '"' && b[i] != '\n') i++;
+        if (i >= n || b[i] != '"' || i == a) return;
+        if (cx_fmt(rel, sizeof rel, "%s%.*s", dir, (int)(i - a), b + a)) die("path too long");
+        add_dep(ni, rel);
+    }
+}
+static void parse(int ni) {
+    size_t n0; long n, i = 0; int ls = 1; char *b;
+    node[ni].parsed = 1;
+    if (!node[ni].cx) return;
+    b = cx_read(node[ni].key, &n0);
+    if (!b) { fprintf(stderr, "NOTE\tunreadable\t%s\n", node[ni].given); return; }
+    n = (long)n0;
+    node[ni].use = ar_alloc(arena, 64 * (long)sizeof(int));
+    if (!node[ni].use) die("out of memory");
+    while (i < n) {
+        char c = b[i];
+        if (c == '\n') { ls = 1; i++; continue; }
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\f') { i++; continue; }
+        if (c == '/' && i + 1 < n && b[i + 1] == '*') {
+            long e = tx_find(b + i + 2, n - i - 2, "*/", 2);
+            i = e < 0 ? n : i + 2 + e + 2;
+            continue;
+        }
+        if (c == '/' && i + 1 < n && b[i + 1] == '/') { while (i < n && b[i] != '\n') i++; continue; }
+        if (c == '#' && ls) { directive(ni, b, i, n); ls = 0; i++; continue; }
+        ls = 0;
+        if (c == '"') {
+            long s = ++i;
+            while (i < n && b[i] != '"' && b[i] != '\n') { if (b[i] == '\\' && i + 1 < n) i++; i++; }
+            add_literal(&node[ni], b + s, i - s);
+            i++; continue;
+        }
+        if (c == '\'') {
+            i++;
+            while (i < n && b[i] != '\'' && b[i] != '\n') { if (b[i] == '\\' && i + 1 < n) i++; i++; }
+            i++; continue;
+        }
+        i++;
+    }
+}
+
+/* ---------- closure of one batch (or one file) ---------- */
+static int dirs[4096], dirvia[4096], ndirs;
+static int child_via(int v) { return v == V_SOURCE ? V_USE : v == V_LIT ? V_LITUSE : v == V_ARG ? V_ARGUSE : v; }
+static void mark(int ni, int via) {
+    Node *N = &node[ni]; int k;
+    if (N->mark == epoch && N->via <= via) return;
+    N->mark = epoch; N->via = via;
+    if (!N->parsed) parse(ni);
+    N = &node[ni];
+    for (k = 0; k < N->nuse; k++) mark(N->use[k], child_via(via));
+}
+/* a path token TOK (repo-relative) named by a root, as VIA (V_LIT or V_ARG) */
+static void named(const char *tok, int via) {
+    char abs[8192]; sy_stat_t st; int r, ni;
+    if (cx_fmt(abs, sizeof abs, "%s/%s", root, tok)) return;
+    r = sy_stat(abs, &st);
+    if (r < 0) { if (r != -ENOENT) fprintf(stderr, "NOTE\tliteral-stat\t%s\terr=%d\n", tok, r); return; }
+    ni = path_node(tok, 1);
+    if (st.kind == 'd') {
+        if (tx_chr(tok, tx_len(tok, 2048), '/') < 0) return;   /* a top-level directory names too much */
+        if (ndirs < 4096) { dirs[ndirs] = ni; dirvia[ndirs] = via; ndirs++; }
+        return;
+    }
+    if (st.kind == 'f') mark(ni, via);
+}
+static void mark_root(const char *rel) {
+    int ni = path_node(rel, 1), k;
+    mark(ni, V_SOURCE);
+    for (k = 0; k < node[ni].ntok; k++) named(node[ni].tok[k], V_LIT);
+}
+
+/* ---------- registry ---------- */
+typedef struct { char *id, *source, *entry, *args, *materials; } Batch;
+static Batch batch[MAXBATCH];
+static int nbatch;
+static void on_batch(const tp_batch_view *v, void *ctx) {
+    (void)ctx;
+    if (!tx_eqz(v->implementation, "IMPLEMENTED") || !tx_eqz(v->mode, "SOURCE")) return;
+    if (nbatch == MAXBATCH) die("too many batches");
+    batch[nbatch].id = zkeep(v->id); batch[nbatch].source = zkeep(v->source); batch[nbatch].entry = zkeep(v->entry);
+    batch[nbatch].args = zkeep(v->args); batch[nbatch].materials = zkeep(v->materials);
+    nbatch++;
+}
+static void on_cov(const tp_coverage_view *v, void *ctx) { (void)v; (void)ctx; }
+static void load_registry(void) {
+    size_t rn, cn; char why[1200]; tp_summary sum; tp_observer ob = {on_batch, on_cov, 0};
+    char *r = cx_read("tests/batches.tsv", &rn), *c = cx_read("tests/coverage.tsv", &cn);
+    if (!r || !c) die("cannot read tests/batches.tsv or tests/coverage.tsv");
+    if (tp_visit(root, r, rn, c, cn, &ob, &sum, why, sizeof why)) { fprintf(stderr, "affected: REFUSE metadata %s\n", why); exit(2); }
+}
+static void mark_batch(Batch *B) {
+    ndirs = 0; epoch++;
+    mark_root(B->source);
+    if (tx_chr(B->entry, tx_len(B->entry, 4096), '{') < 0 && !tx_eqz(B->entry, B->source)) mark_root(B->entry);
+    if (!tx_eqz(B->args, "-")) {   /* ';'-separated tokens; {placeholders} skipped */
+        const char *at = B->args;
+        while (*at) {
+            long n = 0; char tok[2048];
+            while (at[n] && at[n] != ';') n++;
+            if (n > 0 && at[0] != '{' && n < (long)sizeof tok && tx_chr(at, n, '/') >= 0 && !tx_copy(tok, sizeof tok, at, n)) named(tok, V_ARG);
+            at += n; if (*at) at++;
+        }
+    }
+}
+/* the strongest match of the changed files against the current marks: its via, *WHY the file */
+static int match(const int *changed, int nch, int *why) {
+    int best = V_NONE, k, d;
+    for (k = 0; k < nch; k++) {
+        int ci = changed[k], v = V_NONE;
+        if (node[ci].mark == epoch) v = node[ci].via;
+        for (d = 0; d < ndirs; d++) {
+            const char *dk = node[dirs[d]].key, *ck = node[ci].key; long dl = tx_len(dk, 8192);
+            if (tx_prefix(ck, tx_len(ck, 8192), dk, dl) && ck[dl] == '/' && (v == V_NONE || dirvia[d] < v)) v = dirvia[d];
+        }
+        if (v != V_NONE && (best == V_NONE || v < best)) { best = v; *why = ci; }
+    }
+    return best;
+}
+
+/* ---------- child processes ---------- */
+static int read_all(char **argv, Buf *out) {
+    int ofd, efd, pid, ex = 0, code = 0, sig = 0; char chunk[65536]; long r; Buf err = {0, 0, 0};
+    pid = sy_spawn_pipe(argv, root, SY_SPAWN_STDERR_SPLIT, &ofd, &efd);
+    if (pid < 0) return pid;
+    while ((r = sy_read(ofd, chunk, sizeof chunk)) > 0) put(out, chunk, r);
+    while ((r = sy_read(efd, chunk, sizeof chunk)) > 0) put(&err, chunk, r);
+    sy_close(ofd); sy_close(efd);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) < 0) return -EIO;
+    if (err.n) fprintf(stderr, "%s", err.p);
+    return ex ? code : 128 + sig;
+}
+static long parse_long(const char *s, long n) { long v = 0, i; if (n < 1 || n > 18) return -1; for (i = 0; i < n; i++) { if (s[i] < '0' || s[i] > '9') return -1; v = v * 10 + (s[i] - '0'); } return v; }
+
+/* every descendant of PID (pgrep -P, breadth first), then SIGKILL to each one's group and itself, then PID's */
+static void kill_tree(int pid) {
+    int all[256], n = 1, i = 0, k;
+    all[0] = pid;
+    while (i < n && n < 256) {
+        char ps[32], *gv[] = {"pgrep", "-P", ps, 0}; Buf o = {0, 0, 0}; long a = 0;
+        if (cx_fmt(ps, sizeof ps, "%d", all[i])) break;
+        if (read_all(gv, &o) < 0) { fprintf(stderr, "NOTE\tpgrep\tcannot run\n"); break; }
+        while (a < o.n && n < 256) {
+            long e = a, v;
+            while (e < o.n && o.p[e] != '\n') e++;
+            v = parse_long(o.p + a, e - a);
+            if (v > 1) all[n++] = (int)v;
+            a = e + 1;
+        }
+        i++;
+    }
+    for (k = n - 1; k >= 1; k--) { sy_killpg(all[k], 9); sy_signal(all[k], 9); }
+    sy_kill(pid);
+}
+
+typedef struct { int pid, ofd, efd, bi; Buf out, err; } Child;
+static char outparent[4400];
+static long t_main, start_deadline = 45000, hard_deadline = 54000;
+
+/* the last line of S starting with PREFIX, or 0 */
+static const char *last_line(const char *s, long n, const char *prefix, long *ln) {
+    long at = 0, pl = tx_len(prefix, 512); const char *found = 0;
+    while (at < n) {
+        long e = at;
+        while (e < n && s[e] != '\n') e++;
+        if (e - at >= pl && tx_prefix(s + at, e - at, prefix, pl)) { found = s + at; *ln = e - at; }
+        at = e + 1;
+    }
+    return found;
+}
+/* 1 PASS, 0 not */
+static int finish(Child *C, int ex, int code, int sig) {
+    char logp[4600], pre[256]; Buf lg = {0, 0, 0}; long ln = 0; const char *line; const char *id = batch[C->bi].id;
+    put(&lg, C->out.p ? C->out.p : "", C->out.n); puts_(&lg, "\n--- stderr ---\n"); put(&lg, C->err.p ? C->err.p : "", C->err.n);
+    if (cx_fmt(logp, sizeof logp, "%s/%s.log", outparent, id) || cx_write(logp, lg.p, (size_t)lg.n)) fprintf(stderr, "NOTE\tlog\tcannot write %s\n", logp);
+    if (cx_fmt(pre, sizeof pre, "BATCH_RUN\tid=%s\t", id)) die("id too long");
+    line = last_line(C->out.p ? C->out.p : "", C->out.n, pre, &ln);
+    if (line) {
+        printf("%.*s\n", (int)ln, line);
+        return tx_find(line, ln, "\tstatus=PASS\t", 13) >= 0;
+    }
+    {   const char *why = last_line(C->err.p ? C->err.p : "", C->err.n, "run-batch: ", &ln);
+        printf("RUN_REFUSED\t%s\trc=%d\tlog=%s\treason=%.*s\n", id, ex ? code : 128 + sig, logp + root_n + 1, why ? (int)ln : 1, why ? why : "-");
+    }
+    return 0;
+}
+static int run(const int *sel, int nsel, int jobs) {
+    Child ch[MAXJOBS]; int nrun = 0, next = 0, pass = 0, fail = 0, deferred = 0, k, m;
+    char runner[4400], candidate[4400];
+    long t0 = sy_now_ms();
+    if (cx_fmt(runner, sizeof runner, "%s/tests/run-batch.cx", root) || cx_fmt(candidate, sizeof candidate, "%s/unisacc.com", root)
+        || cx_fmt(outparent, sizeof outparent, "%s/out/affected-%d", root, sy_pid())) die("path too long");
+    {   char od[4400]; int r;
+        if (cx_fmt(od, sizeof od, "%s/out", root)) die("path too long");
+        r = sy_mkdir(od, 0755); if (r < 0 && r != -EEXIST) die("cannot make out/");
+        if (sy_mkdir(outparent, 0755) < 0) die("cannot make out/affected-PID");
+    }
+    printf("RUN_DIR\t%s\tjobs=%d\n", outparent + root_n + 1, jobs);
+    while (next < nsel || nrun) {
+        sy_pollfd_t fds[2 * MAXJOBS]; int who[2 * MAXJOBS], isout[2 * MAXJOBS], nf = 0;
+        long now = sy_now_ms();
+        while (nrun < jobs && next < nsel && now - t_main < start_deadline) {
+            Batch *B = &batch[sel[next]]; Child *C = &ch[nrun];
+            char *av[] = {"sh", candidate, runner, "--", root, outparent, B->id, 0};
+            if (!tx_eqz(B->materials, "-")) { printf("DEFERRED\t%s\tneeds-materials=%s\n", B->id, B->materials); deferred++; next++; continue; }
+            C->bi = sel[next]; C->out.p = 0; C->out.n = C->out.cap = 0; C->err = C->out;
+            C->pid = sy_spawn_pipe(av, root, SY_SPAWN_STDERR_SPLIT, &C->ofd, &C->efd);
+            next++;
+            if (C->pid < 0) { printf("RUN_REFUSED\t%s\tspawn=%d\n", B->id, C->pid); fail++; continue; }
+            nrun++;
+        }
+        if (next < nsel && now - t_main >= start_deadline) {
+            for (; next < nsel; next++) { printf("DEFERRED\t%s\tstart-deadline\n", batch[sel[next]].id); deferred++; }
+        }
+        if (!nrun) continue;
+        if (now - t_main >= hard_deadline) {
+            for (k = 0; k < nrun; k++) {
+                kill_tree(ch[k].pid);
+                if (ch[k].ofd >= 0) sy_close(ch[k].ofd);
+                if (ch[k].efd >= 0) sy_close(ch[k].efd);
+                printf("DEFERRED\t%s\tkilled-at-deadline\n", batch[ch[k].bi].id); deferred++;
+            }
+            nrun = 0;
+            break;
+        }
+        for (k = 0; k < nrun; k++) {
+            if (ch[k].ofd >= 0) { fds[nf].fd = ch[k].ofd; fds[nf].events = SY_POLLIN; fds[nf].revents = 0; who[nf] = k; isout[nf++] = 1; }
+            if (ch[k].efd >= 0) { fds[nf].fd = ch[k].efd; fds[nf].events = SY_POLLIN; fds[nf].revents = 0; who[nf] = k; isout[nf++] = 0; }
+        }
+        if (nf && sy_poll(fds, nf, 200) < 0) die("poll");
+        for (m = 0; m < nf; m++) {
+            int c = who[m]; char chunk[65536]; long r;
+            if (!fds[m].revents) continue;
+            r = sy_read(fds[m].fd, chunk, sizeof chunk);
+            if (r > 0) { put(isout[m] ? &ch[c].out : &ch[c].err, chunk, r); continue; }
+            if (r == -EINTR || r == -EAGAIN) continue;
+            sy_close(fds[m].fd);
+            if (isout[m]) ch[c].ofd = -1; else ch[c].efd = -1;
+        }
+        for (k = 0; k < nrun; k++) {   /* both pipes closed: reap and report */
+            int ex = 0, code = 0, sig = 0;
+            if (ch[k].ofd >= 0 || ch[k].efd >= 0) continue;
+            if (sy_wait_status(ch[k].pid, 0, &ex, &code, &sig) < 0) { ex = 1; code = 255; }
+            if (finish(&ch[k], ex, code, sig)) pass++; else fail++;
+            ch[k] = ch[nrun - 1]; nrun--; k--;
+        }
+    }
+    printf("AFFECTED_RUN\tpass=%d\tfail=%d\tdeferred=%d\telapsed_ms=%ld\n", pass, fail, deferred, sy_now_ms() - t0);
+    return fail ? 1 : deferred ? 3 : 0;
+}
+
+/* ---------- --users ---------- */
+static int users(const char *file) {
+    char *gv[] = {"git", "ls-files", "-s", "-z", "--", "*.cx", 0}; Buf list = {0, 0, 0}; long at = 0; int target, found = 0, scanned = 0;
+    char abs[8192];
+    if (file[0] == '/') { if (cx_fmt(abs, sizeof abs, "%s", file)) die("path too long"); }
+    else if (cx_fmt(abs, sizeof abs, "%s/%s", root, file)) die("path too long");
+    if (sy_exists(abs) != 1) { fprintf(stderr, "affected: --users: no file %s\n", file); return 2; }
+    target = path_node(file, 1);
+    if (read_all(gv, &list) != 0) die("git ls-files failed");
+    while (at < list.n) {   /* "MODE SHA STAGE\tPATH\0" */
+        char *e = list.p + at; long ln = tx_len(e, list.n - at), tab = tx_chr(e, ln, '\t');
+        if (tab > 0 && !tx_prefix(e, ln, "120000", 6) && !tx_prefix(e + tab + 1, ln - tab - 1, "archive/", 8)) {
+            int ni = path_node(e + tab + 1, 1);
+            scanned++; epoch++;
+            mark(ni, V_SOURCE);
+            if (ni != target && node[target].mark == epoch) { printf("USER\t%s\n", e + tab + 1); found++; }
+        }
+        at += ln + 1;
+    }
+    printf("USERS_SUMMARY\tfile=%s\tusers=%d\tscanned=%d\n", display(target), found, scanned);
+    return 0;
+}
+
+static void usage(void) {
+    fprintf(stderr, "usage: affected.cx -- (--since REV | --files F... | --ids ID...) [--list-only | --run [-j N]] | --users FILE\n");
+    exit(2);
+}
+int main(int argc, char **argv) {
+    int a = 1, mode_run = 0, jobs = 1, nch = 0, nsel = 0, k, b, src = 0;
+    static int changed[MAXNODE], sel[MAXBATCH];
+    const char *since = 0;
+    char **files = 0; int nfiles = 0;
+    t_main = sy_now_ms();
+    arena = ar_new(1L << 34);
+    if (!arena) die("cannot create the arena");
+    if (sy_is_reg("tests/batches.tsv") != 1 || sy_is_reg("tests/run-batch.cx") != 1) die("run from the repo root (tests/batches.tsv not found)");
+    if (sy_realpath(".", root, sizeof root) < 0) die("cannot resolve the root");
+    root_n = tx_len(root, sizeof root);
+    if (argc == 3 && tx_eqz(argv[1], "--users")) return users(argv[2]);
+    while (a < argc) {
+        if (tx_eqz(argv[a], "--since") && a + 1 < argc) { since = argv[a + 1]; a += 2; src++; }
+        else if (tx_eqz(argv[a], "--files") || tx_eqz(argv[a], "--ids")) {
+            int ids = tx_eqz(argv[a], "--ids");
+            files = argv + a + 1; nfiles = 0; a++;
+            while (a < argc && !tx_prefix(argv[a], tx_len(argv[a], 4096), "--", 2)) { a++; nfiles++; }
+            if (!nfiles) usage();
+            src += ids ? 100 : 1;
+        }
+        else if (tx_eqz(argv[a], "--list-only")) { mode_run = 0; a++; }
+        else if (tx_eqz(argv[a], "--run")) { mode_run = 1; a++; }
+        else if (tx_eqz(argv[a], "-j") && a + 1 < argc) { jobs = (int)parse_long(argv[a + 1], tx_len(argv[a + 1], 8)); if (jobs < 1 || jobs > MAXJOBS) die("-j N: 1..8"); a += 2; }
+        else if (tx_eqz(argv[a], "--start-deadline-ms") && a + 1 < argc) {   /* test hook: start no batch after N ms */
+            start_deadline = parse_long(argv[a + 1], tx_len(argv[a + 1], 8));
+            if (start_deadline < 0 || start_deadline > 45000) die("--start-deadline-ms 0..45000");
+            a += 2;
+        }
+        else if (tx_eqz(argv[a], "--hard-deadline-ms") && a + 1 < argc) {   /* test hook: kill what still runs after N ms */
+            hard_deadline = parse_long(argv[a + 1], tx_len(argv[a + 1], 8));
+            if (hard_deadline < 0 || hard_deadline > 54000) die("--hard-deadline-ms 0..54000");
+            a += 2;
+        }
+        else usage();
+    }
+    if (src != 1 && src != 100) usage();
+    load_registry();
+    if (src == 100) {   /* --ids: run (or list) exactly these */
+        for (k = 0; k < nfiles; k++) {
+            for (b = 0; b < nbatch && !tx_eqz(batch[b].id, files[k]); b++) {}
+            if (b == nbatch) { fprintf(stderr, "affected: REFUSE id %s is not an IMPLEMENTED SOURCE batch\n", files[k]); return 2; }
+            sel[nsel++] = b;
+            printf("SELECTED\t%s\n", batch[b].id);
+        }
+        return mode_run ? run(sel, nsel, jobs) : 0;
+    }
+    if (since) {
+        char *gv[] = {"git", "diff", "--name-only", "-z", (char *)since, "--", 0}; Buf o = {0, 0, 0}; long at = 0;
+        if (read_all(gv, &o) != 0) die("git diff failed");
+        while (at < o.n) {
+            long ln = tx_len(o.p + at, o.n - at);
+            if (ln > 0) { if (nch == MAXNODE) die("too many changed files"); changed[nch++] = path_node(o.p + at, 1); }
+            at += ln + 1;
+        }
+    } else for (k = 0; k < nfiles; k++) changed[nch++] = path_node(files[k], 1);
+    for (b = 0; b < nbatch; b++) {
+        int why = -1, v;
+        mark_batch(&batch[b]);
+        v = match(changed, nch, &why);
+        if (v == V_NONE) continue;
+        printf("AFFECTED\t%s\twhy=%s\tvia=%s\n", batch[b].id, display(why), via_name[v]);
+        sel[nsel++] = b;
+    }
+    printf("AFFECTED_SUMMARY\tchanged=%d\tbatches=%d\tscanned=%d\n", nch, nsel, nbatch);
+    return mode_run ? run(sel, nsel, jobs) : 0;
+}
