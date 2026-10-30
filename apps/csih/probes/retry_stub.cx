@@ -1,0 +1,193 @@
+#pragma unisa module retry_stub
+/*
+ * retry_stub.cx — scripted chat/completions stand-in for the retry probe.
+ * Lower: libc/posix includes OK.
+ *
+ * rs_stub_start(port, script, log): the Nth POST gets the Nth status of the
+ * comma list SCRIPT ("503,200"); past the end every POST gets 200. A 200
+ * body has the DeepSeek shape and an answer (or {"go":"stop"} for the
+ * round-end question). Each served status is appended to LOG, one per line,
+ * so the probe counts what csih really sent. The child exits after 40s.
+ */
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <signal.h>
+#include <sys/socket.h>
+#include <sys/wait.h>
+#include <time.h>
+
+#define RS_REQ 262144
+
+long rs_now_ms(void);
+
+static int rs_status_at(const char *script, int n) {
+    const char *p = script;
+    int i = 0;
+    while (p && *p) {
+        if (i == n) return atoi(p);
+        p = strchr(p, ',');
+        if (p) p++;
+        i++;
+    }
+    return 200;
+}
+
+static void rs_write_all(int fd, const char *b, size_t n) {
+    while (n) {
+        ssize_t k = write(fd, b, n);
+        if (k <= 0) return;
+        b += k; n -= (size_t)k;
+    }
+}
+
+static void rs_serve_one(int c, const char *script, int n, const char *log) {
+    static char req[RS_REQ];
+    char head[256], body[512];
+    size_t have = 0, want = 0, hdr_end = 0;
+    int got_hdr = 0, status, fd;
+    ssize_t k;
+    for (;;) {
+        if (have + 1 >= RS_REQ) break;
+        k = read(c, req + have, RS_REQ - 1 - have);
+        if (k <= 0) break;
+        have += (size_t)k;
+        req[have] = 0;
+        if (!got_hdr) {
+            char *e = strstr(req, "\r\n\r\n"), *cl;
+            if (e) {
+                got_hdr = 1;
+                hdr_end = (size_t)(e - req) + 4;
+                cl = strstr(req, "Content-Length:");
+                if (!cl) cl = strstr(req, "content-length:");
+                if (cl) want = (size_t)strtoul(cl + 15, NULL, 10);
+            }
+        }
+        if (got_hdr && have >= hdr_end + want) break;
+    }
+    status = rs_status_at(script, n);
+    if (status == 200) {
+        const char *content = strstr(req, "Decide only: continue") ? "{\\\"go\\\":\\\"stop\\\"}"
+                                                                   : "{\\\"act\\\":\\\"answer\\\",\\\"text\\\":\\\"完成了\\\"}";
+        snprintf(body, sizeof body,
+                 "{\"id\":\"stub\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"%s\"}}],"
+                 "\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12}}", content);
+    } else {
+        snprintf(body, sizeof body, "{\"error\":{\"message\":\"injected %d\"}}", status);
+    }
+    snprintf(head, sizeof head,
+             "HTTP/1.1 %d X\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
+             status, (int)strlen(body));
+    fd = open(log, O_WRONLY | O_CREAT | O_APPEND, 0600);
+    if (fd >= 0) { char line[48]; snprintf(line, sizeof line, "%d %ld\n", status, rs_now_ms()); rs_write_all(fd, line, strlen(line)); close(fd); }
+    rs_write_all(c, head, strlen(head));
+    rs_write_all(c, body, strlen(body));
+}
+
+/* Child pid, or -1. The socket listens before the fork, so no start race. */
+int rs_stub_start(int port, const char *script, const char *log) {
+    struct sockaddr_in a;
+    int s, one = 1;
+    pid_t pid;
+    s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) return -1;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_port = htons((unsigned short)port);
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(s, (struct sockaddr *)&a, sizeof a) != 0 || listen(s, 8) != 0) { close(s); return -1; }
+    pid = fork();
+    if (pid < 0) { close(s); return -1; }
+    if (pid == 0) {
+        time_t end = time(NULL) + 40;
+        int n = 0;
+        while (time(NULL) < end) {
+            struct pollfd p;
+            int c;
+            p.fd = s; p.events = POLLIN; p.revents = 0;
+            if (poll(&p, 1, 500) <= 0) continue;
+            c = accept(s, NULL, NULL);
+            if (c < 0) continue;
+            rs_serve_one(c, script, n++, log);
+            close(c);
+        }
+        _exit(0);
+    }
+    close(s);
+    return (int)pid;
+}
+
+void rs_stop(int pid) {
+    if (pid > 0) { kill(pid, SIGKILL); waitpid(pid, NULL, 0); }
+}
+
+void rs_sleep_ms(int ms) {
+    poll(NULL, 0, ms);
+}
+
+long rs_now_ms(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+
+int rs_pid(void) {
+    return (int)getpid();
+}
+
+/* argv[0] via PATH; stdout+stderr into OUT (NUL-terminated, may be NULL). Exit code, or -1. */
+int rs_run(char **argv, char *out, int cap) {
+    int p[2], st;
+    size_t off = 0;
+    pid_t pid;
+    if (pipe(p) != 0) return -1;
+    pid = fork();
+    if (pid < 0) { close(p[0]); close(p[1]); return -1; }
+    if (pid == 0) {
+        dup2(p[1], 1); dup2(p[1], 2);
+        close(p[0]); close(p[1]);
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+    close(p[1]);
+    for (;;) {
+        char tmp[4096];
+        ssize_t k = read(p[0], tmp, sizeof tmp);
+        if (k <= 0) break;
+        if (out && cap > 1) {
+            size_t take = (size_t)k;
+            if (off + take > (size_t)cap - 1) take = (size_t)cap - 1 - off;
+            memcpy(out + off, tmp, take);
+            off += take;
+        }
+    }
+    if (out && cap > 0) out[off] = 0;
+    close(p[0]);
+    if (waitpid(pid, &st, 0) < 0) return -1;
+    return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+}
+
+/* Served statuses in LOG, comma-joined into OUT; the count. AT[i] is when
+ * the i-th request was served (monotonic ms), up to NAT of them. */
+int rs_posts(const char *log, char *out, int cap, long *at, int nat) {
+    char buf[1024], *p, *nl;
+    int fd = open(log, O_RDONLY), n = 0, j = 0;
+    ssize_t k;
+    if (cap > 0) out[0] = 0;
+    if (fd < 0) return 0;
+    k = read(fd, buf, sizeof buf - 1);
+    close(fd);
+    if (k <= 0) return 0;
+    buf[k] = 0;
+    for (p = buf; (nl = strchr(p, '\n')) != NULL; p = nl + 1) {
+        char *sp = strchr(p, ' ');
+        if (!sp || sp > nl) break;
+        if (n < nat) at[n] = atol(sp + 1);
+        j += snprintf(out + j, j < cap ? (size_t)(cap - j) : 0, "%s%.*s", n ? "," : "", (int)(sp - p), p);
+        if (j >= cap) j = cap - 1;
+        n++;
+    }
+    return n;
+}

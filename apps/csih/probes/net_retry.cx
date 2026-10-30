@@ -1,0 +1,205 @@
+#pragma unisa use retry_stub
+/*
+ * net_retry.cx — the model-request retry path, measured end to end.
+ *   cd apps/csih && sh ../../unisacc.com probes/net_retry.cx
+ *
+ * Five installed-csih TUIs (CSIH_BIN, else out/csih-e2e-bin/csih) run in a
+ * private tmux server, each against its own scripted local stub
+ * (retry_stub.cx) through CSIH_ENDPOINT, with HOME in a scratch directory.
+ * The stub logs every status it served; that log, not the screen, is the
+ * request count. Cases:
+ *   503-then-200   503,200        one retry, then the answer
+ *   429-then-200   429,200        same for 429
+ *   401-no-retry   401            no retry, the 401 is the error
+ *   503x3-gives-up 503,503,503    two retries, then the 503 is the error
+ *   esc-cancels-wait 503,503,503  Esc during the 5s second back-off:
+ *                                 cancelled, the third request never goes out
+ * posts= counts the requests up to and including the first 200 (or all of
+ * them when none succeeded); total= is everything the stub served.
+ */
+
+#define NCASE 5
+
+typedef struct {
+    const char *name, *script;
+    int want_posts;       /* chain length */
+    int want_total;       /* exact total served, 0 = at least want_posts */
+    const char *need1, *need2;   /* both must be on the screen */
+    int port, stub, esc_sent, done, pass;
+    long t_mark, t_cancel, at[8];
+    char home[600], log[600], sess[32], pane[16384], served[256];
+} rcase;
+
+static char g_sock[64];
+
+static int tmux(char **args, int n, char *out, int cap) {
+    char *av[24];
+    int i, k = 0;
+    av[k++] = (char *)"tmux";
+    av[k++] = (char *)"-L";
+    av[k++] = g_sock;
+    for (i = 0; i < n && k < 23; i++) av[k++] = args[i];
+    av[k] = NULL;
+    return rs_run(av, out, cap);
+}
+
+static void capture(rcase *c) {
+    char *a[] = { "capture-pane", "-p", "-J", "-S", "-200", "-t", c->sess };
+    if (tmux(a, 7, c->pane, sizeof c->pane) != 0) c->pane[0] = 0;
+}
+
+static void keys(rcase *c, const char *k, int literal) {
+    char *a[] = { "send-keys", "-t", c->sess, literal ? "-l" : "--", (char *)k };
+    tmux(a, 5, NULL, 0);
+}
+
+static int chain(const char *served, int *total) {
+    int n = 0, t = 0;
+    const char *p = served;
+    int first200 = 0;
+    while (*p) {
+        t++;
+        if (!first200) n++;
+        if (atoi(p) == 200) first200 = 1;
+        p = strchr(p, ',');
+        if (!p) break;
+        p++;
+    }
+    *total = t;
+    return n;
+}
+
+int main(void) {
+    static rcase cs[NCASE] = {
+        { "503-then-200",     "503,200",     2, 0, "HTTP 503，2 秒后重试（第 1 次）", "完成了" },
+        { "429-then-200",     "429,200",     2, 0, "HTTP 429，2 秒后重试（第 1 次）", "完成了" },
+        { "401-no-retry",     "401",         1, 1, "401", "injected 401" },
+        { "503x3-gives-up",   "503,503,503", 3, 3, "5 秒后重试（第 2 次）", "injected 503" },
+        { "esc-cancels-wait", "503,503,503", 2, 2, "5 秒后重试（第 2 次）", "已取消" },
+    };
+    const char *bin = getenv("CSIH_BIN");
+    const char *tmp = getenv("TMPDIR");
+    char root[512], cwd[512], absbin[1024], endpoint[128];
+    int i, pid = rs_pid(), passed = 0;
+    long t0 = rs_now_ms(), deadline;
+
+    if (!getcwd(cwd, sizeof cwd)) return 2;
+    if (!bin || !bin[0]) { snprintf(absbin, sizeof absbin, "%s/../../out/csih-e2e-bin/csih", cwd); bin = absbin; }
+    if (access(bin, X_OK) != 0) { printf("net_retry: no csih binary at %s (csih.sh prepare)\n", bin); return 2; }
+    snprintf(root, sizeof root, "%s/csih-netretry-%d", tmp && tmp[0] ? tmp : "/tmp", pid);
+    if (mkdir(root, 0700) != 0) { printf("net_retry: mkdir %s failed\n", root); return 2; }
+    snprintf(g_sock, sizeof g_sock, "csih-netretry-%d", pid);
+
+    for (i = 0; i < NCASE; i++) {
+        rcase *c = &cs[i];
+        char *a[24];
+        int k = 0;
+        c->port = 20000 + (pid % 4000) * 5 + i;
+        snprintf(c->home, sizeof c->home, "%s/h%d", root, i);
+        snprintf(c->log, sizeof c->log, "%s/posts%d.txt", root, i);
+        snprintf(c->sess, sizeof c->sess, "c%d", i);
+        mkdir(c->home, 0700);
+        c->stub = rs_stub_start(c->port, c->script, c->log);
+        if (c->stub < 0) { printf("FAIL %s: stub cannot listen on %d\n", c->name, c->port); c->done = 1; continue; }
+        snprintf(endpoint, sizeof endpoint, "CSIH_ENDPOINT=http://127.0.0.1:%d/v1/chat/completions", c->port);
+        {
+            static char envs[NCASE][4][700];
+            snprintf(envs[i][0], 700, "HOME=%s", c->home);
+            snprintf(envs[i][1], 700, "%s", endpoint);
+            snprintf(envs[i][2], 700, "CSIH_CWD=%s", c->home);
+            a[k++] = "new-session"; a[k++] = "-d"; a[k++] = "-s"; a[k++] = c->sess;
+            a[k++] = "-x"; a[k++] = "160"; a[k++] = "-y"; a[k++] = "50"; a[k++] = "-c"; a[k++] = c->home;
+            a[k++] = "env"; a[k++] = envs[i][0]; a[k++] = envs[i][1]; a[k++] = envs[i][2];
+            a[k++] = "CSIH_MODEL=stub-model"; a[k++] = "CSIH_BELL=0"; a[k++] = (char *)bin; a[k++] = "agent";
+        }
+        if (tmux(a, k, NULL, 0) != 0) { printf("FAIL %s: tmux new-session\n", c->name); c->done = 1; }
+    }
+
+    /* Ready when the footer is drawn, then send one prompt each. */
+    for (i = 0; i < NCASE; i++) {
+        rcase *c = &cs[i];
+        long until = rs_now_ms() + 5000;
+        if (c->done) continue;
+        for (;;) {
+            capture(c);
+            if (strstr(c->pane, "Enter 发送")) break;
+            if (rs_now_ms() > until) { printf("FAIL %s: TUI not ready\n", c->name); c->done = 1; break; }
+            rs_sleep_ms(100);
+        }
+        if (c->done) continue;
+        keys(c, "hi", 1);
+        keys(c, "Enter", 0);
+    }
+
+    deadline = rs_now_ms() + 25000;
+    for (;;) {
+        int open = 0;
+        for (i = 0; i < NCASE; i++) {
+            rcase *c = &cs[i];
+            int n, total;
+            if (c->done) continue;
+            open++;
+            n = rs_posts(c->log, c->served, sizeof c->served, c->at, 8);
+            capture(c);
+            if (!strcmp(c->name, "esc-cancels-wait")) {
+                /* second back-off is 5s: press Esc 800ms in, then outwait the rest */
+                if (!c->esc_sent && n == 2) {
+                    if (!c->t_mark) c->t_mark = rs_now_ms();
+                    else if (rs_now_ms() - c->t_mark >= 800) { keys(c, "Escape", 0); c->esc_sent = 1; c->t_mark = rs_now_ms(); }
+                } else if (c->esc_sent) {
+                    if (!c->t_cancel && strstr(c->pane, "已取消")) c->t_cancel = rs_now_ms();
+                    if (rs_now_ms() - c->t_mark >= 6000) c->done = 1;
+                }
+            } else {
+                /* settle 2.5s after the last expected request */
+                if (n >= c->want_posts) {
+                    if (!c->t_mark) c->t_mark = rs_now_ms();
+                    else if (rs_now_ms() - c->t_mark >= 2500) c->done = 1;
+                }
+            }
+            if (c->done) {
+                n = chain(c->served, &total);
+                c->pass = n == c->want_posts && (!c->want_total || total == c->want_total)
+                          && strstr(c->pane, c->need1) && strstr(c->pane, c->need2)
+                          && (c->want_total || !strstr(c->pane, "model call failed"));
+                /* the back-offs really waited: 2s before the 2nd request, 5s before the 3rd */
+                if (total >= 2 && c->at[1] - c->at[0] < 1800) c->pass = 0;
+                if (total >= 3 && c->at[2] - c->at[1] < 4500) c->pass = 0;
+                /* Esc ends the wait at once, not when the back-off runs out */
+                if (!strcmp(c->name, "esc-cancels-wait"))
+                    c->pass = c->pass && c->esc_sent && c->t_cancel && c->t_cancel - c->t_mark < 1500;
+                printf("%s %s posts=%d total=%d served=%s gaps_ms=%ld,%ld",
+                       c->pass ? "PASS" : "FAIL", c->name, n, total, c->served,
+                       total >= 2 ? c->at[1] - c->at[0] : 0L, total >= 3 ? c->at[2] - c->at[1] : 0L);
+                if (c->esc_sent) printf(" esc_to_cancel_ms=%ld", c->t_cancel ? c->t_cancel - c->t_mark : -1L);
+                printf("\n");
+                if (!c->pass) {
+                    /* the last screen lines, for the reader */
+                    const char *p = c->pane + strlen(c->pane);
+                    int lines = 0;
+                    while (p > c->pane && lines < 14) { p--; if (*p == '\n') lines++; }
+                    printf("  screen tail:\n%s\n", p);
+                }
+                passed += c->pass;
+            }
+        }
+        if (!open) break;
+        if (rs_now_ms() > deadline) {
+            for (i = 0; i < NCASE; i++) if (!cs[i].done) {
+                rs_posts(cs[i].log, cs[i].served, sizeof cs[i].served, cs[i].at, 8);
+                printf("FAIL %s: timed out, served=%s\n", cs[i].name, cs[i].served);
+            }
+            break;
+        }
+        rs_sleep_ms(100);
+    }
+
+    {
+        char *a[] = { "kill-server" };
+        tmux(a, 1, NULL, 0);
+    }
+    for (i = 0; i < NCASE; i++) rs_stop(cs[i].stub);
+    if (cx_rmtree(root) != 0) printf("net_retry: scratch %s left behind\n", root);
+    printf("net_retry: %d/%d PASS (%ld ms)\n", passed, NCASE, rs_now_ms() - t0);
+    return passed == NCASE ? 0 : 1;
+}

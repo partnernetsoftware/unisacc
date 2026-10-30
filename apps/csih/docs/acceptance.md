@@ -55,6 +55,7 @@ CSIH_BIN=../../out/csih-e2e-bin/csih UNISACC=../../unisacc.com \
 | /context、/compact、/retry、Tab 补全命令 | `/context reports…`、`/compact keeps…`、`/retry sends…`、`tab completes slash commands` | compact 后只剩 1 条记录，模型仍记得代号 |
 | 自定义斜杠命令 .csih/commands/名字.md | `custom /command expands $ARGS from ~/.csih/commands` | `/lines four.txt` 展开并执行 |
 | /copy、长回合响铃 | `/copy refuses…`、`bell only on a tty…` | 缓冲区内容原样；后台窗口 bell=1 |
+| 模型请求重试：503/429 退避 2s/5s 后重发，401 不重试，最多 2 次，等待中 Esc 取消 | agent_cli：`connection errors, 429 and 5xx are retried`；shell_cli：`shell_poll2 with no fds sleeps its timeout`；`probes/net_retry.cx` 故障注入 5/5 | 桩记录间隔 2.78s/5.81s，Esc 后 111ms 已取消 |
 | 危险命令门 + /allow 一次 | `dangerous exec is blocked until /allow`、`/allow lets exactly one through` | 拦截 → 说明 → /allow → 执行 |
 | 证据引用：quote 定位、0,0 整段、格式错误给出规则 | agent_cli：`observation_refs accept optional quote…` | write→read→sh 6/6 通过 |
 | 项目状态行 + 生成器 | `project status file shows up to 3 rows with age` | `tools/status.cx` 显示 108/142，`find` 复核一致 |
