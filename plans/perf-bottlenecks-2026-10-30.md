@@ -109,13 +109,21 @@
 - **建议（待实测）：** 执行热循环已由汇编核心承担，驱动层 CX 代码的 `-O2` 运行收益变小了。不在热路径上的对象改用 `-O0`/`-O1` 构造，可以省下 e4 的大头。每次运行都会走的 inflate、模型装载等，保留 `-O2`。按对象分别实测运行时间后再定。
   - 测试架初测（out/b2/k，汇编核心，极小输入，取 3 次最好）：驱动、包解析和模型解码代码用 `-O0` 编时，e3 模型那次运行 126 ms，`-O2` 时 87 ms；lower 那次 85 ms 对 57 ms。解码密集的代码 `-O0` 慢约 45%，所以 codec、model_decode、package_decode、packmodel、executor 要保留 `-O2`。
   - e4 的大头在只走一次的驱动对象：driveface 5.4 s、driveroute 1.7 s、drive 1.4 s、host 1.3 s、cxmod 1.2 s、tapegate 1.1 s。这些对象改用 `-O0`/`-O1` 后，每次运行要多花多少，需要构造一只候选、做同候选的冷热 `-run` 分相对照后再定。
+- **实测（2026-10-30，同一份 `tools/entry-build.cx`，已装产品，P3 用 build-14 的 pkg.bin）：** 默认全是 `-O2`。`--o1-drivers` 才把 `drive.o`、`host.o`、`driveface.o`、`driveroute.o`、`cxmod.o`、`tapegate.o` 编成 `-O1`，其余保持 `-O2`。两只候选都由这份源分三批跑完（6 只驱动、其余 27 只、链接）。每批重新 `-run` 同一份源，开工前 `sha256sum -c` 通过。`entry-build.cx` 的 sha256 是 `f7231608fb6d2f0dc5fef01e00dc9aa84ab246be915e5ad259fe56ecae0e98a3`。33 个源的 sha256 在对应的代码提交说明里。这不是一次 `entry-build` 进程的墙钟。对象墙钟和链接墙钟是回执里的 `ns`。e4/elf 是该对象 stderr 里 `RR_TIME inference` 的较大值。早先直接调用编译器、并且在分批期间改过 `entry-build.cx` 的那一轮不拿来对比。
+  - 33 只对象的墙钟 55558 ms → 45509 ms。链接 5890 ms → 7259 ms。对象加链接 61448 ms → 52768 ms。外层三批相加（含每批 `-run` 这份入口）73650 ms → 65045 ms。
+  - 这 6 只的墙钟 32557 ms → 22634 ms。33 只的 e4 合计 20205 ms → 7327 ms，elf 合计 8518 ms → 10766 ms。`-O1` 少做优化，对象变大，elf 和链接变长，净构造仍少 8.7 s。另外 27 只对象两边逐字节相同。
+  - 6 只各自的墙钟 / e4 / elf（毫秒，默认 `-O2` → `--o1-drivers`）：driveface 11536/5400/2236 → 7311/393/2857；driveroute 4713/1928/822 → 3448/197/1111；drive 7797/3148/1299 → 5607/273/1869；host 3091/1203/474 → 2323/124/750；cxmod 2664/1226/475 → 1867/110/713；tapegate 2757/1104/504 → 2078/111/721。
+  - 全 `-O2` 候选 `out/grk-opt2-o2/candidate`，2717972 字节，sha256 `2d59f550b6cb142147fd6f0a5f1b62354e1e2759736ad158494bf26322018e36`。`tests/runcache.cx` 12/0，`TIMING cold_ms=496 hit_ms=41`。`tools/dev-run.cx -run` 冷跑 6126 ms，退出 2。
+  - 混合候选 `out/grk-opt2-o1/candidate`，2959636 字节，sha256 `e477a4c70be28c11b86f9fce129fae2acf4e6c6813aa7d8436a8881d75160970`。`tests/runcache.cx` 12/0，`TIMING cold_ms=515 hit_ms=41`。`tools/dev-run.cx -run` 冷跑 6112 ms，退出 2。冷跑和命中都没有变快。
+  - 同一份 `out/grk-opt-cmp/main.c`，两边 `-run -- z` 的 stdout 和 stderr 逐字节相同，都退出 0，stdout 是 `opt-cmp z`。
+  - `-O0` 没有再试。这 6 只的 e4 已经降到 1.2 s，再降优化级别主要会把 elf 和链接再拉长。
 
 ## 三、建议顺序
 
 1. B1（单项最大，`.cx` 冷编译可望从数秒降到数百毫秒级）：先写规则方案与私有包对拍，再走慢车道构造。
 2. B3（与 B1 正交、改动在运行时一层）：模型解码缓存，带身份核对。
 3. B2：等主人定执行器路线；在此之前不动热循环。
-4. B4/B5 随前三项自然下降，再复测。
+4. B5 已测：六个驱动对象加 `--o1-drivers`，对象加链接 61.4 s → 52.8 s。B4 仍随前三项再复测。
 
 复现：参考执行器回放工具在仓外 `/tmp/claude-1001/w/`（`archive/reference-c/exec/c/run.c` 加 SWAP 计数，宿主 GCC 仅作测量，不作产品证据）。
 
