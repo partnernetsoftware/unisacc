@@ -52,7 +52,7 @@ sh ./unisacc.com tools/csih-ape.cx -- smoke
   - 目标机第一次运行时，用 `gzip -dc` 解到 `~/.cache/csih/csih-<key>`，以后直接用缓存。
   - 压缩器单独检查：`sh ./unisacc.com tools/check-cx-deflate.cx`。
   - ape-pack 不带 `--deflate` 时，输出和原来逐字节相同。
-- **版本**：只有一个来源，就是 `apps/csih/tui.cx` 里的 `CSIH_VERSION`，现在是 0.1.3（0.1.0 → 0.1.1 见 PRD 第六十七批；0.1.1 → 0.1.2 见第六十八批，新增 `-p`、编辑后保留文件权限；0.1.3 给 `-p` 加了 `--perm`、`--allow`）。
+- **版本**：只有一个来源，就是 `apps/csih/tui.cx` 里的 `CSIH_VERSION`，现在是 0.1.3（0.1.0 → 0.1.1 见 PRD 第六十七批；0.1.1 → 0.1.2 见第六十八批，新增 `-p`、编辑后保留文件权限；0.1.3 给 `-p` 加了 `--perm`、`--allow`；0.1.4 起 `/undo` 也能撤销 exec 改过、且命令里点名的已有文件，macOS 上信号会真正注册（写好了，未实测），启动器在拿不到可用的用户缓存目录时改用私有临时目录）。
   - pack 从源码读出它，写进 PE 的 VERSIONINFO 和清单的 `version` 行。
   - verify 会拿清单里的版本和源码对照。
   - `csih -v`、`--version`、`version` 打印同一行。
@@ -66,7 +66,7 @@ sh ./unisacc.com tools/csih-ape.cx -- smoke
 
 ```
 sh apps/csih/csih.com            # 不带参数即 agent（与 csih.sh 相同；d8eafebcee 之前直接跑会只打印用法）
-sh apps/csih/csih.com -v         # csih 0.1.3
+sh apps/csih/csih.com -v         # csih 0.1.4
 sh apps/csih/csih.com -p "修好 sum.sh 并运行验证"   # 跑一轮就退出（给脚本和 CI 用，见下）
 echo "提示词" | sh apps/csih/csih.com -p             # 不带参数时，提示词从 stdin 读
 sh apps/csih/csih.com selftest
@@ -103,14 +103,15 @@ csih.com 是自包含的二进制，不需要 `apps/csih` 源码树，也不读 
   - 实测：树里 pack 写出的是 0490c63017；install 之后只有这一条；verify 按快照模式 10/10 通过。
 - 快照里每片都是冷编译，实测 55–58 秒，紧贴 60 秒上限。
 
-## 启动器的两个已知问题（ape-pack 生成，未修）
+## 启动器的缓存目录（fdb4ae5b19 已修，主人授权改 ujs/）
 
-csih.com 开头那段 shell 由 `ujs/product/ape-pack.cx` 生成，unisacc.com、gcc_cx.com 用的也是这一段。ujs/ 是独立子项目，本车道不改，问题记在这里，交主人裁定。
+csih.com 开头那段 shell 由 `ujs/product/ape-pack.cx` 生成，unisacc.com、gcc_cx.com 用的也是这一段。
 
-- **退到 /tmp 时会执行别人放的文件**：HOME 为空，或 `mkdir -p` 失败时，缓存目录退到 `${TMPDIR:-/tmp}`。脚本只要发现 `$d/csih-<k>` 存在且可执行，就直接 exec，不检查属主，也不校验内容。共享的 /tmp 里，别的用户可以先放一个同名文件。
-  - 平时 HOME 有值，走不到这条路；没有 HOME 的 cron、systemd 服务会走到。
-  - 建议的改法：退路改成 `mkdir -m 700` 建一个按 uid 区分的私有目录，并检查它属于自己（`[ -O ]`）、不是软链；或者 exec 之前核对缓存文件的摘要。
-- **缓存目录存在但不可写时直接失败**：`~/.cache` 存在但不可写时，`mkdir -p` 照样成功，接着解压失败，`exit 1`，不会退到别的目录。建议同时检查 `[ -w "$d" ]`。
+- 原来：HOME 为空或 `mkdir -p` 失败时，退回共享的 `${TMPDIR:-/tmp}`。只要那里已有可执行的 `csih-<k>` 就直接运行，别的用户可以预先放一个同名文件。另外 `~/.cache` 存在但不可写时，解压失败，直接退出。
+- 现在：
+  - 能建出来、也可写，就用 `~/.cache/csih`。
+  - 否则用 `${TMPDIR:-/tmp}/csih-<uid>`，以 `mkdir -m 700` 新建。它必须是自己拥有、可写的真目录，是软链接或属于别人都会被拒绝（退出码 1）。
+- 实测四种情况：HOME 正常、HOME 为空（新建出权限 700 的目录）、缓存目录不可写（退回私有目录）、预先放好的软链接（拒绝）。用新启动器打包的 csih 在 HOME 为空时 `-v` 正常。
 
 ## 已知在别的平台上可能出问题的地方
 
@@ -119,7 +120,7 @@ csih.com 开头那段 shell 由 `ujs/product/ape-pack.cx` 生成，unisacc.com�
 - **tmux**：窗口列表、`/copy` 和多会话协作要用 tmux；没装 tmux 时，这些功能如实报不可用。
 - **信号**：
   - 自 839a435f36 起，终端恢复走 `sys.sig`（rt_sigaction 真注册）。在 Linux x86_64 的 pty 里对 csih.com 发 SIGTERM，终端模式恢复成启动前的样子，退出码 143。旧版前导 `signal()` 不进内核，被杀后终端停在原始模式。
-  - macOS 上 `sy_sig_handle` 返回 -ENOSYS，被杀时不恢复终端，乱了就执行一次 `reset`。
+  - macOS：自 434bc1e79f 起，`sy_sig_handle` 也会向内核注册。原始 `__sigaction` 要求自带 trampoline，这个入口就是：调用 dispatch 后自己执行 `sigreturn`；arm64 另加一个备用信号栈。机器码已用 objdump 核对，两个 osx 切片都能编过，但没有在 Mac 上跑过（UNMEASURED）。如果在 Mac 上被杀后终端还是乱的，执行一次 `reset`，并报告这个问题。
 
 ## Windows
 

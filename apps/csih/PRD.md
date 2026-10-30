@@ -145,6 +145,13 @@ agent 模式新增 `/help`、`/status`、`/clear`，均只在本地处理、不�
 - **第十批已落地（2026-10-29）**：忙碌行。原来执行命令时一直显示「等模型」；现在收到 exec 行（命令执行前发出）就显示 `跑命令 <命令>`，下一次请求在途（`net_in_flight()`）时切回「等模型」。文案从 `请求中 等模型 3秒 7745词元 上传 32839字节 已收 574字节 hit 1152 miss 6561` 改为 `⏳ 等模型 3秒 · 7745词元 · ↑32.1KB 已收574B · 缓存命中15%`，保留「已收」二字（已有断言依赖它）。selftest：`busy line names the running command and reads sizes`；tmux 实测已见切换。原来 exec 同步执行时秒数不走、界面不刷新，第十一批已解决。
 - **第四十二批已落地（2026-10-29）**：状态行上色：`✓` 绿、`◐` 黄、`✗` 和 `│ blocked:` 红、`项目>` 青。颜色只在写终端时加（`tui_put_line`），帧本身仍是纯文本，宽度计算、差量比较和所有读取帧的测试都不受影响；差量刷新改用 tui 自己的循环，`render.cx` 的 `frame_diff` 没动。遵守 `NO_COLOR`，也可以用 `CSIH_COLOR=0` 关闭。写屏缓冲按每行 32 字节预留，满屏彩色行也放得下。selftest：`status rows are coloured on output, frames stay plain`（设了 NO_COLOR 时打印 skip）；tmux `capture-pane -e` 实测 `◐` 行带 `ESC[33m`。
   - 观察（不是本批改动引起）：一道不用工具的算术题，这次评审判为「未验证」（理由是没有工具记录可核实）；之前同类问题判过「已验收（answer_only）」。评审对纯问答的判法不稳定，第四十三批处理。
+- **第六十九批已落地（2026-10-30）**：剩下的几项限制按白箱先写出代码，验证跟上（主人："先用白箱思路把这些限制相关代码给做了，过不过到时再改"），0.1.4。
+  - **macOS 信号**（cx/sys/sig.cx，bdy 车道，经 cc 转达后由本车道写）：x86_64 和 arm64 的 trampoline 入口；arm64 用 sigaltstack 53。objdump 核对过，osx 两片能编过，Linux 的 check-cx-sys-sig 34/0。没在 Mac 上跑过（UNMEASURED）。
+  - **exec 改动可撤**：执行前，给命令里点名、且在 cwd 内的已有普通文件做快照（最多 8 个，每个不超过 1 MiB）。glob、find 等没点名的文件不覆盖。
+    - 顺带修了一个旧问题：某一步恢复失败时，这一步一直留在栈顶，导致更早的步骤都撤不了，selftest 里还成了死循环。现在失败的一步出栈，备份文件留下，并报出备份所在路径。
+  - **启动器**（ujs/product/ape-pack.cx，主人授权）：拿不到可用的用户缓存目录时，改用按 uid 分开、权限 700 的私有目录，并核对属主和是否为软链接。
+  - 验证：12 条受影响合同在"HEAD 快照加本补丁"上全部 PASS（共享工作区当时被 bdy 未提交的 fs.cx 卡住编不过）；启动器四种情况实测通过；csih.com 重编后 verify、smoke 均 OK。
+  - 仍未做：Windows 版（Console API 加 CreateProcess 的移植，工作量大）。
 - **第六十八批已落地（2026-10-30）**：把 csih.com 当真正的 harness 用，0.1.2。
   - 做法：在临时项目里实际驱动 csih.com，做了这些事：修一个 bug；加测试并运行；`/exit` 后重开，问它之前改了什么；`/diff`、`/undo`；在 apps/csih 里做代码导航；错误 key、没有 key。
   - 发现并修复：
