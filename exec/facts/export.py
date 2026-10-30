@@ -923,32 +923,7 @@ def k2gen2():
             "=autonames\tjson\t" + dump(autonames), "=HEADER\tjson\t" + dump(G.E.HEADER), "=AUT\tint\t%d" % G.E.AUT, "=AXF64\tint\t%d" % G.AX.index("f64")]
 
 
-def k2gen2tokens():
-    """parse2 (gen2) token reader facts (was parse2base.tokens -> E.tokenizer(QUALIFIERS)): the parse words plus
-    type=extern/_Bool appended after max(TK), parse2's skipped qualifiers, span readers, limits."""
-    if str(ROOT / "exec") not in sys.path:
-        sys.path.insert(0, str(ROOT / "exec"))
-    from finite_rules import prefix_facts
-    E = _parse_e("k2gen2tok_parse")
-    B = _module("exec/build/parse2base.py", "k2gen2tok_base")
-    tk = dict(E.TK)
-    words = list(E.WORDS)
-    for w in _parse2_extra_words():
-        words.append(w); tk[w] = max(tk.values()) + 1
-    skip = B.QUALIFIERS
-    spans = dict(ln.split("\t") for ln in (ROOT / "exec/parse/token-prefixes.tsv").read_text().splitlines()
-                 if ln and not ln.startswith("#"))
-    root, pre = prefix_facts(words + list(spans) + list(skip))
-    def node(n):
-        p = n["name"]
-        if p in spans:
-            return dict(name=p, span=[dict(reader=spans[p])], children=[], q=[], w=[], tail=[])
-        return dict(name=p, span=[], children=[dict(name=c["name"], last=c["last"]) for c in n["children"]],
-                    q=[1] if p in skip else [], w=[dict(tok=tk[p])] if p not in skip and p in tk else [],
-                    tail=[dict(tok=E.TK_OTHER)])
-    out = ["=N\tjson\t" + json.dumps([node(root)] + [node(n) for n in pre])]
-    out += ["=limit%d\tint\t%d" % (d, (2**64 - 1 - d) // 10) for d in range(10)]
-    return out
+# k2-gen2-tokens moved to tools/facts-gen.cx on 2026-10-30.
 
 
 def k2unitstokens():
@@ -1005,7 +980,6 @@ def k2unitstokens():
 
 
 TABLES = [
-    ("k2-gen2-tokens", ["exec/build/parsebase.py", "exec/build/parse2base.py", "exec/facts/parse2-extra.tsv", "exec/parse/token-prefixes.tsv", "exec/finite_rules.py", "exec/facts/export.py"], k2gen2tokens),
     ("k2-units-tokens", ["exec/build/parsebase.py", "exec/parse/token-prefixes.tsv", "exec/parse2/units-qualifiers.tsv", "exec/parse2/units-builtin.tsv", "exec/parse2/units-tokens.tsv", "exec/parse2/units-reject.tsv", "exec/parse2/units-counters.tsv", "exec/parse2/units-separators.tsv", "exec/parse2/units-trailer.tsv", "exec/finite_rules.py", "exec/facts/export.py"], k2unitstokens),
     ("k2-gen2", ["exec/build/parsebase.py", "exec/build/parse2base.py", "exec/facts/parse2-extra.tsv", "exec/facts/statics.tsv", "exec/parse2/operator-actions.tsv", "exec/parse2/type-follow.tsv", "exec/parse2/ladder-modes.tsv", "exec/parse2/shape-reject.tsv", "exec/parse2/shape-stack.tsv", "exec/parse2/shape-tokens.tsv", "exec/parse2/return-text.tsv", "exec/parse2/return-template.tsv", "exec/parse2/return-reject.tsv", "exec/parse2/return-stack.tsv", "exec/parse2/return-tokens.tsv", "exec/parse2/tape-templates.tsv", "exec/parse2/update-text.tsv", "exec/parse2/update-reject.tsv", "exec/parse2/update-template.tsv", "exec/parse2/update-stack.tsv", "exec/parse2/update-modes.tsv", "exec/parse2/update-pointer.tsv", "exec/parse2/update-float.tsv", "exec/parse2/update-tokens.tsv", "exec/parse2/type-tape.tsv", "exec/parse2/scope-actions.tsv", "exec/parse2/type-entry.tsv", "exec/facts/export.py"], k2gen2),
     ("lex-gen", ["weights/gold/parse.tsv", "iterate/kernel/typekw.tsv", "weights/gold/lexcls.tsv", "weights/gold/lexword.tsv", "weights/gold/lex.tsv", "exec/lex/spelling.tsv", "exec/facts/lex-consts.tsv", "exec/finite_rules.py", "exec/facts/export.py"], lexgen),

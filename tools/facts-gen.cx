@@ -1282,6 +1282,114 @@ static void lower_armfuse(Ob *o) {
     }
 }
 
+/* A JSON list of plain strings ["a","b",...] into the arena; returns the count. */
+static int jlist(const char *s, char **out, int cap) {
+    long n = tx_len(s, FG_CAP), at = 1;
+    int k = 0;
+    if (n < 2 || s[0] != '[' || s[n - 1] != ']') fg_die("not a JSON list", s);
+    while (at < n - 1) {
+        long q;
+        while (at < n - 1 && (s[at] == ' ' || s[at] == ',')) at++;
+        if (at >= n - 1) break;
+        if (s[at] != '"' || k == cap) fg_die("bad JSON list item", s);
+        q = tx_chr(s + at + 1, n - at - 1, '"');
+        if (q < 0) fg_die("unterminated string", s);
+        out[k] = jstr(s + at, q + 2);
+        if (!out[k]) fg_die("bad JSON string", s);
+        k++;
+        at += q + 2;
+    }
+    return k;
+}
+static char *fg_eqrow(const char *rel, const char *name) {   /* "=NAME\tKIND\tVALUE" value */
+    Lines L = fg_lines(rel);
+    int i;
+    for (i = 0; i < L.n; i++) {
+        char *cells[4], *line = fg_dupz(L.l[i]);
+        if (line[0] != '=') continue;
+        if (fg_split(line + 1, cells, 3) == 3 && tx_eq(cells[0], name, 256)) return cells[2];
+    }
+    fg_die("row absent", name);
+    return 0;
+}
+static int byte_less(const char *a, const char *b) { return fg_strcmp(a, b) < 0; }
+
+/* k2-gen2-tokens: parse2's token-reader trie over the parse words, parse2's extra words (appended after
+   max(TK)), the span prefixes and the skipped qualifiers; plus the decimal overflow limits. */
+static void k2_gen2_tokens(Ob *o) {
+    static char *w[2048], *tkn[2048], *names[8192], *spk[16], *spv[16], *extra[64];
+    static int tkv[2048];
+    static const char *skip[4] = {"type=const", "type=volatile", "type=restrict", "type=inline"};
+    int nw = 0, ntk = 0, nn = 0, nsp = 0, ne, i, j, mx = 0;
+    long tk_other;
+    Lines S;
+    pt_build();
+    for (i = 0; i < pt.nw; i++) w[nw++] = pt.w[i];
+    for (i = 0; i < pt.ntk; i++) { tkn[ntk] = pt.tkn[i]; tkv[ntk++] = pt.tkv[i]; if (pt.tkv[i] > mx) mx = pt.tkv[i]; }
+    ne = jlist(fg_eqrow("exec/facts/parse2-extra.tsv", "words"), extra, 64);
+    for (i = 0; i < ne; i++) {
+        w[nw++] = extra[i];
+        for (j = 0; j < ntk; j++) if (tx_eq(tkn[j], extra[i], FG_CAP)) break;
+        tkv[j] = ++mx;
+        if (j == ntk) tkn[ntk++] = extra[i];
+    }
+    S = fg_lines("exec/parse/token-prefixes.tsv");
+    for (i = 0; i < S.n; i++) {
+        char *cells[4], *line = fg_dupz(S.l[i]);
+        if (!*line || line[0] == '#') continue;
+        if (fg_split(line, cells, 4) != 2 || nsp == 16) fg_die("bad token-prefixes row", S.l[i]);
+        spk[nsp] = cells[0]; spv[nsp++] = cells[1];
+    }
+    for (i = 0; i < nsp; i++) w[nw++] = spk[i];
+    for (i = 0; i < 4; i++) w[nw++] = (char *)skip[i];
+    for (i = 0; i < nw; i++) {                    /* every non-empty prefix, once */
+        long n = tx_len(w[i], 256), m;
+        for (m = 1; m <= n; m++) {
+            int seen = 0;
+            for (j = 0; j < nn; j++) if (tx_len(names[j], 256) == m && tx_same(names[j], m, w[i], m)) { seen = 1; break; }
+            if (!seen) { if (nn == 8192) fg_die("too many prefixes", 0); names[nn++] = ar_dup(fg_ar, w[i], m); }
+        }
+    }
+    for (i = 1; i < nn; i++) { char *x = names[i]; for (j = i - 1; j >= 0 && byte_less(x, names[j]); j--) names[j + 1] = names[j]; names[j + 1] = x; }
+    tk_other = fg_const("parse-constants", "TK_OTHER");
+    ob_z(o, "=N\tjson\t[");
+    for (i = -1; i < nn; i++) {                   /* -1 = the root (empty prefix) */
+        const char *p = i < 0 ? "" : names[i];
+        long pl = tx_len(p, 256);
+        int sp = -1, q, first;
+        if (i >= 0) ob_z(o, ", ");
+        for (q = 0; q < nsp; q++) if (tx_eq(spk[q], p, 256)) sp = q;
+        ob_z(o, "{\"name\": "); ob_str(o, p);
+        if (sp >= 0) { ob_z(o, ", \"span\": [{\"reader\": "); ob_str(o, spv[sp]); ob_z(o, "}], \"children\": [], \"q\": [], \"w\": [], \"tail\": []}"); continue; }
+        ob_z(o, ", \"span\": [], \"children\": [");
+        first = 1;
+        for (q = 0; q < nn; q++) {
+            long cl = tx_len(names[q], 256);
+            if (cl != pl + 1 || !tx_prefix(names[q], cl, p, pl)) continue;
+            if (!first) ob_z(o, ", ");
+            ob_z(o, "{\"name\": "); ob_str(o, names[q]); ob_z(o, ", \"last\": "); ob_int(o, (unsigned char)names[q][cl - 1]); ob_z(o, "}");
+            first = 0;
+        }
+        {
+            int is_skip = 0, t = -1;
+            for (q = 0; q < 4; q++) if (tx_eq(skip[q], p, 256)) is_skip = 1;
+            for (q = 0; q < ntk; q++) if (tx_eq(tkn[q], p, 256)) t = tkv[q];
+            ob_z(o, is_skip ? "], \"q\": [1], \"w\": [" : "], \"q\": [], \"w\": [");
+            if (!is_skip && t >= 0) { ob_z(o, "{\"tok\": "); ob_int(o, t); ob_z(o, "}"); }
+            ob_z(o, "], \"tail\": [{\"tok\": "); ob_int(o, tk_other); ob_z(o, "}]}");
+        }
+    }
+    ob_z(o, "]\n");
+    for (i = 0; i < 10; i++) {
+        unsigned long lim = (~0UL - (unsigned long)i) / 10UL;
+        char d[32];
+        int k = 31;
+        d[k] = 0;
+        do { d[--k] = (char)('0' + lim % 10UL); lim /= 10UL; } while (lim);
+        ob_z(o, "=limit"); ob_int(o, i); ob_z(o, "\tint\t"); ob_z(o, d + k); ob_z(o, "\n");
+    }
+}
+
 static void enc_pe(Ob *o) { pe_fields(o, 0); }
 static void enc_pe_forward(Ob *o) { pe_fields(o, 1); }
 
@@ -1308,6 +1416,8 @@ static const Table fg_tables[] = {
     {"enc-macho", {"exec/facts/image-macho.tsv", "tools/facts-gen.cx", 0}, enc_macho},
     {"enc-elf", {"exec/facts/image-elf.tsv", "exec/facts/image-pe.tsv", "tools/facts-gen.cx", 0}, enc_elf},
     {"lower-armfuse", {"exec/facts/tape-shape.tsv", "exec/lower/armfuse-shapes.tsv", "tools/facts-gen.cx", 0}, lower_armfuse},
+    {"k2-gen2-tokens", {"exec/facts/parse-words.tsv", "weights/gold/prec.tsv", "exec/facts/parse2-extra.tsv",
+                        "exec/parse/token-prefixes.tsv", "exec/facts/parse-constants.tsv", "tools/facts-gen.cx", 0}, k2_gen2_tokens},
     {0, {0}, 0}
 };
 
