@@ -1,5 +1,8 @@
 #pragma unisa module render
 #pragma unisa use cols
+#pragma unisa use zstr
+#pragma unisa use mem.bytes
+#pragma unisa use sys.env
 /*
  * render.cx — turn state into a screen, as a pure function.
  *
@@ -42,7 +45,7 @@ typedef struct {
 
 /* ── the state a screen renders from ────────────────────────────────────── */
 
-void r_frame_init(r_frame *f) { f->n = 0; memset(f->lines, 0, sizeof(f->lines)); }
+void r_frame_init(r_frame *f) { f->n = 0; mm_fill(f->lines, (long)sizeof(f->lines), 0, (long)sizeof(f->lines)); }
 
 /* Copy whole codepoints only. max_cols < 0 means no column cap.
  * Column width comes from csih_cols.h, the same measure tui.c uses. */
@@ -57,7 +60,7 @@ static int r_copy_fit(char *dst, int dstmax, const char *s, int max_cols, int *o
         cw = csih_cp_cols(cp);
         if (n + need > dstmax) break;
         if (max_cols >= 0 && w + cw > max_cols) break;
-        memcpy(dst + n, s, (size_t)need);
+        mm_copy(dst + n, (long)(dstmax - n), s, (long)need);   /* n + need <= dstmax */
         n += need;
         w += cw;
         s += need;
@@ -77,21 +80,17 @@ static void r_put(r_frame *f, const char *s) {
 /* unisacc setenv() stays in the file that called it. render_cli.c cannot
  * change this file's getenv, so the self-test asks this function to do it. */
 void render_test_home(const char *home) {
-    if (home) {
-        extern int setenv(const char *, const char *, int);
-        setenv("HOME", home, 1);
-    }
+    if (home) sy_setenv("HOME", home, 1);
 }
 
 /* Username from $HOME when it is /Users/<name> or /home/<name>. */
 static int r_home_user(char *user, int n) {
-    extern char *getenv(const char *);
-    const char *home = getenv("HOME");
+    const char *home = sy_env("HOME");
     const char *p;
     int len;
     if (!home) return 0;
-    if (!strncmp(home, "/Users/", 7)) p = home + 7;
-    else if (!strncmp(home, "/home/", 6)) p = home + 6;
+    if (zs_starts(home, "/Users/")) p = home + 7;
+    else if (zs_starts(home, "/home/")) p = home + 6;
     else return 0;
     while (*p == '/') p++;
     len = 0;
@@ -114,10 +113,10 @@ static void r_hide_user(char *s) {
     snprintf(pat[0], sizeof pat[0], "/Users/%s", user);
     snprintf(pat[1], sizeof pat[1], "/home/%s", user);
     for (pi = 0; pi < 2; pi++) {
-        int plen = (int)strlen(pat[pi]);
+        int plen = (int)zs_len(pat[pi]);
         char *p = s;
         if (plen < 2) continue;
-        while ((p = strstr(p, pat[pi])) != NULL) {
+        while ((p = zs_find(p, pat[pi])) != NULL) {
             char next = p[plen];
             /* '/' keeps the slash (so ~/...). End, space, or punctuation ends the path. */
             if (next != '\0' && next != '/'
@@ -126,7 +125,10 @@ static void r_hide_user(char *s) {
                 p += plen;
                 continue;
             }
-            memmove(p + 1, p + plen, strlen(p + plen) + 1);
+            {
+                long tail = zs_len(p + plen) + 1;   /* with the NUL; shifted left, within s */
+                mm_move(p + 1, (long)(plen - 1) + tail, p + plen, tail);
+            }
             *p = '~';
             p += 1;
         }
@@ -181,7 +183,7 @@ int frame_diff(const r_frame *prev, const r_frame *next, char *out, size_t outle
     for (i = 0; i < lines; i++) {
         const char *a = i < prev->n ? prev->lines[i] : "";
         const char *b = i < next->n ? next->lines[i] : "";
-        if (!strcmp(a, b)) continue;          /* unchanged: do not touch it */
+        if (zs_eq(a, b)) continue;            /* unchanged: do not touch it */
         rewritten++;
         used += (size_t)snprintf(out + used, outlen > used ? outlen - used : 0,
                                  "\x1b[%d;1H%s\x1b[K", i + 1, b);
