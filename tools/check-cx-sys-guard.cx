@@ -1,0 +1,50 @@
+/* Checks cx/sys/guard.cx: sh ./unisacc.com tools/check-cx-sys-guard.cx
+   Normal return, failure at depth, nesting, a NULL body, and sy_guard_fail() outside a guard (in a
+   child run of this same file, which must die by SIGABRT).  Prints PASS/FAIL lines and
+   CX_SYS_GUARD<TAB>failed=N. */
+#pragma unisa use sys.guard
+#pragma unisa use text.text
+
+static int failed;
+static void ck(int ok, const char *name) { if (!ok) failed++; printf("%s\tguard.%s\n", ok ? "PASS" : "FAIL", name); }
+
+static int steps;
+static void body_ok(void *ud) { (void)ud; steps++; }
+static void deep(int n) { if (n == 0) sy_guard_fail(); deep(n - 1); steps += 100; }
+static void body_fail(void *ud) { steps++; deep(*(int *)ud); steps += 1000; }
+static int inner_rc;
+static void body_outer(void *ud) {
+    int d = 3;
+    (void)ud;
+    inner_rc = sy_guard(body_fail, &d);   /* the inner guard catches its own failure */
+    steps += 10;                          /* the outer body continues */
+}
+static void body_outer_fail(void *ud) { int d = 0; (void)ud; inner_rc = sy_guard(body_ok, &d); sy_guard_fail(); }
+
+int main(int argc, char **argv) {
+    int d = 5, rc;
+    if (argc == 2 && tx_eq(argv[1], "child-fail", 16)) { sy_guard_fail(); return 0; }
+
+    steps = 0; rc = sy_guard(body_ok, 0);
+    ck(rc == 0 && steps == 1 && !sy_guard_active(), "returns-0");
+
+    steps = 0; rc = sy_guard(body_fail, &d);
+    ck(rc == 1 && steps == 1 && !sy_guard_active(), "fail-at-depth-returns-1-skips-rest");
+
+    steps = 0; inner_rc = -9; rc = sy_guard(body_outer, 0);
+    ck(rc == 0 && inner_rc == 1 && steps == 11 && !sy_guard_active(), "nested-inner-catches-outer-continues");
+
+    inner_rc = -9; rc = sy_guard(body_outer_fail, 0);
+    ck(rc == 1 && inner_rc == 0 && !sy_guard_active(), "outer-catches-after-inner-returned");
+
+    ck(sy_guard(0, 0) == -EINVAL, "null-body-refused");
+
+    {   char *v[] = {"sh", "./unisacc.com", "tools/check-cx-sys-guard.cx", "--", "child-fail", 0};
+        char *out = 0; size_t n = 0;
+        rc = cx_runv_timeout(v, 50, &out, &n);
+        ck(rc == 128 + 6 || rc == 134, "fail-outside-guard-aborts");
+        if (rc != 128 + 6 && rc != 134) printf("note\tchild rc=%d\n", rc);
+    }
+    printf("CX_SYS_GUARD\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

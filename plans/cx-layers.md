@@ -17,7 +17,15 @@
 - 两张表有一处不一致，记在这里。`tests/cxraw-layers.tsv` 准许 `src/host.cx`、`src/hostnative.cx`、`cx/core/kernel.cx`、`cx/runtime/process*.cx` 直接调 libc（L0 适配器），但它们不在 include 白名单里。收口方向是让它们需要的头都进 `cx/sys`，不是把它们加进白名单。
 - 白名单外仍在 include 的（2026-10-30）：
   - `src/host.cx` 原来 3 个（`<sys/mman.h>`、`<dlfcn.h>`、`<fcntl.h>`）。mmap、mprotect、munmap 已进 `cx/sys/mem.cx`，dlopen、dlsym、dlclose、dlerror 的地址已进 `cx/sys/dl.cx`。open 用的 `O_*` 本来就在前导里，没有再为 `<fcntl.h>` 写 include。`src/host.cx` 现在 0 个 `#include`。`tests/cxinclude.cx --check` 不再报这个文件；整次仍失败，报的是 `apps/csih`（24 个超基线、2 个低于基线），那是 csih 车道。
-  - `apps/csih` 交给 csih 车道（unisacc-00），缺的 socket、tty、signal、poll 等接口要补进 `cx/sys`；
+  - `apps/csih`：主人定 csih 只做自己的事，`cx/sys` 的接口由 cc 补。已补的有 `sys.net`、`sys.poll`、`sys.tty`、`sys.time`（796531e47f，检查 `cx-l0-sys-net` 43/0）和 `sys.guard`（setjmp/longjmp 收进 `sy_guard`/`sy_guard_fail`，检查 `cx-l0-sys-guard` 6/0）。5 个只用到前导头的 probe 已去掉 include（03cd501057）。剩下的按下表机械迁移：
+    - `<sys/socket.h>`、`<netinet/in.h>`、`<arpa/inet.h>`、`<netdb.h>` 改为 `use sys.net`；
+    - `<poll.h>` 改为 `use sys.poll`，类型用 `sy_pollfd_t`，事件位用 `SY_POLL*`；
+    - `<termios.h>`、`<sys/ioctl.h>` 改为 `use sys.posix` 加 `use sys.tty`；
+    - `<time.h>` 改为 `use sys.time`；
+    - `<sys/file.h>` 改为 `use sys.posix` 的 `sy_flock`；
+    - `<setjmp.h>` 改为 `use sys.guard`；
+    - signal、errno、fcntl、stdio、string、unistd、sys/types、sys/stat、sys/wait、dirent 直接删掉，前导里已有。
+  - sy_* 一律返回 -errno，迁移时要改返回值判断。csih 的 Windows Winsock 路径没有对应的 L0（`sy_tcp_dial` 在 Windows 上返回 -ENOSYS），这条要 csih 自己定。两个 fuzz 测试被宿主 cc 当 `.c` 编译，交 csih 决定：要么改名成 `.c`，要么改用 `-include` 前导。
   - 其余为 0（89d5390e01 清掉了最后两行旧基线）。
 - 完成标准：`sh ./unisacc.com tests/cxinclude.cx -- --check` 输出 `ok`，基线表里没有任何一行。
 

@@ -1,0 +1,35 @@
+#pragma unisa module guard
+/* L0 sys/guard: a non-local failure exit for callback bodies, so that upper layers need no
+   <setjmp.h>.  sy_guard(fn, ud) runs fn(ud) and returns 0 when it returns, or 1 when the body (at
+   any call depth) calls sy_guard_fail().  setjmp lives in sy_guard's own frame, which stays alive
+   for the whole callback: a wrapper that setjmps and then returns would be undefined behaviour.
+   Guards nest: the inner guard catches, and on its exit the outer guard is active again.
+   sy_guard_fail() outside any guard aborts.  Locals of the caller that the body changes and that
+   are read after a failure must be volatile, as with setjmp itself.
+   This is the cx/sys include exception (tests/cxinclude-boundary.tsv): <setjmp.h> is not in the
+   implicit prelude. */
+#include <setjmp.h>
+
+static jmp_buf *sy_guard_top;
+
+int sy_guard(void (*fn)(void *), void *ud) {
+    jmp_buf here;
+    jmp_buf *prev = sy_guard_top;
+    if (!fn) return -EINVAL;
+    sy_guard_top = &here;
+    if (setjmp(here)) {
+        sy_guard_top = prev;
+        return 1;
+    }
+    fn(ud);
+    sy_guard_top = prev;
+    return 0;
+}
+
+void sy_guard_fail(void) {
+    if (sy_guard_top) longjmp(*sy_guard_top, 1);
+    abort();
+}
+
+/* 1 inside a guard, 0 outside. */
+int sy_guard_active(void) { return sy_guard_top != 0; }
