@@ -4,6 +4,8 @@
  * <=55-second batch; --trace/--multi do not replace the original SC1 obligations. */
 #pragma unisa use cxlib.netpack
 #pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
 static char root[4096],work[4096],product[4400],bound[4400],src[4400],capdir[4400],container[4400];
 static int native_driver;static const char *second_ledger;
 static int assertions,failures;static char *ledger;static size_t ledger_n;
@@ -89,5 +91,10 @@ int main(int argc,char **argv){int trace_mode=argc>3&&tx_eqz(argv[argc-1], "--tr
  char *end=memchr(ledger,'\n',ledger_n);if(!end)die("identity line");size_t header=(size_t)(end-ledger)+1;refuse("missing-identity",ledger+header,ledger_n-header,"resource-identity-absent");char *changed=malloc(ledger_n+1);if(!changed)die("allocation");memcpy(changed,ledger,ledger_n);changed[ledger_n]=0;char *stage=strstr(changed,"stage=e3:");if(!stage)die("stage field");stage[7]='2';refuse("wrong-stage",changed,ledger_n,"resource-identity-mismatch stage");memcpy(changed,ledger,ledger_n);char *hash=strstr(changed,"input_sha256=");if(!hash)die("input field");hash[13]=hash[13]=='0'?'1':'0';refuse("wrong-input",changed,ledger_n,"resource-identity-mismatch input");free(changed);
  const char *row="ff\t0\t-\t0\t-\n",*extra="ff\t0\t-\t0\t-\textra\n";appended("extra-fields",extra,strlen(extra),"resource-row-fields");appended("bad-key","fg\t0\t-\t0\t-\n",11,"resource-key-malformed");appended("bad-presence","ff\t2\t-\t0\t-\n",11,"resource-presence-invalid");appended("bad-length","ff\t0\t-\t00\t-\n",12,"resource-length-invalid");appended("bad-absent","ff\t0\tdata\t0\t-\n",14,"resource-absent-malformed");appended("truncated-row",row,strlen(row)-1,"resource-row-truncated");
  np_buf two={0};np_puts(&two,row);np_puts(&two,row);appended("duplicate-key",two.p,two.n,"duplicate-resource-key");free(two.p);
+ /* ri.frame.identity-malformed (hex half): a non-hex input digest is a malformed identity.  The stage-label half is a
+    product gap: a label outside {e3,lower,source} is parsed and then reported as resource-identity-mismatch. */
+ {long at=tx_find(ledger,(long)ledger_n,"input_sha256=",13);char *bad=mm_alloc((long)ledger_n+1);if(at<0||!bad||mm_copy(bad,(long)ledger_n+1,ledger,(long)ledger_n))die("input field");bad[at+13]='g';refuse("malformed-input-hex",bad,ledger_n,"resource-identity-malformed");mm_free(bad);}
+ /* ri.frame.row-field-too-long: a 4096-byte field is one above the parser bound (width >= 4096) */
+ {np_buf longrow={0};np_puts(&longrow,"ff\t0\t");for(int k=0;k<4096;k++)np_put(&longrow,"a",1);np_puts(&longrow,"\t0\t-\n");appended("row-field-4096",longrow.p,longrow.n,"resource-row-field-too-long");mm_free(longrow.p);}
  const char nulrow[]="ff\t0\t-\t0\t-\0hidden\n";appended("embedded-nul-row",nulrow,sizeof nulrow-1,"resource-row-nul");np_buf nulheader={0};np_put(&nulheader,ledger,header-1);np_put(&nulheader,"\0hidden\n",8);np_put(&nulheader,ledger+header,ledger_n-header);refuse("embedded-nul-header",nulheader.p,nulheader.n,"resource-row-nul");free(nulheader.p);
  repeated();additional();replay=invoke(capdir,root,0,"recovery");path(p,sizeof p,work,"normal.stdout");size_t recovery_n;char *recovery=load(p,&recovery_n);ck(replay.rc==0&&!replay.errn&&replay.outn==recovery_n&&!memcmp(replay.out,recovery,recovery_n),"strict-recovery-after-refusals");free(recovery);np_free(&replay);free(ledger);return finish(before,container_before,"SC1-map-compatibility-from-verified-SC2-trace");}
