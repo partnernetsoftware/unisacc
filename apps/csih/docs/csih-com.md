@@ -52,7 +52,7 @@ sh ./unisacc.com tools/csih-ape.cx -- smoke
   - 目标机第一次运行时，用 `gzip -dc` 解到 `~/.cache/csih/csih-<key>`，以后直接用缓存。
   - 压缩器单独检查：`sh ./unisacc.com tools/check-cx-deflate.cx`。
   - ape-pack 不带 `--deflate` 时，输出和原来逐字节相同。
-- **版本**：只有一个来源，就是 `apps/csih/tui.cx` 里的 `CSIH_VERSION`，现在是 0.1.0。
+- **版本**：只有一个来源，就是 `apps/csih/tui.cx` 里的 `CSIH_VERSION`，现在是 0.1.1（0.1.0 → 0.1.1 的变化见 PRD 第六十七批）。
   - pack 从源码读出它，写进 PE 的 VERSIONINFO 和清单的 `version` 行。
   - verify 会拿清单里的版本和源码对照。
   - `csih -v`、`--version`、`version` 打印同一行。
@@ -66,7 +66,7 @@ sh ./unisacc.com tools/csih-ape.cx -- smoke
 
 ```
 sh apps/csih/csih.com            # 不带参数即 agent（与 csih.sh 相同；d8eafebcee 之前直接跑会只打印用法）
-sh apps/csih/csih.com -v         # csih 0.1.0
+sh apps/csih/csih.com -v         # csih 0.1.1
 sh apps/csih/csih.com selftest
 sh apps/csih/csih.com keyprobe
 ```
@@ -83,6 +83,15 @@ csih.com 是自包含的二进制，不需要 `apps/csih` 源码树，也不读 
 | osx/arm64 | csih_osx64-arm.bin（真 csih） | 是，Mach-O arm64 | UNMEASURED | 同上 |
 | win/x86_64 | csih_win64-x86.exe（占位） | 是，PE32+ | 同一份源码在 Linux 上 `-run`：打印说明，退出码 2；PE 本身 UNMEASURED | 见下文"Windows" |
 | win/arm64 | 用 win/x86_64 那个 PE | 不单独编 | UNMEASURED | APE 的约定（与 gcc_cx.com 相同） |
+
+## 启动器的两个已知问题（ape-pack 生成，未修）
+
+csih.com 开头那段 shell 由 `ujs/product/ape-pack.cx` 生成，unisacc.com、gcc_cx.com 用的也是这一段。ujs/ 是独立子项目，本车道不改，问题记在这里，交主人裁定。
+
+- **退到 /tmp 时会执行别人放的文件**：HOME 为空，或 `mkdir -p` 失败时，缓存目录退到 `${TMPDIR:-/tmp}`。脚本只要发现 `$d/csih-<k>` 存在且可执行，就直接 exec，不检查属主，也不校验内容。共享的 /tmp 里，别的用户可以先放一个同名文件。
+  - 平时 HOME 有值，走不到这条路；没有 HOME 的 cron、systemd 服务会走到。
+  - 建议的改法：退路改成 `mkdir -m 700` 建一个按 uid 区分的私有目录，并检查它属于自己（`[ -O ]`）、不是软链；或者 exec 之前核对缓存文件的摘要。
+- **缓存目录存在但不可写时直接失败**：`~/.cache` 存在但不可写时，`mkdir -p` 照样成功，接着解压失败，`exit 1`，不会退到别的目录。建议同时检查 `[ -w "$d" ]`。
 
 ## 已知在别的平台上可能出问题的地方
 

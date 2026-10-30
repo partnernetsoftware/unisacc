@@ -170,7 +170,7 @@ agent 模式新增 `/help`、`/status`、`/clear`，均只在本地处理、不�
 - **第六十四批已落地（2026-10-30）**：csih.com 细节（见 `docs/csih-com.md`）。
   - **体积**：8.9MB 降到 1.34MB。新增 L0 压缩器 `cx/text/deflate.cx`（LZ77 + 动态 Huffman，无 libc），检查 `tools/check-cx-deflate.cx`：15 条用系统 `gzip -dc` 对拍，结果全部一致。ape-pack 加 `--deflate`，不带时输出逐字节不变。
   - **位置**：成品放在 `apps/csih/csih.com`，和 `csih.cx` 同目录，git 忽略；中间切片仍在 `out/csih-ape/`。
-  - **版本**：`csih -v`、`--version`、`version` 打印 `csih 0.1.0`。版本只有一个来源，就是 `tui.cx` 的 `CSIH_VERSION`；pack 把它写进 PE 的 VERSIONINFO 和清单，verify 会对照源码。合同 `version-flag`（smoke 层）。
+  - **版本**：`csih -v`、`--version`、`version` 打印 `csih <版本>`（0.1.0；自 2026-10-30 第六十七批起为 0.1.1：信号真注册后被杀能恢复终端、envelope 路径可配、`~/.cdsh` 能链上、gate 发现不再依赖 Mac 路径）。版本只有一个来源，就是 `tui.cx` 的 `CSIH_VERSION`；pack 把它写进 PE 的 VERSIONINFO 和清单，verify 会对照源码。合同 `version-flag`（smoke 层）。
   - **smoke**：四个 Unix 片按 shell 头里的 `o=`/`n=` 截出来，用 `gzip -dc` 解开，和切片逐字节比对。本机经 csih.com 跑 `-v`、`--version` 和 selftest，arm64 片在 qemu-user 下跑 selftest。macOS 和 Windows 的运行记 UNMEASURED。
 - **第六十三批已落地（2026-10-30）**：原来阻塞的几块功能，借 cx 底层 `cx/sys` 解开，不用改 `include/`，也不用走产品慢车道。
   - **cx/sys 新包**：
