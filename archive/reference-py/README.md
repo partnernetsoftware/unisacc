@@ -8,7 +8,12 @@
 
 ## 仍留在活路径的 Python（剩余债，须先有原生替代才能归档）
 
-1. ~~事实表生成器 `exec/facts/export.py`~~：2026-10-30 已归档到 `archive/reference-py/exec/facts/export.py`。30 张 `exec/facts/*.tsv` 全部改由 `tools/facts-gen.cx` 写出并 `--check`；原 `--check` 里的 bank 归属检查（`_bank_owners`）一并移入 `facts-gen --check`。原生产者里的 Python 字面量已改记为事实文件，包括 `exec/facts/enc-literals.tsv`、`gen2-constants.tsv`、`gen2-literals.tsv`、`image-*.tsv`、`tape-shape.tsv`、`pp-escapes.tsv` 和 `exec/nativeabi/trie-order.tsv`。它原来的导入闭包仍留在活路径：`exec/assemble.py`、`exec/finite_rules.py`、`exec/facts/load.py`、`exec/build/parsebase.py`、`exec/build/parse2base.py`、`exec/build/graph.py`、`exec/build/procs.py`。这些文件已没有 `.cx`/`.sh`/Makefile 入口调用，但还没核实是否完全不可达，所以暂不归档。
+1. ~~事实表生成器 `exec/facts/export.py`~~：2026-10-30 已归档到 `archive/reference-py/exec/facts/export.py`。30 张 `exec/facts/*.tsv` 全部改由 `tools/facts-gen.cx` 写出并 `--check`；原 `--check` 里的 bank 归属检查（`_bank_owners`）一并移入 `facts-gen --check`。原生产者里的 Python 字面量已改记为事实文件，包括 `exec/facts/enc-literals.tsv`、`gen2-constants.tsv`、`gen2-literals.tsv`、`image-*.tsv`、`tape-shape.tsv`、`pp-escapes.tsv` 和 `exec/nativeabi/trie-order.tsv`。它原来的导入闭包同日一并归档：`exec/assemble.py`、`exec/finite_rules.py`、`exec/facts/load.py`、`exec/build/parsebase.py`、`exec/build/parse2base.py`、`exec/build/graph.py`、`exec/build/procs.py`。依据有三条：
+   - 活路径的 `.py`/`.cx`/`.sh`/Makefile 没有一处导入或执行它们（`unisa/__main__.py` 的 `.assemble` 是 `unisa/assemble.py`）；
+   - `tools/facts-gen.cx` 只在注释里提到它们作为出处；
+   - 在仓外副本用审计钩子实跑 `python3 -m unisa emit-kernel`，没有打开 `exec/` 下任何 `.py`。
+
+   `exec/**/*-manifest.tsv` 开头的 `#! base build/parsebase.py` 是历史元数据，manifest 本身仍是构造与测试的数据，留在原处。
 2. 18 网内核生成器 `python3 -m unisa emit-kernel`（`kernel/` 的生成者）及其实测闭包；`unisa/ckernel.py`、`unisa/gold.py`、`unisa/libneed.py` 还被 `tools/table-kernel-export.cx`、`tools/net-material.cx`、`tools/pp-gold-material.cx`、`tools/carried-header-export.cx` 以及 `tests/pp-constructed.cx`、`tests/pp-gold-controls.cx` 当作数据或身份输入读取。
 3. `release/` 发布工具链（未在本次范围）；`apps/`、`m4/`、`research/` 各属其域，未动。
 4. `exec/c/buildcompiler.sh` 仍是 Makefile 的构造入口，留在原处；其中 `python3 -m unisa ape` 回退分支已不可用。
@@ -22,7 +27,12 @@
 ## 清单
 
 - examples/run-speed/time_run.py
+- exec/assemble.py
 - exec/build/gen.py
+- exec/build/graph.py
+- exec/build/parse2base.py
+- exec/build/parsebase.py
+- exec/build/procs.py
 - exec/c/apecache.py
 - exec/c/asm/bindingcheck.sh
 - exec/c/asm/bindprep.sh
@@ -104,9 +114,12 @@
 - exec/enc/shacheck.sh
 - exec/enc/x86wincheck.py
 - exec/enc/x86wincheck.sh
+- exec/facts/export.py
+- exec/facts/load.py
 - exec/ffi/bridgecheck.py
 - exec/ffi/hostcheck.sh
 - exec/ffi/productcheck.py
+- exec/finite_rules.py
 - exec/ledger.sh
 - exec/lex/compare.py
 - exec/lex/declcheck.py
