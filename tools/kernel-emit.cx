@@ -4,6 +4,8 @@
  *
  *   sh ./unisacc.com tools/kernel-emit.cx -- --write ROOT OUTDIR    (OUTDIR must exist)
  *   sh ./unisacc.com tools/kernel-emit.cx -- --check ROOT OUTDIR    (SAME/DIFF per file; exit 1 on DIFF)
+ *   ... [--built BUILT_JSON]   read the nets from BUILT_JSON instead of ROOT/weights/built.json (the
+ *                              provenance line still names weights/built.json and hashes that file)
  *
  * Inputs, each read as data:
  *   weights/built.json           the constructed nets (unisa/__main__.py _built() loads this file)
@@ -46,11 +48,18 @@ static void ob_z(Ob *o, const char *s) { ob_put(o, s, tx_len(s, 1L << 30)); }
 static void ob_f(Ob *o, const char *fmt, long a, long b) { char t[256]; cx_fmt(t, sizeof t, fmt, a, b); ob_z(o, t); }
 static void ob_nl(Ob *o, const char *s) { ob_z(o, s); ob_put(o, "\n", 1); }   /* one line of the "\n".join */
 
+/* ROOT/rel, except weights/built.json, which --built may name elsewhere (a private construction
+   root holds only its own built.json; gold, facts, seed and headers stay the repository's). */
+static char ke_built[4096];
+static void ke_abs(char *p, long cap, const char *rel) {
+    if (ke_built[0] && tx_eq(rel, "weights/built.json", 32)) cx_fmt(p, cap, "%s", ke_built);
+    else cx_fmt(p, cap, "%s/%s", ke_root, rel);
+}
 static char *ke_read(const char *rel, long *n) {
     char p[8400];
     size_t sz;
     char *b;
-    cx_fmt(p, sizeof p, "%s/%s", ke_root, rel);
+    ke_abs(p, sizeof p, rel);
     b = cx_read(p, &sz);
     if (!b) ke_die("cannot read", p);
     *n = (long)sz;
@@ -90,7 +99,7 @@ static void ke_prov(Ob *o, const char *what, char **paths, int np) {
         size_t n;
         char *b;
         long pl = tx_len(paths[i], 4096), k;
-        cx_fmt(p, sizeof p, "%s/%s", ke_root, paths[i]);
+        ke_abs(p, sizeof p, paths[i]);
         b = cx_read(p, &n);
         if (b) { cx_sha256_hex(b, n, hex); hex[12] = 0; } else tx_copy(hex, sizeof hex, "(absent)", 8);
         ob_put(o, "\n", 1);
@@ -451,7 +460,9 @@ int main(int argc, char **argv) {
     int nbackend = 0;
     ke_ar = ar_new(1L << 33);
     if (!ke_ar) ke_die("cannot create the arena", 0);
-    if (argc != 4 || (!tx_eq(argv[1], "--write", 16) && !tx_eq(argv[1], "--check", 16))) ke_die("usage", "--write|--check ROOT OUTDIR");
+    if ((argc != 4 && !(argc == 6 && tx_eq(argv[4], "--built", 16))) || (!tx_eq(argv[1], "--write", 16) && !tx_eq(argv[1], "--check", 16)))
+        ke_die("usage", "--write|--check ROOT OUTDIR [--built BUILT_JSON]");
+    if (argc == 6 && !realpath(argv[5], ke_built)) ke_die("bad --built", argv[5]);
     ke_check = tx_eq(argv[1], "--check", 16);
     if (!realpath(argv[2], ke_root)) ke_die("bad ROOT", argv[2]);
     if (!realpath(argv[3], ke_out)) ke_die("OUTDIR must exist", argv[3]);
