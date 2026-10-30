@@ -26,7 +26,13 @@
   - 标识符改名：`refactor.cx rename`。
   - 按行段替换：`tools/edit-span.cx`。
   - 改动影响了哪些测试批次、并行重跑它们：`tools/affected.cx`。
-  - 五个棘轮一次跑完：`tools/ratchets.cx`（cxraw、cxinclude、cxapis、cxtrunc、cxlibc）。其中 cxlibc 管上层：除 L0 外，所有直接调用 libc/POSIX 的地方（名单由前导自动推导）只降不升，新文件必须是 0。
+  - 六个棘轮一次跑完：`tools/ratchets.cx`（cxraw、cxinclude、cxapis、cxtrunc、cxlibc、cxplatform）。
+- **cx 架构钢印（主人定，提交时由 `.git/hooks/pre-commit` → `tools/precommit.cx` 强制）**：不许写回传统 C 结构。
+  - 上层不写 `#include`：用 `#pragma unisa use`。
+  - 上层不直接调 libc/POSIX：printf、malloc、strcmp、open 等一律改用 L0 的 `sy_*`、`mm_*`、`tx_*`。
+  - 上层不写平台 `#if`（`__linux__`、`_WIN32`、`__APPLE__`、`__x86_64__` 等），也不写 `__syscallN`：平台差异只放在 L0 的 `_os` 静态帮手或表里。
+  - 编译行为的差异写成模型步（事实表 → 生成器 → 网），不在 drive.cx、host.cx 这类代码里写特判。
+  - 新文件六项计数全部为 0；旧文件只降不升。提交时，暂存的 .cx 只要有一项超基线，提交就被拒绝；别人工作区里的超额不会挡你的提交。
   - 把一个检查登记成批次：`tools/register.cx`。
   - 查目标的 lowering 缺口：`tools/tape-gap.cx`。
   - 核对格式结构：`tools/formats-*.cx`。
