@@ -1,0 +1,349 @@
+/* as, nm, objdump, and ar. src/unisacc.cx does not use this file.
+   drive.cx calls dv_as, dv_view, and dv_ar by name. asmtext and the
+   archive helpers stay in this object. Host, input, and entry phrases
+   stay in drive.o and are named inside the functions that call them. */
+#pragma unisa module driveface
+#pragma unisa use compiler.asmtext
+#pragma unisa use driver.archive
+
+static char dv_in[262144];
+static char dv_obj[1048576];
+static long dv_objn;
+
+static int dv_len(const char *s) {
+    int n;
+    n = 0;
+    if (!s) return 0;
+    while (s[n]) n = n + 1;
+    return n;
+}
+
+static int dv_emit(char *p, long n) {
+    long i;
+    if (!p || n < 0 || dv_objn > 1048576 - n) return 1;
+    i = 0;
+    while (i < n) {
+        dv_obj[dv_objn] = p[i];
+        dv_objn = dv_objn + 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
+static int dv_read(const char *path, long *n) {
+    FILE *f;
+    long got;
+    if (!path || !n) return 4;
+    f = fopen(path, "rb");
+    if (!f) return 1;
+    got = (long)fread(dv_in, 1, 262143, f);
+    if (fclose(f)) return 1;
+    dv_in[got] = 0;
+    *n = got;
+    return 0;
+}
+
+int dv_as(int argc, char **argv) {
+    const char *in;
+    const char *out;
+    char line[256];
+    int i;
+    int arch;
+    int explicit;
+    int head;
+    long n;
+    FILE *f;
+    int bx_as_arch(const char *);
+    const char *bx_as_targets(void);
+    int bx_as_opt_line(const char *, char *, int);
+    const char *bx_as_usage(void);
+    int bx_read_open_line(const char *, const char *, char *, int);
+    int bx_as_head_line(const char *, char *, int);
+    int bx_as_err_line(const char *, int, const char *, char *, int);
+    int bx_as_write_line(const char *, char *, int);
+    in = 0;
+    out = "a.out";
+    arch = 0;
+    explicit = 0;
+    i = 2;
+    while (i < argc) {
+        if (argv[i][0] == '-' && argv[i][1]) {
+            if (!strcmp(argv[i], "-o") && i + 1 < argc) {
+                out = argv[i + 1];
+                i = i + 2;
+                continue;
+            }
+            if (!strcmp(argv[i], "-b") && i + 1 < argc) {
+                arch = bx_as_arch(argv[i + 1]);
+                if (arch != 0 && arch != 1) {
+                    fputs(bx_as_targets(), stderr);
+                    return 2;
+                }
+                explicit = 1;
+                i = i + 2;
+                continue;
+            }
+            if (bx_as_opt_line(argv[i], line, 256) == 0) fputs(line, stderr);
+            else fprintf(stderr, "as: unknown option %s\n", argv[i]);
+            return 2;
+        }
+        in = argv[i];
+        i = i + 1;
+    }
+    if (!in) {
+        fputs(bx_as_usage(), stderr);
+        return 2;
+    }
+    if (dv_read(in, &n)) {
+        int e;
+        const char *why;
+        e = errno;
+        if (e == ENOENT || e == EACCES || e == ENOTDIR) {
+            why = "ENOENT";
+            if (e == EACCES) why = "EACCES";
+            if (e == ENOTDIR) why = "ENOTDIR";
+            if (bx_read_open_line(in, why, line, 256) == 0) fputs(line, stderr);
+            else fprintf(stderr, "unisacc: error: cannot open %s: %s\n", in, why);
+        } else fprintf(stderr, "as: cannot read %s\n", in);
+        return 1;
+    }
+    dv_objn = 0;
+    if (at_bind(dv_emit)) return 1;
+    head = at_header_arch(dv_in, n);
+    if (explicit && head >= 0 && head != arch) {
+        if (bx_as_head_line(in, line, 256) == 0) fputs(line, stderr);
+        else fprintf(stderr, "as: %s: -S header target conflicts with -b\n", in);
+        return 1;
+    }
+    if (at_asm(dv_in, n, arch)) {
+        if (bx_as_err_line(in, at_line(), at_error(), line, 256) == 0) fputs(line, stderr);
+        else fprintf(stderr, "as: %s:%d: %s\n", in, at_line(), at_error()[0] ? at_error() : "error");
+        return 1;
+    }
+    f = fopen(out, "wb");
+    if (!f) {
+        if (bx_as_write_line(out, line, 256) == 0) fputs(line, stderr);
+        else fprintf(stderr, "as: cannot write %s\n", out);
+        return 1;
+    }
+    if (fwrite(dv_obj, 1, (size_t)dv_objn, f) != (size_t)dv_objn || fclose(f)) {
+        if (bx_as_write_line(out, line, 256) == 0) fputs(line, stderr);
+        else fprintf(stderr, "as: cannot write %s\n", out);
+        return 1;
+    }
+    return 0;
+}
+
+int dv_view(int argc, char **argv) {
+    int dis;
+    const char *path;
+    char line[256];
+    long n;
+    const char *bx_view_usage(int);
+    int bx_view_err_line(int, const char *, const char *, char *, int);
+    dis = argv[1][0] == 'o';
+    if (dis ? (argc != 4 || strcmp(argv[2], "-d")) : argc != 3) {
+        fputs(bx_view_usage(dis), stderr);
+        return 2;
+    }
+    path = argv[dis ? 3 : 2];
+    if (dv_read(path, &n)) {
+        fprintf(stderr, "%s: cannot read %s\n", dis ? "objdump" : "nm", path);
+        return 1;
+    }
+    dv_objn = 0;
+    if (at_bind(dv_emit)) return 1;
+    if (dis ? at_dis(dv_in, n) : at_nm(dv_in, n)) {
+        if (bx_view_err_line(dis, path, at_error(), line, 256) == 0) fputs(line, stderr);
+        else fprintf(stderr, "%s: %s: %s\n", dis ? "objdump" : "nm", path, at_error());
+        return 1;
+    }
+    if (dv_objn) fwrite(dv_obj, 1, (size_t)dv_objn, stdout);
+    return 0;
+}
+
+static int dv_ar_read(const char *path, unsigned char **b, long *n) {
+    char reason[128];
+    char line[512];
+    int rc;
+    int act;
+    const char *shown;
+    int cxi_read(const char *, unsigned char **, long *, char *, long);
+    int bx_read_act(int);
+    int bx_read_open_line(const char *, const char *, char *, int);
+    int bx_read_stdin(const char *);
+    int bx_read_fail_line(const char *, char *, int);
+    const char *bx_read_die(int);
+    *b = 0;
+    *n = 0;
+    rc = cxi_read(path, b, n, reason, 128);
+    act = bx_read_act(rc);
+    if (!act && *n > 2147483647L) act = 4;
+    if (!act) return 0;
+    free(*b);
+    *b = 0;
+    *n = 0;
+    if (act == 1) {
+        if (bx_read_open_line(path, reason, line, 512) == 0) fputs(line, stderr);
+        else fprintf(stderr, "unisacc: error: cannot open %s%s%s\n", path, reason[0] ? ": " : "", reason);
+        return 1;
+    }
+    if (act == 2) {
+        shown = bx_read_stdin(path) == 1 ? "stdin" : path;
+        if (bx_read_fail_line(shown, line, 512) == 0) fputs(line, stderr);
+        else fprintf(stderr, "run: cannot read %s\n", shown);
+        fputs("run: cannot read input\n", stderr);
+        return 1;
+    }
+    fprintf(stderr, "run: %s\n", bx_read_die(act));
+    return 1;
+}
+
+static int dv_ar_room(long cap, long n, long namesz) {
+    long long need;
+    if (n < 0 || namesz < 0) return 1;
+    need = (long long)n + 400 + (long long)namesz;
+    if (need < 0) return 1;
+    if ((long long)cap > 9223372036854775807LL - need) return 1;
+    return 0;
+}
+
+static int dv_ar_write(const char *path, const unsigned char *data, long n) {
+    char why[128];
+    char line[512];
+    int chmod(const char *, unsigned);
+    int hs_write_out(const char *, const unsigned char *, long, char *, int);
+    int bx_ar_write_line(const char *, char *, int);
+    if (!hs_write_out(path, data, n, why, 128)) {
+        if (chmod(path, 0644)) {
+            if (bx_ar_write_line(path, line, 512) == 0) fputs(line, stderr);
+            else fprintf(stderr, "ar: cannot write %s\n", path);
+            return 1;
+        }
+        return 0;
+    }
+    if (bx_ar_write_line(path, line, 512) == 0) fputs(line, stderr);
+    else fprintf(stderr, "ar: cannot write %s\n", path);
+    return 1;
+}
+
+int dv_ar(int argc, char **argv) {
+    const char *op;
+    const char *lib;
+    char why[128];
+    int op0;
+    int i;
+    const char *bx_ar_usage(void);
+    const char *bx_ar_big(void);
+    const char *bx_read_die(int);
+    const char *bx_ar_kind(void);
+    const char *bx_ar_op(void);
+    if (argc < 4) {
+        fputs(bx_ar_usage(), stderr);
+        return 2;
+    }
+    op = argv[2];
+    lib = argv[3];
+    if (cxr_operation(op, why, 128)) {
+        fputs(why, stderr);
+        return 2;
+    }
+    op0 = op[0] & 255;
+    if (op0 == 'r' || op0 == 'q') {
+        long cap;
+        unsigned char *ab;
+        long at;
+        cap = 8;
+        i = 4;
+        while (i < argc) {
+            unsigned char *b;
+            long n;
+            long namesz;
+            if (dv_ar_read(argv[i], &b, &n)) return 1;
+            namesz = dv_len(argv[i]);
+            free(b);
+            if (dv_ar_room(cap, n, namesz)) {
+                fputs(bx_ar_big(), stderr);
+                return 1;
+            }
+            cap = cap + n + 400 + namesz;
+            i = i + 1;
+        }
+        ab = malloc((size_t)cap);
+        if (!ab) {
+            fprintf(stderr, "run: %s\n", bx_read_die(6));
+            return 1;
+        }
+        memcpy(ab, "!<arch>\n", 8);
+        at = 8;
+        i = 4;
+        while (i < argc) {
+            unsigned char *b;
+            long n;
+            long next;
+            int rc;
+            if (dv_ar_read(argv[i], &b, &n)) {
+                free(ab);
+                return 1;
+            }
+            next = 0;
+            rc = cxr_append((char *)ab, cap, at, argv[i], (char *)b, n, &next, why, 128);
+            free(b);
+            if (rc) {
+                fputs(why, stderr);
+                free(ab);
+                return 1;
+            }
+            at = next;
+            i = i + 1;
+        }
+        if (dv_ar_write(lib, ab, at)) {
+            free(ab);
+            return 1;
+        }
+        free(ab);
+        return 0;
+    }
+    {
+        unsigned char *b;
+        long n;
+        char nm[256];
+        if (dv_ar_read(lib, &b, &n)) return 1;
+        if (n < 8 || memcmp(b, "!<arch>\n", 8)) {
+            free(b);
+            fputs(bx_ar_kind(), stderr);
+            return 1;
+        }
+        i = 0;
+        for (;;) {
+            long ml;
+            char *m;
+            int rc;
+            ml = 0;
+            m = 0;
+            rc = cxr_member((char *)b, n, i, nm, 256, &m, &ml, why, 128);
+            if (rc == 1) break;
+            if (rc) {
+                fputs(why, stderr);
+                free(b);
+                return 1;
+            }
+            if (op0 == 't') {
+                fputs(nm, stdout);
+                fputc('\n', stdout);
+            } else if (op0 == 'x') {
+                if (dv_ar_write(nm, (const unsigned char *)m, ml)) {
+                    free(b);
+                    return 1;
+                }
+            } else {
+                free(b);
+                fputs(bx_ar_op(), stderr);
+                return 2;
+            }
+            i = i + 1;
+        }
+        free(b);
+        return 0;
+    }
+}

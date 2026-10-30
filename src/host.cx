@@ -526,6 +526,69 @@ int hs_enter(unsigned char *base, int entryoff) {
     return entry(0, 0);
 }
 
+/* A static Linux image has no host loader in this process. A -run that
+   forwards to the host C library is the dynamic ELF the image route writes.
+   memfd + execveat(AT_EMPTY_PATH) replaces this process. There is no
+   on-disk fallback and no return into hs_enter. Numbers match hostnative:
+   x86_64 memfd 319, execveat 322, close 3, write 1. */
+#if defined(__aarch64__)
+#define HS_MEMFD 279L
+#define HS_EXECVEAT 281L
+#define HS_CLOSE 57L
+#define HS_WRITE 64L
+#define HS_LOADER "/lib/ld-linux-aarch64.so.1"
+#else
+#define HS_MEMFD 319L
+#define HS_EXECVEAT 322L
+#define HS_CLOSE 3L
+#define HS_WRITE 1L
+#define HS_LOADER "/lib64/ld-linux-x86-64.so.2"
+#endif
+
+static long hs_fx(long nr, long a, long b, long c, long d, long e) {
+    return __syscall6(nr, a, b, c, d, e);
+}
+
+int hs_forward_exec(const unsigned char *image, long n, char **argv) {
+    char **envp;
+    long fd;
+    long wrote;
+    long err;
+    long done;
+    int noloader;
+    if (!image || n < 0 || !argv) return 1;
+    envp = argv;
+    while (*envp) envp = envp + 1;
+    envp = envp + 1;
+    fflush(stdout);
+    fflush(stderr);
+    noloader = 0;
+    fd = hs_fx(HS_MEMFD, (long)"unisacc-run", 1 | 16, 0, 0, 0);
+    if (fd == -22) fd = hs_fx(HS_MEMFD, (long)"unisacc-run", 1, 0, 0, 0);
+    if (fd >= 0) {
+        done = 0;
+        err = 0;
+        while (done < n) {
+            wrote = hs_fx(HS_WRITE, fd, (long)(image + done), n - done, 0, 0);
+            if (wrote == -4) continue;
+            if (wrote <= 0) {
+                err = -5;
+                break;
+            }
+            done = done + wrote;
+        }
+        if (!err) err = hs_fx(HS_EXECVEAT, fd, (long)"", (long)argv, (long)envp, 0x1000L);
+        noloader = err == -2;
+        hs_fx(HS_CLOSE, fd, 0, 0, 0, 0);
+    } else err = fd;
+    if (noloader) {
+        fprintf(stderr, "unisacc: model driver: this program calls the host C library, and running it needs the host's dynamic loader %s, which could not be opened here (as on a system without glibc); write the program with -o and run it where glibc is installed\n", HS_LOADER);
+        return 1;
+    }
+    fprintf(stderr, "unisacc: model driver: this program calls the host C library, and its image could not be started from an anonymous memory file (errno %ld); write the program with -o and run that\n", (long)(-err));
+    return 1;
+}
+
 /* cxmod's injected file callbacks. rd: byte count, -1 only for ENOENT,
    -2 when the buffer fills, -3 for any other open/read/close failure.
    wr replaces the destination by rename so a reader never sees a prefix. */

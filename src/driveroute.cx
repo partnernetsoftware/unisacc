@@ -1,0 +1,388 @@
+/* Forward lowering. src/unisacc.cx does not use this file.
+   drive.cx calls dv_run_lower by name. cxmod, tapegate, and the forward
+   modules stay in this object. Stage spans stay in drive.o and are named
+   inside the functions that call them. A side-car with cnt>0 rewrites the
+   run route to the image route, drops the process slots, and tells the
+   caller to hs_forward_exec the dynamic ELF. cnt==0 stays on the run route. */
+#pragma unisa module driveroute
+#pragma unisa use compiler.fwdsig
+#pragma unisa use compiler.fwdmerge
+#pragma unisa use compiler.fwdincrement
+
+static const char *dv_fw_tgt;
+static char dv_fw_why[128];
+static unsigned char dv_funit_one = 1;
+static char dv_fwd_path[] = "/tmp/unisacc-forward-entry.c";
+
+static void dv_setwhy(char *why, int cap, const char *s) {
+    int i;
+    if (!why || cap <= 0) return;
+    i = 0;
+    if (s) while (s[i] && i + 1 < cap) { why[i] = s[i]; i = i + 1; }
+    why[i] = 0;
+}
+
+static int dv_fw_replay(void) {
+    const char *e;
+    e = getenv("UNISA_FWD_REPLAY");
+    if (e && e[0]) return 1;
+    return 0;
+}
+
+static void *dv_fw_alloc(void *p, long long n) {
+    return realloc(p, n ? (size_t)n : 1);
+}
+
+static void dv_fw_release(void *p) { free(p); }
+
+static void dv_fw_fail(char *m) {
+    fprintf(stderr, "unisacc: %s\n", m ? m : "forward");
+    exit(1);
+}
+
+static int dv_fwd_win(const char *t) {
+    if (t && t[0] == 'w' && t[1] == 'i' && t[2] == 'n' && t[3] == '/') return 1;
+    return 0;
+}
+
+static int dv_fw_take(char *route, const char *first, const char *last, void *buf, char *src) {
+    FwiBuf *u;
+    unsigned char *in;
+    unsigned char *out;
+    long inn;
+    long outn;
+    int pr;
+    int st_span(const char *, const char *, const char *, int, unsigned, const char *, const char *, unsigned char *, long, unsigned char **, long *, char *, int);
+    u = (FwiBuf *)buf;
+    if (!u || !route || !dv_fw_tgt || !src) return 1;
+    in = u->b;
+    inn = u->n;
+    u->b = 0;
+    u->n = 0;
+    u->cap = 0;
+    u->at = 0;
+    out = 0;
+    outn = 0;
+    dv_fw_why[0] = 0;
+    pr = st_span(route, dv_fw_tgt, src, 0, 0, first, last, in, inn, &out, &outn, dv_fw_why, 128);
+    if (pr) return 1;
+    if (outn < 0 || outn > 2147483647L) {
+        free(out);
+        dv_setwhy(dv_fw_why, 128, "model too large");
+        return 1;
+    }
+    u->b = out;
+    u->n = (int)outn;
+    u->cap = (int)outn;
+    return 0;
+}
+
+static int dv_fw_front(char *route, char *stage, void *buf, char *src) {
+    return dv_fw_take(route, 0, stage, buf, src);
+}
+
+static int dv_fw_range(char *route, char *a, char *b, void *buf, char *src) {
+    int pr;
+    int st_extra_put(const char *, int, const unsigned char *, int);
+    int st_extra_pop(void);
+    if (st_extra_put("\0cli/funit", (int)(sizeof "\0cli/funit" - 1), &dv_funit_one, 1)) return 1;
+    pr = dv_fw_take(route, a, b, buf, src);
+    if (st_extra_pop()) return 1;
+    return pr;
+}
+
+static int dv_fw_merge(const void *base, const void *stub, const void *unit, int unitn, void *merged) {
+    return fwm_merge((const FwmBuf *)base, (const FwmBuf *)stub, (const FwmBuf *)unit, unitn, (FwmBuf *)merged);
+}
+
+static int dv_fwd_one(const unsigned char *b, unsigned long long n, unsigned long long *at,
+                      const char **nm, unsigned long long *nl, USForwardSig *sig, char *why, int cap) {
+    unsigned long long sl;
+    int bad;
+    int k;
+    char line[1100];
+    if (us_fw_u64(b, n, at, nl) || *nl > 1024 || *nl > n - *at) {
+        dv_setwhy(why, cap, "forwarding side-car malformed");
+        return 1;
+    }
+    *nm = (const char *)b + *at;
+    *at = *at + *nl;
+    if (us_fw_u64(b, n, at, &sl) || sl > n - *at) {
+        dv_setwhy(why, cap, "forwarding side-car malformed");
+        return 1;
+    }
+    memset(sig, 0, sizeof *sig);
+    bad = us_forward_sig_decode(b + *at, sl, *nm, *nl, sig);
+    *at = *at + sl;
+    if (fw_undef(bad, sig->structbyval, sig->ret.structbyval, sig->n)) {
+        if (fw_undef_line(*nm, (int)*nl, line, 1100) == 0) fputs(line, stderr);
+        dv_setwhy(why, cap, "undefined function");
+        return 1;
+    }
+    k = 0;
+    while (k < sig->n) {
+        if (sig->args[k].callback) {
+            if (fw_undef_line(*nm, (int)*nl, line, 1100) == 0) fputs(line, stderr);
+            dv_setwhy(why, cap, "undefined function");
+            return 1;
+        }
+        k = k + 1;
+    }
+    (void)fwm_export((const unsigned char *)*nm, (int)*nl);
+    return 0;
+}
+
+static int dv_fwd_emit(const char *nm, unsigned long long nl, const USForwardSig *sig, char *why, int cap) {
+    int kk[33];
+    int ww[33];
+    int uu[33];
+    int k;
+    int emitted;
+    char line[1100];
+    int fwd_emit(char *, int, int, int *, int *, int *, int, int, int, int);
+    int fwd_emit_var(char *, int, int, int *, int *, int, int, int, int);
+    int fwd_pclear(void);
+    int fw_emit_miss(int);
+    k = 0;
+    while (k < sig->n) {
+        kk[k] = sig->args[k].kind;
+        ww[k] = sig->args[k].width;
+        uu[k] = 0;
+        k = k + 1;
+    }
+    if (sig->variadic)
+        emitted = fwd_emit_var((char *)nm, (int)nl, sig->n, kk, ww, sig->ret.isvoid, sig->ret.kind, sig->ret.width, sig->ret.uns);
+    else
+        emitted = fwd_emit((char *)nm, (int)nl, sig->n, kk, ww, uu, sig->ret.isvoid, sig->ret.kind, sig->ret.width, sig->ret.uns);
+    fwd_pclear();
+    if (fw_emit_miss(emitted)) {
+        if (fw_undef_line(nm, (int)nl, line, 1100) == 0) fputs(line, stderr);
+        dv_setwhy(why, cap, "undefined function");
+        return 1;
+    }
+    return 0;
+}
+
+static int dv_fwd_stub(const unsigned char *b, unsigned long long n, unsigned long long at,
+                       unsigned long long cnt, unsigned long long ccwc, const char *tgt,
+                       char *why, int cap) {
+    unsigned long long r;
+    void fwd_reset(void);
+    void fwd_set_ccw(int);
+    void fwd_set_maxargs(int);
+    int fwd_count(void);
+    int fwd_emit_libs(void);
+    if (fwm_bind(dv_fw_alloc, dv_fw_release, dv_fw_fail)) {
+        dv_setwhy(why, cap, "out of memory");
+        return 1;
+    }
+    fwm_reset();
+    fwd_reset();
+    fwd_set_ccw(ccwc > 0);
+    fwd_set_maxargs(dv_fwd_win(tgt) ? 4 : 0);
+    r = 0;
+    while (r < cnt) {
+        const char *nm;
+        unsigned long long nl;
+        USForwardSig sig;
+        if (dv_fwd_one(b, n, &at, &nm, &nl, &sig, why, cap)) return 1;
+        if (dv_fwd_emit(nm, nl, &sig, why, cap)) return 1;
+        r = r + 1;
+    }
+    if (fwd_count() > 0) fwd_emit_libs();
+    return 0;
+}
+
+static int dv_fwd_merge(const char *route, const char *tgt, const char *src, int cx,
+                        int level, int nsrc, unsigned char *tape, long tapen,
+                        unsigned char **out, long *outn, char *why, int cap) {
+    FwiBuf base;
+    FwiBuf merged;
+    FwiBuf attrs;
+    FwiRi ri[1];
+    int nri;
+    int attr_unit;
+    int attr_slot;
+    int fast;
+    unsigned char *hold;
+    long hn;
+    long hc;
+    const char *cont;
+    int st_attr_exchange(unsigned char **, long *, long *);
+    int st_span(const char *, const char *, const char *, int, unsigned, const char *, const char *, unsigned char *, long, unsigned char **, long *, char *, int);
+    int fwd_count(void);
+    char *fwd_text(void);
+    base.b = tape;
+    base.at = 0;
+    base.n = (int)tapen;
+    base.cap = (int)tapen + 1;
+    merged.b = 0;
+    merged.at = 0;
+    merged.n = 0;
+    merged.cap = 0;
+    attrs.b = 0;
+    attrs.at = 0;
+    attrs.n = 0;
+    attrs.cap = 0;
+    ri[0].name = 0;
+    ri[0].n = 0;
+    ri[0].data = 0;
+    ri[0].len = 0;
+    nri = 0;
+    attr_unit = 0;
+    attr_slot = -1;
+    dv_fw_tgt = tgt;
+    dv_fw_why[0] = 0;
+    hold = 0;
+    hn = 0;
+    hc = 0;
+    if (st_attr_exchange(&hold, &hn, &hc)) {
+        free(tape);
+        dv_setwhy(why, cap, "cli");
+        return 1;
+    }
+    fast = fwd_incremental(tgt, level, &base, nsrc, &merged, ri, &nri, &attrs, &attr_unit, &attr_slot,
+                           dv_fwd_path, dv_fw_replay, fwm_overflowed, fwd_count, fwd_text,
+                           dv_fw_alloc, dv_fw_release, dv_fw_front, dv_fw_range, dv_fw_merge);
+    st_attr_exchange(&hold, &hn, &hc);
+    free(hold);
+    free(tape);
+    cont = level ? "e4" : "prune";
+    if (fast > 0)
+        return st_span(route, tgt, src, cx, 0, cont, 0, merged.b, merged.n, out, outn, why, cap);
+    free(merged.b);
+    if (fast < 0) {
+        dv_setwhy(why, cap, dv_fw_why[0] ? dv_fw_why : "forwarding stub");
+        return 1;
+    }
+    dv_setwhy(why, cap, "forwarding increment refused");
+    return 1;
+}
+
+/* "/run/" becomes "/image/". "image" is two bytes longer than "run". */
+static int dv_image_route(const char *route, char *dst, int cap) {
+    int i;
+    int n;
+    int at;
+    const char *ins;
+    if (!route || !dst || cap < 8) return 1;
+    n = 0;
+    while (route[n]) n = n + 1;
+    at = -1;
+    i = 0;
+    while (i + 5 <= n) {
+        if (route[i] == '/' && route[i + 1] == 'r' && route[i + 2] == 'u' && route[i + 3] == 'n' && route[i + 4] == '/') {
+            at = i;
+            break;
+        }
+        i = i + 1;
+    }
+    if (at < 0) return 1;
+    i = 0;
+    while (i < at) {
+        if (i + 1 >= cap) return 1;
+        dst[i] = route[i];
+        i = i + 1;
+    }
+    ins = "/image";
+    n = 0;
+    while (ins[n]) {
+        if (i + 1 >= cap) return 1;
+        dst[i] = ins[n];
+        i = i + 1;
+        n = n + 1;
+    }
+    n = at + 4;
+    while (route[n]) {
+        if (i + 1 >= cap) return 1;
+        dst[i] = route[n];
+        i = i + 1;
+        n = n + 1;
+    }
+    dst[i] = 0;
+    return 0;
+}
+
+int dv_run_lower(const char *route, const char *tgt, const char *src, int cx,
+                 int level, int nsrc, unsigned char *in, long inn,
+                 unsigned char **out, long *outn, char *why, int cap, int *execf) {
+    unsigned char *e3;
+    unsigned char *tape;
+    long e3n;
+    unsigned long long n;
+    unsigned long long at;
+    unsigned long long tl;
+    unsigned long long cnt;
+    unsigned long long ccwc;
+    int pr;
+    const char *cont;
+    char img[96];
+    int st_extra_put(const char *, int, const unsigned char *, int);
+    int st_extra_pop(void);
+    int st_span(const char *, const char *, const char *, int, unsigned, const char *, const char *, unsigned char *, long, unsigned char **, long *, char *, int);
+    if (execf) *execf = 0;
+    if (!out || !outn) {
+        free(in);
+        return 4;
+    }
+    *out = 0;
+    *outn = 0;
+    if (st_extra_put("\0cli/run-forward", (int)(sizeof "\0cli/run-forward" - 1), &dv_funit_one, 1)) {
+        free(in);
+        dv_setwhy(why, cap, "cli");
+        return 1;
+    }
+    e3 = 0;
+    e3n = 0;
+    pr = st_span(route, tgt, src, cx, 0, 0, "e3", in, inn, &e3, &e3n, why, cap);
+    st_extra_pop();
+    if (pr) return pr;
+    n = (unsigned long long)e3n;
+    if (fw_side_head(e3, n)) {
+        free(e3);
+        dv_setwhy(why, cap, "forwarding side-car missing");
+        return 1;
+    }
+    at = 7;
+    if (us_fw_u64(e3, n, &at, &tl) || us_fw_u64(e3, n, &at, &cnt) || us_fw_u64(e3, n, &at, &ccwc) ||
+        fw_side_bad(ccwc, tl, n, at) || tl > 2147483647ULL) {
+        free(e3);
+        dv_setwhy(why, cap, "forwarding side-car malformed");
+        return 1;
+    }
+    tape = malloc((size_t)tl + 1);
+    if (!tape) {
+        free(e3);
+        dv_setwhy(why, cap, "out of memory");
+        return 1;
+    }
+    if (tl) memcpy(tape, e3 + at, (size_t)tl);
+    tape[tl] = 0;
+    at = at + tl;
+    cont = level ? "e4" : "prune";
+    if (cnt == 0) {
+        free(e3);
+        return st_span(route, tgt, src, cx, 0, cont, 0, tape, (long)tl, out, outn, why, cap);
+    }
+    if (dv_image_route(route, img, 96)) {
+        free(tape);
+        free(e3);
+        dv_setwhy(why, cap, "image route");
+        return 1;
+    }
+    if (st_extra_pop() || st_extra_pop()) {
+        free(tape);
+        free(e3);
+        dv_setwhy(why, cap, "cli");
+        return 1;
+    }
+    if (dv_fwd_stub(e3, n, at, cnt, ccwc, tgt, why, cap)) {
+        free(tape);
+        free(e3);
+        return 1;
+    }
+    free(e3);
+    pr = dv_fwd_merge(img, tgt, src, cx, level, nsrc, tape, (long)tl, out, outn, why, cap);
+    if (!pr && execf) *execf = 1;
+    return pr;
+}

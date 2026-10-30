@@ -1,14 +1,25 @@
 #pragma unisa module executor
 #pragma unisa use core.execute
-#pragma unisa use core.alu
-#pragma unisa use core.transition
-#pragma unisa use core.stack
-#pragma unisa use core.output
-#pragma unisa use core.sparse
-#pragma unisa use core.bytes
-#pragma unisa use runtime.codec
-#pragma unisa use runtime.model_decode
-#pragma unisa use runtime.model_lifetime
+/* CxModel matches cx/runtime/model_lifetime.cx. CxDecode matches model_decode.cx.
+   CxCodecCrc matches cx/runtime/codec.cx. Those bodies are other objects. */
+typedef struct UnisaModel {
+    int loaded;
+    int ns,nq,nrg,nstr,start,isnet,topmax,nqa;
+    char **str; int *strl; int *qoff,*qlen; int64_t *qa;
+    int *smode,*rowc,**rowk,**rown,**rowq; int *nlo,*nhi,*bn,*bq,*rets; unsigned char **retok;
+} CxModel;
+typedef struct CxDecode {
+    CxModel model;
+    void *(*allocate)(void *, size_t);
+    void (*release)(void *);
+    const char *why;
+} CxDecode;
+typedef struct { uint32_t table[4][256]; } CxCodecCrc;
+typedef struct CxCoreStack CxCoreStack;
+typedef struct CxCoreFrames CxCoreFrames;
+typedef struct CxSparse CxSparse;
+typedef struct CxBlobs CxBlobs;
+typedef struct CxResources CxResources;
 /* Host hooks are defined in host.cx. Image and memory bind stay in bind.cx.
    -E runs the e2 model and returns its output bytes. */
 int ex_touch(void) {
@@ -16,6 +27,17 @@ int ex_touch(void) {
     long long next;
     const char *why;
     int z;
+    int64_t core_alu32(int, int64_t, int64_t);
+    int64_t core_alu64(int, int64_t, int64_t, int *);
+    int core_run_take(int);
+    int core_run_budget(long long, long long, long long *, const char **);
+    int core_decimal(char *, int64_t);
+    void core_stack_push(CxCoreStack *, int);
+    void core_frame_pop(CxCoreFrames *);
+    int64_t core_memory_get(const CxSparse *, int64_t);
+    void core_memory_set(CxSparse *, int64_t, int64_t);
+    int core_blob_add(CxBlobs *, const unsigned char *, int);
+    int core_resource_find(CxResources *, CxBlobs *, const unsigned char *, int);
     if (core_alu32(0, 1, 2) != 3) return 1;
     if (core_alu64(0, 1, 2, &z) != 3 || z) return 1;
     if (core_run_take(0) != 1) return 1;
@@ -76,6 +98,11 @@ int ex_pp(const unsigned char *comp, long n, int raw, unsigned crc, int compress
     CoreResult result;
     uint32_t got;
     int st;
+    int cxcodec_inflate(unsigned char *, unsigned long, const unsigned char *, unsigned long);
+    int cxcodec_crc_init(CxCodecCrc *);
+    int cxcodec_crc(CxCodecCrc *, const char *, int, uint32_t *);
+    int cxmd_decode(CxDecode *, const unsigned char *, long);
+    void cxml_release(CxModel *, void (*)(void *));
     if (!outb || !outn || n < 0 || raw <= 0 || inputn < 0 || (n > 0 && !comp) || (inputn > 0 && !input)) {
         ex_why(why, cap, "bad argument");
         return 4;
@@ -151,24 +178,30 @@ static int ex_held;
 
 int ex_inflate(unsigned char *out, unsigned long outlen,
                const unsigned char *in, unsigned long inlen) {
+    int cxcodec_inflate(unsigned char *, unsigned long, const unsigned char *, unsigned long);
     return cxcodec_inflate(out, outlen, in, inlen);
 }
 
 unsigned ex_crc32(char *p, int n) {
     CxCodecCrc ctx;
     uint32_t got;
+    int cxcodec_crc_init(CxCodecCrc *);
+    int cxcodec_crc(CxCodecCrc *, const char *, int, uint32_t *);
     if (!p || n < 0) return 0;
     if (cxcodec_crc_init(&ctx) || cxcodec_crc(&ctx, p, n, &got)) return 0;
     return got;
 }
 
 void ex_unload(void) {
+    void cxml_release(CxModel *, void (*)(void *));
     if (!ex_held) return;
     cxml_release(&ex_dec.model, ex_drop);
     ex_held = 0;
 }
 
 int ex_load(const unsigned char *raw, int n, char *why, int cap) {
+    int cxmd_decode(CxDecode *, const unsigned char *, long);
+    void cxml_release(CxModel *, void (*)(void *));
     if (ex_held) ex_unload();
     if (!raw || n <= 0) {
         ex_why(why, cap, "bad argument");

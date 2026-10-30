@@ -6,11 +6,15 @@
    An explicit CONSTRUCTOR is executed directly.
    Each compile and the link runs under ROOT/tools/bound. The candidate
    is OUT/candidate. The receipt is OUT/receipt.txt. This does not replace
-   ROOT/unisacc.com and does not call the old construction scripts. */
+   ROOT/unisacc.com and does not call the old construction scripts.
+   One object per small closure. drive is src/unisacc.cx.
+   UNISACC_RR_TIME=1. Each step keeps stderr in OUT/<name>.rr. The receipt
+   records wall time and the slowest RR_TIME line (inference, inflate, or other). */
 #pragma unisa use runtime.process
 #pragma unisa use runtime.packagefooter
 
 struct eb_ts { long sec; long nsec; };
+static char eb_rr_env[] = "UNISACC_RR_TIME=1";
 
 static void eb_die(const char *s) {
     fprintf(stderr, "entry-build: %s\n", s);
@@ -40,13 +44,88 @@ static void eb_sha(const char *path, char h[65], long *n) {
     free(b);
 }
 
-static int eb_run(char **argv, const char *cwd, int secs, long long *dt, char *why, int wl) {
+static void eb_copy_tok(char *dst, int cap, const char *s) {
+    int i;
+    if (!dst || cap <= 0) return;
+    if (!s) s = "-";
+    i = 0;
+    while (s[i] && i + 1 < cap) {
+        char c;
+        c = s[i];
+        if (c == '\t' || c == '\n' || c == '\r') c = ' ';
+        dst[i] = c;
+        i = i + 1;
+    }
+    dst[i] = 0;
+}
+
+static const char *eb_find(const char *s, const char *w) {
+    int i;
+    int k;
+    if (!s || !w) return 0;
+    i = 0;
+    while (s[i]) {
+        k = 0;
+        while (w[k] && s[i + k] == w[k]) k = k + 1;
+        if (!w[k]) return s + i;
+        i = i + 1;
+    }
+    return 0;
+}
+
+static void eb_slow(const char *path, char *kind, int kcap, char *line, int lcap, long long *ns) {
+    FILE *f;
+    char buf[768];
+    eb_copy_tok(kind, kcap, "UNMEASURED");
+    eb_copy_tok(line, lcap, "-");
+    *ns = -1;
+    if (!path) return;
+    f = fopen(path, "rb");
+    if (!f) return;
+    while (fgets(buf, (int)sizeof buf, f)) {
+        const char *p;
+        const char *k;
+        long long v;
+        if (!eb_find(buf, "RR_TIME")) continue;
+        p = eb_find(buf, "ns=");
+        if (!p) continue;
+        p = p + 3;
+        if (*p == '-') p = p + 1;
+        if (*p < '0' || *p > '9') continue;
+        v = 0;
+        while (*p >= '0' && *p <= '9') {
+            v = v * 10 + (long long)(*p - '0');
+            p = p + 1;
+        }
+        if (v <= *ns) continue;
+        *ns = v;
+        if (eb_find(buf, "inflate")) k = "inflate";
+        else if (eb_find(buf, "inference")) k = "inference";
+        else k = "other";
+        eb_copy_tok(kind, kcap, k);
+        eb_copy_tok(line, lcap, buf);
+    }
+    if (fclose(f)) eb_die("rr close");
+}
+
+static int eb_run(char **argv, const char *cwd, int secs, long long *dt, char *why, int wl, const char *errpath) {
     np_result r;
     long long t0;
     int pr;
+    char *envadd[2];
+    FILE *ef;
     t0 = eb_ns();
-    pr = np_run(argv, cwd, 0, secs, &r, why, (size_t)wl);
+    envadd[0] = eb_rr_env;
+    envadd[1] = 0;
+    pr = np_run(argv, cwd, envadd, secs, &r, why, (size_t)wl);
     *dt = eb_ns() - t0;
+    if (!pr && errpath && r.err && r.errn) {
+        ef = fopen(errpath, "wb");
+        if (ef) {
+            fwrite(r.err, 1, r.errn, ef);
+            if (fclose(ef)) eb_die("rr close");
+        }
+    }
     if (pr) return -1;
     if (r.rc) {
         if (r.err && r.errn) fwrite(r.err, 1, r.errn, stderr);
@@ -57,7 +136,7 @@ static int eb_run(char **argv, const char *cwd, int secs, long long *dt, char *w
     return 0;
 }
 
-static int eb_compile(const char *bound, const char *ctor, int via_sh, const char *src, const char *obj, const char *cwd, long long *dt, char *why, int wl) {
+static int eb_compile(const char *bound, const char *ctor, int via_sh, const char *src, const char *obj, const char *cwd, const char *errpath, long long *dt, char *why, int wl) {
     char *v[14];
     int n;
     n = 0;
@@ -73,13 +152,15 @@ static int eb_compile(const char *bound, const char *ctor, int via_sh, const cha
     v[n++] = "-o";
     v[n++] = (char *)obj;
     v[n++] = (char *)src;
+    if (n >= 14) eb_die("argv");
     v[n] = 0;
-    return eb_run(v, cwd, 58, dt, why, wl);
+    return eb_run(v, cwd, 58, dt, why, wl, errpath);
 }
 
-static int eb_link(const char *bound, const char *ctor, int via_sh, const char *drive, const char *execo, const char *native, const char *elf, const char *cwd, long long *dt, char *why, int wl) {
-    char *v[13];
+static int eb_link(const char *bound, const char *ctor, int via_sh, char **objs, int nobj, const char *elf, const char *cwd, const char *errpath, long long *dt, char *why, int wl) {
+    char *v[64];
     int n;
+    int i;
     n = 0;
     v[n++] = (char *)bound;
     v[n++] = "40";
@@ -89,11 +170,14 @@ static int eb_link(const char *bound, const char *ctor, int via_sh, const char *
     v[n++] = "lnx/x86_64";
     v[n++] = "-o";
     v[n++] = (char *)elf;
-    v[n++] = (char *)drive;
-    v[n++] = (char *)execo;
-    v[n++] = (char *)native;
+    i = 0;
+    while (i < nobj) {
+        if (n >= 63) eb_die("argv");
+        v[n++] = objs[i];
+        i = i + 1;
+    }
     v[n] = 0;
-    return eb_run(v, cwd, 45, dt, why, wl);
+    return eb_run(v, cwd, 45, dt, why, wl, errpath);
 }
 
 static void eb_splice(const char *elf, const char *p3, const char *dst, long *poff, long *plen, long long *dt) {
@@ -124,40 +208,31 @@ static void eb_splice(const char *elf, const char *p3, const char *dst, long *po
     *dt = eb_ns() - t0;
 }
 
-static void eb_line(FILE *f, const char *k, const char *sha, long n, long long ns) {
-    fprintf(f, "%s\tsha=%s\tbytes=%ld\tns=%lld\n", k, sha, n, ns);
+static void eb_line_slow(FILE *f, const char *k, const char *sha, long n, long long ns, const char *rr) {
+    char kind[32];
+    char line[512];
+    long long sn;
+    eb_slow(rr, kind, 32, line, 512, &sn);
+    fprintf(f, "%s\tsha=%s\tbytes=%ld\tns=%lld\tslow_kind=%s\tslow_ns=%lld\tslow_line=%s\n", k, sha, n, ns, kind, sn, line);
 }
 
 static void eb_open_head(FILE *rf, const char *root, const char *p3, const char *hp, const char *ctor, const char *hc, long nk, int via_sh) {
-    fprintf(rf, "entry-build-v2\nroot\t%s\np3\t%s\np3_sha\t%s\nconstructor\t%s\nconstructor_sha\t%s\nconstructor_bytes\t%ld\nvia\t%s\n",
+    fprintf(rf, "entry-build-v3\nroot\t%s\np3\t%s\np3_sha\t%s\nconstructor\t%s\nconstructor_sha\t%s\nconstructor_bytes\t%ld\nvia\t%s\n",
             root, p3, hp, ctor, hc, nk, via_sh ? "sh" : "exec");
+    if (fflush(rf)) eb_die("receipt");
 }
 
-static void eb_obj(FILE *rf, const char *key, const char *path, long long ns) {
-    char h[65];
-    long n;
-    if (!key) return;
-    eb_sha(path, h, &n);
-    eb_line(rf, key, h, n, ns);
-}
-
-static void eb_fail(const char *path, const char *root, const char *p3, const char *hp, const char *ctor, const char *hc, long nk, int via_sh,
-                    const char *k0, const char *p0, long long n0,
-                    const char *k1, const char *p1, long long n1,
-                    const char *k2, const char *p2, long long n2,
-                    const char *phase, int rc, long long ns, const char *why) {
-    FILE *rf;
-    const char *kind;
-    rf = fopen(path, "wb");
-    if (!rf) eb_die("receipt");
-    eb_open_head(rf, root, p3, hp, ctor, hc, nk, via_sh);
-    eb_obj(rf, k0, p0, n0);
-    eb_obj(rf, k1, p1, n1);
-    eb_obj(rf, k2, p2, n2);
-    kind = (rc == 142 || rc < 0) ? "TIMEOUT" : "FAIL";
-    fprintf(rf, "failed_phase\t%s\nfailed_class\t%s\nfailed_rc\t%d\nfailed_ns\t%lld\n", phase, kind, rc, ns);
+static void eb_fail_close(FILE *rf, const char *phase, const char *rr, int rc, long long ns, const char *why) {
+    char kind[32];
+    char line[512];
+    long long sn;
+    const char *cls;
+    eb_slow(rr, kind, 32, line, 512, &sn);
+    cls = (rc == 142 || rc < 0) ? "TIMEOUT" : "FAIL";
+    fprintf(rf, "failed_phase\t%s\nfailed_class\t%s\nfailed_rc\t%d\nfailed_ns\t%lld\nfailed_slow_kind\t%s\nfailed_slow_ns\t%lld\nfailed_slow_line\t%s\n",
+            phase, cls, rc, ns, kind, sn, line);
     if (fclose(rf)) eb_die("receipt close");
-    fprintf(stderr, "entry-build: %s %s rc %d\n", phase, kind, rc);
+    fprintf(stderr, "entry-build: %s %s rc %d\n", phase, cls, rc);
     if (why && why[0]) fprintf(stderr, "%s\n", why);
 }
 
@@ -167,21 +242,25 @@ int main(int argc, char **argv) {
     char out[512];
     char ctor[576];
     char bound[576];
-    char src_drive[576];
-    char src_exec[576];
-    char src_native[576];
-    char drive[576];
-    char execo[576];
-    char native[576];
+    char srcs_b[38][576];
+    char objs_b[38][576];
+    char rrs_b[38][576];
     char elf[576];
     char cand[576];
     char receipt[576];
+    char rr_link[576];
     char why[512];
-    char hd[65], he[65], hn[65], hf[65], hc[65], hp[65], hk[65];
-    long nd, ne, nn, nf, nc, np, nk;
+    char shas[38][65];
+    char hf[65], hc[65], hp[65], hk[65];
+    const char *keys[38];
+    const char *src_rel[38];
+    char *objp[38];
+    long nbytes[38];
+    long nf, nc, np, nk;
     long poff, plen;
-    long long td, te, tn, tl, ts;
-    int via_sh, rc;
+    long long nss[38];
+    long long tl, ts;
+    int via_sh, rc, i;
     FILE *rf;
     if (argc != 4 && argc != 5) {
         fputs("usage: ROOT P3 OUT [CONSTRUCTOR]\n", stderr);
@@ -195,44 +274,88 @@ int main(int argc, char **argv) {
     unsetenv("UNISA_CONTAINER");
     eb_join(bound, 576, root, "tools/bound");
     if (via_sh) eb_join(ctor, 576, root, "unisacc.com");
-    eb_join(src_drive, 576, root, "src/unisacc.cx");
-    eb_join(src_exec, 576, root, "src/entryexec.cx");
-    eb_join(src_native, 576, root, "src/hostnative.cx");
-    eb_join(drive, 576, out, "drive.o");
-    eb_join(execo, 576, out, "exec.o");
-    eb_join(native, 576, out, "hostnative.o");
+    keys[0] = "drive.o"; src_rel[0] = "src/unisacc.cx";
+    keys[1] = "host.o"; src_rel[1] = "src/host.cx";
+    keys[2] = "stages.o"; src_rel[2] = "src/stages.cx";
+    keys[3] = "routestep.o"; src_rel[3] = "src/runtime/routestep.cx";
+    keys[4] = "stagehandoff.o"; src_rel[4] = "src/runtime/stagehandoff.cx";
+    keys[5] = "runexec.o"; src_rel[5] = "src/runtime/runexec.cx";
+    keys[6] = "attributeframe.o"; src_rel[6] = "src/runtime/attribute_frame.cx";
+    keys[7] = "bind.o"; src_rel[7] = "src/bind.cx";
+    keys[8] = "cli.o"; src_rel[8] = "src/driver/cli.cx";
+    keys[9] = "compat.o"; src_rel[9] = "src/driver/compat.cx";
+    keys[10] = "route.o"; src_rel[10] = "src/driver/route.cx";
+    keys[11] = "deps.o"; src_rel[11] = "src/driver/deps.cx";
+    keys[12] = "input.o"; src_rel[12] = "src/driver/input.cx";
+    keys[13] = "args.o"; src_rel[13] = "src/driver/args.cx";
+    keys[14] = "path.o"; src_rel[14] = "src/driver/path.cx";
+    keys[15] = "entrybind.o"; src_rel[15] = "src/entrybind.cx";
+    keys[16] = "memlayout.o"; src_rel[16] = "src/runtime/memlayout.cx";
+    keys[17] = "driveface.o"; src_rel[17] = "src/driveface.cx";
+    keys[18] = "driveroute.o"; src_rel[18] = "src/driveroute.cx";
+    keys[19] = "cxmod.o"; src_rel[19] = "src/compiler/cxmod.cx";
+    keys[20] = "tapegate.o"; src_rel[20] = "src/compiler/tapegate.cx";
+    keys[21] = "fwdstub.o"; src_rel[21] = "src/compiler/fwdstub.cx";
+    keys[22] = "executor.o"; src_rel[22] = "src/executor.cx";
+    keys[23] = "alu.o"; src_rel[23] = "src/core/alu.cx";
+    keys[24] = "stack.o"; src_rel[24] = "src/core/stack.cx";
+    keys[25] = "output.o"; src_rel[25] = "src/core/output.cx";
+    keys[26] = "sparse.o"; src_rel[26] = "src/core/sparse.cx";
+    keys[27] = "bytes.o"; src_rel[27] = "src/core/bytes.cx";
+    keys[28] = "transition.o"; src_rel[28] = "src/core/transition.cx";
+    keys[29] = "codec.o"; src_rel[29] = "src/runtime/codec.cx";
+    keys[30] = "modeldecode.o"; src_rel[30] = "src/runtime/model_decode.cx";
+    keys[31] = "modelnumber.o"; src_rel[31] = "src/runtime/model_number.cx";
+    keys[32] = "packmodel.o"; src_rel[32] = "src/packmodel.cx";
+    keys[33] = "modelload.o"; src_rel[33] = "src/runtime/modelload.cx";
+    keys[34] = "bindstage.o"; src_rel[34] = "src/runtime/compiler/bindstage.cx";
+    keys[35] = "entryexec.o"; src_rel[35] = "src/entryexec.cx";
+    keys[36] = "hostnative.o"; src_rel[36] = "src/hostnative.cx";
+    keys[37] = "tapelink.o"; src_rel[37] = "src/compiler/tapelink.cx";
+    i = 0;
+    while (i < 38) {
+        int rn;
+        eb_join(srcs_b[i], 576, root, src_rel[i]);
+        eb_join(objs_b[i], 576, out, keys[i]);
+        rn = snprintf(rrs_b[i], 576, "%s/%s.rr", out, keys[i]);
+        if (rn < 0 || rn >= 576) eb_die("path");
+        objp[i] = objs_b[i];
+        i = i + 1;
+    }
     eb_join(elf, 576, out, "entry.elf");
     eb_join(cand, 576, out, "candidate");
     eb_join(receipt, 576, out, "receipt.txt");
+    eb_join(rr_link, 576, out, "entry.elf.rr");
     eb_sha(p3, hp, &np);
     eb_sha(ctor, hk, &nk);
-    why[0] = 0;
-    rc = eb_compile(bound, ctor, via_sh, src_drive, drive, root, &td, why, (int)sizeof why);
-    if (rc) { eb_fail(receipt, root, p3, hp, ctor, hk, nk, via_sh, 0, 0, 0, 0, 0, 0, 0, 0, 0, "drive.o", rc, td, why); return 1; }
-    why[0] = 0;
-    rc = eb_compile(bound, ctor, via_sh, src_exec, execo, root, &te, why, (int)sizeof why);
-    if (rc) { eb_fail(receipt, root, p3, hp, ctor, hk, nk, via_sh, "drive.o", drive, td, 0, 0, 0, 0, 0, 0, "exec.o", rc, te, why); return 1; }
-    why[0] = 0;
-    rc = eb_compile(bound, ctor, via_sh, src_native, native, root, &tn, why, (int)sizeof why);
-    if (rc) { eb_fail(receipt, root, p3, hp, ctor, hk, nk, via_sh, "drive.o", drive, td, "exec.o", execo, te, 0, 0, 0, "hostnative.o", rc, tn, why); return 1; }
-    why[0] = 0;
-    rc = eb_link(bound, ctor, via_sh, drive, execo, native, elf, root, &tl, why, (int)sizeof why);
-    if (rc) { eb_fail(receipt, root, p3, hp, ctor, hk, nk, via_sh, "drive.o", drive, td, "exec.o", execo, te, "hostnative.o", native, tn, "entry.elf", rc, tl, why); return 1; }
-    eb_splice(elf, p3, cand, &poff, &plen, &ts);
-    eb_sha(drive, hd, &nd);
-    eb_sha(execo, he, &ne);
-    eb_sha(native, hn, &nn);
-    eb_sha(elf, hf, &nf);
-    eb_sha(cand, hc, &nc);
     rf = fopen(receipt, "wb");
     if (!rf) eb_die("receipt");
     eb_open_head(rf, root, p3, hp, ctor, hk, nk, via_sh);
+    i = 0;
+    while (i < 38) {
+        why[0] = 0;
+        rc = eb_compile(bound, ctor, via_sh, srcs_b[i], objs_b[i], root, rrs_b[i], &nss[i], why, (int)sizeof why);
+        if (rc) {
+            eb_fail_close(rf, keys[i], rrs_b[i], rc, nss[i], why);
+            return 1;
+        }
+        eb_sha(objs_b[i], shas[i], &nbytes[i]);
+        eb_line_slow(rf, keys[i], shas[i], nbytes[i], nss[i], rrs_b[i]);
+        if (fflush(rf)) eb_die("receipt");
+        i = i + 1;
+    }
+    why[0] = 0;
+    rc = eb_link(bound, ctor, via_sh, objp, 38, elf, root, rr_link, &tl, why, (int)sizeof why);
+    if (rc) {
+        eb_fail_close(rf, "entry.elf", rr_link, rc, tl, why);
+        return 1;
+    }
+    eb_splice(elf, p3, cand, &poff, &plen, &ts);
+    eb_sha(elf, hf, &nf);
+    eb_sha(cand, hc, &nc);
     fprintf(rf, "package_offset\t%ld\npackage_bytes\t%ld\n", poff, plen);
-    eb_line(rf, "drive.o", hd, nd, td);
-    eb_line(rf, "exec.o", he, ne, te);
-    eb_line(rf, "hostnative.o", hn, nn, tn);
-    eb_line(rf, "entry.elf", hf, nf, tl);
-    eb_line(rf, "candidate", hc, nc, ts);
+    eb_line_slow(rf, "entry.elf", hf, nf, tl, rr_link);
+    eb_line_slow(rf, "candidate", hc, nc, ts, 0);
     if (fclose(rf)) eb_die("receipt close");
     printf("entry-build candidate=%s bytes=%ld\n", hc, nc);
     return 0;

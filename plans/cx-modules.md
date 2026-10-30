@@ -468,3 +468,28 @@ flowchart TD
   gen2 --> stop["55 秒退出 142，没有第二代对象"]
 ```
 
+## 158. 2026-10-30 38 只对象，两代逐字节相同
+
+`drive.cx` 不再把整段驱动闭包编成一只对象。`src/driveface.cx` 和 `src/driveroute.cx` 是从它挪出去的。`tools/entry-build.cx` 现在编 38 只 `-funit` 对象。第 38 只是 `src/compiler/tapelink.cx`，单独成 `tapelink.o`。`drive.cx` 用块内声明调用 `tl_*`，没有 `#pragma unisa use compiler.tapelink`。
+
+`-c -funit` 会把 `\0cli/object` 和 `\0cli/funit` 放进模型资源，值是单字节 1。没有这两键时，别的对象里的函数会被报成 undefined function。
+
+`.o`、`.obj`、`.a` 不再把文件字节送进 e2。先要求每个输入都是对象，再用 tapelink 把 unit tape 接成一条文本，源个数收成 1，然后走 `{目标}/image/O{level}`。链接命令没有 `-O`，level 是 0，从 prune 走到 elf。`out/grk-entry-build-09` 是修这个之前的第二代：37 只对象在盘上，链接失败，e2 打出 `reject: NUL byte in preprocessing input`，rc 1，不是超时。09 没有 candidate，这轮没有覆盖它。
+
+正式第一代是 `out/grk-entry-build-10`。构造器是仓库根 `unisacc.com`，sha256 `79fb84e65a10b55ce40be5f68746748acbd38f441944046c0a5dfa5718bc0c32`，3035300 字节，via=sh。38 只对象都成功。`drive.o` sha256 `f29d42cf917d22100987f71fdc264424d1ac25de4eb9dd9fa08db05e0c5b1b10`，460640 字节，ns=3818703482，最慢 e4 推理 ns=1429277276。`tapelink.o` sha256 `5c775c5a45b0121b43f40583b6e15e5d20662bcac0be5fc19017731fbc691560`，172296 字节，ns=1258903985，最慢 e4 推理 ns=474498514。`entry.elf` sha256 `5b3ac328a505d42c4774508513a1b8e3680c6eadb59266b0fb3ee7f44d33c3eb`，1036192 字节，ns=5682763632，最慢 lower 推理 ns=2254913489。package_offset 1399280，package_bytes 1636020。候选 sha256 `c85447d8386c7bd4df34f60969fd7545e08328a0a55e9520e59478a2f079c4aa`，2672212 字节。拼接 ns=13371511，slow_kind=UNMEASURED。
+
+同一组 38 只对象，产品链出的 ELF 和这只候选再链出的 ELF 逐字节相同，都是上面的 `entry.elf` sha。候选那次走了 tapecheck、prune、lower、elf，最慢是 lower 推理，ns=6455972660，`tools/bound 40` 内退出 0。
+
+第二代是 `out/grk-entry-build-11`。构造器就是 10 的候选，2672212 字节，via=exec。38 只 `.o`、`entry.elf`、候选和第一代逐字节相同：same 40，diff 0，miss 0。候选 sha 与第一代相同。候选侧 `drive.o` ns=11608953444，最慢 e4 推理 ns=4019976213。`tapelink.o` ns=3859911462，最慢 e4 推理 ns=1463634371。最慢的对象是 `driveface.o`，sha256 `b6c590c3ee2eccfe9604892bd9f48931d428a16726f55d69d32c3b5ac98672d3`，1626584 字节，ns=34415356768，最慢 e4 推理 ns=14840487407，低于 55 秒。`entry.elf` ns=13406527014，最慢 lower 推理 ns=6759420788，低于链接的 40 秒上限。
+
+`dup.c` 和 `hello.c` 在 10 的候选和已装产品上实跑过。cwd 是 `/tmp/notrepo`，去掉 `UNISA_CONTAINER`，外层 `tools/bound 12`。`dup.c -run` 两边退出 3，stdout 0，stderr 0。`examples/hello.c -run` 两边退出 0，stdout 13 字节 `from hello.c`，stderr 0。148 格这轮没重跑，旧表仍只绑定旧候选 sha `ccb79895…`。热循环没改。bound 没有加长。没有换掉已装产品。
+
+```mermaid
+flowchart TD
+  prod["已装产品 via=sh"] --> g1["10：38 只对象 + entry.elf"]
+  g1 --> cand["候选 sha c85447d8"]
+  cand --> g2["11：直接执行这只候选"]
+  g2 --> same["40 个文件与 10 逐字节相同"]
+  cand --> run["dup 退出 3，hello 退出 0"]
+```
+
