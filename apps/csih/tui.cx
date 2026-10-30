@@ -2057,8 +2057,12 @@ static int tui_disp_width(const char *s) {
     return w;
 }
 
-static int tui_utf8_fit(const char *s, int cols, char *out) {
+/* Whole codepoints of S that fit COLS display columns, into OUT (CAP bytes,
+ * NUL-terminated). The byte bound matters: zero-width codepoints take no
+ * column, so the column count alone does not bound the bytes written. */
+static int tui_utf8_fit(const char *s, int cols, char *out, int cap) {
     int i = 0, n = 0, w = 0;
+    if (cap < 1) return 0;
     if (!s) s = "";
     if (cols < 0) cols = 0;
     while (s[i] && w < cols) {
@@ -2068,7 +2072,8 @@ static int tui_utf8_fit(const char *s, int cols, char *out) {
         if (need <= 0) break;
         cw = tui_cp_cols(cp);
         if (w + cw > cols) break;
-        zs_mcpy(out + n, s + i, (size_t)need);
+        if (n + need >= cap) break;
+        mm_copy(out + n, (long)(cap - n), s + i, (long)need);
         n += need;
         i += need;
         w += cw;
@@ -2128,7 +2133,7 @@ static void tui_page_lines(const char *name, char got[][R_LINE_MAX + 1],
 }
 
 static void tui_col_put(char *side, int width, const char *text) {
-    int n = tui_utf8_fit(text ? text : "", width, side);
+    int n = tui_utf8_fit(text ? text : "", width, side, R_LINE_MAX + 1);   /* callers pass R_LINE_MAX+1 buffers */
     int w = tui_disp_width(side);
     while (w < width && n < R_LINE_MAX) {
         side[n++] = ' ';
@@ -2304,7 +2309,7 @@ static void tui_sys_block(r_state *rs, char line[][R_LINE_MAX + 1], int *n,
     if (width < 1) width = 1;
     nrows = 0;
     while (*p && nrows < TUI_SYS_WRAP) {
-        used = tui_utf8_fit(p, width, wrap[nrows]);
+        used = tui_utf8_fit(p, width, wrap[nrows], (int)sizeof wrap[nrows]);
         if (used <= 0) {
             unsigned int cp = 0;
             int need = tui_next_cp(p, &cp);
@@ -2359,7 +2364,7 @@ static int tui_mind_fold(char src[][R_LINE_MAX + 1], int n,
                  * next line reads as the same note, not a new one. */
                 int k;
                 for (k = 0; k < 4 && k < w - 1; k++) dst[out][k] = ' ';
-                used = tui_utf8_fit(p, w - k, dst[out] + k);
+                used = tui_utf8_fit(p, w - k, dst[out] + k, (int)sizeof dst[out] - k);
                 if (used > 0 && p[used]) {
                     /* Prefer a break at space/punctuation over a cut mid-token. */
                     int b = 0, bo = 0;
@@ -2386,7 +2391,7 @@ static int tui_mind_fold(char src[][R_LINE_MAX + 1], int n,
                 out++;
                 continue;
             }
-            used = tui_utf8_fit(p, w, dst[out]);
+            used = tui_utf8_fit(p, w, dst[out], (int)sizeof dst[out]);
             if (used > 0 && p[used]) {
                 /* Prefer a break at space/punctuation over a cut mid-token. */
                 int b = 0, bo = 0;
@@ -2862,9 +2867,9 @@ static void tui_input_row(char *dst, int dstmax, const char *input, int cols, in
     }
     if (from != shown) {
         char rest[R_LINE_MAX + 1];
-        tui_utf8_fit(from, width - 1, rest);
+        tui_utf8_fit(from, width - 1, rest, (int)sizeof rest);
         tx_snprintf(piece, sizeof piece, "…%s", rest);
-    } else tui_utf8_fit(shown, width, piece);
+    } else tui_utf8_fit(shown, width, piece, (int)sizeof piece);
     tx_snprintf(dst, (size_t)dstmax, "> %s", piece);
 }
 
@@ -3042,7 +3047,7 @@ static r_frame tui_render_state(tui_state *st, int cols) {
             /* A fresh, empty screen says where to start; after that, stay short. */
             tx_snprintf(raw, sizeof raw, "%s%sEnter 发送%s", prev, sep,
                      st->nlog == 0 && !st->ninput ? " · /help 看命令 · / 加 Tab 补全 · Alt-Enter 换行" : "");
-            tui_utf8_fit(raw, fit, hint);
+            tui_utf8_fit(raw, fit, hint, (int)sizeof hint);
         }
     } else if (st->ask_exit)
         tx_snprintf(hint, sizeof hint, "要退出请按 Ctrl-D · %d", st->ticks);
@@ -3054,7 +3059,7 @@ static r_frame tui_render_state(tui_state *st, int cols) {
         int fit = cols > 0 ? cols : 1;
         if (fit > R_MAX_COLS) fit = R_MAX_COLS;
         tx_snprintf(with, sizeof with, "%s · 错误> %s", hint, st->errline);
-        tui_utf8_fit(with, fit, fitted);
+        tui_utf8_fit(with, fit, fitted, (int)sizeof fitted);
         tx_snprintf(hint, sizeof hint, "%s", fitted);
     }
 
@@ -3065,7 +3070,7 @@ static r_frame tui_render_state(tui_state *st, int cols) {
         int show, starti = 0, endi = 0, view_at, filled;
         tui_status_load(st);
         for (i = 0; i < st->nstatus && n < 40; i++) {
-            tui_utf8_fit(st->status[i], cols, line[n]);
+            tui_utf8_fit(st->status[i], cols, line[n], R_LINE_MAX + 1);
             rs.body[n] = line[n]; n++;
         }
         tui_log_clamp(st);
