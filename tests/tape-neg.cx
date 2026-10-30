@@ -10,6 +10,7 @@
  *   integer-range   2^64 and -2^63-1: rc 1, stdout empty, "tape domain line L: integer literal out of 64-bit word
  *                   range"; the bounds 2^64-1 and -2^63 are accepted
  *   underscore      1_000 and 0x_1f: rc 1, stdout empty, "tape domain line L: invalid integer literal"; 0x1f accepted
+ *   tapecheck-pass  the fixture tape and a larger program's tape on -O0 -S come out byte-exact (if.route.tapecheck-pass)
  * Prints PASS/FAIL per case and TAPE_NEG<TAB>assertions=N<TAB>failed=M; rc 0 only when nothing failed. */
 #pragma unisa use cxlib.netpack
 #pragma unisa use sys.fs
@@ -85,6 +86,19 @@ int main(void) {
     literal("underscore-decimal", "1_000", "invalid integer literal");
     literal("underscore-hex", "0x_1f", "invalid integer literal");
     literal("hex-accepted", "0x1f", 0);
+
+    /* if.route.tapecheck-pass: a valid tape on -O0 -S (the tapecheck route) comes out byte-exact, for the fixture
+       and for a larger program (loop, globals, calls) */
+    r = run("-S", "ok.tape", "-"); ck(r.rc == 0 && !r.errn && (long)r.outn == tape_n && mm_same(r.out, tape, tape_n), "tapecheck-pass-byte-exact"); np_free(&r);
+    {   const char *big = "int g[8];\nstatic int sq(int x){return x*x;}\nint sum(int n){int s=0;for(int i=0;i<n;i++){g[i&7]+=i;s+=sq(i);}return s;}\nint main(void){return sum(5)&127;}\n";
+        char *t2; size_t n2;
+        put("big.c", big, tx_len(big, 512));
+        r = run("-S", "big.c", "big.tape"); if (r.rc != 0) die("big fixture tape"); np_free(&r);
+        if (cx_fmt(p, sizeof p, "%s/big.tape", work)) die("path");
+        t2 = cx_read(p, &n2); if (!t2) die("read big tape");
+        r = run("-S", "big.tape", "-"); ck(r.rc == 0 && !r.errn && r.outn == n2 && n2 > 0 && mm_same(r.out, t2, (long)n2), "tapecheck-pass-byte-exact-larger"); np_free(&r);
+        mm_free(t2);
+    }
 
     mm_free(tape);
     sy_printf("TAPE_NEG\tassertions=%d\tfailed=%d\n", assertions, failures);
