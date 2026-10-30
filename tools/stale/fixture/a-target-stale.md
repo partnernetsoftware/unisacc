@@ -1,1 +1,1 @@
-# stale fixture: referred to by b-refers-stale.md
+# stale fixture: the target another fixture file points at
