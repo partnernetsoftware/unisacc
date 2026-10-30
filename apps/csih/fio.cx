@@ -146,6 +146,40 @@ int fio_printf(fio_t *f, const char *fmt, ...) {
     return fio_write(tmp, 1, (size_t)n, f) == (size_t)n ? n : -1;
 }
 
+/* ferror / feof */
+int fio_error(fio_t *f) { return f && f->err; }
+int fio_eof(fio_t *f) { return f && f->eof && f->pos >= f->n; }
+
+/* fseek: 0, or -1. A write stream writes its buffer out first, a read stream
+   drops what it had read ahead; the end-of-file mark is cleared. */
+int fio_seek(fio_t *f, long off, int whence) {
+    long r;
+    if (!f) return -1;
+    if (f->wr) { if (fio_drain(f) != 0) return -1; }
+    else { f->pos = f->n = 0; f->eof = 0; }
+    r = sy_lseek(f->fd, off, whence);
+    return r < 0 ? fio_fail(f, (int)r) : 0;
+}
+
+/* ftell: the stream's offset (what has been read or written through it), or -1 */
+long fio_tell(fio_t *f) {
+    long at;
+    if (!f) return -1;
+    at = sy_lseek(f->fd, 0, SEEK_CUR);
+    if (at < 0) return fio_fail(f, (int)at);
+    return f->wr ? at + f->n : at - (f->n - f->pos);
+}
+
+/* rewind: back to the start, the error mark cleared */
+void fio_rewind(fio_t *f) { if (fio_seek(f, 0, SEEK_SET) == 0) f->err = 0; }
+
+/* stdin as a read stream (one per process; not to be closed) */
+fio_t *fio_stdin(void) {
+    static fio_t in;
+    in.fd = 0;
+    return &in;
+}
+
 /* fclose: 0, or -1 when a buffered write or the close failed; F is freed */
 int fio_close(fio_t *f) {
     int bad, r;

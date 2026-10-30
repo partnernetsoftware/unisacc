@@ -1,0 +1,91 @@
+#pragma unisa use fio
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+/* fio_cli.cx -- the selftest of fio.cx (csih's buffered file streams):
+ *   sh ../../unisacc.com fio_cli.cx -- selftest      (cwd apps/csih)
+ * Expected values are written from fio.cx's comments and stdio's contract, in a
+ * scratch dir under $TMPDIR (else /tmp) that is removed at the end. */
+
+static int fails;
+
+static void expect(int ok, const char *what) {
+    if (ok) sy_printf("  ok   %s\n", what);
+    else { sy_printf("  FAIL %s\n", what); fails++; }
+}
+
+static int selftest(void) {
+    char dir[300], p[400], line[64], big[20000];
+    const char *tmp = sy_env_or("TMPDIR", "/tmp");
+    fio_t *f;
+    long i;
+    size_t got;
+    sy_printf("fio selftest:\n");
+    if (tx_snprintf(dir, sizeof dir, "%s/csih-fio-%d", tmp, sy_pid()) >= (int)sizeof dir || sy_mkdir(dir, 0700) != 0) {
+        sy_printf("  FAIL scratch dir\n");
+        return 1;
+    }
+    tx_snprintf(p, sizeof p, "%s/a.txt", dir);
+
+    f = fio_open(p, "w");
+    expect(f != 0, "open w creates the file");
+    expect(fio_puts("one\n", f) == 1 && fio_printf(f, "%s %d\n", "two", 2) == 6 && fio_putc('3', f) == '3',
+           "puts, printf and putc report what they wrote");
+    expect(fio_tell(f) == 11, "tell on a write stream counts the buffered bytes (11)");
+    expect(fio_close(f) == 0, "close writes the buffer out");
+
+    f = fio_open(p, "r");
+    expect(f && fio_gets(line, sizeof line, f) && tx_eqz(line, "one\n"), "gets keeps the newline");
+    expect(fio_tell(f) == 4, "tell on a read stream is what was taken (4), not what was read ahead");
+    expect(fio_gets(line, sizeof line, f) && tx_eqz(line, "two 2\n"), "the second line");
+    expect(fio_gets(line, sizeof line, f) && tx_eqz(line, "3"), "a last line without a newline");
+    expect(fio_gets(line, sizeof line, f) == 0 && fio_eof(f), "gets at the end returns 0 and eof is set");
+    expect(fio_seek(f, 0, SEEK_END) == 0 && fio_tell(f) == 11, "seek to the end: tell is the size (11)");
+    fio_rewind(f);
+    expect(!fio_eof(f) && fio_gets(line, sizeof line, f) && tx_eqz(line, "one\n"), "rewind reads from the start again");
+    expect(fio_seek(f, 4, SEEK_SET) == 0 && fio_read(line, 1, 3, f) == 3 && line[0] == 't' && line[2] == 'o',
+           "seek to 4 then read 3 bytes: \"two\"");
+    expect(!fio_error(f), "no error mark after reads and seeks");
+    expect(fio_write("x", 1, 1, f) == 0, "a read stream refuses writes");
+    expect(fio_close(f) == 0, "close a read stream");
+
+    /* a write larger than the buffer goes out in pieces and reads back whole */
+    for (i = 0; i < (long)sizeof big; i++) big[i] = (char)('a' + i % 26);
+    f = fio_open(p, "w");
+    expect(f && fio_write(big, 1, sizeof big, f) == sizeof big && fio_close(f) == 0, "a 20000-byte write (over the 8 KiB buffer)");
+    f = fio_open(p, "r");
+    {
+        static char back[20000];
+        got = f ? fio_read(back, 1, sizeof back, f) : 0;
+        expect(got == sizeof back && tx_same(back, (long)got, big, (long)sizeof big), "reads back byte for byte");
+        expect(f && fio_read(back, 1, 1, f) == 0 && fio_eof(f), "then end of file");
+        if (f) fio_close(f);
+    }
+
+    f = fio_open(p, "a");
+    expect(f && fio_puts("Z", f) == 1 && fio_close(f) == 0, "open a appends");
+    f = fio_open(p, "r");
+    expect(f && fio_seek(f, 0, SEEK_END) == 0 && fio_tell(f) == 20001, "the size is one more (20001)");
+    if (f) fio_close(f);
+
+    tx_snprintf(p, sizeof p, "%s/missing/x", dir);
+    expect(fio_open(p, "r") == 0 && fio_errno() == ENOENT, "a missing file: 0 and fio_errno() ENOENT");
+    expect(fio_open(p, "q") == 0 && fio_errno() == EINVAL, "an unknown mode: 0 and EINVAL");
+    expect(fio_stdin() != 0 && fio_stdin() == fio_stdin(), "stdin is one stream");
+
+    tx_snprintf(p, sizeof p, "%s/a.txt", dir);
+    sy_unlink(p);
+    sy_rmdir(dir);
+    if (fails) sy_printf("fio: %d FAIL\n", fails);
+    else sy_printf("fio: all cases pass\n");
+    return fails ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc > 1 && tx_eqz(argv[1], "selftest")) return selftest();
+    sy_printf("usage: fio_cli selftest\n");
+    return 64;
+}
