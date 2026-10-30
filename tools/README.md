@@ -1,14 +1,6 @@
 # Development and construction support
 
-The final measured working source is
-`0d59237f3250b59514a55ff529c77b665033e5feb71061f6fcaded0c7ef925c0`.
-Scanner repair and legitimate carried-header regeneration completed; cf2270 is
-header-only intermediate evidence. Installed Root remains Source329. P53 raw bytes
-were fully reconstructed and locally installed with a new record; the prior
-S447 bootstrap and its original record remain explicitly preserved. Material,
-runtime and product qualifications below retain their named source identities.
-Old PP92/23 and RI/host/source material observations are not transferred merely
-because this checkout now contains the unsigned classic C math repair.
+Current source, candidate and installed identities are in prd.md §2 (work tree). Identity narratives before 2026-10-30 (Source329/P53/S447 epochs) are in archive/prd-c43-history-20261030.md and do not transfer to the CX-rewritten entry.
 
 `sourceflat.cx` is the native complete-source exporter:
 

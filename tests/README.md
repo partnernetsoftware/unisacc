@@ -1,19 +1,6 @@
 # Tests
 
-Source identity boundary: final fresh working SID is
-`0d59237f3250b59514a55ff529c77b665033e5feb71061f6fcaded0c7ef925c0`,
-after scanner repair and legitimate carried-header regeneration. Header-only
-cf2270 remains intermediate measured evidence. No new-source product is built.
-Root is now locally installed P53/S329, with a new actual construction/installation
-record and unchanged raw bytes. The original P53/S447 bootstrap remains saved. Source329 candidate A was fully reconstructed
-under ctx699, checked and archived. Current new-context candidate B was fully
-rebuilt and passed direct smoke16/candidate58/schema79, then was actually
-installed development-only. GEN13/14 reconstruction and original30 Source329 selfhost03 completed58/0;
-current fclose is SOURCE_FIXED/PRODUCT_NOT_REBUILT (explicit -I include338/0); the old
-S447 provenance remains historical and is not relabeled.
-P53/S447 results below, including PP92/23, RI and fixed-point observations, are
-not transferred to changed source; Source32958/0 is also only a retained baseline. The PP low-mask observations remain valid within
-their original scope; they are not relabeled failures.
+Current source, candidate and installed identities are in prd.md §2 (work tree). Identity narratives before 2026-10-30 (Source329/P53/S447 epochs) are in archive/prd-c43-history-20261030.md and do not transfer to the CX-rewritten entry.
 
 ## UJS product (`ujs.com`) — **不在本目录**
 
