@@ -99,31 +99,30 @@ static void script(Buf *s, long off[4], long len[4], char key[4][17]) {
         put(s, line, (long)strlen(line));
     }
     {
-        static const char *rest_ujs =
-            "  *) echo \"ujs.com: no slice for $u\" >&2; exit 1;;\n"
+        /* The cache dir: ~/.cache/TOOL when it can be made and written. Else a
+           per-user dir under $TMPDIR (/tmp): made 0700 and refused unless it is a
+           real directory we own and can write. The old fallback was the shared
+           /tmp itself, where an existing executable TOOL-<key> was run as is, so
+           another user could plant one; and an existing but unwritable cache dir
+           made the extraction fail instead of falling back. (ujs's text was this
+           one with ujs for TOOL.) */
+        char rest[1024];
+        int rn = snprintf(rest, sizeof rest,
+            "  *) echo \"%s.com: no slice for $u\" >&2; exit 1;;\n"
             "esac\n"
-            "d=\"${XDG_CACHE_HOME:-$HOME/.cache}/ujs\"\n"
-            "[ -n \"$HOME\" ] && mkdir -p \"$d\" 2>/dev/null || d=\"${TMPDIR:-/tmp}\"\n"
-            "t=\"$d/ujs-$k\"\n"
+            "d=\"${XDG_CACHE_HOME:-$HOME/.cache}/%s\"\n"
+            "if [ -z \"$HOME\" ] || ! mkdir -p \"$d\" 2>/dev/null || [ ! -w \"$d\" ]; then\n"
+            "  d=\"${TMPDIR:-/tmp}/%s-$(id -u)\"\n"
+            "  mkdir -m 700 \"$d\" 2>/dev/null\n"
+            "  if [ -L \"$d\" ] || [ ! -d \"$d\" ] || [ ! -O \"$d\" ] || [ ! -w \"$d\" ]; then echo \"%s.com: cache dir $d is not a private writable directory\" >&2; exit 1; fi\n"
+            "fi\n"
+            "t=\"$d/%s-$k\"\n"
             "if [ ! -x \"$t\" ]; then\n"
             "  tail -c +$o \"$0\" | head -c $n | gzip -dc > \"$t.$$\" && chmod +x \"$t.$$\" && mv -f \"$t.$$\" \"$t\" || { rm -f \"$t.$$\"; exit 1; }\n"
-            "fi\n";
-        char rest[640];
-        if (!strcmp(ape_tool, "ujs")) put(s, rest_ujs, (long)strlen(rest_ujs));
-        else {
-            int rn = snprintf(rest, sizeof rest,
-                "  *) echo \"%s.com: no slice for $u\" >&2; exit 1;;\n"
-                "esac\n"
-                "d=\"${XDG_CACHE_HOME:-$HOME/.cache}/%s\"\n"
-                "[ -n \"$HOME\" ] && mkdir -p \"$d\" 2>/dev/null || d=\"${TMPDIR:-/tmp}\"\n"
-                "t=\"$d/%s-$k\"\n"
-                "if [ ! -x \"$t\" ]; then\n"
-                "  tail -c +$o \"$0\" | head -c $n | gzip -dc > \"$t.$$\" && chmod +x \"$t.$$\" && mv -f \"$t.$$\" \"$t\" || { rm -f \"$t.$$\"; exit 1; }\n"
-                "fi\n",
-                ape_tool, ape_tool, ape_tool);
-            if (rn < 0 || rn >= (int)sizeof rest) { fprintf(stderr, "ape: tool script too long\n"); exit(1); }
-            put(s, rest, rn);
-        }
+            "fi\n",
+            ape_tool, ape_tool, ape_tool, ape_tool, ape_tool);
+        if (rn < 0 || rn >= (int)sizeof rest) { fprintf(stderr, "ape: tool script too long\n"); exit(1); }
+        put(s, rest, rn);
         if (embedded) put(s, "UNISA_CONTAINER=\"$0\"; export UNISA_CONTAINER\n", 45);
         put(s, "exec \"$t\" \"$@\"\n", 15);
     }
