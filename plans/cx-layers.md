@@ -271,7 +271,7 @@ feedback 反复指出「内存安全未触及更广的 Rust 式所有权/借用�
 
 按主人「prd.md 要做好索引」的要求，把 CX 分层重构接进现有索引体系：
 
-- `prd.md`「当前导航」新增一条 → [cx 分层与底层/上层重构](plans/cx-layers.md)。
+- `prd.md`「当前导航」新增一条 → [cx 分层与底层/上层重构](cx-layers.md)。
 - `docs/cx/prd.md` 索引段新增 `plans/cx-layers.md`（底层/上层分层重构）。
 - `plans/cx-layers.md` 开头新增「目录」小节，列出设计节 + 13 个已落地项的可回归索引。
 
