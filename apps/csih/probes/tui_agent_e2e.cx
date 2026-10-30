@@ -1,5 +1,5 @@
 #pragma unisa use tmuxwit
-/* CX probe root; lower includes kept (the port wait needs sockets) */
+#pragma unisa use netwit
 /* tui_agent_e2e.cx — the csih agent TUI end to end on a real tty (a private
  * tmux pane) against probes/agent-stub.cx: one prompt makes the stub ask for
  * `echo hello-from-agent`, the TUI runs it, the stub answers 完成了.
@@ -7,10 +7,8 @@
  * Asserts, as the old pty witness (tui_agent_e2e.py) did, on the screen and
  * the transcript, and that the TUI exits 0 (now via Ctrl-C then Ctrl-D: an
  * idle Ctrl-C no longer quits). HOME is a scratch dir. No python.
+ * Upper root: no #include (the tty is tmuxwit's, the port wait netwit's).
  */
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
 
 #define TEXT "build the feature, then report"
 
@@ -19,23 +17,6 @@ static int fail;
 
 static void okf(const char *m) { printf("  ok    %s\n", m); }
 static void bad(const char *m) { printf("  FAIL  %s\n", m); fail++; }
-
-static int wait_port(int port, int ms) {
-    long until = tw_now_ms() + ms;
-    while (tw_now_ms() < until) {
-        int s = socket(AF_INET, SOCK_STREAM, 0);
-        struct sockaddr_in a;
-        if (s < 0) return -1;
-        memset(&a, 0, sizeof a);
-        a.sin_family = AF_INET;
-        a.sin_port = htons((unsigned short)port);
-        a.sin_addr.s_addr = htonl(0x7f000001);
-        if (connect(s, (struct sockaddr *)&a, sizeof a) == 0) { close(s); return 0; }
-        close(s);
-        tw_sleep_ms(100);
-    }
-    return -1;
-}
 
 static int contains(const char *path, const char *needle) {
     static char buf[1 << 18];
@@ -74,7 +55,7 @@ int main(void) {
         execv("/bin/sh", av);   /* APE needs /bin/sh as its loader */
         _exit(127);
     }
-    if (wait_port(port, 20000) != 0) {   /* the stub is compiled first (~4s) */
+    if (nw_wait_port(port, 20000) != 0) {   /* the stub is compiled first (~4s) */
         bad("agent-stub.cx did not listen");
         kill(stub, SIGKILL); waitpid(stub, &st, 0);
         tw_close(); cx_rmtree(root);

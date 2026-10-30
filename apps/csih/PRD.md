@@ -145,6 +145,26 @@ agent 模式新增 `/help`、`/status`、`/clear`，均只在本地处理、不�
 - **第十批已落地（2026-10-29）**：忙碌行。原来执行命令时一直显示「等模型」；现在收到 exec 行（命令执行前发出）就显示 `跑命令 <命令>`，下一次请求在途（`net_in_flight()`）时切回「等模型」。文案从 `请求中 等模型 3秒 7745词元 上传 32839字节 已收 574字节 hit 1152 miss 6561` 改为 `⏳ 等模型 3秒 · 7745词元 · ↑32.1KB 已收574B · 缓存命中15%`，保留「已收」二字（已有断言依赖它）。selftest：`busy line names the running command and reads sizes`；tmux 实测已见切换。原来 exec 同步执行时秒数不走、界面不刷新，第十一批已解决。
 - **第四十二批已落地（2026-10-29）**：状态行上色：`✓` 绿、`◐` 黄、`✗` 和 `│ blocked:` 红、`项目>` 青。颜色只在写终端时加（`tui_put_line`），帧本身仍是纯文本，宽度计算、差量比较和所有读取帧的测试都不受影响；差量刷新改用 tui 自己的循环，`render.cx` 的 `frame_diff` 没动。遵守 `NO_COLOR`，也可以用 `CSIH_COLOR=0` 关闭。写屏缓冲按每行 32 字节预留，满屏彩色行也放得下。selftest：`status rows are coloured on output, frames stay plain`（设了 NO_COLOR 时打印 skip）；tmux `capture-pane -e` 实测 `◐` 行带 `ESC[33m`。
   - 观察（不是本批改动引起）：一道不用工具的算术题，这次评审判为「未验证」（理由是没有工具记录可核实）；之前同类问题判过「已验收（answer_only）」。评审对纯问答的判法不稳定，第四十三批处理。
+- **第六十一批已落地（2026-10-30）**：csih 作为独立小产品，测试放在自己的目录里，不进仓库的 `tests/`（那是 unisacc 的）。
+  - **入口** `sh unisacc.com apps/csih/tests/run.cx -- --list | --smoke | --all | --layer L | --run ID... | --selftest`，合同表在 `tests/contracts.tsv`，共 79 条。
+    - 每条合同有层次、状态、时限（≤55 秒）、命令和判据。每条单独计时，结果是 PASS、FAIL 或 TIMEOUT。命令相同的几条合同在一次执行里共用同一份输出。
+    - 运行器通过 `env` 把 `UNISACC` 和 `CSIH_BIN` 交给每条合同：有几个探针在没有 `UNISACC` 时会去找另一台机器上的路径（dup_symbol、net_cover 因此误报失败），而 unisacc 的 `setenv()` 传不到子进程。
+    - 判定：`--smoke` 要求冒烟合同全过；`--all` 要求所有 IMPLEMENTED 合同都过，而且没有 GAP、BLOCKED、ENV 行，否则非零（有失败为 1，只是覆盖不全为 3）。`--selftest` 有 11 条，测的是运行器自己的判定逻辑。
+  - **状态**：IMPLEMENTED 58 条，GAP 15 条，BLOCKED 3 条，ENV 3 条。
+    - GAP：已归档、没有 `.cx` 版本的 Python 探针所测的合同。
+    - BLOCKED：reload_launcher 运行循环、message_send 的 publish、内核信号投递。
+    - ENV：tty-raw 和 tty-size 需要终端，net-tcp 需要一个它自己不启动的监听端。
+  - **2026-10-30 分批实跑全部 58 条**，日志在 rawcc evidence：
+    - `--smoke` 8/8，约 20 秒。
+    - module 层 18/18，gate 层 4/4，host-fuzz 层 2/2，runtime 层 14/14，net 层 3/3，tty 层 6/6，loop 1/1。
+    - stale-probe 层 0/10：这 10 个探针原来就不在任何闸里，原样跑全红。原因各不相同：读 `net.c` 之类旧路径、没 `use u_run` 导致 u_spawn 链接不上、要求设置 `PROBE_SCRATCH`、编译身份校验不过、exit 126。这里如实记 FAIL，待修。
+    - 首次接进闸的有 plugin selftest 和 11 个底层探针（fs、poll、dns、net、信号、cfmakeraw）。
+  - **上层不写 `#include`**：缺的能力放进下层封装模块（`#pragma unisa module`，include 只出现在这一层）。
+    - 新增 `probes/netwit.cx`，提供 `nw_wait_port` 和 `nw_serve_file`。
+    - `tui_agent_e2e`、`http_roundtrip`、`llm_roundtrip`、`agent_roundtrip`、`check.cx` 的 `#include` 已全部去掉；sys/stat、sys/wait、stdio 这些 cx 前奏本来就有。
+    - 下层封装：`probes/tmuxwit.cx`（poll、单调时钟、tmux）、`probes/retry_stub.cx`（socket）、`probes/netwit.cx`（socket）、`tests/tclock.cx`（单调时钟）。
+    - `use` 只在使用者所在目录（及其子目录）里解析，所以 probes/ 和 tests/ 各有一份时钟。
+    - **提案（慢车道）**：把单调毫秒时钟、毫秒睡眠、本机 TCP 等端口这几个封装件提进 cx 前奏 `include/cx.h`。前奏嵌在产品里（`kernel/unisa_headers.inc`），改了要重建产品，所以这一轮没做。
 - **第六十批已落地（2026-10-30）**：`csih.sh prepare` 的源摘要只算产品真正的输入。
   - 原来算的是根目录全部 `*.cx *.h`，所以只改 `check.cx` 或某个 `*_cli.cx` 也要重建产品，约 50 秒。上一批的验收第一次就是因此超时。反过来，换了编译器却不会重建。
   - 现在的摘要只算三样：`unisacc.com -cx-plan csih.cx` 的第 2 列（31 个模块）、根目录 14 个 `.h`、`unisacc.com` 的内容。文件名按相对 apps/csih 记，所以检出目录换了位置也不算陈旧。
