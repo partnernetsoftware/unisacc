@@ -2,6 +2,7 @@
  * exercise E2 input transports with the same literal source and source label.
  * Read selected P3 directory/model extents independently of stream-pack. */
 #pragma unisa use cxlib.netpack
+#pragma unisa use text.text
 typedef struct {const unsigned char *p;size_t n,pos;char f[8][512];int nf;} Reader;
 typedef struct {const unsigned char *p;size_t n;unsigned index;} Model;
 static int checks,failed;
@@ -15,7 +16,7 @@ static int model(const unsigned char *file,size_t n,const char *route,const char
  if(n<16||memcmp(file+n-16,"UNIPKG1\n",8))return 0;unsigned long long extent=0;for(int i=7;i>=0;i--)extent=(extent<<8)|file[n-8+(size_t)i];if(!extent||extent>n-16)return 0;
  Reader r={file+n-16-(size_t)extent,(size_t)extent,0,{{0}},0};unsigned long long pm,ps,nr,x,len,raw,crc;unsigned wanted=0;int found=0;
  if(!line(&r)||r.nf!=5||strcmp(r.f[0],"P")||strcmp(r.f[1],"3")||!number(r.f[2],65536,&pm)||!pm||!number(r.f[3],65536,&ps)||!ps||!number(r.f[4],65536,&nr))return 0;
- for(unsigned long long i=0;i<ps;i++){if(!line(&r)||r.nf!=6||strcmp(r.f[0],"D")||!number(r.f[5],pm-1,&x))return 0;if(!strcmp(r.f[1],route)&&!strcmp(r.f[2],stage)){if(found++)return 0;wanted=(unsigned)x;if(!strcmp(stage,"e2")&&(strcmp(r.f[3],"src.c")||strcmp(r.f[4],"pp.locations")))return 0;}}
+ for(unsigned long long i=0;i<ps;i++){if(!line(&r)||r.nf!=6||strcmp(r.f[0],"D")||!number(r.f[5],pm-1,&x))return 0;if(tx_eq(r.f[1], route, 1L << 20)&&tx_eq(r.f[2], stage, 1L << 20)){if(found++)return 0;wanted=(unsigned)x;if(tx_eq(stage, "e2", 1L << 20)&&(strcmp(r.f[3],"src.c")||strcmp(r.f[4],"pp.locations")))return 0;}}
  if(found!=1)return 0;out->p=0;out->n=0;out->index=wanted;
  for(unsigned long long i=0;i<pm;i++){size_t at=r.pos;if(!line(&r)||r.nf!=5||strcmp(r.f[0],"M")||!number(r.f[1],r.n,&len)||!len||!number(r.f[2],2147483647,&raw)||!raw||strcmp(r.f[3],"1")||!number(r.f[4],4294967295ULL,&crc)||len>r.n-r.pos)return 0;r.pos+=(size_t)len;if(i==wanted){out->p=r.p+at;out->n=r.pos-at;}}
  (void)nr;(void)crc;return out->p&&out->n;
@@ -30,7 +31,7 @@ static void extra_models(const char *candidate,size_t pn,const char *streams){
   z=snprintf(label,sizeof label,"stream%d-modified-model-record-differs",i+3);if(z<0||(size_t)z>=sizeof label)die("model-label");Model bad={0};int differs=0;if(sa&&sm.n){size_t at=(size_t)((const char *)sm.p-s)+sm.n-1;s[at]^=1;differs=model((const unsigned char *)s,sn,"stream",extra_stage[i],&bad)&&ca&&!eq(cm.p,cm.n,bad.p,bad.n);s[at]^=1;}ck(differs,label);free(s);
  }
 }
-static void extra_unchanged(void){for(int i=0;i<5;i++){size_t n;char *s=load(extra_path[i],&n),h[65],label[100];cx_sha256_hex(s,n,h);free(s);int z=snprintf(label,sizeof label,"stream%d-unchanged",i+3);if(z<0||(size_t)z>=sizeof label)die("unchanged-label");ck(!strcmp(extra_hash[i],h),label);}}
+static void extra_unchanged(void){for(int i=0;i<5;i++){size_t n;char *s=load(extra_path[i],&n),h[65],label[100];cx_sha256_hex(s,n,h);free(s);int z=snprintf(label,sizeof label,"stream%d-unchanged",i+3);if(z<0||(size_t)z>=sizeof label)die("unchanged-label");ck(tx_eq(extra_hash[i], h, 1L << 20),label);}}
 static unsigned le32(const unsigned char *p){return (unsigned)p[0]|(unsigned)p[1]<<8|(unsigned)p[2]<<16|(unsigned)p[3]<<24;}
 static int frame(const char *s,size_t n,const char *body){const unsigned char *p=(const unsigned char *)s;size_t z=strlen(body);return n==27+z&&!memcmp(p,"UNIPP1\0",7)&&le32(p+7)==z&&!le32(p+11)&&!le32(p+15)&&!le32(p+19)&&!le32(p+23)&&!memcmp(p+27,body,z);}
 static void save_n(const char *p,const char *s,size_t n,int mode){int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,mode);if(fd<0)die("fixture-create");size_t at=0;while(at<n){ssize_t z=write(fd,s+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0)die("fixture-write");at+=(size_t)z;}if(close(fd))die("fixture-close");}
@@ -72,6 +73,6 @@ int main(int argc,char **argv){
  char *fv[]={bound,"10",forced,forced_src,forced_src,include,0},*av[]={bound,"10",stream,auto_src,auto_src,include,0};np_result f={0},a2={0};int fr=np_run(fv,root,(char *const *)env,12,&f,why,sizeof why);ck(!fr&&!f.rc&&!f.errn,"forced-transport-rc0");ck(!fr&&counts(&f,1,0),"forced-one-prefix-line-not-header-lines");
  if(!fr&&counts(&f,1,0)){unsigned text=le32((unsigned char *)f.out+7);const char *body=f.out+f.outn-text;ck(strstr(body,"int forced_a;")&&strstr(body,"int forced_b;")&&strstr(body,"int ordinary;"),"forced-header-and-source-body");}else ck(0,"forced-header-and-source-body");
  int ar2=np_run(av,root,(char *const *)env,12,&a2,why,sizeof why);ck(!ar2&&!a2.rc&&!a2.errn,"automatic-transport-rc0");ck(!ar2&&counts(&a2,0,1),"automatic-one-inserted-header-line");ck(!ar2&&counts(&a2,0,1)&&le32((unsigned char *)a2.out+23)>0,"automatic-header-region-present");ck(!fr&&!ar2&&!counts(&f,2,0)&&!counts(&a2,1,0),"metadata-counters-not-interchangeable");np_free(&f);np_free(&a2);
- size_t z;char *v=load(product,&z);cx_sha256_hex(v,z,after);ck(!strcmp(pb,after),"candidate-unchanged");free(v);v=load(stream,&z);cx_sha256_hex(v,z,after);ck(!strcmp(sb,after),"stream-unchanged");free(v);v=load(e1path,&z);cx_sha256_hex(v,z,after);ck(!strcmp(e1hash,after),"stream2-unchanged");free(v);extra_unchanged();free(p);free(s);
+ size_t z;char *v=load(product,&z);cx_sha256_hex(v,z,after);ck(tx_eq(pb, after, 1L << 20),"candidate-unchanged");free(v);v=load(stream,&z);cx_sha256_hex(v,z,after);ck(tx_eq(sb, after, 1L << 20),"stream-unchanged");free(v);v=load(e1path,&z);cx_sha256_hex(v,z,after);ck(tx_eq(e1hash, after, 1L << 20),"stream2-unchanged");free(v);extra_unchanged();free(p);free(s);
  puts("NOT_CLAIMED\tfull-package-integrity-foreign-hosts-complete-E2-or-N22");printf("E2_INPUT_BINDING\tassertions=%d\tfailed=%d\tscope=current-product-and-single-stream-Linux-x86_64\n",checks,failed);return failed?1:0;
 }

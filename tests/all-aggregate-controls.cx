@@ -40,6 +40,7 @@
  * independent runseal and every later chain link; these hashes have no secret key. */
 #pragma unisa use cxlib.allsession
 #pragma unisa use cxlib.netpack
+#pragma unisa use text.text
 static char root[4096],source[4096],out[4096],why[1700];
 static const char *pass_id,*missing_id,*timeout_id;
 static int assertions,failed;
@@ -50,7 +51,7 @@ static void copy_tree(const char *src,const char *dst){struct stat st;if(lstat(s
  if(S_ISLNK(st.st_mode)){char t[4096];long k=readlink(src,t,sizeof t-1);if(k<0)die("readlink",src);t[k]=0;if(symlink(t,dst))die("symlink",dst);return;}
  if(S_ISREG(st.st_mode)){size_t n;char *s=as_read(src,0,&n,why,sizeof why);if(!s)die("copy-read",why);put(dst,s,n,1);free(s);return;}
  if(!S_ISDIR(st.st_mode))die("copy-special",src);if(mkdir(dst,0700))die("copy-mkdir",dst);DIR *d=opendir(src);if(!d)die("opendir",src);struct dirent *e;
- while((e=readdir(d))){if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;char a[4400],b[4400];join(a,sizeof a,src,e->d_name);join(b,sizeof b,dst,e->d_name);copy_tree(a,b);}closedir(d);}
+ while((e=readdir(d))){if(tx_eq(e->d_name, ".", 1L << 20)||tx_eq(e->d_name, "..", 1L << 20))continue;char a[4400],b[4400];join(a,sizeof a,src,e->d_name);join(b,sizeof b,dst,e->d_name);copy_tree(a,b);}closedir(d);}
 static char *slurp(const char *p,size_t *n){char *s=as_read(p,0,n,why,sizeof why);if(!s)die("read",why);return s;}
 /* replace the one occurrence of OLD in file P by NEW */
 static void replace_once(const char *p,const char *old,const char *nw){size_t n;char *s=slurp(p,&n);if(np_count(s,n,old,strlen(old))!=1)die("replace-not-unique",old);np_buf b={0,0,0};np_replace(s,n,old,strlen(old),nw,strlen(nw),1,&b);put(p,b.p,b.n,0);free(s);free(b.p);}
@@ -79,7 +80,7 @@ static void drop_block(const char *session,int seq){char p[4400];join(p,sizeof p
 static void duplicate_block(const char *session,int seq,int newseq){char p[4400];join(p,sizeof p,session,"session.tsv");size_t n,a,b;char *s=slurp(p,&n);block_range(s,n,seq,&a,&b);np_buf o={0,0,0};np_put(&o,s,n);
  char oh[40],nh[40],ot[40],nt[40];{if(cx_fmt(oh,sizeof oh,"BLOCK\t%d\t",seq))die("format-bound",0);}{if(cx_fmt(nh,sizeof nh,"BLOCK\t%d\t",newseq))die("format-bound",0);}{if(cx_fmt(ot,sizeof ot,"END\t%d\n",seq))die("format-bound",0);}{if(cx_fmt(nt,sizeof nt,"END\t%d\n",newseq))die("format-bound",0);}
  np_buf c={0,0,0};np_put(&c,nh,strlen(nh));np_put(&c,s+a+strlen(oh),b-a-strlen(oh)-strlen(ot));np_put(&c,nt,strlen(nt));np_put(&o,c.p,c.n);put(p,o.p,o.n,0);free(s);free(o.p);free(c.p);}
-static const as_wave *open_attempt(const char *session,as_manifest *m,const char *id){if(as_load(session,m,why,sizeof why))die("manifest",why);const as_wave *w=0;for(int i=0;i<m->nwave;i++)if(!strcmp(m->wave[i].mode,"split")&&!strcmp(m->wave[i].ids,id)&&m->wave[i].run&&!m->wave[i].finished)w=&m->wave[i];if(!w)die("source-needs-an-open-RUN-sealed-attempt",id);return w;}
+static const as_wave *open_attempt(const char *session,as_manifest *m,const char *id){if(as_load(session,m,why,sizeof why))die("manifest",why);const as_wave *w=0;for(int i=0;i<m->nwave;i++)if(tx_eq(m->wave[i].mode, "split", 1L << 20)&&tx_eq(m->wave[i].ids, id, 1L << 20)&&m->wave[i].run&&!m->wave[i].finished)w=&m->wave[i];if(!w)die("source-needs-an-open-RUN-sealed-attempt",id);return w;}
 static int refused_as(const char *name,int frc,const char *w){size_t n=strlen(name);return frc==-1&&!strncmp(w,name,n)&&w[n]=='\t';}
 static int split_main(char **argv){
  if(argv[2][0]!='/'||!realpath(argv[2],root)||strcmp(root,argv[2])||argv[3][0]!='/'||!realpath(argv[3],source)||strcmp(source,argv[3]))die("canonical-root-session",0);
@@ -90,14 +91,14 @@ static int split_main(char **argv){
  copy_named(source,"run-sealed-no-finish",d);rc=aggregate(d,"run-sealed-no-finish",&t,&tn);
  expect("run-sealed-no-finish",rc==1&&has_line(t,tn,att)&&strstr(t,"reason=interrupted-attempt-no-finish")&&has_line(t,tn,unk)&&!has_line(t,tn,line),"ATTEMPT UNKNOWN interrupted-attempt-no-finish",rc);free(t);
  copy_named(source,"start-without-run",d);drop_block(d,runseq);rechain(d);rc=aggregate(d,"start-without-run",&t,&tn);manifest_sha(d,h0);frc=as_finish(root,d,id,nonce,v,rs,w,sizeof w);manifest_sha(d,h1);
- expect("start-without-run",rc==1&&strstr(t,"reason=interrupted-attempt-no-run")&&has_line(t,tn,unk)&&refused_as("attempt-not-run",frc,w)&&!strcmp(h0,h1),"UNKNOWN interrupted-attempt-no-run and finish refused attempt-not-run",rc);free(t);
- copy_named(source,"never-started",d);manifest_sha(d,h0);frc=as_finish(root,d,id,other_nonce,v,rs,w,sizeof w);manifest_sha(d,h1);expect("never-started",refused_as("attempt-not-started",frc,w)&&!strcmp(h0,h1),"finish refused attempt-not-started",frc);
- frc=as_finish(root,d,"smoke",nonce,v,rs,w,sizeof w);manifest_sha(d,h1);expect("wrong-id",!strcmp(id,"smoke")||(refused_as("attempt-id-mismatch",frc,w)&&!strcmp(h0,h1)),"finish refused attempt-id-mismatch",frc);
+ expect("start-without-run",rc==1&&strstr(t,"reason=interrupted-attempt-no-run")&&has_line(t,tn,unk)&&refused_as("attempt-not-run",frc,w)&&tx_eq(h0, h1, 1L << 20),"UNKNOWN interrupted-attempt-no-run and finish refused attempt-not-run",rc);free(t);
+ copy_named(source,"never-started",d);manifest_sha(d,h0);frc=as_finish(root,d,id,other_nonce,v,rs,w,sizeof w);manifest_sha(d,h1);expect("never-started",refused_as("attempt-not-started",frc,w)&&tx_eq(h0, h1, 1L << 20),"finish refused attempt-not-started",frc);
+ frc=as_finish(root,d,"smoke",nonce,v,rs,w,sizeof w);manifest_sha(d,h1);expect("wrong-id",tx_eq(id, "smoke", 1L << 20)||(refused_as("attempt-id-mismatch",frc,w)&&tx_eq(h0, h1, 1L << 20)),"finish refused attempt-id-mismatch",frc);
  {char m[4400];copy_named(source,"sealed-rc-tampered",d);join(m,sizeof m,d,"session.tsv");replace_once(m,old_rc,new_rc);manifest_sha(d,h0);frc=as_finish(root,d,id,nonce,v,rs,w,sizeof w);manifest_sha(d,h1);
-  expect("sealed-rc-tampered",refused_as("run-seal-mismatch",frc,w)&&!strcmp(h0,h1),"finish refused run-seal-mismatch",frc);}
+  expect("sealed-rc-tampered",refused_as("run-seal-mismatch",frc,w)&&tx_eq(h0, h1, 1L << 20),"finish refused run-seal-mismatch",frc);}
  copy_named(source,"positive-finish",pos);frc=as_finish(root,pos,id,nonce,v,rs,w,sizeof w);if(frc)fprintf(stderr,"all-aggregate-controls: positive finish refused: %s\n",w);printf("FINISHED\t%s\t%s\treason=%s\n",id,frc?"REFUSED":v,frc?w:rs);
- rc=aggregate(pos,"positive-finish",&t,&tn);expect("positive-finish",!frc&&!strcmp(v,"PASS")&&rc==1&&has_line(t,tn,line)&&!has_line(t,tn,"REFUSE\t")&&!has_line(t,tn,"RECEIPT_REFUSE\t"),line,rc);free(t);
- {char snap[4400];copy_named(pos,"double-finish",snap);manifest_sha(snap,h0);frc=as_finish(root,snap,id,nonce,v,rs,w,sizeof w);manifest_sha(snap,h1);expect("double-finish",refused_as("attempt-already-finished",frc,w)&&!strcmp(h0,h1),"finish refused attempt-already-finished",frc);}
+ rc=aggregate(pos,"positive-finish",&t,&tn);expect("positive-finish",!frc&&tx_eq(v, "PASS", 1L << 20)&&rc==1&&has_line(t,tn,line)&&!has_line(t,tn,"REFUSE\t")&&!has_line(t,tn,"RECEIPT_REFUSE\t"),line,rc);free(t);
+ {char snap[4400];copy_named(pos,"double-finish",snap);manifest_sha(snap,h0);frc=as_finish(root,snap,id,nonce,v,rs,w,sizeof w);manifest_sha(snap,h1);expect("double-finish",refused_as("attempt-already-finished",frc,w)&&tx_eq(h0, h1, 1L << 20),"finish refused attempt-already-finished",frc);}
  char refl[300];
  {char m[4400];copy_named(pos,"sealed-rc-edited",d);join(m,sizeof m,d,"session.tsv");replace_once(m,old_rc,new_rc);rechain(d);rc=aggregate(d,"sealed-rc-edited",&t,&tn);{if(cx_fmt(refl,sizeof refl,"RECEIPT_REFUSE\t%s\treceipt-run-block-mismatch\t",id))die("format-bound",0);}
   {int z=snprintf(refl,sizeof refl,"RECEIPT_REFUSE\t%s\treceipt-run-seal-mismatch\t",id);if(z<0||(size_t)z>=sizeof refl)die("bound-format",id);}
@@ -114,7 +115,7 @@ static int split_main(char **argv){
  printf("CONTROLS\tgroup=split\tassertions=%d\tfailed=%d\tattempt=%s\tsealed_bound_rc=%d\tscope=split-attempt-refusals-only-not-a-batch-or-release-pass\n",assertions,failed,nonce,true_rc);return failed?1:0;
 }
 int main(int argc,char **argv){
- if(argc==6&&!strcmp(argv[1],"split"))return split_main(argv);
+ if(argc==6&&tx_eq(argv[1], "split", 1L << 20))return split_main(argv);
  if(argc!=7)die("usage","ROOT SESSION NEW_OUT PASS_ID MISSING_ID TIMEOUT_ID | split ROOT SESSION NEW_OUT ID");
  if(argv[1][0]!='/'||!realpath(argv[1],root)||strcmp(root,argv[1])||argv[2][0]!='/'||!realpath(argv[2],source)||strcmp(source,argv[2]))die("canonical-root-session",0);
  if(argv[3][0]!='/'||strlen(argv[3])>=sizeof out)die("out-absolute",argv[3]);{size_t i,n=strlen(argv[3]);for(i=0;i<=n;i++)out[i]=argv[3][i];}if(mkdir(out,0700))die("new-out-required",out);char co[4096],ob[4400],oc[4096];join(ob,sizeof ob,root,"out");if(!realpath(out,co)||strcmp(co,out)||!realpath(ob,oc)||strncmp(out,oc,strlen(oc))||out[strlen(oc)]!='/')die("out-below-ROOT/out",out);
