@@ -1,0 +1,111 @@
+/* tools/release-ape.cx -- pack the five release-build slices and the frozen P3 into one APE unisacc-next.com,
+ * and smoke it before anyone installs it (plans/release-0.0.43.md step 2, wrap).
+ *
+ *   sh ./unisacc.com tools/release-ape.cx -- pack OUT P3 WIN_X86_64 LNX_X86_64 LNX_ARM64 OSX_X86_64 OSX_ARM64
+ *   sh ./unisacc.com tools/release-ape.cx -- smoke OUT/unisacc-next.com
+ *
+ * pack: P3 is a package file as release-build writes it (package bytes, then the 16-byte UNIPKG1 footer); its
+ *   package bytes (footer cut, located with runtime.packagefooter) become OUT/p3-package.bin, and
+ *   ujs/product/ape-pack.cx --tool unisacc --deflate --payload makes OUT/unisacc-next.com: launcher + five gzip
+ *   slices + one copy of the package + one UNIPKG1 footer, the layout of the installed unisacc.com (one package at
+ *   the end, read by every slice through UNISA_CONTAINER).  The lnx slices are entry.elf (no P3 of their own).
+ *   Writes OUT/ape-receipt.txt (every input and the output with sha256 and bytes) and checks that the packed
+ *   package bytes equal OUT/p3-package.bin.
+ * smoke: runs the packed file the way users do (sh FILE ...) under tools/bound: --version names 0.0.43; -run of a
+ *   C program exits 7; -S prints a tape; a .cx program that calls the host C library (sy_printf) prints its line
+ *   -- the memory-image route that 5ed7ba69 broke; and tests/srcshape.cx --check exits 0.  Prints
+ *   RELEASE_APE<TAB>SMOKE<TAB>ok=N<TAB>failed=M; exit 0 only when nothing failed.
+ * An L3 tool: no #include, no direct libc call. */
+#pragma unisa use runtime.packagefooter
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static void ra_die(const char *a, const char *b) { sy_eprintf("release-ape: %s%s%s\n", a, b ? ": " : "", b ? b : ""); sy_exit(2); }
+
+static int sha_of(const char *path, char hex[65], long *bytes) {
+    size_t n = 0; char *b = cx_read(path, &n);
+    if (!b) return -1;
+    cx_sha256_hex(b, n, hex); *bytes = (long)n; mm_free(b);
+    return 0;
+}
+
+/* run ARGV; stdout+stderr (truncated to cap) into OUT; the exit code, or -1 */
+static int run(char **argv, char *out, int cap) { int cut; return sy_run(argv, out, cap, &cut); }
+
+static int receipt_line(char *r, long cap, long *at, const char *key, const char *path) {
+    char hex[65]; long n = 0;
+    if (sha_of(path, hex, &n)) return -1;
+    if (cx_fmt(r + *at, (size_t)(cap - *at), "%s\t%s\tsha=%s\tbytes=%ld\n", key, path, hex, n)) return -1;
+    *at += tx_len(r + *at, cap - *at);
+    return 0;
+}
+
+static int pack(char **argv) {
+    const char *out = argv[0], *p3 = argv[1], *keys[6] = {"p3", "win/x86_64", "lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64"};
+    char payload[4400], com[4400], rp[4400], log[8192], receipt[8192]; size_t pn; long at = 0; int i, rc; PackageFooter foot;
+    if (sy_mkdir(out, 0755) && sy_exists(out) != 1) ra_die("cannot make", out);
+    if (cx_fmt(payload, sizeof payload, "%s/p3-package.bin", out) || cx_fmt(com, sizeof com, "%s/unisacc-next.com", out) || cx_fmt(rp, sizeof rp, "%s/ape-receipt.txt", out)) ra_die("path too long", out);
+    {   char *b = cx_read(p3, &pn);
+        if (!b || pn > 2147483647UL || !packagefooter_locate_bytes((const unsigned char *)b, (long)pn, &foot)) ra_die("no package footer", p3);
+        if (foot.package_offset < 0 || foot.footer_offset < foot.package_offset || foot.footer_offset + 16 != (long)pn || b[foot.package_offset] != 'P') ra_die("unexpected package span", p3);
+        if (cx_write(payload, b + foot.package_offset, (size_t)(foot.footer_offset - foot.package_offset))) ra_die("cannot write", payload);
+        mm_free(b);
+    }
+    {   char *av[] = {"sh", "./unisacc.com", "-run", "ujs/product/ape-pack.cx", "--", "--payload", payload, "--tool", "unisacc", "--deflate",
+                      "--product", "unisacc", "0.0.43", com, argv[2], argv[3], argv[4], argv[5], argv[6], 0};
+        rc = run(av, log, sizeof log);
+        if (rc != 0 || sy_exists(com) != 1) { sy_eprintf("%s", log); ra_die("ape-pack failed", com); }
+        sy_chmod(com, 0755);
+    }
+    for (i = 0; i < 6; i++) if (receipt_line(receipt, sizeof receipt, &at, keys[i], argv[1 + i])) ra_die("cannot hash", argv[1 + i]);
+    if (receipt_line(receipt, sizeof receipt, &at, "p3-package", payload) || receipt_line(receipt, sizeof receipt, &at, "unisacc-next.com", com)) ra_die("cannot hash", com);
+    {   /* the packed file's last package must be the payload: footer = "UNIPKG1\n" + length, payload just before it */
+        size_t cn, qn; char *c = cx_read(com, &cn), *q = cx_read(payload, &qn); long len = 0; int k;
+        if (!c || !q || cn < qn + 16 || !tx_same(c + cn - 16, 8, "UNIPKG1\n", 8)) ra_die("no UNIPKG1 footer at the end", com);
+        for (k = 7; k >= 0; k--) len = (len << 8) | (unsigned char)c[cn - 8 + k];
+        if (len != (long)qn || !tx_same(c + cn - 16 - qn, (long)qn, q, (long)qn)) ra_die("packed package differs from the payload", com);
+        mm_free(c); mm_free(q);
+    }
+    if (cx_write(rp, receipt, (size_t)at)) ra_die("cannot write", rp);
+    sy_printf("%sRELEASE_APE\tPACKED\t%s\n", receipt, com);
+    return 0;
+}
+
+static int ok, failed;
+static void ck(int good, const char *name, const char *log) {
+    if (good) { ok++; sy_printf("PASS\trelease-ape.smoke.%s\n", name); }
+    else { failed++; sy_printf("FAIL\trelease-ape.smoke.%s\n%s\n", name, log); }
+}
+
+static int smoke(const char *com) {
+    char log[8192], dir[4400], c[4400], cx[4400];
+    if (sy_exists(com) != 1) ra_die("no such file", com);
+    if (cx_fmt(dir, sizeof dir, "out/release-ape-smoke") || (sy_mkdir(dir, 0755) && sy_exists(dir) != 1)) ra_die("cannot make", dir);
+    if (cx_fmt(c, sizeof c, "%s/seven.c", dir) || cx_write(c, "int main(void){return 7;}\n", 26)) ra_die("cannot write", c);
+    if (cx_fmt(cx, sizeof cx, "%s/hostc.cx", dir)) ra_die("path", dir);
+    {   const char *s = "#pragma unisa use sys.io\nint main(void){sy_printf(\"release-ape-hostc\\n\");return 0;}\n";
+        if (cx_write(cx, s, (size_t)tx_len(s, 256))) ra_die("cannot write", cx); }
+    {   char *av[] = {"./tools/bound", "30", "sh", (char *)com, "--version", 0}; int rc = run(av, log, sizeof log);
+        ck(rc == 0 && tx_find(log, tx_len(log, sizeof log), "unisacc 0.0.43", 14) >= 0, "version-0.0.43", log); }
+    {   char *av[] = {"./tools/bound", "30", "sh", (char *)com, "-run", c, 0}; int rc = run(av, log, sizeof log);
+        ck(rc == 7, "run-c-exit-7", log); }
+    {   char *av[] = {"./tools/bound", "30", "sh", (char *)com, "-O0", "-b", "lnx/x86_64", "-S", c, "-o", "-", 0}; int rc = run(av, log, sizeof log);
+        ck(rc == 0 && tx_find(log, tx_len(log, sizeof log), "_start:", 7) >= 0, "S-prints-tape", log); }
+    {   char *av[] = {"./tools/bound", "50", "sh", (char *)com, cx, 0}; int rc = run(av, log, sizeof log);
+        ck(rc == 0 && tx_find(log, tx_len(log, sizeof log), "release-ape-hostc", 17) >= 0, "cx-host-c-library", log); }
+    {   char *av[] = {"./tools/bound", "50", "sh", (char *)com, "tests/srcshape.cx", "--", "--check", 0}; int rc = run(av, log, sizeof log);
+        ck(rc == 0, "cx-tool-srcshape", log); }
+    sy_printf("RELEASE_APE\tSMOKE\tok=%d\tfailed=%d\n", ok, failed);
+    return failed ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc == 9 && tx_eqz(argv[1], "pack")) return pack(argv + 2);
+    if (argc == 3 && tx_eqz(argv[1], "smoke")) return smoke(argv[2]);
+    sy_eprintf("usage: release-ape.cx pack OUT P3 WIN_X86_64 LNX_X86_64 LNX_ARM64 OSX_X86_64 OSX_ARM64 | smoke FILE\n");
+    return 2;
+}
