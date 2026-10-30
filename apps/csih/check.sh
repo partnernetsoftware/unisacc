@@ -58,9 +58,17 @@ if cc $CFLAGS $CXINC -c -o "$TMP/json.o" "$TMP/json.c" \
 else
     echo "FAIL 3a: json fuzz"; cat "$TMP/fuzz_json.out" 2>/dev/null; rc=1
 fi
-if cc $CFLAGS $CXINC -include json.h -c -o "$TMP/csih_message.o" "$TMP/csih_message.c" \
+# csih_message reaches zstr, text.text and mem.bytes through `#pragma unisa use`,
+# which host cc ignores: compile those beside it, declared by fuzz/host_l0.h.
+L0INC="-include $R/apps/csih/fuzz/host_l0.h"
+if cp zstr.cx "$TMP/zstr.c" && cp text/text.cx "$TMP/text.c" && cp mem/bytes.cx "$TMP/bytes.c" \
+   && cc $CFLAGS $CXINC -c -o "$TMP/text.o" "$TMP/text.c" \
+   && cc $CFLAGS $CXINC -c -o "$TMP/bytes.o" "$TMP/bytes.c" \
+   && cc $CFLAGS $CXINC $L0INC -c -o "$TMP/zstr.o" "$TMP/zstr.c" \
+   && cc $CFLAGS $CXINC $L0INC -include json.h -c -o "$TMP/csih_message.o" "$TMP/csih_message.c" \
    && cc $CFLAGS -include json.h -include csih_message.h -c -o "$TMP/fuzz_msg.o" "$TMP/fuzz_msg.c" \
    && cc $CFLAGS -o "$TMP/fuzz_msg" "$TMP/fuzz_msg.o" "$TMP/csih_message.o" "$TMP/json.o" \
+        "$TMP/zstr.o" "$TMP/text.o" "$TMP/bytes.o" \
    && "$TMP/fuzz_msg" "$ITERS" > "$TMP/fuzz_msg.out" 2>&1 \
    && grep -q 'decoded_ok=[1-9]' "$TMP/fuzz_msg.out"; then
     echo "ok   3b: msg fuzz $(cat "$TMP/fuzz_msg.out")"

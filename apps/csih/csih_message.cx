@@ -1,5 +1,7 @@
 #pragma unisa module csih_message
 #pragma unisa use json
+#pragma unisa use zstr
+#pragma unisa use mem.bytes
 typedef struct csih_message {
     char id[33];
     char body[4096];
@@ -71,7 +73,7 @@ static int cm_no_nul(const char *text, size_t len, char *why, size_t cap) {
 static int cm_safe_session(const char *s) {
     size_t n;
     if (!s) return 0;
-    n = strlen(s);
+    n = (size_t)zs_len(s);
     if (n == 0 || n > 64) return 0;
     for (size_t i = 0; i < n; i++) {
         unsigned char c = (unsigned char)s[i];
@@ -108,7 +110,7 @@ int csih_message_validate(const char *text, size_t len,
     for (size_t i = 0; i < root->nkeys; i++) {
         int known = 0;
         for (size_t k = 0; k < nkeys; k++)
-            if (!strcmp(root->keys[i], keys[k])) { known = 1; break; }
+            if (zs_eq(root->keys[i], keys[k])) { known = 1; break; }
         if (!known) {
             char b[96]; snprintf(b, sizeof b, "unknown key: %.48s", root->keys[i]);
             cm_fail(why, cap, b); goto done;
@@ -118,7 +120,7 @@ int csih_message_validate(const char *text, size_t len,
     for (size_t k = 0; k < nkeys; k++) {
         int cnt = 0;
         for (size_t i = 0; i < root->nkeys; i++)
-            if (!strcmp(root->keys[i], keys[k])) cnt++;
+            if (zs_eq(root->keys[i], keys[k])) cnt++;
         if (cnt == 0) { char b[96]; snprintf(b, sizeof b, "missing: %s", keys[k]); cm_fail(why, cap, b); goto done; }
         if (cnt > 1) { char b[96]; snprintf(b, sizeof b, "duplicate: %s", keys[k]); cm_fail(why, cap, b); goto done; }
     }
@@ -135,7 +137,7 @@ int csih_message_validate(const char *text, size_t len,
     if (version->kind != J_NUM || version->n != 1.0) { cm_fail(why, cap, "version: must be 1"); goto done; }
     if (id->kind != J_STR) { cm_fail(why, cap, "id: not string"); goto done; }
     idv = jstr(id);
-    if (strlen(idv) != 32) { cm_fail(why, cap, "id: need 32 hex"); goto done; }
+    if ((size_t)zs_len(idv) != 32) { cm_fail(why, cap, "id: need 32 hex"); goto done; }
     for (size_t i = 0; i < 32; i++) {
         char c = idv[i];
         if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
@@ -145,20 +147,20 @@ int csih_message_validate(const char *text, size_t len,
     if (session->kind != J_STR) { cm_fail(why, cap, "session: not string"); goto done; }
     sv = jstr(session);
     if (!cm_safe_session(sv)) { cm_fail(why, cap, "session: unsafe"); goto done; }
-    if (strcmp(sv, expected_session) != 0) { cm_fail(why, cap, "session: mismatch"); goto done; }
+    if (!zs_eq(sv, expected_session)) { cm_fail(why, cap, "session: mismatch"); goto done; }
     if (kind->kind != J_STR) { cm_fail(why, cap, "kind: not string"); goto done; }
     kv = jstr(kind);
-    if (strcmp(kv, "task") != 0 && strcmp(kv, "notice") != 0) {
+    if (!zs_eq(kv, "task") && !zs_eq(kv, "notice")) {
         cm_fail(why, cap, "kind: task|notice only"); goto done;
     }
     if (body->kind != J_STR) { cm_fail(why, cap, "body: not string"); goto done; }
     bv = jstr(body);
-    if (strlen(bv) == 0) { cm_fail(why, cap, "body: empty"); goto done; }
-    if (strlen(bv) > 4095) { cm_fail(why, cap, "body: over 4095 bytes"); goto done; }
-    if (!cm_utf8_valid(bv, strlen(bv))) { cm_fail(why, cap, "body: invalid UTF-8"); goto done; }
+    if ((size_t)zs_len(bv) == 0) { cm_fail(why, cap, "body: empty"); goto done; }
+    if ((size_t)zs_len(bv) > 4095) { cm_fail(why, cap, "body: over 4095 bytes"); goto done; }
+    if (!cm_utf8_valid(bv, (size_t)zs_len(bv))) { cm_fail(why, cap, "body: invalid UTF-8"); goto done; }
 
     if (why && cap) snprintf(why, cap, "ok");
-    rc = (strcmp(kv, "notice") == 0) ? 2 : 1;
+    rc = zs_eq(kv, "notice") ? 2 : 1;
 
 done:
     jfree(root);
@@ -176,7 +178,7 @@ int csih_message_decode(const char *text, size_t len,
     int kind;
 
     if (!out) return cm_fail(why, cap, "out: null");
-    memset(out, 0, sizeof *out);
+    mm_fill(out, (long)sizeof *out, 0, (long)sizeof *out);
 
     kind = csih_message_validate(text, len, expected_session, why, cap);
     if (kind == 0) return 0;
@@ -185,7 +187,7 @@ int csih_message_decode(const char *text, size_t len,
     if (!root) {
         char b[320];
         snprintf(b, sizeof b, "parse: %s", err);
-        memset(out, 0, sizeof *out);
+        mm_fill(out, (long)sizeof *out, 0, (long)sizeof *out);
         return cm_fail(why, cap, b);
     }
 
@@ -193,7 +195,7 @@ int csih_message_decode(const char *text, size_t len,
     body = jget(root, "body");
     if (!id || id->kind != J_STR || !body || body->kind != J_STR) {
         jfree(root);
-        memset(out, 0, sizeof *out);
+        mm_fill(out, (long)sizeof *out, 0, (long)sizeof *out);
         return cm_fail(why, cap, "decode: unexpected field");
     }
 
