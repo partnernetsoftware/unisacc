@@ -120,7 +120,8 @@ static void key_source(const char *dir,int keylen,char *src_name,int cap){
  if(cx_fmt(p,sizeof p,"%s/%s",dir,name))die("key header");save(p,"int v=1;\n",9);
  char body[700];if(cx_fmt(src_name,cap,"m%d.c",keylen)||cx_fmt(p,sizeof p,"%s/%s",dir,src_name)||cx_fmt(body,sizeof body,"#include \"%s\"\nint main(void){return v;}\n",name))die("key source");save(p,body,tx_len(body,sizeof body));}
 static const char *key_idir;   /* -I for key_run, or 0 */
-static np_result key_run(const char *dir,const char *ledger,const char *capture,const char *srcname,const char *name){char *v[22];int n=command_prefix(v,8);if(ledger){v[n++]="--strict-resource-flow";v[n++]="--resource-ledger";v[n++]=(char *)ledger;}if(key_idir){v[n++]="-I";v[n++]=(char *)key_idir;}v[n++]="-O0";v[n++]="-b";v[n++]="lnx/x86_64";v[n++]="-S";v[n++]=(char *)srcname;v[n++]="-o";v[n++]="-";v[n]=0;return command(v,dir,capture,8,name);}
+static char *key_extra[8];     /* further options for key_run, 0-terminated */
+static np_result key_run(const char *dir,const char *ledger,const char *capture,const char *srcname,const char *name){char *v[30];int n=command_prefix(v,8);if(ledger){v[n++]="--strict-resource-flow";v[n++]="--resource-ledger";v[n++]=(char *)ledger;}if(key_idir){v[n++]="-I";v[n++]=(char *)key_idir;}for(int k=0;k<7&&key_extra[k];k++)v[n++]=key_extra[k];v[n++]="-O0";v[n++]="-b";v[n++]="lnx/x86_64";v[n++]="-S";v[n++]=(char *)srcname;v[n++]="-o";v[n++]="-";v[n]=0;return command(v,dir,capture,8,name);}
 /* ri.class.inc-quote.MISSING: the quote-include capture as an SC1 map (#SC1, first row per key) replays exactly;
    without its \0inc/q/ row the strict run is refused MISSING_EXPLICIT_RESOURCE naming the hex key, with no output */
 static void sc1_map(const char *t,long n,const char *drop,np_buf *out){   /* DROP: hex key prefix whose rows are left out, or 0 */
@@ -190,6 +191,36 @@ static void inc_states(int angle){
  ck(want.rc==1&&got.rc==1&&!got.outn&&got.errn==want.errn&&want.errn>0&&mm_same(got.err,want.err,(long)want.errn)&&tx_find(got.err,(long)got.errn,"no such file for #include",25)>=0,name);np_free(&want);np_free(&got);
  key_idir=0;
 }
+/* ri.class.cli-option.EMPTY and .ledger-authority: a capture made with -D FOO=7 -include pre.h, replayed strictly with
+   that same command line --
+   EMPTY     -- \0cli/defines and \0cli/includes re-signed as present 0-byte rows give the bytes of a plain run with no
+                -D/-include;
+   authority -- \0cli/defines re-signed to "FOO=3" gives the bytes of a plain run with -D FOO=3 -include pre.h: the
+                ledger answers, not the command line.
+   The fixture's three plain runs (none, FOO=3, FOO=7) differ, so each equality picks one of them. */
+static void cli_rows_without(const char *t,size_t n,const char *k1,const char *k2,np_buf *out){long at=0;
+ while(at<(long)n){long e=tx_chr(t+at,(long)n-at,'\n'),l=e<0?(long)n-at:e,tab=tx_chr(t+at,l,'\t');const char *s=t+at;at+=l+1;
+  if(tab>0&&((k1&&tx_same(s,tab,k1,tx_len(k1,64)))||(k2&&tx_same(s,tab,k2,tx_len(k2,64)))))continue;
+  np_put(out,s,(size_t)l);np_put(out,"\n",1);}}
+static void cli_options(void){
+ char d[4400],p[4400],cap[4400],led[4400],row[256],eh[65],h3[65];path(d,sizeof d,work,"cliopt");path(cap,sizeof cap,work,"cliopt-capture");if(sy_mkdir(d,0700))die("cliopt dir");
+ const char *m="#ifdef FOO\nint foo_defined=FOO;\n#endif\nint main(void){return 0;}\n";path(p,sizeof p,d,"m.c");save(p,m,tx_len(m,128));path(p,sizeof p,d,"pre.h");save(p,"int pre_included=2;\n",20);
+ const char *dk="00636c692f646566696e6573",*ik="00636c692f696e636c75646573";
+ np_result plain=key_run(d,0,0,"m.c","cliopt-plain");
+ key_extra[0]="-D";key_extra[1]="FOO=3";key_extra[2]="-include";key_extra[3]="pre.h";key_extra[4]=0;np_result w3=key_run(d,0,0,"m.c","cliopt-foo3");
+ key_extra[1]="FOO=7";np_result w7=key_run(d,0,cap,"m.c","cliopt-capture");
+ ck(plain.rc==0&&w3.rc==0&&w7.rc==0&&plain.outn&&w3.outn&&w7.outn&&!(plain.outn==w7.outn&&mm_same(plain.out,w7.out,(long)w7.outn))&&!(w3.outn==w7.outn&&mm_same(w3.out,w7.out,(long)w7.outn)),"cli-option-fixture-distinct");
+ size_t tn;path(p,sizeof p,cap,"resources.tsv");char *t=load(p,&tn);np_buf all={0};sc1_map(t,(long)tn,0,&all);mm_free(t);
+ cx_sha256_hex("",0,eh);np_buf e={0};cli_rows_without(all.p,all.n,dk,ik,&e);
+ if(cx_fmt(row,sizeof row,"%s\t1\tempty.bin\t0\t%s\n%s\t1\tempty.bin\t0\t%s\n",dk,eh,ik,eh))die("empty rows");np_put(&e,row,tx_len(row,sizeof row));
+ material_from(cap,"cliopt-empty-ledger",e.p,e.n,led);path(p,sizeof p,led,"empty.bin");save(p,"",0);mm_free(e.p);
+ np_result got=key_run(d,led,0,"m.c","cliopt-empty");ck(got.rc==0&&!got.errn&&got.outn==plain.outn&&mm_same(got.out,plain.out,(long)plain.outn),"cli-option-empty-equals-plain");np_free(&got);
+ cx_sha256_hex("FOO=3",6,h3);np_buf a={0};cli_rows_without(all.p,all.n,dk,0,&a);
+ if(cx_fmt(row,sizeof row,"%s\t1\tdef3.bin\t6\t%s\n",dk,h3))die("authority row");np_put(&a,row,tx_len(row,sizeof row));
+ material_from(cap,"cliopt-authority-ledger",a.p,a.n,led);path(p,sizeof p,led,"def3.bin");save(p,"FOO=3",6);mm_free(a.p);mm_free(all.p);
+ got=key_run(d,led,0,"m.c","cliopt-authority");ck(got.rc==0&&!got.errn&&got.outn==w3.outn&&mm_same(got.out,w3.out,(long)w3.outn),"cli-option-ledger-authority");np_free(&got);
+ key_extra[0]=0;np_free(&plain);np_free(&w3);np_free(&w7);
+}
 static void key_length_bound(void){
  char dir[4400],s512[32],s513[32],cap512[4400],cap513[4400],p[4400];path(dir,sizeof dir,work,"keylen");if(sy_mkdir(dir,0700))die("keylen dir");
  key_source(dir,512,s512,sizeof s512);key_source(dir,513,s513,sizeof s513);path(cap512,sizeof cap512,dir,"cap512");path(cap513,sizeof cap513,dir,"cap513");
@@ -235,4 +266,4 @@ int main(int argc,char **argv){int trace_mode=argc>3&&tx_eqz(argv[argc-1], "--tr
  /* ri.frame.row-field-too-long: a 4096-byte field is one above the parser bound (width >= 4096) */
  {np_buf longrow={0};np_puts(&longrow,"ff\t0\t");for(int k=0;k<4096;k++)np_put(&longrow,"a",1);np_puts(&longrow,"\t0\t-\n");appended("row-field-4096",longrow.p,longrow.n,"resource-row-field-too-long");mm_free(longrow.p);}
  const char nulrow[]="ff\t0\t-\t0\t-\0hidden\n";appended("embedded-nul-row",nulrow,sizeof nulrow-1,"resource-row-nul");np_buf nulheader={0};np_put(&nulheader,ledger,header-1);np_put(&nulheader,"\0hidden\n",8);np_put(&nulheader,ledger+header,ledger_n-header);refuse("embedded-nul-header",nulheader.p,nulheader.n,"resource-row-nul");free(nulheader.p);
- ledger_preconditions();identity_bounds();key_length_bound();inc_states(0);inc_states(1);length_blob("blob-longer-than-declared",3);length_blob("blob-shorter-than-declared",5);repeated();additional();replay=invoke(capdir,root,0,"recovery");path(p,sizeof p,work,"normal.stdout");size_t recovery_n;char *recovery=load(p,&recovery_n);ck(replay.rc==0&&!replay.errn&&replay.outn==recovery_n&&!memcmp(replay.out,recovery,recovery_n),"strict-recovery-after-refusals");free(recovery);np_free(&replay);free(ledger);return finish(before,container_before,"SC1-map-compatibility-from-verified-SC2-trace");}
+ ledger_preconditions();identity_bounds();key_length_bound();inc_states(0);inc_states(1);cli_options();length_blob("blob-longer-than-declared",3);length_blob("blob-shorter-than-declared",5);repeated();additional();replay=invoke(capdir,root,0,"recovery");path(p,sizeof p,work,"normal.stdout");size_t recovery_n;char *recovery=load(p,&recovery_n);ck(replay.rc==0&&!replay.errn&&replay.outn==recovery_n&&!memcmp(replay.out,recovery,recovery_n),"strict-recovery-after-refusals");free(recovery);np_free(&replay);free(ledger);return finish(before,container_before,"SC1-map-compatibility-from-verified-SC2-trace");}
