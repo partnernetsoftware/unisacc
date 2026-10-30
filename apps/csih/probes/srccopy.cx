@@ -1,0 +1,47 @@
+#pragma unisa module srccopy
+#pragma unisa use text.text
+#pragma unisa use sys.fs
+/*
+ * srccopy.cx — for the probes that build csih from a private copy of apps/csih
+ * (file_observation, completion_contract, evidence_reconciliation,
+ * reload_launcher_run). apps/csih/sys, mem and text are symlinks to
+ * ../../cx/{sys,mem,text}; their copy walks skip links (cx_walk), so the copy
+ * missed the L0 modules csih uses through `#pragma unisa use sys.*` and did
+ * not compile. csih_copy_l0 copies those three directories' .cx files into
+ * DST/{sys,mem,text}, read through their real paths. No #include, no libc.
+ */
+
+static char cl0_root[1100], cl0_dst[1100];
+static int cl0_err;
+
+static int cl0_cb(const char *path, void *ctx) {
+    char to[2400];
+    size_t n = 0;
+    char *d;
+    long rl = tx_len(cl0_root, (long)sizeof cl0_root), pl = tx_len(path, 4096);
+    (void)ctx;
+    if (rl < 0 || pl < rl + 5 || !tx_same(path + pl - 3, 3, ".cx", 3)) return 0;
+    if (tx_chr(path + rl + 1, pl - rl - 1, '/') >= 0) return 0;   /* the L0 directories are flat */
+    if (cx_fmt(to, sizeof to, "%s/%s", cl0_dst, path + rl + 1)) { cl0_err = 1; return 1; }
+    d = cx_read(path, &n);
+    if (!d || cx_write(to, d, n) != 0) { cl0_err = 1; return 1; }
+    return 0;
+}
+
+/* Copy APP/{sys,mem,text}/ *.cx (through the links' real directories) into
+   DST/{sys,mem,text}/. 0, or -1. */
+int csih_copy_l0(const char *app, const char *dst) {
+    static const char *const names[] = { "sys", "mem", "text" };
+    int i;
+    for (i = 0; i < 3; i++) {
+        char link[1100];
+        if (cx_fmt(link, sizeof link, "%s/%s", app, names[i])) return -1;
+        if (sy_realpath(link, cl0_root, (int)sizeof cl0_root) < 0) return -1;
+        if (cx_fmt(cl0_dst, sizeof cl0_dst, "%s/%s", dst, names[i])) return -1;
+        if (sy_mkdir(cl0_dst, 0755) != 0 && sy_exists(cl0_dst) != 1) return -1;
+        cl0_err = 0;
+        cx_walk(cl0_root, cl0_cb, 0);
+        if (cl0_err) return -1;
+    }
+    return 0;
+}

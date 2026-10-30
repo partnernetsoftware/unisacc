@@ -1,3 +1,4 @@
+#pragma unisa use srccopy
 #pragma unisa use text.text
 #pragma unisa use sys.env
 #pragma unisa use sys.fs
@@ -530,7 +531,7 @@ static int run_agent(const char **kv, const char *a1, const char *a2, int capaci
     sb_puts(&s, "; ");
     for (i = 0; kv && kv[i]; i += 2) { sb_puts(&s, "export "); sb_puts(&s, kv[i]); sb_puts(&s, "="); sq(&s, kv[i + 1]); sb_puts(&s, "; "); }
     sb_puts(&s, "cd "); sq(&s, g_root);
-    sb_puts(&s, " && exec /bin/sh \"$0\" -run source/agent_cli.cx -- \"$@\" >"); sq(&s, outp);
+    sb_puts(&s, " && exec ./agent_cli.bin \"$@\" >"); sq(&s, outp);
     sb_puts(&s, " 2>"); sq(&s, errp);
     argv[0] = "sh"; argv[1] = "-c"; argv[2] = (char *)sb_z(&s); argv[3] = g_comp;
     argv[4] = (char *)a1; argv[5] = (char *)a2; argv[6] = NULL;
@@ -1065,15 +1066,18 @@ static int prepare(void) {
     snprintf(g_src, sizeof g_src, "%s/source", g_root);
     snprintf(g_comp, sizeof g_comp, "%s/compiler.com", g_root);
     NEED(copy_source() == 0, "source copy failed");
+    NEED(csih_copy_l0(g_app, g_src) == 0, "copy of the L0 dirs (sys, mem, text) failed");
     st = inject();
     NEED(st == 0, "agent_cli.cx injection failed (%d)", st);
     u = cx_read(g_unisacc, &n);
     NEED(u != NULL && cx_write(g_comp, u, n) == 0, "compiler copy");
-    /* build gate: the -run compile of the injected source; an unknown subcommand gives the usage line, rc 64 */
+    /* build gate: the compile of the injected source (once, -o); an unknown subcommand gives the usage line, rc 64 */
     snprintf(outp, sizeof outp, "%s/build.stdout", g_root);
     snprintf(errp, sizeof errp, "%s/build.stderr", g_root);
     sb_puts(&s, "cd "); sq(&s, g_root);
-    sb_puts(&s, " && exec /bin/sh \"$0\" -run source/agent_cli.cx -- \"$@\" >"); sq(&s, outp); sb_puts(&s, " 2>"); sq(&s, errp);
+    /* compiled once (-o agent_cli.bin); the selftest and every case run that binary:
+       a -run compile of the injected source is ~36s, too long to repeat per step */
+    sb_puts(&s, " && { /bin/sh \"$0\" source/agent_cli.cx -o agent_cli.bin && exec ./agent_cli.bin \"$@\"; } >"); sq(&s, outp); sb_puts(&s, " 2>"); sq(&s, errp);
     av[0] = "sh"; av[1] = "-c"; av[2] = (char *)sb_z(&s); av[3] = g_comp; av[4] = "build-check"; av[5] = NULL;
     {
         int pid = sy_spawn(av), w = -EAGAIN;
@@ -1087,7 +1091,7 @@ static int prepare(void) {
     }
     NEED(r.rc == 64 && !r.timed && has(r.out, r.outn, "usage: agent_cli"), "build gate: rc=%d timed=%d (want 64 with the usage line)", r.rc, r.timed);
     NEED(r.errn == 0, "build stderr not empty: %.300s", r.err);
-    printf("  ok    build: injected agent compiles (-run, usage rc 64, empty stderr)\n");
+    printf("  ok    build: injected agent compiles (-o once, usage rc 64, empty stderr)\n");
     /* selftest */
     st = sy_exists(g_selfhome);
     if (st == 1) cx_rmtree(g_selfhome);
@@ -1098,7 +1102,7 @@ static int prepare(void) {
     sb_puts(&s, "unset CSIH_ROLE CSIH_PEER OPENAI_API_KEY HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; ");
     sb_puts(&s, "export NO_PROXY='127.0.0.1,localhost' no_proxy='127.0.0.1,localhost' HOME="); sq(&s, g_selfhome);
     sb_puts(&s, "; cd "); sq(&s, g_root);
-    sb_puts(&s, " && exec /bin/sh \"$0\" -run source/agent_cli.cx -- \"$@\" >"); sq(&s, outp); sb_puts(&s, " 2>"); sq(&s, errp);
+    sb_puts(&s, " && exec ./agent_cli.bin \"$@\" >"); sq(&s, outp); sb_puts(&s, " 2>"); sq(&s, errp);
     av[2] = (char *)sb_z(&s); av[4] = "selftest";
     {
         int pid = sy_spawn(av), w = -EAGAIN;

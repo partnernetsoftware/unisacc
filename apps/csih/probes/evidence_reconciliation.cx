@@ -1,3 +1,4 @@
+#pragma unisa use srccopy
 #pragma unisa use text.text
 #pragma unisa use sys.env
 #pragma unisa use sys.fs
@@ -568,7 +569,11 @@ static int run_agent(const char *cwd, const char **kv, char **args, int nargs, l
                 "export NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost; ");
     for (i = 0; kv && kv[i]; i += 2) { sb_fmt(&s, "export %s=", kv[i]); sq(&s, kv[i + 1]); sb_puts(&s, "; "); }
     sb_puts(&s, "cd "); sq(&s, cwd);
-    sb_puts(&s, " && exec /bin/sh \"$0\" -run source/agent_cli.cx -- \"$@\" </dev/null >"); sq(&s, g_out);
+    /* the injected agent is compiled once, on the first call (the build gate),
+       into g_root/agent_cli.bin; later calls exec it (a -run compile is ~36s) */
+    sb_puts(&s, " && { { [ -x "); sq(&s, g_root); sb_puts(&s, "/agent_cli.bin ] || /bin/sh \"$0\" ");
+    sq(&s, g_src); sb_puts(&s, "/agent_cli.cx -o "); sq(&s, g_root); sb_puts(&s, "/agent_cli.bin; } ");
+    sb_puts(&s, "&& exec "); sq(&s, g_root); sb_puts(&s, "/agent_cli.bin \"$@\"; } </dev/null >"); sq(&s, g_out);
     sb_puts(&s, " 2>"); sq(&s, g_err);
     av[n++] = "/bin/sh"; av[n++] = "-c"; av[n++] = s.p; av[n++] = g_comp;
     for (i = 0; i < nargs && n < 38; i++) av[n++] = args[i];
@@ -1086,6 +1091,7 @@ int main(void) {
 
     /* private source copy + injection (copy only) */
     cx_walk(CSIH_APP, copy_cb, NULL);
+    if (!g_copy_err && csih_copy_l0(CSIH_APP, g_src) != 0) g_copy_err = 1;   /* sys, mem, text: links the walk skips */
     if (g_copy_err) { printf("evidence_reconciliation: FAIL (source copy)\n"); fails++; goto end; }
     {
         static const char entry[] = "int main(int argc, char **argv) {";

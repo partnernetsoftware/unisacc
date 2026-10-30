@@ -1,5 +1,6 @@
 #pragma unisa use agentwit
 #pragma unisa use netwit
+#pragma unisa use srccopy
 /* CX probe */
 /* file_observation.c — C port of probes/file_observation.py.
  * Real native file windows and HTTP presentation; no semantic-model claim.
@@ -463,6 +464,10 @@ static void sq(sbuf *b, const char *s) {
     }
     sb_put(b, "'", 1);
 }
+/* The injected agent, compiled once on the first call (the build gate) into
+   g_agentbin from g_agentsrc; later calls exec the binary. A -run compile of
+   it is ~36s, too long to repeat for every case. Set in main. */
+static char g_agentbin[1000], g_agentsrc[1000];
 /* sh -c body: unset proxy/role vars, export kv pairs, cd cwd, exec bin. kv is key,value,... NULL-ended. */
 static char *make_script(const char *cwd, const char **kv) {
     sbuf s = {0, 0, 0};
@@ -477,7 +482,15 @@ static char *make_script(const char *cwd, const char **kv) {
     }
     sb_puts(&s, "cd ");
     sq(&s, cwd);
-    sb_puts(&s, " && exec /bin/sh \"$0\" -run source/agent_cli.cx -- \"$@\"");
+    sb_puts(&s, " && { [ -x ");
+    sq(&s, g_agentbin);
+    sb_puts(&s, " ] || /bin/sh \"$0\" ");
+    sq(&s, g_agentsrc);
+    sb_puts(&s, " -o ");
+    sq(&s, g_agentbin);
+    sb_puts(&s, "; } && exec ");
+    sq(&s, g_agentbin);
+    sb_puts(&s, " \"$@\"");
     return s.p;
 }
 static int run_proc(const char *script, const char *bin, char **args, int nargs,
@@ -1089,6 +1102,8 @@ static int probe(void) {
         NEED(mkdtemp(g_home) != NULL, "mkdir home");
     }
     snprintf(g_src, sizeof g_src, "%s/source", g_root);
+    snprintf(g_agentbin, sizeof g_agentbin, "%s/agent_cli.bin", g_root);
+    snprintf(g_agentsrc, sizeof g_agentsrc, "%s/agent_cli.cx", g_src);
     NEED(mkdirp(g_src) == 0, "mkdir source");
     snprintf(g_bin, sizeof g_bin, "%s/agent", g_root);
     snprintf(g_comp, sizeof g_comp, "%s/compiler.com", g_root);
@@ -1122,6 +1137,7 @@ static int probe(void) {
         NEED(data != NULL, "source read failed");
         NEED(writeall(to, data, len) == 0, "source copy failed");
     }
+    NEED(csih_copy_l0(CSIH_APP, g_src) == 0, "copy of the L0 dirs (sys, mem, text) failed");
     /* inject the read-proof entry into agent_cli.c and csih_private_read into agent.c */
     {
         char cli[1100], agentc[1100];
