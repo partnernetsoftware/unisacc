@@ -1,3 +1,9 @@
+#pragma unisa use text.fmt
+#pragma unisa use text.num
+#pragma unisa use sys.io
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use sys.env
 #pragma unisa use agentwit
 #pragma unisa use netwit
 #pragma unisa use srccopy
@@ -35,7 +41,7 @@ static char UNISACC_PATH[4200];  /* <app>/../../unisacc.com: the frozen compiler
 #define PORT_CAPACITY 19202
 
 static char g_why[600];
-#define NEED(c, m) do { if (!(c)) { snprintf(g_why, sizeof g_why, "%s", (m)); goto fail; } } while (0)
+#define NEED(c, m) do { if (!(c)) { tx_snprintf(g_why, sizeof g_why, "%s", (m)); goto fail; } } while (0)
 
 /* ---------- byte buffer ---------- */
 typedef struct { char *p; size_t n, cap; } sbuf;
@@ -44,7 +50,7 @@ static void sb_put(sbuf *b, const void *d, size_t k) {
         size_t nc = b->cap ? b->cap : 256;
         char *np;
         while (nc < b->n + k + 1) nc *= 2;
-        np = realloc(b->p, nc);
+        np = mm_grow(b->p, nc);
         if (!np) exit(9);
         b->p = np;
         b->cap = nc;
@@ -59,17 +65,17 @@ static void sb_fmt(sbuf *b, const char *fmt, ...) {
     int k;
     char tmp[1024];
     va_start(ap, fmt);
-    k = vsnprintf(tmp, sizeof tmp, fmt, ap);
+    k = tx_vsnprintf(tmp, sizeof tmp, fmt, ap);
     va_end(ap);
     if (k < 0) return;
     if ((size_t)k < sizeof tmp) { sb_put(b, tmp, (size_t)k); return; }
     {
-        char *big = malloc((size_t)k + 1);
+        char *big = mm_alloc((size_t)k + 1);
         va_start(ap, fmt);
-        vsnprintf(big, (size_t)k + 1, fmt, ap);
+        tx_vsnprintf(big, (size_t)k + 1, fmt, ap);
         va_end(ap);
         sb_put(b, big, (size_t)k);
-        free(big);
+        mm_free(big);
     }
 }
 static void sb_jstr(sbuf *b, const char *s, size_t n) {
@@ -92,7 +98,7 @@ static const char *bfind(const char *h, size_t hn, const char *nd, size_t nn) {
     if (nn == 0) return h;
     if (nn > hn) return NULL;
     for (i = 0; i + nn <= hn; i++)
-        if (h[i] == nd[0] && !memcmp(h + i, nd, nn)) return h + i;
+        if (h[i] == nd[0] && !mm_cmp(h + i, nd, nn)) return h + i;
     return NULL;
 }
 
@@ -102,9 +108,9 @@ static void sl_addn(slist *s, const char *x, size_t k) {
     char *c;
     if (s->n == s->cap) {
         s->cap = s->cap ? s->cap * 2 : 64;
-        s->v = realloc(s->v, s->cap * sizeof *s->v);
+        s->v = mm_grow(s->v, s->cap * sizeof *s->v);
     }
-    c = malloc(k + 1);
+    c = mm_alloc(k + 1);
     memcpy(c, x, k);
     c[k] = 0;
     s->v[s->n++] = c;
@@ -112,7 +118,7 @@ static void sl_addn(slist *s, const char *x, size_t k) {
 static int sl_has(slist *s, const char *x, size_t k) {
     size_t i;
     for (i = 0; i < s->n; i++)
-        if (strlen(s->v[i]) == k && !memcmp(s->v[i], x, k)) return 1;
+        if (strlen(s->v[i]) == k && !mm_cmp(s->v[i], x, k)) return 1;
     return 0;
 }
 static void sl_add_unique(slist *s, const char *x, size_t k) {
@@ -152,13 +158,13 @@ static jn *jnew(int t) {
 static void jadd(jn *o, const char *key, size_t klen, jn *v) {
     if (o->n == o->cap) {
         size_t nc = o->cap ? o->cap * 2 : 8;
-        o->kids = realloc(o->kids, nc * sizeof *o->kids);
-        o->keys = realloc(o->keys, nc * sizeof *o->keys);
+        o->kids = mm_grow(o->kids, nc * sizeof *o->kids);
+        o->keys = mm_grow(o->keys, nc * sizeof *o->keys);
         o->cap = nc;
     }
     o->kids[o->n] = v;
     if (key) {
-        o->keys[o->n] = malloc(klen + 1);
+        o->keys[o->n] = mm_alloc(klen + 1);
         memcpy(o->keys[o->n], key, klen);
         o->keys[o->n][klen] = 0;
     } else {
@@ -300,9 +306,9 @@ static jn *jvalue(void) {
         if (!v->s) return NULL;
         return v;
     }
-    if (jend - jp >= 4 && !memcmp(jp, "true", 4)) { jn *v = jnew(J_BOOL); v->b = 1; jp += 4; return v; }
-    if (jend - jp >= 5 && !memcmp(jp, "false", 5)) { jn *v = jnew(J_BOOL); v->b = 0; jp += 5; return v; }
-    if (jend - jp >= 4 && !memcmp(jp, "null", 4)) { jp += 4; return jnew(J_NULL); }
+    if (jend - jp >= 4 && !mm_cmp(jp, "true", 4)) { jn *v = jnew(J_BOOL); v->b = 1; jp += 4; return v; }
+    if (jend - jp >= 5 && !mm_cmp(jp, "false", 5)) { jn *v = jnew(J_BOOL); v->b = 0; jp += 5; return v; }
+    if (jend - jp >= 4 && !mm_cmp(jp, "null", 4)) { jp += 4; return jnew(J_NULL); }
     if (*jp == '-' || (*jp >= '0' && *jp <= '9')) {
         const char *e = jp;
         char tmp[80];
@@ -313,7 +319,7 @@ static jn *jvalue(void) {
         while (jp < e) tmp[k++] = *jp++;
         tmp[k] = 0;
         v = jnew(J_NUM);
-        v->num = strtod(tmp, NULL);
+        v->num = tx_strtod(tmp, NULL);
         return v;
     }
     jerr = 1;
@@ -340,7 +346,7 @@ static jn *jget(jn *o, const char *k) {
     return r;
 }
 static int jstreq(jn *v, const char *s) {
-    return v && v->t == J_STR && v->slen == strlen(s) && !memcmp(v->s, s, v->slen);
+    return v && v->t == J_STR && v->slen == strlen(s) && !mm_cmp(v->s, s, v->slen);
 }
 static int jtrue(jn *v) { return v && v->t == J_BOOL && v->b; }
 static int jfalse(jn *v) { return v && v->t == J_BOOL && !v->b; }
@@ -353,7 +359,7 @@ static int jeq(jn *a, jn *b) {
     switch (a->t) {
     case J_BOOL: return a->b == b->b;
     case J_NUM: return a->num == b->num;
-    case J_STR: return a->slen == b->slen && !memcmp(a->s, b->s, a->slen);
+    case J_STR: return a->slen == b->slen && !mm_cmp(a->s, b->s, a->slen);
     case J_ARR:
     case J_OBJ:
         if (a->n != b->n) return 0;
@@ -401,15 +407,15 @@ static void collect(const char *base, const char *rel, slist *out) {
     char full[1024];
     DIR *d;
     struct dirent *e;
-    snprintf(full, sizeof full, "%s%s%s", base, rel[0] ? "/" : "", rel);
+    tx_snprintf(full, sizeof full, "%s%s%s", base, rel[0] ? "/" : "", rel);
     d = opendir(full);
     if (!d) return;
     while ((e = readdir(d)) != NULL) {
         char abs[1100], sub[1100];
         struct stat st;
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-        snprintf(sub, sizeof sub, "%s%s%s", rel, rel[0] ? "/" : "", e->d_name);
-        snprintf(abs, sizeof abs, "%s/%s", full, e->d_name);
+        tx_snprintf(sub, sizeof sub, "%s%s%s", rel, rel[0] ? "/" : "", e->d_name);
+        tx_snprintf(abs, sizeof abs, "%s/%s", full, e->d_name);
         if (lstat(abs, &st) != 0) continue;
         if (S_ISLNK(st.st_mode)) continue;
         if (S_ISDIR(st.st_mode)) collect(base, sub, out);
@@ -432,11 +438,11 @@ static snapset take_snapshot(void) {
     s.e = calloc(s.n, sizeof *s.e);
     for (i = 0; i < l.n; i++) {
         char p[1100];
-        snprintf(p, sizeof p, "%s/%s", CSIH_APP, l.v[i]);
-        s.e[i].path = strdup(p);
+        tx_snprintf(p, sizeof p, "%s/%s", CSIH_APP, l.v[i]);
+        s.e[i].path = mm_strdup(p);
     }
-    s.e[l.n].path = strdup(UNISACC_PATH);
-    s.e[l.n + 1].path = strdup(PROBE_SRC);
+    s.e[l.n].path = mm_strdup(UNISACC_PATH);
+    s.e[l.n + 1].path = mm_strdup(PROBE_SRC);
     for (i = 0; i < s.n; i++) {
         s.e[i].data = readall(s.e[i].path, &s.e[i].n);
         s.e[i].ok = s.e[i].data != NULL;
@@ -449,7 +455,7 @@ static int snap_same(snapset *a, snapset *b) {
     for (i = 0; i < a->n; i++) {
         if (strcmp(a->e[i].path, b->e[i].path)) return 0;
         if (!a->e[i].ok || !b->e[i].ok) return 0;
-        if (a->e[i].n != b->e[i].n || memcmp(a->e[i].data, b->e[i].data, a->e[i].n)) return 0;
+        if (a->e[i].n != b->e[i].n || mm_cmp(a->e[i].data, b->e[i].data, a->e[i].n)) return 0;
     }
     return 1;
 }
@@ -539,8 +545,8 @@ static int run_proc(const char *script, const char *bin, char **args, int nargs,
     r->rc = r->timed ? -9 : (WIFEXITED(st) ? WEXITSTATUS(st) : 128);
     r->out = readall(outp, &r->outn);
     r->err = readall(errp, &r->errn);
-    if (!r->out) { r->out = strdup(""); r->outn = 0; }
-    if (!r->err) { r->err = strdup(""); r->errn = 0; }
+    if (!r->out) { r->out = mm_strdup(""); r->outn = 0; }
+    if (!r->err) { r->err = mm_strdup(""); r->errn = 0; }
     return 0;
 }
 
@@ -556,7 +562,7 @@ static size_t header_clen(const char *h, size_t hn) {
             int ok = 1;
             for (k = 0; k < 15; k++)
                 if (tolower((unsigned char)h[i + k]) != want[k]) { ok = 0; break; }
-            if (ok) return (size_t)atol(h + i + 15);
+            if (ok) return (size_t)tx_atol(h + i + 15);
         }
         i = j + 1;
     }
@@ -618,7 +624,7 @@ static void serve_child(int port, const char *dir, respond_fn fn) {
         body = read_http_body(c, &bl);
         if (!body) { close(c); continue; }
         n++;
-        snprintf(path, sizeof path, "%s/req-%d.bin", dir, n);
+        tx_snprintf(path, sizeof path, "%s/req-%d.bin", dir, n);
         writeall(path, body, bl);
         content = fn(n, body, bl, &cl);
         respond_http(c, content, cl);
@@ -647,7 +653,7 @@ static int count_reqs(const char *dir) {
     char p[1100];
     for (;;) {
         struct stat st;
-        snprintf(p, sizeof p, "%s/req-%d.bin", dir, k);
+        tx_snprintf(p, sizeof p, "%s/req-%d.bin", dir, k);
         if (stat(p, &st) != 0) break;
         k++;
     }
@@ -658,7 +664,7 @@ static jn *load_req(const char *dir, int k) {
     char p[1100];
     size_t len = 0;
     char *b;
-    snprintf(p, sizeof p, "%s/req-%d.bin", dir, k);
+    tx_snprintf(p, sizeof p, "%s/req-%d.bin", dir, k);
     b = readall(p, &len);
     if (!b) return NULL;
     return jparse(b, len);
@@ -720,7 +726,7 @@ static int jsonl_load(const char *path, jn ***out, size_t *count) {
         if (!v) return -1;
         if (n == cap) {
             cap = cap ? cap * 2 : 64;
-            arr = realloc(arr, cap * sizeof *arr);
+            arr = mm_grow(arr, cap * sizeof *arr);
         }
         arr[n++] = v;
         i = e + 1;
@@ -752,15 +758,15 @@ static jn *read_proof(const char *path, const char *extra) {
     args[0] = (char *)"read-proof";
     args[1] = cmd.p;
     if (run_proc(make_script(g_root, g_kv_home), g_bin, args, 2, g_rp_out, g_rp_err, 3, &r) != 0) {
-        snprintf(g_why, sizeof g_why, "read-proof did not start");
+        tx_snprintf(g_why, sizeof g_why, "read-proof did not start");
         return NULL;
     }
     if (r.rc != 0 || r.timed) {
-        snprintf(g_why, sizeof g_why, "read-proof rc=%d timed=%d stderr=%.120s", r.rc, r.timed, r.err);
+        tx_snprintf(g_why, sizeof g_why, "read-proof rc=%d timed=%d stderr=%.120s", r.rc, r.timed, r.err);
         return NULL;
     }
     v = jparse(r.out, r.outn);
-    if (!v) snprintf(g_why, sizeof g_why, "read-proof stdout is not JSON: %.120s", r.out);
+    if (!v) tx_snprintf(g_why, sizeof g_why, "read-proof stdout is not JSON: %.120s", r.out);
     return v;
 }
 /* observation of a read result: string-encoded JSON (read-proof) or object (journal). */
@@ -771,7 +777,7 @@ static jn *obs_of(jn *v) {
 }
 static int body_is(jn *v, const char *lit) {
     jn *b = jget(v, "body");
-    return b && b->t == J_STR && b->slen == strlen(lit) && !memcmp(b->s, lit, b->slen);
+    return b && b->t == J_STR && b->slen == strlen(lit) && !mm_cmp(b->s, lit, b->slen);
 }
 static int body_has(jn *v, const char *lit) {
     jn *b = jget(v, "body");
@@ -880,8 +886,8 @@ static int case_reads(void) {
         char off[64];
         NEED(iter < 100, "cursor continuation did not reach eof");
         NEED(jget(o, "next_byte_offset") && jget(o, "next_byte_offset")->t == J_NUM, "next_byte_offset missing");
-        snprintf(off, sizeof off, "%lld", (long long)jget(o, "next_byte_offset")->num);
-        snprintf(extra, sizeof extra, ",\"byte_offset\":%s,\"max_bytes\":4096", off);
+        tx_snprintf(off, sizeof off, "%lld", (long long)jget(o, "next_byte_offset")->num);
+        tx_snprintf(extra, sizeof extra, ",\"byte_offset\":%s,\"max_bytes\":4096", off);
         v = read_proof(g_long, extra);
         NEED(v != NULL, g_why);
         sb_put(&joined, jget(v, "body")->s, jget(v, "body")->slen);
@@ -890,7 +896,7 @@ static int case_reads(void) {
     }
     fbytes = readall(g_long, &flen);
     NEED(fbytes != NULL, "long.txt unreadable");
-    NEED(joined.n == flen && !memcmp(joined.p, fbytes, flen), "cursor continuation does not equal file bytes");
+    NEED(joined.n == flen && !mm_cmp(joined.p, fbytes, flen), "cursor continuation does not equal file bytes");
     /* utf-8 windows */
     v = read_proof(g_utf, ",\"max_bytes\":1");
     NEED(v != NULL, g_why);
@@ -907,7 +913,7 @@ static int case_reads(void) {
     {
         jn *b = jget(v, "body");
         NEED(b && b->t == J_STR, "large-prefix body missing");
-        NEED(b->slen >= 28 && !memcmp(b->s, "CURRENT_DEPLOYMENT_ACTIVATED", 28), "large-prefix body prefix");
+        NEED(b->slen >= 28 && !mm_cmp(b->s, "CURRENT_DEPLOYMENT_ACTIVATED", 28), "large-prefix body prefix");
         NEED(b->slen == 4096, "large-prefix body should be 4096 bytes");
     }
     /* fifo: TODO(blocked) mkfifo is missing in unisacc 0.0.39. The fifo
@@ -925,7 +931,7 @@ static int case_reads(void) {
     wv = NULL;
     (void)wv;
     (void)i;
-    free(fbytes);
+    mm_free(fbytes);
     return 0;
 fail:
     return 1;
@@ -942,13 +948,13 @@ static int case_wire(void) {
     char dir[900];
     runres r;
     char *args[3];
-    snprintf(dir, sizeof dir, "%s/wire", g_root);
+    tx_snprintf(dir, sizeof dir, "%s/wire", g_root);
     NEED(mkdirp(dir) == 0, "wire dir");
-    snprintf(ep, sizeof ep, "http://127.0.0.1:%d/v1/chat/completions", PORT_WIRE);
-    snprintf(tr, sizeof tr, "%s/wire.jsonl", dir);
+    tx_snprintf(ep, sizeof ep, "http://127.0.0.1:%d/v1/chat/completions", PORT_WIRE);
+    tx_snprintf(tr, sizeof tr, "%s/wire.jsonl", dir);
     sp = start_server(PORT_WIRE, dir, respond_wire);
     NEED(sp > 0, "fork server");
-    if (wait_port(PORT_WIRE) != 0) { stop_server(sp); snprintf(g_why, sizeof g_why, "wire stub did not listen"); goto fail; }
+    if (wait_port(PORT_WIRE) != 0) { stop_server(sp); tx_snprintf(g_why, sizeof g_why, "wire stub did not listen"); goto fail; }
     args[0] = (char *)"agent";
     args[1] = (char *)"read relevant window";
     rc_ok = run_proc(make_script(g_root, mk_kv(ep, tr)), g_bin, args, 2, g_rp_out, g_rp_err, 9, &r);
@@ -961,7 +967,7 @@ static int case_wire(void) {
     for (i = 0; i < nrec; i++) if (jget(recs[i], "read_call")) { record = recs[i]; break; }
     NEED(record != NULL, "wire journal has no read_call record");
     g_wire_record = record;
-    snprintf(g_record_id, sizeof g_record_id, "%s", jget(record, "action_id") ? jget(record, "action_id")->s : "");
+    tx_snprintf(g_record_id, sizeof g_record_id, "%s", jget(record, "action_id") ? jget(record, "action_id")->s : "");
     o = jget(jget(record, "read_call"), "observation");
     NEED(o && jtrue(jget(o, "presentation_complete")), "wire presentation_complete");
     NEED(bfind(jget(record, "text")->s, jget(record, "text")->slen, "ACTIVATED_COMMITTED", 19) != NULL,
@@ -997,20 +1003,20 @@ static int case_extra(const char *mode) {
     char *args[3];
     int nreq, rc;
     int port = g_mode == 1 ? PORT_JUDGE : PORT_CAPACITY;
-    snprintf(dir, sizeof dir, "%s/%s", g_root, mode);
+    tx_snprintf(dir, sizeof dir, "%s/%s", g_root, mode);
     NEED(mkdirp(dir) == 0, "extra dir");
-    snprintf(tr, sizeof tr, "%s/journal.jsonl", dir);
-    snprintf(ep, sizeof ep, "http://127.0.0.1:%d/v1/chat/completions", port);
+    tx_snprintf(tr, sizeof tr, "%s/journal.jsonl", dir);
+    tx_snprintf(ep, sizeof ep, "http://127.0.0.1:%d/v1/chat/completions", port);
     if (g_mode == 2) {
         size_t k;
-        char *ctl = malloc(20000);
+        char *ctl = mm_alloc(20000);
         for (k = 0; k < 20000; k++) ctl[k] = 1;
         NEED(writeall(g_control, ctl, 20000) == 0, "control file");
-        free(ctl);
+        mm_free(ctl);
     }
     sp = start_server(port, dir, g_mode == 1 ? respond_judge : respond_capacity);
     NEED(sp > 0, "fork server");
-    if (wait_port(port) != 0) { stop_server(sp); snprintf(g_why, sizeof g_why, "%s stub did not listen", mode); goto fail; }
+    if (wait_port(port) != 0) { stop_server(sp); tx_snprintf(g_why, sizeof g_why, "%s stub did not listen", mode); goto fail; }
     args[0] = (char *)"agent";
     args[1] = (char *)"observe relevant bounded data";
     rc = run_proc(make_script(g_root, mk_kv(ep, tr)), g_bin, args, 2, g_rp_out, g_rp_err, 9, &r);
@@ -1021,7 +1027,7 @@ static int case_extra(const char *mode) {
     if (g_mode == 1) {
         jn *reqpacket;
         sbuf packet = {0, 0, 0};
-        if (!(r.rc == 0 && nreq == 3)) printf("  judge run: rc=%d timed=%d requests=%d\n...%s\n", r.rc, r.timed, nreq, r.out + (r.outn > 2500 ? r.outn - 2500 : 0));
+        if (!(r.rc == 0 && nreq == 3)) sy_printf("  judge run: rc=%d timed=%d requests=%d\n...%s\n", r.rc, r.timed, nreq, r.out + (r.outn > 2500 ? r.outn - 2500 : 0));
         NEED(r.rc == 0 && nreq == 3, "judge run rc must be 0 and 3 requests");
         for (i = 0; i < nrec; i++) if (jget(recs[i], "read_call")) { tools_first = recs[i]; ntools++; }
         NEED(ntools == 1, "judge run must have exactly one read record");
@@ -1080,10 +1086,10 @@ static int probe(void) {
     char p[1100];
 
     before = take_snapshot();
-    scratch = getenv("PROBE_SCRATCH");
-    if (!scratch || !scratch[0]) scratch = getenv("TMPDIR");
+    scratch = sy_env("PROBE_SCRATCH");
+    if (!scratch || !scratch[0]) scratch = sy_env("TMPDIR");
     if (!scratch || !scratch[0]) scratch = "/tmp";
-    snprintf(g_root, sizeof g_root, "%s/csih-probe-build-%d/file_observation", scratch, (int)getuid());
+    tx_snprintf(g_root, sizeof g_root, "%s/csih-probe-build-%d/file_observation", scratch, (int)getuid());
     {
         struct stat rs;
         if (lstat(g_root, &rs) == 0) NEED(cx_rmtree(g_root) == 0, "cannot clear the work tree");
@@ -1094,27 +1100,27 @@ static int probe(void) {
      * HOME is a mkdtemp under <repo>/out/ (git-ignored, a deletion-guard root). */
     {
         char repo[4096], t[4300];
-        snprintf(t, sizeof t, "%s/../..", CSIH_APP);
+        tx_snprintf(t, sizeof t, "%s/../..", CSIH_APP);
         NEED(realpath(t, repo) != NULL, "repo root");
-        snprintf(t, sizeof t, "%s/out", repo);
+        tx_snprintf(t, sizeof t, "%s/out", repo);
         mkdir(t, 0755);
-        snprintf(g_home, sizeof g_home, "%s/out/csih-file-observation-home-XXXXXX", repo);
+        tx_snprintf(g_home, sizeof g_home, "%s/out/csih-file-observation-home-XXXXXX", repo);
         NEED(mkdtemp(g_home) != NULL, "mkdir home");
     }
-    snprintf(g_src, sizeof g_src, "%s/source", g_root);
-    snprintf(g_agentbin, sizeof g_agentbin, "%s/agent_cli.bin", g_root);
-    snprintf(g_agentsrc, sizeof g_agentsrc, "%s/agent_cli.cx", g_src);
+    tx_snprintf(g_src, sizeof g_src, "%s/source", g_root);
+    tx_snprintf(g_agentbin, sizeof g_agentbin, "%s/agent_cli.bin", g_root);
+    tx_snprintf(g_agentsrc, sizeof g_agentsrc, "%s/agent_cli.cx", g_src);
     NEED(mkdirp(g_src) == 0, "mkdir source");
-    snprintf(g_bin, sizeof g_bin, "%s/agent", g_root);
-    snprintf(g_comp, sizeof g_comp, "%s/compiler.com", g_root);
-    snprintf(g_middle, sizeof g_middle, "%s/middle.txt", g_root);
-    snprintf(g_long, sizeof g_long, "%s/long.txt", g_root);
-    snprintf(g_utf, sizeof g_utf, "%s/utf.txt", g_root);
-    snprintf(g_large, sizeof g_large, "%s/large.txt", g_root);
-    snprintf(g_fifo, sizeof g_fifo, "%s/fifo", g_root);
-    snprintf(g_control, sizeof g_control, "%s/control.txt", g_root);
-    snprintf(g_rp_out, sizeof g_rp_out, "%s/rp.out", g_root);
-    snprintf(g_rp_err, sizeof g_rp_err, "%s/rp.err", g_root);
+    tx_snprintf(g_bin, sizeof g_bin, "%s/agent", g_root);
+    tx_snprintf(g_comp, sizeof g_comp, "%s/compiler.com", g_root);
+    tx_snprintf(g_middle, sizeof g_middle, "%s/middle.txt", g_root);
+    tx_snprintf(g_long, sizeof g_long, "%s/long.txt", g_root);
+    tx_snprintf(g_utf, sizeof g_utf, "%s/utf.txt", g_root);
+    tx_snprintf(g_large, sizeof g_large, "%s/large.txt", g_root);
+    tx_snprintf(g_fifo, sizeof g_fifo, "%s/fifo", g_root);
+    tx_snprintf(g_control, sizeof g_control, "%s/control.txt", g_root);
+    tx_snprintf(g_rp_out, sizeof g_rp_out, "%s/rp.out", g_root);
+    tx_snprintf(g_rp_err, sizeof g_rp_err, "%s/rp.err", g_root);
     g_kv_home[0] = "HOME"; g_kv_home[1] = g_home;
     g_kv_home[2] = "DEEPSEEK_API_KEY"; g_kv_home[3] = "LOCAL_ONLY";
     g_kv_home[4] = "NO_PROXY"; g_kv_home[5] = "127.0.0.1,localhost";
@@ -1128,9 +1134,9 @@ static int probe(void) {
         size_t len = 0;
         char *data;
         char *slash;
-        snprintf(from, sizeof from, "%s/%s", CSIH_APP, l.v[i]);
-        snprintf(to, sizeof to, "%s/%s", g_src, l.v[i]);
-        snprintf(dirp, sizeof dirp, "%s", to);
+        tx_snprintf(from, sizeof from, "%s/%s", CSIH_APP, l.v[i]);
+        tx_snprintf(to, sizeof to, "%s/%s", g_src, l.v[i]);
+        tx_snprintf(dirp, sizeof dirp, "%s", to);
         slash = strrchr(dirp, '/');
         if (slash) { *slash = 0; NEED(mkdirp(dirp) == 0, "mkdir copy dir"); }
         data = readall(from, &len);
@@ -1149,11 +1155,11 @@ static int probe(void) {
         const char *private_fn =
             "\nint csih_private_read(const char *raw,const char *cwd){agent_step s=agent_parse(raw);char out[16384],rec[60000];if(s.kind!=ACT_READ){puts(\"{\\\"parse_rejected\\\":true}\");return 0;}agent_tool_reset();agent_exec(&s,cwd,out,sizeof out);if(!json_rec(rec,sizeof rec,\"body\",out,\"observation\",agent_read_observation,NULL,NULL))return 9;printf(\"%s\\n\",rec);return 0;}\n";
         sbuf nt = {0, 0, 0};
-        snprintf(cli, sizeof cli, "%s/agent_cli.cx", g_src);
-        snprintf(agentc, sizeof agentc, "%s/agent.cx", g_src);
+        tx_snprintf(cli, sizeof cli, "%s/agent_cli.cx", g_src);
+        tx_snprintf(agentc, sizeof agentc, "%s/agent.cx", g_src);
         text = readall(cli, &cl);
         NEED(text != NULL, "agent_cli.c unreadable");
-        for (i = 0; i + strlen(entry) <= cl; i++) if (!memcmp(text + i, entry, strlen(entry))) { nocc++; pos = i; }
+        for (i = 0; i + strlen(entry) <= cl; i++) if (!mm_cmp(text + i, entry, strlen(entry))) { nocc++; pos = i; }
         NEED(nocc == 1, "agent_cli.c main anchor must occur once");
         sb_put(&nt, text, pos);
         sb_puts(&nt, inject_entry_pre);
@@ -1179,29 +1185,29 @@ static int probe(void) {
      * injected source; an unknown subcommand gives the usage line and rc 64 */
     {
         char *bargs[2];
-        snprintf(g_bin, sizeof g_bin, "%s", g_comp);
+        tx_snprintf(g_bin, sizeof g_bin, "%s", g_comp);
         bargs[0] = (char *)"build-check";
         NEED(run_proc(make_script(g_root, g_kv_home), g_bin, bargs, 1, g_rp_out, g_rp_err, 50, &r) == 0, "build did not start");
-        if (r.errn) printf("  build stderr: %.400s\n", r.err);
+        if (r.errn) sy_printf("  build stderr: %.400s\n", r.err);
         NEED(r.rc == 64 && !r.timed && bfind(r.out, r.outn, "usage: agent_cli", 16) != NULL, "build gate: rc must be 64 with the usage line");
         NEED(r.errn == 0, "build stderr must be empty");
     }
     /* selftest */
     args[0] = (char *)"selftest";
     NEED(run_proc(make_script(g_root, g_kv_home), g_bin, args, 1, g_rp_out, g_rp_err, 9, &r) == 0, "selftest did not start");
-    if (r.rc != 0) printf("  selftest rc=%d timed=%d\n...%s\n%.600s\n", r.rc, r.timed, r.out + (r.outn > 3000 ? r.outn - 3000 : 0), r.err);
+    if (r.rc != 0) sy_printf("  selftest rc=%d timed=%d\n...%s\n%.600s\n", r.rc, r.timed, r.out + (r.outn > 3000 ? r.outn - 3000 : 0), r.err);
     NEED(r.rc == 0 && bfind(r.out, r.outn, "agent: all cases pass", strlen("agent: all cases pass")) != NULL, "selftest failed");
-    printf("  ok    selftest: agent: all cases pass\n");
+    sy_printf("  ok    selftest: agent: all cases pass\n");
     (void)nargs;
 
     /* fixtures */
     {
         sbuf m = {0, 0, 0};
-        big = malloc(5000 + 4 + 6 + 1);
+        big = mm_alloc(5000 + 4 + 6 + 1);
         memset(big, 'A', 5000);
         memcpy(big + 5000, "\r\nSECOND\r\nTHIRD", 14);
         NEED(writeall(g_long, big, 5000 + 14) == 0, "long.txt");
-        free(big);
+        mm_free(big);
         for (i = 1; i <= 300; i++) {
             sb_fmt(&m, "LINE%03u ", (unsigned)i);
             if (i == 150) sb_puts(&m, "ACTIVATED_COMMITTED");
@@ -1216,31 +1222,31 @@ static int probe(void) {
     }
     {
         size_t total = 30 + 9 * 1024 * 1024 + 1;
-        char *lb = malloc(total);
+        char *lb = mm_alloc(total);
         size_t k;
         memcpy(lb, "CURRENT_DEPLOYMENT_ACTIVATED\n", 29);
         for (k = 29; k < total - 1; k++) lb[k] = 'A';
         lb[total - 1] = (char)0xff;
         NEED(writeall(g_large, lb, total) == 0, "large.txt");
-        free(lb);
+        mm_free(lb);
     }
     /* TODO(blocked: mkfifo) fifo fixture not created: unisacc 0.0.39 has no mkfifo. */
 
     /* reads */
     NEED(case_reads() == 0, g_why);
-    printf("  ok    native file windows: physical line, cursor, utf-8, large, fifo, rejected selectors\n");
+    sy_printf("  ok    native file windows: physical line, cursor, utf-8, large, fifo, rejected selectors\n");
 
     /* wire */
     NEED(case_wire() == 0, g_why);
-    printf("  ok    wire: presentation_complete window reached the next request\n");
+    sy_printf("  ok    wire: presentation_complete window reached the next request\n");
 
     /* judge and capacity */
     g_mode = 1;
     NEED(case_extra("judge") == 0, g_why);
-    printf("  ok    judge request carries the window and presentation\n");
+    sy_printf("  ok    judge request carries the window and presentation\n");
     g_mode = 2;
     NEED(case_extra("capacity") == 0, g_why);
-    printf("  ok    capacity: both raw windows preserved, final partial stays non-success\n");
+    sy_printf("  ok    capacity: both raw windows preserved, final partial stays non-success\n");
 
     f = fopen("/dev/null", "r");
     if (f) fclose(f);
@@ -1248,7 +1254,7 @@ static int probe(void) {
     (void)p;
     (void)nlong;
     after = take_snapshot();
-    if (!snap_same(&before, &after)) { snprintf(g_why, sizeof g_why, "frozen snapshot changed"); ok = 0; }
+    if (!snap_same(&before, &after)) { tx_snprintf(g_why, sizeof g_why, "frozen snapshot changed"); ok = 0; }
     cx_rmtree(g_root);
     cx_rmtree(g_home);
     return ok ? 0 : 1;
@@ -1266,15 +1272,15 @@ int main(int argc, char **argv) {
     (void)argv;
     g_why[0] = 0;
     {
-        const char *app = getenv("CSIH_APP");
-        if (app && app[0]) snprintf(CSIH_APP, sizeof CSIH_APP, "%s", app);
-        else if (!getcwd(CSIH_APP, sizeof CSIH_APP)) { printf("FAIL getcwd\n"); return 1; }
-        if (CSIH_APP[0] != '/') { printf("FAIL app dir must be absolute\n"); return 1; }
-        snprintf(PROBE_SRC, sizeof PROBE_SRC, "%s/probes/file_observation.cx", CSIH_APP);
-        snprintf(UNISACC_PATH, sizeof UNISACC_PATH, "%s/../../unisacc.com", CSIH_APP);
+        const char *app = sy_env("CSIH_APP");
+        if (app && app[0]) tx_snprintf(CSIH_APP, sizeof CSIH_APP, "%s", app);
+        else if (!getcwd(CSIH_APP, sizeof CSIH_APP)) { sy_printf("FAIL getcwd\n"); return 1; }
+        if (CSIH_APP[0] != '/') { sy_printf("FAIL app dir must be absolute\n"); return 1; }
+        tx_snprintf(PROBE_SRC, sizeof PROBE_SRC, "%s/probes/file_observation.cx", CSIH_APP);
+        tx_snprintf(UNISACC_PATH, sizeof UNISACC_PATH, "%s/../../unisacc.com", CSIH_APP);
     }
     rc = probe();
-    if (rc != 0) printf("  FAIL  %s\n", g_why[0] ? g_why : "unknown");
-    printf("%s\n", rc == 0 ? "PASS" : "FAIL");
+    if (rc != 0) sy_printf("  FAIL  %s\n", g_why[0] ? g_why : "unknown");
+    sy_printf("%s\n", rc == 0 ? "PASS" : "FAIL");
     return rc;
 }
