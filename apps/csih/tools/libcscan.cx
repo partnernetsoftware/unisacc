@@ -1,0 +1,96 @@
+#pragma unisa use text.text
+#pragma unisa use sys.io
+/*
+ * libcscan.cx — list direct libc/POSIX calls in the given .cx files: csih
+ * reaches the C library only through the cx L0 wrappers (sy_*, mm_*, tx_*).
+ *   sh ./unisacc.com apps/csih/tools/libcscan.cx -- FILE...
+ * A name counts only as a call (NAME followed by optional blanks and '(')
+ * that starts at an identifier boundary, is not a member (after '.' or '->'),
+ * and sits outside comments and string/character literals. One line per call:
+ * FILE:LINE<TAB>NAME. The last line is LIBCSCAN files=N calls=M.
+ * Exit 0 when there is none, 1 when there are calls, 2 when a file cannot be
+ * read. --self runs the scanner's fixed sample and exits 0 when it counts 2.
+ */
+
+static const char *LIBC[] = {
+    "malloc", "calloc", "realloc", "free", "strdup", "strndup",
+    "memcpy", "memmove", "memset", "memcmp", "memchr",
+    "strlen", "strnlen", "strcpy", "strncpy", "strcat", "strncat", "strcmp", "strncmp",
+    "strchr", "strrchr", "strstr", "strtok", "strerror", "strspn", "strcspn",
+    "printf", "fprintf", "sprintf", "snprintf", "vsnprintf", "vfprintf", "puts", "fputs", "putchar",
+    "fopen", "fdopen", "fclose", "fread", "fwrite", "fseek", "ftell", "fgets", "fflush", "fileno",
+    "atoi", "atol", "strtol", "strtoul", "strtod", "strtoll", "strtoull",
+    "open", "openat", "close", "read", "write", "lseek", "pread", "pwrite",
+    "stat", "fstat", "lstat", "access", "unlink", "unlinkat", "rename", "mkdir", "rmdir",
+    "symlink", "readlink", "realpath", "chdir", "getcwd", "chmod", "fsync", "truncate", "ftruncate",
+    "opendir", "readdir", "closedir", "mmap", "munmap", "mprotect",
+    "fork", "vfork", "execve", "execv", "execvp", "execl", "execlp", "waitpid", "wait",
+    "pipe", "dup", "dup2", "kill", "killpg", "setpgid", "getpgid", "setsid", "getpid", "getppid",
+    "getuid", "geteuid", "posix_spawn", "posix_spawnp", "system", "popen", "pclose",
+    "signal", "sigaction", "raise", "atexit", "exit", "_exit", "abort",
+    "getenv", "setenv", "unsetenv", "clock_gettime", "gettimeofday", "time", "nanosleep", "sleep", "usleep",
+    "isatty", "tcgetattr", "tcsetattr", "ioctl", "fcntl", "poll", "select",
+    "socket", "connect", "bind", "listen", "accept", "send", "recv", "getaddrinfo",
+    "flock", "lockf", "dlopen", "dlsym", 0};
+
+static const char SAMPLE[] = "/* fork( */ x = \"read(\"; s.open(1); p->close(2); my_free(3); n = strlen (s); exit(0);\n";
+
+static int ident(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
+
+/* the calls in S[0..LEN); prints each under NAME when PRINT */
+static int scan(const char *name, const char *s, long len, int print) {
+    long i = 0, line = 1;
+    int calls = 0, k;
+    while (i < len) {
+        char c = s[i];
+        if (c == '\n') { line++; i++; continue; }
+        if (c == '/' && i + 1 < len && s[i + 1] == '*') {
+            long e = tx_find(s + i + 2, len - i - 2, "*/", 2), stop = e < 0 ? len : i + 2 + e + 2;
+            for (; i < stop; i++) if (s[i] == '\n') line++;
+            continue;
+        }
+        if (c == '/' && i + 1 < len && s[i + 1] == '/') { while (i < len && s[i] != '\n') i++; continue; }
+        if (c == '"' || c == '\'') {
+            i++;
+            while (i < len && s[i] != c) { if (s[i] == '\\' && i + 1 < len) i++; if (s[i] == '\n') line++; i++; }
+            i++;
+            continue;
+        }
+        if (!ident(c)) { i++; continue; }
+        {
+            long a = i, j;
+            int member = a > 0 && (s[a - 1] == '.' || (s[a - 1] == '>' && a > 1 && s[a - 2] == '-'));
+            while (i < len && ident(s[i])) i++;
+            if (member || (s[a] >= '0' && s[a] <= '9')) continue;
+            for (j = i; j < len && (s[j] == ' ' || s[j] == '\t'); j++) {}
+            if (j >= len || s[j] != '(') continue;
+            for (k = 0; LIBC[k]; k++) {
+                long nl = tx_len(LIBC[k], 32);
+                if (nl == i - a && tx_same(s + a, nl, LIBC[k], nl)) break;
+            }
+            if (!LIBC[k]) continue;
+            calls++;
+            if (print) sy_printf("%s:%ld\t%s\n", name, line, LIBC[k]);
+        }
+    }
+    return calls;
+}
+
+int main(int argc, char **argv) {
+    int i, files = 0, calls = 0;
+    if (argc < 2) { sy_printf("usage: libcscan.cx -- --self | FILE...\n"); return 2; }
+    if (tx_eq(argv[1], "--self", 8)) {
+        int n = scan("sample", SAMPLE, (long)sizeof SAMPLE - 1, 1);
+        sy_printf("LIBCSCAN self calls=%d (want 2: strlen, exit)\n", n);
+        return n == 2 ? 0 : 1;
+    }
+    for (i = 1; i < argc; i++) {
+        size_t n = 0;
+        char *s = cx_read(argv[i], &n);
+        if (!s) { sy_printf("libcscan: cannot read %s\n", argv[i]); return 2; }
+        calls += scan(argv[i], s, (long)n, 1);
+        files++;
+    }
+    sy_printf("LIBCSCAN files=%d calls=%d\n", files, calls);
+    return calls ? 1 : 0;
+}
