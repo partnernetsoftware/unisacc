@@ -3508,6 +3508,235 @@ static void k2_libraryenv(Ob *o) {
 static void enc_pe(Ob *o) { pe_fields(o, 0); }
 static void enc_pe_forward(Ob *o) { pe_fields(o, 1); }
 
+/* ---- encoder entries and lower target facts (enc-x86, enc-arm, lower-abi, lower-code): literals from
+   exec/facts/enc-literals.tsv (kind/name/value, original order), gold regmap/enc/reloc/abi, image-pe imports. ---- */
+static Krow el_r[512];
+static int el_n;
+static int el_kind(const char *kind, Krow **out, int cap) {
+    int i, n = 0;
+    if (!el_n) el_n = fg_krows("exec/facts/enc-literals.tsv", el_r, 512);
+    for (i = 0; i < el_n; i++) if (tx_eq(el_r[i].kind, kind, 64)) { if (n == cap) fg_die("too many literal rows", kind); out[n++] = &el_r[i]; }
+    return n;
+}
+static const char *el_get(const char *kind, const char *name) {
+    Krow *k[256];
+    int i, n = el_kind(kind, k, 256);
+    for (i = 0; i < n; i++) if (tx_eq(k[i]->name, name, 256)) return k[i]->value;
+    return 0;
+}
+static long el_int(const char *kind, const char *name) {
+    const char *v = el_get(kind, name);
+    char *end;
+    long x;
+    if (!v) fg_die("literal absent", name);
+    x = strtol(v, &end, 10);
+    if (end == v || *end) fg_die("literal is not an integer", name);
+    return x;
+}
+/* facts(stem) of a single-column `value` table, as text (a JSON string cell decoded; other JSON refused). */
+static int el_values(const char *stem, char **out, int cap) {
+    Jv *rows = fj_facts(stem);
+    int i;
+    if (rows->n > cap) fg_die("too many values", stem);
+    for (i = 0; i < rows->n; i++) out[i] = (char *)jv_str(jd_must(rows->v[i], "value"), stem);
+    return rows->n;
+}
+static int el_in(char **v, int n, const char *x) { int i; for (i = 0; i < n; i++) if (tx_eq(v[i], x, 256)) return 1; return 0; }
+static int el_imports(char **out, int cap) {   /* unisa/image/pe.py IMPORTS, from exec/facts/image-pe.tsv */
+    Krow k[256];
+    int i, n = fg_krows("exec/facts/image-pe.tsv", k, 256), m = 0;
+    for (i = 0; i < n; i++) {
+        if (!tx_eq(k[i].kind, "import", 16)) continue;
+        if (m == cap || strtol(k[i].name, 0, 10) != m + 1) fg_die("import rows out of order", k[i].name);
+        out[m++] = k[i].value;
+    }
+    return m;
+}
+/* gold regmap.tsv: machine register of tape register rN on arch, or 0. */
+static const char *el_regmap(const char *arch, const char *treg) {
+    static Rows R;
+    static List F;
+    static int ready;
+    int i;
+    if (!ready) { fg_gold("regmap", &R, &F, 0, 0); ready = 1; }
+    for (i = 0; i < R.n; i++) if (R.nc[i] >= 3 && tx_eq(R.c[i][0], treg, 64) && tx_eq(R.c[i][1], arch, 64)) return R.c[i][2];
+    return 0;
+}
+static long el_num(const char *reg) {
+    const char *v = el_get("x86num", reg);
+    if (!v) fg_die("no x86 register number", reg);
+    return strtol(v, 0, 10);
+}
+static void el_jlist1(Ob *o, int have, long v) { if (have) { ob_z(o, "["); ob_int(o, v); ob_z(o, "]"); } else ob_z(o, "[]"); }
+
+static void enc_x86(Ob *o) {
+    static const char *grp[3] = {"x86_alu2", "x86_setcc", "x86_shiftext"};
+    static const char *grpcls[3] = {"C_ALU", "C_SET", "C_SHF"};
+    Krow *k[256];
+    char *v[256], *meta[64], *win[64], *imp[64], line[256];
+    int i, j, n, nm, nw, ni;
+    unsigned char used[257];
+    Jv *classes = jv_d();
+    n = el_kind("x86base", k, 256);
+    for (i = 0; i < n; i++) { cx_fmt(line, sizeof line, "=%s\tint\t%ld\n", k[i]->name, strtol(k[i]->value, 0, 10) * 1000000L); ob_z(o, line); }
+    n = el_kind("x86cls", k, 256);
+    for (i = 0; i < n; i++) { ob_z(o, "="); ob_z(o, k[i]->name); ob_z(o, "\tint\t"); ob_z(o, k[i]->value); ob_z(o, "\n"); }
+    ob_z(o, "=SCR\tint\t"); ob_int(o, el_num(el_get("x86scratch", "SCR"))); ob_z(o, "\n");
+    ob_z(o, "=SCR2\tint\t"); ob_int(o, el_num(el_get("x86scratch", "SCR2"))); ob_z(o, "\n");
+    ob_z(o, "=SPREG\tint\t"); ob_int(o, el_num(el_regmap("x86_64", "r7"))); ob_z(o, "\n");
+    ob_z(o, "=RAX\tint\t"); ob_int(o, el_num("rax")); ob_z(o, "\n");
+    ob_z(o, "=RDX\tint\t"); ob_int(o, el_num("rdx")); ob_z(o, "\n");
+    ob_z(o, "=division_registers\tjson\t[");
+    for (i = 0; i < 7; i++) {
+        char t[8];
+        cx_fmt(t, sizeof t, "r%d", i);
+        if (i) ob_z(o, ", ");
+        ob_int(o, el_num(el_regmap("x86_64", t)));
+    }
+    ob_z(o, "]\n");
+    n = el_kind("x86word1", k, 256);
+    for (i = 0; i < n; i++) jd_puti(classes, k[i]->name, el_int("x86cls", k[i]->value));
+    { Jv *fp = fj_facts("enc-fp-ops"); for (i = 0; i < fp->n; i++) jd_put(classes, jv_str(jd_must(fp->v[i], "op"), "enc-fp-ops"), jd_must(fp->v[i], "id")); }
+    jd_puti(classes, "hostcall", 60); jd_puti(classes, "hostaddr", 61);
+    { Jv *ids = fj_facts("enc-x86win-ids"); for (i = 0; i < ids->n; i++) jd_put(classes, jv_str(jd_must(ids->v[i], "name"), "enc-x86win-ids"), jd_must(ids->v[i], "value")); }
+    n = el_kind("x86word2", k, 256);
+    for (i = 0; i < n; i++) jd_puti(classes, k[i]->name, el_int("x86cls", k[i]->value));
+    for (j = 0; j < 3; j++) { n = el_kind(grp[j], k, 256); for (i = 0; i < n; i++) jd_puti(classes, k[i]->name, el_int("x86cls", grpcls[j])); }
+    for (i = 0; i < 257; i++) used[i] = 0;
+    for (i = 0; i < classes->n; i++) { long long c = jv_num(classes->v[i], classes->k[i]); if (c >= 0 && c <= 256) used[c] = 1; }
+    ob_z(o, "=unknown\tjson\t[");
+    for (i = 0, j = 0; i < 257; i++) if (!used[i]) { if (j++) ob_z(o, ", "); ob_int(o, i); }
+    ob_z(o, "]\n@wi\tword:str\n");
+    n = el_values("enc-x86win-ops", v, 256);
+    for (i = 0; i < n; i++) { ob_z(o, "\t"); ob_z(o, v[i]); ob_z(o, "\n"); }
+    n = el_values("enc-x86win-rcs", v, 256);
+    for (i = 0; i < n; i++) { ob_z(o, "\t"); ob_z(o, v[i]); ob_z(o, "\n"); }
+    ob_z(o, "@wimp\tword:str\tn:int\n");
+    ni = el_imports(imp, 64);
+    for (i = 0; i < ni; i++) { ob_z(o, "\t"); ob_z(o, imp[i]); ob_z(o, "\t"); ob_int(o, i + 1); ob_z(o, "\n"); }
+    ob_z(o, "@classes\tword:str\tcls:int\taopc:json\tacc:json\tshx:json\n");
+    for (i = 0; i < classes->n; i++) {
+        ob_z(o, "\t"); ob_z(o, classes->k[i]); ob_z(o, "\t"); ob_int(o, (long)jv_num(classes->v[i], classes->k[i]));
+        for (j = 0; j < 3; j++) { const char *x = el_get(grp[j], classes->k[i]); ob_z(o, "\t"); el_jlist1(o, x != 0, x ? strtol(x, 0, 10) : 0); }
+        ob_z(o, "\n");
+    }
+    ob_z(o, "@regs\tword:str\tn:int\n");
+    n = el_kind("x86num", k, 256);
+    for (i = 0; i < n; i++) { ob_z(o, "\t"); ob_z(o, k[i]->name); ob_z(o, "\t"); ob_int(o, strtol(k[i]->value, 0, 10) + 1); ob_z(o, "\n"); }
+    nm = el_values("enc-tins-meta", meta, 64);
+    nw = el_values("enc-x86win-meta", win, 64);
+    ob_z(o, "@ids\tword:str\tnm:str\n");
+    n = el_kind("x86id1", k, 256);
+    for (i = 0; i < n; i++) { ob_z(o, "\t"); ob_z(o, k[i]->name); ob_z(o, "\t"); ob_z(o, k[i]->value); ob_z(o, "\n"); }
+    n = el_kind("x86idw", k, 256);
+    for (i = 0; i < n; i++) { ob_z(o, "\t"); ob_z(o, k[i]->name); ob_z(o, "\t"); ob_z(o, k[i]->value); ob_z(o, "\n"); }
+    for (i = 0; i < nm; i++) {
+        static char *skip[5] = {"role", "form", "reloc", "carry", "winapi"};
+        if (el_in(skip, 5, meta[i])) continue;
+        ob_z(o, "\t"); ob_z(o, meta[i]); ob_z(o, "\t"); ob_z(o, meta[i]); ob_z(o, "\n");
+    }
+    n = el_kind("x86id2", k, 256);
+    for (i = 0; i < n; i++) { ob_z(o, "\t"); ob_z(o, k[i]->name); ob_z(o, "\t"); ob_z(o, k[i]->value); ob_z(o, "\n"); }
+    n = el_kind("x86idh", k, 256);
+    for (i = 0; i < n; i++) { ob_z(o, "\t"); ob_z(o, k[i]->name); ob_z(o, "\t"); ob_z(o, k[i]->value); ob_z(o, "\n"); }
+    ob_z(o, "@metakeys\tkey:str\twin:int\n");
+    for (i = 0; i < nm; i++) {
+        static char *skip[4] = {"role", "form", "reloc", "carry"};
+        if (el_in(skip, 4, meta[i])) continue;
+        ob_z(o, "\t"); ob_z(o, meta[i]); ob_z(o, "\t"); ob_int(o, el_in(win, nw, meta[i])); ob_z(o, "\n");
+    }
+    ob_z(o, "@winmeta\tk:str\n");
+    for (i = 0; i < nw; i++) { ob_z(o, "\t"); ob_z(o, win[i]); ob_z(o, "\n"); }
+    ob_z(o, "@puts\ti:int\n");
+    for (i = 0; i < 4; i++) { ob_z(o, "\t"); ob_int(o, i); ob_z(o, "\n"); }
+}
+
+static void enc_arm(Ob *o) {
+    Krow *k[256];
+    char *sop[512], *sshape[512], *meta[64], *imp[64], *v[256];
+    long scls[512];
+    int ns = 0, i, j, n, nm, ni;
+    Jv *t;
+    static const char *spec_files[2] = {"enc-armint-specs", "enc-armfp-specs"};
+#define SPEC_PUT(OP, SHAPE, CLS) do { int f_ = -1, q_; for (q_ = 0; q_ < ns; q_++) if (tx_eq(sop[q_], (OP), 256)) f_ = q_; \
+        if (f_ < 0) { if (ns == 512) fg_die("too many arm specs", 0); f_ = ns++; sop[f_] = (char *)(OP); } sshape[f_] = (char *)(SHAPE); scls[f_] = (CLS); } while (0)
+    n = el_kind("armspec", k, 256);
+    for (i = 0; i < n; i++) {
+        long c = tx_chr(k[i]->value, tx_len(k[i]->value, 64), ':');
+        char *sh;
+        if (c < 0) fg_die("armspec is not SHAPE:CLS", k[i]->value);
+        sh = ar_dup(fg_ar, k[i]->value, c);
+        SPEC_PUT(k[i]->name, sh, strtol(k[i]->value + c + 1, 0, 10));
+    }
+    for (j = 0; j < 2; j++) {
+        t = fj_facts(spec_files[j]);
+        for (i = 0; i < t->n; i++) SPEC_PUT(jv_str(jd_must(t->v[i], "op"), spec_files[j]), jv_str(jd_must(t->v[i], "shape"), spec_files[j]),
+                                            (long)jv_num(jd_must(t->v[i], "cls"), spec_files[j]));
+    }
+    n = el_kind("arm_alu3", k, 256);
+    for (i = 0; i < n; i++) SPEC_PUT(k[i]->name, "rrr", 7);
+    n = el_kind("arm_invcond", k, 256);
+    for (i = 0; i < n; i++) SPEC_PUT(k[i]->name, "rrr", 8);
+#undef SPEC_PUT
+    n = el_kind("armbase", k, 256);
+    for (i = 0; i < n; i++) { ob_z(o, "="); ob_z(o, k[i]->name); ob_z(o, "\tint\t"); ob_z(o, k[i]->value); ob_z(o, "\n"); }
+    ob_z(o, "=unknown\tjson\t[");
+    for (i = 0, j = 0; i < 257; i++) if (i < 1 || i > ns) { if (j++) ob_z(o, ", "); ob_int(o, i); }
+    ob_z(o, "]\n");
+    nm = el_values("enc-tins-meta", meta, 64);
+    ob_z(o, "=meta_classes\tjson\t{");
+    for (i = 0; i < nm; i++) { char key[128]; if (i) ob_z(o, ", "); cx_fmt(key, sizeof key, "meta_%s", meta[i]); ob_str(o, key); ob_z(o, ": ["); ob_int(o, i + 1); ob_z(o, "]"); }
+    ob_z(o, "}\n@specs\ti:int\top:str\tn:int\tcls:int\tlpos:int\tbase:int\tspin:int\tchars:json\tlast:int\tlastsigned:int\n");
+    for (i = 0; i < ns; i++) {
+        const char *sh = sshape[i], *base;
+        long sn = tx_len(sh, 64), lpos = tx_chr(sh, sn, 'l');
+        int prev_signed = 0, sg = 0;
+        ob_z(o, "\t"); ob_int(o, i + 1); ob_z(o, "\t"); ob_z(o, sop[i]); ob_z(o, "\t"); ob_int(o, sn); ob_z(o, "\t"); ob_int(o, scls[i]);
+        ob_z(o, "\t"); ob_int(o, lpos < 0 ? -1 : lpos);
+        base = el_get("arm_alu3", sop[i]);
+        if (!base) base = el_get("arm_invcond", sop[i]);
+        ob_z(o, "\t"); ob_z(o, base ? base : "0");
+        ob_z(o, "\t"); ob_int(o, tx_eq(sop[i], "spinit", 16));
+        ob_z(o, "\t[");
+        for (j = 0; j < sn; j++) {
+            char kc = sh[j], cs[2];
+            const char *code;
+            cs[0] = kc; cs[1] = 0;
+            code = el_get("armcode", cs);
+            sg = kc == 'i' && !tx_eq(sop[i], "imm", 8);
+            if (j) ob_z(o, ",");
+            ob_z(o, "{\"i\":"); ob_int(o, j); ob_z(o, ",\"p\":"); ob_int(o, j - 1); ob_z(o, ",\"first\":"); ob_int(o, j == 0);
+            ob_z(o, ",\"ps\":"); ob_int(o, j > 0 && prev_signed); ob_z(o, ",\"isv\":"); ob_int(o, kc == 'v');
+            ob_z(o, ",\"code\":"); ob_z(o, code ? code : "0"); ob_z(o, ",\"signed\":"); ob_int(o, sg); ob_z(o, "}");
+            prev_signed = sg;
+        }
+        ob_z(o, "]\t"); ob_int(o, sn - 1); ob_z(o, "\t"); ob_int(o, sn > 0 && prev_signed); ob_z(o, "\n");
+    }
+    ob_z(o, "@regs\tword:str\tn:int\n");
+    for (i = 0; i < 31; i++) { char r[64]; cx_fmt(r, sizeof r, "\tx%d\t%d\n", i, i + 1); ob_z(o, r); }
+    ob_z(o, "@metakeys\tword:str\tn:int\n");
+    for (i = 0; i < nm; i++) { ob_z(o, "\t"); ob_z(o, meta[i]); ob_z(o, "\t"); ob_int(o, i + 1); ob_z(o, "\n"); }
+    ob_z(o, "@imports\tword:str\tn:int\n");
+    ni = el_imports(imp, 64);
+    for (i = 0; i < ni; i++) { ob_z(o, "\t"); ob_z(o, imp[i]); ob_z(o, "\t"); ob_int(o, i + 1); ob_z(o, "\n"); }
+    {
+        static const char *nm4[4][2] = {{"inputkeys", "enc-arminput-keys"}, {"headers", "enc-armlayout-headers"},
+                                        {"winkeys", "enc-armwin-keys"}, {"winreset", "enc-armwin-reset"}};
+        for (j = 0; j < 4; j++) {
+            ob_z(o, "@"); ob_z(o, nm4[j][0]); ob_z(o, "\tword:str\n");
+            n = el_values(nm4[j][1], v, 256);
+            for (i = 0; i < n; i++) { ob_z(o, "\t"); ob_z(o, v[i]); ob_z(o, "\n"); }
+        }
+    }
+    ob_z(o, "@targets\tkey:str\tword:str\n");
+    t = fj_facts("enc-armlayout-targets");
+    for (i = 0; i < t->n; i++) {
+        ob_z(o, "\t"); ob_z(o, jv_str(jd_must(t->v[i], "key"), "targets")); ob_z(o, "\t"); ob_z(o, jv_str(jd_must(t->v[i], "value"), "targets")); ob_z(o, "\n");
+    }
+    ob_z(o, "@puts\ti:int\tp:int\n");
+    for (i = 0; i < 4; i++) { ob_z(o, "\t"); ob_int(o, i); ob_z(o, "\t"); ob_int(o, i - 1); ob_z(o, "\n"); }
+}
+
 typedef struct { const char *stem; const char *inputs[40]; void (*produce)(Ob *); } Table;   /* inputs 0-terminated */
 static const Table fg_tables[] = {
     {"opt-gen", {"weights/gold/peep.tsv", "weights/gold/opinfo.tsv", "exec/facts/opt-gen-constants.tsv",
@@ -3559,6 +3788,13 @@ static const Table fg_tables[] = {
         "exec/nativeabi/ordered-fresh.tsv", "exec/facts/nativeabi-gen-reject.tsv", "exec/facts/top-modelgraphequality-banks.tsv", "tools/facts-gen.cx", 0}, nativeabi},
     {"pp-autoinc-gen", {"exec/facts/pp-bytes.tsv", "seed/unisa_libneed.c", "exec/facts/pp-autoinc.tsv", "exec/facts/pp-layout.tsv",
                         "tools/facts-gen.cx", 0}, pp_autoinc},
+    {"enc-x86", {"exec/facts/enc-literals.tsv", "weights/gold/regmap.tsv", "exec/facts/image-pe.tsv", "exec/facts/enc-fp-ops.tsv",
+                 "exec/facts/enc-x86win-ids.tsv", "exec/facts/enc-x86win-ops.tsv", "exec/facts/enc-x86win-rcs.tsv",
+                 "exec/facts/enc-x86win-meta.tsv", "exec/facts/enc-tins-meta.tsv", "tools/facts-gen.cx", 0}, enc_x86},
+    {"enc-arm", {"exec/facts/enc-literals.tsv", "exec/facts/image-pe.tsv", "exec/facts/enc-armint-specs.tsv",
+                 "exec/facts/enc-armfp-specs.tsv", "exec/facts/enc-tins-meta.tsv", "exec/facts/enc-arminput-keys.tsv",
+                 "exec/facts/enc-armlayout-headers.tsv", "exec/facts/enc-armlayout-targets.tsv",
+                 "exec/facts/enc-armwin-keys.tsv", "exec/facts/enc-armwin-reset.tsv", "tools/facts-gen.cx", 0}, enc_arm},
     {0, {0}, 0}
 };
 
