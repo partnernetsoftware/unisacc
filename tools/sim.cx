@@ -21,7 +21,7 @@ static void *xrealloc(void *p, size_t n) { p = realloc(p, n ? n : 1); if (!p) di
 /* ---- growable byte buffer ---- */
 typedef struct { unsigned char *s; long n, cap; } Bytes;
 static void bgrow(Bytes *b, long need) { if (b->n + need > b->cap) { long c = b->cap ? b->cap : 256; while (b->n + need > c) c *= 2; b->s = xrealloc(b->s, (size_t)c); b->cap = c; } }
-static void bput(Bytes *b, const unsigned char *s, long n) { bgrow(b, n); memcpy(b->s + b->n, s, (size_t)n); b->n += n; }
+static void bput(Bytes *b, const unsigned char *s, long n) { bgrow(b, n); { void *cx_kept = memcpy(b->s + b->n, s, (size_t)n); (void)cx_kept; } b->n += n; }
 static void bputc(Bytes *b, int c) { bgrow(b, 1); b->s[b->n++] = (unsigned char)c; }
 typedef struct { long long *s; long n, cap; } Words;
 static void wgrow(Words *w, long need) { if (w->n + need > w->cap) { long c = w->cap ? w->cap : 256; while (w->n + need > c) c *= 2; w->s = xrealloc(w->s, (size_t)c * sizeof(long long)); w->cap = c; } }
@@ -48,7 +48,7 @@ static long long sget(SMap *m, const char *k) { long i = m->cap ? sfind(m, k, (l
 static int shas(SMap *m, const unsigned char *k, long n, long long *out) { long i = m->cap ? sfind(m, (const char *)k, n, 0) : -1; if (i < 0) return 0; *out = m->vals[i]; return 1; }
 static void sset(SMap *m, const unsigned char *k, long n, long long v) {
     long i = sfind(m, (const char *)k, n, 1);
-    if (!m->keys[i]) { char *c = xmalloc((size_t)n + 1); memcpy(c, k, (size_t)n); c[n] = 0; m->keys[i] = c; m->n++; }
+    if (!m->keys[i]) { char *c = xmalloc((size_t)n + 1); { void *cx_kept = memcpy(c, k, (size_t)n); (void)cx_kept; } c[n] = 0; m->keys[i] = c; m->n++; }
     m->vals[i] = v;
 }
 static void ssets(SMap *m, const char *k, long long v) { sset(m, (const unsigned char *)k, (long)strlen(k), v); }
@@ -69,7 +69,7 @@ static long bfind(BMap *m, const unsigned char *k, long n, int insert) {
     }
 }
 static int bhas(BMap *m, const unsigned char *k, long n, long long *out) { long i = m->cap ? bfind(m, k, n, 0) : -1; if (i < 0) return 0; *out = m->vals[i]; return 1; }
-static void bset(BMap *m, const unsigned char *k, long n, long long v) { long i = bfind(m, k, n, 1); if (!m->keys[i]) { unsigned char *c = xmalloc((size_t)n + 1); memcpy(c, k, (size_t)n); c[n] = 0; m->keys[i] = c; m->lens[i] = n; m->n++; } m->vals[i] = v; }
+static void bset(BMap *m, const unsigned char *k, long n, long long v) { long i = bfind(m, k, n, 1); if (!m->keys[i]) { unsigned char *c = xmalloc((size_t)n + 1); { void *cx_kept = memcpy(c, k, (size_t)n); (void)cx_kept; } c[n] = 0; m->keys[i] = c; m->lens[i] = n; m->n++; } m->vals[i] = v; }
 typedef struct { long long *keys; long long *vals; unsigned char *used; long n, cap; } IMap;
 static long ifind(IMap *m, long long k, int insert) {
     if (!m->cap || (insert && m->n * 2 >= m->cap)) {
@@ -91,8 +91,8 @@ static long file_get(const unsigned char *key, long n, const unsigned char **dat
     long long idx; if (bhas(&filecache, key, n, &idx)) { if (idx < 0) return 0; *data = filedata[idx].s; *len = filedata[idx].n; return 1; }
     char path[8192]; long off = 0, pn = 0;
     if (n >= 7 && key[0] == 0 && (!memcmp(key + 1, "inc/q/", 6) || !memcmp(key + 1, "inc/a/", 6))) off = 7;
-    else if (n >= 5 && key[0] == 0 && !memcmp(key + 1, "hdr/", 4)) { if (!bundled) die("\\0hdr/ path needs INCLUDE_DIR"); pn = (long)strlen(bundled); if (pn + 1 + n >= (long)sizeof path) die("path length"); memcpy(path, bundled, (size_t)pn); path[pn++] = '/'; off = 5; }
-    if (n - off + pn >= (long)sizeof path) die("path length"); memcpy(path + pn, key + off, (size_t)(n - off)); path[pn + n - off] = 0;
+    else if (n >= 5 && key[0] == 0 && !memcmp(key + 1, "hdr/", 4)) { if (!bundled) die("\\0hdr/ path needs INCLUDE_DIR"); pn = (long)strlen(bundled); if (pn + 1 + n >= (long)sizeof path) die("path length"); { void *cx_kept = memcpy(path, bundled, (size_t)pn); (void)cx_kept; } path[pn++] = '/'; off = 5; }
+    if (n - off + pn >= (long)sizeof path) die("path length"); { void *cx_kept = memcpy(path + pn, key + off, (size_t)(n - off)); (void)cx_kept; } path[pn + n - off] = 0;
     if (memchr(path, 0, (size_t)(pn + n - off))) { bset(&filecache, key, n, -1); return 0; }   /* a NUL inside the path: never a file (Python ValueError) */
     struct stat st; errno = 0;
     if (stat(path, &st)) { if (errno == ENOENT) { bset(&filecache, key, n, -1); return 0; } fprintf(stderr, "sim: cannot stat %s (errno %d)\n", path, errno); exit(2); }
@@ -139,7 +139,7 @@ typedef struct { unsigned char *s; long n; } Blob;
 int main(int argc, char **argv) {
     const char *delta = 0, *input = 0, *srcpath = 0, *covpath = 0; int pos = 0;
     const char *resname[16], *respath[16]; int nres = 0;
-    for (int i = 1; i < argc; i++) { if (!strcmp(argv[i], "--resource") && i + 1 < argc) { const char *s = argv[++i], *eq = strchr(s, '='); if (!eq || eq == s || !eq[1] || nres == 16) die("--resource NAME=FILE (at most 16)"); char *nm = xmalloc((size_t)(eq - s) + 2); nm[0] = 0; memcpy(nm + 1, s, (size_t)(eq - s)); nm[eq - s + 1] = 0; for (int r2 = 0; r2 < nres; r2++) if (!strcmp(resname[r2] + 1, nm + 1)) die("--resource name given twice"); resname[nres] = nm; respath[nres] = eq + 1; nres++; } else if (!strcmp(argv[i], "--cov") && i + 1 < argc) covpath = argv[++i]; else if (pos == 0) delta = argv[i], pos++; else if (pos == 1) input = argv[i], pos++; else if (pos == 2) srcpath = argv[i], pos++; else if (pos == 3) bundled = argv[i], pos++; else die("usage: DELTA.json INPUT [SRC_LABEL] [INCLUDE_DIR] [--cov COV.tsv]"); }
+    for (int i = 1; i < argc; i++) { if (!strcmp(argv[i], "--resource") && i + 1 < argc) { const char *s = argv[++i], *eq = strchr(s, '='); if (!eq || eq == s || !eq[1] || nres == 16) die("--resource NAME=FILE (at most 16)"); char *nm = xmalloc((size_t)(eq - s) + 2); nm[0] = 0; { void *cx_kept = memcpy(nm + 1, s, (size_t)(eq - s)); (void)cx_kept; } nm[eq - s + 1] = 0; for (int r2 = 0; r2 < nres; r2++) if (!strcmp(resname[r2] + 1, nm + 1)) die("--resource name given twice"); resname[nres] = nm; respath[nres] = eq + 1; nres++; } else if (!strcmp(argv[i], "--cov") && i + 1 < argc) covpath = argv[++i]; else if (pos == 0) delta = argv[i], pos++; else if (pos == 1) input = argv[i], pos++; else if (pos == 2) srcpath = argv[i], pos++; else if (pos == 3) bundled = argv[i], pos++; else die("usage: DELTA.json INPUT [SRC_LABEL] [INCLUDE_DIR] [--cov COV.tsv]"); }
     if (!delta || !input) { fputs("usage: sim DELTA.json INPUT [SRC_LABEL] [INCLUDE_DIR] [--cov COV.tsv]\n", stderr); return 2; }
     if (!srcpath) srcpath = input;
     dl_delta D; dl_load(delta, &D);
@@ -151,12 +151,12 @@ int main(int argc, char **argv) {
     long long *W = xmalloc((size_t)(D.nreg + 1) * sizeof(long long)); memset(W, 0, (size_t)(D.nreg + 1) * sizeof(long long)); IMap WM = {0}; BMap intern = {0}, blobid = {0};
     Blob *blobs = xmalloc(1024 * sizeof(Blob)); long nblobs = 0, blobcap = 1024;
 #define ADDBLOB(ptr, len) do { if (nblobs == blobcap) { blobcap *= 2; blobs = xrealloc(blobs, (size_t)blobcap * sizeof(Blob)); } blobs[nblobs].s = (unsigned char *)(ptr); blobs[nblobs].n = (len); nblobs++; } while (0)
-    ADDBLOB("", 0); { long sl = (long)strlen(srcpath); unsigned char *c = xmalloc((size_t)sl + 1); memcpy(c, srcpath, (size_t)sl + 1); ADDBLOB(c, sl); }
+    ADDBLOB("", 0); { long sl = (long)strlen(srcpath); unsigned char *c = xmalloc((size_t)sl + 1); { void *cx_kept = memcpy(c, srcpath, (size_t)sl + 1); (void)cx_kept; } ADDBLOB(c, sl); }
     { static const unsigned char k[] = "\0cli/source"; bset(&blobid, k, 11, 1); }
     for (int r2 = 0; r2 < nres; r2++) {
         Bytes rb = {0}; FILE *f = fopen(respath[r2], "rb"); if (!f) { fprintf(stderr, "sim: cannot open resource %s\n", respath[r2]); return 2; }
         unsigned char chunk[65536]; size_t k; while ((k = fread(chunk, 1, sizeof chunk, f)) > 0) bput(&rb, chunk, (long)k); if (ferror(f)) { fclose(f); fprintf(stderr, "sim: cannot read resource %s\n", respath[r2]); return 2; } fclose(f);
-        unsigned char *c = xmalloc((size_t)rb.n + 1); if (rb.n) memcpy(c, rb.s, (size_t)rb.n); ADDBLOB(c, rb.n);
+        unsigned char *c = xmalloc((size_t)rb.n + 1); if (rb.n) { void *cx_kept = memcpy(c, rb.s, (size_t)rb.n); (void)cx_kept; } ADDBLOB(c, rb.n);
         long kn = (long)strlen(resname[r2] + 1) + 1; bset(&blobid, (const unsigned char *)resname[r2], kn, nblobs - 1);
     }
     Frame frames[MAXFRAMES]; int nfr = 1; frames[0].b = x; frames[0].attr = xattr; frames[0].cur = 0; frames[0].end = xn; Frame *fr = &frames[0];
@@ -201,10 +201,10 @@ int main(int argc, char **argv) {
             case DL_OLAST: r = o.n ? o.s[o.n - 1] : 256; break;
             case DL_ODROP: if (o.n) { o.n--; oattr.n--; } break;
             case DL_OLEN: W[a->r1] = o.n; break;
-            case DL_OCUT: { long s0 = (long)W[a->r2]; if (s0 < 0) s0 = 0; if (s0 > o.n) s0 = o.n; long len = o.n - s0; unsigned char *c = xmalloc((size_t)len + 1); memcpy(c, o.s + s0, (size_t)len); ADDBLOB(c, len); W[a->r1] = nblobs - 1; o.n = s0; oattr.n = s0; } break;
+            case DL_OCUT: { long s0 = (long)W[a->r2]; if (s0 < 0) s0 = 0; if (s0 > o.n) s0 = o.n; long len = o.n - s0; unsigned char *c = xmalloc((size_t)len + 1); { void *cx_kept = memcpy(c, o.s + s0, (size_t)len); (void)cx_kept; } ADDBLOB(c, len); W[a->r1] = nblobs - 1; o.n = s0; oattr.n = s0; } break;
             case DL_ORES: W[a->r1] = o.n; for (long long i = 0; i < a->v; i++) { bputc(&o, ' '); wput(&oattr, OT); } break;
             case DL_OFILL: { char t[32]; int tn = snprintf(t, sizeof t, "%lld", W[a->r2]); long wdt = (long)a->v, at = (long)W[a->r1]; if (at < 0 || at + wdt > o.n) die("fill past the reservation");
-                if (tn <= wdt) { memset(o.s + at, ' ', (size_t)(wdt - tn)); memcpy(o.s + at + wdt - tn, t, (size_t)tn); } else { result = 1; rejname = "field overflow"; goto done; } } break;
+                if (tn <= wdt) { memset(o.s + at, ' ', (size_t)(wdt - tn)); { void *cx_kept = memcpy(o.s + at + wdt - tn, t, (size_t)tn); (void)cx_kept; } } else { result = 1; rejname = "field overflow"; goto done; } } break;
             case DL_OCLR: o.n = 0; oattr.n = 0; break;
             case DL_OSEL: osel = (int)a->v; break;
             case DL_SETOT: OT = W[a->r1]; break;
@@ -214,7 +214,7 @@ int main(int argc, char **argv) {
             case DL_INTERN: case DL_SBINTERN: { const unsigned char *k; long kn; if (a->op == DL_INTERN) { long s0 = (long)W[a->r2], s1 = (long)W[a->r3]; if (s0 < 0) s0 = 0; if (s1 > fr->end) s1 = fr->end; k = fr->b + s0; kn = s0 < s1 ? s1 - s0 : 0; } else { k = sb.s ? sb.s : (const unsigned char *)""; kn = sb.n; }
                 long long id; if (!bhas(&intern, k, kn, &id)) { id = intern.n + 1; bset(&intern, k, kn, id); } W[a->r1] = id; } break;
             case DL_BLOBSAVE: case DL_SBSAVE: { const unsigned char *k; long kn; if (a->op == DL_BLOBSAVE) { long s0 = (long)W[a->r2], s1 = (long)W[a->r3]; if (s0 < 0) s0 = 0; if (s1 > fr->end) s1 = fr->end; k = fr->b + s0; kn = s0 < s1 ? s1 - s0 : 0; } else { k = sb.s ? sb.s : (const unsigned char *)""; kn = sb.n; }
-                unsigned char *c = xmalloc((size_t)kn + 1); memcpy(c, k, (size_t)kn); ADDBLOB(c, kn); W[a->r1] = nblobs - 1; } break;
+                unsigned char *c = xmalloc((size_t)kn + 1); { void *cx_kept = memcpy(c, k, (size_t)kn); (void)cx_kept; } ADDBLOB(c, kn); W[a->r1] = nblobs - 1; } break;
             case DL_INPUSH: { long long bi = W[a->r1]; if (bi < 0 || bi >= nblobs) die("INPUSH blob index"); if (nfr == MAXFRAMES) die("frame overflow"); frames[nfr].b = blobs[bi].s; frames[nfr].attr = 0; frames[nfr].cur = 0; frames[nfr].end = blobs[bi].n; fr = &frames[nfr++]; } break;
             case DL_INPUSHX: case DL_INPUSHXE: { if (nfr == MAXFRAMES) die("frame overflow"); frames[nfr].b = x; frames[nfr].attr = xattr; frames[nfr].cur = (long)W[a->r1]; long end = xn; if (a->op == DL_INPUSHXE) { long long ee = W[a->r2]; if (ee < end) end = (long)ee; } frames[nfr].end = end; fr = &frames[nfr++]; } break;
             case DL_INPOP: if (nfr <= 1) die("INPOP of the base frame"); nfr--; fr = &frames[nfr - 1]; break;
@@ -228,7 +228,7 @@ int main(int argc, char **argv) {
             case DL_BLEN: { long long bi = W[a->r2]; if (bi < 0 || bi >= nblobs) die("BLEN blob index"); W[a->r1] = blobs[bi].n; } break;
             case DL_DIVMOD10: { unsigned long long v = (unsigned long long)W[a->r1] & 0xFFFFFFFFULL; W[a->r1] = (long long)(v / 10); r = (long long)(v % 10) + (v / 10 == 0 ? 10 : 0); } break;
             case DL_INC: W[a->r1] = (long long)(((unsigned long long)W[a->r1] + 1) & 0xFFFFFFFFULL); break;   /* exec/c/core.c:300 */
-            case DL_SWAP: { unsigned char *nx = xmalloc((size_t)o.n + 1); memcpy(nx, o.s, (size_t)o.n); nx[o.n] = 0; long long *na = xmalloc((size_t)(o.n ? o.n : 1) * sizeof(long long)); memcpy(na, oattr.s, (size_t)o.n * sizeof(long long));
+            case DL_SWAP: { unsigned char *nx = xmalloc((size_t)o.n + 1); { void *cx_kept = memcpy(nx, o.s, (size_t)o.n); (void)cx_kept; } nx[o.n] = 0; long long *na = xmalloc((size_t)(o.n ? o.n : 1) * sizeof(long long)); { void *cx_kept = memcpy(na, oattr.s, (size_t)o.n * sizeof(long long)); (void)cx_kept; }
                 x = nx; xn = o.n; xattr = na; o.s = 0; o.n = 0; o.cap = 0; oattr.s = 0; oattr.n = 0; oattr.cap = 0; nfr = 1; frames[0].b = x; frames[0].attr = xattr; frames[0].cur = 0; frames[0].end = xn; fr = &frames[0]; } break;
             case DL_ACCEPT: result = 0; goto done;
             case DL_REJECT: result = 1; rejname = a->s1; goto done;
