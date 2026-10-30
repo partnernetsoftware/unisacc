@@ -1,0 +1,108 @@
+#pragma unisa use tmuxwit
+#pragma unisa use retry_stub
+/*
+ * esc_cancel.cx — Esc right after Enter cancels the turn, however early.
+ *   cd apps/csih && sh ../../unisacc.com probes/esc_cancel.cx
+ *
+ * Four installed-csih agent TUIs (private tmux, scratch HOME), each against a
+ * retry_stub that answers 503 to everything, so a turn that is NOT cancelled
+ * keeps retrying (a 2nd request ~2.8s after the 1st, a 3rd ~5.8s later).
+ * Esc goes 0, 50, 150 and 400ms after Enter. Pass: the screen says 已取消
+ * within 1.5s of the Esc, and the stub saw at most one request in the 4s
+ * after it (none at all is fine: cancelled before the request went out).
+ */
+
+#define NCASE 4
+
+int main(void) {
+    static const int delay_ms[NCASE] = { 0, 50, 150, 400 };
+    static char pane[65536];
+    const char *bin = getenv("CSIH_BIN"), *tmp = getenv("TMPDIR");
+    char cwd[512], absbin[700], root[600], home[NCASE][700], log[NCASE][700], sess[NCASE][8];
+    char served[256];
+    long t_esc[NCASE], t_cancel[NCASE], t_enter[NCASE];
+    long at[8];
+    int stub[NCASE], i, pid = rs_pid(), passed = 0, port0 = 30000 + (rs_pid() % 3000) * 4;
+
+    if (!getcwd(cwd, sizeof cwd)) return 2;
+    if (!bin || !bin[0]) { snprintf(absbin, sizeof absbin, "%s/../../out/csih-e2e-bin/csih", cwd); bin = absbin; }
+    if (access(bin, X_OK) != 0) { printf("esc_cancel: no csih binary at %s (csih.sh prepare)\n", bin); return 2; }
+    if (!tw_open("esc")) { printf("esc_cancel: tmux is not on PATH\n"); return 2; }
+    snprintf(root, sizeof root, "%s/csih-esc-%d", tmp && tmp[0] ? tmp : "/tmp", pid);
+    if (mkdir(root, 0700) != 0) { printf("esc_cancel: mkdir %s failed\n", root); return 2; }
+
+    for (i = 0; i < NCASE; i++) {
+        char e_home[760], e_ep[160], e_cwd[760];
+        snprintf(home[i], sizeof home[i], "%s/h%d", root, i);
+        snprintf(log[i], sizeof log[i], "%s/posts%d.txt", root, i);
+        snprintf(sess[i], sizeof sess[i], "e%d", i);
+        mkdir(home[i], 0700);
+        stub[i] = rs_stub_start(port0 + i, "503,503,503,503,503", log[i]);
+        snprintf(e_home, sizeof e_home, "HOME=%s", home[i]);
+        snprintf(e_ep, sizeof e_ep, "CSIH_ENDPOINT=http://127.0.0.1:%d/v1/chat/completions", port0 + i);
+        snprintf(e_cwd, sizeof e_cwd, "CSIH_CWD=%s", home[i]);
+        {
+            char *cmd[] = { "env", e_home, e_ep, e_cwd, "CSIH_MODEL=stub", "CSIH_BELL=0", (char *)bin, "agent" };
+            if (stub[i] < 0 || tw_new(sess[i], 140, 45, home[i], cmd, 8) != 0) { printf("FAIL esc+%dms: setup\n", delay_ms[i]); stub[i] = -1; }
+        }
+    }
+    /* type everywhere first, then Enter and Esc per case with its own delay */
+    for (i = 0; i < NCASE; i++) {
+        if (stub[i] < 0) continue;
+        if (!tw_wait_text(sess[i], "Enter 发送", 8000, pane, sizeof pane)) { printf("FAIL esc+%dms: TUI not ready\n", delay_ms[i]); stub[i] = -1; continue; }
+    }
+    for (i = 0; i < NCASE; i++) {
+        int k;
+        if (stub[i] < 0) continue;
+        for (k = 0; k < 3; k++) {
+            tw_keys(sess[i], "hi", 1);
+            if (tw_wait_text(sess[i], "> hi", 1500, pane, sizeof pane)) break;
+            tw_keys(sess[i], "C-u", 0);
+        }
+    }
+    tw_sleep_ms(200);
+    /* One case at a time: Enter, the delay, Esc, then watch only this pane
+     * until 已取消 (a shared watch after all four would time the first case
+     * from the last Esc, not its own). */
+    for (i = 0; i < NCASE; i++) {
+        long until;
+        if (stub[i] < 0) continue;
+        tw_keys(sess[i], "Enter", 0);
+        t_enter[i] = tw_now_ms();
+        if (delay_ms[i]) tw_sleep_ms(delay_ms[i]);
+        tw_keys(sess[i], "Escape", 0);
+        t_esc[i] = tw_now_ms();
+        t_cancel[i] = 0;
+        until = t_esc[i] + 1500;
+        while (tw_now_ms() < until) {
+            tw_capture(sess[i], pane, sizeof pane);
+            if (strstr(pane, "已取消")) { t_cancel[i] = tw_now_ms(); break; }
+            tw_sleep_ms(20);
+        }
+    }
+    /* then 4s with no new request anywhere: an uncancelled turn retries at ~2.8s */
+    tw_sleep_ms(4000);
+    for (i = 0; i < NCASE; i++) {
+        int n, pass;
+        if (stub[i] < 0) continue;
+        n = rs_posts(log[i], served, sizeof served, at, 8);
+        pass = t_cancel[i] && t_cancel[i] - t_esc[i] < 1500 && n <= 1;
+        printf("%s esc+%dms posts=%d served=%s esc_to_cancel_ms=%ld enter_to_request_ms=%ld\n", pass ? "PASS" : "FAIL",
+               delay_ms[i], n, served[0] ? served : "-", t_cancel[i] ? t_cancel[i] - t_esc[i] : -1L,
+               n ? at[0] - t_enter[i] : -1L);
+        if (!pass) {
+            const char *p;
+            int lines = 0;
+            tw_capture(sess[i], pane, sizeof pane);
+            p = pane + strlen(pane);
+            while (p > pane && lines < 12) { p--; if (*p == '\n') lines++; }
+            printf("  screen tail:\n%s\n", p);
+        }
+        passed += pass;
+    }
+    tw_close();
+    for (i = 0; i < NCASE; i++) rs_stop(stub[i]);
+    if (cx_rmtree(root) != 0) printf("esc_cancel: scratch %s left behind\n", root);
+    printf("esc_cancel: %d/%d PASS\n", passed, NCASE);
+    return passed == NCASE ? 0 : 1;
+}

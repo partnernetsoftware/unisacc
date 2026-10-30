@@ -5650,7 +5650,12 @@ int tui_entry(int argc, char **argv) {
              * is what lost 14 of 15 characters: one read returns a whole typed
              * line, and one key per tick threw the rest away. */
             if (tui_q_empty(&st)) {
-                int ready = term_wait_readable(TUI_FRAME_MS);
+                /* A busy turn says how long it may wait: 0 with work ready,
+                 * 10ms with a request in flight. A whole frame here was up to
+                 * 250ms lost on every step (turn_latency: Enter -> request
+                 * 263ms, request -> request 930ms around a 5ms exec). */
+                int wait_ms = st.busy ? agent_turn_wait_ms(TUI_FRAME_MS) : TUI_FRAME_MS;
+                int ready = term_wait_readable(wait_ms);
                 if (ready < 0) break;             /* terminal gone */
                 if (ready == 1) {
                     /* Read in BULK and split into keys. Calling term_read_key()
@@ -5664,8 +5669,15 @@ int tui_entry(int argc, char **argv) {
                     int j;
                     for (j = 0; j < nk; j++) tui_q_push(&st, batch[j]);
                 } else {
-                    tui_apply_key(&st, -1, 0);
-                    tui_repaint = 1;
+                    /* The idle tick keeps its frame cadence: short busy
+                     * waits add up to one frame before it fires. */
+                    static int short_wait;
+                    short_wait += wait_ms;
+                    if (short_wait >= TUI_FRAME_MS) {
+                        short_wait = 0;
+                        tui_apply_key(&st, -1, 0);
+                        tui_repaint = 1;
+                    }
                 }
             }
             while (!tui_q_empty(&st)) {

@@ -316,6 +316,10 @@ shell_result shell_run_in(const char *command, const char *cwd) {
             kill(pid, SIGKILL);
             do { w = waitpid(pid, &st, 0); } while (w < 0 && errno == EINTR);
         } else {
+            /* The pipe usually closes a moment before the exit status is
+             * ready. A flat 100ms nap here added 100ms to every exec
+             * (turn_latency); back off from 1ms instead, still capped at 100. */
+            long nap_ms = 1;
             for (;;) {
                 w = waitpid(pid, &st, WNOHANG);
                 if (w == pid) break;
@@ -337,8 +341,9 @@ shell_result shell_run_in(const char *command, const char *cwd) {
                     {
                         struct timespec ts;
                         ts.tv_sec = 0;
-                        ts.tv_nsec = (ms > 100 ? 100 : ms) * 1000000L;
+                        ts.tv_nsec = (ms > nap_ms ? nap_ms : ms) * 1000000L;
                         nanosleep(&ts, NULL);
+                        if (nap_ms < 100) nap_ms = nap_ms * 2 > 100 ? 100 : nap_ms * 2;
                     }
                 }
             }
