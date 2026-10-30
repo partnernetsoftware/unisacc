@@ -15,7 +15,7 @@
 1. [ ] 慢车道安装三项修复：去重、48 条 use、间接原型报错。验收：`tools/check-install-fixes.cx -- 候选`。负责：grk。
 2. [ ] 实测缺口：所有不需要材料的批次各实跑一遍，结果写进 `plans/release-0.0.43.md`。负责：cc（子代理在跑）。
 3. [ ] 补齐 176 个 UNPREPARED 批次的材料，同一候选、一次构造。
-4. [ ] 实现 19 个 PLANNED 覆盖行。分工：grk 做产品和流，cc 做工具和库，bdy 做 L0。
+4. [ ] 实现 19 个 PLANNED 覆盖行。分工：grk 做产品和流，cc 做工具和库；L0 有缺口时给 bdy 发信封，请它按自己的节奏补。
 5. [ ] win、osx、arm64 在同一候选上实跑。需要主人允许 push 跑 CI。
 6. [ ] 自举和源码资格；然后跑 `tests/run.cx -- --all`，结果要是 QUALIFIED。
 7. [ ] 主人授权发布。
@@ -27,9 +27,9 @@
 1. **量**：跑 `sh ./unisacc.com tools/release-board.cx > out/board-now.txt`，和上一轮的 `out/board-last.txt` 比较各 OWNER 的 open 数；比完把 now 复制成 last。再跑 `tools/ratchets.cx`，看 `git log -6`。
 2. **追**：
    - 谁的 open 两轮没降，就直接在它的窗口里要具体结果：哪一格、哪个提交、什么时候。不发"不用回"的知会。
-   - 谁在做任务板以外的事（比如 bdy 继续做架构），当轮叫停，并指明它该做的格。
+   - 板上的人（grk、cc）在做任务板以外的事，当轮叫停，并指明它该做的格。bdy 不在板上（主人安排它专做 cx 核心底层和上层封装），不给它派发布格，也不追它。
    - 卡住的，cc 当轮动手疏通。
-3. **干**：cc 自己也是干活的人。每轮至少推进自己名下（ri、resources、negative）的一格，并提交。
+3. **干**：cc 自己也是干活的人。每轮至少推进自己名下（ri、resources、negative、library、interfaces、properties）的一格，并提交。
 4. **报**：只报四件事：RELEASE 行的数字及变化、关键路径推进到第几项、谁没动、卡在哪。
 
 ## 底线
