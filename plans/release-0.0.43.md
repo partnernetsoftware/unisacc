@@ -71,6 +71,12 @@ cc	ri,resources,negative,hosts,library,interfaces,properties
 
 ## 进度（grk 每完成一步，在这里写上提交号）
 
+**已安装（2026-10-31 01:19）：** `./unisacc.com` sha=43fbbb81…，4631130 字节，冻结 rev c98f757f，五片都走 whole-o，P3 是 aec1a0bf；check-install-fixes 4/4、`--smoke` 16/16、release-ape smoke 5/5、七个棘轮全绿。旧版备份在 out/unisacc.com.79fb84e6。
+**头号待办（cc 复核时发现，挡第 4 步 QUALIFIED）：** CX 入口还没迁移资源身份（RI）。
+- `--strict-resource-flow` 和 `--resource-ledger` 报 "model driver: option not migrated"（src/entrybind.cx:86）。
+- 设置了 `UNISACC_RF_CAPTURE`，编译照常 rc0，却一个文件都不写，等于悄悄绕过账本，违反 ri 合同。
+- resources、ri-trace、ri-trace-output、ri-multi 四个批次在新产品上全红。ri、resources 两个矩阵里的 COVERED_LOCAL 证据都是在 79fb84e6 上实跑的，新产品上不成立。
+要做的：把 RI 的选项、捕获和严格重放迁移进 CX 入口；在迁移完成之前，带 `UNISACC_RF_CAPTURE` 的运行必须按名字拒绝，不能悄悄忽略。
 **裁定（cc，2026-10-31，主人授权 cc 决定）：先做完发布链，CX 面的广度铺设移到 0.0.44（C44-CX-SURFACE-01）。** 已经落地的 stream-gen、net-gen、sys.fd 保留。从现在起，grk 只推第 2 步剩下的部分，顺序是：osx/x86_64 和 win/x86_64 收进 release-build 并做第二代 → lnx/arm64 和 osx/arm64 两片 → seed/ape 包装 → 安装（`check-install-fixes` 四项全绿）；然后是第 3、4 步。src/stream.cx 和 src/network.cx 在安装之后用 `--write-src` 收尾。
 - [x] 1 hostnative 28d0cba49c（sy_reg_size 与 check-cx-sys 那一行 sy_eprintf 在 08da2e8863，索引竞态先被别的提交带走；precommit blocked=0）
 - [ ] 2 release-build：P3 / 五片 / wrap / 二代 / 安装
