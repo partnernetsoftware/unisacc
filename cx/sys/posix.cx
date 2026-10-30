@@ -145,6 +145,35 @@ int sy_dir_names(int dfd, char *out, int cap) {
     return count;
 }
 
+/* Terminal modes, saved and put back whole (the kernel's termios through its
+   ioctl: TCGETS/TCSETS[F] on Linux, TIOCGETA/TIOCSETA[F] on macOS). Opaque:
+   only sy_tty_get fills it, and two are compared with sy_tty_same. */
+typedef struct { unsigned char b[128]; } sy_tty_t;
+#if defined(__APPLE__)
+static const long syp_tcgets = 0x40487413L, syp_tcsets = 0x80487414L, syp_tcsetsf = 0x80487416L;
+#else
+static const long syp_tcgets = 0x5401L, syp_tcsets = 0x5402L, syp_tcsetsf = 0x5404L;
+#endif
+
+/* The modes of the terminal on FD into T. 0, or -errno (-ENOTTY: not a terminal). */
+int sy_tty_get(int fd, sy_tty_t *t) {
+    if (!t) return -EINVAL;
+    memset(t, 0, sizeof *t);
+    return (int)syp(syp_ioctl, fd, syp_tcgets, (long)t->b, 0, 0);
+}
+
+/* Set the terminal on FD to T. FLUSH 1 first waits for output to drain and
+   drops unread input (TCSAFLUSH), 0 applies at once (TCSANOW). 0, or -errno. */
+int sy_tty_set(int fd, const sy_tty_t *t, int flush) {
+    if (!t) return -EINVAL;
+    return (int)syp(syp_ioctl, fd, flush ? syp_tcsetsf : syp_tcsets, (long)t->b, 0, 0);
+}
+
+/* 1 when A and B hold the same modes. */
+int sy_tty_same(const sy_tty_t *a, const sy_tty_t *b) {
+    return a && b && memcmp(a->b, b->b, sizeof a->b) == 0;
+}
+
 /* flock(2) on FD: OP is 1 shared, 2 exclusive, 8 unlock, |4 not to wait.
    0, or -errno (-EWOULDBLOCK when held and not waiting). */
 int sy_flock(int fd, int op) { return (int)syp(syp_flock, fd, op, 0, 0, 0); }

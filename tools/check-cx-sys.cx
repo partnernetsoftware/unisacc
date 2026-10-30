@@ -29,11 +29,35 @@ static int child(const char *mode, const char *arg) {
         long fg = sy_tcgetpgrp(0);
         return fg > 0 && fg == sy_getpgid(0) && sy_tcsetpgrp(0, (int)fg) == 0 ? 0 : 1;
     }
+    if (tx_eq(mode, "pgrp", 16)) {
+        /* started by sy_spawn_inherit: write this process group into the kept fd ARG */
+        char line[32];
+        int fd = 0, i;
+        for (i = 0; arg[i] >= '0' && arg[i] <= '9'; i++) fd = fd * 10 + arg[i] - '0';
+        snprintf(line, sizeof line, "%ld\n", sy_getpgid(0));
+        return sy_write_all(fd, line, tx_len(line, 32)) == 0 ? 0 : 1;
+    }
+    if (tx_eq(mode, "tty-modes", 16)) {
+        /* under script(1): save, put back with and without flush, read again: the same modes */
+        static sy_tty_t zero;   /* all zero: a real terminal's modes are not */
+        sy_tty_t a, b, c;
+        return sy_tty_get(0, &a) == 0 && !sy_tty_same(&a, &zero) && sy_tty_set(0, &a, 1) == 0 && sy_tty_get(0, &b) == 0 &&
+               sy_tty_set(0, &b, 0) == 0 && sy_tty_get(0, &c) == 0 && sy_tty_same(&a, &b) && sy_tty_same(&b, &c) ? 0 : 1;
+    }
     if (tx_eq(mode, "lockf-held", 16) || tx_eq(mode, "lockf-free", 16)) {
         int fd = sy_openat(sy_at_fdcwd(), arg, O_RDWR, 0), r = fd >= 0 ? sy_lockf(fd, 1, 0) : fd;
         return tx_eq(mode, "lockf-held", 16) ? (r == -EAGAIN || r == -EACCES ? 0 : 1) : (r == 0 ? 0 : 1);
     }
     return 2;
+}
+
+/* sy_fork_session's fn: 7 when this process leads its own session and group
+   (setsid again must be -EPERM), after one line on stdout and one on stderr. */
+static int fs_child(void *ud) {
+    (void)ud;
+    sy_write_all(1, "out\n", 4);
+    sy_write_all(2, "err\n", 4);
+    return sy_getpgid(0) == (long)sy_pid() && sy_setsid() == -EPERM ? 7 : 1;
 }
 
 /* This file's own path (argv[0] under -run), so a child run works from any cwd. */
@@ -118,6 +142,47 @@ int main(int argc, char **argv) {
         ok(has(out, "gone"), "kill: the background grandchild died with the group");
     }
     ok(sy_pid() > 0, "pid: positive");
+    {
+        /* spawn_inherit: same process group, the kept fd reaches the exec'd child */
+        int sv[2], n = 0;
+        char fdtext[16], line[64], want[32];
+        const char *u = sy_env_or("UNISACC", "./unisacc.com");
+        char *av[] = { "/bin/sh", (char *)u, "-run", (char *)self, "--", "child", "pgrp", fdtext, 0 };
+        char *bad[] = { "/cx-sys-no-such-program-7f3a", 0 };
+        long got;
+        ok(sy_socketpair(sv) == 0, "spawn_inherit: a socketpair for the child");
+        snprintf(fdtext, sizeof fdtext, "%d", sv[1]);
+        pid = sy_spawn_inherit(av, sv[1]);
+        sy_close(sv[1]);
+        rc = pid > 0 ? sy_wait(pid, 0) : pid;
+        while (sy_readable(sv[0], 0) == 1 && (got = sy_recv(sv[0], line + n, (long)sizeof line - 1 - n)) > 0) n += (int)got;
+        line[n] = 0;
+        snprintf(want, sizeof want, "%ld\n", sy_getpgid(0));
+        ok(pid > 0 && rc == 0 && tx_eq(line, want, 32), "spawn_inherit: the child writes on the kept fd and is in our process group");
+        sy_close(sv[0]);
+        ok(sy_spawn_inherit(bad, -1) == -ENOENT, "spawn_inherit: a missing program is -ENOENT (the exec errno)");
+        ok(sy_spawn_inherit(0, -1) == -EINVAL, "spawn_inherit: null argv is -EINVAL");
+    }
+    {
+        int fds[2], no = 0, ne = 0;
+        char o[64], e[64];
+        long got;
+        pid = sy_fork_session(fs_child, 0, fds);
+        rc = pid > 0 ? sy_wait(pid, 0) : pid;
+        while (pid > 0 && (got = sy_read(fds[0], o + no, (long)sizeof o - 1 - no)) > 0) no += (int)got;
+        while (pid > 0 && (got = sy_read(fds[1], e + ne, (long)sizeof e - 1 - ne)) > 0) ne += (int)got;
+        o[no] = 0; e[ne] = 0;
+        ok(pid > 0 && rc == 7, "fork_session: the child exits with fn's value (7: it led a new session and group)");
+        ok(tx_eq(o, "out\n", 8) && tx_eq(e, "err\n", 8), "fork_session: stdout and stderr come back on their own pipes");
+        if (pid > 0) { sy_close(fds[0]); sy_close(fds[1]); }
+        ok(sy_fork_session(0, 0, fds) == -EINVAL, "fork_session: a null fn is -EINVAL");
+    }
+    {
+        char *av[] = { "sh", "-c", "sleep 31.77", 0 };
+        pid = sy_spawn(av);
+        ok(pid > 0 && sy_signal(pid, 15) == 0 && sy_wait(pid, 0) == 128 + 15, "signal: SIGTERM to one pid, status 128+15");
+        ok(sy_signal(0, 15) == -EINVAL && sy_signal(pid, 0) == -ESRCH, "signal: refuses pid 0; a reaped pid is -ESRCH");
+    }
 
     /* time */
     {
@@ -185,6 +250,10 @@ int main(int argc, char **argv) {
            && sy_send_all(sv[1], "w", 1) == 0 && sy_recv(sv[0], buf, 1) == 1 && buf[0] == 'w', "socketpair carries bytes both ways");
         ok(sy_tcgetpgrp(sv[0]) == -ENOTTY, "tcgetpgrp on a socket is -ENOTTY");
         {
+            sy_tty_t t;
+            ok(sy_tty_get(sv[0], &t) == -ENOTTY && sy_tty_set(sv[0], &t, 1) == -ENOTTY, "tty_get/tty_set on a socket are -ENOTTY");
+        }
+        {
             /* on a real tty: script(1) (util-linux, -e returns the child's status) gives the child a pty */
             char *probe[] = { "sh", "-c", "script -qec true /dev/null >/dev/null 2>&1", 0 };
             if (sy_run(probe, out, sizeof out, &cut) == 0) {
@@ -193,6 +262,9 @@ int main(int argc, char **argv) {
                 snprintf(cmd, sizeof cmd, "script -qec 'sh %s -run %s -- child tty-pgrp -' /dev/null >/dev/null 2>&1",
                          sy_env_or("UNISACC", "./unisacc.com"), self);
                 ok(sy_run(av, out, sizeof out, &cut) == 0, "tcgetpgrp/tcsetpgrp on a pty: the foreground group is the child's own");
+                snprintf(cmd, sizeof cmd, "script -qec 'sh %s -run %s -- child tty-modes -' /dev/null >/dev/null 2>&1",
+                         sy_env_or("UNISACC", "./unisacc.com"), self);
+                ok(sy_run(av, out, sizeof out, &cut) == 0, "tty_get/tty_set on a pty: modes put back (flush and now) read back the same");
             } else printf("  note  tcgetpgrp on a pty: UNMEASURED (no util-linux script(1) here)\n");
         }
         snprintf(f, sizeof f, "%s/a", root);

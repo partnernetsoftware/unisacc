@@ -1,4 +1,5 @@
 #pragma unisa module proc
+#pragma unisa use posix
 /* L0 sys/proc: child processes (plans/cx-layers.md). Exit status as one int:
    0..255 an exit code, 128+N killed by signal N, -errno when it could not run
    or be waited for. No #include: fork/pipe/exec/waitpid/kill come with the
@@ -64,6 +65,78 @@ int sy_spawn(char **argv) {
         _exit(127);
     }
     return (int)pid;
+}
+
+/* Start ARGV (argv[0] a path: not looked up on PATH) in THIS process group and
+   session, stdin/stdout/stderr inherited: a terminal stays the child's terminal
+   and the child stays in its foreground group (sy_spawn makes its own group,
+   which cannot read the terminal). Descriptor KEEP (-1: none) is left open
+   across exec; every other descriptor keeps its own close-on-exec flag. Its
+   pid, or -errno; a failed exec comes back as its errno (over a close-on-exec
+   pipe), not as a child that exits 127. */
+int sy_spawn_inherit(char **argv, int keep) {
+    int p[2], e = 0, st;
+    long k;
+    pid_t pid;
+    if (!argv || !argv[0]) return -EINVAL;
+    if (pipe(p) != 0) return -errno;
+    if (fcntl(p[0], F_SETFD, FD_CLOEXEC) != 0 || fcntl(p[1], F_SETFD, FD_CLOEXEC) != 0) {
+        e = errno; close(p[0]); close(p[1]); return -e;
+    }
+    pid = fork();
+    if (pid < 0) { e = errno; close(p[0]); close(p[1]); return -e; }
+    if (pid == 0) {
+        close(p[0]);
+        if (keep >= 0 && fcntl(keep, F_SETFD, 0) != 0) e = errno;
+        else { execv(argv[0], argv); e = errno; }
+        write(p[1], &e, sizeof e);
+        _exit(127);
+    }
+    close(p[1]);
+    do k = read(p[0], &e, sizeof e); while (k < 0 && errno == EINTR);
+    close(p[0]);
+    if (k == (long)sizeof e) {
+        while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+        return e ? -e : -EIO;
+    }
+    return (int)pid;
+}
+
+/* Run FN(UD) in a forked child that leads a new session (no controlling
+   terminal; sy_killpg(pid, 9) takes its whole group), stdin from /dev/null,
+   stdout into a pipe whose read end is FDS[0] and stderr into FDS[1] (both
+   close-on-exec in the parent). The child exits with FN's return value and
+   does not flush stdio: FN writes with sy_write_all. Its pid, or -errno. */
+int sy_fork_session(int (*fn)(void *), void *ud, int fds[2]) {
+    int po[2], pe[2], e;
+    pid_t pid;
+    if (!fn || !fds) return -EINVAL;
+    if (pipe(po) != 0) return -errno;
+    if (pipe(pe) != 0) { e = errno; close(po[0]); close(po[1]); return -e; }
+    pid = fork();
+    if (pid < 0) { e = errno; close(po[0]); close(po[1]); close(pe[0]); close(pe[1]); return -e; }
+    if (pid == 0) {
+        int dn;
+        sy_setsid();   /* a fresh fork is never a group leader: this cannot be -EPERM */
+        dn = open("/dev/null", O_RDONLY);
+        if (dn >= 0) { dup2(dn, 0); close(dn); }
+        dup2(po[1], 1); dup2(pe[1], 2);
+        close(po[0]); close(po[1]); close(pe[0]); close(pe[1]);
+        _exit(fn(ud) & 255);
+    }
+    close(po[1]); close(pe[1]);
+    fcntl(po[0], F_SETFD, FD_CLOEXEC);
+    fcntl(pe[0], F_SETFD, FD_CLOEXEC);
+    fds[0] = po[0];
+    fds[1] = pe[0];
+    return (int)pid;
+}
+
+/* Send signal SIG to the one process PID (no group). 0, or -errno. */
+int sy_signal(int pid, int sig) {
+    if (pid <= 0) return -EINVAL;   /* 0 and -1 would mean my group / everything */
+    errno = 0;
+    return kill((pid_t)pid, sig) == 0 ? 0 : (errno ? -errno : -EIO);
 }
 
 /* Wait for PID. NOHANG: -EAGAIN while it still runs. The exit status, as above. */
