@@ -2,8 +2,14 @@
 #pragma unisa use json
 #pragma unisa use reload_state
 #pragma unisa use reload_io
+#pragma unisa use zstr
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
 /* reload_load.c — reload_io_load 实现（唯一新源码，无 main）。
  * 采信 load 成功不删文件；仅已提交恢复后由 consume 收尾。
+ * 文件、目录与内存经 cx 底层（sys.fs、mem.*、zstr），不直接调 libc。
  */
 
 
@@ -13,17 +19,19 @@
 static void set_why(char *why, size_t cap, const char *msg)
 {
     if (why != NULL && cap > 0) {
-        strncpy(why, msg, cap - 1);
-        why[cap - 1] = '\0';
+        long n = zs_len(msg);
+        if (n > (long)cap - 1) n = (long)cap - 1;
+        mm_copy(why, (long)cap, msg, n);
+        why[n] = '\0';
     }
 }
 
 static int check_dir(const char *path, char *why, size_t cap)
 {
     char dir[4096];
-    size_t n = strlen(path);
+    size_t n = (size_t)zs_len(path);
     int fd;
-    struct stat st;
+    sy_stat_t st;
 
     if (n == 0 || n > 4095 || path[0] != '/') {
         set_why(why, cap, "path length or prefix out of range");
@@ -45,59 +53,48 @@ static int check_dir(const char *path, char *why, size_t cap)
             dir[0] = '/';
             dir[1] = '\0';
         } else {
-            memcpy(dir, path, slash);
+            mm_copy(dir, (long)sizeof dir, path, (long)slash);
             dir[slash] = '\0';
         }
     }
-    fd = open(dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    fd = sy_open(dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW, 0);
     if (fd < 0) {
         set_why(why, cap, "open parent dir failed");
         return -1;
     }
-    if (fstat(fd, &st) != 0) {
+    if (sy_fstat(fd, &st) != 0) {
         set_why(why, cap, "fstat parent dir failed");
-        close(fd);
+        sy_close(fd);
         return -1;
     }
-    if (!S_ISDIR(st.st_mode) || st.st_uid != getuid() ||
-        (st.st_mode & 0777) != 0700) {
+    if (st.kind != 'd' || st.uid != (long)getuid() ||
+        (st.mode & 0777) != 0700) {
         set_why(why, cap, "parent dir not trusted");
-        close(fd);
+        sy_close(fd);
         return -1;
     }
     return fd;
 }
 
+/* Exactly SIZE bytes, then end of file: 0; a short read, a grown file or an
+ * error: -1. sy_read resumes after EINTR itself. */
 static int read_all(int fd, char *buf, size_t size)
 {
     size_t off = 0;
+    char extra;
+    long r;
     while (off < size) {
-        ssize_t r = read(fd, buf + off, size - off);
-        if (r < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            return -1;
-        }
-        if (r == 0) {
-            return -1; /* short read */
+        r = sy_read(fd, buf + off, (long)(size - off));
+        if (r <= 0) {
+            return -1; /* error or short read */
         }
         off += (size_t)r;
     }
-    char extra;
-    for (;;) {
-        ssize_t r = read(fd, &extra, 1);
-        if (r < 0 && errno == EINTR) {
-            continue;
-        }
-        if (r < 0) {
-            return -1;
-        }
-        if (r == 0) {
-            return 0; /* EOF confirmed */
-        }
-        return -1; /* grew */
+    r = sy_read(fd, &extra, 1);
+    if (r == 0) {
+        return 0; /* EOF confirmed */
     }
+    return -1; /* error, or grew */
 }
 
 static int str_eq(const char *v, size_t vlen, const char *expect)
@@ -105,8 +102,7 @@ static int str_eq(const char *v, size_t vlen, const char *expect)
     if (expect == NULL) {
         return 0;
     }
-    size_t el = strlen(expect);
-    return vlen == el && memcmp(v, expect, el) == 0;
+    return tx_same(v, (long)vlen, expect, zs_len(expect));
 }
 
 int reload_io_load(const char *path, const char *expected_session,
@@ -116,7 +112,7 @@ int reload_io_load(const char *path, const char *expected_session,
 {
     int dfd = -1, fd = -1, rc = -1;
     char *buf = NULL;
-    struct stat st;
+    sy_stat_t st;
     size_t size = 0;
     jvalue *root = NULL, *v;
     const char *sv = NULL;
@@ -126,7 +122,7 @@ int reload_io_load(const char *path, const char *expected_session,
         *out_len = 0;
     }
     if (token != NULL) {
-        memset(token, 0, sizeof(*token));
+        mm_fill(token, (long)sizeof(*token), 0, (long)sizeof(*token));
     }
     if (out != NULL && out_cap > 0) {
         out[0] = '\0';
@@ -142,30 +138,30 @@ int reload_io_load(const char *path, const char *expected_session,
     if (dfd < 0) {
         return -1;
     }
-    fd = open(path, O_RDONLY | O_NOFOLLOW);
+    fd = sy_open(path, O_RDONLY | O_NOFOLLOW, 0);
     if (fd < 0) {
         set_why(why, cap, "open target failed");
         goto done;
     }
-    if (fstat(fd, &st) != 0) {
+    if (sy_fstat(fd, &st) != 0) {
         set_why(why, cap, "fstat target failed");
         goto done;
     }
-    if (!S_ISREG(st.st_mode) || st.st_uid != getuid() ||
-        (st.st_mode & 0777) != 0600) {
+    if (st.kind != 'f' || st.uid != (long)getuid() ||
+        (st.mode & 0777) != 0600) {
         set_why(why, cap, "target not trusted");
         goto done;
     }
-    if (st.st_size < 0 || (unsigned long long)st.st_size > LOAD_MAX_BYTES) {
+    if (st.size < 0 || (unsigned long long)st.size > LOAD_MAX_BYTES) {
         set_why(why, cap, "target size out of range");
         goto done;
     }
-    size = (size_t)st.st_size;
+    size = (size_t)st.size;
     if (out_cap < size + 1) {
         set_why(why, cap, "out buffer too small");
         goto done;
     }
-    buf = (char *)malloc(size + 1);
+    buf = (char *)mm_alloc((long)size + 1);
     if (buf == NULL) {
         set_why(why, cap, "malloc failed");
         goto done;
@@ -175,7 +171,7 @@ int reload_io_load(const char *path, const char *expected_session,
         goto done;
     }
     buf[size] = '\0';
-    if (close(fd) != 0) {
+    if (sy_close(fd) != 0) {
         fd = -1;
         set_why(why, cap, "close target failed");
         goto done;
@@ -194,7 +190,7 @@ int reload_io_load(const char *path, const char *expected_session,
         set_why(why, cap, "missing session_id field");
         goto done;
     }
-    if (!str_eq(sv, strlen(sv), expected_session)) {
+    if (!str_eq(sv, (size_t)zs_len(sv), expected_session)) {
         set_why(why, cap, "session_id mismatch");
         goto done;
     }
@@ -204,7 +200,7 @@ int reload_io_load(const char *path, const char *expected_session,
         set_why(why, cap, "missing handoff_id field");
         goto done;
     }
-    if (!str_eq(sv, strlen(sv), expected_handoff)) {
+    if (!str_eq(sv, (size_t)zs_len(sv), expected_handoff)) {
         set_why(why, cap, "handoff_id mismatch");
         goto done;
     }
@@ -214,17 +210,22 @@ int reload_io_load(const char *path, const char *expected_session,
         set_why(why, cap, "missing candidate_hash field");
         goto done;
     }
-    if (!str_eq(sv, strlen(sv), expected_hash)) {
+    if (!str_eq(sv, (size_t)zs_len(sv), expected_hash)) {
         set_why(why, cap, "candidate_hash mismatch");
         goto done;
     }
-    memcpy(out, buf, size + 1);
+    /* the expected ids equal the file's validated fields; the copies are
+       bounded anyway, and a value that does not fit is refused, not cut */
+    if (tx_copy(token->session_id, (long)sizeof token->session_id, expected_session, zs_len(expected_session)) ||
+        tx_copy(token->handoff_id, (long)sizeof token->handoff_id, expected_handoff, zs_len(expected_handoff)) ||
+        tx_copy(token->candidate_hash, (long)sizeof token->candidate_hash, expected_hash, zs_len(expected_hash))) {
+        set_why(why, cap, "token field too long");
+        goto done;
+    }
+    mm_copy(out, (long)out_cap, buf, (long)size + 1);
     *out_len = size;
-    token->dev = st.st_dev;
-    token->ino = st.st_ino;
-    strcpy(token->session_id, expected_session);
-    strcpy(token->handoff_id, expected_handoff);
-    strcpy(token->candidate_hash, expected_hash);
+    token->dev = (dev_t)st.dev;
+    token->ino = (ino_t)st.ino;
     set_why(why, cap, "ok");
     rc = 0;
 
@@ -234,24 +235,24 @@ done:
         if (out_cap > 0) {
             out[0] = '\0';
         }
-        memset(token, 0, sizeof(*token));
+        mm_fill(token, (long)sizeof(*token), 0, (long)sizeof(*token));
     }
     if (root != NULL) {
         jfree(root);
     }
-    free(buf);
+    mm_free(buf);
     if (fd >= 0) {
-        close(fd);
+        sy_close(fd);
     }
     if (dfd >= 0) {
-        if (close(dfd) != 0) {
+        if (sy_close(dfd) != 0) {
             rc = -1;
             set_why(why, cap, "close parent failed");
             *out_len = 0;
             if (out_cap > 0) {
                 out[0] = '\0';
             }
-            memset(token, 0, sizeof(*token));
+            mm_fill(token, (long)sizeof(*token), 0, (long)sizeof(*token));
         }
     }
     return rc;
