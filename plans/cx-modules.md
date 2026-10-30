@@ -534,3 +534,21 @@ flowchart TD
   diff --> gap["-o 报 undefined function；-run 停在 forwarding increment refused"]
 ```
 
+## 161. 2026-10-30 -o 也走转发，5 格 DIFF 在新候选上 SAME
+
+`-o` 的目标前缀是 `osx/`、`lnx/` 或 `win/` 时，和 `-run` 一样进 `dv_run_lower`。side-car 的 `cnt>0` 时留下 image route，写出桩，保存第一遍帧和属性，第二遍只编桩再按新下标合并属性。`-run` 的桩遍把 mode 改成 0，然后 `hs_forward_exec`。`-o` 不调用 `hs_forward_exec`，把动态映像写进输出文件。对象、tape、`-E`、emitbin、裸 `-S` 不进这条路。
+
+新缓冲走 `src/host.cx` 的 `hs_alloc` / `hs_free`。桩文件用 `cx_write`。比较、拷贝、长度走 `tx_len` / `tx_copy` / `tx_find`。`#pragma unisa use text.text` 只在 `src/drive.cx`。`src/text` 是指向 `../cx/text` 的符号链接。`src/driveroute.cx` 不 use 这个模块，只在函数里声明 `tx_*`，符号由 `drive.o` 提供。`tests/cxraw.cx --check` 退出 0：655 个 `.cx`，22411 次调用，基线 22684，超过基线的是 0。`src/drive.cx` 仍是基线 79。`src/driveroute.cx` 是 22，基线 24。基线文件没有改。
+
+当前候选不是 33 只对象全重编。`out/grk-entry-build-14` 里新的是 `drive.o`（569096 字节，sha256 `472e19165498c4ebcb1248b1f5760ba57334e6c92c8c04c02b121dab15c638c4`）、`host.o`（378000 字节，sha256 `1950ad2f3e242659a15e2e9bd08532c12dbd8b54e1604c9e56cca3542cf6e274`）、`driveroute.o`（554296 字节，sha256 `0cf0cb3377c937f3cfc221291a21fa4fc4dc58b3d96865c87883c2342eda21c9`）。其余对象来自 `out/grk-entry-build-13`。已装产品链接出 `entry.elf` 1015920 字节，sha256 `fec29b44a9cfaae262d1c4d82a886cfd285ec3844150078c2d86f4ff3b1d8109`，再接 build-14 里原来的 P3（1636020 字节，首字节 `P`）。候选 2651940 字节，sha256 `0989b4fdda853103b1f2a45e991654ca1b17d6e9b424d5b53192d989f4679c13`，权限 0755。已装产品没换。
+
+检查器 `tools/check-cx-entry.cx`，表是 `out/grk-cxe-fwd-02/cx-entry-matrix-2026-10-30.tsv`。进度文件是 92 和 148。从格 92 到表尾 56 行全是 SAME，没有 DIFF，没有 TIMEOUT。最后一次调用 stdout 以这些 SAME 结尾，然后 `LEFT:0`，退出 0。格 0–91 没有在这只二进制上重跑，不能把 build-13 的 143 SAME 挪到这个 sha 上。
+
+原来的 5 格：
+
+`dev-run.cx -run` `lnx/x86_64`：两边退出 2，stdout 0，stderr 81 字节。产品墙钟 97414015 ns，候选 12003250594 ns。
+
+四个 unix `-o` 两边退出 0，stderr 0，权限 755。映像字节两边相同：`lnx/x86_64` 272197，`lnx/arm64` 340985，`osx/x86_64` 280930，`osx/arm64` 363490。
+
+两个 Windows `-o` 两边退出 1，stderr 2770 字节，没有映像。`dup.c -run` 两边退出 3。后面 48 个产品面也是 SAME。这些墙钟没有单独证明窗口是空的。已装产品没换。bound 没有加长。run-cache 还没做。
+

@@ -1,4 +1,5 @@
 #pragma unisa module drive
+#pragma unisa use text.text
 /* Layouts match cx/driver/cli.cx, compat.cx, and route.cx. Those modules
    are other objects; this file only names their functions. */
 typedef struct {
@@ -478,6 +479,396 @@ static const char *dv_dl_key[4] = {
 static char **dv_runargs;
 /* One byte 1. The product publishes this for \0cli/object and \0cli/funit. */
 static unsigned char dv_one = 1;
+/* First-pass unit frames and their attribute table. The restart splices
+   the stub unit in and retargets the records; it does not compile the
+   original units again. */
+static unsigned char *dv_hold_fr;
+static long dv_hold_frn;
+static unsigned char *dv_hold_at;
+static long dv_hold_atn;
+
+static void dv_move(unsigned char *d, const unsigned char *s, long n) {
+    long i;
+    if (!d || !s || n <= 0) return;
+    i = 0;
+    while (i < n) {
+        d[i] = s[i];
+        i = i + 1;
+    }
+}
+
+static void dv_hold_drop(void) {
+    void hs_free(void *);
+    hs_free(dv_hold_fr);
+    hs_free(dv_hold_at);
+    dv_hold_fr = 0;
+    dv_hold_frn = 0;
+    dv_hold_at = 0;
+    dv_hold_atn = 0;
+}
+
+static void dv_why(char *why, int cap, const char *s) {
+    long tx_len(const char *, long);
+    int tx_copy(char *, long, const char *, long);
+    long n;
+    if (!why || cap <= 0) return;
+    n = tx_len(s, (long)cap);
+    if (n < 0 || tx_copy(why, (long)cap, s, n)) why[0] = 0;
+}
+
+static long dv_rd32(const unsigned char *p) {
+    return (long)((unsigned)p[0] | ((unsigned)p[1] << 8) |
+                  ((unsigned)p[2] << 16) | ((unsigned)p[3] << 24));
+}
+
+static void dv_recs_free(unsigned char **recs, int *rcnt, int *fill, int nu) {
+    void hs_free(void *);
+    int i;
+    if (recs) {
+        i = 0;
+        while (i < nu) {
+            hs_free(recs[i]);
+            i = i + 1;
+        }
+    }
+    hs_free(recs);
+    hs_free(rcnt);
+    hs_free(fill);
+}
+
+/* Copy the framed units and the attribute table from before e3. */
+static int dv_fwd_keep(const unsigned char *fr, long frn) {
+    unsigned char *ab;
+    unsigned char *cp;
+    unsigned char *fp;
+    long an;
+    long ac;
+    long saved;
+    int st_attr_exchange(unsigned char **, long *, long *);
+    void *hs_alloc(long);
+    void hs_free(void *);
+    ab = 0;
+    an = 0;
+    ac = 0;
+    dv_hold_drop();
+    if (!fr || frn <= 0) return 1;
+    if (st_attr_exchange(&ab, &an, &ac)) return 1;
+    saved = an;
+    cp = 0;
+    if (saved > 0) {
+        cp = hs_alloc(saved);
+        if (!cp) {
+            st_attr_exchange(&ab, &an, &ac);
+            return 1;
+        }
+        dv_move(cp, ab, saved);
+    }
+    if (st_attr_exchange(&ab, &an, &ac)) {
+        hs_free(cp);
+        return 1;
+    }
+    fp = hs_alloc(frn);
+    if (!fp) {
+        hs_free(cp);
+        return 1;
+    }
+    dv_move(fp, fr, frn);
+    dv_hold_fr = fp;
+    dv_hold_frn = frn;
+    dv_hold_at = cp;
+    dv_hold_atn = saved;
+    return 0;
+}
+
+/* One unit route compile, wrapped as a frame chunk: length, name, bytes. */
+static int dv_compile_frame(const char *tgt, const char *file, unsigned unit,
+                            unsigned char **out, long *outn, char *why, int cap) {
+    char uroute[96];
+    char reason[128];
+    char line[512];
+    unsigned char *cur;
+    unsigned char *next;
+    unsigned char *chunk;
+    long srcn;
+    long nextn;
+    long framed;
+    int namelen;
+    int pr;
+    int act;
+    int k;
+    int cxi_read(const char *, unsigned char **, long *, char *, long);
+    int bx_read_act(int);
+    int bx_read_open_line(const char *, const char *, char *, int);
+    int bx_read_stdin(const char *);
+    int bx_read_fail_line(const char *, char *, int);
+    const char *bx_read_die(int);
+    int st_span(const char *, const char *, const char *, int, unsigned, const char *, const char *, unsigned char *, long, unsigned char **, long *, char *, int);
+    void *hs_alloc(long);
+    void hs_free(void *);
+    *out = 0;
+    *outn = 0;
+    if (dv_unit_route(uroute, 96, tgt)) {
+        dv_why(why, cap, "unit route");
+        return 1;
+    }
+    cur = 0;
+    srcn = 0;
+    pr = cxi_read(file, &cur, &srcn, reason, 128);
+    act = bx_read_act(pr);
+    if (act) {
+        hs_free(cur);
+        if (act == 1) {
+            if (bx_read_open_line(file, reason, line, 512) == 0) fputs(line, stderr);
+            else fprintf(stderr, "unisacc: error: cannot open %s%s%s\n", file, reason[0] ? ": " : "", reason);
+        } else if (act == 2) {
+            const char *shown_in;
+            shown_in = bx_read_stdin(file) == 1 ? "stdin" : file;
+            if (bx_read_fail_line(shown_in, line, 512) == 0) fputs(line, stderr);
+            else fprintf(stderr, "run: cannot read %s\n", shown_in);
+            fputs("run: cannot read input\n", stderr);
+        } else fprintf(stderr, "run: %s\n", bx_read_die(act));
+        return 5;
+    }
+    next = 0;
+    nextn = 0;
+    pr = st_span(uroute, tgt, file, dv_cx(file), unit, 0, 0, cur, srcn, &next, &nextn, why, cap);
+    if (pr) return pr == 4 ? 1 : pr;
+    namelen = dv_len(file);
+    if (namelen < 0 || nextn < 0 || nextn > 2147483647L - 8 - namelen) {
+        hs_free(next);
+        dv_why(why, cap, "forwarding stub");
+        return 1;
+    }
+    framed = nextn + 4 + namelen;
+    chunk = hs_alloc(4 + framed);
+    if (!chunk) {
+        hs_free(next);
+        dv_why(why, cap, "out of memory");
+        return 1;
+    }
+    dv_le(chunk, 0, framed);
+    dv_le(chunk, 4, (long)namelen);
+    k = 0;
+    while (k < namelen) {
+        chunk[8 + k] = (unsigned char)file[k];
+        k = k + 1;
+    }
+    if (nextn) dv_move(chunk + 8 + namelen, next, nextn);
+    hs_free(next);
+    *out = chunk;
+    *outn = 4 + framed;
+    return 0;
+}
+
+/* Rebuild the attribute table in restart order and splice the stub frame
+   after the first unit. ccw is published before the stub compile. */
+static int dv_fwd_splice(const char *tgt, int nsrc, unsigned char **out, long *outn, char *why, int cap) {
+    int nu;
+    int i;
+    int u;
+    int pr;
+    int *rcnt;
+    int *fill;
+    unsigned char **recs;
+    unsigned char *ab;
+    unsigned char *stub;
+    unsigned char *joined;
+    long count;
+    long an;
+    long ac;
+    long head;
+    long stubn;
+    long total;
+    int st_attr_reset(void);
+    int st_attr_exchange(unsigned char **, long *, long *);
+    int st_extra_put(const char *, int, const unsigned char *, int);
+    int cxaf_merge(unsigned char **, long *, long *, const unsigned char *, long, unsigned, void *(*)(void *, size_t));
+    int fwd_ccw_on(void);
+    void *hs_alloc(long);
+    void hs_free(void *);
+    *out = 0;
+    *outn = 0;
+    nu = nsrc - 1;
+    if (!dv_hold_fr || dv_hold_frn < 8 || nu < 1 || nu > 63) {
+        dv_why(why, cap, "forwarding stub");
+        dv_hold_drop();
+        return 1;
+    }
+    head = 4 + dv_rd32(dv_hold_fr);
+    if (head < 8 || head > dv_hold_frn) {
+        dv_why(why, cap, "forwarding stub");
+        dv_hold_drop();
+        return 1;
+    }
+    count = 0;
+    if (dv_hold_atn) {
+        if (dv_hold_atn < 4 || !dv_hold_at) {
+            dv_why(why, cap, "cli");
+            dv_hold_drop();
+            return 1;
+        }
+        count = dv_rd32(dv_hold_at);
+        if (count < 0 || count > 1000000L || 4 + 9 * count != dv_hold_atn) {
+            dv_why(why, cap, "cli");
+            dv_hold_drop();
+            return 1;
+        }
+    }
+    rcnt = hs_alloc((long)nu * (long)sizeof(int));
+    fill = hs_alloc((long)nu * (long)sizeof(int));
+    recs = hs_alloc((long)nu * (long)sizeof(unsigned char *));
+    if (!rcnt || !fill || !recs) {
+        hs_free(rcnt);
+        hs_free(fill);
+        hs_free(recs);
+        dv_why(why, cap, "out of memory");
+        dv_hold_drop();
+        return 1;
+    }
+    i = 0;
+    while (i < nu) {
+        rcnt[i] = 0;
+        fill[i] = 0;
+        recs[i] = 0;
+        i = i + 1;
+    }
+    i = 0;
+    while (i < count) {
+        long uidx;
+        uidx = dv_rd32(dv_hold_at + 4 + 9 * i);
+        if (uidx < 0 || uidx >= nu) {
+            dv_recs_free(recs, rcnt, fill, nu);
+            dv_why(why, cap, "cli");
+            dv_hold_drop();
+            return 1;
+        }
+        rcnt[uidx] = rcnt[uidx] + 1;
+        i = i + 1;
+    }
+    i = 0;
+    while (i < nu) {
+        if (rcnt[i] > 0) {
+            recs[i] = hs_alloc((long)rcnt[i] * 5);
+            if (!recs[i]) {
+                dv_recs_free(recs, rcnt, fill, nu);
+                dv_why(why, cap, "out of memory");
+                dv_hold_drop();
+                return 1;
+            }
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < count) {
+        const unsigned char *rec;
+        long uidx;
+        rec = dv_hold_at + 4 + 9 * i;
+        uidx = dv_rd32(rec);
+        dv_move(recs[uidx] + 5L * fill[uidx], rec + 4, 5);
+        fill[uidx] = fill[uidx] + 1;
+        i = i + 1;
+    }
+    if (st_attr_reset()) {
+        dv_recs_free(recs, rcnt, fill, nu);
+        dv_why(why, cap, "cli");
+        dv_hold_drop();
+        return 1;
+    }
+    ab = 0;
+    an = 0;
+    ac = 0;
+    if (rcnt[0] > 0) {
+        pr = cxaf_merge(&ab, &an, &ac, recs[0], (long)rcnt[0], 0, realloc);
+        if (pr != 1) {
+            hs_free(ab);
+            dv_recs_free(recs, rcnt, fill, nu);
+            dv_why(why, cap, "cli");
+            dv_hold_drop();
+            return 1;
+        }
+    }
+    if (st_attr_exchange(&ab, &an, &ac)) {
+        hs_free(ab);
+        dv_recs_free(recs, rcnt, fill, nu);
+        dv_why(why, cap, "cli");
+        dv_hold_drop();
+        return 1;
+    }
+    if (fwd_ccw_on() && st_extra_put("\0cli/ccw", 8, &dv_one, 1)) {
+        dv_recs_free(recs, rcnt, fill, nu);
+        dv_why(why, cap, "cli");
+        dv_hold_drop();
+        return 1;
+    }
+    stub = 0;
+    stubn = 0;
+    pr = dv_compile_frame(tgt, dv_srcv[1], 1, &stub, &stubn, why, cap);
+    if (pr) {
+        dv_recs_free(recs, rcnt, fill, nu);
+        dv_hold_drop();
+        return pr;
+    }
+    ab = 0;
+    an = 0;
+    ac = 0;
+    if (st_attr_exchange(&ab, &an, &ac)) {
+        hs_free(stub);
+        dv_recs_free(recs, rcnt, fill, nu);
+        dv_why(why, cap, "cli");
+        dv_hold_drop();
+        return 1;
+    }
+    u = 1;
+    while (u < nu) {
+        if (rcnt[u] > 0) {
+            pr = cxaf_merge(&ab, &an, &ac, recs[u], (long)rcnt[u], (unsigned)(u + 1), realloc);
+            if (pr != 1) {
+                hs_free(ab);
+                hs_free(stub);
+                dv_recs_free(recs, rcnt, fill, nu);
+                dv_why(why, cap, "cli");
+                dv_hold_drop();
+                return 1;
+            }
+        }
+        u = u + 1;
+    }
+    if (st_attr_exchange(&ab, &an, &ac)) {
+        hs_free(ab);
+        hs_free(stub);
+        dv_recs_free(recs, rcnt, fill, nu);
+        dv_why(why, cap, "cli");
+        dv_hold_drop();
+        return 1;
+    }
+    if (stubn > 2147483647L - dv_hold_frn) {
+        hs_free(stub);
+        dv_recs_free(recs, rcnt, fill, nu);
+        dv_why(why, cap, "forwarding stub");
+        dv_hold_drop();
+        return 1;
+    }
+    total = dv_hold_frn + stubn;
+    joined = hs_alloc(total);
+    if (!joined) {
+        hs_free(stub);
+        dv_recs_free(recs, rcnt, fill, nu);
+        dv_why(why, cap, "out of memory");
+        dv_hold_drop();
+        return 1;
+    }
+    dv_move(joined, dv_hold_fr, head);
+    dv_move(joined + head, stub, stubn);
+    if (dv_hold_frn > head)
+        dv_move(joined + head + stubn, dv_hold_fr + head, dv_hold_frn - head);
+    hs_free(stub);
+    dv_recs_free(recs, rcnt, fill, nu);
+    dv_hold_drop();
+    *out = joined;
+    *outn = total;
+    return 0;
+}
+
 /* Tape bytes emitted by tapelink. Handed to the caller on success. */
 static unsigned char *dv_linkb;
 static long dv_linkn;
@@ -874,6 +1265,8 @@ int dv_main(int argc, char **argv) {
     int kind;
     int nsrc;
     int argstart;
+    int dv_fwd_pass;
+    int dv_fwd_exec;
     char cont[512];
     char gap[32];
     char preason[128];
@@ -888,6 +1281,10 @@ int dv_main(int argc, char **argv) {
     int dv_as(int, char **);
     int dv_view(int, char **);
     int dv_run_lower(const char *, const char *, const char *, int, int, int, unsigned char *, long, unsigned char **, long *, char *, int, int *);
+    int dv_fwd_replay(void);
+    const char *dv_fwd_file(void);
+    void hs_free(void *);
+    int fwd_ccw_on(void);
     char **fwd_lib_slot(void);
     int *fwd_lib_count(void);
     int cxm_flag(char *);
@@ -1042,6 +1439,8 @@ int dv_main(int argc, char **argv) {
     shown = opts.out;
     gotb = 0;
     gotn = 0;
+    dv_fwd_pass = 0;
+    dv_fwd_exec = 0;
     pkg = 0;
     pkgn = 0;
     {
@@ -1057,12 +1456,14 @@ int dv_main(int argc, char **argv) {
         int obj;
         int asmw;
         int as_tape;
+        int image_fwd;
         int rc;
         mode2 = opts.mode;
         need = 0;
         obj = 0;
         asmw = 0;
         as_tape = 0;
+        image_fwd = 0;
         rc = cxt_object(opts.mode, opts.sawc, opts.sawS, opts.funit, opts.target, opts.out, cxp_object_path(src), &mode2, &need, &obj, &asmw, why2, 512);
         if (rc == 4) {
             fputs(why2, stderr);
@@ -1116,6 +1517,13 @@ int dv_main(int argc, char **argv) {
             return dv_fail("bind: --emit-host-symbols cannot be used with -run or stdout");
         rc = cxt_text(tgt, mode2, nsrc, opts.warnings, opts.level, route, 96, why2, 512);
         if (rc) return dv_fail(why2);
+        /* osx, lnx, and win images forward host calls. Objects, tapes, and
+           -E never reach this with mode 0. The second pass keeps the stub. */
+        if (mode2 == 0 && !as_tape && !opts.emitbin && tgt && !cxp_tape_path(src) &&
+            ((tgt[0] == 'o' && tgt[1] == 's' && tgt[2] == 'x' && tgt[3] == '/') ||
+             (tgt[0] == 'l' && tgt[1] == 'n' && tgt[2] == 'x' && tgt[3] == '/') ||
+             (tgt[0] == 'w' && tgt[1] == 'i' && tgt[2] == 'n' && tgt[3] == '/')))
+            image_fwd = 1;
         if (need) {
             rc = cxd_default_target(src, objname, 520, why2, 512);
             if (rc) return dv_fail(why2);
@@ -1330,6 +1738,18 @@ int dv_main(int argc, char **argv) {
         }
         st_attr_reset();
         st_extra_reset();
+        /* -c -funit is a unit object. Without these resources e3 reports
+           every call defined in another unit as an undefined function.
+           These stay under the process slots; a replay does not push them again. */
+        if ((obj && st_extra_put("\0cli/object", 11, &dv_one, 1)) ||
+            (opts.funit && st_extra_put("\0cli/funit", 10, &dv_one, 1))) {
+            pm_close();
+            free(pkg);
+            free(gotb);
+            fputs("unisacc: model driver: cli\n", stderr);
+            return 1;
+        }
+dv_replay:
         if (mode2 == 3 && nsrc >= 1) {
             if (dv_bind_args(argc, argv, argstart, src) ||
                 st_extra_put("\0process/argc", 13, dv_argc_b, 8) ||
@@ -1339,13 +1759,12 @@ int dv_main(int argc, char **argv) {
                 return 1;
             }
         }
-        /* -c -funit is a unit object. Without these resources e3 reports
-           every call defined in another unit as an undefined function. */
-        if ((obj && st_extra_put("\0cli/object", 11, &dv_one, 1)) ||
-            (opts.funit && st_extra_put("\0cli/funit", 10, &dv_one, 1))) {
+        /* Single-source restart compiles every unit with ccw already published.
+           A multi-source restart does not come back here. */
+        if (dv_fwd_pass && fwd_ccw_on() && st_extra_put("\0cli/ccw", 8, &dv_one, 1)) {
             pm_close();
-            free(pkg);
-            free(gotb);
+            hs_free(pkg);
+            hs_free(gotb);
             fputs("unisacc: model driver: cli\n", stderr);
             return 1;
         }
@@ -1389,14 +1808,25 @@ int dv_main(int argc, char **argv) {
             long bodyn;
             int pr;
             int execf;
+            int lowered;
             const char *dest;
             int wr;
             body = 0;
             bodyn = 0;
             execf = 0;
-            if (mode2 == 3)
+            lowered = 0;
+            if ((mode2 == 3 || image_fwd) && !dv_fwd_pass) {
+                if (nsrc > 1 && gotb && gotn > 0 && dv_fwd_keep(gotb, gotn)) {
+                    pm_close();
+                    hs_free(pkg);
+                    hs_free(gotb);
+                    fputs("unisacc: model driver: cli\n", stderr);
+                    return 1;
+                }
+                lowered = 1;
                 pr = dv_run_lower(route, tgt, src, dv_cx(src), opts.level, nsrc,
                                   gotb, gotn, &body, &bodyn, preason, 128, &execf);
+            }
             else if (as_tape || cxp_tape_path(src)) {
                 unsigned char *mid;
                 long midn;
@@ -1415,6 +1845,50 @@ int dv_main(int argc, char **argv) {
                 }
             } else
                 pr = st_span(route, tgt, src, dv_cx(src), 0, 0, 0, gotb, gotn, &body, &bodyn, preason, 128);
+            if (lowered && !pr && dv_fwd_replay()) {
+                const char *stub;
+                int k;
+                stub = dv_fwd_file();
+                /* The e3 span already freed the input. The stub is inserted
+                   after the first source, which is where the restart puts it. */
+                gotb = 0;
+                gotn = 0;
+                if (!stub || nsrc >= 64) {
+                    dv_hold_drop();
+                    pm_close();
+                    hs_free(pkg);
+                    fputs("unisacc: model driver: forwarding stub\n", stderr);
+                    return 1;
+                }
+                k = nsrc;
+                while (k > 1) {
+                    dv_srcv[k] = dv_srcv[k - 1];
+                    k = k - 1;
+                }
+                dv_srcv[1] = stub;
+                nsrc = nsrc + 1;
+                dv_fwd_pass = 1;
+                /* -run's restart is an image, then forward_exec. -o stays an image write. */
+                if (mode2 == 3) {
+                    dv_fwd_exec = 1;
+                    mode2 = 0;
+                    runit2 = 0;
+                }
+                rc = cxt_text(tgt, mode2, nsrc, opts.warnings, opts.level, route, 96, why2, 512);
+                if (rc) {
+                    dv_hold_drop();
+                    pm_close();
+                    hs_free(pkg);
+                    return dv_fail(why2);
+                }
+                if (dv_hold_fr) {
+                    pr = dv_fwd_splice(tgt, nsrc, &gotb, &gotn, preason, 128);
+                    if (!pr)
+                        pr = st_span(route, tgt, src, dv_cx(src), 0, 0, 0, gotb, gotn, &body, &bodyn, preason, 128);
+                } else
+                    goto dv_replay;
+            } else
+                dv_hold_drop();
             if (pr == 3) {
                 pm_close();
                 free(pkg);
@@ -1431,6 +1905,14 @@ int dv_main(int argc, char **argv) {
                 }
                 fprintf(stderr, "unisacc: model driver: %s\n", preason);
                 return pr == 2 ? 2 : 1;
+            }
+            if (dv_fwd_exec) {
+                int code;
+                code = hs_forward_exec(body, bodyn, dv_runargs);
+                pm_close();
+                hs_free(pkg);
+                hs_free(body);
+                return code;
             }
             if (mode2 == 3 && nsrc >= 1) {
                 if (execf) {

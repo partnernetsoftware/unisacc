@@ -1,9 +1,12 @@
 /* Forward lowering. src/unisacc.cx does not use this file.
    drive.cx calls dv_run_lower by name. cxmod, tapegate, and the forward
    modules stay in this object. Stage spans stay in drive.o and are named
-   inside the functions that call them. A side-car with cnt>0 rewrites the
-   run route to the image route, drops the process slots, and tells the
-   caller to hs_forward_exec the dynamic ELF. cnt==0 stays on the run route. */
+   inside the functions that call them. A side-car with cnt>0 stays on an
+   image route (a run route is rewritten onto one) and drops process slots
+   when they were pushed. The merged ELF is returned for -run to exec.
+   When the increment is refused, the stub is written and dv_fwd_replay()
+   is 1 so the caller can compile that file as the next unit. cnt==0 stays
+   on the caller's route. */
 #pragma unisa module driveroute
 #pragma unisa use compiler.fwdsig
 #pragma unisa use compiler.fwdmerge
@@ -13,13 +16,23 @@ static const char *dv_fw_tgt;
 static char dv_fw_why[128];
 static unsigned char dv_funit_one = 1;
 static char dv_fwd_path[] = "/tmp/unisacc-forward-entry.c";
+static int dv_fwd_again;
+
+int dv_fwd_replay(void) {
+    return dv_fwd_again;
+}
+
+const char *dv_fwd_file(void) {
+    return dv_fwd_path;
+}
 
 static void dv_setwhy(char *why, int cap, const char *s) {
-    int i;
+    long tx_len(const char *, long);
+    int tx_copy(char *, long, const char *, long);
+    long n;
     if (!why || cap <= 0) return;
-    i = 0;
-    if (s) while (s[i] && i + 1 < cap) { why[i] = s[i]; i = i + 1; }
-    why[i] = 0;
+    n = tx_len(s, (long)cap);
+    if (n < 0 || tx_copy(why, (long)cap, s, n)) why[0] = 0;
 }
 
 static int dv_fw_replay(void) {
@@ -255,51 +268,66 @@ static int dv_fwd_merge(const char *route, const char *tgt, const char *src, int
         dv_setwhy(why, cap, dv_fw_why[0] ? dv_fw_why : "forwarding stub");
         return 1;
     }
-    dv_setwhy(why, cap, "forwarding increment refused");
-    return 1;
+    {
+        char *text;
+        int n;
+        text = fwd_text();
+        n = fwd_count();
+        if (!text || n <= 0) {
+            dv_setwhy(why, cap, "forwarding stub");
+            return 1;
+        }
+        if (cx_write(dv_fwd_path, text, (size_t)n)) {
+            dv_setwhy(why, cap, "forwarding stub");
+            return 1;
+        }
+        dv_fwd_again = 1;
+        return 0;
+    }
 }
 
-/* "/run/" becomes "/image/". "image" is two bytes longer than "run". */
+static int dv_has(const char *s, const char *lit) {
+    long tx_len(const char *, long);
+    long tx_find(const char *, long, const char *, long);
+    long sn;
+    long ln;
+    if (!s || !lit) return 0;
+    sn = tx_len(s, 4096);
+    ln = tx_len(lit, 64);
+    if (sn < 0 || ln < 0) return 0;
+    return tx_find(s, sn, lit, ln) >= 0;
+}
+
+static int dv_copy_route(const char *route, char *dst, int cap) {
+    long tx_len(const char *, long);
+    int tx_copy(char *, long, const char *, long);
+    long n;
+    if (!route || !dst || cap < 2) return 1;
+    n = tx_len(route, (long)cap);
+    if (n < 0) return 1;
+    return tx_copy(dst, (long)cap, route, n);
+}
+
+/* An image route is already the one we want. "/run/" becomes "/image/".
+   "image" is two bytes longer than "run". The slash after "run" stays. */
 static int dv_image_route(const char *route, char *dst, int cap) {
-    int i;
-    int n;
-    int at;
-    const char *ins;
+    long tx_len(const char *, long);
+    long tx_find(const char *, long, const char *, long);
+    int tx_copy(char *, long, const char *, long);
+    long n;
+    long at;
+    long tail;
     if (!route || !dst || cap < 8) return 1;
-    n = 0;
-    while (route[n]) n = n + 1;
-    at = -1;
-    i = 0;
-    while (i + 5 <= n) {
-        if (route[i] == '/' && route[i + 1] == 'r' && route[i + 2] == 'u' && route[i + 3] == 'n' && route[i + 4] == '/') {
-            at = i;
-            break;
-        }
-        i = i + 1;
-    }
+    n = tx_len(route, 4096);
+    if (n < 0) return 1;
+    if (dv_has(route, "/image/")) return dv_copy_route(route, dst, cap);
+    at = tx_find(route, n, "/run/", 5);
     if (at < 0) return 1;
-    i = 0;
-    while (i < at) {
-        if (i + 1 >= cap) return 1;
-        dst[i] = route[i];
-        i = i + 1;
-    }
-    ins = "/image";
-    n = 0;
-    while (ins[n]) {
-        if (i + 1 >= cap) return 1;
-        dst[i] = ins[n];
-        i = i + 1;
-        n = n + 1;
-    }
-    n = at + 4;
-    while (route[n]) {
-        if (i + 1 >= cap) return 1;
-        dst[i] = route[n];
-        i = i + 1;
-        n = n + 1;
-    }
-    dst[i] = 0;
+    tail = n - (at + 4);
+    if (at + 6 + tail + 1 > (long)cap) return 1;
+    if (tx_copy(dst, (long)cap, route, at)) return 1;
+    if (tx_copy(dst + at, (long)cap - at, "/image", 6)) return 1;
+    if (tx_copy(dst + at + 6, (long)cap - at - 6, route + at + 4, tail)) return 1;
     return 0;
 }
 
@@ -320,6 +348,7 @@ int dv_run_lower(const char *route, const char *tgt, const char *src, int cx,
     int st_extra_put(const char *, int, const unsigned char *, int);
     int st_extra_pop(void);
     int st_span(const char *, const char *, const char *, int, unsigned, const char *, const char *, unsigned char *, long, unsigned char **, long *, char *, int);
+    dv_fwd_again = 0;
     if (execf) *execf = 0;
     if (!out || !outn) {
         free(in);
@@ -370,12 +399,9 @@ int dv_run_lower(const char *route, const char *tgt, const char *src, int cx,
         dv_setwhy(why, cap, "image route");
         return 1;
     }
-    if (st_extra_pop() || st_extra_pop()) {
-        free(tape);
-        free(e3);
-        dv_setwhy(why, cap, "cli");
-        return 1;
-    }
+    /* -run pushed argc and argv. -o pushed neither. An empty stack is not
+       a failure; a present pair is dropped so the image has no process slots. */
+    if (st_extra_pop() == 0) (void)st_extra_pop();
     if (dv_fwd_stub(e3, n, at, cnt, ccwc, tgt, why, cap)) {
         free(tape);
         free(e3);
@@ -383,6 +409,7 @@ int dv_run_lower(const char *route, const char *tgt, const char *src, int cx,
     }
     free(e3);
     pr = dv_fwd_merge(img, tgt, src, cx, level, nsrc, tape, (long)tl, out, outn, why, cap);
+    if (dv_fwd_again) return pr;
     if (!pr && execf) *execf = 1;
     return pr;
 }
