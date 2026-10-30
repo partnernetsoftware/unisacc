@@ -26,6 +26,8 @@ GEN 的工具换成下面的新入口构造。现在的 `product-build.cx` 不�
 - 头怎么进包：`tools/cxlib/sourcepackage.cx`、`tools/source-package-pack.cx`、`tools/source-package-mixed.cx` 把 `root/include` 整棵记成 `CARRIED_HEADERS`。下一次正规包刷新把现在的 `include/`（含 `cx-flat.h`，以及 `__UNISA__` 下改读它的 `cx.h`）打进 `\0hdr/`。
 - 做完要核，这次没做：新包里 `\0hdr/` 下的 `cx-flat.h` 与树里 `include/cx-flat.h` 逐字节相同；工作目录不在仓库根的空 main，e2 不再是 1.6 s 那一档。没跑之前不能记通过。
 - 这只新包才是 wrap 的 `--payload`。build-14 的 `pkg.bin`（sha256 `b976719e…`）不能再接上去。
+- 包刷新现在起不来，这一步要先改 `tools/package-refresh.cx`，这次不改代码。第 29 行 `equal_file` 看见相对路径 `exec/c/core.c` 就走 `cc_kind` 特判；第 35 行 `compare_sources` 末尾还调用 `equal_file("exec/c/core.h",1)` 和 `equal_file("exec/c/core.c",1)`。活路径上没有 `exec/c/core.c`（副本在 `archive/reference-c/exec/c/core.c`），刷新读到它就会停。
+- 同一步还要重写 `kernel/`，这次不执行、也不跑 `--check`。2026-10-30 核对文件头：41 个生成文件里 40 个仍写 `` `python3 -m unisa emit-kernel` writes this ``；`kernel/unisa_headers.inc` 第 1 行是 `carried-header-export-v1`，安装它的是 `tools/carried-header-export.cx`。`tools/kernel-emit.cx` 从 `18e2d9984d` 起，新写出的头改成 `` `tools/kernel-emit.cx --write` writes this ``，并且它也写 `unisa_headers.inc`。两个工具都在写这一个文件，先定只由哪个写。然后 `sh ./unisacc.com tools/kernel-emit.cx -- --write . kernel`，`--check` 报 41/41 SAME 之后才刷新包。`plans/python-residue-2026-10-30.md` 第 9 行记过当时的 `--check` 是 41/41 DIFF；本段没有重跑。`kernel/` 一改，包身份就变。
 
 ### 2. 新入口版的 product-build
 
