@@ -1,0 +1,116 @@
+/* tools/register.cx -- register a check program as a test batch, validate the registry, run it once.
+ *
+ *   sh ./unisacc.com tools/register.cx -- ID CHECK.cx MARKER "COVERAGE TEXT" "FILES" [LAYER]
+ *
+ * Appends one SOURCE batch row to tests/batches.tsv
+ *   ID IMPLEMENTED LAYER CHECK SOURCE lnx/x86_64 55 - CHECK - LAYER.ID rc0:MARKER
+ * and one coverage row to tests/coverage.tsv
+ *   LAYER.ID LAYER IMPLEMENTED_SEPARATE_BATCH COVERAGE-TEXT FILES
+ * (LAYER defaults to interfaces), then runs tests/run.cx --list (metadata_valid=1 required) and
+ * tests/run-batch.cx for ID into out/register-ID-PID/.  On any refusal or failure exactly the two appended
+ * lines are taken out again (other lines, even ones appended meanwhile, stay) and the exit is 1; an ID that
+ * is already registered, a missing CHECK, or a TAB or newline in a field is refused before anything is
+ * written (exit 2).  Prints the BATCH_RUN line and REGISTER<TAB>id=..<TAB>status=REGISTERED|ROLLED_BACK.
+ * The six manual steps (two appends, --list, mkdir, run-batch, read the result) as one call. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+
+static void rg_die(const char *a, const char *b) { fprintf(stderr, "register: %s%s%s\n", a, b ? ": " : "", b ? b : ""); exit(2); }
+
+static int clean(const char *s) { for (; *s; s++) if (*s == '\t' || *s == '\n' || *s == '\r') return 0; return 1; }
+
+/* 1 when a line of the file starts with KEY followed by a TAB */
+static int has_key(const char *path, const char *key) {
+    size_t n; char *b = cx_read(path, &n); long at = 0, kl = tx_len(key, 256);
+    if (!b) rg_die("cannot read", path);
+    while (at < (long)n) {
+        long e = tx_chr(b + at, (long)n - at, '\n'), ln = e < 0 ? (long)n - at : e;
+        if (ln > kl && tx_prefix(b + at, ln, key, kl) && b[at + kl] == '\t') return 1;
+        at += ln + 1;
+    }
+    return 0;
+}
+
+static int append(const char *path, const char *line) {
+    int fd = sy_open(path, O_WRONLY | O_APPEND, 0), bad;
+    if (fd < 0) return 1;
+    bad = sy_write_all(fd, line, tx_len(line, 1 << 16)) != 0;
+    return sy_close(fd) != 0 || bad;
+}
+
+/* rewrite PATH without the one line equal to LINE (which ends in \n); 0 when it was found and removed */
+static int take_out(const char *path, const char *line) {
+    size_t n; char *b = cx_read(path, &n); long at = 0, ll = tx_len(line, 1 << 16);
+    if (!b) return 1;
+    while (at < (long)n) {
+        long e = tx_chr(b + at, (long)n - at, '\n'), ln = e < 0 ? (long)n - at : e + 1;
+        if (ln == ll && tx_same(b + at, ln, line, ll)) {
+            int fd = sy_open(path, O_WRONLY | O_TRUNC, 0), bad;
+            if (fd < 0) return 1;
+            bad = sy_write_all(fd, b, at) != 0 || sy_write_all(fd, b + at + ln, (long)n - at - ln) != 0;
+            return sy_close(fd) != 0 || bad;
+        }
+        at += ln;
+    }
+    return 1;
+}
+
+/* run ARGV, the LAST cap-1 bytes of stdout+stderr into OUT (terminated): the summaries come last; exit code or -1 */
+static int run(char **argv, char *out, long cap) {
+    int ofd, pid, ex = 0, code = 0, sig = 0; long n = 0, r, k, half = (cap - 1) / 2;
+    pid = sy_spawn_pipe(argv, 0, 0, &ofd, 0);
+    if (pid < 0) return -1;
+    for (;;) {
+        if (n == cap - 1) { for (k = 0; k < n - half; k++) out[k] = out[k + half]; n -= half; }
+        r = sy_read(ofd, out + n, cap - 1 - n);
+        if (r <= 0) break;
+        n += r;
+    }
+    out[n] = 0;
+    sy_close(ofd);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
+    return code;
+}
+
+int main(int argc, char **argv) {
+    static char brow[8192], crow[8192], cid[512], root[4096], parent[4400], buf[1 << 16];
+    const char *id, *check, *marker, *text, *files, *layer;
+    int rc, okrun; long at;
+    if (argc != 6 && argc != 7) rg_die("usage", "ID CHECK.cx MARKER \"COVERAGE TEXT\" \"FILES\" [LAYER]");
+    id = argv[1]; check = argv[2]; marker = argv[3]; text = argv[4]; files = argv[5]; layer = argc == 7 ? argv[6] : "interfaces";
+    if (!clean(id) || !clean(check) || !clean(marker) || !clean(text) || !clean(files) || !clean(layer) || !*id || !*marker) rg_die("empty field, TAB or newline in a field", 0);
+    if (!sy_exists(check)) rg_die("no such check", check);
+    if (tx_snprintf(cid, sizeof cid, "%s.%s", layer, id) >= (int)sizeof cid) rg_die("id too long", id);
+    if (has_key("tests/batches.tsv", id)) rg_die("batch already registered", id);
+    if (has_key("tests/coverage.tsv", cid)) rg_die("coverage row already present", cid);
+    if (tx_snprintf(brow, sizeof brow, "%s\tIMPLEMENTED\t%s\t%s\tSOURCE\tlnx/x86_64\t55\t-\t%s\t-\t%s\trc0:%s\n", id, layer, check, check, cid, marker) >= (int)sizeof brow
+        || tx_snprintf(crow, sizeof crow, "%s\t%s\tIMPLEMENTED_SEPARATE_BATCH\t%s\t%s\n", cid, layer, text, files) >= (int)sizeof crow) rg_die("row too long", id);
+    if (append("tests/batches.tsv", brow)) rg_die("cannot append", "tests/batches.tsv");
+    if (append("tests/coverage.tsv", crow)) { take_out("tests/batches.tsv", brow); rg_die("cannot append", "tests/coverage.tsv"); }
+    {   char *v[] = {"./tools/bound", "55", "sh", "./unisacc.com", "tests/run.cx", "--", "--list", 0};
+        rc = run(v, buf, sizeof buf);
+        okrun = tx_find(buf, tx_len(buf, sizeof buf), "metadata_valid=1", 16) >= 0;
+        if (!okrun) printf("LIST\trc=%d\tmetadata_valid!=1\n", rc);
+    }
+    if (okrun) {
+        if (sy_realpath(".", root, sizeof root) < 0 || tx_snprintf(parent, sizeof parent, "%s/out/register-%s-%d", root, id, sy_pid()) >= (int)sizeof parent
+            || sy_mkdir(parent, 0700) != 0) okrun = 0;
+        else {
+            char *v[] = {"./tools/bound", "58", "sh", "./unisacc.com", "tests/run-batch.cx", "--", root, parent, (char *)id, 0};
+            rc = run(v, buf, sizeof buf);
+            at = tx_find(buf, tx_len(buf, sizeof buf), "BATCH_RUN\t", 10);
+            if (at >= 0) { long e = tx_chr(buf + at, tx_len(buf + at, sizeof buf), '\n'); printf("%.*s\n", (int)(e < 0 ? tx_len(buf + at, sizeof buf) : e), buf + at); }
+            okrun = rc == 0 && at >= 0 && tx_find(buf + at, tx_len(buf + at, sizeof buf), "status=PASS", 11) >= 0;
+            if (!okrun) fputs(buf, stderr);
+        }
+    }
+    if (!okrun) {
+        int t1 = take_out("tests/batches.tsv", brow), t2 = take_out("tests/coverage.tsv", crow);
+        printf("REGISTER\tid=%s\tstatus=ROLLED_BACK\trows_removed=%d\n", id, (!t1) + (!t2));
+        return 1;
+    }
+    printf("REGISTER\tid=%s\tstatus=REGISTERED\n", id);
+    return 0;
+}

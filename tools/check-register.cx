@@ -1,0 +1,37 @@
+/* Checks tools/register.cx refusals, which write nothing: sh ./unisacc.com tools/check-register.cx
+   An ID already in tests/batches.tsv, a CHECK that does not exist, an empty MARKER and a TAB inside a field
+   are each refused with exit 2, and tests/batches.tsv and tests/coverage.tsv keep their exact bytes.
+   (The append, --list, run-batch and roll-back path changes the registry, so it is not run here; it was
+   exercised by hand when the tool was written: a failing probe was rolled back byte for byte.)
+   Prints PASS/FAIL lines and CHECK_REGISTER<TAB>failed=N. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+
+static int failed;
+static void ck(int ok, const char *name) { if (!ok) failed++; printf("%s\tregister.%s\n", ok ? "PASS" : "FAIL", name); }
+
+static int reg(char *id, char *check, char *marker, char *text) {
+    char *argv[] = {"sh", "./unisacc.com", "tools/register.cx", "--", id, check, marker, text, "f", 0};
+    int ofd, efd, pid, ex = 0, code = 0, sig = 0; char junk[4096];
+    pid = sy_spawn_pipe(argv, 0, SY_SPAWN_STDERR_SPLIT, &ofd, &efd);
+    if (pid < 0) return -1;
+    while (sy_read(ofd, junk, sizeof junk) > 0) {}
+    while (sy_read(efd, junk, sizeof junk) > 0) {}
+    sy_close(ofd); sy_close(efd);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
+    return code;
+}
+
+int main(void) {
+    size_t bn0, cn0, bn1, cn1;
+    char *b0 = cx_read("tests/batches.tsv", &bn0), *c0 = cx_read("tests/coverage.tsv", &cn0), *b1, *c1;
+    ck(reg("refactor-tool", "tools/check-refactor.cx", "CHECK_REFACTOR", "t") == 2, "existing-id-refused");
+    ck(reg("register-probe-x", "tools/no-such-check.cx", "X", "t") == 2, "missing-check-refused");
+    ck(reg("register-probe-x", "tools/check-register.cx", "", "t") == 2, "empty-marker-refused");
+    ck(reg("register-probe-x", "tools/check-register.cx", "X", "a\tb") == 2, "tab-in-field-refused");
+    b1 = cx_read("tests/batches.tsv", &bn1); c1 = cx_read("tests/coverage.tsv", &cn1);
+    ck(b0 && c0 && b1 && c1 && tx_same(b0, (long)bn0, b1, (long)bn1) && tx_same(c0, (long)cn0, c1, (long)cn1), "registry-bytes-unchanged");
+    printf("CHECK_REGISTER\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

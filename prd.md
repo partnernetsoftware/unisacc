@@ -34,6 +34,7 @@
 | 改名（标识符，全仓） | `refactor.cx -- rename [--auto] OLD NEW (FILE... \| --tracked) > C.tsv`，再 `apply` 同上 | 定义、函数指针、调用、类型、宏里的 OLD 都改；注释、字符串、更长的标识符不动；保留路径判 skip。行与 find 同格式，apply 照样逐文件核验并可还原。 |
 | 按行段替换（断言两端） | `sh ./unisacc.com tools/edit-span.cx -- FILE FIRST LAST FIRST_TEXT LAST_TEXT REPLACEMENT` | 首末行前缀不符就拒绝、不写盘；适合搬移整段。 |
 | 查某目标不能 lower 的系统调用／ccw 桩 | `sh ./unisacc.com tools/tape-gap.cx -- TAPE TARGET` | 一遍对 `exec/facts/lower-abi.tsv` 的 `@abi` 行，列出无行或 selected 0 的 `.sys` op 与 `__ccw_` 标号；退出 1 表示有缺口。检查：batch `tape-gap-tool`。 |
+| 登记一个检查为测试批次 | `sh ./unisacc.com tools/register.cx -- ID CHECK.cx MARKER "覆盖说明" "文件" [LAYER]` | 追加 batches／coverage 各一行、跑 `--list` 与 `run-batch`；失败只撤回自己追加的两行。已有 ID、缺文件、空 MARKER、字段含 TAB 直接拒绝（退出 2）。检查：batch `register-tool`。 |
 | 四个仓级棘轮一次跑完 | `sh ./unisacc.com tools/ratchets.cx [-- --only PATH-PREFIX]` | 并行跑 cxraw／cxinclude／cxapis／cxtrunc 的 `--check`，每个一行 RATCHET，只列超基线或缺行的文件（不列 stale 与 below）；全 ok 才退出 0。检查：batch `ratchets-tool`。 |
 | 核对一只现成 PE 的结构 | `sh ./unisacc.com tools/formats-macho-pe.cx -- --pe FILE` | 与 `ROOT ABS_OUT` 同一套 PE/COFF 判据，写到标准输出：节区、导入、重定位、load config、入口。不放宽判据，不编译夹具。`ROOT ABS_OUT` 仍是 8 只夹具。见 [plans/osx-win-whole-o-2026-10-30.md](plans/osx-win-whole-o-2026-10-30.md)。 |
 | 包清单与导入身份 | `sh ./unisacc.com -run tests/cxpack.cx -- --fixtures` | `cxpack.tsv` 将模块名钉到路径。已装 e955 的 CXIF 在存在匹配文件行时只导出公开列表中的非 static 函数；清单缺席或无匹配行仍保留全部非 static 函数的兼容行为。清单超限、目录或其他读取错误具名拒绝，不扩大公开接口。类型声明仍沿用文本 CXIF v0，尚非结构化 ABI 或编译期所有权。见 [plans/cx-pack.md](plans/cx-pack.md) 与 [缺陷证据](plans/defects-c43.md)。 |
