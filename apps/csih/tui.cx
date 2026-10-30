@@ -3878,6 +3878,60 @@ static int tui_version_flag(const char *s) {
     return 0;
 }
 
+/* -p: steps to stderr as they happen, so stdout holds only the answer */
+static void tui_print_event(const char *line, void *ud) {
+    (void)ud;
+    sy_eprintf("%s\n", line ? line : "");
+}
+
+/* csih -p PROMPT... (or print): one agent turn without the TUI, for scripts and
+   CI. The prompt is the rest of argv, else stdin. Same endpoint/model/cwd and
+   the same per-directory transcript as the TUI, so -p and the TUI continue one
+   conversation. stdout: the answer; stderr: the steps and, on failure, the
+   reason. Exit 0 when the turn completed (the review accepted it), 1 when it did
+   not, 64 for an empty prompt. */
+static int tui_print_mode(int argc, char **argv) {
+    const char *endpoint = csih_env("CSIH_ENDPOINT", "CDSH_ENDPOINT");
+    const char *model    = csih_env("CSIH_MODEL", "CDSH_MODEL");
+    const char *cwd      = csih_env("CSIH_CWD", "CDSH_CWD");
+    static char prompt[TUI_INPUT_MAX];
+    char journal[512], real_cwd[1024];
+    agent_result r;
+    long k = 0;
+    int i;
+    if (!endpoint) endpoint = "https://api.deepseek.com/v1/chat/completions";
+    if (!model)    model = "deepseek-chat";
+    if (!cwd) { if (!tui_getcwd(real_cwd, (int)sizeof real_cwd)) zs_set(real_cwd, (long)sizeof real_cwd, "."); cwd = real_cwd; }
+    for (i = 2; i < argc && k < (long)sizeof prompt - 2; i++) {
+        int n = tx_snprintf(prompt + k, sizeof prompt - (size_t)k, "%s%s", k ? " " : "", argv[i]);
+        if (n < 0) break;
+        k += n;
+    }
+    if (k == 0 && !sy_isatty(0)) {
+        size_t got = fio_read(prompt, 1, sizeof prompt - 1, fio_stdin());
+        k = (long)got;
+        while (k > 0 && (prompt[k - 1] == '\n' || prompt[k - 1] == '\r')) k--;
+    }
+    if (k >= (long)sizeof prompt) k = (long)sizeof prompt - 1;
+    prompt[k] = 0;
+    if (k == 0) { sy_eprintf("usage: csih -p PROMPT...   (or the prompt on stdin)\n"); return 64; }
+    /* without a key the request goes out unauthenticated and comes back as a 401,
+       which reads like a wrong key: say what is missing instead */
+    {
+        int klen = 0;
+        if (zs_find(endpoint, "api.deepseek.com") && !net_deepseek_key_probe(&klen)) {
+            sy_eprintf("csih: no DeepSeek key: set DEEPSEEK_API_KEY, or put {\"deepseek\":{\"api_key\":\"...\"}} in ~/env.jsonl\n");
+            return 1;
+        }
+    }
+    if (agent_transcript_path(journal, sizeof journal) != 0)
+        tx_snprintf(journal, sizeof journal, "/tmp/csih-agent-%d.jsonl", (int)sy_pid());
+    r = agent_run_cb(prompt, journal, endpoint, model, cwd, NULL, tui_print_event, NULL);
+    if (r.answer[0]) sy_printf("%s\n", r.answer);
+    if (!r.ok) { sy_eprintf("csih: not completed: %s\n", r.reason[0] ? r.reason : "(no reason)"); return 1; }
+    return 0;
+}
+
 int tui_entry(int argc, char **argv) {
     /* no argument starts the agent, as csih.sh does (so csih.com behaves the same) */
     const char *cmd = argc > 1 ? argv[1] : "agent";
@@ -3886,6 +3940,7 @@ int tui_entry(int argc, char **argv) {
         sy_printf("csih %s\n", CSIH_VERSION);
         return 0;
     }
+    if (!zs_cmp(cmd, "-p") || !zs_cmp(cmd, "print")) return tui_print_mode(argc, argv);
 
     if (!zs_cmp(cmd, "keyprobe")) {
         int len = 0, src = net_deepseek_key_probe(&len);
@@ -5785,7 +5840,7 @@ int tui_entry(int argc, char **argv) {
         return 0;
     }
 
-    sy_printf("usage: tui selftest | once | run | agent | agent-owned DIR SESSION HASH | resume-agent DIR STATE SESSION HANDOFF HASH\n");
+    sy_printf("usage: csih [agent] | -p PROMPT... | -v | keyprobe | selftest | once | run | agent-owned DIR SESSION HASH | resume-agent DIR STATE SESSION HANDOFF HASH\n");
     return 64;
 }
 

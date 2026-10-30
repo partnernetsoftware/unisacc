@@ -1,0 +1,124 @@
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use u_run
+#pragma unisa use netwit
+/* print_mode.cx -- csih -p (one agent turn without the TUI) on the installed
+ * product binary CSIH_BIN (else ../../out/csih-e2e-bin/csih), only when its stamp
+ * equals the current `csih.sh digest` (a stale binary is a FAIL):
+ *   cd apps/csih && sh ../../unisacc.com probes/print_mode.cx
+ * Cases (expected values from tui_print_mode's comment, 2026-10-30):
+ *   empty prompt (no args, stdin /dev/null)  rc 64, usage on stderr, stdout empty
+ *   no key, DeepSeek endpoint                rc 1, "no DeepSeek key" on stderr, stdout empty
+ *   local agent-stub (exec, then a bare answer)
+ *                                            stdout is the answer only (完成了), the exec
+ *                                            step and its output on stderr; the bare
+ *                                            answer is unverified, so rc 1 and
+ *                                            "csih: not completed" on stderr
+ * Prints ok/FAIL per check and "print_mode: PASS" or "print_mode: N FAIL". */
+
+static int bad;
+static char dir[300], bin[700], errp[400];
+
+static void check(int ok, const char *what) {
+    if (ok) sy_printf("  ok    %s\n", what);
+    else { sy_printf("  FAIL  %s\n", what); bad++; }
+}
+
+static int has(const char *s, const char *n) { return s && tx_find(s, tx_len(s, 1 << 20), n, tx_len(n, 256)) >= 0; }
+
+/* the product binary, refused when its stamp is not today's source digest */
+static int find_bin(void) {
+    const char *b = sy_env("CSIH_BIN");
+    static char out[1 << 16];
+    char stamp_p[800];
+    char *av[] = { "sh", "./csih.sh", "digest", 0 };
+    size_t n = 0;
+    char *stamp;
+    long ol, at = -1, f, k = 0;
+    int cut;
+    if (b && b[0]) tx_snprintf(bin, sizeof bin, "%s", b);
+    else tx_snprintf(bin, sizeof bin, "../../out/csih-e2e-bin/csih");
+    tx_snprintf(stamp_p, sizeof stamp_p, "%s.src", bin);
+    /* the digest is the last "digest HEX" line (the file list comes first) */
+    if (sy_run(av, out, sizeof out, &cut) != 0) { sy_printf("  FAIL  csih.sh digest did not run\n"); return 0; }
+    ol = tx_len(out, sizeof out);
+    while ((f = tx_find(out + k, ol - k, "digest ", 7)) >= 0) { at = k + f; k = at + 7; }
+    if (at < 0 || ol - at < 7 + 64) { sy_printf("  FAIL  no digest line from csih.sh digest\n"); return 0; }
+    stamp = cx_read(stamp_p, &n);
+    if (!stamp || n < 64 || !tx_same(stamp, 64, out + at + 7, 64)) {
+        sy_printf("  FAIL  %s is stale or unstamped (run csih.sh prepare)\n", bin);
+        return 0;
+    }
+    return 1;
+}
+
+/* run bin -p ARGS under SCRIPT's environment; stdout into OUT, stderr into ERR */
+static int run_p(const char *env, const char *arg, char *out, int cap, char *err, int ecap) {
+    char script[1200];
+    char *args[2];
+    int rc = -1, n = 0;
+    size_t en = 0;
+    char *e;
+    args[n++] = "-p";
+    if (arg) args[n++] = (char *)arg;
+    tx_snprintf(script, sizeof script, "%s exec \"$0\" \"$@\" </dev/null 2>'%s'", env, errp);
+    u_spawn_sh(bin, args, n, script, out, cap, &rc);
+    e = cx_read(errp, &en);
+    tx_snprintf(err, (size_t)ecap, "%s", e ? e : "");
+    return rc;
+}
+
+int main(void) {
+    static char out[8192], err[8192];
+    char env[900], home[400], work[400], tr[400], ep[200], portbuf[16];
+    char *pav[7];
+    int rc, port, pid;
+    if (!find_bin()) { sy_printf("print_mode: 1 FAIL\n"); return 1; }
+    tx_snprintf(dir, sizeof dir, "%s/csih-print-%d", sy_env_or("TMPDIR", "/tmp"), sy_pid());
+    tx_snprintf(home, sizeof home, "%s/home", dir);
+    tx_snprintf(work, sizeof work, "%s/work", dir);
+    tx_snprintf(tr, sizeof tr, "%s/tr.jsonl", dir);
+    tx_snprintf(errp, sizeof errp, "%s/stderr", dir);
+    if (sy_mkdir(dir, 0700) != 0 || sy_mkdir(home, 0700) != 0 || sy_mkdir(work, 0700) != 0) { sy_printf("print_mode: no temp\n"); return 2; }
+
+    /* 1. empty prompt */
+    tx_snprintf(env, sizeof env, "export HOME='%s';", home);
+    rc = run_p(env, 0, out, sizeof out, err, sizeof err);
+    check(rc == 64 && has(err, "usage: csih -p") && out[0] == 0, "empty prompt: rc 64, usage on stderr, nothing on stdout");
+
+    /* 2. no key for the DeepSeek endpoint */
+    tx_snprintf(env, sizeof env, "unset DEEPSEEK_API_KEY CSIH_ENDPOINT CDSH_ENDPOINT; export HOME='%s';", home);
+    rc = run_p(env, "say hi", out, sizeof out, err, sizeof err);
+    check(rc == 1 && has(err, "no DeepSeek key") && out[0] == 0, "no key: rc 1, says what is missing, nothing on stdout");
+
+    /* 3. a local stub: exec, then a bare answer */
+    port = 18000 + (sy_pid() % 20000);
+    tx_snprintf(portbuf, sizeof portbuf, "%d", port);
+    pav[0] = "sh"; pav[1] = "../../unisacc.com"; pav[2] = "-run"; pav[3] = "probes/agent-stub.cx";
+    pav[4] = "--"; pav[5] = portbuf; pav[6] = 0;
+    pid = sy_spawn(pav);
+    if (pid <= 0 || nw_wait_port(port, 20000) != 0) {
+        if (pid > 0) u_stop(pid);
+        sy_printf("  FAIL  stub did not listen\nprint_mode: 1 FAIL\n");
+        return 1;
+    }
+    tx_snprintf(ep, sizeof ep, "http://127.0.0.1:%d/v1/chat/completions", port);
+    tx_snprintf(env, sizeof env,
+                "unset CSIH_ROLE CSIH_PEER; export HOME='%s' DEEPSEEK_API_KEY=LOCAL_STUB_ONLY CSIH_ENDPOINT='%s' "
+                "CSIH_MODEL=stub CSIH_CWD='%s' CSIH_TRANSCRIPT='%s';", home, ep, work, tr);
+    rc = run_p(env, "do it", out, sizeof out, err, sizeof err);
+    u_stop(pid); sy_wait(pid, 0);
+    check(has(out, "\xe5\xae\x8c\xe6\x88\x90\xe4\xba\x86") && !has(out, "hello-from-agent") && !has(out, "exec"),
+          "stub: stdout holds the answer only");
+    check(has(err, "hello-from-agent"), "stub: the exec step and its output are on stderr");
+    check(rc == 1 && has(err, "csih: not completed"), "stub: a bare answer is unverified: rc 1 and the reason on stderr");
+
+    sy_unlink(errp); sy_unlink(tr);
+    if (bad) sy_printf("print_mode: %d FAIL\n", bad);
+    else sy_printf("print_mode: PASS\n");
+    return bad ? 1 : 0;
+}

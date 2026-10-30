@@ -2,6 +2,7 @@
 #pragma unisa use sys.io
 #pragma unisa use zstr
 #pragma unisa use sys.env
+#pragma unisa use sys.fs
 #pragma unisa use file
 /*
  * file_cli.c — the `main` for file.c, moved out so file.c can be a library.
@@ -81,6 +82,23 @@ static void run_selftest(void) {
     r = file_read(path, buf, sizeof buf);
     expect(r.ok == 1 && r.bytes == 6, "read reports the bytes it read");
     expect(!zs_cmp(buf, "hello\n"), "the content round-trips exactly");
+
+    /* --- a rewrite keeps the permission bits (an edited script stays executable) --- */
+    {
+        sy_stat_t st;
+        tx_snprintf(path, sizeof path, "%s/run.sh", base);
+        r = file_write(path, "#!/bin/sh\necho a\n", 17);
+        expect(r.ok == 1 && sy_chmod(path, 0750) == 0, "a script is written and made 0750");
+        r = file_write(path, "#!/bin/sh\necho b\n", 17);
+        expect(r.ok == 1 && sy_stat(path, &st) == 0 && (st.mode & 07777) == 0750, "rewriting it keeps 0750");
+        tx_snprintf(path, sizeof path, "%s/new.txt", base);
+        sy_unlink(path);
+        r = file_write(path, "n\n", 2);
+        expect(r.ok == 1 && sy_stat(path, &st) == 0 && (st.mode & 0777) != 0, "a new file still gets the default mode");
+        sy_unlink(path);
+        tx_snprintf(path, sizeof path, "%s/run.sh", base);
+        sy_unlink(path);
+    }
 
     /* --- the size guard: REFUSE, do not truncate ----------------------- */
     /* This is the decision the whole file turns on. A truncating read would
