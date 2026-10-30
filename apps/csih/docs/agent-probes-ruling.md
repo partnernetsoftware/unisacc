@@ -58,4 +58,11 @@
 - 4 例都以裸答复收尾，期望改为现行为（请求数减 1、rc 1、原因 `answer outcome=unverified`）。no-tools-braces 测的正是"带花括号的纯文本仍算答复"，桩保持纯文本。
 - 多动作拒绝与恢复、写出的文件、错误 trace、纯文本 trace 这些断言一条没动。
 - 结果 9/9 PASS。`tests/contracts.tsv` 里的 BLOCKED 不在本车道的可写范围，等有权限的人换标。
-- agent_loop_bound 还没做：其中 invalid_judge、watch_* 等用例测的是评审轮本身，需要能回填 action ID 的动态桩（参照 completion_contract 的 extract_ids）。
+- agent_loop_bound 也做完了，31/31 PASS：
+  - 原来每个用例都现编 `-run`，现在改成只编一次 `agent_cli.bin`。
+  - 桩按请求现场回填：回复里可以写 `@IDS@`、`@CLAIMS@`、`@SCOPE@`，由 `expand` 从请求里的 `[harness action_id]` 行和 `Claim evidence reference:` 消息中取出本回合的 ID 填进去。
+  - 作为正常完成的答复改用 ANSWER_EV（completed 加证据），答复后的评审改用 ACCEPT（accepted/scope/evidence）。normal、last_round_answer、invalid_judge*、watch_no_tools 等用例的请求数和 rc 期望都没改。
+  - 投递义务现在只能由调用方给，不能由角色给，所以 agent_cli 加了 `agent-required` 子命令（`agent_delivery_require_next(1)` 之后再进 agent）。断言"邮件未投递"的 watch 用例改走它；6 个伪造回执的用例仍然 rc 1，被拒在评审之前，请求数比原来少 1。
+  - 只改了措辞的断言：`go=stop without answer` → `stop without independent acceptance`，`invalid round-end judgment` → `acceptance protocol invalid` / `malformed acceptance schema`。
+  - 计数跟着协议变的：stop_no_answer 请求数 3→1（停下即结束，不再重试）；watch_failed/partial 以模型自报的 failed/partial 结束，断言的是这个原因，而不是邮件。
+  - 每处改动在探针源码里都有注释。
