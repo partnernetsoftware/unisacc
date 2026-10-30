@@ -171,7 +171,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 │  └─ 未切换：旧构造脚本 exec/c/buildcompiler.sh 等仍指向已归档 C；已装产品未换
 ├─ 性能（plans/perf-bottlenecks-2026-10-30.md）
 │  ├─ B1 E2 每个 #include 整缓冲重扫：前导部分已解（4f4a2ae2b3，include/cx.h → 生成的单文件 cx-flat.h，tools/cx-flatten.cx --check；空 main E2 1.74→0.09 s，候选冷编 facts-gen 40.5→16.8 s）；用户自己的 #include 仍待规则方案
-│  ├─ B2 执行器自编 -O2 代码质量：同模型慢 3.3–3.9 倍；步级计数每步 130–140 ns、无算法热点，switch 改查表只得 e2 7% 未采纳（路线待主人定：汇编执行循环 / 改进自身 O2）
+│  ├─ B2 执行器自编 -O2 代码质量：同模型慢 3.3–3.9 倍；主人定走汇编 → cx/core/kernel.cx（f03c5a940d）接包内 UNIKERN1 汇编核心，七段逐字节同、全链 2.95→1.11 s；入口切换（src/executor.cx use core.kernel）待 grk
 │  └─ B3 每次运行固定开销约 113 ms（包解析 + 模型解压）；候选无 run-cache
 ├─ 去 Python：191 个已归档 archive/reference-py/；活路径剩 42 个为两个生成器闭包（exec/facts/export.py、unisa emit-kernel），另 release/ 18、apps/ 各自域；gold 表的检查与重写已原生化（tools/gold-table.cx，20 张，11 张有 seed 规则形），不再需要 `unisa gold-export`；30 张事实表已有 17 张改由 tools/facts-gen.cx 原生生成（逐字节对上 Python 后切换，图像格式常量移入 exec/facts/image-{pe,macho,elf}.tsv、tape-shape.tsv），export.py 剩 13 张（enc-arm/x86、pp-gen、pp-autoinc-gen、lex-gen、k2-gen2*、k2-units-tokens、k2-membercontrol、k2-libraryenv、nativeabi、lower-abi/code）
 ├─ 分层：plans/cx-layers.md；L0 包 cx/text、cx/mem（arena）、cx/sys（env/fs/proc/time/net，unisacc-00，检查 tools/check-cx-sys.cx），棘轮 tests/cxraw.cx（上层直接 libc/POSIX 调用只降不升）；include/cx.h 与 cx_read/cx_write/cx_run* 收编归 cc
