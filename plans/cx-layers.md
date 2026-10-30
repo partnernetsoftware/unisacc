@@ -25,6 +25,7 @@
     - `<sys/file.h>` 改为 `use sys.posix` 的 `sy_flock`；
     - `<setjmp.h>` 改为 `use sys.guard`；
     - signal、errno、fcntl、stdio、string、unistd、sys/types、sys/stat、sys/wait、dirent 直接删掉，前导里已有。
+  - **头文件表面探针算底层。** csih 有 10 个 probe，文件头写明它们测的就是某个携带头本身，例如 "that `<sys/socket.h>` alone builds is what it tests"。改成 `use sys.*` 会把要测的东西测没了。所以它们以精确条目 `文件.cx<TAB>理由` 逐个列进 `tests/cxinclude-boundary.tsv`，不按目录放行。`tests/cxinclude.cx` 会拒绝缺少理由或不是 `.cx` 的条目。
   - sy_* 一律返回 -errno，迁移时要改返回值判断。csih 的 Windows Winsock 路径没有对应的 L0（`sy_tcp_dial` 在 Windows 上返回 -ENOSYS），这条要 csih 自己定。两个 fuzz 测试被宿主 cc 当 `.c` 编译，交 csih 决定：要么改名成 `.c`，要么改用 `-include` 前导。
   - 其余为 0（89d5390e01 清掉了最后两行旧基线）。
 - 完成标准：`sh ./unisacc.com tests/cxinclude.cx -- --check` 输出 `ok`，基线表里没有任何一行。

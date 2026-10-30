@@ -4,7 +4,9 @@
    module has its prelude (include/cx.h) built in and must not use #include.  A new module starts and stays at 0;
    a row already in tests/cxinclude.tsv is debt and only goes down.  The libc/POSIX docking units listed in
    tests/cxinclude-boundary.tsv (include/, tools/cxcc-hostinc/ and the L0 cx/sys/) may use #include; they are not
-   module rows.
+   module rows.  The boundary file also takes exact entries FILE.cx<TAB>REASON for single files that belong to the
+   bottom layer although they live elsewhere (header-surface probes that test a carried header by including it); an
+   entry without a reason, or not naming a .cx file, is refused with rc 2.
    This file itself has none: everything it calls comes from the prelude.
    usage, from the repo root:
      sh ./unisacc.com -run tests/cxinclude.cx -- --check   rc 1 naming each file whose count rose above its row in
@@ -31,6 +33,9 @@ static Row rows[MAXROWS];
 static int nrows;
 static char *pref[MAXPREF];
 static int npref;
+#define MAXEXACT 64
+static char exact[MAXEXACT][512];   /* single bottom-layer .cx files (header-surface probes), each with a reason */
+static int nexact;
 
 /* include directives in b[0..n) */
 static int count_includes(const char *b, size_t n) {
@@ -85,7 +90,19 @@ static int load_boundary(void) {
         if (e < n) b[e] = 0;
         if (e > i && b[e - 1] == '\r') b[e - 1] = 0;
         if (e > i && b[i] != '#') {
-            char *line = b + i;
+            char *line = b + i, *tab = line;
+            while (*tab && *tab != '\t') tab++;
+            if (*tab) {   /* one exact .cx file with a mandatory reason: FILE<TAB>REASON */
+                size_t pl = (size_t)(tab - line);
+                if (nexact == MAXEXACT) { fprintf(stderr, "cxinclude: %s: too many exact entries\n", BOUNDARY); return -1; }   /* rc 2 exits */
+                if (pl < 4 || pl >= sizeof exact[0] || line[pl - 3] != '.' || line[pl - 2] != 'c' || line[pl - 1] != 'x' || !tab[1]) {
+                    fprintf(stderr, "cxinclude: exact boundary entry must be FILE.cx<TAB>reason: %s\n", line); return -1;
+                }
+                { size_t q; for (q = 0; q < pl; q++) exact[nexact][q] = line[q]; exact[nexact][pl] = 0; }
+                nexact++;
+                i = e + 1;
+                continue;
+            }
             if (npref == MAXPREF) { fprintf(stderr, "cxinclude: %s: too many prefixes\n", BOUNDARY); free(b); return -1; }
             t = strlen(line);
             if (t < 2 || line[t - 1] != '/') { fprintf(stderr, "cxinclude: boundary prefix must end with /: %s\n", line); free(b); return -1; }
@@ -103,6 +120,11 @@ static int is_boundary(const char *path) {
     for (k = 0; k < npref; k++) {
         n = strlen(pref[k]);
         if (!strncmp(path, pref[k], n)) return 1;
+    }
+    for (k = 0; k < nexact; k++) {   /* exact entries: whole-path equality, no prefix reach */
+        const char *a = path, *x = exact[k];
+        while (*a && *a == *x) { a++; x++; }
+        if (!*a && !*x) return 1;
     }
     return 0;
 }
