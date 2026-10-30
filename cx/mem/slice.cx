@@ -11,6 +11,9 @@
      ms_len(s)            the length
      ms_eq(a, b)          1 when the two spans are byte-equal
      ms_find(s, needle)   offset of needle in s, or -1
+   Mutable borrow (Rust's &mut [u8]): ms_mut_of / ms_mut_at / ms_mut_fill /
+   ms_mut_copy.  Together the borrow half of the ownership model: grow owns,
+   slice borrows, move/take transfer.
    Speed: every op is O(n) with no allocation; slices never copy their bytes. */
 
 typedef struct { const unsigned char *p; long n; } ms_slice;
@@ -54,4 +57,47 @@ long ms_find(const ms_slice *s, const ms_slice *needle) {
     for (i = 0; i + needle->n <= s->n; i++)
         if (ms_eq(&(ms_slice){ s->p + i, needle->n }, needle)) return i;
     return -1;
+}
+
+/* ---- mutable borrow (Rust's &mut [u8]) ----
+   A mutable slice borrows writable bytes it still does not own: it is a
+   non-const pointer + length, so writes are bounds-checked.  It complements the
+   immutable slice above; the two together are the borrow half of the ownership
+   model (grow owns, slice borrows, move/take transfer).  The caller must ensure
+   no other live borrow aliases the same bytes (Rust's compile-time uniqueness
+   is not enforced here; that is cx/core/memory.cx's runtime job). */
+typedef struct { unsigned char *p; long n; } ms_slice_mut;
+
+ms_slice_mut ms_mut_of(mg_buf *b) {
+    ms_slice_mut s;
+    if (!b) { s.p = 0; s.n = 0; return s; }
+    s.p = b->data; s.n = b->len;
+    return s;
+}
+
+long ms_mut_len(const ms_slice_mut *s) {
+    return s ? s->n : 0;
+}
+
+int ms_mut_at(const ms_slice_mut *s, long off, long n, ms_slice_mut *out) {
+    if (!s || !out || off < 0 || n < 0 || off > s->n || n > s->n - off) return -1;
+    out->p = s->p + off;
+    out->n = n;
+    return 0;
+}
+
+/* Fill the whole mutable slice with BYTE & 255. 0, or -1 on a bad slice. */
+int ms_mut_fill(ms_slice_mut *s, int byte) {
+    long i;
+    if (!s || s->n < 0 || (s->n > 0 && !s->p)) return -1;
+    for (i = 0; i < s->n; i++) s->p[i] = (unsigned char)(byte & 255);
+    return 0;
+}
+
+/* Copy the immutable SRC into DST (both must be the same length). 0, or -1. */
+int ms_mut_copy(ms_slice_mut *dst, const ms_slice *src) {
+    long i;
+    if (!dst || !src || dst->n != src->n || dst->n < 0) return -1;
+    for (i = 0; i < dst->n; i++) dst->p[i] = src->p[i];
+    return 0;
 }
