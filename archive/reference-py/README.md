@@ -250,3 +250,5 @@
 - plans/pending/py2cx-w7-unlanded/exec_parse2_warnprep.cx.pending
 - plans/pending/README.md
 - plans/pending/tapebin-selfheal/tapebinref-selfheal.partial.patch
+
+- exec/pipeline/stages.tsv（旧 Python 流水线定义，无活使用方）
