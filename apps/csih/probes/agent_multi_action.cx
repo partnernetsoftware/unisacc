@@ -1,3 +1,4 @@
+#pragma unisa use agentwit
 /* CX probe */
 /* agent_multi_action.c — C port of probes/agent_multi_action.py.
  *
@@ -12,26 +13,22 @@
  *
  * Verdict: last line "PASS agent multi-action" or "FAIL agent multi-action"; rc 0/1.
  * Optional argv: case names. Temp dirs use $TMPDIR (fallback /tmp).
+ *
+ * CX (run with -run; upper root, no includes: sockets and time are agentwit's):
+ * the agent is `<compiler copy> -run agent_cli.cx -- agent PROMPT` with
+ * cwd = the private source and CSIH_CWD = the case dir (the tools act there);
+ * the build gate is `-run agent_cli.cx -- build-check` (rc 64, usage line,
+ * empty stderr). unisacc's -run cache is keyed by cwd + root path + content,
+ * so the private source is a fixed per-uid tree
+ * TMP/csih-probe-build-UID/agent_multi_action/source, cleared and recopied
+ * every run (~28s cold compile measured, ~1.2s hot); the cases' own dirs are
+ * a fresh mkdtemp, removed at the end.
+ * Run from the app dir (apps/csih), or set CSIH_APP to it.
  */
-#include "../../../include/unisa_safedel.h"   /* the one deletion guard (commissar ruling 2026-10-23) */
-#include <dirent.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <signal.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
-#include <sys/time.h>
-#include <sys/wait.h>
-#include <unistd.h>
-#include "csih_flat.h"
 
-#define MA_UNISACC CSIH_ROOT "/unisacc.com"
-#define MA_SELF CSIH_APP "/probes/agent_multi_action.cx"
+static char CSIH_APP[4096];   /* absolute app dir */
+static char MA_UNISACC[4200]; /* <app>/../../unisacc.com: the frozen compiler */
+static char MA_SELF[4200];    /* this probe source */
 #define MA_PORT_LO 19150
 #define MA_PORT_HI 19199
 
@@ -59,35 +56,11 @@ static void *xmalloc(size_t n) {
 }
 
 static unsigned char *read_file(const char *path, size_t *len) {
-    struct stat st;
-    unsigned char *buf;
-    size_t got = 0;
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) return NULL;
-    if (fstat(fd, &st) != 0) { close(fd); return NULL; }
-    buf = xmalloc((size_t)st.st_size);
-    while (got < (size_t)st.st_size) {
-        ssize_t k = read(fd, buf + got, (size_t)st.st_size - got);
-        if (k < 0) { if (errno == EINTR) continue; break; }
-        if (k == 0) break;
-        got += (size_t)k;
-    }
-    close(fd);
-    if (got != (size_t)st.st_size) { free(buf); return NULL; }
-    *len = got;
-    return buf;
+    return (unsigned char *)cx_read(path, len);
 }
 
 static int write_file(const char *path, const void *data, size_t n, mode_t mode) {
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, mode);
-    size_t off = 0;
-    if (fd < 0) return -1;
-    while (off < n) {
-        ssize_t k = write(fd, (const char *)data + off, n - off);
-        if (k < 0) { if (errno == EINTR) continue; close(fd); return -1; }
-        off += (size_t)k;
-    }
-    close(fd);
+    if (cx_write(path, data, n) != 0) return -1;
     chmod(path, mode);
     return 0;
 }
@@ -282,10 +255,7 @@ static const char *tmpbase(void) {
 
 /* every removal goes through the one deletion guard (include/unisa_safedel.h); the private tree is a mkdtemp under
    tmpbase(), the guard's temp root */
-static void rm_rf(const char *path) {
-    char why[600];
-    if (unisa_safedel(path, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 0, why, (int)sizeof why)) fprintf(stderr, "agent_multi_action: %s\n", why);
-}
+static void rm_rf(const char *path) { cx_rmtree(path); }   /* cx_rmtree reports a refusal on stderr */
 
 static int read_int(const char *path) {
     FILE *f = fopen(path, "r");
@@ -297,11 +267,7 @@ static int read_int(const char *path) {
     return v;
 }
 
-static double now_s(void) {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return (double)tv.tv_sec + (double)tv.tv_usec / 1e6;
-}
+static double now_s(void) { return aw_now_s(); }
 
 /* ---------- stub HTTP server (forked child) ---------- */
 
@@ -358,7 +324,7 @@ static char *json_wrap(const char *content) {
 
 static void send_all(int fd, const char *b, size_t n) {
     while (n > 0) {
-        ssize_t k = write(fd, b, n);
+        ssize_t k = (ssize_t)aw_send(fd, b, (long)n);
         if (k < 0) { if (errno == EINTR) continue; return; }
         b += k;
         n -= (size_t)k;
@@ -373,7 +339,7 @@ static void stub_one(int c, const stub_t *st, int *count) {
         ssize_t k;
         if (hend && len >= need) break;
         if (len + 1 >= sizeof buf) return;
-        k = recv(c, buf + len, sizeof buf - 1 - len, 0);
+        k = (ssize_t)aw_recv(c, buf + len, (long)(sizeof buf - 1 - len));
         if (k < 0 && errno == EINTR) continue;
         if (k <= 0) return;
         len += (size_t)k;
@@ -405,7 +371,7 @@ static void stub_one(int c, const stub_t *st, int *count) {
 static void stub_serve(const stub_t *st) {
     int count = 0;
     for (;;) {
-        int c = accept(st->lsock, NULL, NULL);
+        int c = aw_accept(st->lsock);
         if (c < 0) { if (errno == EINTR) continue; _exit(0); }
         stub_one(c, st, &count);
         close(c);
@@ -413,23 +379,9 @@ static void stub_serve(const stub_t *st) {
 }
 
 static int listen_local(int *port) {
-    int p;
-    for (p = MA_PORT_LO; p <= MA_PORT_HI; p++) {
-        struct sockaddr_in a;
-        int one = 1;
-        int s = socket(AF_INET, SOCK_STREAM, 0);
-        if (s < 0) return -1;
-        setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-        memset(&a, 0, sizeof a);
-        a.sin_family = AF_INET;
-        a.sin_port = htons((unsigned short)p);
-        a.sin_addr.s_addr = htonl(0x7f000001);
-        if (bind(s, (struct sockaddr *)&a, sizeof a) == 0 && listen(s, 16) == 0) {
-            *port = p;
-            return s;
-        }
-        close(s);
-    }
+    int s = -1;
+    if (aw_listen(MA_PORT_LO, MA_PORT_HI, port, &s) == 0) return s;
+    if (s >= 0) close(s);
     return -1;
 }
 
@@ -580,7 +532,7 @@ static int run_case(const case_t *c, ctx_t *x) {
     char reasons[1024] = "";
     int lsock, port = 0, rc = 0, timed = 0, reqs = 0, ok = 1, i;
     pid_t stub;
-    char *args[4];
+    char *args[8];
     char *tbuf;
     size_t tlen = 0;
     double remaining;
@@ -620,11 +572,14 @@ static int run_case(const case_t *c, ctx_t *x) {
              "unset CSIH_ROLE CSIH_PEER OPENAI_API_KEY HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; "
              "export NO_PROXY='127.0.0.1,localhost' no_proxy='127.0.0.1,localhost' "
              "HOME='%s' DEEPSEEK_API_KEY='LOCAL_STUB_ONLY' CSIH_ENDPOINT='%s' CSIH_MODEL='multi-action-stub' "
-             "CSIH_CWD='%s' CSIH_TRANSCRIPT='%s'; cd '%s' && exec \"$0\" \"$@\"",
-             home, ep, cwd, trace, cwd);
-    args[0] = (char *)"agent";
-    args[1] = (char *)c->prompt;
-    spawn(script, x->binary, args, 2, tmo, out, sizeof out, &rc, &timed);
+             "CSIH_CWD='%s' CSIH_TRANSCRIPT='%s'; cd '%s' && exec /bin/sh \"$0\" \"$@\"",
+             home, ep, cwd, trace, x->source);
+    args[0] = (char *)"-run";
+    args[1] = (char *)"agent_cli.cx";
+    args[2] = (char *)"--";
+    args[3] = (char *)"agent";
+    args[4] = (char *)c->prompt;
+    spawn(script, x->binary, args, 5, tmo, out, sizeof out, &rc, &timed);
     if (timed) rc = -1;
     kill(stub, SIGKILL);
     waitpid(stub, NULL, 0);
@@ -689,11 +644,28 @@ int main(int argc, char **argv) {
     size_t cl = 0;
     unsigned char *e;
 
+    {
+        const char *app = getenv("CSIH_APP");
+        if (app && app[0]) snprintf(CSIH_APP, sizeof CSIH_APP, "%s", app);
+        else if (!getcwd(CSIH_APP, sizeof CSIH_APP)) die("getcwd");
+        if (CSIH_APP[0] != '/') die("app dir must be absolute");
+        snprintf(MA_UNISACC, sizeof MA_UNISACC, "%s/../../unisacc.com", CSIH_APP);
+        snprintf(MA_SELF, sizeof MA_SELF, "%s/probes/agent_multi_action.cx", CSIH_APP);
+    }
     snap_hashes(&before);
     snprintf(root, sizeof root, "%s/csih-agent-multi-XXXXXX", tmpbase());
     if (!mkdtemp(root)) die("mkdtemp root");
-    snprintf(source, sizeof source, "%s/source", root);
+    /* the fixed private source (the -run cache key), cleared and recopied */
+    snprintf(source, sizeof source, "%s/csih-probe-build-%d", tmpbase(), (int)getuid());
     mkdir(source, 0700);
+    snprintf(source, sizeof source, "%s/csih-probe-build-%d/agent_multi_action", tmpbase(), (int)getuid());
+    mkdir(source, 0700);
+    snprintf(source, sizeof source, "%s/csih-probe-build-%d/agent_multi_action/source", tmpbase(), (int)getuid());
+    {
+        struct stat sst;
+        if (lstat(source, &sst) == 0 && cx_rmtree(source) != 0) die("cannot clear the private source");
+    }
+    if (mkdir(source, 0700) != 0) die("mkdir private source");
     copy_tree(CSIH_APP, source);
     snprintf(compiler, sizeof compiler, "%s/compiler.com", root);
     {
@@ -706,17 +678,23 @@ int main(int argc, char **argv) {
         if ((size_t)j >= before.n || before.len[j] != len || memcmp(before.data[j], b, len)) die("compiler copy differs");
         free(b);
     }
-    snprintf(binary, sizeof binary, "%s/agent-native", root);
+    /* the agent is the compiler copy running agent_cli.cx; build gate: unknown
+     * subcommand -> usage line, rc 64, empty stderr (the cold compile is ~28s) */
+    snprintf(binary, sizeof binary, "%s", compiler);
     snprintf(errp, sizeof errp, "%s/build-err.txt", root);
     snprintf(script, sizeof script, "cd '%s' && exec /bin/sh \"$0\" \"$@\" 2>'%s'", source, errp);
-    for (i = 0; csih_global_include_args[i]; i++) args[n++] = (char *)csih_global_include_args[i];
-    args[n++] = (char *)"-o";
-    args[n++] = binary;
-    for (i = 0; csih_agent[i]; i++) args[n++] = (char *)csih_agent[i];
-    spawn(script, compiler, args, n, 14, ebuf, sizeof ebuf, &rc, &timed);
-    if (rc != 0 || timed) die("multi-action build failed");
+    args[n++] = (char *)"-run";
+    args[n++] = (char *)"agent_cli.cx";
+    args[n++] = (char *)"--";
+    args[n++] = (char *)"build-check";
+    spawn(script, compiler, args, n, 50, ebuf, sizeof ebuf, &rc, &timed);
+    if (rc != 64 || timed || !strstr(ebuf, "usage: agent_cli")) {
+        printf("build rc=%d timed=%d out=%.200s\n", rc, timed, ebuf);
+        die("multi-action build failed");
+    }
     e = read_file(errp, &cl);
-    if (e && cl) die("multi-action build wrote stderr");
+    if (!e) die("multi-action build stderr unreadable");
+    if (cl) { printf("build stderr: %.400s\n", (char *)e); die("multi-action build wrote stderr"); }
     free(e);
     rm_rf(errp);
 

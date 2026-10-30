@@ -1,37 +1,32 @@
+#pragma unisa use agentwit
 /* CX probe */
-/* context_preview.c — C port of probes/context_preview.py.
+/* context_preview.cx — port of probes/context_preview.py (run with -run; upper
+ * root, no includes: utime and time are agentwit's).
  *
  * Real owned context-index over a private 10-notice fixture; no model, network,
- * TTY or deployment. Copies csih src into a private tree, builds the csih_tui
- * sources with unisacc, then drives the existing dev command:
+ * TTY or deployment. Copies csih src into a private tree and drives the
+ * existing dev command of the csih product binary:
  *
- *   /bin/sh <private compiler copy> -o OUT <csih_tui sources>   (cwd: private source)
- *   OUT context-index SESSION_DIR sess <64-hex>                  (cwd/CSIH_CWD: session dir)
+ *   <private copy of CSIH_BIN> context-index SESSION_DIR sess <64-hex>   (cwd: private source,
+ *                                                                          CSIH_CWD: session dir)
+ *
+ * The binary is the installed product CSIH_BIN (else ../../out/csih-e2e-bin/csih),
+ * taken only when its stamp CSIH_BIN.src equals the current `csih.sh digest` of
+ * the product inputs (a stale binary is a FAIL); a private csih.cx build is ~50s
+ * cold, over the contract budget.
  *
  * Deviation from the Python: Python injected a preview-proof branch into tui.c that
  * called a nonexistent tui_context_index() with hand-built owned metadata. This port
  * uses the real owned-startup path (tui.c context-index), so no source injection.
  *
+ * Run from the app dir (apps/csih), or set CSIH_APP to it.
  * Verdict: last line "PASS context preview" or "FAIL context preview"; rc 0/1.
  * Temp dirs use $TMPDIR (fallback /tmp).
  */
-#include <dirent.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <signal.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/stat.h>
-#include <sys/time.h>
-#include <sys/wait.h>
-#include <unistd.h>
-#include <utime.h>
-#include "csih_flat.h"
-#include "unisa_safedel.h"   /* the one deletion guard */
 
-#define CP_UNISACC CSIH_ROOT "/unisacc.com"
-#define CP_SELF CSIH_APP "/probes/context_preview.cx"
+static char CSIH_APP[4096];   /* absolute app dir */
+static char CP_UNISACC[4200]; /* <app>/../../unisacc.com: the frozen compiler */
+static char CP_SELF[4200];    /* this probe source */
 #define NOTICES 10
 
 static void die(const char *msg) {
@@ -45,36 +40,15 @@ static void *xmalloc(size_t n) {
     return p;
 }
 
+/* a symlink is not followed (was O_NOFOLLOW): NULL */
 static unsigned char *read_file(const char *path, size_t *len) {
     struct stat st;
-    unsigned char *buf;
-    size_t got = 0;
-    int fd = open(path, O_RDONLY | O_NOFOLLOW);
-    if (fd < 0) return NULL;
-    if (fstat(fd, &st) != 0) { close(fd); return NULL; }
-    buf = xmalloc((size_t)st.st_size);
-    while (got < (size_t)st.st_size) {
-        ssize_t k = read(fd, buf + got, (size_t)st.st_size - got);
-        if (k < 0) { if (errno == EINTR) continue; break; }
-        if (k == 0) break;
-        got += (size_t)k;
-    }
-    close(fd);
-    if (got != (size_t)st.st_size) { free(buf); return NULL; }
-    *len = got;
-    return buf;
+    if (lstat(path, &st) != 0 || S_ISLNK(st.st_mode)) return NULL;
+    return (unsigned char *)cx_read(path, len);
 }
 
 static int write_file(const char *path, const void *data, size_t n, mode_t mode) {
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, mode);
-    size_t off = 0;
-    if (fd < 0) return -1;
-    while (off < n) {
-        ssize_t k = write(fd, (const char *)data + off, n - off);
-        if (k < 0) { if (errno == EINTR) continue; close(fd); return -1; }
-        off += (size_t)k;
-    }
-    close(fd);
+    if (cx_write(path, data, n) != 0) return -1;
     chmod(path, mode);
     return 0;
 }
@@ -264,17 +238,47 @@ static const char *tmpbase(void) {
     return (t && t[0]) ? t : "/tmp";
 }
 
-/* through the one deletion guard (include/unisa_safedel.h): this probe's own mkdtemp tree (a site ceiling) or one
-   file in it; a refusal is reported and nothing is deleted */
-static void rm_rf(const char *path) {
-    char why[1400];
-    if (unisa_safedel(path, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 20000L, why, (int)sizeof why)) fprintf(stderr, "rm_rf: %s\n", why);
+/* through the one deletion guard (cx_rmtree over include/unisa_safedel.h): this probe's own mkdtemp tree or one
+   file in it; a refusal is reported on stderr and nothing is deleted */
+static void rm_rf(const char *path) { cx_rmtree(path); }
+
+static double now_s(void) { return aw_now_s(); }
+
+/* Last non-empty line of BUF into DST. */
+static void last_line(const char *buf, char *dst, size_t cap) {
+    const char *end = buf + strlen(buf), *q;
+    while (end > buf && (end[-1] == '\n' || end[-1] == '\r')) end--;
+    q = end;
+    while (q > buf && q[-1] != '\n') q--;
+    snprintf(dst, cap, "%.*s", (int)(end - q), q);
 }
 
-static double now_s(void) {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return (double)tv.tv_sec + (double)tv.tv_usec / 1e6;
+/* The installed product binary, copied to OUT_BIN once its stamp CSIH_BIN.src
+ * matches the current product-input digest (csih.sh digest); else FAIL. */
+static void install_tui(const char *out_bin) {
+    static char msg[900];
+    char bin[4200], stamp_p[4300], script_p[4300], dig[200], want[200];
+    const char *b = getenv("CSIH_BIN");
+    char *av[4], *o = NULL;
+    size_t ol = 0, bl = 0;
+    unsigned char *stamp, *bytes;
+    if (b && b[0]) snprintf(bin, sizeof bin, "%s", b);
+    else snprintf(bin, sizeof bin, "%s/../../out/csih-e2e-bin/csih", CSIH_APP);
+    snprintf(stamp_p, sizeof stamp_p, "%s.src", bin);
+    snprintf(script_p, sizeof script_p, "%s/csih.sh", CSIH_APP);
+    av[0] = (char *)"sh"; av[1] = script_p; av[2] = (char *)"digest"; av[3] = NULL;
+    if (cx_runv_timeout(av, 20, &o, &ol) != 0 || !o) die("csih.sh digest failed");
+    last_line(o, dig, sizeof dig);
+    stamp = (unsigned char *)cx_read(stamp_p, NULL);
+    if (!stamp) { snprintf(msg, sizeof msg, "no stamp %s (run csih.sh prepare)", stamp_p); die(msg); }
+    last_line((const char *)stamp, want, sizeof want);
+    if (strncmp(dig, "digest ", 7) != 0 || strcmp(dig + 7, want) != 0) {
+        snprintf(msg, sizeof msg, "%s is stale: stamp %s, sources %s (run csih.sh prepare)", bin, want, dig);
+        die(msg);
+    }
+    bytes = (unsigned char *)cx_read(bin, &bl);
+    if (!bytes) die("cannot read CSIH_BIN");
+    if (write_file(out_bin, bytes, bl, 0755) != 0) die("csih copy failed");
 }
 
 /* ---------- minimal JSON read for the packet ---------- */
@@ -468,6 +472,14 @@ int main(void) {
     unsigned char *orig;
     size_t olen = 0;
 
+    {
+        const char *app = getenv("CSIH_APP");
+        if (app && app[0]) snprintf(CSIH_APP, sizeof CSIH_APP, "%s", app);
+        else if (!getcwd(CSIH_APP, sizeof CSIH_APP)) die("getcwd");
+        if (CSIH_APP[0] != '/') die("app dir must be absolute");
+        snprintf(CP_UNISACC, sizeof CP_UNISACC, "%s/../../unisacc.com", CSIH_APP);
+        snprintf(CP_SELF, sizeof CP_SELF, "%s/probes/context_preview.cx", CSIH_APP);
+    }
     snap_hashes(&before);
     snprintf(root, sizeof root, "%s/csih-preview-XXXXXX", tmpbase());
     if (!mkdtemp(root)) die("mkdtemp root");
@@ -491,26 +503,11 @@ int main(void) {
         free(b);
     }
 
-    /* build csih_tui sources with cwd = private source */
+    /* the product binary (stamp == current source digest), private copy */
     snprintf(binary, sizeof binary, "%s/context-native", root);
     snprintf(errp, sizeof errp, "%s/build-err.txt", root);
-    {
-        char script[1024];
-        snprintf(script, sizeof script, "cd '%s' && exec /bin/sh \"$0\" \"$@\" 2>'%s'", source, errp);
-        for (i = 0; csih_global_include_args[i]; i++) args[n++] = (char *)csih_global_include_args[i];
-        args[n++] = (char *)"-o";
-        args[n++] = binary;
-        for (i = 0; csih_tui[i]; i++) args[n++] = (char *)csih_tui[i];
-        spawn(script, compiler, args, n, 14, ebuf, sizeof ebuf, &rc, &timed);
-        if (rc != 0 || timed) die("context build failed");
-    }
-    {
-        size_t el = 0;
-        unsigned char *e = read_file(errp, &el);
-        if (e && el) die("context build wrote stderr");
-        free(e);
-        rm_rf(errp);
-    }
+    install_tui(binary);
+    (void)args; (void)n; (void)ebuf; (void)rc; (void)timed;
 
     memset(&priv_before, 0, sizeof priv_before);
     walk(&priv_before, source, 0);
@@ -537,15 +534,13 @@ int main(void) {
             unsigned char raw[400];
             size_t rl = 0;
             int stamp = (m == 8 || m == 9) ? 109 : 100 + m;
-            struct utimbuf ut;
             make_body(m, raw, &rl);
             memcpy(bodies_raw[m], raw, rl);
             bodies_len[m] = rl;
             memcpy(bodies_text[m], raw, rl);
             bodies_text[m][rl] = 0;
             if (notice_file(done, m, "sess", path, sizeof path) != 0) die("notice write");
-            ut.actime = ut.modtime = stamp;
-            utime(path, &ut);
+            aw_utime(path, stamp);
             if (m == 8) snprintf(file8, sizeof file8, "%s", path);
         }
     }

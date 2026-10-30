@@ -1,35 +1,26 @@
+#pragma unisa use agentwit
 /* CX probe */
-/* agent_loop_bound.c — C port of probes/agent_loop_bound.py (working-tree version).
+/* agent_loop_bound.cx — port of probes/agent_loop_bound.py (run with -run; upper
+ * root, no includes: the stub's sockets are agentwit's).
  *
- * Builds the csih agent once with unisacc (-include globals + AGENT list), then
- * runs it per case against a forked C HTTP stub that serves canned chat
- * completions. Blocked by decision A: the stubs still use the old answer format
- * (no claims/observation_refs); expectations are unchanged.
+ * Gates the csih agent build once (`-run agent_cli.cx -- build-check`, cwd = the
+ * app dir: rc 64 with the usage line and an empty stderr), then runs
+ * `-run agent_cli.cx -- agent PROMPT` (same cwd, so the -run cache is shared)
+ * per case against a forked HTTP stub that serves canned chat completions.
+ * Blocked by decision A: the stubs still use the old answer format (no
+ * claims/observation_refs); expectations are unchanged.
  *
- *   /bin/sh /Users/wjc/repos/unisacc/unisacc.com <-include ...> -o OUT <AGENT>
- *   OUT agent PROMPT
- *
+ * Run from the app dir (apps/csih), or set CSIH_APP to it; UNISACC (else
+ * ../../unisacc.com) is the compiler.
  * Verdict: last line "TOTAL PASS n" or "TOTAL FAIL n"; rc 0 / 1.
  * Optional argv: case names to run (same selector as the Python).
  * Temp dirs use $TMPDIR (fallback /tmp), like Python tempfile.
  */
-#include <arpa/inet.h>
-#include <dirent.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <netinet/in.h>
-#include <signal.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
-#include <sys/wait.h>
-#include <unistd.h>
-#include "csih_flat.h"
-#include "unisa_safedel.h"
 
-#define LB_UNISACC CSIH_ROOT "/unisacc.com"
+static char CSIH_APP[4096];   /* absolute app dir */
+static char LB_UNISACC[4200]; /* <app>/../../unisacc.com: the frozen compiler */
+static char LB_SELF[4200];    /* this probe source */
+static const char *LB_RUN;    /* the compiler that runs the agent (UNISACC) */
 #define LB_PORT_LO 19100
 #define LB_PORT_HI 19149
 #define CONT "{\"go\":\"continue\"}"
@@ -62,18 +53,7 @@ static void *xmalloc(size_t n) {
 }
 
 static unsigned char *read_file(const char *path, size_t *len) {
-    FILE *f = fopen(path, "rb");
-    unsigned char *buf;
-    long sz;
-    if (!f) return NULL;
-    fseek(f, 0, SEEK_END);
-    sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    buf = xmalloc((size_t)sz);
-    if (sz > 0 && fread(buf, 1, (size_t)sz, f) != (size_t)sz) { fclose(f); free(buf); return NULL; }
-    fclose(f);
-    *len = (size_t)sz;
-    return buf;
+    return (unsigned char *)cx_read(path, len);
 }
 
 static int ends(const char *s, const char *suf) {
@@ -149,7 +129,7 @@ static void snap_hashes(snap_t *s) {
     memset(s, 0, sizeof *s);
     walk(s, CSIH_APP, 1);
     snap_add(s, LB_UNISACC);
-    snap_add(s, CSIH_APP "/probes/agent_loop_bound.cx");
+    snap_add(s, LB_SELF);
 }
 
 /* ---------- process helpers ---------- */
@@ -227,12 +207,9 @@ static const char *tmpbase(void) {
     return (t && t[0]) ? t : "/tmp";
 }
 
-/* every deletion goes through the one guard (include/unisa_safedel.h, embedded in unisacc.com; commissar ruling
+/* every deletion goes through the one guard (cx_rmtree over include/unisa_safedel.h; commissar ruling
    2026-10-23): refused, with its one-line reason on stderr, unless under the temp root or a repository's out/ */
-static void safedel_purge(const char *p) {
-    char why[700];
-    if (unisa_safedel(p, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 0, why, (int)sizeof why)) fprintf(stderr, "safedel: %s\n", why);
-}
+static void safedel_purge(const char *p) { cx_rmtree(p); }
 static void rm_rf(const char *path) { safedel_purge(path); }
 
 static int read_int(const char *path) {
@@ -247,22 +224,32 @@ static int read_int(const char *path) {
 
 /* ---------- csih agent build ---------- */
 
-static int build_bin(const char *out_bin) {
-    char script[1024], errp[1024], *args[64];
+/* The agent's module graph compiles clean: an unknown subcommand prints the
+ * usage line and exits 64; stderr (compiler diagnostics included) must be empty.
+ * The compile lands in unisacc's -run cache (keyed by cwd + root path + content),
+ * which every case below then hits from the same cwd. */
+static int build_bin(const char *dir) {
+    char script[1024], errp[1024], *args[8];
     char ebuf[256];
-    int n = 0, i, rc = -1, timed = 0;
+    int rc = -1, timed = 0;
     size_t elen = 0;
     unsigned char *e;
-    snprintf(errp, sizeof errp, "%s/build-err.txt", tmpbase());
+    snprintf(errp, sizeof errp, "%s/build-err.txt", dir);
     snprintf(script, sizeof script, "cd '%s' && exec /bin/sh \"$0\" \"$@\" 2>'%s'", CSIH_APP, errp);
-    for (i = 0; csih_global_include_args[i]; i++) args[n++] = (char *)csih_global_include_args[i];
-    args[n++] = (char *)"-o";
-    args[n++] = (char *)out_bin;
-    for (i = 0; csih_agent[i]; i++) args[n++] = (char *)csih_agent[i];
-    spawn(script, LB_UNISACC, args, n, 180, ebuf, sizeof ebuf, &rc, &timed);
-    if (rc != 0 || timed) return -1;
+    args[0] = (char *)"-run";
+    args[1] = (char *)"agent_cli.cx";
+    args[2] = (char *)"--";
+    args[3] = (char *)"build-check";
+    spawn(script, LB_RUN, args, 4, 50, ebuf, sizeof ebuf, &rc, &timed);
+    if (rc != 64 || timed || !strstr(ebuf, "usage: agent_cli")) {
+        printf("build rc=%d timed=%d out=%.200s\n", rc, timed, ebuf);
+        return -1;
+    }
     e = read_file(errp, &elen);
-    if (e) { free(e); if (elen) return -1; }
+    if (!e) return -1;
+    if (elen) printf("build stderr: %.400s\n", (char *)e);
+    free(e);
+    if (elen) return -1;
     safedel_purge(errp);
     return 0;
 }
@@ -323,7 +310,7 @@ static char *json_wrap(const char *content) {
 
 static void send_all(int fd, const char *b, size_t n) {
     while (n > 0) {
-        ssize_t k = write(fd, b, n);
+        ssize_t k = (ssize_t)aw_send(fd, b, (long)n);
         if (k < 0) { if (errno == EINTR) continue; return; }
         b += k;
         n -= (size_t)k;
@@ -338,7 +325,7 @@ static void stub_one(int c, const stub_t *st, int *count) {
         ssize_t k;
         if (hend && len >= need) break;
         if (len + 1 >= sizeof buf) return;
-        k = recv(c, buf + len, sizeof buf - 1 - len, 0);
+        k = (ssize_t)aw_recv(c, buf + len, (long)(sizeof buf - 1 - len));
         if (k < 0 && errno == EINTR) continue;
         if (k <= 0) return;
         len += (size_t)k;
@@ -370,7 +357,7 @@ static void stub_one(int c, const stub_t *st, int *count) {
 static void stub_serve(const stub_t *st) {
     int count = 0;
     for (;;) {
-        int c = accept(st->lsock, NULL, NULL);
+        int c = aw_accept(st->lsock);
         if (c < 0) { if (errno == EINTR) continue; _exit(0); }
         stub_one(c, st, &count);
         close(c);
@@ -378,23 +365,9 @@ static void stub_serve(const stub_t *st) {
 }
 
 static int listen_local(int *port) {
-    int p;
-    for (p = LB_PORT_LO; p <= LB_PORT_HI; p++) {
-        struct sockaddr_in a;
-        int one = 1;
-        int s = socket(AF_INET, SOCK_STREAM, 0);
-        if (s < 0) return -1;
-        setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-        memset(&a, 0, sizeof a);
-        a.sin_family = AF_INET;
-        a.sin_port = htons((unsigned short)p);
-        a.sin_addr.s_addr = htonl(0x7f000001);
-        if (bind(s, (struct sockaddr *)&a, sizeof a) == 0 && listen(s, 16) == 0) {
-            *port = p;
-            return s;
-        }
-        close(s);
-    }
+    int s = -1;
+    if (aw_listen(LB_PORT_LO, LB_PORT_HI, port, &s) == 0) return s;
+    if (s >= 0) close(s);
     return -1;
 }
 
@@ -528,7 +501,7 @@ static int run_case(const row_t *r, const char *bin) {
     size_t tlen = 0;
     int lsock, port = 0, rc = 0, timed = 0, reqs = 0, ok, i;
     pid_t stub;
-    char *args[4];
+    char *args[8];
     char *s;
     int watch = pick(r->name, "watch") && !strncmp(r->name, "watch", 5);
 
@@ -575,11 +548,14 @@ static int run_case(const row_t *r, const char *bin) {
              "unset OPENAI_API_KEY http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY CSIH_ROLE CSIH_PEER; "
              "export HOME='%s' DEEPSEEK_API_KEY='LOCAL_STUB_ONLY' NO_PROXY='127.0.0.1,localhost' no_proxy='127.0.0.1,localhost' "
              "CSIH_ENDPOINT='%s' CSIH_MODEL='stub' CSIH_CWD='%s' CSIH_TRANSCRIPT='%s'; %s"
-             "cd '%s' && exec \"$0\" \"$@\"",
+             "cd '%s' && exec /bin/sh \"$0\" \"$@\"",
              home, ep, cwd, trace, extra, CSIH_APP);
-    args[0] = (char *)"agent";
-    args[1] = (char *)r->prompt;
-    spawn(script, bin, args, 2, 9, out, sizeof out, &rc, &timed);
+    args[0] = (char *)"-run";
+    args[1] = (char *)"agent_cli.cx";
+    args[2] = (char *)"--";
+    args[3] = (char *)"agent";
+    args[4] = (char *)r->prompt;
+    spawn(script, bin, args, 5, 9, out, sizeof out, &rc, &timed);
     if (timed) rc = -1;
     kill(stub, SIGKILL);
     waitpid(stub, NULL, 0);
@@ -668,10 +644,19 @@ int main(int argc, char **argv) {
         rows[nrows].prompt = pr; rows[nrows].reqs = rq; rows[nrows].rc = rcode; \
         rows[nrows].red = rd; rows[nrows].extra_env = ex; nrows++; } while (0)
 
+    {
+        const char *app = getenv("CSIH_APP"), *u = getenv("UNISACC");
+        if (app && app[0]) snprintf(CSIH_APP, sizeof CSIH_APP, "%s", app);
+        else if (!getcwd(CSIH_APP, sizeof CSIH_APP)) die("getcwd");
+        if (CSIH_APP[0] != '/') die("app dir must be absolute");
+        snprintf(LB_UNISACC, sizeof LB_UNISACC, "%s/../../unisacc.com", CSIH_APP);
+        snprintf(LB_SELF, sizeof LB_SELF, "%s/probes/agent_loop_bound.cx", CSIH_APP);
+        LB_RUN = (u && u[0]) ? u : LB_UNISACC;
+    }
     snprintf(bindir, sizeof bindir, "%s/csih-loop-bin-XXXXXX", tmpbase());
     if (!mkdtemp(bindir)) die("mkdtemp bin");
-    snprintf(bin, sizeof bin, "%s/agent-bin", bindir);
-    if (build_bin(bin) != 0) die("agent build (no -include leak, rc/stderr)");
+    snprintf(bin, sizeof bin, "%s", LB_RUN);
+    if (build_bin(bindir) != 0) die("agent build (no -include leak, rc/stderr)");
 
     ROW("outcome_failed", 2, "do it", 1, 1, 0, NULL, FAILED_A, STOP_A);
     ROW("outcome_partial", 2, "do it", 1, 1, 0, NULL, PARTIAL_A, STOP_A);

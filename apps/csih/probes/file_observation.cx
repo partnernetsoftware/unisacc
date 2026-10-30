@@ -1,3 +1,5 @@
+#pragma unisa use agentwit
+#pragma unisa use netwit
 /* CX probe */
 /* file_observation.c — C port of probes/file_observation.py.
  * Real native file windows and HTTP presentation; no semantic-model claim.
@@ -12,28 +14,21 @@
  *  - the local HTTP stub is a forked C server on 127.0.0.1:19200..19202.
  *  - timeout kill is SIGKILL on the direct child (unisacc has no killpg/setsid).
  *  - no --receipt file is written.
+ *
+ * CX (run with -run from the app dir, or set CSIH_APP; upper root, no includes:
+ * sockets and time are agentwit's, the port wait netwit's):
+ *  - scratch: PROBE_SCRATCH, else $TMPDIR, else /tmp.
+ *  - the work tree is the fixed per-uid SCRATCH/csih-probe-build-UID/file_observation,
+ *    cleared at the start and removed at the end: unisacc's -run cache is keyed by
+ *    cwd + root path + content, so a fixed path keeps the injected agent's ~28s cold
+ *    compile to the first run after a source change (~1.2s hot); every case still runs.
+ *  - the agent is `<compiler copy> -run source/agent_cli.cx -- ...` with cwd = the
+ *    work tree; the build gate is `-- build-check` (rc 64, usage line, empty stderr).
  */
-#include <arpa/inet.h>
-#include <ctype.h>
-#include <dirent.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <netinet/in.h>
-#include <signal.h>
-#include <stdarg.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
-#include <sys/time.h>
-#include <sys/wait.h>
-#include <time.h>
-#include <unistd.h>
-#include "csih_flat.h"
 
-#define PROBE_SRC CSIH_APP "/probes/file_observation.cx"
-#define UNISACC_PATH CSIH_ROOT "/unisacc.com"
+static char CSIH_APP[4096];      /* absolute app dir */
+static char PROBE_SRC[4200];     /* this probe source */
+static char UNISACC_PATH[4200];  /* <app>/../../unisacc.com: the frozen compiler */
 #define PORT_WIRE 19200
 #define PORT_JUDGE 19201
 #define PORT_CAPACITY 19202
@@ -372,32 +367,10 @@ static int jeq(jn *a, jn *b) {
 
 /* ---------- files ---------- */
 static char *readall(const char *path, size_t *len) {
-    FILE *f = fopen(path, "rb");
-    size_t cap = 65536, n = 0, k;
-    char *b;
-    if (!f) return NULL;
-    b = malloc(cap + 1);
-    for (;;) {
-        if (n + 65536 > cap) {
-            cap *= 2;
-            b = realloc(b, cap + 1);
-        }
-        k = fread(b + n, 1, 65536, f);
-        n += k;
-        if (k < 65536) break;
-    }
-    fclose(f);
-    b[n] = 0;
-    if (len) *len = n;
-    return b;
+    return cx_read(path, len);
 }
 static int writeall(const char *path, const void *d, size_t n) {
-    FILE *f = fopen(path, "wb");
-    size_t k;
-    if (!f) return -1;
-    k = n ? fwrite(d, 1, n, f) : 0;
-    if (fclose(f) != 0 || k != n) return -1;
-    return 0;
+    return cx_write(path, d, n);
 }
 static int mkdirp(const char *path) {
     char tmp[1024];
@@ -504,7 +477,7 @@ static char *make_script(const char *cwd, const char **kv) {
     }
     sb_puts(&s, "cd ");
     sq(&s, cwd);
-    sb_puts(&s, " && exec \"$0\" \"$@\"");
+    sb_puts(&s, " && exec /bin/sh \"$0\" -run source/agent_cli.cx -- \"$@\"");
     return s.p;
 }
 static int run_proc(const char *script, const char *bin, char **args, int nargs,
@@ -512,7 +485,7 @@ static int run_proc(const char *script, const char *bin, char **args, int nargs,
     pid_t pid;
     int st = 0, i, n = 0;
     char *av[40];
-    struct timeval t0, t1;
+    double t0;
     memset(r, 0, sizeof *r);
     av[n++] = (char *)"sh";
     av[n++] = (char *)"-c";
@@ -523,7 +496,9 @@ static int run_proc(const char *script, const char *bin, char **args, int nargs,
     pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) {
-        int fd = open("/dev/null", O_RDONLY);
+        int fd;
+        setpgid(0, 0);
+        fd = open("/dev/null", O_RDONLY);
         if (fd >= 0) { dup2(fd, 0); close(fd); }
         fd = open(outp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
         if (fd >= 0) { dup2(fd, 1); close(fd); }
@@ -532,16 +507,16 @@ static int run_proc(const char *script, const char *bin, char **args, int nargs,
         execv("/bin/sh", av);
         _exit(127);
     }
-    gettimeofday(&t0, NULL);
+    setpgid(pid, pid);
+    t0 = aw_now_s();
     for (;;) {
         pid_t w = waitpid(pid, &st, WNOHANG);
         long ms;
         if (w == pid) break;
         if (w < 0) return -1;
-        gettimeofday(&t1, NULL);
-        ms = (long)(t1.tv_sec - t0.tv_sec) * 1000L + (long)(t1.tv_usec - t0.tv_usec) / 1000L;
+        ms = (long)((aw_now_s() - t0) * 1000.0);
         if (ms >= (long)secs * 1000L) {
-            kill(pid, SIGKILL);
+            kill(-pid, SIGKILL);   /* its group: the compiler and the program it runs */
             waitpid(pid, &st, 0);
             r->timed = 1;
             break;
@@ -580,7 +555,7 @@ static char *read_http_body(int c, size_t *blen) {
     size_t hdr = 0, want = 0;
     int have_hdr = 0;
     for (;;) {
-        ssize_t k = read(c, tmp, sizeof tmp);
+        ssize_t k = (ssize_t)aw_recv(c, tmp, (long)sizeof tmp);
         if (k <= 0) break;
         sb_put(&b, tmp, (size_t)k);
         if (!have_hdr) {
@@ -599,7 +574,7 @@ static char *read_http_body(int c, size_t *blen) {
 }
 static void send_all(int c, const char *d, size_t n) {
     while (n) {
-        ssize_t k = write(c, d, n);
+        ssize_t k = (ssize_t)aw_send(c, d, (long)n);
         if (k <= 0) return;
         d += k;
         n -= (size_t)k;
@@ -616,21 +591,13 @@ static void respond_http(int c, const char *content, size_t cl) {
     send_all(c, w.p, w.n);
 }
 static void serve_child(int port, const char *dir, respond_fn fn) {
-    int ls, one = 1, n = 0;
-    struct sockaddr_in a;
-    /* SIGPIPE = 13 on darwin; signal() with SIG_IGN is the unisacc-supported form */
+    int ls = -1, n = 0, bound = 0;
+    /* SIGPIPE = 13 on darwin; signal() with SIG_IGN is the unisacc-supported form
+     * (aw_send also passes MSG_NOSIGNAL) */
     signal(13, (void (*)(int))1);
-    ls = socket(AF_INET, SOCK_STREAM, 0);
-    if (ls < 0) _exit(3);
-    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-    memset(&a, 0, sizeof a);
-    a.sin_family = AF_INET;
-    a.sin_port = htons((unsigned short)port);
-    a.sin_addr.s_addr = htonl(0x7f000001);
-    if (bind(ls, (struct sockaddr *)&a, sizeof a) != 0) _exit(3);
-    if (listen(ls, 8) != 0) _exit(3);
+    if (aw_listen(port, port, &bound, &ls) != 0) _exit(3);
     for (;;) {
-        int c = accept(ls, NULL, NULL);
+        int c = aw_accept(ls);
         size_t bl = 0, cl = 0;
         char *body, *content;
         char path[1100];
@@ -654,20 +621,7 @@ static pid_t start_server(int port, const char *dir, respond_fn fn) {
     return pid;
 }
 static int wait_port(int port) {
-    int i;
-    for (i = 0; i < 50; i++) {
-        int s = socket(AF_INET, SOCK_STREAM, 0);
-        struct sockaddr_in a;
-        if (s < 0) return -1;
-        memset(&a, 0, sizeof a);
-        a.sin_family = AF_INET;
-        a.sin_port = htons((unsigned short)port);
-        a.sin_addr.s_addr = htonl(0x7f000001);
-        if (connect(s, (struct sockaddr *)&a, sizeof a) == 0) { close(s); return 0; }
-        close(s);
-        usleep(100000);
-    }
-    return -1;
+    return nw_wait_port(port, 5000);   /* 50 tries x 100ms, as before */
 }
 static void stop_server(pid_t pid) {
     int st;
@@ -835,9 +789,16 @@ static char *respond_judge(int n, const char *body, size_t bl, size_t *outl) {
         sb_jstr(&s, g_middle, strlen(g_middle));
         sb_puts(&s, ",\"line\":130,\"n\":40,\"max_bytes\":8192}");
     } else if (n == 2) {
+        /* the current answer protocol: a completed answer after tool use carries
+         * claims + observation_refs grounded in this turn's evidence IDs */
+        const char *rid = ids.n ? ids.v[0] : g_record_id;
         sb_puts(&s, "{\"act\":\"answer\",\"outcome\":\"completed\",\"text\":\"observed bounded marker\",\"evidence\":");
         sl_json(&s, &ids);
-        sb_puts(&s, "}");
+        sb_puts(&s, ",\"claims\":[{\"id\":\"c1\",\"text\":\"line 150 holds the marker\",\"scope\":\"middle.txt\","
+                    "\"state\":\"supported\",\"support\":[0],\"counter\":[],\"unknown\":\"\"}],"
+                    "\"observation_refs\":[{\"id\":");
+        sb_jstr(&s, rid, strlen(rid));
+        sb_puts(&s, ",\"start\":0,\"end\":0,\"layer\":\"tool_output\",\"json_pointer\":null,\"quote\":\"ACTIVATED_COMMITTED\"}]}");
     } else {
         sb_puts(&s, "{\"go\":\"stop\",\"acceptance\":\"accepted\",\"scope\":\"work\",\"evidence\":");
         if (ids.n) sl_json(&s, &ids);
@@ -1047,6 +1008,7 @@ static int case_extra(const char *mode) {
     if (g_mode == 1) {
         jn *reqpacket;
         sbuf packet = {0, 0, 0};
+        if (!(r.rc == 0 && nreq == 3)) printf("  judge run: rc=%d timed=%d requests=%d\n...%s\n", r.rc, r.timed, nreq, r.out + (r.outn > 2500 ? r.outn - 2500 : 0));
         NEED(r.rc == 0 && nreq == 3, "judge run rc must be 0 and 3 requests");
         for (i = 0; i < nrec; i++) if (jget(recs[i], "read_call")) { tools_first = recs[i]; ntools++; }
         NEED(ntools == 1, "judge run must have exactly one read record");
@@ -1106,11 +1068,26 @@ static int probe(void) {
 
     before = take_snapshot();
     scratch = getenv("PROBE_SCRATCH");
-    NEED(scratch && scratch[0], "set PROBE_SCRATCH to a writable scratch directory");
-    snprintf(g_root, sizeof g_root, "%s/file_observation-%ld-%ld", scratch, (long)getpid(), (long)time(NULL));
+    if (!scratch || !scratch[0]) scratch = getenv("TMPDIR");
+    if (!scratch || !scratch[0]) scratch = "/tmp";
+    snprintf(g_root, sizeof g_root, "%s/csih-probe-build-%d/file_observation", scratch, (int)getuid());
+    {
+        struct stat rs;
+        if (lstat(g_root, &rs) == 0) NEED(cx_rmtree(g_root) == 0, "cannot clear the work tree");
+    }
     NEED(mkdirp(g_root) == 0, "mkdir root");
-    snprintf(g_home, sizeof g_home, "%s/home", g_root);
-    NEED(mkdirp(g_home) == 0, "mkdir home");
+    /* HOME must not lie under the temp root: the agent selftest's sandbox keeps
+     * /tmp writable, so its "home outside cwd is read-only" row cannot hold there.
+     * HOME is a mkdtemp under <repo>/out/ (git-ignored, a deletion-guard root). */
+    {
+        char repo[4096], t[4300];
+        snprintf(t, sizeof t, "%s/../..", CSIH_APP);
+        NEED(realpath(t, repo) != NULL, "repo root");
+        snprintf(t, sizeof t, "%s/out", repo);
+        mkdir(t, 0755);
+        snprintf(g_home, sizeof g_home, "%s/out/csih-file-observation-home-XXXXXX", repo);
+        NEED(mkdtemp(g_home) != NULL, "mkdir home");
+    }
     snprintf(g_src, sizeof g_src, "%s/source", g_root);
     NEED(mkdirp(g_src) == 0, "mkdir source");
     snprintf(g_bin, sizeof g_bin, "%s/agent", g_root);
@@ -1182,33 +1159,21 @@ static int probe(void) {
         NEED(u != NULL, "unisacc.com unreadable");
         NEED(writeall(g_comp, u, cl) == 0, "compiler copy");
     }
-    /* build the agent from the copied source tree */
+    /* build the agent from the copied source tree: the -run compile of the
+     * injected source; an unknown subcommand gives the usage line and rc 64 */
     {
-        const char *bkv[2];
-        char *script;
-        char *bargs[64];
-        int nb = 0, k;
-        bkv[0] = NULL;
-        script = (char *)malloc(1024);
-        snprintf(script, 1024, "cd %s && exec /bin/sh \"$0\" \"$@\"", "'' ");
-        {
-            sbuf s = {0, 0, 0};
-            sb_puts(&s, "cd ");
-            sq(&s, g_src);
-            sb_puts(&s, " && exec /bin/sh \"$0\" \"$@\"");
-            script = s.p;
-        }
-        for (k = 0; csih_global_include_args[k]; k++) bargs[nb++] = (char *)csih_global_include_args[k];
-        bargs[nb++] = (char *)"-o";
-        bargs[nb++] = g_bin;
-        for (k = 0; csih_agent[k]; k++) bargs[nb++] = (char *)csih_agent[k];
-        NEED(run_proc(script, g_comp, bargs, nb, g_rp_out, g_rp_err, 14, &r) == 0, "build did not start");
-        NEED(r.rc == 0 && !r.timed, "build rc must be 0");
+        char *bargs[2];
+        snprintf(g_bin, sizeof g_bin, "%s", g_comp);
+        bargs[0] = (char *)"build-check";
+        NEED(run_proc(make_script(g_root, g_kv_home), g_bin, bargs, 1, g_rp_out, g_rp_err, 50, &r) == 0, "build did not start");
+        if (r.errn) printf("  build stderr: %.400s\n", r.err);
+        NEED(r.rc == 64 && !r.timed && bfind(r.out, r.outn, "usage: agent_cli", 16) != NULL, "build gate: rc must be 64 with the usage line");
         NEED(r.errn == 0, "build stderr must be empty");
     }
     /* selftest */
     args[0] = (char *)"selftest";
     NEED(run_proc(make_script(g_root, g_kv_home), g_bin, args, 1, g_rp_out, g_rp_err, 9, &r) == 0, "selftest did not start");
+    if (r.rc != 0) printf("  selftest rc=%d timed=%d\n...%s\n%.600s\n", r.rc, r.timed, r.out + (r.outn > 3000 ? r.outn - 3000 : 0), r.err);
     NEED(r.rc == 0 && bfind(r.out, r.outn, "agent: all cases pass", strlen("agent: all cases pass")) != NULL, "selftest failed");
     printf("  ok    selftest: agent: all cases pass\n");
     (void)nargs;
@@ -1268,10 +1233,14 @@ static int probe(void) {
     (void)nlong;
     after = take_snapshot();
     if (!snap_same(&before, &after)) { snprintf(g_why, sizeof g_why, "frozen snapshot changed"); ok = 0; }
+    cx_rmtree(g_root);
+    cx_rmtree(g_home);
     return ok ? 0 : 1;
 fail:
     after = take_snapshot();
     (void)after;
+    if (g_root[0]) cx_rmtree(g_root);
+    if (g_home[0] && g_home[strlen(g_home) - 1] != 'X') cx_rmtree(g_home);
     return 1;
 }
 
@@ -1280,6 +1249,14 @@ int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
     g_why[0] = 0;
+    {
+        const char *app = getenv("CSIH_APP");
+        if (app && app[0]) snprintf(CSIH_APP, sizeof CSIH_APP, "%s", app);
+        else if (!getcwd(CSIH_APP, sizeof CSIH_APP)) { printf("FAIL getcwd\n"); return 1; }
+        if (CSIH_APP[0] != '/') { printf("FAIL app dir must be absolute\n"); return 1; }
+        snprintf(PROBE_SRC, sizeof PROBE_SRC, "%s/probes/file_observation.cx", CSIH_APP);
+        snprintf(UNISACC_PATH, sizeof UNISACC_PATH, "%s/../../unisacc.com", CSIH_APP);
+    }
     rc = probe();
     if (rc != 0) printf("  FAIL  %s\n", g_why[0] ? g_why : "unknown");
     printf("%s\n", rc == 0 ? "PASS" : "FAIL");

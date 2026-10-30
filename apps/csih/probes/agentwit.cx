@@ -1,0 +1,69 @@
+#pragma unisa module agentwit
+/*
+ * agentwit.cx — what the csih agent/net probe roots need beyond the cx prelude,
+ * so those roots stay include-free (upper modules: pragma only).
+ * Lower: <arpa/inet.h>/<netinet/in.h>/<sys/socket.h> for the local HTTP stubs,
+ * <sys/time.h>/<time.h> for wall time, <utime.h> for fixture mtimes. The
+ * prelude carries none of them. No fd is closed here: the caller owns every
+ * descriptor these return and closes it itself.
+ *
+ * aw_listen(lo, hi, &port, &fd)  one socket bound to the first free port of
+ *                                127.0.0.1:[lo,hi] and listening; 0 ok, -1 not.
+ *                                *fd is the socket (or -1) either way
+ * aw_accept(fd)                  accept(2), no peer address
+ * aw_recv(fd, buf, n)            recv(2)
+ * aw_send(fd, buf, n)            send(2) with MSG_NOSIGNAL (a vanished peer
+ *                                must not kill the stub: signal() cannot
+ *                                ignore SIGPIPE under unisacc)
+ * aw_time()                      time(2), whole seconds
+ * aw_now_s()                     gettimeofday as seconds
+ * aw_utime(path, t)              atime = mtime = t
+ */
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <time.h>
+#include <utime.h>
+
+int aw_listen(int lo, int hi, int *port, int *fd) {
+    int p, one = 1;
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    *fd = s;
+    if (s < 0) return -1;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    /* a failed bind leaves the socket unbound, so the same socket tries the next port */
+    for (p = lo; p <= hi; p++) {
+        struct sockaddr_in a = {0};
+        a.sin_family = AF_INET;
+        a.sin_port = htons((unsigned short)p);
+        a.sin_addr.s_addr = htonl(0x7f000001);
+        if (bind(s, (struct sockaddr *)&a, sizeof a) == 0) {
+            if (listen(s, 16) != 0) return -1;
+            *port = p;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+int aw_accept(int fd) { return accept(fd, NULL, NULL); }
+
+long aw_recv(int fd, void *buf, long n) { return (long)recv(fd, buf, (size_t)n, 0); }
+
+long aw_send(int fd, const void *buf, long n) { return (long)send(fd, buf, (size_t)n, MSG_NOSIGNAL); }
+
+long aw_time(void) { return (long)time(NULL); }
+
+double aw_now_s(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (double)tv.tv_sec + (double)tv.tv_usec / 1e6;
+}
+
+int aw_utime(const char *path, long t) {
+    struct utimbuf ut;
+    ut.actime = (time_t)t;
+    ut.modtime = (time_t)t;
+    return utime(path, &ut);
+}
