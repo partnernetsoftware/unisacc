@@ -4,10 +4,12 @@
      sh ./unisacc.com tools/refactor.cx -- find [--auto] RULES FILE...   > CANDIDATES.tsv
      sh ./unisacc.com tools/refactor.cx -- apply CANDIDATES.tsv JOBS VERIFY...
 
-   RULES (TSV, '#' comments): id  call  prefix  argc  template  use  class
+   RULES (TSV, '#' comments): id  call  prefix  argc  template  use  class  [context]
      call     the called name; prefix: the characters that must sit right before it ('-': none), replaced too;
      argc     top-level argument count; template: the replacement, $1..$9 the arguments (trimmed);
-     use      a module the replacement needs ('-': none), e.g. text.text; class: safe | review.
+     use      a module the replacement needs ('-': none), e.g. text.text; class: safe | review;
+     context  any (default) | truth: the call's value must be used only as a truth value -- the whole
+              condition of if (...) / while (...), or an operand of && / || followed by ) && || ? ; , or :.
    CANDIDATES (TSV): verdict  file  offset  line  rule  class  why  original  replacement  use
      find writes verdict "accept" for safe rows under --auto, else "-"; apply takes only "accept" rows.
      Tabs, newlines and backslashes inside fields are written as \t \n \\.
@@ -78,17 +80,20 @@ static int split(char *line, char **f, int maxf) {
 }
 
 /* ---------- rules ---------- */
-typedef struct { char *id, *call, *prefix, *tmpl, *use, *cls; int argc; } Rule;
+typedef struct { char *id, *call, *prefix, *tmpl, *use, *cls; int argc, truth; } Rule;
 static Rule rules[MAXRULE];
 static int nrules;
 static void load_rules(const char *path) {
-    size_t n; char *b = cx_read(path, &n), *line, *e, *f[8]; long i = 0;
+    size_t n; char *b = cx_read(path, &n), *line, *e, *f[9]; long i = 0; int nf;
     if (!b) die("cannot read the rules");
     while (i < (long)n) {
         line = b + i; e = line; while (*e && *e != '\n') e++;
         i = (long)(e - b) + 1; *e = 0;
         if (!*line || *line == '#') continue;
-        if (nrules == MAXRULE || split(line, f, 8) != 7) die("rules: want 7 fields: id call prefix argc template use class");
+        nf = split(line, f, 9);
+        if (nrules == MAXRULE || (nf != 7 && nf != 8)) die("rules: want 7 or 8 fields: id call prefix argc template use class [context]");
+        if (nf == 8 && !tx_eq(f[7], "any", 8) && !tx_eq(f[7], "truth", 8)) die("rules: context is any or truth");
+        rules[nrules].truth = nf == 8 && tx_eq(f[7], "truth", 8);
         rules[nrules].id = f[0]; rules[nrules].call = f[1];
         rules[nrules].prefix = tx_eq(f[2], "-", 4) ? "" : f[2];
         rules[nrules].argc = (int)strtol(f[3], 0, 10);
@@ -124,6 +129,26 @@ static int has_use(const char *src, long n, const char *use) {
 
 /* ---------- find ---------- */
 static long skip_ws(const char *b, long i, long n) { while (i < n && (b[i] == ' ' || b[i] == '\t' || b[i] == '\n' || b[i] == '\r')) i++; return i; }
+static long skip_ws_back(const char *b, long i) { while (i >= 0 && (b[i] == ' ' || b[i] == '\t' || b[i] == '\n' || b[i] == '\r')) i--; return i; }
+/* 1 when b[ps..close] is used only as a truth value (see context in the header): what precedes it is
+   && or || or the '(' of if / while, and what follows binds no tighter than && */
+static int truth_context(const char *b, long n, long ps, long close) {
+    long p = skip_ws_back(b, ps - 1), q = skip_ws(b, close + 1, n), k, e;
+    int paren = 0;
+    if (p >= 1 && ((b[p] == '&' && b[p - 1] == '&') || (b[p] == '|' && b[p - 1] == '|'))) {
+        if (p >= 2 && (b[p - 2] == '&' || b[p - 2] == '|')) return 0;
+    } else if (p >= 0 && b[p] == '(') {
+        e = skip_ws_back(b, p - 1); k = e;
+        while (k >= 0 && is_id((unsigned char)b[k])) k--;
+        if (!tx_same(b + k + 1, e - k, "if", 2) && !tx_same(b + k + 1, e - k, "while", 5)) return 0;
+        paren = 1;
+    } else return 0;
+    if (q >= n) return 0;
+    if (b[q] == ')') return 1;
+    if (q + 1 < n && ((b[q] == '&' && b[q + 1] == '&') || (b[q] == '|' && b[q + 1] == '|'))) return 1;
+    if (paren) return 0;   /* if (call ? ...) and the like: leave to a person */
+    return b[q] == '?' || b[q] == ';' || b[q] == ',' || b[q] == ':';
+}
 
 /* From the '(' at P, find the matching ')' and the top-level argument spans. -1 when unbalanced. */
 static long parse_args(const char *b, long p, long n, long *as, long *ae, int *na, int *multiline, int *comment) {
@@ -202,6 +227,7 @@ static int find_file(Buf *out, const char *file, int autoacc) {
                 }
                 close = parse_args(b, j, n, as, ae, &na, &ml, &cm);
                 if (close < 0 || na != R->argc) continue;
+                if (R->truth && !truth_context(b, n, ps, close)) continue;
                 render(&rep, R->tmpl, b, as, ae);
                 cls = R->cls; why = "rule";
                 if (ml) { cls = "review"; why = "spans lines"; }
