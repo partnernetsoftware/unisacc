@@ -1,0 +1,213 @@
+/* Checks tools/symindex.cx: sh ./unisacc.com tools/check-symindex.cx   (from the repo root)
+   On the fixtures under tools/symindex/fixture/, with its own index in out/check-symindex-PID/:
+   the first update parses all 5 files, the second none and hashes none; dump gives the exact rows of
+   facts.cx (module, use, macros with and without parameters, typedef / struct tag / function-pointer
+   typedef names, static, variadic and double definitions, a two-line prototype, a function-pointer
+   parameter, calls with a comment inside, a top-level macro call and initializer, nothing from the comment
+   or the string), of proto/lib.cx and proto/user.cx; undeclared on proto/user.cx and proto/direct.cx
+   reports exactly lib_num (DANGER double), lib_vec (INFO, a float pointer), lib_fmt (DANGER variadic) and
+   lib_count (INFO), none for direct.cx, lib_len (own prototype), mid_x (direct use) or lib_hidden
+   (static), rc 1; uses / users / def give the exact closure and rows; calls equals refactor.cx sites.
+   On a copy in out/: a same-size rewrite with its mtime put back passes the stat prefilter (the old facts
+   stay), update --verify prints STALE for it, re-parses it and the new facts appear; a size change is
+   re-parsed by the plain update.  Prints PASS/FAIL lines and CHECK_SYMINDEX<TAB>failed=N. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use text.text
+
+#define CAPOUT (1 << 20)
+static int failed;
+static char out[CAPOUT], err[65536], out2[CAPOUT];
+static char idx[512], list[512], idx2[512], list2[512], copy[512];
+
+static void ck(int ok, const char *name) { if (!ok) failed++; printf("%s\tsymindex.%s\n", ok ? "PASS" : "FAIL", name); }
+static int has(const char *s, const char *needle) { return tx_find(s, tx_len(s, CAPOUT), needle, tx_len(needle, 4096)) >= 0; }
+
+/* runs sh ./unisacc.com PROG -- A...; stdout into O, stderr into err; the exit code or -1 */
+static int run(const char *prog, char **args, char *o, long cap) {
+    char *argv[24]; int i = 0, k, ofd, efd, pid, ex = 0, code = 0, sig = 0; long n = 0, m = 0, r; char junk[4096];
+    argv[i++] = "sh"; argv[i++] = "./unisacc.com"; argv[i++] = (char *)prog; argv[i++] = "--";
+    for (k = 0; args[k] && i < 23; k++) argv[i++] = args[k];
+    argv[i] = 0;
+    pid = sy_spawn_pipe(argv, 0, SY_SPAWN_STDERR_SPLIT, &ofd, &efd);
+    if (pid < 0) return -1;
+    while ((r = sy_read(ofd, o + n, cap - 1 - n)) > 0) n += r;
+    o[n] = 0;
+    while (sy_read(ofd, junk, sizeof junk) > 0) {}
+    while ((r = sy_read(efd, err + m, (long)sizeof err - 1 - m)) > 0) m += r;
+    err[m] = 0;
+    while (sy_read(efd, junk, sizeof junk) > 0) {}
+    sy_close(ofd); sy_close(efd);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
+    return code;
+}
+/* symindex with the fixture index (SECOND: the copy's index) and up to 4 more words */
+static int si(int second, const char *a, const char *b, const char *c, const char *d) {
+    char *args[12]; int k = 0;
+    args[k++] = "--index"; args[k++] = second ? idx2 : idx; args[k++] = "--in"; args[k++] = second ? list2 : list;
+    if (a) args[k++] = (char *)a;
+    if (b) args[k++] = (char *)b;
+    if (c) args[k++] = (char *)c;
+    if (d) args[k++] = (char *)d;
+    args[k] = 0;
+    return run("tools/symindex.cx", args, out, CAPOUT);
+}
+/* the output after its first line (the FILE line of a dump) */
+static const char *body(const char *s) { long e = tx_chr(s, tx_len(s, CAPOUT), '\n'); return e < 0 ? "" : s + e + 1; }
+
+static const char *facts_rows =
+    "M\tfacts\n"
+    "U\ttext.text\n"
+    "X\tFX_LIMIT\t5\t0\n"
+    "X\tFX_TWICE\t6\t1\n"
+    "C\tFX_TWICE\t6\t1\t(x)\n"
+    "T\tfx_pair\t7\n"
+    "T\tfx_pair_t\t7\n"
+    "T\tfx_cb\t8\n"
+    "D\tfx_hidden\t9\t1\t1\t0\tstatic int\t(int v)\n"
+    "C\tFX_TWICE\t9\t1\t(v)\n"
+    "P\tfx_log\t10\t1\t0\t1\tint\t(const char *fmt, ...)\n"
+    "P\tfx_ratio\t11\t1\t0\t0\tdouble\t(long a,\\n                long b)\n"
+    "D\tfx_apply\t13\t1\t0\t0\tint\t(int (*fn)(int), int v)\n"
+    "C\tfn\t13\t1\t(v)\n"
+    "C\tfx_hidden\t13\t1\t(v)\n"
+    "D\tfx_ratio\t14\t1\t0\t0\tdouble\t(long a, long b)\n"
+    "C\tfx_scale\t16\t1\t('(')\n"
+    "D\tfx_log\t18\t1\t0\t1\tint\t(const char *fmt, ...)\n"
+    "C\tfx_count\t18\t0\t(FX_LIMIT, /* fx_fake3() */ 0)\n"
+    "D\tfx_multi\t20\t0\t0\t0\tint\t(int a, /* why */ int b)\n"
+    "C\tFX_REGISTER\t21\t1\t(fx_apply)\n"
+    "C\tfx_seed\t22\t1\t(1)\n";
+static const char *lib_rows =
+    "M\tlib\n"
+    "D\tlib_fmt\t3\t1\t0\t1\tint\t(char *dst, long cap, const char *fmt, ...)\n"
+    "D\tlib_num\t4\t1\t0\t0\tdouble\t(const char *s)\n"
+    "D\tlib_count\t5\t1\t0\t0\tlong\t(const char *s)\n"
+    "D\tlib_len\t6\t1\t0\t0\tlong\t(const char *s)\n"
+    "D\tlib_vec\t7\t1\t0\t0\tfloat *\t(void)\n"
+    "D\tlib_hidden\t8\t1\t1\t0\tstatic int\t(void)\n";
+static const char *user_rows =
+    "M\tuser\n"
+    "U\tmid\n"
+    "P\tlib_len\t4\t1\t0\t0\tlong\t(const char *s)\n"
+    "D\tuser_all\t5\t1\t0\t0\tint\t(char *b)\n"
+    "C\tlib_num\t6\t1\t(\"1\")\n"
+    "C\tlib_vec\t7\t1\t()\n"
+    "C\tlib_fmt\t8\t1\t(b, 8, \"%d\", 1)\n"
+    "C\tlib_count\t8\t1\t(b)\n"
+    "C\tlib_len\t8\t1\t(b)\n"
+    "C\tmid_x\t8\t1\t()\n"
+    "C\tlib_hidden\t8\t1\t()\n";
+#define FX "tools/symindex/fixture/"
+#define PR FX "proto/"
+static const char *undeclared_out =
+    "DANGER\t" PR "user.cx:6\tlib_num\tsites=1\tdef=" PR "lib.cx:4\twhy=double\treach=transitive\n"
+    "INFO\t" PR "user.cx:7\tlib_vec\tsites=1\tdef=" PR "lib.cx:7\twhy=-\treach=transitive\n"
+    "DANGER\t" PR "user.cx:8\tlib_fmt\tsites=1\tdef=" PR "lib.cx:3\twhy=variadic\treach=transitive\n"
+    "INFO\t" PR "user.cx:8\tlib_count\tsites=1\tdef=" PR "lib.cx:5\twhy=-\treach=transitive\n"
+    "UNDECLARED\tdanger=2\tinfo=2\ttransitive=4\tcallers=1\tscanned=2\n";
+static const char *uses_out = "USE\t" PR "lib.cx\nUSE\t" PR "mid.cx\nUSES\tfile=" PR "user.cx\tcount=2\n";
+static const char *users_out = "USER\t" PR "mid.cx\nUSER\t" PR "user.cx\nUSER\t" PR "direct.cx\nUSERS\tfile=" PR "lib.cx\tcount=3\n";
+static const char *def_out =
+    PR "lib.cx:6\tD\tstatic=0\tvariadic=0\tlong lib_len(const char *s)\n"
+    PR "user.cx:4\tP\tstatic=0\tvariadic=0\tlong lib_len(const char *s)\n"
+    "DEF\tname=lib_len\tcount=2\n";
+
+static int write_file(const char *path, const char *s, long n) {
+    int fd = sy_open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644), bad;
+    if (fd < 0) return 1;
+    bad = sy_write_all(fd, s, n) != 0;
+    return sy_close(fd) != 0 || bad;
+}
+
+int main(void) {
+    char dir[256], lines[1024]; int rc, m;
+    const char *files[] = {FX "facts.cx", PR "lib.cx", PR "mid.cx", PR "user.cx", PR "direct.cx", 0};
+    long ln = 0; int k;
+    if (cx_fmt(dir, sizeof dir, "out/check-symindex-%d", sy_pid())) return 2;
+    m = sy_mkdir("out", 0755); if (m != 0 && m != -EEXIST) return 2;
+    if (sy_mkdir(dir, 0755) != 0) { fprintf(stderr, "check-symindex: cannot make %s\n", dir); return 2; }
+    if (cx_fmt(idx, sizeof idx, "%s/idx", dir) || cx_fmt(list, sizeof list, "%s/list", dir)
+        || cx_fmt(idx2, sizeof idx2, "%s/idx2", dir) || cx_fmt(list2, sizeof list2, "%s/list2", dir)
+        || cx_fmt(copy, sizeof copy, "%s/v.cx", dir)) return 2;
+    for (k = 0; files[k]; k++) {   /* the list; users answers in list order */
+        const char *f = files[k]; long fl = tx_len(f, 256);
+        if (tx_copy(lines + ln, (long)sizeof lines - ln, f, fl)) return 2;
+        ln += fl; lines[ln++] = '\n';
+    }
+    if (write_file(list, lines, ln)) return 2;
+
+    rc = si(0, "update", 0, 0, 0);
+    ck(rc == 0 && has(out, "SYMINDEX\tfiles=5\treparsed=5\thashed=5\tstale=0"), "cold-update-parses-5");
+    rc = si(0, "update", 0, 0, 0);
+    ck(rc == 0 && has(out, "SYMINDEX\tfiles=5\treparsed=0\thashed=0\tstale=0"), "warm-update-reads-nothing");
+
+    rc = si(0, "dump", FX "facts.cx", 0, 0);
+    ck(rc == 0 && tx_prefix(out, CAPOUT, "FILE\t" FX "facts.cx\t", tx_len("FILE\t" FX "facts.cx\t", 256)) && tx_eqz(body(out), facts_rows), "dump-facts-exact");
+    rc = si(0, "dump", PR "lib.cx", 0, 0);
+    ck(rc == 0 && tx_eqz(body(out), lib_rows), "dump-lib-exact");
+    rc = si(0, "dump", PR "user.cx", 0, 0);
+    ck(rc == 0 && tx_eqz(body(out), user_rows), "dump-user-exact");
+
+    rc = si(0, "undeclared", PR "user.cx", PR "direct.cx", 0);
+    ck(rc == 1 && tx_eqz(out, undeclared_out), "undeclared-danger-info-exact");
+    rc = si(0, "uses", PR "user.cx", 0, 0);
+    ck(rc == 0 && tx_eqz(out, uses_out), "uses-closure");
+    rc = si(0, "users", PR "lib.cx", 0, 0);
+    ck(rc == 0 && tx_eqz(out, users_out), "users-reverse-closure");
+    rc = si(0, "def", "lib_len", 0, 0);
+    ck(rc == 0 && tx_eqz(out, def_out), "def-rows");
+
+    {   char *sargs[] = {"sites", "fx_hidden,fx_count,FX_TWICE,fn", FX "facts.cx", 0};
+        rc = si(0, "calls", "fx_hidden,fx_count,FX_TWICE,fn", FX "facts.cx", 0);
+        if (rc == 0 && tx_len(out, CAPOUT) < CAPOUT - 1) {
+            long n = tx_len(out, CAPOUT);
+            if (tx_copy(out2, CAPOUT, out, n)) rc = -1;
+        }
+        ck(rc == 0 && run("tools/refactor.cx", sargs, out, CAPOUT) == 0 && tx_eqz(out, out2)
+           && tx_eqz(out2, FX "facts.cx:6\tFX_TWICE(x)\n" FX "facts.cx:9\tfx_hidden(int v)\n" FX "facts.cx:9\tFX_TWICE(v)\n"
+                           FX "facts.cx:13\tfn(v)\n" FX "facts.cx:13\tfx_hidden(v)\n"), "calls-equals-sites");
+    }
+
+    {   /* --verify on a copy: same size, mtime put back, same inode */
+        size_t n; char *b = cx_read(FX "facts.cx", &n); long at; sy_stat_t s1, s2; char want[600];
+        if (!b) return 2;
+        if (write_file(copy, b, (long)n)) return 2;
+        {   char l2[600]; long cl = tx_len(copy, 512);
+            if (tx_copy(l2, sizeof l2, copy, cl)) return 2;
+            l2[cl] = '\n';
+            if (write_file(list2, l2, cl + 1)) return 2;
+        }
+        rc = si(1, "update", 0, 0, 0);
+        ck(rc == 0 && has(out, "files=1\treparsed=1\thashed=1"), "copy-indexed");
+        at = tx_find(b, (long)n, "fx_scale", 8);
+        if (at < 0 || sy_stat(copy, &s1) != 0) return 2;
+        b[at + 7] = 'f';   /* fx_scale -> fx_scalf: the same size */
+        if (write_file(copy, b, (long)n) || sy_set_mtime(copy, s1.mtime) != 0 || sy_stat(copy, &s2) != 0) return 2;
+        ck(s1.size == s2.size && s1.mtime == s2.mtime && s1.ino == s2.ino && s1.dev == s2.dev, "rewrite-keeps-size-mtime-inode");
+        rc = si(1, "update", 0, 0, 0);
+        ck(rc == 0 && has(out, "reparsed=0\thashed=0\tstale=0"), "prefilter-trusts-the-stat");
+        rc = si(1, "dump", copy, 0, 0);
+        ck(rc == 0 && has(out, "C\tfx_scale\t16\t") && !has(out, "fx_scalf"), "prefilter-keeps-the-old-facts");
+        rc = si(1, "update", "--verify", 0, 0);
+        if (cx_fmt(want, sizeof want, "STALE\t%s\t", copy)) return 2;
+        ck(rc == 0 && has(out, want) && has(out, "reparsed=1\thashed=1\tstale=1"), "verify-reports-stale");
+        rc = si(1, "dump", copy, 0, 0);
+        ck(rc == 0 && has(out, "C\tfx_scalf\t16\t") && !has(out, "fx_scale\t"), "verify-repairs");
+        rc = si(1, "update", "--verify", 0, 0);
+        ck(rc == 0 && has(out, "reparsed=0\thashed=1\tstale=0") && !has(out, "STALE\t"), "verify-again-clean");
+        {   /* a size change: the plain update re-parses */
+            int fd = sy_open(copy, O_WRONLY | O_APPEND, 0), bad;
+            if (fd < 0) return 2;
+            bad = sy_write_all(fd, "int fx_more(void);\n", 19) != 0;
+            if (sy_close(fd) != 0 || bad) return 2;
+        }
+        rc = si(1, "update", 0, 0, 0);
+        ck(rc == 0 && has(out, "reparsed=1\thashed=1\tstale=0"), "size-change-reparsed");
+        rc = si(1, "dump", copy, 0, 0);
+        ck(rc == 0 && has(out, "P\tfx_more\t23\t1\t0\t0\tint\t(void)\n"), "size-change-new-fact");
+    }
+    printf("CHECK_SYMINDEX\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
