@@ -212,3 +212,41 @@
 - unisa/tapebin.py
 - unisa/tapebin_shape.py
 - unisa/uns2.py
+
+## 第二批（2026-10-30）
+
+引用已归档参考 C 或已归档 Python 的旧 shell，以及 Python 时代未落地的 `plans/pending` 补丁（目标文件已归档）。`.cx` 旧检查未挪：挪动会改变 `tests/cxinclude|cxapis|cxtrunc` 棘轮的路径键，等这三份棘轮在主线恢复绿后再处理。`tools/build_ref.sh`、`tools/export_ref.sh`、`exec/c/qprefixcheck.cx` 仍被现行覆盖清单或工具引用，留在原处。
+
+- bench/cpu_ratio.sh
+- examples/win/run.sh
+- exec/c/comboot.sh
+- exec/stamp.sh
+- plans/pending/delgov-fix3/core.patch
+- plans/pending/delgov-fix3/js.patch
+- plans/pending/delgov-fix3/scanner-new-sites.tsv
+- plans/pending/delgov-fix3/scanner.patch
+- plans/pending/delgov-fix3/triage.patch
+- plans/pending/detach-w2/W2-A.patch
+- plans/pending/detach-w2/W2-C.patch
+- plans/pending/detach-w2/W2-D1.patch
+- plans/pending/detach-w2/W2-E.patch
+- plans/pending/detach-w2/W2-F.patch
+- plans/pending/f1/0001-fix-libc-vsnprintf-NULL-0-measures-and-vprintf-write.patch
+- plans/pending/f1/0002-fix-libc-comments-in-dup2-and-fopen-no-longer-name-o.patch
+- plans/pending/f1/0003-fix-libc-setenv-unsetenv-edit-environ-execvp-system-.patch
+- plans/pending/f1/0004-test-libc-setenv-takes-a-value-of-any-length-and-any.patch
+- plans/pending/f1/0005-fix-libc-fileno.patch
+- plans/pending/f1/0006-fix-cx-cx_read-of-a-directory-is-NULL-as-its-contrac.patch
+- plans/pending/f1/0007-fix-parse2-enum-E-bare-tag-declaration-accepted-agai.patch
+- plans/pending/flownet-w5/files/adapter/ujswasm/ujswasm.cx.pending
+- plans/pending/flownet-w5/files/docs/flownet-migration.md
+- plans/pending/flownet-w5/files/flownet/README.md
+- plans/pending/flownet-w5/files/tests/flownet-coverage.tsv
+- plans/pending/flownet-w5/files/tests/flownetw5.cx.pending
+- plans/pending/py2cx-w7-unlanded/exec_c_librarystackcheck.cx.pending
+- plans/pending/py2cx-w7-unlanded/exec_c_netcheck.cx.pending
+- plans/pending/py2cx-w7-unlanded/exec_parse2_diagnosticcheck.cx.pending
+- plans/pending/py2cx-w7-unlanded/exec_parse2_errorcheck.cx.pending
+- plans/pending/py2cx-w7-unlanded/exec_parse2_warnprep.cx.pending
+- plans/pending/README.md
+- plans/pending/tapebin-selfheal/tapebinref-selfheal.partial.patch
