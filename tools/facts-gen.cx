@@ -358,9 +358,26 @@ static char *fg_pair(char **k, char **v, int n, const char *key) {
 
 /* parse-tokens: words = words_pre + casops+"=" + sorted(prec operators with a digit level) + words_post;
    TK maps each word to its last 1-based position (first-occurrence order), then "type" = TK["type=int"]. */
-static void parse_tokens(Ob *o) {
-    static char *k[512], *v[512], *w[1024], *prec[256];
-    int n = fg_pairs("exec/facts/parse-words.tsv", k, v, 512), nw = 0, np = 0, i, j, g;
+typedef struct {
+    char *w[1024]; int nw;                   /* WORDS */
+    char *tkn[1024]; int tkv[1024]; int ntk; /* TK in insertion order, "type" last */
+    char *prec[256]; int plev[256]; int np;  /* gold prec operators with a digit level, byte-sorted */
+} Tok;
+static Tok pt;
+static int pt_ready;
+static int pt_tk(const char *name) {
+    int i;
+    for (i = 0; i < pt.ntk; i++) if (tx_eq(pt.tkn[i], name, FG_CAP)) return pt.tkv[i];
+    fg_die("no TK entry", name);
+    return 0;
+}
+static void pt_build(void) {
+    static char *k[512], *v[512];
+    char **w = pt.w, **prec = pt.prec;
+    int n, nw = 0, np = 0, i, j, g, *plev = pt.plev;
+    if (pt_ready) return;
+    pt_ready = 1;
+    n = fg_pairs("exec/facts/parse-words.tsv", k, v, 512);
     static const char *groups[3] = {"words_pre", "casops", "words_post"};
     Rows P;
     static List none[1];
@@ -376,20 +393,23 @@ static void parse_tokens(Ob *o) {
         for (j = 0; j < m; j++) if (lvl[j] < '0' || lvl[j] > '9') break;
         if (j < m) continue;
         for (j = 0; j < np; j++) if (tx_eq(prec[j], P.c[i][0], FG_CAP)) break;
-        if (j == np) prec[np++] = P.c[i][0];
+        if (j == np) { prec[np] = P.c[i][0]; plev[np] = (int)strtol(lvl, 0, 10); np++; }
+        else plev[j] = (int)strtol(lvl, 0, 10);   /* dict: the last row's level wins */
     }
     for (i = 1; i < np; i++) {                    /* sorted(): byte order, insertion sort */
         char *x = prec[i];
+        int xl = plev[i];
         for (j = i - 1; j >= 0; j--) {
             long a = tx_len(prec[j], FG_CAP), b = tx_len(x, FG_CAP), m = a < b ? a : b, q;
             int gt = 0;
             for (q = 0; q < m && prec[j][q] == x[q]; q++) ;
             gt = q < m ? (unsigned char)prec[j][q] > (unsigned char)x[q] : a > b;
             if (!gt) break;
-            prec[j + 1] = prec[j];
+            prec[j + 1] = prec[j]; plev[j + 1] = plev[j];
         }
-        prec[j + 1] = x;
+        prec[j + 1] = x; plev[j + 1] = xl;
     }
+    pt.np = np;
     for (g = 0; g < 3; g++) {
         if (g == 2) for (j = 0; j < np; j++) w[nw++] = prec[j];
         for (i = 0; i < n; i++) {
@@ -401,26 +421,140 @@ static void parse_tokens(Ob *o) {
             w[nw++] = s;
         }
     }
-    ob_z(o, "=WORDS\tjson\t[");
-    for (i = 0; i < nw; i++) { if (i) ob_z(o, ","); ob_str(o, w[i]); }
-    ob_z(o, "]\n=TK\tjson\t{");
+    pt.nw = nw;
     {
-        int first = 1, tint = -1, has_type = 0;
+        int tint = -1;
         for (i = 0; i < nw; i++) {
             int last = i;
             for (j = 0; j < i; j++) if (tx_eq(w[j], w[i], FG_CAP)) break;
             if (j < i) continue;                  /* not the first occurrence */
             for (j = i + 1; j < nw; j++) if (tx_eq(w[j], w[i], FG_CAP)) last = j;
-            if (!first) ob_z(o, ",");
-            ob_str(o, w[i]); ob_z(o, ":"); ob_int(o, last + 1); first = 0;
+            if (tx_eq(w[i], "type", 8)) fg_die("a word named type exists; its TK position would be reused", 0);
+            pt.tkn[pt.ntk] = w[i]; pt.tkv[pt.ntk++] = last + 1;
             if (tx_eq(w[i], "type=int", 16)) tint = last + 1;
-            if (tx_eq(w[i], "type", 8)) has_type = 1;
         }
         if (tint < 0) fg_die("no type=int word", 0);
-        if (has_type) fg_die("a word named type exists; its TK position would be reused", 0);
-        ob_z(o, ",\"type\":"); ob_int(o, tint);
+        pt.tkn[pt.ntk] = "type"; pt.tkv[pt.ntk++] = tint;
     }
+}
+static void parse_tokens(Ob *o) {
+    int i;
+    pt_build();
+    ob_z(o, "=WORDS\tjson\t[");
+    for (i = 0; i < pt.nw; i++) { if (i) ob_z(o, ","); ob_str(o, pt.w[i]); }
+    ob_z(o, "]\n=TK\tjson\t{");
+    for (i = 0; i < pt.ntk; i++) { if (i) ob_z(o, ","); ob_str(o, pt.tkn[i]); ob_z(o, ":"); ob_int(o, pt.tkv[i]); }
     ob_z(o, "}\n");
+}
+
+/* structreturnexpr: the struct-return refusal entry (LOC from parse-constants). */
+static void struct_return_expr(Ob *o) {
+    const char *reason = "not covered: struct return expression outside local lvalue";
+    ob_z(o, "=reason\tstr\t"); ob_z(o, reason);
+    ob_z(o, "\n@sr\tentry:str\tloc:int\treason:str\n\tLI.original.structreturn\t");
+    ob_int(o, fg_const("parse-constants", "LOC")); ob_z(o, "\t"); ob_z(o, reason); ob_z(o, "\n");
+}
+
+/* k2-constexpr: integer-expression precedence levels and token classes for the E3 table. */
+static void k2_constexpr(Ob *o) {
+    static char *opn[256], *opc[256][5];
+    static char *cn[64], *ct[64];
+    int levels[64], nl = 0, nop = 0, ncl = 0, i, j, l;
+    Lines L;
+    pt_build();
+    for (i = 0; i < pt.np; i++) {                 /* sorted(set(levels)) */
+        for (j = 0; j < nl; j++) if (levels[j] == pt.plev[i]) break;
+        if (j == nl) levels[nl++] = pt.plev[i];
+    }
+    for (i = 1; i < nl; i++) { int x = levels[i]; for (j = i - 1; j >= 0 && levels[j] > x; j--) levels[j + 1] = levels[j]; levels[j + 1] = x; }
+    L = fg_lines("exec/parse2/constexpr-operators.tsv");
+    for (i = 1; i < L.n; i++) {
+        char *cells[8], *line = fg_dupz(L.l[i]);
+        if (!*line) continue;
+        if (fg_split(line, cells, 8) != 6 || nop == 256) fg_die("bad constexpr-operators row", L.l[i]);
+        opn[nop] = cells[0];
+        for (j = 0; j < 5; j++) opc[nop][j] = cells[j + 1];
+        nop++;
+    }
+    ob_z(o, "=levels\tjson\t[");
+    for (l = 0; l < nl; l++) {
+        int first = 1;
+        if (l) ob_z(o, ",");
+        ob_z(o, "{\"level\":"); ob_int(o, levels[l]); ob_z(o, ",\"next\":");
+        if (l + 1 < nl) ob_int(o, levels[l + 1]); else ob_str(o, ".atom");
+        ob_z(o, ",\"ops\":[");
+        for (i = 0; i < pt.np; i++) {             /* pt.prec is already byte-sorted */
+            int x;
+            char **c;
+            if (pt.plev[i] != levels[l]) continue;
+            for (x = 0; x < nop; x++) if (tx_eq(opn[x], pt.prec[i], FG_CAP)) break;
+            if (x == nop) fg_die("operator missing from constexpr-operators", pt.prec[i]);
+            c = opc[x];
+            if (!first) ob_z(o, ",");
+            first = 0;
+            ob_z(o, "{\"k\":"); ob_int(o, pt_tk(pt.prec[i]));
+            ob_z(o, ",\"name\":"); ob_str(o, pt.prec[i]);
+            ob_z(o, ",\"category\":"); ob_str(o, c[0]);
+            ob_z(o, ",\"action\":"); ob_str(o, c[1]);
+            ob_z(o, ",\"comparison\":[");
+            if (!tx_eq(c[2], "-", 4)) {
+                long cl = tx_len(c[2], FG_CAP), q, firstn = 1;
+                for (q = 0; q < cl; ) {
+                    long e = tx_chr(c[2] + q, cl - q, ',');
+                    char num[32];
+                    if (e < 0) e = cl - q;
+                    if (tx_copy(num, sizeof num, c[2] + q, e)) fg_die("bad comparison", c[2]);
+                    if (!firstn) ob_z(o, ",");
+                    ob_int(o, strtol(num, 0, 10)); firstn = 0;
+                    q += e + 1;
+                }
+            }
+            ob_z(o, "],\"zero\":"); ob_str(o, c[3]);
+            ob_z(o, ",\"nonzero\":"); ob_str(o, c[4]); ob_z(o, "}");
+        }
+        ob_z(o, "]}");
+    }
+    ob_z(o, "]\n");
+    {   /* tokens = TK + identifier/number/string, then type=extern/_Bool after max(TK) */
+        static char *tn[1100];
+        static int tv[1100];
+        int nt = 0, mx = 0, typeword[1100], ntw = 0;
+        const char *extra[3][2] = {{"identifier", "TK_ID"}, {"number", "TK_NUM"}, {"string", "TK_STR"}};
+        for (i = 0; i < pt.ntk; i++) { tn[nt] = pt.tkn[i]; tv[nt++] = pt.tkv[i]; if (pt.tkv[i] > mx) mx = pt.tkv[i]; }
+        for (i = 0; i < 3; i++) {
+            long v = fg_const("parse-constants", extra[i][1]);
+            for (j = 0; j < nt; j++) if (tx_eq(tn[j], extra[i][0], FG_CAP)) break;
+            if (j == nt) { tn[nt] = (char *)extra[i][0]; tv[nt++] = (int)v; } else tv[j] = (int)v;
+        }
+        tn[nt] = "type=extern"; tv[nt++] = mx + 1;
+        tn[nt] = "type=_Bool"; tv[nt++] = mx + 2;
+        L = fg_lines("exec/parse2/constexpr-tokens.tsv");
+        for (i = 1; i < L.n; i++) {
+            char *cells[4], *line = fg_dupz(L.l[i]);
+            if (!*line) continue;
+            if (fg_split(line, cells, 4) != 2 || ncl == 64) fg_die("bad constexpr-tokens row", L.l[i]);
+            cn[ncl] = cells[0]; ct[ncl++] = cells[1];
+        }
+        ob_z(o, "=classes\tjson\t{");
+        for (i = 0; i < ncl; i++) {
+            int v = -1;
+            for (j = 0; j < nt; j++) if (tx_eq(tn[j], ct[i], FG_CAP)) v = tv[j];
+            if (v < 0) fg_die("constexpr token without a code", ct[i]);
+            if (i) ob_z(o, ",");
+            ob_str(o, cn[i]); ob_z(o, ":["); ob_int(o, v); ob_z(o, "]");
+        }
+        for (j = 0; j < nt; j++) {
+            int keep = tx_prefix(tn[j], tx_len(tn[j], FG_CAP), "type", 4) || tx_eq(tn[j], "struct", 8) || tx_eq(tn[j], "union", 8) || tx_eq(tn[j], "enum", 8), q;
+            if (!keep) continue;
+            for (q = 0; q < ntw; q++) if (typeword[q] == tv[j]) break;
+            if (q == ntw) typeword[ntw++] = tv[j];
+        }
+        for (i = 1; i < ntw; i++) { int x = typeword[i]; for (j = i - 1; j >= 0 && typeword[j] > x; j--) typeword[j + 1] = typeword[j]; typeword[j + 1] = x; }
+        ob_z(o, ncl ? ",\"typeword\":[" : "\"typeword\":[");
+        for (i = 0; i < ntw; i++) { if (i) ob_z(o, ","); ob_int(o, typeword[i]); }
+        ob_z(o, "]}\n=SKIPS\tint\t");
+        ob_int(o, 7L * (1L << 26)); ob_z(o, "\n");
+    }
 }
 
 /* k2-tokenlocations-map: MAP_FIELDS (a JSON list of plain strings) as [{"i":i,"register":"diag_NAME"}]. */
@@ -497,6 +631,9 @@ static const Table fg_tables[] = {
     {"parse-tokens", {"exec/facts/parse-words.tsv", "weights/gold/prec.tsv", "tools/facts-gen.cx", 0}, parse_tokens},
     {"top-modelbindings-template", {"exec/facts/top-modelbindings-const.tsv", "tools/facts-gen.cx", 0}, modelbindings_template},
     {"k2-tokenlocations-map", {"exec/facts/tokenlocations.tsv", "tools/facts-gen.cx", 0}, tokenlocations_map},
+    {"structreturnexpr", {"exec/facts/parse-constants.tsv", "tools/facts-gen.cx", 0}, struct_return_expr},
+    {"k2-constexpr", {"exec/facts/parse-words.tsv", "weights/gold/prec.tsv", "exec/facts/parse-constants.tsv",
+                      "exec/parse2/constexpr-operators.tsv", "exec/parse2/constexpr-tokens.tsv", "tools/facts-gen.cx", 0}, k2_constexpr},
     {0, {0}, 0}
 };
 

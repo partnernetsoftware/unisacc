@@ -488,45 +488,7 @@ def _esc(s):
     return s.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n")
 
 
-def constexprentry():
-    """Integer-expression precedence and token classes for the E3 table."""
-    import csv
-    E = _parse_e("exec_parse_gen_constexpr_facts")
-    levels = sorted(set(E.PREC.values()))
-    path = ROOT / "exec/parse2/constexpr-operators.tsv"
-    with path.open() as f:
-        opinfo = {r[0]: r[1:] for r in list(csv.reader(f, delimiter="\t"))[1:]}
-    level_rows = []
-    for i, level in enumerate(levels):
-        operators = []
-        for name in sorted(o for o, v in E.PREC.items() if v == level):
-            category, action, comparison, zero, nonzero = opinfo[name]
-            operators.append(dict(k=E.TK[name], name=name, category=category, action=action,
-                                  comparison=[] if comparison == "-" else [int(x) for x in comparison.split(",")],
-                                  zero=zero, nonzero=nonzero))
-        level_rows.append(dict(level=level,
-                               next=levels[i + 1] if i + 1 < len(levels) else ".atom",
-                               ops=operators))
-    tokens = dict(E.TK, identifier=E.TK_ID, number=E.TK_NUM, string=E.TK_STR)
-    # gen2 adds these two type words before it installs constexpr.
-    first = max(E.TK.values()) + 1
-    tokens.update({"type=extern": first, "type=_Bool": first + 1})
-    with (ROOT / "exec/parse2/constexpr-tokens.tsv").open() as f:
-        classes = {name: [tokens[token]] for name, token in list(csv.reader(f, delimiter="\t"))[1:]}
-    classes["typeword"] = sorted({tokens[w] for w in tokens if w.startswith("type")} |
-                                  {tokens[w] for w in ("struct", "union", "enum")})
-    return ["=levels\tjson\t" + json.dumps(level_rows, separators=(",", ":")),
-            "=classes\tjson\t" + json.dumps(classes, separators=(",", ":")),
-            "=SKIPS\tint\t" + str(7 * (1 << 26))]
-
-
-def structreturnexpr():
-    E = _parse_e("exec_parse_gen_facts")
-    reason = "not covered: struct return expression outside local lvalue"
-    return ["=reason\tstr\t" + _esc(reason),
-            "@sr\tentry:str\tloc:int\treason:str",
-            "\tLI.original.structreturn\t%d\t%s" % (E.LOC, _esc(reason))]
-
+# k2-constexpr and structreturnexpr moved to tools/facts-gen.cx on 2026-10-30.
 
 
 def _gold(name):
@@ -1068,8 +1030,6 @@ TABLES = [
     ("pp-autoinc-gen", ["exec/facts/pp-bytes.tsv", "unisa/libneed.py", "exec/facts/pp-autoinc.tsv", "exec/facts/pp-layout.tsv", "exec/facts/export.py",
                          *sorted(str(p.relative_to(ROOT)) for p in (ROOT / "include").rglob("*.h"))], ppautoinc),
     ("nativeabi", ["exec/nativeabi/rules.tsv", "exec/nativeabi/ordered-result.tsv", "exec/nativeabi/gen-fresh.tsv", "exec/nativeabi/ordered-fresh.tsv", "exec/facts/nativeabi-gen-reject.tsv", "exec/facts/top-modelgraphequality-banks.tsv", "exec/facts/export.py"], nativeabi),
-    ("structreturnexpr", ["exec/build/parsebase.py", "exec/facts/export.py"], structreturnexpr),
-    ("k2-constexpr", ["exec/build/parsebase.py", "exec/parse2/constexpr-operators.tsv", "exec/parse2/constexpr-tokens.tsv", "weights/gold/prec.tsv", "exec/facts/export.py"], constexprentry),
     ("lower-armfuse", ["unisa/tape.py", "exec/lower/armfuse-shapes.tsv", "exec/facts/export.py"], lowerarmfuse),
     ("lower-abi", ["unisa/catalog.py", "unisa/lower.py", "exec/lower/code-abi-sources.tsv", "weights/gold/abi.tsv", "weights/gold/enc.tsv", "exec/facts/export.py"], lowerabi),
     ("lower-code", ["unisa/tape.py", "unisa/lower.py", "weights/gold/regmap.tsv", "weights/gold/enc.tsv", "weights/gold/reloc.tsv", "unisa/emit_x86.py", "unisa/emit_arm.py", "exec/facts/top-modelbindings-banks.tsv", "exec/facts/top-modelbindings-const.tsv", "exec/facts/export.py"], lowercode),
