@@ -89,7 +89,7 @@ Windows Authenticode 单列验收。Mach-O ad-hoc 签名仅满足运行格式要
 | `kernel/unisa_headers.inc` | 随身携带的 C 库（`include/*.h` 原文与 `-ftrim-libc` 闭包） | 仓内这份由 `tools/carried-header-export.cx`（`prepare`／`--verify`／`install`）写出，文件头记有该工具；`kernel-emit` 也写同名文件 |
 | `include/cx-flat.h` | `.cx` 的单文件前导（`include/cx.h` 在 `__UNISA__` 下读它） | `tools/cx-flatten.cx --write ROOT`／`--check ROOT`，源是 `include/cx-nested.h` |
 
-原 `tests/kernel.sh`（归档于 `archive/testing-c43-legacy/tests/kernel.sh`）的再生成对比，现由上表各工具的 `--check` 承担。仓内 `kernel/` 41 个文件中有 40 个的溯源注释仍写着 `python3 -m unisa emit-kernel`：这些已提交字节还没有用 `kernel-emit --write` 重写过。
+原 `tests/kernel.sh`（归档于 `archive/testing-c43-legacy/tests/kernel.sh`）的再生成对比，现由上表各工具的 `--check` 承担。仓内 `kernel/` 41 个文件中有 40 个的溯源注释仍写着 `python3 -m unisa emit-kernel`：这些已提交字节还没有用 `kernel-emit --write` 重写过。2026-10-30 对仓内 `kernel/` 跑 `kernel-emit --check`，41 个文件都报 DIFF（40 个首处差异在溯源注释；`unisa_headers.inc` 是 `carried-header-export` 写出的，与 `kernel-emit` 的输出不同）。同日 `facts-gen --check`、`gold-table --check`、`cx-flatten --check` 均通过。
 
 ### 文件格式
 
@@ -152,7 +152,7 @@ Windows Authenticode 单列验收。Mach-O ad-hoc 签名仅满足运行格式要
 | [`tests/cxapis.cx`](tests/cxapis.cx) | `tests/cxapis.tsv` | `strcpy`、`strcat`、`sprintf`、`gets` 的调用 |
 | [`tests/cxtrunc.cx`](tests/cxtrunc.cx) | `tests/cxtrunc.tsv` | 丢弃返回值、长度可随输入变化的 `snprintf`、`strncpy`、`memcpy` |
 
-用法如 `sh ./unisacc.com -run tests/cxinclude.cx -- --check`。
+用法如 `sh ./unisacc.com -run tests/cxinclude.cx -- --check`；2026-10-30 它仍失败，29 个文件超基线。
 
 **旧实现已归档**：Python 种子 `unisa/` 在 `archive/reference-py/unisa/`，连同依赖它的旧脚本（清单与归档依据见 [archive/reference-py/README.md](archive/reference-py/README.md)）；经典 C 参考 `unisacc.c`、`src/*.c` 与 `exec/c/` 的驱动和运行核 C 源在 `archive/reference-c/`（`exec/c/` 里仍留有检查与探针用的 `.c` 及头文件）（见 [archive/reference-c/README.md](archive/reference-c/README.md)）。两者都按原相对路径存放，只供对照，活路径不得回调。旧自举判据 `nativeboot`、`bigclosure` 等随旧测试树归档在 `archive/testing-c43-legacy/tests/`，不授权新入口。
 
