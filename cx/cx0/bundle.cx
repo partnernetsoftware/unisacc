@@ -17,19 +17,19 @@ static int cxb_name(const unsigned char *p,size_t n){if(!n||n>4095)return 0;for(
 static int cxb_target(const char *p){return !strcmp(p,"lnx/x86_64")||!strcmp(p,"lnx/arm64")||!strcmp(p,"osx/x86_64")||!strcmp(p,"osx/arm64")||!strcmp(p,"win/x86_64")||!strcmp(p,"win/arm64");}
 void cxb_clear(cxb_bundle *b){if(b){free(b->storage);free(b->units);free(b->resources);memset(b,0,sizeof *b);}}
 void cxb_release(cxb_result *r){if(r){free(r->data);memset(r,0,sizeof *r);}}
-static int cxb_reject(cxb_bundle *b,char *why,size_t cap,const char *reason){cxb_clear(b);if(why&&cap){size_t n=strlen(reason);if(n>=cap)n=cap-1;memcpy(why,reason,n);why[n]=0;}return -1;}
+static int cxb_reject(cxb_bundle *b,char *why,size_t cap,const char *reason){cxb_clear(b);if(why&&cap){size_t n=strlen(reason);if(n>=cap)n=cap-1;{ void *cx_kept = memcpy(why,reason,n); (void)cx_kept; }why[n]=0;}return -1;}
 /* OUT must be empty or previously cleared. All failures leave it all-zero. */
 int cxb_read(const void *input,size_t n,cxb_bundle *out,char *why,size_t cap){
  if(out)memset(out,0,sizeof *out);if(why&&cap)why[0]=0;cxb_bundle b={0};
  if(!input||!out||!why||!cap||n<160||n>67108864)return cxb_reject(&b,why,cap,"bundle-size");
- b.storage=malloc(n);if(!b.storage)return cxb_reject(&b,why,cap,"bundle-allocation");memcpy(b.storage,input,n);b.bytes=n;
+ b.storage=malloc(n);if(!b.storage)return cxb_reject(&b,why,cap,"bundle-allocation");{ void *cx_kept = memcpy(b.storage,input,n); (void)cx_kept; }b.bytes=n;
  unsigned char *p=b.storage;size_t end=n-64,at=96;
  if(memcmp(p,"CX0BND1\n",8))return cxb_reject(&b,why,cap,"bundle-version");
  if(cxb_u32(p+8)!=n||cxb_u32(p+28))return cxb_reject(&b,why,cap,"bundle-header");
  b.unit_count=(int)cxb_u32(p+12);b.resource_count=(int)cxb_u32(p+16);unsigned tn=cxb_u32(p+20),an=cxb_u32(p+24);
  if(b.unit_count<1||b.unit_count>64||b.resource_count<0||b.resource_count>4096||!tn||tn>=sizeof b.target||!an||an>=sizeof b.abi||tn+an>end-at||!cxb_hex(p+32))return cxb_reject(&b,why,cap,"bundle-count-or-metadata");
  char digest[65];cx_sha256_hex(p,end,digest);if(!cxb_hex(p+end)||memcmp(digest,p+end,64))return cxb_reject(&b,why,cap,"bundle-digest");
- memcpy(b.model,p+32,64);b.model[64]=0;memcpy(b.target,p+at,tn);b.target[tn]=0;at+=tn;memcpy(b.abi,p+at,an);b.abi[an]=0;at+=an;
+ memcpy(b.model,p+32,64);b.model[64]=0;{ void *cx_kept = memcpy(b.target,p+at,tn); (void)cx_kept; }b.target[tn]=0;at+=tn;{ void *cx_kept = memcpy(b.abi,p+at,an); (void)cx_kept; }b.abi[an]=0;at+=an;
  if(strlen(b.target)!=tn||strlen(b.abi)!=an||!cxb_target(b.target)||strcmp(b.abi,"unisa-c99-v1"))return cxb_reject(&b,why,cap,"bundle-target-or-abi");
  b.units=calloc((size_t)b.unit_count,sizeof *b.units);b.resources=calloc((size_t)b.resource_count+1,sizeof *b.resources);
  if(!b.units||!b.resources)return cxb_reject(&b,why,cap,"bundle-allocation");
@@ -50,8 +50,8 @@ int cxb_read(const void *input,size_t n,cxb_bundle *out,char *why,size_t cap){
  }
  if(at!=end)return cxb_reject(&b,why,cap,"bundle-trailing");*out=b;return 0;
 }
-static void cxb_fail(cxb_result *r,const char *why){free(r->data);r->data=0;r->bytes=0;r->status=2;size_t n=strlen(why);if(n>=sizeof r->why)n=sizeof r->why-1;memcpy(r->why,why,n);r->why[n]=0;}
-static int cxb_append(cxb_result *r,const void *p,size_t n){if(r->status)return 1;if(n>67108864||r->bytes>67108864-n){cxb_fail(r,"bundle-size");return 1;}unsigned char *b=realloc(r->data,r->bytes+n+1);if(!b){cxb_fail(r,"bundle-allocation");return 1;}r->data=b;if(n)memcpy(b+r->bytes,p,n);r->bytes+=n;b[r->bytes]=0;return 0;}
+static void cxb_fail(cxb_result *r,const char *why){free(r->data);r->data=0;r->bytes=0;r->status=2;size_t n=strlen(why);if(n>=sizeof r->why)n=sizeof r->why-1;{ void *cx_kept = memcpy(r->why,why,n); (void)cx_kept; }r->why[n]=0;}
+static int cxb_append(cxb_result *r,const void *p,size_t n){if(r->status)return 1;if(n>67108864||r->bytes>67108864-n){cxb_fail(r,"bundle-size");return 1;}unsigned char *b=realloc(r->data,r->bytes+n+1);if(!b){cxb_fail(r,"bundle-allocation");return 1;}r->data=b;if(n){ void *cx_kept = memcpy(b+r->bytes,p,n); (void)cx_kept; }r->bytes+=n;b[r->bytes]=0;return 0;}
 static void cxb_number(cxb_result *r,unsigned n){unsigned char p[4];cxb_put32(p,n);cxb_append(r,p,4);}
 static int cxb_observation(const cx0_result *p,const char *name,const unsigned char **bytes,size_t *n){
  if(p->bytes<16||memcmp(p->text,"CX0CAP1\n",8))return 0;const unsigned char *s=(const unsigned char *)p->text;size_t at=16+cxb_u32(s+8),nn=strlen(name);unsigned count=cxb_u32(s+12);int found=0;
@@ -69,7 +69,7 @@ cxb_result cxb_seal(char **sources,int count,const char *directory,const cxb_opt
  p=cx0_capture_plan(sources,count,directory);if(p.status){cxb_fail(&r,p.diagnostic?p.diagnostic:"plan-rejected");r.status=p.status;cx0_release(&p);return r;}
  if(p.bytes<25||memcmp(p.text,"CX0CAP1\n",8)){cxb_fail(&r,"capture-version");goto done;}unsigned pn=cxb_u32((unsigned char *)p.text+8);
  if(pn<9||pn>p.bytes-16||memcmp(p.text+16,"CX0PLAN1\n",9)){cxb_fail(&r,"capture-plan");goto done;}
- plan=malloc((size_t)pn+1);res=calloc(4096,sizeof *res);if(!plan||!res){cxb_fail(&r,"bundle-allocation");goto done;}memcpy(plan,p.text+16,pn);plan[pn]=0;
+ plan=malloc((size_t)pn+1);res=calloc(4096,sizeof *res);if(!plan||!res){cxb_fail(&r,"bundle-allocation");goto done;}{ void *cx_kept = memcpy(plan,p.text+16,pn); (void)cx_kept; }plan[pn]=0;
  for(int i=0;i<nextra;i++){
   if((extra[i].kind!=1&&extra[i].kind!=2)||!extra[i].name||!cxb_name((const unsigned char *)extra[i].name,strlen(extra[i].name))||extra[i].bytes>67108864||(extra[i].bytes&&!extra[i].data)||cxb_resource_id(res,nres,extra[i].kind,extra[i].name)>=0){cxb_fail(&r,"bundle-extra-resource");goto done;}
   res[nres].kind=extra[i].kind;res[nres].name=(const unsigned char *)extra[i].name;res[nres].name_bytes=strlen(extra[i].name);res[nres].data=extra[i].data;res[nres].bytes=extra[i].bytes;nres++;
