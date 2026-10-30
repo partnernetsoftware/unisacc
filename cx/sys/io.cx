@@ -1,0 +1,99 @@
+#pragma unisa module io
+/* L0 sys/io: the standard output streams, descriptor flags, terminals and error text
+   (plans/cx-layers.md, plans/cx-l0-fmt-2026-10-30.md).  No #include: <stdio.h>,
+   <fcntl.h>, <unistd.h> and errno come with the implicit prelude.
+   Ordering: sy_printf/sy_eprintf/sy_puts write through the prelude's own stdout and
+   stderr FILEs (vfprintf, puts), so their bytes interleave with any printf, puts or
+   fprintf(stderr) left in the caller exactly as if the caller had made that call.  The
+   prelude writes the standard streams straight through (no buffer: include/stdio.h
+   _u_st_wput), so there is nothing to flush between the two. */
+
+/* vprintf(FMT, AP) to stdout: bytes written, negative on error. */
+int sy_vprintf(const char *fmt, va_list ap) {
+    return vfprintf(stdout, fmt, ap);
+}
+
+/* vfprintf(stderr, FMT, AP): bytes written, negative on error. */
+int sy_veprintf(const char *fmt, va_list ap) {
+    return vfprintf(stderr, fmt, ap);
+}
+
+/* printf(FMT, ...) to stdout. */
+int sy_printf(const char *fmt, ...) {
+    va_list ap;
+    int n;
+    va_start(ap, fmt);
+    n = vfprintf(stdout, fmt, ap);
+    va_end(ap);
+    return n;
+}
+
+/* fprintf(stderr, FMT, ...). */
+int sy_eprintf(const char *fmt, ...) {
+    va_list ap;
+    int n;
+    va_start(ap, fmt);
+    n = vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    return n;
+}
+
+/* puts(S): S and a newline to stdout; what the prelude's puts returns (nonnegative). */
+int sy_puts(const char *s) {
+    return puts(s);
+}
+
+/* 1 when FD is a terminal, else 0 (isatty; never -errno). */
+int sy_isatty(int fd) {
+    return isatty(fd) ? 1 : 0;
+}
+
+/* The prelude's strerror text for E, given as errno (E > 0) or as a sy_* -errno (E < 0).
+   The text is static; never 0. */
+const char *sy_strerror(int e) {
+    return strerror(e < 0 ? -e : e);
+}
+
+/* Set or clear BIT in FD's flags: GET/SET are F_GETFL/F_SETFL or F_GETFD/F_SETFD.
+   Windows' prelude has no fcntl. */
+static int sy_fd_flag_os(int fd, int get, int set, int bit, int on) {
+#ifdef _WIN32
+    return -ENOSYS;
+#else
+    int f;
+    errno = 0;
+    f = fcntl(fd, get, 0);
+    if (f < 0) return errno ? -errno : -EIO;
+    f = on ? (f | bit) : (f & ~bit);
+    if (fcntl(fd, set, f) < 0) return errno ? -errno : -EIO;
+    return 0;
+#endif
+}
+
+static int sy_nonblock_os(int fd, int on) {
+#ifdef _WIN32
+    return -ENOSYS;
+#else
+    return sy_fd_flag_os(fd, F_GETFL, F_SETFL, O_NONBLOCK, on);
+#endif
+}
+
+static int sy_cloexec_os(int fd, int on) {
+#ifdef _WIN32
+    return -ENOSYS;
+#else
+    return sy_fd_flag_os(fd, F_GETFD, F_SETFD, FD_CLOEXEC, on);
+#endif
+}
+
+/* O_NONBLOCK on FD on (ON != 0) or off: F_GETFL then F_SETFL. 0, or -errno
+   (-EBADF for a closed fd; -ENOSYS on Windows). */
+int sy_fd_nonblock(int fd, int on) {
+    return sy_nonblock_os(fd, on);
+}
+
+/* FD_CLOEXEC on FD on (ON != 0) or off: F_GETFD then F_SETFD. 0, or -errno
+   (-EBADF for a closed fd; -ENOSYS on Windows). */
+int sy_fd_cloexec(int fd, int on) {
+    return sy_cloexec_os(fd, on);
+}

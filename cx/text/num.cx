@@ -1,0 +1,74 @@
+#pragma unisa module num
+/* L0 text/num: number parsing (plans/cx-layers.md, plans/cx-l0-fmt-2026-10-30.md).
+   No #include: strtol/strtoul/strtod come with the implicit prelude.
+   tx_atol, tx_strtol, tx_strtoul, tx_strtod return exactly what the prelude's
+   atol/strtol/strtoul/strtod return (value, clamping on overflow, *END), but
+   errno does NOT reach the caller: in this toolchain errno is one static int per
+   compile unit (plans/errno-per-unit-2026-10-30.md), so the ERANGE they set lands
+   in this module's errno, not yours.  A caller that needs to see a range error
+   uses the _r forms, which return it: 0, -EINVAL (no digits, or a bad base), or
+   -ERANGE (out of range; *OUT then holds the clamped value libc gives). */
+
+/* atol(S): strtol(S, 0, 10). */
+long tx_atol(const char *s) {
+    return strtol(s, 0, 10);
+}
+
+/* strtol(S, END, BASE). errno is not reported; see tx_strtol_r. */
+long tx_strtol(const char *s, char **end, int base) {
+    return strtol(s, end, base);
+}
+
+/* strtoul(S, END, BASE). errno is not reported; see tx_strtoul_r. */
+unsigned long tx_strtoul(const char *s, char **end, int base) {
+    return strtoul(s, end, base);
+}
+
+/* strtod(S, END). errno is not reported; see tx_strtod_r. */
+double tx_strtod(const char *s, char **end) {
+    return strtod(s, end);
+}
+
+/* strtol into *OUT; END as strtol (may be 0). 0, -EINVAL (null S or OUT, base not 0
+   or 2..36, or no digits: *OUT 0 and *END S), or -ERANGE (*OUT LONG_MIN/LONG_MAX). */
+int tx_strtol_r(const char *s, char **end, int base, long *out) {
+    char *e = 0;
+    if (end) *end = (char *)s;
+    if (!s || !out) return -EINVAL;
+    *out = 0;
+    if (base != 0 && (base < 2 || base > 36)) return -EINVAL;
+    errno = 0;
+    *out = strtol(s, &e, base);
+    if (end) *end = e;
+    if (e == s) return -EINVAL;
+    return errno == ERANGE ? -ERANGE : 0;
+}
+
+/* strtoul into *OUT, as tx_strtol_r; -ERANGE leaves *OUT ULONG_MAX. A leading '-'
+   negates in unsigned arithmetic, as strtoul does. */
+int tx_strtoul_r(const char *s, char **end, int base, unsigned long *out) {
+    char *e = 0;
+    if (end) *end = (char *)s;
+    if (!s || !out) return -EINVAL;
+    *out = 0;
+    if (base != 0 && (base < 2 || base > 36)) return -EINVAL;
+    errno = 0;
+    *out = strtoul(s, &e, base);
+    if (end) *end = e;
+    if (e == s) return -EINVAL;
+    return errno == ERANGE ? -ERANGE : 0;
+}
+
+/* strtod into *OUT, as tx_strtol_r; -ERANGE on overflow (*OUT +-HUGE_VAL) or
+   underflow (*OUT the zero or subnormal strtod gives). */
+int tx_strtod_r(const char *s, char **end, double *out) {
+    char *e = 0;
+    if (end) *end = (char *)s;
+    if (!s || !out) return -EINVAL;
+    *out = 0;
+    errno = 0;
+    *out = strtod(s, &e);
+    if (end) *end = e;
+    if (e == s) return -EINVAL;
+    return errno == ERANGE ? -ERANGE : 0;
+}
