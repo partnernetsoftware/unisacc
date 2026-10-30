@@ -63,13 +63,26 @@ jobs:
       - name: preflight draft fetch
         if: inputs.asset_id != ''
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RID: ${{ inputs.release_id }}
+          AID: ${{ inputs.asset_id }}
+          TAG: ${{ inputs.tag }}
+          TC: ${{ inputs.tag_commit }}
+          SHA: ${{ inputs.sha256 }}
         run: |
+          # the identity checks of the retired release/tools/draftfetch.py, with gh and jq from the runner:
+          # never a public URL, a cache or "latest"; never an upload, a delete or a publish
           set -euo pipefail
           mkdir -p preflight
-          python3 release/tools/draftfetch.py --repo "${{ github.repository }}" --release-id "${{ inputs.release_id }}" \
-            --asset-id "${{ inputs.asset_id }}" --tag "${{ inputs.tag }}" --commit "${{ inputs.tag_commit }}" \
-            --sha256 "${{ inputs.sha256 }}" --out preflight/unisacc.com
+          api() { gh api -H 'X-GitHub-Api-Version: 2022-11-28' "$@"; }
+          rel=$(api "repos/$REPO/releases/$RID") && asset=$(api "repos/$REPO/releases/assets/$AID") || { echo "draftfetch: API read failed"; exit 1; }
+          why=$(jq -r -n --argjson r "$rel" --argjson a "$asset" --arg rid "$RID" --arg aid "$AID" --arg tag "$TAG" --arg tc "$TC" -f release/tools/draftcheck.jq)
+          if [ -n "$why" ]; then printf 'draftfetch: REFUSED %s\n' "$why"; exit 1; fi
+          api -H 'Accept: application/octet-stream' "repos/$REPO/releases/assets/$AID" > preflight/unisacc.com || { echo "draftfetch: download failed"; exit 1; }
+          got=$(sha256sum preflight/unisacc.com | cut -d' ' -f1)
+          echo "source=authenticated-draft release_id=$RID asset_id=$AID tag_name=$TAG target_commitish=$TC sha256 $got"
+          [ "$got" = "$SHA" ] || { echo "draftfetch: DRAFT BYTES DIFFER from the signed hash"; exit 1; }
       - uses: actions/upload-artifact@v4
         if: inputs.asset_id != ''
         with:
@@ -120,8 +133,8 @@ jobs:
         if: inputs.asset_id != ''
         shell: pwsh
         run: |
-          python release/tools/draftfetch.py --verify-again --repo x --release-id x --asset-id x --tag x --commit x --sha256 "${{ inputs.sha256 }}" --out dl/unisacc.com
-          if ($LASTEXITCODE -ne 0) { throw "artifact bytes differ from the signed hash" }
+          $got = (Get-FileHash dl/unisacc.com -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne "${{ inputs.sha256 }}") { throw "artifact bytes differ from the signed hash" }
       - name: Defender scan of the final bytes
         shell: pwsh
         run: |
@@ -140,5 +153,5 @@ jobs:
         if: inputs.asset_id != ''
         shell: pwsh
         run: |
-          python release/tools/draftfetch.py --verify-again --repo x --release-id x --asset-id x --tag x --commit x --sha256 "${{ inputs.sha256 }}" --out dl/unisacc.com
-          if ($LASTEXITCODE -ne 0) { throw "bytes changed during the scan" }
+          $got = (Get-FileHash dl/unisacc.com -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne "${{ inputs.sha256 }}") { throw "bytes changed during the scan" }

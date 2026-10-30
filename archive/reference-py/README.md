@@ -23,8 +23,8 @@
    - 历史见证 `tools/cxpack-source-delta.cx`、`tools/link-source-delta.cx` 保留原树列表（含 `unisa`），它们只适用于各自钉住的历史根对。
 3. `release/`：2026-10-30 按调用链清理。
    - **已归档：** 18 个 `.py`，连同只服务于它们、且引用已归档文件因而早已跑不起来的 `.sh`/`.cx`（macOS 打包、提交门禁、旧候选链、发布队列与预热、裁定台账报告）。
-   - **仍留 2 个，由 GitHub 手动发布 workflow 调用：**
-     - `release/tools/draftfetch.py`（`defender-scan.yml`）：经 HTTPS 调 GitHub API，从草稿 release 取回 `unisacc.com`。检出后的 CI 里还没有 `unisacc.com` 可以运行 `.cx`，CX 侧也没有 TLS，所以无法移植。
+   - **2026-10-30 再归档 1 个：** `release/tools/draftfetch.py` 现在位于 `archive/reference-py/release/tools/draftfetch.py`。`defender-scan.yml` 改用 runner 自带的 `gh api`、`jq` 和 `Get-FileHash`，不需要 Python，也不需要 `unisacc.com`。7 条身份检查原样搬进 `release/tools/draftcheck.jq`，本地用 jq 实测：正例为空，换了 tag 的反例被拒。这条 workflow 改动之后还没在 CI 上实跑过，第一次实跑之前，没有云端证据。
+   - **仍留 1 个，由 GitHub 手动发布 workflow 调用：**
      - `release/apeinspect.py`（`windows-signing.yml`，windows-2025 runner）：那条 workflow 自己还内联了大段 Python；被检查的正是待签名的 `unisacc.com`，用它自己运行 `.cx` 来检查既是循环依赖，本地也无法验证。
    - `apps/`、`m4/` 各属其域，未动。
 4. `exec/c/buildcompiler.sh` 仍是 Makefile 的构造入口，留在原处；其中 `python3 -m unisa ape` 回退分支已不可用。
