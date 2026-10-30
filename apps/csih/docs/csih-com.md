@@ -84,12 +84,11 @@ csih.com 是自包含的二进制，不需要 `apps/csih` 源码树，也不读 
 | win/x86_64 | csih_win64-x86.exe（占位） | 是，PE32+ | 同一份源码在 Linux 上 `-run`：打印说明，退出码 2；PE 本身 UNMEASURED | 见下文"Windows" |
 | win/arm64 | 用 win/x86_64 那个 PE | 不单独编 | UNMEASURED | APE 的约定（与 gcc_cx.com 相同） |
 
-## csih-ape 快照构造的已知问题（未修，有绕法）
+## csih-ape 快照构造
 
-- 在快照树（out/csih-ape/tree）里 pack 时，`clean_head()` 会向外层检出的 git 要 HEAD；外层 HEAD 一旦前进，清单里就会写进一条错的 `commit` 行，install 再追加快照那条，结果有两条。verify 读到第一条，和 `tree/.commit` 对不上，就退回工作区模式；别人改了一半的 L0 这时会让它报"slices are stale"。
-  - 2026-10-30 实际碰到：构造 0490c63017 时，清单多出 f4edfb4c。
-  - 绕法：删掉不等于 `out/csih-ape/tree/.commit` 的那条 commit 行，再 verify，会按快照模式核对，10 项通过。
-  - 修法：`clean_head()` 在存在 `./.commit` 时直接读它；install 先去掉旧的 commit 行再追加。tools/ 不在本车道当前的可写范围内，所以没改。
+- 已修（2026-10-30）：在快照树（out/csih-ape/tree）里 pack 时，`clean_head()` 原来去问外层检出的 git 要 HEAD；外层 HEAD 一旦前进，清单就会多一条错的 `commit` 行（构造 0490c63017 时多出了 f4edfb4c），verify 因此退回工作区模式。
+  - 现在 `clean_head()` 在有 `./.commit` 的地方直接读它；install 写清单前先删掉旧的 commit 行，只追加快照那一条。
+  - 实测：树里 pack 写出的是 0490c63017；install 之后只有这一条；verify 按快照模式 10/10 通过。
 - 快照里每片都是冷编译，实测 55–58 秒，紧贴 60 秒上限。
 
 ## 启动器的两个已知问题（ape-pack 生成，未修）

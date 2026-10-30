@@ -108,6 +108,16 @@ static int slice_digest(int k, char d[65]) {
 static void clean_head(char hash[41]) {
     char out[256];
     int cut;
+    /* Inside a snapshot (./.commit) the tree is that commit; git would answer for
+       the enclosing checkout instead, whose HEAD may have moved on (2026-10-30: a
+       snapshot of 0490c63017 got a commit row f4edfb4c). */
+    if (sy_exists(".commit") == 1) {
+        size_t n = 0;
+        char *c = cx_read(".commit", &n);
+        hash[0] = 0;
+        if (c && n >= 40) tx_copy(hash, 41, c, 40);
+        return;
+    }
     char *av[] = { "sh", "-c",
                    "cd apps/csih && sh ../../unisacc.com -cx-plan csih.cx | cut -f2 "
                    "| while read f; do realpath --relative-to=../.. \"$f\"; done > ../../out/csih-ape/closure.txt "
@@ -462,9 +472,13 @@ static int install(void) {
     tx_copy(hash, sizeof hash, h, 40);
     if (mn + 64 > sizeof man) return 1;
     {
-        long at = 0;
-        tx_copy(man, sizeof man, m, (long)mn);
-        at = (long)mn;
+        long at = 0, i = 0;
+        /* drop the commit rows the packed manifest already has: the snapshot's own is appended once */
+        while (i < (long)mn) {
+            long e = tx_chr(m + i, (long)mn - i, '\n'), ln = e < 0 ? (long)mn - i : e + 1;
+            if (!tx_prefix(m + i, ln, "commit\t", 7)) { tx_copy(man + at, (long)sizeof man - at, m + i, ln); at += ln; }
+            i += ln;
+        }
         if (cx_fmt(man + at, sizeof man - (size_t)at, "commit\t%s\n", hash)) return 1;
         at += tx_len(man + at, (long)sizeof man - at);
         if (cx_fmt(q, sizeof q, "%s/manifest.tsv", OUT) || cx_write(q, man, (size_t)at) != 0) { fprintf(stderr, "csih-ape: cannot write %s\n", q); return 1; }
