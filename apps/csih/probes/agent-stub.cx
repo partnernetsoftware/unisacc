@@ -1,5 +1,7 @@
 #pragma unisa module agent-stub
-/* Lower: an HTTP test double — it is a socket server, and sockets are not in the cx prelude. */
+#pragma unisa use sys.net
+#pragma unisa use sys.fs
+/* An HTTP test double: its sockets are sys.net (sy_tcp_listen/accept/recv/send_all); no #include. */
 /* agent-stub.c — C port of agent-stub.py.
  * Scripted stand-in for the DeepSeek chat/completions API. Same reply shape,
  * same decision logic:
@@ -10,14 +12,6 @@
  * Build:  /bin/sh unisacc.com probes/agent-stub.c -o OUT
  * Run:    OUT [port]          (default 19001)
  */
-#include <arpa/inet.h>
-#include <ctype.h>
-#include <netinet/in.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
 #define REQ_MAX (1 << 22)
 
@@ -264,7 +258,7 @@ static char *read_request(int c, size_t *blen) {
     for (;;) {
         ssize_t k;
         if (have >= REQ_MAX) break;
-        k = read(c, req + have, REQ_MAX - have);
+        k = (ssize_t)sy_recv(c, req + have, (long)(REQ_MAX - have));
         if (k <= 0) break;
         have += (size_t)k;
         if (!got_hdr) {
@@ -318,8 +312,8 @@ static void serve_one(int c) {
              "Content-Length: %d\r\nConnection: close\r\n\r\n", (int)strlen(reply));
     /* send(MSG_NOSIGNAL), not write: a port probe closes without reading,
      * and unisacc's signal() cannot ignore the SIGPIPE that would kill us. */
-    send(c, head, strlen(head), MSG_NOSIGNAL);
-    send(c, reply, strlen(reply), MSG_NOSIGNAL);
+    sy_send_all(c, head, (long)strlen(head));   /* MSG_NOSIGNAL inside */
+    sy_send_all(c, reply, (long)strlen(reply));
     for (i = 0; i < n; i++) { free(msgs[i].role); free(msgs[i].content); }
     free(msgs);
     free(body);
@@ -327,22 +321,14 @@ static void serve_one(int c) {
 
 int main(int argc, char **argv) {
     int port = argc > 1 ? atoi(argv[1]) : 19001;
-    int s, c, one = 1;
-    struct sockaddr_in a;
-    s = socket(AF_INET, SOCK_STREAM, 0);
-    if (s < 0) { printf("FAIL socket\n"); return 1; }
-    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-    memset(&a, 0, sizeof a);
-    a.sin_family = AF_INET;
-    a.sin_port = htons((unsigned short)port);
-    a.sin_addr.s_addr = htonl(0x7f000001);
-    if (bind(s, (struct sockaddr *)&a, sizeof a) != 0) { printf("FAIL bind\n"); return 1; }
-    if (listen(s, 16) != 0) { printf("FAIL listen\n"); return 1; }
+    int s, c;
+    s = sy_tcp_listen(port, 16);   /* 127.0.0.1, SO_REUSEADDR */
+    if (s < 0) { printf("FAIL listen\n"); return 1; }
     for (;;) {
-        c = accept(s, NULL, NULL);
+        c = sy_tcp_accept(s, -1);
         if (c < 0) continue;
         serve_one(c);
-        close(c);
+        sy_close(c);
     }
     return 0;
 }

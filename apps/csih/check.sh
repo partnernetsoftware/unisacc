@@ -54,6 +54,8 @@ CXINC="-include $R/include/cx.h"
 # `#pragma unisa use`, which host cc ignores: compile those beside them,
 # declared by fuzz/host_l0.h.
 L0INC="-include $R/apps/csih/fuzz/host_l0.h"
+# the fuzz drivers carry no #include (tests/cxinclude): their host headers come from here
+DRVINC="-include stdio.h -include stdlib.h -include string.h"
 L0OBJ="$TMP/zstr.o $TMP/text.o $TMP/bytes.o $TMP/heap.o"
 if cp zstr.cx "$TMP/zstr.c" && cp text/text.cx "$TMP/text.c" && cp mem/bytes.cx "$TMP/bytes.c" \
    && cp mem/heap.cx "$TMP/heap.c" \
@@ -66,7 +68,7 @@ else
     echo "FAIL 3: host build of the L0 helpers"; rc=1
 fi
 if cc $CFLAGS $CXINC $L0INC -c -o "$TMP/json.o" "$TMP/json.c" \
-   && cc $CFLAGS -include json.h -c -o "$TMP/fuzz_json.o" "$TMP/fuzz_json.c" \
+   && cc $CFLAGS $DRVINC -include json.h -c -o "$TMP/fuzz_json.o" "$TMP/fuzz_json.c" \
    && cc $CFLAGS -o "$TMP/fuzz_json" "$TMP/fuzz_json.o" "$TMP/json.o" $L0OBJ \
    && "$TMP/fuzz_json" "$ITERS" > "$TMP/fuzz_json.out" 2>&1; then
     echo "ok   3a: json fuzz $(cat "$TMP/fuzz_json.out")"
@@ -74,7 +76,7 @@ else
     echo "FAIL 3a: json fuzz"; cat "$TMP/fuzz_json.out" 2>/dev/null; rc=1
 fi
 if cc $CFLAGS $CXINC $L0INC -include json.h -c -o "$TMP/csih_message.o" "$TMP/csih_message.c" \
-   && cc $CFLAGS -include json.h -include csih_message.h -c -o "$TMP/fuzz_msg.o" "$TMP/fuzz_msg.c" \
+   && cc $CFLAGS $DRVINC -include json.h -include csih_message.h -c -o "$TMP/fuzz_msg.o" "$TMP/fuzz_msg.c" \
    && cc $CFLAGS -o "$TMP/fuzz_msg" "$TMP/fuzz_msg.o" "$TMP/csih_message.o" "$TMP/json.o" $L0OBJ \
    && "$TMP/fuzz_msg" "$ITERS" > "$TMP/fuzz_msg.out" 2>&1 \
    && grep -q 'decoded_ok=[1-9]' "$TMP/fuzz_msg.out"; then
