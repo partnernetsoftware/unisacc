@@ -1,6 +1,7 @@
 /* Run from any cwd: sh /path/unisacc.com /path/tests/run.cx -- --smoke */
 #pragma unisa use cases.product
 #pragma unisa use cxlib.testplan
+#pragma unisa use text.text
 static const char *names[]={"function","recursion","fibonacci","struct-array","pointer-mutation","callback","loop-control","short-circuit","memmove","format","format-bytes","parse-integer","parse-tail","allocation","sha256","module-state"};
 static const long expected[]={42,720,55,34,17,81,25,0,0,7,0,-123,120,45,0,2};
 static int smoke(void){long actual[16];int i,failed=0;
@@ -13,14 +14,14 @@ static int smoke(void){long actual[16];int i,failed=0;
  return failed?1:0;
 }
 typedef struct {int smoke_rc,smoke_seen,invalid,not_run_batches,not_run_coverage,unresolved;} run_inventory;
-static int smoke_id(const char *id){int i;for(i=0;i<16;i++){char expected_id[100];snprintf(expected_id,sizeof expected_id,"product.%s",names[i]);if(!strcmp(id,expected_id))return 1;}return 0;}
+static int smoke_id(const char *id){int i;for(i=0;i<16;i++){char expected_id[100];snprintf(expected_id,sizeof expected_id,"product.%s",names[i]);if(tx_eq(id, expected_id, 1L << 20))return 1;}return 0;}
 static int smoke_mapping(const char *csv){int count=0;while(*csv){const char *end=strchr(csv,',');size_t n=end?(size_t)(end-csv):strlen(csv);char id[128];if(!n||n>=sizeof id)return 0;memcpy(id,csv,n);id[n]=0;if(!smoke_id(id))return 0;count++;if(!end)break;csv=end+1;}return count==16;}
-static int smoke_row_valid(const tp_batch_view *v){return !strcmp(v->implementation,"IMPLEMENTED")&&!strcmp(v->source,"tests/run.cx")&&!strcmp(v->entry,v->source)&&!strcmp(v->mode,"SOURCE")&&!strcmp(v->materials,"-")&&!strcmp(v->args,"--smoke")&&!strcmp(v->expect,"rc0:SMOKE")&&smoke_mapping(v->coverage);}
-static void inventory_batch(const tp_batch_view *v,void *context){run_inventory *s=context;if(!strcmp(v->id,"smoke")){
+static int smoke_row_valid(const tp_batch_view *v){return tx_eq(v->implementation, "IMPLEMENTED", 1L << 20)&&tx_eq(v->source, "tests/run.cx", 1L << 20)&&tx_eq(v->entry, v->source, 1L << 20)&&tx_eq(v->mode, "SOURCE", 1L << 20)&&tx_eq(v->materials, "-", 1L << 20)&&tx_eq(v->args, "--smoke", 1L << 20)&&tx_eq(v->expect, "rc0:SMOKE", 1L << 20)&&smoke_mapping(v->coverage);}
+static void inventory_batch(const tp_batch_view *v,void *context){run_inventory *s=context;if(tx_eq(v->id, "smoke", 1L << 20)){
  s->smoke_seen=1;int valid=smoke_row_valid(v);
  if(!valid){s->invalid=1;puts("REFUSE\tsmoke-registry-contract\tlocal-observations-do-not-satisfy-this-row");return;}
  printf("BATCH\tsmoke\t%s\tscope=in-process-local-only\tplatform_claim=NOT_QUALIFIED\tdeclared_platform=%s\n",s->smoke_rc?"LOCAL_FAIL":"LOCAL_PASS",v->platform);return;
- }s->not_run_batches++;printf("NOT_RUN\tbatch.%s\timplementation=%s\treason=%s\tplatform=%s\tbudget=%s\tmaterials=%s\tsource_state=%s\n",v->id,v->implementation,!strcmp(v->implementation,"PLANNED")?"PLANNED":strcmp(v->materials,"-")?"UNPREPARED":"not-scheduled",v->platform,v->budget,v->materials,v->source_present?"PRESENT":"MISSING");}
+ }s->not_run_batches++;printf("NOT_RUN\tbatch.%s\timplementation=%s\treason=%s\tplatform=%s\tbudget=%s\tmaterials=%s\tsource_state=%s\n",v->id,v->implementation,tx_eq(v->implementation, "PLANNED", 1L << 20)?"PLANNED":strcmp(v->materials,"-")?"UNPREPARED":"not-scheduled",v->platform,v->budget,v->materials,v->source_present?"PRESENT":"MISSING");}
 static void inventory_coverage(const tp_coverage_view *v,void *context){run_inventory *s=context;if(strcmp(v->implementation,"IMPLEMENTED")&&strcmp(v->implementation,"IMPLEMENTED_SEPARATE_BATCH")){s->unresolved++;printf("%s\t%s\tmapped=%d\texpected_or_gap=%s\n",v->implementation,v->id,v->mapped,v->expected);return;}
  if(smoke_id(v->id)&&s->smoke_seen&&!s->invalid){printf("COVERAGE\t%s\t%s\timplementation=%s\tscope=in-process-local-only\tplatform_claim=NOT_QUALIFIED\n",v->id,s->smoke_rc?"LOCAL_FAIL":"LOCAL_PASS",v->implementation);return;}
  s->not_run_coverage++;printf("NOT_RUN\t%s\timplementation=%s\timplemented_batch=%d\texpected=%s\n",v->id,v->implementation,v->implemented_batch,v->expected);}
@@ -47,7 +48,7 @@ static int all_session(const char *root,const char *session,char *reg,size_t rn,
  free(out);if(smoke_rc)return smoke_rc;if(!qualified)return arc==2?2:3;return 0;
 }
 static char *metadata_read(const char *p,const char *kind,size_t *n){struct stat st;errno=0;if(lstat(p,&st)){fprintf(stderr,"REFUSE\tmetadata-io\tkind=%s\tpath=%s\terrno=%d\n",kind,p,errno);return 0;}if(!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>4194304){fprintf(stderr,"REFUSE\tmetadata-file-shape\tkind=%s\tpath=%s\n",kind,p);return 0;}char *s=cx_read(p,n);if(!s||*n!=(size_t)st.st_size){fprintf(stderr,"REFUSE\tmetadata-read-size\tkind=%s\tpath=%s\n",kind,p);free(s);return 0;}return s;}
-int main(int argc,char **argv){int session_mode=argc==3&&!strcmp(argv[1],"--all");if(!session_mode&&(argc!=2||(!strcmp(argv[1],"--smoke")?0:!strcmp(argv[1],"--list")?0:strcmp(argv[1],"--all")))){fprintf(stderr,"usage: --smoke | --all [ABS_SESSION] | --list\n");return 2;}if(!strcmp(argv[1],"--smoke"))return smoke();
+int main(int argc,char **argv){int session_mode=argc==3&&tx_eq(argv[1], "--all", 1L << 20);if(!session_mode&&(argc!=2||(tx_eq(argv[1], "--smoke", 1L << 20)?0:tx_eq(argv[1], "--list", 1L << 20)?0:strcmp(argv[1],"--all")))){fprintf(stderr,"usage: --smoke | --all [ABS_SESSION] | --list\n");return 2;}if(tx_eq(argv[1], "--smoke", 1L << 20))return smoke();
  char root[4096],registry_path[4400],coverage_path[4400],why[600];const char *suffix="/tests/run.cx";if(!realpath(argv[0],root)){fprintf(stderr,"REFUSE\tinventory-root-source\terrno=%d\n",errno);return 2;}size_t z=strlen(root),sn=strlen(suffix);if(z<=sn||strcmp(root+z-sn,suffix)){fprintf(stderr,"REFUSE\tinventory-root-layout\texpected=ROOT/tests/run.cx\n");return 2;}root[z-sn]=0;
  snprintf(registry_path,sizeof registry_path,"%s/tests/batches.tsv",root);snprintf(coverage_path,sizeof coverage_path,"%s/tests/coverage.tsv",root);size_t rn,cn;char *reg=metadata_read(registry_path,"batches",&rn),*cov=metadata_read(coverage_path,"coverage",&cn);if(!reg||!cov){free(reg);free(cov);return 2;}
  tp_summary summary;int list=!strcmp(argv[1],"--list"),rc=tp_analyze(root,reg,rn,cov,cn,list,&summary,why,sizeof why);if(rc){fprintf(stderr,"REFUSE\tmetadata-schema\t%s\n",why);free(reg);free(cov);return 2;}

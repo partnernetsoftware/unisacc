@@ -3,6 +3,7 @@
  * an independent tool-only union, and parent survival: 36 obligations.
  * Actual job receipts are re-read; no NN inference or full-package claim. */
 #pragma unisa use cxlib.sourcepackage
+#pragma unisa use text.text
 static int assertions,failed;
 static void check(int ok,const char *s){assertions++;if(!ok)failed++;printf("%s\t%s\n",ok?"PASS":"FAIL",s);}
 static void die(const char *s){fprintf(stderr,"source-job-union: REFUSE %s errno=%d\n",s,errno);exit(2);}
@@ -10,8 +11,8 @@ static void path(char out[4400],const char *base,const char *leaf){int n=snprint
 static void digest(const char *p,char out[65]){struct stat st;size_t n;if(lstat(p,&st)||!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>8388608)die("regular-module-source");char *s=cx_read(p,&n);if(!s||n!=(size_t)st.st_size)die("module-source-read");cx_sha256_hex(s,n,out);free(s);}
 static void source_file(const char *p,char out[65]){struct stat st;size_t n;if(lstat(p,&st)||!S_ISREG(st.st_mode)||st.st_size!=65)die("context-source-file");char *s=cx_read(p,&n);if(!s||n!=65||s[64]!='\n')die("context-source-extent");for(int i=0;i<64;i++)if(!((s[i]>='0'&&s[i]<='9')||(s[i]>='a'&&s[i]<='f')))die("context-source-hex");memcpy(out,s,64);out[64]=0;free(s);}
 static int zero(const sp_result *r){const unsigned char *p=(const unsigned char *)r;for(size_t i=0;i<sizeof *r;i++)if(p[i])return 0;return 1;}
-static void negative(const char *root,const char *ctx,const char *sid,const char *const *ids,int n,const char *label){sp_result r;char why[1200];memset(&r,0xa5,sizeof r);memset(why,'!',sizeof why);int rc=sp_verify_jobs_snapshot(root,ctx,ids,n,sid,20,&r,why,sizeof why);check(rc==-1,label);check(memchr(why,0,sizeof why)&&!strcmp(why,"source-package-snapshot-arguments"),"early-argument-refusal-is-exact");check(zero(&r),"negative-clears-entire-result");}
-static sp_result positive(const char *root,const char *ctx,const char *sid,const char *module_sha,const char *const *ids,int n,int jobs,int models){sp_result r;char why[1200];memset(&r,0xa5,sizeof r);int rc=sp_verify_jobs_snapshot(root,ctx,ids,n,sid,20,&r,why,sizeof why);check(!rc,"fresh-material-job-union");if(rc){fprintf(stderr,"%s\n",why);exit(2);}check(!why[0],"success-reason-empty");check(r.jobs==jobs&&r.models==models,"unique-job-and-complete-net-domains");check(!strcmp(r.source,sid),"caller-fresh-source-matches-context");check(!strcmp(r.verifier,module_sha),"executing-module-source-identity");check(r.physical_reads>0&&r.elapsed_ns>0,"fresh-physical-reads-and-measured-time");check(strlen(r.artifact)==64&&strlen(r.receipt)==64&&strlen(r.manifest)==64&&strcmp(r.artifact,r.receipt),"outputs-and-receipts-have-separate-domains");printf("UNION\tjobs=%d\tmodels=%d\treads=%d\tns=%lld\tartifact=%s\treceipt=%s\twitness=%s\n",r.jobs,r.models,r.physical_reads,r.elapsed_ns,r.artifact,r.receipt,r.witness);return r;}
+static void negative(const char *root,const char *ctx,const char *sid,const char *const *ids,int n,const char *label){sp_result r;char why[1200];memset(&r,0xa5,sizeof r);memset(why,'!',sizeof why);int rc=sp_verify_jobs_snapshot(root,ctx,ids,n,sid,20,&r,why,sizeof why);check(rc==-1,label);check(memchr(why,0,sizeof why)&&tx_eq(why, "source-package-snapshot-arguments", 1L << 20),"early-argument-refusal-is-exact");check(zero(&r),"negative-clears-entire-result");}
+static sp_result positive(const char *root,const char *ctx,const char *sid,const char *module_sha,const char *const *ids,int n,int jobs,int models){sp_result r;char why[1200];memset(&r,0xa5,sizeof r);int rc=sp_verify_jobs_snapshot(root,ctx,ids,n,sid,20,&r,why,sizeof why);check(!rc,"fresh-material-job-union");if(rc){fprintf(stderr,"%s\n",why);exit(2);}check(!why[0],"success-reason-empty");check(r.jobs==jobs&&r.models==models,"unique-job-and-complete-net-domains");check(tx_eq(r.source, sid, 1L << 20),"caller-fresh-source-matches-context");check(tx_eq(r.verifier, module_sha, 1L << 20),"executing-module-source-identity");check(r.physical_reads>0&&r.elapsed_ns>0,"fresh-physical-reads-and-measured-time");check(strlen(r.artifact)==64&&strlen(r.receipt)==64&&strlen(r.manifest)==64&&strcmp(r.artifact,r.receipt),"outputs-and-receipts-have-separate-domains");printf("UNION\tjobs=%d\tmodels=%d\treads=%d\tns=%lld\tartifact=%s\treceipt=%s\twitness=%s\n",r.jobs,r.models,r.physical_reads,r.elapsed_ns,r.artifact,r.receipt,r.witness);return r;}
 int main(int argc,char **argv){
  if(argc!=4)return 2;
  char root[4096],ctx[4096],sid_path[4400],module_path[4400],sid[65],module_sha[65],after_module[65];
@@ -21,9 +22,9 @@ int main(int argc,char **argv){
  const char *a[]={"net-shared-e3","net-warnparse","net-errorparse"},*b[]={"net-errorparse","net-shared-e3","net-warnparse"},*tools[]={"tool-gen","tool-tbl","tool-net"},*dup[]={"net-shared-e3","net-shared-e3"},*unknown[]={"net-not-a-model"};
  negative(root,ctx,sid,a,0,"empty-leaf-set-refused");negative(root,ctx,sid,dup,2,"duplicate-explicit-leaf-refused");negative(root,ctx,sid,unknown,1,"unknown-leaf-refused");negative(root,ctx,"bad",a,3,"malformed-fresh-source-refused");
  pid_t caller=getpid();sp_result before=positive(root,ctx,sid,module_sha,a,3,12,3),after=positive(root,ctx,sid,module_sha,b,3,12,3);
- check(!strcmp(before.artifact,after.artifact)&&!strcmp(before.receipt,after.receipt)&&!strcmp(before.manifest,after.manifest),"explicit-leaf-order-does-not-change-canonical-union");
- check(!strcmp(before.witness,after.witness)&&before.physical_reads==after.physical_reads,"independent-fresh-views-have-stable-data-witness");
+ check(tx_eq(before.artifact, after.artifact, 1L << 20)&&tx_eq(before.receipt, after.receipt, 1L << 20)&&tx_eq(before.manifest, after.manifest, 1L << 20),"explicit-leaf-order-does-not-change-canonical-union");
+ check(tx_eq(before.witness, after.witness, 1L << 20)&&before.physical_reads==after.physical_reads,"independent-fresh-views-have-stable-data-witness");
  positive(root,ctx,sid,module_sha,tools,3,3,0);check(caller==getpid(),"parent-survives-private-validation");
- digest(module_path,after_module);check(!strcmp(module_sha,after_module),"module-source-stable");
+ digest(module_path,after_module);check(tx_eq(module_sha, after_module, 1L << 20),"module-source-stable");
  puts("SCOPE\tmaterial-only;no-NN-inference-or-current107-package-claim");
  printf("SOURCE_JOB_UNION\tassertions=%d\tfailed=%d\n",assertions,failed);return failed?1:0;}

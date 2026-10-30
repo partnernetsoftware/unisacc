@@ -3,6 +3,7 @@
  * Controls material eligibility only, never NN execution or cached PASS. */
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.riflowmaterial
+#pragma unisa use text.text
 static char root[4096],mat[4096],work[4096],copydir[4400],product[4400],bound[4400],selfpath[128],selfhash[65];
 static const char *leaves[]={"runtime.c","material.tsv","flow-native","flow-native.pending.tsv","flow-native.tsv"};
 static int assertions,failures;
@@ -13,7 +14,7 @@ static char *load(const char *p,size_t *n){struct stat a,b;errno=0;if(lstat(p,&a
 static void digest(const char *p,char h[65]){size_t n;char *s=load(p,&n);cx_sha256_hex(s,n,h);free(s);}
 static void put(const char *p,const char *s,size_t n,int fresh,int mode){int fd=open(p,O_WRONLY|O_CLOEXEC|O_NOFOLLOW|(fresh?(O_CREAT|O_EXCL):O_TRUNC),mode);if(fd<0)die("private write open");if(fchmod(fd,(mode_t)mode)){close(fd);die("private output mode");}size_t at=0;while(at<n){ssize_t z=write(fd,s+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0){close(fd);die("private write");}at+=(size_t)z;}if(close(fd))die("private close");}
 static int inside(const char *p,const char *d){size_t n=strlen(d);return !strncmp(p,d,n)&&(!p[n]||p[n]=='/');}
-static void newout(const char *arg){if(arg[0]!='/'||strlen(arg)>=sizeof work||strpbrk(arg,"\r\n\t"))die("absolute new output");char tmp[4096],parent[4096];strcpy(tmp,arg);char *slash=strrchr(tmp,'/');if(!slash||!slash[1]||!strcmp(slash+1,".")||!strcmp(slash+1,".."))die("output leaf");char leaf[4096];strcpy(leaf,slash+1);if(slash==tmp)slash[1]=0;else *slash=0;if(!realpath(tmp,parent))die("output parent");int z=snprintf(work,sizeof work,"%s%s%s",parent,strcmp(parent,"/")?"/":"",leaf);if(z<0||(size_t)z>=sizeof work||inside(work,mat))die("output overlaps original");if(mkdir(work,0700))die("fresh output required");}
+static void newout(const char *arg){if(arg[0]!='/'||strlen(arg)>=sizeof work||strpbrk(arg,"\r\n\t"))die("absolute new output");char tmp[4096],parent[4096];strcpy(tmp,arg);char *slash=strrchr(tmp,'/');if(!slash||!slash[1]||tx_eq(slash+1, ".", 1L << 20)||tx_eq(slash+1, "..", 1L << 20))die("output leaf");char leaf[4096];strcpy(leaf,slash+1);if(slash==tmp)slash[1]=0;else *slash=0;if(!realpath(tmp,parent))die("output parent");int z=snprintf(work,sizeof work,"%s%s%s",parent,strcmp(parent,"/")?"/":"",leaf);if(z<0||(size_t)z>=sizeof work||inside(work,mat))die("output overlaps original");if(mkdir(work,0700))die("fresh output required");}
 static void states(const char *dir,char h[5][65],int present[5]){for(int i=0;i<5;i++){char p[4400];struct stat st;path(p,dir,leaves[i]);errno=0;if(lstat(p,&st)){if(errno!=ENOENT)die("state stat");present[i]=0;h[i][0]=0;}else{present[i]=1;digest(p,h[i]);}}}
 /* proc's executable link deliberately follows the kernel's live image binding;
  * realpath would produce an unusable '(deleted)' memfd name. It is not an input
@@ -31,9 +32,9 @@ int main(int argc,char **argv){
 #if !defined(__linux__) || !defined(__x86_64__)
  fputs("NOT_RUN ri-flow-controls requires Linux/x86_64\n",stderr);return 3;
 #endif
- if(argc>1&&!strcmp(argv[1],"--profile-child"))return profile_child(argc,argv);
+ if(argc>1&&tx_eq(argv[1], "--profile-child", 1L << 20))return profile_child(argc,argv);
  if(argc!=5||!realpath(argv[1],root)||!realpath(argv[2],mat))return 2;
- const char *cases[]={"valid","unsealed","elf-flip","pending-flip","final-flip","closure-field","old-v1","recompile","reseal"};int kind=-1;for(int i=0;i<9;i++)if(!strcmp(argv[4],cases[i]))kind=i;if(kind<0)return 2;
+ const char *cases[]={"valid","unsealed","elf-flip","pending-flip","final-flip","closure-field","old-v1","recompile","reseal"};int kind=-1;for(int i=0;i<9;i++)if(tx_eq(argv[4], cases[i], 1L << 20))kind=i;if(kind<0)return 2;
  newout(argv[3]);path(copydir,work,"copy");if(mkdir(copydir,0700))die("private clone directory");path(product,root,"unisacc.com");path(bound,root,"tools/bound");bind_self();printf("EXECUTION_IMAGE\tsha256=%s\tmode=live-parent-proc-exe-no-recompilation\n",selfhash);
  char original[5][65],post[5][65],bootstrap[65],after[65],from[4400],to[4400];int exists0[5],exists1[5];states(mat,original,exists0);for(int i=0;i<5;i++)if(!exists0[i])die("sealed original prerequisite");digest(product,bootstrap);path(from,mat,"flow-native");size_t image_n;char *image=load(from,&image_n);free(image);
  np_result base=invoke("--verify-native",mat,"original");int good=accepted(&base,original[2],image_n);ck(good,"sealed-original-verified");if(!good){if(base.errn)fwrite(base.err,1,base.errn,stderr);np_free(&base);die("original verification prerequisite");}np_free(&base);
@@ -48,7 +49,7 @@ int main(int argc,char **argv){
  if(kind==7){action="compile";reason="compile requires absent profile outputs";}
  if(kind==8){action="seal";reason="seal refuses existing final receipt";}
  char mutated[5][65];int present[5];states(copydir,mutated,present);np_result r=invoke(action,copydir,"control");if(!kind)ck(accepted(&r,original[2],image_n),"valid-clone-verified");else{ck(r.rc==2,"rejected-rc2");ck(!r.outn,"rejected-empty-stdout");ck(named(&r,reason,kind==5),"exact-named-refusal");}np_free(&r);
- states(copydir,post,exists1);for(int i=0;i<5;i++){char label[100];snprintf(label,sizeof label,"private-%s-not-overwritten",leaves[i]);ck(present[i]==exists1[i]&&(!present[i]||!strcmp(mutated[i],post[i])),label);}
- states(mat,post,exists1);for(int i=0;i<5;i++){char label[100];snprintf(label,sizeof label,"original-%s-unchanged",leaves[i]);ck(exists1[i]&&!strcmp(original[i],post[i]),label);}digest(product,after);ck(!strcmp(bootstrap,after),"raw-root-unchanged");
+ states(copydir,post,exists1);for(int i=0;i<5;i++){char label[100];snprintf(label,sizeof label,"private-%s-not-overwritten",leaves[i]);ck(present[i]==exists1[i]&&(!present[i]||tx_eq(mutated[i], post[i], 1L << 20)),label);}
+ states(mat,post,exists1);for(int i=0;i<5;i++){char label[100];snprintf(label,sizeof label,"original-%s-unchanged",leaves[i]);ck(exists1[i]&&tx_eq(original[i], post[i], 1L << 20),label);}digest(product,after);ck(tx_eq(bootstrap, after, 1L << 20),"raw-root-unchanged");
  puts("TIMING\tstartup_read_verify_output_cold_hot=UNMEASURED");printf("RI_FLOW_CONTROLS\tcase=%s\tassertions=%d\tfailed=%d\tscope=private-profile-eligibility-no-NN-execution\n",argv[4],assertions,failures);return failures?1:0;
 }

@@ -1,6 +1,7 @@
 /* Execute one validated registry row. No PASS cache or preparation shortcut. */
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.testplan
+#pragma unisa use text.text
 typedef struct {char name[128],path[4096];int supplied,kind;} Material;
 typedef struct {char id[128],implementation[32],source[1024],mode[32],platform[32],budget[16],materials[4608],entry[2048],args[4096],expect[128];int found,source_present;} Selected;
 static Selected selected;
@@ -23,16 +24,16 @@ static int marker(const char *p,size_t n,const char *want){size_t at=0,wn=strlen
 int main(int argc,char **argv){
  if(argc<4){fputs("usage: ROOT ABS_OUT_PARENT BATCH_ID [material=ABS_PATH ...]\n",stderr);return 2;}
  if(argv[1][0]!='/'||argv[2][0]!='/'||!realpath(argv[1],root)||!realpath(argv[2],parent)||strcmp(argv[1],root)||strcmp(argv[2],parent))die("canonical root and output parent");
- char outbase[4400],registry[4400],coverage_path[4400],why[1200];path(outbase,sizeof outbase,root,"out");char canonical[4096];if(!realpath(outbase,canonical)||!within(parent,canonical)||!strcmp(parent,canonical))die("output parent must be below root/out");
+ char outbase[4400],registry[4400],coverage_path[4400],why[1200];path(outbase,sizeof outbase,root,"out");char canonical[4096];if(!realpath(outbase,canonical)||!within(parent,canonical)||tx_eq(parent, canonical, 1L << 20))die("output parent must be below root/out");
  copy(selected.id,sizeof selected.id,argv[3]);path(registry,sizeof registry,root,"tests/batches.tsv");path(coverage_path,sizeof coverage_path,root,"tests/coverage.tsv");size_t rn,cn;char *r=read_regular(registry,&rn),*c=read_regular(coverage_path,&cn);tp_summary summary;tp_observer observer={batch,coverage,0};int rc=tp_visit(root,r,rn,c,cn,&observer,&summary,why,sizeof why);free(r);free(c);if(rc)die(why);if(selected.found!=1||strcmp(selected.implementation,"IMPLEMENTED")||!selected.source_present)die("batch not implemented or source missing");
  if(strcmp(selected.platform,"lnx/x86_64"))die("batch requires another native host");int seconds=atoi(selected.budget);if(seconds<1||seconds>55)die("batch budget");parse_materials();supplied(argc,argv);
  path(candidate,sizeof candidate,root,"unisacc.com");char before[65],after[65];digest(candidate,before);path(work,sizeof work,parent,selected.id);struct stat prior;errno=0;if(!lstat(work,&prior)||errno!=ENOENT)die("exclusive output path");
- char entry[4400];if(!strcmp(selected.mode,"SOURCE"))path(entry,sizeof entry,root,selected.entry);else expand(selected.entry,entry);size_t en;char *source=read_regular(entry,&en);free(source);
+ char entry[4400];if(tx_eq(selected.mode, "SOURCE", 1L << 20))path(entry,sizeof entry,root,selected.entry);else expand(selected.entry,entry);size_t en;char *source=read_regular(entry,&en);free(source);
  char storage[64][4400],*args[72];int na=0;args[na++]="sh";args[na++]=candidate;args[na++]=entry;args[na++]="--";
  if(strcmp(selected.args,"-")){const char *at=selected.args;while(*at){const char *end=strchr(at,';');size_t n=end?(size_t)(end-at):strlen(at);if(na>=69||!n||n>=sizeof storage[0])die("argument bound");char token[4400];memcpy(token,at,n);token[n]=0;expand(token,storage[na-4]);args[na]=storage[na-4];na++;if(!end)break;at=end+1;}}
  args[na]=0;np_result result={0};char reason[1200];int transport=np_run(args,root,0,seconds,&result,reason,sizeof reason);digest(candidate,after);
  if(result.outn)fwrite(result.out,1,result.outn,stdout);if(result.errn)fwrite(result.err,1,result.errn,stderr);
- int ok=!transport&&!result.rc&&!strcmp(before,after)&&!strncmp(selected.expect,"rc0:",4)&&marker(result.out,result.outn,selected.expect+4)==1;
+ int ok=!transport&&!result.rc&&tx_eq(before, after, 1L << 20)&&!strncmp(selected.expect,"rc0:",4)&&marker(result.out,result.outn,selected.expect+4)==1;
  /* the batch's own bound expired: not a verdict, never PASS; the process group was killed and it must rerun */
  int timed_out=transport&&!strncmp(reason,"subprocess.TimeoutExpired",25);
  printf("BATCH_RUN\tid=%s\tstatus=%s\trc=%d\ttransport=%d\tmarker=%s\tcandidate=%s\tscope=actual-one-batch-no-cached-result\n",selected.id,ok?"PASS":timed_out?"UNKNOWN":"FAIL",result.rc,transport,selected.expect+4,before);

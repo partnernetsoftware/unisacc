@@ -21,6 +21,7 @@
 #pragma unisa use cases.kernel_route_shape
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.elfkernel
+#pragma unisa use text.text
 static char root[4096],route[4096],work[4096],product[4400],bound[4400],golden[4400];
 static const char *units[11]={"transition","arith","buffer","memory","intern","bytes","format","stack","action","run","bridge"};
 static const char *isas[2]={"x86_64","arm64"};
@@ -53,15 +54,15 @@ typedef struct {unsigned char *p;size_t n;unsigned long long shoff;unsigned shnu
 static int elf_open(elf_t *e,unsigned char *p,size_t n){e->p=p;e->n=n;if(n<64||memcmp(p,"\177ELF\2\1\1",7))return 0;e->shoff=rd(p+40,8);e->shnum=(unsigned)rd(p+60,2);e->shstrndx=(unsigned)rd(p+62,2);if(e->shnum==0||e->shnum>64||e->shstrndx>=e->shnum||e->shoff>n||(unsigned long long)e->shnum*64>n-e->shoff)return 0;return 1;}
 static unsigned char *elf_sh(elf_t *e,unsigned i){return e->p+e->shoff+(unsigned long long)i*64;}
 static const char *elf_secname(elf_t *e,unsigned i){unsigned char *s=elf_sh(e,e->shstrndx);unsigned long long off=rd(s+24,8),size=rd(s+32,8),name=rd(elf_sh(e,i),4);if(off>e->n||size>e->n-off||name>=size||!memchr(e->p+off+name,0,size-name))return "";return (const char *)e->p+off+name;}
-static int elf_find(elf_t *e,const char *name){unsigned i;for(i=1;i<e->shnum;i++)if(!strcmp(elf_secname(e,i),name))return (int)i;return -1;}
+static int elf_find(elf_t *e,const char *name){unsigned i;for(i=1;i<e->shnum;i++)if(tx_eq(elf_secname(e,i), name, 1L << 20))return (int)i;return -1;}
 static int elf_bytes(elf_t *e,const char *name,unsigned char **p,unsigned long long *size){int i=elf_find(e,name);if(i<0)return 0;unsigned char *s=elf_sh(e,(unsigned)i);unsigned long long off=rd(s+24,8);*size=rd(s+32,8);if(rd(s+4,4)==8){*p=0;return 1;}if(off>e->n||*size>e->n-off)return 0;*p=e->p+off;return 1;}
 static const char *elf_symname(elf_t *e,unsigned long long idx){int st=elf_find(e,".symtab"),ss=elf_find(e,".strtab");if(st<0||ss<0)return "?";unsigned char *h=elf_sh(e,(unsigned)st),*g=elf_sh(e,(unsigned)ss);unsigned long long off=rd(h+24,8),size=rd(h+32,8);if(idx*24+24>size||off+size>e->n)return "?";unsigned char *y=e->p+off+idx*24;if((y[4]&15)==3)return elf_secname(e,(unsigned)rd(y+6,2));unsigned long long so=rd(g+24,8),sz=rd(g+32,8),nm=rd(y,4);if(so>e->n||sz>e->n-so||nm>=sz)return "?";return (const char *)e->p+so+nm;}
 static void elf_relocs(elf_t *e,char *out,size_t cap){int r=elf_find(e,".rela.text");out[0]=0;if(r<0){snprintf(out,cap,"?norela");return;}unsigned char *h=elf_sh(e,(unsigned)r);unsigned long long off=rd(h+24,8),size=rd(h+32,8),k;if(off>e->n||size>e->n-off||size%24){snprintf(out,cap,"?extent");return;}if(!size){snprintf(out,cap,"-");return;}for(k=0;k<size/24;k++){unsigned char *q=e->p+off+k*24;size_t used=strlen(out);int z=snprintf(out+used,cap-used,"%s%llu:%llu:%s:%lld",k?";":"",rd(q,8),rd(q+8,4),elf_symname(e,rd(q+12,4)),(long long)rd(q+16,8));if(z<0||(size_t)z>=cap-used)die("relocation rendering bound");}}
 /* ---- (i)/(ii) golden instruction rows ---- */
-static void golden_rows(const char *isa,int want_rel){char p[4400],dir[4400];table_t t;int i;path(p,sizeof p,golden,!strcmp(isa,"arm64")?"arm64.tsv":"x86_64.tsv");table_load(p,&t);
+static void golden_rows(const char *isa,int want_rel){char p[4400],dir[4400];table_t t;int i;path(p,sizeof p,golden,tx_eq(isa, "arm64", 1L << 20)?"arm64.tsv":"x86_64.tsv");table_load(p,&t);
  path(dir,sizeof dir,work,isa);if(absent(dir))mkdir_new(dir);
  for(i=0;i<t.n;i++){row_t *r=&t.rows[i];char text[16384],src[4400],obj[4400],name[300];int marked;
-  if(r->nf!=10){if(r->nf>=1&&strcmp(r->f[0],"id"))ck(0,"row-width");continue;}if(!strcmp(r->f[0],"id"))continue;
+  if(r->nf!=10){if(r->nf>=1&&strcmp(r->f[0],"id"))ck(0,"row-width");continue;}if(tx_eq(r->f[0], "id", 1L << 20))continue;
   int is_rel=!strcmp(r->f[1],"rel");if(is_rel!=want_rel)continue;
   if(strcmp(r->f[1],"enc")&&strcmp(r->f[1],"dir")&&strcmp(r->f[1],"rel")){{int z=snprintf(name,sizeof name,"%s.group",r->f[0]);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};ck(0,name);continue;}
   if(expand_text(r->f[3],text,sizeof text,&marked)||!marked){{int z=snprintf(name,sizeof name,"%s.marked-line",r->f[0]);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};ck(0,name);continue;}
@@ -70,7 +71,7 @@ static void golden_rows(const char *isa,int want_rel){char p[4400],dir[4400];tab
   if(x.rc||absent(obj)){{int z=snprintf(name,sizeof name,"%s",r->f[0]);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};ck(0,name);fprintf(stderr,"DETAIL\t%s\trc=%d\t%s",r->f[0],x.rc,x.err);continue;}
   size_t n;unsigned char *b=load(obj,&n);elf_t e;unsigned char *sec=0;unsigned long long size=0;unsigned char want[4096];long wn=unhex(r->f[6],want,sizeof want);
   unsigned long long off=strtoull(r->f[5],0,10),expect_size=strtoull(r->f[7],0,10);char got_hex[8300]="",relocs[2048];
-  int opened=elf_open(&e,b,n),ok=opened&&rd(b+18,2)==(unsigned long long)(!strcmp(isa,"arm64")?183:62)&&elf_bytes(&e,!strcmp(r->f[4],"data")?".data":".text",&sec,&size)&&sec&&wn>0;
+  int opened=elf_open(&e,b,n),ok=opened&&rd(b+18,2)==(unsigned long long)(tx_eq(isa, "arm64", 1L << 20)?183:62)&&elf_bytes(&e,tx_eq(r->f[4], "data", 1L << 20)?".data":".text",&sec,&size)&&sec&&wn>0;
   if(ok)ok=size==expect_size&&off<=size&&(unsigned long long)wn<=size-off;
   if(ok){hex(sec+off,(size_t)wn,got_hex);ok=!memcmp(sec+off,want,(size_t)wn);}
   if(opened)elf_relocs(&e,relocs,sizeof relocs);else snprintf(relocs,sizeof relocs,"?header");if(ok)ok=!strcmp(relocs,r->f[8]);
@@ -80,19 +81,19 @@ static void golden_rows(const char *isa,int want_rel){char p[4400],dir[4400];tab
 static void route_material_applies(void){char p[4400],h[65];size_t n;path(p,sizeof p,route,"route.tsv");char *s=(char *)load(p,&n),*q=s;int canonical=0,inputs=0,stale=0,sources=0,objects=0,kernels=0;
  while(q<s+n){char *e=memchr(q,'\n',(size_t)(s+n-q));if(!e)die("route receipt newline");*e=0;char *t1=strchr(q,'\t');
   if(t1){*t1=0;char *a=t1+1,*t2=strchr(a,'\t');if(t2){*t2=0;char *b=t2+1,f[4400];
-   if(!strcmp(q,"input")){if(!strncmp(a,"asm/",4)){char rel[4400];{int z=snprintf(rel,sizeof rel,"exec/c/asm/%s",a+4);if(z<0||(size_t)z>=sizeof rel){fprintf(stderr,"bound-format\n");exit(2);}};path(f,sizeof f,root,rel);}else path(f,sizeof f,root,a);sha_file(f,h);inputs++;if(strcmp(h,b)){stale++;fprintf(stderr,"DETAIL\troute-input-changed\t%s\n",a);}}
-   else if(!strcmp(q,"source")||!strcmp(q,"object")||!strcmp(q,"kernel")){path(f,sizeof f,route,a);sha_file(f,h);if(strcmp(h,b)){stale++;fprintf(stderr,"DETAIL\troute-artifact-changed\t%s\n",a);}if(*q=='s')sources++;else if(*q=='o')objects++;else kernels++;}
-  }else if(!strcmp(q,"canonical")&&!strcmp(a,"YES"))canonical=1;}
+   if(tx_eq(q, "input", 1L << 20)){if(!strncmp(a,"asm/",4)){char rel[4400];{int z=snprintf(rel,sizeof rel,"exec/c/asm/%s",a+4);if(z<0||(size_t)z>=sizeof rel){fprintf(stderr,"bound-format\n");exit(2);}};path(f,sizeof f,root,rel);}else path(f,sizeof f,root,a);sha_file(f,h);inputs++;if(strcmp(h,b)){stale++;fprintf(stderr,"DETAIL\troute-input-changed\t%s\n",a);}}
+   else if(tx_eq(q, "source", 1L << 20)||tx_eq(q, "object", 1L << 20)||tx_eq(q, "kernel", 1L << 20)){path(f,sizeof f,route,a);sha_file(f,h);if(strcmp(h,b)){stale++;fprintf(stderr,"DETAIL\troute-artifact-changed\t%s\n",a);}if(*q=='s')sources++;else if(*q=='o')objects++;else kernels++;}
+  }else if(tx_eq(q, "canonical", 1L << 20)&&tx_eq(a, "YES", 1L << 20))canonical=1;}
   q=e+1;}
  free(s);if(!canonical||stale||inputs!=33||sources!=22||objects!=22||kernels!=2){fprintf(stderr,"kernel-route-test: canonical=%d stale=%d inputs=%d sources=%d objects=%d kernels=%d\n",canonical,stale,inputs,sources,objects,kernels);die("ROUTE_DIR is not canonical PREPARED material for the current inputs");}
  printf("MATERIAL\troute=%s\tcanonical=YES\tinputs=33\tstatus=PREPARED-and-current\n",route);}
 static unsigned char *route_file(const char *isa,const char *unit,const char *ext,size_t *n){char rel[300],p[4400];if(unit){int z=snprintf(rel,sizeof rel,"%s/%s.%s",isa,unit,ext);if(z<0||(size_t)z>=sizeof rel){fprintf(stderr,"bound-format\n");exit(2);}}else {int z=snprintf(rel,sizeof rel,"%s.kernel",isa);if(z<0||(size_t)z>=sizeof rel){fprintf(stderr,"bound-format\n");exit(2);}};path(p,sizeof p,route,rel);return load(p,n);}
 /* ---- (v) coverage ---- */
-static int rel32_branch(int arm,const char *key){if(arm||key[0]!='j')return 0;size_t n=strlen(key);return n>3&&!strcmp(key+n-3," Lt");}
+static int rel32_branch(int arm,const char *key){if(arm||key[0]!='j')return 0;size_t n=strlen(key);return n>3&&tx_eq(key+n-3, " Lt", 1L << 20);}
 static void coverage(void){int a,i;for(a=0;a<2;a++){const char *isa=isas[a];int arm=a==1;krs_shapes canon,gold;char why[256],p[4400];memset(&canon,0,sizeof canon);memset(&gold,0,sizeof gold);
   for(i=0;i<11;i++){size_t n;unsigned char *s=route_file(isa,units[i],"s",&n);if(krs_classify(arm,(const char *)s,n,-1,&canon,why,sizeof why))die(why);free(s);}
   table_t t;path(p,sizeof p,golden,arm?"arm64.tsv":"x86_64.tsv");table_load(p,&t);int rows=0,bad=0;
-  for(i=0;i<t.n;i++){row_t *r=&t.rows[i];char text[16384],key[300];int marked;if(r->nf!=10||!strcmp(r->f[0],"id")||!strcmp(r->f[1],"rel"))continue;if(expand_text(r->f[3],text,sizeof text,&marked)||!marked){bad++;continue;}
+  for(i=0;i<t.n;i++){row_t *r=&t.rows[i];char text[16384],key[300];int marked;if(r->nf!=10||tx_eq(r->f[0], "id", 1L << 20)||tx_eq(r->f[1], "rel", 1L << 20))continue;if(expand_text(r->f[3],text,sizeof text,&marked)||!marked){bad++;continue;}
    krs_shapes one;memset(&one,0,sizeof one);if(krs_classify(arm,text,strlen(text),marked,&one,why,sizeof why)||one.n!=1){bad++;fprintf(stderr,"DETAIL\trow-shape\t%s\tshapes=%d\n",r->f[0],one.n);krs_free(&one);continue;}
    {int z=snprintf(key,sizeof key,"%s|%s",one.key[0],r->f[2]);if(z<0||(size_t)z>=sizeof key){fprintf(stderr,"bound-format\n");exit(2);}};if(krs_add(&gold,key,r->f[0]))die("coverage shape allocation");krs_free(&one);rows++;}
   {char name[100];{int z=snprintf(name,sizeof name,"%s.every-oracle-row-has-one-form",isa);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};ck(!bad,name);}
@@ -117,13 +118,13 @@ static void coverage(void){int a,i;for(a=0;a<2;a++){const char *isa=isas[a];int 
 typedef struct {elf_t e;unsigned char *p;size_t n;unsigned long long base[64];} unit_t;
 static int sym_addr(unit_t *u,int nu,int k,unsigned long long idx,unsigned long long *addr){elf_t *e=&u[k].e;int st=elf_find(e,".symtab");if(st<0)return 0;unsigned char *h=elf_sh(e,(unsigned)st);if(idx*24+24>rd(h+32,8)||rd(h+24,8)+rd(h+32,8)>e->n)return 0;unsigned char *y=e->p+rd(h+24,8)+idx*24;unsigned sh=(unsigned)rd(y+6,2);
  if(sh){if(sh>=e->shnum)return 0;*addr=u[k].base[sh]+((y[4]&15)==3?0:rd(y+8,8));return 1;}
- const char *name=elf_symname(e,idx);int j,found=0;for(j=0;j<nu;j++){elf_t *f=&u[j].e;int s2=elf_find(f,".symtab");unsigned char *h2=elf_sh(f,(unsigned)s2);unsigned long long c,cnt=rd(h2+32,8)/24;for(c=1;c<cnt;c++){unsigned char *z=f->p+rd(h2+24,8)+c*24;if((z[4]>>4)==1&&rd(z+6,2)&&!strcmp(elf_symname(f,c),name)){*addr=u[j].base[rd(z+6,2)]+rd(z+8,8);found++;}}}
+ const char *name=elf_symname(e,idx);int j,found=0;for(j=0;j<nu;j++){elf_t *f=&u[j].e;int s2=elf_find(f,".symtab");unsigned char *h2=elf_sh(f,(unsigned)s2);unsigned long long c,cnt=rd(h2+32,8)/24;for(c=1;c<cnt;c++){unsigned char *z=f->p+rd(h2+24,8)+c*24;if((z[4]>>4)==1&&rd(z+6,2)&&tx_eq(elf_symname(f,c), name, 1L << 20)){*addr=u[j].base[rd(z+6,2)]+rd(z+8,8);found++;}}}
  return found==1;}
 static void kernel_recompute(int a,int mode_reloc){const char *isa=isas[a];int arm=a==1,i,k;unit_t u[11];size_t kn;unsigned char *kb=route_file(isa,0,0,&kn);unsigned long long total=0,entry=0,slot=0;int have_entry=0,have_slot=0;char name[160];
  unsigned char *covered;
  for(k=0;k<11;k++){u[k].p=route_file(isa,units[k],"o",&u[k].n);if(!elf_open(&u[k].e,u[k].p,u[k].n))die("canonical object header");
   for(i=1;i<(int)u[k].e.shnum;i++){unsigned char *s=elf_sh(&u[k].e,(unsigned)i);if(rd(s+8,8)&2){unsigned long long al=rd(s+48,8);if(!al)al=1;total=(total+al-1)/al*al;u[k].base[i]=total;total+=rd(s+32,8);}}}
- for(k=0;k<11;k++){elf_t *e=&u[k].e;int st=elf_find(e,".symtab");unsigned char *h=elf_sh(e,(unsigned)st);unsigned long long c,cnt=rd(h+32,8)/24;for(c=1;c<cnt;c++){unsigned char *z=e->p+rd(h+24,8)+c*24;if((z[4]>>4)==1&&rd(z+6,2)){const char *nm=elf_symname(e,c);if(!strcmp(nm,"_kernel_entry")){entry=u[k].base[rd(z+6,2)]+rd(z+8,8);have_entry++;}if(!strcmp(nm,"_kernel_service")){slot=u[k].base[rd(z+6,2)]+rd(z+8,8);have_slot++;}}}}
+ for(k=0;k<11;k++){elf_t *e=&u[k].e;int st=elf_find(e,".symtab");unsigned char *h=elf_sh(e,(unsigned)st);unsigned long long c,cnt=rd(h+32,8)/24;for(c=1;c<cnt;c++){unsigned char *z=e->p+rd(h+24,8)+c*24;if((z[4]>>4)==1&&rd(z+6,2)){const char *nm=elf_symname(e,c);if(tx_eq(nm, "_kernel_entry", 1L << 20)){entry=u[k].base[rd(z+6,2)]+rd(z+8,8);have_entry++;}if(tx_eq(nm, "_kernel_service", 1L << 20)){slot=u[k].base[rd(z+6,2)]+rd(z+8,8);have_slot++;}}}}
  covered=calloc(total?total:1,1);if(!covered)die("alloc");
  if(!mode_reloc){
   {int z=snprintf(name,sizeof name,"%s.unikern1-header",isa);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};ck(kn==40+total&&!memcmp(kb,"UNIKERN1",8)&&rd(kb+8,8)==(unsigned long long)(arm?1:2)&&rd(kb+16,8)==entry&&rd(kb+24,8)==slot&&rd(kb+32,8)==total&&have_entry==1&&have_slot==1,name);
@@ -132,7 +133,7 @@ static void kernel_recompute(int a,int mode_reloc){const char *isa=isas[a];int a
  {int placement_ok=1,patch_total=0,patch_ok=1;
   for(k=0;k<11;k++){elf_t *e=&u[k].e;
    for(i=1;i<(int)e->shnum;i++){unsigned char *s=elf_sh(e,(unsigned)i);unsigned long long size=rd(s+32,8),off=rd(s+24,8),j;if(!(rd(s+8,8)&2))continue;for(j=0;j<size;j++)covered[u[k].base[i]+j]=rd(s+4,4)==8?2:1;
-    if(!mode_reloc){unsigned char *patched=calloc(size?size:1,1);int r=elf_find(e,".rela.text");if(r>=0&&!strcmp(elf_secname(e,(unsigned)i),".text")){unsigned char *rh=elf_sh(e,(unsigned)r);unsigned long long ro=rd(rh+24,8),rs=rd(rh+32,8),q;for(q=0;q<rs/24;q++){unsigned long long po=rd(e->p+ro+q*24,8);if(po+4<=size)memset(patched+po,1,4);}}
+    if(!mode_reloc){unsigned char *patched=calloc(size?size:1,1);int r=elf_find(e,".rela.text");if(r>=0&&tx_eq(elf_secname(e,(unsigned)i), ".text", 1L << 20)){unsigned char *rh=elf_sh(e,(unsigned)r);unsigned long long ro=rd(rh+24,8),rs=rd(rh+32,8),q;for(q=0;q<rs/24;q++){unsigned long long po=rd(e->p+ro+q*24,8);if(po+4<=size)memset(patched+po,1,4);}}
      for(j=0;j<size;j++){unsigned char want=rd(s+4,4)==8?0:e->p[off+j];if(!patched[j]&&kb[40+u[k].base[i]+j]!=want){placement_ok=0;fprintf(stderr,"DETAIL\t%s\tplacement\tunit=%s\tsection=%s\toffset=%llu\n",isa,units[k],elf_secname(e,(unsigned)i),j);break;}}free(patched);}}
    if(mode_reloc){int r=elf_find(e,".rela.text"),t=elf_find(e,".text");if(r<0||t<0)continue;unsigned char *rh=elf_sh(e,(unsigned)r);unsigned long long ro=rd(rh+24,8),rs=rd(rh+32,8),q;
     for(q=0;q<rs/24;q++){unsigned char *rec=e->p+ro+q*24;unsigned long long po=rd(rec,8),type=rd(rec+8,4),sidx=rd(rec+12,4),S;long long A=(long long)rd(rec+16,8);unsigned long long P=u[k].base[t]+po;int ok=sym_addr(u,11,k,sidx,&S);long long target=(long long)S+A,d=target-(long long)P;unsigned long long orig=rd(e->p+rd(elf_sh(e,(unsigned)t)+24,8)+po,4),want=0,got=rd(kb+40+P,4);patch_total++;
@@ -184,13 +185,13 @@ static int link_fixture(row_t *r,const char *tag,unsigned char **kernel,size_t *
   {int z=snprintf(name,sizeof name,"%s-%s-u%d.s",tag,r->f[0],u);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};path(src,sizeof src,work,name);{int z=snprintf(name,sizeof name,"%s-%s-u%d.o",tag,r->f[0],u);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};path(obj[u],sizeof obj[u],work,name);save(src,text,strlen(text));
   run_t x;product_as(r->f[1],src,obj[u],&x);if(x.rc){fprintf(stderr,"DETAIL\t%s\t%s",r->f[0],x.err);return 0;}u++;if(!e)break;c=e+4;}
  {int z=snprintf(name,sizeof name,"%s-%s.kernel",tag,r->f[0]);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};path(out,sizeof out,work,name);const char *paths[2]={obj[0],obj[1]};
- ek_result k=ek_link(!strcmp(r->f[1],"arm64")?1:2,out,paths,u,why,sizeof why);if(k.status!=EK_OK){fprintf(stderr,"DETAIL\t%s\tlink=%s\n",r->f[0],why);return 0;}
+ ek_result k=ek_link(tx_eq(r->f[1], "arm64", 1L << 20)?1:2,out,paths,u,why,sizeof why);if(k.status!=EK_OK){fprintf(stderr,"DETAIL\t%s\tlink=%s\n",r->f[0],why);return 0;}
  *kernel=load(out,kn);return 1;}
 static void link_rows(int header_only){table_t t;char p[4400];int i;path(p,sizeof p,golden,"link.tsv");table_load(p,&t);
- for(i=0;i<t.n;i++){row_t *r=&t.rows[i];if(r->nf!=8||!strcmp(r->f[0],"id"))continue;unsigned char *k=0;size_t kn=0;char name[200];unsigned char img[4096];long in=unhex(r->f[3],img,sizeof img);unsigned long long entry=strtoull(r->f[4],0,10),slot=strtoull(r->f[5],0,10),len=strtoull(r->f[6],0,10);
+ for(i=0;i<t.n;i++){row_t *r=&t.rows[i];if(r->nf!=8||tx_eq(r->f[0], "id", 1L << 20))continue;unsigned char *k=0;size_t kn=0;char name[200];unsigned char img[4096];long in=unhex(r->f[3],img,sizeof img);unsigned long long entry=strtoull(r->f[4],0,10),slot=strtoull(r->f[5],0,10),len=strtoull(r->f[6],0,10);
   int ok=link_fixture(r,header_only?"hdr":"img",&k,&kn)&&in==(long)len;
   if(header_only){
-   unsigned char h[40];memset(h,0,40);memcpy(h,"UNIKERN1",8);wr(h+8,8,!strcmp(r->f[1],"arm64")?1:2);wr(h+16,8,entry);wr(h+24,8,slot);wr(h+32,8,len);ok=ok&&kn==40+len&&!memcmp(k,h,40);
+   unsigned char h[40];memset(h,0,40);memcpy(h,"UNIKERN1",8);wr(h+8,8,tx_eq(r->f[1], "arm64", 1L << 20)?1:2);wr(h+16,8,entry);wr(h+24,8,slot);wr(h+32,8,len);ok=ok&&kn==40+len&&!memcmp(k,h,40);
    int z=snprintf(name,sizeof name,"as8-unikern1-header.%s",r->f[0]);if(z<0||(size_t)z>=sizeof name)die("link row name length");
   }
   else{ok=ok&&kn==40+len&&!memcmp(k+40,img,(size_t)len);{int z=snprintf(name,sizeof name,"as7-resolved-image.%s",r->f[0]);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};if(!ok&&k&&kn==40+len){char g[8300];hex(k+40,(size_t)len,g);fprintf(stderr,"DETAIL\t%s\tgot=%s\n",r->f[0],g);}}
@@ -201,7 +202,7 @@ static int as_neg(const char *id,const char *isa,const char *bad,const char *exp
  product_as(isa,src,obj,&x);int ok=x.rc!=0&&strstr(x.err,expect)&&absent(obj);if(!ok)fprintf(stderr,"DETAIL\t%s\trc=%d\terr=%s\n",id,x.rc,x.err);
  {int z=snprintf(name,sizeof name,"%s.named-refusal-no-output",id);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};ck(ok,name);
  {int z=snprintf(name,sizeof name,"%s-good.s",id);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};path(src,sizeof src,work,name);{int z=snprintf(name,sizeof name,"%s-good.o",id);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};path(obj,sizeof obj,work,name);save(src,good,strlen(good));product_as(good_isa,src,obj,&x);
- int rec=!x.rc&&!absent(obj);if(rec){size_t n;unsigned char *b=load(obj,&n);rec=n>=64&&rd(b+18,2)==(unsigned long long)(!strcmp(good_isa,"arm64")?183:62);free(b);}
+ int rec=!x.rc&&!absent(obj);if(rec){size_t n;unsigned char *b=load(obj,&n);rec=n>=64&&rd(b+18,2)==(unsigned long long)(tx_eq(good_isa, "arm64", 1L << 20)?183:62);free(b);}
  {int z=snprintf(name,sizeof name,"%s.clean-recovery",id);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};ck(rec,name);return ok&&rec;}
 static void assemble_to(const char *isa,const char *id,const char *text,char *obj,size_t cap){char src[4400],name[200];run_t x;{int z=snprintf(name,sizeof name,"%s.s",id);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};path(src,sizeof src,work,name);{int z=snprintf(name,sizeof name,"%s.o",id);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};path(obj,cap,work,name);save(src,text,strlen(text));product_as(isa,src,obj,&x);if(x.rc){fprintf(stderr,"%s",x.err);die("fixture assembly");}}
 static void link_neg(const char *id,int arch,const char *const *bad,int nb,const char *expect,int good_arch,const char *const *good,int ng){char out[4400],name[200],why[256];ek_result r;{int z=snprintf(name,sizeof name,"%s-bad.kernel",id);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};path(out,sizeof out,work,name);r=ek_link((unsigned)arch,out,bad,nb,why,sizeof why);
@@ -247,14 +248,14 @@ static void refusal(void){
  {const char *fwd[11],*rev[11];char p[11][4400],o1[4400],o2[4400],why[256];int i;for(i=0;i<11;i++){char rel[300];{int z=snprintf(rel,sizeof rel,"x86_64/%s.o",units[i]);if(z<0||(size_t)z>=sizeof rel){fprintf(stderr,"bound-format\n");exit(2);}};path(p[i],sizeof p[i],route,rel);fwd[i]=p[i];rev[10-i]=p[i];}
   path(o1,sizeof o1,work,"order-canonical.kernel");path(o2,sizeof o2,work,"order-reversed.kernel");ek_result a=ek_link(2,o1,fwd,11,why,sizeof why),b=ek_link(2,o2,rev,11,why,sizeof why);char h1[65]="",h2[65]="",hr[65]="";
   if(a.status==EK_OK)sha_file(o1,h1);if(b.status==EK_OK)sha_file(o2,h2);{char k[4400];path(k,sizeof k,route,"x86_64.kernel");sha_file(k,hr);}
-  ck(a.status==EK_OK&&b.status==EK_OK&&!strcmp(h1,hr)&&strcmp(h1,h2),"linker-accepts-a-permutation-with-different-bytes(route-must-refuse)");}
+  ck(a.status==EK_OK&&b.status==EK_OK&&tx_eq(h1, hr, 1L << 20)&&strcmp(h1,h2),"linker-accepts-a-permutation-with-different-bytes(route-must-refuse)");}
 }
 static void route_cmd(char **extra,int ne,const char *outdir,run_t *x){char tool[4400];path(tool,sizeof tool,root,"tools/kernel-route.cx");char *v[32];int n=0,i;v[n++]=bound;v[n++]="50";v[n++]="sh";v[n++]=product;v[n++]=tool;v[n++]="--";v[n++]=root;v[n++]=(char *)outdir;for(i=0;i<ne;i++)v[n++]=extra[i];v[n]=0;run(v,x,52);}
 static void copy_asm(const char *dir,const char *mutate_unit,const char *prefix){char asmd[4400],p[4400],q[4400];int a,i;mkdir_new(dir);path(asmd,sizeof asmd,dir,"asm");mkdir_new(asmd);
  const char *hs[]={"layout.h","actions.h"};for(i=0;i<2;i++){size_t n;char rel[100];{int z=snprintf(rel,sizeof rel,"exec/c/asm/%s",hs[i]);if(z<0||(size_t)z>=sizeof rel){fprintf(stderr,"bound-format\n");exit(2);}};path(p,sizeof p,root,rel);unsigned char *s=load(p,&n);path(q,sizeof q,asmd,hs[i]);save(q,s,n);free(s);}
  {size_t n;path(p,sizeof p,root,"exec/c/core.h");unsigned char *s=load(p,&n);path(q,sizeof q,dir,"core.h");save(q,s,n);free(s);}
  for(a=0;a<2;a++)for(i=0;i<11;i++){char name[200],rel[300];size_t n;{int z=snprintf(name,sizeof name,"%s_%s.S",units[i],isas[a]);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};{int z=snprintf(rel,sizeof rel,"exec/c/asm/%s",name);if(z<0||(size_t)z>=sizeof rel){fprintf(stderr,"bound-format\n");exit(2);}};path(p,sizeof p,root,rel);unsigned char *s=load(p,&n);path(q,sizeof q,asmd,name);
-  if(mutate_unit&&!strcmp(name,mutate_unit)){size_t pl=strlen(prefix);unsigned char *m=malloc(n+pl);if(!m)die("alloc");{unsigned char *cxb_d=(unsigned char *)(m);const unsigned char *cxb_s=(const unsigned char *)(prefix);size_t cxb_n=(size_t)(pl),cxb_i;for(cxb_i=0;cxb_i<cxb_n;cxb_i++)cxb_d[cxb_i]=cxb_s[cxb_i];};{unsigned char *cxb_d=(unsigned char *)(m+pl);const unsigned char *cxb_s=(const unsigned char *)(s);size_t cxb_n=(size_t)(n),cxb_i;for(cxb_i=0;cxb_i<cxb_n;cxb_i++)cxb_d[cxb_i]=cxb_s[cxb_i];};save(q,m,n+pl);free(m);}else save(q,s,n);free(s);}}
+  if(mutate_unit&&tx_eq(name, mutate_unit, 1L << 20)){size_t pl=strlen(prefix);unsigned char *m=malloc(n+pl);if(!m)die("alloc");{unsigned char *cxb_d=(unsigned char *)(m);const unsigned char *cxb_s=(const unsigned char *)(prefix);size_t cxb_n=(size_t)(pl),cxb_i;for(cxb_i=0;cxb_i<cxb_n;cxb_i++)cxb_d[cxb_i]=cxb_s[cxb_i];};{unsigned char *cxb_d=(unsigned char *)(m+pl);const unsigned char *cxb_s=(const unsigned char *)(s);size_t cxb_n=(size_t)(n),cxb_i;for(cxb_i=0;cxb_i<cxb_n;cxb_i++)cxb_d[cxb_i]=cxb_s[cxb_i];};save(q,m,n+pl);free(m);}else save(q,s,n);free(s);}}
 static void route_refusal(void){char out[4400],dir[4400],asmd[4400];run_t x;
  {char *e[]={"--isa","x86_64","--units","arith,transition,buffer,memory,intern,bytes,format,stack,action,run,bridge"};path(out,sizeof out,work,"order-permuted");route_cmd(e,4,out,&x);ck(x.rc==2&&strstr(x.err,"unit order differs from AS-1 canonical order")&&absent(out),"unit-order-permutation.named-refusal-no-output");if(x.rc!=2)fprintf(stderr,"DETAIL\t%s\n",x.err);}
  {char *e[]={"--isa","x86_64","--units","transition,arith,buffer,memory,intern,bytes,format,stack,action,run"};path(out,sizeof out,work,"order-missing-bridge");route_cmd(e,4,out,&x);ck(x.rc==2&&strstr(x.err,"unit order differs from AS-1 canonical order")&&absent(out),"unit-set-missing-bridge.named-refusal-no-output");}
@@ -269,7 +270,7 @@ static void route_refusal(void){char out[4400],dir[4400],asmd[4400];run_t x;
  * above -- the canonical sources through the same route give the pinned kernel again. */
 static void route_recovery(void){char out[4400];run_t x;
  {char *e[]={"--isa","x86_64"};path(out,sizeof out,work,"route-recovery");route_cmd(e,2,out,&x);char k[4400],h[65]="";path(k,sizeof k,out,"x86_64.kernel");if(!x.rc&&!absent(k))sha_file(k,h);
-  ck(!x.rc&&!strcmp(h,"32cecc8a48dd6ccb30be186a161325a3537cce743291752eab427046ff262d97"),"canonical-route-recovery-equals-regression-pin");if(x.rc)fprintf(stderr,"DETAIL\t%s\n",x.err);}
+  ck(!x.rc&&tx_eq(h, "32cecc8a48dd6ccb30be186a161325a3537cce743291752eab427046ff262d97", 1L << 20),"canonical-route-recovery-equals-regression-pin");if(x.rc)fprintf(stderr,"DETAIL\t%s\n",x.err);}
 }
 static void pin_mutation(void){char out[4400],dir[4400],asmd[4400],src[4400],obj[4400],k[4400],h[65]="",why[256];run_t x;
  /* a semantically different .S that still assembles: only the pin notices (REGRESSION_PIN_MISMATCH) */
@@ -282,12 +283,12 @@ static void pin_mutation(void){char out[4400],dir[4400],asmd[4400],src[4400],obj
   path(k,sizeof k,work,"flip.kernel");ek_result r=ek_link(2,k,paths,11,why,sizeof why);h[0]=0;if(r.status==EK_OK)sha_file(k,h);
   int caught=!x.rc&&r.status==EK_OK&&strcmp(h,"32cecc8a48dd6ccb30be186a161325a3537cce743291752eab427046ff262d97");if(caught)puts("REGRESSION_PIN_MISMATCH\tx86_64\tmutated-s\tdetected-by-pin-not-by-an-oracle");ck(caught,"mutated-s-still-builds-and-differs-from-pin");}}
 static void pins(void){table_t t;char p[4400];int i;path(p,sizeof p,golden,"kernels.tsv");table_load(p,&t);int seen=0;
- for(i=0;i<t.n;i++){row_t *r=&t.rows[i];if(r->nf!=5||!strcmp(r->f[0],"isa"))continue;char k[4400],h[65],name[200],rel[100];if(strcmp(r->f[3],"REGRESSION-PIN")){ck(0,"role-is-regression-pin");continue;}seen++;
+ for(i=0;i<t.n;i++){row_t *r=&t.rows[i];if(r->nf!=5||tx_eq(r->f[0], "isa", 1L << 20))continue;char k[4400],h[65],name[200],rel[100];if(strcmp(r->f[3],"REGRESSION-PIN")){ck(0,"role-is-regression-pin");continue;}seen++;
   {int z=snprintf(rel,sizeof rel,"%s.kernel",r->f[0]);if(z<0||(size_t)z>=sizeof rel){fprintf(stderr,"bound-format\n");exit(2);}};path(k,sizeof k,route,rel);sha_file(k,h);size_t n;unsigned char *b=load(k,&n);free(b);
-  {int z=snprintf(name,sizeof name,"%s.route-kernel-equals-regression-pin",r->f[0]);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};ck(!strcmp(h,r->f[1])&&n==strtoull(r->f[2],0,10),name);
-  char obs[2048];{int z=snprintf(obs,sizeof obs,"%s",r->f[4]);if(z<0||(size_t)z>=sizeof obs){fprintf(stderr,"bound-format\n");exit(2);}};char *c=obs;while(c&&*c){char *semi=strchr(c,';');if(semi)*semi=0;char f[4400];path(f,sizeof f,root,c);if(absent(f))printf("NOT_RUN\tpin-generation\t%s\tabsent-on-this-host\n",c);else{char g[65];sha_file(f,g);{int z=snprintf(name,sizeof name,"%s.stored-generation-equals-pin:%s",r->f[0],c);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};ck(!strcmp(g,r->f[1]),name);}c=semi?semi+1:0;}}
+  {int z=snprintf(name,sizeof name,"%s.route-kernel-equals-regression-pin",r->f[0]);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};ck(tx_eq(h, r->f[1], 1L << 20)&&n==strtoull(r->f[2],0,10),name);
+  char obs[2048];{int z=snprintf(obs,sizeof obs,"%s",r->f[4]);if(z<0||(size_t)z>=sizeof obs){fprintf(stderr,"bound-format\n");exit(2);}};char *c=obs;while(c&&*c){char *semi=strchr(c,';');if(semi)*semi=0;char f[4400];path(f,sizeof f,root,c);if(absent(f))printf("NOT_RUN\tpin-generation\t%s\tabsent-on-this-host\n",c);else{char g[65];sha_file(f,g);{int z=snprintf(name,sizeof name,"%s.stored-generation-equals-pin:%s",r->f[0],c);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};ck(tx_eq(g, r->f[1], 1L << 20),name);}c=semi?semi+1:0;}}
  ck(seen==2,"two-pins");puts("BOUNDARY\tpins-detect-change-only;not-an-oracle;correctness-is-groups-i-to-v");free(t.rows);free(t.text);}
-static void shape_want(int arm,const char *text,const char *want,const char *name){krs_shapes s={0};char why[160]="";int rc=krs_classify(arm,text,strlen(text),-1,&s,why,sizeof why);ck(!rc&&s.n==1&&!strcmp(s.key[0],want),name);if(rc)fprintf(stderr,"DETAIL\t%s\t%s\n",name,why);krs_free(&s);}
+static void shape_want(int arm,const char *text,const char *want,const char *name){krs_shapes s={0};char why[160]="";int rc=krs_classify(arm,text,strlen(text),-1,&s,why,sizeof why);ck(!rc&&s.n==1&&tx_eq(s.key[0], want, 1L << 20),name);if(rc)fprintf(stderr,"DETAIL\t%s\t%s\n",name,why);krs_free(&s);}
 static void shape_checks(void){
  shape_want(0,"movb %ah,%bl\n","movb r8h,r8","x64-high-byte-else-branch");
  shape_want(0,"movq %r8,%rdi\n","movq r64x,r64","x64-wide-register-else-branch");
@@ -301,8 +302,8 @@ static void shape_checks(void){
  {const char *text=".directive_name_shared_prefix_alpha\n.directive_name_shared_prefix_beta\n";krs_shapes s={0};char why[160]="";int rc=krs_classify(0,text,strlen(text),-1,&s,why,sizeof why);ck(!rc&&s.n==2&&krs_find(&s,".directive_name_shared_prefix_alpha@text")>=0&&krs_find(&s,".directive_name_shared_prefix_beta@text")>=0,"long-directive-names-never-coalesce");krs_free(&s);}
  {char text[108],one[52],two[52],why[160]="";memset(one,'a',50);one[50]='x';one[51]=0;memcpy(two,one,sizeof one);two[50]='y';memcpy(text,one,51);text[51]='\n';memcpy(text+52,two,51);text[103]='\n';text[104]=0;krs_shapes s={0};int rc=krs_classify(0,text,strlen(text),-1,&s,why,sizeof why);ck(!rc&&s.n==2&&krs_find(&s,one)>=0&&krs_find(&s,two)>=0,"long-mnemonic-names-never-coalesce");krs_free(&s);}
  {char text[300],why[160]="";memset(text,'a',255);text[255]='\n';text[256]=0;krs_shapes s={0};int rc=krs_classify(0,text,256,-1,&s,why,sizeof why);ck(!rc&&s.n==1&&strlen(s.key[0])==255,"shape-key-exact-capacity");krs_free(&s);}
- {char text[300],why[160]="";memset(text,'a',248);memcpy(text+248," %rax,%rcx\n",sizeof " %rax,%rcx\n");krs_shapes s={0};int rc=krs_classify(0,text,strlen(text),-1,&s,why,sizeof why);ck(rc==-1&&!s.n&&strstr(why,"shape key length"),"shape-append-overflow-named-refusal");rc=krs_classify(0,"ret\n",4,-1,&s,why,sizeof why);ck(!rc&&s.n==1&&!strcmp(s.key[0],"ret"),"shape-recovers-after-overflow");krs_free(&s);}
- {char text[1500],why[160]="";memcpy(text,".quad ",6);size_t n=6;for(int i=0;i<600;i++){text[n++]='0';text[n++]=i==599?'\n':',';}text[n]=0;krs_shapes s={0};int rc=krs_classify(0,text,n,-1,&s,why,sizeof why);ck(!rc&&s.n==1&&!strcmp(s.key[0],".quad@text:num")&&strlen(s.example[0])==n-1&&!memcmp(s.example[0],text,n-1),"long-example-kept-without-truncation");krs_free(&s);}
+ {char text[300],why[160]="";memset(text,'a',248);memcpy(text+248," %rax,%rcx\n",sizeof " %rax,%rcx\n");krs_shapes s={0};int rc=krs_classify(0,text,strlen(text),-1,&s,why,sizeof why);ck(rc==-1&&!s.n&&strstr(why,"shape key length"),"shape-append-overflow-named-refusal");rc=krs_classify(0,"ret\n",4,-1,&s,why,sizeof why);ck(!rc&&s.n==1&&tx_eq(s.key[0], "ret", 1L << 20),"shape-recovers-after-overflow");krs_free(&s);}
+ {char text[1500],why[160]="";memcpy(text,".quad ",6);size_t n=6;for(int i=0;i<600;i++){text[n++]='0';text[n++]=i==599?'\n':',';}text[n]=0;krs_shapes s={0};int rc=krs_classify(0,text,n,-1,&s,why,sizeof why);ck(!rc&&s.n==1&&tx_eq(s.key[0], ".quad@text:num", 1L << 20)&&strlen(s.example[0])==n-1&&!memcmp(s.example[0],text,n-1),"long-example-kept-without-truncation");krs_free(&s);}
  {const char *bad[]={"movq (%rax,%rcx,8,%rdx\n","ldr x0,[x1,#8\n"};for(int arm=0;arm<2;arm++){krs_shapes s={0};char why[160]="";int rc=krs_classify(arm,bad[arm],strlen(bad[arm]),-1,&s,why,sizeof why);ck(rc==-1&&!s.n&&strstr(why,"operand"),arm?"a64-unbalanced-operands-refused":"x64-unbalanced-operands-refused");krs_free(&s);}}
 }
 static void option_checks(void){run_t x;char out[4400];
@@ -314,23 +315,23 @@ int main(int argc,char **argv){
  if(argc!=5){fprintf(stderr,"usage: ROOT ROUTE_DIR NEW_ABS_OUT encoding|relocation|object|refusal|route-refusal|route-recovery|pin-mutation|coverage|pins|shape|options\n");return 2;}
  if(!realpath(argv[1],root)||!realpath(argv[2],route)||argv[3][0]!='/'||strlen(argv[3])>=sizeof work)die("ROOT ROUTE_DIR NEW_ABS_OUT");{int z=snprintf(work,sizeof work,"%s",argv[3]);if(z<0||(size_t)z>=sizeof work){fprintf(stderr,"bound-format\n");exit(2);}};group_name=argv[4];
  path(product,sizeof product,root,"unisacc.com");path(bound,sizeof bound,root,"tools/bound");path(golden,sizeof golden,root,"tests/asm-golden");
- int standalone=!strcmp(group_name,"shape")||!strcmp(group_name,"options");
+ int standalone=!strcmp(group_name,"shape")||tx_eq(group_name, "options", 1L << 20);
  if(!standalone){size_t rn=strlen(route);if(!strncmp(work,route,rn)&&(work[rn]=='/'||!work[rn]))die("NEW_ABS_OUT inside ROUTE_DIR");}
  char before[65],after[65];sha_file(product,before);if(!standalone)route_material_applies();mkdir_new(work);
  const char *g=group_name;
- if(!strcmp(g,"encoding")){golden_rows("x86_64",0);golden_rows("arm64",0);}
- else if(!strcmp(g,"relocation")){golden_rows("x86_64",1);golden_rows("arm64",1);link_rows(0);kernel_recompute(0,1);kernel_recompute(1,1);}
- else if(!strcmp(g,"object")){int a,i;object_rows();link_rows(1);for(a=0;a<2;a++)for(i=0;i<11;i++){size_t n;char why[100]="",name[100];unsigned char *b=route_file(isas[a],units[i],"o",&n);int ok=as6_layout(b,n,a==1,why,sizeof why);{int z=snprintf(name,sizeof name,"as6-layout.%s.%s",isas[a],units[i]);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};ck(ok,name);if(!ok)fprintf(stderr,"DETAIL\t%s\t%s\n",name,why);free(b);}kernel_recompute(0,0);kernel_recompute(1,0);}
- else if(!strcmp(g,"refusal"))refusal();
- else if(!strcmp(g,"route-refusal"))route_refusal();
- else if(!strcmp(g,"route-recovery"))route_recovery();
- else if(!strcmp(g,"pin-mutation"))pin_mutation();
- else if(!strcmp(g,"coverage"))coverage();
- else if(!strcmp(g,"pins"))pins();
- else if(!strcmp(g,"shape"))shape_checks();
- else if(!strcmp(g,"options"))option_checks();
+ if(tx_eq(g, "encoding", 1L << 20)){golden_rows("x86_64",0);golden_rows("arm64",0);}
+ else if(tx_eq(g, "relocation", 1L << 20)){golden_rows("x86_64",1);golden_rows("arm64",1);link_rows(0);kernel_recompute(0,1);kernel_recompute(1,1);}
+ else if(tx_eq(g, "object", 1L << 20)){int a,i;object_rows();link_rows(1);for(a=0;a<2;a++)for(i=0;i<11;i++){size_t n;char why[100]="",name[100];unsigned char *b=route_file(isas[a],units[i],"o",&n);int ok=as6_layout(b,n,a==1,why,sizeof why);{int z=snprintf(name,sizeof name,"as6-layout.%s.%s",isas[a],units[i]);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};ck(ok,name);if(!ok)fprintf(stderr,"DETAIL\t%s\t%s\n",name,why);free(b);}kernel_recompute(0,0);kernel_recompute(1,0);}
+ else if(tx_eq(g, "refusal", 1L << 20))refusal();
+ else if(tx_eq(g, "route-refusal", 1L << 20))route_refusal();
+ else if(tx_eq(g, "route-recovery", 1L << 20))route_recovery();
+ else if(tx_eq(g, "pin-mutation", 1L << 20))pin_mutation();
+ else if(tx_eq(g, "coverage", 1L << 20))coverage();
+ else if(tx_eq(g, "pins", 1L << 20))pins();
+ else if(tx_eq(g, "shape", 1L << 20))shape_checks();
+ else if(tx_eq(g, "options", 1L << 20))option_checks();
  else die("unknown group");
- sha_file(product,after);ck(!strcmp(before,after),"candidate-unchanged");if(!standalone)route_material_applies();
+ sha_file(product,after);ck(tx_eq(before, after, 1L << 20),"candidate-unchanged");if(!standalone)route_material_applies();
  puts("TIMING\tstartup,construction,loading,inference,output,validation=UNMEASURED(no portable clock in the prelude)");
  printf("KERNEL_ROUTE\tgroup=%s\tassertions=%d\tfailed=%d\tcandidate=%s\n",g,checks,failed,before);return failed?1:0;
 }

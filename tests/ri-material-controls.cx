@@ -4,6 +4,7 @@
  * fixture execution, source mutation or original-material mutation is done.
  * Linux/x86_64 only; FIFO uses the existing raw mknodat syscall convention. */
 #pragma unisa use cxlib.netpack
+#pragma unisa use text.text
 static char root[4096],original[4096],work[4096],clone[4400],product[4400],tool[4400],bound[4400];
 static const char *leaves[]={"runtime.c","material.tsv","native.tsv","runtime-native"};
 static char *bytes[4];static size_t sizes[4];static char hashes[4][65];static int assertions,failures;
@@ -24,10 +25,10 @@ int main(int argc,char **argv){
  fputs("NOT_RUN ri-material-controls requires Linux/x86_64\n",stderr);return 3;
 #endif
  const char *names[]={"control-valid","native-byte-flip","missing-native-receipt","symlink-native","fifo-receipt","corrupt-runtime.c","corrupt-flags-receipt"};int which=-1;
- if(argc!=6||!realpath(argv[1],root)||!realpath(argv[2],original)||!argv[3][0]||argv[3][0]=='/'||strstr(argv[3],"..")||strpbrk(argv[3],"\\\r\n\t")||argv[4][0]!='/'||strlen(argv[4])>=sizeof work)die("usage ROOT EXISTING_MATERIAL FIXTURE_REL NEW_ABS_OUT CASE_ID");for(int i=0;i<7;i++)if(!strcmp(argv[5],names[i]))which=i;if(which<0)die("unknown CASE_ID");
+ if(argc!=6||!realpath(argv[1],root)||!realpath(argv[2],original)||!argv[3][0]||argv[3][0]=='/'||strstr(argv[3],"..")||strpbrk(argv[3],"\\\r\n\t")||argv[4][0]!='/'||strlen(argv[4])>=sizeof work)die("usage ROOT EXISTING_MATERIAL FIXTURE_REL NEW_ABS_OUT CASE_ID");for(int i=0;i<7;i++)if(tx_eq(argv[5], names[i], 1L << 20))which=i;if(which<0)die("unknown CASE_ID");
  /* Canonicalize the existing parent, keeping the output leaf genuinely new.
   * A clone may not be created inside the original material directory. */
- char parent[4096],canonical[4096];strcpy(parent,argv[4]);char *slash=strrchr(parent,'/');if(!slash||!slash[1]||!strcmp(slash+1,".")||!strcmp(slash+1,".."))die("output leaf");char leaf[4096];strcpy(leaf,slash+1);if(slash==parent)slash[1]=0;else *slash=0;if(!realpath(parent,canonical))die("output parent");int z=snprintf(work,sizeof work,"%s%s%s",canonical,!strcmp(canonical,"/")?"":"/",leaf);if(z<0||(size_t)z>=sizeof work||within(work,original))die("output aliases original material");if(mkdir(work,0700))die("new private output required");join(clone,work,"material");if(mkdir(clone,0700))die("new clone directory");join(bound,root,"tools/bound");join(product,root,"unisacc.com");join(tool,root,"tools/ri-material.cx");
+ char parent[4096],canonical[4096];strcpy(parent,argv[4]);char *slash=strrchr(parent,'/');if(!slash||!slash[1]||tx_eq(slash+1, ".", 1L << 20)||tx_eq(slash+1, "..", 1L << 20))die("output leaf");char leaf[4096];strcpy(leaf,slash+1);if(slash==parent)slash[1]=0;else *slash=0;if(!realpath(parent,canonical))die("output parent");int z=snprintf(work,sizeof work,"%s%s%s",canonical,tx_eq(canonical, "/", 1L << 20)?"":"/",leaf);if(z<0||(size_t)z>=sizeof work||within(work,original))die("output aliases original material");if(mkdir(work,0700))die("new private output required");join(clone,work,"material");if(mkdir(clone,0700))die("new clone directory");join(bound,root,"tools/bound");join(product,root,"unisacc.com");join(tool,root,"tools/ri-material.cx");
  for(int i=0;i<4;i++){char p[4400],q[4400];join(p,original,leaves[i]);bytes[i]=readfile(p,&sizes[i]);cx_sha256_hex(bytes[i],sizes[i],hashes[i]);join(q,clone,leaves[i]);writefile(q,bytes[i],sizes[i],i==3?0700:0600,1);size_t n;char *copy=readfile(q,&n);ck(n==sizes[i]&&!memcmp(copy,bytes[i],n),leaves[i]);free(copy);printf("ORIGINAL\t%s\tsha256=%s\tbytes=%lu\n",leaves[i],hashes[i],(unsigned long)sizes[i]);}
  np_result baseline=verify(original,argv[3],"original-valid");int valid=accepted(&baseline);ck(valid,"original-valid");np_free(&baseline);if(!valid)die("original material must verify before mutation");
  char p[4400];const char *reason=0;
@@ -38,6 +39,6 @@ int main(int argc,char **argv){
  if(which==5){if(!sizes[0])die("runtime source empty");bytes[0][0]^=1;join(p,clone,"runtime.c");writefile(p,bytes[0],sizes[0],0600,0);reason="material changed";}
  if(which==6){const char *needle="\nflags\t-O2 -fno-trim-libc -b lnx/x86_64 -o -\n";char *at=strstr(bytes[2],needle);if(!at||strstr(at+1,needle))die("unique native flags");at[strlen("\nflags\t-O")]='3';join(p,clone,"native.tsv");writefile(p,bytes[2],sizes[2],0600,0);reason="material changed";}
  np_result result=verify(clone,argv[3],names[which]);ck(which==0?accepted(&result):result.rc==2&&!result.outn&&reason_is(&result,reason),names[which]);np_free(&result);
- for(int i=0;i<4;i++){char q[4400],h[65],label[100];size_t n;join(q,original,leaves[i]);char *s=readfile(q,&n);cx_sha256_hex(s,n,h);snprintf(label,sizeof label,"original-unchanged.%s",leaves[i]);ck(n==sizes[i]&&!strcmp(h,hashes[i]),label);free(s);free(bytes[i]);}
+ for(int i=0;i<4;i++){char q[4400],h[65],label[100];size_t n;join(q,original,leaves[i]);char *s=readfile(q,&n);cx_sha256_hex(s,n,h);snprintf(label,sizeof label,"original-unchanged.%s",leaves[i]);ck(n==sizes[i]&&tx_eq(h, hashes[i], 1L << 20),label);free(s);free(bytes[i]);}
  puts("NOT_CLAIMED\tfixture-behavior-product-rebuild-foreign-hosts-or-general-filesystem-race-safety");puts("TIMING\tstartup_construction_loading_output_validation_cold_hot=UNMEASURED");printf("RI_MATERIAL_CONTROLS\tcase=%s\tassertions=%d\tfailed=%d\texecuted-cases=1\n",names[which],assertions,failures);return failures?1:0;
 }

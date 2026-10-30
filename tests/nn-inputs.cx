@@ -10,6 +10,7 @@
  * not NN inference, model adoption, full PP equivalence or product qualification.
  */
 #pragma unisa use cxlib.nninputs
+#pragma unisa use text.text
 static int nit_assertions,nit_failures;
 static const char *nit_table="aea1293b96da78c6a0cfaf0354e47e840d414de41bdea735bead30d736c8c853";
 static void nit_die(const char *s){fprintf(stderr,"nn-inputs-test: %s errno=%d\n",s,errno);exit(2);}
@@ -21,7 +22,7 @@ static long long nit_ns(void){struct timespec t={0};long rc=__syscall6(228,1,(lo
 static int nit_fds(void){
     DIR *d=opendir("/proc/self/fd");if(!d)nit_die("fd-observer-open");int n=0;
     for(;;){errno=0;struct dirent *e=readdir(d);if(!e){int saved=errno,rc=closedir(d);if(saved||rc)nit_die("fd-observer-read-or-close");return n;}
-        if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;
+        if(tx_eq(e->d_name, ".", 1L << 20)||tx_eq(e->d_name, "..", 1L << 20))continue;
         for(const char *p=e->d_name;*p;p++)if(*p<'0'||*p>'9'){closedir(d);nit_die("fd-observer-nonnumeric-entry");}
         if(++n>4096){closedir(d);nit_die("fd-observer-bound");}}
 }
@@ -59,7 +60,7 @@ static void nit_prepare_unknown(const char *root_arg,const char *reader,const ch
     cx_sha256_hex(cloned,cloned_n,sha);nit_check(strcmp(sha,reader_sha)!=0,"unknown-reader.actual-SHA-differs-from-trusted-reader");
     struct stat st;int frozen=!lstat(path,&st)&&S_ISREG(st.st_mode)&&(st.st_mode&07777)==0400;
     nit_check(frozen,"unknown-reader.frozen-private-nonexecutable-fixture-before-API-batch");
-    free(cloned);free(s);if(!shape||!exact||!frozen||!strcmp(sha,reader_sha))nit_die("unknown-reader-fixture-preconditions");
+    free(cloned);free(s);if(!shape||!exact||!frozen||tx_eq(sha, reader_sha, 1L << 20))nit_die("unknown-reader-fixture-preconditions");
     printf("FIXTURE\tunknown-reader=%s\tsha256=%s\tmode=0400\tnever-executed\n",path,sha);
 }
 static int nit_reason(const char *why,const char *reason,const char *path){
@@ -72,7 +73,7 @@ static void nit_negative(const char *root_arg,const char *origin,const char *rea
     int rc=ni_compare(root_arg,origin,reader,no_out?0:&r,why,zero_cap?0:sizeof why);
     nit_part(rc==-1,label,"explicit-refusal");
     if(zero_cap)nit_part(nit_bytes(why,sizeof why,0xa5),label,"zero-cap-reason-buffer-untouched");
-    else{int terminated=memchr(why,0,sizeof why)!=0;nit_part(terminated&&(error_path?nit_reason(why,reason,error_path):!strcmp(why,reason)),label,"exact-reason-and-path");if(terminated)printf("REFUSAL\t%s\t%s\n",label,why);}
+    else{int terminated=memchr(why,0,sizeof why)!=0;nit_part(terminated&&(error_path?nit_reason(why,reason,error_path):tx_eq(why, reason, 1L << 20)),label,"exact-reason-and-path");if(terminated)printf("REFUSAL\t%s\t%s\n",label,why);}
     if(no_out)nit_part(nit_bytes(&r,sizeof r,0xa5),label,"no-result-destination-does-not-write-local-canary");
     else nit_part(nit_bytes(&r,sizeof r,0),label,"entire-A5-result-cleared-including-padding");
 }
@@ -94,9 +95,9 @@ static ni_result nit_positive(const char *root_arg,const char *origin,const char
     nit_part(r.physical_reads>0&&(long long)r.physical_reads==(long long)r.current_reads+r.origin_reads+r.support_reads,label,"witness-and-actual-read-accounting");
     nit_part(r.current_reads>0&&r.origin_reads>0&&r.support_reads>0&&r.current_reads==r.origin_reads&&!(r.current_reads%2)&&!(r.origin_reads%2),label,"mirrored-two-endpoint-per-root-read-accounting");
     nit_part(strcmp(r.current_include,r.origin_include)!=0,label,"different-header-bodies-remain-distinct-input-identities");
-    nit_part(!strcmp(r.libneed,nit_table),label,"complete-libneed-table-independent-literal-gold");
-    nit_part(!strcmp(r.native_artifact,reader_sha),label,"actual-reader-file-identity");
-    nit_part(!strcmp(r.verifier,module_sha),label,"actual-current-NI-module-identity");
+    nit_part(tx_eq(r.libneed, nit_table, 1L << 20),label,"complete-libneed-table-independent-literal-gold");
+    nit_part(tx_eq(r.native_artifact, reader_sha, 1L << 20),label,"actual-reader-file-identity");
+    nit_part(tx_eq(r.verifier, module_sha, 1L << 20),label,"actual-current-NI-module-identity");
     nit_part(r.data_files>0&&r.data_dirs>0&&r.data_symlinks>=0,label,"complete-observed-tree-domain");
     nit_part(r.full_triggers>r.facts_triggers&&r.facts_triggers>0&&strcmp(r.autoinc_full,r.autoinc_facts)!=0,label,"printf-projections-remain-independent-ordered-domains");
     nit_part(begin>=0&&end>=begin,label,"monotonic-observation-timing");nit_part(nit_phase_accounting(&r),label,"nonoverlapping-phase-accounting");
@@ -108,7 +109,7 @@ static void nit_stable(const ni_result *a,const ni_result *b){
     const char *av[]={a->witness,a->data,a->ctor_cdeps,a->current_include,a->origin_include,a->libneed,a->autoinc_full,a->autoinc_facts,a->native_artifact,a->native_C_source,a->verifier,a->netpack,a->kernelsha,a->runtime_support};
     const char *bv[]={b->witness,b->data,b->ctor_cdeps,b->current_include,b->origin_include,b->libneed,b->autoinc_full,b->autoinc_facts,b->native_artifact,b->native_C_source,b->verifier,b->netpack,b->kernelsha,b->runtime_support};
     const char *names[]={"witness","data","Cdeps","current-include","origin-include","libneed","full-projection","facts-projection","reader-artifact","reader-source","NI-module","netpack","kernelsha","runtime-support"};
-    for(int i=0;i<14;i++)nit_part(!strcmp(av[i],bv[i]),"recovery-stable-identity-excluding-timing",names[i]);
+    for(int i=0;i<14;i++)nit_part(tx_eq(av[i], bv[i], 1L << 20),"recovery-stable-identity-excluding-timing",names[i]);
     nit_check(a->data_files==b->data_files&&a->data_dirs==b->data_dirs&&a->data_symlinks==b->data_symlinks&&a->ctor_files==b->ctor_files&&a->ordered_headers==b->ordered_headers&&a->full_triggers==b->full_triggers&&a->facts_triggers==b->facts_triggers,"recovery-all-logical-domain-counts-stable");
     nit_check(a->physical_reads==b->physical_reads&&a->current_reads==b->current_reads&&a->origin_reads==b->origin_reads&&a->support_reads==b->support_reads&&a->native_table_calls==b->native_table_calls&&a->native_internal_reads==b->native_internal_reads,"recovery-all-actual-read-counts-stable-without-timing-equality");
 }
@@ -118,7 +119,7 @@ int main(int argc,char **argv){
 #else
     if(argc!=4||sizeof(long)!=8||sizeof(void *)!=8)nit_die("usage ROOT SNAPSHOT_ROOT TRUSTED_READER");
     char root_arg[4096],origin[4096],reader[4096],wrong[4400],missing[4400],module[4400],reader_sha[65],module_sha[65],unknown[4400],unknown_sha[65];
-    if(!realpath(argv[1],root_arg)||!realpath(argv[2],origin)||!realpath(argv[3],reader)||!strcmp(root_arg,origin))nit_die("distinct-real-roots-and-existing-reader-required");
+    if(!realpath(argv[1],root_arg)||!realpath(argv[2],origin)||!realpath(argv[3],reader)||tx_eq(root_arg, origin, 1L << 20))nit_die("distinct-real-roots-and-existing-reader-required");
     int n=snprintf(wrong,sizeof wrong,"%s/unisacc.com",root_arg);if(n<0||(size_t)n>=sizeof wrong||strlen(wrong)>700)nit_die("wrong-reader-path-bound");
     n=snprintf(missing,sizeof missing,"%s.nn-inputs-permanent-absent",reader);if(n<0||(size_t)n>=sizeof missing)nit_die("missing-reader-path-bound");
     struct stat st;errno=0;if(!lstat(missing,&st)||errno!=ENOENT)nit_die("missing-reader-precondition-must-be-ENOENT-only");
@@ -135,8 +136,8 @@ int main(int argc,char **argv){
     nit_negative(root_arg,origin,unknown,0,0,"unknown-valid-ELF-reader","trusted-libneed-native-artifact-mismatch",unknown);
     nit_check(getpid()==caller,"parent-remains-alive-after-every-refusal");
     ni_result recovered=nit_positive(root_arg,origin,reader,reader_sha,module_sha,"recovery");nit_stable(&first,&recovered);
-    char after[65];nit_digest(reader,after);nit_check(!strcmp(reader_sha,after),"trusted-reader-original-bytes-unchanged");nit_digest(module,after);nit_check(!strcmp(module_sha,after),"NI-module-original-bytes-unchanged");
-    nit_digest(unknown,after);nit_check(!strcmp(unknown_sha,after),"unknown-reader-frozen-bytes-unchanged-after-API-batch");
+    char after[65];nit_digest(reader,after);nit_check(tx_eq(reader_sha, after, 1L << 20),"trusted-reader-original-bytes-unchanged");nit_digest(module,after);nit_check(tx_eq(module_sha, after, 1L << 20),"NI-module-original-bytes-unchanged");
+    nit_digest(unknown,after);nit_check(tx_eq(unknown_sha, after, 1L << 20),"unknown-reader-frozen-bytes-unchanged-after-API-batch");
     nit_check(!lstat(unknown,&st)&&S_ISREG(st.st_mode)&&(st.st_mode&07777)==0400,"unknown-reader-remains-private-readonly-nonexecutable");
     errno=0;nit_check(lstat(missing,&st)==-1&&errno==ENOENT,"missing-reader-remains-absent-ENOENT-only");
     nit_check(nit_fds()==baseline,"all-positive-refusal-recovery-FDs-released");

@@ -26,6 +26,7 @@
  * Cold = UNISACC_RUN_CACHE=0 process (or the first run on an empty private cache for the lookup miss); not OS-cold.
  */
 #pragma unisa use cxlib.netpack
+#pragma unisa use text.text
 static char root[4096], product[4096], work[4096], bound[4400], fixture[4400], selfpath[4096];
 static char cache[4400], object[4400], env_cache[4600];
 static char prod_hash[65], self_hash[65], fixture_hash[65];
@@ -312,7 +313,7 @@ static int exact(const np_result *r, const char *want) {
 static void identity_after(const sample *s) {
     char h[65];
     digest(product, h);
-    ck2(!strcmp(h, prod_hash), s->label, "product-unchanged");
+    ck2(tx_eq(h, prod_hash, 1L << 20), s->label, "product-unchanged");
 }
 static void finish(sample *s) {
     s->validation_ns = now_ns() - validation_start;
@@ -328,10 +329,10 @@ static void cache_scan(int *all, int *host) {
     if (!d) die("cache scan");
     *all = *host = 0;
     while ((e = readdir(d))) {
-        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        if (tx_eq(e->d_name, ".", 1L << 20) || tx_eq(e->d_name, "..", 1L << 20)) continue;
         (*all)++;
         n = strlen(e->d_name);
-        if (n > 5 && !strcmp(e->d_name + n - 5, ".host")) (*host)++;
+        if (n > 5 && tx_eq(e->d_name + n - 5, ".host", 1L << 20)) (*host)++;
     }
     if (closedir(d)) die("cache scan close");
 }
@@ -462,12 +463,12 @@ int main(int argc, char **argv) {
         die("Linux x86_64 LP64 clock layout required");
     copy_fit(parent, sizeof parent, argv[3]);
     char *slash = strrchr(parent, '/');
-    if (!slash || !slash[1] || !strcmp(slash + 1, ".") || !strcmp(slash + 1, "..")) die("new output leaf");
+    if (!slash || !slash[1] || tx_eq(slash + 1, ".", 1L << 20) || tx_eq(slash + 1, "..", 1L << 20)) die("new output leaf");
     copy_fit(leaf, sizeof leaf, slash + 1);
     if (slash == parent) slash[1] = 0;
     else *slash = 0;
     if (!realpath(parent, base)) die("output parent");
-    int z = snprintf(work, sizeof work, "%s%s%s", base, !strcmp(base, "/") ? "" : "/", leaf);
+    int z = snprintf(work, sizeof work, "%s%s%s", base, tx_eq(base, "/", 1L << 20) ? "" : "/", leaf);
     if (z < 0 || (size_t)z >= sizeof work || mkdir(work, 0700)) die("new output directory required");
     clean_environment();
     path(bound, sizeof bound, root, "tools/bound");
@@ -561,7 +562,7 @@ int main(int argc, char **argv) {
     ck2(!obj_hit.st.bad && obj_hit.st.art_n == 1 && obj_hit.st.art_hit == 1 && obj_hit.st.art_mode == 2 &&
         !obj_hit.st.lookup_n && !obj_hit.st.mem_n, "obj.hit", "stamp-grammar-one-artifact_hit=1-mode=2");
     digest(object, obj2);
-    ck2(!strcmp(obj1, obj2), "obj.hit", "object-bytes-equal-to-miss");
+    ck2(tx_eq(obj1, obj2, 1L << 20), "obj.hit", "object-bytes-equal-to-miss");
     identity_after(&obj_hit);
     finish(&obj_hit);
     printf("STAMP\tlookup\tcache-off\thit=%lld\tns=%lld\n", run_cold.st.lookup_hit, run_cold.st.lookup_ns);
@@ -638,7 +639,7 @@ int main(int argc, char **argv) {
         const char *got = check_report(bad.p, bad.n);
         int n = snprintf(name, sizeof name, "report.refuses-%s-as-%s", mutation_name[m], mutation_reason[m]);
         if (n < 0 || (size_t)n >= sizeof name) die("label bound");
-        ck(got && !strcmp(got, mutation_reason[m]), name);
+        ck(got && tx_eq(got, mutation_reason[m], 1L << 20), name);
         if (!got || strcmp(got, mutation_reason[m])) printf("REPORT_MUTATION\t%s\tgot=%s\n", mutation_name[m],
                                                               got ? got : "ACCEPTED");
     }
@@ -667,11 +668,11 @@ int main(int argc, char **argv) {
            M_COUNT - 1);
 
     digest(product, after);
-    ck(!strcmp(prod_hash, after), "product-unchanged-at-end");
+    ck(tx_eq(prod_hash, after, 1L << 20), "product-unchanged-at-end");
     digest(selfpath, after);
-    ck(!strcmp(self_hash, after), "source-unchanged");
+    ck(tx_eq(self_hash, after, 1L << 20), "source-unchanged");
     digest(fixture, after);
-    ck(!strcmp(fixture_hash, after), "probe-unchanged");
+    ck(tx_eq(fixture_hash, after, 1L << 20), "probe-unchanged");
     if (!failures)
         printf("OBSERVATION\tstartup_isolated_cold_ns=%lld\trun_e2e_cold_ns=%lld\trun_e2e_hot_ns=%lld\t"
                "lookup_miss_ns=%lld\tlookup_hit_ns=%lld\tno-speed-threshold\n",
