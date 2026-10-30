@@ -272,7 +272,7 @@ remains explicitly unsupported. No final default-product switch is implied.
 
 ### Isolated execution kernel
 
-The machine is now in [core.c](core.c) and [core.h](core.h), independently
+The machine is now in [core.c](../../archive/reference-c/exec/c/core.c) and [core.h](core.h), independently
 linkable from the package/route loader. [CORE.md](CORE.md) records its exact
 boundary, ownership, two ISA object sizes and external dependencies. Package
 bytes, network/action formats and route behavior are unchanged. The default

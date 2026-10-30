@@ -1,0 +1,55 @@
+/* Checks tools/doc-links.cx: sh ./unisacc.com tools/check-doc-links.cx   (from the repo root)
+   On tools/doc-links/fixture/docs/t.md: four links are checked (the https, #anchor, inline-code and fenced
+   ones are not) and three are BROKEN (exit 1).  --fix-moved on a copy at out/check-doc-links-PID/docs/t.md
+   rewrites the two whose file name is tracked once (exec/c/compiler.c and exec/enc/CONTROL_AUDIT.md, both
+   under archive/reference-c/) to paths relative to the copy, both on one line, and leaves the third
+   BROKEN; a second plain run of the copy then finds one broken link.
+   Prints PASS/FAIL lines and CHECK_DOC_LINKS<TAB>failed=N. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+
+static int failed;
+static void ck(int ok, const char *name) { if (!ok) failed++; printf("%s\tdoc-links.%s\n", ok ? "PASS" : "FAIL", name); }
+
+static int dl(char **args, char *out, long cap) {
+    char *argv[10]; int i = 0, k, ofd, pid, ex = 0, code = 0, sig = 0; long n = 0, r; char junk[4096];
+    argv[i++] = "sh"; argv[i++] = "./unisacc.com"; argv[i++] = "tools/doc-links.cx"; argv[i++] = "--";
+    for (k = 0; args[k] && i < 9; k++) argv[i++] = args[k];
+    argv[i] = 0;
+    pid = sy_spawn_pipe(argv, 0, 0, &ofd, 0);
+    if (pid < 0) return -1;
+    while ((r = sy_read(ofd, out + n, cap - 1 - n)) > 0) n += r;
+    out[n] = 0;
+    while (sy_read(ofd, junk, sizeof junk) > 0) {}
+    sy_close(ofd);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
+    return code;
+}
+static int has(const char *o, const char *s) { return tx_find(o, tx_len(o, 1 << 16), s, tx_len(s, 512)) >= 0; }
+
+int main(void) {
+    static char o[1 << 16]; char dir[200], docs[240], copy[280]; size_t n; char *src, *after; int rc;
+    char *a1[] = {"tools/doc-links/fixture/docs/t.md", 0};
+    rc = dl(a1, o, sizeof o);
+    ck(rc == 1 && has(o, "DOC_LINKS\tfiles=1\tlinks=4\tbroken=3\tfixed=0\n") && has(o, "BROKEN\ttools/doc-links/fixture/docs/t.md:6\tmissing-nowhere.md\n")
+       && !has(o, "nope"), "check-four-links-three-broken-code-skipped");
+    if (cx_fmt(dir, sizeof dir, "out/check-doc-links-%d", sy_pid()) || cx_fmt(docs, sizeof docs, "%s/docs", dir) || cx_fmt(copy, sizeof copy, "%s/t.md", docs)) return 2;
+    src = cx_read("tools/doc-links/fixture/docs/t.md", &n);
+    if (!src || sy_mkdir(dir, 0755) || sy_mkdir(docs, 0755)) return 2;
+    {   int fd = sy_open_new(copy, 0644); if (fd < 0 || sy_write_all(fd, src, (long)n) || sy_close(fd)) return 2; }
+    {   char *a2[] = {"--fix-moved", copy, 0};
+        rc = dl(a2, o, sizeof o);
+        after = cx_read(copy, &n);
+        ck(rc == 1 && has(o, "fixed=2") && has(o, "broken=1") && after
+           && tx_find(after, (long)n, "[a](../../../archive/reference-c/exec/c/compiler.c) and [b](../../../archive/reference-c/exec/enc/CONTROL_AUDIT.md)", 113) >= 0,
+           "fix-moved-two-on-one-line");
+    }
+    {   char *a3[] = {copy, 0};
+        rc = dl(a3, o, sizeof o);
+        ck(rc == 1 && has(o, "links=4\tbroken=1\tfixed=0\n"), "fixed-links-resolve");
+    }
+    sy_unlink(copy);
+    printf("CHECK_DOC_LINKS\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

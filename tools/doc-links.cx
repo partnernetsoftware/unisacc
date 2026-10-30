@@ -1,0 +1,196 @@
+/* tools/doc-links.cx -- find Markdown links to repo paths that do not exist.
+ *
+ *   sh ./unisacc.com tools/doc-links.cx -- (FILE.md... | --tracked [--skip PREFIX[:PREFIX...]])
+ *
+ * Reads every inline link [text](target) of the given Markdown files (--tracked: every tracked *.md),
+ * skipping fenced code blocks and inline code spans.  A target with a scheme (http:, https:, mailto:, ...)
+ * or that is only an #anchor is not checked; otherwise the #anchor and a "title" are dropped, %20 is a
+ * space, and the path is resolved against the Markdown file's directory (a leading / against the repo
+ * root).  Missing paths print BROKEN<TAB>FILE:LINE<TAB>target; the run ends with
+ * DOC_LINKS<TAB>files=N<TAB>links=L<TAB>broken=B and exits 1 when B > 0.  --skip leaves out files under the
+ * given prefixes (e.g. archive/:ujs/:apps/csih/). */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static long links, broken, fixed;
+static int fix_mode;
+static char *tracked; static long tracked_n;   /* NUL-separated `git ls-files` paths, for --fix-moved */
+typedef struct { long line; char old[1024], neu[1024]; } Fix;
+static Fix fixes[256]; static int nfix;
+
+/* the one tracked path ending in /BASE (or equal to BASE), or 0 when none or several */
+static const char *moved_to(const char *base, long bl) {
+    long at = 0; const char *hit = 0;
+    while (at < tracked_n) {
+        const char *p = tracked + at; long pl = tx_len(p, tracked_n - at);
+        if (pl <= 0) break;
+        if ((pl == bl || (pl > bl && p[pl - bl - 1] == '/')) && tx_same(p + pl - bl, bl, base, bl)) { if (hit) return 0; hit = p; }
+        at += pl + 1;
+    }
+    return hit;
+}
+/* DST relative to the directory of MD (both repo-relative) */
+static int rel_path(char *out, long cap, const char *md, const char *dst) {
+    long dl = tx_len(md, 4096), c = 0, k, o = 0, i;
+    while (dl > 0 && md[dl - 1] != '/') dl--;   /* md's directory, with its trailing / */
+    for (k = 0; k < dl && dst[k] && md[k] == dst[k]; k++) if (md[k] == '/') c = k + 1;   /* common directory prefix */
+    for (i = c; i < dl; i++) if (md[i] == '/') { if (o + 3 >= cap) return 1; out[o++] = '.'; out[o++] = '.'; out[o++] = '/'; }
+    for (i = c; dst[i]; i++) { if (o + 1 >= cap) return 1; out[o++] = dst[i]; }
+    out[o] = 0;
+    return 0;
+}
+
+static int skipped(const char *path, const char *skip) {
+    long pl = tx_len(path, 4096);
+    while (skip && *skip) {
+        const char *e = skip; while (*e && *e != ':') e++;
+        if (e > skip && tx_prefix(path, pl, skip, e - skip)) return 1;
+        skip = *e ? e + 1 : e;
+    }
+    return 0;
+}
+
+static void check_target(const char *md, long line, const char *t, long n) {
+    char path[4400]; long k, dl = tx_len(md, 4096), o = 0;
+    while (n > 0 && (t[0] == ' ' || t[0] == '<')) { t++; n--; }
+    for (k = 0; k < n; k++) if (t[k] == ' ' || t[k] == '"' || t[k] == '>') { n = k; break; }   /* drop a title */
+    if (n == 0 || t[0] == '#') return;
+    for (k = 0; k < n && k < 12; k++) {   /* a scheme: letters then ':' before any '/' */
+        if (t[k] == ':') return;
+        if (!((t[k] >= 'a' && t[k] <= 'z') || (t[k] >= 'A' && t[k] <= 'Z') || t[k] == '+' || t[k] == '.' || t[k] == '-')) break;
+    }
+    { long h = tx_chr(t, n, '#'); if (h >= 0) n = h; }
+    { long q = tx_chr(t, n, '?'); if (q >= 0) n = q; }
+    if (n == 0) return;
+    if (t[0] != '/') {   /* relative to the Markdown file's directory */
+        while (dl > 0 && md[dl - 1] != '/') dl--;
+        if (dl + 1 >= (long)sizeof path) return;
+        for (k = 0; k < dl; k++) path[o++] = md[k];
+    } else { t++; n--; }
+    for (k = 0; k < n && o + 1 < (long)sizeof path; k++) {
+        if (t[k] == '%' && k + 2 < n && t[k + 1] == '2' && t[k + 2] == '0') { path[o++] = ' '; k += 2; }
+        else path[o++] = t[k];
+    }
+    path[o] = 0;
+    links++;
+    if (!sy_exists(path)) {
+        long bs = n; const char *dst;
+        while (bs > 0 && t[bs - 1] != '/') bs--;
+        dst = fix_mode && bs < n && nfix < 256 && t[0] != '/' ? moved_to(t + bs, n - bs) : 0;
+        if (dst && n < 1024 && !rel_path(fixes[nfix].neu, sizeof fixes[nfix].neu, md, dst)) {
+            fixes[nfix].line = line; tx_copy(fixes[nfix].old, sizeof fixes[nfix].old, t, n);
+            printf("FIXED\t%s:%ld\t%.*s\t%s\n", md, line, (int)n, t, fixes[nfix].neu);
+            nfix++; fixed++;
+        } else { broken++; printf("BROKEN\t%s:%ld\t%.*s\n", md, line, (int)n, t); }
+    }
+}
+/* rewrite MD (bytes B, n) with every recorded fix: on its line, the first "(old" becomes "(new" */
+static int apply_fixes(const char *md, const char *b, long n) {
+    int f, fd; long at = 0, line = 1;
+    if (!nfix) return 0;
+    {   char tmp[4400];
+        if (cx_fmt(tmp, sizeof tmp, "%s.doc-links-tmp", md)) return -1;
+        fd = sy_open_new(tmp, 0644);
+        if (fd < 0) return -1;
+        while (at < n) {
+            long e = tx_chr(b + at, n - at, '\n'), ln = e < 0 ? n - at : e + 1, cur = ln;
+            static char lb[2][65536]; int w = 0;
+            if (ln >= (long)sizeof lb[0]) { sy_write_all(fd, b + at, ln); at += ln; line++; continue; }
+            tx_copy(lb[0], sizeof lb[0], b + at, ln); 
+            for (f = 0; f < nfix; f++) if (fixes[f].line == line) {   /* every fix of this line, in order */
+                char needle[1100]; long nl, p, nn = tx_len(fixes[f].neu, 1024);
+                if (cx_fmt(needle, sizeof needle, "(%s", fixes[f].old)) continue;
+                nl = tx_len(needle, sizeof needle);
+                p = tx_find(lb[w], cur, needle, nl);
+                if (p < 0 || cur - nl + nn + 1 >= (long)sizeof lb[0]) continue;
+                {   long o = 0, k;
+                    for (k = 0; k <= p; k++) lb[!w][o++] = lb[w][k];
+                    for (k = 0; k < nn; k++) lb[!w][o++] = fixes[f].neu[k];
+                    for (k = p + nl; k < cur; k++) lb[!w][o++] = lb[w][k];
+                    cur = o; w = !w;
+                }
+            }
+            sy_write_all(fd, lb[w], cur);
+            at += ln; line++;
+        }
+        sy_close(fd);
+        return sy_rename(tmp, md);
+    }
+}
+
+static int scan(const char *md) {
+    size_t sz; char *b = cx_read(md, &sz); long n, i = 0, line = 1; int fence = 0;
+    if (!b) { fprintf(stderr, "doc-links: cannot read %s\n", md); return -1; }
+    n = (long)sz;
+    while (i < n) {
+        long e = tx_chr(b + i, n - i, '\n'), ln = e < 0 ? n - i : e, k = 0, s;
+        const char *l = b + i;
+        while (k < ln && (l[k] == ' ' || l[k] == '\t')) k++;
+        if (ln - k >= 3 && (tx_prefix(l + k, ln - k, "```", 3) || tx_prefix(l + k, ln - k, "~~~", 3))) fence = !fence;
+        else if (!fence) {
+            int code = 0;
+            for (k = 0; k < ln; k++) {
+                if (l[k] == '`') { code = !code; continue; }
+                if (code || l[k] != ']' || k + 1 >= ln || l[k + 1] != '(') continue;
+                s = k + 2;
+                {   long d = 1, j = s;   /* the matching ')' (targets may hold balanced parentheses) */
+                    while (j < ln && d) { if (l[j] == '(') d++; else if (l[j] == ')') d--; if (d) j++; }
+                    if (d) break;
+                    check_target(md, line, l + s, j - s);
+                    k = j;
+                }
+            }
+        }
+        i += ln + 1; line++;
+    }
+    if (fix_mode && nfix) {   /* a fix not applied in this pass (two on one line) stays BROKEN-free but is redone next run */
+        if (apply_fixes(md, b, n) != 0) { fprintf(stderr, "doc-links: cannot rewrite %s\n", md); return -1; }
+        nfix = 0;
+    }
+    mm_free(b);
+    return 0;
+}
+
+/* `git ls-files -z [-- PATTERN]` into a NUL-separated buffer; 0 on failure */
+static char *ls_files(const char *pattern, long *n) {
+    char *gv[] = {"git", "ls-files", "-z", "--", (char *)pattern, 0}, chunk[65536]; int ofd, pid, k; long r, cap = 1 << 20;
+    char *list = mm_alloc(cap);
+    *n = 0;
+    if (!list) return 0;
+    if (!pattern) gv[3] = 0;
+    pid = sy_spawn_pipe(gv, 0, 0, &ofd, 0);
+    if (pid < 0) return 0;
+    while ((r = sy_read(ofd, chunk, sizeof chunk)) > 0) {
+        if (*n + r >= cap) { char *g = mm_grow(list, cap * 2 + r); if (!g) return 0; list = g; cap = cap * 2 + r; }
+        for (k = 0; k < r; k++) list[*n + k] = chunk[k];
+        *n += r;
+    }
+    sy_close(ofd); sy_wait_status(pid, 0, 0, 0, 0);
+    return list;
+}
+
+int main(int argc, char **argv) {
+    long files = 0; int k, a = 1;
+    if (argc >= 2 && tx_eqz(argv[1], "--fix-moved")) {   /* rewrite a broken link whose file name is tracked exactly once */
+        fix_mode = 1; a = 2;
+        tracked = ls_files(0, &tracked_n);
+        if (!tracked) return 2;
+    }
+    if (argc > a && tx_eqz(argv[a], "--tracked")) {
+        const char *skip = argc == a + 3 && tx_eqz(argv[a + 1], "--skip") ? argv[a + 2] : 0;
+        long at = 0, ln; char *list = ls_files("*.md", &ln);
+        if (!list || (argc != a + 1 && !skip)) { fprintf(stderr, "usage: doc-links [--fix-moved] (FILE.md... | --tracked [--skip PREFIXES])\n"); return 2; }
+        while (at < ln) {
+            const char *p = list + at; long pl = tx_len(p, ln - at);
+            if (pl <= 0) break;
+            if (!skipped(p, skip)) { if (scan(p) < 0) return 2; files++; }
+            at += pl + 1;
+        }
+    } else if (argc > a) {
+        for (k = a; k < argc; k++) { if (scan(argv[k]) < 0) return 2; files++; }
+    } else { fprintf(stderr, "usage: doc-links [--fix-moved] (FILE.md... | --tracked [--skip PREFIXES])\n"); return 2; }
+    printf("DOC_LINKS\tfiles=%ld\tlinks=%ld\tbroken=%ld\tfixed=%ld\n", files, links, broken, fixed);
+    return broken ? 1 : 0;
+}

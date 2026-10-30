@@ -524,6 +524,6 @@ of 0.0.12 reported time lost on exactly these, documented nowhere.
 Two things that look like limitations and are not.  `-ftrim-libc` is on by
 default and keeps library bodies only when a program reaches them by identifier
 closure, so a symbol reached solely through a bundled header's macro expansion
-can be reported undefined ([R13-0 #03](tests/difftest.com.knownfail)).  And the
+can be reported undefined ([R13-0 #03](archive/testing-c43-legacy/tests/difftest.com.knownfail)).  And the
 model compiler refuses to compile rather than falling back to the classic path,
 by design.

@@ -25,7 +25,7 @@
 |---|---|---|
 | 动态执行 C／`.cx` 工具 | `./unisacc.com FILE.cx -- ARGS` | 默认就是 `-run`；`.c` 同样适用。见本篇§3.11、[README 用法](README.md)及[`.cx` 草案](docs/cx-spec-draft.md)。 |
 | 显式动态执行 | `./unisacc.com -run FILE.cx -- ARGS` | 保留的显式写法；日常推进直接执行源码。 |
-| 从 tape／tapebin 写目标镜像 | `./unisacc.com INPUT.tape -b OS/ARCH -o OUTPUT` | `.tapebin` 也有现成入口。支持域及具名拒绝仍生效；见 [README](README.md)、[驱动](exec/c/compiler.c)及[当前优化Tape合同](tests/optimization.cx)。 |
+| 从 tape／tapebin 写目标镜像 | `./unisacc.com INPUT.tape -b OS/ARCH -o OUTPUT` | `.tapebin` 也有现成入口。支持域及具名拒绝仍生效；见 [README](README.md)、[驱动](archive/reference-c/exec/c/compiler.c)及[当前优化Tape合同](tests/optimization.cx)。 |
 | 写六目标程序 | `./unisacc.com FILE.c -b OS/ARCH -o OUTPUT` | 目标为 `lnx`／`osx`／`win` × `x86_64`／`arm64`；跨目标写出与目标机器原生执行分别记证。 |
 | 查看 `.cx` 模块依赖计划 | `./unisacc.com -cx-plan FILE.cx` | 复用现有模块入口与[当前模块ABI用例](tests/library-abi.cx)，不另造模块扫描器。 |
 | 用系统 GCC／Clang 把 `.cx` 编成普通可执行文件 | `sh ./gcc_cx.com FILE.cx -o OUT`；Clang 用 `sh ./clang_cx.com`。Windows 上是 `gcc_cx.com FILE.cx -o OUT` | PATH 上的 gcc 或 clang 由 `tools/build-cxcc-host.cx` 在该机链出驱动，不入库。Linux 与 OSX 用 `sh ./gcc_cx.com`；Windows 的 `gcc_cx.com` 是本机程序。本机只跑过 Linux。不调用 `unisacc.com`。抹掉首行 `#!`。无 `use` 时一次执行系统 `gcc` 或 `clang -std=c99 -x c -include include/cx.h`；没有后续非选项输入时不追加 `-x none`。有 `#pragma unisa use` 时在驱动进程里按 `src/cxmod.c` 展开，再按每个单元编译链接。`-run` 尚未做。`gcc_cx.com` 1606288 字节，`clang_cx.com` 1606304 字节，是六格 APE。本机这次构建跑过 Linux x86-64 那一格；其余四份切片只写出。进程 API 是按需模块 `tools/cxproc.cx`。不授予已检查身份。见 §5.3。 |
@@ -41,6 +41,7 @@
 | 只提交自己的文件和自己的行 | `sh ./unisacc.com tools/commit-own.cx -- -m MSG [--whole PATH...] [--keyed PATH KEY[,KEY...]]...` | 在私有 index 里提交，不碰别人暂存的条目，别人追加的行留在工作区；提交后只在共享 index 无人暂存该路径时同步条目。用于 tests/batches.tsv、tests/coverage.tsv、prd.md 这类多人同改的文件。 |
 | 登记一个检查为测试批次 | `sh ./unisacc.com tools/register.cx -- ID CHECK.cx MARKER "覆盖说明" "文件" [LAYER]` | 追加 batches／coverage 各一行、跑 `--list` 与 `run-batch`；失败只撤回自己追加的两行。已有 ID、缺文件、空 MARKER、字段含 TAB 直接拒绝（退出 2）。检查：batch `register-tool`。 |
 | 改了文件该重跑哪些批次 | `sh ./unisacc.com tools/affected.cx -- --since REV｜--files F...｜--ids ID... [--run -j N]`；反查 `-- --users FILE` | 按 source／`use` 传递闭包（realpath）／根源码字符串字面量点名的路径算受影响批次，约 0.3 秒；`--run` 经 run-batch 并行跑，45 秒后不再启动、余下 `DEFERRED` 用 `--ids` 续跑。检查：batch `affected-tool`。 |
+| 文档里的断链（归档后常见） | `sh ./unisacc.com tools/doc-links.cx -- [--fix-moved] (FILE.md... \| --tracked [--skip archive/:ujs/:apps/csih/])` | 检查 Markdown 行内链接指向的仓内路径，跳过代码块和外链。`--fix-moved` 会把断链改到该文件名在仓内唯一的新位置（比如归档后的路径），用的是相对路径。检查：batch `doc-links-tool`。 |
 | 四个仓级棘轮一次跑完 | `sh ./unisacc.com tools/ratchets.cx [-- --only PATH-PREFIX]` | 并行跑 cxraw／cxinclude／cxapis／cxtrunc 的 `--check`，每个一行 RATCHET，只列超基线或缺行的文件（不列 stale 与 below）；全 ok 才退出 0。检查：batch `ratchets-tool`。 |
 | 核对一只现成 PE 的结构 | `sh ./unisacc.com tools/formats-macho-pe.cx -- --pe FILE` | 与 `ROOT ABS_OUT` 同一套 PE/COFF 判据，写到标准输出：节区、导入、重定位、load config、入口。不放宽判据，不编译夹具。`ROOT ABS_OUT` 仍是 8 只夹具。见 [plans/osx-win-whole-o-2026-10-30.md](plans/osx-win-whole-o-2026-10-30.md)。 |
 | 包清单与导入身份 | `sh ./unisacc.com -run tests/cxpack.cx -- --fixtures` | `cxpack.tsv` 将模块名钉到路径。已装 e955 的 CXIF 在存在匹配文件行时只导出公开列表中的非 static 函数；清单缺席或无匹配行仍保留全部非 static 函数的兼容行为。清单超限、目录或其他读取错误具名拒绝，不扩大公开接口。类型声明仍沿用文本 CXIF v0，尚非结构化 ABI 或编译期所有权。见 [plans/cx-pack.md](plans/cx-pack.md) 与 [缺陷证据](plans/defects-c43.md)。 |
@@ -454,7 +455,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 | E5 编码 + E6 / `elf` | 目标文本 → ELF/Mach-O/PE 字节 | 六目标编码及镜像网络 | `elf` 是历史路由名，包含三种镜像格式 |
 | 内存路线 / `target/memory` | 目标文本 + 实际基址资源 → UNIMEM1 | 重用末端网络的内存入口 | `-run` 不落盘执行镜像；一次绑定 |
 
-实际路线来自 [image-stages.tsv](exec/pipeline/image-stages.tsv) 与 [compilerpack.py](exec/c/compilerpack.py)，驱动执行见 [compiler.c](exec/c/compiler.c)。公开 token dump 另有 `tokenpp/tokenlex`，不等于普通编译的 located E2/E1。`-c` 当前输出 tape，不是原生 `.o`；多个 C 文件一次编译成一个程序，没有普通系统链接器的 `-l/-L` 契约。模型拒绝不能悄悄改走经典编译；经典路线是显式参考/回退构建。
+实际路线来自 [image-stages.tsv](exec/pipeline/image-stages.tsv) 与 [compilerpack.py](archive/reference-py/exec/c/compilerpack.py)，驱动执行见 [compiler.c](archive/reference-c/exec/c/compiler.c)。公开 token dump 另有 `tokenpp/tokenlex`，不等于普通编译的 located E2/E1。`-c` 当前输出 tape，不是原生 `.o`；多个 C 文件一次编译成一个程序，没有普通系统链接器的 `-l/-L` 契约。模型拒绝不能悄悄改走经典编译；经典路线是显式参考/回退构建。
 
 ### 3.3 E2：预处理模型
 
