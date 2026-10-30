@@ -1,3 +1,7 @@
+#pragma unisa use text.fmt
+#pragma unisa use sys.io
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
 /* CX probe */
 /* reload_state.cx -- CX port of probes/reload_state.py (v1 state validator matrix).
  *
@@ -57,15 +61,15 @@ static void tx_copy(char *dst, long cap, const char *src, long n) {
 
 /* APP = cwd; UNI = $UNISACC or APP/../../unisacc.com; 0 when both exist */
 static int locate(void) {
-    const char *e = getenv("UNISACC");
+    const char *e = sy_env("UNISACC");
     char probe[1200];
     struct stat st;
-    if (!getcwd(APP, sizeof APP)) { printf("FAIL: getcwd: %s\n", strerror(errno)); return -1; }
-    if (e && e[0]) snprintf(UNI, sizeof UNI, "%s", e);
-    else snprintf(UNI, sizeof UNI, "%s/../../unisacc.com", APP);
-    snprintf(probe, sizeof probe, "%s/reload_state_cli.cx", APP);
-    if (stat(probe, &st) != 0) { printf("FAIL: %s: %s\n", probe, strerror(errno)); return -1; }
-    if (stat(UNI, &st) != 0) { printf("FAIL: %s: %s\n", UNI, strerror(errno)); return -1; }
+    if (!getcwd(APP, sizeof APP)) { sy_printf("FAIL: getcwd: %s\n", sy_strerror(errno)); return -1; }
+    if (e && e[0]) tx_snprintf(UNI, sizeof UNI, "%s", e);
+    else tx_snprintf(UNI, sizeof UNI, "%s/../../unisacc.com", APP);
+    tx_snprintf(probe, sizeof probe, "%s/reload_state_cli.cx", APP);
+    if (stat(probe, &st) != 0) { sy_printf("FAIL: %s: %s\n", probe, sy_strerror(errno)); return -1; }
+    if (stat(UNI, &st) != 0) { sy_printf("FAIL: %s: %s\n", UNI, sy_strerror(errno)); return -1; }
     return 0;
 }
 
@@ -80,7 +84,7 @@ static int run_merged(char **args, int secs, char *out, long cap, int *rc) {
     argv[4 + i] = NULL;
     r = cx_runv_timeout(argv, secs, &o, &n);
     out[0] = 0;
-    if (o) { if ((long)n >= cap) n = (size_t)(cap - 1); tx_copy(out, cap, o, (long)n); free(o); }
+    if (o) { if ((long)n >= cap) n = (size_t)(cap - 1); tx_copy(out, cap, o, (long)n); mm_free(o); }
     if (r == 124) return -2;
     if (r < 0) return -1;
     *rc = r;
@@ -91,12 +95,12 @@ static int build(void) {
     char *args[8];
     static char out[8192];
     int rc = 0, r;
-    snprintf(BIN, sizeof BIN, "%s/reload_state_cli", DIR);
+    tx_snprintf(BIN, sizeof BIN, "%s/reload_state_cli", DIR);
     args[0] = (char *)"/bin/sh"; args[1] = UNI; args[2] = (char *)"reload_state_cli.cx";
     args[3] = (char *)"-o"; args[4] = BIN; args[5] = NULL;
     r = run_merged(args, 30, out, (long)sizeof out, &rc);
     if (r != 0 || rc != 0) {
-        printf("FAIL build: %s rc %d | %.400s\n", r == -2 ? "timeout" : "exit", rc, out);
+        sy_printf("FAIL build: %s rc %d | %.400s\n", r == -2 ? "timeout" : "exit", rc, out);
         return -1;
     }
     return 0;
@@ -110,25 +114,25 @@ static void run_check(const char *name, const char *raw, int expect_code, int ex
     char *args[4];
     int rc = 0, ok = 1, r;
     long k, rawn = tx_len(raw, 1L << 20);
-    snprintf(path, sizeof path, "%s/state.json", DIR);
-    if (rawn < 0 || cx_write(path, raw, (size_t)rawn) != 0) { printf("FAIL %s: cannot write fixture\n", name); failed++; return; }
+    tx_snprintf(path, sizeof path, "%s/state.json", DIR);
+    if (rawn < 0 || cx_write(path, raw, (size_t)rawn) != 0) { sy_printf("FAIL %s: cannot write fixture\n", name); failed++; return; }
     args[0] = BIN; args[1] = (char *)"check"; args[2] = path; args[3] = NULL;
     r = run_merged(args, 4, buf, (long)sizeof buf, &rc);
-    if (r != 0) { printf("FAIL %s: %s\n", name, r == -2 ? "timeout" : "run error"); failed++; return; }
+    if (r != 0) { sy_printf("FAIL %s: %s\n", name, r == -2 ? "timeout" : "run error"); failed++; return; }
     /* strip, as the Python's .strip() of newlines and spaces */
     k = tx_len(buf, (long)sizeof buf);
     while (k > 0 && (buf[k - 1] == '\n' || buf[k - 1] == ' ')) buf[--k] = 0;
     while (*out == '\n' || *out == ' ') { out++; k--; }
     if (rc != expect_code) {
         ok = 0;
-        printf("FAIL %s: exit %d, want %d | %s\n", name, rc, expect_code, out);
+        sy_printf("FAIL %s: exit %d, want %d | %s\n", name, rc, expect_code, out);
     } else if (expect_ok) {
-        if (!tx_prefix(out, k, "PASS: ok", 8)) { ok = 0; printf("FAIL %s: not PASS: ok | %s\n", name, out); }
+        if (!tx_prefix(out, k, "PASS: ok", 8)) { ok = 0; sy_printf("FAIL %s: not PASS: ok | %s\n", name, out); }
     } else {
-        if (!tx_prefix(out, k, "FAIL:", 5)) { ok = 0; printf("FAIL %s: not FAIL | %s\n", name, out); }
-        else if (why && tx_find(out, k, why, tx_len(why, 256)) < 0) { ok = 0; printf("FAIL %s: want '%s' | %s\n", name, why, out); }
+        if (!tx_prefix(out, k, "FAIL:", 5)) { ok = 0; sy_printf("FAIL %s: not FAIL | %s\n", name, out); }
+        else if (why && tx_find(out, k, why, tx_len(why, 256)) < 0) { ok = 0; sy_printf("FAIL %s: want '%s' | %s\n", name, why, out); }
     }
-    if (ok) { printf("PASS %s: exit %d %s\n", name, rc, out); passed++; }
+    if (ok) { sy_printf("PASS %s: exit %d %s\n", name, rc, out); passed++; }
     else failed++;
 }
 
@@ -137,7 +141,7 @@ static void run_check(const char *name, const char *raw, int expect_code, int ex
 static void base_json(char *buf, size_t cap, const char *version, const char *session,
                       const char *hash, const char *goal, const char *input, const char *cwd,
                       const char *journal, const char *queue, const char *extra) {
-    snprintf(buf, cap,
+    tx_snprintf(buf, cap,
              "{\"version\": %s, \"session_id\": \"%s\", \"handoff_id\": \"h1\", "
              "\"candidate_hash\": \"%s\", \"goal\": \"%s\", \"input\": \"%s\", "
              "\"cwd\": \"%s\", \"role\": \"agent\", \"peer\": \"\", "
@@ -160,13 +164,13 @@ int main(void) {
     char *tmp;
     static char buf[8192], goal4095[4200], goal4096[4200], raw[8192];
     int rc = 1;
-    const char *td = getenv("TMPDIR");
+    const char *td = sy_env("TMPDIR");
 
     if (locate() != 0) { puts("RESULT FAIL reload_state"); return 1; }
-    snprintf(tmpl, sizeof tmpl, "%s/csih-state-XXXXXX", td && *td ? td : "/tmp");   /* the guard's temp root */
+    tx_snprintf(tmpl, sizeof tmpl, "%s/csih-state-XXXXXX", td && *td ? td : "/tmp");   /* the guard's temp root */
     tmp = mkdtemp(tmpl);
-    if (!tmp) { printf("FAIL: mkdtemp: %s\n", strerror(errno)); return 1; }
-    snprintf(DIR, sizeof DIR, "%s", tmp);
+    if (!tmp) { sy_printf("FAIL: mkdtemp: %s\n", sy_strerror(errno)); return 1; }
+    tx_snprintf(DIR, sizeof DIR, "%s", tmp);
     if (build() != 0) goto done;
 
     /* valid */
@@ -220,7 +224,7 @@ int main(void) {
     base_json(buf, sizeof buf, "1", "sess-abc", SHA_A, "do the thing", "hello world", "/tmp", J_OK, Q_EMPTY,
               ", \"bogus\": 1");
     run_check("unknown_field_reject", buf, 1, 0, "unknown");
-    snprintf(raw, sizeof raw,
+    tx_snprintf(raw, sizeof raw,
              "{\"version\": 1, \"session_id\": \"sess-abc\", \"handoff_id\": \"h1\", "
              "\"candidate_hash\": \"%s\", \"goal\": \"do the thing\", \"cwd\": \"/tmp\", "
              "\"role\": \"agent\", \"peer\": \"\", \"journal\": %s, \"pending_queue\": []}",
@@ -233,10 +237,10 @@ int main(void) {
               ", \"pending_queue\": []");
     run_check("dup_queue_reject", buf, 1, 0, "duplicate");
 
-    printf("TOTAL: %d passed, %d failed, %d total\n", passed, failed, passed + failed);
+    sy_printf("TOTAL: %d passed, %d failed, %d total\n", passed, failed, passed + failed);
     rc = (failed == 0 && passed == 20) ? 0 : 1;
 done:
     cx_rmtree(DIR);   /* fixture and built CLI lie in DIR; a refusal is reported on stderr, the verdict stands */
-    printf("RESULT %s reload_state\n", rc == 0 ? "PASS" : "FAIL");
+    sy_printf("RESULT %s reload_state\n", rc == 0 ? "PASS" : "FAIL");
     return rc;
 }

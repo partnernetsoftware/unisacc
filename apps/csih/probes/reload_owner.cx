@@ -1,3 +1,7 @@
+#pragma unisa use text.fmt
+#pragma unisa use sys.io
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
 /* CX probe */
 /* reload_owner.cx -- CX port of probes/reload_owner.py.
  * POSIX real-process ownership regression, using the shipped compiler.
@@ -33,18 +37,18 @@ static int same(const char *a, const char *b) {
 
 /* APP = cwd; UNI = $UNISACC or APP/../../unisacc.com; 0 when all watched files exist */
 static int locate(void) {
-    const char *e = getenv("UNISACC");
+    const char *e = sy_env("UNISACC");
     struct stat st;
     int i;
-    if (!getcwd(APP, sizeof APP)) { printf("FAIL: getcwd: %s\n", strerror(errno)); return -1; }
-    if (e && e[0]) snprintf(UNI, sizeof UNI, "%s", e);
-    else snprintf(UNI, sizeof UNI, "%s/../../unisacc.com", APP);
-    snprintf(WATCH[0], sizeof WATCH[0], "%s/reload_owner.cx", APP);
-    snprintf(WATCH[1], sizeof WATCH[1], "%s/reload_owner.h", APP);
-    snprintf(WATCH[2], sizeof WATCH[2], "%s/%s", APP, OWN_CLI);
-    snprintf(WATCH[3], sizeof WATCH[3], "%s", UNI);
+    if (!getcwd(APP, sizeof APP)) { sy_printf("FAIL: getcwd: %s\n", sy_strerror(errno)); return -1; }
+    if (e && e[0]) tx_snprintf(UNI, sizeof UNI, "%s", e);
+    else tx_snprintf(UNI, sizeof UNI, "%s/../../unisacc.com", APP);
+    tx_snprintf(WATCH[0], sizeof WATCH[0], "%s/reload_owner.cx", APP);
+    tx_snprintf(WATCH[1], sizeof WATCH[1], "%s/reload_owner.h", APP);
+    tx_snprintf(WATCH[2], sizeof WATCH[2], "%s/%s", APP, OWN_CLI);
+    tx_snprintf(WATCH[3], sizeof WATCH[3], "%s", UNI);
     for (i = 0; i < NWATCH; i++)
-        if (stat(WATCH[i], &st) != 0) { printf("FAIL: %s: %s\n", WATCH[i], strerror(errno)); return -1; }
+        if (stat(WATCH[i], &st) != 0) { sy_printf("FAIL: %s: %s\n", WATCH[i], sy_strerror(errno)); return -1; }
     return 0;
 }
 
@@ -54,7 +58,7 @@ static int sha_file(const char *path, char hex[65]) {
     char *b = cx_read(path, &n);
     if (!b) { hex[0] = 0; return 0; }
     cx_sha256_hex(b, n, hex);
-    free(b);
+    mm_free(b);
     return 1;
 }
 
@@ -76,10 +80,10 @@ static int read_file(const char *path, char *buf, size_t cap, size_t *len) {
     size_t n = 0, i;
     char *b = cx_read(path, &n);
     if (!b) return -1;
-    if (n + 1 > cap) { free(b); return -1; }
+    if (n + 1 > cap) { mm_free(b); return -1; }
     for (i = 0; i < n; i++) buf[i] = b[i];
     buf[n] = 0; *len = n;
-    free(b);
+    mm_free(b);
     return 0;
 }
 
@@ -99,7 +103,7 @@ static int run_split(char **args, int secs, char *out, size_t cap, char *err, si
         if (n + 1 > cap) n = cap - 1;
         for (i = 0; i < n; i++) out[i] = o[i];
         out[n] = 0;
-        free(o);
+        mm_free(o);
     }
     if (r == 124) return -2;
     if (r < 0) return -1;
@@ -109,7 +113,7 @@ static int run_split(char **args, int secs, char *out, size_t cap, char *err, si
         if (n + 1 > errcap) n = errcap - 1;
         for (i = 0; i < n; i++) err[i] = e[i];
         err[n] = 0;
-        free(e);
+        mm_free(e);
     }
     *rc = r;
     return 0;
@@ -119,12 +123,12 @@ static int build(const char *dir) {
     char *args[8];
     static char out[8192], err[8192];
     int rc = 0, r;
-    snprintf(BIN, sizeof BIN, "%s/reload_owner_cli", dir);
+    tx_snprintf(BIN, sizeof BIN, "%s/reload_owner_cli", dir);
     args[0] = (char *)"/bin/sh"; args[1] = UNI; args[2] = (char *)OWN_CLI;
     args[3] = (char *)"-o"; args[4] = BIN; args[5] = NULL;
     r = run_split(args, 30, out, sizeof out, err, sizeof err, &rc);
     if (r != 0 || rc != 0) {
-        printf("FAIL: build %s rc %d | %.300s | %.300s\n", r == -2 ? "timeout" : "exit", rc, out, err);
+        sy_printf("FAIL: build %s rc %d | %.300s | %.300s\n", r == -2 ? "timeout" : "exit", rc, out, err);
         return -1;
     }
     return 0;
@@ -158,7 +162,7 @@ static int is_dir(const char *path) {
     return lstat(path, &st) == 0 && S_ISDIR(st.st_mode);
 }
 
-#define CHECK(cond, msg) do { if (!(cond)) { printf("FAIL: %s\n", msg); return 1; } } while (0)
+#define CHECK(cond, msg) do { if (!(cond)) { sy_printf("FAIL: %s\n", msg); return 1; } } while (0)
 
 /* One CLI case. reason==NULL: expect rc 0 and exact expected text. */
 static int cli(const char *mode, const char *path, const char *reason,
@@ -169,18 +173,18 @@ static int cli(const char *mode, const char *path, const char *reason,
     int rc = 0, r;
     args[0] = BIN; args[1] = (char *)mode; args[2] = (char *)path; args[3] = NULL;
     r = run_split(args, 5, out, sizeof out, err, sizeof err, &rc);
-    if (r != 0) { printf("FAIL: %s %s\n", step, r == -2 ? "timeout" : "run error"); return 1; }
-    if (err[0]) { printf("FAIL: %s stderr: %s\n", step, err); return 1; }
+    if (r != 0) { sy_printf("FAIL: %s %s\n", step, r == -2 ? "timeout" : "run error"); return 1; }
+    if (err[0]) { sy_printf("FAIL: %s stderr: %s\n", step, err); return 1; }
     if (reason) {
         size_t n = 0;
         while (out[n]) n++;
         while (n && (out[n - 1] == '\n' || out[n - 1] == ' ')) out[--n] = 0;
-        snprintf(expect, sizeof expect, "FAIL: %s", reason);
-        if (!(rc == 1 && same(out, expect))) { printf("FAIL: %s: rc %d out=%s\n", step, rc, out); return 1; }
+        tx_snprintf(expect, sizeof expect, "FAIL: %s", reason);
+        if (!(rc == 1 && same(out, expect))) { sy_printf("FAIL: %s: rc %d out=%s\n", step, rc, out); return 1; }
     } else {
-        if (!(rc == 0 && same(out, expect_ok))) { printf("FAIL: %s: rc %d out=%s\n", step, rc, out); return 1; }
+        if (!(rc == 0 && same(out, expect_ok))) { sy_printf("FAIL: %s: rc %d out=%s\n", step, rc, out); return 1; }
     }
-    printf("PASS %s %s\n", mode, path);
+    sy_printf("PASS %s %s\n", mode, path);
     return 0;
 }
 
@@ -190,7 +194,7 @@ static int cli(const char *mode, const char *path, const char *reason,
 #define CHECK_OK "PASS: acquire/release\n"
 
 #undef CHECK
-#define CHECK(cond, msg) do { if (!(cond)) { printf("FAIL: %s\n", msg); goto done; } } while (0)
+#define CHECK(cond, msg) do { if (!(cond)) { sy_printf("FAIL: %s\n", msg); goto done; } } while (0)
 
 int main(void) {
     char before[NWATCH][65];
@@ -204,23 +208,23 @@ int main(void) {
     mode_t m;
     ino_t ino, ino2, ino3;
     int ncases = 0;
-    const char *td = getenv("TMPDIR");
+    const char *td = sy_env("TMPDIR");
 
     if (locate() != 0) { puts("RESULT FAIL reload_owner"); return 1; }
     hashes_take(before);
-    snprintf(tmpl, sizeof tmpl, "%s/csih-owner-XXXXXX", td && td[0] ? td : "/tmp");
+    tx_snprintf(tmpl, sizeof tmpl, "%s/csih-owner-XXXXXX", td && td[0] ? td : "/tmp");
     tmp = mkdtemp(tmpl);
-    if (!tmp) { printf("FAIL: mkdtemp: %s\n", strerror(errno)); return 1; }
-    snprintf(lock, sizeof lock, "%s/owner.lock", tmp);
-    snprintf(bad, sizeof bad, "%s/bad.lock", tmp);
-    snprintf(link_p, sizeof link_p, "%s/link.lock", tmp);
-    snprintf(dirp, sizeof dirp, "%s/directory.lock", tmp);
-    snprintf(unsafe, sizeof unsafe, "%s/unsafe", tmp);
-    snprintf(unsafe_lock, sizeof unsafe_lock, "%s/unsafe/owner.lock", tmp);
-    snprintf(parent_link, sizeof parent_link, "%s/parent-link", tmp);
-    snprintf(parent_lock, sizeof parent_lock, "%s/parent-link/owner.lock", tmp);
-    snprintf(rel, sizeof rel, "relative.lock");
-    snprintf(ERRF, sizeof ERRF, "%s/cli.stderr", tmp);
+    if (!tmp) { sy_printf("FAIL: mkdtemp: %s\n", sy_strerror(errno)); return 1; }
+    tx_snprintf(lock, sizeof lock, "%s/owner.lock", tmp);
+    tx_snprintf(bad, sizeof bad, "%s/bad.lock", tmp);
+    tx_snprintf(link_p, sizeof link_p, "%s/link.lock", tmp);
+    tx_snprintf(dirp, sizeof dirp, "%s/directory.lock", tmp);
+    tx_snprintf(unsafe, sizeof unsafe, "%s/unsafe", tmp);
+    tx_snprintf(unsafe_lock, sizeof unsafe_lock, "%s/unsafe/owner.lock", tmp);
+    tx_snprintf(parent_link, sizeof parent_link, "%s/parent-link", tmp);
+    tx_snprintf(parent_lock, sizeof parent_lock, "%s/parent-link/owner.lock", tmp);
+    tx_snprintf(rel, sizeof rel, "relative.lock");
+    tx_snprintf(ERRF, sizeof ERRF, "%s/cli.stderr", tmp);
     if (build(tmp) != 0) goto done;
 
     /* 1: selftest creates the lock, 0600, empty. */
@@ -271,9 +275,9 @@ int main(void) {
     rc = 0;
 done:
     cx_rmtree(tmp);   /* through the one deletion guard; a refusal is reported on stderr */
-    if (rc == 0 && ncases == 8) printf("TOTAL: %d CLI cases passed; 3 real fork phases\n", ncases);
-    if (!hashes_same(before)) { printf("FAIL: source/compiler changed during test\n"); rc = 1; }
-    if (rc == 0 && ncases == 8) printf("hashes unchanged\nRESULT PASS reload_owner\n");
-    else { rc = 1; printf("RESULT FAIL reload_owner\n"); }
+    if (rc == 0 && ncases == 8) sy_printf("TOTAL: %d CLI cases passed; 3 real fork phases\n", ncases);
+    if (!hashes_same(before)) { sy_printf("FAIL: source/compiler changed during test\n"); rc = 1; }
+    if (rc == 0 && ncases == 8) sy_printf("hashes unchanged\nRESULT PASS reload_owner\n");
+    else { rc = 1; sy_printf("RESULT FAIL reload_owner\n"); }
     return rc;
 }
