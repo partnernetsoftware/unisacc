@@ -1,0 +1,717 @@
+#pragma unisa module json
+/* release/ci/json.cx -- the JSON the windows-signing gate needs, with Python's json semantics, for
+ * release/ci/seal-bind.cx and release/ci/validate-manifest.cx (the CX ports of the two inline
+ * Python blocks of .github/workflows/windows-signing.yml).
+ *
+ * Reading (json.loads): strict UTF-8 text (as Path.read_text with PYTHONUTF8=1), RFC 8259 plus
+ * NaN/Infinity/-Infinity; control characters in strings refused; \uXXXX surrogate pairs joined, a
+ * lone surrogate kept (stored as its 3-byte generalized UTF-8 form); a repeated key keeps the
+ * first key's place and the last value; an int with more than 4300 digits is refused (Python's
+ * int limit).  Ints keep their decimal text ("-0" becomes "0"); floats are doubles.
+ * Writing (json.dumps(v, indent=2), ensure_ascii): separators "," and ": ", "{}"/"[]" when
+ * empty, non-ASCII, DEL and control characters as \uXXXX, floats in Python repr (shortest round
+ * trip; NaN, Infinity, -Infinity).  No trailing newline.
+ * Comparison: jv_eq is Python ==  (1 == 1.0 == true; dicts by key set; lists in order).
+ * jv_key and jv_die print the Python exception text (KeyError: 'x', TypeError: ...) on stderr and
+ * exit 1, which is what an uncaught exception in the inline Python did.
+ * All nodes live in one module-private arena for the life of the process. */
+#pragma unisa use mem.arena
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+
+enum { JV_OBJ = 1, JV_ARR, JV_STR, JV_INT, JV_FLT, JV_TRUE, JV_FALSE, JV_NULL };
+
+typedef struct jv_t {
+    int kind;
+    long n;              /* JV_STR/JV_INT: bytes of s; JV_OBJ/JV_ARR: members */
+    const char *s;       /* JV_STR: generalized UTF-8; JV_INT: canonical decimal text */
+    double f;            /* JV_FLT */
+    struct jv_t **v;     /* members */
+    struct jv_t **k;     /* JV_OBJ keys (JV_STR) */
+    long cap;
+} jv_t;
+
+static int jv_arena;
+
+/* Print MSG (the Python exception line) on stderr and exit 1. */
+void jv_die(const char *msg) {
+    fprintf(stderr, "%s\n", msg);
+    exit(1);
+}
+
+static void *jv_mem(long n) {
+    void *p;
+    if (!jv_arena) jv_arena = ar_new(1L << 34);
+    p = jv_arena ? ar_alloc(jv_arena, n < 1 ? 1 : n) : 0;
+    if (!p) jv_die("MemoryError");
+    return p;
+}
+
+/* A copy of b[0..n) with a NUL after it, in the module arena. */
+char *jv_dup(const char *b, long n) {
+    char *p = jv_mem(n + 1);
+    if (n > 0 && mm_copy(p, n + 1, b, n) != 0) jv_die("MemoryError");
+    return p;
+}
+
+jv_t *jv_new(int kind) {
+    jv_t *v = jv_mem((long)sizeof(jv_t));
+    v->kind = kind;
+    return v;
+}
+jv_t *jv_str(const char *s, long n) {
+    jv_t *v = jv_new(JV_STR);
+    v->s = jv_dup(s, n); v->n = n;
+    return v;
+}
+jv_t *jv_strz(const char *s) { return jv_str(s, tx_len(s, 1L << 30)); }
+/* An int from canonical decimal text (no sign but '-', no leading zeros). */
+jv_t *jv_int_text(const char *s) {
+    jv_t *v = jv_new(JV_INT);
+    long n = tx_len(s, 1L << 30);
+    if (n == 2 && s[0] == '-' && s[1] == '0') { s = "0"; n = 1; }
+    v->s = jv_dup(s, n); v->n = n;
+    return v;
+}
+jv_t *jv_int(long long x) {
+    char b[32];
+    if (cx_fmt(b, sizeof b, "%lld", x) != 0) jv_die("MemoryError");
+    return jv_int_text(b);
+}
+jv_t *jv_bool(int b) { return jv_new(b ? JV_TRUE : JV_FALSE); }
+
+static void jv_push(jv_t *o, jv_t *key, jv_t *val) {
+    if (o->n == o->cap) {
+        long cap = o->cap ? o->cap * 2 : 8;
+        jv_t **nv = jv_mem(cap * (long)sizeof(jv_t *)), **nk = jv_mem(cap * (long)sizeof(jv_t *));
+        if (o->n) {
+            mm_copy(nv, cap * (long)sizeof(jv_t *), o->v, o->n * (long)sizeof(jv_t *));
+            mm_copy(nk, cap * (long)sizeof(jv_t *), o->k, o->n * (long)sizeof(jv_t *));
+        }
+        o->v = nv; o->k = nk; o->cap = cap;
+    }
+    o->k[o->n] = key;
+    o->v[o->n++] = val;
+}
+static long jv_find(const jv_t *o, const char *key, long n) {
+    long i;
+    if (!o || o->kind != JV_OBJ) return -1;
+    for (i = 0; i < o->n; i++) if (tx_same(o->k[i]->s, o->k[i]->n, key, n)) return i;
+    return -1;
+}
+/* o[key] = val: a present key keeps its place (as a Python dict). */
+void jv_set(jv_t *o, const char *key, jv_t *val) {
+    long n = tx_len(key, 1L << 30), i = jv_find(o, key, n);
+    if (i >= 0) o->v[i] = val; else jv_push(o, jv_str(key, n), val);
+}
+/* o[key] = val for a JV_STR key (which may hold NUL bytes). */
+void jv_set_key(jv_t *o, jv_t *key, jv_t *val) {
+    long i = jv_find(o, key->s, key->n);
+    if (i >= 0) o->v[i] = val; else jv_push(o, key, val);
+}
+void jv_append(jv_t *a, jv_t *val) { jv_push(a, 0, val); }
+
+/* o[key] for an object holding it, else 0. */
+jv_t *jv_get(const jv_t *o, const char *key) {
+    long i = jv_find(o, key, tx_len(key, 1L << 30));
+    return i < 0 ? 0 : o->v[i];
+}
+
+const char *jv_type(const jv_t *v) {
+    if (!v) return "NoneType";
+    switch (v->kind) {
+    case JV_OBJ: return "dict";
+    case JV_ARR: return "list";
+    case JV_STR: return "str";
+    case JV_INT: return "int";
+    case JV_FLT: return "float";
+    case JV_TRUE: case JV_FALSE: return "bool";
+    default: return "NoneType";
+    }
+}
+
+/* o[key] as Python evaluates it: the value, or the KeyError/TypeError text and exit 1. */
+jv_t *jv_key(const jv_t *o, const char *key) {
+    char msg[512];
+    jv_t *v;
+    if (o && o->kind == JV_OBJ) {
+        v = jv_get(o, key);
+        if (v) return v;
+        cx_fmt(msg, sizeof msg, "KeyError: '%s'", key);
+    } else if (o && o->kind == JV_ARR) cx_fmt(msg, sizeof msg, "TypeError: list indices must be integers or slices, not str");
+    else if (o && o->kind == JV_STR) cx_fmt(msg, sizeof msg, "TypeError: string indices must be integers, not 'str'");
+    else cx_fmt(msg, sizeof msg, "TypeError: '%s' object is not subscriptable", jv_type(o));
+    jv_die(msg);
+    return 0;
+}
+
+/* 1 when v is the string LIT. */
+int jv_is(const jv_t *v, const char *lit) {
+    return v && v->kind == JV_STR && tx_same(v->s, v->n, lit, tx_len(lit, 1L << 30));
+}
+
+/* Python truthiness. */
+int jv_truthy(const jv_t *v) {
+    if (!v) return 0;
+    switch (v->kind) {
+    case JV_OBJ: case JV_ARR: case JV_STR: return v->n > 0;
+    case JV_INT: return !(v->n == 1 && v->s[0] == '0');
+    case JV_FLT: return v->f != 0.0;
+    case JV_TRUE: return 1;
+    default: return 0;
+    }
+}
+
+/* v as a long long when it is an int of at most 18 digits or a bool: 1, else 0. */
+int jv_to_ll(const jv_t *v, long long *out) {
+    long long x = 0;
+    long i, neg;
+    if (!v) return 0;
+    if (v->kind == JV_TRUE || v->kind == JV_FALSE) { *out = v->kind == JV_TRUE; return 1; }
+    if (v->kind != JV_INT) return 0;
+    neg = v->s[0] == '-';
+    if (v->n - neg > 18) return 0;
+    for (i = neg; i < v->n; i++) x = x * 10 + (v->s[i] - '0');
+    *out = neg ? -x : x;
+    return 1;
+}
+static int jv_numeric(const jv_t *v) {
+    return v && (v->kind == JV_INT || v->kind == JV_FLT || v->kind == JV_TRUE || v->kind == JV_FALSE);
+}
+/* v as a double (ints by strtod of their text). */
+double jv_to_double(const jv_t *v) {
+    long long x;
+    if (v->kind == JV_FLT) return v->f;
+    if (jv_to_ll(v, &x)) return (double)x;
+    return strtod(v->s, 0);
+}
+
+/* Compare a number with x: -1, 0, 1; 2 unordered (NaN); -9 when v is not a number (TypeError). */
+int jv_num_cmp(const jv_t *v, long long x) {
+    long long y;
+    double d;
+    if (!jv_numeric(v)) return -9;
+    if (jv_to_ll(v, &y)) return y < x ? -1 : y > x;
+    if (v->kind == JV_INT) return v->s[0] == '-' ? -1 : 1;     /* more than 18 digits */
+    d = v->f;
+    if (d != d) return 2;
+    return d < (double)x ? -1 : d > (double)x;
+}
+
+static int jv_num_eq(const jv_t *a, const jv_t *b) {
+    long long x, y;
+    const jv_t *t;
+    if (jv_to_ll(a, &x) && jv_to_ll(b, &y)) return x == y;
+    if (a->kind == JV_INT && b->kind == JV_INT) return tx_same(a->s, a->n, b->s, b->n);
+    if (a->kind == JV_FLT && b->kind == JV_FLT) return a->f == b->f;
+    if (a->kind == JV_FLT) { t = a; a = b; b = t; }
+    if (b->kind != JV_FLT) return 0;                 /* a big int and a bool */
+    /* a is an int or bool, b a float: exact comparison as Python's */
+    if (jv_to_ll(a, &x) && x >= -(1LL << 53) && x <= (1LL << 53)) return (double)x == b->f;
+    /* |a| > 2^53 here: equal only to a float as large, and every double that large is integral */
+    if (b->f != b->f || b->f - b->f != 0.0 || (b->f < 9007199254740992.0 && b->f > -9007199254740992.0)) return 0;
+    {
+        char buf[400];
+        if (cx_fmt(buf, sizeof buf, "%.0f", b->f) != 0) return 0;
+        if (jv_to_ll(a, &x)) {
+            char ab[32];
+            cx_fmt(ab, sizeof ab, "%lld", x);
+            return tx_eq(ab, buf, sizeof buf);
+        }
+        return tx_same(a->s, a->n, buf, tx_len(buf, sizeof buf));
+    }
+}
+
+/* Python a == b. */
+int jv_eq(const jv_t *a, const jv_t *b) {
+    long i, j;
+    if (!a || !b) return a == b;
+    if (jv_numeric(a) && jv_numeric(b)) return jv_num_eq(a, b);
+    if (a->kind != b->kind) return 0;
+    switch (a->kind) {
+    case JV_STR: return tx_same(a->s, a->n, b->s, b->n);
+    case JV_NULL: return 1;
+    case JV_ARR:
+        if (a->n != b->n) return 0;
+        for (i = 0; i < a->n; i++) if (!jv_eq(a->v[i], b->v[i])) return 0;
+        return 1;
+    case JV_OBJ:
+        if (a->n != b->n) return 0;
+        for (i = 0; i < a->n; i++) {
+            j = jv_find(b, a->k[i]->s, a->k[i]->n);
+            if (j < 0 || !jv_eq(a->v[i], b->v[j])) return 0;
+        }
+        return 1;
+    default: return 0;
+    }
+}
+
+/* An inline-Python assert: when OK is 0, print the statement and the AssertionError line (the
+   last line of the Python traceback: "AssertionError" or "AssertionError: MSG") and exit 1. */
+void jv_check(int ok, const char *expr, const char *msg) {
+    if (ok) return;
+    fprintf(stderr, "    assert %s\n", expr);
+    if (msg) fprintf(stderr, "AssertionError: %s\n", msg);
+    else fprintf(stderr, "AssertionError\n");
+    exit(1);
+}
+
+static int jv_utf8_at(const unsigned char *b, long n, long i, unsigned *cp, int lax);
+
+/* Python iteration of X as a list: a list's items, a dict's keys, a str's characters; anything
+   else is the TypeError of a for loop over it. */
+jv_t *jv_iter(const jv_t *x) {
+    char msg[128];
+    jv_t *a;
+    long i;
+    unsigned cp;
+    int k;
+    if (x && x->kind == JV_ARR) return (jv_t *)x;
+    a = jv_new(JV_ARR);
+    if (x && x->kind == JV_OBJ) { for (i = 0; i < x->n; i++) jv_push(a, 0, x->k[i]); return a; }
+    if (x && x->kind == JV_STR) {
+        for (i = 0; i < x->n; i += k) {
+            k = jv_utf8_at((const unsigned char *)x->s, x->n, i, &cp, 1);
+            if (!k) k = 1;
+            jv_push(a, 0, jv_str(x->s + i, k));
+        }
+        return a;
+    }
+    cx_fmt(msg, sizeof msg, "TypeError: '%s' object is not iterable", jv_type(x));
+    jv_die(msg);
+    return 0;
+}
+
+/* x in s for a set s built by jv_pyset (Python ==; 1 == 1.0 == True as Python's hash/eq). */
+int jv_in(const jv_t *s, const jv_t *x) {
+    long i;
+    for (i = 0; i < s->n; i++) if (jv_eq(s->v[i], x)) return 1;
+    return 0;
+}
+static void jv_hashable(const jv_t *x) {
+    char msg[128];
+    if (x && (x->kind == JV_ARR || x->kind == JV_OBJ)) {
+        cx_fmt(msg, sizeof msg, "TypeError: unhashable type: '%s'", jv_type(x));
+        jv_die(msg);
+    }
+}
+/* set(X): the distinct items of jv_iter(X) in first-seen order; an unhashable item is the TypeError. */
+jv_t *jv_pyset(const jv_t *x) {
+    jv_t *it = jv_iter(x), *s = jv_new(JV_ARR);
+    long i;
+    for (i = 0; i < it->n; i++) {
+        jv_hashable(it->v[i]);
+        if (!jv_in(s, it->v[i])) jv_push(s, 0, it->v[i]);
+    }
+    return s;
+}
+/* Python set equality of two jv_pyset results. */
+int jv_set_eq(const jv_t *a, const jv_t *b) {
+    long i;
+    if (a->n != b->n) return 0;
+    for (i = 0; i < a->n; i++) if (!jv_in(b, a->v[i])) return 0;
+    return 1;
+}
+
+/* ── UTF-8 ─────────────────────────────────────────────────────────────── */
+
+/* Length of the UTF-8 sequence at b[i] decoding to *cp; LAX takes the 3-byte surrogate forms.
+   0 when invalid. */
+static int jv_utf8_at(const unsigned char *b, long n, long i, unsigned *cp, int lax) {
+    unsigned c = b[i], v;
+    int need, k;
+    if (c < 0x80) { *cp = c; return 1; }
+    if (c >= 0xc2 && c <= 0xdf) { need = 1; v = c & 0x1f; }
+    else if (c >= 0xe0 && c <= 0xef) { need = 2; v = c & 0x0f; }
+    else if (c >= 0xf0 && c <= 0xf4) { need = 3; v = c & 0x07; }
+    else return 0;
+    if (i + need > n - 1) return 0;
+    for (k = 1; k <= need; k++) {
+        if ((b[i + k] & 0xc0) != 0x80) return 0;
+        v = (v << 6) | (b[i + k] & 0x3f);
+    }
+    if ((need == 2 && v < 0x800) || (need == 3 && (v < 0x10000 || v > 0x10ffff))) return 0;
+    if (!lax && v >= 0xd800 && v <= 0xdfff) return 0;
+    *cp = v;
+    return need + 1;
+}
+
+/* -1 when b[0..n) is strict UTF-8, else the offset of the first bad byte. */
+long jv_utf8_bad(const char *b, long n) {
+    long i = 0;
+    unsigned cp;
+    int k;
+    while (i < n) {
+        k = jv_utf8_at((const unsigned char *)b, n, i, &cp, 0);
+        if (!k) return i;
+        i += k;
+    }
+    return -1;
+}
+
+/* ── parser ─────────────────────────────────────────────────────────────── */
+
+typedef struct { const unsigned char *p; long n, i; const char *err; long at; int depth; } jv_rd;
+
+static void jv_ws(jv_rd *r) {
+    while (r->i < r->n && (r->p[r->i] == ' ' || r->p[r->i] == '\t' || r->p[r->i] == '\n' || r->p[r->i] == '\r')) r->i++;
+}
+static jv_t *jv_bad(jv_rd *r, const char *what, long at) {
+    if (!r->err) { r->err = what; r->at = at; }
+    return 0;
+}
+static int jv_lit(jv_rd *r, const char *w) {
+    long n = tx_len(w, 64);
+    if (r->n - r->i >= n && tx_same((const char *)r->p + r->i, n, w, n)) { r->i += n; return 1; }
+    return 0;
+}
+static int jv_hex4(const unsigned char *p, unsigned *out) {
+    unsigned v = 0;
+    int i;
+    for (i = 0; i < 4; i++) {
+        unsigned c = p[i];
+        v <<= 4;
+        if (c >= '0' && c <= '9') v |= c - '0';
+        else if (c >= 'a' && c <= 'f') v |= c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') v |= c - 'A' + 10;
+        else return 0;
+    }
+    *out = v;
+    return 1;
+}
+static long jv_enc(char *o, unsigned cp) {
+    if (cp < 0x80) { o[0] = (char)cp; return 1; }
+    if (cp < 0x800) { o[0] = (char)(0xc0 | cp >> 6); o[1] = (char)(0x80 | (cp & 0x3f)); return 2; }
+    if (cp < 0x10000) { o[0] = (char)(0xe0 | cp >> 12); o[1] = (char)(0x80 | ((cp >> 6) & 0x3f)); o[2] = (char)(0x80 | (cp & 0x3f)); return 3; }
+    o[0] = (char)(0xf0 | cp >> 18); o[1] = (char)(0x80 | ((cp >> 12) & 0x3f));
+    o[2] = (char)(0x80 | ((cp >> 6) & 0x3f)); o[3] = (char)(0x80 | (cp & 0x3f));
+    return 4;
+}
+/* At the opening quote. */
+static jv_t *jv_rstr(jv_rd *r) {
+    long start = r->i, o = 0, i = r->i + 1;
+    char *buf;
+    jv_t *v;
+    long end = i;
+    while (end < r->n && r->p[end] != '"') end += r->p[end] == '\\' ? 2 : 1;
+    if (end > r->n) end = r->n;
+    buf = jv_mem(end - i + 1);           /* escapes never grow the text */
+    while (i < end) {                    /* errors in text order, as Python's scanstring */
+        unsigned c = r->p[i];
+        if (c < 0x20) return jv_bad(r, "Invalid control character at", i);
+        if (c != '\\') { buf[o++] = (char)c; i++; continue; }
+        if (i + 1 >= end) break;
+        c = r->p[i + 1];
+        i += 2;
+        switch (c) {
+        case '"': buf[o++] = '"'; break;
+        case '\\': buf[o++] = '\\'; break;
+        case '/': buf[o++] = '/'; break;
+        case 'b': buf[o++] = '\b'; break;
+        case 'f': buf[o++] = '\f'; break;
+        case 'n': buf[o++] = '\n'; break;
+        case 'r': buf[o++] = '\r'; break;
+        case 't': buf[o++] = '\t'; break;
+        case 'u': {
+            unsigned cp, lo;
+            if (i + 4 > end || !jv_hex4(r->p + i, &cp)) return jv_bad(r, "Invalid \\uXXXX escape", i - 1);
+            i += 4;
+            if (cp >= 0xd800 && cp <= 0xdbff && i + 6 <= end && r->p[i] == '\\' && r->p[i + 1] == 'u' &&
+                jv_hex4(r->p + i + 2, &lo) && lo >= 0xdc00 && lo <= 0xdfff) {
+                cp = 0x10000 + ((cp - 0xd800) << 10) + (lo - 0xdc00);
+                i += 6;
+            }
+            o += jv_enc(buf + o, cp);
+            break;
+        }
+        default: return jv_bad(r, "Invalid \\escape", i - 2);
+        }
+    }
+    if (end >= r->n) return jv_bad(r, "Unterminated string starting at", start);
+    r->i = end + 1;
+    v = jv_new(JV_STR);
+    v->s = buf; v->n = o;
+    return v;
+}
+static int jv_digit(jv_rd *r, long i) { return i < r->n && r->p[i] >= '0' && r->p[i] <= '9'; }
+static jv_t *jv_rnum(jv_rd *r) {
+    long s = r->i, i = r->i, intend;
+    int isf = 0;
+    jv_t *v;
+    char *t;
+    if (r->p[i] == '-') i++;
+    if (!jv_digit(r, i)) return jv_bad(r, "Expecting value", s);
+    if (r->p[i] == '0') i++;
+    else while (jv_digit(r, i)) i++;
+    intend = i;
+    if (i < r->n && r->p[i] == '.' && jv_digit(r, i + 1)) { isf = 1; i++; while (jv_digit(r, i)) i++; }
+    if (i < r->n && (r->p[i] == 'e' || r->p[i] == 'E')) {
+        long j = i + 1;
+        if (j < r->n && (r->p[j] == '+' || r->p[j] == '-')) j++;
+        if (jv_digit(r, j)) { isf = 1; i = j; while (jv_digit(r, i)) i++; }
+    }
+    t = jv_dup((const char *)r->p + s, i - s);
+    r->i = i;
+    if (isf) { v = jv_new(JV_FLT); v->f = strtod(t, 0); return v; }
+    if (intend - s - (r->p[s] == '-') > 4300) return jv_bad(r, "ValueError: Exceeds the limit (4300 digits) for integer string conversion", s);
+    return jv_int_text(t);
+}
+static double jv_inf(void) { volatile double x = 1e308; return x * 10.0; }
+static jv_t *jv_rval(jv_rd *r);
+static jv_t *jv_robj(jv_rd *r) {
+    jv_t *o = jv_new(JV_OBJ), *k, *v;
+    long i;
+    r->i++;
+    jv_ws(r);
+    if (r->i < r->n && r->p[r->i] == '}') { r->i++; return o; }
+    for (;;) {
+        if (r->i >= r->n || r->p[r->i] != '"') return jv_bad(r, "Expecting property name enclosed in double quotes", r->i);
+        if (!(k = jv_rstr(r))) return 0;
+        jv_ws(r);
+        if (r->i >= r->n || r->p[r->i] != ':') return jv_bad(r, "Expecting ':' delimiter", r->i);
+        r->i++;
+        jv_ws(r);
+        if (!(v = jv_rval(r))) return 0;
+        i = jv_find(o, k->s, k->n);
+        if (i >= 0) o->v[i] = v; else jv_push(o, k, v);
+        jv_ws(r);
+        if (r->i < r->n && r->p[r->i] == '}') { r->i++; return o; }
+        if (r->i >= r->n || r->p[r->i] != ',') return jv_bad(r, "Expecting ',' delimiter", r->i);
+        r->i++;
+        jv_ws(r);
+    }
+}
+static jv_t *jv_rarr(jv_rd *r) {
+    jv_t *a = jv_new(JV_ARR), *v;
+    r->i++;
+    jv_ws(r);
+    if (r->i < r->n && r->p[r->i] == ']') { r->i++; return a; }
+    for (;;) {
+        if (!(v = jv_rval(r))) return 0;
+        jv_push(a, 0, v);
+        jv_ws(r);
+        if (r->i < r->n && r->p[r->i] == ']') { r->i++; return a; }
+        if (r->i >= r->n || r->p[r->i] != ',') return jv_bad(r, "Expecting ',' delimiter", r->i);
+        r->i++;
+        jv_ws(r);
+    }
+}
+static jv_t *jv_rval(jv_rd *r) {
+    jv_t *v;
+    unsigned c;
+    if (r->i >= r->n) return jv_bad(r, "Expecting value", r->i);
+    c = r->p[r->i];
+    if (++r->depth > 990) return jv_bad(r, "RecursionError: maximum recursion depth exceeded", r->i);
+    if (c == '{') v = jv_robj(r);
+    else if (c == '[') v = jv_rarr(r);
+    else if (c == '"') v = jv_rstr(r);
+    else if (jv_lit(r, "null")) v = jv_new(JV_NULL);
+    else if (jv_lit(r, "true")) v = jv_new(JV_TRUE);
+    else if (jv_lit(r, "false")) v = jv_new(JV_FALSE);
+    else if (jv_lit(r, "NaN")) { v = jv_new(JV_FLT); v->f = jv_inf() - jv_inf(); }
+    else if (jv_lit(r, "Infinity")) { v = jv_new(JV_FLT); v->f = jv_inf(); }
+    else if (jv_lit(r, "-Infinity")) { v = jv_new(JV_FLT); v->f = -jv_inf(); }
+    else if (c == '-' || (c >= '0' && c <= '9')) v = jv_rnum(r);
+    else v = jv_bad(r, "Expecting value", r->i);
+    r->depth--;
+    return v;
+}
+
+/* json.loads of b[0..n) (already decoded text).  The value, or 0 with *ERR the Python message. */
+jv_t *jv_parse(const char *b, long n, const char **err) {
+    static char msg[256];
+    jv_rd r;
+    jv_t *v;
+    long bad = jv_utf8_bad(b, n), line = 1, col = 1, chr = 0, i;
+    if (bad >= 0) {
+        cx_fmt(msg, sizeof msg, "UnicodeDecodeError: 'utf-8' codec can't decode byte 0x%02x in position %ld",
+               (unsigned)(unsigned char)b[bad], bad);
+        if (err) *err = msg;
+        return 0;
+    }
+    r.p = (const unsigned char *)b; r.n = n; r.i = 0; r.err = 0; r.at = 0; r.depth = 0;
+    jv_ws(&r);
+    v = jv_rval(&r);
+    if (v) {
+        jv_ws(&r);
+        if (r.i < n) { jv_bad(&r, "Extra data", r.i); v = 0; }
+    }
+    if (v) return v;
+    if (tx_prefix(r.err, tx_len(r.err, 256), "ValueError", 10) || tx_prefix(r.err, tx_len(r.err, 256), "Recursion", 9)) {
+        cx_fmt(msg, sizeof msg, "%s", r.err);
+    } else {
+        for (i = 0; i < r.at && i < n; i++) {
+            if ((r.p[i] & 0xc0) == 0x80) continue;
+            chr++;
+            if (r.p[i] == '\n') { line++; col = 1; } else col++;
+        }
+        cx_fmt(msg, sizeof msg, "json.decoder.JSONDecodeError: %s: line %ld column %ld (char %ld)", r.err, line, col, chr);
+    }
+    if (err) *err = msg;
+    return 0;
+}
+
+/* json.loads(Path(path).read_text()), or the Python exception text and exit 1. */
+jv_t *jv_load(const char *path) {
+    size_t n;
+    const char *err = 0;
+    char msg[600];
+    char *b = cx_read(path, &n);
+    jv_t *v;
+    if (!b) {
+        cx_fmt(msg, sizeof msg, "FileNotFoundError: [Errno 2] No such file or directory: '%s'", path);
+        jv_die(msg);
+    }
+    v = jv_parse(b, (long)n, &err);
+    if (!v) jv_die(err);
+    return v;
+}
+
+/* ── writer ─────────────────────────────────────────────────────────────── */
+
+typedef struct { char *b; long n, cap; } jv_out;
+
+static void jo_put(jv_out *o, const char *s, long n) {
+    if (o->n + n + 1 > o->cap) {
+        long cap = o->cap ? o->cap : 256;
+        char *nb;
+        while (o->n + n + 1 > cap) cap *= 2;
+        nb = jv_mem(cap);
+        if (o->n) mm_copy(nb, cap, o->b, o->n);
+        o->b = nb; o->cap = cap;
+    }
+    if (n) mm_copy(o->b + o->n, o->cap - o->n, s, n);
+    o->n += n;
+    o->b[o->n] = 0;
+}
+static void jo_z(jv_out *o, const char *s) { jo_put(o, s, tx_len(s, 1L << 30)); }
+static void jo_ind(jv_out *o, int level) {
+    int i;
+    jo_put(o, "\n", 1);
+    for (i = 0; i < level; i++) jo_put(o, "  ", 2);
+}
+static void jo_u(jv_out *o, unsigned u) {
+    char t[8];
+    cx_fmt(t, sizeof t, "\\u%04x", u);
+    jo_put(o, t, 6);
+}
+static void jo_str(jv_out *o, const char *s, long n) {
+    long i = 0;
+    jo_put(o, "\"", 1);
+    while (i < n) {
+        unsigned char c = (unsigned char)s[i];
+        unsigned cp;
+        int k;
+        if (c == '"') { jo_put(o, "\\\"", 2); i++; continue; }
+        if (c == '\\') { jo_put(o, "\\\\", 2); i++; continue; }
+        if (c == '\n') { jo_put(o, "\\n", 2); i++; continue; }
+        if (c == '\r') { jo_put(o, "\\r", 2); i++; continue; }
+        if (c == '\t') { jo_put(o, "\\t", 2); i++; continue; }
+        if (c == '\b') { jo_put(o, "\\b", 2); i++; continue; }
+        if (c == '\f') { jo_put(o, "\\f", 2); i++; continue; }
+        if (c >= 0x20 && c < 0x7f) { jo_put(o, s + i, 1); i++; continue; }
+        if (c < 0x80) { jo_u(o, c); i++; continue; }
+        k = jv_utf8_at((const unsigned char *)s, n, i, &cp, 1);
+        if (!k) { jo_u(o, 0xdc00 + c); i++; continue; }      /* not produced by the parser */
+        if (cp >= 0x10000) { cp -= 0x10000; jo_u(o, 0xd800 + (cp >> 10)); jo_u(o, 0xdc00 + (cp & 0x3ff)); }
+        else jo_u(o, cp);
+        i += k;
+    }
+    jo_put(o, "\"", 1);
+}
+/* float.__repr__ (json.dumps floatstr). */
+static void jo_float(jv_out *o, double d) {
+    char e[64], dig[32], out[400];
+    int p, nd = 0, ex, neg = 0, decpt, i, at = 0;
+    const char *q;
+    if (d != d) { jo_z(o, "NaN"); return; }
+    if (d - d != 0.0) { jo_z(o, d > 0 ? "Infinity" : "-Infinity"); return; }
+    if (d == 0.0) { jo_z(o, 1.0 / d < 0 ? "-0.0" : "0.0"); return; }
+    for (p = 1; p <= 17; p++) {
+        cx_fmt(e, sizeof e, "%.*e", p - 1, d);
+        if (strtod(e, 0) == d) break;
+    }
+    q = e;
+    if (*q == '-') { neg = 1; q++; }
+    while (*q && *q != 'e') { if (*q != '.') dig[nd++] = *q; q++; }
+    while (nd > 1 && dig[nd - 1] == '0') nd--;
+    dig[nd] = 0;
+    ex = 0;
+    if (*q == 'e') {
+        int sg = 1;
+        q++;
+        if (*q == '-') { sg = -1; q++; } else if (*q == '+') q++;
+        while (*q >= '0' && *q <= '9') ex = ex * 10 + (*q++ - '0');
+        ex *= sg;
+    }
+    decpt = ex + 1;
+    if (neg) out[at++] = '-';
+    if (decpt <= -4 || decpt > 16) {
+        out[at++] = dig[0];
+        if (nd > 1) { out[at++] = '.'; for (i = 1; i < nd; i++) out[at++] = dig[i]; }
+        out[at] = 0;
+        cx_fmt(out + at, sizeof out - (size_t)at, "e%c%02d", ex < 0 ? '-' : '+', ex < 0 ? -ex : ex);
+        jo_z(o, out);
+        return;
+    }
+    if (decpt <= 0) {
+        out[at++] = '0'; out[at++] = '.';
+        for (i = 0; i < -decpt; i++) out[at++] = '0';
+        for (i = 0; i < nd; i++) out[at++] = dig[i];
+    } else if (decpt < nd) {
+        for (i = 0; i < decpt; i++) out[at++] = dig[i];
+        out[at++] = '.';
+        for (i = decpt; i < nd; i++) out[at++] = dig[i];
+    } else {
+        for (i = 0; i < nd; i++) out[at++] = dig[i];
+        for (i = nd; i < decpt; i++) out[at++] = '0';
+        out[at++] = '.'; out[at++] = '0';
+    }
+    out[at] = 0;
+    jo_z(o, out);
+}
+static void jo_val(jv_out *o, const jv_t *v, int level) {
+    long i;
+    if (!v) { jo_z(o, "null"); return; }
+    switch (v->kind) {
+    case JV_OBJ:
+        if (!v->n) { jo_z(o, "{}"); return; }
+        jo_put(o, "{", 1);
+        for (i = 0; i < v->n; i++) {
+            if (i) jo_put(o, ",", 1);
+            jo_ind(o, level + 1);
+            jo_str(o, v->k[i]->s, v->k[i]->n);
+            jo_put(o, ": ", 2);
+            jo_val(o, v->v[i], level + 1);
+        }
+        jo_ind(o, level);
+        jo_put(o, "}", 1);
+        return;
+    case JV_ARR:
+        if (!v->n) { jo_z(o, "[]"); return; }
+        jo_put(o, "[", 1);
+        for (i = 0; i < v->n; i++) {
+            if (i) jo_put(o, ",", 1);
+            jo_ind(o, level + 1);
+            jo_val(o, v->v[i], level + 1);
+        }
+        jo_ind(o, level);
+        jo_put(o, "]", 1);
+        return;
+    case JV_STR: jo_str(o, v->s, v->n); return;
+    case JV_INT: jo_put(o, v->s, v->n); return;
+    case JV_FLT: jo_float(o, v->f); return;
+    case JV_TRUE: jo_z(o, "true"); return;
+    case JV_FALSE: jo_z(o, "false"); return;
+    default: jo_z(o, "null"); return;
+    }
+}
+
+/* json.dumps(v, indent=2) into the module arena; *N its length. */
+char *jv_dump(const jv_t *v, long *n) {
+    jv_out o;
+    o.b = 0; o.n = 0; o.cap = 0;
+    jo_val(&o, v, 0);
+    if (n) *n = o.n;
+    return o.b;
+}

@@ -1,0 +1,314 @@
+/* release/ci/seal-bind.cx -- windows-signing.yml step "Bind source, CI attempt and existing owner
+ * seal": the CX port of the inline Python block that step ran.  From the checkout root:
+ *
+ *   GH_TOKEN=... SOURCE_SHA=... SEAL_TAG=... RECEIPT_SHA256=... UPSTREAM_RUN_ID=... \
+ *   UPSTREAM_ATTEMPT=... GITHUB_REPOSITORY=... GITHUB_REF=... ./unisacc.com release/ci/seal-bind.cx
+ *
+ * Checks the inputs, the checkout, that the source is on main and named by rc/<seal tag> (after a
+ * git fetch of both), release/candidate.json against the tag and its sealed_from_commit ancestry,
+ * the upstream release-check.yml run attempt (gh api), and that the seal is exactly one owner draft
+ * release holding exactly one unisacc-unsigned.zip and one unsigned-receipt.json within their size
+ * budgets; downloads both into upstream/ (mkdir: it must not exist), checks that the draft and the
+ * assets did not change meanwhile and the receipt sha256, then writes upstream/upstream-identity.json
+ * (json.dumps indent=2, no trailing newline, LF line ends; the Python on Windows wrote CRLF, read
+ * back only by release/ci/validate-manifest.cx, which takes both).
+ * Every git/gh call runs without a shell under 45 s (cx_runv_timeout; 124 is its timeout result).
+ * A failed check prints the Python exception line on stderr ("AssertionError: MSG", "KeyError:
+ * 'X'", "subprocess.CalledProcessError: ...") and exits 1.  The two downloaded assets are checked
+ * in sorted name order; the Python iterated a set, whose order varied per process.
+ * The Python block also defined closure_digest() but never called it; it is not ported. */
+#pragma unisa use json
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use text.text
+
+#define ZIP "unisacc-unsigned.zip"
+#define RECEIPT "unsigned-receipt.json"
+
+static const char *envv(const char *name) {
+    char msg[200];
+    const char *v = sy_env(name);
+    if (!v) { cx_fmt(msg, sizeof msg, "KeyError: '%s'", name); jv_die(msg); }
+    return v;
+}
+static long zlen(const char *s) { return tx_len(s, 1L << 20); }
+
+/* re.fullmatch('[0-9a-f]{N}', s) */
+static int hexn(const char *s, long n) {
+    long i;
+    if (zlen(s) != n) return 0;
+    for (i = 0; i < n; i++) if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))) return 0;
+    return 1;
+}
+/* re.fullmatch('[1-9][0-9]*', s) */
+static int posint(const char *s) {
+    long i, n = zlen(s);
+    if (n < 1 || s[0] < '1' || s[0] > '9') return 0;
+    for (i = 1; i < n; i++) if (s[i] < '0' || s[i] > '9') return 0;
+    return 1;
+}
+/* re.fullmatch('[A-Za-z0-9][A-Za-z0-9._-]{0,99}', s) */
+static int tag_ok(const char *s) {
+    long i, n = zlen(s);
+    if (n < 1 || n > 100) return 0;
+    for (i = 0; i < n; i++) {
+        char c = s[i];
+        int alnum = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
+        if (!alnum && (i == 0 || (c != '.' && c != '_' && c != '-'))) return 0;
+    }
+    return 1;
+}
+
+static void cmd_repr(char *dst, long cap, char **argv) {
+    long at;
+    int i;
+    cx_fmt(dst, (size_t)cap, "(");      /* call(*args) passed a tuple */
+    for (i = 0; argv[i]; i++) {
+        at = zlen(dst);
+        cx_fmt(dst + at, (size_t)(cap - at), "%s'%s'", i ? ", " : "", argv[i]);
+    }
+    at = zlen(dst);
+    cx_fmt(dst + at, (size_t)(cap - at), ")");
+}
+/* subprocess.run(argv, timeout=45): the exit status (stdout to OUT when given). */
+static int run45(char **argv, char **out, long *outn) {
+    char *o = 0, rep[2048], msg[2400];
+    size_t n = 0;
+    int rc = cx_runv_timeout(argv, 45, out ? &o : 0, out ? &n : 0);
+    if (rc < 0 || rc == 127) {
+        cmd_repr(rep, sizeof rep, argv);
+        cx_fmt(msg, sizeof msg, "FileNotFoundError: cannot run %s (status %d)", rep, rc);
+        jv_die(msg);
+    }
+    if (out) { *out = o ? o : (char *)""; *outn = o ? (long)n : 0; }
+    return rc;
+}
+/* call(*argv): check=True, capture_output, text: the stdout, or the CalledProcessError exit. */
+static char *call(char **argv, long *n) {
+    char *o, rep[2048], msg[2400];
+    long on;
+    int rc = run45(argv, &o, &on);
+    long bad;
+    if (rc != 0) {
+        cmd_repr(rep, sizeof rep, argv);
+        if (rc == 124) cx_fmt(msg, sizeof msg, "subprocess.TimeoutExpired: Command '%s' timed out after 45 seconds (or exited 124)", rep);
+        else cx_fmt(msg, sizeof msg, "subprocess.CalledProcessError: Command '%s' returned non-zero exit status %d.", rep, rc);
+        jv_die(msg);
+    }
+    bad = jv_utf8_bad(o, on);
+    if (bad >= 0) {
+        cx_fmt(msg, sizeof msg, "UnicodeDecodeError: 'utf-8' codec can't decode byte 0x%02x in position %ld", (unsigned)(unsigned char)o[bad], bad);
+        jv_die(msg);
+    }
+    *n = on;
+    return o;
+}
+/* call(...).strip() == want */
+static int stripped_is(const char *s, long n, const char *want) {
+    long a = 0;
+    while (a < n && (s[a] == ' ' || (s[a] >= 9 && s[a] <= 13) || (s[a] >= 0x1c && s[a] <= 0x1f))) a++;
+    while (n > a && (s[n - 1] == ' ' || (s[n - 1] >= 9 && s[n - 1] <= 13) || (s[n - 1] >= 0x1c && s[n - 1] <= 0x1f))) n--;
+    return tx_same(s + a, n - a, want, zlen(want));
+}
+static jv_t *api(const char *path) {
+    char *argv[] = { "gh", "api", (char *)path, 0 };
+    long n;
+    const char *err = 0;
+    char *o = call(argv, &n);
+    jv_t *v = jv_parse(o, n, &err);
+    if (!v) jv_die(err);
+    return v;
+}
+
+static const char *repo, *tag;
+
+/* draft_release(tag) */
+static jv_t *draft_release(void) {
+    char path[600];
+    jv_t *all, *found = jv_new(JV_ARR), *t = jv_strz(tag);
+    long i;
+    cx_fmt(path, sizeof path, "repos/%s/releases?per_page=100", repo);
+    all = jv_iter(api(path));
+    for (i = 0; i < all->n; i++) {
+        jv_t *r = all->v[i];
+        if (jv_eq(jv_key(r, "tag_name"), t) && jv_key(r, "draft")->kind == JV_TRUE) jv_append(found, r);
+    }
+    jv_check(found->n == 1, "len(found)==1", "seal must be exactly one existing owner draft");
+    return found->v[0];
+}
+
+/* {a['name']: a for a in rel['assets']}: keys and values, a repeated name keeping its first place
+   and its last asset; *IN_WANTED = sum(a['name'] in wanted for a in rel['assets']). */
+static void asset_map(jv_t *rel, jv_t *keys, jv_t *vals, long *in_wanted) {
+    jv_t *it = jv_iter(jv_key(rel, "assets"));
+    long i, j;
+    char msg[128];
+    *in_wanted = 0;
+    for (i = 0; i < it->n; i++) {
+        jv_t *nm = jv_key(it->v[i], "name");
+        if (nm->kind == JV_ARR || nm->kind == JV_OBJ) {
+            cx_fmt(msg, sizeof msg, "TypeError: unhashable type: '%s'", jv_type(nm));
+            jv_die(msg);
+        }
+        for (j = 0; j < keys->n && !jv_eq(keys->v[j], nm); j++) {}
+        if (j < keys->n) vals->v[j] = it->v[i];
+        else { jv_append(keys, nm); jv_append(vals, it->v[i]); }
+    }
+    for (i = 0; i < it->n; i++) {
+        jv_t *nm = jv_key(it->v[i], "name");
+        if (jv_is(nm, ZIP) || jv_is(nm, RECEIPT)) (*in_wanted)++;
+    }
+}
+static jv_t *lookup(jv_t *keys, jv_t *vals, const char *name) {
+    long j;
+    char msg[200];
+    for (j = 0; j < keys->n; j++) if (jv_is(keys->v[j], name)) return vals->v[j];
+    cx_fmt(msg, sizeof msg, "KeyError: '%s'", name);
+    jv_die(msg);
+    return 0;
+}
+/* 0 < v <= cap for a JSON number (TypeError for anything else). */
+static int in_budget(const jv_t *v, long long cap) {
+    char msg[200];
+    int lo = jv_num_cmp(v, 0), hi;
+    if (lo == -9) {
+        cx_fmt(msg, sizeof msg, "TypeError: '<' not supported between instances of 'int' and '%s'", jv_type(v));
+        jv_die(msg);
+    }
+    if (lo != 1) return 0;
+    hi = jv_num_cmp(v, cap);
+    return hi == -1 || hi == 0;
+}
+
+int main(void) {
+    const char *sha, *receipt_sha, *run_id, *attempt, *ref, *version;
+    char *o, refspec1[] = "+refs/heads/main:refs/remotes/origin/main", refspec2[400], rcref[400], path[700], hex[65], msg[700];
+    long n, inw, i;
+    jv_t *sealed, *sfc, *run, *rel, *again, *akeys, *avals, *ckeys, *cvals, *ident, *ids;
+    static const char *wanted[2] = { ZIP, RECEIPT };   /* sorted(wanted) */
+    sy_stat_t st;
+    int rc;
+
+    repo = envv("GITHUB_REPOSITORY");
+    sha = envv("SOURCE_SHA");
+    jv_check(hexn(sha, 40), "re.fullmatch('[0-9a-f]{40}',sha)", "invalid source SHA");
+    receipt_sha = envv("RECEIPT_SHA256");
+    jv_check(hexn(receipt_sha, 64), "re.fullmatch('[0-9a-f]{64}',env['RECEIPT_SHA256'])", "invalid receipt SHA");
+    run_id = envv("UPSTREAM_RUN_ID");
+    jv_check(posint(run_id), "re.fullmatch('[1-9][0-9]*',env['UPSTREAM_RUN_ID'])", "invalid run id");
+    attempt = envv("UPSTREAM_ATTEMPT");
+    jv_check(posint(attempt), "re.fullmatch('[1-9][0-9]*',env['UPSTREAM_ATTEMPT'])", "invalid attempt");
+    tag = envv("SEAL_TAG");
+    jv_check(tag_ok(tag), "re.fullmatch('[A-Za-z0-9][A-Za-z0-9._-]{0,99}',env['SEAL_TAG'])", "invalid seal tag");
+    ref = envv("GITHUB_REF");
+    jv_check(tx_eq(ref, "refs/heads/main", 1L << 20), "env['GITHUB_REF']=='refs/heads/main'", "dispatch must run on main");
+    {
+        char *argv[] = { "git", "rev-parse", "HEAD", 0 };
+        o = call(argv, &n);
+        jv_check(stripped_is(o, n, sha), "call('git','rev-parse','HEAD').strip()==sha", "checkout mismatch");
+    }
+    cx_fmt(refspec2, sizeof refspec2, "+refs/tags/rc/%s:refs/tags/rc/%s", tag, tag);
+    {
+        char *argv[] = { "git", "fetch", "--no-tags", "origin", refspec1, refspec2, 0 };
+        call(argv, &n);
+    }
+    {
+        char *argv[] = { "git", "merge-base", "--is-ancestor", (char *)sha, "origin/main", 0 };
+        jv_check(run45(argv, 0, 0) == 0, "subprocess.run(['git','merge-base','--is-ancestor',sha,'origin/main'],timeout=45).returncode==0",
+                 "source is not on main");
+    }
+    cx_fmt(rcref, sizeof rcref, "rc/%s^{commit}", tag);
+    {
+        char *argv[] = { "git", "rev-parse", rcref, 0 };
+        o = call(argv, &n);
+        cx_fmt(msg, sizeof msg, "rc/%s does not name the source commit", tag);
+        jv_check(stripped_is(o, n, sha), "call('git','rev-parse',f\"rc/{env['SEAL_TAG']}^{{commit}}\").strip()==sha", msg);
+    }
+    sealed = jv_load("release/candidate.json");
+    version = tag;
+    while (*version == 'v') version++;                 /* str.lstrip('v') */
+    jv_check(jv_is(jv_key(sealed, "version"), version), "sealed['version']==env['SEAL_TAG'].lstrip('v')", "candidate.json version is not the seal tag");
+    sfc = jv_key(sealed, "sealed_from_commit");
+    if (sfc->kind != JV_STR) {
+        cx_fmt(msg, sizeof msg, "TypeError: expected str, bytes or os.PathLike object, not %s", jv_type(sfc));
+        jv_die(msg);
+    }
+    if (tx_chr(sfc->s, sfc->n, 0) >= 0) jv_die("ValueError: embedded null byte");
+    {
+        char *argv[] = { "git", "merge-base", "--is-ancestor", (char *)sfc->s, (char *)sha, 0 };
+        jv_check(run45(argv, 0, 0) == 0, "subprocess.run(['git','merge-base','--is-ancestor',sealed['sealed_from_commit'],sha],timeout=45).returncode==0",
+                 "sealed_from_commit is not an ancestor of the source (rebased after sealing?)");
+    }
+    cx_fmt(path, sizeof path, "repos/%s/actions/runs/%s/attempts/%s", repo, run_id, attempt);
+    run = api(path);
+    jv_check(jv_eq(jv_key(run, "head_sha"), jv_strz(sha)) && jv_is(jv_key(run, "path"), ".github/workflows/release-check.yml"),
+             "run['head_sha']==sha and run['path']=='.github/workflows/release-check.yml'",
+             "wrong upstream source/workflow (release-check.yml is the release upstream)");
+    jv_check(jv_eq(jv_key(run, "id"), jv_int_text(run_id)) && jv_eq(jv_key(run, "run_attempt"), jv_int_text(attempt)),
+             "run['id']==int(env['UPSTREAM_RUN_ID']) and run['run_attempt']==int(env['UPSTREAM_ATTEMPT'])", "wrong upstream run/attempt response");
+    jv_check(jv_is(jv_key(run, "status"), "completed") && jv_is(jv_key(run, "conclusion"), "success"),
+             "run['status']=='completed' and run['conclusion']=='success'", "upstream failed/incomplete");
+    jv_check(jv_is(jv_key(run, "head_branch"), "main") && (jv_is(jv_key(run, "event"), "push") || jv_is(jv_key(run, "event"), "workflow_dispatch")),
+             "run['head_branch']=='main' and run['event'] in ('push','workflow_dispatch')", "upstream is not main CI");
+
+    rel = draft_release();
+    jv_check(jv_key(rel, "draft")->kind == JV_TRUE, "release['draft'] is True", "seal must be an existing owner draft");
+    akeys = jv_new(JV_ARR); avals = jv_new(JV_ARR);
+    asset_map(rel, akeys, avals, &inw);
+    {
+        int have = 0;
+        for (i = 0; i < akeys->n; i++) if (jv_is(akeys->v[i], ZIP) || jv_is(akeys->v[i], RECEIPT)) have++;
+        jv_check(have == 2, "wanted<=assets.keys()", "missing owner seal assets");
+    }
+    jv_check(inw == 2, "sum(a['name'] in wanted for a in release['assets'])==2", "duplicate seal assets");
+    jv_check(in_budget(jv_key(lookup(akeys, avals, RECEIPT), "size"), 65536), "0<assets['unsigned-receipt.json']['size']<=65536", "receipt size budget");
+    jv_check(in_budget(jv_key(lookup(akeys, avals, ZIP), "size"), 16842752), "0<assets['unisacc-unsigned.zip']['size']<=16842752", "archive size budget");
+    if ((rc = sy_mkdir("upstream", 0777)) != 0) {
+        cx_fmt(msg, sizeof msg, rc == -17 ? "FileExistsError: [Errno 17] File exists: 'upstream'" : "OSError: [Errno %d] mkdir: 'upstream'", -rc);
+        jv_die(msg);
+    }
+    {
+        char *argv[] = { "gh", "release", "download", (char *)tag, "--repo", (char *)repo, "--pattern", ZIP, "--pattern", RECEIPT, "--dir", "upstream", 0 };
+        call(argv, &n);
+    }
+    again = draft_release();
+    ckeys = jv_new(JV_ARR); cvals = jv_new(JV_ARR);
+    asset_map(again, ckeys, cvals, &inw);
+    jv_check(jv_eq(jv_key(again, "id"), jv_key(rel, "id")) && jv_key(again, "draft")->kind == JV_TRUE,
+             "again['id']==release['id'] and again['draft'] is True", "seal release changed during download");
+    jv_check(inw == 2, "sum(a['name'] in wanted for a in again['assets'])==2", "seal asset set changed");
+    for (i = 0; i < 2; i++) {
+        jv_t *cur = lookup(ckeys, cvals, wanted[i]), *orig = lookup(akeys, avals, wanted[i]);
+        jv_check(jv_eq(jv_key(cur, "id"), jv_key(orig, "id")) && jv_eq(jv_key(cur, "size"), jv_key(orig, "size")),
+                 "current[name]['id']==assets[name]['id'] and current[name]['size']==assets[name]['size']", "seal asset identity changed");
+        cx_fmt(path, sizeof path, "upstream/%s", wanted[i]);
+        if ((rc = sy_stat(path, &st)) != 0) {
+            cx_fmt(msg, sizeof msg, "FileNotFoundError: [Errno %d] No such file or directory: '%s'", -rc, path);
+            jv_die(msg);
+        }
+        jv_check(jv_eq(jv_int(st.size), jv_key(orig, "size")), "Path('upstream',name).stat().st_size==assets[name]['size']", "downloaded asset size mismatch");
+    }
+    {
+        size_t rn;
+        char *rb = cx_read("upstream/" RECEIPT, &rn);
+        if (!rb) jv_die("FileNotFoundError: [Errno 2] No such file or directory: 'upstream/unsigned-receipt.json'");
+        cx_sha256_hex(rb, rn, hex);
+        jv_check(tx_eq(hex, receipt_sha, 65), "hashlib.sha256(receipt).hexdigest()==env['RECEIPT_SHA256']", "receipt seal mismatch");
+    }
+    ident = jv_new(JV_OBJ);
+    jv_set(ident, "source_sha", jv_strz(sha));
+    jv_set(ident, "upstream_run_id", jv_int_text(run_id));
+    jv_set(ident, "upstream_attempt", jv_int_text(attempt));
+    jv_set(ident, "seal_release_id", jv_key(rel, "id"));
+    jv_set(ident, "seal_tag", jv_strz(tag));
+    ids = jv_new(JV_OBJ);
+    for (i = 0; i < 2; i++) jv_set(ids, wanted[i], jv_key(lookup(akeys, avals, wanted[i]), "id"));
+    jv_set(ident, "seal_asset_ids", ids);
+    jv_set(ident, "receipt_sha256", jv_strz(receipt_sha));
+    {
+        long dl;
+        char *d = jv_dump(ident, &dl);
+        if (cx_write("upstream/upstream-identity.json", d, (size_t)dl) != 0) jv_die("OSError: cannot write 'upstream/upstream-identity.json'");
+    }
+    return 0;
+}

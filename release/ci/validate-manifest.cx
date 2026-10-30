@@ -1,0 +1,618 @@
+/* release/ci/validate-manifest.cx -- windows-signing.yml step "Validate exact local-build manifest
+ * and bounded APE package": the CX port of the inline Python block that step ran (python - with
+ * release/apeinspect.py imported).  From the checkout root, after release/ci/seal-bind.cx:
+ *
+ *   MODE=qualification|company ./unisacc.com release/ci/validate-manifest.cx
+ *
+ * Reads release/signing-policy.json, upstream/unsigned-receipt.json, upstream/upstream-identity.json,
+ * src/version.h and upstream/unisacc-unsigned.zip; checks them in the Python order; writes staged/
+ * (mkdir: it must not exist), one file per archive entry, staged/qualification-receipt.json
+ * (json.dumps indent=2, no trailing newline, LF line ends) and copies of the receipt and the policy.
+ * A failed check prints the Python exception line on stderr ("AssertionError: MSG", or the
+ * statement and a bare "AssertionError" where the Python assert had no message; "KeyError: 'x'",
+ * "ValueError: <apeinspect reason>", "zipfile.BadZipFile: ...") and exits 1.
+ *
+ * The ZIP reader follows CPython 3.12 zipfile as used on the Windows runner: end record (with up to
+ * 64 KiB comment) and zip64 records, prepended-data offset, central-directory walk by byte size,
+ * cp437 or UTF-8 names, NUL truncation and '\' -> '/' (os.sep on Windows, so a backslash name is
+ * "noncanonical" here even on Linux), zip64 extra fields, the 3.12 overlapped-entry check, local
+ * header checks, stored or deflated data cut to file_size, CRC-32.  Stricter than zipfile: a
+ * deflate stream must end exactly at compress_size and inflate to exactly file_size
+ * (cx/runtime/codec.cx cxcodec_inflate); zipfile would ignore trailing compressed bytes.
+ * Not ported: the Info-ZIP Unicode Path extra field (0x7075), which only renames non-ASCII names.
+ * The Python on Windows wrote JSON with CRLF line ends; the next pwsh lines rewrite the receipt. */
+#pragma unisa use json
+#pragma unisa use apecore
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use mem.arena
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+#pragma unisa use runtime.codec
+
+static int arena;
+
+static void *mem(long n) {
+    void *p;
+    if (!arena) arena = ar_new(1L << 34);
+    p = arena ? ar_alloc(arena, n < 1 ? 1 : n) : 0;
+    if (!p) jv_die("MemoryError");
+    return p;
+}
+
+static char *slurp(const char *path, long *n, int must) {
+    size_t sz;
+    char msg[600];
+    char *b = cx_read(path, &sz);
+    if (!b) {
+        if (!must) return 0;
+        cx_fmt(msg, sizeof msg, "FileNotFoundError: [Errno 2] No such file or directory: '%s'", path);
+        jv_die(msg);
+    }
+    *n = (long)sz;
+    return b;
+}
+
+/* re.fullmatch('[0-9a-f]{N}', v) on a str (TypeError otherwise). */
+static int hexn(const jv_t *v, long n) {
+    char msg[128];
+    long i;
+    if (!v || v->kind != JV_STR) {
+        cx_fmt(msg, sizeof msg, "TypeError: expected string or bytes-like object, got '%s'", jv_type(v));
+        jv_die(msg);
+    }
+    if (v->n != n) return 0;
+    for (i = 0; i < n; i++) if (!((v->s[i] >= '0' && v->s[i] <= '9') || (v->s[i] >= 'a' && v->s[i] <= 'f'))) return 0;
+    return 1;
+}
+/* re.fullmatch('[0-9]+(?:[.][0-9]+){2,3}', v). */
+static int version_ok(const jv_t *v) {
+    char msg[128];
+    long i, run = 0, groups = 0;
+    if (!v || v->kind != JV_STR) {
+        cx_fmt(msg, sizeof msg, "TypeError: expected string or bytes-like object, got '%s'", jv_type(v));
+        jv_die(msg);
+    }
+    for (i = 0; i <= v->n; i++) {
+        if (i == v->n || v->s[i] == '.') { if (!run) return 0; groups++; run = 0; }
+        else if (v->s[i] >= '0' && v->s[i] <= '9') run++;
+        else return 0;
+    }
+    return groups == 3 || groups == 4;
+}
+
+/* Python str.isspace() at t[i]: the byte length of that whitespace character, or 0. */
+static long ws_at(const unsigned char *t, long n, long i) {
+    unsigned c = t[i], cp;
+    if (c == ' ' || (c >= 9 && c <= 13) || (c >= 0x1c && c <= 0x1f)) return 1;
+    if (c < 0x80) return 0;
+    if (c >= 0xc0 && c <= 0xdf && i + 1 < n) { cp = ((c & 0x1f) << 6) | (t[i + 1] & 0x3f); return cp == 0x85 || cp == 0xa0 ? 2 : 0; }
+    if (c >= 0xe0 && c <= 0xef && i + 2 < n) {
+        cp = ((c & 0x0f) << 12) | ((t[i + 1] & 0x3f) << 6) | (t[i + 2] & 0x3f);
+        if (cp == 0x1680 || (cp >= 0x2000 && cp <= 0x200a) || cp == 0x2028 || cp == 0x2029 || cp == 0x202f || cp == 0x205f || cp == 0x3000) return 3;
+    }
+    return 0;
+}
+static long skip_ws(const unsigned char *t, long n, long i) {
+    long k;
+    while (i < n && (k = ws_at(t, n, i))) i += k;
+    return i;
+}
+/* One match of ^\s*#\s*define\s+UNISACC_VERSION\s+"([^"]+)"\s*$ (re.M) at P: its end, or -1. */
+static long ver_match(const unsigned char *t, long n, long p, long *g0, long *g1) {
+    long q = skip_ws(t, n, p), r, e, best = -1;
+    if (q >= n || t[q] != '#') return -1;
+    q = skip_ws(t, n, q + 1);
+    if (n - q < 6 || !tx_same((const char *)t + q, 6, "define", 6)) return -1;
+    q += 6;
+    r = skip_ws(t, n, q);
+    if (r == q) return -1;
+    q = r;
+    if (n - q < 15 || !tx_same((const char *)t + q, 15, "UNISACC_VERSION", 15)) return -1;
+    q += 15;
+    r = skip_ws(t, n, q);
+    if (r == q || r >= n || t[r] != '"') return -1;
+    q = r + 1;
+    *g0 = q;
+    while (q < n && t[q] != '"') q++;
+    if (q == *g0 || q >= n) return -1;
+    *g1 = q;
+    q++;
+    /* \s*$ : the longest whitespace run that ends at the end or before a newline */
+    for (e = q;;) {
+        if (e == n || t[e] == '\n') best = e;
+        if (e >= n) break;
+        r = ws_at(t, n, e);
+        if (!r) break;
+        e += r;
+    }
+    return best;
+}
+
+/* ── ZIP (CPython zipfile) ─────────────────────────────────────────────── */
+
+static const unsigned short cp437[128] = {
+    0x00c7, 0x00fc, 0x00e9, 0x00e2, 0x00e4, 0x00e0, 0x00e5, 0x00e7,
+    0x00ea, 0x00eb, 0x00e8, 0x00ef, 0x00ee, 0x00ec, 0x00c4, 0x00c5,
+    0x00c9, 0x00e6, 0x00c6, 0x00f4, 0x00f6, 0x00f2, 0x00fb, 0x00f9,
+    0x00ff, 0x00d6, 0x00dc, 0x00a2, 0x00a3, 0x00a5, 0x20a7, 0x0192,
+    0x00e1, 0x00ed, 0x00f3, 0x00fa, 0x00f1, 0x00d1, 0x00aa, 0x00ba,
+    0x00bf, 0x2310, 0x00ac, 0x00bd, 0x00bc, 0x00a1, 0x00ab, 0x00bb,
+    0x2591, 0x2592, 0x2593, 0x2502, 0x2524, 0x2561, 0x2562, 0x2556,
+    0x2555, 0x2563, 0x2551, 0x2557, 0x255d, 0x255c, 0x255b, 0x2510,
+    0x2514, 0x2534, 0x252c, 0x251c, 0x2500, 0x253c, 0x255e, 0x255f,
+    0x255a, 0x2554, 0x2569, 0x2566, 0x2560, 0x2550, 0x256c, 0x2567,
+    0x2568, 0x2564, 0x2565, 0x2559, 0x2558, 0x2552, 0x2553, 0x256b,
+    0x256a, 0x2518, 0x250c, 0x2588, 0x2584, 0x258c, 0x2590, 0x2580,
+    0x03b1, 0x00df, 0x0393, 0x03c0, 0x03a3, 0x03c3, 0x00b5, 0x03c4,
+    0x03a6, 0x0398, 0x03a9, 0x03b4, 0x221e, 0x03c6, 0x03b5, 0x2229,
+    0x2261, 0x00b1, 0x2265, 0x2264, 0x2320, 0x2321, 0x00f7, 0x2248,
+    0x00b0, 0x2219, 0x00b7, 0x221a, 0x207f, 0x00b2, 0x25a0, 0x00a0,
+};
+
+typedef struct {
+    char *orig; long orign;          /* orig_filename, UTF-8 */
+    char *name; long namen;          /* filename: cut at NUL, '\' -> '/' */
+    unsigned flags, method, crc, extract_version;
+    unsigned long external_attr;
+    long long csize, fsize, hoff, end_offset;
+} zent;
+
+typedef struct { const unsigned char *b; long n; zent *e; long ne; long start_dir; } zarc;
+
+static void bad_zip(const char *why) {
+    char msg[600];
+    cx_fmt(msg, sizeof msg, "zipfile.BadZipFile: %s", why);
+    jv_die(msg);
+}
+static unsigned long long le(const unsigned char *p, int n) {
+    unsigned long long v = 0;
+    int i;
+    for (i = n - 1; i >= 0; i--) v = (v << 8) | p[i];
+    return v;
+}
+/* Decoded name as UTF-8 (UTF8: the 0x800 flag), or the UnicodeDecodeError exit. */
+static char *zname(const unsigned char *s, long n, int utf8, long *outn) {
+    char *o = mem(n * 3 + 1), msg[200];
+    long i, k = 0;
+    if (utf8) {
+        long bad = jv_utf8_bad((const char *)s, n);
+        if (bad >= 0) {
+            cx_fmt(msg, sizeof msg, "UnicodeDecodeError: 'utf-8' codec can't decode byte 0x%02x in position %ld", (unsigned)s[bad], bad);
+            jv_die(msg);
+        }
+        if (n) mm_copy(o, n * 3 + 1, s, n);
+        *outn = n;
+        return o;
+    }
+    for (i = 0; i < n; i++) {
+        unsigned c = s[i] < 0x80 ? s[i] : cp437[s[i] - 0x80];
+        if (c < 0x80) o[k++] = (char)c;
+        else if (c < 0x800) { o[k++] = (char)(0xc0 | c >> 6); o[k++] = (char)(0x80 | (c & 0x3f)); }
+        else { o[k++] = (char)(0xe0 | c >> 12); o[k++] = (char)(0x80 | ((c >> 6) & 0x3f)); o[k++] = (char)(0x80 | (c & 0x3f)); }
+    }
+    *outn = k;
+    return o;
+}
+
+/* _EndRecData + _EndRecData64: 0 and the fields, or -1 for "File is not a zip file". */
+static int end_rec(zarc *z, long long *size_cd, long long *offset_cd, long long *location, int *is64) {
+    const unsigned char *b = z->b, *r = 0;
+    long n = z->n, at = -1, i, start;
+    *is64 = 0;
+    if (n < 22) return -1;
+    if (tx_same((const char *)b + n - 22, 4, "PK\5\6", 4) && b[n - 2] == 0 && b[n - 1] == 0) at = n - 22;
+    else {
+        start = n - 65536 - 22;
+        if (start < 0) start = 0;
+        for (i = n - 4; i >= start; i--) if (tx_same((const char *)b + i, 4, "PK\5\6", 4)) break;
+        if (i < start) return -1;
+        if (n - i < 22) return -1;
+        at = i;
+    }
+    r = b + at;
+    *size_cd = (long long)le(r + 12, 4);
+    *offset_cd = (long long)le(r + 16, 4);
+    *location = at;
+    /* zip64 locator 20 bytes before the end record, then the 56-byte zip64 end record */
+    if (at - 20 >= 0 && tx_same((const char *)b + at - 20, 4, "PK\6\7", 4)) {
+        const unsigned char *l = b + at - 20;
+        if (le(l + 4, 4) != 0 || le(l + 16, 4) > 1) bad_zip("zipfiles that span multiple disks are not supported");
+        if (at - 76 < 0) return -1;                       /* the seek before the file start: OSError */
+        if (tx_same((const char *)b + at - 76, 4, "PK\6\6", 4)) {
+            const unsigned char *e = b + at - 76;
+            *size_cd = (long long)le(e + 40, 8);
+            *offset_cd = (long long)le(e + 48, 8);
+            *is64 = 1;
+        }
+    }
+    return 0;
+}
+
+static void zip_open(zarc *z) {
+    long long size_cd, offset_cd, location, concat, total = 0, cap = 8, i, j;
+    int is64;
+    long pos, lim;
+    char msg[200];
+    if (end_rec(z, &size_cd, &offset_cd, &location, &is64) != 0) bad_zip("File is not a zip file");
+    concat = location - size_cd - offset_cd;
+    if (is64) concat -= 56 + 20;
+    z->start_dir = (long)(offset_cd + concat);
+    if (offset_cd + concat < 0) bad_zip("Bad offset for central directory");
+    z->e = mem(cap * (long)sizeof(zent));
+    z->ne = 0;
+    pos = z->start_dir > z->n ? z->n : z->start_dir;
+    lim = size_cd > z->n - pos ? z->n : pos + (long)size_cd;   /* fp.read(size_cd) may come back short */
+    while (total < size_cd) {
+        const unsigned char *c = z->b + pos;
+        zent *e;
+        long fl, xl, cl, k;
+        const unsigned char *x;
+        if (lim - pos < 46) bad_zip("Truncated central directory");
+        if (!tx_same((const char *)c, 4, "PK\1\2", 4)) bad_zip("Bad magic number for central directory");
+        if (z->ne == cap) {
+            zent *ne = mem(cap * 2 * (long)sizeof(zent));
+            mm_copy(ne, cap * 2 * (long)sizeof(zent), z->e, cap * (long)sizeof(zent));
+            z->e = ne; cap *= 2;
+        }
+        e = &z->e[z->ne++];
+        fl = (long)le(c + 28, 2); xl = (long)le(c + 30, 2); cl = (long)le(c + 32, 2);
+        e->extract_version = c[6];
+        e->flags = (unsigned)le(c + 8, 2);
+        e->method = (unsigned)le(c + 10, 2);
+        e->crc = (unsigned)le(c + 16, 4);
+        e->csize = (long long)le(c + 20, 4);
+        e->fsize = (long long)le(c + 24, 4);
+        e->external_attr = (unsigned long)le(c + 38, 4);
+        e->hoff = (long long)le(c + 42, 4);
+        pos += 46;
+        k = fl < lim - pos ? fl : lim - pos;
+        e->orig = zname(z->b + pos, k, (e->flags & 0x800) != 0, &e->orign);
+        pos += k;
+        k = xl < lim - pos ? xl : lim - pos;
+        x = z->b + pos; xl = k;
+        pos += k;
+        k = cl < lim - pos ? cl : lim - pos;
+        pos += k;
+        /* ZipInfo(filename): cut at the first NUL; on Windows os.sep '\' becomes '/' */
+        e->namen = e->orign;
+        for (j = 0; j < e->orign; j++) if (!e->orig[j]) { e->namen = (long)j; break; }
+        e->name = mem(e->namen + 1);
+        for (j = 0; j < e->namen; j++) e->name[j] = e->orig[j] == '\\' ? '/' : e->orig[j];
+        if (e->extract_version > 63) {
+            cx_fmt(msg, sizeof msg, "NotImplementedError: zip file version %.1f", e->extract_version / 10.0);
+            jv_die(msg);
+        }
+        /* _decodeExtra: zip64 sizes and offset */
+        while (xl >= 4) {
+            long tp = (long)le(x, 2), ln = (long)le(x + 2, 2);
+            if (ln + 4 > xl) {
+                cx_fmt(msg, sizeof msg, "Corrupt extra field %04lx (size=%ld)", tp, ln);
+                bad_zip(msg);
+            }
+            if (tp == 1) {
+                const unsigned char *d = x + 4;
+                long dl = ln;
+                if (e->fsize == 0xffffffffLL) {
+                    if (dl < 8) bad_zip("Corrupt zip64 extra field. File size not found.");
+                    e->fsize = (long long)le(d, 8); d += 8; dl -= 8;
+                }
+                if (e->csize == 0xffffffffLL) {
+                    if (dl < 8) bad_zip("Corrupt zip64 extra field. Compress size not found.");
+                    e->csize = (long long)le(d, 8); d += 8; dl -= 8;
+                }
+                if (e->hoff == 0xffffffffLL) {
+                    if (dl < 8) bad_zip("Corrupt zip64 extra field. Header offset not found.");
+                    e->hoff = (long long)le(d, 8);
+                }
+            }
+            x += ln + 4; xl -= ln + 4;
+        }
+        e->hoff += concat;
+        total += 46 + fl + (long long)le(c + 30, 2) + cl;
+    }
+    /* 3.12: each entry ends where the next header (by offset) or the central directory starts */
+    {
+        long *ord = mem((z->ne + 1) * (long)sizeof(long)), t;
+        long long end = z->start_dir;
+        for (i = 0; i < z->ne; i++) ord[i] = (long)i;
+        for (i = 1; i < z->ne; i++)                  /* stable insertion sort, descending offset */
+            for (j = i; j > 0 && z->e[ord[j - 1]].hoff < z->e[ord[j]].hoff; j--) { t = ord[j]; ord[j] = ord[j - 1]; ord[j - 1] = t; }
+        for (i = 0; i < z->ne; i++) { z->e[ord[i]].end_offset = end; end = z->e[ord[i]].hoff; }
+    }
+}
+
+/* z.read(e): the bytes, *N their length; zipfile's exceptions exit. */
+static unsigned char *zip_read(zarc *z, zent *e, long *n) {
+    const unsigned char *h;
+    long long at = e->hoff, data;
+    long fl, xl, ln;
+    char *lname, msg[700];
+    unsigned char *out;
+    unsigned crc;
+    CxCodecCrc cc;
+    if (at < 0) jv_die("OSError: [Errno 22] Invalid argument");
+    if (at > z->n || z->n - at < 30) bad_zip("Truncated file header");
+    h = z->b + at;
+    if (!tx_same((const char *)h, 4, "PK\3\4", 4)) bad_zip("Bad magic number for file header");
+    fl = (long)le(h + 26, 2); xl = (long)le(h + 28, 2);
+    data = at + 30;
+    ln = fl < z->n - data ? fl : (long)(z->n - data);
+    lname = zname(z->b + data, ln, (le(h + 6, 2) & 0x800) != 0, &ln);
+    data += fl + xl;
+    if (e->flags & 0x20) jv_die("NotImplementedError: compressed patched data (flag bit 5)");
+    if (e->flags & 0x40) jv_die("NotImplementedError: strong encryption (flag bit 6)");
+    if (!tx_same(lname, ln, e->orig, e->orign)) {
+        cx_fmt(msg, sizeof msg, "File name in directory '%s' and header '%s' differ.", e->orig, lname);
+        bad_zip(msg);
+    }
+    if (data + e->csize > e->end_offset) {
+        cx_fmt(msg, sizeof msg, "Overlapped entries: '%s' (possible zip bomb)", e->orig);
+        bad_zip(msg);
+    }
+    if (data > z->n || e->csize > z->n - data) jv_die("EOFError");
+    if (e->method == 0) {
+        long long k = e->csize < e->fsize ? e->csize : e->fsize;
+        out = mem((long)k + 1);
+        if (k) mm_copy(out, (long)k + 1, z->b + data, (long)k);
+        *n = (long)k;
+    } else {
+        int rc;
+        out = mem((long)e->fsize + 1);
+        rc = cxcodec_inflate(out, (unsigned long)e->fsize, z->b + data, (unsigned long)e->csize);
+        if (rc) {
+            cx_fmt(msg, sizeof msg, "zlib.error: Error %d while decompressing data (or not exactly compress_size -> file_size)", rc);
+            jv_die(msg);
+        }
+        *n = (long)e->fsize;
+    }
+    if (cxcodec_crc_init(&cc) || cxcodec_crc(&cc, (const char *)out, (int)*n, &crc)) jv_die("MemoryError");
+    if (crc != e->crc) {
+        cx_fmt(msg, sizeof msg, "Bad CRC-32 for file '%s'", e->name);
+        bad_zip(msg);
+    }
+    return out;
+}
+
+/* (PureWindowsPath('staged') / name).parent == 'staged': the single path part, or 0. */
+static const char *root_part(const char *name, long n, long *pn) {
+    long i = 0, s, parts = 0;
+    const char *part = 0;
+    if (n >= 2 && name[1] == ':') return 0;             /* a drive */
+    if (n >= 1 && (name[0] == '/' || name[0] == '\\')) return 0;   /* a root */
+    while (i < n) {
+        s = i;
+        while (i < n && name[i] != '/' && name[i] != '\\') i++;
+        if (i > s && !(i - s == 1 && name[s] == '.')) { parts++; part = name + s; *pn = i - s; }
+        i++;
+    }
+    return parts == 1 ? part : 0;
+}
+
+/* declared: dict(a['path'] -> a) with Python dict semantics (first place, last value). */
+typedef struct { jv_t *keys, *vals; } pydict;
+static long pd_find(const pydict *d, const jv_t *k) {
+    long i;
+    for (i = 0; i < d->keys->n; i++) if (jv_eq(d->keys->v[i], k)) return i;
+    return -1;
+}
+
+int main(void) {
+    const char *mode = sy_env("MODE"), *why = 0;
+    jv_t *policy, *receipt, *identity, *up, *local, *assets_list, *rset, *dset, *names, *before, *context, *ra, *t, *k;
+    pydict declared;
+    long i, j, n, vn, bad, g0, g1, p, end, count = 0, an, pn;
+    char *vt, *vb, hex[65], msg[700], path[1100];
+    const char *part;
+    sy_stat_t st;
+    long long total = 0, x;
+    double ftotal = 0;
+    int isf = 0, rc;
+    zarc z;
+    jv_t *versions;
+
+    if (!mode) jv_die("KeyError: 'MODE'");
+    jv_check(tx_eq(mode, "qualification", 64) || tx_eq(mode, "company", 64), "os.environ['MODE'] in ('qualification','company')", "unknown signing mode");
+    policy = jv_load("release/signing-policy.json");
+    receipt = jv_load("upstream/unsigned-receipt.json");
+    identity = jv_load("upstream/upstream-identity.json");
+    jv_check(jv_num_cmp(jv_key(policy, "schema"), 1) == 0 && jv_is(jv_key(jv_key(policy, "windows"), "provider"), "azure-artifact-signing"),
+             "policy['schema']==1 and policy['windows']['provider']=='azure-artifact-signing'", 0);
+    t = jv_key(receipt, "schema");
+    jv_check(t->kind == JV_INT && jv_num_cmp(t, 1) == 0 && jv_is(jv_key(receipt, "kind"), "unisacc-owner-local-build"),
+             "type(receipt['schema']) is int and receipt['schema']==1 and receipt['kind']=='unisacc-owner-local-build'", 0);
+    jv_check(jv_eq(jv_key(receipt, "source_sha"), jv_key(identity, "source_sha")) && jv_key(receipt, "source_dirty")->kind == JV_FALSE,
+             "receipt['source_sha']==identity['source_sha'] and receipt['source_dirty'] is False", 0);
+    jv_check(jv_is(jv_key(receipt, "built_by"), "owner-local") && jv_key(receipt, "local_gate_complete")->kind == JV_TRUE,
+             "receipt['built_by']=='owner-local' and receipt['local_gate_complete'] is True", 0);
+    up = jv_key(receipt, "upstream");
+    {
+        jv_t *want = jv_new(JV_ARR);
+        jv_append(want, jv_strz("run_id")); jv_append(want, jv_strz("run_attempt"));
+        jv_check(jv_set_eq(jv_pyset(up), want), "set(receipt['upstream'])=={'run_id','run_attempt'}", 0);
+    }
+    {
+        static const char *keys[2] = { "run_id", "run_attempt" };
+        int ok = 1;
+        for (i = 0; ok && i < 2; i++) { t = jv_key(up, keys[i]); ok = t->kind == JV_INT && jv_num_cmp(t, 0) == 1; }
+        jv_check(ok, "all(type(receipt['upstream'][key]) is int and receipt['upstream'][key]>0 for key in ('run_id','run_attempt'))", 0);
+    }
+    {
+        jv_t *want = jv_new(JV_OBJ);
+        jv_set(want, "run_id", jv_key(identity, "upstream_run_id"));
+        jv_set(want, "run_attempt", jv_key(identity, "upstream_attempt"));
+        jv_check(jv_eq(up, want), "receipt['upstream']==dict(run_id=identity['upstream_run_id'],run_attempt=identity['upstream_attempt'])", 0);
+    }
+    jv_check(version_ok(jv_key(receipt, "product_version")), "re.fullmatch('[0-9]+(?:[.][0-9]+){2,3}',receipt['product_version'])", 0);
+    /* Path('src/version.h').read_text(): strict UTF-8, universal newlines */
+    vb = slurp("src/version.h", &vn, 1);
+    bad = jv_utf8_bad(vb, vn);
+    if (bad >= 0) {
+        cx_fmt(msg, sizeof msg, "UnicodeDecodeError: 'utf-8' codec can't decode byte 0x%02x in position %ld", (unsigned)(unsigned char)vb[bad], bad);
+        jv_die(msg);
+    }
+    vt = mem(vn + 1);
+    for (i = 0, n = 0; i < vn; i++) {
+        if (vb[i] == '\r') { vt[n++] = '\n'; if (i + 1 < vn && vb[i + 1] == '\n') i++; }
+        else vt[n++] = vb[i];
+    }
+    versions = jv_new(JV_ARR);
+    for (p = 0; p <= n; ) {
+        if ((p == 0 || vt[p - 1] == '\n') && (end = ver_match((const unsigned char *)vt, n, p, &g0, &g1)) >= 0) {
+            jv_append(versions, jv_str(vt + g0, g1 - g0));
+            p = end > p ? end : p + 1;
+            continue;
+        }
+        p++;
+    }
+    {
+        jv_t *want = jv_new(JV_ARR);
+        jv_append(want, jv_key(receipt, "product_version"));
+        jv_check(jv_eq(versions, want), "versions==[receipt['product_version']]", "unknown or source-mismatched product version");
+    }
+    local = jv_key(receipt, "local_build");
+    jv_check(jv_truthy(jv_key(local, "host")) && jv_truthy(jv_key(local, "created_at")), "local['host'] and local['created_at']", 0);
+    jv_check(hexn(jv_key(local, "toolchain_sha256"), 64), "re.fullmatch('[0-9a-f]{64}',local['toolchain_sha256'])", 0);
+
+    assets_list = jv_iter(jv_key(jv_key(policy, "windows"), "assets"));
+    declared.keys = jv_new(JV_ARR); declared.vals = jv_new(JV_ARR);
+    for (i = 0; i < assets_list->n; i++) {
+        jv_t *a = assets_list->v[i], *pth = jv_key(a, "path");
+        long at;
+        if (pth->kind == JV_ARR || pth->kind == JV_OBJ) {
+            cx_fmt(msg, sizeof msg, "TypeError: unhashable type: '%s'", jv_type(pth));
+            jv_die(msg);
+        }
+        at = pd_find(&declared, pth);
+        if (at >= 0) declared.vals->v[at] = a;
+        else { jv_append(declared.keys, pth); jv_append(declared.vals, a); }
+    }
+    an = assets_list->n;                 /* len() of the list, dict or str iterated above */
+    jv_check(declared.keys->n > 0 && declared.keys->n == an, "declared and len(declared)==len(policy['windows']['assets'])", 0);
+    rset = jv_pyset(jv_key(receipt, "assets"));
+    dset = declared.keys;
+    jv_check(jv_set_eq(rset, dset), "set(receipt['assets'])==set(declared)", "receipt asset allowlist differs");
+
+    if ((rc = sy_stat("upstream/unisacc-unsigned.zip", &st)) != 0) {
+        cx_fmt(msg, sizeof msg, "FileNotFoundError: [Errno %d] No such file or directory: 'upstream/unisacc-unsigned.zip'", -rc);
+        jv_die(msg);
+    }
+    for (i = 0; i < declared.vals->n; i++) {
+        t = jv_key(declared.vals->v[i], "max_unsigned_bytes");
+        if (t->kind == JV_FLT) { if (!isf) { isf = 1; ftotal = (double)total; } ftotal += t->f; }
+        else if (t->kind == JV_INT || t->kind == JV_TRUE || t->kind == JV_FALSE) {
+            if (!isf && jv_to_ll(t, &x) && total < (1LL << 61) && total > -(1LL << 61)) { total += x; continue; }
+            if (!isf) { isf = 1; ftotal = (double)total; }
+            ftotal += jv_to_double(t);
+        } else {
+            cx_fmt(msg, sizeof msg, "TypeError: unsupported operand type(s) for +: '%s' and '%s'", isf ? "float" : "int", jv_type(t));
+            jv_die(msg);
+        }
+    }
+    if (isf) jv_check((double)st.size <= ftotal + 65536.0, "archive.stat().st_size<=sum(a['max_unsigned_bytes'] for a in declared.values())+65536", 0);
+    else jv_check(st.size <= total + 65536,
+                  "archive.stat().st_size<=sum(a['max_unsigned_bytes'] for a in declared.values())+65536", 0);
+    z.b = (const unsigned char *)slurp("upstream/unisacc-unsigned.zip", &z.n, 1);
+    cx_sha256_hex((const char *)z.b, (size_t)z.n, hex);
+    jv_check(jv_is(jv_key(receipt, "archive_sha256"), hex), "hashlib.sha256(archive.read_bytes()).hexdigest()==receipt['archive_sha256']", 0);
+    jv_check(hexn(jv_key(receipt, "archive_sha256"), 64), "re.fullmatch('[0-9a-f]{64}',receipt['archive_sha256'])", 0);
+
+    before = jv_new(JV_OBJ);
+    if ((rc = sy_mkdir("staged", 0777)) != 0) {
+        cx_fmt(msg, sizeof msg, rc == -17 ? "FileExistsError: [Errno 17] File exists: 'staged'" : "OSError: [Errno %d] mkdir: 'staged'", -rc);
+        jv_die(msg);
+    }
+    zip_open(&z);
+    names = jv_new(JV_ARR);
+    for (i = 0; i < z.ne; i++) {
+        k = jv_str(z.e[i].name, z.e[i].namen);
+        if (!jv_in(names, k)) jv_append(names, k);
+    }
+    jv_check(z.ne == declared.keys->n && jv_set_eq(names, dset),
+             "len(entries)==len(declared) and {e.filename for e in entries}==set(declared)", "archive allowlist differs");
+    for (i = 0; i < z.ne; i++) {
+        zent *e = &z.e[i];
+        jv_t *rule, *expected, *rec, *mx;
+        unsigned char *data;
+        long dn;
+        ape_info_t info;
+        int ok;
+        k = jv_str(e->name, e->namen);
+        rule = declared.vals->v[pd_find(&declared, k)];
+        ra = jv_key(receipt, "assets");
+        expected = jv_key(ra, k->s);     /* the name has no NUL: ZipInfo cut it there */
+        jv_check(tx_same(e->orig, e->orign, e->name, e->namen) && tx_chr(e->orig, e->orign, 0) < 0,
+                 "e.orig_filename==e.filename and '\\x00' not in e.orig_filename", "noncanonical ZIP filename");
+        jv_check(!(e->namen && e->name[e->namen - 1] == '/') && !(e->flags & 1), "not e.is_dir() and not e.flag_bits & 1", 0);
+        jv_check(((e->external_attr >> 16) & 0170000) == 0 || ((e->external_attr >> 16) & 0170000) == 0100000,
+                 "((e.external_attr>>16)&0o170000) in (0,0o100000)", "nonregular ZIP asset");
+        jv_check(e->method == 0 || e->method == 8, "e.compress_type in (zipfile.ZIP_STORED,zipfile.ZIP_DEFLATED)", "unsupported ZIP compression");
+        ok = e->fsize > 0;
+        if (ok) {
+            mx = jv_key(rule, "max_unsigned_bytes");
+            if (jv_num_cmp(mx, 0) == -9) {
+                cx_fmt(msg, sizeof msg, "TypeError: '<=' not supported between instances of 'int' and '%s'", jv_type(mx));
+                jv_die(msg);
+            }
+            if (jv_to_ll(mx, &x)) ok = e->fsize <= x;
+            else if (mx->kind == JV_INT) ok = mx->s[0] != '-';
+            else ok = (double)e->fsize <= mx->f;
+        }
+        jv_check(ok, "0<e.file_size<=rule['max_unsigned_bytes']", 0);
+        data = zip_read(&z, e, &dn);
+        cx_sha256_hex((const char *)data, (size_t)dn, hex);
+        ok = jv_is(jv_key(expected, "sha256"), hex) && jv_eq(jv_key(expected, "bytes"), jv_int(dn));
+        jv_check(ok, "digest==expected['sha256'] and len(data)==expected['bytes']", "local asset seal mismatch");
+        if (ape_inspect(data, dn, &info, &why) != 0) {
+            cx_fmt(msg, sizeof msg, "ValueError: %s", why);
+            jv_die(msg);
+        }
+        jv_check(info.cert == 0 && info.certlen == 0, "info['certificate_offset']==0 and info['certificate_length']==0", "input is already signed");
+        part = root_part(e->name, e->namen, &pn);
+        jv_check(part != 0, "path.parent==Path('staged')", "this catalog supports root assets only");
+        if (cx_fmt(path, sizeof path, "staged/%.*s", (int)pn, part) != 0 || cx_write(path, data, (size_t)dn) != 0) {
+            cx_fmt(msg, sizeof msg, "OSError: cannot write '%s'", path);
+            jv_die(msg);
+        }
+        rec = jv_new(JV_OBJ);
+        jv_set(rec, "sha256", jv_strz(hex));
+        jv_set(rec, "bytes", jv_int(dn));
+        jv_set(rec, "package_sha256", jv_strz(info.psha));
+        jv_set(before, jv_dup(e->name, e->namen), rec);
+        count++;
+    }
+    /* dict(schema=1,kind=...,release_eligible=False,**identity,product_version=...,before=...,local_build=...,provider_called=False) */
+    if (identity->kind != JV_OBJ) {
+        cx_fmt(msg, sizeof msg, "TypeError: dict() argument after ** must be a mapping, not %s", jv_type(identity));
+        jv_die(msg);
+    }
+    context = jv_new(JV_OBJ);
+    jv_set(context, "schema", jv_int(1));
+    jv_set(context, "kind", jv_strz("unisacc-windows-qualification"));
+    jv_set(context, "release_eligible", jv_bool(0));
+    for (i = 0; i < identity->n; i++) {
+        static const char *fixed[7] = { "schema", "kind", "release_eligible", "product_version", "before", "local_build", "provider_called" };
+        for (j = 0; j < 7; j++)
+            if (tx_same(identity->k[i]->s, identity->k[i]->n, fixed[j], tx_len(fixed[j], 64))) {
+                cx_fmt(msg, sizeof msg, "TypeError: dict() got multiple values for keyword argument '%s'", fixed[j]);
+                jv_die(msg);
+            }
+        jv_set_key(context, identity->k[i], identity->v[i]);
+    }
+    jv_set(context, "product_version", jv_key(receipt, "product_version"));
+    jv_set(context, "before", before);
+    jv_set(context, "local_build", local);
+    jv_set(context, "provider_called", jv_bool(0));
+    {
+        long dl;
+        char *d = jv_dump(context, &dl), *c;
+        long cn;
+        if (cx_write("staged/qualification-receipt.json", d, (size_t)dl) != 0) jv_die("OSError: cannot write 'staged/qualification-receipt.json'");
+        c = slurp("upstream/unsigned-receipt.json", &cn, 1);
+        if (cx_write("staged/unsigned-receipt.json", c, (size_t)cn) != 0) jv_die("OSError: cannot write 'staged/unsigned-receipt.json'");
+        c = slurp("release/signing-policy.json", &cn, 1);
+        if (cx_write("staged/signing-policy.json", c, (size_t)cn) != 0) jv_die("OSError: cannot write 'staged/signing-policy.json'");
+    }
+    (void)count;
+    return 0;
+}

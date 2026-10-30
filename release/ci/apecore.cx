@@ -1,0 +1,117 @@
+#pragma unisa module apecore
+/* release/ci/apecore.cx -- the inspect() of release/apeinspect.py on bytes in memory: bounded APE
+ * package/certificate extents; does not authenticate signatures.  Used by release/apeinspect.cx
+ * (the command) and release/ci/validate-manifest.cx (the windows-signing gate).
+ *
+ *   int ape_inspect(const unsigned char *b, long n, ape_info_t *out, const char **why)
+ *
+ * 0 with OUT filled, or -1 with *WHY the text of the ValueError the Python raised (the first one
+ * met, in the Python order): PE header and optional header, data directories, the security extent
+ * (8-aligned, ends the file), section extents after the headers, WIN_CERTIFICATE records (revision
+ * 0x0200, type 0x0002, zero padding to 8), then exactly one UNIPKG1 footer within the allowed
+ * padding before the certificate table (or at the end).  An 8-byte package length past 2^63-1
+ * saturates, so it is an "invalid package extent" as the unbounded Python int was. */
+#pragma unisa use text.text
+
+typedef struct {
+    long size, footer, length, cert, certlen, padding;
+    char sha[65], psha[65];
+} ape_info_t;
+
+typedef struct { const unsigned char *b; long n; const char *err; } ape_cur;
+
+static void ape_fail(ape_cur *f, const char *why) { if (!f->err) f->err = why; }
+static const unsigned char *ape_span(ape_cur *f, long off, long n) {
+    if (f->err) return 0;
+    if (off < 0 || n < 0 || off > f->n || n > f->n - off) { ape_fail(f, "extent outside file"); return 0; }
+    return f->b + off;
+}
+static long ape_num(ape_cur *f, long off, int n) {
+    const unsigned char *p = ape_span(f, off, n);
+    unsigned long long v = 0;
+    int i;
+    if (!p) return 0;
+    for (i = n - 1; i >= 0; i--) v = (v << 8) | p[i];
+    return v > 0x7fffffffffffffffULL ? 0x7fffffffffffffffL : (long)v;
+}
+static int ape_is(ape_cur *f, long off, const char *lit, long n) {
+    const unsigned char *p = ape_span(f, off, n);
+    return p && tx_same((const char *)p, n, lit, n);
+}
+static int ape_zero(ape_cur *f, long off, long n) {
+    const unsigned char *p = ape_span(f, off, n);
+    long i;
+    if (!p) return 0;
+    for (i = 0; i < n; i++) if (p[i]) return 0;
+    return 1;
+}
+
+int ape_inspect(const unsigned char *b, long n, ape_info_t *out, const char **why) {
+    ape_cur f;
+    long cert = 0, certlen = 0, minimum = 0, end, footer = 0, length = 0, padding = 0, pad, nfound = 0;
+    f.b = b; f.n = n; f.err = 0;
+    if (!b || n < 0 || !out) { if (why) *why = "invalid arguments"; return -1; }
+    if (n < 16) ape_fail(&f, "short file");
+    if (!f.err && ape_is(&f, 0, "MZ", 2)) {
+        long pe = ape_num(&f, 60, 4), sections, optsize, opt, magic, dirs, count, sec, headers, s;
+        if (!f.err && (pe < 64 || !ape_is(&f, pe, "PE\0\0", 4))) ape_fail(&f, "invalid PE offset/header");
+        sections = ape_num(&f, pe + 6, 2); optsize = ape_num(&f, pe + 20, 2);
+        opt = pe + 24;
+        ape_span(&f, opt, optsize);
+        magic = ape_num(&f, opt, 2);
+        dirs = magic == 0x10b ? 96 : magic == 0x20b ? 112 : 0;
+        if (!f.err && (!dirs || optsize < dirs)) ape_fail(&f, "invalid optional header");
+        count = f.err ? 0 : ape_num(&f, opt + dirs - 4, 4);
+        if (!f.err && (count < 5 || count > (optsize - dirs) / 8)) ape_fail(&f, "invalid data directories");
+        cert = f.err ? 0 : ape_num(&f, opt + dirs + 32, 4);
+        certlen = f.err ? 0 : ape_num(&f, opt + dirs + 36, 4);
+        if (!f.err && ((cert != 0) != (certlen != 0) || (cert && (cert % 8 || certlen < 8 || cert + certlen != n))))
+            ape_fail(&f, "invalid security extent");
+        sec = opt + optsize;
+        if (!f.err && !sections) ape_fail(&f, "no sections");
+        ape_span(&f, sec, sections * 40);
+        headers = ape_num(&f, opt + 60, 4);
+        if (!f.err && (headers < sec + sections * 40 || headers > n)) ape_fail(&f, "invalid header extent");
+        minimum = headers;
+        for (s = 0; !f.err && s < sections; s++) {
+            long rawlen = ape_num(&f, sec + s * 40 + 16, 4), raw = ape_num(&f, sec + s * 40 + 20, 4);
+            if (!f.err && rawlen) {
+                if (raw < headers) ape_fail(&f, "section overlaps headers");
+                ape_span(&f, raw, rawlen);
+                if (raw + rawlen > minimum) minimum = raw + rawlen;
+            }
+        }
+        if (!f.err && cert && cert < minimum) ape_fail(&f, "certificate overlaps sections");
+    }
+    if (!f.err && cert) {
+        long pos = cert;
+        while (!f.err && pos < n) {
+            long len = ape_num(&f, pos, 4), padn;
+            if (!f.err && (len < 8 || !ape_is(&f, pos + 4, "\0\2\2\0", 4))) ape_fail(&f, "invalid WIN_CERTIFICATE");
+            ape_span(&f, pos, len);
+            padn = (8 - len % 8) % 8;
+            if (!f.err && !ape_zero(&f, pos + len, padn)) ape_fail(&f, "nonzero certificate padding");
+            pos += len + padn;
+        }
+        if (!f.err && pos != n) ape_fail(&f, "invalid certificate table end");
+    }
+    end = cert ? cert : n;
+    for (pad = 0; !f.err && pad < (cert ? 8 : 1); pad++) {
+        long ft = end - pad - 16;
+        if (ft < minimum || !ape_zero(&f, end - pad, pad)) continue;
+        if (ape_is(&f, ft, "UNIPKG1\n", 8)) {
+            long len = ape_num(&f, ft + 8, 8);
+            if (!f.err && (!len || len > ft - minimum)) ape_fail(&f, "invalid package extent");
+            if (!nfound) { footer = ft; length = len; padding = pad; }
+            nfound++;
+        }
+    }
+    if (!f.err && nfound != 1) ape_fail(&f, "missing or ambiguous package footer");
+    if (f.err) { if (why) *why = f.err; return -1; }
+    cx_sha256_hex((const char *)b, (size_t)n, out->sha);
+    cx_sha256_hex((const char *)b + (footer - length), (size_t)length, out->psha);
+    out->size = n; out->footer = footer; out->length = length;
+    out->cert = cert; out->certlen = certlen; out->padding = padding;
+    if (why) *why = 0;
+    return 0;
+}

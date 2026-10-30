@@ -1,5 +1,6 @@
 /* release/apeinspect.cx -- inspect bounded APE package/certificate extents; does not authenticate
- * signatures.  The native form of release/apeinspect.py, output byte for byte the same:
+ * signatures.  The native form of release/apeinspect.py (archived at
+ * archive/reference-py/release/apeinspect.py), output byte for byte the same:
  *
  *   sh ./unisacc.com release/apeinspect.cx -- FILE...
  *
@@ -7,33 +8,10 @@
  * UNIPKG1 footer and package extents, the PE security-directory (certificate table) extent, the
  * footer padding, the file and package sha256 and "authentication": "not_checked".  A file that
  * is not a well-formed APE prints "PATH: REASON" on stderr and exits 1, as the Python argparse exit
- * did.  Checks, in order: PE header and optional header, data directories, the security extent
- * (8-aligned, ends the file), section extents after the headers, WIN_CERTIFICATE records (revision
- * 0x0200, type 0x0002, zero padding to 8), then exactly one UNIPKG1 footer within the allowed
- * padding before the certificate table (or at the end). */
-#pragma unisa use text.text
+ * did.  The checks themselves are ape_inspect in release/ci/apecore.cx, shared with the
+ * windows-signing gate release/ci/validate-manifest.cx. */
+#pragma unisa use ci.apecore
 
-typedef struct { const unsigned char *b; long n; const char *path; } Ai;
-
-static void ai_fail(const Ai *f, const char *why) { fprintf(stderr, "%s: %s\n", f->path, why); exit(1); }
-static const unsigned char *ai_span(const Ai *f, long off, long n) {
-    if (off < 0 || n < 0 || off > f->n || n > f->n - off) ai_fail(f, "extent outside file");
-    return f->b + off;
-}
-static long ai_num(const Ai *f, long off, int n) {
-    const unsigned char *p = ai_span(f, off, n);
-    unsigned long long v = 0;
-    int i;
-    for (i = n - 1; i >= 0; i--) v = (v << 8) | p[i];
-    if (v > 0x7fffffffffffffffULL) ai_fail(f, "number out of range");
-    return (long)v;
-}
-static int ai_zero(const Ai *f, long off, long n) {
-    const unsigned char *p = ai_span(f, off, n);
-    long i;
-    for (i = 0; i < n; i++) if (p[i]) return 0;
-    return 1;
-}
 /* json.dumps of a path given as UTF-8 bytes (ensure_ascii: \uXXXX, surrogate pairs above U+FFFF;
    a byte that is not UTF-8 is a lone surrogate U+DC80..U+DCFF, as Python's filesystem decoding). */
 static void ai_json_str(const char *s) {
@@ -68,84 +46,23 @@ static void ai_json_str(const char *s) {
     putchar('"');
 }
 
-typedef struct { long size, footer, length, cert, certlen, padding; char sha[65], psha[65]; } Ar;
-
 /* Checks one file; on a malformed one prints "PATH: REASON" on stderr and exits 1. */
-static void ai_inspect(const char *path, Ar *r) {
-    Ai f;
+static void ai_inspect(const char *path, ape_info_t *r) {
     size_t sz;
-    long cert = 0, certlen = 0, minimum = 0, end, footer = 0, length = 0, padding = 0, pad, nfound = 0;
-    f.path = path;
-    f.b = (const unsigned char *)cx_read(path, &sz);
-    if (!f.b) { fprintf(stderr, "%s: cannot read\n", path); exit(1); }
-    f.n = (long)sz;
-    if (f.n < 16) ai_fail(&f, "short file");
-    if (tx_same((const char *)ai_span(&f, 0, 2), 2, "MZ", 2)) {
-        long pe = ai_num(&f, 60, 4), sections, optsize, opt, magic, dirs, count, sec, headers, s;
-        if (pe < 64 || !tx_same((const char *)ai_span(&f, pe, 4), 4, "PE\0\0", 4)) ai_fail(&f, "invalid PE offset/header");
-        sections = ai_num(&f, pe + 6, 2); optsize = ai_num(&f, pe + 20, 2);
-        opt = pe + 24;
-        ai_span(&f, opt, optsize);
-        magic = ai_num(&f, opt, 2);
-        dirs = magic == 0x10b ? 96 : magic == 0x20b ? 112 : 0;
-        if (!dirs || optsize < dirs) ai_fail(&f, "invalid optional header");
-        count = ai_num(&f, opt + dirs - 4, 4);
-        if (count < 5 || count > (optsize - dirs) / 8) ai_fail(&f, "invalid data directories");
-        cert = ai_num(&f, opt + dirs + 32, 4); certlen = ai_num(&f, opt + dirs + 36, 4);
-        if ((cert != 0) != (certlen != 0) || (cert && (cert % 8 || certlen < 8 || cert + certlen != f.n))) ai_fail(&f, "invalid security extent");
-        sec = opt + optsize;
-        if (!sections) ai_fail(&f, "no sections");
-        ai_span(&f, sec, sections * 40);
-        headers = ai_num(&f, opt + 60, 4);
-        if (headers < sec + sections * 40 || headers > f.n) ai_fail(&f, "invalid header extent");
-        minimum = headers;
-        for (s = 0; s < sections; s++) {
-            long rawlen = ai_num(&f, sec + s * 40 + 16, 4), raw = ai_num(&f, sec + s * 40 + 20, 4);
-            if (rawlen) {
-                if (raw < headers) ai_fail(&f, "section overlaps headers");
-                ai_span(&f, raw, rawlen);
-                if (raw + rawlen > minimum) minimum = raw + rawlen;
-            }
-        }
-        if (cert && cert < minimum) ai_fail(&f, "certificate overlaps sections");
-    }
-    if (cert) {
-        long pos = cert;
-        while (pos < f.n) {
-            long len = ai_num(&f, pos, 4), padn;
-            if (len < 8 || !tx_same((const char *)ai_span(&f, pos + 4, 4), 4, "\0\2\2\0", 4)) ai_fail(&f, "invalid WIN_CERTIFICATE");
-            ai_span(&f, pos, len);
-            padn = (8 - len % 8) % 8;
-            if (!ai_zero(&f, pos + len, padn)) ai_fail(&f, "nonzero certificate padding");
-            pos += len + padn;
-        }
-        if (pos != f.n) ai_fail(&f, "invalid certificate table end");
-    }
-    end = cert ? cert : f.n;
-    for (pad = 0; pad < (cert ? 8 : 1); pad++) {
-        long ft = end - pad - 16;
-        if (ft < minimum || !ai_zero(&f, end - pad, pad)) continue;
-        if (tx_same((const char *)ai_span(&f, ft, 8), 8, "UNIPKG1\n", 8)) {
-            long len = ai_num(&f, ft + 8, 8);
-            if (!len || len > ft - minimum) ai_fail(&f, "invalid package extent");
-            if (!nfound) { footer = ft; length = len; padding = pad; }
-            nfound++;
-        }
-    }
-    if (nfound != 1) ai_fail(&f, "missing or ambiguous package footer");
-    cx_sha256_hex((const char *)f.b, (size_t)f.n, r->sha);
-    cx_sha256_hex((const char *)ai_span(&f, footer - length, length), (size_t)length, r->psha);
-    r->size = f.n; r->footer = footer; r->length = length; r->cert = cert; r->certlen = certlen; r->padding = padding;
+    const char *why = 0;
+    const unsigned char *b = (const unsigned char *)cx_read(path, &sz);
+    if (!b) { fprintf(stderr, "%s: cannot read\n", path); exit(1); }
+    if (ape_inspect(b, (long)sz, r, &why) != 0) { fprintf(stderr, "%s: %s\n", path, why); exit(1); }
 }
 
 int main(int argc, char **argv) {
-    static Ar res[1024];
+    static ape_info_t res[1024];
     int i;
     if (argc < 2 || argc > 1025) { fprintf(stderr, "usage: apeinspect.cx FILE... (at most 1024)\n"); return 2; }
     for (i = 1; i < argc; i++) ai_inspect(argv[i], &res[i - 1]);   /* all checked before any output, as in the Python */
     printf("[");
     for (i = 1; i < argc; i++) {
-        Ar *r = &res[i - 1];
+        ape_info_t *r = &res[i - 1];
         printf("%s\n  {\n    \"path\": ", i > 1 ? "," : "");
         ai_json_str(argv[i]);
         printf(",\n    \"file_size\": %ld,\n    \"footer_offset\": %ld,\n    \"package_offset\": %ld,\n    \"package_length\": %ld,\n"
