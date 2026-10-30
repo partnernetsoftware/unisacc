@@ -113,6 +113,80 @@ int tw_wait_text(const char *sess, const char *needle, int ms, char *out, int ca
     }
 }
 
+/* Append CAP's text to SEEN unless SEEN already ends with it: a log of every
+ * distinct frame, so a line that later scrolls away still counts. */
+static void tw_note(char *seen, int seen_cap, const char *cap) {
+    size_t have = strlen(seen), n = strlen(cap);
+    if (have >= n && !strcmp(seen + have - n, cap)) return;
+    if (have + n + 2 > (size_t)seen_cap) return;
+    memcpy(seen + have, cap, n);
+    seen[have + n] = '\n';
+    seen[have + n + 1] = 0;
+}
+
+/* Type TEXT (one write, or one key per 30ms when PER_CHAR) and send it.
+ * Keys before the TUI's raw mode are flushed, so the text is retyped until it
+ * shows; Enter goes alone 200ms later (in the same tick it would be a pasted
+ * newline). 1 when the text was on the input line before Enter. */
+int tw_submit(const char *sess, const char *text, int per_char, char *seen, int seen_cap) {
+    static char cap[65536];
+    int attempt;
+    for (attempt = 0; attempt < 3; attempt++) {
+        if (per_char) {
+            char one[8];
+            const char *p = text;
+            while (*p) {
+                int n = 1;
+                while (((unsigned char)p[n] & 0xc0) == 0x80) n++;   /* whole UTF-8 sequences */
+                snprintf(one, sizeof one, "%.*s", n, p);
+                tw_keys(sess, one, 1);
+                tw_sleep_ms(30);
+                p += n;
+            }
+        } else tw_keys(sess, text, 1);
+        if (tw_wait_text(sess, text, 1500, cap, sizeof cap)) {
+            tw_note(seen, seen_cap, cap);
+            tw_sleep_ms(200);
+            tw_keys(sess, "Enter", 0);
+            return 1;
+        }
+        tw_keys(sess, "C-u", 0);   /* a partial line would be doubled by the retype */
+    }
+    return 0;
+}
+
+/* Watch the pane at most MS; every distinct frame goes into SEEN. With
+ * NEEDLE, stop one capture after it shows. Without, stop when two captures
+ * 250ms apart are equal after at least one change (a pane with a running
+ * tick counter never settles, so give it a needle). 1 if NEEDLE showed. */
+int tw_settle(const char *sess, int ms, const char *needle, char *seen, int seen_cap) {
+    static char a[65536], b[65536];
+    long until = tw_now_ms() + ms;
+    int changed = 0, hit = 0;
+    tw_capture(sess, a, sizeof a);
+    tw_note(seen, seen_cap, a);
+    while (tw_now_ms() < until) {
+        tw_sleep_ms(needle ? 100 : 250);
+        tw_capture(sess, b, sizeof b);
+        if (strcmp(a, b)) { changed = 1; tw_note(seen, seen_cap, b); memcpy(a, b, sizeof a); }
+        else if (!needle && changed) break;
+        if (needle && strstr(b, needle)) {
+            if (hit) break;
+            hit = 1;
+        }
+    }
+    return hit;
+}
+
+/* Exit code the pane's wrapper printed as __RC=N__ within MS, or -1. */
+int tw_rc(const char *sess, int ms) {
+    static char cap[65536];
+    const char *p;
+    if (!tw_wait_text(sess, "__RC=", ms, cap, sizeof cap)) return -1;
+    p = strstr(cap, "__RC=");
+    return atoi(p + 5);
+}
+
 void tw_close(void) {
     char *a[] = { "kill-server" };
     tw_tmux(a, 1, NULL, 0);
