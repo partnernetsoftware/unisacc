@@ -48,14 +48,14 @@ static void die(const char *name,const char *detail){printf("REFUSE\t%s\t%s\n",n
 static void join(char *out,size_t cap,const char *a,const char *b){int n=snprintf(out,cap,"%s/%s",a,b);if(n<0||(size_t)n>=cap)die("path-bound",b);}
 static double now_s(void){long long t=as_now();if(t<0)die("monotonic-clock",0);return (double)t/1e9;}
 static void outer_window(void){const char *d=getenv("UNISACC_BOUND_DEADLINE_MONO");char *end=0;if(!d||!*d)die("outer-bound-required","run under tools/bound 55");deadline=strtod(d,&end);double left=deadline-now_s();if(!end||*end||left<=0||left>57.5)die("outer-bound-55-required",d);}
-static void canonical_root(const char *arg){if(arg[0]!='/'||!realpath(arg,root)||strcmp(root,arg))die("canonical-root",arg);join(candidate,sizeof candidate,root,"unisacc.com");join(bound,sizeof bound,root,"tools/bound");join(runner,sizeof runner,root,"tests/run-batch.cx");}
+static void canonical_root(const char *arg){if(arg[0]!='/'||!realpath(arg,root)||!tx_eq(root, arg, 1L << 20))die("canonical-root",arg);join(candidate,sizeof candidate,root,"unisacc.com");join(bound,sizeof bound,root,"tools/bound");join(runner,sizeof runner,root,"tests/run-batch.cx");}
 static void below_out(const char *p){char base[4400],canon[4096];join(base,sizeof base,root,"out");if(!realpath(base,canon))die("root-out",base);size_t n=strlen(canon);if(strncmp(p,canon,n)||p[n]!='/'||!p[n+1])die("session-must-be-below-ROOT/out",p);}
-static void existing_session(const char *arg){if(arg[0]!='/'||!realpath(arg,session)||strcmp(session,arg))die("canonical-session",arg);below_out(session);}
+static void existing_session(const char *arg){if(arg[0]!='/'||!realpath(arg,session)||!tx_eq(session, arg, 1L << 20))die("canonical-session",arg);below_out(session);}
 static void save_new(const char *p,const char *s,size_t n){int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0600);if(fd<0)die("exclusive-write",p);size_t at=0;while(at<n){ssize_t z=write(fd,s+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0)die("write",p);at+=(size_t)z;}if(fsync(fd)||close(fd))die("write-close",p);}
 static void check_identity(const as_manifest *m,as_ident *live){
- if(strcmp(m->root,root))die("session-root-mismatch",m->root);if(as_identity(root,1,live,why,sizeof why))die("live-identity",why);
+ if(!tx_eq(m->root, root, 1L << 20))die("session-root-mismatch",m->root);if(as_identity(root,1,live,why,sizeof why))die("live-identity",why);
  const char *d=as_ident_diff(live,&m->ident);if(d){char name[80];{int z=snprintf(name,sizeof name,"session-%s-changed",d);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};die(name,"start-a-new-session");}
- char p[4400],h[65];join(p,sizeof p,session,"materials.tsv");if(as_sha_file(p,0,h,0,why,sizeof why)||strcmp(h,m->map_sha))die("session-materials-map-changed",p);
+ char p[4400],h[65];join(p,sizeof p,session,"materials.tsv");if(as_sha_file(p,0,h,0,why,sizeof why)||!tx_eq(h, m->map_sha, 1L << 20))die("session-materials-map-changed",p);
  if(as_material_bind(session,m,why,sizeof why))die("session-material-binding",why);
 }
 /* materials.tsv: NAME<TAB>PATH lines; returns the path for NAME or 0 */
@@ -64,10 +64,10 @@ static int declared_material(const as_registry *r,const char *name){return as_ma
 
 static int cmd_init(int argc,char **argv){
  if(argc!=6)die("usage","init ROOT NEW_SESSION CANDIDATE MATERIALS_MAP|-");outer_window();canonical_root(argv[2]);
- char cand[4096];if(!realpath(argv[4],cand)||strcmp(cand,candidate))die("candidate-must-be-ROOT/unisacc.com","run-batch.cx binds ROOT/unisacc.com");
+ char cand[4096];if(!realpath(argv[4],cand)||!tx_eq(cand, candidate, 1L << 20))die("candidate-must-be-ROOT/unisacc.com","run-batch.cx binds ROOT/unisacc.com");
  /* the new session: absolute, parent canonical, below ROOT/out, absent */
  if(argv[3][0]!='/'||strlen(argv[3])>=sizeof session)die("session-absolute",argv[3]);char parent[4096],pc[4096];{ if (cx_fmt(parent, sizeof parent, "%s",argv[3])) { fprintf(stderr, "all-waves: text too long for parent\n"); exit(2); } }char *slash=strrchr(parent,'/');if(!slash||!slash[1]||tx_eq(slash+1, ".", 1L << 20)||tx_eq(slash+1, "..", 1L << 20))die("session-leaf",argv[3]);*slash=0;
- if(!realpath(parent,pc)||strcmp(pc,parent))die("session-parent-canonical",parent);{ if (cx_fmt(session, sizeof session, "%s", argv[3])) { fprintf(stderr, "all-waves: text too long for session\n"); exit(2); } }below_out(session);struct stat st;errno=0;if(!lstat(session,&st)||errno!=ENOENT)die("session-must-be-absent",session);
+ if(!realpath(parent,pc)||!tx_eq(pc, parent, 1L << 20))die("session-parent-canonical",parent);{ if (cx_fmt(session, sizeof session, "%s", argv[3])) { fprintf(stderr, "all-waves: text too long for session\n"); exit(2); } }below_out(session);struct stat st;errno=0;if(!lstat(session,&st)||errno!=ENOENT)die("session-must-be-absent",session);
  as_registry reg;if(as_registry_load(root,&reg,why,sizeof why))die("registry-metadata",why);int implemented=0;for(int i=0;i<reg.nb;i++)if(tx_eq(reg.b[i].impl, "IMPLEMENTED", 1L << 20))implemented++;
  char *map;size_t mn=0;if(tx_eq(argv[5], "-", 1L << 20)){map=malloc(1);if(!map)die("allocation",0);map[0]=0;}else if(!(map=as_read(argv[5],0,&mn,why,sizeof why)))die("materials-map",why);
  if(mn&&map[mn-1]!='\n')die("materials-map-wire",argv[5]);
@@ -75,7 +75,7 @@ static int cmd_init(int argc,char **argv){
   char *tab=strchr(line,'\t');if(!tab||strchr(tab+1,'\t'))die("materials-map-fields",line);*tab=0;const char *name=line,*path=tab+1;char canon[4096];
   int mk=declared_material(&reg,name);if(mk<1)die("materials-map-undeclared-name",name);if(!tp_material_value(mk,path))die("materials-map-typed-value",name);if(mk==2){nmap++;continue;}
   errno=0;struct stat ms;if(lstat(path,&ms)){if(errno==ENOENT)die("material-absent",path);char d[4200];{int z=snprintf(d,sizeof d,"%s errno=%d",path,errno);if(z<0||(size_t)z>=sizeof d){fprintf(stderr,"bound-format\n");exit(2);}};die("material-stat",d);}
-  if(!S_ISREG(ms.st_mode)&&!S_ISDIR(ms.st_mode))die("material-path-kind",path);if(path[0]!='/'||!realpath(path,canon)||strcmp(canon,path))die("material-path-canonical",path);nmap++;}
+  if(!S_ISREG(ms.st_mode)&&!S_ISDIR(ms.st_mode))die("material-path-kind",path);if(path[0]!='/'||!realpath(path,canon)||!tx_eq(canon, path, 1L << 20))die("material-path-canonical",path);nmap++;}
  /* duplicate names */
  {size_t a=0;while(a<mn){size_t e=a;while(map[e]!='\n')e++;size_t t=a;while(map[t]!='\t')t++;char name[200];if(t-a>=sizeof name)die("materials-map-name",0);{unsigned char *cxb_d=(unsigned char *)(name);const unsigned char *cxb_s=(const unsigned char *)(map+a);size_t cxb_n=(size_t)(t-a),cxb_i;for(cxb_i=0;cxb_i<cxb_n;cxb_i++)cxb_d[cxb_i]=cxb_s[cxb_i];};name[t-a]=0;char first[4096];size_t prefix=a;if(prefix&&map_lookup(map,prefix,name,first))die("materials-map-duplicate",name);a=e+1;}}
  as_ident id;if(as_identity(root,1,&id,why,sizeof why))die("live-identity",why);
@@ -93,17 +93,17 @@ static int cmd_material(int argc,char **argv){
  if(as_find_material(&m,argv[4]))die("material-already-registered",argv[4]);char p[4400],path[4096];size_t mn;join(p,sizeof p,session,"materials.tsv");char *map=as_read(p,0,&mn,why,sizeof why);if(!map)die("materials-map",why);if(!map_lookup(map,mn,argv[4],path))die("material-not-in-map",argv[4]);free(map);
  as_registry reg;if(as_registry_load(root,&reg,why,sizeof why))die("registry-metadata",why);int mk=declared_material(&reg,argv[4]);as_registry_free(&reg);if(mk<1)die("material-undeclared",argv[4]);
  char fp1[65],fp2[65],content[65];long entries=0;long long t0=as_now();
- if(as_material_measure(mk,path,0,fp1,0,why,sizeof why))die("material-fingerprint",why);if(as_material_measure(mk,path,1,content,&entries,why,sizeof why))die("material-content",why);if(as_material_measure(mk,path,0,fp2,0,why,sizeof why))die("material-fingerprint",why);if(strcmp(fp1,fp2))die("material-changed-while-hashing",argv[4]);
+ if(as_material_measure(mk,path,0,fp1,0,why,sizeof why))die("material-fingerprint",why);if(as_material_measure(mk,path,1,content,&entries,why,sizeof why))die("material-content",why);if(as_material_measure(mk,path,0,fp2,0,why,sizeof why))die("material-fingerprint",why);if(!tx_eq(fp1, fp2, 1L << 20))die("material-changed-while-hashing",argv[4]);
  np_buf b={0,0,0};np_puts(&b,"MATERIAL\t");np_puts(&b,argv[4]);np_puts(&b,"\t");np_puts(&b,path);np_puts(&b,"\tcontent=");np_puts(&b,content);np_puts(&b,"\tfingerprint=");np_puts(&b,fp1);np_puts(&b,"\tentries=");np_putll(&b,entries);as_material_tag(&b,mk);np_puts(&b,"\n");
  join(p,sizeof p,session,"session.tsv");int fd=open(p,O_WRONLY|O_APPEND|O_CLOEXEC|O_NOFOLLOW);if(fd<0)die("manifest-open",p);if(as_append(fd,session,"material",m.seq+1,b.p,b.n,why,sizeof why))die("manifest-append",why);close(fd);free(b.p);
  printf("MATERIAL\t%s\tpath=%s\tcontent=%s\tfingerprint=%s\tentries=%ld\thash_ns=%lld\tstate=PREPARED-identity-only\n",argv[4],path,content,fp1,entries,as_now()-t0);as_free(&m);close(lock);return 0;
 }
-static int decided(const as_manifest *m,const char *id){for(int i=0;i<m->nref;i++)if(tx_eq(m->ref[i].id, id, 1L << 20)&&strcmp(m->ref[i].verdict,"UNKNOWN"))return 1;return 0;}
+static int decided(const as_manifest *m,const char *id){for(int i=0;i<m->nref;i++)if(tx_eq(m->ref[i].id, id, 1L << 20)&&!tx_eq(m->ref[i].verdict, "UNKNOWN", 1L << 20))return 1;return 0;}
 static int cmd_pending(int argc,char **argv){
  if(argc!=4)die("usage","pending ROOT SESSION");canonical_root(argv[2]);existing_session(argv[3]);as_manifest m;if(as_load(session,&m,why,sizeof why))die("session-manifest",why);as_registry reg;if(as_registry_load(root,&reg,why,sizeof why))die("registry-metadata",why);int n=0;
- for(int i=0;i<reg.nb;i++){as_batch *b=&reg.b[i];if(strcmp(b->impl,"IMPLEMENTED")||decided(&m,b->id))continue;n++;int ready=1;if(strcmp(b->materials,"-")){const char *q=b->materials;tp_material_decl d;while(tp_material_next(&q,&d)>0){const as_material *x=as_find_material(&m,d.name);if(!x||x->kind!=d.kind)ready=0;}}
+ for(int i=0;i<reg.nb;i++){as_batch *b=&reg.b[i];if(!tx_eq(b->impl, "IMPLEMENTED", 1L << 20)||decided(&m,b->id))continue;n++;int ready=1;if(!tx_eq(b->materials, "-", 1L << 20)){const char *q=b->materials;tp_material_decl d;while(tp_material_next(&q,&d)>0){const as_material *x=as_find_material(&m,d.name);if(!x||x->kind!=d.kind)ready=0;}}
   printf("PENDING\t%s\twave_class=%s\tbudget=%d\tmaterials=%s\tmaterials_registered=%s\n",b->id,strcmp(b->materials,"-")?"heavy":"light-or-heavy",b->budget,b->materials,ready?"yes":"no");}
- int open=0;for(int i=0;i<m.nwave;i++){const as_wave *w=&m.wave[i];if(strcmp(w->mode,"split")||w->finished)continue;open++;printf("OPEN_ATTEMPT\t%s\tattempt=%s\tstate=%s\n",w->ids,w->nonce,w->superseded?"SUPERSEDED-UNKNOWN":w->run?"RUN-SEALED-AWAITING-FINISH":"STARTED-AWAITING-RUN");}
+ int open=0;for(int i=0;i<m.nwave;i++){const as_wave *w=&m.wave[i];if(!tx_eq(w->mode, "split", 1L << 20)||w->finished)continue;open++;printf("OPEN_ATTEMPT\t%s\tattempt=%s\tstate=%s\n",w->ids,w->nonce,w->superseded?"SUPERSEDED-UNKNOWN":w->run?"RUN-SEALED-AWAITING-FINISH":"STARTED-AWAITING-RUN");}
  printf("PENDING_SUMMARY\tundecided=%d\topen_attempts=%d\texecutor=%s\tqualification=NOT_DECIDED_HERE\n",n,open,m.has_executor?"REGISTERED":"ABSENT");as_registry_free(&reg);as_free(&m);return 0;
 }
 
@@ -117,7 +117,7 @@ static void hash_inputs(Job *j,char (*dst)[65]){for(int i=0;i<j->ninput;i++)if(a
 static void spawn(Job *j,const char *wavedir,const as_manifest *m){
  char *v[80];char storage[33][4400];int n=0,s=0;char secs[16];{int z=snprintf(secs,sizeof secs,"%d",j->seconds);if(z<0||(size_t)z>=sizeof secs){fprintf(stderr,"bound-format\n");exit(2);}};
  v[n++]=bound;v[n++]="--status";v[n++]=j->status;v[n++]=secs;v[n++]="sh";v[n++]=candidate;v[n++]=runner;v[n++]="--";v[n++]=root;v[n++]=(char *)wavedir;v[n++]=j->b->id;
- if(strcmp(j->b->materials,"-")){const char *q=j->b->materials;tp_material_decl d;while(tp_material_next(&q,&d)>0){const char *name=d.name;if(s==32)die("material-args",j->b->id);const as_material *x=as_find_material(m,name);if(!x||x->kind!=d.kind)die("material-unregistered-or-type",name);{int z=snprintf(storage[s],sizeof storage[s],"%s=%s",name,x->path);if(z<0||(size_t)z>=sizeof storage[s]){fprintf(stderr,"bound-format\n");exit(2);}};v[n++]=storage[s++];}}
+ if(!tx_eq(j->b->materials, "-", 1L << 20)){const char *q=j->b->materials;tp_material_decl d;while(tp_material_next(&q,&d)>0){const char *name=d.name;if(s==32)die("material-args",j->b->id);const as_material *x=as_find_material(m,name);if(!x||x->kind!=d.kind)die("material-unregistered-or-type",name);{int z=snprintf(storage[s],sizeof storage[s],"%s=%s",name,x->path);if(z<0||(size_t)z>=sizeof storage[s]){fprintf(stderr,"bound-format\n");exit(2);}};v[n++]=storage[s++];}}
  v[n]=0;j->t0=as_now();pid_t pid=fork();if(pid<0)die("fork",j->b->id);
  if(!pid){int o=open(j->out,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0600);int e=open(j->err,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0600);if(o<0||e<0||dup2(o,1)<0||dup2(e,2)<0||chdir(root))_exit(126);execv(bound,v);_exit(127);}
  j->pid=pid;
@@ -130,10 +130,10 @@ static int cmd_wave(int argc,char **argv){
  for(int i=0;i<m.nwave;i++)if(m.wave[i].changed)die("session-identity-changed-during-earlier-wave","start-a-new-session");
  as_registry reg;if(as_registry_load(root,&reg,why,sizeof why))die("registry-metadata",why);
  Job job[4];memset(job,0,sizeof job);np_buf ids={0,0,0};
- for(int i=0;i<count;i++){const char *id=argv[at+i];const as_batch *b=as_find_batch(&reg,id);if(!b)die("unknown-batch",id);if(strcmp(b->impl,"IMPLEMENTED"))die("batch-not-implemented",id);if(strcmp(b->platform,"lnx/x86_64"))die("batch-needs-another-native-host",id);
-  for(int k=0;k<i;k++)if(tx_eq(job[k].b->id, id, 1L << 20))die("duplicate-batch",id);if(decided(&m,id))die("batch-already-decided-in-session",id);if(light&&strcmp(b->materials,"-"))die("light-wave-requires-materials-free-batch",id);
+ for(int i=0;i<count;i++){const char *id=argv[at+i];const as_batch *b=as_find_batch(&reg,id);if(!b)die("unknown-batch",id);if(!tx_eq(b->impl, "IMPLEMENTED", 1L << 20))die("batch-not-implemented",id);if(!tx_eq(b->platform, "lnx/x86_64", 1L << 20))die("batch-needs-another-native-host",id);
+  for(int k=0;k<i;k++)if(tx_eq(job[k].b->id, id, 1L << 20))die("duplicate-batch",id);if(decided(&m,id))die("batch-already-decided-in-session",id);if(light&&!tx_eq(b->materials, "-", 1L << 20))die("light-wave-requires-materials-free-batch",id);
   job[i].b=b;if(as_entry(root,b,&m,job[i].entry,why,sizeof why))die("batch-entry",why);char src[4400];join(src,sizeof src,root,b->source);add_input(&job[i],src);add_input(&job[i],job[i].entry);plan_inputs(&job[i]);
-  if(strcmp(b->materials,"-")){const char *q=b->materials;tp_material_decl d;while(tp_material_next(&q,&d)>0){const char *name=d.name;const as_material *x=as_find_material(&m,name);if(!x||x->kind!=d.kind)die("material-unregistered-or-type",name);char fp[65];if(as_material_fp(x,fp,why,sizeof why)||strcmp(fp,x->fingerprint))die("material-changed-since-registration",name);}}
+  if(!tx_eq(b->materials, "-", 1L << 20)){const char *q=b->materials;tp_material_decl d;while(tp_material_next(&q,&d)>0){const char *name=d.name;const as_material *x=as_find_material(&m,name);if(!x||x->kind!=d.kind)die("material-unregistered-or-type",name);char fp[65];if(as_material_fp(x,fp,why,sizeof why)||!tx_eq(fp, x->fingerprint, 1L << 20))die("material-changed-since-registration",name);}}
   job[i].before=calloc((size_t)job[i].ninput,sizeof *job[i].before);job[i].after=calloc((size_t)job[i].ninput,sizeof *job[i].after);if(!job[i].before||!job[i].after)die("allocation",0);hash_inputs(&job[i],job[i].before);
   if(i)np_puts(&ids,",");np_puts(&ids,id);}
  int window=(int)(deadline-now_s()-12.0);if(window<3)die("insufficient-wave-window","outer window minus after-measurement reserve below 3 s");
@@ -151,8 +151,8 @@ static int cmd_wave(int argc,char **argv){
  if(changed)fprintf(stderr,"all-waves: identity changed during wave: %s %s\n",changed,measured?"":why);
  np_buf fb={0,0,0};np_puts(&fb,"FINISH\twave=");np_putll(&fb,seq);np_puts(&fb,"\tidentity=");np_puts(&fb,identity_stable?"STABLE":"CHANGED");np_puts(&fb,"\tstart_ns=");np_putll(&fb,w0);np_puts(&fb,"\tend_ns=");np_putll(&fb,w1);np_puts(&fb,"\n");
  int npass=0,nfail=0,nunknown=0;
- for(int i=0;i<count;i++){Job *j=&job[i];hash_inputs(j,j->after);int inputs_stable=1;for(int k=0;k<j->ninput;k++)if(strcmp(j->before[k],j->after[k]))inputs_stable=0;
-  np_buf mat={0,0,0};int materials_stable=1;if(strcmp(j->b->materials,"-")){const char *q=j->b->materials;tp_material_decl d;while(tp_material_next(&q,&d)>0){const char *name=d.name;const as_material *x=as_find_material(&m,name);char fp[65];if(!x||x->kind!=d.kind)die("material-unregistered-or-type",name);if(as_material_fp(x,fp,why,sizeof why)){ if (cx_fmt(fp, sizeof fp, "%s","0000000000000000000000000000000000000000000000000000000000000000")) { fprintf(stderr, "all-waves: text too long for fp\n"); exit(2); } }if(strcmp(fp,x->fingerprint))materials_stable=0;
+ for(int i=0;i<count;i++){Job *j=&job[i];hash_inputs(j,j->after);int inputs_stable=1;for(int k=0;k<j->ninput;k++)if(!tx_eq(j->before[k], j->after[k], 1L << 20))inputs_stable=0;
+  np_buf mat={0,0,0};int materials_stable=1;if(!tx_eq(j->b->materials, "-", 1L << 20)){const char *q=j->b->materials;tp_material_decl d;while(tp_material_next(&q,&d)>0){const char *name=d.name;const as_material *x=as_find_material(&m,name);char fp[65];if(!x||x->kind!=d.kind)die("material-unregistered-or-type",name);if(as_material_fp(x,fp,why,sizeof why)){ if (cx_fmt(fp, sizeof fp, "%s","0000000000000000000000000000000000000000000000000000000000000000")) { fprintf(stderr, "all-waves: text too long for fp\n"); exit(2); } }if(!tx_eq(fp, x->fingerprint, 1L << 20))materials_stable=0;
    np_puts(&mat,"material\t");np_puts(&mat,name);np_puts(&mat,"\t");np_puts(&mat,x->path);np_puts(&mat,"\t");np_puts(&mat,x->content);np_puts(&mat,"\t");np_puts(&mat,x->fingerprint);np_puts(&mat,"\t");np_puts(&mat,fp);as_material_tag(&mat,x->kind);np_puts(&mat,"\n");}}
   size_t on=0,en=0,sn=0;char *out=as_read(j->out,0,&on,why,sizeof why),*err=as_read(j->err,0,&en,why,sizeof why);if(!out||!err)die("child-transcript",why);char oh[65],eh[65],sh[65];cx_sha256_hex(out,on,oh);cx_sha256_hex(err,en,eh);
   struct stat st;errno=0;int status_known=!lstat(j->status,&st);if(!status_known&&errno!=ENOENT)die("status-file-stat",j->status);long long raw=0;
@@ -197,10 +197,10 @@ static int cmd_start(int argc,char **argv){
  int lock=as_lock(session,1,why,sizeof why);if(lock<0)die("session-lock",why);as_manifest m;if(as_load(session,&m,why,sizeof why))die("session-manifest",why);as_ident live;check_identity(&m,&live);refuse_changed_session(&m);
  if(!m.has_executor)die("executor-not-registered","run all-waves executor ROOT SESSION first");
  as_registry reg;if(as_registry_load(root,&reg,why,sizeof why))die("registry-metadata",why);const as_batch *b=as_find_batch(&reg,id);
- if(!b)die("unknown-batch",id);if(strcmp(b->impl,"IMPLEMENTED"))die("batch-not-implemented",id);if(strcmp(b->platform,"lnx/x86_64"))die("batch-needs-another-native-host",id);if(decided(&m,id))die("batch-already-decided-in-session",id);
+ if(!b)die("unknown-batch",id);if(!tx_eq(b->impl, "IMPLEMENTED", 1L << 20))die("batch-not-implemented",id);if(!tx_eq(b->platform, "lnx/x86_64", 1L << 20))die("batch-needs-another-native-host",id);if(decided(&m,id))die("batch-already-decided-in-session",id);
  Job j;memset(&j,0,sizeof j);j.b=b;if(as_entry(root,b,&m,j.entry,why,sizeof why))die("batch-entry",why);char src[4400];join(src,sizeof src,root,b->source);add_input(&j,src);add_input(&j,j.entry);plan_inputs(&j);
  np_buf mat={0,0,0};
- if(strcmp(b->materials,"-")){const char *q=b->materials;tp_material_decl d;while(tp_material_next(&q,&d)>0){const char *name=d.name;const as_material *x=as_find_material(&m,name);if(!x||x->kind!=d.kind)die("material-unregistered-or-type",name);char fp[65];if(as_material_fp(x,fp,why,sizeof why)||strcmp(fp,x->fingerprint))die("material-changed-since-registration",name);
+ if(!tx_eq(b->materials, "-", 1L << 20)){const char *q=b->materials;tp_material_decl d;while(tp_material_next(&q,&d)>0){const char *name=d.name;const as_material *x=as_find_material(&m,name);if(!x||x->kind!=d.kind)die("material-unregistered-or-type",name);char fp[65];if(as_material_fp(x,fp,why,sizeof why)||!tx_eq(fp, x->fingerprint, 1L << 20))die("material-changed-since-registration",name);
    np_puts(&mat,"material\t");np_puts(&mat,name);np_puts(&mat,"\t");np_puts(&mat,x->path);np_puts(&mat,"\t");np_puts(&mat,x->content);np_puts(&mat,"\t");np_puts(&mat,x->fingerprint);as_material_tag(&mat,x->kind);np_puts(&mat,"\n");}}
  j.before=calloc((size_t)j.ninput,sizeof *j.before);if(!j.before)die("allocation",0);hash_inputs(&j,j.before);
  char nonce[65],dir[64],base[4400],p[4400],leaf[200];urandom_hex(nonce);{ if (cx_fmt(dir,sizeof dir,"attempt-%.16s",nonce)) { fprintf(stderr, "all-waves: text too long for dir\n"); exit(2); } }join(base,sizeof base,session,dir);if(mkdir(base,0700))die("attempt-dir-must-be-new",base);
@@ -220,19 +220,19 @@ static int cmd_run(int argc,char **argv){
  if(argc!=5)die("usage","run ROOT SESSION ID");const char *id=argv[4];
  {const char *d=getenv("UNISACC_BOUND_DEADLINE_MONO");char *end=0;if(!d||!*d)die("outer-bound-required","run under tools/bound 58");deadline=strtod(d,&end);double left=deadline-now_s();if(!end||*end||left<=0||left>60.5)die("outer-bound-58-max-required",d);}
  double left_at_entry=deadline-now_s();canonical_root(argv[2]);existing_session(argv[3]);
- char self[4096],want[4400],rb[4400],h[65];join(want,sizeof want,session,"executor/all-waves");join(rb,sizeof rb,session,"executor/run-batch");if(!realpath("/proc/self/exe",self)||strcmp(self,want))die("run-requires-the-session-native-executor",want);
- int lock=as_lock(session,1,why,sizeof why);if(lock<0)die("session-lock",why);as_manifest m;if(as_load(session,&m,why,sizeof why))die("session-manifest",why);if(strcmp(m.root,root))die("session-root-mismatch",m.root);
- if(!m.has_executor)die("executor-not-registered",session);if(as_sha_file(want,0,h,0,why,sizeof why)||strcmp(h,m.exec_sha))die("executor-changed",want);if(as_sha_file(rb,0,h,0,why,sizeof why)||strcmp(h,m.runner_sha))die("executor-changed",rb);
- if(as_sha_file(candidate,0,h,0,why,sizeof why)||strcmp(h,m.ident.candidate))die("session-candidate-changed","start-a-new-session");refuse_changed_session(&m);
+ char self[4096],want[4400],rb[4400],h[65];join(want,sizeof want,session,"executor/all-waves");join(rb,sizeof rb,session,"executor/run-batch");if(!realpath("/proc/self/exe",self)||!tx_eq(self, want, 1L << 20))die("run-requires-the-session-native-executor",want);
+ int lock=as_lock(session,1,why,sizeof why);if(lock<0)die("session-lock",why);as_manifest m;if(as_load(session,&m,why,sizeof why))die("session-manifest",why);if(!tx_eq(m.root, root, 1L << 20))die("session-root-mismatch",m.root);
+ if(!m.has_executor)die("executor-not-registered",session);if(as_sha_file(want,0,h,0,why,sizeof why)||!tx_eq(h, m.exec_sha, 1L << 20))die("executor-changed",want);if(as_sha_file(rb,0,h,0,why,sizeof why)||!tx_eq(h, m.runner_sha, 1L << 20))die("executor-changed",rb);
+ if(as_sha_file(candidate,0,h,0,why,sizeof why)||!tx_eq(h, m.ident.candidate, 1L << 20))die("session-candidate-changed","start-a-new-session");refuse_changed_session(&m);
  const as_wave *w=0;for(int i=0;i<m.nwave;i++)if(tx_eq(m.wave[i].mode, "split", 1L << 20)&&tx_eq(m.wave[i].ids, id, 1L << 20)&&!m.wave[i].finished&&!m.wave[i].superseded)w=&m.wave[i];
  if(!w)die("attempt-not-started",id);if(w->run)die("attempt-already-run",w->nonce);
- as_registry reg;if(as_registry_load(root,&reg,why,sizeof why))die("registry-metadata",why);const as_batch *b=as_find_batch(&reg,id);if(!b||strcmp(b->impl,"IMPLEMENTED"))die("batch-not-implemented",id);
+ as_registry reg;if(as_registry_load(root,&reg,why,sizeof why))die("registry-metadata",why);const as_batch *b=as_find_batch(&reg,id);if(!b||!tx_eq(b->impl, "IMPLEMENTED", 1L << 20))die("batch-not-implemented",id);
  char *v[48];char storage[33][4400];int n=0,s=0;char base[4400],out[4400],err[4400],status[4400],secs[16];join(base,sizeof base,session,w->dir);jobpath(out,base,id,"stdout");jobpath(err,base,id,"stderr");jobpath(status,base,id,"status");
  /* bound 58 has a hard deadline at +60.  Keep four seconds for waitpid,
     hashing and the RUN append; a prompt fork still grants the child all 55. */
  int seconds=55;{double avail=deadline-now_s()-4.0;if(avail<55)seconds=(int)avail;int need=b->budget<55?b->budget:55;if(seconds<need)die("run-window-below-budget","run under tools/bound 58");}{ if (cx_fmt(secs,sizeof secs,"%d",seconds)) { fprintf(stderr, "all-waves: text too long for secs\n"); exit(2); } }
  v[n++]=bound;v[n++]="--status";v[n++]=status;v[n++]=secs;v[n++]=rb;v[n++]=root;v[n++]=base;v[n++]=(char *)id;
- if(strcmp(b->materials,"-")){const char *q=b->materials;tp_material_decl d;while(tp_material_next(&q,&d)>0){const char *name=d.name;if(s==32)die("material-args",id);const as_material *x=as_find_material(&m,name);if(!x||x->kind!=d.kind)die("material-unregistered-or-type",name);char fp[65];if(as_material_fp(x,fp,why,sizeof why)||strcmp(fp,x->fingerprint))die("material-changed-since-registration",name);{ if (cx_fmt(storage[s],sizeof storage[s],"%s=%s",name,x->path)) { fprintf(stderr, "all-waves: text too long for storage[s]\n"); exit(2); } }v[n++]=storage[s++];}}
+ if(!tx_eq(b->materials, "-", 1L << 20)){const char *q=b->materials;tp_material_decl d;while(tp_material_next(&q,&d)>0){const char *name=d.name;if(s==32)die("material-args",id);const as_material *x=as_find_material(&m,name);if(!x||x->kind!=d.kind)die("material-unregistered-or-type",name);char fp[65];if(as_material_fp(x,fp,why,sizeof why)||!tx_eq(fp, x->fingerprint, 1L << 20))die("material-changed-since-registration",name);{ if (cx_fmt(storage[s],sizeof storage[s],"%s=%s",name,x->path)) { fprintf(stderr, "all-waves: text too long for storage[s]\n"); exit(2); } }v[n++]=storage[s++];}}
  v[n]=0;double left_at_fork=deadline-now_s();long long t0=as_now();pid_t pid=fork();if(pid<0)die("fork",id);
  if(!pid){int o=open(out,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0600);int e=open(err,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0600);if(o<0||e<0||dup2(o,1)<0||dup2(e,2)<0||chdir(root))_exit(126);execv(bound,v);_exit(127);}
  int st=0;pid_t got;do{got=waitpid(pid,&st,0);}while(got<0&&errno==EINTR);if(got!=pid)die("waitpid",id);long long t1=as_now();int bound_rc=WIFEXITED(st)?WEXITSTATUS(st):128+(WIFSIGNALED(st)?WTERMSIG(st):0);

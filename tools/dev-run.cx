@@ -30,9 +30,9 @@ static void file(np_buf *b,const char *p,int scan){struct stat a,c;char resolved
 static int strings(const void *a,const void *b){return strcmp(*(char *const *)a,*(char *const *)b);}
 static char **children(const char *p,int *count){DIR *d=opendir(p);if(!d)bad("directory-open");char **v=0;int n=0;for(;;){errno=0;struct dirent *e=readdir(d);if(!e){int saved=errno,closed=closedir(d);if(saved||closed)bad("directory-read-close");break;}if(tx_eq(e->d_name, ".", 1L << 20)||tx_eq(e->d_name, "..", 1L << 20))continue;if(n==8192)bad("directory-count-bound");char **w=realloc(v,(size_t)(n+1)*sizeof *v);if(!w)bad("allocation");v=w;v[n]=strdup(e->d_name);if(!v[n])bad("allocation");n++;}qsort(v,(size_t)n,sizeof *v,strings);*count=n;return v;}
 static void tree(np_buf *b,const char *p,int depth){if(depth>32||++tree_entries>8192)bad("tree-bound");struct stat a,c;if(lstat(p,&a))bad("tree-stat");if(!S_ISDIR(a.st_mode)){file(b,p,0);return;}field(b,p);field(b,"directory");num(b,(long long)(a.st_mode&07777));int n;char **v=children(p,&n);num(b,n);for(int i=0;i<n;i++){char q[4400];path(q,p,v[i]);tree(b,q,depth+1);free(v[i]);}free(v);if(lstat(p,&c)||!same(&a,&c))bad("directory-changed");}
-static void pinned(np_buf *b,const char *p,const char *expected){size_t n;char *s=read_actual(p,&n,0);char h[65];hash(s,n,h);free(s);if(strcmp(h,expected))bad("compiled-source-or-native-pin");field(b,p);field(b,h);}
+static void pinned(np_buf *b,const char *p,const char *expected){size_t n;char *s=read_actual(p,&n,0);char h[65];hash(s,n,h);free(s);if(!tx_eq(h, expected, 1L << 20))bad("compiled-source-or-native-pin");field(b,p);field(b,h);}
 static void canonical(const char *p,char out[4400]){if(!realpath(p,out))bad("canonical-path");}
-static void plan(np_buf *b,char **v,const char *inc,const char *cwd){np_result r={0};char why[1200];if(np_run(v,cwd,0,10,&r,why,sizeof why)||r.rc||r.errn||!r.outn||r.outn>1048576||memchr(r.out,0,r.outn)||memchr(r.out,'\r',r.outn)||r.out[r.outn-1]!='\n')bad("incomplete-cx-plan");field(b,r.out);char *at=r.out;int units=0;while(*at){char *end=strchr(at,'\n');*end=0;char *tab=strchr(at,'\t');if(!tab)bad("plan-row");*tab=0;char index[20];snprintf(index,sizeof index,"%d",units);if(strcmp(at,index)||++units>256)bad("plan-index-or-unit-bound");if(units>16)uncached=1;at=tab+1;int col=0;for(;;){tab=strchr(at,'\t');if(tab)*tab=0;if(!*at||strlen(at)>=4400)bad("plan-empty-or-long-field");char p[4400];if(tx_eq(at, "cx.h", 1L << 20))path(p,inc,"cx.h");else if(at[0]=='/')snprintf(p,sizeof p,"%s",at);else path(p,cwd,at);file(b,p,col==0);col++;if(!tab)break;at=tab+1;}if(col<2)bad("plan-cx-prelude-missing");at=end+1;}if(!units)bad("empty-plan");np_free(&r);}
+static void plan(np_buf *b,char **v,const char *inc,const char *cwd){np_result r={0};char why[1200];if(np_run(v,cwd,0,10,&r,why,sizeof why)||r.rc||r.errn||!r.outn||r.outn>1048576||memchr(r.out,0,r.outn)||memchr(r.out,'\r',r.outn)||r.out[r.outn-1]!='\n')bad("incomplete-cx-plan");field(b,r.out);char *at=r.out;int units=0;while(*at){char *end=strchr(at,'\n');*end=0;char *tab=strchr(at,'\t');if(!tab)bad("plan-row");*tab=0;char index[20];snprintf(index,sizeof index,"%d",units);if(!tx_eq(at, index, 1L << 20)||++units>256)bad("plan-index-or-unit-bound");if(units>16)uncached=1;at=tab+1;int col=0;for(;;){tab=strchr(at,'\t');if(tab)*tab=0;if(!*at||strlen(at)>=4400)bad("plan-empty-or-long-field");char p[4400];if(tx_eq(at, "cx.h", 1L << 20))path(p,inc,"cx.h");else if(at[0]=='/')snprintf(p,sizeof p,"%s",at);else path(p,cwd,at);file(b,p,col==0);col++;if(!tab)break;at=tab+1;}if(col<2)bad("plan-cx-prelude-missing");at=end+1;}if(!units)bad("empty-plan");np_free(&r);}
 static char **compiler_environment(char **caller){size_t n=0;for(char **p=caller;*p;p++)if(++n>65536)bad("environment-count");char **v=calloc(n+2,sizeof *v);if(!v)bad("allocation");size_t k=0;for(char **p=caller;*p;p++)if(strncmp(*p,"UNISACC_E3CACHE=",16)&&strncmp(*p,"UNISACC_RUN_CACHE=",18))v[k++]=*p;v[k++]="UNISACC_RUN_CACHE=0";return v;}
 static void environment(np_buf *b){np_buf e={0};for(char **p=environ;*p;p++){
  /* The outer bound sets a fresh absolute deadline for every invocation.
@@ -68,13 +68,13 @@ int main(int argc,char **argv){
  int at=2;char *opt="-O0";
  if(tx_eq(argv[at], "--opt=0", 1L << 20)||tx_eq(argv[at], "--opt=2", 1L << 20)){opt=argv[at][6]=='2'?"-O2":"-O0";if(++at>=argc)bad("source-required");}
  const char *source=argv[at++];size_t sn=strlen(source);
- if(sn<3||strcmp(source+sn-3,".cx")||source[0]=='-')bad("only-cx-source");
+ if(sn<3||!tx_eq(source+sn-3, ".cx", 1L << 20)||source[0]=='-')bad("only-cx-source");
  if(sn>=sizeof src)bad("source-path-bound");memcpy(src,source,sn+1);
- if(at<argc&&strcmp(argv[at++],"--"))bad("program-arguments-require-separator");
+ if(at<argc&&!tx_eq(argv[at++], "--", 1L << 20))bad("program-arguments-require-separator");
  path(native,root,"unisacc.com");char *shell="/bin/sh";pkg[0]=0;
  const char *e=getenv("UNISACC_DEV_MODELS");if(e&&*e)canonical(e,pkg);
  e=getenv("UNISACC_DEV_INCLUDE");if(e&&*e)canonical(e,inc);else path(inc,root,"include");path(bound,root,"tools/bound");
- char k[65];if(ks_sha256_hex("",0,k)||strcmp(k,"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")||ks_sha256_hex("abc",3,k)||strcmp(k,"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"))bad("kernel-sha-selfcheck");
+ char k[65];if(ks_sha256_hex("",0,k)||!tx_eq(k, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", 1L << 20)||ks_sha256_hex("abc",3,k)||!tx_eq(k, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", 1L << 20))bad("kernel-sha-selfcheck");
  char **caller_environ=environ;environ=compiler_environment(caller_environ);
  /* Only compiler options enter the key. The output role is stable; the actual
   * fresh attempt path and all runtime program arguments never enter it. */
@@ -97,7 +97,7 @@ int main(int argc,char **argv){
   command[out_at]=program;int rc=execute(command,cwd);command[out_at]=role;
   if(rc)return rc;
   manifest(after,root,native,shell,pkg,inc,bound,cwd,command,planv);
-  if(strcmp(before,after)||uncached!=no_cache)bad("inputs-changed-during-compilation");
+  if(!tx_eq(before, after, 1L << 20)||uncached!=no_cache)bad("inputs-changed-during-compilation");
   struct stat st;if(lstat(program,&st)||!S_ISREG(st.st_mode)||st.st_uid!=getuid())bad("compiler-output-not-regular-owned");
   if(chmod(program,0700))bad("compiler-output-mode");
   char blobs[65];if(inventory(attempt,blobs)!=1)bad("invalid-native-elf-output");

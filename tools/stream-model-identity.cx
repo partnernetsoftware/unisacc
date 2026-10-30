@@ -19,7 +19,7 @@ static char *PK; static size_t PN, POS;
 static int nsame, ndiff, nnotrun;
 static const char *units; static int ninfo;
 static int counted(const char *unit) { if (tx_eq(units, "all", 1L << 20)) return 1; size_t n = strlen(unit); const char *p = units; while ((p = strstr(p, unit))) { if ((p == units || p[-1] == ',' || p[-1] == ':') && (!p[n] || p[n] == ',' || p[n] == ':')) return 1; p += n; } return 0; }
-static void row(const char *st, const char *unit, const char *what, const char *detail) { if (!counted(unit) && strcmp(st, "NOT_RUN")) st = "INFO"; printf("%s\t%s.id.same-candidate-model\t%s\t%s\n", st, unit, what, detail); if (tx_eq(st, "SAME", 1L << 20)) nsame++; else if (tx_eq(st, "DIFFERENT", 1L << 20)) ndiff++; else if (tx_eq(st, "INFO", 1L << 20)) ninfo++; else nnotrun++; }
+static void row(const char *st, const char *unit, const char *what, const char *detail) { if (!counted(unit) && !tx_eq(st, "NOT_RUN", 1L << 20)) st = "INFO"; printf("%s\t%s.id.same-candidate-model\t%s\t%s\n", st, unit, what, detail); if (tx_eq(st, "SAME", 1L << 20)) nsame++; else if (tx_eq(st, "DIFFERENT", 1L << 20)) ndiff++; else if (tx_eq(st, "INFO", 1L << 20)) ninfo++; else nnotrun++; }
 /* one ASCII header line split on single spaces; returns field count */
 static int line(char *v[8], char buf[2048]) { size_t s = POS, k; int n = 0; if (POS >= PN) die("truncated header");
     while (POS < PN && PK[POS] != '\n') { if (PK[POS] < 32 || PK[POS] > 126) die("non-ASCII header"); POS++; }
@@ -44,11 +44,11 @@ int main(int argc, char **argv) {
     char ph[65]; cx_sha256_hex(PK, PN, ph);
     printf("IDENTITY\tstreams.json=%s\tcandidate_file=%s\tp3=%s\tmode=%s\n", jh, ch, ph, check ? "check" : "compare");
     /* P3 directory: P 3 pm ps nr; ps D lines; pm M lines + compressed bytes */
-    char *v[8], buf[2048]; POS = 0; int n = line(v, buf); if (n != 5 || strcmp(v[0], "P") || strcmp(v[1], "3")) die("not canonical P3");
+    char *v[8], buf[2048]; POS = 0; int n = line(v, buf); if (n != 5 || !tx_eq(v[0], "P", 1L << 20) || !tx_eq(v[1], "3", 1L << 20)) die("not canonical P3");
     int pm = (int)num(v[2], 65536), ps = (int)num(v[3], 65536); if (pm < 1) die("no models");
-    for (int i = 0; i < ps; i++) { n = line(v, buf); if (n != 6 || strcmp(v[0], "D")) die("stream directory line"); }
+    for (int i = 0; i < ps; i++) { n = line(v, buf); if (n != 6 || !tx_eq(v[0], "D", 1L << 20)) die("stream directory line"); }
     size_t *mat = calloc((size_t)pm, sizeof *mat), *mdata = calloc((size_t)pm, sizeof *mdata), *mcomp = calloc((size_t)pm, sizeof *mcomp), *mbytes = calloc((size_t)pm, sizeof *mbytes); if (!mat || !mdata || !mcomp || !mbytes) die("alloc");
-    for (int i = 0; i < pm; i++) { mat[i] = POS; n = line(v, buf); if (n != 5 || strcmp(v[0], "M")) die("model header"); unsigned long long len = num(v[1], PN); if (!len || len > PN - POS) die("model truncated"); mdata[i] = POS; mcomp[i] = (size_t)len; POS += (size_t)len; mbytes[i] = POS - mat[i]; }
+    for (int i = 0; i < pm; i++) { mat[i] = POS; n = line(v, buf); if (n != 5 || !tx_eq(v[0], "M", 1L << 20)) die("model header"); unsigned long long len = num(v[1], PN); if (!len || len > PN - POS) die("model truncated"); mdata[i] = POS; mcomp[i] = (size_t)len; POS += (size_t)len; mbytes[i] = POS - mat[i]; }
     /* receipt header */
     char src[80]; if (!field(js, js + jn, "source_package_sha256", src, sizeof src)) die("receipt source_package_sha256");
     row(tx_eq(src, ph, 1L << 20) ? "SAME" : "DIFFERENT", "all", "source-package", src);
@@ -65,12 +65,12 @@ int main(int argc, char **argv) {
         if (!fb) { { if (cx_fmt(detail, sizeof detail, "%s errno=%d", file, errno)) { fprintf(stderr, "stream-model-identity: text too long for detail\n"); exit(2); } } if (errno != ENOENT) die(detail); row("NOT_RUN", unit, "container-file", detail); }
         else { char fh[65]; cx_sha256_hex(fb, fn, fh); free(fb); { if (cx_fmt(detail, sizeof detail, "%s file=%.16s receipt=%.16s", file, fh, csha)) { fprintf(stderr, "stream-model-identity: text too long for detail\n"); exit(2); } } row(tx_eq(fh, csha, 1L << 20) ? "SAME" : "DIFFERENT", unit, "container-file", detail); }
         if (check) { /* self-test: stable rehash and one-byte tamper detection on this model's payload */
-            char again[65]; cx_sha256_hex(PK + mdata[idx], mcomp[idx], again); if (strcmp(again, mh)) die("self-check: rehash differs");
+            char again[65]; cx_sha256_hex(PK + mdata[idx], mcomp[idx], again); if (!tx_eq(again, mh, 1L << 20)) die("self-check: rehash differs");
             char *t = malloc(mcomp[idx]); if (!t) die("alloc"); { void *cx_kept = memcpy(t, PK + mdata[idx], mcomp[idx]); (void)cx_kept; } t[mcomp[idx] / 2] ^= 0x5a; cx_sha256_hex(t, mcomp[idx], again); free(t);
             if (tx_eq(again, mh, 1L << 20)) die("self-check: tamper not detected"); row("SAME", unit, "self-check", "rehash stable, one-byte tamper detected"); }
         p = e; }
     if (entries != 7) { char d[64]; { if (cx_fmt(d, sizeof d, "%d entries, expected 7", entries)) { fprintf(stderr, "stream-model-identity: text too long for d\n"); exit(2); } } row("DIFFERENT", "all", "entry-count", d); }
-    if (strcmp(units, "all")) printf("INFO\tscope\tunits=%s only; whole-package identity is the all.* rows above\n", units);
+    if (!tx_eq(units, "all", 1L << 20)) printf("INFO\tscope\tunits=%s only; whole-package identity is the all.* rows above\n", units);
     printf("STREAM_MODEL_IDENTITY\tunits=%s\tsame=%d\tdifferent=%d\tinfo=%d\tnot_run=%d\n", units, nsame, ndiff, ninfo, nnotrun);
     free(js); free(cand); return ndiff || nnotrun ? 1 : 0;
 }

@@ -46,7 +46,7 @@ static void record_controller(void){
 }
 static int number(const char *s){char *end;long n=strtol(s,&end,10);if(!s[0]||*end||n<0||n>107)die("number");return (int)n;}
 static void wave(const char *phase,int first,int count,const char *action){
- if(strcmp(action,"start-job")&&strcmp(action,"finish-job"))die("start/finish action");if(count<1||count>4)die("concurrency1..4");enumerate();char prefix[20];checked(cx_fmt(prefix,sizeof prefix,"%s-",phase));int selected[107],n=0;for(int i=0;i<nids;i++)if(!strncmp(ids[i],prefix,strlen(prefix)))selected[n++]=i;if(first+count>n)die("phase extent");
+ if(!tx_eq(action, "start-job", 1L << 20)&&!tx_eq(action, "finish-job", 1L << 20))die("start/finish action");if(count<1||count>4)die("concurrency1..4");enumerate();char prefix[20];checked(cx_fmt(prefix,sizeof prefix,"%s-",phase));int selected[107],n=0;for(int i=0;i<nids;i++)if(!strncmp(ids[i],prefix,strlen(prefix)))selected[n++]=i;if(first+count>n)die("phase extent");
  pid_t pids[4];fflush(stdout);for(int j=0;j<count;j++){pids[j]=fork();if(pids[j]<0)die("fork");if(!pids[j]){const char *id=ids[selected[first+j]];char label[180];checked(cx_fmt(label,sizeof label,"%s-%s",action,id));exit(call(action,id,label));}}
  int bad=0;for(int j=0;j<count;j++){int st;pid_t p;do{p=waitpid(pids[j],&st,0);}while(p<0&&errno==EINTR);if(p!=pids[j]||!WIFEXITED(st)||WEXITSTATUS(st)){bad++;printf("UNKNOWN_OR_FAILED %s %s wait_status=%d\n",action,ids[selected[first+j]],p==pids[j]?st:-1);}}if(bad)die("wave failed; raw outputs retained");printf("WAVE phase=%s first=%d count=%d action=%s all_outer_rc0\n",phase,first,count,action);
 }
@@ -54,7 +54,7 @@ static void success(const char *label){char p[4400];checked(cx_fmt(p,sizeof p,"%
 static void final(void){
  enumerate();if(call("--verify-context",0,"verify-final"))die("final context verification");np_buf b={0};np_puts(&b,"# actual start/finish outer statuses, command status and formal record required\n# job\tstart_outer_rc\tfinish_outer_rc\tcommand_rc\trecord\n");
  for(int i=0;i<nids;i++){char label[180],p[4400];checked(cx_fmt(label,sizeof label,"start-job-%s",ids[i]));success(label);checked(cx_fmt(label,sizeof label,"finish-job-%s",ids[i]));success(label);checked(cx_fmt(p,sizeof p,"%s/jobs/%s/command.status",ctx,ids[i]));size_t n;char *s=load(p,&n);if(n!=5||memcmp(s,"rc\t0\n",5))die("actual job command status");free(s);checked(cx_fmt(p,sizeof p,"%s/jobs/%s/record.tsv",ctx,ids[i]));struct stat st;if(lstat(p,&st)||!S_ISREG(st.st_mode)||st.st_size<=0)die("formal record absent");np_puts(&b,ids[i]);np_puts(&b,"\t0\t0\t0\t");np_puts(&b,p);np_puts(&b,"\n");}
- char jobs[4400];path(jobs,ctx,"jobs");DIR *d=opendir(jobs);if(!d)die("jobs directory");int actual=0;for(;;){errno=0;struct dirent *e=readdir(d);if(!e){int er=errno;if(closedir(d)||er)die("jobs iteration");break;}if(strcmp(e->d_name,".")&&strcmp(e->d_name,".."))actual++;}if(actual!=107)die("formal job directory count");
+ char jobs[4400];path(jobs,ctx,"jobs");DIR *d=opendir(jobs);if(!d)die("jobs directory");int actual=0;for(;;){errno=0;struct dirent *e=readdir(d);if(!e){int er=errno;if(closedir(d)||er)die("jobs iteration");break;}if(!tx_eq(e->d_name, ".", 1L << 20)&&!tx_eq(e->d_name, "..", 1L << 20))actual++;}if(actual!=107)die("formal job directory count");
  char p[4400];path(p,build,"job-outer-statuses.tsv");save(p,b.p,b.n);free(b.p);puts("PREPARED formal source context and107 jobs; all actual start/finish/command statuses0; no PC/GEN/install/package/test qualification");
 }
 int main(int argc,char **argv){
