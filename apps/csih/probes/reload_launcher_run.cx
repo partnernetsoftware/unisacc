@@ -371,8 +371,12 @@ static int lock_free(const char *dir) {
 
 static int mkpriv(const char *p) { return sy_mkdir(p, 0700) == 0 && sy_chmod(p, 0700) == 0; }
 
-int main(void) {
+int main(int argc, char **argv) {
     static char out[8192], h1[80], h2[80], tmpv[200];
+    /* --prepare: only build the two cached binaries (cold ~28s) and stop: PREPARED,
+       never PASS. A cold cache plus the run (~12-20s) came within 1s of the
+       contract's 55s budget; after a closure change run --prepare first. */
+    int prepare_only = argc > 1 && tx_eqz(argv[1], "--prepare");
     const char *bin_env = sy_env("CSIH_BIN");
     long t0 = sy_now_ms(), at, at2;
     int rc, n, pid_old, pid_new, k;
@@ -400,6 +404,13 @@ int main(void) {
         static char absbin[800];
         if (bin_env && bin_env[0]) csih = bin_env;
         else { tx_snprintf(absbin, sizeof absbin, "%s/out/csih-e2e-bin/csih", repo); csih = absbin; }
+    }
+    if (prepare_only) {
+        if (sy_exists(ws) == 0 && !mkpriv(ws)) { sy_printf("reload_launcher_run: cannot make %s\n", ws); return 1; }
+        if (sy_exists(cache) == 0 && !mkpriv(cache)) { sy_printf("reload_launcher_run: cannot make %s\n", cache); return 1; }
+        if (!prepare_bins()) { sy_printf("reload_launcher_run: PREPARE FAILED\n"); return 1; }
+        sy_printf("reload_launcher_run: PREPARED (binaries cached; nothing verified)\n");
+        return 0;
     }
     if (sy_stat(csih, &s) != 0) { sy_printf("reload_launcher_run: FAIL no csih binary at %s (csih.sh prepare)\n", csih); return 1; }
     if (!tw_open("launcher")) { sy_printf("reload_launcher_run: FAIL tmux is not on PATH\n"); return 1; }
