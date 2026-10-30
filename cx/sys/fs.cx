@@ -211,14 +211,36 @@ int sy_stat(const char *path, sy_stat_t *out) {
     return sy_stat_os(path, out);
 }
 
-/* lstat PATH (a link is reported as kind 'l') into OUT. 0, or -errno. */
-int sy_lstat(const char *path, sy_stat_t *out) {
+/* The prelude's Windows lstat is a call to stat, and stat is not a Windows
+   function. This branch does not call either. A symlink is not kind 'l'. */
+static int sy_lstat_os(const char *path, sy_stat_t *out) {
+#ifdef _WIN32
+    return sy_stat_os(path, out);
+#else
     struct stat s;
     errno = 0;
-    if (!path || !path[0] || !out) return -EINVAL;
     if (lstat(path, &s) != 0) return sy_fail();
     sy_fill(&s, out);
     return 0;
+#endif
+}
+
+/* lstat PATH (a link is reported as kind 'l') into OUT. 0, or -errno.
+   On Windows, kind is 'f' or 'd' only. */
+int sy_lstat(const char *path, sy_stat_t *out) {
+    if (!path || !path[0] || !out) return -EINVAL;
+    return sy_lstat_os(path, out);
+}
+
+/* 1 when PATH is a regular file, 0 when it exists and is not, -ENOENT when
+   absent, otherwise -errno. Linux uses lstat, so a symlink is not regular. */
+int sy_is_reg(const char *path) {
+    sy_stat_t st;
+    int rc;
+    if (!path || !path[0]) return -EINVAL;
+    rc = sy_lstat(path, &st);
+    if (rc != 0) return rc;
+    return st.kind == 'f' ? 1 : 0;
 }
 
 /* Rename FROM to TO. 0, or -errno. */
@@ -235,12 +257,25 @@ int sy_unlink(const char *path) {
     return unlink(path) == 0 ? 0 : sy_fail();
 }
 
+/* Same Windows limit as sy_lstat: do not call the prelude lstat. */
+static int sy_exists_os(const char *path) {
+#ifdef _WIN32
+    sy_stat_t st;
+    int rc;
+    rc = sy_stat_os(path, &st);
+    if (rc == 0) return 1;
+    return rc == -ENOENT ? 0 : rc;
+#else
+    struct stat s;
+    errno = 0;
+    if (lstat(path, &s) == 0) return 1;
+    return errno == ENOENT ? 0 : sy_fail();
+#endif
+}
+
 /* 1 when PATH exists, 0 only when it does not (ENOENT), -errno for every
    other failure (ENOTDIR, EACCES, ...): those are not "absent". */
 int sy_exists(const char *path) {
-    struct stat s;
-    errno = 0;
     if (!path || !path[0]) return -EINVAL;
-    if (lstat(path, &s) == 0) return 1;
-    return errno == ENOENT ? 0 : sy_fail();
+    return sy_exists_os(path);
 }
