@@ -1,14 +1,20 @@
 # csih 的 Python 依赖登记
 
-2026-10-30 盘点。原有 34 个 `.py`，分两批归档到 `archive/reference-py/apps/csih/`，相对路径不变：第一批 28 个，第二批 5 个。现在只剩 1 个，而且它的调用方在仓外。apps/csih 的 `.cx` / `.h` / `.sh` 里已经没有 `python3` 调用。
+2026-10-30 盘点。原有 34 个 `.py`，分三批归档到 `archive/reference-py/apps/csih/`，相对路径不变：第一批 28 个，第二批 5 个，第三批 1 个。**apps/csih 里已经没有 `.py`**，`.cx` / `.h` / `.sh` 里也没有 `python3` 调用。
 
 判定"活调用方"的依据：有 `.cx` / `.h` 把它当路径字符串传给 exec，有 `.sh` 直接调用，或有仓外入口调用。注释里写"C port of X.py"的不算。
 
-## 仍在用的（1 个）
+## 第三批归档（1 个，2026-10-30）
 
-| 文件 | 调用方 | 为什么还没去掉 | 去掉的条件 |
-| --- | --- | --- | --- |
-| `apps/csih/deepseek-proxy.py` | 仓外的 `moltbaby/bin/rawcsih`（`python3 "$CSIH_DIR/deepseek-proxy.py"`），当明文代理跳到 api.deepseek.com | `net.cx` 已经能直连 https，csih 本身用不着这个跳板了；但 rawcsih 还在拉起它，而 rawcsih 不在本仓 | rawcsih 改成直接用 `https://api.deepseek.com` 端点之后归档 |
+| 原文件 | 换成了什么 | 证据 |
+| --- | --- | --- |
+| `deepseek-proxy.py`（本机明文代理，转发到 api.deepseek.com） | `apps/csih/deepseek-proxy.cx`；仓外调用方 `moltbaby/bin/rawcsih` 改为首次把它编译到 `~/.cache/csih/deepseek-proxy`，`.cx` 或 `net.cx` 比缓存新时重编，然后拉起 | 探针 `probes/deepseek_proxy.cx` 12 条，合同 `deepseek-proxy`；另用 rawcsih 的启动段对真 DeepSeek 发了一次请求，返回 200 和一个 completion |
+
+- 行为和 `.py` 一样：只转发 POST `/v1/chat/completions` 和 `/chat/completions`，其它路径 404，GET 501，没有 key 500，上游的状态和正文原样透传，传输失败 502。
+- key 的来源和 csih 相同：先看 `DEEPSEEK_API_KEY`，没有再读 `~/env.jsonl`。由 net.cx 只在发往 api.deepseek.com 时加上。
+- 移植中查出并修了 `net.cx` 的一个缺陷：明文 http 请求把头和正文拼进一个 8KB 的缓冲，所以正文超过约 8KB 的请求一律被拒（-2002）。
+  - 影响：rawcsih 正是让 csih 走 `http://127.0.0.1` 这个明文端点，而 agent 的请求常有 30KB 左右。
+  - 修法：现在头和正文分开发送，探针用 200KB 的正文验证过。
 
 ## 第二批归档（5 个，2026-10-30）
 

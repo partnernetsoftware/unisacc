@@ -145,6 +145,11 @@ agent 模式新增 `/help`、`/status`、`/clear`，均只在本地处理、不�
 - **第十批已落地（2026-10-29）**：忙碌行。原来执行命令时一直显示「等模型」；现在收到 exec 行（命令执行前发出）就显示 `跑命令 <命令>`，下一次请求在途（`net_in_flight()`）时切回「等模型」。文案从 `请求中 等模型 3秒 7745词元 上传 32839字节 已收 574字节 hit 1152 miss 6561` 改为 `⏳ 等模型 3秒 · 7745词元 · ↑32.1KB 已收574B · 缓存命中15%`，保留「已收」二字（已有断言依赖它）。selftest：`busy line names the running command and reads sizes`；tmux 实测已见切换。原来 exec 同步执行时秒数不走、界面不刷新，第十一批已解决。
 - **第四十二批已落地（2026-10-29）**：状态行上色：`✓` 绿、`◐` 黄、`✗` 和 `│ blocked:` 红、`项目>` 青。颜色只在写终端时加（`tui_put_line`），帧本身仍是纯文本，宽度计算、差量比较和所有读取帧的测试都不受影响；差量刷新改用 tui 自己的循环，`render.cx` 的 `frame_diff` 没动。遵守 `NO_COLOR`，也可以用 `CSIH_COLOR=0` 关闭。写屏缓冲按每行 32 字节预留，满屏彩色行也放得下。selftest：`status rows are coloured on output, frames stay plain`（设了 NO_COLOR 时打印 skip）；tmux `capture-pane -e` 实测 `◐` 行带 `ESC[33m`。
   - 观察（不是本批改动引起）：一道不用工具的算术题，这次评审判为「未验证」（理由是没有工具记录可核实）；之前同类问题判过「已验收（answer_only）」。评审对纯问答的判法不稳定，第四十三批处理。
+- **第六十五批已落地（2026-10-30）**：最后一个 `.py` 迁成 cx，apps/csih 不再有 Python。
+  - `deepseek-proxy.py` 迁成 `deepseek-proxy.cx`，原文件已归档；仓外的 rawcsih 改为编译到缓存后拉起 cx 版。
+  - 探针 `probes/deepseek_proxy.cx` 12 条，合同 `deepseek-proxy`；另对真 DeepSeek 做了一次端到端请求，返回 200。
+  - 顺带修了 `net.cx`：明文 http 请求不再受 8KB 限制（原来正文过大一律被拒，rawcsih 走的正是这条路）。
+  - 详见 `docs/python-debt.md`。
 - **第六十四批已落地（2026-10-30）**：csih.com 细节（见 `docs/csih-com.md`）。
   - **体积**：8.9MB 降到 1.34MB。新增 L0 压缩器 `cx/text/deflate.cx`（LZ77 + 动态 Huffman，无 libc），检查 `tools/check-cx-deflate.cx`：15 条用系统 `gzip -dc` 对拍，结果全部一致。ape-pack 加 `--deflate`，不带时输出逐字节不变。
   - **位置**：成品放在 `apps/csih/csih.com`，和 `csih.cx` 同目录，git 忽略；中间切片仍在 `out/csih-ape/`。
