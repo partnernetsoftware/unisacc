@@ -262,6 +262,27 @@ static void route_preprocess(void){
  r=pp_run(d,0,cap,"pp-capture");ck(r.rc==2&&!r.outn&&tx_find(r.err,(long)r.errn,why,tx_len(why,128))>=0&&sy_lstat(cap,&s)==-ENOENT,"preprocess-E-capture-refused");np_free(&r);
  r=pp_run(d,led,0,"pp-strict");ck(r.rc==2&&!r.outn&&tx_find(r.err,(long)r.errn,why,tx_len(why,128))>=0,"preprocess-E-strict-refused");np_free(&r);
 }
+/* ri.capture.cli-dir-preconditions (tools/ri.md: the capture directory must be new, empty, or hold only a regular
+   empty resources.tsv; initialization owns a private guard): the installed CLI capturing the incq fixture into
+   a nonempty dir           -- capture-dir-not-empty, the foreign file intact, no ledger written;
+   a dir whose guard .capture-begin already exists -- capture-session-busy, the guard kept, no ledger;
+   a dir whose resources.tsv is a FIFO -- capture-ledger-not-regular, the FIFO left as it is;
+   a dir whose resources.tsv already has rows -- capture-ledger-rows-before-identity, the ledger bytes unchanged;
+   each with rc 2 and empty stdout; and a dir with only an empty resources.tsv is accepted (an #SC2 ledger). */
+static void capture_preconditions(void){
+ char d[4400],c[4400],p[4400],q[4400];sy_stat_t s;np_result r;path(d,sizeof d,work,"incq");
+ path(c,sizeof c,work,"cap-nonempty");if(sy_mkdir(c,0700))die("cap dir");path(p,sizeof p,c,"keep.txt");save(p,"keep",4);path(q,sizeof q,c,"resources.tsv");
+ r=key_run(d,0,c,"m.c","cap-nonempty");{size_t n;char *k=load(p,&n);ck(r.rc==2&&!r.outn&&tx_find(r.err,(long)r.errn,"INTERFACE_ERROR capture-dir-not-empty",37)>=0&&n==4&&mm_same(k,"keep",4)&&sy_lstat(q,&s)==-ENOENT,"capture-nonempty-refused");mm_free(k);}np_free(&r);
+ path(c,sizeof c,work,"cap-busy");if(sy_mkdir(c,0700))die("cap dir");path(p,sizeof p,c,".capture-begin");if(sy_mkdir(p,0700))die("guard");path(q,sizeof q,c,"resources.tsv");
+ r=key_run(d,0,c,"m.c","cap-busy");ck(r.rc==2&&!r.outn&&tx_find(r.err,(long)r.errn,"INTERFACE_ERROR capture-session-busy",36)>=0&&sy_lstat(p,&s)==0&&s.kind=='d'&&sy_lstat(q,&s)==-ENOENT,"capture-existing-guard-refused");np_free(&r);
+ path(c,sizeof c,work,"cap-fifo");if(sy_mkdir(c,0700))die("cap dir");path(q,sizeof q,c,"resources.tsv");
+ {char *mk[]={"mkfifo",q,0},why[1024];np_result m;if(np_run(mk,root,0,5,&m,why,sizeof why)||m.rc)die("mkfifo");np_free(&m);}   /* fixture only: L0 has no sy_mkfifo yet */
+ r=key_run(d,0,c,"m.c","cap-fifo");ck(r.rc==2&&!r.outn&&tx_find(r.err,(long)r.errn,"INTERFACE_ERROR capture-ledger-not-regular",42)>=0&&sy_lstat(q,&s)==0&&s.kind=='p',"capture-fifo-ledger-refused");np_free(&r);
+ path(c,sizeof c,work,"cap-rows");if(sy_mkdir(c,0700))die("cap dir");path(q,sizeof q,c,"resources.tsv");save(q,"ff\t0\t-\t0\t-\n",11);
+ r=key_run(d,0,c,"m.c","cap-rows");{size_t n;char *k=load(q,&n);ck(r.rc==2&&!r.outn&&tx_find(r.err,(long)r.errn,"INTERFACE_ERROR capture-ledger-rows-before-identity",51)>=0&&n==11&&mm_same(k,"ff\t0\t-\t0\t-\n",11),"capture-rows-before-identity-refused");mm_free(k);}np_free(&r);
+ path(c,sizeof c,work,"cap-legacy");if(sy_mkdir(c,0700))die("cap dir");path(q,sizeof q,c,"resources.tsv");save(q,"",0);
+ r=key_run(d,0,c,"m.c","cap-legacy");{size_t n;char *k=load(q,&n);ck(r.rc==0&&!r.errn&&r.outn>0&&n>5&&tx_prefix(k,(long)n,"#SC2\t",5),"capture-legacy-empty-ledger-accepted");mm_free(k);}np_free(&r);
+}
 static void key_length_bound(void){
  char dir[4400],s512[32],s513[32],cap512[4400],cap513[4400],p[4400];path(dir,sizeof dir,work,"keylen");if(sy_mkdir(dir,0700))die("keylen dir");
  key_source(dir,512,s512,sizeof s512);key_source(dir,513,s513,sizeof s513);path(cap512,sizeof cap512,dir,"cap512");path(cap513,sizeof cap513,dir,"cap513");
@@ -307,4 +328,4 @@ int main(int argc,char **argv){int trace_mode=argc>3&&tx_eqz(argv[argc-1], "--tr
  /* ri.frame.row-field-too-long: a 4096-byte field is one above the parser bound (width >= 4096) */
  {np_buf longrow={0};np_puts(&longrow,"ff\t0\t");for(int k=0;k<4096;k++)np_put(&longrow,"a",1);np_puts(&longrow,"\t0\t-\n");appended("row-field-4096",longrow.p,longrow.n,"resource-row-field-too-long");mm_free(longrow.p);}
  const char nulrow[]="ff\t0\t-\t0\t-\0hidden\n";appended("embedded-nul-row",nulrow,sizeof nulrow-1,"resource-row-nul");np_buf nulheader={0};np_put(&nulheader,ledger,header-1);np_put(&nulheader,"\0hidden\n",8);np_put(&nulheader,ledger+header,ledger_n-header);refuse("embedded-nul-header",nulheader.p,nulheader.n,"resource-row-nul");free(nulheader.p);
- ledger_preconditions();identity_bounds();key_length_bound();inc_states(0);route_preprocess();inc_states(1);cli_options();hdr_states();length_blob("blob-longer-than-declared",3);length_blob("blob-shorter-than-declared",5);repeated();additional();replay=invoke(capdir,root,0,"recovery");path(p,sizeof p,work,"normal.stdout");size_t recovery_n;char *recovery=load(p,&recovery_n);ck(replay.rc==0&&!replay.errn&&replay.outn==recovery_n&&!memcmp(replay.out,recovery,recovery_n),"strict-recovery-after-refusals");free(recovery);np_free(&replay);free(ledger);return finish(before,container_before,"SC1-map-compatibility-from-verified-SC2-trace");}
+ ledger_preconditions();identity_bounds();key_length_bound();inc_states(0);route_preprocess();capture_preconditions();inc_states(1);cli_options();hdr_states();length_blob("blob-longer-than-declared",3);length_blob("blob-shorter-than-declared",5);repeated();additional();replay=invoke(capdir,root,0,"recovery");path(p,sizeof p,work,"normal.stdout");size_t recovery_n;char *recovery=load(p,&recovery_n);ck(replay.rc==0&&!replay.errn&&replay.outn==recovery_n&&!memcmp(replay.out,recovery,recovery_n),"strict-recovery-after-refusals");free(recovery);np_free(&replay);free(ledger);return finish(before,container_before,"SC1-map-compatibility-from-verified-SC2-trace");}
