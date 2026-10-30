@@ -110,6 +110,29 @@ static void identity_bounds(void){
  const char *levels[5]={"-O1","-O2","-O0","-O0","-O0"},*targets[5]={"lnx/x86_64","lnx/x86_64","lnx/arm64","osx/x86_64","win/x86_64"};
  for(int i=0;i<5;i++)ck(bound_case(names[i],levels[i],targets[i]),names[i]);
 }
+/* ri.frame.key-length-bound: a quote include named so its key "\0inc/q/NAME" is 512 bytes is captured and replayed;
+   at 513 bytes capture is refused capture-key-length, and a strict fetch (ledger re-bound to that source) is refused
+   "resource key too long", both with empty stdout */
+static void key_source(const char *dir,int keylen,char *src_name,int cap){
+ char name[600],p[1200];int at=0;
+ for(int s=0;s<5;s++){for(int k=0;k<99;k++)name[at++]='d';name[at]=0;if(cx_fmt(p,sizeof p,"%s/%s",dir,name)||(sy_mkdir(p,0700)&&sy_exists(p)!=1))die("key dir");name[at++]='/';}
+ int hs=keylen-7-at-2;for(int k=0;k<hs;k++)name[at++]='h';name[at++]='.';name[at++]='h';name[at]=0;
+ if(cx_fmt(p,sizeof p,"%s/%s",dir,name))die("key header");save(p,"int v=1;\n",9);
+ char body[700];if(cx_fmt(src_name,cap,"m%d.c",keylen)||cx_fmt(p,sizeof p,"%s/%s",dir,src_name)||cx_fmt(body,sizeof body,"#include \"%s\"\nint main(void){return v;}\n",name))die("key source");save(p,body,tx_len(body,sizeof body));}
+static np_result key_run(const char *dir,const char *ledger,const char *capture,const char *srcname,const char *name){char *v[20];int n=command_prefix(v,8);if(ledger){v[n++]="--strict-resource-flow";v[n++]="--resource-ledger";v[n++]=(char *)ledger;}v[n++]="-O0";v[n++]="-b";v[n++]="lnx/x86_64";v[n++]="-S";v[n++]=(char *)srcname;v[n++]="-o";v[n++]="-";v[n]=0;return command(v,dir,capture,8,name);}
+static void key_length_bound(void){
+ char dir[4400],s512[32],s513[32],cap512[4400],cap513[4400],p[4400];path(dir,sizeof dir,work,"keylen");if(sy_mkdir(dir,0700))die("keylen dir");
+ key_source(dir,512,s512,sizeof s512);key_source(dir,513,s513,sizeof s513);path(cap512,sizeof cap512,dir,"cap512");path(cap513,sizeof cap513,dir,"cap513");
+ np_result a=key_run(dir,0,cap512,s512,"key-512-capture");ck(a.rc==0&&!a.errn&&a.outn>0,"key-512-capture-accept");
+ np_result b=key_run(dir,cap512,0,s512,"key-512-strict");ck(b.rc==0&&!b.errn&&b.outn==a.outn&&a.outn>0&&mm_same(b.out,a.out,(long)a.outn),"key-512-strict-accept");np_free(&b);np_free(&a);
+ np_result c=key_run(dir,0,cap513,s513,"key-513-capture");ck(c.rc==2&&!c.outn&&tx_find(c.err,(long)c.errn,"INTERFACE_ERROR capture-key-length",34)>=0,"key-513-capture-refused");np_free(&c);
+ /* the 512 ledger re-bound to the 513 source (input_sha256 is the source digest) reaches the fetch of the 513-byte key */
+ size_t tn,sn;path(p,sizeof p,cap512,"resources.tsv");char *table=load(p,&tn);path(p,sizeof p,dir,s513);char *srcb=load(p,&sn);char hash[65];cx_sha256_hex(srcb,sn,hash);mm_free(srcb);
+ long at=tx_find(table,(long)tn,"input_sha256=",13);if(at<0||at+13+64>(long)tn)die("key identity");for(int k=0;k<64;k++)table[at+13+k]=hash[k];
+ char keep[4400];if(tx_copy(keep,sizeof keep,capdir,tx_len(capdir,sizeof capdir))||tx_copy(capdir,sizeof capdir,cap512,tx_len(cap512,sizeof cap512)))die("capdir");
+ char ledger513[4400];material("keylen-strict-513",table,tn,ledger513);if(tx_copy(capdir,sizeof capdir,keep,tx_len(keep,sizeof keep)))die("capdir");mm_free(table);
+ np_result d=key_run(dir,ledger513,0,s513,"key-513-strict");ck(d.rc==2&&!d.outn&&tx_find(d.err,(long)d.errn,"resource key too long",21)>=0,"key-513-strict-refused");np_free(&d);
+}
 static void ledger_preconditions(void){
  char none[4400],file[4400],locked[4400];path(none,sizeof none,work,"ledger-none");path(file,sizeof file,work,"ledger-file");path(locked,sizeof locked,work,"ledger-locked");
  save(file,"x",1);if(sy_mkdir(locked,0700)||sy_chmod(locked,0))die("locked ledger");
@@ -133,4 +156,4 @@ int main(int argc,char **argv){int trace_mode=argc>3&&tx_eqz(argv[argc-1], "--tr
  /* ri.frame.row-field-too-long: a 4096-byte field is one above the parser bound (width >= 4096) */
  {np_buf longrow={0};np_puts(&longrow,"ff\t0\t");for(int k=0;k<4096;k++)np_put(&longrow,"a",1);np_puts(&longrow,"\t0\t-\n");appended("row-field-4096",longrow.p,longrow.n,"resource-row-field-too-long");mm_free(longrow.p);}
  const char nulrow[]="ff\t0\t-\t0\t-\0hidden\n";appended("embedded-nul-row",nulrow,sizeof nulrow-1,"resource-row-nul");np_buf nulheader={0};np_put(&nulheader,ledger,header-1);np_put(&nulheader,"\0hidden\n",8);np_put(&nulheader,ledger+header,ledger_n-header);refuse("embedded-nul-header",nulheader.p,nulheader.n,"resource-row-nul");free(nulheader.p);
- ledger_preconditions();identity_bounds();repeated();additional();replay=invoke(capdir,root,0,"recovery");path(p,sizeof p,work,"normal.stdout");size_t recovery_n;char *recovery=load(p,&recovery_n);ck(replay.rc==0&&!replay.errn&&replay.outn==recovery_n&&!memcmp(replay.out,recovery,recovery_n),"strict-recovery-after-refusals");free(recovery);np_free(&replay);free(ledger);return finish(before,container_before,"SC1-map-compatibility-from-verified-SC2-trace");}
+ ledger_preconditions();identity_bounds();key_length_bound();repeated();additional();replay=invoke(capdir,root,0,"recovery");path(p,sizeof p,work,"normal.stdout");size_t recovery_n;char *recovery=load(p,&recovery_n);ck(replay.rc==0&&!replay.errn&&replay.outn==recovery_n&&!memcmp(replay.out,recovery,recovery_n),"strict-recovery-after-refusals");free(recovery);np_free(&replay);free(ledger);return finish(before,container_before,"SC1-map-compatibility-from-verified-SC2-trace");}
