@@ -24,6 +24,8 @@
   11. [cx/runtime/stream_output 迁移 sys.fs](#已落地cx-runtimestream_outputcx-迁移到-sysfsl1-产品模块去裸-libc2026-10-30cc)
   12. [mem.grow 补 mg_move/mg_take（所有权）](#已落地mem-grow-补-mg_move--mg_takerust-式所有权转移2026-10-30cc)
   13. [cx/core/sparse 迁移 mem.heap](#已落地cx-coresparsecx-迁移到-memheap执行器稀疏表去裸-libc2026-10-30cc)
+  14. [mem.grow 补 mg_pop/mg_truncate/mg_clear；text 补 tx_suffix/tx_trim；build 补 sb_clear（Rust 尾部操作）](#已落地mem-grow-补-mg_popmg_truncatemg_cleartext-补-tx_suffixtx_trimbuild-补-sb_clear2026-10-30)
+  15. [sys.fs 补 sy_rmdir + check-* 工具 mem.bytes 批量迁移；cx-namespace 锁定模块循环拒绝](#已落地sysfs-补-sy_rmdir--工具-membytes-批量迁移--锁定模块循环拒绝2026-10-30)
 
 ## 层
 
@@ -275,6 +277,23 @@ feedback 反复指出「内存安全未触及更广的 Rust 式所有权/借用�
 - `docs/cx/prd.md` 索引段新增 `plans/cx-layers.md`（底层/上层分层重构）。
 - `plans/cx-layers.md` 开头新增「目录」小节，列出设计节 + 13 个已落地项的可回归索引。
 
+
+## 已落地：mem.grow 补 mg_pop/mg_truncate/mg_clear；text 补 tx_suffix/tx_trim；build 补 sb_clear（2026-10-30）
+
+L0 库补齐 Rust 的 O(1) 尾部操作与 str 后缀/裁剪（不受 closure-once 约束，因 L0 白名单，且新符号自动经 drive.o 内联进产品不重复）。
+
+- `cx/mem/grow.cx` 补 `mg_pop`（Vec::pop，返回值不悬垂）、`mg_truncate`（Vec::truncate，原地缩短）、`mg_clear`（Vec::clear，保留分配）。都是 O(1)、不 realloc，regrow 复用已分配块。
+- `cx/text/text.cx` 补 `tx_suffix`（str::ends_with / Node endsWith）、`tx_trim`/`tx_trimc`（str::trim / trim_matches）。
+- `cx/text/build.cx` 补 `sb_clear`（String::clear）。
+- 验收：`practice-grow`/`practice-build`/`check-cx-text` 全 failed=0；`cx/mem/README.md`、`cx/text/README.md` 索引新接口。
+
+## 已落地：sys.fs 补 sy_rmdir + 工具 mem.bytes 批量迁移 + 锁定模块循环拒绝（2026-10-30）
+
+- `cx/sys/fs.cx` 补 `sy_rmdir`（std::fs::remove_dir）；`tools/check-package-decode-real.cx`、`refusals.cx` 的裸 `rmdir`/`unlink` 迁到 `sy_rmdir`/`sy_unlink`。
+- 工具层 mem.bytes 批量迁移（-run 单源，不受 closure-once 影响）：`check-driver-cli.cx` 107 处 libc 全清零（memset→mm_fill、memcmp→mm_same、memcpy→mm_copy、printf→sy_printf，libc=0 host=0）；`check-driver-*` 7 文件 77 处、`check-attribute-frame` 等 4 文件 57 处、`check-model-lifetime` 7 处。规则在 `tools/refactor/membytes.tsv`（memset-fill/not-memcmp-same/memcpy-copy）。
+- `tests/cx-namespace.cx` 追加模块循环拒绝锁定：`a→b→a` 与自循环都硬拒绝（`cx: module cycle`），是 Rust mod-graph 规范 + spec §3「v1 模块导入图拒绝循环」的验收。
+- 边界：`check-model-decode.cx` 的 memcpy 迁移被软链归一阻塞（runtime.model_decode 已 use mem.bytes，再直接 use 重复）——坑一实例，已回退。
+- 验收：五个棘轮全绿（cxlibc 23462→23267，cxraw 15809→14793）。
 
 ## 三个坑（cc 2026-10-30 提醒，本目标设计须遵守）
 
