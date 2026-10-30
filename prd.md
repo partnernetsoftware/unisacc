@@ -172,10 +172,10 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 ├─ 性能（plans/perf-bottlenecks-2026-10-30.md）
 │  ├─ B1 E2 每个 #include 整缓冲重扫：前导部分已解（4f4a2ae2b3，include/cx.h → 生成的单文件 cx-flat.h，tools/cx-flatten.cx --check；空 main E2 1.74→0.09 s，候选冷编 facts-gen 40.5→16.8 s）；用户自己的 #include 仍待规则方案
 │  ├─ B2 执行器自编 -O2 代码质量：主人定走汇编。cx/core/kernel.cx（f03c5a940d）接包内 UNIKERN1；入口已切 src/executor.cx use core.kernel。候选编 driveface.o 34.4s→11.8s，e4 推理 14.8s→5.39s
-│  └─ B3 每次运行固定开销约 113 ms（包解析 + 模型解压）；候选无 run-cache
-├─ 去 Python：已归档的在 archive/reference-py/；事实表 30 张全部改由 tools/facts-gen.cx 原生生成并 --check（31/0，含 bank 归属检查），export.py 与其闭包已归档；gold 表由 tools/gold-table.cx 检查与重写；剩下的活 Python 只有 unisa emit-kernel 闭包（kernel/ 生成者）和 release/、apps/ 各自域
+│  └─ B3 每次运行固定开销约 113 ms（包解析 + 模型解压）；候选 run-cache 由 grk 移植中（src/runcache.cx，2026-10-30 未提交）；合同 tests/runcache.cx（批次 runcache，12 项，产品 12/0，首次 556 ms／命中 61 ms）
+├─ 去 Python：已归档的在 archive/reference-py/；事实表 30 张由 tools/facts-gen.cx 生成并 --check，kernel/ 由 tools/kernel-emit.cx 生成，unisa 包已归档；活 .py 只剩 3 个：apps/csih/deepseek-proxy.py（仓外 rawcsih 拉起，待主人定改 rawcsih 直连）、release/apeinspect.py 与 release/tools/draftfetch.py（CI 用；release/apeinspect.cx 输出一致，工作流补丁在 out/ci-draft/，待授权）
 ├─ 分层：plans/cx-layers.md；L0 包 cx/text、cx/mem（arena）、cx/sys（env/fs/proc/time/net，unisacc-00，检查 tools/check-cx-sys.cx），棘轮 tests/cxraw.cx（上层直接 libc/POSIX 调用只降不升）；include/cx.h 与 cx_read/cx_write/cx_run* 收编归 cc
-├─ 卫生：cx 三棘轮（cxinclude/cxapis/cxtrunc）已不计 archive/，但 HEAD 超基线 52/71/170 行（多在 apps/csih）
+├─ 卫生：cx 四棘轮不计 archive/ 与已跟踪符号链接（f638c861e5，原把 31 个链接重复计数）；cxraw 绿（19800）；cxinclude/cxapis/cxtrunc 超基线 29/16/81 个文件，csih 车道占 28/16/74，其余是 grk 在改的 src/* 与 cx/runtime、cx/compiler 5 处已核为有界的截断（out/cxtrunc-candidate-pending.md，候选提交后标记）
 └─ 分层棘轮：tests/cxraw.cx（plans/cx-layers.md）——上层 .cx 直接 libc/POSIX 只降不升、新文件须 0；csih 下层封装已入 tests/cxraw-layers.tsv（netwit/tmuxwit/retry_stub/tclock），apps/csih/tests/run.cx 已迁 tx_* 至 0
 ```
 
