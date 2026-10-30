@@ -22,6 +22,7 @@
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
 #pragma unisa use sys.env
+#pragma unisa use sys.time
 #pragma unisa use mem.arena
 #pragma unisa use text.text
 
@@ -205,6 +206,12 @@ static int find_file(Buf *out, const char *file, int autoacc) {
                 cls = R->cls; why = "rule";
                 if (ml) { cls = "review"; why = "spans lines"; }
                 if (cm) { cls = "review"; why = "holds a comment"; }
+                if (!tx_eq(R->use, "-", 4) && !has_use(b, n, R->use) && tx_find(b, n, "#pragma unisa module", 20) >= 0) {
+                    /* a used module that gains a use: its dependents may then pull the same module in through
+                       another link path, which the installed product counts twice; compiling the module alone
+                       cannot show that */
+                    cls = "review"; why = "module file would gain a use";
+                }
                 if (!module_reachable(file, R->use)) { cls = "skip"; why = "no module link beside the file"; }
                 if (in_reserved(file)) { cls = "skip"; why = "reserved path"; }
                 {   char num[64];
@@ -385,6 +392,8 @@ static char *edited(Job *J, long *outn) {
     *outn = o.n; return o.p;
 }
 
+static long range_from = 0, range_count = -1;   /* --range A N: only files A..A+N-1 (in file order) */
+static long deadline_ms = 48000;   /* no edit is started that its re-verify could not finish inside this */
 static int apply(const char *candpath, int jobs, const char *verify) {
     static Job js[MAXCAND];
     int nj = 0, c, j, ok = 0, skip = 0, rev = 0;
@@ -399,9 +408,23 @@ static int apply(const char *candpath, int jobs, const char *verify) {
         if (nj && tx_eq(js[nj - 1].file, cands[c].file, CAP)) { js[nj - 1].count++; continue; }
         js[nj].file = cands[c].file; js[nj].first = c; js[nj].count = 1; nj++;
     }
+    if (range_count >= 0) {   /* keep only the requested slice of files, so one call fits its time bound */
+        long a = range_from < nj ? range_from : nj, z = a + range_count < nj ? a + range_count : nj, q;
+        for (q = a; q < z; q++) js[q - a] = js[q];
+        nj = (int)(z - a);
+        printf("RANGE\tfiles %ld..%ld\n", a, z - 1);
+    }
+    long t0 = sy_now_ms(), deferred = 0;
     for (j = 0; j < nj; j += jobs) {
         int k, end = j + jobs < nj ? j + jobs : nj, state[MAXJOBS];
         Run run[MAXJOBS], twin[MAXJOBS]; char *tw_out[MAXJOBS];
+        long tb;
+        if (sy_now_ms() - t0 > deadline_ms / 2) {   /* no time for another baseline + re-verify: leave the rest */
+            for (k = j; k < nj; k++) printf("DEFER\t%s\tdeadline (run again with --range %d %d)\n", js[k].file, (int)(range_from + k), nj - k);
+            deferred = nj - j;
+            break;
+        }
+        tb = sy_now_ms();
         for (k = j; k < end; k++) {   /* baselines, each run twice at once: an unstable check cannot verify */
             Job *J = &js[k]; const char *cmd = verify, *cmd2 = verify;
             J->orig = cx_read(J->file, &J->on); J->out1 = J->out2 = 0; tw_out[k - j] = 0;
@@ -435,6 +458,14 @@ static int apply(const char *candpath, int jobs, const char *verify) {
                 }
             }
         }
+        {   /* the re-verify takes about as long as the baselines did; never edit what could not be re-checked */
+            long now = sy_now_ms(), base = now - tb;
+            if (now - t0 + base + base / 2 > deadline_ms) {
+                for (k = j; k < nj; k++) printf("DEFER\t%s\tdeadline before editing (run again with --range %d %d)\n", js[k].file, (int)(range_from + k), nj - k);
+                deferred = nj - j;
+                break;
+            }
+        }
         for (k = j; k < end; k++) {   /* edits, then every re-verify started together */
             Job *J = &js[k]; long nn; char *nb; const char *cmd = verify;
             if (state[k - j] < 0) { state[k - j] = 0; continue; }
@@ -466,7 +497,7 @@ static int apply(const char *candpath, int jobs, const char *verify) {
             printf("OK\t%s\t%d edits\n", J->file, J->count); ok++;
         }
     }
-    printf("REFACTOR\tok=%d\tskip=%d\trevert=%d\n", ok, skip, rev);
+    printf("REFACTOR\tok=%d\tskip=%d\trevert=%d\tdefer=%ld\telapsed_ms=%ld\n", ok, skip, rev, deferred, sy_now_ms() - t0);
     return rev ? 1 : 0;
 }
 
@@ -484,6 +515,12 @@ int main(int argc, char **argv) {
     if (argc >= 5 && tx_eq(argv[1], "apply", 8)) {
         Buf v = {0, 0, 0}; int k, jobs = (int)strtol(argv[3], 0, 10);
         if (jobs < 1 || jobs > MAXJOBS) die("JOBS 1..16");
+        if (argc >= 8 && tx_eq(argv[4], "--range", 8)) {
+            range_from = strtol(argv[5], 0, 10); range_count = strtol(argv[6], 0, 10);
+            if (range_from < 0 || range_count < 0) die("--range A N");
+            for (k = 7; k < argc; k++) argv[k - 3] = argv[k];   /* drop the three --range words */
+            argc -= 3;
+        }
         if (tx_eq(argv[4], "--verify-from", 16)) {   /* each file's registered batch is its check */
             if (argc != 6) die("apply CANDIDATES JOBS --verify-from REGISTRY");
             reg_text = cx_read(argv[5], &reg_n);
