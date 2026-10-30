@@ -217,6 +217,29 @@ int main(int argc, char **argv) {
         ok(run_child("lockf-free", h) == 0, "lockf: after unlock another process gets it");
         got = sy_at_fdcwd();
         ok(got < 0, "at_fdcwd is the negative AT_FDCWD of this target");
+        {
+            char names[256];
+            int n, seen_a = 0, seen_b = 0, seen_sub = 0, seen_lock = 0, other = 0, i = 0, k;
+            ok(sy_mkdirat(dfd, "sub", 0700) == 0 && sy_stat(root, &s) == 0, "mkdirat makes a directory in a directory fd");
+            ok(sy_mkdirat(dfd, "sub", 0700) == -EEXIST, "mkdirat over an existing name is -EEXIST");
+            n = sy_dir_names(dfd, names, sizeof names);
+            /* exactly N names, NUL after each: what follows the last one is not the function's */
+            for (k = 0; k < n && i < (int)sizeof names; k++, i += (int)tx_len(names + i, (long)sizeof names - i) + 1) {
+                if (tx_eq(names + i, "a", 8)) seen_a++;
+                else if (tx_eq(names + i, "b", 8)) seen_b++;
+                else if (tx_eq(names + i, "sub", 8)) seen_sub++;
+                else if (tx_eq(names + i, "lock", 8)) seen_lock++;
+                else if (!tx_eq(names + i, "file", 8) && !tx_eq(names + i, "timed", 8)) other++;
+            }
+            ok(n >= 4 && seen_a == 1 && seen_b == 1 && seen_sub == 1 && seen_lock == 1 && !other, "dir_names lists each entry once, without . and ..");
+            ok(sy_dir_names(dfd, names, sizeof names) == n, "dir_names twice gives the same count (the offset is rewound)");
+            ok(sy_dir_names(dfd, names, 4) == -ENOSPC, "dir_names into a too-small buffer is -ENOSPC");
+            ok(sy_dir_names(fd, names, sizeof names) == -ENOTDIR, "dir_names on a file fd is -ENOTDIR");
+            ok(sy_unlinkat(dfd, "b", 0) == 0 && sy_exists(g) == 0, "unlinkat removes a file name");
+            ok(sy_unlinkat(dfd, "sub", 0) == -EISDIR || sy_unlinkat(dfd, "sub", 0) == -EPERM, "unlinkat of a directory without the dir flag is refused");
+            ok(sy_unlinkat(dfd, "sub", 1) == 0, "unlinkat with the dir flag removes an empty directory");
+            ok(sy_unlinkat(dfd, "missing", 0) == -ENOENT, "unlinkat of a missing name is -ENOENT");
+        }
     }
 
     ok(cx_rmtree(root) == 0 && sy_exists(root) == 0, "cleanup: scratch removed through the deletion guard");

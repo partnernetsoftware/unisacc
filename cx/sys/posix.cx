@@ -9,21 +9,26 @@
    (Windows) every call is -ENOSYS: stated, not emulated. The interface is
    the same on every target; only the numbers below differ. */
 
+/* syp_dents: getdents64 on Linux, getdirentries64 on macOS (different record layouts, see sy_dir_names). */
 #if defined(__APPLE__)
 static const long syp_ok = 1, syp_setsid = 147, syp_getpgid = 151, syp_socketpair = 135, syp_ioctl = 54,
                   syp_openat = 463, syp_linkat = 471, syp_flock = 131,
+                  syp_mkdirat = 475, syp_unlinkat = 472, syp_dents = 344, syp_mac = 1, syp_at_removedir = 0x80,
                   syp_tiocgpgrp = 0x40047477L, syp_tiocspgrp = 0x80047476L, syp_at_fdcwd = -2;
 #elif defined(__linux__) && defined(__aarch64__)
 static const long syp_ok = 1, syp_setsid = 157, syp_getpgid = 155, syp_socketpair = 199, syp_ioctl = 29,
                   syp_openat = 56, syp_linkat = 37, syp_flock = 32,
+                  syp_mkdirat = 34, syp_unlinkat = 35, syp_dents = 61, syp_mac = 0, syp_at_removedir = 0x200,
                   syp_tiocgpgrp = 0x540FL, syp_tiocspgrp = 0x5410L, syp_at_fdcwd = -100;
 #elif defined(__linux__) && defined(__x86_64__)
 static const long syp_ok = 1, syp_setsid = 112, syp_getpgid = 121, syp_socketpair = 53, syp_ioctl = 16,
                   syp_openat = 257, syp_linkat = 265, syp_flock = 73,
+                  syp_mkdirat = 258, syp_unlinkat = 263, syp_dents = 217, syp_mac = 0, syp_at_removedir = 0x200,
                   syp_tiocgpgrp = 0x540FL, syp_tiocspgrp = 0x5410L, syp_at_fdcwd = -100;
 #else
 static const long syp_ok = 0, syp_setsid = 0, syp_getpgid = 0, syp_socketpair = 0, syp_ioctl = 0,
                   syp_openat = 0, syp_linkat = 0, syp_flock = 0,
+                  syp_mkdirat = 0, syp_unlinkat = 0, syp_dents = 0, syp_mac = 0, syp_at_removedir = 0,
                   syp_tiocgpgrp = 0, syp_tiocspgrp = 0, syp_at_fdcwd = -1;
 #endif
 
@@ -86,6 +91,58 @@ int sy_openat(int dfd, const char *path, int flags, int mode) {
 int sy_linkat(int oldd, const char *oldp, int newd, const char *newp, int flags) {
     if (!oldp || !oldp[0] || !newp || !newp[0]) return -EINVAL;
     return (int)syp(syp_linkat, oldd, (long)oldp, newd, (long)newp, flags);
+}
+
+/* mkdirat(2): directory NAME in DFD with MODE. 0, or -errno (-EEXIST when it exists). */
+int sy_mkdirat(int dfd, const char *name, int mode) {
+    if (!name || !name[0]) return -EINVAL;
+    return (int)syp(syp_mkdirat, dfd, (long)name, mode, 0, 0);
+}
+
+/* unlinkat(2): remove NAME in DFD; DIR 1 removes an (empty) directory. 0, or -errno.
+   An L0 primitive for code that owns the entry it removes (a temp file it just
+   made); deleting trees and user paths goes through cx_rmtree, the guard. */
+int sy_unlinkat(int dfd, const char *name, int dir) {
+    if (!name || !name[0]) return -EINVAL;
+    return (int)syp(syp_unlinkat, dfd, (long)name, dir ? syp_at_removedir : 0, 0, 0);
+}
+
+/* The entry names of the open directory DFD (without "." and ".."), each
+   NUL-terminated, one after another in OUT. The count, -ENOSPC when OUT is
+   too small, or -errno. Reads from the start: DFD's offset is rewound first.
+   Linux records (getdents64): reclen at byte 16, name at 19. macOS records
+   (getdirentries64): reclen at 16, namlen at 18, name at 21 -- written from
+   <sys/dirent.h>, not yet run on a Mac. */
+int sy_dir_names(int dfd, char *out, int cap) {
+    static char buf[8192];
+    int count = 0, used = 0;
+    long base = 0;
+    if (!out || cap < 1) return -EINVAL;
+    if (lseek(dfd, 0, SEEK_SET) < 0) return -errno;
+    for (;;) {
+        long n = syp_mac ? syp(syp_dents, dfd, (long)buf, sizeof buf, (long)&base, 0)
+                         : syp(syp_dents, dfd, (long)buf, sizeof buf, 0, 0);
+        long at = 0;
+        if (n < 0) return (int)n;
+        if (n == 0) break;
+        while (at < n) {
+            unsigned short reclen = (unsigned short)((unsigned char)buf[at + 16] | ((unsigned char)buf[at + 17] << 8));
+            const char *name = buf + at + (syp_mac ? 21 : 19);
+            int len = 0;
+            if (reclen == 0) return -EIO;
+            if (syp_mac) len = (unsigned char)buf[at + 18] | ((unsigned char)buf[at + 19] << 8);
+            else while (name + len < buf + at + reclen && name[len]) len++;
+            if (!(len == 1 && name[0] == '.') && !(len == 2 && name[0] == '.' && name[1] == '.')) {
+                if (used + len + 1 > cap) return -ENOSPC;
+                memcpy(out + used, name, (size_t)len);
+                out[used + len] = 0;
+                used += len + 1;
+                count++;
+            }
+            at += reclen;
+        }
+    }
+    return count;
 }
 
 /* flock(2) on FD: OP is 1 shared, 2 exclusive, 8 unlock, |4 not to wait.
