@@ -1560,6 +1560,276 @@ static void k2_units_tokens(Ob *o) {
 #undef TKOF
 }
 
+/* finite_rules.prefix_facts as nested JSON: words may contain 0 entries (skipped). */
+typedef struct { char *name[4096]; int n; char **w; int nw; } Pf;
+static void pf_build(Pf *p, char **w, int nw) {
+    int i, j;
+    long m;
+    p->n = 0; p->w = w; p->nw = nw;
+    for (i = 0; i < nw; i++) {
+        long n;
+        if (!w[i]) continue;
+        n = tx_len(w[i], 256);
+        for (m = 1; m <= n; m++) {
+            int seen = 0;
+            for (j = 0; j < p->n; j++) if (tx_len(p->name[j], 256) == m && tx_same(p->name[j], m, w[i], m)) { seen = 1; break; }
+            if (!seen) { if (p->n == 4096) fg_die("too many prefixes", 0); p->name[p->n++] = ar_dup(fg_ar, w[i], m); }
+        }
+    }
+    for (i = 1; i < p->n; i++) { char *x = p->name[i]; for (j = i - 1; j >= 0 && byte_less(x, p->name[j]); j--) p->name[j + 1] = p->name[j]; p->name[j + 1] = x; }
+}
+static void pf_node(Ob *o, Pf *p, int i);
+static void pf_children(Ob *o, Pf *p, const char *name) {
+    long pl = tx_len(name, 256);
+    int q, first = 1;
+    ob_z(o, "[");
+    for (q = 0; q < p->n; q++) {
+        long cl = tx_len(p->name[q], 256);
+        if (cl != pl + 1 || !tx_prefix(p->name[q], cl, name, pl)) continue;
+        if (!first) ob_z(o, ", ");
+        pf_node(o, p, q); first = 0;
+    }
+    ob_z(o, "]");
+}
+static void pf_head(Ob *o, Pf *p, int i) {   /* the keys before children */
+    const char *nm = p->name[i];
+    long nl = tx_len(nm, 256);
+    int q, best = -1, word = 0;
+    for (q = 0; q < p->nw; q++) {
+        long wl;
+        if (!p->w[q]) continue;
+        wl = tx_len(p->w[q], 256);
+        if (tx_eq(p->w[q], nm, 256)) word = 1;
+        if (tx_prefix(nm, nl, p->w[q], wl) && (best < 0 || wl > tx_len(p->w[best], 256))) best = q;
+    }
+    ob_z(o, "{\"name\": "); ob_str(o, nm); ob_z(o, ", \"last\": "); ob_int(o, (unsigned char)nm[nl - 1]);
+    ob_z(o, word ? ", \"word\": \"yes\", \"longest\": " : ", \"word\": \"no\", \"longest\": "); ob_int(o, best);
+    ob_z(o, ", \"children\": "); pf_children(o, p, nm);
+}
+static void pf_node(Ob *o, Pf *p, int i) { pf_head(o, p, i); ob_z(o, "}"); }
+
+/* lex-gen: E1 lexer facts (dispatch rows, peek classes, word and punctuator tries, token names). */
+static void lex_gen(Ob *o) {
+    static char *toks[512], *typekw[64], *lw[64], *lwg[64], *lwc[64], *lws[64], *lt_c[1024], *lt_p[1024], *lt_y[1024];
+    static char *cls[257], *classes[64], *head[32], *sp_tok[256], *words[1024];
+    static int ws[257], kwkind_v[1024], sp_plain[256], sp_typed[256];
+    static char *kwkind_n[1024];
+    static Pf ID, OP;
+    static char *opw[512];
+    int ntok = 0, ntk = 0, nlw = 0, nlt = 0, nws = 0, ncl = 0, nhead = 0, nsp = 0, nkw = 0, nwords = 0, i, j;
+    long EOFC = fg_const("lex-consts", "EOF"), KID = fg_const("lex-consts", "KID"), TYPE = fg_const("lex-consts", "TYPE"), CLASSNAMES = fg_const("lex-consts", "CLASSNAMES");
+    {   /* token schema */
+        Lines L = fg_lines("weights/gold/parse.tsv");
+        int found = 0;
+        for (i = 0; i < L.n; i++) if (tx_prefix(L.l[i], tx_len(L.l[i], FG_CAP), "#field\ttok\t", 11)) {
+            char *cells[1024], *line = fg_dupz(L.l[i]);
+            int c = fg_split(line, cells, 1024), k;
+            for (k = 2; k < c; k++) toks[ntok++] = cells[k];
+            found++;
+        }
+        if (found != 1 || !ntok) fg_die("missing or repeated token schema", 0);
+    }
+    {
+        Lines L = fg_lines("iterate/kernel/typekw.tsv");
+        for (i = 0; i < L.n; i++) {
+            char *cells[4], *line = fg_dupz(L.l[i]);
+            if (!*line || line[0] == '#') continue;
+            if (fg_split(line, cells, 4) != 2 || !tx_eq(cells[0], "kw", 4) || !*cells[1]) fg_die("bad typekw row", L.l[i]);
+            typekw[ntk++] = cells[1];
+        }
+    }
+    {   /* lexcls: byte -> class, attws bytes in row order */
+        Lines L = fg_lines("weights/gold/lexcls.tsv");
+        for (i = 0; i < L.n; i++) {
+            char *cells[8], *line = fg_dupz(L.l[i]);
+            int b;
+            if (!*line || line[0] == '#') continue;
+            if (fg_split(line, cells, 8) != 3 || tx_eq(cells[0], "b", 4)) continue;
+            b = tx_eq(cells[0], "eof", 4) ? (int)EOFC : (int)strtol(cells[0], 0, 10);
+            if (b < 0 || b > 256) fg_die("bad lexcls byte", cells[0]);
+            cls[b] = cells[1];
+            if (tx_eq(cells[2], "yes", 4)) ws[nws++] = b;
+        }
+        for (i = 0; i <= 256; i++) if (!cls[i]) fg_die("lexcls lacks a byte", 0);
+    }
+    {
+        Lines L = fg_lines("weights/gold/lexword.tsv");
+        for (i = 0; i < L.n; i++) {
+            char *cells[8], *line = fg_dupz(L.l[i]);
+            if (!*line || line[0] == '#') continue;
+            if (fg_split(line, cells, 8) != 4 || tx_eq(cells[0], "w", 4)) continue;
+            lw[nlw] = cells[0]; lwg[nlw] = cells[1]; lwc[nlw] = cells[2]; lws[nlw++] = cells[3];
+        }
+    }
+    {
+        Lines L = fg_lines("weights/gold/lex.tsv");
+        for (i = 0; i < L.n; i++) {
+            char *cells[32], *line = fg_dupz(L.l[i]);
+            int c = fg_split(line, cells, 32), k;
+            if (c >= 1 && tx_eq(cells[0], "#head", 8)) { for (k = 3; k < c; k++) head[nhead++] = cells[k]; continue; }
+            if (L.l[i][0] == '#' || c < 3 || tx_eq(cells[0], "c", 4)) continue;
+            for (k = 0; k < nlt; k++) if (tx_eq(lt_c[k], cells[0], 64) && tx_eq(lt_p[k], cells[1], 64)) break;
+            if (k == nlt) { lt_c[nlt] = cells[0]; lt_p[nlt] = cells[1]; nlt++; }
+            lt_y[k] = cells[2];
+        }
+    }
+    for (i = 0; i < nlt; i++) {                   /* CLASSES = sorted(set(c)) */
+        for (j = 0; j < ncl; j++) if (tx_eq(classes[j], lt_c[i], 64)) break;
+        if (j == ncl) classes[ncl++] = lt_c[i];
+    }
+    for (i = 1; i < ncl; i++) { char *x = classes[i]; for (j = i - 1; j >= 0 && byte_less(x, classes[j]); j--) classes[j + 1] = classes[j]; classes[j + 1] = x; }
+    {
+        Lines L = fg_lines("exec/lex/spelling.tsv");
+        for (i = 0; i < L.n; i++) {
+            char *cells[4], *line = fg_dupz(L.l[i]);
+            if (!*line || line[0] == '#') continue;
+            if (fg_split(line, cells, 4) != 3) fg_die("bad spelling row", L.l[i]);
+            sp_tok[nsp] = cells[0]; sp_plain[nsp] = tx_eq(cells[1], "yes", 4); sp_typed[nsp++] = tx_eq(cells[2], "yes", 4);
+        }
+    }
+#define ISAL(c) ((c) != EOFC && tx_eq(cls[(c)], "A", 4))
+#define ISDI(c) ((c) != EOFC && tx_eq(cls[(c)], "d", 4))
+    for (i = 0; i < ntok; i++) if (*toks[i] && ISAL((unsigned char)toks[i][0])) {
+        for (j = 0; j < nkw; j++) if (tx_eq(kwkind_n[j], toks[i], 256)) break;
+        if (j == nkw) kwkind_n[nkw++] = toks[i];
+        kwkind_v[j] = i < CLASSNAMES ? (int)KID : i;
+    }
+    for (i = 0; i < ntk; i++) {
+        for (j = 0; j < nkw; j++) if (tx_eq(kwkind_n[j], typekw[i], 256)) break;
+        if (j == nkw) kwkind_n[nkw++] = typekw[i];
+        kwkind_v[j] = (int)TYPE;
+    }
+    for (i = 0; i < nkw; i++) words[nwords++] = kwkind_n[i];
+    for (i = 0; i < nlw; i++) if (!tx_eq(lwg[i], "none", 8) || tx_eq(lwc[i], "yes", 4) || tx_eq(lws[i], "yes", 4)) words[nwords++] = lw[i];
+    {   /* sorted(set(WORDS)) */
+        int n2 = 0;
+        for (i = 0; i < nwords; i++) { for (j = 0; j < n2; j++) if (tx_eq(words[j], words[i], 256)) break; if (j == n2) words[n2++] = words[i]; }
+        nwords = n2;
+        for (i = 1; i < nwords; i++) { char *x = words[i]; for (j = i - 1; j >= 0 && byte_less(x, words[j]); j--) words[j + 1] = words[j]; words[j + 1] = x; }
+    }
+    pf_build(&ID, words, nwords);
+    for (i = 0; i < ntok; i++) opw[i] = (*toks[i] && !ISAL((unsigned char)toks[i][0])) ? toks[i] : 0;
+    pf_build(&OP, opw, ntok);
+    {   /* HANDLE and PEEKCLASS */
+        static char *rowc[64];
+        int nd = 0;
+        char *bfirst[64];
+        int bfv[64];
+        for (i = 0; i < ncl; i++) {
+            char *v = 0;
+            int same = 1, k;
+            for (k = 0; k < nlt; k++) if (tx_eq(lt_c[k], classes[i], 64)) { if (!v) v = lt_y[k]; else if (!tx_eq(v, lt_y[k], 64)) same = 0; }
+            rowc[i] = same ? v : 0;
+            bfv[i] = -1;
+            for (k = 0; k <= 256; k++) if (tx_eq(cls[k], classes[i], 64)) { bfv[i] = k; break; }
+            if (bfv[i] < 0) fg_die("class without a byte", classes[i]);
+            bfirst[i] = classes[i];
+        }
+#define HANDLE_OPEN(STATE, CL, ACT) do { if (nd++) ob_z(o, ", "); ob_z(o, "{\"state\": "); ob_str(o, STATE); ob_z(o, ", \"cls\": "); ob_str(o, CL); ob_z(o, ", \"act\": "); ob_str(o, ACT); } while (0)
+        ob_z(o, "=HANDLE\tjson\t[");
+        for (i = 0; i < ncl; i++) if (rowc[i]) {
+            int h;
+            HANDLE_OPEN("DISPATCH", classes[i], rowc[i]);
+            ob_z(o, ", \"peek\": [], \"peekstate\": []");
+            for (h = 0; h < nhead; h++) { ob_z(o, ", "); ob_str(o, head[h]); ob_z(o, tx_eq(rowc[i], head[h], 64) ? ": [{}]" : ": []"); }
+            ob_z(o, "}");
+        }
+        for (i = 0; i < ncl; i++) if (!rowc[i]) {
+            int order[64], k, q, nacts = 0, h;
+            char *acts[64];
+            for (k = 0; k < ncl; k++) order[k] = k;
+            for (k = 1; k < ncl; k++) { int x = order[k]; for (q = k - 1; q >= 0 && bfv[order[q]] > bfv[x]; q--) order[q + 1] = order[q]; order[q + 1] = x; }
+            for (k = 0; k < ncl; k++) {
+                char *a = 0;
+                for (q = 0; q < nlt; q++) if (tx_eq(lt_c[q], classes[i], 64) && tx_eq(lt_p[q], classes[order[k]], 64)) a = lt_y[q];
+                if (!a) fg_die("lex table lacks a cell", classes[i]);
+                for (q = 0; q < nacts; q++) if (tx_eq(acts[q], a, 64)) break;
+                if (q == nacts) acts[nacts++] = a;
+            }
+            for (q = 0; q < nacts; q++) {
+                char st[128];
+                cx_fmt(st, sizeof st, "H:%s", acts[q]);
+                HANDLE_OPEN(st, classes[i], acts[q]);
+                ob_z(o, ", \"peek\": [");
+                if (q == 0) for (k = 0; k < ncl; k++) {
+                    char *a = 0;
+                    int r;
+                    for (r = 0; r < nlt; r++) if (tx_eq(lt_c[r], classes[i], 64) && tx_eq(lt_p[r], classes[order[k]], 64)) a = lt_y[r];
+                    if (k) ob_z(o, ", ");
+                    ob_z(o, "{\"cls\": "); ob_str(o, classes[i]); ob_z(o, ", \"col\": "); ob_str(o, classes[order[k]]); ob_z(o, ", \"act\": "); ob_str(o, a); ob_z(o, "}");
+                }
+                ob_z(o, q == 0 ? "], \"peekstate\": [{\"name\": " : "], \"peekstate\": [");
+                if (q == 0) { ob_str(o, classes[i]); ob_z(o, "}]"); } else ob_z(o, "]");
+                for (h = 0; h < nhead; h++) { ob_z(o, ", "); ob_str(o, head[h]); ob_z(o, tx_eq(acts[q], head[h], 64) ? ": [{}]" : ": []"); }
+                ob_z(o, "}");
+            }
+        }
+        ob_z(o, "]\n=PEEKCLASS\tjson\t[");
+        {
+            int first = 1;
+            for (i = 0; i < ncl; i++) if (!rowc[i]) { if (!first) ob_z(o, ", "); ob_z(o, "{\"name\": "); ob_str(o, classes[i]); ob_z(o, "}"); first = 0; }
+        }
+        ob_z(o, "]\n");
+#undef HANDLE_OPEN
+        (void)bfirst;
+    }
+    ob_z(o, "=IDROOT\tjson\t"); pf_children(o, &ID, ""); ob_z(o, "\n");
+    ob_z(o, "=OPROOT\tjson\t"); pf_children(o, &OP, ""); ob_z(o, "\n");
+    ob_z(o, "=IDPFX\tjson\t[");
+    for (i = 0; i < ID.n; i++) {
+        const char *nm = ID.name[i];
+        int kind = (int)KID, k, skipp = 0, drop = 0, pch = 0, pst = 0;
+        for (k = 0; k < nkw; k++) if (tx_eq(kwkind_n[k], nm, 256)) kind = kwkind_v[k];
+        for (k = 0; k < nlw; k++) if (tx_eq(lw[k], nm, 256)) {
+            if (tx_eq(lwg[k], "skipparen", 16)) skipp = 1;
+            if (tx_eq(lwg[k], "drop", 16)) drop = 1;
+            if (tx_eq(lwc[k], "yes", 4)) pch = 1;
+            if (tx_eq(lws[k], "yes", 4)) pst = 1;
+        }
+        if (i) ob_z(o, ", ");
+        pf_head(o, &ID, i);
+        ob_z(o, ", \"kind\": "); ob_int(o, kind);
+        ob_z(o, skipp ? ", \"ifskip\": [{}]" : ", \"ifskip\": []");
+        ob_z(o, drop ? ", \"ifdrop\": [{}]" : ", \"ifdrop\": []");
+        ob_z(o, !skipp && !drop ? ", \"iftoken\": [{}]" : ", \"iftoken\": []");
+        ob_z(o, pch ? ", \"ifpfxch\": [{}]" : ", \"ifpfxch\": []");
+        ob_z(o, pst ? ", \"ifpfxstr\": [{}]}" : ", \"ifpfxstr\": []}");
+    }
+    ob_z(o, "]\n=OPPFX\tjson\t[");
+    for (i = 0; i < OP.n; i++) { if (i) ob_z(o, ", "); pf_node(o, &OP, i); }
+    ob_z(o, "]\n=KID\tjson\t["); ob_int(o, KID); ob_z(o, "]\n=classes\tjson\t{");
+    for (i = 0; i < ncl; i++) {
+        int k, first = 1;
+        if (i) ob_z(o, ", ");
+        ob_str(o, classes[i]); ob_z(o, ": [");
+        for (k = 0; k <= 256; k++) if (tx_eq(cls[k], classes[i], 64)) { if (!first) ob_z(o, ", "); ob_int(o, k); first = 0; }
+        ob_z(o, "]");
+    }
+    ob_z(o, ncl ? ", \"identifier\": [" : "\"identifier\": [");
+    {
+        int k, first = 1;
+        for (k = 0; k <= 256; k++) if (k != EOFC && (ISAL(k) || ISDI(k))) { if (!first) ob_z(o, ", "); ob_int(o, k); first = 0; }
+    }
+    ob_z(o, "], \"space\": [");
+    for (i = 0; i < nws; i++) { if (i) ob_z(o, ", "); ob_int(o, ws[i]); }
+    ob_z(o, "]}\n=literalclasses\tjson\t{\"space\": [");
+    for (i = 0; i < nws; i++) { if (i) ob_z(o, ", "); ob_int(o, ws[i]); }
+    ob_z(o, "]}\n=tok_names\tjson\t[");
+    for (i = 0; i < ntok; i++) { if (i) ob_z(o, ", "); ob_str(o, toks[i]); }
+    ob_z(o, "]\n=tokens\tjson\t[");
+    for (i = 0; i < ntok; i++) {
+        int k, pl = 0, ty = 0;
+        for (k = 0; k < nsp; k++) if (tx_eq(sp_tok[k], toks[i], 256)) { pl = sp_plain[k]; ty = sp_typed[k]; }
+        if (i) ob_z(o, ", ");
+        ob_z(o, "{\"kind\": "); ob_int(o, i); ob_z(o, ", \"name\": "); ob_str(o, toks[i]);
+        ob_z(o, pl ? ", \"plain_spell\": true" : ", \"plain_spell\": false");
+        ob_z(o, ty ? ", \"typed_spell\": true}" : ", \"typed_spell\": false}");
+    }
+    ob_z(o, "]\n");
+#undef ISAL
+#undef ISDI
+}
+
 static void enc_pe(Ob *o) { pe_fields(o, 0); }
 static void enc_pe_forward(Ob *o) { pe_fields(o, 1); }
 
@@ -1591,6 +1861,8 @@ static const Table fg_tables[] = {
     {"k2-units-tokens", {"exec/facts/parse-words.tsv", "weights/gold/prec.tsv", "exec/facts/parse-constants.tsv", "exec/parse/token-prefixes.tsv",
                          "exec/parse2/units-qualifiers.tsv", "exec/parse2/units-builtin.tsv", "exec/parse2/units-tokens.tsv", "exec/parse2/units-reject.tsv",
                          "exec/parse2/units-counters.tsv", "exec/parse2/units-separators.tsv", "exec/parse2/units-trailer.tsv", "tools/facts-gen.cx", 0}, k2_units_tokens},
+    {"lex-gen", {"weights/gold/parse.tsv", "iterate/kernel/typekw.tsv", "weights/gold/lexcls.tsv", "weights/gold/lexword.tsv", "weights/gold/lex.tsv",
+                 "exec/lex/spelling.tsv", "exec/facts/lex-consts.tsv", "tools/facts-gen.cx", 0}, lex_gen},
     {0, {0}, 0}
 };
 
