@@ -312,3 +312,7 @@
 - release/tools/derivedcheck.py
 - release/tools/hooks/pre-commit
 - release/tools/install_hooks.sh
+- release/tools/build_candidate.sh
+- release/tools/candidate_chain.sh
+- release/tools/exittable.py
+- release/tools/h1source.py
