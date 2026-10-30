@@ -1,10 +1,15 @@
 /* Release chain for one slice at a time.
-   sh ./unisacc.com tools/release-build.cx -- p3 ROOT SRC_PKG OUT_PKG
-   sh ./unisacc.com tools/release-build.cx -- slice ROOT PKG OUT [entry-build flags]
+   sh ./unisacc.com tools/release-build.cx -- [--rev REV] p3 ROOT SRC_PKG OUT_PKG
+   sh ./unisacc.com tools/release-build.cx -- [--rev REV] slice ROOT PKG OUT [entry-build flags]
+
+   REV defaults to HEAD. Sources and include/ come from `git archive` of that
+   commit (out/release-snap-<sha10>/, reused when the marker matches), not from
+   the shared worktree. The installed ROOT/unisacc.com is copied in as the
+   generation-1 constructor. The receipt records the full rev.
 
    p3 keeps the model bytes of SRC_PKG and replaces every \0hdr/ resource with
-   the files currently under ROOT/include (seed/pack.c mount order). The
-   resource \0hdr/cx-flat.h must then match ROOT/include/cx-flat.h byte for
+   the files under the snapshot's include/ (seed/pack.c mount order). The
+   resource \0hdr/cx-flat.h must then match that include/cx-flat.h byte for
    byte. Models are not rebuilt and package-refresh is not called.
 
    slice runs one entry-build invocation. lnx/x86_64 stays the 33-object
@@ -317,6 +322,102 @@ static int rb_p3(int argc, char **argv) {
     return 0;
 }
 
+static char rb_rev_full[48];
+static char rb_snap[RB_FULL];
+static char rb_out_abs[RB_FULL];
+
+static int rb_pipe(char **argv, const char *cwd, char *out, int cap) {
+    int fd, pid, exited, code, bad, n;
+    bad = 0;
+    n = 0;
+    pid = sy_spawn_pipe(argv, cwd, 0, &fd, 0);
+    if (pid < 0) return -1;
+    if (out && cap > 0) out[0] = 0;
+    for (;;) {
+        char tmp[512];
+        long k, i;
+        k = sy_read(fd, tmp, 512);
+        if (k < 0) { bad = 1; break; }
+        if (k == 0) break;
+        if (out) {
+            for (i = 0; i < k && n + 1 < cap; i++) out[n++] = tmp[i];
+        }
+    }
+    if (out && cap > 0) {
+        while (n > 0 && (out[n - 1] == 10 || out[n - 1] == 13)) n--;
+        out[n] = 0;
+    }
+    if (sy_close(fd)) bad = 1;
+    if (sy_wait_status(pid, 0, &exited, &code, 0) < 0) return -1;
+    if (bad || !exited || code) return -1;
+    return 0;
+}
+
+/* Replace *ROOT with the absolute snapshot of REV. Sources are that commit. */
+static void rb_freeze(const char *rev, char **root_slot) {
+    char root[RB_FULL], spec[96], dir[RB_FULL], mark[RB_FULL], cmd[2048], got[80], brief[11];
+    char *vp[5], *sh[4];
+    size_t mn;
+    char *marker;
+    int i, n;
+    if (!rev || !rev[0] || !root_slot || !*root_slot) rb_die("rev");
+    if (sy_realpath(*root_slot, root, RB_FULL) < 0) rb_die("root");
+    if (cx_fmt(spec, sizeof spec, "%s^{commit}", rev)) rb_die("rev");
+    vp[0] = "git";
+    vp[1] = "rev-parse";
+    vp[2] = "--verify";
+    vp[3] = spec;
+    vp[4] = 0;
+    if (rb_pipe(vp, root, got, 80)) rb_die("rev");
+    n = 0;
+    while (got[n]) n++;
+    if (n != 40) rb_die("rev");
+    for (i = 0; i < 40; i++) {
+        char c = got[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) rb_die("rev");
+        rb_rev_full[i] = c;
+    }
+    rb_rev_full[40] = 0;
+    for (i = 0; i < 10; i++) brief[i] = rb_rev_full[i];
+    brief[10] = 0;
+    if (cx_fmt(dir, sizeof dir, "%s/out/release-snap-%s", root, brief)) rb_die("path");
+    if (cx_fmt(mark, sizeof mark, "%s/.release-rev", dir)) rb_die("path");
+    marker = cx_read(mark, &mn);
+    if (!(marker && mn >= 40 && mm_same(marker, rb_rev_full, 40))) {
+        if (marker) mm_free(marker);
+        if (sy_exists(dir)) rb_die("snapshot exists without a matching rev marker");
+        if (sy_mkdir(dir, 0755)) rb_die("snapshot mkdir");
+        if (cx_fmt(cmd, sizeof cmd, "git archive %s | tar -x -C %s", rb_rev_full, dir)) rb_die("path");
+        sh[0] = "sh";
+        sh[1] = "-c";
+        sh[2] = cmd;
+        sh[3] = 0;
+        if (rb_pipe(sh, root, 0, 0)) rb_die("git archive");
+        {
+            int fd = sy_open(mark, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd < 0 || sy_write_all(fd, rb_rev_full, 40) || sy_close(fd)) rb_die("snapshot marker");
+        }
+    } else {
+        mm_free(marker);
+    }
+    if (cx_fmt(cmd, sizeof cmd, "cp %s/unisacc.com %s/unisacc.com", root, dir)) rb_die("path");
+    sh[0] = "sh";
+    sh[1] = "-c";
+    sh[2] = cmd;
+    sh[3] = 0;
+    if (rb_pipe(sh, root, 0, 0)) rb_die("copy compiler");
+    n = 0;
+    while (dir[n]) {
+        if (n + 1 >= RB_FULL) rb_die("path");
+        rb_snap[n] = dir[n];
+        n++;
+    }
+    rb_snap[n] = 0;
+    *root_slot = rb_snap;
+    if (cx_fmt(cmd, sizeof cmd, "release-build\trev\t%s\tsnap=%s\n", rb_rev_full, rb_snap)) rb_die("report");
+    sy_printf("%s", cmd);
+}
+
 static int rb_target_ok(int argc, char **argv) {
     int i;
     for (i = 5; i < argc; i++) {
@@ -337,6 +438,9 @@ static int rb_slice(int argc, char **argv) {
     if (argc < 5) rb_die("usage: slice ROOT PKG OUT [entry-build flags]");
     if (argc - 5 > 66) rb_die("argv");
     rb_target_ok(argc, argv);
+    sy_mkdir(argv[4], 0755);
+    if (sy_realpath(argv[4], rb_out_abs, RB_FULL) < 0) rb_die("out");
+    argv[4] = rb_out_abs;
     if (sy_mono(&t0)) rb_die("clock");
     rb_cat(bound, RB_FULL, argv[2], 1, "tools/bound");
     rb_cat(tool, RB_FULL, argv[2], 1, "tools/entry-build.cx");
@@ -374,12 +478,35 @@ static int rb_slice(int argc, char **argv) {
     if (cx_fmt(sha_line, sizeof sha_line, "release-build\tslice\tns=%lld\trc=0\n", rb_span(&t0, &t1)))
         rb_die("report");
     sy_printf("%s", sha_line);
+    {
+        char rec[RB_FULL], line[80];
+        int rfd;
+        long ln;
+        rb_cat(rec, RB_FULL, argv[4], 1, "receipt.txt");
+        if (cx_fmt(line, sizeof line, "rev\t%s\n", rb_rev_full)) rb_die("report");
+        ln = tx_len(line, 80);
+        if (ln < 0) rb_die("report");
+        rfd = sy_open(rec, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (rfd < 0 || sy_write_all(rfd, line, ln) || sy_close(rfd)) rb_die("receipt rev");
+    }
     return 0;
 }
 
 int main(int argc, char **argv) {
+    const char *rev = "HEAD";
+    int i;
+    if (argc >= 3 && tx_eqz(argv[1], "--rev")) {
+        rev = argv[2];
+        for (i = 1; i + 2 < argc; i++) argv[i] = argv[i + 2];
+        argc -= 2;
+        argv[argc] = 0;
+    }
+    if (argc >= 2 && (tx_eqz(argv[1], "p3") || tx_eqz(argv[1], "slice"))) {
+        if (argc < 3) rb_die("root");
+        rb_freeze(rev, &argv[2]);
+    }
     if (argc >= 2 && tx_eqz(argv[1], "p3")) return rb_p3(argc, argv);
     if (argc >= 2 && tx_eqz(argv[1], "slice")) return rb_slice(argc, argv);
-    sy_eprintf("usage: p3 ROOT SRC_PKG OUT_PKG | slice ROOT PKG OUT [entry-build flags]\n");
+    sy_eprintf("usage: [--rev REV] p3 ROOT SRC_PKG OUT_PKG | slice ROOT PKG OUT [entry-build flags]\n");
     return 2;
 }

@@ -81,6 +81,12 @@ cc	ri,resources,negative,hosts,library,interfaces,properties
   二代：用候选 99ea6d0e 再编 lnx/x86_64，entry.elf 与 332756bb 不同。g2 entry.elf sha=0b56f314eb36db3d6706327f099dd3ba2b5875ebdedc340e88cb6363c0e0fb02 bytes=1398144，长度相同，从第 24 字节起不同。33 个对象里 32 个与第一代逐字节相同，只有 drive.o 不同（92814bf2 bytes=1373880 → 724e2bb8 bytes=1378472），多出来的全局符号是 tx_count。cx/text/text.cx 的 tx_count 在 ce3f7018fd（23:04）落地，晚于第一代 drive.o（22:59）。drive.o 是唯一携带 text.text 的对象。
   同一棵树再对一次 drive.o（text.cx 停在 476a09a592）：已装编译器与候选编出的 drive.o 逐字节相同，sha=556f24115e28c3077bad3be9aeeb63752184a84c5be3790e299ae9910a6174f6 bytes=1382392。
   二代工具时钟：drive.o ns=13246925759；其余五只 -O1 ns=21998369411；14 只 ns=11757854979；13 只 ns=14514585606；link ns=8151159408。同树对照：已装 ns=7294579227，候选 ns=8587396907。
+  冻结 rev 两代（`--rev`，git archive 到 out/release-snap-<sha10>/，不读共享工作区）：rev=5ed7ba69bf9e86b91843c608ce00a1daff231dc8。P3、第一代、第二代同一个 rev。33 个对象、entry.elf、candidate 都逐字节相同。
+  entry.elf sha=fb2237f23f4b7a50dd8d3d2e92ad2f56da623fdd5c0ec2f12193973004337775 bytes=1402240
+  candidate sha=a6ddb03bd6dd356bc194ede1ed7c66a350bd011f4020de2e6634443061ddb975 bytes=3442090
+  p3 sha=aec1a0bf27b9d1f2e26a1b86b52cb3694bc66a906415bcc0435c11278c6deabf
+  第一代构造器是快照里的已装 unisacc.com（via=sh，sha=79fb84e65a10b55ce40be5f68746748acbd38f441944046c0a5dfa5718bc0c32）。第二代构造器是第一代 candidate（via=exec）。
+  工具时钟：第一代六只 -O1 ns=31485383890，27 只 ns=24720043367，link ns=9093827509。第二代六只 -O1 ns=29852339534，27 只 ns=26229984423，link ns=8744013468。
 - [ ] 3 object 模型步
 - [ ] 4 测试到 QUALIFIED
 - [ ] 主人授权发布
