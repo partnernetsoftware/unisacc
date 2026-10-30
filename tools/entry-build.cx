@@ -1,0 +1,184 @@
+/* Build the self-contained entry candidate.
+   usage: ROOT P3 OUT
+   ROOT is the tree. P3 is a file whose trailer is the package to append
+   (the installed unisacc.com is the usual source). OUT is a directory.
+   Each compile and the link runs under ROOT/tools/bound. The candidate
+   is OUT/candidate. The receipt is OUT/receipt.txt. This does not replace
+   ROOT/unisacc.com and does not call the old construction scripts. */
+#pragma unisa use runtime.process
+#pragma unisa use runtime.packagefooter
+
+struct eb_ts { long sec; long nsec; };
+
+static void eb_die(const char *s) {
+    fprintf(stderr, "entry-build: %s\n", s);
+    exit(1);
+}
+
+static long long eb_ns(void) {
+    struct eb_ts ts;
+    int clock_gettime(int, struct eb_ts *);
+    if (clock_gettime(1, &ts)) eb_die("clock");
+    return (long long)ts.sec * 1000000000LL + (long long)ts.nsec;
+}
+
+static void eb_join(char *dst, int cap, const char *a, const char *b) {
+    int n;
+    n = snprintf(dst, (size_t)cap, "%s/%s", a, b);
+    if (n < 0 || n >= cap) eb_die("path");
+}
+
+static void eb_sha(const char *path, char h[65], long *n) {
+    size_t zn;
+    char *b;
+    b = cx_read(path, &zn);
+    if (!b) eb_die("read");
+    cx_sha256_hex(b, zn, h);
+    *n = (long)zn;
+    free(b);
+}
+
+static void eb_run(char **argv, const char *cwd, int secs, long long *dt) {
+    np_result r;
+    char why[512];
+    long long t0;
+    t0 = eb_ns();
+    if (np_run(argv, cwd, 0, secs, &r, why, sizeof why)) eb_die(why);
+    *dt = eb_ns() - t0;
+    if (r.rc) {
+        if (r.err && r.errn) fwrite(r.err, 1, r.errn, stderr);
+        fprintf(stderr, "entry-build: step rc %d\n", r.rc);
+        np_free(&r);
+        exit(1);
+    }
+    np_free(&r);
+}
+
+static void eb_compile(const char *bound, const char *product, const char *src, const char *obj, const char *cwd, long long *dt) {
+    char *v[13];
+    v[0] = (char *)bound;
+    v[1] = "55";
+    v[2] = "sh";
+    v[3] = (char *)product;
+    v[4] = "-O2";
+    v[5] = "-c";
+    v[6] = "-b";
+    v[7] = "lnx/x86_64";
+    v[8] = "-funit";
+    v[9] = "-o";
+    v[10] = (char *)obj;
+    v[11] = (char *)src;
+    v[12] = 0;
+    eb_run(v, cwd, 58, dt);
+}
+
+static void eb_link(const char *bound, const char *product, const char *drive, const char *execo, const char *native, const char *elf, const char *cwd, long long *dt) {
+    char *v[12];
+    v[0] = (char *)bound;
+    v[1] = "40";
+    v[2] = "sh";
+    v[3] = (char *)product;
+    v[4] = "-b";
+    v[5] = "lnx/x86_64";
+    v[6] = "-o";
+    v[7] = (char *)elf;
+    v[8] = (char *)drive;
+    v[9] = (char *)execo;
+    v[10] = (char *)native;
+    v[11] = 0;
+    eb_run(v, cwd, 45, dt);
+}
+
+static void eb_splice(const char *elf, const char *p3, const char *dst, long *poff, long *plen, long long *dt) {
+    size_t en;
+    size_t pn;
+    char *e;
+    char *p;
+    PackageFooter foot;
+    long end;
+    FILE *f;
+    long long t0;
+    t0 = eb_ns();
+    e = cx_read(elf, &en);
+    p = cx_read(p3, &pn);
+    if (!e || !p) eb_die("read");
+    if (pn > 2147483647UL || !packagefooter_locate_bytes((const unsigned char *)p, (long)pn, &foot)) eb_die("p3 footer");
+    end = foot.footer_offset + 16;
+    if (foot.package_offset < 0 || end < foot.package_offset || end > (long)pn) eb_die("p3 span");
+    if (p[foot.package_offset] != 'P') eb_die("p3 mark");
+    f = fopen(dst, "wb");
+    if (!f) eb_die("open candidate");
+    if (fwrite(e, 1, en, f) != en || fwrite(p + foot.package_offset, 1, (size_t)(end - foot.package_offset), f) != (size_t)(end - foot.package_offset) || fclose(f)) eb_die("write candidate");
+    if (chmod(dst, 0755)) eb_die("chmod candidate");
+    *poff = foot.package_offset;
+    *plen = end - foot.package_offset;
+    free(e);
+    free(p);
+    *dt = eb_ns() - t0;
+}
+
+static void eb_line(FILE *f, const char *k, const char *sha, long n, long long ns) {
+    fprintf(f, "%s\tsha=%s\tbytes=%ld\tns=%lld\n", k, sha, n, ns);
+}
+
+int main(int argc, char **argv) {
+    char root[512];
+    char p3[512];
+    char out[512];
+    char bound[576];
+    char product[576];
+    char src_drive[576];
+    char src_exec[576];
+    char src_native[576];
+    char drive[576];
+    char execo[576];
+    char native[576];
+    char elf[576];
+    char cand[576];
+    char receipt[576];
+    char hd[65], he[65], hn[65], hf[65], hc[65], hp[65];
+    long nd, ne, nn, nf, nc, np;
+    long poff, plen;
+    long long td, te, tn, tl, ts;
+    FILE *rf;
+    if (argc != 4) {
+        fputs("usage: ROOT P3 OUT\n", stderr);
+        return 2;
+    }
+    if (!realpath(argv[1], root) || !realpath(argv[2], p3)) eb_die("realpath");
+    if (mkdir(argv[3], 0755) && errno != EEXIST) eb_die("mkdir");
+    if (!realpath(argv[3], out)) eb_die("realpath out");
+    eb_join(bound, 576, root, "tools/bound");
+    eb_join(product, 576, root, "unisacc.com");
+    eb_join(src_drive, 576, root, "src/unisacc.cx");
+    eb_join(src_exec, 576, root, "src/entryexec.cx");
+    eb_join(src_native, 576, root, "src/hostnative.cx");
+    eb_join(drive, 576, out, "drive.o");
+    eb_join(execo, 576, out, "exec.o");
+    eb_join(native, 576, out, "hostnative.o");
+    eb_join(elf, 576, out, "entry.elf");
+    eb_join(cand, 576, out, "candidate");
+    eb_join(receipt, 576, out, "receipt.txt");
+    eb_compile(bound, product, src_drive, drive, root, &td);
+    eb_compile(bound, product, src_exec, execo, root, &te);
+    eb_compile(bound, product, src_native, native, root, &tn);
+    eb_link(bound, product, drive, execo, native, elf, root, &tl);
+    eb_splice(elf, p3, cand, &poff, &plen, &ts);
+    eb_sha(drive, hd, &nd);
+    eb_sha(execo, he, &ne);
+    eb_sha(native, hn, &nn);
+    eb_sha(elf, hf, &nf);
+    eb_sha(cand, hc, &nc);
+    eb_sha(p3, hp, &np);
+    rf = fopen(receipt, "wb");
+    if (!rf) eb_die("receipt");
+    fprintf(rf, "entry-build-v1\nroot\t%s\np3\t%s\np3_sha\t%s\npackage_offset\t%ld\npackage_bytes\t%ld\n", root, p3, hp, poff, plen);
+    eb_line(rf, "drive.o", hd, nd, td);
+    eb_line(rf, "exec.o", he, ne, te);
+    eb_line(rf, "hostnative.o", hn, nn, tn);
+    eb_line(rf, "entry.elf", hf, nf, tl);
+    eb_line(rf, "candidate", hc, nc, ts);
+    if (fclose(rf)) eb_die("receipt close");
+    printf("entry-build candidate=%s bytes=%ld\n", hc, nc);
+    return 0;
+}
