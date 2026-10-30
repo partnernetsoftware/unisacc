@@ -20,6 +20,13 @@
 
 ### B1　E2 每个 `#include` 都整缓冲重扫（模型规则，最大）
 
+**前导部分已在结构层解决（4f4a2ae2b3，不改模型）：** `include/cx.h` 在 `__UNISA__` 下改读生成的单文件 `include/cx-flat.h`（`tools/cx-flatten.cx --write|--check`，源为 `include/cx-nested.h`；宿主编译器仍读嵌套源）。
+
+- 实测：空 main `.cx` 的 E2，产品从 1.74 秒降到 0.09 秒；build-06 候选冷编 `tools/facts-gen.cx`（三单元）从 40.5 秒降到 16.8 秒（E2 26.4 → 3.1 秒）。
+- 等价：`-E` 规范化空白后逐字节相同。
+- 约束：展平文件必须放在 `include/` 里，因为 E2 只对系统 include 目录的头做 libc 体裁剪（`__UNISA_FTRIM_LIBC`）。用 `-I` 放的副本不裁剪，输出会从 5.8 KB 涨到 76–118 KB。
+- 用户自己写的 `#include` 仍按下文的规则方案处理。
+
 - 位置：`exec/pp/directive-body-byte.tsv` 的 `INCH`（头文件读完：`INPOP`、补换行、`SPAN2` 抄回外层剩余、`SWAP`），以及 `exec/pp/text-byte.tsv` 的 `P0`/`P1`、`directive-scan-result.tsv` 的 `P3END` 三处 `SWAP`。每次 include 后整缓冲回到 P0 重新规范化并重扫指令。
 - 实测（宿主 GCC 构造的参考执行器回放产品真实 RI，tape 与产品逐字节相同）：空 main 的 `.cx` 一次 E2 共 **213 次 SWAP，累计换入 50,841,523 字节**；最终输出约 50 万字节，其中非空白约 3.2 万。每次 include 3 次 SWAP，约 71 个嵌套头，缓冲从 1.7 万涨到 15 万以上又继续涨。
 - 对照实验：固定 32 KB 正文前放 K 个空头，K=0/10/20/40 时 E2 为 17/51/77/131 ms，严格线性；每个 include 每字节约 90 ns。
