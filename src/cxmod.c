@@ -60,6 +60,9 @@ int cxm_inc[CXM_MAXU][CXM_MAXU]; int cxm_ninc[CXM_MAXU];
 char cxm_ren[CXM_MAXU][CXM_MAXUSE][CXM_PATHW];
 /* renamed-CXIF path pool; cxm_inc[u][k] < 0 means cxm_renpool[-(x)-1] */
 char cxm_renpool[CXM_MAXU * CXM_MAXUSE][CXM_PATHW]; int cxm_nren;
+/* body-symbol rename: cxm_bodysrc[v] is a rewritten source of module v ("#define sym alias" head),
+   empty = compile the original source.  One rename per module (the common case). */
+char cxm_bodysrc[CXM_MAXU][CXM_PATHW];
 /* exported and defined names: kind 0 a module's function, 1 a module's type name (typedef, "struct T", enum
    constant), 2 a non-static function defined by a unit that is not a module */
 char cxm_sym[CXM_SYMS][CXM_SYMW]; int cxm_symu[CXM_SYMS]; int cxm_syml[CXM_SYMS]; int cxm_symk[CXM_SYMS];
@@ -729,6 +732,25 @@ int cxm_put(char *path) {
     if (cxm_wr(path, cxm_out, cxm_nout)) { cxm_start(0 - 1, 0); cxm_m("cannot write the interface "); cxm_m(path); return cxm_fail(); }
     return 0;
 }
+/* write a body-symbol-renamed copy of module v: "#define SYM ALIAS" then the original
+   source, to a fresh temp file; returns the path in OUT (0 on failure).  The rename is a
+   macro, so the function definition, its recursive calls and any static use of SYM all
+   change symbol together. */
+int cxm_rewrite(int v, char *sym, char *alias, char *out) {
+    char *td; int n; int k; int p;
+    n = cxm_rd(cxm_arg[v], cxm_cmp, CXM_IFMAX);
+    if (n < 0) return 1;
+    td = getenv("TMPDIR"); if (td == 0 || td[0] == 0) td = "/tmp";
+    p = cxm_cpy(out, td, CXM_PATHW - 40);
+    k = cxm_cpy(out + p, "/ua-bodysrc-", 12); p = p + k;
+    k = 0; while (k < 8) { out[p] = "0123456789abcdef"[(cxm_nren + k) & 15]; p = p + 1; k = k + 1; }
+    out[p] = '.'; out[p + 1] = 'c'; out[p + 2] = 'x'; out[p + 3] = 0;
+    cxm_nout = 0;
+    cxm_o("#define "); cxm_o(sym); cxm_o(" "); cxm_o(alias); cxm_o("\n");
+    cxm_on2(cxm_cmp, n);
+    if (cxm_wr(out, cxm_out, cxm_nout)) return 1;
+    return 0;
+}
 int cxm_srcsha(int u) {
     char hex[65];
     unisa_sha256_hex(cxm_src, (size_t)cxm_nsrc, hex);
@@ -900,6 +922,9 @@ int cxm_plan(char **paths, int n) {
                             if (cxm_text(v, 1, cxm_usym[u][uk], cxm_ualias[u][uk]) || cxm_put(cxm_renpool[cxm_nren])) { cxm_on = 0; return 1; }
                             cxm_cpy(cxm_ren[u][uk], cxm_renpool[cxm_nren], CXM_PATHW);
                             cxm_inc[u][cxm_ninc[u]] = 0 - (cxm_nren + 1); cxm_nren = cxm_nren + 1; cxm_ninc[u] = cxm_ninc[u] + 1;
+                            if (!cxm_bodysrc[v][0]) {
+                                if (cxm_rewrite(v, cxm_usym[u][uk], cxm_ualias[u][uk], cxm_bodysrc[v])) { cxm_on = 0; return 1; }
+                            }
                         } else { cxm_inc[u][cxm_ninc[u]] = 2 * v + 1; cxm_ninc[u] = cxm_ninc[u] + 1; }
                     }
                     else if (cxm_typ[v][0]) { cxm_inc[u][cxm_ninc[u]] = 2 * v; cxm_ninc[u] = cxm_ninc[u] + 1; }
@@ -921,7 +946,7 @@ int cxm_planprint(char **opt, int nopt) {
     while (u < cxm_n) {
         cxm_nout = 0;
         cxm_nmsg = 0; cxm_md(u); cxm_on2(cxm_msg, cxm_nmsg);
-        cxm_o("\t"); cxm_o(cxm_arg[u]);
+        cxm_o("\t"); cxm_o(cxm_bodysrc[u][0] ? cxm_bodysrc[u] : cxm_arg[u]);
         if (cxm_iscx[u]) cxm_o("\tcx.h");
         k = 0; while (k < nopt) { cxm_o("\t"); cxm_o(opt[k]); k = k + 1; }
         k = 0; while (k < cxm_ninc[u]) { cxm_o("\t"); cxm_o(cxm_incpath(u, k)); k = k + 1; }
