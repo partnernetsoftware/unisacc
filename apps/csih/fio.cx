@@ -1,0 +1,156 @@
+#pragma unisa module fio
+#pragma unisa use sys.fs
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+/*
+ * fio.cx — buffered file streams over sys.fs, shaped like the stdio calls
+ * csih used (fopen/fgets/fread/fwrite/fputs/fputc/fprintf/fclose), so call
+ * sites keep their logic. No direct libc file call: the fd work is sy_open,
+ * sy_read, sy_write_all and sy_close. fio_printf formats with vsnprintf, the
+ * one libc formatter csih still uses directly (as snprintf elsewhere).
+ *
+ * Modes: "r"/"rb" read; "w"/"wb" create or truncate, 0666 before umask;
+ * "a"/"ab" create or append. Text and binary are the same here. One stream
+ * either reads or writes. Failures return NULL / EOF (-1) / a short count, as
+ * stdio does; the error code is fio_errno() (this file's errno is not the
+ * caller's: errno is per compilation unit).
+ */
+
+enum { FIO_BUF = 8192 };
+
+typedef struct fio_t {
+    int fd, wr, eof, err;
+    long pos, n;
+    char buf[FIO_BUF];
+} fio_t;
+
+/* errno is per compilation unit here, so a caller in another module does not
+   see the one set in this file: the last failure's code is kept and exported. */
+static int fio_last;
+int fio_errno(void) { return fio_last; }
+
+static int fio_fail(fio_t *f, int r) { errno = fio_last = -r; if (f) f->err = 1; return -1; }
+
+fio_t *fio_open(const char *path, const char *mode) {
+    int flags, fd;
+    fio_t *f;
+    if (!path || !mode) { fio_fail(0, -EINVAL); return 0; }
+    if (mode[0] == 'r') flags = O_RDONLY;
+    else if (mode[0] == 'w') flags = O_WRONLY | O_CREAT | O_TRUNC;
+    else if (mode[0] == 'a') flags = O_WRONLY | O_CREAT | O_APPEND;
+    else { fio_fail(0, -EINVAL); return 0; }
+    fd = sy_open(path, flags, 0666);
+    if (fd < 0) { fio_fail(0, fd); return 0; }
+    f = (fio_t *)mm_zalloc((long)sizeof *f);
+    if (!f) { sy_close(fd); fio_fail(0, -ENOMEM); return 0; }
+    f->fd = fd;
+    f->wr = mode[0] != 'r';
+    return f;
+}
+
+/* write out the buffered bytes: 0, or -1 */
+static int fio_drain(fio_t *f) {
+    int r;
+    if (!f->wr || f->n == 0) return 0;
+    r = sy_write_all(f->fd, f->buf, f->n);
+    f->n = 0;
+    return r != 0 ? fio_fail(f, r) : 0;
+}
+
+/* refill the read buffer: bytes now available, 0 at end of file, -1 */
+static long fio_fill(fio_t *f) {
+    long k;
+    if (f->pos < f->n) return f->n - f->pos;
+    if (f->eof) return 0;
+    k = sy_read(f->fd, f->buf, FIO_BUF);
+    if (k < 0) return fio_fail(f, (int)k);
+    if (k == 0) { f->eof = 1; return 0; }
+    f->pos = 0;
+    f->n = k;
+    return k;
+}
+
+/* fgets: up to CAP-1 bytes, through the first newline (kept); S, or 0 when
+   nothing was read (end of file or error) */
+char *fio_gets(char *s, int cap, fio_t *f) {
+    int i = 0;
+    if (!f || f->wr || !s || cap < 1) return 0;
+    while (i < cap - 1) {
+        char c;
+        if (fio_fill(f) <= 0) break;
+        c = f->buf[f->pos++];
+        s[i++] = c;
+        if (c == '\n') break;
+    }
+    if (i == 0) return 0;
+    s[i] = 0;
+    return s;
+}
+
+/* fread: whole items read */
+size_t fio_read(void *p, size_t size, size_t nmemb, fio_t *f) {
+    char *d = (char *)p;
+    long want, got = 0;
+    if (!f || f->wr || !p || size == 0 || nmemb == 0) return 0;
+    want = (long)(size * nmemb);
+    while (got < want) {
+        long have = fio_fill(f), take;
+        if (have <= 0) break;
+        take = have < want - got ? have : want - got;
+        mm_copy(d + got, want - got, f->buf + f->pos, take);
+        f->pos += take;
+        got += take;
+    }
+    return (size_t)got / size;
+}
+
+/* fwrite: whole items written (nmemb unless an error) */
+size_t fio_write(const void *p, size_t size, size_t nmemb, fio_t *f) {
+    const char *s = (const char *)p;
+    long want, done = 0;
+    if (!f || !f->wr || !p || size == 0 || nmemb == 0) return 0;
+    want = (long)(size * nmemb);
+    while (done < want) {
+        long room = FIO_BUF - f->n, take = want - done < room ? want - done : room;
+        mm_copy(f->buf + f->n, room, s + done, take);
+        f->n += take;
+        done += take;
+        if (f->n == FIO_BUF && fio_drain(f) != 0) return (size_t)(done - take) / size;
+    }
+    return nmemb;
+}
+
+int fio_puts(const char *s, fio_t *f) {
+    long n = 0;
+    if (!s) return -1;
+    while (s[n]) n++;
+    return fio_write(s, 1, (size_t)n, f) == (size_t)n ? 1 : -1;
+}
+
+int fio_putc(int c, fio_t *f) {
+    char b = (char)c;
+    return fio_write(&b, 1, 1, f) == 1 ? (unsigned char)b : -1;
+}
+
+/* fprintf: bytes written, or -1 (output over 64 KiB is refused) */
+int fio_printf(fio_t *f, const char *fmt, ...) {
+    static char tmp[65536];
+    va_list ap;
+    int n;
+    va_start(ap, fmt);
+    n = vsnprintf(tmp, sizeof tmp, fmt, ap);
+    va_end(ap);
+    if (n < 0 || n >= (int)sizeof tmp) { if (f) f->err = 1; return -1; }
+    return fio_write(tmp, 1, (size_t)n, f) == (size_t)n ? n : -1;
+}
+
+/* fclose: 0, or -1 when a buffered write or the close failed; F is freed */
+int fio_close(fio_t *f) {
+    int bad, r;
+    if (!f) return -1;
+    bad = fio_drain(f) != 0 || f->err;
+    r = sy_close(f->fd);
+    if (r != 0) { fio_fail(0, r); bad = 1; }
+    mm_free(f);
+    return bad ? -1 : 0;
+}

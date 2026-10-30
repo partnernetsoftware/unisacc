@@ -1,6 +1,7 @@
 #pragma unisa module tui
 #pragma unisa use zstr
 #pragma unisa use mem.heap
+#pragma unisa use fio
 /* text.text, mem.bytes (through zstr) and sys.env/fs/proc (through agent) are
    visible transitively; a unit takes at most 32 uses */
 #pragma unisa use render
@@ -37,6 +38,16 @@
    (the compiler takes no subscript of a call's result) */
 static int tui_env_first(const char *name) { const char *v = sy_env(name); return v ? (unsigned char)v[0] : 0; }
 static int tui_env_has(const char *name) { return tui_env_first(name) != 0; }
+
+/* sys.fs with the libc calls' shape: 0, or -1 with errno */
+static int tui_errno(int r) { if (r < 0) { errno = -r; return -1; } return r; }
+/* getcwd's shape: DST, or 0 with errno */
+static char *tui_getcwd(char *dst, int cap) { int r = sy_cwd(dst, cap); if (r < 0) { errno = -r; return 0; } return dst; }
+static int tui_rename(const char *a, const char *b) { return tui_errno(sy_rename(a, b)); }
+/* fopen's shape: errno is per compilation unit, so fio's code is copied into this one */
+static fio_t *tui_fopen(const char *p, const char *mode) { fio_t *f = fio_open(p, mode); if (!f) errno = fio_errno(); return f; }
+static int tui_mkdir(const char *p, int mode) { return tui_errno(sy_mkdir(p, mode)); }
+static int tui_rmdir(const char *p) { return tui_errno(sy_unlinkat(sy_at_fdcwd(), p, 1)); }
 
 /*
  * tui.c — the main loop. This is the file that finally puts term.c and
@@ -405,7 +416,7 @@ static int tui_owned_start(tui_state *st, const char *dir, const char *session,
     const char *v;
     size_t i;
     int fd, dfd;
-    struct stat sb;
+    sy_stat_t sb;
     reload_session_state *m;
     if (!dir || dir[0] != '/' || (size_t)zs_len(dir) > 4000 || dir[(size_t)zs_len(dir)-1] == '/' ||
         !tui_owned_id(session, 0) || !hash || (size_t)zs_len(hash) != 64 ||
@@ -436,7 +447,7 @@ static int tui_owned_start(tui_state *st, const char *dir, const char *session,
         if (v && v[0]) {
             if ((size_t)zs_len(v) >= 1024) return tui_reload_error(why, cap, "owned cwd exceeds agent capacity");
             snprintf(m->cwd, sizeof m->cwd, "%s", v);
-        } else if (!getcwd(m->cwd, sizeof m->cwd))
+        } else if (!tui_getcwd(m->cwd, (int)sizeof m->cwd))
             return tui_reload_error(why, cap, "owned getcwd failed");
         v = sy_env("CSIH_ROLE");
         if (!v || !v[0]) v = "agent";
@@ -448,18 +459,18 @@ static int tui_owned_start(tui_state *st, const char *dir, const char *session,
         snprintf(m->peer, sizeof m->peer, "%s", v);
     }
     if (tui_owned_runtime(m, why, cap) != 0) return -1;
-    dfd = open(m->cwd, O_RDONLY | O_DIRECTORY);
+    dfd = sy_open(m->cwd, O_RDONLY | O_DIRECTORY, 0);
     if (dfd < 0) return tui_reload_error(why, cap, "owned cwd not enterable directory");
-    if (close(dfd) != 0 || chdir(m->cwd) != 0)
+    if (sy_close(dfd) != 0 || sy_chdir(m->cwd) != 0)
         return tui_reload_error(why, cap, "owned cwd activation failed");
     if (!state_path) {
-        fd = open(journal, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+        fd = sy_open(journal, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
         if (fd < 0) return tui_reload_error(why, cap, "owned journal open failed");
-        if (fstat(fd, &sb) != 0 || !S_ISREG(sb.st_mode) || sb.st_uid != getuid() ||
-            (sb.st_mode & 0777) != 0600) {
-            close(fd); return tui_reload_error(why, cap, "owned journal not trusted regular file");
+        if (sy_fstat(fd, &sb) != 0 || sb.kind != 'f' || sb.uid != (long)getuid() ||
+            (sb.mode & 0777) != 0600) {
+            sy_close(fd); return tui_reload_error(why, cap, "owned journal not trusted regular file");
         }
-        if (close(fd) != 0) return tui_reload_error(why, cap, "owned journal close failed");
+        if (sy_close(fd) != 0) return tui_reload_error(why, cap, "owned journal close failed");
     }
     if (tui_reload_apply(st, m, why, cap) != 0) return -1;
     if (sy_setenv("CSIH_CWD", m->cwd, 1) != 0 || sy_setenv("CSIH_ROLE", m->role, 1) != 0 ||
@@ -532,13 +543,7 @@ static term_key_t tui_q_pop(tui_state *st) {
  * except stop looping, which the caller does).
  */
 static int tui_write_all(const char *s, size_t n) {
-    size_t off = 0;
-    while (off < n) {
-        ssize_t w = write(1, s + off, n - off);
-        if (w <= 0) return -1;
-        off += (size_t)w;
-    }
-    return 0;
+    return sy_write_all(1, s, (long)n) == 0 ? 0 : -1;   /* resumes after EINTR; 0 written is an error */
 }
 
 /*
@@ -904,15 +909,15 @@ static int tui_archives(const char *path, long *stamps, int max);
  * The old file is kept as PATH.<seconds>.jsonl. Returns 0 on success. */
 static int tui_new_context(const char *path, char *note, size_t cap) {
     char old[4200];
-    FILE *f;
+    fio_t *f;
     if (!path || !path[0]) { snprintf(note, cap, "new: no transcript path"); return 1; }
-    f = fopen(path, "r");
+    f = tui_fopen(path, "r");
     if (!f) {
         if (errno == ENOENT) { snprintf(note, cap, "new: 已是空上下文"); return 0; }
         snprintf(note, cap, "new: cannot open %s: %s", path, strerror(errno));
         return 1;
     }
-    fclose(f);
+    fio_close(f);
     {
         /* Never overwrite an archive: two moves in one second bump the stamp.
          * And stay newest, so /resume 1 is always the one just moved aside. */
@@ -920,10 +925,10 @@ static int tui_new_context(const char *path, char *note, size_t cap) {
         int tries = 0;
         if (tui_archives(path, have, 1) == 1 && have[0] >= stamp) stamp = have[0] + 1;
         do snprintf(old, sizeof old, "%s.%ld.jsonl", path, stamp++);
-        while (access(old, F_OK) == 0 && ++tries < 100);
+        while (sy_exists(old) == 1 && ++tries < 100);
         if (tries >= 100) { snprintf(note, cap, "new: no free archive name"); return 1; }
     }
-    if (rename(path, old) != 0) {
+    if (tui_rename(path, old) != 0) {
         snprintf(note, cap, "new: cannot move transcript: %s", strerror(errno));
         return 1;
     }
@@ -980,12 +985,12 @@ static void tui_first_user(const char *file, char *out, size_t cap) {
     const char *u = NULL, *t, *e;
     int lines = 0;
     /* Transcripts are large; file_read refuses those, so read the head only. */
-    FILE *f = fopen(file, "r");
+    fio_t *f = tui_fopen(file, "r");
     out[0] = 0;
     if (!f) return;
-    while (lines++ < 64 && fgets(buf, sizeof buf, f))
+    while (lines++ < 64 && fio_gets(buf, sizeof buf, f))
         if ((u = zs_find(buf, "\"role\":\"user\""))) break;
-    fclose(f);
+    fio_close(f);
     if (!u) return;
     t = zs_find(u, "\"text\":\"");
     if (!t) return;
@@ -1008,11 +1013,11 @@ static void tui_first_user(const char *file, char *out, size_t cap) {
 static int tui_import_shared(const char *path, const char *shared, char *note, size_t cap) {
     static char buf[65536];
     char dst[600];
-    FILE *in, *out;
+    fio_t *in, *out;
     size_t n;
     long stamp = (long)net_now();
     int tries = 0;
-    in = fopen(shared, "r");
+    in = tui_fopen(shared, "r");
     if (!in) { snprintf(note, cap, "resume: 没有旧的共享对话记录 %.200s", shared); return 1; }
     {
         /* Newest, so it is archive 1: archives bumped past now must not outrank it. */
@@ -1020,14 +1025,14 @@ static int tui_import_shared(const char *path, const char *shared, char *note, s
         if (tui_archives(path, have, 1) == 1 && have[0] >= stamp) stamp = have[0] + 1;
     }
     do snprintf(dst, sizeof dst, "%s.%ld.jsonl", path, stamp++);
-    while (access(dst, F_OK) == 0 && ++tries < 100);
-    /* access() above found dst free; "wx" is not available on every libc here. */
-    out = tries < 100 ? fopen(dst, "w") : NULL;
-    if (!out) { fclose(in); snprintf(note, cap, "resume: cannot create %s", dst); return 1; }
-    while ((n = fread(buf, 1, sizeof buf, in)) > 0)
-        if (fwrite(buf, 1, n, out) != n) { fclose(in); fclose(out); snprintf(note, cap, "resume: copy failed"); return 1; }
-    fclose(in);
-    if (fclose(out) != 0) { snprintf(note, cap, "resume: copy failed"); return 1; }
+    while (sy_exists(dst) == 1 && ++tries < 100);
+    /* sy_exists above found dst free; "wx" is not available on every libc here. */
+    out = tries < 100 ? tui_fopen(dst, "w") : NULL;
+    if (!out) { fio_close(in); snprintf(note, cap, "resume: cannot create %s", dst); return 1; }
+    while ((n = fio_read(buf, 1, sizeof buf, in)) > 0)
+        if (fio_write(buf, 1, n, out) != n) { fio_close(in); fio_close(out); snprintf(note, cap, "resume: copy failed"); return 1; }
+    fio_close(in);
+    if (fio_close(out) != 0) { snprintf(note, cap, "resume: copy failed"); return 1; }
     snprintf(note, cap, "resume: 已把旧的共享对话记录复制为本目录的归档 1，/resume 1 换回");
     return 0;
 }
@@ -1040,7 +1045,7 @@ static int tui_resume(const char *path, int pick, char *note, size_t cap) {
     if (pick < 1 || pick > n) { snprintf(note, cap, "resume: 没有第 %d 个归档（共 %d 个）", pick, n); return 1; }
     snprintf(from, sizeof from, "%s.%ld.jsonl", path, stamps[pick - 1]);
     if (tui_new_context(path, why, sizeof why) != 0) { snprintf(note, cap, "%s", why); return 1; }
-    if (rename(from, path) != 0) {
+    if (tui_rename(from, path) != 0) {
         snprintf(note, cap, "resume: cannot restore: %s", strerror(errno));
         return 1;
     }
@@ -1125,7 +1130,7 @@ static int tui_compact(const char *path, const char *last_answer, char *note, si
     session_records recs = session_read(path);
     size_t i, o;
     int nu = 0, k;
-    FILE *f;
+    fio_t *f;
     zs_mset(held, 0, sizeof held);
     for (i = recs.count; i > 0 && nu < 5; i--) {
         char err[128];
@@ -1151,10 +1156,10 @@ static int tui_compact(const char *path, const char *last_answer, char *note, si
     if (!json_rec(rec, sizeof rec, "role", "user", "text", summary, NULL, NULL)) {
         snprintf(note, cap, "compact: 摘录太长"); return 1;
     }
-    f = fopen(path, "w");
+    f = tui_fopen(path, "w");
     if (!f) { snprintf(note, cap, "compact: cannot write %s", path); return 1; }
-    fprintf(f, "%s\n", rec);
-    fclose(f);
+    fio_printf(f, "%s\n", rec);
+    fio_close(f);
     snprintf(note, cap, "compact: 已归档完整记录，新上下文保留 %d 条请求%s的原文摘录", nu, last_answer && last_answer[0] ? "和上一轮答复" : "");
     return 0;
 }
@@ -1165,38 +1170,38 @@ static int tui_compact(const char *path, const char *last_answer, char *note, si
  * out. Returns the number of sections written, -1 on error. */
 static int tui_export(const char *transcript, const char *dest, char *note, size_t cap) {
     session_records recs = session_read(transcript);
-    FILE *f;
+    fio_t *f;
     size_t i;
     int sections = 0;
     if (!recs.count) { session_free(&recs); snprintf(note, cap, "export: 当前没有对话记录"); return -1; }
-    f = fopen(dest, "w");
+    f = tui_fopen(dest, "w");
     if (!f) { session_free(&recs); snprintf(note, cap, "export: cannot write %.200s: %s", dest, strerror(errno)); return -1; }
-    fprintf(f, "# csih 对话导出\n\n");
+    fio_printf(f, "# csih 对话导出\n\n");
     for (i = 0; i < recs.count; i++) {
         char err[128];
         jvalue *v = json_parse(recs.lines[i], (size_t)zs_len(recs.lines[i]), err, sizeof err);
         const char *role = v ? jstr(jget(v, "role")) : NULL, *text = v ? jstr(jget(v, "text")) : NULL;
         if (!role || !text) { if (v) jfree(v); continue; }
         if (!zs_cmp(role, "user")) {
-            fprintf(f, "## 你\n\n%s\n\n", text); sections++;
+            fio_printf(f, "## 你\n\n%s\n\n", text); sections++;
         } else if (!zs_cmp(role, "assistant")) {
             /* Only answers: the text of an act=answer object, or plain prose. */
             jvalue *a = json_parse(text, (size_t)zs_len(text), err, sizeof err);
             const char *act = a ? jstr(jget(a, "act")) : NULL, *body = a ? jstr(jget(a, "text")) : NULL;
-            if (a && act && !zs_cmp(act, "answer") && body) { fprintf(f, "## csih\n\n%s\n\n", body); sections++; }
-            else if (!a && text[0] != '{') { fprintf(f, "## csih\n\n%s\n\n", text); sections++; }
+            if (a && act && !zs_cmp(act, "answer") && body) { fio_printf(f, "## csih\n\n%s\n\n", body); sections++; }
+            else if (!a && text[0] != '{') { fio_printf(f, "## csih\n\n%s\n\n", text); sections++; }
             if (a) jfree(a);
         } else if (!zs_cmp(role, "tool")) {
             const char *name = jstr(jget(v, "name"));
             size_t n = (size_t)zs_len(text);
-            fprintf(f, "### 工具 %s\n\n```\n%.*s%s\n```\n\n", name ? name : "", (int)(n > 1500 ? 1500 : n), text,
+            fio_printf(f, "### 工具 %s\n\n```\n%.*s%s\n```\n\n", name ? name : "", (int)(n > 1500 ? 1500 : n), text,
                     n > 1500 ? "\n…（截断）" : "");
             sections++;
         }
         jfree(v);
     }
     session_free(&recs);
-    if (fclose(f) != 0) { snprintf(note, cap, "export: write failed"); return -1; }
+    if (fio_close(f) != 0) { snprintf(note, cap, "export: write failed"); return -1; }
     snprintf(note, cap, "export: %d 段写入 %.200s", sections, dest);
     return sections;
 }
@@ -1333,7 +1338,7 @@ static int tui_slash(tui_state *st) {
         char path[1024], here[1024], full[2100], buf[1024];
         const char *arg = st->input + 5, *sp;
         int from = 1, ln = 0, shown = 0;
-        FILE *f;
+        fio_t *f;
         while (*arg == ' ') arg++;
         sp = zs_rchr(arg, ' ');
         if (sp && sp[1] >= '0' && sp[1] <= '9') { from = atoi(sp + 1); snprintf(path, sizeof path, "%.*s", (int)(sp - arg), arg); }
@@ -1344,14 +1349,14 @@ static int tui_slash(tui_state *st) {
         else if (path[0] == '/') snprintf(full, sizeof full, "%s", path);
         else {
             const char *cwd = csih_env("CSIH_CWD", "CDSH_CWD");
-            if (!cwd) { if (!getcwd(here, sizeof here)) zs_cpy(here, "."); cwd = here; }
+            if (!cwd) { if (!tui_getcwd(here, (int)sizeof here)) zs_cpy(here, "."); cwd = here; }
             snprintf(full, sizeof full, "%s/%s", cwd, path);
         }
-        f = fopen(full, "r");
+        f = tui_fopen(full, "r");
         if (!f) { snprintf(note, sizeof note, "view: cannot open %.180s: %s", path, strerror(errno)); tui_log_plain(st, note); tui_command_done(st); return 1; }
         snprintf(note, sizeof note, "view: %.180s 从第 %d 行", path, from);
         tui_log_plain(st, note);
-        while (shown < 20 && fgets(buf, sizeof buf, f)) {
+        while (shown < 20 && fio_gets(buf, sizeof buf, f)) {
             ln++;
             if (ln < from) continue;
             buf[strcspn(buf, "\r\n")] = 0;
@@ -1360,11 +1365,11 @@ static int tui_slash(tui_state *st) {
             shown++;
         }
         if (!shown) tui_log_plain(st, "view: （此范围没有内容）");
-        else if (fgets(buf, sizeof buf, f)) {
+        else if (fio_gets(buf, sizeof buf, f)) {
             snprintf(note, sizeof note, "view: 还有更多，/view %.150s %d", path, ln + 1);
             tui_log_plain(st, note);
         }
-        fclose(f);
+        fio_close(f);
         tui_command_done(st);
         return 1;
     }
@@ -1407,15 +1412,15 @@ static int tui_slash(tui_state *st) {
         char path[512], up[16], sz[16];
         int per_turn = 0, keep = 0, calls = 0, tokens = 0, sec = 0, rsec = 0;
         long trim = 0, sent = 0, hit = 0, miss = 0, out = 0;
-        struct stat sb;
+        sy_stat_t sb;
         agent_context_limits(&per_turn, &trim, &keep);
         if (st->owned) snprintf(path, sizeof path, "%s", st->journal_path);
         else if (agent_transcript_path(path, sizeof path) != 0) path[0] = 0;
-        if (!path[0] || stat(path, &sb) != 0) {
+        if (!path[0] || sy_stat(path, &sb) != 0) {
             tui_log_plain(st, "context: 当前没有对话记录（新上下文）");
         } else {
             session_records recs = session_read(path);
-            tui_bytes(sz, sizeof sz, (long)sb.st_size);
+            tui_bytes(sz, sizeof sz, sb.size);
             snprintf(note, sizeof note, "context: %zu 条记录 · %s · %.150s", recs.count, sz, path);
             tui_log_plain(st, note);
             session_free(&recs);
@@ -1529,7 +1534,7 @@ static int tui_slash(tui_state *st) {
     if (!zs_cmp(st->input, "/cwd")) {
         char here[1024];
         const char *cwd = csih_env("CSIH_CWD", "CDSH_CWD");
-        if (!cwd) { if (!getcwd(here, sizeof here)) zs_cpy(here, "?"); cwd = here; }
+        if (!cwd) { if (!tui_getcwd(here, (int)sizeof here)) zs_cpy(here, "?"); cwd = here; }
         snprintf(note, sizeof note, "cwd: %.200s", cwd);
         tui_log_plain(st, note);
         tui_command_done(st);
@@ -1688,17 +1693,17 @@ static int tui_slash(tui_state *st) {
         char file[1200], body[TUI_INPUT_MAX], out[TUI_INPUT_MAX], args[TUI_INPUT_MAX];
         const char *home = sy_env("HOME"), *p, *a;
         size_t n = 0, o = 0;
-        FILE *f;
+        fio_t *f;
         snprintf(args, sizeof args, "%s", st->input[token] == ' ' ? st->input + token + 1 : "");
         snprintf(file, sizeof file, ".csih/commands/%.*s.md", token - 1, st->input + 1);
-        f = fopen(file, "r");
+        f = tui_fopen(file, "r");
         if (!f && home) {
             snprintf(file, sizeof file, "%s/.csih/commands/%.*s.md", home, token - 1, st->input + 1);
-            f = fopen(file, "r");
+            f = tui_fopen(file, "r");
         }
         if (f) {
-            n = fread(body, 1, sizeof body - 1, f);
-            fclose(f);
+            n = fio_read(body, 1, sizeof body - 1, f);
+            fio_close(f);
             body[n] = 0;
             for (p = body; *p && o + 1 < sizeof out; ) {
                 if (!zs_ncmp(p, "$ARGS", 5)) {
@@ -1764,13 +1769,13 @@ static void tui_input_byte(tui_state *st, char ch) {
 static char tui_hist_file[600];
 
 static void tui_history_save(const char *line) {
-    FILE *f;
+    fio_t *f;
     if (!tui_hist_file[0] || !line || !line[0]) return;
-    f = fopen(tui_hist_file, "a");
+    f = tui_fopen(tui_hist_file, "a");
     if (!f) return;
-    for (; *line; line++) fputc(*line == '\n' ? 0x1e : *line, f);
-    fputc('\n', f);
-    fclose(f);
+    for (; *line; line++) fio_putc(*line == '\n' ? 0x1e : *line, f);
+    fio_putc('\n', f);
+    fio_close(f);
 }
 
 /* Load the newest entries into st (at most the 16 it holds). */
@@ -1778,11 +1783,11 @@ static void tui_history_load(tui_state *st, const char *file) {
     static char ring[16][TUI_INPUT_MAX];
     char line[TUI_INPUT_MAX];
     int n = 0, i, start;
-    FILE *f;
+    fio_t *f;
     snprintf(tui_hist_file, sizeof tui_hist_file, "%s", file);
-    f = fopen(file, "r");
+    f = tui_fopen(file, "r");
     if (!f) return;
-    while (fgets(line, sizeof line, f)) {
+    while (fio_gets(line, sizeof line, f)) {
         char *p;
         line[strcspn(line, "\n")] = 0;
         if (!line[0]) continue;
@@ -1790,14 +1795,14 @@ static void tui_history_load(tui_state *st, const char *file) {
         snprintf(ring[n % 16], TUI_INPUT_MAX, "%s", line);
         n++;
     }
-    fclose(f);
+    fio_close(f);
     start = n > 16 ? n - 16 : 0;
     st->nhistory = 0;
     for (i = start; i < n; i++)
         snprintf(st->history[st->nhistory++], sizeof st->history[0], "%s", ring[i % 16]);
     /* Keep the file bounded: past 1000 entries, rewrite it as the kept 16. */
-    if (n > 1000 && (f = fopen(file, "w"))) {
-        fclose(f);
+    if (n > 1000 && (f = tui_fopen(file, "w"))) {
+        fio_close(f);
         for (i = 0; i < st->nhistory; i++) tui_history_save(st->history[i]);
     }
 }
@@ -2094,21 +2099,21 @@ static int tui_mind_noise(const char *s) {
 static void tui_page_lines(const char *name, char got[][R_LINE_MAX + 1],
                            int maxlines, int *nlines, int *state) {
     char path[512], buf[512];
-    FILE *fp;
+    fio_t *fp;
     const char *home = sy_env("HOME");
     *nlines = 0;
     *state = 1;
     if (!home || !home[0]) return;
     csih_home_bind(home);
     snprintf(path, sizeof path, "%s/.csih/%s", home, name);
-    fp = fopen(path, "r");
+    fp = tui_fopen(path, "r");
     if (!fp) {
         snprintf(path, sizeof path, "%s/.cdsh/%s", home, name);
-        fp = fopen(path, "r");
+        fp = tui_fopen(path, "r");
     }
     if (!fp) return;
     *state = 2;
-    while (fgets(buf, sizeof buf, fp)) {
+    while (fio_gets(buf, sizeof buf, fp)) {
         size_t len = (size_t)zs_len(buf);
         while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r')) buf[--len] = '\0';
         if (!buf[0] || tui_mind_noise(buf)) continue;
@@ -2117,7 +2122,7 @@ static void tui_page_lines(const char *name, char got[][R_LINE_MAX + 1],
         (*nlines)++;
         snprintf(got[*nlines - 1], R_LINE_MAX + 1, "%s", buf);
     }
-    fclose(fp);
+    fio_close(fp);
 }
 
 static void tui_col_put(char *side, int width, const char *text) {
@@ -2203,26 +2208,26 @@ static int tui_text_lines(const char *src) {
 /* Content lines in a mind page. -1 when the file is missing. */
 static int tui_page_count(const char *name) {
     char path[512], buf[512];
-    FILE *fp;
+    fio_t *fp;
     const char *home = sy_env("HOME");
     int n = 0, any = 0;
     if (!home || !home[0]) return -1;
     csih_home_bind(home);
     snprintf(path, sizeof path, "%s/.csih/%s", home, name);
-    fp = fopen(path, "r");
+    fp = tui_fopen(path, "r");
     if (!fp) {
         snprintf(path, sizeof path, "%s/.cdsh/%s", home, name);
-        fp = fopen(path, "r");
+        fp = tui_fopen(path, "r");
     }
     if (!fp) return -1;
-    while (fgets(buf, sizeof buf, fp)) {
+    while (fio_gets(buf, sizeof buf, fp)) {
         size_t len = (size_t)zs_len(buf);
         while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r')) buf[--len] = '\0';
         if (!buf[0] || tui_mind_noise(buf)) continue;
         any = 1;
         if (n < 999) n++;
     }
-    fclose(fp);
+    fio_close(fp);
     return any ? n : 0;
 }
 
@@ -2483,7 +2488,7 @@ static int tui_path_at(tui_state *st, int x, int y, char *out, size_t cap, int *
     char word[1024], here[1024];
     static int off[R_LINE_MAX + 1], sep[R_LINE_MAX + 1];
     int i = 0, n = 0, col = 1, k = -1, a, b;
-    struct stat sb;
+    sy_stat_t sb;
     *line = 1;
     if (y < 1 || y > f.n) return 0;
     s = f.lines[y - 1];
@@ -2516,10 +2521,10 @@ static int tui_path_at(tui_state *st, int x, int y, char *out, size_t cap, int *
     else if (word[0] == '/') snprintf(out, cap, "%s", word);
     else {
         const char *cwd = csih_env("CSIH_CWD", "CDSH_CWD");
-        if (!cwd) { if (!getcwd(here, sizeof here)) zs_cpy(here, "."); cwd = here; }
+        if (!cwd) { if (!tui_getcwd(here, (int)sizeof here)) zs_cpy(here, "."); cwd = here; }
         snprintf(out, cap, "%s/%s", cwd, word);
     }
-    return stat(out, &sb) == 0 && S_ISREG(sb.st_mode);
+    return sy_stat(out, &sb) == 0 && sb.kind == 'f';
 }
 
 static void tui_click(tui_state *st, int x, int y) {
@@ -2776,18 +2781,18 @@ static void tui_status_load(tui_state *st) {
     const char *path = sy_env("CSIH_STATUS_FILE");
     const char *stale_env = sy_env("CSIH_STATUS_STALE_SEC");
     char line[600];
-    struct stat sb;
-    FILE *f;
+    sy_stat_t sb;
+    fio_t *f;
     long age, stale = 600;
     st->nstatus = 0;
     if (!path || !path[0]) path = ".csih-status";
-    if (stat(path, &sb) != 0 || !S_ISREG(sb.st_mode)) return;
-    f = fopen(path, "r");
+    if (sy_stat(path, &sb) != 0 || sb.kind != 'f') return;
+    f = tui_fopen(path, "r");
     if (!f) return;
     if (stale_env && atol(stale_env) > 0) stale = atol(stale_env);
-    age = (long)net_now() - (long)sb.st_mtime;
+    age = (long)net_now() - sb.mtime;
     if (age < 0) age = 0;
-    while (st->nstatus < 3 && fgets(line, sizeof line, f)) {
+    while (st->nstatus < 3 && fio_gets(line, sizeof line, f)) {
         size_t n = strcspn(line, "\r\n");
         char ago[48];
         line[n] = 0;
@@ -2801,7 +2806,7 @@ static void tui_status_load(tui_state *st) {
         } else snprintf(st->status[st->nstatus], sizeof st->status[0], "项目> %.200s", line);
         st->nstatus++;
     }
-    fclose(f);
+    fio_close(f);
 }
 
 /* 574B, 32.1KB, 1.2MB: byte counts a person can read at a glance. */
@@ -2984,7 +2989,7 @@ static r_frame tui_render_state(tui_state *st, int cols) {
         char info[1400], here[1024];
         const char *model = csih_env("CSIH_MODEL", "CDSH_MODEL");
         const char *cwd = csih_env("CSIH_CWD", "CDSH_CWD");
-        if (!cwd) { if (!getcwd(here, sizeof here)) zs_cpy(here, "."); cwd = here; }
+        if (!cwd) { if (!tui_getcwd(here, (int)sizeof here)) zs_cpy(here, "."); cwd = here; }
         if (st->model[0]) model = st->model;
         tui_title_info(info, sizeof info, model ? model : "deepseek-chat", cwd);
         snprintf(title, sizeof title, "%s · %s", rs.title, info);
@@ -3440,7 +3445,7 @@ static int tui_run_prompt(tui_state *st, const char *source_prompt, int clear_ma
     if (!endpoint) endpoint = "https://api.deepseek.com/v1/chat/completions";
     if (!model)    model = "deepseek-chat";
     if (st->model[0]) model = st->model;
-    if (!cwd) { if (!getcwd(real_cwd, sizeof real_cwd)) zs_cpy(real_cwd, "."); cwd = real_cwd; }
+    if (!cwd) { if (!tui_getcwd(real_cwd, (int)sizeof real_cwd)) zs_cpy(real_cwd, "."); cwd = real_cwd; }
     /* Same file across turns and across the cache re-exec. Do not delete it. */
     if (st->owned) {
         cwd = st->owned->cwd;
@@ -3576,7 +3581,7 @@ static void tui_turn_done(tui_state *st) {
         }
     }
     tui_redraw(st);
-    if (tui_should_bell(isatty(1), sy_env("CSIH_BELL"))) { fputs("\a", stdout); fflush(stdout); }
+    if (tui_should_bell(isatty(1), sy_env("CSIH_BELL"))) sy_write_all(1, "\a", 1);   /* the screen is written to fd 1 directly too */
     if (!cancelled && r.ok && st->loop_on && !from_mail) tui_queue_goal(st);
 }
 
@@ -3595,7 +3600,7 @@ static int tui_managed_send(const char *op, int pending) {
         "{\"op\":\"%s\",\"session\":\"%s\",\"handoff\":\"%s\",\"hash\":\"%s\"}\n",
         op, tui_managed.session, pending ? tui_managed.next_handoff : tui_managed.handoff,
         pending ? tui_managed.next_hash : tui_managed.hash);
-    return n > 0 && n < (int)sizeof line && write(tui_managed.fd, line, n) == n ? 0 : -1;
+    return n > 0 && n < (int)sizeof line && sy_write_all(tui_managed.fd, line, n) == 0 ? 0 : -1;
 }
 
 static int tui_managed_request(tui_state *st) {
@@ -3608,7 +3613,7 @@ static int tui_managed_request(tui_state *st) {
 
 static int tui_managed_init(const char *dir, const char *sid, const char *hid,
                             const char *hash, const char *fdtext, int standby) {
-    struct stat sb; int dfd, fd = 0, flags, i;
+    sy_stat_t sb; int dfd, fd = 0, flags, i;
     if (!dir || dir[0] != '/' || (size_t)zs_len(dir) > 4000 || dir[(size_t)zs_len(dir)-1] == '/' ||
         !tui_owned_id(sid, 0) || (size_t)zs_len(sid) > 64 || !tui_owned_id(hid, 0) ||
         (size_t)zs_len(hid) > 64 || !hash || (size_t)zs_len(hash) != 64 || !fdtext || !*fdtext) return -1;
@@ -3617,14 +3622,17 @@ static int tui_managed_init(const char *dir, const char *sid, const char *hid,
         if (fdtext[i] < '0' || fdtext[i] > '9' || fd > 100000) return -1;
         fd = fd * 10 + fdtext[i] - '0';
     }
-    if (fd < 3 || fstat(fd, &sb) != 0 || !S_ISSOCK(sb.st_mode)) return -1;
+    if (fd < 3 || sy_fstat(fd, &sb) != 0 || sb.kind != 's') return -1;
     flags = fcntl(fd, F_GETFL, 0);
     if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0 ||
         fcntl(fd, F_SETFD, FD_CLOEXEC) != 0) return -1;
-    dfd = open(dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    dfd = sy_open(dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0);
     if (dfd < 0) return -1;
-    i = fstat(dfd, &sb) == 0 && S_ISDIR(sb.st_mode) && sb.st_uid == getuid() && (sb.st_mode & 0777) == 0700;
-    if (close(dfd) != 0 || !i) return -1;
+    {
+        sy_stat_t ds;
+        i = sy_fstat(dfd, &ds) == 0 && ds.kind == 'd' && ds.uid == (long)getuid() && (ds.mode & 0777) == 0700;
+    }
+    if (sy_close(dfd) != 0 || !i) return -1;
     zs_mset(&tui_managed, 0, sizeof tui_managed);
     tui_managed.fd = fd; tui_managed.phase = standby ? 1 : 2;
     snprintf(tui_managed.dir, sizeof tui_managed.dir, "%s", dir);
@@ -3707,10 +3715,10 @@ done:
 static void tui_managed_poll(tui_state *st) {
     char c; int n;
     while (!st->quit) {
-        n = read(tui_managed.fd, &c, 1);
+        n = (int)sy_read(tui_managed.fd, &c, 1);   /* non-blocking; resumes after EINTR */
         if (n == 0) { st->quit = 1; break; }
         if (n < 0) {
-            if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) st->quit = 1;
+            if (n != -EAGAIN && n != -EWOULDBLOCK) st->quit = 1;
             break;
         }
         if (!c || tui_managed.used >= (int)sizeof tui_managed.frame - 1) { st->quit = 1; break; }
@@ -3779,7 +3787,7 @@ static void tui_mail_complete(tui_state *st, const char *result, const char *rea
  * soon without busy-spinning. */
 static void tui_mail_poll(tui_state *st, int tasks_allowed) {
     char inbox[4096], why[256];
-    struct stat sb;
+    sy_stat_t sb;
     csih_message *m;
     long now;
     int rc;
@@ -3790,12 +3798,15 @@ static void tui_mail_poll(tui_state *st, int tasks_allowed) {
     if (st->mail_next_ms && now < st->mail_next_ms) return;
     st->mail_next_ms = now + 250;
     if (snprintf(inbox, sizeof inbox, "%s/inbox", st->owned_dir) >= (int)sizeof inbox) return;
-    if (lstat(inbox, &sb) != 0) {
-        if (errno != ENOENT) {
+    {
+        int lr = sy_lstat(inbox, &sb);
+        if (lr != 0) {
+        if (lr != -ENOENT) {
             const char *e = "mailbox unavailable";
             if (zs_cmp(st->mail_error, e)) { snprintf(st->mail_error, sizeof st->mail_error, "%s", e); tui_log_plain(st, e); }
         }
         return;
+        }
     }
     m = mm_alloc(sizeof *m);
     if (!m) return;
@@ -3895,14 +3906,14 @@ int tui_entry(int argc, char **argv) {
             };
             char journal[4096], bytes[64];
             const char *audit = "audit unchanged\n";
-            FILE *f;
+            fio_t *f;
             int i, j, found, n, bad = 0;
             snprintf(journal, sizeof journal, "%s/csih-command-selftest-%ld.jsonl", tui_selftest_tmp(), (long)getpid());
-            f = fopen(journal, "wb");
+            f = tui_fopen(journal, "wb");
             if (!f) bad = 1;
             else {
-                if (fwrite(audit, 1, (size_t)zs_len(audit), f) != (size_t)zs_len(audit)) bad = 1;
-                if (fclose(f) != 0) bad = 1;
+                if (fio_write(audit, 1, (size_t)zs_len(audit), f) != (size_t)zs_len(audit)) bad = 1;
+                if (fio_close(f) != 0) bad = 1;
             }
             tui_state_init(&h, journal); h.mode = 1;
             tui_history_add(&h, "old history");
@@ -3947,12 +3958,12 @@ int tui_entry(int argc, char **argv) {
             if (!zs_find(h.log[h.nlog - 1], "unknown command: /foobar") || h.busy || h.nhistory || h.npending != 1) bad = 1;
             tui_type(&h, "/clear extra");
             if (!zs_find(h.log[h.nlog - 1], "usage: /clear") || h.nlog != 3 || h.busy || h.nhistory) bad = 1;
-            f = fopen(journal, "rb");
+            f = tui_fopen(journal, "rb");
             if (!f) bad = 1;
             else {
-                n = (int)fread(bytes, 1, sizeof bytes - 1, f); bytes[n] = 0;
+                n = (int)fio_read(bytes, 1, sizeof bytes - 1, f); bytes[n] = 0;
                 if (zs_cmp(bytes, audit)) bad = 1;
-                fclose(f);
+                fio_close(f);
             }
             if (tui_selftest_rm(journal, 0)) bad = 1;
             if (bad) { printf("FAIL native help/status/clear invariants\n"); failures++; }
@@ -4049,20 +4060,20 @@ int tui_entry(int argc, char **argv) {
                 char dir[4096];
                 char path[4200], journal[4200];
                 const char *line = "中文日志\n";
-                FILE *f;
+                fio_t *f;
                 int fixture_ok = 0, seq;
                 for (seq = 0; seq < 100; seq++) {
                     snprintf(dir, sizeof dir, "%s/csih-reload-bridge-%ld-%d", tui_selftest_tmp(), (long)getpid(), seq);
-                    if (mkdir(dir, 0700) == 0) { fixture_ok = 1; break; }
+                    if (tui_mkdir(dir, 0700) == 0) { fixture_ok = 1; break; }
                 }
                 snprintf(path, sizeof path, "%s/state.json", dir);
                 snprintf(journal, sizeof journal, "%s/journal.jsonl", dir);
                 if (fixture_ok) {
-                    f = fopen(journal, "wb");
+                    f = tui_fopen(journal, "wb");
                     if (!f) fixture_ok = 0;
                     else {
-                        if (fwrite(line, 1, (size_t)zs_len(line), f) != (size_t)zs_len(line)) fixture_ok = 0;
-                        if (fclose(f) != 0) fixture_ok = 0;
+                        if (fio_write(line, 1, (size_t)zs_len(line), f) != (size_t)zs_len(line)) fixture_ok = 0;
+                        if (fio_close(f) != 0) fixture_ok = 0;
                     }
                 }
                 if (!fixture_ok) {
@@ -4080,7 +4091,7 @@ int tui_entry(int argc, char **argv) {
                     if (tui_reload_capture(&source, &before_metadata, &expected, why, sizeof why) != 0 ||
                         tui_reload_prepare(path, metadata.session_id, metadata.handoff_id,
                                            metadata.candidate_hash, &prepared, &token, why, sizeof why) != 0 ||
-                        mm_cmp(&expected, &prepared, sizeof expected) || access(path, F_OK) != 0) {
+                        mm_cmp(&expected, &prepared, sizeof expected) || sy_exists(path) != 1) {
                         printf("FAIL reload bridge prepare %s\n", why); failures++;
                     }
                     zs_mcpy(&old_token, &token, sizeof token);
@@ -4098,21 +4109,21 @@ int tui_entry(int argc, char **argv) {
                                            &prepared, &token, why, sizeof why) != -1 ||
                         zs_cmp(why, "session_id mismatch") ||
                         mm_cmp(&prepared, &zero, sizeof prepared) ||
-                        mm_cmp(&token, &zero_token, sizeof token) || access(path, F_OK) != 0) {
+                        mm_cmp(&token, &zero_token, sizeof token) || sy_exists(path) != 1) {
                         printf("FAIL reload bridge wrong identity retains file %s\n", why); failures++;
                     }
-                    f = fopen(journal, "ab");
+                    f = tui_fopen(journal, "ab");
                     if (!f) { printf("FAIL reload bridge append fixture\n"); failures++; }
                     else {
-                        int append_ok = fwrite("x", 1, 1, f) == 1;
-                        if (fclose(f) != 0) append_ok = 0;
+                        int append_ok = fio_write("x", 1, 1, f) == 1;
+                        if (fio_close(f) != 0) append_ok = 0;
                         if (!append_ok) { printf("FAIL reload bridge append fixture\n"); failures++; }
                     }
                     if (tui_reload_prepare(path, metadata.session_id, metadata.handoff_id, metadata.candidate_hash,
                                            &prepared, &token, why, sizeof why) != -1 ||
                         zs_cmp(why, "journal length != snapshot offset") ||
                         mm_cmp(&prepared, &zero, sizeof prepared) ||
-                        mm_cmp(&token, &zero_token, sizeof token) || access(path, F_OK) != 0) {
+                        mm_cmp(&token, &zero_token, sizeof token) || sy_exists(path) != 1) {
                         printf("FAIL reload bridge changed journal retains file %s\n", why); failures++;
                     }
                 }
@@ -4620,16 +4631,16 @@ int tui_entry(int argc, char **argv) {
                 char oldhome[512], fh[4096], fp2[4200];
                 const char *home = sy_env("HOME");
                 int k, in_at = -1, hint_at = -1, sysn = 0, rules = 0, head = 0, paired = 0, tee = 0, labeled = 0, bars = 0, collapsed = 0;
-                FILE *fp;
+                fio_t *fp;
                 if (home) snprintf(oldhome, sizeof oldhome, "%s", home);
                 else oldhome[0] = '\0';
                 snprintf(fh, sizeof fh, "%s/cdsh-frame-home", tui_selftest_tmp());
-                mkdir(fh, 0750);
-                snprintf(fp2, sizeof fp2, "%s/.cdsh", fh); mkdir(fp2, 0750);
-                snprintf(fp2, sizeof fp2, "%s/.cdsh/思维树.md", fh); fp = fopen(fp2, "w");
-                if (fp) { fputs("# 思维树\n甲\n乙\n丙\n", fp); fclose(fp); }
-                snprintf(fp2, sizeof fp2, "%s/.cdsh/记忆宫殿.md", fh); fp = fopen(fp2, "w");
-                if (fp) { fputs("```mermaid\nflowchart LR\n# 记忆宫殿\n子\n丑\n```\n", fp); fclose(fp); }
+                tui_mkdir(fh, 0750);
+                snprintf(fp2, sizeof fp2, "%s/.cdsh", fh); tui_mkdir(fp2, 0750);
+                snprintf(fp2, sizeof fp2, "%s/.cdsh/思维树.md", fh); fp = tui_fopen(fp2, "w");
+                if (fp) { fio_puts("# 思维树\n甲\n乙\n丙\n", fp); fio_close(fp); }
+                snprintf(fp2, sizeof fp2, "%s/.cdsh/记忆宫殿.md", fh); fp = tui_fopen(fp2, "w");
+                if (fp) { fio_puts("```mermaid\nflowchart LR\n# 记忆宫殿\n子\n丑\n```\n", fp); fio_close(fp); }
                 sy_setenv("HOME", fh, 1);
                 tui_state_init(&mind, NULL);
                 mind.mode = 1;
@@ -4774,8 +4785,8 @@ int tui_entry(int argc, char **argv) {
                     mind.sys_top = 0;
                     mind.rows = 24;
                 }
-                fp = fopen(fp2, "w");
-                if (fp) fclose(fp);
+                fp = tui_fopen(fp2, "w");
+                if (fp) fio_close(fp);
                 if (!tui_frame_has(&mind, "(空)")) {
                     printf("FAIL empty palace page\n"); failures++;
                 } else printf("  ok   empty palace shows (空)\n");
@@ -5065,12 +5076,12 @@ int tui_entry(int argc, char **argv) {
         {
             char path[256], msg[400];
             const char *arch;
-            FILE *f;
+            fio_t *f;
             snprintf(path, sizeof path, "/tmp/csih-new-%d.jsonl", (int)getpid());
-            f = fopen(path, "w");
-            if (f) { fputs("{\"role\":\"user\",\"text\":\"old\"}\n", f); fclose(f); }
-            if (!f || tui_new_context(path, msg, sizeof msg) != 0 || access(path, F_OK) == 0
-                || !(arch = zs_find(msg, "存为 ")) || access(arch + (size_t)zs_len("存为 "), F_OK) != 0) {
+            f = tui_fopen(path, "w");
+            if (f) { fio_puts("{\"role\":\"user\",\"text\":\"old\"}\n", f); fio_close(f); }
+            if (!f || tui_new_context(path, msg, sizeof msg) != 0 || sy_exists(path) == 1
+                || !(arch = zs_find(msg, "存为 ")) || sy_exists(arch + (size_t)zs_len("存为 ")) != 1) {
                 printf("FAIL /new: %s\n", msg); failures++;
             } else {
                 if (tui_selftest_rm(arch + (size_t)zs_len("存为 "), 0)) failures++;
@@ -5082,20 +5093,20 @@ int tui_entry(int argc, char **argv) {
         {
             char dir[256], path[300], msg[400], first[160], body[256];
             long stamps[9];
-            FILE *f;
+            fio_t *f;
             int ok = 0, n1 = -1, n2 = -1;
             snprintf(dir, sizeof dir, "/tmp/csih-resume-%d", (int)getpid());
             snprintf(path, sizeof path, "%s/t.jsonl", dir);
-            if (mkdir(dir, 0700) == 0) {
-                f = fopen(path, "w"); if (f) { fputs("{\"role\":\"user\",\"text\":\"任务甲\"}\n", f); fclose(f); }
+            if (tui_mkdir(dir, 0700) == 0) {
+                f = tui_fopen(path, "w"); if (f) { fio_puts("{\"role\":\"user\",\"text\":\"任务甲\"}\n", f); fio_close(f); }
                 tui_new_context(path, msg, sizeof msg);
-                f = fopen(path, "w"); if (f) { fputs("{\"role\":\"user\",\"text\":\"任务乙\"}\n", f); fclose(f); }
+                f = tui_fopen(path, "w"); if (f) { fio_puts("{\"role\":\"user\",\"text\":\"任务乙\"}\n", f); fio_close(f); }
                 n1 = tui_archives(path, stamps, 9);
                 if (n1 == 1 && tui_resume(path, 1, msg, sizeof msg) == 0) {
                     n2 = tui_archives(path, stamps, 9);
-                    f = fopen(path, "r");
+                    f = tui_fopen(path, "r");
                     body[0] = 0;
-                    if (f) { if (!fgets(body, sizeof body, f)) body[0] = 0; fclose(f); }
+                    if (f) { if (!fio_gets(body, sizeof body, f)) body[0] = 0; fio_close(f); }
                     if (n2 >= 1) {
                         snprintf(msg, sizeof msg, "%s.%ld.jsonl", path, stamps[0]);
                         tui_first_user(msg, first, sizeof first);
@@ -5106,9 +5117,9 @@ int tui_entry(int argc, char **argv) {
                     {
                         char shared[320];
                         snprintf(shared, sizeof shared, "%s/shared.jsonl", dir);
-                        f = fopen(shared, "w"); if (f) { fputs("{\"role\":\"user\",\"text\":\"旧任务丙\"}\n", f); fclose(f); }
+                        f = tui_fopen(shared, "w"); if (f) { fio_puts("{\"role\":\"user\",\"text\":\"旧任务丙\"}\n", f); fio_close(f); }
                         ok = ok && tui_import_shared(path, shared, msg, sizeof msg) == 0
-                            && tui_archives(path, stamps, 9) == 2 && access(shared, F_OK) == 0;
+                            && tui_archives(path, stamps, 9) == 2 && sy_exists(shared) == 1;
                         if (ok) {
                             snprintf(msg, sizeof msg, "%s.%ld.jsonl", path, stamps[0]);
                             tui_first_user(msg, first, sizeof first);
@@ -5125,22 +5136,22 @@ int tui_entry(int argc, char **argv) {
                 int i2, lines = 0;
                 snprintf(cdir, sizeof cdir, "/tmp/csih-compact-%d", (int)getpid());
                 snprintf(cpath, sizeof cpath, "%s/t.jsonl", cdir);
-                mkdir(cdir, 0700);
-                f = fopen(cpath, "w");
+                tui_mkdir(cdir, 0700);
+                f = tui_fopen(cpath, "w");
                 if (f) {
                     for (i2 = 1; i2 <= 7; i2++)
-                        fprintf(f, "{\"role\":\"user\",\"text\":\"请求%d\"}\n{\"role\":\"assistant\",\"text\":\"x\"}\n", i2);
-                    fclose(f);
+                        fio_printf(f, "{\"role\":\"user\",\"text\":\"请求%d\"}\n{\"role\":\"assistant\",\"text\":\"x\"}\n", i2);
+                    fio_close(f);
                 }
                 ok = tui_compact(cpath, "答复X", msg, sizeof msg) == 0 && tui_archives(cpath, stamps, 9) == 1;
-                f = fopen(cpath, "r"); line[0] = 0;
-                if (f) { while (fgets(line + (size_t)zs_len(line), (int)(sizeof line - (size_t)zs_len(line)), f)) lines++; fclose(f); }
+                f = tui_fopen(cpath, "r"); line[0] = 0;
+                if (f) { while (fio_gets(line + (size_t)zs_len(line), (int)(sizeof line - (size_t)zs_len(line)), f)) lines++; fio_close(f); }
                 ok = ok && lines == 1 && zs_find(line, "请求3") && zs_find(line, "请求7") && !zs_find(line, "请求2")
                     && zs_find(line, "答复X") && zs_find(line, "不是模型总结");
                 /* compacting again does not quote the previous excerpt inside itself */
                 ok = ok && tui_compact(cpath, "答复Y", msg, sizeof msg) == 0;
-                f = fopen(cpath, "r"); line[0] = 0;
-                if (f) { if (!fgets(line, sizeof line, f)) line[0] = 0; fclose(f); }
+                f = tui_fopen(cpath, "r"); line[0] = 0;
+                if (f) { if (!fio_gets(line, sizeof line, f)) line[0] = 0; fio_close(f); }
                 ok = ok && zs_find(line, "答复Y") && !zs_find(line, "请求7");
                 if (!ok) printf("  (compact) %s\n", msg);
                 else printf("  ok   /compact keeps the last 5 requests and answer, quoted\n");
@@ -5149,19 +5160,19 @@ int tui_entry(int argc, char **argv) {
                     char md[300], all[4096];
                     size_t got = 0;
                     int sec;
-                    f = fopen(cpath, "w");
+                    f = tui_fopen(cpath, "w");
                     if (f) {
-                        fputs("{\"role\":\"user\",\"text\":\"列一下文件\"}\n", f);
-                        fputs("{\"role\":\"tool\",\"name\":\"exec\",\"text\":\"cwd=/x\\nexit=0\\na.txt\\n\"}\n", f);
-                        fputs("{\"role\":\"assistant\",\"text\":\"{\\\"act\\\":\\\"answer\\\",\\\"outcome\\\":\\\"completed\\\",\\\"text\\\":\\\"只有 a.txt\\\",\\\"evidence\\\":[]}\"}\n", f);
-                        fputs("{\"role\":\"assistant\",\"text\":\"{\\\"go\\\":\\\"stop\\\",\\\"acceptance\\\":\\\"accepted\\\",\\\"reason\\\":\\\"JUDGE\\\"}\"}\n", f);
-                        fputs("{\"role\":\"decision\",\"go\":\"stop\"}\n", f);
-                        fclose(f);
+                        fio_puts("{\"role\":\"user\",\"text\":\"列一下文件\"}\n", f);
+                        fio_puts("{\"role\":\"tool\",\"name\":\"exec\",\"text\":\"cwd=/x\\nexit=0\\na.txt\\n\"}\n", f);
+                        fio_puts("{\"role\":\"assistant\",\"text\":\"{\\\"act\\\":\\\"answer\\\",\\\"outcome\\\":\\\"completed\\\",\\\"text\\\":\\\"只有 a.txt\\\",\\\"evidence\\\":[]}\"}\n", f);
+                        fio_puts("{\"role\":\"assistant\",\"text\":\"{\\\"go\\\":\\\"stop\\\",\\\"acceptance\\\":\\\"accepted\\\",\\\"reason\\\":\\\"JUDGE\\\"}\"}\n", f);
+                        fio_puts("{\"role\":\"decision\",\"go\":\"stop\"}\n", f);
+                        fio_close(f);
                     }
                     snprintf(md, sizeof md, "%s/out.md", cdir);
                     sec = tui_export(cpath, md, msg, sizeof msg);
-                    f = fopen(md, "r");
-                    if (f) { got = fread(all, 1, sizeof all - 1, f); fclose(f); }
+                    f = tui_fopen(md, "r");
+                    if (f) { got = fio_read(all, 1, sizeof all - 1, f); fio_close(f); }
                     all[got] = 0;
                     ok = sec == 3 && zs_find(all, "## 你\n\n列一下文件") && zs_find(all, "### 工具 exec") && zs_find(all, "a.txt")
                         && zs_find(all, "## csih\n\n只有 a.txt") && !zs_find(all, "JUDGE") && !zs_find(all, "\"act\"");
@@ -5303,13 +5314,13 @@ int tui_entry(int argc, char **argv) {
         {
             static tui_state ts;
             char path[256];
-            FILE *f;
+            fio_t *f;
             int ok = 0, room0, room1;
             snprintf(path, sizeof path, "/tmp/csih-status-%d.txt", (int)getpid());
-            f = fopen(path, "w");
+            f = tui_fopen(path, "w");
             if (f) {
-                fputs("进度 37/52 .cx（盘点 tools/inventory）\n\n下一刀 grk: cx/runtime/routespan\n拒绝 not covered: x\n第四行不显示\n", f);
-                fclose(f);
+                fio_puts("进度 37/52 .cx（盘点 tools/inventory）\n\n下一刀 grk: cx/runtime/routespan\n拒绝 not covered: x\n第四行不显示\n", f);
+                fio_close(f);
                 /* Short terminal, so the log room is not at its cap and the 3 rows show. */
                 tui_state_init(&ts, NULL); ts.mode = 1; ts.rows = 16;
                 room0 = tui_log_room(&ts);
@@ -5334,7 +5345,7 @@ int tui_entry(int argc, char **argv) {
             agent_step s;
             int k, created = 0, plus = 0, once = 0, empty_ok;
             snprintf(dir, sizeof dir, "/tmp/csih-diff-%d", (int)getpid());
-            mkdir(dir, 0700);
+            tui_mkdir(dir, 0700);
             tui_state_init(&td, NULL); td.mode = 1;
             while (agent_undo_depth() > 0) agent_undo_last(note, sizeof note);
             tui_type(&td, "/diff");
@@ -5349,7 +5360,7 @@ int tui_entry(int argc, char **argv) {
                 if (zs_find(td.log[k], "+second")) plus = 1;
             }
             while (agent_undo_depth() > 0) agent_undo_last(note, sizeof note);
-            rmdir(dir);
+            tui_rmdir(dir);
             /* two writes to one new file: listed once, as new, with its current text */
             if (!empty_ok || created != 1 || !plus || once != 1)
                 { printf("FAIL /diff created=%d plus=%d\n", created, plus); failures++; }
@@ -5375,11 +5386,11 @@ int tui_entry(int argc, char **argv) {
         {
             static tui_state tv;
             char path[128];
-            FILE *f;
+            fio_t *f;
             int i, ok;
             snprintf(path, sizeof path, "/tmp/csih-view-%d.txt", (int)getpid());
-            f = fopen(path, "w");
-            if (f) { for (i = 1; i <= 30; i++) fprintf(f, "line %d\n", i); fclose(f); }
+            f = tui_fopen(path, "w");
+            if (f) { for (i = 1; i <= 30; i++) fio_printf(f, "line %d\n", i); fio_close(f); }
             tui_state_init(&tv, NULL); tv.mode = 1;
             snprintf(tv.input, sizeof tv.input, "/view %s 25", path); tv.ninput = (int)(size_t)zs_len(tv.input);
             tui_apply_key(&tv, TERM_KEY_ENTER, 0);
@@ -5420,12 +5431,12 @@ int tui_entry(int argc, char **argv) {
         {
             static tui_state tk2;
             char path[128], text[300];
-            FILE *f;
+            fio_t *f;
             r_frame fr;
             int i, y = 0, x = 0, ok = 0, before;
             snprintf(path, sizeof path, "/tmp/csih-click-%d.txt", (int)getpid());
-            f = fopen(path, "w");
-            if (f) { for (i = 1; i <= 5; i++) fprintf(f, "row %d\n", i); fclose(f); }
+            f = tui_fopen(path, "w");
+            if (f) { for (i = 1; i <= 5; i++) fio_printf(f, "row %d\n", i); fio_close(f); }
             tui_state_init(&tk2, NULL); tk2.mode = 1; tk2.rows = 24; tk2.cols = 120;
             snprintf(text, sizeof text, "see %s:3 for details", path);
             tui_log_plain(&tk2, text);
@@ -5453,14 +5464,14 @@ int tui_entry(int argc, char **argv) {
             static tui_state tcc;
             char home[128], d[200], p[260];
             char *oldhome = sy_env("HOME") ? mm_strdup(sy_env("HOME")) : NULL;
-            FILE *f;
+            fio_t *f;
             int ok;
             snprintf(home, sizeof home, "/tmp/csih-cmd-%d", (int)getpid());
-            mkdir(home, 0700);
-            snprintf(d, sizeof d, "%s/.csih", home); mkdir(d, 0700);
-            snprintf(d, sizeof d, "%s/.csih/commands", home); mkdir(d, 0700);
+            tui_mkdir(home, 0700);
+            snprintf(d, sizeof d, "%s/.csih", home); tui_mkdir(d, 0700);
+            snprintf(d, sizeof d, "%s/.csih/commands", home); tui_mkdir(d, 0700);
             snprintf(p, sizeof p, "%s/greet.md", d);
-            f = fopen(p, "w"); if (f) { fputs("用中文问候 $ARGS，再说一遍 $ARGS\n", f); fclose(f); }
+            f = tui_fopen(p, "w"); if (f) { fio_puts("用中文问候 $ARGS，再说一遍 $ARGS\n", f); fio_close(f); }
             sy_setenv("HOME", home, 1);
             tui_state_init(&tcc, NULL); tcc.mode = 1; tcc.busy = 1;
             tui_type(&tcc, "/greet 小王");
@@ -5506,8 +5517,8 @@ int tui_entry(int argc, char **argv) {
                 char tp[128];
                 char *oldt = sy_env("CSIH_TRANSCRIPT") ? mm_strdup(sy_env("CSIH_TRANSCRIPT")) : NULL;
                 snprintf(tp, sizeof tp, "/tmp/csih-ctx-%d.jsonl", (int)getpid());
-                f = fopen(tp, "w");
-                if (f) { fputs("{\"role\":\"user\",\"text\":\"a\"}\n{\"role\":\"assistant\",\"text\":\"b\"}\n{\"role\":\"user\",\"text\":\"c\"}\n", f); fclose(f); }
+                f = tui_fopen(tp, "w");
+                if (f) { fio_puts("{\"role\":\"user\",\"text\":\"a\"}\n{\"role\":\"assistant\",\"text\":\"b\"}\n{\"role\":\"user\",\"text\":\"c\"}\n", f); fio_close(f); }
                 sy_setenv("CSIH_TRANSCRIPT", tp, 1);
                 tui_state_init(&tcc, NULL); tcc.mode = 1;
                 tui_type(&tcc, "/context");
@@ -5608,7 +5619,7 @@ int tui_entry(int argc, char **argv) {
             /* Plain agent/run sessions share one input history across restarts. */
             if (!owned_mode && tui_env_has("HOME")) {
                 char hf[600];
-                snprintf(hf, sizeof hf, "%s/.csih", sy_env("HOME")); mkdir(hf, 0750);
+                snprintf(hf, sizeof hf, "%s/.csih", sy_env("HOME")); tui_mkdir(hf, 0750);
                 snprintf(hf, sizeof hf, "%s/.csih/history", sy_env("HOME"));
                 tui_history_load(&st, hf);
             }
@@ -5749,7 +5760,7 @@ int tui_entry(int argc, char **argv) {
             /* One line left in the terminal: what this session cost and changed. */
             if (!managed_mode && tui_session_summary(sum, sizeof sum)) printf("%s\n", sum);
         }
-        if (managed_mode) close(tui_managed.fd);
+        if (managed_mode) sy_close(tui_managed.fd);
         /* Successful retirement must not restore TTY state over the new actor. */
         /* show cursor, reset, newline */
         if (tui_owned_close(&st, owned_why, sizeof owned_why) != 0) {
