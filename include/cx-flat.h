@@ -7629,8 +7629,17 @@ static char *cx_read(const char *__u_path, size_t *__u_len) {
         if (__u_len) *__u_len = __u_n;
     }
 #else
-    {   struct stat __u_st;
-        if (stat(__u_path, &__u_st) == 0 && S_ISDIR(__u_st.st_mode)) {
+    /* GetFileAttributesExA, not stat. A call inside this body does not mark
+       __UN_stat, so the trimmed stat body stays out and e3 reports
+       undefined function 'stat'. 0x10 is FILE_ATTRIBUTE_DIRECTORY. A failed
+       query is not treated as a directory, same as stat failing. */
+    {   static __u_word __u_fa;
+        unsigned int __u_d[9];
+        __u_word __u_r;
+        __u_r = 0;
+        if (!__u_fa) _ux_load(__u_fa, "GetFileAttributesExA");
+        if (__u_fa) _ux_go(__u_r, __u_fa, __u_path, 0, __u_d, 0);
+        if ((__u_r & 0xFFFFFFFFL) && (__u_d[0] & 0x10)) {
             fclose(__u_f);
             if (__u_len) *__u_len = 0;
             return 0;
