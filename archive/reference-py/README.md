@@ -336,3 +336,29 @@
 - release/tools/stagelog.py
 - release/tools/warmup.sh
 - release/tools/rulingwait.py
+
+## m4（2026-10-30）
+
+- m4/__init__.py
+- m4/__main__.py
+- m4/contract.py
+- m4/emit.py
+- m4/flows.py
+- m4/nets.py
+- m4/selftest.py
+- m4/README.md（原 README，描述 Python 包；`m4/` 下留了一份新的说明剩余数据）
+
+归档依据：
+- m4 在活树里已无法运行：它导入的 `ujs.seed.construct` 早在 `afb539b875` 随 ujs Python 挪进 `archive/ujs-legacy-py-c/`，`tests/ujs2wasm/` 语料与 `tests/flownet-baseline.tsv` 也在 `archive/testing-c43-legacy/`。
+- 唯一调用方 `adapter/ujswasm/ujswasm.cx accepts` 改为比对预先录好的字节（`4ae92c6f4f`）。
+- m4 的 .cx 移植就是 ujswasm 的 flownet 路径。
+
+录制参考字节（只在需要重录时；仓外进行，不进活路径）：
+1. 搭一个仓外目录 W，放入：
+   - `W/ujs/__init__.py`、`W/ujs/seed/__init__.py`，两个空文件；
+   - `W/ujs/seed/construct/`，复制自 `archive/ujs-legacy-py-c/construct/`；
+   - `W/m4/`，复制自本目录 `m4/`；
+   - `W/unisa/`，复制自活树。
+2. `sh ./unisacc.com adapter/ujswasm/ujswasm.cx -- accepts-sources ROOT DIR` 写出 11 个输入。ROOT 需含 `tests/flownet-baseline.tsv` 与 `tests/ujs2wasm/neg/`，可取自 `archive/testing-c43-legacy/tests/`。
+3. 对每个输入，在 W 里跑 `python3 -I -c "import sys,runpy; sys.path.insert(0,'.'); sys.argv=['m4','build',SRC,'-o',REFDIR+'/'+NAME+'.wasm']; runpy.run_module('m4', run_name='__main__')"`。
+4. `accepts ROOT REFDIR` 比对。2026-10-30 实测 11/11 逐字节相同。
