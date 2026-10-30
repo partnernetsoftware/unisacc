@@ -1,0 +1,259 @@
+#pragma unisa module sig
+#pragma unisa use mem
+/* L0 sys/sig: signal dispositions registered with the kernel, raise, and exit handlers
+   (plans/cx-layers.md, plans/cx-l0-sig-2026-10-30.md). 0 or -errno, never errno.
+
+   Why this unit exists: the prelude's signal()/sigaction() only fill an in-process table that
+   raise() reads (include/signal.h says so); nothing reaches the kernel, so an outside SIGINT or
+   SIGTERM never runs a handler and SIGPIPE cannot be ignored. Here the dispositions are real
+   rt_sigaction calls.
+
+   How a handler is entered: compiled code uses the unisa tape ABI, not the platform C ABI the
+   kernel calls a handler with (x86_64: argument 0 is rax, the kernel passes the signal in rdi;
+   arm64: the return address lives on the x7 tape, the kernel leaves it in x30). One page made
+   once at run time (sys.mem: map, write, then read+execute) holds a small entry thunk that moves
+   the signal into the tape's argument register and jumps to syg_dispatch, which calls the
+   handler kept in syg_fn[sig].
+     Linux x86_64: entry  mov %rdi,%rax; movabs $syg_dispatch,%rcx; jmp *%rcx
+                   restorer (SA_RESTORER, required there)  mov $15,%rax; syscall  (rt_sigreturn)
+     Linux arm64:  entry  mov x16,sp; sub x7,x16,#16; str x30,[x7]; ldr x16,=syg_dispatch; br x16
+                   The tape shares the process stack and runs BELOW the hardware sp, so a signal
+                   frame pushed at sp would land on live tape frames: handlers run on an
+                   alternate stack (sigaltstack, 256 KiB, SA_ONSTACK) and the thunk starts the
+                   tape just under the frame there. No restorer: the kernel's vdso returns.
+     macOS, Windows: no handler entry here (-ENOSYS). macOS ignore/default are real sigaction
+                   calls; Windows has no POSIX dispositions (-ENOSYS).
+   Flags: SA_RESTART (a read interrupted by a handled signal is restarted, as BSD signal()), the
+   signal itself is blocked while its handler runs (no SA_NODEFER), so "default, then raise"
+   inside a handler takes effect when the handler returns.
+   Limits: handlers run on the thread that takes the signal and the alternate stack is set for
+   the first thread that installs one (arm64). errno is per unit (plans/errno-per-unit-
+   2026-10-30.md): a handler that calls into its own unit's prelude should save and restore that
+   errno itself. */
+
+#define SYG_NSIG 65
+#define SYG_NAX 32
+#define SYG_PAGE 4096
+#define SYG_ALT 262144
+
+static void (*syg_fn[SYG_NSIG])(int);
+static unsigned char *syg_page;
+static void (*syg_ax[SYG_NAX])(void);
+static int syg_nax;
+
+/* The tape-ABI side of every handled signal. */
+static void syg_dispatch(int sig) {
+    void (*f)(int);
+    if (sig <= 0 || sig >= SYG_NSIG) return;
+    f = syg_fn[sig];
+    if (f) f(sig);
+}
+
+/* The largest signal number this platform takes; 0 when it has no POSIX signals. */
+static int syg_max(void) {
+#if defined(_WIN32)
+    return 0;
+#elif defined(__APPLE__)
+    return 31;
+#else
+    return 64;
+#endif
+}
+
+static void syg_put64(unsigned char *p, unsigned long v) {
+    int i;
+    for (i = 0; i < 8; i++) { p[i] = (unsigned char)(v & 0xff); v = v >> 8; }
+}
+
+static void syg_put32(unsigned char *p, unsigned int v) {
+    int i;
+    for (i = 0; i < 4; i++) { p[i] = (unsigned char)(v & 0xff); v = v >> 8; }
+}
+
+/* Write the thunk bytes for this machine into P (writable). 0, or -ENOSYS. */
+static int syg_code(unsigned char *p) {
+#if defined(__linux__) && defined(__x86_64__)
+    p[0] = 0x48; p[1] = 0x89; p[2] = 0xf8;                 /* mov %rdi,%rax */
+    p[3] = 0x48; p[4] = 0xb9;                               /* movabs $syg_dispatch,%rcx */
+    syg_put64(p + 5, (unsigned long)syg_dispatch);
+    p[13] = 0xff; p[14] = 0xe1;                             /* jmp *%rcx */
+    p[16] = 0x48; p[17] = 0xc7; p[18] = 0xc0;               /* mov $15,%rax (rt_sigreturn) */
+    p[19] = 0x0f; p[20] = 0; p[21] = 0; p[22] = 0;
+    p[23] = 0x0f; p[24] = 0x05;                             /* syscall */
+    return 0;
+#elif defined(__linux__) && defined(__aarch64__)
+    syg_put32(p + 0, 0x910003f0u);                          /* mov x16, sp */
+    syg_put32(p + 4, 0xd1004207u);                          /* sub x7, x16, #16 */
+    syg_put32(p + 8, 0xf90000feu);                          /* str x30, [x7] */
+    syg_put32(p + 12, 0x58000070u);                         /* ldr x16, =syg_dispatch (offset 24) */
+    syg_put32(p + 16, 0xd61f0200u);                         /* br x16 */
+    syg_put32(p + 20, 0xd503201fu);                         /* nop */
+    syg_put64(p + 24, (unsigned long)syg_dispatch);
+    return 0;
+#else
+    (void)p;
+    return -ENOSYS;
+#endif
+}
+
+/* The thunk page, made once. 0, or -errno. */
+static int syg_ready(void) {
+    void *pg = 0;
+    int rc;
+    if (syg_page) return 0;
+    rc = sy_map_none(&pg, SYG_PAGE);
+    if (rc != 0) return rc;
+    rc = sy_protect_rw(pg, SYG_PAGE);
+    if (rc == 0) rc = syg_code((unsigned char *)pg);
+    if (rc == 0) rc = sy_protect_rx(pg, SYG_PAGE);
+    if (rc != 0) { sy_unmap(pg, SYG_PAGE); return rc; }
+    syg_page = (unsigned char *)pg;
+    return 0;
+}
+
+/* arm64 Linux: one alternate signal stack (see the head comment). 0, or -errno. */
+static int syg_altstack(void) {
+#if defined(__linux__) && defined(__aarch64__)
+    static int done;
+    struct { void *sp; int flags; unsigned long size; } ss;
+    void *st = 0;
+    long r;
+    int rc;
+    if (done) return 0;
+    rc = sy_map_none(&st, SYG_ALT);
+    if (rc != 0) return rc;
+    rc = sy_protect_rw(st, SYG_ALT);
+    if (rc != 0) { sy_unmap(st, SYG_ALT); return rc; }
+    ss.sp = st; ss.flags = 0; ss.size = SYG_ALT;
+    r = __syscall6(132, (long)&ss, 0, 0, 0, 0);                /* sigaltstack */
+    if (r < 0) { sy_unmap(st, SYG_ALT); return (int)r; }
+    done = 1;
+    return 0;
+#else
+    return 0;
+#endif
+}
+
+/* Set SIG's disposition in the kernel. KIND 0 default, 1 ignore, 2 the thunk (syg_ready first).
+   0, or -errno. */
+static int syg_act(int sig, int kind) {
+#if defined(_WIN32)
+    (void)sig;
+    (void)kind;
+    return -ENOSYS;
+#elif defined(__APPLE__)
+    struct { void *handler; void *tramp; unsigned int mask; int flags; } a;
+    long r;
+    if (kind == 2) return -ENOSYS;
+    a.handler = (void *)(long)kind; a.tramp = 0; a.mask = 0; a.flags = 0;
+    r = __syscall6(_UNISA_SC(46), (long)sig, (long)&a, 0, 0, 0);   /* sigaction */
+    return r < 0 ? (int)r : 0;
+#elif defined(__linux__) && (defined(__x86_64__) || defined(__aarch64__))
+    struct { void *handler; unsigned long flags; void *restorer; unsigned long mask; } a;
+    long r;
+    a.handler = (void *)(long)kind; a.flags = 0; a.restorer = 0; a.mask = 0;
+    if (kind == 2) {
+        a.handler = (void *)syg_page;
+        a.flags = 0x10000000;                                    /* SA_RESTART */
+#if defined(__x86_64__)
+        a.flags = a.flags | 0x04000000;                          /* SA_RESTORER */
+        a.restorer = (void *)(syg_page + 16);
+#else
+        a.flags = a.flags | 0x08000000;                          /* SA_ONSTACK */
+#endif
+    }
+#if defined(__x86_64__)
+    r = __syscall6(13, (long)sig, (long)&a, 0, 8, 0);            /* rt_sigaction */
+#else
+    r = __syscall6(134, (long)sig, (long)&a, 0, 8, 0);
+#endif
+    return r < 0 ? (int)r : 0;
+#else
+    (void)sig;
+    (void)kind;
+    return -ENOSYS;
+#endif
+}
+
+/* The kernel's kill(getpid(), SIG). 0, or -errno. */
+static int syg_kill_self(int sig) {
+#if defined(_WIN32)
+    (void)sig;
+    return -ENOSYS;
+#else
+    errno = 0;
+    return kill(getpid(), sig) == 0 ? 0 : (errno ? -errno : -EIO);
+#endif
+}
+
+/* Run FN(sig) when SIG arrives, from the kernel or sy_raise. FN must not be 0 (use
+   sy_sig_default/sy_sig_ignore). 0, or -errno: -EINVAL for a bad number, SIGKILL or SIGSTOP;
+   -ENOSYS where handlers cannot be entered (macOS, Windows). The previous handler is replaced. */
+int sy_sig_handle(int sig, void (*fn)(int)) {
+    void (*old)(int);
+    int rc;
+    if (!fn || sig <= 0 || sig > syg_max() || sig >= SYG_NSIG) return -EINVAL;
+    rc = syg_ready();
+    if (rc == 0) rc = syg_altstack();
+    if (rc != 0) return rc;
+    old = syg_fn[sig];
+    syg_fn[sig] = fn;
+    rc = syg_act(sig, 2);
+    if (rc != 0) syg_fn[sig] = old;
+    return rc;
+}
+
+/* Give SIG its default action back. 0, or -errno (-EINVAL for a bad number or SIGKILL/SIGSTOP). */
+int sy_sig_default(int sig) {
+    int rc;
+    if (sig <= 0 || sig > syg_max() || sig >= SYG_NSIG) return -EINVAL;
+    rc = syg_act(sig, 0);
+    if (rc == 0) syg_fn[sig] = 0;
+    return rc;
+}
+
+/* Ignore SIG (SIGPIPE: a write to a closed pipe then returns -EPIPE). 0, or -errno. */
+int sy_sig_ignore(int sig) {
+    int rc;
+    if (sig <= 0 || sig > syg_max() || sig >= SYG_NSIG) return -EINVAL;
+    rc = syg_act(sig, 1);
+    if (rc == 0) syg_fn[sig] = 0;
+    return rc;
+}
+
+/* Send SIG to this process through the kernel (its handler, if any, has run when this returns,
+   unless SIG is blocked, e.g. inside its own handler). 0, or -errno; -ENOSYS on Windows. */
+int sy_raise(int sig) {
+    if (sig <= 0 || sig > syg_max() || sig >= SYG_NSIG) return -EINVAL;
+    return syg_kill_self(sig);
+}
+
+/* Run the sy_atexit handlers, last registered first, each once. */
+static void syg_run_atexit(void) {
+    while (syg_nax > 0) {
+        syg_nax = syg_nax - 1;
+        syg_ax[syg_nax]();
+    }
+}
+
+/* Return from main reaches this (the program's destructor chain, before main's unit exit). */
+__attribute__((destructor)) static void syg_fini(void) { syg_run_atexit(); }
+
+/* Run FN when the program ends by returning from main or by sy_exit (last registered first,
+   at most 32). The prelude atexit cannot serve here: its table is one per unit, and only the
+   unit that calls exit() runs its own. Not run on exit() called from another unit, _exit,
+   or death by a signal. 0, -EINVAL for 0, -ENOMEM when full. */
+int sy_atexit(void (*fn)(void)) {
+    if (!fn) return -EINVAL;
+    if (syg_nax >= SYG_NAX) return -ENOMEM;
+    syg_ax[syg_nax] = fn;
+    syg_nax = syg_nax + 1;
+    return 0;
+}
+
+/* Run the sy_atexit handlers, then exit(CODE). Streams the caller opened with fopen in its own
+   unit are not flushed by this unit's exit: fflush them first. */
+void sy_exit(int code) {
+    syg_run_atexit();
+    exit(code);
+}

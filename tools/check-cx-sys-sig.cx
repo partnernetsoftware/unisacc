@@ -1,0 +1,204 @@
+/* Checks cx/sys/sig.cx (sy_sig_handle, sy_sig_default, sy_sig_ignore, sy_raise, sy_atexit,
+   sy_exit) and sy_symlink of cx/sys/fs.cx:
+     sh ./unisacc.com tools/check-cx-sys-sig.cx
+   The signal cases run in real child runs of this file ("-- child MODE", spawned through
+   sy_spawn_pipe) so that a death by signal is observed from outside with sy_wait_status.
+   Prints PASS/FAIL lines and CX_SYS_SIG<TAB>ok=N<TAB>failed=N; exit 1 on any FAIL. */
+#pragma unisa use sys.sig
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+
+static int nok, nfail;
+static const char *self = "tools/check-cx-sys-sig.cx";
+static void ck(int c, const char *name) {
+    printf("%s\tsig.%s\n", c ? "PASS" : "FAIL", name);
+    if (c) nok++; else nfail++;
+}
+
+/* ---- children ------------------------------------------------------------------------- */
+
+static volatile int hits, last_sig;
+
+/* async-signal-safe marker: "HANDLER <sig> <hits>\n" through one write */
+static void on_term(int sig) {
+    char b[32];
+    int n;
+    hits = hits + 1;
+    last_sig = sig;
+    n = tx_snprintf(b, sizeof b, "HANDLER %d %d\n", sig, hits);
+    if (n > 0) sy_write_all(1, b, n);
+}
+
+static void bye(void) { sy_write_all(1, "ATEXIT ran\n", 11); }
+
+static int at_count;
+static void bump(void) { at_count = at_count + 1; }
+static void bye_last(void) {
+    char b[48];
+    int n = tx_snprintf(b, sizeof b, "ATEXIT last count=%d\n", at_count);
+    if (n > 0) sy_write_all(1, b, n);
+}
+
+/* a: handler from sy_raise and from another process, SIGPIPE ignored, atexit on return */
+static int child_a(void) {
+    int pf[2] = {-1, -1}, w, pid, ofd = -1, ex = -1, code = -1, sg = -1;
+    char pidtxt[24], out[64];
+    if (sy_sig_handle(15, on_term) != 0) { printf("handle failed\n"); return 2; }
+    if (sy_raise(15) != 0 || hits != 1 || last_sig != 15) { printf("raise: hits=%d sig=%d\n", hits, last_sig); return 3; }
+    tx_snprintf(pidtxt, sizeof pidtxt, "%d", sy_pid());
+    {   char *v[] = { "sh", "-c", "kill -TERM \"$1\"", "sh", pidtxt, 0 };
+        pid = sy_spawn_pipe(v, 0, 0, &ofd, 0);
+        if (pid > 0) { long k; while ((k = sy_read(ofd, out, sizeof out)) > 0) {} sy_close(ofd); }
+        if (pid <= 0 || sy_wait_status(pid, 0, &ex, &code, &sg) != pid || !ex || code != 0) { printf("kill child failed\n"); return 4; }
+    }
+    if (hits != 2 || last_sig != 15) { printf("outside kill: hits=%d\n", hits); return 5; }
+    if (sy_sig_ignore(13) != 0) { printf("ignore failed\n"); return 6; }
+    if (sy_pipe(pf) != 0) return 7;
+    sy_close(pf[0]);
+    w = sy_write_all(pf[1], "x", 1);
+    sy_close(pf[1]);
+    printf("WRITE %s %d\n", w == -EPIPE ? "EPIPE" : "other", w);
+    if (w != -EPIPE) return 8;
+    if (sy_atexit(bye) != 0) return 9;
+    printf("CHILD done\n");
+    return 0;                       /* exits 0 by its own choice; bye runs after this */
+}
+
+/* x: 32 sy_atexit slots, the 33rd refused; sy_exit runs them, last registered first */
+static int child_x(void) {
+    int i, rc = 0;
+    if (sy_atexit(bye_last) != 0) return 2;
+    for (i = 1; i < 32; i++) if (sy_atexit(bump) != 0) return 3;
+    rc = sy_atexit(bump);
+    printf("FULL %d\n", rc);
+    sy_exit(rc == -ENOMEM ? 7 : 8);
+    return 9;
+}
+
+/* c: a handler, then sy_sig_default: SIGTERM ends the process by signal 15 */
+static int child_c(void) {
+    if (sy_sig_handle(15, on_term) != 0) return 2;
+    if (sy_sig_default(15) != 0) return 3;
+    if (sy_atexit(bye) != 0) return 4;
+    printf("BEFORE\n");
+    sy_raise(15);
+    printf("AFTER\n");
+    return 0;
+}
+
+/* r: the restore-and-reraise pattern inside a handler (signal blocked while it runs, so the
+   re-raise lands when the handler returns and the default action ends the process) */
+static void on_fatal(int sig) {
+    sy_write_all(1, "FATAL\n", 6);
+    sy_sig_default(sig);
+    sy_raise(sig);
+    sy_write_all(1, "STILL-IN-HANDLER\n", 17);
+}
+static int child_r(void) {
+    if (sy_sig_handle(15, on_fatal) != 0) return 2;
+    sy_raise(15);
+    printf("NOT-REACHED\n");
+    return 0;
+}
+
+static int child(const char *m) {
+    if (tx_eqz(m, "a")) return child_a();
+    if (tx_eqz(m, "x")) return child_x();
+    if (tx_eqz(m, "c")) return child_c();
+    if (tx_eqz(m, "r")) return child_r();
+    return 64;
+}
+
+/* ---- parent --------------------------------------------------------------------------- */
+
+static void run_child(const char *mode, char *out, long cap, int *ex, int *code, int *sg) {
+    const char *u = sy_env_or("UNISACC", "./unisacc.com");
+    char *av[] = { "sh", (char *)u, "-run", (char *)self, "--", "child", (char *)mode, 0 };
+    int pid, ofd = -1;
+    long n = 0, k;
+    *ex = -1; *code = -1; *sg = -1; out[0] = 0;
+    pid = sy_spawn_pipe(av, 0, 0, &ofd, 0);
+    if (pid <= 0) return;
+    while (n < cap - 1 && (k = sy_read(ofd, out + n, cap - 1 - n)) > 0) n += k;
+    out[n] = 0;
+    sy_close(ofd);
+    sy_wait_status(pid, 0, ex, code, sg);
+}
+
+static long at(const char *s, const char *p) { return tx_find(s, tx_len(s, 1 << 20), p, tx_len(p, 1 << 20)); }
+
+static void check_children(void) {
+    char out[1024];
+    int ex, code, sg;
+    run_child("a", out, sizeof out, &ex, &code, &sg);
+    ck(at(out, "HANDLER 15 1\n") >= 0, "handler-runs-on-sy_raise-with-signal-15");
+    ck(at(out, "HANDLER 15 2\n") >= 0, "handler-runs-on-kill-from-another-process");
+    ck(at(out, "WRITE EPIPE ") >= 0, "sigpipe-ignored-write-returns-epipe");
+    ck(at(out, "CHILD done\n") >= 0 && at(out, "ATEXIT ran\n") > at(out, "CHILD done\n"), "atexit-runs-after-return-from-main");
+    ck(ex == 1 && code == 0 && sg == 0, "child-survives-and-exits-0");
+    if (!(ex == 1 && code == 0)) printf("  child a: ex=%d code=%d sig=%d out<<%s>>\n", ex, code, sg, out);
+
+    run_child("x", out, sizeof out, &ex, &code, &sg);
+    ck(at(out, "FULL -12\n") >= 0, "atexit-33rd-enomem");
+    ck(at(out, "ATEXIT last count=31\n") >= 0 && ex == 1 && code == 7, "sy_exit-runs-32-handlers-last-registered-first");
+    if (!(ex == 1 && code == 7)) printf("  child x: ex=%d code=%d sig=%d out<<%s>>\n", ex, code, sg, out);
+
+    run_child("c", out, sizeof out, &ex, &code, &sg);
+    ck(at(out, "BEFORE\n") >= 0 && at(out, "AFTER") < 0 && at(out, "HANDLER") < 0, "default-restored-no-handler-no-return");
+    ck(ex == 0 && sg == 15, "default-sigterm-kills-by-signal-15");
+    ck(at(out, "BEFORE\n") >= 0 && at(out, "ATEXIT") < 0 && sg == 15, "atexit-not-run-on-death-by-signal");
+    if (!(ex == 0 && sg == 15)) printf("  child c: ex=%d code=%d sig=%d out<<%s>>\n", ex, code, sg, out);
+
+    run_child("r", out, sizeof out, &ex, &code, &sg);
+    ck(at(out, "FATAL\nSTILL-IN-HANDLER\n") >= 0 && at(out, "NOT-REACHED") < 0 && ex == 0 && sg == 15,
+       "default-and-reraise-inside-handler-kills-after-handler-returns");
+    if (!(ex == 0 && sg == 15)) printf("  child r: ex=%d code=%d sig=%d out<<%s>>\n", ex, code, sg, out);
+}
+
+static void check_refusals(void) {
+    ck(sy_sig_handle(0, on_term) == -EINVAL && sy_sig_handle(-1, on_term) == -EINVAL
+       && sy_sig_handle(65, on_term) == -EINVAL && sy_sig_handle(1000, on_term) == -EINVAL, "handle-bad-number-einval");
+    ck(sy_sig_handle(15, 0) == -EINVAL, "handle-null-fn-einval");
+    ck(sy_sig_handle(9, on_term) == -EINVAL && sy_sig_ignore(9) == -EINVAL && sy_sig_ignore(19) == -EINVAL,
+       "sigkill-sigstop-refused-by-kernel-einval");
+    ck(sy_sig_default(0) == -EINVAL && sy_sig_default(65) == -EINVAL && sy_sig_ignore(-3) == -EINVAL, "default-ignore-bad-number-einval");
+    ck(sy_raise(0) == -EINVAL && sy_raise(65) == -EINVAL && sy_raise(-15) == -EINVAL, "raise-bad-number-einval");
+    ck(sy_atexit(0) == -EINVAL, "atexit-null-einval");
+    ck(sy_sig_default(9) == -EINVAL && sy_sig_default(13) == 0, "default-sigkill-einval-sigpipe-ok");
+}
+
+static void check_symlink(void) {
+    const char *d = "out/cx-sys-sig", *t = "out/cx-sys-sig/t.txt", *l = "out/cx-sys-sig/l", *g = "out/cx-sys-sig/dangling";
+    char a[4096], b[4096];
+    sy_stat_t s;
+    int fd, mk, na, nb;
+    mk = sy_mkdir("out", 0755);
+    mk = sy_mkdir(d, 0755);
+    sy_unlink(l); sy_unlink(g); sy_unlink(t);
+    fd = sy_open_new(t, 0644);
+    ck((mk == 0 || mk == -EEXIST) && fd >= 0 && sy_write_all(fd, "t\n", 2) == 0 && sy_close(fd) == 0, "symlink-scratch-ready");
+    ck(sy_symlink("t.txt", l) == 0, "symlink-create");
+    ck(sy_lstat(l, &s) == 0 && s.kind == 'l', "symlink-lstat-kind-l");
+    ck(sy_stat(l, &s) == 0 && s.kind == 'f' && s.size == 2, "symlink-stat-follows-to-file");
+    na = sy_realpath(l, a, sizeof a); nb = sy_realpath(t, b, sizeof b);
+    ck(na > 0 && na == nb && tx_eq(a, b, sizeof a), "symlink-realpath-resolves-to-target");
+    ck(sy_symlink("t.txt", l) == -EEXIST && sy_symlink("other", t) == -EEXIST, "symlink-existing-eexist");
+    ck(sy_symlink("", l) == -EINVAL && sy_symlink("t.txt", "") == -EINVAL && sy_symlink(0, l) == -EINVAL
+       && sy_symlink("t.txt", 0) == -EINVAL, "symlink-empty-einval");
+    ck(sy_symlink("no-such-target", g) == 0 && sy_exists(g) == 1 && sy_stat(g, &s) == -ENOENT, "symlink-dangling-allowed");
+    ck(sy_symlink("t.txt", "out/cx-sys-sig/no/dir/l") == -ENOENT, "symlink-missing-dir-enoent");
+    ck(sy_unlink(l) == 0 && sy_unlink(g) == 0 && sy_unlink(t) == 0, "symlink-cleanup");
+}
+
+int main(int argc, char **argv) {
+    if (argc == 3 && tx_eqz(argv[1], "child")) return child(argv[2]);
+    if (argc > 0 && argv[0] && argv[0][0]) self = argv[0];
+    check_refusals();
+    check_children();
+    check_symlink();
+    printf("CX_SYS_SIG\tok=%d\tfailed=%d\n", nok, nfail);
+    return nfail ? 1 : 0;
+}
