@@ -27,8 +27,9 @@ for a in "$@"; do
   esac
 done
 
-CHECK="$ROOT/ujs/scripts/release-check.mjs"   # node helpers; this script runs no Python
-VER=$(node "$CHECK" version ujs/package.json)
+CHECK="$ROOT/ujs/scripts/release-check.cx"   # CX helpers; this script runs no Python
+check() { sh "$ROOT/unisacc.com" "$CHECK" -- "$@"; }
+VER=$(check version ujs/package.json)
 OUT_DIR="$ROOT/dist"
 # the stage and the zip are built in a private scratch under the temp root and only the finished zip is renamed into
 # dist/: dist/ lies outside out/, where the deletion guard (tests/safedel.cx, commissar ruling 2026-10-23) removes
@@ -61,7 +62,7 @@ test -f "$CORE/BUILD.json"
 test -f "$CORE/ujs_full.wasm"
 test -f "$CORE/compiler.gen.js"
 
-node "$CHECK" fingerprint "$CORE" ujs/package.json
+check fingerprint "$CORE" ujs/package.json
 
 mkdir -p "$STAGE/core" "$OUT_DIR"
 
@@ -91,7 +92,7 @@ if [[ "$WITH_DEMOS" -eq 1 ]]; then
   done
 fi
 
-node "$CHECK" note "$STAGE"
+check note "$STAGE"
 
 ( cd "$SCRATCH" && zip -r -q "$(basename "$ZIP")" "$(basename "$STAGE")" )
 mv -f "$SCRATCH/$(basename "$ZIP")" "$ZIP"

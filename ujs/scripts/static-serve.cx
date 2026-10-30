@@ -1,0 +1,282 @@
+/* static-serve.cx -- minimal local static server for ujs/scripts/uxe-gate.sh and the ujs "demo"
+   script (they used `python3 -m http.server` before).
+     sh ./unisacc.com ujs/scripts/static-serve.cx -- PORT DIR
+   Binds 127.0.0.1 only. GET and HEAD of files under DIR (other methods: 405); a directory
+   serves its index.html; a path that leaves DIR is refused (403); a missing file is 404.
+   The request path is cut at '?' or '#', its dot segments are removed as a URL parser does
+   (clamped at the root), it is percent-decoded, and the decoded path is resolved lexically
+   under DIR: a ".." that would climb above DIR is 403, a malformed %-escape is 400.
+   One request per connection (Connection: close); up to NCLI connections are read at once
+   through sys/poll, and an idle connection is dropped after IDLE_MS. Files are streamed
+   from disk, so nothing is allocated per request. */
+#pragma unisa use sys.net
+#pragma unisa use sys.fs
+#pragma unisa use sys.poll
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use text.text
+
+#define REQCAP 16384
+#define PATHCAP 8192
+#define NCLI 63
+#define IDLE_MS 30000L
+#define CHUNK 65536
+
+typedef struct { int fd; long len; long since; char buf[REQCAP]; } Cli;
+static Cli cli[NCLI];
+static const char *root;
+static char chunk[CHUNK];
+
+static void reply_empty(int fd, int code, const char *text) {
+    char h[256];
+    if (cx_fmt(h, sizeof h, "HTTP/1.1 %d %s\r\ncontent-length: 0\r\nconnection: close\r\n\r\n", code, text) == 0)
+        sy_send_all(fd, h, tx_len(h, sizeof h));
+}
+
+static int hexval(int c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* A URL path segment s[0..n) that is "." (1) or ".." (2) in raw or %2e form, else 0. */
+static int dot_seg(const char *s, long n) {
+    int dots = 0;
+    long i = 0;
+    while (i < n) {
+        if (s[i] == '.') i++;
+        else if (i + 2 < n && s[i] == '%' && s[i + 1] == '2' && (s[i + 2] == 'e' || s[i + 2] == 'E')) i += 3;
+        else return 0;
+        if (++dots > 2) return 0;
+    }
+    return dots;
+}
+
+/* Remove the dot segments of the raw path p[0..n) ('\\' counts as '/') into DST as "/seg/seg":
+   "." and empty segments are dropped, ".." drops the previous segment and stops at the root.
+   0, or -1 when DST (CAP bytes) is too small. */
+static int url_path(const char *p, long n, char *dst, long cap) {
+    long o = 0, i = 0, e;
+    int d;
+    while (i < n) {
+        while (i < n && (p[i] == '/' || p[i] == '\\')) i++;
+        if (i >= n) break;
+        e = i;
+        while (e < n && p[e] != '/' && p[e] != '\\') e++;
+        d = dot_seg(p + i, e - i);
+        if (d == 2) {                                   /* drop the last "/seg" of DST */
+            while (o > 0 && dst[o - 1] != '/') o--;
+            if (o > 0) o--;
+        } else if (d == 0) {                            /* append "/seg" */
+            if (o + 1 + (e - i) + 1 >= cap) return -1;
+            dst[o++] = '/';
+            tx_copy(dst + o, cap - o, p + i, e - i);
+            o += e - i;
+        }
+        i = e;
+    }
+    if (o == 0) dst[o++] = '/';
+    dst[o] = 0;
+    return 0;
+}
+
+/* Percent-decode s (a z-string) into DST. 0, -1 for a malformed escape, -2 for a decoded NUL. */
+static int pct_decode(const char *s, char *dst, long cap) {
+    long i = 0, o = 0;
+    int h, l;
+    while (s[i]) {
+        int c = (unsigned char)s[i];
+        if (c == '%') {
+            if ((h = hexval((unsigned char)s[i + 1])) < 0 || (l = hexval((unsigned char)s[i + 2])) < 0) return -1;
+            c = h * 16 + l;
+            if (!c) return -2;
+            i += 3;
+        } else i++;
+        if (o + 1 >= cap) return -1;
+        dst[o++] = (char)c;
+    }
+    dst[o] = 0;
+    return 0;
+}
+
+/* Resolve the decoded path s lexically into REL (segments joined by '/', no leading '/').
+   0, -1 when a ".." climbs above the root, -2 when too long. */
+static int resolve_rel(const char *s, char *rel, long cap) {
+    long i = 0, o = 0, e;
+    while (s[i]) {
+        while (s[i] == '/') i++;
+        if (!s[i]) break;
+        e = i;
+        while (s[e] && s[e] != '/') e++;
+        if (e - i == 1 && s[i] == '.') { /* "." */ }
+        else if (e - i == 2 && s[i] == '.' && s[i + 1] == '.') {
+            if (o == 0) return -1;
+            while (o > 0 && rel[o - 1] != '/') o--;
+            if (o > 0) o--;
+        } else {
+            if (o + (e - i) + 2 >= cap) return -2;
+            if (o > 0) rel[o++] = '/';
+            tx_copy(rel + o, cap - o, s + i, e - i);
+            o += e - i;
+        }
+        i = e;
+    }
+    rel[o] = 0;
+    return 0;
+}
+
+static const char *type_of(const char *path) {
+    static const char *map[][2] = {
+        {".html", "text/html; charset=utf-8"}, {".js", "text/javascript; charset=utf-8"},
+        {".mjs", "text/javascript; charset=utf-8"}, {".css", "text/css; charset=utf-8"},
+        {".json", "application/json"}, {".wasm", "application/wasm"}, {".svg", "image/svg+xml"},
+        {".png", "image/png"}, {".txt", "text/plain; charset=utf-8"}, {".md", "text/markdown; charset=utf-8"},
+        {0, 0}};
+    long n = tx_len(path, PATHCAP), b = n, d = -1, k;
+    while (b > 0 && path[b - 1] != '/') b--;
+    for (k = n - 1; k > b; k--) if (path[k] == '.') { d = k; break; }   /* a leading '.' is no extension */
+    if (d < 0) return "application/octet-stream";
+    for (k = 0; map[k][0]; k++)
+        if (tx_same(path + d, n - d, map[k][0], tx_len(map[k][0], 16))) return map[k][1];
+    return "application/octet-stream";
+}
+
+/* Open PATH for reading as a regular file (a directory: its index.html). The fd with *ST filled,
+   or -1. PATH may be extended in place (PATHCAP bytes). */
+static int open_file(char *path, sy_stat_t *st) {
+    int fd = sy_openat(sy_at_fdcwd(), path, O_RDONLY, 0);
+    long n;
+    if (fd < 0) return -1;
+    if (sy_fstat(fd, st) != 0) { sy_close(fd); return -1; }
+    if (st->kind == 'd') {
+        sy_close(fd);
+        n = tx_len(path, PATHCAP);
+        if (n < 0 || tx_copy(path + n, PATHCAP - n, n > 0 && path[n - 1] == '/' ? "index.html" : "/index.html",
+                             n > 0 && path[n - 1] == '/' ? 10 : 11)) return -1;
+        fd = sy_openat(sy_at_fdcwd(), path, O_RDONLY, 0);
+        if (fd < 0) return -1;
+        if (sy_fstat(fd, st) != 0) { sy_close(fd); return -1; }
+    }
+    if (st->kind != 'f') { sy_close(fd); return -1; }
+    return fd;
+}
+
+static void serve(int fd, char *req, long n) {
+    char upath[PATHCAP], dec[PATHCAP], rel[PATHCAP], path[PATHCAP], h[512];
+    long m, t0, t1, q, sent;
+    int head, r, f;
+    sy_stat_t st;
+    m = tx_chr(req, n, ' ');
+    if (m <= 0) { reply_empty(fd, 400, "Bad Request"); return; }
+    head = tx_same(req, m, "HEAD", 4);
+    if (!head && !tx_same(req, m, "GET", 3)) { reply_empty(fd, 405, "Method Not Allowed"); return; }
+    t0 = m + 1;
+    t1 = t0;
+    while (t1 < n && req[t1] != ' ' && req[t1] != '\r' && req[t1] != '\n') t1++;
+    if (t1 == t0) { reply_empty(fd, 400, "Bad Request"); return; }
+    /* absolute-form "http://host/path": keep the path */
+    if (tx_prefix(req + t0, t1 - t0, "http://", 7) || tx_prefix(req + t0, t1 - t0, "https://", 8)) {
+        q = tx_find(req + t0, t1 - t0, "//", 2) + 2;
+        q = tx_chr(req + t0 + q, t1 - t0 - q, '/') < 0 ? t1 - t0 : q + tx_chr(req + t0 + q, t1 - t0 - q, '/');
+        t0 += q;
+    }
+    for (q = t0; q < t1 && req[q] != '?' && req[q] != '#'; q++) {}
+    t1 = q;
+    if (t1 - t0 + 2 >= PATHCAP) { reply_empty(fd, 414, "URI Too Long"); return; }
+    path[0] = '/';
+    tx_copy(path + (t1 > t0 && req[t0] == '/' ? 0 : 1), PATHCAP - 1, req + t0, t1 - t0);
+    if (url_path(path, tx_len(path, PATHCAP), upath, PATHCAP)) { reply_empty(fd, 414, "URI Too Long"); return; }
+    r = pct_decode(upath, dec, PATHCAP);
+    if (r == -1) { reply_empty(fd, 400, "Bad Request"); return; }
+    if (r == -2) { reply_empty(fd, 404, "Not Found"); return; }
+    r = resolve_rel(dec, rel, PATHCAP);
+    if (r == -1) { reply_empty(fd, 403, "Forbidden"); return; }
+    if (r) { reply_empty(fd, 414, "URI Too Long"); return; }
+    if (rel[0] ? cx_fmt(path, PATHCAP, "%s/%s", root, rel) : cx_fmt(path, PATHCAP, "%s", root)) {
+        reply_empty(fd, 414, "URI Too Long");
+        return;
+    }
+    f = open_file(path, &st);
+    if (f < 0) { reply_empty(fd, 404, "Not Found"); return; }
+    if (cx_fmt(h, sizeof h, "HTTP/1.1 200 OK\r\ncontent-type: %s\r\ncontent-length: %ld\r\nconnection: close\r\n\r\n",
+               type_of(path), st.size) || sy_send_all(fd, h, tx_len(h, sizeof h)) != 0 || head) {
+        sy_close(f);
+        return;
+    }
+    for (sent = 0; sent < st.size; sent += m) {
+        m = sy_read(f, chunk, CHUNK);
+        if (m <= 0 || sy_send_all(fd, chunk, m) != 0) break;
+    }
+    sy_close(f);
+}
+
+static void drop(Cli *c) {
+    char sink[4096];
+    /* read what the peer already sent, so closing does not reset the reply away */
+    while (sy_readable(c->fd, 0) > 0 && sy_recv(c->fd, sink, sizeof sink) > 0) {}
+    sy_close(c->fd);
+    c->fd = -1;
+    c->len = 0;
+}
+
+/* The end of the request head in buf[0..n) (after the blank line), or -1. */
+static long head_end(const char *buf, long n) {
+    long k = tx_find(buf, n, "\r\n\r\n", 4);
+    if (k >= 0) return k + 4;
+    k = tx_find(buf, n, "\n\n", 2);
+    return k >= 0 ? k + 2 : -1;
+}
+
+int main(int argc, char **argv) {
+    sy_pollfd_t pf[NCLI + 1];
+    int map[NCLI + 1];
+    long port = 0, now, got, i;
+    int lfd, n, k, r, c;
+    sy_stat_t st;
+    if (argc != 3) { fprintf(stderr, "usage: static-serve.cx PORT DIR\n"); return 2; }
+    for (i = 0; argv[1][i]; i++) {
+        if (argv[1][i] < '0' || argv[1][i] > '9' || i > 5) { fprintf(stderr, "static-serve: bad port %s\n", argv[1]); return 2; }
+        port = port * 10 + (argv[1][i] - '0');
+    }
+    if (i == 0 || port > 65535) { fprintf(stderr, "static-serve: bad port %s\n", argv[1]); return 2; }
+    root = argv[2];
+    if (sy_stat(root, &st) != 0 || st.kind != 'd') { fprintf(stderr, "static-serve: not a directory: %s\n", root); return 2; }
+    lfd = sy_tcp_listen((int)port, 64);
+    if (lfd < 0) { fprintf(stderr, "static-serve: listen 127.0.0.1:%ld: %s\n", port, sy_net_error(lfd)); return 1; }
+    for (k = 0; k < NCLI; k++) cli[k].fd = -1;
+    for (;;) {
+        n = 0;
+        pf[n].fd = lfd; pf[n].events = SY_POLLIN; map[n++] = -1;
+        for (k = 0; k < NCLI; k++)
+            if (cli[k].fd >= 0) { pf[n].fd = cli[k].fd; pf[n].events = SY_POLLIN; map[n++] = k; }
+        r = sy_poll(pf, n, 1000);
+        if (r < 0) { fprintf(stderr, "static-serve: poll: %s\n", sy_net_error(r)); return 1; }
+        now = sy_now_ms();
+        for (i = 1; i < n; i++) {
+            Cli *cl = &cli[map[i]];
+            if (!pf[i].revents) {
+                if (now - cl->since > IDLE_MS) drop(cl);
+                continue;
+            }
+            got = sy_recv(cl->fd, cl->buf + cl->len, REQCAP - 1 - cl->len);
+            if (got <= 0) { sy_close(cl->fd); cl->fd = -1; cl->len = 0; continue; }
+            cl->len += got;
+            if (head_end(cl->buf, cl->len) >= 0) {
+                serve(cl->fd, cl->buf, cl->len);
+                drop(cl);
+            } else if (cl->len >= REQCAP - 1) {
+                reply_empty(cl->fd, 431, "Request Header Fields Too Large");
+                drop(cl);
+            }
+        }
+        if (pf[0].revents) {
+            c = sy_tcp_accept(lfd, 0);
+            if (c >= 0) {
+                for (k = 0; k < NCLI && cli[k].fd >= 0; k++) {}
+                if (k == NCLI) { reply_empty(c, 503, "Service Unavailable"); sy_close(c); }
+                else { cli[k].fd = c; cli[k].len = 0; cli[k].since = now; }
+            }
+        }
+    }
+}
