@@ -3,6 +3,9 @@
 #pragma unisa use sys.fs
 #pragma unisa use sys.time
 #pragma unisa use sys.ffi
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
 /* Sockets, stat, the clock and the libcurl calls (sys.ffi) are cx/sys; no #include. */
 /*
  * net.cx — talk HTTP/1.1 over a TCP socket. This is the layer csih needs to
@@ -41,6 +44,28 @@
  *
  * CLI takes SUBCOMMANDS, not dash-options.
  */
+
+/* ── text helpers over text.text (no libc string calls in this module) ──── */
+
+#define NET_SCAN (1L << 30)   /* scan bound for NUL-terminated text */
+
+static long net_len(const char *s) { long n = tx_len(s, NET_SCAN); return n < 0 ? 0 : n; }
+/* first W in S, or 0 (strstr) */
+static char *net_str(const char *s, const char *w) {
+    long at = tx_find(s, net_len(s), w, net_len(w));
+    return at < 0 ? 0 : (char *)s + at;
+}
+/* first C in S, or 0 (strchr; C 0 is the terminator) */
+static char *net_chr(const char *s, int c) {
+    long n = net_len(s), at;
+    if (c == 0) return (char *)s + n;
+    at = tx_chr(s, n, c);
+    return at < 0 ? 0 : (char *)s + at;
+}
+static int net_eq(const char *a, const char *b) { return tx_eq(a, b, NET_SCAN); }
+static int net_starts(const char *s, const char *p) { return tx_prefix(s, net_len(s), p, net_len(p)); }
+/* copy z-string SRC into DST[CAP]; 0, or 1 (DST untouched) when it does not fit */
+static int net_set(char *dst, long cap, const char *src) { return tx_copy(dst, cap, src, net_len(src)); }
 
 /* curl prototypes live inside the helpers that call them (CX module export rule). */
 enum {
@@ -112,39 +137,31 @@ typedef struct {
  */
 int net_parse_url(const char *url, net_url *u) {
     const char *p, *slash;
-    memset(u, 0, sizeof *u);
+    mm_fill(u, (long)sizeof *u, 0, (long)sizeof *u);
 
-    if (!strncmp(url, "https://", 8)) { u->https = 1; p = url + 8; }
-    else if (!strncmp(url, "http://", 7)) p = url + 7;
+    if (net_starts(url, "https://")) { u->https = 1; p = url + 8; }
+    else if (net_starts(url, "http://")) p = url + 7;
     else return NET_REFUSED_URL;
 
-    slash = strchr(p, '/');
+    slash = net_chr(p, '/');
     {
-        const char *colon = strchr(p, ':');
-        const char *hostend = slash ? slash : p + strlen(p);
+        const char *colon = net_chr(p, ':');
+        const char *hostend = slash ? slash : p + net_len(p);
         if (colon && colon < hostend) {
-            size_t hl = (size_t)(colon - p);
-            size_t pl;
-            if (hl >= sizeof u->host) return NET_REFUSED_URL;
-            memcpy(u->host, p, hl);
-            u->host[hl] = '\0';
-            pl = (size_t)(hostend - colon - 1);
-            if (pl >= sizeof u->port) return NET_REFUSED_URL;
-            memcpy(u->port, colon + 1, pl);
-            u->port[pl] = '\0';
+            long hl = (long)(colon - p), pl;
+            if (tx_copy(u->host, (long)sizeof u->host, p, hl)) return NET_REFUSED_URL;
+            pl = (long)(hostend - colon - 1);
+            if (tx_copy(u->port, (long)sizeof u->port, colon + 1, pl)) return NET_REFUSED_URL;
         } else {
-            size_t hl = (size_t)(hostend - p);
-            if (hl >= sizeof u->host) return NET_REFUSED_URL;
-            memcpy(u->host, p, hl);
-            u->host[hl] = '\0';
-            strcpy(u->port, u->https ? "443" : "80");
+            long hl = (long)(hostend - p);
+            if (tx_copy(u->host, (long)sizeof u->host, p, hl)) return NET_REFUSED_URL;
+            net_set(u->port, (long)sizeof u->port, u->https ? "443" : "80");
         }
     }
     if (slash) {
-        if (strlen(slash) >= sizeof u->path) return NET_REFUSED_URL;
-        strcpy(u->path, slash);
+        if (net_set(u->path, (long)sizeof u->path, slash)) return NET_REFUSED_URL;
     } else {
-        strcpy(u->path, "/");
+        net_set(u->path, (long)sizeof u->path, "/");
     }
     if (u->host[0] == '\0') return NET_REFUSED_URL;
     return 0;
@@ -268,9 +285,9 @@ time_t net_now(void) { return net_wall(); }
 static void net_note_usage(const char *tail) {
     const char *u = 0, *p, *brace, *end, *k;
     int hit = 0, miss = 0;
-    for (p = tail; (p = strstr(p, "\"usage\"")); p++) u = p;
+    for (p = tail; (p = net_str(p, "\"usage\"")); p++) u = p;
     if (!u) { net_hit = net_miss = net_usage_seen = 0; return; }
-    brace = strchr(u, '{');
+    brace = net_chr(u, '{');
     if (!brace) { net_hit = net_miss = net_usage_seen = 0; return; }
     /* usage nests prompt_tokens_details{...}; the first '}' is not its end. */
     {
@@ -282,14 +299,14 @@ static void net_note_usage(const char *tail) {
         if (!*end) end = 0;
     }
     if (!end) { net_hit = net_miss = net_usage_seen = 0; return; }
-    k = strstr(brace, "\"prompt_cache_hit_tokens\"");
+    k = net_str(brace, "\"prompt_cache_hit_tokens\"");
     if (k && k < end) {
-        k = strchr(k, ':');
+        k = net_chr(k, ':');
         if (k && k < end) hit = atoi(k + 1);
     }
-    k = strstr(brace, "\"prompt_cache_miss_tokens\"");
+    k = net_str(brace, "\"prompt_cache_miss_tokens\"");
     if (k && k < end) {
-        k = strchr(k, ':');
+        k = net_chr(k, ':');
         if (k && k < end) miss = atoi(k + 1);
     }
     net_hit = hit;
@@ -298,9 +315,9 @@ static void net_note_usage(const char *tail) {
     /* Progress polls re-read the same tail; count each response once. */
     if (!net_req_counted) {
         int out = 0;
-        k = strstr(brace, "\"completion_tokens\"");
+        k = net_str(brace, "\"completion_tokens\"");
         if (k && k < end) {
-            k = strchr(k, ':');
+            k = net_chr(k, ':');
             if (k && k < end) out = atoi(k + 1);
         }
         net_req_counted = 1;
@@ -342,25 +359,24 @@ void net_note_progress(const char *path, time_t t0) {
     }
     net_got = (long)st.size;
     net_tokens = (int)(st.size / 4);
-    fd = open(path, O_RDONLY);
+    fd = sy_open(path, O_RDONLY, 0);
     if (fd < 0) return;
-    if (st.size > (long)sizeof tail) lseek(fd, (off_t)(st.size - (long)sizeof tail), SEEK_SET);
-    n = (int)read(fd, tail, sizeof tail - 1);
-    close(fd);
+    if (st.size > (long)sizeof tail) sy_lseek(fd, st.size - (long)sizeof tail, SEEK_SET);
+    n = (int)sy_read(fd, tail, (long)sizeof tail - 1);
+    sy_close(fd);
     if (n < 0) return;
     tail[n] = 0;
-    p = strstr(tail, "\"total_tokens\":");
+    p = net_str(tail, "\"total_tokens\":");
     if (p) net_tokens = atoi(p + 15);
     net_note_usage(tail);
 }
 
 static void net_take_body(int fd, char *buf, size_t cap, size_t *off) {
     for (;;) {
-        ssize_t k;
+        long k;
         if (*off + 1 >= cap) return;
-        k = read(fd, buf + *off, cap - 1 - *off);
-        if (k < 0) { if (errno == EINTR) continue; return; }
-        if (k == 0) return;
+        k = sy_read(fd, buf + *off, (long)(cap - 1 - *off));   /* resumes after EINTR */
+        if (k <= 0) return;
         *off += (size_t)k;
         buf[*off] = 0;
     }
@@ -372,42 +388,59 @@ static char net_key[200];
 
 /* unisacc re-execs into its cache and drops DEEPSEEK_API_KEY. Read the
  * deepseek object in ~/env.jsonl. The first api_key in that file is not this one. */
+/* One env.jsonl line: 1 when it is the deepseek object and its key was copied
+ * into net_key. */
+static int net_key_line(const char *line) {
+    char *p, *q;
+    int i = 0;
+    if (!net_str(line, "\"deepseek\"")) return 0;
+    p = net_str(line, "\"api_key\"");
+    if (!p) p = net_str(line, "\"key\"");
+    if (!p) return 0;
+    p = net_chr(p, ':');
+    if (!p) return 0;
+    q = net_chr(p, '"');
+    if (!q) return 0;
+    q++;
+    while (*q && *q != '"' && i < (int)sizeof net_key - 1) net_key[i++] = *q++;
+    net_key[i] = 0;
+    return 1;
+}
+
 static const char *net_deepseek_key(void) {
-    const char *env = getenv("DEEPSEEK_API_KEY");
+    const char *env = sy_env("DEEPSEEK_API_KEY");
     const char *home;
-    char path[512], line[4096];
-    FILE *f;
+    char path[512], line[4096], chunk[4096];
+    int fd, used = 0, done = 0;
     if (env && env[0]) return env;
     if (net_key[0]) return net_key;
-    home = getenv("HOME");
+    home = sy_env("HOME");
     if (!home) return 0;
-    snprintf(path, sizeof path, "%s/env.jsonl", home);
-    f = fopen(path, "r");
-    if (!f) return 0;
-    while (fgets(line, sizeof line, f)) {
-        char *p, *q;
-        int i = 0;
-        if (!strstr(line, "\"deepseek\"")) continue;
-        p = strstr(line, "\"api_key\"");
-        if (!p) p = strstr(line, "\"key\"");
-        if (!p) continue;
-        p = strchr(p, ':');
-        if (!p) continue;
-        q = strchr(p, '"');
-        if (!q) continue;
-        q++;
-        while (*q && *q != '"' && i < (int)sizeof net_key - 1) net_key[i++] = *q++;
-        net_key[i] = 0;
-        break;
+    if (cx_fmt(path, sizeof path, "%s/env.jsonl", home)) return 0;
+    fd = sy_open(path, O_RDONLY, 0);
+    if (fd < 0) return 0;
+    /* Lines as fgets(line, 4096) cut them: at a newline, or after 4095 bytes. */
+    while (!done) {
+        long k = sy_read(fd, chunk, (long)sizeof chunk), i;
+        if (k <= 0) break;
+        for (i = 0; i < k && !done; i++) {
+            line[used++] = chunk[i];
+            if (chunk[i] == '\n' || used == (int)sizeof line - 1) {
+                line[used] = 0;
+                done = net_key_line(line);
+                used = 0;
+            }
+        }
     }
-    fclose(f);
+    if (!done && used > 0) { line[used] = 0; net_key_line(line); }
+    sy_close(fd);
     return net_key[0] ? net_key : 0;
 }
 
 /* unisacc setenv() stays in the file that called it. net_cli.c cannot
  * change this file's getenv, so the self-test asks this function to do it. */
 void net_test_home(const char *home) {
-    if (home && home[0]) setenv("HOME", home, 1);
+    if (home && home[0]) sy_setenv("HOME", home, 1);
 }
 
 /* Drop the cached env.jsonl key when that file can be opened. Returns 1
@@ -415,22 +448,22 @@ void net_test_home(const char *home) {
  * Does not unset DEEPSEEK_API_KEY and does not rewrite env.jsonl. */
 /* Report where the key comes from without printing it: 0 none, 1 env, 2 file. */
 int net_deepseek_key_probe(int *len) {
-    const char *env = getenv("DEEPSEEK_API_KEY");
+    const char *env = sy_env("DEEPSEEK_API_KEY");
     const char *k = net_deepseek_key();
-    *len = k ? (int)strlen(k) : 0;
+    *len = k ? (int)net_len(k) : 0;
     if (!k) return 0;
     return env && env[0] ? 1 : 2;
 }
 
 int net_deepseek_forget(void) {
-    const char *home = getenv("HOME");
+    const char *home = sy_env("HOME");
     char path[512];
-    FILE *f;
+    int fd;
     if (!home || !home[0]) return 0;
-    snprintf(path, sizeof path, "%s/env.jsonl", home);
-    f = fopen(path, "r");
-    if (!f) return 0;
-    fclose(f);
+    if (cx_fmt(path, sizeof path, "%s/env.jsonl", home)) return 0;
+    fd = sy_open(path, O_RDONLY, 0);
+    if (fd < 0) return 0;
+    sy_close(fd);
     net_key[0] = 0;
     return 1;
 }
@@ -497,9 +530,9 @@ int net_async_begin(const char *method, const char *url,
     net_t0 = 0;
     net_req0 = net_wall();
     net_req_elapsed = 0;
-    memset(&net_res, 0, sizeof net_res);
+    mm_fill(&net_res, (long)sizeof net_res, 0, (long)sizeof net_res);
     if (net_stop) { net_res.err = NET_CANCELLED; return -1; }
-    net_sent = body ? (long)strlen(body) : 0;
+    net_sent = body ? (long)net_len(body) : 0;
     {
         static int curl_loaded;
         if (!curl_loaded) {
@@ -518,7 +551,7 @@ int net_async_begin(const char *method, const char *url,
         hdr = curl_slist_append(hdr, chead);
     }
     key = net_deepseek_key();
-    if (key && key[0] && strstr(url, "api.deepseek.com") && strlen(key) < 500) {
+    if (key && key[0] && net_str(url, "api.deepseek.com") && net_len(key) < 500) {
         snprintf(auth, sizeof auth, "Authorization: Bearer %s", key);
         hdr = curl_slist_append(hdr, auth);
     }
@@ -527,7 +560,7 @@ int net_async_begin(const char *method, const char *url,
     curl_setopt_long(h, CURLOPT_TIMEOUT, NET_TOTAL_SEC);
     curl_setopt(h, CURLOPT_URL, (void *)url);
     curl_setopt(h, CURLOPT_HTTPHEADER, hdr);
-    if (!strcmp(method, "POST")) curl_setopt(h, CURLOPT_POSTFIELDS, (void *)(body ? body : ""));
+    if (net_eq(method, "POST")) curl_setopt(h, CURLOPT_POSTFIELDS, (void *)(body ? body : ""));
     snprintf(net_capture, sizeof net_capture, "/tmp/cdsh-net-%d", (int)getpid());
     net_outf = host_fopen(net_capture, "w+");
     if (!net_outf) { curl_easy_cleanup(h); net_res.err = NET_NO_CURL; return -1; }
@@ -535,7 +568,7 @@ int net_async_begin(const char *method, const char *url,
     net_multi = curl_multi_init();
     if (!net_multi) {
         host_fclose(net_outf);
-        unlink(net_capture);
+        sy_unlink(net_capture);
         curl_easy_cleanup(h);
         net_res.err = NET_NO_CURL;
         return -1;
@@ -591,15 +624,15 @@ net_response net_async_end(void) {
         host_fflush_file(net_outf);
         host_fclose(net_outf);
         net_outf = 0;
-        fd = open(net_capture, O_RDONLY);
+        fd = sy_open(net_capture, O_RDONLY, 0);
         if (fd >= 0) {
-            nread = read(fd, net_res.body, sizeof net_res.body - 1);
+            nread = sy_read(fd, net_res.body, (long)sizeof net_res.body - 1);
             if (nread < 0) nread = 0;
             net_res.body[nread] = 0;
             net_res.body_bytes = (long)nread;
-            close(fd);
+            sy_close(fd);
         }
-        unlink(net_capture);
+        sy_unlink(net_capture);
     }
     if (net_easy) {
         curl_getinfo(net_easy, CURLINFO_RESPONSE_CODE, &code);
@@ -620,7 +653,7 @@ net_response net_async_end(void) {
     net_easy = net_multi = net_hdr = net_outf = 0;
     net_capture[0] = 0;
     net_t0 = 0;
-    memset(&net_res, 0, sizeof net_res);
+    mm_fill(&net_res, (long)sizeof net_res, 0, (long)sizeof net_res);
     return r;
 }
 
@@ -654,15 +687,15 @@ net_response net_http(const char *method, const char *url,
     int prc;
     char req[8192];
     size_t reqlen;
-    size_t blen = body ? strlen(body) : 0;
+    size_t blen = body ? net_len(body) : 0;
 
-    memset(&r, 0, sizeof r);
+    mm_fill(&r, (long)sizeof r, 0, (long)sizeof r);
     r.ok = 0;
     r.body_bytes = 0;
 
     prc = net_parse_url(url, &u);
     if (prc != 0) { r.err = prc; return r; }
-    if (strcmp(method, "GET") && strcmp(method, "POST")) { r.err = NET_REFUSED_URL; return r; }
+    if (!net_eq(method, "GET") && !net_eq(method, "POST")) { r.err = NET_REFUSED_URL; return r; }
     if (u.https) { r = net_https(method, url, content_type, body); return r; }
 
     fd = net_connect(u.host, u.port);
@@ -703,10 +736,10 @@ net_response net_http(const char *method, const char *url,
      * of the body IS the end of the stream, so no length arithmetic is needed
      * for the read loop — which is exactly why that header is sent. */
     {
-        char *all = (char *)malloc(NET_HDR_MAX + NET_BODY_MAX);
-        size_t off = 0, cap = NET_HDR_MAX + NET_BODY_MAX;
+        /* one response at a time: a static buffer, no allocation */
+        static char all[NET_HDR_MAX + NET_BODY_MAX];
+        size_t off = 0, cap = sizeof all;
         int truncated = 0;
-        if (!all) { net_socket_close(fd); r.err = ENOMEM; return r; }
         for (;;) {
             long n;
             if (off >= cap) { truncated = 1; break; }
@@ -722,29 +755,28 @@ net_response net_http(const char *method, const char *url,
          * blank line is malformed and is reported as such rather than guessed
          * at — returning the whole thing as "body" would hide the problem. */
         {
-            char *sep = strstr(all, "\r\n\r\n");
+            char *sep = net_str(all, "\r\n\r\n");
             size_t hlen;
-            if (!sep) { free(all); r.err = EPROTO; return r; }
+            if (!sep) { r.err = EPROTO; return r; }
             hlen = (size_t)(sep - all) + 2;             /* keep the final CRLF */
             if (hlen >= sizeof r.header) hlen = sizeof r.header - 1;
-            memcpy(r.header, all, hlen);
+            mm_copy(r.header, (long)sizeof r.header, all, (long)hlen);
             r.header[hlen] = '\0';
 
             {
                 const char *bodyp = sep + 4;
                 size_t bodylen = off > (size_t)(bodyp - all) ? off - (size_t)(bodyp - all) : 0;
                 if (bodylen >= sizeof r.body) { bodylen = sizeof r.body - 1; truncated = 1; }
-                memcpy(r.body, bodyp, bodylen);
+                mm_copy(r.body, (long)sizeof r.body, bodyp, (long)bodylen);
                 r.body[bodylen] = '\0';
                 r.body_bytes = truncated ? -1 : (long)bodylen;
             }
         }
-        free(all);
     }
 
     /* Parse the status line: "HTTP/1.1 200 OK" */
     {
-        const char *sp = strchr(r.header, ' ');
+        const char *sp = net_chr(r.header, ' ');
         if (!sp) { r.err = EPROTO; return r; }
         r.status = atoi(sp + 1);
         if (r.status <= 0) { r.err = EPROTO; return r; }
