@@ -173,6 +173,8 @@ static void walk(const char *dir, const char *rel, SList *hs) {
         char full[4096], sub[4096];
         size_t nl = strlen(e->d_name);
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        /* cx-flat.h is generated from the other headers (tools/cx-flatten.cx), not carried source */
+        if (!rel[0] && !strcmp(e->d_name, "cx-flat.h")) continue;
         snprintf(full, sizeof full, "%s/%s", dir, e->d_name);
         snprintf(sub, sizeof sub, rel[0] ? "%s/%s" : "%s%s", rel, e->d_name);
         {

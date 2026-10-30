@@ -1,0 +1,275 @@
+/* tools/cx-flatten.cx -- writes include/cx-flat.h, the one-file .cx prelude: include/cx-nested.h with
+ * every #include inlined (bottleneck B1, plans/perf-bottlenecks-2026-10-30.md).  E2 swaps the whole
+ * buffer once per #include, so the nested prelude (40 headers) costs ~1.7 s of E2 per .cx unit on the
+ * installed product; the flat file costs ~0.1 s.  Every other directive (#define, #if, the guards)
+ * is kept, so preprocessing gives the same tokens.  The flat file must sit in include/ itself: E2
+ * trims carried libc bodies (__UNISA_FTRIM_LIBC) only in headers from the system include directory.
+ * include/cx.h picks cx-flat.h under __UNISA__ and cx-nested.h for host compilers (gcc_cx, -include).
+ *
+ *   sh ./unisacc.com tools/cx-flatten.cx -- --write ROOT     regenerate ROOT/include/cx-flat.h
+ *   sh ./unisacc.com tools/cx-flatten.cx -- --check ROOT     exit 1 when it differs (named)
+ *
+ * Names resolve inside ROOT/include only (quote form: the including file's directory first); a name
+ * that resolves nowhere is refused, so the prelude cannot reach a host header.  A guarded header
+ * (first directives `#ifndef G` / `#define G`) is inlined once per conditional context: skipped where
+ * an earlier copy sits under a prefix of the same open conditionals, else inlined and its guard
+ * decides as before.  Line splices and block comments are honoured when finding directives.
+ * seed/unisa_libneed.c and tools/facts-gen.cx skip cx-flat.h (its bodies are copies).
+ * Exit 0 written or equal, 1 differs, 2 refused.
+ */
+#pragma unisa use text.text
+#pragma unisa use mem.arena
+#define FL_MAXH 1024
+#define FL_DEPTH 256
+
+static int fl_ar;
+static char fl_inc[4096];
+static long fl_incn;
+static char *fl_hdr[FL_MAXH];          /* paths under ROOT/include, as cx_walk gives them */
+static int fl_nh;
+#define FL_KEY 4096
+#define FL_NKEY 16
+/* Open conditionals: guard flag, directive text, branch (#else/#elif count).  The key of a site is
+   its non-guard conditionals, text and branch; a header inlined under key K is skipped at a site
+   whose key starts with K.  Condition texts in the prelude test target and driver macros only
+   (_WIN32, __UNISA_FTRIM_LIBC, __UN_*), constant across the file, so equal text is equal truth. */
+static unsigned char fl_guard[FL_DEPTH];
+static char *fl_text[FL_DEPTH];
+static int fl_branch[FL_DEPTH];
+static char *fl_keys[FL_MAXH][FL_NKEY];
+static int fl_nkeys[FL_MAXH];
+static int fl_nc, fl_nest, fl_count;
+typedef struct { char *p; long n, cap; } Fb;
+static Fb fl_out;
+
+static void fl_die(const char *a, const char *b) { fprintf(stderr, "cx-flatten: %s%s%s\n", a, b ? ": " : "", b ? b : ""); exit(2); }
+static void fl_put(const char *s, long n) {
+    long i;
+    if (fl_out.n + n + 1 > fl_out.cap) {
+        long c = (fl_out.n + n + 1) * 2 + 65536;
+        char *t = ar_alloc(fl_ar, c);
+        if (!t) fl_die("out of memory", 0);
+        for (i = 0; i < fl_out.n; i++) t[i] = fl_out.p[i];
+        fl_out.p = t; fl_out.cap = c;
+    }
+    for (i = 0; i < n; i++) fl_out.p[fl_out.n + i] = s[i];
+    fl_out.n += n;
+}
+static int fl_take(const char *path, void *ctx) {
+    long n = tx_len(path, 8192);
+    (void)ctx;
+    if (n == fl_incn + 10 && tx_prefix(path, n, fl_inc, fl_incn) && tx_eq(path + fl_incn, "/cx-flat.h", 16)) return 0;   /* the output */
+    if (fl_nh == FL_MAXH) fl_die("too many headers", 0);
+    fl_hdr[fl_nh++] = ar_dup(fl_ar, path, tx_len(path, 8192));
+    return 0;
+}
+static int fl_find(const char *dir, long dn, const char *name, long nn) {
+    int i;
+    for (i = 0; i < fl_nh; i++) {
+        const char *h = fl_hdr[i];
+        long hn = tx_len(h, 8192);
+        if (hn == dn + 1 + nn && tx_prefix(h, hn, dir, dn) && h[dn] == '/' && tx_same(h + dn + 1, nn, name, nn)) return i;
+    }
+    return -1;
+}
+/* A directive's logical line: from s[at], splices joined; returns the offset after its newline and
+   writes the text without splices into buf. */
+static long fl_logical(const char *s, long n, long at, char *buf, long cap, long *bn) {
+    long k = 0;
+    while (at < n) {
+        if (s[at] == '\\' && at + 1 < n && s[at + 1] == '\n') { at += 2; continue; }
+        if (s[at] == '\n') { at++; break; }
+        if (k + 1 < cap) buf[k++] = s[at];
+        at++;
+    }
+    buf[k] = 0;
+    *bn = k;
+    return at;
+}
+static long fl_skipws(const char *s, long n, long i) { while (i < n && (s[i] == ' ' || s[i] == '\t')) i++; return i; }
+static int fl_word(const char *s, long n, long i, const char *w) {
+    long wn = tx_len(w, 32);
+    return tx_prefix(s + i, n - i, w, wn) && (i + wn == n || s[i + wn] == ' ' || s[i + wn] == '\t' || s[i + wn] == '(' || s[i + wn] == '<' || s[i + wn] == '"');
+}
+static long fl_key(char *key) {
+    long k = 0;
+    int i;
+    for (i = 0; i < fl_nc; i++) {
+        char b[24];
+        long tn, bn;
+        if (fl_guard[i]) continue;
+        tn = tx_len(fl_text[i], FL_KEY);
+        cx_fmt(b, sizeof b, "|%d\001", fl_branch[i]);
+        bn = tx_len(b, sizeof b);
+        if (k + tn + bn + 1 > FL_KEY) fl_die("conditional key too long", fl_text[i]);
+        tx_copy(key + k, FL_KEY - k, fl_text[i], tn); k += tn;
+        tx_copy(key + k, FL_KEY - k, b, bn); k += bn;
+    }
+    key[k] = 0;
+    return k;
+}
+static int fl_guarded(const char *s, long n, char *g, long gcap);
+static void fl_file(int hi);
+
+/* Copies one header, inlining its includes. */
+static void fl_file(int hi) {
+    size_t sz;
+    char *s = cx_read(fl_hdr[hi], &sz), line[8192], guard[256];
+    long n, at = 0, dn, bol = 1, gate0 = fl_nc;
+    int incomment = 0, guarded, sawguard = 0;
+    if (!s) fl_die("cannot read", fl_hdr[hi]);
+    n = (long)sz;
+    if (++fl_nest > 64) fl_die("include nesting too deep", fl_hdr[hi]);
+    fl_count++;
+    guarded = fl_guarded(s, n, guard, sizeof guard);
+    dn = tx_len(fl_hdr[hi], 8192);
+    while (dn > 0 && fl_hdr[hi][dn - 1] != '/') dn--;
+    dn--;
+    while (at < n) {
+        long i, start = at, ln;
+        if (!incomment && bol) {
+            i = fl_skipws(s, n, at);
+            if (i < n && s[i] == '#') {
+                long e = fl_logical(s, n, at, line, sizeof line, &ln), d = fl_skipws(line, ln, 0);
+                d = fl_skipws(line, ln, d + 1);
+                if (fl_word(line, ln, d, "include")) {
+                    long q = fl_skipws(line, ln, d + 7), z;
+                    char close;
+                    int to;
+                    if (q >= ln || (line[q] != '<' && line[q] != '"')) fl_die("computed #include", fl_hdr[hi]);
+                    close = line[q] == '<' ? '>' : '"';
+                    z = tx_chr(line + q + 1, ln - q - 1, close);
+                    if (z < 0) fl_die("bad #include", fl_hdr[hi]);
+                    to = close == '"' ? fl_find(fl_hdr[hi], dn, line + q + 1, z) : -1;
+                    if (to < 0) to = fl_find(fl_inc, fl_incn, line + q + 1, z);
+                    if (to < 0) { line[q + 1 + z] = 0; fl_die("#include outside ROOT/include", line + q + 1); }
+                    {
+                        char key[FL_KEY];
+                        int k, skip = 0;
+                        long kn = fl_key(key);
+                        for (k = 0; k < fl_nkeys[to]; k++)
+                            if (tx_prefix(key, kn, fl_keys[to][k], tx_len(fl_keys[to][k], FL_KEY))) skip = 1;
+                        if (!skip) {
+                            if (fl_nkeys[to] == FL_NKEY) fl_die("header inlined under too many conditions", fl_hdr[to]);
+                            fl_keys[to][fl_nkeys[to]++] = ar_dup(fl_ar, key, kn);
+                            fl_put("\n", 1);
+                            fl_file(to);
+                        }
+                    }
+                    for (i = start; i < e; i++) if (s[i] == '\n') fl_put("\n", 1);   /* keep the line count */
+                    at = e;
+                    continue;
+                }
+                if (fl_word(line, ln, d, "if") || fl_word(line, ln, d, "ifdef") || fl_word(line, ln, d, "ifndef")) {
+                    int isguard = guarded && !sawguard && fl_nc == gate0;
+                    if (fl_nc == FL_DEPTH) fl_die("conditionals too deep", fl_hdr[hi]);
+                    fl_guard[fl_nc] = (unsigned char)isguard;
+                    fl_text[fl_nc] = ar_dup(fl_ar, line + d, ln - d);
+                    fl_branch[fl_nc] = 0;
+                    fl_nc++;
+                    if (isguard) sawguard = 1;
+                } else if (fl_word(line, ln, d, "else") || fl_word(line, ln, d, "elif")) {
+                    if (fl_nc <= gate0) fl_die("#else outside a conditional", fl_hdr[hi]);
+                    fl_branch[fl_nc - 1]++;
+                } else if (fl_word(line, ln, d, "endif")) {
+                    if (fl_nc <= gate0) fl_die("unbalanced #endif", fl_hdr[hi]);
+                    fl_nc--;
+                }
+                fl_put(s + start, e - start);
+                at = e;
+                continue;
+            }
+        }
+        /* ordinary text up to the end of the line, tracking block comments and string literals */
+        while (at < n && s[at] != '\n') {
+            if (incomment) { if (s[at] == '*' && at + 1 < n && s[at + 1] == '/') { incomment = 0; at++; } }
+            else if (s[at] == '/' && at + 1 < n && s[at + 1] == '*') { incomment = 1; at++; }
+            else if (s[at] == '/' && at + 1 < n && s[at + 1] == '/') { while (at + 1 < n && s[at + 1] != '\n') at++; }
+            else if (s[at] == '"' || s[at] == '\'') {
+                char qc = s[at];
+                at++;
+                while (at < n && s[at] != qc && s[at] != '\n') { if (s[at] == '\\' && at + 1 < n) at++; at++; }
+                if (at >= n || s[at] == '\n') continue;
+            }
+            at++;
+        }
+        bol = !(at > 0 && s[at - 1] == '\\');
+        if (at < n) at++;
+        fl_put(s + start, at - start);
+        if (bol == 0) bol = 0;
+        bol = 1;
+        if (at >= 2 && s[at - 2] == '\\') bol = 0;
+    }
+    if (fl_nc != gate0) fl_die("unbalanced conditionals", fl_hdr[hi]);
+    if (n && s[n - 1] != '\n') fl_put("\n", 1);
+    fl_nest--;
+}
+/* 1 when the first two directives are #ifndef G and #define G. */
+static int fl_guarded(const char *s, long n, char *g, long gcap) {
+    char line[8192];
+    long at = 0, ln, gn = 0;
+    int seen = 0, incomment = 0;
+    while (at < n && seen < 2) {
+        long i = fl_skipws(s, n, at), e, d;
+        if (!incomment && i < n && s[i] == '#') {
+            e = fl_logical(s, n, at, line, sizeof line, &ln);
+            d = fl_skipws(line, ln, fl_skipws(line, ln, 0) + 1);
+            if (seen == 0) {
+                long w;
+                if (!fl_word(line, ln, d, "ifndef")) return 0;
+                d = fl_skipws(line, ln, d + 6);
+                for (w = d; w < ln && line[w] != ' ' && line[w] != '\t'; w++) ;
+                gn = w - d;
+                if (gn <= 0 || gn >= gcap) return 0;
+                tx_copy(g, gcap, line + d, gn);
+            } else {
+                if (!fl_word(line, ln, d, "define")) return 0;
+                d = fl_skipws(line, ln, d + 6);
+                if (!tx_prefix(line + d, ln - d, g, gn) || (d + gn < ln && line[d + gn] != ' ' && line[d + gn] != '\t')) return 0;
+            }
+            seen++;
+            at = e;
+            continue;
+        }
+        for (; at < n && s[at] != '\n'; at++) {
+            if (incomment) { if (s[at] == '*' && at + 1 < n && s[at + 1] == '/') { incomment = 0; at++; } }
+            else if (s[at] == '/' && at + 1 < n && s[at + 1] == '*') { incomment = 1; at++; }
+            else if (s[at] == '/' && at + 1 < n && s[at + 1] == '/') break;
+            else if (s[at] != ' ' && s[at] != '\t' && s[at] != '\r') return 0;   /* text before the guard */
+        }
+        while (at < n && s[at] != '\n') at++;
+        at++;
+    }
+    return seen == 2;
+}
+
+int main(int argc, char **argv) {
+    static const char mark[] = "/* include/cx-flat.h: written by tools/cx-flatten.cx from include/cx-nested.h and the headers it"
+        " includes, do not edit; unisacc reads it through include/cx.h */\n";
+    char root[4096], dst[4400];
+    int hi, check;
+    size_t n;
+    char *cur;
+    fl_ar = ar_new(1L << 31);
+    if (!fl_ar) fl_die("cannot create the arena", 0);
+    if (argc != 3 || (!tx_eq(argv[1], "--write", 16) && !tx_eq(argv[1], "--check", 16))) fl_die("usage", "--write|--check ROOT");
+    check = tx_eq(argv[1], "--check", 16);
+    if (!realpath(argv[2], root)) fl_die("bad ROOT", argv[2]);
+    cx_fmt(fl_inc, sizeof fl_inc, "%s/include", root);
+    fl_incn = tx_len(fl_inc, sizeof fl_inc);
+    cx_fmt(dst, sizeof dst, "%s/cx-flat.h", fl_inc);
+    if (cx_walk(fl_inc, fl_take, 0)) fl_die("cannot walk", fl_inc);
+    hi = fl_find(fl_inc, fl_incn, "cx-nested.h", 11);
+    if (hi < 0) fl_die("no include/cx-nested.h under", root);
+    fl_put(mark, (long)sizeof mark - 1);
+    fl_file(hi);
+    if (!check) {
+        if (cx_write(dst, fl_out.p, (size_t)fl_out.n)) fl_die("cannot write", dst);
+        printf("WROTE\tinclude/cx-flat.h\t%d headers\t%ld bytes\n", fl_count, fl_out.n);
+        return 0;
+    }
+    cur = cx_read(dst, &n);
+    if (!cur || !tx_same(cur, (long)n, fl_out.p, fl_out.n)) { printf("DIFF\tinclude/cx-flat.h\n"); return 1; }
+    printf("SAME\tinclude/cx-flat.h\t%d headers\n", fl_count);
+    return 0;
+}
