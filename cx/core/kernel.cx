@@ -1,0 +1,116 @@
+#pragma unisa module kernel
+/* The assembly execution kernel behind the core_run interface of cx/core/execute.cx.  exec/c/asm/ implements the whole loop (transition, all 56 actions and
+   their dispatch, buffers, sparse memory, interning, stacks) by hand for x86-64 and AArch64;
+   tools/kernel-build.cx assembles it with the product's own assembler and links the UNIKERN1
+   blob the P3 package carries as \0kernel/x86_64 and \0kernel/arm64.  The same CX execution
+   algorithm compiled by the product's -O2 runs 3-4 times slower per stage
+   (plans/perf-bottlenecks-2026-10-30.md B2), so the entry links this module instead of
+   core.execute.  A port of exec/c/asm/binding.c: the blob is fetched through
+   core_host_fetch (UNISA_KERNEL names a file for standalone kernel tests), mapped writable,
+   given the address of kn_service in its service slot, then made read-execute for the
+   process's lifetime.  The structures below are the 64-bit-pointer/32-bit-int ABI
+   exec/c/asm/layout.h names; they equal cx/core/execute.cx's.  No model rule lives here. */
+typedef int64_t I;
+typedef struct { unsigned char *b; I *at; int n, cap; } Buf;
+typedef struct {
+    int ns, nq, nrg, start, isnet;
+    char **str; int *strl;
+    int *qoff, *qlen; I *qa;
+    int *mode, *count, **keys, **next, **seq;
+    int *lo, *hi, *base_next, *base_seq;
+    int *ret_seq; unsigned char **ret_ok;   /* declared returns; ret_ok[q] may be NULL */
+} CoreModel;
+typedef struct { Buf out, err; const char *reason; int reason_n; } CoreResult;
+
+static unsigned char *kn_code;
+static long kn_entry;
+
+static void kn_die(const char *s) { {extern void core_host_panic(const char *);core_host_panic(s);} abort(); }
+/* The kernel's only way out: allocation, byte primitives, the resource fetch and the panic hook. */
+static long kn_service(long op, long a, long b, long c, long d) {
+    if (op == 0) return (long)calloc((size_t)a, (size_t)b);
+    if (op == 1) return (long)realloc((void *)a, (size_t)b);
+    if (op == 2) { free((void *)a); return 0; }
+    if (op == 3) return (long)memcpy((void *)a, (void *)b, (size_t)c);
+    if (op == 4) return memcmp((void *)a, (void *)b, (size_t)c);
+    if (op == 5) return (long)memset((void *)a, (int)b, (size_t)c);
+    if (op == 6) return (long)strlen((char *)a);
+    if (op == 7) { extern int core_host_fetch(const unsigned char *,int,unsigned char **,int *);
+                   return core_host_fetch((unsigned char *)a, (int)b, (unsigned char **)c, (int *)d); }
+    if (op == 8) kn_die((char *)a);
+    kn_die("bad kernel service");
+    return 0;
+}
+static long kn_field(const unsigned char *p) {
+    long n = 0;
+    int j;
+    for (j = 7; j >= 0; j--) {
+        if (n > (2147483647L - p[j]) / 256) kn_die("bad kernel extent");
+        n = n * 256 + p[j];
+    }
+    return n;
+}
+static void kn_load(void) {
+#ifdef __aarch64__
+    static const char key[] = "\0kernel/arm64";
+    const long want = 1;
+#else
+    static const char key[] = "\0kernel/x86_64";
+    const long want = 2;
+#endif
+    extern int core_host_fetch(const unsigned char *,int,unsigned char **,int *);
+    unsigned char *bytes = 0, *code;
+    int n = 0, owner;
+    long isa, entry, slot, length, mapped;
+    owner = core_host_fetch((const unsigned char *)key, (int)sizeof key - 1, &bytes, &n);
+    if (!owner) {
+        const char *path = getenv("UNISA_KERNEL");
+        size_t fn;
+        if (!path || !*path) kn_die("assembly kernel not specified");
+        bytes = (unsigned char *)cx_read(path, &fn);
+        if (!bytes || fn > 2147483647UL) kn_die("cannot read the assembly kernel");
+        n = (int)fn;
+        owner = 2;
+    }
+    if (n < 40 || memcmp(bytes, "UNIKERN1", 8)) kn_die("bad kernel header");
+    isa = kn_field(bytes + 8); entry = kn_field(bytes + 16);
+    slot = kn_field(bytes + 24); length = kn_field(bytes + 32);
+    if (isa != want) kn_die("wrong kernel ISA");
+    if (length != n - 40 || entry >= length || slot > length - 8 || (slot & 7)) kn_die("bad kernel bounds");
+    mapped = (length + 16383) & -16384L;
+#ifdef _WIN32
+    code = (unsigned char *)__mmap(0, mapped, 0x3000, 4, 0, 0);
+#elif defined(__linux__)
+    code = (unsigned char *)__mmap(0, mapped, 3, 0x22, -1, 0);
+#else
+    code = (unsigned char *)__mmap(0, mapped, 3, 0x1002, -1, 0);
+#endif
+    if ((long)code < 0 || !code || ((long)code & 4095)) kn_die("cannot map kernel memory");
+    memcpy(code, bytes + 40, (size_t)length);
+    if (owner == 2) free(bytes);
+    *(long *)(code + slot) = (long)kn_service;
+#ifdef _WIN32
+    if (__mprotect((long)code, mapped, 0x20)) kn_die("cannot protect kernel memory");
+#else
+    if (__mprotect((long)code, mapped, 5)) kn_die("cannot protect kernel memory");
+#endif
+    kn_code = code;
+    kn_entry = entry;
+}
+static long kn_call(long *args) {
+    long (*entry)(long *);
+    if (!kn_code) kn_load();
+#if defined(_WIN32) && defined(__aarch64__)
+    args[0] = args[0] + 2;   /* the Windows tape stack is separate from the real WinAPI stack */
+#endif
+    entry = (long (*)(long *))(kn_code + kn_entry);
+    return entry(args);
+}
+int core_run(const CoreModel *m, unsigned char *input, int inputn, const char *src, I maxsteps, CoreResult *result) {
+    long args[7];
+    args[0] = 0; args[1] = (long)m; args[2] = (long)input; args[3] = inputn;
+    args[4] = (long)src; args[5] = (long)maxsteps; args[6] = (long)result;
+    return (int)kn_call(args);
+}
+/* The kernel's transition entry (args[0] = 1) is not exported here: cx/core/transition.cx keeps
+   core_transition and the core_run_* step helpers for direct callers, so both link together. */
