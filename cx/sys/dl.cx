@@ -6,8 +6,11 @@
    when the host reports one, else -EIO. Windows has no dlfcn: open and
    sym return 0, close and addr return -ENOSYS. Linux has no libc in the
    33-object link, so the loader names are resolved from the libc already
-   mapped in this process and called through pointers. Apple imports
-   libSystem. This unit does not define dlopen, dlsym, dlclose or dlerror.
+   mapped in this process. open, sym and close call the imported dlopen,
+   dlsym and dlclose. Calling glibc's dlopen by that mapped address crashes
+   in this image: its ld.so state is not initialized (check-cx-sys rc 139).
+   Apple imports libSystem. This unit does not define dlopen, dlsym,
+   dlclose or dlerror.
    Exported functions stay outside #if. */
 
 #if defined(__linux__)
@@ -216,11 +219,6 @@ static void *syd_open(const char *path, int mode) {
     (void)path;
     (void)mode;
     return 0;
-#elif defined(__linux__)
-    void *(*real)(const char *, int);
-    real = syd_libc("dlopen");
-    if (!real) return 0;
-    return real(path, mode);
 #else
     return dlopen(path, mode);
 #endif
@@ -231,11 +229,6 @@ static void *syd_sym(void *handle, const char *name) {
     (void)handle;
     (void)name;
     return 0;
-#elif defined(__linux__)
-    void *(*real)(void *, const char *);
-    real = syd_libc("dlsym");
-    if (!real) return 0;
-    return real(handle, name);
 #else
     return dlsym(handle, name);
 #endif
@@ -245,15 +238,6 @@ static int syd_close(void *handle) {
 #if defined(_WIN32)
     (void)handle;
     return -ENOSYS;
-#elif defined(__linux__)
-    int (*real)(void *);
-    int rc;
-    real = syd_libc("dlclose");
-    if (!real) return -EIO;
-    errno = 0;
-    rc = real(handle);
-    if (rc == 0) return 0;
-    return errno ? -errno : -EIO;
 #else
     int rc;
     errno = 0;
