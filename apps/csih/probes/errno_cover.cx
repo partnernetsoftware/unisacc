@@ -21,10 +21,24 @@ static int is_num(const char *s) {
     return 1;
 }
 
+/* 1 when OUT has a line "NAME=<digits>". */
+static int printed(const char *out, const char *name) {
+    const char *p = out;
+    while (*p) {
+        const char *a = p, *b = name;
+        while (*b && *a == *b) { a++; b++; }
+        if (!*b && *a == '=' && a[1] >= '0' && a[1] <= '9') return 1;
+        while (*p && *p != '\n') p++;
+        if (*p) p++;
+    }
+    return 0;
+}
+
 int main(void) {
     const char *u = getenv("UNISACC");
     char dir[4096], src[4200], body[160], out[512]; const char *td = getenv("TMPDIR");
-    int i, n, rc, have = 0, miss = 0;
+    static char all[8192], allout[4096];
+    int i, n, rc, have = 0, miss = 0, used;
     FILE *f;
     if (!u || !u[0]) u = "../../unisacc.com";
     n = (int)(sizeof names / sizeof names[0]);
@@ -32,7 +46,21 @@ int main(void) {
     if (mkdir(dir, 0700) != 0) { printf("no temp\n"); return 2; }
     snprintf(src, sizeof src, "%s/c.c", dir);
     printf("MISSING:");
-    for (i = 0; i < n; i++) {
+    /* One compile for all names first: 43 compiles took ~25s. Only when that
+     * program fails does each name get its own compile, to name the missing. */
+    used = snprintf(all, sizeof all, "#include <stdio.h>\n#include <errno.h>\nint main(void){\n");
+    for (i = 0; i < n; i++)
+        used += snprintf(all + used, sizeof all - (size_t)used, " printf(\"%s=%%d\\n\",(int)%s);\n", names[i], names[i]);
+    used += snprintf(all + used, sizeof all - (size_t)used, " return 0; }\n");
+    if (cx_write(src, all, (size_t)used) == 0) {
+        char *args[1];
+        args[0] = src;
+        u_spawn(u, args, 1, NULL, allout, (int)sizeof allout, &rc);
+        if (rc == 0) for (i = 0; i < n; i++) have += printed(allout, names[i]);
+    }
+    if (have == n) i = n;   /* every name printed a number: no per-name pass */
+    else { have = 0; i = 0; }
+    for (; i < n; i++) {
         char *args[1];
         snprintf(body, sizeof body,
             "#include <stdio.h>\n#include <errno.h>\nint main(void){ printf(\"%%d\\n\",(int)%s); return 0; }\n",
