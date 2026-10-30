@@ -15,7 +15,7 @@
 | 5 | `exec/c/buildcompiler.sh` 调 `exec/c/tbl.py`、`net.py`、`exec/build/gen.py`、`exec/c/provenance.py` | 旧 Makefile 构造入口 | **已经跑不起来**：这几个 .py 都已归档，旧 C 也已归档 | 和旧构造路线（`product-build`、`hostseed-*`，见 `plans/candidate-to-product-2026-10-30.md` 的退场表）一起退场 |
 | 6 | `release/tools/precheck.sh` 调 `tests/bound.py`、`tests/ledgercheck.py`、`exec/facts/export.py`、`tests/subtractsafety.py` | 旧发布前检查 | **已经跑不起来**：调用的都已归档 | 归档，并更新 `release/RELEASE-PIPELINE.md` 里的引用 |
 | 7 | `release/tools/seal_candidate.sh`：内联 `python3 -c`，外加 `python3 - <<PY` | 把旧链产出的 `unisacc-next.com` 推到 GHCR，写 `release/candidate.json` | 输入是旧 `product-build` 的 generation 目录（`.build.json`、`model-audit/models.json`），要跟着旧链一起定 | 新链的发布形态定下来后，用 jq 和 sha256sum 重写；在那之前和旧链一起退场 |
-| 8 | `ujs/scripts/release-artifacts.sh`（`python3 -m ujs`）、`ujs/scripts/uxe-gate.sh`（`python3 -m http.server`） | ujs 子项目的发布产物；本地静态服务 | 前者调的 ujs Python 已归档，**已经跑不起来**；后者只需要一个静态服务器 | ujs 车道：前者归档，后者改用 node 起静态服务（ujs 本来就是 node 项目，`package.json` 写明 "no Python under ujs/"） |
+| 8 | `ujs/scripts/release-artifacts.sh`（`python3 -m ujs`）、`ujs/scripts/uxe-gate.sh`（`python3 -m http.server`） | ujs 子项目的发布产物；本地静态服务 | **已迁（b230ade92f）**：版本读取、指纹核对、RELEASE.txt 三段改由 `ujs/scripts/release-check.mjs` 完成（对照旧 Python 跑过：RELEASE.txt 逐字节相同，指纹拒绝结果相同）；静态服务改用 `ujs/scripts/static-serve.mjs` | `FORCE_WEB_BUILD` 原来调已归档的 `python3 -m ujs web-build`，现在直接报出这个原因后退出。`ujs/scripts` 里已经没有 Python |
 | — | `research/**/*.sh` 里的 python | 历史研究现场 | 不在活路径上，是证据 | 不动 |
 
 ## 只有底层能 include（同日盘点）
