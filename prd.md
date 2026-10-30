@@ -182,7 +182,11 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 │  ├─ B2 执行器自编 -O2 代码质量：主人定走汇编。cx/core/kernel.cx（f03c5a940d）接包内 UNIKERN1；入口已切 src/executor.cx use core.kernel。候选编 driveface.o 34.4s→11.8s，e4 推理 14.8s→5.39s
 │  ├─ B3 运行缓存：单源也存转发 ELF，大文件哈希走 AF_ALG。tests/runcache.cx 对 build-17 是 12/0（首次 546 ms，命中 40 ms）。包解析和解压还在
 │  └─ B5 六个驱动对象用 -O1：同一份 entry-build.cx，对象加链接 61.4 s → 52.8 s。混合候选 runcache 12/0（首次 515 ms，命中 41 ms），dev-run.cx 冷 -run 编译加用法拒绝 6.11 s。148 格全 SAME 后，不带旗标也是这六只 -O1
-├─ 去 Python：已归档的在 archive/reference-py/；事实表 30 张由 tools/facts-gen.cx 生成并 --check，kernel/ 由 tools/kernel-emit.cx 生成，unisa 包已归档；活 .py 只剩 3 个：apps/csih/deepseek-proxy.py（仓外 rawcsih 拉起，待主人定改 rawcsih 直连）、release/apeinspect.py 与 release/tools/draftfetch.py（CI 用；release/apeinspect.cx 输出一致，工作流补丁在 out/ci-draft/，待授权）
+├─ 去 Python（范围不含 ujs/、apps/csih/）：活路径上已没有 .py，也没有执行 Python 的脚本或 workflow 步骤（逐项见 plans/python-residue-2026-10-30.md）
+│  ├─ 原生替代：事实表由 tools/facts-gen.cx 生成；kernel/ 由 tools/kernel-emit.cx 生成；ujswasm 网表由 iterate/construct/construct.c 生成（9eed33fe1b）
+│  ├─ 已归档：draftfetch.py（defender-scan 改用 gh/jq）、windows-signing 的内联 Python 和 apeinspect.py（改为 release/ci/*.cx，db8048c8b3）、buildcompiler.sh、seal_candidate.sh、precheck.sh
+│  ├─ csih 车道自己迁的：deepseek-proxy.py 改为 deepseek-proxy.cx（b3bf45395b）
+│  └─ 未实跑：两个 workflow 改动都还没在 CI 上跑过；windows-signing 需要检出里有 unisacc.com，现在它被 .gitignore 忽略，怎么提供待主人定
 ├─ 分层：plans/cx-layers.md；L0 包 cx/text、cx/mem（arena）、cx/sys（env/fs/proc/time/net/sha/mem/dl，检查 tools/check-cx-sys.cx，这次 PASS ok=100 fail=0），棘轮 tests/cxraw.cx（上层直接 libc/POSIX 调用只降不升）；include/cx.h 与 cx_read/cx_write/cx_run* 收编归 cc
 ├─ 卫生：cx 四棘轮不计 archive/ 与已跟踪符号链接（f638c861e5，原把 31 个链接重复计数）；cxraw 这次是 645 个已跟踪 .cx、19329 次调用，基线 19615，超基线 0、低于基线 20（没有 --write）。src/drive.cx、src/driveroute.cx、src/host.cx 里那 4 处 memcpy 已留下返回值。cx/runtime、cx/compiler 的 5 处已标（71c45c265c）
 ├─ 新测试入口注册表 289 批次、270 已实现：本轮新登 24 个——21 个原本未登记的模块检查（其中 3 个解码检查原先就坏，缺 use，已修），加 tests/core-stack-empty.cx、tests/driver-environment.cx 两个包装和 tests/runcache.cx；还有 10 个 check 工具要材料或参数，未登记
