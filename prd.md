@@ -174,6 +174,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 │  ├─ lnx/arm64 第二片（2026-10-30，不算通过）：`out/grk-arm64-link/entry.elf` 1315376 字节，sha256 `c0adf34a…`，ELF aarch64。`--version` 和 x86_64 的 `entry.elf` 标准输出、标准错误逐字节相同（`unisacc 0.0.43\n`）。接了 P3 的候选 `-run` 在 qemu 下 memfd 回 ENOSYS（errno 38）。`hs_forward_exec` 没有落盘回退，待补，这一刀不改。改测 `-o`：同一只 `entry.elf` 在 qemu 里 `-b lnx/arm64 -o hello`，编出的 hello 打出 `from hello.c`，和 x86_64 的 hello 标准输出、标准错误逐字节相同。见 plans/entry-arm64-smoke-2026-10-30.md
 │  ├─ osx/win 的 -c（2026-10-30，只查不改）：不带 `-funit` 在 `src/driver/route.cx` 第 336 行拒绝。带 `-funit` 在 `src/drive.cx` 第 1939 行报 `NOT_IMPLEMENTED object`。单文件 `-o` 能出 Mach-O 和 PE。见 plans/osx-win-object-2026-10-30.md
 │  ├─ osx/win 整程序 -o（2026-10-30，已装产品）：33 源一次 `-o` 在 2.8 秒停在 e2 的 `hostnative.cx:8`。去掉 `hostnative.cx` 后用另外 32 个源：osx/x86_64 36.025 秒写出 Mach-O（1486306 字节，没有 `UNIPKG1`，本机不跑）；win/x86_64 11.218 秒停在 e3，第一条是 `src/host.cx:265` 的 `O_CLOEXEC`。没有改源。见 plans/osx-win-whole-o-2026-10-30.md
+│  ├─ 模块身份（2026-10-30，候选，未装）：同一个文件从两条软链进来时，用 `sy_realpath` 折成一条再比，不再报 defined twice。`sy_stat_t` 没有设备号，不比 inode；硬链接的两个真名仍算两个模块。`cxmod` 不 `use sys.fs`，只在函数里声明 `sy_realpath`：`-funit` 会把 `sys.fs` 再编进 `cxmod.o`，和 `drive.o`（经 `runcache`）里的 `sy_fstat` 重复。候选 `out/grk-modid/candidate` 2976044 字节，sha256 `d903d2258641dc17141cef736f36b3fc8501b169ce704f6d81923eaa1dc7bb88`。`out/modrepro` 编过并输出 `1`。`tests/cxclash` 仍报 `exported by both`。`cxdir_main` 退出 35，`cxnest_main` 退出 36，`tests/cxcycle/ping.cx` 报循环，`cxpriv_ok` 退出 42，`cxpriv_bad` 报 `cxpriv_hidden`。已装产品仍是旧的，这条要等换产品才生效
 │  └─ 注册表里仍读旧 C 的批次见 plans/archived-c-batches-2026-10-30.md：比对类 6 个已改指 archive/reference-c，-I exec/c 加 source_frame/codecgate 对象，实跑全 PASS；p3-library-* 待 p3-pack-ctx 材料；旧构造路线（hostseed-*、ri-material-*、package-controls 等）归档还是标不可运行，待主人定
 ├─ 性能（plans/perf-bottlenecks-2026-10-30.md）
 │  ├─ B1 E2 每个 #include 整缓冲重扫：前导部分已解（4f4a2ae2b3，include/cx.h → 生成的单文件 cx-flat.h，tools/cx-flatten.cx --check；空 main E2 1.74→0.09 s，候选冷编 facts-gen 40.5→16.8 s）；用户自己的 #include 仍待规则方案
@@ -182,7 +183,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 │  └─ B5 六个驱动对象用 -O1：同一份 entry-build.cx，对象加链接 61.4 s → 52.8 s。混合候选 runcache 12/0（首次 515 ms，命中 41 ms），dev-run.cx 冷 -run 编译加用法拒绝 6.11 s。148 格全 SAME 后，不带旗标也是这六只 -O1
 ├─ 去 Python：已归档的在 archive/reference-py/；事实表 30 张由 tools/facts-gen.cx 生成并 --check，kernel/ 由 tools/kernel-emit.cx 生成，unisa 包已归档；活 .py 只剩 3 个：apps/csih/deepseek-proxy.py（仓外 rawcsih 拉起，待主人定改 rawcsih 直连）、release/apeinspect.py 与 release/tools/draftfetch.py（CI 用；release/apeinspect.cx 输出一致，工作流补丁在 out/ci-draft/，待授权）
 ├─ 分层：plans/cx-layers.md；L0 包 cx/text、cx/mem（arena）、cx/sys（env/fs/proc/time/net/sha/mem/dl，检查 tools/check-cx-sys.cx，这次 PASS ok=100 fail=0），棘轮 tests/cxraw.cx（上层直接 libc/POSIX 调用只降不升）；include/cx.h 与 cx_read/cx_write/cx_run* 收编归 cc
-├─ 卫生：cx 四棘轮不计 archive/ 与已跟踪符号链接（f638c861e5，原把 31 个链接重复计数）；cxraw 这次是 629 个已跟踪 .cx、19634 次调用，基线 19634，超基线 0、低于基线 0。src/drive.cx、src/driveroute.cx、src/host.cx 里那 4 处 memcpy 已留下返回值。cx/runtime、cx/compiler 的 5 处已标（71c45c265c）
+├─ 卫生：cx 四棘轮不计 archive/ 与已跟踪符号链接（f638c861e5，原把 31 个链接重复计数）；cxraw 这次是 645 个已跟踪 .cx、19329 次调用，基线 19615，超基线 0、低于基线 20（没有 --write）。src/drive.cx、src/driveroute.cx、src/host.cx 里那 4 处 memcpy 已留下返回值。cx/runtime、cx/compiler 的 5 处已标（71c45c265c）
 ├─ 新测试入口注册表 289 批次、270 已实现：本轮新登 24 个——21 个原本未登记的模块检查（其中 3 个解码检查原先就坏，缺 use，已修），加 tests/core-stack-empty.cx、tests/driver-environment.cx 两个包装和 tests/runcache.cx；还有 10 个 check 工具要材料或参数，未登记
 └─ 分层棘轮：tests/cxraw.cx（plans/cx-layers.md）——上层 .cx 直接 libc/POSIX 只降不升、新文件须 0；csih 下层封装已入 tests/cxraw-layers.tsv（netwit/tmuxwit/retry_stub/tclock），apps/csih/tests/run.cx 已迁 tx_* 至 0
 ```
@@ -221,12 +222,13 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 | 四目标探针 | 已装产品只编对象：lnx/arm64 33 只 ELF；osx/x86_64、osx/arm64、win/x86_64 各 33 只编译失败，诊断同一句。不记通过。`76085cb99d` 之后不带 `--target` 的 path.o、tapegate.o 与改前逐字节相同。host.cx 改过之后，那批对象里的 host.o 过期 | plans/entry-target-probe-2026-10-30.md |
 | arm64 冒烟 | `--version` 与 x86_64 逐字节相同。`-run` 在 qemu 下 memfd 回 errno 38，没有落盘回退。`-o` 的 hello 在 qemu 下打出 `from hello.c`，与 x86_64 逐字节相同 | plans/entry-arm64-smoke-2026-10-30.md |
 | osx/win 对象 | 33 源整只 `-o` 在 e2 被 `hostnative.cx` 拒绝。去掉它之后，osx/x86_64 写出 Mach-O，没有 P3；win/x86_64 在 e3 停在 `host.cx:265` 的 `O_CLOEXEC`。没有改源 | plans/osx-win-whole-o-2026-10-30.md |
+| 模块身份 | 软链折到同一文件时按 `sy_realpath` 算同一个模块。不比 inode。候选 `d903d225…`，2976044 字节，未装。`out/modrepro` 输出 `1`；两个不同文件的同名导出仍拒绝 | out/grk-modid/receipt.txt |
 | 对拍 | `9fb93c13` 这一片 22 格全 SAME（`out/grk-host-sys-mx`），抽前 10 格也是 SAME，LEFT 126，没有跑完 148。`e477a4c7` 上 148 格全 SAME 只属于那只（`out/grk-opt2-mx`）。这只的 runcache 是 12/0 | out/grk-host-sys-mx；plans/cx-modules.md 第 164 节 |
 | 性能 | 对象加链接 61.4 s → 52.8 s。混合候选 runcache 首次 515 ms、命中 41 ms。dev-run.cx 冷 -run 编译加用法拒绝 6.11 s。runcache 的运行时间没有变快 | plans/perf-bottlenecks-2026-10-30.md 的 B5 |
 | 事实表 | 只经 `sh ./unisacc.com tools/facts-gen.cx -- --write\|--check .`（30 张 + bank 归属，`--check` 31/0） | exec/facts/ |
 | 归档 | 参考 C、参考 Python、旧检查与旧 shell | archive/reference-c/、archive/reference-py/README.md |
 | 已装产品 | 3,035,300 B，sha 79fb84e6…；新测试入口 `sh ./unisacc.com tests/run.cx -- --list` | tests/batches.tsv、tests/coverage.tsv |
-| CX 分层 | L0=`cx/{sys,mem,text}`+layers 表白名单。`src/host.cx` 0 个 include，映射和加载符号在 `cx/sys/mem.cx`、`cx/sys/dl.cx`。check-cx-sys 100/0。cxraw 629 个文件、19634 次、0 超基线 | plans/cx-layers.md、tests/cxraw-layers.tsv |
+| CX 分层 | L0=`cx/{sys,mem,text}`+layers 表白名单。`src/host.cx` 0 个 include，映射和加载符号在 `cx/sys/mem.cx`、`cx/sys/dl.cx`。check-cx-sys 100/0。cxraw 645 个文件、19329 次、基线 19615、0 超基线、20 低于基线 | plans/cx-layers.md、tests/cxraw-layers.tsv |
 | 旧纪元证据 | 10-30 前的构造链、安装、矩阵收据 | archive/prd-c43-history-20261030.md |
 
 **动态维护规则**：进度、身份、阻塞、决定或下一动作变化时，同步原位更新思维树节点及对应房间；只把当前事实留在这里。每次恢复先读两者，派发任务引用当前节点和确切缺口。原始过程与旧失败保留在证据或Git历史中，不冒充当前状态。
