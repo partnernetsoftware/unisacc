@@ -1,0 +1,536 @@
+#pragma unisa use tmuxwit
+#pragma unisa use text.text
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use sys.posix
+/*
+ * reload_launcher_run.cx — the reload launcher's run loop on a real tty, with
+ * real csih actors. The behaviour checked is that of the archived probes
+ * reload_launcher.py (success / rollback), reload_launcher_lock.py and
+ * managed_handoff.py (archive/reference-py/apps/csih/probes/).
+ *   cd apps/csih && sh ../../unisacc.com -run probes/reload_launcher_run.cx
+ *
+ * One launcher (reload_launcher.cx, compiled here) runs in a private tmux pane
+ * and builds its own candidates from a private copy of the app sources:
+ *   1 start: build, spawn agent-managed in the pane's foreground group, ACK,
+ *     ACTIVATE (events build-started, spawn, received ACK, activated)
+ *   2 commit: /reload-code in the pane sends REQUEST; a draft typed meanwhile;
+ *     the build (source changed: new hash) is handed off in order READY,
+ *     FROZEN, RELEASED, ACK, activated, committed; the old actor is gone; the
+ *     new one shows the draft and takes keys
+ *   3 a second launcher on the same session dir is refused by the supervisor
+ *     lock (rc 1, "Resource temporarily unavailable"), events unchanged; a
+ *     launcher with no tty is refused and leaves its lock free
+ *   4 rollback: the next candidate's standby actor is pointed at an empty
+ *     directory, so COMMIT finds no snapshot and it exits without ACK:
+ *     handoff-failed (freeze_sent true), candidate-exited before resumed, the
+ *     old actor RESUMED with its draft and takes keys again
+ *   5 /exit: launcher rc 0, terminal-restored logged, `stty -g` before and
+ *     after the launcher equal, supervisor lock free, no actor left
+ *
+ * Candidates. reload_candidate build compiles the app with the frozen
+ * compiler under a 14s per-command limit, and the csih graph takes ~50s cold
+ * (agent_cli ~28s), so a real compile cannot finish inside build(). The
+ * COMPILER handed to the launcher is therefore a replay compiler (a sh script
+ * written here): for "-o .../candidate" it copies the installed csih
+ * (CSIH_BIN, else ../../out/csih-e2e-bin/csih), for "-o .../agent-selftest"
+ * an agent_cli.cx binary compiled by this probe. Everything else is real:
+ * reload_candidate freezes the sources, runs both gates (csih selftest,
+ * agent selftest) and writes and verifies the receipt; the launcher verifies
+ * again before every spawn. The rollback candidate is the same csih behind a
+ * two-line sh wrapper that swaps the session dir for the candidate's own
+ * empty tmp/.
+ * Build cache (measured: launcher ~15s, agent_cli ~28s): both binaries live in
+ * ../../out/csih-launcher-run/cache and are reused only while the sha256 of
+ * unisacc.com plus every file of their -cx-plan closure is unchanged.
+ * Upper root (L3): no #include, no direct libc calls (cx/sys, text.text,
+ * tmuxwit, cx_read/cx_write/cx_runv_timeout/cx_rmtree).
+ */
+
+#define CAP 65536
+#define PASSLINE "reload_launcher_run: PASS"
+
+static char pane[CAP], seen[1 << 18];
+static int fails;
+static char here[600], repo[700], ws[800], cache[900], run[900], src[1000], cand[1000], sess[1000],
+    home[1000], cwdd[1000], comp[1000], launcher[1000], agentbin[1000], before[1000], after[1000],
+    events[1100], e_home[1100], e_cwd[1100];
+static const char *csih;
+
+static long slen(const char *s) { return tx_len(s, 1 << 22); }
+static int has(const char *hay, const char *needle) { return tx_find(hay, slen(hay), needle, slen(needle)) >= 0; }
+static void check(int ok, const char *what) {
+    printf("  %s  %s\n", ok ? "ok  " : "FAIL", what);
+    if (!ok) fails++;
+}
+
+/* ── build cache ─────────────────────────────────────────────────────────── */
+
+/* sha256 of the compiler and of FILE's -cx-plan closure (names and bytes). */
+static int plan_key(const char *file, char key[65]) {
+    static char list[1 << 16];
+    char u[800], *out = 0, *av[] = { "sh", u, "-cx-plan", (char *)file, 0 };
+    size_t n = 0, len;
+    long at = 0, used = 0;
+    int rc;
+    snprintf(u, sizeof u, "%s/unisacc.com", repo);
+    rc = cx_runv_timeout(av, 20, &out, &n);
+    if (rc != 0 || !out) { if (out) tw_free(out); return -1; }
+    {
+        char *b = cx_read(u, &len), h[65];
+        if (!b) { tw_free(out); return -1; }
+        cx_sha256_hex(b, len, h);
+        tw_free(b);
+        used += snprintf(list + used, sizeof list - used, "unisacc %s\n", h);
+    }
+    while (at < (long)n) {
+        long e = at, t1, t2;
+        char name[600], h[65], *b;
+        while (e < (long)n && out[e] != '\n') e++;
+        t1 = tx_chr(out + at, e - at, '\t');
+        if (t1 >= 0) {
+            t2 = tx_chr(out + at + t1 + 1, e - at - t1 - 1, '\t');
+            if (t2 < 0) t2 = e - at - t1 - 1;
+            if (tx_copy(name, sizeof name, out + at + t1 + 1, t2) != 0) { tw_free(out); return -1; }
+            b = cx_read(name, &len);
+            if (!b) { tw_free(out); return -1; }
+            cx_sha256_hex(b, len, h);
+            tw_free(b);
+            used += snprintf(list + used, sizeof list - used, "%s %s\n", name, h);
+            if (used >= (long)sizeof list) { tw_free(out); return -1; }
+        }
+        at = e + 1;
+    }
+    tw_free(out);
+    cx_sha256_hex(list, (size_t)used, key);
+    return 0;
+}
+
+/* 1 when BIN exists and BIN.key holds KEY. */
+static int cached(const char *bin, const char *key) {
+    char kp[1100], *b;
+    size_t n;
+    int ok;
+    sy_stat_t s;
+    snprintf(kp, sizeof kp, "%s.key", bin);
+    if (sy_stat(bin, &s) != 0 || s.kind != 'f') return 0;
+    b = cx_read(kp, &n);
+    if (!b) return 0;
+    ok = n == 64 && tx_same(b, 64, key, 64);
+    tw_free(b);
+    return ok;
+}
+
+/* Compile FILE to BIN unless cached; both at once (each ~15-28s), 50s limit. */
+static int prepare_bins(void) {
+    const char *file[2] = { "reload_launcher.cx", "agent_cli.cx" };
+    const char *bin[2] = { launcher, agentbin };
+    char key[2][65], u[800], kp[1100];
+    int pid[2] = { 0, 0 }, k, ok = 1;
+    long end = sy_now_ms() + 50000;
+    snprintf(u, sizeof u, "%s/unisacc.com", repo);
+    for (k = 0; k < 2; k++) {
+        if (plan_key(file[k], key[k]) != 0) { printf("  note  cannot plan %s\n", file[k]); return 0; }
+        if (cached(bin[k], key[k])) { printf("  note  cache hit %s (key %.12s)\n", file[k], key[k]); continue; }
+        snprintf(kp, sizeof kp, "%s.key", bin[k]);
+        if (sy_exists(kp) == 1) cx_remove(kp);
+        {
+            char *av[] = { "sh", u, (char *)file[k], "-o", (char *)bin[k], 0 };
+            pid[k] = sy_spawn(av);
+        }
+        printf("  note  compiling %s (cache miss, key %.12s)\n", file[k], key[k]);
+    }
+    for (k = 0; k < 2; k++) {
+        int r = -EAGAIN;
+        if (pid[k] <= 0) continue;
+        while ((r = sy_wait(pid[k], 1)) == -EAGAIN && sy_now_ms() < end) sy_sleep_ms(100);
+        if (r == -EAGAIN) { sy_kill(pid[k]); r = -1; }
+        snprintf(kp, sizeof kp, "%s.key", bin[k]);
+        if (r == 0 && sy_chmod(bin[k], 0700) == 0 && cx_write(kp, key[k], 64) == 0) continue;
+        printf("  note  compile of %s failed (status %d)\n", file[k], r);
+        ok = 0;
+    }
+    return ok;
+}
+
+/* ── private inputs ──────────────────────────────────────────────────────── */
+
+static int source_suffix(const char *n) {
+    long l = slen(n);
+    return (l > 3 && tx_same(n + l - 3, 3, ".cx", 3)) || (l > 2 && tx_same(n + l - 2, 2, ".h", 2)) ||
+           (l > 2 && tx_same(n + l - 2, 2, ".c", 2)) || (l > 4 && tx_same(n + l - 4, 4, ".inc", 4));
+}
+
+/* The app's own top-level sources (regular files only: the sys/ link and the
+ * test trees stay out, as the manifest refuses links) into SRC. */
+static int copy_sources(void) {
+    static char names[1 << 16];
+    int dfd = sy_openat(sy_at_fdcwd(), ".", O_RDONLY, 0), n, k, i = 0, copied = 0;
+    if (dfd < 0) return -1;
+    n = sy_dir_names(dfd, names, sizeof names);
+    sy_close(dfd);
+    for (k = 0; k < n; k++) {
+        const char *name = names + i;
+        sy_stat_t s;
+        i += (int)slen(name) + 1;
+        if (!source_suffix(name) || sy_lstat(name, &s) != 0 || s.kind != 'f') continue;
+        {
+            char to[1200], *b;
+            size_t len;
+            b = cx_read(name, &len);
+            snprintf(to, sizeof to, "%s/%s", src, name);
+            if (!b || cx_write(to, b, len) != 0 || sy_chmod(to, 0600) != 0) { if (b) tw_free(b); return -1; }
+            tw_free(b);
+            copied++;
+        }
+    }
+    return copied;
+}
+
+/* Append TEXT to the private tui.cx (a new source manifest: a new candidate hash). */
+static int touch_tui(const char *text) {
+    static char big[1 << 22];
+    char p[1100], *b;
+    size_t n;
+    long t = slen(text);
+    int ok;
+    snprintf(p, sizeof p, "%s/tui.cx", src);
+    b = cx_read(p, &n);
+    if (!b || (long)n + t + 1 > (long)sizeof big) { if (b) tw_free(b); return -1; }
+    tx_copy(big, sizeof big, b, (long)n);
+    tx_copy(big + n, sizeof big - n, text, t);
+    tw_free(b);
+    ok = cx_write(p, big, n + (size_t)t);
+    return ok;
+}
+
+static int write_compiler(void) {
+    static char s[8192];
+    int n = snprintf(s, sizeof s,
+        "#!/bin/sh\n"
+        "# Replay compiler written by probes/reload_launcher_run.cx. reload_candidate runs\n"
+        "# \"compiler.com -run ENTRY -o OUT\" in the frozen app dir under a 14s limit, too short\n"
+        "# for a csih compile: the product binaries are copied instead; the gates then run them.\n"
+        "[ $# -eq 4 ] && [ \"$1\" = -run ] && [ \"$3\" = -o ] || { echo \"replay: argv $*\" >&2; exit 64; }\n"
+        "case \"$4\" in\n"
+        "*/candidate)\n"
+        "  if grep -q PROBE_ROLLBACK_CANDIDATE tui.cx; then\n"
+        "    printf '%%s\\n' '#!/bin/sh' \\\n"
+        "      '# rollback candidate: standby-managed gets the empty tmp/ for its session dir' \\\n"
+        "      'if [ \"$1\" = standby-managed ]; then shift 2; exec %s standby-managed \"$(dirname \"$0\")/tmp\" \"$@\"; fi' \\\n"
+        "      'exec %s \"$@\"' > \"$4\"\n"
+        "  else cp %s \"$4\"; fi ;;\n"
+        "*/agent-selftest) cp %s \"$4\" ;;\n"
+        "*) echo \"replay: unknown output $4\" >&2; exit 64 ;;\n"
+        "esac\n", csih, csih, csih, agentbin);
+    if (n <= 0 || n >= (int)sizeof s) return -1;
+    return cx_write(comp, s, (size_t)n);
+}
+
+/* ── launcher-events.jsonl ───────────────────────────────────────────────── */
+
+static char evbuf[1 << 20];
+
+static void load_events(void) {
+    size_t n = 0;
+    char *b = cx_read(events, &n);
+    evbuf[0] = 0;
+    if (b) { tx_copy(evbuf, sizeof evbuf, b, (long)n); tw_free(b); }
+}
+
+/* Offset of the K-th (from 1) line of event NAME, -1 when there are fewer. */
+static long ev_at(const char *name, int k) {
+    char pat[96];
+    long at = 0, n = slen(evbuf), f;
+    snprintf(pat, sizeof pat, "{\"event\": \"%s\"", name);
+    while ((f = tx_find(evbuf + at, n - at, pat, slen(pat))) >= 0) {
+        if (--k == 0) return at + f;
+        at += f + 1;
+    }
+    return -1;
+}
+
+static int ev_count(const char *name) {
+    int k = 0;
+    while (ev_at(name, k + 1) >= 0) k++;
+    return k;
+}
+
+/* Wait up to MS for the K-th event NAME; also stops early on event STOP (may be 0). */
+static int wait_event(const char *name, int k, int ms, const char *stop) {
+    long end = sy_now_ms() + ms;
+    for (;;) {
+        load_events();
+        if (ev_at(name, k) >= 0) return 1;
+        if (stop && ev_at(stop, 1) >= 0) return 0;
+        if (sy_now_ms() > end) return 0;
+        sy_sleep_ms(50);
+    }
+}
+
+/* The string field KEY of the line at AT, into OUT. */
+static int ev_field(long at, const char *key, char *out, int cap) {
+    char pat[64];
+    long e = at, f, q;
+    while (evbuf[e] && evbuf[e] != '\n') e++;
+    snprintf(pat, sizeof pat, "\"%s\": ", key);
+    f = tx_find(evbuf + at, e - at, pat, slen(pat));
+    if (f < 0) return 0;
+    f += at + slen(pat);
+    if (evbuf[f] == '"') {
+        f++;
+        q = tx_chr(evbuf + f, e - f, '"');
+        if (q < 0) return 0;
+    } else {
+        q = 0;
+        while (f + q < e && evbuf[f + q] != ',' && evbuf[f + q] != '}') q++;
+    }
+    return tx_copy(out, cap, evbuf + f, q) == 0;
+}
+static int ev_has(long at, const char *text) {
+    long e = at;
+    while (evbuf[e] && evbuf[e] != '\n') e++;
+    return tx_find(evbuf + at, e - at, text, slen(text)) >= 0;
+}
+static int ev_int(long at, const char *key) {
+    char v[32];
+    long i, x = 0;
+    int neg = 0;
+    if (!ev_field(at, key, v, sizeof v)) return -1;
+    for (i = 0; v[i]; i++) { if (v[i] == '-') neg = 1; else x = x * 10 + v[i] - '0'; }
+    return (int)(neg ? -x : x);
+}
+
+/* Offsets of each "received OP" after FROM must come in the order given. */
+static int received_in_order(long from, const char *const *ops, int n) {
+    long at = from;
+    int k;
+    for (k = 0; k < n; k++) {
+        char pat[160];
+        long f, len = slen(evbuf);
+        snprintf(pat, sizeof pat, "{\"event\": \"received\", ");
+        for (;;) {
+            f = tx_find(evbuf + at, len - at, pat, slen(pat));
+            if (f < 0) return 0;
+            at += f;
+            {
+                char op[32];
+                if (ev_field(at, "op", op, sizeof op) && tx_eq(op, ops[k], 32)) break;
+            }
+            at++;
+        }
+        at++;
+    }
+    return 1;
+}
+
+/* ── the run ─────────────────────────────────────────────────────────────── */
+
+static int start_pane(void) {
+    char *cmd[32];
+    int k = 0;
+    cmd[k++] = "env"; cmd[k++] = "-u"; cmd[k++] = "DEEPSEEK_API_KEY"; cmd[k++] = "-u"; cmd[k++] = "OPENAI_API_KEY";
+    cmd[k++] = e_home; cmd[k++] = e_cwd;
+    cmd[k++] = "CSIH_ROLE=write"; cmd[k++] = "CSIH_PEER=0:launcher-test";
+    cmd[k++] = "CSIH_ENDPOINT=http://127.0.0.1:1/v1/chat/completions";
+    cmd[k++] = "CSIH_MODEL=private-no-network";
+    cmd[k++] = "sh"; cmd[k++] = "-c";
+    cmd[k++] = "b=$1; a=$2; shift 2; stty -g >\"$b\"; \"$@\"; rc=$?; stty -g >\"$a\"; echo __RC=${rc}__; sleep 30";
+    cmd[k++] = "sh"; cmd[k++] = before; cmd[k++] = after;
+    cmd[k++] = launcher; cmd[k++] = "run"; cmd[k++] = src; cmd[k++] = comp; cmd[k++] = cand; cmd[k++] = sess;
+    cmd[k++] = "sess";
+    return tw_new("lr", 120, 35, NULL, cmd, k);
+}
+
+/* A launcher with no tty (stdin /dev/null) on DIR: its rc, stderr+stdout in OUT. */
+static int side_launcher(const char *dir, const char *sid, char *out, int cap) {
+    char *av[] = { "sh", "-c", "\"$0\" \"$@\" </dev/null 2>&1", launcher, "run", src, comp, cand, (char *)dir, (char *)sid, 0 };
+    char *o = 0;
+    size_t n = 0;
+    int rc = cx_runv_timeout(av, 10, &o, &n);
+    out[0] = 0;
+    if (o) { tx_copy(out, cap, o, (long)n); tw_free(o); }
+    return rc;
+}
+
+/* 1 when DIR/supervisor.lock can be flocked now (nobody holds it). */
+static int lock_free(const char *dir) {
+    char p[1100];
+    int fd, r;
+    snprintf(p, sizeof p, "%s/supervisor.lock", dir);
+    fd = sy_openat(sy_at_fdcwd(), p, O_RDWR, 0);
+    if (fd < 0) return 0;
+    r = sy_flock(fd, 2 | 4);
+    sy_close(fd);
+    return r == 0;
+}
+
+static int mkpriv(const char *p) { return sy_mkdir(p, 0700) == 0 && sy_chmod(p, 0700) == 0; }
+
+int main(void) {
+    static char out[8192], h1[80], h2[80], tmpv[200];
+    const char *bin_env = sy_env("CSIH_BIN");
+    long t0 = sy_now_ms(), at, at2;
+    int rc, n, pid_old, pid_new, k;
+    sy_stat_t s;
+
+    if (!getcwd(here, sizeof here)) return 2;
+    snprintf(repo, sizeof repo, "%s/../..", here);
+    snprintf(ws, sizeof ws, "%s/out/csih-launcher-run", repo);
+    snprintf(cache, sizeof cache, "%s/cache", ws);
+    snprintf(run, sizeof run, "%s/run", ws);
+    snprintf(src, sizeof src, "%s/src", run);
+    snprintf(cand, sizeof cand, "%s/candidates", run);
+    snprintf(sess, sizeof sess, "%s/session", run);
+    snprintf(home, sizeof home, "%s/home", run);
+    snprintf(cwdd, sizeof cwdd, "%s/cwd", run);
+    snprintf(comp, sizeof comp, "%s/replay-compiler.sh", run);
+    snprintf(before, sizeof before, "%s/stty-before", run);
+    snprintf(after, sizeof after, "%s/stty-after", run);
+    snprintf(events, sizeof events, "%s/launcher-events.jsonl", sess);
+    snprintf(launcher, sizeof launcher, "%s/reload_launcher", cache);
+    snprintf(agentbin, sizeof agentbin, "%s/agent-selftest", cache);
+    snprintf(e_home, sizeof e_home, "HOME=%s", home);
+    snprintf(e_cwd, sizeof e_cwd, "CSIH_CWD=%s", cwdd);
+    {
+        static char absbin[800];
+        if (bin_env && bin_env[0]) csih = bin_env;
+        else { snprintf(absbin, sizeof absbin, "%s/out/csih-e2e-bin/csih", repo); csih = absbin; }
+    }
+    if (sy_stat(csih, &s) != 0) { printf("reload_launcher_run: FAIL no csih binary at %s (csih.sh prepare)\n", csih); return 1; }
+    if (!tw_open("launcher")) { printf("reload_launcher_run: FAIL tmux is not on PATH\n"); return 1; }
+
+    /* workspace: the cache is kept, the run dir is new every time */
+    if (sy_exists(ws) == 0 && !mkpriv(ws)) { printf("reload_launcher_run: FAIL cannot make %s\n", ws); return 1; }
+    if (sy_exists(cache) == 0 && !mkpriv(cache)) { printf("reload_launcher_run: FAIL cannot make %s\n", cache); return 1; }
+    if (sy_exists(run) != 0 && cx_rmtree(run) != 0) { printf("reload_launcher_run: FAIL cannot clear %s\n", run); return 1; }
+    if (!mkpriv(run) || !mkpriv(src) || !mkpriv(cand) || !mkpriv(sess) || !mkpriv(home) || !mkpriv(cwdd)) {
+        printf("reload_launcher_run: FAIL cannot make the run dirs under %s\n", run);
+        return 1;
+    }
+    check(prepare_bins(), "launcher and agent_cli binaries ready (cache keyed by compiler + -cx-plan closure)");
+    if (fails) { printf("reload_launcher_run: FAIL (setup)\n"); return 1; }
+    n = copy_sources();
+    check(n >= 30, "private copy of the app's top-level sources");
+    check(write_compiler() == 0, "replay compiler written");
+    printf("  note  setup %ldms\n", sy_now_ms() - t0);
+
+    /* 1 start */
+    check(start_pane() == 0, "launcher started in a private tmux pane");
+    check(wait_event("activated", 1, 20000, 0), "initial build, spawn, ACK, ACTIVATE (event activated)");
+    load_events();
+    at = ev_at("activated", 1);
+    check(ev_at("build-started", 1) >= 0 && ev_at("spawn", 1) >= 0 && at >= 0 &&
+          ev_has(ev_at("spawn", 1), "\"standby\": false") && ev_has(at, "\"handoff\": \"initial\""),
+          "initial actor: agent-managed, handoff initial");
+    h1[0] = 0;
+    if (at >= 0) ev_field(at, "hash", h1, sizeof h1);
+    pid_old = at >= 0 ? ev_int(at, "pid") : -1;
+    check(tw_wait_text("lr", "owned session", 8000, pane, sizeof pane), "the initial actor draws on the launcher's tty");
+    printf("  note  start %ldms\n", sy_now_ms() - t0);
+
+    /* 2 REQUEST -> build -> committed handoff */
+    check(touch_tui("\n/* private candidate version1 */\n") == 0, "private source changed (new candidate)");
+    check(tw_submit("lr", "/reload-code", 0, seen, sizeof seen), "/reload-code typed");
+    tw_keys("lr", "DRAFT-ONE", 1);
+    tw_wait_text("lr", "DRAFT-ONE", 1500, pane, sizeof pane);
+    check(wait_event("committed", 1, 20000, "handoff-failed"), "REQUEST built and handed off (event committed)");
+    load_events();
+    at = ev_at("committed", 1);
+    h2[0] = 0;
+    if (at >= 0) ev_field(at, "hash", h2, sizeof h2);
+    pid_new = at >= 0 ? ev_int(at, "pid") : -1;
+    check(ev_count("build-started") == 2 && h2[0] && !tx_eq(h1, h2, 80), "the committed candidate has a new hash");
+    {
+        static const char *const order[] = { "READY", "FROZEN", "RELEASED", "ACK" };
+        at2 = ev_at("spawn", 2);
+        check(at2 >= 0 && ev_has(at2, "\"standby\": true") && received_in_order(at2, order, 4) &&
+              ev_at("activated", 2) > at2 && ev_at("committed", 1) > ev_at("activated", 2) && ev_count("handoff-failed") == 0,
+              "handoff order: standby spawn, READY, FROZEN, RELEASED, ACK, activated, committed");
+    }
+    check(pid_old > 0 && sy_signal(pid_old, 0) == -ESRCH, "the old actor is retired (its pid is gone)");
+    check(pid_new > 0 && pid_new != pid_old && sy_signal(pid_new, 0) == 0, "the new actor runs");
+    tw_keys("lr", "-NEW", 1);
+    check(tw_wait_text("lr", "DRAFT-ONE-NEW", 3000, pane, sizeof pane), "the new actor carries the draft and takes keys");
+    printf("  note  commit %ldms\n", sy_now_ms() - t0);
+
+    /* 3 a second launcher on the live session: refused by the supervisor lock */
+    {
+        static char evcopy[1 << 20];
+        load_events();
+        tx_copy(evcopy, sizeof evcopy, evbuf, slen(evbuf));
+        rc = side_launcher(sess, "other-session", out, sizeof out);
+        load_events();
+        check(rc == 1 && has(out, "reload launcher: [Errno 11] Resource temporarily unavailable"),
+              "a second launcher on the same session dir exits 1: supervisor lock held");
+        check(tx_eq(evbuf, evcopy, sizeof evcopy), "the refused launcher wrote no event");
+        printf("        second launcher rc=%d: %s", rc, out);
+    }
+    {
+        char other[1100];
+        snprintf(other, sizeof other, "%s/no-tty", run);
+        rc = mkpriv(other) ? side_launcher(other, "sess", out, sizeof out) : -1;
+        check(rc == 1 && has(out, "launcher requires foreground controlling TTY") && lock_free(other),
+              "a launcher without a tty is refused and leaves its lock free");
+    }
+
+    /* 4 a handoff that fails after FREEZE: rolled back, the old actor RESUMED */
+    tw_keys("lr", "C-u", 0);
+    tw_sleep_ms(200);
+    check(touch_tui("\n/* PROBE_ROLLBACK_CANDIDATE */\n") == 0, "private source changed (rollback candidate)");
+    check(tw_submit("lr", "/reload-code", 0, seen, sizeof seen), "/reload-code typed again");
+    tw_keys("lr", "DRAFT-TWO", 1);
+    tw_wait_text("lr", "DRAFT-TWO", 1500, pane, sizeof pane);
+    check(wait_event("resumed", 1, 25000, "committed-warning"), "failed handoff rolled back (event resumed)");
+    load_events();
+    at = ev_at("handoff-failed", 1);
+    check(at >= 0 && ev_has(at, "\"freeze_sent\": true") && ev_count("committed") == 1,
+          "handoff-failed after FREEZE (freeze_sent true), nothing committed");
+    if (at >= 0 && ev_field(at, "reason", tmpv, sizeof tmpv)) printf("        reason: %s\n", tmpv);
+    at2 = ev_at("candidate-exited", 1);
+    check(at2 > at && ev_at("resumed", 1) > at2 && ev_int(at2, "pid") > 0 && ev_field(at2, "rc", tmpv, sizeof tmpv),
+          "the failed candidate is stopped (candidate-exited, rc) before RESUME");
+    at = ev_at("resumed", 1);
+    {
+        char rh[80] = "";
+        if (at >= 0) ev_field(at, "hash", rh, sizeof rh);
+        check(at >= 0 && tx_eq(rh, h2, 80) && ev_int(at, "pid") == pid_new && sy_signal(pid_new, 0) == 0,
+              "the resumed actor is the committed one, still running");
+    }
+    tw_keys("lr", "-RESUMED", 1);
+    check(tw_wait_text("lr", "DRAFT-TWO-RESUMED", 3000, pane, sizeof pane), "the resumed actor keeps its draft and takes keys");
+    printf("  note  rollback %ldms\n", sy_now_ms() - t0);
+
+    /* 5 exit: rc 0, terminal back as it was, lock free */
+    tw_keys("lr", "C-u", 0);
+    tw_sleep_ms(200);
+    tw_submit("lr", "/exit", 0, seen, sizeof seen);
+    rc = tw_rc("lr", 10000);
+    check(rc == 0, "/exit: the launcher exits 0");
+    load_events();
+    check(ev_count("terminal-restored") == 1 && ev_count("BLOCKED") == 0, "terminal-restored logged, no BLOCKED");
+    {
+        size_t bn = 0, an = 0;
+        char *b = cx_read(before, &bn), *a = cx_read(after, &an);
+        check(b && a && bn > 10 && bn == an && tx_same(b, (long)bn, a, (long)an), "stty -g after the launcher equals before");
+        if (b) tw_free(b);
+        if (a) tw_free(a);
+    }
+    check(lock_free(sess), "the supervisor lock is free after exit");
+    {
+        int alive = 0, total = ev_count("spawn");
+        for (k = 1; k <= total; k++) { int p = ev_int(ev_at("spawn", k), "pid"); if (p > 0 && sy_signal(p, 0) != -ESRCH) alive++; }
+        check(total == 3 && alive == 0, "three actors were spawned and none is left");
+    }
+    if (fails) {
+        tw_capture("lr", pane, sizeof pane);
+        printf("---- pane ----\n%s\n---- events ----\n%s", pane, evbuf);
+    }
+    tw_close();
+    printf("  note  total %ldms\n", sy_now_ms() - t0);
+    if (fails) { printf("reload_launcher_run: FAIL (%d)\n", fails); return 1; }
+    printf("%s\n", PASSLINE);
+    return 0;
+}

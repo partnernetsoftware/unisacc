@@ -1,50 +1,125 @@
 #pragma unisa use reload_candidate
 #pragma unisa use reload_io
 #pragma unisa use json
+#pragma unisa use sys.posix
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use sys.net
 
-/* reload_launcher.cx -- C port of reload_launcher.py (same CLI and exit codes).
+/* reload_launcher.cx -- port of reload_launcher.py (archive/reference-py/apps/csih/),
+ * same CLI, exit codes and launcher-events.jsonl lines.
  * Stable CTTY supervisor; trusted private candidates, native actors own user input.
  *
  * CLI:
  *   reload_launcher run SOURCE_APP COMPILER PRIVATE_CANDIDATE_ROOT PRIVATE_SESSION_DIR SESSION [VERIFIED_INITIAL_DIR]
- *   errors: stderr "reload launcher: CAUSE", rc 1.
+ *   errors: stderr "reload launcher: CAUSE", rc 1. Otherwise the active actor's exit status.
  *
+ * What run() does, as the Python does it:
+ *   - supervisor flock (supervisor.lock, owned regular 0600) is taken before anything
+ *     else, then launcher-events.jsonl (O_APPEND, 0600);
+ *   - stdin and stdout must be the controlling terminal and this process must be its
+ *     foreground group (sy_tcgetpgrp(0) == getpgid(0));
+ *   - the terminal modes are saved, and put back (TCSAFLUSH) on every exit path, then
+ *     event terminal-restored;
+ *   - the initial candidate is VERIFIED_INITIAL_DIR (verified) or a build;
+ *   - each actor is the candidate binary in agent-managed / standby-managed mode,
+ *     started in THIS foreground group (sy_spawn_inherit) with one end of a socketpair
+ *     as its control fd; the candidate is verified again right before the spawn;
+ *   - a REQUEST from the active actor starts a build: a forked child that leads its own
+ *     session (sy_fork_session) and runs reload_candidate build(); after 55s its group is
+ *     killed (sy_killpg) and build-failed is logged;
+ *   - a finished build is handed off: spawn standby (READY), FREEZE/FROZEN and
+ *     RELEASE/RELEASED on the old actor, COMMIT/ACK and ACTIVATE on the new, RETIRE
+ *     the old. A failure before ACTIVATE stops the new actor and, once FREEZE was sent
+ *     (and not answered REJECT), sends RESUME and requires RESUMED; an unconfirmed resume
+ *     is BLOCKED. A failure after ACTIVATE is committed-warning, never a rollback;
+ *   - cleanup kills a running build, stops every actor, restores the terminal and closes
+ *     the host fds; a cleanup failure with no other error is "cleanup unconfirmed: ...".
  *
- * STATUS
- *   ported : CLI, Launcher constructor (absolute paths, trusted root/session dir,
- *            session regex, supervisor flock, launcher-events.jsonl O_APPEND 0600),
- *            run() preamble (lock ownership, isatty(0)/isatty(1) foreground TTY refusal).
- *   BLOCKED: foreground pgid check needs tcgetpgrp (missing in unisacc 0.0.39).
- *            Actor control channel needs socketpair (missing); actor spawn needs
- *            Popen pass_fds; build/kill needs killpg, setsid (missing); select on the
- *            actor socket and the handoff state machine depend on those.
- *            Run path with a TTY therefore stops with a BLOCKED error (rc 1).
- *   TODO   : event() JSON writer and the event callers (spawn, build, handoff) are
- *            unported: they are only reached after the blocked symbols above.
- *   DEVIATION: a missing root/session directory reports "cannot stat: PATH" (Python
- *            prints the OSError text).
+ * Errors: Python's exceptions are return values here (-1, with lr_msg and the kind:
+ * ValueError, OSError, EOFError, TimeoutError, Blocked). rc_guard from reload_io only
+ * wraps the reload_candidate calls that fail() (trusted, verify, build): it does not
+ * nest, so each guard is a leaf.
+ *
+ * DEVIATIONS (observable only in edge cases):
+ *   - the build is reload_candidate's build() run in a forked child, not a python3 child
+ *     process; its stdout is the same JSON the reload_candidate CLI prints;
+ *   - a child's status is reported Python-style (negative signal number) whenever it is
+ *     above 128: an actor exiting with code 130 is logged as rc -2;
+ *   - an actor whose exec fails is an OS error at spawn ("[Errno 2] ..."), as Popen's;
+ *   - a control frame that is not JSON reports the parser's own text;
+ *   - a missing root/session directory reports "cannot stat: PATH".
  */
 
-#define MODEBITS(m) ((m) & 07777)
+#define LR_MAX_ACTORS 64
+#define LR_QUEUE 32
+#define LR_MSG 2048
+
+enum { K_VALUE, K_OS, K_EOF, K_TIMEOUT, K_BLOCKED };
 
 static int lr_lock_fd = -1;
 static int lr_event_fd = -1;
+static char *lr_source, *lr_compiler, *lr_root, *lr_directory, *lr_sid, *lr_initial;
 
-static char *lr_source, *lr_compiler, *lr_root, *lr_directory, *lr_sid;
+/* ---- errors ---- */
+static char lr_msg[LR_MSG];
+static int lr_kind;
 
-/* OSError-style text: "[Errno N] strerror: 'PATH'" */
-static void lr_oserr(const char *path) {
-    snprintf(rc_err_buf(), RC_ERR_CAP, "[Errno %d] %s: '%s'", errno, strerror(errno), path);
-    rc_fail_jump();
+static int lr_set(int kind, const char *msg) {
+    static char tmp[LR_MSG];
+    snprintf(tmp, sizeof tmp, "%s", msg);   /* MSG may be lr_msg itself */
+    snprintf(lr_msg, sizeof lr_msg, "%s", tmp);
+    lr_kind = kind;
+    return -1;
 }
 
-static void lr_close_host(void) {
-    if (lr_event_fd >= 0) { close(lr_event_fd); lr_event_fd = -1; }
-    if (lr_lock_fd >= 0) { close(lr_lock_fd); lr_lock_fd = -1; }
+/* strerror as Python prints it. The carried runtime's table has no text for
+ * several errnos this launcher meets (0.0.43: EAGAIN is "Unknown error"), so
+ * those are named here, by symbol (the numbers differ per target). */
+static const char *lr_strerror(int e) {
+    if (e == EAGAIN || e == EWOULDBLOCK) return "Resource temporarily unavailable";
+    if (e == ELOOP) return "Too many levels of symbolic links";
+    if (e == EISDIR) return "Is a directory";
+    if (e == ENOTDIR) return "Not a directory";
+    if (e == EPIPE) return "Broken pipe";
+    if (e == ECONNRESET) return "Connection reset by peer";
+    if (e == EINTR) return "Interrupted system call";
+    if (e == ECHILD) return "No child processes";
+    if (e == ESRCH) return "No such process";
+    if (e == EMFILE) return "Too many open files";
+    if (e == ENOEXEC) return "Exec format error";
+    return strerror(e);
 }
 
-static int lr_valid_sid(const char *s) {
-    size_t i, n = strlen(s);
+/* OSError-style text: "[Errno N] strerror: 'PATH'" (PATH may be 0). */
+static int lr_oserr(int e, const char *path) {
+    char m[LR_MSG];
+    if (path) snprintf(m, sizeof m, "[Errno %d] %s: '%s'", e, lr_strerror(e), path);
+    else snprintf(m, sizeof m, "[Errno %d] %s", e, lr_strerror(e));
+    return lr_set(K_OS, m);
+}
+
+#define TRY(x) do { if ((x) < 0) return -1; } while (0)
+
+/* ---- small strings (no libc string calls in this upper layer) ---- */
+static int lr_len(const char *s) { int n = 0; while (s[n]) n++; return n; }
+static int lr_eq(const char *a, const char *b) {
+    while (*a && *a == *b) { a++; b++; }
+    return *a == *b;
+}
+static int lr_has(const char *hay, const char *needle) {
+    int i, j;
+    for (i = 0; hay[i]; i++) {
+        for (j = 0; needle[j] && hay[i + j] == needle[j]; j++) {}
+        if (!needle[j]) return 1;
+    }
+    return !needle[0];
+}
+static void lr_cpy(char *dst, int cap, const char *src) { snprintf(dst, (size_t)cap, "%s", src); }
+
+static int lr_valid_id(const char *s) {
+    int i, n = lr_len(s);
     if (n < 1 || n > 64) return 0;
     for (i = 0; i < n; i++) {
         unsigned char c = (unsigned char)s[i];
@@ -54,78 +129,628 @@ static int lr_valid_sid(const char *s) {
     }
     return 1;
 }
+static int lr_valid_hash(const char *s) {
+    int i;
+    for (i = 0; i < 64; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return 0;
+    }
+    return s[64] == 0;
+}
+
+/* sy_wait status as Python's returncode: a death by signal N is -N. */
+static int lr_pyrc(int status) { return status > 128 ? -(status - 128) : status; }
+
+/* ---- reload_candidate calls, each under its own (leaf) rc_guard ---- */
+static Result lr_vres;
+static const char *lr_varg;
+static void lr_verify_body(void *ud) { (void)ud; lr_vres = verify(lr_varg); }
+static int lr_verify(const char *dir, Result *out) {
+    lr_varg = dir;
+    if (rc_guard(lr_verify_body, 0)) return lr_set(K_VALUE, rc_err_buf());
+    *out = lr_vres;
+    return 0;
+}
+
+/* ---- host fds ---- */
+static int lr_close_host(void) {
+    int err = 0, r;
+    if (lr_event_fd >= 0) { r = sy_close(lr_event_fd); lr_event_fd = -1; if (r < 0 && !err) err = -r; }
+    if (lr_lock_fd >= 0) { r = sy_close(lr_lock_fd); lr_lock_fd = -1; if (r < 0 && !err) err = -r; }
+    return err;
+}
+
+/* ---- events: json.dumps(dict(event=NAME, **fields), sort_keys=True) + "\n";
+ * every caller adds its fields in sorted key order ("event" always sorts first) ---- */
+static Buf lr_ev;
+static void ev_begin(const char *name) { lr_ev.n = 0; bs(&lr_ev, "{\"event\": "); bjs(&lr_ev, name); }
+static void ev_key(const char *k) { bs(&lr_ev, ", \""); bs(&lr_ev, k); bs(&lr_ev, "\": "); }
+static void ev_str(const char *k, const char *v) { ev_key(k); bjs(&lr_ev, v); }
+static void ev_int(const char *k, long v) { char t[32]; snprintf(t, sizeof t, "%ld", v); ev_key(k); bs(&lr_ev, t); }
+static void ev_bool(const char *k, int v) { ev_key(k); bs(&lr_ev, v ? "true" : "false"); }
+static int ev_end(void) {
+    int r;
+    bs(&lr_ev, "}\n");
+    r = sy_write_all(lr_event_fd, lr_ev.p, (long)lr_ev.n);
+    return r < 0 ? lr_oserr(-r, 0) : 0;
+}
+static int ev_plain(const char *name) { ev_begin(name); return ev_end(); }
+static int ev_reason(const char *name, const char *reason) { ev_begin(name); ev_str("reason", reason); return ev_end(); }
+
+/* ---- actors ---- */
+typedef struct { char session[65], handoff[65], hash[65]; } Ident;
+typedef struct { char op[16]; Ident id; } Msg;
+typedef struct {
+    Ident id;
+    int sock, pid, exited, status;
+    char buf[1024 + 4096];
+    int used;
+    Msg q[LR_QUEUE];
+    int qh, qn;
+} Actor;
+static Actor lr_actors[LR_MAX_ACTORS];
+static int lr_nactors;
+static Actor *lr_active;
+
+static int actor_alive(Actor *a) {
+    int r;
+    if (a->exited) return 0;
+    r = sy_wait(a->pid, 1);
+    if (r == -EAGAIN) return 1;
+    a->exited = 1;
+    a->status = r;
+    return 0;
+}
+
+/* Wait up to MS for A to exit. 1 once it has. */
+static int actor_reap(Actor *a, long ms) {
+    long end = sy_now_ms() + ms;
+    while (actor_alive(a)) {
+        if (sy_now_ms() >= end) return 0;
+        sy_sleep_ms(20);
+    }
+    return 1;
+}
+
+static int actor_close(Actor *a) {
+    int r;
+    if (a->sock < 0) return 0;
+    r = sy_close(a->sock);
+    a->sock = -1;
+    return r < 0 ? lr_oserr(-r, 0) : 0;
+}
+
+static int lr_event_id(const char *name, const Ident *id, int pid) {
+    ev_begin(name);
+    ev_str("handoff", id->handoff);
+    ev_str("hash", id->hash);
+    ev_int("pid", pid);
+    ev_str("session", id->session);
+    return ev_end();
+}
+
+/* Actor.send: {"op":OP,"session":..,"handoff":..,"hash":..}\n with IDENTITY (default A's own). */
+static int actor_send(Actor *a, const char *op, const Ident *id) {
+    static Buf b;
+    int r;
+    if (!id) id = &a->id;
+    b.n = 0;
+    bs(&b, "{\"op\":"); bjs(&b, op);
+    bs(&b, ",\"session\":"); bjs(&b, id->session);
+    bs(&b, ",\"handoff\":"); bjs(&b, id->handoff);
+    bs(&b, ",\"hash\":"); bjs(&b, id->hash);
+    bs(&b, "}\n");
+    if (a->sock < 0) return lr_oserr(EBADF, 0);
+    r = sy_send_all(a->sock, b.p, (long)b.n);
+    if (r == -EAGAIN || r == -EWOULDBLOCK) return lr_set(K_OS, "partial control send");
+    return r < 0 ? lr_oserr(-r, 0) : 0;
+}
+
+/* One control line: exactly {op, session, handoff, hash}, all strings, no NUL. */
+static int actor_line(Actor *a, const char *line, int len) {
+    static const char *ops[] = {"ACK", "READY", "REQUEST", "REJECT", "FROZEN", "RELEASED", "BLOCKED", "RESUMED", 0};
+    static const char *keys[] = {"op", "session", "handoff", "hash"};
+    char why[256], m[400];
+    const char *bad = 0;
+    jvalue *root, *v[4];
+    Msg *msg;
+    size_t i, j;
+    int k, known = 0;
+    if (len > 1023) return lr_set(K_VALUE, "oversize control line");
+    if (lr_has(line, "\\u0000")) return lr_set(K_VALUE, "control schema");
+    root = json_parse(line, (size_t)len, why, sizeof why);
+    if (!root) { snprintf(m, sizeof m, "control frame is not JSON: %s", why); return lr_set(K_VALUE, m); }
+    if (root->kind != J_OBJ || root->nkeys != 4) bad = "control schema";
+    for (i = 0; !bad && i < root->nkeys; i++)
+        for (j = 0; j < i; j++)
+            if (lr_eq(root->keys[i], root->keys[j])) bad = "control schema";
+    for (k = 0; !bad && k < 4; k++) {
+        v[k] = jget(root, keys[k]);
+        if (!v[k] || v[k]->kind != J_STR) bad = "control schema";
+    }
+    if (!bad) {
+        for (k = 0; ops[k]; k++) if (lr_eq(v[0]->s, ops[k])) known = 1;
+        if (!known) bad = "unknown actor op";
+    }
+    if (!bad && (!lr_valid_id(v[1]->s) || !lr_valid_id(v[2]->s) || !lr_valid_hash(v[3]->s)))
+        bad = "control identity syntax";
+    if (!bad && a->qn >= LR_QUEUE) bad = "control queue overflow";
+    if (bad) { jfree(root); return lr_set(K_VALUE, bad); }
+    msg = &a->q[(a->qh + a->qn) % LR_QUEUE];
+    lr_cpy(msg->op, sizeof msg->op, v[0]->s);
+    lr_cpy(msg->id.session, sizeof msg->id.session, v[1]->s);
+    lr_cpy(msg->id.handoff, sizeof msg->id.handoff, v[2]->s);
+    lr_cpy(msg->id.hash, sizeof msg->id.hash, v[3]->s);
+    a->qn++;
+    jfree(root);
+    return 0;
+}
+
+/* Actor.read: what is there now; EOF is an error (K_EOF). */
+static int actor_read(Actor *a) {
+    long n;
+    int i, start;
+    n = sy_recv(a->sock, a->buf + a->used, 4096);
+    if (n == -EAGAIN || n == -EWOULDBLOCK) return 0;
+    if (n < 0) return lr_oserr((int)-n, 0);
+    if (n == 0) return lr_set(K_EOF, "actor control EOF");
+    a->used += (int)n;
+    start = 0;
+    for (i = 0; i < a->used; i++) {
+        if (a->buf[i] != '\n') continue;
+        a->buf[i] = 0;
+        TRY(actor_line(a, a->buf + start, i - start));
+        start = i + 1;
+    }
+    for (i = start; i < a->used; i++) a->buf[i - start] = a->buf[i];
+    a->used -= start;
+    if (a->used > 1023) return lr_set(K_VALUE, "oversize control frame");
+    return 0;
+}
+
+/* Actor.stop: SIGTERM, 3s, SIGKILL, 3s, else Blocked. */
+static int actor_stop(Actor *a) {
+    if (actor_alive(a)) sy_signal(a->pid, 15);
+    if (!actor_reap(a, 3000)) {
+        sy_signal(a->pid, 9);
+        if (!actor_reap(a, 3000)) return lr_set(K_BLOCKED, "candidate exit not confirmed");
+    }
+    return actor_close(a);
+}
+
+/* Launcher.spawn (Actor.__init__ + the spawn event). */
+static int lr_spawn(const Result *info, const char *handoff, int standby, Actor **out) {
+    Result v;
+    Actor *a;
+    int sv[2], r, pid, k = 0, fl;
+    char fdtext[16], *argv[9];
+    TRY(lr_verify(info->candidate_dir, &v));   /* immediately before native spawn */
+    if (lr_nactors >= LR_MAX_ACTORS) return lr_set(K_VALUE, "too many actors");
+    a = &lr_actors[lr_nactors];
+    a->sock = -1; a->pid = -1; a->exited = 0; a->status = 0; a->used = 0; a->qh = 0; a->qn = 0;
+    lr_cpy(a->id.session, sizeof a->id.session, lr_sid);
+    lr_cpy(a->id.handoff, sizeof a->id.handoff, handoff);
+    lr_cpy(a->id.hash, sizeof a->id.hash, v.hash);
+    r = sy_socketpair(sv);
+    if (r < 0) return lr_oserr(-r, 0);
+    /* both ends close-on-exec here; sy_spawn_inherit keeps the child end for its actor only */
+    fl = fcntl(sv[0], F_GETFL, 0);
+    if (fcntl(sv[0], F_SETFD, FD_CLOEXEC) != 0 || fcntl(sv[1], F_SETFD, FD_CLOEXEC) != 0 ||
+        fl < 0 || fcntl(sv[0], F_SETFL, fl | O_NONBLOCK) != 0) {
+        sy_close(sv[0]); sy_close(sv[1]);
+        return lr_set(K_OS, "cannot set control socket flags");
+    }
+    snprintf(fdtext, sizeof fdtext, "%d", sv[1]);
+    argv[k++] = v.binary;
+    argv[k++] = standby ? "standby-managed" : "agent-managed";
+    argv[k++] = lr_directory;
+    argv[k++] = lr_sid;
+    if (standby) argv[k++] = (char *)handoff;
+    argv[k++] = v.hash;
+    argv[k++] = fdtext;
+    argv[k] = 0;
+    pid = sy_spawn_inherit(argv, sv[1]);   /* same CTTY foreground group */
+    sy_close(sv[1]);
+    if (pid < 0) { sy_close(sv[0]); return lr_oserr(-pid, v.binary); }
+    a->sock = sv[0];
+    a->pid = pid;
+    lr_nactors++;
+    *out = a;
+    ev_begin("spawn");
+    ev_str("handoff", a->id.handoff);
+    ev_str("hash", a->id.hash);
+    ev_int("pid", pid);
+    ev_str("session", a->id.session);
+    ev_bool("standby", standby);
+    return ev_end();
+}
+
+/* Launcher.wait: the next message of A must be OP with IDENTITY (default A's own), within 8s. */
+static int lr_wait(Actor *a, const char *op, const Ident *id) {
+    long deadline = sy_now_ms() + 8000;
+    char m[200];
+    if (!id) id = &a->id;
+    while (sy_now_ms() < deadline) {
+        if (a->qn) {
+            Msg *msg = &a->q[a->qh];
+            a->qh = (a->qh + 1) % LR_QUEUE;
+            a->qn--;
+            if (!lr_eq(msg->id.session, id->session) || !lr_eq(msg->id.handoff, id->handoff) || !lr_eq(msg->id.hash, id->hash))
+                return lr_set(K_VALUE, "stale actor identity");
+            if (!lr_eq(msg->op, op)) {
+                snprintf(m, sizeof m, "expected %s received %s", op, msg->op);
+                return lr_set(K_VALUE, m);
+            }
+            ev_begin("received");
+            ev_str("handoff", id->handoff);
+            ev_str("hash", id->hash);
+            ev_str("op", op);
+            ev_str("session", id->session);
+            return ev_end();
+        }
+        if (sy_readable(a->sock, 100) == 1) TRY(actor_read(a));
+        if (!actor_alive(a)) { snprintf(m, sizeof m, "actor exited before %s", op); return lr_set(K_EOF, m); }
+    }
+    snprintf(m, sizeof m, "waiting %s", op);
+    return lr_set(K_TIMEOUT, m);
+}
+
+/* ---- the build: reload_candidate build() in a child that leads its own session ---- */
+static int lr_build_pid = -1, lr_build_fd[2] = {-1, -1}, lr_build_exited, lr_build_status;
+static long lr_build_started;
+static Result lr_built;
+
+static void lr_build_body(void *ud) { (void)ud; lr_built = build(lr_source, lr_compiler, lr_root); }
+
+/* In the child: no host fd or actor socket goes on into the build; stdout is the
+ * reload_candidate CLI's JSON ({"error": ...} and 1 on failure). */
+static int lr_build_child(void *ud) {
+    Buf o = {0, 0, 0};
+    int i;
+    (void)ud;
+    sy_close(lr_event_fd);
+    sy_close(lr_lock_fd);
+    for (i = 0; i < lr_nactors; i++) if (lr_actors[i].sock >= 0) sy_close(lr_actors[i].sock);
+    if (rc_guard(lr_build_body, 0)) {
+        bs(&o, "{\"error\": ");
+        bjs(&o, rc_err_buf());
+        bs(&o, "}\n");
+        sy_write_all(1, o.p, (long)o.n);
+        return 1;
+    }
+    bs(&o, "{\"binary\": "); bjs(&o, lr_built.binary);
+    bs(&o, ", \"candidate_dir\": "); bjs(&o, lr_built.candidate_dir);
+    bs(&o, ", \"hash\": "); bjs(&o, lr_built.hash);
+    bs(&o, ", \"receipt\": "); bjs(&o, lr_built.receipt);
+    bs(&o, "}\n");
+    return sy_write_all(1, o.p, (long)o.n) == 0 ? 0 : 1;
+}
+
+static int lr_build_done(void) {
+    int r;
+    if (lr_build_exited) return 1;
+    r = sy_wait(lr_build_pid, 1);
+    if (r == -EAGAIN) return 0;
+    lr_build_exited = 1;
+    lr_build_status = r;
+    return 1;
+}
+
+static int lr_start_build(void) {
+    int pid;
+    if (lr_build_pid > 0) return ev_reason("request-rejected", "build already running");
+    pid = sy_fork_session(lr_build_child, 0, lr_build_fd);
+    if (pid < 0) return lr_oserr(-pid, 0);
+    lr_build_pid = pid;
+    lr_build_exited = 0;
+    lr_build_status = 0;
+    lr_build_started = sy_now_ms();
+    return ev_plain("build-started");
+}
+
+static Buf lr_bout, lr_berr;
+
+/* communicate(timeout): read both pipes to EOF and reap, within MS. 1 when done. */
+static int lr_build_drain(long ms) {
+    long end = sy_now_ms() + ms;
+    char tmp[4096];
+    int k;
+    for (;;) {
+        int open = 0;
+        for (k = 0; k < 2; k++) {
+            int fd = lr_build_fd[k];
+            if (fd < 0) continue;
+            while (sy_readable(fd, 0) == 1) {
+                long n = sy_read(fd, tmp, sizeof tmp);
+                if (n <= 0) { sy_close(fd); lr_build_fd[k] = -1; break; }
+                bn(k ? &lr_berr : &lr_bout, tmp, (size_t)n);
+            }
+            if (lr_build_fd[k] >= 0) open = 1;
+        }
+        if (!open && lr_build_done()) return 1;
+        if (sy_now_ms() >= end) return 0;
+        sy_sleep_ms(10);
+    }
+}
+
+/* Launcher.end_build: the verified candidate of a finished build; KILL cancels it. */
+static int lr_end_build(int kill, Result *out) {
+    char m[LR_MSG], why[256];
+    jvalue *root;
+    const char *dir;
+    int status, r;
+    lr_bout.n = 0; lr_berr.n = 0;
+    bs(&lr_bout, ""); bs(&lr_berr, "");
+    if (kill && !lr_build_done()) sy_killpg(lr_build_pid, 9);
+    if (!lr_build_drain(2000)) {
+        sy_killpg(lr_build_pid, 9);
+        if (!lr_build_drain(2000)) {
+            lr_build_pid = -1;
+            return lr_set(K_TIMEOUT, "build exit not confirmed after kill");
+        }
+    }
+    status = lr_build_status;
+    lr_build_pid = -1;
+    if (kill || status != 0) {
+        snprintf(m, sizeof m, "build failed rc=%d: %s %s", lr_pyrc(status), lr_bout.p, lr_berr.p);
+        return lr_set(K_VALUE, m);
+    }
+    root = json_parse(lr_bout.p, lr_bout.n, why, sizeof why);
+    dir = root ? jstr(jget(root, "candidate_dir")) : 0;
+    if (!dir) {
+        snprintf(m, sizeof m, "build output is not a candidate: %s", root ? "no candidate_dir" : why);
+        if (root) jfree(root);
+        return lr_set(K_VALUE, m);
+    }
+    r = lr_verify(dir, out);
+    jfree(root);
+    return r;
+}
+
+/* ---- Launcher.handoff ---- */
+static int lr_handoff_steps(Actor *old, Actor **new_, const Result *info, const Ident *id,
+                            int *freeze_sent, int *activated) {
+    TRY(lr_spawn(info, id->handoff, 1, new_));
+    TRY(lr_wait(*new_, "READY", 0));
+    *freeze_sent = 1;
+    TRY(actor_send(old, "FREEZE", id));
+    if (lr_wait(old, "FROZEN", id) < 0) {
+        if (lr_has(lr_msg, "received REJECT")) *freeze_sent = 0;
+        return -1;
+    }
+    TRY(actor_send(old, "RELEASE", id));
+    TRY(lr_wait(old, "RELEASED", id));
+    TRY(actor_send(*new_, "COMMIT", 0));
+    TRY(lr_wait(*new_, "ACK", 0));
+    TRY(actor_send(*new_, "ACTIVATE", 0));
+    *activated = 1;
+    lr_active = *new_;
+    TRY(lr_event_id("activated", &(*new_)->id, (*new_)->pid));
+    TRY(actor_send(old, "RETIRE", id));
+    if (!actor_reap(old, 3000) || actor_close(old) < 0) {
+        TRY(actor_stop(old));
+        ev_begin("retire-forced");
+        ev_int("pid", old->pid);
+        TRY(ev_end());
+    }
+    return lr_event_id("committed", &(*new_)->id, (*new_)->pid);
+}
+
+static int lr_handoff(const Result *info) {
+    Actor *old = lr_active, *new_ = 0;
+    Ident id;
+    char reason[LR_MSG], m[LR_MSG];
+    unsigned char raw[16];
+    int fd, i, freeze_sent = 0, activated = 0;
+    long n;
+    /* uuid.uuid4().hex: 32 hex digits of fresh randomness */
+    fd = sy_openat(sy_at_fdcwd(), "/dev/urandom", O_RDONLY | O_CLOEXEC, 0);
+    if (fd < 0) return lr_oserr(-fd, "/dev/urandom");
+    n = sy_read(fd, raw, sizeof raw);
+    sy_close(fd);
+    if (n != (long)sizeof raw) return lr_oserr(EIO, "/dev/urandom");
+    for (i = 0; i < 16; i++) snprintf(id.handoff + 2 * i, 3, "%02x", raw[i]);
+    lr_cpy(id.session, sizeof id.session, lr_sid);
+    lr_cpy(id.hash, sizeof id.hash, info->hash);
+    if (lr_handoff_steps(old, &new_, info, &id, &freeze_sent, &activated) == 0) return 0;
+    lr_cpy(reason, sizeof reason, lr_msg);
+    if (activated) {
+        /* New state already committed: never advertise rollback/reapply. */
+        ev_begin("committed-warning");
+        ev_str("handoff", new_->id.handoff);
+        ev_str("hash", new_->id.hash);
+        ev_str("reason", reason);
+        ev_str("session", new_->id.session);
+        TRY(ev_end());
+        return actor_stop(old);
+    }
+    ev_begin("handoff-failed");
+    ev_bool("freeze_sent", freeze_sent);
+    ev_str("reason", reason);
+    TRY(ev_end());
+    if (new_) {
+        TRY(actor_stop(new_));
+        ev_begin("candidate-exited");
+        ev_int("pid", new_->pid);
+        ev_int("rc", lr_pyrc(new_->status));
+        TRY(ev_end());
+    }
+    if (freeze_sent) {
+        TRY(actor_send(old, "RESUME", &id));
+        if (lr_wait(old, "RESUMED", &id) < 0) {
+            snprintf(m, sizeof m, "old paused; resume unconfirmed: %s", lr_msg);
+            return lr_set(K_BLOCKED, m);
+        }
+        TRY(lr_event_id("resumed", &old->id, old->pid));
+    }
+    return 0;
+}
+
+/* ---- Launcher.__init__ (under one rc_guard: trusted/absolute fail()) ---- */
+static int lr_argc;
+static char **lr_argv;
 
 /* acquire_supervisor_lock(directory): owned regular 0600 lock file, exclusive flock */
 static int lr_acquire_lock(const char *directory) {
     char *lockp = pjoin(directory, "supervisor.lock");
-    struct stat sb;
-    int fd, e;
+    sy_stat_t sb;
+    int fd, r;
     trusted(directory, 1, 1);
-    fd = open(lockp, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
-    if (fd < 0) lr_oserr(lockp);
-    if (fstat(fd, &sb) != 0 || !S_ISREG(sb.st_mode) || sb.st_uid != getuid() || MODEBITS(sb.st_mode) != 0600) {
-        close(fd);
+    fd = sy_openat(sy_at_fdcwd(), lockp, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0) { lr_oserr(-fd, lockp); fail(lr_msg); }
+    if (sy_fstat(fd, &sb) != 0 || sb.kind != 'f' || sb.uid != (long)getuid() || sb.mode != 0600) {
+        sy_close(fd);
         fail("supervisor lock not owned regular0600");
     }
-    if (reload_io_flock_exnb(fd) != 0) {
-        e = errno;
-        close(fd);
-        snprintf(rc_err_buf(), RC_ERR_CAP, "[Errno %d] %s", e, strerror(e));
-        rc_fail_jump();
+    r = sy_flock(fd, 2 | 4);
+    if (r < 0) {
+        sy_close(fd);
+        lr_oserr(-r, 0);
+        fail(lr_msg);
     }
     return fd;
 }
 
-/* Launcher.__init__ */
-static void lr_init(const char *source, const char *compiler, const char *root, const char *directory, const char *sid) {
+static void lr_init_body(void *ud) {
     char *evp;
-    lr_source = absolute(source);
-    lr_compiler = absolute(compiler);
-    lr_root = absolute(root);
-    lr_directory = absolute(directory);
-    lr_sid = xdup(sid);
+    (void)ud;
+    if ((lr_argc != 7 && lr_argc != 8) || !lr_eq(lr_argv[1], "run"))
+        fail("usage: run SOURCE_APP COMPILER PRIVATE_CANDIDATE_ROOT PRIVATE_SESSION_DIR SESSION [VERIFIED_INITIAL_DIR]");
+    lr_initial = lr_argc == 8 ? lr_argv[7] : 0;
+    lr_source = absolute(lr_argv[2]);
+    lr_compiler = absolute(lr_argv[3]);
+    lr_root = absolute(lr_argv[4]);
+    lr_directory = absolute(lr_argv[5]);
+    lr_sid = xdup(lr_argv[6]);
     trusted(lr_root, 1, 1);
     trusted(lr_directory, 1, 1);
-    if (!lr_valid_sid(sid)) fail("invalid session");
+    if (!lr_valid_id(lr_sid)) fail("invalid session");
+    /* Must precede event writes, TTY capture, builds and native spawn. */
     lr_lock_fd = lr_acquire_lock(lr_directory);
     evp = pjoin(lr_directory, "launcher-events.jsonl");
-    lr_event_fd = open(evp, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
-    if (lr_event_fd < 0) lr_oserr(evp);
+    lr_event_fd = sy_openat(sy_at_fdcwd(), evp, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (lr_event_fd < 0) { lr_oserr(-lr_event_fd, evp); lr_event_fd = -1; fail(lr_msg); }
     trusted(evp, 0, 1);
 }
 
-/* Launcher.run(): only the preamble is portable today (see STATUS). */
-static int lr_run(void) {
-    if (lr_lock_fd < 0) fail("supervisor ownership absent");
-    if (!isatty(0) || !isatty(1)) fail("launcher requires foreground controlling TTY");
-    /* BLOCKED: Python also requires os.tcgetpgrp(0) == os.getpgrp(); tcgetpgrp is missing in
-     * unisacc 0.0.39. The rest of run() (baseline tcgetattr, actor spawn over socketpair with
-     * pass_fds, build child with setsid/killpg, handoff) is unported for the same reason. */
-    fail("BLOCKED: tcgetpgrp/socketpair/killpg/setsid missing in unisacc 0.0.39 (TODO port run loop)");
-    return 1;
-}
-
-static int lr_argc;
-static char **lr_argv;
+/* ---- Launcher.run ---- */
+static sy_tty_t lr_baseline;
+static int lr_have_baseline;
 static int lr_rc;
 
-static void lr_guard_body(void *ud) {
-    (void)ud;
-    if ((lr_argc != 7 && lr_argc != 8) || strcmp(lr_argv[1], "run") != 0)
-        fail("usage: run SOURCE_APP COMPILER PRIVATE_CANDIDATE_ROOT PRIVATE_SESSION_DIR SESSION [VERIFIED_INITIAL_DIR]");
-    lr_init(lr_argv[2], lr_argv[3], lr_argv[4], lr_argv[5], lr_argv[6]);
-    lr_rc = lr_run();
+static int lr_run_body(void) {
+    Result info;
+    long end;
+    int r;
+    if (lr_lock_fd < 0) return lr_set(K_VALUE, "supervisor ownership absent");
+    if (!isatty(0) || !isatty(1) || sy_tcgetpgrp(0) != sy_getpgid(0))
+        return lr_set(K_VALUE, "launcher requires foreground controlling TTY");
+    r = sy_tty_get(0, &lr_baseline);
+    if (r < 0) return lr_oserr(-r, 0);
+    lr_have_baseline = 1;
+    if (lr_initial) TRY(lr_verify(lr_initial, &info));
+    else {
+        TRY(lr_start_build());
+        end = sy_now_ms() + 55000;
+        while (!lr_build_done()) {
+            if (sy_now_ms() >= end) return lr_set(K_TIMEOUT, "initial build timed out after 55 seconds");
+            sy_sleep_ms(50);
+        }
+        TRY(lr_end_build(0, &info));
+    }
+    TRY(lr_spawn(&info, "initial", 0, &lr_active));
+    TRY(lr_wait(lr_active, "ACK", 0));
+    TRY(actor_send(lr_active, "ACTIVATE", 0));
+    TRY(lr_event_id("activated", &lr_active->id, lr_active->pid));
+    while (actor_alive(lr_active)) {
+        if (sy_readable(lr_active->sock, 50) == 1) {
+            Actor *a = lr_active;
+            TRY(actor_read(a));
+            while (a->qn) {
+                Msg *msg = &a->q[a->qh];
+                a->qh = (a->qh + 1) % LR_QUEUE;
+                a->qn--;
+                if (!lr_eq(msg->op, "REQUEST") || !lr_eq(msg->id.session, a->id.session) ||
+                    !lr_eq(msg->id.handoff, a->id.handoff) || !lr_eq(msg->id.hash, a->id.hash))
+                    return lr_set(K_VALUE, "unexpected/stale active message");
+                TRY(lr_start_build());
+            }
+        }
+        if (lr_build_pid > 0) {
+            Result next;
+            if (sy_now_ms() - lr_build_started > 55000) {
+                if (lr_end_build(1, &next) < 0) TRY(ev_reason("build-failed", lr_msg));
+            } else if (lr_build_done()) {
+                if (lr_end_build(0, &next) < 0) { TRY(ev_reason("build-failed", lr_msg)); continue; }
+                TRY(lr_handoff(&next));
+            }
+        }
+    }
+    lr_rc = lr_active->status;
+    return 0;
+}
+
+/* run(): the body, then the Python finally: cancel a build, stop every actor, put the
+ * terminal back while still locked, close the host fds. */
+static int lr_run(void) {
+    static char primary_msg[LR_MSG], cleanup_msg[LR_MSG], m[LR_MSG];
+    int primary, primary_kind = K_VALUE, cleanup = 0, i, r;
+    Result unused;
+    primary = lr_run_body() < 0;
+    if (primary) {
+        primary_kind = lr_kind;
+        lr_cpy(primary_msg, sizeof primary_msg, lr_msg);
+        /* Native normal exit closes the stream just before waitpid observes exit. */
+        if (primary_kind == K_EOF && lr_active && actor_reap(lr_active, 3000)) {
+            primary = 0;
+            lr_rc = lr_active->status;
+        }
+    }
+    /* a cancelled build's ValueError is the expected end after confirmed group cleanup */
+    if (lr_build_pid > 0 && lr_end_build(1, &unused) < 0 && lr_kind != K_VALUE && !cleanup) {
+        cleanup = 1;
+        lr_cpy(cleanup_msg, sizeof cleanup_msg, lr_msg);
+    }
+    for (i = 0; i < lr_nactors; i++) {
+        Actor *a = &lr_actors[i];
+        if ((actor_alive(a) ? actor_stop(a) : actor_close(a)) == 0) continue;
+        lr_cpy(m, sizeof m, lr_msg);
+        if (!cleanup) { cleanup = 1; lr_cpy(cleanup_msg, sizeof cleanup_msg, m); }
+        ev_reason("BLOCKED", m);
+    }
+    /* Even failed cleanup must attempt final TTY restoration while locked. */
+    if (lr_have_baseline) {
+        r = sy_tty_set(0, &lr_baseline, 1);
+        if (r < 0) {
+            if (!cleanup) { cleanup = 1; snprintf(cleanup_msg, sizeof cleanup_msg, "[Errno %d] %s", -r, lr_strerror(-r)); }
+        } else if (ev_plain("terminal-restored") < 0 && !cleanup) {
+            cleanup = 1;
+            lr_cpy(cleanup_msg, sizeof cleanup_msg, lr_msg);
+        }
+    }
+    r = lr_close_host();
+    if (r && !cleanup) { cleanup = 1; snprintf(cleanup_msg, sizeof cleanup_msg, "[Errno %d] %s", r, lr_strerror(r)); }
+    if (primary) return lr_set(primary_kind, primary_msg);
+    if (cleanup) {
+        snprintf(m, sizeof m, "cleanup unconfirmed: %s", cleanup_msg);
+        return lr_set(K_BLOCKED, m);
+    }
+    return 0;
 }
 
 int main(int argc, char **argv) {
     lr_argc = argc;
     lr_argv = argv;
     lr_rc = 0;
-    if (rc_guard(lr_guard_body, 0)) {
+    if (rc_guard(lr_init_body, 0)) {
         lr_close_host();
         fprintf(stderr, "reload launcher: %s\n", rc_err_buf());
         return 1;
     }
-    lr_close_host();
+    if (lr_run() < 0) {
+        lr_close_host();
+        fprintf(stderr, "reload launcher: %s\n", lr_msg);
+        return 1;
+    }
     return lr_rc;
 }
