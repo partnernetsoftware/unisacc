@@ -15,7 +15,12 @@
 
    `exec/**/*-manifest.tsv` 开头的 `#! base build/parsebase.py` 是历史元数据，manifest 本身仍是构造与测试的数据，留在原处。
 2. 18 网内核生成器 `python3 -m unisa emit-kernel`（`kernel/` 的生成者）及其实测闭包；`unisa/ckernel.py`、`unisa/gold.py`、`unisa/libneed.py` 还被 `tools/table-kernel-export.cx`、`tools/net-material.cx`、`tools/pp-gold-material.cx`、`tools/carried-header-export.cx` 以及 `tests/pp-constructed.cx`、`tests/pp-gold-controls.cx` 当作数据或身份输入读取。
-3. `release/` 发布工具链（未在本次范围）；`apps/`、`m4/`、`research/` 各属其域，未动。
+3. `release/`：2026-10-30 按调用链清理。
+   - **已归档：** 18 个 `.py`，连同只服务于它们、且引用已归档文件因而早已跑不起来的 `.sh`/`.cx`（macOS 打包、提交门禁、旧候选链、发布队列与预热、裁定台账报告）。
+   - **仍留 2 个，由 GitHub 手动发布 workflow 调用：**
+     - `release/tools/draftfetch.py`（`defender-scan.yml`）：经 HTTPS 调 GitHub API，从草稿 release 取回 `unisacc.com`。检出后的 CI 里还没有 `unisacc.com` 可以运行 `.cx`，CX 侧也没有 TLS，所以无法移植。
+     - `release/apeinspect.py`（`windows-signing.yml`，windows-2025 runner）：那条 workflow 自己还内联了大段 Python；被检查的正是待签名的 `unisacc.com`，用它自己运行 `.cx` 来检查既是循环依赖，本地也无法验证。
+   - `apps/`、`m4/` 各属其域，未动。
 4. `exec/c/buildcompiler.sh` 仍是 Makefile 的构造入口，留在原处；其中 `python3 -m unisa ape` 回退分支已不可用。
 
 闭包由审计钩子在仓外副本实跑，并在删去归档文件后反复重跑补回缺件（补回 `exec/build/graph.py`、`exec/build/procs.py`），直到输出与归档前一致；依据是 `exec/facts/export.py --check` 与 `python3 -m unisa emit-kernel` 得到。
@@ -325,3 +330,4 @@
 - release/tools/queuestart.sh
 - release/tools/stagelog.py
 - release/tools/warmup.sh
+- release/tools/rulingwait.py
