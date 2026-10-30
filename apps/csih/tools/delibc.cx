@@ -1,3 +1,4 @@
+#pragma unisa use sys.io
 #pragma unisa use text.text
 #pragma unisa use text.fmt
 /*
@@ -68,10 +69,10 @@ static int one(const char *path) {
     long i = 0, o = 0, len = (long)n;
     int cnt[NREN], k, total = 0;
     for (k = 0; k < NREN; k++) cnt[k] = 0;
-    if (!s) { printf("delibc: cannot read %s\n", path); return 1; }
+    if (!s) { sy_printf("delibc: cannot read %s\n", path); return 1; }
     while (i < len) {
         char c = s[i];
-        if (o + 64 >= (long)sizeof out) { printf("delibc: %s too large\n", path); return 1; }
+        if (o + 64 >= (long)sizeof out) { sy_printf("delibc: %s too large\n", path); return 1; }
         if (c == '/' && i + 1 < len && s[i + 1] == '*') {            /* block comment */
             long e = tx_find(s + i + 2, len - i - 2, "*/", 2);
             long stop = e < 0 ? len : i + 2 + e + 2;
@@ -92,6 +93,38 @@ static int one(const char *path) {
             continue;
         }
         if (!ident(c) || (i > 0 && (ident(s[i - 1]) || s[i - 1] == '.' || s[i - 1] == '>'))) { out[o++] = s[i++]; continue; }
+        /* fputs(X, stdout) / fputs(X, stderr): sy_printf("%s", X) / sy_eprintf("%s", X)
+           (the same stdio stream underneath, so the order of output is kept). X is
+           copied as it is; a second run renames calls inside it. */
+        if (tx_prefix(s + i, len - i, "fputs(", 6)) {
+            long j = i + 6, comma = -1, a, b;
+            int depth = 1;
+            while (j < len && depth > 0) {
+                char d = s[j];
+                if (d == '"' || d == '\'') { j++; while (j < len && s[j] != d) { if (s[j] == '\\') j++; j++; } j++; continue; }
+                if (d == '(') depth++;
+                else if (d == ')') { if (--depth == 0) break; }
+                else if (d == ',' && depth == 1) comma = j;
+                j++;
+            }
+            if (j < len && comma > 0) {
+                for (a = comma + 1; a < j && (s[a] == ' ' || s[a] == '\t'); a++) {}
+                for (b = j; b > a && (s[b - 1] == ' ' || s[b - 1] == '\t'); b--) {}
+                if ((b - a == 6 && (tx_same(s + a, 6, "stdout", 6) || tx_same(s + a, 6, "stderr", 6)))) {
+                    const char *to = s[a + 3] == 'o' ? "sy_printf(\"%s\", " : "sy_eprintf(\"%s\", ";
+                    long tl = tx_len(to, 32);
+                    if (o + tl + (comma - i - 6) + 2 >= (long)sizeof out) { sy_printf("delibc: %s too large\n", path); return 1; }
+                    tx_copy(out + o, (long)sizeof out - o, to, tl);
+                    o += tl;
+                    tx_copy(out + o, (long)sizeof out - o, s + i + 6, comma - i - 6);
+                    o += comma - i - 6;
+                    out[o++] = ')';
+                    i = j + 1;
+                    total++;
+                    continue;
+                }
+            }
+        }
         for (k = 0; k < NREN; k++) {
             long fl = tx_len(REN[k].from, 64);
             if (no_zstr && tx_prefix(REN[k].to, tx_len(REN[k].to, 64), "zs_", 3)) continue;
@@ -107,10 +140,10 @@ static int one(const char *path) {
             total++;
         }
     }
-    if (total && cx_write(path, out, (size_t)o) != 0) { printf("delibc: cannot write %s\n", path); return 1; }
-    printf("%s\t%d", path, total);
-    for (k = 0; k < NREN; k++) if (cnt[k]) printf("\t%s%d", REN[k].from, cnt[k]);
-    printf("\n");
+    if (total && cx_write(path, out, (size_t)o) != 0) { sy_printf("delibc: cannot write %s\n", path); return 1; }
+    sy_printf("%s\t%d", path, total);
+    for (k = 0; k < NREN; k++) if (cnt[k]) sy_printf("\t%s%d", REN[k].from, cnt[k]);
+    sy_printf("\n");
     return 0;
 }
 
@@ -151,14 +184,45 @@ static const char *need_use(int k) {
     return tx_eq(NEED[k].use, "#pragma unisa use zstr\n", 64) ? zstr_use : NEED[k].use;
 }
 
+/* S with every comment and string/character literal blanked to spaces (newlines
+   kept): the code the use pass looks at, so a call name or a pragma written in a
+   comment or a literal (delibc's own tables) is not taken for code */
+static char code[1 << 22];
+static void blank(const char *s, long len) {
+    long i = 0;
+    while (i < len) {
+        char c = s[i];
+        if (c == '/' && i + 1 < len && s[i + 1] == '*') {
+            long e = tx_find(s + i + 2, len - i - 2, "*/", 2), stop = e < 0 ? len : i + 2 + e + 2;
+            for (; i < stop; i++) code[i] = s[i] == '\n' ? '\n' : ' ';
+            continue;
+        }
+        if (c == '/' && i + 1 < len && s[i + 1] == '/') { while (i < len && s[i] != '\n') code[i++] = ' '; continue; }
+        if (c == '"' || c == '\'') {
+            code[i++] = ' ';
+            while (i < len && s[i] != c) {
+                if (s[i] == '\\' && i + 1 < len) code[i++] = ' ';
+                code[i] = s[i] == '\n' ? '\n' : ' ';
+                i++;
+            }
+            if (i < len) code[i++] = ' ';
+            continue;
+        }
+        code[i] = c;
+        i++;
+    }
+}
+
 static int uses(const char *path) {
     size_t n = 0;
     char *s = cx_read(path, &n);
     long len = (long)n, m, e;
     int k, j, added = 0, have;
-    if (!s) { printf("delibc: cannot read %s\n", path); return 1; }
-    have = count_uses(s, len);
-    m = tx_find(s, len, "#pragma unisa module ", 21);
+    if (!s) { sy_printf("delibc: cannot read %s\n", path); return 1; }
+    if (len >= (long)sizeof code) { sy_printf("delibc: %s too large\n", path); return 1; }
+    blank(s, len);
+    have = count_uses(code, len);
+    m = tx_find(code, len, "#pragma unisa module ", 21);
     e = m < 0 ? 0 : m + tx_chr(s + m, len - m, '\n') + 1;
     if (m < 0 && len > 2 && s[0] == '#' && s[1] == '!') e = tx_chr(s, len, '\n') + 1;   /* keep a shebang first */
     tx_copy(out, (long)sizeof out, s, e);
@@ -169,18 +233,19 @@ static int uses(const char *path) {
             const char *use = need_use(k);
             long ul = tx_len(use, 96);
             for (j = 0; j < NCALL && NEED[k].calls[j]; j++)
-                if (tx_find(s, len, NEED[k].calls[j], tx_len(NEED[k].calls[j], 64)) >= 0) called = 1;
-            if (!called || tx_find(s, len, use, ul) >= 0 || tx_find(out + e, o - e, use, ul) >= 0) continue;
-            if (have + added >= 32) { printf("delibc: %s would pass 32 uses (needs %s)\n", path, use + 18); return 1; }
+                if (tx_find(code, len, NEED[k].calls[j], tx_len(NEED[k].calls[j], 64)) >= 0) called = 1;
+            /* the existing use lines are code; ul - 1 leaves out the newline (a last line may lack one) */
+            if (!called || tx_find(code, len, use, ul - 1) >= 0 || tx_find(out + e, o - e, use, ul) >= 0) continue;
+            if (have + added >= 32) { sy_printf("delibc: %s would pass 32 uses (needs %s)\n", path, use + 18); return 1; }
             tx_copy(out + o, (long)sizeof out - o, use, ul);
             o += ul;
             added++;
         }
         tx_copy(out + o, (long)sizeof out - o, s + e, len - e);
         o += len - e;
-        if (added && cx_write(path, out, (size_t)o) != 0) { printf("delibc: cannot write %s\n", path); return 1; }
+        if (added && cx_write(path, out, (size_t)o) != 0) { sy_printf("delibc: cannot write %s\n", path); return 1; }
     }
-    printf("%s\t%d uses added\n", path, added);
+    sy_printf("%s\t%d uses added\n", path, added);
     return 0;
 }
 
@@ -205,12 +270,12 @@ static int fio_one(const char *path) {
     char *s = cx_read(path, &n);
     long i = 0, o = 0, len = (long)n;
     int k, total = 0;
-    if (!s) { printf("delibc: cannot read %s\n", path); return 1; }
+    if (!s) { sy_printf("delibc: cannot read %s\n", path); return 1; }
     for (int pass = 0; pass < 2; pass++) {       /* 0: look for a stop word; 1: rewrite */
         i = 0; o = 0;
         while (i < len) {
             char c = s[i];
-            if (o + 64 >= (long)sizeof out) { printf("delibc: %s too large\n", path); return 1; }
+            if (o + 64 >= (long)sizeof out) { sy_printf("delibc: %s too large\n", path); return 1; }
             if (c == '/' && i + 1 < len && s[i + 1] == '*') {
                 long e = tx_find(s + i + 2, len - i - 2, "*/", 2), stop = e < 0 ? len : i + 2 + e + 2;
                 while (i < stop) out[o++] = s[i++];
@@ -233,7 +298,7 @@ static int fio_one(const char *path) {
                 if (pass == 0) {
                     for (k = 0; FIO_STOP[k]; k++)
                         if (tx_len(FIO_STOP[k], 16) == e - a && tx_same(s + a, e - a, FIO_STOP[k], e - a)) {
-                            printf("%s\t0\tleft alone: names %s\n", path, FIO_STOP[k]);
+                            sy_printf("%s\t0\tleft alone: names %s\n", path, FIO_STOP[k]);
                             return 0;
                         }
                     while (i < e) out[o++] = s[i++];
@@ -256,15 +321,15 @@ static int fio_one(const char *path) {
     if (total && tx_find(out, o, "#pragma unisa use fio\n", 22) < 0) {
         static char tmp[1 << 22];
         long m = tx_find(out, o, "#pragma unisa module ", 21), e = m < 0 ? 0 : m + tx_chr(out + m, o - m, '\n') + 1;
-        if (count_uses(out, o) >= 32) { printf("delibc: %s would pass 32 uses (needs fio)\n", path); return 1; }
+        if (count_uses(out, o) >= 32) { sy_printf("delibc: %s would pass 32 uses (needs fio)\n", path); return 1; }
         tx_copy(tmp, (long)sizeof tmp, out, e);
         tx_copy(tmp + e, (long)sizeof tmp - e, "#pragma unisa use fio\n", 22);
         tx_copy(tmp + e + 22, (long)sizeof tmp - e - 22, out + e, o - e);
         o += 22;
         tx_copy(out, (long)sizeof out, tmp, o);
     }
-    if (total && cx_write(path, out, (size_t)o) != 0) { printf("delibc: cannot write %s\n", path); return 1; }
-    printf("%s\t%d\tfio\n", path, total);
+    if (total && cx_write(path, out, (size_t)o) != 0) { sy_printf("delibc: cannot write %s\n", path); return 1; }
+    sy_printf("%s\t%d\tfio\n", path, total);
     return 0;
 }
 
@@ -275,7 +340,7 @@ int main(int argc, char **argv) {
         else if (tx_snprintf(zstr_use, sizeof zstr_use, "#pragma unisa use %s\n", argv[2]) >= (int)sizeof zstr_use) return 2;
         argc -= 2; argv += 2;
     }
-    if (argc < 2) { printf("usage: delibc.cx -- [--zstr MOD] [--uses | --fio] FILE...\n"); return 2; }
+    if (argc < 2) { sy_printf("usage: delibc.cx -- [--zstr MOD] [--uses | --fio] FILE...\n"); return 2; }
     if (tx_eq(argv[1], "--fio", 16)) {
         for (i = 2; i < argc; i++) bad |= fio_one(argv[i]);
         return bad;

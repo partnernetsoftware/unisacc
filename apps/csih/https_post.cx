@@ -1,4 +1,9 @@
 #pragma unisa module https_post
+#pragma unisa use fio
+#pragma unisa use text.fmt
+#pragma unisa use sys.io
+#pragma unisa use zstr
+#pragma unisa use sys.env
 #pragma unisa use sys.ffi
 /* libcurl through sys.ffi; stdio is the prelude's. No #include. */
 /* https_post.cx — standalone probe. net.cx calls libcurl itself as of unisacc 0.0.26.
@@ -60,45 +65,45 @@ int main(int argc, char **argv) {
     void *h, *hdr = 0;
     long code = 0;
     int rc;
-    FILE *in, *out;
+    fio_t *in, *out;
     size_t n = 0;
-    if (argc < 6) { fprintf(stderr, "usage: post|get URL ctype bodyfile outfile\n"); return 64; }
+    if (argc < 6) { sy_eprintf("usage: post|get URL ctype bodyfile outfile\n"); return 64; }
     method = argv[1]; url = argv[2]; ctype = argv[3]; bodypath = argv[4]; outpath = argv[5];
 #ifdef __APPLE__
     if (!sy_ffi_dlopen("/usr/lib/libcurl.4.dylib", 2 | 8)) return 2;
 #else
     if (!sy_ffi_dlopen("libcurl.so.4", 2 | 0x100)) return 2;
 #endif
-    if (!strcmp(method, "post")) {
-        in = fopen(bodypath, "r");
+    if (!zs_cmp(method, "post")) {
+        in = fio_open(bodypath, "r");
         if (!in) return 3;
-        n = fread(body, 1, sizeof body - 1, in);
-        fclose(in);
+        n = fio_read(body, 1, sizeof body - 1, in);
+        fio_close(in);
         body[n] = 0;
     }
     h = curl_easy_init();
     if (!h) return 2;
     hdr = curl_slist_append(0, "Accept: application/json");
     if (ctype && ctype[0]) {
-        snprintf(chead, sizeof chead, "Content-Type: %s", ctype);
+        tx_snprintf(chead, sizeof chead, "Content-Type: %s", ctype);
         hdr = curl_slist_append(hdr, chead);
     }
-    key = getenv("DEEPSEEK_API_KEY");
-    if (key && key[0] && strstr(url, "api.deepseek.com") && strlen(key) < 500) {
-        snprintf(auth, sizeof auth, "Authorization: Bearer %s", key);
+    key = sy_env("DEEPSEEK_API_KEY");
+    if (key && key[0] && zs_find(url, "api.deepseek.com") && zs_len(key) < 500) {
+        tx_snprintf(auth, sizeof auth, "Authorization: Bearer %s", key);
         hdr = curl_slist_append(hdr, auth);
     }
     curl_setopt(h, CURLOPT_URL, (void *)url);
     curl_setopt(h, CURLOPT_HTTPHEADER, hdr);
-    if (!strcmp(method, "post")) curl_setopt(h, CURLOPT_POSTFIELDS, body);
+    if (!zs_cmp(method, "post")) curl_setopt(h, CURLOPT_POSTFIELDS, body);
     rc = curl_easy_perform(h);
     flush_host_stdout();
     curl_getinfo(h, CURLINFO_RESPONSE_CODE, &code);
     curl_easy_cleanup(h);
     if (hdr) curl_slist_free_all(hdr);
-    out = fopen(outpath, "w");
+    out = fio_open(outpath, "w");
     if (!out) return 3;
-    fprintf(out, "%ld\n", code);
-    fclose(out);
+    fio_printf(out, "%ld\n", code);
+    fio_close(out);
     return rc == 0 ? 0 : 1;
 }
