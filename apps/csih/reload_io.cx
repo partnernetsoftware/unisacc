@@ -5,6 +5,8 @@
 #pragma unisa use sys.time
 #pragma unisa use sys.posix
 #pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
 #pragma unisa use text.text
 #pragma unisa use mem.bytes
 typedef struct {
@@ -102,19 +104,19 @@ int reload_io_save(const char *path, const char *text, size_t len, char *why, si
   sy_stat_t ds;
   if (sy_fstat(dfd, &ds) != 0) { rset(why, cap, "fstat 父目录失败"); sy_close(dfd); return -1; }
   if (ds.kind != 'd') { rset(why, cap, "父目录非普通目录"); sy_close(dfd); return -1; }
-  if (ds.uid != (long)getuid()) { rset(why, cap, "父目录非本人 owner"); sy_close(dfd); return -1; }
+  if (ds.uid != (long)sy_uid()) { rset(why, cap, "父目录非本人 owner"); sy_close(dfd); return -1; }
   if ((ds.mode & 0777) != 0700) { rset(why, cap, "父目录权限非 0700"); sy_close(dfd); return -1; }
   char tmp[4096];
   int tfd = -1;
   for (unsigned seq = 0; seq < 10000; seq++) {
-    if (cx_fmt(tmp, sizeof(tmp), "%s/.reload_io.%ld.%u.tmp", dir, (long)getpid(), seq)) { rset(why, cap, "临时路径过长"); sy_close(dfd); return -1; }
+    if (cx_fmt(tmp, sizeof(tmp), "%s/.reload_io.%ld.%u.tmp", dir, (long)sy_pid(), seq)) { rset(why, cap, "临时路径过长"); sy_close(dfd); return -1; }
     tfd = sy_openat(sy_at_fdcwd(), tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
     if (tfd >= 0) break;
     if (tfd != -EEXIST) { rset(why, cap, "创建临时文件失败"); sy_close(dfd); return -1; }
   }
   if (tfd < 0) { rset(why, cap, "临时文件冲突过多"); sy_close(dfd); return -1; }
   sy_stat_t ts;
-  if (sy_fstat(tfd, &ts) != 0 || ts.kind != 'f' || ts.uid != (long)getuid() || (ts.mode & 0777) != 0600) {
+  if (sy_fstat(tfd, &ts) != 0 || ts.kind != 'f' || ts.uid != (long)sy_uid() || (ts.mode & 0777) != 0600) {
     rset(why, cap, "临时文件权限/owner 异常"); sy_close(tfd); sy_unlink(tmp); sy_close(dfd); return -1;
   }
   /* sy_write_all resumes after EINTR and reports a 0-byte write as -EIO */
