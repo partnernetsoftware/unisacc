@@ -26,7 +26,7 @@
   - 标识符改名：`refactor.cx rename`。
   - 按行段替换：`tools/edit-span.cx`。
   - 改动影响了哪些测试批次、并行重跑它们：`tools/affected.cx`。
-  - 六个棘轮一次跑完：`tools/ratchets.cx`（cxraw、cxinclude、cxapis、cxtrunc、cxlibc、cxplatform）。
+  - 七个棘轮一次跑完：`tools/ratchets.cx`（cxraw、cxinclude、cxapis、cxtrunc、cxlibc、cxplatform、srcshape）。srcshape 让 src/ 只瘦不胖：每个文件的行数、最长函数、if 数和总行数都只降不升。
 - **cx 架构钢印（主人定，提交时由 `.git/hooks/pre-commit` → `tools/precommit.cx` 强制）**：不许写回传统 C 结构。
   - 上层不写 `#include`：用 `#pragma unisa use`。
   - 上层不直接调 libc/POSIX：printf、malloc、strcmp、open 等一律改用 L0 的 `sy_*`、`mm_*`、`tx_*`。

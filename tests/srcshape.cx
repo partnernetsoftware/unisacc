@@ -1,0 +1,127 @@
+/* srcshape.cx -- ratchet: the product source src/ only gets slimmer (plans/src-slim-2026-10-30.md).
+ *
+ *   sh ./unisacc.com tests/srcshape.cx -- --check | --write | --init      (from the repo root)
+ *
+ * Per tracked src/*.cx file (symlinks into cx/ are skipped; cx/ is measured elsewhere) this measures
+ *   lines  -- newline count,
+ *   maxfn  -- the longest top-level brace block in lines (a function body, or a static table),
+ *   ifs    -- `if` keywords outside comments, strings and character constants,
+ * and the sum of lines over all files.  tests/srcshape.tsv holds FILE<TAB>lines<TAB>maxfn<TAB>ifs rows and one
+ * TOTAL<TAB>lines row.  Every number only goes down.  A file without a row (a new file) must keep maxfn at or
+ * under 150, and its lines count toward TOTAL.  --check: rc 1 naming each file above its row.  --write: rewrite
+ * the baseline only when nothing is above it.  --init: write the first baseline; refused when the file exists. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use text.num
+#pragma unisa use mem.heap
+
+#define BASELINE "tests/srcshape.tsv"
+#define MAXROWS 256
+#define NEWFN 150
+
+typedef struct { char path[256]; long lines, maxfn, ifs; int used; } Row;
+static Row rows[MAXROWS]; static int nrows; static long base_total = -1;
+
+static int ident(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
+
+/* one pass: lines, the longest top-level {...} block, and `if` tokens, skipping comments, strings and chars */
+static void measure(const char *b, long n, long *lines, long *maxfn, long *ifs) {
+    long i = 0, line = 1, depth = 0, start = 0;
+    *lines = 0; *maxfn = 0; *ifs = 0;
+    while (i < n) {
+        char c = b[i];
+        if (c == '\n') { line++; (*lines)++; i++; continue; }
+        if (c == '/' && i + 1 < n && b[i + 1] == '/') { while (i < n && b[i] != '\n') i++; continue; }
+        if (c == '/' && i + 1 < n && b[i + 1] == '*') {
+            i += 2;
+            while (i < n && !(b[i] == '*' && i + 1 < n && b[i + 1] == '/')) { if (b[i] == '\n') { line++; (*lines)++; } i++; }
+            i += 2; continue;
+        }
+        if (c == '"' || c == '\'') {
+            i++;
+            while (i < n && b[i] != c && b[i] != '\n') { if (b[i] == '\\') i++; i++; }
+            i++; continue;
+        }
+        if (c == '{') { if (depth == 0) start = line; depth++; i++; continue; }
+        if (c == '}') { if (depth > 0 && --depth == 0 && line - start + 1 > *maxfn) *maxfn = line - start + 1; i++; continue; }
+        if (c == 'i' && i + 1 < n && b[i + 1] == 'f' && (i == 0 || !ident(b[i - 1])) && (i + 2 >= n || !ident(b[i + 2]))) { (*ifs)++; i += 2; continue; }
+        if (ident(c)) { while (i < n && ident(b[i])) i++; continue; }
+        i++;
+    }
+}
+
+static long num(const char *s, long n) { char t[32]; tx_copy(t, sizeof t, s, n < 31 ? n : 31); return tx_strtol(t, 0, 10); }
+
+static Row *find(const char *p, long pl) { int k; for (k = 0; k < nrows; k++) if (tx_same(rows[k].path, tx_len(rows[k].path, 256), p, pl)) return &rows[k]; return 0; }
+
+static void load(const char *b, long bn) {   /* FILE lines maxfn ifs, or TOTAL lines */
+    long at = 0;
+    while (at < bn) {
+        long e = tx_chr(b + at, bn - at, '\n'), l = e < 0 ? bn - at : e, f[4], nf = 0, q;
+        const char *s = b + at;
+        if (l > 0 && s[0] != '#') {
+            for (q = 0; q < l && nf < 4; q++) if (s[q] == '\t') f[nf++] = q;
+            if (nf == 1 && tx_prefix(s, l, "TOTAL\t", 6)) base_total = num(s + 6, l - 6);
+            else if (nf == 3 && nrows < MAXROWS && f[0] < 255) {
+                tx_copy(rows[nrows].path, sizeof rows[nrows].path, s, f[0]);
+                rows[nrows].lines = num(s + f[0] + 1, f[1] - f[0] - 1);
+                rows[nrows].maxfn = num(s + f[1] + 1, f[2] - f[1] - 1);
+                rows[nrows].ifs = num(s + f[2] + 1, l - f[2] - 1);
+                nrows++;
+            }
+        }
+        at += l + 1;
+    }
+}
+
+static int put(char **out, long *olen, long *ocap, const char *line) {
+    long ll = tx_len(line, 4096);
+    if (*olen + ll + 1 > *ocap) { char *g = mm_grow(*out, *ocap * 2 + ll); if (!g) return 1; *out = g; *ocap = *ocap * 2 + ll; }
+    tx_copy(*out + *olen, *ocap - *olen, line, ll); *olen += ll;
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    char *list = 0, *out; size_t ln = 0; long at, olen = 0, ocap = 1 << 14, total = 0; int files = 0, over = 0, under = 0, k, mode, rc;
+    if (argc != 2) { sy_eprintf("usage: srcshape.cx --check | --write | --init\n"); return 2; }
+    mode = tx_eqz(argv[1], "--check") ? 0 : tx_eqz(argv[1], "--write") ? 1 : tx_eqz(argv[1], "--init") ? 2 : -1;
+    if (mode < 0) { sy_eprintf("usage: srcshape.cx --check | --write | --init\n"); return 2; }
+    {   size_t bn; char *b = cx_read(BASELINE, &bn);
+        if (mode == 2 && b) { sy_eprintf("srcshape: --init refused, %s exists\n", BASELINE); return 2; }
+        if (mode != 2 && !b) { sy_eprintf("srcshape: cannot read %s (run --init once)\n", BASELINE); return 2; }
+        if (b) { load(b, (long)bn); mm_free(b); }
+        if (mode != 2 && base_total < 0) { sy_eprintf("srcshape: %s has no TOTAL row\n", BASELINE); return 2; }
+    }
+    rc = cx_run("git ls-files -s -z -- 'src/*.cx'", &list, &ln);
+    if (rc != 0 || !list) { sy_eprintf("srcshape: git ls-files failed\n"); return 2; }
+    out = mm_alloc(ocap); if (!out) return 2;
+    if (put(&out, &olen, &ocap, "# tests/srcshape.tsv -- tests/srcshape.cx: per src/*.cx file lines, longest top-level block, `if` count;\n"
+                                "# TOTAL is the lines of all of them.  Every number only goes down (plans/src-slim-2026-10-30.md).\n")) return 2;
+    for (at = 0; at < (long)ln; ) {
+        char *rec = list + at, *p, line[512]; long rl = tx_len(rec, (long)ln - at), tab = tx_chr(rec, rl, '\t'), pl, lines, maxfn, ifs; size_t sn; char *src; Row *r;
+        at += rl + 1;
+        if (tab < 0 || tx_prefix(rec, rl, "120000", 6)) continue;
+        p = rec + tab + 1; pl = rl - tab - 1;
+        src = cx_read(p, &sn); if (!src) { sy_eprintf("srcshape: cannot read %s\n", p); return 2; }
+        measure(src, (long)sn, &lines, &maxfn, &ifs); mm_free(src);
+        files++; total += lines;
+        r = find(p, pl); if (r) r->used = 1;
+        if (mode != 2 && (r ? (lines > r->lines || maxfn > r->maxfn || ifs > r->ifs) : maxfn > NEWFN)) {
+            if (r) sy_printf("srcshape: %s has lines=%ld maxfn=%ld ifs=%ld, baseline %ld %ld %ld\n", p, lines, maxfn, ifs, r->lines, r->maxfn, r->ifs);
+            else sy_printf("srcshape: %s has maxfn=%ld and no baseline row (a new file keeps maxfn <= %d)\n", p, maxfn, NEWFN);
+            over++;
+        } else if (r && (lines < r->lines || maxfn < r->maxfn || ifs < r->ifs)) under++;
+        if (cx_fmt(line, sizeof line, "%s\t%ld\t%ld\t%ld\n", p, lines, maxfn, ifs) || put(&out, &olen, &ocap, line)) return 2;
+    }
+    if (mode != 2 && total > base_total) { sy_printf("srcshape: src/ total lines %ld, baseline %ld\n", total, base_total); over++; }
+    {   char line[64]; if (cx_fmt(line, sizeof line, "TOTAL\t%ld\n", total) || put(&out, &olen, &ocap, line)) return 2; }
+    for (k = 0; k < nrows; k++) if (!rows[k].used) sy_printf("srcshape: stale row %s (--write drops it)\n", rows[k].path);
+    sy_printf("srcshape: %s: %d src files, %ld lines (baseline %ld); %d above baseline, %d below (--write ratchets down)\n",
+              over ? "FAIL" : "ok", files, total, base_total, over, under);
+    if (mode == 0) return over ? 1 : 0;
+    if (over) { sy_eprintf("srcshape: --write refused, %s unchanged\n", BASELINE); return 1; }
+    if (cx_write(BASELINE, out, (size_t)olen) != 0) { sy_eprintf("srcshape: cannot write %s\n", BASELINE); return 2; }
+    sy_printf("srcshape: wrote %s\n", BASELINE);
+    return 0;
+}
