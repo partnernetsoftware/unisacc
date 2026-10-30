@@ -1,0 +1,213 @@
+#!/usr/bin/env -S unisacc.com -run
+/* cxraw.cx -- layering ratchet (plans/cx-layers.md): per tracked .cx file outside the
+   bottom layer, direct calls of libc/POSIX memory, string, file, process and environment
+   functions (malloc, memcpy, strlen, open, read, fork, getenv, ... see raw_name below).
+   Upper layers are to reach those only through the bottom packages; the bottom layer is
+   the path prefixes listed in tests/cxraw-layers.tsv and is not counted.
+   Comments and string or character literals do not count.  The count only goes down;
+   a new upper-layer .cx with no row is held at 0.  The scanner self-check counts the
+   fixed sample below: malloc( in a comment and "memcpy(" in a string must not count,
+   the strlen call must, so the sample counts exactly 1.  This checker is itself a
+   test-layer tool with its own baseline row like any other upper-layer file.
+   usage, from the repo root:
+     sh ./unisacc.com -run tests/cxraw.cx -- --check
+     sh ./unisacc.com -run tests/cxraw.cx -- --write
+*/
+#define BASELINE "tests/cxraw.tsv"
+#define LAYERS "tests/cxraw-layers.tsv"
+#define MAXROWS 4096
+
+static const char cxraw_sample[] = "/* malloc( */ x = \"memcpy(\"; n = strlen (s); y = 'm';\n";
+static char *bottom[64];
+static int nbottom;
+
+typedef struct { char *path; int count; int used; } Row;
+static Row rows[MAXROWS];
+static int nrows;
+
+static int is_id(int c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || (c >= '0' && c <= '9');
+}
+static int is_start(int c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+}
+static int name_is(const char *s, size_t n, const char *w) {
+    size_t m = strlen(w);
+    return n == m && memcmp(s, w, m) == 0;
+}
+static const char *raw_names[] = {
+    "malloc", "calloc", "realloc", "free", "strdup", "strndup",
+    "memcpy", "memmove", "memset", "memcmp", "memchr",
+    "strlen", "strcpy", "strncpy", "strcat", "strncat", "strcmp", "strncmp", "strchr", "strrchr", "strstr",
+    "fopen", "fdopen", "fclose", "fread", "fwrite", "fseek", "ftell", "fgets", "fflush",
+    "open", "openat", "close", "read", "write", "lseek", "pread", "pwrite", "stat", "fstat", "lstat",
+    "mmap", "munmap", "mprotect", "unlink", "rename", "mkdir", "rmdir", "opendir", "readdir", "closedir",
+    "fork", "vfork", "execve", "execv", "execvp", "waitpid", "pipe", "dup", "dup2", "kill", "posix_spawn", "posix_spawnp",
+    "getenv", "setenv", "unsetenv", "clock_gettime", "nanosleep", 0};
+static int unbounded(const char *s, size_t n) {
+    int k;
+    for (k = 0; raw_names[k]; k++) if (name_is(s, n, raw_names[k])) return 1;
+    return 0;
+}
+static int load_layers(void) {
+    size_t n, i = 0, e; char *b = cx_read(LAYERS, &n);
+    if (!b) { fprintf(stderr, "cxraw: cannot read %s\n", LAYERS); return -1; }
+    while (i < n) {
+        e = i; while (e < n && b[e] != '\n') e++;
+        if (e < n) b[e] = 0;
+        if (e > i && b[i] != '#') {
+            if (nbottom == 64 || b[e - 1] != '/' && !strstr(b + i, ".cx")) { fprintf(stderr, "cxraw: %s: bad prefix '%s'\n", LAYERS, b + i); return -1; }
+            bottom[nbottom++] = b + i;
+        }
+        i = e + 1;
+    }
+    return 0;
+}
+static int is_bottom(const char *p) {
+    int k;
+    for (k = 0; k < nbottom; k++) if (!strncmp(p, bottom[k], strlen(bottom[k]))) return 1;
+    return 0;
+}
+
+static int count_calls(const char *b, size_t n) {
+    size_t i = 0;
+    int c = 0, mode = 0;
+    (void)cxraw_sample;
+    while (i < n) {
+        char ch = b[i];
+        if (mode == 1) {
+            if (ch == '\n') mode = 0;
+            i++;
+            continue;
+        }
+        if (mode == 2) {
+            if (ch == '*' && i + 1 < n && b[i + 1] == '/') { mode = 0; i += 2; continue; }
+            i++;
+            continue;
+        }
+        if (mode == 3 || mode == 4) {
+            if (ch == '\\' && i + 1 < n) { i += 2; continue; }
+            if ((mode == 3 && ch == '"') || (mode == 4 && ch == '\'')) mode = 0;
+            i++;
+            continue;
+        }
+        if (ch == '/' && i + 1 < n && b[i + 1] == '/') { mode = 1; i += 2; continue; }
+        if (ch == '/' && i + 1 < n && b[i + 1] == '*') { mode = 2; i += 2; continue; }
+        if (ch == '"') { mode = 3; i++; continue; }
+        if (ch == '\'') { mode = 4; i++; continue; }
+        if (is_start((unsigned char)ch) && (i == 0 || !is_id((unsigned char)b[i - 1]))) {
+            size_t a = i;
+            size_t j;
+            i++;
+            while (i < n && is_id((unsigned char)b[i])) i++;
+            j = i;
+            while (j < n && (b[j] == ' ' || b[j] == '\t' || b[j] == '\n' || b[j] == '\r' || b[j] == '\f' || b[j] == '\v')) j++;
+            if (j < n && b[j] == '(' && unbounded(b + a, i - a)) c++;
+            continue;
+        }
+        i++;
+    }
+    return c;
+}
+
+static int load_baseline(void) {
+    size_t n, i = 0, e, t; char *b = cx_read(BASELINE, &n);
+    if (!b) { fprintf(stderr, "cxraw: cannot read %s (run --write once)\n", BASELINE); return -1; }
+    while (i < n) {
+        e = i; while (e < n && b[e] != '\n') e++;
+        if (e < n) b[e] = 0;
+        if (e > i && b[e - 1] == '\r') b[e - 1] = 0;
+        if (e > i && b[i] != '#') {
+            char *line = b + i, *tab = strchr(line, '\t'), *end; long v;
+            if (!tab || nrows == MAXROWS) { fprintf(stderr, "cxraw: %s: bad row '%s'\n", BASELINE, line); free(b); return -1; }
+            *tab = 0; v = strtol(tab + 1, &end, 10);
+            if (end == tab + 1 || *end || v < 0) { fprintf(stderr, "cxraw: %s: bad count for %s\n", BASELINE, line); free(b); return -1; }
+            t = strlen(line) + 1; rows[nrows].path = malloc(t); memcpy(rows[nrows].path, line, t);
+            rows[nrows].count = (int)v; rows[nrows].used = 0; nrows++;
+        }
+        i = e + 1;
+    }
+    free(b); return 0;
+}
+
+static Row *find_row(const char *path) {
+    int k;
+    for (k = 0; k < nrows; k++) if (!strcmp(rows[k].path, path)) return &rows[k];
+    return 0;
+}
+
+static int append(char **buf, size_t *len, size_t *cap, const char *s) {
+    size_t n = strlen(s); char *t;
+    if (*len + n + 1 > *cap) {
+        *cap = (*len + n + 1) * 2; t = realloc(*buf, *cap);
+        if (!t) return -1;
+        *buf = t;
+    }
+    memcpy(*buf + *len, s, n + 1); *len += n; return 0;
+}
+
+int main(int argc, char **argv) {
+    char *list = 0, *cdup = 0, *p, *end, *out = 0, line[4200]; size_t ln = 0, cl = 0, olen = 0, ocap = 0, selfn = 0;
+    int check, files = 0, total = 0, over = 0, under = 0, base_total = 0, k, rc;
+    char *self;
+    if (argc != 2 || (strcmp(argv[1], "--check") && strcmp(argv[1], "--write"))) {
+        fprintf(stderr, "usage: cxraw.cx --check | --write   (from the repo root)\n"); return 2;
+    }
+    selfn = sizeof cxraw_sample - 1;
+    self = malloc(selfn);
+    if (self) memcpy(self, cxraw_sample, selfn);
+    if (!self || count_calls(self, selfn) != 1) {
+        fprintf(stderr, "cxraw: scanner self-check failed\n");
+        free(self);
+        return 2;
+    }
+    free(self);
+    check = !strcmp(argv[1], "--check");
+    if (load_layers() < 0) return 2;
+    rc = cx_run("git rev-parse --show-cdup", &cdup, &cl);
+    if (rc != 0 || !cdup || cl > 1) { fprintf(stderr, "cxraw: run from the repo root\n"); return 2; }
+    if (check && load_baseline() < 0) return 2;
+    rc = cx_run("git ls-files -z -- '*.cx' ':(exclude)archive/'", &list, &ln);   /* archive/ is reference-only */
+    if (rc != 0 || !list) { fprintf(stderr, "cxraw: git ls-files failed (rc %d)\n", rc); return 2; }
+    if (!check) {
+        append(&out, &olen, &ocap, "# tests/cxraw.tsv -- written by tests/cxraw.cx --write.\n");
+        append(&out, &olen, &ocap, "# Direct libc/POSIX calls in upper-layer .cx (bottom prefixes: tests/cxraw-layers.tsv).\n");
+        append(&out, &olen, &ocap, "# Rows only for counts above 0. Counts only go down (plans/cx-layers.md).\n");
+        append(&out, &olen, &ocap, "# path\tcalls\n");
+    }
+    for (p = list, end = list + ln; p < end; p += strlen(p) + 1) {
+        size_t n; char *src; int c; Row *r;
+        if (!*p || is_bottom(p)) continue;
+        src = cx_read(p, &n);
+        c = src ? count_calls(src, n) : 0;
+        free(src);
+        files++; total += c;
+        if (check) {
+            r = find_row(p);
+            if (r) r->used = 1;
+            if (c > (r ? r->count : 0)) {
+                if (r) printf("cxraw: %s has %d calls, baseline %d\n", p, c, r->count);
+                else printf("cxraw: %s has %d calls and no baseline row (a new .cx must have 0)\n", p, c);
+                over++;
+            } else if (r && c < r->count) under++;
+        } else if (c > 0) {
+            if (strlen(p) + 16 > sizeof line) { fprintf(stderr, "cxraw: path too long: %s\n", p); return 2; }
+            snprintf(line, sizeof line, "%s\t%d\n", p, c);
+            if (append(&out, &olen, &ocap, line) < 0) { fprintf(stderr, "cxraw: out of memory\n"); return 2; }
+        }
+    }
+    free(list); free(cdup);
+    if (!check) {
+        if (cx_write(BASELINE, out, olen) != 0) { fprintf(stderr, "cxraw: cannot write %s\n", BASELINE); return 2; }
+        free(out);
+        printf("cxraw: wrote %s: %d .cx files, %d calls\n", BASELINE, files, total);
+        return 0;
+    }
+    for (k = 0; k < nrows; k++) {
+        base_total += rows[k].count;
+        if (!rows[k].used) printf("cxraw: stale row %s (not a tracked .cx; --write drops it)\n", rows[k].path);
+    }
+    printf("cxraw: %s: %d .cx files, %d calls (baseline %d); %d above baseline, %d below (--write ratchets down)\n",
+           over ? "FAIL" : "ok", files, total, base_total, over, under);
+    return over ? 1 : 0;
+}
