@@ -2048,6 +2048,157 @@ static void pp_gen(Ob *o) {
     ob_z(o, "}\n");
 }
 
+/* Every .h under include/ (recursive), relative to ROOT, byte-sorted (pathlib rglob + sorted). */
+static char *ih_path[1024];
+static int ih_n;
+static int ih_take(const char *path, void *ctx) {
+    long n = tx_len(path, 4400), rl = tx_len(fg_root, 4096);
+    (void)ctx;
+    if (n > 2 && path[n - 2] == '.' && path[n - 1] == 'h') {
+        if (ih_n == 1024) fg_die("too many headers", 0);
+        ih_path[ih_n++] = ar_dup(fg_ar, path + rl + 1, n - rl - 1);
+    }
+    return 0;
+}
+static void ih_list(void) {
+    char dir[4400];
+    int i, j;
+    if (ih_n) return;
+    cx_fmt(dir, sizeof dir, "%s/include", fg_root);
+    if (cx_walk(dir, ih_take, 0)) fg_die("cannot walk", dir);
+    for (i = 1; i < ih_n; i++) { char *x = ih_path[i]; for (j = i - 1; j >= 0 && byte_less(x, ih_path[j]); j--) ih_path[j + 1] = ih_path[j]; ih_path[j + 1] = x; }
+}
+
+static int bidx(char **names, int nb, const char *nm) {
+    int q;
+    for (q = 0; q < nb; q++) if (tx_eq(names[q], nm, 256)) return q;
+    fg_die("closure name is not a carried body", nm);
+    return -1;
+}
+
+/* pp-autoinc-gen: autoinc library names, closure slots and header order (the closure from the native
+   seed/unisa_libneed.c `table`, header function names by front_pp's line rule). */
+static void pp_autoinc(Ob *o) {
+    static char *names[2048], *keyn[2048], **keyc[2048], *rootc[256], *hdr[128], *alln[2048];
+    static int keync[2048];
+    int nb = 0, nk = 0, nr = 0, nh = 0, i, j;
+    long NEEDB = fg_const("pp-layout", "NEEDB");
+    char *out;
+    size_t on;
+    {
+        char bound[4400], com[4400], src[4400], inc[4400];
+        char *argv[9];
+        int rc;
+        cx_fmt(bound, sizeof bound, "%s/tools/bound", fg_root); cx_fmt(com, sizeof com, "%s/unisacc.com", fg_root);
+        cx_fmt(src, sizeof src, "%s/seed/unisa_libneed.c", fg_root); cx_fmt(inc, sizeof inc, "%s/include", fg_root);
+        argv[0] = bound; argv[1] = "50"; argv[2] = "sh"; argv[3] = com; argv[4] = src; argv[5] = "--"; argv[6] = "table"; argv[7] = inc; argv[8] = 0;
+        rc = cx_runv_timeout(argv, 55, &out, &on);
+        if (rc != 0 || !out) fg_die("seed/unisa_libneed.c table failed", 0);
+    }
+    {
+        char *copy = ar_dup(fg_ar, out, (long)on), *p = copy, *end = copy + on;
+        while (p < end) {
+            long off = tx_chr(p, (long)(end - p), '\n');
+            char *cell[2100];
+            int c, k;
+            if (off < 0) off = (long)(end - p);
+            p[off] = 0;
+            for (c = 0, k = 0; p[k]; ) {          /* space-separated */
+                while (p[k] == ' ') p[k++] = 0;
+                if (!p[k]) break;
+                if (c == 2100) fg_die("libneed line too long", 0);
+                cell[c++] = p + k;
+                while (p[k] && p[k] != ' ') k++;
+            }
+            if (c && tx_eq(cell[0], "NAMES", 8)) for (k = 1; k < c; k++) names[nb++] = cell[k];
+            else if (c >= 2 && tx_eq(cell[0], "KEY", 4)) {
+                keyn[nk] = cell[1]; keync[nk] = c - 2;
+                keyc[nk] = ar_alloc(fg_ar, (long)sizeof(char *) * (c + 1));
+                for (k = 2; k < c; k++) keyc[nk][k - 2] = cell[k];
+                nk++;
+            } else if (c && tx_eq(cell[0], "ROOTS_CLOSURE", 16)) for (k = 1; k < c; k++) rootc[nr++] = cell[k];
+            p += off + 1;
+        }
+    }
+    ob_z(o, "=idclass\tjson\t[");
+    {   /* sorted(alpha | digit) */
+        static char *pk[8], *pv[8];
+        int np = fg_pairs("exec/facts/pp-bytes.tsv", pk, pv, 8), mark[256] = {0}, first = 1, c;
+        for (i = 0; i < np; i++) if (tx_eq(pk[i], "alpha", 8) || tx_eq(pk[i], "digit", 8)) {
+            char *s = pv[i], *e;
+            while (*s) {
+                long a, b;
+                while (*s && (*s < '0' || *s > '9')) s++;
+                if (!*s) break;
+                a = strtol(s, &e, 10); s = e;
+                while (*s && (*s < '0' || *s > '9')) s++;
+                b = strtol(s, &e, 10); s = e;
+                for (c = (int)a; c <= b && c < 256; c++) mark[c] = 1;
+            }
+        }
+        for (c = 0; c < 256; c++) if (mark[c]) { if (!first) ob_z(o, ", "); ob_int(o, c); first = 0; }
+    }
+    ob_z(o, "]\n=roots\tjson\t[");
+    for (i = 0; i < nr; i++) { if (i) ob_z(o, ", "); ob_z(o, "{\"offset\": "); ob_int(o, NEEDB + bidx(names, nb, rootc[i])); ob_z(o, "}"); }
+    ob_z(o, "]\n=keys\tjson\t[");
+    for (i = 0; i < nk; i++) {
+        if (i) ob_z(o, ", ");
+        ob_z(o, "{\"id\": "); ob_int(o, i); ob_z(o, ", \"end\": "); ob_int(o, i + 1);
+        ob_z(o, i + 1 == nk ? ", \"terminal\": true, \"name\": " : ", \"terminal\": false, \"name\": "); ob_str(o, keyn[i]);
+        ob_z(o, ", \"slots\": [");
+        for (j = 0; j < keync[i]; j++) { if (j) ob_z(o, ", "); ob_z(o, "{\"offset\": "); ob_int(o, NEEDB + bidx(names, nb, keyc[i][j])); ob_z(o, "}"); }
+        ob_z(o, "]}");
+    }
+    ob_z(o, "]\n=bodies\tjson\t[");
+    for (i = 0; i < nb; i++) {
+        char nm[300];
+        if (i) ob_z(o, ", ");
+        cx_fmt(nm, sizeof nm, "__UN_%s", names[i]);
+        ob_z(o, "{\"id\": "); ob_int(o, i); ob_z(o, ", \"end\": "); ob_int(o, i + 1);
+        ob_z(o, i + 1 == nb ? ", \"terminal\": true, \"slot\": " : ", \"terminal\": false, \"slot\": "); ob_int(o, NEEDB + i);
+        ob_z(o, ", \"name\": "); ob_str(o, nm); ob_z(o, "}");
+    }
+    ob_z(o, "]\n=lndef\tstr\t__UNISA_FTRIM_LIBC\n=headers\tjson\t[");
+    {
+        Lines A = fg_lines("exec/facts/pp-autoinc.tsv");
+        for (i = 1; i < A.n; i++) if (*A.l[i] && A.l[i][0] != '#') hdr[nh++] = A.l[i];
+        for (i = 0; i < nh; i++) {
+            char rel[512];
+            Lines H;
+            int na = 0, k;
+            cx_fmt(rel, sizeof rel, "include/%s", hdr[i]);
+            H = fg_lines(rel);
+            for (k = 0; k < H.n; k++) {           /* static ...NAME(...{  on one line */
+                char *ln = H.l[k];
+                long n = tx_len(ln, FG_CAP), par, e, s;
+                if (n <= 7 || !tx_prefix(ln, n, "static", 6)) continue;
+                par = tx_chr(ln, n, '(');
+                if (par < 0 || tx_chr(ln + par, n - par, '{') < 0) continue;
+                e = par;
+                while (e > 0 && (ln[e - 1] == ' ' || ln[e - 1] == '\t' || ln[e - 1] == '\r' || ln[e - 1] == '\f' || ln[e - 1] == '\v')) e--;
+                s = e;
+                while (s > 0 && ((ln[s - 1] >= 'a' && ln[s - 1] <= 'z') || (ln[s - 1] >= 'A' && ln[s - 1] <= 'Z') || (ln[s - 1] >= '0' && ln[s - 1] <= '9') || ln[s - 1] == '_')) s--;
+                if (s == e) continue;
+                if (tx_same(ln + s, e - s, "printf", 6)) continue;
+                alln[na++] = ar_dup(fg_ar, ln + s, e - s);
+            }
+            if (i) ob_z(o, ", ");
+            ob_z(o, "{\"id\": "); ob_int(o, i); ob_z(o, ", \"end\": "); ob_int(o, i + 1);
+            ob_z(o, i + 1 == nh ? ", \"terminal\": true, \"count\": " : ", \"terminal\": false, \"count\": "); ob_int(o, na);
+            ob_z(o, ", \"names\": [");
+            for (k = 0; k < na; k++) { if (k) ob_z(o, ", "); ob_z(o, "{\"id\": "); ob_int(o, k); ob_z(o, ", \"end\": "); ob_int(o, k + 1); ob_z(o, ", \"name\": "); ob_str(o, alln[k]); ob_z(o, "}"); }
+            ob_z(o, "]}");
+        }
+    }
+    ob_z(o, "]\n=emits\tjson\t[{\"special\": true, \"id\": "); ob_int(o, nh); ob_z(o, ", \"end\": "); ob_int(o, nh - 1);
+    ob_z(o, ", \"terminal\": false, \"header\": \"stdio.h\"}");
+    for (i = nh - 1; i >= 0; i--) {
+        ob_z(o, ", {\"special\": false, \"id\": "); ob_int(o, i); ob_z(o, ", \"end\": "); ob_int(o, i - 1);
+        ob_z(o, i == 0 ? ", \"terminal\": true, \"header\": " : ", \"terminal\": false, \"header\": "); ob_str(o, hdr[i]); ob_z(o, "}");
+    }
+    ob_z(o, "]\n");
+}
+
 static void enc_pe(Ob *o) { pe_fields(o, 0); }
 static void enc_pe_forward(Ob *o) { pe_fields(o, 1); }
 
@@ -2083,22 +2234,26 @@ static const Table fg_tables[] = {
                  "exec/lex/spelling.tsv", "exec/facts/lex-consts.tsv", "tools/facts-gen.cx", 0}, lex_gen},
     {"pp-gen", {"exec/facts/pp-targets.tsv", "exec/facts/pp-init.tsv", "exec/facts/pp-layout.tsv", "exec/facts/pp-escapes.tsv",
                 "exec/pp/operators.tsv", "exec/pp/predefines.tsv", "weights/gold/pp.tsv", "tools/facts-gen.cx", 0}, pp_gen},
+    {"pp-autoinc-gen", {"exec/facts/pp-bytes.tsv", "seed/unisa_libneed.c", "exec/facts/pp-autoinc.tsv", "exec/facts/pp-layout.tsv",
+                        "tools/facts-gen.cx", 0}, pp_autoinc},
     {0, {0}, 0}
 };
 
+static void fg_input(Ob *head, const char *rel) {
+    char path[4400], hex[65];
+    size_t n;
+    char *b;
+    cx_fmt(path, sizeof path, "%s/%s", fg_root, rel);
+    b = cx_read(path, &n);
+    if (!b) fg_die("cannot read input", path);
+    cx_sha256_hex(b, n, hex);
+    ob_z(head, "# input "); ob_z(head, rel); ob_z(head, " sha256:"); ob_put(head, hex, 16); ob_z(head, "\n");
+}
 static void fg_render(const Table *t, Ob *head, Ob *body) {
     int i;
     ob_z(head, "# exec/facts/"); ob_z(head, t->stem); ob_z(head, ".tsv: written by tools/facts-gen.cx, do not edit\n");
-    for (i = 0; t->inputs[i]; i++) {
-        char path[4400], hex[65];
-        size_t n;
-        char *b;
-        cx_fmt(path, sizeof path, "%s/%s", fg_root, t->inputs[i]);
-        b = cx_read(path, &n);
-        if (!b) fg_die("cannot read input", path);
-        cx_sha256_hex(b, n, hex);
-        ob_z(head, "# input "); ob_z(head, t->inputs[i]); ob_z(head, " sha256:"); ob_put(head, hex, 16); ob_z(head, "\n");
-    }
+    for (i = 0; t->inputs[i]; i++) fg_input(head, t->inputs[i]);
+    if (tx_eq(t->stem, "pp-autoinc-gen", 32)) { ih_list(); for (i = 0; i < ih_n; i++) fg_input(head, ih_path[i]); }   /* every .h under include/ */
     t->produce(body);
 }
 

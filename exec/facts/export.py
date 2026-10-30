@@ -309,71 +309,7 @@ def _gen2ns(tag):
     return SimpleNamespace(**locals())
 
 
-def _ppsrc():
-    """E2 source facts (was the module level of exec/pp/gen.py): layout names, byte classes, targets,
-    the gold pp.tsv directive vocabulary, predefines.tsv, operators.tsv, autoinc trigger names."""
-    import os, re
-    from types import SimpleNamespace
-    sys.path.insert(0, str(ROOT))
-    from unisa.tsvgold import load_table
-    from exec.facts.load import facts
-    E = SimpleNamespace(**{r["name"]: r["value"] for r in facts("pp-layout")})
-    E.TARGETS = tuple(r["os"] + "/" + r["arch"] for r in facts("pp-targets"))
-    by = {r["class"]: {c for a, b in r["ranges"] for c in range(a, b + 1)} for r in facts("pp-bytes")}
-    E.ID = by["alpha"] | by["digit"]
-    name, fields, heads, rows = load_table(str(ROOT / "weights/gold/pp.tsv"))
-    assert name == "pp" and [n for n, _ in fields] == ["dir", "defined"]
-    assert fields[1][1] == ("0", "1") and [n for n, _, _ in heads] == ["y"]
-    assert list(heads[0][1]) == ["take", "skip", "pop", "macro"]
-    E.DIRV = fields[0][1]
-    E.PPT = {(d, int(b)): labels["y"] for (d, b), labels in rows.items()}
-    path = ROOT / "exec/pp/predefines.tsv"
-    pre = {}
-    for line, text in enumerate(path.read_text(encoding="utf-8").splitlines(True), 1):
-        if text.startswith("#") or not text.strip():
-            continue
-        f = text.rstrip("\n").split("\t")
-        key, names = tuple(f[:2]), f[2:]
-        if (len(f) < 3 or key in pre or len(set(names)) != len(names) or
-                any(not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", n) for n in names)):
-            raise ValueError("%s:%d: invalid or duplicate predefinition row" % (path, line))
-        pre[key] = names
-    # optional per-OS data-model rows (e.g. __LP64__ on lnx/osx, none on LLP64 win), placed after the architecture
-    required = {("os", x) for x in ("lnx", "osx", "win")} | {("arch", x) for x in ("x86_64", "arm64")} | {("common", "*")}
-    if not required <= set(pre) or not set(pre) - required <= {("model", x) for x in ("lnx", "osx", "win")}:
-        raise ValueError("%s: expected OS, architecture, optional data-model and common declarations" % path)
-    E.PREDEF = pre
-    E.XOPS = {}
-    for line in (ROOT / "exec/pp/operators.tsv").read_text().splitlines():
-        if not line or line.startswith("#"):
-            continue
-        code, spelling, precedence, arity = line.split("\t")
-        code, precedence, arity = int(code), int(precedence), int(arity)
-        assert code not in E.XOPS and 0 < code < 257 and precedence >= 0 and arity in (0, 1, 2, 3)
-        assert spelling and spelling not in {v[0] for v in E.XOPS.values()}
-        E.XOPS[code] = spelling, precedence, arity
-    assert E.XOPS, "empty expression operator declarations"
-    E.AUTOINC_ORDER = tuple(facts("pp-autoinc"))
-    def autoinc_map():   # src/front_pp.c hdrneeded's line rule over include/*.h
-        m = {}
-        for h in E.AUTOINC_ORDER:
-            names = []
-            for ln in (ROOT / "include" / h).read_text(encoding="latin-1").split("\n"):
-                if len(ln) > 7 and ln.startswith("static") and "(" in ln and "{" in ln[ln.index("("):]:
-                    mm = re.search(r"([A-Za-z0-9_]+)\s*$", ln[:ln.index("(")])
-                    if mm:
-                        names.append(mm.group(1))
-            m[h] = names
-        return m
-    E.autoinc_map = autoinc_map
-    E.sbconst = lambda s: [("SBCLR",)] + [("SBOUT", c) for c in s.encode()]
-    def xe_init():
-        a = []
-        for c, (_, p, _) in list(E.XOPS.items()) + [(0, (None, -1, 0))]:
-            a += [("LDI", "xc", E.XPRB + c), ("LDI", "xq", p), ("STX", "xc", 0, "xq")]
-        return a
-    E.xe_init = xe_init
-    return E
+# _ppsrc (E2 source facts for pp-gen/pp-autoinc-gen) went with them to tools/facts-gen.cx on 2026-10-30.
 
 
 # lex-gen moved to tools/facts-gen.cx on 2026-10-30.
@@ -609,37 +545,7 @@ def nativeabi():
             "=reject\tjson\t" + json.dumps(facts("nativeabi-gen-reject"))]
 
 
-def ppautoinc():
-    """Autoinc domain data: library names, closure slots and header order.
-
-    Ordinal intervals describe source-list order; state spelling and all action
-    recipes belong to exec/pp/autoinc-manifest.tsv, not this producer.
-    """
-    import json
-    E = _ppsrc()
-    from unisa.libneed import table, roots, PREFIX
-    inc = str(ROOT / "include")
-    keys, closure, bodies = table(inc)
-    index = {b: i for i, b in enumerate(bodies)}
-    def slots(names):
-        return [dict(offset=E.NEEDB + index[b]) for b in names]
-    K = [dict(id=i, end=i + 1, terminal=i + 1 == len(keys),
-              name=k, slots=slots(closure[k])) for i, k in enumerate(keys)]
-    B = [dict(id=j, end=j + 1, terminal=j + 1 == len(bodies),
-              slot=E.NEEDB + j, name=PREFIX + b) for j, b in enumerate(bodies)]
-    amap, H = E.autoinc_map(), list(E.AUTOINC_ORDER)
-    HD = []
-    for h, hn in enumerate(H):
-        names = [n for n in amap[hn] if n != "printf"]
-        HD.append(dict(id=h, end=h + 1, terminal=h + 1 == len(H), count=len(names),
-                       names=[dict(id=k, end=k + 1, name=nm) for k, nm in enumerate(names)]))
-    EM = [dict(special=True, id=len(H), end=len(H) - 1, terminal=False, header="stdio.h")]
-    EM += [dict(special=False, id=h, end=h - 1, terminal=h == 0, header=H[h])
-           for h in range(len(H) - 1, -1, -1)]
-    return ["=idclass\tjson\t" + json.dumps(sorted(E.ID)), "=roots\tjson\t" + json.dumps(slots(roots(inc))),
-            "=keys\tjson\t" + json.dumps(K), "=bodies\tjson\t" + json.dumps(B),
-            "=lndef\tstr\t__UNISA_FTRIM_LIBC",
-            "=headers\tjson\t" + json.dumps(HD), "=emits\tjson\t" + json.dumps(EM)]
+# pp-autoinc-gen moved to tools/facts-gen.cx (closure from seed/unisa_libneed.c) on 2026-10-30.
 
 
 # pp-gen moved to tools/facts-gen.cx (escapes: exec/facts/pp-escapes.tsv) on 2026-10-30.
@@ -793,8 +699,6 @@ def k2gen2():
 
 TABLES = [
     ("k2-gen2", ["exec/build/parsebase.py", "exec/build/parse2base.py", "exec/facts/parse2-extra.tsv", "exec/facts/statics.tsv", "exec/parse2/operator-actions.tsv", "exec/parse2/type-follow.tsv", "exec/parse2/ladder-modes.tsv", "exec/parse2/shape-reject.tsv", "exec/parse2/shape-stack.tsv", "exec/parse2/shape-tokens.tsv", "exec/parse2/return-text.tsv", "exec/parse2/return-template.tsv", "exec/parse2/return-reject.tsv", "exec/parse2/return-stack.tsv", "exec/parse2/return-tokens.tsv", "exec/parse2/tape-templates.tsv", "exec/parse2/update-text.tsv", "exec/parse2/update-reject.tsv", "exec/parse2/update-template.tsv", "exec/parse2/update-stack.tsv", "exec/parse2/update-modes.tsv", "exec/parse2/update-pointer.tsv", "exec/parse2/update-float.tsv", "exec/parse2/update-tokens.tsv", "exec/parse2/type-tape.tsv", "exec/parse2/scope-actions.tsv", "exec/parse2/type-entry.tsv", "exec/facts/export.py"], k2gen2),
-    ("pp-autoinc-gen", ["exec/facts/pp-bytes.tsv", "unisa/libneed.py", "exec/facts/pp-autoinc.tsv", "exec/facts/pp-layout.tsv", "exec/facts/export.py",
-                         *sorted(str(p.relative_to(ROOT)) for p in (ROOT / "include").rglob("*.h"))], ppautoinc),
     ("nativeabi", ["exec/nativeabi/rules.tsv", "exec/nativeabi/ordered-result.tsv", "exec/nativeabi/gen-fresh.tsv", "exec/nativeabi/ordered-fresh.tsv", "exec/facts/nativeabi-gen-reject.tsv", "exec/facts/top-modelgraphequality-banks.tsv", "exec/facts/export.py"], nativeabi),
     ("lower-abi", ["unisa/catalog.py", "unisa/lower.py", "exec/lower/code-abi-sources.tsv", "weights/gold/abi.tsv", "weights/gold/enc.tsv", "exec/facts/export.py"], lowerabi),
     ("lower-code", ["unisa/tape.py", "unisa/lower.py", "weights/gold/regmap.tsv", "weights/gold/enc.tsv", "weights/gold/reloc.tsv", "unisa/emit_x86.py", "unisa/emit_arm.py", "exec/facts/top-modelbindings-banks.tsv", "exec/facts/top-modelbindings-const.tsv", "exec/facts/export.py"], lowercode),
