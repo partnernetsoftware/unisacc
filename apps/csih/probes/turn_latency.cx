@@ -1,3 +1,7 @@
+#pragma unisa use text.fmt
+#pragma unisa use text.num
+#pragma unisa use sys.io
+#pragma unisa use sys.env
 #pragma unisa use tmuxwit
 #pragma unisa use retry_stub
 /*
@@ -26,38 +30,38 @@ static long median3(long a, long b, long c) {
 
 int main(int argc, char **argv) {
     static char pane[65536];
-    const char *bin = getenv("CSIH_BIN"), *tmp = getenv("TMPDIR");
+    const char *bin = sy_env("CSIH_BIN"), *tmp = sy_env("TMPDIR");
     char cwd[512], absbin[700], root[600], home[NCASE][700], log[NCASE][700], sess[NCASE][8], served[256];
     long t_enter[NCASE], t_answer[NCASE], first[NCASE], step[NCASE], answer[NCASE], at[8];
     int stub[NCASE], i, pid = rs_pid(), ok = 1, port0 = 33000 + (rs_pid() % 3000) * 3;
-    long max_first = argc > 2 ? atol(argv[1]) : 0, max_step = argc > 2 ? atol(argv[2]) : 0;
+    long max_first = argc > 2 ? tx_atol(argv[1]) : 0, max_step = argc > 2 ? tx_atol(argv[2]) : 0;
 
     if (!getcwd(cwd, sizeof cwd)) return 2;
-    if (!bin || !bin[0]) { snprintf(absbin, sizeof absbin, "%s/../../out/csih-e2e-bin/csih", cwd); bin = absbin; }
-    if (access(bin, X_OK) != 0) { printf("turn_latency: no csih binary at %s (csih.sh prepare)\n", bin); return 2; }
-    if (!tw_open("lat")) { printf("turn_latency: tmux is not on PATH\n"); return 2; }
-    snprintf(root, sizeof root, "%s/csih-lat-%d", tmp && tmp[0] ? tmp : "/tmp", pid);
-    if (mkdir(root, 0700) != 0) { printf("turn_latency: mkdir %s failed\n", root); return 2; }
+    if (!bin || !bin[0]) { tx_snprintf(absbin, sizeof absbin, "%s/../../out/csih-e2e-bin/csih", cwd); bin = absbin; }
+    if (access(bin, X_OK) != 0) { sy_printf("turn_latency: no csih binary at %s (csih.sh prepare)\n", bin); return 2; }
+    if (!tw_open("lat")) { sy_printf("turn_latency: tmux is not on PATH\n"); return 2; }
+    tx_snprintf(root, sizeof root, "%s/csih-lat-%d", tmp && tmp[0] ? tmp : "/tmp", pid);
+    if (mkdir(root, 0700) != 0) { sy_printf("turn_latency: mkdir %s failed\n", root); return 2; }
 
     for (i = 0; i < NCASE; i++) {
         char e_home[760], e_ep[160], e_cwd[760];
-        snprintf(home[i], sizeof home[i], "%s/h%d", root, i);
-        snprintf(log[i], sizeof log[i], "%s/posts%d.txt", root, i);
-        snprintf(sess[i], sizeof sess[i], "l%d", i);
+        tx_snprintf(home[i], sizeof home[i], "%s/h%d", root, i);
+        tx_snprintf(log[i], sizeof log[i], "%s/posts%d.txt", root, i);
+        tx_snprintf(sess[i], sizeof sess[i], "l%d", i);
         mkdir(home[i], 0700);
         stub[i] = rs_stub_start(port0 + i, "x,200,200,200", log[i]);
-        snprintf(e_home, sizeof e_home, "HOME=%s", home[i]);
-        snprintf(e_ep, sizeof e_ep, "CSIH_ENDPOINT=http://127.0.0.1:%d/v1/chat/completions", port0 + i);
-        snprintf(e_cwd, sizeof e_cwd, "CSIH_CWD=%s", home[i]);
+        tx_snprintf(e_home, sizeof e_home, "HOME=%s", home[i]);
+        tx_snprintf(e_ep, sizeof e_ep, "CSIH_ENDPOINT=http://127.0.0.1:%d/v1/chat/completions", port0 + i);
+        tx_snprintf(e_cwd, sizeof e_cwd, "CSIH_CWD=%s", home[i]);
         {
             char *cmd[] = { "env", e_home, e_ep, e_cwd, "CSIH_MODEL=stub", "CSIH_BELL=0", (char *)bin, "agent" };
-            if (stub[i] < 0 || tw_new(sess[i], 140, 45, home[i], cmd, 8) != 0) { printf("FAIL case %d: setup\n", i); ok = 0; stub[i] = -1; }
+            if (stub[i] < 0 || tw_new(sess[i], 140, 45, home[i], cmd, 8) != 0) { sy_printf("FAIL case %d: setup\n", i); ok = 0; stub[i] = -1; }
         }
     }
     for (i = 0; i < NCASE; i++) {
         int k;
         if (stub[i] < 0) continue;
-        if (!tw_wait_text(sess[i], "Enter 发送", 8000, pane, sizeof pane)) { printf("FAIL case %d: TUI not ready\n", i); ok = 0; stub[i] = -1; continue; }
+        if (!tw_wait_text(sess[i], "Enter 发送", 8000, pane, sizeof pane)) { sy_printf("FAIL case %d: TUI not ready\n", i); ok = 0; stub[i] = -1; continue; }
         for (k = 0; k < 3; k++) {
             tw_keys(sess[i], "hi", 1);
             if (tw_wait_text(sess[i], "> hi", 1500, pane, sizeof pane)) break;
@@ -94,7 +98,7 @@ int main(int argc, char **argv) {
         if (n >= 1) first[i] = at[0] - t_enter[i];
         if (n >= 2) step[i] = at[1] - at[0];
         if (t_answer[i]) answer[i] = t_answer[i] - t_enter[i];
-        printf("case %d: requests=%d first_ms=%ld step_ms=%ld answer_ms=%ld\n", i, n, first[i], step[i], answer[i]);
+        sy_printf("case %d: requests=%d first_ms=%ld step_ms=%ld answer_ms=%ld\n", i, n, first[i], step[i], answer[i]);
         if (n < 2 || !t_answer[i]) ok = 0;
     }
     {
@@ -103,11 +107,11 @@ int main(int argc, char **argv) {
         long a = median3(answer[0], answer[1], answer[2]);
         if (max_first && f > max_first) ok = 0;
         if (max_step && s > max_step) ok = 0;
-        printf("%s turn_latency median first_ms=%ld step_ms=%ld answer_ms=%ld%s\n", ok ? "PASS" : "FAIL", f, s, a,
+        sy_printf("%s turn_latency median first_ms=%ld step_ms=%ld answer_ms=%ld%s\n", ok ? "PASS" : "FAIL", f, s, a,
                max_first ? "" : " (report only)");
     }
     tw_close();
     for (i = 0; i < NCASE; i++) rs_stop(stub[i]);
-    if (cx_rmtree(root) != 0) printf("turn_latency: scratch %s left behind\n", root);
+    if (cx_rmtree(root) != 0) sy_printf("turn_latency: scratch %s left behind\n", root);
     return ok ? 0 : 1;
 }
