@@ -1,4 +1,5 @@
 #pragma unisa use text.text
+#pragma unisa use text.fmt
 /*
  * delibc.cx — rename csih's remaining libc calls to their cx L0 wrappers,
  * one fixed table, in the given .cx files (in place).
@@ -136,6 +137,14 @@ static int count_uses(const char *s, long len) {
     return c;
 }
 
+/* the use line that names zstr: "zstr" from apps/csih, --zstr MOD elsewhere
+   (probes: csih.zstr through the probes/csih link) */
+static char zstr_use[96] = "#pragma unisa use zstr\n";
+
+static const char *need_use(int k) {
+    return tx_eq(NEED[k].use, "#pragma unisa use zstr\n", 64) ? zstr_use : NEED[k].use;
+}
+
 static int uses(const char *path) {
     size_t n = 0;
     char *s = cx_read(path, &n);
@@ -151,12 +160,13 @@ static int uses(const char *path) {
         long o = e;
         for (k = 0; k < NNEED; k++) {
             int called = 0;
-            long ul = tx_len(NEED[k].use, 64);
+            const char *use = need_use(k);
+            long ul = tx_len(use, 96);
             for (j = 0; j < NCALL && NEED[k].calls[j]; j++)
                 if (tx_find(s, len, NEED[k].calls[j], tx_len(NEED[k].calls[j], 64)) >= 0) called = 1;
-            if (!called || tx_find(s, len, NEED[k].use, ul) >= 0 || tx_find(out + e, o - e, NEED[k].use, ul) >= 0) continue;
-            if (have + added >= 32) { printf("delibc: %s would pass 32 uses (needs %s)\n", path, NEED[k].use + 18); return 1; }
-            tx_copy(out + o, (long)sizeof out - o, NEED[k].use, ul);
+            if (!called || tx_find(s, len, use, ul) >= 0 || tx_find(out + e, o - e, use, ul) >= 0) continue;
+            if (have + added >= 32) { printf("delibc: %s would pass 32 uses (needs %s)\n", path, use + 18); return 1; }
+            tx_copy(out + o, (long)sizeof out - o, use, ul);
             o += ul;
             added++;
         }
@@ -251,7 +261,11 @@ static int fio_one(const char *path) {
 
 int main(int argc, char **argv) {
     int i, bad = 0;
-    if (argc < 2) { printf("usage: delibc.cx -- [--uses | --fio] FILE...\n"); return 2; }
+    if (argc >= 3 && tx_eq(argv[1], "--zstr", 16)) {
+        if (tx_snprintf(zstr_use, sizeof zstr_use, "#pragma unisa use %s\n", argv[2]) >= (int)sizeof zstr_use) return 2;
+        argc -= 2; argv += 2;
+    }
+    if (argc < 2) { printf("usage: delibc.cx -- [--zstr MOD] [--uses | --fio] FILE...\n"); return 2; }
     if (tx_eq(argv[1], "--fio", 16)) {
         for (i = 2; i < argc; i++) bad |= fio_one(argv[i]);
         return bad;
