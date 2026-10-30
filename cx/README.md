@@ -3,6 +3,7 @@ CX结构化主线：以module/use、公开接口、私有实例、显式构建�
 **论文归属：** 模块化与内存安全叙事归 **Paper D**（[`research/paper-d-intent.md`](../research/paper-d-intent.md)）；不塞进 Paper A。现行产品阅读见 [`docs/cx/prd.md`](../docs/cx/prd.md)。
 
 - `mem/README.md`：内存库（heap/bytes/arena/grow/slice，Rust 所有权/借用体系）。
+- `text/README.md`：文本库（text/build/deflate，Rust str / Node Buffer 体系）。
 - `cx0/README.md`：权威CX解析器、经典C兼容投影、不可变单元束与E2资源适配。
 - `workspace/README.md`：包图、构建、严格续构、声明资源目录闭包与每次真实执行测试。
 - `../tools/cx-driver.md`：源码优先入口，默认编译并运行，调用实际七流网络。
