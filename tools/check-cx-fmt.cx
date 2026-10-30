@@ -1,0 +1,329 @@
+/* Checks cx/text/fmt.cx, cx/text/num.cx, cx/sys/io.cx and sy_euid of cx/sys/env.cx against the
+   prelude libc call each one stands for, on the same inputs (differential).
+   sh ./unisacc.com tools/check-cx-fmt.cx   (from the repo root: the stdout/stderr and tty cases
+   re-run this file as a child, "-- child MODE", the tty one under script(1)).
+   Prints PASS/FAIL per case, UNMEASURED for a case this host cannot run; exit 1 on any FAIL. */
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use text.num
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+
+static int bad, nok, nfail;
+static void ok(int c, const char *name) {
+    printf("%s\t%s\n", c ? "PASS" : "FAIL", name);
+    if (c) nok++; else { nfail++; bad = 1; }
+}
+
+/* ---- snprintf / vsnprintf ------------------------------------------------------------- */
+
+enum { SNB = 96 };
+static char sa[SNB], sb[SNB];
+static int sn_cases, sn_bad;
+
+static void fillz(char *p) { int i; for (i = 0; i < SNB; i++) p[i] = (char)('Z' + (i & 3)); }
+
+/* Byte-for-byte: return value and all SNB bytes (so nothing past the cap is written either). */
+static void sn_cmp(const char *label, size_t cap, int ra, int rb) {
+    sn_cases++;
+    if (ra != rb || !tx_same(sa, SNB, sb, SNB)) {
+        sn_bad++;
+        printf("FAIL\tsnprintf %s cap=%ld: libc=%d tx=%d\n", label, (long)cap, ra, rb);
+    }
+}
+
+/* Every format at caps 0, 1, 2, short (n/2), exact (n), n+1 and SNB, with DST also 0 at cap 0. */
+#define SN(label, ...) do { \
+    int n_ = snprintf(0, 0, __VA_ARGS__), k_; \
+    size_t caps_[7]; \
+    caps_[0] = 0; caps_[1] = 1; caps_[2] = 2; caps_[3] = (size_t)(n_ / 2); caps_[4] = (size_t)n_; \
+    caps_[5] = (size_t)n_ + 1; caps_[6] = SNB; \
+    for (k_ = 0; k_ < 7; k_++) { \
+        int ra_, rb_; \
+        if (caps_[k_] > SNB) continue; \
+        fillz(sa); fillz(sb); \
+        ra_ = snprintf(sa, caps_[k_], __VA_ARGS__); \
+        rb_ = tx_snprintf(sb, caps_[k_], __VA_ARGS__); \
+        sn_cmp(label, caps_[k_], ra_, rb_); \
+    } \
+    sn_cases++; \
+    if (snprintf(0, 0, __VA_ARGS__) != tx_snprintf(0, 0, __VA_ARGS__)) { sn_bad++; printf("FAIL\tsnprintf %s null-measure\n", label); } \
+} while (0)
+
+static int via_tx_v(char *d, size_t cap, const char *fmt, ...) {
+    va_list ap; int n;
+    va_start(ap, fmt); n = tx_vsnprintf(d, cap, fmt, ap); va_end(ap);
+    return n;
+}
+static int via_libc_v(char *d, size_t cap, const char *fmt, ...) {
+    va_list ap; int n;
+    va_start(ap, fmt); n = vsnprintf(d, cap, fmt, ap); va_end(ap);
+    return n;
+}
+
+static void check_snprintf(void) {
+    int x = 42, k;
+    SN("plain", "hello");
+    SN("empty", "%s", "");
+    SN("%s", "[%s]", "hello world");
+    SN("%d", "%d|%d|%d", 0, -7, 2147483647);
+    SN("%d min", "%d", (int)(-2147483647 - 1));
+    SN("%ld", "%ld %ld", 9223372036854775807L, -9223372036854775807L - 1);
+    SN("%lld", "%lld", (long long)-1234567890123LL);
+    SN("%u", "%u %u", 0u, 4294967295u);
+    SN("%x", "%x %X %08x %#x", 255u, 48879u, 0xbeefu, 26u);
+    SN("%lx", "%lx", 0xfedcba9876543210UL);
+    SN("%p", "%p", (void *)&x);
+    SN("%c", "%c%c%c", 'a', 'B', '0');
+    SN("%%", "100%% %d%%", 5);
+    SN("%5.2f", "%5.2f|%5.2f|%.0f|%f", 3.14159, -0.5, 2.5, 1e10);
+    SN("%e %g", "%e %g %g", 12345.678, 0.0001, 1e20);
+    SN("%-8s", "%-8s|%8s|%.3s", "ab", "cd", "truncate");
+    SN("%*d", "%*d|%-*d|%.*s", 6, 42, 5, -3, 2, "xyz");
+    SN("%05d %+d % d", "%05d %+d % d", -42, 7, 9);
+    SN("mixed long", "%s=%d (%x) %s %ld %c %5.1f %%", "key", 123456, 0xabcu, "value text here", -99L, 'Q', 99.95);
+    printf("%s\tsnprintf differential: %d comparisons over 19 formats, caps 0/1/2/short/exact/exact+1/96 and null-measure\n",
+           sn_bad ? "FAIL" : "PASS", sn_cases);
+    if (sn_bad) { nfail++; bad = 1; } else nok++;
+    /* absolute expectations, not just agreement */
+    fillz(sb);
+    k = tx_snprintf(sb, 8, "%s", "hello world");
+    ok(k == 11 && tx_eq(sb, "hello w", 8), "snprintf: cap 8 keeps 7 bytes + NUL, returns the full length 11");
+    fillz(sb);
+    k = tx_snprintf(sb, 0, "%d", 12345);
+    ok(k == 5 && sb[0] == 'Z', "snprintf: cap 0 writes nothing, returns 5");
+    fillz(sb);
+    k = tx_snprintf(sb, 1, "%d", 12345);
+    ok(k == 5 && sb[0] == 0 && sb[1] == 'Z' + 1, "snprintf: cap 1 writes only the NUL");
+    fillz(sa); fillz(sb);
+    k = via_tx_v(sb, 10, "%s-%d-%x", "ab", -12, 255u);
+    ok(k == via_libc_v(sa, 10, "%s-%d-%x", "ab", -12, 255u) && tx_same(sa, SNB, sb, SNB) && tx_eq(sb, "ab--12-ff", 16),
+       "vsnprintf: a va_list passed through a variadic wrapper matches vsnprintf");
+    fillz(sa); fillz(sb);
+    k = via_tx_v(sb, 4, "%s-%d-%x", "ab", -12, 255u);
+    ok(k == 9 && k == via_libc_v(sa, 4, "%s-%d-%x", "ab", -12, 255u) && tx_same(sa, SNB, sb, SNB) && tx_eq(sb, "ab-", 8),
+       "vsnprintf: truncated at cap 4 like vsnprintf");
+}
+
+/* ---- number parsing ------------------------------------------------------------------ */
+
+static const char *ints[] = {
+    "0", "123", "-123", "+77", "   42", "\t\n -9z", "", "   ", "abc", "-", "+", "0x", "0X1f", "0x1G", "0xg",
+    "077", "08", "-0x10", "zz", "Zz9", "1010", "9223372036854775807", "9223372036854775808",
+    "-9223372036854775808", "-9223372036854775809", "18446744073709551615", "18446744073709551616",
+    "99999999999999999999999", "-18446744073709551615", "0x7fffffffffffffff", "0xffffffffffffffff",
+    "0x10000000000000000", "1e5", "12abc", 0 };
+static const int bases[] = { 0, 2, 8, 10, 16, 36, 1, 37, -1 };
+
+static void check_strtol(void) {
+    int i, b, cases = 0, fails = 0, rc;
+    for (i = 0; ints[i]; i++) for (b = 0; b < (int)(sizeof bases / sizeof bases[0]); b++) {
+        const char *s = ints[i];
+        char *ea = 0, *eb = 0, *ec = 0, *ed = 0;
+        long va, vb, vr;
+        unsigned long ua, ub, ur;
+        int ra, rua, base = bases[b], valid = base == 0 || (base >= 2 && base <= 36);
+        errno = 0; va = strtol(s, &ea, base); ra = errno;
+        vb = tx_strtol(s, &eb, base);
+        rc = tx_strtol_r(s, &ec, base, &vr);
+        cases++;
+        if (va != vb || ea != eb) { fails++; printf("FAIL\tstrtol \"%s\" base %d: libc=%ld+%ld tx=%ld+%ld\n", s, base, va, (long)(ea - s), vb, (long)(eb - s)); }
+        else if (valid && (vr != va || ec != ea || rc != (ea == s ? -EINVAL : ra == ERANGE ? -ERANGE : 0))) {
+            fails++; printf("FAIL\tstrtol_r \"%s\" base %d: rc=%d out=%ld libc errno=%d\n", s, base, rc, vr, ra);
+        } else if (!valid && (rc != -EINVAL || ec != s)) { fails++; printf("FAIL\tstrtol_r \"%s\" bad base %d: rc=%d\n", s, base, rc); }
+        errno = 0; ua = strtoul(s, &ea, base); rua = errno;
+        ub = tx_strtoul(s, &eb, base);
+        rc = tx_strtoul_r(s, &ed, base, &ur);
+        cases++;
+        if (ua != ub || ea != eb) { fails++; printf("FAIL\tstrtoul \"%s\" base %d: libc=%lu tx=%lu\n", s, base, ua, ub); }
+        else if (valid && (ur != ua || ed != ea || rc != (ea == s ? -EINVAL : rua == ERANGE ? -ERANGE : 0))) {
+            fails++; printf("FAIL\tstrtoul_r \"%s\" base %d: rc=%d out=%lu libc errno=%d\n", s, base, rc, ur, rua);
+        } else if (!valid && (rc != -EINVAL || ed != s)) { fails++; printf("FAIL\tstrtoul_r \"%s\" bad base %d: rc=%d\n", s, base, rc); }
+    }
+    printf("%s\tstrtol/strtoul differential: %d comparisons (%d inputs x bases 0/2/8/10/16/36 and bad 1/37/-1), value, end and range/no-digit codes\n",
+           fails ? "FAIL" : "PASS", cases, i);
+    if (fails) { nfail++; bad = 1; } else nok++;
+    {
+        long v = 1; char *e = 0;
+        ok(tx_strtol_r("9223372036854775808", &e, 10, &v) == -ERANGE && v == 9223372036854775807L && *e == 0,
+           "strtol_r: overflow is -ERANGE with LONG_MAX, end past every digit");
+        ok(tx_strtol_r("-9223372036854775809", 0, 10, &v) == -ERANGE && v == -9223372036854775807L - 1, "strtol_r: underflow is -ERANGE with LONG_MIN");
+        ok(tx_strtol_r("0x", &e, 16, &v) == 0 && v == 0 && e[0] == 'x', "strtol_r: \"0x\" base 16 parses the 0, end at x");
+        ok(tx_strtol_r("  ", &e, 10, &v) == -EINVAL && v == 0, "strtol_r: no digits is -EINVAL");
+        ok(tx_strtol_r(0, &e, 10, &v) == -EINVAL && e == 0 && tx_strtol_r("1", 0, 10, 0) == -EINVAL, "strtol_r: null S or OUT is -EINVAL");
+        ok(tx_strtol_r("z", 0, 36, &v) == 0 && v == 35, "strtol_r: base 36");
+    }
+    {
+        const char *as[] = { "0", "42", "-17x", "  +9", "", "abc", "9223372036854775807", 0 };
+        int fails2 = 0;
+        for (i = 0; as[i]; i++) if (tx_atol(as[i]) != atol(as[i])) { fails2++; printf("FAIL\tatol \"%s\"\n", as[i]); }
+        ok(!fails2 && tx_atol("-17x") == -17, "atol: 7 inputs equal atol");
+    }
+}
+
+static const char *dbls[] = {
+    "0", "1.5", "  -2.25e3x", "+.5", "5.", ".", "e5", "1e", "1e+", "1e-2", "3.14159265358979323846",
+    "inf", "-INF", "infinity", "Infinityx", "nan", "-NaN", "nanx", "1e400", "-1e400", "1e-400", "4.9e-324",
+    "2.2250738585072014e-308", "1.7976931348623157e308", "0x1p3", "0x1.8p1", "0x", "", "abc",
+    "123456789012345678901234567890", "0.000000000000000000000000001", 0 };
+
+static void check_strtod(void) {
+    int i, cases = 0, fails = 0, rc, ra;
+    for (i = 0; dbls[i]; i++) {
+        const char *s = dbls[i];
+        char *ea = 0, *eb = 0, *ec = 0;
+        double va, vb, vr;
+        int same;
+        errno = 0; va = strtod(s, &ea); ra = errno;
+        vb = tx_strtod(s, &eb);
+        rc = tx_strtod_r(s, &ec, &vr);
+        cases++;
+        same = (va != va) ? (vb != vb && vr != vr) : (va == vb && vr == va);
+        if (!same || ea != eb || ec != ea) {
+            fails++; printf("FAIL\tstrtod \"%s\": libc=%g+%ld tx=%g+%ld r=%g\n", s, va, (long)(ea - s), vb, (long)(eb - s), vr);
+        } else if (rc != (ea == s ? -EINVAL : ra == ERANGE ? -ERANGE : 0)) {
+            fails++; printf("FAIL\tstrtod_r \"%s\": rc=%d libc errno=%d\n", s, rc, ra);
+        }
+    }
+    printf("%s\tstrtod differential: %d inputs (ordinary, inf/nan, exponents, hex, overflow/underflow, empty), value, end and range code\n",
+           fails ? "FAIL" : "PASS", cases);
+    if (fails) { nfail++; bad = 1; } else nok++;
+    {
+        double v = 1; char *e = 0;
+        ok(tx_strtod_r("1e400", &e, &v) == -ERANGE && v > 1e308 && *e == 0, "strtod_r: overflow is -ERANGE with HUGE_VAL");
+        ok(tx_strtod_r("  -2.25e3x", &e, &v) == 0 && v == -2250.0 && *e == 'x', "strtod_r: -2.25e3, end at x");
+        ok(tx_strtod_r("x", &e, &v) == -EINVAL && v == 0 && *e == 'x', "strtod_r: no digits is -EINVAL");
+    }
+}
+
+/* ---- descriptors, tty, strerror, euid ---------------------------------------------- */
+
+static void check_fd(void) {
+    int p[2], fl;
+    if (sy_pipe(p) != 0) { ok(0, "fd: sy_pipe"); return; }
+    ok(sy_fd_nonblock(p[0], 1) == 0 && (fcntl(p[0], F_GETFL, 0) & O_NONBLOCK), "fd_nonblock on: F_GETFL has O_NONBLOCK");
+    ok(sy_fd_nonblock(p[0], 1) == 0 && (fcntl(p[0], F_GETFL, 0) & O_NONBLOCK), "fd_nonblock on twice: still set");
+    {
+        char c; long r = sy_read(p[0], &c, 1);
+        ok(r == -EAGAIN, "fd_nonblock on: an empty pipe read is -EAGAIN");
+    }
+    ok(sy_fd_nonblock(p[0], 0) == 0 && !(fcntl(p[0], F_GETFL, 0) & O_NONBLOCK), "fd_nonblock off: O_NONBLOCK cleared");
+    fl = fcntl(p[1], F_GETFL, 0);
+    ok(sy_fd_nonblock(p[1], 1) == 0 && fcntl(p[1], F_GETFL, 0) == (fl | O_NONBLOCK) && (fl & O_ACCMODE) == O_WRONLY,
+       "fd_nonblock: the other status flags (write end O_WRONLY) are kept");
+    ok((fcntl(p[1], F_GETFD, 0) & FD_CLOEXEC) != 0, "fd_cloexec: sy_pipe ends start close-on-exec");
+    ok(sy_fd_cloexec(p[1], 0) == 0 && !(fcntl(p[1], F_GETFD, 0) & FD_CLOEXEC), "fd_cloexec off: F_GETFD has no FD_CLOEXEC");
+    ok(sy_fd_cloexec(p[1], 1) == 0 && (fcntl(p[1], F_GETFD, 0) & FD_CLOEXEC), "fd_cloexec on: FD_CLOEXEC set again");
+    ok(sy_isatty(p[0]) == 0 && isatty(p[0]) == 0, "isatty: a pipe is 0, as isatty");
+    sy_close(p[0]); sy_close(p[1]);
+    ok(sy_fd_nonblock(p[0], 1) == -EBADF && sy_fd_cloexec(p[0], 1) == -EBADF, "fd flags on a closed fd: -EBADF");
+    ok(sy_isatty(p[0]) == 0 && sy_isatty(-1) == 0, "isatty: a closed fd and -1 are 0");
+}
+
+static void check_misc(void) {
+    int e, fails = 0;
+    static const int es[] = { 0, 1, 2, 5, 9, 12, 13, 17, 22, 25, 28, 33, 34, 4, 11, 9999, -1 };
+    for (e = 0; es[e] >= 0; e++) {
+        const char *want = strerror(es[e]);
+        if (!tx_eqz(sy_strerror(es[e]), want) || !tx_eqz(sy_strerror(-es[e]), want)) { fails++; printf("FAIL\tstrerror %d\n", es[e]); }
+    }
+    ok(!fails, "strerror: 16 codes, as errno and as -errno, give strerror's text");
+    ok(tx_eqz(sy_strerror(-ENOENT), "No such file or directory") && tx_eqz(sy_strerror(ERANGE), "Numerical result out of range"),
+       "strerror: ENOENT and ERANGE texts");
+    ok(sy_strerror(-2147483647) != 0, "strerror: a huge -errno still gives a text");
+    ok(sy_euid() == (long)geteuid() && sy_euid() >= 0, "euid: equals geteuid");
+}
+
+/* ---- stdout / stderr through a child run --------------------------------------------- */
+
+static const char *self = "tools/check-cx-fmt.cx";
+
+static int vout(const char *fmt, ...) { va_list ap; int n; va_start(ap, fmt); n = sy_vprintf(fmt, ap); va_end(ap); return n; }
+static int verr(const char *fmt, ...) { va_list ap; int n; va_start(ap, fmt); n = sy_veprintf(fmt, ap); va_end(ap); return n; }
+
+/* The child: stdout and stderr writes, sy_* interleaved with the prelude's; exit 0 when every
+   sy_* return equals what printf/fprintf return for the same output. */
+static int child_out(void) {
+    int r = 0;
+    r |= printf("a1\n") != 3;
+    r |= sy_printf("b%d\n", 2) != 3;
+    r |= sy_puts("c3") < 0;
+    puts("d4");
+    r |= sy_eprintf("e%s\n", "5") != 3;
+    fprintf(stderr, "f6\n");
+    r |= sy_printf("%s", "g7") != 2;
+    printf("h8\n");
+    r |= vout("i%d\n", 9) != 3;
+    r |= verr("j%d\n", 10) != 4;
+    r |= sy_printf("%s", "") != 0;
+    return r ? 3 : 0;
+}
+
+static int child_tty(void) {
+    return sy_isatty(0) == 1 && isatty(0) == 1 && sy_isatty(1) == 1 ? 0 : 4;
+}
+
+static int child(const char *mode) {
+    if (tx_eqz(mode, "out")) return child_out();
+    if (tx_eqz(mode, "tty")) return child_tty();
+    return 2;
+}
+
+static long slurp(int fd, char *buf, long cap) {
+    long n = 0, k;
+    while (n < cap - 1 && (k = sy_read(fd, buf + n, cap - 1 - n)) > 0) n += k;
+    buf[n] = 0;
+    sy_close(fd);
+    return n;
+}
+
+static void check_streams(void) {
+    const char *u = sy_env_or("UNISACC", "./unisacc.com");
+    char *av[] = { "sh", (char *)u, "-run", (char *)self, "--", "child", "out", 0 };
+    char out[512], err[512];
+    int cut = 0, rc, pid, ofd = -1, efd = -1, n;
+    rc = sy_run(av, out, sizeof out, &cut);
+    ok(rc == 0, "printf child: every sy_printf/sy_eprintf/sy_vprintf/sy_veprintf/sy_puts return equals printf's");
+    ok(tx_eqz(out, "a1\nb2\nc3\nd4\ne5\nf6\ng7h8\ni9\nj10\n"),
+       "printf child: stdout and stderr merged keep the call order of sy_* and printf/puts/fprintf");
+    if (!tx_eqz(out, "a1\nb2\nc3\nd4\ne5\nf6\ng7h8\ni9\nj10\n")) printf("got <<%s>>\n", out);
+    pid = sy_spawn_pipe(av, 0, SY_SPAWN_STDERR_SPLIT, &ofd, &efd);
+    if (pid < 0) { ok(0, "printf child split: spawn"); return; }
+    slurp(ofd, out, sizeof out);
+    n = (int)slurp(efd, err, sizeof err);
+    rc = sy_wait(pid, 0);
+    ok(rc == 0 && tx_eqz(out, "a1\nb2\nc3\nd4\ng7h8\ni9\n"), "printf child split: stdout has exactly the sy_printf/sy_vprintf/sy_puts/printf/puts bytes");
+    ok(n == 10 && tx_eqz(err, "e5\nf6\nj10\n"), "printf child split: stderr has exactly the sy_eprintf/sy_veprintf/fprintf(stderr) bytes");
+}
+
+static void check_tty(void) {
+    char *probe[] = { "sh", "-c", "script -qec true /dev/null >/dev/null 2>&1", 0 };
+    char out[256], cmd[1024];
+    int cut = 0;
+    if (sy_run(probe, out, sizeof out, &cut) != 0) {
+        printf("UNMEASURED\tisatty on a terminal: no util-linux script(1) here\n");
+        return;
+    }
+    if (cx_fmt(cmd, sizeof cmd, "script -qec 'sh %s -run %s -- child tty' /dev/null >/dev/null 2>&1",
+               sy_env_or("UNISACC", "./unisacc.com"), self) != 0) { ok(0, "isatty pty: command fits"); return; }
+    {
+        char *av[] = { "sh", "-c", cmd, 0 };
+        ok(sy_run(av, out, sizeof out, &cut) == 0, "isatty: stdin and stdout on a script(1) pty are 1, as isatty");
+    }
+}
+
+int main(int argc, char **argv) {
+    if (argc == 3 && tx_eqz(argv[1], "child")) return child(argv[2]);
+    if (argc > 0 && argv[0] && argv[0][0]) self = argv[0];
+    check_snprintf();
+    check_strtol();
+    check_strtod();
+    check_fd();
+    check_misc();
+    check_streams();
+    check_tty();
+    printf("CX_FMT\tok=%d\tfailed=%d\n", nok, nfail);
+    return bad;
+}
