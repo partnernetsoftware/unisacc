@@ -1,58 +1,27 @@
 #pragma unisa module tmuxwit
+#pragma unisa use sys.time
+#pragma unisa use sys.proc
 /*
  * tmuxwit.cx — a terminal witness over a private tmux server, for probes
- * that need a real tty without a pty library. Lower: the two includes are
- * what the implicit runtime lacks (poll for sleeping, a monotonic clock).
+ * that need a real tty without a pty library. Lower (a csih probe adapter):
+ * clocks, sleeping and processes are cx/sys (probes/sys); no #include.
  *
  * The server is private (-L csih-TAG-PID) and reads no config (-f /dev/null):
  * a user config that errors puts the first session in view mode, which then
  * swallows every key sent to it. tw_close() kills the whole server.
  */
-#include <poll.h>
-#include <time.h>
 
 static char tw_sock[96];
 
-void tw_sleep_ms(int ms) {
-    poll(NULL, 0, ms);
-}
+void tw_sleep_ms(int ms) { sy_sleep_ms(ms); }
 
-long tw_now_ms(void) {
-    struct timespec t;
-    clock_gettime(CLOCK_MONOTONIC, &t);
-    return (long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
-}
+long tw_now_ms(void) { return sy_now_ms(); }
 
-/* argv[0] via PATH; stdout+stderr into OUT (NUL-terminated, may be NULL). Exit code, or -1. */
+/* argv[0] via PATH; stdout+stderr into OUT (NUL-terminated, may be NULL).
+ * Exit code, or -1 when it could not run or died by a signal. */
 int tw_run(char **argv, char *out, int cap) {
-    int p[2], st;
-    size_t off = 0;
-    pid_t pid;
-    if (pipe(p) != 0) return -1;
-    pid = fork();
-    if (pid < 0) { close(p[0]); close(p[1]); return -1; }
-    if (pid == 0) {
-        dup2(p[1], 1); dup2(p[1], 2);
-        close(p[0]); close(p[1]);
-        execvp(argv[0], argv);
-        _exit(127);
-    }
-    close(p[1]);
-    for (;;) {
-        char tmp[4096];
-        ssize_t k = read(p[0], tmp, sizeof tmp);
-        if (k <= 0) break;
-        if (out && cap > 1) {
-            size_t take = (size_t)k;
-            if (off + take > (size_t)cap - 1) take = (size_t)cap - 1 - off;
-            memcpy(out + off, tmp, take);
-            off += take;
-        }
-    }
-    if (out && cap > 0) out[off] = 0;
-    close(p[0]);
-    if (waitpid(pid, &st, 0) < 0) return -1;
-    return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+    int cut, r = sy_run(argv, out, cap, &cut);
+    return r >= 0 && r < 128 ? r : -1;
 }
 
 /* env, mkdir, chmod, stat and processes for upper probe roots are cx/sys

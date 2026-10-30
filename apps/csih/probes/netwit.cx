@@ -1,86 +1,67 @@
 #pragma unisa module netwit
+#pragma unisa use sys.net
+#pragma unisa use sys.proc
 /*
- * netwit.cx — the socket calls csih's probe roots need, so the roots stay
- * include-free (upper modules: pragma only). Lower: the includes below are
- * what the cx prelude does not carry (sockets, poll).
+ * netwit.cx — the loopback servers csih's probe roots need, so the roots stay
+ * include-free (upper modules: pragma only). Lower (a csih probe adapter):
+ * sockets and waiting are cx/sys net (probes/sys); no #include.
  *
  * nw_wait_port(port, ms)       0 once 127.0.0.1:PORT accepts, -1 after MS
  * nw_serve_file(port, path)    child process: answer every request with 200
- *                              and the file's bytes until killed; its pid
+ *                              and the file's bytes until killed or 60s idle;
+ *                              its pid (stop it with sy_kill)
  */
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <poll.h>
-#include <sys/socket.h>
 
 int nw_wait_port(int port, int ms) {
-    int waited = 0;
-    while (waited <= ms) {
-        int s = socket(AF_INET, SOCK_STREAM, 0);
-        struct sockaddr_in a;
-        if (s < 0) return -1;
-        memset(&a, 0, sizeof a);
-        a.sin_family = AF_INET;
-        a.sin_port = htons((unsigned short)port);
-        a.sin_addr.s_addr = htonl(0x7f000001);
-        if (connect(s, (struct sockaddr *)&a, sizeof a) == 0) { close(s); return 0; }
-        close(s);
-        poll(NULL, 0, 100);
-        waited += 100;
-    }
-    return -1;
+    return sy_wait_port(port, ms) == 0 ? 0 : -1;
 }
 
 /* A port probe connects and closes without a request: it gets nothing.
- * send(MSG_NOSIGNAL), not write: unisacc's signal() cannot ignore SIGPIPE,
- * and a write to a closed peer would kill this server. */
+ * sy_send_all uses MSG_NOSIGNAL: unisacc's signal() cannot ignore SIGPIPE. */
 static void nw_serve(int s, const char *body, int n) {
     static char req[8192];
     char head[160];
-    int left_ms = 60000;   /* the server ends itself: a killed parent cannot leak it */
-    while (left_ms > 0) {
-        struct pollfd p;
+    int idle_ms = 60000;   /* the server ends itself: a killed parent cannot leak it */
+    while (idle_ms > 0) {
         int c, have = 0, hl;
-        ssize_t k;
-        p.fd = s; p.events = POLLIN; p.revents = 0;
-        if (poll(&p, 1, 500) <= 0) { left_ms -= 500; continue; }
-        c = accept(s, NULL, NULL);
+        long k;
+        c = sy_tcp_accept(s, 500);
+        if (c == -ETIMEDOUT) { idle_ms -= 500; continue; }
         if (c < 0) continue;
-        while (have < (int)sizeof req - 1 && (k = read(c, req + have, sizeof req - 1 - have)) > 0) {
+        while (have < (int)sizeof req - 1 && (k = sy_recv(c, req + have, (long)sizeof req - 1 - have)) > 0) {
+            int i;
             have += (int)k;
             req[have] = 0;
-            if (strstr(req, "\r\n\r\n")) break;
+            for (i = 3; i < have; i++)
+                if (req[i - 3] == '\r' && req[i - 2] == '\n' && req[i - 1] == '\r' && req[i] == '\n') break;
+            if (i < have) break;
         }
         if (have > 0) {
             hl = snprintf(head, sizeof head,
                           "HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n", n);
-            if (send(c, head, (size_t)hl, MSG_NOSIGNAL) == hl && n > 0) send(c, body, (size_t)n, MSG_NOSIGNAL);
+            if (sy_send_all(c, head, hl) == 0 && n > 0) sy_send_all(c, body, n);
         }
-        close(c);
+        sy_close(c);
     }
 }
-
-/* End a server nw_serve_file started with cx/sys sy_kill(pid). */
 
 /* The socket listens before the fork, so there is no start race. -1 on failure. */
 int nw_serve_file(int port, const char *path) {
     static char body[4096];
-    struct sockaddr_in a;
-    int s, one = 1, n = 0;
+    size_t len = 0;
+    char *b = cx_read(path, &len);
+    int s, n = 0;
     pid_t pid;
-    FILE *f = fopen(path, "rb");
-    if (f) { n = (int)fread(body, 1, sizeof body, f); fclose(f); }
-    s = socket(AF_INET, SOCK_STREAM, 0);
+    if (b) {
+        n = len < sizeof body ? (int)len : (int)sizeof body;
+        snprintf(body, sizeof body, "%.*s", n, b);
+        free(b);
+    }
+    s = sy_tcp_listen(port, 4);
     if (s < 0) return -1;
-    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-    memset(&a, 0, sizeof a);
-    a.sin_family = AF_INET;
-    a.sin_port = htons((unsigned short)port);
-    a.sin_addr.s_addr = htonl(0x7f000001);
-    if (bind(s, (struct sockaddr *)&a, sizeof a) != 0 || listen(s, 4) != 0) { close(s); return -1; }
     pid = fork();
-    if (pid < 0) { close(s); return -1; }
+    if (pid < 0) { sy_close(s); return -1; }
     if (pid == 0) { nw_serve(s, body, n); _exit(0); }
-    close(s);
+    sy_close(s);
     return (int)pid;
 }

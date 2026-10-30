@@ -1,7 +1,11 @@
 #pragma unisa module retry_stub
+#pragma unisa use sys.net
+#pragma unisa use sys.time
+#pragma unisa use sys.proc
 /*
  * retry_stub.cx — scripted chat/completions stand-in for the retry probe.
- * Lower: libc/posix includes OK.
+ * Lower (a csih probe adapter): sockets, clocks and processes are cx/sys
+ * (probes/sys); its own log files use the prelude's open/write. No #include.
  *
  * rs_stub_start(port, script, log): the Nth POST gets the Nth token of the
  * comma list SCRIPT ("503,200", "~P,R,S"; tokens at rs_status_at); past the
@@ -10,14 +14,6 @@
  * appended to LOG, one per line, so the probe counts what csih really sent;
  * the Nth request body is saved as LOG.reqN. The child exits after 40s.
  */
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <netinet/in.h>
-#include <poll.h>
-#include <signal.h>
-#include <sys/socket.h>
-#include <sys/wait.h>
-#include <time.h>
 
 #define RS_REQ 262144
 
@@ -73,7 +69,7 @@ static void rs_serve_one(int c, const char *script, int n, const char *log) {
     ssize_t k;
     for (;;) {
         if (have + 1 >= RS_REQ) break;
-        k = read(c, req + have, RS_REQ - 1 - have);
+        k = sy_recv(c, req + have, (long)(RS_REQ - 1 - have));
         if (k <= 0) break;
         have += (size_t)k;
         req[have] = 0;
@@ -97,7 +93,7 @@ static void rs_serve_one(int c, const char *script, int n, const char *log) {
         fd = open(rp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
         if (fd >= 0) { if (have > hdr_end) rs_write_all(fd, req + hdr_end, have - hdr_end); close(fd); }
     }
-    if (delay) poll(NULL, 0, 500);
+    if (delay) sy_sleep_ms(500);
     if (status == -204 || status == -205) {
         /* the first action id the harness put in the request (JSON-escaped: it ends at "\n") */
         /* V cites the action id the request names; J cites the same one (the
@@ -144,92 +140,47 @@ static void rs_serve_one(int c, const char *script, int n, const char *log) {
              status, (int)strlen(body));
     fd = open(log, O_WRONLY | O_CREAT | O_APPEND, 0600);
     if (fd >= 0) { char line[48]; snprintf(line, sizeof line, "%d %ld\n", status, rs_now_ms()); rs_write_all(fd, line, strlen(line)); close(fd); }
-    rs_write_all(c, head, strlen(head));
-    rs_write_all(c, body, strlen(body));
+    sy_send_all(c, head, (long)strlen(head));   /* MSG_NOSIGNAL: a client that left cannot kill the stub */
+    sy_send_all(c, body, (long)strlen(body));
 }
 
 /* Child pid, or -1. The socket listens before the fork, so no start race. */
 int rs_stub_start(int port, const char *script, const char *log) {
-    struct sockaddr_in a;
-    int s, one = 1;
+    int s = sy_tcp_listen(port, 8);
     pid_t pid;
-    s = socket(AF_INET, SOCK_STREAM, 0);
     if (s < 0) return -1;
-    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-    memset(&a, 0, sizeof a);
-    a.sin_family = AF_INET;
-    a.sin_port = htons((unsigned short)port);
-    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (bind(s, (struct sockaddr *)&a, sizeof a) != 0 || listen(s, 8) != 0) { close(s); return -1; }
     pid = fork();
-    if (pid < 0) { close(s); return -1; }
+    if (pid < 0) { sy_close(s); return -1; }
     if (pid == 0) {
-        time_t end = time(NULL) + 40;
+        long end = sy_now_ms() + 40000;
         int n = 0;
-        while (time(NULL) < end) {
-            struct pollfd p;
-            int c;
-            p.fd = s; p.events = POLLIN; p.revents = 0;
-            if (poll(&p, 1, 500) <= 0) continue;
-            c = accept(s, NULL, NULL);
+        while (sy_now_ms() < end) {
+            int c = sy_tcp_accept(s, 500);
             if (c < 0) continue;
             rs_serve_one(c, script, n++, log);
-            close(c);
+            sy_close(c);
         }
         _exit(0);
     }
-    close(s);
+    sy_close(s);
     return (int)pid;
 }
 
 void rs_stop(int pid) {
-    if (pid > 0) { kill(pid, SIGKILL); waitpid(pid, NULL, 0); }
+    if (pid > 0) sy_kill(pid);
 }
 
-void rs_sleep_ms(int ms) {
-    poll(NULL, 0, ms);
-}
+void rs_sleep_ms(int ms) { sy_sleep_ms(ms); }
 
-long rs_now_ms(void) {
-    struct timespec t;
-    clock_gettime(CLOCK_MONOTONIC, &t);
-    return (long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
-}
+long rs_now_ms(void) { return sy_now_ms(); }
 
-int rs_pid(void) {
-    return (int)getpid();
-}
+int rs_pid(void) { return sy_pid(); }
 
-/* argv[0] via PATH; stdout+stderr into OUT (NUL-terminated, may be NULL). Exit code, or -1. */
+/* argv[0] via PATH; stdout+stderr into OUT (NUL-terminated, may be NULL).
+ * Exit code, or -1 when it could not run or died by a signal. */
 int rs_run(char **argv, char *out, int cap) {
-    int p[2], st;
-    size_t off = 0;
-    pid_t pid;
-    if (pipe(p) != 0) return -1;
-    pid = fork();
-    if (pid < 0) { close(p[0]); close(p[1]); return -1; }
-    if (pid == 0) {
-        dup2(p[1], 1); dup2(p[1], 2);
-        close(p[0]); close(p[1]);
-        execvp(argv[0], argv);
-        _exit(127);
-    }
-    close(p[1]);
-    for (;;) {
-        char tmp[4096];
-        ssize_t k = read(p[0], tmp, sizeof tmp);
-        if (k <= 0) break;
-        if (out && cap > 1) {
-            size_t take = (size_t)k;
-            if (off + take > (size_t)cap - 1) take = (size_t)cap - 1 - off;
-            memcpy(out + off, tmp, take);
-            off += take;
-        }
-    }
-    if (out && cap > 0) out[off] = 0;
-    close(p[0]);
-    if (waitpid(pid, &st, 0) < 0) return -1;
-    return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+    int cut, r = sy_run(argv, out, cap, &cut);
+    return r >= 0 && r < 128 ? r : -1;
 }
 
 /* Served statuses in LOG, comma-joined into OUT; the count. AT[i] is when
