@@ -17,6 +17,8 @@
 | 7 | `release/tools/seal_candidate.sh`：内联 `python3 -c`，外加 `python3 - <<PY` | 把旧链产出的 `unisacc-next.com` 推到 GHCR，写 `release/candidate.json` | 输入是旧 `product-build` 的 generation 目录（`.build.json`、`model-audit/models.json`），要跟着旧链一起定 | 新链的发布形态定下来后，用 jq 和 sha256sum 重写；在那之前和旧链一起退场 |
 | 8 | `ujs/scripts/release-artifacts.sh`（`python3 -m ujs`）、`ujs/scripts/uxe-gate.sh`（`python3 -m http.server`） | ujs 子项目的发布产物；本地静态服务 | **已迁（b230ade92f）**：版本读取、指纹核对、RELEASE.txt 三段改由 `ujs/scripts/release-check.mjs` 完成（对照旧 Python 跑过：RELEASE.txt 逐字节相同，指纹拒绝结果相同）；静态服务改用 `ujs/scripts/static-serve.mjs` | `FORCE_WEB_BUILD` 原来调已归档的 `python3 -m ujs web-build`，现在直接报出这个原因后退出。`ujs/scripts` 里已经没有 Python |
 | — | `research/**/*.sh` 里的 python | 历史研究现场 | 不在活路径上，是证据 | 不动 |
+| 9 | `kernel/` 41 个生成文件的溯源注释仍写着 "`python3 -m unisa emit-kernel` writes this file" | 文件头说明，不执行 Python | 这批文件当初是 Python 写的，之后没有用原生的 `tools/kernel-emit.cx` 重写过，所以 `kernel-emit --check . kernel` 41 个都报 DIFF。其中 40 个第一处差异在溯源注释；`unisa_headers.inc` 现在由 `tools/carried-header-export.cx` 写，和 `kernel-emit` 写出的内容不同，有两个写入者 | `kernel/` 是 `package-refresh` 的输入（源包刷新），一改包身份就变。放到下一次慢车道的"新 P3"一步：先定下 `unisa_headers.inc` 由哪个工具写，再用 `kernel-emit --write` 重写 `kernel/`，`--check` 41/41 SAME 之后再刷新包 |
+| 10 | `ujs/package.json` 的 `build`、`demo` 脚本：`python3 -m ujs web-build`、`python3 -m http.server` | npm 脚本 | 还有 `test:game`、`test:uxe:packet`、`test:uxe:input` 三个，要跑的 `_*_selftest_run.py` 早已归档（`archive/ujs-legacy-py-c/`），原本只是给 node 测试套的计时外壳，所以 uxe-gate 之前根本跑不起来 | **已迁**：三个测试改为直接 node 跑 `.mjs`（packet、input 均 rc 0）；`demo` 改用 `static-serve.mjs`（200）；`build` 明确报出"Python 构建器已归档"后退出 1。`test:game` 失败与 Python 无关：`practice/web/core/wasm_run.js` 不存在，是 ujs 原有的布局问题。`ujs/package.json` 里已经没有 python |
 
 ## 只有底层能 include（同日盘点）
 
