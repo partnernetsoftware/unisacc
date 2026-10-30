@@ -1,143 +1,139 @@
 /* CX probe */
-/* reload_owner.c -- C port of probes/reload_owner.py.
+/* reload_owner.cx -- CX port of probes/reload_owner.py.
  * POSIX real-process ownership regression, using the shipped compiler.
  *
- * Run mode, from apps/csih (no -o build; each case runs unisacc in run mode):
- *   /bin/sh /Users/wjc/repos/unisacc/unisacc.com reload_owner.c reload_owner_cli.c MODE PATH
- *   OUT
+ * Builds reload_owner_cli.cx once, then runs `CLI MODE PATH` per case from
+ * apps/csih; compiler $UNISACC, else APP/../../unisacc.com. Processes through
+ * cx_runv_timeout (own process group, killed past the limit); no libc string
+ * calls (tests/cxraw.cx ratchet).
+ * One build instead of -run per case: measured 2026-10-30, one -run costs ~4 s
+ * of compile, so 8 run-mode cases leave no margin in the contract's 40 s budget
+ * on a loaded machine. The binary lives in the probe's mkdtemp dir and is removed
+ * with it; nothing is cached across runs.
  *
- * Deviations from the Python original:
- *   - the file hash is FNV-1a 64 (sha256 is not in the libc). The before/after
- *     comparison keeps the same meaning: any byte change in a watched file fails;
- *   - the probe runs unisacc in run mode per case, as the Python did (the Python
- *     ran the run-mode compiler directly);
- *   - a failed case prints "FAIL: <step>" and exits 1 instead of a traceback.
+ * As the Python: per case limit 5 s, stdout must match exactly, stderr must be
+ * empty, and the watched sources plus the compiler must hash (sha256) the same
+ * before and after. A failed case prints "FAIL: <step>" and exits 1.
  */
-#include <dirent.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <poll.h>
-#include <signal.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/stat.h>
-#include <sys/wait.h>
-#include <time.h>
-#include <unistd.h>
 
-#include "csih_flat.h"
-#include "unisa_safedel.h"   /* the one deletion guard */
+#define OWN_CLI "reload_owner_cli.cx"
 
-#define ROOT_BIN CSIH_ROOT "/unisacc.com"
-#define OWN_CLI  "reload_owner_cli.cx"
+static char APP[1024], UNI[1200], BIN[1100];
 
-typedef struct { int rc; char out[1024]; char err[1024]; } Run;
+#define NWATCH 4
+static char WATCH[NWATCH][1200];
 
-static int failures = 0;
-#define CHECK(cond, msg) do { if (!(cond)) { printf("FAIL: %s\n", msg); return 1; } } while (0)
+static char ERRF[1100];   /* the CLI's stderr, a file in the probe's mkdtemp dir */
 
-/* Run argv with cwd=CSIH_APP, capture stdout and stderr separately. */
-static int run_capture(char *const argv[], Run *r) {
-    int po[2], pe[2], st;
-    pid_t pid;
-    size_t on = 0, en = 0;
-    time_t deadline = time(NULL) + 5;
-    int open_out = 1, open_err = 1, timed_out = 0;
+/* z-string equality without libc string calls (tests/cxraw.cx ratchet) */
+static int same(const char *a, const char *b) {
+    while (*a && *a == *b) { a++; b++; }
+    return *a == *b;
+}
 
-    r->rc = 127; r->out[0] = 0; r->err[0] = 0;
-    if (pipe(po) != 0) return -1;
-    if (pipe(pe) != 0) { close(po[0]); close(po[1]); return -1; }
-    pid = fork();
-    if (pid < 0) return -1;
-    if (pid == 0) {
-        if (chdir(CSIH_APP) != 0) _exit(126);
-        dup2(po[1], 1); dup2(pe[1], 2);
-        close(po[0]); close(po[1]); close(pe[0]); close(pe[1]);
-        execv(argv[0], argv);
-        _exit(127);
-    }
-    close(po[1]); close(pe[1]);
-    while (open_out || open_err) {
-        struct pollfd fds[2];
-        int n = 0, k;
-        if (time(NULL) > deadline) { timed_out = 1; kill(pid, SIGKILL); break; }
-        if (open_out) { fds[n].fd = po[0]; fds[n].events = POLLIN; n++; }
-        if (open_err) { fds[n].fd = pe[0]; fds[n].events = POLLIN; n++; }
-        if (poll(fds, (nfds_t)n, 100) <= 0) continue;
-        for (k = 0; k < n; k++) {
-            if (!(fds[k].revents & (POLLIN | POLLHUP))) continue;
-            if (fds[k].fd == po[0]) {
-                ssize_t got = read(po[0], r->out + on, sizeof r->out - 1 - on);
-                if (got <= 0) open_out = 0; else on += (size_t)got;
-            } else {
-                ssize_t got = read(pe[0], r->err + en, sizeof r->err - 1 - en);
-                if (got <= 0) open_err = 0; else en += (size_t)got;
-            }
-        }
-        if (on >= sizeof r->out - 1) open_out = 0;
-        if (en >= sizeof r->err - 1) open_err = 0;
-    }
-    r->out[on] = 0; r->err[en] = 0;
-    close(po[0]); close(pe[0]);
-    if (waitpid(pid, &st, 0) < 0) return -1;
-    if (timed_out) return -1;
-    r->rc = WIFEXITED(st) ? WEXITSTATUS(st) : 128;
+/* APP = cwd; UNI = $UNISACC or APP/../../unisacc.com; 0 when all watched files exist */
+static int locate(void) {
+    const char *e = getenv("UNISACC");
+    struct stat st;
+    int i;
+    if (!getcwd(APP, sizeof APP)) { printf("FAIL: getcwd: %s\n", strerror(errno)); return -1; }
+    if (e && e[0]) snprintf(UNI, sizeof UNI, "%s", e);
+    else snprintf(UNI, sizeof UNI, "%s/../../unisacc.com", APP);
+    snprintf(WATCH[0], sizeof WATCH[0], "%s/reload_owner.cx", APP);
+    snprintf(WATCH[1], sizeof WATCH[1], "%s/reload_owner.h", APP);
+    snprintf(WATCH[2], sizeof WATCH[2], "%s/%s", APP, OWN_CLI);
+    snprintf(WATCH[3], sizeof WATCH[3], "%s", UNI);
+    for (i = 0; i < NWATCH; i++)
+        if (stat(WATCH[i], &st) != 0) { printf("FAIL: %s: %s\n", WATCH[i], strerror(errno)); return -1; }
     return 0;
 }
 
-/* FNV-1a 64 over a file's bytes; 0 with *ok=0 on failure. */
-static unsigned long long fnv_file(const char *path, int *ok) {
-    unsigned long long h = 1469598103934665603ULL;
-    unsigned char buf[4096];
-    ssize_t n;
-    int fd = open(path, O_RDONLY);
-    *ok = fd >= 0;
-    if (fd < 0) return 0;
-    while ((n = read(fd, buf, sizeof buf)) > 0) {
-        ssize_t i;
-        for (i = 0; i < n; i++) { h ^= buf[i]; h *= 1099511628211ULL; }
-    }
-    close(fd);
-    return h;
-}
-
-static const char *WATCH[] = {
-    CSIH_APP "/reload_owner.cx", CSIH_APP "/reload_owner.h",
-    CSIH_APP "/" OWN_CLI, ROOT_BIN, NULL
-};
-
-static int hashes_same(const unsigned long long *before) {
-    int i, ok;
-    for (i = 0; WATCH[i]; i++) {
-        unsigned long long h = fnv_file(WATCH[i], &ok);
-        if (!ok || h != before[i]) return 0;
-    }
+/* sha256 hex of a file; 0 when it cannot be read */
+static int sha_file(const char *path, char hex[65]) {
+    size_t n = 0;
+    char *b = cx_read(path, &n);
+    if (!b) { hex[0] = 0; return 0; }
+    cx_sha256_hex(b, n, hex);
+    free(b);
     return 1;
 }
 
-static void hashes_take(unsigned long long *out) {
-    int i, ok;
-    for (i = 0; WATCH[i]; i++) out[i] = fnv_file(WATCH[i], &ok);
+static void hashes_take(char out[][65]) {
+    int i;
+    for (i = 0; i < NWATCH; i++) sha_file(WATCH[i], out[i]);
 }
 
-static int write_file(const char *path, const char *data, size_t len, mode_t mode) {
-    int fd = open(path, O_CREAT | O_TRUNC | O_WRONLY, mode);
-    if (fd < 0) return -1;
-    if (len && write(fd, data, len) != (ssize_t)len) { close(fd); return -1; }
-    close(fd);
-    return chmod(path, mode);
+static int hashes_same(char before[][65]) {
+    int i;
+    char h[65];
+    for (i = 0; i < NWATCH; i++)
+        if (!sha_file(WATCH[i], h) || !same(h, before[i])) return 0;
+    return 1;
 }
 
+/* the whole file into BUF (cap > its size), terminated; 0, or -1 when unreadable or too big */
 static int read_file(const char *path, char *buf, size_t cap, size_t *len) {
-    int fd = open(path, O_RDONLY);
-    ssize_t n;
-    if (fd < 0) return -1;
-    n = read(fd, buf, cap - 1);
-    close(fd);
-    if (n < 0) return -1;
-    buf[n] = 0; *len = (size_t)n;
+    size_t n = 0, i;
+    char *b = cx_read(path, &n);
+    if (!b) return -1;
+    if (n + 1 > cap) { free(b); return -1; }
+    for (i = 0; i < n; i++) buf[i] = b[i];
+    buf[n] = 0; *len = n;
+    free(b);
     return 0;
+}
+
+/* ARGS (NULL-terminated, at most 6) under /bin/sh, stdout into OUT and stderr into ERR
+ * (via the file ERRF), SECS limit (process group killed past it). 0 with *rc; -2 timeout; -1 error. */
+static int run_split(char **args, int secs, char *out, size_t cap, char *err, size_t errcap, int *rc) {
+    char *argv[12], *o = NULL;
+    size_t n = 0, i;
+    int k, r;
+    argv[0] = (char *)"/bin/sh"; argv[1] = (char *)"-c";
+    argv[2] = (char *)"f=$1; shift; exec \"$@\" 2>\"$f\""; argv[3] = (char *)"sh"; argv[4] = ERRF;
+    for (k = 0; k < 6 && args[k]; k++) argv[5 + k] = args[k];
+    argv[5 + k] = NULL;
+    r = cx_runv_timeout(argv, secs, &o, &n);
+    out[0] = 0; err[0] = 0;
+    if (o) {
+        if (n + 1 > cap) n = cap - 1;
+        for (i = 0; i < n; i++) out[i] = o[i];
+        out[n] = 0;
+        free(o);
+    }
+    if (r == 124) return -2;
+    if (r < 0) return -1;
+    {   /* a missing stderr file means sh could not redirect: an error, not empty stderr */
+        char *e = cx_read(ERRF, &n);
+        if (!e) return -1;
+        if (n + 1 > errcap) n = errcap - 1;
+        for (i = 0; i < n; i++) err[i] = e[i];
+        err[n] = 0;
+        free(e);
+    }
+    *rc = r;
+    return 0;
+}
+
+static int build(const char *dir) {
+    char *args[8];
+    static char out[8192], err[8192];
+    int rc = 0, r;
+    snprintf(BIN, sizeof BIN, "%s/reload_owner_cli", dir);
+    args[0] = (char *)"/bin/sh"; args[1] = UNI; args[2] = (char *)OWN_CLI;
+    args[3] = (char *)"-o"; args[4] = BIN; args[5] = NULL;
+    r = run_split(args, 30, out, sizeof out, err, sizeof err, &rc);
+    if (r != 0 || rc != 0) {
+        printf("FAIL: build %s rc %d | %.300s | %.300s\n", r == -2 ? "timeout" : "exit", rc, out, err);
+        return -1;
+    }
+    return 0;
+}
+
+/* DATA into a fresh file, then MODE (as the Python's write_bytes + chmod) */
+static int write_file(const char *path, const char *data, size_t len, mode_t mode) {
+    if (cx_write(path, data, len) != 0) return -1;
+    return chmod(path, mode);
 }
 
 static int file_mode(const char *path, mode_t *m, ino_t *ino) {
@@ -162,32 +158,27 @@ static int is_dir(const char *path) {
     return lstat(path, &st) == 0 && S_ISDIR(st.st_mode);
 }
 
-/* Remove a private tree without following symlinks. */
-/* through the one deletion guard (include/unisa_safedel.h): this probe's own mkdtemp tree (a site ceiling) or one
-   file in it; a refusal is reported and nothing is deleted */
-static void rm_rf(const char *path) {
-    char why[1400];
-    if (unisa_safedel(path, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 20000L, why, (int)sizeof why)) fprintf(stderr, "rm_rf: %s\n", why);
-}
+#define CHECK(cond, msg) do { if (!(cond)) { printf("FAIL: %s\n", msg); return 1; } } while (0)
 
 /* One CLI case. reason==NULL: expect rc 0 and exact expected text. */
 static int cli(const char *mode, const char *path, const char *reason,
                const char *expect_ok, const char *step) {
-    char *argv[8];
-    Run r;
+    char *args[4];
+    static char out[1024], err[1024];
     char expect[256];
-    argv[0] = (char *)"/bin/sh"; argv[1] = (char *)ROOT_BIN;
-    argv[2] = (char *)"-run"; argv[3] = (char *)OWN_CLI;
-    argv[4] = (char *)"--"; argv[5] = (char *)mode; argv[6] = (char *)path; argv[7] = NULL;
-    if (run_capture(argv, &r) != 0) { printf("FAIL: %s run error\n", step); return 1; }
-    if (r.err[0]) { printf("FAIL: %s stderr: %s\n", step, r.err); return 1; }
+    int rc = 0, r;
+    args[0] = BIN; args[1] = (char *)mode; args[2] = (char *)path; args[3] = NULL;
+    r = run_split(args, 5, out, sizeof out, err, sizeof err, &rc);
+    if (r != 0) { printf("FAIL: %s %s\n", step, r == -2 ? "timeout" : "run error"); return 1; }
+    if (err[0]) { printf("FAIL: %s stderr: %s\n", step, err); return 1; }
     if (reason) {
-        size_t n = strlen(r.out);
-        while (n && (r.out[n - 1] == '\n' || r.out[n - 1] == ' ')) r.out[--n] = 0;
+        size_t n = 0;
+        while (out[n]) n++;
+        while (n && (out[n - 1] == '\n' || out[n - 1] == ' ')) out[--n] = 0;
         snprintf(expect, sizeof expect, "FAIL: %s", reason);
-        CHECK(r.rc == 1 && !strcmp(r.out, expect), step);
+        if (!(rc == 1 && same(out, expect))) { printf("FAIL: %s: rc %d out=%s\n", step, rc, out); return 1; }
     } else {
-        CHECK(r.rc == 0 && !strcmp(r.out, expect_ok), step);
+        if (!(rc == 0 && same(out, expect_ok))) { printf("FAIL: %s: rc %d out=%s\n", step, rc, out); return 1; }
     }
     printf("PASS %s %s\n", mode, path);
     return 0;
@@ -202,7 +193,7 @@ static int cli(const char *mode, const char *path, const char *reason,
 #define CHECK(cond, msg) do { if (!(cond)) { printf("FAIL: %s\n", msg); goto done; } } while (0)
 
 int main(void) {
-    unsigned long long before[8];
+    char before[NWATCH][65];
     char tmpl[1024];   /* under the temp root: the one deletion guard deletes only there */
     char *tmp;
     char lock[1024], bad[1024], link_p[1024], dirp[1024], unsafe[1024];
@@ -213,11 +204,13 @@ int main(void) {
     mode_t m;
     ino_t ino, ino2, ino3;
     int ncases = 0;
+    const char *td = getenv("TMPDIR");
 
+    if (locate() != 0) { puts("RESULT FAIL reload_owner"); return 1; }
     hashes_take(before);
-    snprintf(tmpl, sizeof tmpl, "%s/csih-owner-XXXXXX", getenv("TMPDIR") && getenv("TMPDIR")[0] ? getenv("TMPDIR") : "/tmp");
+    snprintf(tmpl, sizeof tmpl, "%s/csih-owner-XXXXXX", td && td[0] ? td : "/tmp");
     tmp = mkdtemp(tmpl);
-    if (!tmp) { puts("FAIL: mkdtemp"); return 1; }
+    if (!tmp) { printf("FAIL: mkdtemp: %s\n", strerror(errno)); return 1; }
     snprintf(lock, sizeof lock, "%s/owner.lock", tmp);
     snprintf(bad, sizeof bad, "%s/bad.lock", tmp);
     snprintf(link_p, sizeof link_p, "%s/link.lock", tmp);
@@ -226,8 +219,9 @@ int main(void) {
     snprintf(unsafe_lock, sizeof unsafe_lock, "%s/unsafe/owner.lock", tmp);
     snprintf(parent_link, sizeof parent_link, "%s/parent-link", tmp);
     snprintf(parent_lock, sizeof parent_lock, "%s/parent-link/owner.lock", tmp);
-    strcpy(rel, "relative.lock");
-
+    snprintf(rel, sizeof rel, "relative.lock");
+    snprintf(ERRF, sizeof ERRF, "%s/cli.stderr", tmp);
+    if (build(tmp) != 0) goto done;
 
     /* 1: selftest creates the lock, 0600, empty. */
     if (cli("selftest", lock, NULL, SELFTEST_OK, "selftest")) goto done;
@@ -243,14 +237,14 @@ int main(void) {
     CHECK(write_file(bad, "keep", 4, 0644) == 0, "setup bad.lock");
     if (cli("check", bad, "lock not owned 0600 regular file", NULL, "bad perm")) goto done;
     ncases++;
-    CHECK(read_file(bad, data, sizeof data, &dlen) == 0 && !strcmp(data, "keep") && file_mode(bad, &m, &ino3) == 0 && m == 0644,
+    CHECK(read_file(bad, data, sizeof data, &dlen) == 0 && same(data, "keep") && file_mode(bad, &m, &ino3) == 0 && m == 0644,
           "bad.lock content/mode preserved");
 
     /* 4: symlink refused, target untouched. */
     CHECK(symlink(bad, link_p) == 0, "setup link.lock");
     if (cli("check", link_p, "open lock failed", NULL, "symlink")) goto done;
     ncases++;
-    CHECK(is_symlink(link_p) && read_file(bad, data, sizeof data, &dlen) == 0 && !strcmp(data, "keep"), "symlink target preserved");
+    CHECK(is_symlink(link_p) && read_file(bad, data, sizeof data, &dlen) == 0 && same(data, "keep"), "symlink target preserved");
 
     /* 5: directory refused. */
     CHECK(mkdir(dirp, 0700) == 0, "setup directory.lock");
@@ -276,10 +270,10 @@ int main(void) {
 
     rc = 0;
 done:
-    rm_rf(tmp);
+    cx_rmtree(tmp);   /* through the one deletion guard; a refusal is reported on stderr */
     if (rc == 0 && ncases == 8) printf("TOTAL: %d CLI cases passed; 3 real fork phases\n", ncases);
     if (!hashes_same(before)) { printf("FAIL: source/compiler changed during test\n"); rc = 1; }
     if (rc == 0 && ncases == 8) printf("hashes unchanged\nRESULT PASS reload_owner\n");
-    else printf("RESULT FAIL reload_owner\n");
+    else { rc = 1; printf("RESULT FAIL reload_owner\n"); }
     return rc;
 }

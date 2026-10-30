@@ -1,109 +1,136 @@
 /* CX probe */
-/* reload_session.c -- C port of probes/reload_session.py.
+/* reload_session.cx -- CX port of probes/reload_session.py.
  * Strict undeployed v2 automatic-execution state through the real session CLI
- * (roundtrip mode of reload_session_cli.c), run mode per case.
+ * (roundtrip mode of reload_session_cli.cx).
  *
- * Run from apps/csih:
- *   /bin/sh /Users/wjc/repos/unisacc/unisacc.com -include ABS/json.h json.cx reload_state.c \
- *       reload_session_decode.c reload_session_encode.c reload_session_cli.c roundtrip FIXTURE
+ * Builds reload_session_cli.cx once, then runs `CLI roundtrip FIXTURE` per case
+ * from apps/csih; compiler $UNISACC, else APP/../../unisacc.com. One build instead
+ * of -run per case: measured 2026-10-30, one -run costs ~6.6 s of compile, so 12
+ * run-mode cases (~80 s) cannot fit the contract's 40 s budget. The binary lives in
+ * the probe's mkdtemp dir and is removed with it; nothing is cached across runs.
+ * Processes through cx_runv_timeout (own process group, killed past the limit);
+ * no libc string calls (tests/cxraw.cx ratchet).
+ *
+ * As the Python: per case limit 4 s, stderr must be empty, and the sources plus
+ * the compiler must hash (sha256) the same before and after.
  *
  * Deviations from the Python original:
- *   - json.c is not in apps/csih any more; the source is json.cx (the unit
- *     reload_state.c builds with);
+ *   - the sources are the .cx modules the CLI builds from (json.cx, reload_state.cx,
+ *     reload_session.cx and its decode/encode units);
  *   - the Python compared json.loads(restored) == json.loads(raw). Without a JSON
  *     parser in the probe, valid cases check the restored output (whitespace
  *     removed) for each field as a `"key":value` token, so key order and spacing
- *     are not part of the verdict. Failure cases compare the FAIL line exactly;
- *   - FNV-1a 64 stands in for sha256 in the before/after hash check.
+ *     are not part of the verdict. Failure cases compare the FAIL line exactly.
  */
-#include <fcntl.h>
-#include <poll.h>
-#include <signal.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/stat.h>
-#include <sys/wait.h>
-#include <time.h>
-#include "unisa_safedel.h"
-#include <unistd.h>
-
-#include "csih_flat.h"
 
 #define SHA_A "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-#define ROOT_BIN CSIH_ROOT "/unisacc.com"
+#define CLI_SRC "reload_session_cli.cx"
 
-static char FIX[1100];
+static char APP[1024], UNI[1200], BIN[1100], FIX[1100], ERRF[1100];
 
-static const char *WATCH[] = {
-    CSIH_APP "/json.cx", CSIH_APP "/reload_state.cx", CSIH_APP "/reload_session_decode.cx",
-    CSIH_APP "/reload_session_encode.cx", CSIH_APP "/reload_session_cli.cx",
-    CSIH_APP "/reload_session.h", ROOT_BIN, NULL
+static const char *const WATCH_NAMES[] = {
+    "json.cx", "reload_state.cx", "reload_session.cx", "reload_session_decode.cx",
+    "reload_session_encode.cx", CLI_SRC, "reload_session.h", NULL
 };
+#define NWATCH 8
+static char WATCH[NWATCH][1200];
 
-static unsigned long long fnv_file(const char *path, int *ok) {
-    unsigned long long h = 1469598103934665603ULL;
-    unsigned char buf[4096];
-    ssize_t n;
-    int fd = open(path, O_RDONLY);
-    *ok = fd >= 0;
-    if (fd < 0) return 0;
-    while ((n = read(fd, buf, sizeof buf)) > 0) {
-        ssize_t i;
-        for (i = 0; i < n; i++) { h ^= buf[i]; h *= 1099511628211ULL; }
+/* z-string helpers without libc string calls */
+static long slen(const char *s) { long n = 0; while (s[n]) n++; return n; }
+static int same(const char *a, const char *b) {
+    while (*a && *a == *b) { a++; b++; }
+    return *a == *b;
+}
+static int has(const char *s, const char *p) {
+    long n = slen(s), pn = slen(p), i, j;
+    for (i = 0; i + pn <= n; i++) {
+        for (j = 0; j < pn && s[i + j] == p[j]; j++) {}
+        if (j == pn) return 1;
     }
-    close(fd);
-    return h;
+    return 0;
 }
 
-static void hashes_take(unsigned long long *out) {
-    int i, ok;
-    for (i = 0; WATCH[i]; i++) out[i] = fnv_file(WATCH[i], &ok);
+/* APP = cwd; UNI = $UNISACC or APP/../../unisacc.com; 0 when all watched files exist */
+static int locate(void) {
+    const char *e = getenv("UNISACC");
+    struct stat st;
+    int i;
+    if (!getcwd(APP, sizeof APP)) { printf("FAIL: getcwd: %s\n", strerror(errno)); return -1; }
+    if (e && e[0]) snprintf(UNI, sizeof UNI, "%s", e);
+    else snprintf(UNI, sizeof UNI, "%s/../../unisacc.com", APP);
+    for (i = 0; WATCH_NAMES[i]; i++) snprintf(WATCH[i], sizeof WATCH[i], "%s/%s", APP, WATCH_NAMES[i]);
+    snprintf(WATCH[i], sizeof WATCH[i], "%s", UNI);
+    for (i = 0; i < NWATCH; i++)
+        if (stat(WATCH[i], &st) != 0) { printf("FAIL: %s: %s\n", WATCH[i], strerror(errno)); return -1; }
+    return 0;
 }
 
-static int hashes_same(const unsigned long long *before) {
-    int i, ok;
-    for (i = 0; WATCH[i]; i++) {
-        unsigned long long h = fnv_file(WATCH[i], &ok);
-        if (!ok || h != before[i]) return 0;
-    }
+static int sha_file(const char *path, char hex[65]) {
+    size_t n = 0;
+    char *b = cx_read(path, &n);
+    if (!b) { hex[0] = 0; return 0; }
+    cx_sha256_hex(b, n, hex);
+    free(b);
     return 1;
 }
 
-/* merged stdout+stderr of argv, 60 s limit (run mode compiles per case) */
-static int run_merged(char *const argv[], char *out, size_t cap, int *rc) {
-    int p[2], st, open_fd = 1, timed_out = 0;
-    pid_t pid;
-    size_t on = 0;
-    time_t deadline = time(NULL) + 60;
-    out[0] = 0; *rc = 127;
-    if (pipe(p) != 0) return -1;
-    pid = fork();
-    if (pid < 0) { close(p[0]); close(p[1]); return -1; }
-    if (pid == 0) {
-        if (chdir(CSIH_APP) != 0) _exit(126);
-        dup2(p[1], 1); dup2(p[1], 2);
-        close(p[0]); close(p[1]);
-        execv(argv[0], argv);
-        _exit(127);
+static void hashes_take(char out[][65]) {
+    int i;
+    for (i = 0; i < NWATCH; i++) sha_file(WATCH[i], out[i]);
+}
+
+static int hashes_same(char before[][65]) {
+    int i;
+    char h[65];
+    for (i = 0; i < NWATCH; i++)
+        if (!sha_file(WATCH[i], h) || !same(h, before[i])) return 0;
+    return 1;
+}
+
+/* ARGS (NULL-terminated, at most 6) under /bin/sh, stdout into OUT and stderr into ERR
+ * (via the file ERRF), SECS limit (process group killed past it). 0 with *rc; -2 timeout; -1 error. */
+static int run_split(char **args, int secs, char *out, size_t cap, char *err, size_t errcap, int *rc) {
+    char *argv[12], *o = NULL;
+    size_t n = 0, i;
+    int k, r;
+    argv[0] = (char *)"/bin/sh"; argv[1] = (char *)"-c";
+    argv[2] = (char *)"f=$1; shift; exec \"$@\" 2>\"$f\""; argv[3] = (char *)"sh"; argv[4] = ERRF;
+    for (k = 0; k < 6 && args[k]; k++) argv[5 + k] = args[k];
+    argv[5 + k] = NULL;
+    r = cx_runv_timeout(argv, secs, &o, &n);
+    out[0] = 0; err[0] = 0;
+    if (o) {
+        if (n + 1 > cap) n = cap - 1;
+        for (i = 0; i < n; i++) out[i] = o[i];
+        out[n] = 0;
+        free(o);
     }
-    close(p[1]);
-    while (open_fd) {
-        struct pollfd f;
-        if (time(NULL) > deadline) { timed_out = 1; kill(pid, SIGKILL); break; }
-        f.fd = p[0]; f.events = POLLIN;
-        if (poll(&f, 1, 100) <= 0) continue;
-        if (on + 1 >= cap) { open_fd = 0; break; }
-        {
-            ssize_t got = read(p[0], out + on, cap - 1 - on);
-            if (got <= 0) open_fd = 0; else on += (size_t)got;
-        }
+    if (r == 124) return -2;
+    if (r < 0) return -1;
+    {   /* a missing stderr file means sh could not redirect: an error, not empty stderr */
+        char *e = cx_read(ERRF, &n);
+        if (!e) return -1;
+        if (n + 1 > errcap) n = errcap - 1;
+        for (i = 0; i < n; i++) err[i] = e[i];
+        err[n] = 0;
+        free(e);
     }
-    out[on] = 0;
-    close(p[0]);
-    if (waitpid(pid, &st, 0) < 0) return -1;
-    if (timed_out) return -1;
-    *rc = WIFEXITED(st) ? WEXITSTATUS(st) : 128;
+    *rc = r;
+    return 0;
+}
+
+static int build(const char *dir) {
+    char *args[8];
+    static char out[8192], err[8192];
+    int rc = 0, r;
+    snprintf(BIN, sizeof BIN, "%s/reload_session_cli", dir);
+    args[0] = (char *)"/bin/sh"; args[1] = UNI; args[2] = (char *)CLI_SRC;
+    args[3] = (char *)"-o"; args[4] = BIN; args[5] = NULL;
+    r = run_split(args, 30, out, sizeof out, err, sizeof err, &rc);
+    if (r != 0 || rc != 0) {
+        printf("FAIL build: %s rc %d | %.300s | %.300s\n", r == -2 ? "timeout" : "exit", rc, out, err);
+        return -1;
+    }
     return 0;
 }
 
@@ -136,33 +163,29 @@ static int failed = 0, passed = 0;
  * whitespace-free token in tokens[] (NULL-terminated). */
 static void run_case(const char *name, const char *raw, const char *reason,
                      const char *const *tokens) {
-    char *argv[12];
-    static char out[8192], norm[8192];
-    int rc = 0, ok = 1, i;
-    FILE *f = fopen(FIX, "wb");
-    if (!f) { printf("FAIL %s: fixture write\n", name); failed++; return; }
-    if (fwrite(raw, 1, strlen(raw), f) != strlen(raw)) { fclose(f); printf("FAIL %s: fixture write\n", name); failed++; return; }
-    fclose(f);
-    argv[0] = (char *)"/bin/sh"; argv[1] = (char *)ROOT_BIN;
-    argv[2] = (char *)"-run"; argv[3] = (char *)"reload_session_cli.cx";
-    argv[4] = (char *)"--"; argv[5] = (char *)"roundtrip"; argv[6] = FIX; argv[7] = NULL;
-    if (run_merged(argv, out, sizeof out, &rc) != 0) { printf("FAIL %s: timeout\n", name); failed++; return; }
+    char *args[4];
+    static char out[8192], err[2048], norm[8192];
+    int rc = 0, ok = 1, i, r;
+    if (cx_write(FIX, raw, (size_t)slen(raw)) != 0) { printf("FAIL %s: fixture write\n", name); failed++; return; }
+    args[0] = BIN; args[1] = (char *)"roundtrip"; args[2] = FIX; args[3] = NULL;
+    r = run_split(args, 4, out, sizeof out, err, sizeof err, &rc);
+    if (r != 0) { printf("FAIL %s: %s\n", name, r == -2 ? "timeout" : "run error"); failed++; return; }
+    if (err[0]) { printf("FAIL %s: stderr: %.200s\n", name, err); failed++; return; }
     if (reason) {
-        size_t k = strlen(out);
+        long k = slen(out);
         char want[300];
         while (k && (out[k - 1] == '\n' || out[k - 1] == ' ')) out[--k] = 0;
         snprintf(want, sizeof want, "FAIL decode_v2 input: %s", reason);
-        if (rc != 1 || strcmp(out, want) != 0) { ok = 0; printf("FAIL %s: rc %d out=%s\n", name, rc, out); }
+        if (rc != 1 || !same(out, want)) { ok = 0; printf("FAIL %s: rc %d out=%s\n", name, rc, out); }
     } else {
-        if (rc != 0 || strncmp(out, "PASS\n", 5) != 0) {
+        if (rc != 0 || !(out[0] == 'P' && out[1] == 'A' && out[2] == 'S' && out[3] == 'S' && out[4] == '\n')) {
             ok = 0; printf("FAIL %s: rc %d out=%.200s\n", name, rc, out);
         } else {
-            strncpy(norm, out + 5, sizeof norm - 1);
-            norm[sizeof norm - 1] = 0;
+            snprintf(norm, sizeof norm, "%s", out + 5);
             squeeze(norm);
             if (tokens) {
                 for (i = 0; tokens[i]; i++) {
-                    if (!strstr(norm, tokens[i])) { ok = 0; printf("FAIL %s: missing %s\n", name, tokens[i]); break; }
+                    if (!has(norm, tokens[i])) { ok = 0; printf("FAIL %s: missing %s\n", name, tokens[i]); break; }
                 }
             }
         }
@@ -187,15 +210,18 @@ int main(void) {
     char tmpl[1024];   /* under the temp root: the deletion guard's whitelist */
     char *tmp;
     static char raw[4096], buf[4096];
-    unsigned long long before[8];
+    char before[NWATCH][65];
     int rc = 1;
+    const char *td = getenv("TMPDIR");
 
-    {   const char *td = getenv("TMPDIR"); if (!td || !td[0]) td = "/tmp";
-        snprintf(tmpl, sizeof tmpl, "%s/csih-session-loop-XXXXXX", td); }
+    if (locate() != 0) { puts("RESULT FAIL reload_session"); return 1; }
+    snprintf(tmpl, sizeof tmpl, "%s/csih-session-loop-XXXXXX", td && td[0] ? td : "/tmp");
     hashes_take(before);
     tmp = mkdtemp(tmpl);
-    if (!tmp) { puts("FAIL mkdtemp"); return 1; }
+    if (!tmp) { printf("FAIL mkdtemp: %s\n", strerror(errno)); return 1; }
     snprintf(FIX, sizeof FIX, "%s/state.json", tmp);
+    snprintf(ERRF, sizeof ERRF, "%s/cli.stderr", tmp);
+    if (build(tmp) != 0) goto done;
 
     state_json(raw, sizeof raw, "true", "8", NULL);
     run_case("True", raw, NULL, TOK_TRUE);
@@ -224,8 +250,8 @@ int main(void) {
 
     printf("TOTAL: %d passed, %d failed\n", passed, failed);
     rc = (failed == 0 && passed == 12) ? 0 : 1;
-    {   char why[700];   /* the one deletion guard (include/unisa_safedel.h; commissar ruling 2026-10-23) */
-        if (unisa_safedel(tmp, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 0, why, (int)sizeof why)) fprintf(stderr, "safedel: %s\n", why); }
+done:
+    cx_rmtree(tmp);   /* through the one deletion guard; a refusal is reported on stderr */
     if (!hashes_same(before)) { printf("FAIL: source/compiler changed during probe\n"); rc = 1; }
     else if (rc == 0) printf("source/compiler hashes unchanged\n");
     printf("RESULT %s reload_session\n", rc == 0 ? "PASS" : "FAIL");

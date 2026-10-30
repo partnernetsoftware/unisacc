@@ -1,110 +1,132 @@
 /* CX probe */
-/* reload_state.c -- C port of probes/reload_state.py (v1 state validator matrix).
+/* reload_state.cx -- CX port of probes/reload_state.py (v1 state validator matrix).
  *
- * Runs the real CLI (unisacc run mode, per fixture) and asserts
- * the exit code and the PASS/FAIL line it prints. Raw text cases (duplicate
- * keys, hand-built JSON) are written exactly as the Python spliced them.
+ * Builds the real CLI once (reload_state_cli.cx, as the Python built it with -o),
+ * then runs `CLI check FIXTURE` per case and asserts the exit code and the
+ * PASS/FAIL line it prints. Raw text cases (duplicate keys, hand-built JSON) are
+ * written exactly as the Python spliced them.
  *
- *   /bin/sh /Users/wjc/repos/unisacc/unisacc.com -include ABS/json.h json.cx reload_state.c reload_state_cli.c check FIX
+ *   cwd apps/csih; compiler $UNISACC, else APP/../../unisacc.com
+ *   processes through cx_runv_timeout (own process group, killed past the limit),
+ *   strings through the plain loops below, no libc string calls (tests/cxraw.cx ratchet;
+ *   the L0 text package is not reachable from probes/ without a link of its own)
+ *
+ * One build instead of -run per case: measured 2026-10-30, one `-run
+ * reload_state_cli.cx` costs ~5.6 s (compile) and the binary ~2 ms, so 20 run-mode
+ * cases (~112 s) cannot fit the contract's 40 s budget. The binary lives in the
+ * probe's mkdtemp dir and is removed with it; nothing is cached across runs.
  *
  * Deviations from the Python original:
- *   - run mode throughout (no -o); if run mode drops .cx definitions the failure is a unisacc defect;
  *   - json.dumps spacing is reproduced by hand; the validator sees the same keys
  *     and values, which is what the cases test;
- *   - stdout and stderr are merged into one stream, as Python's (stdout+stderr).
+ *   - stdout and stderr are merged into one stream, as Python's (stdout+stderr);
+ *   - per-case limit 4 s, as the Python's timeout=4; build limit 30 s.
  */
-#include "../../../include/unisa_safedel.h"   /* the one deletion guard (commissar ruling 2026-10-23); first: its feature macro */
-#include <errno.h>
-#include <fcntl.h>
-#include <poll.h>
-#include <signal.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/stat.h>
-#include <sys/wait.h>
-#include <time.h>
-#include <unistd.h>
-
-#include "csih_flat.h"
 
 #define SHA_A "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
-static char DIR[1024];
+static char DIR[1024], APP[1024], UNI[1200], BIN[1100];
 
-/* combined stdout+stderr, 4 s limit */
-static int run_merged(char *const argv[], char *out, size_t cap, int *rc) {
-    int p[2], st;
-    pid_t pid;
-    size_t on = 0;
-    time_t deadline = time(NULL) + 60;
-    int open_fd = 1, timed_out = 0;
+/* length of z-string S within CAP, or -1 */
+static long tx_len(const char *s, long cap) {
+    long i;
+    for (i = 0; i < cap; i++) if (!s[i]) return i;
+    return -1;
+}
+/* 1 when S[0..n) starts with P[0..pn) */
+static int tx_prefix(const char *s, long n, const char *p, long pn) {
+    long i;
+    if (pn < 0 || pn > n) return 0;
+    for (i = 0; i < pn; i++) if (s[i] != p[i]) return 0;
+    return 1;
+}
+/* offset of P[0..pn) in S[0..n), or -1 */
+static long tx_find(const char *s, long n, const char *p, long pn) {
+    long i;
+    if (pn < 0) return -1;
+    for (i = 0; i + pn <= n; i++) if (tx_prefix(s + i, n - i, p, pn)) return i;
+    return -1;
+}
+/* SRC[0..n) into DST (cap > n) and terminate */
+static void tx_copy(char *dst, long cap, const char *src, long n) {
+    long i;
+    if (n >= cap) n = cap - 1;
+    for (i = 0; i < n; i++) dst[i] = src[i];
+    dst[n] = 0;
+}
+
+/* APP = cwd; UNI = $UNISACC or APP/../../unisacc.com; 0 when both exist */
+static int locate(void) {
+    const char *e = getenv("UNISACC");
+    char probe[1200];
+    struct stat st;
+    if (!getcwd(APP, sizeof APP)) { printf("FAIL: getcwd: %s\n", strerror(errno)); return -1; }
+    if (e && e[0]) snprintf(UNI, sizeof UNI, "%s", e);
+    else snprintf(UNI, sizeof UNI, "%s/../../unisacc.com", APP);
+    snprintf(probe, sizeof probe, "%s/reload_state_cli.cx", APP);
+    if (stat(probe, &st) != 0) { printf("FAIL: %s: %s\n", probe, strerror(errno)); return -1; }
+    if (stat(UNI, &st) != 0) { printf("FAIL: %s: %s\n", UNI, strerror(errno)); return -1; }
+    return 0;
+}
+
+/* ARGS (NULL-terminated, at most 7) under /bin/sh with stderr merged into stdout, as the
+ * Python's stdout+stderr; SECS limit. 0 with *rc and OUT (truncated to cap); -2 timeout; -1 error. */
+static int run_merged(char **args, int secs, char *out, long cap, int *rc) {
+    char *argv[12], *o = NULL;
+    size_t n = 0;
+    int i, r;
+    argv[0] = (char *)"/bin/sh"; argv[1] = (char *)"-c"; argv[2] = (char *)"exec \"$@\" 2>&1"; argv[3] = (char *)"sh";
+    for (i = 0; i < 7 && args[i]; i++) argv[4 + i] = args[i];
+    argv[4 + i] = NULL;
+    r = cx_runv_timeout(argv, secs, &o, &n);
     out[0] = 0;
-    *rc = 127;
-    if (pipe(p) != 0) return -1;
-    pid = fork();
-    if (pid < 0) { close(p[0]); close(p[1]); return -1; }
-    if (pid == 0) {
-        if (chdir(CSIH_APP) != 0) _exit(126);
-        dup2(p[1], 1); dup2(p[1], 2);
-        close(p[0]); close(p[1]);
-        execv(argv[0], argv);
-        _exit(127);
+    if (o) { if ((long)n >= cap) n = (size_t)(cap - 1); tx_copy(out, cap, o, (long)n); free(o); }
+    if (r == 124) return -2;
+    if (r < 0) return -1;
+    *rc = r;
+    return 0;
+}
+
+static int build(void) {
+    char *args[8];
+    static char out[8192];
+    int rc = 0, r;
+    snprintf(BIN, sizeof BIN, "%s/reload_state_cli", DIR);
+    args[0] = (char *)"/bin/sh"; args[1] = UNI; args[2] = (char *)"reload_state_cli.cx";
+    args[3] = (char *)"-o"; args[4] = BIN; args[5] = NULL;
+    r = run_merged(args, 30, out, (long)sizeof out, &rc);
+    if (r != 0 || rc != 0) {
+        printf("FAIL build: %s rc %d | %.400s\n", r == -2 ? "timeout" : "exit", rc, out);
+        return -1;
     }
-    close(p[1]);
-    while (open_fd) {
-        struct pollfd f;
-        if (time(NULL) > deadline) { timed_out = 1; kill(pid, SIGKILL); break; }
-        f.fd = p[0]; f.events = POLLIN;
-        if (poll(&f, 1, 100) <= 0) continue;
-        if (on + 1 >= cap) { open_fd = 0; break; }
-        {
-            ssize_t got = read(p[0], out + on, cap - 1 - on);
-            if (got <= 0) open_fd = 0; else on += (size_t)got;
-        }
-    }
-    out[on] = 0;
-    close(p[0]);
-    if (waitpid(pid, &st, 0) < 0) return -1;
-    if (timed_out) return -1;
-    *rc = WIFEXITED(st) ? WEXITSTATUS(st) : 128;
     return 0;
 }
 
 static int failed = 0, passed = 0;
 
-/* Write raw_text to a fixture, run `unisacc run: check FIXTURE`, check exit and text. */
+/* Write raw_text to a fixture, run `CLI check FIXTURE`, check exit and text. */
 static void run_check(const char *name, const char *raw, int expect_code, int expect_ok, const char *why) {
-    char path[1100], out[4096];
-    char *argv[10];
-    int rc = 0, ok = 1;
-    FILE *f;
-    size_t n;
+    char path[1100], buf[4096], *out = buf;
+    char *args[4];
+    int rc = 0, ok = 1, r;
+    long k, rawn = tx_len(raw, 1L << 20);
     snprintf(path, sizeof path, "%s/state.json", DIR);
-    f = fopen(path, "wb");
-    if (!f) { printf("FAIL %s: cannot write fixture\n", name); failed++; return; }
-    n = fwrite(raw, 1, strlen(raw), f);
-    fclose(f);
-    if (n != strlen(raw)) { printf("FAIL %s: short write\n", name); failed++; return; }
-    argv[0] = (char *)"/bin/sh"; argv[1] = (char *)CSIH_ROOT "/unisacc.com";
-    argv[2] = (char *)"-run"; argv[3] = (char *)"reload_state_cli.cx";
-    argv[4] = (char *)"--"; argv[5] = (char *)"check"; argv[6] = path; argv[7] = NULL;
-    if (run_merged(argv, out, sizeof out, &rc) != 0) {
-        printf("FAIL %s: timeout\n", name); failed++; return;
-    }
-    {
-        size_t k = strlen(out);
-        while (k && (out[k - 1] == '\n' || out[k - 1] == ' ')) out[--k] = 0;
-        while (out[0] == '\n' || out[0] == ' ') memmove(out, out + 1, strlen(out));
-    }
+    if (rawn < 0 || cx_write(path, raw, (size_t)rawn) != 0) { printf("FAIL %s: cannot write fixture\n", name); failed++; return; }
+    args[0] = BIN; args[1] = (char *)"check"; args[2] = path; args[3] = NULL;
+    r = run_merged(args, 4, buf, (long)sizeof buf, &rc);
+    if (r != 0) { printf("FAIL %s: %s\n", name, r == -2 ? "timeout" : "run error"); failed++; return; }
+    /* strip, as the Python's .strip() of newlines and spaces */
+    k = tx_len(buf, (long)sizeof buf);
+    while (k > 0 && (buf[k - 1] == '\n' || buf[k - 1] == ' ')) buf[--k] = 0;
+    while (*out == '\n' || *out == ' ') { out++; k--; }
     if (rc != expect_code) {
         ok = 0;
         printf("FAIL %s: exit %d, want %d | %s\n", name, rc, expect_code, out);
     } else if (expect_ok) {
-        if (strncmp(out, "PASS: ok", 8) != 0) { ok = 0; printf("FAIL %s: not PASS: ok | %s\n", name, out); }
+        if (!tx_prefix(out, k, "PASS: ok", 8)) { ok = 0; printf("FAIL %s: not PASS: ok | %s\n", name, out); }
     } else {
-        if (strncmp(out, "FAIL:", 5) != 0) { ok = 0; printf("FAIL %s: not FAIL | %s\n", name, out); }
-        else if (why && !strstr(out, why)) { ok = 0; printf("FAIL %s: want '%s' | %s\n", name, why, out); }
+        if (!tx_prefix(out, k, "FAIL:", 5)) { ok = 0; printf("FAIL %s: not FAIL | %s\n", name, out); }
+        else if (why && tx_find(out, k, why, tx_len(why, 256)) < 0) { ok = 0; printf("FAIL %s: want '%s' | %s\n", name, why, out); }
     }
     if (ok) { printf("PASS %s: exit %d %s\n", name, rc, out); passed++; }
     else failed++;
@@ -133,21 +155,19 @@ static void rep(char *dst, size_t cap, char c, size_t count) {
     dst[count] = 0;
 }
 
-/* P (a tree) through the one guard, never a raw unlink/rmdir; a refusal is reported, the probe's verdict stands */
-static void sd_gone(const char *p) {
-    char why[600];
-    if (unisa_safedel(p, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 0, why, (int)sizeof why)) fprintf(stderr, "probe: %s\n", why);
-}
 int main(void) {
     char tmpl[1100];
     char *tmp;
-    char buf[8192], goal4095[4200], goal4096[4200], q8[512], q9[512], raw[8192];
-    int rc = 0;
+    static char buf[8192], goal4095[4200], goal4096[4200], raw[8192];
+    int rc = 1;
+    const char *td = getenv("TMPDIR");
 
-    snprintf(tmpl, sizeof tmpl, "%s/csih-state-XXXXXX", getenv("TMPDIR") && *getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");   /* the guard's temp root */
+    if (locate() != 0) { puts("RESULT FAIL reload_state"); return 1; }
+    snprintf(tmpl, sizeof tmpl, "%s/csih-state-XXXXXX", td && *td ? td : "/tmp");   /* the guard's temp root */
     tmp = mkdtemp(tmpl);
-    if (!tmp) { puts("FAIL: mkdtemp"); return 1; }
-    strcpy(DIR, tmp);
+    if (!tmp) { printf("FAIL: mkdtemp: %s\n", strerror(errno)); return 1; }
+    snprintf(DIR, sizeof DIR, "%s", tmp);
+    if (build() != 0) goto done;
 
     /* valid */
     base_json(buf, sizeof buf, "1", "sess-abc", SHA_A, "do the thing", "hello world", "/tmp", J_OK, Q_EMPTY, "");
@@ -214,12 +234,9 @@ int main(void) {
     run_check("dup_queue_reject", buf, 1, 0, "duplicate");
 
     printf("TOTAL: %d passed, %d failed, %d total\n", passed, failed, passed + failed);
-    rc = (failed == 0 && passed > 0) ? 0 : 1;
+    rc = (failed == 0 && passed == 20) ? 0 : 1;
 done:
-    /* remove fixture and binary */
-    {
-        sd_gone(DIR);   /* state.json lies in DIR */
-    }
+    cx_rmtree(DIR);   /* fixture and built CLI lie in DIR; a refusal is reported on stderr, the verdict stands */
     printf("RESULT %s reload_state\n", rc == 0 ? "PASS" : "FAIL");
     return rc;
 }
