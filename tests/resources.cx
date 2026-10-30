@@ -141,6 +141,34 @@ static void inc_quote_missing(const char *dir,const char *cap,const char *srcnam
  np_result r=key_run(dir,full,0,srcname,"inc-quote-sc1");ck(r.rc==0&&!r.errn&&r.outn>0,"inc-quote-sc1-map-accept");np_free(&r);
  r=key_run(dir,missing,0,srcname,"inc-quote-missing");ck(r.rc==2&&!r.outn&&tx_find(r.err,(long)r.errn,"MISSING_EXPLICIT_RESOURCE 00696e632f712f",40)>=0,"inc-quote-missing-refused");np_free(&r);
 }
+/* material() built from another capture directory CAP instead of the main one */
+static void material_from(const char *cap,const char *name,const char *table,size_t n,char *out){
+ char keep[4400];if(tx_copy(keep,sizeof keep,capdir,tx_len(capdir,sizeof capdir))||tx_copy(capdir,sizeof capdir,cap,tx_len(cap,4400)))die("capdir");
+ material(name,table,n,out);if(tx_copy(capdir,sizeof capdir,keep,tx_len(keep,sizeof keep)))die("capdir");}
+/* ri.class.inc-quote.EMPTY and .ABSENT, each against the same compile on disk (cwd = the fixture, source m.c):
+   EMPTY  -- the \0inc/q/h.h row re-signed as a present 0-byte blob gives the bytes of compiling next to an empty h.h;
+   ABSENT -- that row ABSENT, with the rest of the search chain (\0cli/include-dir, \0hdr/h.h, \0cli/quote-dir,
+             \0inc/a/include/h.h) ABSENT, gives the E2 positioned no-such-file #include diagnostic, rc 1, stderr
+             byte-equal to compiling with no h.h -- not a resource-layer death */
+static np_result inc_disk(const char *leaf,const char *header){char d[4400],p[4400];path(d,sizeof d,work,leaf);if(sy_mkdir(d,0700))die("inc fixture");
+ const char *m="#include \"h.h\"\nint main(void){return 0;}\n";path(p,sizeof p,d,"m.c");save(p,m,tx_len(m,128));if(header){path(p,sizeof p,d,"h.h");save(p,header,tx_len(header,64));}
+ return key_run(d,0,0,"m.c",leaf);}
+static void inc_quote_states(void){
+ char cap[4400],d[4400],p[4400],led[4400];path(d,sizeof d,work,"incq");path(cap,sizeof cap,work,"incq-capture");
+ np_result c=inc_disk("incq","int v=1;\n");np_free(&c);
+ c=key_run(d,0,cap,"m.c","incq-capture");ck(c.rc==0&&!c.errn&&c.outn>0,"inc-quote-capture");np_free(&c);
+ size_t tn;path(p,sizeof p,cap,"resources.tsv");char *t=load(p,&tn);np_buf base={0};sc1_map(t,(long)tn,1,&base);mm_free(t);
+ char eh[65];cx_sha256_hex("",0,eh);char row[256];
+ np_buf e={0};np_put(&e,base.p,base.n);if(cx_fmt(row,sizeof row,"00696e632f712f682e68\t1\tempty.h\t0\t%s\n",eh))die("empty row");np_put(&e,row,tx_len(row,sizeof row));
+ material_from(cap,"incq-empty-ledger",e.p,e.n,led);path(p,sizeof p,led,"empty.h");save(p,"",0);mm_free(e.p);
+ np_result want=inc_disk("incq-disk-empty","");np_result got=key_run(d,led,0,"m.c","incq-empty");
+ ck(want.rc==0&&got.rc==0&&!got.errn&&got.outn==want.outn&&want.outn>0&&mm_same(got.out,want.out,(long)want.outn),"inc-quote-empty-equals-disk");np_free(&want);np_free(&got);
+ const char *absent[]={"00696e632f712f682e68","00636c692f696e636c7564652d646972","006864722f682e68","00636c692f71756f74652d646972","00696e632f612f696e636c7564652f682e68",0};
+ np_buf a={0};np_put(&a,base.p,base.n);for(int k=0;absent[k];k++){if(cx_fmt(row,sizeof row,"%s\t0\t-\t0\t-\n",absent[k]))die("absent row");np_put(&a,row,tx_len(row,sizeof row));}
+ material_from(cap,"incq-absent-ledger",a.p,a.n,led);mm_free(a.p);mm_free(base.p);
+ want=inc_disk("incq-disk-absent",0);got=key_run(d,led,0,"m.c","incq-absent");
+ ck(want.rc==1&&got.rc==1&&!got.outn&&got.errn==want.errn&&want.errn>0&&mm_same(got.err,want.err,(long)want.errn)&&tx_find(got.err,(long)got.errn,"no such file for #include",25)>=0,"inc-quote-absent-is-e2-diagnostic");np_free(&want);np_free(&got);
+}
 static void key_length_bound(void){
  char dir[4400],s512[32],s513[32],cap512[4400],cap513[4400],p[4400];path(dir,sizeof dir,work,"keylen");if(sy_mkdir(dir,0700))die("keylen dir");
  key_source(dir,512,s512,sizeof s512);key_source(dir,513,s513,sizeof s513);path(cap512,sizeof cap512,dir,"cap512");path(cap513,sizeof cap513,dir,"cap513");
@@ -186,4 +214,4 @@ int main(int argc,char **argv){int trace_mode=argc>3&&tx_eqz(argv[argc-1], "--tr
  /* ri.frame.row-field-too-long: a 4096-byte field is one above the parser bound (width >= 4096) */
  {np_buf longrow={0};np_puts(&longrow,"ff\t0\t");for(int k=0;k<4096;k++)np_put(&longrow,"a",1);np_puts(&longrow,"\t0\t-\n");appended("row-field-4096",longrow.p,longrow.n,"resource-row-field-too-long");mm_free(longrow.p);}
  const char nulrow[]="ff\t0\t-\t0\t-\0hidden\n";appended("embedded-nul-row",nulrow,sizeof nulrow-1,"resource-row-nul");np_buf nulheader={0};np_put(&nulheader,ledger,header-1);np_put(&nulheader,"\0hidden\n",8);np_put(&nulheader,ledger+header,ledger_n-header);refuse("embedded-nul-header",nulheader.p,nulheader.n,"resource-row-nul");free(nulheader.p);
- ledger_preconditions();identity_bounds();key_length_bound();length_blob("blob-longer-than-declared",3);length_blob("blob-shorter-than-declared",5);repeated();additional();replay=invoke(capdir,root,0,"recovery");path(p,sizeof p,work,"normal.stdout");size_t recovery_n;char *recovery=load(p,&recovery_n);ck(replay.rc==0&&!replay.errn&&replay.outn==recovery_n&&!memcmp(replay.out,recovery,recovery_n),"strict-recovery-after-refusals");free(recovery);np_free(&replay);free(ledger);return finish(before,container_before,"SC1-map-compatibility-from-verified-SC2-trace");}
+ ledger_preconditions();identity_bounds();key_length_bound();inc_quote_states();length_blob("blob-longer-than-declared",3);length_blob("blob-shorter-than-declared",5);repeated();additional();replay=invoke(capdir,root,0,"recovery");path(p,sizeof p,work,"normal.stdout");size_t recovery_n;char *recovery=load(p,&recovery_n);ck(replay.rc==0&&!replay.errn&&replay.outn==recovery_n&&!memcmp(replay.out,recovery,recovery_n),"strict-recovery-after-refusals");free(recovery);np_free(&replay);free(ledger);return finish(before,container_before,"SC1-map-compatibility-from-verified-SC2-trace");}
