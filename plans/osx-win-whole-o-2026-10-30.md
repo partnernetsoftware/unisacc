@@ -91,3 +91,25 @@ unisacc: error: undefined function 'stat'
 ```
 
 这时 `src` 里已经没有活的 `stat(` 或 `lstat(`。`fs.cx` 里剩下的三处都在非 Windows 的 `#else`。没有文件，没有 PE。没有再追下一处调用。
+
+## stat 的调用者（2026-10-30）
+
+32 源的 use 链里没有 `sys.time`，也没有 `cx0.plan` 和 `workspace.driver`。`cx/sys/time.cx` 的 `sy_set_mtime` 确实无条件调用 `stat`，但这只 win `-o` 编不进它。`plan.cx:959` 和 `workspace/driver.cx` 的 `stat` 同样不在闭包里。
+
+带进来的是前导 `cx_read`。`include/cx-nested.h` 里 `#ifndef _WIN32` 的 `#else` 就是 Windows，这一支用 `stat` 判断是不是目录。`src/runcache.cx` 和 `cx/core/kernel.cx` 调用了 `cx_read`，函数体被留下；体里面的 `stat` 不会标上 `__UN_stat`。e3 就报 `undefined function 'stat'`，没有文件名和行号。
+
+这一支改成 `GetFileAttributesExA`，经 `_ux_load` / `_ux_go`，源码里不再写 `stat`。`sh ./unisacc.com tools/cx-flatten.cx -- --write .` 重写了 `include/cx-flat.h`，diff 只有这一处。
+
+`sy_set_mtime` 另铺了 Windows 骨架：先 `GetFileAttributesExA`，再 `CreateFileA` + `SetFileTime`。导出函数没有 `#if`。Linux 仍是 `stat` 然后 `utimes`。整个 `time.cx` 用 `-b win/x86_64` 编，停在第 85 行 `struct pollfd`（`not covered: incomplete struct`），还没走到设时间。把设时间那段单独拿出来编，得到 PE32+，`out/grk-win-time/mtime.com`，30720 字节。本机不执行。
+
+`check-cx-sys` 108/0，其中 `set_mtime` 两条都过。已装产品 runcache 12/0，冷 607 ms，命中 61 ms。没有重编 Linux 候选。
+
+32 源再跑，`-o out/grk-win3-o3/slice-win-x86_64`，外层 `tools/bound 55`。units 推理退出 0，e3 推理退出 0，tapecheck 和 prune 退出 0。lower 推理退出 1，标准错误：
+
+```
+reject: not covered: win/x86_64 lowering
+```
+
+没有文件，没有 PE。`stat` 没有了。
+
+`undefined function` 带上首个调用点这一刀没做。这句话由 `fw_undef_line` 拼出来，手里只有符号名；转发边车这段没有源位置。
