@@ -1,5 +1,9 @@
 #pragma unisa module session
 #pragma unisa use json
+#pragma unisa use zstr
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
 /*
  * session.cx — read and write the harness's session records. LIBRARY, NO `main`.
  *
@@ -37,21 +41,20 @@
  * whose last line silently merges with the next append.
  */
 int session_append(const char *path, const char *record) {
-    FILE *f;
-    size_t n;
+    int fd;
     if (!path || !record || !*record) return 1;
     /* A newline INSIDE the record would split one entry into two on read.
      * Reject rather than escape: the caller built a raw line, so a newline in
      * it is a caller bug, and silently mangling it creates a corrupt transcript. */
-    if (strchr(record, '\n') || strchr(record, '\r')) return 2;
-    f = fopen(path, "a");
-    if (!f) return 3;
-    n = fwrite(record, 1, strlen(record), f);
-    if (n != strlen(record)) { fclose(f); return 4; }
-    if (fputc('\n', f) == EOF) { fclose(f); return 5; }
-    /* fflush before fclose so a crash between them cannot lose the record
+    if (zs_chr(record, '\n') || zs_chr(record, '\r')) return 2;
+    /* fopen(path, "a") did O_WRONLY | O_CREAT | O_APPEND with mode 0666 (umask applies) */
+    fd = sy_open(path, O_WRONLY | O_CREAT | O_APPEND, 0666);
+    if (fd < 0) return 3;
+    if (sy_write_all(fd, record, zs_len(record)) != 0) { sy_close(fd); return 4; }
+    if (sy_write_all(fd, "\n", 1) != 0) { sy_close(fd); return 5; }
+    /* the close result is checked so a failed final write is not lost
      * silently — an audit trail that loses its tail is not an audit trail. */
-    if (fclose(f) != 0) return 6;
+    if (sy_close(fd) != 0) return 6;
     return 0;
 }
 
@@ -66,8 +69,8 @@ typedef struct {
 void session_free(session_records *r) {
     size_t i;
     if (!r) return;
-    for (i = 0; i < r->count; i++) free(r->lines[i]);
-    free(r->lines);
+    for (i = 0; i < r->count; i++) mm_free(r->lines[i]);
+    mm_free(r->lines);
     r->lines = NULL;
     r->count = 0;
     r->bad = 0;
@@ -79,43 +82,62 @@ void session_free(session_records *r) {
  * caller gets both the good records and the number that failed, so it can
  * decide whether a gap is acceptable rather than never learning about it.
  */
+/* One line (NUL-terminated, LEN bytes, its newline still on): 1 to go on,
+ * 0 when memory ran out (session_read stops there, as before). */
+static int session_take(session_records *out, char *buf, size_t len) {
+    char err[128];
+    jvalue *v;
+    char **grown;
+    while (len && (buf[len-1] == '\n' || buf[len-1] == '\r')) buf[--len] = '\0';
+    if (!len) return 1;
+    v = json_parse(buf, len, err, sizeof(err));
+    if (!v || v->kind != J_OBJ) {
+        /* Counted, not dropped in silence. */
+        out->bad++;
+        jfree(v);
+        return 1;
+    }
+    jfree(v);
+    grown = (char **)mm_grow(out->lines, (long)((out->count + 1) * sizeof(char *)));
+    if (!grown) return 0;
+    out->lines = grown;
+    out->lines[out->count] = (char *)mm_alloc((long)len + 1);
+    if (!out->lines[out->count]) return 0;
+    mm_copy(out->lines[out->count], (long)len + 1, buf, (long)len + 1);
+    out->count++;
+    return 1;
+}
+
 session_records session_read(const char *path) {
     session_records out;
-    FILE *f;
-    char *buf;
+    char *buf, chunk[65536];
     const size_t CAP = 1u << 20;
-    memset(&out, 0, sizeof(out));
+    size_t used = 0;
+    int fd, go = 1;
+    mm_fill(&out, (long)sizeof(out), 0, (long)sizeof(out));
 
-    f = fopen(path, "r");
-    if (!f) return out;
-    buf = (char *)malloc(CAP);
-    if (!buf) { fclose(f); return out; }
+    fd = sy_open(path, O_RDONLY, 0);
+    if (fd < 0) return out;
+    buf = (char *)mm_alloc((long)CAP);
+    if (!buf) { sy_close(fd); return out; }
 
-    while (fgets(buf, (int)CAP, f)) {
-        size_t len = strlen(buf);
-        char err[128];
-        jvalue *v;
-        char **grown;
-        while (len && (buf[len-1] == '\n' || buf[len-1] == '\r')) buf[--len] = '\0';
-        if (!len) continue;
-        v = json_parse(buf, len, err, sizeof(err));
-        if (!v || v->kind != J_OBJ) {
-            /* Counted, not dropped in silence. */
-            out.bad++;
-            jfree(v);
-            continue;
+    /* Lines are cut as fgets(buf, CAP) cut them: at a newline (kept), or after
+     * CAP-1 bytes; the last line may have no newline. */
+    while (go) {
+        long k = sy_read(fd, chunk, (long)sizeof chunk), i;
+        if (k <= 0) break;
+        for (i = 0; i < k && go; i++) {
+            buf[used++] = chunk[i];
+            if (chunk[i] == '\n' || used == CAP - 1) {
+                buf[used] = '\0';
+                go = session_take(&out, buf, used);
+                used = 0;
+            }
         }
-        jfree(v);
-        grown = (char **)realloc(out.lines, (out.count + 1) * sizeof(char *));
-        if (!grown) break;
-        out.lines = grown;
-        out.lines[out.count] = (char *)malloc(len + 1);
-        if (!out.lines[out.count]) break;
-        memcpy(out.lines[out.count], buf, len + 1);
-        out.count++;
     }
-    free(buf);
-    fclose(f);
+    if (go && used > 0) { buf[used] = '\0'; session_take(&out, buf, used); }
+    mm_free(buf);
+    sy_close(fd);
     return out;
 }
 

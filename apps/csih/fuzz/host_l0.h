@@ -24,4 +24,9 @@ int mm_move(void *dst, long dcap, const void *src, long n);
 int mm_fill(void *dst, long dcap, int byte, long n);
 int mm_same(const void *a, const void *b, long n);
 int mm_cmp(const void *a, const void *b, long n);
+void *mm_alloc(long n);
+void *mm_zalloc(long n);
+void *mm_grow(void *p, long n);
+void mm_free(void *p);
+char *mm_strdup(const char *s);
 #endif

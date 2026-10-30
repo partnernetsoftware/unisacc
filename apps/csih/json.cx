@@ -1,4 +1,8 @@
 #pragma unisa module json
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+#pragma unisa use zstr
 /*
  * json.cx — a minimal JSON reader for the C99 harness. LIBRARY, NO `main`.
  *
@@ -58,7 +62,7 @@ typedef struct {
     int  depth;
 } jparser;
 
-static void *jalloc(size_t n) { return calloc(1, n ? n : 1); }
+static void *jalloc(size_t n) { return mm_zalloc((long)(n ? n : 1)); }
 
 static jvalue *jnew(jkind k) {
     jvalue *v = (jvalue *)jalloc(sizeof(jvalue));
@@ -69,13 +73,13 @@ static jvalue *jnew(jkind k) {
 void jfree(jvalue *v) {
     size_t i;
     if (!v) return;
-    if (v->s) free(v->s);
+    if (v->s) mm_free(v->s);
     for (i = 0; i < v->len; i++) jfree(v->items[i]);
-    if (v->items) free(v->items);
-    for (i = 0; i < v->nkeys; i++) { free(v->keys[i]); jfree(v->vals[i]); }
-    if (v->keys) free(v->keys);
-    if (v->vals) free(v->vals);
-    free(v);
+    if (v->items) mm_free(v->items);
+    for (i = 0; i < v->nkeys; i++) { mm_free(v->keys[i]); jfree(v->vals[i]); }
+    if (v->keys) mm_free(v->keys);
+    if (v->vals) mm_free(v->vals);
+    mm_free(v);
 }
 
 static void jfail(jparser *ps, const char *msg) {
@@ -121,13 +125,13 @@ static char *jparse_string_raw(jparser *ps) {
     while (ps->p < ps->end && *ps->p != '"') {
         unsigned char c = (unsigned char)*ps->p;
         if (len + 8 >= cap) {
-            char *n = (char *)realloc(out, cap * 2);
-            if (!n) { free(out); jfail(ps, "oom"); return NULL; }
+            char *n = (char *)mm_grow(out, cap * 2);
+            if (!n) { mm_free(out); jfail(ps, "oom"); return NULL; }
             out = n; cap *= 2;
         }
         if (c == '\\') {
             ps->p++;
-            if (ps->p >= ps->end) { free(out); jfail(ps, "truncated escape"); return NULL; }
+            if (ps->p >= ps->end) { mm_free(out); jfail(ps, "truncated escape"); return NULL; }
             switch (*ps->p) {
                 case '"': out[len++]='"'; ps->p++; break;
                 case '\\': out[len++]='\\'; ps->p++; break;
@@ -139,7 +143,7 @@ static char *jparse_string_raw(jparser *ps) {
                 case 't': out[len++]='\t'; ps->p++; break;
                 case 'u': {
                     unsigned cp;
-                    if (ps->p + 5 > ps->end || !jhex4(ps->p + 1, &cp)) { free(out); jfail(ps, "bad \\u"); return NULL; }
+                    if (ps->p + 5 > ps->end || !jhex4(ps->p + 1, &cp)) { mm_free(out); jfail(ps, "bad \\u"); return NULL; }
                     ps->p += 5;
                     /* A surrogate pair is two \u escapes; combine them. */
                     if (cp >= 0xD800 && cp <= 0xDBFF && ps->p + 6 <= ps->end &&
@@ -153,19 +157,19 @@ static char *jparse_string_raw(jparser *ps) {
                     /* A leftover surrogate is not a Unicode scalar. Emitting
                      * it would put ill-formed UTF-8 back on the wire. */
                     if (cp >= 0xD800 && cp <= 0xDFFF) {
-                        free(out); jfail(ps, "bad \\u"); return NULL;
+                        mm_free(out); jfail(ps, "bad \\u"); return NULL;
                     }
                     len += put_utf8(out + len, cp);
                     break;
                 }
-                default: free(out); jfail(ps, "unknown escape"); return NULL;
+                default: mm_free(out); jfail(ps, "unknown escape"); return NULL;
             }
         } else {
             out[len++] = (char)c;
             ps->p++;
         }
     }
-    if (ps->p >= ps->end) { free(out); jfail(ps, "unterminated string"); return NULL; }
+    if (ps->p >= ps->end) { mm_free(out); jfail(ps, "unterminated string"); return NULL; }
     ps->p++;                     /* closing quote */
     out[len] = '\0';
     return out;
@@ -178,14 +182,14 @@ static jvalue *jparse_array(jparser *ps) {
     size_t cap = 8;
     if (!v) { jfail(ps, "oom"); return NULL; }
     v->items = (jvalue **)jalloc(cap * sizeof(jvalue *));
-    if (!v->items) { free(v); jfail(ps, "oom"); return NULL; }
+    if (!v->items) { mm_free(v); jfail(ps, "oom"); return NULL; }
     ps->p++;                     /* [ */
     jskip_ws(ps);
     if (ps->p < ps->end && *ps->p == ']') { ps->p++; return v; }
     for (;;) {
         jvalue *item;
         if (v->len == cap) {
-            jvalue **n = (jvalue **)realloc(v->items, cap * 2 * sizeof(jvalue *));
+            jvalue **n = (jvalue **)mm_grow(v->items, cap * 2 * sizeof(jvalue *));
             if (!n) { jfail(ps, "oom"); return v; }
             v->items = n; cap *= 2;
         }
@@ -216,15 +220,15 @@ static jvalue *jparse_object(jparser *ps) {
         k = jparse_string_raw(ps);
         if (ps->failed) return v;
         jskip_ws(ps);
-        if (ps->p >= ps->end || *ps->p != ':') { free(k); jfail(ps, "expected :"); return v; }
+        if (ps->p >= ps->end || *ps->p != ':') { mm_free(k); jfail(ps, "expected :"); return v; }
         ps->p++;
         jskip_ws(ps);
         val = jparse_value(ps);
-        if (ps->failed) { free(k); return v; }
+        if (ps->failed) { mm_free(k); return v; }
         if (v->nkeys == cap) {
-            char **nk = (char **)realloc(v->keys, cap * 2 * sizeof(char *));
-            jvalue **nv = (jvalue **)realloc(v->vals, cap * 2 * sizeof(jvalue *));
-            if (!nk || !nv) { free(k); jfail(ps, "oom"); return v; }
+            char **nk = (char **)mm_grow(v->keys, cap * 2 * sizeof(char *));
+            jvalue **nv = (jvalue **)mm_grow(v->vals, cap * 2 * sizeof(jvalue *));
+            if (!nk || !nv) { mm_free(k); jfail(ps, "oom"); return v; }
             v->keys = nk; v->vals = nv; cap *= 2;
         }
         v->keys[v->nkeys] = k;
@@ -251,9 +255,9 @@ static jvalue *jparse_value(jparser *ps) {
     switch (*ps->p) {
         case '"': { jvalue *v = jnew(J_STR); if (!v) { jfail(ps,"oom"); return NULL; }
                     v->s = jparse_string_raw(ps); if (ps->failed) { jfree(v); return NULL; } return v; }
-        case 't': if (ps->end - ps->p >= 4 && !strncmp(ps->p,"true",4)) { jvalue *v=jnew(J_BOOL); if(!v){jfail(ps,"oom");return NULL;} v->b=1; ps->p+=4; return v; } break;
-        case 'f': if (ps->end - ps->p >= 5 && !strncmp(ps->p,"false",5)) { jvalue *v=jnew(J_BOOL); if(!v){jfail(ps,"oom");return NULL;} v->b=0; ps->p+=5; return v; } break;
-        case 'n': if (ps->end - ps->p >= 4 && !strncmp(ps->p,"null",4)) { ps->p+=4; return jnew(J_NULL); } break;
+        case 't': if (ps->end - ps->p >= 4 && tx_same(ps->p,4,"true",4)) { jvalue *v=jnew(J_BOOL); if(!v){jfail(ps,"oom");return NULL;} v->b=1; ps->p+=4; return v; } break;
+        case 'f': if (ps->end - ps->p >= 5 && tx_same(ps->p,5,"false",5)) { jvalue *v=jnew(J_BOOL); if(!v){jfail(ps,"oom");return NULL;} v->b=0; ps->p+=5; return v; } break;
+        case 'n': if (ps->end - ps->p >= 4 && tx_same(ps->p,4,"null",4)) { ps->p+=4; return jnew(J_NULL); } break;
         default: break;
     }
     if (*ps->p == '-' || isdigit((unsigned char)*ps->p)) {
@@ -394,7 +398,7 @@ jvalue *jget(jvalue *obj, const char *key) {
     size_t i;
     if (!obj || obj->kind != J_OBJ) return NULL;
     for (i = 0; i < obj->nkeys; i++)
-        if (!strcmp(obj->keys[i], key)) return obj->vals[i];
+        if (zs_eq(obj->keys[i], key)) return obj->vals[i];
     return NULL;
 }
 
@@ -429,12 +433,12 @@ static int utf8_one(const unsigned char *s, size_t avail) {
  * Invalid UTF-8 bytes are skipped, not copied: a strict parser rejects them
  * with HTTP 400. An escape or a multibyte character is written whole or not
  * at all, so a short buffer cannot end on '\' or on a split code point.
- * *in_used (if non-NULL) is how far `in` was read. It is short of strlen(in)
+ * *in_used (if non-NULL) is how far `in` was read. It is short of (size_t)zs_len(in)
  * only when `out` filled up. Returns bytes written, not counting the NUL. */
 size_t json_escape(const char *in, char *out, size_t outlen, size_t *in_used) {
     size_t i = 0, used = 0, avail;
     if (!in) in = "";
-    avail = strlen(in);
+    avail = (size_t)zs_len(in);
     if (outlen == 0) {
         if (in_used) *in_used = 0;
         return 0;
@@ -458,7 +462,7 @@ size_t json_escape(const char *in, char *out, size_t outlen, size_t *in_used) {
                 rep = buf;
             }
             if (rep) {
-                rn = strlen(rep);
+                rn = (size_t)zs_len(rep);
                 if (used + rn + 1 > outlen) break;
                 for (k = 0; k < (int)rn; k++) out[used++] = rep[k];
             } else {
@@ -479,7 +483,7 @@ size_t json_escape(const char *in, char *out, size_t outlen, size_t *in_used) {
 /* Copy raw JSON bytes. Returns 0 when they do not fit, and clears out. */
 static int jw_add(char *out, size_t cap, size_t *n, const char *s, size_t sn) {
     if (*n + sn + 1 > cap) return 0;
-    memcpy(out + *n, s, sn);
+    mm_copy(out + *n, (long)(cap - *n), s, (long)sn);
     *n += sn;
     out[*n] = 0;
     return 1;
@@ -489,7 +493,7 @@ static int jw_add(char *out, size_t cap, size_t *n, const char *s, size_t sn) {
 static int jw_qstr(char *out, size_t cap, size_t *n, const char *v) {
     size_t used = 0, wrote, need;
     if (!v) v = "";
-    need = strlen(v);
+    need = (size_t)zs_len(v);
     if (*n + 3 > cap) return 0;
     wrote = json_escape(v, out + *n + 1, cap - *n - 2, &used);
     if (used != need) return 0;
@@ -554,12 +558,12 @@ size_t json_msg(char *buf, size_t cap, int comma,
         if (n + 3 > cap) { buf[0] = 0; return 0; }
         buf[n++] = '"';
         if (lead && lead[0]) {
-            need = strlen(lead);
+            need = (size_t)zs_len(lead);
             wrote = json_escape(lead, buf + n, cap - n - 2, &used);
             if (used != need) { buf[0] = 0; return 0; }
             n += wrote;
         }
-        need = strlen(body);
+        need = (size_t)zs_len(body);
         wrote = json_escape(body, buf + n, cap - n - 2, &used);
         if (used != need) { buf[0] = 0; return 0; }
         n += wrote;
@@ -579,13 +583,13 @@ size_t json_model(char *out, size_t cap, const char *msgs, size_t nmsg) {
     size_t lp, lq;
     if (!out || !cap) return 0;
     out[0] = 0;
-    lp = strlen(pre);
-    lq = strlen(post);
+    lp = (size_t)zs_len(pre);
+    lq = (size_t)zs_len(post);
     if (!msgs) nmsg = 0;
     if (lp + nmsg + lq + 1 > cap) return 0;
-    memcpy(out, pre, lp);
-    if (nmsg) memcpy(out + lp, msgs, nmsg);
-    memcpy(out + lp + nmsg, post, lq);
+    mm_copy(out, (long)cap, pre, (long)lp);
+    if (nmsg) mm_copy(out + lp, (long)(cap - lp), msgs, (long)nmsg);
+    mm_copy(out + lp + nmsg, (long)(cap - lp - nmsg), post, (long)lq);
     out[lp + nmsg + lq] = 0;
     return lp + nmsg + lq;
 }
