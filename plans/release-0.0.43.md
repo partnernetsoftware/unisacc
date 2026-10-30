@@ -34,6 +34,7 @@
    3. **wrap**：用 `seed/ape.c` 包装，生成 `unisacc-next.com`。
    4. **第二代**：用第一代的产品再编一遍，五片两两逐字节比较。
    5. **安装**：两代相同，且 `tools/check-install-fixes.cx` 4/4 通过，才替换 `./unisacc.com`。新身份写进 prd.md。
+      安装后恢复这三处 `use`，删掉手抄原型：`cx/driver/input.cx` 的 `sys.fs`，`cx/runtime/model_decode.cx` 和 `cx/runtime/model_lifetime.cx` 的 `mem.bytes`。三处注释标了 `TEMP-UNTIL-INSTALL`。根子是已装产品不按真实路径去重模块（安装修复 dedupe）。
 3. **osx 和 win 的 object 模型步**：在模型里补上路由，走"事实表 → 生成器 → 网"。不阻塞第一次安装，装好以后再做。
 4. **测试**：在新产品上跑 `tests/run.cx -- --list`，用 all-waves 跑所有不需要材料的批次，再补材料、实现 PLANNED 的 19 行，最后跑 `--all`。
 

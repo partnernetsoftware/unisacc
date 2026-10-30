@@ -4,8 +4,204 @@
    the image route writes (plans/cx-layers.md). <dlfcn.h> is not in the
    prelude. A missing library or symbol is 0. sy_dlclose is 0, or -errno
    when the host reports one, else -EIO. Windows has no dlfcn: open and
-   sym return 0, close and addr return -ENOSYS. Exported functions stay
-   outside #if. */
+   sym return 0, close and addr return -ENOSYS. Linux has no libc in the
+   33-object link, so the loader names are resolved from the libc already
+   mapped in this process and called through pointers. Apple imports
+   libSystem. This unit does not define dlopen, dlsym, dlclose or dlerror.
+   Exported functions stay outside #if. */
+
+#if defined(__linux__)
+static unsigned syd_u32(const unsigned char *p) {
+    return (unsigned)p[0] | ((unsigned)p[1] << 8) | ((unsigned)p[2] << 16) | ((unsigned)p[3] << 24);
+}
+
+static unsigned long long syd_u64(const unsigned char *p) {
+    unsigned long long v;
+    int i;
+    v = 0;
+    i = 0;
+    while (i < 8) {
+        v = v | ((unsigned long long)p[i] << (8 * i));
+        i = i + 1;
+    }
+    return v;
+}
+
+static int syd_hex(int c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static int syd_has(const char *s, const char *end, const char *w) {
+    int n, i, k;
+    n = 0;
+    while (w[n]) n = n + 1;
+    i = 0;
+    while (s + i + n <= end) {
+        k = 0;
+        while (k < n && s[i + k] == w[k]) k = k + 1;
+        if (k == n) return 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
+static int syd_eq(const char *a, const char *b) {
+    int i;
+    i = 0;
+    while (a[i] && a[i] == b[i]) i = i + 1;
+    return a[i] == 0 && b[i] == 0;
+}
+
+static unsigned long syd_elfhash(const char *s) {
+    unsigned long h, g;
+    h = 0;
+    while (*s) {
+        h = (h << 4) + (unsigned char)(*s);
+        g = h & 0xf0000000UL;
+        if (g) h = h ^ (g >> 24);
+        h = h & ~g;
+        s = s + 1;
+    }
+    return h;
+}
+
+static long syd_openat(const char *path) {
+#if defined(__aarch64__)
+    return __syscall6(56, -100, (long)path, 0, 0, 0);
+#else
+    return __syscall6(257, -100, (long)path, 0, 0, 0);
+#endif
+}
+
+static long syd_read(int fd, char *buf, long n) {
+#if defined(__aarch64__)
+    return __syscall6(63, fd, (long)buf, n, 0, 0);
+#else
+    return __syscall6(0, fd, (long)buf, n, 0, 0);
+#endif
+}
+
+static void syd_close_fd(int fd) {
+#if defined(__aarch64__)
+    __syscall6(57, fd, 0, 0, 0, 0);
+#else
+    __syscall6(3, fd, 0, 0, 0, 0);
+#endif
+}
+
+static unsigned char *syd_libc_base(void) {
+    char *text;
+    long fd, got, k;
+    int i;
+    unsigned long addr;
+    int d;
+    const char *line, *end;
+    text = malloc(131072);
+    if (!text) return 0;
+    fd = syd_openat("/proc/self/maps");
+    if (fd < 0) {
+        free(text);
+        return 0;
+    }
+    got = 0;
+    while (got < 131071) {
+        k = syd_read((int)fd, text + got, 131071 - got);
+        if (k < 0) {
+            syd_close_fd((int)fd);
+            free(text);
+            return 0;
+        }
+        if (k == 0) break;
+        got = got + k;
+    }
+    syd_close_fd((int)fd);
+    text[got] = 0;
+    i = 0;
+    while (text[i]) {
+        line = text + i;
+        while (text[i] && text[i] != '\n') i = i + 1;
+        end = text + i;
+        if (syd_has(line, end, "libc.so.6") && syd_has(line, end, " 00000000 ")) {
+            addr = 0;
+            d = 0;
+            while (line[d] && line[d] != '-') {
+                int h = syd_hex(line[d]);
+                if (h < 0) break;
+                addr = (addr << 4) + (unsigned)h;
+                d = d + 1;
+            }
+            free(text);
+            return (unsigned char *)addr;
+        }
+        if (text[i] == '\n') i = i + 1;
+    }
+    free(text);
+    return 0;
+}
+
+static void *syd_libc(const char *name) {
+    unsigned char *base, *dyn, *hash, *sym, *str;
+    unsigned long long phoff, tag, val;
+    int phentsize, phnum, i, syment, dynsz;
+    unsigned nbucket, nchain, idx, guard;
+    unsigned long h;
+    unsigned char *ent;
+    base = syd_libc_base();
+    if (!base || base[0] != 0x7f || base[1] != 'E' || base[2] != 'L' || base[3] != 'F') return 0;
+    phoff = syd_u64(base + 32);
+    phentsize = base[54] | (base[55] << 8);
+    phnum = base[56] | (base[57] << 8);
+    if (phentsize < 56 || phnum < 1 || phnum > 64) return 0;
+    dyn = 0;
+    dynsz = 0;
+    i = 0;
+    while (i < phnum) {
+        unsigned char *ph = base + phoff + i * phentsize;
+        if (syd_u32(ph) == 2) {
+            dyn = base + syd_u64(ph + 16);
+            dynsz = (int)syd_u64(ph + 40);
+        }
+        i = i + 1;
+    }
+    if (!dyn || dynsz < 16) return 0;
+    hash = 0;
+    sym = 0;
+    str = 0;
+    syment = 24;
+    i = 0;
+    while (i + 16 <= dynsz) {
+        tag = syd_u64(dyn + i);
+        val = syd_u64(dyn + i + 8);
+        if (tag == 4) hash = (unsigned char *)val;
+        else if (tag == 5) str = (unsigned char *)val;
+        else if (tag == 6) sym = (unsigned char *)val;
+        else if (tag == 11 && val) syment = (int)val;
+        else if (tag == 0) break;
+        i = i + 16;
+    }
+    if (!hash || !sym || !str) return 0;
+    if ((unsigned long)hash < (unsigned long)base) hash = base + (unsigned long)hash;
+    if ((unsigned long)sym < (unsigned long)base) sym = base + (unsigned long)sym;
+    if ((unsigned long)str < (unsigned long)base) str = base + (unsigned long)str;
+    nbucket = syd_u32(hash);
+    nchain = syd_u32(hash + 4);
+    if (!nbucket || !nchain) return 0;
+    h = syd_elfhash(name);
+    idx = syd_u32(hash + 8 + (h % nbucket) * 4);
+    guard = 0;
+    while (idx && idx < nchain && guard < nchain) {
+        ent = sym + (unsigned long)idx * (unsigned)syment;
+        if (syd_eq((const char *)(str + syd_u32(ent)), name))
+            return (void *)((unsigned long)base + syd_u64(ent + 8));
+        idx = syd_u32(hash + 8 + nbucket * 4 + idx * 4);
+        guard = guard + 1;
+    }
+    return 0;
+}
+#endif
 
 static int syd_now(void) {
 #if defined(_WIN32)
@@ -20,6 +216,11 @@ static void *syd_open(const char *path, int mode) {
     (void)path;
     (void)mode;
     return 0;
+#elif defined(__linux__)
+    void *(*real)(const char *, int);
+    real = syd_libc("dlopen");
+    if (!real) return 0;
+    return real(path, mode);
 #else
     return dlopen(path, mode);
 #endif
@@ -30,6 +231,11 @@ static void *syd_sym(void *handle, const char *name) {
     (void)handle;
     (void)name;
     return 0;
+#elif defined(__linux__)
+    void *(*real)(void *, const char *);
+    real = syd_libc("dlsym");
+    if (!real) return 0;
+    return real(handle, name);
 #else
     return dlsym(handle, name);
 #endif
@@ -39,6 +245,15 @@ static int syd_close(void *handle) {
 #if defined(_WIN32)
     (void)handle;
     return -ENOSYS;
+#elif defined(__linux__)
+    int (*real)(void *);
+    int rc;
+    real = syd_libc("dlclose");
+    if (!real) return -EIO;
+    errno = 0;
+    rc = real(handle);
+    if (rc == 0) return 0;
+    return errno ? -errno : -EIO;
 #else
     int rc;
     errno = 0;
@@ -53,6 +268,17 @@ static int syd_addr(int slot, unsigned long long *out) {
     (void)slot;
     (void)out;
     return -ENOSYS;
+#elif defined(__linux__)
+    const char *name;
+    void *p;
+    if (slot == 0) name = "dlopen";
+    else if (slot == 1) name = "dlsym";
+    else if (slot == 2) name = "dlclose";
+    else name = "dlerror";
+    p = syd_libc(name);
+    if (!p) return -EIO;
+    *out = (unsigned long long)(uintptr_t)p;
+    return 0;
 #else
     unsigned long long v;
     if (slot == 0) v = (unsigned long long)(uintptr_t)dlopen;

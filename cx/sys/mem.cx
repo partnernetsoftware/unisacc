@@ -2,7 +2,9 @@
 #include <sys/mman.h>
 /* L0 sys/mem: anonymous reserve and permission changes (plans/cx-layers.md).
    <sys/mman.h> is not in the prelude. 0 on success, -errno on failure.
-   Windows has no mmap here: -ENOSYS. Exported functions stay outside #if. */
+   Windows has no mmap here: -ENOSYS. Elsewhere the gates are __mmap,
+   __munmap and __mprotect, so this unit does not reference the libc names.
+   Exported functions stay outside #if. */
 
 static int sym_fail(void) { return errno ? -errno : -1; }
 
@@ -12,11 +14,15 @@ static int sym_map(void **out, long n) {
     (void)n;
     return -ENOSYS;
 #else
-    void *p;
+    long result;
     errno = 0;
-    p = mmap(0, (size_t)n, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (p == MAP_FAILED || !p) return sym_fail();
-    *out = p;
+    result = __mmap(0, (long)n, (long)PROT_NONE, (long)(MAP_PRIVATE | MAP_ANON), -1, 0);
+    if (result < 0) {
+        errno = (int)-result;
+        return sym_fail();
+    }
+    if (!result) return sym_fail();
+    *out = (void *)result;
     return 0;
 #endif
 }
@@ -27,8 +33,14 @@ static int sym_unmap(void *p, long n) {
     (void)n;
     return -ENOSYS;
 #else
+    long result;
     errno = 0;
-    return munmap(p, (size_t)n) == 0 ? 0 : sym_fail();
+    result = __munmap((long)p, (long)n);
+    if (result < 0) {
+        errno = (int)-result;
+        return sym_fail();
+    }
+    return 0;
 #endif
 }
 
@@ -42,10 +54,16 @@ static int sym_prot(void *p, long n, int kind) {
     return -ENOSYS;
 #else
     int prot;
+    long result;
     errno = 0;
     if (kind == 1) prot = PROT_READ | PROT_WRITE;
     else prot = PROT_READ | PROT_EXEC;
-    return mprotect(p, (size_t)n, prot) == 0 ? 0 : sym_fail();
+    result = __mprotect((long)p, (long)n, (long)prot);
+    if (result < 0) {
+        errno = (int)-result;
+        return sym_fail();
+    }
+    return 0;
 #endif
 }
 

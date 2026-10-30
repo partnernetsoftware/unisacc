@@ -110,6 +110,39 @@ int sy_sleep_ms(long ms) {
    1 readable, 0 timed out, -errno; -ENOSYS on Windows (no readiness wait here). */
 int sy_readable(int fd, long ms) { return syt_readable(fd, ms); }
 
+/* Linux: utimensat (x86_64 280, aarch64 88, AT_FDCWD -100). The two times are
+   one second, matching sy_set_mtime. Apple keeps the libc utimes import.
+   This unit does not define utimes. */
+static int syt_utimes_os(const char *path, long sec) {
+#if defined(__linux__)
+    long ts[4];
+    long result;
+    ts[0] = sec;
+    ts[1] = 0;
+    ts[2] = sec;
+    ts[3] = 0;
+#if defined(__aarch64__)
+    result = __syscall6(88, -100, (long)path, (long)ts, 0, 0);
+#else
+    result = __syscall6(280, -100, (long)path, (long)ts, 0, 0);
+#endif
+    if (result < 0) {
+        errno = (int)-result;
+        return -1;
+    }
+    return 0;
+#elif defined(_WIN32)
+    (void)path;
+    (void)sec;
+    return -1;
+#else
+    struct timeval tv[2];
+    tv[0].tv_sec = tv[1].tv_sec = (time_t)sec;
+    tv[0].tv_usec = tv[1].tv_usec = 0;
+    return utimes(path, tv);
+#endif
+}
+
 /* Windows has no utimes. Query the path with GetFileAttributesExA so a missing
    path still returns -ENOENT, then set both times with SetFileTime. The
    exported function has no #if. */
@@ -162,23 +195,19 @@ static int syt_set_mtime(const char *path, long sec) {
     }
     return 0;
 #else
-    struct timeval tv[2];
     struct stat s;
     errno = 0;
     if (stat(path, &s) != 0) return errno ? -errno : -EIO;
-    tv[0].tv_sec = tv[1].tv_sec = (time_t)sec;
-    tv[0].tv_usec = tv[1].tv_usec = 0;
     errno = 0;
-    if (utimes(path, tv) == 0) return 0;
+    if (syt_utimes_os(path, sec) == 0) return 0;
     return errno ? -errno : -EIO;
 #endif
 }
 
 /* Set PATH's access and modification times to SEC (whole seconds). 0, or -errno.
-   utimes is forwarded to the host C library and its errno does not come back
-   (0.0.43: a missing path gave -1 with errno 0). The path is stat'ed first so
-   its own errors (ENOENT, ENOTDIR, EACCES) are reported; a failure of utimes
-   itself with no errno is -EIO. */
+   The path is stat'ed first on non-Windows so ENOENT, ENOTDIR and EACCES come
+   from stat. The set itself is syt_utimes_os (Linux utimensat, Apple utimes);
+   a failure there with no errno is -EIO. */
 int sy_set_mtime(const char *path, long sec) {
     if (!path || !path[0]) return -EINVAL;
     return syt_set_mtime(path, sec);

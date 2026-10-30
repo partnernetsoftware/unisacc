@@ -41,8 +41,17 @@
    A directory may open and then fail its read (code 2). A fifo or a
    terminal can block, as the product open does. */
 #pragma unisa module input
-#pragma unisa use sys.fs
 #pragma unisa use mem.heap
+/* TEMP-UNTIL-INSTALL: sys.fs is already in this program through src/runcache.cx
+   (drive.cx uses runcache). A use here resolves beside this file,
+   src/driver/sys/fs.cx, and the installed compiler keeps that as a second
+   module. Declare the calls. mem.heap stays: this object is the one copy of mm_*.
+   After install (module dedupe), restore `#pragma unisa use sys.fs` and delete
+   these prototypes. Size comes from sy_reg_size so this file does not copy sy_stat_t. */
+int sy_open(const char *path, int flags, int mode);
+int sy_close(int fd);
+long sy_reg_size(int fd);
+long sy_read_once(int fd, void *buf, long n);
 
 static void cxi_setwhy(char *why, long cap, const char *msg) {
     long i;
@@ -92,7 +101,7 @@ int cxi_read(const char *path, unsigned char **out, long *length, char *why, lon
     long ncap;
     unsigned char *buf;
     unsigned char *grown;
-    sy_stat_t sst;
+    long sz;
 
     if (out) *out = 0;
     if (length) *length = 0;
@@ -117,9 +126,9 @@ int cxi_read(const char *path, unsigned char **out, long *length, char *why, lon
         owned = 1;
     }
     cap = 4096;
-    if (sy_fstat(fd, &sst) == 0 && sst.kind == 'f'
-        && sst.size >= 0 && sst.size <= 1073741823L)
-        cap = sst.size + 1;
+    sz = sy_reg_size(fd);
+    if (sz >= 0 && sz <= 1073741823L)
+        cap = sz + 1;
     buf = (unsigned char *)mm_alloc(cap);
     if (!buf) return cxi_drop(owned, fd, 0, out, length, 6, "out of memory", why, whycap);
     n = 0;
