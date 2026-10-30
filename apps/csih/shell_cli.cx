@@ -1,3 +1,6 @@
+#pragma unisa use text.num
+#pragma unisa use sys.io
+#pragma unisa use zstr
 #pragma unisa use shell
 /*
  * shell_cli.c — the `main` for shell.c, moved out so shell.c is a library that
@@ -24,16 +27,16 @@ static int cli_stop_tick(void) { return ++cli_ticks >= 3; }
 int main(int argc, char **argv) {
     const char *cmd = argc > 1 ? argv[1] : "";
     shell_result r;
-    if (!strcmp(cmd, "selftest")) return shell_run_selftest();
-    if (!strcmp(cmd, "run")) {
+    if (!zs_cmp(cmd, "selftest")) return shell_run_selftest();
+    if (!zs_cmp(cmd, "run")) {
         r = shell_run(argc > 2 ? argv[2] : "");
-        if (!r.ok) { printf("could not run (errno %d)\n", r.err); return 1; }
+        if (!r.ok) { sy_printf("could not run (errno %d)\n", r.err); return 1; }
         fputs(r.out, stdout);
-        if (!r.exited) printf("[signalled %d]\n", r.signal);
-        else if (r.status) printf("[exit %d]\n", r.status);
+        if (!r.exited) sy_printf("[signalled %d]\n", r.signal);
+        else if (r.status) sy_printf("[exit %d]\n", r.status);
         return r.exited ? r.status : 1;
     }
-    printf("usage: shell_cli selftest | run \"<command>\"\n");
+    sy_printf("usage: shell_cli selftest | run \"<command>\"\n");
     return 64;
 }
 
@@ -42,7 +45,7 @@ int main(int argc, char **argv) {
 
 static int failures = 0;
 static void expect(int cond, const char *what) {
-    if (!cond) { printf("FAIL %s\n", what); failures++; }
+    if (!cond) { sy_printf("FAIL %s\n", what); failures++; }
 }
 
 static void run_selftest(void) {
@@ -52,7 +55,7 @@ static void run_selftest(void) {
     r = shell_run("echo hello");
     expect(r.ok == 1, "a command runs");
     expect(r.exited == 1 && r.status == 0, "and exits 0");
-    expect(!strcmp(r.out, "hello\n"), "and its stdout is captured");
+    expect(!zs_cmp(r.out, "hello\n"), "and its stdout is captured");
 
     /* --- the exit status is a RESULT, not a failure of this function ---- */
     r = shell_run("exit 7");
@@ -62,24 +65,24 @@ static void run_selftest(void) {
     /* --- the shell is a real shell: pipes and redirection work ---------- */
     r = shell_run("printf 'a\\nb\\nc\\n' | wc -l");
     expect(r.ok == 1, "a pipeline runs");
-    expect(strstr(r.out, "3") != NULL, "and the pipeline actually piped");
+    expect(zs_find(r.out, "3") != NULL, "and the pipeline actually piped");
 
     r = shell_run("echo one && echo two");
-    expect(strstr(r.out, "one") && strstr(r.out, "two") != NULL, "&& works");
+    expect(zs_find(r.out, "one") && zs_find(r.out, "two") != NULL, "&& works");
 
     r = shell_run("X=42; echo $X");
-    expect(strstr(r.out, "42") != NULL, "shell variables work");
+    expect(zs_find(r.out, "42") != NULL, "shell variables work");
 
     r = shell_run("for i in 1 2 3; do printf '%s' $i; done");
-    expect(!strcmp(r.out, "123"), "a for loop works");
+    expect(!zs_cmp(r.out, "123"), "a for loop works");
 
     /* --- stderr is captured too, or a model sees an empty mystery ------- */
     r = shell_run("echo to-stderr >&2");
-    expect(strstr(r.out, "to-stderr") != NULL, "stderr is captured, not hidden");
+    expect(zs_find(r.out, "to-stderr") != NULL, "stderr is captured, not hidden");
 
     /* --- quoting survives: this is the whole reason to use a real shell - */
     r = shell_run("printf '%s' \"a b c\"");
-    expect(!strcmp(r.out, "a b c"), "quoting is the shell's, not ours");
+    expect(!zs_cmp(r.out, "a b c"), "quoting is the shell's, not ours");
 
     /* --- a signal death is reported as a SIGNAL, not as exit 0 ---------- */
     r = shell_run("kill -TERM $$");
@@ -113,13 +116,13 @@ static void run_selftest(void) {
     mkdir("/tmp/cdsh-cwd-test", 0755);
     r = shell_run_in("pwd", "/tmp/cdsh-cwd-test");
     expect(r.ok == 1, "a command runs in a chosen directory");
-    expect(strstr(r.out, "cdsh-cwd-test") != NULL, "and pwd reports it");
+    expect(zs_find(r.out, "cdsh-cwd-test") != NULL, "and pwd reports it");
 
     /* The PARENT must not have moved. If it had, a second call could not be
      * independent of the first — which is the whole reason the chdir is in the
      * child. */
     r = shell_run_in("pwd", NULL);
-    expect(strstr(r.out, "cdsh-cwd-test") == NULL,
+    expect(zs_find(r.out, "cdsh-cwd-test") == NULL,
            "the caller's own directory did NOT change");
 
     /* A directory that does not exist is reported as such, and is NOT confused
@@ -142,7 +145,7 @@ static void run_selftest(void) {
     expect(r.ok == 1, "and the result is still returned (not an error)");
     expect(r.exited == 0 && r.signal != 0, "and the child died by a signal (killed)");
     r = shell_run("echo alive");
-    expect(!strcmp(r.out, "alive\n"), "a normal command still works after a timeout");
+    expect(!zs_cmp(r.out, "alive\n"), "a normal command still works after a timeout");
     unsetenv("CSIH_EXEC_TIMEOUT_SEC");
 
     /* --- a tick that asks to stop (Esc) kills the command and its children */
@@ -152,10 +155,10 @@ static void run_selftest(void) {
     shell_set_tick(NULL);
     expect(r.timed_out == 1 && r.err == ECANCELED, "a tick asking to stop cancels the command");
     expect(cli_ticks >= 3 && cli_ticks < 10, "after the tick said so, not at the deadline");
-    expect(strstr(r.out, "late") == NULL, "the rest of the command did not run");
+    expect(zs_find(r.out, "late") == NULL, "the rest of the command did not run");
     /* The bracket keeps this grep's own command line from matching itself. */
     r = shell_run("pgrep -f 'sleep 27[.]25' | wc -l | tr -d ' '");
-    expect(!strcmp(r.out, "0\n"), "the backgrounded child died with the group");
+    expect(!zs_cmp(r.out, "0\n"), "the backgrounded child died with the group");
 
     /* --- no fds is a sleep (the model-retry back-off waits on this) ----- */
     {
@@ -163,16 +166,16 @@ static void run_selftest(void) {
         long t0, t1;
         int i;
         r = shell_run("date +%s");
-        t0 = atol(r.out);
+        t0 = tx_atol(r.out);
         for (i = 0; i < 12; i++) shell_poll2(-1, -1, 100, &r0, &r1);
         r = shell_run("date +%s");
-        t1 = atol(r.out);
+        t1 = tx_atol(r.out);
         expect(t0 > 0 && t1 - t0 >= 1, "shell_poll2 with no fds sleeps its timeout");
     }
 }
 
 int shell_run_selftest(void) {
     run_selftest();
-    printf("%s\n", failures ? "SELFTEST FAILED" : "selftest ok");
+    sy_printf("%s\n", failures ? "SELFTEST FAILED" : "selftest ok");
     return failures == 0 ? 0 : 1;
 }

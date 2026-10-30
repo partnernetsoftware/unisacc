@@ -5,18 +5,20 @@
  *   cd apps/csih && sh ../../unisacc.com tools/delibc.cx -- FILE...
  * A name is replaced only as a call (NAME followed by '(') that starts at an
  * identifier boundary, outside comments and string/character literals.
- * fprintf is replaced only as `fprintf(stderr,` (the stderr stream). A file
- * that got replacements and has no `#pragma unisa use zstr` gets one after its
- * module line (zstr brings text.fmt, text.num and sys.io in transitively).
- * Prints per file: the count of each rename. Exit 1 when a file cannot be
- * read or written. An apps/csih tool: no #include, no direct libc call.
+ * fprintf is replaced only as `fprintf(stderr,` (the stderr stream). Then each
+ * file gets the direct uses its new calls need (the --uses pass below). Run it
+ * from apps/csih (zstr resolves there). Prints per file: the count of each
+ * rename. Exit 1 when a file cannot be read or written, or would pass 32 uses.
+ * An apps/csih tool: no #include.
  */
 
 typedef struct { const char *from, *to; } ren_t;
 static const ren_t REN[] = {
     { "vsnprintf(", "tx_vsnprintf(" },
     { "snprintf(", "tx_snprintf(" },
+    { "fprintf(stderr, ", "sy_eprintf(" },
     { "fprintf(stderr,", "sy_eprintf(" },
+    { "sy_eprintf( ", "sy_eprintf(" },        /* tidies an earlier run's leftover blank */
     { "printf(", "sy_printf(" },
     { "strerror(", "sy_strerror(" },
     { "atoi(", "(int)tx_atol(" },
@@ -26,6 +28,27 @@ static const ren_t REN[] = {
     { "strtod(", "tx_strtod(" },
     { "isatty(", "sy_isatty(" },
     { "geteuid(", "sy_euid(" },
+    /* libc-shaped zstr (same arguments and results), mem.heap, mem.bytes, sys.env, sys.proc */
+    { "strcmp(", "zs_cmp(" },
+    { "strncmp(", "zs_ncmp(" },
+    { "strstr(", "zs_find(" },
+    { "strlen(", "zs_len(" },
+    { "strchr(", "zs_chr(" },
+    { "strrchr(", "zs_rchr(" },
+    { "strcspn(", "zs_cspn(" },
+    { "strcpy(", "zs_cpy(" },
+    { "strncpy(", "zs_ncpy(" },
+    { "memcpy(", "zs_mcpy(" },
+    { "memmove(", "zs_mmove(" },
+    { "memset(", "zs_mset(" },
+    { "memchr(", "zs_mchr(" },
+    { "memcmp(", "mm_cmp(" },
+    { "malloc(", "mm_alloc(" },
+    { "realloc(", "mm_grow(" },
+    { "free(", "mm_free(" },
+    { "strdup(", "mm_strdup(" },
+    { "getenv(", "sy_env(" },
+    { "getpid(", "sy_pid(" },
 };
 #define NREN ((int)(sizeof REN / sizeof REN[0]))
 
@@ -77,17 +100,6 @@ static int one(const char *path) {
             total++;
         }
     }
-    if (total && tx_find(out, o, "#pragma unisa use zstr\n", 23) < 0) {
-        long m = tx_find(out, o, "#pragma unisa module ", 21), e;
-        static char tmp[1 << 22];
-        if (m < 0) { printf("delibc: %s has no module line\n", path); return 1; }
-        e = m + tx_chr(out + m, o - m, '\n') + 1;
-        tx_copy(tmp, (long)sizeof tmp, out, e);
-        tx_copy(tmp + e, (long)sizeof tmp - e, "#pragma unisa use zstr\n", 23);
-        tx_copy(tmp + e + 23, (long)sizeof tmp - e - 23, out + e, o - e);
-        o += 23;
-        tx_copy(out, (long)sizeof out, tmp, o);
-    }
     if (total && cx_write(path, out, (size_t)o) != 0) { printf("delibc: cannot write %s\n", path); return 1; }
     printf("%s\t%d", path, total);
     for (k = 0; k < NREN; k++) if (cnt[k]) printf("\t%s%d", REN[k].from, cnt[k]);
@@ -95,36 +107,55 @@ static int one(const char *path) {
     return 0;
 }
 
-/* --uses: the wrappers a module calls must be declared by a direct use. A
-   variadic (tx_snprintf, sy_printf) or double-returning (tx_strtod) function
-   that is only transitively visible is called wrongly by this toolchain
-   (out/fmttest), so add `#pragma unisa use text.fmt|text.num|sys.io` after the
-   module line where the file calls one and lacks the use. */
-typedef struct { const char *use; const char *calls[6]; } need_t;
+/* --uses: the wrappers a file calls must be declared by a direct use (a call
+   that sees no declaration is wrong, and the candidate compiler refuses it), so
+   add `#pragma unisa use M` where the file calls one of M's wrappers and lacks
+   the use: after the module line, or at the top of a file without one (a
+   program's main). A unit takes at most 32 uses: a file that would pass that
+   is left alone and reported (exit 1). */
+#define NCALL 12
+typedef struct { const char *use; const char *calls[NCALL]; } need_t;
 static const need_t NEED[] = {
     { "#pragma unisa use text.fmt\n", { "tx_snprintf(", "tx_vsnprintf(", 0 } },
     { "#pragma unisa use text.num\n", { "tx_strtod(", "tx_strtol(", "tx_strtoul(", "tx_atol(", 0 } },
-    { "#pragma unisa use sys.io\n", { "sy_printf(", "sy_eprintf(", "sy_strerror(", "sy_isatty(", "sy_fd_nonblock(", "sy_fd_cloexec(" } },
+    { "#pragma unisa use sys.io\n", { "sy_printf(", "sy_eprintf(", "sy_strerror(", "sy_isatty(", "sy_fd_nonblock(", "sy_fd_cloexec(", 0 } },
+    { "#pragma unisa use zstr\n", { "zs_cmp(", "zs_ncmp(", "zs_find(", "zs_len(", "zs_chr(", "zs_rchr(", "zs_cspn(", "zs_cpy(", "zs_ncpy(", "zs_mcpy(", "zs_mmove(", "zs_mset(" } },
+    { "#pragma unisa use zstr\n", { "zs_mchr(", "zs_eq(", "zs_starts(", "zs_set(", 0 } },
+    { "#pragma unisa use mem.heap\n", { "mm_alloc(", "mm_zalloc(", "mm_grow(", "mm_free(", "mm_strdup(", 0 } },
+    { "#pragma unisa use mem.bytes\n", { "mm_cmp(", "mm_copy(", "mm_move(", "mm_fill(", "mm_same(", 0 } },
+    { "#pragma unisa use sys.env\n", { "sy_env(", "sy_env_or(", "sy_euid(", "sy_uid(", 0 } },
+    { "#pragma unisa use sys.proc\n", { "sy_pid(", 0 } },
 };
+#define NNEED ((int)(sizeof NEED / sizeof NEED[0]))
+
+/* how many `#pragma unisa use` lines S has */
+static int count_uses(const char *s, long len) {
+    long at = 0, f;
+    int c = 0;
+    while ((f = tx_find(s + at, len - at, "#pragma unisa use ", 18)) >= 0) { c++; at += f + 18; }
+    return c;
+}
 
 static int uses(const char *path) {
     size_t n = 0;
     char *s = cx_read(path, &n);
     long len = (long)n, m, e;
-    int k, j, added = 0;
+    int k, j, added = 0, have;
     if (!s) { printf("delibc: cannot read %s\n", path); return 1; }
+    have = count_uses(s, len);
     m = tx_find(s, len, "#pragma unisa module ", 21);
-    if (m < 0) { printf("%s\t0\t(no module line)\n", path); return 0; }
-    e = m + tx_chr(s + m, len - m, '\n') + 1;
+    e = m < 0 ? 0 : m + tx_chr(s + m, len - m, '\n') + 1;
+    if (m < 0 && len > 2 && s[0] == '#' && s[1] == '!') e = tx_chr(s, len, '\n') + 1;   /* keep a shebang first */
     tx_copy(out, (long)sizeof out, s, e);
     {
         long o = e;
-        for (k = 0; k < 3; k++) {
+        for (k = 0; k < NNEED; k++) {
             int called = 0;
             long ul = tx_len(NEED[k].use, 64);
-            for (j = 0; j < 6 && NEED[k].calls[j]; j++)
+            for (j = 0; j < NCALL && NEED[k].calls[j]; j++)
                 if (tx_find(s, len, NEED[k].calls[j], tx_len(NEED[k].calls[j], 64)) >= 0) called = 1;
-            if (!called || tx_find(s, len, NEED[k].use, ul) >= 0) continue;
+            if (!called || tx_find(s, len, NEED[k].use, ul) >= 0 || tx_find(out + e, o - e, NEED[k].use, ul) >= 0) continue;
+            if (have + added >= 32) { printf("delibc: %s would pass 32 uses (needs %s)\n", path, NEED[k].use + 18); return 1; }
             tx_copy(out + o, (long)sizeof out - o, NEED[k].use, ul);
             o += ul;
             added++;
@@ -144,6 +175,6 @@ int main(int argc, char **argv) {
         for (i = 2; i < argc; i++) bad |= uses(argv[i]);
         return bad;
     }
-    for (i = 1; i < argc; i++) bad |= one(argv[i]);
+    for (i = 1; i < argc; i++) { bad |= one(argv[i]); bad |= uses(argv[i]); }
     return bad;
 }

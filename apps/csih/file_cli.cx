@@ -1,3 +1,7 @@
+#pragma unisa use text.fmt
+#pragma unisa use sys.io
+#pragma unisa use zstr
+#pragma unisa use sys.env
 #pragma unisa use file
 /*
  * file_cli.c — the `main` for file.c, moved out so file.c can be a library.
@@ -20,34 +24,34 @@ int main(int argc, char **argv) {
     char buf[65536];
     file_result r;
 
-    if (!strcmp(cmd, "selftest")) return file_run_selftest();
+    if (!zs_cmp(cmd, "selftest")) return file_run_selftest();
 
-    if (!strcmp(cmd, "read")) {
+    if (!zs_cmp(cmd, "read")) {
         r = file_read(argc > 2 ? argv[2] : "", buf, sizeof buf);
-        if (!r.ok) { printf("error %d bytes %ld\n", r.err, r.bytes); return 1; }
+        if (!r.ok) { sy_printf("error %d bytes %ld\n", r.err, r.bytes); return 1; }
         fputs(buf, stdout);
         return 0;
     }
-    if (!strcmp(cmd, "write")) {
+    if (!zs_cmp(cmd, "write")) {
         const char *path = argc > 2 ? argv[2] : "";
         const char *text = argc > 3 ? argv[3] : "";
-        r = file_write(path, text, strlen(text));
-        printf("%s %ld\n", r.ok ? "ok" : "error", r.bytes);
+        r = file_write(path, text, zs_len(text));
+        sy_printf("%s %ld\n", r.ok ? "ok" : "error", r.bytes);
         return r.ok ? 0 : 1;
     }
-    if (!strcmp(cmd, "append")) {
+    if (!zs_cmp(cmd, "append")) {
         r = file_append_line(argc > 2 ? argv[2] : "", argc > 3 ? argv[3] : "");
-        printf("%s %ld\n", r.ok ? "ok" : "error", r.bytes);
+        sy_printf("%s %ld\n", r.ok ? "ok" : "error", r.bytes);
         return r.ok ? 0 : 1;
     }
-    if (!strcmp(cmd, "list")) {
+    if (!zs_cmp(cmd, "list")) {
         r = file_list(argc > 2 ? argv[2] : ".", buf, sizeof buf);
-        if (!r.ok) { printf("error %d\n", r.err); return 1; }
-        printf("%ld entries\n", r.bytes);
+        if (!r.ok) { sy_printf("error %d\n", r.err); return 1; }
+        sy_printf("%ld entries\n", r.bytes);
         fputs(buf, stdout);
         return 0;
     }
-    printf("usage: file_cli selftest | read <path> | write <path> <text> | "
+    sy_printf("usage: file_cli selftest | read <path> | write <path> <text> | "
            "append <path> <line> | list <dir>\n");
     return 64;
 }
@@ -59,30 +63,30 @@ int main(int argc, char **argv) {
 
 static int failures = 0;
 static void expect(int cond, const char *what) {
-    if (!cond) { printf("FAIL %s\n", what); failures++; }
+    if (!cond) { sy_printf("FAIL %s\n", what); failures++; }
 }
 
 static void run_selftest(void) {
-    char base[400], path[512], buf[4096], why[600]; const char *td = getenv("TMPDIR");
+    char base[400], path[512], buf[4096], why[600]; const char *td = sy_env("TMPDIR");
     file_result r;
 
-    snprintf(base, sizeof base, "%s/cdsh-file-selftest", td && td[0] ? td : "/tmp");   /* the guard's temp root */
+    tx_snprintf(base, sizeof base, "%s/cdsh-file-selftest", td && td[0] ? td : "/tmp");   /* the guard's temp root */
 
     mkdir(base, 0755);
 
     /* --- write then read: the round trip ------------------------------- */
-    snprintf(path, sizeof path, "%s/a.txt", base);
+    tx_snprintf(path, sizeof path, "%s/a.txt", base);
     r = file_write(path, "hello\n", 6);
     expect(r.ok == 1 && r.bytes == 6, "write reports the bytes it wrote");
     r = file_read(path, buf, sizeof buf);
     expect(r.ok == 1 && r.bytes == 6, "read reports the bytes it read");
-    expect(!strcmp(buf, "hello\n"), "the content round-trips exactly");
+    expect(!zs_cmp(buf, "hello\n"), "the content round-trips exactly");
 
     /* --- the size guard: REFUSE, do not truncate ----------------------- */
     /* This is the decision the whole file turns on. A truncating read would
      * return ok=1 with six bytes of a thirteen-byte file, and the caller would
      * reason about half a document without ever knowing. */
-    snprintf(path, sizeof path, "%s/big.txt", base);
+    tx_snprintf(path, sizeof path, "%s/big.txt", base);
     r = file_write(path, "0123456789abc", 13);
     expect(r.ok == 1, "a 13-byte file can be written");
     r = file_read(path, buf, 8);            /* only 8 bytes of room */
@@ -91,7 +95,7 @@ static void run_selftest(void) {
     expect(r.bytes == 13, "and reports the real size so the caller can retry");
 
     /* --- a missing file is an error with a reason ---------------------- */
-    snprintf(path, sizeof path, "%s/definitely-not-here", base);
+    tx_snprintf(path, sizeof path, "%s/definitely-not-here", base);
     r = file_read(path, buf, sizeof buf);
     expect(r.ok == 0, "a missing file fails");
     expect(r.err == ENOENT, "and reports ENOENT");
@@ -101,28 +105,28 @@ static void run_selftest(void) {
     expect(r.ok == 0 && r.err == EISDIR, "reading a directory says EISDIR");
 
     /* --- atomic replace: old contents must not survive ------------------ */
-    snprintf(path, sizeof path, "%s/c.txt", base);
+    tx_snprintf(path, sizeof path, "%s/c.txt", base);
     (void)file_write(path, "AAAAAAAAAA", 10);
     (void)file_write(path, "BB", 2);        /* shorter: a stale tail would show */
     r = file_read(path, buf, sizeof buf);
     expect(r.ok == 1, "the replacement is readable");
-    expect(!strcmp(buf, "BB"), "a shorter write fully replaces the longer one");
+    expect(!zs_cmp(buf, "BB"), "a shorter write fully replaces the longer one");
 
     /* --- the temp file must NOT be left behind ------------------------- */
     {
         char tmp[512];
         struct stat st;
-        snprintf(tmp, sizeof tmp, "%s/c.txt.csih-tmp", base);
+        tx_snprintf(tmp, sizeof tmp, "%s/c.txt.csih-tmp", base);
         expect(stat(tmp, &st) != 0, "no temp file is left after a successful write");
     }
 
     /* --- listing ------------------------------------------------------- */
     r = file_list(base, buf, sizeof buf);
     expect(r.ok == 1, "a directory can be listed");
-    expect(strstr(buf, "a.txt") != NULL, "the listing contains a.txt");
-    expect(strstr(buf, "big.txt") != NULL, "the listing contains big.txt");
-    expect(strstr(buf, ".\n") == NULL, "the listing skips .");
-    expect(strstr(buf, "..\n") == NULL, "the listing skips ..");
+    expect(zs_find(buf, "a.txt") != NULL, "the listing contains a.txt");
+    expect(zs_find(buf, "big.txt") != NULL, "the listing contains big.txt");
+    expect(zs_find(buf, ".\n") == NULL, "the listing skips .");
+    expect(zs_find(buf, "..\n") == NULL, "the listing skips ..");
     expect(r.bytes >= 3, "the listing reports how many entries it found");
 
     /* A too-small buffer must fail, not silently return a partial listing —
@@ -131,13 +135,13 @@ static void run_selftest(void) {
     expect(r.ok == 0, "a too-small listing buffer fails rather than truncating");
 
     /* --- append -------------------------------------------------------- */
-    snprintf(path, sizeof path, "%s/log.jsonl", base);
+    tx_snprintf(path, sizeof path, "%s/log.jsonl", base);
     expect(unisa_safedel(path, SAFEDEL_PURGE, 0, why, (int)sizeof why) == 0, "a stale log is removed through the deletion guard");
     expect(file_append_line(path, "one").ok == 1, "append creates the file");
     expect(file_append_line(path, "two\n").ok == 1, "append adds a second line");
     r = file_read(path, buf, sizeof buf);
     expect(r.ok == 1, "the log is readable");
-    expect(!strcmp(buf, "one\ntwo\n"), "each line is newline-terminated exactly once");
+    expect(!zs_cmp(buf, "one\ntwo\n"), "each line is newline-terminated exactly once");
 
     /* --- no path expansion: a literal ~ is a literal directory ---------- */
     /* Guarding this in a test because "helpfully" expanding ~ is the kind of
@@ -151,6 +155,6 @@ static void run_selftest(void) {
 
 int file_run_selftest(void) {
     run_selftest();
-    printf("%s\n", failures ? "SELFTEST FAILED" : "selftest ok");
+    sy_printf("%s\n", failures ? "SELFTEST FAILED" : "selftest ok");
     return failures == 0 ? 0 : 1;
 }

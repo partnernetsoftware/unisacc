@@ -1,3 +1,11 @@
+#pragma unisa use text.fmt
+#pragma unisa use text.num
+#pragma unisa use sys.io
+#pragma unisa use zstr
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
 #pragma unisa use agent
 #pragma unisa use os_safedel
 /*
@@ -108,7 +116,7 @@ agent_result agent_run_cb(const char *prompt, const char *transcript,
 
 static void print_event(const char *line, void *ud) {
     (void)ud;
-    printf("%s\n", line ? line : "");
+    sy_printf("%s\n", line ? line : "");
     fflush(stdout);
 }
 
@@ -116,8 +124,8 @@ static void print_event(const char *line, void *ud) {
 
 static int a_failures = 0;
 static void a_expect(int cond, const char *what) {
-    if (!cond) { printf("  FAIL %s\n", what); a_failures++; }
-    else printf("  ok   %s\n", what);
+    if (!cond) { sy_printf("  FAIL %s\n", what); a_failures++; }
+    else sy_printf("  ok   %s\n", what);
 }
 
 static int agent_run_selftest(void) {
@@ -127,14 +135,14 @@ static int agent_run_selftest(void) {
     int fd;
 
     a_failures = 0;
-    printf("agent selftest:\n");
+    sy_printf("agent selftest:\n");
 
     /* parser: each shape resolves to the right kind */
     s = agent_parse("{\"act\":\"exec\",\"cmd\":\"echo hi\"}");
     a_expect(s.kind == ACT_EXEC, "parse exec");
-    a_expect(!strcmp(s.cmd, "echo hi"), "  exec cmd");
+    a_expect(!zs_cmp(s.cmd, "echo hi"), "  exec cmd");
     s = agent_parse("{\"act\":\"exec\",\"cmd\":\"echo hi\",\"why\":\"看输出\"}");
-    a_expect(s.kind == ACT_EXEC && !strcmp(s.why, "看输出"), "parse exec why");
+    a_expect(s.kind == ACT_EXEC && !zs_cmp(s.why, "看输出"), "parse exec why");
 
     /* observation_refs: optional sixth key quote (harness locates its bytes) */
     {
@@ -158,11 +166,11 @@ static int agent_run_selftest(void) {
         int bad = -1;
         for (k = 0; k < sizeof refs / sizeof refs[0]; k++) {
             char doc[2048];
-            snprintf(doc, sizeof doc, "%s%s]}", head, refs[k][0]);
+            tx_snprintf(doc, sizeof doc, "%s%s]}", head, refs[k][0]);
             s = agent_parse(doc);
             if (s.claims_present != (refs[k][1][0] == '1')) { bad = (int)k; break; }
         }
-        if (bad >= 0) printf("  case %d claims_present=%d\n", bad, s.claims_present);
+        if (bad >= 0) sy_printf("  case %d claims_present=%d\n", bad, s.claims_present);
         a_expect(bad < 0, "observation_refs accept optional quote; reject empty/unknown keys and duplicates");
     }
 
@@ -179,9 +187,9 @@ static int agent_run_selftest(void) {
     s = agent_parse("{\"act\":\"answer\",\"outcome\":\"failed\",\"outcome\":\"completed\",\"text\":\"x\"}");
     a_expect(s.kind == ACT_ERR, "duplicate outcome rejected");
     s = agent_parse("{\"act\":\"mind\",\"op\":\"add\",\"target\":\"palace\",\"text\":\"note\"}");
-    a_expect(s.kind == ACT_MIND && !strcmp(s.path, "palace") && !strcmp(s.op, "add"), "parse mind target");
+    a_expect(s.kind == ACT_MIND && !zs_cmp(s.path, "palace") && !zs_cmp(s.op, "add"), "parse mind target");
     s = agent_parse("{\"act\":\"mind\",\"op\":\"read\",\"which\":\"tree\"}");
-    a_expect(s.kind == ACT_MIND && !strcmp(s.path, "tree"), "parse mind which");
+    a_expect(s.kind == ACT_MIND && !zs_cmp(s.path, "tree"), "parse mind which");
 
     s = agent_parse("{\"go\":\"stop\"}");
     a_expect(s.kind == ACT_GO_STOP, "parse go:stop");
@@ -197,7 +205,7 @@ static int agent_run_selftest(void) {
     a_expect(!agent_take_prose(&s, "out[0]=0 即可", 0), "prose stays an error when tools are allowed");
     s = agent_parse("not json");
     a_expect(agent_take_prose(&s, "out[0]=0 即可", 1) && s.kind == ACT_ANSWER
-             && strstr(s.text, "out[0]"),
+             && zs_find(s.text, "out[0]"),
              "不用工具: prose is the answer");
     s = agent_parse("Sure.\n{\"act\":\"exec\",\"cmd\":\"pwd\"}\n{\"act\":\"exec\",\"cmd\":\"ls\"}");
     a_expect(s.kind == ACT_ERR,
@@ -205,7 +213,7 @@ static int agent_run_selftest(void) {
     a_expect(agent_object_count("Sure.\n{\"act\":\"exec\",\"cmd\":\"pwd\"}\n{\"act\":\"exec\",\"cmd\":\"ls\"}") == 2,
              "two objects are counted");
     s = agent_parse("{\"act\":\"answer\",\"text\":\"use } here\"}");
-    a_expect(s.kind == ACT_ANSWER && strcmp(s.text, "use } here") == 0,
+    a_expect(s.kind == ACT_ANSWER && zs_cmp(s.text, "use } here") == 0,
              "a brace inside a string stays in the first object");
     a_expect(agent_object_count("{\"a\":\" } { \"} {\"b\":1}") == 2,
              "a brace inside a string is not a second object");
@@ -217,33 +225,33 @@ static int agent_run_selftest(void) {
         }
         big[sizeof big - 1] = 0;
         a_expect(agent_tool_record(rec, sizeof rec, "file", big) == 1, "big tool record fits");
-        n = strlen(rec);
+        n = zs_len(rec);
         a_expect(n + 1 < sizeof rec && rec[n - 1] == '}' && rec[n - 2] == '"',
                  "  record is closed JSON");
-        a_expect(strstr(rec, "中间略") != NULL, "  a long tool row keeps a middle mark");
+        a_expect(zs_find(rec, "中间略") != NULL, "  a long tool row keeps a middle mark");
     }
     {
         char raw[4100], rec[8256];
-        memset(raw, 'M', sizeof raw - 1);
-        memcpy(raw, "HEADMARK", 8);
-        memcpy(raw + sizeof raw - 9, "TAILMARK", 8);
+        zs_mset(raw, 'M', sizeof raw - 1);
+        zs_mcpy(raw, "HEADMARK", 8);
+        zs_mcpy(raw + sizeof raw - 9, "TAILMARK", 8);
         raw[sizeof raw - 1] = 0;
         a_expect(agent_tool_record(rec, sizeof rec, "file", raw) == 1
-                 && strstr(rec, "HEADMARK") && strstr(rec, "TAILMARK")
-                 && strstr(rec, "中间略") && strlen(rec) < 4000,
+                 && zs_find(rec, "HEADMARK") && zs_find(rec, "TAILMARK")
+                 && zs_find(rec, "中间略") && zs_len(rec) < 4000,
                  "a long tool row keeps its head and its tail");
     }
     {
         char rows[12][200];
         char big[900];
         int n, i, bad = 0;
-        memset(big, 'A', sizeof big - 1);
-        memcpy(big, "HEAD\n", 5);
-        memcpy(big + 860, "\nTAIL", 5);
+        zs_mset(big, 'A', sizeof big - 1);
+        zs_mcpy(big, "HEAD\n", 5);
+        zs_mcpy(big + 860, "\nTAIL", 5);
         big[sizeof big - 1] = 0;
         n = agent_event_pack("✓ answer: ", big, rows, 12);
-        for (i = 0; i < n; i++) if (strlen(rows[i]) >= 200) bad = 1;
-        a_expect(n >= 3 && !bad && strstr(rows[0], "HEAD") && strstr(rows[n - 1], "TAIL"),
+        for (i = 0; i < n; i++) if (zs_len(rows[i]) >= 200) bad = 1;
+        a_expect(n >= 3 && !bad && zs_find(rows[0], "HEAD") && zs_find(rows[n - 1], "TAIL"),
                  "a long answer is several log rows");
     }
 
@@ -254,11 +262,11 @@ static int agent_run_selftest(void) {
         char role[16];
         int wrap = 1;
         a_expect(agent_chat_role("assistant", role, sizeof role, &wrap) == 1
-                 && !strcmp(role, "assistant") && wrap == 0,
+                 && !zs_cmp(role, "assistant") && wrap == 0,
                  "assistant role stays");
         wrap = 0;
         a_expect(agent_chat_role("tool", role, sizeof role, &wrap) == 1
-                 && !strcmp(role, "user") && wrap == 1,
+                 && !zs_cmp(role, "user") && wrap == 1,
                  "tool role becomes a user turn");
         a_expect(agent_chat_role("decision", role, sizeof role, &wrap) == 1
                  && wrap == 1, "decision role is not sent raw");
@@ -267,22 +275,22 @@ static int agent_run_selftest(void) {
     {
         const char *rules = agent_model_rules();
         a_expect(rules
-                 && strstr(rules, "先理解当前请求与仍有效约束")
-                 && strstr(rules, "自主最小查证")
-                 && strstr(rules, "普通无需工具的咨询可直接单独 answer")
-                 && strstr(rules, "只有当前任务明确要求或明确授权通信")
-                 && strstr(rules, "禁止或不需要确认时，不得发送外部消息")
-                 && !strstr(rules, "0:grkwjcgmcsih")
-                 && strstr(rules, "新功能先讨论")
-                 && strstr(rules, "不得先写入")
-                 && strstr(rules, "why")
-                 && strstr(rules, "markdown-tree-dag")
-                 && strstr(rules, "mermaid-flowchart-memory-palace")
-                 && strstr(rules, "csih。")
-                 && strstr(rules, "answer之后独立验收")
-                 && strstr(rules, "stop立即停止但不自动通过")
-                 && strstr(rules, "本回合harness action_id")
-                 && strstr(rules, "不要 exec tmux"),
+                 && zs_find(rules, "先理解当前请求与仍有效约束")
+                 && zs_find(rules, "自主最小查证")
+                 && zs_find(rules, "普通无需工具的咨询可直接单独 answer")
+                 && zs_find(rules, "只有当前任务明确要求或明确授权通信")
+                 && zs_find(rules, "禁止或不需要确认时，不得发送外部消息")
+                 && !zs_find(rules, "0:grkwjcgmcsih")
+                 && zs_find(rules, "新功能先讨论")
+                 && zs_find(rules, "不得先写入")
+                 && zs_find(rules, "why")
+                 && zs_find(rules, "markdown-tree-dag")
+                 && zs_find(rules, "mermaid-flowchart-memory-palace")
+                 && zs_find(rules, "csih。")
+                 && zs_find(rules, "answer之后独立验收")
+                 && zs_find(rules, "stop立即停止但不自动通过")
+                 && zs_find(rules, "本回合harness action_id")
+                 && zs_find(rules, "不要 exec tmux"),
                  "rules: default answer, explicit communication authorization, no obsolete peer, and existing task/memory rules");
         a_expect(agent_may_stop_ans(1, 3, 1) && agent_may_stop_ans(2, 3, 1),
                  "answered: first stop ends the turn");
@@ -292,37 +300,37 @@ static int agent_run_selftest(void) {
                  "a package question is not a window");
         a_expect(agent_mentions_window("看看窗口 13") && agent_mentions_window("tmux capture-pane"),
                  "a window request keeps the list");
-        a_expect(strstr(rules, "下一窗") != NULL && strstr(rules, "恰好一个 JSON 对象") != NULL &&
-                 strstr(rules, "等待真实结果") != NULL,
+        a_expect(zs_find(rules, "下一窗") != NULL && zs_find(rules, "恰好一个 JSON 对象") != NULL &&
+                 zs_find(rules, "等待真实结果") != NULL,
                  "rules keep one action, wait for its result, and name the next window");
     }
 
     {
-        char *body = (char *)malloc(65536);
+        char *body = (char *)mm_alloc(65536);
         a_expect(body != NULL, "role communication policy preview buffer");
         if (body) {
             agent_role_test("write", "0:policy-peer");
             agent_ctx_preview("/tmp/csih-role-policy-missing.jsonl", body, 65536);
-            a_expect(strstr(body, "cwd 不是文件系统隔离") != NULL &&
-                     strstr(body, "所有测试临时输出都必须留在该目录内") != NULL &&
-                     strstr(body, "不要使用全局固定 /tmp 文件") != NULL &&
-                     strstr(body, "已有越界必须如实报告，不能因后续修复隐去") != NULL &&
-                     strstr(body, "不能把未核实的范围宣称已验证") != NULL,
+            a_expect(zs_find(body, "cwd 不是文件系统隔离") != NULL &&
+                     zs_find(body, "所有测试临时输出都必须留在该目录内") != NULL &&
+                     zs_find(body, "不要使用全局固定 /tmp 文件") != NULL &&
+                     zs_find(body, "已有越界必须如实报告，不能因后续修复隐去") != NULL &&
+                     zs_find(body, "不能把未核实的范围宣称已验证") != NULL,
                      "actual model request describes task-local temporary files and honest side effects without claiming isolation");
-            a_expect(strstr(body, "写手。同伴 0:policy-peer") != NULL &&
-                     strstr(body, "先最小查证、执行和验收") != NULL &&
-                     strstr(body, "禁止或不需要确认时不得发送") != NULL &&
-                     strstr(body, "做完执行") == NULL,
+            a_expect(zs_find(body, "写手。同伴 0:policy-peer") != NULL &&
+                     zs_find(body, "先最小查证、执行和验收") != NULL &&
+                     zs_find(body, "禁止或不需要确认时不得发送") != NULL &&
+                     zs_find(body, "做完执行") == NULL,
                      "writer has actual peer and no automatic external confirmation obligation");
             agent_role_test("watch", "0:policy-peer");
             agent_ctx_preview("/tmp/csih-role-policy-missing.jsonl", body, 65536);
-            a_expect(strstr(body, "看客。同伴 0:policy-peer") != NULL &&
-                     strstr(body, "可用 file read 与 mind read 查证") != NULL &&
-                     strstr(body, "只有当前任务明确要求或明确授权通信时才发送") != NULL &&
-                     strstr(body, "真实成功回执") != NULL && agent_watch_needs_mail() == 1,
+            a_expect(zs_find(body, "看客。同伴 0:policy-peer") != NULL &&
+                     zs_find(body, "可用 file read 与 mind read 查证") != NULL &&
+                     zs_find(body, "只有当前任务明确要求或明确授权通信时才发送") != NULL &&
+                     zs_find(body, "真实成功回执") != NULL && agent_watch_needs_mail() == 1,
                      "watch authorization guidance preserves the real delivery gate");
         }
-        free(body);
+        mm_free(body);
         agent_role_test(NULL, NULL);
     }
 
@@ -365,9 +373,9 @@ static int agent_run_selftest(void) {
                 "/Users/wjc/repos/moltbaby/bin/envelope 0:csih-tui 标题 正文 > /tmp/x"
             };
             int i;
-            memset(&r, 0, sizeof r); r.ok = 1; r.exited = 1;
-            snprintf(r.out, sizeof r.out, "envelope → 0:csih-tui.0: 80 chars [submitted✓:BUSY]\n");
-            r.bytes = (long)strlen(r.out);
+            zs_mset(&r, 0, sizeof r); r.ok = 1; r.exited = 1;
+            tx_snprintf(r.out, sizeof r.out, "envelope → 0:csih-tui.0: 80 chars [submitted✓:BUSY]\n");
+            r.bytes = (long)zs_len(r.out);
             for (i = 0; i < 6; i++) {
                 agent_watch_result(bad[i], &r);
                 a_expect(agent_watch_needs_mail() == 1, "fake/composite/wrong-peer envelope rejected");
@@ -378,7 +386,7 @@ static int agent_run_selftest(void) {
             a_expect(agent_watch_needs_mail() == 1, "timeout does not clear mail gate");
             r.timed_out = 0; r.bytes = -1; agent_watch_result(cmd, &r);
             a_expect(agent_watch_needs_mail() == 1, "truncated receipt rejected");
-            r.bytes = (long)strlen(r.out); agent_watch_result(cmd, &r);
+            r.bytes = (long)zs_len(r.out); agent_watch_result(cmd, &r);
             a_expect(agent_watch_needs_mail() == 0, "structured success result clears mail gate (no delivery performed)");
         }
         agent_role_test("", "");
@@ -386,7 +394,7 @@ static int agent_run_selftest(void) {
 
     {
         s = agent_parse("{\"act\":\"file\",\"op\":\"read\",\"path\":\"a.c\",\"line\":40,\"n\":20}");
-        a_expect(s.kind == ACT_READ && s.line == 40 && s.nlines == 20 && !strcmp(s.path, "a.c"),
+        a_expect(s.kind == ACT_READ && s.line == 40 && s.nlines == 20 && !zs_cmp(s.path, "a.c"),
                  "file read takes a line window");
     }
 
@@ -401,25 +409,25 @@ static int agent_run_selftest(void) {
                  "an oversized newest record is not replaced by an older one");
         a_expect(agent_ctx_start(0, 50, costs, 100) == 0, "empty context starts at 0");
         a_expect(agent_transcript_path(jpath, sizeof jpath) == 0, "transcript path resolves");
-        if (getenv("CSIH_TRANSCRIPT") && getenv("CSIH_TRANSCRIPT")[0])
-            a_expect(strcmp(jpath, getenv("CSIH_TRANSCRIPT")) == 0,
+        if (sy_env("CSIH_TRANSCRIPT") && sy_env("CSIH_TRANSCRIPT")[0])
+            a_expect(zs_cmp(jpath, sy_env("CSIH_TRANSCRIPT")) == 0,
                      "transcript follows CSIH_TRANSCRIPT");
-        else if (getenv("CDSH_TRANSCRIPT") && getenv("CDSH_TRANSCRIPT")[0])
-            a_expect(strcmp(jpath, getenv("CDSH_TRANSCRIPT")) == 0,
+        else if (sy_env("CDSH_TRANSCRIPT") && sy_env("CDSH_TRANSCRIPT")[0])
+            a_expect(zs_cmp(jpath, sy_env("CDSH_TRANSCRIPT")) == 0,
                      "transcript follows CDSH_TRANSCRIPT");
         else {
             char want[1200], here[1024];
             size_t i, n;
             /* Default: one journal per cwd, / encoded as %. */
             if (getcwd(here, sizeof here)) {
-                n = (size_t)snprintf(want, sizeof want, "/.cdsh/cwd/");
+                n = (size_t)tx_snprintf(want, sizeof want, "/.cdsh/cwd/");
                 for (i = 0; here[i] && n + 3 < sizeof want; i++) {
                     if (here[i] == '/') want[n++] = '%';
                     else if (here[i] == '%') { want[n++] = '%'; want[n++] = '%'; }
                     else want[n++] = here[i];
                 }
-                snprintf(want + n, sizeof want - n, "/tui.jsonl");
-                a_expect(strstr(jpath, want) != NULL, "transcript defaults to this cwd's journal");
+                tx_snprintf(want + n, sizeof want - n, "/tui.jsonl");
+                a_expect(zs_find(jpath, want) != NULL, "transcript defaults to this cwd's journal");
             }
         }
     }
@@ -427,7 +435,7 @@ static int agent_run_selftest(void) {
     /* executor: exec really runs */
     s = agent_parse("{\"act\":\"exec\",\"cmd\":\"echo hi\"}");
     a_expect(agent_exec(&s, "/tmp", out, sizeof out) == 1, "exec runs");
-    a_expect(strstr(out, "hi") != NULL, "  exec output captured");
+    a_expect(zs_find(out, "hi") != NULL, "  exec output captured");
 
     /* which model-call failures are worth a retry */
     a_expect(agent_transient_http(0, -2, 0) && agent_transient_http(1, 0, 429) && agent_transient_http(1, 0, 503),
@@ -442,33 +450,33 @@ static int agent_run_selftest(void) {
         size_t got;
         int i, valid = 1;
         FILE *f;
-        snprintf(dir, sizeof dir, "/tmp/csih-notes-%d", (int)getpid());
+        tx_snprintf(dir, sizeof dir, "/tmp/csih-notes-%d", (int)sy_pid());
         mkdir(dir, 0700);
         if (getcwd(old, sizeof old) && chdir(dir) == 0) {
             a_expect(agent_project_notes(notes, sizeof notes) == 0, "no notes file: nothing added");
-            snprintf(p, sizeof p, "%s/AGENTS.md", dir);
+            tx_snprintf(p, sizeof p, "%s/AGENTS.md", dir);
             f = fopen(p, "w"); if (f) { fputs("用 tab 缩进", f); fclose(f); }
             got = agent_project_notes(notes, sizeof notes);
-            a_expect(got > 0 && strstr(notes, "AGENTS.md") && strstr(notes, "用 tab 缩进") && strstr(notes, "不是授权"),
+            a_expect(got > 0 && zs_find(notes, "AGENTS.md") && zs_find(notes, "用 tab 缩进") && zs_find(notes, "不是授权"),
                      "AGENTS.md is read when there is no CSIH.md");
-            snprintf(p, sizeof p, "%s/CSIH.md", dir);
+            tx_snprintf(p, sizeof p, "%s/CSIH.md", dir);
             f = fopen(p, "w");
             if (f) { for (i = 0; i < 3000; i++) fputs("中", f); fclose(f); }   /* 9000 bytes */
             got = agent_project_notes(notes, sizeof notes);
-            a_expect(got > 0 && strstr(notes, "CSIH.md") && !strstr(notes, "用 tab 缩进"), "CSIH.md wins over AGENTS.md");
+            a_expect(got > 0 && zs_find(notes, "CSIH.md") && !zs_find(notes, "用 tab 缩进"), "CSIH.md wins over AGENTS.md");
             /* cut at 8KB on a code point: every 中 after the header is whole */
             {
-                const char *b = strstr(notes, "）：\n");
+                const char *b = zs_find(notes, "）：\n");
                 size_t k, len;
-                if (b) { b += strlen("）：\n"); len = strlen(b) - 1; /* trailing \n */
-                    for (k = 0; k + 3 <= len; k += 3) if (memcmp(b + k, "中", 3)) valid = 0;
+                if (b) { b += zs_len("）：\n"); len = zs_len(b) - 1; /* trailing \n */
+                    for (k = 0; k + 3 <= len; k += 3) if (mm_cmp(b + k, "中", 3)) valid = 0;
                     if (len % 3) valid = 0;
                     if (len > 8192) valid = 0;
                 } else valid = 0;
             }
             a_expect(valid, "long notes are cut to 8KB on a code point boundary");
             remove(p);
-            snprintf(p, sizeof p, "%s/AGENTS.md", dir); remove(p);
+            tx_snprintf(p, sizeof p, "%s/AGENTS.md", dir); remove(p);
             if (chdir(old) != 0) a_expect(0, "restore cwd");
         }
         rmdir(dir);
@@ -477,52 +485,52 @@ static int agent_run_selftest(void) {
     /* sandbox: the kernel, not a keyword list, refuses writes outside the tier */
     if (agent_sandbox_available()) {
         char dir[128], cmd[600];
-        const char *home = getenv("HOME");
-        snprintf(dir, sizeof dir, "/tmp/csih-sbx-%d", (int)getpid());
+        const char *home = sy_env("HOME");
+        tx_snprintf(dir, sizeof dir, "/tmp/csih-sbx-%d", (int)sy_pid());
         mkdir(dir, 0700);
         agent_set_perm(0);
-        memset(&s, 0, sizeof s); s.kind = ACT_EXEC;
-        snprintf(s.cmd, sizeof s.cmd, "touch inside && echo wrote");
+        zs_mset(&s, 0, sizeof s); s.kind = ACT_EXEC;
+        tx_snprintf(s.cmd, sizeof s.cmd, "touch inside && echo wrote");
         agent_exec(&s, dir, out, sizeof out);
-        a_expect(strstr(out, "Read-only") != NULL && !strstr(out, "wrote"), "read tier: kernel refuses a write in cwd");
+        a_expect(zs_find(out, "Read-only") != NULL && !zs_find(out, "wrote"), "read tier: kernel refuses a write in cwd");
         agent_set_perm(1);
         agent_exec(&s, dir, out, sizeof out);
-        a_expect(strstr(out, "wrote") != NULL, "work tier: cwd is writable");
-        snprintf(cmd, sizeof cmd, "touch '%s/.csih-sbx-probe' && echo wrote", home ? home : "/root");
-        snprintf(s.cmd, sizeof s.cmd, "%s", cmd);
+        a_expect(zs_find(out, "wrote") != NULL, "work tier: cwd is writable");
+        tx_snprintf(cmd, sizeof cmd, "touch '%s/.csih-sbx-probe' && echo wrote", home ? home : "/root");
+        tx_snprintf(s.cmd, sizeof s.cmd, "%s", cmd);
         agent_exec(&s, dir, out, sizeof out);
-        a_expect(strstr(out, "Read-only") != NULL && !strstr(out, "wrote"), "work tier: home outside cwd is read-only");
+        a_expect(zs_find(out, "Read-only") != NULL && !zs_find(out, "wrote"), "work tier: home outside cwd is read-only");
         /* secrets read empty, own PID space, and (read tier) no network */
-        snprintf(s.cmd, sizeof s.cmd, "echo env=$(cat \"$HOME/env.jsonl\" 2>/dev/null | wc -c) pids=$(ls /proc | grep -c '^[0-9]') net=$(wc -l < /proc/net/dev)");
+        tx_snprintf(s.cmd, sizeof s.cmd, "echo env=$(cat \"$HOME/env.jsonl\" 2>/dev/null | wc -c) pids=$(ls /proc | grep -c '^[0-9]') net=$(wc -l < /proc/net/dev)");
         agent_exec(&s, dir, out, sizeof out);
-        a_expect(strstr(out, "env=0 ") != NULL, "work tier: ~/env.jsonl reads as empty");
+        a_expect(zs_find(out, "env=0 ") != NULL, "work tier: ~/env.jsonl reads as empty");
         {
-            const char *p = strstr(out, "pids=");
-            a_expect(p && atoi(p + 5) > 0 && atoi(p + 5) < 10, "sandbox has its own PID space");
+            const char *p = zs_find(out, "pids=");
+            a_expect(p && (int)tx_atol(p + 5) > 0 && (int)tx_atol(p + 5) < 10, "sandbox has its own PID space");
         }
-        snprintf(s.cmd, sizeof s.cmd, "echo vm=$(ulimit -v) cpu=$(ulimit -t)");
+        tx_snprintf(s.cmd, sizeof s.cmd, "echo vm=$(ulimit -v) cpu=$(ulimit -t)");
         agent_exec(&s, dir, out, sizeof out);
-        a_expect(strstr(out, "vm=4194304 cpu=120") != NULL, "sandbox sets default memory and CPU quotas");
-        snprintf(s.cmd, sizeof s.cmd, "echo env=$(cat \"$HOME/env.jsonl\" 2>/dev/null | wc -c) pids=$(ls /proc | grep -c '^[0-9]') net=$(wc -l < /proc/net/dev)");
+        a_expect(zs_find(out, "vm=4194304 cpu=120") != NULL, "sandbox sets default memory and CPU quotas");
+        tx_snprintf(s.cmd, sizeof s.cmd, "echo env=$(cat \"$HOME/env.jsonl\" 2>/dev/null | wc -c) pids=$(ls /proc | grep -c '^[0-9]') net=$(wc -l < /proc/net/dev)");
         agent_set_perm(0);
         agent_exec(&s, dir, out, sizeof out);
         /* /proc/net/dev: two header lines plus lo only. */
-        a_expect(strstr(out, "net=3") != NULL, "read tier: no network but loopback");
+        a_expect(zs_find(out, "net=3") != NULL, "read tier: no network but loopback");
         agent_set_perm(1);
         agent_exec(&s, dir, out, sizeof out);
-        a_expect(strstr(out, "net=3") == NULL, "work tier keeps the network by default");
+        a_expect(zs_find(out, "net=3") == NULL, "work tier keeps the network by default");
         agent_set_net(0);
         agent_exec(&s, dir, out, sizeof out);
-        a_expect(strstr(out, "net=3") != NULL, "/net off: work tier has loopback only");
+        a_expect(zs_find(out, "net=3") != NULL, "/net off: work tier has loopback only");
         agent_set_net(1);
         /* user secret list: a file in cwd listed in ~/.csih/secrets reads empty */
         {
             char sec[300], list[300], had[4096];
             FILE *lf;
             size_t hn = 0;
-            snprintf(sec, sizeof sec, "%s/token.txt", dir);
+            tx_snprintf(sec, sizeof sec, "%s/token.txt", dir);
             lf = fopen(sec, "w"); if (lf) { fputs("SECRET123", lf); fclose(lf); }
-            snprintf(list, sizeof list, "%s/.csih/secrets", home ? home : "/tmp");
+            tx_snprintf(list, sizeof list, "%s/.csih/secrets", home ? home : "/tmp");
             lf = fopen(list, "r");
             if (lf) { hn = fread(had, 1, sizeof had - 1, lf); fclose(lf); }
             had[hn] = 0;
@@ -530,16 +538,16 @@ static int agent_run_selftest(void) {
             if (lf) {
                 char tilde[300];
                 FILE *tf;
-                snprintf(tilde, sizeof tilde, "%s/.csih/csih-sbx-tilde-%d.txt", home ? home : "/tmp", (int)getpid());
+                tx_snprintf(tilde, sizeof tilde, "%s/.csih/csih-sbx-tilde-%d.txt", home ? home : "/tmp", (int)sy_pid());
                 tf = fopen(tilde, "w"); if (tf) { fputs("TILDE456", tf); fclose(tf); }
                 fprintf(lf, "%s# csih selftest\n%s\n~/.csih/csih-sbx-tilde-%d.txt\n",
-                        hn && had[hn - 1] != '\n' ? "\n" : "", sec, (int)getpid());
+                        hn && had[hn - 1] != '\n' ? "\n" : "", sec, (int)sy_pid());
                 fclose(lf);
-                snprintf(s.cmd, sizeof s.cmd, "echo got=$(cat token.txt) tilde=$(cat \"$HOME/.csih/csih-sbx-tilde-%d.txt\")", (int)getpid());
+                tx_snprintf(s.cmd, sizeof s.cmd, "echo got=$(cat token.txt) tilde=$(cat \"$HOME/.csih/csih-sbx-tilde-%d.txt\")", (int)sy_pid());
                 agent_exec(&s, dir, out, sizeof out);
-                a_expect(strstr(out, "got=") && !strstr(out, "SECRET123"),
+                a_expect(zs_find(out, "got=") && !zs_find(out, "SECRET123"),
                          "a path listed in ~/.csih/secrets reads empty in the sandbox");
-                a_expect(strstr(out, "tilde=") && !strstr(out, "TILDE456"), "  ~/ paths in the list are expanded");
+                a_expect(zs_find(out, "tilde=") && !zs_find(out, "TILDE456"), "  ~/ paths in the list are expanded");
                 remove(tilde);
                 /* put the user's list back exactly as it was */
                 if (hn) { lf = fopen(list, "w"); if (lf) { fwrite(had, 1, hn, lf); fclose(lf); } }
@@ -547,30 +555,30 @@ static int agent_run_selftest(void) {
             }
             remove(sec);
         }
-        memset(s.cmd, 'x', sizeof s.cmd - 1); s.cmd[sizeof s.cmd - 1] = 0;
-        memcpy(s.cmd, "echo ", 5);
+        zs_mset(s.cmd, 'x', sizeof s.cmd - 1); s.cmd[sizeof s.cmd - 1] = 0;
+        zs_mcpy(s.cmd, "echo ", 5);
         { int i; for (i = 5; i < (int)sizeof s.cmd - 1; i += 2) s.cmd[i] = '\''; }
         agent_exec(&s, dir, out, sizeof out);
-        a_expect(strstr(out, "放不进沙箱") != NULL, "a command too long for the box is refused, not run bare");
+        a_expect(zs_find(out, "放不进沙箱") != NULL, "a command too long for the box is refused, not run bare");
         agent_set_perm(1);
-        snprintf(cmd, sizeof cmd, "%s/inside", dir);
+        tx_snprintf(cmd, sizeof cmd, "%s/inside", dir);
         unlink(cmd);
         rmdir(dir);
-    } else printf("  skip sandbox: unshare -Urm unavailable here\n");
+    } else sy_printf("  skip sandbox: unshare -Urm unavailable here\n");
 
     /* a long result stays in memory unless the CLI asked for spill */
-    memset(&s, 0, sizeof s); s.kind = ACT_EXEC;
-    strncpy(s.cmd, "dd if=/dev/zero bs=2500 count=1 2>/dev/null | tr '\\0' A", sizeof s.cmd - 1);
+    zs_mset(&s, 0, sizeof s); s.kind = ACT_EXEC;
+    zs_ncpy(s.cmd, "dd if=/dev/zero bs=2500 count=1 2>/dev/null | tr '\\0' A", sizeof s.cmd - 1);
     agent_set_spill(0);
     a_expect(agent_exec(&s, "/tmp", out, sizeof out) == 1, "long exec runs");
-    a_expect(strstr(out, "full:") == NULL && strstr(out, "AAAA") != NULL,
+    a_expect(zs_find(out, "full:") == NULL && zs_find(out, "AAAA") != NULL,
              "  long exec does not write a tool file");
     agent_set_spill(1);
     a_expect(agent_exec(&s, "/tmp", out, sizeof out) == 1, "long exec spill runs");
-    a_expect(strstr(out, "full: ") != NULL && strstr(out, "/.csih/tool/") != NULL,
+    a_expect(zs_find(out, "full: ") != NULL && zs_find(out, "/.csih/tool/") != NULL,
              "  long result names a tool file");
     {
-        const char *p = strstr(out, "full: ");
+        const char *p = zs_find(out, "full: ");
         char spath[640];
         FILE *sf;
         size_t k = 0;
@@ -591,25 +599,25 @@ static int agent_run_selftest(void) {
     agent_set_spill(0);
 
     /* executor: file write then read round-trips */
-    snprintf(path, sizeof path, "/tmp/csih-agent-test-%d.txt", (int)getpid());
+    tx_snprintf(path, sizeof path, "/tmp/csih-agent-test-%d.txt", (int)sy_pid());
     remove(path);
     s = agent_parse("{\"act\":\"file\",\"op\":\"write\",\"path\":\"PLACE\",\"text\":\"hello-world\"}");
     /* path is a fixed placeholder above; set it directly */
-    memset(&s, 0, sizeof s); s.kind = ACT_WRITE;
-    strncpy(s.path, path, sizeof s.path - 1);
-    strncpy(s.text, "hello-world", sizeof s.text - 1);
+    zs_mset(&s, 0, sizeof s); s.kind = ACT_WRITE;
+    zs_ncpy(s.path, path, sizeof s.path - 1);
+    zs_ncpy(s.text, "hello-world", sizeof s.text - 1);
     a_expect(agent_exec(&s, "/tmp", out, sizeof out) == 1, "file write runs");
-    a_expect(strstr(out, "wrote") != NULL, "  write reported bytes");
+    a_expect(zs_find(out, "wrote") != NULL, "  write reported bytes");
 
-    memset(&s, 0, sizeof s); s.kind = ACT_READ;
-    strncpy(s.path, path, sizeof s.path - 1);
+    zs_mset(&s, 0, sizeof s); s.kind = ACT_READ;
+    zs_ncpy(s.path, path, sizeof s.path - 1);
     a_expect(agent_exec(&s, "/tmp", out, sizeof out) == 1, "file read runs");
-    a_expect(strstr(out, "hello-world") != NULL, "  read returned the content");
+    a_expect(zs_find(out, "hello-world") != NULL, "  read returned the content");
     remove(path);
 
     {
         FILE *lf;
-        snprintf(path, sizeof path, "/tmp/csih-lines-%d.txt", (int)getpid());
+        tx_snprintf(path, sizeof path, "/tmp/csih-lines-%d.txt", (int)sy_pid());
         lf = fopen(path, "w");
         a_expect(lf != NULL, "line window fixture");
         if (lf) {
@@ -617,15 +625,15 @@ static int agent_run_selftest(void) {
             for (row = 1; row <= 10; row++) fprintf(lf, "L%d\n", row);
             fclose(lf);
         }
-        memset(&s, 0, sizeof s);
+        zs_mset(&s, 0, sizeof s);
         s.kind = ACT_READ;
-        strncpy(s.path, path, sizeof s.path - 1);
+        zs_ncpy(s.path, path, sizeof s.path - 1);
         s.line = 3;
         s.nlines = 2;
         a_expect(agent_exec(&s, "/tmp", out, sizeof out) == 1, "line window reads");
-        a_expect(strstr(out, "L3") && strstr(out, "L4") && !strstr(out, "L2") && !strstr(out, "L5"),
+        a_expect(zs_find(out, "L3") && zs_find(out, "L4") && !zs_find(out, "L2") && !zs_find(out, "L5"),
                  "  window is lines 3 and 4");
-        a_expect(!strcmp(out, "L3\nL4\n"), "  window is exact raw text without invented coverage footer");
+        a_expect(!zs_cmp(out, "L3\nL4\n"), "  window is exact raw text without invented coverage footer");
         remove(path);
     }
 
@@ -635,13 +643,13 @@ static int agent_run_selftest(void) {
     {
         char dir[64], rel[80], got[32];
         FILE *f;
-        snprintf(dir, sizeof dir, "/tmp/cdsh-rel-%d", (int)getpid());
-        snprintf(rel, sizeof rel, "%s/rel.txt", dir);
+        tx_snprintf(dir, sizeof dir, "/tmp/cdsh-rel-%d", (int)sy_pid());
+        tx_snprintf(rel, sizeof rel, "%s/rel.txt", dir);
         mkdir(dir, 0700);
         remove(rel);
-        memset(&s, 0, sizeof s); s.kind = ACT_WRITE;
-        strncpy(s.path, "rel.txt", sizeof s.path - 1);
-        strncpy(s.text, "hello", sizeof s.text - 1);
+        zs_mset(&s, 0, sizeof s); s.kind = ACT_WRITE;
+        zs_ncpy(s.path, "rel.txt", sizeof s.path - 1);
+        zs_ncpy(s.text, "hello", sizeof s.text - 1);
         a_expect(agent_exec(&s, dir, out, sizeof out) == 1, "relative write runs");
         f = fopen(rel, "r");
         a_expect(f != NULL, "  relative file is under cwd");
@@ -649,7 +657,7 @@ static int agent_run_selftest(void) {
             size_t n = fread(got, 1, sizeof got - 1, f);
             fclose(f);
             got[n] = 0;
-            a_expect(strcmp(got, "hello") == 0, "  relative content");
+            a_expect(zs_cmp(got, "hello") == 0, "  relative content");
         }
         /* undo: overwrite, then step back twice: old content, then gone */
         {
@@ -658,16 +666,16 @@ static int agent_run_selftest(void) {
             FILE *sf;
             /* A backup from a dead process (pid 2^22-1 is never live here) is
              * swept the first time this process snapshots. */
-            snprintf(stale, sizeof stale, "%s/.csih/undo/4194303-1.bak", getenv("HOME") ? getenv("HOME") : "/tmp");
+            tx_snprintf(stale, sizeof stale, "%s/.csih/undo/4194303-1.bak", sy_env("HOME") ? sy_env("HOME") : "/tmp");
             sf = fopen(stale, "w"); if (sf) { fputs("x", sf); fclose(sf); }
-            strncpy(s.text, "changed", sizeof s.text - 1);
+            zs_ncpy(s.text, "changed", sizeof s.text - 1);
             agent_exec(&s, dir, out, sizeof out);
             a_expect(agent_undo_depth() == depth + 1, "a write records one undo step");
             a_expect(!sf || access(stale, F_OK) != 0, "a dead process's leftover backup is swept");
             a_expect(agent_undo_last(note, sizeof note) == 0, "undo restores the overwrite");
             f = fopen(rel, "r"); got[0] = 0;
             if (f) { size_t n = fread(got, 1, sizeof got - 1, f); fclose(f); got[n] = 0; }
-            a_expect(strcmp(got, "hello") == 0, "  old content is back");
+            a_expect(zs_cmp(got, "hello") == 0, "  old content is back");
             a_expect(agent_undo_last(note, sizeof note) == 0 && access(rel, F_OK) != 0,
                      "undo of a created file removes it");
             while (agent_undo_depth() > 0) agent_undo_last(note, sizeof note);
@@ -681,32 +689,32 @@ static int agent_run_selftest(void) {
     {
         char base[64], inner[80], cwd[128], out2[256], got[16];
         FILE *f;
-        snprintf(base, sizeof base, "/tmp/cdsh-acd-%d", (int)getpid());
-        snprintf(inner, sizeof inner, "%s/inner", base);
+        tx_snprintf(base, sizeof base, "/tmp/cdsh-acd-%d", (int)sy_pid());
+        tx_snprintf(inner, sizeof inner, "%s/inner", base);
         mkdir(base, 0700);
         mkdir(inner, 0700);
-        snprintf(cwd, sizeof cwd, "%s", base);
+        tx_snprintf(cwd, sizeof cwd, "%s", base);
         a_expect(agent_note_cd(cwd, sizeof cwd, "cd \"inner\"", out2, sizeof out2) == 1,
                  "cd is a persistent builtin");
-        a_expect(strstr(cwd, "/inner") != NULL, "  cwd moved into inner");
-        memset(&s, 0, sizeof s); s.kind = ACT_WRITE;
-        strncpy(s.path, "there.txt", sizeof s.path - 1);
-        strncpy(s.text, "in", sizeof s.text - 1);
+        a_expect(zs_find(cwd, "/inner") != NULL, "  cwd moved into inner");
+        zs_mset(&s, 0, sizeof s); s.kind = ACT_WRITE;
+        zs_ncpy(s.path, "there.txt", sizeof s.path - 1);
+        zs_ncpy(s.text, "in", sizeof s.text - 1);
         a_expect(agent_exec(&s, cwd, out, sizeof out) == 1, "write after cd");
-        snprintf(inner, sizeof inner, "%s/there.txt", cwd);
+        tx_snprintf(inner, sizeof inner, "%s/there.txt", cwd);
         f = fopen(inner, "r");
         a_expect(f != NULL, "  file is in the new directory");
         if (f) { size_t n = fread(got, 1, sizeof got - 1, f); fclose(f); got[n] = 0;
-                 a_expect(strcmp(got, "in") == 0, "  content after cd"); }
+                 a_expect(zs_cmp(got, "in") == 0, "  content after cd"); }
         a_expect(agent_note_cd(cwd, sizeof cwd, "cd /tmp/cdsh-no-such-dir", out2, sizeof out2) == 1
-                 && strstr(cwd, "/inner") != NULL, "failed cd leaves cwd");
-        memset(&s, 0, sizeof s); s.kind = ACT_EXEC;
-        strncpy(s.cmd, "cat there.txt", sizeof s.cmd - 1);
+                 && zs_find(cwd, "/inner") != NULL, "failed cd leaves cwd");
+        zs_mset(&s, 0, sizeof s); s.kind = ACT_EXEC;
+        zs_ncpy(s.cmd, "cat there.txt", sizeof s.cmd - 1);
         a_expect(agent_exec(&s, cwd, out, sizeof out) == 1, "exec reads the file just written");
-        a_expect(strstr(out, "exit=0") != NULL && strstr(out, "in") != NULL,
+        a_expect(zs_find(out, "exit=0") != NULL && zs_find(out, "in") != NULL,
                  "  exec output includes the file text");
         remove(inner);
-        snprintf(inner, sizeof inner, "%s", cwd);
+        tx_snprintf(inner, sizeof inner, "%s", cwd);
         rmdir(inner);
         rmdir(base);
     }
@@ -730,18 +738,18 @@ static int agent_run_selftest(void) {
             fprintf(jf, "{\"role\":\"decision\",\"go\":\"stop\"}\n");
             fclose(jf);
         }
-        body = (char *)malloc(65536);
+        body = (char *)mm_alloc(65536);
         a_expect(body != NULL, "context preview buffer");
         if (body && opened) {
             agent_ctx_preview(jp, body, 65536);
-            a_expect(strstr(body, "NEWMARKER") != NULL, "context keeps the newest record");
-            a_expect(strstr(body, "OLDMARKER") != NULL, "context keeps the first user line");
-            a_expect(strstr(body, "MIDONLY") == NULL, "context drops a middle user line");
-            a_expect(strstr(body, "被省略的是较早的工具结果和助手行") != NULL,
+            a_expect(zs_find(body, "NEWMARKER") != NULL, "context keeps the newest record");
+            a_expect(zs_find(body, "OLDMARKER") != NULL, "context keeps the first user line");
+            a_expect(zs_find(body, "MIDONLY") == NULL, "context drops a middle user line");
+            a_expect(zs_find(body, "被省略的是较早的工具结果和助手行") != NULL,
                      "an omission is one short note");
-            a_expect(strstr(body, "decision") == NULL, "decision records stay off the wire");
+            a_expect(zs_find(body, "decision") == NULL, "decision records stay off the wire");
         }
-        free(body);
+        mm_free(body);
         remove(jp);
     }
 
@@ -765,16 +773,16 @@ static int agent_run_selftest(void) {
             fprintf(jf, "{\"role\":\"user\",\"text\":\"NEWMARKER\"}\n");
             fclose(jf);
         }
-        body = (char *)malloc(65536);
+        body = (char *)mm_alloc(65536);
         if (body && opened) {
             agent_ctx_preview(jp, body, 65536);
-            a_expect(strstr(body, "OLDMARKER") != NULL, "a full context keeps the older user line");
-            a_expect(strstr(body, "NEWMARKER") != NULL, "a full context keeps the newest user line");
-            a_expect(strstr(body, "TOOLGONE") == NULL, "a full context drops an old tool row first");
-            a_expect(strstr(body, "被省略的是较早的工具结果和助手行") != NULL,
+            a_expect(zs_find(body, "OLDMARKER") != NULL, "a full context keeps the older user line");
+            a_expect(zs_find(body, "NEWMARKER") != NULL, "a full context keeps the newest user line");
+            a_expect(zs_find(body, "TOOLGONE") == NULL, "a full context drops an old tool row first");
+            a_expect(zs_find(body, "被省略的是较早的工具结果和助手行") != NULL,
                      "a dropped tool row leaves one note");
         }
-        free(body);
+        mm_free(body);
         remove(jp);
     }
 
@@ -799,12 +807,12 @@ static int agent_run_selftest(void) {
         line[0] = 0;
         jf = fopen(jp, "r");
         if (jf) { if (!fgets(line, sizeof line, jf)) line[0] = 0; fclose(jf); }
-        a_expect(strstr(line, "line-7") != NULL, "trim starts at the oldest kept line");
+        a_expect(zs_find(line, "line-7") != NULL, "trim starts at the oldest kept line");
         remove(jp);
     }
 
-    if (a_failures) { printf("agent: %d FAILED\n", a_failures); return 1; }
-    printf("agent: all cases pass\n");
+    if (a_failures) { sy_printf("agent: %d FAILED\n", a_failures); return 1; }
+    sy_printf("agent: all cases pass\n");
     return 0;
 }
 
@@ -816,19 +824,19 @@ static void print_trace(const char *transcript) {
     FILE *f = fopen(transcript, "r");
     char buf[8192];
     if (!f) return;
-    printf("\n--- trace (%s) ---\n", transcript);
+    sy_printf("\n--- trace (%s) ---\n", transcript);
     while (fgets(buf, sizeof buf, f)) {
-        size_t n = strlen(buf);
+        size_t n = zs_len(buf);
         while (n && (buf[n-1] == '\n' || buf[n-1] == '\r')) buf[--n] = '\0';
-        printf("%s\n", buf);
+        sy_printf("%s\n", buf);
     }
     fclose(f);
 }
 
 static const char *csih_env(const char *neu, const char *old) {
-    const char *v = getenv(neu);
+    const char *v = sy_env(neu);
     if (v && v[0]) return v;
-    v = getenv(old);
+    v = sy_env(old);
     if (v && v[0]) return v;
     return 0;
 }
@@ -848,37 +856,37 @@ static int run_agent(int argc, char **argv) {
     if (!endpoint) endpoint = "https://api.deepseek.com/v1/chat/completions";
     if (!model)    model = "deepseek-chat";
     if (!cwd) {
-        if (!getcwd(real_cwd, sizeof real_cwd)) snprintf(real_cwd, sizeof real_cwd, ".");
+        if (!getcwd(real_cwd, sizeof real_cwd)) tx_snprintf(real_cwd, sizeof real_cwd, ".");
         cwd = real_cwd;
     }
     if (agent_transcript_path(journal, sizeof journal) != 0)
-        snprintf(journal, sizeof journal, "/tmp/csih-agent-%d.jsonl", (int)getpid());
+        tx_snprintf(journal, sizeof journal, "/tmp/csih-agent-%d.jsonl", (int)sy_pid());
     transcript = journal;
 
     /* join the rest of argv as the prompt. The word spill is a switch. */
     agent_set_spill(0);
     prompt[0] = '\0';
     for (i = 2, k = 0; i < argc && k < sizeof prompt - 2; i++) {
-        if (!strcmp(argv[i], "spill")) { agent_set_spill(1); continue; }
+        if (!zs_cmp(argv[i], "spill")) { agent_set_spill(1); continue; }
         if (k > 0) prompt[k++] = ' ';
-        n = snprintf(prompt + k, sizeof prompt - k, "%s", argv[i]);
+        n = tx_snprintf(prompt + k, sizeof prompt - k, "%s", argv[i]);
         if (n < 0) break;
         k += (size_t)n;
     }
 
-    printf("agent: endpoint=%s model=%s cwd=%s\n", endpoint, model, cwd);
+    sy_printf("agent: endpoint=%s model=%s cwd=%s\n", endpoint, model, cwd);
     fflush(stdout);
     r = agent_run_cb(prompt, transcript, endpoint, model, cwd, NULL, print_event, NULL);
 
-    printf("acceptance=%d scope=%d (semantic assessment, not proof)\n",r.acceptance,r.scope);
+    sy_printf("acceptance=%d scope=%d (semantic assessment, not proof)\n",r.acceptance,r.scope);
     if (!r.ok) {
-        printf("agent FAILED: %s (err=%d)\n", r.reason, r.err);
-        if (r.answer[0]) printf("\n%s\n", r.answer);
+        sy_printf("agent FAILED: %s (err=%d)\n", r.reason, r.err);
+        if (r.answer[0]) sy_printf("\n%s\n", r.answer);
         print_trace(transcript);
         return 1;
     }
-    printf("\n%s\n", r.answer[0] ? r.answer : "(no answer text)");
-    printf("rounds=%d actions=%d stopped=%s reason=%s\n",
+    sy_printf("\n%s\n", r.answer[0] ? r.answer : "(no answer text)");
+    sy_printf("rounds=%d actions=%d stopped=%s reason=%s\n",
            r.rounds, r.actions, r.stopped ? "yes" : "no", r.reason);
     print_trace(transcript);
     return 0;
@@ -886,8 +894,8 @@ static int run_agent(int argc, char **argv) {
 
 int main(int argc, char **argv) {
     const char *cmd = argc > 1 ? argv[1] : "";
-    if (!strcmp(cmd, "selftest")) return agent_run_selftest();
-    if (!strcmp(cmd, "agent")) return run_agent(argc, argv);
-    printf("usage: agent_cli selftest | agent [spill] <prompt...>\n");
+    if (!zs_cmp(cmd, "selftest")) return agent_run_selftest();
+    if (!zs_cmp(cmd, "agent")) return run_agent(argc, argv);
+    sy_printf("usage: agent_cli selftest | agent [spill] <prompt...>\n");
     return 64;
 }

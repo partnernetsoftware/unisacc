@@ -1,3 +1,7 @@
+#pragma unisa use text.fmt
+#pragma unisa use sys.io
+#pragma unisa use zstr
+#pragma unisa use sys.env
 #pragma unisa use llm
 #pragma unisa use json
 #pragma unisa use net
@@ -53,29 +57,29 @@ int           llm_run_selftest(void);
 int main(int argc, char **argv)
 {
     const char *cmd = argc > 1 ? argv[1] : "";
-    if (!strcmp(cmd, "selftest")) return llm_run_selftest();
+    if (!zs_cmp(cmd, "selftest")) return llm_run_selftest();
 
-    if (!strcmp(cmd, "run")) {
+    if (!zs_cmp(cmd, "run")) {
         if (argc < 5) {
-            printf("usage: llm_cli run <url> <transcript> <user_text> [threshold]\n");
+            sy_printf("usage: llm_cli run <url> <transcript> <user_text> [threshold]\n");
             return 64;
         }
         gate_config cfg;
         cfg.threshold = argc > 5 ? atof(argv[5]) : 0.5;
         llm_turn t = llm_turn_run(argv[2], argv[3], argv[4], cfg);
         if (t.ok) {
-            printf("ok decision=%s p=%.4f status=%d appended=%d\n",
+            sy_printf("ok decision=%s p=%.4f status=%d appended=%d\n",
                    t.decision ? "continue" : "stop", t.p, t.status, t.appended);
             return t.decision ? 0 : 1;
         }
-        printf("failed (err %d): %s\n", t.err, t.reason);
+        sy_printf("failed (err %d): %s\n", t.err, t.reason);
         /* A network failure or an unusable reply is NOT a "stop" verdict — the
          * caller must be able to tell them apart, so the exit code is its own
          * band (2) rather than the 0/1 continue/stop of a real decision. */
         return 2;
     }
 
-    printf("usage: llm_cli selftest | run <url> <transcript> <user_text> [threshold]\n");
+    sy_printf("usage: llm_cli selftest | run <url> <transcript> <user_text> [threshold]\n");
     return 64;
 }
 
@@ -88,8 +92,8 @@ int session_append(const char *path, const char *record);
 
 static int llm_failures = 0;
 static void llm_expect(int cond, const char *what) {
-    if (!cond) { printf("  FAIL %s\n", what); llm_failures++; }
-    else printf("  ok   %s\n", what);
+    if (!cond) { sy_printf("  FAIL %s\n", what); llm_failures++; }
+    else sy_printf("  ok   %s\n", what);
 }
 
 int llm_run_selftest(void) {
@@ -105,49 +109,49 @@ int llm_run_selftest(void) {
      * constant: a too-short len silently truncates the body and turns a valid
      * reply into "not JSON" — exactly the self-inflicted failure that hides a
      * real one. This was the cause of 6 false selftest failures. */
-#define LLM_X(body) llm_extract((body), strlen(body), &t)
+#define LLM_X(body) llm_extract((body), zs_len(body), &t)
 
-    memset(&t, 0, sizeof t);
+    zs_mset(&t, 0, sizeof t);
     llm_expect(LLM_X("{\"p\":0.83,\"text\":\"go on\"}") == 0, "csih shape parses");
     llm_expect(t.p > 0.82 && t.p < 0.84, "p is read as a number");
-    llm_expect(!strcmp(t.text, "go on"), "text is read");
+    llm_expect(!zs_cmp(t.text, "go on"), "text is read");
 
-    memset(&t, 0, sizeof t);
+    zs_mset(&t, 0, sizeof t);
     llm_expect(LLM_X("{\"p\":0.2,\"text\":\"halt\"}") == 0, "low p parses too");
 
     /* absent p is NOT zero — this is the whole reason the check exists */
-    memset(&t, 0, sizeof t);
+    zs_mset(&t, 0, sizeof t);
     llm_expect(LLM_X("{\"text\":\"no p here\"}") != 0, "a reply without p is REFUSED");
     llm_expect(t.err == LLM_NO_PROBABILITY, "  and refused for the right reason (not a 0.0 default)");
 
-    memset(&t, 0, sizeof t);
+    zs_mset(&t, 0, sizeof t);
     llm_expect(LLM_X("{\"p\":\"high\",\"text\":\"x\"}") != 0, "a non-numeric p is REFUSED");
 
-    memset(&t, 0, sizeof t);
+    zs_mset(&t, 0, sizeof t);
     llm_expect(LLM_X("not json at all") != 0, "a non-JSON body is REFUSED");
     llm_expect(t.err == LLM_BAD_JSON, "  and named as bad JSON");
 
-    memset(&t, 0, sizeof t);
+    zs_mset(&t, 0, sizeof t);
     llm_expect(LLM_X("{\"p\":0.5}") != 0, "a reply with no text is REFUSED");
 
     /* OpenAI-ish shape, p beside choices */
-    memset(&t, 0, sizeof t);
+    zs_mset(&t, 0, sizeof t);
     llm_expect(LLM_X("{\"p\":0.9,\"choices\":[{\"message\":{\"content\":\"hi\"}}]}") == 0, "choices/message/content parses");
-    llm_expect(!strcmp(t.text, "hi"), "  and its content is read");
+    llm_expect(!zs_cmp(t.text, "hi"), "  and its content is read");
 
     /* escaping: a quote in the model's text must not break the record */
-    memset(&t, 0, sizeof t);
+    zs_mset(&t, 0, sizeof t);
     llm_expect(LLM_X("{\"p\":0.5,\"text\":\"say \\\"hi\\\"\"}") == 0, "escaped quotes in reply parse");
-    llm_expect(strstr(t.text, "\\\"") != NULL, "  and are re-escaped for the record");
+    llm_expect(zs_find(t.text, "\\\"") != NULL, "  and are re-escaped for the record");
 
 #undef LLM_X
 
     /* the network path: an unroutable/down port must be a failure, not a verdict */
-    memset(&t, 0, sizeof t);
+    zs_mset(&t, 0, sizeof t);
     t = llm_turn_run("http://127.0.0.1:1/", NULL, "hello", cfg);
     llm_expect(!t.ok, "a dead port is a FAILURE, not a stop verdict");
 
-    memset(&t, 0, sizeof t);
+    zs_mset(&t, 0, sizeof t);
     t = llm_turn_run("https://127.0.0.1:1/", NULL, "hello", cfg);
     llm_expect(!t.ok, "https to a closed port is a FAILURE, not a verdict");
 
@@ -158,14 +162,14 @@ int llm_run_selftest(void) {
      * unisacc does NOT provide. */
     {
         /* under the temp root, deleted through the one guard (include/unisa_safedel.h) */
-        char tp[1024], why[1400]; const char *td = getenv("TMPDIR");
-        snprintf(tp, sizeof tp, "%s/cdsh-llm-selftest.jsonl", td && td[0] ? td : "/tmp");
+        char tp[1024], why[1400]; const char *td = sy_env("TMPDIR");
+        tx_snprintf(tp, sizeof tp, "%s/cdsh-llm-selftest.jsonl", td && td[0] ? td : "/tmp");
         unisa_safedel(tp, SAFEDEL_PURGE, 0, why, (int)sizeof why);
         llm_expect(session_append(tp, "{\"role\":\"model\",\"text\":\"x\",\"p\":0.5000}") == 0, "model record appends to a real transcript");
         if (unisa_safedel(tp, SAFEDEL_PURGE, 0, why, (int)sizeof why)) llm_expect(0, why);
     }
 
-    if (llm_failures) { printf("llm: %d FAILED\n", llm_failures); return 1; }
-    printf("llm: all cases pass\n");
+    if (llm_failures) { sy_printf("llm: %d FAILED\n", llm_failures); return 1; }
+    sy_printf("llm: all cases pass\n");
     return 0;
 }

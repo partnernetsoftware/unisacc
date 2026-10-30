@@ -1,3 +1,7 @@
+#pragma unisa use text.fmt
+#pragma unisa use sys.io
+#pragma unisa use zstr
+#pragma unisa use mem.heap
 #pragma unisa use json
 /*
  * json_cli.c — the `main` for json.c, moved out so json.c can be a library.
@@ -47,45 +51,45 @@ size_t  jlen(jvalue *v);
 
 static int failures = 0;
 static void expect(int cond, const char *what) {
-    if (!cond) { printf("FAIL %s\n", what); failures++; }
+    if (!cond) { sy_printf("FAIL %s\n", what); failures++; }
 }
 
 int json_run_selftest(void) {
     char err[128];
     jvalue *v;
 
-    v = json_parse("{\"a\":1,\"b\":\"x\"}", strlen("{\"a\":1,\"b\":\"x\"}"), err, sizeof(err));
+    v = json_parse("{\"a\":1,\"b\":\"x\"}", zs_len("{\"a\":1,\"b\":\"x\"}"), err, sizeof(err));
     expect(v != NULL, "object parses");
     if (v) {
         expect(jnum(jget(v, "a"), -1) == 1, "number field");
-        expect(jstr(jget(v, "b")) && !strcmp(jstr(jget(v, "b")), "x"), "string field");
+        expect(jstr(jget(v, "b")) && !zs_cmp(jstr(jget(v, "b")), "x"), "string field");
         expect(jget(v, "zz") == NULL, "missing key is NULL");
         jfree(v);
     }
 
     {
         const char *line = "{\"role\":\"user\",\"n\":3,\"ok\":true,\"t\":[\"a\",\"b\"],\"s\":\"\\u4e2d\\u6587\"}";
-        v = json_parse(line, strlen(line), err, sizeof(err));
+        v = json_parse(line, zs_len(line), err, sizeof(err));
         expect(v != NULL, "session-shaped line parses");
         if (v) {
             expect(jlen(jget(v, "t")) == 2, "array length");
-            expect(jstr(jget(v, "s")) && !strcmp(jstr(jget(v, "s")), "\xe4\xb8\xad\xe6\x96\x87"), "\\u escape becomes UTF-8");
+            expect(jstr(jget(v, "s")) && !zs_cmp(jstr(jget(v, "s")), "\xe4\xb8\xad\xe6\x96\x87"), "\\u escape becomes UTF-8");
             expect(jget(v, "ok") && jget(v, "ok")->kind == J_BOOL && jget(v, "ok")->b == 1, "boolean");
             jfree(v);
         }
     }
 
-    expect(json_parse("{\"a\":}", strlen("{\"a\":}"), err, sizeof(err)) == NULL, "missing value rejected");
-    expect(json_parse("{\"a\":1} junk", strlen("{\"a\":1} junk"), err, sizeof(err)) == NULL, "trailing content rejected");
-    expect(json_parse("[1,2", strlen("[1,2"), err, sizeof(err)) == NULL, "unterminated array rejected");
-    expect(json_parse("\"unterminated", strlen("\"unterminated"), err, sizeof(err)) == NULL, "unterminated string rejected");
-    expect(json_parse("", strlen(""), err, sizeof(err)) == NULL, "empty input rejected");
+    expect(json_parse("{\"a\":}", zs_len("{\"a\":}"), err, sizeof(err)) == NULL, "missing value rejected");
+    expect(json_parse("{\"a\":1} junk", zs_len("{\"a\":1} junk"), err, sizeof(err)) == NULL, "trailing content rejected");
+    expect(json_parse("[1,2", zs_len("[1,2"), err, sizeof(err)) == NULL, "unterminated array rejected");
+    expect(json_parse("\"unterminated", zs_len("\"unterminated"), err, sizeof(err)) == NULL, "unterminated string rejected");
+    expect(json_parse("", zs_len(""), err, sizeof(err)) == NULL, "empty input rejected");
 
-    v = json_parse("\"a\\nb\\t\\\"c\\\\d\"", strlen("\"a\\nb\\t\\\"c\\\\d\""), err, sizeof(err));
-    expect(v && !strcmp(jstr(v), "a\nb\t\"c\\d"), "escapes decode");
+    v = json_parse("\"a\\nb\\t\\\"c\\\\d\"", zs_len("\"a\\nb\\t\\\"c\\\\d\""), err, sizeof(err));
+    expect(v && !zs_cmp(jstr(v), "a\nb\t\"c\\d"), "escapes decode");
     jfree(v);
 
-    v = json_parse("\"\\ud83d\\ude00\"", strlen("\"\\ud83d\\ude00\""), err, sizeof(err));
+    v = json_parse("\"\\ud83d\\ude00\"", zs_len("\"\\ud83d\\ude00\""), err, sizeof(err));
     expect(v && jstr(v) && (unsigned char)jstr(v)[0] == 0xF0, "surrogate pair becomes 4-byte UTF-8");
     jfree(v);
 
@@ -94,10 +98,10 @@ int json_run_selftest(void) {
         size_t seen = 0;
         json_escape("a\"b\\c\n\x01", esc, sizeof esc, &seen);
         expect(seen == 7, "escape consumes the whole input");
-        expect(!strcmp(esc, "a\\\"b\\\\c\\n\\u0001"), "quotes, slash, newline, control");
-        snprintf(wrapped, sizeof wrapped, "\"%s\"", esc);
-        v = json_parse(wrapped, strlen(wrapped), err, sizeof err);
-        expect(v && jstr(v) && !strcmp(jstr(v), "a\"b\\c\n\x01"), "escape round-trips");
+        expect(!zs_cmp(esc, "a\\\"b\\\\c\\n\\u0001"), "quotes, slash, newline, control");
+        tx_snprintf(wrapped, sizeof wrapped, "\"%s\"", esc);
+        v = json_parse(wrapped, zs_len(wrapped), err, sizeof err);
+        expect(v && jstr(v) && !zs_cmp(jstr(v), "a\"b\\c\n\x01"), "escape round-trips");
         jfree(v);
     }
     {
@@ -109,9 +113,9 @@ int json_run_selftest(void) {
         raw[7] = 0;
         json_escape(raw, esc, sizeof esc, &seen);
         expect(seen == 7, "stray lead is consumed, not stuck");
-        snprintf(wrapped, sizeof wrapped, "\"%s\"", esc);
-        v = json_parse(wrapped, strlen(wrapped), err, sizeof err);
-        expect(v && jstr(v) && !strcmp(jstr(v), "\xe5\xa6\x82\xe4\xbd\x95"), "stray lead dropped, 如何 kept");
+        tx_snprintf(wrapped, sizeof wrapped, "\"%s\"", esc);
+        v = json_parse(wrapped, zs_len(wrapped), err, sizeof err);
+        expect(v && jstr(v) && !zs_cmp(jstr(v), "\xe5\xa6\x82\xe4\xbd\x95"), "stray lead dropped, 如何 kept");
         jfree(v);
     }
     {
@@ -121,21 +125,21 @@ int json_run_selftest(void) {
         expect(tiny[0] == 0 && seen == 0, "3-byte character does not fit in 2 bytes");
         seen = 99;
         json_escape("\xe4\xb8\x80Z", tiny, 4, &seen);
-        expect(!strcmp(tiny, "\xe4\xb8\x80") && seen == 3, "one complete character, then stop");
+        expect(!zs_cmp(tiny, "\xe4\xb8\x80") && seen == 3, "one complete character, then stop");
         seen = 99;
         json_escape("\"", tiny, 2, &seen);
         expect(tiny[0] == 0 && seen == 0, "quote escape is not a lone backslash");
     }
 
-    expect(json_parse("\"\\ud800\"", strlen("\"\\ud800\""), err, sizeof err) == NULL,
+    expect(json_parse("\"\\ud800\"", zs_len("\"\\ud800\""), err, sizeof err) == NULL,
            "lone high surrogate rejected");
-    expect(json_parse("\"\\ude00\"", strlen("\"\\ude00\""), err, sizeof err) == NULL,
+    expect(json_parse("\"\\ude00\"", zs_len("\"\\ude00\""), err, sizeof err) == NULL,
            "lone low surrogate rejected");
-    expect(json_parse("1e", strlen("1e"), err, sizeof err) == NULL, "truncated exponent rejected");
-    expect(json_parse("01", strlen("01"), err, sizeof err) == NULL, "leading zero rejected");
+    expect(json_parse("1e", zs_len("1e"), err, sizeof err) == NULL, "truncated exponent rejected");
+    expect(json_parse("01", zs_len("01"), err, sizeof err) == NULL, "leading zero rejected");
     {
         const char *span = " {\"a\":\"}\"} ";
-        size_t e = json_value_end(span, strlen(span));
+        size_t e = json_value_end(span, zs_len(span));
         expect(e == 10 && span[e - 1] == '}', "span closes after the brace inside the string");
         expect(json_value_end("{", 1) == 0, "unclosed object is not a span");
     }
@@ -153,29 +157,29 @@ int json_run_selftest(void) {
     {
         char buf[80];
         size_t n = json_rec(buf, sizeof buf, "role", "user", "text", "a\"b", NULL, NULL);
-        expect(n > 0 && !strcmp(buf, "{\"role\":\"user\",\"text\":\"a\\\"b\"}"),
+        expect(n > 0 && !zs_cmp(buf, "{\"role\":\"user\",\"text\":\"a\\\"b\"}"),
                "a record escapes its value");
         expect(json_rec(buf, 8, "role", "user", "text", "hello", NULL, NULL) == 0
                && buf[0] == 0, "a short record buffer stays empty");
-        snprintf(buf, sizeof buf, "stale");
+        tx_snprintf(buf, sizeof buf, "stale");
         expect(json_msg(buf, 4, 0, "user", NULL, "hi") == 0 && buf[0] == 0,
                "a too-small message buffer is cleared, not left stale");
         n = json_msg(buf, sizeof buf, 1, "user", NULL, "x");
-        expect(n > 0 && !strcmp(buf, ",{\"role\":\"user\",\"content\":\"x\"}"),
+        expect(n > 0 && !zs_cmp(buf, ",{\"role\":\"user\",\"content\":\"x\"}"),
                "a message is role and content");
         n = json_msg(buf, sizeof buf, 0, "user", "[tool]\n", "z");
-        expect(n > 0 && !strcmp(buf, "{\"role\":\"user\",\"content\":\"[tool]\\nz\"}"),
+        expect(n > 0 && !zs_cmp(buf, "{\"role\":\"user\",\"content\":\"[tool]\\nz\"}"),
                "a message lead is escaped with the content");
     }
 
-    v = json_parse("{}", strlen("{}"), err, sizeof(err)); expect(v != NULL, "{} parses"); jfree(v);
-    v = json_parse("[]", strlen("[]"), err, sizeof(err)); expect(v != NULL, "[] parses"); jfree(v);
+    v = json_parse("{}", zs_len("{}"), err, sizeof(err)); expect(v != NULL, "{} parses"); jfree(v);
+    v = json_parse("[]", zs_len("[]"), err, sizeof(err)); expect(v != NULL, "[] parses"); jfree(v);
 
-    v = json_parse("-1.5e3", strlen("-1.5e3"), err, sizeof(err));
+    v = json_parse("-1.5e3", zs_len("-1.5e3"), err, sizeof(err));
     expect(v && jnum(v, 0) < -1499.0 && jnum(v, 0) > -1501.0, "negative exponent number");
     jfree(v);
 
-    printf("%s\n", failures ? "SELFTEST FAILED" : "selftest ok");
+    sy_printf("%s\n", failures ? "SELFTEST FAILED" : "selftest ok");
     return failures == 0 ? 0 : 1;
 }
 
@@ -189,11 +193,11 @@ static int run_stream(void) {
      * (how long may one session record be?) rather than a fact about the
      * machine. Fixed size on the stack also silently truncates a long line. */
     const size_t CAP = 1u << 20;
-    char *line = (char *)malloc(CAP);
+    char *line = (char *)mm_alloc(CAP);
     long n = 0, ok = 0, bad = 0;
-    if (!line) { printf("out of memory\n"); return 2; }
+    if (!line) { sy_printf("out of memory\n"); return 2; }
     while (fgets(line, (int)CAP, stdin)) {
-        size_t len = strlen(line);
+        size_t len = zs_len(line);
         char err[128];
         jvalue *v;
         while (len && (line[len-1]=='\n' || line[len-1]=='\r')) line[--len] = '\0';
@@ -201,15 +205,15 @@ static int run_stream(void) {
         n++;
         v = json_parse(line, len, err, sizeof(err));
         if (v) { ok++; jfree(v); }
-        else { bad++; printf("line %ld: %s\n", n, err); }
+        else { bad++; sy_printf("line %ld: %s\n", n, err); }
     }
-    printf("records %ld ok %ld bad %ld\n", n, ok, bad);
-    free(line);
+    sy_printf("records %ld ok %ld bad %ld\n", n, ok, bad);
+    mm_free(line);
     return bad == 0 ? 0 : 1;
 }
 
 int main(int argc, char **argv) {
     /* Subcommands, not dash-options — see the header note. */
-    if (argc > 1 && !strcmp(argv[1], "selftest")) return json_run_selftest();
+    if (argc > 1 && !zs_cmp(argv[1], "selftest")) return json_run_selftest();
     return run_stream();
 }
