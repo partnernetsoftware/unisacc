@@ -47,7 +47,7 @@ sh ./unisacc.com tools/csih-ape.cx -- smoke
 - 成品是 `apps/csih/csih.com`，和 `csih.cx` 放在同一目录，git 不跟踪（见 `apps/csih/.gitignore`）。
 - 中间产物在 `out/csih-ape/`：五个切片和 `manifest.tsv`。
 - **体积**：pack 调 ape-pack 时带 `--deflate`，四个 Unix 片用 `cx/text/deflate.cx` 压缩，结果是 gzip 格式。
-  - csih.com 从 8.9MB 降到 1.34MB（2026-10-30，d8eafebcee 时为 1.12MB）。
+  - csih.com 从 8.9MB 降到 1.34MB（2026-10-30；d8eafebcee 时为 1.12MB，839a435f36 时为 1,129,680 字节）。
   - 每片约 1.9–2.5MB，压到 0.32–0.35MB，比 `gzip -6` 还略小一点。
   - 目标机第一次运行时，用 `gzip -dc` 解到 `~/.cache/csih/csih-<key>`，以后直接用缓存。
   - 压缩器单独检查：`sh ./unisacc.com tools/check-cx-deflate.cx`。
@@ -89,7 +89,9 @@ csih.com 是自包含的二进制，不需要 `apps/csih` 源码树，也不读 
 - **HTTPS**：`net.cx` 用 dlopen 加载 libcurl。Linux 上找 `libcurl.so.4`，macOS 上找 `/usr/lib/libcurl.4.dylib`。没有的话联网会失败；本机以外没有实测过。
 - **沙箱**：read/work 档的只读挂载、机密遮蔽、私有 PID、断网，都靠 Linux 的 `unshare`。macOS 上没有，会退回到只靠关键字拦截危险命令（PRD 里已写明），隔离明显变弱。
 - **tmux**：窗口列表、`/copy` 和多会话协作要用 tmux；没装 tmux 时，这些功能如实报不可用。
-- **信号**：unisacc 的 `signal()` 不向内核注册（BLOCKED）。被 kill 时，csih.sh 会帮忙恢复终端，直接跑 csih.com 没有这层兜底。终端如果乱了，执行一次 `reset`。
+- **信号**：
+  - 自 839a435f36 起，终端恢复走 `sys.sig`（rt_sigaction 真注册）。在 Linux x86_64 的 pty 里对 csih.com 发 SIGTERM，终端模式恢复成启动前的样子，退出码 143。旧版前导 `signal()` 不进内核，被杀后终端停在原始模式。
+  - macOS 上 `sy_sig_handle` 返回 -ENOSYS，被杀时不恢复终端，乱了就执行一次 `reset`。
 
 ## Windows
 
