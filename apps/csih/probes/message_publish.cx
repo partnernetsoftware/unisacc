@@ -1,0 +1,167 @@
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+/*
+ * message_publish.cx — message_send.cx publish, end to end on a scratch
+ * session directory:  cd apps/csih && sh ../../unisacc.com probes/message_publish.cx
+ *
+ * Expectations are the archived message_send.py's rules (checked against it
+ * on 2026-10-30): receipts, exit codes, causes, the inbox tree and modes, the
+ * canonical envelope bytes, the mailbox record lock, the scan's refusals and
+ * the 32-unfinished capacity. Upper root (L3): no #include, no libc calls.
+ */
+
+#define CAP 4096
+#define ID "0123456789abcdef0123456789abcdef"
+#define CANON "{\"body\":\"hi\",\"id\":\"" ID "\",\"kind\":\"notice\",\"session\":\"csih2\",\"version\":1}"
+
+static int fails;
+static const char *U;
+static char root[600], msg[700], msg2[700];
+
+static void check(int ok, const char *what) {
+    printf("  %s  %s\n", ok ? "ok  " : "FAIL", what);
+    if (!ok) fails++;
+}
+static int has(const char *s, const char *n) { return tx_find(s, tx_len(s, CAP), n, tx_len(n, 256)) >= 0; }
+
+/* publish DIR with message file M as session EXPECTED: rc, stdout+stderr in OUT */
+static int publish(const char *dir, const char *expected, const char *m, char *out) {
+    char *av[] = { "sh", (char *)U, "-run", "message_send.cx", "--", "publish", (char *)dir, (char *)expected, (char *)m, 0 };
+    int cut;
+    return sy_run(av, out, CAP, &cut);
+}
+
+static void fresh(char *dir, int cap, const char *name, int mode) {
+    snprintf(dir, cap, "%s/%s", root, name);
+    sy_mkdir(dir, 0700);
+    sy_chmod(dir, mode);
+}
+
+static int names_in(const char *dir) {
+    char names[CAP];
+    int fd = sy_openat(sy_at_fdcwd(), dir, O_RDONLY, 0), n = fd >= 0 ? sy_dir_names(fd, names, sizeof names) : fd;
+    if (fd >= 0) sy_close(fd);
+    return n;
+}
+
+static int mode_is(const char *p, int mode, int kind) {
+    sy_stat_t s;
+    return sy_lstat(p, &s) == 0 && s.mode == mode && s.kind == kind;
+}
+
+int main(void) {
+    static char out[CAP];
+    char d[700], p[900], q[900];
+    const char *tmp = sy_env_or("TMPDIR", "/tmp");
+    char *got;
+    size_t n;
+    int rc, i;
+    U = sy_env_or("UNISACC", "../../unisacc.com");
+    snprintf(root, sizeof root, "%s/csih-publish-%d", tmp, sy_pid());
+    if (sy_mkdir(root, 0700) != 0) { printf("message_publish: scratch %s\n", root); return 2; }
+    snprintf(msg, sizeof msg, "%s/m.json", root);
+    snprintf(msg2, sizeof msg2, "%s/m2.json", root);
+    {
+        static const char m1[] = "{\"version\":1,\"kind\":\"notice\",\"id\":\"" ID "\",\"session\":\"csih2\",\"body\":\"hi\"}";
+        static const char m2[] = "{\"version\":1,\"kind\":\"notice\",\"id\":\"" ID "\",\"session\":\"csih2\",\"body\":\"other\"}";
+        cx_write(msg, m1, sizeof m1 - 1);
+        cx_write(msg2, m2, sizeof m2 - 1);
+    }
+
+    /* a new message */
+    fresh(d, sizeof d, "s", 0700);
+    rc = publish(d, "csih2", msg, out);
+    check(rc == 0 && has(out, "{\"id\":\"" ID "\",\"kind\":\"notice\",\"session\":\"csih2\",\"status\":\"published\"}"), "publish: rc 0, receipt published");
+    snprintf(p, sizeof p, "%s/inbox/ready/" ID ".json", d);
+    got = cx_read(p, &n);
+    check(got && n == sizeof CANON - 1 && tx_same(got, (long)n, CANON, (long)sizeof CANON - 1), "the envelope holds the canonical bytes (sorted keys, no spaces)");
+    check(mode_is(p, 0600, 'f'), "the envelope is a regular file, mode 0600");
+    snprintf(q, sizeof q, "%s/inbox", d);
+    check(mode_is(q, 0700, 'd') && names_in(q) == 4, "inbox/ is 0700 with exactly ready, started, done, mailbox.lock");
+    snprintf(q, sizeof q, "%s/inbox/mailbox.lock", d);
+    check(mode_is(q, 0600, 'f'), "mailbox.lock is 0600");
+    snprintf(q, sizeof q, "%s/inbox/ready", d);
+    check(mode_is(q, 0700, 'd') && names_in(q) == 1, "ready/ is 0700 and holds only the envelope (no temp file left)");
+
+    /* the same message again, then the same id with other content */
+    rc = publish(d, "csih2", msg, out);
+    check(rc == 0 && has(out, "\"status\":\"already-published\""), "republish: rc 0, already-published");
+    rc = publish(d, "csih2", msg2, out);
+    check(rc == 1 && has(out, "\"status\":\"rejected\"") && has(out, "id conflicts with existing content"), "same id, other content: rc 1, id conflicts");
+    {
+        char *again = cx_read(p, &n);
+        check(again && n == sizeof CANON - 1 && tx_same(again, (long)n, CANON, (long)sizeof CANON - 1), "the stored envelope is untouched by the conflict");
+    }
+
+    /* the mailbox lock held by this process */
+    snprintf(q, sizeof q, "%s/inbox/mailbox.lock", d);
+    {
+        int fd = sy_openat(sy_at_fdcwd(), q, O_RDWR, 0);
+        int held = fd >= 0 && sy_lockf(fd, 1, 0) == 0;
+        rc = publish(d, "csih2", msg, out);
+        check(held && rc == 1 && has(out, "mailbox busy") && has(out, "\"status\":\"rejected\""), "lock held elsewhere: rc 1, mailbox busy");
+        if (fd >= 0) { sy_unlockf(fd); sy_close(fd); }
+    }
+
+    /* refusals of the scan */
+    snprintf(q, sizeof q, "%s/inbox/stray", d);
+    cx_write(q, "x", 1);
+    rc = publish(d, "csih2", msg, out);
+    check(rc == 1 && has(out, "unknown inbox entry"), "a stray inbox entry: rc 1, unknown inbox entry");
+    sy_unlinkat(sy_openat(sy_at_fdcwd(), d, O_RDONLY, 0), "inbox/stray", 0);
+    snprintf(q, sizeof q, "%s/inbox/ready/not-an-id.json", d);
+    cx_write(q, "x", 1);
+    rc = publish(d, "csih2", msg, out);
+    check(rc == 1 && has(out, "unknown state directory entry"), "a stray state entry: rc 1, unknown state directory entry");
+    sy_unlinkat(sy_openat(sy_at_fdcwd(), d, O_RDONLY, 0), "inbox/ready/not-an-id.json", 0);
+    snprintf(q, sizeof q, "%s/inbox/done/" ID ".json", d);
+    cx_write(q, CANON, sizeof CANON - 1);
+    sy_chmod(q, 0600);
+    rc = publish(d, "csih2", msg, out);
+    check(rc == 1 && has(out, "id present in multiple states"), "one id in ready and done: rc 1, id present in multiple states");
+    sy_unlinkat(sy_openat(sy_at_fdcwd(), d, O_RDONLY, 0), "inbox/done/" ID ".json", 0);
+    sy_chmod(p, 0644);
+    rc = publish(d, "csih2", msg, out);
+    check(rc == 1 && has(out, "wrong private permissions"), "a stored envelope at 0644: rc 1, wrong private permissions");
+    sy_chmod(p, 0600);
+
+    /* the session directory itself */
+    fresh(d, sizeof d, "open", 0755);
+    rc = publish(d, "csih2", msg, out);
+    check(rc == 1 && has(out, "\"status\":\"rejected\"") && has(out, "wrong private permissions") && names_in(d) == 0, "a 0755 session dir: rc 1, rejected, nothing made");
+    fresh(d, sizeof d, "ln", 0700);
+    fresh(q, sizeof q, "elsewhere", 0700);
+    snprintf(p, sizeof p, "%s/inbox", d);
+    {
+        char *av[] = { "ln", "-s", q, p, 0 };
+        int cut;
+        sy_run(av, out, CAP, &cut);
+    }
+    rc = publish(d, "csih2", msg, out);
+    check(rc == 1 && has(out, "filesystem error") && names_in(q) == 0, "inbox/ a symlink: rc 1, refused, nothing written through it");
+    rc = publish("relative/dir", "csih2", msg, out);
+    check(rc == 1 && has(out, "session directory must be absolute"), "a relative session dir: rc 1");
+    fresh(d, sizeof d, "wrongsess", 0700);
+    rc = publish(d, "other", msg, out);
+    check(rc == 1 && has(out, "\"id\":null") && names_in(d) == 0, "the message names another session: rc 1, null receipt, nothing made");
+
+    /* capacity: 32 unfinished */
+    fresh(d, sizeof d, "full", 0700);
+    for (i = 0, rc = 0; i < 32 && rc == 0; i++) {
+        char m[900], body[200];
+        int len = snprintf(body, sizeof body, "{\"version\":1,\"kind\":\"notice\",\"id\":\"%032x\",\"session\":\"csih2\",\"body\":\"n\"}", i + 1);
+        snprintf(m, sizeof m, "%s/full-%d.json", root, i);
+        cx_write(m, body, (size_t)len);
+        rc = publish(d, "csih2", m, out);
+    }
+    check(rc == 0 && i == 32, "32 messages publish");
+    rc = publish(d, "csih2", msg, out);
+    check(rc == 1 && has(out, "unfinished capacity32 reached"), "a 33rd unfinished message: rc 1, unfinished capacity32 reached");
+
+    if (cx_rmtree(root) != 0) printf("message_publish: scratch %s left behind\n", root);
+    printf("message_publish: %s (%d failed)\n", fails ? "FAIL" : "PASS", fails);
+    return fails ? 1 : 0;
+}

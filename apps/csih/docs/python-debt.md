@@ -48,5 +48,10 @@
 
 **2026-10-30 更新：前 7 个接口已经有了不改 `include/` 的路。** cx 底层新增了 `cx/sys/posix.cx`，直接用 `__syscall6` 加逐平台调用号，补齐了这批接口：`sy_tcgetpgrp`、`sy_socketpair`、`sy_killpg`、`sy_setsid`、`sy_openat`、`sy_linkat`、`sy_lockf`，另有 `sy_flock`、`sy_getpgid`、`sy_tcsetpgrp`。
 - 检查在 `tools/check-cx-sys.cx`，posix 部分全部通过；只在 Linux x86_64 上实跑过，arm64 和 macOS 的调用号写了但没有实跑。
-- `reload_launcher.cx` 的运行循环和 `message_send.cx` 的 publish，现在可以改用这些接口移植，不必再等慢车道。移植还没做，所以它们在合同表里仍是 BLOCKED，等移植完成并实跑通过后再改。
+- **`message_send.cx` 的 publish 已移植**（2026-10-30）。
+  - cx/sys/posix 另补了 `sy_mkdirat`、`sy_unlinkat`、`sy_dir_names`（按目录 fd 列名字），fs 补了 `sy_fstat`、`sy_read`、`sy_write_all`、`sy_fsync`、`sy_close`。
+  - 和归档的 `message_send.py` 逐例对照：published、already-published、内容冲突、锁忙、未知条目、inbox 是符号链接、相对路径这几种情况，回执、rc、原因、目录树、权限、信封字节全部一致。
+  - 唯一的差异是会话目录过不了 `trusted()` 时：.py 的原因是 "filesystem error errno=None"，.cx 给的是具体原因，回执和 rc 相同。
+  - 探针 `probes/message_publish.cx` 20 条；合同 message-send-publish 由 BLOCKED 转为 IMPLEMENTED。
+- `reload_launcher.cx` 的运行循环现在也可以改用这些接口移植，不必再等慢车道。这一部分还没做，在合同表里仍是 BLOCKED，等移植完成并实跑通过后再改。
 - `signal()` 的内核投递不在这批里：它要 `rt_sigaction` 加信号返回跳板，仍然 BLOCKED。
