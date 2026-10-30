@@ -178,7 +178,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 <a id="work-tree"></a>
 ### 思维树
 
-当前节点（2026-10-31）。已装 `./unisacc.com` 是 4631130 字节，sha `43fbbb819aae028e8151a9f8eec621514a1264259d1b7a926d85f7dd952a5f00`，权限 755。备份 `out/unisacc.com.79fb84e6`。CX 面：`tools/surface-gen.cx`（提交 `a1394d6a5f`）按 `exec/pipeline/image-stages.tsv` 和 `gold-stages.tsv` 生成七流、十八网。compiler 与 runtime 两侧都有 stream 和 net。流步骤返回 0，`_in`、`_out`、`_model` 返回事实表的输入、输出、模型。网步骤返回 0。窄检查打出 `CX_SURFACE ok=25 formats=7 failed=0` 和 `CX_RUNTIME_SURFACE ok=25 formats=7 failed=0`。这两项没登记进 `tests/batches.tsv`，不记套件通过。sys 的 16 个模块原本就在，L0 未改。入口路由名仍是 `src/stages.cx` 的 `st_gap` 手写链，没有事实表。RI 迁移和两代对照仍待办，只记账。下面代码块是 2026-10-30 的记录。逐刀旧账在 [plans/cx-modules.md](plans/cx-modules.md)；10-30 之前的原文在 [归档](archive/prd-c43-history-20261030.md)。
+当前节点（2026-10-31）。已装 `./unisacc.com` 是 4631130 字节，sha `43fbbb819aae028e8151a9f8eec621514a1264259d1b7a926d85f7dd952a5f00`，权限 755。备份 `out/unisacc.com.79fb84e6`。CX 面：`tools/surface-gen.cx`（提交 `a1394d6a5f`）按 `exec/pipeline/image-stages.tsv` 和 `gold-stages.tsv` 生成七流、十八网。compiler 与 runtime 两侧都有 stream 和 net。流步骤返回 0，`_in`、`_out`、`_model` 返回事实表的输入、输出、模型。网步骤返回 0。窄检查打出 `CX_SURFACE ok=25 formats=7 failed=0` 和 `CX_RUNTIME_SURFACE ok=25 formats=7 failed=0`。这两项没登记进 `tests/batches.tsv`，不记套件通过。sys 的 16 个模块原本就在，L0 未改。六格目标表：`tools/target-gen.cx`（提交 `05b682aa39`）按 `exec/facts/pp-targets.tsv` 生成 `cx/compiler/targetname.cx` 和 `cx/runtime/targetname.cx`。窄检查 `CX_TARGET ok=6 failed=0`，没登记，不记套件通过。入口路由名仍是 `src/stages.cx` 的 `st_gap` 手写链，没有事实表。RI 迁移和两代对照仍待办，只记账。下面代码块是 2026-10-30 的记录。逐刀旧账在 [plans/cx-modules.md](plans/cx-modules.md)；10-30 之前的原文在 [归档](archive/prd-c43-history-20261030.md)。
 
 ```text
 0.0.43
@@ -272,7 +272,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 | 事实表 | 只经 `sh ./unisacc.com tools/facts-gen.cx -- --write\|--check .`（30 张 + bank 归属，`--check` 31/0） | exec/facts/ |
 | 归档 | 参考 C、参考 Python、旧检查与旧 shell | archive/reference-c/、archive/reference-py/README.md |
 | 已装产品 | 4,631,130 B，sha 43fbbb81…，权限 755；备份 out/unisacc.com.79fb84e6；新测试入口 `sh ./unisacc.com tests/run.cx -- --list` | tests/batches.tsv、tests/coverage.tsv |
-| CX 面骨架 | 七流十八网在 compiler 与 runtime 两侧的 stream 和 net。流有 in/out/model 访问器，步骤返回 0。窄检查 ok=25 formats=7，failed=0。未登记，不记套件通过。sys 16 个模块未改。入口 st_gap、RI、两代仍待办 | tools/surface-gen.cx、plans/v0.0.44.md 的 C44-CX-SURFACE-01 |
+| CX 面骨架 | 七流十八网在 compiler 与 runtime 两侧的 stream 和 net。流有 in/out/model 访问器，步骤返回 0。窄检查 ok=25 formats=7，failed=0。六格目标表在两侧 targetname，窄检查 ok=6 failed=0。均未登记，不记套件通过。sys 16 个模块未改。入口 st_gap、RI、两代仍待办 | tools/surface-gen.cx、tools/target-gen.cx、plans/v0.0.44.md 的 C44-CX-SURFACE-01 |
 | CX 分层 | L0=`cx/{sys,mem,text}`+layers 表白名单。`src/host.cx` 0 个 include，映射和加载符号在 `cx/sys/mem.cx`、`cx/sys/dl.cx`。check-cx-sys 100/0。cxraw 645 个文件、19329 次、基线 19615、0 超基线、20 低于基线 | plans/cx-layers.md、tests/cxraw-layers.tsv |
 | 旧纪元证据 | 10-30 前的构造链、安装、矩阵收据 | archive/prd-c43-history-20261030.md |
 
