@@ -1,0 +1,401 @@
+#pragma unisa use sys.io
+#pragma unisa use text.text
+/* Project the stream stage codes that are not route last stages.
+   sh ./unisacc.com tools/rest-gen.cx -- --check
+   sh ./unisacc.com tools/rest-gen.cx -- --write
+   Stage codes come from exec/pipeline/image-stages.tsv, in file order.
+   Last stages come from exec/c/compiler-routes.tsv.
+   Exactly seven codes, five last stages, two names left over: e1, prune.
+   The seven codes stay on streamname. The five ends stay on endname.
+   This is not st_gap.
+   A null out-pointer returns 4. An index outside 0..count-1 returns 2.
+   No libc and no include. */
+#define ROUTES "exec/c/compiler-routes.tsv"
+#define STAGES "exec/pipeline/image-stages.tsv"
+#define NROUTE 10
+#define NEND 5
+#define NCODE 7
+#define NREST 2
+#define NAMEMAX 32
+#define FILECAP 2048
+#define CHECKCAP 8192
+
+static char suffixes[NROUTE][NAMEMAX];
+static char ends[NEND][NAMEMAX];
+static char codes[NCODE][NAMEMAX];
+static char rests[NREST][NAMEMAX];
+static int nsuffix;
+static int nend;
+static int ncode;
+static int nrest;
+
+static int fail(const char *why) {
+    sy_eprintf("rest-gen\tFAIL\t%s\n", why);
+    return 1;
+}
+
+static int ident_ok(const char *s, int n) {
+    int i;
+    if (n < 1 || n >= NAMEMAX) return 0;
+    if (s[0] < 'a' || s[0] > 'z') return 0;
+    for (i = 1; i < n; i++) {
+        char c = s[i];
+        if (c >= 'a' && c <= 'z') continue;
+        if (c >= '0' && c <= '9') continue;
+        return 0;
+    }
+    return 1;
+}
+
+static int suffix_ok(const char *s, int n) {
+    int i;
+    if (n < 1 || n >= NAMEMAX) return 0;
+    for (i = 0; i < n; i++) {
+        char c = s[i];
+        if (c >= 'a' && c <= 'z') continue;
+        if (c >= 'A' && c <= 'Z') continue;
+        if (c >= '0' && c <= '9') continue;
+        if (c == '/') continue;
+        return 0;
+    }
+    return 1;
+}
+
+static int opt_ok(const char *s, int n) {
+    int i;
+    if (n < 1 || n >= NAMEMAX) return 0;
+    if (!((s[0] >= 'a' && s[0] <= 'z') || (s[0] >= 'A' && s[0] <= 'Z'))) return 0;
+    for (i = 1; i < n; i++) {
+        char c = s[i];
+        if (c >= 'a' && c <= 'z') continue;
+        if (c >= 'A' && c <= 'Z') continue;
+        if (c >= '0' && c <= '9') continue;
+        return 0;
+    }
+    return 1;
+}
+
+static void copy_field(char *dst, const char *s, int n) {
+    int i;
+    for (i = 0; i < n; i++) dst[i] = s[i];
+    dst[n] = 0;
+}
+
+static int in_set(char names[][NAMEMAX], int n, const char *s) {
+    int i;
+    for (i = 0; i < n; i++) if (tx_eqz(names[i], s)) return 1;
+    return 0;
+}
+
+static int push_unique(char names[][NAMEMAX], int *count, int cap, const char *s, const char *why) {
+    int i;
+    if (in_set(names, *count, s)) return 0;
+    if (*count >= cap) return fail(why);
+    for (i = 0; s[i]; i++) names[*count][i] = s[i];
+    names[*count][i] = 0;
+    *count += 1;
+    return 0;
+}
+
+static int push_suffix(const char *s) {
+    int i;
+    if (in_set(suffixes, nsuffix, s)) return fail("suffix-dup");
+    if (nsuffix >= NROUTE) return fail("route-count");
+    for (i = 0; s[i]; i++) suffixes[nsuffix][i] = s[i];
+    suffixes[nsuffix][i] = 0;
+    nsuffix++;
+    return 0;
+}
+
+static int take_route(const char *line, int n) {
+    const char *f[3];
+    int len[3];
+    int i, k, start;
+    char suffix[NAMEMAX], stage[NAMEMAX];
+    k = 0;
+    start = 0;
+    for (i = 0; i <= n; i++) {
+        if (i == n || line[i] == '\t') {
+            if (k >= 3) return fail("row-fields");
+            f[k] = line + start;
+            len[k] = i - start;
+            k++;
+            start = i + 1;
+        }
+    }
+    if (k != 3) return fail("row-fields");
+    if (!suffix_ok(f[0], len[0])) return fail("suffix-charset");
+    if (!ident_ok(f[1], len[1])) return fail("stage-charset");
+    if (!opt_ok(f[2], len[2])) return fail("opt-charset");
+    copy_field(suffix, f[0], len[0]);
+    copy_field(stage, f[1], len[1]);
+    if (push_suffix(suffix)) return 1;
+    if (push_unique(ends, &nend, NEND, stage, "end-count")) return 1;
+    return 0;
+}
+
+static int take_stage(const char *line, int n) {
+    const char *f[5];
+    int len[5];
+    int i, k, start;
+    char code[NAMEMAX];
+    k = 0;
+    start = 0;
+    for (i = 0; i <= n; i++) {
+        if (i == n || line[i] == '\t') {
+            if (k >= 5) return fail("stage-fields");
+            f[k] = line + start;
+            len[k] = i - start;
+            k++;
+            start = i + 1;
+        }
+    }
+    if (k != 5) return fail("stage-fields");
+    if (!ident_ok(f[0], len[0])) return fail("code-charset");
+    copy_field(code, f[0], len[0]);
+    if (push_unique(codes, &ncode, NCODE, code, "code-count")) return 1;
+    return 0;
+}
+
+static int parse_file(const char *path, const char *header,
+                       int (*take)(const char *, int)) {
+    size_t nb = 0, i = 0;
+    char *b;
+    int saw = 0;
+    b = cx_read(path, &nb);
+    if (!b) return fail(path);
+    if (nb == 0 || b[nb - 1] != '\n') return fail("tsv-newline");
+    while (i < nb) {
+        size_t e = i;
+        while (e < nb && b[e] != '\n') e++;
+        b[e] = 0;
+        if (e == i) return fail("tsv-blank");
+        if (!saw) {
+            if (!tx_eqz(b + i, header)) return fail("tsv-header");
+            saw = 1;
+        } else if (b[i] == '#') {
+            return fail("tsv-comment");
+        } else if (take(b + i, (int)(e - i))) {
+            return 1;
+        }
+        i = e + 1;
+    }
+    return 0;
+}
+
+static int collect_rest(void) {
+    int i;
+    if (nsuffix != NROUTE) return fail("route-count");
+    if (nend != NEND) return fail("end-count");
+    if (ncode != NCODE) return fail("code-count");
+    for (i = 0; i < nend; i++) {
+        if (!in_set(codes, ncode, ends[i])) return fail("end-not-stage");
+    }
+    for (i = 0; i < ncode; i++) {
+        if (in_set(ends, nend, codes[i])) continue;
+        if (nrest >= NREST) return fail("rest-count");
+        copy_field(rests[nrest], codes[i], 0);
+        {
+            int k = 0;
+            while (codes[i][k]) {
+                rests[nrest][k] = codes[i][k];
+                k++;
+            }
+            rests[nrest][k] = 0;
+        }
+        nrest++;
+    }
+    if (nrest != NREST) return fail("rest-count");
+    return 0;
+}
+
+static int app(char *dst, int cap, int *n, const char *s) {
+    int i = 0;
+    while (s[i]) {
+        if (*n + 1 >= cap) return -1;
+        dst[*n] = s[i];
+        *n += 1;
+        i++;
+    }
+    dst[*n] = 0;
+    return 0;
+}
+
+static int app_n(char *dst, int cap, int *n, int d) {
+    char s[4];
+    int k = 0;
+    if (d < 0 || d > 99) return -1;
+    if (d >= 10) s[k++] = (char)('0' + d / 10);
+    s[k++] = (char)('0' + d % 10);
+    s[k] = 0;
+    return app(dst, cap, n, s);
+}
+
+static int emit_mod(char *dst, int cap, const char *prefix) {
+    int n = 0, i;
+    dst[0] = 0;
+    if (app(dst, cap, &n, "#pragma unisa module restname\n")) return -1;
+    if (app(dst, cap, &n, "/* Generated by tools/rest-gen.cx.\n")) return -1;
+    if (app(dst, cap, &n, "   Do not edit by hand. Names are stage codes that are not route last stages.\n")) return -1;
+    if (app(dst, cap, &n, "   Order follows exec/pipeline/image-stages.tsv. Ends stay on endname.\n")) return -1;
+    if (app(dst, cap, &n, "   A null out-pointer returns 4. An index outside 0..count-1 returns 2.\n")) return -1;
+    if (app(dst, cap, &n, "   No libc and no include. */\n")) return -1;
+    if (app(dst, cap, &n, "int ")) return -1;
+    if (app(dst, cap, &n, prefix)) return -1;
+    if (app(dst, cap, &n, "_count(void) {\n    return ")) return -1;
+    if (app_n(dst, cap, &n, nrest)) return -1;
+    if (app(dst, cap, &n, ";\n}\n")) return -1;
+    if (app(dst, cap, &n, "int ")) return -1;
+    if (app(dst, cap, &n, prefix)) return -1;
+    if (app(dst, cap, &n, "_at(int index, const char **name) {\n")) return -1;
+    if (app(dst, cap, &n, "    if (!name) return 4;\n")) return -1;
+    for (i = 0; i < nrest; i++) {
+        if (app(dst, cap, &n, "    if (index == ")) return -1;
+        if (app_n(dst, cap, &n, i)) return -1;
+        if (app(dst, cap, &n, ") { *name = \"")) return -1;
+        if (app(dst, cap, &n, rests[i])) return -1;
+        if (app(dst, cap, &n, "\"; return 0; }\n")) return -1;
+    }
+    if (app(dst, cap, &n, "    return 2;\n}\n")) return -1;
+    return n;
+}
+
+static int emit_rows(char *dst, int cap, int *n, const char *prefix) {
+    int i;
+    if (app(dst, cap, n, "    if (")) return -1;
+    if (app(dst, cap, n, prefix)) return -1;
+    if (app(dst, cap, n, "_count() != ")) return -1;
+    if (app_n(dst, cap, n, nrest)) return -1;
+    if (app(dst, cap, n, ") return 1;\n")) return -1;
+    for (i = 0; i < nrest; i++) {
+        if (app(dst, cap, n, "    if (")) return -1;
+        if (app(dst, cap, n, prefix)) return -1;
+        if (app(dst, cap, n, "_at(")) return -1;
+        if (app_n(dst, cap, n, i)) return -1;
+        if (app(dst, cap, n, ", &name) || !tx_eqz(name, \"")) return -1;
+        if (app(dst, cap, n, rests[i])) return -1;
+        if (app(dst, cap, n, "\")) return 1;\n")) return -1;
+    }
+    if (app(dst, cap, n, "    if (")) return -1;
+    if (app(dst, cap, n, prefix)) return -1;
+    if (app(dst, cap, n, "_at(0, missing) != 4) return 1;\n")) return -1;
+    if (app(dst, cap, n, "    if (")) return -1;
+    if (app(dst, cap, n, prefix)) return -1;
+    if (app(dst, cap, n, "_at(-1, &name) != 2) return 1;\n")) return -1;
+    if (app(dst, cap, n, "    if (")) return -1;
+    if (app(dst, cap, n, prefix)) return -1;
+    if (app(dst, cap, n, "_at(")) return -1;
+    if (app_n(dst, cap, n, nrest)) return -1;
+    if (app(dst, cap, n, ", &name) != 2) return 1;\n")) return -1;
+    return 0;
+}
+
+static int emit_check(char *dst, int cap) {
+    int n = 0;
+    dst[0] = 0;
+    if (app(dst, cap, &n, "#pragma unisa use compiler.restname\n")) return -1;
+    if (app(dst, cap, &n, "#pragma unisa use runtime.restname\n")) return -1;
+    if (app(dst, cap, &n, "#pragma unisa use compiler.endname\n")) return -1;
+    if (app(dst, cap, &n, "#pragma unisa use compiler.streamname\n")) return -1;
+    if (app(dst, cap, &n, "#pragma unisa use sys.io\n")) return -1;
+    if (app(dst, cap, &n, "#pragma unisa use text.text\n")) return -1;
+    if (app(dst, cap, &n, "/* Generated by tools/rest-gen.cx. Narrow check of non-endpoint stage codes. */\n")) return -1;
+    if (app(dst, cap, &n, "int main(void) {\n")) return -1;
+    if (app(dst, cap, &n, "    const char *name;\n")) return -1;
+    if (app(dst, cap, &n, "    const char *end;\n")) return -1;
+    if (app(dst, cap, &n, "    const char *official;\n")) return -1;
+    if (app(dst, cap, &n, "    const char *code;\n")) return -1;
+    if (app(dst, cap, &n, "    const char **missing;\n")) return -1;
+    if (app(dst, cap, &n, "    int i, j, seen, hit_end, hit_rest, outside;\n")) return -1;
+    if (app(dst, cap, &n, "    missing = 0;\n")) return -1;
+    if (emit_rows(dst, cap, &n, "nst")) return -1;
+    if (emit_rows(dst, cap, &n, "rns")) return -1;
+    if (app(dst, cap, &n, "    if (sn_count() != ")) return -1;
+    if (app_n(dst, cap, &n, ncode)) return -1;
+    if (app(dst, cap, &n, ") return 1;\n")) return -1;
+    if (app(dst, cap, &n, "    if (lsn_count() != ")) return -1;
+    if (app_n(dst, cap, &n, nend)) return -1;
+    if (app(dst, cap, &n, ") return 1;\n")) return -1;
+    if (app(dst, cap, &n, "    for (i = 0; i < nst_count(); i++) {\n")) return -1;
+    if (app(dst, cap, &n, "        seen = 0;\n")) return -1;
+    if (app(dst, cap, &n, "        if (nst_at(i, &name)) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "        for (j = 0; j < sn_count(); j++) {\n")) return -1;
+    if (app(dst, cap, &n, "            if (sn_at(j, &official, &code)) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "            if (tx_eqz(code, name)) seen = 1;\n")) return -1;
+    if (app(dst, cap, &n, "        }\n")) return -1;
+    if (app(dst, cap, &n, "        if (!seen) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "        for (j = 0; j < lsn_count(); j++) {\n")) return -1;
+    if (app(dst, cap, &n, "            if (lsn_at(j, &end)) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "            if (tx_eqz(end, name)) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "        }\n")) return -1;
+    if (app(dst, cap, &n, "    }\n")) return -1;
+    if (app(dst, cap, &n, "    outside = 0;\n")) return -1;
+    if (app(dst, cap, &n, "    for (j = 0; j < sn_count(); j++) {\n")) return -1;
+    if (app(dst, cap, &n, "        hit_end = 0;\n")) return -1;
+    if (app(dst, cap, &n, "        hit_rest = 0;\n")) return -1;
+    if (app(dst, cap, &n, "        if (sn_at(j, &official, &code)) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "        for (i = 0; i < lsn_count(); i++) {\n")) return -1;
+    if (app(dst, cap, &n, "            if (lsn_at(i, &end)) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "            if (tx_eqz(end, code)) hit_end = 1;\n")) return -1;
+    if (app(dst, cap, &n, "        }\n")) return -1;
+    if (app(dst, cap, &n, "        for (i = 0; i < nst_count(); i++) {\n")) return -1;
+    if (app(dst, cap, &n, "            if (nst_at(i, &name)) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "            if (tx_eqz(name, code)) hit_rest = 1;\n")) return -1;
+    if (app(dst, cap, &n, "        }\n")) return -1;
+    if (app(dst, cap, &n, "        if (!hit_end) {\n")) return -1;
+    if (app(dst, cap, &n, "            outside = outside + 1;\n")) return -1;
+    if (app(dst, cap, &n, "            if (!hit_rest) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "        } else if (hit_rest) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "    }\n")) return -1;
+    if (app(dst, cap, &n, "    if (outside != nst_count()) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "    sy_printf(\"CX_REST\\tok=")) return -1;
+    if (app_n(dst, cap, &n, nrest)) return -1;
+    if (app(dst, cap, &n, "\\tfailed=0\\n\");\n")) return -1;
+    if (app(dst, cap, &n, "    return 0;\n}\n")) return -1;
+    return n;
+}
+
+static int same_bytes(const char *a, size_t an, const char *b, int bn) {
+    int i;
+    if (an != (size_t)bn) return 0;
+    for (i = 0; i < bn; i++) if (a[i] != b[i]) return 0;
+    return 1;
+}
+
+static int one_file(int dowrite, const char *path, const char *body, int n) {
+    size_t on = 0;
+    char *cur;
+    if (dowrite) {
+        if (cx_write(path, body, (size_t)n)) return fail("write");
+        return 0;
+    }
+    cur = cx_read(path, &on);
+    if (!cur) return fail(path);
+    if (!same_bytes(cur, on, body, n)) return fail(path);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    char file[FILECAP], check[CHECKCAP];
+    int dowrite, fn, cn;
+    if (argc != 2 || (!tx_eqz(argv[1], "--check") && !tx_eqz(argv[1], "--write"))) {
+        sy_eprintf("rest-gen\tusage\t--check|--write\n");
+        return 2;
+    }
+    dowrite = tx_eqz(argv[1], "--write");
+    if (parse_file(ROUTES, "# route suffix\tlast stage\toptimiser", take_route)) return 1;
+    if (parse_file(STAGES, "# stage\tinput format\toutput format\tmodel file\tofficial", take_stage)) return 1;
+    if (collect_rest()) return 1;
+    cn = emit_check(check, CHECKCAP);
+    if (cn < 0) return fail("emit-check");
+    fn = emit_mod(file, FILECAP, "nst");
+    if (fn < 0) return fail("emit-compiler");
+    if (one_file(dowrite, "cx/compiler/restname.cx", file, fn)) return 1;
+    fn = emit_mod(file, FILECAP, "rns");
+    if (fn < 0) return fail("emit-runtime");
+    if (one_file(dowrite, "cx/runtime/restname.cx", file, fn)) return 1;
+    if (one_file(dowrite, "tools/check-cx-rest.cx", check, cn)) return 1;
+    if (dowrite) sy_printf("REST_GEN\tWROTE\trows=%d\n", nrest);
+    else sy_printf("REST_GEN\tCHECK\trows=%d\n", nrest);
+    return 0;
+}
