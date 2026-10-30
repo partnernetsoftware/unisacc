@@ -57,3 +57,23 @@
 4. B4/B5 随前三项自然下降，再复测。
 
 复现：参考执行器回放工具在仓外 `/tmp/claude-1001/w/`（`archive/reference-c/exec/c/run.c` 加 SWAP 计数，宿主 GCC 仅作测量，不作产品证据）。
+
+## 四、B2 细化：自身 `-O2` 生成码的具体缺口（2026-10-30 实测）
+
+微基准 `mb.c`（二分查找 + 求和，40 万次调用）：unisacc `-O2` 206 ms，`-O0` 333 ms；宿主 gcc `-O0` 166 ms、`-O2` 43 ms。
+unisacc `-O2` 比 gcc `-O0` 还慢，比 gcc `-O2` 慢 4.8 倍。二分循环体 39 条 x86 指令；gcc `-O1` 整个函数 26 条。
+
+`-O2 -c -b lnx/x86_64` 对象反汇编看到的缺口，按每次出现省下的指令数排：
+
+| 缺口 | 现在 | 应该 | 所在层 |
+|---|---|---|---|
+| G1 常数移位 | `imm r0,1; shr64` → mov/mov/mov/push rcx/mov/sar %cl/pop/mov，8 条 | `sar $1`，1 条 | E4 立即数折叠 + enc 立即数形式 |
+| G2 比较加分支 | `slt64; jumpz` → cmp/setl/movzbq/test/je，5 条 | cmp/jge，2 条 | E4/lower 比较—分支融合 |
+| G3 局部全在栈槽 | 每次读写 `movslq -0x28(%r9)`、`mov %eax,-0x28(%r9)` | 寄存器 | tape 只有 r0–r7（weights/gold/regmap.tsv：rax rdi rsi rdx rcx r8 r9 rsp），rbx、r10–r15 未用；需扩 tape 寄存器并在 O2 提升不取址的标量局部 |
+| G4 三地址落两地址 | `add64 r0,r1,r0` → mov r11 / mov / add，3 条 | `add %rdi,%rax`，1 条 | lower/enc：目的与一个源相同或可交换时直接两地址 |
+| G5 下标乘法 | `imm 4; mul64; add64; .ld` → mov/imul/mov/mov/add/movslq | `movslq (%rdi,%rax,4)` | E4 pow2 改移位（peep 已有 pow2 关系）+ enc 带比例寻址 |
+| G6 32 位局部不转发 | peep 只覆盖 `store64/load64`（weights/gold/peep.tsv 1632 键），C 里最常见的 int 局部走 `.st/.ld`，存后立刻重读不被消除 | 存—读转发、重复读消除 | peep 事实表加 `.st/.ld` 宽度变体 |
+
+G1、G2、G4、G6 只改有限表与构造，不改 tape 协议，可先做；G5 需 enc 新寻址形式；G3 改 tape ISA，影响 E3/E4/lower/enc 与执行器自身，最后做。
+G1+G2+G4+G6 估计二分循环体从 39 条降到约 20 条；再加 G3 接近 gcc `-O1`。执行器、E2/E3 等自编热循环同样受益。
+注意：peep 等 gold 表的生成器仍是 Python（`unisa/gold.py` → `gold-export`），改表要先走该生成器或先把它移植为 `.cx`。
