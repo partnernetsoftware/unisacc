@@ -24,3 +24,9 @@
 - sweep 规定的检查是不带 `-funit` 的 `-c`。改之前检查失败，refactor 把文件记成 SKIP，不改（`tools/refactor.cx`：失败的基线证明不了改动）。这条命令不会改 `path.cx`、`compat.cx`。没有跑 sweep。
 - 产品清单里的 `path.o`、`compat.o` 就是 `cx/driver/path.cx`、`cx/driver/compat.cx`（`src/driver` 指到 `cx/driver`，同一 inode）。再 `use text.text`，`-funit` 会把 `tx_*` 再编进这两只对象，和入口 `drive.o` 里已有的 `tx_eqz` 重复。所以不把这两处改成 accept。
 - 为了让模块找得到 `text.text` 而加的 `cx/driver/text` 软链会让已装产品把同一模块算两次。sweep 不做，这条软链删掉。
+
+## cli.cx 维持 static（bdy 对齐，2026-10-30）
+
+- `cx/driver/cli.cx` 继续用模块内 `cxc_eqz`、`cxc_prefixz`，不 `use text.text`。这是当前做法。等每模块只进一只对象之后，再改成 `tx_eqz`、`tx_prefixz`。
+- 当场核对：`cx/driver` 旁边只有 `sys`、`mem`，没有 `text`。`cli.cx` 没有 `use text.text`。
+- `plans/cx-layers.md` 的收敛清单由 bdy 改。这份计划不代改那个文件。
