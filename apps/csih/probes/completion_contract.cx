@@ -1,3 +1,5 @@
+#pragma unisa use text.fmt
+#pragma unisa use sys.io
 #pragma unisa use srccopy
 #pragma unisa use text.text
 #pragma unisa use sys.env
@@ -53,7 +55,7 @@ static char g_root[1200], g_src[1300], g_comp[1300], g_selfhome[4400];
 static long g_deadline;
 static int g_failed;
 static char g_why[1200];
-#define NEED(c, ...) do { if (!(c)) { snprintf(g_why, sizeof g_why, __VA_ARGS__); goto fail; } } while (0)
+#define NEED(c, ...) do { if (!(c)) { tx_snprintf(g_why, sizeof g_why, __VA_ARGS__); goto fail; } } while (0)
 
 /* ---------- pool (reset per case; never freed) ---------- */
 static char g_pool[POOL_CAP];
@@ -62,7 +64,7 @@ static void *pa(long n) {
     char *p;
     long i;
     n = (n + 15) & ~15L;
-    if (n <= 0 || g_used + n > POOL_CAP) { printf("completion_contract: pool exhausted\n"); exit(9); }
+    if (n <= 0 || g_used + n > POOL_CAP) { sy_printf("completion_contract: pool exhausted\n"); exit(9); }
     p = g_pool + g_used;
     g_used += n;
     for (i = 0; i < n; i++) p[i] = 0;
@@ -112,7 +114,7 @@ static void sb_jstr(sbuf *b, const char *s, long n) {
         else if (c == '\t') sb_puts(b, "\\t");
         else if (c == '\b') sb_puts(b, "\\b");
         else if (c == '\f') sb_puts(b, "\\f");
-        else if (c < 0x20) { snprintf(u, sizeof u, "\\u%04x", (unsigned)c); sb_puts(b, u); }
+        else if (c < 0x20) { tx_snprintf(u, sizeof u, "\\u%04x", (unsigned)c); sb_puts(b, u); }
         else sb_put(b, (const char *)&s[i], 1);
     }
     sb_put(b, "\"", 1);
@@ -155,7 +157,7 @@ static void ob_claims(sbuf *b, slist *refs, const char *quote) {
     int i;
     ob_key(b, "claims");
     sb_puts(b, "[{\"id\": \"c1\", \"text\": \"the command printed its marker\", \"scope\": \"tool output\", \"state\": \"supported\", \"support\": [");
-    for (i = 0; i < refs->n && i < 4; i++) { char d[16]; snprintf(d, sizeof d, "%s%d", i ? ", " : "", i); sb_puts(b, d); }
+    for (i = 0; i < refs->n && i < 4; i++) { char d[16]; tx_snprintf(d, sizeof d, "%s%d", i ? ", " : "", i); sb_puts(b, d); }
     sb_puts(b, "], \"counter\": [], \"unknown\": \"\"}]");
     ob_key(b, "observation_refs");
     sb_puts(b, "[");
@@ -391,8 +393,8 @@ static int copy_source(void) {
         long k;
         snapent *e = &g_before.e[i];
         if (!e->ok) return -1;
-        snprintf(to, sizeof to, "%s/%s", g_src, e->path + al + 1);
-        snprintf(dir, sizeof dir, "%s", to);
+        tx_snprintf(to, sizeof to, "%s/%s", g_src, e->path + al + 1);
+        tx_snprintf(dir, sizeof dir, "%s", to);
         for (k = zl(dir) - 1; k > 0 && dir[k] != '/'; k--) {}
         dir[k] = 0;
         if (mkdirp(dir) != 0 || cx_write(to, e->data, e->n) != 0) return -1;
@@ -413,7 +415,7 @@ static int inject(void) {
     long i, pos = -1, occ = 0, el = zl(ENTRY);
     char *t;
     sbuf o = {0, 0, 0};
-    snprintf(cli, sizeof cli, "%s/agent_cli.cx", g_src);
+    tx_snprintf(cli, sizeof cli, "%s/agent_cli.cx", g_src);
     t = cx_read(cli, &n);
     if (!t) return -1;
     for (i = 0; i + el <= (long)n; i++) if (tx_same(t + i, el, ENTRY, el)) { occ++; pos = i; }
@@ -503,7 +505,7 @@ static void serve_one(int c, int capacity, resp_fn fn) {
         sb_puts(&body, "{\"choices\":[{\"message\":{\"content\":");
         sb_jstr(&body, out.p, out.n);
         sb_puts(&body, "}}]}");
-        snprintf(head, sizeof head, "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: %ld\r\n\r\n", body.n);
+        tx_snprintf(head, sizeof head, "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: %ld\r\n\r\n", body.n);
         sb_puts(&w, head);
         sb_put(&w, body.p, body.n);
     }
@@ -522,9 +524,9 @@ static int run_agent(const char **kv, const char *a1, const char *a2, int capaci
     ls = sy_tcp_listen(0, 16);
     if (ls < 0) return -1;
     port = sy_tcp_port(ls);
-    snprintf(ep, sizeof ep, "http://127.0.0.1:%d/v1/chat/completions", port);
-    snprintf(outp, sizeof outp, "%s/%s.stdout", g_root, g_case);
-    snprintf(errp, sizeof errp, "%s/%s.stderr", g_root, g_case);
+    tx_snprintf(ep, sizeof ep, "http://127.0.0.1:%d/v1/chat/completions", port);
+    tx_snprintf(outp, sizeof outp, "%s/%s.stdout", g_root, g_case);
+    tx_snprintf(errp, sizeof errp, "%s/%s.stderr", g_root, g_case);
     sb_puts(&s, "unset CSIH_ROLE CSIH_PEER OPENAI_API_KEY HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; ");
     sb_puts(&s, "export NO_PROXY='127.0.0.1,localhost' no_proxy='127.0.0.1,localhost' CSIH_ENDPOINT=");
     sq(&s, ep);
@@ -610,8 +612,8 @@ static int load_journal(void) {
     long i = 0;
     char *b;
     g_jr.n = 0;
-    if (is_file(g_journal)) snprintf(p, sizeof p, "%s", g_journal);
-    else snprintf(p, sizeof p, "%s/journal-before", g_cwd);
+    if (is_file(g_journal)) tx_snprintf(p, sizeof p, "%s", g_journal);
+    else tx_snprintf(p, sizeof p, "%s/journal-before", g_cwd);
     b = cx_read(p, &n);
     if (!b) return -1;
     while (i < (long)n) {
@@ -670,13 +672,13 @@ static int case_setup(const char *name) {
     char home[1500];
     g_used = 0;
     g_nreq = 0; g_nresp = 0; g_note[0] = 0;
-    snprintf(g_case, sizeof g_case, "%s", name);
-    snprintf(g_cwd, sizeof g_cwd, "%s/%s", g_root, name);
-    snprintf(g_journal, sizeof g_journal, "%s/journal", g_cwd);
-    snprintf(home, sizeof home, "%s/home", g_cwd);
+    tx_snprintf(g_case, sizeof g_case, "%s", name);
+    tx_snprintf(g_cwd, sizeof g_cwd, "%s/%s", g_root, name);
+    tx_snprintf(g_journal, sizeof g_journal, "%s/journal", g_cwd);
+    tx_snprintf(home, sizeof home, "%s/home", g_cwd);
     {
         int a = sy_mkdir(g_cwd, 0777), b = a == 0 ? sy_mkdir(home, 0777) : 0;
-        if (a || b) { snprintf(g_note, sizeof g_note, "mkdir %s: %d/%d", g_cwd, a, b); return -1; }
+        if (a || b) { tx_snprintf(g_note, sizeof g_note, "mkdir %s: %d/%d", g_cwd, a, b); return -1; }
     }
     return 0;
 }
@@ -684,7 +686,7 @@ static int case_setup(const char *name) {
 static int rotate_journal(void) {
     char before[1600];
     char *mv[5];
-    snprintf(before, sizeof before, "%s/journal-before", g_cwd);
+    tx_snprintf(before, sizeof before, "%s/journal-before", g_cwd);
     mv[0] = "mv"; mv[1] = g_journal; mv[2] = before; mv[3] = NULL;
     if (sy_exists(before) != 0) return -1;   /* rename onto a taken name raised */
     if (sy_run(mv, NULL, 0, NULL) != 0) return -1;
@@ -763,7 +765,7 @@ static int case_run(const char *name) {
     runres r;
     jn *tools[64], *anchor[3] = {0, 0, 0};
     NEED(case_setup(name) == 0, "case dir (%s)", g_note);
-    snprintf(home, sizeof home, "%s/home", g_cwd);
+    tx_snprintf(home, sizeof home, "%s/home", g_cwd);
     kv[k++] = "HOME"; kv[k++] = home;
     kv[k++] = "DEEPSEEK_API_KEY"; kv[k++] = "LOCAL_ONLY";
     kv[k++] = "CSIH_TRANSCRIPT"; kv[k++] = g_journal;
@@ -831,7 +833,7 @@ static int case_run(const char *name) {
             NEED(aid && aid->t == J_STR, "tool action_id not a string");
             {
                 char needle[512];
-                snprintf(needle, sizeof needle, "%.*s", (int)aid->sl, aid->s);
+                tx_snprintf(needle, sizeof needle, "%.*s", (int)aid->sl, aid->s);
                 NEED(jdeep(g_req[g_nreq - 1].j, needle), "last request lacks the tool action_id %s", needle);
             }
         }
@@ -847,7 +849,7 @@ static int case_run(const char *name) {
              "peer mail text in stdout/journal");
     } else if (named(name, "audit-failure")) {
         char mk[1600];
-        snprintf(mk, sizeof mk, "%s/forbidden-marker", g_cwd);
+        tx_snprintf(mk, sizeof mk, "%s/forbidden-marker", g_cwd);
         NEED(nt == 0 && out_has(&r, "audit write failed") && sy_exists(mk) == 0, "audit-failure: tools=%d audit-msg=%d marker=%d", nt,
              out_has(&r, "audit write failed"), sy_exists(mk));
     } else if (expected_rc) NEED(out_has(&r, "unfinished"), "'unfinished' not in stdout");
@@ -879,13 +881,13 @@ static int resp_feedback(int n, jn *req, sbuf *o) {
     ob_begin(o);
     if (n <= 2) {
         char cmd[64];
-        snprintf(cmd, sizeof cmd, "printf 'ACTUAL_%d\n'", n);
+        tx_snprintf(cmd, sizeof cmd, "printf 'ACTUAL_%d\n'", n);
         ob_z(o, "act", "exec"); ob_z(o, "cmd", cmd); ob_z(o, "why", "private distinct evidence");
         ob_end(o);
         return 0;
     }
     if (n == 3) {
-        if (ids.n != 2) { snprintf(g_note, sizeof g_note, "request 3 carried %d ids (want 2)", ids.n); return 1; }  /* assert len(ids)==2 */
+        if (ids.n != 2) { tx_snprintf(g_note, sizeof g_note, "request 3 carried %d ids (want 2)", ids.n); return 1; }  /* assert len(ids)==2 */
         g_claim.n = 0;
         sl_add(&g_claim, ids.v[1], ids.l[1]);
         ob_z(o, "act", "answer"); ob_z(o, "outcome", "completed"); ob_z(o, "text", "DECLARATION_PRESERVED");
@@ -909,7 +911,7 @@ static int resp_feedback(int n, jn *req, sbuf *o) {
         else if (contains(name, "unknown")) {
             char u[600];
             ev.n = 0;
-            snprintf(u, sizeof u, "%.*s999", (int)g_claim.l[0], g_claim.v[0]);
+            tx_snprintf(u, sizeof u, "%.*s999", (int)g_claim.l[0], g_claim.v[0]);
             sl_add(&ev, u, zl(u));
         }
     }
@@ -928,7 +930,7 @@ static int case_feedback(const char *name) {
     const char *diag = NULL;
     NEED(case_setup(name) == 0, "case dir (%s)", g_note);
     g_claim.n = 0;
-    snprintf(home, sizeof home, "%s/home", g_cwd);
+    tx_snprintf(home, sizeof home, "%s/home", g_cwd);
     kv[k++] = "HOME"; kv[k++] = home;
     kv[k++] = "DEEPSEEK_API_KEY"; kv[k++] = "LOCAL_ONLY";
     kv[k++] = "CSIH_TRANSCRIPT"; kv[k++] = g_journal;
@@ -980,7 +982,7 @@ static int case_feedback(const char *name) {
                 if (!(t && t->t == J_STR && has(t->s, t->sl, diag))) all = 0;
             }
         NEED(ne > 0 && all, "error records: %d, all carry %s: %d", ne, diag, all);
-        snprintf(want, sizeof want, "expected_evidence=[%.*s]", (int)g_claim.l[0], g_claim.v[0]);
+        tx_snprintf(want, sizeof want, "expected_evidence=[%.*s]", (int)g_claim.l[0], g_claim.v[0]);
         NEED(first && first->t == J_STR && has(first->s, first->sl, want), "first error lacks %s", want);
         if (expected_n >= 5) NEED(jdeep(g_req[4].j, diag), "request 5 lacks %s", diag);
     }
@@ -1007,8 +1009,8 @@ static int case_capacity(const char *name) {
     runres r;
     sbuf raw = {0, 0, 0};
     NEED(case_setup(name) == 0, "case dir (%s)", g_note);
-    snprintf(home, sizeof home, "%s/home", g_cwd);
-    snprintf(packet, sizeof packet, "%s/packet.json", g_cwd);
+    tx_snprintf(home, sizeof home, "%s/home", g_cwd);
+    tx_snprintf(packet, sizeof packet, "%s/packet.json", g_cwd);
     sb_puts(&raw, "{\"data\":\"");
     sb_rep(&raw, "\\\"", 15500);
     sb_puts(&raw, "\"}");
@@ -1045,8 +1047,8 @@ static const char *CASES[] = {
     "feedback-unknown-recover", "feedback-extra-exhaust", "feedback-length-exhaust", "feedback-audit-failure", NULL};
 
 static void report(int ok, const char *what) {
-    if (ok) printf("  ok    %s\n", what);
-    else { printf("  FAIL  %s: %s\n", what, g_why); g_failed++; }
+    if (ok) sy_printf("  ok    %s\n", what);
+    else { sy_printf("  FAIL  %s: %s\n", what, g_why); g_failed++; }
 }
 
 static int prepare(void) {
@@ -1058,13 +1060,13 @@ static int prepare(void) {
     const char *scratch = sy_env_or("PROBE_SCRATCH", sy_env_or("TMPDIR", "/tmp"));
     int st;
     char outp[1400], errp[1400];
-    snprintf(g_root, sizeof g_root, "%s/csih-probe-build-%d/completion_contract", scratch, (int)getuid());
+    tx_snprintf(g_root, sizeof g_root, "%s/csih-probe-build-%d/completion_contract", scratch, (int)getuid());
     st = sy_exists(g_root);
     NEED(st >= 0, "work tree %s: errno %d", g_root, -st);
     if (st == 1) NEED(cx_rmtree(g_root) == 0, "cannot clear the work tree %s", g_root);
     NEED(mkdirp(g_root) == 0, "mkdir %s", g_root);
-    snprintf(g_src, sizeof g_src, "%s/source", g_root);
-    snprintf(g_comp, sizeof g_comp, "%s/compiler.com", g_root);
+    tx_snprintf(g_src, sizeof g_src, "%s/source", g_root);
+    tx_snprintf(g_comp, sizeof g_comp, "%s/compiler.com", g_root);
     NEED(copy_source() == 0, "source copy failed");
     NEED(csih_copy_l0(g_app, g_src) == 0, "copy of the L0 dirs (sys, mem, text) failed");
     st = inject();
@@ -1072,8 +1074,8 @@ static int prepare(void) {
     u = cx_read(g_unisacc, &n);
     NEED(u != NULL && cx_write(g_comp, u, n) == 0, "compiler copy");
     /* build gate: the compile of the injected source (once, -o); an unknown subcommand gives the usage line, rc 64 */
-    snprintf(outp, sizeof outp, "%s/build.stdout", g_root);
-    snprintf(errp, sizeof errp, "%s/build.stderr", g_root);
+    tx_snprintf(outp, sizeof outp, "%s/build.stdout", g_root);
+    tx_snprintf(errp, sizeof errp, "%s/build.stderr", g_root);
     sb_puts(&s, "cd "); sq(&s, g_root);
     /* compiled once (-o agent_cli.bin); the selftest and every case run that binary:
        a -run compile of the injected source is ~36s, too long to repeat per step */
@@ -1091,13 +1093,13 @@ static int prepare(void) {
     }
     NEED(r.rc == 64 && !r.timed && has(r.out, r.outn, "usage: agent_cli"), "build gate: rc=%d timed=%d (want 64 with the usage line)", r.rc, r.timed);
     NEED(r.errn == 0, "build stderr not empty: %.300s", r.err);
-    printf("  ok    build: injected agent compiles (-o once, usage rc 64, empty stderr)\n");
+    sy_printf("  ok    build: injected agent compiles (-o once, usage rc 64, empty stderr)\n");
     /* selftest */
     st = sy_exists(g_selfhome);
     if (st == 1) cx_rmtree(g_selfhome);
     NEED(mkdirp(g_selfhome) == 0, "selftest home");
-    snprintf(outp, sizeof outp, "%s/selftest.stdout", g_root);
-    snprintf(errp, sizeof errp, "%s/selftest.stderr", g_root);
+    tx_snprintf(outp, sizeof outp, "%s/selftest.stdout", g_root);
+    tx_snprintf(errp, sizeof errp, "%s/selftest.stderr", g_root);
     s.n = 0;
     sb_puts(&s, "unset CSIH_ROLE CSIH_PEER OPENAI_API_KEY HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; ");
     sb_puts(&s, "export NO_PROXY='127.0.0.1,localhost' no_proxy='127.0.0.1,localhost' HOME="); sq(&s, g_selfhome);
@@ -1116,7 +1118,7 @@ static int prepare(void) {
     }
     NEED(r.rc == 0 && !r.timed && r.errn == 0 && has(r.out, r.outn, "agent: all cases pass"), "selftest rc=%d timed=%d stderr=%.200s stdout tail=%.300s",
          r.rc, r.timed, r.err ? r.err : "", r.out ? r.out + (r.outn > 300 ? r.outn - 300 : 0) : "");
-    printf("  ok    selftest: agent: all cases pass\n");
+    sy_printf("  ok    selftest: agent: all cases pass\n");
     cx_rmtree(g_selfhome);
     return 0;
 fail:
@@ -1128,18 +1130,18 @@ int main(int argc, char **argv) {
     long t0 = sy_now_ms();
     const char *app = sy_env("CSIH_APP"), *uni = sy_env("UNISACC");
     char t[4300];
-    if (app && app[0]) snprintf(g_app, sizeof g_app, "%s", app);
-    else if (!getcwd(g_app, sizeof g_app)) { printf("completion_contract: FAIL (getcwd)\n"); return 1; }
-    snprintf(t, sizeof t, "%s/../..", g_app);
-    if (g_app[0] != '/' || !realpath(t, g_repo)) { printf("completion_contract: FAIL (app dir must be absolute)\n"); return 1; }
-    snprintf(g_probe_src, sizeof g_probe_src, "%s/probes/completion_contract.cx", g_app);
-    if (uni && uni[0]) snprintf(g_unisacc, sizeof g_unisacc, "%s", uni);
-    else snprintf(g_unisacc, sizeof g_unisacc, "%s/unisacc.com", g_repo);
-    snprintf(g_selfhome, sizeof g_selfhome, "%s/out/csih-completion-selftest-home-%d", g_repo, sy_pid());
+    if (app && app[0]) tx_snprintf(g_app, sizeof g_app, "%s", app);
+    else if (!getcwd(g_app, sizeof g_app)) { sy_printf("completion_contract: FAIL (getcwd)\n"); return 1; }
+    tx_snprintf(t, sizeof t, "%s/../..", g_app);
+    if (g_app[0] != '/' || !realpath(t, g_repo)) { sy_printf("completion_contract: FAIL (app dir must be absolute)\n"); return 1; }
+    tx_snprintf(g_probe_src, sizeof g_probe_src, "%s/probes/completion_contract.cx", g_app);
+    if (uni && uni[0]) tx_snprintf(g_unisacc, sizeof g_unisacc, "%s", uni);
+    else tx_snprintf(g_unisacc, sizeof g_unisacc, "%s/unisacc.com", g_repo);
+    tx_snprintf(g_selfhome, sizeof g_selfhome, "%s/out/csih-completion-selftest-home-%d", g_repo, sy_pid());
     (void)argc; (void)argv;
     g_deadline = t0 + 55000;   /* python: deadline = monotonic() + 55 */
     take_snapshot(&g_before);
-    if (prepare() != 0) { printf("  FAIL  prepare: %s\n", g_why); g_failed++; }
+    if (prepare() != 0) { sy_printf("  FAIL  prepare: %s\n", g_why); g_failed++; }
     else {
         g_deadline = sy_now_ms() + 55000;   /* cases share 55s after the build, as the python's deadline mostly did */
         for (i = 0; CASES[i]; i++) {
@@ -1155,10 +1157,10 @@ int main(int argc, char **argv) {
     }
     g_used = 0;
     take_snapshot(&g_after);
-    snprintf(g_why, sizeof g_why, "frozen sources changed during the run");
+    tx_snprintf(g_why, sizeof g_why, "frozen sources changed during the run");
     report(snap_same(&g_before, &g_after), "freeze: app sources, unisacc.com and this probe unchanged");
     if (g_root[0]) cx_rmtree(g_root);
-    printf("  (%d/31 cases passed, %.1fs)\n", pass, (double)(sy_now_ms() - t0) / 1000.0);
-    printf("completion_contract: %s (%d failed)\n", g_failed ? "FAIL" : "PASS", g_failed);
+    sy_printf("  (%d/31 cases passed, %.1fs)\n", pass, (double)(sy_now_ms() - t0) / 1000.0);
+    sy_printf("completion_contract: %s (%d failed)\n", g_failed ? "FAIL" : "PASS", g_failed);
     return g_failed ? 1 : 0;
 }

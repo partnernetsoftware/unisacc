@@ -1,3 +1,7 @@
+#pragma unisa use text.fmt
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
 #pragma unisa use tmuxwit
 #pragma unisa use netwit
 /* tui_agent_e2e.cx — the csih agent TUI end to end on a real tty (a private
@@ -15,8 +19,8 @@
 static char seen[1 << 18];
 static int fail;
 
-static void okf(const char *m) { printf("  ok    %s\n", m); }
-static void bad(const char *m) { printf("  FAIL  %s\n", m); fail++; }
+static void okf(const char *m) { sy_printf("  ok    %s\n", m); }
+static void bad(const char *m) { sy_printf("  FAIL  %s\n", m); fail++; }
 
 static int contains(const char *path, const char *needle) {
     static char buf[1 << 18];
@@ -30,7 +34,7 @@ static int contains(const char *path, const char *needle) {
 }
 
 int main(void) {
-    const char *u = getenv("UNISACC"), *bin = getenv("CSIH_BIN"), *tmp = getenv("TMPDIR");
+    const char *u = sy_env("UNISACC"), *bin = sy_env("CSIH_BIN"), *tmp = sy_env("TMPDIR");
     char cwd[512], absbin[700], root[600], home[700], work[700], tr[700], ep[128], portbuf[16], msg[600];
     char e_home[760], e_ep[200], e_cwd[760], e_tr[760];
     int port, rc, st;
@@ -38,17 +42,17 @@ int main(void) {
 
     if (!getcwd(cwd, sizeof cwd)) return 2;
     if (!u || !u[0]) u = "../../unisacc.com";
-    if (!bin || !bin[0]) { snprintf(absbin, sizeof absbin, "%s/../../out/csih-e2e-bin/csih", cwd); bin = absbin; }
-    if (access(bin, X_OK) != 0) { printf("  FAIL  no csih binary at %s (csih.sh prepare)\n", bin); return 1; }
-    if (!tw_open("agente2e")) { printf("  FAIL  tmux is not on PATH\n"); return 1; }
-    snprintf(root, sizeof root, "%s/csih-tuia-%d", tmp && tmp[0] ? tmp : "/tmp", (int)getpid());
-    snprintf(home, sizeof home, "%s/home", root);
-    snprintf(work, sizeof work, "%s/work", root);
-    snprintf(tr, sizeof tr, "%s/tr.jsonl", root);
-    if (mkdir(root, 0700) || mkdir(home, 0700) || mkdir(work, 0700)) { printf("  FAIL  scratch %s\n", root); return 1; }
+    if (!bin || !bin[0]) { tx_snprintf(absbin, sizeof absbin, "%s/../../out/csih-e2e-bin/csih", cwd); bin = absbin; }
+    if (access(bin, X_OK) != 0) { sy_printf("  FAIL  no csih binary at %s (csih.sh prepare)\n", bin); return 1; }
+    if (!tw_open("agente2e")) { sy_printf("  FAIL  tmux is not on PATH\n"); return 1; }
+    tx_snprintf(root, sizeof root, "%s/csih-tuia-%d", tmp && tmp[0] ? tmp : "/tmp", (int)sy_pid());
+    tx_snprintf(home, sizeof home, "%s/home", root);
+    tx_snprintf(work, sizeof work, "%s/work", root);
+    tx_snprintf(tr, sizeof tr, "%s/tr.jsonl", root);
+    if (mkdir(root, 0700) || mkdir(home, 0700) || mkdir(work, 0700)) { sy_printf("  FAIL  scratch %s\n", root); return 1; }
 
-    port = 21000 + (int)getpid() % 20000;
-    snprintf(portbuf, sizeof portbuf, "%d", port);
+    port = 21000 + (int)sy_pid() % 20000;
+    tx_snprintf(portbuf, sizeof portbuf, "%d", port);
     stub = fork();
     if (stub == 0) {
         char *av[] = { "sh", (char *)u, "-run", "probes/agent-stub.cx", "--", portbuf, NULL };
@@ -62,25 +66,25 @@ int main(void) {
         return 1;
     }
 
-    snprintf(ep, sizeof ep, "http://127.0.0.1:%d/v1/chat/completions", port);
-    snprintf(e_home, sizeof e_home, "HOME=%s", home);
-    snprintf(e_ep, sizeof e_ep, "CSIH_ENDPOINT=%s", ep);
-    snprintf(e_cwd, sizeof e_cwd, "CSIH_CWD=%s", work);
-    snprintf(e_tr, sizeof e_tr, "CSIH_TRANSCRIPT=%s", tr);
+    tx_snprintf(ep, sizeof ep, "http://127.0.0.1:%d/v1/chat/completions", port);
+    tx_snprintf(e_home, sizeof e_home, "HOME=%s", home);
+    tx_snprintf(e_ep, sizeof e_ep, "CSIH_ENDPOINT=%s", ep);
+    tx_snprintf(e_cwd, sizeof e_cwd, "CSIH_CWD=%s", work);
+    tx_snprintf(e_tr, sizeof e_tr, "CSIH_TRANSCRIPT=%s", tr);
     {
         char *cmd[] = { "env", e_home, e_ep, "CSIH_MODEL=stub", e_cwd, e_tr, "CSIH_BELL=0",
                         "sh", "-c", "\"$0\" agent; echo __RC=$?__; sleep 30", (char *)bin };
         if (tw_new("a", 100, 30, work, cmd, 11) != 0) bad("tmux new-session");
     }
     if (!fail && !tw_wait_text("a", "Enter 发送", 8000, seen, sizeof seen)) {
-        snprintf(msg, sizeof msg, "the program never drew a frame: %.200s", seen);
+        tx_snprintf(msg, sizeof msg, "the program never drew a frame: %.200s", seen);
         bad(msg);
     }
     if (!fail) {
         if (!tw_submit("a", TEXT, 0, seen + strlen(seen), (int)(sizeof seen - strlen(seen))))
-            printf("  note  the prompt never showed on the input line\n");
+            sy_printf("  note  the prompt never showed on the input line\n");
         if (!tw_settle("a", 15000, "完成了", seen + strlen(seen), (int)(sizeof seen - strlen(seen))))
-            printf("  note  no answer on screen within 15s\n");
+            sy_printf("  note  no answer on screen within 15s\n");
         tw_keys("a", "C-c", 0);
         tw_sleep_ms(200);
         tw_keys("a", "C-d", 0);
@@ -90,12 +94,12 @@ int main(void) {
             static const char *on_screen[3] = { "hello-from-agent", "完成了", TEXT };
             int i, ok = 1;
             for (i = 0; i < 3; i++)
-                if (!strstr(seen, on_screen[i])) { snprintf(msg, sizeof msg, "screen missing '%s'", on_screen[i]); bad(msg); ok = 0; }
+                if (!strstr(seen, on_screen[i])) { tx_snprintf(msg, sizeof msg, "screen missing '%s'", on_screen[i]); bad(msg); ok = 0; }
             if (!contains(tr, "hello-from-agent")) { bad("transcript missing the exec output 'hello-from-agent'"); ok = 0; }
             /* the judge path writes role=decision go=stop; a stub answer may end it too (as agent_roundtrip) */
             if (!contains(tr, "\"role\":\"decision\",\"go\":\"stop\"") && !contains(tr, "\\\"act\\\":\\\"answer\\\"")) { bad("transcript has no terminal act"); ok = 0; }
             if (!contains(tr, "完成了")) { bad("transcript missing the answer '完成了'"); ok = 0; }
-            if (rc != 0) { snprintf(msg, sizeof msg, "tui exit after Ctrl-C, Ctrl-D was %d", rc); bad(msg); ok = 0; }
+            if (rc != 0) { tx_snprintf(msg, sizeof msg, "tui exit after Ctrl-C, Ctrl-D was %d", rc); bad(msg); ok = 0; }
             if (ok) okf("agent ran in the TUI (exec -> answer), screen and transcript agree, exit 0");
         }
     }
@@ -103,6 +107,6 @@ int main(void) {
     tw_close();
     kill(stub, SIGTERM);
     waitpid(stub, &st, 0);
-    if (cx_rmtree(root) != 0) printf("  note  scratch %s left behind\n", root);
+    if (cx_rmtree(root) != 0) sy_printf("  note  scratch %s left behind\n", root);
     return fail ? 1 : 0;
 }

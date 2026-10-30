@@ -1,3 +1,7 @@
+#pragma unisa use text.fmt
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
 #pragma unisa use tmuxwit
 /* tui_e2e.cx — the csih `run` TUI on a real tty (a private tmux pane), with
  * the same assertions the old pty witness (tui_e2e.py) made:
@@ -15,8 +19,8 @@
 static char seen[1 << 18];
 static int fail;
 
-static void okf(const char *m) { printf("  ok    %s\n", m); }
-static void bad(const char *m) { printf("  FAIL  %s\n", m); fail++; }
+static void okf(const char *m) { sy_printf("  ok    %s\n", m); }
+static void bad(const char *m) { sy_printf("  FAIL  %s\n", m); fail++; }
 
 /* ── a JSON value, strictly enough to catch a torn or doubled record ───── */
 static const char *js_ws(const char *p) { while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++; return p; }
@@ -88,13 +92,13 @@ static int run_tui(const char *sess, const char **lines, const char **needles, i
     int i;
     seen[0] = 0;
     *rc = -1;
-    snprintf(env_home, sizeof env_home, "HOME=%s", home);
+    tx_snprintf(env_home, sizeof env_home, "HOME=%s", home);
     if (tw_new(sess, 70, 24, root, cmd, 7) != 0) return 0;
     /* the first frame is the signal that a keystroke will be seen */
     if (!tw_wait_text(sess, "Ctrl-D", 8000, seen, sizeof seen)) return 0;
     for (i = 0; i < n; i++) {
         if (!tw_submit(sess, lines[i], per_char, seen + strlen(seen), (int)(sizeof seen - strlen(seen))))
-            printf("  note  %s: line %d never showed on the input line\n", sess, i + 1);
+            sy_printf("  note  %s: line %d never showed on the input line\n", sess, i + 1);
         tw_settle(sess, needles[i] ? 4000 : 1500, needles[i], seen + strlen(seen), (int)(sizeof seen - strlen(seen)));
     }
     tw_keys(sess, "C-c", 0);
@@ -111,14 +115,14 @@ static void last_user(char *out, int cap) {
     out[0] = 0;
     if (!f) return;
     while (fgets(line, sizeof line, f))
-        if (strstr(line, "\"user\"")) snprintf(out, cap, "%s", line);
+        if (strstr(line, "\"user\"")) tx_snprintf(out, cap, "%s", line);
     fclose(f);
 }
 
 int main(void) {
     static const char *modes[2] = { "bulk (whole line in one write)", "per-character" };
     char cwd[512], absbin[700], hand[760], w[800], r[800], msg[600], last[4096];
-    const char *tmp = getenv("TMPDIR");
+    const char *tmp = sy_env("TMPDIR");
     const char *text[1] = { TEXT };
     const char *text_needle[1] = { "unknown command" };
     const char *hand_lines[3];
@@ -127,44 +131,44 @@ int main(void) {
     FILE *f;
 
     if (!getcwd(cwd, sizeof cwd)) return 2;
-    bin = getenv("CSIH_BIN");
-    if (!bin || !bin[0]) { snprintf(absbin, sizeof absbin, "%s/../../out/csih-e2e-bin/csih", cwd); bin = absbin; }
-    if (access(bin, X_OK) != 0) { printf("  FAIL  no csih binary at %s (csih.sh prepare)\n", bin); return 1; }
-    if (!tw_open("e2e")) { printf("  FAIL  tmux is not on PATH\n"); return 1; }
-    snprintf(root, sizeof root, "%s/csih-tuie-%d", tmp && tmp[0] ? tmp : "/tmp", (int)getpid());
-    snprintf(home, sizeof home, "%s/home", root);
-    snprintf(tr, sizeof tr, "%s/tui-e2e.jsonl", root);
-    if (mkdir(root, 0700) != 0 || mkdir(home, 0700) != 0) { printf("  FAIL  scratch %s\n", root); return 1; }
+    bin = sy_env("CSIH_BIN");
+    if (!bin || !bin[0]) { tx_snprintf(absbin, sizeof absbin, "%s/../../out/csih-e2e-bin/csih", cwd); bin = absbin; }
+    if (access(bin, X_OK) != 0) { sy_printf("  FAIL  no csih binary at %s (csih.sh prepare)\n", bin); return 1; }
+    if (!tw_open("e2e")) { sy_printf("  FAIL  tmux is not on PATH\n"); return 1; }
+    tx_snprintf(root, sizeof root, "%s/csih-tuie-%d", tmp && tmp[0] ? tmp : "/tmp", (int)sy_pid());
+    tx_snprintf(home, sizeof home, "%s/home", root);
+    tx_snprintf(tr, sizeof tr, "%s/tui-e2e.jsonl", root);
+    if (mkdir(root, 0700) != 0 || mkdir(home, 0700) != 0) { sy_printf("  FAIL  scratch %s\n", root); return 1; }
 
     for (m = 0; m < 2; m++) {
         char sess[8];
-        snprintf(sess, sizeof sess, "m%d", m);
+        tx_snprintf(sess, sizeof sess, "m%d", m);
         seed_transcript();
         up = run_tui(sess, text, text_needle, 1, m == 1, &rc);
         if (!up) {
-            snprintf(msg, sizeof msg, "%s: the program never drew a frame: %.200s", modes[m], seen);
+            tx_snprintf(msg, sizeof msg, "%s: the program never drew a frame: %.200s", modes[m], seen);
             bad(msg);
             continue;
         }
         last_user(last, sizeof last);
-        snprintf(msg, sizeof msg, "%s: the full line reached the transcript (with ts)", modes[m]);
+        tx_snprintf(msg, sizeof msg, "%s: the full line reached the transcript (with ts)", modes[m]);
         if (strstr(last, "\"role\":\"user\"") && strstr(last, "\"text\":\"" TEXT "\"") && strstr(last, "\"ts\":")) okf(msg);
-        else { snprintf(msg, sizeof msg, "%s: transcript got %.300s", modes[m], last[0] ? last : "<nothing>"); bad(msg); }
-        snprintf(msg, sizeof msg, "%s: a verdict was rendered", modes[m]);
+        else { tx_snprintf(msg, sizeof msg, "%s: transcript got %.300s", modes[m], last[0] ? last : "<nothing>"); bad(msg); }
+        tx_snprintf(msg, sizeof msg, "%s: a verdict was rendered", modes[m]);
         if (strstr(seen, "CONTINUE") || strstr(seen, "STOP")) okf(msg);
-        else { snprintf(msg, sizeof msg, "%s: no verdict on screen", modes[m]); bad(msg); }
-        snprintf(msg, sizeof msg, "%s: cli dispatch showed on the tui", modes[m]);
+        else { tx_snprintf(msg, sizeof msg, "%s: no verdict on screen", modes[m]); bad(msg); }
+        tx_snprintf(msg, sizeof msg, "%s: cli dispatch showed on the tui", modes[m]);
         if (strstr(seen, "unknown command")) okf(msg);
-        else { snprintf(msg, sizeof msg, "%s: cli dispatch missing on screen", modes[m]); bad(msg); }
-        snprintf(msg, sizeof msg, "%s: Ctrl-C then Ctrl-D exits 0", modes[m]);
+        else { tx_snprintf(msg, sizeof msg, "%s: cli dispatch missing on screen", modes[m]); bad(msg); }
+        tx_snprintf(msg, sizeof msg, "%s: Ctrl-C then Ctrl-D exits 0", modes[m]);
         if (rc == 0) okf(msg);
-        else { snprintf(msg, sizeof msg, "%s: exit after Ctrl-C, Ctrl-D was %d", modes[m], rc); bad(msg); }
+        else { tx_snprintf(msg, sizeof msg, "%s: exit after Ctrl-C, Ctrl-D was %d", modes[m], rc); bad(msg); }
     }
 
     /* One TUI process, three CLI lines: the shell line and the file the later read printed. */
-    snprintf(hand, sizeof hand, "%s/csih-e2e-hand.txt", root);
-    snprintf(w, sizeof w, "write %s from-cli", hand);
-    snprintf(r, sizeof r, "read %s", hand);
+    tx_snprintf(hand, sizeof hand, "%s/csih-e2e-hand.txt", root);
+    tx_snprintf(w, sizeof w, "write %s from-cli", hand);
+    tx_snprintf(r, sizeof r, "read %s", hand);
     hand_lines[0] = "sh echo csih-hand";
     hand_lines[1] = w;
     hand_lines[2] = r;
@@ -172,7 +176,7 @@ int main(void) {
     up = run_tui("hand", hand_lines, hand_needles, 3, 0, &rc);
     if (!up) bad("cli hand: the program never drew a frame");
     else if (strstr(seen, "csih-hand") && strstr(seen, "from-cli")) okf("cli hand: echo and read landed on the tui");
-    else { snprintf(msg, sizeof msg, "cli hand: screen missing tool output: %.240s", seen); bad(msg); }
+    else { tx_snprintf(msg, sizeof msg, "cli hand: screen missing tool output: %.240s", seen); bad(msg); }
 
     /* Every line must still be valid JSON. */
     f = fopen(tr, "r");
@@ -182,14 +186,14 @@ int main(void) {
         int n = 0, torn = 0;
         while (fgets(line, sizeof line, f)) {
             n++;
-            if (!js_line_ok(line)) { snprintf(msg, sizeof msg, "line %d is not JSON: %.200s", n, line); bad(msg); torn++; }
+            if (!js_line_ok(line)) { tx_snprintf(msg, sizeof msg, "line %d is not JSON: %.200s", n, line); bad(msg); torn++; }
         }
         fclose(f);
         if (!torn && n >= 3) okf("every transcript line is valid JSON");
-        else if (!torn) { snprintf(msg, sizeof msg, "transcript has only %d lines", n); bad(msg); }
+        else if (!torn) { tx_snprintf(msg, sizeof msg, "transcript has only %d lines", n); bad(msg); }
     }
 
     tw_close();
-    if (cx_rmtree(root) != 0) printf("  note  scratch %s left behind\n", root);
+    if (cx_rmtree(root) != 0) sy_printf("  note  scratch %s left behind\n", root);
     return fail ? 1 : 0;
 }
