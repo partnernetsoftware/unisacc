@@ -1,5 +1,6 @@
 #pragma unisa use tmuxwit
 #pragma unisa use netwit
+#pragma unisa use text.text
 /*
  * ttyenv.cx — gives three runtime-surface probes the environment they need,
  * so they run as contracts instead of being parked as ENV:
@@ -10,10 +11,18 @@
  *             "ok keycode 113" (raw mode read one byte) and exit 0
  *   net-tcp   probes/net-tcp.cx against a netwit listener on a free port:
  *             must print "ok connected" and exit 0
- * Upper root: no #include (the tty is tmuxwit's, the listener netwit's).
+ * Upper root (L3, plans/cx-layers.md): no #include and no direct libc calls.
+ * The tty, env and mkdir are tmuxwit's, the listener netwit's, strings
+ * text.text's (probes/text -> cx/text), files cx_write/cx_rmtree.
  */
 
-static char pane[65536];
+#define CAP 65536
+
+static char pane[CAP];
+
+static int has(const char *hay, const char *needle) {
+    return tx_find(hay, tx_len(hay, CAP), needle, tx_len(needle, CAP)) >= 0;
+}
 
 static int on_pane(const char *u, const char *probe, const char *want, const char *key) {
     char *cmd[] = { "sh", "-c", "\"$0\" -run \"$1\"; echo __RC=$?__; sleep 30", (char *)u, (char *)probe };
@@ -28,7 +37,7 @@ static int on_pane(const char *u, const char *probe, const char *want, const cha
     rc = tw_rc("t", 30000);
     tw_capture("t", pane, sizeof pane);
     tw_close();
-    if (rc == 0 && strstr(pane, want)) { printf("PASS %s: %s\n", probe, want); return 0; }
+    if (rc == 0 && has(pane, want)) { printf("PASS %s: %s\n", probe, want); return 0; }
     printf("FAIL %s: rc=%d want \"%s\"\n%s\n", probe, rc, want, pane);
     return 1;
 }
@@ -36,36 +45,32 @@ static int on_pane(const char *u, const char *probe, const char *want, const cha
 static int net_tcp(const char *u) {
     static char out[4096];
     char root[600], file[700], portbuf[16];
-    const char *tmp = getenv("TMPDIR");
+    const char *tmp = tw_env("TMPDIR");
     int port = 40000 + (int)getpid() % 20000, pid, rc;
-    FILE *f;
     snprintf(root, sizeof root, "%s/csih-ttyenv-%d", tmp && tmp[0] ? tmp : "/tmp", (int)getpid());
     snprintf(file, sizeof file, "%s/body", root);
-    if (mkdir(root, 0700) != 0) { printf("FAIL scratch %s\n", root); return 1; }
-    f = fopen(file, "w");
-    if (f) { fputs("x", f); fclose(f); }
+    if (tw_mkdir(root) != 0 || cx_write(file, "x", 1) != 0) { printf("FAIL scratch %s\n", root); return 1; }
     pid = nw_serve_file(port, file);
-    if (pid < 0 || nw_wait_port(port, 3000) != 0) { printf("FAIL listener on %d\n", port); cx_rmtree(root); return 1; }
+    if (pid < 0 || nw_wait_port(port, 3000) != 0) { printf("FAIL listener on %d\n", port); nw_stop(pid); cx_rmtree(root); return 1; }
     snprintf(portbuf, sizeof portbuf, "%d", port);
     {
         char *av[] = { "sh", (char *)u, "-run", "probes/net-tcp.cx", "--", portbuf, NULL };
         rc = tw_run(av, out, sizeof out);
     }
-    kill(pid, SIGKILL);
-    waitpid(pid, NULL, 0);
+    nw_stop(pid);
     cx_rmtree(root);
-    if (rc == 0 && strstr(out, "ok connected")) { printf("PASS probes/net-tcp.cx: ok connected (port %d)\n", port); return 0; }
+    if (rc == 0 && has(out, "ok connected")) { printf("PASS probes/net-tcp.cx: ok connected (port %d)\n", port); return 0; }
     printf("FAIL probes/net-tcp.cx: rc=%d %s\n", rc, out);
     return 1;
 }
 
 int main(int argc, char **argv) {
-    const char *u = getenv("UNISACC");
+    const char *u = tw_env("UNISACC");
     const char *mode = argc > 1 ? argv[1] : "";
     if (!u || !u[0]) u = "../../unisacc.com";
-    if (!strcmp(mode, "tty-size")) return on_pane(u, "probes/tty-size.cx", "ok rows 23 cols 77", NULL);
-    if (!strcmp(mode, "tty-raw")) return on_pane(u, "probes/tty-raw.cx", "ok keycode 113", "q");
-    if (!strcmp(mode, "net-tcp")) return net_tcp(u);
+    if (tx_eq(mode, "tty-size", 16)) return on_pane(u, "probes/tty-size.cx", "ok rows 23 cols 77", NULL);
+    if (tx_eq(mode, "tty-raw", 16)) return on_pane(u, "probes/tty-raw.cx", "ok keycode 113", "q");
+    if (tx_eq(mode, "net-tcp", 16)) return net_tcp(u);
     printf("usage: ttyenv.cx -- tty-size | tty-raw | net-tcp\n");
     return 2;
 }
