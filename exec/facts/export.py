@@ -18,27 +18,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 
 
-def _autonames(E):
-    """The reference's autoinc (src/front_pp.c): for each of these headers, a
-    raw line opening `static` with `NAME(` and `{` on it names a function;
-    if NAME is followed by `(` somewhere in the source and never by
-    `( ... ) {`, the whole header is prepended -- tokens the dump does not
-    show.  printf is the walker's own (exempt).  Read from include/, as the
-    reference reads it."""
-    import os
-    out = []
-    for h in E.AUTOINC_HEADERS:
-        for ln in open(os.path.join(E.ROOT, "include", h), encoding="utf-8", errors="replace"):
-            ln = ln.rstrip("\n")
-            if len(ln) <= 7 or not ln.startswith("static") or "(" not in ln or "{" not in ln:
-                continue
-            b = ln[:ln.index("(")].rstrip(" ")
-            a = len(b)
-            while a > 0 and (b[a - 1].isalnum() or b[a - 1] == "_"):
-                a -= 1
-            if a < len(b) and b[a:] != "printf" and b[a:] not in out:
-                out.append(b[a:])
-    return out
+# _autonames went with k2-gen2 to tools/facts-gen.cx on 2026-10-30.
 
 
 def _module(rel, name):
@@ -484,143 +464,7 @@ def lowerabi():
 
 
 # (fact stem, inputs whose sha prefixes head the file, producer)
-def _namespace_constants(G):
-    """Layout constants the function/global/local control sections bind (facts k2-gen2 nsconst; was gen2.py)."""
-    E = G.E
-    f = dict(PIDS=G.PIDS, PDB=G.PDB, LOC=G.LOC, FND=E.FND, FRD=E.FRD, FRB=E.FRB, VAR=E.VAR)
-    f.update(("FN_PDB" + str(i), G.PDB + i) for i in range(16))
-    g = {name: getattr(G, name) for name in ("LOC", "GIBLOB", "GIEND", "GINPS", "GINPE", "GSZ", "GUNIT", "GHL", "GHE", "SINIT", "SKIPS")}
-    g.update((name, getattr(E, name)) for name in ("FND", "GMARK", "BASE", "ARR", "PTR"))
-    return dict(function=f, globals=g, local=dict(SKIPS=G.SKIPS, PTR=E.PTR, BASE=E.BASE))
-
-
-def _parse2_extra_words():
-    if str(HERE) not in sys.path:
-        sys.path.insert(0, str(HERE))
-    from load import manifest_facts
-    return manifest_facts("parse2-extra")["words"]
-
-
-def _tk2(E):
-    """parse2's token ids: parse words plus type=extern/_Bool appended after max(TK) (parse2base.tokens)."""
-    assert "type=extern" not in E.TK
-    tk = dict(E.TK)
-    for w in _parse2_extra_words():
-        tk[w] = max(tk.values()) + 1
-    return tk
-
-
-def k2gen2():
-    """parse2/gen2-manifest.tsv constants: POSSPAN, type words, tytail ckm/resd tables (from gen2.py constants)."""
-    for d in ("exec", "exec/parse2"):
-        if str(ROOT / d) not in sys.path:
-            sys.path.insert(0, str(ROOT / d))
-    G = _gen2ns("gen2")
-    dump = lambda v: json.dumps(v)
-    follow = dict(G.tape_rows("type-follow.tsv"))
-    words = [dict(word=w, value=v, rank=(1 if w == "type=float" else 2 if w == "type=double" else 0),
-                  follow=follow.get(w, follow["*"])) for w, v in G.TYPEW.items()]
-    ck, current, first = [], "CKM", [{}]
-    for width, mask in [(sz, (1 << (8 * sz)) - 1) for _, _, sz, un, _ in G.TYINT if un and sz < 8]:
-        nxt = "CKM.k%d" % width
-        ck.append(dict(current=current, hit="CKM.m%d" % width, next=nxt, axis=G.AX.index("u%d" % (8 * width)),
-                       first=first, masktext=G.TYPE_TAPE["mask_pair"] % mask))
-        current, first = nxt, []
-    ckf = dict(current=current, axis=G.AX.index("u64"), first=first)
-    rs, current, first = [], "RESD", [{}]
-    for name, code, size, unsigned, _ in G.TYINT:
-        hit, nxt = "RESD." + name, "RESD.n" + name
-        rs.append(dict(current=current, hit=hit, next=nxt, axis=G.AX.index(name), code=code, first=first,
-                       masktext=G.TYPE_TAPE["mask"] % ((1 << (8 * size)) - 1) if unsigned and size < 8 else ""))
-        current, first = nxt, []
-    rsf = dict(current=current, first=first)
-    lm = dict(G.tape_rows("ladder-modes.tsv"))
-    ladder = [dict(lv=lv, nxt=G.LEVELS[i + 1] if i + 1 < len(G.LEVELS) else None,
-                   mid=[{}] if i + 1 < len(G.LEVELS) else [], last=[] if i + 1 < len(G.LEVELS) else [{}],
-                   ops=[dict(op=o, key=G.TK[o], mode=lm.get(o, lm["*"])) for o in G.OPS[lv]])
-              for i, lv in enumerate(G.LEVELS)]
-    tops = [o for lv in G.LEVELS for o in G.OPS[lv] if o not in G.SHORT]
-    tyrows = []
-    for l in range(16):
-        for r in range(16):
-            tyrows.append(dict(t=l * 16 + r, u=G.AX.index(G.TYROW.get((G.AX[l], "+", G.AX[r]), "illegal")), tab=G.CKT))
-            for i, o in enumerate(tops):
-                tyrows.append(dict(t=i * 256 + l * 16 + r, tab=G.RST,
-                                   u=G.AX.index(G.TYROW.get((G.AX[l], G.TYOP.get(o, o), G.AX[r]), "illegal"))))
-    syscalls = [dict(i=k, name=nm) for k, (nm, _, _) in enumerate(G.SYSCALLS, 1)]
-    autonames = [dict(name=nm) for nm in _autonames(G.E)]
-    i32 = G.TYINFO["i32"][0]
-    btk = dict(G.TK)   # build() appends these two token codes before types() runs
-    for w in _parse2_extra_words():
-        btk[w] = max(btk.values()) + 1
-    typetargets = {btk[w]: "TS." + w for w in G.TWORDS}
-    typetargets.update((G.TK_ID if w == "identifier" else btk[w], t) for w, t in G.tape_rows("type-entry.tsv"))
-    gen2parts = dict(
-        localdecl=dict(classes=dict(identifier=[G.TK_ID], paren=[G.TK["("]])),
-        longdouble=dict(consts=dict(DBL=G.DBL), classes=dict(double=[G.TK["type=double"]])),
-        positive=dict(consts=dict(INT=i32),
-                      classes=dict(promote=[G.BOOL] + [c for _, c, z, _, _ in G.TYINT if z < i32],
-                                   arithmetic=[G.DBL, G.FLT] + [c for _, c, z, _, _ in G.TYINT if z >= i32])),
-        tentative=dict(consts=dict(TENTATIVE=764 << 40)),
-        typeops=[dict(key=k, target=t) for k, t in typetargets.items()],
-        updateops=[dict(key=G.TK[o + "="], target="LV.c" + o) for o in G.E.CASOPS])
-    scopeconst = {n: getattr(G.E, n) for n in ("UNDO", "PTR", "BASE", "ARR", "TDN", "TDB", "TDD", "FND", "FRD", "FRB", "VAR")}
-    scopeconst.update(VALUEBANK=G._VR["VALUEBANK"], TYPERANK=G.TYPERANK, LOC=G.LOC, END_=G.END_, ENV=G.ENV, VLSIZE=G.VLSIZE,
-                      UNDO_SIZE=G.UNDO_SIZE, SHAPE=G.SHAPE, TDE=G.TDE, REGISTERBANK=G.REGISTERBANK)
-    for n, base, size in (("UNDO", G.E.UNDO, G.UNDO_SIZE), ("DIM", G.DIM, 8), ("PDB", G.PDB, 16)):
-        scopeconst.update((n + "_" + str(i), base + i) for i in range(size))
-    widthparts = dict(
-        store=dict(consts=dict(FLT=G.FLT)),
-        elsz=dict(consts=dict(SBB=G.SBB, SSZ=G.SSZ, DBL=G.DBL, FLT=G.FLT, BOOL=G.BOOL, UNS=G.UNS)),
-        naru=dict(consts=dict(BOOL=G.BOOL), rows=[dict(code=c) for _, c, z, u, _ in G.TYINT if u and z < 8]),
-        conv=dict(consts=dict(BOOL=G.BOOL, DBL=G.DBL, FLT=G.FLT, UNSIGNED_WIDE=G.UNS + 8),
-                  suffixes=[dict(s=x) for x in ("d", "s", "i", "u")]),
-        narrow=dict(consts=dict(UNSIGNED_WIDE=G.UNS + 8, DBL=G.DBL, BOOL=G.BOOL, TDN=G.E.TDN),
-                    rows=[dict(code=vb) for _, vb, size, uns, nar in G.TYINT if nar]))
-    widthd = {wname: dict(rows=[dict(code=vb) for _, vb, *_ in G.TYINT if vb != 8])
-              for wname in ("LOADV", "LOADRAW", "STOREV0")}
-    updconst = {n: getattr(G, n) for n in ("SBB", "UNS", "DBL", "FLT", "BOOL", "FPB", "FPV", "ENV", "END_", "LOC", "FPS_FN", "FPS_VAR")}
-    updconst.update((n, getattr(G.E, n)) for n in ("FND", "VAR", "PTR", "BASE", "ARR"))
-    updconst.update(("U" + str(z), G.UNS + z) for z in (1, 2, 4, 8))
-    updconst.update(tail_entry="C%d" % G.LEVELS[0], axis_ptr=G.AX.index("ptr"), axis_struct=G.AX.index("struct"))
-    tk = dict(G.TK, identifier=G.TK_ID)
-    for w in _parse2_extra_words():   # the token codes gen2 build() appends before any rows install
-        tk.setdefault(w, max(v for k, v in tk.items() if k != "identifier") + 1)
-    updclasses = {n: [tk[t]] for n, t in G.tape_rows("update-tokens.tsv")}
-    updclasses.update(BOOL=[G.BOOL], float_types=[G.DBL, G.FLT], float_axes=[G.AX.index("f32"), G.AX.index("f64")],
-                      signed_narrow_codes=[c for _, c, z, u, _ in G.TYINT if not u and z < 8])
-    updcompound = [dict(key=G.TK[o + "="], target="X.c" + o) for o in G.E.CASOPS]
-    updid0 = sorted(set(range(257)) - {c["key"] for c in updcompound})
-    retconst = dict(SBB=G.SBB, SSZ=G.SSZ, CKT=G.CKT, expr_entry="E%d" % G.LEVELS[0], tail_entry="C%d" % G.LEVELS[0])
-    tk = dict(G.TK, identifier=G.TK_ID, number=G.TK_NUM)
-    for w in _parse2_extra_words():   # the token codes gen2 build() appends before any rows install
-        tk.setdefault(w, max(v for k, v in tk.items() if k not in ("identifier", "number")) + 1)
-    retclasses = {n: [tk[t]] for n, t in G.tape_rows("return-tokens.tsv")}
-    retclasses.update(typewords=[tk[w] for w in G.TWORDS], scalar_types=[G.BOOL, G.DBL, G.FLT], float_types=[G.DBL, G.FLT],
-                      axis_f64=[G.AX.index("f64")], axis_f32=[G.AX.index("f32")],
-                      operators=[G.TK[o] for o in ("=", "++", "--")] + [G.TK[o + "="] for o in G.E.CASOPS])
-    retcompound = [dict(key=G.TK[o + "="], target="LV.c" + o) for o in G.E.CASOPS]
-    retexpr0 = sorted(set(range(257)) - {c["key"] for c in retcompound})
-    shapeconst = {n: getattr(G, n) for n in ("POSSPAN", "SHAPE", "SHAPE_IDS", "DIM", "TDIM", "MEMBER_STRIDE", "TYPERANK", "MEMBERRANK", "RETURNRANK", "PARAMRANK")}
-    shapeconst.update(ARR=G.E.ARR, UNSIGNED_CHAR=G.UNS + 1)
-    shapeclasses = {n: [G.TK[t] for t in ts.split(",")] for n, ts in G.tape_rows("shape-tokens.tsv")}
-    return ["=VS\tint\t%d" % G.E.VS, "=POSSPAN\tint\t%d" % G.POSSPAN, "=typewords\tjson\t" + dump(words),
-            "=ckmrows\tjson\t" + dump(ck), "=ckmfinal\tjson\t" + dump(ckf),
-            "=resdrows\tjson\t" + dump(rs), "=resdfinal\tjson\t" + dump(rsf),
-            "=oprows\tjson\t" + dump([G.optail_facts(o) for lv in G.LEVELS for o in G.OPS[lv] if o not in G.SHORT]),
-            "=CKT\tint\t%d" % G.CKT, "=RST\tint\t%d" % G.RST,
-            "=AXILL\tint\t%d" % G.AX.index("illegal"), "=INVTEXT\tjson\t" + dump(G.TYPE_TAPE["float_invert"]), "=ladder\tjson\t" + dump(ladder), "=nsconst\tjson\t" + dump(_namespace_constants(G)), "=truthfpu\tjson\t" + dump({row[1]: row[2] for row in G.E.gold("irsel") if row[0] == "fpu"}), "=buildconst\tjson\t" + dump({"UNSIGNED_WIDE": G.UNS + 8, "TK": _tk2(G.E), "TK_ID": G.E.TK_ID, "TK_NUM": G.E.TK_NUM, "TK_FNUM": G.E.TK_FNUM, "FND": G.E.FND, **{n: getattr(G, n) for n in ['FPS_FN', 'FPS_RD', 'FPS_RB', 'FPS_RSH', 'FPS_COUNT', 'FPS_PARAM', 'FPS_PSH', 'FPS_VAR', 'SBB', 'FPB', 'FPV', 'FPS_FIRST', 'BOOL', 'DBL', 'FLT', 'ENUM_FIRST', 'GSZ', 'GUNIT', 'SSZ', 'SAL', 'SMN', 'SMEM', 'MOF', 'MSZ', 'MPT', 'MBS', 'MAR', 'BFW', 'BFO', 'BFS', 'SHAPE_IDS', 'SHAPE', 'UNS', 'TIX', 'REGISTERBANK', 'UNDO_SIZE', 'ENV', 'END_', 'TYINT']}}), "=ordconst\tjson\t" + dump(dict(DBL=G.DBL, FLT=G.FLT, GMARK=G.E.GMARK, bottom="C%d" % G.LEVELS[0])), "=tyrows\tjson\t" + dump(tyrows), "=syscalls\tjson\t" + dump(syscalls),
-            "=shapeconst\tjson\t" + dump(shapeconst), "=shapeclasses\tjson\t" + dump(shapeclasses),
-            "=retconst\tjson\t" + dump(retconst), "=retclasses\tjson\t" + dump(retclasses),
-            "=retexpr0\tjson\t" + dump(retexpr0), "=retint\tjson\t" + dump([dict(code=c) for _, c, *_ in G.TYINT]), "=retfloat\tjson\t" + dump([dict(label=l, cv=v, base=b) for l, v, b in (("double", "d", G.DBL), ("single", "s", G.FLT))]), "=retcompound\tjson\t" + dump(retcompound),
-            "=updconst\tjson\t" + dump(updconst), "=updclasses\tjson\t" + dump(updclasses),
-           
-            "=updid0\tjson\t" + dump(updid0), "=updcompound\tjson\t" + dump(updcompound), "=ordupd\tjson\t" + dump([dict(tag="inc", op="+"), dict(tag="dec", op="-")]), "=staticsenv\tjson\t" + dump({n: getattr(G, n) for n in ('BOOL', 'LOC', 'SIEND', 'SINIT', 'SKIPS', 'TIX')}), "=initenv\tjson\t" + dump(dict({n: getattr(G, n) for n in ('SBB', 'LOC', 'SSZ', 'SMN', 'SMEM', 'MOF', 'MPT', 'MBS', 'MAR', 'SFLAT', 'MFLAT', 'MEMBER_STRIDE', 'SKIPS', 'BFW', 'BFO', 'BFS', 'SHAPE', 'SHAPE_IDS', 'MSZ', 'DIM')}, UCHAR=G.E.UNS + 1, PTR=G.E.PTR, BASE=G.E.BASE, ARR=G.E.ARR, DIM1=G.DIM + 1, DIM2=G.DIM + 2)), "=k2env\tjson\t" + dump(dict(DBL=G.DBL, FLT=G.FLT, BOOL=G.BOOL, VLDEP=G.VLDEP, END_=G.END_, VLFRAME=G.VLFRAME, VLSIZE=G.VLSIZE, UNS=G.UNS, ENV=G.ENV, SBB=G.SBB, MEMBER_STRIDE=G.MEMBER_STRIDE, MOF=G.MOF, MSZ=G.MSZ, MBS=G.MBS, MAR=G.MAR)), "=unaryenv\tjson\t" + dump((lambda mt: dict(ucx=dict(TIX=G.TIX, MAXTOK=mt), ufacts=dict(DBL=G.DBL, FLT=G.FLT, BOOL=G.BOOL, UNS1=G.UNS + 1, UNS3=G.UNS + 3, UNS4=G.UNS + 4, UNS8=G.UNS + 8, U32M=G.U32M, ENV=G.ENV, END_=G.END_, FNSTR=G.FNSTR, TIX=G.TIX, MAXTOK=mt)))(int(next(l.split("\t")[2] for l in G.Path(G.E.ROOT, "exec/facts/statics.tsv").read_text().splitlines() if l.startswith("limit\tMAXTOK\t"))))), "=updcas\tjson\t" + dump([dict(op=o, nptr=int(o not in {r[0] for r in G.tape_rows("update-pointer.tsv")}), owner="X" if o not in {r[0] for r in G.tape_rows("update-pointer.tsv")} else "LV") for o in G.E.CASOPS]), "=updtype\tjson\t" + dump([dict(code=c, axis=G.AX.index(n)) for c, n in ((1,"i8"),(2,"i16"),(4,"i32"),(8,"i64"),(G.UNS+1,"u8"),(G.UNS+2,"u16"),(G.UNS+4,"u32"),(G.UNS+8,"u64"),(G.BOOL,"u8"),(0,"void"),(G.DBL,"f64"),(G.FLT,"f32"),(G.FPB,"ptr"),(G.FPV,"ptr"))]), "=updmodes\tjson\t" + dump([dict(zip(("name","op","postfix","prefixname","prefixfix","integer","floating"), r)) for r in G.tape_rows("update-modes.tsv")]), "=updfloat\tjson\t" + dump([dict(suffix=s, bits=int(b)) for s, b in G.tape_rows("update-float.tsv")]),
-            "=widthd\tjson\t" + dump(widthd), "=widthconst\tjson\t" + dump(dict(DBL=G.DBL, FLT=G.FLT, BOOL=G.BOOL, SBB=G.SBB)),
-            "=widthparts\tjson\t" + dump(widthparts),
-            "=scopeconst\tjson\t" + dump(scopeconst),
-            "=gen2parts\tjson\t" + dump(gen2parts),
-            "=autonames\tjson\t" + dump(autonames), "=HEADER\tjson\t" + dump(G.E.HEADER), "=AUT\tint\t%d" % G.E.AUT, "=AXF64\tint\t%d" % G.AX.index("f64")]
+# k2-gen2 moved to tools/facts-gen.cx (literals: exec/facts/gen2-constants.tsv, gen2-literals.tsv) on 2026-10-30.
 
 
 # k2-gen2-tokens moved to tools/facts-gen.cx on 2026-10-30.
@@ -630,7 +474,6 @@ def k2gen2():
 
 
 TABLES = [
-    ("k2-gen2", ["exec/build/parsebase.py", "exec/build/parse2base.py", "exec/facts/parse2-extra.tsv", "exec/facts/statics.tsv", "exec/parse2/operator-actions.tsv", "exec/parse2/type-follow.tsv", "exec/parse2/ladder-modes.tsv", "exec/parse2/shape-reject.tsv", "exec/parse2/shape-stack.tsv", "exec/parse2/shape-tokens.tsv", "exec/parse2/return-text.tsv", "exec/parse2/return-template.tsv", "exec/parse2/return-reject.tsv", "exec/parse2/return-stack.tsv", "exec/parse2/return-tokens.tsv", "exec/parse2/tape-templates.tsv", "exec/parse2/update-text.tsv", "exec/parse2/update-reject.tsv", "exec/parse2/update-template.tsv", "exec/parse2/update-stack.tsv", "exec/parse2/update-modes.tsv", "exec/parse2/update-pointer.tsv", "exec/parse2/update-float.tsv", "exec/parse2/update-tokens.tsv", "exec/parse2/type-tape.tsv", "exec/parse2/scope-actions.tsv", "exec/parse2/type-entry.tsv", "exec/facts/export.py"], k2gen2),
     ("lower-abi", ["unisa/catalog.py", "unisa/lower.py", "exec/lower/code-abi-sources.tsv", "weights/gold/abi.tsv", "weights/gold/enc.tsv", "exec/facts/export.py"], lowerabi),
     ("lower-code", ["unisa/tape.py", "unisa/lower.py", "weights/gold/regmap.tsv", "weights/gold/enc.tsv", "weights/gold/reloc.tsv", "unisa/emit_x86.py", "unisa/emit_arm.py", "exec/facts/top-modelbindings-banks.tsv", "exec/facts/top-modelbindings-const.tsv", "exec/facts/export.py"], lowercode),
 ]

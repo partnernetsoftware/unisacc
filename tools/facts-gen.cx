@@ -2468,10 +2468,798 @@ static void nativeabi(Ob *o) {
     ob_z(o, "=reject\tjson\t"); na_facts(o, "nativeabi-gen-reject"); ob_z(o, "\n");
 }
 
+/* ---- an ordered JSON value tree for the parse2 tables (k2-gen2, k2-membercontrol, k2-libraryenv):
+   dicts keep insertion order and a put on an existing key keeps its place, as Python dicts do;
+   jv_dump writes json.dumps text (default or compact separators, optionally sort_keys). ---- */
+enum { JV_INT, JV_STR, JV_LIST, JV_DICT, JV_TRUE, JV_FALSE, JV_NULL };
+typedef struct Jv { int t; long long i; char *s; int n, cap; struct Jv **v; char **k; } Jv;
+static Jv *jv_new(int t) { Jv *v = ar_alloc(fg_ar, (long)sizeof *v); if (!v) fg_die("out of memory", 0); v->t = t; return v; }
+static Jv *jv_i(long long x) { Jv *v = jv_new(JV_INT); v->i = x; return v; }
+static Jv *jv_s(const char *s) { Jv *v = jv_new(JV_STR); v->s = fg_dupz(s); return v; }
+static Jv *jv_l(void) { return jv_new(JV_LIST); }
+static Jv *jv_d(void) { return jv_new(JV_DICT); }
+static void jv_grow(Jv *c) {
+    int nc, i;
+    Jv **nv;
+    char **nk;
+    if (c->n < c->cap) return;
+    nc = c->cap ? c->cap * 2 : 8;
+    nv = ar_alloc(fg_ar, (long)sizeof(Jv *) * nc);
+    nk = ar_alloc(fg_ar, (long)sizeof(char *) * nc);
+    if (!nv || !nk) fg_die("out of memory", 0);
+    for (i = 0; i < c->n; i++) { nv[i] = c->v[i]; nk[i] = c->k ? c->k[i] : 0; }
+    c->v = nv; c->k = nk; c->cap = nc;
+}
+static Jv *jl_add(Jv *l, Jv *x) { jv_grow(l); l->v[l->n++] = x; return l; }
+static int jd_find(Jv *d, const char *k) { int i; for (i = 0; i < d->n; i++) if (tx_eq(d->k[i], k, FG_CAP)) return i; return -1; }
+static Jv *jd_put(Jv *d, const char *k, Jv *x) {
+    int i = jd_find(d, k);
+    if (i >= 0) { d->v[i] = x; return d; }
+    jv_grow(d);
+    d->k[d->n] = fg_dupz(k);
+    d->v[d->n++] = x;
+    return d;
+}
+static Jv *jd_get(Jv *d, const char *k) { int i = jd_find(d, k); return i < 0 ? 0 : d->v[i]; }
+static Jv *jd_must(Jv *d, const char *k) { Jv *v = jd_get(d, k); if (!v) fg_die("key absent", k); return v; }
+static long long jv_num(Jv *v, const char *what) { if (!v || v->t != JV_INT) fg_die("not an integer", what); return v->i; }
+static const char *jv_str(Jv *v, const char *what) { if (!v || v->t != JV_STR) fg_die("not a string", what); return v->s; }
+static Jv *jd_puti(Jv *d, const char *k, long long x) { return jd_put(d, k, jv_i(x)); }
+static Jv *jd_puts(Jv *d, const char *k, const char *s) { return jd_put(d, k, jv_s(s)); }
+static Jv *jl_one(long long x) { return jl_add(jv_l(), jv_i(x)); }       /* [x] */
+static Jv *jl_unit(void) { return jl_add(jv_l(), jv_d()); }              /* [{}] */
+static void jv_dump(Ob *o, Jv *v, int compact, int sortk) {
+    int i, j;
+    if (v->t == JV_INT) { char b[32]; cx_fmt(b, sizeof b, "%lld", v->i); ob_z(o, b); }
+    else if (v->t == JV_STR) ob_str(o, v->s);
+    else if (v->t == JV_TRUE) ob_z(o, "true");
+    else if (v->t == JV_FALSE) ob_z(o, "false");
+    else if (v->t == JV_NULL) ob_z(o, "null");
+    else if (v->t == JV_LIST) {
+        ob_z(o, "[");
+        for (i = 0; i < v->n; i++) { if (i) ob_z(o, compact ? "," : ", "); jv_dump(o, v->v[i], compact, sortk); }
+        ob_z(o, "]");
+    } else {
+        int *ord = ar_alloc(fg_ar, (long)sizeof(int) * (v->n + 1));
+        if (!ord) fg_die("out of memory", 0);
+        for (i = 0; i < v->n; i++) ord[i] = i;
+        if (sortk) for (i = 1; i < v->n; i++) { int x = ord[i]; for (j = i - 1; j >= 0 && fg_strcmp(v->k[x], v->k[ord[j]]) < 0; j--) ord[j + 1] = ord[j]; ord[j + 1] = x; }
+        ob_z(o, "{");
+        for (i = 0; i < v->n; i++) {
+            if (i) ob_z(o, compact ? "," : ", ");
+            ob_str(o, v->k[ord[i]]);
+            ob_z(o, compact ? ":" : ": ");
+            jv_dump(o, v->v[ord[i]], compact, sortk);
+        }
+        ob_z(o, "}");
+    }
+}
+/* JSON text to a tree; 0 when s[0..n) is not one JSON value (integers only, no floats: refused). */
+static long jp_ws(const char *s, long n, long at) { while (at < n && (s[at] == ' ' || s[at] == '\t' || s[at] == '\n' || s[at] == '\r')) at++; return at; }
+static Jv *jp_val(const char *s, long n, long *at) {
+    long p = jp_ws(s, n, *at);
+    Jv *v;
+    if (p >= n) return 0;
+    if (s[p] == '"') {
+        long q = p + 1;
+        char *t;
+        while (q < n && s[q] != '"') { if (s[q] == '\\') q++; q++; }
+        if (q >= n) return 0;
+        t = jstr(s + p, q - p + 1);
+        if (!t) return 0;
+        v = jv_new(JV_STR); v->s = t;
+        *at = q + 1;
+        return v;
+    }
+    if (s[p] == '[' || s[p] == '{') {
+        int dict = s[p] == '{';
+        v = dict ? jv_d() : jv_l();
+        p = jp_ws(s, n, p + 1);
+        if (p < n && s[p] == (dict ? '}' : ']')) { *at = p + 1; return v; }
+        for (;;) {
+            Jv *x, *key = 0;
+            if (dict) {
+                key = jp_val(s, n, &p);
+                if (!key || key->t != JV_STR) return 0;
+                p = jp_ws(s, n, p);
+                if (p >= n || s[p] != ':') return 0;
+                p++;
+            }
+            x = jp_val(s, n, &p);
+            if (!x) return 0;
+            if (dict) jd_put(v, key->s, x); else jl_add(v, x);
+            p = jp_ws(s, n, p);
+            if (p < n && s[p] == ',') { p++; continue; }
+            if (p < n && s[p] == (dict ? '}' : ']')) { *at = p + 1; return v; }
+            return 0;
+        }
+    }
+    if (s[p] == '-' || (s[p] >= '0' && s[p] <= '9')) {
+        long q = p + (s[p] == '-');
+        long long x = 0;
+        if (q >= n || s[q] < '0' || s[q] > '9') return 0;
+        if (s[q] == '0' && q + 1 < n && s[q + 1] >= '0' && s[q + 1] <= '9') return 0;
+        while (q < n && s[q] >= '0' && s[q] <= '9') { x = x * 10 + (s[q] - '0'); q++; }
+        if (q < n && (s[q] == '.' || s[q] == 'e' || s[q] == 'E')) fg_die("JSON float in a fact", s);
+        *at = q;
+        return jv_i(s[p] == '-' ? -x : x);
+    }
+    if (tx_prefix(s + p, n - p, "true", 4)) { *at = p + 4; return jv_new(JV_TRUE); }
+    if (tx_prefix(s + p, n - p, "false", 5)) { *at = p + 5; return jv_new(JV_FALSE); }
+    if (tx_prefix(s + p, n - p, "null", 4)) { *at = p + 4; return jv_new(JV_NULL); }
+    return 0;
+}
+static Jv *jv_parse(const char *s) {
+    long n = tx_len(s, 1L << 30), at = 0;
+    Jv *v = jp_val(s, n, &at);
+    if (!v || jp_ws(s, n, at) != n) return 0;
+    return v;
+}
+static Jv *jv_must_parse(const char *s) { Jv *v = jv_parse(s); if (!v) fg_die("bad JSON", s); return v; }
+/* facts(stem) of exec/facts/load.py: rows as dicts of decoded cells (a cell that is not JSON stays text). */
+static Jv *fj_facts(const char *stem) {
+    char rel[256], *head[32], *hl;
+    Lines L;
+    int i, k, nh;
+    Jv *rows = jv_l();
+    cx_fmt(rel, sizeof rel, "exec/facts/%s.tsv", stem);
+    L = fg_lines(rel);
+    hl = fg_dupz(L.l[0]);
+    while (*hl == '#') hl++;
+    while (*hl == ' ' || *hl == '\t') hl++;
+    { long e = tx_len(hl, FG_CAP); while (e > 0 && (hl[e - 1] == ' ' || hl[e - 1] == '\t' || hl[e - 1] == '\r')) hl[--e] = 0; }
+    nh = fg_split(hl, head, 32);
+    if (nh < 1) fg_die("bad header", stem);
+    for (i = 1; i < L.n; i++) {
+        char *cells[32], *line = fg_dupz(L.l[i]);
+        int nc;
+        Jv *r;
+        if (!*line || line[0] == '#') continue;
+        nc = fg_split(line, cells, 32);
+        if (nc < 0) fg_die("row too wide", stem);
+        r = jv_d();
+        for (k = 0; k < nc && k < nh; k++) { Jv *c = jv_parse(cells[k]); jd_put(r, head[k], c ? c : jv_s(cells[k])); }
+        jl_add(rows, r);
+    }
+    return rows;
+}
+/* {name: value} of a facts table, rows filtered by column `kind` == want when want is given. */
+static Jv *fj_names(const char *stem, const char *want) {
+    Jv *rows = fj_facts(stem), *d = jv_d();
+    int i;
+    for (i = 0; i < rows->n; i++) {
+        Jv *r = rows->v[i];
+        if (want && !tx_eq(jv_str(jd_must(r, "kind"), stem), want, 256)) continue;
+        jd_put(d, jv_str(jd_must(r, "name"), stem), jd_must(r, "value"));
+    }
+    return d;
+}
+static Jv *fj_eq(const char *rel, const char *name) { return jv_must_parse(fg_eqrow(rel, name)); }   /* =NAME json row */
+/* exec/parse2/NAME rows after the column line, split on tabs (gen2 tape_rows). */
+typedef struct { int n; char **c[1024]; int nc[1024]; } Tape;
+static void fj_tape(const char *name, Tape *t) {
+    char rel[256];
+    Lines L;
+    int i;
+    cx_fmt(rel, sizeof rel, "exec/parse2/%s", name);
+    L = fg_lines(rel);
+    t->n = 0;
+    for (i = 1; i < L.n; i++) {
+        char **cells = ar_alloc(fg_ar, (long)sizeof(char *) * 16);
+        if (!cells || t->n == 1024) fg_die("tape rows", name);
+        t->nc[t->n] = fg_split(fg_dupz(L.l[i]), cells, 16);
+        if (t->nc[t->n] < 0) fg_die("tape row too wide", name);
+        t->c[t->n++] = cells;
+    }
+}
+static const char *fj_tget(Tape *t, const char *key, const char *dflt) {   /* dict(rows).get(key, dict[dflt]) */
+    int i, hit = -1, d = -1;
+    for (i = 0; i < t->n; i++) { if (t->nc[i] < 2) fg_die("tape row is not a pair", key); if (tx_eq(t->c[i][0], key, 256)) hit = i; if (dflt && tx_eq(t->c[i][0], dflt, 256)) d = i; }
+    if (hit >= 0) return t->c[hit][1];
+    if (d < 0) fg_die("tape key absent", key);
+    return t->c[d][1];
+}
+/* gold(name) of export.py (its later definition): non-empty, non-comment rows without "=>". */
+static int fj_gold(const char *name, char ***rows, int *nc, int cap) {
+    char rel[256];
+    Lines L;
+    int i, n = 0;
+    cx_fmt(rel, sizeof rel, "weights/gold/%s.tsv", name);
+    L = fg_lines(rel);
+    for (i = 0; i < L.n; i++) {
+        char *s = L.l[i];
+        if (!*s || s[0] == '#' || tx_find(s, tx_len(s, FG_CAP), "=>", 2) >= 0) continue;
+        if (n == cap) fg_die("too many gold rows", name);
+        rows[n] = ar_alloc(fg_ar, (long)sizeof(char *) * 16);
+        if (!rows[n]) fg_die("out of memory", 0);
+        nc[n] = fg_split(fg_dupz(s), rows[n], 16);
+        if (nc[n] < 0) fg_die("gold row too wide", name);
+        n++;
+    }
+    return n;
+}
+static int fj_isdigits(const char *s) { long i, n = tx_len(s, 64); if (n <= 0) return 0; for (i = 0; i < n; i++) if (s[i] < '0' || s[i] > '9') return 0; return 1; }
+/* ---- the parse2 namespace (was export.py _parse_e/_gen2ns over exec/build/parsebase.py): E = facts
+   parse-constants, G = facts gen2-constants plus the E names gen2 re-bound and the bank/rank facts it
+   read, TK = facts parse-tokens, literal maps in facts gen2-literals. ---- */
+#define G2_GOLD 8192
+typedef struct {
+    Jv *E, *G, *TK, *casops, *extra, *twords, *fpu;
+    char *ax[32]; int nax;
+    long long tsize[32], tuns[32], tnar[32];
+    char *tyint[8]; long long tyvb[8], tysz[8], tyun[8], tynar[8];
+    char *pop[64]; long long plev[64]; int nprec;
+    long long levels[64]; int nlev;
+    char *tops[64]; int ntops;
+} G2;
+static G2 g2;
+static int g2_ready;
+static long long gi(const char *n) { return jv_num(jd_must(g2.G, n), n); }
+static long long ei(const char *n) { return jv_num(jd_must(g2.E, n), n); }
+static long long tki(const char *n) { return jv_num(jd_must(g2.TK, n), n); }
+static Jv *g2_lit(const char *n) { return fj_eq("exec/facts/gen2-literals.tsv", n); }
+static int g2_ax(const char *n) { int i; for (i = 0; i < g2.nax; i++) if (tx_eq(g2.ax[i], n, 64)) return i; fg_die("not a type axis", n); return -1; }
+static long long g2_sz(const char *ctype) { return g2.tsize[g2_ax(jv_str(jd_must(jd_must(g2.E, "CTY"), ctype), ctype))]; }
+static long long g2_expr(Jv *v) {   /* INT, NAME, NAME+INT, SZ.<ctype> */
+    const char *s, *plus;
+    char name[128];
+    long k;
+    if (v->t == JV_INT) return v->i;
+    s = jv_str(v, "gen2 expression");
+    if (tx_prefix(s, tx_len(s, 128), "SZ.", 3)) return g2_sz(s + 3);
+    k = tx_chr(s, tx_len(s, 128), '+');
+    if (k < 0) return gi(s);
+    if (tx_copy(name, sizeof name, s, k)) fg_die("bad gen2 expression", s);
+    plus = s + k + 1;
+    { char *end; long long add = strtoll(plus, &end, 10); if (end == plus || *end) fg_die("bad gen2 expression", s); return gi(name) + add; }
+}
+/* a token map: TK, plus `ident`/`number` entries when given, plus parse2-extra words each max+1 over
+   the non-alias values (gen2 build() appends them before any rows install). */
+static Jv *g2_tk(int ident, int number) {
+    Jv *t = jv_d();
+    int i, k;
+    for (i = 0; i < g2.TK->n; i++) jd_put(t, g2.TK->k[i], g2.TK->v[i]);
+    if (ident) jd_puti(t, "identifier", ei("TK_ID"));
+    if (number) jd_puti(t, "number", ei("TK_NUM"));
+    for (i = 0; i < g2.extra->n; i++) {
+        const char *w = jv_str(g2.extra->v[i], "parse2-extra word");
+        long long mx = -1;
+        if (jd_get(t, w)) continue;
+        for (k = 0; k < t->n; k++) {
+            if ((ident && tx_eq(t->k[k], "identifier", 16)) || (number && tx_eq(t->k[k], "number", 16))) continue;
+            if (t->v[k]->i > mx) mx = t->v[k]->i;
+        }
+        jd_puti(t, w, mx + 1);
+    }
+    return t;
+}
+static void g2_build(void) {
+    static const char *alias[] = {"LOC", "UNS", "SBB", "STAG", "SSZ", "STRUCT_MAX", "SIG_RADIX", "FPB", "DBL", "FLT", 0};
+    static const char *ranks[] = {"TYPERANK", "MEMBERRANK", "RETURNRANK", "PARAMRANK", 0};
+    char **rows[G2_GOLD];
+    int nc[G2_GOLD], n, i, k;
+    Jv *vr, *lx, *words, *ty;
+    if (g2_ready) return;
+    g2_ready = 1;
+    g2.E = fj_names("parse-constants", 0);
+    g2.G = fj_names("gen2-constants", 0);
+    for (i = 0; alias[i]; i++) { if (jd_get(g2.G, alias[i])) fg_die("gen2 constant shadows a parse constant", alias[i]); jd_put(g2.G, alias[i], jd_must(g2.E, alias[i])); }
+    vr = fj_names("valueranks", "bank");
+    jd_put(g2.G, "REGISTERBANK", jd_must(vr, "REGISTERBANK"));
+    jd_put(g2.G, "VALUEBANK", jd_must(vr, "VALUEBANK"));
+    lx = fj_names("libraryexports", 0);
+    for (i = 0; ranks[i]; i++) jd_put(g2.G, ranks[i], jd_must(lx, ranks[i]));
+    g2.TK = fj_eq("exec/facts/parse-tokens.tsv", "TK");
+    g2.extra = fj_eq("exec/facts/parse2-extra.tsv", "words");
+    if (jd_get(g2.TK, "type=extern")) fg_die("parse-tokens already holds type=extern", 0);
+    g2.casops = jv_l();
+    words = fj_facts("parse-words");
+    for (i = 0; i < words->n; i++) if (tx_eq(jv_str(jd_must(words->v[i], "group"), "parse-words"), "casops", 16)) jl_add(g2.casops, jd_must(words->v[i], "value"));
+    n = fj_gold("tyinfo", rows, nc, G2_GOLD);
+    for (i = 0; i < n; i++) {
+        if (nc[i] < 4 || !fj_isdigits(rows[i][1])) continue;
+        if (g2.nax == 32) fg_die("tyinfo axis too long", 0);
+        g2.ax[g2.nax] = rows[i][0];
+        g2.tsize[g2.nax] = na_int(rows[i][1]); g2.tuns[g2.nax] = na_int(rows[i][2]); g2.tnar[g2.nax] = na_int(rows[i][3]);
+        g2.nax++;
+    }
+    if (g2.nax != 16 || !tx_eq(g2.ax[15], "illegal", 16)) fg_die("tyinfo axis is not 16 names ending in illegal", 0);
+    if (g2_sz("char") != 1 || g2_sz("short") != 2 || g2_sz("int") != 4 || g2_sz("long") != 8 || g2.tsize[g2_ax("ptr")] != 8) fg_die("measured widths", 0);
+    ty = g2_lit("tyint");
+    if (ty->n != 8) fg_die("TYINT is not 8 rows", 0);
+    for (i = 0; i < 8; i++) {
+        int a = g2_ax(jv_str(ty->v[i], "tyint"));
+        g2.tyint[i] = g2.ax[a]; g2.tysz[i] = g2.tsize[a]; g2.tyun[i] = g2.tuns[a]; g2.tynar[i] = g2.tnar[a];
+        g2.tyvb[i] = (g2.tuns[a] ? ei("UNS") : 0) + g2.tsize[a];
+        if (g2.tysz[i] != 1 && g2.tysz[i] != 2 && g2.tysz[i] != 4 && g2.tysz[i] != 8) fg_die("TYINT width", g2.tyint[i]);
+    }
+    if (g2.tuns[g2_ax("u32")] != 1) fg_die("u32 is not unsigned", 0);
+    jd_puti(g2.G, "U32M", (long long)((1ULL << (8 * g2.tsize[g2_ax("u32")])) - 1));
+    n = fj_gold("prec", rows, nc, G2_GOLD);
+    for (i = 0; i < n; i++) {
+        int seen = -1;
+        if (nc[i] < 2 || !fj_isdigits(rows[i][1])) continue;
+        for (k = 0; k < g2.nprec; k++) if (tx_eq(g2.pop[k], rows[i][0], 16)) seen = k;
+        if (seen < 0) { if (g2.nprec == 64) fg_die("too many operators", 0); seen = g2.nprec++; g2.pop[seen] = rows[i][0]; }
+        g2.plev[seen] = na_int(rows[i][1]);
+    }
+    for (i = 0; i < g2.nprec; i++) {
+        int seen = 0;
+        for (k = 0; k < g2.nlev; k++) seen |= g2.levels[k] == g2.plev[i];
+        if (!seen) g2.levels[g2.nlev++] = g2.plev[i];
+    }
+    for (i = 1; i < g2.nlev; i++) for (k = i; k > 0 && g2.levels[k] < g2.levels[k - 1]; k--) { long long t = g2.levels[k]; g2.levels[k] = g2.levels[k - 1]; g2.levels[k - 1] = t; }
+    for (i = 0; i < g2.nlev; i++) {
+        char *ops[64];
+        int no = 0, j;
+        for (k = 0; k < g2.nprec; k++) if (g2.plev[k] == g2.levels[i]) ops[no++] = g2.pop[k];
+        for (k = 1; k < no; k++) for (j = k; j > 0 && byte_less(ops[j], ops[j - 1]); j--) { char *t = ops[j]; ops[j] = ops[j - 1]; ops[j - 1] = t; }
+        for (k = 0; k < no; k++) if (!tx_eq(ops[k], "&&", 4) && !tx_eq(ops[k], "||", 4)) g2.tops[g2.ntops++] = ops[k];
+    }
+    g2.twords = jv_l();
+    ty = g2_lit("typew");
+    for (i = 0; i < ty->n; i++) jl_add(g2.twords, ty->v[i]->v[0]);
+    ty = g2_lit("twords_extra");
+    for (i = 0; i < ty->n; i++) jl_add(g2.twords, ty->v[i]);
+    g2.fpu = jv_d();
+    n = fj_gold("irsel", rows, nc, G2_GOLD);
+    for (i = 0; i < n; i++) if (nc[i] >= 3 && tx_eq(rows[i][0], "fpu", 8)) jd_puts(g2.fpu, rows[i][1], rows[i][2]);
+    if (!(gi("FPS_FIRST") < gi("SBB") && gi("SBB") + gi("STRUCT_MAX") < gi("SIG_RADIX") && gi("FPV") < gi("SBB"))) fg_die("gen2 code ranges overlap", 0);
+    if (!(8 * gi("SIG_RADIX") + gi("SBB") + gi("STRUCT_MAX") < 2147483648LL)) fg_die("parameter depth packing", 0);
+    if (!(gi("FPS_PSH") + gi("SBB") * 16 < gi("ENUM_STATE") && gi("ENUM_STATE") < gi("TAG_EPOCH"))) fg_die("enum state banks", 0);
+}
+/* the operators in prec order of their level (G.OPS[lv]) */
+static int g2_ops(long long lv, char **out) {
+    int i, j, n = 0;
+    for (i = 0; i < g2.nprec; i++) if (g2.plev[i] == lv) out[n++] = g2.pop[i];
+    for (i = 1; i < n; i++) for (j = i; j > 0 && byte_less(out[j], out[j - 1]); j--) { char *t = out[j]; out[j] = out[j - 1]; out[j - 1] = t; }
+    return n;
+}
+static char *g2_fmt1(const char *tmpl, long long v) {   /* tmpl % v for a template with one %d */
+    Ob o = {0, 0, 0};
+    long i, n = tx_len(tmpl, FG_CAP);
+    int used = 0;
+    char b[32];
+    for (i = 0; i < n; i++) {
+        if (tmpl[i] == '%' && i + 1 < n && tmpl[i + 1] == 'd' && !used) { cx_fmt(b, sizeof b, "%lld", v); ob_z(&o, b); used = 1; i++; continue; }
+        if (tmpl[i] == '%') fg_die("template is not one %d", tmpl);
+        ob_put(&o, tmpl + i, 1);
+    }
+    if (!used) fg_die("template has no %d", tmpl);
+    return o.p;
+}
+static void g2_line(Ob *o, const char *name, Jv *v) { ob_z(o, "="); ob_z(o, name); ob_z(o, "\tjson\t"); jv_dump(o, v, 0, 0); ob_z(o, "\n"); }
+static void g2_int(Ob *o, const char *name, long long v) { char b[32]; ob_z(o, "="); ob_z(o, name); ob_z(o, "\tint\t"); cx_fmt(b, sizeof b, "%lld", v); ob_z(o, b); ob_z(o, "\n"); }
+static Jv *g2_pick(Jv *d, Jv *src, const char *const *names) { int i; for (i = 0; names[i]; i++) jd_put(d, names[i], jd_must(src, names[i])); return d; }
+static Jv *g2_tyint_list(void) {
+    Jv *l = jv_l();
+    int i;
+    for (i = 0; i < 8; i++) {
+        Jv *r = jv_l();
+        jl_add(r, jv_s(g2.tyint[i])); jl_add(r, jv_i(g2.tyvb[i])); jl_add(r, jv_i(g2.tysz[i])); jl_add(r, jv_i(g2.tyun[i])); jl_add(r, jv_i(g2.tynar[i]));
+        jl_add(l, r);
+    }
+    return l;
+}
+static Jv *g2_rows_code(int (*keep)(int)) { Jv *l = jv_l(); int i; for (i = 0; i < 8; i++) if (keep(i)) jl_add(l, jd_puti(jv_d(), "code", g2.tyvb[i])); return l; }
+static int g2_k_narrow_u(int i) { return g2.tyun[i] && g2.tysz[i] < 8; }
+static int g2_k_nar(int i) { return (int)g2.tynar[i]; }
+static int g2_k_not8(int i) { return g2.tyvb[i] != 8; }
+static int g2_k_all(int i) { (void)i; return 1; }
+/* k2-gen2: the parse2/gen2-manifest.tsv constants (was export.py k2gen2). */
+static void g2_optail(Jv *out) {   /* =oprows: export.py optail_facts for each ladder operator */
+    char **rows[G2_GOLD];
+    int nc[G2_GOLD], n, i, k;
+    Jv *binsel = jv_d(), *irsel = jv_d(), *fops;
+    Tape modes, flt;
+    fj_tape("operator-modes.tsv", &modes);
+    fj_tape("operator-float.tsv", &flt);
+    fops = jv_d();
+    for (i = 0; i < flt.n; i++) jd_puts(fops, flt.c[i][0], flt.c[i][1]);
+    n = fj_gold("binsel", rows, nc, G2_GOLD);
+    for (i = 0; i < n; i++) if (nc[i] >= 3 && (tx_eq(rows[i][1], "s", 4) || tx_eq(rows[i][1], "u", 4))) {
+        char key[64]; cx_fmt(key, sizeof key, "%s\t%s", rows[i][0], rows[i][1]); jd_puts(binsel, key, rows[i][2]);
+    }
+    n = fj_gold("irsel", rows, nc, G2_GOLD);
+    for (i = 0; i < n; i++) if (nc[i] >= 3 && tx_eq(rows[i][0], "alu", 8)) jd_puts(irsel, rows[i][1], rows[i][2]);
+    for (i = 0; i < g2.ntops; i++) {
+        const char *o = g2.tops[i], *pointer = 0;
+        int compare = 0, invert = 0, s, m;
+        Jv *r = jv_d(), *floats = jv_l();
+        char sop[2][64];
+        const char *sregs[2];
+        for (k = 0, m = -1; k < modes.n; k++) if (tx_eq(modes.c[k][0], o, 16)) m = k;
+        if (m < 0) for (k = 0; k < modes.n; k++) if (tx_eq(modes.c[k][0], "*", 4)) m = k;
+        if (m < 0 || modes.nc[m] < 4) fg_die("operator-modes", o);
+        pointer = modes.c[m][1]; compare = (int)na_int(modes.c[m][2]); invert = (int)na_int(modes.c[m][3]);
+        for (s = 0; s < 2; s++) {   /* E.optext(o, u) split into mnemonic and registers */
+            char key[64];
+            const char *sp;
+            long sn;
+            int rev;
+            cx_fmt(key, sizeof key, "%s\t%s", o, s ? "u" : "s");
+            sp = jv_str(jd_must(irsel, jv_str(jd_must(binsel, key), key)), key);
+            sn = tx_len(sp, 64);
+            rev = sn > 4 && tx_eq(sp + sn - 4, "_rev", 8);
+            if (rev) sn -= 4;
+            k = 0;
+            if ((sn == 3 && (tx_prefix(sp, 3, "div", 3) || tx_prefix(sp, 3, "mod", 3))) || (sn == 4 && (tx_prefix(sp, 4, "udiv", 4) || tx_prefix(sp, 4, "umod", 4)))) sop[s][k++] = '.';
+            if (tx_copy(sop[s] + k, 64 - k, sp, sn)) fg_die("mnemonic too long", sp);
+            sregs[s] = rev ? "r0, r1" : "r1, r0";
+        }
+        if (jd_get(fops, o)) {
+            static const char *sfx[2] = {"d", "s"}, *base[2] = {"DBL", "FLT"};
+            for (s = 0; s < 2; s++) {
+                char key[64];
+                const char *op;
+                long on;
+                Jv *f = jv_d();
+                cx_fmt(key, sizeof key, "%s%s", sfx[s], jv_str(jd_get(fops, o), o));
+                op = jv_str(jd_must(g2.fpu, key), key);
+                on = tx_len(op, 64);
+                jd_puts(f, "sfx", sfx[s]);
+                if (on > 4 && tx_eq(op + on - 4, "_rev", 8)) { char t[64]; tx_copy(t, sizeof t, op, on - 4); jd_puts(f, "fop", t); jd_puts(f, "fregs", "r0, r1"); }
+                else { jd_puts(f, "fop", op); jd_puts(f, "fregs", "r1, r0"); }
+                jd_puti(f, "result", compare ? 4 : gi(base[s]));
+                jl_add(floats, f);
+            }
+        }
+        jd_puts(r, "op", o); jd_puti(r, "offset", (long long)i * 256);
+        jd_puts(r, "sop", sop[0]); jd_puts(r, "sregs", sregs[0]); jd_puts(r, "uop", sop[1]); jd_puts(r, "uregs", sregs[1]);
+        jd_puts(r, "ptr", pointer);
+        jd_put(r, "ptrn", tx_eq(pointer, "add", 8) || tx_eq(pointer, "sub", 8) ? jl_unit() : jv_l());
+        jd_put(r, "cmpl", compare ? jl_unit() : jv_l());
+        jd_put(r, "invl", invert ? jl_unit() : jv_l());
+        jd_put(r, "fl", floats->n ? jl_unit() : jv_l());
+        jd_put(r, "nf", floats->n ? jv_l() : jl_unit());
+        jd_put(r, "floats", floats);
+        jl_add(out, r);
+    }
+}
+static void g2_autonames(Jv *out) {   /* export.py _autonames over parse-constants AUTOINC_HEADERS */
+    Jv *hs = jd_must(g2.E, "AUTOINC_HEADERS"), *seen = jv_d();
+    int h, i;
+    for (h = 0; h < hs->n; h++) {
+        char rel[256];
+        Lines L;
+        cx_fmt(rel, sizeof rel, "include/%s", jv_str(hs->v[h], "AUTOINC_HEADERS"));
+        L = fg_lines(rel);
+        for (i = 0; i < L.n; i++) {
+            const char *ln = L.l[i];
+            long n = tx_len(ln, FG_CAP), p, a;
+            char name[256];
+            if (n <= 7 || !tx_prefix(ln, n, "static", 6) || tx_chr(ln, n, '(') < 0 || tx_chr(ln, n, '{') < 0) continue;
+            p = tx_chr(ln, n, '(');
+            while (p > 0 && ln[p - 1] == ' ') p--;
+            a = p;
+            while (a > 0 && ((ln[a - 1] >= 'a' && ln[a - 1] <= 'z') || (ln[a - 1] >= 'A' && ln[a - 1] <= 'Z') || (ln[a - 1] >= '0' && ln[a - 1] <= '9') || ln[a - 1] == '_')) a--;
+            if (a >= p || tx_copy(name, sizeof name, ln + a, p - a)) continue;
+            if (tx_eq(name, "printf", 16) || jd_get(seen, name)) continue;
+            jd_puti(seen, name, 1);
+            jl_add(out, jd_puts(jv_d(), "name", name));
+        }
+    }
+}
+static void k2_gen2(Ob *o) {
+    static const char *fn_e[] = {"FND", "FRD", "FRB", "VAR", 0}, *gl_g[] = {"LOC", "GIBLOB", "GIEND", "GINPS", "GINPE", "GSZ", "GUNIT", "GHL", "GHE", "SINIT", "SKIPS", 0};
+    static const char *gl_e[] = {"FND", "GMARK", "BASE", "ARR", "PTR", 0};
+    static const char *bc_g[] = {"FPS_FN", "FPS_RD", "FPS_RB", "FPS_RSH", "FPS_COUNT", "FPS_PARAM", "FPS_PSH", "FPS_VAR", "SBB", "FPB", "FPV", "FPS_FIRST", "BOOL", "DBL", "FLT",
+        "ENUM_FIRST", "GSZ", "GUNIT", "SSZ", "SAL", "SMN", "SMEM", "MOF", "MSZ", "MPT", "MBS", "MAR", "BFW", "BFO", "BFS", "SHAPE_IDS", "SHAPE", "UNS", "TIX", "REGISTERBANK", "UNDO_SIZE", "ENV", "END_", 0};
+    static const char *sh_g[] = {"POSSPAN", "SHAPE", "SHAPE_IDS", "DIM", "TDIM", "MEMBER_STRIDE", "TYPERANK", "MEMBERRANK", "RETURNRANK", "PARAMRANK", 0};
+    static const char *up_g[] = {"SBB", "UNS", "DBL", "FLT", "BOOL", "FPB", "FPV", "ENV", "END_", "LOC", "FPS_FN", "FPS_VAR", 0}, *up_e[] = {"FND", "VAR", "PTR", "BASE", "ARR", 0};
+    static const char *st_g[] = {"BOOL", "LOC", "SIEND", "SINIT", "SKIPS", "TIX", 0};
+    static const char *in_g[] = {"SBB", "LOC", "SSZ", "SMN", "SMEM", "MOF", "MPT", "MBS", "MAR", "SFLAT", "MFLAT", "MEMBER_STRIDE", "SKIPS", "BFW", "BFO", "BFS", "SHAPE", "SHAPE_IDS", "MSZ", "DIM", 0};
+    static const char *k2_g[] = {"DBL", "FLT", "BOOL", "VLDEP", "END_", "VLFRAME", "VLSIZE", "UNS", "ENV", "SBB", "MEMBER_STRIDE", "MOF", "MSZ", "MBS", "MAR", 0};
+    static const char *sc_e[] = {"UNDO", "PTR", "BASE", "ARR", "TDN", "TDB", "TDD", "FND", "FRD", "FRB", "VAR", 0};
+    static const char *sc_g[] = {"VALUEBANK", "TYPERANK", "LOC", "END_", "ENV", "VLSIZE", "UNDO_SIZE", "SHAPE", "TDE", "REGISTERBANK", 0};
+    char **rows[G2_GOLD], b[64];
+    int nc[G2_GOLD], n, i, k, l, r, w;
+    Jv *v, *d, *x, *tk, *lit, *ptrset;
+    Tape t, follow, lm;
+    long long maxtok = -1, i32;
+    g2_build();
+    g2_int(o, "VS", ei("VS"));
+    g2_int(o, "POSSPAN", gi("POSSPAN"));
+    fj_tape("type-follow.tsv", &follow);
+    v = jv_l(); lit = g2_lit("typew");
+    for (i = 0; i < lit->n; i++) {
+        const char *word = jv_str(lit->v[i]->v[0], "typew");
+        d = jv_d();
+        jd_puts(d, "word", word); jd_puti(d, "value", g2_expr(lit->v[i]->v[1]));
+        jd_puti(d, "rank", tx_eq(word, "type=float", 32) ? 1 : tx_eq(word, "type=double", 32) ? 2 : 0);
+        jd_puts(d, "follow", fj_tget(&follow, word, "*"));
+        jl_add(v, d);
+    }
+    g2_line(o, "typewords", v);
+    {
+        Tape tt;
+        Jv *tape = jv_d(), *first = jl_unit();
+        const char *current = "CKM";
+        fj_tape("type-tape.tsv", &tt);
+        for (i = 0; i < tt.n; i++) jd_put(tape, tt.c[i][0], jv_must_parse(tt.c[i][1]));
+        v = jv_l();
+        for (i = 0; i < 8; i++) {
+            char nxt[32], hit[32], axn[16];
+            if (!g2.tyun[i] || g2.tysz[i] >= 8) continue;
+            cx_fmt(nxt, sizeof nxt, "CKM.k%lld", g2.tysz[i]); cx_fmt(hit, sizeof hit, "CKM.m%lld", g2.tysz[i]); cx_fmt(axn, sizeof axn, "u%lld", 8 * g2.tysz[i]);
+            d = jv_d();
+            jd_puts(d, "current", current); jd_puts(d, "hit", hit); jd_puts(d, "next", nxt); jd_puti(d, "axis", g2_ax(axn));
+            jd_put(d, "first", first);
+            jd_puts(d, "masktext", g2_fmt1(jv_str(jd_must(tape, "mask_pair"), "mask_pair"), (long long)((1ULL << (8 * g2.tysz[i])) - 1)));
+            jl_add(v, d);
+            current = fg_dupz(nxt); first = jv_l();
+        }
+        g2_line(o, "ckmrows", v);
+        d = jv_d(); jd_puts(d, "current", current); jd_puti(d, "axis", g2_ax("u64")); jd_put(d, "first", first);
+        g2_line(o, "ckmfinal", d);
+        v = jv_l(); current = "RESD"; first = jl_unit();
+        for (i = 0; i < 8; i++) {
+            char hit[32], nxt[32];
+            cx_fmt(hit, sizeof hit, "RESD.%s", g2.tyint[i]); cx_fmt(nxt, sizeof nxt, "RESD.n%s", g2.tyint[i]);
+            d = jv_d();
+            jd_puts(d, "current", current); jd_puts(d, "hit", hit); jd_puts(d, "next", nxt); jd_puti(d, "axis", g2_ax(g2.tyint[i]));
+            jd_puti(d, "code", g2.tyvb[i]); jd_put(d, "first", first);
+            jd_puts(d, "masktext", g2.tyun[i] && g2.tysz[i] < 8 ? g2_fmt1(jv_str(jd_must(tape, "mask"), "mask"), (long long)((1ULL << (8 * g2.tysz[i])) - 1)) : "");
+            jl_add(v, d);
+            current = fg_dupz(nxt); first = jv_l();
+        }
+        g2_line(o, "resdrows", v);
+        d = jv_d(); jd_puts(d, "current", current); jd_put(d, "first", first);
+        g2_line(o, "resdfinal", d);
+        v = jv_l(); g2_optail(v); g2_line(o, "oprows", v);
+        g2_int(o, "CKT", gi("CKT")); g2_int(o, "RST", gi("RST")); g2_int(o, "AXILL", g2_ax("illegal"));
+        g2_line(o, "INVTEXT", jd_must(tape, "float_invert"));
+    }
+    fj_tape("ladder-modes.tsv", &lm);
+    v = jv_l();
+    for (i = 0; i < g2.nlev; i++) {
+        char *ops[64];
+        int no = g2_ops(g2.levels[i], ops), last = i + 1 >= g2.nlev;
+        Jv *ol = jv_l();
+        d = jv_d();
+        jd_puti(d, "lv", g2.levels[i]);
+        jd_put(d, "nxt", last ? jv_new(JV_NULL) : jv_i(g2.levels[i + 1]));
+        jd_put(d, "mid", last ? jv_l() : jl_unit()); jd_put(d, "last", last ? jl_unit() : jv_l());
+        for (k = 0; k < no; k++) { x = jv_d(); jd_puts(x, "op", ops[k]); jd_puti(x, "key", tki(ops[k])); jd_puts(x, "mode", fj_tget(&lm, ops[k], "*")); jl_add(ol, x); }
+        jd_put(d, "ops", ol);
+        jl_add(v, d);
+    }
+    g2_line(o, "ladder", v);
+    {   /* export.py _namespace_constants */
+        Jv *f = jv_d(), *g = jv_d(), *lo = jv_d();
+        jd_puti(f, "PIDS", gi("PIDS")); jd_puti(f, "PDB", gi("PDB")); jd_puti(f, "LOC", gi("LOC"));
+        g2_pick(f, g2.E, fn_e);
+        for (i = 0; i < 16; i++) { cx_fmt(b, sizeof b, "FN_PDB%d", i); jd_puti(f, b, gi("PDB") + i); }
+        g2_pick(g, g2.G, gl_g); g2_pick(g, g2.E, gl_e);
+        jd_puti(lo, "SKIPS", gi("SKIPS")); jd_puti(lo, "PTR", ei("PTR")); jd_puti(lo, "BASE", ei("BASE"));
+        d = jv_d(); jd_put(d, "function", f); jd_put(d, "globals", g); jd_put(d, "local", lo);
+        g2_line(o, "nsconst", d);
+    }
+    g2_line(o, "truthfpu", g2.fpu);
+    d = jv_d();
+    jd_puti(d, "UNSIGNED_WIDE", gi("UNS") + 8);
+    jd_put(d, "TK", g2_tk(0, 0));
+    jd_puti(d, "TK_ID", ei("TK_ID")); jd_puti(d, "TK_NUM", ei("TK_NUM")); jd_puti(d, "TK_FNUM", ei("TK_FNUM")); jd_puti(d, "FND", ei("FND"));
+    g2_pick(d, g2.G, bc_g);
+    jd_put(d, "TYINT", g2_tyint_list());
+    g2_line(o, "buildconst", d);
+    d = jv_d(); jd_puti(d, "DBL", gi("DBL")); jd_puti(d, "FLT", gi("FLT")); jd_puti(d, "GMARK", ei("GMARK"));
+    cx_fmt(b, sizeof b, "C%lld", g2.levels[0]); jd_puts(d, "bottom", b);
+    g2_line(o, "ordconst", d);
+    {   /* tyrows: CKT[l*16+r] = type(l "+" r); RST[opi*256+l*16+r] = type(l TYOP(o) r) */
+        static short tyr[16][32][16];
+        char *opn[32];
+        int nop = 0;
+        Jv *tyop = g2_lit("tyop");
+        Ob *ob = o;
+        n = fj_gold("type", rows, nc, G2_GOLD);
+        for (l = 0; l < 16; l++) for (k = 0; k < 32; k++) for (r = 0; r < 16; r++) tyr[l][k][r] = -1;
+        for (i = 0; i < n; i++) {
+            int a, c, op = -1;
+            if (nc[i] < 4) continue;
+            for (k = 0; k < nop; k++) if (tx_eq(opn[k], rows[i][1], 16)) op = k;
+            if (op < 0) { if (nop == 32) fg_die("too many type operators", 0); op = nop++; opn[op] = rows[i][1]; }
+            a = g2_ax(rows[i][0]); c = g2_ax(rows[i][2]);
+            tyr[a][op][c] = (short)g2_ax(rows[i][3]);
+        }
+        ob_z(ob, "=tyrows\tjson\t[");
+        w = 0;
+        for (l = 0; l < 16; l++) for (r = 0; r < 16; r++) {
+            int plus = -1, u;
+            char line[160];
+            for (k = 0; k < nop; k++) if (tx_eq(opn[k], "+", 4)) plus = k;
+            u = plus >= 0 && tyr[l][plus][r] >= 0 ? tyr[l][plus][r] : g2_ax("illegal");
+            cx_fmt(line, sizeof line, "%s{\"t\": %d, \"u\": %d, \"tab\": %lld}", w++ ? ", " : "", l * 16 + r, u, gi("CKT"));
+            ob_z(ob, line);
+            for (i = 0; i < g2.ntops; i++) {
+                const char *asks = g2.tops[i];
+                int op = -1;
+                if (jd_get(tyop, asks)) asks = jv_str(jd_get(tyop, asks), "tyop");
+                for (k = 0; k < nop; k++) if (tx_eq(opn[k], asks, 16)) op = k;
+                u = op >= 0 && tyr[l][op][r] >= 0 ? tyr[l][op][r] : g2_ax("illegal");
+                cx_fmt(line, sizeof line, ", {\"t\": %d, \"tab\": %lld, \"u\": %d}", i * 256 + l * 16 + r, gi("RST"), u);
+                ob_z(ob, line);
+            }
+        }
+        ob_z(ob, "]\n");
+    }
+    v = jv_l(); lit = g2_lit("intrinsics");
+    for (i = 0; i < lit->n; i++) { d = jv_d(); jd_puti(d, "i", i + 1); jd_put(d, "name", lit->v[i]->v[0]); jl_add(v, d); }
+    g2_line(o, "syscalls", v);
+    d = g2_pick(jv_d(), g2.G, sh_g); jd_puti(d, "ARR", ei("ARR")); jd_puti(d, "UNSIGNED_CHAR", gi("UNS") + 1);
+    g2_line(o, "shapeconst", d);
+    fj_tape("shape-tokens.tsv", &t);
+    d = jv_d();
+    for (i = 0; i < t.n; i++) {
+        char *p = fg_dupz(t.c[i][1]), *q;
+        Jv *l2 = jv_l();
+        for (;;) { q = p; while (*q && *q != ',') q++; { int end = !*q; *q = 0; jl_add(l2, jv_i(tki(p))); if (end) break; p = q + 1; } }
+        jd_put(d, t.c[i][0], l2);
+    }
+    g2_line(o, "shapeclasses", d);
+    d = jv_d(); jd_puti(d, "SBB", gi("SBB")); jd_puti(d, "SSZ", gi("SSZ")); jd_puti(d, "CKT", gi("CKT"));
+    cx_fmt(b, sizeof b, "E%lld", g2.levels[0]); jd_puts(d, "expr_entry", b); cx_fmt(b, sizeof b, "C%lld", g2.levels[0]); jd_puts(d, "tail_entry", b);
+    g2_line(o, "retconst", d);
+    tk = g2_tk(1, 1);
+    fj_tape("return-tokens.tsv", &t);
+    d = jv_d();
+    for (i = 0; i < t.n; i++) jd_put(d, t.c[i][0], jl_one(jv_num(jd_must(tk, t.c[i][1]), t.c[i][1])));
+    v = jv_l(); for (i = 0; i < g2.twords->n; i++) jl_add(v, jv_i(jv_num(jd_must(tk, g2.twords->v[i]->s), "tword")));
+    jd_put(d, "typewords", v);
+    v = jv_l(); jl_add(v, jv_i(gi("BOOL"))); jl_add(v, jv_i(gi("DBL"))); jl_add(v, jv_i(gi("FLT"))); jd_put(d, "scalar_types", v);
+    v = jv_l(); jl_add(v, jv_i(gi("DBL"))); jl_add(v, jv_i(gi("FLT"))); jd_put(d, "float_types", v);
+    jd_put(d, "axis_f64", jl_one(g2_ax("f64"))); jd_put(d, "axis_f32", jl_one(g2_ax("f32")));
+    v = jv_l(); jl_add(v, jv_i(tki("="))); jl_add(v, jv_i(tki("++"))); jl_add(v, jv_i(tki("--")));
+    for (i = 0; i < g2.casops->n; i++) { cx_fmt(b, sizeof b, "%s=", g2.casops->v[i]->s); jl_add(v, jv_i(tki(b))); }
+    jd_put(d, "operators", v);
+    g2_line(o, "retclasses", d);
+    {   /* retexpr0, retint, retfloat, retcompound; updid0/updcompound share the key set */
+        unsigned char used[257] = {0};
+        Jv *comp = jv_l(), *comp2 = jv_l();
+        for (i = 0; i < g2.casops->n; i++) {
+            long long key;
+            cx_fmt(b, sizeof b, "%s=", g2.casops->v[i]->s); key = tki(b);
+            if (key < 0 || key > 256) fg_die("compound token out of range", b);
+            used[key] = 1;
+            d = jv_d(); jd_puti(d, "key", key); cx_fmt(b, sizeof b, "LV.c%s", g2.casops->v[i]->s); jd_puts(d, "target", b); jl_add(comp, d);
+            d = jv_d(); jd_puti(d, "key", key); cx_fmt(b, sizeof b, "X.c%s", g2.casops->v[i]->s); jd_puts(d, "target", b); jl_add(comp2, d);
+        }
+        v = jv_l(); for (i = 0; i < 257; i++) if (!used[i]) jl_add(v, jv_i(i));
+        g2_line(o, "retexpr0", v);
+        g2_line(o, "retint", g2_rows_code(g2_k_all));
+        v = jv_l(); lit = g2_lit("retfloat");
+        for (i = 0; i < lit->n; i++) { d = jv_d(); jd_put(d, "label", lit->v[i]->v[0]); jd_put(d, "cv", lit->v[i]->v[1]); jd_puti(d, "base", g2_expr(lit->v[i]->v[2])); jl_add(v, d); }
+        g2_line(o, "retfloat", v);
+        g2_line(o, "retcompound", comp);
+        d = g2_pick(jv_d(), g2.G, up_g); g2_pick(d, g2.E, up_e);
+        for (k = 1; k <= 8; k *= 2) { cx_fmt(b, sizeof b, "U%d", k); jd_puti(d, b, gi("UNS") + k); }
+        cx_fmt(b, sizeof b, "C%lld", g2.levels[0]); jd_puts(d, "tail_entry", b);
+        jd_puti(d, "axis_ptr", g2_ax("ptr")); jd_puti(d, "axis_struct", g2_ax("struct"));
+        g2_line(o, "updconst", d);
+        tk = g2_tk(1, 0);
+        fj_tape("update-tokens.tsv", &t);
+        d = jv_d();
+        for (i = 0; i < t.n; i++) jd_put(d, t.c[i][0], jl_one(jv_num(jd_must(tk, t.c[i][1]), t.c[i][1])));
+        jd_put(d, "BOOL", jl_one(gi("BOOL")));
+        v = jv_l(); jl_add(v, jv_i(gi("DBL"))); jl_add(v, jv_i(gi("FLT"))); jd_put(d, "float_types", v);
+        v = jv_l(); jl_add(v, jv_i(g2_ax("f32"))); jl_add(v, jv_i(g2_ax("f64"))); jd_put(d, "float_axes", v);
+        v = jv_l(); for (i = 0; i < 8; i++) if (!g2.tyun[i] && g2.tysz[i] < 8) jl_add(v, jv_i(g2.tyvb[i]));
+        jd_put(d, "signed_narrow_codes", v);
+        g2_line(o, "updclasses", d);
+        v = jv_l(); for (i = 0; i < 257; i++) if (!used[i]) jl_add(v, jv_i(i));
+        g2_line(o, "updid0", v);
+        g2_line(o, "updcompound", comp2);
+    }
+    g2_line(o, "ordupd", g2_lit("ordupd"));
+    g2_line(o, "staticsenv", g2_pick(jv_d(), g2.G, st_g));
+    d = g2_pick(jv_d(), g2.G, in_g);
+    jd_puti(d, "UCHAR", ei("UNS") + 1); jd_puti(d, "PTR", ei("PTR")); jd_puti(d, "BASE", ei("BASE")); jd_puti(d, "ARR", ei("ARR"));
+    jd_puti(d, "DIM1", gi("DIM") + 1); jd_puti(d, "DIM2", gi("DIM") + 2);
+    g2_line(o, "initenv", d);
+    g2_line(o, "k2env", g2_pick(jv_d(), g2.G, k2_g));
+    {
+        Lines L = fg_lines("exec/facts/statics.tsv");
+        for (i = 0; i < L.n; i++) if (tx_prefix(L.l[i], tx_len(L.l[i], FG_CAP), "limit\tMAXTOK\t", 13)) { char *c[4], *line = fg_dupz(L.l[i]); if (fg_split(line, c, 4) >= 3) { maxtok = na_int(c[2]); break; } }
+        if (maxtok < 0) fg_die("statics.tsv has no limit MAXTOK", 0);
+    }
+    d = jv_d();
+    x = jv_d(); jd_puti(x, "TIX", gi("TIX")); jd_puti(x, "MAXTOK", maxtok); jd_put(d, "ucx", x);
+    x = jv_d(); jd_puti(x, "DBL", gi("DBL")); jd_puti(x, "FLT", gi("FLT")); jd_puti(x, "BOOL", gi("BOOL"));
+    jd_puti(x, "UNS1", gi("UNS") + 1); jd_puti(x, "UNS3", gi("UNS") + 3); jd_puti(x, "UNS4", gi("UNS") + 4); jd_puti(x, "UNS8", gi("UNS") + 8);
+    jd_puti(x, "U32M", gi("U32M")); jd_puti(x, "ENV", gi("ENV")); jd_puti(x, "END_", gi("END_")); jd_puti(x, "FNSTR", gi("FNSTR")); jd_puti(x, "TIX", gi("TIX")); jd_puti(x, "MAXTOK", maxtok);
+    jd_put(d, "ufacts", x);
+    g2_line(o, "unaryenv", d);
+    fj_tape("update-pointer.tsv", &t);
+    ptrset = jv_d(); for (i = 0; i < t.n; i++) jd_puti(ptrset, t.c[i][0], 1);
+    v = jv_l();
+    for (i = 0; i < g2.casops->n; i++) {
+        int np = !jd_get(ptrset, g2.casops->v[i]->s);
+        d = jv_d(); jd_put(d, "op", g2.casops->v[i]); jd_puti(d, "nptr", np); jd_puts(d, "owner", np ? "X" : "LV"); jl_add(v, d);
+    }
+    g2_line(o, "updcas", v);
+    v = jv_l(); lit = g2_lit("updtype");
+    for (i = 0; i < lit->n; i++) { d = jv_d(); jd_puti(d, "code", g2_expr(lit->v[i]->v[0])); jd_puti(d, "axis", g2_ax(jv_str(lit->v[i]->v[1], "updtype"))); jl_add(v, d); }
+    g2_line(o, "updtype", v);
+    fj_tape("update-modes.tsv", &t);
+    v = jv_l();
+    for (i = 0; i < t.n; i++) {
+        static const char *keys[7] = {"name", "op", "postfix", "prefixname", "prefixfix", "integer", "floating"};
+        d = jv_d();
+        for (k = 0; k < 7 && k < t.nc[i]; k++) jd_puts(d, keys[k], t.c[i][k]);
+        jl_add(v, d);
+    }
+    g2_line(o, "updmodes", v);
+    fj_tape("update-float.tsv", &t);
+    v = jv_l();
+    for (i = 0; i < t.n; i++) { d = jv_d(); jd_puts(d, "suffix", t.c[i][0]); jd_puti(d, "bits", strtoll(t.c[i][1], 0, 10)); jl_add(v, d); }
+    g2_line(o, "updfloat", v);
+    d = jv_d();
+    jd_put(d, "LOADV", jd_put(jv_d(), "rows", g2_rows_code(g2_k_not8)));
+    jd_put(d, "LOADRAW", jd_put(jv_d(), "rows", g2_rows_code(g2_k_not8)));
+    jd_put(d, "STOREV0", jd_put(jv_d(), "rows", g2_rows_code(g2_k_not8)));
+    g2_line(o, "widthd", d);
+    d = jv_d(); jd_puti(d, "DBL", gi("DBL")); jd_puti(d, "FLT", gi("FLT")); jd_puti(d, "BOOL", gi("BOOL")); jd_puti(d, "SBB", gi("SBB"));
+    g2_line(o, "widthconst", d);
+    {
+        Jv *wp = jv_d(), *c;
+        c = jv_d(); jd_puti(c, "FLT", gi("FLT")); jd_put(wp, "store", jd_put(jv_d(), "consts", c));
+        c = jv_d(); jd_puti(c, "SBB", gi("SBB")); jd_puti(c, "SSZ", gi("SSZ")); jd_puti(c, "DBL", gi("DBL")); jd_puti(c, "FLT", gi("FLT")); jd_puti(c, "BOOL", gi("BOOL")); jd_puti(c, "UNS", gi("UNS"));
+        jd_put(wp, "elsz", jd_put(jv_d(), "consts", c));
+        c = jv_d(); jd_puti(c, "BOOL", gi("BOOL")); x = jd_put(jv_d(), "consts", c); jd_put(x, "rows", g2_rows_code(g2_k_narrow_u)); jd_put(wp, "naru", x);
+        c = jv_d(); jd_puti(c, "BOOL", gi("BOOL")); jd_puti(c, "DBL", gi("DBL")); jd_puti(c, "FLT", gi("FLT")); jd_puti(c, "UNSIGNED_WIDE", gi("UNS") + 8);
+        x = jd_put(jv_d(), "consts", c);
+        v = jv_l(); lit = g2_lit("conv_suffixes"); for (i = 0; i < lit->n; i++) jl_add(v, jd_put(jv_d(), "s", lit->v[i]));
+        jd_put(x, "suffixes", v); jd_put(wp, "conv", x);
+        c = jv_d(); jd_puti(c, "UNSIGNED_WIDE", gi("UNS") + 8); jd_puti(c, "DBL", gi("DBL")); jd_puti(c, "BOOL", gi("BOOL")); jd_puti(c, "TDN", ei("TDN"));
+        x = jd_put(jv_d(), "consts", c); jd_put(x, "rows", g2_rows_code(g2_k_nar)); jd_put(wp, "narrow", x);
+        g2_line(o, "widthparts", wp);
+    }
+    d = g2_pick(jv_d(), g2.E, sc_e); g2_pick(d, g2.G, sc_g);
+    for (i = 0; i < gi("UNDO_SIZE"); i++) { cx_fmt(b, sizeof b, "UNDO_%d", i); jd_puti(d, b, ei("UNDO") + i); }
+    for (i = 0; i < 8; i++) { cx_fmt(b, sizeof b, "DIM_%d", i); jd_puti(d, b, gi("DIM") + i); }
+    for (i = 0; i < 16; i++) { cx_fmt(b, sizeof b, "PDB_%d", i); jd_puti(d, b, gi("PDB") + i); }
+    g2_line(o, "scopeconst", d);
+    i32 = g2.tsize[g2_ax("i32")];
+    {
+        Jv *gp = jv_d(), *c, *cl, *tt, *ops;
+        cl = jv_d(); jd_put(cl, "identifier", jl_one(ei("TK_ID"))); jd_put(cl, "paren", jl_one(tki("(")));
+        jd_put(gp, "localdecl", jd_put(jv_d(), "classes", cl));
+        c = jv_d(); jd_puti(c, "DBL", gi("DBL")); x = jd_put(jv_d(), "consts", c);
+        jd_put(x, "classes", jd_put(jv_d(), "double", jl_one(tki("type=double")))); jd_put(gp, "longdouble", x);
+        c = jv_d(); jd_puti(c, "INT", i32); x = jd_put(jv_d(), "consts", c);
+        cl = jv_d();
+        v = jl_one(gi("BOOL")); for (i = 0; i < 8; i++) if (g2.tysz[i] < i32) jl_add(v, jv_i(g2.tyvb[i]));
+        jd_put(cl, "promote", v);
+        v = jv_l(); jl_add(v, jv_i(gi("DBL"))); jl_add(v, jv_i(gi("FLT"))); for (i = 0; i < 8; i++) if (g2.tysz[i] >= i32) jl_add(v, jv_i(g2.tyvb[i]));
+        jd_put(cl, "arithmetic", v);
+        jd_put(x, "classes", cl); jd_put(gp, "positive", x);
+        c = jv_d(); jd_puti(c, "TENTATIVE", gi("TENTATIVE")); jd_put(gp, "tentative", jd_put(jv_d(), "consts", c));
+        tk = g2_tk(0, 0);
+        tt = jv_d();   /* typetargets: token code (decimal key) -> target, Python dict order */
+        for (i = 0; i < g2.twords->n; i++) { cx_fmt(b, sizeof b, "%lld", jv_num(jd_must(tk, g2.twords->v[i]->s), "tword")); { char tg[64]; cx_fmt(tg, sizeof tg, "TS.%s", g2.twords->v[i]->s); jd_puts(tt, b, tg); } }
+        fj_tape("type-entry.tsv", &t);
+        for (i = 0; i < t.n; i++) {
+            long long key = tx_eq(t.c[i][0], "identifier", 16) ? ei("TK_ID") : jv_num(jd_must(tk, t.c[i][0]), t.c[i][0]);
+            cx_fmt(b, sizeof b, "%lld", key); jd_puts(tt, b, t.c[i][1]);
+        }
+        ops = jv_l();
+        for (i = 0; i < tt->n; i++) { x = jv_d(); jd_puti(x, "key", strtoll(tt->k[i], 0, 10)); jd_put(x, "target", tt->v[i]); jl_add(ops, x); }
+        jd_put(gp, "typeops", ops);
+        ops = jv_l();
+        for (i = 0; i < g2.casops->n; i++) { x = jv_d(); cx_fmt(b, sizeof b, "%s=", g2.casops->v[i]->s); jd_puti(x, "key", tki(b)); cx_fmt(b, sizeof b, "LV.c%s", g2.casops->v[i]->s); jd_puts(x, "target", b); jl_add(ops, x); }
+        jd_put(gp, "updateops", ops);
+        g2_line(o, "gen2parts", gp);
+    }
+    v = jv_l(); g2_autonames(v); g2_line(o, "autonames", v);
+    g2_line(o, "HEADER", jd_must(g2.E, "HEADER"));
+    g2_int(o, "AUT", ei("AUT"));
+    g2_int(o, "AXF64", g2_ax("f64"));
+}
+
 static void enc_pe(Ob *o) { pe_fields(o, 0); }
 static void enc_pe_forward(Ob *o) { pe_fields(o, 1); }
 
-typedef struct { const char *stem; const char *inputs[16]; void (*produce)(Ob *); } Table;   /* inputs 0-terminated */
+typedef struct { const char *stem; const char *inputs[40]; void (*produce)(Ob *); } Table;   /* inputs 0-terminated */
 static const Table fg_tables[] = {
     {"opt-gen", {"weights/gold/peep.tsv", "weights/gold/opinfo.tsv", "exec/facts/opt-gen-constants.tsv",
                  "exec/facts/opt-gen-startwords.tsv", "exec/opt/answer-targets.tsv", "tools/facts-gen.cx", 0}, opt_gen},
@@ -2503,6 +3291,13 @@ static const Table fg_tables[] = {
                  "exec/lex/spelling.tsv", "exec/facts/lex-consts.tsv", "tools/facts-gen.cx", 0}, lex_gen},
     {"pp-gen", {"exec/facts/pp-targets.tsv", "exec/facts/pp-init.tsv", "exec/facts/pp-layout.tsv", "exec/facts/pp-escapes.tsv",
                 "exec/pp/operators.tsv", "exec/pp/predefines.tsv", "weights/gold/pp.tsv", "tools/facts-gen.cx", 0}, pp_gen},
+    {"k2-gen2", {"exec/facts/parse-constants.tsv", "exec/facts/parse-tokens.tsv", "exec/facts/parse-words.tsv", "exec/facts/parse2-extra.tsv",
+        "exec/facts/gen2-constants.tsv", "exec/facts/gen2-literals.tsv", "exec/facts/valueranks.tsv", "exec/facts/libraryexports.tsv", "exec/facts/statics.tsv",
+        "weights/gold/prec.tsv", "weights/gold/binsel.tsv", "weights/gold/irsel.tsv", "weights/gold/tyinfo.tsv", "weights/gold/type.tsv",
+        "exec/parse2/type-tape.tsv", "exec/parse2/type-follow.tsv", "exec/parse2/operator-modes.tsv", "exec/parse2/operator-float.tsv",
+        "exec/parse2/ladder-modes.tsv", "exec/parse2/type-entry.tsv", "exec/parse2/update-tokens.tsv", "exec/parse2/return-tokens.tsv",
+        "exec/parse2/shape-tokens.tsv", "exec/parse2/update-pointer.tsv", "exec/parse2/update-modes.tsv", "exec/parse2/update-float.tsv",
+        "include/assert.h", "include/ctype.h", "include/stdlib.h", "include/string.h", "include/wchar.h", "include/stdio.h", "tools/facts-gen.cx", 0}, k2_gen2},
     {"nativeabi", {"exec/nativeabi/rules.tsv", "exec/nativeabi/trie-order.tsv", "exec/nativeabi/ordered-result.tsv", "exec/nativeabi/gen-fresh.tsv",
         "exec/nativeabi/ordered-fresh.tsv", "exec/facts/nativeabi-gen-reject.tsv", "exec/facts/top-modelgraphequality-banks.tsv", "tools/facts-gen.cx", 0}, nativeabi},
     {"pp-autoinc-gen", {"exec/facts/pp-bytes.tsv", "seed/unisa_libneed.c", "exec/facts/pp-autoinc.tsv", "exec/facts/pp-layout.tsv",
