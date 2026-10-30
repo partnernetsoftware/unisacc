@@ -133,3 +133,17 @@ reject: not covered: win/x86_64 lowering
 `exec/facts/lower-abi.tsv` 里 win/x86_64 的 `poll` 系统号是 `none`、门是 0；osx/x86_64 的 `poll` 是 `0x20000e6`、门是 1。同形的还有 `stat`、`lstat`、`fstat`、`execve`、`socket`、`connect`、`ioctl`、`fcntl`、`mkdir`、`chmod`、`futex`、`clone`、`getpid`、`gettimeofday`、`ftruncate`、`getdirentries64`、`bind`、`listen`、`accept`、`syscall`。32 源的 e3 已经过了，所以不是「未定义函数」。停在哪一条要等新拒绝句。`ccw-win` 的 `CCW.set` 直接进 `C.fail`，osx 走 `ccw-x86` 把六个宿主参数搬进寄存器。
 
 已装产品 `tests/runcache.cx`，目录 `out/grk-lower-rcache`：12/0，冷 587 ms，命中 61 ms。没有重编候选。
+
+## 32 源 tape 对上表（2026-10-30）
+
+`-t win/x86_64` 不走宿主转发。改 `hs_ns` 之前，32 源停在 e3：`undefined function 'clock_gettime'`，没有 tape。`-o` 会转发。已装产品把桩写到 `/tmp/unisacc-forward-<地址>.c`，不是源码里现在的固定名。改之前那只桩是 `out/grk-win-gap/stub32.c`，821 字节，只有 `clock_gettime`，并且因为程序里取过函数地址（`ccwc>0`），`timespec *` 被包进 `__unisa_ccw_of`。单独转发 `clock_gettime`、不包这一层的小文件能出 PE。
+
+`hs_ns` 改为包含 `time.h`，调用里头的 static `clock_gettime`（Windows 走性能计数器，Linux 走系统调用，macOS 走 `gettimeofday`）。导出函数没有 `#if`。这之后 32 源不再转发，`-t` 写出 `out/grk-win-gap/slice.tape`，7821279 字节。
+
+`.sys` / `.sys6` 的名字和 `exec/facts/lower-abi.tsv` 里 win/x86_64、最后一列门为 0 的行求交，只剩一条：`hs_fx` 里的 `.sys6 syscall, r0, r1, r2, r3, r4, r5`（tape 第 28710 行，函数 `hs_fx__u1`）。`write`、`read`、`open`、`mmap` 这些门是 1。tape 里没有 `__ccw_`。`poll`、`setpgid`、`fork`、`execve`、`sigaction` 都不在这只 `.sys` 列表里。所以这一刀不改那些函数，也不改 qsort。
+
+`hs_fx` 是 `hs_forward_exec` 的 Linux memfd/execveat。Windows 上这个 static 帮手直接返回 -1，调用处照旧打印失败，不再发出 `.sys syscall`。
+
+同一只已装产品，外层 `tools/bound 55`，32 源，`-b win/x86_64 -o out/grk-win-gap/slice-win-fix2.com`。lower 退出 0，elf 退出 0。文件是 PE32+ console x86-64，1535488 字节，sha256 `ea1ceff674898bde77e9444c2884f22634f591f2e3cf4835d107c48cbadfb287`。没有 `UNIPKG1`，没有 P3。本机是 Linux，没有跑这只 PE。
+
+已装产品 `tests/runcache.cx`，目录 `out/grk-win-gap-rcache`：12/0，冷 566 ms，命中 61 ms。没有重编候选，没有安装。

@@ -7,15 +7,19 @@
    an output asks sy_is_reg instead of lstat. Each is declared at the call:
    drive.o already contains those bodies via runcache, and a second use
    would define sy_fstat twice.
-   mmap and the loader symbols are sys.mem and sys.dl. This file has no #include.
-   clock_gettime is declared inside hs_ns so this module does not export it.
+   mmap and the loader symbols are sys.mem and sys.dl.
+   hs_ns includes time.h and calls its static clock_gettime. A local extern
+   declaration was forwarded to the host; on win that pointer was wrapped
+   with __unisa_ccw_of and lowering rejected the wrapper. The header already
+   reads the monotonic clock per target (Win32 performance counter, Linux
+   syscall, macOS gettimeofday) and is not exported from this module.
    core_host_panic and core_host_fetch are the execution core's host hooks.
    Drive-supplied CLI resources win, then package resources (predefines and
    \0hdr/), then cwd-relative \0inc/q/ and \0inc/a/ files.
    The package path is UNISA_CONTAINER when that is set. Otherwise it is the
    entry executable if that file carries a UNIPKG1 trailer, else unisacc.com
    beside that executable (/proc/self/exe). It does not use the working directory. */
-struct hs_ts { long sec; long nsec; };
+#include <time.h>
 
 static void hs_why(char *why, int cap, const char *msg) {
     int i;
@@ -334,10 +338,9 @@ int hs_pid(void) {
 }
 
 long long hs_ns(void) {
-    struct hs_ts ts;
-    int clock_gettime(int, struct hs_ts *);
-    if (clock_gettime(1, &ts)) return -1;
-    return (long long)ts.sec * 1000000000LL + (long long)ts.nsec;
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts)) return -1;
+    return (long long)ts.tv_sec * 1000000000LL + (long long)ts.tv_nsec;
 }
 
 void core_host_panic(const char *reason) {
@@ -570,8 +573,15 @@ int hs_enter(unsigned char *base, int entryoff) {
 #define HS_LOADER "/lib64/ld-linux-x86-64.so.2"
 #endif
 
+/* Win has no memfd/execveat. The generic `.sys syscall` op is not lowered
+   there, so this helper returns -1 and hs_forward_exec reports that. */
 static long hs_fx(long nr, long a, long b, long c, long d, long e) {
+#if defined(_WIN32)
+    (void)nr; (void)a; (void)b; (void)c; (void)d; (void)e;
+    return -1;
+#else
     return __syscall6(nr, a, b, c, d, e);
+#endif
 }
 
 int hs_forward_exec(const unsigned char *image, long n, char **argv) {
