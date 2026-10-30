@@ -1,12 +1,13 @@
 /* Build the self-contained entry candidate.
-   usage: ROOT P3 OUT [CONSTRUCTOR] [--o1-drivers] [--only KEY]... [--link-only]
+   usage: ROOT P3 OUT [CONSTRUCTOR] [--o1-drivers] [--target T] [--only KEY]... [--link-only]
    ROOT is the tree. P3 is a file whose trailer is the package to append
    (the installed unisacc.com is the usual source). OUT is a directory.
    CONSTRUCTOR defaults to ROOT/unisacc.com and is started with sh.
    An explicit CONSTRUCTOR is executed directly.
    Default compile level is -O1 for drive.o, host.o, driveface.o,
    driveroute.o, cxmod.o and tapegate.o, and -O2 for every other object.
-   --o1-drivers is accepted and selects the same six. --only KEY
+   --o1-drivers is accepted and selects the same six. --target sets
+   the compiler -b value. Omitted, it stays lnx/x86_64. --only KEY
    (repeatable) compiles just those objects and does not link.
    --link-only links the objects already in OUT and appends P3. A full
    build can be split across those invocations. Each invocation reads
@@ -154,6 +155,11 @@ static int eb_same(const char *a, const char *b) {
     return a[i] == 0 && b[i] == 0;
 }
 
+static int eb_target_ok(const char *s) {
+    return eb_same(s, "lnx/x86_64") || eb_same(s, "lnx/arm64") || eb_same(s, "osx/x86_64") ||
+           eb_same(s, "osx/arm64") || eb_same(s, "win/x86_64");
+}
+
 static int eb_o1_driver(const char *key) {
     return eb_same(key, "drive.o") || eb_same(key, "host.o") || eb_same(key, "driveface.o") ||
            eb_same(key, "driveroute.o") || eb_same(key, "cxmod.o") || eb_same(key, "tapegate.o");
@@ -175,7 +181,7 @@ static int eb_wanted(const char *key, const char **only, int only_n) {
     return 0;
 }
 
-static int eb_compile(const char *bound, const char *ctor, int via_sh, const char *opt, const char *src, const char *obj, const char *cwd, const char *errpath, long long *dt, char *why, int wl) {
+static int eb_compile(const char *bound, const char *ctor, int via_sh, const char *opt, const char *triple, const char *src, const char *obj, const char *cwd, const char *errpath, long long *dt, char *why, int wl) {
     char *v[14];
     int n;
     n = 0;
@@ -186,7 +192,7 @@ static int eb_compile(const char *bound, const char *ctor, int via_sh, const cha
     v[n++] = (char *)opt;
     v[n++] = "-c";
     v[n++] = "-b";
-    v[n++] = "lnx/x86_64";
+    v[n++] = (char *)triple;
     v[n++] = "-funit";
     v[n++] = "-o";
     v[n++] = (char *)obj;
@@ -196,7 +202,7 @@ static int eb_compile(const char *bound, const char *ctor, int via_sh, const cha
     return eb_run(v, cwd, 58, dt, why, wl, errpath);
 }
 
-static int eb_link(const char *bound, const char *ctor, int via_sh, char **objs, int nobj, const char *elf, const char *cwd, const char *errpath, long long *dt, char *why, int wl) {
+static int eb_link(const char *bound, const char *ctor, int via_sh, const char *triple, char **objs, int nobj, const char *elf, const char *cwd, const char *errpath, long long *dt, char *why, int wl) {
     char *v[64];
     int n;
     int i;
@@ -206,7 +212,7 @@ static int eb_link(const char *bound, const char *ctor, int via_sh, char **objs,
     if (via_sh) v[n++] = "sh";
     v[n++] = (char *)ctor;
     v[n++] = "-b";
-    v[n++] = "lnx/x86_64";
+    v[n++] = (char *)triple;
     v[n++] = "-o";
     v[n++] = (char *)elf;
     i = 0;
@@ -295,14 +301,17 @@ int main(int argc, char **argv) {
     const char *src_rel[33];
     const char *only_keys[33];
     const char *rmode;
+    const char *target;
     char *objp[33];
     long nbytes[33];
     long nf, nc, np, nk;
     long poff, plen;
     long long nss[33];
     long long tl, ts;
-    int via_sh, rc, i, o1_drivers, link_only, only_n, w, a, found, k;
+    int via_sh, rc, i, o1_drivers, link_only, only_n, w, a, found, k, target_set;
     FILE *rf;
+    target = "lnx/x86_64";
+    target_set = 0;
     o1_drivers = 1;
     link_only = 0;
     only_n = 0;
@@ -316,6 +325,14 @@ int main(int argc, char **argv) {
         }
         if (eb_same(argv[a], "--link-only")) {
             link_only = 1;
+            a = a + 1;
+            continue;
+        }
+        if (eb_same(argv[a], "--target")) {
+            if (target_set || a + 1 >= argc) eb_die("target");
+            a = a + 1;
+            target = argv[a];
+            target_set = 1;
             a = a + 1;
             continue;
         }
@@ -334,8 +351,9 @@ int main(int argc, char **argv) {
     }
     argc = w;
     if (link_only && only_n) eb_die("flags");
+    if (!eb_target_ok(target)) eb_die("target");
     if (argc != 4 && argc != 5) {
-        fputs("usage: ROOT P3 OUT [CONSTRUCTOR] [--o1-drivers] [--only KEY]... [--link-only]\n", stderr);
+        fputs("usage: ROOT P3 OUT [CONSTRUCTOR] [--o1-drivers] [--target T] [--only KEY]... [--link-only]\n", stderr);
         return 2;
     }
     via_sh = argc == 4;
@@ -411,9 +429,9 @@ int main(int argc, char **argv) {
     if (!rf) eb_die("receipt");
     eb_open_head(rf, root, p3, hp, ctor, hk, nk, via_sh);
     if (o1_drivers)
-        fprintf(rf, "object_level\tmode=o1-drivers\tdrive.o=-O1\thost.o=-O1\tdriveface.o=-O1\tdriveroute.o=-O1\tcxmod.o=-O1\ttapegate.o=-O1\tother=-O2\n");
+        fprintf(rf, "object_level\tmode=o1-drivers\tdrive.o=-O1\thost.o=-O1\tdriveface.o=-O1\tdriveroute.o=-O1\tcxmod.o=-O1\ttapegate.o=-O1\tother=-O2\ttarget=%s\n", target);
     else
-        fprintf(rf, "object_level\tmode=default\tall=-O2\n");
+        fprintf(rf, "object_level\tmode=default\tall=-O2\ttarget=%s\n", target);
     i = 0;
     while (i < 33) {
         if (link_only || !eb_wanted(keys[i], only_keys, only_n)) {
@@ -422,7 +440,7 @@ int main(int argc, char **argv) {
             continue;
         }
         why[0] = 0;
-        rc = eb_compile(bound, ctor, via_sh, eb_opt_for(keys[i], o1_drivers), srcs_b[i], objs_b[i], root, rrs_b[i], &nss[i], why, (int)sizeof why);
+        rc = eb_compile(bound, ctor, via_sh, eb_opt_for(keys[i], o1_drivers), target, srcs_b[i], objs_b[i], root, rrs_b[i], &nss[i], why, (int)sizeof why);
         if (rc) {
             eb_fail_close(rf, keys[i], rrs_b[i], rc, nss[i], why);
             return 1;
@@ -434,7 +452,7 @@ int main(int argc, char **argv) {
     }
     if (!only_n) {
         why[0] = 0;
-        rc = eb_link(bound, ctor, via_sh, objp, 33, elf, root, rr_link, &tl, why, (int)sizeof why);
+        rc = eb_link(bound, ctor, via_sh, target, objp, 33, elf, root, rr_link, &tl, why, (int)sizeof why);
         if (rc) {
             eb_fail_close(rf, "entry.elf", rr_link, rc, tl, why);
             return 1;
