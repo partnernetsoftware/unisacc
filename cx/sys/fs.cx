@@ -11,7 +11,7 @@ typedef struct {
     int mode;       /* permission bits, 07777 */
     int kind;       /* 'f' regular, 'd' directory, 'l' symlink (sy_lstat only), '?' other */
     long uid;       /* owner */
-    unsigned long dev;   /* device; (dev, ino) names one file across hard links and mounts */
+    unsigned long dev;   /* device. Linux and macOS: (dev, ino) names one file. Windows leaves both 0. */
 } sy_stat_t;
 
 static int sy_fail(void) { return errno ? -errno : -1; }
@@ -90,6 +90,34 @@ int sy_realpath(const char *path, char *dst, int cap) {
     return (int)n;
 }
 
+/* This process's executable path into DST. Its length, or -errno.
+   Linux reads /proc/self/exe. Windows calls GetModuleFileNameA (kernel32). */
+static int sy_self_path_os(char *dst, int cap) {
+#ifdef _WIN32
+    static __u_word fn;
+    __u_word n;
+    if (!fn) fn = _ux_sym("GetModuleFileNameA");
+    if (!fn) return -ENOSYS;
+    n = _ux_call(fn, 0, (__u_word)dst, (__u_word)cap, 0) & 0xFFFFFFFFL;
+    if (n == 0) { _ux_fail(); return sy_fail(); }
+    if (n >= (__u_word)cap) return -ENAMETOOLONG;
+    return (int)n;
+#else
+    long n;
+    errno = 0;
+    n = readlink("/proc/self/exe", dst, (size_t)cap - 1);
+    if (n < 0) return sy_fail();
+    if (n >= cap) return -ENAMETOOLONG;
+    dst[n] = 0;
+    return (int)n;
+#endif
+}
+
+int sy_self_path(char *dst, int cap) {
+    if (!dst || cap < 2) return -EINVAL;
+    return sy_self_path_os(dst, cap);
+}
+
 /* Reposition FD to OFF from WHENCE (the prelude's SEEK_SET/SEEK_CUR/SEEK_END). The new offset, or -errno. */
 long sy_lseek(int fd, long off, int whence) {
     off_t r;
@@ -146,14 +174,41 @@ int sy_chmod(const char *path, int mode) {
     return chmod(path, (mode_t)mode) == 0 ? 0 : sy_fail();
 }
 
-/* stat PATH (following links) into OUT. 0, or -errno. */
-int sy_stat(const char *path, sy_stat_t *out) {
+/* Windows: GetFileAttributesExA has no device or inode. (dev, ino) cannot
+   say that two names are one file there; both fields stay 0. */
+static int sy_stat_os(const char *path, sy_stat_t *out) {
+#ifdef _WIN32
+    static __u_word fn;
+    unsigned int d[9];
+    __u_word ticks;
+    if (!fn) fn = _ux_sym("GetFileAttributesExA");
+    if (!fn) return -ENOSYS;
+    if (!(_ux_call(fn, (__u_word)path, 0, (__u_word)d, 0) & 0xFFFFFFFFL)) {
+        _ux_fail();
+        return sy_fail();
+    }
+    out->size = (long)(((__u_word)d[7] << 32) | (__u_word)d[8]);
+    ticks = ((__u_word)d[6] << 32) | (__u_word)d[5];
+    out->mtime = ticks > 116444736000000000LL ? (long)((ticks - 116444736000000000LL) / 10000000LL) : 0;
+    out->mode = 0;
+    out->kind = (d[0] & 0x10) ? 'd' : 'f';
+    out->uid = 0;
+    out->ino = 0;
+    out->dev = 0;
+    return 0;
+#else
     struct stat s;
     errno = 0;
-    if (!path || !path[0] || !out) return -EINVAL;
     if (stat(path, &s) != 0) return sy_fail();
     sy_fill(&s, out);
     return 0;
+#endif
+}
+
+/* stat PATH (following links) into OUT. 0, or -errno. */
+int sy_stat(const char *path, sy_stat_t *out) {
+    if (!path || !path[0] || !out) return -EINVAL;
+    return sy_stat_os(path, out);
 }
 
 /* lstat PATH (a link is reported as kind 'l') into OUT. 0, or -errno. */
