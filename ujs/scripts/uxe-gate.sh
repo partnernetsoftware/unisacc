@@ -11,7 +11,7 @@ cd "$UJS"
 
 STARTED=0
 if ! curl --noproxy '*' -sf -o /dev/null "http://127.0.0.1:8765/uxe/" 2>/dev/null; then
-  python3 -m http.server 8765 --directory "$UJS" >/tmp/uxe-gate-8765.log 2>&1 &
+  node "$UJS/scripts/static-serve.mjs" 8765 "$UJS" >/tmp/uxe-gate-8765.log 2>&1 &
   SPID=$!
   STARTED=1
   cleanup() { kill -9 "$SPID" 2>/dev/null || true; }
