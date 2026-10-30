@@ -25,5 +25,5 @@
 `tests/cxinclude-boundary.tsv` 的白名单是 `include/`、`tools/cxcc-hostinc/`、`cx/sys/`，也就是底层。白名单外仍有 `#include` 的：
 
 - `apps/csih/` 共 30 个文件（基线行 2 个，超基线 28 个）：需要的 socket、termios、signal、tty 等接口还没进 `cx/sys`。csih 车道。
-- `src/host.cx` 有 3 个：`<sys/mman.h>`、`<dlfcn.h>`、`<fcntl.h>`。它在 `tests/cxraw-layers.tsv` 里算底层。二选一：把它列进 include 白名单，或者把 mmap、dlopen 收进 `cx/sys`。grk 的文件。
+- `src/host.cx` 原来有 3 个：`<sys/mman.h>`、`<dlfcn.h>`、`<fcntl.h>`。已经收进 `cx/sys/mem.cx` 和 `cx/sys/dl.cx`，`src/host.cx` 现在 0 个 include。open 的 flag 走前导。`tests/cxinclude.cx --check` 不再报这个文件。
 - 两行旧基线：`exec/c/qprefixcheck.cx`（1 个）、`exec/parse2/librarycallsitecheck.cx`（2 个）。

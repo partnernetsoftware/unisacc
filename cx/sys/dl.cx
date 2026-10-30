@@ -1,0 +1,79 @@
+#pragma unisa module dl
+#include <dlfcn.h>
+/* L0 sys/dl: load a shared library and the four loader symbol addresses
+   the image route writes (plans/cx-layers.md). <dlfcn.h> is not in the
+   prelude. A missing library or symbol is 0. sy_dlclose is 0, or -errno
+   when the host reports one, else -EIO. Windows has no dlfcn: open and
+   sym return 0, close and addr return -ENOSYS. Exported functions stay
+   outside #if. */
+
+static int syd_now(void) {
+#if defined(_WIN32)
+    return 0;
+#else
+    return RTLD_NOW;
+#endif
+}
+
+static void *syd_open(const char *path, int mode) {
+#if defined(_WIN32)
+    (void)path;
+    (void)mode;
+    return 0;
+#else
+    return dlopen(path, mode);
+#endif
+}
+
+static void *syd_sym(void *handle, const char *name) {
+#if defined(_WIN32)
+    (void)handle;
+    (void)name;
+    return 0;
+#else
+    return dlsym(handle, name);
+#endif
+}
+
+static int syd_close(void *handle) {
+#if defined(_WIN32)
+    (void)handle;
+    return -ENOSYS;
+#else
+    int rc;
+    errno = 0;
+    rc = dlclose(handle);
+    if (rc == 0) return 0;
+    return errno ? -errno : -EIO;
+#endif
+}
+
+static int syd_addr(int slot, unsigned long long *out) {
+#if defined(_WIN32)
+    (void)slot;
+    (void)out;
+    return -ENOSYS;
+#else
+    unsigned long long v;
+    if (slot == 0) v = (unsigned long long)(uintptr_t)dlopen;
+    else if (slot == 1) v = (unsigned long long)(uintptr_t)dlsym;
+    else if (slot == 2) v = (unsigned long long)(uintptr_t)dlclose;
+    else v = (unsigned long long)(uintptr_t)dlerror;
+    *out = v;
+    return 0;
+#endif
+}
+
+int sy_rtld_now(void) { return syd_now(); }
+
+void *sy_dlopen(const char *path, int mode) { return syd_open(path, mode); }
+
+void *sy_dlsym(void *handle, const char *name) { return syd_sym(handle, name); }
+
+int sy_dlclose(void *handle) { return syd_close(handle); }
+
+/* Slot 0 dlopen, 1 dlsym, 2 dlclose, 3 dlerror. The address, or -EINVAL. */
+int sy_dl_addr(int slot, unsigned long long *out) {
+    if (!out || slot < 0 || slot > 3) return -EINVAL;
+    return syd_addr(slot, out);
+}

@@ -1,0 +1,70 @@
+#pragma unisa module mem
+#include <sys/mman.h>
+/* L0 sys/mem: anonymous reserve and permission changes (plans/cx-layers.md).
+   <sys/mman.h> is not in the prelude. 0 on success, -errno on failure.
+   Windows has no mmap here: -ENOSYS. Exported functions stay outside #if. */
+
+static int sym_fail(void) { return errno ? -errno : -1; }
+
+static int sym_map(void **out, long n) {
+#if defined(_WIN32)
+    (void)out;
+    (void)n;
+    return -ENOSYS;
+#else
+    void *p;
+    errno = 0;
+    p = mmap(0, (size_t)n, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (p == MAP_FAILED || !p) return sym_fail();
+    *out = p;
+    return 0;
+#endif
+}
+
+static int sym_unmap(void *p, long n) {
+#if defined(_WIN32)
+    (void)p;
+    (void)n;
+    return -ENOSYS;
+#else
+    errno = 0;
+    return munmap(p, (size_t)n) == 0 ? 0 : sym_fail();
+#endif
+}
+
+static int sym_prot(void *p, long n, int prot) {
+#if defined(_WIN32)
+    (void)p;
+    (void)n;
+    (void)prot;
+    return -ENOSYS;
+#else
+    errno = 0;
+    return mprotect(p, (size_t)n, prot) == 0 ? 0 : sym_fail();
+#endif
+}
+
+/* Map N bytes of anonymous private memory, no access, into *OUT. */
+int sy_map_none(void **out, long n) {
+    if (!out || n < 0) return -EINVAL;
+    *out = 0;
+    return sym_map(out, n);
+}
+
+/* Drop a mapping from sy_map_none. */
+int sy_unmap(void *p, long n) {
+    if (!p || n < 0) return -EINVAL;
+    return sym_unmap(p, n);
+}
+
+/* Allow read and write on N bytes at P. */
+int sy_protect_rw(void *p, long n) {
+    if (!p || n < 0) return -EINVAL;
+    return sym_prot(p, n, PROT_READ | PROT_WRITE);
+}
+
+/* Allow read and execute on N bytes at P. */
+int sy_protect_rx(void *p, long n) {
+    if (!p || n < 0) return -EINVAL;
+    return sym_prot(p, n, PROT_READ | PROT_EXEC);
+}

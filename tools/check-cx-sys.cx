@@ -1,4 +1,4 @@
-/* Checks cx/sys (env, fs, proc, time, net, posix, sha): sh ./unisacc.com tools/check-cx-sys.cx
+/* Checks cx/sys (env, fs, proc, time, net, posix, sha, mem, dl): sh ./unisacc.com tools/check-cx-sys.cx
    (from the repo root: the posix cases re-run this file as a child, "-- child MODE ...", for what
    must happen in another process: setsid, and a record lock held by someone else).
    Each case runs for real in a scratch directory under $TMPDIR or /tmp.
@@ -11,6 +11,8 @@
 #pragma unisa use sys.net
 #pragma unisa use sys.posix
 #pragma unisa use sys.sha
+#pragma unisa use sys.mem
+#pragma unisa use sys.dl
 #pragma unisa use text.text
 static int n_ok, n_bad;
 static void ok(int c, const char *name) { printf("  %s  %s\n", c ? "ok  " : "FAIL", name); if (c) n_ok++; else n_bad++; }
@@ -344,6 +346,41 @@ int main(int argc, char **argv) {
             ok(n < 65536 && picked == soft && tx_eq(picked, abc, 65) && (af_rc != 0 || tx_eq(af, abc, 65)),
                "sha: under 64KiB the digest is the software fallback");
         }
+    }
+
+    /* mem */
+    {
+        void *p = 0;
+        int mr = sy_map_none(&p, 4096);
+        ok(mr == 0 && p != 0, "mem: anonymous page");
+        if (mr == 0 && p) {
+            unsigned char *b = p;
+            ok(sy_protect_rw(p, 4096) == 0, "mem: read-write");
+            b[0] = 0x7f;
+            ok(b[0] == 0x7f, "mem: stored byte reads back");
+            ok(sy_protect_rx(p, 4096) == 0, "mem: read-exec");
+            ok(sy_unmap(p, 4096) == 0, "mem: unmap");
+        } else {
+            ok(0, "mem: read-write");
+            ok(0, "mem: stored byte reads back");
+            ok(0, "mem: read-exec");
+            ok(0, "mem: unmap");
+        }
+        ok(sy_map_none(0, 4096) == -EINVAL && sy_map_none(&p, -1) == -EINVAL && sy_unmap(0, 4096) == -EINVAL &&
+           sy_protect_rw(0, 4096) == -EINVAL && sy_protect_rx(0, 4096) == -EINVAL, "mem: null or negative is -EINVAL");
+    }
+
+    /* dl */
+    {
+        unsigned long long a, b, c, d;
+        void *h;
+        ok(sy_dl_addr(0, &a) == 0 && sy_dl_addr(1, &b) == 0 && sy_dl_addr(2, &c) == 0 && sy_dl_addr(3, &d) == 0 &&
+           a && b && c && d && a != b && b != c && c != d, "dl: four loader addresses differ");
+        ok(sy_dl_addr(-1, &a) == -EINVAL && sy_dl_addr(4, &a) == -EINVAL && sy_dl_addr(0, 0) == -EINVAL,
+           "dl: a bad slot or null out is -EINVAL");
+        h = sy_dlopen("libc.so.6", sy_rtld_now());
+        ok(h != 0 && sy_dlsym(h, "malloc") != 0 && sy_dlclose(h) == 0, "dl: libc malloc resolves and closes");
+        ok(sy_dlopen("cx-sys-no-such-7f3a.so", sy_rtld_now()) == 0, "dl: a missing library is 0");
     }
 
     ok(cx_rmtree(root) == 0 && sy_exists(root) == 0, "cleanup: scratch removed through the deletion guard");

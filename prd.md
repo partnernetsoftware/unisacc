@@ -170,6 +170,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 │  ├─ 自举：第二代 13 已编完 33 只对象并链上，最慢 driveface.o 11.8s，低于 55s
 │  ├─ 未切换：旧构造脚本 exec/c/buildcompiler.sh 等仍指向已归档 C；已装产品未换
 │  ├─ 四目标对象探针（2026-10-30，已装产品，不算通过）：lnx/arm64 33 个对象都是 ELF；osx/x86_64、osx/arm64、win/x86_64 各 33 个编译失败，第一条诊断都是 model driver 还没把 -c -b 接到非 Linux。没有链接，没有 wrap。见 plans/entry-target-probe-2026-10-30.md
+│  ├─ host 的 include（2026-10-30）：`src/host.cx` 不再写 `#include`。mmap、mprotect、munmap 在 `cx/sys/mem.cx`；dlopen、dlsym、dlclose、dlerror 的地址在 `cx/sys/dl.cx`。open 的 flag 仍走前导。`tools/check-cx-sys.cx` 实跑 PASS，ok=100，fail=0。`tests/cxinclude.cx --check` 不再报 `src/host.cx`（整次仍因 apps/csih 失败）。`tests/cxraw.cx --check` 是 629 个已跟踪文件、19634 次，0 超基线。候选 `out/grk-host-sys/candidate`，2963732 字节，sha256 `9fb93c137363b210295870853fcf01b6693414270bc57f5c1438779c197535bf`；entry.elf 1327712 字节，sha256 `da3f42daed4faef32ac550b67856eade8eb344effaafca9a5ea0cb3c3c09facd`。runcache 12/0（冷 586 ms，命中 40 ms）。对拍这一片 22 格全 SAME，抽前 10 格也是 SAME，LEFT 126，没有跑完 148。不能装。
 │  └─ 注册表里仍读旧 C 的批次见 plans/archived-c-batches-2026-10-30.md：比对类 6 个已改指 archive/reference-c，-I exec/c 加 source_frame/codecgate 对象，实跑全 PASS；p3-library-* 待 p3-pack-ctx 材料；旧构造路线（hostseed-*、ri-material-*、package-controls 等）归档还是标不可运行，待主人定
 ├─ 性能（plans/perf-bottlenecks-2026-10-30.md）
 │  ├─ B1 E2 每个 #include 整缓冲重扫：前导部分已解（4f4a2ae2b3，include/cx.h → 生成的单文件 cx-flat.h，tools/cx-flatten.cx --check；空 main E2 1.74→0.09 s，候选冷编 facts-gen 40.5→16.8 s）；用户自己的 #include 仍待规则方案
@@ -177,8 +178,8 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 │  ├─ B3 运行缓存：单源也存转发 ELF，大文件哈希走 AF_ALG。tests/runcache.cx 对 build-17 是 12/0（首次 546 ms，命中 40 ms）。包解析和解压还在
 │  └─ B5 六个驱动对象用 -O1：同一份 entry-build.cx，对象加链接 61.4 s → 52.8 s。混合候选 runcache 12/0（首次 515 ms，命中 41 ms），dev-run.cx 冷 -run 编译加用法拒绝 6.11 s。148 格全 SAME 后，不带旗标也是这六只 -O1
 ├─ 去 Python：已归档的在 archive/reference-py/；事实表 30 张由 tools/facts-gen.cx 生成并 --check，kernel/ 由 tools/kernel-emit.cx 生成，unisa 包已归档；活 .py 只剩 3 个：apps/csih/deepseek-proxy.py（仓外 rawcsih 拉起，待主人定改 rawcsih 直连）、release/apeinspect.py 与 release/tools/draftfetch.py（CI 用；release/apeinspect.cx 输出一致，工作流补丁在 out/ci-draft/，待授权）
-├─ 分层：plans/cx-layers.md；L0 包 cx/text、cx/mem（arena）、cx/sys（env/fs/proc/time/net/sha，检查 tools/check-cx-sys.cx，仓库根这次 PASS ok=90 fail=0），棘轮 tests/cxraw.cx（上层直接 libc/POSIX 调用只降不升）；include/cx.h 与 cx_read/cx_write/cx_run* 收编归 cc
-├─ 卫生：cx 四棘轮不计 archive/ 与已跟踪符号链接（f638c861e5，原把 31 个链接重复计数）；cxraw 这次是 628 个 .cx、19639 次调用，基线 19639，超过 0（src/drive.cx 79、src/driveroute.cx 22）。src/drive.cx、src/driveroute.cx、src/host.cx 里那 4 处 memcpy 已留下返回值。cxtrunc 整次仍失败，超基线的是 csih 新文件和过期行，不是这 4 处。cx/runtime、cx/compiler 的 5 处已标（71c45c265c）
+├─ 分层：plans/cx-layers.md；L0 包 cx/text、cx/mem（arena）、cx/sys（env/fs/proc/time/net/sha/mem/dl，检查 tools/check-cx-sys.cx，这次 PASS ok=100 fail=0），棘轮 tests/cxraw.cx（上层直接 libc/POSIX 调用只降不升）；include/cx.h 与 cx_read/cx_write/cx_run* 收编归 cc
+├─ 卫生：cx 四棘轮不计 archive/ 与已跟踪符号链接（f638c861e5，原把 31 个链接重复计数）；cxraw 这次是 629 个已跟踪 .cx、19634 次调用，基线 19634，超基线 0、低于基线 0。src/drive.cx、src/driveroute.cx、src/host.cx 里那 4 处 memcpy 已留下返回值。cx/runtime、cx/compiler 的 5 处已标（71c45c265c）
 ├─ 新测试入口注册表 289 批次、270 已实现：本轮新登 24 个——21 个原本未登记的模块检查（其中 3 个解码检查原先就坏，缺 use，已修），加 tests/core-stack-empty.cx、tests/driver-environment.cx 两个包装和 tests/runcache.cx；还有 10 个 check 工具要材料或参数，未登记
 └─ 分层棘轮：tests/cxraw.cx（plans/cx-layers.md）——上层 .cx 直接 libc/POSIX 只降不升、新文件须 0；csih 下层封装已入 tests/cxraw-layers.tsv（netwit/tmuxwit/retry_stub/tclock），apps/csih/tests/run.cx 已迁 tx_* 至 0
 ```
@@ -213,14 +214,14 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 | 房间 | 当前事实 | 入口 |
 |---|---|---|
 | 新入口 | `src/unisacc.cx` 六层；`src/core`、`src/runtime` 为指向 `cx/` 的符号链接 | plans/cx-modules.md 顶部产品面 |
-| 候选构造 | 全只候选仍是显式 `--o1-drivers` 的 `out/grk-opt2-o1/candidate`，sha `e477a4c7…`，2959636 字节。entry-build 不带旗标也编那六只 `-O1`；整只还没按新默认重编。无旗标探针的 tapegate.o、path.o 与已知对象逐字节相同 | plans/perf-bottlenecks-2026-10-30.md 的 B5；plans/cx-modules.md 第 164 节 |
-| 四目标探针 | 已装产品只编对象：lnx/arm64 33 只 ELF；osx/x86_64、osx/arm64、win/x86_64 各 33 只编译失败，诊断同一句。不记通过。`76085cb99d` 之后不带 `--target` 的 path.o、tapegate.o 与改前逐字节相同 | plans/entry-target-probe-2026-10-30.md |
-| 对拍 | `e477a4c7` 上 148 格全 SAME（`out/grk-opt2-mx`）。build-14 的 56 格和 build-13 的 143 格不转到这只。build-17 的运行缓存合同是 `tests/runcache.cx` 12/0 | plans/cx-modules.md 第 164、161、163 节 |
+| 候选构造 | 当前这只是 `out/grk-host-sys/candidate`，sha256 `9fb93c13…`，2963732 字节。entry.elf 1327712 字节，sha256 `da3f42da…`。已装产品经 `sh` 构造，默认六只 `-O1`，目标 `lnx/x86_64`，P3 仍是 build-14 的 pkg.bin。`e477a4c7` 的 148 格不转到这只。还没装 | plans/cx-layers.md；out/grk-host-sys/receipt.txt |
+| 四目标探针 | 已装产品只编对象：lnx/arm64 33 只 ELF；osx/x86_64、osx/arm64、win/x86_64 各 33 只编译失败，诊断同一句。不记通过。`76085cb99d` 之后不带 `--target` 的 path.o、tapegate.o 与改前逐字节相同。host.cx 改过之后，那批对象里的 host.o 过期 | plans/entry-target-probe-2026-10-30.md |
+| 对拍 | `9fb93c13` 这一片 22 格全 SAME（`out/grk-host-sys-mx`），抽前 10 格也是 SAME，LEFT 126，没有跑完 148。`e477a4c7` 上 148 格全 SAME 只属于那只（`out/grk-opt2-mx`）。这只的 runcache 是 12/0 | out/grk-host-sys-mx；plans/cx-modules.md 第 164 节 |
 | 性能 | 对象加链接 61.4 s → 52.8 s。混合候选 runcache 首次 515 ms、命中 41 ms。dev-run.cx 冷 -run 编译加用法拒绝 6.11 s。runcache 的运行时间没有变快 | plans/perf-bottlenecks-2026-10-30.md 的 B5 |
 | 事实表 | 只经 `sh ./unisacc.com tools/facts-gen.cx -- --write\|--check .`（30 张 + bank 归属，`--check` 31/0） | exec/facts/ |
 | 归档 | 参考 C、参考 Python、旧检查与旧 shell | archive/reference-c/、archive/reference-py/README.md |
 | 已装产品 | 3,035,300 B，sha 79fb84e6…；新测试入口 `sh ./unisacc.com tests/run.cx -- --list` | tests/batches.tsv、tests/coverage.tsv |
-| CX 分层 | L0=`cx/{sys,mem,text}`+layers 表白名单；棘轮 `tests/cxraw.cx`；示范 `tools/gold-table.cx` | plans/cx-layers.md、tests/cxraw-layers.tsv |
+| CX 分层 | L0=`cx/{sys,mem,text}`+layers 表白名单。`src/host.cx` 0 个 include，映射和加载符号在 `cx/sys/mem.cx`、`cx/sys/dl.cx`。check-cx-sys 100/0。cxraw 629 个文件、19634 次、0 超基线 | plans/cx-layers.md、tests/cxraw-layers.tsv |
 | 旧纪元证据 | 10-30 前的构造链、安装、矩阵收据 | archive/prd-c43-history-20261030.md |
 
 **动态维护规则**：进度、身份、阻塞、决定或下一动作变化时，同步原位更新思维树节点及对应房间；只把当前事实留在这里。每次恢复先读两者，派发任务引用当前节点和确切缺口。原始过程与旧失败保留在证据或Git历史中，不冒充当前状态。
