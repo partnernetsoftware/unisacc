@@ -1,0 +1,130 @@
+/* tools/stale.cx -- archive candidates: tracked files nothing live refers to, by last-commit age.
+ *
+ *   sh ./unisacc.com tools/stale.cx -- [--days N] [--refs-max K] PREFIX...
+ *
+ * Candidates are the tracked files under the PREFIXes (archive/, ujs/ and apps/csih/ never).  A reference is
+ * a mention in another live tracked text file (not under archive/, not the file itself, no NUL in its first
+ * 4 KiB): a path-like token ([A-Za-z0-9_./-]) whose last component is the candidate's file name and which,
+ * after leading ./ and ../ are dropped, is a suffix of the candidate's path on a / boundary, or is the bare
+ * file name when that name is unique among tracked files.  Each referencing file counts once.  Age is days
+ * since the last commit touching the candidate.  Prints, for refs <= K (default 0) and age >= N (default 0):
+ *   CAND<TAB>refs=R<TAB>age_d=A<TAB>PATH<TAB>[first referrer]
+ * then STALE<TAB>candidates=C<TAB>listed=L<TAB>scanned_files=F.  It only reports; moving a file to archive/ and
+ * repairing links (tools/doc-links.cx --fix-moved) is the caller's decision. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use text.num
+#pragma unisa use mem.heap
+
+#define ST_MAX 8192
+typedef struct { const char *path; long pl; const char *base; long bl; int refs, uniq; long last; const char *who; int seen_epoch; } Cand;
+static Cand cand[ST_MAX]; static int ncand;
+static int bucket[1 << 15], nextc[ST_MAX];
+
+static void st_die(const char *a) { fprintf(stderr, "stale: %s\n", a); exit(2); }
+
+static char *slurp_cmd(char **argv, long *n) {
+    int ofd, pid; long cap = 1 << 20, r; char *b = mm_alloc(cap);
+    *n = 0;
+    if (!b) return 0;
+    pid = sy_spawn_pipe(argv, 0, 0, &ofd, 0);
+    if (pid < 0) return 0;
+    while ((r = sy_read(ofd, b + *n, cap - 1 - *n)) > 0) {
+        *n += r;
+        if (*n + 1 >= cap) { char *g = mm_grow(b, cap * 2); if (!g) st_die("out of memory"); b = g; cap *= 2; }
+    }
+    sy_close(ofd); sy_wait_status(pid, 0, 0, 0, 0);
+    b[*n] = 0;
+    return b;
+}
+static unsigned hash(const char *s, long n) { unsigned h = 2166136261u; long i; for (i = 0; i < n; i++) h = (h ^ (unsigned char)s[i]) * 16777619u; return h & ((1 << 15) - 1); }
+static int closed(const char *p, long n) { return tx_prefix(p, n, "archive/", 8) || tx_prefix(p, n, "ujs/", 4) || tx_prefix(p, n, "apps/csih/", 10); }
+
+int main(int argc, char **argv) {
+    long days = 0, refsmax = 0, ln, at, now = sy_wall_s(), files = 0; int a = 1, k, listed = 0, epoch = 0;
+    char *all, *log;
+    while (a < argc && argv[a][0] == '-') {
+        if (a + 1 >= argc) st_die("usage: [--days N] [--refs-max K] PREFIX...");
+        if (tx_eqz(argv[a], "--days")) days = tx_strtol(argv[a + 1], 0, 10);
+        else if (tx_eqz(argv[a], "--refs-max")) refsmax = tx_strtol(argv[a + 1], 0, 10);
+        else st_die("unknown option");
+        a += 2;
+    }
+    if (a >= argc) st_die("usage: [--days N] [--refs-max K] PREFIX...");
+    {   char *gv[] = {"git", "ls-files", "-z", 0}; all = slurp_cmd(gv, &ln); if (!all) st_die("git ls-files failed"); }
+    for (k = 0; k < (1 << 15); k++) bucket[k] = -1;
+    for (at = 0; at < ln; ) {   /* candidates */
+        const char *p = all + at; long pl = tx_len(p, ln - at); int i;
+        if (pl <= 0) break;
+        if (!closed(p, pl)) for (i = a; i < argc; i++) if (tx_prefix(p, pl, argv[i], tx_len(argv[i], 4096))) {
+            long b = pl; unsigned h;
+            if (ncand == ST_MAX) st_die("too many candidates");
+            while (b > 0 && p[b - 1] != '/') b--;
+            cand[ncand].path = p; cand[ncand].pl = pl; cand[ncand].base = p + b; cand[ncand].bl = pl - b;
+            h = hash(p + b, pl - b); nextc[ncand] = bucket[h]; bucket[h] = ncand; ncand++;
+            break;
+        }
+        at += pl + 1;
+    }
+    for (at = 0; at < ln; ) {   /* uniqueness of each candidate's file name among all tracked files */
+        const char *p = all + at; long pl = tx_len(p, ln - at), b = pl; int c;
+        if (pl <= 0) break;
+        while (b > 0 && p[b - 1] != '/') b--;
+        for (c = bucket[hash(p + b, pl - b)]; c >= 0; c = nextc[c]) if (tx_same(cand[c].base, cand[c].bl, p + b, pl - b)) cand[c].uniq++;
+        at += pl + 1;
+    }
+    for (at = 0; at < ln; ) {   /* references */
+        const char *p = all + at; long pl = tx_len(p, ln - at); size_t sz; char *t; long i, n;
+        if (pl <= 0) break;
+        at += pl + 1;
+        if (closed(p, pl) && !tx_prefix(p, pl, "apps/csih/", 10)) continue;   /* apps/csih may refer to tools */
+        t = cx_read(p, &sz);
+        if (!t) continue;
+        n = (long)sz;
+        if (tx_chr(t, n < 4096 ? n : 4096, 0) >= 0) { mm_free(t); continue; }
+        files++; epoch++;
+        for (i = 0; i < n; ) {
+            long s = i, e, b, s2; int c;
+            while (i < n && ((t[i] >= 'a' && t[i] <= 'z') || (t[i] >= 'A' && t[i] <= 'Z') || (t[i] >= '0' && t[i] <= '9') || t[i] == '_' || t[i] == '.' || t[i] == '/' || t[i] == '-')) i++;
+            e = i;
+            if (e == s) { i++; continue; }
+            while (e > s && (t[e - 1] == '.' || t[e - 1] == '/')) e--;   /* a sentence's full stop */
+            b = e; while (b > s && t[b - 1] != '/') b--;
+            s2 = s; while (s2 + 1 < e && t[s2] == '.' && (t[s2 + 1] == '/' || (t[s2 + 1] == '.' && s2 + 2 < e && t[s2 + 2] == '/'))) s2 += t[s2 + 1] == '/' ? 2 : 3;
+            for (c = bucket[hash(t + b, e - b)]; c >= 0; c = nextc[c]) {
+                long tl = e - s2;
+                if (cand[c].seen_epoch == epoch || !tx_same(cand[c].base, cand[c].bl, t + b, e - b)) continue;
+                if (tx_same(cand[c].path, cand[c].pl, p, pl)) continue;   /* the file itself */
+                if ((tl <= cand[c].pl && tx_same(cand[c].path + cand[c].pl - tl, tl, t + s2, tl) && (tl == cand[c].pl || cand[c].path[cand[c].pl - tl - 1] == '/'))
+                    || (b == s2 && cand[c].uniq == 1)) {
+                    cand[c].refs++; cand[c].seen_epoch = epoch; if (!cand[c].who) cand[c].who = p;
+                }
+            }
+        }
+        /* t is kept: who points into the ls-files buffer, not into t */
+        mm_free(t);
+    }
+    {   char *gv[] = {"git", "log", "--format=%x01%ct", "--name-only", 0}; log = slurp_cmd(gv, &ln); if (!log) st_die("git log failed"); }
+    {   long t = 0;   /* newest commit first: the first time a path appears is its last change */
+        for (at = 0; at < ln; ) {
+            long e = tx_chr(log + at, ln - at, '\n'), l = e < 0 ? ln - at : e; int c;
+            if (l > 0 && log[at] == 1) t = tx_strtol(log + at + 1, 0, 10);
+            else if (l > 0) {
+                long b = l; while (b > 0 && log[at + b - 1] != '/') b--;
+                for (c = bucket[hash(log + at + b, l - b)]; c >= 0; c = nextc[c])
+                    if (!cand[c].last && tx_same(cand[c].path, cand[c].pl, log + at, l)) cand[c].last = t;
+            }
+            at += l + 1;
+        }
+    }
+    for (k = 0; k < ncand; k++) {
+        long age = cand[k].last ? (now - cand[k].last) / 86400 : -1;
+        if (cand[k].refs > refsmax || age < days) continue;
+        printf("CAND\trefs=%d\tage_d=%ld\t%.*s\t%s\n", cand[k].refs, age, (int)cand[k].pl, cand[k].path, cand[k].who ? cand[k].who : "-");
+        listed++;
+    }
+    printf("STALE\tcandidates=%d\tlisted=%d\tscanned_files=%ld\n", ncand, listed, files);
+    return 0;
+}
