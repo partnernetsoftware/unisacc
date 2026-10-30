@@ -96,4 +96,5 @@ Assertions and expected values are unchanged.
 | cx-model-lifetime-runtime | PASS 1/0 |
 | cx-model-allocation | PASS 1/0 |
 | cx-model-reference | PASS 8/0 (tests/cases/model_decode_reference.c) |
-| core-compat, p3-library-*, package-controls | not yet repaired |
+| core-compat | PASS 16/0: reads archive/reference-c/exec/c/core.c (R100 rename, same bytes) |
+| p3-library-*, package-controls | not yet repaired |
