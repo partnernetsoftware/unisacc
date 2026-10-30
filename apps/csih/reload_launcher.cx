@@ -1,3 +1,5 @@
+#pragma unisa use text.fmt
+#pragma unisa use sys.io
 #pragma unisa use reload_candidate
 #pragma unisa use reload_io
 #pragma unisa use json
@@ -68,8 +70,8 @@ static int lr_kind;
 
 static int lr_set(int kind, const char *msg) {
     static char tmp[LR_MSG];
-    snprintf(tmp, sizeof tmp, "%s", msg);   /* MSG may be lr_msg itself */
-    snprintf(lr_msg, sizeof lr_msg, "%s", tmp);
+    tx_snprintf(tmp, sizeof tmp, "%s", msg);   /* MSG may be lr_msg itself */
+    tx_snprintf(lr_msg, sizeof lr_msg, "%s", tmp);
     lr_kind = kind;
     return -1;
 }
@@ -89,14 +91,14 @@ static const char *lr_strerror(int e) {
     if (e == ESRCH) return "No such process";
     if (e == EMFILE) return "Too many open files";
     if (e == ENOEXEC) return "Exec format error";
-    return strerror(e);
+    return sy_strerror(e);
 }
 
 /* OSError-style text: "[Errno N] strerror: 'PATH'" (PATH may be 0). */
 static int lr_oserr(int e, const char *path) {
     char m[LR_MSG];
-    if (path) snprintf(m, sizeof m, "[Errno %d] %s: '%s'", e, lr_strerror(e), path);
-    else snprintf(m, sizeof m, "[Errno %d] %s", e, lr_strerror(e));
+    if (path) tx_snprintf(m, sizeof m, "[Errno %d] %s: '%s'", e, lr_strerror(e), path);
+    else tx_snprintf(m, sizeof m, "[Errno %d] %s", e, lr_strerror(e));
     return lr_set(K_OS, m);
 }
 
@@ -116,7 +118,7 @@ static int lr_has(const char *hay, const char *needle) {
     }
     return !needle[0];
 }
-static void lr_cpy(char *dst, int cap, const char *src) { snprintf(dst, (size_t)cap, "%s", src); }
+static void lr_cpy(char *dst, int cap, const char *src) { tx_snprintf(dst, (size_t)cap, "%s", src); }
 
 static int lr_valid_id(const char *s) {
     int i, n = lr_len(s);
@@ -166,7 +168,7 @@ static Buf lr_ev;
 static void ev_begin(const char *name) { lr_ev.n = 0; bs(&lr_ev, "{\"event\": "); bjs(&lr_ev, name); }
 static void ev_key(const char *k) { bs(&lr_ev, ", \""); bs(&lr_ev, k); bs(&lr_ev, "\": "); }
 static void ev_str(const char *k, const char *v) { ev_key(k); bjs(&lr_ev, v); }
-static void ev_int(const char *k, long v) { char t[32]; snprintf(t, sizeof t, "%ld", v); ev_key(k); bs(&lr_ev, t); }
+static void ev_int(const char *k, long v) { char t[32]; tx_snprintf(t, sizeof t, "%ld", v); ev_key(k); bs(&lr_ev, t); }
 static void ev_bool(const char *k, int v) { ev_key(k); bs(&lr_ev, v ? "true" : "false"); }
 static int ev_end(void) {
     int r;
@@ -259,7 +261,7 @@ static int actor_line(Actor *a, const char *line, int len) {
     if (len > 1023) return lr_set(K_VALUE, "oversize control line");
     if (lr_has(line, "\\u0000")) return lr_set(K_VALUE, "control schema");
     root = json_parse(line, (size_t)len, why, sizeof why);
-    if (!root) { snprintf(m, sizeof m, "control frame is not JSON: %s", why); return lr_set(K_VALUE, m); }
+    if (!root) { tx_snprintf(m, sizeof m, "control frame is not JSON: %s", why); return lr_set(K_VALUE, m); }
     if (root->kind != J_OBJ || root->nkeys != 4) bad = "control schema";
     for (i = 0; !bad && i < root->nkeys; i++)
         for (j = 0; j < i; j++)
@@ -340,7 +342,7 @@ static int lr_spawn(const Result *info, const char *handoff, int standby, Actor 
         sy_close(sv[0]); sy_close(sv[1]);
         return lr_set(K_OS, "cannot set control socket flags");
     }
-    snprintf(fdtext, sizeof fdtext, "%d", sv[1]);
+    tx_snprintf(fdtext, sizeof fdtext, "%d", sv[1]);
     argv[k++] = v.binary;
     argv[k++] = standby ? "standby-managed" : "agent-managed";
     argv[k++] = lr_directory;
@@ -378,7 +380,7 @@ static int lr_wait(Actor *a, const char *op, const Ident *id) {
             if (!lr_eq(msg->id.session, id->session) || !lr_eq(msg->id.handoff, id->handoff) || !lr_eq(msg->id.hash, id->hash))
                 return lr_set(K_VALUE, "stale actor identity");
             if (!lr_eq(msg->op, op)) {
-                snprintf(m, sizeof m, "expected %s received %s", op, msg->op);
+                tx_snprintf(m, sizeof m, "expected %s received %s", op, msg->op);
                 return lr_set(K_VALUE, m);
             }
             ev_begin("received");
@@ -389,9 +391,9 @@ static int lr_wait(Actor *a, const char *op, const Ident *id) {
             return ev_end();
         }
         if (sy_readable(a->sock, 100) == 1) TRY(actor_read(a));
-        if (!actor_alive(a)) { snprintf(m, sizeof m, "actor exited before %s", op); return lr_set(K_EOF, m); }
+        if (!actor_alive(a)) { tx_snprintf(m, sizeof m, "actor exited before %s", op); return lr_set(K_EOF, m); }
     }
-    snprintf(m, sizeof m, "waiting %s", op);
+    tx_snprintf(m, sizeof m, "waiting %s", op);
     return lr_set(K_TIMEOUT, m);
 }
 
@@ -492,13 +494,13 @@ static int lr_end_build(int kill, Result *out) {
     status = lr_build_status;
     lr_build_pid = -1;
     if (kill || status != 0) {
-        snprintf(m, sizeof m, "build failed rc=%d: %s %s", lr_pyrc(status), lr_bout.p, lr_berr.p);
+        tx_snprintf(m, sizeof m, "build failed rc=%d: %s %s", lr_pyrc(status), lr_bout.p, lr_berr.p);
         return lr_set(K_VALUE, m);
     }
     root = json_parse(lr_bout.p, lr_bout.n, why, sizeof why);
     dir = root ? jstr(jget(root, "candidate_dir")) : 0;
     if (!dir) {
-        snprintf(m, sizeof m, "build output is not a candidate: %s", root ? "no candidate_dir" : why);
+        tx_snprintf(m, sizeof m, "build output is not a candidate: %s", root ? "no candidate_dir" : why);
         if (root) jfree(root);
         return lr_set(K_VALUE, m);
     }
@@ -549,7 +551,7 @@ static int lr_handoff(const Result *info) {
     n = sy_read(fd, raw, sizeof raw);
     sy_close(fd);
     if (n != (long)sizeof raw) return lr_oserr(EIO, "/dev/urandom");
-    for (i = 0; i < 16; i++) snprintf(id.handoff + 2 * i, 3, "%02x", raw[i]);
+    for (i = 0; i < 16; i++) tx_snprintf(id.handoff + 2 * i, 3, "%02x", raw[i]);
     lr_cpy(id.session, sizeof id.session, lr_sid);
     lr_cpy(id.hash, sizeof id.hash, info->hash);
     if (lr_handoff_steps(old, &new_, info, &id, &freeze_sent, &activated) == 0) return 0;
@@ -578,7 +580,7 @@ static int lr_handoff(const Result *info) {
     if (freeze_sent) {
         TRY(actor_send(old, "RESUME", &id));
         if (lr_wait(old, "RESUMED", &id) < 0) {
-            snprintf(m, sizeof m, "old paused; resume unconfirmed: %s", lr_msg);
+            tx_snprintf(m, sizeof m, "old paused; resume unconfirmed: %s", lr_msg);
             return lr_set(K_BLOCKED, m);
         }
         TRY(lr_event_id("resumed", &old->id, old->pid));
@@ -643,7 +645,7 @@ static int lr_run_body(void) {
     long end;
     int r;
     if (lr_lock_fd < 0) return lr_set(K_VALUE, "supervisor ownership absent");
-    if (!isatty(0) || !isatty(1) || sy_tcgetpgrp(0) != sy_getpgid(0))
+    if (!sy_isatty(0) || !sy_isatty(1) || sy_tcgetpgrp(0) != sy_getpgid(0))
         return lr_set(K_VALUE, "launcher requires foreground controlling TTY");
     r = sy_tty_get(0, &lr_baseline);
     if (r < 0) return lr_oserr(-r, 0);
@@ -722,17 +724,17 @@ static int lr_run(void) {
     if (lr_have_baseline) {
         r = sy_tty_set(0, &lr_baseline, 1);
         if (r < 0) {
-            if (!cleanup) { cleanup = 1; snprintf(cleanup_msg, sizeof cleanup_msg, "[Errno %d] %s", -r, lr_strerror(-r)); }
+            if (!cleanup) { cleanup = 1; tx_snprintf(cleanup_msg, sizeof cleanup_msg, "[Errno %d] %s", -r, lr_strerror(-r)); }
         } else if (ev_plain("terminal-restored") < 0 && !cleanup) {
             cleanup = 1;
             lr_cpy(cleanup_msg, sizeof cleanup_msg, lr_msg);
         }
     }
     r = lr_close_host();
-    if (r && !cleanup) { cleanup = 1; snprintf(cleanup_msg, sizeof cleanup_msg, "[Errno %d] %s", r, lr_strerror(r)); }
+    if (r && !cleanup) { cleanup = 1; tx_snprintf(cleanup_msg, sizeof cleanup_msg, "[Errno %d] %s", r, lr_strerror(r)); }
     if (primary) return lr_set(primary_kind, primary_msg);
     if (cleanup) {
-        snprintf(m, sizeof m, "cleanup unconfirmed: %s", cleanup_msg);
+        tx_snprintf(m, sizeof m, "cleanup unconfirmed: %s", cleanup_msg);
         return lr_set(K_BLOCKED, m);
     }
     return 0;
@@ -744,12 +746,12 @@ int main(int argc, char **argv) {
     lr_rc = 0;
     if (rc_guard(lr_init_body, 0)) {
         lr_close_host();
-        fprintf(stderr, "reload launcher: %s\n", rc_err_buf());
+        sy_eprintf("reload launcher: %s\n", rc_err_buf());
         return 1;
     }
     if (lr_run() < 0) {
         lr_close_host();
-        fprintf(stderr, "reload launcher: %s\n", lr_msg);
+        sy_eprintf("reload launcher: %s\n", lr_msg);
         return 1;
     }
     return lr_rc;
