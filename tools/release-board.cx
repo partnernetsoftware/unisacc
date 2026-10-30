@@ -1,0 +1,92 @@
+/* tools/release-board.cx -- the 0.0.43 release board, counted from the domain matrices (no estimates).
+ *
+ *   sh ./unisacc.com tools/release-board.cx
+ *
+ * For every tests/*-domain-matrix.tsv: required cells (column 3 "yes") by state (column 4): COVERED_LOCAL,
+ * MISSING, NEEDS_FOREIGN_HOST, NEEDS_PRODUCT_CHANGE, other; and the owner from plans/release-0.0.43.md's
+ * board (a line "OWNER<TAB>domain,domain,..." under "## 任务板"; unlisted domains show "-").  Prints one
+ * BOARD row per domain, one OWNER row per owner (open = MISSING + NEEDS_PRODUCT_CHANGE), and
+ * RELEASE<TAB>required=R<TAB>covered=C<TAB>missing=M<TAB>foreign=F<TAB>product=P.  The patrol compares these
+ * numbers round to round: an owner whose open count did not move is chased, not messaged again. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+typedef struct { char name[64]; long cov, mis, fh, pc, oth; char owner[32]; } Dom;
+static Dom dom[64]; static int nd;
+
+static void owner_of(Dom *d, const char *plan, long pn) {   /* "OWNER\tdomain,domain" lines after "## 任务板" */
+    long at = tx_find(plan, pn, "## 任务板", tx_len("## 任务板", 64)), nl = tx_len(d->name, 64);
+    tx_copy(d->owner, sizeof d->owner, "-", 1);
+    if (at < 0) return;
+    while (at < pn) {
+        long e = tx_chr(plan + at, pn - at, '\n'), l = e < 0 ? pn - at : e, t = tx_chr(plan + at, l, '\t');
+        const char *s = plan + at;
+        if (l > 2 && s[0] == '#' && s[1] == '#' && !tx_prefix(s, l, "## 任务板", tx_len("## 任务板", 64))) break;
+        if (t > 0 && t < 31) {
+            long k = t + 1;
+            while (k < l) {
+                long c = k; while (c < l && s[c] != ',' && s[c] != ' ' && s[c] != '\t') c++;
+                if (tx_same(s + k, c - k, d->name, nl)) { tx_copy(d->owner, sizeof d->owner, s, t); return; }
+                k = c + 1;
+            }
+        }
+        at += l + 1;
+    }
+}
+
+int main(void) {
+    char *gv[] = {"git", "ls-files", "-z", "--", "tests/*-domain-matrix.tsv", 0}, chunk[8192], list[65536];
+    int ofd, pid, k, j; long r, n = 0, at; size_t pn; char *plan = cx_read("plans/release-0.0.43.md", &pn);
+    long R = 0, C = 0, M = 0, F = 0, P = 0;
+    pid = sy_spawn_pipe(gv, 0, 0, &ofd, 0);
+    if (pid < 0) return 2;
+    while ((r = sy_read(ofd, chunk, sizeof chunk)) > 0) { for (k = 0; k < r && n + 1 < (long)sizeof list; k++) list[n++] = chunk[k]; }
+    sy_close(ofd); sy_wait_status(pid, 0, 0, 0, 0);
+    for (at = 0; at < n && nd < 64; ) {
+        const char *p = list + at; long pl = tx_len(p, n - at), b = pl; size_t sz; char *t; long i = 0;
+        if (pl <= 0) break;
+        at += pl + 1;
+        while (b > 0 && p[b - 1] != '/') b--;
+        tx_copy(dom[nd].name, sizeof dom[nd].name, p + b, pl - b - (long)tx_len("-domain-matrix.tsv", 64));
+        t = cx_read(p, &sz); if (!t) continue;
+        while (i < (long)sz) {   /* host  id  required  state  ... */
+            long e = tx_chr(t + i, (long)sz - i, '\n'), l = e < 0 ? (long)sz - i : e, f[5], nf = 0, q;
+            if (l > 0 && t[i] != '#') {
+                f[0] = 0;
+                for (q = 0; q < l && nf < 4; q++) if (t[i + q] == '\t') f[++nf] = q + 1;
+                if (nf >= 4) {
+                    const char *req = t + i + f[2], *st = t + i + f[3]; long sl = tx_chr(st, l - f[3], '\t'); if (sl < 0) sl = l - f[3];
+                    if (tx_prefix(req, 3, "yes", 3)) {
+                        if (tx_same(st, sl, "COVERED_LOCAL", 13)) dom[nd].cov++;
+                        else if (tx_same(st, sl, "MISSING", 7)) dom[nd].mis++;
+                        else if (tx_same(st, sl, "NEEDS_FOREIGN_HOST", 18)) dom[nd].fh++;
+                        else if (tx_same(st, sl, "NEEDS_PRODUCT_CHANGE", 20)) dom[nd].pc++;
+                        else dom[nd].oth++;
+                    }
+                }
+            }
+            i += l + 1;
+        }
+        mm_free(t);
+        if (plan) owner_of(&dom[nd], plan, (long)pn); else tx_copy(dom[nd].owner, sizeof dom[nd].owner, "-", 1);
+        nd++;
+    }
+    for (k = 0; k < nd; k++) {
+        long req = dom[k].cov + dom[k].mis + dom[k].fh + dom[k].pc + dom[k].oth;
+        sy_printf("BOARD\t%s\towner=%s\trequired=%ld\tcovered=%ld\tmissing=%ld\tforeign=%ld\tproduct=%ld\n",
+                  dom[k].name, dom[k].owner, req, dom[k].cov, dom[k].mis, dom[k].fh, dom[k].pc);
+        R += req; C += dom[k].cov; M += dom[k].mis; F += dom[k].fh; P += dom[k].pc;
+    }
+    for (k = 0; k < nd; k++) {   /* one OWNER row per distinct owner */
+        long open = 0; int first = 1;
+        for (j = 0; j < k; j++) if (tx_eqz(dom[j].owner, dom[k].owner)) first = 0;
+        if (!first) continue;
+        for (j = 0; j < nd; j++) if (tx_eqz(dom[j].owner, dom[k].owner)) open += dom[j].mis + dom[j].pc;
+        sy_printf("OWNER\t%s\topen=%ld\n", dom[k].owner, open);
+    }
+    sy_printf("RELEASE\trequired=%ld\tcovered=%ld\tmissing=%ld\tforeign=%ld\tproduct=%ld\n", R, C, M, F, P);
+    return 0;
+}

@@ -37,6 +37,22 @@
 3. **osx 和 win 的 object 模型步**：在模型里补上路由，走"事实表 → 生成器 → 网"。不阻塞第一次安装，装好以后再做。
 4. **测试**：在新产品上跑 `tests/run.cx -- --list`，用 all-waves 跑所有不需要材料的批次，再补材料、实现 PLANNED 的 19 行，最后跑 `--all`。
 
+## 任务板（`sh ./unisacc.com tools/release-board.cx` 按此表计数；每轮巡检对比 open 有没有下降）
+
+发布缺口以域矩阵里的必需格计，不靠估算。2026-10-30 起点：必需 825 格，已覆盖 463，MISSING 211，NEEDS_FOREIGN_HOST 79，NEEDS_PRODUCT_CHANGE 20。
+
+- MISSING 的格：写批次或断言，在 lnx 上实跑 PASS 后改标 COVERED_LOCAL，带 batch@candidate 证据。
+- PRODUCT 的格：先修产品。
+- FOREIGN 的格：安装之后由 CI 在各宿主上实跑。
+
+grk	stream-e3,stream-elf,stream-lower,stream-e1,stream-e2,stream-e4,stream-prune,bootstrap,candidate,phase-timing,optimization,formats
+bdy	library,interfaces,properties
+cc	ri,resources,negative,hosts
+
+- **grk**：先做发布链（hostnative → release-build → 安装），再做所负责域的 PRODUCT 格和 MISSING 格。
+- **bdy**：只做 library、interfaces、properties 三个域的 MISSING 格，暂停架构改进。
+- **cc**：做 ri、resources、negative 三个域的 MISSING 格；安装后负责 FOREIGN 格的 CI。
+
 ## 进度（grk 每完成一步，在这里写上提交号）
 
 - [ ] 1 hostnative
