@@ -302,3 +302,4 @@ grk 澄清：cli.cx 收敛 use text.text 的真正阻塞不是软链归一，而
 ## closure-once 方案 2+3 的实现设计（施工图，供 grk 实施，2026-10-30）
 ## cli.cx 收敛 use text.text 的完整阻塞链（三个，2026-10-30 实测）
 ## 本 goal 快车道最终状态（2026-10-30）
+## cli.cx 收敛阻塞的精确根因：cxmod lib 模式 typedef 分类差异（2026-10-30 实测）
