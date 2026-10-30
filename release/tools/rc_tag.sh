@@ -7,8 +7,8 @@ set -eu; TAG=${1:?tag, e.g. v0.0.22}; R=$(cd "$(dirname "$0")/../.." && pwd); cd
 git fetch -q origin main
 SHA=$(git rev-parse HEAD)
 git merge-base --is-ancestor "$SHA" origin/main || { echo "HEAD $SHA is not on origin/main: push first" >&2; exit 2; }
-from=$(python3 -c "import json;print(json.load(open('release/candidate.json'))['sealed_from_commit'])")
-ver=$(python3 -c "import json;print(json.load(open('release/candidate.json'))['version'])")
+from=$(jq -er .sealed_from_commit release/candidate.json)
+ver=$(jq -er .version release/candidate.json)
 [ "v$ver" = "$TAG" ] || { echo "candidate.json is version $ver, not $TAG" >&2; exit 2; }
 git merge-base --is-ancestor "$from" origin/main || { echo "sealed_from_commit $from is not on origin/main (rebased after sealing): reseal" >&2; exit 2; }
 git tag -a "rc/$TAG" -m "release candidate $TAG (candidate.json sealed from $from)" "$SHA"
