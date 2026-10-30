@@ -1,0 +1,48 @@
+/* Checks cx/sys/ffi.cx: sh ./unisacc.com tools/check-cx-sys-ffi.cx
+   Real calls into the host C library through sy_ffi_*: labs (long), abs (int), strlen (pointer -> long),
+   snprintf (variadic, nfixed 3), a library opened by name, and the refusals (missing symbol, missing
+   library, too many arguments).  Prints PASS/FAIL lines and CX_SYS_FFI<TAB>failed=N. */
+#pragma unisa use sys.ffi
+#pragma unisa use text.text
+
+static int failed;
+static void ck(int ok, const char *name) { if (!ok) failed++; printf("%s\tffi.%s\n", ok ? "PASS" : "FAIL", name); }
+
+int main(void) {
+    void *def = sy_ffi_default(), *fn;
+    long lv = -42, lr = 0; int iv = -7, ir = 0;
+    int k1[1], k4[4];
+    void *v1[1], *v4[4];
+
+    fn = sy_ffi_dlsym(def, "labs");
+    k1[0] = SY_FFI_LONG; v1[0] = &lv;
+    ck(fn && sy_ffi_call(fn, SY_FFI_LONG, k1, v1, 1, 1, &lr) == 0 && lr == 42, "labs-long");
+
+    fn = sy_ffi_dlsym(def, "abs");
+    k1[0] = SY_FFI_INT; v1[0] = &iv;
+    ck(fn && sy_ffi_call(fn, SY_FFI_INT, k1, v1, 1, 1, &ir) == 0 && ir == 7, "abs-int");
+
+    {   const char *s = "seventeen chars!!"; lr = 0;
+        fn = sy_ffi_dlsym(def, "strlen");
+        k1[0] = SY_FFI_POINTER; v1[0] = &s;
+        ck(fn && sy_ffi_call(fn, SY_FFI_LONG, k1, v1, 1, 1, &lr) == 0 && lr == 17, "strlen-pointer");
+    }
+    {   char buf[32]; char *bp = buf; long cap = sizeof buf; const char *fmt = "%d"; int num = 12; const char *word = "ok";
+        fn = sy_ffi_dlsym(def, "snprintf"); ir = 0;
+        k4[0] = SY_FFI_POINTER; k4[1] = SY_FFI_LONG; k4[2] = SY_FFI_POINTER; k4[3] = SY_FFI_INT;
+        v4[0] = &bp; v4[1] = &cap; v4[2] = &fmt; v4[3] = &num;
+        ck(fn && sy_ffi_call(fn, SY_FFI_INT, k4, v4, 4, 3, &ir) == 0 && ir == 2 && tx_eq(buf, "12", 32), "snprintf-variadic-int");
+        (void)word;
+    }
+    {   void *h = sy_ffi_dlopen("libc.so.6", sy_ffi_now_global());
+        ck(h != 0 && sy_ffi_dlsym(h, "getpid") != 0, "dlopen-libc-by-name");
+        ck(sy_ffi_dlsym(def, "no_such_symbol_cx_sys_ffi") == 0, "missing-symbol-is-null");
+        ck(sy_ffi_dlopen("libno-such-lib-cx-sys.so.9", sy_ffi_now_global()) == 0 && sy_ffi_dlerror() != 0, "missing-library-is-null-with-reason");
+    }
+    {   int many[40]; void *mv[40]; int i; for (i = 0; i < 40; i++) { many[i] = SY_FFI_INT; mv[i] = &iv; }
+        ck(sy_ffi_call(sy_ffi_dlsym(def, "abs"), SY_FFI_INT, many, mv, 40, 40, &ir) < 0, "too-many-args-refused");
+    }
+    ck(sy_ffi_now_global() == (2 | 0x100), "now-global-linux");
+    printf("CX_SYS_FFI\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

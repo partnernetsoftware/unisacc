@@ -1,0 +1,42 @@
+#pragma unisa module ffi
+/* L0 sys/ffi: calls into host shared libraries (libcurl, the host C library) through the carried
+   <unisacc_ffi.h> (uffi_*), so that upper layers need no #include.  Semantics are uffi_*'s, unchanged:
+     sy_ffi_dlopen(path, mode)    a handle, or 0 (sy_ffi_dlerror() says why)
+     sy_ffi_dlsym(handle, name)   an address, or 0; handle sy_ffi_default() searches the loaded images
+     sy_ffi_call(fn, ret_kind, kinds, vals, n, nfixed, &ret)
+                                  0, or negative (-3: bad n or kinds); vals[i] points at argument i,
+                                  ret at storage for the result; nfixed < n marks a variadic call
+   Kinds are the SY_FFI_* enum (same numbers as UFFI_*).  The loader constants that differ per platform
+   (RTLD_DEFAULT: glibc 0, macOS -2; RTLD_GLOBAL: glibc 0x100, macOS 8) come from functions, because an
+   export may not sit under #if.
+   This is the cx/sys include exception (tests/cxinclude-boundary.tsv): <unisacc_ffi.h> is not in the
+   implicit prelude. */
+#include <unisacc_ffi.h>
+
+enum {
+    SY_FFI_VOID = 0, SY_FFI_INT = 1, SY_FFI_UINT = 2, SY_FFI_LONG = 3, SY_FFI_ULONG = 4,
+    SY_FFI_POINTER = 5, SY_FFI_DOUBLE = 6, SY_FFI_FLOAT = 7,
+    SY_FFI_NOW = 2,            /* RTLD_NOW, the same on glibc and macOS */
+    SY_FFI_MAX_ARGS = 32
+};
+
+static long sy_ffi_rtld_global(void) {
+#ifdef __APPLE__
+    return 8;
+#else
+    return 0x100;
+#endif
+}
+
+/* the loader's RTLD_DEFAULT handle for sy_ffi_dlsym */
+void *sy_ffi_default(void) { return (void *)(long)UFFI_RTLD_DEFAULT; }
+/* RTLD_NOW | RTLD_GLOBAL for this platform */
+int sy_ffi_now_global(void) { return (int)(SY_FFI_NOW | sy_ffi_rtld_global()); }
+
+void *sy_ffi_dlopen(const char *path, int mode) { return uffi_dlopen(path, mode); }
+void *sy_ffi_dlsym(void *handle, const char *name) { return uffi_dlsym(handle, name); }
+int sy_ffi_dlclose(void *handle) { return uffi_dlclose(handle); }
+const char *sy_ffi_dlerror(void) { return uffi_dlerror(); }
+int sy_ffi_call(void *fn, int ret_kind, int *kinds, void **vals, int n, int nfixed, void *ret) {
+    return uffi_call(fn, ret_kind, kinds, vals, n, nfixed, ret);
+}
