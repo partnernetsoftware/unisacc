@@ -32,14 +32,16 @@ int main(int argc, char **argv) {
     for (char *at = m; at < m + mn;) { char *e = memchr(at, '\n', (size_t)(m + mn - at)); if (!e) e = m + mn; *e = 0; if (at[0] != '#' && strncmp(at, "matrix\t", 7) && *at) { if (nmap >= 128) die("map size"); Map *x = &maps[nmap]; if (!field(at, 0, x->matrix, sizeof x->matrix) || !field(at, 1, x->cell, sizeof x->cell) || !field(at, 2, x->batches, sizeof x->batches) || !field(at, 3, x->evidence, sizeof x->evidence)) die("map row shape"); nmap++; } at = e + 1; }
     char rp[4400]; path(rp, sizeof rp, root, "tests/batches.tsv"); size_t rn; char *reg = cx_read(rp, &rn); if (!reg) die("batches.tsv");
     for (int i = 0; i < nmap; i++) { char b[1024]; { if (cx_fmt(b, sizeof b, "%s", maps[i].batches)) { fprintf(stderr, "matrix-flip-gen: text too long for b\n"); exit(2); } } for (char *t = strtok(b, ","); t; t = strtok(0, ",")) if (!batch_implemented(reg, rn, t)) { fprintf(stderr, "matrix-flip: REFUSE batch-not-implemented %s (cell %s)\n", t, maps[i].cell); return 2; } }
-    const char *names[] = { "stream-e4", "stream-prune", "properties", "optimization", "formats" }; int flipped = 0;
+    /* the matrices are the distinct matrix column of the map (tests/<name>-domain-matrix.tsv) */
+    const char *names[128]; size_t nnames = 0; int flipped = 0;
+    for (int i = 0; i < nmap; i++) { size_t j = 0; while (j < nnames && !tx_eqz(names[j], maps[i].matrix)) j++; if (j == nnames) names[nnames++] = maps[i].matrix; }
     if (outdir && !check && mkdir(outdir, 0700) && errno != EEXIST) die("out dir");
-    for (size_t k = 0; k < sizeof names / sizeof *names; k++) {
+    for (size_t k = 0; k < nnames; k++) {
         char in[4400], leaf[160]; { if (cx_fmt(leaf, sizeof leaf, "tests/%s-domain-matrix.tsv", names[k])) { fprintf(stderr, "matrix-flip-gen: text too long for leaf\n"); exit(2); } } path(in, sizeof in, root, leaf);
         size_t n; char *s = cx_read(in, &n); if (!s) die("matrix read");
         size_t ocap = n + 65536; char *out = malloc(ocap); if (!out) die("alloc"); size_t on = 0; int header_done = 0;
         static char note[1024]; if (mig_new) { if (cx_fmt(note, sizeof note, "# migrated: rows with @%s evidence were re-run on the admitted candidate %s (%s); earlier rows are untouched.\n", mig_new, mig_new, mig_log)) { fprintf(stderr, "matrix-flip-gen: text too long for note\n"); exit(2); } }
-        else snprintf(note, sizeof note, "# 2026-10-28: rows with @d65c1474 evidence ran on the admitted fullname-epoch candidate d65c1474 (out/c43-cc-reg-01; all-waves session unisacc-cc-session-2e6adb9ce0, 35 receipts PASS); older Root7a rows are untouched.\n");
+        else note[0] = 0;   /* a plain flip adds no note: the evidence column names the batch and assertion */
         for (char *at = s; at < s + n;) {
             if (!header_done && at > s && at[0] != '#' && memcmp(at, note, strlen(note))) { int any = 0; for (int i = 0; i < nmap; i++) if (tx_eqz(maps[i].matrix, names[k])) any = 1; if (any) { size_t nl0 = strlen(note); if (nl0 > ocap - on) die("output bound"); { void *cx_kept = memcpy(out + on, note, nl0); (void)cx_kept; } on += nl0; } header_done = 1; }
             if (!header_done && !memcmp(at, note, strlen(note))) header_done = 1; char *e = memchr(at, '\n', (size_t)(s + n - at)); size_t ln = e ? (size_t)(e - at) : (size_t)(s + n - at); char line[8192]; if (ln >= sizeof line) die("line bound"); { void *cx_kept = memcpy(line, at, ln); (void)cx_kept; } line[ln] = 0;
