@@ -41,6 +41,8 @@
    A directory may open and then fail its read (code 2). A fifo or a
    terminal can block, as the product open does. */
 #pragma unisa module input
+#pragma unisa use sys.fs
+#pragma unisa use mem.heap
 
 static void cxi_setwhy(char *why, long cap, const char *msg) {
     long i;
@@ -52,10 +54,10 @@ static void cxi_setwhy(char *why, long cap, const char *msg) {
 
 static int cxi_drop(int owned, int fd, unsigned char *buf, unsigned char **out, long *length,
                     int rc, const char *msg, char *why, long whycap) {
-    if (buf) free(buf);
+    if (buf) mm_free(buf);
     if (out) *out = 0;
     if (length) *length = 0;
-    if (owned && close(fd) < 0) {
+    if (owned && sy_close(fd) != 0) {
         cxi_setwhy(why, whycap, "cannot close input");
         return 3;
     }
@@ -113,7 +115,7 @@ int cxi_read(const char *path, unsigned char **out, long *length, char *why, lon
     if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode)
         && st.st_size >= 0 && st.st_size <= 1073741823L)
         cap = st.st_size + 1;
-    buf = (unsigned char *)malloc(cap);
+    buf = (unsigned char *)mm_alloc(cap);
     if (!buf) return cxi_drop(owned, fd, 0, out, length, 6, "out of memory", why, whycap);
     n = 0;
     for (;;) {
@@ -123,7 +125,7 @@ int cxi_read(const char *path, unsigned char **out, long *length, char *why, lon
             ncap = cap * 2;
             if (ncap < cap)
                 return cxi_drop(owned, fd, buf, out, length, 4, "input too large", why, whycap);
-            grown = (unsigned char *)realloc(buf, ncap);
+            grown = (unsigned char *)mm_grow(buf, ncap);
             if (!grown)
                 return cxi_drop(owned, fd, buf, out, length, 6, "out of memory", why, whycap);
             buf = grown;
@@ -138,8 +140,8 @@ int cxi_read(const char *path, unsigned char **out, long *length, char *why, lon
         if (got == 0) break;
         n = n + got;
     }
-    if (owned && close(fd) < 0) {
-        free(buf);
+    if (owned && sy_close(fd) != 0) {
+        mm_free(buf);
         *out = 0;
         *length = 0;
         cxi_setwhy(why, whycap, "cannot close input");
