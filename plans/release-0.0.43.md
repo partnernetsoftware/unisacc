@@ -73,11 +73,14 @@ cc	ri,resources,negative,hosts,library,interfaces,properties
 
 - [x] 1 hostnative 28d0cba49c（sy_reg_size 与 check-cx-sys 那一行 sy_eprintf 在 08da2e8863，索引竞态先被别的提交带走；precommit blocked=0）
 - [ ] 2 release-build：P3 / 五片 / wrap / 二代 / 安装
-  lnx/x86_64 一片已跑通，route=33 个对象。P3 只拼在 candidate 上，entry.elf 是链接结果。osx/win、其余四片、wrap、二代、安装未开始。candidate 直接 --version 打印 unisacc 0.0.43，rc=0。runcache 未跑。
+  lnx/x86_64 一片已跑通，route=33 个对象。P3 只拼在 candidate 上，entry.elf 是链接结果。osx/win、其余四片、wrap、安装未开始。candidate 直接 --version 打印 unisacc 0.0.43，rc=0。runcache 未跑。
   p3 sha=aec1a0bf27b9d1f2e26a1b86b52cb3694bc66a906415bcc0435c11278c6deabf bytes=2039850 flat=match ns=373396397
   entry.elf sha=332756bb1662080520bb3c9973bedd027bc89227bcda1d191fcc67f76b855cf4 bytes=1398144 link_ns=7907732090
   candidate sha=99ea6d0e85734f15c99de4c8272c3d39d3afc30ef967cd581d6d513ec5b24126 bytes=3437994
   工具时钟：六只 -O1 --only ns=30663464644；其余 27 只 --only ns=24263170737；--link-only ns=9189543474
+  二代：用候选 99ea6d0e 再编 lnx/x86_64，entry.elf 与 332756bb 不同。g2 entry.elf sha=0b56f314eb36db3d6706327f099dd3ba2b5875ebdedc340e88cb6363c0e0fb02 bytes=1398144，长度相同，从第 24 字节起不同。33 个对象里 32 个与第一代逐字节相同，只有 drive.o 不同（92814bf2 bytes=1373880 → 724e2bb8 bytes=1378472），多出来的全局符号是 tx_count。cx/text/text.cx 的 tx_count 在 ce3f7018fd（23:04）落地，晚于第一代 drive.o（22:59）。drive.o 是唯一携带 text.text 的对象。
+  同一棵树再对一次 drive.o（text.cx 停在 476a09a592）：已装编译器与候选编出的 drive.o 逐字节相同，sha=556f24115e28c3077bad3be9aeeb63752184a84c5be3790e299ae9910a6174f6 bytes=1382392。
+  二代工具时钟：drive.o ns=13246925759；其余五只 -O1 ns=21998369411；14 只 ns=11757854979；13 只 ns=14514585606；link ns=8151159408。同树对照：已装 ns=7294579227，候选 ns=8587396907。
 - [ ] 3 object 模型步
 - [ ] 4 测试到 QUALIFIED
 - [ ] 主人授权发布
