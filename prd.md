@@ -178,7 +178,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 <a id="work-tree"></a>
 ### 思维树
 
-当前节点（2026-10-30）。逐刀记录在 [plans/cx-modules.md](plans/cx-modules.md)；10-30 之前的思维树与记忆宫殿原文在 [归档](archive/prd-c43-history-20261030.md)。
+当前节点（2026-10-31）。已装 `./unisacc.com` 是 4631130 字节，sha `43fbbb819aae028e8151a9f8eec621514a1264259d1b7a926d85f7dd952a5f00`，权限 755。备份 `out/unisacc.com.79fb84e6`。CX 面：`tools/surface-gen.cx`（提交 `cbc2bfb1e5`）按 `exec/pipeline/image-stages.tsv` 和 `gold-stages.tsv` 生成七流、十八网骨架（`cx/compiler/stream`、`cx/compiler/net`）和七个 runtime 流骨架（`cx/runtime/stream`）。窄检查打出 `CX_SURFACE ok=25 failed=0` 和 `CX_RUNTIME_SURFACE ok=7 failed=0`。这两项没登记进 `tests/batches.tsv`，不记套件通过。sys 的 16 个模块原本就在，这一刀没改 L0。RI 迁移和两代对照仍待办。下面代码块是 2026-10-30 的记录。逐刀旧账在 [plans/cx-modules.md](plans/cx-modules.md)；10-30 之前的原文在 [归档](archive/prd-c43-history-20261030.md)。
 
 ```text
 0.0.43
@@ -222,7 +222,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 └─ 分层棘轮：tests/cxraw.cx（plans/cx-layers.md）——上层 .cx 直接 libc/POSIX 只降不升、新文件须 0；csih 下层封装已入 tests/cxraw-layers.tsv（netwit/tmuxwit/retry_stub/tclock），apps/csih/tests/run.cx 已迁 tx_* 至 0
 ```
 
-已装产品：`unisacc.com` 3,035,300 字节，sha `79fb84e65a10…`。旧候选资格、矩阵与安装收据不转授新入口。
+已装产品：`unisacc.com` 4,631,130 字节，sha `43fbbb819aae…`，权限 755。备份 `out/unisacc.com.79fb84e6`（3,035,300 字节，sha `79fb84e65a10…`）。旧候选资格、矩阵与安装收据不转授这只。
 
 ### 本版重构合同
 
@@ -271,7 +271,8 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 | 性能 | 对象加链接 61.4 s → 52.8 s。混合候选 runcache 首次 515 ms、命中 41 ms。dev-run.cx 冷 -run 编译加用法拒绝 6.11 s。runcache 的运行时间没有变快 | plans/perf-bottlenecks-2026-10-30.md 的 B5 |
 | 事实表 | 只经 `sh ./unisacc.com tools/facts-gen.cx -- --write\|--check .`（30 张 + bank 归属，`--check` 31/0） | exec/facts/ |
 | 归档 | 参考 C、参考 Python、旧检查与旧 shell | archive/reference-c/、archive/reference-py/README.md |
-| 已装产品 | 3,035,300 B，sha 79fb84e6…；新测试入口 `sh ./unisacc.com tests/run.cx -- --list` | tests/batches.tsv、tests/coverage.tsv |
+| 已装产品 | 4,631,130 B，sha 43fbbb81…，权限 755；备份 out/unisacc.com.79fb84e6；新测试入口 `sh ./unisacc.com tests/run.cx -- --list` | tests/batches.tsv、tests/coverage.tsv |
+| CX 面骨架 | 七流十八网在 cx/compiler/stream 与 cx/compiler/net；runtime 七流在 cx/runtime/stream。窄检查 ok=25 与 ok=7，failed=0。未登记，不记套件通过。sys 16 个模块未改。RI 与两代仍待办 | tools/surface-gen.cx、plans/v0.0.44.md 的 C44-CX-SURFACE-01 |
 | CX 分层 | L0=`cx/{sys,mem,text}`+layers 表白名单。`src/host.cx` 0 个 include，映射和加载符号在 `cx/sys/mem.cx`、`cx/sys/dl.cx`。check-cx-sys 100/0。cxraw 645 个文件、19329 次、基线 19615、0 超基线、20 低于基线 | plans/cx-layers.md、tests/cxraw-layers.tsv |
 | 旧纪元证据 | 10-30 前的构造链、安装、矩阵收据 | archive/prd-c43-history-20261030.md |
 
