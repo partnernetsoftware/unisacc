@@ -69,7 +69,7 @@ else
 fi
 
 # 4. context-index golden (unchanged contract; drives csih.sh CX entry)
-if mkdir -p "$TMP/ci" && python3 fixtures/context_index_fixture.py "$TMP/ci/owned" \
+if mkdir -p "$TMP/ci" && sh "$UNISACC" fixtures/context_index_fixture.cx -- "$TMP/ci/owned" > /dev/null \
    && ./csih.sh context-index "$TMP/ci/owned" csih2 "$(printf 'a%.0s' $(seq 64))" > "$TMP/ci/raw.json" 2> "$TMP/ci/err.log" \
    && sed -e 's|"captured_ms":[0-9]*|"captured_ms":<MS>|' -e "s|$TMP/ci/owned|<DIR>|g" \
           -e "s|\"turn_start_cwd\":\"$ROOT\"|\"turn_start_cwd\":\"<CWD>\"|" "$TMP/ci/raw.json" > "$TMP/ci/norm.json" \
