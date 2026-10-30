@@ -1,10 +1,11 @@
 #pragma unisa use agentwit
+#pragma unisa use srccopy
 /* CX probe */
 /* net_timeout.cx — port of net_timeout.py (run with -run; upper root, no includes:
  * sockets and time are agentwit's).
  *
  * A private copy of the app tree gets NET_TOTAL_SEC 60 -> 1 (net.cx enum). The
- * private agent (`-run agent_cli.cx -- agent`) must hit the timeout branch
+ * private agent (agent_cli.cx compiled once to agent_cli.bin, `agent`) must hit the timeout branch
  * (err=-6) against a localhost stub that sleeps 3s, with exactly one request.
  * The production 60s TUI selftest also runs, against an unchanged private
  * snapshot: the installed product binary CSIH_BIN (else
@@ -32,7 +33,7 @@
 #define AGENT_MSG  "agent FAILED: model call timed out (60s) (err=-6)"
 #define PASS_LINE  "PASS private timeout branch (err=-6), one localhost request; production60s TUI selftest"
 #define RUN_TIMEOUT 14.0
-#define BUILD_TIMEOUT 38.0   /* the -run compile of the private agent, cold */
+#define BUILD_TIMEOUT 38.0   /* the -o compile of the private agent, cold */
 
 static char APP[4096];   /* absolute app dir (apps/csih) */
 static char PRIV[4096];  /* private temp dir */
@@ -247,25 +248,35 @@ static int make_home(void) {
     return 0;
 }
 
-/* Build gate of the private agent: sh <PRIV>/unisacc.com -run agent_cli.cx -- build-check,
- * cwd = BUILD. An unknown subcommand prints the usage line and exits 64, so rc 64,
- * that line on stdout and an empty stderr mean the module graph compiled clean.
+/* Build of the private agent, cwd = BUILD: sh <PRIV>/unisacc.com agent_cli.cx -o
+ * BUILD/agent_cli.bin (rc 0, empty stderr), then the gate: agent_cli.bin build-check.
+ * An unknown subcommand prints the usage line and exits 64, so rc 64, that line on
+ * stdout and an empty stderr mean the module graph compiled clean. Compiled once
+ * (2026-10-30): a second -run for the agent case did not fit RUN_TIMEOUT.
  * Returns 0 on pass. */
 static int build_agent(const char *envs, const char **why) {
     char *args[8];
-    char compiler[4200], out_f[4200], err_f[4200];
+    char compiler[4200], bin[4200], out_f[4200], err_f[4200];
     int rc = 0, st;
     unsigned char *so, *se;
     snprintf(compiler, sizeof compiler, "%s/unisacc.com", PRIV);
+    snprintf(bin, sizeof bin, "%s/agent_cli.bin", BUILD);
     snprintf(out_f, sizeof out_f, "%s/agent_build.out", PRIV);
     snprintf(err_f, sizeof err_f, "%s/agent_build.err", PRIV);
     args[0] = compiler;
-    args[1] = (char *)"-run";
-    args[2] = (char *)"agent_cli.cx";
-    args[3] = (char *)"--";
-    args[4] = (char *)"build-check";
-    st = run_timed_for(BUILD_TIMEOUT, BUILD, envs, "/bin/sh", args, 5, out_f, err_f, &rc);
+    args[1] = (char *)"agent_cli.cx";
+    args[2] = (char *)"-o";
+    args[3] = bin;
+    st = run_timed_for(BUILD_TIMEOUT, BUILD, envs, "/bin/sh", args, 4, out_f, err_f, &rc);
     if (st != 0) { *why = "agent build timed out or spawn failed"; return -1; }
+    se = read_file(err_f, NULL);
+    st = rc == 0 && se && se[0] == 0;
+    if (!st) fprintf(stderr, "agent compile rc=%d stderr=%.400s\n", rc, se ? (const char *)se : "");
+    free(se);
+    if (!st) { *why = "agent compile failed (need rc 0, empty stderr)"; return -1; }
+    args[0] = (char *)"build-check";
+    st = run_timed(BUILD, envs, bin, args, 1, out_f, err_f, &rc);
+    if (st != 0) { *why = "agent build gate timed out or spawn failed"; return -1; }
     so = read_file(out_f, NULL);
     se = read_file(err_f, NULL);
     st = rc == 64 && so && !strncmp((const char *)so, "usage: agent_cli", 16) && se && se[0] == 0;
@@ -454,6 +465,8 @@ static const char *probe(void) {
             if (write_file(dst, before.data[i], before.len[i]) != 0) { err = "copy failed"; goto out; }
         }
     }
+    /* sys, mem, text are links the snapshot walk skips: the agent build needs them */
+    if (csih_copy_l0(APP, BUILD) != 0) { err = "copy of the L0 dirs (sys, mem, text) failed"; goto out; }
     for (i = 0; i < before.n; i++) {
         const char *p = before.path[i];
         size_t pl = strlen(p);
@@ -535,15 +548,11 @@ static const char *probe(void) {
         snprintf(extra, sizeof extra, "export CSIH_ENDPOINT=http://127.0.0.1:%d/v1/chat/completions;", PORT);
         build_env(agent_envs, sizeof agent_envs, extra);
     }
-    snprintf(agent_bin, sizeof agent_bin, "%s/unisacc.com", PRIV);
-    args[0] = agent_bin;
-    args[1] = (char *)"-run";
-    args[2] = (char *)"agent_cli.cx";
-    args[3] = (char *)"--";
-    args[4] = (char *)"agent";
-    args[5] = (char *)"TIMEOUT_PROBE";
+    snprintf(agent_bin, sizeof agent_bin, "%s/agent_cli.bin", BUILD);
+    args[0] = (char *)"agent";
+    args[1] = (char *)"TIMEOUT_PROBE";
     t0 = now_sec();
-    st = run_timed(BUILD, agent_envs, "/bin/sh", args, 6, out_f, err_f, &rc);
+    st = run_timed(BUILD, agent_envs, agent_bin, args, 2, out_f, err_f, &rc);
     t1 = now_sec();
     if (st != 0) { err = "agent run timed out or spawn failed"; goto out; }
     {
