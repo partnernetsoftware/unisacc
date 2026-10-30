@@ -14,7 +14,12 @@
    - 在仓外副本用审计钩子实跑 `python3 -m unisa emit-kernel`，没有打开 `exec/` 下任何 `.py`。
 
    `exec/**/*-manifest.tsv` 开头的 `#! base build/parsebase.py` 是历史元数据，manifest 本身仍是构造与测试的数据，留在原处。
-2. 18 网内核生成器 `python3 -m unisa emit-kernel`（`kernel/` 的生成者）及其实测闭包；`unisa/ckernel.py`、`unisa/gold.py`、`unisa/libneed.py` 还被 `tools/table-kernel-export.cx`、`tools/net-material.cx`、`tools/pp-gold-material.cx`、`tools/carried-header-export.cx` 以及 `tests/pp-constructed.cx`、`tests/pp-gold-controls.cx` 当作数据或身份输入读取。
+2. ~~18 网内核生成器 `python3 -m unisa emit-kernel`~~：2026-10-30 起由 `tools/kernel-emit.cx` 原生写出 `kernel/` 的 41 个文件，与 Python 逐字节相同（e98caea11e）。`tools/net-built-private.cx`、`tools/pp-built-private.cx` 已改调它（1c372d2b43），活路径不再执行 `unisa`。
+   `unisa/` 暂不归档，因为它仍被当作数据或身份输入读取：
+   - `unisa/ckernel.py` 的 KERNEL_BODY 由 `tools/kernel-emit.cx`、`tools/table-kernel-export.cx` 按标记截取；
+   - `unisa/*.py` 的哈希进入 `kernel/` 的溯源注释，以及 `tools/net-material.cx`、`tools/pp-gold-material.cx`、`tools/carried-header-export.cx`、`tests/pp-constructed.cx`、`tests/pp-gold-controls.cx` 的身份绑定。
+   
+   归档前要先把 KERNEL_BODY 挪成数据文件，并重定这些身份绑定。
 3. `release/`：2026-10-30 按调用链清理。
    - **已归档：** 18 个 `.py`，连同只服务于它们、且引用已归档文件因而早已跑不起来的 `.sh`/`.cx`（macOS 打包、提交门禁、旧候选链、发布队列与预热、裁定台账报告）。
    - **仍留 2 个，由 GitHub 手动发布 workflow 调用：**
