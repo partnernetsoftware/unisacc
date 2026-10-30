@@ -1,5 +1,13 @@
 # unisacc 发布流水线手册（自 v0.0.10 实践沉淀）
 
+> **2026-10-30 起，本手册描述的是旧 C 产品的发布流程，下面这些已经不能用：**
+> - 旧 C 已归档（`e16028ffa1`）。
+> - `release/tools/precheck.sh` 调用的 Python 都已归档，所以它也归档了，位置是 `archive/reference-py/release/tools/precheck.sh`。
+> - `release/tools/draftfetch.py` 已由 `defender-scan.yml` 里的 gh/jq 取代。
+> - `product-build`、`hostseed-step`、`seal_candidate.sh` 跟着旧构造链退场。
+>
+> 新 CX 入口的产品化步骤见 `plans/candidate-to-product-2026-10-30.md`，仍在活路径上的 Python 见 `plans/python-residue-2026-10-30.md`。本文其余内容保留作历史参考。
+
 一次发布 = 冻结源 → 同源参考 → P3 候选 → 本地全量门禁 → 平台客机 → 一次 push 取 CI → Apple 签名公证 → Windows 企业签名 → 草稿 Release → 正式发布。每一步的**输入身份**（源闭包 sha、候选 sha、UA、环境变量）决定下一步能否复用；下面按顺序给出命令、坑与判据。所有命令单次 ≤ 60 s，长任务放后台并用完成通知，不前台轮询。
 
 ## 0. 冻结源与版本
