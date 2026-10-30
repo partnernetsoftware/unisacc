@@ -91,15 +91,60 @@ int sy_readable(int fd, long ms) {
     return r > 0 ? 1 : 0;
 }
 
-/* Set PATH's access and modification times to SEC (whole seconds). 0, or -errno.
-   utimes is forwarded to the host C library and its errno does not come back
-   (0.0.43: a missing path gave -1 with errno 0). The path is stat'ed first so
-   its own errors (ENOENT, ENOTDIR, EACCES) are reported; a failure of utimes
-   itself with no errno is -EIO. */
-int sy_set_mtime(const char *path, long sec) {
+/* Windows has no utimes. Query the path with GetFileAttributesExA so a missing
+   path still returns -ENOENT, then set both times with SetFileTime. The
+   exported function has no #if. */
+static int syt_set_mtime(const char *path, long sec) {
+#ifdef _WIN32
+    static __u_word attr_fn, create_fn, set_fn, close_fn;
+    unsigned int attr[9], ft[2];
+    __u_word ticks, handle, a[10];
+    int i, err;
+    if (!attr_fn) {
+        attr_fn = _ux_sym("GetFileAttributesExA");
+        create_fn = _ux_sym("CreateFileA");
+        set_fn = _ux_sym("SetFileTime");
+        close_fn = _ux_sym("CloseHandle");
+    }
+    if (!attr_fn || !create_fn || !set_fn || !close_fn) return -ENOSYS;
+    if (!(_ux_call(attr_fn, (__u_word)path, 0, (__u_word)attr, 0) & 0xFFFFFFFFL)) {
+        _ux_fail();
+        return errno ? -errno : -EIO;
+    }
+    ticks = ((__u_word)sec) * 10000000LL + 116444736000000000LL;
+    ft[0] = (unsigned int)ticks;
+    ft[1] = (unsigned int)(ticks >> 32);
+    i = 0;
+    while (i < 10) { a[i] = 0; i++; }
+    a[0] = (__u_word)path;
+    a[1] = 0x100;       /* FILE_WRITE_ATTRIBUTES */
+    a[2] = 7;           /* FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE */
+    a[4] = 3;           /* OPEN_EXISTING */
+    a[5] = 0x02000000;  /* FILE_FLAG_BACKUP_SEMANTICS, so a directory opens too */
+    handle = __hostcall(create_fn, a);
+    if (handle == 0 || handle + 1 == 0) {
+        _ux_fail();
+        return errno ? -errno : -EIO;
+    }
+    i = 0;
+    while (i < 10) { a[i] = 0; i++; }
+    a[0] = handle;
+    a[2] = (__u_word)ft;
+    a[3] = (__u_word)ft;
+    if (!(__hostcall(set_fn, a) & 0xFFFFFFFFL)) {
+        _ux_fail();
+        err = errno ? -errno : -EIO;
+        _ux_call(close_fn, handle, 0, 0, 0);
+        return err;
+    }
+    if (!(_ux_call(close_fn, handle, 0, 0, 0) & 0xFFFFFFFFL)) {
+        _ux_fail();
+        return errno ? -errno : -EIO;
+    }
+    return 0;
+#else
     struct timeval tv[2];
     struct stat s;
-    if (!path || !path[0]) return -EINVAL;
     errno = 0;
     if (stat(path, &s) != 0) return errno ? -errno : -EIO;
     tv[0].tv_sec = tv[1].tv_sec = (time_t)sec;
@@ -107,4 +152,15 @@ int sy_set_mtime(const char *path, long sec) {
     errno = 0;
     if (utimes(path, tv) == 0) return 0;
     return errno ? -errno : -EIO;
+#endif
+}
+
+/* Set PATH's access and modification times to SEC (whole seconds). 0, or -errno.
+   utimes is forwarded to the host C library and its errno does not come back
+   (0.0.43: a missing path gave -1 with errno 0). The path is stat'ed first so
+   its own errors (ENOENT, ENOTDIR, EACCES) are reported; a failure of utimes
+   itself with no errno is -EIO. */
+int sy_set_mtime(const char *path, long sec) {
+    if (!path || !path[0]) return -EINVAL;
+    return syt_set_mtime(path, sec);
 }
