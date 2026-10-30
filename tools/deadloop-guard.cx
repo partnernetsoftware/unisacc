@@ -1,0 +1,33 @@
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use text.text
+/* deadloop-guard.cx -- a verifiable per-round dead-loop check (the goal's
+   '每轮次开始前先判断有没有进入意外的/goal死循环' made concrete).
+
+   It looks at the last 5 commits and classifies each as CODE or DOCS (a
+   docs:/docs -only subject).  Landing DOCS-only commits while the active goal
+   demands code is the dead loop: 诊断/报告/等待 without a code commit.  It
+   exits 0 when the most recent commit is CODE, 1 when it is DOCS.
+
+   usage: sh ./unisacc.com tools/deadloop-guard.cx */
+static int bad;
+int main(void) {
+    char out[8192];
+    char *av[] = { "git", "log", "--format=%s", "-5", 0 };
+    int rc, cut = 0;
+    long i = 0;
+    int first = 1, latest_code = 0;
+    rc = sy_run(av, out, sizeof out, &cut);
+    if (rc != 0) { sy_printf("DEADLOOP\tgit-log-rc=%d\n", rc); return 2; }
+    while (out[i]) {
+        long e = tx_chr(out + i, tx_len(out + i, 8192), '\n');
+        long ln = e < 0 ? tx_len(out + i, 8192) : e;
+        int is_docs = tx_prefix(out + i, ln, "docs:", 5) || tx_prefix(out + i, ln, "docs ", 5);
+        if (first) { latest_code = !is_docs; first = 0; }
+        sy_printf("%s\t%.*s\n", is_docs ? "DOCS" : "CODE", (int)ln, out + i);
+        if (e < 0) break;
+        i += e + 1;
+    }
+    sy_printf("DEADLOOP\t%s\tmost-recent=%s\n", latest_code ? "OK" : "DOCS_ONLY", latest_code ? "CODE" : "DOCS");
+    return latest_code ? 0 : 1;
+}
