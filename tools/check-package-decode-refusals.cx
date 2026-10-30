@@ -1,4 +1,6 @@
 #pragma unisa use runtime.package_decode
+#pragma unisa use runtime.model_number
+#pragma unisa use compiler.bindstage
 #pragma unisa use runtime.process
 static int live;
 static void *grow(void *p,size_t n){void *q=realloc(p,n);if(q&&!p)live++;return q;}
@@ -8,7 +10,15 @@ int main(int argc,char **argv){
  if(argc!=2&&argc!=3)return 2;char root[4096],dir[]="/tmp/cxpk-refuse-XXXXXX",source[4400],ref[4400],path[4400],bound[4400];
  if(!realpath(argv[1],root)||!mkdtemp(dir))return 2;
  if(cx_fmt(source,sizeof source,"%s/tests/cases/package_decode_reference.c",root)||cx_fmt(ref,sizeof ref,"%s/ref",dir)||cx_fmt(path,sizeof path,"%s/input",dir)||cx_fmt(bound,sizeof bound,"%s/tools/bound",root))return 2;
- char *build[]={bound,"30","/usr/bin/x86_64-linux-gnu-gcc-11","-O2","-w","-ffunction-sections","-fdata-sections","-Wl,--gc-sections",source,"-o",ref,0};np_result r={0};char why[512];
+ /* The reference run.c (archive/reference-c) keeps its headers in exec/c and calls cxsf_* of
+    cx/runtime/source_frame.cx and cd_crc_step of cx/compiler/codecgate.cx. */
+ char hdr[4400],frame[4400],codec[4400],inc[4400],fobj[4400],cobj[4400];
+ if(cx_fmt(hdr,sizeof hdr,"-I%s/exec/c",root)||cx_fmt(frame,sizeof frame,"%s/cx/runtime/source_frame.cx",root)||cx_fmt(codec,sizeof codec,"%s/cx/compiler/codecgate.cx",root)||cx_fmt(inc,sizeof inc,"%s/include/cx.h",root)||cx_fmt(fobj,sizeof fobj,"%s/frame.o",dir)||cx_fmt(cobj,sizeof cobj,"%s/codec.o",dir))return 2;
+ char *fbuild[]={bound,"30","/usr/bin/x86_64-linux-gnu-gcc-11","-O2","-w","-x","c","-include",inc,"-c",frame,"-o",fobj,0};np_result r={0};char why[512];
+ if(np_run(fbuild,root,0,35,&r,why,sizeof why)||r.rc||r.errn)return 2;np_free(&r);
+ char *cbuild[]={bound,"30","/usr/bin/x86_64-linux-gnu-gcc-11","-O2","-w","-x","c","-include",inc,"-c",codec,"-o",cobj,0};
+ if(np_run(cbuild,root,0,35,&r,why,sizeof why)||r.rc||r.errn)return 2;np_free(&r);
+ char *build[]={bound,"30","/usr/bin/x86_64-linux-gnu-gcc-11","-O2","-w","-ffunction-sections","-fdata-sections","-Wl,--gc-sections",hdr,source,fobj,cobj,"-o",ref,0};
  if(np_run(build,root,0,35,&r,why,sizeof why)||r.rc||r.errn)return 2;np_free(&r);
  const Example ex[]={
   {"version","P 4 1 1\n","unknown package version"},
@@ -39,5 +49,5 @@ int main(int argc,char **argv){
   if(!ok){fprintf(stderr,"FAIL %s cx=%s live=%d c_rc=%d c_err=%.*s\n",ex[i].name,d.why?d.why:"(none)",live,r.rc,(int)r.errn,r.err);fails++;}else printf("PASS %s\n",ex[i].name);
   cxpl_release(&d.package,drop);np_free(&r);
  }
- unlink(path);unlink(ref);rmdir(dir);printf("CXPACKAGE_REFUSALS failed=%d\n",fails);return fails?1:0;
+ unlink(path);unlink(ref);rmdir(dir);printf("CXPACKAGE_REFUSALS\tfailed=%d\n",fails);return fails?1:0;
 }

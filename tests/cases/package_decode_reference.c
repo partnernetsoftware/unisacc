@@ -1,6 +1,6 @@
 /* Host-only snapshot of the production C package directory. */
 #define UNISA_RUNTIME_LIBRARY
-#include "../../exec/c/run.c"
+#include "../../archive/reference-c/exec/c/run.c"   /* reference C; its headers stay in exec/c (-I) */
 int main(int argc,char **argv) {
     if(argc!=2)return 2;
     Package p={0};package_parse(&p,package_open(argv[1]),argv[1]);
