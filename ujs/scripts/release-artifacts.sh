@@ -27,9 +27,7 @@ for a in "$@"; do
   esac
 done
 
-CHECK="$ROOT/ujs/scripts/release-check.cx"   # CX helpers; this script runs no Python
-check() { sh "$ROOT/unisacc.com" "$CHECK" -- "$@"; }
-VER=$(check version ujs/package.json)
+VER=$(python3 -c 'import json; print(json.load(open("ujs/package.json"))["version"])')
 OUT_DIR="$ROOT/dist"
 # the stage and the zip are built in a private scratch under the temp root and only the finished zip is renamed into
 # dist/: dist/ lies outside out/, where the deletion guard (tests/safedel.cx, commissar ruling 2026-10-23) removes
@@ -50,9 +48,7 @@ else
   echo "== skip tests (requested) =="
   # Prefer committed core/ fingerprint; FORCE_WEB_BUILD=1 to rebuild A-kernel
   if [[ "${FORCE_WEB_BUILD:-0}" == "1" ]]; then
-    # `python3 -m ujs web-build` was retired with the ujs Python (archive/ujs-legacy-py-c/)
-    echo "FORCE_WEB_BUILD: the Python web-build is archived; rebuild core/ with the node tooling first" >&2
-    exit 1
+    python3 -m ujs web-build
   else
     echo "== verify core/ (no web-build unless FORCE_WEB_BUILD=1) =="
   fi
@@ -62,7 +58,23 @@ test -f "$CORE/BUILD.json"
 test -f "$CORE/ujs_full.wasm"
 test -f "$CORE/compiler.gen.js"
 
-check fingerprint "$CORE" ujs/package.json
+python3 - <<PY
+import json, hashlib, pathlib, sys
+core = pathlib.Path("$CORE")
+b = json.loads((core / "BUILD.json").read_text())
+pkg = json.loads(pathlib.Path("ujs/package.json").read_text())
+assert b["version"] == pkg["version"], (b["version"], pkg["version"])
+for name, meta in b["artifacts"].items():
+    p = core / name
+    if not p.is_file():
+        print("missing", p, file=sys.stderr); sys.exit(1)
+    h = hashlib.sha256(p.read_bytes()).hexdigest()
+    if h != meta["sha256"]:
+        print("sha mismatch", name, h, meta["sha256"], file=sys.stderr); sys.exit(1)
+    if p.stat().st_size != meta["bytes"]:
+        print("size mismatch", name, file=sys.stderr); sys.exit(1)
+print("fingerprint OK", b["version"], b.get("git"))
+PY
 
 mkdir -p "$STAGE/core" "$OUT_DIR"
 
@@ -92,7 +104,24 @@ if [[ "$WITH_DEMOS" -eq 1 ]]; then
   done
 fi
 
-check note "$STAGE"
+python3 - <<PY
+import json, pathlib
+stage = pathlib.Path("$STAGE")
+b = json.loads((stage / "core" / "BUILD.json").read_text())
+note = {
+  "how": "Upload this zip as a GitHub Release asset for tag/version matching package.json.",
+  "verify": "sha256 of core/ujs_full.wasm and core/compiler.gen.js must match core/BUILD.json",
+  "boot": "import { bootRuntime, wasm_run } from './core/wasm_run.js'; await bootRuntime(new URL('./core/ujs_full.wasm', import.meta.url));",
+  "build": b,
+}
+(stage / "RELEASE.txt").write_text(
+  "UJS %(version)s artifacts\\n"
+  "git=%(git)s created=%(created)s\\n"
+  "Core: core/ujs_full.wasm + core/compiler.gen.js (+ hand-written ESM).\\n"
+  "Do not commit this zip to git; attach to the GitHub Release.\\n" % b
+  + "\\n" + json.dumps(note, indent=2) + "\\n"
+)
+PY
 
 ( cd "$SCRATCH" && zip -r -q "$(basename "$ZIP")" "$(basename "$STAGE")" )
 mv -f "$SCRATCH/$(basename "$ZIP")" "$ZIP"

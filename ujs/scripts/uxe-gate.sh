@@ -11,13 +11,12 @@ cd "$UJS"
 
 STARTED=0
 if ! curl --noproxy '*' -sf -o /dev/null "http://127.0.0.1:8765/uxe/" 2>/dev/null; then
-  # unisacc.com execs the server binary, so $! is the server itself; a cold start compiles it first (~4 s)
-  sh "$ROOT/unisacc.com" "$UJS/scripts/static-serve.cx" -- 8765 "$UJS" >/tmp/uxe-gate-8765.log 2>&1 &
+  python3 -m http.server 8765 --directory "$UJS" >/tmp/uxe-gate-8765.log 2>&1 &
   SPID=$!
   STARTED=1
   cleanup() { kill -9 "$SPID" 2>/dev/null || true; }
   trap cleanup EXIT
-  for i in $(seq 1 100); do
+  for i in 1 2 3 4 5 6 7 8 9 10; do
     curl --noproxy '*' -sf -o /dev/null "http://127.0.0.1:8765/uxe/" && break
     sleep 0.2
   done
