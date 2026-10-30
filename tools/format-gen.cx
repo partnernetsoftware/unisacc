@@ -1,0 +1,294 @@
+#pragma unisa use sys.io
+#pragma unisa use text.text
+/* Project exec/pipeline/image-stages.tsv input and output columns onto
+   the compiler and runtime format name tables.
+   sh ./unisacc.com tools/format-gen.cx -- --check
+   sh ./unisacc.com tools/format-gen.cx -- --write
+   The fact table is the only name list. A name may contain '.', so it is
+   a string, not a file stem. First-seen order across the input column,
+   then the output column. The model-file column is not a format.
+   Exactly seven data rows, exactly six unique formats.
+   A null out-pointer returns 4. An index outside 0..count-1 returns 2.
+   No libc and no include. */
+#define TSV "exec/pipeline/image-stages.tsv"
+#define NROW 7
+#define NFORMAT 6
+#define NAMEMAX 32
+#define FILECAP 2048
+#define CHECKCAP 4096
+
+static char names[NFORMAT][NAMEMAX];
+static char models[NROW][NAMEMAX];
+static int nnames;
+static int nrows;
+
+static int fail(const char *why) {
+    sy_eprintf("format-gen\tFAIL\t%s\n", why);
+    return 1;
+}
+
+static int ident_ok(const char *s, int n) {
+    int i;
+    if (n < 1 || n >= NAMEMAX) return 0;
+    if (s[0] < 'a' || s[0] > 'z') return 0;
+    for (i = 1; i < n; i++) {
+        char c = s[i];
+        if (c >= 'a' && c <= 'z') continue;
+        if (c >= '0' && c <= '9') continue;
+        if (c == '_') continue;
+        return 0;
+    }
+    return 1;
+}
+
+static int format_ok(const char *s, int n) {
+    int i, dot = 0;
+    if (n < 3 || n >= NAMEMAX) return 0;
+    for (i = 0; i < n; i++) {
+        char c = s[i];
+        if (c >= 'a' && c <= 'z') continue;
+        if (c >= '0' && c <= '9') continue;
+        if (c == '_') continue;
+        if (c == '.') { dot = 1; continue; }
+        return 0;
+    }
+    return dot;
+}
+
+static void copy_field(char *dst, const char *s, int n) {
+    int i;
+    for (i = 0; i < n; i++) dst[i] = s[i];
+    dst[n] = 0;
+}
+
+static int seen(const char *s) {
+    int i;
+    for (i = 0; i < nnames; i++) if (tx_eqz(names[i], s)) return 1;
+    return 0;
+}
+
+static int push_name(const char *s) {
+    int i;
+    if (seen(s)) return 0;
+    if (nnames >= NFORMAT) return fail("format-count");
+    for (i = 0; s[i]; i++) names[nnames][i] = s[i];
+    names[nnames][i] = 0;
+    nnames++;
+    return 0;
+}
+
+static int take_row(const char *line, int n) {
+    const char *f[5];
+    int len[5];
+    int i, k, start;
+    char input[NAMEMAX], output[NAMEMAX];
+    if (nrows >= NROW) return fail("stage-count");
+    k = 0;
+    start = 0;
+    for (i = 0; i <= n; i++) {
+        if (i == n || line[i] == '\t') {
+            if (k >= 5) return fail("row-fields");
+            f[k] = line + start;
+            len[k] = i - start;
+            k++;
+            start = i + 1;
+        }
+    }
+    if (k != 5) return fail("row-fields");
+    if (!ident_ok(f[0], len[0])) return fail("stage-charset");
+    if (!format_ok(f[1], len[1])) return fail("format-charset");
+    if (!format_ok(f[2], len[2])) return fail("format-charset");
+    if (!format_ok(f[3], len[3])) return fail("model-charset");
+    if (!ident_ok(f[4], len[4])) return fail("official-charset");
+    copy_field(input, f[1], len[1]);
+    copy_field(output, f[2], len[2]);
+    copy_field(models[nrows], f[3], len[3]);
+    if (push_name(input)) return 1;
+    if (push_name(output)) return 1;
+    nrows++;
+    return 0;
+}
+
+static int parse_tsv(char *b, size_t n) {
+    size_t i = 0;
+    int saw = 0;
+    if (n == 0 || b[n - 1] != '\n') return fail("tsv-newline");
+    while (i < n) {
+        size_t e = i;
+        while (e < n && b[e] != '\n') e++;
+        b[e] = 0;
+        if (e == i) return fail("tsv-blank");
+        if (!saw) {
+            if (!tx_eqz(b + i, "# stage\tinput format\toutput format\tmodel file\tofficial"))
+                return fail("tsv-header");
+            saw = 1;
+        } else if (b[i] == '#') {
+            return fail("tsv-comment");
+        } else if (take_row(b + i, (int)(e - i))) {
+            return 1;
+        }
+        i = e + 1;
+    }
+    if (nrows != NROW) return fail("stage-count");
+    if (nnames != NFORMAT) return fail("format-count");
+    return 0;
+}
+
+static int model_separate(void) {
+    int i, j;
+    for (i = 0; i < nrows; i++) {
+        for (j = 0; j < nnames; j++) {
+            if (tx_eqz(models[i], names[j])) return fail("model-mixed");
+        }
+    }
+    return 0;
+}
+
+static int app(char *dst, int cap, int *n, const char *s) {
+    int i = 0;
+    while (s[i]) {
+        if (*n + 1 >= cap) return -1;
+        dst[*n] = s[i];
+        *n += 1;
+        i++;
+    }
+    dst[*n] = 0;
+    return 0;
+}
+
+static int app_n(char *dst, int cap, int *n, int d) {
+    char s[4];
+    int k = 0;
+    if (d < 0 || d > 99) return -1;
+    if (d >= 10) s[k++] = (char)('0' + d / 10);
+    s[k++] = (char)('0' + d % 10);
+    s[k] = 0;
+    return app(dst, cap, n, s);
+}
+
+static int emit_mod(char *dst, int cap, const char *prefix) {
+    int n = 0, i;
+    dst[0] = 0;
+    if (app(dst, cap, &n, "#pragma unisa module formatname\n")) return -1;
+    if (app(dst, cap, &n, "/* Generated by tools/format-gen.cx from exec/pipeline/image-stages.tsv.\n")) return -1;
+    if (app(dst, cap, &n, "   Do not edit by hand. Names are first-seen input and output formats.\n")) return -1;
+    if (app(dst, cap, &n, "   The model-file column is not a format. A dot keeps the name a string.\n")) return -1;
+    if (app(dst, cap, &n, "   A null out-pointer returns 4. An index outside 0..count-1 returns 2.\n")) return -1;
+    if (app(dst, cap, &n, "   No libc and no include. */\n")) return -1;
+    if (app(dst, cap, &n, "int ")) return -1;
+    if (app(dst, cap, &n, prefix)) return -1;
+    if (app(dst, cap, &n, "_count(void) {\n    return ")) return -1;
+    if (app_n(dst, cap, &n, nnames)) return -1;
+    if (app(dst, cap, &n, ";\n}\n")) return -1;
+    if (app(dst, cap, &n, "int ")) return -1;
+    if (app(dst, cap, &n, prefix)) return -1;
+    if (app(dst, cap, &n, "_at(int index, const char **name) {\n")) return -1;
+    if (app(dst, cap, &n, "    if (!name) return 4;\n")) return -1;
+    for (i = 0; i < nnames; i++) {
+        if (app(dst, cap, &n, "    if (index == ")) return -1;
+        if (app_n(dst, cap, &n, i)) return -1;
+        if (app(dst, cap, &n, ") { *name = \"")) return -1;
+        if (app(dst, cap, &n, names[i])) return -1;
+        if (app(dst, cap, &n, "\"; return 0; }\n")) return -1;
+    }
+    if (app(dst, cap, &n, "    return 2;\n}\n")) return -1;
+    return n;
+}
+
+static int emit_row(char *dst, int cap, int *n, const char *prefix, int i) {
+    if (app(dst, cap, n, "    if (")) return -1;
+    if (app(dst, cap, n, prefix)) return -1;
+    if (app(dst, cap, n, "_at(")) return -1;
+    if (app_n(dst, cap, n, i)) return -1;
+    if (app(dst, cap, n, ", &name) || !tx_eqz(name, \"")) return -1;
+    if (app(dst, cap, n, names[i])) return -1;
+    if (app(dst, cap, n, "\")) return 1;\n")) return -1;
+    return 0;
+}
+
+static int emit_check(char *dst, int cap) {
+    int n = 0, i;
+    dst[0] = 0;
+    if (app(dst, cap, &n, "#pragma unisa use compiler.formatname\n")) return -1;
+    if (app(dst, cap, &n, "#pragma unisa use runtime.formatname\n")) return -1;
+    if (app(dst, cap, &n, "#pragma unisa use sys.io\n")) return -1;
+    if (app(dst, cap, &n, "#pragma unisa use text.text\n")) return -1;
+    if (app(dst, cap, &n, "/* Generated by tools/format-gen.cx. Narrow check of the six format names. */\n")) return -1;
+    if (app(dst, cap, &n, "int main(void) {\n")) return -1;
+    if (app(dst, cap, &n, "    const char *name;\n")) return -1;
+    if (app(dst, cap, &n, "    const char **missing;\n")) return -1;
+    if (app(dst, cap, &n, "    missing = 0;\n")) return -1;
+    if (app(dst, cap, &n, "    if (pft_count() != ")) return -1;
+    if (app_n(dst, cap, &n, nnames)) return -1;
+    if (app(dst, cap, &n, ") return 1;\n")) return -1;
+    if (app(dst, cap, &n, "    if (rpt_count() != ")) return -1;
+    if (app_n(dst, cap, &n, nnames)) return -1;
+    if (app(dst, cap, &n, ") return 1;\n")) return -1;
+    for (i = 0; i < nnames; i++) {
+        if (emit_row(dst, cap, &n, "pft", i)) return -1;
+        if (emit_row(dst, cap, &n, "rpt", i)) return -1;
+    }
+    if (app(dst, cap, &n, "    if (pft_at(0, missing) != 4) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "    if (rpt_at(0, missing) != 4) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "    if (pft_at(-1, &name) != 2) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "    if (pft_at(")) return -1;
+    if (app_n(dst, cap, &n, nnames)) return -1;
+    if (app(dst, cap, &n, ", &name) != 2) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "    if (rpt_at(-1, &name) != 2) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "    if (rpt_at(")) return -1;
+    if (app_n(dst, cap, &n, nnames)) return -1;
+    if (app(dst, cap, &n, ", &name) != 2) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "    sy_printf(\"CX_FORMAT\\tok=")) return -1;
+    if (app_n(dst, cap, &n, nnames)) return -1;
+    if (app(dst, cap, &n, "\\tfailed=0\\n\");\n")) return -1;
+    if (app(dst, cap, &n, "    return 0;\n}\n")) return -1;
+    return n;
+}
+
+static int same_bytes(const char *a, size_t an, const char *b, int bn) {
+    int i;
+    if (an != (size_t)bn) return 0;
+    for (i = 0; i < bn; i++) if (a[i] != b[i]) return 0;
+    return 1;
+}
+
+static int one_file(int dowrite, const char *path, const char *body, int n) {
+    size_t on = 0;
+    char *cur;
+    if (dowrite) {
+        if (cx_write(path, body, (size_t)n)) return fail("write");
+        return 0;
+    }
+    cur = cx_read(path, &on);
+    if (!cur) return fail(path);
+    if (!same_bytes(cur, on, body, n)) return fail(path);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    size_t nb = 0;
+    char *b;
+    char file[FILECAP], check[CHECKCAP];
+    int dowrite, fn, cn;
+    if (argc != 2 || (!tx_eqz(argv[1], "--check") && !tx_eqz(argv[1], "--write"))) {
+        sy_eprintf("format-gen\tusage\t--check|--write\n");
+        return 2;
+    }
+    dowrite = tx_eqz(argv[1], "--write");
+    b = cx_read(TSV, &nb);
+    if (!b) return fail("tsv-read");
+    if (parse_tsv(b, nb)) return 1;
+    if (model_separate()) return 1;
+    cn = emit_check(check, CHECKCAP);
+    if (cn < 0) return fail("emit-check");
+    fn = emit_mod(file, FILECAP, "pft");
+    if (fn < 0) return fail("emit-compiler");
+    if (one_file(dowrite, "cx/compiler/formatname.cx", file, fn)) return 1;
+    fn = emit_mod(file, FILECAP, "rpt");
+    if (fn < 0) return fail("emit-runtime");
+    if (one_file(dowrite, "cx/runtime/formatname.cx", file, fn)) return 1;
+    if (one_file(dowrite, "tools/check-cx-format.cx", check, cn)) return 1;
+    if (dowrite) sy_printf("FORMAT_GEN\tWROTE\trows=%d\n", nnames);
+    else sy_printf("FORMAT_GEN\tCHECK\trows=%d\n", nnames);
+    return 0;
+}
