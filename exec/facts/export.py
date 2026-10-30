@@ -1493,68 +1493,7 @@ TABLES.append(("k2-membercontrol", ["exec/build/parsebase.py", "exec/build/parse
                                     "exec/parse2/tape-templates.tsv", "exec/facts/export.py"], k2membercontrol))
 
 
-def k2truth():
-    """Scalar truth opcodes from the declared output variants; actions remain in scalar TSVs."""
-    rows = [ln.split("\t") for ln in (ROOT / "exec/parse2/scalar-outputs.tsv").read_text().splitlines()[1:]]
-    variants = [(group, entry, argument) for group, entry, _, argument, _ in rows
-                if group in ("truth", "not")]
-    assert variants == [("truth", "FT.double", "64"), ("truth", "FT.float", "32"),
-                        ("not", "FN.double", "feq64"), ("not", "FN.float", "feq32"),
-                        ("not", "FN.integer", "eq")]
-    names = ("TRUTH64_OP", "TRUTH32_OP", "NOT64_OP", "NOT32_OP", "NOTINT_OP")
-    return ["=" + name + "\tstr\t" + ("feq" + argument if group == "truth" else argument)
-            for name, (group, _, argument) in zip(names, variants)]
-
-
-def k2stack():
-    """Value-stack layout: ordered value/rank slots. Actions are declared by consumers."""
-    sys.path.insert(0, str(HERE))
-    from load import facts as F
-    vs = {r["name"]: r["value"] for r in F("parse-constants")}["VS"]
-    rank = {r["name"]: r["value"] for r in F("valueranks") if r["kind"] == "rank"}
-    out = ["=VS\tint\t%d" % vs]
-    for stem, file in STACKS:
-        for ln in (ROOT / file).read_text().splitlines()[1:]:
-            name, value = ln.split("\t")
-            method, items = json.loads(value)
-            assert method in ("vpush", "vpop")
-            slots = [slot for item in items for slot in
-                     ([item, rank[item]] if rank.get(item) and rank[item] not in items else [item])]
-            if method == "vpop":
-                slots.reverse()
-            out.append("=stack_%s_%s\tjson\t%s" %
-                       (stem, name, json.dumps([dict(register=x) for x in slots])))
-    return out
-
-
-STACKS = [("initializers", "exec/parse2/initializers-stack.tsv"), ("intwarnings", "exec/parse2/intwarnings-stack.tsv"),
-          ("returnwarnings", "exec/parse2/returnwarnings-stack.tsv"), ("formatwarnings", "exec/parse2/formatwarnings-stack.tsv"),
-          ("membercontrol", "exec/parse2/membercontrol-stack.tsv")]
-TABLES.append(("k2-stack", ["exec/facts/parse-constants.tsv", "exec/facts/valueranks.tsv"] + [f for _, f in STACKS]
-               + ["exec/facts/export.py"], k2stack))
-
-
-TABLES.append(("k2-truth", ["exec/parse2/scalar-outputs.tsv", "exec/facts/export.py"], k2truth))
-
-
-def k2librarymodule():
-    """Finite header and main-key domains; continuation labels stay in the manifest."""
-    source = {}
-    for line in (HERE / "k2-librarymodule.tsv").read_text().splitlines():
-        if line.startswith("="):
-            name, kind, value = line[1:].split("\t", 2)
-            source[name] = json.loads(value) if kind == "json" else value
-    lo, hi = source["hdomain"]
-    mlo, mhi = source["maindomain"]
-    ok = set(source["mainok"])
-    compact = lambda x: json.dumps(x, separators=(",", ":"))
-    return ["=hkeys\tjson\t" + compact(list(range(lo, hi))),
-            "=mainbad\tjson\t" + compact([k for k in range(mlo, mhi) if k not in ok]),
-            "=mainreason\tstr\t" + source["mainreason"]]
-
-
-TABLES.append(("k2-librarymodule-map", ["exec/facts/k2-librarymodule.tsv", "exec/facts/export.py"],
-               k2librarymodule))
+# k2-truth, k2-stack and k2-librarymodule-map moved to tools/facts-gen.cx on 2026-10-30.
 
 
 
@@ -1615,13 +1554,7 @@ TABLES.append(("k2-libraryenv", ["exec/build/parsebase.py", "exec/build/parse2ba
                "exec/facts/libraryvariadic.tsv", "exec/facts/unresolved.tsv", "exec/facts/valueranks.tsv",
                "exec/facts/k2-gen2.tsv", "exec/facts/k2-librarymodule-map.tsv", "exec/facts/export.py"], k2libraryenv))
 
-def signature_layout():
-    rows = (line.split('\t') for line in (ROOT / 'exec/facts/parse-constants.tsv').read_text().splitlines())
-    radix = next(int(row[1]) for row in rows if row[0] == 'SIG_RADIX')
-    return [f'=SIG_RADIX\tint\t{radix}']
-
-
-TABLES.append(('signature-layout', ['exec/facts/parse-constants.tsv', 'exec/facts/export.py'], signature_layout))
+# signature-layout moved to tools/facts-gen.cx on 2026-10-30.
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))

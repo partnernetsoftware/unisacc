@@ -686,7 +686,138 @@ static void k2_strings(Ob *o) {
     }
 }
 
-typedef struct { const char *stem; const char *inputs[8]; void (*produce)(Ob *); } Table;
+/* k2-truth: scalar truth opcodes from the declared output variants (fixed shape asserted). */
+static void k2_truth(Ob *o) {
+    static const char *want[5][3] = {{"truth", "FT.double", "64"}, {"truth", "FT.float", "32"},
+        {"not", "FN.double", "feq64"}, {"not", "FN.float", "feq32"}, {"not", "FN.integer", "eq"}};
+    static const char *names[5] = {"TRUTH64_OP", "TRUTH32_OP", "NOT64_OP", "NOT32_OP", "NOTINT_OP"};
+    Lines L = fg_lines("exec/parse2/scalar-outputs.tsv");
+    int i, nv = 0;
+    for (i = 1; i < L.n; i++) {
+        char *cells[8], *line = fg_dupz(L.l[i]);
+        if (!*line) continue;
+        if (fg_split(line, cells, 8) != 5) fg_die("bad scalar-outputs row", L.l[i]);
+        if (!tx_eq(cells[0], "truth", 8) && !tx_eq(cells[0], "not", 8)) continue;
+        if (nv == 5 || !tx_eq(cells[0], want[nv][0], 8) || !tx_eq(cells[1], want[nv][1], 64) || !tx_eq(cells[3], want[nv][2], 16))
+            fg_die("scalar truth variants differ from the declared five", L.l[i]);
+        ob_z(o, "="); ob_z(o, names[nv]); ob_z(o, "\tstr\t");
+        if (tx_eq(cells[0], "truth", 8)) ob_z(o, "feq");
+        ob_z(o, cells[3]); ob_z(o, "\n");
+        nv++;
+    }
+    if (nv != 5) fg_die("scalar truth variants differ from the declared five", 0);
+}
+
+/* signature-layout: SIG_RADIX from parse-constants. */
+static void signature_layout(Ob *o) {
+    ob_z(o, "=SIG_RADIX\tint\t"); ob_int(o, fg_const("parse-constants", "SIG_RADIX")); ob_z(o, "\n");
+}
+
+/* k2-librarymodule-map: header keys, bad main keys and the main reason from k2-librarymodule. */
+static void k2_librarymodule_map(Ob *o) {
+    Lines L = fg_lines("exec/facts/k2-librarymodule.tsv");
+    long hd[2] = {-1, -1}, md[2] = {-1, -1}, ok[64], k;
+    int nok = 0, i;
+    char *reason = 0;
+    for (i = 0; i < L.n; i++) {
+        char *cells[4], *line = fg_dupz(L.l[i]);
+        if (line[0] != '=') continue;
+        if (fg_split(line + 1, cells, 3) != 3) fg_die("bad k2-librarymodule row", L.l[i]);
+        if (tx_eq(cells[0], "hdomain", 16) || tx_eq(cells[0], "maindomain", 16) || tx_eq(cells[0], "mainok", 16)) {
+            long *dst = tx_eq(cells[0], "mainok", 16) ? ok : tx_eq(cells[0], "hdomain", 16) ? hd : md;
+            char *p = cells[2], *end;
+            int n = 0;
+            if (*p != '[') fg_die("expected a JSON list", cells[2]);
+            p++;
+            while (*p && *p != ']') {
+                while (*p == ' ' || *p == ',') p++;
+                if (*p == ']') break;
+                if (n == 64) fg_die("list too long", cells[2]);
+                dst[n++] = strtol(p, &end, 10);
+                if (end == p) fg_die("expected integers", cells[2]);
+                p = end;
+            }
+            if (dst == ok) nok = n; else if (n != 2) fg_die("domain must be [lo,hi]", cells[2]);
+        } else if (tx_eq(cells[0], "mainreason", 16)) reason = cells[2];
+    }
+    if (hd[0] < 0 || md[0] < 0 || !reason) fg_die("k2-librarymodule lacks a domain or the reason", 0);
+    ob_z(o, "=hkeys\tjson\t[");
+    for (k = hd[0]; k < hd[1]; k++) { if (k > hd[0]) ob_z(o, ","); ob_int(o, k); }
+    ob_z(o, "]\n=mainbad\tjson\t[");
+    {
+        int first = 1;
+        for (k = md[0]; k < md[1]; k++) {
+            int j, good = 0;
+            for (j = 0; j < nok; j++) if (ok[j] == k) good = 1;
+            if (good) continue;
+            if (!first) ob_z(o, ",");
+            ob_int(o, k); first = 0;
+        }
+    }
+    ob_z(o, "]\n=mainreason\tstr\t"); ob_z(o, reason); ob_z(o, "\n");
+}
+
+/* k2-stack: VS and, for each declared stack, the slot order of every push/pop (a slot with a rank that
+   is not itself listed is followed by its rank; vpop reverses). */
+static const char *k2_stacks[5][2] = {{"initializers", "exec/parse2/initializers-stack.tsv"},
+    {"intwarnings", "exec/parse2/intwarnings-stack.tsv"}, {"returnwarnings", "exec/parse2/returnwarnings-stack.tsv"},
+    {"formatwarnings", "exec/parse2/formatwarnings-stack.tsv"}, {"membercontrol", "exec/parse2/membercontrol-stack.tsv"}};
+static void k2_stack(Ob *o) {
+    static char *rk[256], *rv[256];
+    int nr = 0, s, i;
+    Lines R = fg_lines("exec/facts/valueranks.tsv");
+    for (i = 1; i < R.n; i++) {
+        char *cells[4], *line = fg_dupz(R.l[i]);
+        int j;
+        if (!*line || line[0] == '#') continue;
+        if (fg_split(line, cells, 4) != 3) fg_die("bad valueranks row", R.l[i]);
+        if (!tx_eq(cells[0], "rank", 8)) continue;
+        for (j = 0; j < nr; j++) if (tx_eq(rk[j], cells[1], FG_CAP)) break;
+        if (j == nr) { if (nr == 256) fg_die("too many ranks", 0); rk[nr++] = cells[1]; }
+        rv[j] = cells[2];
+    }
+    ob_z(o, "=VS\tint\t"); ob_int(o, fg_const("parse-constants", "VS")); ob_z(o, "\n");
+    for (s = 0; s < 5; s++) {
+        Lines L = fg_lines(k2_stacks[s][1]);
+        for (i = 1; i < L.n; i++) {
+            char *cells[4], *line = fg_dupz(L.l[i]), *items[128], *slots[256], *p;
+            int ni = 0, ns = 0, pop, j, q;
+            if (!*line) continue;
+            if (fg_split(line, cells, 4) != 2) fg_die("bad stack row", L.l[i]);
+            p = cells[1];
+            if (tx_prefix(p, tx_len(p, FG_CAP), "[\"vpush\", [", 11)) pop = 0;
+            else if (tx_prefix(p, tx_len(p, FG_CAP), "[\"vpop\", [", 10)) pop = 1;
+            else fg_die("stack method is not vpush/vpop", cells[1]);
+            p += pop ? 10 : 11;
+            while (*p && *p != ']') {
+                long q2;
+                while (*p == ' ' || *p == ',') p++;
+                if (*p == ']') break;
+                q2 = tx_chr(p + 1, tx_len(p + 1, FG_CAP), '"');
+                if (*p != '"' || q2 < 0 || ni == 128) fg_die("bad stack item", cells[1]);
+                items[ni++] = ar_dup(fg_ar, p + 1, q2);
+                p += q2 + 2;
+            }
+            if (tx_eq(p, "]]", 4) == 0) fg_die("bad stack row tail", cells[1]);
+            for (j = 0; j < ni; j++) {
+                char *rank = 0;
+                int listed = 0;
+                slots[ns++] = items[j];
+                for (q = 0; q < nr; q++) if (tx_eq(rk[q], items[j], FG_CAP)) rank = rv[q];
+                if (rank && *rank) for (q = 0; q < ni; q++) if (tx_eq(items[q], rank, FG_CAP)) listed = 1;
+                if (rank && *rank && !listed) slots[ns++] = rank;
+            }
+            ob_z(o, "=stack_"); ob_z(o, k2_stacks[s][0]); ob_z(o, "_"); ob_z(o, cells[0]); ob_z(o, "\tjson\t[");
+            for (j = 0; j < ns; j++) {
+                if (j) ob_z(o, ", ");
+                ob_z(o, "{\"register\": "); ob_str(o, slots[pop ? ns - 1 - j : j]); ob_z(o, "}");
+            }
+            ob_z(o, "]\n");
+        }
+    }
+}
+
+typedef struct { const char *stem; const char *inputs[12]; void (*produce)(Ob *); } Table;   /* inputs 0-terminated */
 static const Table fg_tables[] = {
     {"opt-gen", {"weights/gold/peep.tsv", "weights/gold/opinfo.tsv", "exec/facts/opt-gen-constants.tsv",
                  "exec/facts/opt-gen-startwords.tsv", "exec/opt/answer-targets.tsv", "tools/facts-gen.cx", 0}, opt_gen},
@@ -698,6 +829,12 @@ static const Table fg_tables[] = {
                       "exec/parse2/constexpr-operators.tsv", "exec/parse2/constexpr-tokens.tsv", "tools/facts-gen.cx", 0}, k2_constexpr},
     {"k2-unitlocations", {"tools/facts-gen.cx", 0}, k2_unitlocations},
     {"k2-strings", {"exec/facts/strings.tsv", "exec/facts/parse-constants.tsv", "tools/facts-gen.cx", 0}, k2_strings},
+    {"k2-truth", {"exec/parse2/scalar-outputs.tsv", "tools/facts-gen.cx", 0}, k2_truth},
+    {"signature-layout", {"exec/facts/parse-constants.tsv", "tools/facts-gen.cx", 0}, signature_layout},
+    {"k2-librarymodule-map", {"exec/facts/k2-librarymodule.tsv", "tools/facts-gen.cx", 0}, k2_librarymodule_map},
+    {"k2-stack", {"exec/facts/parse-constants.tsv", "exec/facts/valueranks.tsv", "exec/parse2/initializers-stack.tsv",
+                  "exec/parse2/intwarnings-stack.tsv", "exec/parse2/returnwarnings-stack.tsv",
+                  "exec/parse2/formatwarnings-stack.tsv", "exec/parse2/membercontrol-stack.tsv", "tools/facts-gen.cx"}, k2_stack},
     {0, {0}, 0}
 };
 
