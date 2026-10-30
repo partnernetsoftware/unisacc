@@ -170,3 +170,14 @@ sh ./unisacc.com tools/refactor.cx -- apply CANDIDATES.tsv JOBS VERIFY...
   - 不取写成 `1L<<20` 的调用。
 - 规则 eqz-fold.tsv：`tx_eq($1, $2, 1L << 20)` 改为 `tx_eqz($1, $2)`。二者完全等价，因为 `tx_eqz` 本身就是 `tx_eq(a, b, TX_ZCAP)`，而 `TX_ZCAP` 等于 `1 << 20`。
 - 范围：185 个文件，共 1755 处。
+
+## 第 6 轮结果（2026-10-30）
+
+- **结果：** 185 个文件全部 OK，0 SKIP，0 REVERT，共 1755 处。
+- **提交：** tests 82 个（c2d2393a00），tools 102 个（669980b461），另有 tools/run-startup-bench.cx 单独一个提交（513ed85906）。
+- **混入他人改动的处理：** run-startup-bench.cx 里还有一处他人尚未提交的改动：`unsetenv` 改成了 `sy_unsetenv`，并新增 `use sys.env`。这个改动依赖同样未提交的 cx/sys/env.cx。处理方式：
+  1. 用 refactor 工具在 `git show HEAD:` 的副本上重放这一折叠规则（out/rf-iso）；
+  2. 用临时 `GIT_INDEX_FILE` 只提交这份 blob；
+  3. 再把主 index 中这一路径更新为同一个 blob。
+  结果：他人的改动原样留在工作区，仍是未暂存。
+- **教训：** 核对差异时必须用 `git diff HEAD`。别人 `git add` 过的文件，`git diff` 比的是 index，会看不到改动。第 3 至 5 轮的核对用的是 `git diff`，复查时那批文件已经提交，HEAD 里的差异只有规则改出来的行。
