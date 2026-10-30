@@ -16,8 +16,10 @@
                               10-30.md), else INFO.  One row per caller and name: KIND FILE:LINE NAME
                               sites=K def=FILE:LINE why=.. reach=transitive|none (transitive: the module is
                               in the caller's use closure, the miscompiled case; none: not visible through
-                              uses at all), then UNDECLARED danger= info= transitive= callers= scanned=;
-                              rc 1 when any DANGER
+                              uses at all), then UNDECLARED danger= info= transitive= callers= scanned=
+                              host_cc_only=; rc 1 when any DANGER.  A caller whose first 2048 bytes say
+                              host-cc-only (built only by a host C compiler with -include) is not reported,
+                              only counted in host_cc_only.
      dump FILE                the file's facts
 
    The file set is every tracked .cx file (git ls-files -s, mode 120000 symlinks skipped), or the paths in
@@ -741,8 +743,18 @@ static int declares(int e, const char *s, long n) {
     return 0;
 }
 typedef struct { const char *name; long nl; long line; int sites; int d; } Hit;
+/* 1 when the first 2048 bytes of PATH hold the marker host-cc-only: a file only a host C compiler builds
+   (with -include for its declarations), never unisacc, so use-visibility does not apply to it */
+static int host_cc_only(const char *path) {
+    size_t n; char *b = cx_read(path, &n); int r;
+    if (!b) return 0;
+    r = tx_find(b, n < 2048 ? (long)n : 2048, "host-cc-only", 12) >= 0;
+    mm_free(b);
+    return r;
+}
+
 static int cmd_undeclared(int *callers, int nc) {
-    int c, e, danger = 0, info = 0, transitive = 0, files = 0, nl;
+    int c, e, danger = 0, info = 0, transitive = 0, files = 0, nl, hostonly = 0;
     static Hit hits[16384];
     real_all();
     for (c = 0; c < nc; c++) { epoch++; closure(callers[c]); }   /* reach every module the callers can see */
@@ -771,6 +783,7 @@ static int cmd_undeclared(int *callers, int nc) {
             hits[nh].name = nm; hits[nh].nl = nn; hits[nh].line = tx_strtol(ln, 0, 10); hits[nh].sites = 1; hits[nh].d = dd; nh++;
         }
         if (nh) { epoch++; closure(ce); }
+        if (nh && host_cc_only(ent[ce].path)) { hostonly++; continue; }
         for (h = 0; h < nh; h++) {
             Def *D; const char *why; int tr;
             if (hits[h].d < 0) continue;   /* declared by the caller or reached through a direct use */
@@ -786,7 +799,7 @@ static int cmd_undeclared(int *callers, int nc) {
         }
         files += any;
     }
-    printf("UNDECLARED\tdanger=%d\tinfo=%d\ttransitive=%d\tcallers=%d\tscanned=%d\n", danger, info, transitive, files, nc);
+    printf("UNDECLARED\tdanger=%d\tinfo=%d\ttransitive=%d\tcallers=%d\tscanned=%d\thost_cc_only=%d\n", danger, info, transitive, files, nc, hostonly);
     return danger ? 1 : 0;
 }
 
