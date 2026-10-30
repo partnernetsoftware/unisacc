@@ -75,3 +75,26 @@ sh ./unisacc.com tools/refactor.cx -- apply CANDIDATES.tsv JOBS VERIFY...
 - **验证来源：** apply 增加 `--verify-from tests/batches.tsv`，按文件去找登记它的批次，用批次登记的 entry 和 args 运行。批次输出里会带 `{out}` 这类每次都不同的路径，再加 `--mask REGEX`，比较前先把匹配的部分替换掉。
 - **规则：** 增加"后缀条件"（例如 `strcmp(a,b) == 0`）和"参数类型提示"（只接受字面量或标识符），覆盖面更大，同时保持安全。
 - **规模：** 在不同目录各选一批，单次 apply 控制在 55 秒内，用 JOBS 并行把墙钟压下来。
+
+## 第 2 轮结果（2026-10-30）
+
+- **新增 `--verify-from tests/batches.tsv`（cb3a800fa4）：** 按文件找到登记它的 SOURCE 批次，用登记的入口和参数作为它的检查，`{root}`、`{candidate}`、`{out}` 都会被替换。可验证的目标从 2 个扩大到 88 个。
+- **抓到一个危险的假 OK，已修。**
+  - 经过：`{out}` 的编号每次运行都从 1 开始，被测程序要求输出目录必须是新的，于是每次都以同样的 rc=2 拒绝运行。改前改后两次失败一模一样，被当成了"输出不变"。
+  - 修法：
+    - 输出目录名加上进程号，保证唯一；
+    - 基线失败（rc≠0）一律判 SKIP；
+    - 批次模式下，基线必须打印登记的 rc0 标记；
+    - 基线同时跑两次，两次不一样的（例如输出里有耗时）判 SKIP；
+    - 每个检查都套 `tools/bound 50`；
+    - 改写前把原文件备份到 `out/refactor-verify/backup/`；
+    - `REFACTOR_DEBUG` 环境变量会打印每次检查的命令和结果。
+  - 误判为 OK 的两个文件已从备份还原。
+- **实践：** 13 处，`tests/resources.cx` 和 `tools/formats-macho-pe.cx`（a77eb778a1）。对应的批次 `resources`、`ri-trace`、`formats-macho-pe` 已用 run-batch 复验，全部 PASS。`phase-timing-stamps`（检查不稳定）和 `negative-hostile`（改之前就失败）判 SKIP，没有改动。
+- **规模：** 4 个文件、JOBS=4，墙钟 41 秒；user 时间 96 秒，说明确实在并行。每个文件要跑三次检查（两次基线加一次改后），所以一次调用只能带 2～4 个文件。
+
+## 第 3 轮计划
+
+- 增加 `restore` 子命令：按 backup 目录把被中途杀掉的运行恢复回去。
+- 自动分批：plan 子命令按登记的 budget 把文件分组，保证每组在 55 秒内跑完，再一组一组调用 apply，每组完成后核对结果。
+- 规则：再加 `strcmp(a, b) == 0` 和 `strlen(x)` 改成 `tx_len(x, CAP)`。后者只在结果用于比较或赋值给 long 时才算 safe。
