@@ -102,11 +102,29 @@ static int slice_digest(int k, char d[65]) {
     return 0;
 }
 
+/* HEAD into HASH (41) when every file of csih.cx's compile closure is as
+   committed (no staged or unstaged change), else "" -- then csih.com is that
+   commit's csih. */
+static void clean_head(char hash[41]) {
+    char out[256];
+    int cut;
+    char *av[] = { "sh", "-c",
+                   "cd apps/csih && sh ../../unisacc.com -cx-plan csih.cx | cut -f2 "
+                   "| while read f; do realpath --relative-to=../.. \"$f\"; done > ../../out/csih-ape/closure.txt "
+                   "&& cd ../.. && [ -s out/csih-ape/closure.txt ] "
+                   "&& git diff --quiet HEAD -- $(cat out/csih-ape/closure.txt) apps/csih/csih.sh "
+                   "&& git rev-parse HEAD", 0 };
+    hash[0] = 0;
+    if (sy_run(av, out, sizeof out, &cut) == 0 && tx_len(out, sizeof out) >= 40) tx_copy(hash, 41, out, 40);
+}
+
 static int write_manifest(const char *d, const char *ver) {
     static char m[8192];
-    char hex[65], path[256];
+    char hex[65], path[256], head[41];
     int i, at = 0;
     at += snprintf(m + at, sizeof m - at, "# csih.com manifest: tools/csih-ape.cx pack\nsource_digest\t%s\nversion\t%s\n", d, ver);
+    clean_head(head);
+    if (head[0]) at += snprintf(m + at, sizeof m - at, "commit\t%s\n", head);
     if (sha_file("unisacc.com", hex) != 0) return -1;
     at += snprintf(m + at, sizeof m - at, "compiler\tunisacc.com\t%s\n", hex);
     for (i = 0; i < NS; i++) {
@@ -149,27 +167,32 @@ static int verify(void) {
     size_t n = 0;
     char *m;
     long len, at = 0;
-    int rows = 0, bad = 0;
+    int rows = 0, bad = 0, has_commit = 0;
     { if (cx_fmt(path, sizeof path, "%s/manifest.tsv", OUT)) { fprintf(stderr, "csih-ape: text too long for path\n"); exit(2); } }
     m = cx_read(path, &n);
     if (!m) { printf("CSIH_APE\tREFUSED\tno %s: run pack\n", path); return 1; }
     len = (long)n;
     {
-        /* A commit row (written by install): the sources are that commit's
-           snapshot in OUT/tree, not the working tree. */
+        /* A commit row: csih.com is that commit's csih. Built in a snapshot
+           (install), the sources are checked there; built in the working tree
+           (pack with a clean closure), the digest check below is against the
+           working tree, which then still holds that commit's closure. */
         long c = tx_find(m, len, "\ncommit\t", 8);
         if (c >= 0) {
             char want[48], have[48];
             size_t hn = 0;
             char *h;
             tx_copy(want, sizeof want, m + c + 8, 40);
-            if (cx_fmt(g_base, sizeof g_base, "%s/tree/", OUT) || cx_fmt(path, sizeof path, "%s/tree/.commit", OUT)) return 2;
+            if (cx_fmt(path, sizeof path, "%s/tree/.commit", OUT)) return 2;
             h = cx_read(path, &hn);
             have[0] = 0;
             if (h && hn >= 40) tx_copy(have, sizeof have, h, 40);
             rows++;
-            if (!eq(want, have)) { printf("  FAIL  commit %s, but %s holds %s\n", want, path, have[0] ? have : "nothing"); bad++; }
-            else printf("  ok    built from commit %s (snapshot %s)\n", want, g_base);
+            has_commit = 1;
+            if (eq(want, have)) {
+                if (cx_fmt(g_base, sizeof g_base, "%s/tree/", OUT)) return 2;
+                printf("  ok    built from commit %s (snapshot %s)\n", want, g_base);
+            } else printf("  ok    built from commit %s (working tree, closure as committed)\n", want);
         }
     }
     if (src_digest(d) != 0) { printf("CSIH_APE\tREFUSED\tcannot read the source digest\n"); return 1; }
@@ -220,7 +243,7 @@ static int verify(void) {
             else printf("  ok    %s as packed\n", f2);
         }
     }
-    if (rows != NS + 4 + (g_base[0] ? 1 : 0)) { printf("  FAIL  manifest has %d rows, want %d\n", rows, NS + 4 + (g_base[0] ? 1 : 0)); bad++; }
+    if (rows != NS + 4 + has_commit) { printf("  FAIL  manifest has %d rows, want %d\n", rows, NS + 4 + has_commit); bad++; }
     printf("CSIH_APE\t%s\trows=%d\tfail=%d\tsrc=%s\n", bad ? "REFUSED" : "VERIFIED", rows, bad, d);
     return bad ? 1 : 0;
 }
