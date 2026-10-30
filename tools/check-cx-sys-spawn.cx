@@ -5,6 +5,7 @@
    Prints PASS/FAIL lines and CX_SYS_SPAWN<TAB>failed=N. */
 #pragma unisa use sys.proc
 #pragma unisa use sys.fs
+#pragma unisa use sys.env
 #pragma unisa use mem.bytes
 #pragma unisa use text.text
 
@@ -60,6 +61,23 @@ int main(void) {
         ck(sy_spawn_pipe(v, 0, SY_SPAWN_STDERR_SPLIT, &ofd, 0) == -EINVAL, "split-needs-err-fd");
     }
 
+    {   /* sy_open / sy_lseek: write, then read the last byte back through an END-relative seek */
+        const char *f = "/tmp/cx-sys-spawn-open.tmp";
+        int fd = sy_open(f, O_CREAT | O_WRONLY | O_TRUNC, 0600); char last = 0; long end;
+        ck(fd >= 0 && sy_write_all(fd, "line\n", 5) == 0 && sy_close(fd) == 0, "open-create-write");
+        fd = sy_open(f, O_RDONLY, 0);
+        end = sy_lseek(fd, -1, SEEK_END);
+        ck(fd >= 0 && end == 4 && sy_read(fd, &last, 1) == 1 && last == '\n' && sy_lseek(fd, 0, SEEK_CUR) == 5, "lseek-end-and-cur");
+        sy_close(fd); sy_unlink(f);
+        ck(sy_open("/no/such/dir/cx-open", O_RDONLY, 0) == -ENOENT && sy_lseek(-1, 0, SEEK_SET) == -EBADF, "open-enoent-lseek-ebadf");
+    }
+    {   /* sy_setenv reaches a later child; overwrite 0 keeps the old value; bad names refused */
+        char *v[] = {"sh", "-c", "printf %s \"$CX_SPAWN_ENV\"", 0};
+        ck(sy_setenv("CX_SPAWN_ENV", "one", 1) == 0 && sy_setenv("CX_SPAWN_ENV", "two", 0) == 0, "setenv");
+        pid = sy_spawn_pipe(v, 0, 0, &ofd, 0); slurp(ofd, buf, sizeof buf); sy_wait_status(pid, 0, 0, 0, 0);
+        ck(tx_eq(buf, "one", 16), "setenv-reaches-child-overwrite-0-keeps");
+        ck(sy_setenv("", "x", 1) == -EINVAL && sy_setenv("A=B", "x", 1) == -EINVAL, "setenv-bad-name");
+    }
     {   char d[8] = "abcdefg"; char big[16]; int i;
         ck(mm_copy(d, 8, "XYZ", 3) == 0 && tx_eq(d, "XYZdefg", 8), "copy");
         ck(mm_copy(d, 2, "XYZ", 3) == -ERANGE && tx_eq(d, "XYZdefg", 8), "copy-over-cap-untouched");
