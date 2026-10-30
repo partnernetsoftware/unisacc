@@ -84,6 +84,7 @@ static int split(char *line, char **f, int maxf) {
 typedef struct { char *id, *call, *prefix, *tmpl, *use, *cls, *where; int argc, truth, where_arg; } Rule;
 static Rule rules[MAXRULE];
 static int sites_mode;   /* sites: list call sites instead of candidate rows */
+static int rename_rule = -1;   /* rename: the rule whose call is the identifier to rename, its template the new name */
 static int nrules;
 static void load_rules(const char *path) {
     size_t n; char *b = cx_read(path, &n), *line, *e, *f[10]; long i = 0; int nf;
@@ -221,6 +222,18 @@ static int find_file(Buf *out, const char *file, int autoacc) {
         if (is_id((unsigned char)c) && !(c >= '0' && c <= '9') && (i == 0 || !is_id((unsigned char)b[i - 1]))) {
             long a = i, j, k; int r;
             while (i < n && is_id((unsigned char)b[i])) i++;
+            if (rename_rule >= 0 && tx_same(b + a, i - a, rules[rename_rule].call, tx_len(rules[rename_rule].call, 256))) {
+                Rule *R = &rules[rename_rule]; char num[64]; const char *cls = in_reserved(file) ? "skip" : "safe";
+                /* rename: the bare identifier anywhere outside comments and literals, as an apply row */
+                puts_(out, autoacc && tx_eq(cls, "safe", 8) ? "accept" : "-"); put(out, "\t", 1);
+                putesc(out, file, tx_len(file, CAP)); put(out, "\t", 1);
+                if (cx_fmt(num, sizeof num, "%ld\t%ld\t", a, line)) die("format");
+                puts_(out, num); puts_(out, R->id); put(out, "\t", 1); puts_(out, cls); put(out, "\t", 1);
+                puts_(out, tx_eq(cls, "skip", 8) ? "reserved path" : "rename"); put(out, "\t", 1);
+                putesc(out, b + a, i - a); put(out, "\t", 1); puts_(out, R->tmpl); put(out, "\t-\n", 3);
+                count++;
+                continue;
+            }
             j = skip_ws(b, i, n);
             if (j >= n || b[j] != '(') continue;
             for (r = 0; r < nrules; r++) {
@@ -549,6 +562,23 @@ static int apply(const char *candpath, int jobs, const char *verify) {
     return rev ? 1 : 0;
 }
 
+/* find_file over every tracked .cx file (symlinks skipped); -1 when one cannot be read */
+static int scan_tracked(Buf *out, int autoacc) {
+    char *gv[] = {"git", "ls-files", "-s", "-z", "--", "*.cx", 0}, chunk[65536]; int ofd, pid; long r, at = 0;
+    Buf list = {0, 0, 0};
+    pid = sy_spawn_pipe(gv, 0, 0, &ofd, 0);
+    if (pid < 0) die("cannot run git ls-files");
+    while ((r = sy_read(ofd, chunk, sizeof chunk)) > 0) put(&list, chunk, r);
+    sy_close(ofd); sy_wait_status(pid, 0, 0, 0, 0);
+    while (at < list.n) {   /* "MODE SHA STAGE\tPATH\0" */
+        char *e = list.p + at; long ln = tx_len(e, list.n - at), tab = tx_chr(e, ln, '\t');
+        if (ln < 0) break;
+        if (tab > 0 && !tx_prefix(e, ln, "120000", 6) && find_file(out, e + tab + 1, autoacc) < 0) return -1;
+        at += ln + 1;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
     arena = ar_new(1L << 32);
     if (!arena) die("cannot create the arena");
@@ -564,7 +594,7 @@ int main(int argc, char **argv) {
         /* sites NAME[,NAME...] (FILE... | --tracked): every call of those names, with any argument count,
            outside comments and literals, as FILE:LINE<TAB>call; --tracked scans every tracked .cx file
            (symlinks skipped).  The search half of find, for a whole tree in one process. */
-        char *names = zdup(argv[2]), *p = names; int k; Buf out = {0, 0, 0}, list = {0, 0, 0};
+        char *names = zdup(argv[2]), *p = names; int k; Buf out = {0, 0, 0};
         while (*p) {
             char *s = p; while (*p && *p != ',') p++;
             if (*p) *p++ = 0;
@@ -576,20 +606,26 @@ int main(int argc, char **argv) {
             nrules++;
         }
         sites_mode = 1;
-        if (tx_eq(argv[3], "--tracked", 16)) {
-            char *gv[] = {"git", "ls-files", "-s", "-z", "--", "*.cx", 0}, chunk[65536]; int ofd, pid; long r, at = 0;
-            pid = sy_spawn_pipe(gv, 0, 0, &ofd, 0);
-            if (pid < 0) die("cannot run git ls-files");
-            while ((r = sy_read(ofd, chunk, sizeof chunk)) > 0) put(&list, chunk, r);
-            sy_close(ofd); sy_wait_status(pid, 0, 0, 0, 0);
-            while (at < list.n) {   /* "MODE SHA STAGE\tPATH\0" */
-                char *e = list.p + at; long ln = tx_len(e, list.n - at), tab = tx_chr(e, ln, '\t');
-                if (ln < 0) break;
-                if (tab > 0 && !tx_prefix(e, ln, "120000", 6) && find_file(&out, e + tab + 1, 0) < 0) return 2;
-                at += ln + 1;
-            }
-        } else for (k = 3; k < argc; k++) if (find_file(&out, argv[k], 0) < 0) return 2;
+        if (tx_eq(argv[3], "--tracked", 16)) { if (scan_tracked(&out, 0) < 0) return 2; }
+        else for (k = 3; k < argc; k++) if (find_file(&out, argv[k], 0) < 0) return 2;
         return sy_write_all(1, out.p ? out.p : "", out.n) == 0 ? 0 : 2;
+    }
+    if (argc >= 5 && tx_eq(argv[1], "rename", 8)) {
+        /* rename OLD NEW (FILE... | --tracked): every OLD identifier outside comments and literals (calls,
+           types, macros, declarations alike) as candidate rows that apply takes, verified per file like any
+           rule; rows in reserved paths are skip.  Nothing is accepted unless --auto comes first. */
+        int a = 2, autoacc = 0, k; Buf out = {0, 0, 0};
+        if (tx_eq(argv[a], "--auto", 8)) { autoacc = 1; a++; }
+        if (argc < a + 3) die("rename [--auto] OLD NEW (FILE... | --tracked)");
+        rules[0].id = "rename"; rules[0].call = argv[a]; rules[0].prefix = ""; rules[0].argc = -2;
+        rules[0].tmpl = argv[a + 1]; rules[0].use = "-"; rules[0].cls = "safe";
+        rules[0].truth = 0; rules[0].where_arg = 0; rules[0].where = "";
+        nrules = 1; rename_rule = 0;
+        for (k = 0; argv[a + 1][k]; k++) if (!is_id((unsigned char)argv[a + 1][k])) die("NEW must be an identifier");
+        puts_(&out, "# verdict\tfile\toffset\tline\trule\tclass\twhy\toriginal\treplacement\tuse\n");
+        if (tx_eq(argv[a + 2], "--tracked", 16)) { if (scan_tracked(&out, autoacc) < 0) return 2; }
+        else for (k = a + 2; k < argc; k++) if (find_file(&out, argv[k], autoacc) < 0) return 2;
+        return sy_write_all(1, out.p, out.n) == 0 ? 0 : 2;
     }
     if (argc >= 5 && tx_eq(argv[1], "apply", 8)) {
         Buf v = {0, 0, 0}; int k, jobs = (int)strtol(argv[3], 0, 10);
