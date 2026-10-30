@@ -31,6 +31,8 @@
    rename. Failure does not unlink the path; a short write can leave a
    truncated file. */
 #pragma unisa module output
+#pragma unisa use sys.fs
+#pragma unisa use mem.heap
 
 static void cxo_setwhy(char *why, long cap, const char *msg) {
     long i;
@@ -47,16 +49,7 @@ static int cxo_arg(const void *data, long length, char *why, long whycap) {
 }
 
 static int cxo_pump(int fd, const char *bytes, long length) {
-    long done;
-    done = 0;
-    while (done < length) {
-        long wrote;
-        wrote = (long)write(fd, bytes + done, (size_t)(length - done));
-        if (wrote < 0 && errno == EINTR) continue;
-        if (wrote <= 0 || wrote > length - done) return -1;
-        done = done + wrote;
-    }
-    return 0;
+    return sy_write_all(fd, bytes, length) ? -1 : 0;
 }
 
 static int cxo_stdout(const void *data, long length, char *why, long whycap) {
@@ -81,11 +74,11 @@ static int cxo_store(const char *path, const void *data, long length, char *why,
     fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0755);
     if (fd < 0) { cxo_setwhy(why, whycap, "cannot open output"); return 1; }
     if (cxo_pump(fd, (const char *)data, length)) {
-        close(fd);
+        sy_close(fd);
         cxo_setwhy(why, whycap, "short output write");
         return 2;
     }
-    if (close(fd) < 0) { cxo_setwhy(why, whycap, "cannot close output"); return 3; }
+    if (sy_close(fd) != 0) { cxo_setwhy(why, whycap, "cannot close output"); return 3; }
     cxo_setwhy(why, whycap, 0);
     return 0;
 }
@@ -97,11 +90,11 @@ static int cxo_direct(const char *path, const void *data, long length, char *why
     fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0755);
     if (fd < 0) { cxo_setwhy(why, whycap, "cannot open output"); return 1; }
     if (cxo_pump(fd, (const char *)data, length)) {
-        close(fd);
+        sy_close(fd);
         cxo_setwhy(why, whycap, "short output write");
         return 2;
     }
-    if (close(fd) < 0) { cxo_setwhy(why, whycap, "cannot close output"); return 3; }
+    if (sy_close(fd) != 0) { cxo_setwhy(why, whycap, "cannot close output"); return 3; }
     cxo_setwhy(why, whycap, 0);
     return 0;
 }
@@ -114,35 +107,35 @@ static int cxo_transaction(const char *path, const void *data, long length, char
     bad = cxo_arg(data, length, why, whycap);
     if (bad) return bad;
     cap = strlen(path) + 80;
-    tmp = malloc(cap);
+    tmp = mm_alloc(cap);
     if (!tmp) { cxo_setwhy(why, whycap, "cannot open output"); return 1; }
     slash = strrchr(path, '/');
     directory = slash ? (int)(slash - path + 1) : 0;
     fd = -1;
     for (attempt = 0; attempt < 100; attempt = attempt + 1) {
         n = snprintf(tmp, cap, "%.*s.unisacc-%ld-%d.tmp", directory, path, (long)getpid(), attempt);
-        if (n < 0 || (size_t)n >= cap) { free(tmp); cxo_setwhy(why, whycap, "cannot open output"); return 1; }
+        if (n < 0 || (size_t)n >= cap) { mm_free(tmp); cxo_setwhy(why, whycap, "cannot open output"); return 1; }
         fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0755);
         if (fd >= 0) break;
-        if (errno != EEXIST) { free(tmp); cxo_setwhy(why, whycap, "cannot open output"); return 1; }
+        if (errno != EEXIST) { mm_free(tmp); cxo_setwhy(why, whycap, "cannot open output"); return 1; }
     }
-    if (fd < 0) { free(tmp); cxo_setwhy(why, whycap, "cannot open output"); return 1; }
+    if (fd < 0) { mm_free(tmp); cxo_setwhy(why, whycap, "cannot open output"); return 1; }
     if (cxo_pump(fd, (const char *)data, length)) {
-        close(fd); unlink(tmp); free(tmp);
+        sy_close(fd); unlink(tmp); mm_free(tmp);
         cxo_setwhy(why, whycap, "short output write");
         return 2;
     }
-    if (close(fd) < 0) {
-        unlink(tmp); free(tmp);
+    if (sy_close(fd) != 0) {
+        unlink(tmp); mm_free(tmp);
         cxo_setwhy(why, whycap, "cannot close output");
         return 3;
     }
     if (rename(tmp, path)) {
-        unlink(tmp); free(tmp);
+        unlink(tmp); mm_free(tmp);
         cxo_setwhy(why, whycap, "cannot commit output");
         return 4;
     }
-    free(tmp);
+    mm_free(tmp);
     cxo_setwhy(why, whycap, 0);
     return 0;
 }
