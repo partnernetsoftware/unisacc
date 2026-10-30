@@ -119,22 +119,23 @@ static void key_source(const char *dir,int keylen,char *src_name,int cap){
  int hs=keylen-7-at-2;for(int k=0;k<hs;k++)name[at++]='h';name[at++]='.';name[at++]='h';name[at]=0;
  if(cx_fmt(p,sizeof p,"%s/%s",dir,name))die("key header");save(p,"int v=1;\n",9);
  char body[700];if(cx_fmt(src_name,cap,"m%d.c",keylen)||cx_fmt(p,sizeof p,"%s/%s",dir,src_name)||cx_fmt(body,sizeof body,"#include \"%s\"\nint main(void){return v;}\n",name))die("key source");save(p,body,tx_len(body,sizeof body));}
-static np_result key_run(const char *dir,const char *ledger,const char *capture,const char *srcname,const char *name){char *v[20];int n=command_prefix(v,8);if(ledger){v[n++]="--strict-resource-flow";v[n++]="--resource-ledger";v[n++]=(char *)ledger;}v[n++]="-O0";v[n++]="-b";v[n++]="lnx/x86_64";v[n++]="-S";v[n++]=(char *)srcname;v[n++]="-o";v[n++]="-";v[n]=0;return command(v,dir,capture,8,name);}
+static const char *key_idir;   /* -I for key_run, or 0 */
+static np_result key_run(const char *dir,const char *ledger,const char *capture,const char *srcname,const char *name){char *v[22];int n=command_prefix(v,8);if(ledger){v[n++]="--strict-resource-flow";v[n++]="--resource-ledger";v[n++]=(char *)ledger;}if(key_idir){v[n++]="-I";v[n++]=(char *)key_idir;}v[n++]="-O0";v[n++]="-b";v[n++]="lnx/x86_64";v[n++]="-S";v[n++]=(char *)srcname;v[n++]="-o";v[n++]="-";v[n]=0;return command(v,dir,capture,8,name);}
 /* ri.class.inc-quote.MISSING: the quote-include capture as an SC1 map (#SC1, first row per key) replays exactly;
    without its \0inc/q/ row the strict run is refused MISSING_EXPLICIT_RESOURCE naming the hex key, with no output */
-static void sc1_map(const char *t,long n,int drop_inc,np_buf *out){
+static void sc1_map(const char *t,long n,const char *drop,np_buf *out){   /* DROP: hex key prefix whose rows are left out, or 0 */
  char seen[64][1100];int ns=0;long at=0;
  while(at<n){long e=tx_chr(t+at,n-at,'\n'),l=e<0?n-at:e,tab=tx_chr(t+at,l,'\t');const char *s=t+at;at+=l+1;
   if(tx_prefix(s,l,"#SC2\t",5)){np_put(out,"#SC1",4);np_put(out,s+4,(size_t)(l-4));np_put(out,"\n",1);continue;}
   if(tab<=0||tab>=1100)continue;
-  if(drop_inc&&tx_prefix(s,tab,"00696e632f712f",14))continue;
+  if(drop&&tx_prefix(s,tab,drop,tx_len(drop,64)))continue;
   int dup=0;for(int k=0;k<ns;k++)if(tx_same(seen[k],tx_len(seen[k],1100),s,tab))dup=1;if(dup)continue;
   if(ns<64){tx_copy(seen[ns],1100,s,tab);ns++;}
   np_put(out,s,(size_t)l);np_put(out,"\n",1);}
 }
 static void inc_quote_missing(const char *dir,const char *cap,const char *srcname){
  size_t tn;char p[4400],keep[4400],full[4400],missing[4400];path(p,sizeof p,cap,"resources.tsv");char *t=load(p,&tn);
- np_buf a={0},b={0};sc1_map(t,(long)tn,0,&a);sc1_map(t,(long)tn,1,&b);mm_free(t);
+ np_buf a={0},b={0};sc1_map(t,(long)tn,0,&a);sc1_map(t,(long)tn,"00696e632f712f",&b);mm_free(t);
  if(tx_copy(keep,sizeof keep,capdir,tx_len(capdir,sizeof capdir))||tx_copy(capdir,sizeof capdir,cap,tx_len(cap,4400)))die("capdir");
  material("inc-quote-sc1",a.p,a.n,full);material("inc-quote-missing",b.p,b.n,missing);
  if(tx_copy(capdir,sizeof capdir,keep,tx_len(keep,sizeof keep)))die("capdir");mm_free(a.p);mm_free(b.p);
@@ -145,29 +146,49 @@ static void inc_quote_missing(const char *dir,const char *cap,const char *srcnam
 static void material_from(const char *cap,const char *name,const char *table,size_t n,char *out){
  char keep[4400];if(tx_copy(keep,sizeof keep,capdir,tx_len(capdir,sizeof capdir))||tx_copy(capdir,sizeof capdir,cap,tx_len(cap,4400)))die("capdir");
  material(name,table,n,out);if(tx_copy(capdir,sizeof capdir,keep,tx_len(keep,sizeof keep)))die("capdir");}
-/* ri.class.inc-quote.EMPTY and .ABSENT, each against the same compile on disk (cwd = the fixture, source m.c):
-   EMPTY  -- the \0inc/q/h.h row re-signed as a present 0-byte blob gives the bytes of compiling next to an empty h.h;
-   ABSENT -- that row ABSENT, with the rest of the search chain (\0cli/include-dir, \0hdr/h.h, \0cli/quote-dir,
-             \0inc/a/include/h.h) ABSENT, gives the E2 positioned no-such-file #include diagnostic, rc 1, stderr
-             byte-equal to compiling with no h.h -- not a resource-layer death */
-static np_result inc_disk(const char *leaf,const char *header){char d[4400],p[4400];path(d,sizeof d,work,leaf);if(sy_mkdir(d,0700))die("inc fixture");
- const char *m="#include \"h.h\"\nint main(void){return 0;}\n";path(p,sizeof p,d,"m.c");save(p,m,tx_len(m,128));if(header){path(p,sizeof p,d,"h.h");save(p,header,tx_len(header,64));}
+/* ri.class.inc-quote.EMPTY/.ABSENT and ri.class.inc-angle.states, each against the same compile on disk (cwd = the
+   fixture, source m.c; angle: <h.h> found through -I inc):
+   PRESENT -- the capture as an SC1 map replays to the bytes of the disk compile (angle);
+   EMPTY   -- the include row re-signed as a present 0-byte blob gives the bytes of compiling next to an empty h.h;
+   ABSENT  -- that row ABSENT, with the rest of the search chain ABSENT (quote: \0cli/include-dir, \0hdr/h.h,
+              \0cli/quote-dir, \0inc/a/include/h.h; angle: \0inc/a/include/h.h, \0hdr/h.h), gives the E2 positioned
+              no-such-file #include diagnostic, rc 1, stderr byte-equal to compiling with no h.h -- not a resource death;
+   MISSING -- without the include row the strict run is refused MISSING_EXPLICIT_RESOURCE <hex key> (angle; quote is
+              inc_quote_missing) */
+static np_result inc_disk(int angle,const char *leaf,const char *header){char d[4400],p[4400];path(d,sizeof d,work,leaf);if(sy_mkdir(d,0700))die("inc fixture");
+ const char *m=angle?"#include <h.h>\nint main(void){return 0;}\n":"#include \"h.h\"\nint main(void){return 0;}\n";path(p,sizeof p,d,"m.c");save(p,m,tx_len(m,128));
+ if(angle){path(p,sizeof p,d,"inc");if(sy_mkdir(p,0700))die("inc dir");}
+ if(header){path(p,sizeof p,d,angle?"inc/h.h":"h.h");save(p,header,tx_len(header,64));}
  return key_run(d,0,0,"m.c",leaf);}
-static void inc_quote_states(void){
- char cap[4400],d[4400],p[4400],led[4400];path(d,sizeof d,work,"incq");path(cap,sizeof cap,work,"incq-capture");
- np_result c=inc_disk("incq","int v=1;\n");np_free(&c);
- c=key_run(d,0,cap,"m.c","incq-capture");ck(c.rc==0&&!c.errn&&c.outn>0,"inc-quote-capture");np_free(&c);
- size_t tn;path(p,sizeof p,cap,"resources.tsv");char *t=load(p,&tn);np_buf base={0};sc1_map(t,(long)tn,1,&base);mm_free(t);
- char eh[65];cx_sha256_hex("",0,eh);char row[256];
- np_buf e={0};np_put(&e,base.p,base.n);if(cx_fmt(row,sizeof row,"00696e632f712f682e68\t1\tempty.h\t0\t%s\n",eh))die("empty row");np_put(&e,row,tx_len(row,sizeof row));
- material_from(cap,"incq-empty-ledger",e.p,e.n,led);path(p,sizeof p,led,"empty.h");save(p,"",0);mm_free(e.p);
- np_result want=inc_disk("incq-disk-empty","");np_result got=key_run(d,led,0,"m.c","incq-empty");
- ck(want.rc==0&&got.rc==0&&!got.errn&&got.outn==want.outn&&want.outn>0&&mm_same(got.out,want.out,(long)want.outn),"inc-quote-empty-equals-disk");np_free(&want);np_free(&got);
- const char *absent[]={"00696e632f712f682e68","00636c692f696e636c7564652d646972","006864722f682e68","00636c692f71756f74652d646972","00696e632f612f696e636c7564652f682e68",0};
- np_buf a={0};np_put(&a,base.p,base.n);for(int k=0;absent[k];k++){if(cx_fmt(row,sizeof row,"%s\t0\t-\t0\t-\n",absent[k]))die("absent row");np_put(&a,row,tx_len(row,sizeof row));}
- material_from(cap,"incq-absent-ledger",a.p,a.n,led);mm_free(a.p);mm_free(base.p);
- want=inc_disk("incq-disk-absent",0);got=key_run(d,led,0,"m.c","incq-absent");
- ck(want.rc==1&&got.rc==1&&!got.outn&&got.errn==want.errn&&want.errn>0&&mm_same(got.err,want.err,(long)want.errn)&&tx_find(got.err,(long)got.errn,"no such file for #include",25)>=0,"inc-quote-absent-is-e2-diagnostic");np_free(&want);np_free(&got);
+static void inc_states(int angle){
+ const char *tag=angle?"inc-angle":"inc-quote",*key=angle?"00696e632f612f696e632f682e68":"00696e632f712f682e68",*drop=angle?"00696e632f612f":"00696e632f712f";
+ const char *qchain[]={"00636c692f696e636c7564652d646972","006864722f682e68","00636c692f71756f74652d646972","00696e632f612f696e636c7564652f682e68",0};
+ const char *achain[]={"00696e632f612f696e636c7564652f682e68","006864722f682e68",0};const char **chain=angle?achain:qchain;
+ char leaf[64],name[96],cap[4400],d[4400],p[4400],led[4400],row[256],eh[65];
+ key_idir=angle?"inc":0;
+ if(cx_fmt(leaf,sizeof leaf,"%s",angle?"inca":"incq"))die("leaf");path(d,sizeof d,work,leaf);if(cx_fmt(name,sizeof name,"%s-capture",leaf))die("name");path(cap,sizeof cap,work,name);
+ np_result present=inc_disk(angle,leaf,"int v=1;\n");
+ np_result c=key_run(d,0,cap,"m.c",name);if(cx_fmt(name,sizeof name,"%s-capture",tag))die("name");ck(c.rc==0&&!c.errn&&c.outn>0,name);np_free(&c);
+ size_t tn;path(p,sizeof p,cap,"resources.tsv");char *t=load(p,&tn);np_buf all={0},base={0};sc1_map(t,(long)tn,0,&all);sc1_map(t,(long)tn,drop,&base);mm_free(t);
+ if(angle){
+  if(cx_fmt(name,sizeof name,"%s-present-ledger",leaf))die("name");material_from(cap,name,all.p,all.n,led);
+  np_result got=key_run(d,led,0,"m.c","inca-present");ck(present.rc==0&&got.rc==0&&!got.errn&&got.outn==present.outn&&present.outn>0&&mm_same(got.out,present.out,(long)present.outn),"inc-angle-present-equals-disk");np_free(&got);
+  if(cx_fmt(name,sizeof name,"%s-missing-ledger",leaf))die("name");material_from(cap,name,base.p,base.n,led);
+  char want[128];if(cx_fmt(want,sizeof want,"MISSING_EXPLICIT_RESOURCE %s",key))die("want");
+  got=key_run(d,led,0,"m.c","inca-missing");ck(got.rc==2&&!got.outn&&tx_find(got.err,(long)got.errn,want,tx_len(want,128))>=0,"inc-angle-missing-refused");np_free(&got);
+ }
+ np_free(&present);mm_free(all.p);
+ cx_sha256_hex("",0,eh);np_buf e={0};np_put(&e,base.p,base.n);if(cx_fmt(row,sizeof row,"%s\t1\tempty.h\t0\t%s\n",key,eh))die("empty row");np_put(&e,row,tx_len(row,sizeof row));
+ if(cx_fmt(name,sizeof name,"%s-empty-ledger",leaf))die("name");material_from(cap,name,e.p,e.n,led);path(p,sizeof p,led,"empty.h");save(p,"",0);mm_free(e.p);
+ if(cx_fmt(name,sizeof name,"%s-disk-empty",leaf))die("name");np_result want=inc_disk(angle,name,"");np_result got=key_run(d,led,0,"m.c",angle?"inca-empty":"incq-empty");
+ if(cx_fmt(name,sizeof name,"%s-empty-equals-disk",tag))die("name");ck(want.rc==0&&got.rc==0&&!got.errn&&got.outn==want.outn&&want.outn>0&&mm_same(got.out,want.out,(long)want.outn),name);np_free(&want);np_free(&got);
+ np_buf a={0};np_put(&a,base.p,base.n);if(cx_fmt(row,sizeof row,"%s\t0\t-\t0\t-\n",key))die("absent row");np_put(&a,row,tx_len(row,sizeof row));
+ for(int k=0;chain[k];k++){if(cx_fmt(row,sizeof row,"%s\t0\t-\t0\t-\n",chain[k]))die("absent row");np_put(&a,row,tx_len(row,sizeof row));}
+ if(cx_fmt(name,sizeof name,"%s-absent-ledger",leaf))die("name");material_from(cap,name,a.p,a.n,led);mm_free(a.p);mm_free(base.p);
+ if(cx_fmt(name,sizeof name,"%s-disk-absent",leaf))die("name");want=inc_disk(angle,name,0);got=key_run(d,led,0,"m.c",angle?"inca-absent":"incq-absent");
+ if(cx_fmt(name,sizeof name,"%s-absent-is-e2-diagnostic",tag))die("name");
+ ck(want.rc==1&&got.rc==1&&!got.outn&&got.errn==want.errn&&want.errn>0&&mm_same(got.err,want.err,(long)want.errn)&&tx_find(got.err,(long)got.errn,"no such file for #include",25)>=0,name);np_free(&want);np_free(&got);
+ key_idir=0;
 }
 static void key_length_bound(void){
  char dir[4400],s512[32],s513[32],cap512[4400],cap513[4400],p[4400];path(dir,sizeof dir,work,"keylen");if(sy_mkdir(dir,0700))die("keylen dir");
@@ -214,4 +235,4 @@ int main(int argc,char **argv){int trace_mode=argc>3&&tx_eqz(argv[argc-1], "--tr
  /* ri.frame.row-field-too-long: a 4096-byte field is one above the parser bound (width >= 4096) */
  {np_buf longrow={0};np_puts(&longrow,"ff\t0\t");for(int k=0;k<4096;k++)np_put(&longrow,"a",1);np_puts(&longrow,"\t0\t-\n");appended("row-field-4096",longrow.p,longrow.n,"resource-row-field-too-long");mm_free(longrow.p);}
  const char nulrow[]="ff\t0\t-\t0\t-\0hidden\n";appended("embedded-nul-row",nulrow,sizeof nulrow-1,"resource-row-nul");np_buf nulheader={0};np_put(&nulheader,ledger,header-1);np_put(&nulheader,"\0hidden\n",8);np_put(&nulheader,ledger+header,ledger_n-header);refuse("embedded-nul-header",nulheader.p,nulheader.n,"resource-row-nul");free(nulheader.p);
- ledger_preconditions();identity_bounds();key_length_bound();inc_quote_states();length_blob("blob-longer-than-declared",3);length_blob("blob-shorter-than-declared",5);repeated();additional();replay=invoke(capdir,root,0,"recovery");path(p,sizeof p,work,"normal.stdout");size_t recovery_n;char *recovery=load(p,&recovery_n);ck(replay.rc==0&&!replay.errn&&replay.outn==recovery_n&&!memcmp(replay.out,recovery,recovery_n),"strict-recovery-after-refusals");free(recovery);np_free(&replay);free(ledger);return finish(before,container_before,"SC1-map-compatibility-from-verified-SC2-trace");}
+ ledger_preconditions();identity_bounds();key_length_bound();inc_states(0);inc_states(1);length_blob("blob-longer-than-declared",3);length_blob("blob-shorter-than-declared",5);repeated();additional();replay=invoke(capdir,root,0,"recovery");path(p,sizeof p,work,"normal.stdout");size_t recovery_n;char *recovery=load(p,&recovery_n);ck(replay.rc==0&&!replay.errn&&replay.outn==recovery_n&&!memcmp(replay.out,recovery,recovery_n),"strict-recovery-after-refusals");free(recovery);np_free(&replay);free(ledger);return finish(before,container_before,"SC1-map-compatibility-from-verified-SC2-trace");}
