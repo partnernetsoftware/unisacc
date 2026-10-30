@@ -3,7 +3,6 @@
 本篇是 cx 的现行阅读。仓库 [prd.md](../../prd.md) 只做索引。`gcc_cx.com` 与 `clang_cx.com` 的要求是 APE 六格，不是本机 shell。驱动运行时不调用 `unisacc.com -cx-plan`。
 
 草案仍是 [docs/cx-spec-draft.md](../cx-spec-draft.md)。阶段表在 [plans/cx-modules.md](../../plans/cx-modules.md)。**底层/上层分层重构**（L0 cx/sys·cx/mem·cx/text 对接 libc/POSIX，L1 去裸 libc，Rust 式 Vec/String/所有权）记录在 [plans/cx-layers.md](../../plans/cx-layers.md)。**论文：** 模块化＋内存安全归 [Paper D 意向书](../../research/paper-d-intent.md)；工程进度不冒称论文完成。
-草案仍是 [docs/cx-spec-draft.md](../cx-spec-draft.md)。阶段表在 [plans/cx-modules.md](../../plans/cx-modules.md)。**论文：** 模块化＋内存安全归 [Paper D 意向书](../../research/paper-d-intent.md)；工程进度不冒称论文完成。
 
 ## `.com` 的要求：APE 六格
 
