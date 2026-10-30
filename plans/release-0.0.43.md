@@ -1,0 +1,46 @@
+# 0.0.43 发布：重新来（2026-10-30）
+
+## 目标
+
+可发布的 `unisacc.com` 0.0.43 要同时满足三条：
+
+1. 由 HEAD 源码用新 CX 入口自己构造出来。
+2. 两代判词：第一代编出的产品再编一次，五片逐字节相同。
+3. 同一候选上 `tests/run.cx -- --all` 的结果为 QUALIFIED。
+
+签名、Draft、公开等主人授权。
+
+## 原则（主人定）
+
+核心是 nn 推理字节流，用它把 8 个流和 18 张网串起来，产品应当优雅、简约。
+- 能写成模型步的差异，就不在代码里写特判。
+- 平台差异只放进 L0（cx/sys）或表里。
+- 构造链也照这条办：不在旧链上打补丁，写一条短的新链。
+
+## 主刀与分工
+
+- **grk 一人主刀发布链**（AGENTS.md：慢车道一次只一个主刀）。构造、安装、产品源都由它改。
+- **cc 只做三件事**：给方向、审每一个提交（看是否符合范式、有无回退）、按 grk 的请求补 L0 和工具。构造和安装不另派子代理。
+- **bdy、csih**：不碰发布链的文件。
+
+## 新链（取代 package-refresh、product-build、candidate-install 这条旧链）
+
+旧链读的是已归档的 C 源（exec/c/core.c、asmcompiler.c），收的是旧的五片收据。它不再修，等新链跑通后归档。
+
+1. **hostnative 变薄**：clock、utimes、loader 都转到 cx/sys，去掉只认 Linux 的 `#error`。osx 和 win 片要能原生运行。
+2. **新写一个工具 `tools/release-build.cx`**，一个命令走完以下五步，每一步都写出身份（sha256）：
+   1. **P3**：模型加上 `include/` 携带的头，其中 `\0hdr/cx-flat.h` 必须与树里的文件逐字节相同。复用现有的打包模块，不经 package-refresh。
+   2. **五片**：用 `tools/entry-build.cx` 每个目标编一片。lnx 走 33 个对象；osx 和 win 在 object 模型步落地之前先用整只 `-o`，并在记录里写明 route。
+   3. **wrap**：用 `seed/ape.c` 包装，生成 `unisacc-next.com`。
+   4. **第二代**：用第一代的产品再编一遍，五片两两逐字节比较。
+   5. **安装**：两代相同，且 `tools/check-install-fixes.cx` 4/4 通过，才替换 `./unisacc.com`。新身份写进 prd.md。
+3. **osx 和 win 的 object 模型步**：在模型里补上路由，走"事实表 → 生成器 → 网"。不阻塞第一次安装，装好以后再做。
+4. **测试**：在新产品上跑 `tests/run.cx -- --list`，用 all-waves 跑所有不需要材料的批次，再补材料、实现 PLANNED 的 19 行，最后跑 `--all`。
+
+## 进度（grk 每完成一步，在这里写上提交号）
+
+- [ ] 1 hostnative
+- [ ] 2 release-build：P3 / 五片 / wrap / 二代 / 安装
+- [ ] 3 object 模型步
+- [ ] 4 测试到 QUALIFIED
+- [ ] 主人授权发布
