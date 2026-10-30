@@ -250,6 +250,32 @@ int sy_mkdir(const char *path, int mode) {
     return mkdir(path, (mode_t)mode) == 0 ? 0 : sy_fail();
 }
 
+/* mkfifo is not in the implicit prelude, so this L0 unit makes the FIFO with the
+   raw mknodat syscall (Linux x86_64 259, aarch64 33; AT_FDCWD is -100).  Windows
+   has no FIFO: -ENOSYS. */
+static int sy_mkfifo_os(const char *path, int mode) {
+#ifdef _WIN32
+    (void)path;
+    (void)mode;
+    return -ENOSYS;
+#elif defined(__linux__) && defined(__x86_64__)
+    return (int)__syscall6(259, -100, (long)path, (long)(S_IFIFO | (mode & 07777)), 0, 0);
+#elif defined(__linux__) && defined(__aarch64__)
+    return (int)__syscall6(33, -100, (long)path, (long)(S_IFIFO | (mode & 07777)), 0, 0);
+#else
+    errno = 0;
+    return mkfifo(path, (mode_t)mode) == 0 ? 0 : sy_fail();
+#endif
+}
+
+/* Make PATH a FIFO (named pipe) with MODE permission bits (Rust std::os::unix::
+   fs::symlink's sibling; POSIX mkfifo).  0, or -errno: -EINVAL for an empty
+   PATH, -ENOSYS on Windows. */
+int sy_mkfifo(const char *path, int mode) {
+    if (!path || !path[0]) return -EINVAL;
+    return sy_mkfifo_os(path, mode);
+}
+
 /* Set PATH's permission bits. 0, or -errno. */
 int sy_chmod(const char *path, int mode) {
     errno = 0;
