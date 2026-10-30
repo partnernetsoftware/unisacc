@@ -17,9 +17,11 @@ import os
 
 
 def _headers(incdir):
-    """Every carried header, subdirectories included (`sys/stat.h`, 0.0.18)."""
-    return sorted(os.path.relpath(os.path.join(d, n), incdir)
-                  for d, _, fs in os.walk(incdir) for n in fs if n.endswith(".h"))
+    """Every carried header, subdirectories included (`sys/stat.h`, 0.0.18).  cx-flat.h is generated
+    from the others (tools/cx-flatten.cx), not carried source; seed/unisa_libneed.c skips it too."""
+    return sorted(r for r in (os.path.relpath(os.path.join(d, n), incdir)
+                              for d, _, fs in os.walk(incdir) for n in fs if n.endswith(".h"))
+                  if r != "cx-flat.h")
 import re
 
 PREFIX = "__UN_"
