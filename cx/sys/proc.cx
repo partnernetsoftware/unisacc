@@ -264,3 +264,32 @@ int sy_kill(int pid) {
 
 /* This process's pid. */
 int sy_pid(void) { return (int)getpid(); }
+
+/* The raw setpgid system call (the prelude's setpgid is forwarded to the host C library, whose
+   errno is not this unit's). Windows has no process groups here. */
+static int sy_setpgid_os(int pid, int pgid) {
+#if defined(_WIN32)
+    (void)pid;
+    (void)pgid;
+    return -ENOSYS;
+#elif defined(__APPLE__)
+    return (int)__syscall6(_UNISA_SC(82), (long)pid, (long)pgid, 0, 0, 0);
+#elif defined(__linux__) && defined(__aarch64__)
+    return (int)__syscall6(154, (long)pid, (long)pgid, 0, 0, 0);
+#elif defined(__linux__) && defined(__x86_64__)
+    return (int)__syscall6(109, (long)pid, (long)pgid, 0, 0, 0);
+#else
+    (void)pid;
+    (void)pgid;
+    return -ENOSYS;
+#endif
+}
+
+/* Put process PID (0: this one) into process group PGID (0: the group whose id is PID, a new
+   group led by it). 0, or -errno: -EINVAL for a negative argument, -ESRCH when PID is neither
+   this process nor a child, -EACCES for a child that has already exec'd, -EPERM for a session
+   leader or a group in another session; -ENOSYS on Windows. */
+int sy_setpgid(int pid, int pgid) {
+    if (pid < 0 || pgid < 0) return -EINVAL;
+    return sy_setpgid_os(pid, pgid);
+}

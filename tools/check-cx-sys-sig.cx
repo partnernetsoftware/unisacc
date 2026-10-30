@@ -10,6 +10,7 @@
 #pragma unisa use sys.env
 #pragma unisa use text.text
 #pragma unisa use text.fmt
+#pragma unisa use sys.posix
 
 static int nok, nfail;
 static const char *self = "tools/check-cx-sys-sig.cx";
@@ -104,7 +105,18 @@ static int child_r(void) {
     return 0;
 }
 
+/* h: started by sy_run, so in the parent's process group and not its leader; sy_setpgid(0, 0)
+   makes a new group whose id is this pid */
+static int child_h(void) {
+    long before = sy_getpgid(0), after;
+    int me = sy_pid(), rc = sy_setpgid(0, 0);
+    after = sy_getpgid(0);
+    printf("PGID before_self=%d rc=%d after_self=%d\n", before == me, rc, after == me);
+    return 0;
+}
+
 static int child(const char *m) {
+    if (tx_eqz(m, "h")) return child_h();
     if (tx_eqz(m, "a")) return child_a();
     if (tx_eqz(m, "x")) return child_x();
     if (tx_eqz(m, "c")) return child_c();
@@ -170,6 +182,40 @@ static void check_refusals(void) {
     ck(sy_sig_default(9) == -EINVAL && sy_sig_default(13) == 0, "default-sigkill-einval-sigpipe-ok");
 }
 
+/* forked by sy_fork_session: a session leader, which setpgid refuses */
+static int in_session(void *ud) {
+    char b[32];
+    int n = tx_snprintf(b, sizeof b, "SESS %d\n", sy_setpgid(0, 0) == -EPERM);
+    (void)ud;
+    if (n > 0) sy_write_all(1, b, n);
+    return 0;
+}
+
+static void check_setpgid(void) {
+    const char *u = sy_env_or("UNISACC", "./unisacc.com");
+    char *av[] = { "sh", (char *)u, "-run", (char *)self, "--", "child", "h", 0 };
+    char out[512];
+    int cut = 0, rc, fds[2] = {-1, -1}, pid, ofd = -1;
+    long n = 0, k;
+    rc = sy_run(av, out, sizeof out, &cut);
+    ck(rc == 0 && at(out, "PGID before_self=0 rc=0 after_self=1\n") >= 0, "setpgid-0-0-new-group-id-is-own-pid");
+    if (at(out, "PGID before_self=0 rc=0 after_self=1\n") < 0) printf("  child h: rc=%d out<<%s>>\n", rc, out);
+    pid = sy_fork_session(in_session, 0, fds);
+    if (pid > 0) {
+        while (n < (long)sizeof out - 1 && (k = sy_read(fds[0], out + n, sizeof out - 1 - n)) > 0) n += k;
+        out[n] = 0; sy_close(fds[0]); sy_close(fds[1]);
+    } else out[0] = 0;
+    ck(pid > 0 && sy_wait(pid, 0) == 0 && at(out, "SESS 1\n") >= 0, "setpgid-forked-session-leader-eperm");
+    {   char *v[] = { "sh", "-c", "sleep 5", 0 };
+        pid = sy_spawn_pipe(v, 0, 0, &ofd, 0);
+        ck(pid > 0 && sy_getpgid(pid) == pid, "spawn-pipe-child-leads-own-group");
+        ck(pid > 0 && sy_setpgid(pid, pid) == -EACCES, "setpgid-exec-d-child-eacces");
+        if (pid > 0) { sy_kill(pid); sy_close(ofd); }
+    }
+    ck(sy_setpgid(-1, 0) == -EINVAL && sy_setpgid(0, -1) == -EINVAL, "setpgid-negative-einval");
+    ck(sy_setpgid(999999999, 0) == -ESRCH, "setpgid-not-self-nor-child-esrch");
+}
+
 static void check_symlink(void) {
     const char *d = "out/cx-sys-sig", *t = "out/cx-sys-sig/t.txt", *l = "out/cx-sys-sig/l", *g = "out/cx-sys-sig/dangling";
     char a[4096], b[4096];
@@ -199,6 +245,7 @@ int main(int argc, char **argv) {
     check_refusals();
     check_children();
     check_symlink();
+    check_setpgid();
     printf("CX_SYS_SIG\tok=%d\tfailed=%d\n", nok, nfail);
     return nfail ? 1 : 0;
 }
