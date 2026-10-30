@@ -93,6 +93,7 @@ int agent_undo_depth(void);
 size_t agent_project_notes(char *out, size_t cap);
 int agent_transient_http(int ok, int err, int status);
 int agent_undo_last(char *note, size_t cap);
+void agent_undo_exec(const char *cmd, const char *cwd);
 void agent_set_perm(int p);
 void agent_set_net(int on);
 typedef struct {
@@ -683,6 +684,24 @@ static int agent_run_selftest(void) {
                      "undo of a created file removes it");
             while (agent_undo_depth() > 0) agent_undo_last(note, sizeof note);
             a_expect(agent_undo_last(note, sizeof note) == 1, "undo with nothing left says so");
+        }
+        /* undo after exec: the existing files the command names are snapshotted
+           (quoted, once each); options, missing files and paths outside cwd are not */
+        {
+            char note[400], p2[300];
+            fio_t *wf;
+            int depth;
+            tx_snprintf(p2, sizeof p2, "%s/ex.txt", dir);
+            wf = fio_open(p2, "w"); if (wf) { fio_puts("before\n", wf); fio_close(wf); }
+            depth = agent_undo_depth();
+            agent_undo_exec("sed -i 's/before/after/' 'ex.txt' && cat ex.txt missing.txt /etc/hostname -n", dir);
+            a_expect(agent_undo_depth() == depth + 1, "exec: one snapshot for the named file (not options, missing or outside)");
+            wf = fio_open(p2, "w"); if (wf) { fio_puts("after\n", wf); fio_close(wf); }
+            a_expect(agent_undo_last(note, sizeof note) == 0, "exec: undo restores the file the command changed");
+            wf = fio_open(p2, "r"); got[0] = 0;
+            if (wf) { size_t n = fio_read(got, 1, sizeof got - 1, wf); fio_close(wf); got[n] = 0; }
+            a_expect(zs_cmp(got, "before\n") == 0, "  its content before the exec is back");
+            remove(p2);
         }
         remove(rel);
         rmdir(dir);

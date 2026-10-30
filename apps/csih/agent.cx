@@ -1326,14 +1326,20 @@ int agent_undo_last(char *note, size_t cap) {
     i = agent_undo_n - 1;
     if (agent_undo[i].existed) {
         if (agent_copy_file(agent_undo[i].bak, agent_undo[i].path) != 0) {
-            tx_snprintf(note, cap, "undo: 恢复 %.300s 失败: %s", agent_undo[i].path, sy_strerror(errno));
+            /* Leave the step on the stack and every older step stays out of reach
+               behind it (a directory the file was in may be gone for good). Drop
+               it, keep the backup, and say where it is. */
+            tx_snprintf(note, cap, "undo: 恢复 %.300s 失败: %s；这一步已移出撤销栈，旧内容留在 %.200s",
+                        agent_undo[i].path, sy_strerror(errno), agent_undo[i].bak);
+            agent_undo_n--;
             return 1;
         }
         ag_unlink(agent_undo[i].bak);
         tx_snprintf(note, cap, "undo: 已恢复 %.300s（还可撤销 %d 步）", agent_undo[i].path, i);
     } else {
         if (ag_unlink(agent_undo[i].path) != 0 && errno != ENOENT) {
-            tx_snprintf(note, cap, "undo: 删除 %.300s 失败: %s", agent_undo[i].path, sy_strerror(errno));
+            tx_snprintf(note, cap, "undo: 删除 %.300s 失败: %s；这一步已移出撤销栈", agent_undo[i].path, sy_strerror(errno));
+            agent_undo_n--;
             return 1;
         }
         tx_snprintf(note, cap, "undo: 已删除 agent 新建的 %.300s（还可撤销 %d 步）", agent_undo[i].path, i);
@@ -1342,12 +1348,56 @@ int agent_undo_last(char *note, size_t cap) {
     return 0;
 }
 
+/* 1 for a byte that ends a word of a shell command (blank or operator) */
+static int agent_word_end(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == ';' || c == '|' || c == '&' || c == '<' || c == '>' || c == '(' || c == ')';
+}
+
+/* exec can change files the undo stack never saw (sed -i, perl -pi, mv, > f).
+ * Before the command runs, snapshot the existing regular files inside CWD that it
+ * names: the words of the command with quotes taken off, options skipped, at
+ * most 8 files of up to 1 MiB, each once. A file the command reaches without
+ * naming it (a glob, find, a script that writes elsewhere) is not covered, and
+ * a file it creates is not removed by /undo. */
+void agent_undo_exec(const char *cmd, const char *cwd) {
+    char word[512], path[512], real[4096], rcwd[4096], seen[8][512];
+    const char *p = cmd;
+    long cl;
+    int n = 0, i;
+    sy_stat_t st;
+    if (!cmd || !cwd || !cwd[0] || sy_realpath(cwd, rcwd, (int)sizeof rcwd) < 0) return;
+    cl = (long)zs_len(rcwd);
+    while (*p && n < 8) {
+        long k = 0;
+        char q = 0;
+        int dup = 0;
+        while (*p && agent_word_end(*p)) p++;
+        while (*p && (q || !agent_word_end(*p))) {
+            if (q && *p == q) { q = 0; p++; continue; }
+            if (!q && (*p == '\'' || *p == '"')) { q = *p++; continue; }
+            if (k < (long)sizeof word - 1) word[k++] = *p;
+            p++;
+        }
+        word[k] = 0;
+        if (k == 0 || word[0] == '-') continue;
+        agent_under(cwd, word, path, sizeof path);
+        if (sy_lstat(path, &st) != 0 || st.kind != 'f' || st.size > (1L << 20)) continue;
+        if (sy_realpath(path, real, (int)sizeof real) < 0 || !tx_prefix(real, (long)zs_len(real), rcwd, cl) || real[cl] != '/') continue;
+        for (i = 0; i < n; i++) if (!zs_cmp(seen[i], real)) dup = 1;
+        if (dup) continue;
+        tx_snprintf(seen[n], sizeof seen[n], "%s", real);
+        agent_undo_snapshot(path);
+        n++;
+    }
+}
+
 int agent_exec(const agent_step *s, const char *cwd, char *out, size_t outlen) {
     char path[512];
     out[0] = '\0';
     agent_tool_reset();
     agent_under(cwd, s->path, path, sizeof path);
     if (s->kind == ACT_WRITE || s->kind == ACT_EDIT) agent_undo_snapshot(path);
+    if (s->kind == ACT_EXEC) agent_undo_exec(s->cmd, cwd);
     switch (s->kind) {
     case ACT_EXEC:
         g_exec_step = *s;
