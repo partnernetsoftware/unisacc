@@ -113,8 +113,8 @@
   - 33 只对象的墙钟 55558 ms → 45509 ms。链接 5890 ms → 7259 ms。对象加链接 61448 ms → 52768 ms。外层三批相加（含每批 `-run` 这份入口）73650 ms → 65045 ms。
   - 这 6 只的墙钟 32557 ms → 22634 ms。33 只的 e4 合计 20205 ms → 7327 ms，elf 合计 8518 ms → 10766 ms。`-O1` 少做优化，对象变大，elf 和链接变长，净构造仍少 8.7 s。另外 27 只对象两边逐字节相同。
   - 6 只各自的墙钟 / e4 / elf（毫秒，默认 `-O2` → `--o1-drivers`）：driveface 11536/5400/2236 → 7311/393/2857；driveroute 4713/1928/822 → 3448/197/1111；drive 7797/3148/1299 → 5607/273/1869；host 3091/1203/474 → 2323/124/750；cxmod 2664/1226/475 → 1867/110/713；tapegate 2757/1104/504 → 2078/111/721。
-  - 全 `-O2` 候选 `out/grk-opt2-o2/candidate`，2717972 字节，sha256 `2d59f550b6cb142147fd6f0a5f1b62354e1e2759736ad158494bf26322018e36`。`tests/runcache.cx` 12/0，`TIMING cold_ms=496 hit_ms=41`。`tools/dev-run.cx -run` 冷跑 6126 ms，退出 2。
-  - 混合候选 `out/grk-opt2-o1/candidate`，2959636 字节，sha256 `e477a4c70be28c11b86f9fce129fae2acf4e6c6813aa7d8436a8881d75160970`。`tests/runcache.cx` 12/0，`TIMING cold_ms=515 hit_ms=41`。`tools/dev-run.cx -run` 冷跑 6112 ms，退出 2。冷跑和命中都没有变快。
+  - 全 `-O2` 候选 `out/grk-opt2-o2/candidate`，2717972 字节，sha256 `2d59f550b6cb142147fd6f0a5f1b62354e1e2759736ad158494bf26322018e36`。`tests/runcache.cx` 12/0，`TIMING cold_ms=496 hit_ms=41`。`tools/dev-run.cx` 不带参数的冷 `-run` 编译加上一次用法拒绝，6126 ms，退出 2。这不是 dev-run 自己的运行时间。
+  - 混合候选 `out/grk-opt2-o1/candidate`，2959636 字节，sha256 `e477a4c70be28c11b86f9fce129fae2acf4e6c6813aa7d8436a8881d75160970`。`tests/runcache.cx` 12/0，`TIMING cold_ms=515 hit_ms=41`。`tools/dev-run.cx` 不带参数的冷 `-run` 编译加上一次用法拒绝，6112 ms，退出 2。这不是 dev-run 自己的运行时间。runcache 的冷跑和命中没有变快。
   - 同一份 `out/grk-opt-cmp/main.c`，两边 `-run -- z` 的 stdout 和 stderr 逐字节相同，都退出 0，stdout 是 `opt-cmp z`。
   - `-O0` 没有再试。这 6 只的 e4 已经降到 1.2 s，再降优化级别主要会把 elf 和链接再拉长。
 
