@@ -24,6 +24,11 @@ static int child(const char *mode, const char *arg) {
         setpgid(0, 0);   /* become a group leader: setsid must then refuse */
         return sy_setsid() == -EPERM ? 0 : 1;
     }
+    if (tx_eq(mode, "tty-pgrp", 16)) {
+        /* under script(1): stdin is a tty and this process is in its foreground group */
+        long fg = sy_tcgetpgrp(0);
+        return fg > 0 && fg == sy_getpgid(0) && sy_tcsetpgrp(0, (int)fg) == 0 ? 0 : 1;
+    }
     if (tx_eq(mode, "lockf-held", 16) || tx_eq(mode, "lockf-free", 16)) {
         int fd = sy_openat(sy_at_fdcwd(), arg, O_RDWR, 0), r = fd >= 0 ? sy_lockf(fd, 1, 0) : fd;
         return tx_eq(mode, "lockf-held", 16) ? (r == -EAGAIN || r == -EACCES ? 0 : 1) : (r == 0 ? 0 : 1);
@@ -175,6 +180,17 @@ int main(int argc, char **argv) {
         ok(sy_socketpair(sv) == 0 && sy_send_all(sv[0], "z", 1) == 0 && sy_recv(sv[1], buf, 1) == 1 && buf[0] == 'z'
            && sy_send_all(sv[1], "w", 1) == 0 && sy_recv(sv[0], buf, 1) == 1 && buf[0] == 'w', "socketpair carries bytes both ways");
         ok(sy_tcgetpgrp(sv[0]) == -ENOTTY, "tcgetpgrp on a socket is -ENOTTY");
+        {
+            /* on a real tty: script(1) (util-linux, -e returns the child's status) gives the child a pty */
+            char *probe[] = { "sh", "-c", "script -qec true /dev/null >/dev/null 2>&1", 0 };
+            if (sy_run(probe, out, sizeof out, &cut) == 0) {
+                char cmd[700];
+                char *av[] = { "sh", "-c", cmd, 0 };
+                snprintf(cmd, sizeof cmd, "script -qec '%s -run tools/check-cx-sys.cx -- child tty-pgrp -' /dev/null >/dev/null 2>&1",
+                         sy_env_or("UNISACC", "sh ./unisacc.com"));
+                ok(sy_run(av, out, sizeof out, &cut) == 0, "tcgetpgrp/tcsetpgrp on a pty: the foreground group is the child's own");
+            } else printf("  note  tcgetpgrp on a pty: UNMEASURED (no util-linux script(1) here)\n");
+        }
         snprintf(f, sizeof f, "%s/a", root);
         fd = sy_openat(sy_at_fdcwd(), f, O_RDWR | O_CREAT, 0600);
         ok(fd >= 0 && sy_stat(f, &s) == 0 && s.mode == 0600, "openat(AT_FDCWD, absolute, O_CREAT) creates with the mode");
