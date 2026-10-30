@@ -47,7 +47,7 @@ sh ./unisacc.com tools/csih-ape.cx -- smoke
 - 成品是 `apps/csih/csih.com`，和 `csih.cx` 放在同一目录，git 不跟踪（见 `apps/csih/.gitignore`）。
 - 中间产物在 `out/csih-ape/`：五个切片和 `manifest.tsv`。
 - **体积**：pack 调 ape-pack 时带 `--deflate`，四个 Unix 片用 `cx/text/deflate.cx` 压缩，结果是 gzip 格式。
-  - csih.com 从 8.9MB 降到 1.34MB（2026-10-30；d8eafebcee 时为 1.12MB，839a435f36 时为 1,129,680 字节，7a8c033ec9 时为 1,130,032 字节）。
+  - csih.com 从 8.9MB 降到 1.34MB（2026-10-30；d8eafebcee 时为 1.12MB，839a435f36 时为 1,129,680 字节，7a8c033ec9 时为 1,130,032 字节，0.1.1 / 4e73f38a8b 时为 1,130,992 字节）。
   - 每片约 1.9–2.5MB，压到 0.32–0.35MB，比 `gzip -6` 还略小一点。
   - 目标机第一次运行时，用 `gzip -dc` 解到 `~/.cache/csih/csih-<key>`，以后直接用缓存。
   - 压缩器单独检查：`sh ./unisacc.com tools/check-cx-deflate.cx`。
