@@ -1,0 +1,52 @@
+#pragma unisa use text.text
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+/* check-delibc.cx -- checks apps/csih/tools/delibc.cx; from the repo root:
+ *   sh ./unisacc.com apps/csih/tools/check-delibc.cx
+ * Copies tools/delibc-fixture/in.txt to out/check-delibc/t.cx, runs delibc on it and
+ * compares the result with want.txt byte for byte (written by reading in.txt and the
+ * rename table, 2026-10-30: comments, literals, members and longer names stay; the
+ * five uses go at the top since the fixture has no module line). A second run must
+ * change nothing (idempotent). Prints CHECK_DELIBC pass=N fail=M; exit 1 on a FAIL. */
+
+static int pass, fail;
+
+static void expect(int ok, const char *what) {
+    if (ok) { pass++; sy_printf("  ok   %s\n", what); }
+    else { fail++; sy_printf("  FAIL %s\n", what); }
+}
+
+static int delibc(const char *file) {
+    char *av[6];
+    int pid, fd = -1, exited = 0, code = -1, sig = 0;
+    char sink[4096];
+    av[0] = "sh"; av[1] = "./unisacc.com"; av[2] = "apps/csih/tools/delibc.cx"; av[3] = "--"; av[4] = (char *)file; av[5] = 0;
+    pid = sy_spawn_pipe(av, 0, 0, &fd, 0);
+    if (pid < 0) return -1;
+    while (sy_read(fd, sink, (long)sizeof sink) > 0) {}
+    sy_close(fd);
+    if (sy_wait_status(pid, 0, &exited, &code, &sig) < 0 || !exited) return -1;
+    return code;
+}
+
+static int same_file(const char *a, const char *b) {
+    size_t an = 0, bn = 0;
+    char *x = cx_read(a, &an), *y = cx_read(b, &bn);
+    return x && y && an == bn && tx_same(x, (long)an, y, (long)bn);
+}
+
+int main(void) {
+    const char *in = "apps/csih/tools/delibc-fixture/in.txt", *want = "apps/csih/tools/delibc-fixture/want.txt";
+    const char *t = "out/check-delibc/t.cx";
+    size_t n = 0;
+    char *s = cx_read(in, &n);
+    sy_mkdir("out", 0755);
+    sy_mkdir("out/check-delibc", 0755);
+    if (!s || cx_write(t, s, n) != 0) { sy_printf("check-delibc: cannot stage %s\n", t); return 2; }
+    expect(delibc(t) == 0, "delibc exits 0 on the fixture");
+    expect(same_file(t, want), "result equals want.txt byte for byte");
+    expect(delibc(t) == 0 && same_file(t, want), "a second run changes nothing");
+    sy_printf("CHECK_DELIBC pass=%d fail=%d\n", pass, fail);
+    return fail ? 1 : 0;
+}
