@@ -97,4 +97,5 @@ Assertions and expected values are unchanged.
 | cx-model-allocation | PASS 1/0 |
 | cx-model-reference | PASS 8/0 (tests/cases/model_decode_reference.c) |
 | core-compat | PASS 16/0: reads archive/reference-c/exec/c/core.c (R100 rename, same bytes) |
-| p3-library-*, package-controls | not yet repaired |
+| p3-library-members, -cxcodec, -cxruntime, p3-library-api | not repaired; they need the `p3-pack-ctx` material. tests/p3-library-members.cx hashes and builds `exec/c/libunisacc.c` and `exec/c/run.c` (dep_names), and tests/cases/p3_library_members.c includes `exec/c/libunisacc.c`. The same recipe applies, but it can only be verified on a slow-lane run that has the material |
+| package-controls | not kind 1. It drives tools/package-refresh.cx (old construction route, materials baseline and kernels), so it belongs with kind 2 |
