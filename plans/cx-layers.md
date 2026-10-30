@@ -52,7 +52,11 @@
   - `fs.cx`：`sy_mkdir`、`sy_chmod`、`sy_stat`、`sy_lstat`、`sy_exists`。`sy_exists` 只有 ENOENT 返回 0，ENOTDIR、EACCES 等返回 -errno。
   - `proc.cx`：`sy_run`、`sy_spawn`、`sy_wait`、`sy_kill`、`sy_pid`。状态统一为一个 int：退出码、128+信号、-errno。
   - `time.cx`：`sy_now_ms`、`sy_wall_s`、`sy_sleep_ms`、`sy_readable`、`sy_set_mtime`。
-  - `net.cx`：只用本机 127.0.0.1，`sy_tcp_listen`、`sy_tcp_port`、`sy_tcp_accept`、`sy_tcp_connect`、`sy_wait_port`、`sy_send_all`、`sy_recv`、`sy_close`。写一律用 `send(MSG_NOSIGNAL)`。
+  - `net.cx`：监听与 `sy_tcp_connect` 只用本机 127.0.0.1，`sy_tcp_listen`、`sy_tcp_port`、`sy_tcp_accept`、`sy_tcp_connect`、`sy_wait_port`、`sy_send_all`、`sy_recv`、`sy_close`。写一律用 `send(MSG_NOSIGNAL)`。2026-10-30 为 csih 去 include 补：`sy_send`（单次发送，返回已发字节数）、`sy_resolve4`（系统解析器，首个 IPv4 点分文本）、`sy_tcp_dial`（任意主机名 IPv4 TCP，Windows 为 -ENOSYS）、`sy_net_error`（解析器失败返回 ≤ `SY_EAI_BASE`(-4096) 的码，与 -errno 不相交；取文本）。
+  - `poll.cx`：`sy_poll`、`sy_pollfd_t`、`SY_POLLIN/PRI/OUT/ERR/HUP/NVAL`、`SY_POLL_MAX`(64)。模块里的 enum 与 typedef 随 `use` 导出，#define 不导出（实测），所以位值用 enum。
+  - `tty.cx`：`sy_tty_raw`（对 `sy_tty_t` 做 cfmakeraw）、`sy_tty_size`（TIOCGWINSZ）。保存与恢复仍是 `posix.cx` 的 `sy_tty_get/set/same`。
+  - `time.cx` 补：`sy_ts_t`、`sy_mono`、`sy_wall`、`sy_ts_ms`、`sy_local_fmt`（localtime_r + strftime）。
+  - 检查 `tools/check-cx-sys-net.cx`（43 条实跑：回环收发、解析器、poll、pty 上的 raw 与窗口大小、本地时间对拍 date(1)）。
   - `posix.cx`（`cx/sys/posix.cx`）：携带运行库在 0.0.43 上缺的那批 POSIX 调用，直接用 `__syscall6` 和逐平台的调用号实现（Linux x86_64/arm64、macOS x86_64/arm64），不写 include。包括 `sy_setsid`、`sy_getpgid`、`sy_killpg`、`sy_socketpair`、`sy_tcgetpgrp`、`sy_tcsetpgrp`、`sy_openat`、`sy_linkat`、`sy_at_fdcwd`、`sy_flock`、`sy_lockf`、`sy_unlockf`。Windows 一律返回 -ENOSYS。导出函数不随平台变，平台差异只在文件顶部的静态调用号里（模块检查不允许导出写在 `#if` 下）。
   - `sha.cx`（grk，6049a9a94c）：`sy_sha256_hex`。在 Linux x86_64 上走内核的 AF_ALG，失败时返回非 0，由调用方回退到 `cx_sha256_hex`。它 include `<sys/socket.h>`，属于 `cx/sys/` 名单内。
   - `mem.cx`（grk）：`sy_map_none`、`sy_unmap`、`sy_protect_rw`、`sy_protect_rx`。匿名私有映射，先不可访问，再改成读写或读执行。include `<sys/mman.h>`。成功返回 0，失败返回 -errno（errno 为 0 时是 -1）。Windows 返回 -ENOSYS。`src/host.cx` 的 `hs_reserve`、`hs_release`、`hs_commit`、`hs_protect_code` 调这四个，对外仍是原来的 0、1、4。
@@ -60,7 +64,7 @@
   - 错误一律返回 -errno。
   - 检查：`tools/check-cx-sys.cx` 这次实跑 PASS，ok=100，fail=0（原先 90，mem 和 dl 加了 10 条）。已登记为批次 `cx-l0-sys`。posix 部分需要另一个进程验证的（setsid、别的进程持有的记录锁），由它以 `-- child MODE` 重新运行自己来完成。
 - **include 例外，只限 `cx/sys/`**：新 .cx 不手写 `#include`，唯一的例外在这里。
-  - `time.cx` include `<time.h>`、`<poll.h>`、`<sys/time.h>`；`net.cx` include `<sys/socket.h>`、`<netinet/in.h>`、`<arpa/inet.h>`。
+  - `time.cx` include `<time.h>`、`<poll.h>`、`<sys/time.h>`；`net.cx` include `<sys/socket.h>`、`<netinet/in.h>`、`<arpa/inet.h>`、`<netdb.h>`；`poll.cx` include `<poll.h>`；`tty.cx` include `<termios.h>`、`<sys/ioctl.h>`。
   - 这样做的原因：这些头不在前奏里，而携带头里本来就有逐平台的实现，在包里复制一份会走样；把它们加进前奏，又会让每个单元的 E2 都多付一份（B1）。
   - 放行方式是 `tests/cxinclude-boundary.tsv` 里的 `cx/sys/` 前缀，不抬整体基线。`env.cx`、`fs.cx`、`proc.cx` 只用前奏，不 include。
 - **已知运行库缺陷**：`utimes`（以及同样转发给宿主 C 库的那些函数）失败时不带回宿主的 errno：0.0.43 上对不存在的路径返回 -1，errno 却是 0。`sy_set_mtime` 先 stat 一次来报路径错误，utimes 本身失败而 errno 为 0 时记 -EIO。根治要改 `include/`（产品输入），等 grk 的构造结束后再做。
