@@ -173,8 +173,10 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 │  ├─ B1 E2 每个 #include 整缓冲重扫：空 main 的 .cx 一次 E2 换入 5084 万字节（模型规则，最大）
 │  ├─ B2 执行器自编 -O2 代码质量：同模型慢 3.3–3.9 倍（路线待主人定：汇编执行循环 / 改进自身 O2）
 │  └─ B3 每次运行固定开销约 113 ms（包解析 + 模型解压）；候选无 run-cache
-├─ 去 Python：191 个已归档 archive/reference-py/；活路径剩 42 个为两个生成器闭包（exec/facts/export.py、unisa emit-kernel），另 release/ 18、apps/ 各自域；gold 表的检查与重写已原生化（tools/gold-table.cx，20 张，11 张有 seed 规则形），不再需要 `unisa gold-export`
-└─ 卫生：cx 三棘轮（cxinclude/cxapis/cxtrunc）已不计 archive/，但 HEAD 超基线 52/71/170 行（多在 apps/csih）
+├─ 去 Python：191 个已归档 archive/reference-py/；活路径剩 42 个为两个生成器闭包（exec/facts/export.py、unisa emit-kernel），另 release/ 18、apps/ 各自域；gold 表的检查与重写已原生化（tools/gold-table.cx，20 张，11 张有 seed 规则形），不再需要 `unisa gold-export`；30 张事实表已有 17 张改由 tools/facts-gen.cx 原生生成（逐字节对上 Python 后切换，图像格式常量移入 exec/facts/image-{pe,macho,elf}.tsv、tape-shape.tsv），export.py 剩 13 张（enc-arm/x86、pp-gen、pp-autoinc-gen、lex-gen、k2-gen2*、k2-units-tokens、k2-membercontrol、k2-libraryenv、nativeabi、lower-abi/code）
+├─ 分层：plans/cx-layers.md；L0 包 cx/text、cx/mem（arena），棘轮 tests/cxraw.cx（上层直接 libc/POSIX 调用只降不升）
+├─ 卫生：cx 三棘轮（cxinclude/cxapis/cxtrunc）已不计 archive/，但 HEAD 超基线 52/71/170 行（多在 apps/csih）
+└─ 分层棘轮：tests/cxraw.cx（plans/cx-layers.md）——上层 .cx 直接 libc/POSIX 只降不升、新文件须 0；csih 下层封装已入 tests/cxraw-layers.tsv（netwit/tmuxwit/retry_stub/tclock），apps/csih/tests/run.cx 已迁 tx_* 至 0
 ```
 
 已装产品：`unisacc.com` 3,035,300 字节，sha `79fb84e65a10…`。旧候选资格、矩阵与安装收据不转授新入口。
@@ -213,6 +215,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 | 事实表 | 只经 `exec/facts/export.py`（`--check` 30/0） | exec/facts/ |
 | 归档 | 参考 C、参考 Python、旧检查与旧 shell | archive/reference-c/、archive/reference-py/README.md |
 | 已装产品 | 3,035,300 B，sha 79fb84e6…；新测试入口 `sh ./unisacc.com tests/run.cx -- --list` | tests/batches.tsv、tests/coverage.tsv |
+| CX 分层 | L0=`cx/{sys,mem,text}`+layers 表白名单；棘轮 `tests/cxraw.cx`；示范 `tools/gold-table.cx` | plans/cx-layers.md、tests/cxraw-layers.tsv |
 | 旧纪元证据 | 10-30 前的构造链、安装、矩阵收据 | archive/prd-c43-history-20261030.md |
 
 **动态维护规则**：进度、身份、阻塞、决定或下一动作变化时，同步原位更新思维树节点及对应房间；只把当前事实留在这里。每次恢复先读两者，派发任务引用当前节点和确切缺口。原始过程与旧失败保留在证据或Git历史中，不冒充当前状态。
