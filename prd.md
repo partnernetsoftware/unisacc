@@ -12,6 +12,7 @@
 - [路线](#5-路线) · [未解决问题](#6-未解决问题) · [归档索引](#7-归档索引)
 - [0.1.x：其他 C 编译器接入 `.cx`](#53-01x其他-c-编译器接入-cx)
 - **[cx 模式](docs/cx/prd.md)**：`gcc_cx.com` 与 `clang_cx.com` 是 APE 六格。现行阅读含宿主 `-o`、模块 lint、包清单与 CXIF v0。
+- **[cx 分层与底层/上层重构](plans/cx-layers.md)**：L0 `cx/sys`·`cx/mem`·`cx/text` 对接 libc/POSIX，L1 去裸 libc，Rust 式 Vec/String/所有权（`mem.grow`、`text.build`）、带界 z-string、`cxraw` 棘轮。
 - **[论文五线](research/README.md)**：A 流网换逻辑；B＝`ujs/`；C 管道方法；**D＝`.cx` 模块化＋内存安全**；E 系统构表。CX 叙事归 D，不塞进 A。
 
 <a id="implemented-usage"></a>
