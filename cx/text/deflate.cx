@@ -1,0 +1,373 @@
+#pragma unisa module deflate
+/* L0 deflate (RFC 1951) and gzip (RFC 1952) compression (plans/cx-layers.md).
+   No libc call: the caller owns the output buffer and sizes it with dz_bound /
+   dz_gzip_bound; the match tables and the token block are module-private static
+   state, so the functions are not reentrant (one compression at a time).
+   LZ77 over the whole input (32 KiB window, 3-byte hash chains, lazy matching
+   one step ahead, as gzip -6), then per block of up to DZ_TOK tokens a dynamic
+   Huffman block, or stored blocks when those would be shorter. The only inverse
+   in this tree is cx/runtime/codec.cx (cxcodec_inflate); tools/check-cx-deflate.cx
+   checks round trips against the system's gzip -dc. */
+
+#define DZ_WBITS 15
+#define DZ_WSIZE (1 << DZ_WBITS)
+#define DZ_WMASK (DZ_WSIZE - 1)
+#define DZ_HSIZE (1 << 15)
+#define DZ_CHAIN 128
+#define DZ_NICE 128
+#define DZ_LAZY 32
+#define DZ_TOK 16384
+#define DZ_MINM 3
+#define DZ_MAXM 258
+
+static int dz_head[DZ_HSIZE];          /* last position + 1 with this hash, 0 none */
+static int dz_prev[DZ_WSIZE];          /* previous position + 1 in the chain */
+static unsigned short dz_tlen[DZ_TOK]; /* 0: literal; else match length */
+static unsigned short dz_tval[DZ_TOK]; /* literal byte or match distance */
+static int dz_ntok;
+
+static const unsigned short dz_lbase[29] = { 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31,
+    35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258 };
+static const unsigned char dz_lext[29] = { 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2,
+    3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0 };
+static const unsigned short dz_dbase[30] = { 1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193,
+    257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577 };
+static const unsigned char dz_dext[30] = { 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6,
+    7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13 };
+static const unsigned char dz_corder[19] = { 16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15 };
+
+/* ── bit writer ──────────────────────────────────────────────────────────── */
+
+static unsigned char *dz_out;
+static long dz_at, dz_cap;
+static unsigned long dz_bits;
+static int dz_nbits;
+
+static void dz_put(unsigned long v, int n) {
+    dz_bits |= v << dz_nbits;
+    dz_nbits += n;
+    while (dz_nbits >= 8) {
+        if (dz_at < dz_cap) dz_out[dz_at] = (unsigned char)dz_bits;
+        dz_at++;
+        dz_bits >>= 8;
+        dz_nbits -= 8;
+    }
+}
+
+static void dz_align(void) { if (dz_nbits) dz_put(0, 8 - dz_nbits); }
+
+static void dz_byte(unsigned char c) {
+    if (dz_at < dz_cap) dz_out[dz_at] = c;
+    dz_at++;
+}
+
+/* ── symbol maps ─────────────────────────────────────────────────────────── */
+
+static int dz_lcode(int len) {
+    int c = 28;
+    while (dz_lbase[c] > len) c--;
+    return c;
+}
+
+static int dz_dcode(int dist) {
+    int c = 29;
+    while (dz_dbase[c] > dist) c--;
+    return c;
+}
+
+/* ── Huffman code lengths (at most MAXB bits) and canonical codes ─────────── */
+
+/* LEN[0..n) from FREQ[0..n): Huffman tree depths; when the deepest exceeds MAXB the
+   frequencies are halved (nonzero stays nonzero) and the tree is rebuilt. */
+static void dz_lengths(const unsigned long *freq, int n, int maxb, unsigned char *len) {
+    static unsigned long w[2 * 288];
+    static int parent[2 * 288];
+    unsigned long f[288];
+    int i, live, nodes, deepest;
+    for (i = 0; i < n; i++) f[i] = freq[i];
+    for (;;) {
+        int alive[2 * 288];
+        nodes = n;
+        live = 0;
+        for (i = 0; i < n; i++) { w[i] = f[i]; parent[i] = -1; alive[i] = f[i] > 0; live += alive[i]; }
+        while (live > 1) {
+            int a = -1, b = -1;
+            for (i = 0; i < nodes; i++) {
+                if (!alive[i]) continue;
+                if (a < 0 || w[i] < w[a]) { b = a; a = i; }
+                else if (b < 0 || w[i] < w[b]) b = i;
+            }
+            w[nodes] = w[a] + w[b];
+            parent[nodes] = -1;
+            alive[nodes] = 1;
+            parent[a] = nodes;
+            parent[b] = nodes;
+            alive[a] = alive[b] = 0;
+            nodes++;
+            live--;
+        }
+        deepest = 0;
+        for (i = 0; i < n; i++) {
+            int d = 0, p = i;
+            if (!f[i]) { len[i] = 0; continue; }
+            while (parent[p] >= 0) { p = parent[p]; d++; }
+            if (d == 0) d = 1;
+            len[i] = (unsigned char)d;
+            if (d > deepest) deepest = d;
+        }
+        if (deepest <= maxb) return;
+        for (i = 0; i < n; i++) if (f[i]) f[i] = (f[i] >> 1) | 1;
+    }
+}
+
+/* CODE[0..n) from LEN: canonical codes, bit-reversed for the LSB-first writer. */
+static void dz_codes(const unsigned char *len, int n, unsigned short *code) {
+    int count[16], next[16], i, b, c = 0;
+    for (b = 0; b < 16; b++) count[b] = 0;
+    for (i = 0; i < n; i++) count[len[i]]++;
+    count[0] = 0;
+    for (b = 1; b < 16; b++) { c = (c + count[b - 1]) << 1; next[b] = c; }
+    for (i = 0; i < n; i++) {
+        int l = len[i], v, r = 0, k;
+        if (!l) { code[i] = 0; continue; }
+        v = next[l]++;
+        for (k = 0; k < l; k++) { r = (r << 1) | (v & 1); v >>= 1; }
+        code[i] = (unsigned short)r;
+    }
+}
+
+/* at least two used symbols, so every code is complete */
+static void dz_two(unsigned long *freq, int n) {
+    int i, used = 0;
+    for (i = 0; i < n; i++) used += freq[i] > 0;
+    for (i = 0; used < 2 && i < n; i++) if (!freq[i]) { freq[i] = 1; used++; }
+}
+
+/* ── one block ───────────────────────────────────────────────────────────── */
+
+/* code-length run symbols for LENS[0..n) into SYM/EXT, returning their count */
+static int dz_runs(const unsigned char *lens, int n, unsigned char *sym, unsigned char *ext) {
+    int i = 0, k = 0;
+    while (i < n) {
+        int v = lens[i], r = 1;
+        while (i + r < n && lens[i + r] == v) r++;
+        if (v == 0 && r >= 3) {
+            int t = r > 138 ? 138 : r;
+            if (t >= 11) { sym[k] = 18; ext[k++] = (unsigned char)(t - 11); }
+            else { sym[k] = 17; ext[k++] = (unsigned char)(t - 3); }
+            i += t;
+        } else if (v != 0 && r >= 4) {
+            int t = r - 1 > 6 ? 6 : r - 1;
+            sym[k] = (unsigned char)v; ext[k++] = 0;
+            sym[k] = 16; ext[k++] = (unsigned char)(t - 3);
+            i += 1 + t;
+        } else {
+            sym[k] = (unsigned char)v; ext[k++] = 0;
+            i++;
+        }
+    }
+    return k;
+}
+
+static void dz_stored(const unsigned char *in, long from, long to, int last) {
+    do {
+        long n = to - from > 65535 ? 65535 : to - from;
+        int fin = last && from + n == to;
+        dz_put((unsigned long)fin, 3);
+        dz_align();
+        dz_byte((unsigned char)(n & 255)); dz_byte((unsigned char)(n >> 8));
+        dz_byte((unsigned char)(~n & 255)); dz_byte((unsigned char)((~n >> 8) & 255));
+        while (n--) dz_byte(in[from++]);
+    } while (from < to);
+}
+
+/* the block of tokens covering IN[from..to): dynamic Huffman, or stored if shorter */
+static void dz_block(const unsigned char *in, long from, long to, int last) {
+    unsigned long lf[286], df[30], cf[19], dyn, sto;
+    unsigned char ll[286], dl[30], cl[19], lens[316], rs[316], rx[316];
+    unsigned short lc[286], dc[30], cc[19];
+    int i, nl = 257, nd = 1, nc = 4, nlens, nr;
+    for (i = 0; i < 286; i++) lf[i] = 0;
+    for (i = 0; i < 30; i++) df[i] = 0;
+    for (i = 0; i < dz_ntok; i++) {
+        if (!dz_tlen[i]) lf[dz_tval[i]]++;
+        else { lf[257 + dz_lcode(dz_tlen[i])]++; df[dz_dcode(dz_tval[i])]++; }
+    }
+    lf[256] = 1;
+    dz_two(lf, 286);
+    dz_two(df, 30);
+    dz_lengths(lf, 286, 15, ll);
+    dz_lengths(df, 30, 15, dl);
+    for (i = 0; i < 286; i++) if (ll[i]) nl = i + 1 > 257 ? i + 1 : 257;
+    for (i = 0; i < 30; i++) if (dl[i]) nd = i + 1;
+    nlens = 0;
+    for (i = 0; i < nl; i++) lens[nlens++] = ll[i];
+    for (i = 0; i < nd; i++) lens[nlens++] = dl[i];
+    nr = dz_runs(lens, nlens, rs, rx);
+    for (i = 0; i < 19; i++) cf[i] = 0;
+    for (i = 0; i < nr; i++) cf[rs[i]]++;
+    dz_two(cf, 19);
+    dz_lengths(cf, 19, 7, cl);
+    for (i = 0; i < 19; i++) if (cl[dz_corder[i]]) nc = i + 1 > 4 ? i + 1 : 4;
+    dyn = 3 + 14 + 3 * (unsigned long)nc;
+    for (i = 0; i < nr; i++) dyn += cl[rs[i]] + (rs[i] == 16 ? 2 : rs[i] == 17 ? 3 : rs[i] == 18 ? 7 : 0);
+    for (i = 0; i < 286; i++) if (lf[i] && i < 257) dyn += lf[i] * ll[i];
+    for (i = 0; i < 29; i++) dyn += lf[257 + i] * (ll[257 + i] + dz_lext[i]);
+    for (i = 0; i < 30; i++) dyn += df[i] * (dl[i] + dz_dext[i]);
+    sto = (unsigned long)((to - from) / 65535 + 1) * 48 + 8 * (unsigned long)(to - from);
+    if (dyn >= sto) { dz_stored(in, from, to, last); return; }
+    dz_codes(ll, 286, lc);
+    dz_codes(dl, 30, dc);
+    dz_codes(cl, 19, cc);
+    dz_put((unsigned long)(last ? 1 : 0) | 4, 3);
+    dz_put((unsigned long)(nl - 257), 5);
+    dz_put((unsigned long)(nd - 1), 5);
+    dz_put((unsigned long)(nc - 4), 4);
+    for (i = 0; i < nc; i++) dz_put(cl[dz_corder[i]], 3);
+    for (i = 0; i < nr; i++) {
+        dz_put(cc[rs[i]], cl[rs[i]]);
+        if (rs[i] == 16) dz_put(rx[i], 2);
+        else if (rs[i] == 17) dz_put(rx[i], 3);
+        else if (rs[i] == 18) dz_put(rx[i], 7);
+    }
+    for (i = 0; i < dz_ntok; i++) {
+        if (!dz_tlen[i]) { dz_put(lc[dz_tval[i]], ll[dz_tval[i]]); continue; }
+        {
+            int l = dz_tlen[i], d = dz_tval[i], c = dz_lcode(l), e = dz_dcode(d);
+            dz_put(lc[257 + c], ll[257 + c]);
+            if (dz_lext[c]) dz_put((unsigned long)(l - dz_lbase[c]), dz_lext[c]);
+            dz_put(dc[e], dl[e]);
+            if (dz_dext[e]) dz_put((unsigned long)(d - dz_dbase[e]), dz_dext[e]);
+        }
+    }
+    dz_put(lc[256], ll[256]);
+}
+
+/* ── LZ77 ────────────────────────────────────────────────────────────────── */
+
+static int dz_hash(const unsigned char *p) {
+    return (((int)p[0] << 10) ^ ((int)p[1] << 5) ^ p[2]) & (DZ_HSIZE - 1);
+}
+
+static void dz_insert(const unsigned char *in, long n, long i) {
+    int h;
+    if (i + DZ_MINM > n) return;
+    h = dz_hash(in + i);
+    dz_prev[i & DZ_WMASK] = dz_head[h];
+    dz_head[h] = (int)(i + 1);
+}
+
+/* longest earlier match for IN[i..): length into *len (0 when < 3), distance into *dist */
+static void dz_find(const unsigned char *in, long n, long i, int *len, int *dist) {
+    long p = (long)dz_head[dz_hash(in + i)] - 1, max = n - i > DZ_MAXM ? DZ_MAXM : n - i;
+    int chain = DZ_CHAIN, best = 0, bd = 0;
+    *len = 0;
+    *dist = 0;
+    if (max < DZ_MINM) return;
+    /* the head is i itself (inserted before the search): start one link back */
+    if (p == i) p = (long)dz_prev[i & DZ_WMASK] - 1;
+    while (p >= 0 && p < i && i - p < DZ_WSIZE && chain-- > 0) {
+        if (in[p + best] == in[i + best] && in[p] == in[i]) {
+            long k = 0;
+            while (k < max && in[p + k] == in[i + k]) k++;
+            if (k > best) {
+                best = (int)k;
+                bd = (int)(i - p);
+                if (k >= DZ_NICE || k == max) break;
+            }
+        }
+        {
+            long q = (long)dz_prev[p & DZ_WMASK] - 1;
+            if (q >= p) break;
+            p = q;
+        }
+    }
+    if (best >= DZ_MINM) { *len = best; *dist = bd; }
+}
+
+static void dz_lit(int c) { dz_tlen[dz_ntok] = 0; dz_tval[dz_ntok] = (unsigned short)c; dz_ntok++; }
+static void dz_match(int l, int d) { dz_tlen[dz_ntok] = (unsigned short)l; dz_tval[dz_ntok] = (unsigned short)d; dz_ntok++; }
+
+/* ── interface ───────────────────────────────────────────────────────────── */
+
+/* The largest raw deflate stream dz_deflate writes for N input bytes. */
+long dz_bound(long n) {
+    if (n < 0) return -1;
+    /* a block is dynamic only when shorter than its stored form: at most 6 bytes of
+       framing per 65535-byte chunk, and a block of DZ_TOK - 2 tokens adds one chunk */
+    return n + 8 * (n / 8192 + 4) + 64;
+}
+
+/* The largest gzip member dz_gzip writes for N input bytes. */
+long dz_gzip_bound(long n) { return n < 0 ? -1 : dz_bound(n) + 18; }
+
+/* Raw deflate of IN[0..n) into OUT[0..cap): bytes written; -1 when cap < dz_bound(n)
+   or an argument is invalid (OUT is then unchanged). */
+long dz_deflate(const unsigned char *in, long n, unsigned char *out, long cap) {
+    long i = 0, from = 0;
+    int prev_len = 0, prev_dist = 0, have = 0, i2;
+    if (n < 0 || !out || (n > 0 && !in) || cap < dz_bound(n)) return -1;
+    dz_out = out; dz_at = 0; dz_cap = cap; dz_bits = 0; dz_nbits = 0; dz_ntok = 0;
+    for (i2 = 0; i2 < DZ_HSIZE; i2++) dz_head[i2] = 0;
+    for (i2 = 0; i2 < DZ_WSIZE; i2++) dz_prev[i2] = 0;
+    if (n == 0) { dz_stored(in, 0, 0, 1); dz_align(); return dz_at; }
+    while (i < n) {
+        int cur = 0, cd = 0;
+        dz_insert(in, n, i);
+        if (prev_len < DZ_LAZY) dz_find(in, n, i, &cur, &cd);
+        if (prev_len >= DZ_MINM && cur <= prev_len) {
+            long end = i - 1 + prev_len, k;
+            dz_match(prev_len, prev_dist);
+            for (k = i + 1; k < end; k++) dz_insert(in, n, k);
+            i = end;
+            have = 0;
+            prev_len = 0;
+        } else {
+            if (have) dz_lit(in[i - 1]);
+            have = 1;
+            prev_len = cur;
+            prev_dist = cd;
+            i++;
+        }
+        if (dz_ntok >= DZ_TOK - 2) {
+            /* the pending literal (or match start) at i-1 stays with the next block */
+            long to = have ? i - 1 : i;
+            dz_block(in, from, to, 0);
+            from = to;
+            dz_ntok = 0;
+        }
+    }
+    if (have) dz_lit(in[n - 1]);
+    dz_block(in, from, n, 1);
+    dz_align();
+    return dz_at <= cap ? dz_at : -1;
+}
+
+/* CRC-32 (gzip polynomial) of P[0..n), continuing from CRC (0 to start). */
+unsigned long dz_crc32(unsigned long crc, const unsigned char *p, long n) {
+    unsigned long c = crc ^ 0xFFFFFFFFUL;
+    long i;
+    int k;
+    for (i = 0; i < n; i++) {
+        c ^= p[i];
+        for (k = 0; k < 8; k++) c = (c >> 1) ^ (0xEDB88320UL & (0UL - (c & 1)));
+    }
+    return (c ^ 0xFFFFFFFFUL) & 0xFFFFFFFFUL;
+}
+
+/* A gzip member (mtime 0, no name, OS 255) of IN[0..n) into OUT[0..cap): bytes
+   written, -1 as dz_deflate. */
+long dz_gzip(const unsigned char *in, long n, unsigned char *out, long cap) {
+    static const unsigned char hd[10] = { 0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 255 };
+    unsigned long crc, sz = (unsigned long)n;
+    long k, i;
+    if (n < 0 || !out || cap < dz_gzip_bound(n)) return -1;
+    for (i = 0; i < 10; i++) out[i] = hd[i];
+    k = dz_deflate(in, n, out + 10, cap - 18);
+    if (k < 0) return -1;
+    k += 10;
+    crc = dz_crc32(0, in, n);
+    for (i = 0; i < 4; i++) out[k++] = (unsigned char)(crc >> 8 * i);
+    for (i = 0; i < 4; i++) out[k++] = (unsigned char)(sz >> 8 * i);
+    return k;
+}

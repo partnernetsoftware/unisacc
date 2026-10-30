@@ -2,7 +2,10 @@
 /* ujs APE packer (.cx, no #include). Layout = seed/ape.c / unisa ape:
  *   ape-pack OUT WIN_X86_64 LNX_X86_64 LNX_ARM64 OSX_X86_64 OSX_ARM64
  * Stored gzip slices; PE DOS stub holds shell polyglot. No .c/.py/zlib.
+ * --deflate: compressed gzip slices instead (cx/text/deflate.cx); the default output is unchanged.
  */
+#pragma unisa use text.text
+#pragma unisa use text.deflate
 typedef struct { unsigned char *p; long n, cap; } Buf;
 static void put(Buf *b, const void *s, long n) {
     if (b->n + n > b->cap) { b->cap = (b->n + n) * 2 + 64; b->p = realloc(b->p, b->cap); if (!b->p) { perror("ape"); exit(1); } }
@@ -32,6 +35,15 @@ static Buf gz(Buf in) {          /* mtime 0, stored blocks (no zlib) */
         put(&o, in.p + at, n); at += n;
     } while (at < in.n);
     put32(&o, ape_crc32(in.p, in.n)); put32(&o, (unsigned long)in.n);
+    return o;
+}
+static int deflate_on;   /* --deflate */
+static unsigned char zbuf[32 << 20];   /* one slice's gzip member at a time */
+static Buf gz_deflate(Buf in) {
+    Buf o = {0, 0, 0};
+    long k = dz_gzip_bound(in.n) <= (long)sizeof zbuf ? dz_gzip(in.p, in.n, zbuf, (long)sizeof zbuf) : -1;
+    if (k < 0) { fprintf(stderr, "ape: deflate refused (slice over %ld bytes?)\n", (long)sizeof zbuf - 4096); exit(1); }
+    put(&o, zbuf, k);
     return o;
 }
 /* sha256, for the cache key (first 16 hex digits, as ape.py) */
@@ -248,6 +260,7 @@ int main(int argc, char **argv) {
     const char *payload = 0, *pname = 0, *pver = 0; Buf pkg = {0, 0, 0};
     while (argc > 1 && argv[1][0] == '-') {
         if (!strcmp(argv[1], "--payload") && argc > 2) { payload = argv[2]; argv += 2; argc -= 2; }
+        else if (tx_eq(argv[1], "--deflate", 16)) { deflate_on = 1; argv += 1; argc -= 1; }
         else if (!strcmp(argv[1], "--product") && argc > 3) { pname = argv[2]; pver = argv[3]; argv += 3; argc -= 3; }
         else if (!strcmp(argv[1], "--tool") && argc > 2) {
             const char *t = argv[2]; int k;
@@ -262,13 +275,13 @@ int main(int argc, char **argv) {
         }
         else break;
     }
-    if (argc != 7) { fprintf(stderr, "usage: ape-pack.cx [--payload PKG] [--product NAME VERSION] [--tool NAME] OUT WIN_X86_64 LNX_X86_64 LNX_ARM64 OSX_X86_64 OSX_ARM64\n"); return 2; }
+    if (argc != 7) { fprintf(stderr, "usage: ape-pack.cx [--payload PKG] [--product NAME VERSION] [--tool NAME] [--deflate] OUT WIN_X86_64 LNX_X86_64 LNX_ARM64 OSX_X86_64 OSX_ARM64\n"); return 2; }
     if (payload) {
         pkg = slurp(payload); embedded = 1;
         if (pkg.n < 4 || (memcmp(pkg.p, "P 1 ", 4) && memcmp(pkg.p, "P 2 ", 4) && memcmp(pkg.p, "P 3 ", 4))) { fprintf(stderr, "ape: embedded payload must be a model package\n"); return 1; }
     }
     win = slurp(argv[2]);
-    for (i = 0; i < 4; i++) { Buf raw = slurp(argv[3 + i]); img[i] = gz(raw); free(raw.p); len[i] = img[i].n; off[i] = 1L << 30; strcpy(key[i], "0000000000000000"); }
+    for (i = 0; i < 4; i++) { Buf raw = slurp(argv[3 + i]); img[i] = deflate_on ? gz_deflate(raw) : gz(raw); free(raw.p); len[i] = img[i].n; off[i] = 1L << 30; strcpy(key[i], "0000000000000000"); }
     script(&sc, off, len, key);
     want = sc.n + 40;
     { long n0 = 2 + 64; want += (8 - (n0 + want) % 8) % 8; }   /* PE signature 8-aligned */

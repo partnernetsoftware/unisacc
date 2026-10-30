@@ -145,6 +145,11 @@ agent 模式新增 `/help`、`/status`、`/clear`，均只在本地处理、不�
 - **第十批已落地（2026-10-29）**：忙碌行。原来执行命令时一直显示「等模型」；现在收到 exec 行（命令执行前发出）就显示 `跑命令 <命令>`，下一次请求在途（`net_in_flight()`）时切回「等模型」。文案从 `请求中 等模型 3秒 7745词元 上传 32839字节 已收 574字节 hit 1152 miss 6561` 改为 `⏳ 等模型 3秒 · 7745词元 · ↑32.1KB 已收574B · 缓存命中15%`，保留「已收」二字（已有断言依赖它）。selftest：`busy line names the running command and reads sizes`；tmux 实测已见切换。原来 exec 同步执行时秒数不走、界面不刷新，第十一批已解决。
 - **第四十二批已落地（2026-10-29）**：状态行上色：`✓` 绿、`◐` 黄、`✗` 和 `│ blocked:` 红、`项目>` 青。颜色只在写终端时加（`tui_put_line`），帧本身仍是纯文本，宽度计算、差量比较和所有读取帧的测试都不受影响；差量刷新改用 tui 自己的循环，`render.cx` 的 `frame_diff` 没动。遵守 `NO_COLOR`，也可以用 `CSIH_COLOR=0` 关闭。写屏缓冲按每行 32 字节预留，满屏彩色行也放得下。selftest：`status rows are coloured on output, frames stay plain`（设了 NO_COLOR 时打印 skip）；tmux `capture-pane -e` 实测 `◐` 行带 `ESC[33m`。
   - 观察（不是本批改动引起）：一道不用工具的算术题，这次评审判为「未验证」（理由是没有工具记录可核实）；之前同类问题判过「已验收（answer_only）」。评审对纯问答的判法不稳定，第四十三批处理。
+- **第六十四批已落地（2026-10-30）**：csih.com 细节（见 `docs/csih-com.md`）。
+  - **体积**：8.9MB 降到 1.34MB。新增 L0 压缩器 `cx/text/deflate.cx`（LZ77 + 动态 Huffman，无 libc），检查 `tools/check-cx-deflate.cx`：15 条用系统 `gzip -dc` 对拍，结果全部一致。ape-pack 加 `--deflate`，不带时输出逐字节不变。
+  - **位置**：成品放在 `apps/csih/csih.com`，和 `csih.cx` 同目录，git 忽略；中间切片仍在 `out/csih-ape/`。
+  - **版本**：`csih -v`、`--version`、`version` 打印 `csih 0.1.0`。版本只有一个来源，就是 `tui.cx` 的 `CSIH_VERSION`；pack 把它写进 PE 的 VERSIONINFO 和清单，verify 会对照源码。合同 `version-flag`（smoke 层）。
+  - **smoke**：四个 Unix 片按 shell 头里的 `o=`/`n=` 截出来，用 `gzip -dc` 解开，和切片逐字节比对。本机经 csih.com 跑 `-v`、`--version` 和 selftest，arm64 片在 qemu-user 下跑 selftest。macOS 和 Windows 的运行记 UNMEASURED。
 - **第六十三批已落地（2026-10-30）**：原来阻塞的几块功能，借 cx 底层 `cx/sys` 解开，不用改 `include/`，也不用走产品慢车道。
   - **cx/sys 新包**：
     - `posix.cx` 用 `__syscall6` 加逐平台调用号，补齐携带运行库缺的接口：setsid、getpgid、killpg、socketpair、tcgetpgrp、tcsetpgrp、openat、mkdirat、linkat、unlinkat、按目录 fd 列名字、flock、lockf。

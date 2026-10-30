@@ -1,7 +1,7 @@
 /* csih-ape.cx -- build csih.com, one APE file for six targets (apps/csih/docs/csih-com.md).
    From the repo root, one step per call (each slice compiles csih in ~45-50s):
      sh ./unisacc.com tools/csih-ape.cx -- slice lnx/x86_64     (then lnx/arm64, osx/x86_64, osx/arm64, win/x86_64)
-     sh ./unisacc.com tools/csih-ape.cx -- pack                 -> out/csih-ape/csih.com + manifest.tsv
+     sh ./unisacc.com tools/csih-ape.cx -- pack                 -> apps/csih/csih.com (deflated slices) + out/csih-ape/manifest.tsv
      sh ./unisacc.com tools/csih-ape.cx -- verify               the files, their sha256 and today's sources agree
    Slices: apps/csih/csih.cx with -b TARGET for the four Unix targets; win/x86_64 is
    apps/csih/tools/win-unsupported.cx for now (csih's TUI is POSIX), and win/arm64 runs that PE.
@@ -14,6 +14,7 @@
 #pragma unisa use text.text
 
 #define OUT "out/csih-ape"
+#define COM "apps/csih/csih.com"
 #define NS 5
 
 static const char *const targets[NS] = { "win/x86_64", "lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64" };
@@ -42,6 +43,18 @@ static int src_digest(char out[65]) {
     if (rc != 0 || at < 0) return -1;
     if (tx_copy(out, 65, buf + at + 8, 64) != 0) return -1;
     return tx_len(out, 65) == 64 ? 0 : -1;
+}
+
+/* the product version, from CSIH_VERSION in apps/csih/tui.cx, into V (32) */
+static int csih_version(char v[32]) {
+    size_t n = 0;
+    char *s = cx_read("apps/csih/tui.cx", &n);
+    long at = s ? tx_find(s, (long)n, "#define CSIH_VERSION \"", 22) : -1, e;
+    if (at < 0) return -1;
+    at += 22;
+    e = tx_chr(s + at, (long)n - at, '"');
+    if (e <= 0 || e > 31) return -1;
+    return tx_copy(v, 32, s + at, e) == 0 ? 0 : -1;
 }
 
 static int slice(const char *target) {
@@ -81,11 +94,11 @@ static int slice_digest(int k, char d[65]) {
     return 0;
 }
 
-static int write_manifest(const char *d) {
+static int write_manifest(const char *d, const char *ver) {
     static char m[8192];
     char hex[65], path[256];
     int i, at = 0;
-    at += snprintf(m + at, sizeof m - at, "# csih.com manifest: tools/csih-ape.cx pack\nsource_digest\t%s\n", d);
+    at += snprintf(m + at, sizeof m - at, "# csih.com manifest: tools/csih-ape.cx pack\nsource_digest\t%s\nversion\t%s\n", d, ver);
     if (sha_file("unisacc.com", hex) != 0) return -1;
     at += snprintf(m + at, sizeof m - at, "compiler\tunisacc.com\t%s\n", hex);
     for (i = 0; i < NS; i++) {
@@ -93,32 +106,32 @@ static int write_manifest(const char *d) {
         if (sha_file(path, hex) != 0) return -1;
         at += snprintf(m + at, sizeof m - at, "slice\t%s\t%s\t%s\n", targets[i], files[i], hex);
     }
-    { if (cx_fmt(path, sizeof path, "%s/csih.com", OUT)) { fprintf(stderr, "csih-ape: text too long for path\n"); exit(2); } }
-    if (sha_file(path, hex) != 0) return -1;
-    at += snprintf(m + at, sizeof m - at, "ape\tcsih.com\t%s\n", hex);
+    if (sha_file(COM, hex) != 0) return -1;
+    at += snprintf(m + at, sizeof m - at, "ape\t%s\t%s\n", COM, hex);
     { if (cx_fmt(path, sizeof path, "%s/manifest.tsv", OUT)) { fprintf(stderr, "csih-ape: text too long for path\n"); exit(2); } }
     return cx_write(path, m, (size_t)at);
 }
 
 static int pack(void) {
-    char d[65], di[65], path[NS][256], com[256], out[8192];
+    char d[65], di[65], path[NS][256], ver[32], out[8192];
+    char *com = COM;
     int i, rc, cut;
     if (src_digest(d) != 0) { fprintf(stderr, "csih-ape: cannot read the source digest\n"); return 1; }
+    if (csih_version(ver) != 0) { fprintf(stderr, "csih-ape: no CSIH_VERSION in apps/csih/tui.cx\n"); return 1; }
     for (i = 0; i < NS; i++) {
         { if (cx_fmt(path[i], sizeof path[i], "%s/%s", OUT, files[i])) { fprintf(stderr, "csih-ape: text too long for path[i]\n"); exit(2); } }
         if (sy_exists(path[i]) != 1 || slice_digest(i, di) != 0) { fprintf(stderr, "csih-ape: slice %s missing: run slice %s\n", files[i], targets[i]); return 1; }
         if (!eq(di, d)) { fprintf(stderr, "csih-ape: slice %s was built from other sources (%s, today %s): rebuild it\n", files[i], di, d); return 1; }
     }
-    { if (cx_fmt(com, sizeof com, "%s/csih.com", OUT)) { fprintf(stderr, "csih-ape: text too long for com\n"); exit(2); } }
     {
-        char *av[] = { "sh", "./unisacc.com", "-run", "ujs/product/ape-pack.cx", "--", "--tool", "csih", "--product", "csih", "0.1.0",
+        char *av[] = { "sh", "./unisacc.com", "-run", "ujs/product/ape-pack.cx", "--", "--tool", "csih", "--deflate", "--product", "csih", ver,
                        com, path[0], path[1], path[2], path[3], path[4], 0 };
         rc = sy_run(av, out, sizeof out, &cut);
     }
     if (rc != 0 || sy_exists(com) != 1) { fprintf(stderr, "csih-ape: ape-pack failed rc=%d\n%s", rc, out); return 1; }
     sy_chmod(com, 0755);
-    if (write_manifest(d) != 0) { fprintf(stderr, "csih-ape: cannot write the manifest\n"); return 1; }
-    printf("CSIH_APE\tPACKED\t%s\tsrc=%s\n", com, d);
+    if (write_manifest(d, ver) != 0) { fprintf(stderr, "csih-ape: cannot write the manifest\n"); return 1; }
+    printf("CSIH_APE\tPACKED\t%s\tversion=%s\tsrc=%s\n", com, ver, d);
     return 0;
 }
 
@@ -170,14 +183,18 @@ static int verify(void) {
             { if (cx_fmt(path, sizeof path, "%s/%s", OUT, f3)) { fprintf(stderr, "csih-ape: text too long for path\n"); exit(2); } }
             if (sha_file(path, hex) != 0 || !eq(hex, f4)) { printf("  FAIL  slice %s (%s) differs from the manifest\n", f2, f3); bad++; }
             else printf("  ok    slice %s %s\n", f2, f3);
+        } else if (eq(f1, "version") && nf >= 2) {
+            char v[32];
+            rows++;
+            if (csih_version(v) != 0 || !eq(v, f2)) { printf("  FAIL  packed version %s, CSIH_VERSION in tui.cx differs\n", f2); bad++; }
+            else printf("  ok    version %s matches CSIH_VERSION\n", f2);
         } else if (eq(f1, "ape") && nf >= 3) {
             rows++;
-            { if (cx_fmt(path, sizeof path, "%s/%s", OUT, f2)) { fprintf(stderr, "csih-ape: text too long for path\n"); exit(2); } }
-            if (sha_file(path, hex) != 0 || !eq(hex, f3)) { printf("  FAIL  %s differs from the manifest\n", f2); bad++; }
+            if (!eq(f2, COM) || sha_file(f2, hex) != 0 || !eq(hex, f3)) { printf("  FAIL  %s differs from the manifest\n", f2); bad++; }
             else printf("  ok    %s as packed\n", f2);
         }
     }
-    if (rows != NS + 3) { printf("  FAIL  manifest has %d rows, want %d\n", rows, NS + 3); bad++; }
+    if (rows != NS + 4) { printf("  FAIL  manifest has %d rows, want %d\n", rows, NS + 4); bad++; }
     printf("CSIH_APE\t%s\trows=%d\tfail=%d\tsrc=%s\n", bad ? "REFUSED" : "VERIFIED", rows, bad, d);
     return bad ? 1 : 0;
 }
@@ -213,12 +230,43 @@ static int header_ok(int k, const char *b, size_t n, char *why, int cap) {
     }
 }
 
-/* 1 when csih.com carries the slice's bytes: 64-byte windows at 1/4, 1/2 and 3/4 of it */
-static int embedded(const char *com, size_t cn, const char *b, size_t n) {
-    int q;
-    if (n < 256) return 0;
-    for (q = 1; q <= 3; q++)
-        if (tx_find(com, (long)cn, b + n * q / 4, 64) < 0) return 0;
+/* the decimal after KEY in S[0..n), or -1 */
+static long number_after(const char *s, long n, const char *key) {
+    long at = tx_find(s, n, key, tx_len(key, 64)), v = 0, d = 0;
+    if (at < 0) return -1;
+    for (at += tx_len(key, 64); at < n && s[at] >= '0' && s[at] <= '9'; at++, d++) v = v * 10 + (s[at] - '0');
+    return d ? v : -1;
+}
+
+/* 1 when csih.com carries slice K. The PE slice sits in the file as is (after its rewritten
+   headers): 64-byte windows at 1/4, 1/2 and 3/4 of it are found. A Unix slice is the gzip
+   member the shell header names (o= n= on its uname line): it is cut out, inflated by the
+   system's gzip -dc, the same command the launcher runs, and compared byte for byte. */
+static int carries(int k, const char *com, size_t cn, const char *b, size_t n, char *why, int cap) {
+    static const char *const line[NS] = { "", "  Linuxx86_64) o=", "  Linuxaarch64|Linuxarm64) o=",
+                                          "  Darwinx86_64) o=", "  Darwinarm64) o=" };
+    char gzp[256];
+    char *av[] = { "gzip", "-dc", gzp, 0 };
+    char *back = 0;
+    size_t bn = 0;
+    long head = cn < 8192 ? (long)cn : 8192, at, o, len;
+    int q, rc;
+    if (k == 0) {
+        if (n < 2048) { cx_fmt(why, cap, "PE slice too short"); return 0; }
+        for (q = 1; q <= 3; q++)
+            if (tx_find(com, (long)cn, b + n * q / 4, 64) < 0) { cx_fmt(why, cap, "PE body window %d/4 not found", q); return 0; }
+        cx_fmt(why, cap, "PE body found as is");
+        return 1;
+    }
+    at = tx_find(com, head, line[k], tx_len(line[k], 64));
+    if (at < 0) { cx_fmt(why, cap, "no uname line in the shell header"); return 0; }
+    o = number_after(com + at, head - at, " o=");
+    len = number_after(com + at, head - at, " n=");
+    if (o < 1 || len <= 0 || o - 1 + len > (long)cn) { cx_fmt(why, cap, "bad o=%ld n=%ld", o, len); return 0; }
+    if (cx_fmt(gzp, sizeof gzp, "%s/.smoke-%d.gz", OUT, k) || cx_write(gzp, com + o - 1, (size_t)len) != 0) { cx_fmt(why, cap, "cannot write %s", gzp); return 0; }
+    rc = cx_runv_timeout(av, 20, &back, &bn);
+    if (rc != 0 || bn != n || !tx_same(back, (long)bn, b, (long)n)) { cx_fmt(why, cap, "gzip -dc rc=%d gave %ld bytes, slice %ld", rc, (long)bn, (long)n); return 0; }
+    cx_fmt(why, cap, "gzip member %ld -> %ld bytes, identical", len, (long)n);
     return 1;
 }
 
@@ -237,12 +285,11 @@ static int runs(char **av, int secs, const char *want, char *tail, int cap) {
 
 /* what this machine can check, slice by slice; what it cannot run is UNMEASURED */
 static int smoke(void) {
-    char com[256], path[256], why[160], tail[160], qemu[512];
+    char *com = COM, path[256], why[160], tail[160], qemu[512], ver[32], want[48];
     size_t cn = 0;
     char *c;
     const char *home = sy_env("HOME");
     int i, bad = 0, ran = 0, unm = 0;
-    { if (cx_fmt(com, sizeof com, "%s/csih.com", OUT)) { fprintf(stderr, "csih-ape: text too long for com\n"); exit(2); } }
     c = cx_read(com, &cn);
     if (!c) { printf("CSIH_APE\tREFUSED\tno %s: run pack\n", com); return 1; }
     for (i = 0; i < NS; i++) {
@@ -253,8 +300,15 @@ static int smoke(void) {
         if (!b) { printf("  FAIL  %s: missing\n", files[i]); bad++; continue; }
         if (!header_ok(i, b, n, why, sizeof why)) { printf("  FAIL  %s header: %s\n", targets[i], why); bad++; }
         else printf("  ok    %s header: %s\n", targets[i], why);
-        if (!embedded(c, cn, b, n)) { printf("  FAIL  csih.com does not carry %s\n", files[i]); bad++; }
-        else printf("  ok    csih.com carries %s\n", files[i]);
+        if (!carries(i, c, cn, b, n, why, sizeof why)) { printf("  FAIL  csih.com does not carry %s: %s\n", files[i], why); bad++; }
+        else printf("  ok    csih.com carries %s: %s\n", files[i], why);
+    }
+    printf("  note  %s is %ld bytes\n", com, (long)cn);
+    if (csih_version(ver) != 0 || cx_fmt(want, sizeof want, "csih %s\n", ver)) { printf("  FAIL  no CSIH_VERSION in apps/csih/tui.cx\n"); bad++; }
+    else {
+        char *v1[] = { "sh", com, "--version", 0 }, *v2[] = { "sh", com, "-v", 0 };
+        if (!runs(v1, 20, want, tail, sizeof tail) || !runs(v2, 20, want, tail, sizeof tail)) { printf("  FAIL  csih.com --version / -v: %s\n", tail); bad++; }
+        else printf("  ok    csih.com --version and -v print csih %s\n", ver);
     }
     {
         char *av[] = { "sh", com, "selftest", 0 };

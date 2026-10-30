@@ -1,0 +1,100 @@
+/* check-cx-deflate.cx -- checks cx/text/deflate.cx: sh ./unisacc.com tools/check-cx-deflate.cx
+   Each case compresses with dz_gzip, has the system's gzip -dc decompress the member,
+   and compares the bytes (the oracle is outside this tree). Also: the bound refusal,
+   the stored fallback on incompressible bytes, a ratio floor on source text, and the
+   time for the largest input. Scratch files under out/check-cx-deflate/.
+   An L3 tool: no #include, no direct libc call. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use text.deflate
+
+#define DIR "out/check-cx-deflate"
+#define BIG (12 << 20)
+
+static unsigned char gen[1 << 20];
+static unsigned char gzb[BIG];
+static int bad, okn;
+
+static void ok(int c, const char *name, const char *note) {
+    printf("  %s  %s%s%s\n", c ? "ok  " : "FAIL", name, note && note[0] ? ": " : "", note ? note : "");
+    if (c) okn++; else bad++;
+}
+
+/* compress IN[0..n), decompress with gzip -dc, compare; the member size into *gn */
+static int round_trip(const char *name, const unsigned char *in, long n, long *gn) {
+    char path[256], note[160];
+    char *av[] = { "gzip", "-dc", path, 0 };
+    char *back = 0;
+    size_t bn = 0;
+    long k = dz_gzip(in, n, gzb, (long)sizeof gzb);
+    int rc;
+    *gn = k;
+    if (k < 0 || k > dz_gzip_bound(n)) { ok(0, name, "dz_gzip refused or overran its bound"); return 0; }
+    if (cx_fmt(path, sizeof path, "%s/%s.gz", DIR, name)) { ok(0, name, "path too long"); return 0; }
+    if (cx_write(path, (const char *)gzb, (size_t)k) != 0) { ok(0, name, "cannot write the member"); return 0; }
+    rc = cx_runv_timeout(av, 20, &back, &bn);
+    if (rc != 0 || (long)bn != n || (n && !tx_same((const char *)in, n, back, (long)bn))) {
+        if (cx_fmt(note, sizeof note, "gzip -dc rc=%d, %ld bytes back of %ld", rc, (long)bn, n)) note[0] = 0;
+        ok(0, name, note);
+        return 0;
+    }
+    if (cx_fmt(note, sizeof note, "%ld -> %ld bytes", n, k)) note[0] = 0;
+    ok(1, name, note);
+    return 1;
+}
+
+int main(void) {
+    long i, gn;
+    unsigned long x = 12345;
+    sy_mkdir("out", 0755);
+    sy_mkdir(DIR, 0755);
+
+    round_trip("empty", gen, 0, &gn);
+    gen[0] = 'a';
+    round_trip("one-byte", gen, 1, &gn);
+    round_trip("abc", (const unsigned char *)"abcabcabcabcabcabcabcabc", 24, &gn);
+
+    for (i = 0; i < (1 << 20); i++) gen[i] = 0;
+    round_trip("zeros-1MiB", gen, 1 << 20, &gn);
+    ok(gn > 0 && gn < 4096, "zeros-1MiB compresses", "");
+
+    for (i = 0; i < (1 << 20); i++) { x = x * 1103515245UL + 12345UL; gen[i] = (unsigned char)(x >> 16); }
+    round_trip("random-1MiB", gen, 1 << 20, &gn);
+    ok(gn > 0 && gn <= dz_gzip_bound(1 << 20) && gn < (1 << 20) + (1 << 20) / 1000 + 64, "random-1MiB falls back to stored (under 0.1% framing)", "");
+
+    for (i = 0; i < 70000; i++) gen[i] = (unsigned char)("0123456789abcdef"[(i * 7 + i / 300) & 15]);
+    round_trip("mixed-70000", gen, 70000, &gn);
+    round_trip("short-runs", (const unsigned char *)"aaabbbbccccccccccccccccdddddddddddddddddddddddddddddddddddddddddddd", 66, &gn);
+
+    {
+        size_t n = 0;
+        char *src = cx_read("cx/text/deflate.cx", &n);
+        if (!src) ok(0, "source-text", "cannot read cx/text/deflate.cx");
+        else if (round_trip("source-text", (const unsigned char *)src, (long)n, &gn))
+            ok(gn * 100 < (long)n * 40, "source-text ratio under 40%", "");
+    }
+    {
+        /* the largest input on hand: an x86-64 csih slice when built, else unisacc.com */
+        const char *big = sy_exists("out/csih-ape/csih_lnx64-x86.bin") == 1 ? "out/csih-ape/csih_lnx64-x86.bin" : "unisacc.com";
+        size_t n = 0;
+        char *b = cx_read(big, &n);
+        char note[160];
+        long t0 = sy_now_ms(), ms;
+        if (!b || (long)n > BIG - 4096) ok(0, "binary", big);
+        else {
+            long k = dz_gzip((const unsigned char *)b, (long)n, gzb, (long)sizeof gzb);
+            ms = sy_now_ms() - t0;
+            if (cx_fmt(note, sizeof note, "%s: %ld -> %ld bytes in %ld ms", big, (long)n, k, ms)) note[0] = 0;
+            printf("  note  %s\n", note);
+            round_trip("binary", (const unsigned char *)b, (long)n, &gn);
+        }
+    }
+
+    ok(dz_deflate(gen, 100, gzb, dz_bound(100) - 1) == -1, "cap under the bound is refused", "");
+    ok(dz_deflate(gen, -1, gzb, 64) == -1 && dz_bound(-1) == -1, "negative length is refused", "");
+    ok(dz_crc32(0, (const unsigned char *)"123456789", 9) == 0xCBF43926UL, "crc32 check value", "");
+
+    printf("CHECK_CX_DEFLATE\t%s\tok=%d\tfail=%d\n", bad ? "FAIL" : "PASS", okn, bad);
+    return bad ? 1 : 0;
+}

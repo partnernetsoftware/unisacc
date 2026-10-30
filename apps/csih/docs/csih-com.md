@@ -19,13 +19,27 @@ sh ./unisacc.com tools/csih-ape.cx -- smoke
 
 - **smoke**（约 5 秒）：在本机能查的都实际查一遍，查不了的标 UNMEASURED，不记 PASS。
   - 五个切片的头部：win 是 PE、机器号 0x8664；lnx 是 ELF64，机器号 62 / 183；osx 是 Mach-O 64，cputype 0x1000007 / 0x100000c。
-  - csih.com 确实带着每一片：在每片的 1/4、1/2、3/4 处各取 64 字节，到 csih.com 里找。
+  - csih.com 确实带着每一片：
+    - 四个 Unix 片：按 shell 头里对应 uname 那一行的 `o=` 和 `n=` 截出 gzip 段，用系统的 `gzip -dc` 解开（目标机上的启动器跑的就是这条命令），再和切片逐字节比对。
+    - PE 片：按原样放在文件里，在它的 1/4、1/2、3/4 处各取 64 字节到 csih.com 里找。
+  - `--version` 和 `-v` 都打印 `csih <CSIH_VERSION>`。
   - 本机经 csih.com 跑 `selftest`。
   - 在 qemu-aarch64-static 加 `/usr/aarch64-linux-gnu` sysroot 下，跑 arm64 切片的 `selftest`；找不到 qemu 或 sysroot 就记 UNMEASURED。
   - macOS 两片、Windows 一片只查头部，运行记 UNMEASURED。
   - 末行是 `CSIH_APE SMOKE_OK ran=2 fail=0 unmeasured=3`。
 
-- 产物都在 `out/csih-ape/`，git 不跟踪：五个切片、`csih.com`、`manifest.tsv`。
+- 成品是 `apps/csih/csih.com`，和 `csih.cx` 放在同一目录，git 不跟踪（见 `apps/csih/.gitignore`）。
+- 中间产物在 `out/csih-ape/`：五个切片和 `manifest.tsv`。
+- **体积**：pack 调 ape-pack 时带 `--deflate`，四个 Unix 片用 `cx/text/deflate.cx` 压缩，结果是 gzip 格式。
+  - csih.com 从 8.9MB 降到 1.34MB。
+  - 每片约 1.9–2.5MB，压到 0.32–0.35MB，比 `gzip -6` 还略小一点。
+  - 目标机第一次运行时，用 `gzip -dc` 解到 `~/.cache/csih/csih-<key>`，以后直接用缓存。
+  - 压缩器单独检查：`sh ./unisacc.com tools/check-cx-deflate.cx`。
+  - ape-pack 不带 `--deflate` 时，输出和原来逐字节相同。
+- **版本**：只有一个来源，就是 `apps/csih/tui.cx` 里的 `CSIH_VERSION`，现在是 0.1.0。
+  - pack 从源码读出它，写进 PE 的 VERSIONINFO 和清单的 `version` 行。
+  - verify 会拿清单里的版本和源码对照。
+  - `csih -v`、`--version`、`version` 打印同一行。
 - 每个切片旁边有一个 `.src` 文件，记着它是用哪一版 csih 源码编的（就是 `apps/csih/csih.sh digest` 给出的产品源摘要）。
 - 不一致时会拒绝：
   - **pack**：各切片记录的源码摘要不一致，或者和当前源码对不上，就拒绝打包。
@@ -35,9 +49,10 @@ sh ./unisacc.com tools/csih-ape.cx -- smoke
 ## 用
 
 ```
-sh out/csih-ape/csih.com            # 默认 agent
-sh out/csih-ape/csih.com selftest
-sh out/csih-ape/csih.com keyprobe
+sh apps/csih/csih.com            # 默认 agent
+sh apps/csih/csih.com -v         # csih 0.1.0
+sh apps/csih/csih.com selftest
+sh apps/csih/csih.com keyprobe
 ```
 
 csih.com 是自包含的二进制，不需要 `apps/csih` 源码树，也不读 `csih.sh` 的产物戳。在 macOS 上和 unisacc.com 一样，要用 `sh csih.com` 启动（直接 `execve` 一个 APE 会得到 ENOEXEC）。
