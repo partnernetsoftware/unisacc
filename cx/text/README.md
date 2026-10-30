@@ -13,7 +13,7 @@
 
 ## 关键接口
 
-- `text.text`：`tx_eqz`/`tx_prefixz`（z-string 带界比较，无 cap 上限固化）、`tx_prefix`/`tx_suffix`（starts_with / str::ends_with）、`tx_contains`（str::contains / String.includes）、`tx_count`（str::matches().count()）、`tx_fields`/`tx_field`（字段分割）、`tx_find`/`tx_copy`。
+- `text.text`：`tx_eqz`/`tx_prefixz`（z-string 带界比较，无 cap 上限固化）、`tx_prefix`/`tx_suffix`（starts_with / str::ends_with）、`tx_contains`（str::contains / String.includes）、`tx_count`（str::matches().count()）、`tx_fields`/`tx_field`（字段分割）、`tx_find`/`tx_rfind`/`tx_copy`（find / str::rfind）。
 - `text.build`：`sb_new/sb_free/sb_puts/sb_putn/sb_putc/sb_len/sb_capacity/sb_clear/sb_reserve/sb_truncate/sb_cstr/sb_join`。`sb` 是不透明类型（`void* inner`），CXIF 不泄漏内部 Vec 类型。
 
 ## 速度
