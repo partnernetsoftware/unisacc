@@ -1,4 +1,6 @@
 #pragma unisa module retry_stub
+#pragma unisa use text.fmt
+#pragma unisa use text.num
 #pragma unisa use sys.net
 #pragma unisa use sys.time
 #pragma unisa use sys.proc
@@ -44,7 +46,7 @@ static int rs_status_at(const char *script, int n, int *delay) {
             case 'S': return -203;
             case 'V': return -204;
             case 'J': return -205;
-            default: return atoi(p);
+            default: return (int)tx_atol(p);
             }
         }
         p = strchr(p, ',');
@@ -81,7 +83,7 @@ static void rs_serve_one(int c, const char *script, int n, const char *log) {
                 hdr_end = (size_t)(e - req) + 4;
                 cl = strstr(req, "Content-Length:");
                 if (!cl) cl = strstr(req, "content-length:");
-                if (cl) want = (size_t)strtoul(cl + 15, NULL, 10);
+                if (cl) want = (size_t)tx_strtoul(cl + 15, NULL, 10);
             }
         }
         if (got_hdr && have >= hdr_end + want) break;
@@ -90,7 +92,7 @@ static void rs_serve_one(int c, const char *script, int n, const char *log) {
     {
         /* the request body, for probes that check what csih sent: LOG.reqN */
         char rp[700];
-        snprintf(rp, sizeof rp, "%s.req%d", log, n);
+        tx_snprintf(rp, sizeof rp, "%s.req%d", log, n);
         fd = open(rp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
         if (fd >= 0) { if (have > hdr_end) rs_write_all(fd, req + hdr_end, have - hdr_end); close(fd); }
     }
@@ -108,19 +110,19 @@ static void rs_serve_one(int c, const char *script, int n, const char *log) {
             while (a[i] && a[i] != '\\' && a[i] != '"' && i + 1 < sizeof cited) { cited[i] = a[i]; i++; }
             cited[i] = 0;
         }
-        snprintf(id, sizeof id, "%s", cited);
+        tx_snprintf(id, sizeof id, "%s", cited);
         if (status == -204)
-            snprintf(content, sizeof content,
+            tx_snprintf(content, sizeof content,
                      "{\\\"act\\\":\\\"answer\\\",\\\"outcome\\\":\\\"completed\\\",\\\"text\\\":\\\"RESUME_DONE\\\",\\\"evidence\\\":[\\\"%s\\\"],"
                      "\\\"claims\\\":[{\\\"id\\\":\\\"c1\\\",\\\"text\\\":\\\"pwd ran in the restored cwd\\\",\\\"scope\\\":\\\"cwd\\\","
                      "\\\"state\\\":\\\"supported\\\",\\\"support\\\":[0],\\\"counter\\\":[],\\\"unknown\\\":\\\"\\\"}],"
                      "\\\"observation_refs\\\":[{\\\"id\\\":\\\"%s\\\",\\\"start\\\":0,\\\"end\\\":0,\\\"layer\\\":\\\"tool_output\\\",\\\"json_pointer\\\":null}]}",
                      id, id);
         else
-            snprintf(content, sizeof content,
+            tx_snprintf(content, sizeof content,
                      "{\\\"go\\\":\\\"stop\\\",\\\"acceptance\\\":\\\"accepted\\\",\\\"scope\\\":\\\"work\\\",\\\"evidence\\\":[\\\"%s\\\"],\\\"reason\\\":\\\"scripted\\\"}", id);
         status = 200;
-        snprintf(body, sizeof body,
+        tx_snprintf(body, sizeof body,
                  "{\"id\":\"stub\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"%s\"}}],"
                  "\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12}}", content);
     } else if (status == 200 || status <= -200) {
@@ -130,17 +132,17 @@ static void rs_serve_one(int c, const char *script, int n, const char *log) {
                             : status == -200 ? "{\\\"act\\\":\\\"exec\\\",\\\"cmd\\\":\\\"echo stub-exec\\\",\\\"why\\\":\\\"探针\\\"}"
                                              : "{\\\"act\\\":\\\"answer\\\",\\\"text\\\":\\\"完成了\\\"}";
         status = 200;
-        snprintf(body, sizeof body,
+        tx_snprintf(body, sizeof body,
                  "{\"id\":\"stub\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"%s\"}}],"
                  "\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12}}", content);
     } else {
-        snprintf(body, sizeof body, "{\"error\":{\"message\":\"injected %d\"}}", status);
+        tx_snprintf(body, sizeof body, "{\"error\":{\"message\":\"injected %d\"}}", status);
     }
-    snprintf(head, sizeof head,
+    tx_snprintf(head, sizeof head,
              "HTTP/1.1 %d X\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
              status, (int)strlen(body));
     fd = open(log, O_WRONLY | O_CREAT | O_APPEND, 0600);
-    if (fd >= 0) { char line[48]; snprintf(line, sizeof line, "%d %ld\n", status, rs_now_ms()); rs_write_all(fd, line, strlen(line)); close(fd); }
+    if (fd >= 0) { char line[48]; tx_snprintf(line, sizeof line, "%d %ld\n", status, rs_now_ms()); rs_write_all(fd, line, strlen(line)); close(fd); }
     sy_send_all(c, head, (long)strlen(head));   /* MSG_NOSIGNAL: a client that left cannot kill the stub */
     sy_send_all(c, body, (long)strlen(body));
 }
@@ -199,8 +201,8 @@ int rs_posts(const char *log, char *out, int cap, long *at, int nat) {
     for (p = buf; (nl = strchr(p, '\n')) != NULL; p = nl + 1) {
         char *sp = strchr(p, ' ');
         if (!sp || sp > nl) break;
-        if (n < nat) at[n] = atol(sp + 1);
-        j += snprintf(out + j, j < cap ? (size_t)(cap - j) : 0, "%s%.*s", n ? "," : "", (int)(sp - p), p);
+        if (n < nat) at[n] = tx_atol(sp + 1);
+        j += tx_snprintf(out + j, j < cap ? (size_t)(cap - j) : 0, "%s%.*s", n ? "," : "", (int)(sp - p), p);
         if (j >= cap) j = cap - 1;
         n++;
     }

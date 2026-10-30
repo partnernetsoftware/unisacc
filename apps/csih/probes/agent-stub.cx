@@ -1,4 +1,8 @@
 #pragma unisa module agent-stub
+#pragma unisa use text.fmt
+#pragma unisa use text.num
+#pragma unisa use sys.io
+#pragma unisa use mem.heap
 #pragma unisa use sys.net
 #pragma unisa use sys.fs
 /* An HTTP test double: its sockets are sys.net (sy_tcp_listen/accept/recv/send_all); no #include. */
@@ -27,7 +31,7 @@ typedef struct {
 } J;
 
 static char *dup_n(const char *s, size_t n) {
-    char *d = malloc(n + 1);
+    char *d = mm_alloc(n + 1);
     if (!d) exit(1);
     memcpy(d, s, n);
     d[n] = 0;
@@ -50,7 +54,7 @@ static char *parse_str(J *j) {
         q++; raw++;
     }
     if (q >= j->end) { j->bad = 1; return NULL; }
-    out = malloc(raw + 1);
+    out = mm_alloc(raw + 1);
     if (!out) exit(1);
     o = out;
     q = j->p + 1;
@@ -92,7 +96,7 @@ static void skip_value(J *j) {
     char *s;
     skip_ws(j);
     if (j->p >= j->end) { j->bad = 1; return; }
-    if (*j->p == '"') { s = parse_str(j); free(s); return; }
+    if (*j->p == '"') { s = parse_str(j); mm_free(s); return; }
     if (*j->p == '{' || *j->p == '[') {
         char close = *j->p == '{' ? '}' : ']';
         int obj = close == '}';
@@ -102,7 +106,7 @@ static void skip_value(J *j) {
         for (;;) {
             if (obj) {
                 skip_ws(j);
-                s = parse_str(j); free(s);
+                s = parse_str(j); mm_free(s);
                 if (j->bad) return;
                 skip_ws(j);
                 if (j->p >= j->end || *j->p != ':') { j->bad = 1; return; }
@@ -132,21 +136,21 @@ static void parse_message(J *j, Msg *m) {
         char *key;
         skip_ws(j);
         key = parse_str(j);
-        if (j->bad) { free(key); return; }
+        if (j->bad) { mm_free(key); return; }
         skip_ws(j);
-        if (j->p >= j->end || *j->p != ':') { j->bad = 1; free(key); return; }
+        if (j->p >= j->end || *j->p != ':') { j->bad = 1; mm_free(key); return; }
         j->p++;
         skip_ws(j);
         if (strcmp(key, "role") == 0 && j->p < j->end && *j->p == '"') {
-            free(m->role);
+            mm_free(m->role);
             m->role = parse_str(j);
         } else if (strcmp(key, "content") == 0 && j->p < j->end && *j->p == '"') {
-            free(m->content);
+            mm_free(m->content);
             m->content = parse_str(j);
         } else {
             skip_value(j);
         }
-        free(key);
+        mm_free(key);
         if (j->bad) return;
         skip_ws(j);
         if (j->p >= j->end) { j->bad = 1; return; }
@@ -166,12 +170,12 @@ static void parse_messages(J *j, Msg **out, size_t *n) {
         Msg m;
         if (*n == cap) {
             cap = cap ? cap * 2 : 16;
-            *out = realloc(*out, cap * sizeof(Msg));
+            *out = mm_grow(*out, cap * sizeof(Msg));
             if (!*out) exit(1);
         }
         skip_ws(j);
         parse_message(j, &m);
-        if (j->bad) { free(m.role); free(m.content); return; }
+        if (j->bad) { mm_free(m.role); mm_free(m.content); return; }
         (*out)[(*n)++] = m;
         skip_ws(j);
         if (j->p >= j->end) { j->bad = 1; return; }
@@ -195,9 +199,9 @@ static void parse_request(const char *buf, size_t len, Msg **out, size_t *n) {
         char *key;
         skip_ws(&j);
         key = parse_str(&j);
-        if (j.bad) { free(key); goto fail; }
+        if (j.bad) { mm_free(key); goto fail; }
         skip_ws(&j);
-        if (j.p >= j.end || *j.p != ':') { free(key); goto fail; }
+        if (j.p >= j.end || *j.p != ':') { mm_free(key); goto fail; }
         j.p++;
         skip_ws(&j);
         if (strcmp(key, "messages") == 0 && j.p < j.end && *j.p == '[') {
@@ -205,7 +209,7 @@ static void parse_request(const char *buf, size_t len, Msg **out, size_t *n) {
         } else {
             skip_value(&j);
         }
-        free(key);
+        mm_free(key);
         if (j.bad) goto fail;
         skip_ws(&j);
         if (j.p >= j.end) goto fail;
@@ -216,8 +220,8 @@ static void parse_request(const char *buf, size_t len, Msg **out, size_t *n) {
 fail:
     {
         size_t i;
-        for (i = 0; i < *n; i++) { free((*out)[i].role); free((*out)[i].content); }
-        free(*out); *out = NULL; *n = 0;
+        for (i = 0; i < *n; i++) { mm_free((*out)[i].role); mm_free((*out)[i].content); }
+        mm_free(*out); *out = NULL; *n = 0;
     }
 }
 
@@ -250,7 +254,7 @@ static int strncasecmp_local(const char *a, const char *b, size_t n);
 
 /* Read one HTTP request; returns the body bytes (malloc'd) and length. */
 static char *read_request(int c, size_t *blen) {
-    char *req = malloc(REQ_MAX + 1);
+    char *req = mm_alloc(REQ_MAX + 1);
     size_t have = 0, hdr = 0, want = 0;
     int got_hdr = 0;
     char *body;
@@ -274,17 +278,17 @@ static char *read_request(int c, size_t *blen) {
                     line = h;
                     while (h < e && *h != '\r') h++;
                     if (h - line > 15 && strncasecmp_local(line, "content-length:", 15) == 0)
-                        want = (size_t)strtoul(line + 15, NULL, 10);
+                        want = (size_t)tx_strtoul(line + 15, NULL, 10);
                     while (h < e && (*h == '\r' || *h == '\n')) h++;
                 }
             }
         }
         if (got_hdr && have >= hdr + want) break;
     }
-    if (!got_hdr) { *blen = 0; free(req); return dup_n("", 0); }
+    if (!got_hdr) { *blen = 0; mm_free(req); return dup_n("", 0); }
     *blen = have - hdr < want ? have - hdr : want;
     body = dup_n(req + hdr, *blen);
-    free(req);
+    mm_free(req);
     return body;
 }
 
@@ -307,23 +311,23 @@ static void serve_one(int c) {
     /* empty or invalid body -> no messages (python json fails -> []) */
     parse_request(body, blen, &msgs, &n);
     reply = decide(msgs, n);
-    snprintf(head, sizeof head,
+    tx_snprintf(head, sizeof head,
              "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
              "Content-Length: %d\r\nConnection: close\r\n\r\n", (int)strlen(reply));
     /* send(MSG_NOSIGNAL), not write: a port probe closes without reading,
      * and unisacc's signal() cannot ignore the SIGPIPE that would kill us. */
     sy_send_all(c, head, (long)strlen(head));   /* MSG_NOSIGNAL inside */
     sy_send_all(c, reply, (long)strlen(reply));
-    for (i = 0; i < n; i++) { free(msgs[i].role); free(msgs[i].content); }
-    free(msgs);
-    free(body);
+    for (i = 0; i < n; i++) { mm_free(msgs[i].role); mm_free(msgs[i].content); }
+    mm_free(msgs);
+    mm_free(body);
 }
 
 int main(int argc, char **argv) {
-    int port = argc > 1 ? atoi(argv[1]) : 19001;
+    int port = argc > 1 ? (int)tx_atol(argv[1]) : 19001;
     int s, c;
     s = sy_tcp_listen(port, 16);   /* 127.0.0.1, SO_REUSEADDR */
-    if (s < 0) { printf("FAIL listen\n"); return 1; }
+    if (s < 0) { sy_printf("FAIL listen\n"); return 1; }
     for (;;) {
         c = sy_tcp_accept(s, -1);
         if (c < 0) continue;
