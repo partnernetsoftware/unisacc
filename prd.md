@@ -153,7 +153,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 
 **Python 归档（2026-10-30，cc，`a755ce969c`）：** 191 个已无活调用方的 `.py` 及会执行 `python3` 的旧 `.sh` 原路径挪入 `archive/reference-py/`（清单与依据见其 README）。活路径剩 94 个 `.py`：事实表生成器 `exec/facts/export.py` 与 `python3 -m unisa emit-kernel` 的实测闭包 42 个（原生替代前不能归档），`release/` 18 属其域；`apps/csih` 原有 34 个，2026-10-30 分两批归档 33 个到 `archive/reference-py/apps/csih/`；探针改用 `.cx` 桩和私有 tmux 见证，`check.cx` probes-net 6/0、loop 加 probes-e2e 8/0。只剩 `deepseek-proxy.py`，调用方是仓外的 rawcsih。另有 7 个缺失的系统接口和 `signal()`，在 0.0.43 上实测仍然缺，要走产品慢车道（`apps/csih/docs/python-debt.md`）。归档前后 `export.py --check` 行为不变、emit-kernel 产物逐字节相同、`tests/run.cx --list` 计数不变。第二批 `59948f29c8`、`af185e7069` 归档依赖已归档代码的旧 shell、`plans/pending` 与 `exec/pipeline/stages.tsv`。`42d03b6c0a` 让事实表生成器改读 `exec/facts/statics.tsv` 的 MAXTOK、不再读已归档的 `src/front_pp.c`，并重写 30 张表：29 张只变摘要头，`pp-autoinc-gen.tsv` 有 4 个 cx.h 函数依赖槽此前未随 cx.h 更新；现 `--check` 30/0。`kernel/` 里 40 个文件仍由 `python3 -m unisa emit-kernel` 生成，`unisa_headers.inc` 已改由原生 `tools/carried-header-export.cx` 生成。`.cx` 旧检查暂不归档：`tests/cxinclude|cxapis|cxtrunc` 三份棘轮在 HEAD 已红（51/71/167 行超基线），挪动会再改路径键。**更新（同日）：** 事实表生成器已全部移植为 `tools/facts-gen.cx`（30 张，加 bank 归属检查，`--check` 31/0），`export.py` 归档于 `07432e3ae3`，其导入闭包 7 个 `.py` 归档于 `e0bee5e42d`。仍在活路径执行的 Python 只剩 `python3 -m unisa emit-kernel` 的闭包，由 `tools/net-built-private.cx` 和 `tools/pp-built-private.cx` 调用；`4b9cc0ea95` 让它跳过生成物 `include/cx-flat.h`。
 
-**当前入口（2026-10-30）：** `src/executor.cx` 改用 `core.kernel`，`core_run` 走包里的 UNIKERN1 汇编核心。`tools/entry-build.cx` 编 33 只 `-funit` 对象，unit tape 接成文本后链成 `entry.elf`，再接已装产品尾部的 P3。第一代 `out/grk-entry-build-12` 由已装产品经 `sh` 构造，候选 2631060 字节，sha256 `11b7a23ad760970590a28350da189f8391cde3649c8053f936b3756b7715747d`。第二代 `out/grk-entry-build-13` 直接执行这只候选，33 只对象、`entry.elf` 和候选与第一代逐字节相同。候选侧最慢对象是 `driveface.o`，ns=11794761865，最慢相位 e4 推理 ns=5386000902。上一只 CX 核心候选编同一对象是 ns=34415356768。`dup.c -run` 在这只候选和已装产品上都退出 3。`hello.c -run` 两边都退出 0，stdout 是 `from hello.c`。148 格这轮没重跑。细节在 [plans/cx-modules.md](plans/cx-modules.md) 第 159 节。已装产品仍是 3035300 字节，sha256 `79fb84e65a10b55ce40be5f68746748acbd38f441944046c0a5dfa5718bc0c32`。这不是产品安装。
+**当前入口（2026-10-30）：** `src/executor.cx` 改用 `core.kernel`，`core_run` 走包里的 UNIKERN1 汇编核心。`tools/entry-build.cx` 编 33 只 `-funit` 对象，unit tape 接成文本后链成 `entry.elf`，再接已装产品尾部的 P3。第一代 `out/grk-entry-build-12` 由已装产品经 `sh` 构造，候选 2631060 字节，sha256 `11b7a23ad760970590a28350da189f8391cde3649c8053f936b3756b7715747d`。第二代 `out/grk-entry-build-13` 直接执行这只候选，33 只对象、`entry.elf` 和候选与第一代逐字节相同。候选侧最慢对象是 `driveface.o`，ns=11794761865，最慢相位 e4 推理 ns=5386000902。上一只 CX 核心候选编同一对象是 ns=34415356768。`dup.c -run` 在这只候选和已装产品上都退出 3。`hello.c -run` 两边都退出 0，stdout 是 `from hello.c`。148 格已在这只候选上跑完：143 SAME、5 DIFF、0 TIMEOUT。5 格都是 `dev-run.cx` 的转发缺口。墙钟记在非独占窗口上。细节在 [plans/cx-modules.md](plans/cx-modules.md) 第 160 节。已装产品仍是 3035300 字节，sha256 `79fb84e65a10b55ce40be5f68746748acbd38f441944046c0a5dfa5718bc0c32`。这不是产品安装。
 
 <a id="work-tree"></a>
 ### 思维树
@@ -166,7 +166,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 ├─ CX 结构重写 unisacc.com（主人 10-29）
 │  ├─ 旧 C 已归档 archive/reference-c/（只供对照）；新入口 src/unisacc.cx 六层：host / packmodel / executor / stages / drive / bind
 │  ├─ 候选：tools/entry-build.cx 33 只对象 → out/grk-entry-build-12/candidate（sha 11b7a23a…，自带已装 P3）；13 与 12 逐字节相同
-│  ├─ 对拍：148 格仍是旧候选 ccb79895（139 SAME、8 TIMEOUT、1 DIFF）；dup/hello 在 12 的候选上实跑过，dup 退出 3，hello 退出 0
+│  ├─ 对拍：build-13 候选 11b7a23a 的 148 格 143 SAME、5 DIFF、0 TIMEOUT（out/grk-cand-mx-02）；5 格是 dev-run 转发；dup.c 两边退出 3，判 SAME
 │  ├─ 自举：第二代 13 已编完 33 只对象并链上，最慢 driveface.o 11.8s，低于 55s
 │  └─ 未切换：旧构造脚本 exec/c/buildcompiler.sh 等仍指向已归档 C；已装产品未换
 ├─ 性能（plans/perf-bottlenecks-2026-10-30.md）
@@ -210,7 +210,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 |---|---|---|
 | 新入口 | `src/unisacc.cx` 六层；`src/core`、`src/runtime` 为指向 `cx/` 的符号链接 | plans/cx-modules.md 顶部产品面 |
 | 候选构造 | `tools/entry-build.cx`（可指定构造器）；三只 `-O2 -funit` 对象 + `src/hostnative.o` + 已装 P3 | out/grk-entry-build-01/receipt.txt |
-| 对拍 | `tools/check-cx-entry.cx` 148 格，`tools/bound 55` 分片 | out/grk-cand-mx-01/ |
+| 对拍 | `tools/check-cx-entry.cx` 148 格，build-13 sha 11b7a23a：143 SAME、5 DIFF | out/grk-cand-mx-02/ |
 | 性能 | 相位用 `UNISACC_RR_TIME=1`；参考执行器回放与 SWAP 计数法见瓶颈地图 | plans/perf-bottlenecks-2026-10-30.md |
 | 事实表 | 只经 `sh ./unisacc.com tools/facts-gen.cx -- --write\|--check .`（30 张 + bank 归属，`--check` 31/0） | exec/facts/ |
 | 归档 | 参考 C、参考 Python、旧检查与旧 shell | archive/reference-c/、archive/reference-py/README.md |

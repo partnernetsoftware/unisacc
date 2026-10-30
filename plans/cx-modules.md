@@ -512,3 +512,25 @@ flowchart TD
   g2 --> fast["driveface 34.4s 降到 11.8s"]
 ```
 
+## 160. 2026-10-30 汇编核心候选的 148 格
+
+检查器是 `tools/check-cx-entry.cx`。候选是 `out/grk-entry-build-13/candidate`，2631060 字节，sha256 `11b7a23ad760970590a28350da189f8391cde3649c8053f936b3756b7715747d`，和 12 逐字节相同。表是 `out/grk-cand-mx-02/cx-entry-matrix-2026-10-30.tsv`，表头加 148 行。进度文件是 0 和 148。最后一片 stdout 是 `LEFT:0`，退出 0。格子里面仍是普通 12 秒，`dev-run.cx` 18 秒。子进程的 cwd 是 `/tmp/notrepo`，环境里去掉 `UNISA_CONTAINER`。候选直接执行。没有一片被外层 55 秒杀掉。旧表 `out/grk-cand-mx-01` 仍只绑定旧候选 sha `ccb79895…`。
+
+143 行 SAME，5 行 DIFF，没有 TIMEOUT，没有 CRASH，没有 NOT_IMPLEMENTED。这 143 格按上面的候选 sha 记已通。`dup.c -run` 两边退出 3，stdout 0，stderr 0，判 SAME。上一只候选这一格是 DIFF（候选退出 127）。
+
+原来 8 个 TIMEOUT 都是 `dev-run.cx`。这一只上：`-E` SAME（两边退出 1，stderr 67 字节）。`-S` SAME（两边退出 1，stderr 109 字节；产品墙钟 4513807171 ns，候选 9098663210 ns）。两个 Windows `-o` SAME（两边退出 1，stderr 2770 字节）。剩下 5 格是 DIFF，不是超时：
+
+`dev-run.cx -run`：产品退出 2，stderr 81 字节，墙钟 109215544 ns；候选退出 1，stderr 52 字节，墙钟 9015168507 ns。单独再跑一次，产品 stderr 是 `dev-run: REFUSE usage ROOT [--opt=0|--opt=2] SOURCE.cx [-- PROGRAM_ARGS] errno=0`。候选 stderr 是 `unisacc: model driver: forwarding increment refused`。
+
+四个 `-o`（`lnx/x86_64`、`lnx/arm64`、`osx/x86_64`、`osx/arm64`）：产品退出 0，写出映像，stderr 0。候选退出 1，没有映像，stderr 109 字节。`lnx/x86_64` 单独再跑一次，候选 stderr 是 `unisacc: error: undefined function 'strdup'`、`unisacc: error: undefined function 'setpgid'`、`2 errors generated.`。产品这一次退出 0，stderr 0。
+
+8 次调用里有 6 次开头时已经有别的 `unisacc.com` 在跑。上面的墙钟都是非独占窗口上的数，不拿来比快慢。判定用的是退出码、stdout、stderr 和映像，没有一格因为撞上别人的构造被记成 TIMEOUT，所以没有整表重跑，也没有为了计时再补跑。已装产品没换。bound 没有加长。
+
+```mermaid
+flowchart TD
+  cand["候选 sha 11b7a23a"] --> mx["148 格"]
+  mx --> same["143 SAME，含 dup.c 退出 3"]
+  mx --> diff["5 DIFF：dev-run 的 -run 和四个 unix -o"]
+  diff --> gap["-o 报 undefined function；-run 停在 forwarding increment refused"]
+```
+
