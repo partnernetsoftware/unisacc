@@ -1,6 +1,6 @@
 /* Host-only harness for the actual runtime model-number adapter. */
 #define UNISA_RUNTIME_LIBRARY
-#include "../../exec/c/run.c"
+#include "../../archive/reference-c/exec/c/run.c"   /* reference C; its headers stay in exec/c (-I) */
 
 static int digit(int c) {
     if (c >= '0' && c <= '9') return c - '0';

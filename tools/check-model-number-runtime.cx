@@ -5,13 +5,16 @@ static void die(const char *s){fprintf(stderr,"model-number-runtime: %s\n",s);ex
 static void ck(int ok,const char *name){printf("%s\t%s\n",ok?"PASS":"FAIL",name);if(!ok)failed++;}
 static np_result call(char **v,const char *root){np_result r;char why[512];if(np_run(v,root,0,35,&r,why,sizeof why))die(why);return r;}
 int main(void){
- char root[4096],bound[4400],src[4400],mod[4400],inc[4400],old[512],newer[512],obj[512];
+ char root[4096],bound[4400],src[4400],mod[4400],inc[4400],old[512],newer[512],obj[512],hdr[4400],frame[4400],fobj[512];
  char tmp[]="/tmp/cx-model-number-XXXXXX";if(!realpath(".",root)||!mkdtemp(tmp))die("setup");
  if(cx_fmt(bound,sizeof bound,"%s/tools/bound",root)||cx_fmt(src,sizeof src,"%s/tests/cases/model_number_runtime.c",root)||cx_fmt(mod,sizeof mod,"%s/cx/runtime/model_number.cx",root)||cx_fmt(inc,sizeof inc,"%s/include/cx.h",root)||cx_fmt(old,sizeof old,"%s/old",tmp)||cx_fmt(newer,sizeof newer,"%s/new",tmp)||cx_fmt(obj,sizeof obj,"%s/model.o",tmp))die("path");
+ /* The reference run.c (archive/reference-c) keeps its headers in exec/c and calls cxsf_* of cx/runtime/source_frame.cx. */
+ if(cx_fmt(hdr,sizeof hdr,"-I%s/exec/c",root)||cx_fmt(frame,sizeof frame,"%s/cx/runtime/source_frame.cx",root)||cx_fmt(fobj,sizeof fobj,"%s/frame.o",tmp))die("path");
  char *cc="/usr/bin/x86_64-linux-gnu-gcc-11";
  char *a[]={bound,"30",cc,"-O2","-x","c","-include",inc,"-c",mod,"-o",obj,0};np_result r=call(a,root);if(r.rc||r.errn)die("module-build");np_free(&r);
- char *b[]={bound,"30",cc,"-O2","-w","-ffunction-sections","-fdata-sections","-Wl,--gc-sections",src,"-o",old,0};r=call(b,root);if(r.rc||r.errn)die("old-build");np_free(&r);
- char *c[]={bound,"30",cc,"-O2","-w","-ffunction-sections","-fdata-sections","-Wl,--gc-sections","-DUNISA_CX_MODEL_NUMBER",src,obj,"-o",newer,0};r=call(c,root);if(r.rc||r.errn)die("new-build");np_free(&r);
+ char *f[]={bound,"30",cc,"-O2","-w","-x","c","-include",inc,"-c",frame,"-o",fobj,0};r=call(f,root);if(r.rc||r.errn)die("frame-build");np_free(&r);
+ char *b[]={bound,"30",cc,"-O2","-w","-ffunction-sections","-fdata-sections","-Wl,--gc-sections",hdr,src,fobj,"-o",old,0};r=call(b,root);if(r.rc||r.errn)die("old-build");np_free(&r);
+ char *c[]={bound,"30",cc,"-O2","-w","-ffunction-sections","-fdata-sections","-Wl,--gc-sections","-DUNISA_CX_MODEL_NUMBER",hdr,src,obj,fobj,"-o",newer,0};r=call(c,root);if(r.rc||r.errn)die("new-build");np_free(&r);
  struct Row {const char *name,*binary,*input,*output,*error;int rc;} rows[]={
   {"text-min","0","-9223372036854775808","-9223372036854775808 20\n","",0},
   {"text-max","0","9223372036854775807","9223372036854775807 19\n","",0},

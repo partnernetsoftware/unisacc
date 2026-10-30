@@ -8,7 +8,7 @@ static void observed_free(void *p) {
 #define UNISA_PACKAGE_FREE observed_free
 #define UNISA_PACKAGE_REALLOC realloc
 #define UNISA_RUNTIME_LIBRARY
-#include "../../exec/c/run.c"
+#include "../../archive/reference-c/exec/c/run.c"   /* reference C; its headers stay in exec/c (-I) */
 int main(void) {
     Model m={0}, empty={0}; m.ns=2; m.nstr=2; m.loaded=1;
     m.str=calloc(2,sizeof *m.str); known[0]=m.str;

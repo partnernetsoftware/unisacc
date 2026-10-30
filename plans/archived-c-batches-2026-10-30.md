@@ -79,3 +79,19 @@ not FAIL).
    IMPLEMENTED makes `--all` fail on them, which is honest but says nothing about why.
 
 No registry row has been changed. Deleting rows or relaxing expectations is not on the table.
+
+## Kind 1 recipe and status
+
+The run.c compare harnesses were already broken before the archive. 76dab595f9 (2026-10-29 21:23) made
+run.c call `cxsf_close_fail` from cx/runtime/source_frame.cx, so a pure-C old build no longer
+links. The recipe:
+1. Include `../../archive/reference-c/exec/c/run.c`.
+2. Add `-I ROOT/exec/c`, where the headers stayed.
+3. Link an object of cx/runtime/source_frame.cx into both the old and the new build.
+Assertions and expected values are unchanged.
+
+| batch | after the recipe |
+|---|---|
+| cx-model-number-runtime | PASS 27/0 (tests/run-batch.cx) |
+| cx-model-lifetime-runtime | PASS 1/0 |
+| core-compat, cx-model-allocation, cx-model-reference, p3-library-*, package-controls | not yet repaired |
