@@ -2,6 +2,10 @@
 #pragma unisa use sys.poll
 #pragma unisa use sys.time
 #pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use mem.bytes
 /*
  * shell.cx — run a command through a real shell and bring back what it printed.
  *
@@ -153,82 +157,45 @@ int shell_call_tick(void) { return shell_tick ? shell_tick() : 0; }
 
 shell_result shell_run_in(const char *command, const char *cwd) {
     shell_result r;
-    int pipefd[2];
-    pid_t pid;
+    int outfd = -1;
+    int pid;
 
-    memset(&r, 0, sizeof r);
+    mm_fill(&r, (long)sizeof r, 0, (long)sizeof r);
     r.ok = 0;
 
     if (!command) { r.err = EINVAL; return r; }
-    if (strlen(command) == 0) { r.err = EINVAL; return r; }
+    if (!command[0]) { r.err = EINVAL; return r; }
 
-    if (pipe(pipefd) != 0) { r.err = errno; return r; }
-
-    pid = fork();
+    /*
+     * sy_spawn_pipe (sys.proc) starts /bin/sh -c COMMAND:
+     * - in its own process group, so a timeout or Esc kills the whole command,
+     *   not just /bin/sh while its children keep running;
+     * - in CWD, changed in the child, so this process's own cwd never moves;
+     * - with stdin from /dev/null: a command that reads stdin must NOT steal
+     *   keystrokes from the raw-mode TUI that launched it;
+     * - with stdout and stderr both in one pipe (see the header), whose write
+     *   end the parent no longer holds, so EOF arrives when the command ends.
+     * A failed chdir or exec comes back as -errno with the child reaped. They
+     * are reported as before, as exit codes the caller can tell apart from
+     * "the command ran and failed": 125 for the directory, 126 for exec.
+     */
+    {
+        char *argv[4];
+        argv[0] = (char *)"/bin/sh";
+        argv[1] = (char *)"-c";
+        argv[2] = (char *)command;
+        argv[3] = NULL;
+        pid = sy_spawn_pipe(argv, cwd, SY_SPAWN_NO_PATH, &outfd, NULL);
+    }
     if (pid < 0) {
-        r.err = errno;
-        close(pipefd[0]);
-        close(pipefd[1]);
+        int e = -pid;
+        /* no pipe or no process: THIS function failed, as before (r.err) */
+        if (e == EMFILE || e == ENFILE || e == EAGAIN || e == ENOMEM || e == EINVAL) { r.err = e; return r; }
+        r.ok = 1;
+        r.exited = 1;
+        r.status = cwd ? 125 : 126;
         return r;
     }
-
-    if (pid == 0) {
-        /* ---- child ---- */
-        /* Own process group, so a timeout or Esc kills the whole command,
-         * not just /bin/sh while its children keep running. */
-        setpgid(0, 0);
-        /* The directory is changed HERE, in the child, so the parent process's
-         * own cwd never moves — see the note above. A failed chdir exits 125,
-         * a code the parent can distinguish from "the command ran and failed"
-         * (non-zero status) and from "could not exec" (126).
-         *
-         * This used to sit behind a CDSH_HAVE_CHDIR guard, with a shell-level
-         * `cd '<dir>' || exit 125; ` prepended to the command when chdir was
-         * missing. unisacc 0.0.19 lacked chdir; 0.0.23 HAS IT (measured:
-         * getcwd before -> chdir("/tmp") -> getcwd after reports the new
-         * directory, same as gcc). So the guard, the fallback and its quoting
-         * are gone — a workaround that outlives its cause is a mystery for the
-         * next reader. fchdir is still missing ("undefined function"), and is
-         * not needed here.
-         */
-        if (cwd && chdir(cwd) != 0) _exit(125);
-        /* stdin from /dev/null: a command that reads stdin must NOT steal
-         * keystrokes from the terminal that launched us. This matters when
-         * csih runs inside a raw-mode TUI (tui agent) — without it, an agent
-         * step like `cat` or `read` would drain the keyboard buffer the TUI
-         * is still reading from, and characters would vanish. It is harmless
-         * for every existing caller (none of the tool commands read stdin). */
-        {
-            int dn = open("/dev/null", 0);
-            if (dn >= 0) { if (dup2(dn, 0) < 0) { /* ignore */ } close(dn); }
-        }
-        /* stdout and stderr both land in the pipe; see the header. */
-        if (dup2(pipefd[1], 1) < 0) _exit(126);
-        if (dup2(pipefd[1], 2) < 0) _exit(126);
-        close(pipefd[0]);
-        close(pipefd[1]);       /* the child must not hold the read end either */
-        {
-            char *argv[4];
-            argv[0] = (char *)"sh";
-            argv[1] = (char *)"-c";
-            argv[2] = (char *)command;
-            argv[3] = NULL;
-            /* execvp, not execl: unisacc 0.0.19 has the array forms and not the
-             * variadic ones (reported). 126 is the conventional "found but
-             * could not execute" so the parent can tell it apart from a
-             * command that ran and failed. */
-            execvp("/bin/sh", argv);
-            _exit(126);
-        }
-    }
-
-    /* ---- parent ---- */
-    /*
-     * Close the write end BEFORE reading. Holding it open means read() below
-     * never returns: there is still a writer (us), so no EOF, forever. This is
-     * the deadlock named in the header, and it is a one-line omission.
-     */
-    close(pipefd[1]);
 
     /* Drain first, then wait — the child may be blocked writing into a full
      * pipe while we wait for it to finish. Reversed, that is the deadlock. */
@@ -240,9 +207,8 @@ shell_result shell_run_in(const char *command, const char *cwd) {
     }
     deadline = sy_now_ms() + budget_ms;
     {
-        size_t off = 0;
-        ssize_t n;
-        while (off + 1 < sizeof r.out) {
+        long off = 0, cap = (long)sizeof r.out, n;
+        while (off + 1 < cap) {
             /* Wake every 200ms so the UI can redraw and the user can cancel.
              * The overall deadline is unchanged. */
             int stop = 0;
@@ -250,83 +216,71 @@ shell_result shell_run_in(const char *command, const char *cwd) {
                 long slice = sy_now_ms() + 200;
                 int last = slice >= deadline;
                 if (last) slice = deadline;
-                if (shell_poll_deadline(pipefd[0], slice, NULL) != 0) break;
+                if (shell_poll_deadline(outfd, slice, NULL) != 0) break;
                 if (last) { r.timed_out = 1; stop = 1; break; }
                 if (shell_tick && shell_tick()) { r.timed_out = 1; r.err = ECANCELED; stop = 1; break; }
             }
             if (stop) break;
-            n = read(pipefd[0], r.out + off, sizeof r.out - 1 - off);
-            if (n < 0) {
-                if (errno == EINTR) continue;
-                break;
-            }
-            if (n == 0) break;
-            off += (size_t)n;
+            n = sy_read(outfd, r.out + off, cap - 1 - off);   /* resumes after EINTR itself */
+            if (n <= 0) break;
+            off += n;
         }
         r.out[off] = '\0';
-        r.bytes = (long)off;
+        r.bytes = off;
         /* The buffer is full but the child may still be writing. Stop reading
-         * into r.out, but keep draining, or waitpid deadlocks on a full pipe. */
-        if (off + 1 >= sizeof r.out) {
+         * into r.out, but keep draining, or the wait below deadlocks on a full pipe. */
+        if (off + 1 >= cap) {
             char junk[1024];
             r.bytes = -1;
             for (;;) {
-                int pr = shell_poll_deadline(pipefd[0], deadline, NULL);
+                int pr = shell_poll_deadline(outfd, deadline, NULL);
                 if (pr == 0) { r.timed_out = 1; break; }
                 if (pr < 0) { r.err = errno; break; }
-                n = read(pipefd[0], junk, sizeof junk);
-                if (n < 0) { if (errno == EINTR) continue; break; }
-                if (n == 0) break;
+                n = sy_read(outfd, junk, (long)sizeof junk);
+                if (n <= 0) break;
             }
         }
     }
-    close(pipefd[0]);
+    sy_close(outfd);
 
     {
-        int st = 0;
-        pid_t w;
+        int w, exited = 0, code = 0, sig = 0;
         /* One deadline for the whole turn: if we already hit it while
          * reading, kill now; otherwise wait with the same deadline's
-         * remaining time, never a fresh budget. */
+         * remaining time, never a fresh budget. The kill takes the whole
+         * process group (sy_killpg), then the leader itself. */
         if (r.timed_out) {
-            kill(-pid, SIGKILL);
-            kill(pid, SIGKILL);
-            do { w = waitpid(pid, &st, 0); } while (w < 0 && errno == EINTR);
+            sy_killpg(pid, SIGKILL);
+            sy_signal(pid, SIGKILL);
+            w = sy_wait_status(pid, 0, &exited, &code, &sig);
         } else {
             /* The pipe usually closes a moment before the exit status is
              * ready. A flat 100ms nap here added 100ms to every exec
              * (turn_latency); back off from 1ms instead, still capped at 100. */
             long nap_ms = 1;
             for (;;) {
-                w = waitpid(pid, &st, WNOHANG);
-                if (w == pid) break;
-                if (w < 0 && errno != EINTR) break;
-                if (w < 0 && errno == EINTR) continue;
-                {
-                    long ms = deadline - sy_now_ms();
-                    if (ms <= 0) {
-                        kill(-pid, SIGKILL);
-                        kill(pid, SIGKILL);
-                        r.timed_out = 1;
-                        do { w = waitpid(pid, &st, 0); } while (w < 0 && errno == EINTR);
-                        break;
-                    }
-                    sy_sleep_ms(ms > nap_ms ? nap_ms : ms);
-                    if (nap_ms < 100) nap_ms = nap_ms * 2 > 100 ? 100 : nap_ms * 2;
+                long ms;
+                w = sy_wait_status(pid, 1, &exited, &code, &sig);
+                if (w != 0) break;                /* reaped, or -errno */
+                ms = deadline - sy_now_ms();
+                if (ms <= 0) {
+                    sy_killpg(pid, SIGKILL);
+                    sy_signal(pid, SIGKILL);
+                    r.timed_out = 1;
+                    w = sy_wait_status(pid, 0, &exited, &code, &sig);
+                    break;
                 }
+                sy_sleep_ms(ms > nap_ms ? nap_ms : ms);
+                if (nap_ms < 100) nap_ms = nap_ms * 2 > 100 ? 100 : nap_ms * 2;
             }
         }
 
-        if (w < 0) { r.err = errno; return r; }
+        if (w < 0) { r.err = -w; return r; }
 
         r.ok = 1;
-        if (WIFEXITED(st)) {
-            r.exited = 1;
-            r.status = WEXITSTATUS(st);
-        } else if (WIFSIGNALED(st)) {
-            r.exited = 0;
-            r.signal = WTERMSIG(st);
-        }
+        r.exited = exited;
+        if (exited) r.status = code;
+        else r.signal = sig;
     }
     return r;
 }
