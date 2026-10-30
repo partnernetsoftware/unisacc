@@ -20,6 +20,7 @@ char *zs_find(const char *s, const char *w);
 char *zs_chr(const char *s, int c);
 char *zs_rchr(const char *s, int c);
 int zs_has_nul(const char *s, long cap);
+int zs_set(char *d, long cap, const char *s);
 int mm_copy(void *dst, long dcap, const void *src, long n);
 int mm_move(void *dst, long dcap, const void *src, long n);
 int mm_fill(void *dst, long dcap, int byte, long n);
