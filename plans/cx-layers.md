@@ -295,3 +295,4 @@ grk 澄清：cli.cx 收敛 use text.text 的真正阻塞不是软链归一，而
 2. cli.cx 收敛 use text.text：被 closure-once 阻塞（见上），不是软链归一。
 3. csv2tsv 可改用 mem.grow：同受 closure-once 约束（use mem.grow 的模块只进一只对象）。
 这三项的解除路径是 closure-once（每模块只进一只对象的架构改造），是 grk 的慢车道。当前 static 方案（cli.cx 的 cxc_eqz）是正确的过渡，不是缺陷。
+## input.cx / output.cx 迁移边界（已迁 vs 保留及精确理由，2026-10-30）
