@@ -221,6 +221,35 @@ static void cli_options(void){
  got=key_run(d,led,0,"m.c","cliopt-authority");ck(got.rc==0&&!got.errn&&got.outn==w3.outn&&mm_same(got.out,w3.out,(long)w3.outn),"cli-option-ledger-authority");np_free(&got);
  key_extra[0]=0;np_free(&plain);np_free(&w3);np_free(&w7);
 }
+/* ri.class.hdr-bundled.states: <stdio.h> from the bundled headers (\0hdr/stdio.h) --
+   PRESENT -- the SC1 map replays to the captured bytes even with a junk include/stdio.h beside the source (hermetic);
+   EMPTY   -- the row re-signed as a 0-byte blob gives the bytes of -nostdinc -I e with an empty e/stdio.h on disk;
+   ABSENT  -- the row ABSENT gives the E2 no-such-file diagnostic, stderr byte-equal to -nostdinc on disk;
+   MISSING -- without the row the strict run is refused MISSING_EXPLICIT_RESOURCE 006864722f737464696f2e68;
+   and a -nostdinc capture records no \0hdr/ row at all. */
+static void hdr_states(void){
+ const char *hk="006864722f737464696f2e68";char d[4400],p[4400],cap[4400],capn[4400],led[4400],row[256],eh[65];
+ path(d,sizeof d,work,"hdrb");path(cap,sizeof cap,work,"hdrb-capture");path(capn,sizeof capn,work,"hdrb-nostdinc-capture");
+ if(sy_mkdir(d,0700))die("hdrb dir");const char *m="#include <stdio.h>\nint main(void){return 0;}\n";path(p,sizeof p,d,"m.c");save(p,m,tx_len(m,128));
+ np_result want=key_run(d,0,cap,"m.c","hdrb-capture");ck(want.rc==0&&!want.errn&&want.outn>0,"hdr-bundled-capture");
+ size_t tn;path(p,sizeof p,cap,"resources.tsv");char *t=load(p,&tn);np_buf all={0},base={0};sc1_map(t,(long)tn,0,&all);mm_free(t);cli_rows_without(all.p,all.n,hk,0,&base);
+ material_from(cap,"hdrb-present-ledger",all.p,all.n,led);mm_free(all.p);
+ path(p,sizeof p,d,"include");if(sy_mkdir(p,0700))die("hdrb include");path(p,sizeof p,d,"include/stdio.h");save(p,"junk junk junk\n",15);
+ np_result got=key_run(d,led,0,"m.c","hdrb-present");ck(got.rc==0&&!got.errn&&got.outn==want.outn&&mm_same(got.out,want.out,(long)want.outn),"hdr-bundled-present-hermetic");np_free(&got);np_free(&want);
+ if(cx_rmtree(p))die("hdrb junk");path(p,sizeof p,d,"include");if(cx_rmtree(p))die("hdrb include");
+ cx_sha256_hex("",0,eh);np_buf e={0};np_put(&e,base.p,base.n);if(cx_fmt(row,sizeof row,"%s\t1\tempty.bin\t0\t%s\n",hk,eh))die("hdr empty");np_put(&e,row,tx_len(row,sizeof row));
+ material_from(cap,"hdrb-empty-ledger",e.p,e.n,led);path(p,sizeof p,led,"empty.bin");save(p,"",0);mm_free(e.p);
+ path(p,sizeof p,d,"e");if(sy_mkdir(p,0700))die("hdrb e");path(p,sizeof p,d,"e/stdio.h");save(p,"",0);
+ key_extra[0]="-nostdinc";key_extra[1]="-I";key_extra[2]="e";key_extra[3]=0;want=key_run(d,0,0,"m.c","hdrb-disk-empty");key_extra[0]=0;
+ got=key_run(d,led,0,"m.c","hdrb-empty");ck(want.rc==0&&got.rc==0&&!got.errn&&got.outn==want.outn&&want.outn>0&&mm_same(got.out,want.out,(long)want.outn),"hdr-bundled-empty-equals-disk");np_free(&got);np_free(&want);
+ np_buf a={0};np_put(&a,base.p,base.n);if(cx_fmt(row,sizeof row,"%s\t0\t-\t0\t-\n",hk))die("hdr absent");np_put(&a,row,tx_len(row,sizeof row));material_from(cap,"hdrb-absent-ledger",a.p,a.n,led);mm_free(a.p);
+ key_extra[0]="-nostdinc";key_extra[1]=0;want=key_run(d,0,0,"m.c","hdrb-disk-nostdinc");key_extra[0]=0;
+ got=key_run(d,led,0,"m.c","hdrb-absent");ck(want.rc==1&&got.rc==1&&!got.outn&&got.errn==want.errn&&want.errn>0&&mm_same(got.err,want.err,(long)want.errn),"hdr-bundled-absent-is-e2-diagnostic");np_free(&got);np_free(&want);
+ material_from(cap,"hdrb-missing-ledger",base.p,base.n,led);mm_free(base.p);char wantm[96];if(cx_fmt(wantm,sizeof wantm,"MISSING_EXPLICIT_RESOURCE %s",hk))die("hdr missing");
+ got=key_run(d,led,0,"m.c","hdrb-missing");ck(got.rc==2&&!got.outn&&tx_find(got.err,(long)got.errn,wantm,tx_len(wantm,96))>=0,"hdr-bundled-missing-refused");np_free(&got);
+ key_extra[0]="-nostdinc";key_extra[1]=0;got=key_run(d,0,capn,"m.c","hdrb-nostdinc-capture");key_extra[0]=0;np_free(&got);
+ path(p,sizeof p,capn,"resources.tsv");t=load(p,&tn);ck(tn>0&&tx_find(t,(long)tn,"\n006864722f",11)<0,"hdr-bundled-nostdinc-no-fetch");mm_free(t);
+}
 static void key_length_bound(void){
  char dir[4400],s512[32],s513[32],cap512[4400],cap513[4400],p[4400];path(dir,sizeof dir,work,"keylen");if(sy_mkdir(dir,0700))die("keylen dir");
  key_source(dir,512,s512,sizeof s512);key_source(dir,513,s513,sizeof s513);path(cap512,sizeof cap512,dir,"cap512");path(cap513,sizeof cap513,dir,"cap513");
@@ -266,4 +295,4 @@ int main(int argc,char **argv){int trace_mode=argc>3&&tx_eqz(argv[argc-1], "--tr
  /* ri.frame.row-field-too-long: a 4096-byte field is one above the parser bound (width >= 4096) */
  {np_buf longrow={0};np_puts(&longrow,"ff\t0\t");for(int k=0;k<4096;k++)np_put(&longrow,"a",1);np_puts(&longrow,"\t0\t-\n");appended("row-field-4096",longrow.p,longrow.n,"resource-row-field-too-long");mm_free(longrow.p);}
  const char nulrow[]="ff\t0\t-\t0\t-\0hidden\n";appended("embedded-nul-row",nulrow,sizeof nulrow-1,"resource-row-nul");np_buf nulheader={0};np_put(&nulheader,ledger,header-1);np_put(&nulheader,"\0hidden\n",8);np_put(&nulheader,ledger+header,ledger_n-header);refuse("embedded-nul-header",nulheader.p,nulheader.n,"resource-row-nul");free(nulheader.p);
- ledger_preconditions();identity_bounds();key_length_bound();inc_states(0);inc_states(1);cli_options();length_blob("blob-longer-than-declared",3);length_blob("blob-shorter-than-declared",5);repeated();additional();replay=invoke(capdir,root,0,"recovery");path(p,sizeof p,work,"normal.stdout");size_t recovery_n;char *recovery=load(p,&recovery_n);ck(replay.rc==0&&!replay.errn&&replay.outn==recovery_n&&!memcmp(replay.out,recovery,recovery_n),"strict-recovery-after-refusals");free(recovery);np_free(&replay);free(ledger);return finish(before,container_before,"SC1-map-compatibility-from-verified-SC2-trace");}
+ ledger_preconditions();identity_bounds();key_length_bound();inc_states(0);inc_states(1);cli_options();hdr_states();length_blob("blob-longer-than-declared",3);length_blob("blob-shorter-than-declared",5);repeated();additional();replay=invoke(capdir,root,0,"recovery");path(p,sizeof p,work,"normal.stdout");size_t recovery_n;char *recovery=load(p,&recovery_n);ck(replay.rc==0&&!replay.errn&&replay.outn==recovery_n&&!memcmp(replay.out,recovery,recovery_n),"strict-recovery-after-refusals");free(recovery);np_free(&replay);free(ledger);return finish(before,container_before,"SC1-map-compatibility-from-verified-SC2-trace");}
