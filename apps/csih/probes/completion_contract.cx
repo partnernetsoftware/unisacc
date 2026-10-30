@@ -143,6 +143,31 @@ static void ob_list(sbuf *b, const char *k, slist *l, int times) {
     sb_puts(b, "]");
 }
 static void ob_end(sbuf *b) { sb_puts(b, "}"); }
+/* Protocol adaptation (the product changed meaning since the python original):
+ * a completed answer after tool use must now also carry claims and
+ * observation_refs grounded in this turn's tool records, or it is sent back
+ * ("resend the same answer as one object with all six keys") and the turn
+ * gains a request. The original's evidence field is kept as it was (it is
+ * what these cases vary); the refs name this turn's tool records REFS with a
+ * QUOTE from their body, one supported claim over all of them. */
+static void ob_claims(sbuf *b, slist *refs, const char *quote) {
+    int i;
+    ob_key(b, "claims");
+    sb_puts(b, "[{\"id\": \"c1\", \"text\": \"the command printed its marker\", \"scope\": \"tool output\", \"state\": \"supported\", \"support\": [");
+    for (i = 0; i < refs->n && i < 4; i++) { char d[16]; snprintf(d, sizeof d, "%s%d", i ? ", " : "", i); sb_puts(b, d); }
+    sb_puts(b, "], \"counter\": [], \"unknown\": \"\"}]");
+    ob_key(b, "observation_refs");
+    sb_puts(b, "[");
+    for (i = 0; i < refs->n; i++) {
+        if (i) sb_puts(b, ", ");
+        sb_puts(b, "{\"id\": ");
+        sb_jstr(b, refs->v[i], refs->l[i]);
+        sb_puts(b, ", \"start\": 0, \"end\": 0, \"layer\": \"tool_output\", \"json_pointer\": null, \"quote\": ");
+        sb_jstr(b, quote, zl(quote));
+        sb_puts(b, "}");
+    }
+    sb_puts(b, "]");
+}
 
 /* ---------- JSON tree ---------- */
 enum { J_NULL, J_BOOL, J_NUM, J_STR, J_ARR, J_OBJ };
@@ -648,7 +673,11 @@ static int case_setup(const char *name) {
     snprintf(g_cwd, sizeof g_cwd, "%s/%s", g_root, name);
     snprintf(g_journal, sizeof g_journal, "%s/journal", g_cwd);
     snprintf(home, sizeof home, "%s/home", g_cwd);
-    return sy_mkdir(g_cwd, 0777) == 0 && sy_mkdir(home, 0777) == 0 ? 0 : -1;
+    {
+        int a = sy_mkdir(g_cwd, 0777), b = a == 0 ? sy_mkdir(home, 0777) : 0;
+        if (a || b) { snprintf(g_note, sizeof g_note, "mkdir %s: %d/%d", g_cwd, a, b); return -1; }
+    }
+    return 0;
 }
 /* python: journal.rename(cwd/'journal-before'); journal.mkdir() */
 static int rotate_journal(void) {
@@ -696,6 +725,7 @@ static int resp_run(int n, jn *req, sbuf *o) {
     } else if (named(name, "duplicate-evidence") && n >= 2) {
         ob_z(o, "act", "answer"); ob_z(o, "outcome", "completed"); ob_z(o, "text", "duplicate");
         ob_list(o, "evidence", &ids, 2);
+        ob_claims(o, &ids, "ACTUAL_BODY");
     } else if (named(name, "legacy-answer") && n == 2) {
         ob_z(o, "act", "answer"); ob_z(o, "outcome", "completed"); ob_z(o, "text", "missing evidence");
     } else if (named(name, "consultation")) {
@@ -715,6 +745,7 @@ static int resp_run(int n, jn *req, sbuf *o) {
         ob_z(o, "act", "answer"); ob_z(o, "outcome", "completed"); ob_z(o, "text", "\xe5\xa3\xb0\xe6\x98\x8e");
         if (named(name, "missing-evidence")) { slist old; old.n = 0; sl_add(&old, "old-turn-1", 10); ob_list(o, "evidence", &old, 1); }
         else ob_list(o, "evidence", &ids, 1);
+        ob_claims(o, &ids, "ACTUAL_BODY");
     } else if (named(name, "legacy-stop")) ob_z(o, "go", "stop");
     else if (named(name, "invalid-recovery") && n == 3) { ob_key(o, "not_a_judgment"); sb_puts(o, "true"); }
     else {
@@ -730,7 +761,7 @@ static int case_run(const char *name) {
     int k = 0, expected_rc, expected_n, i, nt, anchors_n = 0;
     runres r;
     jn *tools[64], *anchor[3] = {0, 0, 0};
-    NEED(case_setup(name) == 0, "case dir");
+    NEED(case_setup(name) == 0, "case dir (%s)", g_note);
     snprintf(home, sizeof home, "%s/home", g_cwd);
     kv[k++] = "HOME"; kv[k++] = home;
     kv[k++] = "DEEPSEEK_API_KEY"; kv[k++] = "LOCAL_ONLY";
@@ -858,6 +889,7 @@ static int resp_feedback(int n, jn *req, sbuf *o) {
         sl_add(&g_claim, ids.v[1], ids.l[1]);
         ob_z(o, "act", "answer"); ob_z(o, "outcome", "completed"); ob_z(o, "text", "DECLARATION_PRESERVED");
         ob_list(o, "evidence", &g_claim, 1);
+        ob_claims(o, &g_claim, "ACTUAL_2");
         ob_end(o);
         return 0;
     }
@@ -893,7 +925,7 @@ static int case_feedback(const char *name) {
     runres r;
     jn *tools[64];
     const char *diag = NULL;
-    NEED(case_setup(name) == 0, "case dir");
+    NEED(case_setup(name) == 0, "case dir (%s)", g_note);
     g_claim.n = 0;
     snprintf(home, sizeof home, "%s/home", g_cwd);
     kv[k++] = "HOME"; kv[k++] = home;
@@ -973,7 +1005,7 @@ static int case_capacity(const char *name) {
     int k = 0, i, found = 0;
     runres r;
     sbuf raw = {0, 0, 0};
-    NEED(case_setup(name) == 0, "case dir");
+    NEED(case_setup(name) == 0, "case dir (%s)", g_note);
     snprintf(home, sizeof home, "%s/home", g_cwd);
     snprintf(packet, sizeof packet, "%s/packet.json", g_cwd);
     sb_puts(&raw, "{\"data\":\"");
