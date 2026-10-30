@@ -61,3 +61,12 @@
 ## 与 closure-once 的关系
 
 符号级导入 + 别名**不直接解决** closure-once（那是「每模块只进一只对象」的架构改造），但让「use 同一模块的多个上层单元」可以各取所需、避免不必要的整模块内联，是 closure-once 落地后的自然配套。
+
+## 实现进度（2026-10-31，bdy，在 gcc_cx/clang_cx 宿主链上）
+
+已在 `src/cxmod.c` 落地三块，均重编 gcc_cx/clang_cx 验证：
+1. **解析**：`use NAME::sym as alias`（cxm_directive + cxm_adduse，新增 cxm_usym/cxm_ualias）。
+2. **冲突消解**：cxm_collisions 函数分支加 reach + cxm_aliased 检查，同名函数被别名后不冲突。
+3. **CXIF 声明改名**：cxm_text(sym,alias) + cxm_on_rename（token 级改名）+ cxm_renpool + cxm_inc 负值编码。
+
+**剩余（函数体符号改名）**：别名改了 CXIF 声明，但模块本身的函数体（`int clash(...)`）编译出的符号仍是原名 `clash`，链接时两个模块的 clash 重复。要让 `use a::clash as clash_a` 端到端工作，cxmod 还要对「被别名 use 的模块」生成改名源码（头部 `#define clash clash_a`，或源码级符号替换），cxm_planprint 输出改名源码路径，cxcc 编译它。难点是「模块被多个单元用不同别名 use」需要多份改名源码（多版本模块编译），是架构级改动。
