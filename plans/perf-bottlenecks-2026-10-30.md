@@ -76,11 +76,12 @@
   - 命中后仍要走 lower/elf 和执行；被缓存的只是前端产物，运行期资源每次重新绑定。
   - 候选移植成 CX 模块时，键里的"产品 sha"要换成候选自己的身份（候选文件加附带的 P3）。
 - **包内嵌头：** cwd 不在仓库根时，E2 从包资源 `\0hdr/` 取的是旧版嵌套 cx.h，同一个空 main 的 e2 要 1.6 s。展平前导要随下一次包刷新进包，才会处处生效。
-- **候选 run-cache 命中（c17b472673 之后，2026-10-30）：**
-  - 单源小程序首次 749 ms、命中 505 ms（tests/runcache.cx）；产品命中 61 ms。
-  - 已定的修法（grk 在做）：单源也存转发 ELF，命中后直接执行。
-  - 命中剩下的约 196 ms 里，大头应是每次对 2.7 MB 候选文件做软件 SHA256（这是推断，尚未单独测）。产品 rr_hash_file 在 ≥64 KB 时走 Linux AF_ALG，由内核计算，失败再回退软件实现。建议 L0 加 sy_sha256_hex，在 lnx/x86_64 上走 AF_ALG。
-  - cx_read 从 4 KB 起倍增扩容，读 2.7 MB 约多花 20 ms（grk 估算）。先 fstat 定长可省，但 cx_read 在前导里，新增的 fstat 要进 exec/facts/pp-autoinc-gen.tsv 的函数依赖槽，表一变就得走慢车道重构造，所以留到下次慢车道一起做。
+- **候选 run-cache 命中（2026-10-30，build-17）：**
+  - 单源也存转发 ELF。命中后直接执行，不再跑 lower、elf 和模型装载。
+  - 键里 64 KiB 及以上的文件用 `cx/sys/sha.cx` 的 `sy_sha256_hex`（Linux x86_64 的 AF_ALG）。失败或更小的块用 `cx_sha256_hex`。
+  - `tests/runcache.cx` 对 `out/grk-entry-build-17/candidate`（sha256 `a051997fdf52304bfffd285cca02474b1f4743012abaf26e1a7b1f2439f3f2b9`）12/0。`TIMING cold_ms=546 hit_ms=40 phases=UNMEASURED`。产品同一测试的命中是 61 ms。
+  - 只存了转发 ELF、哈希仍是软件实现的中间候选，热路径墙钟 0.196 s。合同命中从 build-15 的 506 ms 降到这只的 40 ms。
+  - cx_read 从 4 KB 起倍增扩容，读 2.7 MB 约多花 20 ms（先前估算）。先 fstat 定长可省，但新增的 fstat 要进 exec/facts/pp-autoinc-gen.tsv，留在慢车道，这轮没动。
 
 ### B4　多单元的重复工作
 

@@ -579,5 +579,28 @@ flowchart TD
 
 另外在窗口空着时量了 `tools/dev-run.cx -run`（`UNISACC_RR_TIME=1`，私有 `UNISACC_E3CACHE`）。冷跑墙钟 6.624 秒，退出 2。热跑墙钟 0.343 秒，退出 2，只有 `RR_TIME lookup_hit=2 ns=62046927`，没有 e2，stderr 仍是 `dev-run: REFUSE usage ROOT [--opt=0|--opt=2] SOURCE.cx [-- PROGRAM_ARGS] errno=0`。空的 `empty.cx` 冷跑有 e2、e1、e3，热跑 `lookup_hit=1`，这三段不再出现，prune、lower、elf 还在。
 
-`tests/cxraw.cx --check` 退出 0：625 个 `.cx`，19790 次调用，基线 19790，超过基线的是 0。基线文件没有为这一刀改写。148 格没有在这只候选上重跑。bound 没有加长。
+`tests/cxraw.cx --check` 退出 0：625 个 `.cx`，19790 次调用，基线 19790，超过基线的是 0。基线文件没有为这一刀改写。148 格没有在这只候选上重跑。bound 没有加长。单源也存转发 ELF、大文件改走 AF_ALG，记在第 163 节。
+
+## 163. 2026-10-30 单源也存转发 ELF，大文件哈希走 AF_ALG
+
+单源且 side-car 的宿主槽是 0 时，不再只存 e3。进程槽弹出之后，从 e4（有优化）或 prune（没有优化）编到结尾，产出以 ELF 魔数开头就存成 USE34。下次在读包之前命中，用这一次的参数执行，模型、e3、lower、elf 都不跑。第二遍转发不查。多源且宿主槽是 0 时仍只存 e3，在内存里接着跑。`-o` 不看这个执行标志。
+
+早退路径上新加的 `free` 改走 `src/host.cx` 里已有的 `hs_free`。`src/drive.cx`、`src/driveroute.cx`、`src/host.cx` 里被点名的 4 处 `memcpy` 写成 `{ void *cx_kept = memcpy(...); (void)cx_kept; }`。
+
+`cx/sys/sha.cx` 提供 `sy_sha256_hex`。只在 Linux x86_64 上走 AF_ALG：`socket(38, 5, 0)`，bind `"hash"` / `"sha256"`，accept，一次 write 整块，一次 read 32 字节。短写不补第二次，因为第二次会变成另一条记录。失败返回非 0，hex 置空。导出函数本体没有 `#if`，平台分支在 static 助手里。`src/runcache.cx` 对 64 KiB 及以上的文件先调它，失败或更小的块再用 `cx_sha256_hex`。这个文件的直接 libc 调用仍是 0。
+
+仓库根 `sh ./unisacc.com tools/check-cx-sys.cx`：`CHECK_CX_SYS PASS ok=90 fail=0`。新增 3 项：64 KiB 随机数据的 AF_ALG 与 `cx_sha256_hex` 一致；空输入是 `e3b0c442…`；小于 64 KiB 时选中的是软件结果（`"abc"` 的摘要是 `ba7816bf…`）。
+
+对象没有全重编。`out/grk-entry-build-17` 里新的是：
+
+| 对象 | 字节 | sha256 |
+|---|---|---|
+| drive.o | 957880 | `2da02e01363c2a677fa9565e2e924faa4f7af7b4985d114e34cf06ccb5a69be1` |
+| driveroute.o | 559424 | `b0a51a4180bd04145fdd7491c2fd6fe5be0ca0a42cd0dcc59483ca365a686388` |
+
+`host.o` 用 build-16（380112 字节，sha256 `8ec0c72db2caec864c1b491062d0b9bf5b8c06eee1a9bdeb3bf19c669b5fb7aa`）。`stages.o` 用 build-15。`tapegate.o`、`modeldecode.o`、`packmodel.o` 用 build-16（cc 的 `71c45c265c`）。其余来自 build-13。已装产品链接。`entry.elf` 1081952 字节，sha256 `722f136ebc244138fcaa3ef00e990a1bc4df354950479efb5f97cf0a95212804`。P3 是 build-14 的 `pkg.bin`，1636020 字节，接缝是 `P 3 `。候选 2717972 字节，权限 0755，sha256 `a051997fdf52304bfffd285cca02474b1f4743012abaf26e1a7b1f2439f3f2b9`。已装产品没换。链接时没有别的 `unisacc.com`。
+
+`tests/runcache.cx` 对这只候选：12 项都过，失败 0。输出行是 `TIMING cold_ms=546 hit_ms=40 phases=UNMEASURED`。跑之前去掉了 `UNISA_CONTAINER` 和 `UNISACC_CONTAINER`。dev-run 没有在这只上重测。
+
+`tests/cxraw.cx --check` 退出 0：628 个 `.cx`，19639 次调用，基线 19639，超过基线的是 0。基线文件没有改。`tests/cxtrunc.cx --check` 整次仍失败，超基线的是 csih 新文件和过期行；`src/drive.cx`、`src/driveroute.cx`、`src/host.cx`、`cx/sys/sha.cx` 不在超基线名单里。没有 `--write`。148 格没有在这只候选上重跑。bound 没有加长。
 

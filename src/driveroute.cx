@@ -368,9 +368,11 @@ int dv_run_lower(const char *route, const char *tgt, const char *src, int cx,
     e3 = 0;
     e3n = 0;
     e3hit = 0;
-    /* A hit is the e3 side-car only. The process slots stay published, and
-       the caller binds them again for e4, memory, or the forward image. */
-    if (rc_lookup_e3(&e3, &e3n) == 1) {
+    /* Single-source -run looks up the forward ELF before this call. A hit
+       never arrives here. A miss re-runs e3 so the include receipts are
+       recorded again, then the image ELF is what gets stored. Multi-source
+       with no host slot still replays the e3 side-car. */
+    if (nsrc != 1 && rc_lookup_e3(&e3, &e3n) == 1) {
         hs_free(in);
         pr = 0;
         e3hit = 1;
@@ -397,13 +399,27 @@ int dv_run_lower(const char *route, const char *tgt, const char *src, int cx,
         dv_setwhy(why, cap, "out of memory");
         return 1;
     }
-    if (tl) memcpy(tape, e3 + at, (size_t)tl);
+    if (tl) { void *cx_kept = memcpy(tape, e3 + at, (size_t)tl); (void)cx_kept; }
     tape[tl] = 0;
     at = at + tl;
     cont = level ? "e4" : "prune";
     if (cnt == 0) {
-        /* The memory path replays this side-car. A forward image is stored
-           later, after these slots are gone, so it is not saved here. */
+        /* No host slot. One source finishes as an image ELF: the process
+           slots stay out of that image, and the caller execs it. The same
+           ELF is what a later run hits. More than one source still lowers
+           on the run route and binds the slots again in memory. */
+        if (nsrc == 1) {
+            hs_free(e3);
+            if (dv_image_route(route, img, 96)) {
+                hs_free(tape);
+                dv_setwhy(why, cap, "image route");
+                return 1;
+            }
+            if (st_extra_pop() == 0) (void)st_extra_pop();
+            pr = st_span(img, tgt, src, cx, 0, cont, 0, tape, (long)tl, out, outn, why, cap);
+            if (!pr && execf) *execf = 1;
+            return pr;
+        }
         if (!e3hit) (void)rc_store_e3(e3, e3n);
         free(e3);
         return st_span(route, tgt, src, cx, 0, cont, 0, tape, (long)tl, out, outn, why, cap);

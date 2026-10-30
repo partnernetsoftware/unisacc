@@ -1,6 +1,7 @@
 #pragma unisa module runcache
 #pragma unisa use sys.fs
 #pragma unisa use sys.env
+#pragma unisa use sys.sha
 /* Cross-process reuse of a -run frontend tape (USE33) and of the forward ELF
    (USE34, file <key>.host). The key binds the candidate file (entry plus the
    attached P3), the route, and the sources. Arguments after "--" are not part
@@ -12,7 +13,10 @@
    pointers again. Neither cache entry is the tape dv_run_lower returns while
    those resources are still published.
    Direct libc stays out of this file: cx_read, cx_write, cx_sha256_hex, tx_*,
-   sy_stat / sy_lstat (follow vs not), sy_env, sy_uid, sy_cwd. */
+   sy_stat / sy_lstat (follow vs not), sy_env, sy_uid, sy_cwd.
+   A file of 64 KiB or more is hashed with sy_sha256_hex (kernel AF_ALG).
+   A non-zero return falls back to cx_sha256_hex. Smaller blocks stay on
+   cx_sha256_hex. */
 static int rc_on;
 static int rc_armed;
 static int rc_broken;
@@ -211,6 +215,7 @@ static int rc_app(unsigned char **b, long *n, long *cap, const void *p, long k) 
 
 static int rc_hex_file(const char *path, char hex[65]) {
     int sy_stat(const char *, sy_stat_t *);
+    int sy_sha256_hex(const void *, long, char *);
     sy_stat_t st;
     char *b;
     size_t n;
@@ -220,6 +225,10 @@ static int rc_hex_file(const char *path, char hex[65]) {
     if (!b || (long)n != st.size) {
         rc_release(b);
         return 1;
+    }
+    if ((long)n >= 65536 && sy_sha256_hex(b, (long)n, hex) == 0) {
+        rc_release(b);
+        return 0;
     }
     cx_sha256_hex(b, n, hex);
     rc_release(b);

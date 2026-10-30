@@ -459,7 +459,7 @@ static int dv_units(const char *tgt, int nsrc, unsigned char **out, long *outn, 
                 k = k + 1;
             }
         }
-        if (curn) memcpy(frame + fn, cur, (size_t)curn);
+        if (curn) { void *cx_kept = memcpy(frame + fn, cur, (size_t)curn); (void)cx_kept; }
         fn = fn + curn;
         free(cur);
         j = j + 1;
@@ -1664,6 +1664,36 @@ int dv_main(int argc, char **argv) {
             gotn = textn;
             as_tape = 1;
         }
+        if (hs_container(cont, 512, argv[0], preason, 128)) {
+            free(gotb);
+            fprintf(stderr, "unisacc: model driver: package %s\n", preason[0] ? preason : "cannot open");
+            return 1;
+        }
+        /* Before the package is read. A single-source hit is the forward
+           ELF from the image route; exec it and skip the models. Pass 2
+           does not look. A miss arms the include receipts for the store. */
+        if (mode2 == 3 && nsrc >= 1 && !dv_fwd_pass) {
+            int ready;
+            unsigned char *cached;
+            long cachedn;
+            int code;
+            cached = 0;
+            cachedn = 0;
+            if (dv_bind_args(argc, argv, argstart, src)) {
+                hs_free(gotb);
+                fputs("unisacc: model driver: argv\n", stderr);
+                return 1;
+            }
+            ready = rc_open(cont, argc, argv, dv_srcv, nsrc, tgt, opts.level, opts.warnings,
+                            (as_tape || cxp_tape_path(src)) ? 1 : 0, opts.deponly);
+            if (ready && rc_lookup_elf(&cached, &cachedn) == 1) {
+                code = hs_forward_exec(cached, cachedn, dv_runargs);
+                hs_free(cached);
+                hs_free(gotb);
+                return code;
+            }
+            if (ready) (void)rc_arm();
+        }
         if (ex_touch()) {
             free(gotb);
             fputs("unisacc: model driver: alu\n", stderr);
@@ -1677,11 +1707,6 @@ int dv_main(int argc, char **argv) {
         if (st_touch()) {
             free(gotb);
             fputs("unisacc: model driver: stages\n", stderr);
-            return 1;
-        }
-        if (hs_container(cont, 512, argv[0], preason, 128)) {
-            free(gotb);
-            fprintf(stderr, "unisacc: model driver: package %s\n", preason[0] ? preason : "cannot open");
             return 1;
         }
         if (hs_read(cont, &pkg, &pkgn, preason, 128)) {
@@ -1766,34 +1791,15 @@ int dv_main(int argc, char **argv) {
             return 1;
         }
 dv_replay:
+        /* Args were bound before the package was opened, on pass 1.
+           The slots are published again here so e3 still sees them.
+           The image ELF is built only after they are popped. */
         if (mode2 == 3 && nsrc >= 1) {
-            if (dv_bind_args(argc, argv, argstart, src) ||
-                st_extra_put("\0process/argc", 13, dv_argc_b, 8) ||
+            if (st_extra_put("\0process/argc", 13, dv_argc_b, 8) ||
                 st_extra_put("\0process/argv", 13, dv_argv_b, 8)) {
                 free(gotb);
                 fputs("unisacc: model driver: argv\n", stderr);
                 return 1;
-            }
-            /* Pass 1 only. A hit execs the forward image and skips units.
-               The saved key keeps this source list; pass 2 does not look up. */
-            if (!dv_fwd_pass) {
-                int ready;
-                unsigned char *cached;
-                long cachedn;
-                int code;
-                cached = 0;
-                cachedn = 0;
-                ready = rc_open(cont, argc, argv, dv_srcv, nsrc, tgt, opts.level, opts.warnings,
-                                (as_tape || cxp_tape_path(src)) ? 1 : 0, opts.deponly);
-                if (ready && rc_lookup_elf(&cached, &cachedn) == 1) {
-                    code = hs_forward_exec(cached, cachedn, dv_runargs);
-                    pm_close();
-                    hs_free(cached);
-                    hs_free(pkg);
-                    hs_free(gotb);
-                    return code;
-                }
-                if (ready) (void)rc_arm();
             }
         }
         /* Single-source restart compiles every unit with ccw already published.

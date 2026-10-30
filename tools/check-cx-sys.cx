@@ -1,4 +1,4 @@
-/* Checks cx/sys (env, fs, proc, time, net, posix): sh ./unisacc.com tools/check-cx-sys.cx
+/* Checks cx/sys (env, fs, proc, time, net, posix, sha): sh ./unisacc.com tools/check-cx-sys.cx
    (from the repo root: the posix cases re-run this file as a child, "-- child MODE ...", for what
    must happen in another process: setsid, and a record lock held by someone else).
    Each case runs for real in a scratch directory under $TMPDIR or /tmp.
@@ -10,6 +10,7 @@
 #pragma unisa use sys.time
 #pragma unisa use sys.net
 #pragma unisa use sys.posix
+#pragma unisa use sys.sha
 #pragma unisa use text.text
 static int n_ok, n_bad;
 static void ok(int c, const char *name) { printf("  %s  %s\n", c ? "ok  " : "FAIL", name); if (c) n_ok++; else n_bad++; }
@@ -311,6 +312,37 @@ int main(int argc, char **argv) {
             ok(sy_unlinkat(dfd, "sub", 0) == -EISDIR || sy_unlinkat(dfd, "sub", 0) == -EPERM, "unlinkat of a directory without the dir flag is refused");
             ok(sy_unlinkat(dfd, "sub", 1) == 0, "unlinkat with the dir flag removes an empty directory");
             ok(sy_unlinkat(dfd, "missing", 0) == -ENOENT, "unlinkat of a missing name is -ENOENT");
+        }
+    }
+
+    /* sha. 64 KiB and above is the kernel hash. A shorter block keeps
+       cx_sha256_hex, the same cut as rr_hash_file and rc_hex_file. */
+    {
+        static unsigned char big[65536];
+        char af[65], soft[65];
+        const char *empty = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        const char *abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        unsigned long x = 0xC0FFEEU;
+        int i, af_rc;
+        for (i = 0; i < 65536; i++) {
+            x = x * 1664525u + 1013904223u;
+            big[i] = (unsigned char)(x >> 24);
+        }
+        af_rc = sy_sha256_hex(big, 65536, af);
+        cx_sha256_hex(big, 65536, soft);
+        ok(af_rc == 0 && af[64] == 0 && tx_eq(af, soft, 65), "sha: 64KiB random, AF_ALG matches cx_sha256_hex");
+        af_rc = sy_sha256_hex("", 0, af);
+        cx_sha256_hex("", 0, soft);
+        ok(af_rc == 0 && tx_eq(af, soft, 65) && tx_eq(af, empty, 65), "sha: empty input matches cx_sha256_hex");
+        {
+            const char *msg = "abc";
+            const char *picked;
+            long n = 3;
+            af_rc = sy_sha256_hex(msg, n, af);
+            cx_sha256_hex(msg, 3, soft);
+            picked = (n < 65536 || af_rc != 0) ? soft : af;
+            ok(n < 65536 && picked == soft && tx_eq(picked, abc, 65) && (af_rc != 0 || tx_eq(af, abc, 65)),
+               "sha: under 64KiB the digest is the software fallback");
         }
     }
 
