@@ -1,0 +1,157 @@
+#pragma unisa use csih_message_io
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use text.text
+/*
+ * csih_message_io_cli.cx — the self-test of the private mailbox consumer
+ * (csih_message_take / csih_message_finish / csih_message_preview).
+ *   cd apps/csih && sh ../../unisacc.com csih_message_io_cli.cx -- selftest
+ * Each case builds a fresh mailbox under out/msgio-test/ (dir 0700, inbox
+ * 0700 with ready/started/done 0700 and mailbox.lock 0600, messages 0600),
+ * calls the library and prints one line: the case, rc, why, and what moved.
+ * The lines are the contract; the last line is "selftest ok" or a FAIL count.
+ * No #include, no direct libc call.
+ */
+
+#define ROOT "../../out/msgio-test"
+#define SESSION "s1"
+
+static int bad;
+static char base[512];
+
+static void expect(int c, const char *what) { if (!c) { printf("FAIL  %s\n", what); bad++; } }
+
+static int mk(const char *path, int mode) { int r = sy_mkdir(path, mode); return r == 0 || r == -EEXIST ? sy_chmod(path, mode) : r; }
+
+static void put(const char *rel, const char *text, int mode) {
+    char p[700];
+    if (cx_fmt(p, sizeof p, "%s/%s", base, rel)) return;
+    cx_write(p, text, (size_t)tx_len(text, 1 << 20));
+    sy_chmod(p, mode);
+}
+
+static int there(const char *rel) {
+    char p[700];
+    return !cx_fmt(p, sizeof p, "%s/%s", base, rel) && sy_exists(p) == 1;
+}
+
+/* a fresh mailbox named NAME */
+static void fresh(const char *name) {
+    char p[700];
+    static const char *const sub[] = { "inbox", "inbox/ready", "inbox/started", "inbox/done" };
+    int i;
+    cx_fmt(base, sizeof base, "%s/%s", ROOT, name);
+    if (sy_exists(base) == 1) cx_rmtree(base);
+    mk(base, 0700);
+    for (i = 0; i < 4; i++) { cx_fmt(p, sizeof p, "%s/%s", base, sub[i]); mk(p, 0700); }
+    put("inbox/mailbox.lock", "", 0600);
+}
+
+static void msg(const char *state, const char *id, const char *kind, const char *session, const char *body) {
+    char rel[128], text[1024];
+    cx_fmt(rel, sizeof rel, "inbox/%s/%s.json", state, id);
+    cx_fmt(text, sizeof text, "{\"version\":1,\"id\":\"%s\",\"kind\":\"%s\",\"session\":\"%s\",\"body\":\"%s\"}", id, kind, session, body);
+    put(rel, text, 0600);
+}
+
+static char abs_base[1024];
+static const char *dir(void) {
+    /* the library wants an absolute session directory */
+    char cwd[512];
+    if (sy_cwd(cwd, (int)sizeof cwd) != 0) return base;
+    cx_fmt(abs_base, sizeof abs_base, "%s/%s", cwd, base);
+    return abs_base;
+}
+
+#define A "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+#define B "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+#define C "cccccccccccccccccccccccccccccccc"
+
+static int take(const char *name, int tasks, csih_message *m, char *why) {
+    int rc = csih_message_take(dir(), SESSION, tasks, m, why, 256);
+    printf("%s take(tasks=%d) rc=%d why=%s id=%s kind=%d body=%s\n", name, tasks, rc, why, rc > 0 ? m->id : "-", rc > 0 ? m->kind : 0, rc > 0 ? m->body : "-");
+    return rc;
+}
+
+int main(int argc, char **argv) {
+    static csih_message m;
+    static csih_message_preview_entry pv[4];
+    char why[256];
+    int rc, total, i;
+    if (argc != 2 || !tx_eq(argv[1], "selftest", 16)) { printf("usage: csih_message_io_cli selftest\n"); return 64; }
+    sy_mkdir("../../out", 0755);
+    mk(ROOT, 0755);
+
+    fresh("empty");
+    rc = take("empty", 1, &m, why);
+    expect(rc == 0, "empty mailbox: rc 0");
+
+    fresh("flow");
+    msg("ready", B, "notice", SESSION, "note one");
+    msg("ready", A, "task", SESSION, "do a thing");
+    rc = take("flow", 0, &m, why);
+    expect(rc == 2 && tx_eq(m.id, B, 64), "tasks=0 takes the notice only");
+    expect(there("inbox/started/" B ".json") && !there("inbox/ready/" B ".json"), "notice moved ready -> started");
+    rc = take("flow", 1, &m, why);
+    expect(rc == 1 && tx_eq(m.id, A, 64), "tasks=1 takes the task");
+    rc = take("flow", 1, &m, why);
+    expect(rc == 0, "nothing left in ready");
+    rc = csih_message_finish(dir(), SESSION, B, why, sizeof why);
+    printf("flow finish(B) rc=%d why=%s\n", rc, why);
+    expect(rc == 0 && there("inbox/done/" B ".json"), "finish moves started -> done");
+    rc = csih_message_finish(dir(), SESSION, B, why, sizeof why);
+    printf("flow finish(B again) rc=%d why=%s\n", rc, why);
+    expect(rc < 0, "finishing twice is refused");
+    rc = csih_message_finish(dir(), SESSION, "not-an-id", why, sizeof why);
+    printf("flow finish(bad id) rc=%d why=%s\n", rc, why);
+    expect(rc == -1, "a malformed id is refused");
+
+    fresh("preview");
+    msg("done", C, "notice", SESSION, "third");
+    msg("done", A, "notice", SESSION, "first, older");
+    msg("done", B, "task", SESSION, "a task is not previewed");
+    { char p[700]; cx_fmt(p, sizeof p, "%s/inbox/done/%s.json", base, A); sy_set_mtime(p, 1000000000L);
+      cx_fmt(p, sizeof p, "%s/inbox/done/%s.json", base, C); sy_set_mtime(p, 1100000000L); }
+    rc = csih_message_preview(dir(), SESSION, pv, 4, &total, why, sizeof why);
+    printf("preview rc=%d total=%d why=%s", rc, total, why);
+    for (i = 0; i < rc && i < 4; i++) printf(" [%s %ld %s %lu %d]", pv[i].id, pv[i].mtime, pv[i].preview, (unsigned long)pv[i].body_bytes, pv[i].truncated);
+    printf("\n");
+    expect(rc == 2 && total == 2 && tx_eq(pv[0].id, C, 64), "preview: notices only, newest first");
+
+    fresh("unknown");
+    put("inbox/stray.txt", "x", 0600);
+    msg("ready", A, "task", SESSION, "x");
+    rc = take("unknown", 1, &m, why);
+    expect(rc == -1, "an unknown inbox entry is refused");
+
+    fresh("perm");
+    { char p[700]; cx_fmt(p, sizeof p, "%s/inbox", base); sy_chmod(p, 0755); }
+    rc = take("perm", 1, &m, why);
+    expect(rc == -1, "a 0755 inbox is refused");
+
+    fresh("dup");
+    msg("ready", A, "task", SESSION, "x");
+    msg("done", A, "task", SESSION, "x");
+    rc = take("dup", 1, &m, why);
+    expect(rc == -1, "the same id in two states is refused");
+
+    fresh("mismatch");
+    put("inbox/ready/" A ".json", "{\"version\":1,\"id\":\"" B "\",\"kind\":\"task\",\"session\":\"s1\",\"body\":\"x\"}", 0600);
+    rc = take("mismatch", 1, &m, why);
+    expect(rc == -1, "an id that is not the file name is refused");
+
+    fresh("session");
+    msg("ready", A, "task", "other", "x");
+    rc = take("session", 1, &m, why);
+    expect(rc == -1, "a message for another session is refused");
+
+    fresh("mode");
+    msg("ready", A, "task", SESSION, "x");
+    { char p[700]; cx_fmt(p, sizeof p, "%s/inbox/ready/%s.json", base, A); sy_chmod(p, 0644); }
+    rc = take("mode", 1, &m, why);
+    expect(rc == -1, "a 0644 message is refused");
+
+    printf(bad ? "selftest FAILED %d\n" : "selftest ok\n", bad);
+    return bad ? 1 : 0;
+}
