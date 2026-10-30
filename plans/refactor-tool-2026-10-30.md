@@ -99,3 +99,20 @@ sh ./unisacc.com tools/refactor.cx -- apply CANDIDATES.tsv JOBS VERIFY...
 - 增加 `restore` 子命令：按 backup 目录把被中途杀掉的运行恢复回去。
 - 自动分批：plan 子命令按登记的 budget 把文件分组，保证每组在 55 秒内跑完，再一组一组调用 apply，每组完成后核对结果。
 - 规则：再加 `strcmp(a, b) == 0` 和 `strlen(x)` 改成 `tx_len(x, CAP)`。后者只在结果用于比较或赋值给 long 时才算 safe。
+
+## 第 3 轮结果（2026-10-30）
+
+- **事故与修复：** 第一次扫描的 apply 在 58 秒时被外层 timeout 杀在半途，6 个文件改了一半，已从 backup 还原。之后 apply 加了内部 48 秒截止：到点不再开始新文件，剩下的报 `DEFER`；另加 `--range A N`，每次只处理候选里的第 A 到 A+N-1 个文件（7bc93735d9）。`restore` 子命令没做，backup 目录加手工还原已经够用。
+- **扫描方式：** 在 `out/` 下写了一个薄驱动循环，每轮都是有界调用，最多 30 轮：
+  1. 对还含 `!strcmp(` 的干净目标重新 `find --auto`；
+  2. 对前 12 个文件跑 `apply 4 --range 0 12`；
+  3. 检查命令是 `-c -b lnx/x86_64 {file} -o /dev/null`。
+  目标是 223 个 tests/tools 文件，开工时已经 dirty 的文件排除在外。
+- **结果：** 138 个文件改动，0 个 REVERT。分两批按路径提交：tests 79 个（d51282b23c），tools 59 个（c2b3d5bf26）。
+  - 差异审查：每个改动行都只涉及 `strcmp` / `tx_eq(` / `#pragma unisa use text.text`，共 +688/−550，多出的 138 行正好是每个文件新增的一行 use。
+  - 棘轮检查：cxraw ok。cxapis、cxtrunc、cxinclude 的超额全部在 apps/csih，与这 138 个文件没有交集。
+- **SKIP（改之前编译就失败）：** tests/nets.cx、tools/cx0.cx、cx0-bundle.cx、cx-driver.cx、cx-pipeline.cx、check-cx-entry.cx、hostseed-step.cx、hostseed-step-nativefirst.cx。这些文件没有改动，需要单独排查编译失败的原因。
+- **瓶颈：** 一轮 12 个文件，平均只完成 4～7 个；有 4 轮是 ok=0、defer=12，白跑。原因是每个文件要编译 3 次（两次基线、一次改后），单次 5～10 秒，而且在 4 个并发下会互相拖慢。30 轮共 138 个文件，墙钟约 15 分钟。
+- **第 4 轮改进候选：**
+  - 基线结果按（检查命令、文件 sha、编译器身份）缓存，只缓存改前基线，改后验证每次实跑；第二次基线也可以跳过。这算"有测量依据的热点缓存"，预计每个文件少 2 次编译。
+  - grk 在 L0 新增 `tx_eqz` 并提交后，用一条规则 `tx_eq($1, $2, 1L << 20)` → `tx_eqz($1, $2)` 把这次扫描的结果折叠掉。这条规则本身也是对工具的二次实践。
