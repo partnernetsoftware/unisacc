@@ -20,7 +20,7 @@ static void injected_free(void *p) {
 #define UNISA_PACKAGE_FREE injected_free
 #define UNISA_RUNTIME_PANIC(message) longjmp(trap,1)
 #define UNISA_RUNTIME_LIBRARY
-#include "../../exec/c/run.c"
+#include "../../archive/reference-c/exec/c/run.c"   /* reference C; its headers stay in exec/c (-I) */
 int main(void) {
     unsigned char data[]={'U','N','I','N','E','T','B','1','N',2,2,0,2,0,0,'S',0,'Q',0,'H',0,0,128,4,0,0,0};
     const char keyed[]="N 1 1 0 1 0 0\nS 41\nQ 1 1 7\nH 3 -1 0 1 0 0 0 1 0 0 0 0\n";

@@ -1,6 +1,6 @@
 /* Observable shape of the existing runtime decoder; host reference only. */
 #define UNISA_RUNTIME_LIBRARY
-#include "../../exec/c/run.c"
+#include "../../archive/reference-c/exec/c/run.c"   /* reference C; its headers stay in exec/c (-I) */
 int main(int argc,char **argv) {
     if(argc!=2)return 2;
     int n;unsigned char *data=readfile(argv[1],&n,0);loadbytes(data,n);free(data);
