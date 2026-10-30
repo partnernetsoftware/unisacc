@@ -15,6 +15,7 @@ long zs_len(const char *s);
 int zs_eq(const char *a, const char *b);
 int zs_starts(const char *s, const char *p);
 int zs_cmp(const char *a, const char *b);
+int zs_ncmp(const char *a, const char *b, long n);
 char *zs_find(const char *s, const char *w);
 char *zs_chr(const char *s, int c);
 char *zs_rchr(const char *s, int c);
