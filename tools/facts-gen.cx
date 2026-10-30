@@ -1,13 +1,14 @@
-/* tools/facts-gen.cx -- native producers for exec/facts tables, moved out of exec/facts/export.py one
- * table at a time (zero-Python plan, plans/cx-layers.md).  A ported table names this tool as its writer
- * and lists it among its inputs in place of export.py; export.py no longer writes it.
+/* tools/facts-gen.cx -- the writer of every exec/facts table that is generated (30 tables; the Python
+ * exec/facts/export.py they came from is archived in archive/reference-py since 2026-10-30).  A table
+ * names this tool as its writer and lists its inputs, this file included, with sha256 prefixes.
  *
- *   sh ./unisacc.com tools/facts-gen.cx -- --check ROOT [TABLE...]
+ *   sh ./unisacc.com tools/facts-gen.cx -- --check ROOT [TABLE...]   (all tables: plus the bank-owner check)
  *   sh ./unisacc.com tools/facts-gen.cx -- --write ROOT [TABLE...]
- *   sh ./unisacc.com tools/facts-gen.cx -- --compare-body ROOT TABLE   (transition: body equal to the
- *       committed table written by export.py; header lines are not compared)
+ *   sh ./unisacc.com tools/facts-gen.cx -- --compare-body ROOT TABLE   (body equal to the committed
+ *       table; header lines are not compared)
  *
- * Tables: opt-gen (E4 START data and peep indices).
+ * Literals the old producers held in code live in fact files (enc-literals, gen2-constants, gen2-literals,
+ * image-*, tape-shape, pp-escapes, exec/nativeabi/trie-order).
  * Exit 0 all equal / written, 1 a table differs (named), 2 usage or I/O.
  */
 #pragma unisa use text.text
@@ -4126,6 +4127,85 @@ static int fg_one(const Table *t, int mode) {   /* mode 0 check, 1 write, 2 comp
     }
 }
 
+/* Bank ownership (was exec/facts/export.py _bank_owners, before that runtime asserts in layoutfacts.py and
+   libraryexports.py): an owner's bank list must not be reused by any other stage's constant table, i.e.
+   the exec/facts/*.tsv whose second line starts "# source: literal constants formerly in" (name/value
+   rows; a value is an integer when it is a plain JSON integer).  Run by --check over all tables. */
+static const char *bo_paths[1024];
+static int bo_n;
+static int bo_take(const char *path, void *ctx) {
+    long n = tx_len(path, 4400), d = tx_len((const char *)ctx, 4400);
+    (void)ctx;
+    if (n > d + 5 && tx_chr(path + d + 1, n - d - 1, '/') < 0 && tx_eq(path + n - 4, ".tsv", 8)) {
+        if (bo_n == 1024) fg_die("too many fact tables", 0);
+        bo_paths[bo_n++] = ar_dup(fg_ar, path, n);
+    }
+    return 0;
+}
+static int bo_isint(const char *s) { int i = s[0] == '-'; if (!s[i]) return 0; for (; s[i]; i++) if (s[i] < '0' || s[i] > '9') return 0; return 1; }
+typedef struct { char *stem; int n; char *k[512]; char *v[512]; } BoTable;
+static int fg_bank_owners(void) {
+    static const char *owners[2][2] = {{"layoutfacts", "RESERVED_BANKS"}, {"libraryexports", "RANK_BANKS"}};
+    static BoTable T[64];
+    char dir[4400];
+    int nt = 0, i, j, w, bad = 0;
+    cx_fmt(dir, sizeof dir, "%s/exec/facts", fg_root);
+    bo_n = 0;
+    if (cx_walk(dir, bo_take, dir)) fg_die("cannot walk", dir);
+    for (i = 1; i < bo_n; i++) { const char *x = bo_paths[i]; for (j = i - 1; j >= 0 && byte_less(x, bo_paths[j]); j--) bo_paths[j + 1] = bo_paths[j]; bo_paths[j + 1] = x; }
+    for (i = 0; i < bo_n; i++) {
+        size_t sz;
+        char *b = cx_read(bo_paths[i], &sz), *p, *e;
+        long n, l1, d = tx_len(dir, 4400);
+        int line = 0;
+        BoTable *t;
+        if (!b) fg_die("cannot read", bo_paths[i]);
+        n = (long)sz;
+        l1 = tx_chr(b, n, '\n');
+        if (l1 < 0 || !tx_prefix(b + l1 + 1, n - l1 - 1, "# source: literal constants formerly in", 39)) continue;
+        if (nt == 64) fg_die("too many constant tables", 0);
+        t = &T[nt++];
+        t->stem = ar_dup(fg_ar, bo_paths[i] + d + 1, tx_len(bo_paths[i] + d + 1, 4400) - 4);
+        t->n = 0;
+        for (p = b; p <= b + n; p = e + 1) {
+            char *c[4];
+            long off = tx_chr(p, (long)(b + n - p), '\n');
+            e = off < 0 ? b + n : p + off;
+            *e = 0;
+            if (line++ < 2 || p[0] == '#') continue;
+            if (fg_split(p, c, 4) != 2) continue;
+            if (t->n == 512) fg_die("constant table too long", t->stem);
+            t->k[t->n] = c[0]; t->v[t->n] = c[1]; t->n++;
+        }
+    }
+    for (w = 0; w < 2; w++) {
+        BoTable *ow = 0;
+        Jv *owned = 0;
+        for (i = 0; i < nt; i++) if (tx_eq(T[i].stem, owners[w][0], 256)) ow = &T[i];
+        if (ow) for (j = 0; j < ow->n; j++) if (tx_eq(ow->k[j], owners[w][1], 256)) owned = jv_must_parse(ow->v[j]);
+        if (!owned || owned->t != JV_LIST) fg_die("bank owner list absent", owners[w][1]);
+        for (i = 0; i < nt; i++) {
+            char *hit[512];
+            int nh = 0, a, q;
+            if (tx_eq(T[i].stem, owners[w][0], 256)) continue;
+            for (j = 0; j < T[i].n; j++) {
+                long long x;
+                if (!bo_isint(T[i].v[j])) continue;
+                x = strtoll(T[i].v[j], 0, 10);
+                for (a = 0; a < owned->n; a++) if (owned->v[a]->t == JV_INT && owned->v[a]->i == x) { hit[nh++] = T[i].k[j]; break; }
+            }
+            if (!nh) continue;
+            for (a = 1; a < nh; a++) { char *x = hit[a]; for (q = a - 1; q >= 0 && byte_less(x, hit[q]); q--) hit[q + 1] = hit[q]; hit[q + 1] = x; }
+            bad++;
+            printf("bank owned by %s.%s reused in %s: ", owners[w][0], owners[w][1], T[i].stem);
+            for (a = 0; a < nh; a++) printf("%s%s", a ? ", " : "", hit[a]);
+            printf("\n");
+        }
+    }
+    printf("%s\tbank-owners\t%d constant tables\n", bad ? "DIFF" : "SAME", nt);
+    return bad;
+}
+
 int main(int argc, char **argv) {
     int mode, i, k, bad = 0;
     fg_ar = ar_new(1L << 32);
@@ -4141,5 +4221,6 @@ int main(int argc, char **argv) {
         for (k = 3; k < argc; k++) if (tx_eq(argv[k], fg_tables[i].stem, 256)) pick = 1;
         if (pick) bad |= fg_one(&fg_tables[i], mode);
     }
+    if (mode == 0 && argc == 3 && fg_bank_owners()) bad = 1;
     return bad;
 }

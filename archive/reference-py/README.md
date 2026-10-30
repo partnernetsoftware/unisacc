@@ -8,7 +8,7 @@
 
 ## 仍留在活路径的 Python（剩余债，须先有原生替代才能归档）
 
-1. 事实表生成器 `exec/facts/export.py` 及其实测导入闭包：`exec/assemble.py`、`exec/finite_rules.py`、`exec/facts/load.py`、`exec/build/parsebase.py`、`exec/build/parse2base.py`、`exec/build/graph.py`、`exec/build/procs.py` 与 `unisa/` 的一部分。30 张 `exec/facts/*.tsv` 只能经它修改。
+1. ~~事实表生成器 `exec/facts/export.py`~~：2026-10-30 已归档到 `archive/reference-py/exec/facts/export.py`。30 张 `exec/facts/*.tsv` 全部改由 `tools/facts-gen.cx` 写出并 `--check`；原 `--check` 里的 bank 归属检查（`_bank_owners`）一并移入 `facts-gen --check`。原生产者里的 Python 字面量已改记为事实文件，包括 `exec/facts/enc-literals.tsv`、`gen2-constants.tsv`、`gen2-literals.tsv`、`image-*.tsv`、`tape-shape.tsv`、`pp-escapes.tsv` 和 `exec/nativeabi/trie-order.tsv`。它原来的导入闭包仍留在活路径：`exec/assemble.py`、`exec/finite_rules.py`、`exec/facts/load.py`、`exec/build/parsebase.py`、`exec/build/parse2base.py`、`exec/build/graph.py`、`exec/build/procs.py`。这些文件已没有 `.cx`/`.sh`/Makefile 入口调用，但还没核实是否完全不可达，所以暂不归档。
 2. 18 网内核生成器 `python3 -m unisa emit-kernel`（`kernel/` 的生成者）及其实测闭包；`unisa/ckernel.py`、`unisa/gold.py`、`unisa/libneed.py` 还被 `tools/table-kernel-export.cx`、`tools/net-material.cx`、`tools/pp-gold-material.cx`、`tools/carried-header-export.cx` 以及 `tests/pp-constructed.cx`、`tests/pp-gold-controls.cx` 当作数据或身份输入读取。
 3. `release/` 发布工具链（未在本次范围）；`apps/`、`m4/`、`research/` 各属其域，未动。
 4. `exec/c/buildcompiler.sh` 仍是 Makefile 的构造入口，留在原处；其中 `python3 -m unisa ape` 回退分支已不可用。
