@@ -1,6 +1,6 @@
 # 候选换成产品：慢车道步骤（未执行，以新 CX 入口为准）
 
-2026-10-30 修订。上一版 `f091575044` 把 `tools/product-build.cx` 当成现成的两代工具。那一步跑不通：它编的是已经归档的旧 C，编出来也不是新入口。这份改成以新入口为准。仍然只写清单，没有跑 `source-job-wave`、`pc-wave`、`kernel-build`、`product-build`、`selfhost`、`entry-build` 的新目标，没有 wrap，没有安装，没有换标，没有改已装 `unisacc.com`。
+2026-10-30 修订。上一版 `f091575044` 把 `tools/product-build.cx` 当成现成的两代工具。那一步跑不通：它编的是已经归档的旧 C，编出来也不是新入口。这份改成以新入口为准。慢车道本身还没跑：没有 `source-job-wave`、`pc-wave`、`kernel-build`、`product-build`、`selfhost`，没有 wrap，没有安装，没有换标，没有改已装 `unisacc.com`。四目标只编了对象，见 [entry-target-probe-2026-10-30.md](entry-target-probe-2026-10-30.md)。
 
 ## 现在是什么
 
@@ -35,7 +35,7 @@ GEN 的工具换成下面的新入口构造。现在的 `product-build.cx` 不�
 2. `lnx/x86_64` 的链接结果叫 `entry.elf`。现在这只是 ELF（开头 `\x7fELF`）。另外四个目标各留自己的映像，文件名沿用 `slice-win-x86_64`、`slice-lnx-arm64`、`slice-osx-x86_64`、`slice-osx-arm64`，加上 `slice-lnx-x86_64`（就是这份 `entry.elf`）。
 3. 五片都是链接结果，不接 P3。P3 只在 wrap 时附一次。`entry-build` 现在的 `eb_splice` 是 ELF 候选的做法，不用它来生成 `unisacc-next.com`。
 4. wrap 仍用 `seed/ape.c`。参数顺序是 `OUT WIN_X86_64 LNX_X86_64 LNX_ARM64 OSX_X86_64 OSX_ARM64`，加上 `--payload` 第 1 步的新包、`--product Unisacc` 和 `src/version.h` 里的版本。产物叫 `unisacc-next.com`。开头应是 `MZqFpD`。win 片必须是 PE，头在 64..1024，`seed/ape.c` 才能把它挪到偏移 0 并写入壳脚本。
-5. 现在还编不了五片。`entry-build` 的编译和链接把 `-b` 写死成 `lnx/x86_64`。整表一次超过 60 秒。60 秒例外名单现在是 `source-job-wave`、`pc-wave`、`kernel-build`、`product-build`、`selfhost`（`AGENTS.md`）。把这条新链写进例外名单等于改规则，待主人裁定，cc 去报。裁定之前每批仍不超过 55 秒，不把五个目标一次进程跑完。
+5. `--target` 已在 `76085cb99d`。省略时仍是 `lnx/x86_64`。改完后不带 `--target` 重编的 path.o、tapegate.o 与改前逐字节相同。四个新目标只编了对象，每批不超过 55 秒，没有链接，没有 wrap。lnx/arm64 的 33 个对象都出了 ELF；osx/x86_64、osx/arm64、win/x86_64 各 33 个在出对象前被已装产品拒绝，第一条诊断相同。这不是通过。60 秒例外名单现在是 `source-job-wave`、`pc-wave`、`kernel-build`、`product-build`、`selfhost`（`AGENTS.md`）。把这条新链写进例外名单等于改规则，待主人裁定，cc 去报。裁定之前每批仍不超过 55 秒，不把五个目标一次进程跑完。
 6. 对拍里用户程序的两个 Windows `-o` 两边都退出 1（[cx-modules.md](cx-modules.md) 第 161 节）。那是用户程序，不是编译器自己的 win 片。不能当成新入口已经能交出 `seed/ape.c` 要的 PE。win 片没实测通过之前，wrap 不能开始。
 
 ### 3. 两代判词
@@ -78,21 +78,24 @@ GEN 的工具换成下面的新入口构造。现在的 `product-build.cx` 不�
 | `tools/cx-driver-build.cx` | 退场 | 源列表含 `exec/c/asmcompiler.c` |
 | `tools/check-cx-driver-target-unit.cx` | 退场 | 用已装产品编 `asmcompiler.c` 做驱动单元检查 |
 | `tools/selfhost-mixed.cx` | 退场 | 两代比的是旧核对象、五片和 kind 4 的 `unisacc-next.com`。判词已改成 `entry.elf` |
-| `tools/entry-build.cx` | 改写 | `-b` 写死 `lnx/x86_64`。要按五个目标各编一次。第二代 APE 要经 `sh` 当构造器。产品不走现在的 `eb_splice` |
+| `tools/entry-build.cx` | 改写中 | `--target` 已加，省略仍是 `lnx/x86_64`，path.o 和 tapegate.o 与改前逐字节相同。lnx/arm64 能出对象。osx 两个目标和 win/x86_64 的 `-c -b` 被已装产品拒绝。链接、wrap、第二代用 `sh` 拉起 APE 都还没做。产品不走现在的 `eb_splice` |
 | `tools/candidate-install.cx` | 改写 | 见第 4 节。替换仓库根那一步留下 |
 | `tools/cxlib/rebuildcontext.cx` | 改写 | 五片和 `.native-build.tsv` 按旧片核对。`rb_package_refresh` 还摘要 `arm64.kernel`、`x86_64.kernel`。包尾仍要和 `compiler.pkg` 逐字节相同 |
 | `tools/cxlib/kernelcontext.cx` | 改写 | `kc_check` 的 context 绑的是 kernel-build 那一组旧工具 |
 | `seed/ape.c` | 留下当 wrap | 已接受五片和 `--payload`。不负责编入口。win 片必须是它能挪头的 PE |
 | `tools/cx-flatten.cx` | 留下 | 展平头的生成器。包刷新前用 `--check` |
 | `tools/source-package-pack.cx`、`tools/cxlib/sourcepackage.cx`、`tools/source-package-mixed.cx` | 留下 | `CARRIED_HEADERS` 把 `include/` 打进新 P3 |
+| `exec/c/buildcompiler.sh` | 退场 | 和 `product-build` 一起退。`SEED_GEN=0` 时第 30、31、45、57、59 行调用 `exec/c/tbl.py`、`net.py`、`exec/build/gen.py`、`exec/c/provenance.py`。这四个活路径不存在，副本在 `archive/reference-py/`。默认 `SEED_GEN=1` 改走 `seed/*.c`，旧 C 也已归档，这条入口现在起不来。见 [python-residue-2026-10-30.md](python-residue-2026-10-30.md) 第 5 项 |
+| `Makefile` 的 `model-com`、`comboot-seed-step`、`comboot-stage2-step`、`comboot-stage3-step` | 退场 | 第 63–69 行都去跑 `exec/c/buildcompiler.sh`。这是 model、seed、comb 三步，跟着上面那条一起退 |
+| `release/tools/seal_candidate.sh` | 切换时重写 | 第 4 行读旧 generation 里的 `unisacc-next.com`、`unisacc-next.com.build.json`、`model-audit/models.json`。第 7–8 行内联 `python3`，写 `release/candidate.json`。新收据定下来之后用 jq 和 sha256sum 重写。见 python-residue 第 7 项。这次不改这个脚本 |
 
 工具退场与注册表里那几批同时处理。`hostseed-*`、`ri-material-*`、`package-controls` 依赖 `product-build`、`hostseed-step` 这些旧工具。归档还是标不可运行，等主人裁定，见 [archived-c-batches-2026-10-30.md](archived-c-batches-2026-10-30.md)。这份清单不改注册表行。
 
 ## 这次明确不做
 
 - 不跑 `source-job-wave`、`pc-wave`、`kernel-build`、`product-build`、`hostseed-step`、`selfhost`。
-- 不改 `entry-build.cx`，不按新目标编五片，不 wrap。
-- 不改 `candidate-install.cx`、`rebuildcontext.cx`、`kernelcontext.cx`。
+- `--target` 已加。四目标只编了对象，没有链接，没有 wrap。33 个对象的清单没改。
+- 探针表已经出来。`candidate-install.cx`、`rebuildcontext.cx`、`kernelcontext.cx` 这次仍没改。
 - 不调用安装，不改 `unisacc.com`。
 - 不跑 `matrix-flip-gen`，不改五张域矩阵。
 - 不把 148 格 SAME 写成产品已换，或五个目标已经能编。
