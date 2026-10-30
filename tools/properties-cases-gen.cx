@@ -30,7 +30,7 @@ static void die(const char *s) { fprintf(stderr, "properties-cases: REFUSE %s er
 static void path(char *p, size_t cap, const char *a, const char *b) { int n = snprintf(p, cap, "%s/%s", a, b); if (n < 0 || (size_t)n >= cap) die("path"); }
 static void saved(const char *p, const char *s, size_t n) { int f = open(p, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600); if (f < 0) die("exclusive create"); while (n) { ssize_t k = write(f, s, n); if (k <= 0) die("write"); s += k; n -= (size_t)k; } if (close(f)) die("close"); }
 static int shafile(const char *p, char h[65]) { size_t n; char *s = cx_read(p, &n); if (!s) { if (errno != ENOENT) die("read for digest"); return 0; } cx_sha256_hex(s, n, h); free(s); return 1; }
-static void row(const char *state, const char *cell, const char *label, const char *detail) { fprintf(res, "%s\t%s\t%s\t%s\n", state, cell, label, detail); if (tx_eq(state, "PASS", 1L << 20)) npass++; else if (tx_eq(state, "FAIL", 1L << 20)) nfail++; else if (tx_eq(state, "VACUOUS", 1L << 20)) nvac++; else nnotrun++; }
+static void row(const char *state, const char *cell, const char *label, const char *detail) { fprintf(res, "%s\t%s\t%s\t%s\n", state, cell, label, detail); if (tx_eqz(state, "PASS")) npass++; else if (tx_eqz(state, "FAIL")) nfail++; else if (tx_eqz(state, "VACUOUS")) nvac++; else nnotrun++; }
 static void check(int ok, const char *cell, const char *label, const char *detail) { row(ok ? "PASS" : "FAIL", cell, label, detail); }
 
 /* run argv under tools/bound with extra env; returns 0 when the child ran (its rc is in r->rc) */
@@ -87,13 +87,13 @@ static void group_det(void) {
         { if (cx_fmt(i1, sizeof i1, "%s/img-%s-1", work, tslug(t))) { fprintf(stderr, "properties-cases-gen: text too long for i1\n"); exit(2); } } { if (cx_fmt(i2, sizeof i2, "%s/img-%s-2", work, tslug(t))) { fprintf(stderr, "properties-cases-gen: text too long for i2\n"); exit(2); } } { if (cx_fmt(i3, sizeof i3, "%s/img-%s-alt", alt, tslug(t))) { fprintf(stderr, "properties-cases-gen: text too long for i3\n"); exit(2); } }
         if (compile(base, "-O2", targets[t], i1, noenv, &r) || r.rc || !shafile(i1, h1)) { { if (cx_fmt(lab, sizeof lab, "%s.compile-1", tslug(t))) { fprintf(stderr, "properties-cases-gen: text too long for lab\n"); exit(2); } } row("NOT_RUN", "prop.det.image-repeat-six-targets", lab, "first compile failed"); np_free(&r); continue; } np_free(&r);
         if (compile(base, "-O2", targets[t], i2, noenv, &r) || r.rc || !shafile(i2, h2)) { { if (cx_fmt(lab, sizeof lab, "%s.compile-2", tslug(t))) { fprintf(stderr, "properties-cases-gen: text too long for lab\n"); exit(2); } } row("NOT_RUN", "prop.det.image-repeat-six-targets", lab, "second compile failed"); np_free(&r); continue; } np_free(&r);
-        { if (cx_fmt(lab, sizeof lab, "%s.repeat", tslug(t))) { fprintf(stderr, "properties-cases-gen: text too long for lab\n"); exit(2); } } { if (cx_fmt(det, sizeof det, "sha256=%s", h1)) { fprintf(stderr, "properties-cases-gen: text too long for det\n"); exit(2); } } check(tx_eq(h1, h2, 1L << 20), "prop.det.image-repeat-six-targets", lab, det);
+        { if (cx_fmt(lab, sizeof lab, "%s.repeat", tslug(t))) { fprintf(stderr, "properties-cases-gen: text too long for lab\n"); exit(2); } } { if (cx_fmt(det, sizeof det, "sha256=%s", h1)) { fprintf(stderr, "properties-cases-gen: text too long for det\n"); exit(2); } } check(tx_eqz(h1, h2), "prop.det.image-repeat-six-targets", lab, det);
         if (compile(altsrc, "-O2", targets[t], i3, altenv, &r) || r.rc || !shafile(i3, h3)) { { if (cx_fmt(lab, sizeof lab, "%s.compile-alt", tslug(t))) { fprintf(stderr, "properties-cases-gen: text too long for lab\n"); exit(2); } } row("NOT_RUN", "prop.det.no-path-or-time", lab, "alt compile failed"); np_free(&r); continue; } np_free(&r);
-        { if (cx_fmt(lab, sizeof lab, "%s.alt-dir-tz-lang", tslug(t))) { fprintf(stderr, "properties-cases-gen: text too long for lab\n"); exit(2); } } check(tx_eq(h1, h3, 1L << 20), "prop.det.no-path-or-time", lab, det);
+        { if (cx_fmt(lab, sizeof lab, "%s.alt-dir-tz-lang", tslug(t))) { fprintf(stderr, "properties-cases-gen: text too long for lab\n"); exit(2); } } check(tx_eqz(h1, h3), "prop.det.no-path-or-time", lab, det);
     }
     { char ie[4400], h1[65], he[65]; np_result r; char *env[] = { "UNISA_MAXSTEPS=5000000", "FOO=bar", "UNISA_UNRELATED=1", 0 };
       { if (cx_fmt(ie, sizeof ie, "%s/img-lnx-x86_64-env", work)) { fprintf(stderr, "properties-cases-gen: text too long for ie\n"); exit(2); } } char i1[4400]; { if (cx_fmt(i1, sizeof i1, "%s/img-lnx-x86_64-1", work)) { fprintf(stderr, "properties-cases-gen: text too long for i1\n"); exit(2); } }
-      if (compile(base, "-O2", targets[0], ie, env, &r) || r.rc || !shafile(ie, he) || !shafile(i1, h1)) row("NOT_RUN", "prop.det.host-env-ignored", "lnx-x86_64.env", "compile failed"); else check(tx_eq(h1, he, 1L << 20), "prop.det.host-env-ignored", "lnx-x86_64.UNISA_MAXSTEPS-and-unrelated-env", "sha256 equal to plain compile"); np_free(&r); }
+      if (compile(base, "-O2", targets[0], ie, env, &r) || r.rc || !shafile(ie, he) || !shafile(i1, h1)) row("NOT_RUN", "prop.det.host-env-ignored", "lnx-x86_64.env", "compile failed"); else check(tx_eqz(h1, he), "prop.det.host-env-ignored", "lnx-x86_64.UNISA_MAXSTEPS-and-unrelated-env", "sha256 equal to plain compile"); np_free(&r); }
     { char i1[4400]; { if (cx_fmt(i1, sizeof i1, "%s/img-lnx-x86_64-1", work)) { fprintf(stderr, "properties-cases-gen: text too long for i1\n"); exit(2); } } np_result a, b; char *v[] = { i1, "255", 0 };
       if (run(v, noenv, 3, &a) || run(v, noenv, 3, &b)) row("NOT_RUN", "prop.det.run-repeat", "lnx-x86_64.run-255", "image did not run");
       else { int ok = a.rc == b.rc && a.outn == b.outn && !memcmp(a.out, b.out, a.outn) && exact(&a, gold[2]); check(ok, "prop.det.run-repeat", "lnx-x86_64.run-255-twice", "identical stdout and rc, equal to gold"); np_free(&a); np_free(&b); } }
@@ -135,7 +135,7 @@ static void group_meta(void) {
         { if (cx_fmt(ic, sizeof ic, "%s/rt-%s-c", work, tslug(t))) { fprintf(stderr, "properties-cases-gen: text too long for ic\n"); exit(2); } } { if (cx_fmt(it, sizeof it, "%s/rt-%s-tape", work, tslug(t))) { fprintf(stderr, "properties-cases-gen: text too long for it\n"); exit(2); } } { if (cx_fmt(lab, sizeof lab, "%s.tape-to-image", tslug(t))) { fprintf(stderr, "properties-cases-gen: text too long for lab\n"); exit(2); } }
         if (compile(base, "-O2", targets[t], ic, noenv, &r) || r.rc || !shafile(ic, hc)) { row("NOT_RUN", "prop.meta.tape-roundtrip", lab, "C compile failed"); np_free(&r); continue; } np_free(&r);
         if (compile(o2, "-O2", targets[t], it, noenv, &r) || r.rc || !shafile(it, ht)) { row("NOT_RUN", "prop.meta.tape-roundtrip", lab, "tape compile failed"); np_free(&r); continue; } np_free(&r);
-        char det[200]; { if (cx_fmt(det, sizeof det, "sha256=%s", hc)) { fprintf(stderr, "properties-cases-gen: text too long for det\n"); exit(2); } } check(tx_eq(hc, ht, 1L << 20), "prop.meta.tape-roundtrip", lab, det); }
+        char det[200]; { if (cx_fmt(det, sizeof det, "sha256=%s", hc)) { fprintf(stderr, "properties-cases-gen: text too long for det\n"); exit(2); } } check(tx_eqz(hc, ht), "prop.meta.tape-roundtrip", lab, det); }
     /* forward / reverse / comment / rename variants: literal gold on four inputs */
     { const char *names[4] = { "forward", "reverse", "commented", "renamed" }; const char *cells[4] = { "prop.meta.forward-reverse", "prop.meta.forward-reverse", "prop.meta.comment-whitespace", "prop.meta.identifier-rename" };
       char cat[4][256]; char hb[65], hv[65]; int have[4] = { 0 };
@@ -144,8 +144,8 @@ static void group_meta(void) {
         if (k && same_file(base, src)) { row("VACUOUS", cells[k], names[k], "variant source equals base"); continue; }
         if (compile(src, "-O0", targets[0], img, noenv, &r) || r.rc) { row("NOT_RUN", cells[k], names[k], "compile failed"); np_free(&r); continue; } np_free(&r);
         have[k] = run_domain(img, cells[k], names[k], cat[k], sizeof cat[k]) == 4;
-        if (k == 2) { char ib[4400]; { if (cx_fmt(ib, sizeof ib, "%s/forward.img", work)) { fprintf(stderr, "properties-cases-gen: text too long for ib\n"); exit(2); } } if (shafile(ib, hb) && shafile(img, hv)) row(tx_eq(hb, hv, 1L << 20) ? "PASS" : "INFO", cells[k], "commented.image-bytes", tx_eq(hb, hv, 1L << 20) ? "image sha256 equal to forward" : "image sha256 differs from forward (position data present)"); } }
-      if (have[0] && have[1]) check(tx_eq(cat[0], cat[1], 1L << 20), "prop.meta.forward-reverse", "forward-vs-reverse.outputs", "identical outputs on 0/1/255/256"); }
+        if (k == 2) { char ib[4400]; { if (cx_fmt(ib, sizeof ib, "%s/forward.img", work)) { fprintf(stderr, "properties-cases-gen: text too long for ib\n"); exit(2); } } if (shafile(ib, hb) && shafile(img, hv)) row(tx_eqz(hb, hv) ? "PASS" : "INFO", cells[k], "commented.image-bytes", tx_eqz(hb, hv) ? "image sha256 equal to forward" : "image sha256 differs from forward (position data present)"); } }
+      if (have[0] && have[1]) check(tx_eqz(cat[0], cat[1]), "prop.meta.forward-reverse", "forward-vs-reverse.outputs", "identical outputs on 0/1/255/256"); }
 }
 
 /* two translation units: the same program split in two, each TU with its own `static int hidden` (7 and 100) */
@@ -272,7 +272,7 @@ static void group_bound(void) {
         else { /* .write r3, r3 is not a newline writer; compare on the concatenated decimal stream instead */
           char flat[512] = ""; for (int i = 0; i < n; i++) { size_t fl = strlen(flat); if (cx_fmt(flat + fl, sizeof flat - fl, "%s", ops[i].want)) { fprintf(stderr, "properties-cases-gen: text too long for flat\n"); exit(2); } }
           int ok = r.rc == 0 && r.outn >= strlen(flat); char got[1024] = ""; size_t g = 0; for (size_t i = 0; i < r.outn && g + 1 < sizeof got; i++) if (r.out[i] == '-' || (r.out[i] >= '0' && r.out[i] <= '9')) got[g++] = r.out[i]; got[g] = 0;
-          ok = ok && tx_eq(got, flat, 1L << 20); check(ok, "prop.bound.int64-arith", "twelve-ops.decimal-stream", ok ? "TP-2 literals" : got); np_free(&r); } } }
+          ok = ok && tx_eqz(got, flat); check(ok, "prop.bound.int64-arith", "twelve-ops.decimal-stream", ok ? "TP-2 literals" : got); np_free(&r); } } }
     /* .div by zero exits 136 on the lnx/x86_64 image */
     { const char *t = "_start:\n  imm r1, 0\n  imm r0, 5\n  .div r0, r0, r1\n  .exit r0\n"; char tp[4400], ti[4400]; path(tp, sizeof tp, work, "divzero.tape"); path(ti, sizeof ti, work, "divzero.img"); saved(tp, t, strlen(t));
       if (compile(tp, "-O0", targets[0], ti, noenv, &r) || r.rc) { row("NOT_RUN", "prop.bound.div-zero", "div", "tape compile failed"); np_free(&r); }
@@ -295,13 +295,13 @@ static void group_bound(void) {
 
 int main(int argc, char **argv) {
     if ((argc != 6 && argc != 7) || !realpath(argv[1], root) || !realpath(argv[2], stream4) || !realpath(argv[3], stream5) || argv[4][0] != '/' || (argc == 7 && !realpath(argv[6], ref))) { fputs("usage: ROOT STREAM4_COM STREAM5_COM ABS_OUT det|meta|bound|tu|lower|random [REF]\n", stderr); return 2; }
-    const char *group = argv[5]; if (!tx_eq(group, "det", 1L << 20) && !tx_eq(group, "meta", 1L << 20) && !tx_eq(group, "bound", 1L << 20) && !tx_eq(group, "tu", 1L << 20) && !tx_eq(group, "lower", 1L << 20) && !tx_eq(group, "random", 1L << 20)) die("group");
+    const char *group = argv[5]; if (!tx_eqz(group, "det") && !tx_eqz(group, "meta") && !tx_eqz(group, "bound") && !tx_eqz(group, "tu") && !tx_eqz(group, "lower") && !tx_eqz(group, "random")) die("group");
     { if (cx_fmt(outdir, sizeof outdir, "%s", argv[4])) { fprintf(stderr, "properties-cases-gen: text too long for outdir\n"); exit(2); } } if (mkdir(outdir, 0700) && errno != EEXIST) die("out dir");
     path(work, sizeof work, outdir, group); if (mkdir(work, 0700)) die("group dir must be absent");
     path(inc, sizeof inc, root, "include"); path(bound, sizeof bound, root, "tools/bound"); path(product, sizeof product, root, "unisacc.com");
     char rp[4400]; { if (cx_fmt(rp, sizeof rp, "%s/results-%s.tsv", outdir, group)) { fprintf(stderr, "properties-cases-gen: text too long for rp\n"); exit(2); } } res = fopen(rp, "wbx"); if (!res) die("results exclusive");
     { char hp[65], h4[65], h5[65]; if (!shafile(product, hp) || !shafile(stream4, h4) || !shafile(stream5, h5)) die("identity"); fprintf(res, "IDENTITY\tproduct=%s\tstream4=%s\tstream5=%s\n", hp, h4, h5); }
-    if (tx_eq(group, "det", 1L << 20)) group_det(); else if (tx_eq(group, "meta", 1L << 20)) group_meta(); else if (tx_eq(group, "tu", 1L << 20)) group_tu(); else if (tx_eq(group, "lower", 1L << 20)) group_lower(); else if (tx_eq(group, "random", 1L << 20)) group_random(); else group_bound();
+    if (tx_eqz(group, "det")) group_det(); else if (tx_eqz(group, "meta")) group_meta(); else if (tx_eqz(group, "tu")) group_tu(); else if (tx_eqz(group, "lower")) group_lower(); else if (tx_eqz(group, "random")) group_random(); else group_bound();
     fprintf(res, "SUMMARY\tgroup=%s\tpass=%d\tfail=%d\tvacuous=%d\tnot_run=%d\n", group, npass, nfail, nvac, nnotrun); fclose(res);
     printf("PROPERTY_CASES\tgroup=%s\tpass=%d\tfail=%d\tvacuous=%d\tnot_run=%d\n", group, npass, nfail, nvac, nnotrun);
     return nfail || nvac || nnotrun ? 1 : 0;
