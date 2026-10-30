@@ -32,3 +32,17 @@ unisacc: model driver: this program calls the host C library, and its image coul
 ```
 
 errno 38 是 ENOSYS。`src/host.cx` 的 `hs_forward_exec` 在 aarch64 上用系统调用号 279（memfd）加标志 `1|16`。这次 qemu 没有回 EINVAL，所以没有改成不带 16 再试。这一步没有改这段代码。
+
+## memfd 没有回退（2026-10-30，只看，不改）
+
+`hs_forward_exec`（`src/host.cx` 第 572 行）只做 memfd 再 `execveat`。第 549–552 行写明没有落盘回退，也不回到 `hs_enter`。第 586 行用标志 `1|16`。只有返回 -22（EINVAL）才在第 587 行改成标志 `1` 再试一次。其它失败，包括 ENOSYS（-38），直接走到第 608 行把 errno 打出来并返回 1。没有写临时文件，没有第二次 exec。记为待补。这一刀不改。
+
+## 改测 -o 产物（2026-10-30）
+
+裸的 `entry.elf` 做 `-o` 退出 1：没有包。所以进程仍是 `out/grk-arm64-link/entry.elf`，包用 `UNISA_CONTAINER` 指到接了 P3 的候选 `out/grk-arm64-link/candidate`。qemu 是 `/home/devali/.local/bin/qemu-aarch64-static -L /usr/aarch64-linux-gnu`。
+
+`entry.elf -b lnx/arm64 -o out/grk-arm64-run/hello-arm examples/hello.c`：退出 0，3.659 秒，标准错误空。`hello-arm` 45096 字节，`file` 是 ELF 64-bit ARM aarch64，静态链接。
+
+对照：`out/grk-host-sys/entry.elf`，包用它自己的候选，`-b lnx/x86_64 -o out/grk-arm64-run/hello-x86`。退出 0，0.549 秒。`hello-x86` 32808 字节，ELF x86-64，静态链接。
+
+两边的程序都退出 0。标准输出都是 `from hello.c\n`，13 字节，逐字节相同。标准错误都是空的，逐字节相同。qemu 跑的是编出来的 hello，不是编译器的 `-run`。这不是五片通过，也不是 `-run` 通过。
