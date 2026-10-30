@@ -8,7 +8,7 @@
 | 模块 | 文件 | 语义 |
 |---|---|---|
 | `sys.env` | `env.cx` | 环境变量（sy_env/sy_env_vec/sy_env_or/sy_setenv/sy_unsetenv/sy_uid/sy_cwd） |
-| `sys.fs` | `fs.cx` | 文件/目录（sy_open/sy_read/sy_read_full/sy_read_once/sy_write_all/sy_fstat/sy_stat/sy_lstat/sy_realpath/sy_mkdir/sy_mkfifo/sy_rename/sy_unlink/sy_rmdir/sy_symlink/sy_readlink/sy_truncate/sy_fsync/sy_fdatasync/sy_exists 等） |
+| `sys.fs` | `fs.cx` | 文件/目录（sy_open/sy_read/sy_read_full/sy_read_once/sy_write_all/sy_copy/sy_fstat/sy_stat/sy_lstat/sy_realpath/sy_mkdir/sy_mkfifo/sy_rename/sy_unlink/sy_rmdir/sy_symlink/sy_readlink/sy_truncate/sy_fsync/sy_fdatasync/sy_exists 等） |
 | `sys.proc` | `proc.cx` | 进程（sy_run/sy_spawn/sy_spawn_pipe/sy_pipe/sy_wait/sy_kill/sy_fork_session） |
 | `sys.time` | `time.cx` | 时钟（sy_now_ms/sy_wall_s/sy_sleep_ms/sy_set_mtime） |
 | `sys.net` | `net.cx` | TCP（sy_tcp_connect/listen/accept/send_all/recv） |
