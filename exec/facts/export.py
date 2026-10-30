@@ -63,21 +63,7 @@ def _gold(name):   # weights/gold/NAME.tsv rows, `#` comments and `=>` rows drop
     return rows
 
 
-def parsetokens():
-    """parse token words and codes (was exec/parse/gen.py module level): words = pre + compound-assign
-    (casops + "=") + sorted(gold prec operators) + post; TK = 1-based index, "type" = the "type=int" code."""
-    import json
-    fw = {}
-    for ln in (ROOT / "exec/facts/parse-words.tsv").read_text().splitlines()[1:]:
-        if ln and not ln.startswith("#"):
-            k, v = ln.split("\t")
-            fw.setdefault(k, []).append(json.loads(v))
-    prec = {f[0]: int(f[1]) for f in _gold("prec") if f[1].isdigit()}
-    words = fw["words_pre"] + [o + "=" for o in fw["casops"]] + sorted(prec) + fw["words_post"]
-    tk = {w: k + 1 for k, w in enumerate(words)}
-    tk["type"] = tk["type=int"]
-    return ["=WORDS\tjson\t" + json.dumps(words, separators=(",", ":")),
-            "=TK\tjson\t" + json.dumps(tk, separators=(",", ":"))]
+# parse-tokens moved to tools/facts-gen.cx on 2026-10-30.
 
 
 def _parse_e(tag):
@@ -709,17 +695,7 @@ def lowerabi():
 # opt-gen (E4 START data and peep indices) moved to tools/facts-gen.cx on 2026-10-30.
 
 
-def modelbindingstemplate():
-    """USBIND magic chain, identifier byte classes, record kinds (from top-modelbindings-const)."""
-    sys.path.insert(0, str(HERE))
-    from load import facts
-    c = {r["name"]: r["value"] for r in facts("top-modelbindings-const")}
-    out = ["@magic\ti:int\tc:int\tnext:int"]
-    out += ["\t%d\t%d\t%d" % (i, ch, i + 1) for i, ch in enumerate(c["magic"].encode())]
-    L, D = list(c["letters"].encode()), list(c["digits"].encode())
-    out += ["@id\tletters:json\tdigits:json\tall:json", "\t%s\t%s\t%s" % tuple(json.dumps(x) for x in (L, D, L + D))]
-    out += ["=kind\tjson\t" + json.dumps(c["kind"])]
-    return out
+# top-modelbindings-template, parse-tokens and k2-tokenlocations-map moved to tools/facts-gen.cx on 2026-10-30.
 
 
 _NATIVE_TRIE = r"""
@@ -860,17 +836,6 @@ def ppgen():
             "=xelayout\tjson\t" + json.dumps(prec),
             "=predefres\tjson\t" + json.dumps({t: "".join(n + "\0" for n in E.PREDEF["os", t.split("/")[0]] + E.PREDEF["arch", t.split("/")[1]] + E.PREDEF.get(("model", t.split("/")[0]), []) + E.PREDEF["common", "*"])
                                                  for t in sorted(E.TARGETS)})]
-
-
-def tokenlocationsmap():
-    """Located-token record fields; actions remain in the stage template."""
-    import csv
-    with (ROOT / "exec/facts/tokenlocations.tsv").open() as f:
-        rows = {r[0]: r[1] for r in list(csv.reader(f, delimiter="\t"))[1:]}
-    names = json.loads(rows["MAP_FIELDS"])
-    assert len(names) == len(set(names)) and names
-    return ["=mapfields\tjson\t" + json.dumps(
-        [dict(i=i, register="diag_" + name) for i, name in enumerate(names)], separators=(",", ":"))]
 
 
 # (fact stem, inputs whose sha prefixes head the file, producer)
@@ -1095,7 +1060,6 @@ def k2unitstokens():
 
 
 TABLES = [
-    ("parse-tokens", ["exec/facts/parse-words.tsv", "weights/gold/prec.tsv", "exec/facts/export.py"], parsetokens),
     ("k2-gen2-tokens", ["exec/build/parsebase.py", "exec/build/parse2base.py", "exec/facts/parse2-extra.tsv", "exec/parse/token-prefixes.tsv", "exec/finite_rules.py", "exec/facts/export.py"], k2gen2tokens),
     ("k2-units-tokens", ["exec/build/parsebase.py", "exec/parse/token-prefixes.tsv", "exec/parse2/units-qualifiers.tsv", "exec/parse2/units-builtin.tsv", "exec/parse2/units-tokens.tsv", "exec/parse2/units-reject.tsv", "exec/parse2/units-counters.tsv", "exec/parse2/units-separators.tsv", "exec/parse2/units-trailer.tsv", "exec/finite_rules.py", "exec/facts/export.py"], k2unitstokens),
     ("k2-gen2", ["exec/build/parsebase.py", "exec/build/parse2base.py", "exec/facts/parse2-extra.tsv", "exec/facts/statics.tsv", "exec/parse2/operator-actions.tsv", "exec/parse2/type-follow.tsv", "exec/parse2/ladder-modes.tsv", "exec/parse2/shape-reject.tsv", "exec/parse2/shape-stack.tsv", "exec/parse2/shape-tokens.tsv", "exec/parse2/return-text.tsv", "exec/parse2/return-template.tsv", "exec/parse2/return-reject.tsv", "exec/parse2/return-stack.tsv", "exec/parse2/return-tokens.tsv", "exec/parse2/tape-templates.tsv", "exec/parse2/update-text.tsv", "exec/parse2/update-reject.tsv", "exec/parse2/update-template.tsv", "exec/parse2/update-stack.tsv", "exec/parse2/update-modes.tsv", "exec/parse2/update-pointer.tsv", "exec/parse2/update-float.tsv", "exec/parse2/update-tokens.tsv", "exec/parse2/type-tape.tsv", "exec/parse2/scope-actions.tsv", "exec/parse2/type-entry.tsv", "exec/facts/export.py"], k2gen2),
@@ -1104,9 +1068,7 @@ TABLES = [
     ("pp-autoinc-gen", ["exec/facts/pp-bytes.tsv", "unisa/libneed.py", "exec/facts/pp-autoinc.tsv", "exec/facts/pp-layout.tsv", "exec/facts/export.py",
                          *sorted(str(p.relative_to(ROOT)) for p in (ROOT / "include").rglob("*.h"))], ppautoinc),
     ("nativeabi", ["exec/nativeabi/rules.tsv", "exec/nativeabi/ordered-result.tsv", "exec/nativeabi/gen-fresh.tsv", "exec/nativeabi/ordered-fresh.tsv", "exec/facts/nativeabi-gen-reject.tsv", "exec/facts/top-modelgraphequality-banks.tsv", "exec/facts/export.py"], nativeabi),
-    ("top-modelbindings-template", ["exec/facts/top-modelbindings-const.tsv", "exec/facts/export.py"], modelbindingstemplate),
     ("structreturnexpr", ["exec/build/parsebase.py", "exec/facts/export.py"], structreturnexpr),
-    ("k2-tokenlocations-map", ["exec/facts/tokenlocations.tsv", "exec/facts/export.py"], tokenlocationsmap),
     ("k2-constexpr", ["exec/build/parsebase.py", "exec/parse2/constexpr-operators.tsv", "exec/parse2/constexpr-tokens.tsv", "weights/gold/prec.tsv", "exec/facts/export.py"], constexprentry),
     ("lower-armfuse", ["unisa/tape.py", "exec/lower/armfuse-shapes.tsv", "exec/facts/export.py"], lowerarmfuse),
     ("lower-abi", ["unisa/catalog.py", "unisa/lower.py", "exec/lower/code-abi-sources.tsv", "weights/gold/abi.tsv", "weights/gold/enc.tsv", "exec/facts/export.py"], lowerabi),
