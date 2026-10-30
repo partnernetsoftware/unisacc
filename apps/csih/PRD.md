@@ -145,6 +145,39 @@ agent 模式新增 `/help`、`/status`、`/clear`，均只在本地处理、不�
 - **第十批已落地（2026-10-29）**：忙碌行。原来执行命令时一直显示「等模型」；现在收到 exec 行（命令执行前发出）就显示 `跑命令 <命令>`，下一次请求在途（`net_in_flight()`）时切回「等模型」。文案从 `请求中 等模型 3秒 7745词元 上传 32839字节 已收 574字节 hit 1152 miss 6561` 改为 `⏳ 等模型 3秒 · 7745词元 · ↑32.1KB 已收574B · 缓存命中15%`，保留「已收」二字（已有断言依赖它）。selftest：`busy line names the running command and reads sizes`；tmux 实测已见切换。原来 exec 同步执行时秒数不走、界面不刷新，第十一批已解决。
 - **第四十二批已落地（2026-10-29）**：状态行上色：`✓` 绿、`◐` 黄、`✗` 和 `│ blocked:` 红、`项目>` 青。颜色只在写终端时加（`tui_put_line`），帧本身仍是纯文本，宽度计算、差量比较和所有读取帧的测试都不受影响；差量刷新改用 tui 自己的循环，`render.cx` 的 `frame_diff` 没动。遵守 `NO_COLOR`，也可以用 `CSIH_COLOR=0` 关闭。写屏缓冲按每行 32 字节预留，满屏彩色行也放得下。selftest：`status rows are coloured on output, frames stay plain`（设了 NO_COLOR 时打印 skip）；tmux `capture-pane -e` 实测 `◐` 行带 `ESC[33m`。
   - 观察（不是本批改动引起）：一道不用工具的算术题，这次评审判为「未验证」（理由是没有工具记录可核实）；之前同类问题判过「已验收（answer_only）」。评审对纯问答的判法不稳定，第四十三批处理。
+- **第六十二批已落地（2026-10-30）**：修好 `tests/contracts.tsv` 里原来的 stale-probe 层，并把 apps/csih 上层根文件里的 `#include` 清掉。
+  - **errno_cover、f22**：根文件自己声明了 `u_spawn`，却没有 `use u_run`，`-run` 时链接不到（rc 127）。修好后 43/43、18/18。
+  - **reload_owner、reload_session、reload_state**：原来引的 `csih_flat.h` 里写死了另一台机器的仓库路径，子进程 chdir 失败，所以报 exit 126，也报"源/编译器在测试中被改了"。
+    - 现在应用目录取 getcwd，编译器取 `$UNISACC`。
+    - 每个探针先把被测 CLI 编译一次，再逐例直接跑，不再逐例 `-run`（逐例 `-run` 要约 112 秒，超出时限）；二进制随临时目录一起删除。
+    - 每例限时和哈希改回 Python 原版（4/5 秒、sha256），`reload_session` 恢复了"stderr 必须为空"的断言。
+    - 结果 8/8、12/12、20/20。
+  - **上层不写 `#include`**：
+    - tui_run、run、libc_cover、dup_symbol、net_cover、tools/redact 直接删掉 include（前奏都已覆盖），删除操作改用 `cx_rmtree`。
+    - fixture 用到的 `utimes` 收进下层 `fixtures/fswit.cx`；生成的目录树、通知文件的 mtime 和权限都与改前相同。
+    - 被测对象就是携带 libc 头的 14 个运行库探针，以及 agent-stub、llm_stub 两个 socket 测试替身，改为声明 `#pragma unisa module`，并在文件里写明 Lower 原因。
+  - **探针不再泄漏进程**：原来探针被外层超时直接杀掉时走不到 `tw_close`，csih TUI 会在私有 tmux 里一直挂着；清理时发现 85 个残留 socket，有的进程挂了约 1 小时。
+    - 现在 `tw_new` 把会话命令包一层 `timeout --foreground -k 2 120`（不加 `--foreground` 的话 TUI 读不了 tty）。
+    - netwit 的文件服务 60 秒后自行退出。
+  - **agent 层**（代理并行修）：context_preview、file_observation、net_timeout 转绿。
+    - 根因分别是：另一台机器的路径和 `.c` 文件表；必须设置 `PROBE_SCRATCH`；读的还是 `net.c`。
+    - file_observation 的评审桩答复补上了现行协议要求的 claims/observation_refs，断言不变。
+  - **agent_loop_bound（12/31）、agent_multi_action（5/9）记 BLOCKED**：红的 19+4 个用例，期望的是验收协议之前的行为。
+    - 例如：裸答复会被接受、答复后再有一轮评审、`go=stop without answer` 文案、watch 模式的同伴邮件提示。
+    - 现在没带证据的答复记为"未验证"，之后不再有评审轮。
+    - 这些期望要不要按现行为改写，需要一个裁定；在那之前探针保持原样，不改断言。
+  - **两个归档探针移植成 `.cx`，GAP 从 15 降到 13**：
+    - `probes/owned_session.cx`，19 条：锁拒绝、导出、三种坏快照被拒、恢复时只消费一次、重新导出一致。
+    - `probes/resume_pending.cx`，11 条：草稿保留、恢复出的角色/同伴/cwd 生效、恰好 3 个请求、快照被消费、循环解除。
+    - 两个都保留原版全部断言，各有一处适配现行为：
+      - owned_session：被拒的连接现在会按 2s+5s 重试，`/export-state` 要求空闲，所以要先等这一轮结束。
+      - resume_pending：桩的答复要带 evidence/claims/observation_refs，否则不进评审轮，就成了 2 个请求而不是 3 个；retry_stub 为此新增记号 V/J。
+  - **ENV 清零**：`probes/ttyenv.cx` 让 tty-raw、tty-size 跑在私有 tmux 窗格里，让 net-tcp 连 netwit 起的监听端。
+  - **tmuxwit 两处缺陷**：
+    - `send-keys` 的字面文本前没有 `--`，`-EDIT` 会被当成选项。
+    - 参数超长时被静默截断，曾经截掉了 resume-agent 的 HASH 参数；现在超长直接拒绝。
+  - **合同表现状**：79 条中 IMPLEMENTED 61、GAP 13、BLOCKED 5、ENV 0；本批涉及的合同全部实跑通过。
+  - **`tests/cxraw.cx`**：我改动的文件都不超基线，新文件为 0。当前仍有 3 处超标，都在 `src/drive*.cx`，不属于 csih。
 - **第六十一批已落地（2026-10-30）**：csih 作为独立小产品，测试放在自己的目录里，不进仓库的 `tests/`（那是 unisacc 的）。
   - **入口** `sh unisacc.com apps/csih/tests/run.cx -- --list | --smoke | --all | --layer L | --run ID... | --selftest`，合同表在 `tests/contracts.tsv`，共 79 条。
     - 每条合同有层次、状态、时限（≤55 秒）、命令和判据。每条单独计时，结果是 PASS、FAIL 或 TIMEOUT。命令相同的几条合同在一次执行里共用同一份输出。
