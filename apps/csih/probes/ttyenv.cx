@@ -1,0 +1,71 @@
+#pragma unisa use tmuxwit
+#pragma unisa use netwit
+/*
+ * ttyenv.cx — gives three runtime-surface probes the environment they need,
+ * so they run as contracts instead of being parked as ENV:
+ *   cd apps/csih && sh ../../unisacc.com probes/ttyenv.cx -- tty-size|tty-raw|net-tcp
+ *   tty-size  probes/tty-size.cx on a 77x23 private tmux pane: must print
+ *             "ok rows 23 cols 77" (TIOCGWINSZ on a real tty) and exit 0
+ *   tty-raw   probes/tty-raw.cx on a pane, one key 'q' sent: must print
+ *             "ok keycode 113" (raw mode read one byte) and exit 0
+ *   net-tcp   probes/net-tcp.cx against a netwit listener on a free port:
+ *             must print "ok connected" and exit 0
+ * Upper root: no #include (the tty is tmuxwit's, the listener netwit's).
+ */
+
+static char pane[65536];
+
+static int on_pane(const char *u, const char *probe, const char *want, const char *key) {
+    char *cmd[] = { "sh", "-c", "\"$0\" -run \"$1\"; echo __RC=$?__; sleep 30", (char *)u, (char *)probe };
+    int rc;
+    if (!tw_open("ttyenv")) { printf("FAIL tmux is not on PATH\n"); return 1; }
+    if (tw_new("t", 77, 23, NULL, cmd, 5) != 0) { printf("FAIL tmux new-session\n"); return 1; }
+    if (key) {
+        /* the key may land before raw mode: canonical input is held, then readable once ICANON is off */
+        tw_sleep_ms(300);
+        tw_keys("t", key, 1);
+    }
+    rc = tw_rc("t", 30000);
+    tw_capture("t", pane, sizeof pane);
+    tw_close();
+    if (rc == 0 && strstr(pane, want)) { printf("PASS %s: %s\n", probe, want); return 0; }
+    printf("FAIL %s: rc=%d want \"%s\"\n%s\n", probe, rc, want, pane);
+    return 1;
+}
+
+static int net_tcp(const char *u) {
+    static char out[4096];
+    char root[600], file[700], portbuf[16];
+    const char *tmp = getenv("TMPDIR");
+    int port = 40000 + (int)getpid() % 20000, pid, rc;
+    FILE *f;
+    snprintf(root, sizeof root, "%s/csih-ttyenv-%d", tmp && tmp[0] ? tmp : "/tmp", (int)getpid());
+    snprintf(file, sizeof file, "%s/body", root);
+    if (mkdir(root, 0700) != 0) { printf("FAIL scratch %s\n", root); return 1; }
+    f = fopen(file, "w");
+    if (f) { fputs("x", f); fclose(f); }
+    pid = nw_serve_file(port, file);
+    if (pid < 0 || nw_wait_port(port, 3000) != 0) { printf("FAIL listener on %d\n", port); cx_rmtree(root); return 1; }
+    snprintf(portbuf, sizeof portbuf, "%d", port);
+    {
+        char *av[] = { "sh", (char *)u, "-run", "probes/net-tcp.cx", "--", portbuf, NULL };
+        rc = tw_run(av, out, sizeof out);
+    }
+    kill(pid, SIGKILL);
+    waitpid(pid, NULL, 0);
+    cx_rmtree(root);
+    if (rc == 0 && strstr(out, "ok connected")) { printf("PASS probes/net-tcp.cx: ok connected (port %d)\n", port); return 0; }
+    printf("FAIL probes/net-tcp.cx: rc=%d %s\n", rc, out);
+    return 1;
+}
+
+int main(int argc, char **argv) {
+    const char *u = getenv("UNISACC");
+    const char *mode = argc > 1 ? argv[1] : "";
+    if (!u || !u[0]) u = "../../unisacc.com";
+    if (!strcmp(mode, "tty-size")) return on_pane(u, "probes/tty-size.cx", "ok rows 23 cols 77", NULL);
+    if (!strcmp(mode, "tty-raw")) return on_pane(u, "probes/tty-raw.cx", "ok keycode 113", "q");
+    if (!strcmp(mode, "net-tcp")) return net_tcp(u);
+    printf("usage: ttyenv.cx -- tty-size | tty-raw | net-tcp\n");
+    return 2;
+}
