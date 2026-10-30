@@ -1,0 +1,335 @@
+#pragma unisa use sys.io
+#pragma unisa use text.text
+/* Project the twenty gold-table names.
+   sh ./unisacc.com tools/goldname-gen.cx -- --check
+   sh ./unisacc.com tools/goldname-gen.cx -- --write
+   The first eighteen names are exec/pipeline/gold-stages.tsv, in file order.
+   The last two are the DECLARED headers of weights/gold/lexcls.tsv and
+   lexword.tsv. This is not the sorted list in tools/gold-table.cx.
+   Net names stay on netname. Declared names stay on declname.
+   This is not st_gap.
+   A null out-pointer returns 4. An index outside 0..count-1 returns 2.
+   No libc and no include. */
+#define STAGES "exec/pipeline/gold-stages.tsv"
+#define NNET 18
+#define NDECL 2
+#define NTOT 20
+#define NAMEMAX 32
+#define FILECAP 4096
+#define CHECKCAP 8192
+#define LINEMAX 4096
+
+static const char *decl_paths[NDECL] = {
+    "weights/gold/lexcls.tsv",
+    "weights/gold/lexword.tsv"
+};
+
+static char names[NTOT][NAMEMAX];
+static int nname;
+
+static int fail(const char *why) {
+    sy_eprintf("goldname-gen\tFAIL\t%s\n", why);
+    return 1;
+}
+
+static int letters(const char *s, int n) {
+    int i;
+    if (n < 1 || n >= NAMEMAX) return 0;
+    for (i = 0; i < n; i++) if (s[i] < 'a' || s[i] > 'z') return 0;
+    return 1;
+}
+
+static int ident(const char *s, int n) {
+    int i;
+    if (n < 1 || n >= NAMEMAX) return 0;
+    if (s[0] < 'a' || s[0] > 'z') return 0;
+    for (i = 1; i < n; i++) {
+        char c = s[i];
+        if (c >= 'a' && c <= 'z') continue;
+        if (c >= '0' && c <= '9') continue;
+        if (c == '_') continue;
+        return 0;
+    }
+    return 1;
+}
+
+static int has_phrase(const char *s, int n, const char *phrase) {
+    int pn = 0, i, j;
+    while (phrase[pn]) pn++;
+    if (pn < 1 || n < pn) return 0;
+    for (i = 0; i + pn <= n; i++) {
+        for (j = 0; j < pn; j++) if (s[i + j] != phrase[j]) break;
+        if (j == pn) return 1;
+    }
+    return 0;
+}
+
+static void copy_field(char *dst, const char *s, int n) {
+    int i;
+    for (i = 0; i < n; i++) dst[i] = s[i];
+    dst[n] = 0;
+}
+
+static int in_set(const char *s) {
+    int i;
+    for (i = 0; i < nname; i++) if (tx_eqz(names[i], s)) return 1;
+    return 0;
+}
+
+static int push_name(const char *s, int cap, const char *full) {
+    int i;
+    if (in_set(s)) return fail("name-dup");
+    if (nname >= cap) return fail(full);
+    for (i = 0; s[i]; i++) names[nname][i] = s[i];
+    names[nname][i] = 0;
+    nname++;
+    return 0;
+}
+
+static int take_net(const char *line, int n) {
+    char name[NAMEMAX];
+    int i;
+    for (i = 0; i < n; i++) if (line[i] == '\t') return fail("row-fields");
+    if (!letters(line, n)) return fail("row-charset");
+    copy_field(name, line, n);
+    return push_name(name, NNET, "net-count");
+}
+
+static int load_nets(void) {
+    size_t nb = 0, i = 0;
+    char *b;
+    int saw = 0;
+    b = cx_read(STAGES, &nb);
+    if (!b) return fail(STAGES);
+    if (nb == 0 || b[nb - 1] != '\n') return fail("tsv-newline");
+    while (i < nb) {
+        size_t e = i;
+        while (e < nb && b[e] != '\n') e++;
+        b[e] = 0;
+        if (e == i) return fail("tsv-blank");
+        if (!saw) {
+            if (!tx_eqz(b + i, "# stage")) return fail("tsv-header");
+            saw = 1;
+        } else if (b[i] == '#') {
+            return fail("tsv-comment");
+        } else if (take_net(b + i, (int)(e - i))) {
+            return 1;
+        }
+        i = e + 1;
+    }
+    if (nname != NNET) return fail("net-count");
+    return 0;
+}
+
+static int stem_of(const char *path, char *dst) {
+    int i = 0, slash = -1, dot = -1;
+    while (path[i]) i++;
+    while (i > 0) {
+        i--;
+        if (path[i] == '/' && slash < 0) slash = i;
+        if (path[i] == '.' && dot < 0) dot = i;
+    }
+    if (slash < 0 || dot < 0 || dot <= slash + 1) return fail("path-stem");
+    if (!ident(path + slash + 1, dot - slash - 1)) return fail("path-stem");
+    copy_field(dst, path + slash + 1, dot - slash - 1);
+    return 0;
+}
+
+static int take_decl(const char *b, size_t n, const char *path) {
+    char stem[NAMEMAX], stage[NAMEMAX];
+    int i, start, len;
+    const char *mark = "# stage ";
+    if (stem_of(path, stem)) return 1;
+    for (i = 0; i < (int)n && b[i] != '\n'; i++) ;
+    if (i == (int)n || i >= LINEMAX) return fail("header-line");
+    for (start = 0; mark[start]; start++) if (b[start] != mark[start]) return fail("header-mark");
+    len = start;
+    while (len < i && b[len] != ':') len++;
+    if (len == i || len == start) return fail("header-name");
+    if (!ident(b + start, len - start)) return fail("header-name");
+    if (!has_phrase(b, i, "DECLARED here (not exported by gold-export)"))
+        return fail("header-declared");
+    copy_field(stage, b + start, len - start);
+    if (!tx_eqz(stem, stage)) return fail("header-stem");
+    return push_name(stage, NTOT, "decl-count");
+}
+
+static int load_decls(void) {
+    int i, base;
+    base = nname;
+    for (i = 0; i < NDECL; i++) {
+        size_t nb = 0;
+        char *b = cx_read(decl_paths[i], &nb);
+        if (!b) return fail(decl_paths[i]);
+        if (take_decl(b, nb, decl_paths[i])) return 1;
+    }
+    if (nname != base + NDECL) return fail("decl-count");
+    if (nname != NTOT) return fail("row-count");
+    return 0;
+}
+
+static int app(char *dst, int cap, int *n, const char *s) {
+    int i = 0;
+    while (s[i]) {
+        if (*n + 1 >= cap) return -1;
+        dst[*n] = s[i];
+        *n += 1;
+        i++;
+    }
+    dst[*n] = 0;
+    return 0;
+}
+
+static int app_n(char *dst, int cap, int *n, int d) {
+    char s[4];
+    int k = 0;
+    if (d < 0 || d > 99) return -1;
+    if (d >= 10) s[k++] = (char)('0' + d / 10);
+    s[k++] = (char)('0' + d % 10);
+    s[k] = 0;
+    return app(dst, cap, n, s);
+}
+
+static int emit_mod(char *dst, int cap, const char *prefix) {
+    int n = 0, i;
+    dst[0] = 0;
+    if (app(dst, cap, &n, "#pragma unisa module goldname\n")) return -1;
+    if (app(dst, cap, &n, "/* Generated by tools/goldname-gen.cx.\n")) return -1;
+    if (app(dst, cap, &n, "   Do not edit by hand. First 18 are gold-stages.tsv.\n")) return -1;
+    if (app(dst, cap, &n, "   Last 2 are the DECLARED tables lexcls and lexword.\n")) return -1;
+    if (app(dst, cap, &n, "   Not the sorted list in tools/gold-table.cx.\n")) return -1;
+    if (app(dst, cap, &n, "   A null out-pointer returns 4. An index outside 0..count-1 returns 2.\n")) return -1;
+    if (app(dst, cap, &n, "   No libc and no include. */\n")) return -1;
+    if (app(dst, cap, &n, "int ")) return -1;
+    if (app(dst, cap, &n, prefix)) return -1;
+    if (app(dst, cap, &n, "_count(void) {\n    return ")) return -1;
+    if (app_n(dst, cap, &n, nname)) return -1;
+    if (app(dst, cap, &n, ";\n}\n")) return -1;
+    if (app(dst, cap, &n, "int ")) return -1;
+    if (app(dst, cap, &n, prefix)) return -1;
+    if (app(dst, cap, &n, "_at(int index, const char **name) {\n")) return -1;
+    if (app(dst, cap, &n, "    if (!name) return 4;\n")) return -1;
+    for (i = 0; i < nname; i++) {
+        if (app(dst, cap, &n, "    if (index == ")) return -1;
+        if (app_n(dst, cap, &n, i)) return -1;
+        if (app(dst, cap, &n, ") { *name = \"")) return -1;
+        if (app(dst, cap, &n, names[i])) return -1;
+        if (app(dst, cap, &n, "\"; return 0; }\n")) return -1;
+    }
+    if (app(dst, cap, &n, "    return 2;\n}\n")) return -1;
+    return n;
+}
+
+static int emit_rows(char *dst, int cap, int *n, const char *prefix) {
+    int i;
+    if (app(dst, cap, n, "    if (")) return -1;
+    if (app(dst, cap, n, prefix)) return -1;
+    if (app(dst, cap, n, "_count() != ")) return -1;
+    if (app_n(dst, cap, n, nname)) return -1;
+    if (app(dst, cap, n, ") return 1;\n")) return -1;
+    for (i = 0; i < nname; i++) {
+        if (app(dst, cap, n, "    if (")) return -1;
+        if (app(dst, cap, n, prefix)) return -1;
+        if (app(dst, cap, n, "_at(")) return -1;
+        if (app_n(dst, cap, n, i)) return -1;
+        if (app(dst, cap, n, ", &name) || !tx_eqz(name, \"")) return -1;
+        if (app(dst, cap, n, names[i])) return -1;
+        if (app(dst, cap, n, "\")) return 1;\n")) return -1;
+    }
+    if (app(dst, cap, n, "    if (")) return -1;
+    if (app(dst, cap, n, prefix)) return -1;
+    if (app(dst, cap, n, "_at(0, missing) != 4) return 1;\n")) return -1;
+    if (app(dst, cap, n, "    if (")) return -1;
+    if (app(dst, cap, n, prefix)) return -1;
+    if (app(dst, cap, n, "_at(-1, &name) != 2) return 1;\n")) return -1;
+    if (app(dst, cap, n, "    if (")) return -1;
+    if (app(dst, cap, n, prefix)) return -1;
+    if (app(dst, cap, n, "_at(")) return -1;
+    if (app_n(dst, cap, n, nname)) return -1;
+    if (app(dst, cap, n, ", &name) != 2) return 1;\n")) return -1;
+    return 0;
+}
+
+static int emit_check(char *dst, int cap) {
+    int n = 0;
+    dst[0] = 0;
+    if (app(dst, cap, &n, "#pragma unisa use compiler.goldname\n")) return -1;
+    if (app(dst, cap, &n, "#pragma unisa use runtime.goldname\n")) return -1;
+    if (app(dst, cap, &n, "#pragma unisa use compiler.netname\n")) return -1;
+    if (app(dst, cap, &n, "#pragma unisa use runtime.netname\n")) return -1;
+    if (app(dst, cap, &n, "#pragma unisa use compiler.declname\n")) return -1;
+    if (app(dst, cap, &n, "#pragma unisa use runtime.declname\n")) return -1;
+    if (app(dst, cap, &n, "#pragma unisa use sys.io\n")) return -1;
+    if (app(dst, cap, &n, "#pragma unisa use text.text\n")) return -1;
+    if (app(dst, cap, &n, "/* Generated by tools/goldname-gen.cx. Narrow check of the gold name list. */\n")) return -1;
+    if (app(dst, cap, &n, "int main(void) {\n")) return -1;
+    if (app(dst, cap, &n, "    const char *name;\n")) return -1;
+    if (app(dst, cap, &n, "    const char *other;\n")) return -1;
+    if (app(dst, cap, &n, "    const char **missing;\n")) return -1;
+    if (app(dst, cap, &n, "    int i;\n")) return -1;
+    if (app(dst, cap, &n, "    missing = 0;\n")) return -1;
+    if (emit_rows(dst, cap, &n, "gdn")) return -1;
+    if (emit_rows(dst, cap, &n, "rgd")) return -1;
+    if (app(dst, cap, &n, "    if (nn_count() + dcl_count() != gdn_count()) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "    if (rnn_count() != nn_count()) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "    if (rdl_count() != dcl_count()) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "    for (i = 0; i < nn_count(); i++) {\n")) return -1;
+    if (app(dst, cap, &n, "        if (gdn_at(i, &name)) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "        if (rgd_at(i, &other) || !tx_eqz(name, other)) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "        if (nn_at(i, &other) || !tx_eqz(name, other)) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "        if (rnn_at(i, &other) || !tx_eqz(name, other)) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "    }\n")) return -1;
+    if (app(dst, cap, &n, "    for (i = 0; i < dcl_count(); i++) {\n")) return -1;
+    if (app(dst, cap, &n, "        if (gdn_at(nn_count() + i, &name)) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "        if (rgd_at(nn_count() + i, &other) || !tx_eqz(name, other)) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "        if (dcl_at(i, &other) || !tx_eqz(name, other)) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "        if (rdl_at(i, &other) || !tx_eqz(name, other)) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "    }\n")) return -1;
+    if (app(dst, cap, &n, "    sy_printf(\"CX_GOLD\\tok=%d\\tnets=%d\\tdecl=%d\\tfailed=0\\n\", gdn_count(), nn_count(), dcl_count());\n")) return -1;
+    if (app(dst, cap, &n, "    return 0;\n}\n")) return -1;
+    return n;
+}
+
+static int same_bytes(const char *a, size_t an, const char *b, int bn) {
+    int i;
+    if (an != (size_t)bn) return 0;
+    for (i = 0; i < bn; i++) if (a[i] != b[i]) return 0;
+    return 1;
+}
+
+static int one_file(int dowrite, const char *path, const char *body, int n) {
+    size_t on = 0;
+    char *cur;
+    if (dowrite) {
+        if (cx_write(path, body, (size_t)n)) return fail("write");
+        return 0;
+    }
+    cur = cx_read(path, &on);
+    if (!cur) return fail(path);
+    if (!same_bytes(cur, on, body, n)) return fail(path);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    char file[FILECAP], check[CHECKCAP];
+    int dowrite, fn, cn;
+    if (argc != 2 || (!tx_eqz(argv[1], "--check") && !tx_eqz(argv[1], "--write"))) {
+        sy_eprintf("goldname-gen\tusage\t--check|--write\n");
+        return 2;
+    }
+    dowrite = tx_eqz(argv[1], "--write");
+    if (load_nets()) return 1;
+    if (load_decls()) return 1;
+    cn = emit_check(check, CHECKCAP);
+    if (cn < 0) return fail("emit-check");
+    fn = emit_mod(file, FILECAP, "gdn");
+    if (fn < 0) return fail("emit-compiler");
+    if (one_file(dowrite, "cx/compiler/goldname.cx", file, fn)) return 1;
+    fn = emit_mod(file, FILECAP, "rgd");
+    if (fn < 0) return fail("emit-runtime");
+    if (one_file(dowrite, "cx/runtime/goldname.cx", file, fn)) return 1;
+    if (one_file(dowrite, "tools/check-cx-gold.cx", check, cn)) return 1;
+    if (dowrite) sy_printf("GOLDNAME_GEN\tWROTE\trows=%d\n", nname);
+    else sy_printf("GOLDNAME_GEN\tCHECK\trows=%d\n", nname);
+    return 0;
+}
