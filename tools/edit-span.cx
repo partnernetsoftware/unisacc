@@ -1,0 +1,53 @@
+/* tools/edit-span.cx -- replace a line span of a file, asserting both ends first.
+ *
+ *   sh ./unisacc.com tools/edit-span.cx -- FILE FIRST LAST FIRST_TEXT LAST_TEXT REPLACEMENT
+ *
+ * Lines FIRST..LAST (1-based, inclusive) are replaced by the bytes of the file REPLACEMENT (which
+ * should end in a newline).  Refused, with nothing written, unless line FIRST starts with FIRST_TEXT,
+ * line LAST starts with LAST_TEXT, and FIRST <= LAST lie inside the file.  For moving generated-table
+ * producers out of a source file without retyping them; no pattern search, no regex.
+ */
+#pragma unisa use text.text
+#pragma unisa use mem.arena
+#define ES_CAP 1048576
+
+static void es_die(const char *a, const char *b) { fprintf(stderr, "edit-span: %s%s%s\n", a, b ? ": " : "", b ? b : ""); exit(2); }
+
+int main(int argc, char **argv) {
+    size_t n, rn;
+    char *b, *r, *out, *end;
+    long first, last, line = 1, at = 0, s0 = -1, s1 = -1, flen, llen, i, o = 0;
+    int ar = ar_new(1L << 30);
+    if (argc != 7) es_die("usage", "FILE FIRST LAST FIRST_TEXT LAST_TEXT REPLACEMENT");
+    first = strtol(argv[2], &end, 10); if (*end || first < 1) es_die("bad FIRST", argv[2]);
+    last = strtol(argv[3], &end, 10); if (*end || last < first) es_die("bad LAST", argv[3]);
+    b = cx_read(argv[1], &n); if (!b) es_die("cannot read", argv[1]);
+    r = cx_read(argv[6], &rn); if (!r) es_die("cannot read", argv[6]);
+    while (at < (long)n && line <= last + 1) {
+        if (line == first) s0 = at;
+        if (line == last + 1) { s1 = at; break; }
+        {
+            long off = tx_chr(b + at, (long)n - at, '\n');
+            if (off < 0) { at = (long)n; line++; break; }
+            at += off + 1;
+        }
+        line++;
+    }
+    if (s1 < 0 && line == last + 1) s1 = (long)n;
+    if (s0 < 0 || s1 < 0) es_die("span outside the file", argv[1]);
+    flen = tx_len(argv[4], ES_CAP); llen = tx_len(argv[5], ES_CAP);
+    if (!tx_prefix(b + s0, (long)n - s0, argv[4], flen)) es_die("line FIRST does not start with FIRST_TEXT", argv[4]);
+    {
+        long ls = s1 - 1;   /* start of line LAST */
+        while (ls > s0 && b[ls - 1] != '\n') ls--;
+        if (!tx_prefix(b + ls, (long)n - ls, argv[5], llen)) es_die("line LAST does not start with LAST_TEXT", argv[5]);
+    }
+    out = ar_alloc(ar, (long)n + (long)rn + 1);
+    if (!out) es_die("out of memory", 0);
+    for (i = 0; i < s0; i++) out[o++] = b[i];
+    for (i = 0; i < (long)rn; i++) out[o++] = r[i];
+    for (i = s1; i < (long)n; i++) out[o++] = b[i];
+    if (cx_write(argv[1], out, (size_t)o)) es_die("cannot write", argv[1]);
+    printf("REPLACED\t%s\tlines %ld..%ld\t%ld bytes -> %ld bytes\n", argv[1], first, last, s1 - s0, (long)rn);
+    return 0;
+}

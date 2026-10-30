@@ -821,7 +821,7 @@ static void k2_stack(Ob *o) {
    register name, and the lead = literal-byte ("byteN") and computation names that precede it. */
 #define FC_MAX 512
 #define FC_LEAD 4096
-typedef struct { int w; long v; const char *reg; int lead0, nlead; } FcField;
+typedef struct { int w; long v; const char *reg; int lead0, nlead, big; } FcField;
 typedef struct { FcField f[FC_MAX]; int nf; const char *lead[FC_LEAD * 4]; int nl, pend; } Fc;
 static void fc_init(Fc *c) { c->nf = 0; c->nl = 0; c->pend = 0; }
 static void fc_name(Fc *c, const char *s) { if (c->nl == FC_LEAD * 4) fg_die("field chain too long", 0); c->lead[c->nl++] = s; }
@@ -833,11 +833,12 @@ static void fc_lit(Fc *c, const unsigned char *b, long n) {
         fc_name(c, byten[b[i]]);
     }
 }
+static int fc_big;                     /* endian of the fields added next */
 static void fc_field(Fc *c, int w, long v, const char *reg) {
     FcField *f;
     if (c->nf == FC_MAX) fg_die("too many fields", 0);
     f = &c->f[c->nf++];
-    f->w = w; f->v = v; f->reg = reg; f->lead0 = c->pend; f->nlead = c->nl - c->pend;
+    f->w = w; f->v = v; f->reg = reg; f->lead0 = c->pend; f->nlead = c->nl - c->pend; f->big = fc_big;
     c->pend = c->nl;
 }
 static void fc_lead_json(Ob *o, Fc *c, int at, int n) {
@@ -853,7 +854,7 @@ static void fc_rows(Ob *o, const char *name, Fc *c) {
         FcField *f = &c->f[i];
         ob_z(o, "\t"); ob_int(o, i); ob_z(o, "\t"); ob_int(o, f->w); ob_z(o, f->reg ? "\treg\t" : "\tconst\t");
         if (f->reg) ob_str(o, f->reg); else ob_int(o, f->v);
-        ob_z(o, "\tlittle\t"); fc_lead_json(o, c, f->lead0, f->nlead); ob_z(o, "\n");
+        ob_z(o, f->big ? "\tbig\t" : "\tlittle\t"); fc_lead_json(o, c, f->lead0, f->nlead); ob_z(o, "\n");
     }
 }
 static void fc_tail(Ob *o, const char *name, Fc *c) {   /* one zero-width row carrying the trailing lead */
@@ -1028,6 +1029,211 @@ static void pe_fields(Ob *o, int forward) {
     ob_z(o, "@names\toffset:int\n");
     for (i = 0; i < n; i++) { ob_z(o, "\t"); ob_int(o, noff[i]); ob_z(o, "\n"); }
 }
+static long kv_hex(Krow *r, int n, const char *name, unsigned char *out, long cap) {
+    int i;
+    for (i = 0; i < n; i++) if (tx_eq(r[i].kind, "bytes", 8) && tx_eq(r[i].name, name, 64)) {
+        long len = tx_len(r[i].value, FG_CAP), q;
+        if (len % 2 || len / 2 > cap) fg_die("bad hex fact", name);
+        for (q = 0; q < len / 2; q++) {
+            int hi = r[i].value[2 * q], lo = r[i].value[2 * q + 1];
+            hi = hi <= '9' ? hi - '0' : hi - 'a' + 10; lo = lo <= '9' ? lo - '0' : lo - 'a' + 10;
+            out[q] = (unsigned char)(hi * 16 + lo);
+        }
+        return len / 2;
+    }
+    fg_die("hex fact absent", name);
+    return 0;
+}
+static void fc_used_bytes(Ob *o) {
+    int i, j;
+    for (i = 1; i < pe_nused; i++) for (j = i; j > 0 && fg_strcmp(pe_used[j - 1], pe_used[j]) > 0; j--) {
+        const char *t = pe_used[j]; pe_used[j] = pe_used[j - 1]; pe_used[j - 1] = t;
+    }
+    ob_z(o, "@bytes\tv:int\n");
+    for (i = 0; i < pe_nused; i++) if (tx_prefix(pe_used[i], tx_len(pe_used[i], 64), "byte", 4)) { ob_z(o, "\t"); ob_z(o, pe_used[i] + 4); ob_z(o, "\n"); }
+}
+static void fc_lit_name16(Fc *c, const char *s) {
+    unsigned char b[16] = {0};
+    long i;
+    for (i = 0; s[i] && i < 16; i++) b[i] = (unsigned char)s[i];
+    fc_lit(c, b, 16);
+}
+
+/* enc-macho: Mach-O load commands and the ad-hoc code-signature field schema. */
+static void enc_macho(Ob *o) {
+    static Krow k[128];
+    static Fc c;
+    int nk = fg_krows("exec/facts/image-macho.tsv", k, 128), a, i;
+    static unsigned char ident[64], dlbind[256], dyld[64], libsys[96];
+    long nident = kv_hex(k, nk, "IDENT", ident, 64), ndlbind = kv_hex(k, nk, "DLBIND", dlbind, 256),
+         ndyld = kv_hex(k, nk, "DYLD", dyld, 64), nlibsys = kv_hex(k, nk, "LIBSYS", libsys, 96);
+#define MC(n) kv_int(k, nk, "const", n)
+    const char *arch[4];
+    int narch = 0;
+    for (i = 0; i < nk; i++) if (tx_eq(k[i].kind, "cputype", 8)) arch[narch++] = k[i].name;
+    for (a = 1; a < narch; a++) for (i = a; i > 0 && fg_strcmp(arch[i - 1], arch[i]) > 0; i--) { const char *t = arch[i]; arch[i] = arch[i - 1]; arch[i - 1] = t; }
+    {
+        const char *cn[10] = {"DATA", "VMADDR", "STRTAB", "page_minus_one", "page_mask", "page4_minus_one", "PAGE4", "signature_base", "DLPREFIX", "DLBINDLEN"};
+        long cv[10];
+        cv[0] = 1L << 40; cv[1] = MC("VMADDR"); cv[2] = MC("STRTAB"); cv[3] = MC("PAGE") - 1; cv[4] = -MC("PAGE");
+        cv[5] = MC("PAGE4") - 1; cv[6] = MC("PAGE4"); cv[7] = 20 + 88 + nident; cv[8] = MC("DLPREFIX"); cv[9] = ndlbind;
+        for (i = 0; i < 10; i++) { ob_z(o, "="); ob_z(o, cn[i]); ob_z(o, "\tint\t"); ob_int(o, cv[i]); ob_z(o, "\n"); }
+    }
+    pe_nused = 0;
+    for (a = 0; a < narch; a++) {
+        long hdrs = kv_int(k, nk, "hdrs", arch[a]), VM = MC("VMADDR"), SEG = MC("SEG"), SECT = MC("SECT");
+        char nm[64];
+        unsigned char lib[128];
+        long nlib, q;
+        fc_big = 0;
+        ob_z(o, "=HDRS_"); ob_z(o, arch[a]); ob_z(o, "\tint\t"); ob_int(o, hdrs); ob_z(o, "\n");
+        fc_init(&c);
+        fc_field(&c, 4, 0xFEEDFACFL, 0); fc_field(&c, 4, kv_int(k, nk, "cputype", arch[a]), 0); fc_field(&c, 4, kv_int(k, nk, "cpusub", arch[a]), 0);
+        fc_field(&c, 4, 2, 0); fc_field(&c, 4, MC("NCMDS"), 0); fc_field(&c, 4, kv_int(k, nk, "cmdsz", arch[a]), 0); fc_field(&c, 4, 0x200085, 0); fc_field(&c, 4, 0, 0);
+#define SEGC(N, VA, VAR, VMV, VMR, FO, FOR, FS, FSR, PROT, NS) do { fc_field(&c, 4, MC("LC_SEGMENT_64"), 0); fc_field(&c, 4, SEG + SECT * (NS), 0); fc_lit_name16(&c, N); \
+        fc_field(&c, 8, VA, VAR); fc_field(&c, 8, VMV, VMR); fc_field(&c, 8, FO, FOR); fc_field(&c, 8, FS, FSR); fc_field(&c, 4, PROT, 0); fc_field(&c, 4, PROT, 0); fc_field(&c, 4, NS, 0); fc_field(&c, 4, 0, 0); } while (0)
+#define SECTC(N, S, VA, VAR, SZ, SZR, OFF, OFFR, FLAGS) do { fc_lit_name16(&c, N); fc_lit_name16(&c, S); fc_field(&c, 8, VA, VAR); fc_field(&c, 8, SZ, SZR); fc_field(&c, 4, OFF, OFFR); \
+        fc_field(&c, 4, 2, 0); fc_field(&c, 4, 0, 0); fc_field(&c, 4, 0, 0); fc_field(&c, 4, FLAGS, 0); fc_field(&c, 4, 0, 0); fc_field(&c, 4, 0, 0); fc_field(&c, 4, 0, 0); } while (0)
+        SEGC("__PAGEZERO", 0, 0, VM, 0, 0, 0, 0, 0, 0, 0);
+        SEGC("__TEXT", VM, 0, 0, "mh_text", 0, 0, 0, "mh_text", 5, 1);
+        SECTC("__text", "__TEXT", VM + hdrs, 0, 0, "endo", hdrs, 0, 0x80000400L);
+        SEGC("__DATA", 0, "mh_datava", 0, "mh_vm", 0, "mh_text", 0, "mh_data", 3, 2);
+        SECTC("__data", "__DATA", 0, "mh_datava", 0, "mh_stored", 0, "mh_text", 0);
+        SECTC("__bss", "__DATA", 0, "mh_bssva", 0, "mh_bsslen", 0, 0, 1);
+        SEGC("__LINKEDIT", 0, "mh_linkva", 0, "mh_linkvm", 0, "mh_link", 0, "mh_linksz", 1, 0);
+        fc_field(&c, 4, MC("LC_LOAD_DYLINKER"), 0); fc_field(&c, 4, 32, 0); fc_field(&c, 4, 12, 0);
+        { unsigned char d[20] = {0}; for (q = 0; q < ndyld && q < 20; q++) d[q] = dyld[q]; fc_lit(&c, d, 20); }
+        for (q = 0; q < nlibsys; q++) lib[q] = libsys[q];
+        lib[nlibsys] = 0; nlib = nlibsys + 1;
+        while (nlib % 8) lib[nlib++] = 0;
+        fc_field(&c, 4, MC("LC_LOAD_DYLIB"), 0); fc_field(&c, 4, 24 + nlib, 0); fc_field(&c, 4, 24, 0); fc_field(&c, 4, 0, 0); fc_field(&c, 4, 0x10000, 0); fc_field(&c, 4, 0x10000, 0);
+        fc_lit(&c, lib, nlib);
+        fc_field(&c, 4, MC("LC_MAIN"), 0); fc_field(&c, 4, 24, 0); fc_field(&c, 8, 0, "mh_entry"); fc_field(&c, 8, 0, 0);
+        fc_field(&c, 4, MC("LC_BUILD_VERSION"), 0); fc_field(&c, 4, 24, 0); fc_field(&c, 4, 1, 0); fc_field(&c, 4, 13L << 16, 0); fc_field(&c, 4, 13L << 16, 0); fc_field(&c, 4, 0, 0);
+        fc_field(&c, 4, MC("LC_DYLD_INFO_ONLY"), 0); fc_field(&c, 4, 48, 0); fc_field(&c, 4, 0, 0); fc_field(&c, 4, 0, 0); fc_field(&c, 4, 0, "mh_bindoff"); fc_field(&c, 4, ndlbind, 0);
+        for (q = 0; q < 6; q++) fc_field(&c, 4, 0, 0);
+        fc_field(&c, 4, MC("LC_SYMTAB"), 0); fc_field(&c, 4, 24, 0); fc_field(&c, 4, 0, "mh_link"); fc_field(&c, 4, 0, 0); fc_field(&c, 4, 0, "mh_link"); fc_field(&c, 4, MC("STRTAB"), 0);
+        fc_field(&c, 4, MC("LC_DYSYMTAB"), 0); fc_field(&c, 4, 80, 0);
+        for (q = 0; q < 18; q++) fc_field(&c, 4, 0, 0);
+        fc_field(&c, 4, MC("LC_CODE_SIGNATURE"), 0); fc_field(&c, 4, 16, 0); fc_field(&c, 4, 0, "mh_sigoff"); fc_field(&c, 4, 0, "mh_siglen");
+        { static unsigned char z[512]; long sl = MC("SLACK"); if (sl > 512) fg_die("SLACK too large", 0); fc_lit(&c, z, sl); }
+        cx_fmt(nm, sizeof nm, "header_%s", arch[a]); fc_rows(o, nm, &c);
+        cx_fmt(nm, sizeof nm, "header_tail_%s", arch[a]); fc_tail(o, nm, &c);
+        fc_collect(&c);
+        fc_init(&c);
+        fc_big = 1;
+        fc_field(&c, 4, MC("CS_MAGIC_EMBEDDED"), 0); fc_field(&c, 4, 0, "mh_siglen"); fc_field(&c, 4, 1, 0); fc_field(&c, 4, 0, 0); fc_field(&c, 4, 20, 0);
+        fc_name(&c, "signature-length");
+        fc_field(&c, 4, MC("CS_MAGIC_CODEDIRECTORY"), 0); fc_field(&c, 4, 0, "mh_cdlen"); fc_field(&c, 4, 0x20400, 0); fc_field(&c, 4, MC("CS_ADHOC"), 0);
+        fc_field(&c, 4, 88 + nident, 0); fc_field(&c, 4, 88, 0); fc_field(&c, 4, 0, 0); fc_field(&c, 4, 0, "mh_slots"); fc_field(&c, 4, 0, "mh_sigoff");
+        fc_field(&c, 1, 32, 0); fc_field(&c, 1, 2, 0); fc_field(&c, 1, 0, 0); fc_field(&c, 1, 12, 0); fc_field(&c, 4, 0, 0);
+        fc_field(&c, 4, 0, 0); fc_field(&c, 4, 0, 0); fc_field(&c, 4, 0, 0); fc_field(&c, 8, 0, 0); fc_field(&c, 8, 0, 0); fc_field(&c, 8, 0, "mh_text"); fc_field(&c, 8, MC("CS_EXECSEG_MAIN_BINARY"), 0);
+        fc_big = 0;
+        fc_lit(&c, ident, nident);
+        cx_fmt(nm, sizeof nm, "signature_%s", arch[a]); fc_rows(o, nm, &c);
+        cx_fmt(nm, sizeof nm, "signature_tail_%s", arch[a]); fc_tail(o, nm, &c);
+        fc_collect(&c);
+#undef SEGC
+#undef SECTC
+    }
+    {
+        static unsigned char z[256];
+        long pre = MC("DLPREFIX");
+        if (pre > 256) fg_die("DLPREFIX too large", 0);
+        fc_init(&c); fc_lit(&c, z, pre); fc_tail(o, "prefix", &c); fc_collect(&c);
+        fc_init(&c); fc_lit(&c, dlbind, ndlbind); fc_tail(o, "binddata", &c); fc_collect(&c);
+    }
+    fc_used_bytes(o);
+#undef MC
+}
+
+/* enc-elf: ELF program-header / dynamic-section field schema and the import/loader slot tables. */
+static void enc_elf(Ob *o) {
+    static Krow k[64], kp[128];
+    static Fc c;
+    int nk = fg_krows("exec/facts/image-elf.tsv", k, 64), np = fg_krows("exec/facts/image-pe.tsv", kp, 128), nimp = 0, a, i;
+    long VADDR = kv_int(k, nk, "const", "VADDR"), EHDR = kv_int(k, nk, "const", "EHDR"), PHDR = kv_int(k, nk, "const", "PHDR"), PAGE = kv_int(k, nk, "const", "PAGE");
+    const char *arch[4];
+    int narch = 0;
+    char nm[64];
+    for (i = 0; i < np; i++) if (tx_eq(kp[i].kind, "import", 8)) nimp++;
+    for (i = 0; i < nk; i++) if (tx_eq(k[i].kind, "machine", 8)) arch[narch++] = k[i].name;
+    for (a = 1; a < narch; a++) for (i = a; i > 0 && fg_strcmp(arch[i - 1], arch[i]) > 0; i--) { const char *t = arch[i]; arch[i] = arch[i - 1]; arch[i - 1] = t; }
+    {
+        const char *cn[8] = {"DATA", "RELOCS", "iat_size", "VADDR", "dyn_doff", "fmt_elf", "fmt_macho", "fmt_pe"};
+        long cv[8] = {1L << 40, 4L << 40, 0, 0, 0, 1, 2, 3};
+        cv[2] = 8L * nimp; cv[3] = VADDR; cv[4] = VADDR + 32;
+        for (i = 0; i < 8; i++) { ob_z(o, "="); ob_z(o, cn[i]); ob_z(o, "\tint\t"); ob_int(o, cv[i]); ob_z(o, "\n"); }
+    }
+    pe_nused = 0; fc_big = 0;
+#define EMIT(N) do { cx_fmt(nm, sizeof nm, "%s", N); fc_rows(o, nm, &c); cx_fmt(nm, sizeof nm, "%s_tail", N); fc_tail(o, nm, &c); fc_collect(&c); } while (0)
+    fc_init(&c);
+    for (i = 0; i < nimp; i++) { char r[32]; cx_fmt(r, sizeof r, "ml_imp_%d", i); fc_field(&c, 8, 0, fg_dupz(r)); }
+    EMIT("iat");
+    fc_init(&c);
+    for (i = 0; i < 4; i++) { char r[32]; cx_fmt(r, sizeof r, "ml_dl_%d", i); fc_field(&c, 8, 0, fg_dupz(r)); }
+    EMIT("dlslots");
+    { static const unsigned char z[32]; fc_init(&c); fc_lit(&c, z, 32); EMIT("dynslots"); }
+    for (a = 0; a < narch; a++) {
+        long mach = kv_int(k, nk, "machine", arch[a]);
+        int arm = tx_eq(arch[a], "arm64", 8), dyn;
+        ob_z(o, "=HDRS_"); ob_z(o, arch[a]); ob_z(o, "\tint\t"); ob_int(o, kv_int(k, nk, "hdrs", arch[a])); ob_z(o, "\n");
+        for (dyn = 0; dyn < 2; dyn++) {
+            static const unsigned char id[16] = {0x7f, 'E', 'L', 'F', 2, 1, 1, 0};
+            const char *interp = arm ? "/lib/ld-linux-aarch64.so.1" : "/lib64/ld-linux-x86-64.so.2";
+            long il = tx_len(interp, 64);
+            fc_init(&c);
+            fc_name(&c, dyn ? "dyn-init" : "header-init");
+            fc_lit(&c, id, 16);
+            fc_field(&c, 2, 2, 0); fc_field(&c, 2, mach, 0); fc_field(&c, 4, 1, 0); fc_field(&c, 8, 0, "entryva"); fc_field(&c, 8, EHDR, 0); fc_field(&c, 8, 0, 0);
+            fc_field(&c, 4, 0, 0); fc_field(&c, 2, EHDR, 0); fc_field(&c, 2, PHDR, 0); fc_field(&c, 2, dyn ? 4 : 2, 0); fc_field(&c, 2, 0, 0); fc_field(&c, 2, 0, 0); fc_field(&c, 2, 0, 0);
+#define PH(T, F, OFF, OFFR, VA, VAR, FS, FSR, MS, MSR, AL) do { fc_field(&c, 4, T, 0); fc_field(&c, 4, F, 0); fc_field(&c, 8, OFF, OFFR); fc_field(&c, 8, VA, VAR); fc_field(&c, 8, VA, VAR); \
+            fc_field(&c, 8, FS, FSR); fc_field(&c, 8, MS, MSR); fc_field(&c, 8, AL, 0); } while (0)
+            if (!dyn) {
+                PH(1, 5, 0, 0, VADDR, 0, 0, "tend", 0, "tend", PAGE);
+                PH(1, 6, 0, "doff", 0, "data_va", 0, "stored", 0, "memlen", PAGE);
+                cx_fmt(nm, sizeof nm, "static_%s", arch[a]);
+            } else {
+                static const unsigned char names[] = "\0libc.so.6\0dlopen\0dlsym\0dlclose\0dlerror\0";
+                static const unsigned char z[32], st[4] = {0x12, 0, 0, 0};
+                unsigned char ib[32] = {0};
+                static const long nameoff[4] = {11, 18, 24, 32};
+                static const long tags[11][2] = {{1, 1}, {4, 480}, {5, 320}, {6, 360}, {10, 40}, {11, 24}, {7, 512}, {8, 96}, {9, 24}, {30, 8}, {0, 0}};
+                long q;
+                PH(3, 4, 288, 0, VADDR + 288, 0, il + 1, 0, il + 1, 0, 1);
+                PH(1, 5, 0, 0, VADDR, 0, 0, "tend", 0, "tend", PAGE);
+                PH(1, 6, 0, "doff", 0, "dyn_slots", 0, "dyn_filesz", 0, "dyn_memsz", PAGE);
+                PH(2, 4, 608, 0, VADDR + 608, 0, 176, 0, 176, 0, 8);
+                for (q = 0; q < il; q++) ib[q] = (unsigned char)interp[q];
+                fc_lit(&c, ib, 32);
+                fc_lit(&c, names, (long)sizeof names - 1);
+                fc_lit(&c, z, 24);
+                for (q = 0; q < 4; q++) { fc_field(&c, 4, nameoff[q], 0); fc_lit(&c, st, 4); fc_field(&c, 8, 0, 0); fc_field(&c, 8, 0, 0); }
+                fc_field(&c, 4, 1, 0); fc_field(&c, 4, 5, 0);
+                fc_lit(&c, z, 24);
+                for (q = 0; q < 4; q++) {
+                    char cn[32];
+                    cx_fmt(cn, sizeof cn, "dynreloc%ld", 8 * q);
+                    fc_name(&c, fg_dupz(cn));
+                    fc_field(&c, 8, 0, "dyn_reloc"); fc_field(&c, 8, ((q + 1) << 32) | (arm ? 1025 : 6), 0); fc_field(&c, 8, 0, 0);
+                }
+                for (q = 0; q < 11; q++) { long v = tags[q][1]; if (tags[q][0] == 4 || tags[q][0] == 5 || tags[q][0] == 6 || tags[q][0] == 7) v += VADDR; fc_field(&c, 8, tags[q][0], 0); fc_field(&c, 8, v, 0); }
+                cx_fmt(nm, sizeof nm, "dyn_%s", arch[a]);
+            }
+#undef PH
+            {
+                char base[64];
+                cx_fmt(base, sizeof base, "%s", nm);
+                EMIT(base);
+            }
+        }
+    }
+#undef EMIT
+    ob_z(o, "@relocs\toff:int\n");
+    for (i = 0; i < 4; i++) { ob_z(o, "\t"); ob_int(o, 8 * i); ob_z(o, "\n"); }
+    fc_used_bytes(o);
+}
+
 static void enc_pe(Ob *o) { pe_fields(o, 0); }
 static void enc_pe_forward(Ob *o) { pe_fields(o, 1); }
 
@@ -1051,6 +1257,8 @@ static const Table fg_tables[] = {
                   "exec/parse2/formatwarnings-stack.tsv", "exec/parse2/membercontrol-stack.tsv", "tools/facts-gen.cx"}, k2_stack},
     {"enc-pe", {"exec/facts/image-pe.tsv", "tools/facts-gen.cx", 0}, enc_pe},
     {"enc-pe-forward", {"exec/facts/image-pe.tsv", "tools/facts-gen.cx", 0}, enc_pe_forward},
+    {"enc-macho", {"exec/facts/image-macho.tsv", "tools/facts-gen.cx", 0}, enc_macho},
+    {"enc-elf", {"exec/facts/image-elf.tsv", "exec/facts/image-pe.tsv", "tools/facts-gen.cx", 0}, enc_elf},
     {0, {0}, 0}
 };
 
