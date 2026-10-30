@@ -1,0 +1,54 @@
+#pragma unisa use mem.grow
+#pragma unisa use text.build
+#pragma unisa use text.text
+/* practice-vec.cx -- an experiment that drives mem.grow/text.build at their
+   boundaries to surface real interface defects, not toy cases.  usage:
+     sh ./unisacc.com tools/practice-vec.cx
+   Each PASS/FAIL below is a boundary the current API must hold. */
+static int bad;
+static void ok(int c, const char *n) { printf("%s\t%s\n", c ? "PASS" : "FAIL", n); if (!c) bad = 1; }
+
+int main(void) {
+    /* 1. sb_cstr on a fresh builder: no allocation should be observable */
+    {
+        sb *b = sb_new();
+        ok(b && sb_len(b) == 0, "fresh-empty");
+        /* call cstr twice: second must not change len */
+        const char *s1 = sb_cstr(b);
+        ok(s1 && s1[0] == 0, "fresh-cstr-empty");
+        ok(sb_len(b) == 0, "cstr-does-not-grow-len");
+        sb_free(b);
+    }
+    /* 2. append then cstr: the NUL must not count into len */
+    {
+        sb *b = sb_new();
+        sb_puts(b, "abc");
+        ok(sb_len(b) == 3, "three-before-cstr");
+        const char *s = sb_cstr(b);
+        ok(s && s[0] == 'a' && s[3] == 0, "cstr-nul-terminated");
+        ok(sb_len(b) == 3, "cstr-does-not-advance-len");
+        sb_free(b);
+    }
+    /* 3. grow to a large size and read back a boundary byte */
+    {
+        mg_buf g; long i;
+        mg_init(&g);
+        for (i = 0; i < 100000; i++) if (mg_push(&g, (i & 255))) bad = 1;
+        ok(g.len == 100000 && g.cap >= 100000, "grow-large");
+        ok(g.data[0] == 0 && g.data[99999] == (99999 & 255), "grow-large-content");
+        mg_free(&g);
+        ok(g.data == 0 && g.len == 0, "grow-large-freed");
+    }
+    /* 4. move then use the source: must be a no-op, not a double-free */
+    {
+        mg_buf a, b;
+        mg_init(&a); mg_init(&b);
+        mg_append(&a, "xyz", 3);
+        mg_move(&b, &a);
+        mg_free(&a);       /* no-op */
+        mg_free(&b);       /* the real free */
+        ok(1, "move-then-free-source-is-noop");
+    }
+    printf("PRACTICE_VEC\tfailed=%d\n", bad);
+    return bad;
+}

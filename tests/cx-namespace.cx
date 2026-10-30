@@ -1,0 +1,41 @@
+#!/usr/bin/env -S unisacc.com -run
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+/* cx-namespace.cx -- lock the cxmod namespace/conflict rejection. usage: ROOT PRODUCT NEW_DIR */
+static int fails, checks;
+static char dir[4096];
+static void note(int ok, const char *name) { printf("%s\t%s\n", ok ? "PASS" : "FAIL", name); checks++; if (!ok) fails++; }
+static int write_file(const char *rel, const char *s) { char p[4096]; if (cx_path_join(p, sizeof p, dir, rel)) return 1; return cx_write(p, s, tx_len(s, 1L << 20)); }
+static int plan_rc(const char *product, const char *main, int exp, const char *want, char *out, int cap) {
+    char full[4096]; char *av[8]; int rc, cut = 0; long n;
+    if (cx_path_join(full, sizeof full, dir, main)) return 0;
+    av[0] = "sh"; av[1] = (char *)product; av[2] = "-cx-plan"; av[3] = full; av[4] = 0;
+    rc = sy_run(av, out, cap, &cut);
+    if (rc != exp) return 0;
+    if (want) { n = tx_len(want, 512); if (tx_find(out, tx_len(out, cap), want, n) < 0) return 0; }
+    return 1;
+}
+int main(int argc, char **argv) {
+    char out[8192]; char root[4096], product[4096];
+    if (argc != 4 || !realpath(argv[1], root) || !realpath(argv[2], product) || !argv[3][0]) { fputs("usage: ROOT PRODUCT NEW_DIR\n", stderr); return 2; }
+    { if (cx_fmt(dir, sizeof dir, "%s", argv[3])) return 2; }
+    if (sy_mkdir(dir, 0700) != 0) { perror("output dir"); return 2; }
+    (void)root;
+    write_file("a.cx", "#pragma unisa module a\nint clash(void){return 1;}\n");
+    write_file("b.cx", "#pragma unisa module b\nint clash(void){return 2;}\n");
+    write_file("c1.cx", "#pragma unisa use a\n#pragma unisa use b\nint main(void){return clash();}\n");
+    note(plan_rc(product, "c1.cx", 1, "clash exported by both a", out, sizeof out), "exported-by-both-refused");
+    write_file("m2.cx", "#pragma unisa module m2\nint val(void){return 1;}\n");
+    write_file("c2.cx", "#pragma unisa use m2\nint val(void){return 2;}\nint main(void){return val();}\n");
+    note(plan_rc(product, "c2.cx", 1, "val is exported by m2", out, sizeof out), "unit-defines-export-refused");
+    write_file("t3.cx", "#pragma unisa module t3\nstruct S { int x; };\nint fa(void){return 1;}\n");
+    write_file("t4.cx", "#pragma unisa module t4\nstruct S { int y; };\nint fb(void){return 2;}\n");
+    write_file("c3.cx", "#pragma unisa use t3\n#pragma unisa use t4\nint main(void){return fa()+fb();}\n");
+    note(plan_rc(product, "c3.cx", 1, "type struct S from t3 and t4", out, sizeof out), "type-from-two-refused");
+    write_file("ok.cx", "#pragma unisa module ok\nint fine(void){return 5;}\n");
+    write_file("c4.cx", "#pragma unisa use ok\nint main(void){return fine();}\n");
+    note(plan_rc(product, "c4.cx", 0, 0, out, sizeof out), "no-clash-plans");
+    printf("CX_NAMESPACE\tchecks=%d\tfailed=%d\n", checks, fails);
+    return fails ? 1 : 0;
+}
