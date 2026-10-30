@@ -1,6 +1,8 @@
 #pragma unisa use reload_candidate
 #pragma unisa use reload_io
 #pragma unisa use json
+#pragma unisa use sys.posix
+#pragma unisa use sys.fs
 
 /* message_send.cx -- C port of message_send.py (same CLI, receipt JSON and exit codes).
  *
@@ -15,11 +17,14 @@
  * STATUS
  *   ported : CLI, input read (O_NOFOLLOW, regular file, LIMIT+1 cap), strict UTF-8,
  *            JSON parse with duplicate-key rejection, schema/field checks, canonical
- *            envelope bytes and size limit, receipt printing, absolute/trusted session dir.
- *   BLOCKED: the publish body (inbox/ state dirs, mailbox lock, temp write, atomic link).
- *            Missing in unisacc 0.0.39: openat, linkat, lockf (dir_fd-relative mkdir/open/
- *            unlink also depend on the *at family). Such valid messages are rejected here
- *            with rc 1 and cause "publish blocked: openat/linkat/lockf missing in unisacc".
+ *            envelope bytes and size limit, receipt printing, absolute/trusted session dir,
+ *            and (2026-10-30) the publish body: inbox/ and its ready/started/done dirs
+ *            made and opened relative to directory fds with O_NOFOLLOW and checked owner
+ *            and private modes, the mailbox.lock record lock, the scan (only those dirs and
+ *            the lock, [0-9a-f]{32}.json names, one state per id, stored envelopes decoded
+ *            and their id/name matched, capacities 32 unfinished / 1024 retained), the temp
+ *            write + fsync and the atomic linkat publish, then cleanup. The *at calls and
+ *            lockf the carried runtime lacks come from cx/sys posix (apps/csih/sys).
  *   DEVIATION: NUL inside JSON string escapes (\u0000) cannot be detected in NUL-terminated
  *            jvalue strings; Python rejects them with "NUL value".
  */
@@ -196,6 +201,240 @@ static void ms_print_receipt(const char *kind, const char *id, const char *sessi
            status);
 }
 
+/* ---- publish (message_send.py publish/scan/read_envelope/directory/checked) ----
+ * Every step is relative to a directory fd opened with O_NOFOLLOW, so a path
+ * swapped for a symlink mid-way cannot redirect it. Failures inside run under
+ * their own rc_guard: like Python's try/finally, the receipt then still names
+ * the message, cleanup runs, and the status says whether it became visible. */
+
+static const char *const ms_states[3] = { "ready", "started", "done" };
+
+typedef struct {
+    const char *dir, *expected, *wanted;
+    Buf *canon;
+    int fds[16], nfds;
+    int statefd[3];
+    int tempfd, temporary, visible;
+    const char *status;
+    char tempname[64];
+} ms_pub_t;
+static ms_pub_t MP;
+
+static void ms_os(long r) {
+    char m[64];
+    if (r >= 0) return;
+    snprintf(m, sizeof m, "filesystem error errno=%ld", -r);
+    fail(m);
+}
+
+static int ms_push(int fd) {
+    if (MP.nfds < (int)(sizeof MP.fds / sizeof MP.fds[0])) MP.fds[MP.nfds++] = fd;
+    return fd;
+}
+
+static int ms_same(const char *a, const char *b) {
+    while (*a && *a == *b) { a++; b++; }
+    return *a == *b;
+}
+
+static int ms_len(const char *s) { int n = 0; while (s[n]) n++; return n; }
+
+static int ms_bytes_eq(const char *a, const char *b, size_t n) {
+    size_t i;
+    for (i = 0; i < n; i++) if (a[i] != b[i]) return 0;
+    return 1;
+}
+
+#define RC_ERR_CAP_MS 1024
+
+/* checked(fd, directory): ours, the right kind, private mode */
+static sy_stat_t ms_checked(int fd, int directory) {
+    sy_stat_t s;
+    ms_os(sy_fstat(fd, &s));
+    ms_req(s.uid == (long)getuid() && s.kind == (directory ? 'd' : 'f'), "untrusted opened file kind/owner");
+    ms_req(s.mode == (directory ? 0700 : 0600), "wrong private permissions");
+    return s;
+}
+
+/* directory(parent, name): make it if absent (an existing one is fine), open, check */
+static int ms_directory(int parent, const char *name) {
+    int r = sy_mkdirat(parent, name, 0700), fd;
+    if (r < 0 && r != -EEXIST) ms_os(r);
+    fd = sy_openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0);
+    ms_os(fd);
+    ms_push(fd);
+    ms_checked(fd, 1);
+    return fd;
+}
+
+/* [0-9a-f]{32}\.json */
+static int ms_state_name(const char *n) {
+    int i;
+    for (i = 0; i < 32; i++) if (!((n[i] >= '0' && n[i] <= '9') || (n[i] >= 'a' && n[i] <= 'f'))) return 0;
+    return ms_same(n + 32, ".json");
+}
+
+/* read_envelope(parent, name, expected): the stored envelope's canonical bytes into OUT */
+static void ms_read_envelope(int parent, const char *name, Buf *out) {
+    static unsigned char raw[MS_LIMIT + 2];
+    long got = 0, k;
+    jvalue *obj;
+    int fd = sy_openat(parent, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC, 0);
+    sy_stat_t s;
+    char want[64];
+    ms_os(fd);
+    ms_push(fd);
+    s = ms_checked(fd, 0);
+    ms_req(s.size <= MS_LIMIT, "stored envelope oversized");
+    while (got < MS_LIMIT + 1 && (k = sy_read(fd, raw + got, MS_LIMIT + 1 - got)) > 0) got += k;
+    ms_os(k < 0 ? k : 0);
+    out->n = 0;
+    obj = ms_decode(raw, (size_t)got, MP.expected, out);
+    snprintf(want, sizeof want, "%s.json", jget(obj, "id")->s);
+    ms_req(ms_same(name, want), "stored id/filename mismatch");
+}
+
+/* scan(): retained, unfinished; *existing set when WANTED is stored (its bytes in EXISTING) */
+static void ms_scan(int inbox, int *retained, int *unfinished, int *found, Buf *existing) {
+    static char names[65536], ids[1024][33];
+    static Buf stored;
+    int n, i, at, st, nids = 0;
+    n = sy_dir_names(inbox, names, sizeof names);
+    ms_os(n);
+    {
+        int seen[4] = { 0, 0, 0, 0 }, bad = n != 4;
+        for (i = 0, at = 0; i < n; i++, at += ms_len(names + at) + 1) {
+            if (ms_same(names + at, "ready")) seen[0]++;
+            else if (ms_same(names + at, "started")) seen[1]++;
+            else if (ms_same(names + at, "done")) seen[2]++;
+            else if (ms_same(names + at, "mailbox.lock")) seen[3]++;
+            else bad = 1;
+        }
+        ms_req(!bad && seen[0] == 1 && seen[1] == 1 && seen[2] == 1 && seen[3] == 1, "unknown inbox entry");
+    }
+    *unfinished = 0;
+    *found = 0;
+    for (st = 0; st < 3; st++) {
+        n = sy_dir_names(MP.statefd[st], names, sizeof names);
+        ms_os(n);
+        for (i = 0, at = 0; i < n; i++, at += ms_len(names + at) + 1) {
+            const char *name = names + at;
+            char mid[33];
+            int j;
+            ms_req(ms_state_name(name), "unknown state directory entry");
+            snprintf(mid, sizeof mid, "%.32s", name);
+            for (j = 0; j < nids; j++) ms_req(!ms_same(ids[j], mid), "id present in multiple states");
+            ms_req(nids < 1024, "retained message capacity exceeded");
+            ms_read_envelope(MP.statefd[st], name, &stored);
+            snprintf(ids[nids++], 33, "%s", mid);
+            if (st != 2) (*unfinished)++;
+            ms_req(*unfinished <= 32, "unfinished message capacity exceeded");
+            if (ms_same(mid, MP.wanted)) {
+                existing->n = 0;
+                bn(existing, stored.p, stored.n);
+                *found = 1;
+            }
+        }
+    }
+    *retained = nids;
+}
+
+/* .publish-<32 random hex>.tmp */
+static void ms_tempname(char *out, int cap) {
+    unsigned char r[16];
+    long got = 0;
+    int fd = sy_openat(sy_at_fdcwd(), "/dev/urandom", O_RDONLY | O_CLOEXEC, 0), i, at;
+    ms_os(fd);
+    got = sy_read(fd, r, sizeof r);
+    sy_close(fd);
+    ms_req(got == (long)sizeof r, "random source short read");
+    at = snprintf(out, cap, ".publish-");
+    for (i = 0; i < 16 && at + 3 < cap; i++) at += snprintf(out + at, cap - at, "%02x", r[i]);
+    snprintf(out + at, cap - at, ".tmp");
+}
+
+static void ms_publish_body(void *ud) {
+    static Buf existing;
+    int parent, inbox, lock, st, retained, unfinished, found, r;
+    (void)ud;
+    ms_req(MP.dir[0] == '/', "session directory must be absolute");
+    trusted(MP.dir, 1, 1);
+    parent = sy_openat(sy_at_fdcwd(), MP.dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0);
+    ms_os(parent);
+    ms_push(parent);
+    ms_checked(parent, 1);
+    inbox = ms_directory(parent, "inbox");
+    lock = sy_openat(inbox, "mailbox.lock", O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+    ms_os(lock);
+    ms_push(lock);
+    ms_checked(lock, 0);
+    r = sy_lockf(lock, 1, 0);
+    if (r == -EAGAIN || r == -EACCES) fail("mailbox busy");
+    ms_os(r);
+    for (st = 0; st < 3; st++) MP.statefd[st] = ms_directory(inbox, ms_states[st]);
+    ms_scan(inbox, &retained, &unfinished, &found, &existing);
+    if (found) {
+        ms_req(existing.n == MP.canon->n && ms_bytes_eq(existing.p, MP.canon->p, existing.n), "id conflicts with existing content");
+        MP.visible = 1;
+        MP.status = "already-published";
+        return;
+    }
+    ms_req(unfinished < 32, "unfinished capacity32 reached");
+    ms_req(retained < 1024, "retained capacity1024 reached");
+    /* persist any newly created namespace before exposing an envelope */
+    ms_os(sy_fsync(lock));
+    ms_os(sy_fsync(inbox));
+    ms_os(sy_fsync(parent));
+    ms_tempname(MP.tempname, sizeof MP.tempname);
+    MP.tempfd = sy_openat(MP.statefd[0], MP.tempname, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    ms_os(MP.tempfd);
+    MP.temporary = 1;
+    ms_checked(MP.tempfd, 0);
+    ms_os(sy_write_all(MP.tempfd, MP.canon->p, (long)MP.canon->n));
+    ms_os(sy_fsync(MP.tempfd));
+    r = MP.tempfd;
+    MP.tempfd = -1;
+    ms_os(sy_close(r));
+    {
+        /* link is atomic, fails on an existing target, and exposes complete bytes */
+        char final_[64];
+        snprintf(final_, sizeof final_, "%s.json", MP.wanted);
+        ms_os(sy_linkat(MP.statefd[0], MP.tempname, MP.statefd[0], final_, 0));
+    }
+    MP.visible = 1;
+    MP.status = "published";
+    ms_os(sy_unlinkat(MP.statefd[0], MP.tempname, 0));
+    MP.temporary = 0;
+    ms_os(sy_fsync(MP.statefd[0]));
+}
+
+/* publish(): rc 0 / 1 rejected / 3 published-unconfirmed; *STATUS and *CAUSE (NULL: none) */
+static int ms_publish(const char *dir, const char *expected, const char *id, Buf *canon,
+                      const char **status, char *cause, int cap) {
+    static const ms_pub_t zero;
+    int failed, i;
+    char err[RC_ERR_CAP_MS];
+    MP = zero;
+    MP.dir = dir; MP.expected = expected; MP.wanted = id; MP.canon = canon;
+    MP.tempfd = -1;
+    MP.statefd[0] = MP.statefd[1] = MP.statefd[2] = -1;
+    failed = rc_guard(ms_publish_body, 0);
+    err[0] = 0;
+    if (failed) snprintf(err, sizeof err, "%s", rc_err_buf());
+    /* finally: our own temp file only; never a target or the lock */
+    if (MP.tempfd >= 0) { int r = sy_close(MP.tempfd); if (r < 0 && !err[0]) snprintf(err, sizeof err, "filesystem error errno=%d", -r); }
+    if (MP.temporary) { int r = sy_unlinkat(MP.statefd[0], MP.tempname, 0); if (r < 0 && !err[0]) snprintf(err, sizeof err, "filesystem error errno=%d", -r); }
+    for (i = MP.nfds - 1; i >= 0; i--) { int r = sy_close(MP.fds[i]); if (r < 0 && !err[0]) snprintf(err, sizeof err, "filesystem error errno=%d", -r); }
+    if (err[0]) {
+        *status = MP.visible ? "published-unconfirmed" : "rejected";
+        snprintf(cause, cap, "%s", err);
+        return MP.visible ? 3 : 1;
+    }
+    *status = MP.status;
+    cause[0] = 0;
+    return 0;
+}
+
 static int ms_main_body(int argc, char **argv) {
     static char rc_cause[1100];
     unsigned char *raw = NULL;
@@ -214,15 +453,15 @@ static int ms_main_body(int argc, char **argv) {
     }
     obj = ms_decode(raw, rawn, argv[3], &canon);
 
-    /* publish(): absolute trusted private session dir, then the blocked body */
-    if (argv[2][0] != '/') fail("session directory must be absolute");
-    trusted(argv[2], 1, 1);
-    snprintf(rc_cause, sizeof rc_cause,
-             "publish blocked: openat/linkat/lockf missing in unisacc 0.0.39 (TODO port)");
-    cause = rc_cause;
-    ms_print_receipt(jget(obj, "kind")->s, jget(obj, "id")->s, jget(obj, "session")->s, "rejected");
-    fprintf(stderr, "message publisher: %s\n", cause);
-    rc = 1;
+    /* publish(): decode failures above go to main's guard (null receipt, like
+     * Python's default); everything after names the message in its receipt. */
+    {
+        const char *status = "rejected";
+        rc = ms_publish(argv[2], argv[3], jget(obj, "id")->s, &canon, &status, rc_cause, sizeof rc_cause);
+        cause = rc_cause[0] ? rc_cause : NULL;
+        ms_print_receipt(jget(obj, "kind")->s, jget(obj, "id")->s, jget(obj, "session")->s, status);
+        if (cause) fprintf(stderr, "message publisher: %s\n", cause);
+    }
     return rc;
 }
 

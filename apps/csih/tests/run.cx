@@ -1,4 +1,5 @@
 #pragma unisa use tclock
+#pragma unisa use text.text
 /*
  * tests/run.cx — csih's own test entry (csih is a small product of its own;
  * the repository's tests/run.cx is unisacc's).
@@ -19,9 +20,13 @@
  * then complete); otherwise 1 on a failure, 3 when only coverage is missing.
  * Each run is bounded by its row's budget (<= 55s); every result carries its
  * seconds. Nothing is cached across runs.
+ *
+ * L3 on L0 only (plans/cx-layers.md): strings via text.text; clock/env via
+ * tclock; cx_read / cx_runv_timeout from the cx.h prelude.
  */
 
 #define MAXC 160
+#define CAP 4200
 
 typedef struct {
     char *id, *layer, *status, *smoke, *argv, *expect, *source;
@@ -35,12 +40,21 @@ typedef struct {
 static contract cs[MAXC];
 static int nc;
 static char unisacc[4096], env_unisacc[4200], env_bin[4200];
+static const contract zc;
+
+typedef struct { int pass, fail, timeout, gap, blocked, env, run; long ms; } tally;
+static const tally zt;
+
+static int eq(const char *a, const char *b) { return tx_eq(a, b, CAP); }
 
 static char *field(char **p) {
-    char *s = *p, *t;
+    char *s = *p;
+    long n, off;
     if (!s) return NULL;
-    t = strchr(s, '\t');
-    if (t) { *t = 0; *p = t + 1; } else *p = NULL;
+    n = tx_len(s, CAP);                 /* stops at the NUL we put on the line */
+    if (n < 0) return NULL;
+    off = tx_chr(s, n, '\t');
+    if (off >= 0) { s[off] = 0; *p = s + off + 1; } else *p = NULL;
     return s;
 }
 
@@ -48,37 +62,43 @@ static char *field(char **p) {
 static int parse_registry(char *text, char *why, int whyn) {
     char *line = text;
     int lineno = 0;
+    long tn = tx_len(text, 1L << 30);
+    char *end = tn < 0 ? text : text + tn;
     nc = 0;
-    while (line && *line) {
-        char *nl = strchr(line, '\n'), *p;
+    while (line < end) {
+        long off = tx_chr(line, (long)(end - line), '\n');
+        char *nl = off < 0 ? 0 : line + off;
         contract *c;
+        char *p;
         lineno++;
         if (nl) *nl = 0;
-        if (line[0] == '#' || !line[0]) { line = nl ? nl + 1 : NULL; continue; }
+        if (line[0] == '#' || !line[0]) { line = nl ? nl + 1 : end; continue; }
         if (nc >= MAXC) { snprintf(why, whyn, "more than %d contracts", MAXC); return 1; }
         c = &cs[nc];
-        memset(c, 0, sizeof *c);
+        *c = zc;
         p = line;
         c->id = field(&p); c->layer = field(&p); c->status = field(&p); c->smoke = field(&p);
         { char *b = field(&p); c->budget = b ? atoi(b) : 0; }
         c->argv = field(&p); c->expect = field(&p); c->source = field(&p);
         if (!c->source || p) { snprintf(why, whyn, "line %d: want 8 tab-separated fields", lineno); return 1; }
-        if (strcmp(c->status, "IMPLEMENTED") && strcmp(c->status, "GAP") && strcmp(c->status, "BLOCKED") && strcmp(c->status, "ENV")) {
+        if (!eq(c->status, "IMPLEMENTED") && !eq(c->status, "GAP") && !eq(c->status, "BLOCKED") && !eq(c->status, "ENV")) {
             snprintf(why, whyn, "line %d: status %s", lineno, c->status); return 1;
         }
-        if (strcmp(c->smoke, "smoke") && strcmp(c->smoke, "-")) { snprintf(why, whyn, "line %d: smoke column %s", lineno, c->smoke); return 1; }
-        if (!strcmp(c->status, "IMPLEMENTED")) {
+        if (!eq(c->smoke, "smoke") && !eq(c->smoke, "-")) { snprintf(why, whyn, "line %d: smoke column %s", lineno, c->smoke); return 1; }
+        if (eq(c->status, "IMPLEMENTED")) {
             if (c->budget < 1 || c->budget > 55) { snprintf(why, whyn, "line %d: budget %d not in 1..55", lineno, c->budget); return 1; }
-            if (!strcmp(c->argv, "-")) { snprintf(why, whyn, "line %d: IMPLEMENTED without argv", lineno); return 1; }
-            if (strcmp(c->expect, "rc0") && strncmp(c->expect, "rc0+text:", 9)) { snprintf(why, whyn, "line %d: expect %s", lineno, c->expect); return 1; }
-        } else if (!strcmp(c->smoke, "smoke")) { snprintf(why, whyn, "line %d: a %s row cannot be smoke", lineno, c->status); return 1; }
+            if (eq(c->argv, "-")) { snprintf(why, whyn, "line %d: IMPLEMENTED without argv", lineno); return 1; }
+            if (!eq(c->expect, "rc0") && !tx_prefix(c->expect, tx_len(c->expect, CAP), "rc0+text:", 9)) {
+                snprintf(why, whyn, "line %d: expect %s", lineno, c->expect); return 1;
+            }
+        } else if (eq(c->smoke, "smoke")) { snprintf(why, whyn, "line %d: a %s row cannot be smoke", lineno, c->status); return 1; }
         {
             int j;
-            for (j = 0; j < nc; j++) if (!strcmp(cs[j].id, c->id)) { snprintf(why, whyn, "line %d: duplicate id %s", lineno, c->id); return 1; }
+            for (j = 0; j < nc; j++) if (eq(cs[j].id, c->id)) { snprintf(why, whyn, "line %d: duplicate id %s", lineno, c->id); return 1; }
         }
         c->shared = -1;
         nc++;
-        line = nl ? nl + 1 : NULL;
+        line = nl ? nl + 1 : end;
     }
     if (!nc) { snprintf(why, whyn, "no contracts"); return 1; }
     return 0;
@@ -94,9 +114,18 @@ static void tail_line(const char *out, size_t n, char *line, int cap) {
     { char *t; for (t = line; *t; t++) if (*t == '\t') *t = ' '; }
 }
 
+static int has_text(const char *hay, const char *needle) {
+    long hn, nn;
+    if (!hay || !needle) return 0;
+    hn = tx_len(hay, 1L << 30);
+    nn = tx_len(needle, CAP);
+    if (hn < 0 || nn < 0) return 0;
+    return tx_find(hay, hn, needle, nn) >= 0;
+}
+
 static int judge(const contract *c, int rc, const char *out) {
     if (rc != 0) return 2;
-    if (!strncmp(c->expect, "rc0+text:", 9) && !(out && strstr(out, c->expect + 9))) return 2;
+    if (tx_prefix(c->expect, tx_len(c->expect, CAP), "rc0+text:", 9) && !has_text(out, c->expect + 9)) return 2;
     return 1;
 }
 
@@ -116,8 +145,8 @@ static void run_one(int i) {
     av[n++] = env_bin;
     av[n++] = "sh";
     for (t = strtok(buf, " "); t && n < 39; t = strtok(NULL, " ")) {
-        if (!strcmp(t, "U")) av[n++] = unisacc;
-        else if (n == 4 && !strcmp(t, "sh")) continue;   /* "sh x.sh": sh is already there */
+        if (eq(t, "U")) av[n++] = unisacc;
+        else if (n == 4 && eq(t, "sh")) continue;   /* "sh x.sh": sh is already there */
         else av[n++] = t;
     }
     av[n] = NULL;
@@ -130,17 +159,16 @@ static void run_one(int i) {
     printf("RESULT\t%s\t%s\tseconds=%ld.%02ld\trc=%d\tlayer=%s\t%s\n", c->id,
            c->verdict == 1 ? "PASS" : c->verdict == 3 ? "TIMEOUT" : "FAIL",
            c->ms / 1000, (c->ms % 1000) / 10, c->rc, c->layer, line);
-    fflush(stdout);
-    /* rows sharing this argv are judged on the same output, now */
+    /* rows sharing this argv are judged on the same output, now.
+     * out is a process-lifetime buffer from the cx.h prelude (no free). */
     for (j = i + 1; j < nc; j++) {
         contract *d = &cs[j];
-        if (d->verdict || strcmp(d->status, "IMPLEMENTED") || strcmp(d->argv, c->argv)) continue;
+        if (d->verdict || !eq(d->status, "IMPLEMENTED") || !eq(d->argv, c->argv)) continue;
         d->shared = i;
         d->rc = c->rc;
         d->ms = 0;
         d->verdict = c->verdict == 3 ? 3 : judge(d, c->rc, out);
     }
-    free(out);
 }
 
 static void report_shared(int i) {
@@ -149,12 +177,10 @@ static void report_shared(int i) {
            c->verdict == 1 ? "PASS" : c->verdict == 3 ? "TIMEOUT" : "FAIL", c->rc, c->layer, cs[c->shared].id);
 }
 
-typedef struct { int pass, fail, timeout, gap, blocked, env, run; long ms; } tally;
-
 static void count(tally *t, const contract *c) {
-    if (!strcmp(c->status, "GAP")) t->gap++;
-    else if (!strcmp(c->status, "BLOCKED")) t->blocked++;
-    else if (!strcmp(c->status, "ENV")) t->env++;
+    if (eq(c->status, "GAP")) t->gap++;
+    else if (eq(c->status, "BLOCKED")) t->blocked++;
+    else if (eq(c->status, "ENV")) t->env++;
     else if (c->verdict == 1) t->pass++;
     else if (c->verdict == 3) t->timeout++;
     else if (c->verdict == 2) t->fail++;
@@ -163,13 +189,12 @@ static void count(tally *t, const contract *c) {
 
 /* Run every IMPLEMENTED row WANT() selects; report the rest it selects. */
 static tally run_selected(int (*want)(const contract *, void *), void *ctx) {
-    tally t;
+    tally t = zt;
     int i;
-    memset(&t, 0, sizeof t);
     for (i = 0; i < nc; i++) {
         contract *c = &cs[i];
         if (!want(c, ctx)) continue;
-        if (strcmp(c->status, "IMPLEMENTED")) {
+        if (!eq(c->status, "IMPLEMENTED")) {
             printf("NOT_RUN\t%s\t%s\tlayer=%s\t%s\n", c->id, c->status, c->layer, c->source);
         } else if (c->verdict) {
             report_shared(i);
@@ -180,13 +205,13 @@ static tally run_selected(int (*want)(const contract *, void *), void *ctx) {
 }
 
 static int want_all(const contract *c, void *ctx) { (void)c; (void)ctx; return 1; }
-static int want_smoke(const contract *c, void *ctx) { (void)ctx; return !strcmp(c->smoke, "smoke"); }
-static int want_layer(const contract *c, void *ctx) { return !strcmp(c->layer, (const char *)ctx); }
+static int want_smoke(const contract *c, void *ctx) { (void)ctx; return eq(c->smoke, "smoke"); }
+static int want_layer(const contract *c, void *ctx) { return eq(c->layer, (const char *)ctx); }
 typedef struct { int argc; char **argv; } idlist;
 static int want_ids(const contract *c, void *ctx) {
     idlist *l = ctx;
     int i;
-    for (i = 0; i < l->argc; i++) if (!strcmp(l->argv[i], c->id)) return 1;
+    for (i = 0; i < l->argc; i++) if (eq(l->argv[i], c->id)) return 1;
     return 0;
 }
 
@@ -217,11 +242,11 @@ static int runner_selftest(void) {
     contract c;
 #define RS_EXPECT(cond, what) do { if (cond) printf("  ok    %s\n", what); else { printf("  FAIL  %s\n", what); fails++; } } while (0)
     RS_EXPECT(parse_registry(fixture, why, sizeof why) == 0 && nc == 2, "a valid registry parses (comment skipped)");
-    RS_EXPECT(parse_registry(bad1, why, sizeof why) != 0 && strstr(why, "budget"), "a budget over 55s is refused");
-    RS_EXPECT(parse_registry(bad2, why, sizeof why) != 0 && strstr(why, "smoke"), "a GAP row cannot be smoke");
-    RS_EXPECT(parse_registry(bad3, why, sizeof why) != 0 && strstr(why, "duplicate"), "duplicate ids are refused");
-    RS_EXPECT(parse_registry(bad4, why, sizeof why) != 0 && strstr(why, "8 tab"), "a short row is refused");
-    memset(&t, 0, sizeof t); t.pass = 3;
+    RS_EXPECT(parse_registry(bad1, why, sizeof why) != 0 && has_text(why, "budget"), "a budget over 55s is refused");
+    RS_EXPECT(parse_registry(bad2, why, sizeof why) != 0 && has_text(why, "smoke"), "a GAP row cannot be smoke");
+    RS_EXPECT(parse_registry(bad3, why, sizeof why) != 0 && has_text(why, "duplicate"), "duplicate ids are refused");
+    RS_EXPECT(parse_registry(bad4, why, sizeof why) != 0 && has_text(why, "8 tab"), "a short row is refused");
+    t = zt; t.pass = 3;
     RS_EXPECT(all_verdict(&t) == 0, "all pass, nothing missing: --all rc 0");
     t.gap = 1;
     RS_EXPECT(all_verdict(&t) == 3, "a GAP row keeps --all non-zero (3)");
@@ -231,7 +256,7 @@ static int runner_selftest(void) {
     RS_EXPECT(all_verdict(&t) == 1, "a failure is 1 even with coverage missing");
     t.fail = 0; t.env = 0; t.timeout = 1;
     RS_EXPECT(all_verdict(&t) == 1, "a timeout counts as a failure");
-    memset(&c, 0, sizeof c); c.expect = "rc0+text:selftest ok";
+    c = zc; c.expect = "rc0+text:selftest ok";
     RS_EXPECT(judge(&c, 0, "x\nselftest ok\n") == 1 && judge(&c, 0, "x\n") == 2 && judge(&c, 1, "selftest ok") == 2,
               "rc0+text needs both the exit code and the text");
     printf("RUNNER-SELFTEST\t%s\tfailed=%d\n", fails ? "FAIL" : "PASS", fails);
@@ -242,17 +267,20 @@ int main(int argc, char **argv) {
     char self[4096], root[4096], reg[4400], why[300];
     const char *suffix = "/tests/run.cx";
     char *text;
-    size_t n, z, sn = strlen(suffix);
+    size_t n;
+    long z, sn = tx_len(suffix, CAP);
     const char *mode = argc > 1 ? argv[1] : "";
-    if (!strcmp(mode, "--selftest")) return runner_selftest();
-    if (strcmp(mode, "--list") && strcmp(mode, "--smoke") && strcmp(mode, "--all") &&
-        !(argc > 2 && (!strcmp(mode, "--layer") || !strcmp(mode, "--run")))) {
+    if (eq(mode, "--selftest")) return runner_selftest();
+    if (!eq(mode, "--list") && !eq(mode, "--smoke") && !eq(mode, "--all") &&
+        !(argc > 2 && (eq(mode, "--layer") || eq(mode, "--run")))) {
         fprintf(stderr, "usage: --list | --smoke | --all | --layer L | --run ID... | --selftest\n");
         return 2;
     }
     if (!realpath(argv[0], self)) { fprintf(stderr, "REFUSE\trunner-path\terrno=%d\n", errno); return 2; }
-    z = strlen(self);
-    if (z <= sn || strcmp(self + z - sn, suffix)) { fprintf(stderr, "REFUSE\trunner-layout\twant=apps/csih/tests/run.cx\n"); return 2; }
+    z = tx_len(self, CAP);
+    if (z < 0 || z <= sn || !tx_same(self + z - sn, sn, suffix, sn)) {
+        fprintf(stderr, "REFUSE\trunner-layout\twant=apps/csih/tests/run.cx\n"); return 2;
+    }
     snprintf(root, sizeof root, "%.*s", (int)(z - sn), self);
     {
         char u[4200];
@@ -262,7 +290,7 @@ int main(int argc, char **argv) {
     snprintf(env_unisacc, sizeof env_unisacc, "UNISACC=%s", unisacc);
     {
         /* the installed product: tty/net probes drive it, csih.sh selftest checks its stamp */
-        const char *b = getenv("CSIH_BIN");
+        const char *b = tc_getenv("CSIH_BIN");
         char d[4200], r[4096];
         snprintf(d, sizeof d, "%s/../../out/csih-e2e-bin/csih", root);
         if (b && b[0]) snprintf(env_bin, sizeof env_bin, "CSIH_BIN=%s", b);
@@ -275,10 +303,9 @@ int main(int argc, char **argv) {
     if (!text) { fprintf(stderr, "REFUSE\tregistry-read\t%s\n", reg); return 2; }
     if (parse_registry(text, why, sizeof why)) { fprintf(stderr, "REFUSE\tregistry\t%s\n", why); return 2; }
 
-    if (!strcmp(mode, "--list")) {
-        tally t;
+    if (eq(mode, "--list")) {
+        tally t = zt;
         int i;
-        memset(&t, 0, sizeof t);
         for (i = 0; i < nc; i++) {
             printf("CONTRACT\t%s\t%s\t%s\t%s\tbudget=%d\t%s\n", cs[i].id, cs[i].layer, cs[i].status, cs[i].smoke, cs[i].budget, cs[i].source);
             count(&t, &cs[i]);
@@ -287,19 +314,19 @@ int main(int argc, char **argv) {
                nc, nc - t.gap - t.blocked - t.env, t.gap, t.blocked, t.env);
         return 0;
     }
-    if (!strcmp(mode, "--smoke")) {
+    if (eq(mode, "--smoke")) {
         tally t = run_selected(want_smoke, NULL);
         int ok = !t.fail && !t.timeout && t.run > 0;
         print_tally("SMOKE", ok ? "PASS" : "FAIL", &t);
         return ok ? 0 : 1;
     }
-    if (!strcmp(mode, "--layer")) {
+    if (eq(mode, "--layer")) {
         tally t = run_selected(want_layer, argv[2]);
         int ok = !t.fail && !t.timeout;
         print_tally("LAYER", ok ? "PASS" : "FAIL", &t);
         return ok ? 0 : 1;
     }
-    if (!strcmp(mode, "--run")) {
+    if (eq(mode, "--run")) {
         idlist l;
         tally t;
         int ok;

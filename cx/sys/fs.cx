@@ -10,6 +10,7 @@ typedef struct {
     long mtime;     /* seconds */
     int mode;       /* permission bits, 07777 */
     int kind;       /* 'f' regular, 'd' directory, 'l' symlink (sy_lstat only), '?' other */
+    long uid;       /* owner */
 } sy_stat_t;
 
 static int sy_fail(void) { return errno ? -errno : -1; }
@@ -20,6 +21,51 @@ static void sy_fill(const struct stat *s, sy_stat_t *out) {
     out->mtime = (long)s->st_mtime;
     out->mode = (int)(s->st_mode & 07777);
     out->kind = S_ISREG(s->st_mode) ? 'f' : S_ISDIR(s->st_mode) ? 'd' : S_ISLNK(s->st_mode) ? 'l' : '?';
+    out->uid = (long)s->st_uid;
+}
+
+/* fstat FD into OUT. 0, or -errno. */
+int sy_fstat(int fd, sy_stat_t *out) {
+    struct stat s;
+    errno = 0;
+    if (!out) return -EINVAL;
+    if (fstat(fd, &s) != 0) return sy_fail();
+    sy_fill(&s, out);
+    return 0;
+}
+
+/* Read up to N bytes from FD (retrying EINTR). The count, 0 at end, or -errno. */
+long sy_read(int fd, void *buf, long n) {
+    ssize_t k;
+    do { errno = 0; k = read(fd, buf, (size_t)n); } while (k < 0 && errno == EINTR);
+    return k < 0 ? sy_fail() : (long)k;
+}
+
+/* Write all N bytes of BUF to FD (a file or pipe; sockets: sy_send_all). 0, or -errno. */
+int sy_write_all(int fd, const void *buf, long n) {
+    const char *p = buf;
+    while (n > 0) {
+        ssize_t k;
+        errno = 0;
+        k = write(fd, p, (size_t)n);
+        if (k < 0 && errno == EINTR) continue;
+        if (k <= 0) return k < 0 ? sy_fail() : -EIO;
+        p += k;
+        n -= (long)k;
+    }
+    return 0;
+}
+
+/* fsync FD. 0, or -errno. */
+int sy_fsync(int fd) {
+    errno = 0;
+    return fsync(fd) == 0 ? 0 : sy_fail();
+}
+
+/* Close FD. 0, or -errno. */
+int sy_close(int fd) {
+    errno = 0;
+    return close(fd) == 0 ? 0 : sy_fail();
 }
 
 /* Make PATH (one level) with MODE. 0, or -errno (-EEXIST when it exists). */

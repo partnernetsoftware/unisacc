@@ -195,8 +195,9 @@ agent 模式新增 `/help`、`/status`、`/clear`，均只在本地处理、不�
   - **上层不写 `#include`**：缺的能力放进下层封装模块（`#pragma unisa module`，include 只出现在这一层）。
     - 新增 `probes/netwit.cx`，提供 `nw_wait_port` 和 `nw_serve_file`。
     - `tui_agent_e2e`、`http_roundtrip`、`llm_roundtrip`、`agent_roundtrip`、`check.cx` 的 `#include` 已全部去掉；sys/stat、sys/wait、stdio 这些 cx 前奏本来就有。
-    - 下层封装：`probes/tmuxwit.cx`（poll、单调时钟、tmux）、`probes/retry_stub.cx`（socket）、`probes/netwit.cx`（socket）、`tests/tclock.cx`（单调时钟）。
-    - `use` 只在使用者所在目录（及其子目录）里解析，所以 probes/ 和 tests/ 各有一份时钟。
+    - 下层封装：`probes/tmuxwit.cx`（poll、单调时钟、tmux）、`probes/retry_stub.cx`（socket）、`probes/netwit.cx`（socket）、`tests/tclock.cx`（单调时钟 + getenv）。四条路径已列入仓库 `tests/cxraw-layers.tsv`（`tests/cxraw.cx` 分层棘轮不计它们）。
+    - 运行器 `tests/run.cx` 为上层：字符串走 `text.text`（`tx_*`），时钟/环境走 tclock；新文件直接 libc 须为 0。
+    - `use` 只在使用者所在目录（及其子目录）里解析，所以 probes/ 和 tests/ 各有一份时钟；`tests/text`、`tests/mem` 链到仓库 `cx/text`、`cx/mem`。
     - **提案（慢车道）**：把单调毫秒时钟、毫秒睡眠、本机 TCP 等端口这几个封装件提进 cx 前奏 `include/cx.h`。前奏嵌在产品里（`kernel/unisa_headers.inc`），改了要重建产品，所以这一轮没做。
 - **第六十批已落地（2026-10-30）**：`csih.sh prepare` 的源摘要只算产品真正的输入。
   - 原来算的是根目录全部 `*.cx *.h`，所以只改 `check.cx` 或某个 `*_cli.cx` 也要重建产品，约 50 秒。上一批的验收第一次就是因此超时。反过来，换了编译器却不会重建。
