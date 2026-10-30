@@ -71,8 +71,13 @@ cc	ri,resources,negative,hosts,library,interfaces,properties
 
 ## 进度（grk 每完成一步，在这里写上提交号）
 
-- [ ] 1 hostnative
+- [x] 1 hostnative 28d0cba49c（sy_reg_size 与 check-cx-sys 那一行 sy_eprintf 在 08da2e8863，索引竞态先被别的提交带走；precommit blocked=0）
 - [ ] 2 release-build：P3 / 五片 / wrap / 二代 / 安装
+  lnx/x86_64 一片已跑通，route=33 个对象。P3 只拼在 candidate 上，entry.elf 是链接结果。osx/win、其余四片、wrap、二代、安装未开始。candidate 直接 --version 打印 unisacc 0.0.43，rc=0。runcache 未跑。
+  p3 sha=aec1a0bf27b9d1f2e26a1b86b52cb3694bc66a906415bcc0435c11278c6deabf bytes=2039850 flat=match ns=373396397
+  entry.elf sha=332756bb1662080520bb3c9973bedd027bc89227bcda1d191fcc67f76b855cf4 bytes=1398144 link_ns=7907732090
+  candidate sha=99ea6d0e85734f15c99de4c8272c3d39d3afc30ef967cd581d6d513ec5b24126 bytes=3437994
+  工具时钟：六只 -O1 --only ns=30663464644；其余 27 只 --only ns=24263170737；--link-only ns=9189543474
 - [ ] 3 object 模型步
 - [ ] 4 测试到 QUALIFIED
 - [ ] 主人授权发布
