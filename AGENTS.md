@@ -22,10 +22,15 @@
 - 查已实现API再行动，不重复研究已知入口。遇语言/运行库缺陷保留最小默认-run复现；有阻塞就在本版修复，不机械推迟到下一版。
 - 用工具、造工具，不靠人工逐处扫。动手前先查 `prd.md` 的能力速查和 `tools/` 下现成的工具：
   - 查调用点：`tools/refactor.cx sites`。
-  - 批量机械改写：`refactor.cx find/apply`，每个文件改前改后都验证，验证不过就还原。
+  - 批量机械改写：`refactor.cx find/apply`，每个文件改前改后都验证，验证不过就还原；要跑多轮时用 `refactor.cx sweep`，同一条命令反复执行，直到退出码为 0。
+  - 标识符改名：`refactor.cx rename`。
   - 按行段替换：`tools/edit-span.cx`。
+  - 改动影响了哪些测试批次、并行重跑它们：`tools/affected.cx`。
+  - 四个棘轮一次跑完：`tools/ratchets.cx`。
+  - 把一个检查登记成批次：`tools/register.cx`。
   - 查目标的 lowering 缺口：`tools/tape-gap.cx`。
   - 核对格式结构：`tools/formats-*.cx`。
+- 多人同改的文件（`tests/batches.tsv`、`tests/coverage.tsv`、`prd.md` 等）用 `tools/commit-own.cx --keyed` 提交，只带自己的行。提交前可以用 `tools/own-diff.cx` 看一下工作区里哪些改动不是自己的。
 - 同一类查找或改写要做第二遍，或者涉及十处以上时，没有合适的工具就当场用 `.cx` 造一个小工具，再用它去做，不要开成百次 grep、手工逐个编辑。新工具要求：
   - 放进 `tools/`，带 `check-*.cx` 检查，并登记批次；
   - 在 `prd.md` 能力速查里补一行。
