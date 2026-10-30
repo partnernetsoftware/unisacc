@@ -1,0 +1,92 @@
+/* tests/tape-neg.cx -- raw tape input refusals of the installed product (spec.md TP-9; negative tape.* and
+ * interfaces if.route.tapecheck-neg001).
+ *
+ *   sh ./unisacc.com tests/tape-neg.cx            (from the repo root; writes out/tape-neg-batch/)
+ *
+ * The fixture tape is the product's own -S output for `int main(void){return 7;}`; one operand of its
+ * `imm r0, 7` line (physical line L) is replaced, then the tape is compiled with -O0 -b lnx/x86_64 under a 20 s bound:
+ *   neg001          a tape that is just "?\n", on -S and on -c with -o FILE: rc 1, stdout empty, no FILE,
+ *                   "tape domain line 1: unknown opcode"
+ *   integer-range   2^64 and -2^63-1: rc 1, stdout empty, "tape domain line L: integer literal out of 64-bit word
+ *                   range"; the bounds 2^64-1 and -2^63 are accepted
+ *   underscore      1_000 and 0x_1f: rc 1, stdout empty, "tape domain line L: invalid integer literal"; 0x1f accepted
+ * Prints PASS/FAIL per case and TAPE_NEG<TAB>assertions=N<TAB>failed=M; rc 0 only when nothing failed. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+static char root[4096], work[4400], com[4400], bound[4400];
+static int assertions, failures;
+static char *tape; static long tape_n, imm_at, imm_line;
+
+static void die(const char *s) { sy_eprintf("tape-neg: REFUSE %s\n", s); sy_exit(2); }
+static void ck(int ok, const char *name) { assertions++; if (ok) sy_printf("PASS\ttape-neg.%s\n", name); else { failures++; sy_printf("FAIL\ttape-neg.%s\n", name); } }
+static void put(const char *leaf, const char *b, long n) { char p[4600]; if (cx_fmt(p, sizeof p, "%s/%s", work, leaf) || cx_write(p, b, (size_t)n)) die(leaf); }
+static int has(const np_result *r, const char *s) { return tx_find(r->err, (long)r->errn, s, tx_len(s, 256)) >= 0; }
+
+/* the product on FILE: MODE "-S" or "-c", output OUT ("-" for stdout) */
+static np_result run(const char *mode, const char *file, const char *out) {
+    char *v[14]; int n = 0; char why[1024]; np_result r;
+    v[n++] = bound; v[n++] = "20"; v[n++] = "sh"; v[n++] = com; v[n++] = "-O0"; v[n++] = "-b"; v[n++] = "lnx/x86_64";
+    v[n++] = (char *)mode; v[n++] = (char *)file; v[n++] = "-o"; v[n++] = (char *)out; v[n] = 0;
+    if (np_run(v, work, 0, 25, &r, why, sizeof why)) die(why);
+    return r;
+}
+
+/* the fixture tape with the operand 7 of `imm r0, 7` replaced by VALUE, as t-NAME.tape */
+static void variant(const char *name, const char *value, char *leaf, int cap) {
+    long vn = tx_len(value, 64), n = tape_n - 1 + vn; char *b = mm_alloc(n + 1);
+    if (!b || cx_fmt(leaf, cap, "t-%s.tape", name)) die("variant");
+    mm_copy(b, n + 1, tape, imm_at); mm_copy(b + imm_at, n + 1 - imm_at, value, vn);
+    mm_copy(b + imm_at + vn, n + 1 - imm_at - vn, tape + imm_at + 1, tape_n - imm_at - 1);
+    put(leaf, b, n); mm_free(b);
+}
+
+static void literal(const char *name, const char *value, const char *reason) {
+    char leaf[96], want[160]; np_result r;
+    variant(name, value, leaf, sizeof leaf);
+    r = run("-S", leaf, "-");
+    if (reason) {
+        if (cx_fmt(want, sizeof want, "tape domain line %ld: %s", imm_line, reason)) die("want");
+        ck(r.rc == 1 && !r.outn && has(&r, want), name);
+    } else ck(r.rc == 0 && r.outn > 0 && !r.errn, name);
+    np_free(&r);
+}
+
+int main(void) {
+    char p[4600]; np_result r; size_t sn; sy_stat_t s; long k;
+    if (sy_cwd(root, sizeof root) < 0) die("cwd");
+    if (cx_fmt(work, sizeof work, "%s/out/tape-neg-batch", root) || cx_fmt(com, sizeof com, "%s/unisacc.com", root) || cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) die("paths");
+    if (sy_exists(work) == 1 && cx_rmtree(work)) die("old work");
+    if (sy_mkdir(work, 0700)) die("work");
+
+    put("ok.c", "int main(void){return 7;}\n", 26);
+    r = run("-S", "ok.c", "ok.tape"); if (r.rc != 0) die("fixture tape"); np_free(&r);
+    if (cx_fmt(p, sizeof p, "%s/ok.tape", work)) die("path");
+    tape = cx_read(p, &sn); if (!tape) die("read fixture"); tape_n = (long)sn;
+    imm_at = tx_find(tape, tape_n, "  imm r0, 7\n", 12); if (imm_at < 0) die("fixture has no `imm r0, 7`");
+    imm_line = 1; for (k = 0; k < imm_at; k++) if (tape[k] == '\n') imm_line++;
+    imm_at += 10;   /* the operand */
+
+    put("bad.tape", "?\n", 2);
+    r = run("-S", "bad.tape", "-"); ck(r.rc == 1 && !r.outn && has(&r, "tape domain line 1: unknown opcode"), "neg001-S"); np_free(&r);
+    r = run("-c", "bad.tape", "bad.o"); if (cx_fmt(p, sizeof p, "%s/bad.o", work)) die("path");
+    ck(r.rc == 1 && !r.outn && has(&r, "tape domain line 1: unknown opcode") && sy_lstat(p, &s) == -ENOENT, "neg001-c-no-output"); np_free(&r);
+
+    literal("integer-max-accepted", "18446744073709551615", 0);
+    literal("integer-min-accepted", "-9223372036854775808", 0);
+    literal("integer-above-max", "18446744073709551616", "integer literal out of 64-bit word range");
+    literal("integer-below-min", "-9223372036854775809", "integer literal out of 64-bit word range");
+    literal("underscore-decimal", "1_000", "invalid integer literal");
+    literal("underscore-hex", "0x_1f", "invalid integer literal");
+    literal("hex-accepted", "0x1f", 0);
+
+    mm_free(tape);
+    sy_printf("TAPE_NEG\tassertions=%d\tfailed=%d\n", assertions, failures);
+    return failures ? 1 : 0;
+}
