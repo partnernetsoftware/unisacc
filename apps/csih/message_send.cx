@@ -1,3 +1,7 @@
+#pragma unisa use text.fmt
+#pragma unisa use sys.io
+#pragma unisa use zstr
+#pragma unisa use mem.heap
 #pragma unisa use reload_candidate
 #pragma unisa use reload_io
 #pragma unisa use json
@@ -45,7 +49,7 @@ static void ms_req(int ok, const char *msg) {
 }
 
 static int ms_valid_session(const char *s) {
-    size_t i, n = strlen(s);
+    size_t i, n = zs_len(s);
     if (n < 1 || n > 64) return 0;
     for (i = 0; i < n; i++) {
         unsigned char c = (unsigned char)s[i];
@@ -58,7 +62,7 @@ static int ms_valid_session(const char *s) {
 
 static int ms_valid_id(const char *s) {
     size_t i;
-    if (strlen(s) != 32) return 0;
+    if (zs_len(s) != 32) return 0;
     for (i = 0; i < 32; i++)
         if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))) return 0;
     return 1;
@@ -95,7 +99,7 @@ static void ms_check_unique(const jvalue *v) {
     if (v->kind == J_OBJ) {
         for (i = 0; i < v->nkeys; i++)
             for (j = 0; j < i; j++)
-                ms_req(strcmp(v->keys[i], v->keys[j]) != 0, "invalid JSON or duplicate keys");
+                ms_req(zs_cmp(v->keys[i], v->keys[j]) != 0, "invalid JSON or duplicate keys");
         for (i = 0; i < v->nkeys; i++) ms_check_unique(v->vals[i]);
     } else if (v->kind == J_ARR) {
         for (i = 0; i < v->len; i++) ms_check_unique(v->items[i]);
@@ -118,7 +122,7 @@ static void ms_canon_str(Buf *b, const char *s) {
         default:
             if (*p < 0x20) {
                 char u[8];
-                snprintf(u, sizeof u, "\\u%04x", *p);
+                tx_snprintf(u, sizeof u, "\\u%04x", *p);
                 bs(b, u);
             } else {
                 bn(b, p, 1);
@@ -149,12 +153,12 @@ static jvalue *ms_decode(const unsigned char *raw, size_t rawn, const char *expe
     id = jget(root, "id");
     ms_req(id->kind == J_STR && ms_valid_id(id->s), "invalid message id");
     ses = jget(root, "session");
-    ms_req(ses->kind == J_STR && !strcmp(ses->s, expected), "session mismatch");
+    ms_req(ses->kind == J_STR && !zs_cmp(ses->s, expected), "session mismatch");
     kind = jget(root, "kind");
-    ms_req(kind->kind == J_STR && (!strcmp(kind->s, "task") || !strcmp(kind->s, "notice")), "invalid message kind");
+    ms_req(kind->kind == J_STR && (!zs_cmp(kind->s, "task") || !zs_cmp(kind->s, "notice")), "invalid message kind");
     body = jget(root, "body");
     ms_req(body->kind == J_STR && body->s[0] != '\0', "empty/nonstring body");
-    blen = strlen(body->s);
+    blen = zs_len(body->s);
     ms_req(blen <= MS_BODY_MAX, "body exceeds4095 UTF8 bytes");
 
     /* normalized envelope, keys sorted, version 1, separators (',',':'), ensure_ascii=False */
@@ -173,24 +177,24 @@ static jvalue *ms_decode(const unsigned char *raw, size_t rawn, const char *expe
 
 /* read_input(filename): LIMIT+1 cap; returns 0 ok, -1 OS error (cause = input/directory error) */
 static int ms_read_input(const char *filename, unsigned char **out, size_t *outn) {
-    unsigned char *buf = malloc(MS_LIMIT + 1);
+    unsigned char *buf = mm_alloc(MS_LIMIT + 1);
     size_t got = 0;
     int fd;
     if (!buf) return -1;
-    if (!strcmp(filename, "-")) {
+    if (!zs_cmp(filename, "-")) {
         fd = 0;
     } else {
         fd = open(filename, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-        if (fd < 0) { free(buf); return -1; }
+        if (fd < 0) { mm_free(buf); return -1; }
     }
     if (fd != 0) {
         struct stat sb;
-        if (fstat(fd, &sb) != 0) { close(fd); free(buf); return -1; }
-        if (!S_ISREG(sb.st_mode)) { close(fd); free(buf); fail("JSON input must be regular"); }
+        if (fstat(fd, &sb) != 0) { close(fd); mm_free(buf); return -1; }
+        if (!S_ISREG(sb.st_mode)) { close(fd); mm_free(buf); fail("JSON input must be regular"); }
     }
     while (got < MS_LIMIT + 1) {
         ssize_t r = read(fd, buf + got, (MS_LIMIT + 1) - got);
-        if (r < 0) { if (errno == EINTR) continue; if (fd != 0) close(fd); free(buf); return -1; }
+        if (r < 0) { if (errno == EINTR) continue; if (fd != 0) close(fd); mm_free(buf); return -1; }
         if (r == 0) break;
         got += (size_t)r;
     }
@@ -202,7 +206,7 @@ static int ms_read_input(const char *filename, unsigned char **out, size_t *outn
 
 static void ms_print_receipt(const char *kind, const char *id, const char *session, const char *status) {
     /* json.dumps(sort_keys=True, separators=(',',':')): id, kind, session, status; null when unset */
-    printf("{\"id\":%s%s%s,\"kind\":%s%s%s,\"session\":%s%s%s,\"status\":\"%s\"}\n",
+    sy_printf("{\"id\":%s%s%s,\"kind\":%s%s%s,\"session\":%s%s%s,\"status\":\"%s\"}\n",
            id ? "\"" : "null", id ? id : "", id ? "\"" : "",
            kind ? "\"" : "null", kind ? kind : "", kind ? "\"" : "",
            session ? "\"" : "null", session ? session : "", session ? "\"" : "",
@@ -231,7 +235,7 @@ static ms_pub_t MP;
 static void ms_os(long r) {
     char m[64];
     if (r >= 0) return;
-    snprintf(m, sizeof m, "filesystem error errno=%ld", -r);
+    tx_snprintf(m, sizeof m, "filesystem error errno=%ld", -r);
     fail(m);
 }
 
@@ -298,7 +302,7 @@ static void ms_read_envelope(int parent, const char *name, Buf *out) {
     ms_os(k < 0 ? k : 0);
     out->n = 0;
     obj = ms_decode(raw, (size_t)got, MP.expected, out);
-    snprintf(want, sizeof want, "%s.json", jget(obj, "id")->s);
+    tx_snprintf(want, sizeof want, "%s.json", jget(obj, "id")->s);
     ms_req(ms_same(name, want), "stored id/filename mismatch");
 }
 
@@ -330,11 +334,11 @@ static void ms_scan(int inbox, int *retained, int *unfinished, int *found, Buf *
             char mid[33];
             int j;
             ms_req(ms_state_name(name), "unknown state directory entry");
-            snprintf(mid, sizeof mid, "%.32s", name);
+            tx_snprintf(mid, sizeof mid, "%.32s", name);
             for (j = 0; j < nids; j++) ms_req(!ms_same(ids[j], mid), "id present in multiple states");
             ms_req(nids < 1024, "retained message capacity exceeded");
             ms_read_envelope(MP.statefd[st], name, &stored);
-            snprintf(ids[nids++], 33, "%s", mid);
+            tx_snprintf(ids[nids++], 33, "%s", mid);
             if (st != 2) (*unfinished)++;
             ms_req(*unfinished <= 32, "unfinished message capacity exceeded");
             if (ms_same(mid, MP.wanted)) {
@@ -356,9 +360,9 @@ static void ms_tempname(char *out, int cap) {
     got = sy_read(fd, r, sizeof r);
     sy_close(fd);
     ms_req(got == (long)sizeof r, "random source short read");
-    at = snprintf(out, cap, ".publish-");
-    for (i = 0; i < 16 && at + 3 < cap; i++) at += snprintf(out + at, cap - at, "%02x", r[i]);
-    snprintf(out + at, cap - at, ".tmp");
+    at = tx_snprintf(out, cap, ".publish-");
+    for (i = 0; i < 16 && at + 3 < cap; i++) at += tx_snprintf(out + at, cap - at, "%02x", r[i]);
+    tx_snprintf(out + at, cap - at, ".tmp");
 }
 
 static void ms_publish_body(void *ud) {
@@ -406,7 +410,7 @@ static void ms_publish_body(void *ud) {
     {
         /* link is atomic, fails on an existing target, and exposes complete bytes */
         char final_[64];
-        snprintf(final_, sizeof final_, "%s.json", MP.wanted);
+        tx_snprintf(final_, sizeof final_, "%s.json", MP.wanted);
         ms_os(sy_linkat(MP.statefd[0], MP.tempname, MP.statefd[0], final_, 0));
     }
     MP.visible = 1;
@@ -428,14 +432,14 @@ static int ms_publish(const char *dir, const char *expected, const char *id, Buf
     MP.statefd[0] = MP.statefd[1] = MP.statefd[2] = -1;
     failed = rc_guard(ms_publish_body, 0);
     err[0] = 0;
-    if (failed) snprintf(err, sizeof err, "%s", rc_err_buf());
+    if (failed) tx_snprintf(err, sizeof err, "%s", rc_err_buf());
     /* finally: our own temp file only; never a target or the lock */
-    if (MP.tempfd >= 0) { int r = sy_close(MP.tempfd); if (r < 0 && !err[0]) snprintf(err, sizeof err, "filesystem error errno=%d", -r); }
-    if (MP.temporary) { int r = sy_unlinkat(MP.statefd[0], MP.tempname, 0); if (r < 0 && !err[0]) snprintf(err, sizeof err, "filesystem error errno=%d", -r); }
-    for (i = MP.nfds - 1; i >= 0; i--) { int r = sy_close(MP.fds[i]); if (r < 0 && !err[0]) snprintf(err, sizeof err, "filesystem error errno=%d", -r); }
+    if (MP.tempfd >= 0) { int r = sy_close(MP.tempfd); if (r < 0 && !err[0]) tx_snprintf(err, sizeof err, "filesystem error errno=%d", -r); }
+    if (MP.temporary) { int r = sy_unlinkat(MP.statefd[0], MP.tempname, 0); if (r < 0 && !err[0]) tx_snprintf(err, sizeof err, "filesystem error errno=%d", -r); }
+    for (i = MP.nfds - 1; i >= 0; i--) { int r = sy_close(MP.fds[i]); if (r < 0 && !err[0]) tx_snprintf(err, sizeof err, "filesystem error errno=%d", -r); }
     if (err[0]) {
         *status = MP.visible ? "published-unconfirmed" : "rejected";
-        snprintf(cause, cap, "%s", err);
+        tx_snprintf(cause, cap, "%s", err);
         return MP.visible ? 3 : 1;
     }
     *status = MP.status;
@@ -452,11 +456,11 @@ static int ms_main_body(int argc, char **argv) {
     const char *cause = NULL;
     int rc;
 
-    ms_req(argc == 5 && !strcmp(argv[1], "publish"),
+    ms_req(argc == 5 && !zs_cmp(argv[1], "publish"),
            "usage: publish PRIVATE_SESSION_DIR EXPECTED_SESSION JSON_FILE (- for stdin)");
     if (ms_read_input(argv[4], &raw, &rawn) != 0) {
         ms_print_receipt(NULL, NULL, NULL, "rejected");
-        fprintf(stderr, "message publisher: input/directory error\n");
+        sy_eprintf("message publisher: input/directory error\n");
         return 1;
     }
     obj = ms_decode(raw, rawn, argv[3], &canon);
@@ -468,7 +472,7 @@ static int ms_main_body(int argc, char **argv) {
         rc = ms_publish(argv[2], argv[3], jget(obj, "id")->s, &canon, &status, rc_cause, sizeof rc_cause);
         cause = rc_cause[0] ? rc_cause : NULL;
         ms_print_receipt(jget(obj, "kind")->s, jget(obj, "id")->s, jget(obj, "session")->s, status);
-        if (cause) fprintf(stderr, "message publisher: %s\n", cause);
+        if (cause) sy_eprintf("message publisher: %s\n", cause);
     }
     return rc;
 }
@@ -489,7 +493,7 @@ int main(int argc, char **argv) {
     if (rc_guard(ms_guard_body, 0)) {
         /* validation failure: receipt keeps null id/kind/session like the Python default */
         ms_print_receipt(NULL, NULL, NULL, "rejected");
-        fprintf(stderr, "message publisher: %s\n", rc_err_buf());
+        sy_eprintf("message publisher: %s\n", rc_err_buf());
         return 1;
     }
     return ms_rc;
