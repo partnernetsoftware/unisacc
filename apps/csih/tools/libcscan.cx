@@ -1,5 +1,7 @@
 #pragma unisa use text.text
 #pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
 /*
  * libcscan.cx — list direct libc/POSIX calls in the given .cx files: csih
  * reaches the C library only through the cx L0 wrappers (sy_*, mm_*, tx_*).
@@ -10,6 +12,9 @@
  * FILE:LINE<TAB>NAME. The last line is LIBCSCAN files=N calls=M.
  * Exit 0 when there is none, 1 when there are calls, 2 when a file cannot be
  * read. --self runs the scanner's fixed sample and exits 0 when it counts 2.
+ *   ... -- --closure ENTRY.cx   (from the repo root)
+ * scans ENTRY's module closure as `sh ./unisacc.com -cx-plan ENTRY` plans it
+ * (column 2), less the L0 layer: a file whose real path is under ./cx/.
  */
 
 static const char *LIBC[] = {
@@ -76,9 +81,54 @@ static int scan(const char *name, const char *s, long len, int print) {
     return calls;
 }
 
+static char plan[1 << 20];
+
+/* the closure of ENTRY outside ./cx/, scanned; the exit status as main's */
+static int closure(const char *entry) {
+    char *av[5], root[4096], real[4096];
+    int fd = -1, pid, exited = 0, code = 0, sig = 0, files = 0, calls = 0;
+    long n = 0, k, rl, a;
+    av[0] = "sh"; av[1] = "./unisacc.com"; av[2] = "-cx-plan"; av[3] = (char *)entry; av[4] = 0;
+    if (sy_realpath(".", root, (int)sizeof root) < 0) { sy_printf("libcscan: cannot resolve .\n"); return 2; }
+    rl = tx_len(root, 4096);
+    pid = sy_spawn_pipe(av, 0, 0, &fd, 0);
+    if (pid < 0) { sy_printf("libcscan: cannot run -cx-plan: %s\n", sy_strerror(-pid)); return 2; }
+    while (n < (long)sizeof plan - 1 && (k = sy_read(fd, plan + n, (long)sizeof plan - 1 - n)) > 0) n += k;
+    sy_close(fd);
+    if (sy_wait_status(pid, 0, &exited, &code, &sig) < 0 || !exited || code != 0 || n == 0) {
+        sy_printf("libcscan: -cx-plan %s failed\n", entry);
+        return 2;
+    }
+    plan[n] = 0;
+    for (a = 0; a < n;) {
+        long e = tx_chr(plan + a, n - a, '\n'), ln = e < 0 ? n - a : e, t = tx_chr(plan + a, ln, '\t'), f, fl;
+        if (t >= 0) {
+            f = a + t + 1;
+            fl = tx_chr(plan + f, a + ln - f, '\t');
+            if (fl < 0) fl = a + ln - f;
+            plan[f + fl] = 0;
+            if (sy_realpath(plan + f, real, (int)sizeof real) < 0) { sy_printf("libcscan: cannot resolve %s\n", plan + f); return 2; }
+            if (!(tx_prefix(real, tx_len(real, 4096), root, rl) && tx_prefix(real + rl, tx_len(real + rl, 4096), "/cx/", 4))) {
+                size_t sn = 0;
+                char *s = cx_read(real, &sn);
+                if (!s) { sy_printf("libcscan: cannot read %s\n", real); return 2; }
+                calls += scan(real + (real[rl] == '/' ? rl + 1 : 0), s, (long)sn, 1);
+                files++;
+            }
+        }
+        a += ln + 1;
+    }
+    sy_printf("LIBCSCAN closure=%s files=%d calls=%d\n", entry, files, calls);
+    return files == 0 ? 2 : calls ? 1 : 0;
+}
+
 int main(int argc, char **argv) {
     int i, files = 0, calls = 0;
-    if (argc < 2) { sy_printf("usage: libcscan.cx -- --self | FILE...\n"); return 2; }
+    if (argc < 2) { sy_printf("usage: libcscan.cx -- --self | --closure ENTRY.cx | FILE...\n"); return 2; }
+    if (tx_eq(argv[1], "--closure", 16)) {
+        if (argc != 3) { sy_printf("usage: libcscan.cx -- --closure ENTRY.cx\n"); return 2; }
+        return closure(argv[2]);
+    }
     if (tx_eq(argv[1], "--self", 8)) {
         int n = scan("sample", SAMPLE, (long)sizeof SAMPLE - 1, 1);
         sy_printf("LIBCSCAN self calls=%d (want 2: strlen, exit)\n", n);

@@ -1,0 +1,64 @@
+#pragma unisa use text.text
+#pragma unisa use text.num
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+/* check-libcscan.cx -- checks apps/csih/tools/libcscan.cx; from the repo root:
+ *   sh ./unisacc.com apps/csih/tools/check-libcscan.cx
+ * Expected values come from reading the inputs (2026-10-30):
+ *   --self                       rc 0, "calls=2"
+ *   the fixture                  rc 1, exactly three rows: :10 access, :11 setpgid, :12 strcspn,
+ *                                then "files=1 calls=3" (literal, comments, members, longer names: none)
+ *   --closure apps/csih/csih.cx  rc 0, "calls=0", at least 30 files (34 at f3b2f7cde9)
+ *   no argument                  rc 2
+ * Prints one ok/FAIL line per case and CHECK_LIBCSCAN pass=N fail=M; exit 1 on any FAIL. */
+
+static char out[1 << 16];
+static int pass, fail;
+
+/* run the scanner with A1 (and A2 when given); output in out, the exit code returned */
+static int run(const char *a1, const char *a2) {
+    char *av[7];
+    int fd = -1, pid, exited = 0, code = -1, sig = 0, i = 0;
+    long n = 0, k;
+    av[i++] = "sh"; av[i++] = "./unisacc.com"; av[i++] = "apps/csih/tools/libcscan.cx"; av[i++] = "--";
+    if (a1) av[i++] = (char *)a1;
+    if (a2) av[i++] = (char *)a2;
+    av[i] = 0;
+    out[0] = 0;
+    pid = sy_spawn_pipe(av, 0, 0, &fd, 0);
+    if (pid < 0) return -1;
+    while (n < (long)sizeof out - 1 && (k = sy_read(fd, out + n, (long)sizeof out - 1 - n)) > 0) n += k;
+    out[n] = 0;
+    sy_close(fd);
+    if (sy_wait_status(pid, 0, &exited, &code, &sig) < 0 || !exited) return -1;
+    return code;
+}
+
+static int has(const char *s) { return tx_find(out, tx_len(out, (long)sizeof out), s, tx_len(s, 256)) >= 0; }
+
+static void expect(int ok, const char *what) {
+    if (ok) { pass++; sy_printf("  ok   %s\n", what); }
+    else { fail++; sy_printf("  FAIL %s\n---\n%s---\n", what, out); }
+}
+
+int main(void) {
+    const char *fx = "apps/csih/tools/libcscan-fixture.txt";
+    int rc;
+    rc = run("--self", 0);
+    expect(rc == 0 && has("calls=2"), "--self counts its sample's 2 calls");
+    rc = run(fx, 0);
+    expect(rc == 1 && has("libcscan-fixture.txt:10\taccess\n") && has("libcscan-fixture.txt:11\tsetpgid\n")
+           && has("libcscan-fixture.txt:12\tstrcspn\n") && has("LIBCSCAN files=1 calls=3\n"),
+           "fixture: the three calls, nothing in literals, comments, members or longer names");
+    rc = run("--closure", "apps/csih/csih.cx");
+    {
+        long at = tx_find(out, tx_len(out, (long)sizeof out), "files=", 6);
+        long files = at < 0 ? 0 : tx_atol(out + at + 6);
+        expect(rc == 0 && has(" calls=0\n") && files >= 30, "csih.cx closure above cx/: no direct libc call");
+    }
+    rc = run(0, 0);
+    expect(rc == 2, "no argument is a usage error (rc 2)");
+    sy_printf("CHECK_LIBCSCAN pass=%d fail=%d\n", pass, fail);
+    return fail ? 1 : 0;
+}

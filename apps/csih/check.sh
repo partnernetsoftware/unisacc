@@ -107,10 +107,8 @@ fi
 
 # 6. no direct libc call above L0: every csih.cx closure file outside cx/ reaches libc
 #    only through the cx wrappers (the scanner checks its own sample first)
-if sh "$UNISACC" "$ROOT/tools/libcscan.cx" -- --self > "$TMP/libcscan.out" 2>&1 \
-   && sh "$UNISACC" -cx-plan "$ROOT/csih.cx" 2>/dev/null | cut -f2 > "$TMP/plan" && [ -s "$TMP/plan" ] \
-   && (cd "$R" && while read f; do realpath --relative-to=. "$f"; done < "$TMP/plan" | grep -v '^cx/' | sort -u) > "$TMP/upper" \
-   && (cd "$R" && sh "$UNISACC" apps/csih/tools/libcscan.cx -- $(cat "$TMP/upper")) >> "$TMP/libcscan.out" 2>&1; then
+#    (check-libcscan.cx: the scanner's self sample, its fixture, then the closure)
+if (cd "$R" && sh "$UNISACC" apps/csih/tools/check-libcscan.cx) > "$TMP/libcscan.out" 2>&1; then
     echo "ok   6: $(tail -1 "$TMP/libcscan.out")"
 else
     echo "FAIL 6: direct libc calls above L0"; cat "$TMP/libcscan.out"; rc=1
