@@ -1,10 +1,12 @@
-/* Checks cx/sys (env, fs, proc): sh ./unisacc.com tools/check-cx-sys.cx
+/* Checks cx/sys (env, fs, proc, time, net): sh ./unisacc.com tools/check-cx-sys.cx
    Each case runs for real in a scratch directory under $TMPDIR or /tmp.
    Prints "  ok    name" / "  FAIL  name", then CHECK_CX_SYS PASS|FAIL ok=N fail=M; exit 1 on any FAIL.
    An L3 tool: no #include and no direct libc call (cx/sys, cx/text and the cx_* prelude only). */
 #pragma unisa use sys.env
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use sys.net
 #pragma unisa use text.text
 static int n_ok, n_bad;
 static void ok(int c, const char *name) { printf("  %s  %s\n", c ? "ok  " : "FAIL", name); if (c) n_ok++; else n_bad++; }
@@ -77,6 +79,47 @@ int main(void) {
         ok(has(out, "gone"), "kill: the background grandchild died with the group");
     }
     ok(sy_pid() > 0, "pid: positive");
+
+    /* time */
+    {
+        long t0 = sy_now_ms(), t1, w = sy_wall_s();
+        ok(t0 >= 0 && sy_sleep_ms(120) == 0 && (t1 = sy_now_ms()) - t0 >= 110 && t1 - t0 < 1000, "sleep 120ms: the monotonic clock moves 110..1000ms");
+        ok(w > 1700000000L, "wall clock: seconds after 2023");
+        ok(sy_sleep_ms(0) == 0 && sy_sleep_ms(-5) == 0, "sleep 0 and negative return at once");
+        snprintf(f, sizeof f, "%s/timed", root);
+        ok(cx_write(f, "t", 1) == 0 && sy_set_mtime(f, 1700000100L) == 0 && sy_stat(f, &s) == 0 && s.mtime == 1700000100L, "set_mtime: stat reads the time back");
+        snprintf(d, sizeof d, "%s/absent", root);
+        ok(sy_set_mtime(d, 1L) == -ENOENT && sy_set_mtime("", 1L) == -EINVAL, "set_mtime: absent is -ENOENT, empty -EINVAL");
+    }
+
+    /* net */
+    {
+        int lfd = sy_tcp_listen(0, 4), port = lfd >= 0 ? sy_tcp_port(lfd) : -1, cfd, afd;
+        char buf[64];
+        long got = 0, t0;
+        ok(lfd >= 0 && port > 0, "listen: port 0 gives a free port");
+        t0 = sy_now_ms();
+        ok(sy_tcp_accept(lfd, 100) == -ETIMEDOUT && sy_now_ms() - t0 >= 90, "accept: nothing connects within 100ms -> -ETIMEDOUT");
+        ok(sy_readable(lfd, 0) == 0, "readable: an idle listener is 0");
+        cfd = sy_tcp_connect(port);
+        afd = cfd >= 0 ? sy_tcp_accept(lfd, 1000) : -1;
+        ok(cfd >= 0 && afd >= 0, "connect + accept on loopback");
+        ok(sy_send_all(cfd, "ping", 4) == 0 && sy_readable(afd, 1000) == 1 && (got = sy_recv(afd, buf, sizeof buf - 1)) == 4 && (buf[got] = 0, tx_eq(buf, "ping", 8)), "send_all + recv: 4 bytes arrive intact");
+        ok(sy_close(cfd) == 0 && sy_recv(afd, buf, sizeof buf) == 0, "recv: 0 at end of stream after the peer closes");
+        {
+            /* the peer is gone: a write must be -EPIPE (or -ECONNRESET), and this process must live */
+            int r = 0, k;
+            for (k = 0; k < 50 && r == 0; k++) r = sy_send_all(afd, "xxxxxxxxxxxxxxxx", 16);
+            ok(r == -EPIPE || r == -ECONNRESET, "send_all to a closed peer is an error, not SIGPIPE");
+        }
+        sy_close(afd);
+        ok(sy_wait_port(port, 500) == 0, "wait_port: an open listener answers");
+        sy_close(lfd);
+        t0 = sy_now_ms();
+        ok(sy_wait_port(port, 200) == -ETIMEDOUT && sy_now_ms() - t0 >= 190, "wait_port: a closed port times out after 200ms");
+        ok(sy_tcp_connect(port) == -ECONNREFUSED, "connect: nothing listening is -ECONNREFUSED");
+        ok(sy_close(lfd) == -EBADF, "close: a closed fd is -EBADF");
+    }
 
     ok(cx_rmtree(root) == 0 && sy_exists(root) == 0, "cleanup: scratch removed through the deletion guard");
     printf("CHECK_CX_SYS\t%s\tok=%d\tfail=%d\n", n_bad ? "FAIL" : "PASS", n_ok, n_bad);

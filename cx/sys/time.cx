@@ -1,0 +1,67 @@
+#pragma unisa module time
+/* L0 sys/time: clocks, sleeping and file times (plans/cx-layers.md).
+   L0 exception (agreed for cx/sys/ only): <time.h>, <poll.h> and <sys/time.h>
+   are not in the implicit prelude, and the carried headers already hold the
+   per-target code (Linux syscalls, macOS gettimeofday, Windows calls). They
+   are included here, in one L0 unit, instead of copying that code or adding
+   them to every unit's prelude. Upper layers see only the sy_* below. */
+#include <poll.h>
+#include <sys/time.h>
+#include <time.h>
+
+/* Monotonic milliseconds from an arbitrary origin (on macOS the carried
+   CLOCK_MONOTONIC is the wall clock at microsecond grain, as include/time.h
+   states). -1 when the clock cannot be read. */
+long sy_now_ms(void) {
+    struct timespec t;
+    if (clock_gettime(CLOCK_MONOTONIC, &t) != 0) return -1;
+    return (long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+
+/* Wall-clock seconds since the epoch, or -1. */
+long sy_wall_s(void) {
+    struct timespec t;
+    if (clock_gettime(CLOCK_REALTIME, &t) != 0) return -1;
+    return (long)t.tv_sec;
+}
+
+/* Sleep MS milliseconds (poll with no fds); an interruption resumes for
+   what is left. 0, or -errno. */
+int sy_sleep_ms(long ms) {
+    long end = sy_now_ms() + ms, left = ms;
+    while (left > 0) {
+        if (poll(NULL, 0, (int)(left > 2000000000L ? 2000000000L : left)) < 0 && errno != EINTR) return -errno;
+        left = end - sy_now_ms();
+    }
+    return 0;
+}
+
+/* Wait up to MS (negative: forever) for FD to be readable (or hung up).
+   1 readable, 0 timed out, -errno. */
+int sy_readable(int fd, long ms) {
+    struct pollfd p;
+    int r;
+    p.fd = fd; p.events = POLLIN; p.revents = 0;
+    do r = poll(&p, 1, ms < 0 ? -1 : (int)(ms > 2000000000L ? 2000000000L : ms));
+    while (r < 0 && errno == EINTR);
+    if (r < 0) return -errno;
+    return r > 0 ? 1 : 0;
+}
+
+/* Set PATH's access and modification times to SEC (whole seconds). 0, or -errno.
+   utimes is forwarded to the host C library and its errno does not come back
+   (0.0.43: a missing path gave -1 with errno 0). The path is stat'ed first so
+   its own errors (ENOENT, ENOTDIR, EACCES) are reported; a failure of utimes
+   itself with no errno is -EIO. */
+int sy_set_mtime(const char *path, long sec) {
+    struct timeval tv[2];
+    struct stat s;
+    if (!path || !path[0]) return -EINVAL;
+    errno = 0;
+    if (stat(path, &s) != 0) return errno ? -errno : -EIO;
+    tv[0].tv_sec = tv[1].tv_sec = (time_t)sec;
+    tv[0].tv_usec = tv[1].tv_usec = 0;
+    errno = 0;
+    if (utimes(path, tv) == 0) return 0;
+    return errno ? -errno : -EIO;
+}

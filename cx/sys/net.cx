@@ -1,0 +1,106 @@
+#pragma unisa module net
+#pragma unisa use time
+/* L0 sys/net: loopback TCP for local servers, stubs and their clients
+   (plans/cx-layers.md). Every address is 127.0.0.1.
+   L0 exception (agreed for cx/sys/ only): <sys/socket.h>, <netinet/in.h> and
+   <arpa/inet.h> are not in the implicit prelude; the carried headers hold the
+   per-target socket code, so they are included in this one L0 unit. Waiting
+   is sys/time's sy_readable. 0 or a value on success, -errno on failure.
+   Writes use send(MSG_NOSIGNAL): this runtime's signal() cannot ignore
+   SIGPIPE, so a plain write to a peer that has gone would kill the process. */
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+
+static void sy_loop_addr(struct sockaddr_in *a, int port) {
+    memset(a, 0, sizeof *a);
+    a->sin_family = AF_INET;
+    a->sin_port = htons((unsigned short)port);
+    a->sin_addr.s_addr = htonl(0x7f000001);
+}
+
+/* Listen on 127.0.0.1:PORT (0: any free port, see sy_tcp_port). The fd, or -errno. */
+int sy_tcp_listen(int port, int backlog) {
+    struct sockaddr_in a;
+    int s, one = 1;
+    s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) return -errno;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    sy_loop_addr(&a, port);
+    if (bind(s, (struct sockaddr *)&a, sizeof a) != 0 || listen(s, backlog > 0 ? backlog : 8) != 0) {
+        int e = errno;
+        close(s);
+        return -e;
+    }
+    return s;
+}
+
+/* The port FD is bound to, or -errno. */
+int sy_tcp_port(int fd) {
+    struct sockaddr_in a;
+    socklen_t n = sizeof a;
+    if (getsockname(fd, (struct sockaddr *)&a, &n) != 0) return -errno;
+    return (int)ntohs(a.sin_port);
+}
+
+/* Accept one connection on listening FD, waiting at most MS (negative:
+   forever). The new fd, -ETIMEDOUT, or -errno. */
+int sy_tcp_accept(int fd, long ms) {
+    int r = sy_readable(fd, ms), c;
+    if (r < 0) return r;
+    if (r == 0) return -ETIMEDOUT;
+    c = accept(fd, NULL, NULL);
+    return c < 0 ? -errno : c;
+}
+
+/* Connect to 127.0.0.1:PORT. The fd, or -errno (-ECONNREFUSED: nothing listens). */
+int sy_tcp_connect(int port) {
+    struct sockaddr_in a;
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) return -errno;
+    sy_loop_addr(&a, port);
+    if (connect(s, (struct sockaddr *)&a, sizeof a) != 0) {
+        int e = errno;
+        close(s);
+        return -e;
+    }
+    return s;
+}
+
+/* 0 once 127.0.0.1:PORT accepts a connection, -ETIMEDOUT after MS. The probe
+   connection is closed at once without sending anything. */
+int sy_wait_port(int port, long ms) {
+    long end = sy_now_ms() + ms;
+    for (;;) {
+        int s = sy_tcp_connect(port);
+        if (s >= 0) { close(s); return 0; }
+        if (sy_now_ms() >= end) return -ETIMEDOUT;
+        sy_sleep_ms(50);
+    }
+}
+
+/* Send all N bytes of BUF. 0, or -errno (-EPIPE: the peer went away). */
+int sy_send_all(int fd, const void *buf, long n) {
+    const char *p = buf;
+    while (n > 0) {
+        ssize_t k = send(fd, p, (size_t)n, MSG_NOSIGNAL);
+        if (k < 0 && errno == EINTR) continue;
+        if (k <= 0) return k < 0 ? -errno : -EPIPE;
+        p += k;
+        n -= (long)k;
+    }
+    return 0;
+}
+
+/* Read up to N bytes. The count, 0 at end of stream, or -errno. */
+long sy_recv(int fd, void *buf, long n) {
+    ssize_t k;
+    do k = recv(fd, buf, (size_t)n, 0);
+    while (k < 0 && errno == EINTR);
+    return k < 0 ? -errno : (long)k;
+}
+
+/* Close FD. 0, or -errno. */
+int sy_close(int fd) {
+    return close(fd) == 0 ? 0 : -errno;
+}
