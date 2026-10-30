@@ -44,9 +44,9 @@
 
 | 层 | 唯一名 | 含义 | 数量 | 真源 |
 |---|---|---|---|---|
-| L1 | **Stream**（别名 Flow） | 字节管道阶段：输入格式 → 输出格式 | unisacc **7**（e2/e1/e3/e4/prune/lower/elf）· m4/ujs **4**（lex/front/select/encode）· tdesc **3**（declare/context/size） | `exec/pipeline/image-stages.tsv` · `m4/contract.py FLOWS` · `flownet/tdesc/contract.tsv` |
-| L2 | **Net** | ask 事实网：一张有限表 + 全键穷举 exact | **18**（8770 键）· **10**（3677 键）· **3** | `unisa/gold.py` · `ujs/seed/construct/gold.py` |
-| L3 | **Segment** | 训练合并段（多网合一的 masked 多任务模型） | 3（s1/s2/s3） | `unisa/control/segment.py` |
+| L1 | **Stream**（别名 Flow） | 字节管道阶段：输入格式 → 输出格式 | unisacc **7**（e2/e1/e3/e4/prune/lower/elf）· m4/ujs **4**（lex/front/select/encode）· tdesc **3**（declare/context/size） | `exec/pipeline/image-stages.tsv` · `adapter/ujswasm/tables/contract.tsv`（原 `m4/contract.py FLOWS`，已归档） · `flownet/tdesc/contract.tsv` |
+| L2 | **Net** | ask 事实网：一张有限表 + 全键穷举 exact | **18**（8770 键）· **10**（3677 键）· **3** | `weights/gold/*.tsv`（权威；规则形式 `seed/gold_<阶段>_label.c`，由 `tools/gold-table.cx --check` 核对）· `adapter/ujswasm/ujsgold.cx` → `adapter/ujswasm/tables/*.gold.tsv`（原 `unisa/gold.py`、`ujs/seed/construct/gold.py`，均已归档） |
+| L3 | **Segment** | 训练合并段（多网合一的 masked 多任务模型） | 3（s1/s2/s3） | `archive/reference-py/unisa/control/segment.py`（负结果证据，已归档） |
 | L4 | **Book phase** | 一次推导中 ask 的记账阶段 | 由 contract 声明 | `flownet/contract.cx` 的 `phase` 行 |
 | L5 | **Release phase** | 发布流程阶段 | 10 | `archive/reference-py/release/tools/stagelog.py`（2026-10-30 随发布队列链归档） |
 
@@ -55,8 +55,8 @@
 | 如果你这样理解 | 正确的是 | 为什么容易错 |
 |---|---|---|
 | 「7 流」与「18 网」是同一批东西的两种叫法 | 流是**字节管道阶段**，网是 **ask 事实表** | 旧句「勿混」只否定了互换，没说明二者各是什么 |
-| `class Stage`（`unisa/gold.py`）表示流 | 它表示**网**（18 张的规格定义） | 类名抢占了「流」的词 |
-| `unisa/control/net.py` 的 `Net` 是事实网 | 它是**神经网络模型**（TableNet / StageNet / UnisaNet） | `net` 一词被两处占用 |
+| `class Stage`（`unisa/gold.py`，已归档到 `archive/reference-py/`）表示流 | 它表示**网**（18 张的规格定义） | 类名抢占了「流」的词 |
+| `unisa/control/net.py`（已归档）的 `Net` 是事实网 | 它是**神经网络模型**（TableNet / StageNet / UnisaNet） | `net` 一词被两处占用 |
 | m4 的「4 流」指 4 张决策网（lex/parse/isel/enc） | 4 流是**四个字节段**：lex / front / select / encode；决策网恰好也是 4 张，是数字巧合 | 两个「4」属不同维度 |
 | 所有 `phase` 都是编译阶段 | 三义：**book phase**（记账）/ **release phase**（发布）/ 历史 `compiler phase`（实为 segment） | 同一个词三次入场 |
 | `STAGE_NETS` 是「所有与流相关的网」 | 仅 **isel、abi** 两张不在 `TABLES` 里的网（15 + 2 + 1 = 18） | 名字里的 stage 是历史包袱 |
@@ -241,7 +241,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 <a id="flow-net-contracts"></a>
 ### 3.0 流/网合同三表与进度
 
-七流真源：[exec/pipeline/image-stages.tsv](exec/pipeline/image-stages.tsv)；十八网真源：[unisa/gold.py 的 STAGES](unisa/gold.py)，金表位于 weights/gold/。逻辑完整输入与拆分方案保留在[归档身份义务](archive/testing-c43-legacy/tests/STAGE-IDENTITIES.md)，不作为当前执行入口，本节汇总现有物理管道及观测。
+七流真源：[exec/pipeline/image-stages.tsv](exec/pipeline/image-stages.tsv)；十八网真源：金表 `weights/gold/*.tsv` 本身（由 `tools/gold-table.cx --check` 核对，规则形式在 `seed/gold_<阶段>_label.c`）；原 `unisa/gold.py` 的 STAGES 已归档到 `archive/reference-py/unisa/gold.py`。逻辑完整输入与拆分方案保留在[归档身份义务](archive/testing-c43-legacy/tests/STAGE-IDENTITIES.md)，不作为当前执行入口，本节汇总现有物理管道及观测。
 
 **逻辑边界不等于物理嵌套。** parse/type等逻辑阶段目前集成于e3，enc/image集成于elf，不声称已有独立产物。七流模型并非十八张ask事实网的简单一对一替换；下表消费关系含经典ask定位与产品归属，不能只因同名pp就把有限金表的叶证据当完整E2验证。流级封不推出内嵌每张网有独立封存。出货闸模块口径：**网格** `tests/netseal.cx`，**流格** `tests/streamseal.cx` + 叶内 `cell.tsv`（详见 `tests/SEAL-MODULES.md`）；e1/e4/prune/elf 已挂 streamseal，e2/e3/lower/pp 见该文「暂不合形状」。聚合测套 `./tests/seal-modules.sh`（闸 job `seal-modules`，contract 层，~25s）：manifest+x流×y网适用性检查 + 4 流封 + 17 网封回放；登记表 `tests/seal-modules.manifest.tsv`。
 
@@ -272,7 +272,7 @@ Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输�
 ### 3.0b 十八网合同表
 
 - tip `25f720ab` · 观测 2026-10-21 17:33 AWST
-- 真源：`unisa/gold.py` → `STAGES`；README stages 表；金表在 `weights/gold/*.tsv`
+- 真源：金表 `weights/gold/*.tsv`（`tools/gold-table.cx --check`）；README 的 stages 表是冻结文本；原 `unisa/gold.py` → `STAGES` 已归档
 - **是否封存** = `tests/seals/` 有点名该网的叶封/夹具原件；可标 STALE风险。**有封 ≠ 已冻**。金表 tsv ≠ seal 夹具。
 
 | 网名 | 功能 | 主要落流 | 是否封存 | 备注（出货/对照） |
