@@ -69,6 +69,7 @@ sh ./unisacc.com tools/refactor.cx -- apply CANDIDATES.tsv JOBS VERIFY...
 
 1. 能用强验证的文件太少，强验证指不带参数就能运行、改前改后输出逐字节可比。`tools/`、`tests/` 里这样的已登记批次只有 49 个，其中还有 `!strcmp` 的只剩 2 个。
 2. 退一步只验证"能编译"也不行：已装产品的 `-c` 和 `-S` 不认转发给宿主 C 库的函数（`setpgid`、`clock_gettime` 等），报"undefined function"，只有 `-run` 能用。所以凡是间接用到 `cx_runv_timeout` 的文件，都没法单独编译检查。这是产品缺陷，已转给 grk。
+   补记（2026-10-30，候选 `d903d225` 和已装产品都实跑过）：这是设计，不是缺声明。`-S`、以及不带 `-b` 的 `-c`，留在 tape，不建宿主桩，所以报 `undefined function`。单独编译检查用 `-c -b lnx/x86_64 -o OUT.o`。这样能编过，`setpgid` 在对象里是未定义符号；再拿这个对象去链接会报 `undefined reference`。能跑的程序仍从源码 `-o` 或 `-run`。见 plans/host-forward-compile-2026-10-30.md。
 
 ## 第 2 轮计划
 
