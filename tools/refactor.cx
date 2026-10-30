@@ -4,12 +4,13 @@
      sh ./unisacc.com tools/refactor.cx -- find [--auto] RULES FILE...   > CANDIDATES.tsv
      sh ./unisacc.com tools/refactor.cx -- apply CANDIDATES.tsv JOBS VERIFY...
 
-   RULES (TSV, '#' comments): id  call  prefix  argc  template  use  class  [context]
+   RULES (TSV, '#' comments): id  call  prefix  argc  template  use  class  [context  [where]]
      call     the called name; prefix: the characters that must sit right before it ('-': none), replaced too;
      argc     top-level argument count; template: the replacement, $1..$9 the arguments (trimmed);
      use      a module the replacement needs ('-': none), e.g. text.text; class: safe | review;
      context  any (default) | truth: the call's value must be used only as a truth value -- the whole
-              condition of if (...) / while (...), or an operand of && / || followed by ) && || ? ; , or :.
+              condition of if (...) / while (...), or an operand of && / || followed by ) && || ? ; , or :;
+     where    '-' or $N=TEXT: argument N, trimmed, must be exactly TEXT (e.g. $3=1L << 20).
    CANDIDATES (TSV): verdict  file  offset  line  rule  class  why  original  replacement  use
      find writes verdict "accept" for safe rows under --auto, else "-"; apply takes only "accept" rows.
      Tabs, newlines and backslashes inside fields are written as \t \n \\.
@@ -80,20 +81,25 @@ static int split(char *line, char **f, int maxf) {
 }
 
 /* ---------- rules ---------- */
-typedef struct { char *id, *call, *prefix, *tmpl, *use, *cls; int argc, truth; } Rule;
+typedef struct { char *id, *call, *prefix, *tmpl, *use, *cls, *where; int argc, truth, where_arg; } Rule;
 static Rule rules[MAXRULE];
 static int nrules;
 static void load_rules(const char *path) {
-    size_t n; char *b = cx_read(path, &n), *line, *e, *f[9]; long i = 0; int nf;
+    size_t n; char *b = cx_read(path, &n), *line, *e, *f[10]; long i = 0; int nf;
     if (!b) die("cannot read the rules");
     while (i < (long)n) {
         line = b + i; e = line; while (*e && *e != '\n') e++;
         i = (long)(e - b) + 1; *e = 0;
         if (!*line || *line == '#') continue;
-        nf = split(line, f, 9);
-        if (nrules == MAXRULE || (nf != 7 && nf != 8)) die("rules: want 7 or 8 fields: id call prefix argc template use class [context]");
-        if (nf == 8 && !tx_eq(f[7], "any", 8) && !tx_eq(f[7], "truth", 8)) die("rules: context is any or truth");
-        rules[nrules].truth = nf == 8 && tx_eq(f[7], "truth", 8);
+        nf = split(line, f, 10);
+        if (nrules == MAXRULE || nf < 7 || nf > 9) die("rules: want 7 to 9 fields: id call prefix argc template use class [context [where]]");
+        if (nf >= 8 && !tx_eq(f[7], "any", 8) && !tx_eq(f[7], "truth", 8)) die("rules: context is any or truth");
+        rules[nrules].truth = nf >= 8 && tx_eq(f[7], "truth", 8);
+        rules[nrules].where_arg = 0; rules[nrules].where = "";
+        if (nf == 9 && !tx_eq(f[8], "-", 4)) {
+            if (f[8][0] != '$' || f[8][1] < '1' || f[8][1] > '9' || f[8][2] != '=') die("rules: where is $N=TEXT or -");
+            rules[nrules].where_arg = f[8][1] - '0'; rules[nrules].where = f[8] + 3;
+        }
         rules[nrules].id = f[0]; rules[nrules].call = f[1];
         rules[nrules].prefix = tx_eq(f[2], "-", 4) ? "" : f[2];
         rules[nrules].argc = (int)strtol(f[3], 0, 10);
@@ -228,6 +234,12 @@ static int find_file(Buf *out, const char *file, int autoacc) {
                 close = parse_args(b, j, n, as, ae, &na, &ml, &cm);
                 if (close < 0 || na != R->argc) continue;
                 if (R->truth && !truth_context(b, n, ps, close)) continue;
+                if (R->where_arg) {   /* that argument, trimmed, must be exactly the given text */
+                    long ws = as[R->where_arg - 1], we = ae[R->where_arg - 1];
+                    if (R->where_arg > na) continue;
+                    trim(b, &ws, &we);
+                    if (!tx_same(b + ws, we - ws, R->where, tx_len(R->where, 256))) continue;
+                }
                 render(&rep, R->tmpl, b, as, ae);
                 cls = R->cls; why = "rule";
                 if (ml) { cls = "review"; why = "spans lines"; }
