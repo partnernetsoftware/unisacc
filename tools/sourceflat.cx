@@ -1,3 +1,4 @@
+#pragma unisa use text.text
 /* Native complete classic C export. Run from any cwd:
    sh /repo/unisacc.com /repo/tools/sourceflat.cx -- OUTPUT
    --verify OUTPUT checks current inputs, flat bytes and the v2 sidecar.
@@ -27,7 +28,7 @@ static void put(Buf *b,const void *p,size_t n) {
 static void text_(Buf *b,const char *s){put(b,s,strlen(s));}
 static char *read_(const char *p,size_t *n){char *b=cx_read(p,n);if(!b)die("cannot read",p);return b;}
 static void path_(char out[4096],const char *a,const char *b){if(snprintf(out,4096,"%s/%s",a,b)>=4096)die("path too long",b);}
-static int find_(const char *p){int i;for(i=0;i<nd;i++)if(!strcmp(deps[i].path,p))return i;return -1;}
+static int find_(const char *p){int i;for(i=0;i<nd;i++)if(tx_eq(deps[i].path, p, 1L << 20))return i;return -1;}
 static void remember(const char *p,const char *bytes,size_t n){
     char *s; Dep *q;
     if(find_(p)>=0)return;
@@ -72,7 +73,7 @@ static void headers(const char *dir,int depth){
     if(depth>64)die("runtime include depth exceeds 64",dir);
     d=opendir(dir);if(!d)die("cannot open runtime include directory",dir);
     for(;;){errno=0;e=readdir(d);if(!e){if(errno)die("cannot read runtime include directory",dir);break;}
-        if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;
+        if(tx_eq(e->d_name, ".", 1L << 20)||tx_eq(e->d_name, "..", 1L << 20))continue;
         if(n==cap){char **q;cap=cap?cap*2:32;q=realloc(v,cap*sizeof *v);if(!q)die("allocation failed",0);v=q;}
         path_(p,dir,e->d_name);v[n]=strdup(p);if(!v[n])die("allocation failed",0);n++;
     }
@@ -100,15 +101,15 @@ static void destination(const char *arg,char out[4096]){
     char work[4096],parent[4096],resolved[4096],*s;struct stat st;int i;
     if(strlen(arg)>=sizeof work)die("path too long",arg);strcpy(work,arg);
     s=strrchr(work,'/');if(s){*s=0;if(!realpath(work[0]?work:"/",parent))die("cannot resolve parent",arg);s++;}else{if(!getcwd(parent,sizeof parent))die("getcwd failed",0);s=work;}
-    if(!*s||!strcmp(s,".")||!strcmp(s,".."))die("invalid output path",arg);
+    if(!*s||tx_eq(s, ".", 1L << 20)||tx_eq(s, "..", 1L << 20))die("invalid output path",arg);
     path_(out,parent,s);
     if(stat(out,&st)==0){if(!S_ISREG(st.st_mode))die("output is not regular",out);if(!realpath(out,resolved))die("cannot resolve output",out);}else{if(errno!=ENOENT)die("cannot stat output",out);strcpy(resolved,out);}
-    for(i=0;i<nd;i++){char p[4096],r[4096];path_(p,root,deps[i].path);if(!realpath(p,r))die("cannot resolve input",p);if(!strcmp(r,resolved))die("refusing input overwrite",out);if(stat(out,&st)==0){struct stat in;if(stat(p,&in))die("cannot stat input",p);if(in.st_dev==st.st_dev&&in.st_ino==st.st_ino)die("refusing input hardlink overwrite",out);}else if(errno!=ENOENT)die("cannot stat output",out);}
+    for(i=0;i<nd;i++){char p[4096],r[4096];path_(p,root,deps[i].path);if(!realpath(p,r))die("cannot resolve input",p);if(tx_eq(r, resolved, 1L << 20))die("refusing input overwrite",out);if(stat(out,&st)==0){struct stat in;if(stat(p,&in))die("cannot stat input",p);if(in.st_dev==st.st_dev&&in.st_ino==st.st_ino)die("refusing input hardlink overwrite",out);}else if(errno!=ENOENT)die("cannot stat output",out);}
 }
 static void stage(char tmp[4096],const char *out,const Buf *b){int fd;FILE *f;if(snprintf(tmp,4096,"%s.tmp.XXXXXX",out)>=4096)die("path too long",out);fd=mkstemp(tmp);if(fd<0){tmp[0]=0;die("cannot create sibling temporary",out);}f=fdopen(fd,"wb");if(!f){close(fd);die("fdopen failed",tmp);}if(fwrite(b->p,1,b->n,f)!=b->n){fclose(f);die("write failed",tmp);}if(fflush(f)||fsync(fd)){fclose(f);die("flush failed",tmp);}if(fclose(f))die("close failed",tmp);}
 int main(int argc,char **argv){
     char self[4096],inc[4096],out[4096],side[4096],sidearg[4096],*s,*b;size_t n;int verify=0;
-    if(argc==3&&!strcmp(argv[1],"--verify")){verify=1;argv++;argc--;}
+    if(argc==3&&tx_eq(argv[1], "--verify", 1L << 20)){verify=1;argv++;argc--;}
     if(argc!=2){fprintf(stderr,"usage: sourceflat.cx [--verify] OUTPUT\n");return 2;}
     if(!realpath(__FILE__,self))die("cannot resolve tool",__FILE__);
     s=strrchr(self,'/');if(!s)die("invalid tool path",self);*s=0;s=strrchr(self,'/');if(!s)die("invalid tool root",self);*s=0;strcpy(root,self);

@@ -12,13 +12,14 @@
  * declared text and empty stdout. A directory given as INPUT may open successfully on Linux and fail at read: the row
  * then records the observed refusal text as INFO instead of asserting a name (honest, not PASS). */
 #pragma unisa use cxlib.netpack
+#pragma unisa use text.text
 
 static char root[4096], stream[4096], outdir[4096], inc[4400], bound[4400];
 static FILE *res; static int npass, nfail, nnotrun; static const char *pfx;
 static void die(const char *s) { fprintf(stderr, "stream-io-cases: REFUSE %s errno=%d\n", s, errno); exit(2); }
 static void path(char *p, size_t cap, const char *a, const char *b) { int n = snprintf(p, cap, "%s/%s", a, b); if (n < 0 || (size_t)n >= cap) die("path"); }
 static void saved(const char *p, const char *s, size_t n) { int f = open(p, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600); if (f < 0) die("exclusive create"); while (n) { ssize_t k = write(f, s, n); if (k <= 0) die("write"); s += k; n -= (size_t)k; } if (close(f)) die("close"); }
-static void row(const char *state, const char *cell, const char *label, const char *detail) { fprintf(res, "%s\t%s.%s\t%s\t%s\n", state, pfx, cell, label, detail); if (!strcmp(state, "PASS")) npass++; else if (!strcmp(state, "FAIL")) nfail++; else if (!strcmp(state, "NOT_RUN")) nnotrun++; }
+static void row(const char *state, const char *cell, const char *label, const char *detail) { fprintf(res, "%s\t%s.%s\t%s\t%s\n", state, pfx, cell, label, detail); if (tx_eq(state, "PASS", 1L << 20)) npass++; else if (tx_eq(state, "FAIL", 1L << 20)) nfail++; else if (tx_eq(state, "NOT_RUN", 1L << 20)) nnotrun++; }
 static void check(int ok, const char *cell, const char *label, const char *detail) { row(ok ? "PASS" : "FAIL", cell, label, detail); }
 /* run the container on INPUT (a path or "-" with stdin bytes), extra env, 12 s bound */
 static int run_stream(const char *input, const char *stdin_bytes, size_t stdin_n, char *const extra_env[], np_result *r) {
@@ -40,9 +41,9 @@ int main(int argc, char **argv) {
     char rp[4400]; path(rp, sizeof rp, outdir, "results.tsv"); res = fopen(rp, "wbx"); if (!res) die("results");
     { size_t n; char *b = cx_read(stream, &n); if (!b) die("stream"); char h[65]; cx_sha256_hex(b, n, h); free(b); fprintf(res, "IDENTITY\tstream=%s\n", h); }
     /* fixture and its hand oracle: E4 O2 turns `imm r2, 0 / add64 r0, r1, r2` into `mov r0, r1`; prune drops `dead` */
-    const char *fix = !strcmp(pfx, "e4") ? "_start:\n  imm r2, 0\n  add64 r0, r1, r2\n  ret\n"
+    const char *fix = tx_eq(pfx, "e4", 1L << 20) ? "_start:\n  imm r2, 0\n  add64 r0, r1, r2\n  ret\n"
         : "_start:\n  call main\n  ret\nmain:\n  .frame 8\n  store64 [r7+0], r6\n  mov r6, r7\n  .frame 0\n  imm r0, 7\n  ret\ndead:\n  .frame 8\n  store64 [r7+0], r6\n  mov r6, r7\n  .frame 0\n  imm r0, 99\n  ret\n";
-    const char *want = !strcmp(pfx, "e4") ? "_start:\n  mov r0, r1\n  ret\n" : "_start:\n  call main\n  ret\nmain:\n  .frame 8\n  store64 [r7+0], r6\n  mov r6, r7\n  .frame 0\n  imm r0, 7\n  ret\n";
+    const char *want = tx_eq(pfx, "e4", 1L << 20) ? "_start:\n  mov r0, r1\n  ret\n" : "_start:\n  call main\n  ret\nmain:\n  .frame 8\n  store64 [r7+0], r6\n  mov r6, r7\n  .frame 0\n  imm r0, 7\n  ret\n";
     char fp[4400]; path(fp, sizeof fp, outdir, "fixture.tape"); saved(fp, fix, strlen(fix)); np_result a, b;
     /* det.file-vs-stdin */
     if (run_stream(fp, 0, 0, 0, &a)) row("NOT_RUN", "det.file-vs-stdin", "file-route", "container did not run");
@@ -71,7 +72,7 @@ int main(int argc, char **argv) {
         if (run_stream(fp, 0, 0, 0, &c)) row("NOT_RUN", "rec.after-refusal", lab, "container did not run"); else { check(exact(&c, want), "rec.after-refusal", lab, "oracle reproduced"); np_free(&c); } }
     check(ntext >= 3 && strcmp(texts[0], texts[1]) && strcmp(texts[0], texts[2]) && strcmp(texts[1], texts[2]), "ref.non-regular-input", "enoent-eacces-enotdir.distinct", "three refusal texts pairwise different");
     /* ref.step-budget (e4 only; prune's row is shared through resources) */
-    if (!strcmp(pfx, "e4")) { np_result r; char *env[] = { "UNISA_MAXSTEPS=1", 0 };
+    if (tx_eq(pfx, "e4", 1L << 20)) { np_result r; char *env[] = { "UNISA_MAXSTEPS=1", 0 };
         if (run_stream(fp, 0, 0, env, &r)) row("NOT_RUN", "ref.step-budget", "maxsteps-1", "container did not run");
         else { int ok = r.rc == 3 && !r.outn && r.errn && strstr(r.err, "step budget exhausted (budget 1 steps)"); char d[120]; { if (cx_fmt(d, sizeof d, "rc=%d stdout=%zu", r.rc, r.outn)) { fprintf(stderr, "stream-io-cases-gen: text too long for d\n"); exit(2); } } check(ok, "ref.step-budget", "maxsteps-1.exit-3-declared-text", ok ? "rc 3, declared text, empty stdout" : d); np_free(&r); } }
     chmod(unreadable, 0600);

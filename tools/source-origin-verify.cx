@@ -14,6 +14,7 @@
 #pragma unisa use cxlib.kernelsha
 #pragma unisa use cxlib.sourcepackage
 #pragma unisa use cxlib.mixedprofiles
+#pragma unisa use text.text
 
 static int sov_reads;
 static mp_profile sov_material;
@@ -32,7 +33,7 @@ typedef struct {
 static void sov_die(const char *reason){fprintf(stderr,"source-origin-verify: REFUSE %s errno=%d\n",reason,errno);exit(2);}
 static void sov_clean(const char *p){if(!p||!*p||strpbrk(p,"\t\r\n"))sov_die("unclean-path-or-value");}
 static void sov_path(char *p,size_t cap,const char *a,const char *b){int n=snprintf(p,cap,"%s/%s",a,b);if(n<0||(size_t)n>=cap)sov_die("path-bound");}
-static int sov_within(const char *p,const char *base){size_t n=strlen(base);return !strcmp(p,base)||(!strncmp(p,base,n)&&p[n]=='/');}
+static int sov_within(const char *p,const char *base){size_t n=strlen(base);return tx_eq(p, base, 1L << 20)||(!strncmp(p,base,n)&&p[n]=='/');}
 static void sov_canonical(const char *p){char resolved[4400];sov_clean(p);if(p[0]!='/'||!realpath(p,resolved)||strcmp(p,resolved))sov_die("canonical-path-required");}
 static void sov_digest_bytes(const void *p,size_t n,char h[65]){
     if(n>=65536){int rc=ks_sha256_hex(p,n,h);if(rc){char why[120];{ if (cx_fmt(why,sizeof why,"kernelsha-failure rc=%d",rc)) { fprintf(stderr, "source-origin-verify: text too long for why\n"); exit(2); } }sov_die(why);}}
@@ -74,7 +75,7 @@ static void sov_tree(const char *base,const char *relative,int depth){
     DIR *dir=opendir(p);if(!dir)sov_die("include-tree-opendir");
     for(;;){errno=0;struct dirent *e=readdir(dir);
         if(!e){int saved=errno,rc=closedir(dir);if(saved||rc)sov_die("include-tree-readdir-or-close");break;}
-        if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;sov_clean(e->d_name);
+        if(tx_eq(e->d_name, ".", 1L << 20)||tx_eq(e->d_name, "..", 1L << 20))continue;sov_clean(e->d_name);
         char next[4400];if(*relative)sov_path(next,sizeof next,relative,e->d_name);else{if(strlen(e->d_name)>=sizeof next)sov_die("include-entry-bound");{ if (cx_fmt(next, sizeof next, "%s",e->d_name)) { fprintf(stderr, "source-origin-verify: text too long for next\n"); exit(2); } }}
         sov_tree(base,next,depth+1);
     }
@@ -113,7 +114,7 @@ static void sov_collect(const char *root_arg,const char *bootstrap,const char *p
     memset(f,0,sizeof *f);sov_root(root_arg,f->root);sov_canonical(bootstrap);
     if(strlen(bootstrap)>=sizeof f->bootstrap)sov_die("saved-bootstrap-bound");strcpy(f->bootstrap,bootstrap);
     sov_driver(f->root,f->driver,f->driver_sha);char p[4400];
-    if(sov_explicit_material){if(!package)sov_die("explicit-material-profile-requires-models");strcpy(f->material_profile,sov_material.id);sov_root(sov_source_root,f->source_root);if(!strcmp(f->source_root,f->root)||!sov_within(f->bootstrap,f->source_root))sov_die("explicit-tool-source-bootstrap-role");char saved_role[4400];sov_path(saved_role,sizeof saved_role,f->source_root,sov_material.controller_bootstrap_relative);if(strcmp(saved_role,f->bootstrap))sov_die("explicit-preserved-source-bootstrap-path");sov_path(p,sizeof p,f->root,"tools/cxlib/mixedprofiles.cx");sov_digest(p,f->material_roles_sha);}
+    if(sov_explicit_material){if(!package)sov_die("explicit-material-profile-requires-models");strcpy(f->material_profile,sov_material.id);sov_root(sov_source_root,f->source_root);if(tx_eq(f->source_root, f->root, 1L << 20)||!sov_within(f->bootstrap,f->source_root))sov_die("explicit-tool-source-bootstrap-role");char saved_role[4400];sov_path(saved_role,sizeof saved_role,f->source_root,sov_material.controller_bootstrap_relative);if(strcmp(saved_role,f->bootstrap))sov_die("explicit-preserved-source-bootstrap-path");sov_path(p,sizeof p,f->root,"tools/cxlib/mixedprofiles.cx");sov_digest(p,f->material_roles_sha);}
     sov_path(p,sizeof p,f->root,"tools/cxlib/sourcepackage.cx");sov_digest(p,f->sp_sha);
     sov_path(p,sizeof p,f->root,"tools/cxlib/netpack.cx");sov_digest(p,f->np_sha);
     sov_path(p,sizeof p,f->root,"tools/cxlib/kernelsha.cx");sov_digest(p,f->ks_sha);
@@ -138,7 +139,7 @@ static void sov_closure(const np_buf *profile,char profile_sha[65],char closure_
 static void sov_stdout(const np_buf *b){size_t at=0;while(at<b->n){ssize_t z=write(1,b->p+at,b->n-at);if(z<0&&errno==EINTR)continue;if(z<=0)sov_die("stdout-write");at+=(size_t)z;}}
 static void sov_profile_parent(const char *p){
     sov_clean(p);if(p[0]!='/'||strlen(p)>=4096)sov_die("absolute-new-profile-required");char parent[4096];{ if (cx_fmt(parent, sizeof parent, "%s",p)) { fprintf(stderr, "source-origin-verify: text too long for parent\n"); exit(2); } }char *slash=strrchr(parent,'/');
-    if(!slash||!slash[1]||!strcmp(slash+1,".")||!strcmp(slash+1,".."))sov_die("new-profile-leaf");if(slash==parent)slash[1]=0;else *slash=0;sov_canonical(parent);
+    if(!slash||!slash[1]||tx_eq(slash+1, ".", 1L << 20)||tx_eq(slash+1, "..", 1L << 20))sov_die("new-profile-leaf");if(slash==parent)slash[1]=0;else *slash=0;sov_canonical(parent);
 }
 static void sov_write_profile(const char *r,const char *bootstrap,const char *path,const char *package){
     sov_profile_parent(path);if(!sov_within(path,r))sov_die("profile-outside-current-root");SovFacts before,after;sov_collect(r,bootstrap,package,&before);np_buf b=sov_profile(&before);
@@ -182,15 +183,15 @@ int main(int argc,char **argv){
     fputs("source-origin-verify: REFUSE Linux/x86_64-LP64-native-and-proc-required\n",stderr);return 2;
 #else
     if(sizeof(long)!=8||sizeof(void *)!=8)sov_die("LP64-required");
-    if((argc==11||argc==12)&&!strcmp(argv[2],"--material-profile")&&!strcmp(argv[4],"--source-root")){
+    if((argc==11||argc==12)&&tx_eq(argv[2], "--material-profile", 1L << 20)&&tx_eq(argv[4], "--source-root", 1L << 20)){
         if(!mp_get(argv[3],&sov_material))sov_die("unknown-material-profile");sov_explicit_material=1;if(sov_material.origin_context_version!=2)sov_die("explicit-new-material-profile-required");sov_root(argv[5],sov_source_root);char explicit_root[4096];sov_root(argv[6],explicit_root);
-        if(argc==11&&!strcmp(argv[1],"--write-profile")&&!strcmp(argv[9],"--models")){sov_write_profile(explicit_root,argv[7],argv[8],argv[10]);return 0;}
-        if(argc==12&&!strcmp(argv[1],"--snapshot")){sov_snapshot(explicit_root,argv[7],argv[8],argv[9],argv[10],argv[11]);return 0;}
+        if(argc==11&&tx_eq(argv[1], "--write-profile", 1L << 20)&&tx_eq(argv[9], "--models", 1L << 20)){sov_write_profile(explicit_root,argv[7],argv[8],argv[10]);return 0;}
+        if(argc==12&&tx_eq(argv[1], "--snapshot", 1L << 20)){sov_snapshot(explicit_root,argv[7],argv[8],argv[9],argv[10],argv[11]);return 0;}
         sov_die("explicit-material-profile-arguments");
     }
-    char r[4096];if(argc==5&&!strcmp(argv[1],"--write-profile")){sov_root(argv[2],r);sov_write_profile(r,argv[3],argv[4],0);return 0;}
-    if(argc==7&&!strcmp(argv[1],"--write-profile")&&!strcmp(argv[5],"--models")){sov_root(argv[2],r);sov_write_profile(r,argv[3],argv[4],argv[6]);return 0;}
-    if(argc==8&&!strcmp(argv[1],"--snapshot")){sov_root(argv[2],r);sov_snapshot(r,argv[3],argv[4],argv[5],argv[6],argv[7]);return 0;}
+    char r[4096];if(argc==5&&tx_eq(argv[1], "--write-profile", 1L << 20)){sov_root(argv[2],r);sov_write_profile(r,argv[3],argv[4],0);return 0;}
+    if(argc==7&&tx_eq(argv[1], "--write-profile", 1L << 20)&&tx_eq(argv[5], "--models", 1L << 20)){sov_root(argv[2],r);sov_write_profile(r,argv[3],argv[4],argv[6]);return 0;}
+    if(argc==8&&tx_eq(argv[1], "--snapshot", 1L << 20)){sov_root(argv[2],r);sov_snapshot(r,argv[3],argv[4],argv[5],argv[6],argv[7]);return 0;}
     sov_die("usage --write-profile CURRENT_ROOT ABS_SAVED_BOOTSTRAP NEW_PROFILE [--models ABS_COMPILER_PACKAGE] | --snapshot CURRENT_ROOT LOGICAL_ROOT SNAPSHOT_ROOT LOGICAL_PC FRESH_ORIGIN_SID PROFILE");return 2;
 #endif
 }

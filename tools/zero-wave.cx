@@ -3,6 +3,7 @@
  * Outer caller must use tools/bound 55; each child has its own bound 50.
  * This is a development execution wave, never an aggregate qualification. */
 #pragma unisa use cxlib.netpack
+#pragma unisa use text.text
 static char root[4096],parent[4096],candidate[4400],runner[4400],bound[4400];
 static char ids[4][128],logs[4][4400],errors[4][4400];
 static pid_t pids[4];static int statuses[4];
@@ -24,7 +25,7 @@ int main(int argc,char **argv){
  if(argv[1][0]!='/'||argv[2][0]!='/'||!realpath(argv[1],root)||!realpath(argv[2],parent)||strcmp(argv[1],root)||strcmp(argv[2],parent))die("canonical-root-parent");
  char outroot[4400],canonical[4096];path(outroot,sizeof outroot,root,"out");if(!realpath(outroot,canonical)||!within(parent,canonical))die("parent-must-be-below-out");
  path(candidate,sizeof candidate,root,"unisacc.com");path(runner,sizeof runner,root,"tests/run-batch.cx");path(bound,sizeof bound,root,"tools/bound");
- int count=argc-3;for(int i=0;i<count;i++){if(!valid_id(argv[i+3]))die("batch-id-shape");copy_fit(ids[i],sizeof ids[i],argv[i+3]);for(int j=0;j<i;j++)if(!strcmp(ids[i],ids[j]))die("duplicate-batch-id");
+ int count=argc-3;for(int i=0;i<count;i++){if(!valid_id(argv[i+3]))die("batch-id-shape");copy_fit(ids[i],sizeof ids[i],argv[i+3]);for(int j=0;j<i;j++)if(tx_eq(ids[i], ids[j], 1L << 20))die("duplicate-batch-id");
   char leaf[150],work[4400];path(work,sizeof work,parent,ids[i]);struct stat st;errno=0;if(!lstat(work,&st)||errno!=ENOENT)die("batch-output-must-be-absent");
   int z=snprintf(leaf,sizeof leaf,"%s.log",ids[i]);if(z<0||(size_t)z>=sizeof leaf)die("log-leaf");path(logs[i],sizeof logs[i],parent,leaf);
   z=snprintf(leaf,sizeof leaf,"%s.err",ids[i]);if(z<0||(size_t)z>=sizeof leaf)die("err-leaf");path(errors[i],sizeof errors[i],parent,leaf);
@@ -33,6 +34,6 @@ int main(int argc,char **argv){
  for(int i=0;i<count;i++){pids[i]=fork();if(pids[i]<0){for(int j=0;j<i;j++)kill(pids[j],SIGTERM);for(int j=0;j<i;j++){int st;while(waitpid(pids[j],&st,0)<0&&errno==EINTR){}}die("fork");}if(!pids[i])child(i);}
  int left=count;while(left){int st;pid_t pid;do{pid=waitpid(-1,&st,0);}while(pid<0&&errno==EINTR);if(pid<0)die("waitpid");int found=-1;for(int i=0;i<count;i++)if(pids[i]==pid){found=i;break;}if(found<0||statuses[found])die("unknown-or-duplicate-child");statuses[found]=WIFEXITED(st)?WEXITSTATUS(st)+1:WIFSIGNALED(st)?128+WTERMSIG(st)+1:257;left--;}
  digest(candidate,after);int bad=strcmp(before,after)!=0;
- for(int i=0;i<count;i++){size_t n;char *s=cx_read(logs[i],&n);int ok=s&&statuses[i]==1&&marker(s,n,ids[i])&&!strcmp(before,after);printf("WAVE\tid=%s\tstatus=%s\tchild_rc=%d\tlog=%s\tstderr=%s\tcandidate=%s\n",ids[i],ok?"PASS":"FAIL",statuses[i]?statuses[i]-1:-1,logs[i],errors[i],before);if(!ok)bad=1;free(s);}
+ for(int i=0;i<count;i++){size_t n;char *s=cx_read(logs[i],&n);int ok=s&&statuses[i]==1&&marker(s,n,ids[i])&&tx_eq(before, after, 1L << 20);printf("WAVE\tid=%s\tstatus=%s\tchild_rc=%d\tlog=%s\tstderr=%s\tcandidate=%s\n",ids[i],ok?"PASS":"FAIL",statuses[i]?statuses[i]-1:-1,logs[i],errors[i],before);if(!ok)bad=1;free(s);}
  printf("ZERO_WAVE\tjobs=%d\tfailed=%d\tscope=actual-independent-batches-no-aggregate-qualification\n",count,bad?1:0);return bad?1:0;
 }
