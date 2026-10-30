@@ -1,0 +1,57 @@
+#pragma unisa module slice
+#pragma unisa use grow
+/* L1 mem/slice: an immutable byte slice (Rust's &[u8], &str's underlying bytes).
+   A slice borrows bytes it does not own: it is a pointer + length, so every
+   access is bounds-checked against the length and the lifetime is whatever the
+   caller keeps the borrowed buffer alive.  It does not allocate and does not
+   free; the buffer it borrows must outlive the slice.
+     ms_span(p, n)        borrow n bytes at p (n >= 0; p may be null only when n == 0)
+     ms_of(b)             borrow the whole contents of a grow buffer
+     ms_at(s, off, n)     sub-slice s[off..off+n); 0, or -1 when out of range
+     ms_len(s)            the length
+     ms_eq(a, b)          1 when the two spans are byte-equal
+     ms_find(s, needle)   offset of needle in s, or -1
+   Speed: every op is O(n) with no allocation; slices never copy their bytes. */
+
+typedef struct { const unsigned char *p; long n; } ms_slice;
+
+ms_slice ms_span(const unsigned char *p, long n) {
+    ms_slice s;
+    if (n < 0 || (n > 0 && !p)) { s.p = 0; s.n = 0; return s; }
+    s.p = p; s.n = n;
+    return s;
+}
+
+ms_slice ms_of(const mg_buf *b) {
+    ms_slice s;
+    if (!b) { s.p = 0; s.n = 0; return s; }
+    s.p = b->data; s.n = b->len;
+    return s;
+}
+
+long ms_len(const ms_slice *s) {
+    return s ? s->n : 0;
+}
+
+int ms_at(const ms_slice *s, long off, long n, ms_slice *out) {
+    if (!s || !out || off < 0 || n < 0 || off > s->n || n > s->n - off) return -1;
+    out->p = s->p + off;
+    out->n = n;
+    return 0;
+}
+
+int ms_eq(const ms_slice *a, const ms_slice *b) {
+    long i;
+    if (!a || !b || a->n != b->n) return 0;
+    for (i = 0; i < a->n; i++) if (a->p[i] != b->p[i]) return 0;
+    return 1;
+}
+
+long ms_find(const ms_slice *s, const ms_slice *needle) {
+    long i;
+    if (!s || !needle || needle->n < 0 || needle->n > s->n) return -1;
+    if (needle->n == 0) return 0;
+    for (i = 0; i + needle->n <= s->n; i++)
+        if (ms_eq(&(ms_slice){ s->p + i, needle->n }, needle)) return i;
+    return -1;
+}
