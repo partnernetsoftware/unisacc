@@ -20,6 +20,21 @@
                               host_cc_only=; rc 1 when any DANGER.  A caller whose first 2048 bytes say
                               host-cc-only (built only by a host C compiler with -include) is not reported,
                               only counted in host_cc_only.
+     external [--names] (--tracked | FILE...)
+                              per caller, every called name (C rows) that no .cx defines, by kind (plans/cxlibc-
+                              2026-10-30.md): lang (va_start, offsetof, defined, __builtin_*, ...; not counted);
+                              else local when the caller has a D or X of it, or a call site NAME(...) { (a
+                              definition parse missed, e.g. after an #if that unbalances parentheses); else libc
+                              when the flattened prelude include/cx-flat.h defines, declares or #defines it (D, P, X
+                              of parse() over it, plus R (*NAME(...))(...) as signal), runtime when such a name
+                              starts with _ or cx_; else repo when any indexed .cx has a D or X of it (a P alone
+                              is a declaration: forwarded, so host); else runtime for _ / cx_ names, host for the
+                              rest.  Call sites written as members (after . or ->) are not calls of the name, and
+                              a host name that also occurs as a plain identifier (a function-pointer variable or
+                              parameter, or an address taken) is dropped; both need the caller's text, read again.
+                              One row EXTERNAL FILE libc=N host=M runtime=R names=a,b (libc and host names,
+                              sorted) per caller with any; --names: NAME FILE name kind sites=K per name instead;
+                              then EXTERNALS files= scanned= libc= host= runtime= lang= prelude_names=.  rc 0.
      dump FILE                the file's facts
 
    The file set is every tracked .cx file (git ls-files -s, mode 120000 symlinks skipped), or the paths in
@@ -803,9 +818,214 @@ static int cmd_undeclared(int *callers, int nc) {
     return danger ? 1 : 0;
 }
 
+/* ---------- external: called names that no indexed .cx defines ---------- */
+#define PRELUDE "include/cx-flat.h"
+typedef struct { const char **s; long *n; int *v, *used; int cap, cnt; } NSet;
+static void ns_init(NSet *t, int cap) {
+    t->cap = cap; t->cnt = 0;
+    t->s = ar_alloc(arena, (long)cap * (long)sizeof(char *)); t->n = ar_alloc(arena, (long)cap * (long)sizeof(long));
+    t->v = ar_alloc(arena, (long)cap * (long)sizeof(int)); t->used = ar_alloc(arena, (long)cap * (long)sizeof(int));
+    if (!t->s || !t->n || !t->v || !t->used) die("out of memory");
+}
+/* the value + 1 of S[0..N) in T, 0 when absent */
+static int ns_get(NSet *t, const char *s, long n) {
+    unsigned long h = hashn(s, n) & (unsigned long)(t->cap - 1);
+    while (t->s[h]) { if (tx_same(t->s[h], t->n[h], s, n)) return t->v[h] + 1; h = (h + 1) & (unsigned long)(t->cap - 1); }
+    return 0;
+}
+static void ns_put(NSet *t, const char *s, long n, int v) {
+    unsigned long h = hashn(s, n) & (unsigned long)(t->cap - 1);
+    while (t->s[h]) { if (tx_same(t->s[h], t->n[h], s, n)) { t->v[h] = v; return; } h = (h + 1) & (unsigned long)(t->cap - 1); }
+    if ((long)t->cnt * 4 >= (long)t->cap * 3) die("name table full");
+    t->s[h] = s; t->n[h] = n; t->v[h] = v; t->used[t->cnt++] = (int)h;
+}
+static void ns_clear(NSet *t) { int k; for (k = 0; k < t->cnt; k++) t->s[t->used[k]] = 0; t->cnt = 0; }
+
+/* language-level names called with '(' that are neither libc/POSIX nor the CX runtime */
+static const char *lang_names[] = {"va_start", "va_arg", "va_end", "va_copy", "__va_copy", "offsetof", "defined",
+    "__attribute__", "__attribute", "__asm__", "__asm", "asm", "__typeof__", "__typeof", "typeof", "__extension__",
+    "_Static_assert", "static_assert", "_Generic", "_Alignof", "_Alignas", "alignof", "alignas", "__alignof__",
+    "__has_include", "__has_builtin", "__has_attribute", "__has_feature", "__declspec",
+    "INT8_C", "INT16_C", "INT32_C", "INT64_C", "UINT8_C", "UINT16_C", "UINT32_C", "UINT64_C", "INTMAX_C", "UINTMAX_C", 0};
+static int is_lang(const char *s, long n) {
+    int k;
+    if (tx_prefix(s, n, "__builtin_", 10)) return 1;
+    for (k = 0; lang_names[k]; k++) if (word_is(s, n, lang_names[k])) return 1;
+    return 0;
+}
+static int is_runtime(const char *s, long n) { return n > 0 && (s[0] == '_' || tx_prefix(s, n, "cx_", 3)); }
+
+static NSet prelude, repo, own, per;
+static long n_prelude;
+/* every name the prelude defines or declares at file scope (D, P) or as a macro (X), from parse() over the
+   flattened prelude, plus R (*NAME(...))(...) -- a function returning a function pointer (signal), which parse
+   sees as a call inside '(' -- on a line that starts with an identifier other than typedef */
+static void load_prelude(void) {
+    size_t n; char *b = cx_read(PRELUDE, &n); Buf o = {0, 0, 0}; const char *s, *end; long i = 0;
+    if (!b) die2("cannot read the prelude", PRELUDE);
+    ns_init(&prelude, 1 << 14);
+    parse(&o, b, (long)n);   /* o and b stay for the process: the set points into them */
+    for (s = o.p, end = o.p + o.n; s < end; s = next_row(s, end)) {
+        const char *nm; long nn;
+        if (*s != 'D' && *s != 'P' && *s != 'X') continue;
+        nn = field_at(s, end, 1, &nm);
+        if (!ns_get(&prelude, nm, nn)) { ns_put(&prelude, nm, nn, 0); n_prelude++; }
+    }
+    while (i < (long)n) {
+        long e = tx_chr(b + i, (long)n - i, '\n'), ln = e < 0 ? (long)n - i : e, k;
+        const char *l = b + i;
+        if (ln && is_id((unsigned char)l[0]) && !tx_prefix(l, ln, "typedef", 7))
+            for (k = 0; k + 2 < ln; k++) if (l[k] == '(' && l[k + 1] == '*') {
+                long a = k + 2, z = a, q;
+                while (z < ln && is_id((unsigned char)l[z])) z++;
+                q = skip_ws(l, z, ln);
+                if (z > a && q < ln && l[q] == '(' && !ns_get(&prelude, l + a, z - a)) { ns_put(&prelude, l + a, z - a, 0); n_prelude++; }
+                break;
+            }
+        i += ln + 1;
+    }
+}
+
+typedef struct { const char *name; long nl; int sites, member, var, defd; char kind; } Ext;
+static Ext *xs; static int nxs, xcap;
+/* over the caller's text, with parse()'s lexing: for each identifier that PER names, count the call sites written
+   as a member (after '.' or '->': a field holding a function pointer) and flag an occurrence that is neither a
+   call nor a member (a variable or parameter holding a function pointer, or the function's address) */
+static void ext_scan(const char *b, long n) {
+    long i = 0; int mode = 0;
+    while (i < n) {
+        char c = b[i];
+        if (mode == 1) { if (c == '\n') mode = 0; i++; continue; }
+        if (mode == 2) { if (c == '*' && i + 1 < n && b[i + 1] == '/') { mode = 0; i += 2; continue; } i++; continue; }
+        if (mode == 3 || mode == 4) {
+            if (c == '\\' && i + 1 < n) { i += 2; continue; }
+            if ((mode == 3 && c == '"') || (mode == 4 && c == '\'')) mode = 0;
+            i++; continue;
+        }
+        if (c == '/' && i + 1 < n && b[i + 1] == '/') { mode = 1; i += 2; continue; }
+        if (c == '/' && i + 1 < n && b[i + 1] == '*') { mode = 2; i += 2; continue; }
+        if (c == '"') { mode = 3; i++; continue; }
+        if (c == '\'') { mode = 4; i++; continue; }
+        if (is_id((unsigned char)c) && !(c >= '0' && c <= '9') && (i == 0 || !is_id((unsigned char)b[i - 1]))) {
+            long a = i, j, p; int k, member;
+            while (i < n && is_id((unsigned char)b[i])) i++;
+            if (!(k = ns_get(&per, b + a, i - a))) continue;
+            j = skip_ws(b, i, n);
+            p = skip_ws_back(b, a - 1);
+            member = p >= 0 && (b[p] == '.' || (b[p] == '>' && p > 0 && b[p - 1] == '-'));
+            if (j < n && b[j] == '(') {
+                long close, q;
+                if (member) xs[k - 1].member++;
+                else if ((close = match_close(b, j, n)) >= 0 && (q = skip_trailer(b, close + 1, n)) < n && b[q] == '{') xs[k - 1].defd = 1;
+            } else if (!member) xs[k - 1].var = 1;
+            continue;
+        }
+        i++;
+    }
+}
+static const char *kind_word(char k) { return k == 'l' ? "libc" : k == 'h' ? "host" : "runtime"; }
+
+/* external (--names) (--tracked | FILE...): per caller, every called name (C rows) that no indexed .cx defines,
+   classified lang (not counted), runtime, libc or host; see the header */
+static int cmd_external(int *callers, int nc, int names_mode) {
+    int c, e, files = 0, ord[16384];
+    long t_libc = 0, t_host = 0, t_run = 0, t_lang = 0;
+    Buf out = {0, 0, 0};
+    load_prelude();
+    ns_init(&repo, 1 << 19); ns_init(&own, 1 << 15); ns_init(&per, 1 << 15);
+    for (e = 0; e < nent; e++) {
+        const char *s, *end;
+        if (ent[e].ok != 1) continue;
+        load_shard(e);
+        for (s = ent[e].shard, end = s + ent[e].shn; s < end; s = next_row(s, end)) {
+            const char *nm; long nn;
+            if (*s != 'D' && *s != 'X') continue;
+            nn = field_at(s, end, 1, &nm);
+            if (!ns_get(&repo, nm, nn)) ns_put(&repo, nm, nn, 0);
+        }
+    }
+    for (c = 0; c < nc; c++) {
+        int ce = callers[c], k, cand = 0, nl = 0, nh = 0, nr = 0, no = 0; const char *s, *end;
+        long sl = 0, sh = 0, sr = 0;
+        load_shard(ce);
+        ns_clear(&own); ns_clear(&per); nxs = 0;
+        s = ent[ce].shard; end = s + ent[ce].shn;
+        for (; s < end; s = next_row(s, end)) {
+            const char *nm; long nn;
+            if (*s != 'D' && *s != 'X') continue;
+            nn = field_at(s, end, 1, &nm);
+            if (!ns_get(&own, nm, nn)) ns_put(&own, nm, nn, 0);
+        }
+        for (s = ent[ce].shard; s < end; s = next_row(s, end)) {
+            const char *nm; long nn; char kind;
+            if (*s != 'C') continue;
+            nn = field_at(s, end, 1, &nm);
+            if ((k = ns_get(&per, nm, nn))) { xs[k - 1].sites++; continue; }
+            if (is_lang(nm, nn)) kind = 'g';
+            else if (ns_get(&own, nm, nn)) kind = 0;
+            else if (ns_get(&prelude, nm, nn)) kind = is_runtime(nm, nn) ? 'r' : 'l';
+            else if (ns_get(&repo, nm, nn)) kind = 0;
+            else kind = is_runtime(nm, nn) ? 'r' : 'h';
+            if (nxs == xcap) {
+                xcap = xcap ? xcap * 2 : 1024;
+                xs = mm_grow(xs, (long)xcap * (long)sizeof *xs);
+                if (!xs) die("out of memory");
+            }
+            xs[nxs].name = nm; xs[nxs].nl = nn; xs[nxs].sites = 1; xs[nxs].member = 0; xs[nxs].var = 0; xs[nxs].defd = 0; xs[nxs].kind = kind;
+            ns_put(&per, nm, nn, nxs); nxs++;
+            if (kind && kind != 'g') cand = 1;
+        }
+        if (cand) {   /* member calls and function-pointer variables need the text itself */
+            size_t n; char *b = cx_read(ent[ce].path, &n);
+            if (!b) die2("cannot read", ent[ce].path);
+            ext_scan(b, (long)n);
+            mm_free(b);
+        }
+        for (k = 0; k < nxs; k++) {
+            Ext *X = &xs[k];
+            if (X->kind == 'g') { t_lang += X->sites; continue; }
+            if (!X->kind || X->defd || (X->kind == 'h' && X->var) || X->sites - X->member <= 0) continue;
+            X->sites -= X->member;
+            if (X->kind == 'l') { sl += X->sites; nl++; } else if (X->kind == 'h') { sh += X->sites; nh++; } else { sr += X->sites; nr++; }
+            if (no == 16384) die("too many external names in one file");
+            {   int q = no++;   /* insertion by name */
+                while (q > 0 && tx_cmp(xs[ord[q - 1]].name, xs[ord[q - 1]].nl, X->name, X->nl) > 0) { ord[q] = ord[q - 1]; q--; }
+                ord[q] = k;
+            }
+        }
+        if (!no) continue;
+        files++; t_libc += sl; t_host += sh; t_run += sr;
+        if (names_mode) {
+            for (k = 0; k < no; k++) {
+                Ext *X = &xs[ord[k]];
+                puts_(&out, "NAME\t"); putesc(&out, ent[ce].path, tx_len(ent[ce].path, CAP)); put(&out, "\t", 1);
+                put(&out, X->name, X->nl); put(&out, "\t", 1); puts_(&out, kind_word(X->kind));
+                puts_(&out, "\tsites="); putl(&out, X->sites); put(&out, "\n", 1);
+            }
+        } else {
+            int first = 1;
+            puts_(&out, "EXTERNAL\t"); putesc(&out, ent[ce].path, tx_len(ent[ce].path, CAP));
+            puts_(&out, "\tlibc="); putl(&out, sl); puts_(&out, "\thost="); putl(&out, sh);
+            puts_(&out, "\truntime="); putl(&out, sr); puts_(&out, "\tnames=");
+            for (k = 0; k < no; k++) {
+                Ext *X = &xs[ord[k]];
+                if (X->kind == 'r') continue;
+                if (!first) put(&out, ",", 1);
+                put(&out, X->name, X->nl); first = 0;
+            }
+            put(&out, "\n", 1);
+        }
+    }
+    puts_(&out, "EXTERNALS\tfiles="); putl(&out, files); puts_(&out, "\tscanned="); putl(&out, nc);
+    puts_(&out, "\tlibc="); putl(&out, t_libc); puts_(&out, "\thost="); putl(&out, t_host);
+    puts_(&out, "\truntime="); putl(&out, t_run); puts_(&out, "\tlang="); putl(&out, t_lang);
+    puts_(&out, "\tprelude_names="); putl(&out, n_prelude); put(&out, "\n", 1);
+    return sy_write_all(1, out.p, out.n) == 0 ? 0 : 2;
+}
+
 static void usage(void) {
     fprintf(stderr, "usage: symindex.cx [--index DIR] [--in LIST] (update [--verify] | def NAME | calls NAME[,NAME...] [--tracked | FILE...]"
-                    " | uses FILE | users FILE | undeclared (--tracked | FILE...) | dump FILE)\n");
+                    " | uses FILE | users FILE | undeclared (--tracked | FILE...) | external [--names] (--tracked | FILE...) | dump FILE)\n");
     exit(2);
 }
 
@@ -841,7 +1061,7 @@ int main(int argc, char **argv) {
         return n_deferred ? 3 : 0;
     }
     {   /* every query: the files it names join the set first, then the incremental update */
-        int named[4096], nn = 0, k, all = 0;
+        int named[4096], nn = 0, k, all = 0, names_mode = 0;
         if (tx_eqz(cmd, "def")) { if (argc - a != 1) usage(); }
         else if (tx_eqz(cmd, "calls")) {
             char *p;
@@ -859,7 +1079,8 @@ int main(int argc, char **argv) {
         } else if (tx_eqz(cmd, "uses") || tx_eqz(cmd, "users") || tx_eqz(cmd, "dump")) {
             if (argc - a != 1) usage();
             named[nn++] = entry_for(argv[a], 0);
-        } else if (tx_eqz(cmd, "undeclared")) {
+        } else if (tx_eqz(cmd, "undeclared") || tx_eqz(cmd, "external")) {
+            if (tx_eqz(cmd, "external") && a < argc && tx_eqz(argv[a], "--names")) { names_mode = 1; a++; }
             if (argc - a < 1) usage();
             if (argc - a == 1 && tx_eqz(argv[a], "--tracked")) all = 1;
             else for (; a < argc; a++) { if (nn == 4096) die("too many files"); named[nn++] = entry_for(argv[a], 0); }
@@ -882,7 +1103,7 @@ int main(int argc, char **argv) {
             if (!callers) die("out of memory");
             if (all) { for (e = 0; e < nent; e++) if (ent[e].listed && ent[e].ok == 1) callers[nc++] = e; }
             else for (k = 0; k < nn; k++) callers[nc++] = named[k];
-            return cmd_undeclared(callers, nc);
+            return tx_eqz(cmd, "external") ? cmd_external(callers, nc, names_mode) : cmd_undeclared(callers, nc);
         }
     }
 }

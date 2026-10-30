@@ -10,7 +10,11 @@
    (static), rc 1; uses / users / def give the exact closure and rows; calls equals refactor.cx sites.
    On a copy in out/: a same-size rewrite with its mtime put back passes the stat prefilter (the old facts
    stay), update --verify prints STALE for it, re-parses it and the new facts appear; a size change is
-   re-parsed by the plain update.  Prints PASS/FAIL lines and CHECK_SYMINDEX<TAB>failed=N. */
+   re-parsed by the plain update.  external on ext/caller.cx (with ext/lib.cx in its own list and index) gives
+   the exact row and --names rows: libc printf, snprintf, signal x2, setpgid, WIFEXITED; host curl_easy_init and
+   ext_forward (a prototype only); runtime cx_read; lang va_start/va_end; none for ext_helper (lib.cx), own_write,
+   late_fn (after an #if that unbalances the parentheses), EXT_LOCAL, o->puts or the parameter fn; --tracked
+   over the list scans 2 and reports only caller.cx.  Prints PASS/FAIL lines and CHECK_SYMINDEX<TAB>failed=N. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
 #pragma unisa use sys.time
@@ -19,7 +23,7 @@
 #define CAPOUT (1 << 20)
 static int failed;
 static char out[CAPOUT], err[65536], out2[CAPOUT];
-static char idx[512], list[512], idx2[512], list2[512], copy[512];
+static char idx[512], list[512], idx2[512], list2[512], copy[512], idx3[512], list3[512];
 
 static void ck(int ok, const char *name) { if (!ok) failed++; printf("%s\tsymindex.%s\n", ok ? "PASS" : "FAIL", name); }
 static int has(const char *s, const char *needle) { return tx_find(s, tx_len(s, CAPOUT), needle, tx_len(needle, 4096)) >= 0; }
@@ -45,7 +49,8 @@ static int run(const char *prog, char **args, char *o, long cap) {
 /* symindex with the fixture index (SECOND: the copy's index) and up to 4 more words */
 static int si(int second, const char *a, const char *b, const char *c, const char *d) {
     char *args[12]; int k = 0;
-    args[k++] = "--index"; args[k++] = second ? idx2 : idx; args[k++] = "--in"; args[k++] = second ? list2 : list;
+    args[k++] = "--index"; args[k++] = second == 2 ? idx3 : second ? idx2 : idx;
+    args[k++] = "--in"; args[k++] = second == 2 ? list3 : second ? list2 : list;
     if (a) args[k++] = (char *)a;
     if (b) args[k++] = (char *)b;
     if (c) args[k++] = (char *)c;
@@ -110,6 +115,27 @@ static const char *undeclared_out =
 static const char *hostonly_out = "UNDECLARED\tdanger=0\tinfo=0\ttransitive=0\tcallers=0\tscanned=1\thost_cc_only=1\n";
 static const char *uses_out = "USE\t" PR "lib.cx\nUSE\t" PR "mid.cx\nUSES\tfile=" PR "user.cx\tcount=2\n";
 static const char *users_out = "USER\t" PR "mid.cx\nUSER\t" PR "user.cx\nUSER\t" PR "direct.cx\nUSERS\tfile=" PR "lib.cx\tcount=3\n";
+#define EX FX "ext/"
+static const char *external_out =
+    "EXTERNAL\t" EX "caller.cx\tlibc=6\thost=2\truntime=1\tnames=WIFEXITED,curl_easy_init,ext_forward,printf,setpgid,signal,snprintf\n"
+    "EXTERNALS\tfiles=1\tscanned=1\tlibc=6\thost=2\truntime=1\tlang=2\tprelude_names=";
+static const char *external_names_out =
+    "NAME\t" EX "caller.cx\tWIFEXITED\tlibc\tsites=1\n"
+    "NAME\t" EX "caller.cx\tcurl_easy_init\thost\tsites=1\n"
+    "NAME\t" EX "caller.cx\tcx_read\truntime\tsites=1\n"
+    "NAME\t" EX "caller.cx\text_forward\thost\tsites=1\n"
+    "NAME\t" EX "caller.cx\tprintf\tlibc\tsites=1\n"
+    "NAME\t" EX "caller.cx\tsetpgid\tlibc\tsites=1\n"
+    "NAME\t" EX "caller.cx\tsignal\tlibc\tsites=2\n"
+    "NAME\t" EX "caller.cx\tsnprintf\tlibc\tsites=1\n"
+    "EXTERNALS\tfiles=1\tscanned=1\tlibc=6\thost=2\truntime=1\tlang=2\tprelude_names=";
+/* OUT is WANT followed by a prelude name count above 100 and a newline, nothing more */
+static int external_is(const char *o, const char *want) {
+    long wl = tx_len(want, 4096), ol = tx_len(o, CAPOUT), v = 0, i;
+    if (!tx_prefix(o, ol, want, wl) || ol < wl + 2 || o[ol - 1] != '\n') return 0;
+    for (i = wl; i < ol - 1; i++) { if (o[i] < '0' || o[i] > '9') return 0; v = v * 10 + (o[i] - '0'); }
+    return v > 100;
+}
 static const char *def_out =
     PR "lib.cx:6\tD\tstatic=0\tvariadic=0\tlong lib_len(const char *s)\n"
     PR "user.cx:4\tP\tstatic=0\tvariadic=0\tlong lib_len(const char *s)\n"
@@ -131,7 +157,8 @@ int main(void) {
     if (sy_mkdir(dir, 0755) != 0) { fprintf(stderr, "check-symindex: cannot make %s\n", dir); return 2; }
     if (cx_fmt(idx, sizeof idx, "%s/idx", dir) || cx_fmt(list, sizeof list, "%s/list", dir)
         || cx_fmt(idx2, sizeof idx2, "%s/idx2", dir) || cx_fmt(list2, sizeof list2, "%s/list2", dir)
-        || cx_fmt(copy, sizeof copy, "%s/v.cx", dir)) return 2;
+        || cx_fmt(copy, sizeof copy, "%s/v.cx", dir)
+        || cx_fmt(idx3, sizeof idx3, "%s/idx3", dir) || cx_fmt(list3, sizeof list3, "%s/list3", dir)) return 2;
     for (k = 0; files[k]; k++) {   /* the list; users answers in list order */
         const char *f = files[k]; long fl = tx_len(f, 256);
         if (tx_copy(lines + ln, (long)sizeof lines - ln, f, fl)) return 2;
@@ -210,6 +237,16 @@ int main(void) {
         ck(rc == 0 && has(out, "reparsed=1\thashed=1\tstale=0"), "size-change-reparsed");
         rc = si(1, "dump", copy, 0, 0);
         ck(rc == 0 && has(out, "P\tfx_more\t23\t1\t0\t0\tint\t(void)\n"), "size-change-new-fact");
+    }
+    {   /* external on ext/caller.cx, with ext/lib.cx defining ext_helper */
+        const char *l3 = EX "lib.cx\n" EX "caller.cx\n";
+        if (write_file(list3, l3, tx_len(l3, 256))) return 2;
+        rc = si(2, "external", EX "caller.cx", 0, 0);
+        ck(rc == 0 && external_is(out, external_out), "external-classifies-libc-host-runtime");
+        rc = si(2, "external", "--names", EX "caller.cx", 0);
+        ck(rc == 0 && external_is(out, external_names_out), "external-names-rows");
+        rc = si(2, "external", "--tracked", 0, 0);
+        ck(rc == 0 && has(out, "EXTERNAL\t" EX "caller.cx\tlibc=6\t") && !has(out, EX "lib.cx") && has(out, "\tscanned=2\t"), "external-tracked-over-the-list");
     }
     printf("CHECK_SYMINDEX\tfailed=%d\n", failed);
     return failed ? 1 : 0;
