@@ -26,6 +26,7 @@
   13. [cx/core/sparse 迁移 mem.heap](#已落地cx-coresparsecx-迁移到-memheap执行器稀疏表去裸-libc2026-10-30cc)
   14. [mem.grow 补 mg_pop/mg_truncate/mg_clear；text 补 tx_suffix/tx_trim；build 补 sb_clear（Rust 尾部操作）](#已落地mem-grow-补-mg_popmg_truncatemg_cleartext-补-tx_suffixtx_trimbuild-补-sb_clear2026-10-30)
   15. [sys.fs 补 sy_rmdir + check-* 工具 mem.bytes 批量迁移；cx-namespace 锁定模块循环拒绝](#已落地sysfs-补-sy_rmdir--工具-membytes-批量迁移--锁定模块循环拒绝2026-10-30)
+  16. [底层 sy_readlink + 上层 sb_capacity/ms_starts_with/ms_ends_with/tx_count + 确定性性能度量](#已落地底层-sy_readlink--上层-sb_capacityms_starts_withms_ends_withtx_count--确定性性能度量2026-10-30)
 
 ## 层
 
@@ -294,6 +295,13 @@ L0 库补齐 Rust 的 O(1) 尾部操作与 str 后缀/裁剪（不受 closure-on
 - `tests/cx-namespace.cx` 追加模块循环拒绝锁定：`a→b→a` 与自循环都硬拒绝（`cx: module cycle`），是 Rust mod-graph 规范 + spec §3「v1 模块导入图拒绝循环」的验收。
 - 边界：`check-model-decode.cx` 的 memcpy 迁移被软链归一阻塞（runtime.model_decode 已 use mem.bytes，再直接 use 重复）——坑一实例，已回退。
 - 验收：五个棘轮全绿（cxlibc 23462→23267，cxraw 15809→14793）。
+
+## 已落地：底层 sy_readlink + 上层 sb_capacity/ms_starts_with/ms_ends_with/tx_count + 确定性性能度量（2026-10-30）
+
+- `cx/sys/fs.cx` 补 `sy_readlink`（readlink 原语，Rust std::fs::read_link），平台差异收在 `sy_readlink_os` static（`#ifdef _WIN32` 返回 -ENOSYS）；check-cx-sys 补 symlink/lstat/readlink 7 用例（复用已删 rmd 路径，零新增 libc）。
+- `cx/text/build.cx` 补 `sb_capacity`（String::capacity），配合 sb_reserve 做容量观察；`cx/mem/slice.cx` 补 `ms_starts_with`/`ms_ends_with`（slice::starts_with/ends_with）；`cx/text/text.cx` 补 `tx_count`（str::matches().count()）。
+- `tools/practice-grow-perf.cx` 改为确定性 realloc 计数度量（reserve=0 vs grow=17 次，跨机器复现，去墙钟噪声），不再依赖 sy_now_ms。
+- 验收：七个棘轮全绿（`RATCHETS ok=7 fail=0`）；check-cx-sys 的 dl 段段错误是 grk 的 release-build 中间态（按地址直调 glibc dlopen），归 grk，非本目标引入。
 
 ## 三个坑（cc 2026-10-30 提醒，本目标设计须遵守）
 
