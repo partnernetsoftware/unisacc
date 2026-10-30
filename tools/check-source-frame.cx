@@ -1,5 +1,6 @@
 #pragma unisa use runtime.source_frame
 #pragma unisa use text.text
+#pragma unisa use mem.bytes
 static int failures, calls;
 static int hash_calls;
 static int sio_error,sio_mode,sio_closed,sio_allocs,sio_frees;
@@ -7,13 +8,13 @@ static void *sio_open(const char *p){(void)p;if(sio_mode==1){sio_error=ENOENT;re
 static int sio_end(void *f){(void)f;if(sio_mode==2){sio_error=EACCES;return -1;}return 0;}
 static long long sio_tell(void *f){(void)f;if(sio_mode==3)return -1;if(sio_mode==4)return 2147483648LL;return sio_mode==5?0:3;}
 static int sio_start(void *f){(void)f;return 0;}
-static size_t sio_read(void *f,void *p,size_t n){(void)f;if(sio_mode==6){sio_error=EIO;return 0;}size_t k=n<3?n:3;{void *cx_kept=memcpy(p,"abc",k);(void)cx_kept;}return k;}
+static size_t sio_read(void *f,void *p,size_t n){(void)f;if(sio_mode==6){sio_error=EIO;return 0;}size_t k=n<3?n:3;{void *cx_kept=mm_copy(p, sizeof p, "abc", k);(void)cx_kept;}return k;}
 static int sio_close(void *f){(void)f;sio_closed++;if(sio_mode==7){sio_error=EIO;return -1;}return 0;}
 static void *sio_alloc(void *p,size_t n){(void)p;sio_allocs++;if(sio_mode==8)return 0;return malloc(n);}
 static void sio_free(void *p){if(p)sio_frees++;free(p);}
 static int sio_get(void){return sio_error;}
 static void sio_set(int e){sio_error=e;}
-static void test_hash(const unsigned char *p,int n,char *hex) { (void)p;(void)n;hash_calls++;memset(hex,'a',64);hex[64]=0; }
+static void test_hash(const unsigned char *p,int n,char *hex) { (void)p;(void)n;hash_calls++;mm_fill(hex, 64, 'a', 64);hex[64]=0; }
 static int releases;
 static void release(void *p) { if(p) releases++; free(p); }
 static void *allocate(void *p, size_t n) { calls++; return realloc(p, n); }
@@ -26,7 +27,7 @@ int main(void) {
     int lengths[] = {3, 0};
     const unsigned char expected[] = {3,0,0,0,'a','.','c',3,0,0,0,0,255,65,0,0,0,0,0,0,0,0};
     unsigned char *out = 0; int n = -1;
-    check(cxsf_encode(2,names,bytes,lengths,&out,&n,allocate)==0 && n==(int)sizeof expected && !memcmp(out,expected,sizeof expected), "ordered-binary-frame");
+    check(cxsf_encode(2,names,bytes,lengths,&out,&n,allocate)==0 && n==(int)sizeof expected && mm_same(out, expected, sizeof expected), "ordered-binary-frame");
     free(out); out=0; n=-1;
     check(cxsf_encode(0,0,0,0,&out,&n,allocate)==0 && out && n==0, "empty-frame-owned"); free(out);
     out=(unsigned char *)names; n=41; calls=0;
@@ -42,13 +43,13 @@ int main(void) {
     check(cxsf_encode(-1,names,bytes,lengths,&out,&n,allocate)==1 && calls==1, "negative-count");
     const unsigned char pair_expected[]={3,0,0,0,0,255,65,2,0,0,0,255,65};
     out=0; n=-1;
-    check(cxsf_pair(first,3,first+1,2,&out,&n,allocate)==0 && n==(int)sizeof pair_expected && !memcmp(out,pair_expected,sizeof pair_expected), "e3-pair-binary"); free(out);
+    check(cxsf_pair(first,3,first+1,2,&out,&n,allocate)==0 && n==(int)sizeof pair_expected && mm_same(out, pair_expected, sizeof pair_expected), "e3-pair-binary"); free(out);
     out=(unsigned char *)names; n=41; calls=0;
     check(cxsf_pair(first,2147483647,0,0,&out,&n,allocate)==2 && out==(unsigned char *)names && n==41 && calls==0, "e3-pair-overflow");
     check(cxsf_pair(0,1,0,0,&out,&n,allocate)==1 && out==(unsigned char *)names && n==41 && calls==0, "e3-pair-invalid");
     check(cxsf_pair(0,0,0,0,&out,&n,fail_allocate)==3 && out==(unsigned char *)names && n==41 && calls==1, "e3-pair-allocation-failure");
     out=0; n=-1;
-    check(cxsf_pair(0,0,0,0,&out,&n,allocate)==0 && n==8 && out && !memcmp(out,"\0\0\0\0\0\0\0\0",8), "e3-pair-empty"); free(out);
+    check(cxsf_pair(0,0,0,0,&out,&n,allocate)==0 && n==8 && out && mm_same(out, "\0\0\0\0\0\0\0\0", 8), "e3-pair-empty"); free(out);
     char line[128],stage[32],hex[65];
     int ln=snprintf(line,sizeof line,"#SC2\tstage=e3:lnx/x86_64\tinput_sha256=%064d\n",0);
     check(cxsf_companion((unsigned char *)line,ln,stage,sizeof stage,hex)==1 && tx_eqz(stage, "e3:lnx/x86_64") && strlen(hex)==64, "companion-valid");
@@ -73,9 +74,9 @@ int main(void) {
     char fields[5][4096], wide[4108];
     check(cxsf_ledger_fields("ab\t1\tx\t0\t-",fields[0])==5 && tx_eqz(fields[0], "ab") && tx_eqz(fields[4], "-"), "ledger-five-fields");
     check(cxsf_ledger_fields("ab\t1\tx\t0",fields[0])==-1 && cxsf_ledger_fields("a\tb\tc\td\te\tf",fields[0])==-2, "ledger-field-count");
-    memset(wide,'x',4095);memcpy(wide+4095,"\tb\tc\td\te",9);
+    mm_fill(wide, 4095, 'x', 4095);mm_copy(wide+4095, sizeof wide+4095, "\tb\tc\td\te", 9);
     check(cxsf_ledger_fields(wide,fields[0])==5 && strlen(fields[0])==4095, "ledger-field-max");
-    memset(wide,'x',4096);memcpy(wide+4096,"\tb\tc\td\te",9);
+    mm_fill(wide, 4096, 'x', 4096);mm_copy(wide+4096, sizeof wide+4096, "\tb\tc\td\te", 9);
     check(cxsf_ledger_fields(wide,fields[0])==-3, "ledger-field-too-long");
     const unsigned char lines[]={'a','\n',0,'b','\n','c'};size_t at=0,start=99,width=99;
     check(cxsf_ledger_line(lines,sizeof lines,&at,&start,&width)==1 && at==2 && start==0 && width==1, "ledger-line-valid");
@@ -102,9 +103,9 @@ int main(void) {
     check(cxsf_ledger_next(rows,3,1,&cursor,kb,2,&index)==3 && cursor==0 && index==77, "ledger-trace-mismatch-unchanged");
     check(cxsf_ledger_next(rows,3,1,&cursor,ka,2,&index)==0 && index==0 && cursor==1 && cxsf_ledger_next(rows,3,1,&cursor,ka,2,&index)==0 && index==1 && cursor==2, "ledger-trace-duplicate-and-absent");
     check(cxsf_ledger_next(rows,3,1,&cursor,kb,2,&index)==0 && cursor==3 && cxsf_ledger_next(rows,3,1,&cursor,kb,2,&index)==2 && cursor==3, "ledger-trace-end");
-    CxLedger added={0};int cap=0;unsigned char *owned_key=malloc(2);memcpy(owned_key,ka,2);
+    CxLedger added={0};int cap=0;unsigned char *owned_key=malloc(2);mm_copy(owned_key, sizeof owned_key, ka, 2);
     check(cxsf_ledger_add(&added,&cap,owned_key,2,allocate)==0 && added.n==1 && cap==16, "ledger-add-owns-key");
-    unsigned char *dup=malloc(2);memcpy(dup,ka,2);
+    unsigned char *dup=malloc(2);mm_copy(dup, sizeof dup, ka, 2);
     check(cxsf_ledger_add(&added,&cap,dup,2,allocate)==1 && added.n==1, "ledger-add-duplicate-refused");
     added.trace=1;check(cxsf_ledger_add(&added,&cap,dup,2,allocate)==0 && added.n==2, "ledger-add-trace-duplicate");
     cxsf_ledger_clear(&added,release);
@@ -116,14 +117,14 @@ int main(void) {
     check(releases==4 && !owned.rows && !owned.n && !owned.has_id, "ledger-clear-owned-and-partial");
     cxsf_ledger_clear(&owned,release);check(releases==4 && !owned.rows, "ledger-clear-idempotent");
     CxLedgerView views[2]={{"one",ka,2},{"empty",0,0}};unsigned char *viewout=0;size_t viewlen=99;
-    check(cxsf_ledger_view_copy(views,2,"one",&viewout,&viewlen,allocate)==0 && viewlen==2 && viewout!=ka && !memcmp(viewout,ka,2), "ledger-view-copied");free(viewout);
+    check(cxsf_ledger_view_copy(views,2,"one",&viewout,&viewlen,allocate)==0 && viewlen==2 && viewout!=ka && mm_same(viewout, ka, 2), "ledger-view-copied");free(viewout);
     viewout=0;viewlen=99;check(cxsf_ledger_view_copy(views,2,"empty",&viewout,&viewlen,allocate)==0 && viewout && viewlen==0, "ledger-view-empty-owned");free(viewout);
     viewout=ka;viewlen=99;check(cxsf_ledger_view_copy(views,2,"missing",&viewout,&viewlen,allocate)==1 && viewout==ka && viewlen==99, "ledger-view-missing-unchanged");
     check(cxsf_ledger_view_copy(views,2,"one",&viewout,&viewlen,fail_allocate)==2 && viewout==ka && viewlen==99, "ledger-view-allocation-failure");
     views[0].n=(size_t)-1;check(cxsf_ledger_view_copy(views,2,"one",&viewout,&viewlen,allocate)==3 && viewout==ka && viewlen==99, "ledger-view-overflow");
     CxLedgerStreamIO io={sio_open,sio_end,sio_tell,sio_start,sio_read,sio_close,sio_alloc,sio_free,sio_get,sio_set};
     sio_mode=0;sio_closed=sio_allocs=sio_frees=0;viewlen=99;viewout=cxsf_ledger_readstream("x",&viewlen,&io);
-    check(viewout && viewlen==3 && !memcmp(viewout,"abc",3) && sio_closed==1, "ledger-stream-read");sio_free(viewout);
+    check(viewout && viewlen==3 && mm_same(viewout, "abc", 3) && sio_closed==1, "ledger-stream-read");sio_free(viewout);
     sio_mode=5;sio_closed=0;viewlen=99;viewout=cxsf_ledger_readstream("x",&viewlen,&io);
     check(viewout && viewlen==0 && sio_closed==1, "ledger-stream-empty");sio_free(viewout);
     int modes[]={1,2,3,4,6,7,8}, errors[]={ENOENT,EACCES,EIO,EFBIG,EIO,EIO,ENOMEM};
@@ -134,9 +135,9 @@ int main(void) {
     check(cxsf_ledger_check_identity(&identity,"stage",0,0,error,sizeof error,test_hash)==1 && strstr(error,"resource-identity-absent") && !hash_calls, "ledger-check-absent-no-hash");
     identity.has_id=1;{ if (cx_fmt(identity.stage, sizeof identity.stage, "%s", "other")) { fprintf(stderr, "check-source-frame: text too long for identity.stage\n"); exit(2); } }
     check(cxsf_ledger_check_identity(&identity,"stage",0,0,error,sizeof error,test_hash)==1 && strstr(error,"mismatch stage") && !hash_calls, "ledger-check-stage-first");
-    { if (cx_fmt(identity.stage, sizeof identity.stage, "%s", "stage")) { fprintf(stderr, "check-source-frame: text too long for identity.stage\n"); exit(2); } }memset(identity.input_hex,'b',64);identity.input_hex[64]=0;
+    { if (cx_fmt(identity.stage, sizeof identity.stage, "%s", "stage")) { fprintf(stderr, "check-source-frame: text too long for identity.stage\n"); exit(2); } }mm_fill(identity.input_hex, 64, 'b', 64);identity.input_hex[64]=0;
     check(cxsf_ledger_check_identity(&identity,"stage",0,0,error,sizeof error,test_hash)==1 && strstr(error,"mismatch input") && hash_calls==1, "ledger-check-input");
-    memset(identity.input_hex,'a',64);error[0]=0;
+    mm_fill(identity.input_hex, 64, 'a', 64);error[0]=0;
     check(cxsf_ledger_check_identity(&identity,"stage",0,0,error,sizeof error,test_hash)==0 && !error[0] && hash_calls==2, "ledger-check-match");
     check(cxsf_stage_label("e3:lnx/x86_64/warn/multi/tape/O2") && cxsf_stage_label("source:win/arm64/image/O0"), "ledger-stage-valid");
     check(!cxsf_stage_label("e3:lnx/x86_64/multi/warn/tape/O2") && !cxsf_stage_label("e3:lnx/x86_64/tape/O10") && !cxsf_stage_label("bad:lnx/x86_64/tape/O2") && !cxsf_stage_label(0), "ledger-stage-invalid");
