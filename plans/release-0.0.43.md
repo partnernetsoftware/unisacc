@@ -92,6 +92,9 @@ cc	ri,resources,negative,hosts,library,interfaces,properties
   WHOLE-O-TOOL：slice --target 已收 osx/x86_64 与 win/x86_64，route=whole-o。冻结 rev=5ed7ba69bf9e86b91843c608ce00a1daff231dc8。工具写 OUT/receipt.txt。镜像不带 P3。子作业 tools/bound 55，外层不再套 bound。
   WHOLE-O-TOOL：osx/x86_64 sha=52dcc0252ee6d71324df36cc637d34774e4c0e0a4ef29633c9271cb7c95460af bytes=1552354 ns=36426580344 rc=0。与手跑整程序 -o 逐字节相同。
   WHOLE-O-TOOL：win/x86_64 sha=9ae0cf6d034ad1cea71ddde2eb6c790acfc8de298e67a25034daf9a381e86034 bytes=1589760 ns=22000334071 rc=0。与手跑整程序 -o 逐字节相同。
+  ARM64-SLICE：lnx/arm64 走 33 个对象，osx/arm64 走 route=whole-o。冻结 rev=5ed7ba69bf9e86b91843c608ce00a1daff231dc8。工具写收据。外层不再套 bound。
+  ARM64-SLICE：lnx/arm64 entry.elf sha=dabcfa2337de8036b47c528210c4d851128d8f0e011fe33815e49258d9c3bee0 bytes=1385808。candidate sha=8b138088558666154bec3ac59aa3ecbb5dad10f8b2f397f6aa55f24789e69170 bytes=3425658，已按 entry-build 拼上 P3（p3 sha=aec1a0bf27b9d1f2e26a1b86b52cb3694bc66a906415bcc0435c11278c6deabf bytes=2039850）。六只 -O1 ns=25754945902，27 只 ns=23086225727，link ns=8472766756，rc=0。
+  ARM64-SLICE：osx/arm64 sha=2a6c571cf24d62494ca403049e8b233e772a7b41a9da925ea363d264a5c182ab bytes=1981666 ns=37489425891 rc=0。镜像不带 P3。
 - [ ] 3 object 模型步
 - [ ] 4 测试到 QUALIFIED
 - [ ] 主人授权发布
