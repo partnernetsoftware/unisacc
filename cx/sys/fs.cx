@@ -272,6 +272,30 @@ static int sy_mkfifo_os(const char *path, int mode) {
 #endif
 }
 
+/* Copy SRC to DST byte-for-byte (Rust std::fs::copy).  Built on sy_open + sy_read
+   + sy_write_all, so no single POSIX call is needed and every platform has the
+   parts.  The destination is created (O_TRUNC) with MODE.  A short read that is
+   not end-of-input is -EIO.  0, or -errno. */
+int sy_copy(const char *src, const char *dst, int mode) {
+    int in, out, rc;
+    char buf[8192];
+    if (!src || !src[0] || !dst || !dst[0]) return -EINVAL;
+    in = sy_open(src, O_RDONLY, 0);
+    if (in < 0) return in;
+    out = sy_open(dst, O_WRONLY | O_CREAT | O_TRUNC, mode);
+    if (out < 0) { sy_close(in); return out; }
+    for (;;) {
+        long n = sy_read(in, buf, (long)sizeof buf);
+        if (n < 0) { rc = (int)n; break; }
+        if (n == 0) { rc = 0; break; }
+        rc = sy_write_all(out, buf, n);
+        if (rc) break;
+    }
+    sy_close(out);
+    sy_close(in);
+    return rc;
+}
+
 /* Make PATH a FIFO (named pipe) with MODE permission bits (Rust std::os::unix::
    fs::symlink's sibling; POSIX mkfifo).  0, or -errno: -EINVAL for an empty
    PATH, -ENOSYS on Windows and macOS. */
