@@ -3,6 +3,7 @@
 #pragma unisa use stages
 #pragma unisa use bind
 #pragma unisa use driver.cli
+#pragma unisa use driver.compat
 #pragma unisa use driver.archive
 #pragma unisa use driver.route
 #pragma unisa use driver.deps
@@ -23,7 +24,8 @@
    ar members go through cxr_append and cxr_member. as, nm, and objdump
    stay on the tools already wired. -cx-plan and -cx-interface return
    through cxm_planprint and cxm_interface. -D/-U/-I/-include fill the
-   caller-owned args blocks. executor and packmodel are linked from
+   caller-owned args blocks. -l/-L/-x go through cxp_step into the
+   caller-owned library list. executor and packmodel are linked from
    src/entryexec.cx; this file calls them by name. A .tape source is tapecheck, then the
    backend from prune or e4. A .tapebin that is not a container, or whose
    digest does not match, or whose directory or records do not line up,
@@ -50,6 +52,10 @@ static int dv_word(const char *word, int is_object) {
     if (src == 4) return 4;
     if (src == 1) return 20;
     return 0;
+}
+static int dv_compat_word(const char *a) {
+    if (!a || a[0] != '-') return 0;
+    return a[1] == 'l' || a[1] == 'L' || a[1] == 'x';
 }
 static int dv_fail(const char *s) {
     char line[512];
@@ -1173,8 +1179,13 @@ int dv_main(int argc, char **argv) {
     dv_res.last_include = 0;
     opts.res = &dv_res;
     opts.ops = &dv_ops;
-    i = 1;
-    while (i < argc) {
+    {
+        CxpState compat;
+        compat.libs = fwd_lib_slot();
+        compat.n = fwd_lib_count();
+        compat.cap = 16;
+        i = 1;
+        while (i < argc) {
         next = i;
         parsed = cxc_step(&opts, argv, argc, &next, why, 128);
         if (parsed == 0) {
@@ -1198,9 +1209,21 @@ int dv_main(int argc, char **argv) {
             if (opts.runit) argstart = i + 1;
             break;
         }
-        if (opts.runit && src && kind != 20) {
+        if (opts.runit && src && kind != 20 && !dv_compat_word(argv[i])) {
             argstart = i;
             break;
+        }
+        if (dv_compat_word(argv[i])) {
+            const char *cwhy;
+            next = i;
+            parsed = cxp_step(&compat, argv, argc, &next, why, 128);
+            cwhy = bx_compat_why(parsed, opts.defrun, src);
+            if (cwhy) return dv_fail(cwhy);
+            if (parsed == 0) {
+                i = next;
+                continue;
+            }
+            if (parsed != 1) return dv_fail(why);
         }
         if (cxm_flag(argv[i])) {
             i = i + 1;
@@ -1212,6 +1235,7 @@ int dv_main(int argc, char **argv) {
         if (!src) src = argv[i];
         nsrc = nsrc + 1;
         i = i + 1;
+        }
     }
     if (!src) return dv_fail(bx_src_why(0));
     {
@@ -1627,7 +1651,8 @@ int dv_main(int argc, char **argv) {
             }
             if (mode2 == 2 || mode2 == 0 || (mode2 == 5 && !asmw)) {
                 dest = shown;
-                if (!dest || !dest[0] || !strcmp(dest, "-")) dest = 0;
+                if (mode2 == 0 && !runit2 && (!dest || !dest[0])) dest = "a.out";
+                else if (!dest || !dest[0] || !strcmp(dest, "-")) dest = 0;
                 wr = hs_write_out(dest, body, bodyn, preason, 128);
                 free(body);
                 if (wr) {
