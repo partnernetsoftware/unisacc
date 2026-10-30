@@ -182,6 +182,102 @@ static int verify(void) {
     return bad ? 1 : 0;
 }
 
+/* little-endian fields of a header */
+static unsigned u16(const char *b) { return (unsigned char)b[0] | ((unsigned char)b[1] << 8); }
+static unsigned long u32(const char *b) { return (unsigned long)u16(b) | ((unsigned long)u16(b + 2) << 16); }
+
+/* 1 when slice K's header declares its target's format and machine; WHY says what was seen */
+static int header_ok(int k, const char *b, size_t n, char *why, int cap) {
+    if (k == 0) {
+        unsigned long pe;
+        if (n < 0x40 || b[0] != 'M' || b[1] != 'Z') { cx_fmt(why, cap, "no MZ header"); return 0; }
+        pe = u32(b + 0x3c);
+        if (pe + 6 > n || b[pe] != 'P' || b[pe + 1] != 'E' || b[pe + 2] || b[pe + 3]) { cx_fmt(why, cap, "no PE signature"); return 0; }
+        if (u16(b + pe + 4) != 0x8664) { cx_fmt(why, cap, "PE machine 0x%x, want 0x8664", u16(b + pe + 4)); return 0; }
+        cx_fmt(why, cap, "PE x86-64 (0x8664)");
+        return 1;
+    }
+    if (k <= 2) {
+        unsigned want = k == 1 ? 62 : 183;
+        if (n < 20 || b[0] != 0x7f || b[1] != 'E' || b[2] != 'L' || b[3] != 'F' || b[4] != 2) { cx_fmt(why, cap, "no ELF64 header"); return 0; }
+        if (u16(b + 18) != want) { cx_fmt(why, cap, "ELF machine %u, want %u", u16(b + 18), want); return 0; }
+        cx_fmt(why, cap, "ELF64 machine %u (%s)", want, k == 1 ? "x86-64" : "aarch64");
+        return 1;
+    }
+    {
+        unsigned long want = k == 3 ? 0x01000007ul : 0x0100000cul;
+        if (n < 8 || u32(b) != 0xfeedfacful) { cx_fmt(why, cap, "no Mach-O 64 header"); return 0; }
+        if (u32(b + 4) != want) { cx_fmt(why, cap, "Mach-O cputype 0x%lx, want 0x%lx", u32(b + 4), want); return 0; }
+        cx_fmt(why, cap, "Mach-O 64 cputype 0x%lx (%s)", want, k == 3 ? "x86_64" : "arm64");
+        return 1;
+    }
+}
+
+/* 1 when csih.com carries the slice's bytes: 64-byte windows at 1/4, 1/2 and 3/4 of it */
+static int embedded(const char *com, size_t cn, const char *b, size_t n) {
+    int q;
+    if (n < 256) return 0;
+    for (q = 1; q <= 3; q++)
+        if (tx_find(com, (long)cn, b + n * q / 4, 64) < 0) return 0;
+    return 1;
+}
+
+/* run AV for at most SECS: 1 when it exits 0 and its output holds WANT; TAIL gets the output's end */
+static int runs(char **av, int secs, const char *want, char *tail, int cap) {
+    char *out = 0;
+    size_t n = 0;
+    int rc = cx_runv_timeout(av, secs, &out, &n);
+    long at = out ? tx_find(out, (long)n, want, tx_len(want, 256)) : -1;
+    long from = (long)n > 120 ? (long)n - 120 : 0, i;
+    tail[0] = 0;
+    if (out) tx_copy(tail, cap, out + from, (long)n - from < cap - 1 ? (long)n - from : cap - 1);
+    for (i = 0; tail[i]; i++) if (tail[i] == '\n' || tail[i] == '\t') tail[i] = ' ';
+    return rc == 0 && at >= 0;
+}
+
+/* what this machine can check, slice by slice; what it cannot run is UNMEASURED */
+static int smoke(void) {
+    char com[256], path[256], why[160], tail[160], qemu[512];
+    size_t cn = 0;
+    char *c;
+    const char *home = sy_env("HOME");
+    int i, bad = 0, ran = 0, unm = 0;
+    { if (cx_fmt(com, sizeof com, "%s/csih.com", OUT)) { fprintf(stderr, "csih-ape: text too long for com\n"); exit(2); } }
+    c = cx_read(com, &cn);
+    if (!c) { printf("CSIH_APE\tREFUSED\tno %s: run pack\n", com); return 1; }
+    for (i = 0; i < NS; i++) {
+        size_t n = 0;
+        char *b;
+        { if (cx_fmt(path, sizeof path, "%s/%s", OUT, files[i])) { fprintf(stderr, "csih-ape: text too long for path\n"); exit(2); } }
+        b = cx_read(path, &n);
+        if (!b) { printf("  FAIL  %s: missing\n", files[i]); bad++; continue; }
+        if (!header_ok(i, b, n, why, sizeof why)) { printf("  FAIL  %s header: %s\n", targets[i], why); bad++; }
+        else printf("  ok    %s header: %s\n", targets[i], why);
+        if (!embedded(c, cn, b, n)) { printf("  FAIL  csih.com does not carry %s\n", files[i]); bad++; }
+        else printf("  ok    csih.com carries %s\n", files[i]);
+    }
+    {
+        char *av[] = { "sh", com, "selftest", 0 };
+        if (!runs(av, 30, "selftest ok", tail, sizeof tail)) { printf("  FAIL  host csih.com selftest: %s\n", tail); bad++; }
+        else { printf("  ok    host (lnx/x86_64) runs csih.com selftest\n"); ran++; }
+    }
+    qemu[0] = 0;
+    if (home && cx_fmt(qemu, sizeof qemu, "%s/.local/bin/qemu-aarch64-static", home) == 0 && sy_exists(qemu) != 1) qemu[0] = 0;
+    if (!qemu[0] && sy_exists("/usr/bin/qemu-aarch64-static") == 1) tx_copy(qemu, sizeof qemu, "/usr/bin/qemu-aarch64-static", 28);
+    if (!qemu[0] || sy_exists("/usr/aarch64-linux-gnu") != 1) { printf("  UNMEASURED  lnx/arm64 run: no qemu-aarch64-static or aarch64 sysroot\n"); unm++; }
+    else {
+        char *av[] = { qemu, "-L", "/usr/aarch64-linux-gnu", path, "selftest", 0 };
+        { if (cx_fmt(path, sizeof path, "%s/%s", OUT, files[2])) { fprintf(stderr, "csih-ape: text too long for path\n"); exit(2); } }
+        if (!runs(av, 45, "selftest ok", tail, sizeof tail)) { printf("  FAIL  lnx/arm64 slice selftest under qemu-user: %s\n", tail); bad++; }
+        else { printf("  ok    lnx/arm64 slice runs selftest under qemu-user (the slice, not csih.com's pick)\n"); ran++; }
+    }
+    printf("  UNMEASURED  osx/x86_64, osx/arm64 run: no macOS here, headers only\n");
+    printf("  UNMEASURED  win/x86_64 run: no Windows here, header only (the slice is the unsupported stub)\n");
+    unm += 3;
+    printf("CSIH_APE\t%s\tran=%d\tfail=%d\tunmeasured=%d\n", bad ? "SMOKE_FAIL" : "SMOKE_OK", ran, bad, unm);
+    return bad ? 1 : 0;
+}
+
 int main(int argc, char **argv) {
     if (sy_exists("./unisacc.com") != 1 || sy_exists("apps/csih/csih.sh") != 1) {
         fprintf(stderr, "csih-ape: run from the repo root\n");
@@ -190,6 +286,7 @@ int main(int argc, char **argv) {
     if (argc == 3 && eq(argv[1], "slice")) return slice(argv[2]);
     if (argc == 2 && eq(argv[1], "pack")) return pack();
     if (argc == 2 && eq(argv[1], "verify")) return verify();
-    fprintf(stderr, "usage: csih-ape.cx -- slice TARGET | pack | verify\n");
+    if (argc == 2 && eq(argv[1], "smoke")) return smoke();
+    fprintf(stderr, "usage: csih-ape.cx -- slice TARGET | pack | verify | smoke\n");
     return 2;
 }

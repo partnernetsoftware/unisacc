@@ -14,7 +14,16 @@ sh ./unisacc.com tools/csih-ape.cx -- slice osx/arm64
 sh ./unisacc.com tools/csih-ape.cx -- slice win/x86_64
 sh ./unisacc.com tools/csih-ape.cx -- pack
 sh ./unisacc.com tools/csih-ape.cx -- verify
+sh ./unisacc.com tools/csih-ape.cx -- smoke
 ```
+
+- **smoke**（约 5 秒）：在本机能查的都实际查一遍，查不了的标 UNMEASURED，不记 PASS。
+  - 五个切片的头部：win 是 PE、机器号 0x8664；lnx 是 ELF64，机器号 62 / 183；osx 是 Mach-O 64，cputype 0x1000007 / 0x100000c。
+  - csih.com 确实带着每一片：在每片的 1/4、1/2、3/4 处各取 64 字节，到 csih.com 里找。
+  - 本机经 csih.com 跑 `selftest`。
+  - 在 qemu-aarch64-static 加 `/usr/aarch64-linux-gnu` sysroot 下，跑 arm64 切片的 `selftest`；找不到 qemu 或 sysroot 就记 UNMEASURED。
+  - macOS 两片、Windows 一片只查头部，运行记 UNMEASURED。
+  - 末行是 `CSIH_APE SMOKE_OK ran=2 fail=0 unmeasured=3`。
 
 - 产物都在 `out/csih-ape/`，git 不跟踪：五个切片、`csih.com`、`manifest.tsv`。
 - 每个切片旁边有一个 `.src` 文件，记着它是用哪一版 csih 源码编的（就是 `apps/csih/csih.sh digest` 给出的产品源摘要）。
