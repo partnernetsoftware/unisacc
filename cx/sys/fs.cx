@@ -1,0 +1,67 @@
+#pragma unisa module fs
+/* L0 sys/fs: directories, modes and stat (plans/cx-layers.md). Errors are
+   returned, never hidden: 0 or a value on success, -errno on failure.
+   No #include: <sys/stat.h>, <fcntl.h> and errno come with the implicit
+   prelude. Whole-file read/write stays cx_read/cx_write for now. */
+
+typedef struct {
+    long size;      /* bytes */
+    long ino;
+    long mtime;     /* seconds */
+    int mode;       /* permission bits, 07777 */
+    int kind;       /* 'f' regular, 'd' directory, 'l' symlink (sy_lstat only), '?' other */
+} sy_stat_t;
+
+static int sy_fail(void) { return errno ? -errno : -1; }
+
+static void sy_fill(const struct stat *s, sy_stat_t *out) {
+    out->size = (long)s->st_size;
+    out->ino = (long)s->st_ino;
+    out->mtime = (long)s->st_mtime;
+    out->mode = (int)(s->st_mode & 07777);
+    out->kind = S_ISREG(s->st_mode) ? 'f' : S_ISDIR(s->st_mode) ? 'd' : S_ISLNK(s->st_mode) ? 'l' : '?';
+}
+
+/* Make PATH (one level) with MODE. 0, or -errno (-EEXIST when it exists). */
+int sy_mkdir(const char *path, int mode) {
+    errno = 0;
+    if (!path || !path[0]) return -EINVAL;
+    return mkdir(path, (mode_t)mode) == 0 ? 0 : sy_fail();
+}
+
+/* Set PATH's permission bits. 0, or -errno. */
+int sy_chmod(const char *path, int mode) {
+    errno = 0;
+    if (!path || !path[0]) return -EINVAL;
+    return chmod(path, (mode_t)mode) == 0 ? 0 : sy_fail();
+}
+
+/* stat PATH (following links) into OUT. 0, or -errno. */
+int sy_stat(const char *path, sy_stat_t *out) {
+    struct stat s;
+    errno = 0;
+    if (!path || !path[0] || !out) return -EINVAL;
+    if (stat(path, &s) != 0) return sy_fail();
+    sy_fill(&s, out);
+    return 0;
+}
+
+/* lstat PATH (a link is reported as kind 'l') into OUT. 0, or -errno. */
+int sy_lstat(const char *path, sy_stat_t *out) {
+    struct stat s;
+    errno = 0;
+    if (!path || !path[0] || !out) return -EINVAL;
+    if (lstat(path, &s) != 0) return sy_fail();
+    sy_fill(&s, out);
+    return 0;
+}
+
+/* 1 when PATH exists, 0 only when it does not (ENOENT), -errno for every
+   other failure (ENOTDIR, EACCES, ...): those are not "absent". */
+int sy_exists(const char *path) {
+    struct stat s;
+    errno = 0;
+    if (!path || !path[0]) return -EINVAL;
+    if (lstat(path, &s) == 0) return 1;
+    return errno == ENOENT ? 0 : sy_fail();
+}

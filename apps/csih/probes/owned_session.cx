@@ -1,5 +1,7 @@
 #pragma unisa use tmuxwit
 #pragma unisa use text.text
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
 /*
  * owned_session.cx — owned export/resume on a real tty, ported from the
  * archived probes/owned_session.py (archive/reference-py/apps/csih/probes/).
@@ -38,6 +40,16 @@ static int fails;
 static const char *bin;
 static char dir[600], cwd[700], home[700], state[700], journal[700];
 static char e_home[760], e_cwd[760];
+
+/* 0 with PATH's size and inode (either may be NULL), -errno otherwise. */
+static int st_of(const char *path, long *size, long *ino) {
+    sy_stat_t s;
+    int r = sy_stat(path, &s);
+    if (r) return r;
+    if (size) *size = s.size;
+    if (ino) *ino = s.ino;
+    return 0;
+}
 
 static long slen(const char *s) { return tx_len(s, CAP); }
 static int has(const char *hay, const char *needle) { return tx_find(hay, slen(hay), needle, slen(needle)) >= 0; }
@@ -138,15 +150,15 @@ static char *digest(void) {
 
 int main(void) {
     static char saved[CAP], again[CAP], bad[CAP], msg[400];
-    const char *tmp = tw_env("TMPDIR");
+    const char *tmp = sy_env("TMPDIR");
     char absbin[700], here[600], *raw, *old, *d0, d0copy[200];
     long size0 = 0, ino0 = 0, size1 = 0, ino1 = 0, jsize = 0;
     int rc, i;
 
-    bin = tw_env("CSIH_BIN");
+    bin = sy_env("CSIH_BIN");
     if (!getcwd(here, sizeof here)) return 2;
     if (!bin || !bin[0]) { snprintf(absbin, sizeof absbin, "%s/../../out/csih-e2e-bin/csih", here); bin = absbin; }
-    if (tw_stat(bin, NULL, NULL) != 0) { printf("owned_session: no csih binary at %s (csih.sh prepare)\n", bin); return 2; }
+    if (st_of(bin, NULL, NULL) != 0) { printf("owned_session: no csih binary at %s (csih.sh prepare)\n", bin); return 2; }
     if (!tw_open("owned")) { printf("owned_session: tmux is not on PATH\n"); return 2; }
     d0 = digest();
     snprintf(d0copy, sizeof d0copy, "%.190s", d0);
@@ -157,18 +169,18 @@ int main(void) {
     snprintf(journal, sizeof journal, "%s/journal.jsonl", dir);
     snprintf(e_home, sizeof e_home, "HOME=%s", home);
     snprintf(e_cwd, sizeof e_cwd, "CSIH_CWD=%s", cwd);
-    if (tw_mkdir(dir) || tw_mkdir(cwd) || tw_mkdir(home)) { printf("owned_session: scratch %s\n", dir); return 2; }
+    if (sy_mkdir(dir, 0700) || sy_mkdir(cwd, 0700) || sy_mkdir(home, 0700)) { printf("owned_session: scratch %s\n", dir); return 2; }
 
     /* 1 the owner, then a second owner on the same DIR */
     start("own", "agent-owned", dir, "sess", HASH, NULL, NULL, 0);
     check(tw_wait_text("own", "owned session", 8000, pane, sizeof pane), "agent-owned draws its owned frame");
     old = read_all(journal);
-    tw_stat(journal, &size0, &ino0);
+    st_of(journal, &size0, &ino0);
     start("two", "agent-owned", dir, "sess", HASH, NULL, NULL, 0);
     rc = tw_rc("two", 8000);
     tw_capture("two", pane, sizeof pane);
     raw = read_all(journal);
-    tw_stat(journal, &size1, &ino1);
+    st_of(journal, &size1, &ino1);
     check(rc == 1 && has(pane, "ownership lock unavailable") && old && raw && size0 == size1 && ino0 == ino1 &&
           tx_same(old, size0, raw, size1), "second owner refused (exit 1), journal bytes and inode unchanged");
     tw_free(raw);
@@ -189,7 +201,7 @@ int main(void) {
     raw = read_all(state);
     check(raw != NULL, "state-v2.json written");
     if (raw) { snprintf(saved, sizeof saved, "%s", raw); tw_free(raw); }
-    tw_stat(journal, &jsize, NULL);
+    st_of(journal, &jsize, NULL);
     {
         char want_cwd[800], want_journal[900];
         snprintf(want_cwd, sizeof want_cwd, "\"%s\"", cwd);
@@ -227,7 +239,7 @@ int main(void) {
                 jv_set(saved, "journal", repl, bad, sizeof bad);
             }
             cx_write(state, bad, (size_t)slen(bad));
-            tw_chmod(state, 0600);
+            sy_chmod(state, 0600);
             snprintf(sess, sizeof sess, "r%d", i);
             start(sess, "resume-agent", dir, state, i == 0 ? "wrong" : "sess", "h1", HASH, 0);
             rc = tw_rc(sess, 8000);
@@ -244,11 +256,11 @@ int main(void) {
 
     /* 4 resume under wrong env, consume once, export again */
     cx_write(state, saved, (size_t)slen(saved));
-    tw_chmod(state, 0600);
+    sy_chmod(state, 0600);
     start("res", "resume-agent", dir, state, "sess", "h1", HASH, 1);
     check(tw_wait_text("res", "owned session", 8000, pane, sizeof pane), "resume-agent draws its owned frame");
     tw_sleep_ms(300);
-    check(tw_stat(state, NULL, NULL) != 0, "the snapshot was consumed once (state-v2.json gone)");
+    check(st_of(state, NULL, NULL) != 0, "the snapshot was consumed once (state-v2.json gone)");
     tw_keys("res", "Down", 0);
     check(tw_wait_text("res", "中文草稿", 2000, pane, sizeof pane), "Down brings the saved draft back");
     backspaces("res", 30);

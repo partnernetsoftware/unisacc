@@ -1,0 +1,92 @@
+#pragma unisa module proc
+/* L0 sys/proc: child processes (plans/cx-layers.md). Exit status as one int:
+   0..255 an exit code, 128+N killed by signal N, -errno when it could not run
+   or be waited for. No #include: fork/pipe/exec/waitpid/kill come with the
+   implicit prelude. A run with a time limit is cx_runv_timeout until that
+   moves here. An APE (unisacc.com) cannot be exec'd directly: run it as
+   {"sh", path, ...}. */
+
+static int sy_status(int st) {
+    if (WIFEXITED(st)) return WEXITSTATUS(st);
+    if (WIFSIGNALED(st)) return 128 + WTERMSIG(st);
+    return -EINVAL;
+}
+
+/* Run ARGV (argv[0] found on PATH) to the end; its stdout and stderr go to
+   OUT (NUL-terminated; what does not fit in CAP-1 bytes is read and dropped,
+   and *CUT is set when given). The exit status, as above. */
+int sy_run(char **argv, char *out, int cap, int *cut) {
+    int p[2], st;
+    size_t off = 0;
+    pid_t pid;
+    if (cut) *cut = 0;
+    if (!argv || !argv[0]) return -EINVAL;
+    if (pipe(p) != 0) return -errno;
+    pid = fork();
+    if (pid < 0) { int e = errno; close(p[0]); close(p[1]); return -e; }
+    if (pid == 0) {
+        dup2(p[1], 1); dup2(p[1], 2);
+        close(p[0]); close(p[1]);
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+    close(p[1]);
+    for (;;) {
+        char tmp[4096];
+        ssize_t k = read(p[0], tmp, sizeof tmp);
+        if (k < 0 && errno == EINTR) continue;
+        if (k <= 0) break;
+        if (out && cap > 1) {
+            size_t take = (size_t)k;
+            if (off + take > (size_t)cap - 1) { take = (size_t)cap - 1 - off; if (cut) *cut = 1; }
+            memcpy(out + off, tmp, take);
+            off += take;
+        } else if (cut) *cut = 1;
+    }
+    if (out && cap > 0) out[off] = 0;
+    close(p[0]);
+    while (waitpid(pid, &st, 0) < 0) if (errno != EINTR) return -errno;
+    return sy_status(st);
+}
+
+/* Start ARGV in the background, in its own process group (so sy_kill takes
+   its children too), stdin from /dev/null. Its pid, or -errno. */
+int sy_spawn(char **argv) {
+    pid_t pid;
+    if (!argv || !argv[0]) return -EINVAL;
+    pid = fork();
+    if (pid < 0) return -errno;
+    if (pid == 0) {
+        int dn = open("/dev/null", O_RDONLY);
+        setpgid(0, 0);
+        if (dn >= 0) { dup2(dn, 0); close(dn); }
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+    return (int)pid;
+}
+
+/* Wait for PID. NOHANG: -EAGAIN while it still runs. The exit status, as above. */
+int sy_wait(int pid, int nohang) {
+    int st;
+    pid_t w;
+    if (pid <= 0) return -EINVAL;
+    for (;;) {
+        w = waitpid((pid_t)pid, &st, nohang ? WNOHANG : 0);
+        if (w == (pid_t)pid) return sy_status(st);
+        if (w == 0) return -EAGAIN;
+        if (errno != EINTR) return -errno;
+    }
+}
+
+/* Kill PID's process group and PID with SIGKILL, then reap PID. Its status
+   (normally 128+9), or -errno when PID was not ours to reap. */
+int sy_kill(int pid) {
+    if (pid <= 0) return -EINVAL;
+    kill(-(pid_t)pid, SIGKILL);
+    kill((pid_t)pid, SIGKILL);
+    return sy_wait(pid, 0);
+}
+
+/* This process's pid. */
+int sy_pid(void) { return (int)getpid(); }

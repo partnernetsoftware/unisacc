@@ -1,6 +1,9 @@
 #pragma unisa use tmuxwit
 #pragma unisa use netwit
 #pragma unisa use text.text
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
 /*
  * ttyenv.cx — gives three runtime-surface probes the environment they need,
  * so they run as contracts instead of being parked as ENV:
@@ -12,8 +15,8 @@
  *   net-tcp   probes/net-tcp.cx against a netwit listener on a free port:
  *             must print "ok connected" and exit 0
  * Upper root (L3, plans/cx-layers.md): no #include and no direct libc calls.
- * The tty, env and mkdir are tmuxwit's, the listener netwit's, strings
- * text.text's (probes/text -> cx/text), files cx_write/cx_rmtree.
+ * The tty is tmuxwit's, the listener netwit's; env, mkdir and processes are
+ * cx/sys (probes/sys -> cx/sys), strings cx/text, files cx_write/cx_rmtree.
  */
 
 #define CAP 65536
@@ -45,19 +48,20 @@ static int on_pane(const char *u, const char *probe, const char *want, const cha
 static int net_tcp(const char *u) {
     static char out[4096];
     char root[600], file[700], portbuf[16];
-    const char *tmp = tw_env("TMPDIR");
+    const char *tmp = sy_env("TMPDIR");
     int port = 40000 + (int)getpid() % 20000, pid, rc;
     snprintf(root, sizeof root, "%s/csih-ttyenv-%d", tmp && tmp[0] ? tmp : "/tmp", (int)getpid());
     snprintf(file, sizeof file, "%s/body", root);
-    if (tw_mkdir(root) != 0 || cx_write(file, "x", 1) != 0) { printf("FAIL scratch %s\n", root); return 1; }
+    if (sy_mkdir(root, 0700) != 0 || cx_write(file, "x", 1) != 0) { printf("FAIL scratch %s\n", root); return 1; }
     pid = nw_serve_file(port, file);
-    if (pid < 0 || nw_wait_port(port, 3000) != 0) { printf("FAIL listener on %d\n", port); nw_stop(pid); cx_rmtree(root); return 1; }
+    if (pid < 0 || nw_wait_port(port, 3000) != 0) { printf("FAIL listener on %d\n", port); if (pid > 0) sy_kill(pid); cx_rmtree(root); return 1; }
     snprintf(portbuf, sizeof portbuf, "%d", port);
     {
         char *av[] = { "sh", (char *)u, "-run", "probes/net-tcp.cx", "--", portbuf, NULL };
-        rc = tw_run(av, out, sizeof out);
+        int cut;
+        rc = sy_run(av, out, sizeof out, &cut);
     }
-    nw_stop(pid);
+    sy_kill(pid);
     cx_rmtree(root);
     if (rc == 0 && has(out, "ok connected")) { printf("PASS probes/net-tcp.cx: ok connected (port %d)\n", port); return 0; }
     printf("FAIL probes/net-tcp.cx: rc=%d %s\n", rc, out);
@@ -65,7 +69,7 @@ static int net_tcp(const char *u) {
 }
 
 int main(int argc, char **argv) {
-    const char *u = tw_env("UNISACC");
+    const char *u = sy_env("UNISACC");
     const char *mode = argc > 1 ? argv[1] : "";
     if (!u || !u[0]) u = "../../unisacc.com";
     if (tx_eq(mode, "tty-size", 16)) return on_pane(u, "probes/tty-size.cx", "ok rows 23 cols 77", NULL);

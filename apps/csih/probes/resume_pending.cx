@@ -1,6 +1,8 @@
 #pragma unisa use tmuxwit
 #pragma unisa use retry_stub
 #pragma unisa use text.text
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
 /*
  * resume_pending.cx — a resumed owned session with a pending prompt and an
  * unsent draft, against a local scripted model; ported from the archived
@@ -99,7 +101,7 @@ static int count_lines_with(const char *text, const char *needle, char *last, in
 
 int main(void) {
     static char snapshot[8192], saved[CAP], d0[4096], d1[4096];
-    const char *bin = tw_env("CSIH_BIN"), *tmp = tw_env("TMPDIR");
+    const char *bin = sy_env("CSIH_BIN"), *tmp = sy_env("TMPDIR");
     char here[600], absbin[700], dir[600], cwd[700], wrong[700], home[700], journal[700], other[700], state[700], log[700];
     char e_home[760], e_cwd[760], e_tr[760], e_ep[160], user[2048], want[2400], req0[760];
     char *raw, *jtext, *otext, *body0, *d0p;
@@ -109,7 +111,7 @@ int main(void) {
 
     if (!getcwd(here, sizeof here)) return 2;
     if (!bin || !bin[0]) { snprintf(absbin, sizeof absbin, "%s/../../out/csih-e2e-bin/csih", here); bin = absbin; }
-    if (tw_stat(bin, NULL, NULL) != 0) { printf("resume_pending: no csih binary at %s (csih.sh prepare)\n", bin); return 2; }
+    if (sy_exists(bin) != 1) { printf("resume_pending: no csih binary at %s (csih.sh prepare)\n", bin); return 2; }
     if (!tw_open("resume")) { printf("resume_pending: tmux is not on PATH\n"); return 2; }
     d0p = digest(d0, sizeof d0);
     snprintf(d1, sizeof d1, "%.200s", d0p);
@@ -122,8 +124,8 @@ int main(void) {
     snprintf(other, sizeof other, "%s/unrelated.jsonl", dir);
     snprintf(state, sizeof state, "%s/state-v2.json", dir);
     snprintf(log, sizeof log, "%s/posts.txt", dir);
-    if (tw_mkdir(dir) || tw_mkdir(cwd) || tw_mkdir(wrong) || tw_mkdir(home)) { printf("resume_pending: scratch %s\n", dir); return 2; }
-    cx_write(journal, "", 0); tw_chmod(journal, 0600);
+    if (sy_mkdir(dir, 0700) || sy_mkdir(cwd, 0700) || sy_mkdir(wrong, 0700) || sy_mkdir(home, 0700)) { printf("resume_pending: scratch %s\n", dir); return 2; }
+    cx_write(journal, "", 0); sy_chmod(journal, 0600);
     cx_write(other, "UNCHANGED", 9);
     snprintf(snapshot, sizeof snapshot,
         "{\"version\":2,\"session_id\":\"sess\",\"handoff_id\":\"pending\",\"candidate_hash\":\"%s\","
@@ -131,7 +133,7 @@ int main(void) {
         "\"journal\":{\"path\":\"%s\",\"offset\":0},\"input\":\"未发送中文稿\",\"pending_queue\":[\"QUEUED_RESUME\"],"
         "\"history\":[\"HISTORIC\"],\"history_pos\":1,\"history_browsing\":false,\"history_draft\":\"历史草稿\"}",
         HASH, cwd, journal);
-    cx_write(state, snapshot, (size_t)slen(snapshot)); tw_chmod(state, 0600);
+    cx_write(state, snapshot, (size_t)slen(snapshot)); sy_chmod(state, 0600);
 
     port = 24000 + (int)getpid() % 20000;
     /* the original stub answered with bare text; today an answer after tool
@@ -187,7 +189,7 @@ int main(void) {
     snprintf(want, sizeof want, "\"text\":\"cwd=%s\\nexit=0\\n%s\\n\"", cwd, cwd);
     check(has(jtext, want), "the pwd tool record ran in the restored cwd (cwd=…\\nexit=0\\n…)");
     otext = cx_read(other, (size_t *)&at[5]);
-    check(otext && tx_eq(otext, "UNCHANGED", 16) && tw_stat(state, NULL, NULL) != 0,
+    check(otext && tx_eq(otext, "UNCHANGED", 16) && sy_exists(state) == 0,
           "the unrelated transcript is untouched and the snapshot was consumed");
 
     { int i; for (i = 0; i < 30; i++) tw_keys("r", "BSpace", 0); }

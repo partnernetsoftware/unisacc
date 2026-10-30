@@ -1,0 +1,84 @@
+/* Checks cx/sys (env, fs, proc): sh ./unisacc.com tools/check-cx-sys.cx
+   Each case runs for real in a scratch directory under $TMPDIR or /tmp.
+   Prints "  ok    name" / "  FAIL  name", then CHECK_CX_SYS PASS|FAIL ok=N fail=M; exit 1 on any FAIL.
+   An L3 tool: no #include and no direct libc call (cx/sys, cx/text and the cx_* prelude only). */
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+static int n_ok, n_bad;
+static void ok(int c, const char *name) { printf("  %s  %s\n", c ? "ok  " : "FAIL", name); if (c) n_ok++; else n_bad++; }
+static int has(const char *s, const char *needle) { return tx_find(s, tx_len(s, 65536), needle, tx_len(needle, 256)) >= 0; }
+int main(void) {
+    char root[512], d[600], f[600], under[700], out[256], tiny[4];
+    const char *tmp = sy_env_or("TMPDIR", "/tmp");
+    sy_stat_t s;
+    int rc, cut, pid;
+
+    /* env */
+    ok(sy_env("PATH") != 0 && sy_env("PATH")[0] == '/', "env: PATH is set and absolute");
+    ok(sy_env("CX_SYS_SURELY_UNSET_7f3a") == 0, "env: an unset name is 0");
+    ok(sy_env("") == 0 && sy_env(0) == 0, "env: empty and null names are 0");
+    ok(tx_eq(sy_env_or("CX_SYS_SURELY_UNSET_7f3a", "fb"), "fb", 8), "env_or: fallback when unset");
+
+    /* fs */
+    snprintf(root, sizeof root, "%s/cx-sys-check-%d", tmp, sy_pid());
+    ok(sy_mkdir(root, 0700) == 0, "mkdir: a new directory");
+    ok(sy_mkdir(root, 0700) == -EEXIST, "mkdir: an existing one is -EEXIST");
+    ok(sy_mkdir("", 0700) == -EINVAL && sy_chmod(0, 0600) == -EINVAL, "mkdir/chmod: empty or null path is -EINVAL");
+    snprintf(d, sizeof d, "%s/no/such/parent", root);
+    ok(sy_mkdir(d, 0700) == -ENOENT, "mkdir: missing parent is -ENOENT");
+    ok(sy_stat(root, &s) == 0 && s.kind == 'd' && s.mode == 0700 && s.ino > 0, "stat: directory kind, mode 0700, inode");
+    snprintf(f, sizeof f, "%s/file", root);
+    ok(cx_write(f, "hello", 5) == 0 && sy_stat(f, &s) == 0 && s.kind == 'f' && s.size == 5 && s.mtime > 0, "stat: regular file, size 5, mtime");
+    ok(sy_chmod(f, 0640) == 0 && sy_stat(f, &s) == 0 && s.mode == 0640, "chmod: 0640 reads back");
+    ok(sy_exists(f) == 1 && sy_exists(root) == 1, "exists: file and directory are 1");
+    snprintf(d, sizeof d, "%s/absent", root);
+    ok(sy_exists(d) == 0 && sy_stat(d, &s) == -ENOENT, "exists: absent is 0 (stat -ENOENT)");
+    snprintf(under, sizeof under, "%s/under", f);
+    ok(sy_exists(under) == -ENOTDIR, "exists: a path under a file is -ENOTDIR, not absent");
+
+    /* proc */
+    {
+        char *av[] = { "sh", "-c", "echo out; echo err >&2; exit 3", 0 };
+        rc = sy_run(av, out, sizeof out, &cut);
+        ok(rc == 3 && has(out, "out\n") && has(out, "err\n") && !cut, "run: exit code 3, stdout and stderr captured");
+    }
+    {
+        char *av[] = { "sh", "-c", "echo 0123456789", 0 };
+        rc = sy_run(av, tiny, sizeof tiny, &cut);
+        ok(rc == 0 && cut && tx_eq(tiny, "012", 4), "run: output cut at the buffer, *cut set");
+    }
+    {
+        char *av[] = { "cx-sys-no-such-program-7f3a", 0 };
+        ok(sy_run(av, out, sizeof out, &cut) == 127, "run: a missing program exits 127");
+    }
+    {
+        char *av[] = { "sh", "-c", "kill -TERM $$", 0 };
+        ok(sy_run(av, out, sizeof out, &cut) == 128 + 15, "run: death by SIGTERM is 128+15");
+    }
+    ok(sy_run(0, out, sizeof out, &cut) == -EINVAL, "run: null argv is -EINVAL");
+    {
+        char *av[] = { "sh", "-c", "exit 5", 0 };
+        pid = sy_spawn(av);
+        ok(pid > 0 && sy_wait(pid, 0) == 5, "spawn + wait: exit 5");
+    }
+    {
+        /* a child that would outlive us, with a grandchild in its process group */
+        char *av[] = { "sh", "-c", "sleep 31.73 & sleep 31.73", 0 };   /* a duration nothing else uses, for the pgrep below */
+        pid = sy_spawn(av);
+        ok(pid > 0 && sy_wait(pid, 1) == -EAGAIN, "wait nohang: a running child is -EAGAIN");
+        ok(sy_kill(pid) == 128 + 9, "kill: the group is killed, status 128+9");
+        ok(sy_wait(pid, 0) == -ECHILD, "wait: a reaped pid is -ECHILD");
+    }
+    {
+        char *av[] = { "sh", "-c", "pgrep -f 'sleep 31[.]73' >/dev/null && echo alive || echo gone", 0 };
+        sy_run(av, out, sizeof out, &cut);
+        ok(has(out, "gone"), "kill: the background grandchild died with the group");
+    }
+    ok(sy_pid() > 0, "pid: positive");
+
+    ok(cx_rmtree(root) == 0 && sy_exists(root) == 0, "cleanup: scratch removed through the deletion guard");
+    printf("CHECK_CX_SYS\t%s\tok=%d\tfail=%d\n", n_bad ? "FAIL" : "PASS", n_ok, n_bad);
+    return n_bad ? 1 : 0;
+}
