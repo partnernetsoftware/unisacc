@@ -1,0 +1,55 @@
+/* tools/check-install-fixes.cx -- acceptance for the next product install: the compiler fixes the installed
+   79fb84e6 lacks, each as a fixture under tools/install-fixes/.
+     sh ./unisacc.com tools/check-install-fixes.cx [-- COMPILER]
+   COMPILER is a candidate executable (run directly) or a .com product (run with sh); default ./unisacc.com.
+     dupmod   one file reached as text.fmt and as up.lib's text.fmt (up -> .): must build and exit 0
+              (installed: "tx_vsnprintf exported by both text.fmt ... and text.fmt ...", rc 1)
+     dedupe   the same module through two link paths (text/, sub/text/): prints "1 1" and exits 0
+              (installed: "type TX_ZCAP from text.text and text.text is defined twice", rc 1)
+     iproto   user.cx calls tx_snprintf/tx_strtod that only mid.cx's uses make visible: a compile error naming
+              user.cx and tx_snprintf (installed: compiled without a prototype, Segmentation fault, rc 139)
+     uses48   one unit with 33 uses builds and exits 0 (installed: "more than 32 uses in one unit", rc 1)
+   Prints PASS/FAIL per case and CHECK_INSTALL_FIXES<TAB>failed=N<TAB>compiler=PATH.  Measured 2026-10-30:
+   out/grk-iproto/candidate (4ac3c2d4...) 4/4, the installed product 0/4 -- so this is not a registered batch
+   until the install; then it should be registered (tools/register.cx) and stay green. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+
+static int failed;
+static const char *compiler = "./unisacc.com";
+static void ck(int ok, const char *name) { if (!ok) failed++; printf("%s\tinstall-fixes.%s\n", ok ? "PASS" : "FAIL", name); }
+
+/* compile and run FILE with the compiler; stdout and stderr (merged) into OUT; exit code, 128+sig, or -1 */
+static int cx(const char *file, char *out, long cap) {
+    char *v[6]; int k = 0, ofd, pid, ex = 0, code = 0, sig = 0; long n = 0, r, cl = tx_len(compiler, 4096); char junk[4096];
+    v[k++] = "./tools/bound"; v[k++] = "50";
+    if (cl > 4 && tx_same(compiler + cl - 4, 4, ".com", 4)) v[k++] = "sh";
+    v[k++] = (char *)compiler; v[k++] = (char *)file; v[k] = 0;
+    pid = sy_spawn_pipe(v, 0, 0, &ofd, 0);
+    if (pid < 0) return -1;
+    while ((r = sy_read(ofd, out + n, cap - 1 - n)) > 0) n += r;
+    out[n] = 0;
+    while (sy_read(ofd, junk, sizeof junk) > 0) {}
+    sy_close(ofd);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid) return -1;
+    return ex ? code : 128 + sig;
+}
+static int has(const char *o, const char *s) { return tx_find(o, tx_len(o, 1 << 16), s, tx_len(s, 256)) >= 0; }
+
+int main(int argc, char **argv) {
+    static char o[1 << 16]; int rc;
+    if (argc == 2) compiler = argv[1];
+    else if (argc != 1) { fprintf(stderr, "usage: tools/check-install-fixes.cx [COMPILER]\n"); return 2; }
+    if (!sy_exists(compiler)) { fprintf(stderr, "check-install-fixes: no such compiler %s\n", compiler); return 2; }
+    rc = cx("tools/install-fixes/dupmod/main.cx", o, sizeof o);
+    ck(rc == 0 && !has(o, "exported by both"), "dupmod-one-file-two-paths-builds");
+    rc = cx("tools/install-fixes/dedupe/main.cx", o, sizeof o);
+    ck(rc == 0 && has(o, "1 1\n") && !has(o, "defined twice"), "dedupe-two-link-paths-one-module");
+    rc = cx("tools/install-fixes/iproto/main.cx", o, sizeof o);
+    ck(rc == 1 && has(o, "user.cx") && has(o, "tx_snprintf") && has(o, "undeclared"), "iproto-indirect-call-is-a-compile-error");
+    rc = cx("tools/install-fixes/uses48/main.cx", o, sizeof o);
+    ck(rc == 0 && !has(o, "more than 32 uses"), "uses48-33-uses-build");
+    printf("CHECK_INSTALL_FIXES\tfailed=%d\tcompiler=%s\n", failed, compiler);
+    return failed ? 1 : 0;
+}
