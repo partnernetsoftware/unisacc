@@ -3,9 +3,10 @@
 #pragma unisa use sys.dl
 /* Host file and clock. time.h is not in the prelude (edition 2).
    Exclusive create and nonblocking read go through sys.fs (sy_open_new,
-   sy_open_read). The executable path goes through sy_self_path. Each is
-   declared at the call: drive.o already contains those bodies via runcache,
-   and a second use would define sy_fstat twice.
+   sy_open_read). The executable path goes through sy_self_path. Replacing
+   an output asks sy_is_reg instead of lstat. Each is declared at the call:
+   drive.o already contains those bodies via runcache, and a second use
+   would define sy_fstat twice.
    mmap and the loader symbols are sys.mem and sys.dl. This file has no #include.
    clock_gettime is declared inside hs_ns so this module does not export it.
    core_host_panic and core_host_fetch are the execution core's host hooks.
@@ -306,15 +307,14 @@ static int hs_out_commit(const char *path, const unsigned char *data, long lengt
 }
 
 int hs_write_out(const char *path, const unsigned char *data, long length, char *why, int cap) {
-    struct stat st;
+    int sy_is_reg(const char *);
     int ordinary;
+    int rc;
     if (!path || (path[0] == '-' && path[1] == 0)) return hs_out_fd(1, data, length, why, cap);
     if (!path[0]) { hs_why(why, cap, "cannot open output"); return 1; }
-    if (lstat(path, &st) == 0) ordinary = S_ISREG(st.st_mode);
-    else {
-        if (errno != ENOENT) { hs_why(why, cap, "cannot open output"); return 1; }
-        ordinary = 1;
-    }
+    rc = sy_is_reg(path);
+    if (rc < 0 && rc != -ENOENT) { hs_why(why, cap, "cannot open output"); return 1; }
+    ordinary = rc == 1 || rc == -ENOENT;
     if (!ordinary) return hs_out_direct(path, data, length, why, cap);
     return hs_out_commit(path, data, length, why, cap);
 }
