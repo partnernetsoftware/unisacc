@@ -17,6 +17,11 @@
 #define GT_MAXH 16
 #define GT_MAXV 600
 #define GT_ROWS 20000
+#define GT_CAP 65536                      /* longest line or argument any table or CLI word may have */
+#pragma unisa use text.text
+#pragma unisa use mem.arena
+/* L3 tool on the L0 packages only (plans/cx-layers.md): byte strings via text, every buffer from one
+   arena that lives for the process; cx_read/cx_write/cx_runv_timeout come from the cx.h prelude. */
 
 static const char *gt_stages[] = {"abi", "binsel", "combo", "enc", "irsel", "isel", "lex", "lexcls", "lexword",
     "opinfo", "parse", "peep", "pfconv", "pp", "prec", "regmap", "reloc", "scope", "tyinfo", "type", 0};
@@ -32,7 +37,14 @@ typedef struct {
 } GtTable;
 
 static char gt_root[4096];
-static int gt_bad;
+static int gt_bad, gt_ar;
+
+static char *gt_dupz(const char *s) {        /* arena copy of a z-string of at most GT_CAP bytes */
+    long n = tx_len(s, GT_CAP);
+    char *p = n < 0 ? 0 : ar_dup(gt_ar, s, n);
+    if (!p) { fprintf(stderr, "gold-table: line too long or out of memory\n"); exit(2); }
+    return p;
+}
 
 static void gt_die(const char *what, const char *detail) {
     fprintf(stderr, "gold-table: %s%s%s\n", what, detail ? ": " : "", detail ? detail : "");
@@ -44,8 +56,8 @@ static int gt_split(char *s, char **out, int cap) {
     char *p = s;
     while (n < cap) {
         out[n++] = p;
-        p = strchr(p, '\t');
-        if (!p) break;
+        while (*p && *p != '\t') p++;
+        if (!*p) { p = 0; break; }
         *p++ = 0;
     }
     return p ? -1 : n;
@@ -53,26 +65,27 @@ static int gt_split(char *s, char **out, int cap) {
 
 static int gt_in(const GtList *l, const char *x) {
     int i;
-    for (i = 0; i < l->nv; i++) if (!strcmp(l->v[i], x)) return 1;
+    for (i = 0; i < l->nv; i++) if (tx_eq(l->v[i], x, GT_CAP)) return 1;
     return 0;
 }
 
 /* Parses buf (owned by the table afterwards). Returns 0, or names the defect on stderr and returns 1. */
 static int gt_parse(GtTable *t, char *buf, size_t n, const char *stage) {
     char *line = buf, *end = buf + n, *col = 0;
-    memset(t, 0, sizeof *t);
-    t->header = malloc(n ? n : 1);            /* verbatim bytes; buf itself is split in place below */
+    static const GtTable zero;
+    *t = zero;
+    t->header = ar_dup(gt_ar, buf, (long)n);  /* verbatim bytes; buf itself is split in place below */
     if (!t->header) gt_die("out of memory", 0);
-    memcpy(t->header, buf, n);
     while (line < end) {
-        char *nl = memchr(line, '\n', (size_t)(end - line));
+        long off = tx_chr(line, (long)(end - line), '\n');
+        char *nl = off < 0 ? 0 : line + off;
         if (!nl) { fprintf(stderr, "gold-table: %s: last line has no newline\n", stage); return 1; }
         *nl = 0;
         if (nl > line && nl[-1] == '\r') { fprintf(stderr, "gold-table: %s: CR in table\n", stage); return 1; }
-        if (!strncmp(line, "#field\t", 7) || !strncmp(line, "#head\t", 6)) {
+        if (tx_prefix(line, (long)(nl - line), "#field\t", 7) || tx_prefix(line, (long)(nl - line), "#head\t", 6)) {
             int head = line[1] == 'h';
             char *cell[GT_MAXV + 3];
-            char *copy = strdup(line);
+            char *copy = gt_dupz(line);
             int k = gt_split(copy, cell, GT_MAXV + 3), base = head ? 3 : 2, i;
             GtList *l;
             if (!copy || k < base + 1) { fprintf(stderr, "gold-table: %s: short %s line\n", stage, cell[0]); return 1; }
@@ -98,7 +111,7 @@ static int gt_parse(GtTable *t, char *buf, size_t n, const char *stage) {
         int i, at = 0;
         for (i = 0; i < t->nf; i++) at += snprintf(want + at, sizeof want - at, "%s%s", i ? "\t" : "", t->f[i].name);
         for (i = 0; i < t->nh; i++) at += snprintf(want + at, sizeof want - at, "\t=> %s", t->h[i].name);
-        if (at >= (int)sizeof want || strcmp(want, col)) { fprintf(stderr, "gold-table: %s: column line differs from #field/#head\n", stage); return 1; }
+        if (at >= (int)sizeof want || !tx_eq(want, col, GT_CAP)) { fprintf(stderr, "gold-table: %s: column line differs from #field/#head\n", stage); return 1; }
     }
     return 0;
 }
@@ -112,16 +125,13 @@ static int gt_rows_ok(const GtTable *t, char **rows, int n, const char *stage, c
     for (f = 0; f < t->nf; f++) idx[f] = 0;
     for (i = 0; i < n; i++) {
         char *cell[GT_MAXF + GT_MAXH + 1];
-        char *copy = strdup(rows[i]);
-        int k;
-        if (!copy) gt_die("out of memory", 0);
-        k = gt_split(copy, cell, GT_MAXF + GT_MAXH + 1);
-        if (k != t->nf + t->nh) { fprintf(stderr, "gold-table: %s: %s row %d has %d cells\n", stage, who, i + 1, k); free(copy); return 1; }
+        char *copy = gt_dupz(rows[i]);
+        int k = gt_split(copy, cell, GT_MAXF + GT_MAXH + 1);
+        if (k != t->nf + t->nh) { fprintf(stderr, "gold-table: %s: %s row %d has %d cells\n", stage, who, i + 1, k); return 1; }
         for (f = 0; f < t->nf; f++)
-            if (strcmp(cell[f], t->f[f].v[idx[f]])) { fprintf(stderr, "gold-table: %s: %s row %d key out of order (%s)\n", stage, who, i + 1, cell[f]); free(copy); return 1; }
+            if (!tx_eq(cell[f], t->f[f].v[idx[f]], GT_CAP)) { fprintf(stderr, "gold-table: %s: %s row %d key out of order (%s)\n", stage, who, i + 1, cell[f]); return 1; }
         for (f = 0; f < t->nh; f++)
-            if (!gt_in(&t->h[f], cell[t->nf + f])) { fprintf(stderr, "gold-table: %s: %s row %d label %s not a class of %s\n", stage, who, i + 1, cell[t->nf + f], t->h[f].name); free(copy); return 1; }
-        free(copy);
+            if (!gt_in(&t->h[f], cell[t->nf + f])) { fprintf(stderr, "gold-table: %s: %s row %d label %s not a class of %s\n", stage, who, i + 1, cell[t->nf + f], t->h[f].name); return 1; }
         for (f = t->nf - 1; f >= 0; f--) { if (++idx[f] < t->f[f].nv) break; idx[f] = 0; }
     }
     return 0;
@@ -129,7 +139,7 @@ static int gt_rows_ok(const GtTable *t, char **rows, int n, const char *stage, c
 
 static int gt_is_rule(const char *stage) {
     int i;
-    for (i = 0; gt_rules[i]; i++) if (!strcmp(gt_rules[i], stage)) return 1;
+    for (i = 0; gt_rules[i]; i++) if (tx_eq(gt_rules[i], stage, GT_CAP)) return 1;
     return 0;
 }
 
@@ -142,8 +152,8 @@ static char *gt_rule_rows(const char *stage, size_t *n) {
         || cx_fmt(src, sizeof src, "%s/seed/gold_%s_label.c", gt_root, stage)) gt_die("path too long", stage);
     argv[0] = bound; argv[1] = "50"; argv[2] = "sh"; argv[3] = com; argv[4] = src; argv[5] = "--"; argv[6] = "table"; argv[7] = 0;
     rc = cx_runv_timeout(argv, 55, &out, n);
-    if (rc != 0 || !out) { fprintf(stderr, "gold-table: %s: rule form exited %d\n", stage, rc); free(out); return 0; }
-    return out;
+    if (rc != 0 || !out) { fprintf(stderr, "gold-table: %s: rule form exited %d\n", stage, rc); return 0; }
+    return out;                           /* process-lifetime buffer from the cx.h prelude */
 }
 
 static int gt_load(GtTable *t, const char *stage) {
@@ -161,22 +171,19 @@ static int gt_check_stage(const char *stage) {
     if (gt_load(&t, stage)) return 1;
     if (gt_rows_ok(&t, t.rows, t.nrows, stage, "table")) return 1;
     if (gt_is_rule(stage)) {
-        size_t n, i, at = 0;
+        size_t n, at = 0;
         char *rule = gt_rule_rows(stage, &n);
         int r;
         if (!rule) return 1;
         for (r = 0; r < t.nrows; r++) {
-            size_t len = strlen(t.rows[r]);
-            if (at + len + 1 > n || memcmp(rule + at, t.rows[r], len) || rule[at + len] != '\n') {
+            long len = tx_len(t.rows[r], GT_CAP);
+            if (len < 0 || at + (size_t)len + 1 > n || !tx_same(rule + at, len, t.rows[r], len) || rule[at + len] != '\n') {
                 fprintf(stderr, "gold-table: %s: rule form differs from the table at row %d\n", stage, r + 1);
-                free(rule);
                 return 1;
             }
-            at += len + 1;
+            at += (size_t)len + 1;
         }
-        if (at != n) { fprintf(stderr, "gold-table: %s: rule form has extra rows\n", stage); free(rule); return 1; }
-        free(rule);
-        (void)i;
+        if (at != n) { fprintf(stderr, "gold-table: %s: rule form has extra rows\n", stage); return 1; }
         printf("SAME\t%s\t%d rows\trule\n", stage, t.nrows);
     } else {
         printf("OK\t%s\t%d rows\ttable\n", stage, t.nrows);
@@ -194,43 +201,41 @@ static int gt_write_stage(const char *stage) {
     rule = gt_rule_rows(stage, &n);
     if (!rule) return 1;
     {
-        char *copy = malloc(n + 1);
+        char *copy = ar_dup(gt_ar, rule, (long)n), *stop = copy + n;
         if (!copy) gt_die("out of memory", 0);
-        memcpy(copy, rule, n);
-        copy[n] = 0;
-        for (p = copy; *p && nr < GT_ROWS; ) {
-            char *nl = strchr(p, '\n');
-            if (!nl) { fprintf(stderr, "gold-table: %s: rule output lacks a final newline\n", stage); return 1; }
-            *nl = 0;
+        for (p = copy; p < stop && nr < GT_ROWS; ) {
+            long off = tx_chr(p, (long)(stop - p), '\n');
+            if (off < 0) { fprintf(stderr, "gold-table: %s: rule output lacks a final newline\n", stage); return 1; }
+            p[off] = 0;
             rows[nr++] = p;
-            p = nl + 1;
+            p += off + 1;
         }
     }
     if (gt_rows_ok(&t, rows, nr, stage, "rule form")) return 1;
     {
-        size_t total = t.header_n + n;
-        char *out = malloc(total);
+        size_t total = t.header_n + n, i;
+        char *out = ar_alloc(gt_ar, (long)total);
         if (!out) gt_die("out of memory", 0);
-        memcpy(out, t.header, t.header_n);
-        memcpy(out + t.header_n, rule, n);
+        for (i = 0; i < t.header_n; i++) out[i] = t.header[i];
+        for (i = 0; i < n; i++) out[t.header_n + i] = rule[i];
         if (cx_fmt(path, sizeof path, "%s/weights/gold/%s.tsv", gt_root, stage)) gt_die("path too long", stage);
         if (cx_write(path, out, total)) gt_die("cannot write", path);
         printf("WROTE\t%s\t%d rows\n", stage, nr);
-        free(out);
     }
-    free(rule);
     return 0;
 }
 
 int main(int argc, char **argv) {
     int i;
-    if (argc >= 3 && !strcmp(argv[1], "--check") && argc == 3) {
+    gt_ar = ar_new(1L << 30);
+    if (!gt_ar) gt_die("cannot create the arena", 0);
+    if (argc == 3 && tx_eq(argv[1], "--check", GT_CAP)) {
         if (!realpath(argv[2], gt_root)) gt_die("bad ROOT", argv[2]);
         for (i = 0; gt_stages[i]; i++) gt_bad |= gt_check_stage(gt_stages[i]);
         printf("%s\tgold-table\t%d stages\n", gt_bad ? "FAIL" : "PASS", i);
         return gt_bad ? 1 : 0;
     }
-    if (argc == 4 && !strcmp(argv[1], "--write")) {
+    if (argc == 4 && tx_eq(argv[1], "--write", GT_CAP)) {
         if (!realpath(argv[2], gt_root)) gt_die("bad ROOT", argv[2]);
         return gt_write_stage(argv[3]);
     }
