@@ -1,4 +1,6 @@
 #pragma unisa module memory
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
 /* Single-threaded runtime ownership and borrow checks, not a C memory sandbox
  * or compile-time borrow checker. Handles are copyable, forgeable values; the
  * module checks current instance, slot and never-reused token on every access.
@@ -38,7 +40,7 @@ cm_result cm_new(cm_instance instance,size_t length){
  int a=cm_instance_index(instance);if(a<0)return cm_answer(CM_INVALID_INSTANCE);if(length>CM_MAX_BYTES)return cm_answer(CM_SIZE);
  int b=-1;for(int i=0;i<cm_buffer_limits[a];i++)if(!cm_tokens[a][i]){b=i;break;}if(b<0)return cm_answer(CM_CAPACITY);
  if(length>cm_limits_bytes[a]-cm_used[a]||length>CM_MAX_BYTES-cm_total)return cm_answer(CM_BUDGET);if(cm_next==~0ULL)return cm_answer(CM_TOKEN_EXHAUSTED);
- unsigned char *data=length?calloc(length,1):0;if(length&&!data)return cm_answer(CM_ALLOC);
+ unsigned char *data=length?mm_zalloc((long)length):0;if(length&&!data)return cm_answer(CM_ALLOC);
  unsigned long long token=cm_issue();cm_data[a][b]=data;cm_sizes[a][b]=length;cm_tokens[a][b]=token;cm_readers[a][b]=0;cm_writers[a][b]=0;cm_used[a]+=length;cm_total+=length;cm_owner_count[a]++;
  cm_result r=cm_answer(CM_OK);r.owner.instance=instance.id;r.owner.token=token;r.owner.slot=b;return r;
 }
@@ -48,13 +50,13 @@ cm_result cm_write_byte(cm_instance instance,cm_owner owner,size_t offset,unsign
 cm_result cm_copy_range(cm_instance instance,cm_owner destination,size_t to,cm_owner source,size_t from,size_t count){
  int a,b,c,d,status=cm_owner_index(instance,destination,&a,&b);if(status)return cm_answer(status);status=cm_owner_index(instance,source,&c,&d);if(status)return cm_answer(status);
  if(cm_readers[a][b]||cm_writers[a][b]||cm_writers[c][d])return cm_answer(CM_BUSY);if(!cm_range(cm_sizes[a][b],to,count)||!cm_range(cm_sizes[c][d],from,count))return cm_answer(CM_BOUNDS);
- if(count)memmove(cm_data[a][b]+to,cm_data[c][d]+from,count);return cm_answer(CM_OK);
+ if(count&&mm_move(cm_data[a][b]+to,(long)(cm_sizes[a][b]-to),cm_data[c][d]+from,(long)count))return cm_answer(CM_ALLOC);return cm_answer(CM_OK);
 }
 /* Unsafe boundary: DATA must designate COUNT readable bytes for this call.
  * The module checks its destination but cannot validate an arbitrary C pointer. */
-cm_result cm_unsafe_import(cm_instance instance,cm_owner destination,size_t to,const void *data,size_t count){int a,b,status=cm_owner_index(instance,destination,&a,&b);if(status)return cm_answer(status);if(cm_readers[a][b]||cm_writers[a][b])return cm_answer(CM_BUSY);if(!cm_range(cm_sizes[a][b],to,count))return cm_answer(CM_BOUNDS);if(count&&!data)return cm_answer(CM_INVALID_ARGUMENT);if(count)memmove(cm_data[a][b]+to,data,count);return cm_answer(CM_OK);}
+cm_result cm_unsafe_import(cm_instance instance,cm_owner destination,size_t to,const void *data,size_t count){int a,b,status=cm_owner_index(instance,destination,&a,&b);if(status)return cm_answer(status);if(cm_readers[a][b]||cm_writers[a][b])return cm_answer(CM_BUSY);if(!cm_range(cm_sizes[a][b],to,count))return cm_answer(CM_BOUNDS);if(count&&!data)return cm_answer(CM_INVALID_ARGUMENT);if(count&&mm_move(cm_data[a][b]+to,(long)(cm_sizes[a][b]-to),data,(long)count))return cm_answer(CM_ALLOC);return cm_answer(CM_OK);}
 cm_result cm_move(cm_instance instance,cm_owner owner){int a,b,status=cm_owner_index(instance,owner,&a,&b);if(status)return cm_answer(status);if(cm_readers[a][b]||cm_writers[a][b])return cm_answer(CM_BUSY);unsigned long long token=cm_issue();if(!token)return cm_answer(CM_TOKEN_EXHAUSTED);cm_tokens[a][b]=token;cm_result r=cm_answer(CM_OK);r.owner=owner;r.owner.token=token;return r;}
-cm_result cm_drop(cm_instance instance,cm_owner owner){int a,b,status=cm_owner_index(instance,owner,&a,&b);if(status)return cm_answer(status);if(cm_readers[a][b]||cm_writers[a][b])return cm_answer(CM_BUSY);free(cm_data[a][b]);cm_data[a][b]=0;cm_tokens[a][b]=0;cm_total-=cm_sizes[a][b];cm_used[a]-=cm_sizes[a][b];cm_sizes[a][b]=0;cm_owner_count[a]--;return cm_answer(CM_OK);}
+cm_result cm_drop(cm_instance instance,cm_owner owner){int a,b,status=cm_owner_index(instance,owner,&a,&b);if(status)return cm_answer(status);if(cm_readers[a][b]||cm_writers[a][b])return cm_answer(CM_BUSY);mm_free(cm_data[a][b]);cm_data[a][b]=0;cm_tokens[a][b]=0;cm_total-=cm_sizes[a][b];cm_used[a]-=cm_sizes[a][b];cm_sizes[a][b]=0;cm_owner_count[a]--;return cm_answer(CM_OK);}
 static cm_result cm_borrow(cm_instance instance,cm_owner owner,size_t offset,size_t length,int writable){
  int a,b,status=cm_owner_index(instance,owner,&a,&b);if(status)return cm_answer(status);if(cm_writers[a][b]||(writable&&cm_readers[a][b]))return cm_answer(CM_BUSY);if(!cm_range(cm_sizes[a][b],offset,length))return cm_answer(CM_BOUNDS);
  int l=-1;for(int i=0;i<cm_lease_limits[a];i++)if(!cm_lease_tokens[a][i]){l=i;break;}if(l<0)return cm_answer(CM_CAPACITY);unsigned long long token=cm_issue();if(!token)return cm_answer(CM_TOKEN_EXHAUSTED);
@@ -68,6 +70,6 @@ cm_result cm_lease_read_byte(cm_instance instance,cm_lease lease,size_t offset){
 cm_result cm_lease_write_byte(cm_instance instance,cm_lease lease,size_t offset,unsigned byte){int a,l,status=cm_lease_index(instance,lease,&a,&l);if(status)return cm_answer(status);if(!cm_mutable[a][l])return cm_answer(CM_READ_ONLY);if(offset>=cm_lengths[a][l])return cm_answer(CM_BOUNDS);if(byte>255)return cm_answer(CM_INVALID_ARGUMENT);int b=cm_lease_buffers[a][l];cm_data[a][b][cm_offsets[a][l]+offset]=(unsigned char)byte;return cm_answer(CM_OK);}
 cm_result cm_lease_copy_range(cm_instance instance,cm_lease destination,size_t to,cm_lease source,size_t from,size_t count){
  int a,l,c,k,status=cm_lease_index(instance,destination,&a,&l);if(status)return cm_answer(status);status=cm_lease_index(instance,source,&c,&k);if(status)return cm_answer(status);if(!cm_mutable[a][l])return cm_answer(CM_READ_ONLY);
- if(!cm_range(cm_lengths[a][l],to,count)||!cm_range(cm_lengths[c][k],from,count))return cm_answer(CM_BOUNDS);int b=cm_lease_buffers[a][l],d=cm_lease_buffers[c][k];if(count)memmove(cm_data[a][b]+cm_offsets[a][l]+to,cm_data[c][d]+cm_offsets[c][k]+from,count);return cm_answer(CM_OK);
+ if(!cm_range(cm_lengths[a][l],to,count)||!cm_range(cm_lengths[c][k],from,count))return cm_answer(CM_BOUNDS);int b=cm_lease_buffers[a][l],d=cm_lease_buffers[c][k];if(count&&mm_move(cm_data[a][b]+cm_offsets[a][l]+to,(long)(cm_lengths[a][l]-to),cm_data[c][d]+cm_offsets[c][k]+from,(long)count))return cm_answer(CM_ALLOC);return cm_answer(CM_OK);
 }
 cm_result cm_release(cm_instance instance,cm_lease lease){int a,l,status=cm_lease_index(instance,lease,&a,&l);if(status)return cm_answer(status);int b=cm_lease_buffers[a][l];if(cm_mutable[a][l])cm_writers[a][b]=0;else cm_readers[a][b]--;cm_lease_tokens[a][l]=0;cm_lease_owners[a][l]=0;cm_lease_count[a]--;return cm_answer(CM_OK);}

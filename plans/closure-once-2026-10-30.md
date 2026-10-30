@@ -30,3 +30,11 @@
 - `cx/driver/cli.cx` 继续用模块内 `cxc_eqz`、`cxc_prefixz`，不 `use text.text`。这是当前做法。等每模块只进一只对象之后，再改成 `tx_eqz`、`tx_prefixz`。
 - 当场核对：`cx/driver` 旁边只有 `sys`、`mem`，没有 `text`。`cli.cx` 没有 `use text.text`。
 - `plans/cx-layers.md` 的收敛清单由 bdy 改。这份计划不代改那个文件。
+
+## 慢车道定法（2026-10-30，这轮不实现）
+
+bdy 提了三条：weak、`-funit` 不再把 use 进来的函数体编进当前对象、text/mem/sys 各编一只共享对象。
+
+- 不定 weak。weak 是有强符号就让强的赢，全是 weak 就留先看到的那份。`-O1` 和 `-O2` 编出来的函数体可以不一样，链接会悄悄留一份。后端现在也没有 `STB_WEAK`。
+- 定第 2 条加第 3 条。use 只留引用，每个模块只进一只对象，别的对象链接那一只。只加共享对象、函数体仍抄进每一只，重复还在。
+- 这一轮不改 `cxmod`，不改 `tools/entry-build.cx`。`cli.cx` 继续用自己的 `cxc_eqz`、`cxc_prefixz`。
