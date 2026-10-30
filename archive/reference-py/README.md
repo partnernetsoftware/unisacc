@@ -316,3 +316,12 @@
 - release/tools/candidate_chain.sh
 - release/tools/exittable.py
 - release/tools/h1source.py
+- release/tools/gqalive.py
+- release/tools/installpair.sh
+- release/tools/modelkey.py
+- release/tools/queue-retry.cx
+- release/tools/queue.sh
+- release/tools/queuestart.py
+- release/tools/queuestart.sh
+- release/tools/stagelog.py
+- release/tools/warmup.sh
