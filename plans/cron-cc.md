@@ -32,6 +32,31 @@ grk 主刀，尽快做出可发布的 0.0.43 `unisacc.com`。计划、链路和�
 
 有空时，cc 补自己名下的格（ri、resources、negative、library、interfaces、properties），但不能挡住上面这几步。
 
+## 清理与归档（督导之外的空档做，每轮最多一小件）
+
+目的是让仓库只剩"事实表 → 生成器（tools/）→ weights/、kernel/ → 产品（src/ + cx/）"这条主线，少些干扰。
+
+- **找对象**：
+  - 用 `tools/stale.cx` 找没有读者的文件。
+  - 用 `tools/symindex.cx`、`refactor.cx sites` 查引用。
+  - 用 `tools/doc-links.cx` 查断链。
+  - 不凭印象删东西。
+- **当前清单**（做完一项就划掉并写上提交号）：
+  1. 矩阵"合同来源"列和 check 工具里引用 `exec/c/...` 的地方，批量改指到 `cx/runtime`、`src` 里的现行实现。全部改完以后，把 `exec/c` 挪进 `archive/`。
+  2. `exec/` 顶层的 `model*-manifest/result/byte/fresh.tsv`、`layoutprovenance-*` 这类旧门禁产物，确认没有读者后归档。
+  3. 按现状重写 `exec/README.md`：它还在描述已经不存在的 gen.py/check.py。
+  4. `plans/` 里过期的计划，用 `plans/README.md` 判断哪些是当前的，过期的归到 `archive/`。
+- **怎么做**：
+  - 用 `git mv` 原路径挪进 `archive/`，不直接删。
+  - 挪完跑 `doc-links --fix-moved`，但只修活跃区，不改 archive 里的旧文档。
+  - 跑 `tools/ratchets.cx`，再跑 affected 批次，全绿再提交。
+  - 一件事一个提交，提交说明写清依据，比如"0 个读者"。
+- **不碰**：
+  - 别的车道：src/ 和产品层归 grk，cx/* 归 bdy，apps/csih/ 归 csih，ujs/ 不碰。
+  - 正在构造或测试中用到的输入。
+  - 还被矩阵证据引用的文件：先改引用，再挪文件。
+  - 别的车道里该清理的东西，发信封给它的主人。
+
 ## 底线
 
 - 只提交自己的文件。多人共改的文件用 `tools/commit-own.cx --keyed` 提交。
