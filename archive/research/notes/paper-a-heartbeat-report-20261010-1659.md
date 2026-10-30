@@ -7,7 +7,7 @@
 - **Latest：** **v0.0.38**（tag only；不发明 size/SHA）
 - **四 blob：** CN `74893e3d` · EN `95657738` · TeX `3830ede1` · abs `43d7ea7e` — CN/EN/TeX **changed**（仅 §8.1 领句）；abstract **SAME**
 - **Softguess：** **NONE×4**
-- **8509/8769：** **仍开** — 引用 [`paper-a-gap-nail-measurement-identity-8509-8769-20261010-1239.md`](paper-a-gap-nail-measurement-identity-8509-8769-20261010-1239.md)；本拍不重钉、不改数字
+- **8509/8769：** **仍开** — 引用 [`paper-a-gap-nail-measurement-identity-8509-8769-20261010-1239.md`](../../../research/notes/paper-a-gap-nail-measurement-identity-8509-8769-20261010-1239.md)；本拍不重钉、不改数字
 - **挡粘点 / blockers：** 无产品／键数／方向风险（research-only 领句）；冻结身份**未**改派为 v0.0.38；平台矩阵 / 表4·5 / 8509·8769 仍开；政委若要选定投稿密封身份另批
 - **待批板：** 无（本拍不叠决策卡；不代裁投稿身份）
 - **证据路径：**

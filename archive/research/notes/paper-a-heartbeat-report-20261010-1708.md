@@ -7,9 +7,9 @@
 - **Latest：** **v0.0.38**（tag only）
 - **四 blob：** CN `74893e3d` · EN `95657738` · TeX `3830ede1` · abs `43d7ea7e` — **全部 SAME**（本拍零 Paper A 正文 diff；仅 notes + paper-notes 挂链）
 - **Softguess：** **NONE×4**（预期；OUT-OF-SCOPE；本拍不粘）
-- **8509/8769：** **仍开** — 引用 [`paper-a-gap-nail-measurement-identity-8509-8769-20261010-1239.md`](paper-a-gap-nail-measurement-identity-8509-8769-20261010-1239.md)；本拍不改数字、不叠路线Ι 口号
+- **8509/8769：** **仍开** — 引用 [`paper-a-gap-nail-measurement-identity-8509-8769-20261010-1239.md`](../../../research/notes/paper-a-gap-nail-measurement-identity-8509-8769-20261010-1239.md)；本拍不改数字、不叠路线Ι 口号
 - **挡粘点 / blockers：** 无产品／键数／方向风险（research-only 决策卡）；正文未改；平台矩阵 / 表4·5 / 8509·8769 仍开
-- **待批板：** **仅本卡** — [`paper-a-decision-card-remeasure-identity-20261010-1708.md`](paper-a-decision-card-remeasure-identity-20261010-1708.md)（Ο1 默认 / Ο2 触发再议 / Ο3 否决）。**不**重叠 ~03:44「先批 P0 Softguess」同口号卡；Softguess 粘贴仍 UNAPPLIED、可选命名卫生、与本板正交
+- **待批板：** **仅本卡** — [`paper-a-decision-card-remeasure-identity-20261010-1708.md`](../../../research/notes/paper-a-decision-card-remeasure-identity-20261010-1708.md)（Ο1 默认 / Ο2 触发再议 / Ο3 否决）。**不**重叠 ~03:44「先批 P0 Softguess」同口号卡；Softguess 粘贴仍 UNAPPLIED、可选命名卫生、与本板正交
 - **证据路径：**
   - `research/notes/paper-a-decision-card-remeasure-identity-20261010-1708.md`
   - `research/notes/paper-a-heartbeat-report-20261010-1708.md`
