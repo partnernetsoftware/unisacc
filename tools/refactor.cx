@@ -21,6 +21,7 @@
    rc 0 when nothing was reverted, 1 otherwise, 2 for usage or I/O. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
+#pragma unisa use sys.env
 #pragma unisa use mem.arena
 #pragma unisa use text.text
 
@@ -251,7 +252,7 @@ static void load_cands(const char *path) {
     }
 }
 
-typedef struct { char *file; int first, count; char *orig; size_t on; char *outb, *errb; int rc; } Job;
+typedef struct { char *file; int first, count; char *orig; size_t on; char *outb, *errb; int rc; char *out1, *out2, *expect; } Job;
 /* one running VERIFY: started for a batch of files together, collected afterwards */
 typedef struct { int pid, ofd, efd; } Run;
 
@@ -262,8 +263,12 @@ static int verify_start(const char *tmpl, const char *file, Run *r) {
         if (tmpl[i] == '{' && tx_prefix(tmpl + i, n - i, "{file}", 6)) { put(&cmd, file, fl); i += 5; }
         else put(&cmd, tmpl + i, 1);
     }
-    argv[0] = "sh"; argv[1] = "-c"; argv[2] = cmd.p; argv[3] = 0;
-    r->pid = sy_spawn_pipe(argv, 0, SY_SPAWN_STDERR_SPLIT, &r->ofd, &r->efd);
+    if (sy_env("REFACTOR_DEBUG")) fprintf(stderr, "refactor-debug: start %s\n", cmd.p);
+    {   char *bargv[6];   /* every check runs under the native watchdog, so one hang cannot hold the batch */
+        bargv[0] = "./tools/bound"; bargv[1] = "50"; bargv[2] = "sh"; bargv[3] = "-c"; bargv[4] = cmd.p; bargv[5] = 0;
+        (void)argv;
+        r->pid = sy_spawn_pipe(bargv, 0, SY_SPAWN_STDERR_SPLIT, &r->ofd, &r->efd);
+    }
     return r->pid < 0 ? -1 : 0;
 }
 /* collect a started VERIFY: stdout, stderr and the exit status (128+N for signal N); -1 on failure.
@@ -276,7 +281,77 @@ static int verify_finish(Run *r, char **out, char **err, int *rc) {
     sy_close(r->ofd); sy_close(r->efd);
     if (sy_wait_status(r->pid, 0, &ex, &code, &sig) != r->pid) return -1;
     *out = o.p ? o.p : ""; *err = e.p ? e.p : ""; *rc = ex ? code : 128 + sig;
+    if (sy_env("REFACTOR_DEBUG")) fprintf(stderr, "refactor-debug: finish rc=%d out=%ld err=%ld %.80s\n", *rc, o.n, e.n, *err);
     return 0;
+}
+
+/* ---------- --verify-from REGISTRY: the file's own registered batch as its check ---------- */
+static char *reg_text; static size_t reg_n;
+static char *reg_expect;   /* the matched row's expect field, e.g. rc0:MARKER */
+static char root_abs[4096];
+static int verify_seq;
+/* append S single-quoted for sh */
+static void put_quoted(Buf *b, const char *s, long n) {
+    long i;
+    put(b, "'", 1);
+    for (i = 0; i < n; i++) { if (s[i] == '\'') puts_(b, "'\\''"); else put(b, s + i, 1); }
+    put(b, "'", 1);
+}
+/* the command for FILE from its registered batch (mode SOURCE, entry or source == FILE), with
+   {root} {candidate} {out} filled; *OUTP gets the fresh out path (masked before comparing).
+   0 when FILE has no usable row (unregistered, or a material placeholder it cannot fill). */
+static char *registry_cmd(const char *file, char **outp) {
+    long i = 0, fl = tx_len(file, CAP);
+    while (i < (long)reg_n) {
+        char *line = reg_text + i, *e = line, *f[16]; long ln; int nf;
+        while (*e && *e != '\n') e++;
+        ln = e - line; i = (long)(e - reg_text) + 1;
+        if (!ln || *line == '#') continue;
+        {   char *row = keep(line, ln);
+            nf = split(row, f, 16);
+            if (nf != 12 || !tx_eq(f[1], "IMPLEMENTED", 16) || !tx_eq(f[4], "SOURCE", 8)) continue;
+            if (!tx_same(f[8], tx_len(f[8], CAP), file, fl) && !tx_same(f[3], tx_len(f[3], CAP), file, fl)) continue;
+            {   Buf c = {0, 0, 0}; char outdir[4400]; char *a = f[9]; long al = tx_len(a, CAP), s = 0, k;
+                /* unique per process and call: a check that refuses an existing output must never see one */
+                if (cx_fmt(outdir, sizeof outdir, "%s/out/refactor-verify/%d-%d", root_abs, sy_pid(), ++verify_seq)) return 0;
+                reg_expect = zdup(f[11]);
+                puts_(&c, "sh ./unisacc.com "); put_quoted(&c, f[8], tx_len(f[8], CAP));
+                if (!tx_eq(a, "-", 4)) {
+                    puts_(&c, " --");
+                    for (k = 0; k <= al; k++) {
+                        if (k == al || a[k] == ';') {
+                            const char *tok = a + s; long tl = k - s; Buf t = {0, 0, 0}; long q;
+                            for (q = 0; q < tl; q++) {
+                                if (tok[q] == '{') {
+                                    long r = q; while (r < tl && tok[r] != '}') r++;
+                                    if (tx_same(tok + q, r - q + 1, "{root}", 6)) puts_(&t, root_abs);
+                                    else if (tx_same(tok + q, r - q + 1, "{out}", 5)) puts_(&t, outdir);
+                                    else if (tx_same(tok + q, r - q + 1, "{candidate}", 11)) { puts_(&t, root_abs); puts_(&t, "/unisacc.com"); }
+                                    else return 0;   /* a material placeholder: cannot verify here */
+                                    q = r;
+                                } else put(&t, tok + q, 1);
+                            }
+                            put(&c, " ", 1); put_quoted(&c, t.p ? t.p : "", t.n);
+                            s = k + 1;
+                        }
+                    }
+                }
+                *outp = zdup(outdir);
+                return c.p;
+            }
+        }
+    }
+    return 0;
+}
+/* S with every occurrence of the fresh out path P replaced by "{out}" */
+static char *mask_out(const char *s, const char *p) {
+    Buf o = {0, 0, 0}; long n = tx_len(s, CAP), pl = p ? tx_len(p, 8192) : 0, i = 0;
+    if (!pl) return (char *)s;
+    while (i < n) {
+        if (i + pl <= n && tx_same(s + i, pl, p, pl)) { puts_(&o, "{out}"); i += pl; }
+        else { put(&o, s + i, 1); i++; }
+    }
+    return o.p ? o.p : "";
 }
 
 static int same_z(const char *a, const char *b) {
@@ -326,29 +401,64 @@ static int apply(const char *candpath, int jobs, const char *verify) {
     }
     for (j = 0; j < nj; j += jobs) {
         int k, end = j + jobs < nj ? j + jobs : nj, state[MAXJOBS];
-        Run run[MAXJOBS];
-        for (k = j; k < end; k++) {   /* baselines: all started, then collected */
-            Job *J = &js[k];
-            J->orig = cx_read(J->file, &J->on);
-            state[k - j] = J->orig && verify_start(verify, J->file, &run[k - j]) == 0;
+        Run run[MAXJOBS], twin[MAXJOBS]; char *tw_out[MAXJOBS];
+        for (k = j; k < end; k++) {   /* baselines, each run twice at once: an unstable check cannot verify */
+            Job *J = &js[k]; const char *cmd = verify, *cmd2 = verify;
+            J->orig = cx_read(J->file, &J->on); J->out1 = J->out2 = 0; tw_out[k - j] = 0;
+            if (!verify && (!(cmd = registry_cmd(J->file, &J->out1)) || !(cmd2 = registry_cmd(J->file, &tw_out[k - j])))) {
+                printf("SKIP\t%s\tno registered SOURCE batch whose arguments can be filled\n", J->file); skip++;
+                state[k - j] = -1; continue;
+            }
+            J->expect = verify ? 0 : reg_expect;
+            state[k - j] = J->orig && verify_start(cmd, J->file, &run[k - j]) == 0 && verify_start(cmd2, J->file, &twin[k - j]) == 0;
         }
         for (k = j; k < end; k++) {
-            Job *J = &js[k];
-            if (!state[k - j] || verify_finish(&run[k - j], &J->outb, &J->errb, &J->rc) < 0) state[k - j] = 0;
+            Job *J = &js[k]; char *o3 = "", *e3 = ""; int rc3 = -1;
+            if (state[k - j] < 0) continue;
+            if (!state[k - j] || verify_finish(&run[k - j], &J->outb, &J->errb, &J->rc) < 0
+                || verify_finish(&twin[k - j], &o3, &e3, &rc3) < 0) { state[k - j] = 0; continue; }
+            if (rc3 != J->rc || !same_z(mask_out(o3, tw_out[k - j]), mask_out(J->outb, J->out1))
+                || !same_z(mask_out(e3, tw_out[k - j]), mask_out(J->errb, J->out1))) {
+                printf("SKIP\t%s\tits check is not stable (two unchanged runs differ)\n", J->file); skip++;
+                state[k - j] = -1; continue;
+            }
+            /* a failing baseline proves nothing: equal failures before and after are not a verification */
+            if (J->rc != 0) {
+                printf("SKIP\t%s\tits check fails before any edit (rc %d)\n", J->file, J->rc); skip++;
+                state[k - j] = -1; continue;
+            }
+            if (J->expect && tx_prefix(J->expect, tx_len(J->expect, 256), "rc0:", 4)) {
+                const char *mk = J->expect + 4; long ml = tx_len(mk, 200);
+                if (tx_find(J->outb, tx_len(J->outb, CAP), mk, ml) < 0) {
+                    printf("SKIP\t%s\tits check does not print the registered marker %s\n", J->file, mk); skip++;
+                    state[k - j] = -1; continue;
+                }
+            }
         }
         for (k = j; k < end; k++) {   /* edits, then every re-verify started together */
-            Job *J = &js[k]; long nn; char *nb;
+            Job *J = &js[k]; long nn; char *nb; const char *cmd = verify;
+            if (state[k - j] < 0) { state[k - j] = 0; continue; }
             if (!state[k - j]) { printf("SKIP\t%s\tcannot read or run the baseline\n", J->file); skip++; continue; }
             nb = edited(J, &nn);
             if (!nb) { printf("SKIP\t%s\tan original is no longer at its offset\n", J->file); skip++; state[k - j] = 0; continue; }
+            {   /* the original first goes to out/refactor-verify/backup/, so a killed run can be undone by hand */
+                char bp[4400]; static int bseq; long q, fl = tx_len(J->file, CAP); Buf nm = {0, 0, 0};
+                for (q = 0; q < fl; q++) put(&nm, J->file[q] == '/' ? "%" : J->file + q, 1);
+                if (sy_mkdir("out/refactor-verify", 0700) < 0 && sy_exists("out/refactor-verify") != 1) die("cannot make out/refactor-verify");
+                if (sy_mkdir("out/refactor-verify/backup", 0700) < 0 && sy_exists("out/refactor-verify/backup") != 1) die("cannot make the backup directory");
+                if (cx_fmt(bp, sizeof bp, "out/refactor-verify/backup/%d-%d-%s", sy_pid(), ++bseq, nm.p)) die("backup path");
+                if (cx_write(bp, J->orig, J->on) != 0) { printf("SKIP\t%s\tcannot write its backup\n", J->file); skip++; state[k - j] = 0; continue; }
+            }
             if (cx_write(J->file, nb, (size_t)nn) != 0) { printf("SKIP\t%s\tcannot write\n", J->file); skip++; state[k - j] = 0; continue; }
-            if (verify_start(verify, J->file, &run[k - j]) < 0) state[k - j] = 2;
+            if (!verify) cmd = registry_cmd(J->file, &J->out2);
+            if (!cmd || verify_start(cmd, J->file, &run[k - j]) < 0) state[k - j] = 2;
         }
         for (k = j; k < end; k++) {   /* compare; restore on any difference */
             Job *J = &js[k]; char *o2 = "", *e2 = ""; int rc2 = -1;
             if (!state[k - j]) continue;
             if (state[k - j] == 2 || verify_finish(&run[k - j], &o2, &e2, &rc2) < 0 || rc2 != J->rc
-                || !same_z(o2, J->outb) || !same_z(e2, J->errb)) {
+                || !same_z(mask_out(o2, J->out2), mask_out(J->outb, J->out1))
+                || !same_z(mask_out(e2, J->out2), mask_out(J->errb, J->out1))) {
                 if (cx_write(J->file, J->orig, J->on) != 0) die("cannot restore a file: stop");
                 printf("REVERT\t%s\tverify differs (rc %d -> %d)\n", J->file, J->rc, rc2); rev++;
                 continue;
@@ -374,9 +484,21 @@ int main(int argc, char **argv) {
     if (argc >= 5 && tx_eq(argv[1], "apply", 8)) {
         Buf v = {0, 0, 0}; int k, jobs = (int)strtol(argv[3], 0, 10);
         if (jobs < 1 || jobs > MAXJOBS) die("JOBS 1..16");
+        if (tx_eq(argv[4], "--verify-from", 16)) {   /* each file's registered batch is its check */
+            if (argc != 6) die("apply CANDIDATES JOBS --verify-from REGISTRY");
+            reg_text = cx_read(argv[5], &reg_n);
+            if (!reg_text) die("cannot read the registry");
+            if (sy_realpath(".", root_abs, sizeof root_abs) < 0) die("cannot resolve the root");
+            {   char vd[4400]; int m;
+                if (cx_fmt(vd, sizeof vd, "%s/out/refactor-verify", root_abs)) die("path");
+                m = sy_mkdir(vd, 0700);
+                if (m != 0 && m != -EEXIST) die("cannot make out/refactor-verify");
+            }
+            return apply(argv[2], jobs, 0);
+        }
         for (k = 4; k < argc; k++) { if (k > 4) put(&v, " ", 1); puts_(&v, argv[k]); }
         return apply(argv[2], jobs, v.p);
     }
-    fprintf(stderr, "usage: refactor.cx find [--auto] RULES FILE... | apply CANDIDATES JOBS VERIFY...\n");
+    fprintf(stderr, "usage: refactor.cx find [--auto] RULES FILE... | apply CANDIDATES JOBS (VERIFY... | --verify-from REGISTRY)\n");
     return 2;
 }
