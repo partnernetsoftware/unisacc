@@ -299,3 +299,4 @@ grk 澄清：cli.cx 收敛 use text.text 的真正阻塞不是软链归一，而
 ## closure-once 的精确技术路径（为什么是 grk 的编译器后端 + 构建架构改造）
 ## closure-once 精确模型表定位（fd.* section FD.fail -> REJECT，2026-10-30 实测）
 ## closure-once weak 合并的更深约束（动作目录缺函数体字节比较，2026-10-30）
+## closure-once 方案 2+3 的实现设计（施工图，供 grk 实施，2026-10-30）
