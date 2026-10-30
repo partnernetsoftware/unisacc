@@ -116,3 +116,27 @@ sh ./unisacc.com tools/refactor.cx -- apply CANDIDATES.tsv JOBS VERIFY...
 - **第 4 轮改进候选：**
   - 基线结果按（检查命令、文件 sha、编译器身份）缓存，只缓存改前基线，改后验证每次实跑；第二次基线也可以跳过。这算"有测量依据的热点缓存"，预计每个文件少 2 次编译。
   - grk 在 L0 新增 `tx_eqz` 并提交后，用一条规则 `tx_eq($1, $2, 1L << 20)` → `tx_eqz($1, $2)` 把这次扫描的结果折叠掉。这条规则本身也是对工具的二次实践。
+
+## 第 4 轮结果（2026-10-30）
+
+- **改动：** 剩下的 92 个目标又改了 17 个文件（a7bc3fc5cb），0 个 REVERT。之后 `find --auto` 已经没有可自动接受的行。
+- **未改的 341 处，按原因分：**
+  - 289 处判 skip，原因是文件旁边没有 `text/` 链接：
+    - tools/cxlib 204 处（都是模块）；
+    - tests/preprocess 45 处、tests/cases 34 处，都是材料或夹具目录，不动；
+    - 其余 6 处。
+  - 52 处判 review，原因是模块文件会因此新增 use。
+- **review 判定是对的，已用实验证实：**
+  - 已装产品在同一模块经两条不同的链接路径进入时，会报 `type TX_ZCAP from text.text and text.text is defined twice`，rc=1。例子：consumer 经 `X/text` 引入，而它 use 的模块经 `X/sub/text` 引入。
+  - 同一条链接路径的菱形依赖没有问题。
+  - grk 的候选 `out/grk-modid/candidate`（d903d225）同样输入能通过，输出 `1 1`，rc=0。
+  - 最小复现在 `out/rf-dedupe/`。
+- **第 5 轮的前置条件：** 去重修复进入已装产品，由慢车道安装。之后：
+  1. 加 `tools/cxlib/text -> ../../cx/text` 链接；
+  2. apply 增加 `{users}` 占位：模块文件改为编译它的全部消费者，因为单独编译模块会报 `no main`；
+  3. 再放行 review 行。
+- **另外 8 个基线编译失败的文件，都是 `-c -b` 检查本身覆盖不到：**
+  - tests/nets.cx 依赖的 netcore 在材料准备时才放到它旁边；
+  - tools/cx0.cx、tools/check-cx-entry.cx 报 `cc interop call signature` 未覆盖；
+  - tools/hostseed-step.cx 报 `tape domain: unknown opcode`。
+  这些文件改走 `--verify-from tests/batches.tsv`。
