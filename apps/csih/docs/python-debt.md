@@ -45,3 +45,8 @@
 | `signal()`（没有 `rt_sigaction`） | csih 收不到外部信号；被 kill 时靠 `csih.sh` 恢复终端；探针桩没法忽略 SIGPIPE |
 
 补这些要改 `include/unistd.h`、`include/signal.h` 等携带头（`signal` 还要写信号返回跳板），会牵动 `kernel/` 生成物和产品重建，属于慢车道，不在 csih 快车道里做。源码里"missing in unisacc 0.0.39"的说法，在 0.0.43 上仍然成立。
+
+**2026-10-30 更新：前 7 个接口已经有了不改 `include/` 的路。** cx 底层新增了 `cx/sys/posix.cx`，直接用 `__syscall6` 加逐平台调用号，补齐了这批接口：`sy_tcgetpgrp`、`sy_socketpair`、`sy_killpg`、`sy_setsid`、`sy_openat`、`sy_linkat`、`sy_lockf`，另有 `sy_flock`、`sy_getpgid`、`sy_tcsetpgrp`。
+- 检查在 `tools/check-cx-sys.cx`，posix 部分全部通过；只在 Linux x86_64 上实跑过，arm64 和 macOS 的调用号写了但没有实跑。
+- `reload_launcher.cx` 的运行循环和 `message_send.cx` 的 publish，现在可以改用这些接口移植，不必再等慢车道。移植还没做，所以它们在合同表里仍是 BLOCKED，等移植完成并实跑通过后再改。
+- `signal()` 的内核投递不在这批里：它要 `rt_sigaction` 加信号返回跳板，仍然 BLOCKED。

@@ -1,4 +1,6 @@
-/* Checks cx/sys (env, fs, proc, time, net): sh ./unisacc.com tools/check-cx-sys.cx
+/* Checks cx/sys (env, fs, proc, time, net, posix): sh ./unisacc.com tools/check-cx-sys.cx
+   (from the repo root: the posix cases re-run this file as a child, "-- child MODE ...", for what
+   must happen in another process: setsid, and a record lock held by someone else).
    Each case runs for real in a scratch directory under $TMPDIR or /tmp.
    Prints "  ok    name" / "  FAIL  name", then CHECK_CX_SYS PASS|FAIL ok=N fail=M; exit 1 on any FAIL.
    An L3 tool: no #include and no direct libc call (cx/sys, cx/text and the cx_* prelude only). */
@@ -7,12 +9,40 @@
 #pragma unisa use sys.proc
 #pragma unisa use sys.time
 #pragma unisa use sys.net
+#pragma unisa use sys.posix
 #pragma unisa use text.text
 static int n_ok, n_bad;
 static void ok(int c, const char *name) { printf("  %s  %s\n", c ? "ok  " : "FAIL", name); if (c) n_ok++; else n_bad++; }
 static int has(const char *s, const char *needle) { return tx_find(s, tx_len(s, 65536), needle, tx_len(needle, 256)) >= 0; }
-int main(void) {
+/* Child modes, run as a separate process by the posix cases. Exit 0 when the expectation holds. */
+static int child(const char *mode, const char *arg) {
+    if (tx_eq(mode, "setsid", 16)) {
+        long s = sy_setsid();
+        return s > 0 && s == (long)sy_pid() && sy_getpgid(0) == s ? 0 : 1;
+    }
+    if (tx_eq(mode, "leader-setsid", 16)) {
+        setpgid(0, 0);   /* become a group leader: setsid must then refuse */
+        return sy_setsid() == -EPERM ? 0 : 1;
+    }
+    if (tx_eq(mode, "lockf-held", 16) || tx_eq(mode, "lockf-free", 16)) {
+        int fd = sy_openat(sy_at_fdcwd(), arg, O_RDWR, 0), r = fd >= 0 ? sy_lockf(fd, 1, 0) : fd;
+        return tx_eq(mode, "lockf-held", 16) ? (r == -EAGAIN || r == -EACCES ? 0 : 1) : (r == 0 ? 0 : 1);
+    }
+    return 2;
+}
+
+/* Run this check file again as a child in MODE; its exit status. */
+static int run_child(const char *mode, const char *arg) {
+    const char *u = sy_env_or("UNISACC", "./unisacc.com");
+    char *av[] = { "sh", (char *)u, "-run", "tools/check-cx-sys.cx", "--", "child", (char *)mode, (char *)(arg ? arg : "-"), 0 };
+    char out[256];
+    int cut;
+    return sy_run(av, out, sizeof out, &cut);
+}
+
+int main(int argc, char **argv) {
     char root[512], d[600], f[600], under[700], out[256], tiny[4];
+    if (argc == 4 && tx_eq(argv[1], "child", 8)) return child(argv[2], argv[3]);
     const char *tmp = sy_env_or("TMPDIR", "/tmp");
     sy_stat_t s;
     int rc, cut, pid;
@@ -119,6 +149,54 @@ int main(void) {
         ok(sy_wait_port(port, 200) == -ETIMEDOUT && sy_now_ms() - t0 >= 190, "wait_port: a closed port times out after 200ms");
         ok(sy_tcp_connect(port) == -ECONNREFUSED, "connect: nothing listening is -ECONNREFUSED");
         ok(sy_close(lfd) == -EBADF, "close: a closed fd is -EBADF");
+    }
+
+    /* posix: the calls the carried runtime lacks on 0.0.43, made from system calls */
+    {
+        int sv[2], fd, fd2, dfd, p;
+        char buf[8], g[700], h[700];
+        long got;
+        ok(sy_getpgid(0) > 0 && sy_getpgid(0) == (long)getpgrp(), "getpgid(0) is this process group");
+        ok(sy_getpgid(999999) == -ESRCH, "getpgid of no such pid is -ESRCH");
+        ok(run_child("setsid", 0) == 0, "setsid in a child: session and group become its pid");
+        ok(run_child("leader-setsid", 0) == 0, "setsid as a group leader is -EPERM");
+        {
+            char *av[] = { "sh", "-c", "sleep 31.79 & sleep 31.79", 0 };
+            long end;
+            int r;
+            p = sy_spawn(av);
+            sy_sleep_ms(100);
+            ok(p > 0 && sy_killpg(p, 9) == 0 && sy_wait(p, 0) == 128 + 9, "killpg kills a spawned group");
+            end = sy_now_ms() + 2000;   /* the killed grandchild may linger as a zombie of the group */
+            while ((r = sy_killpg(p, 0)) == 0 && sy_now_ms() < end) sy_sleep_ms(20);
+            ok(r == -ESRCH, "killpg of a gone group is -ESRCH");
+            ok(sy_killpg(0, 9) == -EINVAL && sy_killpg(1, 0) == -EINVAL, "killpg refuses 0 and 1 (my group, everything)");
+        }
+        ok(sy_socketpair(sv) == 0 && sy_send_all(sv[0], "z", 1) == 0 && sy_recv(sv[1], buf, 1) == 1 && buf[0] == 'z'
+           && sy_send_all(sv[1], "w", 1) == 0 && sy_recv(sv[0], buf, 1) == 1 && buf[0] == 'w', "socketpair carries bytes both ways");
+        ok(sy_tcgetpgrp(sv[0]) == -ENOTTY, "tcgetpgrp on a socket is -ENOTTY");
+        snprintf(f, sizeof f, "%s/a", root);
+        fd = sy_openat(sy_at_fdcwd(), f, O_RDWR | O_CREAT, 0600);
+        ok(fd >= 0 && sy_stat(f, &s) == 0 && s.mode == 0600, "openat(AT_FDCWD, absolute, O_CREAT) creates with the mode");
+        dfd = sy_openat(sy_at_fdcwd(), root, O_RDONLY, 0);
+        ok(dfd >= 0 && sy_openat(dfd, "a", O_RDONLY, 0) >= 0, "openat relative to a directory fd");
+        ok(sy_openat(dfd, "missing", O_RDONLY, 0) == -ENOENT && sy_openat(dfd, "", O_RDONLY, 0) == -EINVAL, "openat: missing name -ENOENT, empty -EINVAL");
+        snprintf(g, sizeof g, "%s/b", root);
+        ok(sy_linkat(dfd, "a", dfd, "b", 0) == 0 && sy_stat(g, &s) == 0 && s.ino > 0, "linkat makes a second name");
+        ok(sy_linkat(dfd, "a", dfd, "b", 0) == -EEXIST, "linkat over an existing name is -EEXIST");
+        ok(sy_linkat(dfd, "missing", dfd, "c", 0) == -ENOENT, "linkat of a missing source is -ENOENT");
+        snprintf(h, sizeof h, "%s/lock", root);
+        fd = sy_openat(sy_at_fdcwd(), h, O_RDWR | O_CREAT, 0600);
+        fd2 = sy_openat(sy_at_fdcwd(), h, O_RDWR, 0);
+        ok(fd >= 0 && fd2 >= 0 && sy_flock(fd, 2 | 4) == 0, "flock exclusive, not waiting");
+        ok(sy_flock(fd2, 2 | 4) == -EWOULDBLOCK, "flock: a second open file is refused (-EWOULDBLOCK)");
+        ok(sy_flock(fd, 8) == 0 && sy_flock(fd2, 2 | 4) == 0 && sy_flock(fd2, 8) == 0, "flock: after unlock the second one gets it");
+        ok(sy_lockf(fd, 1, 0) == 0, "lockf: an exclusive record lock");
+        ok(run_child("lockf-held", h) == 0, "lockf: another process is refused while it is held");
+        ok(sy_unlockf(fd) == 0, "lockf: unlock");
+        ok(run_child("lockf-free", h) == 0, "lockf: after unlock another process gets it");
+        got = sy_at_fdcwd();
+        ok(got < 0, "at_fdcwd is the negative AT_FDCWD of this target");
     }
 
     ok(cx_rmtree(root) == 0 && sy_exists(root) == 0, "cleanup: scratch removed through the deletion guard");

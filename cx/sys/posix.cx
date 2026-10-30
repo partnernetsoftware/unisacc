@@ -1,0 +1,114 @@
+#pragma unisa module posix
+/* L0 sys/posix: the POSIX calls the carried runtime does not provide on
+   0.0.43 (plans/cx-layers.md; apps/csih/docs/python-debt.md BLOCKED list),
+   made from the system calls themselves. No #include: __syscall6 is the
+   compiler's intrinsic and _UNISA_SC the prelude's syscall-class macro;
+   struct flock, F_SETLK and fcntl come with the prelude.
+   0 or a value on success, -errno on failure, as everywhere in cx/sys.
+   Targets: Linux x86_64 and arm64, macOS x86_64 and arm64. Elsewhere
+   (Windows) every call is -ENOSYS: stated, not emulated. The interface is
+   the same on every target; only the numbers below differ. */
+
+#if defined(__APPLE__)
+static const long syp_ok = 1, syp_setsid = 147, syp_getpgid = 151, syp_socketpair = 135, syp_ioctl = 54,
+                  syp_openat = 463, syp_linkat = 471, syp_flock = 131,
+                  syp_tiocgpgrp = 0x40047477L, syp_tiocspgrp = 0x80047476L, syp_at_fdcwd = -2;
+#elif defined(__linux__) && defined(__aarch64__)
+static const long syp_ok = 1, syp_setsid = 157, syp_getpgid = 155, syp_socketpair = 199, syp_ioctl = 29,
+                  syp_openat = 56, syp_linkat = 37, syp_flock = 32,
+                  syp_tiocgpgrp = 0x540FL, syp_tiocspgrp = 0x5410L, syp_at_fdcwd = -100;
+#elif defined(__linux__) && defined(__x86_64__)
+static const long syp_ok = 1, syp_setsid = 112, syp_getpgid = 121, syp_socketpair = 53, syp_ioctl = 16,
+                  syp_openat = 257, syp_linkat = 265, syp_flock = 73,
+                  syp_tiocgpgrp = 0x540FL, syp_tiocspgrp = 0x5410L, syp_at_fdcwd = -100;
+#else
+static const long syp_ok = 0, syp_setsid = 0, syp_getpgid = 0, syp_socketpair = 0, syp_ioctl = 0,
+                  syp_openat = 0, syp_linkat = 0, syp_flock = 0,
+                  syp_tiocgpgrp = 0, syp_tiocspgrp = 0, syp_at_fdcwd = -1;
+#endif
+
+/* __syscall6 returns -errno on failure on every target (the carried headers
+   rely on the same: include/unistd.h wraps it in _unisa_ret). */
+static long syp(long n, long a, long b, long c, long d, long e) {
+#if defined(_WIN32)
+    (void)n; (void)a; (void)b; (void)c; (void)d; (void)e;
+    return -ENOSYS;
+#else
+    if (!syp_ok) return -ENOSYS;
+    return __syscall6(_UNISA_SC(n), a, b, c, d, e);
+#endif
+}
+
+/* The directory fd that means "relative to the current directory" for
+   sy_openat/sy_linkat (-1 where these calls are unavailable). */
+int sy_at_fdcwd(void) { return (int)syp_at_fdcwd; }
+
+/* Start a new session (the caller becomes its leader, with no controlling
+   tty). The new session id, or -errno (-EPERM for a group leader). */
+long sy_setsid(void) { return syp(syp_setsid, 0, 0, 0, 0, 0); }
+
+/* The process group of PID (0: this process), or -errno. */
+long sy_getpgid(int pid) { return syp(syp_getpgid, pid, 0, 0, 0, 0); }
+
+/* Send SIG to every process of group PGRP. 0, or -errno. */
+int sy_killpg(int pgrp, int sig) {
+    if (pgrp <= 1) return -EINVAL;   /* 0 and 1 would mean "my group" and "everything" */
+    errno = 0;
+    return kill(-(pid_t)pgrp, sig) == 0 ? 0 : (errno ? -errno : -EIO);
+}
+
+/* A connected pair of AF_UNIX stream sockets into SV. 0, or -errno. */
+int sy_socketpair(int sv[2]) {
+    if (!sv) return -EINVAL;
+    return (int)syp(syp_socketpair, 1 /* AF_UNIX */, 1 /* SOCK_STREAM */, 0, (long)sv, 0);
+}
+
+/* The foreground process group of the terminal on FD, or -errno (-ENOTTY). */
+long sy_tcgetpgrp(int fd) {
+    int pg = -1;
+    long r = syp(syp_ioctl, fd, syp_tiocgpgrp, (long)&pg, 0, 0);
+    return r < 0 ? r : pg;
+}
+
+/* Make PGRP the foreground process group of the terminal on FD. 0, or -errno. */
+int sy_tcsetpgrp(int fd, int pgrp) {
+    int pg = pgrp;
+    return (int)syp(syp_ioctl, fd, syp_tiocspgrp, (long)&pg, 0, 0);
+}
+
+/* openat(2): PATH relative to directory DFD (sy_at_fdcwd() for the cwd). The fd, or -errno. */
+int sy_openat(int dfd, const char *path, int flags, int mode) {
+    if (!path || !path[0]) return -EINVAL;
+    return (int)syp(syp_openat, dfd, (long)path, flags, mode, 0);
+}
+
+/* linkat(2): a new hard link NEWP (in NEWD) to OLDP (in OLDD). 0, or -errno (-EEXIST: NEWP exists). */
+int sy_linkat(int oldd, const char *oldp, int newd, const char *newp, int flags) {
+    if (!oldp || !oldp[0] || !newp || !newp[0]) return -EINVAL;
+    return (int)syp(syp_linkat, oldd, (long)oldp, newd, (long)newp, flags);
+}
+
+/* flock(2) on FD: OP is 1 shared, 2 exclusive, 8 unlock, |4 not to wait.
+   0, or -errno (-EWOULDBLOCK when held and not waiting). */
+int sy_flock(int fd, int op) { return (int)syp(syp_flock, fd, op, 0, 0, 0); }
+
+/* A POSIX record lock over all of FD (the lockf/fcntl kind, not flock's):
+   WRITE 1 exclusive / 0 shared, WAIT 1 to block. Unlock with sy_unlockf.
+   0, or -errno (-EAGAIN or -EACCES when held elsewhere and not waiting). */
+int sy_lockf(int fd, int write, int wait) {
+    struct flock l;
+    memset(&l, 0, sizeof l);
+    l.l_type = write ? F_WRLCK : F_RDLCK;
+    l.l_whence = SEEK_SET;
+    errno = 0;
+    return fcntl(fd, wait ? F_SETLKW : F_SETLK, &l) == 0 ? 0 : (errno ? -errno : -EIO);
+}
+
+int sy_unlockf(int fd) {
+    struct flock l;
+    memset(&l, 0, sizeof l);
+    l.l_type = F_UNLCK;
+    l.l_whence = SEEK_SET;
+    errno = 0;
+    return fcntl(fd, F_SETLK, &l) == 0 ? 0 : (errno ? -errno : -EIO);
+}
