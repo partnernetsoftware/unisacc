@@ -95,6 +95,7 @@ cc	ri,resources,negative,hosts,library,interfaces,properties
   ARM64-SLICE：lnx/arm64 走 33 个对象，osx/arm64 走 route=whole-o。冻结 rev=5ed7ba69bf9e86b91843c608ce00a1daff231dc8。工具写收据。外层不再套 bound。
   ARM64-SLICE：lnx/arm64 entry.elf sha=dabcfa2337de8036b47c528210c4d851128d8f0e011fe33815e49258d9c3bee0 bytes=1385808。candidate sha=8b138088558666154bec3ac59aa3ecbb5dad10f8b2f397f6aa55f24789e69170 bytes=3425658，已按 entry-build 拼上 P3（p3 sha=aec1a0bf27b9d1f2e26a1b86b52cb3694bc66a906415bcc0435c11278c6deabf bytes=2039850）。六只 -O1 ns=25754945902，27 只 ns=23086225727，link ns=8472766756，rc=0。
   ARM64-SLICE：osx/arm64 sha=2a6c571cf24d62494ca403049e8b233e772a7b41a9da925ea363d264a5c182ab bytes=1981666 ns=37489425891 rc=0。镜像不带 P3。
+  WHOLE-O-LNX：cc 裁定 0.0.43 的 lnx/x86_64 与 lnx/arm64 也走 route=whole-o，rev=c98f757f4c93ea9cfe91bef18fd88a929ad7ba96。收据写 route=whole-o，镜像不带 P3。lnx/x86_64 sha=477393de82de27764b714502db8cc410e3f5daf213afa99cc278b3ca2b1ce49a bytes=1537472 ns=35346772463 rc=0。lnx/arm64 sha=75d2d4b7659e8cfa91acfbd6bf775762d79e7f56c896216a807a8813d975e1ba bytes=1959313 ns=36257376370 rc=0。pack：out/release-ape-c98/unisacc-next.com sha=43fbbb819aae028e8151a9f8eec621514a1264259d1b7a926d85f7dd952a5f00 bytes=4631130。smoke ok=4 failed=1（hostc.cx 写在 out/release-ape-smoke/，use 在该文件旁边找 sys/io.cx）。同一源放在 cx/ 下再跑，打印 release-ape-hostc，rc=0。未安装。
 - [ ] 3 object 模型步
 - [ ] 4 测试到 QUALIFIED
 - [ ] 主人授权发布
