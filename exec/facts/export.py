@@ -706,66 +706,7 @@ def lowerabi():
     return out + rows + sel + om + private_modes + ["=none\tjson\t[]", "=zero\tint\t0", "=eight\tint\t8"]
 
 
-def optgen():
-    """E4 optimiser START data and peep index facts (was exec/opt/gen.py build/peep_start/peepround):
-    start1/start2 = the START action list per level (interned start words, -O2 peep table and
-    opinfo classes, opinfo simple set), peepidx = PA_/PB_/PR_ column indices and sizes, Y = one
-    answer row per peep head with its target template (answer-targets.tsv)."""
-    import json
-    sys.path.insert(0, str(ROOT))
-    from exec.facts.load import facts
-    C = {r["name"]: r["value"] for r in facts("opt-gen-constants")}
-    pf = {}
-    for ln in (ROOT / "weights/gold/peep.tsv").read_text().splitlines():
-        f = ln.split("\t")
-        if ln.startswith("#field") or ln.startswith("#head"):
-            pf[f[1]] = f[2:]
-    PA, PB, PR, PY = pf["a"], pf["b"], pf["rel"], pf["y"]
-    def gold(name):   # field-wise `=>` filter, as exec/parse/gen.py gold()
-        return [f for f in (ln.split("\t") for ln in (ROOT / "weights/gold" / (name + ".tsv")).read_text(encoding="utf-8").splitlines()
-                            if not ln.startswith("#")) if "=>" not in f]
-    peep, opinfo = gold("peep"), gold("opinfo")
-    startwords = [dict(i=i, word=w, register="id_" + w.strip("."))
-                  for i, w in enumerate(facts("opt-gen-startwords"))]
-    peepinit = []
-    for f in peep:
-        if len(f) == 4 and f[0] in PA and f[1] in PB and f[2] in PR and f[3] in PY:
-            k = (PA.index(f[0]) * len(PB) + PB.index(f[1])) * len(PR) + PR.index(f[2])
-            peepinit.append(dict(i=len(peepinit), index=k, value=PY.index(f[3]) + 1,
-                                 bank=C["PEEPB"]))
-    opinfoinit = []
-    for f in opinfo:
-        if len(f) == 4:
-            opinfoinit.append(dict(i=len(opinfoinit), word=f[0],
-                                   has_a="yes" if f[2] in PA else "no",
-                                   a_value=PA.index(f[2]) + 1 if f[2] in PA else 0,
-                                   a_bank=C["ACLSB"],
-                                   has_b="yes" if f[3] in PB else "no",
-                                   b_value=PB.index(f[3]) + 1 if f[3] in PB else 0,
-                                   b_bank=C["BCLSB"]))
-    simplewords = []
-    for f in opinfo:
-        if len(f) >= 2 and f[1] == "1":
-            simplewords.append(dict(i=len(simplewords), word=f[0], bank=C["SIMPLE"]))
-    words = ["word_%d" % row["i"] for row in startwords]
-    simple = ["simple_%d" % row["i"] for row in simplewords]
-    startplans = [dict(name="start1", refs=words + simple),
-                  dict(name="start2", refs=words +
-                       ["peep_%d" % row["i"] for row in peepinit] +
-                       ["opinfo_%d" % row["i"] for row in opinfoinit] + simple)]
-    out = ["=%s\tjson\t%s" % (name, json.dumps(value)) for name, value in
-           (("startwords", startwords), ("peepinit", peepinit),
-            ("opinfoinit", opinfoinit), ("simplewords", simplewords),
-            ("startplans", startplans))]
-    idx = {}
-    for prefix, values in (("PA", PA), ("PB", PB), ("PR", PR)):
-        idx.update((prefix + "_" + n, i) for i, n in enumerate(values))
-    idx.update(PB_size=len(PB), PR_size=len(PR))
-    out.append("=peepidx\tjson\t" + json.dumps(idx))
-    targets = dict(l.split("\t") for l in (ROOT / "exec/opt/answer-targets.tsv").read_text().splitlines()
-                   if l and not l.startswith("#"))
-    out.append("=Y\tjson\t" + json.dumps([dict(i=i, target=targets.get(n, targets["*"]).format(name=n)) for i, n in enumerate(PY)]))
-    return out
+# opt-gen (E4 START data and peep indices) moved to tools/facts-gen.cx on 2026-10-30.
 
 
 def modelbindingstemplate():
@@ -1163,7 +1104,6 @@ TABLES = [
     ("pp-autoinc-gen", ["exec/facts/pp-bytes.tsv", "unisa/libneed.py", "exec/facts/pp-autoinc.tsv", "exec/facts/pp-layout.tsv", "exec/facts/export.py",
                          *sorted(str(p.relative_to(ROOT)) for p in (ROOT / "include").rglob("*.h"))], ppautoinc),
     ("nativeabi", ["exec/nativeabi/rules.tsv", "exec/nativeabi/ordered-result.tsv", "exec/nativeabi/gen-fresh.tsv", "exec/nativeabi/ordered-fresh.tsv", "exec/facts/nativeabi-gen-reject.tsv", "exec/facts/top-modelgraphequality-banks.tsv", "exec/facts/export.py"], nativeabi),
-    ("opt-gen", ["weights/gold/peep.tsv", "weights/gold/opinfo.tsv", "exec/facts/opt-gen-constants.tsv", "exec/facts/opt-gen-startwords.tsv", "exec/opt/answer-targets.tsv", "exec/facts/export.py"], optgen),
     ("top-modelbindings-template", ["exec/facts/top-modelbindings-const.tsv", "exec/facts/export.py"], modelbindingstemplate),
     ("structreturnexpr", ["exec/build/parsebase.py", "exec/facts/export.py"], structreturnexpr),
     ("k2-tokenlocations-map", ["exec/facts/tokenlocations.tsv", "exec/facts/export.py"], tokenlocationsmap),

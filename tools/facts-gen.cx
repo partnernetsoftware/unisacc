@@ -1,0 +1,376 @@
+/* tools/facts-gen.cx -- native producers for exec/facts tables, moved out of exec/facts/export.py one
+ * table at a time (zero-Python plan, plans/cx-layers.md).  A ported table names this tool as its writer
+ * and lists it among its inputs in place of export.py; export.py no longer writes it.
+ *
+ *   sh ./unisacc.com tools/facts-gen.cx -- --check ROOT [TABLE...]
+ *   sh ./unisacc.com tools/facts-gen.cx -- --write ROOT [TABLE...]
+ *   sh ./unisacc.com tools/facts-gen.cx -- --compare-body ROOT TABLE   (transition: body equal to the
+ *       committed table written by export.py; header lines are not compared)
+ *
+ * Tables: opt-gen (E4 START data and peep indices).
+ * Exit 0 all equal / written, 1 a table differs (named), 2 usage or I/O.
+ */
+#pragma unisa use text.text
+#pragma unisa use mem.arena
+#define FG_CAP 65536
+#define FG_MAXL 8192
+
+static char fg_root[4096];
+static int fg_ar;
+
+typedef struct { char *p; long n, cap; } Ob;
+static void fg_die(const char *a, const char *b) { fprintf(stderr, "facts-gen: %s%s%s\n", a, b ? ": " : "", b ? b : ""); exit(2); }
+static void ob_put(Ob *o, const char *s, long n) {
+    long i;
+    if (o->n + n + 1 > o->cap) {
+        long c = (o->n + n + 1) * 2 + 4096;
+        char *t = ar_alloc(fg_ar, c);
+        if (!t) fg_die("out of memory", 0);
+        for (i = 0; i < o->n; i++) t[i] = o->p[i];
+        o->p = t; o->cap = c;
+    }
+    for (i = 0; i < n; i++) o->p[o->n + i] = s[i];
+    o->n += n;
+    o->p[o->n] = 0;
+}
+static void ob_z(Ob *o, const char *s) { long n = tx_len(s, FG_CAP); if (n < 0) fg_die("string too long", 0); ob_put(o, s, n); }
+static void ob_int(Ob *o, long v) { char b[32]; cx_fmt(b, sizeof b, "%ld", v); ob_z(o, b); }
+static void ob_str(Ob *o, const char *s) {           /* json.dumps of an ASCII string */
+    long i, n = tx_len(s, FG_CAP);
+    ob_put(o, "\"", 1);
+    for (i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == '"' || c == '\\') { ob_put(o, "\\", 1); ob_put(o, s + i, 1); }
+        else if (c < 0x20 || c > 0x7e) { char b[8]; cx_fmt(b, sizeof b, "\\u%04x", c); ob_z(o, b); }
+        else ob_put(o, s + i, 1);
+    }
+    ob_put(o, "\"", 1);
+}
+
+/* Lines of a file, split in place; lines[] point into an arena copy. */
+typedef struct { char **l; int n; char *raw; long rawn; } Lines;
+static Lines fg_lines(const char *rel) {
+    char path[4400];
+    size_t n;
+    char *b, *copy, *p, *end;
+    Lines L;
+    L.n = 0;
+    if (cx_fmt(path, sizeof path, "%s/%s", fg_root, rel)) fg_die("path too long", rel);
+    b = cx_read(path, &n);
+    if (!b) fg_die("cannot read", path);
+    L.raw = b; L.rawn = (long)n;
+    copy = ar_dup(fg_ar, b, (long)n);
+    L.l = ar_alloc(fg_ar, (long)sizeof(char *) * ((long)n + 2));
+    if (!copy || !L.l) fg_die("out of memory", 0);
+    for (p = copy, end = copy + n; p < end; ) {
+        long off = tx_chr(p, (long)(end - p), '\n');
+        if (off < 0) off = (long)(end - p);
+        p[off] = 0;
+        L.l[L.n++] = p;
+        p += off + 1;
+    }
+    return L;
+}
+static int fg_split(char *s, char **out, int cap) {
+    int n = 0;
+    char *p = s;
+    for (;;) {
+        if (n == cap) return -1;
+        out[n++] = p;
+        while (*p && *p != '\t') p++;
+        if (!*p) return n;
+        *p++ = 0;
+    }
+}
+static char *fg_dupz(const char *s) { long n = tx_len(s, FG_CAP); char *p = n < 0 ? 0 : ar_dup(fg_ar, s, n); if (!p) fg_die("out of memory", 0); return p; }
+
+typedef struct { int n; char *v[FG_MAXL]; } List;
+static int list_index(const List *l, const char *x) { int i; for (i = 0; i < l->n; i++) if (tx_eq(l->v[i], x, FG_CAP)) return i; return -1; }
+
+/* gold(name) of export.py: rows of weights/gold/NAME.tsv not starting with '#' whose cells do not
+   include the cell "=>" (the column line's cells are "=> head", so it is kept, as in Python). */
+typedef struct { int n; int nc[FG_MAXL * 4]; char **c[FG_MAXL * 4]; } Rows;
+static void fg_gold(const char *name, Rows *R, List *fields, const char *(*want)[2], int nwant) {
+    char rel[256];
+    Lines L;
+    int i, k, w;
+    cx_fmt(rel, sizeof rel, "weights/gold/%s.tsv", name);
+    L = fg_lines(rel);
+    R->n = 0;
+    for (i = 0; i < L.n; i++) {
+        char *cells[FG_MAXL + 4];
+        char *line = fg_dupz(L.l[i]);
+        int nc, arrow = 0;
+        if (!*L.l[i]) continue;
+        nc = fg_split(line, cells, FG_MAXL + 4);
+        if (nc < 0) fg_die("too many cells", rel);
+        if (L.l[i][0] == '#') {
+            if (nc >= 2 && (tx_eq(cells[0], "#field", 8) || tx_eq(cells[0], "#head", 8)))
+                for (w = 0; w < nwant; w++) if (tx_eq(cells[1], want[w][0], FG_CAP)) {
+                    List *dst = &fields[w];
+                    dst->n = 0;
+                    for (k = 2; k < nc; k++) dst->v[dst->n++] = cells[k];
+                }
+            continue;
+        }
+        for (k = 0; k < nc; k++) if (tx_eq(cells[k], "=>", 4)) arrow = 1;
+        if (arrow) continue;
+        R->c[R->n] = ar_alloc(fg_ar, (long)sizeof(char *) * nc);
+        if (!R->c[R->n]) fg_die("out of memory", 0);
+        for (k = 0; k < nc; k++) R->c[R->n][k] = cells[k];
+        R->nc[R->n++] = nc;
+    }
+}
+
+/* facts(stem) for a two-column name/value table of integers, and a single-column value table of
+   JSON strings (no escapes), as exec/facts/load.py reads them. */
+static long fg_const(const char *stem, const char *name) {
+    char rel[256];
+    Lines L;
+    int i;
+    cx_fmt(rel, sizeof rel, "exec/facts/%s.tsv", stem);
+    L = fg_lines(rel);
+    for (i = 1; i < L.n; i++) {
+        char *cells[4], *line = fg_dupz(L.l[i]), *end;
+        long v;
+        if (!*line || line[0] == '#') continue;
+        if (fg_split(line, cells, 4) != 2) continue;
+        if (!tx_eq(cells[0], name, FG_CAP)) continue;
+        v = strtol(cells[1], &end, 10);
+        if (end == cells[1] || *end) fg_die("constant is not an integer", name);
+        return v;
+    }
+    fg_die("constant absent", name);
+    return 0;
+}
+static int fg_values(const char *stem, char **out, int cap) {
+    char rel[256];
+    Lines L;
+    int i, n = 0;
+    cx_fmt(rel, sizeof rel, "exec/facts/%s.tsv", stem);
+    L = fg_lines(rel);
+    for (i = 1; i < L.n; i++) {
+        char *s = L.l[i];
+        long len = tx_len(s, FG_CAP);
+        if (!*s || s[0] == '#') continue;
+        if (len < 2 || s[0] != '"' || s[len - 1] != '"' || tx_chr(s, len, '\\') >= 0 || n == cap) fg_die("value is not a plain JSON string", stem);
+        out[n++] = ar_dup(fg_ar, s + 1, len - 2);
+    }
+    return n;
+}
+
+static void opt_gen(Ob *o) {
+    static List F[4];
+    static const char *want[4][2] = {{"a", 0}, {"b", 0}, {"rel", 0}, {"y", 0}};
+    static Rows peep, opinfo;
+    static List dummy[1];
+    static const char *none[1][2] = {{"", 0}};
+    List *PA = &F[0], *PB = &F[1], *PR = &F[2], *PY = &F[3];
+    char *words[256];
+    int nwords, i, npeep = 0, nopinfo = 0, nsimple = 0;
+    long PEEPB = fg_const("opt-gen-constants", "PEEPB"), ACLSB = fg_const("opt-gen-constants", "ACLSB"),
+         BCLSB = fg_const("opt-gen-constants", "BCLSB"), SIMPLE = fg_const("opt-gen-constants", "SIMPLE");
+    fg_gold("peep", &peep, F, want, 4);
+    fg_gold("opinfo", &opinfo, dummy, none, 0);
+    nwords = fg_values("opt-gen-startwords", words, 256);
+    /* =startwords */
+    ob_z(o, "=startwords\tjson\t[");
+    for (i = 0; i < nwords; i++) {
+        long a = 0, b = tx_len(words[i], FG_CAP);
+        char reg[512];
+        while (a < b && words[i][a] == '.') a++;
+        while (b > a && words[i][b - 1] == '.') b--;
+        ob_z(o, i ? ", {\"i\": " : "{\"i\": "); ob_int(o, i);
+        ob_z(o, ", \"word\": "); ob_str(o, words[i]);
+        cx_fmt(reg, sizeof reg, "id_%.*s", (int)(b - a), words[i] + a);
+        ob_z(o, ", \"register\": "); ob_str(o, reg); ob_z(o, "}");
+    }
+    ob_z(o, "]\n");
+    /* =peepinit */
+    ob_z(o, "=peepinit\tjson\t[");
+    for (i = 0; i < peep.n; i++) {
+        char **f = peep.c[i];
+        int a, b, r, y;
+        if (peep.nc[i] != 4) continue;
+        a = list_index(PA, f[0]); b = list_index(PB, f[1]); r = list_index(PR, f[2]); y = list_index(PY, f[3]);
+        if (a < 0 || b < 0 || r < 0 || y < 0) continue;
+        ob_z(o, npeep ? ", {\"i\": " : "{\"i\": "); ob_int(o, npeep);
+        ob_z(o, ", \"index\": "); ob_int(o, ((long)a * PB->n + b) * PR->n + r);
+        ob_z(o, ", \"value\": "); ob_int(o, y + 1);
+        ob_z(o, ", \"bank\": "); ob_int(o, PEEPB); ob_z(o, "}");
+        npeep++;
+    }
+    ob_z(o, "]\n");
+    /* =opinfoinit */
+    ob_z(o, "=opinfoinit\tjson\t[");
+    for (i = 0; i < opinfo.n; i++) {
+        char **f = opinfo.c[i];
+        int a, b;
+        if (opinfo.nc[i] != 4) continue;
+        a = list_index(PA, f[2]); b = list_index(PB, f[3]);
+        ob_z(o, nopinfo ? ", {\"i\": " : "{\"i\": "); ob_int(o, nopinfo);
+        ob_z(o, ", \"word\": "); ob_str(o, f[0]);
+        ob_z(o, ", \"has_a\": "); ob_str(o, a >= 0 ? "yes" : "no");
+        ob_z(o, ", \"a_value\": "); ob_int(o, a >= 0 ? a + 1 : 0);
+        ob_z(o, ", \"a_bank\": "); ob_int(o, ACLSB);
+        ob_z(o, ", \"has_b\": "); ob_str(o, b >= 0 ? "yes" : "no");
+        ob_z(o, ", \"b_value\": "); ob_int(o, b >= 0 ? b + 1 : 0);
+        ob_z(o, ", \"b_bank\": "); ob_int(o, BCLSB); ob_z(o, "}");
+        nopinfo++;
+    }
+    ob_z(o, "]\n");
+    /* =simplewords */
+    ob_z(o, "=simplewords\tjson\t[");
+    for (i = 0; i < opinfo.n; i++) {
+        char **f = opinfo.c[i];
+        if (opinfo.nc[i] < 2 || !tx_eq(f[1], "1", 4)) continue;
+        ob_z(o, nsimple ? ", {\"i\": " : "{\"i\": "); ob_int(o, nsimple);
+        ob_z(o, ", \"word\": "); ob_str(o, f[0]);
+        ob_z(o, ", \"bank\": "); ob_int(o, SIMPLE); ob_z(o, "}");
+        nsimple++;
+    }
+    ob_z(o, "]\n");
+    /* =startplans */
+    {
+        int plan, first, k;
+        ob_z(o, "=startplans\tjson\t[");
+        for (plan = 1; plan <= 2; plan++) {
+            char ref[64];
+            first = 1;
+            ob_z(o, plan == 1 ? "{\"name\": \"start1\", \"refs\": [" : ", {\"name\": \"start2\", \"refs\": [");
+            for (k = 0; k < nwords; k++) { cx_fmt(ref, sizeof ref, "word_%d", k); if (!first) ob_z(o, ", "); ob_str(o, ref); first = 0; }
+            if (plan == 2) {
+                for (k = 0; k < npeep; k++) { cx_fmt(ref, sizeof ref, "peep_%d", k); if (!first) ob_z(o, ", "); ob_str(o, ref); first = 0; }
+                for (k = 0; k < nopinfo; k++) { cx_fmt(ref, sizeof ref, "opinfo_%d", k); if (!first) ob_z(o, ", "); ob_str(o, ref); first = 0; }
+            }
+            for (k = 0; k < nsimple; k++) { cx_fmt(ref, sizeof ref, "simple_%d", k); if (!first) ob_z(o, ", "); ob_str(o, ref); first = 0; }
+            ob_z(o, "]}");
+        }
+        ob_z(o, "]\n");
+    }
+    /* =peepidx */
+    {
+        const List *L3[3] = {PA, PB, PR};
+        const char *pre[3] = {"PA_", "PB_", "PR_"};
+        int g, k, first = 1;
+        char key[512];
+        ob_z(o, "=peepidx\tjson\t{");
+        for (g = 0; g < 3; g++)
+            for (k = 0; k < L3[g]->n; k++) {
+                cx_fmt(key, sizeof key, "%s%s", pre[g], L3[g]->v[k]);
+                if (!first) ob_z(o, ", ");
+                ob_str(o, key); ob_z(o, ": "); ob_int(o, k); first = 0;
+            }
+        ob_z(o, ", \"PB_size\": "); ob_int(o, PB->n);
+        ob_z(o, ", \"PR_size\": "); ob_int(o, PR->n);
+        ob_z(o, "}\n");
+    }
+    /* =Y: answer-targets name -> template, "*" the default, "{name}" replaced */
+    {
+        Lines T = fg_lines("exec/opt/answer-targets.tsv");
+        char *tn[256], *tv[256];
+        int nt = 0, k, star = -1;
+        for (k = 0; k < T.n; k++) {
+            char *cells[4], *line = fg_dupz(T.l[k]);
+            if (!*line || line[0] == '#') continue;
+            if (fg_split(line, cells, 4) != 2 || nt == 256) fg_die("bad answer-targets row", T.l[k]);
+            tn[nt] = cells[0]; tv[nt] = cells[1];
+            if (tx_eq(cells[0], "*", 4)) star = nt;
+            nt++;
+        }
+        if (star < 0) fg_die("answer-targets lacks *", 0);
+        ob_z(o, "=Y\tjson\t[");
+        for (i = 0; i < PY->n; i++) {
+            const char *t = tv[star];
+            char out[1024];
+            long at = 0, j, tl, hole;
+            for (k = 0; k < nt; k++) if (tx_eq(tn[k], PY->v[i], FG_CAP)) { t = tv[k]; break; }
+            tl = tx_len(t, FG_CAP);
+            hole = tx_find(t, tl, "{name}", 6);
+            for (j = 0; j < tl && at < 1000; ) {
+                if (j == hole) { long m = tx_len(PY->v[i], 512); if (tx_copy(out + at, 1024 - at, PY->v[i], m)) fg_die("target too long", 0); at += m; j += 6; }
+                else out[at++] = t[j++];
+            }
+            out[at] = 0;
+            ob_z(o, i ? ", {\"i\": " : "{\"i\": "); ob_int(o, i);
+            ob_z(o, ", \"target\": "); ob_str(o, out); ob_z(o, "}");
+        }
+        ob_z(o, "]\n");
+    }
+}
+
+typedef struct { const char *stem; const char *inputs[8]; void (*produce)(Ob *); } Table;
+static const Table fg_tables[] = {
+    {"opt-gen", {"weights/gold/peep.tsv", "weights/gold/opinfo.tsv", "exec/facts/opt-gen-constants.tsv",
+                 "exec/facts/opt-gen-startwords.tsv", "exec/opt/answer-targets.tsv", "tools/facts-gen.cx", 0}, opt_gen},
+    {0, {0}, 0}
+};
+
+static void fg_render(const Table *t, Ob *head, Ob *body) {
+    int i;
+    ob_z(head, "# exec/facts/"); ob_z(head, t->stem); ob_z(head, ".tsv: written by tools/facts-gen.cx, do not edit\n");
+    for (i = 0; t->inputs[i]; i++) {
+        char path[4400], hex[65];
+        size_t n;
+        char *b;
+        cx_fmt(path, sizeof path, "%s/%s", fg_root, t->inputs[i]);
+        b = cx_read(path, &n);
+        if (!b) fg_die("cannot read input", path);
+        cx_sha256_hex(b, n, hex);
+        ob_z(head, "# input "); ob_z(head, t->inputs[i]); ob_z(head, " sha256:"); ob_put(head, hex, 16); ob_z(head, "\n");
+    }
+    t->produce(body);
+}
+
+static long fg_body_start(const char *s, long n) {       /* offset of the first line not starting with '#' */
+    long at = 0;
+    while (at < n && s[at] == '#') { long off = tx_chr(s + at, n - at, '\n'); if (off < 0) return n; at += off + 1; }
+    return at;
+}
+
+static int fg_one(const Table *t, int mode) {   /* mode 0 check, 1 write, 2 compare-body */
+    Ob head = {0, 0, 0}, body = {0, 0, 0};
+    char path[4400];
+    size_t n;
+    char *cur;
+    fg_render(t, &head, &body);
+    cx_fmt(path, sizeof path, "%s/exec/facts/%s.tsv", fg_root, t->stem);
+    if (mode == 1) {
+        Ob all = {0, 0, 0};
+        ob_put(&all, head.p, head.n); ob_put(&all, body.p, body.n);
+        if (cx_write(path, all.p, (size_t)all.n)) fg_die("cannot write", path);
+        printf("WROTE\t%s\n", t->stem);
+        return 0;
+    }
+    cur = cx_read(path, &n);
+    if (!cur) fg_die("cannot read", path);
+    if (mode == 2) {
+        long b = fg_body_start(cur, (long)n);
+        int same = tx_same(cur + b, (long)n - b, body.p, body.n);
+        printf("%s\t%s\tbody\n", same ? "SAME" : "DIFF", t->stem);
+        return !same;
+    }
+    {
+        int same = (long)n == head.n + body.n && tx_same(cur, head.n, head.p, head.n) && tx_same(cur + head.n, body.n, body.p, body.n);
+        printf("%s\t%s\n", same ? "SAME" : "DIFF", t->stem);
+        return !same;
+    }
+}
+
+int main(int argc, char **argv) {
+    int mode, i, k, bad = 0;
+    fg_ar = ar_new(1L << 32);
+    if (!fg_ar) fg_die("cannot create the arena", 0);
+    if (argc < 3) fg_die("usage", "--check|--write|--compare-body ROOT [TABLE...]");
+    if (tx_eq(argv[1], "--check", 16)) mode = 0;
+    else if (tx_eq(argv[1], "--write", 16)) mode = 1;
+    else if (tx_eq(argv[1], "--compare-body", 16)) mode = 2;
+    else fg_die("usage", "--check|--write|--compare-body ROOT [TABLE...]");
+    if (!realpath(argv[2], fg_root)) fg_die("bad ROOT", argv[2]);
+    for (i = 0; fg_tables[i].stem; i++) {
+        int pick = argc == 3;
+        for (k = 3; k < argc; k++) if (tx_eq(argv[k], fg_tables[i].stem, 256)) pick = 1;
+        if (pick) bad |= fg_one(&fg_tables[i], mode);
+    }
+    return bad;
+}
