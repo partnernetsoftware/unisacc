@@ -1,0 +1,57 @@
+#pragma unisa use text.build
+#pragma unisa use text.text
+#pragma unisa use sys.fs
+/* csv2tsv.cx: a driving consumer of the upper library -- read a file block by
+   block into the string builder, then split each line into comma fields and
+   rebuild the row tab-separated with the same builder.  It wires text.build and
+   text.text into one coherent text pipeline (the Node csv/tsv shape), with no
+   bare libc and no mem.grow in scope (the builder owns its buffer).
+   usage: sh ./unisacc.com tools/csv2tsv.cx -- IN.csv OUT.tsv */
+static int bad;
+static void ok(int c, const char *n) { printf("%s\t%s\n", c ? "PASS" : "FAIL", n); if (!c) bad = 1; }
+int main(int argc, char **argv) {
+    sb *in; long rn = 0;
+    int fd;
+    if (argc != 3) { fputs("usage: -- IN.csv OUT.tsv\n", stderr); return 2; }
+    in = sb_new();
+    if (!in) return 1;
+    fd = sy_open_read(argv[1]);
+    if (fd < 0) { sb_free(in); return 1; }
+    {
+        char buf[4096]; long k;
+        while ((k = sy_read(fd, buf, sizeof buf)) > 0)
+            if (sb_putn(in, buf, k)) { sy_close(fd); sb_free(in); return 1; }
+        if (k < 0) { sy_close(fd); sb_free(in); return 1; }
+    }
+    sy_close(fd);
+    rn = sb_len(in);
+    {
+        const char *s = sb_cstr(in);
+        sb *out = sb_new();
+        long line_start = 0, i;
+        if (!out) { sb_free(in); return 1; }
+        for (i = 0; i <= rn; i++) {
+            if (i == rn || s[i] == '\n') {
+                long nl = i - line_start;
+                long nf = tx_fields(s + line_start, nl, ',');
+                long f;
+                for (f = 0; f < nf; f++) {
+                    long off, len;
+                    if (f) sb_puts(out, "\t");
+                    if (tx_field(s + line_start, nl, ',', f, &off, &len) == 0)
+                        sb_putn(out, s + line_start + off, len);
+                }
+                sb_puts(out, "\n");
+                line_start = i + 1;
+            }
+        }
+        {
+            const char *o = sb_cstr(out);
+            if (!o || sy_write_all(1, o, sb_len(out))) bad = 1;
+        }
+        sb_free(out);
+    }
+    sb_free(in);
+    printf("CSV2TSV\tfailed=%d\n", bad);
+    return bad;
+}
