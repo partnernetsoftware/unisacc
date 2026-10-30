@@ -140,3 +140,33 @@ sh ./unisacc.com tools/refactor.cx -- apply CANDIDATES.tsv JOBS VERIFY...
   - tools/cx0.cx、tools/check-cx-entry.cx 报 `cc interop call signature` 未覆盖；
   - tools/hostseed-step.cx 报 `tape domain: unknown opcode`。
   这些文件改走 `--verify-from tests/batches.tsv`。
+
+## 第 5 轮结果（2026-10-30）
+
+- **工具：**
+  - 规则增加第 8 列 `context`，取值 `any` 或 `truth`（93e9ef0aa6）。`truth` 只接受调用值只被当作真假用的位置：
+    - `if (…)` / `while (…)` 的整个条件；
+    - `&&` / `||` 的操作数，后面紧跟 `)` `&&` `||` `?` `;` `,` `:` 之一。
+    - 不接受：比较、赋值、传参、前面带 `!`、后面接位运算。
+  - 新增规则 tools/refactor/strcmp-truth.tsv：`strcmp(a,b)` 改为 `!tx_eq(a, b, 1L << 20)`。
+- **回归检查：** 新增 tools/check-refactor.cx，登记为 batch `refactor-tool`（c779c27eed）。run-batch 实跑 PASS。内容：
+  - 夹具 truth-cases.txt 里，truth 规则恰好取中 5 处、拒绝 9 处；`!` 规则只取第 11 行。
+  - apply 在 out/ 副本上：检查输出改变时逐字节还原，返回 rc 1；输出不变时保留改动。
+- **驱动：** 每轮跑完后把 SKIP 和 REVERT 的文件移出目标名单，它们不再占用 `--range` 的名额。
+- **结果：** 128 个目标文件中 119 个改动，0 个 REVERT。分两批提交：tests 50 个（d70883dc51）、tools 69 个（90a09608f9）。
+  - 421 个改动行全部是 `!tx_eq(` 或新增的 use，其中新增 use 17 行。
+  - cxraw 检查 ok。
+- **SKIP 9 个：** 都是改前编译就失败。比第 3 轮多出两个：tools/check-model-decode-real.cx、tools/core-transition-shapes.cx。
+- **行为复验：** 抽跑 6 个改动文件所在的批次，5 个 PASS：cx-bounded、resources、ri-image-single、negative-diagnostics、formats-objects。
+  - cx-unit-graph 失败，3 项报 `link: multiple definitions of mid_value/leaf_value`。
+  - 在改前的快照 d70883dc51^ 上，用 git archive 导出到 out/rb-base 再跑，失败输出完全相同，说明是已装产品原有的问题，不是这一轮引入的。
+
+## 第 6 轮：折叠成 tx_eqz（进行中）
+
+- grk 已提交 `tx_eqz`/`tx_prefixz`（d58fafcbcc）。
+- 工具：规则增加第 9 列 `where`，格式 `$N=TEXT`，要求第 N 个参数去掉首尾空白后恰好等于 TEXT（ec7496cfb9）。check-refactor 增加到 7 项，覆盖这一列：
+  - 只取 `1L << 20` 这一种写法；
+  - 不取 cap 为 8 的调用；
+  - 不取写成 `1L<<20` 的调用。
+- 规则 eqz-fold.tsv：`tx_eq($1, $2, 1L << 20)` 改为 `tx_eqz($1, $2)`。二者完全等价，因为 `tx_eqz` 本身就是 `tx_eq(a, b, TX_ZCAP)`，而 `TX_ZCAP` 等于 `1 << 20`。
+- 范围：185 个文件，共 1755 处。
