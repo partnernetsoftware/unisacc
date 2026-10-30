@@ -1,0 +1,129 @@
+/* runcache.cx -- run-cache contract (exec/c/runreuse.h USE33/USE34, its CX port src/runcache.cx).
+   A cached -run must give the same stdout as a fresh compile, for every change the key or the include
+   receipts are meant to see.  Uses a private cache through UNISACC_E3CACHE, so the user's cache is not
+   read or written.  A hit is shown by the cache files keeping their inodes (a store renames a new file
+   in); hit timing is reported, never asserted.
+   usage, from the repo root:
+     sh ./unisacc.com tests/runcache.cx -- NEW_OUT [COMPILER WORDS...]
+   NEW_OUT must not exist.  COMPILER defaults to `sh ./unisacc.com`; pass a candidate the same way.
+   rc 0 all PASS, 1 some FAIL, 2 usage or setup trouble. */
+#pragma unisa use text.text
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#define CAP 65536
+
+static int checks, failed;
+static char work[2048], cache[2200], cache_off[2200], src[2200], inc1[2200], inc2[2200], h1[2200], h2[2200];
+static char *compiler[16];
+static int ncompiler;
+
+static void die(const char *s) { fprintf(stderr, "runcache-test: %s\n", s); exit(2); }
+static void ck(int yes, const char *name) {
+    checks++;
+    if (!yes) failed++;
+    printf("%s\truncache.%s\n", yes ? "PASS" : "FAIL", name);
+}
+static void put(const char *path, const char *text) {
+    if (cx_write(path, text, (size_t)tx_len(text, CAP))) die("write");
+}
+static void path(char *out, const char *leaf) {
+    if (cx_fmt(out, 2200, "%s/%s", work, leaf)) die("path-bound");
+}
+
+/* Every cache file's name and inode, in name order: equal before and after means nothing was stored. */
+typedef struct { char *p; long n; } Print;
+static int print_one(const char *file, void *ctx) {
+    Print *f = ctx;
+    sy_stat_t st;
+    char row[2400];
+    long k;
+    if (sy_stat(file, &st)) return -1;
+    if (cx_fmt(row, sizeof row, "%s %ld\n", file, st.ino)) return -1;
+    k = tx_len(row, sizeof row);
+    if (f->n + k >= CAP) return -1;
+    tx_copy(f->p + f->n, CAP - f->n, row, k);
+    f->n += k;
+    return 0;
+}
+static char prints[8][CAP];
+static const char *fingerprint(int slot) {
+    Print f = {prints[slot], 0};
+    prints[slot][0] = 0;
+    if (cx_walk(cache, print_one, &f)) die("cache-walk");
+    return prints[slot];
+}
+static long files(void) {
+    const char *p = fingerprint(7);
+    long n = 0, i;
+    for (i = 0; p[i]; i++) if (p[i] == '\n') n++;
+    return n;
+}
+
+/* -run main.c with ARG; *ms is the wall time.  Returns stdout (process lifetime). */
+static char *run(const char *arg, int off, long *ms) {
+    char *v[32], env[2300], *out = 0;
+    size_t n = 0;
+    int k = 0, i, rc;
+    long t0;
+    v[k++] = "env";
+    if (cx_fmt(env, sizeof env, "UNISACC_E3CACHE=%s", off ? cache_off : cache)) die("env-bound");
+    v[k++] = env;
+    if (off) v[k++] = "UNISACC_RUN_CACHE=0";
+    for (i = 0; i < ncompiler; i++) v[k++] = compiler[i];
+    v[k++] = "-I"; v[k++] = inc1; v[k++] = "-I"; v[k++] = inc2;
+    v[k++] = src; v[k++] = "--"; v[k++] = (char *)arg; v[k] = 0;
+    t0 = sy_now_ms();
+    rc = cx_runv_timeout(v, 55, &out, &n);
+    *ms = sy_now_ms() - t0;
+    if (rc) { fprintf(stderr, "runcache-test: compiler rc %d\n", rc); return ""; }
+    return out ? out : "";
+}
+static int same(const char *a, const char *b) { return tx_eq(a, b, CAP); }
+
+static const char *prog =
+    "#include \"h.h\"\n"
+    "int main(int c, char **v) { printf(\"%d %s\\n\", VAL, c > 1 ? v[1] : \"-\"); return 0; }\n";
+static const char *prog2 =
+    "#include \"h.h\"\n"
+    "int main(int c, char **v) { printf(\"%d %s\\n\", VAL + 1, c > 1 ? v[1] : \"-\"); return 0; }\n";
+
+int main(int argc, char **argv) {
+    long cold, hit, ms;
+    char before[CAP];
+    int i, made;
+    if (argc < 2 || argc > 2 + 15) die("usage: NEW_OUT [COMPILER WORDS...]");
+    if (cx_fmt(work, sizeof work, "%s", argv[1])) die("path-bound");
+    if (argc == 2) { compiler[0] = "sh"; compiler[1] = "./unisacc.com"; ncompiler = 2; }
+    else for (i = 2; i < argc; i++) compiler[ncompiler++] = argv[i];
+    made = sy_mkdir(work, 0700);
+    if (made) die(made == -EEXIST ? "NEW_OUT exists" : "mkdir NEW_OUT");
+    path(cache, "cache"); path(cache_off, "cache-off"); path(src, "src");
+    path(inc1, "inc1"); path(inc2, "inc2"); path(h1, "inc1/h.h"); path(h2, "inc2/h.h");
+    if (sy_mkdir(src, 0700) || sy_mkdir(inc1, 0700) || sy_mkdir(inc2, 0700)) die("mkdir");
+    path(src, "src/main.c");
+    put(src, prog);
+    put(h2, "#define VAL 1\n");
+
+    ck(same(run("x", 0, &cold), "1 x\n"), "cold-output");
+    ck(files() > 0, "cold-stores");
+    tx_copy(before, CAP, fingerprint(0), tx_len(fingerprint(0), CAP) + 1);
+    ck(same(run("x", 0, &hit), "1 x\n"), "hit-output");
+    ck(same(before, fingerprint(1)), "hit-stores-nothing");
+    ck(same(run("y", 0, &ms), "1 y\n"), "argv-rebound-on-hit");
+    ck(same(before, fingerprint(1)), "argv-not-in-key");
+
+    put(h1, "#define VAL 9\n");                      /* was absent; now earlier on the -I path */
+    ck(same(run("x", 0, &ms), "9 x\n"), "absent-include-created");
+    ck(!same(before, fingerprint(1)), "absent-include-restores");
+    if (cx_remove(h1)) die("remove");
+    put(h2, "#define VAL 5\n");
+    ck(same(run("x", 0, &ms), "5 x\n"), "present-include-changed");
+    put(src, prog2);
+    ck(same(run("x", 0, &ms), "6 x\n"), "source-changed");
+    ck(same(run("z", 1, &ms), "6 z\n"), "disabled-output");
+    ck(sy_exists(cache_off) == 0, "disabled-makes-no-cache");
+
+    printf("TIMING\tcold_ms=%ld\thit_ms=%ld\tphases=UNMEASURED\n", cold, hit);
+    printf("RUNCACHE\tassertions=%d\tfailed=%d\n", checks, failed);
+    return failed ? 1 : 0;
+}
