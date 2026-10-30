@@ -305,3 +305,6 @@
 - release/tools/unsigned_receipt.py
 - release/tools/whyrerun.py
 - research/tools/c38-decomp.py
+- release/macosbundle.py
+- release/tools/apple-sign.sh
+- release/tools/release_prep.sh
