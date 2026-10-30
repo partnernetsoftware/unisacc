@@ -37,6 +37,15 @@ int sy_fstat(int fd, sy_stat_t *out) {
     return 0;
 }
 
+/* Byte size of FD when it is a regular file. The size (0 is an empty file),
+   or -1 when fstat fails or FD is not a regular file. Callers that only need
+   this number do not copy sy_stat_t. */
+long sy_reg_size(int fd) {
+    sy_stat_t st;
+    if (sy_fstat(fd, &st) != 0 || st.kind != 'f' || st.size < 0) return -1;
+    return st.size;
+}
+
 /* Open PATH with the prelude's O_* FLAGS and MODE (used with O_CREAT), retrying EINTR. The fd, or -errno. */
 int sy_open(const char *path, int flags, int mode) {
     int fd;
@@ -302,6 +311,32 @@ static int sy_symlink_os(const char *target, const char *link) {
 int sy_symlink(const char *target, const char *link) {
     if (!target || !target[0] || !link || !link[0]) return -EINVAL;
     return sy_symlink_os(target, link);
+}
+
+/* The prelude readlink is a POSIX system call; Windows has none here. */
+static long sy_readlink_os(const char *path, char *dst, long cap) {
+#ifdef _WIN32
+    (void)path;
+    (void)dst;
+    (void)cap;
+    return -ENOSYS;
+#else
+    long n;
+    errno = 0;
+    n = readlink(path, dst, (size_t)cap);
+    if (n < 0) return sy_fail();
+    return n;
+#endif
+}
+
+/* Read the target PATH of the symbolic link PATH into DST (Rust std::fs::read_link).
+   The target is written without a terminator when it exactly fills CAP; the caller
+   may NUL-terminate at the returned length when it is < CAP.  Returns the target
+   byte length, or -errno: -EINVAL for an empty/null argument, -EINVAL for a null
+   DST or non-positive CAP, -ENOSYS on Windows. */
+long sy_readlink(const char *path, char *dst, long cap) {
+    if (!path || !path[0] || !dst || cap <= 0) return -EINVAL;
+    return sy_readlink_os(path, dst, cap);
 }
 
 /* Same Windows limit as sy_lstat: do not call the prelude lstat. */
