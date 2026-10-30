@@ -1,20 +1,21 @@
-/* tools/ratchets.cx -- run the four repo ratchets at once and show only what is wrong.
+/* tools/ratchets.cx -- run the five repo ratchets at once and show only what is wrong.
  *
  *   sh ./unisacc.com tools/ratchets.cx [-- --only PATH-PREFIX]
  *
- * Starts tests/cxraw.cx, tests/cxinclude.cx, tests/cxapis.cx and tests/cxtrunc.cx with --check in parallel
+ * Starts tests/cxraw.cx, tests/cxinclude.cx, tests/cxapis.cx, tests/cxtrunc.cx and tests/cxlibc.cx with --check in parallel
  * (each under tools/bound 55) and prints, per ratchet, one line
  *   RATCHET<TAB>name<TAB>ok|FAIL|ERROR<TAB>its summary line
  * followed by the rows that make it fail (a row naming a file above its baseline or with no row), but not the
  * "stale row" or "below baseline" notes.  With --only PREFIX, only offending rows whose file starts with PREFIX
  * are printed (the status still covers the whole tree).  Ends with RATCHETS<TAB>ok=N<TAB>fail=M<TAB>elapsed_ms=T
- * and exits 0 only when all four are ok.  One call instead of four serial ones (about 4 x 10 s). */
+ * and exits 0 only when all five are ok.  One call instead of five serial ones (about 4 x 10 s, plus cxlibc's symindex query). */
 #pragma unisa use sys.proc
 #pragma unisa use sys.fs
 #pragma unisa use sys.time
 #pragma unisa use text.text
 #pragma unisa use mem.heap
 
+#define NRK 5
 typedef struct { const char *name; int pid, ofd, efd; char *out; long n; int rc; } Rk;
 
 static void slurp(int fd, char **buf, long *n) {
@@ -40,7 +41,7 @@ static int offending(const char *l, long n, const char *only) {
 }
 
 int main(int argc, char **argv) {
-    static Rk rk[4] = {{"cxraw"}, {"cxinclude"}, {"cxapis"}, {"cxtrunc"}};
+    static Rk rk[NRK] = {{"cxraw"}, {"cxinclude"}, {"cxapis"}, {"cxtrunc"}, {"cxlibc"}};
     const char *only = 0; long t0 = sy_now_ms(); int k, ok = 0, fail = 0;
     if ((argc == 3 || argc == 5) && tx_eqz(argv[1], "--rows")) {   /* --rows SAVED [--only P]: the filter alone, on a saved ratchet output */
         size_t n; char *b = cx_read(argv[2], &n); long at = 0;
@@ -55,7 +56,7 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && tx_eqz(argv[1], "--only")) only = argv[2];
     else if (argc != 1) { fprintf(stderr, "usage: tools/ratchets.cx [--only PATH-PREFIX | --rows SAVED [--only PATH-PREFIX]]\n"); return 2; }
-    for (k = 0; k < 4; k++) {
+    for (k = 0; k < NRK; k++) {
         char script[64];
         if (cx_fmt(script, sizeof script, "tests/%s.cx", rk[k].name)) return 2;
         {   char *v[] = {"./tools/bound", "55", "sh", "./unisacc.com", script, "--", "--check", 0};
@@ -63,13 +64,13 @@ int main(int argc, char **argv) {
         }
         if (rk[k].pid < 0) { fprintf(stderr, "ratchets: cannot start %s\n", rk[k].name); return 2; }
     }
-    for (k = 0; k < 4; k++) {
+    for (k = 0; k < NRK; k++) {
         int ex = 0, code = 0, sig = 0;
         slurp(rk[k].ofd, &rk[k].out, &rk[k].n);
         sy_close(rk[k].ofd);
         rk[k].rc = sy_wait_status(rk[k].pid, 0, &ex, &code, &sig) == rk[k].pid && ex ? code : -1;
     }
-    for (k = 0; k < 4; k++) {
+    for (k = 0; k < NRK; k++) {
         const char *o = rk[k].out ? rk[k].out : ""; long at = 0, summary = -1, sn = 0;
         int isok;
         while (at < rk[k].n) {   /* the summary is the line with " ok: " or " FAIL: " */
