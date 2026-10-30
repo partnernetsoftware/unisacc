@@ -5,6 +5,7 @@
  * No ambient header roots, manual resource manifest or old compiler fallback. */
 #pragma unisa use cx0.bundle
 #pragma unisa use runtime.process
+#pragma unisa use text.text
 typedef struct {char *target,*headers,*streams,*e2,*stage,*product,*pipeline,*runtime,*runtime_sha,*interface_sha,*roots[16];int nr;} Profile;
 static long long deadline;
 static size_t resource_bytes;
@@ -37,13 +38,13 @@ static int hash_shape(const char *p){if(!p||strlen(p)!=64)return 0;for(int i=0;i
 static Profile profile(char *text,size_t n){
  Profile p={0};if(n>65536||memchr(text,0,n)||n<10||memcmp(text,"CXDRIVER1\n",10))die("profile-version-or-size",0);char *line=text+10;
  while(*line){char *end=strchr(line,'\n');if(!end)die("profile-final-newline",0);*end=0;if(*line&&*line!='#'){char *value=strchr(line,'\t');if(!value)die("profile-fields",line);*value++=0;if(!*value||strpbrk(value,"\r\t"))die("profile-fields",line);
-  if(!strcmp(line,"Target"))singleton(&p.target,value);else if(!strcmp(line,"HeaderRoot"))singleton(&p.headers,value);else if(!strcmp(line,"Streams"))singleton(&p.streams,value);else if(!strcmp(line,"E2Adapter"))singleton(&p.e2,value);else if(!strcmp(line,"StageAdapter"))singleton(&p.stage,value);else if(!strcmp(line,"Product"))singleton(&p.product,value);else if(!strcmp(line,"Pipeline"))singleton(&p.pipeline,value);else if(!strcmp(line,"RuntimeProvider"))singleton(&p.runtime,value);else if(!strcmp(line,"RuntimeProviderSHA"))singleton(&p.runtime_sha,value);else if(!strcmp(line,"RuntimeDeclarationsSHA"))singleton(&p.interface_sha,value);else if(!strcmp(line,"ResourceRoot")){if(p.nr==16)die("resource-root-count",0);p.roots[p.nr++]=value;}else die("unknown-profile-field",line);
+  if(tx_eqz(line, "Target"))singleton(&p.target,value);else if(tx_eqz(line, "HeaderRoot"))singleton(&p.headers,value);else if(tx_eqz(line, "Streams"))singleton(&p.streams,value);else if(tx_eqz(line, "E2Adapter"))singleton(&p.e2,value);else if(tx_eqz(line, "StageAdapter"))singleton(&p.stage,value);else if(tx_eqz(line, "Product"))singleton(&p.product,value);else if(tx_eqz(line, "Pipeline"))singleton(&p.pipeline,value);else if(tx_eqz(line, "RuntimeProvider"))singleton(&p.runtime,value);else if(tx_eqz(line, "RuntimeProviderSHA"))singleton(&p.runtime_sha,value);else if(tx_eqz(line, "RuntimeDeclarationsSHA"))singleton(&p.interface_sha,value);else if(tx_eqz(line, "ResourceRoot")){if(p.nr==16)die("resource-root-count",0);p.roots[p.nr++]=value;}else die("unknown-profile-field",line);
  }line=end+1;}
  if(!p.target||!p.headers||!p.streams||!p.e2||!p.stage||!p.product||!p.pipeline)die("missing-profile-field",0);
  if((p.runtime_sha||p.interface_sha)&&(!p.runtime||!hash_shape(p.runtime_sha)||!hash_shape(p.interface_sha)))die("runtime-binding-requires-provider-and-two-sha256",0);
- if(strcmp(p.target,"lnx/x86_64"))die("unsupported-target",p.target);
+ if(!tx_eqz(p.target, "lnx/x86_64"))die("unsupported-target",p.target);
  p.headers=resolve(p.headers,1);p.streams=resolve(p.streams,1);p.e2=resolve(p.e2,0);p.stage=resolve(p.stage,0);p.product=resolve(p.product,0);p.pipeline=resolve(p.pipeline,0);
- if(p.runtime){p.runtime=resolve(p.runtime,0);size_t len=strlen(p.runtime);if(len<2||strcmp(p.runtime+len-2,".c"))die("runtime-provider-requires-c-boundary",p.runtime);}
+ if(p.runtime){p.runtime=resolve(p.runtime,0);size_t len=strlen(p.runtime);if(len<2||!tx_eqz(p.runtime+len-2, ".c"))die("runtime-provider-requires-c-boundary",p.runtime);}
  for(int i=0;i<p.nr;i++){p.roots[i]=resolve(p.roots[i],1);for(int j=0;j<i;j++)if(under(p.roots[i],p.roots[j])||under(p.roots[j],p.roots[i]))die("overlapping-resource-roots",p.roots[i]);}
  return p;
 }
@@ -53,13 +54,13 @@ static void walk(const char *base,const char *relative,int kind,int depth){
  if(lstat(absolute,&st))die("resource-stat",absolute);
  if(S_ISDIR(st.st_mode)){
   DIR *d=opendir(absolute);if(!d)die("resource-directory-open",absolute);char **names=calloc(2048,sizeof *names);if(!names)die("allocation",0);int count=0;struct dirent *e;errno=0;
-  while((e=readdir(d))){if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;if(count==2048||resource_entries++==4096)die("directory-entry-count",absolute);if(strpbrk(e->d_name,"\t\r\n"))die("resource-name",e->d_name);names[count++]=copy(e->d_name);errno=0;}
+  while((e=readdir(d))){if(tx_eqz(e->d_name, ".")||tx_eqz(e->d_name, ".."))continue;if(count==2048||resource_entries++==4096)die("directory-entry-count",absolute);if(strpbrk(e->d_name,"\t\r\n"))die("resource-name",e->d_name);names[count++]=copy(e->d_name);errno=0;}
   if(errno)die("resource-directory-read",absolute);if(closedir(d))die("resource-directory-close",absolute);qsort(names,(size_t)count,sizeof *names,compare);
   for(int i=0;i<count;i++){char next[4400];if(*relative)join(next,relative,names[i]);else { if (cx_fmt(next, sizeof next, "%s",names[i])) { fprintf(stderr, "cx-driver: text too long for next\n"); exit(2); } }walk(base,next,kind,depth+1);free(names[i]);}free(names);return;
  }
  if(!S_ISREG(st.st_mode))die("resource-nonregular-or-symlink",absolute);
  if(resource_count==2048)die("resource-count",absolute);const char *logical=kind==1?relative:absolute;if(!*logical||strlen(logical)>4095)die("resource-name",absolute);
- for(int i=0;i<resource_count;i++)if(resources[i].kind==kind&&!strcmp(resources[i].name,logical))die("duplicate-resource",logical);
+ for(int i=0;i<resource_count;i++)if(resources[i].kind==kind&&tx_eqz(resources[i].name, logical))die("duplicate-resource",logical);
  size_t n;char *bytes=regular(absolute,16777216,&n);if(n>33554432-resource_bytes)die("resource-total-bytes",absolute);resource_bytes+=n;
  cxb_input *r=&resources[resource_count++];r->kind=kind;r->name=copy(logical);r->data=bytes;r->bytes=n;
 }
@@ -74,34 +75,34 @@ static int seal_bounded(char **sources,int count,const char *interfaces,const cx
 static void runtime_binding(Profile *p,const char *packet){
  if(!p->runtime_sha)return;size_t n;char *data=regular(packet,67108864,&n),why[256],hash[65];cxb_bundle b={0};
  if(cxb_read(data,n,&b,why,sizeof why))die("runtime-binding-bundle",why);free(data);int provider=0,manifest=-1;int seen[4096]={0};
- for(int i=0;i<b.unit_count;i++){cxb_unit *u=b.units+i;if(u->name_bytes==strlen(p->runtime)&&!memcmp(u->name,p->runtime,u->name_bytes)){cx_sha256_hex(u->source,u->source_bytes,hash);if(strcmp(hash,p->runtime_sha))die("runtime-provider-sha-mismatch",p->runtime);provider++;}}
+ for(int i=0;i<b.unit_count;i++){cxb_unit *u=b.units+i;if(u->name_bytes==strlen(p->runtime)&&!memcmp(u->name,p->runtime,u->name_bytes)){cx_sha256_hex(u->source,u->source_bytes,hash);if(!tx_eqz(hash, p->runtime_sha))die("runtime-provider-sha-mismatch",p->runtime);provider++;}}
  if(provider!=1)die("runtime-provider-binding-count",0);
  for(int i=0;i<b.resource_count;i++){cxb_resource *r=b.resources+i;if(r->kind==1&&r->name_bytes==24&&!memcmp(r->name,"declaration-identity.tsv",24))manifest=i;}
- if(manifest<0)die("runtime-declarations-missing",0);cxb_resource *m=b.resources+manifest;cx_sha256_hex(m->data,m->bytes,hash);if(strcmp(hash,p->interface_sha))die("runtime-declarations-sha-mismatch",0);
+ if(manifest<0)die("runtime-declarations-missing",0);cxb_resource *m=b.resources+manifest;cx_sha256_hex(m->data,m->bytes,hash);if(!tx_eqz(hash, p->interface_sha))die("runtime-declarations-sha-mismatch",0);
  if(!m->bytes||m->bytes>1048576||memchr(m->data,0,m->bytes)||m->data[m->bytes-1]!='\n')die("runtime-declarations-format",0);
  size_t at=0;int entries=0;while(at<m->bytes){size_t end=at;while(end<m->bytes&&m->data[end]!='\n')end++;if(end-at<68||memcmp(m->data+at,"I\t",2))die("runtime-declarations-format",0);size_t tab=at+2;while(tab<end&&m->data[tab]!='\t')tab++;size_t nn=tab-at-2;if(!nn||nn>4095||end-tab!=65)die("runtime-declarations-format",0);char want[65];memcpy(want,m->data+tab+1,64);want[64]=0;if(!hash_shape(want))die("runtime-declarations-format",0);int found=-1;
   for(int i=0;i<b.resource_count;i++){cxb_resource *r=b.resources+i;if(r->kind==1&&r->name_bytes==nn&&!memcmp(r->name,m->data+at+2,nn))found=i;}
-  if(found<0)die("runtime-declaration-header-missing",0);if(seen[found]++)die("runtime-declaration-duplicate",0);cxb_resource *r=b.resources+found;cx_sha256_hex(r->data,r->bytes,hash);if(strcmp(hash,want))die("runtime-declaration-header-sha-mismatch",0);entries++;at=end+1;
+  if(found<0)die("runtime-declaration-header-missing",0);if(seen[found]++)die("runtime-declaration-duplicate",0);cxb_resource *r=b.resources+found;cx_sha256_hex(r->data,r->bytes,hash);if(!tx_eqz(hash, want))die("runtime-declaration-header-sha-mismatch",0);entries++;at=end+1;
  }
  if(!entries)die("runtime-declarations-empty",0);
- for(int i=0;i<b.resource_count;i++){cxb_resource *r=b.resources+i;if(r->kind!=1)continue;if(r->name_bytes==9&&!memcmp(r->name,"runtime.c",9)){cx_sha256_hex(r->data,r->bytes,hash);if(strcmp(hash,p->runtime_sha))die("runtime-provider-resource-sha-mismatch",0);}if(seen[i])continue;const char *allowed[]={"declaration-identity.tsv","source-identity.tsv","runtime-probe.c","runtime.c"};int ok=0;for(int j=0;j<4;j++)if(r->name_bytes==strlen(allowed[j])&&!memcmp(r->name,allowed[j],r->name_bytes))ok=1;if(!ok)die("runtime-declaration-unlisted-header",0);}
+ for(int i=0;i<b.resource_count;i++){cxb_resource *r=b.resources+i;if(r->kind!=1)continue;if(r->name_bytes==9&&!memcmp(r->name,"runtime.c",9)){cx_sha256_hex(r->data,r->bytes,hash);if(!tx_eqz(hash, p->runtime_sha))die("runtime-provider-resource-sha-mismatch",0);}if(seen[i])continue;const char *allowed[]={"declaration-identity.tsv","source-identity.tsv","runtime-probe.c","runtime.c"};int ok=0;for(int j=0;j<4;j++)if(r->name_bytes==strlen(allowed[j])&&!memcmp(r->name,allowed[j],r->name_bytes))ok=1;if(!ok)die("runtime-declaration-unlisted-header",0);}
  cxb_clear(&b);
 }
 int main(int argc,char **argv){
  deadline=now()+45000000000LL;char *profile_path=0,*output=0,*sources[64];int ns=0,emit=0,argstart=argc;
  for(int i=1;i<argc;i++){
-  if(!strcmp(argv[i],"--")){argstart=i+1;break;}
-  if(!strcmp(argv[i],"--profile")||!strcmp(argv[i],"--out")){int isprofile=!strcmp(argv[i],"--profile");if(++i==argc)die("option-value-required",argv[i-1]);if(isprofile)singleton(&profile_path,argv[i]);else singleton(&output,argv[i]);}
-  else if(!strcmp(argv[i],"--emit")){if(emit)die("duplicate-emit",0);emit=1;}
+  if(tx_eqz(argv[i], "--")){argstart=i+1;break;}
+  if(tx_eqz(argv[i], "--profile")||tx_eqz(argv[i], "--out")){int isprofile=!strcmp(argv[i],"--profile");if(++i==argc)die("option-value-required",argv[i-1]);if(isprofile)singleton(&profile_path,argv[i]);else singleton(&output,argv[i]);}
+  else if(tx_eqz(argv[i], "--emit")){if(emit)die("duplicate-emit",0);emit=1;}
   else if(argv[i][0]=='-')die("unknown-option",argv[i]);else {if(ns==64)die("source-count",0);sources[ns++]=argv[i];}
  }
  if(!profile_path||!output||!ns||(emit&&argstart<argc))die("usage","--profile FILE --out NEW_ABS_OUT [--emit] SOURCE... [-- PROGRAM_ARGS...]");
  if(output[0]!='/'||strlen(output)>400||strpbrk(output,"\t\r\n"))die("absolute-output-path",output);
- char parent[4096],out[4400];{ if (cx_fmt(parent, sizeof parent, "%s",output)) { fprintf(stderr, "cx-driver: text too long for parent\n"); exit(2); } }char *slash=strrchr(parent,'/');if(!slash||!slash[1]||!strcmp(slash+1,".")||!strcmp(slash+1,".."))die("output-name",output);char *name=copy(slash+1);if(slash==parent)slash[1]=0;else *slash=0;char realparent[4096];if(!realpath(parent,realparent))die("output-parent",parent);join(out,realparent,name);free(name);
+ char parent[4096],out[4400];{ if (cx_fmt(parent, sizeof parent, "%s",output)) { fprintf(stderr, "cx-driver: text too long for parent\n"); exit(2); } }char *slash=strrchr(parent,'/');if(!slash||!slash[1]||tx_eqz(slash+1, ".")||tx_eqz(slash+1, ".."))die("output-name",output);char *name=copy(slash+1);if(slash==parent)slash[1]=0;else *slash=0;char realparent[4096];if(!realpath(parent,realparent))die("output-parent",parent);join(out,realparent,name);free(name);
  size_t pn;char *raw=regular(profile_path,65536,&pn),*parsed=malloc(pn+1);if(!parsed)die("allocation",0);{ void *cx_kept = memcpy(parsed,raw,pn+1); (void)cx_kept; }Profile p=profile(parsed,pn);
  if(under(out,p.headers))die("output-inside-input-root",p.headers);for(int i=0;i<p.nr;i++)if(under(out,p.roots[i]))die("output-inside-input-root",p.roots[i]);
  size_t total=0;for(int i=0;i<ns;i++){sources[i]=resolve(sources[i],0);size_t n;char *s=regular(sources[i],4194304,&n);free(s);if(n>16777216-total)die("source-total-bytes",sources[i]);total+=n;}
- if(p.runtime){if(ns==64)die("runtime-provider-unit-limit",0);for(int i=0;i<ns;i++)if(!strcmp(sources[i],p.runtime))die("duplicate-runtime-provider",p.runtime);size_t rn;char *rb=regular(p.runtime,4194304,&rn);free(rb);if(rn>16777216-total)die("source-total-bytes",p.runtime);sources[ns++]=copy(p.runtime);}
+ if(p.runtime){if(ns==64)die("runtime-provider-unit-limit",0);for(int i=0;i<ns;i++)if(tx_eqz(sources[i], p.runtime))die("duplicate-runtime-provider",p.runtime);size_t rn;char *rb=regular(p.runtime,4194304,&rn);free(rb);if(rn>16777216-total)die("source-total-bytes",p.runtime);sources[ns++]=copy(p.runtime);}
  if(mkdir(out,0700))die("exclusive-output-directory",out);char file[4400],interfaces[4400],packet[4400],pipeline[4400],runout[4400];join(file,out,"profile.tsv");save(file,raw,pn);free(raw);
  join(interfaces,out,"interfaces");if(mkdir(interfaces,0700))die("interface-directory",interfaces);
  walk(p.headers,"",1,0);for(int i=0;i<p.nr;i++)walk(p.roots[i],"",2,0);
