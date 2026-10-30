@@ -11,6 +11,9 @@
      mg_reserve(b, n)    ensure cap >= n; 0, or -1 (b unchanged)
      mg_push(b, c)       append one byte; 0, or -1
      mg_append(b, p, n)  append n bytes; 0, or -1
+     mg_pop(b, &c)       remove the last byte into c; 0, or -1 (empty/null)
+     mg_truncate(b, n)   shorten to n bytes (no shrink); 0, or -1
+     mg_clear(b)         drop every byte, keep the block (Vec::clear); 0, or -1
      mg_free(b)          free the block and zero the struct
      mg_move(dst, src)    transfer ownership src -> dst; src zeroed (Rust move)
      mg_take(b, &p, &n, &c) hand the block out; b zeroed (Vec::into_raw_parts)
@@ -81,6 +84,34 @@ int mg_move(mg_buf *dst, mg_buf *src) {
     if (dst == src) return 0;
     *dst = *src;
     mg_init(src);
+    return 0;
+}
+
+/* Drop every byte but keep the block (Vec::clear).  len goes to 0 and the
+   allocation is retained, so a grow/clear/regrow cycle does not reallocate.
+   O(1).  0, or -1 when b is null. */
+int mg_clear(mg_buf *b) {
+    if (!b) return -1;
+    b->len = 0;
+    return 0;
+}
+
+/* Remove the last byte into *c (Vec::pop).  The byte is returned by value, not
+   pointer, so nothing dangles; len decreases by one and the block is untouched
+   (no shrink).  0, or -1 when b is null, or empty.  O(1), no allocation. */
+int mg_pop(mg_buf *b, int *c) {
+    if (!b || !c || b->len <= 0) return -1;
+    *c = b->data[b->len - 1];
+    b->len = b->len - 1;
+    return 0;
+}
+
+/* Shorten to n bytes (Vec::truncate).  Bytes after n are dropped; n < 0 or n >
+   len is refused and the buffer is unchanged.  The block is not shrunk, so this
+   is O(1).  0, or -1. */
+int mg_truncate(mg_buf *b, long n) {
+    if (!b || n < 0 || n > b->len) return -1;
+    b->len = n;
     return 0;
 }
 
