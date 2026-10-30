@@ -1,0 +1,195 @@
+/* csih-ape.cx -- build csih.com, one APE file for six targets (apps/csih/docs/csih-com.md).
+   From the repo root, one step per call (each slice compiles csih in ~45-50s):
+     sh ./unisacc.com tools/csih-ape.cx -- slice lnx/x86_64     (then lnx/arm64, osx/x86_64, osx/arm64, win/x86_64)
+     sh ./unisacc.com tools/csih-ape.cx -- pack                 -> out/csih-ape/csih.com + manifest.tsv
+     sh ./unisacc.com tools/csih-ape.cx -- verify               the files, their sha256 and today's sources agree
+   Slices: apps/csih/csih.cx with -b TARGET for the four Unix targets; win/x86_64 is
+   apps/csih/tools/win-unsupported.cx for now (csih's TUI is POSIX), and win/arm64 runs that PE.
+   Each slice records the csih source digest (apps/csih/csih.sh digest) it was built from;
+   pack refuses slices from different sources, verify refuses when today's sources differ.
+   An L3 tool: no #include, no direct libc call (cx/sys, cx/text, the cx_* prelude). */
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+
+#define OUT "out/csih-ape"
+#define NS 5
+
+static const char *const targets[NS] = { "win/x86_64", "lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64" };
+static const char *const files[NS] = { "csih_win64-x86.exe", "csih_lnx64-x86.bin", "csih_lnx64-arm.bin",
+                                       "csih_osx64-x86.bin", "csih_osx64-arm.bin" };
+
+static int eq(const char *a, const char *b) { return tx_eq(a, b, 4096); }
+
+/* sha256 of PATH's bytes into HEX (65), 0 on success. cx_read's buffers are
+   not freed: this is a one-shot CLI (a few files of a few MB), the process
+   exit returns them, and an L3 tool calls no free() of its own. */
+static int sha_file(const char *path, char hex[65]) {
+    size_t n = 0;
+    char *b = cx_read(path, &n);
+    if (!b) return -1;
+    cx_sha256_hex(b, n, hex);
+    return 0;
+}
+
+/* the csih product source digest, as csih.sh prepare stamps it, into OUT (65) */
+static int src_digest(char out[65]) {
+    char buf[8192];
+    char *av[] = { "sh", "apps/csih/csih.sh", "digest", 0 };
+    int cut, rc = sy_run(av, buf, sizeof buf, &cut);
+    long at = tx_find(buf, tx_len(buf, sizeof buf), "\ndigest ", 8);
+    if (rc != 0 || at < 0) return -1;
+    if (tx_copy(out, 65, buf + at + 8, 64) != 0) return -1;
+    return tx_len(out, 65) == 64 ? 0 : -1;
+}
+
+static int slice(const char *target) {
+    char path[256], side[300], d[65];
+    const char *src = "apps/csih/csih.cx";
+    int i, k = -1, rc;
+    for (i = 0; i < NS; i++) if (eq(targets[i], target)) k = i;
+    if (k < 0) { fprintf(stderr, "csih-ape: unknown target %s\n", target); return 2; }
+    if (k == 0) src = "apps/csih/tools/win-unsupported.cx";
+    if (src_digest(d) != 0) { fprintf(stderr, "csih-ape: cannot read the source digest\n"); return 1; }
+    sy_mkdir("out", 0755);
+    sy_mkdir(OUT, 0755);
+    snprintf(path, sizeof path, "%s/%s", OUT, files[k]);
+    {
+        char *av[] = { "sh", "./unisacc.com", (char *)src, "-b", (char *)target, "-o", path, 0 };
+        char *cap = 0;
+        size_t n = 0;
+        rc = cx_runv_timeout(av, 55, &cap, &n);
+        if (rc != 0 && cap && n) fprintf(stderr, "%.*s", (int)(n > 2000 ? 2000 : n), cap);
+    }
+    if (rc != 0 || sy_exists(path) != 1) { fprintf(stderr, "csih-ape: slice %s failed rc=%d\n", target, rc); return 1; }
+    snprintf(side, sizeof side, "%s.src", path);
+    if (cx_write(side, d, 64) != 0) { fprintf(stderr, "csih-ape: cannot write %s\n", side); return 1; }
+    printf("CSIH_APE\tSLICE\t%s\t%s\tsrc=%s\n", target, path, d);
+    return 0;
+}
+
+/* the digest recorded next to slice K, into D (65) */
+static int slice_digest(int k, char d[65]) {
+    char side[300];
+    size_t n = 0;
+    char *b;
+    snprintf(side, sizeof side, "%s/%s.src", OUT, files[k]);
+    b = cx_read(side, &n);
+    if (!b || n != 64) return -1;
+    tx_copy(d, 65, b, 64);
+    return 0;
+}
+
+static int write_manifest(const char *d) {
+    static char m[8192];
+    char hex[65], path[256];
+    int i, at = 0;
+    at += snprintf(m + at, sizeof m - at, "# csih.com manifest: tools/csih-ape.cx pack\nsource_digest\t%s\n", d);
+    if (sha_file("unisacc.com", hex) != 0) return -1;
+    at += snprintf(m + at, sizeof m - at, "compiler\tunisacc.com\t%s\n", hex);
+    for (i = 0; i < NS; i++) {
+        snprintf(path, sizeof path, "%s/%s", OUT, files[i]);
+        if (sha_file(path, hex) != 0) return -1;
+        at += snprintf(m + at, sizeof m - at, "slice\t%s\t%s\t%s\n", targets[i], files[i], hex);
+    }
+    snprintf(path, sizeof path, "%s/csih.com", OUT);
+    if (sha_file(path, hex) != 0) return -1;
+    at += snprintf(m + at, sizeof m - at, "ape\tcsih.com\t%s\n", hex);
+    snprintf(path, sizeof path, "%s/manifest.tsv", OUT);
+    return cx_write(path, m, (size_t)at);
+}
+
+static int pack(void) {
+    char d[65], di[65], path[NS][256], com[256], out[8192];
+    int i, rc, cut;
+    if (src_digest(d) != 0) { fprintf(stderr, "csih-ape: cannot read the source digest\n"); return 1; }
+    for (i = 0; i < NS; i++) {
+        snprintf(path[i], sizeof path[i], "%s/%s", OUT, files[i]);
+        if (sy_exists(path[i]) != 1 || slice_digest(i, di) != 0) { fprintf(stderr, "csih-ape: slice %s missing: run slice %s\n", files[i], targets[i]); return 1; }
+        if (!eq(di, d)) { fprintf(stderr, "csih-ape: slice %s was built from other sources (%s, today %s): rebuild it\n", files[i], di, d); return 1; }
+    }
+    snprintf(com, sizeof com, "%s/csih.com", OUT);
+    {
+        char *av[] = { "sh", "./unisacc.com", "-run", "ujs/product/ape-pack.cx", "--", "--tool", "csih", "--product", "csih", "0.1.0",
+                       com, path[0], path[1], path[2], path[3], path[4], 0 };
+        rc = sy_run(av, out, sizeof out, &cut);
+    }
+    if (rc != 0 || sy_exists(com) != 1) { fprintf(stderr, "csih-ape: ape-pack failed rc=%d\n%s", rc, out); return 1; }
+    sy_chmod(com, 0755);
+    if (write_manifest(d) != 0) { fprintf(stderr, "csih-ape: cannot write the manifest\n"); return 1; }
+    printf("CSIH_APE\tPACKED\t%s\tsrc=%s\n", com, d);
+    return 0;
+}
+
+/* every manifest row against the files, and the source digest against today */
+static int verify(void) {
+    char path[256], hex[65], d[65];
+    size_t n = 0;
+    char *m;
+    long len, at = 0;
+    int rows = 0, bad = 0;
+    snprintf(path, sizeof path, "%s/manifest.tsv", OUT);
+    m = cx_read(path, &n);
+    if (!m) { printf("CSIH_APE\tREFUSED\tno %s: run pack\n", path); return 1; }
+    len = (long)n;
+    if (src_digest(d) != 0) { printf("CSIH_APE\tREFUSED\tcannot read the source digest\n"); return 1; }
+    while (at < len) {
+        long e = tx_chr(m + at, len - at, '\n');
+        long ln = e < 0 ? len - at : e;
+        char row[512], f1[64], f2[256], f3[96], f4[96];
+        int nf;
+        tx_copy(row, sizeof row, m + at, ln < 511 ? ln : 511);
+        at += ln + 1;
+        if (!row[0] || row[0] == '#') continue;
+        {
+            /* split on tabs (this runtime's sscanf has no %[ scanset) */
+            char *f[4];
+            int caps[4] = { 64, 256, 96, 96 }, j;
+            long p = 0, rl = tx_len(row, sizeof row);
+            f[0] = f1; f[1] = f2; f[2] = f3; f[3] = f4;
+            for (nf = 0, j = 0; j < 4; j++) {
+                long t = tx_chr(row + p, rl - p, '\t'), w = t < 0 ? rl - p : t;
+                f[j][0] = 0;
+                if (p > rl) continue;
+                tx_copy(f[j], caps[j], row + p, w < caps[j] - 1 ? w : caps[j] - 1);
+                nf++;
+                p += w + 1;
+            }
+        }
+        if (eq(f1, "source_digest")) {
+            rows++;
+            if (!eq(f2, d)) { printf("  FAIL  source digest %s, today %s: the slices are stale\n", f2, d); bad++; }
+            else printf("  ok    source digest matches today's csih sources\n");
+        } else if (eq(f1, "compiler") && nf >= 3) {
+            rows++;
+            if (sha_file(f2, hex) != 0 || !eq(hex, f3)) { printf("  FAIL  compiler %s changed since pack\n", f2); bad++; }
+            else printf("  ok    compiler %s as packed\n", f2);
+        } else if (eq(f1, "slice") && nf == 4) {
+            rows++;
+            snprintf(path, sizeof path, "%s/%s", OUT, f3);
+            if (sha_file(path, hex) != 0 || !eq(hex, f4)) { printf("  FAIL  slice %s (%s) differs from the manifest\n", f2, f3); bad++; }
+            else printf("  ok    slice %s %s\n", f2, f3);
+        } else if (eq(f1, "ape") && nf >= 3) {
+            rows++;
+            snprintf(path, sizeof path, "%s/%s", OUT, f2);
+            if (sha_file(path, hex) != 0 || !eq(hex, f3)) { printf("  FAIL  %s differs from the manifest\n", f2); bad++; }
+            else printf("  ok    %s as packed\n", f2);
+        }
+    }
+    if (rows != NS + 3) { printf("  FAIL  manifest has %d rows, want %d\n", rows, NS + 3); bad++; }
+    printf("CSIH_APE\t%s\trows=%d\tfail=%d\tsrc=%s\n", bad ? "REFUSED" : "VERIFIED", rows, bad, d);
+    return bad ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    if (sy_exists("./unisacc.com") != 1 || sy_exists("apps/csih/csih.sh") != 1) {
+        fprintf(stderr, "csih-ape: run from the repo root\n");
+        return 2;
+    }
+    if (argc == 3 && eq(argv[1], "slice")) return slice(argv[2]);
+    if (argc == 2 && eq(argv[1], "pack")) return pack();
+    if (argc == 2 && eq(argv[1], "verify")) return verify();
+    fprintf(stderr, "usage: csih-ape.cx -- slice TARGET | pack | verify\n");
+    return 2;
+}
