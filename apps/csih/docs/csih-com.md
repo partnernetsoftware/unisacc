@@ -17,6 +17,22 @@ sh ./unisacc.com tools/csih-ape.cx -- verify
 sh ./unisacc.com tools/csih-ape.cx -- smoke
 ```
 
+- **从提交构造（推荐）**：多个会话同时改 cx 底层时，直接在工作区编，五个切片中途源码摘要就可能变掉，pack 会拒绝。改用快照：
+  ```
+  sh ./unisacc.com tools/csih-ape.cx -- snapshot [REV]       # 默认 HEAD，git archive 导出到 out/csih-ape/tree
+  cd out/csih-ape/tree
+  sh ./unisacc.com tools/csih-ape.cx -- slice lnx/x86_64     # ……五片、pack、verify、smoke 都在快照里跑
+  cd ../../..
+  sh ./unisacc.com tools/csih-ape.cx -- install              # 装到 apps/csih/csih.com，清单加 commit 行
+  sh ./unisacc.com tools/csih-ape.cx -- verify               # 对 commit 清单：核对快照里的摘要、版本和切片
+  ```
+  - 快照里只有已提交的内容，别人没提交的改动混不进来，也打断不了构造；同一个提交可以重复构造。
+  - 编译器 unisacc.com 没进 git，会复制进快照；它的字节算在源码摘要里。
+  - 快照路径是新的，而 unisacc 的 E3 编译缓存（`/tmp/unisacc-e3cache-<uid>`）按路径命中，所以快照里全是冷编译：一片要 59 秒以上（user 时间约 2 分 11 秒），在工作区里约 51 秒（user 约 1 分钟）。负载一高，冷编译就超过 60 秒的命令上限。
+  - 在快照里，切片要直接用 unisacc 编，再用 `mark TARGET` 记下摘要；套一层 csih-ape 工具的话，工具自己的 -run 冷启动还要再加几秒。
+- **平时的做法：在工作区编，记下提交号**。pack 时，如果 csih.cx 编译闭包里的文件（以及 csih.sh）跟 HEAD 相比没有已暂存或未暂存的改动，清单就写 `commit` 行，记下 HEAD。
+  - 这时 csih.com 就是那个提交的 csih，verify 照常核对工作区的源码摘要。
+  - 闭包里有未提交的改动（例如别的会话正在改 cx/sys）时，不写 commit 行；要构造对应提交的版本，就等它们提交以后再编。
 - **smoke**（约 5 秒）：在本机能查的都实际查一遍，查不了的标 UNMEASURED，不记 PASS。
   - 五个切片的头部：win 是 PE、机器号 0x8664；lnx 是 ELF64，机器号 62 / 183；osx 是 Mach-O 64，cputype 0x1000007 / 0x100000c。
   - csih.com 确实带着每一片：
