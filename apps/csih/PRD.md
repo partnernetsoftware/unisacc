@@ -153,6 +153,13 @@ agent 模式新增 `/help`、`/status`、`/clear`，均只在本地处理、不�
     - 没有 key 时原来报 "http 401"，看起来像 key 写错了。现在直接说明缺什么。
   - 测试：新增探针 `probes/print_mode.cx` 和合同 `print-mode`（5 项，对接 agent-stub）；file_cli selftest 加了一条，验证改写 0750 的脚本后仍是 0750。
   - 以下在 csih.com 本身上实测通过：改完的脚本直接就能运行；`-p` 答复正确、退出 0。会话恢复、`/diff`、`/undo` 原来就能用。
+  - 0.1.3：`-p` 新增 `--perm read|work|any`、`--allow N`，因为非交互模式下没人能输入 `/perm`、`/allow`。`--allow` 会通过系统提示告诉模型本轮已放行；不告诉的话，它看到历史里被拦过就不再尝试。
+  - harness 实测清单（csih.com 0.1.3，均在临时项目中）：
+    - 修脚本 bug 并运行验证 ✓；新建 tests/ 并跑测试 ✓；`/exit` 后重开，能续上之前的对话 ✓；`/diff`、`/undo` ✓。
+    - 在 apps/csih 里做代码导航（grep 加读文件，答对定义、返回值和被调函数）✓。
+    - C 项目里把一个函数跨 3 个文件改名，`make test` 通过 ✓。
+    - 危险命令：默认拦下且目录保留 ✓；`--allow 1` 一次执行 ✓。`--perm read` 时写文件被拒 ✓。
+    - 命令超时：3 秒被杀，如实报告，没有残留进程 ✓。key 错误时报 401 原文 ✓；没有 key 时说明缺什么 ✓。
 - **第六十七批已落地（2026-10-30）**：信号真注册，产品闭包零 libc 直调，CLI 和探针跟进。
   - 终端恢复改走 `sys.sig`（rt_sigaction）。pty 实测：SIGTERM 后 termios 回到启动前、退出码 143；旧二进制停在原始模式。agent 撤销清理改 `sy_atexit`：真 DeepSeek 改文件后 `/exit`，新版删掉 `~/.csih/undo/PID-1.bak`，旧版留着（前导 atexit 表按单元，从没跑过）。`home.cx` 用 `sy_symlink`；run/agent 启动改走 `csih_home_bind`，旧 `~/.cdsh` 终于会被链上。
   - f781d1ca4d 把 tui.cx 的 use 推到 40 条（上限 32，产品编不过）：8 个 reload 模块改经 `tui_reload.cx` 转发，去掉 5 条无调用的 use，现 28 条。
