@@ -75,10 +75,12 @@ a five-slice APE product are listed, not yet executed, in
 2026-10-30, `lnx/arm64` objects compile, but `osx/*` and `win/x86_64` do not:
 the model driver's `-c -b` does not yet reach non-Linux targets.
 
-`tools/product-build.cx`, `tools/hostseed-step*.cx`, `tools/selfhost-mixed.cx`,
-`exec/c/buildcompiler.sh` and the Makefile's model/seed/comb targets still
-compile or link the archived C reference or Python, so they cannot run. They
-retire with the switch; see the retirement table in that plan.
+`tools/product-build.cx`, `tools/hostseed-step*.cx` and `tools/selfhost-mixed.cx`
+still compile or link the archived C reference, so they cannot run. They
+retire with the switch; see the retirement table in that plan. The Python-running
+`exec/c/buildcompiler.sh` (with the Makefile's `com`, `model-com` and `comboot-*`
+targets) and `release/tools/seal_candidate.sh` are already archived under
+`archive/reference-py/`.
 `tools/kernel-build.cx` ([kernels](tools/kernels.md)) does not reference archived
 sources. `tools/package-refresh.cx` ([packages](tools/packages.md)) still compares
 `exec/c/core.c`, which is archived, so it too must be reworked before the
@@ -178,9 +180,8 @@ as of 2026-10-30 the candidate covers lnx/x86_64 only and the installed
 The classic route is archived: `unisacc.c`, `src/*.c` and the C sources of the
 old driver are in `archive/reference-c/`; `tests/build_ref.sh`,
 `tests/export_ref.sh` and `tests/release.sh` are in
-`archive/testing-c43-legacy/tests/`. `make com` still calls
-`exec/c/buildcompiler.sh`, which no longer runs because its Python and C
-inputs are archived; `make classic-com` no longer exists. The generated
+`archive/testing-c43-legacy/tests/`. `make com` and `make classic-com` no
+longer exist; `exec/c/buildcompiler.sh` is archived under `archive/reference-py/`. The generated
 `kernel/weight.<stage>.inc` and `kernel/dense.<stage>.inc` keep the 18 classic
 nets' data; the default product's shared networks remain in its separate P3
 package. CI only re-runs tests.
