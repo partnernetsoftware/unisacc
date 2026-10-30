@@ -56,6 +56,10 @@ int cxm_tb[CXM_MAXU]; int cxm_te[CXM_MAXU]; int cxm_fb[CXM_MAXU]; int cxm_fe[CXM
 char cxm_sha[CXM_MAXU][17];
 char cxm_full[CXM_MAXU][CXM_PATHW]; char cxm_typ[CXM_MAXU][CXM_PATHW];
 int cxm_inc[CXM_MAXU][CXM_MAXU]; int cxm_ninc[CXM_MAXU];
+/* per-use alias projection: cxm_ren[u][k] is the renamed full CXIF path when use k has an alias, else empty */
+char cxm_ren[CXM_MAXU][CXM_MAXUSE][CXM_PATHW];
+/* renamed-CXIF path pool; cxm_inc[u][k] < 0 means cxm_renpool[-(x)-1] */
+char cxm_renpool[CXM_MAXU * CXM_MAXUSE][CXM_PATHW]; int cxm_nren;
 /* exported and defined names: kind 0 a module's function, 1 a module's type name (typedef, "struct T", enum
    constant), 2 a non-static function defined by a unit that is not a module */
 char cxm_sym[CXM_SYMS][CXM_SYMW]; int cxm_symu[CXM_SYMS]; int cxm_syml[CXM_SYMS]; int cxm_symk[CXM_SYMS];
@@ -85,6 +89,22 @@ int cxm_fail(void) { cxm_m("\n"); cxm_say(2, cxm_msg, cxm_nmsg); return 1; }
 /* the out buffer: generated text */
 int cxm_o(char *s) { while (*s && cxm_nout < CXM_IFMAX) { cxm_out[cxm_nout] = *s; cxm_nout = cxm_nout + 1; s = s + 1; } return 0; }
 int cxm_on2(char *s, int n) { int k; k = 0; while (k < n && cxm_nout < CXM_IFMAX) { cxm_out[cxm_nout] = s[k]; cxm_nout = cxm_nout + 1; k = k + 1; } return 0; }
+/* like cxm_on2 over s[b..e), but every identifier token equal to SYM is written as
+   ALIAS (both NUL-terminated; ALIAS empty means drop the rename).  Whitespace is
+   copied as-is, so the rename is token-exact and never touches a longer name. */
+int cxm_on_rename(char *s, int b, int e, char *sym, char *alias) {
+    int i;
+    i = b;
+    while (i < e) {
+        if (cxm_idch(s[i] & 255)) {
+            int j = i; while (j < e && cxm_idch(s[j] & 255)) j = j + 1;
+            if (sym && sym[0] && alias && alias[0] && cxm_eqn(s + i, j - i, sym)) { cxm_o(alias); }
+            else { cxm_on2(s + i, j - i); }
+            i = j;
+        } else { cxm_on2(s + i, 1); i = i + 1; }
+    }
+    return 0;
+}
 
 /* lexical normalisation: no "." or empty segments, "x/.." folded; no filesystem query */
 int cxm_norm(char *in, char *out) {
@@ -676,18 +696,21 @@ int cxm_project(int u, int lib) {
     cxm_fe[u] = cxm_nift;
     return 0;
 }
-/* the CXIF text of module u into cxm_out: full (types, then prototypes) or the type part only */
-int cxm_text(int u, int full) {
+/* the CXIF text of module u into cxm_out: full (types, then prototypes) or the type part only.
+   When SYM is non-empty, every prototype identifier equal to SYM is written as ALIAS (the
+   symbol-level import rename: `use m::sym as alias`).  Types are never renamed. */
+int cxm_text(int u, int full, char *sym, char *alias) {
     char g[CXM_NAMEW]; int k;
     cxm_nout = 0;
     k = cxm_cpy(g, cxm_stem[u], CXM_NAMEW);
     while (k > 0) { k = k - 1; if (!cxm_idch(g[k] & 255)) g[k] = '_'; }
     cxm_o("/* CXIF v0 module "); cxm_o(cxm_stem[u]); if (!full) cxm_o(" types");
+    if (sym && sym[0]) { cxm_o(" "); cxm_o(sym); cxm_o(" as "); cxm_o(alias); }
     cxm_o(" src-sha256 "); cxm_o(cxm_sha[u]); cxm_o(" -- generated, do not edit */\n");
     cxm_o("#ifndef CXIF_"); cxm_o(g); cxm_o("_"); cxm_o(cxm_sha[u]); cxm_o("\n");
     cxm_o("#define CXIF_"); cxm_o(g); cxm_o("_"); cxm_o(cxm_sha[u]); cxm_o("\n");
     cxm_on2(cxm_ift + cxm_tb[u], cxm_te[u] - cxm_tb[u]);
-    if (full) cxm_on2(cxm_ift + cxm_fb[u], cxm_fe[u] - cxm_fb[u]);
+    if (full) cxm_on_rename(cxm_ift, cxm_fb[u], cxm_fe[u], sym ? sym : "", alias ? alias : "");
     cxm_o("#endif\n");
     return cxm_nout >= CXM_IFMAX;
 }
@@ -803,7 +826,7 @@ int cxm_collisions(void) {
    0 with cxm_n units (cxm_arg[u] is the path to compile, the given string for a command-line unit), 1 refused. */
 int cxm_plan(char **paths, int n) {
     int u; int k; int t; int v; int r; int direct;
-    cxm_n = 0; cxm_on = 1; cxm_nsym = 0; cxm_nift = 0; cxm_ntopo = 0; cxm_nstk = 0;
+    cxm_n = 0; cxm_on = 1; cxm_nsym = 0; cxm_nift = 0; cxm_ntopo = 0; cxm_nstk = 0; cxm_nren = 0;
     u = 0;
     while (u < n) {
         if (u >= CXM_MAXU) { cxm_start(0 - 1, 0); cxm_m("more than 64 units in one program"); cxm_on = 0; return cxm_fail(); }
@@ -858,8 +881,8 @@ int cxm_plan(char **paths, int n) {
     u = 0;
     while (u < cxm_n) {
         if (cxm_lib[u]) {
-            if (cxm_text(u, 1) || cxm_put(cxm_full[u])) { cxm_on = 0; return 1; }
-            if (cxm_te[u] > cxm_tb[u] && (cxm_text(u, 0) || cxm_put(cxm_typ[u]))) { cxm_on = 0; return 1; }
+            if (cxm_text(u, 1, 0, 0) || cxm_put(cxm_full[u])) { cxm_on = 0; return 1; }
+            if (cxm_te[u] > cxm_tb[u] && (cxm_text(u, 0, 0, 0) || cxm_put(cxm_typ[u]))) { cxm_on = 0; return 1; }
         }
         u = u + 1;
     }
@@ -870,8 +893,15 @@ int cxm_plan(char **paths, int n) {
             while (t < cxm_ntopo) {
                 v = cxm_topo[t];
                 if (v != u && cxm_reach[u][v]) {
-                    direct = 0; k = 0; while (k < cxm_nuse[u]) { if (cxm_use[u][k] == v) direct = 1; k = k + 1; }
-                    if (direct) { cxm_inc[u][cxm_ninc[u]] = 2 * v + 1; cxm_ninc[u] = cxm_ninc[u] + 1; }
+                    int uk; direct = 0; uk = 0;
+                    k = 0; while (k < cxm_nuse[u]) { if (cxm_use[u][k] == v) { direct = 1; uk = k; } k = k + 1; }
+                    if (direct) {
+                        if (cxm_usym[u][uk][0] && cxm_ualias[u][uk][0]) {
+                            if (cxm_text(v, 1, cxm_usym[u][uk], cxm_ualias[u][uk]) || cxm_put(cxm_renpool[cxm_nren])) { cxm_on = 0; return 1; }
+                            cxm_cpy(cxm_ren[u][uk], cxm_renpool[cxm_nren], CXM_PATHW);
+                            cxm_inc[u][cxm_ninc[u]] = 0 - (cxm_nren + 1); cxm_nren = cxm_nren + 1; cxm_ninc[u] = cxm_ninc[u] + 1;
+                        } else { cxm_inc[u][cxm_ninc[u]] = 2 * v + 1; cxm_ninc[u] = cxm_ninc[u] + 1; }
+                    }
                     else if (cxm_typ[v][0]) { cxm_inc[u][cxm_ninc[u]] = 2 * v; cxm_ninc[u] = cxm_ninc[u] + 1; }
                 }
                 t = t + 1;
@@ -882,7 +912,7 @@ int cxm_plan(char **paths, int n) {
     return 0;
 }
 /* the k-th interface file unit u is compiled with (after cx.h and the -include list) */
-char *cxm_incpath(int u, int k) { int x; x = cxm_inc[u][k]; return (x & 1) ? cxm_full[x / 2] : cxm_typ[x / 2]; }
+char *cxm_incpath(int u, int k) { int x; x = cxm_inc[u][k]; if (x < 0) return cxm_renpool[0 - x - 1]; return (x & 1) ? cxm_full[x / 2] : cxm_typ[x / 2]; }
 int cxm_nincof(char *path) { int u; u = cxm_find(path); return u >= 0 ? cxm_ninc[u] : 0; }
 /* -cx-plan: index, path, forced includes (cx.h for a .cx unit, the -include list, the interfaces), one unit a line */
 int cxm_planprint(char **opt, int nopt) {
@@ -912,7 +942,7 @@ int cxm_interface(char *path) {
     if (r < 0) { cxm_start(0 - 1, 0); cxm_m("cannot read "); cxm_m(path); return cxm_fail(); }
     if (r > 0) return 1;
     cxm_srcsha(0);
-    if (cxm_scan(0, 1) || cxm_project(0, 1) || cxm_text(0, 1)) return 1;
+    if (cxm_scan(0, 1) || cxm_project(0, 1) || cxm_text(0, 1, 0, 0)) return 1;
     cxm_say(1, cxm_out, cxm_nout);
     return 0;
 }
