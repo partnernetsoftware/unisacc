@@ -25,6 +25,11 @@
 #define PATHCAP 4096
 #define MODEBITS(m) ((m) & 07777)
 #define TIMEOUT_SECS 14
+/* A gate build compiles a whole program: csih alone takes ~51s cold on 0.0.43, far
+   past the 14s a gate run gets, so builds have their own bound (the launcher's
+   whole-build limit is 55s too). */
+#define BUILD_TIMEOUT_SECS 55
+static int rc_cmd_secs = TIMEOUT_SECS;
 /* ---- file table (CX roots + required modules; product entry is csih.cx) ---- */
 static const char *const SOURCES[] = {
     "csih.cx", "tui.cx", "render.cx", "term.cx", "chat.cx", "clock.cx", "tools.cx",
@@ -271,7 +276,15 @@ static void visit(const char *folder, const char *rel, int strict, Rows *rows) {
         char *relp = rel[0] ? pjoin(rel, name) : xdup(name);
         struct stat s;
         if (lstat(full, &s) != 0) failp("cannot stat", full);
-        REQUIRE(!S_ISLNK(s.st_mode), "source symlink");
+        /* A symlink is neither frozen nor followed (apps/csih/sys -> cx/sys and the
+         * probes/text, tests/mem links are module links into the repo; following
+         * one would pull files from outside the trusted app into a candidate).
+         * The build only ever sees the frozen copy, so a product that needs a
+         * linked module fails to build by name rather than silently using it. */
+        if (S_ISLNK(s.st_mode)) {
+            if (strict) failp("frozen input symlink", full);
+            continue;
+        }
         REQUIRE(s.st_uid == getuid(), "source owner mismatch");
         if (S_ISDIR(s.st_mode)) {
             if (strict) REQUIRE(MODEBITS(s.st_mode) == 0700, "frozen directory permissions mismatch");
@@ -415,10 +428,11 @@ static Argv expected_command(const char *dir, const char *binary, const char *co
     size_t i;
     (void)nsrc;
     if (build) {
-        /* CX: one program root; module graph via pragma use. cwd=app. */
+        /* CX: one program root; module graph via pragma use. cwd=app.
+         * "compiler ROOT -o OUT" compiles. With -run in front, 0.0.43 runs ROOT
+         * instead (it printed the tui usage, rc 2, and wrote no OUT). */
         apush(&a, xdup("/bin/sh"));
         apush(&a, pjoin(dir, "compiler.com"));
-        apush(&a, xdup("-run"));
         apush(&a, xdup(src[0]));
         apush(&a, xdup("-o"));
         apush(&a, pjoin(dir, binary));
@@ -460,7 +474,7 @@ static int run_command(const Argv *av, const char *cwd, char *const envp[], Buf 
     }
     close(po[1]);
     close(pe[1]);
-    deadline = reload_io_wall_now() + TIMEOUT_SECS;
+    deadline = reload_io_wall_now() + rc_cmd_secs;
     while (fo || fe) {
         unsigned short re0 = 0, re1 = 0;
         int r, k;
@@ -668,7 +682,9 @@ Result build(const char *source_arg, const char *compiler_arg, const char *root_
         char *artifact, fh[65];
         size_t n = 0;
         char *cb;
+        rc_cmd_secs = BUILD_TIMEOUT_SECS;
         record_command(&build_r[g], directory, GATES[g].name, "build", &bav, app, envp);
+        rc_cmd_secs = TIMEOUT_SECS;
         REQUIRE(build_r[g].rc == 0, "candidate build failed");
         artifact = pjoin(directory, GATES[g].binary);
         trusted(artifact, 0, 0);

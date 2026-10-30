@@ -145,6 +145,22 @@ agent 模式新增 `/help`、`/status`、`/clear`，均只在本地处理、不�
 - **第十批已落地（2026-10-29）**：忙碌行。原来执行命令时一直显示「等模型」；现在收到 exec 行（命令执行前发出）就显示 `跑命令 <命令>`，下一次请求在途（`net_in_flight()`）时切回「等模型」。文案从 `请求中 等模型 3秒 7745词元 上传 32839字节 已收 574字节 hit 1152 miss 6561` 改为 `⏳ 等模型 3秒 · 7745词元 · ↑32.1KB 已收574B · 缓存命中15%`，保留「已收」二字（已有断言依赖它）。selftest：`busy line names the running command and reads sizes`；tmux 实测已见切换。原来 exec 同步执行时秒数不走、界面不刷新，第十一批已解决。
 - **第四十二批已落地（2026-10-29）**：状态行上色：`✓` 绿、`◐` 黄、`✗` 和 `│ blocked:` 红、`项目>` 青。颜色只在写终端时加（`tui_put_line`），帧本身仍是纯文本，宽度计算、差量比较和所有读取帧的测试都不受影响；差量刷新改用 tui 自己的循环，`render.cx` 的 `frame_diff` 没动。遵守 `NO_COLOR`，也可以用 `CSIH_COLOR=0` 关闭。写屏缓冲按每行 32 字节预留，满屏彩色行也放得下。selftest：`status rows are coloured on output, frames stay plain`（设了 NO_COLOR 时打印 skip）；tmux `capture-pane -e` 实测 `◐` 行带 `ESC[33m`。
   - 观察（不是本批改动引起）：一道不用工具的算术题，这次评审判为「未验证」（理由是没有工具记录可核实）；之前同类问题判过「已验收（answer_only）」。评审对纯问答的判法不稳定，第四十三批处理。
+- **第六十三批已落地（2026-10-30）**：原来阻塞的几块功能，借 cx 底层 `cx/sys` 解开，不用改 `include/`，也不用走产品慢车道。
+  - **cx/sys 新包**：
+    - `posix.cx` 用 `__syscall6` 加逐平台调用号，补齐携带运行库缺的接口：setsid、getpgid、killpg、socketpair、tcgetpgrp、tcsetpgrp、openat、mkdirat、linkat、unlinkat、按目录 fd 列名字、flock、lockf。
+    - `fs.cx` 补了 fstat、read、write_all、fsync、close。
+    - `proc.cx` 补了 spawn_inherit（同进程组，保留指定 fd）、fork_session（构建放进独立会话）、signal；另有 tty 的保存和恢复。
+    - 检查在 `tools/check-cx-sys.cx`。只在 Linux x86_64 上实跑过，arm64 和 macOS 的调用号写了没跑。
+  - **message_send 的 publish**：按归档 .py 移植，全程基于目录 fd。和 .py 逐例对照，回执、退出码、原因、目录树、权限、信封字节都一致。探针 `probes/message_publish.cx` 20 条。
+  - **reload_launcher 的运行循环**：由代理按 .py 移植。前台 TTY 检查、终端基线在每条退出路径上恢复、supervisor 锁、socketpair 控制通道、FREEZE/RELEASE/COMMIT/ACTIVATE/RETIRE 交接和 RESUME 回滚都在。探针 `probes/reload_launcher_run.cx` 在私有 tmux 里用真 csih actor 测了提交、回滚、锁拒绝、无 tty 拒绝、终端前后一致。
+  - **reload_candidate 的真构建路径**有三处缺陷，修了：
+    - 它给编译器传 `-run 根 -o OUT`，0.0.43 会把它当成运行，只打出 usage，不产出 OUT；现在改成 `compiler 根 -o OUT`。
+    - 构建和 selftest 共用 14 秒时限，而 csih 冷编约 51 秒；现在构建单独给 55 秒。
+    - 源码树里有 `apps/csih/sys` 等模块软链，冻结时报 "source symlink"；现在软链不冻结也不跟随。
+    - 修完后用真编译器对当天的源码跑了一次：build rc 0，用时 98 秒（两个门冷编，加上 CLI 自身的编译）；候选 verify rc 0。回执在 `out/csih-candidate-check/receipt.txt`。
+    - **还剩的限制**：一个候选要编两个门（csih 和 agent_cli），冷缓存下合计约 80 秒，超过启动器给整次构建的 55 秒。编译缓存按路径算，冻结副本每次路径都不同，所以每次都是冷编。在改成按内容命中缓存之前，`/reload-code` 现编候选在冷缓存下会超时；reload-launcher-run 探针用的是回放编译器。
+  - **csih.com**：`tools/csih-ape.cx` 编出六目标 APE，Linux 和 macOS 是真 csih，Windows 是明确说明"尚未支持"的占位。矩阵见 `docs/csih-com.md`。
+  - **合同表**：80 条里 IMPLEMENTED 66，GAP 11，BLOCKED 3。BLOCKED 剩下 signal 投递和两个等裁定的 agent 旧探针（`docs/agent-probes-ruling.md`）。
 - **第六十二批已落地（2026-10-30）**：修好 `tests/contracts.tsv` 里原来的 stale-probe 层，并把 apps/csih 上层根文件里的 `#include` 清掉。
   - **errno_cover、f22**：根文件自己声明了 `u_spawn`，却没有 `use u_run`，`-run` 时链接不到（rc 127）。修好后 43/43、18/18。
   - **reload_owner、reload_session、reload_state**：原来引的 `csih_flat.h` 里写死了另一台机器的仓库路径，子进程 chdir 失败，所以报 exit 126，也报"源/编译器在测试中被改了"。

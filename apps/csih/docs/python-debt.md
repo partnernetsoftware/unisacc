@@ -59,6 +59,12 @@
   - 构建不再起 python3 子进程，而是在 fork 出的会话首进程里直接调 reload_candidate 的 `build()`，stdout 与 CLI 同一份 JSON。
   - 运行库的 `strerror` 表缺若干项（0.0.43 上 EAGAIN 是 "Unknown error"），启动器按符号自带了 Python 的文字（"Resource temporarily unavailable" 等）。
   - 探针 `probes/reload_launcher_run.cx`：私有 tmux 窗格里跑启动器和真实 csih actor，覆盖初始构建+ACTIVATE、REQUEST 触发并提交的换手（旧 actor 退役、草稿带过去）、第二个启动器被 supervisor 锁拒绝、无 tty 被拒且锁不残留、COMMIT 失败回滚（handoff-failed、candidate-exited、RESUMED，旧 actor 继续收键）、`/exit` 后 rc 0 且 `stty -g` 前后相同。合同 reload-launcher-run 由 BLOCKED 转为 IMPLEMENTED。
-  - 已知限制：`reload_candidate.cx` 的 `build()` 用真编译器做不出 csih 候选——每条命令只有 14s（csih 冷编译约 50s，agent_cli 约 28s），而且命令行是 `-run ENTRY -o OUT`，当前 unisacc 把它当作"运行 ENTRY"而不是编译（实测输出 tui 的 usage）。探针因此给启动器一个回放编译器（复制已装的 csih 和探针编译的 agent_cli），冻结、两道闸、回执和校验仍是真跑。这一点要在 reload_candidate 里修，不在本次范围。
+  - 已知限制：`reload_candidate.cx` 的 `build()` 用真编译器做不出 csih 候选——每条命令只有 14s（csih 冷编译约 50s，agent_cli 约 28s），而且命令行是 `-run ENTRY -o OUT`，当前 unisacc 把它当作"运行 ENTRY"而不是编译（实测输出 tui 的 usage）。探针因此给启动器一个回放编译器（复制已装的 csih 和探针编译的 agent_cli），冻结、两道闸、回执和校验仍是真跑。
+    - **2026-10-30 已修三处**：
+      - 命令改成 `compiler ROOT -o OUT`；
+      - 构建单独给 55 秒时限，selftest 仍是 14 秒；
+      - `apps/csih/sys` 这类模块软链不冻结也不跟随，以前会报 "source symlink"。
+    - 真编译器跑通一次：build rc 0，98 秒；verify rc 0。回执在 `out/csih-candidate-check/receipt.txt`。
+    - **仍然存在的问题**：一个候选要冷编两个门，合计超过启动器给整次构建的 55 秒。原因是编译缓存按路径算，冻结副本每次路径都不同。所以 `/reload-code` 现编候选在冷缓存下会超时，探针也就继续用回放编译器。要根治，得改成按内容命中缓存，或者放宽启动器的构建上限，这需要一个设计决定。
   - 依赖启动器运行循环的其余归档探针（reload-launcher、reload-launcher-lock、managed-handoff、reload-runtime、task-context、tool-result、rejected-context、message-inbox）不再是 BLOCKED，改记 GAP：还没有 `.cx` 移植，属覆盖缺口，不算 PASS。
 - `signal()` 的内核投递不在这批里：它要 `rt_sigaction` 加信号返回跳板，仍然 BLOCKED。
