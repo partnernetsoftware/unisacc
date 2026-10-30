@@ -82,7 +82,7 @@ static void load_gold(void){int i;
  if(each_row("weights/gold/reloc.tsv",reloc_row)!=6)die("reloc rows");for(i=0;i<3;i++)if(!relk[i][0])die("reloc missing");
  if(each_row("weights/gold/abi.tsv",abi_row)!=522||nabi!=87)die("abi rows");
  if(each_row("weights/gold/enc.tsv",enc_row)!=522)die("enc rows");for(i=0;i<nabi;i++)if(!abi[i].form[0])die("enc missing");}
-static const abirow *A(const char *op){int i;for(i=0;i<nabi;i++)if(tx_eq(abi[i].op, op, 1L << 20))return &abi[i];die("abi op");return 0;}
+static const abirow *A(const char *op){int i;for(i=0;i<nabi;i++)if(tx_eqz(abi[i].op, op))return &abi[i];die("abi op");return 0;}
 static const char *R(const char *t){if(t[0]=='r'&&t[1]>='0'&&t[1]<='7'&&!t[2])return rmap[t[1]-'0'];die("treg");return 0;}
 /* unisa/catalog.py SYSCALLS 4th column (C.WINAPI); absent = None */
 static const char *winapi_of(const char *op){
@@ -90,12 +90,12 @@ static const char *winapi_of(const char *op){
   {"mmap","VirtualAlloc"},{"munmap","VirtualFree"},{"mprotect","VirtualProtect"},{"getpid","GetCurrentProcessId"},{"clock_gettime","QueryPerformanceCounter"},
   {"nanosleep","Sleep"},{"futex","WaitOnAddress"},{"socket","WSASocketW"},{"connect","connect"},{"bind","bind"},{"listen","listen"},{"accept","accept"},
   {"clone","CreateThread"},{"execve","CreateProcessW"},{"lseek","SetFilePointer"},{"unlink","DeleteFileA"},{"rename","MoveFileExA"}};
- size_t i;for(i=0;i<sizeof t/sizeof t[0];i++)if(tx_eq(t[i][0], op, 1L << 20))return t[i][1];return 0;}
+ size_t i;for(i=0;i<sizeof t/sizeof t[0];i++)if(tx_eqz(t[i][0], op))return t[i][1];return 0;}
 /* tins.py _arg: a string that int(s,0) / true / false / none would read back as something else is 'quoted */
 static int intlike(const char *s){const char *p=s;if(*p=='+'||*p=='-')p++;
  if(p[0]=='0'&&p[1]&&strchr("xXoObB",p[1])){int base=(p[1]|32)=='x'?16:(p[1]|32)=='o'?8:2;p+=2;if(!*p)return 0;for(;*p;p++){int c=*p|32,d=c>='0'&&c<='9'?c-'0':c>='a'&&c<='f'?c-'a'+10:99;if(d>=base)return 0;}return 1;}
  if(!*p)return 0;{const char *q;int nz=0;for(q=p;*q;q++){if(*q<'0'||*q>'9')return 0;if(*q!='0')nz=1;}if(p[0]=='0'&&p[1]&&nz)return 0;}return 1;}
-static const char *Q(char *buf,size_t cap,const char *v){int z=snprintf(buf,cap,"%s%s",(intlike(v)||tx_eq(v, "true", 1L << 20)||tx_eq(v, "false", 1L << 20)||tx_eq(v, "none", 1L << 20))?"'":"",v);if(z<0||(size_t)z>=cap)die("meta");return buf;}
+static const char *Q(char *buf,size_t cap,const char *v){int z=snprintf(buf,cap,"%s%s",(intlike(v)||tx_eqz(v, "true")||tx_eqz(v, "false")||tx_eqz(v, "none"))?"'":"",v);if(z<0||(size_t)z>=cap)die("meta");return buf;}
 
 /* ---- data layout oracle ---- */
 #define DATA_BASE 256ULL
@@ -107,7 +107,7 @@ static void layout(const ddef *d,int n,np_buf *head){
  int uq[MAXD],nu=0,i,j,threads=0,ns=0,b;unsigned long long off[MAXD],dn=0,st[MAXD+1],en[MAXD+1],k,used;int nz[MAXD+1];long long newp[MAXD+1],at=0;
  unsigned char img[1024];size_t stored=0;char l[600];
  if(n>MAXD)die("defs");
- for(i=0;i<n;i++){int dup=0;if(tx_eq(d[i].name, "g___unisa_threads", 1L << 20))threads=1;for(j=0;j<nu;j++)if(tx_eq(d[uq[j]].name, d[i].name, 1L << 20))dup=1;if(dup)continue;
+ for(i=0;i<n;i++){int dup=0;if(tx_eqz(d[i].name, "g___unisa_threads"))threads=1;for(j=0;j<nu;j++)if(tx_eqz(d[uq[j]].name, d[i].name))dup=1;if(dup)continue;
   if(d[i].bss)dn=(dn+7)&~7ULL;off[nu]=dn;uq[nu++]=i;dn+=d[i].len;}
  for(j=0;j<nu;j++){int seen=0;for(i=0;i<ns;i++)if(st[i]==off[j])seen=1;if(!seen)st[ns++]=off[j];}
  for(i=1;i<ns;i++){unsigned long long v=st[i];j=i-1;while(j>=0&&st[j]>v){st[j+1]=st[j];j--;}st[j+1]=v;}
@@ -153,10 +153,10 @@ static long long sysno_value(const char *s){char *e;long long v;errno=0;v=strtol
 /* unisa/lower.py syscall_seq for a non-Windows target */
 static void sysseq(prog *p,const char *op,int nsrc,const char *const *src,int priv){
  const abirow *a=A(op);const char *lform=A("load64")->form,*w=winapi_of(op);char l[700],q[8][40];int i;
- if(tx_eq(op, "syscall", 1L << 20)){if(priv)FMT(l,"load64 %s, %s, 0 form=%s",a->f[NRREG],R("r7"),lform);else FMT(l,"setreg %s, mem %llu role=sysno",a->f[NRREG],SYS0);W(p,l);}
- else if(!tx_eq(a->f[SYSNO], "none", 1L << 20)){FMT(l,"setreg %s, imm %lld role=sysno",a->f[NRREG],sysno_value(a->f[SYSNO]));W(p,l);}
+ if(tx_eqz(op, "syscall")){if(priv)FMT(l,"load64 %s, %s, 0 form=%s",a->f[NRREG],R("r7"),lform);else FMT(l,"setreg %s, mem %llu role=sysno",a->f[NRREG],SYS0);W(p,l);}
+ else if(!tx_eqz(a->f[SYSNO], "none")){FMT(l,"setreg %s, imm %lld role=sysno",a->f[NRREG],sysno_value(a->f[SYSNO]));W(p,l);}
  else die("oracle: no system call for this op on lnx (a refusal case)");
- for(i=0;i<nsrc;i++){const char *arg=a->f[ARG0+i];if(i>=6||tx_eq(arg, "none", 1L << 20))die("oracle: stack argument (a refusal case)");
+ for(i=0;i<nsrc;i++){const char *arg=a->f[ARG0+i];if(i>=6||tx_eqz(arg, "none"))die("oracle: stack argument (a refusal case)");
   if(priv)FMT(l,"load64 %s, %s, %s form=%s",arg,R("r7"),src[i],lform);else FMT(l,"setreg %s, %s role=arg%d",arg,src[i],i);W(p,l);}
  FMT(l,"gate form=%s gate=%s carry=false winapi=%s catop=%s sysno=%s retconv=%s winimp=%s ret=%s hstd=%llu written=%llu scr0=%llu scr1=%llu",
   Q(q[0],40,a->form),Q(q[1],40,a->f[GATE]),w?Q(q[2],40,w):"none",Q(q[3],40,op),Q(q[4],40,a->f[SYSNO]),Q(q[5],40,a->f[RETCONV]),Q(q[6],40,a->f[WINIMP]),Q(q[7],40,a->f[RET]),HSTD,WRITTEN,SCR0,SCR1);
@@ -175,20 +175,20 @@ static void x_sys(prog *p,const char *op,const char *ra,const char *rb,const cha
  FMT(l,"  .sys %s, %s, %s, %s",op,ra,rb,rc);T(p,l);
  FMT(l,"setmem %llu, %s",SCR0,R(ra));W(p,l);FMT(l,"setmem %llu, %s",SCR1,R(rb));W(p,l);FMT(l,"setmem %llu, %s",PLEN,R(rc));W(p,l);
  FMT(m0,"mem %llu",SCR0);FMT(m1,"mem %llu",SCR1);FMT(m2,"mem %llu",PLEN);
- if(tx_eq(sh, "plain", 1L << 20)){s[0]=m0;s[1]=m1;s[2]=m2;n=3;}
- else if(tx_eq(sh, "zero4", 1L << 20)){s[0]=m0;s[1]=m1;s[2]=m2;s[3]="imm 0";n=4;}
- else if(tx_eq(sh, "atfd_1", 1L << 20)){s[0]="imm -100";s[1]=m0;s[2]=m1;s[3]=m2;n=4;}
- else if(tx_eq(sh, "atfd_1_zero", 1L << 20)){s[0]="imm -100";s[1]=m0;s[2]="imm 0";n=3;}
- else if(tx_eq(sh, "atfd_2_zero5", 1L << 20)){s[0]="imm -100";s[1]=m0;s[2]="imm -100";s[3]=m1;s[4]="imm 0";n=5;}
+ if(tx_eqz(sh, "plain")){s[0]=m0;s[1]=m1;s[2]=m2;n=3;}
+ else if(tx_eqz(sh, "zero4")){s[0]=m0;s[1]=m1;s[2]=m2;s[3]="imm 0";n=4;}
+ else if(tx_eqz(sh, "atfd_1")){s[0]="imm -100";s[1]=m0;s[2]=m1;s[3]=m2;n=4;}
+ else if(tx_eqz(sh, "atfd_1_zero")){s[0]="imm -100";s[1]=m0;s[2]="imm 0";n=3;}
+ else if(tx_eqz(sh, "atfd_2_zero5")){s[0]="imm -100";s[1]=m0;s[2]="imm -100";s[3]=m1;s[4]="imm 0";n=5;}
  else die("argshape");
  sysseq(p,op,n,s,0);FMT(l,"mov %s, %s",R("r0"),A(op)->f[RET]);W(p,l);}
 static void x_sys6(prog *p,const char *op){
  static const char *tr[6]={"r0","r1","r2","r3","r4","r5"};const char *sp=R("r7"),*lform=A("load64")->form,*scratch="r11";
  char l[300],o[6][8];const char *s[6];int i,n=0;
- for(i=0;i<8;i++)if(tx_eq(rmap[i], scratch, 1L << 20))die("oracle: sys6 scratch aliases a tape register");
+ for(i=0;i<8;i++)if(tx_eqz(rmap[i], scratch))die("oracle: sys6 scratch aliases a tape register");
  FMT(l,"  .sys6 %s, r0, r1, r2, r3, r4, r5",op);T(p,l);
  FMT(l,"mov %s, %s form=%s",scratch,sp,lform);W(p,l);FMT(l,".frame 80 form=%s",lform);W(p,l);
- for(i=0;i<6;i++){const char *src=R(tr[i]);if(tx_eq(src, sp, 1L << 20))src=scratch;FMT(l,"store64 %s, %d, %s form=%s",sp,8*i,src,lform);W(p,l);}
+ for(i=0;i<6;i++){const char *src=R(tr[i]);if(tx_eqz(src, sp))src=scratch;FMT(l,"store64 %s, %d, %s form=%s",sp,8*i,src,lform);W(p,l);}
  FMT(l,"store64 %s, 48, %s form=%s",sp,R("r6"),lform);W(p,l);FMT(l,"store64 %s, 56, %s form=%s",sp,scratch,lform);W(p,l);
  for(i=strcmp(op,"syscall")?0:1;i<6;i++){FMT(o[n],"%d",8*i);s[n]=o[n];n++;}
  sysseq(p,op,n,s,1);
@@ -332,22 +332,22 @@ static void mode_format(void){
  puts("NOT_CLAIMED\tlower.gold.regmap-16 and lower.gold.reloc-6 (x86_64 halves asserted here; arm64 halves need arm64 route material)");}
 
 /* ---- abi ---- */
-static int is_sysop(const char *op){return tx_eq(A(op)->form, "syscall", 1L << 20);}
+static int is_sysop(const char *op){return tx_eqz(A(op)->form, "syscall");}
 static void mode_abi(void){
  prog p;np_result a;char l[300];int i,nsys=0;
  static const char *notape[]={"cas64","fence","syscall_gate","tls_base","cycle_counter","stack_enter"};
  /* 35 system-call ops through .sys (three tape arguments, argshape) */
  begin(&p,NODATA,0,0);entry(&p);
- for(i=0;i<nabi;i++)if(is_sysop(abi[i].op)&&!tx_eq(abi[i].f[SYSNO], "none", 1L << 20)){size_t f=p.code.n;x_sys(&p,abi[i].op,"r1","r2","r3");mark(abi[i].op,f,&p);nsys++;}
+ for(i=0;i<nabi;i++)if(is_sysop(abi[i].op)&&!tx_eqz(abi[i].f[SYSNO], "none")){size_t f=p.code.n;x_sys(&p,abi[i].op,"r1","r2","r3");mark(abi[i].op,f,&p);nsys++;}
  x_exit(&p,"r0");
  check(nsys==35,"abi","thirty-five-lnx-x86_64-system-call-rows-with-a-number");
  accept_prog("sys3",&p,0,0,0);
  /* the same 35 through .sys6 (six arguments: arg0..arg5, the generic syscall shifted by one) */
  begin(&p,NODATA,0,0);entry(&p);
- for(i=0;i<nabi;i++)if(is_sysop(abi[i].op)&&!tx_eq(abi[i].f[SYSNO], "none", 1L << 20)){size_t f=p.code.n;x_sys6(&p,abi[i].op);mark(abi[i].op,f,&p);}
+ for(i=0;i<nabi;i++)if(is_sysop(abi[i].op)&&!tx_eqz(abi[i].f[SYSNO], "none")){size_t f=p.code.n;x_sys6(&p,abi[i].op);mark(abi[i].op,f,&p);}
  x_exit(&p,"r0");accept_prog("sys6",&p,0,0,0);
  /* getdirentries64: abi sysno none on lnx -> no system call for this on lnx (unisa/lower.py), declared {target} lowering */
- {int nnone=0;for(i=0;i<nabi;i++)if(is_sysop(abi[i].op)&&tx_eq(abi[i].f[SYSNO], "none", 1L << 20))nnone++;check(nnone==1&&tx_eq(A("getdirentries64")->f[SYSNO], "none", 1L << 20),"abi","getdirentries64-only-row-without-number");}
+ {int nnone=0;for(i=0;i<nabi;i++)if(is_sysop(abi[i].op)&&tx_eqz(abi[i].f[SYSNO], "none"))nnone++;check(nnone==1&&tx_eqz(A("getdirentries64")->f[SYSNO], "none"),"abi","getdirentries64-only-row-without-number");}
  refuse_text("getdirentries64-sys3","_start:\n  .sys getdirentries64, r0, r1, r2\n  ret\n","not covered: lnx/x86_64 lowering");
  refuse_text("getdirentries64-sys6","_start:\n  .sys6 getdirentries64, r0, r1, r2, r3, r4, r5\n  ret\n","not covered: lnx/x86_64 lowering");
  /* 45 tape machine ops: no system-call sequence; enc form; regmap operands; reloc on branches */
@@ -368,7 +368,7 @@ static void mode_abi(void){
   check(nm==45,"abi","forty-five-tape-machine-ops");
   /* every one of them has an all-none abi row except form: nothing to gate */
   {int ok=1,j;for(i=0;i<nabi;i++)if(!is_sysop(abi[i].op))for(j=0;j<NF;j++){const char *v=abi[i].f[j];
-    if(j==SHAPE?strcmp(v,"plain"):(j==GATE&&tx_eq(abi[i].op, "syscall_gate", 1L << 20))?strcmp(v,"syscall"):strcmp(v,"none"))ok=0;}
+    if(j==SHAPE?strcmp(v,"plain"):(j==GATE&&tx_eqz(abi[i].op, "syscall_gate"))?strcmp(v,"syscall"):strcmp(v,"none"))ok=0;}
    check(ok,"abi","machine-op-rows-carry-no-system-call-facts");}}
  accept_prog("machine-ops",&p,&a,0,0);
  check(!has(a.out,a.outn,"\ngate ")&&!has(a.out,a.outn,"role=sysno"),"machine-ops","no-gate-sequence");np_free(&a);
@@ -438,9 +438,9 @@ static void mode_input(void){
  seq++;a=run_in("input-enoent",missing,missing,0);refused_input("input-enoent",&a,"run: cannot open input");recovery("input-enoent");
  seq++;b=run_in("input-enotdir",notdir,notdir,0);refused_input("input-enotdir",&b,"run: cannot open input");
  sa=strip_path(a.err,a.errn,missing);sb=strip_path(b.err,b.errn,notdir);
- check(b.errn&&!tx_eq(sa, sb, 1L << 20),"input-enotdir","reported-distinct-from-enoent");recovery("input-enotdir");
+ check(b.errn&&!tx_eqz(sa, sb),"input-enotdir","reported-distinct-from-enoent");recovery("input-enotdir");
  seq++;c=run_in("input-eacces",noperm,noperm,0);sc=strip_path(c.err,c.errn,noperm);
- if(eacces_real){refused_input("input-eacces",&c,"run: cannot open input");check(c.errn&&!tx_eq(sa, sc, 1L << 20)&&!tx_eq(sb, sc, 1L << 20),"input-eacces","reported-distinct-from-enoent-enotdir");}
+ if(eacces_real){refused_input("input-eacces",&c,"run: cannot open input");check(c.errn&&!tx_eqz(sa, sc)&&!tx_eqz(sb, sc),"input-eacces","reported-distinct-from-enoent-enotdir");}
  else{unverified++;puts("UNVERIFIED\tinput-eacces\treason=mode-000-file-readable-by-this-user");}
  recovery("input-eacces");
  seq++;d=run_in("input-directory",dir,dir,0);refused_input("input-directory",&d,"run: cannot read input");recovery("input-directory");
@@ -450,7 +450,7 @@ static void mode_input(void){
 
 int main(int argc,char **argv){
  static const char *modes[]={"format","abi","layout-plain","layout-redef","refusals","input"};int m=-1,i;char hex[65];
- for(i=0;(argc==5||argc==6)&&i<6;i++)if(tx_eq(argv[1], modes[i], 1L << 20))m=i;
+ for(i=0;(argc==5||argc==6)&&i<6;i++)if(tx_eqz(argv[1], modes[i]))m=i;
  if(m<0){fputs("usage: format|abi|layout-plain|layout-redef|refusals|input ROOT STREAM_DIR NEW_ABS_OUTDIR [EXPECTED_STREAM6_SHA]\n",stderr);return 2;}
  s6_pin=stream_expected_pin(argc==6?argv[5]:0,s6_pin,"lower");
 #if !defined(__linux__) || !defined(__x86_64__)
@@ -463,12 +463,12 @@ int main(int argc,char **argv){
  path(bound,sizeof bound,root,"tools/bound");path(inc,sizeof inc,root,"include");
  path(product,sizeof product,root,"unisacc.com");path(s6bin,sizeof s6bin,streams,"unisacc-stream6.com");
  digest(product,product_before);digest(s6bin,hex);
- if(!tx_eq(hex, s6_pin, 1L << 20))die("material.stream6-identity");
+ if(!tx_eqz(hex, s6_pin))die("material.stream6-identity");
  check(1,"material","stream6-identity");
  load_gold();
  if(m==0)mode_format();else if(m==1)mode_abi();else if(m==2)mode_layout(0);else if(m==3)mode_layout(1);else if(m==4)mode_refusals();else mode_input();
- digest(product,hex);check(tx_eq(hex, product_before, 1L << 20),"identity","root-product-stable");
- digest(s6bin,hex);check(tx_eq(hex, s6_pin, 1L << 20),"identity","stream6-stable");
+ digest(product,hex);check(tx_eqz(hex, product_before),"identity","root-product-stable");
+ digest(s6bin,hex);check(tx_eqz(hex, s6_pin),"identity","stream6-stable");
  puts("TIMING\tstartup_load_inference_output_validation=UNMEASURED");
  printf("STREAM_LOWER_DOMAIN\tmode=%s\tassertions=%d\tfailed=%d\tunverified=%d\truns=%d\tscope=lower-domain-linux-x86_64-stream6\n",modes[m],assertions,failures,unverified,runs);
  puts("NOT_CLAIMED\tforeign-targets-foreign-hosts-same-candidate-model-unisym1-validation-credential");

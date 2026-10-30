@@ -47,8 +47,8 @@ static void save(const char *name,const char *s,size_t n){char p[4400];path(p,si
 static long long now_ns(void){long t[2]={0,0};if(__syscall6(228,1,(long)t,0,0,0))die("monotonic-clock");return (long long)t[0]*1000000000LL+t[1];}
 static void new_out(const char *arg){
  char parent[4096],base[4096],leaf[4096];if(arg[0]!='/')die("output-absolute");copy_fit(parent,sizeof parent,arg);char *slash=strrchr(parent,'/');
- if(!slash||!slash[1]||tx_eq(slash+1, ".", 1L << 20)||tx_eq(slash+1, "..", 1L << 20))die("output-leaf");copy_fit(leaf,sizeof leaf,slash+1);if(slash==parent)slash[1]=0;else *slash=0;
- if(!realpath(parent,base))die("output-parent");int z=snprintf(work,sizeof work,"%s%s%s",base,tx_eq(base, "/", 1L << 20)?"":"/",leaf);
+ if(!slash||!slash[1]||tx_eqz(slash+1, ".")||tx_eqz(slash+1, ".."))die("output-leaf");copy_fit(leaf,sizeof leaf,slash+1);if(slash==parent)slash[1]=0;else *slash=0;
+ if(!realpath(parent,base))die("output-parent");int z=snprintf(work,sizeof work,"%s%s%s",base,tx_eqz(base, "/")?"":"/",leaf);
  if(z<0||(size_t)z>=sizeof work)die("output-bound");if(mkdir(work,0700))die("new-output-required");
 }
 /* One bounded host command; stdout returned (caller frees), rc returned. */
@@ -106,19 +106,19 @@ typedef struct {char sha[65];size_t n;} ci_product;
 static ci_product product_of(const char *s,size_t n){ci_product p;cx_sha256_hex(s,n,p.sha);p.n=n;return p;}
 static unsigned verdict(const ci_tuple *x,const ci_product *p,const char *rb,size_t rn,const ci_export *e){
  unsigned bad=0;char h[65];
- if(!tx_eq(p->sha, x->com, 1L << 20))bad|=BIT(R_PRODUCT_SHA);
- cx_sha256_hex(rb,rn,h);if(!tx_eq(h, x->record, 1L << 20))bad|=BIT(R_RECORD_SHA);
+ if(!tx_eqz(p->sha, x->com))bad|=BIT(R_PRODUCT_SHA);
+ cx_sha256_hex(rb,rn,h);if(!tx_eqz(h, x->record))bad|=BIT(R_RECORD_SHA);
  ci_record r=parse_record(rb,rn);bad|=r.bad;
  if(!(r.bad&BIT(R_RECORD_SHAPE))){
-  if(!r.artifact[0]||!tx_eq(r.artifact, p->sha, 1L << 20))bad|=BIT(R_RECORD_ARTIFACT);
+  if(!r.artifact[0]||!tx_eqz(r.artifact, p->sha))bad|=BIT(R_RECORD_ARTIFACT);
   if(r.bytes!=(long long)p->n)bad|=BIT(R_RECORD_BYTES);
-  if(!r.sources[0]||!tx_eq(r.sources, x->sid, 1L << 20))bad|=BIT(R_RECORD_SOURCES);
-  char resolved[41];if(!r.commit[0]||!resolve_commit(r.commit,resolved)||!tx_eq(resolved, r.commit, 1L << 20))bad|=BIT(R_RECORD_COMMIT_UNKNOWN);
+  if(!r.sources[0]||!tx_eqz(r.sources, x->sid))bad|=BIT(R_RECORD_SOURCES);
+  char resolved[41];if(!r.commit[0]||!resolve_commit(r.commit,resolved)||!tx_eqz(resolved, r.commit))bad|=BIT(R_RECORD_COMMIT_UNKNOWN);
   else if(!is_ancestor(r.commit,e->commit))bad|=BIT(R_NOT_DESCENDANT);
  }
- if(!tx_eq(e->commit, x->commit, 1L << 20))die("verdict-export-commit-binding");
- if(!tx_eq(e->sid, x->sid, 1L << 20))bad|=BIT(R_COMMIT_SID);
- if(!tx_eq(e->plan, x->plan, 1L << 20))bad|=BIT(R_PLAN_SHA);
+ if(!tx_eqz(e->commit, x->commit))die("verdict-export-commit-binding");
+ if(!tx_eqz(e->sid, x->sid))bad|=BIT(R_COMMIT_SID);
+ if(!tx_eqz(e->plan, x->plan))bad|=BIT(R_PLAN_SHA);
  if(!e->clean)bad|=BIT(R_EXPORT_UNCLEAN);
  return bad;
 }
@@ -128,7 +128,7 @@ static void expect_set(const char *label,unsigned got,unsigned want){char g[1024
 /* ---- clean export ---- */
 static void walk(const char *dir,int depth,ci_export *e){
  if(depth>64){e->clean=0;return;}DIR *d=opendir(dir);if(!d)die("export-walk-open");struct dirent *de;
- while((de=readdir(d))){if(tx_eq(de->d_name, ".", 1L << 20)||tx_eq(de->d_name, "..", 1L << 20))continue;char p[4400];path(p,sizeof p,dir,de->d_name);struct stat st;if(lstat(p,&st))die("export-walk-stat");
+ while((de=readdir(d))){if(tx_eqz(de->d_name, ".")||tx_eqz(de->d_name, ".."))continue;char p[4400];path(p,sizeof p,dir,de->d_name);struct stat st;if(lstat(p,&st))die("export-walk-stat");
   if(S_ISDIR(st.st_mode))walk(p,depth+1,e);else if(S_ISLNK(st.st_mode))e->links++;else if(S_ISREG(st.st_mode)){e->regular++;if(st.st_mode&0100)e->executable++;}else e->clean=0;}
  closedir(d);
 }
@@ -173,14 +173,14 @@ static int identity_mode(char **argv){
  char *pb=load(product,&pn),*rb=load(rec_path,&rn);ci_product P=product_of(pb,pn);
  char dirp[4400],dirn[4400];ci_export pos=export_commit("positive",x.commit,dirp);
  ci_record rec=parse_record(rb,rn);printf("RECORD\tsha256=%s\tschema=%d\tartifact_sha256=%s\tbytes=%lld\tcommit=%s\tsources_sha256=%s\tnative_construction_sha256=%s\n",before_r,rec.schema,rec.artifact,rec.bytes,rec.commit,rec.sources,rec.has_native?rec.native:"ABSENT");
- if(profile_data.raw){ck(tx_eq(rec.commit, cpr_get(&profile_data,"record-commit"), 1L << 20),"record-commit-equals-external-profile");if(failed)die("candidate-profile-record-commit-mismatch");}
+ if(profile_data.raw){ck(tx_eqz(rec.commit, cpr_get(&profile_data,"record-commit")),"record-commit-equals-external-profile");if(failed)die("candidate-profile-record-commit-mismatch");}
  expect_set("positive-tuple",verdict(&x,&P,rb,rn,&pos),0);
  /* Named negative: another commit whose clean export has a different SID. */
  ci_export neg=export_commit("negative",argv[8],dirn);
- if(tx_eq(neg.sid, x.sid, 1L << 20))die("negative-commit-not-applicable-same-source-sid");
+ if(tx_eqz(neg.sid, x.sid))die("negative-commit-not-applicable-same-source-sid");
  int historical=strcmp(neg.commit,rec.commit)&&is_ancestor(neg.commit,rec.commit);
  if(!historical&&is_ancestor(neg.commit,pos.commit))die("negative-ancestry-control-not-applicable-needs-pre-record-or-non-ancestor-revision");
- {ci_tuple y=x;copy_fit(y.commit,41,neg.commit);unsigned got=verdict(&y,&P,rb,rn,&neg),want=BIT(R_COMMIT_SID);if(!tx_eq(neg.plan, x.plan, 1L << 20))want|=BIT(R_PLAN_SHA);if(!is_ancestor(rec.commit,neg.commit))want|=BIT(R_NOT_DESCENDANT);char g[1024];reasons_text(got,g,sizeof g);printf("REFUSE\tnegative-commit\tcommit=%s\tsource_sid=%s\treasons=%s\n",neg.commit,neg.sid,g);
+ {ci_tuple y=x;copy_fit(y.commit,41,neg.commit);unsigned got=verdict(&y,&P,rb,rn,&neg),want=BIT(R_COMMIT_SID);if(!tx_eqz(neg.plan, x.plan))want|=BIT(R_PLAN_SHA);if(!is_ancestor(rec.commit,neg.commit))want|=BIT(R_NOT_DESCENDANT);char g[1024];reasons_text(got,g,sizeof g);printf("REFUSE\tnegative-commit\tcommit=%s\tsource_sid=%s\treasons=%s\n",neg.commit,neg.sid,g);
   ck((got&BIT(R_COMMIT_SID))!=0,"negative-commit.commit-source-sid-mismatch");
   ck(got==want,"negative-commit.only-commit-bound-reasons");}
  /* The record names its commit; a record claiming a later commit cannot be verified at an older one. */
@@ -222,7 +222,7 @@ static int identity_mode(char **argv){
   expect_set("export-stray-file",verdict(&x,&P,rb,rn,&s),BIT(R_EXPORT_UNCLEAN));if(unlink(stray))die("stray-remove");check_clean(dirp,pos.commit,&s);expect_set("export-recovered",verdict(&x,&P,rb,rn,&s),0);}
  /* Recovery: the original tuple still matches after every control. */
  expect_set("positive-tuple-after-controls",verdict(&x,&P,rb,rn,&pos),0);
- free(pb);free(rb);char after_r[65];size_t an;char *after=load(product,&an);ci_product A=product_of(after,an);free(after);ck(tx_eq(A.sha, P.sha, 1L << 20)&&A.n==P.n,"candidate-unchanged");hash_file(rec_path,after_r,0);ck(tx_eq(before_r, after_r, 1L << 20),"record-unchanged");
+ free(pb);free(rb);char after_r[65];size_t an;char *after=load(product,&an);ci_product A=product_of(after,an);free(after);ck(tx_eqz(A.sha, P.sha)&&A.n==P.n,"candidate-unchanged");hash_file(rec_path,after_r,0);ck(tx_eqz(before_r, after_r),"record-unchanged");
  if(profile_data.raw){char why[256];int stable=cpr_stable(profile_input,&profile_data,why,sizeof why);ck(!stable,"candidate-profile-unchanged");if(stable)fprintf(stderr,"candidate-profile: %s\n",why);}
  {np_buf b={0};np_puts(&b,"candidate-identity-v1\nproduct\t");np_puts(&b,x.com);np_puts(&b,"\nrecord\t");np_puts(&b,x.record);np_puts(&b,"\nsource\t");np_puts(&b,pos.sid);np_puts(&b,"\nplan\t");np_puts(&b,pos.plan);np_puts(&b,"\ncommit\t");np_puts(&b,pos.commit);np_puts(&b,"\nnegative-commit\t");np_puts(&b,neg.commit);np_puts(&b,"\nnegative-source\t");np_puts(&b,neg.sid);np_puts(&b,"\nnegative-plan\t");np_puts(&b,neg.plan);np_puts(&b,"\n");if(profile_data.raw){np_puts(&b,"candidate-profile-sha256\t");np_puts(&b,profile_data.sha);np_puts(&b,"\n");}save("identity.tsv",b.p,b.n);free(b.p);}
  if(!failed){purge(dirp);purge(dirn);}
@@ -244,13 +244,13 @@ int main(int argc,char **argv){
  if(argc<3||!realpath(argv[2],root))die("usage identity|verify ROOT ...");
  path(bound,sizeof bound,root,"tools/bound");path(product,sizeof product,root,"unisacc.com");
  if(unsetenv("UNISACC_RF_CAPTURE")||unsetenv("UNISA_ATTRIBUTES"))die("clear-resource-ambient");
- if(argc==6&&tx_eq(argv[1], "identity-profile", 1L << 20)){
+ if(argc==6&&tx_eqz(argv[1], "identity-profile")){
   char why[256];profile_input=argv[3];if(cpr_load(argv[3],argv[4],&profile_data,why,sizeof why))die(why);
   if(!realpath(cpr_get(&profile_data,"candidate-path"),product)||!realpath(cpr_get(&profile_data,"record-path"),configured_record))die("candidate-profile-path");
   char *v[]={argv[0],"identity",argv[2],(char *)cpr_get(&profile_data,"candidate-sha256"),(char *)cpr_get(&profile_data,"record-sha256"),(char *)cpr_get(&profile_data,"source-sid"),(char *)cpr_get(&profile_data,"verification-commit"),(char *)cpr_get(&profile_data,"plan-sha256"),(char *)cpr_get(&profile_data,"negative-commit"),argv[5],0};
   int rc=identity_mode(v);cpr_clear(&profile_data);return rc;
  }
- if(argc==10&&tx_eq(argv[1], "identity", 1L << 20))return identity_mode(argv);
- if(argc==11&&tx_eq(argv[1], "verify", 1L << 20))return verify_mode(argv);
+ if(argc==10&&tx_eqz(argv[1], "identity"))return identity_mode(argv);
+ if(argc==11&&tx_eqz(argv[1], "verify"))return verify_mode(argv);
  die("usage identity ROOT COM REC SID COMMIT PLAN NEG OUT | verify ROOT CAND REC COM RECSHA SID COMMIT PLAN OUT | identity-profile ROOT PROFILE PROFILE_SHA OUT");return 2;
 }

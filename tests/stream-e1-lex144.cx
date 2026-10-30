@@ -28,7 +28,7 @@ static void path(char *p,const char *base,const char *name){if(cx_path_join(p,44
 static char *load(const char *p,size_t *n){struct stat st;if(lstat(p,&st)||!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>8388608)die("bounded-regular-input");char *s=cx_read(p,n);if(!s||*n!=(size_t)st.st_size)die("input-read");return s;}
 static void save(const char *name,const void *p,size_t n){char file[4400];path(file,work,name);int fd=open(file,O_WRONLY|O_CREAT|O_EXCL,0600);if(fd<0)die("exclusive-output");size_t at=0;while(at<n){ssize_t z=write(fd,(const char *)p+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0)die("write");at+=(size_t)z;}if(close(fd))die("close");}
 static void digest(const char *p,char hash[65]){size_t n;char *s=load(p,&n);cx_sha256_hex(s,n,hash);free(s);}
-static void bind(const char *name,const char *p,const char *want){char h[65];digest(p,h);if(want&&!tx_eq(h, want, 1L << 20))die(name);np_puts(&identities,name);np_puts(&identities,"\t");np_puts(&identities,h);np_puts(&identities,"\n");}
+static void bind(const char *name,const char *p,const char *want){char h[65];digest(p,h);if(want&&!tx_eqz(h, want))die(name);np_puts(&identities,name);np_puts(&identities,"\t");np_puts(&identities,h);np_puts(&identities,"\n");}
 static void code_identity(void){for(int i=0;i<(int)(sizeof code_inputs/sizeof code_inputs[0]);i++){char p[4400];path(p,root,code_inputs[i]);bind(code_inputs[i],p,0);}}
 static int expected(int c,int p){
  /* Independently hand specified action rule; no generated/table lookup. */
@@ -36,7 +36,7 @@ static int expected(int c,int p){
  if(c==11)return p==3?3:8;
  const int base[]={0,1,2,3,4,5,-1,8,8,0,9,-1};return base[c];
 }
-static int index(const char *name){for(int i=0;i<states;i++)if(tx_eq(state_names[i], name, 1L << 20))return i;die("required-formal-state-name");return -1;}
+static int index(const char *name){for(int i=0;i<states;i++)if(tx_eqz(state_names[i], name))return i;die("required-formal-state-name");return -1;}
 /* Structural extraction of formal state insertion order. The formal JSON is
  * SHA-pinned; braces/arrays and quoted escapes are walked, not regex matched.
  * tbl's documented missing-target rule appends HALT (the sole absent target).
@@ -49,11 +49,11 @@ static void state_map(const char *json){
   do{char c=*p++;if(!c)die("formal-state-truncated");if(quoted){if(c=='\\'){if(!*p)die("formal-escape");p++;}else if(c=='\"')quoted=0;}else if(c=='\"')quoted=1;else if(c=='['||c=='{')depth++;else if(c==']'||c=='}')depth--;}while(depth);
   if(*p==',')p++;else if(*p!='}')die("formal-state-separator");
  }
- for(int i=0;i<states;i++)if(tx_eq(state_names[i], "HALT", 1L << 20))die("formal-HALT-presence-changed");state_names[states++]="HALT";
+ for(int i=0;i<states;i++)if(tx_eqz(state_names[i], "HALT"))die("formal-HALT-presence-changed");state_names[states++]="HALT";
 }
 static void gold(const char *file){size_t n;char *s=load(file,&n),*line=s;int seen[144]={0},count=0;
  while(*line){char *end=strchr(line,'\n');if(!end)die("gold-final-newline");*end=0;if(*line&&*line!='#'&&strncmp(line,"c\tpeek\t",7)){
-  char *p=strchr(line,'\t');if(!p)die("gold-columns");*p++=0;char *y=strchr(p,'\t');if(!y)die("gold-columns");*y++=0;if(strchr(y,'\t'))die("gold-columns");int c=-1,k=-1;for(int i=0;i<12;i++){if(tx_eq(line, classes[i], 1L << 20))c=i;if(tx_eq(p, classes[i], 1L << 20))k=i;}if(c<0||k<0||seen[c*12+k]++)die("gold-key");char label[150];{if(cx_fmt(label,sizeof label,"hand-oracle.%s.%s",classes[c],classes[k]))die("format-bound");}ck(tx_eq(y, actions[expected(c,k)], 1L << 20),label);count++;
+  char *p=strchr(line,'\t');if(!p)die("gold-columns");*p++=0;char *y=strchr(p,'\t');if(!y)die("gold-columns");*y++=0;if(strchr(y,'\t'))die("gold-columns");int c=-1,k=-1;for(int i=0;i<12;i++){if(tx_eqz(line, classes[i]))c=i;if(tx_eqz(p, classes[i]))k=i;}if(c<0||k<0||seen[c*12+k]++)die("gold-key");char label[150];{if(cx_fmt(label,sizeof label,"hand-oracle.%s.%s",classes[c],classes[k]))die("format-bound");}ck(tx_eqz(y, actions[expected(c,k)]),label);count++;
  }line=end+1;}
  ck(count==144,"hand-oracle.all-144-distinct-gold-keys");free(s);
 }
