@@ -624,6 +624,68 @@ static void modelbindings_template(Ob *o) {
     }
 }
 
+/* k2-unitlocations: the located unit map storage key. */
+static void k2_unitlocations(Ob *o) {
+    ob_z(o, "# Located unit map storage key; actions live in unitlocations-manifest.tsv.\n=MAPS\tint\t");
+    ob_int(o, 49L << 40); ob_z(o, "\n");
+}
+
+/* k2-strings: string rejection text and escape data from exec/facts/strings.tsv (dict semantics: first
+   position, last value), escapes for 0-7 and x excluded, and TK_STR from parse-constants (raw text). */
+static void k2_strings(Ob *o) {
+    static char *rn[256], *rv[256], *ek[256];
+    static int ev[256];
+    int nr = 0, ne = 0, i, j;
+    Lines L = fg_lines("exec/facts/strings.tsv");
+    for (i = 0; i < L.n; i++) {
+        char *cells[4], *line = fg_dupz(L.l[i]);
+        int nc;
+        if (!*line || line[0] == '#') continue;
+        nc = fg_split(line, cells, 3);
+        if (nc < 0) { /* a third tab belongs to the value: split(..., 2) */ }
+        if (nc != 3) continue;
+        if (tx_eq(cells[0], "reject", 8)) {
+            char *v = jstr(cells[2], tx_len(cells[2], FG_CAP));
+            if (!v) fg_die("reject value is not a JSON string", cells[2]);
+            for (j = 0; j < nr; j++) if (tx_eq(rn[j], cells[1], FG_CAP)) break;
+            if (j == nr) { if (nr == 256) fg_die("too many rejects", 0); rn[nr++] = cells[1]; }
+            rv[j] = v;
+        } else if (tx_eq(cells[0], "escape", 8)) {
+            char *k = jstr(cells[1], tx_len(cells[1], FG_CAP)), *end;
+            long v = strtol(cells[2], &end, 10);
+            if (!k || tx_len(k, 4) != 1 || end == cells[2] || *end) fg_die("bad escape row", L.l[i]);
+            for (j = 0; j < ne; j++) if (ek[j][0] == k[0]) break;
+            if (j == ne) { if (ne == 256) fg_die("too many escapes", 0); ek[ne++] = k; }
+            ev[j] = (int)v;
+        }
+    }
+    ob_z(o, "=rej\tjson\t{");
+    for (i = 0; i < nr; i++) { if (i) ob_z(o, ","); ob_str(o, rn[i]); ob_z(o, ":"); ob_str(o, rv[i]); }
+    ob_z(o, "}\n=escape\tjson\t[");
+    {
+        int first = 1;
+        for (i = 0; i < ne; i++) {
+            if (tx_chr("01234567x", 9, ek[i][0]) >= 0) continue;
+            if (!first) ob_z(o, ",");
+            ob_z(o, "{\"byte\":"); ob_int(o, (unsigned char)ek[i][0]); ob_z(o, ",\"value\":"); ob_int(o, ev[i]); ob_z(o, "}");
+            first = 0;
+        }
+        ob_z(o, "]\n=escbytes\tjson\t[");
+        first = 1;
+        for (i = 0; i < ne; i++) {
+            if (tx_chr("01234567x", 9, ek[i][0]) >= 0) continue;
+            if (!first) ob_z(o, ",");
+            ob_int(o, (unsigned char)ek[i][0]); first = 0;
+        }
+        ob_z(o, "]\n");
+    }
+    {
+        static char *k[512], *v[512];
+        int n = fg_pairs("exec/facts/parse-constants.tsv", k, v, 512);
+        ob_z(o, "=TK_STR\tint\t"); ob_z(o, fg_pair(k, v, n, "TK_STR")); ob_z(o, "\n");
+    }
+}
+
 typedef struct { const char *stem; const char *inputs[8]; void (*produce)(Ob *); } Table;
 static const Table fg_tables[] = {
     {"opt-gen", {"weights/gold/peep.tsv", "weights/gold/opinfo.tsv", "exec/facts/opt-gen-constants.tsv",
@@ -634,6 +696,8 @@ static const Table fg_tables[] = {
     {"structreturnexpr", {"exec/facts/parse-constants.tsv", "tools/facts-gen.cx", 0}, struct_return_expr},
     {"k2-constexpr", {"exec/facts/parse-words.tsv", "weights/gold/prec.tsv", "exec/facts/parse-constants.tsv",
                       "exec/parse2/constexpr-operators.tsv", "exec/parse2/constexpr-tokens.tsv", "tools/facts-gen.cx", 0}, k2_constexpr},
+    {"k2-unitlocations", {"tools/facts-gen.cx", 0}, k2_unitlocations},
+    {"k2-strings", {"exec/facts/strings.tsv", "exec/facts/parse-constants.tsv", "tools/facts-gen.cx", 0}, k2_strings},
     {0, {0}, 0}
 };
 
@@ -654,8 +718,12 @@ static void fg_render(const Table *t, Ob *head, Ob *body) {
 }
 
 static long fg_body_start(const char *s, long n) {       /* offset of the first line not starting with '#' */
-    long at = 0;
-    while (at < n && s[at] == '#') { long off = tx_chr(s + at, n - at, '\n'); if (off < 0) return n; at += off + 1; }
+    long at = 0;                         /* header = the writer line and the "# input " lines */
+    while (at < n && (tx_prefix(s + at, n - at, "# exec/facts/", 13) || tx_prefix(s + at, n - at, "# input ", 8))) {
+        long off = tx_chr(s + at, n - at, '\n');
+        if (off < 0) return n;
+        at += off + 1;
+    }
     return at;
 }
 

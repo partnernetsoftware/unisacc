@@ -1435,33 +1435,7 @@ TABLES.append(("enc-arm", ["unisa/catalog.py", "unisa/image/pe.py", "exec/facts/
                            "exec/facts/enc-armlayout-headers.tsv", "exec/facts/enc-armlayout-targets.tsv",
                            "exec/facts/enc-armwin-keys.tsv", "exec/facts/enc-armwin-reset.tsv", "exec/facts/export.py"], armentry))
 
-def k2strings():
-    """String rejection text and escape data from the existing domain declarations."""
-    records = [ln.split("\t", 2) for ln in (ROOT / "exec/facts/strings.tsv").read_text().splitlines()
-               if ln and not ln.startswith("#")]
-    reject = {name: json.loads(value) for kind, name, value in records if kind == "reject"}
-    escape = {json.loads(name): int(value) for kind, name, value in records if kind == "escape"}
-    reserved = {ord(c) for c in "01234567x"}
-    entries = [{"byte": ord(k), "value": v} for k, v in escape.items() if ord(k) not in reserved]
-    parse_constants = dict(ln.split("\t", 1) for ln in (ROOT / "exec/facts/parse-constants.tsv").read_text().splitlines()
-                           if ln and not ln.startswith("#"))
-    compact = lambda value: json.dumps(value, separators=(",", ":"))
-    return ["=rej\tjson\t" + compact(reject), "=escape\tjson\t" + compact(entries),
-            "=escbytes\tjson\t" + compact([row["byte"] for row in entries]),
-            "=TK_STR\tint\t" + parse_constants["TK_STR"]]
-
-
-TABLES.append(("k2-strings", ["exec/facts/strings.tsv",
-                              "exec/facts/parse-constants.tsv", "exec/facts/export.py"], k2strings))
-
-
-def k2unitlocations():
-    """Storage key for located unit framing; transition actions stay in the manifest."""
-    return ["# Located unit map storage key; actions live in unitlocations-manifest.tsv.",
-            "=MAPS\tint\t" + str(49 << 40)]
-
-
-TABLES.append(("k2-unitlocations", ["exec/facts/export.py"], k2unitlocations))
+# k2-strings and k2-unitlocations moved to tools/facts-gen.cx on 2026-10-30.
 
 
 def k2membercontrol():
