@@ -120,6 +120,27 @@ static void key_source(const char *dir,int keylen,char *src_name,int cap){
  if(cx_fmt(p,sizeof p,"%s/%s",dir,name))die("key header");save(p,"int v=1;\n",9);
  char body[700];if(cx_fmt(src_name,cap,"m%d.c",keylen)||cx_fmt(p,sizeof p,"%s/%s",dir,src_name)||cx_fmt(body,sizeof body,"#include \"%s\"\nint main(void){return v;}\n",name))die("key source");save(p,body,tx_len(body,sizeof body));}
 static np_result key_run(const char *dir,const char *ledger,const char *capture,const char *srcname,const char *name){char *v[20];int n=command_prefix(v,8);if(ledger){v[n++]="--strict-resource-flow";v[n++]="--resource-ledger";v[n++]=(char *)ledger;}v[n++]="-O0";v[n++]="-b";v[n++]="lnx/x86_64";v[n++]="-S";v[n++]=(char *)srcname;v[n++]="-o";v[n++]="-";v[n]=0;return command(v,dir,capture,8,name);}
+/* ri.class.inc-quote.MISSING: the quote-include capture as an SC1 map (#SC1, first row per key) replays exactly;
+   without its \0inc/q/ row the strict run is refused MISSING_EXPLICIT_RESOURCE naming the hex key, with no output */
+static void sc1_map(const char *t,long n,int drop_inc,np_buf *out){
+ char seen[64][1100];int ns=0;long at=0;
+ while(at<n){long e=tx_chr(t+at,n-at,'\n'),l=e<0?n-at:e,tab=tx_chr(t+at,l,'\t');const char *s=t+at;at+=l+1;
+  if(tx_prefix(s,l,"#SC2\t",5)){np_put(out,"#SC1",4);np_put(out,s+4,(size_t)(l-4));np_put(out,"\n",1);continue;}
+  if(tab<=0||tab>=1100)continue;
+  if(drop_inc&&tx_prefix(s,tab,"00696e632f712f",14))continue;
+  int dup=0;for(int k=0;k<ns;k++)if(tx_same(seen[k],tx_len(seen[k],1100),s,tab))dup=1;if(dup)continue;
+  if(ns<64){tx_copy(seen[ns],1100,s,tab);ns++;}
+  np_put(out,s,(size_t)l);np_put(out,"\n",1);}
+}
+static void inc_quote_missing(const char *dir,const char *cap,const char *srcname){
+ size_t tn;char p[4400],keep[4400],full[4400],missing[4400];path(p,sizeof p,cap,"resources.tsv");char *t=load(p,&tn);
+ np_buf a={0},b={0};sc1_map(t,(long)tn,0,&a);sc1_map(t,(long)tn,1,&b);mm_free(t);
+ if(tx_copy(keep,sizeof keep,capdir,tx_len(capdir,sizeof capdir))||tx_copy(capdir,sizeof capdir,cap,tx_len(cap,4400)))die("capdir");
+ material("inc-quote-sc1",a.p,a.n,full);material("inc-quote-missing",b.p,b.n,missing);
+ if(tx_copy(capdir,sizeof capdir,keep,tx_len(keep,sizeof keep)))die("capdir");mm_free(a.p);mm_free(b.p);
+ np_result r=key_run(dir,full,0,srcname,"inc-quote-sc1");ck(r.rc==0&&!r.errn&&r.outn>0,"inc-quote-sc1-map-accept");np_free(&r);
+ r=key_run(dir,missing,0,srcname,"inc-quote-missing");ck(r.rc==2&&!r.outn&&tx_find(r.err,(long)r.errn,"MISSING_EXPLICIT_RESOURCE 00696e632f712f",40)>=0,"inc-quote-missing-refused");np_free(&r);
+}
 static void key_length_bound(void){
  char dir[4400],s512[32],s513[32],cap512[4400],cap513[4400],p[4400];path(dir,sizeof dir,work,"keylen");if(sy_mkdir(dir,0700))die("keylen dir");
  key_source(dir,512,s512,sizeof s512);key_source(dir,513,s513,sizeof s513);path(cap512,sizeof cap512,dir,"cap512");path(cap513,sizeof cap513,dir,"cap513");
@@ -132,6 +153,7 @@ static void key_length_bound(void){
  char keep[4400];if(tx_copy(keep,sizeof keep,capdir,tx_len(capdir,sizeof capdir))||tx_copy(capdir,sizeof capdir,cap512,tx_len(cap512,sizeof cap512)))die("capdir");
  char ledger513[4400];material("keylen-strict-513",table,tn,ledger513);if(tx_copy(capdir,sizeof capdir,keep,tx_len(keep,sizeof keep)))die("capdir");mm_free(table);
  np_result d=key_run(dir,ledger513,0,s513,"key-513-strict");ck(d.rc==2&&!d.outn&&tx_find(d.err,(long)d.errn,"resource key too long",21)>=0,"key-513-strict-refused");np_free(&d);
+ inc_quote_missing(dir,cap512,s512);
 }
 /* ri.frame.bytes-length-mismatch: a 4-byte blob declared as 3 (blob longer) or 5 (blob shorter) is refused by the
    length check, which runs before the digest check, naming the key, with no output */
