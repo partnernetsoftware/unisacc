@@ -1,0 +1,145 @@
+/* cxplatform.cx -- ratchet: platform conditionals and raw system calls stay in the bottom layer.
+ *
+ *   sh ./unisacc.com tests/cxplatform.cx -- --check | --write | --init      (from the repo root)
+ *
+ * In the cx architecture the differences between targets live in L0 (cx/sys, cx/mem, cx/text and the
+ * other bottom-layer files of tests/cxraw-layers.tsv, plus include/ and tools/cxcc-hostinc/) or in the
+ * model tables -- never as `#if defined(__linux__)` branches or `__syscall6(NR, ...)` calls in upper-layer
+ * code, which is how traditional C grows.  Per tracked .cx file outside that layer (archive/ and ujs/ are
+ * out of scope) this counts
+ *   - preprocessor conditionals (#if, #ifdef, #ifndef, #elif) that name a platform macro
+ *     (_WIN32, _WIN64, __linux__, __APPLE__, __MACH__, __x86_64__, __aarch64__, __arm64__, _M_X64,
+ *     _M_ARM64, __FreeBSD__, __unix__), and
+ *   - raw system calls: the token __syscall0..6 outside comments.
+ * tests/cxplatform.tsv holds the debt (FILE<TAB>COUNT); it only goes down, and a new file must be 0.
+ * --check: rc 1 naming each file above its row or without a row and COUNT > 0.  --write: rewrite the
+ * baseline only when nothing is above it (it ratchets down).  --init: write the first baseline; refused
+ * when the file exists. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use text.num
+#pragma unisa use mem.heap
+
+#define BASELINE "tests/cxplatform.tsv"
+#define LAYERS "tests/cxraw-layers.tsv"
+#define MAXROWS 4096
+
+typedef struct { char *path; long count; int used; } Row;
+static Row rows[MAXROWS]; static int nrows;
+static char *layers; static size_t layers_n;
+
+static const char *plat[] = {"_WIN32", "_WIN64", "__linux__", "__APPLE__", "__MACH__", "__x86_64__", "__aarch64__",
+                             "__arm64__", "_M_X64", "_M_ARM64", "__FreeBSD__", "__unix__", 0};
+
+static int word_at(const char *b, long n, long i, const char *w) {   /* w at i, not part of a longer identifier */
+    long wl = tx_len(w, 64);
+    if (i + wl > n || !tx_same(b + i, wl, w, wl)) return 0;
+    if (i > 0 && ((b[i - 1] >= 'a' && b[i - 1] <= 'z') || (b[i - 1] >= 'A' && b[i - 1] <= 'Z') || (b[i - 1] >= '0' && b[i - 1] <= '9') || b[i - 1] == '_')) return 0;
+    if (i + wl < n) { char c = b[i + wl]; if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') return 0; }
+    return 1;
+}
+
+static long count(const char *b, long n) {
+    long i = 0, c = 0; int block = 0;
+    while (i < n) {
+        long e = tx_chr(b + i, n - i, '\n'), ln = e < 0 ? n - i : e, k = 0;
+        const char *l = b + i;
+        while (k < ln && (l[k] == ' ' || l[k] == '\t')) k++;
+        if (!block && k < ln && l[k] == '#') {   /* a preprocessor conditional naming a platform macro */
+            long j = k + 1; while (j < ln && (l[j] == ' ' || l[j] == '\t')) j++;
+            if (tx_prefix(l + j, ln - j, "if", 2) || tx_prefix(l + j, ln - j, "elif", 4)) {
+                long q; int p, hit = 0;
+                for (q = j; q < ln && !hit; q++) for (p = 0; plat[p] && !hit; p++) if (word_at(l, ln, q, plat[p])) hit = 1;
+                c += hit;
+            }
+        } else {   /* raw system calls outside comments */
+            long q;
+            for (q = 0; q < ln; q++) {
+                if (block) { if (q + 1 < ln && l[q] == '*' && l[q + 1] == '/') { block = 0; q++; } continue; }
+                if (q + 1 < ln && l[q] == '/' && l[q + 1] == '*') { block = 1; q++; continue; }
+                if (q + 1 < ln && l[q] == '/' && l[q + 1] == '/') break;
+                if (tx_prefix(l + q, ln - q, "__syscall", 9) && q + 9 < ln && l[q + 9] >= '0' && l[q + 9] <= '6' && word_at(l, ln, q, "__syscall") == 0) {
+                    /* __syscallN: word_at refuses the bare prefix, so check the boundary by hand */
+                    if (q == 0 || !((l[q - 1] >= 'a' && l[q - 1] <= 'z') || (l[q - 1] >= 'A' && l[q - 1] <= 'Z') || l[q - 1] == '_')) c++;
+                }
+            }
+        }
+        i += ln + 1;
+    }
+    return c;
+}
+
+static int bottom(const char *p) {   /* tests/cxraw-layers.tsv prefixes and exact files, plus include/ and tools/cxcc-hostinc/ */
+    long at = 0, pl = tx_len(p, 4096);
+    if (tx_prefix(p, pl, "include/", 8) || tx_prefix(p, pl, "tools/cxcc-hostinc/", 19)) return 1;
+    while (at < (long)layers_n) {
+        long e = tx_chr(layers + at, (long)layers_n - at, '\n'), ln = e < 0 ? (long)layers_n - at : e;
+        const char *l = layers + at;
+        if (ln > 0 && l[0] != '#') {
+            long t = tx_chr(l, ln, '\t'); if (t >= 0) ln = t;
+            if (l[ln - 1] == '/' ? tx_prefix(p, pl, l, ln) : tx_same(p, pl, l, ln)) return 1;
+        }
+        at += (e < 0 ? ln : e) + 1;
+    }
+    return 0;
+}
+
+static Row *find(const char *p, long pl) { int k; for (k = 0; k < nrows; k++) if (tx_same(rows[k].path, tx_len(rows[k].path, 4096), p, pl)) return &rows[k]; return 0; }
+
+int main(int argc, char **argv) {
+    char *list = 0, *out = 0; size_t ln = 0; long at, olen = 0, ocap = 1 << 16, total = 0, base = 0; int files = 0, over = 0, under = 0, k, mode, rc;
+    if (argc != 2) { sy_eprintf("usage: cxplatform.cx --check | --write | --init\n"); return 2; }
+    mode = tx_eqz(argv[1], "--check") ? 0 : tx_eqz(argv[1], "--write") ? 1 : tx_eqz(argv[1], "--init") ? 2 : -1;
+    if (mode < 0) { sy_eprintf("usage: cxplatform.cx --check | --write | --init\n"); return 2; }
+    layers = cx_read(LAYERS, &layers_n); if (!layers) { sy_eprintf("cxplatform: cannot read %s\n", LAYERS); return 2; }
+    {   size_t bn; char *b = cx_read(BASELINE, &bn);
+        if (mode == 2 && b) { sy_eprintf("cxplatform: --init refused, %s exists\n", BASELINE); return 2; }
+        if (mode != 2 && !b) { sy_eprintf("cxplatform: cannot read %s (run --init once)\n", BASELINE); return 2; }
+        for (at = 0; b && at < (long)bn; ) {
+            long e = tx_chr(b + at, (long)bn - at, '\n'), l = e < 0 ? (long)bn - at : e, t;
+            if (l > 0 && b[at] != '#' && (t = tx_chr(b + at, l, '\t')) > 0) {
+                if (nrows == MAXROWS) { sy_eprintf("cxplatform: too many rows\n"); return 2; }
+                rows[nrows].path = mm_alloc(t + 1); tx_copy(rows[nrows].path, t + 1, b + at, t);
+                {   char num[32]; tx_copy(num, sizeof num, b + at + t + 1, l - t - 1 < 31 ? l - t - 1 : 31); rows[nrows].count = tx_strtol(num, 0, 10); }
+                base += rows[nrows].count; nrows++;
+            }
+            at += l + 1;
+        }
+    }
+    rc = cx_run("git ls-files -s -z -- '*.cx' ':(exclude)archive/' ':(exclude)ujs/'", &list, &ln);
+    if (rc != 0 || !list) { sy_eprintf("cxplatform: git ls-files failed\n"); return 2; }
+    out = mm_alloc(ocap); if (!out) return 2;
+    {   const char *h = "# tests/cxplatform.tsv -- tests/cxplatform.cx: per upper-layer .cx file, platform conditionals plus raw\n"
+                        "# system calls.  Debt only goes down; no row means 0 (a new file must be 0).  L0: tests/cxraw-layers.tsv.\n";
+        long hl = tx_len(h, 4096); tx_copy(out, ocap, h, hl); olen = hl; }
+    for (at = 0; at < (long)ln; ) {
+        char *rec = list + at, *p; long rl = tx_len(rec, (long)ln - at), tab = tx_chr(rec, rl, '\t'), c, pl; size_t sn; char *src; Row *r;
+        at += rl + 1;
+        if (tab < 0 || tx_prefix(rec, rl, "120000", 6)) continue;   /* symlinks count under their target */
+        p = rec + tab + 1; pl = rl - tab - 1;
+        if (bottom(p)) continue;
+        src = cx_read(p, &sn); c = src ? count(src, (long)sn) : 0; if (src) mm_free(src);
+        files++; total += c;
+        r = find(p, pl); if (r) r->used = 1;
+        if (mode != 2 && c > (r ? r->count : 0)) {
+            if (r) sy_printf("cxplatform: %s has %ld platform conditionals/raw syscalls, baseline %ld\n", p, c, r->count);
+            else sy_printf("cxplatform: %s has %ld platform conditionals/raw syscalls and no baseline row (a new file must be 0)\n", p, c);
+            over++;
+        } else if (r && c < r->count) under++;
+        if (c > 0 && (mode == 2 || c <= (r ? r->count : 0))) {
+            char line[4200]; int k2 = cx_fmt(line, sizeof line, "%s\t%ld\n", p, c); long ll = tx_len(line, sizeof line);
+            if (k2) continue;
+            if (olen + ll + 1 > ocap) { char *g = mm_grow(out, ocap * 2 + ll); if (!g) return 2; out = g; ocap = ocap * 2 + ll; }
+            tx_copy(out + olen, ocap - olen, line, ll); olen += ll;
+        }
+    }
+    for (k = 0; k < nrows; k++) if (!rows[k].used) sy_printf("cxplatform: stale row %s (--write drops it)\n", rows[k].path);
+    sy_printf("cxplatform: %s: %d .cx files, %ld platform conditionals/raw syscalls (baseline %ld); %d above baseline, %d below (--write ratchets down)\n",
+              over ? "FAIL" : "ok", files, total, base, over, under);
+    if (mode == 0) return over ? 1 : 0;
+    if (over) { sy_eprintf("cxplatform: --write refused, %s unchanged\n", BASELINE); return 1; }
+    if (cx_write(BASELINE, out, (size_t)olen) != 0) { sy_eprintf("cxplatform: cannot write %s\n", BASELINE); return 2; }
+    sy_printf("cxplatform: wrote %s\n", BASELINE);
+    return 0;
+}

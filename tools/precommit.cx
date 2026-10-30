@@ -1,0 +1,62 @@
+/* tools/precommit.cx -- the commit gate: a commit may not take a .cx file over any ratchet.
+ *
+ *   sh ./unisacc.com tools/precommit.cx            (run by .git/hooks/pre-commit, a three-line sh entry: exec sh ./unisacc.com tools/precommit.cx)
+ *
+ * Lists the .cx paths staged in the index being committed (git diff --cached, which follows GIT_INDEX_FILE,
+ * so tools/commit-own.cx's private index is gated too), runs tools/ratchets.cx once, and refuses the commit
+ * (exit 1) when any offending ratchet row names one of those paths: a new #include, a new direct libc/POSIX
+ * call, a new platform #if or raw syscall outside L0, a new unbounded call -- the drift back to traditional C.
+ * Rows about files not in this commit (other agents' work) do not block it.  No staged .cx: exit 0 at once.
+ * Prints PRECOMMIT<TAB>staged_cx=N<TAB>blocked=B. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static char *slurp(char **argv, long *n) {
+    int ofd, pid; long cap = 1 << 16, r; char *b = mm_alloc(cap);
+    *n = 0;
+    if (!b) return 0;
+    pid = sy_spawn_pipe(argv, 0, 0, &ofd, 0);
+    if (pid < 0) return 0;
+    while ((r = sy_read(ofd, b + *n, cap - 1 - *n)) > 0) {
+        *n += r;
+        if (*n + 1 >= cap) { char *g = mm_grow(b, cap * 2); if (!g) return 0; b = g; cap *= 2; }
+    }
+    sy_close(ofd); sy_wait_status(pid, 0, 0, 0, 0);
+    b[*n] = 0;
+    return b;
+}
+
+int main(void) {
+    long sn, rn, at; int staged = 0, blocked = 0;
+    char *gv[] = {"git", "diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z", "--", "*.cx", 0};
+    char *rv[] = {"sh", "./unisacc.com", "tools/ratchets.cx", 0};
+    char *names = slurp(gv, &sn), *rows;
+    if (!names) { sy_eprintf("precommit: git diff --cached failed\n"); return 1; }
+    for (at = 0; at < sn; ) { long l = tx_len(names + at, sn - at); if (l <= 0) break; staged++; at += l + 1; }
+    if (!staged) { sy_printf("PRECOMMIT\tstaged_cx=0\tblocked=0\n"); return 0; }
+    rows = slurp(rv, &rn);
+    if (!rows) { sy_eprintf("precommit: tools/ratchets.cx did not run\n"); return 1; }
+    for (at = 0; at < rn; ) {   /* offending rows are indented by two spaces: "  NAME: PATH has ..." */
+        long e = tx_chr(rows + at, rn - at, '\n'), l = e < 0 ? rn - at : e, s;
+        const char *r = rows + at;
+        if (l > 2 && r[0] == ' ' && r[1] == ' ' && (s = tx_chr(r, l, ':')) > 0 && s + 2 < l) {
+            long p = s + 2, q, a2;
+            if (tx_prefix(r + p, l - p, "module ", 7)) p += 7;
+            q = p; while (q < l && r[q] != ' ') q++;
+            for (a2 = 0; a2 < sn; ) {
+                long nl = tx_len(names + a2, sn - a2);
+                if (nl <= 0) break;
+                if (tx_same(names + a2, nl, r + p, q - p)) { sy_eprintf("precommit: blocked:%.*s\n", (int)(l - 1), r + 1); blocked++; break; }
+                a2 += nl + 1;
+            }
+        }
+        at += l + 1;
+    }
+    sy_printf("PRECOMMIT\tstaged_cx=%d\tblocked=%d\n", staged, blocked);
+    if (blocked) sy_eprintf("precommit: this commit takes cx files over a ratchet (traditional C back in). Use cx/sys, cx/mem, cx/text\n"
+                            "  (sy_*/mm_*/tx_*), put platform differences in L0 or tables, and see prd.md 能力速查; run tools/ratchets.cx.\n");
+    return blocked ? 1 : 0;
+}
