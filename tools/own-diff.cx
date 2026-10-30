@@ -1,0 +1,105 @@
+/* tools/own-diff.cx -- before committing a shared file by path, show the changed lines that are not yours.
+ *
+ *   sh ./unisacc.com tools/own-diff.cx -- FILE KEY...        (a KEY is a substring of every line you changed)
+ *   sh ./unisacc.com tools/own-diff.cx -- --base BASEFILE FILE KEY...   (compare with a saved copy, not HEAD)
+ *
+ * Compares FILE in the working tree with FILE at HEAD (git show HEAD:FILE; an untracked FILE has an empty
+ * base) as multisets of lines: a line is ADDED when the working tree has more copies than the base, REMOVED
+ * when fewer.  Every added or removed line that contains none of the KEYs is printed as
+ *   FOREIGN<TAB>+|-<TAB>line
+ * and ends with OWN_DIFF<TAB>own=N<TAB>foreign=M; exit 0 when M is 0, 1 when not, 2 on usage or I/O.
+ * Use it on tests/batches.tsv, tests/coverage.tsv, prd.md and other files several agents append to: a
+ * commit by path takes the whole file, including lines another agent appended a minute ago. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+typedef struct { const char *p; long n; int used; } Ln;
+
+static void od_die(const char *a, const char *b) { fprintf(stderr, "own-diff: %s%s%s\n", a, b ? ": " : "", b ? b : ""); exit(2); }
+
+static char *slurp_cmd(char **argv, long *n) {
+    int ofd, pid; long cap = 1 << 16, r; char *b = mm_alloc(cap);
+    *n = 0;
+    pid = sy_spawn_pipe(argv, 0, 0, &ofd, 0);
+    if (pid < 0 || !b) return 0;
+    while ((r = sy_read(ofd, b + *n, cap - 1 - *n)) > 0) {
+        *n += r;
+        if (*n + 1 >= cap) { char *g = mm_grow(b, cap * 2); if (!g) od_die("out of memory", 0); b = g; cap *= 2; }
+    }
+    sy_close(ofd); sy_wait_status(pid, 0, 0, 0, 0);
+    b[*n] = 0;
+    return b;
+}
+
+static Ln *split(const char *b, long n, long *count) {
+    long at = 0, k = 0, cap = 1024; Ln *v = mm_alloc(cap * (long)sizeof *v);
+    if (!v) od_die("out of memory", 0);
+    while (at < n) {
+        long e = tx_chr(b + at, n - at, '\n'), ln = e < 0 ? n - at : e;
+        if (k == cap) { Ln *g = mm_grow(v, 2 * cap * (long)sizeof *v); if (!g) od_die("out of memory", 0); v = g; cap *= 2; }
+        v[k].p = b + at; v[k].n = ln; v[k].used = 0; k++;
+        at += ln + 1;
+    }
+    *count = k;
+    return v;
+}
+
+static int mine(const Ln *l, char **keys, int nk) {
+    int k;
+    for (k = 0; k < nk; k++) if (tx_find(l->p, l->n, keys[k], tx_len(keys[k], 4096)) >= 0) return 1;
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    const char *file, *emit = 0; char *base = 0, *work; long bn = 0, i, j, nb, nw; size_t wn; Ln *b, *w; int a = 1, own = 0, foreign = 0, nk;
+    if (argc - a >= 2 && tx_eqz(argv[a], "--emit")) { emit = argv[a + 1]; a += 2; }
+    if (argc - a >= 2 && tx_eqz(argv[a], "--base")) {
+        size_t z; base = cx_read(argv[a + 1], &z); if (!base) od_die("cannot read", argv[a + 1]); bn = (long)z; a += 2;
+    }
+    if (argc - a < 2) od_die("usage", "[--emit OUT] [--base BASEFILE] FILE KEY...");
+    file = argv[a]; nk = argc - a - 1;
+    work = cx_read(file, &wn); if (!work) od_die("cannot read", file);
+    if (!base) {
+        char spec[4400]; char *gv[] = {"git", "show", spec, 0};
+        if (tx_len(file, 4300) < 0) od_die("path too long", file);
+        tx_copy(spec, sizeof spec, "HEAD:", 5); tx_copy(spec + 5, sizeof spec - 5, file, tx_len(file, 4300));
+        base = slurp_cmd(gv, &bn);   /* an untracked file prints nothing on stdout: an empty base */
+        if (!base) od_die("cannot run git show", file);
+    }
+    b = split(base, bn, &nb); w = split(work, (long)wn, &nw);
+    for (i = 0; i < nw; i++)   /* pair equal lines; what is left over is added (work) or removed (base) */
+        for (j = 0; j < nb; j++)
+            if (!b[j].used && tx_same(w[i].p, w[i].n, b[j].p, b[j].n)) { b[j].used = 1; w[i].used = 1; break; }
+    for (i = 0; i < nw; i++) if (!w[i].used) { if (mine(&w[i], argv + a + 1, nk)) own++; else { foreign++; printf("FOREIGN\t+\t%.*s\n", (int)w[i].n, w[i].p); } }
+    for (j = 0; j < nb; j++) if (!b[j].used) { if (mine(&b[j], argv + a + 1, nk)) own++; else { foreign++; printf("FOREIGN\t-\t%.*s\n", (int)b[j].n, b[j].p); } }
+    if (emit) {
+        /* the base with only the own changes: own removed lines dropped, foreign removed lines kept, own added
+           lines placed after the base line their preceding unchanged work line was paired with, foreign added
+           lines left out.  This is what commit-own commits for FILE. */
+        long *pair = mm_alloc((nw + 1) * (long)sizeof(long)), *after = mm_alloc((nw + 1) * (long)sizeof(long)), last = -1;
+        int fd;
+        if (!pair || !after) od_die("out of memory", 0);
+        for (i = 0; i < nw; i++) pair[i] = -1;
+        {   int *taken = mm_alloc((nb + 1) * (long)sizeof(int));   /* redo the pairing, remembering which base line */
+            if (!taken) od_die("out of memory", 0);
+            for (j = 0; j < nb; j++) taken[j] = 0;
+            for (i = 0; i < nw; i++) for (j = 0; j < nb; j++)
+                if (!taken[j] && tx_same(w[i].p, w[i].n, b[j].p, b[j].n)) { taken[j] = 1; pair[i] = j; break; }
+        }
+        for (i = 0; i < nw; i++) { if (pair[i] >= 0) last = pair[i]; after[i] = last; }
+        fd = sy_open_new(emit, 0644);
+        if (fd < 0) od_die("cannot write", emit);
+        for (i = 0; i < nw; i++)   /* own added lines that come before every unchanged line */
+            if (pair[i] < 0 && after[i] < 0 && mine(&w[i], argv + a + 1, nk)) { sy_write_all(fd, w[i].p, w[i].n); sy_write_all(fd, "\n", 1); }
+        for (j = 0; j < nb; j++) {
+            if (b[j].used || !mine(&b[j], argv + a + 1, nk)) { sy_write_all(fd, b[j].p, b[j].n); sy_write_all(fd, "\n", 1); }
+            for (i = 0; i < nw; i++)
+                if (pair[i] < 0 && after[i] == j && mine(&w[i], argv + a + 1, nk)) { sy_write_all(fd, w[i].p, w[i].n); sy_write_all(fd, "\n", 1); }
+        }
+        sy_close(fd);
+    }
+    printf("OWN_DIFF\town=%d\tforeign=%d\n", own, foreign);
+    return foreign ? 1 : 0;
+}

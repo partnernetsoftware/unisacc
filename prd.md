@@ -35,6 +35,8 @@
 | 改名（标识符，全仓） | `refactor.cx -- rename [--auto] OLD NEW (FILE... \| --tracked) > C.tsv`，再 `apply` 同上 | 定义、函数指针、调用、类型、宏里的 OLD 都改；注释、字符串、更长的标识符不动；保留路径判 skip。行与 find 同格式，apply 照样逐文件核验并可还原。 |
 | 按行段替换（断言两端） | `sh ./unisacc.com tools/edit-span.cx -- FILE FIRST LAST FIRST_TEXT LAST_TEXT REPLACEMENT` | 首末行前缀不符就拒绝、不写盘；适合搬移整段。 |
 | 查某目标不能 lower 的系统调用／ccw 桩 | `sh ./unisacc.com tools/tape-gap.cx -- TAPE TARGET` | 一遍对 `exec/facts/lower-abi.tsv` 的 `@abi` 行，列出无行或 selected 0 的 `.sys` op 与 `__ccw_` 标号；退出 1 表示有缺口。检查：batch `tape-gap-tool`。 |
+| 共享文件里哪些改动不是我的 | `sh ./unisacc.com tools/own-diff.cx -- [--emit OUT] [--base F] FILE KEY...` | 相对 HEAD 的增删行里，不含任何 KEY 的列为 FOREIGN，有就退出 1；`--emit` 写出"HEAD 加上我的改动"。检查：batch `own-diff-tool`。 |
+| 只提交自己的文件和自己的行 | `sh ./unisacc.com tools/commit-own.cx -- -m MSG [--whole PATH...] [--keyed PATH KEY[,KEY...]]...` | 在私有 index 里提交，不碰别人暂存的条目，别人追加的行留在工作区；提交后只在共享 index 无人暂存该路径时同步条目。用于 tests/batches.tsv、tests/coverage.tsv、prd.md 这类多人同改的文件。 |
 | 登记一个检查为测试批次 | `sh ./unisacc.com tools/register.cx -- ID CHECK.cx MARKER "覆盖说明" "文件" [LAYER]` | 追加 batches／coverage 各一行、跑 `--list` 与 `run-batch`；失败只撤回自己追加的两行。已有 ID、缺文件、空 MARKER、字段含 TAB 直接拒绝（退出 2）。检查：batch `register-tool`。 |
 | 改了文件该重跑哪些批次 | `sh ./unisacc.com tools/affected.cx -- --since REV｜--files F...｜--ids ID... [--run -j N]`；反查 `-- --users FILE` | 按 source／`use` 传递闭包（realpath）／根源码字符串字面量点名的路径算受影响批次，约 0.3 秒；`--run` 经 run-batch 并行跑，45 秒后不再启动、余下 `DEFERRED` 用 `--ids` 续跑。检查：batch `affected-tool`。 |
 | 四个仓级棘轮一次跑完 | `sh ./unisacc.com tools/ratchets.cx [-- --only PATH-PREFIX]` | 并行跑 cxraw／cxinclude／cxapis／cxtrunc 的 `--check`，每个一行 RATCHET，只列超基线或缺行的文件（不列 stale 与 below）；全 ok 才退出 0。检查：batch `ratchets-tool`。 |

@@ -1,0 +1,109 @@
+/* tools/commit-own.cx -- commit only your own files and your own lines of shared files, in a shared checkout.
+ *
+ *   sh ./unisacc.com tools/commit-own.cx -- -m MSG [--whole PATH...] [--keyed PATH KEY[,KEY...]]...
+ *
+ * --whole PATH: the working-tree file as it is.  --keyed PATH KEYS: only the lines of PATH you changed, i.e.
+ * the changed lines that contain one of the comma-separated KEYs (tools/own-diff.cx --emit); lines other agents
+ * appended or removed in the working tree stay out of the commit and stay in the working tree.
+ * The commit is built in a private index (out/commit-own-PID.idx: read-tree HEAD, the blobs above), so other
+ * agents' staged entries in the shared index are neither committed nor dropped.  Afterwards each committed
+ * path's entry in the shared index is moved to the new blob only when it still held the old HEAD blob (nobody
+ * had staged that path); otherwise it is left alone and a NOTE line says so.
+ * Prints COMMIT_OWN<TAB>commit=SHA<TAB>paths=N<TAB>foreign_kept=M.  Exit 0, 1 when git refuses, 2 on usage. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+
+#define CO_MAX 64
+
+static void co_die(const char *a, const char *b) { fprintf(stderr, "commit-own: %s%s%s\n", a, b ? ": " : "", b ? b : ""); exit(2); }
+
+/* run ARGV; its stdout (trimmed of the final newline) into OUT; the exit code or -1 */
+static int run(char **argv, char *out, long cap) {
+    int ofd, pid, ex = 0, code = 0, sig = 0; long n = 0, r; char junk[4096];
+    pid = sy_spawn_pipe(argv, 0, 0, &ofd, 0);
+    if (pid < 0) return -1;
+    while ((r = sy_read(ofd, out + n, cap - 1 - n)) > 0) n += r;
+    while (sy_read(ofd, junk, sizeof junk) > 0) {}
+    sy_close(ofd);
+    while (n > 0 && (out[n - 1] == '\n' || out[n - 1] == '\r')) n--;
+    out[n] = 0;
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
+    return code;
+}
+
+/* the blob of PATH at TREE ("HEAD") or in the shared index (tree 0), and its mode; "" when absent */
+static void entry(const char *tree, const char *path, char *blob, char *mode) {
+    char out[8192];
+    blob[0] = 0; mode[0] = 0;
+    if (tree) { char *v[] = {"git", "ls-tree", (char *)tree, "--", (char *)path, 0}; if (run(v, out, sizeof out) != 0) return; }
+    else { char *v[] = {"git", "ls-files", "-s", "--", (char *)path, 0}; if (run(v, out, sizeof out) != 0) return; }
+    /* ls-tree: "MODE blob SHA\tPATH"; ls-files -s: "MODE SHA STAGE\tPATH" */
+    if (tx_len(out, sizeof out) < 50) return;
+    tx_copy(mode, 8, out, 6);
+    if (tree) tx_copy(blob, 41, out + 12, 40); else tx_copy(blob, 41, out + 7, 40);
+}
+
+int main(int argc, char **argv) {
+    const char *msg = 0, *path[CO_MAX], *keys[CO_MAX]; int np = 0, k, a = 1, kept = 0;
+    char idx[400], blob[CO_MAX][64], out[8192], root[4096];
+    while (a < argc) {
+        if (tx_eqz(argv[a], "-m") && a + 1 < argc) { msg = argv[a + 1]; a += 2; }
+        else if (tx_eqz(argv[a], "--whole")) {
+            a++;
+            while (a < argc && argv[a][0] != '-') { if (np == CO_MAX) co_die("too many paths", 0); path[np] = argv[a]; keys[np] = 0; np++; a++; }
+        } else if (tx_eqz(argv[a], "--keyed") && a + 2 < argc) {
+            if (np == CO_MAX) co_die("too many paths", 0);
+            path[np] = argv[a + 1]; keys[np] = argv[a + 2]; np++; a += 3;
+        } else co_die("usage", "-m MSG [--whole PATH...] [--keyed PATH KEY[,KEY...]]...");
+    }
+    if (!msg || !np) co_die("usage", "-m MSG and at least one path");
+    if (sy_realpath(".", root, sizeof root) < 0) co_die("cannot resolve the root", 0);
+    for (k = 0; k < np; k++) {
+        char src[4400];
+        if (!sy_exists(path[k])) co_die("no such file", path[k]);
+        if (keys[k]) {   /* own-diff --emit writes the base with only the KEYed changes */
+            char *ov[64], kc[1024], *p = kc; int n = 0;
+            if (tx_copy(kc, sizeof kc, keys[k], tx_len(keys[k], 1000))) co_die("keys too long", keys[k]);
+            if (tx_snprintf(src, sizeof src, "out/commit-own-%d-%d.part", sy_pid(), k) >= (int)sizeof src) co_die("path", 0);
+            ov[n++] = "sh"; ov[n++] = "./unisacc.com"; ov[n++] = "tools/own-diff.cx"; ov[n++] = "--"; ov[n++] = "--emit"; ov[n++] = src; ov[n++] = (char *)path[k];
+            while (*p && n < 62) { ov[n++] = p; while (*p && *p != ',') p++; if (*p) *p++ = 0; }
+            ov[n] = 0;
+            if (run(ov, out, sizeof out) < 0) co_die("own-diff failed", path[k]);
+            {   long f = 0, at = tx_find(out, tx_len(out, sizeof out), "foreign=", 8); if (at >= 0) f = strtol(out + at + 8, 0, 10); kept += (int)f; }
+        } else tx_copy(src, sizeof src, path[k], tx_len(path[k], 4300));
+        {   char *hv[] = {"git", "hash-object", "-w", "--", src, 0};
+            if (run(hv, blob[k], sizeof blob[k]) != 0 || tx_len(blob[k], 64) != 40) co_die("git hash-object failed", src);
+        }
+        if (keys[k]) sy_unlink(src);
+    }
+    if (tx_snprintf(idx, sizeof idx, "%s/out/commit-own-%d.idx", root, sy_pid()) >= (int)sizeof idx) co_die("path", 0);
+    {   char old[CO_MAX][48], newc[64]; int rc;
+        for (k = 0; k < np; k++) { char m[8]; entry("HEAD", path[k], old[k], m); }
+        sy_setenv("GIT_INDEX_FILE", idx, 1);
+        {   char *v[] = {"git", "read-tree", "HEAD", 0}; if (run(v, out, sizeof out) != 0) { sy_unsetenv("GIT_INDEX_FILE"); co_die("git read-tree failed", 0); } }
+        for (k = 0; k < np; k++) {
+            char info[200], hb[48], hm[8];
+            entry("HEAD", path[k], hb, hm);
+            if (tx_snprintf(info, sizeof info, "%s,%s,%s", hm[0] ? hm : "100644", blob[k], path[k]) >= (int)sizeof info) co_die("path too long", path[k]);
+            {   char *v[] = {"git", "update-index", "--add", "--cacheinfo", info, 0}; if (run(v, out, sizeof out) != 0) { sy_unsetenv("GIT_INDEX_FILE"); co_die("git update-index failed", path[k]); } }
+        }
+        {   char *v[] = {"git", "commit", "-q", "-m", (char *)msg, 0}; rc = run(v, out, sizeof out); }
+        sy_unsetenv("GIT_INDEX_FILE");
+        sy_unlink(idx);
+        if (rc != 0) { fprintf(stderr, "commit-own: git commit refused (rc %d): %s\n", rc, out); return 1; }
+        {   char *v[] = {"git", "rev-parse", "--short=10", "HEAD", 0}; if (run(v, newc, sizeof newc) != 0) newc[0] = 0; }
+        for (k = 0; k < np; k++) {   /* the shared index: move the entry only where nobody had staged the path */
+            char ib[48], im[8], info[200];
+            entry(0, path[k], ib, im);
+            if (!ib[0] || tx_eqz(ib, old[k])) {
+                if (tx_snprintf(info, sizeof info, "%s,%s,%s", im[0] ? im : "100644", blob[k], path[k]) >= (int)sizeof info) continue;
+                {   char *v[] = {"git", "update-index", "--add", "--cacheinfo", info, 0}; run(v, out, sizeof out); }
+            } else printf("NOTE\t%s\tthe shared index has someone's staged version; left as it is\n", path[k]);
+        }
+        printf("COMMIT_OWN\tcommit=%s\tpaths=%d\tforeign_kept=%d\n", newc, np, kept);
+    }
+    return 0;
+}

@@ -1,0 +1,43 @@
+/* Checks tools/own-diff.cx: sh ./unisacc.com tools/check-own-diff.cx   (from the repo root)
+   On tools/own-diff/base.tsv -> work.tsv with KEY "mine-": the added mine-1 row and both sides of the changed
+   mine-2 row are own (3); the added theirs-1 row (+) and the removed theirs-2 row (-) are FOREIGN (2), exit 1.
+   With keys "mine-" and "theirs-" nothing is foreign, exit 0.  A file compared with itself has own=0 foreign=0.
+   Prints PASS/FAIL lines and CHECK_OWN_DIFF<TAB>failed=N. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+
+static int failed;
+static void ck(int ok, const char *name) { if (!ok) failed++; printf("%s\town-diff.%s\n", ok ? "PASS" : "FAIL", name); }
+
+static int od(char **args, char *out, long cap) {
+    char *argv[12]; int i = 0, k, ofd, pid, ex = 0, code = 0, sig = 0; long n = 0, r; char junk[4096];
+    argv[i++] = "sh"; argv[i++] = "./unisacc.com"; argv[i++] = "tools/own-diff.cx"; argv[i++] = "--";
+    for (k = 0; args[k] && i < 11; k++) argv[i++] = args[k];
+    argv[i] = 0;
+    pid = sy_spawn_pipe(argv, 0, 0, &ofd, 0);
+    if (pid < 0) return -1;
+    while ((r = sy_read(ofd, out + n, cap - 1 - n)) > 0) n += r;
+    out[n] = 0;
+    while (sy_read(ofd, junk, sizeof junk) > 0) {}
+    sy_close(ofd);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
+    return code;
+}
+static int has(const char *out, const char *s) { return tx_find(out, tx_len(out, 1 << 16), s, tx_len(s, 512)) >= 0; }
+
+int main(void) {
+    static char o[1 << 16];
+    char *a1[] = {"--base", "tools/own-diff/base.tsv", "tools/own-diff/work.tsv", "mine-", 0};
+    char *a2[] = {"--base", "tools/own-diff/base.tsv", "tools/own-diff/work.tsv", "mine-", "theirs-", 0};
+    char *a3[] = {"--base", "tools/own-diff/work.tsv", "tools/own-diff/work.tsv", "mine-", 0};
+    int rc = od(a1, o, sizeof o);
+    ck(rc == 1 && has(o, "FOREIGN\t+\ttheirs-1\tadded\n") && has(o, "FOREIGN\t-\ttheirs-2\tgone\n") && !has(o, "FOREIGN\t+\tmine") && !has(o, "FOREIGN\t-\tmine")
+       && has(o, "OWN_DIFF\town=3\tforeign=2\n"), "foreign-added-and-removed-reported");
+    rc = od(a2, o, sizeof o);
+    ck(rc == 0 && has(o, "OWN_DIFF\town=5\tforeign=0\n") && !has(o, "FOREIGN"), "all-keys-own");
+    rc = od(a3, o, sizeof o);
+    ck(rc == 0 && has(o, "OWN_DIFF\town=0\tforeign=0\n"), "no-change");
+    printf("CHECK_OWN_DIFF\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
