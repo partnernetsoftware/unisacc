@@ -83,6 +83,7 @@ static int split(char *line, char **f, int maxf) {
 /* ---------- rules ---------- */
 typedef struct { char *id, *call, *prefix, *tmpl, *use, *cls, *where; int argc, truth, where_arg; } Rule;
 static Rule rules[MAXRULE];
+static int sites_mode;   /* sites: list call sites instead of candidate rows */
 static int nrules;
 static void load_rules(const char *path) {
     size_t n; char *b = cx_read(path, &n), *line, *e, *f[10]; long i = 0; int nf;
@@ -232,8 +233,17 @@ static int find_file(Buf *out, const char *file, int autoacc) {
                     if (ps > 0 && (b[ps - 1] == '!' || b[ps - 1] == '=')) continue;   /* '!!x' or '!=': not this shape */
                 }
                 close = parse_args(b, j, n, as, ae, &na, &ml, &cm);
-                if (close < 0 || na != R->argc) continue;
+                if (close < 0 || (R->argc >= 0 && na != R->argc)) continue;
                 if (R->truth && !truth_context(b, n, ps, close)) continue;
+                if (sites_mode) {   /* FILE:LINE<TAB>the call; go on inside its arguments, so nested calls count too */
+                    char num[32];
+                    putesc(out, file, tx_len(file, CAP));
+                    if (cx_fmt(num, sizeof num, ":%ld\t", line)) die("format");
+                    puts_(out, num); putesc(out, b + ps, close + 1 - ps); put(out, "\n", 1);
+                    for (k = i; k <= j; k++) if (b[k] == '\n') line++;
+                    i = j + 1; count++;
+                    break;
+                }
                 if (R->where_arg) {   /* that argument, trimmed, must be exactly the given text */
                     long ws = as[R->where_arg - 1], we = ae[R->where_arg - 1];
                     if (R->where_arg > na) continue;
@@ -550,6 +560,37 @@ int main(int argc, char **argv) {
         for (k = a; k < argc; k++) if (find_file(&out, argv[k], autoacc) < 0) return 2;
         return sy_write_all(1, out.p, out.n) == 0 ? 0 : 2;
     }
+    if (argc >= 4 && tx_eq(argv[1], "sites", 8)) {
+        /* sites NAME[,NAME...] (FILE... | --tracked): every call of those names, with any argument count,
+           outside comments and literals, as FILE:LINE<TAB>call; --tracked scans every tracked .cx file
+           (symlinks skipped).  The search half of find, for a whole tree in one process. */
+        char *names = zdup(argv[2]), *p = names; int k; Buf out = {0, 0, 0}, list = {0, 0, 0};
+        while (*p) {
+            char *s = p; while (*p && *p != ',') p++;
+            if (*p) *p++ = 0;
+            if (!*s) continue;
+            if (nrules == MAXRULE) die("too many names");
+            rules[nrules].id = s; rules[nrules].call = s; rules[nrules].prefix = ""; rules[nrules].argc = -1;
+            rules[nrules].tmpl = ""; rules[nrules].use = "-"; rules[nrules].cls = "site";
+            rules[nrules].truth = 0; rules[nrules].where_arg = 0; rules[nrules].where = "";
+            nrules++;
+        }
+        sites_mode = 1;
+        if (tx_eq(argv[3], "--tracked", 16)) {
+            char *gv[] = {"git", "ls-files", "-s", "-z", "--", "*.cx", 0}, chunk[65536]; int ofd, pid; long r, at = 0;
+            pid = sy_spawn_pipe(gv, 0, 0, &ofd, 0);
+            if (pid < 0) die("cannot run git ls-files");
+            while ((r = sy_read(ofd, chunk, sizeof chunk)) > 0) put(&list, chunk, r);
+            sy_close(ofd); sy_wait_status(pid, 0, 0, 0, 0);
+            while (at < list.n) {   /* "MODE SHA STAGE\tPATH\0" */
+                char *e = list.p + at; long ln = tx_len(e, list.n - at), tab = tx_chr(e, ln, '\t');
+                if (ln < 0) break;
+                if (tab > 0 && !tx_prefix(e, ln, "120000", 6) && find_file(&out, e + tab + 1, 0) < 0) return 2;
+                at += ln + 1;
+            }
+        } else for (k = 3; k < argc; k++) if (find_file(&out, argv[k], 0) < 0) return 2;
+        return sy_write_all(1, out.p ? out.p : "", out.n) == 0 ? 0 : 2;
+    }
     if (argc >= 5 && tx_eq(argv[1], "apply", 8)) {
         Buf v = {0, 0, 0}; int k, jobs = (int)strtol(argv[3], 0, 10);
         if (jobs < 1 || jobs > MAXJOBS) die("JOBS 1..16");
@@ -574,6 +615,6 @@ int main(int argc, char **argv) {
         for (k = 4; k < argc; k++) { if (k > 4) put(&v, " ", 1); puts_(&v, argv[k]); }
         return apply(argv[2], jobs, v.p);
     }
-    fprintf(stderr, "usage: refactor.cx find [--auto] RULES FILE... | apply CANDIDATES JOBS (VERIFY... | --verify-from REGISTRY)\n");
+    fprintf(stderr, "usage: refactor.cx sites NAME[,NAME...] (FILE... | --tracked) | find [--auto] RULES FILE... | apply CANDIDATES JOBS (VERIFY... | --verify-from REGISTRY)\n");
     return 2;
 }
