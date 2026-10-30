@@ -1,3 +1,4 @@
+#pragma unisa use fio
 #pragma unisa use text.fmt
 #pragma unisa use text.num
 #pragma unisa use sys.io
@@ -451,19 +452,19 @@ static int agent_run_selftest(void) {
         char dir[128], old[1024], p[200], notes[9000];
         size_t got;
         int i, valid = 1;
-        FILE *f;
+        fio_t *f;
         tx_snprintf(dir, sizeof dir, "/tmp/csih-notes-%d", (int)sy_pid());
         mkdir(dir, 0700);
         if (getcwd(old, sizeof old) && chdir(dir) == 0) {
             a_expect(agent_project_notes(notes, sizeof notes) == 0, "no notes file: nothing added");
             tx_snprintf(p, sizeof p, "%s/AGENTS.md", dir);
-            f = fopen(p, "w"); if (f) { fputs("用 tab 缩进", f); fclose(f); }
+            f = fio_open(p, "w"); if (f) { fio_puts("用 tab 缩进", f); fio_close(f); }
             got = agent_project_notes(notes, sizeof notes);
             a_expect(got > 0 && zs_find(notes, "AGENTS.md") && zs_find(notes, "用 tab 缩进") && zs_find(notes, "不是授权"),
                      "AGENTS.md is read when there is no CSIH.md");
             tx_snprintf(p, sizeof p, "%s/CSIH.md", dir);
-            f = fopen(p, "w");
-            if (f) { for (i = 0; i < 3000; i++) fputs("中", f); fclose(f); }   /* 9000 bytes */
+            f = fio_open(p, "w");
+            if (f) { for (i = 0; i < 3000; i++) fio_puts("中", f); fio_close(f); }   /* 9000 bytes */
             got = agent_project_notes(notes, sizeof notes);
             a_expect(got > 0 && zs_find(notes, "CSIH.md") && !zs_find(notes, "用 tab 缩进"), "CSIH.md wins over AGENTS.md");
             /* cut at 8KB on a code point: every 中 after the header is whole */
@@ -528,23 +529,23 @@ static int agent_run_selftest(void) {
         /* user secret list: a file in cwd listed in ~/.csih/secrets reads empty */
         {
             char sec[300], list[300], had[4096];
-            FILE *lf;
+            fio_t *lf;
             size_t hn = 0;
             tx_snprintf(sec, sizeof sec, "%s/token.txt", dir);
-            lf = fopen(sec, "w"); if (lf) { fputs("SECRET123", lf); fclose(lf); }
+            lf = fio_open(sec, "w"); if (lf) { fio_puts("SECRET123", lf); fio_close(lf); }
             tx_snprintf(list, sizeof list, "%s/.csih/secrets", home ? home : "/tmp");
-            lf = fopen(list, "r");
-            if (lf) { hn = fread(had, 1, sizeof had - 1, lf); fclose(lf); }
+            lf = fio_open(list, "r");
+            if (lf) { hn = fio_read(had, 1, sizeof had - 1, lf); fio_close(lf); }
             had[hn] = 0;
-            lf = fopen(list, "a");
+            lf = fio_open(list, "a");
             if (lf) {
                 char tilde[300];
-                FILE *tf;
+                fio_t *tf;
                 tx_snprintf(tilde, sizeof tilde, "%s/.csih/csih-sbx-tilde-%d.txt", home ? home : "/tmp", (int)sy_pid());
-                tf = fopen(tilde, "w"); if (tf) { fputs("TILDE456", tf); fclose(tf); }
-                fprintf(lf, "%s# csih selftest\n%s\n~/.csih/csih-sbx-tilde-%d.txt\n",
+                tf = fio_open(tilde, "w"); if (tf) { fio_puts("TILDE456", tf); fio_close(tf); }
+                fio_printf(lf, "%s# csih selftest\n%s\n~/.csih/csih-sbx-tilde-%d.txt\n",
                         hn && had[hn - 1] != '\n' ? "\n" : "", sec, (int)sy_pid());
-                fclose(lf);
+                fio_close(lf);
                 tx_snprintf(s.cmd, sizeof s.cmd, "echo got=$(cat token.txt) tilde=$(cat \"$HOME/.csih/csih-sbx-tilde-%d.txt\")", (int)sy_pid());
                 agent_exec(&s, dir, out, sizeof out);
                 a_expect(zs_find(out, "got=") && !zs_find(out, "SECRET123"),
@@ -552,7 +553,7 @@ static int agent_run_selftest(void) {
                 a_expect(zs_find(out, "tilde=") && !zs_find(out, "TILDE456"), "  ~/ paths in the list are expanded");
                 remove(tilde);
                 /* put the user's list back exactly as it was */
-                if (hn) { lf = fopen(list, "w"); if (lf) { fwrite(had, 1, hn, lf); fclose(lf); } }
+                if (hn) { lf = fio_open(list, "w"); if (lf) { fio_write(had, 1, hn, lf); fio_close(lf); } }
                 else remove(list);
             }
             remove(sec);
@@ -582,17 +583,17 @@ static int agent_run_selftest(void) {
     {
         const char *p = zs_find(out, "full: ");
         char spath[640];
-        FILE *sf;
+        fio_t *sf;
         size_t k = 0;
         if (p) p += 6;
         while (p && *p && *p != ' ' && *p != '\n' && k + 1 < sizeof spath) spath[k++] = *p++;
         spath[k] = 0;
-        sf = k ? fopen(spath, "r") : NULL;
+        sf = k ? fio_open(spath, "r") : NULL;
         a_expect(sf != NULL, "  spill file exists");
         if (sf) {
             char blk[2600];
-            size_t n = fread(blk, 1, sizeof blk, sf);
-            fclose(sf);
+            size_t n = fio_read(blk, 1, sizeof blk, sf);
+            fio_close(sf);
             a_expect(n == 2500 && blk[0] == 'A' && blk[2499] == 'A',
                      "  spill file keeps all 2500 bytes");
             remove(spath);
@@ -618,14 +619,14 @@ static int agent_run_selftest(void) {
     remove(path);
 
     {
-        FILE *lf;
+        fio_t *lf;
         tx_snprintf(path, sizeof path, "/tmp/csih-lines-%d.txt", (int)sy_pid());
-        lf = fopen(path, "w");
+        lf = fio_open(path, "w");
         a_expect(lf != NULL, "line window fixture");
         if (lf) {
             int row;
-            for (row = 1; row <= 10; row++) fprintf(lf, "L%d\n", row);
-            fclose(lf);
+            for (row = 1; row <= 10; row++) fio_printf(lf, "L%d\n", row);
+            fio_close(lf);
         }
         zs_mset(&s, 0, sizeof s);
         s.kind = ACT_READ;
@@ -644,7 +645,7 @@ static int agent_run_selftest(void) {
     /* relative path lands in the agent cwd, not the process cwd */
     {
         char dir[64], rel[80], got[32];
-        FILE *f;
+        fio_t *f;
         tx_snprintf(dir, sizeof dir, "/tmp/cdsh-rel-%d", (int)sy_pid());
         tx_snprintf(rel, sizeof rel, "%s/rel.txt", dir);
         mkdir(dir, 0700);
@@ -653,11 +654,11 @@ static int agent_run_selftest(void) {
         zs_ncpy(s.path, "rel.txt", sizeof s.path - 1);
         zs_ncpy(s.text, "hello", sizeof s.text - 1);
         a_expect(agent_exec(&s, dir, out, sizeof out) == 1, "relative write runs");
-        f = fopen(rel, "r");
+        f = fio_open(rel, "r");
         a_expect(f != NULL, "  relative file is under cwd");
         if (f) {
-            size_t n = fread(got, 1, sizeof got - 1, f);
-            fclose(f);
+            size_t n = fio_read(got, 1, sizeof got - 1, f);
+            fio_close(f);
             got[n] = 0;
             a_expect(zs_cmp(got, "hello") == 0, "  relative content");
         }
@@ -665,18 +666,18 @@ static int agent_run_selftest(void) {
         {
             char note[400], stale[600];
             int depth = agent_undo_depth();
-            FILE *sf;
+            fio_t *sf;
             /* A backup from a dead process (pid 2^22-1 is never live here) is
              * swept the first time this process snapshots. */
             tx_snprintf(stale, sizeof stale, "%s/.csih/undo/4194303-1.bak", sy_env("HOME") ? sy_env("HOME") : "/tmp");
-            sf = fopen(stale, "w"); if (sf) { fputs("x", sf); fclose(sf); }
+            sf = fio_open(stale, "w"); if (sf) { fio_puts("x", sf); fio_close(sf); }
             zs_ncpy(s.text, "changed", sizeof s.text - 1);
             agent_exec(&s, dir, out, sizeof out);
             a_expect(agent_undo_depth() == depth + 1, "a write records one undo step");
             a_expect(!sf || access(stale, F_OK) != 0, "a dead process's leftover backup is swept");
             a_expect(agent_undo_last(note, sizeof note) == 0, "undo restores the overwrite");
-            f = fopen(rel, "r"); got[0] = 0;
-            if (f) { size_t n = fread(got, 1, sizeof got - 1, f); fclose(f); got[n] = 0; }
+            f = fio_open(rel, "r"); got[0] = 0;
+            if (f) { size_t n = fio_read(got, 1, sizeof got - 1, f); fio_close(f); got[n] = 0; }
             a_expect(zs_cmp(got, "hello") == 0, "  old content is back");
             a_expect(agent_undo_last(note, sizeof note) == 0 && access(rel, F_OK) != 0,
                      "undo of a created file removes it");
@@ -690,7 +691,7 @@ static int agent_run_selftest(void) {
     /* dsh: a bare cd must stick, the next file step uses the new directory */
     {
         char base[64], inner[80], cwd[128], out2[256], got[16];
-        FILE *f;
+        fio_t *f;
         tx_snprintf(base, sizeof base, "/tmp/cdsh-acd-%d", (int)sy_pid());
         tx_snprintf(inner, sizeof inner, "%s/inner", base);
         mkdir(base, 0700);
@@ -704,9 +705,9 @@ static int agent_run_selftest(void) {
         zs_ncpy(s.text, "in", sizeof s.text - 1);
         a_expect(agent_exec(&s, cwd, out, sizeof out) == 1, "write after cd");
         tx_snprintf(inner, sizeof inner, "%s/there.txt", cwd);
-        f = fopen(inner, "r");
+        f = fio_open(inner, "r");
         a_expect(f != NULL, "  file is in the new directory");
-        if (f) { size_t n = fread(got, 1, sizeof got - 1, f); fclose(f); got[n] = 0;
+        if (f) { size_t n = fio_read(got, 1, sizeof got - 1, f); fio_close(f); got[n] = 0;
                  a_expect(zs_cmp(got, "in") == 0, "  content after cd"); }
         a_expect(agent_note_cd(cwd, sizeof cwd, "cd /tmp/cdsh-no-such-dir", out2, sizeof out2) == 1
                  && zs_find(cwd, "/inner") != NULL, "failed cd leaves cwd");
@@ -723,22 +724,22 @@ static int agent_run_selftest(void) {
 
     {
         const char *jp = "/tmp/csih-ctx-selftest.jsonl";
-        FILE *jf;
+        fio_t *jf;
         char *body;
         int row, col, opened = 0;
         remove(jp);
-        jf = fopen(jp, "w");
+        jf = fio_open(jp, "w");
         a_expect(jf != NULL, "context fixture opens");
         if (jf) {
             opened = 1;
             for (row = 0; row < 30; row++) {
-                fprintf(jf, "{\"role\":\"user\",\"text\":\"%s", row == 0 ? "OLDMARKER" : "pad");
-                for (col = 0; col < 2500; col++) fputc('B', jf);
-                fprintf(jf, "%s\"}\n",
+                fio_printf(jf, "{\"role\":\"user\",\"text\":\"%s", row == 0 ? "OLDMARKER" : "pad");
+                for (col = 0; col < 2500; col++) fio_putc('B', jf);
+                fio_printf(jf, "%s\"}\n",
                         row == 29 ? "NEWMARKER" : (row == 1 ? "MIDONLY" : "mid"));
             }
-            fprintf(jf, "{\"role\":\"decision\",\"go\":\"stop\"}\n");
-            fclose(jf);
+            fio_printf(jf, "{\"role\":\"decision\",\"go\":\"stop\"}\n");
+            fio_close(jf);
         }
         body = (char *)mm_alloc(65536);
         a_expect(body != NULL, "context preview buffer");
@@ -757,23 +758,23 @@ static int agent_run_selftest(void) {
 
     {
         const char *jp = "/tmp/csih-ctx-keep-user.jsonl";
-        FILE *jf;
+        fio_t *jf;
         char *body;
         int row, col, opened = 0;
         remove(jp);
-        jf = fopen(jp, "w");
+        jf = fio_open(jp, "w");
         a_expect(jf != NULL, "user-keep fixture opens");
         if (jf) {
             opened = 1;
-            fprintf(jf, "{\"role\":\"user\",\"text\":\"OLDMARKER\"}\n");
+            fio_printf(jf, "{\"role\":\"user\",\"text\":\"OLDMARKER\"}\n");
             for (row = 0; row < 40; row++) {
-                fprintf(jf, "{\"role\":\"tool\",\"name\":\"file\",\"text\":\"%s",
+                fio_printf(jf, "{\"role\":\"tool\",\"name\":\"file\",\"text\":\"%s",
                         row == 0 ? "TOOLGONE" : "toolpad");
-                for (col = 0; col < 2000; col++) fputc('Q', jf);
-                fprintf(jf, "\"}\n");
+                for (col = 0; col < 2000; col++) fio_putc('Q', jf);
+                fio_printf(jf, "\"}\n");
             }
-            fprintf(jf, "{\"role\":\"user\",\"text\":\"NEWMARKER\"}\n");
-            fclose(jf);
+            fio_printf(jf, "{\"role\":\"user\",\"text\":\"NEWMARKER\"}\n");
+            fio_close(jf);
         }
         body = (char *)mm_alloc(65536);
         if (body && opened) {
@@ -790,25 +791,25 @@ static int agent_run_selftest(void) {
 
     {
         const char *jp = "/tmp/csih-journal-selftest.jsonl";
-        FILE *jf;
+        fio_t *jf;
         char line[80];
         int row, n = 0;
         remove(jp);
-        jf = fopen(jp, "w");
+        jf = fio_open(jp, "w");
         a_expect(jf != NULL, "journal fixture opens");
         if (jf) {
             for (row = 0; row < 10; row++)
-                fprintf(jf, "{\"role\":\"user\",\"text\":\"line-%d\"}\n", row);
-            fclose(jf);
+                fio_printf(jf, "{\"role\":\"user\",\"text\":\"line-%d\"}\n", row);
+            fio_close(jf);
         }
         a_expect(agent_journal_trim(jp, 80, 3) == 1, "a long journal keeps the newest lines");
-        jf = fopen(jp, "r");
-        while (jf && fgets(line, sizeof line, jf)) n++;
-        if (jf) fclose(jf);
+        jf = fio_open(jp, "r");
+        while (jf && fio_gets(line, sizeof line, jf)) n++;
+        if (jf) fio_close(jf);
         a_expect(n == 3, "trimmed journal has the kept count");
         line[0] = 0;
-        jf = fopen(jp, "r");
-        if (jf) { if (!fgets(line, sizeof line, jf)) line[0] = 0; fclose(jf); }
+        jf = fio_open(jp, "r");
+        if (jf) { if (!fio_gets(line, sizeof line, jf)) line[0] = 0; fio_close(jf); }
         a_expect(zs_find(line, "line-7") != NULL, "trim starts at the oldest kept line");
         remove(jp);
     }
@@ -823,16 +824,16 @@ static int agent_run_selftest(void) {
 static void print_trace(const char *transcript) {
     /* Read the transcript and print a compact, readable trace. Kept here (not in
      * agent.c) so the library stays stdio-free. */
-    FILE *f = fopen(transcript, "r");
+    fio_t *f = fio_open(transcript, "r");
     char buf[8192];
     if (!f) return;
     sy_printf("\n--- trace (%s) ---\n", transcript);
-    while (fgets(buf, sizeof buf, f)) {
+    while (fio_gets(buf, sizeof buf, f)) {
         size_t n = zs_len(buf);
         while (n && (buf[n-1] == '\n' || buf[n-1] == '\r')) buf[--n] = '\0';
         sy_printf("%s\n", buf);
     }
-    fclose(f);
+    fio_close(f);
 }
 
 static const char *csih_env(const char *neu, const char *old) {
