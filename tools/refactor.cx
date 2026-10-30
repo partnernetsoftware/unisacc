@@ -1,0 +1,382 @@
+/* tools/refactor.cx -- find, confirm, then apply mechanical call rewrites in parallel, each file
+   verified against its own command and reverted on any difference (plans/refactor-tool-2026-10-30.md).
+
+     sh ./unisacc.com tools/refactor.cx -- find [--auto] RULES FILE...   > CANDIDATES.tsv
+     sh ./unisacc.com tools/refactor.cx -- apply CANDIDATES.tsv JOBS VERIFY...
+
+   RULES (TSV, '#' comments): id  call  prefix  argc  template  use  class
+     call     the called name; prefix: the characters that must sit right before it ('-': none), replaced too;
+     argc     top-level argument count; template: the replacement, $1..$9 the arguments (trimmed);
+     use      a module the replacement needs ('-': none), e.g. text.text; class: safe | review.
+   CANDIDATES (TSV): verdict  file  offset  line  rule  class  why  original  replacement  use
+     find writes verdict "accept" for safe rows under --auto, else "-"; apply takes only "accept" rows.
+     Tabs, newlines and backslashes inside fields are written as \t \n \\.
+   Scanning skips comments, string and character literals.  A match is downgraded to review when it
+   spans lines or holds a comment, and to skip in reserved paths (ujs/ apps/csih/ archive/ kernel/
+   src/ cx/) or when the needed module has no link beside the file (e.g. text/ for text.text).
+   apply: per file, VERIFY (sh -c, {file} replaced) runs before the edit and after it; stdout, stderr
+   and exit code must be byte-identical, otherwise the file is restored.  Every original must still
+   sit at its offset, or the whole file is skipped.  Up to JOBS files are verified at once.
+   Prints one line per file (OK | SKIP | REVERT) and REFACTOR<TAB>ok=..<TAB>skip=..<TAB>revert=..;
+   rc 0 when nothing was reverted, 1 otherwise, 2 for usage or I/O. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use mem.arena
+#pragma unisa use text.text
+
+#define CAP (1L << 24)
+#define MAXRULE 64
+#define MAXCAND 8192
+#define MAXJOBS 16
+
+static int arena;
+static void die(const char *s) { fprintf(stderr, "refactor: %s\n", s); exit(2); }
+static char *keep(const char *s, long n) { char *p = ar_dup(arena, s, n); if (!p) die("out of memory"); return p; }
+static char *zdup(const char *s) { return keep(s, tx_len(s, CAP)); }
+
+/* ---------- a growable output buffer in the arena ---------- */
+typedef struct { char *p; long n, cap; } Buf;
+static void put(Buf *b, const char *s, long n) {
+    long i;
+    if (b->n + n + 1 > b->cap) {
+        long c = (b->n + n + 1) * 2; char *t = ar_alloc(arena, c);
+        if (!t) die("out of memory");
+        for (i = 0; i < b->n; i++) t[i] = b->p[i];
+        b->p = t; b->cap = c;
+    }
+    for (i = 0; i < n; i++) b->p[b->n + i] = s[i];
+    b->n += n; b->p[b->n] = 0;
+}
+static void puts_(Buf *b, const char *s) { put(b, s, tx_len(s, CAP)); }
+/* a field with \t \n \\ escaped */
+static void putesc(Buf *b, const char *s, long n) {
+    long i;
+    for (i = 0; i < n; i++) {
+        if (s[i] == '\t') put(b, "\\t", 2); else if (s[i] == '\n') put(b, "\\n", 2);
+        else if (s[i] == '\\') put(b, "\\\\", 2); else put(b, s + i, 1);
+    }
+}
+static char *unesc(const char *s, long n, long *outn) {
+    char *o = ar_alloc(arena, n + 1); long i, k = 0;
+    if (!o) die("out of memory");
+    for (i = 0; i < n; i++) {
+        if (s[i] == '\\' && i + 1 < n) {
+            i++; o[k++] = s[i] == 't' ? '\t' : s[i] == 'n' ? '\n' : s[i];
+        } else o[k++] = s[i];
+    }
+    o[k] = 0; *outn = k; return o;
+}
+
+/* ---------- TSV rows ---------- */
+static int split(char *line, char **f, int maxf) {
+    int k = 0; char *p = line;
+    f[k++] = p;
+    while (*p) { if (*p == '\t') { *p = 0; if (k == maxf) return -1; f[k++] = p + 1; } p++; }
+    return k;
+}
+
+/* ---------- rules ---------- */
+typedef struct { char *id, *call, *prefix, *tmpl, *use, *cls; int argc; } Rule;
+static Rule rules[MAXRULE];
+static int nrules;
+static void load_rules(const char *path) {
+    size_t n; char *b = cx_read(path, &n), *line, *e, *f[8]; long i = 0;
+    if (!b) die("cannot read the rules");
+    while (i < (long)n) {
+        line = b + i; e = line; while (*e && *e != '\n') e++;
+        i = (long)(e - b) + 1; *e = 0;
+        if (!*line || *line == '#') continue;
+        if (nrules == MAXRULE || split(line, f, 8) != 7) die("rules: want 7 fields: id call prefix argc template use class");
+        rules[nrules].id = f[0]; rules[nrules].call = f[1];
+        rules[nrules].prefix = tx_eq(f[2], "-", 4) ? "" : f[2];
+        rules[nrules].argc = (int)strtol(f[3], 0, 10);
+        rules[nrules].tmpl = f[4]; rules[nrules].use = f[5]; rules[nrules].cls = f[6];
+        if (rules[nrules].argc < 0 || rules[nrules].argc > 9) die("rules: argc 0..9");
+        nrules++;
+    }
+}
+
+static int is_id(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || (c >= '0' && c <= '9'); }
+
+static const char *reserved[] = {"ujs/", "apps/csih/", "archive/", "kernel/", "src/", "cx/", 0};
+static int in_reserved(const char *path) {
+    int k; long pl = tx_len(path, CAP);
+    for (k = 0; reserved[k]; k++) if (tx_prefix(path, pl, reserved[k], tx_len(reserved[k], 64))) return 1;
+    return 0;
+}
+/* the module's first path component must be a directory (link) beside the file */
+static int module_reachable(const char *file, const char *use) {
+    char dir[4400], top[256]; long dl = tx_len(file, CAP), k = 0; sy_stat_t st;
+    if (tx_eq(use, "-", 4)) return 1;
+    while (dl > 0 && file[dl - 1] != '/') dl--;
+    while (use[k] && use[k] != '.' && k < 255) { top[k] = use[k]; k++; }
+    top[k] = 0;
+    if (cx_fmt(dir, sizeof dir, "%.*s%s", (int)dl, file, top)) return 0;
+    return sy_stat(dir, &st) == 0 && st.kind == 'd';
+}
+static int has_use(const char *src, long n, const char *use) {
+    char needle[300];
+    if (cx_fmt(needle, sizeof needle, "#pragma unisa use %s", use)) return 0;
+    return tx_find(src, n, needle, tx_len(needle, 300)) >= 0;
+}
+
+/* ---------- find ---------- */
+static long skip_ws(const char *b, long i, long n) { while (i < n && (b[i] == ' ' || b[i] == '\t' || b[i] == '\n' || b[i] == '\r')) i++; return i; }
+
+/* From the '(' at P, find the matching ')' and the top-level argument spans. -1 when unbalanced. */
+static long parse_args(const char *b, long p, long n, long *as, long *ae, int *na, int *multiline, int *comment) {
+    long i = p + 1, start = i; int depth = 0;
+    *na = 0; *multiline = 0; *comment = 0;
+    while (i < n) {
+        char c = b[i];
+        if (c == '\n') *multiline = 1;
+        if (c == '/' && i + 1 < n && (b[i + 1] == '*' || b[i + 1] == '/')) { *comment = 1; return -1; }
+        if (c == '"' || c == '\'') {
+            char q = c; i++;
+            while (i < n && b[i] != q) { if (b[i] == '\\') i++; if (i < n && b[i] == '\n') *multiline = 1; i++; }
+            i++; continue;
+        }
+        if (c == '(' || c == '[' || c == '{') depth++;
+        else if (c == ')' || c == ']' || c == '}') {
+            if (depth == 0) {
+                if (c != ')') return -1;
+                if (i > start || *na > 0) { if (*na == 9) return -1; as[*na] = start; ae[*na] = i; (*na)++; }
+                return i;
+            }
+            depth--;
+        } else if (c == ',' && depth == 0) {
+            if (*na == 9) return -1;
+            as[*na] = start; ae[*na] = i; (*na)++; start = i + 1;
+        }
+        i++;
+    }
+    return -1;
+}
+static void trim(const char *b, long *s, long *e) {
+    while (*s < *e && (b[*s] == ' ' || b[*s] == '\t' || b[*s] == '\n')) (*s)++;
+    while (*e > *s && (b[*e - 1] == ' ' || b[*e - 1] == '\t' || b[*e - 1] == '\n')) (*e)--;
+}
+static void render(Buf *o, const char *tmpl, const char *b, long *as, long *ae) {
+    long i, n = tx_len(tmpl, CAP);
+    for (i = 0; i < n; i++) {
+        if (tmpl[i] == '$' && i + 1 < n && tmpl[i + 1] >= '1' && tmpl[i + 1] <= '9') {
+            int k = tmpl[i + 1] - '1'; long s = as[k], e = ae[k];
+            trim(b, &s, &e); put(o, b + s, e - s); i++;
+        } else put(o, tmpl + i, 1);
+    }
+}
+
+static int find_file(Buf *out, const char *file, int autoacc) {
+    size_t sz; char *b = cx_read(file, &sz); long n, i = 0, line = 1; int mode = 0, count = 0;
+    if (!b) { fprintf(stderr, "refactor: cannot read %s\n", file); return -1; }
+    n = (long)sz;
+    while (i < n) {
+        char c = b[i];
+        if (c == '\n') line++;
+        if (mode == 1) { if (c == '\n') mode = 0; i++; continue; }
+        if (mode == 2) { if (c == '*' && i + 1 < n && b[i + 1] == '/') { mode = 0; i += 2; continue; } i++; continue; }
+        if (mode == 3 || mode == 4) {
+            if (c == '\\' && i + 1 < n) { i += 2; continue; }
+            if ((mode == 3 && c == '"') || (mode == 4 && c == '\'')) mode = 0;
+            i++; continue;
+        }
+        if (c == '/' && i + 1 < n && b[i + 1] == '/') { mode = 1; i += 2; continue; }
+        if (c == '/' && i + 1 < n && b[i + 1] == '*') { mode = 2; i += 2; continue; }
+        if (c == '"') { mode = 3; i++; continue; }
+        if (c == '\'') { mode = 4; i++; continue; }
+        if (is_id((unsigned char)c) && !(c >= '0' && c <= '9') && (i == 0 || !is_id((unsigned char)b[i - 1]))) {
+            long a = i, j, k; int r;
+            while (i < n && is_id((unsigned char)b[i])) i++;
+            j = skip_ws(b, i, n);
+            if (j >= n || b[j] != '(') continue;
+            for (r = 0; r < nrules; r++) {
+                Rule *R = &rules[r]; long pl = tx_len(R->prefix, 64), ps = a, close, as[9], ae[9];
+                int na, ml, cm; const char *cls, *why; Buf rep = {0, 0, 0};
+                if (!tx_same(b + a, i - a, R->call, tx_len(R->call, 256))) continue;
+                if (pl) {
+                    if (a < pl || !tx_same(b + a - pl, pl, R->prefix, pl)) continue;
+                    ps = a - pl;
+                    if (ps > 0 && (b[ps - 1] == '!' || b[ps - 1] == '=')) continue;   /* '!!x' or '!=': not this shape */
+                }
+                close = parse_args(b, j, n, as, ae, &na, &ml, &cm);
+                if (close < 0 || na != R->argc) continue;
+                render(&rep, R->tmpl, b, as, ae);
+                cls = R->cls; why = "rule";
+                if (ml) { cls = "review"; why = "spans lines"; }
+                if (cm) { cls = "review"; why = "holds a comment"; }
+                if (!module_reachable(file, R->use)) { cls = "skip"; why = "no module link beside the file"; }
+                if (in_reserved(file)) { cls = "skip"; why = "reserved path"; }
+                {   char num[64];
+                    puts_(out, autoacc && tx_eq(cls, "safe", 8) ? "accept" : "-"); put(out, "\t", 1);
+                    putesc(out, file, tx_len(file, CAP)); put(out, "\t", 1);
+                    if (cx_fmt(num, sizeof num, "%ld\t%ld\t", ps, line)) die("format");
+                    puts_(out, num); puts_(out, R->id); put(out, "\t", 1); puts_(out, cls); put(out, "\t", 1);
+                    puts_(out, why); put(out, "\t", 1);
+                    putesc(out, b + ps, close + 1 - ps); put(out, "\t", 1);
+                    putesc(out, rep.p ? rep.p : "", rep.n); put(out, "\t", 1);
+                    puts_(out, R->use); put(out, "\n", 1);
+                }
+                for (k = j; k <= close; k++) if (b[k] == '\n') line++;
+                i = close + 1; count++;
+                break;
+            }
+            continue;
+        }
+        i++;
+    }
+    return count;
+}
+
+/* ---------- apply ---------- */
+typedef struct { char *file; long off; char *orig, *rep, *use; long on, rn; } Cand;
+static Cand cands[MAXCAND];
+static int ncands;
+
+static void load_cands(const char *path) {
+    size_t n; char *b = cx_read(path, &n), *line, *e, *f[12]; long i = 0, fn;
+    if (!b) die("cannot read the candidates");
+    while (i < (long)n) {
+        line = b + i; e = line; while (*e && *e != '\n') e++;
+        i = (long)(e - b) + 1; *e = 0;
+        if (!*line || *line == '#') continue;
+        if (split(line, f, 12) != 10) die("candidates: want 10 fields");
+        if (!tx_eq(f[0], "accept", 8)) continue;
+        if (ncands == MAXCAND) die("too many candidates");
+        cands[ncands].file = unesc(f[1], tx_len(f[1], CAP), &fn);
+        cands[ncands].off = strtol(f[2], 0, 10);
+        cands[ncands].orig = unesc(f[7], tx_len(f[7], CAP), &cands[ncands].on);
+        cands[ncands].rep = unesc(f[8], tx_len(f[8], CAP), &cands[ncands].rn);
+        cands[ncands].use = f[9];
+        ncands++;
+    }
+}
+
+typedef struct { char *file; int first, count; char *orig; size_t on; char *outb, *errb; int rc; } Job;
+/* one running VERIFY: started for a batch of files together, collected afterwards */
+typedef struct { int pid, ofd, efd; } Run;
+
+/* start VERIFY for FILE; -1 when it cannot start */
+static int verify_start(const char *tmpl, const char *file, Run *r) {
+    Buf cmd = {0, 0, 0}; long i, n = tx_len(tmpl, CAP), fl = tx_len(file, CAP); char *argv[4];
+    for (i = 0; i < n; i++) {
+        if (tmpl[i] == '{' && tx_prefix(tmpl + i, n - i, "{file}", 6)) { put(&cmd, file, fl); i += 5; }
+        else put(&cmd, tmpl + i, 1);
+    }
+    argv[0] = "sh"; argv[1] = "-c"; argv[2] = cmd.p; argv[3] = 0;
+    r->pid = sy_spawn_pipe(argv, 0, SY_SPAWN_STDERR_SPLIT, &r->ofd, &r->efd);
+    return r->pid < 0 ? -1 : 0;
+}
+/* collect a started VERIFY: stdout, stderr and the exit status (128+N for signal N); -1 on failure.
+   stdout is drained first; a child that fills its stderr pipe before finishing stdout would wait,
+   so VERIFY commands are expected to write their stderr after or in small amounts. */
+static int verify_finish(Run *r, char **out, char **err, int *rc) {
+    Buf o = {0, 0, 0}, e = {0, 0, 0}; char chunk[4096]; long k; int ex = 0, code = 0, sig = 0;
+    while ((k = sy_read(r->ofd, chunk, sizeof chunk)) > 0) put(&o, chunk, k);
+    while ((k = sy_read(r->efd, chunk, sizeof chunk)) > 0) put(&e, chunk, k);
+    sy_close(r->ofd); sy_close(r->efd);
+    if (sy_wait_status(r->pid, 0, &ex, &code, &sig) != r->pid) return -1;
+    *out = o.p ? o.p : ""; *err = e.p ? e.p : ""; *rc = ex ? code : 128 + sig;
+    return 0;
+}
+
+static int same_z(const char *a, const char *b) {
+    long an = tx_len(a, CAP), bn = tx_len(b, CAP);
+    return an == bn && tx_same(a, an, b, bn);
+}
+
+/* the edited bytes of job J (candidates sorted by offset), or 0 when an original is not at its offset */
+static char *edited(Job *J, long *outn) {
+    Buf o = {0, 0, 0}; long at = 0; int c; const char *use = 0;
+    for (c = J->first; c < J->first + J->count; c++) {
+        Cand *C = &cands[c];
+        if (C->off < at || C->off + C->on > (long)J->on || !tx_same(J->orig + C->off, C->on, C->orig, C->on)) return 0;
+        if (!tx_eq(C->use, "-", 4) && !has_use(J->orig, (long)J->on, C->use)) use = C->use;
+        put(&o, J->orig + at, C->off - at); put(&o, C->rep, C->rn); at = C->off + C->on;
+    }
+    put(&o, J->orig + at, (long)J->on - at);
+    if (use) {   /* add the use line after the last '#pragma unisa' line at the top, else first */
+        Buf u = {0, 0, 0}; long p = 0, last = 0, ln;
+        while (p < o.n) {
+            long e2 = p; while (e2 < o.n && o.p[e2] != '\n') e2++;
+            ln = e2 - p;
+            if (tx_prefix(o.p + p, ln, "#pragma unisa", 13)) last = e2 + 1;
+            else if (ln && o.p[p] != '/' && o.p[p] != ' ' && o.p[p] != '*' && last) break;
+            p = e2 + 1;
+        }
+        put(&u, o.p, last); puts_(&u, "#pragma unisa use "); puts_(&u, use); put(&u, "\n", 1);
+        put(&u, o.p + last, o.n - last);
+        *outn = u.n; return u.p;
+    }
+    *outn = o.n; return o.p;
+}
+
+static int apply(const char *candpath, int jobs, const char *verify) {
+    static Job js[MAXCAND];
+    int nj = 0, c, j, ok = 0, skip = 0, rev = 0;
+    load_cands(candpath);
+    /* group accepted candidates by file, sorted by offset (insertion into place) */
+    for (c = 1; c < ncands; c++) {
+        Cand t = cands[c]; int d = c - 1;
+        while (d >= 0 && (tx_eq(cands[d].file, t.file, CAP) ? cands[d].off > t.off : 0)) { cands[d + 1] = cands[d]; d--; }
+        cands[d + 1] = t;
+    }
+    for (c = 0; c < ncands; c++) {
+        if (nj && tx_eq(js[nj - 1].file, cands[c].file, CAP)) { js[nj - 1].count++; continue; }
+        js[nj].file = cands[c].file; js[nj].first = c; js[nj].count = 1; nj++;
+    }
+    for (j = 0; j < nj; j += jobs) {
+        int k, end = j + jobs < nj ? j + jobs : nj, state[MAXJOBS];
+        Run run[MAXJOBS];
+        for (k = j; k < end; k++) {   /* baselines: all started, then collected */
+            Job *J = &js[k];
+            J->orig = cx_read(J->file, &J->on);
+            state[k - j] = J->orig && verify_start(verify, J->file, &run[k - j]) == 0;
+        }
+        for (k = j; k < end; k++) {
+            Job *J = &js[k];
+            if (!state[k - j] || verify_finish(&run[k - j], &J->outb, &J->errb, &J->rc) < 0) state[k - j] = 0;
+        }
+        for (k = j; k < end; k++) {   /* edits, then every re-verify started together */
+            Job *J = &js[k]; long nn; char *nb;
+            if (!state[k - j]) { printf("SKIP\t%s\tcannot read or run the baseline\n", J->file); skip++; continue; }
+            nb = edited(J, &nn);
+            if (!nb) { printf("SKIP\t%s\tan original is no longer at its offset\n", J->file); skip++; state[k - j] = 0; continue; }
+            if (cx_write(J->file, nb, (size_t)nn) != 0) { printf("SKIP\t%s\tcannot write\n", J->file); skip++; state[k - j] = 0; continue; }
+            if (verify_start(verify, J->file, &run[k - j]) < 0) state[k - j] = 2;
+        }
+        for (k = j; k < end; k++) {   /* compare; restore on any difference */
+            Job *J = &js[k]; char *o2 = "", *e2 = ""; int rc2 = -1;
+            if (!state[k - j]) continue;
+            if (state[k - j] == 2 || verify_finish(&run[k - j], &o2, &e2, &rc2) < 0 || rc2 != J->rc
+                || !same_z(o2, J->outb) || !same_z(e2, J->errb)) {
+                if (cx_write(J->file, J->orig, J->on) != 0) die("cannot restore a file: stop");
+                printf("REVERT\t%s\tverify differs (rc %d -> %d)\n", J->file, J->rc, rc2); rev++;
+                continue;
+            }
+            printf("OK\t%s\t%d edits\n", J->file, J->count); ok++;
+        }
+    }
+    printf("REFACTOR\tok=%d\tskip=%d\trevert=%d\n", ok, skip, rev);
+    return rev ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    arena = ar_new(1L << 32);
+    if (!arena) die("cannot create the arena");
+    if (argc >= 4 && tx_eq(argv[1], "find", 8)) {
+        int a = 2, autoacc = 0, k; Buf out = {0, 0, 0};
+        if (tx_eq(argv[a], "--auto", 8)) { autoacc = 1; a++; }
+        load_rules(argv[a++]);
+        puts_(&out, "# verdict\tfile\toffset\tline\trule\tclass\twhy\toriginal\treplacement\tuse\n");
+        for (k = a; k < argc; k++) if (find_file(&out, argv[k], autoacc) < 0) return 2;
+        return sy_write_all(1, out.p, out.n) == 0 ? 0 : 2;
+    }
+    if (argc >= 5 && tx_eq(argv[1], "apply", 8)) {
+        Buf v = {0, 0, 0}; int k, jobs = (int)strtol(argv[3], 0, 10);
+        if (jobs < 1 || jobs > MAXJOBS) die("JOBS 1..16");
+        for (k = 4; k < argc; k++) { if (k > 4) put(&v, " ", 1); puts_(&v, argv[k]); }
+        return apply(argv[2], jobs, v.p);
+    }
+    fprintf(stderr, "usage: refactor.cx find [--auto] RULES FILE... | apply CANDIDATES JOBS VERIFY...\n");
+    return 2;
+}
