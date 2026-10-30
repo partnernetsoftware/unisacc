@@ -145,6 +145,14 @@ agent 模式新增 `/help`、`/status`、`/clear`，均只在本地处理、不�
 - **第十批已落地（2026-10-29）**：忙碌行。原来执行命令时一直显示「等模型」；现在收到 exec 行（命令执行前发出）就显示 `跑命令 <命令>`，下一次请求在途（`net_in_flight()`）时切回「等模型」。文案从 `请求中 等模型 3秒 7745词元 上传 32839字节 已收 574字节 hit 1152 miss 6561` 改为 `⏳ 等模型 3秒 · 7745词元 · ↑32.1KB 已收574B · 缓存命中15%`，保留「已收」二字（已有断言依赖它）。selftest：`busy line names the running command and reads sizes`；tmux 实测已见切换。原来 exec 同步执行时秒数不走、界面不刷新，第十一批已解决。
 - **第四十二批已落地（2026-10-29）**：状态行上色：`✓` 绿、`◐` 黄、`✗` 和 `│ blocked:` 红、`项目>` 青。颜色只在写终端时加（`tui_put_line`），帧本身仍是纯文本，宽度计算、差量比较和所有读取帧的测试都不受影响；差量刷新改用 tui 自己的循环，`render.cx` 的 `frame_diff` 没动。遵守 `NO_COLOR`，也可以用 `CSIH_COLOR=0` 关闭。写屏缓冲按每行 32 字节预留，满屏彩色行也放得下。selftest：`status rows are coloured on output, frames stay plain`（设了 NO_COLOR 时打印 skip）；tmux `capture-pane -e` 实测 `◐` 行带 `ESC[33m`。
   - 观察（不是本批改动引起）：一道不用工具的算术题，这次评审判为「未验证」（理由是没有工具记录可核实）；之前同类问题判过「已验收（answer_only）」。评审对纯问答的判法不稳定，第四十三批处理。
+- **第六十七批已落地（2026-10-30）**：信号真注册，产品闭包零 libc 直调，CLI 和探针跟进。
+  - 终端恢复改走 `sys.sig`（rt_sigaction）。pty 实测：SIGTERM 后 termios 回到启动前、退出码 143；旧二进制停在原始模式。agent 撤销清理改 `sy_atexit`：真 DeepSeek 改文件后 `/exit`，新版删掉 `~/.csih/undo/PID-1.bak`，旧版留着（前导 atexit 表按单元，从没跑过）。`home.cx` 用 `sy_symlink`；run/agent 启动改走 `csih_home_bind`，旧 `~/.cdsh` 终于会被链上。
+  - f781d1ca4d 把 tui.cx 的 use 推到 40 条（上限 32，产品编不过）：8 个 reload 模块改经 `tui_reload.cx` 转发，去掉 5 条无调用的 use，现 28 条。
+  - `tools/libcscan.cx`：比 tests/cxraw 宽的 libc 名单，`--closure csih.cx` 扫编译闭包中 cx/ 以外的文件。查出 6 处漏网（access×2、strcspn×5，后者换成新加的 `zs_cspn`），现 34 个文件 0 处。`check.sh` 第 6 项跑 `tools/check-libcscan.cx`（自检样例、三调用夹具、闭包）。
+  - `tools/delibc.cx` 扩到字符串/堆/环境变量（zs_*、mm_*、sy_env、sy_pid），自动补直接 use（无 module 行的程序加在顶部，超 32 条拒绝），`--fio` 把 stdio 文件流换成 fio（文件里出现 stdout/stdin/fflush/fseek/errno 等就整文件不动），`--zstr MOD` 供探针用 `csih.zstr`；`tools/check-delibc.cx` 夹具逐字节比对。
+  - 25 个 `*_cli.cx` 全部过一遍 delibc：每个改前改后各跑一次，selftest 退出码和末行一致才保留（agent_cli 两边各编一次，输出逐字节相同）。reload_io/load/consume、journal_checkpoint、reload_candidate 的 CLI 没有 selftest，只核了用法退出码并人工读 diff。
+  - 探针目录不能放 `.cx` 名字的软链（复制源码树的探针会拒绝），改用目录链 `probes/csih -> ..`。
+  - 还没做的：CLI 里约 150 处 stdio 文件流（文件同时用 stdout 等，`--fio` 不动）；libc_cover、errno_cover、tui-q5-*、tty-*、fs-* 这些探针本身就是测 libc/前导的，不改。
 - **第六十六批已落地（2026-10-30）**：产品闭包去 `#include`（主人：libc 的函数和符号不直接用，经 cx 底层包装）。
   - file、u_run、term、shell、reload_io、net 六个模块不再有 `#include`，改用 cx/sys：
     - term：`sy_tty_get/set/raw/size` 取代 termios、cfmakeraw、TIOCGWINSZ；`sy_poll` 取代 poll。
