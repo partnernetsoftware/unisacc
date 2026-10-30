@@ -64,4 +64,8 @@ csih.com 是自包含的二进制，不需要 `apps/csih` 源码树，也不读 
 
 csih 的 TUI 是 POSIX 写法：termios 原始模式、`O_DIRECTORY`、`fcntl(F_GETFL)`、进程组、tmux。按 win/x86_64 编译时会报 `unknown identifier` 和 `incomplete struct termios`。要有真正的 Windows 版，得先把这几处移植到 Console API。
 
+2026-10-30 在仓外副本里做了一次试探：把第一层的 3 个错误用占位定义压掉，再编一次，又冒出第二层 6 个错误，涉及 `O_NOFOLLOW`、`O_NONBLOCK`、`tcsetattr`/`TCSANOW`/`TCSAFLUSH`、`struct winsize`。可见错误是一层一层露出来的，不是少数几处。
+
+更大的缺口是运行期：exec 工具要靠 `sh`，沙箱要靠 `unshare`，还有 tmux 见证和进程组。这些在 Windows 上都没有对应。本机也没有 Windows 或 wine，移植出来也只能记 UNMEASURED。所以 Windows 版不在快车道里做。真要做时，从三处入手：`term.cx` 改用 Console API，`shell.cx` 改用 CreateProcess 加 cmd/PowerShell，沙箱档在 Windows 上一律降成拒绝。
+
 在那之前，win 切片是 `apps/csih/tools/win-unsupported.cx`：只打印"Windows 尚未支持"，退出码 2。这样不会出现一个半能用、或者干脆没有的切片。
