@@ -50,3 +50,12 @@
 - **B. 旧行为才是对的。** 那失败的就是产品：要恢复"未验证答复之后仍然请评审"，改 `agent.cx`（产品输入，要重建产品），这两个探针原样当回归。
 
 在裁定之前，这两条保持 BLOCKED，探针不动。
+
+## 进展（2026-10-30）
+
+- 主人的长期授权是"技术细节自己裁定"。据此选 A，先做 agent_multi_action。
+- 这个探针原来还有一处缺陷：每个用例都用 `-run agent_cli.cx` 现编，冷编译约 28 秒，第一个用例就超时，所以上面那 4 例其实从来没跑到。现在改为编一次 `agent_cli.bin`；副本里缺的 sys/mem/text 用 `csih_copy_l0` 补上。
+- 4 例都以裸答复收尾，期望改为现行为（请求数减 1、rc 1、原因 `answer outcome=unverified`）。no-tools-braces 测的正是"带花括号的纯文本仍算答复"，桩保持纯文本。
+- 多动作拒绝与恢复、写出的文件、错误 trace、纯文本 trace 这些断言一条没动。
+- 结果 9/9 PASS。`tests/contracts.tsv` 里的 BLOCKED 不在本车道的可写范围，等有权限的人换标。
+- agent_loop_bound 还没做：其中 invalid_judge、watch_* 等用例测的是评审轮本身，需要能回填 action ID 的动态桩（参照 completion_contract 的 extract_ids）。

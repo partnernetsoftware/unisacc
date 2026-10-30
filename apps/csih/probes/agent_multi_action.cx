@@ -1,4 +1,5 @@
 #pragma unisa use agentwit
+#pragma unisa use srccopy
 /* CX probe */
 /* agent_multi_action.c — C port of probes/agent_multi_action.py.
  *
@@ -15,10 +16,11 @@
  * Optional argv: case names. Temp dirs use $TMPDIR (fallback /tmp).
  *
  * CX (run with -run; upper root, no includes: sockets and time are agentwit's):
- * the agent is `<compiler copy> -run agent_cli.cx -- agent PROMPT` with
- * cwd = the private source and CSIH_CWD = the case dir (the tools act there);
- * the build gate is `-run agent_cli.cx -- build-check` (rc 64, usage line,
- * empty stderr). unisacc's -run cache is keyed by cwd + root path + content,
+ * the agent is `ROOT/agent_cli.bin agent PROMPT`, agent_cli.cx compiled once
+ * by the compiler copy (2026-10-30: a -run per case timed out the first case),
+ * with cwd = the private source and CSIH_CWD = the case dir (the tools act there);
+ * the build gate is `agent_cli.bin build-check` (rc 64, usage line, empty
+ * stderr). unisacc's -run cache is keyed by cwd + root path + content,
  * so the private source is a fixed per-uid tree
  * TMP/csih-probe-build-UID/agent_multi_action/source, cleared and recopied
  * every run (~28s cold compile measured, ~1.2s hot); the cases' own dirs are
@@ -508,13 +510,22 @@ static const case_t CASES[] = {
      3, "write the files", 3, 1, 0, NULL, NULL, "too many unparseable steps", NULL},
     {"malformed-array-shell", {"[ BROKEN " W1 " ]", "[ BROKEN " W1 " ]", "[ BROKEN " W1 " ]"},
      3, "write one file", 3, 1, 0, NULL, NULL, "too many unparseable steps", NULL},
-    {"double-write-recovery", {DW, W1, W2, ANS, STP}, 5, "write the files", 5, 0, 2, "第一份中文\n", "第二份中文\n", NULL, NULL},
-    {"double-exec-rejected", {DE, ANS, STP}, 3, "do the actions", 3, 0, 0, NULL, NULL, NULL,
+    /* The last four end on a bare answer (no evidence). Since the ◐ protocol
+     * (docs/agent-probes-ruling.md, ruling A, 2026-10-30) a bare answer is
+     * recorded unverified and ends the round without a review request: one
+     * request fewer than these cases were written for (2026-10-10), rc 1, cause
+     * "answer outcome=unverified". What they test is unchanged and still
+     * asserted: the multi-action rejection and recovery, the files written, the
+     * error trace, the prose with braces kept as an answer. The trailing STP is
+     * no longer requested. */
+    {"double-write-recovery", {DW, W1, W2, ANS, STP}, 5, "write the files", 4, 1, 2, "第一份中文\n", "第二份中文\n",
+     "answer outcome=unverified", NULL},
+    {"double-exec-rejected", {DE, ANS, STP}, 3, "do the actions", 2, 1, 0, NULL, NULL, "answer outcome=unverified",
      "rc0 after a separate answer is not proof that rejected work completed"},
-    {"single-fenced-braces", {"说明：只执行一个对象。\n```json\n" SF "\n```", ANS, STP}, 3, "write one file", 3, 0, 1,
-     "字符串内 {中文} 与 \"引号\"\n", NULL, NULL, NULL},
-    {"no-tools-braces", {"中文说明，示例代码 if (x) { return; }，只需直接答复。", STP}, 2, "不用工具，直接回答测试", 2, 0, 0,
-     NULL, NULL, NULL, NULL},
+    {"single-fenced-braces", {"说明：只执行一个对象。\n```json\n" SF "\n```", ANS, STP}, 3, "write one file", 2, 1, 1,
+     "字符串内 {中文} 与 \"引号\"\n", NULL, "answer outcome=unverified", NULL},
+    {"no-tools-braces", {"中文说明，示例代码 if (x) { return; }，只需直接答复。", STP}, 2, "不用工具，直接回答测试", 1, 1, 0,
+     NULL, NULL, "answer outcome=unverified", NULL},
 };
 #define NCASES ((int)(sizeof CASES / sizeof CASES[0]))
 
@@ -572,14 +583,11 @@ static int run_case(const case_t *c, ctx_t *x) {
              "unset CSIH_ROLE CSIH_PEER OPENAI_API_KEY HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; "
              "export NO_PROXY='127.0.0.1,localhost' no_proxy='127.0.0.1,localhost' "
              "HOME='%s' DEEPSEEK_API_KEY='LOCAL_STUB_ONLY' CSIH_ENDPOINT='%s' CSIH_MODEL='multi-action-stub' "
-             "CSIH_CWD='%s' CSIH_TRANSCRIPT='%s'; cd '%s' && exec /bin/sh \"$0\" \"$@\"",
+             "CSIH_CWD='%s' CSIH_TRANSCRIPT='%s'; cd '%s' && exec \"$0\" \"$@\"",
              home, ep, cwd, trace, x->source);
-    args[0] = (char *)"-run";
-    args[1] = (char *)"agent_cli.cx";
-    args[2] = (char *)"--";
-    args[3] = (char *)"agent";
-    args[4] = (char *)c->prompt;
-    spawn(script, x->binary, args, 5, tmo, out, sizeof out, &rc, &timed);
+    args[0] = (char *)"agent";
+    args[1] = (char *)c->prompt;
+    spawn(script, x->binary, args, 2, tmo, out, sizeof out, &rc, &timed);
     if (timed) rc = -1;
     kill(stub, SIGKILL);
     waitpid(stub, NULL, 0);
@@ -667,6 +675,7 @@ int main(int argc, char **argv) {
     }
     if (mkdir(source, 0700) != 0) die("mkdir private source");
     copy_tree(CSIH_APP, source);
+    if (csih_copy_l0(CSIH_APP, source) != 0) die("copy of the L0 dirs (sys, mem, text) failed");   /* links the walk skips */
     snprintf(compiler, sizeof compiler, "%s/compiler.com", root);
     {
         size_t len = 0;
@@ -678,16 +687,26 @@ int main(int argc, char **argv) {
         if ((size_t)j >= before.n || before.len[j] != len || memcmp(before.data[j], b, len)) die("compiler copy differs");
         free(b);
     }
-    /* the agent is the compiler copy running agent_cli.cx; build gate: unknown
-     * subcommand -> usage line, rc 64, empty stderr (the cold compile is ~28s) */
-    snprintf(binary, sizeof binary, "%s", compiler);
+    /* the agent is agent_cli.cx compiled once by the compiler copy (-o; the cold
+     * compile is ~28s, so a -run per case would not fit the probe's 55s); build
+     * gate: that binary with an unknown subcommand -> usage line, rc 64, empty stderr */
+    snprintf(binary, sizeof binary, "%s/agent_cli.bin", root);
     snprintf(errp, sizeof errp, "%s/build-err.txt", root);
     snprintf(script, sizeof script, "cd '%s' && exec /bin/sh \"$0\" \"$@\" 2>'%s'", source, errp);
-    args[n++] = (char *)"-run";
-    args[n++] = (char *)"agent_cli.cx";
-    args[n++] = (char *)"--";
+    {
+        char *bav[3];
+        bav[0] = (char *)"agent_cli.cx";
+        bav[1] = (char *)"-o";
+        bav[2] = binary;
+        spawn(script, compiler, bav, 3, 50, ebuf, sizeof ebuf, &rc, &timed);
+        if (rc != 0 || timed) {
+            printf("compile rc=%d timed=%d out=%.200s\n", rc, timed, ebuf);
+            die("multi-action build failed");
+        }
+    }
+    snprintf(script, sizeof script, "cd '%s' && exec \"$0\" \"$@\" 2>'%s'", source, errp);
     args[n++] = (char *)"build-check";
-    spawn(script, compiler, args, n, 50, ebuf, sizeof ebuf, &rc, &timed);
+    spawn(script, binary, args, n, 10, ebuf, sizeof ebuf, &rc, &timed);
     if (rc != 64 || timed || !strstr(ebuf, "usage: agent_cli")) {
         printf("build rc=%d timed=%d out=%.200s\n", rc, timed, ebuf);
         die("multi-action build failed");
