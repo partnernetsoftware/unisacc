@@ -53,6 +53,22 @@ cc	ri,resources,negative,hosts
 - **bdy**：只做 library、interfaces、properties 三个域的 MISSING 格，暂停架构改进。
 - **cc**：做 ri、resources、negative 三个域的 MISSING 格；安装后负责 FOREIGN 格的 CI。
 
+### bdy 域格的材料依赖（2026-10-30，bdy 实测）
+
+- **properties 已清零**（missing=0）。
+- **library 30 格卡在「产品缺口 + P3 材料」**：`tests/cases/p3_library_members.c` 第 15 行 `#include "exec/c/libunisacc.c"`，但 `exec/c/libunisacc.c` 与 `exec/c/run.c` 已被 e16028ffa1（10-29）归档到 `archive/reference-c/exec/c/`，活跃区无 `us_new`/`us_free`/`us_add_*` 等库 API 的任何实现（symindex `def us_new` count=0）。14 格断言已写在 p3-library-members.cx 的 api_expect，另 16 格缺断言；全部要等 grk 重新提供 libunisacc 活跃实现（产品缺口，归 grk）+ P3 包（release-build 第一步）才能实跑。
+- **interfaces 11 格缺的材料**（等 P3 或材料打包，reason 按域矩阵）：
+  - draft（2）：if.attr.sidecar-ownership、if.edge.consumer-frames —— 对应流/网草案未定。
+  - 缺语料（1）：if.edge.corpus —— 需要语言形态语料，非两个 fixture。
+  - 缺 tapecheck 材料（1）：if.route.tapecheck-pass —— streams.json tapecheck_included=false。
+  - 缺注册批次（1）：if.route.tapecheck-neg001 —— 无批次；产品现报 `unknown opcode`（非 spec 的 `Tape lexical form`），产品诊断文本待 grk 对齐。
+  - units/multi 未打包（1）：if.route.units。
+  - memory entry 未打包（1）：if.route.memory。
+  - 材料仅 O2（1）：if.route.optimization-levels —— 需 O0/O1 链材料。
+  - 缺断言（1）：if.route.prune-placement。
+  - 无六目标链批次（1）：if.target.foreign-chains —— 需外宿主 CI。
+  - 本地列不全（1）：if.host.lnx-x86_64 —— 同一候选汇总行。
+
 ## 进度（grk 每完成一步，在这里写上提交号）
 
 - [ ] 1 hostnative
