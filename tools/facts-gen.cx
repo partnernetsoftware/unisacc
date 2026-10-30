@@ -1314,6 +1314,16 @@ static char *fg_eqrow(const char *rel, const char *name) {   /* "=NAME\tKIND\tVA
 }
 static int byte_less(const char *a, const char *b) { return fg_strcmp(a, b) < 0; }
 
+static void limits_emit(Ob *o);
+static void trie_emit(Ob *o, char **w, int nw, char **tkn, int *tkv, int ntk, char **spk, char **spv, int nsp,
+                      const char **skip, int nskip, long tk_other);
+static int tk_lookup(char **tkn, int *tkv, int ntk, const char *name) {
+    int q, t = -1;
+    for (q = 0; q < ntk; q++) if (tx_eq(tkn[q], name, FG_CAP)) t = tkv[q];
+    if (t < 0) fg_die("no TK for", name);
+    return t;
+}
+
 /* k2-gen2-tokens: parse2's token-reader trie over the parse words, parse2's extra words (appended after
    max(TK)), the span prefixes and the skipped qualifiers; plus the decimal overflow limits. */
 static void k2_gen2_tokens(Ob *o) {
@@ -1342,6 +1352,29 @@ static void k2_gen2_tokens(Ob *o) {
     }
     for (i = 0; i < nsp; i++) w[nw++] = spk[i];
     for (i = 0; i < 4; i++) w[nw++] = (char *)skip[i];
+    tk_other = fg_const("parse-constants", "TK_OTHER");
+    trie_emit(o, w, nw, tkn, tkv, ntk, spk, spv, nsp, skip, 4, tk_other);
+    limits_emit(o);
+    (void)names; (void)nn;
+}
+
+static void limits_emit(Ob *o) {
+    int i;
+    for (i = 0; i < 10; i++) {
+        unsigned long lim = (~0UL - (unsigned long)i) / 10UL;
+        char d[32];
+        int k = 31;
+        d[k] = 0;
+        do { d[--k] = (char)('0' + lim % 10UL); lim /= 10UL; } while (lim);
+        ob_z(o, "=limit"); ob_int(o, i); ob_z(o, "\tint\t"); ob_z(o, d + k); ob_z(o, "\n");
+    }
+}
+
+/* finite_rules.prefix_facts + node(): every non-empty prefix of words (byte-sorted), root first. */
+static void trie_emit(Ob *o, char **w, int nw, char **tkn, int *tkv, int ntk, char **spk, char **spv, int nsp,
+                      const char **skip, int nskip, long tk_other) {
+    static char *names[8192];
+    int nn = 0, i, j;
     for (i = 0; i < nw; i++) {                    /* every non-empty prefix, once */
         long n = tx_len(w[i], 256), m;
         for (m = 1; m <= n; m++) {
@@ -1351,7 +1384,6 @@ static void k2_gen2_tokens(Ob *o) {
         }
     }
     for (i = 1; i < nn; i++) { char *x = names[i]; for (j = i - 1; j >= 0 && byte_less(x, names[j]); j--) names[j + 1] = names[j]; names[j + 1] = x; }
-    tk_other = fg_const("parse-constants", "TK_OTHER");
     ob_z(o, "=N\tjson\t[");
     for (i = -1; i < nn; i++) {                   /* -1 = the root (empty prefix) */
         const char *p = i < 0 ? "" : names[i];
@@ -1372,7 +1404,7 @@ static void k2_gen2_tokens(Ob *o) {
         }
         {
             int is_skip = 0, t = -1;
-            for (q = 0; q < 4; q++) if (tx_eq(skip[q], p, 256)) is_skip = 1;
+            for (q = 0; q < nskip; q++) if (tx_eq(skip[q], p, 256)) is_skip = 1;
             for (q = 0; q < ntk; q++) if (tx_eq(tkn[q], p, 256)) t = tkv[q];
             ob_z(o, is_skip ? "], \"q\": [1], \"w\": [" : "], \"q\": [], \"w\": [");
             if (!is_skip && t >= 0) { ob_z(o, "{\"tok\": "); ob_int(o, t); ob_z(o, "}"); }
@@ -1380,20 +1412,158 @@ static void k2_gen2_tokens(Ob *o) {
         }
     }
     ob_z(o, "]\n");
-    for (i = 0; i < 10; i++) {
-        unsigned long lim = (~0UL - (unsigned long)i) / 10UL;
-        char d[32];
-        int k = 31;
-        d[k] = 0;
-        do { d[--k] = (char)('0' + lim % 10UL); lim /= 10UL; } while (lim);
-        ob_z(o, "=limit"); ob_int(o, i); ob_z(o, "\tint\t"); ob_z(o, d + k); ob_z(o, "\n");
+}
+
+/* Rows of exec/parse2/NAME.tsv after its header line, split on tabs. */
+static int p2_rows(const char *name, char ***rows, int *ncol, int cap) {
+    char rel[256];
+    Lines L;
+    int i, n = 0;
+    cx_fmt(rel, sizeof rel, "exec/parse2/%s.tsv", name);
+    L = fg_lines(rel);
+    for (i = 1; i < L.n; i++) {
+        char *cells[16], *line = fg_dupz(L.l[i]);
+        int k, c;
+        if (!*L.l[i]) continue;
+        c = fg_split(line, cells, 16);
+        if (c < 1 || n == cap) fg_die("bad row", L.l[i]);
+        rows[n] = ar_alloc(fg_ar, (long)sizeof(char *) * c);
+        for (k = 0; k < c; k++) rows[n][k] = cells[k];
+        ncol[n++] = c;
     }
+    return n;
+}
+
+/* k2-units-tokens: units-manifest tokenizer facts (units qualifiers appended after max(TK)). */
+static void k2_units_tokens(Ob *o) {
+    static char *w[2048], *tkn[2048], *spk[16], *spv[16];
+    static int tkv[2048], nc[256];
+    static char **R[256];
+    static const char *skip[2] = {"type=const", "type=volatile"};
+    int nw = 0, ntk = 0, nsp = 0, nq, i, j, mx = 0, nb = 0, builtin[1024];
+    long TK_ID = fg_const("parse-constants", "TK_ID"), tk_other = fg_const("parse-constants", "TK_OTHER");
+    char *quals[64];
+    Lines S;
+    pt_build();
+    for (i = 0; i < pt.ntk; i++) { tkn[ntk] = pt.tkn[i]; tkv[ntk++] = pt.tkv[i]; if (pt.tkv[i] > mx) mx = pt.tkv[i]; }
+    nq = p2_rows("units-qualifiers", R, nc, 64);
+    for (i = 0; i < nq; i++) {
+        quals[i] = R[i][0];
+        for (j = 0; j < ntk; j++) if (tx_eq(tkn[j], quals[i], FG_CAP)) break;
+        tkv[j] = ++mx;
+        if (j == ntk) tkn[ntk++] = quals[i];
+    }
+    for (i = 0; i < pt.nw; i++) w[nw++] = pt.w[i];
+    for (i = 0; i < nq; i++) w[nw++] = quals[i];
+    S = fg_lines("exec/parse/token-prefixes.tsv");
+    for (i = 0; i < S.n; i++) {
+        char *cells[4], *line = fg_dupz(S.l[i]);
+        if (!*line || line[0] == '#') continue;
+        if (fg_split(line, cells, 4) != 2 || nsp == 16) fg_die("bad token-prefixes row", S.l[i]);
+        spk[nsp] = cells[0]; spv[nsp++] = cells[1];
+    }
+    {
+        int nws = nw;
+        static char *tw[2048];
+        for (i = 0; i < nw; i++) tw[i] = w[i];
+        for (i = 0; i < nsp; i++) tw[nws++] = spk[i];
+        trie_emit(o, tw, nws, tkn, tkv, ntk, spk, spv, nsp, skip, 2, tk_other);
+    }
+#define TKOF(name) tk_lookup(tkn, tkv, ntk, (name))
+    {
+        static char **B[64];
+        static int bc[64];
+        int nbs = p2_rows("units-builtin", B, bc, 64);
+        for (i = 0; i < nw; i++) {
+            int hit = 0, q;
+            for (q = 0; q < nbs; q++)
+                if (tx_prefix(w[i], tx_len(w[i], 256), B[q][0], tx_len(B[q][0], 256)) && !tx_eq(w[i], B[q][1], 256)) hit = 1;
+            if (hit) builtin[nb++] = TKOF(w[i]);
+        }
+    }
+    ob_z(o, "=builtin\tjson\t[");
+    for (i = 0; i < nb; i++) { if (i) ob_z(o, ", "); ob_int(o, builtin[i]); }
+    ob_z(o, "]\n@qualifiers\tname:str\ttok:int\n");
+    for (i = 0; i < nq; i++) { ob_z(o, "\t"); ob_z(o, quals[i]); ob_z(o, "\t"); ob_int(o, TKOF(quals[i])); ob_z(o, "\n"); }
+    {
+        static char **T[128];
+        static int tc[128];
+        int nt = p2_rows("units-tokens", T, tc, 128);
+        ob_z(o, "@tokens\tclass:str\ttok:int\n");
+        for (i = 0; i < nt; i++) { ob_z(o, "\t"); ob_z(o, T[i][0]); ob_z(o, "\t"); ob_int(o, tx_eq(T[i][1], "identifier", 16) ? TK_ID : TKOF(T[i][1])); ob_z(o, "\n"); }
+        limits_emit(o);
+        ob_z(o, "=classes\tjson\t{");
+        for (i = 0; i < nt; i++) {
+            for (j = 0; j < i; j++) if (tx_eq(T[j][0], T[i][0], 256)) break;
+            if (j < i) continue;                  /* dict: first position */
+            {
+                int k, last = i;
+                for (k = i + 1; k < nt; k++) if (tx_eq(T[k][0], T[i][0], 256)) last = k;
+                if (i) ob_z(o, ", ");
+                ob_str(o, T[i][0]); ob_z(o, ": ["); ob_int(o, tx_eq(T[last][1], "identifier", 16) ? TK_ID : TKOF(T[last][1])); ob_z(o, "]");
+            }
+        }
+        ob_z(o, nt ? ", \"builtin\": [" : "\"builtin\": [");
+        for (i = 0; i < nb; i++) { if (i) ob_z(o, ", "); ob_int(o, builtin[i]); }
+        ob_z(o, "]}\n");
+    }
+    {
+        static char **X[64];
+        static int xc[64];
+        int n = p2_rows("units-reject", X, xc, 64);
+        for (i = 0; i < n; i++) { ob_z(o, "="); ob_z(o, X[i][0]); ob_z(o, "\tstr\t"); ob_z(o, X[i][1]); ob_z(o, "\n"); }
+    }
+    ob_z(o, "@lengths\tbyte:str\tstep:str\tnext:str\tshift:int\n");
+    for (i = 0; i < 4; i++) {
+        char b[64];
+        cx_fmt(b, sizeof b, "\tL%d\tL%db\t", i, i); ob_z(o, b);
+        if (i < 3) { cx_fmt(b, sizeof b, "L%d", i + 1); ob_z(o, b); } else ob_z(o, "EXTENT");
+        ob_z(o, "\t"); ob_int(o, 8 * i); ob_z(o, "\n");
+    }
+    {
+        const char *sect[2] = {"units-counters", "units-separators"}, *head[2] = {"@counters\tsection:str\ttoken:str\tslot:str\n", "@separators\tentry:str\tnext:str\n"};
+        int s;
+        for (s = 0; s < 2; s++) {
+            static char **X[128];
+            static int xc[128];
+            int n = p2_rows(sect[s], X, xc, 128), k;
+            ob_z(o, head[s]);
+            for (i = 0; i < n; i++) { for (k = 0; k < xc[i]; k++) { ob_z(o, "\t"); ob_z(o, X[i][k]); } ob_z(o, "\n"); }
+        }
+    }
+    ob_z(o, "@trailer\tstate:str\tnext:str\tbyte:int\n");
+    {
+        static char **X[8];
+        static int xc[8];
+        char *p;
+        int n = p2_rows("units-trailer", X, xc, 8), t = 0;
+        if (n < 1) fg_die("units-trailer is empty", 0);
+        p = X[0][0];
+        if (*p != '[') fg_die("units-trailer is not a list", p);
+        p++;
+        while (*p && *p != ']') {
+            char *end, b[64];
+            long v;
+            while (*p == ' ' || *p == ',') p++;
+            if (*p == ']') break;
+            v = strtol(p, &end, 10);
+            if (end == p) fg_die("units-trailer item is not an integer", X[0][0]);
+            cx_fmt(b, sizeof b, "\tTRAIL%d\tTRAIL%d\t%ld\n", t, t + 1, v); ob_z(o, b);
+            t++; p = end;
+        }
+    }
+    ob_z(o, "@keys\tkey:int\n");
+    for (i = 0; i < 257; i++) { ob_z(o, "\t"); ob_int(o, i); ob_z(o, "\n"); }
+    ob_z(o, "=STATIC\tint\t"); ob_int(o, 1L << 40);
+    ob_z(o, "\n=tk_goto\tint\t"); ob_int(o, TKOF("goto"));
+    ob_z(o, "\n=tk_colon\tint\t"); ob_int(o, TKOF(":")); ob_z(o, "\n");
+#undef TKOF
 }
 
 static void enc_pe(Ob *o) { pe_fields(o, 0); }
 static void enc_pe_forward(Ob *o) { pe_fields(o, 1); }
 
-typedef struct { const char *stem; const char *inputs[12]; void (*produce)(Ob *); } Table;   /* inputs 0-terminated */
+typedef struct { const char *stem; const char *inputs[16]; void (*produce)(Ob *); } Table;   /* inputs 0-terminated */
 static const Table fg_tables[] = {
     {"opt-gen", {"weights/gold/peep.tsv", "weights/gold/opinfo.tsv", "exec/facts/opt-gen-constants.tsv",
                  "exec/facts/opt-gen-startwords.tsv", "exec/opt/answer-targets.tsv", "tools/facts-gen.cx", 0}, opt_gen},
@@ -1418,6 +1588,9 @@ static const Table fg_tables[] = {
     {"lower-armfuse", {"exec/facts/tape-shape.tsv", "exec/lower/armfuse-shapes.tsv", "tools/facts-gen.cx", 0}, lower_armfuse},
     {"k2-gen2-tokens", {"exec/facts/parse-words.tsv", "weights/gold/prec.tsv", "exec/facts/parse2-extra.tsv",
                         "exec/parse/token-prefixes.tsv", "exec/facts/parse-constants.tsv", "tools/facts-gen.cx", 0}, k2_gen2_tokens},
+    {"k2-units-tokens", {"exec/facts/parse-words.tsv", "weights/gold/prec.tsv", "exec/facts/parse-constants.tsv", "exec/parse/token-prefixes.tsv",
+                         "exec/parse2/units-qualifiers.tsv", "exec/parse2/units-builtin.tsv", "exec/parse2/units-tokens.tsv", "exec/parse2/units-reject.tsv",
+                         "exec/parse2/units-counters.tsv", "exec/parse2/units-separators.tsv", "exec/parse2/units-trailer.tsv", "tools/facts-gen.cx", 0}, k2_units_tokens},
     {0, {0}, 0}
 };
 
