@@ -20,6 +20,7 @@
 | `sys.ffi` | `ffi.cx` | 外来调用（sy_ffi_call） |
 | `sys.poll` | `poll.cx` | 轮询（sy_poll） |
 | `sys.tty` | `tty.cx` | 终端（sy_tty_raw/sy_tty_size 等） |
+| `sys.fd` | `fd.cx` | 描述符复制（sy_dup/sy_dup2；Windows 上 sy_dup2 为 -ENOSYS） |
 
 ## 契约
 
@@ -30,4 +31,4 @@
 
 ## 检查
 
-`tools/check-cx-sys.cx`（CHECK_CX_SYS PASS ok=108）、`tools/check-cx-sys-spawn.cx`、`tools/check-cx-sys-net.cx`、`tools/check-cx-sys-guard.cx`、`tools/check-cx-sys-ffi.cx`。
+`tools/check-cx-sys.cx`（CHECK_CX_SYS PASS ok=108）、`tools/check-cx-sys-spawn.cx`、`tools/check-cx-sys-net.cx`、`tools/check-cx-sys-guard.cx`、`tools/check-cx-sys-ffi.cx`、`tools/check-cx-sys-fd.cx`。
