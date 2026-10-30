@@ -41,69 +41,7 @@ def _gold(name):
     return [x.split("\t") for x in lines if x and not x.startswith("#") and "=>" not in x]
 
 
-def lowercode():
-    """Lower code-route target facts: tape-word interning per os/arch (TAPE SHAPE words,
-    tape registers, fixed spellings), the machine register / encoding form each word
-    carries, and the side-table key bases (was exec/lower/code.py)."""
-    import json
-    sys.path.insert(0, str(ROOT))
-    from unisa.tape import SHAPE
-    out = ["=%s\tint\t%d" % (n, (105 + i) << 40)
-           for i, n in enumerate(("OP", "KIND", "AC", "ARG", "TXT", "REG", "FORM", "ARGREG", "CCW"))]
-    words = list(dict.fromkeys(list(SHAPE) + ["r" + str(i) for i in range(8)] + [
-        "0", "1", "2", "3", "4", "8", "-8", "_start:", "write", "exit",
-        ".hostcall", ".hostaddr", ".librarycall", ".libraryaddr"]
-        # H3d: the cc-interop inbound label definitions `__ccw_N:` (front_parse.c ccw_emit, N < 256) carry a `mark`
-        # (the CCW side table, set when they are interned): the scan has no prefix primitive, and an id range
-        # is not enough -- source labels are interned between these words at run time
-        + ["__ccw_" + str(i) + ":" for i in range(256)]))
-    from unisa import lower as L
-    for n in ("WIN_HSTD", "WIN_WRITTEN", "WIN_SAVE", "WIN_ARGVA", "SYSA", "SYSFP", "SYSSP"):
-        out.append("=%s\tint\t%d" % (n, getattr(L, n)))
-    out.append("=WIN_STACK_END\tint\t%d" % (L.WIN_EXTRA + L.WIN_STACK))
-    out += ["=SYSA%d\tint\t%d" % (i, L.SYSA + 8 * i) for i in range(6)]
-    out += ["=key_argc\tjson\t" + json.dumps("\0process/argc"), "=key_argv\tjson\t" + json.dumps("\0process/argv")]
-    out.append("@words\ttarget:str\ti:int\tword:str\trslots:json\treg:json\tform:json\tmark:json")
-    for os_ in ("lnx", "osx", "win"):
-        for arch in ("x86_64", "arm64"):
-            regmap = {r[0]: r[2] for r in _gold("regmap") if r[1] == arch}
-            enc = {r[0]: r[3] for r in _gold("enc") if r[1:3] == [os_, arch]}
-            for i, w in enumerate(words):
-                out.append("\t%s/%s\t%d\t%s\t%s\t%s\t%s\t%s" % (
-                    os_, arch, i, _esc(w), json.dumps([j for j, k in enumerate(SHAPE.get(w, ())) if k == "r"]),
-                    json.dumps([regmap[w]] if w in regmap else []),
-                    json.dumps([" form=" + enc[w]] if w in enc else []),
-                    json.dumps([1] if w.startswith("__ccw_") else [])))
-    # Per-target env of the code route (was exec/lower/code.py env prep): code-manifest.tsv
-    # merges codeenv.<target> with bindmap.  Scratch registers are checked here, at export.
-    from unisa.emit_x86 import SCR, SCR2
-    from unisa.emit_arm import IP0, IP1
-    from exec.facts.load import facts
-    banks = {r["name"]: r["value"] for r in facts("top-modelbindings-banks")}
-    stride = {r["name"]: r["value"] for r in facts("top-modelbindings-const")}["STRIDE"]
-    env = {}
-    for os_ in ("lnx", "osx", "win"):
-        for arch in ("x86_64", "arm64"):
-            regmap = {r[0]: r[2] for r in _gold("regmap") if r[1] == arch}
-            enc = {r[0]: r[3] for r in _gold("enc") if r[1:3] == [os_, arch]}
-            reloc = {r[0]: r[2] for r in _gold("reloc") if r[1] == arch}
-            ids = {w: "idc" + str(i) for i, w in enumerate(words)}
-            scratch = "x16" if arch == "arm64" else "r11"
-            assert scratch not in set(regmap.values()), "callm scratch aliases tape register"
-            s0, s1 = ("x" + str(IP0), "x" + str(IP1)) if regmap["r0"].startswith("x") else (SCR, SCR2)
-            assert not {s0, s1} & set(regmap.values()), "process scratches alias tape values"
-            e = dict(target=os_ + "/" + arch, arch=arch, ids=ids, process_flag="true" if os_ == "lnx" else "false",
-                     idmapu={"id_" + n: v for n, v in ids.items()}, idmap={"id:" + n: v for n, v in ids.items()},
-                     scratch=scratch, form_load64=enc["load64"], form_callr=enc["callr"],
-                     s0=s0, s1=s1, hosted=True,
-                     IDS=banks["IDS"], ADDRESS=banks["ADDRESS"], DESC=banks["DESC"], BKIND=banks["KIND"],
-                     SUPPORTED=banks["SUPPORTED"], WRITABLE=banks["WRITABLE"], EXTENT=banks["EXTENT"],
-                     STRIDE=stride)
-            e.update({"reloc_" + k: v for k, v in reloc.items()})
-            e.update({"reg_" + k: v for k, v in regmap.items()})
-            env[os_ + "/" + arch] = e
-    out.append("=codeenv\tjson\t" + json.dumps(env, sort_keys=True))
-    return out
+# lower-code moved to tools/facts-gen.cx (literals: exec/facts/enc-literals.tsv) on 2026-10-30.
 
 
 
@@ -139,7 +77,6 @@ def lowercode():
 
 
 TABLES = [
-    ("lower-code", ["unisa/tape.py", "unisa/lower.py", "weights/gold/regmap.tsv", "weights/gold/enc.tsv", "weights/gold/reloc.tsv", "unisa/emit_x86.py", "unisa/emit_arm.py", "exec/facts/top-modelbindings-banks.tsv", "exec/facts/top-modelbindings-const.tsv", "exec/facts/export.py"], lowercode),
 ]
 
 

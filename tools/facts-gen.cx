@@ -3817,6 +3817,106 @@ static void lower_abi(Ob *o) {
     ob_z(o, "=none\tjson\t[]\n=zero\tint\t0\n=eight\tint\t8\n");
 }
 
+/* lower-code: tape-word interning per target (SHAPE words from exec/facts/tape-shape.tsv, r0..r7, the
+   fixed spellings, __ccw_0..255:), each word's register / encoding form / CCW mark, the side-table key
+   bases, and the per-target code-route env (sort_keys JSON). */
+static void lower_code(Ob *o) {
+    static const char *oses[3] = {"lnx", "osx", "win"}, *arches[2] = {"x86_64", "arm64"};
+    static const char *winb[4][2] = {{"WIN_HSTD", 0}, {"WIN_WRITTEN", "WIN_HSTD_BYTES"}, {"WIN_SAVE", "WIN_WRITTEN_BYTES"}, {"WIN_ARGVA", "WIN_SAVE_BYTES"}};
+    static const char *bankn[8][2] = {{"IDS", "IDS"}, {"ADDRESS", "ADDRESS"}, {"DESC", "DESC"}, {"BKIND", "KIND"},
+                                      {"SUPPORTED", "SUPPORTED"}, {"WRITABLE", "WRITABLE"}, {"EXTENT", "EXTENT"}, {0, 0}};
+    Lines SH = fg_lines("exec/facts/tape-shape.tsv");
+    char *word[1024], *shape[1024], *sop[256], *ssh[256];
+    int nw = 0, nsh = 0, i, j, oi, ai;
+    long win[4], v;
+    Krow *k[64];
+    Jv *env = jv_d(), *banks = fj_names("top-modelbindings-banks", 0), *cst = fj_names("top-modelbindings-const", 0);
+    static Rows RL;
+    static List FL;
+#define ADDW(W) do { const char *w_ = (W); int q_, d_ = 0; for (q_ = 0; q_ < nw; q_++) if (tx_eq(word[q_], w_, 256)) d_ = 1; \
+        if (!d_) { if (nw == 1024) fg_die("too many words", 0); word[nw++] = fg_dupz(w_); } } while (0)
+    for (i = 0; i < SH.n; i++) {
+        char *c[4], *line = fg_dupz(SH.l[i]);
+        if (!*line || line[0] == '#') continue;
+        if (fg_split(line, c, 4) != 2 || nsh == 256) fg_die("bad tape-shape row", SH.l[i]);
+        sop[nsh] = c[0]; ssh[nsh] = c[1]; nsh++;
+        ADDW(c[0]);
+    }
+    for (i = 0; i < 8; i++) { char r[8]; cx_fmt(r, sizeof r, "r%d", i); ADDW(r); }
+    { int n = el_kind("codeword", k, 64); for (i = 0; i < n; i++) ADDW(k[i]->name); }
+    for (i = 0; i < 256; i++) { char r[32]; cx_fmt(r, sizeof r, "__ccw_%d:", i); ADDW(r); }
+#undef ADDW
+    for (i = 0; i < nw; i++) { shape[i] = 0; for (j = 0; j < nsh; j++) if (tx_eq(sop[j], word[i], 256)) shape[i] = ssh[j]; }
+    { int n = el_kind("codebank", k, 64); for (i = 0; i < n; i++) { ob_z(o, "="); ob_z(o, k[i]->name); ob_z(o, "\tint\t"); ob_int(o, strtol(k[i]->value, 0, 10) << 40); ob_z(o, "\n"); } }
+    v = el_int("lower", "SCRATCH") + el_int("lower", "PRINTMAX");
+    for (i = 0; i < 4; i++) { if (winb[i][1]) v += el_int("lower", winb[i][1]); win[i] = v; }
+    for (i = 0; i < 4; i++) { ob_z(o, "="); ob_z(o, winb[i][0]); ob_z(o, "\tint\t"); ob_int(o, win[i]); ob_z(o, "\n"); }
+    ob_z(o, "=SYSA\tint\t"); ob_int(o, el_int("lower", "SYSA")); ob_z(o, "\n");
+    ob_z(o, "=SYSFP\tint\t"); ob_int(o, el_int("lower", "SYSFP")); ob_z(o, "\n");
+    ob_z(o, "=SYSSP\tint\t"); ob_int(o, el_int("lower", "SYSSP")); ob_z(o, "\n");
+    ob_z(o, "=WIN_STACK_END\tint\t"); ob_int(o, win[3] + el_int("lower", "WIN_ARGVA_BYTES") + el_int("lower", "WIN_STACK")); ob_z(o, "\n");
+    for (i = 0; i < 6; i++) { ob_z(o, "=SYSA"); ob_int(o, i); ob_z(o, "\tint\t"); ob_int(o, el_int("lower", "SYSA") + 8 * i); ob_z(o, "\n"); }
+    ob_z(o, "=key_argc\tjson\t"); ob_strn(o, "\0process/argc", 13); ob_z(o, "\n");
+    ob_z(o, "=key_argv\tjson\t"); ob_strn(o, "\0process/argv", 13); ob_z(o, "\n");
+    ob_z(o, "@words\ttarget:str\ti:int\tword:str\trslots:json\treg:json\tform:json\tmark:json\n");
+    for (oi = 0; oi < 3; oi++) for (ai = 0; ai < 2; ai++) {
+        const char *os = oses[oi], *arch = arches[ai];
+        for (i = 0; i < nw; i++) {
+            const char *reg = el_regmap(arch, word[i]), *form = el_enc(os, arch, word[i]), *s = shape[i];
+            int slot = 0, first = 1;
+            ob_z(o, "\t"); ob_z(o, os); ob_z(o, "/"); ob_z(o, arch); ob_z(o, "\t"); ob_int(o, i); ob_z(o, "\t"); el_esc(o, word[i]); ob_z(o, "\t[");
+            if (s) for (j = 0; ; j++) {
+                if (s[j] == ',' || !s[j]) { if (j > 0 && s[j - 1] == 'r' && (j == 1 || s[j - 2] == ',')) { if (!first) ob_z(o, ", "); ob_int(o, slot); first = 0; } slot++; if (!s[j]) break; }
+            }
+            ob_z(o, "]\t");
+            if (reg) { ob_z(o, "["); ob_str(o, reg); ob_z(o, "]"); } else ob_z(o, "[]");
+            ob_z(o, "\t");
+            if (form) { char b[256]; cx_fmt(b, sizeof b, " form=%s", form); ob_z(o, "["); ob_str(o, b); ob_z(o, "]"); } else ob_z(o, "[]");
+            ob_z(o, tx_prefix(word[i], tx_len(word[i], 256), "__ccw_", 6) ? "\t[1]\n" : "\t[]\n");
+        }
+    }
+    fg_gold("reloc", &RL, &FL, 0, 0);
+    for (oi = 0; oi < 3; oi++) for (ai = 0; ai < 2; ai++) {
+        const char *os = oses[oi], *arch = arches[ai], *scratch = el_get("codescratch", arch), *s0, *s1, *r0 = el_regmap(arch, "r0");
+        char t[32], b[64], ip0[16], ip1[16];
+        Jv *e = jv_d(), *ids = jv_d(), *idmapu = jv_d(), *idmap = jv_d();
+        cx_fmt(t, sizeof t, "%s/%s", os, arch);
+        for (i = 0; i < nw; i++) {
+            char nm[300];
+            cx_fmt(b, sizeof b, "idc%d", i);
+            jd_puts(ids, word[i], b);
+            cx_fmt(nm, sizeof nm, "id_%s", word[i]); jd_puts(idmapu, nm, b);
+            cx_fmt(nm, sizeof nm, "id:%s", word[i]); jd_puts(idmap, nm, b);
+        }
+        if (!scratch || !r0) fg_die("no scratch or r0", arch);
+        cx_fmt(ip0, sizeof ip0, "x%ld", el_int("armscratch", "IP0"));
+        cx_fmt(ip1, sizeof ip1, "x%ld", el_int("armscratch", "IP1"));
+        if (r0[0] == 'x') { s0 = ip0; s1 = ip1; } else { s0 = el_get("x86scratch", "SCR"); s1 = el_get("x86scratch", "SCR2"); }
+        for (i = 0; i < 8; i++) {
+            char r[8];
+            const char *m;
+            cx_fmt(r, sizeof r, "r%d", i);
+            m = el_regmap(arch, r);
+            if (m && tx_eq(m, scratch, 16)) fg_die("callm scratch aliases tape register", arch);
+            if (m && (tx_eq(m, s0, 16) || tx_eq(m, s1, 16))) fg_die("process scratches alias tape values", arch);
+        }
+        jd_puts(e, "target", t); jd_puts(e, "arch", arch); jd_put(e, "ids", ids);
+        jd_puts(e, "process_flag", oi == 0 ? "true" : "false"); jd_put(e, "idmapu", idmapu); jd_put(e, "idmap", idmap);
+        jd_puts(e, "scratch", scratch);
+        { const char *f = el_enc(os, arch, "load64"); if (!f) fg_die("no load64 form", t); jd_puts(e, "form_load64", f); }
+        { const char *f = el_enc(os, arch, "callr"); if (!f) fg_die("no callr form", t); jd_puts(e, "form_callr", f); }
+        jd_puts(e, "s0", s0); jd_puts(e, "s1", s1); jd_put(e, "hosted", jv_new(JV_TRUE));
+        for (i = 0; bankn[i][0]; i++) jd_put(e, bankn[i][0], jd_must(banks, bankn[i][1]));
+        jd_put(e, "STRIDE", jd_must(cst, "STRIDE"));
+        for (i = 0; i < RL.n; i++) if (RL.nc[i] >= 3 && tx_eq(RL.c[i][1], arch, 16)) { cx_fmt(b, sizeof b, "reloc_%s", RL.c[i][0]); jd_puts(e, b, RL.c[i][2]); }
+        for (i = 0; i < 8; i++) { char r[8]; const char *m; cx_fmt(r, sizeof r, "r%d", i); m = el_regmap(arch, r); if (m) { cx_fmt(b, sizeof b, "reg_%s", r); jd_puts(e, b, m); } }
+        jd_put(env, t, e);
+    }
+    ob_z(o, "=codeenv\tjson\t");
+    jv_dump(o, env, 0, 1);
+    ob_z(o, "\n");
+}
+
 static void enc_arm(Ob *o) {
     Krow *k[256];
     char *sop[512], *sshape[512], *meta[64], *imp[64], *v[256];
@@ -3963,6 +4063,9 @@ static const Table fg_tables[] = {
                  "exec/facts/enc-armwin-keys.tsv", "exec/facts/enc-armwin-reset.tsv", "tools/facts-gen.cx", 0}, enc_arm},
     {"lower-abi", {"exec/facts/enc-literals.tsv", "exec/lower/code-abi-sources.tsv", "weights/gold/abi.tsv", "weights/gold/enc.tsv",
                    "tools/facts-gen.cx", 0}, lower_abi},
+    {"lower-code", {"exec/facts/enc-literals.tsv", "exec/facts/tape-shape.tsv", "weights/gold/regmap.tsv", "weights/gold/enc.tsv",
+                    "weights/gold/reloc.tsv", "exec/facts/top-modelbindings-banks.tsv", "exec/facts/top-modelbindings-const.tsv",
+                    "tools/facts-gen.cx", 0}, lower_code},
     {0, {0}, 0}
 };
 
