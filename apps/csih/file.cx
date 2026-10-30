@@ -1,4 +1,7 @@
 #pragma unisa module file
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.text
 /*
  * file.cx — the file primitives an agent actually needs, and the three rules
  * that make them safe to hand to one.
@@ -114,46 +117,45 @@ typedef struct {
  */
 file_result file_read(const char *path, char *buf, size_t cap) {
     file_result r;
-    struct stat st;
-    int fd;
+    sy_stat_t st;
+    int fd, sr;
     size_t off = 0;
-    ssize_t n;
+    long n;
 
     r.ok = 0; r.err = 0; r.bytes = 0;
     if (!path || !buf || cap == 0) { r.err = EINVAL; return r; }
 
-    if (stat(path, &st) == 0) {
-        if (S_ISDIR(st.st_mode)) { r.err = EISDIR; return r; }
-        if ((size_t)st.st_size + 1 > cap) {
+    sr = sy_stat(path, &st);
+    if (sr == 0) {
+        if (st.kind == 'd') { r.err = EISDIR; return r; }
+        if ((size_t)st.size + 1 > cap) {
             r.err = FILE_TOO_BIG;
-            r.bytes = (long)st.st_size;   /* the caller needs this to retry */
+            r.bytes = st.size;            /* the caller needs this to retry */
             return r;
         }
     } else {
-        r.err = errno;
+        r.err = -sr;
         return r;
     }
 
-    fd = open(path, O_RDONLY);
-    if (fd < 0) { r.err = errno; return r; }
+    fd = sy_open(path, O_RDONLY, 0);
+    if (fd < 0) { r.err = -fd; return r; }
 
     /* Read in a loop: a short read() is normal and must not be mistaken for
      * EOF, or a large file on a busy system would come back truncated — the
-     * exact failure this function exists to prevent. */
+     * exact failure this function exists to prevent. sy_read resumes after
+     * EINTR itself. */
     while (off + 1 < cap) {
-        n = read(fd, buf + off, cap - 1 - off);
+        n = sy_read(fd, buf + off, (long)(cap - 1 - off));
         if (n < 0) {
-            /* Retry on EINTR. unisacc 0.0.19 defines it, so this is no longer a
-             * per-OS magic number — which was the whole reason it was omitted. */
-            if (errno == EINTR) continue;
-            close(fd);
-            r.err = errno;
+            sy_close(fd);
+            r.err = (int)-n;
             return r;
         }
         if (n == 0) break;
         off += (size_t)n;
     }
-    close(fd);
+    sy_close(fd);
     buf[off] = '\0';
     r.ok = 1;
     r.bytes = (long)off;
@@ -178,52 +180,49 @@ file_result file_read(const char *path, char *buf, size_t cap) {
 file_result file_write(const char *path, const char *text, size_t len) {
     file_result r;
     char tmp[4096];
-    int fd;
-    size_t off = 0;
-    ssize_t n;
+    long plen;
+    int fd, e;
 
     r.ok = 0; r.err = 0; r.bytes = 0;
     if (!path || (!text && len)) { r.err = EINVAL; return r; }
 
-    if (strlen(path) + 16 >= sizeof tmp) { r.err = ENAMETOOLONG; return r; }
-    snprintf(tmp, sizeof tmp, "%s.csih-tmp", path);
+    plen = tx_len(path, (long)sizeof tmp);
+    if (plen < 0 || plen + 16 >= (long)sizeof tmp) { r.err = ENAMETOOLONG; return r; }
+    if (cx_fmt(tmp, sizeof tmp, "%s.csih-tmp", path)) { r.err = ENAMETOOLONG; return r; }
 
-    fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) { r.err = errno; return r; }
+    fd = sy_open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) { r.err = -fd; return r; }
 
-    while (off < len) {
-        n = write(fd, text + off, len - off);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            r.err = errno;
-            close(fd);
-            remove(tmp);
-            return r;
-        }
-        off += (size_t)n;
-    }
-    /* fsync is available as of unisacc 0.0.19 (it was missing in 0.0.18, and
-     * the #ifdef that guarded it is gone now that both backends have it —
-     * a workaround that outlives its cause is just a mystery for the next
-     * reader). */
-    if (fsync(fd) != 0) {
-        r.err = errno;
-        close(fd);
-        remove(tmp);
+    /* sy_write_all loops over short writes and resumes after EINTR */
+    e = sy_write_all(fd, text, (long)len);
+    if (e != 0) {
+        r.err = -e;
+        sy_close(fd);
+        sy_unlink(tmp);
         return r;
     }
-    if (close(fd) != 0) {
-        r.err = errno;
-        remove(tmp);
+    /* fsync before close: without it a rename can be durable while the data is not. */
+    e = sy_fsync(fd);
+    if (e != 0) {
+        r.err = -e;
+        sy_close(fd);
+        sy_unlink(tmp);
         return r;
     }
-    if (rename(tmp, path) != 0) {
-        r.err = errno;
-        remove(tmp);
+    e = sy_close(fd);
+    if (e != 0) {
+        r.err = -e;
+        sy_unlink(tmp);
+        return r;
+    }
+    e = sy_rename(tmp, path);
+    if (e != 0) {
+        r.err = -e;
+        sy_unlink(tmp);
         return r;
     }
     r.ok = 1;
-    r.bytes = (long)off;
+    r.bytes = (long)len;
     return r;
 }
 
@@ -234,9 +233,8 @@ file_result file_write(const char *path, const char *text, size_t len) {
  * this file's contents". */
 file_result file_append_line(const char *path, const char *line) {
     file_result r;
-    int fd;
-    size_t len, off = 0;
-    ssize_t n;
+    int fd, e;
+    long len, off = 0;
 
     r.ok = 0; r.err = 0; r.bytes = 0;
     if (!path || !line) { r.err = EINVAL; return r; }
@@ -247,8 +245,8 @@ file_result file_append_line(const char *path, const char *line) {
      * append still produced "hellosecond" while the code to prevent it sat
      * right there looking correct. A guard nobody can reach is worse than no
      * guard, because it is quoted as one. */
-    fd = open(path, O_RDWR | O_CREAT | O_APPEND, 0644);
-    if (fd < 0) { r.err = errno; return r; }
+    fd = sy_open(path, O_RDWR | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) { r.err = -fd; return r; }
 
     /*
      * If the file does not end in a newline, add one BEFORE the new line.
@@ -264,31 +262,29 @@ file_result file_append_line(const char *path, const char *line) {
      * and a well-formed file is untouched.
      */
     {
-        off_t size = lseek(fd, 0, SEEK_END);
+        long size = sy_lseek(fd, 0, SEEK_END);
         if (size > 0) {
             char last = '\n';
-            off_t back = lseek(fd, size - 1, SEEK_SET);
-            if (back >= 0 && read(fd, &last, 1) == 1 && last != '\n') {
-                if (write(fd, "\n", 1) != 1) { r.err = errno; close(fd); return r; }
+            long back = sy_lseek(fd, size - 1, SEEK_SET);
+            if (back >= 0 && sy_read(fd, &last, 1) == 1 && last != '\n') {
+                e = sy_write_all(fd, "\n", 1);
+                if (e != 0) { r.err = -e; sy_close(fd); return r; }
             }
-            (void)lseek(fd, 0, SEEK_END);   /* back to the end for the append */
+            (void)sy_lseek(fd, 0, SEEK_END);   /* back to the end for the append */
         }
     }
 
-    len = strlen(line);
-    while (off < len) {
-        n = write(fd, line + off, len - off);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            r.err = errno; close(fd); return r;
-        }
-        off += (size_t)n;
-    }
+    len = tx_len(line, 1L << 30);
+    if (len < 0) { r.err = EINVAL; sy_close(fd); return r; }
+    e = sy_write_all(fd, line, len);
+    if (e != 0) { r.err = -e; sy_close(fd); return r; }
+    off = len;
     if (len == 0 || line[len - 1] != '\n') {
-        if (write(fd, "\n", 1) != 1) { r.err = errno; close(fd); return r; }
+        e = sy_write_all(fd, "\n", 1);
+        if (e != 0) { r.err = -e; sy_close(fd); return r; }
         off++;
     }
-    close(fd);
+    sy_close(fd);
     r.ok = 1;
     r.bytes = (long)off;
     return r;
@@ -310,36 +306,28 @@ file_result file_append_line(const char *path, const char *line) {
  */
 file_result file_list(const char *dir, char *out, size_t cap) {
     file_result r;
-    DIR *d;
-    struct dirent *e;
-    size_t used = 0;
-    long count = 0;
+    int dfd, count, room, i, used = 0;
 
     r.ok = 0; r.err = 0; r.bytes = 0;
     if (!dir || !out || cap == 0) { r.err = EINVAL; return r; }
     out[0] = '\0';
 
-    d = opendir(dir);
-    if (!d) { r.err = errno; return r; }
+    dfd = sy_open(dir, O_RDONLY | O_DIRECTORY, 0);
+    if (dfd < 0) { r.err = -dfd; return r; }
 
-    errno = 0;
-    while ((e = readdir(d)) != NULL) {
-        size_t n;
-        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-        n = strlen(e->d_name);
-        if (used + n + 2 > cap) {          /* +2 for the newline and the NUL */
-            closedir(d);
-            r.err = ENOSPC;
-            return r;
-        }
-        memcpy(out + used, e->d_name, n);
-        used += n;
+    /* sy_dir_names (sys.posix) skips "." and "..", and writes each name with a
+     * NUL after it: one byte per name, as the newline here. Keeping one byte
+     * back for the final NUL gives the same "+2 per name" room check as
+     * before: ENOSPC instead of a truncated name. */
+    room = cap - 1 > 0x7fffffff ? 0x7fffffff : (int)(cap - 1);
+    count = room > 0 ? sy_dir_names(dfd, out, room) : -ENOSPC;
+    sy_close(dfd);
+    if (count < 0) { out[0] = '\0'; r.err = -count; return r; }
+    for (i = 0; i < count; i++) {
+        while (out[used]) used++;
         out[used++] = '\n';
-        out[used] = '\0';
-        count++;
     }
-    if (errno != 0) { r.err = errno; closedir(d); return r; }
-    closedir(d);
+    out[used] = '\0';
     r.ok = 1;
     r.bytes = count;      /* the COUNT of entries, not bytes — see the CLI note */
     return r;
