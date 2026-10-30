@@ -193,11 +193,12 @@ int sy_fsync(int fd) {
 }
 
 /* fdatasync is not in the implicit prelude, so this L0 unit calls the raw
-   syscall (Linux x86_64 75, aarch64 83).  Windows flushes data via _commit. */
+   syscall (Linux x86_64 75, aarch64 83).  Windows and macOS return -ENOSYS
+   (no prelude _commit / fdatasync). */
 static int sy_fdatasync_os(int fd) {
 #ifdef _WIN32
-    errno = 0;
-    return _commit(fd) == 0 ? 0 : sy_fail();
+    (void)fd;
+    return -ENOSYS;
 #elif defined(__linux__) && defined(__x86_64__)
     return (int)__syscall6(75, (long)fd, 0, 0, 0, 0);
 #elif defined(__linux__) && defined(__aarch64__)
@@ -263,14 +264,17 @@ static int sy_mkfifo_os(const char *path, int mode) {
 #elif defined(__linux__) && defined(__aarch64__)
     return (int)__syscall6(33, -100, (long)path, (long)(S_IFIFO | (mode & 07777)), 0, 0);
 #else
-    errno = 0;
-    return mkfifo(path, (mode_t)mode) == 0 ? 0 : sy_fail();
+    /* Darwin: the prelude has no mkfifo either; return -ENOSYS until a macOS
+       syscall thunk is needed. */
+    (void)path;
+    (void)mode;
+    return -ENOSYS;
 #endif
 }
 
 /* Make PATH a FIFO (named pipe) with MODE permission bits (Rust std::os::unix::
    fs::symlink's sibling; POSIX mkfifo).  0, or -errno: -EINVAL for an empty
-   PATH, -ENOSYS on Windows. */
+   PATH, -ENOSYS on Windows and macOS. */
 int sy_mkfifo(const char *path, int mode) {
     if (!path || !path[0]) return -EINVAL;
     return sy_mkfifo_os(path, mode);
