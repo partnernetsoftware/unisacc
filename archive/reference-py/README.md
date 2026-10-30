@@ -15,13 +15,12 @@
 
    `exec/**/*-manifest.tsv` 开头的 `#! base build/parsebase.py` 是历史元数据，manifest 本身仍是构造与测试的数据，留在原处。
 2. ~~18 网内核生成器 `python3 -m unisa emit-kernel`~~：2026-10-30 起由 `tools/kernel-emit.cx` 原生写出 `kernel/` 的 41 个文件，与 Python 逐字节相同（e98caea11e）。`tools/net-built-private.cx`、`tools/pp-built-private.cx` 已改调它（1c372d2b43），活路径不再执行 `unisa`。
-   同日 `unisa/` 的 36 个文件归档 31 个，见清单。活路径只留 5 个，它们已不再执行，只作数据或身份输入：
-   - `unisa/ckernel.py`：KERNEL_BODY 由 `tools/kernel-emit.cx`、`tools/table-kernel-export.cx`、`tools/pp-gold-material.cx` 按标记截取；
-   - `unisa/gold.py`：`tools/net-material.cx` 从中解析词表元组；
-   - `unisa/gold.py`、`unisa/catalog.py`、`unisa/front/lex.py`、`unisa/ckernel.py`：哈希进入 `kernel/` 的溯源注释（`exec/facts/kernel-emit.tsv` 的 modelsrc），以及各材料工具与测试的身份绑定；
-   - `unisa/libneed.py`：仍有一处字符串引用。
-   
-   这 5 个要归档，得先把上述内容挪成数据文件，并在下一次慢车道纪元重定身份绑定。归档后，`kernel-emit --check` 41/41、`facts-gen --check` 31/31 均不变。
+   同日 `unisa/` 先归档 36 个文件中的 31 个；其余 5 个（`ckernel.py`、`gold.py`、`catalog.py`、`libneed.py`、`front/lex.py`）当时已不再执行，只作数据或身份输入，随后也归档了，活路径不再有 `unisa/`。它们的内容去向：
+   - KERNEL_BODY：原样移到 `exec/kernel/body.c`（b3f20af705），由 `tools/kernel-emit.cx`、`tools/table-kernel-export.cx`、`tools/pp-gold-material.cx` 读取；
+   - `gold.py` 的 CHARC/DEFINED 元组：移到 `exec/kernel/gold-tuples.tsv`，由 `tools/net-material.cx` 读取；
+   - 其余词表与 ENCSPEC：已在 `exec/facts/kernel-emit.tsv`、`enc-literals.tsv` 中。`kernel/` 的溯源块改为列出这些数据文件；除溯源行外，41 个文件的正文与 Python 版逐字节相同。
+   - 身份与遍历：`seed/ident.c`、`tools/table-kernel-export.cx`、`tools/cxlib/rebuildcontext.cx`、`tools/package-refresh.cx`、`tools/cxlib/nninputs.cx` 不再列出 `unisa`（6656ea2602）；材料工具与测试的依赖清单改指新数据文件（b3f20af705、757c385d51）。SID 因此进入新纪元，旧材料在下一次慢车道纪元重备。
+   - 历史见证 `tools/cxpack-source-delta.cx`、`tools/link-source-delta.cx` 保留原树列表（含 `unisa`），它们只适用于各自钉住的历史根对。
 3. `release/`：2026-10-30 按调用链清理。
    - **已归档：** 18 个 `.py`，连同只服务于它们、且引用已归档文件因而早已跑不起来的 `.sh`/`.cx`（macOS 打包、提交门禁、旧候选链、发布队列与预热、裁定台账报告）。
    - **仍留 2 个，由 GitHub 手动发布 workflow 调用：**
@@ -348,6 +347,11 @@
 - unisa/tape.py
 - unisa/tsvgold.py
 - unisa/vm.py
+- unisa/catalog.py
+- unisa/ckernel.py
+- unisa/front/lex.py
+- unisa/gold.py
+- unisa/libneed.py
 - release/macosbundle.py
 - release/tools/apple-sign.sh
 - release/tools/release_prep.sh
