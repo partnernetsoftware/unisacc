@@ -1,0 +1,41 @@
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+/* check-cx-sys-fs.cx -- standalone checks for the byte-safe fs read/write
+   primitives, deliberately separate from check-cx-sys.cx so it runs even while
+   the dl segment there segfaults (grk's in-flight hostnative thinning).  usage:
+   sh ./unisacc.com tools/check-cx-sys-fs.cx */
+static int bad;
+static void ok(int c, const char *n) { sy_printf("%s\t%s\n", c ? "PASS" : "FAIL", n); if (!c) bad = 1; }
+int main(void) {
+    char path[160];
+    int fd;
+    const char *dir = "/tmp/cx-sys-fs-check";
+    sy_mkdir(dir, 0700);
+    tx_copy(path, sizeof path, "/tmp/cx-sys-fs-check/f", 23);
+    fd = sy_open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    ok(fd >= 0, "open-write");
+    if (fd >= 0) {
+        ok(sy_write_all(fd, "hello world", 11) == 0, "write-all-11");
+        sy_close(fd);
+    }
+    fd = sy_open(path, O_RDONLY, 0);
+    ok(fd >= 0, "open-read");
+    if (fd >= 0) {
+        char buf[16];
+        ok(sy_read_full(fd, buf, 11) == 0 && tx_same(buf, 11, "hello world", 11), "read-full-11");
+        ok(sy_read_full(fd, buf, 1) == -EIO, "read-full-past-end-is-eio");
+        sy_close(fd);
+    }
+    sy_unlink(path);
+    sy_rmdir(dir);
+    {
+        char buf[4];
+        ok(sy_read_full(-1, buf, 1) < 0, "read-full-bad-fd");
+        ok(sy_read_full(0, 0, 1) == -EINVAL, "read-full-null-buf");
+        ok(sy_read_full(0, buf, -1) == -EINVAL, "read-full-neg-n");
+        ok(sy_read_full(0, buf, 0) == 0, "read-full-zero-n");
+    }
+    sy_printf("CX_SYS_FS\tfailed=%d\n", bad);
+    return bad;
+}
