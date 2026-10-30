@@ -1,0 +1,344 @@
+#pragma unisa use sys.io
+#pragma unisa use text.text
+/* Project exec/pp/predefines.tsv onto the compiler and runtime predefine tables.
+   sh ./unisacc.com tools/predef-gen.cx -- --check
+   sh ./unisacc.com tools/predef-gen.cx -- --write
+   Eight rows, file order. A row is kind, selector, then one to three macro names.
+   A null out-pointer returns 4. An index outside 0..count-1 returns 2.
+   An unused macro slot is an empty string.
+   os selectors stay on osname. arch selectors stay on archname.
+   No libc and no include. */
+#define TSV "exec/pp/predefines.tsv"
+#define NROW 8
+#define NMAC 3
+#define NAMEMAX 32
+#define FILECAP 4096
+#define CHECKCAP 8192
+#define HEAD1 "# kind\\tselector\\tmacro names in output order; every body is 1"
+#define HEAD2 "# order per target: os, arch, model (optional data-model row), common. win is LLP64: no __LP64__."
+
+typedef struct {
+    char kind[NAMEMAX];
+    char selector[NAMEMAX];
+    char mac[NMAC][NAMEMAX];
+    int nmac;
+} Row;
+
+static Row rows[NROW];
+static int nrows;
+
+static int fail(const char *why) {
+    sy_eprintf("predef-gen\tFAIL\t%s\n", why);
+    return 1;
+}
+
+static int kind_ok(const char *s, int n) {
+    int i;
+    if (n < 1 || n >= NAMEMAX) return 0;
+    for (i = 0; i < n; i++) {
+        if (s[i] < 'a' || s[i] > 'z') return 0;
+    }
+    return 1;
+}
+
+static int ident_ok(const char *s, int n) {
+    int i;
+    if (n < 1 || n >= NAMEMAX) return 0;
+    if (s[0] < 'a' || s[0] > 'z') return 0;
+    for (i = 1; i < n; i++) {
+        char c = s[i];
+        if (c >= 'a' && c <= 'z') continue;
+        if (c >= '0' && c <= '9') continue;
+        if (c == '_') continue;
+        return 0;
+    }
+    return 1;
+}
+
+static int sel_ok(const char *s, int n) {
+    if (n == 1 && s[0] == '*') return 1;
+    return ident_ok(s, n);
+}
+
+static int mac_ok(const char *s, int n) {
+    int i;
+    char c;
+    if (n < 1 || n >= NAMEMAX) return 0;
+    c = s[0];
+    if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_')) return 0;
+    for (i = 1; i < n; i++) {
+        c = s[i];
+        if (c >= 'A' && c <= 'Z') continue;
+        if (c >= 'a' && c <= 'z') continue;
+        if (c >= '0' && c <= '9') continue;
+        if (c == '_') continue;
+        return 0;
+    }
+    return 1;
+}
+
+static void copy_field(char *dst, const char *s, int n) {
+    int i;
+    for (i = 0; i < n; i++) dst[i] = s[i];
+    dst[n] = 0;
+}
+
+static int take_row(const char *line, int n) {
+    const char *f[5];
+    int len[5];
+    int i, k, start, m;
+    if (nrows >= NROW) return fail("predef-count");
+    k = 0;
+    start = 0;
+    for (i = 0; i <= n; i++) {
+        if (i == n || line[i] == '\t') {
+            if (k >= 5) return fail("row-fields");
+            f[k] = line + start;
+            len[k] = i - start;
+            k++;
+            start = i + 1;
+        }
+    }
+    if (k < 3 || k > 5) return fail("row-fields");
+    if (!kind_ok(f[0], len[0])) return fail("kind-charset");
+    if (!sel_ok(f[1], len[1])) return fail("selector-charset");
+    copy_field(rows[nrows].kind, f[0], len[0]);
+    copy_field(rows[nrows].selector, f[1], len[1]);
+    rows[nrows].nmac = k - 2;
+    for (m = 0; m < NMAC; m++) rows[nrows].mac[m][0] = 0;
+    for (m = 0; m < k - 2; m++) {
+        if (!mac_ok(f[2 + m], len[2 + m])) return fail("macro-charset");
+        copy_field(rows[nrows].mac[m], f[2 + m], len[2 + m]);
+    }
+    nrows++;
+    return 0;
+}
+
+static int parse_tsv(char *b, size_t n) {
+    size_t i = 0;
+    int saw = 0;
+    if (n == 0 || b[n - 1] != '\n') return fail("tsv-newline");
+    while (i < n) {
+        size_t e = i;
+        while (e < n && b[e] != '\n') e++;
+        b[e] = 0;
+        if (e == i) return fail("tsv-blank");
+        if (saw == 0) {
+            if (!tx_eqz(b + i, HEAD1)) return fail("tsv-header");
+            saw = 1;
+        } else if (saw == 1) {
+            if (!tx_eqz(b + i, HEAD2)) return fail("tsv-header");
+            saw = 2;
+        } else if (b[i] == '#') {
+            return fail("tsv-comment");
+        } else if (take_row(b + i, (int)(e - i))) {
+            return 1;
+        }
+        i = e + 1;
+    }
+    if (nrows != NROW) return fail("predef-count");
+    return 0;
+}
+
+static int layout_ok(void) {
+    int i;
+    for (i = 0; i < 3; i++) if (!tx_eqz(rows[i].kind, "os")) return fail("kind-os");
+    for (i = 3; i < 5; i++) if (!tx_eqz(rows[i].kind, "arch")) return fail("kind-arch");
+    for (i = 5; i < 7; i++) if (!tx_eqz(rows[i].kind, "model")) return fail("kind-model");
+    if (!tx_eqz(rows[7].kind, "common")) return fail("kind-common");
+    if (!tx_eqz(rows[7].selector, "*")) return fail("common-star");
+    return 0;
+}
+
+static int unique_rows(void) {
+    int i, j, a, b;
+    for (i = 0; i < nrows; i++) {
+        for (j = i + 1; j < nrows; j++) {
+            if (tx_eqz(rows[i].kind, rows[j].kind) &&
+                tx_eqz(rows[i].selector, rows[j].selector))
+                return fail("row-dup");
+        }
+        for (a = 0; a < rows[i].nmac; a++) {
+            for (b = a + 1; b < rows[i].nmac; b++) {
+                if (tx_eqz(rows[i].mac[a], rows[i].mac[b])) return fail("macro-dup");
+            }
+        }
+    }
+    return 0;
+}
+
+static int app(char *dst, int cap, int *n, const char *s) {
+    int i = 0;
+    while (s[i]) {
+        if (*n + 1 >= cap) return -1;
+        dst[*n] = s[i];
+        *n += 1;
+        i++;
+    }
+    dst[*n] = 0;
+    return 0;
+}
+
+static int app_digit(char *dst, int cap, int *n, int d) {
+    char s[2];
+    if (d < 0 || d > 9) return -1;
+    s[0] = (char)('0' + d);
+    s[1] = 0;
+    return app(dst, cap, n, s);
+}
+
+static int emit_mod(char *dst, int cap, const char *prefix) {
+    int n = 0, i;
+    dst[0] = 0;
+    if (app(dst, cap, &n, "#pragma unisa module predefname\n")) return -1;
+    if (app(dst, cap, &n, "/* Generated by tools/predef-gen.cx from exec/pp/predefines.tsv.\n")) return -1;
+    if (app(dst, cap, &n, "   Do not edit by hand. One row is kind, selector, and three macro slots.\n")) return -1;
+    if (app(dst, cap, &n, "   An unused macro slot is an empty string.\n")) return -1;
+    if (app(dst, cap, &n, "   A null out-pointer returns 4. An index outside 0..count-1 returns 2.\n")) return -1;
+    if (app(dst, cap, &n, "   No libc and no include. */\n")) return -1;
+    if (app(dst, cap, &n, "int ")) return -1;
+    if (app(dst, cap, &n, prefix)) return -1;
+    if (app(dst, cap, &n, "_count(void) {\n    return ")) return -1;
+    if (app_digit(dst, cap, &n, nrows)) return -1;
+    if (app(dst, cap, &n, ";\n}\n")) return -1;
+    if (app(dst, cap, &n, "int ")) return -1;
+    if (app(dst, cap, &n, prefix)) return -1;
+    if (app(dst, cap, &n, "_at(int index, const char **kind, const char **selector,\n")) return -1;
+    if (app(dst, cap, &n, "        const char **m0, const char **m1, const char **m2) {\n")) return -1;
+    if (app(dst, cap, &n, "    if (!kind || !selector || !m0 || !m1 || !m2) return 4;\n")) return -1;
+    for (i = 0; i < nrows; i++) {
+        if (app(dst, cap, &n, "    if (index == ")) return -1;
+        if (app_digit(dst, cap, &n, i)) return -1;
+        if (app(dst, cap, &n, ") { *kind = \"")) return -1;
+        if (app(dst, cap, &n, rows[i].kind)) return -1;
+        if (app(dst, cap, &n, "\"; *selector = \"")) return -1;
+        if (app(dst, cap, &n, rows[i].selector)) return -1;
+        if (app(dst, cap, &n, "\"; *m0 = \"")) return -1;
+        if (app(dst, cap, &n, rows[i].mac[0])) return -1;
+        if (app(dst, cap, &n, "\"; *m1 = \"")) return -1;
+        if (app(dst, cap, &n, rows[i].mac[1])) return -1;
+        if (app(dst, cap, &n, "\"; *m2 = \"")) return -1;
+        if (app(dst, cap, &n, rows[i].mac[2])) return -1;
+        if (app(dst, cap, &n, "\"; return 0; }\n")) return -1;
+    }
+    if (app(dst, cap, &n, "    return 2;\n}\n")) return -1;
+    return n;
+}
+
+static int emit_one(char *dst, int cap, int *n, const char *prefix, int index) {
+    if (app(dst, cap, n, "    if (")) return -1;
+    if (app(dst, cap, n, prefix)) return -1;
+    if (app(dst, cap, n, "_at(")) return -1;
+    if (app_digit(dst, cap, n, index)) return -1;
+    if (app(dst, cap, n, ", &k, &s, &a, &b, &c) || !tx_eqz(k, \"")) return -1;
+    if (app(dst, cap, n, rows[index].kind)) return -1;
+    if (app(dst, cap, n, "\") || !tx_eqz(s, \"")) return -1;
+    if (app(dst, cap, n, rows[index].selector)) return -1;
+    if (app(dst, cap, n, "\") || !tx_eqz(a, \"")) return -1;
+    if (app(dst, cap, n, rows[index].mac[0])) return -1;
+    if (app(dst, cap, n, "\") || !tx_eqz(b, \"")) return -1;
+    if (app(dst, cap, n, rows[index].mac[1])) return -1;
+    if (app(dst, cap, n, "\") || !tx_eqz(c, \"")) return -1;
+    if (app(dst, cap, n, rows[index].mac[2])) return -1;
+    if (app(dst, cap, n, "\")) return 1;\n")) return -1;
+    return 0;
+}
+
+static int emit_check(char *dst, int cap) {
+    int n = 0, i;
+    dst[0] = 0;
+    if (app(dst, cap, &n, "#pragma unisa use compiler.predefname\n")) return -1;
+    if (app(dst, cap, &n, "#pragma unisa use runtime.predefname\n")) return -1;
+    if (app(dst, cap, &n, "#pragma unisa use compiler.osname\n")) return -1;
+    if (app(dst, cap, &n, "#pragma unisa use runtime.osname\n")) return -1;
+    if (app(dst, cap, &n, "#pragma unisa use compiler.archname\n")) return -1;
+    if (app(dst, cap, &n, "#pragma unisa use runtime.archname\n")) return -1;
+    if (app(dst, cap, &n, "#pragma unisa use sys.io\n")) return -1;
+    if (app(dst, cap, &n, "#pragma unisa use text.text\n")) return -1;
+    if (app(dst, cap, &n, "/* Generated by tools/predef-gen.cx. Narrow check of the eight predefine rows. */\n")) return -1;
+    if (app(dst, cap, &n, "int main(void) {\n")) return -1;
+    if (app(dst, cap, &n, "    const char *k; const char *s; const char *a; const char *b; const char *c;\n")) return -1;
+    if (app(dst, cap, &n, "    const char *os; const char *ros; const char **missing; int i;\n")) return -1;
+    if (app(dst, cap, &n, "    missing = 0;\n")) return -1;
+    if (app(dst, cap, &n, "    if (pdn_count() != 8 || rpd_count() != 8) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "    if (osn_count() != 3 || rsn_count() != 3) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "    if (arc_count() != 2 || rarc_count() != 2) return 1;\n")) return -1;
+    for (i = 0; i < nrows; i++) {
+        if (emit_one(dst, cap, &n, "pdn", i)) return -1;
+        if (emit_one(dst, cap, &n, "rpd", i)) return -1;
+    }
+    if (app(dst, cap, &n, "    for (i = 0; i < 3; i++) {\n")) return -1;
+    if (app(dst, cap, &n, "        if (pdn_at(i, &k, &s, &a, &b, &c)) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "        if (!tx_eqz(k, \"os\")) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "        if (osn_at(i, &os) || rsn_at(i, &ros)) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "        if (!tx_eqz(s, os) || !tx_eqz(os, ros)) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "    }\n")) return -1;
+    if (app(dst, cap, &n, "    for (i = 0; i < 2; i++) {\n")) return -1;
+    if (app(dst, cap, &n, "        if (pdn_at(3 + i, &k, &s, &a, &b, &c)) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "        if (!tx_eqz(k, \"arch\")) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "        if (arc_at(i, &os) || rarc_at(i, &ros)) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "        if (!tx_eqz(s, os) || !tx_eqz(os, ros)) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "    }\n")) return -1;
+    if (app(dst, cap, &n, "    if (pdn_at(0, missing, &s, &a, &b, &c) != 4) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "    if (pdn_at(0, &k, missing, &a, &b, &c) != 4) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "    if (pdn_at(0, &k, &s, missing, &b, &c) != 4) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "    if (pdn_at(0, &k, &s, &a, missing, &c) != 4) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "    if (pdn_at(0, &k, &s, &a, &b, missing) != 4) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "    if (rpd_at(0, missing, &s, &a, &b, &c) != 4) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "    if (pdn_at(-1, &k, &s, &a, &b, &c) != 2) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "    if (pdn_at(8, &k, &s, &a, &b, &c) != 2) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "    if (rpd_at(-1, &k, &s, &a, &b, &c) != 2) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "    if (rpd_at(8, &k, &s, &a, &b, &c) != 2) return 1;\n")) return -1;
+    if (app(dst, cap, &n, "    sy_printf(\"CX_PREDEF\\tok=8\\tfailed=0\\n\");\n")) return -1;
+    if (app(dst, cap, &n, "    return 0;\n}\n")) return -1;
+    return n;
+}
+
+static int same_bytes(const char *a, size_t an, const char *b, int bn) {
+    int i;
+    if (an != (size_t)bn) return 0;
+    for (i = 0; i < bn; i++) if (a[i] != b[i]) return 0;
+    return 1;
+}
+
+static int one_file(int dowrite, const char *path, const char *body, int n) {
+    size_t on = 0;
+    char *cur;
+    if (dowrite) {
+        if (cx_write(path, body, (size_t)n)) return fail("write");
+        return 0;
+    }
+    cur = cx_read(path, &on);
+    if (!cur) return fail(path);
+    if (!same_bytes(cur, on, body, n)) return fail(path);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    size_t nb = 0;
+    char *b;
+    char file[FILECAP], check[CHECKCAP];
+    int dowrite, fn, cn;
+    if (argc != 2 || (!tx_eqz(argv[1], "--check") && !tx_eqz(argv[1], "--write"))) {
+        sy_eprintf("predef-gen\tusage\t--check|--write\n");
+        return 2;
+    }
+    dowrite = tx_eqz(argv[1], "--write");
+    b = cx_read(TSV, &nb);
+    if (!b) return fail("tsv-read");
+    if (parse_tsv(b, nb)) return 1;
+    if (layout_ok()) return 1;
+    if (unique_rows()) return 1;
+    cn = emit_check(check, CHECKCAP);
+    if (cn < 0) return fail("emit-check");
+    fn = emit_mod(file, FILECAP, "pdn");
+    if (fn < 0) return fail("emit-compiler");
+    if (one_file(dowrite, "cx/compiler/predefname.cx", file, fn)) return 1;
+    fn = emit_mod(file, FILECAP, "rpd");
+    if (fn < 0) return fail("emit-runtime");
+    if (one_file(dowrite, "cx/runtime/predefname.cx", file, fn)) return 1;
+    if (one_file(dowrite, "tools/check-cx-predef.cx", check, cn)) return 1;
+    if (dowrite) sy_printf("PREDEF_GEN\tWROTE\trows=%d\n", nrows);
+    else sy_printf("PREDEF_GEN\tCHECK\trows=%d\n", nrows);
+    return 0;
+}
