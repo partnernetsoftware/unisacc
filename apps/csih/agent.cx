@@ -132,7 +132,7 @@ typedef struct {
 } agent_tool_facts;
 static agent_tool_facts tool_facts;
 static void agent_tool_reset(void) {
-    memset(&tool_facts,0,sizeof tool_facts);
+    zs_mset(&tool_facts,0,sizeof tool_facts);
     tool_facts.op_success=tool_facts.exited=tool_facts.status=tool_facts.signal=-1;
     tool_facts.timed_out=tool_facts.capture_complete=tool_facts.gate_success=-1;
     tool_facts.gate_discovery_success=tool_facts.gate_last_exited=-1;
@@ -171,7 +171,7 @@ static int agent_observation_wire(jvalue *v,const char *raw,const char *text,cha
  if(!agent_fact_read(v,"line_complete",&lc,1,0)||!agent_fact_read(v,"eof",&eof,1,0)||!agent_fact_read(v,"presentation_complete",&pc,1,0)||!pc||(!eof&&n[7]>=0))return 0;
  jvalue *sz=jget(v,"observed_size"),*mt=jget(v,"observed_mtime"),*sc=jget(v,"start_line_complete");
  if(!sz||!mt||sz->kind!=J_NUM||mt->kind!=J_NUM||sz->n!=sz->n||mt->n!=mt->n||sz->n<0||mt->n<0||sz->n>9007199254740991.0||mt->n>9007199254740991.0||sz->n>(double)LONG_MAX||mt->n>(double)LONG_MAX||(double)(long)sz->n!=sz->n||(double)(long)mt->n!=mt->n||!sc||(sc->kind!=J_NULL&&(sc->kind!=J_BOOL||!sc->b)))return 0;
- if(n[3]<0){strcpy(sl,"null");strcpy(el,"null");strcpy(nl,"null");}else{snprintf(sl,sizeof sl,"%ld",n[3]);snprintf(el,sizeof el,"%ld",n[4]);snprintf(nl,sizeof nl,"%ld",n[6]);}if(n[7]<0)strcpy(tl,"null");else snprintf(tl,sizeof tl,"%ld",n[7]);
+ if(n[3]<0){zs_cpy(sl,"null");zs_cpy(el,"null");zs_cpy(nl,"null");}else{snprintf(sl,sizeof sl,"%ld",n[3]);snprintf(el,sizeof el,"%ld",n[4]);snprintf(nl,sizeof nl,"%ld",n[6]);}if(n[7]<0)zs_cpy(tl,"null");else snprintf(tl,sizeof tl,"%ld",n[7]);
  {int z=snprintf(out,cap,"{\"version\":1,\"byte_start\":%ld,\"byte_end\":%ld,\"start_line\":%s,\"end_line\":%s,\"next_byte_offset\":%ld,\"next_line\":%s,\"line_complete\":%s,\"eof\":%s,\"total_lines\":%s,\"max_bytes\":%ld,\"scan_bytes\":%ld,\"presentation_complete\":true,\"observed_size\":%ld,\"observed_mtime\":%ld,\"start_line_complete\":%s}",n[1],n[2],sl,el,n[5],nl,lc?"true":"false",eof?"true":"false",tl,n[8],n[9],(long)sz->n,(long)mt->n,sc->kind==J_NULL?"null":"true");return z>=0&&(size_t)z<cap;}
 }
 static int agent_read_call_wire(jvalue *record,const char *raw,char *out,size_t cap) {
@@ -347,13 +347,37 @@ int agent_mentions_window(const char *s) {
     return 0;
 }
 
+/* ── files through sys.fs, with the libc calls' shape (-1 and errno) ───── */
+
+static int ag_errno(int r) { if (r < 0) { errno = -r; return -1; } return r; }
+static int ag_mkdir(const char *p, int mode) { return ag_errno(sy_mkdir(p, mode)); }
+static int ag_unlink(const char *p) { return ag_errno(sy_unlink(p)); }
+static int ag_rename(const char *a, const char *b) { return ag_errno(sy_rename(a, b)); }
+/* fopen(path, "w") + fwrite + fclose: N bytes of BODY into PATH (created 0666
+ * before umask, truncated). 0, or -1 with errno; the file may be partial then. */
+static int ag_write_file(const char *path, const void *body, long n) {
+    int fd = sy_open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666), r;
+    if (fd < 0) return ag_errno(fd);
+    r = sy_write_all(fd, body, n);
+    if (r != 0) { sy_close(fd); return ag_errno(r); }
+    return ag_errno(sy_close(fd));
+}
+/* fopen(path, "r") + fread(buf, 1, cap) + fclose: bytes read, or -1 */
+static long ag_read_file(const char *path, char *buf, long cap) {
+    int fd = sy_open(path, O_RDONLY, 0);
+    long got = 0, k;
+    if (fd < 0) return ag_errno(fd);
+    while (got < cap && (k = sy_read(fd, buf + got, cap - got)) > 0) got += k;
+    sy_close(fd);
+    return got;
+}
+
 /* Write every byte of a long tool result under ~/.csih/tool/. The transcript
  * then holds the path and the first few lines, not a cut that drops the rest.
  * Returns 1 when `out` is that short form. Returns 0 if nothing was stored. */
 static int agent_spill(const char *body, size_t n, char *out, size_t outlen) {
     const char *home;
     char dir[512], path[640];
-    FILE *f;
     size_t i, lines, shown;
     static int seq;
     if (!agent_spill_enabled) return 0;
@@ -362,14 +386,11 @@ static int agent_spill(const char *body, size_t n, char *out, size_t outlen) {
     if (!home || !home[0]) return 0;
     csih_home_bind(home);
     snprintf(dir, sizeof dir, "%s/.csih", home);
-    mkdir(dir, 0700);
+    ag_mkdir(dir, 0700);
     snprintf(dir, sizeof dir, "%s/.csih/tool", home);
-    if (mkdir(dir, 0700) != 0 && errno != EEXIST) return 0;
+    if (ag_mkdir(dir, 0700) != 0 && errno != EEXIST) return 0;
     snprintf(path, sizeof path, "%s/%d-%d.txt", dir, (int)getpid(), ++seq);
-    f = fopen(path, "w");
-    if (!f) return 0;
-    if (fwrite(body, 1, n, f) != n) { fclose(f); remove(path); return 0; }
-    if (fclose(f) != 0) { remove(path); return 0; }
+    if (ag_write_file(path, body, (long)n) != 0) { ag_unlink(path); return 0; }
     lines = 0;
     shown = 0;
     for (i = 0; i < n && shown < 480 && lines < 8; i++) {
@@ -394,14 +415,14 @@ size_t agent_pack_tool(const char *text, char *out, size_t outlen, size_t cap) {
     if (cap < 8) cap = 8;
     if (n <= cap) {
         n = utf8_prefix(text, n);
-        memcpy(out, text, n);
+        zs_mcpy(out, text, n);
         out[n] = 0;
         return n;
     }
     markn = (size_t)zs_len(mark);
     if (cap <= markn + 8) {
         n = utf8_prefix(text, cap);
-        memcpy(out, text, n);
+        zs_mcpy(out, text, n);
         out[n] = 0;
         return n;
     }
@@ -417,9 +438,9 @@ size_t agent_pack_tool(const char *text, char *out, size_t outlen, size_t cap) {
         used = head + markn + (n - ts);
     }
     if (used > outlen - 1) return 0;
-    memcpy(out, text, head);
-    memcpy(out + head, mark, markn);
-    memcpy(out + head + markn, text + ts, n - ts);
+    zs_mcpy(out, text, head);
+    zs_mcpy(out + head, mark, markn);
+    zs_mcpy(out + head + markn, text + ts, n - ts);
     out[used] = 0;
     return used;
 }
@@ -597,7 +618,7 @@ agent_step agent_parse(const char *content) {
     const char *p;
 
     agent_parsed_claim[0]=0;agent_claim_problem[0]=0;
-    memset(&s, 0, sizeof s);
+    zs_mset(&s, 0, sizeof s);
     s.kind = ACT_ERR;
     s.evidence_count=-1;
     if (!content || !*content || (size_t)zs_len(content)>=AGENT_CONTENT_MAX) return s;
@@ -619,9 +640,9 @@ agent_step agent_parse(const char *content) {
         if (!q) return s;
         e = json_value_end(q, (size_t)zs_len(q));
         if (e == 0 || e + 1 > sizeof one) return s;
-        memcpy(one, q, e);
+        zs_mcpy(one, q, e);
         one[e] = 0;
-        memcpy(stripped, one, e + 1);
+        zs_mcpy(stripped, one, e + 1);
     }
     root = json_parse(stripped, (size_t)zs_len(stripped), errbuf, sizeof errbuf);
     if (!root || root->kind != J_OBJ) { if (root) jfree(root); return s; }
@@ -635,7 +656,7 @@ agent_step agent_parse(const char *content) {
             if(!zs_cmp(p,"continue")){
                 jvalue *why=jget(root,"reason");
                 if(root->nkeys==1)s.kind=ACT_GO_CONTINUE;
-                else if(root->nkeys==2 && why && why->kind==J_STR && agent_reason_valid(jstr(why))){s.kind=ACT_GO_CONTINUE;strcpy(s.judgment_reason,jstr(why));}
+                else if(root->nkeys==2 && why && why->kind==J_STR && agent_reason_valid(jstr(why))){s.kind=ACT_GO_CONTINUE;zs_cpy(s.judgment_reason,jstr(why));}
             }
             else if(!zs_cmp(p,"stop")){
                 s.kind=ACT_GO_STOP;
@@ -666,18 +687,18 @@ agent_step agent_parse(const char *content) {
         if (k == ACT_EXEC) {
             s.kind = ACT_EXEC;
             v = jget(root, "cmd");
-            if (v && v->kind == J_STR) { strncpy(s.cmd, jstr(v), sizeof s.cmd - 1); }
+            if (v && v->kind == J_STR) { zs_ncpy(s.cmd, jstr(v), sizeof s.cmd - 1); }
             v = jget(root, "why");
-            if (v && v->kind == J_STR) { strncpy(s.why, jstr(v), sizeof s.why - 1); }
+            if (v && v->kind == J_STR) { zs_ncpy(s.why, jstr(v), sizeof s.why - 1); }
         } else if (k == ACT_MIND) {
             s.kind = ACT_MIND;
             v = jget(root, "op");
-            if (v && v->kind == J_STR) strncpy(s.op, jstr(v), sizeof s.op - 1);   /* op: read|add */
+            if (v && v->kind == J_STR) zs_ncpy(s.op, jstr(v), sizeof s.op - 1);   /* op: read|add */
             v = jget(root, "target");
             if (!v || v->kind != J_STR) v = jget(root, "which");
-            if (v && v->kind == J_STR) strncpy(s.path, jstr(v), sizeof s.path - 1); /* target or which */
+            if (v && v->kind == J_STR) zs_ncpy(s.path, jstr(v), sizeof s.path - 1); /* target or which */
             v = jget(root, "text");
-            if (v && v->kind == J_STR) strncpy(s.text, jstr(v), sizeof s.text - 1);
+            if (v && v->kind == J_STR) zs_ncpy(s.text, jstr(v), sizeof s.text - 1);
         } else if (k == ACT_READ) {
             jvalue *op = jget(root, "op");
             const char *ops = (op && op->kind == J_STR) ? jstr(op) : "";
@@ -688,22 +709,22 @@ agent_step agent_parse(const char *content) {
                 if(!agent_contract_keys(root,keys,8,stripped)){jfree(root);return s;}
                 v=jget(root,"evidence_id");s.evidence_read=v!=NULL;if(s.evidence_read&&(jget(root,"path")||jget(root,"line")||jget(root,"n"))){jfree(root);return s;}if(!v)v=jget(root,"path");if(!v||v->kind!=J_STR||!jstr(v)[0]||(size_t)zs_len(jstr(v))>=sizeof s.path||(s.evidence_read&&(size_t)zs_len(jstr(v))>=96)){jfree(root);return s;}
                 if(jget(root,"line")&&jget(root,"byte_offset")){jfree(root);return s;}
-                strcpy(s.path,jstr(v));for(ni=0;ni<4;ni++){v=jget(root,nums[ni]);if(v){if(v->kind!=J_NUM||v->n!=v->n||v->n<(ni==2?0:1)||v->n>bounds[ni]||v->n>(double)LONG_MAX){jfree(root);return s;}values[ni]=(long)v->n;if((double)values[ni]!=v->n){jfree(root);return s;}}}
+                zs_cpy(s.path,jstr(v));for(ni=0;ni<4;ni++){v=jget(root,nums[ni]);if(v){if(v->kind!=J_NUM||v->n!=v->n||v->n<(ni==2?0:1)||v->n>bounds[ni]||v->n>(double)LONG_MAX){jfree(root);return s;}values[ni]=(long)v->n;if((double)values[ni]!=v->n){jfree(root);return s;}}}
                 s.kind=ACT_READ;s.line=values[0];s.nlines=values[1];s.byte_offset=values[2];s.max_bytes=values[3];s.offset_set=jget(root,"byte_offset")!=NULL;
             } else if (zs_cmp(ops, "write") == 0) {
                 s.kind = ACT_WRITE;
                 v = jget(root, "path");
-                if (v && v->kind == J_STR) strncpy(s.path, jstr(v), sizeof s.path - 1);
+                if (v && v->kind == J_STR) zs_ncpy(s.path, jstr(v), sizeof s.path - 1);
                 v = jget(root, "text");
-                if (v && v->kind == J_STR) strncpy(s.text, jstr(v), sizeof s.text - 1);
+                if (v && v->kind == J_STR) zs_ncpy(s.text, jstr(v), sizeof s.text - 1);
             } else if (zs_cmp(ops, "edit") == 0) {
                 s.kind = ACT_EDIT;
                 v = jget(root, "path");
-                if (v && v->kind == J_STR) strncpy(s.path, jstr(v), sizeof s.path - 1);
+                if (v && v->kind == J_STR) zs_ncpy(s.path, jstr(v), sizeof s.path - 1);
                 v = jget(root, "old");
-                if (v && v->kind == J_STR) strncpy(s.old, jstr(v), sizeof s.old - 1);
+                if (v && v->kind == J_STR) zs_ncpy(s.old, jstr(v), sizeof s.old - 1);
                 v = jget(root, "new");
-                if (v && v->kind == J_STR) strncpy(s.nw, jstr(v), sizeof s.nw - 1);
+                if (v && v->kind == J_STR) zs_ncpy(s.nw, jstr(v), sizeof s.nw - 1);
             }
         } else if (k == ACT_ANSWER) {
             s.kind = ACT_ANSWER;
@@ -731,12 +752,12 @@ agent_step agent_parse(const char *content) {
             }
             if(jget(root,"claims")||jget(root,"observation_refs")){
                 if(root->nkeys!=6||!jget(root,"outcome")||!jget(root,"evidence")||!agent_claim_schema(root,stripped))s.kind=ACT_ERR;
-                else {s.claims_present=1;memcpy(agent_parsed_claim,stripped,(size_t)zs_len(stripped)+1);}
+                else {s.claims_present=1;zs_mcpy(agent_parsed_claim,stripped,(size_t)zs_len(stripped)+1);}
             }
             if(!agent_contract_evidence(root,&s))s.kind=ACT_ERR;
             if(s.outcome==AGENT_OUTCOME_COMPLETED && s.evidence_count<0)s.outcome=AGENT_OUTCOME_UNVERIFIED;
             v = jget(root, "text");
-            if (agent_small_string(v,sizeof s.text-1,1)) strcpy(s.text,jstr(v));
+            if (agent_small_string(v,sizeof s.text-1,1)) zs_cpy(s.text,jstr(v));
             else s.kind=ACT_ERR;
         }
     }
@@ -775,11 +796,11 @@ int agent_note_cd(char *cwd, size_t cwdlen, const char *cmd, char *out, size_t o
     if (zs_find(p, "&&") || zs_chr(p, ';') || zs_chr(p, '|')) return 0;
     n = (size_t)(end - p);
     if (n >= sizeof dir) { snprintf(out, outlen, "path too long"); return 1; }
-    memcpy(dir, p, n);
+    zs_mcpy(dir, p, n);
     dir[n] = 0;
     if (!dir[0]) { snprintf(out, outlen, "cwd: %s", cwd); return 1; }
     if (n >= 2 && ((dir[0] == '"' && dir[n - 1] == '"') || (dir[0] == '\'' && dir[n - 1] == '\''))) {
-        memmove(dir, dir + 1, n - 2);
+        zs_mmove(dir, dir + 1, n - 2);
         dir[n - 2] = 0;
     }
     if (dir[0] == '/') snprintf(next, sizeof next, "%s", dir);
@@ -964,8 +985,8 @@ int agent_role_configure(const char *role, const char *peer) {
         if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
               (c >= '0' && c <= '9') || zs_chr("_-.:", c))) return -1;
     }
-    memcpy(g_role_force, role, nr + 1);
-    memcpy(g_peer_force, peer, np + 1);
+    zs_mcpy(g_role_force, role, nr + 1);
+    zs_mcpy(g_peer_force, peer, np + 1);
     g_role_configured = 1;
     agent_watch_reset();
     return 0;
@@ -1036,7 +1057,7 @@ void agent_watch_result(const char *cmd, const shell_result *r) {
     if (!r || zs_cmp(agent_role_get(), "watch") || !r->ok || !r->exited ||
         r->status != 0 || r->err || r->signal || r->timed_out ||
         r->bytes < 0 || r->bytes >= SHELL_OUT_MAX ||
-        !memchr(r->out, 0, sizeof r->out) || (long)(size_t)zs_len(r->out) != r->bytes) return;
+        !zs_mchr(r->out, 0, sizeof r->out) || (long)(size_t)zs_len(r->out) != r->bytes) return;
     if (agent_envelope_call(cmd, agent_peer_get()) && agent_envelope_receipt(r->out))
         g_watch_mailed = 1;
 }
@@ -1209,21 +1230,22 @@ static int agent_undo_n, agent_undo_seq;
 
 static int agent_copy_file(const char *from, const char *to) {
     char buf[8192];
-    size_t n;
-    FILE *in = fopen(from, "rb"), *out;
-    if (!in) return -1;
-    out = fopen(to, "wb");
-    if (!out) { fclose(in); return -1; }
-    while ((n = fread(buf, 1, sizeof buf, in)) > 0)
-        if (fwrite(buf, 1, n, out) != n) { fclose(in); fclose(out); return -1; }
-    fclose(in);
-    return fclose(out) == 0 ? 0 : -1;
+    long n;
+    int in = sy_open(from, O_RDONLY, 0), out;
+    if (in < 0) return -1;
+    out = sy_open(to, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (out < 0) { sy_close(in); return -1; }
+    while ((n = sy_read(in, buf, (long)sizeof buf)) > 0)
+        if (sy_write_all(out, buf, n) != 0) { sy_close(in); sy_close(out); return -1; }
+    sy_close(in);
+    if (n < 0) { sy_close(out); return -1; }
+    return sy_close(out) == 0 ? 0 : -1;
 }
 
 /* Undo lives as long as this process; its backups go with it. */
 static void agent_undo_cleanup(void) {
     int i;
-    for (i = 0; i < agent_undo_n; i++) if (agent_undo[i].existed) unlink(agent_undo[i].bak);
+    for (i = 0; i < agent_undo_n; i++) if (agent_undo[i].existed) ag_unlink(agent_undo[i].bak);
     agent_undo_n = 0;
 }
 
@@ -1238,26 +1260,29 @@ static void agent_undo_snapshot(const char *path) {
         /* atexit does not run when the pane is killed (SIGHUP), so each
          * snapshot also sweeps backups of processes that no longer exist.
          * The directory holds a handful of files; the scan is cheap. */
-        DIR *d;
-        struct dirent *e;
+        static char names[16384];
+        int dfd, count, c;
+        const char *e;
         snprintf(dir, sizeof dir, "%s/.csih/undo", home);
-        if ((d = opendir(dir))) {
-            while ((e = readdir(d))) {
-                int pid = atoi(e->d_name);
+        dfd = sy_open(dir, O_RDONLY | O_DIRECTORY, 0);
+        if (dfd >= 0) {
+            count = sy_dir_names(dfd, names, (int)sizeof names);   /* a full listing is swept next time */
+            sy_close(dfd);
+            for (c = 0, e = names; c < count; c++, e += zs_len(e) + 1) {
+                int pid = atoi(e);
                 char stale[1024];
-                if (pid <= 0 || pid == (int)getpid() || !zs_find(e->d_name, ".bak")) continue;
-                if (kill(pid, 0) == 0 || errno != ESRCH) continue;
-                snprintf(stale, sizeof stale, "%s/%s", dir, e->d_name);
-                unlink(stale);
+                if (pid <= 0 || pid == (int)getpid() || !zs_find(e, ".bak")) continue;
+                if (sy_signal(pid, 0) != -ESRCH) continue;          /* alive, or not ours to judge */
+                snprintf(stale, sizeof stale, "%s/%s", dir, e);
+                ag_unlink(stale);
             }
-            closedir(d);
         }
     }
-    snprintf(dir, sizeof dir, "%s/.csih", home); mkdir(dir, 0700);
-    snprintf(dir, sizeof dir, "%s/.csih/undo", home); mkdir(dir, 0700);
+    snprintf(dir, sizeof dir, "%s/.csih", home); ag_mkdir(dir, 0700);
+    snprintf(dir, sizeof dir, "%s/.csih/undo", home); ag_mkdir(dir, 0700);
     if (agent_undo_n == AGENT_UNDO_MAX) {
-        unlink(agent_undo[0].bak);
-        memmove(&agent_undo[0], &agent_undo[1], sizeof agent_undo[0] * (AGENT_UNDO_MAX - 1));
+        ag_unlink(agent_undo[0].bak);
+        zs_mmove(&agent_undo[0], &agent_undo[1], sizeof agent_undo[0] * (AGENT_UNDO_MAX - 1));
         agent_undo_n--;
     }
     slot = agent_undo_n;
@@ -1287,10 +1312,10 @@ int agent_undo_last(char *note, size_t cap) {
             snprintf(note, cap, "undo: 恢复 %.300s 失败: %s", agent_undo[i].path, strerror(errno));
             return 1;
         }
-        unlink(agent_undo[i].bak);
+        ag_unlink(agent_undo[i].bak);
         snprintf(note, cap, "undo: 已恢复 %.300s（还可撤销 %d 步）", agent_undo[i].path, i);
     } else {
-        if (unlink(agent_undo[i].path) != 0 && errno != ENOENT) {
+        if (ag_unlink(agent_undo[i].path) != 0 && errno != ENOENT) {
             snprintf(note, cap, "undo: 删除 %.300s 失败: %s", agent_undo[i].path, strerror(errno));
             return 1;
         }
@@ -1344,17 +1369,17 @@ static int agent_text_width(const unsigned char *p,size_t n){
 }
 typedef struct {int fd,err;unsigned char buf[4096];size_t pos,n;long scanned;} agent_read_stream;
 static int agent_read_byte(agent_read_stream *r){
- ssize_t n;if(r->pos==r->n){do{n=read(r->fd,r->buf,sizeof r->buf);}while(n<0&&errno==EINTR);if(n<0){r->err=errno?errno:EIO;return -1;}if(!n)return -1;r->pos=0;r->n=(size_t)n;}r->scanned++;return r->buf[r->pos++];
+ ssize_t n;if(r->pos==r->n){n=(ssize_t)sy_read(r->fd,r->buf,(long)sizeof r->buf);if(n<0){r->err=(int)-n;return -1;}if(!n)return -1;r->pos=0;r->n=(size_t)n;}r->scanned++;return r->buf[r->pos++];
 }
 static int agent_read_window(const agent_step *s,const char *path,char *out,int outlen){
  int fd=-1,failure=0,c,i,w,line=s->offset_set?-1:1,startline,completed=0,limit=s->max_bytes?s->max_bytes:4096,want=s->nlines?s->nlines:120,eof=0,lastlf=0;
- struct stat st;agent_read_stream r;unsigned char ch[4];size_t used=0;long start=s->offset_set?s->byte_offset:0,end,total=-1;char sl[40],el[40],nl[40],tl[40];
- memset(&r,0,sizeof r);agent_read_observation[0]=0;
+ sy_stat_t st;agent_read_stream r;unsigned char ch[4];size_t used=0;long start=s->offset_set?s->byte_offset:0,end,total=-1;char sl[40],el[40],nl[40],tl[40];
+ zs_mset(&r,0,sizeof r);agent_read_observation[0]=0;
  if(!agent_read_exact){failure=ENAMETOOLONG;goto done;}
- fd=open(path,O_RDONLY|O_NONBLOCK|O_NOFOLLOW);if(fd<0){failure=errno;goto done;}
- if(fstat(fd,&st)!=0){failure=errno;goto done;}if(!S_ISREG(st.st_mode)){failure=EINVAL;goto done;}
+ fd=sy_open(path,O_RDONLY|O_NONBLOCK|O_NOFOLLOW,0);if(fd<0){failure=-fd;fd=-1;goto done;}
+ {int sr=sy_fstat(fd,&st);if(sr!=0){failure=-sr;goto done;}}if(st.kind!='f'){failure=EINVAL;goto done;}
  r.fd=fd;
- if(s->offset_set){if(s->byte_offset>st.st_size){failure=EINVAL;goto done;}if(lseek(fd,(off_t)s->byte_offset,SEEK_SET)<0){failure=errno;goto done;}if(!s->byte_offset)line=1;}
+ if(s->offset_set){if(s->byte_offset>st.size){failure=EINVAL;goto done;}{long sk=sy_lseek(fd,s->byte_offset,SEEK_SET);if(sk<0){failure=(int)-sk;goto done;}}if(!s->byte_offset)line=1;}
  else{int target=s->line?s->line:1;while(line<target){if(r.scanned>=8388608){failure=EFBIG;goto done;}c=agent_read_byte(&r);if(c<0){if(r.err){failure=r.err;goto done;}eof=1;break;}start++;lastlf=c=='\n';if(lastlf)line++;}}
  startline=line;end=start;
  while(!eof&&completed<want){
@@ -1368,15 +1393,15 @@ static int agent_read_window(const agent_step *s,const char *path,char *out,int 
   for(i=1;i<w;i++){c=agent_read_byte(&r);if(c<0){failure=r.err?r.err:EILSEQ;goto done;}ch[i]=(unsigned char)c;}
   if(agent_text_width(ch,(size_t)w)!=w){failure=EILSEQ;goto done;}
   if(used+(size_t)w+1>(size_t)outlen){failure=ENOBUFS;goto done;}
-  memcpy(out+used,ch,(size_t)w);used+=(size_t)w;end+=w;lastlf=ch[0]=='\n';if(lastlf){completed++;if(line>=0)line++;}
+  zs_mcpy(out+used,ch,(size_t)w);used+=(size_t)w;end+=w;lastlf=ch[0]=='\n';if(lastlf){completed++;if(line>=0)line++;}
  }
  if(eof&&line>=0)total=line-(lastlf?1:0);if(eof&&start==0&&!used)total=0;
  out[used]=0;agent_read_lines=used?completed+(lastlf?0:1):0;
- if(startline<0){strcpy(sl,"null");strcpy(el,"null");strcpy(nl,"null");}else{snprintf(sl,sizeof sl,"%d",startline);snprintf(el,sizeof el,"%d",agent_read_lines?line-(lastlf?1:0):startline);snprintf(nl,sizeof nl,"%d",line);}
- if(total<0)strcpy(tl,"null");else snprintf(tl,sizeof tl,"%ld",total);
- snprintf(agent_read_observation,sizeof agent_read_observation,"{\"version\":1,\"byte_start\":%ld,\"byte_end\":%ld,\"start_line\":%s,\"end_line\":%s,\"next_byte_offset\":%ld,\"next_line\":%s,\"line_complete\":%s,\"eof\":%s,\"total_lines\":%s,\"max_bytes\":%d,\"scan_bytes\":%ld,\"presentation_complete\":true,\"observed_size\":%ld,\"observed_mtime\":%ld,\"start_line_complete\":%s}",start,end,sl,el,end,nl,eof||lastlf?"true":"false",eof?"true":"false",tl,limit,r.scanned,(long)st.st_size,(long)st.st_mtime,s->offset_set&&s->byte_offset?"null":"true");
+ if(startline<0){zs_cpy(sl,"null");zs_cpy(el,"null");zs_cpy(nl,"null");}else{snprintf(sl,sizeof sl,"%d",startline);snprintf(el,sizeof el,"%d",agent_read_lines?line-(lastlf?1:0):startline);snprintf(nl,sizeof nl,"%d",line);}
+ if(total<0)zs_cpy(tl,"null");else snprintf(tl,sizeof tl,"%ld",total);
+ snprintf(agent_read_observation,sizeof agent_read_observation,"{\"version\":1,\"byte_start\":%ld,\"byte_end\":%ld,\"start_line\":%s,\"end_line\":%s,\"next_byte_offset\":%ld,\"next_line\":%s,\"line_complete\":%s,\"eof\":%s,\"total_lines\":%s,\"max_bytes\":%d,\"scan_bytes\":%ld,\"presentation_complete\":true,\"observed_size\":%ld,\"observed_mtime\":%ld,\"start_line_complete\":%s}",start,end,sl,el,end,nl,eof||lastlf?"true":"false",eof?"true":"false",tl,limit,r.scanned,st.size,st.mtime,s->offset_set&&s->byte_offset?"null":"true");
  done:
- if(fd>=0&&close(fd)!=0&&!failure)failure=errno?errno:EIO;
+ if(fd>=0){int cr=sy_close(fd);if(cr!=0&&!failure)failure=-cr;}
  tool_facts.op_success=failure?0:1;tool_facts.err=failure;
  if(failure){agent_read_lines=0;agent_read_observation[0]=0;snprintf(out,outlen,"read failed (err=%d); no successful observation",failure);}
  return 1;
@@ -1385,7 +1410,7 @@ static int agent_file(const agent_step *s, const char *cwd, char *out, int outle
     char path[512];
     agent_under(cwd, s->path, path, sizeof path);
     agent_read_path[0]=0;agent_read_exact=0;agent_read_lines=0;
-    if(s->kind==ACT_READ){size_t need=s->path[0]=='/' ? (size_t)zs_len(s->path) : (size_t)zs_len(cwd ? cwd : "")+1+(size_t)zs_len(s->path);if(need<sizeof path){strcpy(agent_read_path,path);agent_read_exact=1;}}
+    if(s->kind==ACT_READ){size_t need=s->path[0]=='/' ? (size_t)zs_len(s->path) : (size_t)zs_len(cwd ? cwd : "")+1+(size_t)zs_len(s->path);if(need<sizeof path){zs_cpy(agent_read_path,path);agent_read_exact=1;}}
     tool_facts.handled=1;
     if (s->kind == ACT_READ) {
         return agent_read_window(s,path,out,outlen);
@@ -1531,7 +1556,7 @@ static size_t agent_sh_quote(char *out, size_t cap, const char *s) {
     for (; *s; s++) {
         if (*s == '\'') {
             if (n + 5 >= cap) return 0;
-            memcpy(out + n, "'\\''", 4); n += 4;
+            zs_mcpy(out + n, "'\\''", 4); n += 4;
         } else {
             if (n + 2 >= cap) return 0;
             out[n++] = *s;
@@ -1662,9 +1687,9 @@ int agent_transcript_path(char *out, size_t outlen) {
     if (!home || !home[0]) return 1;
     /* A fresh HOME has no ~/.cdsh; without it the first append fails. */
     snprintf(out, outlen, "%s/.cdsh", home);
-    if (mkdir(out, 0700) != 0 && errno != EEXIST) return 1;
+    if (ag_mkdir(out, 0700) != 0 && errno != EEXIST) return 1;
     shared = sy_env("CSIH_TRANSCRIPT_SHARED");
-    if (!(shared && shared[0] == '1') && getcwd(here, sizeof here)) {
+    if (!(shared && shared[0] == '1') && sy_cwd(here, (int)sizeof here) == 0) {
         size_t i, n = 0;
         int fits = 1;
         for (i = 0; here[i]; i++) {
@@ -1676,9 +1701,9 @@ int agent_transcript_path(char *out, size_t outlen) {
         slug[n] = 0;
         if (fits && n) {
             snprintf(out, outlen, "%s/.cdsh/cwd", home);
-            if (mkdir(out, 0700) != 0 && errno != EEXIST) return 1;
+            if (ag_mkdir(out, 0700) != 0 && errno != EEXIST) return 1;
             snprintf(out, outlen, "%s/.cdsh/cwd/%s", home, slug);
-            if (mkdir(out, 0700) != 0 && errno != EEXIST) return 1;
+            if (ag_mkdir(out, 0700) != 0 && errno != EEXIST) return 1;
             snprintf(out, outlen, "%s/.cdsh/cwd/%s/tui.jsonl", home, slug);
             return 0;
         }
@@ -1809,13 +1834,13 @@ void agent_context_limits(int *per_turn, long *trim_bytes, int *keep) {
 }
 
 int agent_journal_trim(const char *path, long max_bytes, int keep) {
-    struct stat st;
+    sy_stat_t st;
     session_records recs;
-    FILE *f;
+    int fd;
     char tmp[600];
     size_t i, start;
     if (!path || !path[0] || keep < 1 || max_bytes < 1) return 0;
-    if (stat(path, &st) != 0 || st.st_size < max_bytes) return 0;
+    if (sy_stat(path, &st) != 0 || st.size < max_bytes) return 0;
     recs = session_read(path);
     /* A task journal is the durable boundary across managed handoff/resume.
      * Keep the full audit bytes; context-window selection remains bounded. */
@@ -1829,18 +1854,18 @@ int agent_journal_trim(const char *path, long max_bytes, int keep) {
     if ((int)recs.count <= keep) { session_free(&recs); return 0; }
     start = recs.count - (size_t)keep;
     snprintf(tmp, sizeof tmp, "%s.csih-tmp", path);
-    f = fopen(tmp, "w");
-    if (!f) { session_free(&recs); return 0; }
+    fd = sy_open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0666);   /* fopen(tmp, "w") */
+    if (fd < 0) { session_free(&recs); return 0; }
     for (i = start; i < recs.count; i++) {
-        if (fputs(recs.lines[i], f) < 0 || fputc('\n', f) == EOF) {
-            fclose(f);
-            remove(tmp);
+        if (sy_write_all(fd, recs.lines[i], zs_len(recs.lines[i])) != 0 || sy_write_all(fd, "\n", 1) != 0) {
+            sy_close(fd);
+            ag_unlink(tmp);
             session_free(&recs);
             return 0;
         }
     }
-    if (fclose(f) != 0) { remove(tmp); session_free(&recs); return 0; }
-    if (rename(tmp, path) != 0) { remove(tmp); session_free(&recs); return 0; }
+    if (sy_close(fd) != 0) { ag_unlink(tmp); session_free(&recs); return 0; }
+    if (ag_rename(tmp, path) != 0) { ag_unlink(tmp); session_free(&recs); return 0; }
     session_free(&recs);
     return 1;
 }
@@ -1882,16 +1907,16 @@ size_t agent_project_notes(char *out, size_t cap) {
     static const char *names[] = { "CSIH.md", "AGENTS.md", NULL };
     char here[1024], path[1200], body[8193];
     size_t n = 0, w;
-    FILE *f = NULL;
+    long got = -1;
     int i;
-    if (!out || cap < 64 || !getcwd(here, sizeof here)) return 0;
-    for (i = 0; names[i] && !f; i++) {
+    if (!out || cap < 64 || sy_cwd(here, (int)sizeof here) != 0) return 0;
+    /* the first of CSIH.md, AGENTS.md that opens; at most 8KB of it */
+    for (i = 0; names[i] && got < 0; i++) {
         snprintf(path, sizeof path, "%s/%s", here, names[i]);
-        f = fopen(path, "r");
+        got = ag_read_file(path, body, (long)sizeof body - 1);
     }
-    if (!f) return 0;
-    n = fread(body, 1, sizeof body - 1, f);
-    fclose(f);
+    if (got < 0) return 0;
+    n = (size_t)got;
     if (n == sizeof body - 1) {
         /* Cut at 8KB: drop a last code point that lost its tail bytes. */
         size_t k = n - 1;
@@ -1930,7 +1955,7 @@ static int agent_build_messages(const char *transcript, const char *tail,
     size_t anchor_len = 0;
 
     recs = session_read(transcript);
-    memset(held, 0, sizeof held);
+    zs_mset(held, 0, sizeof held);
 
     /* System text stays byte-stable (catalog + prompt). The tmux window list
      * is caller text with newlines; it rides a user message below,
@@ -2112,7 +2137,7 @@ static int agent_build_messages(const char *transcript, const char *tail,
 
     if(anchor_len){
         if(anchor_len >= sizeof acc-a){for(k=0;k<nvals;k++)jfree(held[k]);mm_free(anchor);session_free(&recs);return 0;}
-        memcpy(acc+a,anchor,anchor_len);a+=anchor_len;acc[a]=0;
+        zs_mcpy(acc+a,anchor,anchor_len);a+=anchor_len;acc[a]=0;
     }
     mm_free(anchor);
 
@@ -2156,8 +2181,8 @@ static int agent_call(const char *endpoint, const char *model,
     rest = (size_t)zs_len(m + 9);
     need = pre + (size_t)zs_len(model) + rest + 1;
     if (need > sizeof body) return -1;
-    memmove(m + (size_t)zs_len(model), m + 9, rest + 1);
-    memcpy(m, model, (size_t)zs_len(model));
+    zs_mmove(m + (size_t)zs_len(model), m + 9, rest + 1);
+    zs_mcpy(m, model, (size_t)zs_len(model));
 
     r = net_http("POST", endpoint, "application/json", body);
     agent_last_http = r.status;
@@ -2179,15 +2204,13 @@ static int agent_call(const char *endpoint, const char *model,
         {
             const char *home = sy_env("HOME");
             char path[512];
-            FILE *f;
+            static char text[NET_BODY_MAX + 64];
             if (home && home[0]) {
+                int tn;
                 csih_home_bind(home);
                 snprintf(path, sizeof path, "%s/.csih/last-http.txt", home);
-                f = fopen(path, "w");
-                if (f) {
-                    fprintf(f, "status %d\n%s\n", r.status, r.body[0] ? r.body : "");
-                    fclose(f);
-                }
+                tn = snprintf(text, sizeof text, "status %d\n%s\n", r.status, r.body[0] ? r.body : "");
+                if (tn > 0) ag_write_file(path, text, tn < (int)sizeof text ? tn : (int)sizeof text - 1);
             }
         }
         return -3;
@@ -2205,7 +2228,7 @@ static int agent_call(const char *endpoint, const char *model,
                 if (msg && msg->kind == J_OBJ) {
                     ct = jget(msg, "content");
                     if (ct && ct->kind == J_STR) {
-                        strncpy(content, jstr(ct), clen - 1);
+                        zs_ncpy(content, jstr(ct), clen - 1);
                         content[clen - 1] = '\0';
                     }
                 }
@@ -2231,7 +2254,7 @@ static int page_path(char *out, int outlen, const char *cwd, const char *which) 
     if (!home || !home[0]) return 0;
     csih_home_bind(home);
     snprintf(dir, sizeof dir, "%s/.csih", home);
-    mkdir(dir, 0750);
+    ag_mkdir(dir, 0750);
     snprintf(out, (size_t)outlen, "%s/%s", dir, page);
     return 1;
 }
@@ -2292,7 +2315,7 @@ static char *agent_context_next;
 /* Harness-owned packet, copied for the next turn. NULL explicitly clears it. */
 int agent_context_packet(const char *packet){
     char *copy=NULL;size_t n;
-    if(packet){n=(size_t)zs_len(packet);if(n>=32768)return -1;copy=mm_alloc(n+1);if(!copy)return -1;memcpy(copy,packet,n+1);}
+    if(packet){n=(size_t)zs_len(packet);if(n>=32768)return -1;copy=mm_alloc(n+1);if(!copy)return -1;zs_mcpy(copy,packet,n+1);}
     mm_free(agent_context_next);agent_context_next=copy;return 0;
 }
 static void at_copy(char *d, int n, const char *s) {
@@ -2308,8 +2331,8 @@ static int at_splice_model(void) {
     rest = (size_t)zs_len(m + 9);
     need = pre + (size_t)zs_len(AT.model) + rest + 1;
     if (need > sizeof AT.messages) return -1;
-    memmove(m + (size_t)zs_len(AT.model), m + 9, rest + 1);
-    memcpy(m, AT.model, (size_t)zs_len(AT.model));
+    zs_mmove(m + (size_t)zs_len(AT.model), m + 9, rest + 1);
+    zs_mcpy(m, AT.model, (size_t)zs_len(AT.model));
     return 0;
 }
 
@@ -2343,7 +2366,7 @@ static int at_claim_grounding(char *acc,size_t *used){
  char err[128];jvalue *v,*refs;size_t i;int ok=0;if(!AT.claim_packet)return 1;v=json_parse(AT.claim_packet,(size_t)zs_len(AT.claim_packet),err,sizeof err);if(!v)return 0;refs=jget(v,"observation_refs");
  for(i=0;i<refs->len;i++){jvalue *r=refs->items[i],*source,*action;int ix=at_evidence_index(jstr(jget(r,"id"))),a=(int)jget(r,"start")->n,b=(int)jget(r,"end")->n;char *span,*record,*prefix;size_t cap,z;const char *text;
  if(ix<0)goto done;source=json_parse(AT.records[ix],(size_t)zs_len(AT.records[ix]),err,sizeof err);if(!source)goto done;text=jstr(jget(source,"text"));action=jget(source,"action");at_ref_resolve(r,text,(size_t)zs_len(text),&a,&b);cap=6*(size_t)(b-a)+12000;span=mm_alloc((size_t)(b-a)+1);record=mm_alloc(cap);prefix=mm_alloc(11000);if(!span||!record||!prefix){mm_free(span);mm_free(record);mm_free(prefix);jfree(source);goto done;}
- memcpy(span,text+a,(size_t)(b-a));span[b-a]=0;
+ zs_mcpy(span,text+a,(size_t)(b-a));span[b-a]=0;
  if(!json_rec(prefix,11000,"source_id",AT.ids[ix],"native_path",jstr(jget(action,"input")),"native_op",jstr(jget(action,"op")))){mm_free(span);mm_free(record);mm_free(prefix);jfree(source);goto done;}
  z=(size_t)snprintf(record,cap,"{%.*s,\"start\":%d,\"end\":%d,\"json_pointer_validation\":\"unknown\",\"verified\":false,\"original_text\":",(int)(size_t)zs_len(prefix)-2,prefix+1,a,b);
  {size_t escaped;if(z+4>=cap){mm_free(span);mm_free(record);mm_free(prefix);jfree(source);goto done;}record[z++]='"';escaped=json_escape(span,record+z,cap-z-3,NULL);if(!escaped&&span[0]){mm_free(span);mm_free(record);mm_free(prefix);jfree(source);goto done;}z+=escaped;record[z++]='"';record[z++]='}';record[z]=0;}
@@ -2358,7 +2381,7 @@ static char *at_directory(void){
  if(!json_rec(id,sizeof id,"id",AT.ids[i],NULL,NULL,NULL,NULL)){jfree(v);mm_free(out);mm_free(row);return NULL;}
  {char provenance[9000];size_t pn;if(!json_rec(provenance,sizeof provenance,"native_op",jstr(jget(action,"op")),"native_path",jstr(jget(action,"input")),NULL,NULL)){jfree(v);mm_free(out);mm_free(row);return NULL;}pn=(size_t)zs_len(provenance);
  n=snprintf(row,12000,"{%.*s,%.*s,\"kind\":\"%s\",\"status\":%s,\"body_bytes\":%zu,\"body_delivery\":\"directory is not body coverage; omitted bodies can be read by evidence_id; read_evidence is retrieval, not independent verification\"}",(int)(size_t)zs_len(id)-2,id+1,(int)pn-2,provenance+1,jstr(jget(action,"kind")),facts,(size_t)zs_len(jstr(text)));}jfree(v);
- if(n<0||n>=12000){mm_free(out);mm_free(row);return NULL;}len=(size_t)n;if(used+len+3>=NET_BODY_MAX){mm_free(out);mm_free(row);return NULL;}if(i)out[used++]=',';memcpy(out+used,row,len);used+=len;
+ if(n<0||n>=12000){mm_free(out);mm_free(row);return NULL;}len=(size_t)n;if(used+len+3>=NET_BODY_MAX){mm_free(out);mm_free(row);return NULL;}if(i)out[used++]=',';zs_mcpy(out+used,row,len);used+=len;
  }out[used++]=']';out[used]=0;mm_free(row);return out;
 }
 static int at_read_evidence(const agent_step *s,char *out,size_t cap){
@@ -2369,13 +2392,13 @@ static int at_read_evidence(const agent_step *s,char *out,size_t cap){
  if(start>n||(start<n&&((unsigned char)text[start]&192)==128)){jfree(v);tool_facts.err=EINVAL;snprintf(out,cap,"evidence read failed: invalid cursor");return 1;}
  while(end<n){width=agent_text_width((const unsigned char*)text+end,n-end);if(!width){jfree(v);tool_facts.err=EILSEQ;return 1;}if(end-start+(size_t)width>limit)break;end+=(size_t)width;}
  if((end==start&&start<n)||end-start+1>cap){jfree(v);tool_facts.err=ENOBUFS;snprintf(out,cap,"evidence read failed: no progress");return 1;}
- memcpy(out,text+start,end-start);out[end-start]=0;tool_facts.op_success=1;
+ zs_mcpy(out,text+start,end-start);out[end-start]=0;tool_facts.op_success=1;
  snprintf(AT.evidence_source,sizeof AT.evidence_source,"{\"source_id\":\"%s\",\"byte_start\":%zu,\"byte_end\":%zu,\"source_body_bytes\":%zu,\"verified\":false,\"meaning\":\"retrieval only, not independent operation success\"}",s->path,start,end,n);jfree(v);return 1;
 }
 static int at_capture_capabilities(void) {
     char policy[2200],why[256];size_t len;int n,write_allowed,mind_allowed;
     n=agent_role_line(policy,sizeof policy);if(n<0||(size_t)n>=sizeof policy)return 0;
-    if(!n)strcpy(policy,"No recognized peer role text; existing native permission gate remains authoritative.");
+    if(!n)zs_cpy(policy,"No recognized peer role text; existing native permission gate remains authoritative.");
     AT.cap_file_read=!AT.no_tools && !agent_peer_blocked(ACT_READ,"read","",why,sizeof why);
     mind_allowed=!AT.no_tools && !agent_peer_blocked(ACT_MIND,"read","",why,sizeof why);
     write_allowed=!AT.no_tools && !agent_peer_blocked(ACT_WRITE,"write","",why,sizeof why);
@@ -2400,7 +2423,7 @@ static char *at_candidate_state(int *pending) {
             if(!json_rec(entry,25000,"id",jstr(id),"path",jstr(path),NULL,NULL))goto fail;
             len=(size_t)zs_len(entry);w=snprintf(entry+len-1,25000-len+1,",\"call_seen\":%s,\"content_lines_seen\":%s,\"complete_read\":null,\"verified\":false}",seen?"true":"false",content?"true":"false");
             if(w<0||(size_t)w>=25000-len+1||used+(size_t)zs_len(entry)+4>=NET_BODY_MAX)goto fail;
-            if(i)out[used++]=',';memcpy(out+used,entry,(size_t)zs_len(entry));used+=(size_t)zs_len(entry);
+            if(i)out[used++]=',';zs_mcpy(out+used,entry,(size_t)zs_len(entry));used+=(size_t)zs_len(entry);
         }
     }
     out[used++]=']';out[used]=0;{char *directory=at_directory();size_t length;if(!directory)goto fail;length=(size_t)zs_len(directory);if(used+length+128>=NET_BODY_MAX){mm_free(directory);goto fail;}used+=(size_t)snprintf(out+used,NET_BODY_MAX-used,",\"ledger_version\":%d,\"ledger_directory\":%s,\"raw_body_policy\":\"current bodies may be omitted; directory and audit remain complete\"",AT.nrecords,directory);mm_free(directory);}out[used++]='}';out[used]=0;jfree(root);mm_free(entry);return out;
@@ -2423,7 +2446,7 @@ static int at_page_messages(void){
  while(ix<AT.nrecords&&AT.page_n<16){char err[128],lead[320];jvalue *v=json_parse(AT.records[ix],(size_t)zs_len(AT.records[ix]),err,sizeof err);const char *text;size_t length,take;
  if(!v)goto fail;text=jstr(jget(v,"text"));length=(size_t)zs_len(text);if((size_t)byte>length){jfree(v);goto fail;}take=length-(size_t)byte;if(take>8192)take=8192;take=utf8_prefix(text+byte,take);
  before=used;
- while(1){snprintf(lead,sizeof lead,"Current original body range id=%s bytes=[%d,%zu) total=%zu; continuous data:\n",AT.ids[ix],byte,(size_t)byte+take,length);memcpy(piece,text+byte,take);piece[take]=0;z=json_msg(acc+used,NET_BODY_MAX-used,1,"user",lead,piece);if(z&&dynamic+z<=16384&&used+z+12000<NET_BODY_MAX)break;if(!take){jfree(v);if(AT.page_n){used=before;goto page_ready;}goto fail;}take=utf8_prefix(text+byte,take/2);if(!take){jfree(v);if(AT.page_n){used=before;goto page_ready;}goto fail;}}
+ while(1){snprintf(lead,sizeof lead,"Current original body range id=%s bytes=[%d,%zu) total=%zu; continuous data:\n",AT.ids[ix],byte,(size_t)byte+take,length);zs_mcpy(piece,text+byte,take);piece[take]=0;z=json_msg(acc+used,NET_BODY_MAX-used,1,"user",lead,piece);if(z&&dynamic+z<=16384&&used+z+12000<NET_BODY_MAX)break;if(!take){jfree(v);if(AT.page_n){used=before;goto page_ready;}goto fail;}take=utf8_prefix(text+byte,take/2);if(!take){jfree(v);if(AT.page_n){used=before;goto page_ready;}goto fail;}}
  if(AT.page_n && dynamic+z>16384){jfree(v);used=before;break;}used+=z;dynamic+=z;
  AT.page_indices[AT.page_n]=ix;AT.page_starts[AT.page_n]=byte;AT.page_ends[AT.page_n]=byte+(int)take;AT.page_n++;
  byte+=(int)take;if((size_t)byte==length){ix++;byte=0;}jfree(v);if(dynamic>=14000)break;
@@ -2432,7 +2455,7 @@ static int at_page_messages(void){
  if(!AT.page_n)goto fail;AT.page_next_record=ix;AT.page_next_byte=byte;
  en=(size_t)snprintf(expected,sizeof expected,"{\"page\":%d,\"turn_id\":\"%s\",\"ledger_version\":%d,\"claim_version\":%d,\"ranges\":[",AT.page_no+1,AT.turn_id,AT.nrecords,AT.claim_version);
  {int i;for(i=0;i<AT.page_n;i++){int n=snprintf(expected+en,sizeof expected-en,"%s{\"id\":\"%s\",\"start\":%d,\"end\":%d}",i?",":"",AT.ids[AT.page_indices[i]],AT.page_starts[i],AT.page_ends[i]);if(n<0||(size_t)n>=sizeof expected-en)goto fail;en+=(size_t)n;}}
- if(en+32>=sizeof expected)goto fail;strcpy(expected+en,"],\"observations\":[]}");
+ if(en+32>=sizeof expected)goto fail;zs_cpy(expected+en,"],\"observations\":[]}");
  z=json_msg(acc+used,NET_BODY_MAX-used,1,"user","Expected strict page response (only observations may change):\n",expected);if(!z)goto fail;used+=z;
  z=json_model(AT.messages,sizeof AT.messages,acc,used);mm_free(acc);mm_free(piece);return z>0;
  fail:mm_free(acc);mm_free(piece);return 0;
@@ -2466,7 +2489,7 @@ static int at_page_keep_concerns(void){
  for(i=0;i<obs->len;i++){jvalue *o=obs->items[i],*source,*action;const char *id=jstr(jget(o,"id")),*text;int ix,start,end;char *record,*span,*meta;size_t cap,n,w;
  if(jget(o,"id")->kind==J_NULL)continue;ix=at_evidence_index(id);start=(int)jget(o,"start")->n;end=(int)jget(o,"end")->n;
  if(ix<0||AT.page_concerns_n>=MAX_MODEL_REPLIES*4)goto done;source=json_parse(AT.records[ix],(size_t)zs_len(AT.records[ix]),err,sizeof err);if(!source)goto done;text=jstr(jget(source,"text"));action=jget(source,"action");cap=6*(size_t)(end-start)+20000;record=mm_alloc(cap);span=mm_alloc((size_t)(end-start)+1);meta=mm_alloc(12000);
- if(!span||!record||!meta){mm_free(span);mm_free(record);mm_free(meta);jfree(source);goto done;}memcpy(span,text+start,(size_t)(end-start));span[end-start]=0;
+ if(!span||!record||!meta){mm_free(span);mm_free(record);mm_free(meta);jfree(source);goto done;}zs_mcpy(span,text+start,(size_t)(end-start));span[end-start]=0;
  if(!json_rec(record,cap,"source_id",id,"relation",jstr(jget(o,"relation")),"original_text",span)||!json_rec(meta,12000,"claim_id",jstr(jget(o,"claim_id")),"note",jstr(jget(o,"note")),"native_path",jstr(jget(action,"input")))){mm_free(span);mm_free(record);mm_free(meta);jfree(source);goto done;}
  n=(size_t)zs_len(record);w=(size_t)snprintf(record+n-1,cap-n+1,",%s",meta+1);if(w>=cap-n+1){mm_free(span);mm_free(record);mm_free(meta);jfree(source);goto done;}n=(size_t)zs_len(record);
  w=(size_t)snprintf(record+n-1,cap-n+1,",\"byte_start\":%d,\"byte_end\":%d,\"json_pointer_validation\":\"unknown\",\"verified\":false}",start,end);mm_free(span);mm_free(meta);jfree(source);if(w>=cap-n+1){mm_free(record);goto done;}AT.page_concerns[AT.page_concerns_n++]=record;
@@ -2543,9 +2566,9 @@ static int at_judge_evidence_problem(const agent_step *d,char *why,size_t cap) {
 static void at_reason_text(const char *prefix,const char *text) {
     size_t n=(size_t)zs_len(prefix),k,room;
     if(n>=sizeof AT.res.reason)n=sizeof AT.res.reason-1;
-    memcpy(AT.res.reason,prefix,n);room=sizeof AT.res.reason-1-n;k=(size_t)zs_len(text);if(k>room)k=room;
+    zs_mcpy(AT.res.reason,prefix,n);room=sizeof AT.res.reason-1-n;k=(size_t)zs_len(text);if(k>room)k=room;
     while(k>0 && ((unsigned char)text[k]&192)==128)k--;
-    memcpy(AT.res.reason+n,text,k);AT.res.reason[n+k]=0;
+    zs_mcpy(AT.res.reason+n,text,k);AT.res.reason[n+k]=0;
 }
 static int at_delivery_unmet(void) {
     return AT.delivery_required && (zs_cmp(AT.delivery_peer,agent_peer_get()) || agent_watch_needs_mail());
@@ -2663,7 +2686,7 @@ int agent_event_pack(const char *prefix, const char *text, char rows[][200], int
     }
     if (*p && n > 0) {
         int o = (int)(size_t)zs_len(rows[n - 1]);
-        if (o + 3 < 199) memcpy(rows[n - 1] + o, "...", 4);
+        if (o + 3 < 199) zs_mcpy(rows[n - 1] + o, "...", 4);
     }
     return n;
 }
@@ -2792,7 +2815,7 @@ static int at_after_http(void) {
                         if(bytes>=sizeof AT.content){jfree(root);AT.res.err=-8;AT.res.ok=0;snprintf(AT.res.reason,sizeof AT.res.reason,"unfinished: response_utf8_bytes=%zu exceeds16383; no action executed",bytes);AT.phase=PH_DONE;return 0;}
                         for(i=0;r.body[i];i++)if(r.body[i]=='\\'&&r.body[i+1]){if(r.body[i+1]=='u'&&!zs_ncmp(r.body+i+2,"0000",4)){jfree(root);return at_fail(-4);}i++;}
                         i=0;while(i<bytes){int w=agent_text_width((const unsigned char*)body+i,bytes-i);if(!w){jfree(root);return at_fail(-4);}i+=(size_t)w;}
-                        memcpy(AT.content,body,bytes+1);
+                        zs_mcpy(AT.content,body,bytes+1);
                     }
                 }
             }
@@ -2823,7 +2846,7 @@ static int at_after_http(void) {
         if(at_audit_assistant(0)!=0)return at_fail(-7);
         if(!at_page_keep_concerns())return at_fail(-7);
         if(AT.page_results_n>=MAX_MODEL_REPLIES)return at_fail(-7);
-        AT.page_results[AT.page_results_n]=mm_alloc((size_t)zs_len(AT.content)+1);if(!AT.page_results[AT.page_results_n])return at_fail(-7);strcpy(AT.page_results[AT.page_results_n++],AT.content);
+        AT.page_results[AT.page_results_n]=mm_alloc((size_t)zs_len(AT.content)+1);if(!AT.page_results[AT.page_results_n])return at_fail(-7);zs_cpy(AT.page_results[AT.page_results_n++],AT.content);
         AT.page_record=AT.page_next_record;AT.page_byte=AT.page_next_byte;AT.page_no++;
         if(AT.page_record==AT.nrecords){AT.page_complete=1;AT.http_kind=HTTP_END;}
         AT.phase=PH_GO;return 1;
@@ -2976,7 +2999,7 @@ static int at_after_http(void) {
             at_pages_reset();AT.claim_version++;
             AT.res.outcome = s.outcome;
             mm_free(AT.claim_packet);AT.claim_packet=NULL;
-            if(s.claims_present){size_t len=(size_t)zs_len(agent_parsed_claim);AT.claim_packet=mm_alloc(len+1);if(!AT.claim_packet)return at_fail(-7);memcpy(AT.claim_packet,agent_parsed_claim,len+1);
+            if(s.claims_present){size_t len=(size_t)zs_len(agent_parsed_claim);AT.claim_packet=mm_alloc(len+1);if(!AT.claim_packet)return at_fail(-7);zs_mcpy(AT.claim_packet,agent_parsed_claim,len+1);
                 int bound=at_claim_bind();
                 if(!bound&&AT.parse_fail<2){AT.parse_fail++;
                     {char why[1600];size_t w;int k;
@@ -3081,7 +3104,7 @@ static int at_after_http(void) {
                         wrote=snprintf(record+len-1,bytes-len+1,",\"read_call\":%s}",call);if(wrote<0||(size_t)wrote>=bytes-len+1){mm_free(record);return at_fail(-7);}
                     }
                     if(session_append(AT.transcript,record)!=0){mm_free(record);return at_fail(-7);}
-                    if(s.kind==ACT_READ && agent_read_exact && tool_facts.op_success>0){strcpy(AT.read_paths[AT.nrecords],agent_read_path);AT.read_calls[AT.nrecords]=1;AT.read_content[AT.nrecords]=agent_read_lines>0;}
+                    if(s.kind==ACT_READ && agent_read_exact && tool_facts.op_success>0){zs_cpy(AT.read_paths[AT.nrecords],agent_read_path);AT.read_calls[AT.nrecords]=1;AT.read_content[AT.nrecords]=agent_read_lines>0;}
                     snprintf(AT.ids[AT.nrecords],96,"%s",id);AT.records[AT.nrecords++]=record;
                     {char label[140];snprintf(label,sizeof label,"  evidence %s",id);at_event(label);}
                 }
@@ -3151,7 +3174,7 @@ int agent_turn_begin(const char *prompt, const char *transcript,
 
     char tree[2048], palace[2048];
     {int i;for(i=0;i<AT.nrecords;i++)mm_free(AT.records[i]);mm_free(AT.judge_feedback);mm_free(AT.context_packet);mm_free(AT.claim_packet);for(i=0;i<AT.page_results_n;i++)mm_free(AT.page_results[i]);for(i=0;i<AT.page_concerns_n;i++)mm_free(AT.page_concerns[i]);}
-    memset(&AT, 0, sizeof AT);
+    zs_mset(&AT, 0, sizeof AT);
     at_net_retry = 0;
     AT.context_packet=agent_context_next;agent_context_next=NULL;
     AT.delivery_required=agent_delivery_next;agent_delivery_next=0;
@@ -3195,9 +3218,9 @@ int agent_turn_begin(const char *prompt, const char *transcript,
         AT.phase = PH_DONE;
         return -1;
     }
-    {struct stat st;if(stat(AT.transcript,&st)!=0){AT.phase=PH_DONE;AT.res.err=-7;return -1;}
+    {sy_stat_t st;if(sy_stat(AT.transcript,&st)!=0){AT.phase=PH_DONE;AT.res.err=-7;return -1;}
      turn_serial++;if(!turn_serial){AT.phase=PH_DONE;AT.res.err=-7;return -1;}
-     snprintf(AT.turn_id,sizeof AT.turn_id,"%ld-%ld-%lu",(long)getpid(),(long)st.st_size,turn_serial);}
+     snprintf(AT.turn_id,sizeof AT.turn_id,"%ld-%ld-%lu",(long)getpid(),st.size,turn_serial);}
     AT.phase = PH_GO;
     AT.http_kind = HTTP_ACT;
     return 0;
@@ -3239,7 +3262,7 @@ agent_result agent_turn_take(void) { agent_result r = AT.res; return r; }
  * agent_turn_take. No socket is opened. */
 void agent_turn_seal(int ok, int stopped, int rounds, int actions, int err,
                      const char *answer) {
-    memset(&AT.res, 0, sizeof AT.res);
+    zs_mset(&AT.res, 0, sizeof AT.res);
     AT.res.ok = ok;
     AT.res.stopped = stopped;
     AT.res.rounds = rounds;
