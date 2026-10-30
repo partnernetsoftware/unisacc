@@ -1,6 +1,8 @@
 /* tools/kernel-emit.cx -- the native `python3 -m unisa emit-kernel`: writes the 41 kernel/ files
  * (weight.<stage>.inc and dense.<stage>.inc for the 18 stages, unisa_model.inc, unisa_cases.inc,
- * unisa_core.c, unisa_self.c, unisa_headers.inc) byte for byte as unisa/ckernel.py does.
+ * unisa_core.c, unisa_self.c, unisa_headers.inc).  The bodies are byte for byte what unisa/ckernel.py
+ * wrote (archived 2026-10-30 in archive/reference-py/unisa/); the provenance blocks ("Inputs (sha256 ...")
+ * name the data files below instead of the Python sources.
  *
  *   sh ./unisacc.com tools/kernel-emit.cx -- --write ROOT OUTDIR    (OUTDIR must exist)
  *   sh ./unisacc.com tools/kernel-emit.cx -- --check ROOT OUTDIR    (SAME/DIFF per file; exit 1 on DIFF)
@@ -8,15 +10,14 @@
  *                              provenance line still names weights/built.json and hashes that file)
  *
  * Inputs, each read as data:
- *   weights/built.json           the constructed nets (unisa/__main__.py _built() loads this file)
+ *   weights/built.json           the constructed nets
  *   weights/gold/<stage>.tsv     each stage's fields in order, head names and every key with its gold
  *                                labels, in gold.py keys() order (the gold-export form)
  *   exec/facts/kernel-emit.tsv   stage order, back-end stages, provenance inputs, vocabularies, ENCSPEC map
  *   exec/facts/enc-literals.tsv  the ENCSPEC opcode rows
- *   unisa/ckernel.py             KERNEL_BODY, the C kernel text, taken between its unique markers
+ *   exec/kernel/body.c           KERNEL_BODY, the C kernel text, after its marker line
  *   include/**.h                 the carried headers; the -ftrim-libc closure comes from the native
  *                                seed/unisa_libneed.c `table`
- * The provenance comments hash the same paths as the Python writer, unisa/*.py included.
  * Exit 0 written or equal, 1 a file differs (named), 2 usage, input or refusal.
  */
 #pragma unisa use text.text
@@ -337,19 +338,18 @@ static int ke_nmodelsrc;
 static char *ke_upper(const char *s) { long n = tx_len(s, 256), i; char *u = ke_alloc(n + 1); for (i = 0; i < n; i++) u[i] = (s[i] >= 'a' && s[i] <= 'z') ? (char)(s[i] - 32) : s[i]; u[n] = 0; return u; }
 static void ke_packed(Ob *o, char **v, int n, const char *sep) { int i; for (i = 0; i < n; i++) { ob_z(o, v[i]); ob_z(o, sep); } }
 
-/* ---- unisa_core.c / unisa_self.c: KERNEL_BODY from unisa/ckernel.py ---- */
+/* ---- unisa_core.c / unisa_self.c: KERNEL_BODY, the bytes after the marker line of exec/kernel/body.c ---- */
 static char *ke_body;
 static long ke_bodyn, ke_mainat;
 static void ke_kernel_body(void) {
-    long n, s, e;
-    char *b = ke_read("unisa/ckernel.py", &n);
-    static const char open_[] = "\nKERNEL_BODY = r'''";
-    s = tx_find(b, n, open_, (long)sizeof open_ - 1);
-    if (s < 0 || tx_find(b + s + 1, n - s - 1, open_, (long)sizeof open_ - 1) >= 0) ke_die("KERNEL_BODY marker not unique", "unisa/ckernel.py");
-    s += (long)sizeof open_ - 1;
-    e = tx_find(b + s, n - s, "'''", 3);
-    if (e < 0) ke_die("KERNEL_BODY end", "unisa/ckernel.py");
-    ke_body = b + s; ke_bodyn = e;
+    long n, s;
+    char *b = ke_read("exec/kernel/body.c", &n);
+    static const char mark[] = "\n/* ---- KERNEL_BODY: the bytes below, verbatim to the end of this file ---- */\n";
+    s = tx_find(b, n, mark, (long)sizeof mark - 1);
+    if (s < 0 || tx_find(b + s + 1, n - s - 1, mark, (long)sizeof mark - 1) >= 0) ke_die("KERNEL_BODY marker not unique", "exec/kernel/body.c");
+    s += (long)sizeof mark - 1;
+    if (s >= n || b[n - 1] != '\n') ke_die("KERNEL_BODY must end with a newline", "exec/kernel/body.c");
+    ke_body = b + s; ke_bodyn = n - s;
     ke_mainat = tx_find(ke_body, ke_bodyn, "int main(void)", 14);
     if (ke_mainat < 0) ke_mainat = ke_bodyn;
 }
@@ -690,10 +690,14 @@ int main(int argc, char **argv) {
     }
     {
         Ob c = {0, 0, 0};
-        char *src2[2];
-        src2[0] = "unisa/gold.py"; src2[1] = "unisa/catalog.py";
+        char *src2[KE_MAXS];
+        for (i = 0; i < ke_ns; i++) {   /* the gold labels the cases pack: weights/gold/<stage>.tsv in stage order */
+            char rel[128];
+            cx_fmt(rel, sizeof rel, "weights/gold/%s.tsv", ke_st[i].name);
+            src2[i] = ke_dup(rel, tx_len(rel, sizeof rel));
+        }
         ke_prov(&c, "Every key of every stage with the class its gold label gives -- the\n * full domain the self test enumerates "
-                "[P-3]: unisa/gold.py STAGES[s].keys()\n * and .label(), packed as [stage][key indices][class per head].", src2, 2);
+                "[P-3]: unisa/gold.py STAGES[s].keys()\n * and .label(), packed as [stage][key indices][class per head].", src2, ke_ns);
         ob_put(&c, "\n", 1); ob_nl(&c, "");
         ke_cstr(&c, (unsigned char *)cases.p, cases.n, "CASES", 0); ob_put(&c, "\n", 1);
         ob_nl(&c, ""); ob_f(&c, "#define NCASE %ld\n", ncase, 0); ob_nl(&c, "");
@@ -704,7 +708,7 @@ int main(int argc, char **argv) {
     {
         Ob k = {0, 0, 0}, s = {0, 0, 0};
         char *src1[1];
-        src1[0] = "unisa/ckernel.py";
+        src1[0] = "exec/kernel/body.c";
         ke_prov(&k, "The decision layer as C: the integer kernel [K-5], from KERNEL_BODY in\n * unisa/ckernel.py.  The model it reads is the file "
                 "included below.\n * No softmax, no libm, no malloc, no multiply, no float.", src1, 1);
         ob_put(&k, "\n", 1); ob_nl(&k, ""); ob_nl(&k, "#include \"unisa_model.inc\""); ob_nl(&k, "");

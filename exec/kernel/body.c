@@ -1,0 +1,111 @@
+/* exec/kernel/body.c -- the integer decision kernel's C text (KERNEL_BODY), moved verbatim on 2026-10-30
+ * from unisa/ckernel.py (archived as archive/reference-py/unisa/ckernel.py) when the last Python left the
+ * live tree.  Data, not a compiled unit: tools/kernel-emit.cx (kernel/unisa_core.c, unisa_self.c),
+ * tools/table-kernel-export.cx (math-only exports) and tools/pp-gold-material.cx (the PP observer slice)
+ * take the bytes after the marker line below, to the end of this file -- the same bytes they used to take
+ * between `KERNEL_BODY = r'''` and the closing three quotes.  Edit the kernel here; nothing else holds it. */
+/* ---- KERNEL_BODY: the bytes below, verbatim to the end of this file ---- */
+/* the kernel -- the deploy kernel. [K-1] [K-2] [K-5]
+ *
+ * embed -> match -> add -> argmax.  No softmax, no libm, no malloc, and -- for
+ * the constructed integer nets -- no multiply and no float either: a unit fires
+ * when every one of its literal masks contains the key's value, and a firing
+ * unit simply ADDS its W2 entries.
+ *
+ * Written in the same C subset unisa itself compiles, so `unisa run` and
+ * `cc` must agree on its output.
+ */
+int getb(int i) { return MODEL[i] & 255; }
+
+unsigned long mask64(int p) {
+    unsigned long v; int k;
+    v = 0;
+    k = 7;
+    while (k >= 0) { v = (v << 8) | getb(p + k); k = k - 1; }
+    return v;
+}
+
+/* one decision: stage index s, key[] holds one value index per field */
+int infer(int s, int *key, int head) {
+    int m; int H; int off; int j; int f; int hit; int ne; int k;
+    int p; int best; int bi; int u; int hh; int c; int w; int ncls;
+    int any; int got; int wi; int mw; int q;
+    unsigned long lit;
+    m = STAGE_M[s]; H = STAGE_H[s]; off = STAGE_OFF[s]; mw = STAGE_MW[s];
+    /* a key outside the table is never answered [P-2]: the net is only
+       defined on the domain it was verified on.  -1 tells the caller. */
+    f = 0;
+    while (f < m) {
+        if (key[f] < 0 || key[f] >= STAGE_VN[(s << 2) + f]) return 0 - 1;
+        f = f + 1;
+    }
+    /* the masks are stored unit by unit, field by field, word by word --
+       the order this loop visits them -- so one running offset reaches
+       every one, and no index is multiplied out */
+    q = off;
+    j = 0;
+    while (j < H) {
+        hit = 1;
+        f = 0;
+        while (f < m) {
+            /* MASKW u64 words per field: a vocabulary may exceed 64 values */
+            any = 0; got = 0; wi = 0;
+            while (wi < mw) {
+                lit = mask64(q); q = q + 8;
+                if (lit) any = 1;
+                if (wi == (key[f] >> 6)) {
+                    if ((lit >> (key[f] & 63)) & 1) got = 1;
+                }
+                wi = wi + 1;
+            }
+            if (any) { if (got == 0) hit = 0; }
+            f = f + 1;
+        }
+        act[j] = hit;
+        j = j + 1;
+    }
+    p = q;
+    ne = getb(p) | (getb(p+1) << 8) | (getb(p+2) << 16) | (getb(p+3) << 24);
+    p = p + 4;
+    ncls = STAGE_NCLS[(s << 4) + head];
+    c = 0;
+    while (c < ncls) { z[c] = 0; c = c + 1; }
+    k = 0;
+    while (k < ne) {
+        u = getb(p) | (getb(p+1) << 8);
+        hh = getb(p+2);
+        c = getb(p+3) | (getb(p+4) << 8);
+        w = getb(p+5) | (getb(p+6) << 8);
+        if (hh == head) { if (act[u]) z[c] = z[c] + w; }
+        p = p + 7;
+        k = k + 1;
+    }
+    best = z[0]; bi = 0;
+    c = 1;
+    while (c < ncls) { if (z[c] > best) { best = z[c]; bi = c; } c = c + 1; }
+    return bi;
+}
+
+int main(void) {
+    int i; int p; int s; int h; int got; int want; int bad;
+    int key[4];
+    model_dims();
+    bad = 0;
+    i = 0;
+    p = 0;
+    while (i < NCASE) {
+        s = CASES[p] & 255;
+        h = CASES[p+1] & 255;
+        key[0] = CASES[p+2] & 255;
+        key[1] = CASES[p+3] & 255;
+        key[2] = CASES[p+4] & 255;
+        key[3] = CASES[p+5] & 255;
+        want = (CASES[p+6] & 255) | ((CASES[p+7] & 255) << 8);
+        got = infer(s, key, h);
+        if (got != want) bad = bad + 1;
+        p = p + 8;
+        i = i + 1;
+    }
+    printf("%d decisions, %d wrong\n", NCASE, bad);
+    return bad != 0;
+}
