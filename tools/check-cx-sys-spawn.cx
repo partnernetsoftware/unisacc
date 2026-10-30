@@ -1,0 +1,76 @@
+/* Checks cx/sys/proc.cx sy_spawn_pipe/sy_wait_status and cx/mem/bytes.cx:
+     sh ./unisacc.com tools/check-cx-sys-spawn.cx
+   Real children (sh -c ...): merged and split output, cwd, stdin from /dev/null, exit code and
+   signal decoding, NOHANG, a missing program and a missing cwd as -errno; then every mm_* edge.
+   Prints PASS/FAIL lines and CX_SYS_SPAWN<TAB>failed=N. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+
+static int failed;
+static void ck(int ok, const char *name) { if (!ok) failed++; printf("%s\tspawn.%s\n", ok ? "PASS" : "FAIL", name); }
+
+/* read FD to the end into OUT (cap bytes, NUL-terminated); its length */
+static long slurp(int fd, char *out, long cap) {
+    long n = 0, k;
+    while (n < cap - 1 && (k = sy_read(fd, out + n, cap - 1 - n)) > 0) n += k;
+    out[n] = 0;
+    sy_close(fd);
+    return n;
+}
+
+int main(void) {
+    char buf[256], ebuf[256];
+    int pid, ofd = -1, efd = -1, ex = -1, code = -1, sig = -1;
+
+    {   char *v[] = {"sh", "-c", "printf out; printf err >&2; exit 3", 0};
+        pid = sy_spawn_pipe(v, 0, 0, &ofd, 0);
+        slurp(ofd, buf, sizeof buf);
+        ck(pid > 0 && sy_wait_status(pid, 0, &ex, &code, &sig) == pid && ex == 1 && code == 3 && sig == 0
+           && (tx_eq(buf, "outerr", 16) || tx_eq(buf, "errout", 16)), "merged-output-exit-3");
+    }
+    {   char *v[] = {"sh", "-c", "printf out; printf err >&2", 0};
+        pid = sy_spawn_pipe(v, 0, SY_SPAWN_STDERR_SPLIT, &ofd, &efd);
+        slurp(ofd, buf, sizeof buf); slurp(efd, ebuf, sizeof ebuf);
+        ck(pid > 0 && sy_wait_status(pid, 0, &ex, &code, 0) == pid && ex && code == 0
+           && tx_eq(buf, "out", 16) && tx_eq(ebuf, "err", 16), "split-output");
+    }
+    {   char *v[] = {"sh", "-c", "pwd; cat; echo eof", 0};
+        pid = sy_spawn_pipe(v, "/tmp", 0, &ofd, 0);
+        slurp(ofd, buf, sizeof buf);
+        ck(pid > 0 && sy_wait_status(pid, 0, 0, 0, 0) == pid && tx_eq(buf, "/tmp\neof\n", 32), "cwd-and-stdin-devnull");
+    }
+    {   char *v[] = {"sh", "-c", "kill -9 $$", 0};
+        pid = sy_spawn_pipe(v, 0, 0, &ofd, 0);
+        slurp(ofd, buf, sizeof buf);
+        ck(pid > 0 && sy_wait_status(pid, 0, &ex, &code, &sig) == pid && ex == 0 && sig == 9, "signal-decoded");
+    }
+    {   char *v[] = {"sh", "-c", "sleep 1", 0};
+        pid = sy_spawn_pipe(v, 0, 0, &ofd, 0);
+        ck(pid > 0 && sy_wait_status(pid, 1, 0, 0, 0) == 0, "nohang-while-running");
+        ck(sy_kill(pid) == 128 + 9, "kill-group");
+        sy_close(ofd);
+    }
+    {   char *v[] = {"no-such-program-cx-spawn", 0};
+        ck(sy_spawn_pipe(v, 0, 0, &ofd, 0) == -ENOENT, "missing-program-enoent");
+    }
+    {   char *v[] = {"/bin/sh", "-c", "true", 0};
+        ck(sy_spawn_pipe(v, "/no/such/dir/cx", SY_SPAWN_NO_PATH, &ofd, 0) == -ENOENT, "missing-cwd-enoent");
+        ck(sy_spawn_pipe(v, 0, SY_SPAWN_STDERR_SPLIT, &ofd, 0) == -EINVAL, "split-needs-err-fd");
+    }
+
+    {   char d[8] = "abcdefg"; char big[16]; int i;
+        ck(mm_copy(d, 8, "XYZ", 3) == 0 && tx_eq(d, "XYZdefg", 8), "copy");
+        ck(mm_copy(d, 2, "XYZ", 3) == -ERANGE && tx_eq(d, "XYZdefg", 8), "copy-over-cap-untouched");
+        ck(mm_copy(d, 8, 0, 3) == -EINVAL && mm_copy(d, 8, "x", -1) == -EINVAL && mm_copy(0, 0, 0, 0) == 0, "copy-bad-args");
+        ck(mm_move(d + 1, 7, d, 6) == 0 && tx_eq(d, "XXYZdef", 8), "move-overlap");
+        ck(mm_fill(d, 8, 0x41 + 256, 7) == 0 && tx_eq(d, "AAAAAAA", 8), "fill-byte-masked");
+        ck(mm_fill(d, 3, 'q', 4) == -ERANGE && tx_eq(d, "AAAAAAA", 8), "fill-over-cap-untouched");
+        for (i = 0; i < 16; i++) big[i] = (char)i;
+        ck(mm_same(big, big, 16) && !mm_same(big, big + 1, 15) && mm_same(0, 0, 0) && !mm_same(big, big, -1), "same");
+        ck(mm_cmp("\x01", "\xff", 1) < 0 && mm_cmp("b", "a", 1) > 0 && mm_cmp("ab", "ab", 2) == 0, "cmp-unsigned");
+    }
+    printf("CX_SYS_SPAWN\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

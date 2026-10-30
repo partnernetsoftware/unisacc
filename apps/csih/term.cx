@@ -1,5 +1,9 @@
 #pragma unisa module term
-/* NOTE: termios/ioctl/poll/signal includes kept — struct termios layout is probe-verified; extern-only shim would fork per target. */
+#pragma unisa use sys.posix
+#pragma unisa use sys.tty
+#pragma unisa use sys.poll
+#pragma unisa use sys.fs
+/* Terminal modes, window size and polling come from cx/sys (sy_tty_*, sy_poll); no #include. */
 /*
  * term.cx — the thin layer that talks to a terminal, and nothing else.
  *
@@ -48,11 +52,6 @@
  * subcommand that needs a terminal reports UNAVAILABLE instead of failing — a
  * probe that is red on a pipe is indistinguishable from a probe that is broken.
  */
-#include <termios.h>
-#include <sys/ioctl.h>
-#include <poll.h>
-#include <signal.h>
-
 enum {
     TERM_FALLBACK_COLS = 80,
     TERM_FALLBACK_ROWS = 24,
@@ -100,7 +99,7 @@ typedef struct {
 
 /* ── raw mode ───────────────────────────────────────────────────────────── */
 
-static struct termios term_saved;
+static sy_tty_t       term_saved;
 static int            term_saved_ok = 0;
 static volatile sig_atomic_t term_got_int = 0;
 
@@ -118,17 +117,17 @@ void term_on_signal(int sig) { (void)sig; term_got_int = 1; }
  * check.sh tests it).
  */
 int term_raw_enter(void) {
-    struct termios raw;
+    sy_tty_t raw;
     if (!isatty(0)) return -1;
-    if (tcgetattr(0, &term_saved) != 0) return -1;
+    if (sy_tty_get(0, &term_saved) != 0) return -1;
     term_saved_ok = 1;
     raw = term_saved;
-    cfmakeraw(&raw);            /* q1: exists, so no flag dance */
-    if (tcsetattr(0, TCSANOW, &raw) != 0) { term_saved_ok = 0; return -1; }
+    if (sy_tty_raw(&raw) != 0) { term_saved_ok = 0; return -1; }   /* cfmakeraw, bit for bit */
+    if (sy_tty_set(0, &raw, 0) != 0) { term_saved_ok = 0; return -1; }
     /* SGR clicks. tmux with mouse on still delivers these once the pane asks. */
     if (isatty(1)) {
         const char on[] = "\033[?1000h\033[?1006h\033[?2004h";
-        if (write(1, on, sizeof on - 1) < 0) { /* still in raw mode */ }
+        if (sy_write_all(1, on, (long)sizeof on - 1) < 0) { /* still in raw mode */ }
     }
     return 0;
 }
@@ -137,13 +136,13 @@ int term_raw_enter(void) {
 int term_raw_leave(void) {
     if (isatty(1)) {
         const char off[] = "\033[?1000l\033[?1006l\033[?2004l";
-        if (write(1, off, sizeof off - 1) < 0) { /* restore anyway */ }
+        if (sy_write_all(1, off, (long)sizeof off - 1) < 0) { /* restore anyway */ }
     }
     if (!term_saved_ok) return -1;
     term_saved_ok = 0;
     /* TCSAFLUSH: drop unread input first, so a late terminal reply (e.g. a
      * device-attributes answer) is not echoed onto the shell after exit. */
-    return tcsetattr(0, TCSAFLUSH, &term_saved);
+    return sy_tty_set(0, &term_saved, 1) == 0 ? 0 : -1;
 }
 
 /* Install the restore-on-exit handler. signal(), not sigaction — see q5. */
@@ -153,8 +152,8 @@ int term_raw_leave(void) {
  * dump are what they would have been. */
 static void term_on_fatal(int sig) {
     static const char off[] = "\033[?1000l\033[?1006l\033[?2004l\033[?25h\033[0m\n";
-    if (write(1, off, sizeof off - 1) < 0) { /* best effort */ }
-    if (term_saved_ok) tcsetattr(0, TCSANOW, &term_saved);
+    if (sy_write_all(1, off, (long)sizeof off - 1) < 0) { /* best effort; write(2) loop, async-signal-safe */ }
+    if (term_saved_ok) sy_tty_set(0, &term_saved, 0);   /* one ioctl: async-signal-safe */
     signal(sig, SIG_DFL);
     raise(sig);
 }
@@ -174,16 +173,15 @@ int term_interrupted(void) { return (int)term_got_int; }
  * rejected even when ioctl claimed success. 43690 has never been a terminal.
  */
 term_size_t term_size(void) {
-    struct winsize ws;
+    int rows = 0, cols = 0;                       /* sy_tty_size zeroes first: q3 */
     term_size_t out;
     out.cols = TERM_FALLBACK_COLS;
     out.rows = TERM_FALLBACK_ROWS;
     out.source = 0;
-    memset(&ws, 0, sizeof ws);                    /* the memset q3 demands */
-    if (ioctl(1, TIOCGWINSZ, &ws) != 0) return out;
-    if (ws.ws_col < TERM_MIN_COLS || ws.ws_row < TERM_MIN_ROWS) return out;
-    out.cols = (int)ws.ws_col;
-    out.rows = (int)ws.ws_row;
+    if (sy_tty_size(1, &rows, &cols) != 0) return out;
+    if (cols < TERM_MIN_COLS || rows < TERM_MIN_ROWS) return out;
+    out.cols = cols;
+    out.rows = rows;
     out.source = 1;
     return out;
 }
@@ -199,18 +197,16 @@ term_size_t term_size(void) {
  * would be a second clock to keep honest.
  */
 int term_wait_readable(int ms) {
-    struct pollfd p;
+    sy_pollfd_t p;
     int rc;
     p.fd = 0;
-    p.events = POLLIN;
+    p.events = SY_POLLIN;
     p.revents = 0;
-    do {
-        rc = poll(&p, 1, ms);
-    } while (rc < 0 && errno == EINTR);
+    rc = sy_poll(&p, 1, ms);                      /* resumes after EINTR itself */
     if (rc < 0) return -1;
     if (rc == 0) return 0;
-    if (p.revents & (POLLERR | POLLHUP | POLLNVAL)) return -1;
-    return (p.revents & POLLIN) ? 1 : 0;
+    if (p.revents & (SY_POLLERR | SY_POLLHUP | SY_POLLNVAL)) return -1;
+    return (p.revents & SY_POLLIN) ? 1 : 0;
 }
 
 /*
@@ -223,8 +219,8 @@ int term_wait_readable(int ms) {
  * gets "unresponsive" bug reports that cannot be reproduced.
  */
 static int term_read_some(char *buf, int cap) {
-    int n = (int)read(0, buf, (size_t)cap);
-    return n < 0 ? 0 : n;
+    long n = sy_read(0, buf, (long)cap);   /* called once poll said readable */
+    return n < 0 ? 0 : (int)n;
 }
 
 /*

@@ -132,6 +132,91 @@ int sy_fork_session(int (*fn)(void *), void *ud, int fds[2]) {
     return (int)pid;
 }
 
+enum {
+    SY_SPAWN_STDERR_SPLIT = 1,   /* stderr into its own pipe (*err_fd), not merged into *out_fd */
+    SY_SPAWN_STDIN_INHERIT = 2,  /* keep the caller's stdin instead of /dev/null */
+    SY_SPAWN_NO_PATH = 4         /* argv[0] is a path: execv, not looked up on PATH */
+};
+
+/* Start ARGV in its own process group (sy_kill/sy_killpg take its children too), in directory
+   CWD (0: the caller's), stdin from /dev/null, stdout and stderr merged into one pipe whose read
+   end is *OUT_FD (close-on-exec in the parent).  FLAGS: SY_SPAWN_STDERR_SPLIT puts stderr into
+   *ERR_FD instead (ERR_FD required then); SY_SPAWN_STDIN_INHERIT keeps stdin; SY_SPAWN_NO_PATH uses
+   execv.  Its pid, or -errno; a failed chdir or exec comes back as its errno (over a close-on-exec
+   pipe), with no read end left open and the child reaped. */
+int sy_spawn_pipe(char **argv, const char *cwd, int flags, int *out_fd, int *err_fd) {
+    int po[2], pe[2] = {-1, -1}, ps[2], e = 0, st, split = flags & SY_SPAWN_STDERR_SPLIT;
+    long k;
+    pid_t pid;
+    if (!argv || !argv[0] || !out_fd || (split && !err_fd)) return -EINVAL;
+    if (pipe(ps) != 0) return -errno;
+    if (pipe(po) != 0) { e = errno; close(ps[0]); close(ps[1]); return -e; }
+    if (split && pipe(pe) != 0) { e = errno; close(ps[0]); close(ps[1]); close(po[0]); close(po[1]); return -e; }
+    if (fcntl(ps[0], F_SETFD, FD_CLOEXEC) != 0 || fcntl(ps[1], F_SETFD, FD_CLOEXEC) != 0) e = errno;
+    if (!e) {
+        pid = fork();
+        if (pid < 0) e = errno;
+    }
+    if (e) {
+        close(ps[0]); close(ps[1]); close(po[0]); close(po[1]);
+        if (split) { close(pe[0]); close(pe[1]); }
+        return -e;
+    }
+    if (pid == 0) {
+        setpgid(0, 0);
+        close(ps[0]); close(po[0]);
+        if (split) close(pe[0]);
+        if (!(flags & SY_SPAWN_STDIN_INHERIT)) {
+            int dn = open("/dev/null", O_RDONLY);
+            if (dn >= 0) { dup2(dn, 0); close(dn); }
+        }
+        dup2(po[1], 1);
+        dup2(split ? pe[1] : po[1], 2);
+        close(po[1]);
+        if (split) close(pe[1]);
+        if (cwd && chdir(cwd) != 0) e = errno;
+        else {
+            if (flags & SY_SPAWN_NO_PATH) execv(argv[0], argv); else execvp(argv[0], argv);
+            e = errno;
+        }
+        write(ps[1], &e, sizeof e);
+        _exit(127);
+    }
+    close(ps[1]); close(po[1]);
+    if (split) close(pe[1]);
+    do k = read(ps[0], &e, sizeof e); while (k < 0 && errno == EINTR);
+    close(ps[0]);
+    if (k == (long)sizeof e) {
+        close(po[0]);
+        if (split) close(pe[0]);
+        while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+        return e ? -e : -EIO;
+    }
+    fcntl(po[0], F_SETFD, FD_CLOEXEC);
+    *out_fd = po[0];
+    if (split) { fcntl(pe[0], F_SETFD, FD_CLOEXEC); *err_fd = pe[0]; }
+    return (int)pid;
+}
+
+/* Wait for PID with the status taken apart: *EXITED 1 and *CODE the exit code, or *EXITED 0 and
+   *SIG the terminating signal (any pointer may be 0).  NOHANG: 0 while it still runs.  PID once
+   reaped, or -errno. */
+int sy_wait_status(int pid, int nohang, int *exited, int *code, int *sig) {
+    int st;
+    pid_t w;
+    if (pid <= 0) return -EINVAL;
+    for (;;) {
+        w = waitpid((pid_t)pid, &st, nohang ? WNOHANG : 0);
+        if (w == (pid_t)pid) break;
+        if (w == 0) return 0;
+        if (errno != EINTR) return -errno;
+    }
+    if (exited) *exited = WIFEXITED(st) ? 1 : 0;
+    if (code) *code = WIFEXITED(st) ? WEXITSTATUS(st) : 0;
+    if (sig) *sig = WIFSIGNALED(st) ? WTERMSIG(st) : 0;
+    return pid;
+}
+
 /* Send signal SIG to the one process PID (no group). 0, or -errno. */
 int sy_signal(int pid, int sig) {
     if (pid <= 0) return -EINVAL;   /* 0 and -1 would mean my group / everything */

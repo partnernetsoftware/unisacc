@@ -1,5 +1,9 @@
 #pragma unisa module reload_io
 #pragma unisa use reload_state
+#pragma unisa use sys.guard
+#pragma unisa use sys.poll
+#pragma unisa use sys.time
+#pragma unisa use sys.posix
 typedef struct {
     dev_t  dev;
     ino_t  ino;
@@ -9,75 +13,54 @@ typedef struct {
 } reload_io_token;
 
 /* reload_io.c - S2 save 单件实现 */
-#include <errno.h>
-#include <fcntl.h>
-#include <stdio.h>
-#include <stddef.h>
-#include <string.h>
-#include <unistd.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <sys/file.h>
-#include <poll.h>
-#include <time.h>
-#include <setjmp.h>
-
 #define RELOAD_IO_MAX 131072
 
 enum { RC_ERR_CAP = 1024 };
 
-static jmp_buf *rc_jb_active;
 static char rc_err[RC_ERR_CAP];
-
-void rc_fail_push(void *jb) { rc_jb_active = (jmp_buf *)jb; }
 
 char *rc_err_buf(void) { return rc_err; }
 
-void rc_fail_jump(void) {
-    if (rc_jb_active)
-        longjmp(*rc_jb_active, 1);
-    abort();
-}
+/* fail()'s exit: back to the innermost rc_guard (sys/guard), or abort outside one. */
+void rc_fail_jump(void) { sy_guard_fail(); }
 
-/* setjmp must live in THIS frame; a wrapper that setjmps then returns is UB and
- * segfaults under -run. Callers pass the body; fail()/rc_fail_jump longjmps here. */
-int rc_guard(void (*fn)(void *), void *ud) {
-    jmp_buf jb;
-    rc_jb_active = &jb;
-    if (setjmp(jb)) {
-        rc_jb_active = 0;
-        return 1;
-    }
-    fn(ud);
-    rc_jb_active = 0;
-    return 0;
-}
+/* Run fn(ud): 0 when it returns, 1 when it (at any depth) failed via rc_fail_jump.
+ * The setjmp frame lives in sy_guard, which stays alive for the whole callback. */
+int rc_guard(void (*fn)(void *), void *ud) { return sy_guard(fn, ud); }
 
-time_t reload_io_wall_now(void) { return time(0); }
+time_t reload_io_wall_now(void) { return (time_t)sy_wall_s(); }
 
+/* poll up to two fds (-1 skips a slot): the ready count, 0 on timeout (or no
+ * fds), -1 with errno on failure; revents (SY_POLL* bits) in *re0/*re1. */
 int reload_io_poll2(int fd0, int fd1, int timeout_ms, unsigned short *re0, unsigned short *re1)
 {
-    struct pollfd pf[2];
+    sy_pollfd_t pf[2];
     int n = 0, r;
     if (re0) *re0 = 0;
     if (re1) *re1 = 0;
     pf[0].fd = fd0;
-    pf[0].events = POLLIN;
+    pf[0].events = SY_POLLIN;
     pf[0].revents = 0;
     pf[1].fd = fd1;
-    pf[1].events = POLLIN;
+    pf[1].events = SY_POLLIN;
     pf[1].revents = 0;
     if (fd0 >= 0) n = 1;
     if (fd1 >= 0) n = 2;
     if (n == 0) return 0;
-    r = poll(pf, (unsigned long)n, timeout_ms);
-    if (r <= 0) return r;
-    if (fd0 >= 0 && re0) *re0 = pf[0].revents;
-    if (fd1 >= 0 && re1) *re1 = pf[1].revents;
+    r = sy_poll(pf, n, timeout_ms);
+    if (r < 0) { errno = -r; return -1; }
+    if (r == 0) return 0;
+    if (fd0 >= 0 && re0) *re0 = (unsigned short)pf[0].revents;
+    if (fd1 >= 0 && re1) *re1 = (unsigned short)pf[1].revents;
     return r;
 }
 
-int reload_io_flock_exnb(int fd) { return flock(fd, LOCK_EX | LOCK_NB); }
+/* flock(LOCK_EX | LOCK_NB): 0, or -1 with errno (EWOULDBLOCK when held). */
+int reload_io_flock_exnb(int fd) {
+    int r = sy_flock(fd, 2 | 4);
+    if (r < 0) { errno = -r; return -1; }
+    return 0;
+}
 
 
 static void rset(char *why, size_t cap, const char *m) {

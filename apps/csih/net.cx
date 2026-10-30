@@ -1,5 +1,9 @@
 #pragma unisa module net
-/* NOTE: socket/netdb/stat/fcntl/time + unisacc_ffi.h kept — TCP/curl/UFFI too large to shim; curl forward decls block `#pragma unisa use net` until relocated. */
+#pragma unisa use sys.net
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use sys.ffi
+/* Sockets, stat, the clock and the libcurl calls (sys.ffi) are cx/sys; no #include. */
 /*
  * net.cx — talk HTTP/1.1 over a TCP socket. This is the layer csih needs to
  * reach a model, and it is deliberately the smallest thing that can do it.
@@ -37,15 +41,6 @@
  *
  * CLI takes SUBCOMMANDS, not dash-options.
  */
-#include <errno.h>
-#include <fcntl.h>
-#include <time.h>
-#include <sys/stat.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <netdb.h>
-#include <unisacc_ffi.h>
 
 /* curl prototypes live inside the helpers that call them (CX module export rule). */
 enum {
@@ -157,98 +152,64 @@ int net_parse_url(const char *url, net_url *u) {
 
 /* ── connect ────────────────────────────────────────────────────────────── */
 
-/* A Winsock SOCKET is pointer-width and must never enter the POSIX fd layer. */
+/* Sockets are cx/sys (sys.net): fds, -errno results turned back into -1 + errno
+ * for the callers below. Windows has no Winsock path in sys.net (sy_tcp_dial is
+ * -ENOSYS there); csih's Windows slice is the unsupported stub, so none is kept. */
 #define NET_INVALID_SOCKET (~0UL)
-static void net_socket_error(void) {
-#ifdef _WIN32
-    int e = WSAGetLastError();
-    errno = e == 10004 ? EINTR : e;
-#endif
-}
-static void net_socket_close(unsigned long fd) {
-#ifdef _WIN32
-    closesocket(fd);
-#else
-    close((int)fd);
-#endif
-}
+static void net_socket_close(unsigned long fd) { sy_close((int)fd); }
 static long net_socket_send(unsigned long fd, const void *buf, size_t len) {
-#ifdef _WIN32
-    int n = (int)(len > 0x7fffffffUL ? 0x7fffffffUL : len);
-    int r = send(fd, (const char *)buf, n, 0);
-    if (r < 0) net_socket_error();
+    long r = sy_send((int)fd, buf, (long)len);   /* MSG_NOSIGNAL: a gone peer is EPIPE, not a signal */
+    if (r < 0) { errno = (int)-r; return -1; }
     return r;
-#else
-    return send((int)fd, buf, len, 0);
-#endif
 }
 static long net_socket_recv(unsigned long fd, void *buf, size_t len) {
-#ifdef _WIN32
-    int n = (int)(len > 0x7fffffffUL ? 0x7fffffffUL : len);
-    int r = recv(fd, (char *)buf, n, 0);
-    if (r < 0) net_socket_error();
+    long r = sy_recv((int)fd, buf, (long)len);
+    if (r < 0) { errno = (int)-r; return -1; }
     return r;
-#else
-    return recv((int)fd, buf, len, 0);
-#endif
 }
-/* Any name getaddrinfo can resolve, not only numeric IPv4 and localhost. */
+/* Any name the system resolver knows, IPv4, each address in turn (sy_tcp_dial).
+ * NET_INVALID_SOCKET on failure, errno set for a socket error (0 for a name). */
 static unsigned long net_connect(const char *host, const char *port) {
-    struct addrinfo hints, *res = 0, *p;
-    unsigned long fd = NET_INVALID_SOCKET;
-    int rc;
-    memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    rc = getaddrinfo(host, port, &hints, &res);
-    if (rc != 0) return -1;
-    for (p = res; p; p = p->ai_next) {
-        fd = (unsigned long)socket(p->ai_family, p->ai_socktype, p->ai_protocol);
-        if (fd == NET_INVALID_SOCKET) { net_socket_error(); continue; }
-        if (connect(fd, p->ai_addr, (int)p->ai_addrlen) == 0) break;
-        net_socket_error();
-        net_socket_close(fd);
-        fd = NET_INVALID_SOCKET;
-    }
-    freeaddrinfo(res);
-    return fd;
+    int r = sy_tcp_dial(host, atoi(port));
+    if (r < 0) { errno = r > SY_EAI_BASE ? -r : 0; return NET_INVALID_SOCKET; }
+    return (unsigned long)r;
 }
 
 /* Uniform UFFI curl path (no file-scope #if): CXIF rejects exports after #if. */
 static int curl_setopt(void *h, int opt, void *val) {
     static void *fn; int kinds[3]; void *vals[3]; int r = 0;
-    if (!fn) fn = uffi_dlsym((void *)UFFI_RTLD_DEFAULT, "curl_easy_setopt");
-    kinds[0] = UFFI_POINTER; kinds[1] = UFFI_INT; kinds[2] = UFFI_POINTER;
+    if (!fn) fn = sy_ffi_dlsym(sy_ffi_default(), "curl_easy_setopt");
+    kinds[0] = SY_FFI_POINTER; kinds[1] = SY_FFI_INT; kinds[2] = SY_FFI_POINTER;
     vals[0] = &h; vals[1] = &opt; vals[2] = &val;
-    uffi_call(fn, UFFI_INT, kinds, vals, 3, 2, &r);
+    sy_ffi_call(fn, SY_FFI_INT, kinds, vals, 3, 2, &r);
     return r;
 }
 static int curl_setopt_long(void *h, int opt, long val) {
     static void *fn; int kinds[3]; void *vals[3]; int r = 0;
-    if (!fn) fn = uffi_dlsym((void *)UFFI_RTLD_DEFAULT, "curl_easy_setopt");
-    kinds[0] = UFFI_POINTER; kinds[1] = UFFI_INT; kinds[2] = UFFI_LONG;
+    if (!fn) fn = sy_ffi_dlsym(sy_ffi_default(), "curl_easy_setopt");
+    kinds[0] = SY_FFI_POINTER; kinds[1] = SY_FFI_INT; kinds[2] = SY_FFI_LONG;
     vals[0] = &h; vals[1] = &opt; vals[2] = &val;
-    uffi_call(fn, UFFI_INT, kinds, vals, 3, 2, &r);
+    sy_ffi_call(fn, SY_FFI_INT, kinds, vals, 3, 2, &r);
     return r;
 }
 static int curl_getinfo(void *h, int info, long *out) {
     static void *fn; int kinds[3]; void *vals[3]; int r = 0;
-    if (!fn) fn = uffi_dlsym((void *)UFFI_RTLD_DEFAULT, "curl_easy_getinfo");
-    kinds[0] = UFFI_POINTER; kinds[1] = UFFI_INT; kinds[2] = UFFI_POINTER;
+    if (!fn) fn = sy_ffi_dlsym(sy_ffi_default(), "curl_easy_getinfo");
+    kinds[0] = SY_FFI_POINTER; kinds[1] = SY_FFI_INT; kinds[2] = SY_FFI_POINTER;
     vals[0] = &h; vals[1] = &info; vals[2] = &out;
-    uffi_call(fn, UFFI_INT, kinds, vals, 3, 2, &r);
+    sy_ffi_call(fn, SY_FFI_INT, kinds, vals, 3, 2, &r);
     return r;
 }
 static void flush_host_stdout(void) {
     void *ff, *slot, *file;
     int kinds[1]; void *vals[1]; int r = 0;
-    ff = uffi_dlsym((void *)UFFI_RTLD_DEFAULT, "fflush");
-    slot = uffi_dlsym((void *)UFFI_RTLD_DEFAULT, "stdout");
-    if (!slot) slot = uffi_dlsym((void *)UFFI_RTLD_DEFAULT, "__stdoutp");
+    ff = sy_ffi_dlsym(sy_ffi_default(), "fflush");
+    slot = sy_ffi_dlsym(sy_ffi_default(), "stdout");
+    if (!slot) slot = sy_ffi_dlsym(sy_ffi_default(), "__stdoutp");
     if (!ff || !slot) return;
     file = *(void **)slot;
-    kinds[0] = UFFI_POINTER; vals[0] = &file;
-    uffi_call(ff, UFFI_INT, kinds, vals, 1, 1, &r);
+    kinds[0] = SY_FFI_POINTER; vals[0] = &file;
+    sy_ffi_call(ff, SY_FFI_INT, kinds, vals, 1, 1, &r);
 }
 
 /* Called from our own poll loop, never from libcurl. A host callback into
@@ -270,9 +231,12 @@ void net_set_tick(net_tick_fn fn) { net_tick_cb = fn; }
 void net_cancel(void) { net_stop = 1; }
 int net_stopped(void) { return net_stop; }   /* Esc/Ctrl-C asked to stop this turn */
 void net_reset(void) { net_stop = 0; }
+/* Wall-clock seconds (sys.time). */
+static time_t net_wall(void) { return (time_t)sy_wall_s(); }
+
 /* One clock for the user turn. net_async_begin must not touch it. */
 void net_turn_clock(void) {
-    net_turn0 = time(0);
+    net_turn0 = net_wall();
     net_elapsed = 0;
     net_got = 0;
     net_hit = net_miss = net_usage_seen = 0;
@@ -297,7 +261,7 @@ void net_cache_set(int hit, int miss, int seen) {
     net_usage_seen = seen;
 }
 /* Upper modules must not #include <time.h>; expose clock through this lower API. */
-time_t net_now(void) { return time(0); }
+time_t net_now(void) { return net_wall(); }
 
 /* Last closed usage object in the tail. Absent cache fields become 0.
  * No usage object in this body: drop any previous hit/miss. */
@@ -363,24 +327,24 @@ void net_test_usage(const char *tail) {
 
 /* Prefer the API's total_tokens once it is on disk. Until then, bytes/4. */
 void net_note_progress(const char *path, time_t t0) {
-    struct stat st;
+    sy_stat_t st;
     char tail[4096];
     int fd, n;
     char *p;
-    net_elapsed = (int)(time(0) - (net_turn0 ? net_turn0 : t0));
+    net_elapsed = (int)(net_wall() - (net_turn0 ? net_turn0 : t0));
     if (net_elapsed < 0) net_elapsed = 0;
-    net_req_elapsed = (int)(time(0) - (net_req0 ? net_req0 : t0));
+    net_req_elapsed = (int)(net_wall() - (net_req0 ? net_req0 : t0));
     if (net_req_elapsed < 0) net_req_elapsed = 0;
-    if (stat(path, &st) != 0 || st.st_size <= 0) {
+    if (sy_stat(path, &st) != 0 || st.size <= 0) {
         net_tokens = 0;
         net_got = 0;
         return;
     }
-    net_got = (long)st.st_size;
-    net_tokens = (int)(st.st_size / 4);
+    net_got = (long)st.size;
+    net_tokens = (int)(st.size / 4);
     fd = open(path, O_RDONLY);
     if (fd < 0) return;
-    if (st.st_size > (off_t)sizeof tail) lseek(fd, st.st_size - (off_t)sizeof tail, SEEK_SET);
+    if (st.size > (long)sizeof tail) lseek(fd, (off_t)(st.size - (long)sizeof tail), SEEK_SET);
     n = (int)read(fd, tail, sizeof tail - 1);
     close(fd);
     if (n < 0) return;
@@ -478,30 +442,30 @@ static void *host_fopen(const char *path, const char *mode) {
     int kinds[2];
     void *vals[2];
     void *r = 0;
-    if (!fn) fn = uffi_dlsym((void *)UFFI_RTLD_DEFAULT, "fopen");
+    if (!fn) fn = sy_ffi_dlsym(sy_ffi_default(), "fopen");
     if (!fn) return 0;
-    kinds[0] = UFFI_POINTER; kinds[1] = UFFI_POINTER;
+    kinds[0] = SY_FFI_POINTER; kinds[1] = SY_FFI_POINTER;
     vals[0] = &path; vals[1] = &mode;
-    if (uffi_call(fn, UFFI_POINTER, kinds, vals, 2, 2, &r) != 0) return 0;
+    if (sy_ffi_call(fn, SY_FFI_POINTER, kinds, vals, 2, 2, &r) != 0) return 0;
     return r;
 }
 static void host_fflush_file(void *file) {
     static void *fn;
     int kinds[1]; void *vals[1]; int r = 0;
     if (!file) return;
-    if (!fn) fn = uffi_dlsym((void *)UFFI_RTLD_DEFAULT, "fflush");
+    if (!fn) fn = sy_ffi_dlsym(sy_ffi_default(), "fflush");
     if (!fn) return;
-    kinds[0] = UFFI_POINTER; vals[0] = &file;
-    uffi_call(fn, UFFI_INT, kinds, vals, 1, 1, &r);
+    kinds[0] = SY_FFI_POINTER; vals[0] = &file;
+    sy_ffi_call(fn, SY_FFI_INT, kinds, vals, 1, 1, &r);
 }
 static void host_fclose(void *file) {
     static void *fn;
     int kinds[1]; void *vals[1]; int r = 0;
     if (!file) return;
-    if (!fn) fn = uffi_dlsym((void *)UFFI_RTLD_DEFAULT, "fclose");
+    if (!fn) fn = sy_ffi_dlsym(sy_ffi_default(), "fclose");
     if (!fn) return;
-    kinds[0] = UFFI_POINTER; vals[0] = &file;
-    uffi_call(fn, UFFI_INT, kinds, vals, 1, 1, &r);
+    kinds[0] = SY_FFI_POINTER; vals[0] = &file;
+    sy_ffi_call(fn, SY_FFI_INT, kinds, vals, 1, 1, &r);
 }
 
 /* One HTTPS transfer, driven one slice at a time.
@@ -531,7 +495,7 @@ int net_async_begin(const char *method, const char *url,
     net_hdr = 0;
     net_capture[0] = 0;
     net_t0 = 0;
-    net_req0 = time(0);
+    net_req0 = net_wall();
     net_req_elapsed = 0;
     memset(&net_res, 0, sizeof net_res);
     if (net_stop) { net_res.err = NET_CANCELLED; return -1; }
@@ -539,8 +503,8 @@ int net_async_begin(const char *method, const char *url,
     {
         static int curl_loaded;
         if (!curl_loaded) {
-            if (!uffi_dlopen("libcurl.so.4", 2 | 0x100) &&
-                !uffi_dlopen("/usr/lib/libcurl.4.dylib", 2 | 8)) {
+            if (!sy_ffi_dlopen("libcurl.so.4", 2 | 0x100) &&
+                !sy_ffi_dlopen("/usr/lib/libcurl.4.dylib", 2 | 8)) {
                 net_res.err = NET_NO_CURL; return -1;
             }
             curl_loaded = 1;
@@ -580,7 +544,7 @@ int net_async_begin(const char *method, const char *url,
     net_easy = h;
     net_hdr = hdr;
     net_running = 1;
-    net_t0 = time(0);
+    net_t0 = net_wall();
     net_on = 1;
     net_tokens = 0;
     net_got = 0;
@@ -600,11 +564,11 @@ int net_async_pump(int wait_ms) {
     host_fflush_file(net_outf);
     net_note_progress(net_capture, net_t0);
     if (!net_running) return 0;
-    if ((int)(time(0) - net_t0) >= NET_TOTAL_SEC) { net_rc = NET_TIMEOUT; return 0; }
+    if ((int)(net_wall() - net_t0) >= NET_TOTAL_SEC) { net_rc = NET_TIMEOUT; return 0; }
     if (wait_ms > 0) curl_multi_wait(net_multi, 0, 0, wait_ms, &nfds);
     if (net_tick_cb) net_tick_cb();
     if (net_stop) { net_rc = NET_CANCELLED; return 0; }
-    if ((int)(time(0) - net_t0) >= NET_TOTAL_SEC) { net_rc = NET_TIMEOUT; return 0; }
+    if ((int)(net_wall() - net_t0) >= NET_TOTAL_SEC) { net_rc = NET_TIMEOUT; return 0; }
     return 1;
 }
 
