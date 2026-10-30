@@ -3369,6 +3369,142 @@ static void k2_membercontrol(Ob *o) {
     g2_cline(o, "pop1_text", pop1);
 }
 
+/* k2-libraryenv: the parse2 library export chain environment (was export.py k2libraryenv); compact
+   sorted JSON.  b = k2-gen2's committed buildconst row. */
+static Jv *g2_typed(const char *rel, const char *name) {   /* =NAME KIND VALUE, typed as exec/facts/load.py typed_cell */
+    Lines L = fg_lines(rel);
+    int i;
+    for (i = 0; i < L.n; i++) {
+        char *c[4], *line = fg_dupz(L.l[i]);
+        if (line[0] != '=' || fg_split(line + 1, c, 3) != 3 || !tx_eq(c[0], name, 256)) continue;
+        if (tx_eq(c[1], "int", 8)) return jv_i(strtoll(c[2], 0, 10));
+        if (tx_eq(c[1], "json", 8)) return jv_must_parse(c[2]);
+        if (tx_eq(c[1], "str", 8)) {
+            char *s = c[2], *d = c[2];
+            while (*s) { if (*s == '\\' && s[1]) { s++; *d++ = *s == 't' ? '\t' : *s == 'n' ? '\n' : *s; s++; } else *d++ = *s++; }
+            *d = 0;
+            return jv_s(c[2]);
+        }
+        fg_die("fact type", c[1]);
+    }
+    fg_die("row absent", name);
+    return 0;
+}
+static Jv *g2_banks(const char *stem) {   /* {name: value} of a facts table, int values >= 1 << 40 */
+    Jv *rows = fj_facts(stem), *d = jv_d();
+    int i;
+    for (i = 0; i < rows->n; i++) {
+        Jv *v = jd_get(rows->v[i], "value");
+        if (v && v->t == JV_INT && v->i >= (1LL << 40)) jd_put(d, jv_str(jd_must(rows->v[i], "name"), stem), v);
+    }
+    return d;
+}
+static void g2_sline(Ob *o, const char *name, Jv *v) { ob_z(o, "="); ob_z(o, name); ob_z(o, "\tjson\t"); jv_dump(o, v, 1, 1); ob_z(o, "\n"); }
+static void k2_libraryenv(Ob *o) {
+    static const char *bn[] = {"FPS_FN", "FPS_RD", "FPS_RB", "FPS_RSH", "FPS_COUNT", "FPS_PARAM", "FPS_PSH", "FPS_VAR", "SBB", "FPB", "FPV", "FPS_FIRST", "BOOL", "DBL", "FLT",
+        "ENUM_FIRST", "GSZ", "GUNIT", "SSZ", "SAL", "SMN", "SMEM", "MOF", "MSZ", "MPT", "MBS", "MAR", "BFW", "BFO", "BFS", 0};
+    static const char *lxb[] = {"FPS_FN", "FPS_COUNT", "FPS_VAR", "FPS_RD", "FPS_RB", "FPS_RSH", 0};
+    static const char *lib[] = {"BYNAME", "ADDRESS", "FORMAT", "SUPPORTED", "TYPEDSIG", "PLAN", 0};
+    static const char *lcb[] = {"FPS_FN", "FPS_COUNT", "FPS_RB", "FPS_RD", "FPS_RSH", "FPS_VAR", "SSZ", "SBB", 0};
+    char b[128];
+    Jv *C, *bd, *ints, *lx, *lxd, *vr, *bints, *d, *v, *x, *outs, *orow, *li, *lc, *seqs;
+    int i, k;
+    long long isize = -1;
+    Lines R;
+    g2_build();
+    C = fj_eq("exec/facts/k2-gen2.tsv", "buildconst");
+    bd = g2_pick(jv_d(), C, bn);
+    ints = jd_must(C, "TYINT");
+    lxd = fj_names("libraryexports", 0);
+    vr = fj_names("valueranks", "bank");
+    lx = jv_d();
+    for (i = 0; i < lxd->n; i++) if (lxd->v[i]->t == JV_INT && lxd->v[i]->i >= (1LL << 40)) jd_put(lx, lxd->k[i], lxd->v[i]);
+    bints = jv_d();
+    for (i = 0; i < bd->n; i++) if (bd->v[i]->t == JV_INT) { cx_fmt(b, sizeof b, "b_%s", bd->k[i]); jd_put(bints, b, bd->v[i]); }
+    outs = g2_lit("libraryenv_out");
+    orow = jv_l();
+    for (i = 0; i < outs->n; i++) {
+        const char *text = jv_str(outs->v[i], "libraryenv_out");
+        long n = tx_len(text, 256);
+        d = jv_d();
+        cx_fmt(b, sizeof b, "out %s", text);
+        while (n > 0 && text[n - 1] == '\n') { b[4 + n - 1] = 0; n--; }
+        jd_puts(d, "name", b); jd_puts(d, "kind", "out"); jd_puts(d, "text", text);
+        jl_add(orow, d);
+    }
+    d = jv_d(); jd_puts(d, "name", "reject"); jd_puts(d, "kind", "reject"); jd_put(d, "reason", g2_lit("libraryenv_reject")); jl_add(orow, d);
+    {
+        Jv *cons = jv_d(), *names = jv_l(), *keys = jv_l();
+        for (i = 0; i < lx->n; i++) jd_put(cons, lx->k[i], lx->v[i]);
+        g2_pick(cons, bd, lxb);
+        for (i = 0; i < orow->n; i++) jl_add(names, jd_must(orow->v[i], "name"));
+        for (i = 0; i < 257; i++) jl_add(keys, jv_i(i));
+        d = jv_d();
+        jd_put(d, "constants", cons); jd_put(d, "out_names", names); jd_put(d, "out_rows", orow);
+        jd_puti(d, "tk_static", tki("type=static")); jd_put(d, "allkeys", keys);
+        g2_sline(o, "lx", d);
+    }
+    d = jv_d();
+    for (i = 0; i < bints->n; i++) jd_put(d, bints->k[i], bints->v[i]);
+    for (i = 0; i < ints->n; i++) if (tx_eq(jv_str(ints->v[i]->v[0], "TYINT"), "i32", 8)) { isize = jv_num(ints->v[i]->v[2], "TYINT size"); break; }
+    if (isize < 0) fg_die("TYINT has no i32", 0);
+    jd_puti(d, "isize", isize);
+    v = jv_l();
+    for (i = 0; i < ints->n; i++) { x = jv_d(); jd_put(x, "code", ints->v[i]->v[1]); jd_put(x, "size", ints->v[i]->v[2]); jd_put(x, "uns", ints->v[i]->v[3]); jl_add(v, x); }
+    jd_put(d, "ints", v);
+    jd_puti(d, "E_ARR", ei("ARR")); jd_puti(d, "gen2_DIM", gi("DIM"));
+    g2_sline(o, "types", d);
+    d = jv_d();
+    for (i = 0; i < bints->n; i++) jd_put(d, bints->k[i], bints->v[i]);
+    jd_puti(d, "TK_ID", ei("TK_ID")); jd_puti(d, "TK_SEMI", tki(";"));
+    v = jv_l(); jl_add(v, jd_must(bd, "FPB")); jl_add(v, jd_must(bd, "FPV")); jd_put(d, "FPB_FPV", v);
+    jd_put(d, "BOOL", jl_add(jv_l(), jd_must(bd, "BOOL")));
+    v = jv_l();
+    for (i = 0; i < ints->n; i++) { x = jv_d(); jd_put(x, "code", ints->v[i]->v[1]); jd_put(x, "width", ints->v[i]->v[2]); jd_put(x, "uns", ints->v[i]->v[3]); jl_add(v, x); }
+    jd_put(d, "ints2", v);
+    g2_sline(o, "imports", d);
+    li = fj_names("libraryimports", 0);
+    lc = g2_banks("librarycallables");
+    jd_put(lc, "RETURNRANK", jd_must(lxd, "RETURNRANK")); jd_put(lc, "PARAMRANK", jd_must(lxd, "PARAMRANK")); jd_put(lc, "LCSITERANK", jd_must(vr, "LCSITERANK"));
+    g2_pick(lc, li, lib);
+    jd_put(lc, "REQUESTS", g2_typed("exec/facts/libraryvariadic.tsv", "REQUESTS"));
+    jd_put(lc, "DEFINED", jd_must(fj_names("unresolved", 0), "DEFINED"));
+    jd_put(lc, "VARIADIC", jd_must(lxd, "VARIADIC"));
+    jd_puti(lc, "E_VAR", ei("VAR")); jd_puti(lc, "E_DBL", ei("DBL")); jd_puti(lc, "E_INT", g2_sz("int")); jd_puti(lc, "TK_SEMI", tki(";"));
+    for (i = 0; lcb[i]; i++) { cx_fmt(b, sizeof b, "b_%s", lcb[i]); jd_put(lc, b, jd_must(bd, lcb[i])); }
+    seqs = jv_d();
+    R = fg_lines("exec/parse2/librarycallables-result.tsv");
+    for (i = 1; i < R.n; i++) {
+        char *c[8], *line;
+        Jv *acts;
+        if (!R.l[i][0]) continue;
+        line = fg_dupz(R.l[i]);
+        if (fg_split(line, c, 8) < 5) fg_die("librarycallables-result row", R.l[i]);
+        acts = jv_must_parse(c[4]);
+        for (k = 0; k < acts->n; k++) {
+            Jv *a = acts->v[k];
+            const char *nm;
+            if (a->t != JV_LIST || a->n < 2 || a->v[0]->t != JV_STR || !tx_eq(a->v[0]->s, "@", 4)) continue;
+            nm = jv_str(a->v[1], "@ name");
+            if (tx_prefix(nm, tx_len(nm, 1024), "out:", 4)) jd_puts(seqs, nm, nm + 4);
+        }
+    }
+    d = jv_d();
+    jd_put(d, "constants", lc);
+    x = jv_d();
+    jd_put(x, "uns1", jl_one(ei("UNS") + 1)); jd_put(x, "uns2", jl_one(ei("UNS") + 2));
+    jd_put(x, "bool", jl_add(jv_l(), jd_must(bd, "BOOL"))); jd_put(x, "float", jl_add(jv_l(), jd_must(bd, "FLT")));
+    jd_put(d, "classes", x);
+    v = jv_l(); for (i = 0; i < seqs->n; i++) jl_add(v, jv_s(seqs->k[i]));
+    jd_put(d, "text_names", v);
+    v = jv_l(); for (i = 0; i < seqs->n; i++) { x = jv_d(); jd_puts(x, "name", seqs->k[i]); jd_put(x, "text", seqs->v[i]); jl_add(v, x); }
+    jd_put(d, "text_rows", v);
+    g2_sline(o, "callables", d);
+    g2_sline(o, "lm_header_text", jd_must(g2.E, "HEADER"));
+    g2_sline(o, "nomain_reason", g2_typed("exec/facts/k2-librarymodule-map.tsv", "mainreason"));
+    g2_sline(o, "ret_text", g2_lit("libraryenv_ret"));
+}
+
 static void enc_pe(Ob *o) { pe_fields(o, 0); }
 static void enc_pe_forward(Ob *o) { pe_fields(o, 1); }
 
@@ -3415,6 +3551,10 @@ static const Table fg_tables[] = {
         "exec/facts/gen2-literals.tsv", "weights/gold/tyinfo.tsv", "exec/parse2/membercontrol-template.tsv", "exec/parse2/membercontrol-tokens.tsv",
         "exec/parse2/membercontrol-operators.tsv", "exec/parse2/membercontrol-fresh.tsv", "exec/parse2/membercontrol-manifest-fresh.tsv",
         "exec/parse2/membercontrol-text.tsv", "exec/parse2/membercontrol-stack.tsv", "exec/parse2/tape-templates.tsv", "tools/facts-gen.cx", 0}, k2_membercontrol},
+    {"k2-libraryenv", {"exec/facts/k2-gen2.tsv", "exec/facts/parse-constants.tsv", "exec/facts/parse-tokens.tsv", "exec/facts/gen2-constants.tsv",
+        "exec/facts/gen2-literals.tsv", "weights/gold/tyinfo.tsv", "exec/parse2/librarycallables-result.tsv", "exec/facts/libraryexports.tsv",
+        "exec/facts/librarycallables.tsv", "exec/facts/libraryimports.tsv", "exec/facts/libraryvariadic.tsv", "exec/facts/unresolved.tsv",
+        "exec/facts/valueranks.tsv", "exec/facts/k2-librarymodule-map.tsv", "tools/facts-gen.cx", 0}, k2_libraryenv},
     {"nativeabi", {"exec/nativeabi/rules.tsv", "exec/nativeabi/trie-order.tsv", "exec/nativeabi/ordered-result.tsv", "exec/nativeabi/gen-fresh.tsv",
         "exec/nativeabi/ordered-fresh.tsv", "exec/facts/nativeabi-gen-reject.tsv", "exec/facts/top-modelgraphequality-banks.tsv", "tools/facts-gen.cx", 0}, nativeabi},
     {"pp-autoinc-gen", {"exec/facts/pp-bytes.tsv", "seed/unisa_libneed.c", "exec/facts/pp-autoinc.tsv", "exec/facts/pp-layout.tsv",
