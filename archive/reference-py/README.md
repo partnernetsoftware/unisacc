@@ -297,3 +297,11 @@
 - exec/pp/objectpredefinecheck.cx
 - exec/pp/pragmacheck.cx
 - exec/prune/check.cx
+- release/tools/attemptchain.py
+- release/tools/c99precheck.py
+- release/tools/docedit.py
+- release/tools/model-reseal.py
+- release/tools/stagesum.py
+- release/tools/unsigned_receipt.py
+- release/tools/whyrerun.py
+- research/tools/c38-decomp.py
