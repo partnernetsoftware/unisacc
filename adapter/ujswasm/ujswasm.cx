@@ -40,6 +40,7 @@
 
 #pragma unisa use flownet.api
 #pragma unisa use ujsgold
+#pragma unisa use text.text
 
 #define DEFAULT_TABLES "adapter/ujswasm/tables"
 #define PH_FRONT "front(lex+parse)"
@@ -2403,21 +2404,24 @@ static Buf long_source(int e) {
 /* SRC built through flownet and compared with the m4 oracle's recorded bytes REFDIR/<basename of LABEL>.wasm.  The
    oracle (the Python m4 package over the ujs Python front end) is archived (archive/reference-py/m4/, procedure in
    archive/reference-py/README.md); it is never run from here.  `accepts-sources ROOT DIR` writes the inputs it needs. */
-static const char *base_of(const char *p) { const char *s = strrchr(p, '/'); return s ? s + 1 : p; }
+static const char *base_of(const char *p) { const char *s = p; for (; *p; p++) if (*p == '/') s = p + 1; return s; }
 static int same_as_oracle(const char *src, const char *label, const char *mine, const char *refdir) {
-    Child c; char *x, *y, *ref; size_t a = 0, b = 0; int ok;
+    Child c; char *x = 0, *y = 0, *ref; size_t a = 0, b = 0; int built, ok = 0;
     cx_remove(mine);
     c = build_child(src, mine, DEFAULT_TABLES, "built");
-    if (c.rc) { badf("%s: refused: %s", label, c.err); free(c.out); free(c.err); return 0; }
+    built = !c.rc;
+    if (!built) badf("%s: refused: %s", label, c.err);
     free(c.out); free(c.err);
+    if (!built) return 0;
     ref = xf("%s/%s.wasm", refdir, base_of(label));
     x = cx_read(mine, &a); y = cx_read(ref, &b);
-    if (!y) { badf("%s: no recorded oracle bytes %s", label, ref); free(x); free(ref); return 0; }
-    free(ref);
-    ok = x && y && a == b && !memcmp(x, y, a);
-    if (!ok) badf("%s: flownet %ld bytes, m4 %ld bytes: differ", label, (long)a, (long)b);
-    else printf("same\t%s\t%ld bytes\n", label, (long)a);
-    free(x); free(y);
+    if (!y) badf("%s: no recorded oracle bytes %s", label, ref);
+    else {
+        ok = x && a == b && !memcmp(x, y, a);
+        if (!ok) badf("%s: flownet %ld bytes, m4 %ld bytes: differ", label, (long)a, (long)b);
+        else printf("same\t%s\t%ld bytes\n", label, (long)a);
+    }
+    free(ref); free(x); free(y);
     return ok;
 }
 
@@ -2434,7 +2438,7 @@ static int cmd_accepts(const char *root, const char *refdir_arg) {
     mine = xf("%s/mine.wasm", tmp);
     for (r = 0; r < nrows; r++) {
         Row *w = &rows[r]; char *path;
-        if (strcmp(w->f[0], "check") || strcmp(w->f[1], "accept") || w->n != 4) continue;
+        if (!tx_eq(w->f[0], "check", 16) || !tx_eq(w->f[1], "accept", 16) || w->n != 4) continue;
         path = neg_path(w->f[2]);
         n++;
         if (same_as_oracle(path, path, mine, refdir)) ok++;
@@ -2468,7 +2472,7 @@ static int cmd_accepts_sources(const char *root, const char *dir_arg) {
     if (chdir(root)) { fprintf(stderr, "ujswasm-accepts-sources: cannot enter %s\n", root); return 1; }
     for (r = 0; r < nrows; r++) {
         Row *w = &rows[r]; char *path, *out, *b; size_t bn;
-        if (strcmp(w->f[0], "check") || strcmp(w->f[1], "accept") || w->n != 4) continue;
+        if (!tx_eq(w->f[0], "check", 16) || !tx_eq(w->f[1], "accept", 16) || w->n != 4) continue;
         path = neg_path(w->f[2]); out = xf("%s/%s", dir, base_of(path));
         b = cx_read(path, &bn);
         if (!b || cx_write(out, b, bn)) bad("cannot copy ", path); else n++;
@@ -3140,8 +3144,8 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "refuse")) return cmd_refuse(argc > 2 ? argv[2] : ".");
     if (!strcmp(cmd, "negative")) return cmd_negative(argc > 2 ? argv[2] : ".");
     if (!strcmp(cmd, "d1")) return cmd_d1(argc > 2 ? argv[2] : ".");
-    if (!strcmp(cmd, "accepts")) return cmd_accepts(argc > 2 ? argv[2] : ".", argc > 3 ? argv[3] : 0);
-    if (!strcmp(cmd, "accepts-sources")) return cmd_accepts_sources(argc > 2 ? argv[2] : ".", argc > 3 ? argv[3] : 0);
+    if (tx_eq(cmd, "accepts", 32)) return cmd_accepts(argc > 2 ? argv[2] : ".", argc > 3 ? argv[3] : 0);
+    if (tx_eq(cmd, "accepts-sources", 32)) return cmd_accepts_sources(argc > 2 ? argv[2] : ".", argc > 3 ? argv[3] : 0);
     if (!strcmp(cmd, "selftest")) return cmd_selftest(argc > 2 ? argv[2] : ".", argc > 3 ? argv[3] : "1/1");
     fprintf(stderr, "ujswasm: usage: build SRC -o OUT [--tables DIR] [--wat FILE] | check ROOT | refuse ROOT | negative ROOT | d1 ROOT | accepts ROOT REFDIR | accepts-sources ROOT DIR | selftest ROOT [K/N|NET,...]\n");
     return 2;
