@@ -1,4 +1,6 @@
 #pragma unisa module llm
+#pragma unisa use text.fmt
+#pragma unisa use zstr
 #pragma unisa use mem.bytes
 #pragma unisa use json
 #pragma unisa use gate
@@ -55,8 +57,8 @@ int llm_extract(const char *body, size_t len, llm_turn *t) {
     int have_p = 0;
 
     root = json_parse(body, len, errbuf, sizeof errbuf);
-    if (!root) { t->err = LLM_BAD_JSON; snprintf(t->reason, sizeof t->reason, "body is not JSON"); return -1; }
-    if (root->kind != J_OBJ) { jfree(root); t->err = LLM_BAD_JSON; snprintf(t->reason, sizeof t->reason, "body is not a JSON object"); return -1; }
+    if (!root) { t->err = LLM_BAD_JSON; tx_snprintf(t->reason, sizeof t->reason, "body is not JSON"); return -1; }
+    if (root->kind != J_OBJ) { jfree(root); t->err = LLM_BAD_JSON; tx_snprintf(t->reason, sizeof t->reason, "body is not a JSON object"); return -1; }
 
     /* p: must be a NUMBER present in the object. `jnum` needs a default, so the
      * presence test is done on the value's kind, not on the returned double —
@@ -84,13 +86,13 @@ int llm_extract(const char *body, size_t len, llm_turn *t) {
     if (!have_p) {
         jfree(root);
         t->err = LLM_NO_PROBABILITY;
-        snprintf(t->reason, sizeof t->reason, "reply has no numeric p (absent is not zero)");
+        tx_snprintf(t->reason, sizeof t->reason, "reply has no numeric p (absent is not zero)");
         return -1;
     }
     if (!text) {
         jfree(root);
         t->err = LLM_NO_TEXT;
-        snprintf(t->reason, sizeof t->reason, "reply has no string text/content");
+        tx_snprintf(t->reason, sizeof t->reason, "reply has no string text/content");
         return -1;
     }
     {
@@ -99,7 +101,7 @@ int llm_extract(const char *body, size_t len, llm_turn *t) {
         if (text[seen]) {
             jfree(root);
             t->err = LLM_TEXT_TOO_LONG;
-            snprintf(t->reason, sizeof t->reason, "model text exceeds %d bytes", LLM_TEXT_MAX);
+            tx_snprintf(t->reason, sizeof t->reason, "model text exceeds %d bytes", LLM_TEXT_MAX);
             return -1;
         }
     }
@@ -128,25 +130,25 @@ llm_turn llm_turn_run(const char *url, const char *transcript,
     t.p = 0.0;
     t.decision = 0;
 
-    if (!url || !url[0]) { t.err = LLM_NO_URL; snprintf(t.reason, sizeof t.reason, "no endpoint URL given"); return t; }
+    if (!url || !url[0]) { t.err = LLM_NO_URL; tx_snprintf(t.reason, sizeof t.reason, "no endpoint URL given"); return t; }
 
     /* 1. the request body. The prompt is escaped HERE because this is the
      *    boundary where a stray quote would otherwise produce non-JSON. */
     llm_escape(user_text ? user_text : "", esc, sizeof esc, NULL);
-    blen = (size_t)snprintf(body, sizeof body, "{\"prompt\":\"%s\"}", esc);
-    if (blen >= sizeof body) { t.err = LLM_TEXT_TOO_LONG; snprintf(t.reason, sizeof t.reason, "prompt too long for request body"); return t; }
+    blen = (size_t)tx_snprintf(body, sizeof body, "{\"prompt\":\"%s\"}", esc);
+    if (blen >= sizeof body) { t.err = LLM_TEXT_TOO_LONG; tx_snprintf(t.reason, sizeof t.reason, "prompt too long for request body"); return t; }
 
     /* 2. the request itself */
     r = net_http("POST", url, "application/json", body);
     if (!r.ok) {
         t.err = r.err;
-        snprintf(t.reason, sizeof t.reason, "network: %s", r.err == -2003 ? "libcurl did not load" : "request failed");
+        tx_snprintf(t.reason, sizeof t.reason, "network: %s", r.err == -2003 ? "libcurl did not load" : "request failed");
         return t;
     }
     t.status = r.status;
     if (r.status < 200 || r.status >= 300) {
         t.err = r.status;
-        snprintf(t.reason, sizeof t.reason, "HTTP %d is not a model reply", r.status);
+        tx_snprintf(t.reason, sizeof t.reason, "HTTP %d is not a model reply", r.status);
         return t;
     }
 
@@ -160,31 +162,31 @@ llm_turn llm_turn_run(const char *url, const char *transcript,
      *    the shared policy on both backends. */
     {
         char probbuf[32];
-        snprintf(probbuf, sizeof probbuf, "%.4f", t.p);
+        tx_snprintf(probbuf, sizeof probbuf, "%.4f", t.p);
         d = gate_decide(probbuf, &cfg);
     }
-    if (!d.ok) { t.err = LLM_NO_PROBABILITY; snprintf(t.reason, sizeof t.reason, "gate could not read a probability"); return t; }
+    if (!d.ok) { t.err = LLM_NO_PROBABILITY; tx_snprintf(t.reason, sizeof t.reason, "gate could not read a probability"); return t; }
     t.decision = d.cont;
 
     /* 5. write back, so the next turn sees the model's line. Only after a
      *    successful judgment — a record that the gate could not judge would be
      *    a transcript entry with no meaning attached. */
     if (transcript && transcript[0]) {
-        if ((size_t)snprintf(rec, sizeof rec, "{\"role\":\"model\",\"text\":\"%s\",\"p\":%.4f}", t.text, t.p) >= sizeof rec) {
+        if ((size_t)tx_snprintf(rec, sizeof rec, "{\"role\":\"model\",\"text\":\"%s\",\"p\":%.4f}", t.text, t.p) >= sizeof rec) {
             t.err = LLM_TEXT_TOO_LONG;
-            snprintf(t.reason, sizeof t.reason, "record too long for the transcript line");
+            tx_snprintf(t.reason, sizeof t.reason, "record too long for the transcript line");
             return t;
         }
         if (session_append(transcript, rec) != 0) {
             t.err = LLM_NO_TEXT;
-            snprintf(t.reason, sizeof t.reason, "cannot write transcript");
+            tx_snprintf(t.reason, sizeof t.reason, "cannot write transcript");
             return t;
         }
         t.appended = 1;
     }
 
     t.ok = 1;
-    snprintf(t.reason, sizeof t.reason, "%s (p=%.2f)", d.cont ? "continue" : "stop", t.p);
+    tx_snprintf(t.reason, sizeof t.reason, "%s (p=%.2f)", d.cont ? "continue" : "stop", t.p);
     return t;
 }
 

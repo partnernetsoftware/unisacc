@@ -1,0 +1,149 @@
+#pragma unisa use text.text
+/*
+ * delibc.cx — rename csih's remaining libc calls to their cx L0 wrappers,
+ * one fixed table, in the given .cx files (in place).
+ *   cd apps/csih && sh ../../unisacc.com tools/delibc.cx -- FILE...
+ * A name is replaced only as a call (NAME followed by '(') that starts at an
+ * identifier boundary, outside comments and string/character literals.
+ * fprintf is replaced only as `fprintf(stderr,` (the stderr stream). A file
+ * that got replacements and has no `#pragma unisa use zstr` gets one after its
+ * module line (zstr brings text.fmt, text.num and sys.io in transitively).
+ * Prints per file: the count of each rename. Exit 1 when a file cannot be
+ * read or written. An apps/csih tool: no #include, no direct libc call.
+ */
+
+typedef struct { const char *from, *to; } ren_t;
+static const ren_t REN[] = {
+    { "vsnprintf(", "tx_vsnprintf(" },
+    { "snprintf(", "tx_snprintf(" },
+    { "fprintf(stderr,", "sy_eprintf(" },
+    { "printf(", "sy_printf(" },
+    { "strerror(", "sy_strerror(" },
+    { "atoi(", "(int)tx_atol(" },
+    { "atol(", "tx_atol(" },
+    { "strtoul(", "tx_strtoul(" },
+    { "strtol(", "tx_strtol(" },
+    { "strtod(", "tx_strtod(" },
+    { "isatty(", "sy_isatty(" },
+    { "geteuid(", "sy_euid(" },
+};
+#define NREN ((int)(sizeof REN / sizeof REN[0]))
+
+static int ident(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
+
+static char out[1 << 22];
+
+static int one(const char *path) {
+    size_t n = 0;
+    char *s = cx_read(path, &n);
+    long i = 0, o = 0, len = (long)n;
+    int cnt[NREN], k, total = 0;
+    for (k = 0; k < NREN; k++) cnt[k] = 0;
+    if (!s) { printf("delibc: cannot read %s\n", path); return 1; }
+    while (i < len) {
+        char c = s[i];
+        if (o + 64 >= (long)sizeof out) { printf("delibc: %s too large\n", path); return 1; }
+        if (c == '/' && i + 1 < len && s[i + 1] == '*') {            /* block comment */
+            long e = tx_find(s + i + 2, len - i - 2, "*/", 2);
+            long stop = e < 0 ? len : i + 2 + e + 2;
+            while (i < stop) out[o++] = s[i++];
+            continue;
+        }
+        if (c == '/' && i + 1 < len && s[i + 1] == '/') {            /* line comment */
+            while (i < len && s[i] != '\n') out[o++] = s[i++];
+            continue;
+        }
+        if (c == '"' || c == '\'') {                                 /* literal */
+            out[o++] = s[i++];
+            while (i < len && s[i] != c) {
+                if (s[i] == '\\' && i + 1 < len) out[o++] = s[i++];
+                out[o++] = s[i++];
+            }
+            if (i < len) out[o++] = s[i++];
+            continue;
+        }
+        if (!ident(c) || (i > 0 && (ident(s[i - 1]) || s[i - 1] == '.' || s[i - 1] == '>'))) { out[o++] = s[i++]; continue; }
+        for (k = 0; k < NREN; k++) {
+            long fl = tx_len(REN[k].from, 64);
+            if (i + fl <= len && tx_same(s + i, fl, REN[k].from, fl)) break;
+        }
+        if (k == NREN) { out[o++] = s[i++]; continue; }
+        {
+            long fl = tx_len(REN[k].from, 64), tl = tx_len(REN[k].to, 64);
+            tx_copy(out + o, (long)sizeof out - o, REN[k].to, tl);
+            o += tl;
+            i += fl;
+            cnt[k]++;
+            total++;
+        }
+    }
+    if (total && tx_find(out, o, "#pragma unisa use zstr\n", 23) < 0) {
+        long m = tx_find(out, o, "#pragma unisa module ", 21), e;
+        static char tmp[1 << 22];
+        if (m < 0) { printf("delibc: %s has no module line\n", path); return 1; }
+        e = m + tx_chr(out + m, o - m, '\n') + 1;
+        tx_copy(tmp, (long)sizeof tmp, out, e);
+        tx_copy(tmp + e, (long)sizeof tmp - e, "#pragma unisa use zstr\n", 23);
+        tx_copy(tmp + e + 23, (long)sizeof tmp - e - 23, out + e, o - e);
+        o += 23;
+        tx_copy(out, (long)sizeof out, tmp, o);
+    }
+    if (total && cx_write(path, out, (size_t)o) != 0) { printf("delibc: cannot write %s\n", path); return 1; }
+    printf("%s\t%d", path, total);
+    for (k = 0; k < NREN; k++) if (cnt[k]) printf("\t%s%d", REN[k].from, cnt[k]);
+    printf("\n");
+    return 0;
+}
+
+/* --uses: the wrappers a module calls must be declared by a direct use. A
+   variadic (tx_snprintf, sy_printf) or double-returning (tx_strtod) function
+   that is only transitively visible is called wrongly by this toolchain
+   (out/fmttest), so add `#pragma unisa use text.fmt|text.num|sys.io` after the
+   module line where the file calls one and lacks the use. */
+typedef struct { const char *use; const char *calls[6]; } need_t;
+static const need_t NEED[] = {
+    { "#pragma unisa use text.fmt\n", { "tx_snprintf(", "tx_vsnprintf(", 0 } },
+    { "#pragma unisa use text.num\n", { "tx_strtod(", "tx_strtol(", "tx_strtoul(", "tx_atol(", 0 } },
+    { "#pragma unisa use sys.io\n", { "sy_printf(", "sy_eprintf(", "sy_strerror(", "sy_isatty(", "sy_fd_nonblock(", "sy_fd_cloexec(" } },
+};
+
+static int uses(const char *path) {
+    size_t n = 0;
+    char *s = cx_read(path, &n);
+    long len = (long)n, m, e;
+    int k, j, added = 0;
+    if (!s) { printf("delibc: cannot read %s\n", path); return 1; }
+    m = tx_find(s, len, "#pragma unisa module ", 21);
+    if (m < 0) { printf("%s\t0\t(no module line)\n", path); return 0; }
+    e = m + tx_chr(s + m, len - m, '\n') + 1;
+    tx_copy(out, (long)sizeof out, s, e);
+    {
+        long o = e;
+        for (k = 0; k < 3; k++) {
+            int called = 0;
+            long ul = tx_len(NEED[k].use, 64);
+            for (j = 0; j < 6 && NEED[k].calls[j]; j++)
+                if (tx_find(s, len, NEED[k].calls[j], tx_len(NEED[k].calls[j], 64)) >= 0) called = 1;
+            if (!called || tx_find(s, len, NEED[k].use, ul) >= 0) continue;
+            tx_copy(out + o, (long)sizeof out - o, NEED[k].use, ul);
+            o += ul;
+            added++;
+        }
+        tx_copy(out + o, (long)sizeof out - o, s + e, len - e);
+        o += len - e;
+        if (added && cx_write(path, out, (size_t)o) != 0) { printf("delibc: cannot write %s\n", path); return 1; }
+    }
+    printf("%s\t%d uses added\n", path, added);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    int i, bad = 0;
+    if (argc < 2) { printf("usage: delibc.cx -- [--uses] FILE...\n"); return 2; }
+    if (tx_eq(argv[1], "--uses", 16)) {
+        for (i = 2; i < argc; i++) bad |= uses(argv[i]);
+        return bad;
+    }
+    for (i = 1; i < argc; i++) bad |= one(argv[i]);
+    return bad;
+}

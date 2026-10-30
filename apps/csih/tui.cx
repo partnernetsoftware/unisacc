@@ -1,14 +1,16 @@
 #pragma unisa module tui
+#pragma unisa use text.fmt
+#pragma unisa use text.num
+#pragma unisa use sys.io
 #pragma unisa use zstr
-#pragma unisa use mem.heap
 #pragma unisa use fio
-/* text.text, mem.bytes (through zstr) and sys.env/fs/proc (through agent) are
-   visible transitively; a unit takes at most 32 uses */
+/* text.text, mem.bytes (through zstr), sys.env/fs/proc, mem.heap, home and clock
+   (through agent) are visible transitively; a unit takes at most 32 uses. A
+   transitively visible variadic or double-returning function is called wrongly
+   (out/fmttest), so text.fmt and sys.io are used directly. */
 #pragma unisa use render
 #pragma unisa use term
 #pragma unisa use cols
-#pragma unisa use home
-#pragma unisa use clock
 #pragma unisa use chat
 #pragma unisa use tools
 #pragma unisa use file
@@ -217,7 +219,7 @@ static void tui_state_init(tui_state *st, const char *transcript) {
 /* These helpers prepare an inactive restore only; they do not transfer
  * startup context, journal ownership, or a running request. */
 static int tui_reload_error(char *why, size_t cap, const char *message) {
-    if (why && cap) snprintf(why, cap, "%s", message);
+    if (why && cap) tx_snprintf(why, cap, "%s", message);
     return -1;
 }
 
@@ -425,38 +427,38 @@ static int tui_owned_start(tui_state *st, const char *dir, const char *session,
     for (i = 0; i < 64; i++)
         if (!zs_chr("0123456789abcdefABCDEF", hash[i]))
             return tui_reload_error(why, cap, "owned hash must be 64 hex (explicit binding only)");
-    snprintf(lock, sizeof lock, "%s/owner.lock", dir);
-    snprintf(journal, sizeof journal, "%s/journal.jsonl", dir);
+    tx_snprintf(lock, sizeof lock, "%s/owner.lock", dir);
+    tx_snprintf(journal, sizeof journal, "%s/journal.jsonl", dir);
     if ((size_t)zs_len(journal) >= 512)
         return tui_reload_error(why, cap, "owned journal exceeds agent capacity");
     if (reload_owner_acquire(lock, &st->owner_fd, why, cap) != 0) return -1;
     m = mm_alloc(sizeof *m);
     if (!m) return tui_reload_error(why, cap, "owned context allocation failed");
     zs_mset(m, 0, sizeof *m); st->owned = m;
-    snprintf(st->owned_dir, sizeof st->owned_dir, "%s", dir);
+    tx_snprintf(st->owned_dir, sizeof st->owned_dir, "%s", dir);
     if (state_path) {
         if (tui_reload_prepare_bound(state_path, session, handoff, hash, journal, m, token, why, cap) != 0) return -1;
         if (zs_cmp(m->journal_path, journal))
             return tui_reload_error(why, cap, "snapshot journal not bound to owned directory");
     } else {
-        snprintf(m->session_id, sizeof m->session_id, "%s", session);
-        snprintf(m->candidate_hash, sizeof m->candidate_hash, "%s", hash);
-        snprintf(m->handoff_id, sizeof m->handoff_id, "initial");
-        snprintf(m->journal_path, sizeof m->journal_path, "%s", journal);
+        tx_snprintf(m->session_id, sizeof m->session_id, "%s", session);
+        tx_snprintf(m->candidate_hash, sizeof m->candidate_hash, "%s", hash);
+        tx_snprintf(m->handoff_id, sizeof m->handoff_id, "initial");
+        tx_snprintf(m->journal_path, sizeof m->journal_path, "%s", journal);
         v = sy_env("CSIH_CWD");
         if (v && v[0]) {
             if ((size_t)zs_len(v) >= 1024) return tui_reload_error(why, cap, "owned cwd exceeds agent capacity");
-            snprintf(m->cwd, sizeof m->cwd, "%s", v);
+            tx_snprintf(m->cwd, sizeof m->cwd, "%s", v);
         } else if (!tui_getcwd(m->cwd, (int)sizeof m->cwd))
             return tui_reload_error(why, cap, "owned getcwd failed");
         v = sy_env("CSIH_ROLE");
         if (!v || !v[0]) v = "agent";
         if (!tui_owned_id(v, 0)) return tui_reload_error(why, cap, "owned role invalid");
-        snprintf(m->role, sizeof m->role, "%s", v);
+        tx_snprintf(m->role, sizeof m->role, "%s", v);
         v = sy_env("CSIH_PEER");
         if (!v) v = "";
         if (!tui_owned_id(v, 1)) return tui_reload_error(why, cap, "owned peer invalid");
-        snprintf(m->peer, sizeof m->peer, "%s", v);
+        tx_snprintf(m->peer, sizeof m->peer, "%s", v);
     }
     if (tui_owned_runtime(m, why, cap) != 0) return -1;
     dfd = sy_open(m->cwd, O_RDONLY | O_DIRECTORY, 0);
@@ -588,7 +590,7 @@ static void tui_history_add(tui_state *st, const char *text) {
         zs_mmove(st->history[0], st->history[1], (size_t)(16 - 1) * TUI_INPUT_MAX);
         st->nhistory = 16 - 1;
     }
-    snprintf(st->history[st->nhistory], TUI_INPUT_MAX, "%s", text);
+    tx_snprintf(st->history[st->nhistory], TUI_INPUT_MAX, "%s", text);
     st->nhistory++;
     st->history_pos = st->nhistory;
     st->history_browsing = 0;
@@ -599,7 +601,7 @@ static void tui_history_move(tui_state *st, int delta) {
     if (st->nhistory <= 0) return;
     if (!st->history_browsing) {
         if (delta >= 0) return;
-        snprintf(st->history_draft, TUI_INPUT_MAX, "%s", st->input);
+        tx_snprintf(st->history_draft, TUI_INPUT_MAX, "%s", st->input);
         st->history_browsing = 1;
         st->history_pos = st->nhistory;
     }
@@ -610,10 +612,10 @@ static void tui_history_move(tui_state *st, int delta) {
         st->history_pos = pos;
     }
     if (st->history_pos >= st->nhistory) {
-        snprintf(st->input, TUI_INPUT_MAX, "%s", st->history_draft);
+        tx_snprintf(st->input, TUI_INPUT_MAX, "%s", st->history_draft);
         st->history_browsing = 0;
     } else {
-        snprintf(st->input, TUI_INPUT_MAX, "%s", st->history[st->history_pos]);
+        tx_snprintf(st->input, TUI_INPUT_MAX, "%s", st->history[st->history_pos]);
     }
     st->ninput = (int)(size_t)zs_len(st->input);
 }
@@ -621,7 +623,7 @@ static void tui_history_move(tui_state *st, int delta) {
 static void tui_enqueue(tui_state *st) {
     if (!st->input[0]) return;
     if (st->npending >= 8) { st->notice = "待发送已满"; return; }
-    snprintf(st->pending[st->npending], TUI_INPUT_MAX, "%s", st->input);
+    tx_snprintf(st->pending[st->npending], TUI_INPUT_MAX, "%s", st->input);
     st->npending++;
     st->input[0] = '\0';
     st->ninput = 0;
@@ -629,7 +631,7 @@ static void tui_enqueue(tui_state *st) {
 
 static void tui_dequeue(tui_state *st) {
     if (st->npending <= 0) return;
-    snprintf(st->input, TUI_INPUT_MAX, "%s", st->pending[0]);
+    tx_snprintf(st->input, TUI_INPUT_MAX, "%s", st->pending[0]);
     st->ninput = (int)(size_t)zs_len(st->input);
     zs_mmove(st->pending[0], st->pending[1], (size_t)(st->npending - 1) * TUI_INPUT_MAX);
     st->npending--;
@@ -663,7 +665,7 @@ static void tui_log_plain(tui_state *st, const char *s) {
     st->ex_why[st->nlog][0] = 0;
     st->ex_cmd[st->nlog][0] = 0;
     st->ex_body[st->nlog][0] = 0;
-    snprintf(st->log[st->nlog], sizeof st->log[0], "%s", s ? s : "");
+    tx_snprintf(st->log[st->nlog], sizeof st->log[0], "%s", s ? s : "");
     st->nlog++;
     tui_log_hold(st);
     tui_note_err(st, s);
@@ -705,8 +707,8 @@ static int tui_exec_fields(const char *line, char *why, int wn, char *cmd, int c
     if (n < 0) n = 0;
     zs_mcpy(why, p, (size_t)n);
     why[n] = 0;
-    snprintf(cmd, (size_t)cn, "%s", tab + 1);
-    if (!why[0]) snprintf(why, (size_t)wn, "%s", "(无解释)");
+    tx_snprintf(cmd, (size_t)cn, "%s", tab + 1);
+    if (!why[0]) tx_snprintf(why, (size_t)wn, "%s", "(无解释)");
     return 1;
 }
 
@@ -732,9 +734,9 @@ static int tui_fold_fields(const char *line, char *tag, int tn,
     if (n < 0) n = 0;
     zs_mcpy(why, p, (size_t)n);
     why[n] = 0;
-    snprintf(cmd, (size_t)cn, "%s", t2 + 1);
-    if (!tag[0]) snprintf(tag, (size_t)tn, "tool");
-    if (!why[0]) snprintf(why, (size_t)wn, "%s", "(无解释)");
+    tx_snprintf(cmd, (size_t)cn, "%s", t2 + 1);
+    if (!tag[0]) tx_snprintf(tag, (size_t)tn, "tool");
+    if (!why[0]) tx_snprintf(why, (size_t)wn, "%s", "(无解释)");
     return 1;
 }
 
@@ -774,18 +776,18 @@ static void tui_log_event(tui_state *st, const char *line) {
     tui_log_make_room(st);
     tag[0] = 0;
     if (tui_exec_fields(line, why, (int)sizeof why, cmd, (int)sizeof cmd))
-        snprintf(tag, sizeof tag, "exec");
+        tx_snprintf(tag, sizeof tag, "exec");
     else if (!tui_fold_fields(line, tag, (int)sizeof tag, why, (int)sizeof why,
                               cmd, (int)sizeof cmd))
         tag[0] = 0;
     if (tag[0]) {
         st->ex_on[st->nlog] = 1;
         st->ex_open[st->nlog] = 0;
-        snprintf(st->ex_tag[st->nlog], sizeof st->ex_tag[0], "%s", tag);
-        snprintf(st->ex_why[st->nlog], sizeof st->ex_why[0], "%s", why);
-        snprintf(st->ex_cmd[st->nlog], sizeof st->ex_cmd[0], "%s", cmd);
+        tx_snprintf(st->ex_tag[st->nlog], sizeof st->ex_tag[0], "%s", tag);
+        tx_snprintf(st->ex_why[st->nlog], sizeof st->ex_why[0], "%s", why);
+        tx_snprintf(st->ex_cmd[st->nlog], sizeof st->ex_cmd[0], "%s", cmd);
         st->ex_body[st->nlog][0] = 0;
-        snprintf(st->log[st->nlog], sizeof st->log[0], "%s[展开]> %s", tag, why);
+        tx_snprintf(st->log[st->nlog], sizeof st->log[0], "%s[展开]> %s", tag, why);
     } else {
         st->ex_on[st->nlog] = 0;
         st->ex_open[st->nlog] = 0;
@@ -793,7 +795,7 @@ static void tui_log_event(tui_state *st, const char *line) {
         st->ex_why[st->nlog][0] = 0;
         st->ex_cmd[st->nlog][0] = 0;
         st->ex_body[st->nlog][0] = 0;
-        snprintf(st->log[st->nlog], sizeof st->log[0], "%s", line ? line : "");
+        tx_snprintf(st->log[st->nlog], sizeof st->log[0], "%s", line ? line : "");
     }
     st->nlog++;
     tui_log_hold(st);
@@ -846,7 +848,7 @@ static void tui_note_err(tui_state *st, const char *s) {
     st->errline[o] = 0;
     /* Keep the last 5 reasons for /why; the error row itself is overwritten. */
     if (st->why.n == 0 || zs_cmp(st->why.text[(st->why.n - 1) % 5], st->errline)) {
-        snprintf(st->why.text[st->why.n % 5], sizeof st->why.text[0], "%s", st->errline);
+        tx_snprintf(st->why.text[st->why.n % 5], sizeof st->why.text[0], "%s", st->errline);
         st->why.t[st->why.n % 5] = (long)net_now();
         st->why.n++;
     }
@@ -855,7 +857,7 @@ static void tui_note_err(tui_state *st, const char *s) {
 /* The line a live turn actually runs. Only the user's goal. The write gate
  * stays in the system prompt, and is not repeated onto this task. */
 static void tui_goal_prompt(const tui_state *st, char *out, int n) {
-    snprintf(out, (size_t)n,
+    tx_snprintf(out, (size_t)n,
              "目标：%s。继续这一目标，做完就停。",
              st->goal);
 }
@@ -881,7 +883,7 @@ static void tui_queue_goal(tui_state *st) {
         return;
     }
     tui_goal_prompt(st, line, (int)sizeof line);
-    snprintf(st->pending[st->npending], TUI_INPUT_MAX, "%s", line);
+    tx_snprintf(st->pending[st->npending], TUI_INPUT_MAX, "%s", line);
     st->npending++;
     st->loop_left--;
 }
@@ -910,11 +912,11 @@ static int tui_archives(const char *path, long *stamps, int max);
 static int tui_new_context(const char *path, char *note, size_t cap) {
     char old[4200];
     fio_t *f;
-    if (!path || !path[0]) { snprintf(note, cap, "new: no transcript path"); return 1; }
+    if (!path || !path[0]) { tx_snprintf(note, cap, "new: no transcript path"); return 1; }
     f = tui_fopen(path, "r");
     if (!f) {
-        if (errno == ENOENT) { snprintf(note, cap, "new: 已是空上下文"); return 0; }
-        snprintf(note, cap, "new: cannot open %s: %s", path, strerror(errno));
+        if (errno == ENOENT) { tx_snprintf(note, cap, "new: 已是空上下文"); return 0; }
+        tx_snprintf(note, cap, "new: cannot open %s: %s", path, sy_strerror(errno));
         return 1;
     }
     fio_close(f);
@@ -924,15 +926,15 @@ static int tui_new_context(const char *path, char *note, size_t cap) {
         long stamp = (long)net_now(), have[1];
         int tries = 0;
         if (tui_archives(path, have, 1) == 1 && have[0] >= stamp) stamp = have[0] + 1;
-        do snprintf(old, sizeof old, "%s.%ld.jsonl", path, stamp++);
+        do tx_snprintf(old, sizeof old, "%s.%ld.jsonl", path, stamp++);
         while (sy_exists(old) == 1 && ++tries < 100);
-        if (tries >= 100) { snprintf(note, cap, "new: no free archive name"); return 1; }
+        if (tries >= 100) { tx_snprintf(note, cap, "new: no free archive name"); return 1; }
     }
     if (tui_rename(path, old) != 0) {
-        snprintf(note, cap, "new: cannot move transcript: %s", strerror(errno));
+        tx_snprintf(note, cap, "new: cannot move transcript: %s", sy_strerror(errno));
         return 1;
     }
-    snprintf(note, cap, "new: 已开新上下文；旧转录存为 %.180s", old);
+    tx_snprintf(note, cap, "new: 已开新上下文；旧转录存为 %.180s", old);
     return 0;
 }
 
@@ -946,7 +948,7 @@ static int tui_archives(const char *path, long *stamps, int max) {
     size_t bl;
     int n = 0, i, j;
     if (!base) return 0;
-    snprintf(dir, sizeof dir, "%.*s", (int)(base - path), path);
+    tx_snprintf(dir, sizeof dir, "%.*s", (int)(base - path), path);
     base++;
     bl = (size_t)zs_len(base);
     if (!file_list(dir[0] ? dir : "/", names, sizeof names).ok) return 0;
@@ -1003,7 +1005,7 @@ static void tui_first_user(const char *file, char *out, size_t cap) {
             len = 120;
             while (len > 0 && ((unsigned char)t[len] & 0xC0) == 0x80) len--;
         }
-        snprintf(out, cap, "%.*s", len, t);
+        tx_snprintf(out, cap, "%.*s", len, t);
     }
 }
 
@@ -1018,22 +1020,22 @@ static int tui_import_shared(const char *path, const char *shared, char *note, s
     long stamp = (long)net_now();
     int tries = 0;
     in = tui_fopen(shared, "r");
-    if (!in) { snprintf(note, cap, "resume: 没有旧的共享对话记录 %.200s", shared); return 1; }
+    if (!in) { tx_snprintf(note, cap, "resume: 没有旧的共享对话记录 %.200s", shared); return 1; }
     {
         /* Newest, so it is archive 1: archives bumped past now must not outrank it. */
         long have[1];
         if (tui_archives(path, have, 1) == 1 && have[0] >= stamp) stamp = have[0] + 1;
     }
-    do snprintf(dst, sizeof dst, "%s.%ld.jsonl", path, stamp++);
+    do tx_snprintf(dst, sizeof dst, "%s.%ld.jsonl", path, stamp++);
     while (sy_exists(dst) == 1 && ++tries < 100);
     /* sy_exists above found dst free; "wx" is not available on every libc here. */
     out = tries < 100 ? tui_fopen(dst, "w") : NULL;
-    if (!out) { fio_close(in); snprintf(note, cap, "resume: cannot create %s", dst); return 1; }
+    if (!out) { fio_close(in); tx_snprintf(note, cap, "resume: cannot create %s", dst); return 1; }
     while ((n = fio_read(buf, 1, sizeof buf, in)) > 0)
-        if (fio_write(buf, 1, n, out) != n) { fio_close(in); fio_close(out); snprintf(note, cap, "resume: copy failed"); return 1; }
+        if (fio_write(buf, 1, n, out) != n) { fio_close(in); fio_close(out); tx_snprintf(note, cap, "resume: copy failed"); return 1; }
     fio_close(in);
-    if (fio_close(out) != 0) { snprintf(note, cap, "resume: copy failed"); return 1; }
-    snprintf(note, cap, "resume: 已把旧的共享对话记录复制为本目录的归档 1，/resume 1 换回");
+    if (fio_close(out) != 0) { tx_snprintf(note, cap, "resume: copy failed"); return 1; }
+    tx_snprintf(note, cap, "resume: 已把旧的共享对话记录复制为本目录的归档 1，/resume 1 换回");
     return 0;
 }
 
@@ -1042,14 +1044,14 @@ static int tui_resume(const char *path, int pick, char *note, size_t cap) {
     long stamps[9];
     char from[600], why[400];
     int n = tui_archives(path, stamps, 9);
-    if (pick < 1 || pick > n) { snprintf(note, cap, "resume: 没有第 %d 个归档（共 %d 个）", pick, n); return 1; }
-    snprintf(from, sizeof from, "%s.%ld.jsonl", path, stamps[pick - 1]);
-    if (tui_new_context(path, why, sizeof why) != 0) { snprintf(note, cap, "%s", why); return 1; }
+    if (pick < 1 || pick > n) { tx_snprintf(note, cap, "resume: 没有第 %d 个归档（共 %d 个）", pick, n); return 1; }
+    tx_snprintf(from, sizeof from, "%s.%ld.jsonl", path, stamps[pick - 1]);
+    if (tui_new_context(path, why, sizeof why) != 0) { tx_snprintf(note, cap, "%s", why); return 1; }
     if (tui_rename(from, path) != 0) {
-        snprintf(note, cap, "resume: cannot restore: %s", strerror(errno));
+        tx_snprintf(note, cap, "resume: cannot restore: %s", sy_strerror(errno));
         return 1;
     }
-    snprintf(note, cap, "resume: 已换回 %ld 的转录；之前的已归档", stamps[pick - 1]);
+    tx_snprintf(note, cap, "resume: 已换回 %ld 的转录；之前的已归档", stamps[pick - 1]);
     return 0;
 }
 
@@ -1067,9 +1069,9 @@ static void tui_complete_command(tui_state *st) {
     const char *home = sy_env("HOME");
     int n = 0, i, d, plen = (int)(size_t)zs_len(st->input), common = -1;
     for (i = 0; builtin[i] && n < 64; i++)
-        if (!zs_ncmp(builtin[i], st->input, (size_t)plen)) snprintf(names[n++], sizeof names[0], "%s", builtin[i]);
-    snprintf(dirs[0], sizeof dirs[0], ".csih/commands");
-    snprintf(dirs[1], sizeof dirs[1], "%s/.csih/commands", home ? home : "");
+        if (!zs_ncmp(builtin[i], st->input, (size_t)plen)) tx_snprintf(names[n++], sizeof names[0], "%s", builtin[i]);
+    tx_snprintf(dirs[0], sizeof dirs[0], ".csih/commands");
+    tx_snprintf(dirs[1], sizeof dirs[1], "%s/.csih/commands", home ? home : "");
     for (d = 0; d < 2; d++) {
         const char *p;
         if (!file_list(dirs[d], listing, sizeof listing).ok) continue;
@@ -1079,9 +1081,9 @@ static void tui_complete_command(tui_state *st) {
             if (len > 3 && len < 60 && !zs_ncmp(p + len - 3, ".md", 3)) {
                 char cand[64];
                 int dup = 0;
-                snprintf(cand, sizeof cand, "/%.*s", (int)(len - 3), p);
+                tx_snprintf(cand, sizeof cand, "/%.*s", (int)(len - 3), p);
                 for (i = 0; i < n; i++) if (!zs_cmp(names[i], cand)) dup = 1;
-                if (!dup && !zs_ncmp(cand, st->input, (size_t)plen)) snprintf(names[n++], sizeof names[0], "%s", cand);
+                if (!dup && !zs_ncmp(cand, st->input, (size_t)plen)) tx_snprintf(names[n++], sizeof names[0], "%s", cand);
             }
             if (!nl) break;
             p = nl + 1;
@@ -1094,13 +1096,13 @@ static void tui_complete_command(tui_state *st) {
         while (k < common && names[i][k] == names[0][k]) k++;
         common = k;
     }
-    if (n == 1) snprintf(st->input, TUI_INPUT_MAX, "%s ", names[0]);
-    else if (common > plen) snprintf(st->input, TUI_INPUT_MAX, "%.*s", common, names[0]);
+    if (n == 1) tx_snprintf(st->input, TUI_INPUT_MAX, "%s ", names[0]);
+    else if (common > plen) tx_snprintf(st->input, TUI_INPUT_MAX, "%.*s", common, names[0]);
     st->ninput = (int)(size_t)zs_len(st->input);
     st->back = 0;
     if (n > 1) {
-        size_t o = (size_t)snprintf(line, sizeof line, "可选：");
-        for (i = 0; i < n && o + 20 < sizeof line; i++) o += (size_t)snprintf(line + o, sizeof line - o, "%s ", names[i]);
+        size_t o = (size_t)tx_snprintf(line, sizeof line, "可选：");
+        for (i = 0; i < n && o + 20 < sizeof line; i++) o += (size_t)tx_snprintf(line + o, sizeof line - o, "%s ", names[i]);
         tui_log_plain(st, line);
     }
 }
@@ -1142,25 +1144,25 @@ static int tui_compact(const char *path, const char *last_answer, char *note, si
     }
     if (!nu && !(last_answer && last_answer[0])) {
         session_free(&recs);
-        snprintf(note, cap, "compact: 没有可保留的内容，用 /new 即可");
+        tx_snprintf(note, cap, "compact: 没有可保留的内容，用 /new 即可");
         return 1;
     }
-    o = (size_t)snprintf(summary, sizeof summary, "此前对话摘录（csih /compact 原文摘录，不是模型总结；完整记录已归档，可 /resume 换回）：\n用户最近的请求（旧→新）：\n");
+    o = (size_t)tx_snprintf(summary, sizeof summary, "此前对话摘录（csih /compact 原文摘录，不是模型总结；完整记录已归档，可 /resume 换回）：\n用户最近的请求（旧→新）：\n");
     for (k = nu - 1; k >= 0 && o + 8 < sizeof summary; k--)
-        o += (size_t)snprintf(summary + o, sizeof summary - o, "- %.600s\n", users[k]);
+        o += (size_t)tx_snprintf(summary + o, sizeof summary - o, "- %.600s\n", users[k]);
     if (last_answer && last_answer[0] && o + 8 < sizeof summary)
-        o += (size_t)snprintf(summary + o, sizeof summary - o, "上一轮答复：%.2000s\n", last_answer);
+        o += (size_t)tx_snprintf(summary + o, sizeof summary - o, "上一轮答复：%.2000s\n", last_answer);
     for (k = 0; k < nu; k++) jfree(held[k]);
     session_free(&recs);
-    if (tui_new_context(path, why, sizeof why) != 0) { snprintf(note, cap, "%s", why); return 1; }
+    if (tui_new_context(path, why, sizeof why) != 0) { tx_snprintf(note, cap, "%s", why); return 1; }
     if (!json_rec(rec, sizeof rec, "role", "user", "text", summary, NULL, NULL)) {
-        snprintf(note, cap, "compact: 摘录太长"); return 1;
+        tx_snprintf(note, cap, "compact: 摘录太长"); return 1;
     }
     f = tui_fopen(path, "w");
-    if (!f) { snprintf(note, cap, "compact: cannot write %s", path); return 1; }
+    if (!f) { tx_snprintf(note, cap, "compact: cannot write %s", path); return 1; }
     fio_printf(f, "%s\n", rec);
     fio_close(f);
-    snprintf(note, cap, "compact: 已归档完整记录，新上下文保留 %d 条请求%s的原文摘录", nu, last_answer && last_answer[0] ? "和上一轮答复" : "");
+    tx_snprintf(note, cap, "compact: 已归档完整记录，新上下文保留 %d 条请求%s的原文摘录", nu, last_answer && last_answer[0] ? "和上一轮答复" : "");
     return 0;
 }
 
@@ -1173,9 +1175,9 @@ static int tui_export(const char *transcript, const char *dest, char *note, size
     fio_t *f;
     size_t i;
     int sections = 0;
-    if (!recs.count) { session_free(&recs); snprintf(note, cap, "export: 当前没有对话记录"); return -1; }
+    if (!recs.count) { session_free(&recs); tx_snprintf(note, cap, "export: 当前没有对话记录"); return -1; }
     f = tui_fopen(dest, "w");
-    if (!f) { session_free(&recs); snprintf(note, cap, "export: cannot write %.200s: %s", dest, strerror(errno)); return -1; }
+    if (!f) { session_free(&recs); tx_snprintf(note, cap, "export: cannot write %.200s: %s", dest, sy_strerror(errno)); return -1; }
     fio_printf(f, "# csih 对话导出\n\n");
     for (i = 0; i < recs.count; i++) {
         char err[128];
@@ -1201,8 +1203,8 @@ static int tui_export(const char *transcript, const char *dest, char *note, size
         jfree(v);
     }
     session_free(&recs);
-    if (fio_close(f) != 0) { snprintf(note, cap, "export: write failed"); return -1; }
-    snprintf(note, cap, "export: %d 段写入 %.200s", sections, dest);
+    if (fio_close(f) != 0) { tx_snprintf(note, cap, "export: write failed"); return -1; }
+    tx_snprintf(note, cap, "export: %d 段写入 %.200s", sections, dest);
     return sections;
 }
 
@@ -1232,14 +1234,14 @@ static int tui_slash(tui_state *st) {
         while (*arg == ' ') arg++;
         if (!*arg) {
             const char *m = st->model[0] ? st->model : csih_env("CSIH_MODEL", "CDSH_MODEL");
-            snprintf(note, sizeof note, "model: %s%s", m ? m : "deepseek-chat", st->model[0] ? " (/model)" : "");
+            tx_snprintf(note, sizeof note, "model: %s%s", m ? m : "deepseek-chat", st->model[0] ? " (/model)" : "");
         } else if (st->busy) {
-            snprintf(note, sizeof note, "busy: model unchanged");
+            tx_snprintf(note, sizeof note, "busy: model unchanged");
         } else if ((size_t)zs_len(arg) >= sizeof st->model || zs_chr(arg, ' ') || zs_chr(arg, '"') || zs_chr(arg, '\\')) {
-            snprintf(note, sizeof note, "usage: /model NAME (one word, under %d bytes)", (int)sizeof st->model);
+            tx_snprintf(note, sizeof note, "usage: /model NAME (one word, under %d bytes)", (int)sizeof st->model);
         } else {
-            snprintf(st->model, sizeof st->model, "%s", arg);
-            snprintf(note, sizeof note, "model set: %s (this session)", st->model);
+            tx_snprintf(st->model, sizeof st->model, "%s", arg);
+            tx_snprintf(note, sizeof note, "model set: %s (this session)", st->model);
         }
         tui_log_plain(st, note);
         tui_command_done(st);
@@ -1249,10 +1251,10 @@ static int tui_slash(tui_state *st) {
         char path[512], dest[600], msg[400];
         const char *arg = st->input + 7;
         while (*arg == ' ') arg++;
-        if (st->owned) snprintf(path, sizeof path, "%s", st->journal_path);
+        if (st->owned) tx_snprintf(path, sizeof path, "%s", st->journal_path);
         else if (agent_transcript_path(path, sizeof path) != 0) path[0] = 0;
-        if (*arg) snprintf(dest, sizeof dest, "%s", arg);
-        else snprintf(dest, sizeof dest, "csih-%ld.md", (long)net_now());
+        if (*arg) tx_snprintf(dest, sizeof dest, "%s", arg);
+        else tx_snprintf(dest, sizeof dest, "csih-%ld.md", (long)net_now());
         if (!path[0]) tui_log_plain(st, "export: no transcript path");
         else { tui_export(path, dest, msg, sizeof msg); tui_log_plain(st, msg); }
         tui_command_done(st);
@@ -1294,11 +1296,11 @@ static int tui_slash(tui_state *st) {
             for (i = 0; i < n; i++) {
                 char file[600], first[160];
                 long age = (long)net_now() - stamps[i];
-                snprintf(file, sizeof file, "%s.%ld.jsonl", path, stamps[i]);
+                tx_snprintf(file, sizeof file, "%s.%ld.jsonl", path, stamps[i]);
                 tui_first_user(file, first, sizeof first);
-                if (age < 3600) snprintf(msg, sizeof msg, "%d) %ld 分钟前 · %s", i + 1, age / 60, first[0] ? first : "(空)");
-                else if (age < 86400) snprintf(msg, sizeof msg, "%d) %ld 小时前 · %s", i + 1, age / 3600, first[0] ? first : "(空)");
-                else snprintf(msg, sizeof msg, "%d) %ld 天前 · %s", i + 1, age / 86400, first[0] ? first : "(空)");
+                if (age < 3600) tx_snprintf(msg, sizeof msg, "%d) %ld 分钟前 · %s", i + 1, age / 60, first[0] ? first : "(空)");
+                else if (age < 86400) tx_snprintf(msg, sizeof msg, "%d) %ld 小时前 · %s", i + 1, age / 3600, first[0] ? first : "(空)");
+                else tx_snprintf(msg, sizeof msg, "%d) %ld 天前 · %s", i + 1, age / 86400, first[0] ? first : "(空)");
                 tui_log_plain(st, msg);
             }
             if (n) tui_log_plain(st, "resume N 换回第 N 个；当前转录会先归档");
@@ -1306,11 +1308,11 @@ static int tui_slash(tui_state *st) {
         } else if (!zs_cmp(arg, "shared")) {
             char shared[512];
             const char *home = sy_env("HOME");
-            snprintf(shared, sizeof shared, "%s/.cdsh/tui.jsonl", home ? home : "");
+            tx_snprintf(shared, sizeof shared, "%s/.cdsh/tui.jsonl", home ? home : "");
             if (!zs_cmp(shared, path)) tui_log_plain(st, "resume: 当前就在用共享对话记录");
             else { tui_import_shared(path, shared, msg, sizeof msg); tui_log_plain(st, msg); }
         } else {
-            tui_resume(path, atoi(arg), msg, sizeof msg);
+            tui_resume(path, (int)tx_atol(arg), msg, sizeof msg);
             tui_log_plain(st, msg);
             st->last_answer[0] = 0; st->errline[0] = 0; st->ended = 0;
         }
@@ -1324,11 +1326,11 @@ static int tui_slash(tui_state *st) {
         while (*arg == ' ') arg++;
         for (i = 0; i < 3; i++) if (!zs_cmp(arg, names[i])) want = i;
         if (!*arg)
-            snprintf(note, sizeof note, "perm: %s（read 只读；work 只写工作目录、危险命令要 /allow；any 不拦）",
+            tx_snprintf(note, sizeof note, "perm: %s（read 只读；work 只写工作目录、危险命令要 /allow；any 不拦）",
                      names[agent_get_perm()]);
-        else if (want < 0) snprintf(note, sizeof note, "usage: /perm read|work|any");
-        else if (st->busy) snprintf(note, sizeof note, "busy: perm unchanged");
-        else { agent_set_perm(want); snprintf(note, sizeof note, "perm set: %s", names[want]); }
+        else if (want < 0) tx_snprintf(note, sizeof note, "usage: /perm read|work|any");
+        else if (st->busy) tx_snprintf(note, sizeof note, "busy: perm unchanged");
+        else { agent_set_perm(want); tx_snprintf(note, sizeof note, "perm set: %s", names[want]); }
         tui_log_plain(st, note);
         tui_command_done(st);
         return 1;
@@ -1341,32 +1343,32 @@ static int tui_slash(tui_state *st) {
         fio_t *f;
         while (*arg == ' ') arg++;
         sp = zs_rchr(arg, ' ');
-        if (sp && sp[1] >= '0' && sp[1] <= '9') { from = atoi(sp + 1); snprintf(path, sizeof path, "%.*s", (int)(sp - arg), arg); }
-        else snprintf(path, sizeof path, "%s", arg);
+        if (sp && sp[1] >= '0' && sp[1] <= '9') { from = (int)tx_atol(sp + 1); tx_snprintf(path, sizeof path, "%.*s", (int)(sp - arg), arg); }
+        else tx_snprintf(path, sizeof path, "%s", arg);
         if (from < 1) from = 1;
         if (!path[0]) { tui_log_plain(st, "usage: /view PATH [LINE]"); tui_command_done(st); return 1; }
-        if (path[0] == '~' && path[1] == '/' && sy_env("HOME")) snprintf(full, sizeof full, "%s%s", sy_env("HOME"), path + 1);
-        else if (path[0] == '/') snprintf(full, sizeof full, "%s", path);
+        if (path[0] == '~' && path[1] == '/' && sy_env("HOME")) tx_snprintf(full, sizeof full, "%s%s", sy_env("HOME"), path + 1);
+        else if (path[0] == '/') tx_snprintf(full, sizeof full, "%s", path);
         else {
             const char *cwd = csih_env("CSIH_CWD", "CDSH_CWD");
             if (!cwd) { if (!tui_getcwd(here, (int)sizeof here)) zs_set(here, (long)sizeof here, "."); cwd = here; }
-            snprintf(full, sizeof full, "%s/%s", cwd, path);
+            tx_snprintf(full, sizeof full, "%s/%s", cwd, path);
         }
         f = tui_fopen(full, "r");
-        if (!f) { snprintf(note, sizeof note, "view: cannot open %.180s: %s", path, strerror(errno)); tui_log_plain(st, note); tui_command_done(st); return 1; }
-        snprintf(note, sizeof note, "view: %.180s 从第 %d 行", path, from);
+        if (!f) { tx_snprintf(note, sizeof note, "view: cannot open %.180s: %s", path, sy_strerror(errno)); tui_log_plain(st, note); tui_command_done(st); return 1; }
+        tx_snprintf(note, sizeof note, "view: %.180s 从第 %d 行", path, from);
         tui_log_plain(st, note);
         while (shown < 20 && fio_gets(buf, sizeof buf, f)) {
             ln++;
             if (ln < from) continue;
             buf[strcspn(buf, "\r\n")] = 0;
-            snprintf(note, sizeof note, "%5d│ %.220s", ln, buf);
+            tx_snprintf(note, sizeof note, "%5d│ %.220s", ln, buf);
             tui_log_plain(st, note);
             shown++;
         }
         if (!shown) tui_log_plain(st, "view: （此范围没有内容）");
         else if (fio_gets(buf, sizeof buf, f)) {
-            snprintf(note, sizeof note, "view: 还有更多，/view %.150s %d", path, ln + 1);
+            tx_snprintf(note, sizeof note, "view: 还有更多，/view %.150s %d", path, ln + 1);
             tui_log_plain(st, note);
         }
         fio_close(f);
@@ -1388,8 +1390,8 @@ static int tui_slash(tui_state *st) {
             if (dup) continue;
             tui_sh_quote(qp, sizeof qp, path);
             tui_sh_quote(qb, sizeof qb, existed ? bak : "/dev/null");
-            snprintf(cmd, sizeof cmd, "diff -u %s %s | tail -n +3 | head -12; true", qb, qp);
-            snprintf(note, sizeof note, "diff: %s %.200s", existed ? "改动" : "新建", path);
+            tx_snprintf(cmd, sizeof cmd, "diff -u %s %s | tail -n +3 | head -12; true", qb, qp);
+            tx_snprintf(note, sizeof note, "diff: %s %.200s", existed ? "改动" : "新建", path);
             tui_log_plain(st, note); rows++; shown++;
             r = shell_run_in(cmd, "/");
             {
@@ -1397,7 +1399,7 @@ static int tui_slash(tui_state *st) {
                 while (*p && rows < 30) {
                     char *nl = zs_chr(p, '\n');
                     if (nl) *nl = 0;
-                    snprintf(note, sizeof note, "  %.230s", p);
+                    tx_snprintf(note, sizeof note, "  %.230s", p);
                     tui_log_plain(st, note); rows++;
                     if (!nl) break;
                     p = nl + 1;
@@ -1414,14 +1416,14 @@ static int tui_slash(tui_state *st) {
         long trim = 0, sent = 0, hit = 0, miss = 0, out = 0;
         sy_stat_t sb;
         agent_context_limits(&per_turn, &trim, &keep);
-        if (st->owned) snprintf(path, sizeof path, "%s", st->journal_path);
+        if (st->owned) tx_snprintf(path, sizeof path, "%s", st->journal_path);
         else if (agent_transcript_path(path, sizeof path) != 0) path[0] = 0;
         if (!path[0] || sy_stat(path, &sb) != 0) {
             tui_log_plain(st, "context: 当前没有对话记录（新上下文）");
         } else {
             session_records recs = session_read(path);
             tui_bytes(sz, sizeof sz, sb.size);
-            snprintf(note, sizeof note, "context: %zu 条记录 · %s · %.150s", recs.count, sz, path);
+            tx_snprintf(note, sizeof note, "context: %zu 条记录 · %s · %.150s", recs.count, sz, path);
             tui_log_plain(st, note);
             session_free(&recs);
         }
@@ -1429,7 +1431,7 @@ static int tui_slash(tui_state *st) {
         net_session_usage(&calls, &hit, &miss, &out);
         tui_bytes(up, sizeof up, sent);
         tui_bytes(sz, sizeof sz, trim);
-        snprintf(note, sizeof note, "context: 每轮送最近 %d 条；文件超过 %s 时裁到最近 %d 条；上次请求上传 %s，本会话输入 %ld 词元",
+        tx_snprintf(note, sizeof note, "context: 每轮送最近 %d 条；文件超过 %s 时裁到最近 %d 条；上次请求上传 %s，本会话输入 %ld 词元",
                  per_turn, sz, keep, up, hit + miss);
         tui_log_plain(st, note);
         tui_command_done(st);
@@ -1444,7 +1446,7 @@ static int tui_slash(tui_state *st) {
         /* Build first, then log: logging an error-looking row would push it again. */
         for (i = first; i < st->why.n; i++) {
             long age = (long)net_now() - st->why.t[i % 5];
-            snprintf(rows[nr++], sizeof rows[0], "why %d（%ld秒前）: %.230s", i - first + 1, age < 0 ? 0 : age, st->why.text[i % 5]);
+            tx_snprintf(rows[nr++], sizeof rows[0], "why %d（%ld秒前）: %.230s", i - first + 1, age < 0 ? 0 : age, st->why.text[i % 5]);
         }
         {
             /* Listing is not a new failure: the rows quote ✗/exit= text, so
@@ -1452,10 +1454,10 @@ static int tui_slash(tui_state *st) {
             static tui_why_ring keep;
             char line[240];
             keep = st->why;
-            snprintf(line, sizeof line, "%s", st->errline);
+            tx_snprintf(line, sizeof line, "%s", st->errline);
             for (i = 0; i < nr; i++) tui_log_plain(st, rows[i]);
             st->why = keep;
-            snprintf(st->errline, sizeof st->errline, "%s", line);
+            tx_snprintf(st->errline, sizeof st->errline, "%s", line);
         }
         tui_command_done(st);
         return 1;
@@ -1467,9 +1469,9 @@ static int tui_slash(tui_state *st) {
             tui_command_done(st);
             return 1;
         }
-        snprintf(note, sizeof note, "retry: 重发「%.180s」", st->history[st->nhistory - 1]);
+        tx_snprintf(note, sizeof note, "retry: 重发「%.180s」", st->history[st->nhistory - 1]);
         tui_log_plain(st, note);
-        snprintf(st->input, TUI_INPUT_MAX, "%s%s", st->history[st->nhistory - 1][0] == '/' ? " " : "",
+        tx_snprintf(st->input, TUI_INPUT_MAX, "%s%s", st->history[st->nhistory - 1][0] == '/' ? " " : "",
                  st->history[st->nhistory - 1]);
         st->ninput = (int)(size_t)zs_len(st->input);
         return 0;
@@ -1484,11 +1486,11 @@ static int tui_slash(tui_state *st) {
         else {
             shell_result r;
             tui_sh_quote(q, sizeof q, st->last_answer);
-            snprintf(cmd, sizeof cmd, "tmux set-buffer -- %s", q);
+            tx_snprintf(cmd, sizeof cmd, "tmux set-buffer -- %s", q);
             r = shell_run_in(cmd, "/");
             if (r.ok && r.exited && r.status == 0)
-                snprintf(note, sizeof note, "copy: 已复制上一轮答复（%d 字节）到 tmux 缓冲区，prefix ] 粘贴", (int)(size_t)zs_len(st->last_answer));
-            else snprintf(note, sizeof note, "copy: tmux set-buffer 失败（exit=%d）", r.exited ? r.status : -1);
+                tx_snprintf(note, sizeof note, "copy: 已复制上一轮答复（%d 字节）到 tmux 缓冲区，prefix ] 粘贴", (int)(size_t)zs_len(st->last_answer));
+            else tx_snprintf(note, sizeof note, "copy: tmux set-buffer 失败（exit=%d）", r.exited ? r.status : -1);
             tui_log_plain(st, note);
         }
         tui_command_done(st);
@@ -1505,12 +1507,12 @@ static int tui_slash(tui_state *st) {
         const char *arg = st->input + 4;
         while (*arg == ' ') arg++;
         if (!zs_cmp(arg, "on") || !zs_cmp(arg, "off")) {
-            if (st->busy) snprintf(note, sizeof note, "busy: net unchanged");
-            else { agent_set_net(!zs_cmp(arg, "on")); snprintf(note, sizeof note, "net: work 档命令%s网络", agent_get_net() ? "可以用" : "不能用"); }
+            if (st->busy) tx_snprintf(note, sizeof note, "busy: net unchanged");
+            else { agent_set_net(!zs_cmp(arg, "on")); tx_snprintf(note, sizeof note, "net: work 档命令%s网络", agent_get_net() ? "可以用" : "不能用"); }
         } else if (!*arg)
-            snprintf(note, sizeof note, "net: %s（read 档始终断网；any 档不进沙箱，不受影响%s）", agent_get_net() ? "on" : "off",
+            tx_snprintf(note, sizeof note, "net: %s（read 档始终断网；any 档不进沙箱，不受影响%s）", agent_get_net() ? "on" : "off",
                      agent_sandbox_available() ? "" : "；本机没有沙箱，此开关无效");
-        else snprintf(note, sizeof note, "usage: /net [on|off]");
+        else tx_snprintf(note, sizeof note, "usage: /net [on|off]");
         tui_log_plain(st, note);
         tui_command_done(st);
         return 1;
@@ -1525,7 +1527,7 @@ static int tui_slash(tui_state *st) {
         int calls = 0;
         long hit = 0, miss = 0, out = 0;
         net_session_usage(&calls, &hit, &miss, &out);
-        snprintf(note, sizeof note, "cost: 请求 %d 次 · 输入 %ld（缓存命中 %ld，%d%%）· 输出 %ld 词元",
+        tx_snprintf(note, sizeof note, "cost: 请求 %d 次 · 输入 %ld（缓存命中 %ld，%d%%）· 输出 %ld 词元",
                  calls, hit + miss, hit, hit + miss ? (int)(hit * 100 / (hit + miss)) : 0, out);
         tui_log_plain(st, note);
         tui_command_done(st);
@@ -1535,7 +1537,7 @@ static int tui_slash(tui_state *st) {
         char here[1024];
         const char *cwd = csih_env("CSIH_CWD", "CDSH_CWD");
         if (!cwd) { if (!tui_getcwd(here, (int)sizeof here)) zs_set(here, (long)sizeof here, "?"); cwd = here; }
-        snprintf(note, sizeof note, "cwd: %.200s", cwd);
+        tx_snprintf(note, sizeof note, "cwd: %.200s", cwd);
         tui_log_plain(st, note);
         tui_command_done(st);
         return 1;
@@ -1547,12 +1549,12 @@ static int tui_slash(tui_state *st) {
         int calls = 0;
         long h0 = 0, m0 = 0, o0 = 0;
         net_session_usage(&calls, &h0, &m0, &o0);
-        snprintf(note, sizeof note, "状态：%s · 权限 %s%s · 沙箱%s · %s · 可撤销 %d 步 · 待发送 %d · 本会话请求 %d 次",
+        tx_snprintf(note, sizeof note, "状态：%s · 权限 %s%s · 沙箱%s · %s · 可撤销 %d 步 · 待发送 %d · 本会话请求 %d 次",
                  m ? m : "deepseek-chat", perm[agent_get_perm()], agent_get_net() ? "" : "（断网）",
                  agent_sandbox_available() ? "开" : "无", st->busy ? "执行中" : "空闲",
                  agent_undo_depth(), st->npending, calls);
         tui_log_plain(st, note);
-        snprintf(note, sizeof note,
+        tx_snprintf(note, sizeof note,
             "busy=%d mode=%s owned=%d owner=%d goal=%d loop=%d left=%d history=%d pending=%d keys=%d",
             st->busy, st->mode == 1 ? "agent" : "chat", st->owned != NULL,
             st->owner_fd >= 0, st->goal[0] != 0, st->loop_on, st->loop_left,
@@ -1578,7 +1580,7 @@ static int tui_slash(tui_state *st) {
             st->errline[0] = 0; st->last_answer[0] = 0;
             st->last[0] = 0; st->output[0] = 0; st->notice = NULL;
             st->phase[0] = 0; st->ended = 0;
-            snprintf(note, sizeof note, "cleared UI view; model context and journal unchanged; pending=%d retained", st->npending);
+            tx_snprintf(note, sizeof note, "cleared UI view; model context and journal unchanged; pending=%d retained", st->npending);
             tui_log_plain(st, note);
         }
         tui_command_done(st);
@@ -1602,7 +1604,7 @@ static int tui_slash(tui_state *st) {
         (!zs_ncmp(st->input, "/reload-code", 12) && token == 12) ||
         (!zs_ncmp(st->input, "/exit", 5) && token == 5) ||
         (!zs_ncmp(st->input, "/quit", 5) && token == 5))) {
-        snprintf(note, sizeof note, "usage: %.*s (no arguments)", token, st->input);
+        tx_snprintf(note, sizeof note, "usage: %.*s (no arguments)", token, st->input);
         tui_log_plain(st, note);
         tui_command_done(st);
         return 1;
@@ -1624,19 +1626,19 @@ static int tui_slash(tui_state *st) {
             return 1;
         }
         m = mm_alloc(sizeof *m); copy = mm_alloc(sizeof *copy);
-        if (!m || !copy) snprintf(why, sizeof why, "allocation failed");
+        if (!m || !copy) tx_snprintf(why, sizeof why, "allocation failed");
         else {
             zs_mcpy(m, st->owned, sizeof *m);
-            snprintf(m->handoff_id, sizeof m->handoff_id, "%s", handoff);
+            tx_snprintf(m->handoff_id, sizeof m->handoff_id, "%s", handoff);
             zs_mcpy(copy, st, sizeof *copy);
             copy->input[0] = 0; copy->ninput = 0;
-            snprintf(path, sizeof path, "%s/state-v2.json", st->owned_dir);
+            tx_snprintf(path, sizeof path, "%s/state-v2.json", st->owned_dir);
             rc = tui_reload_export(copy, m, path, why, sizeof why);
         }
         if (rc == 0) {
             st->input[0] = 0; st->ninput = 0;
-            snprintf(note, sizeof note, "state saved: %s (explicit HASH binding only)", path);
-        } else snprintf(note, sizeof note, "export-state: %s", why);
+            tx_snprintf(note, sizeof note, "state saved: %s (explicit HASH binding only)", path);
+        } else tx_snprintf(note, sizeof note, "export-state: %s", why);
         tui_log_plain(st, note);
         mm_free(copy); mm_free(m);
         return 1;
@@ -1653,7 +1655,7 @@ static int tui_slash(tui_state *st) {
             st->loop_on = 0;
             st->loop_left = 0;
         } else {
-            snprintf(st->goal, sizeof st->goal, "%s", st->input + 6);
+            tx_snprintf(st->goal, sizeof st->goal, "%s", st->input + 6);
         }
         st->input[0] = '\0';
         st->ninput = 0;
@@ -1694,11 +1696,11 @@ static int tui_slash(tui_state *st) {
         const char *home = sy_env("HOME"), *p, *a;
         size_t n = 0, o = 0;
         fio_t *f;
-        snprintf(args, sizeof args, "%s", st->input[token] == ' ' ? st->input + token + 1 : "");
-        snprintf(file, sizeof file, ".csih/commands/%.*s.md", token - 1, st->input + 1);
+        tx_snprintf(args, sizeof args, "%s", st->input[token] == ' ' ? st->input + token + 1 : "");
+        tx_snprintf(file, sizeof file, ".csih/commands/%.*s.md", token - 1, st->input + 1);
         f = tui_fopen(file, "r");
         if (!f && home) {
-            snprintf(file, sizeof file, "%s/.csih/commands/%.*s.md", home, token - 1, st->input + 1);
+            tx_snprintf(file, sizeof file, "%s/.csih/commands/%.*s.md", home, token - 1, st->input + 1);
             f = tui_fopen(file, "r");
         }
         if (f) {
@@ -1713,14 +1715,14 @@ static int tui_slash(tui_state *st) {
             }
             out[o] = 0;
             while (o > 0 && (out[o - 1] == '\n' || out[o - 1] == ' ')) out[--o] = 0;
-            if (!out[0]) { snprintf(note, sizeof note, "command %.*s: %s 是空的", token, st->input, file); tui_log_plain(st, note); tui_command_done(st); return 1; }
+            if (!out[0]) { tx_snprintf(note, sizeof note, "command %.*s: %s 是空的", token, st->input, file); tui_log_plain(st, note); tui_command_done(st); return 1; }
             /* A leading / would be read as a command again; send it literally. */
-            snprintf(st->input, TUI_INPUT_MAX, "%s%s", out[0] == '/' ? " " : "", out);
+            tx_snprintf(st->input, TUI_INPUT_MAX, "%s%s", out[0] == '/' ? " " : "", out);
             st->ninput = (int)(size_t)zs_len(st->input);
             return 0;
         }
     }
-    snprintf(note, sizeof note, "unknown command: %.*s (/help 查看；自定义命令放 .csih/commands/名字.md)", token, st->input);
+    tx_snprintf(note, sizeof note, "unknown command: %.*s (/help 查看；自定义命令放 .csih/commands/名字.md)", token, st->input);
     tui_log_plain(st, note);
     tui_command_done(st);
     return 1;
@@ -1784,7 +1786,7 @@ static void tui_history_load(tui_state *st, const char *file) {
     char line[TUI_INPUT_MAX];
     int n = 0, i, start;
     fio_t *f;
-    snprintf(tui_hist_file, sizeof tui_hist_file, "%s", file);
+    tx_snprintf(tui_hist_file, sizeof tui_hist_file, "%s", file);
     f = tui_fopen(file, "r");
     if (!f) return;
     while (fio_gets(line, sizeof line, f)) {
@@ -1792,14 +1794,14 @@ static void tui_history_load(tui_state *st, const char *file) {
         line[strcspn(line, "\n")] = 0;
         if (!line[0]) continue;
         for (p = line; *p; p++) if (*p == 0x1e) *p = '\n';
-        snprintf(ring[n % 16], TUI_INPUT_MAX, "%s", line);
+        tx_snprintf(ring[n % 16], TUI_INPUT_MAX, "%s", line);
         n++;
     }
     fio_close(f);
     start = n > 16 ? n - 16 : 0;
     st->nhistory = 0;
     for (i = start; i < n; i++)
-        snprintf(st->history[st->nhistory++], sizeof st->history[0], "%s", ring[i % 16]);
+        tx_snprintf(st->history[st->nhistory++], sizeof st->history[0], "%s", ring[i % 16]);
     /* Keep the file bounded: past 1000 entries, rewrite it as the kept 16. */
     if (n > 1000 && (f = tui_fopen(file, "w"))) {
         fio_close(f);
@@ -1809,7 +1811,7 @@ static void tui_history_load(tui_state *st, const char *file) {
 
 static void tui_manual_submit(tui_state *st) {
     char captured[TUI_INPUT_MAX];
-    snprintf(captured, TUI_INPUT_MAX, "%s", st->input);
+    tx_snprintf(captured, TUI_INPUT_MAX, "%s", st->input);
     int had = st->input[0] != '\0';
     tui_submit(st);
     if (had && st->input[0] == '\0' &&
@@ -1863,7 +1865,7 @@ static void tui_submit(tui_state *st) {
     }
     if (st->transcript) {
         chat_turn t = chat_turn_run(st->transcript, st->input, 0.5);
-        snprintf(st->last, sizeof st->last, "%s", t.verdict);
+        tx_snprintf(st->last, sizeof st->last, "%s", t.verdict);
     } else if (!st->input[0]) {
         st->notice = "empty";
     }
@@ -1897,12 +1899,12 @@ static void tui_apply_key(tui_state *st, int kind, char ch) {
         if (ch == 0x12) {
             /* Ctrl-R: newest history line containing what was typed; again goes older. */
             int i, from;
-            if (!st->rsearch_at) snprintf(st->rsearch, sizeof st->rsearch, "%s", st->input);
+            if (!st->rsearch_at) tx_snprintf(st->rsearch, sizeof st->rsearch, "%s", st->input);
             from = st->rsearch_at ? st->rsearch_at - 2 : st->nhistory - 1;
             for (i = from; i >= 0; i--)
                 if (zs_find(st->history[i], st->rsearch)) break;
             if (i < 0) { st->notice = st->rsearch_at ? "没有更早的匹配" : "历史里没有匹配"; return; }
-            snprintf(st->input, TUI_INPUT_MAX, "%s", st->history[i]);
+            tx_snprintf(st->input, TUI_INPUT_MAX, "%s", st->history[i]);
             st->ninput = (int)(size_t)zs_len(st->input);
             st->back = 0;
             st->rsearch_at = i + 1;
@@ -2105,10 +2107,10 @@ static void tui_page_lines(const char *name, char got[][R_LINE_MAX + 1],
     *state = 1;
     if (!home || !home[0]) return;
     csih_home_bind(home);
-    snprintf(path, sizeof path, "%s/.csih/%s", home, name);
+    tx_snprintf(path, sizeof path, "%s/.csih/%s", home, name);
     fp = tui_fopen(path, "r");
     if (!fp) {
-        snprintf(path, sizeof path, "%s/.cdsh/%s", home, name);
+        tx_snprintf(path, sizeof path, "%s/.cdsh/%s", home, name);
         fp = tui_fopen(path, "r");
     }
     if (!fp) return;
@@ -2120,7 +2122,7 @@ static void tui_page_lines(const char *name, char got[][R_LINE_MAX + 1],
         *state = 0;
         if (*nlines >= maxlines) break;
         (*nlines)++;
-        snprintf(got[*nlines - 1], R_LINE_MAX + 1, "%s", buf);
+        tx_snprintf(got[*nlines - 1], R_LINE_MAX + 1, "%s", buf);
     }
     fio_close(fp);
 }
@@ -2213,10 +2215,10 @@ static int tui_page_count(const char *name) {
     int n = 0, any = 0;
     if (!home || !home[0]) return -1;
     csih_home_bind(home);
-    snprintf(path, sizeof path, "%s/.csih/%s", home, name);
+    tx_snprintf(path, sizeof path, "%s/.csih/%s", home, name);
     fp = tui_fopen(path, "r");
     if (!fp) {
-        snprintf(path, sizeof path, "%s/.cdsh/%s", home, name);
+        tx_snprintf(path, sizeof path, "%s/.cdsh/%s", home, name);
         fp = tui_fopen(path, "r");
     }
     if (!fp) return -1;
@@ -2235,11 +2237,11 @@ static void tui_rule_label(char *dst, int n, const char *name, int open, int cou
     const char *mark = open ? "收缩" : "展开";
     /* Keep [展开] and [收缩] intact so a click can find the bracket. */
     if (count < 0)
-        snprintf(dst, (size_t)n, "-<%s>[%s]> 无", name, mark);
+        tx_snprintf(dst, (size_t)n, "-<%s>[%s]> 无", name, mark);
     else if (count > 99)
-        snprintf(dst, (size_t)n, "-<%s>[%s]> 99+", name, mark);
+        tx_snprintf(dst, (size_t)n, "-<%s>[%s]> 99+", name, mark);
     else
-        snprintf(dst, (size_t)n, "-<%s>[%s]> %d", name, mark, count);
+        tx_snprintf(dst, (size_t)n, "-<%s>[%s]> %d", name, mark, count);
 }
 
 /* Top edge of the system block. Collapsed is [展开], open is [收缩].
@@ -2271,7 +2273,7 @@ static void tui_mind_rule(r_state *rs, char line[][R_LINE_MAX + 1], int *n, int 
         char lfit[R_LINE_MAX + 1], rfit[R_LINE_MAX + 1];
         tui_label_rule(lfit, (int)sizeof lfit, left, half);
         tui_label_rule(rfit, (int)sizeof rfit, right, rest);
-        snprintf(line[*n], R_LINE_MAX + 1, "%s┬%s", lfit, rfit);
+        tx_snprintf(line[*n], R_LINE_MAX + 1, "%s┬%s", lfit, rfit);
     }
     rs->body[*n] = line[*n];
     (*n)++;
@@ -2324,7 +2326,7 @@ static void tui_sys_block(r_state *rs, char line[][R_LINE_MAX + 1], int *n,
     tui_sys_y0 = *n + 2;
     for (row = 0; row < TUI_SYS_N && *n < 63; row++) {
         const char *piece = (top + row < nrows) ? wrap[top + row] : "";
-        snprintf(line[*n], R_LINE_MAX + 1, "%s", piece);
+        tx_snprintf(line[*n], R_LINE_MAX + 1, "%s", piece);
         rs->body[*n] = line[*n];
         (*n)++;
     }
@@ -2338,8 +2340,8 @@ static int tui_mind_fold(char src[][R_LINE_MAX + 1], int n,
                          int *rows, int width, int state) {
     int i, out = 0;
     if (n <= 0) {
-        if (state == 1) snprintf(dst[0], R_LINE_MAX + 1, "(无)");
-        else if (state == 2) snprintf(dst[0], R_LINE_MAX + 1, "(空)");
+        if (state == 1) tx_snprintf(dst[0], R_LINE_MAX + 1, "(无)");
+        else if (state == 2) tx_snprintf(dst[0], R_LINE_MAX + 1, "(空)");
         else dst[0][0] = '\0';
         if (maxrows > 0) out = 1;
         if (rows) *rows = out;
@@ -2451,9 +2453,9 @@ static void tui_mind_block(r_state *rs, char line[][R_LINE_MAX + 1], int *n, int
         tui_col_put(left, half, lt);
         tui_col_put(right, rest, rt);
         if (bar < 0)
-            snprintf(line[*n], R_LINE_MAX + 1, "%s%s", left, right);
+            tx_snprintf(line[*n], R_LINE_MAX + 1, "%s%s", left, right);
         else
-            snprintf(line[*n], R_LINE_MAX + 1, "%s│%s", left, right);
+            tx_snprintf(line[*n], R_LINE_MAX + 1, "%s│%s", left, right);
         rs->body[*n] = line[*n];
         (*n)++;
     }
@@ -2508,21 +2510,21 @@ static int tui_path_at(tui_state *st, int x, int y, char *out, size_t cap, int *
     for (a = k; a > 0 && !sep[a - 1]; a--) ;
     for (b = k; b + 1 < n && !sep[b + 1]; b++) ;
     if (off[b + 1] - off[a] >= (int)sizeof word) return 0;
-    snprintf(word, sizeof word, "%.*s", off[b + 1] - off[a], s + off[a]);
+    tx_snprintf(word, sizeof word, "%.*s", off[b + 1] - off[a], s + off[a]);
     {
         /* path:LINE or path:LINE:COL */
         char *c = zs_chr(word, ':');
-        if (c && c[1] >= '0' && c[1] <= '9') { *line = atoi(c + 1); *c = 0; }
+        if (c && c[1] >= '0' && c[1] <= '9') { *line = (int)tx_atol(c + 1); *c = 0; }
         else if (c && !c[1]) *c = 0;
     }
     while (word[0] && zs_chr(".;:", word[(size_t)zs_len(word) - 1])) word[(size_t)zs_len(word) - 1] = 0;
     if (!word[0]) return 0;
-    if (word[0] == '~' && word[1] == '/' && sy_env("HOME")) snprintf(out, cap, "%s%s", sy_env("HOME"), word + 1);
-    else if (word[0] == '/') snprintf(out, cap, "%s", word);
+    if (word[0] == '~' && word[1] == '/' && sy_env("HOME")) tx_snprintf(out, cap, "%s%s", sy_env("HOME"), word + 1);
+    else if (word[0] == '/') tx_snprintf(out, cap, "%s", word);
     else {
         const char *cwd = csih_env("CSIH_CWD", "CDSH_CWD");
         if (!cwd) { if (!tui_getcwd(here, (int)sizeof here)) zs_set(here, (long)sizeof here, "."); cwd = here; }
-        snprintf(out, cap, "%s/%s", cwd, word);
+        tx_snprintf(out, cap, "%s/%s", cwd, word);
     }
     return sy_stat(out, &sb) == 0 && sb.kind == 'f';
 }
@@ -2534,11 +2536,11 @@ static void tui_click(tui_state *st, int x, int y) {
         char path[2048], saved[TUI_INPUT_MAX];
         int line, nsaved = st->ninput, back = st->back;
         if (tui_path_at(st, x, y, path, sizeof path, &line)) {
-            snprintf(saved, sizeof saved, "%s", st->input);
-            snprintf(st->input, TUI_INPUT_MAX, "/view %s %d", path, line);
+            tx_snprintf(saved, sizeof saved, "%s", st->input);
+            tx_snprintf(st->input, TUI_INPUT_MAX, "/view %s %d", path, line);
             st->ninput = (int)(size_t)zs_len(st->input);
             tui_slash(st);
-            snprintf(st->input, TUI_INPUT_MAX, "%s", saved);
+            tx_snprintf(st->input, TUI_INPUT_MAX, "%s", saved);
             st->ninput = nsaved; st->back = back;
             return;
         }
@@ -2756,7 +2758,7 @@ static int tui_session_summary(char *out, size_t cap) {
     long hit = 0, miss = 0, outk = 0;
     net_session_usage(&calls, &hit, &miss, &outk);
     if (!calls) return 0;
-    snprintf(out, cap, "csih 本次会话：请求 %d 次 · 输入 %ld 词元（缓存命中 %d%%）· 输出 %ld 词元 · 文件改动 %d 步%s",
+    tx_snprintf(out, cap, "csih 本次会话：请求 %d 次 · 输入 %ld 词元（缓存命中 %d%%）· 输出 %ld 词元 · 文件改动 %d 步%s",
              calls, hit + miss, hit + miss ? (int)(hit * 100 / (hit + miss)) : 0, outk, steps,
              steps ? "（退出后不能再 /undo）" : "");
     return 1;
@@ -2789,7 +2791,7 @@ static void tui_status_load(tui_state *st) {
     if (sy_stat(path, &sb) != 0 || sb.kind != 'f') return;
     f = tui_fopen(path, "r");
     if (!f) return;
-    if (stale_env && atol(stale_env) > 0) stale = atol(stale_env);
+    if (stale_env && tx_atol(stale_env) > 0) stale = tx_atol(stale_env);
     age = (long)net_now() - sb.mtime;
     if (age < 0) age = 0;
     while (st->nstatus < 3 && fio_gets(line, sizeof line, f)) {
@@ -2798,12 +2800,12 @@ static void tui_status_load(tui_state *st) {
         line[n] = 0;
         if (!line[0]) continue;
         if (st->nstatus == 0) {
-            if (age < 60) snprintf(ago, sizeof ago, "%ld秒前", age);
-            else if (age < 3600) snprintf(ago, sizeof ago, "%ld分钟前", age / 60);
-            else snprintf(ago, sizeof ago, "%ld小时前", age / 3600);
-            snprintf(st->status[0], sizeof st->status[0], "项目> %.150s · %s%s",
+            if (age < 60) tx_snprintf(ago, sizeof ago, "%ld秒前", age);
+            else if (age < 3600) tx_snprintf(ago, sizeof ago, "%ld分钟前", age / 60);
+            else tx_snprintf(ago, sizeof ago, "%ld小时前", age / 3600);
+            tx_snprintf(st->status[0], sizeof st->status[0], "项目> %.150s · %s%s",
                      line, age > stale ? "陈旧 " : "", ago);
-        } else snprintf(st->status[st->nstatus], sizeof st->status[0], "项目> %.200s", line);
+        } else tx_snprintf(st->status[st->nstatus], sizeof st->status[0], "项目> %.200s", line);
         st->nstatus++;
     }
     fio_close(f);
@@ -2811,9 +2813,9 @@ static void tui_status_load(tui_state *st) {
 
 /* 574B, 32.1KB, 1.2MB: byte counts a person can read at a glance. */
 static void tui_bytes(char *out, size_t cap, long n) {
-    if (n < 1024) snprintf(out, cap, "%ldB", n);
-    else if (n < 1024L * 1024) snprintf(out, cap, "%.1fKB", n / 1024.0);
-    else snprintf(out, cap, "%.1fMB", n / (1024.0 * 1024));
+    if (n < 1024) tx_snprintf(out, cap, "%ldB", n);
+    else if (n < 1024L * 1024) tx_snprintf(out, cap, "%.1fKB", n / 1024.0);
+    else tx_snprintf(out, cap, "%.1fMB", n / (1024.0 * 1024));
 }
 
 /* Display columns of the first n bytes of s (n < 0: all of it). */
@@ -2839,7 +2841,7 @@ static void tui_input_row(char *dst, int dstmax, const char *input, int cols, in
     /* Cursor away from the end: draw a thin bar where the next byte goes. */
     if (back > 0 && back <= len) {
         int at = len - back;
-        snprintf(marked, sizeof marked, "%.*s▏%s", at, input, input + at);
+        tx_snprintf(marked, sizeof marked, "%.*s▏%s", at, input, input + at);
         input = marked;
     }
     tui_put_folded(shown, (int)sizeof shown, "", input ? input : "");
@@ -2861,9 +2863,9 @@ static void tui_input_row(char *dst, int dstmax, const char *input, int cols, in
     if (from != shown) {
         char rest[R_LINE_MAX + 1];
         tui_utf8_fit(from, width - 1, rest);
-        snprintf(piece, sizeof piece, "…%s", rest);
+        tx_snprintf(piece, sizeof piece, "…%s", rest);
     } else tui_utf8_fit(shown, width, piece);
-    snprintf(dst, (size_t)dstmax, "> %s", piece);
+    tx_snprintf(dst, (size_t)dstmax, "> %s", piece);
 }
 
 /* After a request finishes the busy line collapses to shortcuts; keep the
@@ -2879,9 +2881,9 @@ static const char *idle_last(tui_state *st) {
         return buf;
     }
     if (st->ended)
-        snprintf(buf, sizeof buf, "上一轮 %s", st->phase);
+        tx_snprintf(buf, sizeof buf, "上一轮 %s", st->phase);
     else
-        snprintf(buf, sizeof buf, "上次 %s %d秒", st->phase, sec);
+        tx_snprintf(buf, sizeof buf, "上次 %s %d秒", st->phase, sec);
     return buf;
 }
 
@@ -2899,7 +2901,7 @@ static void tui_result_row(char *out, size_t cap, const agent_result *r) {
     if (!zs_cmp(why, "answer outcome=failed")) why = "模型报告未能完成";
     else if (!zs_cmp(why, "answer outcome=partial")) why = "模型报告只完成了一部分";
     else if (!zs_cmp(why, "answer outcome=unverified")) why = "模型报告结果未经核实";
-    snprintf(out, cap, soft ? "◐ 做完未验证: %s" : "✗ 失败: %s", why);
+    tx_snprintf(out, cap, soft ? "◐ 做完未验证: %s" : "✗ 失败: %s", why);
 }
 
 /* Undo depth when the current turn started: the difference at the end is how
@@ -2908,7 +2910,7 @@ static int tui_turn_undo0 = -1;
 
 static void tui_turn_changes(char *out, size_t cap) {
     int d = tui_turn_undo0 < 0 ? 0 : agent_undo_depth() - tui_turn_undo0;
-    if (d > 0) snprintf(out, cap, " · 改了 %d 处文件（/diff 查看）", d);
+    if (d > 0) tx_snprintf(out, cap, " · 改了 %d 处文件（/diff 查看）", d);
     else if (cap) out[0] = 0;
 }
 
@@ -2927,10 +2929,10 @@ static void tui_done_row(char *out, size_t cap, const agent_result *r) {
         char took[24] = "";
         net_progress(&sec, &tokens, &sent, &rsec);
         char ch[64];
-        if (sec > 0) snprintf(took, sizeof took, " · %d秒", sec);
+        if (sec > 0) tx_snprintf(took, sizeof took, " · %d秒", sec);
         /* File changes go before the judge's reason, which may be cut at the row's end. */
         tui_turn_changes(ch, sizeof ch);
-        snprintf(out, cap, "%s · 本轮结束 %d 轮 %d 步%s%s%s%s", tag, r->rounds, r->actions, took, ch,
+        tx_snprintf(out, cap, "%s · 本轮结束 %d 轮 %d 步%s%s%s%s", tag, r->rounds, r->actions, took, ch,
                  why[0] ? " · " : "", why);
     }
 }
@@ -2945,9 +2947,9 @@ static void tui_title_info(char *out, size_t cap, const char *model, const char 
     static const char *perm[] = { "read", "work", "any" };
     const char *pm = agent_get_perm() == 1 && !agent_get_net() ? "work·断网" : perm[agent_get_perm()];
     if (hn && cwd && !zs_ncmp(cwd, home, hn) && (cwd[hn] == '/' || !cwd[hn]))
-        snprintf(out, cap, "%s · key=%s · %s · ~%s", model, ks, pm, cwd + hn);
+        tx_snprintf(out, cap, "%s · key=%s · %s · ~%s", model, ks, pm, cwd + hn);
     else
-        snprintf(out, cap, "%s · key=%s · %s · %s", model, ks, pm, cwd ? cwd : "?");
+        tx_snprintf(out, cap, "%s · key=%s · %s · %s", model, ks, pm, cwd ? cwd : "?");
 }
 
 static const char *tui_role_title(const tui_state *st) {
@@ -2958,9 +2960,9 @@ static const char *tui_role_title(const tui_state *st) {
     if (!role || !role[0]) return "csih · agent";
     (void)peer;
     if (!zs_cmp(role, "write"))
-        snprintf(buf, sizeof buf, "csih · 写");
+        tx_snprintf(buf, sizeof buf, "csih · 写");
     else if (!zs_cmp(role, "watch"))
-        snprintf(buf, sizeof buf, "csih · 看");
+        tx_snprintf(buf, sizeof buf, "csih · 看");
     else
         return "csih · agent";
     return buf;
@@ -2992,12 +2994,12 @@ static r_frame tui_render_state(tui_state *st, int cols) {
         if (!cwd) { if (!tui_getcwd(here, (int)sizeof here)) zs_set(here, (long)sizeof here, "."); cwd = here; }
         if (st->model[0]) model = st->model;
         tui_title_info(info, sizeof info, model ? model : "deepseek-chat", cwd);
-        snprintf(title, sizeof title, "%s · %s", rs.title, info);
+        tx_snprintf(title, sizeof title, "%s · %s", rs.title, info);
         rs.title = title;
     }
     if (st->owned) {
         static char bound_title[160];
-        snprintf(bound_title, sizeof bound_title, "%s · %.64s", rs.title, st->owned->candidate_hash);
+        tx_snprintf(bound_title, sizeof bound_title, "%s · %.64s", rs.title, st->owned->candidate_hash);
         rs.title = bound_title;
     }
     rs.width = cols;
@@ -3020,17 +3022,17 @@ static r_frame tui_render_state(tui_state *st, int cols) {
             tui_bytes(up, sizeof up, sent);
             tui_bytes(down, sizeof down, got);
             if (seen && hit + miss > 0)
-                snprintf(hint, sizeof hint,
+                tx_snprintf(hint, sizeof hint,
                          "⏳ %s %d秒 · %d词元 · ↑%s 已收%s · 缓存命中%d%%",
                          phase, sec, tokens, up, down, hit * 100 / (hit + miss));
             else
-                snprintf(hint, sizeof hint,
+                tx_snprintf(hint, sizeof hint,
                          "⏳ %s %d秒 · %d词元 · ↑%s 已收%s",
                          phase, sec, tokens, up, down);
         } else if (st->ask_exit)
-            snprintf(hint, sizeof hint, "要退出请按 Ctrl-D");
+            tx_snprintf(hint, sizeof hint, "要退出请按 Ctrl-D");
         else if (st->log_skip > 0)
-            snprintf(hint, sizeof hint, "更早%d · End回底", st->log_skip);
+            tx_snprintf(hint, sizeof hint, "更早%d · End回底", st->log_skip);
         else {
             const char *prev = idle_last(st);
             const char *sep = prev[0] ? " · " : "";
@@ -3038,22 +3040,22 @@ static r_frame tui_render_state(tui_state *st, int cols) {
             int fit = cols > 0 ? cols : 1;
             if (fit > R_MAX_COLS) fit = R_MAX_COLS;
             /* A fresh, empty screen says where to start; after that, stay short. */
-            snprintf(raw, sizeof raw, "%s%sEnter 发送%s", prev, sep,
+            tx_snprintf(raw, sizeof raw, "%s%sEnter 发送%s", prev, sep,
                      st->nlog == 0 && !st->ninput ? " · /help 看命令 · / 加 Tab 补全 · Alt-Enter 换行" : "");
             tui_utf8_fit(raw, fit, hint);
         }
     } else if (st->ask_exit)
-        snprintf(hint, sizeof hint, "要退出请按 Ctrl-D · %d", st->ticks);
+        tx_snprintf(hint, sizeof hint, "要退出请按 Ctrl-D · %d", st->ticks);
     else
-        snprintf(hint, sizeof hint, "Ctrl-C 清空输入/结果 · Ctrl-D 退出 · %d", st->ticks);
+        tx_snprintf(hint, sizeof hint, "Ctrl-C 清空输入/结果 · Ctrl-D 退出 · %d", st->ticks);
     if (st->errline[0]) {
         char with[R_LINE_MAX + 1];
         char fitted[R_LINE_MAX + 1];
         int fit = cols > 0 ? cols : 1;
         if (fit > R_MAX_COLS) fit = R_MAX_COLS;
-        snprintf(with, sizeof with, "%s · 错误> %s", hint, st->errline);
+        tx_snprintf(with, sizeof with, "%s · 错误> %s", hint, st->errline);
         tui_utf8_fit(with, fit, fitted);
-        snprintf(hint, sizeof hint, "%s", fitted);
+        tx_snprintf(hint, sizeof hint, "%s", fitted);
     }
 
     if (st->mode == 1) {
@@ -3079,13 +3081,13 @@ static r_frame tui_render_state(tui_state *st, int cols) {
                 /* Title is frame row 1, so body index n is screen row n+2.
                  * Closed: the explanation and a short call. Open: that line,
                  * the full call when it was shortened, then the tool output. */
-                snprintf(tag, sizeof tag, "%s[%s]> ", kind,
+                tx_snprintf(tag, sizeof tag, "%s[%s]> ", kind,
                          st->ex_open[i] ? "收缩" : "展开");
                 tui_condense(cond, (int)sizeof cond, st->ex_cmd[i], 28);
                 if (cond[0])
-                    snprintf(head, sizeof head, "%s · %s", st->ex_why[i], cond);
+                    tx_snprintf(head, sizeof head, "%s · %s", st->ex_why[i], cond);
                 else
-                    snprintf(head, sizeof head, "%s", st->ex_why[i]);
+                    tx_snprintf(head, sizeof head, "%s", st->ex_why[i]);
                 if (!st->ex_open[i]) {
                     /* Closed: one row, with the first status line of the body. */
                     const char *b = st->ex_body[i];
@@ -3100,7 +3102,7 @@ static r_frame tui_render_state(tui_state *st, int cols) {
                             sl = 60;
                             while (sl > 0 && ((unsigned char)b[sl] & 0xC0) == 0x80) sl--;
                         }
-                        snprintf(head + hl, sizeof head - hl, " · %.*s", sl, b);
+                        tx_snprintf(head + hl, sizeof head - hl, " · %.*s", sl, b);
                     }
                 }
                 {
@@ -3182,11 +3184,11 @@ static r_frame tui_render_state(tui_state *st, int cols) {
             char gfold[R_LINE_MAX + 1];
             char suffix[32];
             int glen;
-            snprintf(suffix, sizeof suffix, " · loop> %s", st->loop_on ? "on" : "off");
+            tx_snprintf(suffix, sizeof suffix, " · loop> %s", st->loop_on ? "on" : "off");
             glen = (int)sizeof line[n] - (int)(size_t)zs_len("goal> ") - (int)(size_t)zs_len(suffix);
             if (glen < 1) glen = 1;
             tui_put_folded_n(gfold, glen, "", st->goal, glen, 0);
-            snprintf(line[n], sizeof line[n], "goal> %s%s", gfold, suffix);
+            tx_snprintf(line[n], sizeof line[n], "goal> %s%s", gfold, suffix);
             rs.body[n] = line[n]; n++;
         }
         for (i = 0; i < st->npending && n < 62; i++) {
@@ -3205,7 +3207,7 @@ static r_frame tui_render_state(tui_state *st, int cols) {
         }
         tui_input_row(line[n], (int)sizeof line[n], st->input, cols, st->ninput - tui_cursor(st));
         rs.body[n] = line[n]; n++;
-        snprintf(line[n], sizeof line[n], "%s", hint);
+        tx_snprintf(line[n], sizeof line[n], "%s", hint);
         rs.body[n] = line[n]; n++;
         tui_sys_rule(&rs, line, &n, cols, st);
         tui_sys_block(&rs, line, &n, cols, st);
@@ -3214,19 +3216,19 @@ static r_frame tui_render_state(tui_state *st, int cols) {
     } else {
         tui_input_row(line[n], (int)sizeof line[n], st->input, cols, st->ninput - tui_cursor(st));
         rs.body[n] = line[n]; n++;
-        snprintf(line[n], sizeof line[n], "%s", hint);
+        tx_snprintf(line[n], sizeof line[n], "%s", hint);
         rs.body[n] = line[n]; n++;
         tui_sys_rule(&rs, line, &n, cols, st);
         tui_sys_block(&rs, line, &n, cols, st);
         tui_mind_rule(&rs, line, &n, cols, st);
         tui_mind_block(&rs, line, &n, cols, st);
-        snprintf(line[n], sizeof line[n], "%s", st->notice ? st->notice : "");
+        tx_snprintf(line[n], sizeof line[n], "%s", st->notice ? st->notice : "");
         rs.body[n] = line[n]; n++;
-        snprintf(line[n], sizeof line[n], "ticks %d  cols %d", st->ticks, cols);
+        tx_snprintf(line[n], sizeof line[n], "ticks %d  cols %d", st->ticks, cols);
         rs.body[n] = line[n]; n++;
-        snprintf(line[n], sizeof line[n], "%s", st->last[0] ? st->last : "-");
+        tx_snprintf(line[n], sizeof line[n], "%s", st->last[0] ? st->last : "-");
         rs.body[n] = line[n]; n++;
-        snprintf(line[n], sizeof line[n], "%s", st->output[0] ? st->output : "");
+        tx_snprintf(line[n], sizeof line[n], "%s", st->output[0] ? st->output : "");
         rs.body[n] = line[n]; n++;
     }
 
@@ -3267,7 +3269,7 @@ static const char *tui_line_color(const char *line) {
 
 static size_t tui_put_line(char *out, size_t cap, int row, const char *line) {
     const char *c = tui_line_color(line);
-    return (size_t)snprintf(out, cap, c ? "\x1b[%d;1H%s%s\x1b[0m\x1b[K" : "\x1b[%d;1H%s%s\x1b[K",
+    return (size_t)tx_snprintf(out, cap, c ? "\x1b[%d;1H%s%s\x1b[0m\x1b[K" : "\x1b[%d;1H%s%s\x1b[K",
                             row, c ? c : "", line);
 }
 
@@ -3275,11 +3277,11 @@ static void tui_paint_all(const r_frame *f) {
     char out[R_FRAME_BYTES + R_MAX_LINES * 32];
     size_t used = 0;
     int i;
-    used += (size_t)snprintf(out + used, sizeof out - used, "\x1b[H");
+    used += (size_t)tx_snprintf(out + used, sizeof out - used, "\x1b[H");
     for (i = 0; i < f->n && used + 32 < sizeof out; i++)
         used += tui_put_line(out + used, sizeof out - used, i + 1, f->lines[i]);
     if (used + 16 < sizeof out)
-        used += (size_t)snprintf(out + used, sizeof out - used, "\x1b[J");
+        used += (size_t)tx_snprintf(out + used, sizeof out - used, "\x1b[J");
     if (used > 0) tui_write_all(out, used);
 }
 
@@ -3325,31 +3327,31 @@ static void tui_agent_event(const char *line, void *ud) {
         char tool[32], sub[32], path[96];
         tool[0] = sub[0] = path[0] = '\0';
         if (b) {
-            snprintf(tool, sizeof tool, "%.*s", (int)(b - a), a);
+            tx_snprintf(tool, sizeof tool, "%.*s", (int)(b - a), a);
             if (c) {
-                snprintf(sub, sizeof sub, "%.*s", (int)(c - (b + 1)), b + 1);
-                snprintf(path, sizeof path, "%s", c + 1);
+                tx_snprintf(sub, sizeof sub, "%.*s", (int)(c - (b + 1)), b + 1);
+                tx_snprintf(path, sizeof path, "%s", c + 1);
             }
         }
         if (path[0] && sub[0])
-            snprintf(st->phase, sizeof st->phase, "%s %s %s", tool, sub, path);
+            tx_snprintf(st->phase, sizeof st->phase, "%s %s %s", tool, sub, path);
         else if (path[0])
-            snprintf(st->phase, sizeof st->phase, "%s %s", tool, path);
+            tx_snprintf(st->phase, sizeof st->phase, "%s %s", tool, path);
         else if (sub[0])
-            snprintf(st->phase, sizeof st->phase, "%s %s", tool[0] ? tool : "工具", sub);
+            tx_snprintf(st->phase, sizeof st->phase, "%s %s", tool[0] ? tool : "工具", sub);
         else
-            snprintf(st->phase, sizeof st->phase, "%s", tool[0] ? tool : "工具");
+            tx_snprintf(st->phase, sizeof st->phase, "%s", tool[0] ? tool : "工具");
     } else if (!zs_ncmp(line, "exec\t", 5)) {
         /* The exec row arrives before the command runs; say so instead of 等模型. */
         const char *cmd = zs_rchr(line, '\t');
         char shortc[40];
         tui_condense(shortc, (int)sizeof shortc, cmd ? cmd + 1 : "", 24);
-        snprintf(st->phase, sizeof st->phase, "跑命令 %s", shortc);
+        tx_snprintf(st->phase, sizeof st->phase, "跑命令 %s", shortc);
         tui_tool_t0 = (long)net_now();
     } else if (!zs_ncmp(line, "  evidence ", 11) || !zs_ncmp(line, "  │ ", 6)) {
         /* Tool output rows: the tool is still the current step. */
     } else if (st->busy) {
-        snprintf(st->phase, sizeof st->phase, "等模型");
+        tx_snprintf(st->phase, sizeof st->phase, "等模型");
     }
     tui_log_event(st, line);
     tui_redraw(st);
@@ -3427,7 +3429,7 @@ static int tui_selftest_rm(const char *path, unsigned flags) {
     char why[600]; int rc;
     if (flags) rc = csih_safedel_purge(path, why, (int)sizeof why);
     else rc = csih_safedel_purge_file(path, why, (int)sizeof why);
-    if (rc) printf("FAIL selftest cleanup: %s\n", why);
+    if (rc) sy_printf("FAIL selftest cleanup: %s\n", why);
     return rc;
 }
 
@@ -3452,7 +3454,7 @@ static int tui_run_prompt(tui_state *st, const char *source_prompt, int clear_ma
         transcript = st->transcript;
     } else {
         if (agent_transcript_path(journal, sizeof journal) != 0)
-            snprintf(journal, sizeof journal, "/tmp/csih-agent-%d.jsonl", (int)sy_pid());
+            tx_snprintf(journal, sizeof journal, "/tmp/csih-agent-%d.jsonl", (int)sy_pid());
         transcript = journal;
     }
 
@@ -3471,7 +3473,7 @@ static int tui_run_prompt(tui_state *st, const char *source_prompt, int clear_ma
             "| grep -v \"^$(tmux display-message -p '#{window_index}') \"",
             NULL);
         if (sr.ok && sr.out[0]) {
-            snprintf(extra, sizeof extra,
+            tx_snprintf(extra, sizeof extra,
                 "下面是窗口清单，只有用户要求操作窗口时才用。\n%s",
                 sr.out);
         }
@@ -3480,7 +3482,7 @@ static int tui_run_prompt(tui_state *st, const char *source_prompt, int clear_ma
     /* Record the prompt, then clear the input line so the next frame shows it. */
     {
         char you[240];
-        snprintf(you, sizeof you, "you> %s", prompt);
+        tx_snprintf(you, sizeof you, "you> %s", prompt);
         tui_log_plain(st, you);
     }
     if (clear_manual_input) { st->input[0] = '\0'; st->ninput = 0; }
@@ -3491,7 +3493,7 @@ static int tui_run_prompt(tui_state *st, const char *source_prompt, int clear_ma
     st->busy = 1;
     st->ended = 0;
     st->busy_tick = st->ticks;
-    snprintf(st->phase, sizeof st->phase, "等模型");
+    tx_snprintf(st->phase, sizeof st->phase, "等模型");
     tui_redraw(st);
     net_tick_st = st;
     tui_turn_undo0 = agent_undo_depth();
@@ -3507,7 +3509,7 @@ static int tui_run_prompt(tui_state *st, const char *source_prompt, int clear_ma
         st->busy = 0;
         {
             char fail[360];
-            snprintf(fail, sizeof fail, "✗ 失败: %s", r.reason);
+            tx_snprintf(fail, sizeof fail, "✗ 失败: %s", r.reason);
             tui_log_plain(st, fail);
         }
         tui_redraw(st);
@@ -3525,7 +3527,7 @@ static int tui_run_agent(tui_state *st) {
 static int tui_run_pending(tui_state *st) {
     char prompt[TUI_INPUT_MAX];
     if (st->busy || st->npending <= 0) return 0;
-    snprintf(prompt, sizeof prompt, "%s", st->pending[0]);
+    tx_snprintf(prompt, sizeof prompt, "%s", st->pending[0]);
     st->npending--;
     zs_mmove(st->pending[0], st->pending[1], (size_t)st->npending * TUI_INPUT_MAX);
     st->pending[st->npending][0] = 0;
@@ -3542,15 +3544,15 @@ static void tui_turn_done(tui_state *st) {
      * bar writes how this turn ended, not a stale "等模型". */
     st->ended = 1;
     if (cancelled)
-        snprintf(st->phase, sizeof st->phase, "已取消");
+        tx_snprintf(st->phase, sizeof st->phase, "已取消");
     else if (!r.ok)
-        snprintf(st->phase, sizeof st->phase, "%s", r.outcome==AGENT_OUTCOME_PARTIAL ? "部分完成" : (r.outcome==AGENT_OUTCOME_UNVERIFIED || r.acceptance==AGENT_ACCEPT_UNVERIFIED) ? "未验证" : "出错");
+        tx_snprintf(st->phase, sizeof st->phase, "%s", r.outcome==AGENT_OUTCOME_PARTIAL ? "部分完成" : (r.outcome==AGENT_OUTCOME_UNVERIFIED || r.acceptance==AGENT_ACCEPT_UNVERIFIED) ? "未验证" : "出错");
     else if (r.answer[0])
-        snprintf(st->phase, sizeof st->phase, "%s",r.scope==AGENT_SCOPE_ANSWER_ONLY ? "咨询已答" : "语义接受");
+        tx_snprintf(st->phase, sizeof st->phase, "%s",r.scope==AGENT_SCOPE_ANSWER_ONLY ? "咨询已答" : "语义接受");
     else if (r.stopped)
-        snprintf(st->phase, sizeof st->phase, "动作打满未答");
+        tx_snprintf(st->phase, sizeof st->phase, "动作打满未答");
     else
-        snprintf(st->phase, sizeof st->phase, "未答");
+        tx_snprintf(st->phase, sizeof st->phase, "未答");
     if (from_mail)
         tui_mail_complete(st, cancelled ? "cancelled" : r.ok ? (r.scope==AGENT_SCOPE_ANSWER_ONLY ? "answered" : "ok") : r.outcome==AGENT_OUTCOME_PARTIAL ? "partial" : (r.outcome==AGENT_OUTCOME_UNVERIFIED || r.acceptance==AGENT_ACCEPT_UNVERIFIED) ? "unverified" : "failed", r.reason);
     if (cancelled) {
@@ -3561,18 +3563,18 @@ static void tui_turn_done(tui_state *st) {
     if (!r.ok) {
         /* The answer already showed as its 完成声明/失败声明 row; do not print it twice. */
         if (r.answer[0])
-            snprintf(st->last_answer, sizeof st->last_answer, "%s", r.answer);
+            tx_snprintf(st->last_answer, sizeof st->last_answer, "%s", r.answer);
         {
             char fail[360], ch[64];
             size_t fl;
             tui_result_row(fail, sizeof fail, &r);
             tui_turn_changes(ch, sizeof ch);
             fl = (size_t)zs_len(fail);
-            snprintf(fail + fl, sizeof fail - fl, "%s", ch);
+            tx_snprintf(fail + fl, sizeof fail - fl, "%s", ch);
             tui_log_plain(st, fail);
         }
     } else {
-        snprintf(st->last_answer, sizeof st->last_answer, "%s",
+        tx_snprintf(st->last_answer, sizeof st->last_answer, "%s",
                  r.answer[0] ? r.answer : "(no answer text)");
         {
             char sum[240];
@@ -3581,7 +3583,7 @@ static void tui_turn_done(tui_state *st) {
         }
     }
     tui_redraw(st);
-    if (tui_should_bell(isatty(1), sy_env("CSIH_BELL"))) sy_write_all(1, "\a", 1);   /* the screen is written to fd 1 directly too */
+    if (tui_should_bell(sy_isatty(1), sy_env("CSIH_BELL"))) sy_write_all(1, "\a", 1);   /* the screen is written to fd 1 directly too */
     if (!cancelled && r.ok && st->loop_on && !from_mail) tui_queue_goal(st);
 }
 
@@ -3596,7 +3598,7 @@ static struct {
 
 static int tui_managed_send(const char *op, int pending) {
     char line[512]; int n;
-    n = snprintf(line, sizeof line,
+    n = tx_snprintf(line, sizeof line,
         "{\"op\":\"%s\",\"session\":\"%s\",\"handoff\":\"%s\",\"hash\":\"%s\"}\n",
         op, tui_managed.session, pending ? tui_managed.next_handoff : tui_managed.handoff,
         pending ? tui_managed.next_hash : tui_managed.hash);
@@ -3623,9 +3625,8 @@ static int tui_managed_init(const char *dir, const char *sid, const char *hid,
         fd = fd * 10 + fdtext[i] - '0';
     }
     if (fd < 3 || sy_fstat(fd, &sb) != 0 || sb.kind != 's') return -1;
-    flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0 ||
-        fcntl(fd, F_SETFD, FD_CLOEXEC) != 0) return -1;
+    flags = 0;
+    if (sy_fd_nonblock(fd, 1) != 0 || sy_fd_cloexec(fd, 1) != 0) return -1;
     dfd = sy_open(dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0);
     if (dfd < 0) return -1;
     {
@@ -3635,10 +3636,10 @@ static int tui_managed_init(const char *dir, const char *sid, const char *hid,
     if (sy_close(dfd) != 0 || !i) return -1;
     zs_mset(&tui_managed, 0, sizeof tui_managed);
     tui_managed.fd = fd; tui_managed.phase = standby ? 1 : 2;
-    snprintf(tui_managed.dir, sizeof tui_managed.dir, "%s", dir);
-    snprintf(tui_managed.session, sizeof tui_managed.session, "%s", sid);
-    snprintf(tui_managed.handoff, sizeof tui_managed.handoff, "%s", hid);
-    snprintf(tui_managed.hash, sizeof tui_managed.hash, "%s", hash);
+    tx_snprintf(tui_managed.dir, sizeof tui_managed.dir, "%s", dir);
+    tx_snprintf(tui_managed.session, sizeof tui_managed.session, "%s", sid);
+    tx_snprintf(tui_managed.handoff, sizeof tui_managed.handoff, "%s", hid);
+    tx_snprintf(tui_managed.hash, sizeof tui_managed.hash, "%s", hash);
     return 0;
 }
 
@@ -3667,7 +3668,7 @@ static int tui_managed_message(tui_state *st) {
     if (!zs_cmp(op, "ACTIVATE") && match && tui_managed.phase == 2) {
         tui_managed.phase = 3; tui_repaint = 1; rc = 0;
     } else if (!zs_cmp(op, "COMMIT") && match && tui_managed.phase == 1) {
-        snprintf(path, sizeof path, "%s/handoff-%s.json", tui_managed.dir, tui_managed.handoff);
+        tx_snprintf(path, sizeof path, "%s/handoff-%s.json", tui_managed.dir, tui_managed.handoff);
         if (tui_owned_start(st, tui_managed.dir, tui_managed.session, tui_managed.hash,
             path, tui_managed.handoff, &token, why, sizeof why) != 0) goto fatal;
         if (term_raw_enter() != 0) goto fatal;
@@ -3680,12 +3681,12 @@ static int tui_managed_message(tui_state *st) {
         if (!zs_cmp(hid->s, tui_managed.handoff)) goto done;
         m = mm_alloc(sizeof *m); if (!m) goto done;
         zs_mcpy(m, st->owned, sizeof *m);
-        snprintf(m->handoff_id, sizeof m->handoff_id, "%s", hid->s);
-        snprintf(m->candidate_hash, sizeof m->candidate_hash, "%s", hash->s);
-        snprintf(path, sizeof path, "%s/handoff-%s.json", tui_managed.dir, hid->s);
+        tx_snprintf(m->handoff_id, sizeof m->handoff_id, "%s", hid->s);
+        tx_snprintf(m->candidate_hash, sizeof m->candidate_hash, "%s", hash->s);
+        tx_snprintf(path, sizeof path, "%s/handoff-%s.json", tui_managed.dir, hid->s);
         if (tui_reload_export(st, m, path, why, sizeof why) != 0) goto done;
-        snprintf(tui_managed.next_handoff, sizeof tui_managed.next_handoff, "%s", hid->s);
-        snprintf(tui_managed.next_hash, sizeof tui_managed.next_hash, "%s", hash->s);
+        tx_snprintf(tui_managed.next_handoff, sizeof tui_managed.next_handoff, "%s", hid->s);
+        tx_snprintf(tui_managed.next_hash, sizeof tui_managed.next_hash, "%s", hash->s);
         tui_managed.phase = 4; rc = tui_managed_send("FROZEN", 1);
     } else if (!zs_cmp(op, "RELEASE") && pending && tui_managed.phase == 4) {
         if (reload_owner_release(&st->owner_fd, why, sizeof why) != 0) {
@@ -3696,7 +3697,7 @@ static int tui_managed_message(tui_state *st) {
     } else if (!zs_cmp(op, "RESUME") && pending && (tui_managed.phase == 4 || tui_managed.phase == 5)) {
         /* Trusted host must terminate+wait candidate before sending RESUME. */
         if (st->owner_fd < 0) {
-            snprintf(lock, sizeof lock, "%s/owner.lock", tui_managed.dir);
+            tx_snprintf(lock, sizeof lock, "%s/owner.lock", tui_managed.dir);
             if (reload_owner_acquire(lock, &st->owner_fd, why, sizeof why) != 0) goto done;
         }
         if (term_raw_enter() != 0) goto fatal;
@@ -3769,7 +3770,7 @@ static void tui_mail_complete(tui_state *st, const char *result, const char *rea
     if (rc != 0) {
         char note[4200];
         st->mail_blocked = 1;
-        snprintf(note, sizeof note,
+        tx_snprintf(note, sizeof note,
                  "finish rc=%d why=%s (not replayed automatically)", rc, why);
         tui_log_plain(st, note);
     } else {
@@ -3797,13 +3798,13 @@ static void tui_mail_poll(tui_state *st, int tasks_allowed) {
     if (now < 0) return;
     if (st->mail_next_ms && now < st->mail_next_ms) return;
     st->mail_next_ms = now + 250;
-    if (snprintf(inbox, sizeof inbox, "%s/inbox", st->owned_dir) >= (int)sizeof inbox) return;
+    if (tx_snprintf(inbox, sizeof inbox, "%s/inbox", st->owned_dir) >= (int)sizeof inbox) return;
     {
         int lr = sy_lstat(inbox, &sb);
         if (lr != 0) {
         if (lr != -ENOENT) {
             const char *e = "mailbox unavailable";
-            if (zs_cmp(st->mail_error, e)) { snprintf(st->mail_error, sizeof st->mail_error, "%s", e); tui_log_plain(st, e); }
+            if (zs_cmp(st->mail_error, e)) { tx_snprintf(st->mail_error, sizeof st->mail_error, "%s", e); tui_log_plain(st, e); }
         }
         return;
         }
@@ -3817,8 +3818,8 @@ static void tui_mail_poll(tui_state *st, int tasks_allowed) {
     if (rc == 0) { mm_free(m); return; }
     if (rc < 0) {
         char note[512];
-        snprintf(note, sizeof note, "take rc=%d why=%s", rc, why);
-        if (zs_cmp(st->mail_error, note)) { snprintf(st->mail_error, sizeof st->mail_error, "%s", note); tui_log_plain(st, note); }
+        tx_snprintf(note, sizeof note, "take rc=%d why=%s", rc, why);
+        if (zs_cmp(st->mail_error, note)) { tx_snprintf(st->mail_error, sizeof st->mail_error, "%s", note); tui_log_plain(st, note); }
         if (rc == -2) st->mail_blocked = 1;
         mm_free(m);
         return;
@@ -3831,7 +3832,7 @@ static void tui_mail_poll(tui_state *st, int tasks_allowed) {
             mm_free(m);
             return;
         }
-        snprintf(st->mail_id, sizeof st->mail_id, "%s", m->id);
+        tx_snprintf(st->mail_id, sizeof st->mail_id, "%s", m->id);
         st->mail_active = 1;
         if (!tui_mail_meta(st, st->mail_id, "started", "accepted")) {
             /* No audit line: leave started unconsumed and do not execute. */
@@ -3854,7 +3855,7 @@ static void tui_mail_poll(tui_state *st, int tasks_allowed) {
         if (csih_message_finish(st->owned_dir, st->owned->session_id, m->id, why, sizeof why) != 0) {
             char note[512];
             st->mail_blocked = 1;
-            snprintf(note, sizeof note, "notice finish failed: %s", why);
+            tx_snprintf(note, sizeof note, "notice finish failed: %s", why);
             tui_log_plain(st, note);
         }
         mm_free(m);
@@ -3881,14 +3882,14 @@ int tui_entry(int argc, char **argv) {
     const char *cmd = argc > 1 ? argv[1] : "";
 
     if (tui_version_flag(cmd)) {
-        printf("csih %s\n", CSIH_VERSION);
+        sy_printf("csih %s\n", CSIH_VERSION);
         return 0;
     }
 
     if (!zs_cmp(cmd, "keyprobe")) {
         int len = 0, src = net_deepseek_key_probe(&len);
-        if (!src) { printf("deepseek key: missing (DEEPSEEK_API_KEY or ~/env.jsonl deepseek.api_key|key)\n"); return 1; }
-        printf("deepseek key: found len=%d source=%s\n", len, src == 1 ? "env" : "file");
+        if (!src) { sy_printf("deepseek key: missing (DEEPSEEK_API_KEY or ~/env.jsonl deepseek.api_key|key)\n"); return 1; }
+        sy_printf("deepseek key: found len=%d source=%s\n", len, src == 1 ? "env" : "file");
         return 0;
     }
 
@@ -3908,7 +3909,7 @@ int tui_entry(int argc, char **argv) {
             const char *audit = "audit unchanged\n";
             fio_t *f;
             int i, j, found, n, bad = 0;
-            snprintf(journal, sizeof journal, "%s/csih-command-selftest-%ld.jsonl", tui_selftest_tmp(), (long)sy_pid());
+            tx_snprintf(journal, sizeof journal, "%s/csih-command-selftest-%ld.jsonl", tui_selftest_tmp(), (long)sy_pid());
             f = tui_fopen(journal, "wb");
             if (!f) bad = 1;
             else {
@@ -3917,10 +3918,10 @@ int tui_entry(int argc, char **argv) {
             }
             tui_state_init(&h, journal); h.mode = 1;
             tui_history_add(&h, "old history");
-            snprintf(h.history_draft, sizeof h.history_draft, "old draft");
+            tx_snprintf(h.history_draft, sizeof h.history_draft, "old draft");
             h.history_browsing = 1; h.history_pos = 0;
-            snprintf(h.goal, sizeof h.goal, "keep goal"); h.loop_on = 1; h.loop_left = 3;
-            snprintf(h.pending[0], sizeof h.pending[0], "queued text"); h.npending = 1;
+            tx_snprintf(h.goal, sizeof h.goal, "keep goal"); h.loop_on = 1; h.loop_left = 3;
+            tx_snprintf(h.pending[0], sizeof h.pending[0], "queued text"); h.npending = 1;
             h.qhead = 3; h.qtail = 5;
             zs_mcpy(&before, &h, sizeof h);
             for (i = 0; i < 2; i++) {
@@ -3933,7 +3934,7 @@ int tui_entry(int argc, char **argv) {
                     if (!found) bad = 1;
                 }
                 tui_type(&h, "/status");
-                snprintf(bytes, sizeof bytes, "busy=%d mode=agent owned=0 owner=0", i);
+                tx_snprintf(bytes, sizeof bytes, "busy=%d mode=agent owned=0 owner=0", i);
                 if (!zs_find(h.log[h.nlog - 1], bytes) ||
                     !zs_find(h.log[h.nlog - 1], "goal=1 loop=1 left=3 history=1 pending=1 keys=2") ||
                     h.busy != i || h.nhistory != 1 || h.npending != 1 || h.input[0]) bad = 1;
@@ -3944,7 +3945,7 @@ int tui_entry(int argc, char **argv) {
                 h.nhistory != 1 || zs_cmp(h.history_draft, "old draft") ||
                 h.history_pos != 0 || !h.history_browsing || !h.busy) bad = 1;
             h.busy = 0; h.ex_open[0] = 1; h.log_skip = 2;
-            snprintf(h.phase, sizeof h.phase, "old phase"); h.ended = 1;
+            tx_snprintf(h.phase, sizeof h.phase, "old phase"); h.ended = 1;
             tui_type(&h, "/clear");
             if (h.nlog != 1 || !zs_find(h.log[0], "pending=1 retained") ||
                 h.nhistory || h.history_pos || h.history_browsing || h.history_draft[0] ||
@@ -3966,8 +3967,8 @@ int tui_entry(int argc, char **argv) {
                 fio_close(f);
             }
             if (tui_selftest_rm(journal, 0)) bad = 1;
-            if (bad) { printf("FAIL native help/status/clear invariants\n"); failures++; }
-            else printf("  ok   native commands preserve journal, pending, loop and exclude history\n");
+            if (bad) { sy_printf("FAIL native help/status/clear invariants\n"); failures++; }
+            else sy_printf("  ok   native commands preserve journal, pending, loop and exclude history\n");
             tui_state_init(&h, NULL); h.mode = 1; h.busy = 1;
             tui_type(&h, "//foo");
             tui_type(&h, "/foo/bar");
@@ -3978,17 +3979,17 @@ int tui_entry(int argc, char **argv) {
                 tui_command_len("/foo.bar") || tui_command_len("/9foo") ||
                 tui_command_len("/help\rtext") || tui_command_len("/foo\ttext") ||
                 !tui_command_len("/foo-bar_2 arg")) {
-                printf("FAIL slash token boundaries and literal escape\n"); failures++;
-            } else printf("  ok   slash tokens exclude paths/multiline; literal escape queued once\n");
+                sy_printf("FAIL slash token boundaries and literal escape\n"); failures++;
+            } else sy_printf("  ok   slash tokens exclude paths/multiline; literal escape queued once\n");
             h.npending = 8;
             tui_type(&h, "//retry");
             if (zs_cmp(h.input, "//retry") || h.ninput != 7 || h.nhistory != 3) {
-                printf("FAIL escaped full queue keeps draft\n"); failures++;
+                sy_printf("FAIL escaped full queue keeps draft\n"); failures++;
             }
             h.npending = 0;
             tui_manual_submit(&h);
             if (h.npending != 1 || zs_cmp(h.pending[0], "/retry") || h.nhistory != 4 || h.input[0]) {
-                printf("FAIL escaped full queue retry\n"); failures++;
+                sy_printf("FAIL escaped full queue retry\n"); failures++;
             }
         }
         {
@@ -3997,21 +3998,21 @@ int tui_entry(int argc, char **argv) {
             char why[256];
             tui_state_init(&source, NULL);
             zs_mset(&metadata, 0, sizeof metadata);
-            snprintf(metadata.session_id, sizeof metadata.session_id, "sess");
-            snprintf(metadata.handoff_id, sizeof metadata.handoff_id, "handoff");
+            tx_snprintf(metadata.session_id, sizeof metadata.session_id, "sess");
+            tx_snprintf(metadata.handoff_id, sizeof metadata.handoff_id, "handoff");
             zs_mset(metadata.candidate_hash, 'a', 64);
-            snprintf(metadata.cwd, sizeof metadata.cwd, "/tmp");
-            snprintf(metadata.role, sizeof metadata.role, "agent");
-            snprintf(metadata.journal_path, sizeof metadata.journal_path, "/tmp/reload-journal.jsonl");
+            tx_snprintf(metadata.cwd, sizeof metadata.cwd, "/tmp");
+            tx_snprintf(metadata.role, sizeof metadata.role, "agent");
+            tx_snprintf(metadata.journal_path, sizeof metadata.journal_path, "/tmp/reload-journal.jsonl");
             metadata.journal_offset = 17;
-            snprintf(source.goal, sizeof source.goal, "目标");
-            snprintf(source.input, sizeof source.input, "输入");
+            tx_snprintf(source.goal, sizeof source.goal, "目标");
+            tx_snprintf(source.input, sizeof source.input, "输入");
             source.ninput = (int)(size_t)zs_len(source.input);
-            snprintf(source.pending[0], sizeof source.pending[0], "待发送");
+            tx_snprintf(source.pending[0], sizeof source.pending[0], "待发送");
             source.npending = 1;
-            snprintf(source.history[0], sizeof source.history[0], "历史");
+            tx_snprintf(source.history[0], sizeof source.history[0], "历史");
             source.nhistory = 1; source.history_pos = 0; source.history_browsing = 1;
-            snprintf(source.history_draft, sizeof source.history_draft, "中文草稿");
+            tx_snprintf(source.history_draft, sizeof source.history_draft, "中文草稿");
             source.loop_on = 1; source.loop_left = 0;
             zs_mcpy(&saved, &source, sizeof saved);
             tui_state_init(&fresh, NULL);
@@ -4026,33 +4027,33 @@ int tui_entry(int argc, char **argv) {
                 fresh.history_browsing != 1 || fresh.loop_on != 1 || fresh.loop_left != 0 ||
                 fresh.transcript != fresh.journal_path || zs_cmp(fresh.journal_path, metadata.journal_path) ||
                 fresh.mode != 1 || fresh.cols != 77 || fresh.rows != 31) {
-                printf("FAIL reload capture/apply restore %s\n", why); failures++;
+                sy_printf("FAIL reload capture/apply restore %s\n", why); failures++;
             }
             zs_mset(snapshot.journal_path, 0, sizeof snapshot.journal_path);
             if (zs_cmp(fresh.transcript, metadata.journal_path)) {
-                printf("FAIL reload journal path ownership\n"); failures++;
+                sy_printf("FAIL reload journal path ownership\n"); failures++;
             }
             fresh.busy = 1;
             zs_mcpy(&saved, &fresh, sizeof saved);
             if (tui_reload_apply(&fresh, &snapshot, why, sizeof why) != -1 ||
                 mm_cmp(&fresh, &saved, sizeof fresh)) {
-                printf("FAIL reload busy apply atomicity\n"); failures++;
+                sy_printf("FAIL reload busy apply atomicity\n"); failures++;
             }
             if (tui_reload_capture(&fresh, &metadata, &snapshot, why, sizeof why) != -1 ||
                 mm_cmp(&snapshot, &zero, sizeof snapshot) || mm_cmp(&fresh, &saved, sizeof fresh)) {
-                printf("FAIL reload busy capture zero\n"); failures++;
+                sy_printf("FAIL reload busy capture zero\n"); failures++;
             }
             fresh.busy = 0;
             zs_mcpy(&saved, &fresh, sizeof saved);
             snapshot.loop_left = 9;
             if (tui_reload_apply(&fresh, &snapshot, why, sizeof why) != -1 ||
                 mm_cmp(&fresh, &saved, sizeof fresh)) {
-                printf("FAIL reload bad snapshot atomicity\n"); failures++;
+                sy_printf("FAIL reload bad snapshot atomicity\n"); failures++;
             }
             source.loop_left = 9;
             if (tui_reload_capture(&source, &metadata, &snapshot, why, sizeof why) != -1 ||
                 mm_cmp(&snapshot, &zero, sizeof snapshot)) {
-                printf("FAIL reload invalid capture zero\n"); failures++;
+                sy_printf("FAIL reload invalid capture zero\n"); failures++;
             }
             {
                 static reload_session_state before_metadata, expected, prepared;
@@ -4063,11 +4064,11 @@ int tui_entry(int argc, char **argv) {
                 fio_t *f;
                 int fixture_ok = 0, seq;
                 for (seq = 0; seq < 100; seq++) {
-                    snprintf(dir, sizeof dir, "%s/csih-reload-bridge-%ld-%d", tui_selftest_tmp(), (long)sy_pid(), seq);
+                    tx_snprintf(dir, sizeof dir, "%s/csih-reload-bridge-%ld-%d", tui_selftest_tmp(), (long)sy_pid(), seq);
                     if (tui_mkdir(dir, 0700) == 0) { fixture_ok = 1; break; }
                 }
-                snprintf(path, sizeof path, "%s/state.json", dir);
-                snprintf(journal, sizeof journal, "%s/journal.jsonl", dir);
+                tx_snprintf(path, sizeof path, "%s/state.json", dir);
+                tx_snprintf(journal, sizeof journal, "%s/journal.jsonl", dir);
                 if (fixture_ok) {
                     f = tui_fopen(journal, "wb");
                     if (!f) fixture_ok = 0;
@@ -4077,22 +4078,22 @@ int tui_entry(int argc, char **argv) {
                     }
                 }
                 if (!fixture_ok) {
-                    printf("FAIL reload bridge fixture\n"); failures++;
+                    sy_printf("FAIL reload bridge fixture\n"); failures++;
                 } else {
                     source.loop_left = 0;
-                    snprintf(metadata.journal_path, sizeof metadata.journal_path, "%s", journal);
+                    tx_snprintf(metadata.journal_path, sizeof metadata.journal_path, "%s", journal);
                     metadata.journal_offset = 999;
                     zs_mcpy(&before_metadata, &metadata, sizeof metadata);
                     if (tui_reload_export(&source, &metadata, path, why, sizeof why) != 0 ||
                         mm_cmp(&metadata, &before_metadata, sizeof metadata)) {
-                        printf("FAIL reload bridge export %s\n", why); failures++;
+                        sy_printf("FAIL reload bridge export %s\n", why); failures++;
                     }
                     before_metadata.journal_offset = (unsigned long long)(size_t)zs_len(line);
                     if (tui_reload_capture(&source, &before_metadata, &expected, why, sizeof why) != 0 ||
                         tui_reload_prepare(path, metadata.session_id, metadata.handoff_id,
                                            metadata.candidate_hash, &prepared, &token, why, sizeof why) != 0 ||
                         mm_cmp(&expected, &prepared, sizeof expected) || sy_exists(path) != 1) {
-                        printf("FAIL reload bridge prepare %s\n", why); failures++;
+                        sy_printf("FAIL reload bridge prepare %s\n", why); failures++;
                     }
                     zs_mcpy(&old_token, &token, sizeof token);
                     source.busy = 1;
@@ -4102,7 +4103,7 @@ int tui_entry(int argc, char **argv) {
                                            metadata.candidate_hash, &prepared, &token, why, sizeof why) != 0 ||
                         mm_cmp(&expected, &prepared, sizeof expected) ||
                         mm_cmp(&token, &old_token, sizeof token)) {
-                        printf("FAIL reload bridge busy preserves file %s\n", why); failures++;
+                        sy_printf("FAIL reload bridge busy preserves file %s\n", why); failures++;
                     }
                     source.busy = 0;
                     if (tui_reload_prepare(path, "wrong", metadata.handoff_id, metadata.candidate_hash,
@@ -4110,21 +4111,21 @@ int tui_entry(int argc, char **argv) {
                         zs_cmp(why, "session_id mismatch") ||
                         mm_cmp(&prepared, &zero, sizeof prepared) ||
                         mm_cmp(&token, &zero_token, sizeof token) || sy_exists(path) != 1) {
-                        printf("FAIL reload bridge wrong identity retains file %s\n", why); failures++;
+                        sy_printf("FAIL reload bridge wrong identity retains file %s\n", why); failures++;
                     }
                     f = tui_fopen(journal, "ab");
-                    if (!f) { printf("FAIL reload bridge append fixture\n"); failures++; }
+                    if (!f) { sy_printf("FAIL reload bridge append fixture\n"); failures++; }
                     else {
                         int append_ok = fio_write("x", 1, 1, f) == 1;
                         if (fio_close(f) != 0) append_ok = 0;
-                        if (!append_ok) { printf("FAIL reload bridge append fixture\n"); failures++; }
+                        if (!append_ok) { sy_printf("FAIL reload bridge append fixture\n"); failures++; }
                     }
                     if (tui_reload_prepare(path, metadata.session_id, metadata.handoff_id, metadata.candidate_hash,
                                            &prepared, &token, why, sizeof why) != -1 ||
                         zs_cmp(why, "journal length != snapshot offset") ||
                         mm_cmp(&prepared, &zero, sizeof prepared) ||
                         mm_cmp(&token, &zero_token, sizeof token) || sy_exists(path) != 1) {
-                        printf("FAIL reload bridge changed journal retains file %s\n", why); failures++;
+                        sy_printf("FAIL reload bridge changed journal retains file %s\n", why); failures++;
                     }
                 }
                 if (fixture_ok && tui_selftest_rm(dir, 1)) failures++;
@@ -4136,7 +4137,7 @@ int tui_entry(int argc, char **argv) {
     int c;
     for (c = 0; c < 3; c++) {
       tui_state_init(&v, NULL); v.mode = 1; v.rows = cases[c].rows;
-      snprintf(v.input, sizeof v.input, "HEIGHT_DRAFT");
+      tx_snprintf(v.input, sizeof v.input, "HEIGHT_DRAFT");
       v.ninput = (int)(size_t)zs_len("HEIGHT_DRAFT");
       for (i = 0; i < 40; i++) tui_log_line(&v, "L");
       f = tui_render_state(&v, 80);
@@ -4145,7 +4146,7 @@ int tui_entry(int argc, char **argv) {
         if (zs_find(f.lines[i], "HEIGHT_DRAFT")) saw = 1;
       if (tui_log_room(&v) != cases[c].room || f.n > cases[c].rows || f.n > 63 ||
           tui_frame_bad_width(&f, 80) || !saw) {
-        printf("FAIL height%d\n", cases[c].rows); failures++;
+        sy_printf("FAIL height%d\n", cases[c].rows); failures++;
       }
     }
   }
@@ -4155,42 +4156,42 @@ int tui_entry(int argc, char **argv) {
             h.mode = 1;
             h.busy = 1;
             tui_input_byte(&h, 'A');
-            if (h.ninput != 1) { printf("FAIL hist A ninput\n"); failures++; }
+            if (h.ninput != 1) { sy_printf("FAIL hist A ninput\n"); failures++; }
             tui_apply_key(&h, TERM_KEY_ENTER, 0);
             tui_input_byte(&h, 'B');
             tui_apply_key(&h, TERM_KEY_ENTER, 0);
             if (h.nhistory != 2 || h.npending != 2 ||
                 zs_cmp(h.history[0], "A") || zs_cmp(h.history[1], "B")) {
-                printf("FAIL A/B history\n"); failures++;
+                sy_printf("FAIL A/B history\n"); failures++;
             }
             {
                 h.npending = 8;
-                snprintf(h.input, sizeof(h.input), "C");
+                tx_snprintf(h.input, sizeof(h.input), "C");
                 h.ninput = 1;
                 tui_apply_key(&h, TERM_KEY_ENTER, 0);
                 if (zs_cmp(h.input, "C") || h.ninput != 1 || h.nhistory != 2 ||
-                    h.npending != 8) { printf("FAIL fullQ\n"); failures++; }
+                    h.npending != 8) { sy_printf("FAIL fullQ\n"); failures++; }
                 h.npending = 2;
             }
             {
                 const char *dr = "\xe4\xb8\xad\xe6\x96\x87\xe8\x8d\x89\xe7\xa8\xbf";
-                snprintf(h.input, sizeof(h.input), "%s", dr);
+                tx_snprintf(h.input, sizeof(h.input), "%s", dr);
                 h.ninput = (int)(size_t)zs_len(dr);
                 tui_apply_key(&h, TERM_KEY_UP, 0);
-                if (zs_cmp(h.input, "B")) { printf("FAIL UpB\n"); failures++; }
+                if (zs_cmp(h.input, "B")) { sy_printf("FAIL UpB\n"); failures++; }
                 tui_apply_key(&h, TERM_KEY_UP, 0);
-                if (zs_cmp(h.input, "A")) { printf("FAIL UpA\n"); failures++; }
+                if (zs_cmp(h.input, "A")) { sy_printf("FAIL UpA\n"); failures++; }
                 tui_apply_key(&h, TERM_KEY_DOWN, 0);
-                if (zs_cmp(h.input, "B")) { printf("FAIL DnB\n"); failures++; }
+                if (zs_cmp(h.input, "B")) { sy_printf("FAIL DnB\n"); failures++; }
                 tui_apply_key(&h, TERM_KEY_DOWN, 0);
                 if (zs_cmp(h.input, dr) || h.ninput != (int)(size_t)zs_len(dr) ||
-                    h.history_browsing) { printf("FAIL DnD\n"); failures++; }
-                snprintf(h.input, sizeof(h.input), "X");
+                    h.history_browsing) { sy_printf("FAIL DnD\n"); failures++; }
+                tx_snprintf(h.input, sizeof(h.input), "X");
                 h.ninput = 1;
                 tui_apply_key(&h, TERM_KEY_UP, 0);
                 tui_apply_key(&h, TERM_KEY_DOWN, 0);
-                if (zs_cmp(h.input, "X")) { printf("FAIL X\n"); failures++; }
-                if (h.log_skip) { printf("FAIL ls\n"); failures++; }
+                if (zs_cmp(h.input, "X")) { sy_printf("FAIL X\n"); failures++; }
+                if (h.log_skip) { sy_printf("FAIL ls\n"); failures++; }
             }
         }
 
@@ -4201,16 +4202,16 @@ int tui_entry(int argc, char **argv) {
         tui_apply_key(&st, TERM_KEY_CHAR, 'h');
         tui_apply_key(&st, TERM_KEY_CHAR, 'i');
         next = tui_render_state(&st, cols);
-        if (!zs_cmp(st.input, "hi")) { /* ok */ } else { printf("FAIL input\n"); failures++; }
+        if (!zs_cmp(st.input, "hi")) { /* ok */ } else { sy_printf("FAIL input\n"); failures++; }
         if (frame_diff(&prev, &next, out, sizeof out) < 1) {
-            printf("FAIL typing must change the frame\n"); failures++;
+            sy_printf("FAIL typing must change the frame\n"); failures++;
         }
 
         /* An unchanged state must rewrite NOTHING. This is the whole point of
          * the diff, and it is what keeps the loop from flickering. */
         prev = next;
         if (frame_diff(&prev, &next, out, sizeof out) != 0) {
-            printf("FAIL an unchanged frame rewrote lines\n"); failures++;
+            sy_printf("FAIL an unchanged frame rewrote lines\n"); failures++;
         }
 
         /* Backspace must be visible, and must not underflow. */
@@ -4218,7 +4219,7 @@ int tui_entry(int argc, char **argv) {
         tui_apply_key(&st, TERM_KEY_BACKSPACE, 0);
         tui_apply_key(&st, TERM_KEY_BACKSPACE, 0);   /* one too many */
         if (st.ninput != 0 || st.input[0] != '\0') {
-            printf("FAIL backspace underflow\n"); failures++;
+            sy_printf("FAIL backspace underflow\n"); failures++;
         }
         tui_input_byte(&st, (char)0xE4);
         tui_input_byte(&st, (char)0xBD);
@@ -4226,12 +4227,12 @@ int tui_entry(int argc, char **argv) {
         tui_input_byte(&st, 'a');
         tui_apply_key(&st, TERM_KEY_BACKSPACE, 0);
         if (st.ninput != 3 || zs_cmp(st.input, "你") != 0) {
-            printf("FAIL backspace split a code point\n"); failures++;
+            sy_printf("FAIL backspace split a code point\n"); failures++;
         } else {
             tui_apply_key(&st, TERM_KEY_BACKSPACE, 0);
             if (st.ninput != 0 || st.input[0] != '\0') {
-                printf("FAIL backspace left a partial character\n"); failures++;
-            } else printf("  ok   backspace deletes one code point\n");
+                sy_printf("FAIL backspace left a partial character\n"); failures++;
+            } else sy_printf("  ok   backspace deletes one code point\n");
         }
         {
             static tui_state b;
@@ -4245,8 +4246,8 @@ int tui_entry(int argc, char **argv) {
             for (k = 0; k < bf.n; k++)
                 if (bf.lines[k] && zs_find(bf.lines[k], "已收")) saw = 1;
             if (!saw || tui_frame_bad_width(&bf, 40) || bf.n > b.rows) {
-                printf("FAIL busy line hides received bytes\n"); failures++;
-            } else printf("  ok   busy line shows received bytes\n");
+                sy_printf("FAIL busy line hides received bytes\n"); failures++;
+            } else sy_printf("  ok   busy line shows received bytes\n");
         }
 
         /* A paste is one buffer. Newlines inside it are not Enter. */
@@ -4262,20 +4263,20 @@ int tui_entry(int argc, char **argv) {
             tui_apply_key(&pz, TERM_KEY_ENTER, 0);
             tui_apply_key(&pz, TERM_KEY_CHAR, 'b');
             if (zs_cmp(pz.input, "a\nb") || pz.busy || pz.quit) {
-                printf("FAIL paste newline submitted\n"); failures++;
+                sy_printf("FAIL paste newline submitted\n"); failures++;
             }
             pz.pasting = 0;
             pz.more_keys = 1;
             tui_apply_key(&pz, TERM_KEY_ENTER, 0);
             if (zs_cmp(pz.input, "a\nb\n") || pz.busy) {
-                printf("FAIL burst newline submitted\n"); failures++;
-            } else printf("  ok   paste keeps newlines\n");
+                sy_printf("FAIL burst newline submitted\n"); failures++;
+            } else sy_printf("  ok   paste keeps newlines\n");
             pf = tui_render_state(&pz, 40);
             for (k = 0; k < pf.n; k++)
                 if (zs_find(pf.lines[k], "⏎")) saw = 1;
             if (!saw || tui_frame_bad_width(&pf, 40)) {
-                printf("FAIL paste row width\n"); failures++;
-            } else printf("  ok   paste row shows return\n");
+                sy_printf("FAIL paste row width\n"); failures++;
+            } else sy_printf("  ok   paste row shows return\n");
             {
                 static tui_state lz;
                 r_frame lf;
@@ -4284,9 +4285,9 @@ int tui_entry(int argc, char **argv) {
                 lz.mode = 1;
                 lz.rows = 54;
                 tui_log_plain(&lz, "you> a\nb");
-                snprintf(lz.pending[0], TUI_INPUT_MAX, "%s", "c\nd");
+                tx_snprintf(lz.pending[0], TUI_INPUT_MAX, "%s", "c\nd");
                 lz.npending = 1;
-                snprintf(lz.goal, TUI_INPUT_MAX, "%s", "g\nh");
+                tx_snprintf(lz.goal, TUI_INPUT_MAX, "%s", "g\nh");
                 lz.loop_on = 1;
                 lf = tui_render_state(&lz, 40);
                 for (k = 0; k < lf.n; k++) {
@@ -4296,40 +4297,40 @@ int tui_entry(int argc, char **argv) {
                     if (zs_find(lf.lines[k], "goal> g⏎h · loop> on")) mark |= 4;
                 }
                 if (broke || mark != 7 || tui_frame_bad_width(&lf, 40) || lf.n > lz.rows) {
-                    printf("FAIL log newline split the frame\n"); failures++;
-                } else printf("  ok   log newline is one row\n");
+                    sy_printf("FAIL log newline split the frame\n"); failures++;
+                } else sy_printf("  ok   log newline is one row\n");
             }
         }
 
         /* Ctrl-C clears a line. On an empty line it only names Ctrl-D.
          * Ctrl-D on an empty line quits. /exit and /quit quit. */
         tui_apply_key(&st, TERM_KEY_UNKNOWN, 0);
-        if (st.quit) { printf("FAIL unknown key quit the loop\n"); failures++; }
+        if (st.quit) { sy_printf("FAIL unknown key quit the loop\n"); failures++; }
         tui_apply_key(&st, TERM_KEY_CHAR, 'x');
         tui_apply_key(&st, TERM_KEY_CTRL_C, 0);
         if (st.quit || st.ninput != 0 || st.input[0] != '\0') {
-            printf("FAIL ctrl-c did not clear the line\n"); failures++;
+            sy_printf("FAIL ctrl-c did not clear the line\n"); failures++;
         }
         tui_apply_key(&st, TERM_KEY_CTRL_C, 0);
         if (st.quit || !tui_frame_has(&st, "要退出请按 Ctrl-D")) {
-            printf("FAIL empty ctrl-c did not ask for ctrl-d\n"); failures++;
+            sy_printf("FAIL empty ctrl-c did not ask for ctrl-d\n"); failures++;
         }
         tui_apply_key(&st, TERM_KEY_CHAR, 'z');
         tui_apply_key(&st, TERM_KEY_CTRL_D, 0);
         if (st.quit || st.ninput != 1) {
-            printf("FAIL ctrl-d quit while the line had text\n"); failures++;
+            sy_printf("FAIL ctrl-d quit while the line had text\n"); failures++;
         }
         tui_apply_key(&st, TERM_KEY_CTRL_C, 0);
         tui_apply_key(&st, TERM_KEY_CTRL_D, 0);
-        if (!st.quit) { printf("FAIL empty ctrl-d did not quit\n"); failures++; }
+        if (!st.quit) { sy_printf("FAIL empty ctrl-d did not quit\n"); failures++; }
         {
             static tui_state qx;
             tui_state_init(&qx, NULL);
             tui_type(&qx, "/exit");
-            if (!qx.quit) { printf("FAIL /exit did not quit\n"); failures++; }
+            if (!qx.quit) { sy_printf("FAIL /exit did not quit\n"); failures++; }
             tui_state_init(&qx, NULL);
             tui_type(&qx, "/quit");
-            if (!qx.quit) { printf("FAIL /quit did not quit\n"); failures++; }
+            if (!qx.quit) { sy_printf("FAIL /quit did not quit\n"); failures++; }
         }
 
         /* A timeout is not a quit and does change the tick line. */
@@ -4337,8 +4338,8 @@ int tui_entry(int argc, char **argv) {
             static tui_state t2;
             tui_state_init(&t2, NULL);
             tui_apply_key(&t2, -1, 0);
-            if (t2.quit) { printf("FAIL timeout quit\n"); failures++; }
-            if (t2.ticks != 1) { printf("FAIL timeout did not tick\n"); failures++; }
+            if (t2.quit) { sy_printf("FAIL timeout quit\n"); failures++; }
+            if (t2.ticks != 1) { sy_printf("FAIL timeout did not tick\n"); failures++; }
         }
 
         /* Every rendered line covers `cols` terminal columns. CJK makes the
@@ -4348,7 +4349,7 @@ int tui_entry(int argc, char **argv) {
             int i;
             for (i = 0; i < f.n; i++) {
                 if (tui_disp_width(f.lines[i]) != cols) {
-                    printf("FAIL line %d not padded to width\n", i);
+                    sy_printf("FAIL line %d not padded to width\n", i);
                     failures++;
                 }
             }
@@ -4363,9 +4364,9 @@ int tui_entry(int argc, char **argv) {
             k.kind = TERM_KEY_CHAR;
             k.ch = 'a';
             while (tui_q_room(&q) > 0) { tui_q_push(&q, k); n++; }
-            if (n != 63) { printf("FAIL queue room %d\n", n); failures++; }
+            if (n != 63) { sy_printf("FAIL queue room %d\n", n); failures++; }
             tui_q_push(&q, k);
-            if (tui_q_room(&q) != 0) { printf("FAIL full queue accepted more\n"); failures++; }
+            if (tui_q_room(&q) != 0) { sy_printf("FAIL full queue accepted more\n"); failures++; }
         }
         {
             static tui_state g;
@@ -4374,33 +4375,33 @@ int tui_entry(int argc, char **argv) {
             g.mode = 1;
             tui_type(&g, "/goal");
             if (g.busy || g.goal[0] || tui_frame_has(&g, "goal>")) {
-                printf("FAIL bare /goal\n"); failures++;
-            } else printf("  ok   /goal omits the empty goal line\n");
+                sy_printf("FAIL bare /goal\n"); failures++;
+            } else sy_printf("  ok   /goal omits the empty goal line\n");
             tui_type(&g, "/loop");
             if (g.busy || g.loop_on) {
-                printf("FAIL /loop without a goal\n"); failures++;
-            } else printf("  ok   /loop without goal stays off\n");
+                sy_printf("FAIL /loop without a goal\n"); failures++;
+            } else sy_printf("  ok   /loop without goal stays off\n");
             tui_type(&g, "/goal keep-going");
             if (g.busy || zs_cmp(g.goal, "keep-going") != 0 || tui_frame_has(&g, "goal>")) {
-                printf("FAIL /goal text\n"); failures++;
-            } else printf("  ok   /goal sets keep-going\n");
+                sy_printf("FAIL /goal text\n"); failures++;
+            } else sy_printf("  ok   /goal sets keep-going\n");
             tui_type(&g, "/loop");
             if (g.busy || !g.loop_on || !tui_frame_has(&g, "loop> on")
                 || g.npending != 1 || !zs_find(g.pending[0], "keep-going")) {
-                printf("FAIL /loop on\n"); failures++;
-            } else printf("  ok   /loop on queues the goal\n");
+                sy_printf("FAIL /loop on\n"); failures++;
+            } else sy_printf("  ok   /loop on queues the goal\n");
             tui_type(&g, "/loop extra");
             if (g.busy || g.loop_on || g.npending != 0) {
-                printf("FAIL /loop off\n"); failures++;
-            } else printf("  ok   /loop off drops the queue\n");
+                sy_printf("FAIL /loop off\n"); failures++;
+            } else sy_printf("  ok   /loop off drops the queue\n");
             before = g.npending;
             agent_turn_seal(1, 1, 1, 0, 0, "done");
             tui_turn_done(&g);
             if (g.npending != before) {
-                printf("FAIL loop off still submitted\n"); failures++;
-            } else printf("  ok   loop off does not submit\n");
+                sy_printf("FAIL loop off still submitted\n"); failures++;
+            } else sy_printf("  ok   loop off does not submit\n");
             tui_type(&g, "/loop");
-            if (!g.loop_on) { printf("FAIL /loop did not rearm\n"); failures++; }
+            if (!g.loop_on) { sy_printf("FAIL /loop did not rearm\n"); failures++; }
             for (;;) {
                 before = g.npending;
                 agent_turn_seal(1, 1, 1, 0, 0, "done");
@@ -4413,32 +4414,32 @@ int tui_entry(int argc, char **argv) {
             agent_turn_seal(1, 1, 1, 0, 0, "done");
             tui_turn_done(&g);
             if (posts < 2 || g.npending != before) {
-                printf("FAIL loop posts %d pending %d\n", posts, g.npending); failures++;
-            } else printf("  ok   loop posts %d\n", posts);
+                sy_printf("FAIL loop posts %d pending %d\n", posts, g.npending); failures++;
+            } else sy_printf("  ok   loop posts %d\n", posts);
             for (i = 0; i < g.nlog; i++)
                 if (!zs_ncmp(g.log[i], "you>", 4)) you++;
             if (you != 0 || g.busy) {
-                printf("FAIL slash entered a model turn\n"); failures++;
-            } else printf("  ok   slash did not start a model turn\n");
+                sy_printf("FAIL slash entered a model turn\n"); failures++;
+            } else sy_printf("  ok   slash did not start a model turn\n");
             tui_type(&g, "/goal ");
             before = g.npending;
             agent_turn_seal(1, 1, 1, 0, 0, "done");
             tui_turn_done(&g);
             if (g.goal[0] || g.loop_on || g.npending != before) {
-                printf("FAIL empty /goal left the loop armed\n"); failures++;
-            } else printf("  ok   empty /goal disarms loop\n");
+                sy_printf("FAIL empty /goal left the loop armed\n"); failures++;
+            } else sy_printf("  ok   empty /goal disarms loop\n");
             tui_type(&g, "/goal keep-going");
             agent_turn_seal(1, 1, 1, 0, 0, "done");
             tui_turn_done(&g);
             if (g.loop_on || g.npending != before) {
-                printf("FAIL new goal resumed the loop\n"); failures++;
-            } else printf("  ok   new goal stays idle until /loop\n");
+                sy_printf("FAIL new goal resumed the loop\n"); failures++;
+            } else sy_printf("  ok   new goal stays idle until /loop\n");
             {
                 int nlog, fold, keep;
                 tui_log_plain(&g, "keep-me");
                 keep = g.nlog - 1;
                 g.npending = 1;
-                snprintf(g.pending[0], TUI_INPUT_MAX, "%s", "queued");
+                tx_snprintf(g.pending[0], TUI_INPUT_MAX, "%s", "queued");
                 g.loop_on = 1;
                 g.ex_open[keep] = 1;
                 nlog = g.nlog;
@@ -4451,8 +4452,8 @@ int tui_entry(int argc, char **argv) {
                     || g.npending != 1 || zs_cmp(g.pending[0], "queued")
                     || zs_cmp(g.goal, "keep-going") || !g.loop_on
                     || g.ex_open[keep] != fold) {
-                    printf("FAIL busy /reload\n"); failures++;
-                } else printf("  ok   busy /reload stays in process\n");
+                    sy_printf("FAIL busy /reload\n"); failures++;
+                } else sy_printf("  ok   busy /reload stays in process\n");
                 g.busy = 0;
                 nlog = g.nlog;
                 tui_type(&g, "/reload");
@@ -4460,8 +4461,8 @@ int tui_entry(int argc, char **argv) {
                     || zs_cmp(g.log[keep], "keep-me")
                     || !tui_frame_has(&g, "reload: 页每帧已重读，密钥缓存已清")
                     || zs_cmp(g.goal, "keep-going") || g.npending != 1) {
-                    printf("FAIL idle /reload\n"); failures++;
-                } else printf("  ok   idle /reload clears the key cache\n");
+                    sy_printf("FAIL idle /reload\n"); failures++;
+                } else sy_printf("  ok   idle /reload clears the key cache\n");
             }
             {
                 static tui_state tall;
@@ -4473,8 +4474,8 @@ int tui_entry(int argc, char **argv) {
                 for (k = 0; k < 40; k++) tui_log_line(&tall, "log-line");
                 fit = tui_render_state(&tall, 40);
                 if (fit.n > tall.rows) {
-                    printf("FAIL agent frame %d rows over %d\n", fit.n, tall.rows); failures++;
-                } else printf("  ok   agent frame fits %d\n", fit.n);
+                    sy_printf("FAIL agent frame %d rows over %d\n", fit.n, tall.rows); failures++;
+                } else sy_printf("  ok   agent frame fits %d\n", fit.n);
             }
             {
                 static tui_state wide;
@@ -4483,7 +4484,7 @@ int tui_entry(int argc, char **argv) {
                 tui_state_init(&wide, NULL);
                 wide.mode = 1;
                 wide.rows = 27;
-                snprintf(wide.goal, sizeof wide.goal, "g");
+                tx_snprintf(wide.goal, sizeof wide.goal, "g");
                 wide.loop_on = 1;
                 tui_log_line(&wide, "only-one");
                 fr = tui_render_state(&wide, 40);
@@ -4492,15 +4493,15 @@ int tui_entry(int argc, char **argv) {
                 if (goal_at != 2 || !zs_find(fr.lines[1], "only-one")
                     || zs_ncmp(fr.lines[0], "csih · agent", 13) != 0
                     || fr.n > wide.rows || tui_frame_bad_width(&fr, 40)) {
-                    printf("FAIL log view want %d got goal at %d\n",
+                    sy_printf("FAIL log view want %d got goal at %d\n",
                            1 + TUI_LOG_VIEW, goal_at);
                     failures++;
-                } else printf("  ok   log view is %d\n", TUI_LOG_VIEW);
+                } else sy_printf("  ok   log view is %d\n", TUI_LOG_VIEW);
                 {
                     int h, saw = 0;
                     char hist[16];
                     for (h = 0; h < 40; h++) {
-                        snprintf(hist, sizeof hist, "hist-%02d", h);
+                        tx_snprintf(hist, sizeof hist, "hist-%02d", h);
                         tui_log_line(&wide, hist);
                     }
                     fr = tui_render_state(&wide, 40);
@@ -4508,7 +4509,7 @@ int tui_entry(int argc, char **argv) {
                         || tui_frame_has(&wide, "hist-00")
                         || !tui_frame_has(&wide, "hist-39")
                         || tui_frame_bad_width(&fr, 40)) {
-                        printf("FAIL log tail hist y %d..%d\n", tui_log_y0, tui_log_y1);
+                        sy_printf("FAIL log tail hist y %d..%d\n", tui_log_y0, tui_log_y1);
                         failures++;
                     } else {
                         tui_wheel(&wide, tui_log_y0, 2);
@@ -4517,13 +4518,13 @@ int tui_entry(int argc, char **argv) {
                             || tui_frame_has(&wide, "hist-39")
                             || !tui_frame_has(&wide, "更早3")
                             || tui_frame_bad_width(&fr, 40)) {
-                            printf("FAIL log wheel skip %d\n", wide.log_skip);
+                            sy_printf("FAIL log wheel skip %d\n", wide.log_skip);
                             failures++;
                         } else {
                             tui_log_line(&wide, "hist-new");
                             if (wide.log_skip != 4 || tui_frame_has(&wide, "hist-new")
                                 || !tui_frame_has(&wide, "hist-17")) {
-                                printf("FAIL log hold skip %d\n", wide.log_skip);
+                                sy_printf("FAIL log hold skip %d\n", wide.log_skip);
                                 failures++;
                             } else {
                                 tui_wheel(&wide, 1, 2);
@@ -4535,21 +4536,21 @@ int tui_entry(int argc, char **argv) {
                                         && !zs_find(fr.lines[k], "PgUp")) saw = 1;
                                 if (wide.log_skip != 0 || !saw || !tui_frame_has(&wide, "hist-new")
                                     || tui_frame_bad_width(&fr, 80)) {
-                                    printf("FAIL log end or wide hint\n");
+                                    sy_printf("FAIL log end or wide hint\n");
                                     failures++;
                                 } else {
                                     tui_apply_key(&wide, TERM_KEY_PGUP, 0);
                                     tui_apply_key(&wide, TERM_KEY_HOME, 0);
                                     if (wide.log_skip != 20 || !tui_frame_has(&wide, "hist-01")
                                         || tui_frame_has(&wide, "hist-new")) {
-                                        printf("FAIL log home skip %d\n", wide.log_skip);
+                                        sy_printf("FAIL log home skip %d\n", wide.log_skip);
                                         failures++;
                                     } else {
                                         tui_apply_key(&wide, TERM_KEY_PGDN, 0);
                                         if (wide.log_skip != 0) {
-                                            printf("FAIL log page down skip %d\n", wide.log_skip);
+                                            sy_printf("FAIL log page down skip %d\n", wide.log_skip);
                                             failures++;
-                                        } else printf("  ok   log wheel and keys\n");
+                                        } else sy_printf("  ok   log wheel and keys\n");
                                     }
                                 }
                             }
@@ -4559,7 +4560,7 @@ int tui_entry(int argc, char **argv) {
                 tui_state_init(&wide, NULL);
                 wide.mode = 1;
                 wide.rows = 54;
-                snprintf(wide.goal, sizeof wide.goal, "g");
+                tx_snprintf(wide.goal, sizeof wide.goal, "g");
                 wide.loop_on = 1;
                 fr = tui_render_state(&wide, 40);
                 goal_at = -1;
@@ -4568,9 +4569,9 @@ int tui_entry(int argc, char **argv) {
                 if (goal_at < 1 || (goal_at > 1 && !fr.lines[goal_at - 1][0])) {
                     /* No blank rows should pad the empty log view; goal sits
                      * right below the header. */
-                    printf("FAIL empty log view goal at %d\n", goal_at);
+                    sy_printf("FAIL empty log view goal at %d\n", goal_at);
                     failures++;
-                } else printf("  ok   empty log view unpadded, goal at %d\n", goal_at);
+                } else sy_printf("  ok   empty log view unpadded, goal at %d\n", goal_at);
             }
             {
                 static tui_state ex;
@@ -4596,7 +4597,7 @@ int tui_entry(int argc, char **argv) {
                     || !tui_frame_has(&ex, "cmd-ok")
                     || !tui_frame_has(&ex, "file[展开]>")
                     || !tui_frame_has(&ex, "read · json.c")) {
-                    printf("FAIL tool row stays closed\n"); failures++;
+                    sy_printf("FAIL tool row stays closed\n"); failures++;
                 } else {
                     tui_click(&ex, 1, y);
                     fr = tui_render_state(&ex, 40);
@@ -4607,9 +4608,9 @@ int tui_entry(int argc, char **argv) {
                         if (zs_find(fr.lines[k], "FILEBODY-hidden")) cmd = 1;
                     }
                     if (!closed || !cmd || tui_frame_has(&ex, "FILEBODY-hidden")) {
-                        printf("FAIL tool click did not expand\n");
+                        sy_printf("FAIL tool click did not expand\n");
                         failures++;
-                    } else printf("  ok   tool row opens on click\n");
+                    } else sy_printf("  ok   tool row opens on click\n");
                 }
             }
             {
@@ -4618,12 +4619,12 @@ int tui_entry(int argc, char **argv) {
                 er.mode = 1;
                 er.rows = 24;
                 if (tui_frame_has(&er, "错误>")) {
-                    printf("FAIL empty error status\n"); failures++;
+                    sy_printf("FAIL empty error status\n"); failures++;
                 }
                 tui_log_event(&er, "exit=1 nfs: not responding");
                 if (!tui_frame_has(&er, "错误> ") || !tui_frame_has(&er, "not responding")) {
-                    printf("FAIL error status did not take the nfs line\n"); failures++;
-                } else printf("  ok   error status keeps the nfs line\n");
+                    sy_printf("FAIL error status did not take the nfs line\n"); failures++;
+                } else sy_printf("  ok   error status keeps the nfs line\n");
             }
             {
                 static tui_state mind;
@@ -4632,14 +4633,14 @@ int tui_entry(int argc, char **argv) {
                 const char *home = sy_env("HOME");
                 int k, in_at = -1, hint_at = -1, sysn = 0, rules = 0, head = 0, paired = 0, tee = 0, labeled = 0, bars = 0, collapsed = 0;
                 fio_t *fp;
-                if (home) snprintf(oldhome, sizeof oldhome, "%s", home);
+                if (home) tx_snprintf(oldhome, sizeof oldhome, "%s", home);
                 else oldhome[0] = '\0';
-                snprintf(fh, sizeof fh, "%s/cdsh-frame-home", tui_selftest_tmp());
+                tx_snprintf(fh, sizeof fh, "%s/cdsh-frame-home", tui_selftest_tmp());
                 tui_mkdir(fh, 0750);
-                snprintf(fp2, sizeof fp2, "%s/.cdsh", fh); tui_mkdir(fp2, 0750);
-                snprintf(fp2, sizeof fp2, "%s/.cdsh/思维树.md", fh); fp = tui_fopen(fp2, "w");
+                tx_snprintf(fp2, sizeof fp2, "%s/.cdsh", fh); tui_mkdir(fp2, 0750);
+                tx_snprintf(fp2, sizeof fp2, "%s/.cdsh/思维树.md", fh); fp = tui_fopen(fp2, "w");
                 if (fp) { fio_puts("# 思维树\n甲\n乙\n丙\n", fp); fio_close(fp); }
-                snprintf(fp2, sizeof fp2, "%s/.cdsh/记忆宫殿.md", fh); fp = tui_fopen(fp2, "w");
+                tx_snprintf(fp2, sizeof fp2, "%s/.cdsh/记忆宫殿.md", fh); fp = tui_fopen(fp2, "w");
                 if (fp) { fio_puts("```mermaid\nflowchart LR\n# 记忆宫殿\n子\n丑\n```\n", fp); fio_close(fp); }
                 sy_setenv("HOME", fh, 1);
                 tui_state_init(&mind, NULL);
@@ -4682,8 +4683,8 @@ int tui_entry(int argc, char **argv) {
                     || paired || !tee || bars != 0 || mf.n > mind.rows
                     || tui_frame_bad_width(&mf, 40)
                     || tui_frame_has(&mind, "```") || tui_frame_has(&mind, "flowchart LR")) {
-                    printf("FAIL mind drawer stays closed\n"); failures++;
-                } else printf("  ok   rules between hint, system, and mind\n");
+                    sy_printf("FAIL mind drawer stays closed\n"); failures++;
+                } else sy_printf("  ok   rules between hint, system, and mind\n");
                 {
                     int my = 0, opened = 0, obars = 0, opaired = 0;
                     for (k = 0; k < mf.n; k++) {
@@ -4701,8 +4702,8 @@ int tui_entry(int argc, char **argv) {
                     }
                     if (!opened || !opaired || obars != TUI_MIND_N || mf.n > mind.rows
                         || tui_frame_bad_width(&mf, 40)) {
-                        printf("FAIL mind drawer did not open\n"); failures++;
-                    } else printf("  ok   mind drawer opens\n");
+                        sy_printf("FAIL mind drawer did not open\n"); failures++;
+                    } else sy_printf("  ok   mind drawer opens\n");
                 }
                 {
                     int sy = 0, body = 0, phase = 0, by = 0;
@@ -4714,7 +4715,7 @@ int tui_entry(int argc, char **argv) {
                             sy = k + 1;
                     }
                     if (sy < 1) {
-                        printf("FAIL system rule missing\n"); failures++;
+                        sy_printf("FAIL system rule missing\n"); failures++;
                     } else {
                         tui_click(&mind, 1, sy);
                         mf = tui_render_state(&mind, 40);
@@ -4727,13 +4728,13 @@ int tui_entry(int argc, char **argv) {
                                 phase = 2;
                                 break;
                             } else if (phase == 1) {
-                                if (body == 0) snprintf(first, sizeof first, "%s", mf.lines[k]);
+                                if (body == 0) tx_snprintf(first, sizeof first, "%s", mf.lines[k]);
                                 body++;
                             }
                         }
                         if (phase != 2 || body != TUI_SYS_N || mf.n > mind.rows
                             || tui_frame_bad_width(&mf, 40) || !zs_find(first, "三件")) {
-                            printf("FAIL system open body %d\n", body); failures++;
+                            sy_printf("FAIL system open body %d\n", body); failures++;
                         } else {
                             tui_wheel(&mind, by, 1);
                             mf = tui_render_state(&mind, 40);
@@ -4742,12 +4743,12 @@ int tui_entry(int argc, char **argv) {
                             for (k = 0; k < mf.n; k++) {
                                 if (phase == 0 && zs_find(mf.lines[k], "[收缩]")) phase = 1;
                                 else if (phase == 1) {
-                                    snprintf(next, sizeof next, "%s", mf.lines[k]);
+                                    tx_snprintf(next, sizeof next, "%s", mf.lines[k]);
                                     break;
                                 }
                             }
                             if (!next[0] || !zs_cmp(first, next) || tui_frame_bad_width(&mf, 40)) {
-                                printf("FAIL system wheel did not scroll\n"); failures++;
+                                sy_printf("FAIL system wheel did not scroll\n"); failures++;
                             } else {
                                 char stuck[R_LINE_MAX + 1], back[R_LINE_MAX + 1];
                                 int w;
@@ -4758,7 +4759,7 @@ int tui_entry(int argc, char **argv) {
                                 for (k = 0; k < mf.n; k++) {
                                     if (phase == 0 && zs_find(mf.lines[k], "[收缩]")) phase = 1;
                                     else if (phase == 1) {
-                                        snprintf(stuck, sizeof stuck, "%s", mf.lines[k]);
+                                        tx_snprintf(stuck, sizeof stuck, "%s", mf.lines[k]);
                                         break;
                                     }
                                 }
@@ -4769,15 +4770,15 @@ int tui_entry(int argc, char **argv) {
                                 for (k = 0; k < mf.n; k++) {
                                     if (phase == 0 && zs_find(mf.lines[k], "[收缩]")) phase = 1;
                                     else if (phase == 1) {
-                                        snprintf(back, sizeof back, "%s", mf.lines[k]);
+                                        tx_snprintf(back, sizeof back, "%s", mf.lines[k]);
                                         break;
                                     }
                                 }
                                 if (!stuck[0] || !back[0] || !zs_cmp(stuck, back)
                                     || tui_frame_bad_width(&mf, 40)) {
-                                    printf("FAIL system wheel stuck past the end\n");
+                                    sy_printf("FAIL system wheel stuck past the end\n");
                                     failures++;
-                                } else printf("  ok   system opens ten rows and scrolls\n");
+                                } else sy_printf("  ok   system opens ten rows and scrolls\n");
                             }
                         }
                     }
@@ -4788,16 +4789,16 @@ int tui_entry(int argc, char **argv) {
                 fp = tui_fopen(fp2, "w");
                 if (fp) fio_close(fp);
                 if (!tui_frame_has(&mind, "(空)")) {
-                    printf("FAIL empty palace page\n"); failures++;
-                } else printf("  ok   empty palace shows (空)\n");
+                    sy_printf("FAIL empty palace page\n"); failures++;
+                } else sy_printf("  ok   empty palace shows (空)\n");
                 /* the guard refuses everything while $HOME is the fixture under the temp root (the temp root is then an
                    ancestor of $HOME): the real HOME is back for the removal only */
                 if (oldhome[0]) sy_setenv("HOME", oldhome, 1); else sy_unsetenv("HOME");
                 if (tui_selftest_rm(fp2, 0)) failures++;
                 sy_setenv("HOME", fh, 1);
                 if (!tui_frame_has(&mind, "(无)")) {
-                    printf("FAIL missing palace page\n"); failures++;
-                } else printf("  ok   missing palace shows (无)\n");
+                    sy_printf("FAIL missing palace page\n"); failures++;
+                } else sy_printf("  ok   missing palace shows (无)\n");
                 if (oldhome[0]) sy_setenv("HOME", oldhome, 1);
                 else sy_unsetenv("HOME");
             }
@@ -4811,7 +4812,7 @@ int tui_entry(int argc, char **argv) {
             char line[1024];
             size_t i;
             char path[4096], cmd[4200];
-            snprintf(path, sizeof path, "%s/cdsh-tui-cli.txt", tui_selftest_tmp());
+            tx_snprintf(path, sizeof path, "%s/cdsh-tui-cli.txt", tui_selftest_tmp());
             tui_state_init(&hand, NULL);
             tui_type(&hand, "sh echo cdsh-hand");
             via_cli = tool_run("sh echo cdsh-hand");
@@ -4828,11 +4829,11 @@ int tui_entry(int argc, char **argv) {
                 || zs_cmp(hand.notice, "ran (output continues; see 'read')") != 0
                 || !tui_frame_has(&hand, "cdsh-hand")
                 || !tui_frame_has(&hand, "ran (output continues")) {
-                printf("FAIL cli echo did not land on the tui frame\n");
+                sy_printf("FAIL cli echo did not land on the tui frame\n");
                 failures++;
-            } else printf("  ok   cli echo matches tui frame\n");
-            snprintf(cmd, sizeof cmd, "write %s from-cli", path); tui_type(&hand, cmd);
-            snprintf(cmd, sizeof cmd, "read %s", path); tui_type(&hand, cmd);
+            } else sy_printf("  ok   cli echo matches tui frame\n");
+            tx_snprintf(cmd, sizeof cmd, "write %s from-cli", path); tui_type(&hand, cmd);
+            tx_snprintf(cmd, sizeof cmd, "read %s", path); tui_type(&hand, cmd);
             via_cli = tool_run(cmd);
             i = 0;
             while (via_cli.out[i] && via_cli.out[i] != '\n' && i + 1 < sizeof line) {
@@ -4843,9 +4844,9 @@ int tui_entry(int argc, char **argv) {
             if (!via_cli.ok || zs_cmp(hand.output, "from-cli") != 0
                 || zs_cmp(hand.output, line) != 0
                 || !tui_frame_has(&hand, "from-cli")) {
-                printf("FAIL cli read did not land on the tui frame\n");
+                sy_printf("FAIL cli read did not land on the tui frame\n");
                 failures++;
-            } else printf("  ok   cli read matches tui frame\n");
+            } else sy_printf("  ok   cli read matches tui frame\n");
             if (tui_selftest_rm(path, 0)) failures++;
         }
         {
@@ -4853,31 +4854,31 @@ int tui_entry(int argc, char **argv) {
             char row[360];
             zs_mset(&rr, 0, sizeof rr);
             rr.acceptance = AGENT_ACCEPT_UNVERIFIED;
-            snprintf(rr.reason, sizeof rr.reason, "unfinished: no claims");
+            tx_snprintf(rr.reason, sizeof rr.reason, "unfinished: no claims");
             tui_result_row(row, sizeof row, &rr);
-            if (zs_cmp(row, "◐ 做完未验证: no claims")) { printf("FAIL unverified row: %s\n", row); failures++; }
-            else printf("  ok   unverified row uses ◐\n");
+            if (zs_cmp(row, "◐ 做完未验证: no claims")) { sy_printf("FAIL unverified row: %s\n", row); failures++; }
+            else sy_printf("  ok   unverified row uses ◐\n");
             zs_mset(&rr, 0, sizeof rr);
             rr.err = 1;
-            snprintf(rr.reason, sizeof rr.reason, "http 401");
+            tx_snprintf(rr.reason, sizeof rr.reason, "http 401");
             tui_result_row(row, sizeof row, &rr);
-            if (zs_cmp(row, "✗ 失败: http 401")) { printf("FAIL failed row: %s\n", row); failures++; }
-            else printf("  ok   failed row uses ✗ 失败\n");
+            if (zs_cmp(row, "✗ 失败: http 401")) { sy_printf("FAIL failed row: %s\n", row); failures++; }
+            else sy_printf("  ok   failed row uses ✗ 失败\n");
             zs_mset(&rr, 0, sizeof rr);
             rr.outcome = AGENT_OUTCOME_FAILED;
-            snprintf(rr.reason, sizeof rr.reason, "unfinished: answer outcome=failed");
+            tx_snprintf(rr.reason, sizeof rr.reason, "unfinished: answer outcome=failed");
             tui_result_row(row, sizeof row, &rr);
-            if (zs_cmp(row, "✗ 失败: 模型报告未能完成")) { printf("FAIL model-failed row: %s\n", row); failures++; }
-            else printf("  ok   model-reported failure is ✗ with a Chinese reason\n");
+            if (zs_cmp(row, "✗ 失败: 模型报告未能完成")) { sy_printf("FAIL model-failed row: %s\n", row); failures++; }
+            else sy_printf("  ok   model-reported failure is ✗ with a Chinese reason\n");
             zs_mset(&rr, 0, sizeof rr);
             rr.ok = 1; rr.rounds = 1; rr.actions = 3; rr.acceptance = AGENT_ACCEPT_ACCEPTED;
-            snprintf(rr.answer, sizeof rr.answer, "done");
-            snprintf(rr.reason, sizeof rr.reason, "semantic acceptance (work): records match");
+            tx_snprintf(rr.answer, sizeof rr.answer, "done");
+            tx_snprintf(rr.reason, sizeof rr.reason, "semantic acceptance (work): records match");
             net_turn_clock();   /* elapsed 0: the row leaves the time out */
             tui_turn_undo0 = -1; /* no turn in flight: no file-change note */
             tui_done_row(row, sizeof row, &rr);
-            if (zs_cmp(row, "✓ 已验收 · 本轮结束 1 轮 3 步 · records match")) { printf("FAIL done row: %s\n", row); failures++; }
-            else printf("  ok   accepted row reads ✓ 已验收 and keeps 本轮结束\n");
+            if (zs_cmp(row, "✓ 已验收 · 本轮结束 1 轮 3 步 · records match")) { sy_printf("FAIL done row: %s\n", row); failures++; }
+            else sy_printf("  ok   accepted row reads ✓ 已验收 and keeps 本轮结束\n");
         }
         {
             static tui_state ti;
@@ -4888,8 +4889,8 @@ int tui_entry(int argc, char **argv) {
             tf = tui_render_state(&ti, 120);
             sy_unsetenv("CSIH_MODEL"); sy_unsetenv("CSIH_CWD");
             if (tf.n < 1 || !zs_find(tf.lines[0], "csih · agent · m-test · key=") || !zs_find(tf.lines[0], " · /srv/w"))
-                { printf("FAIL title: %s\n", tf.n ? tf.lines[0] : "(none)"); failures++; }
-            else printf("  ok   title shows model, cwd and key source\n");
+                { sy_printf("FAIL title: %s\n", tf.n ? tf.lines[0] : "(none)"); failures++; }
+            else sy_printf("  ok   title shows model, cwd and key source\n");
         }
         {
             static tui_state tk;
@@ -4897,12 +4898,12 @@ int tui_entry(int argc, char **argv) {
             const char *s;
             for (s = "hello world"; *s; s++) tui_apply_key(&tk, TERM_KEY_CHAR, *s);
             tui_apply_key(&tk, TERM_KEY_CHAR, 0x15);
-            if (tk.ninput != 0 || tk.input[0]) { printf("FAIL ctrl-u left: %s\n", tk.input); failures++; }
-            else printf("  ok   ctrl-u clears the line\n");
+            if (tk.ninput != 0 || tk.input[0]) { sy_printf("FAIL ctrl-u left: %s\n", tk.input); failures++; }
+            else sy_printf("  ok   ctrl-u clears the line\n");
             for (s = "git commit  "; *s; s++) tui_apply_key(&tk, TERM_KEY_CHAR, *s);
             tui_apply_key(&tk, TERM_KEY_CHAR, 0x17);
-            if (zs_cmp(tk.input, "git ")) { printf("FAIL ctrl-w left: [%s]\n", tk.input); failures++; }
-            else printf("  ok   ctrl-w deletes one word\n");
+            if (zs_cmp(tk.input, "git ")) { sy_printf("FAIL ctrl-w left: [%s]\n", tk.input); failures++; }
+            else sy_printf("  ok   ctrl-w deletes one word\n");
         }
         {
             static tui_state tq;
@@ -4927,8 +4928,8 @@ int tui_entry(int argc, char **argv) {
             tui_apply_key(&tq, TERM_KEY_LEFT, 0);
             tui_apply_key(&tq, TERM_KEY_CHAR, 'a');
             if (zs_cmp(tq.input, "你a好")) okc = 0;
-            if (!okc) { printf("FAIL cursor editing: [%s] back=%d\n", tq.input, tq.back); failures++; }
-            else printf("  ok   cursor moves and edits mid-line\n");
+            if (!okc) { sy_printf("FAIL cursor editing: [%s] back=%d\n", tq.input, tq.back); failures++; }
+            else sy_printf("  ok   cursor moves and edits mid-line\n");
             tui_apply_key(&tq, TERM_KEY_CHAR, 0x15);
             for (s = "0123456789abcdefghijklmnopqrstuvwxyz0123456789"; *s; s++) tui_apply_key(&tq, TERM_KEY_CHAR, *s);
             for (s = "汉字结尾END"; *s; s++) tui_apply_key(&tq, TERM_KEY_CHAR, *s);
@@ -4936,17 +4937,17 @@ int tui_entry(int argc, char **argv) {
             tui_apply_key(&tq, TERM_KEY_CHAR, 0x01);
             okc = okc && tui_frame_has(&tq, "> ▏0123456789") && !tui_frame_has(&tq, "> …");
             tui_apply_key(&tq, TERM_KEY_CHAR, 0x15);
-            if (!okc) { printf("FAIL long input does not follow the cursor\n"); failures++; }
-            else printf("  ok   long input scrolls to keep the cursor visible\n");
+            if (!okc) { sy_printf("FAIL long input does not follow the cursor\n"); failures++; }
+            else sy_printf("  ok   long input scrolls to keep the cursor visible\n");
         }
         {
             static tui_state th;
             const char *s;
             int ok;
             tui_state_init(&th, NULL); th.mode = 1;
-            snprintf(th.history[0], sizeof th.history[0], "git status");
-            snprintf(th.history[1], sizeof th.history[1], "make test");
-            snprintf(th.history[2], sizeof th.history[2], "git log -3");
+            tx_snprintf(th.history[0], sizeof th.history[0], "git status");
+            tx_snprintf(th.history[1], sizeof th.history[1], "make test");
+            tx_snprintf(th.history[2], sizeof th.history[2], "git log -3");
             th.nhistory = 3;
             for (s = "git"; *s; s++) tui_apply_key(&th, TERM_KEY_CHAR, *s);
             tui_apply_key(&th, TERM_KEY_CHAR, 0x12);
@@ -4961,16 +4962,16 @@ int tui_entry(int argc, char **argv) {
             for (s = "zzz"; *s; s++) tui_apply_key(&th, TERM_KEY_CHAR, *s);
             tui_apply_key(&th, TERM_KEY_CHAR, 0x12);
             ok = ok && !zs_cmp(th.input, "zzz") && th.notice && zs_find(th.notice, "没有匹配");
-            if (!ok) { printf("FAIL ctrl-r [%s]\n", th.input); failures++; }
-            else printf("  ok   ctrl-r searches history newest first\n");
+            if (!ok) { sy_printf("FAIL ctrl-r [%s]\n", th.input); failures++; }
+            else sy_printf("  ok   ctrl-r searches history newest first\n");
             tui_apply_key(&th, TERM_KEY_CHAR, 0x15);
             for (s = "第一行"; *s; s++) tui_apply_key(&th, TERM_KEY_CHAR, *s);
             tui_apply_key(&th, TERM_KEY_ALT_ENTER, 0);
             for (s = "第二行"; *s; s++) tui_apply_key(&th, TERM_KEY_CHAR, *s);
             ok = !zs_cmp(th.input, "第一行\n第二行") && th.npending == 0 && tui_frame_has(&th, "第一行⏎第二行");
             tui_apply_key(&th, TERM_KEY_CHAR, 0x15);
-            if (!ok) { printf("FAIL alt-enter [%s]\n", th.input); failures++; }
-            else printf("  ok   alt-enter adds a newline without sending\n");
+            if (!ok) { sy_printf("FAIL alt-enter [%s]\n", th.input); failures++; }
+            else sy_printf("  ok   alt-enter adds a newline without sending\n");
             /* Tab completes slash commands */
             tui_apply_key(&th, TERM_KEY_CHAR, 0x15);
             for (s = "/res"; *s; s++) tui_apply_key(&th, TERM_KEY_CHAR, *s);
@@ -4988,18 +4989,18 @@ int tui_entry(int argc, char **argv) {
             for (s = "/zzz"; *s; s++) tui_apply_key(&th, TERM_KEY_CHAR, *s);
             tui_apply_key(&th, TERM_KEY_CHAR, '\t');
             ok = ok && !zs_cmp(th.input, "/zzz") && th.notice && zs_find(th.notice, "没有匹配");
-            if (!ok) { printf("FAIL tab complete [%s]\n", th.input); failures++; }
-            else printf("  ok   tab completes slash commands\n");
+            if (!ok) { sy_printf("FAIL tab complete [%s]\n", th.input); failures++; }
+            else sy_printf("  ok   tab completes slash commands\n");
         }
         {
             static tui_state hl;
             char hf[128], e[32];
             int i, ok;
-            snprintf(hf, sizeof hf, "/tmp/csih-hist-%d", (int)sy_pid());
+            tx_snprintf(hf, sizeof hf, "/tmp/csih-hist-%d", (int)sy_pid());
             tui_state_init(&hl, NULL);
             tui_history_load(&hl, hf);              /* missing file: empty, path set */
             ok = hl.nhistory == 0;
-            for (i = 1; i <= 20; i++) { snprintf(e, sizeof e, "entry %d", i); tui_history_save(e); }
+            for (i = 1; i <= 20; i++) { tx_snprintf(e, sizeof e, "entry %d", i); tui_history_save(e); }
             tui_history_save("two\nlines");
             tui_state_init(&hl, NULL);
             tui_history_load(&hl, hf);
@@ -5007,8 +5008,8 @@ int tui_entry(int argc, char **argv) {
                 && !zs_cmp(hl.history[15], "two\nlines");
             tui_hist_file[0] = 0;
             if (tui_selftest_rm(hf, 0)) failures++;
-            if (!ok) { printf("FAIL history persist n=%d first=[%s]\n", hl.nhistory, hl.history[0]); failures++; }
-            else printf("  ok   history persists across restarts, newest 16, multi-line kept\n");
+            if (!ok) { sy_printf("FAIL history persist n=%d first=[%s]\n", hl.nhistory, hl.history[0]); failures++; }
+            else sy_printf("  ok   history persists across restarts, newest 16, multi-line kept\n");
         }
         {
             static tui_state te;
@@ -5017,13 +5018,13 @@ int tui_entry(int argc, char **argv) {
             te.busy = 1;
             tui_apply_key(&te, TERM_KEY_ESC, 0);
             net_reset();
-            if (!te.cancel) { printf("FAIL esc did not cancel the busy turn\n"); failures++; }
-            else printf("  ok   esc cancels a busy turn\n");
+            if (!te.cancel) { sy_printf("FAIL esc did not cancel the busy turn\n"); failures++; }
+            else sy_printf("  ok   esc cancels a busy turn\n");
             te.busy = 0; te.cancel = 0;
             for (s = "draft"; *s; s++) tui_apply_key(&te, TERM_KEY_CHAR, *s);
             tui_apply_key(&te, TERM_KEY_ESC, 0);
-            if (te.ninput || te.cancel) { printf("FAIL esc idle left [%s]\n", te.input); failures++; }
-            else printf("  ok   esc clears idle input\n");
+            if (te.ninput || te.cancel) { sy_printf("FAIL esc idle left [%s]\n", te.input); failures++; }
+            else sy_printf("  ok   esc clears idle input\n");
         }
         {
             static tui_state tm;
@@ -5033,18 +5034,18 @@ int tui_entry(int argc, char **argv) {
             sy_setenv("CSIH_CWD", "/srv/cwdtest", 1);
             if (zs_cmp(tm.model, "m-two") || !zs_find(tm.log[tm.nlog - 1], "model set: m-two")
                 || !tui_frame_has(&tm, "m-two") || tm.npending || tm.busy)
-                { printf("FAIL /model: [%s] %s\n", tm.model, tm.nlog ? tm.log[tm.nlog - 1] : ""); failures++; }
-            else printf("  ok   /model sets the session model\n");
+                { sy_printf("FAIL /model: [%s] %s\n", tm.model, tm.nlog ? tm.log[tm.nlog - 1] : ""); failures++; }
+            else sy_printf("  ok   /model sets the session model\n");
             tui_type(&tm, "/cwd");
             sy_unsetenv("CSIH_CWD");
             if (!zs_find(tm.log[tm.nlog - 1], "cwd: /srv/cwdtest") || tm.npending)
-                { printf("FAIL /cwd: %s\n", tm.log[tm.nlog - 1]); failures++; }
-            else printf("  ok   /cwd shows the working directory\n");
+                { sy_printf("FAIL /cwd: %s\n", tm.log[tm.nlog - 1]); failures++; }
+            else sy_printf("  ok   /cwd shows the working directory\n");
             tui_type(&tm, "/help");
             for (k = 0; k < tm.nlog; k++)
                 if (zs_find(tm.log[k], "/model [名]") && zs_find(tm.log[k], "/cwd")) help = 1;
-            if (!help) { printf("FAIL help misses /model or /cwd\n"); failures++; }
-            else printf("  ok   help lists /model and /cwd\n");
+            if (!help) { sy_printf("FAIL help misses /model or /cwd\n"); failures++; }
+            else sy_printf("  ok   help lists /model and /cwd\n");
         }
         {
             static tui_state tc;
@@ -5058,36 +5059,36 @@ int tui_entry(int argc, char **argv) {
             net_test_usage(tail);
             net_session_usage(&calls1, &h1, &m1, &o1);
             if (calls1 - calls0 != 2 || h1 - h0 != 1600 || m1 - m0 != 400 || o1 - o0 != 100)
-                { printf("FAIL usage sums calls=%d hit=%ld miss=%ld out=%ld\n", calls1 - calls0, h1 - h0, m1 - m0, o1 - o0); failures++; }
-            else printf("  ok   usage with nested details sums per response\n");
+                { sy_printf("FAIL usage sums calls=%d hit=%ld miss=%ld out=%ld\n", calls1 - calls0, h1 - h0, m1 - m0, o1 - o0); failures++; }
+            else sy_printf("  ok   usage with nested details sums per response\n");
             tui_state_init(&tc, NULL); tc.mode = 1;
             tui_type(&tc, "/cost");
             if (!zs_find(tc.log[tc.nlog - 1], "cost: 请求 ") || !zs_find(tc.log[tc.nlog - 1], "缓存命中") || tc.npending || tc.busy)
-                { printf("FAIL /cost: %s\n", tc.log[tc.nlog - 1]); failures++; }
-            else printf("  ok   /cost shows session usage\n");
+                { sy_printf("FAIL /cost: %s\n", tc.log[tc.nlog - 1]); failures++; }
+            else sy_printf("  ok   /cost shows session usage\n");
             {
                 /* usage was fed above, so the exit line has something to say */
                 char sum[300];
                 if (!tui_session_summary(sum, sizeof sum) || !zs_find(sum, "请求 ") || !zs_find(sum, "缓存命中"))
-                    { printf("FAIL exit summary: %s\n", sum); failures++; }
-                else printf("  ok   exit summary reports requests, tokens and file changes\n");
+                    { sy_printf("FAIL exit summary: %s\n", sum); failures++; }
+                else sy_printf("  ok   exit summary reports requests, tokens and file changes\n");
             }
         }
         {
             char path[256], msg[400];
             const char *arch;
             fio_t *f;
-            snprintf(path, sizeof path, "/tmp/csih-new-%d.jsonl", (int)sy_pid());
+            tx_snprintf(path, sizeof path, "/tmp/csih-new-%d.jsonl", (int)sy_pid());
             f = tui_fopen(path, "w");
             if (f) { fio_puts("{\"role\":\"user\",\"text\":\"old\"}\n", f); fio_close(f); }
             if (!f || tui_new_context(path, msg, sizeof msg) != 0 || sy_exists(path) == 1
                 || !(arch = zs_find(msg, "存为 ")) || sy_exists(arch + (size_t)zs_len("存为 ")) != 1) {
-                printf("FAIL /new: %s\n", msg); failures++;
+                sy_printf("FAIL /new: %s\n", msg); failures++;
             } else {
                 if (tui_selftest_rm(arch + (size_t)zs_len("存为 "), 0)) failures++;
                 if (tui_new_context(path, msg, sizeof msg) != 0 || !zs_find(msg, "已是空上下文"))
-                    { printf("FAIL /new on empty: %s\n", msg); failures++; }
-                else printf("  ok   /new archives the transcript and starts fresh\n");
+                    { sy_printf("FAIL /new on empty: %s\n", msg); failures++; }
+                else sy_printf("  ok   /new archives the transcript and starts fresh\n");
             }
         }
         {
@@ -5095,8 +5096,8 @@ int tui_entry(int argc, char **argv) {
             long stamps[9];
             fio_t *f;
             int ok = 0, n1 = -1, n2 = -1;
-            snprintf(dir, sizeof dir, "/tmp/csih-resume-%d", (int)sy_pid());
-            snprintf(path, sizeof path, "%s/t.jsonl", dir);
+            tx_snprintf(dir, sizeof dir, "/tmp/csih-resume-%d", (int)sy_pid());
+            tx_snprintf(path, sizeof path, "%s/t.jsonl", dir);
             if (tui_mkdir(dir, 0700) == 0) {
                 f = tui_fopen(path, "w"); if (f) { fio_puts("{\"role\":\"user\",\"text\":\"任务甲\"}\n", f); fio_close(f); }
                 tui_new_context(path, msg, sizeof msg);
@@ -5108,7 +5109,7 @@ int tui_entry(int argc, char **argv) {
                     body[0] = 0;
                     if (f) { if (!fio_gets(body, sizeof body, f)) body[0] = 0; fio_close(f); }
                     if (n2 >= 1) {
-                        snprintf(msg, sizeof msg, "%s.%ld.jsonl", path, stamps[0]);
+                        tx_snprintf(msg, sizeof msg, "%s.%ld.jsonl", path, stamps[0]);
                         tui_first_user(msg, first, sizeof first);
                     } else first[0] = 0;
                     ok = zs_find(body, "任务甲") && n2 == 1 && !zs_cmp(first, "任务乙")
@@ -5116,12 +5117,12 @@ int tui_entry(int argc, char **argv) {
                     /* import an old shared journal as the newest archive */
                     {
                         char shared[320];
-                        snprintf(shared, sizeof shared, "%s/shared.jsonl", dir);
+                        tx_snprintf(shared, sizeof shared, "%s/shared.jsonl", dir);
                         f = tui_fopen(shared, "w"); if (f) { fio_puts("{\"role\":\"user\",\"text\":\"旧任务丙\"}\n", f); fio_close(f); }
                         ok = ok && tui_import_shared(path, shared, msg, sizeof msg) == 0
                             && tui_archives(path, stamps, 9) == 2 && sy_exists(shared) == 1;
                         if (ok) {
-                            snprintf(msg, sizeof msg, "%s.%ld.jsonl", path, stamps[0]);
+                            tx_snprintf(msg, sizeof msg, "%s.%ld.jsonl", path, stamps[0]);
                             tui_first_user(msg, first, sizeof first);
                             ok = !zs_cmp(first, "旧任务丙");
                         }
@@ -5134,8 +5135,8 @@ int tui_entry(int argc, char **argv) {
             if (ok) {
                 char cdir[200], cpath[260], line[8192];
                 int i2, lines = 0;
-                snprintf(cdir, sizeof cdir, "/tmp/csih-compact-%d", (int)sy_pid());
-                snprintf(cpath, sizeof cpath, "%s/t.jsonl", cdir);
+                tx_snprintf(cdir, sizeof cdir, "/tmp/csih-compact-%d", (int)sy_pid());
+                tx_snprintf(cpath, sizeof cpath, "%s/t.jsonl", cdir);
                 tui_mkdir(cdir, 0700);
                 f = tui_fopen(cpath, "w");
                 if (f) {
@@ -5153,8 +5154,8 @@ int tui_entry(int argc, char **argv) {
                 f = tui_fopen(cpath, "r"); line[0] = 0;
                 if (f) { if (!fio_gets(line, sizeof line, f)) line[0] = 0; fio_close(f); }
                 ok = ok && zs_find(line, "答复Y") && !zs_find(line, "请求7");
-                if (!ok) printf("  (compact) %s\n", msg);
-                else printf("  ok   /compact keeps the last 5 requests and answer, quoted\n");
+                if (!ok) sy_printf("  (compact) %s\n", msg);
+                else sy_printf("  ok   /compact keeps the last 5 requests and answer, quoted\n");
                 /* /export: user, answer text and tool output; judge rows and decisions left out */
                 {
                     char md[300], all[4096];
@@ -5169,20 +5170,20 @@ int tui_entry(int argc, char **argv) {
                         fio_puts("{\"role\":\"decision\",\"go\":\"stop\"}\n", f);
                         fio_close(f);
                     }
-                    snprintf(md, sizeof md, "%s/out.md", cdir);
+                    tx_snprintf(md, sizeof md, "%s/out.md", cdir);
                     sec = tui_export(cpath, md, msg, sizeof msg);
                     f = tui_fopen(md, "r");
                     if (f) { got = fio_read(all, 1, sizeof all - 1, f); fio_close(f); }
                     all[got] = 0;
                     ok = sec == 3 && zs_find(all, "## 你\n\n列一下文件") && zs_find(all, "### 工具 exec") && zs_find(all, "a.txt")
                         && zs_find(all, "## csih\n\n只有 a.txt") && !zs_find(all, "JUDGE") && !zs_find(all, "\"act\"");
-                    if (!ok) { printf("FAIL /export sec=%d\n%s\n", sec, all); failures++; }
-                    else printf("  ok   /export writes user, answers and tool output as Markdown\n");
+                    if (!ok) { sy_printf("FAIL /export sec=%d\n%s\n", sec, all); failures++; }
+                    else sy_printf("  ok   /export writes user, answers and tool output as Markdown\n");
                 }
                 if (tui_selftest_rm(cdir, 1)) failures++;
             }
-            if (!ok) { printf("FAIL /resume n1=%d n2=%d last=%s\n", n1, n2, msg); failures++; }
-            else printf("  ok   /resume lists and swaps archived transcripts\n");
+            if (!ok) { sy_printf("FAIL /resume n1=%d n2=%d last=%s\n", n1, n2, msg); failures++; }
+            else sy_printf("  ok   /resume lists and swaps archived transcripts\n");
         }
         {
             static tui_state ta;
@@ -5192,16 +5193,16 @@ int tui_entry(int argc, char **argv) {
             b1 = agent_danger_blocked(ACT_EXEC, "rm -rf build", why, (int)sizeof why);
             if (!b1 || !zs_find(why, "/allow") || agent_danger_blocked(ACT_EXEC, "ls -la", why, (int)sizeof why)
                 || agent_danger_blocked(ACT_READ, "rm -rf x", why, (int)sizeof why))
-                { printf("FAIL danger gate blocked=%d why=%s\n", b1, why); failures++; }
-            else printf("  ok   dangerous exec is blocked until /allow\n");
+                { sy_printf("FAIL danger gate blocked=%d why=%s\n", b1, why); failures++; }
+            else sy_printf("  ok   dangerous exec is blocked until /allow\n");
             tui_state_init(&ta, NULL); ta.mode = 1;
             tui_type(&ta, "/allow");
             b2 = agent_danger_blocked(ACT_EXEC, "git push origin main", why, (int)sizeof why);
             b3 = agent_danger_blocked(ACT_EXEC, "git push origin main", why, (int)sizeof why);
             agent_allow_danger(0);
             if (b2 || !b3 || ta.npending)
-                { printf("FAIL /allow first=%d second=%d\n", b2, b3); failures++; }
-            else printf("  ok   /allow lets exactly one through\n");
+                { sy_printf("FAIL /allow first=%d second=%d\n", b2, b3); failures++; }
+            else sy_printf("  ok   /allow lets exactly one through\n");
         }
         {
             static tui_state tp;
@@ -5236,8 +5237,8 @@ int tui_entry(int argc, char **argv) {
             tui_type(&tp, "/perm bogus");
             if (!zs_find(tp.log[tp.nlog - 1], "usage: /perm")) bad |= 32768;
             agent_set_perm(1);
-            if (bad) { printf("FAIL perm tiers bad=%d\n", bad); failures++; }
-            else printf("  ok   /perm read|work|any gates writes and commands\n");
+            if (bad) { sy_printf("FAIL perm tiers bad=%d\n", bad); failures++; }
+            else sy_printf("  ok   /perm read|work|any gates writes and commands\n");
         }
         {
             static tui_state tf2;
@@ -5250,21 +5251,21 @@ int tui_entry(int argc, char **argv) {
             tui_log_event(&tf2, "  │ 命令退出 0");
             tui_log_event(&tf2, "  │ FOLDED-BODY");
             if (tf2.nlog != 2 || !tf2.ex_open[0] || tf2.ex_open[1])
-                { printf("FAIL failed tool row nlog=%d open=%d ok row open=%d\n", tf2.nlog, tf2.ex_open[0], tf2.ex_open[1]); failures++; }
-            else printf("  ok   failed tool row opens by itself\n");
+                { sy_printf("FAIL failed tool row nlog=%d open=%d ok row open=%d\n", tf2.nlog, tf2.ex_open[0], tf2.ex_open[1]); failures++; }
+            else sy_printf("  ok   failed tool row opens by itself\n");
             if (!tui_frame_has(&tf2, "· 命令退出 0") || tui_frame_has(&tf2, "FOLDED-BODY"))
-                { printf("FAIL closed tool row lacks status or shows body\n"); failures++; }
-            else printf("  ok   closed tool row is one line with status\n");
+                { sy_printf("FAIL closed tool row lacks status or shows body\n"); failures++; }
+            else sy_printf("  ok   closed tool row is one line with status\n");
             if (!tui_frame_has(&tf2, "  │ 命令退出 2") || !tui_frame_has(&tf2, "  │ evidence 9-1-1-1")
                 || tui_frame_has(&tf2, "⏎"))
-                { printf("FAIL open tool body not one line per row\n"); failures++; }
-            else printf("  ok   open tool body is one line per row\n");
+                { sy_printf("FAIL open tool body not one line per row\n"); failures++; }
+            else sy_printf("  ok   open tool body is one line per row\n");
             tui_apply_key(&tf2, TERM_KEY_CHAR, '\t');
-            if (!tf2.ex_open[1] || tf2.ninput) { printf("FAIL tab did not open newest tool row\n"); failures++; }
+            if (!tf2.ex_open[1] || tf2.ninput) { sy_printf("FAIL tab did not open newest tool row\n"); failures++; }
             else {
                 tui_apply_key(&tf2, TERM_KEY_CHAR, '\t');
-                if (tf2.ex_open[1]) { printf("FAIL tab did not close it again\n"); failures++; }
-                else printf("  ok   tab toggles the newest tool row\n");
+                if (tf2.ex_open[1]) { sy_printf("FAIL tab did not close it again\n"); failures++; }
+                else sy_printf("  ok   tab toggles the newest tool row\n");
             }
             {
                 char b1[16], b2[16], b3[16];
@@ -5273,22 +5274,22 @@ int tui_entry(int argc, char **argv) {
                 tui_bytes(b1, sizeof b1, 574); tui_bytes(b2, sizeof b2, 32839); tui_bytes(b3, sizeof b3, 3 * 1024 * 1024);
                 if (zs_cmp(tf2.phase, "跑命令 sleep 3") || !tui_frame_has(&tf2, "⏳ 跑命令")
                     || zs_cmp(b1, "574B") || zs_cmp(b2, "32.1KB") || zs_cmp(b3, "3.0MB"))
-                    { printf("FAIL busy phase=[%s] bytes=%s %s %s\n", tf2.phase, b1, b2, b3); failures++; }
-                else printf("  ok   busy line names the running command and reads sizes\n");
+                    { sy_printf("FAIL busy phase=[%s] bytes=%s %s %s\n", tf2.phase, b1, b2, b3); failures++; }
+                else sy_printf("  ok   busy line names the running command and reads sizes\n");
                 /* bell: never off a tty, never with CSIH_BELL=0, not for a turn just started */
                 net_turn_clock();
                 if (tui_should_bell(0, NULL) || tui_should_bell(1, "0") || tui_should_bell(1, NULL))
-                    { printf("FAIL bell rules\n"); failures++; }
-                else printf("  ok   bell only on a tty, not disabled, after 10s\n");
+                    { sy_printf("FAIL bell rules\n"); failures++; }
+                else sy_printf("  ok   bell only on a tty, not disabled, after 10s\n");
             {
                 /* the first screen shows where to start; it goes once there is a log */
                 static tui_state tw;
                 tui_state_init(&tw, NULL); tw.mode = 1; tw.rows = 24;
-                if (!tui_frame_has(&tw, "/help 看命令")) { printf("FAIL welcome hint missing\n"); failures++; }
+                if (!tui_frame_has(&tw, "/help 看命令")) { sy_printf("FAIL welcome hint missing\n"); failures++; }
                 else {
                     tui_log_plain(&tw, "x");
-                    if (tui_frame_has(&tw, "/help 看命令")) { printf("FAIL welcome hint stays\n"); failures++; }
-                    else printf("  ok   empty screen hints /help, Tab and Alt-Enter; then steps aside\n");
+                    if (tui_frame_has(&tw, "/help 看命令")) { sy_printf("FAIL welcome hint stays\n"); failures++; }
+                    else sy_printf("  ok   empty screen hints /help, Tab and Alt-Enter; then steps aside\n");
                 }
             }
             {
@@ -5303,9 +5304,9 @@ int tui_entry(int argc, char **argv) {
                 okc = okc && !zs_cmp(o, "\x1b[4;1Hplain\x1b[K");
                 okc = okc && !tui_frame_has(&tf2, "\x1b[");
                 if (tui_env_has("NO_COLOR") || tui_env_first("CSIH_COLOR") == '0')
-                    printf("  skip colour: turned off by NO_COLOR/CSIH_COLOR here\n");
-                else if (!okc) { printf("FAIL colour\n"); failures++; }
-                else printf("  ok   status rows are coloured on output, frames stay plain\n");
+                    sy_printf("  skip colour: turned off by NO_COLOR/CSIH_COLOR here\n");
+                else if (!okc) { sy_printf("FAIL colour\n"); failures++; }
+                else sy_printf("  ok   status rows are coloured on output, frames stay plain\n");
             }
                 tf2.busy = 0;
             }
@@ -5316,7 +5317,7 @@ int tui_entry(int argc, char **argv) {
             char path[256];
             fio_t *f;
             int ok = 0, room0, room1;
-            snprintf(path, sizeof path, "/tmp/csih-status-%d.txt", (int)sy_pid());
+            tx_snprintf(path, sizeof path, "/tmp/csih-status-%d.txt", (int)sy_pid());
             f = tui_fopen(path, "w");
             if (f) {
                 fio_puts("进度 37/52 .cx（盘点 tools/inventory）\n\n下一刀 grk: cx/runtime/routespan\n拒绝 not covered: x\n第四行不显示\n", f);
@@ -5335,8 +5336,8 @@ int tui_entry(int argc, char **argv) {
                 sy_unsetenv("CSIH_STATUS_FILE");
                 if (tui_selftest_rm(path, 0)) failures++;
             }
-            if (!ok) { printf("FAIL project status rows n=%d\n", ts.nstatus); failures++; }
-            else printf("  ok   project status file shows up to 3 rows with age\n");
+            if (!ok) { sy_printf("FAIL project status rows n=%d\n", ts.nstatus); failures++; }
+            else sy_printf("  ok   project status file shows up to 3 rows with age\n");
         }
 
         {
@@ -5344,7 +5345,7 @@ int tui_entry(int argc, char **argv) {
             char dir[128], out[4096], note[400];
             agent_step s;
             int k, created = 0, plus = 0, once = 0, empty_ok;
-            snprintf(dir, sizeof dir, "/tmp/csih-diff-%d", (int)sy_pid());
+            tx_snprintf(dir, sizeof dir, "/tmp/csih-diff-%d", (int)sy_pid());
             tui_mkdir(dir, 0700);
             tui_state_init(&td, NULL); td.mode = 1;
             while (agent_undo_depth() > 0) agent_undo_last(note, sizeof note);
@@ -5363,8 +5364,8 @@ int tui_entry(int argc, char **argv) {
             tui_rmdir(dir);
             /* two writes to one new file: listed once, as new, with its current text */
             if (!empty_ok || created != 1 || !plus || once != 1)
-                { printf("FAIL /diff created=%d plus=%d\n", created, plus); failures++; }
-            else printf("  ok   /diff lists each changed file once with its diff\n");
+                { sy_printf("FAIL /diff created=%d plus=%d\n", created, plus); failures++; }
+            else sy_printf("  ok   /diff lists each changed file once with its diff\n");
             {
                 /* two writes during a turn show up on its result row; none, nothing */
                 char ch[64], doc[300];
@@ -5372,15 +5373,15 @@ int tui_entry(int argc, char **argv) {
                 tui_turn_undo0 = agent_undo_depth();
                 tui_turn_changes(ch, sizeof ch);
                 ok2 = ch[0] == 0;
-                snprintf(doc, sizeof doc, "{\"act\":\"file\",\"op\":\"write\",\"path\":\"/tmp/csih-turnchg-%d.txt\",\"text\":\"a\"}", (int)sy_pid());
+                tx_snprintf(doc, sizeof doc, "{\"act\":\"file\",\"op\":\"write\",\"path\":\"/tmp/csih-turnchg-%d.txt\",\"text\":\"a\"}", (int)sy_pid());
                 s = agent_parse(doc); agent_exec(&s, "/tmp", out, sizeof out);
                 s = agent_parse(doc); agent_exec(&s, "/tmp", out, sizeof out);
                 tui_turn_changes(ch, sizeof ch);
                 ok2 = ok2 && !zs_cmp(ch, " · 改了 2 处文件（/diff 查看）");
                 agent_undo_last(note, sizeof note); agent_undo_last(note, sizeof note);  /* removes the file */
                 tui_turn_undo0 = -1;
-                if (!ok2) { printf("FAIL turn changes [%s]\n", ch); failures++; }
-                else printf("  ok   result row counts this turn's file changes\n");
+                if (!ok2) { sy_printf("FAIL turn changes [%s]\n", ch); failures++; }
+                else sy_printf("  ok   result row counts this turn's file changes\n");
             }
         }
         {
@@ -5388,21 +5389,21 @@ int tui_entry(int argc, char **argv) {
             char path[128];
             fio_t *f;
             int i, ok;
-            snprintf(path, sizeof path, "/tmp/csih-view-%d.txt", (int)sy_pid());
+            tx_snprintf(path, sizeof path, "/tmp/csih-view-%d.txt", (int)sy_pid());
             f = tui_fopen(path, "w");
             if (f) { for (i = 1; i <= 30; i++) fio_printf(f, "line %d\n", i); fio_close(f); }
             tui_state_init(&tv, NULL); tv.mode = 1;
-            snprintf(tv.input, sizeof tv.input, "/view %s 25", path); tv.ninput = (int)(size_t)zs_len(tv.input);
+            tx_snprintf(tv.input, sizeof tv.input, "/view %s 25", path); tv.ninput = (int)(size_t)zs_len(tv.input);
             tui_apply_key(&tv, TERM_KEY_ENTER, 0);
             ok = zs_find(tv.log[1], "   25│ line 25") && zs_find(tv.log[tv.nlog - 1], "line 30") && !tv.npending && !tv.busy;
-            snprintf(tv.input, sizeof tv.input, "/view %s", path); tv.ninput = (int)(size_t)zs_len(tv.input);
+            tx_snprintf(tv.input, sizeof tv.input, "/view %s", path); tv.ninput = (int)(size_t)zs_len(tv.input);
             tui_apply_key(&tv, TERM_KEY_ENTER, 0);
             ok = ok && zs_find(tv.log[tv.nlog - 1], "还有更多") && zs_find(tv.log[tv.nlog - 1], " 21");
             tui_type(&tv, "/view /nonexistent/x");
             ok = ok && zs_find(tv.log[tv.nlog - 1], "cannot open");
             if (tui_selftest_rm(path, 0)) failures++;
-            if (!ok) { printf("FAIL /view\n"); failures++; }
-            else printf("  ok   /view shows numbered lines and paging\n");
+            if (!ok) { sy_printf("FAIL /view\n"); failures++; }
+            else sy_printf("  ok   /view shows numbered lines and paging\n");
         }
         {
             /* /copy without touching the user's real tmux buffer: the refusals,
@@ -5416,17 +5417,17 @@ int tui_entry(int argc, char **argv) {
             tui_state_init(&tc2, NULL); tc2.mode = 1;
             tui_type(&tc2, "/copy");
             ok = zs_find(tc2.log[tc2.nlog - 1], "还没有可复制") != NULL;
-            snprintf(tc2.last_answer, sizeof tc2.last_answer, "%s", tricky);
+            tx_snprintf(tc2.last_answer, sizeof tc2.last_answer, "%s", tricky);
             sy_unsetenv("TMUX");
             tui_type(&tc2, "/copy");
             ok = ok && zs_find(tc2.log[tc2.nlog - 1], "不在 tmux") != NULL;
             if (tm) { sy_setenv("TMUX", tm, 1); mm_free(tm); }
             tui_sh_quote(q, sizeof q, tricky);
-            snprintf(cmd, sizeof cmd, "printf %%s %s", q);
+            tx_snprintf(cmd, sizeof cmd, "printf %%s %s", q);
             r = shell_run_in(cmd, "/");
             ok = ok && !zs_cmp(r.out, tricky);
-            if (!ok) { printf("FAIL /copy [%s]\n", r.out); failures++; }
-            else printf("  ok   /copy refuses when empty or outside tmux; quoting is exact\n");
+            if (!ok) { sy_printf("FAIL /copy [%s]\n", r.out); failures++; }
+            else sy_printf("  ok   /copy refuses when empty or outside tmux; quoting is exact\n");
         }
         {
             static tui_state tk2;
@@ -5434,11 +5435,11 @@ int tui_entry(int argc, char **argv) {
             fio_t *f;
             r_frame fr;
             int i, y = 0, x = 0, ok = 0, before;
-            snprintf(path, sizeof path, "/tmp/csih-click-%d.txt", (int)sy_pid());
+            tx_snprintf(path, sizeof path, "/tmp/csih-click-%d.txt", (int)sy_pid());
             f = tui_fopen(path, "w");
             if (f) { for (i = 1; i <= 5; i++) fio_printf(f, "row %d\n", i); fio_close(f); }
             tui_state_init(&tk2, NULL); tk2.mode = 1; tk2.rows = 24; tk2.cols = 120;
-            snprintf(text, sizeof text, "see %s:3 for details", path);
+            tx_snprintf(text, sizeof text, "see %s:3 for details", path);
             tui_log_plain(&tk2, text);
             fr = tui_render_state(&tk2, 120);
             for (i = 0; i < fr.n; i++) {
@@ -5455,8 +5456,8 @@ int tui_entry(int argc, char **argv) {
                 ok = ok && tk2.nlog == before;
             }
             if (tui_selftest_rm(path, 0)) failures++;
-            if (!ok) { printf("FAIL click path y=%d x=%d\n", y, x); failures++; }
-            else printf("  ok   clicking a file path opens it in /view at path:LINE\n");
+            if (!ok) { sy_printf("FAIL click path y=%d x=%d\n", y, x); failures++; }
+            else sy_printf("  ok   clicking a file path opens it in /view at path:LINE\n");
         }
 
         {
@@ -5466,11 +5467,11 @@ int tui_entry(int argc, char **argv) {
             char *oldhome = sy_env("HOME") ? mm_strdup(sy_env("HOME")) : NULL;
             fio_t *f;
             int ok;
-            snprintf(home, sizeof home, "/tmp/csih-cmd-%d", (int)sy_pid());
+            tx_snprintf(home, sizeof home, "/tmp/csih-cmd-%d", (int)sy_pid());
             tui_mkdir(home, 0700);
-            snprintf(d, sizeof d, "%s/.csih", home); tui_mkdir(d, 0700);
-            snprintf(d, sizeof d, "%s/.csih/commands", home); tui_mkdir(d, 0700);
-            snprintf(p, sizeof p, "%s/greet.md", d);
+            tx_snprintf(d, sizeof d, "%s/.csih", home); tui_mkdir(d, 0700);
+            tx_snprintf(d, sizeof d, "%s/.csih/commands", home); tui_mkdir(d, 0700);
+            tx_snprintf(p, sizeof p, "%s/greet.md", d);
             f = tui_fopen(p, "w"); if (f) { fio_puts("用中文问候 $ARGS，再说一遍 $ARGS\n", f); fio_close(f); }
             sy_setenv("HOME", home, 1);
             tui_state_init(&tcc, NULL); tcc.mode = 1; tcc.busy = 1;
@@ -5480,22 +5481,22 @@ int tui_entry(int argc, char **argv) {
             ok = ok && tcc.npending == 1 && zs_find(tcc.log[tcc.nlog - 1], "unknown command: /nosuchcmd");
             if (oldhome) { sy_setenv("HOME", oldhome, 1); mm_free(oldhome); }
             if (tui_selftest_rm(home, 1)) failures++;
-            if (!ok) { printf("FAIL custom command pending=%d [%s]\n", tcc.npending, tcc.npending ? tcc.pending[0] : ""); failures++; }
-            else printf("  ok   custom /command expands $ARGS from ~/.csih/commands\n");
+            if (!ok) { sy_printf("FAIL custom command pending=%d [%s]\n", tcc.npending, tcc.npending ? tcc.pending[0] : ""); failures++; }
+            else sy_printf("  ok   custom /command expands $ARGS from ~/.csih/commands\n");
             /* /retry queues the newest history line again */
             tui_state_init(&tcc, NULL); tcc.mode = 1; tcc.busy = 1;
             tui_type(&tcc, "/retry");
             ok = tcc.npending == 0 && zs_find(tcc.log[tcc.nlog - 1], "还没有发过");
-            snprintf(tcc.history[0], sizeof tcc.history[0], "跑一下测试"); tcc.nhistory = 1;
+            tx_snprintf(tcc.history[0], sizeof tcc.history[0], "跑一下测试"); tcc.nhistory = 1;
             tui_type(&tcc, "/retry");
             ok = ok && tcc.npending == 1 && !zs_cmp(tcc.pending[0], "跑一下测试");
-            if (!ok) { printf("FAIL /retry\n"); failures++; }
-            else printf("  ok   /retry sends the last prompt again\n");
+            if (!ok) { sy_printf("FAIL /retry\n"); failures++; }
+            else sy_printf("  ok   /retry sends the last prompt again\n");
             tui_type(&tcc, "/status");
             ok = tcc.nlog >= 2 && zs_find(tcc.log[tcc.nlog - 2], "状态：") && zs_find(tcc.log[tcc.nlog - 2], "权限 ")
                 && zs_find(tcc.log[tcc.nlog - 1], "busy=");
-            if (!ok) { printf("FAIL /status overview\n"); failures++; }
-            else printf("  ok   /status shows a readable overview above the raw fields\n");
+            if (!ok) { sy_printf("FAIL /status overview\n"); failures++; }
+            else sy_printf("  ok   /status shows a readable overview above the raw fields\n");
             {
                 /* /why keeps the last 5 distinct reasons, and listing them adds none */
                 int i3;
@@ -5503,20 +5504,20 @@ int tui_entry(int argc, char **argv) {
                 tui_state_init(&tcc, NULL); tcc.mode = 1;
                 tui_type(&tcc, "/why");
                 ok = zs_find(tcc.log[tcc.nlog - 1], "还没有失败") != NULL;
-                for (i3 = 1; i3 <= 7; i3++) { snprintf(r, sizeof r, "✗ 失败: 原因%d", i3); tui_log_plain(&tcc, r); }
+                for (i3 = 1; i3 <= 7; i3++) { tx_snprintf(r, sizeof r, "✗ 失败: 原因%d", i3); tui_log_plain(&tcc, r); }
                 tui_log_plain(&tcc, "✗ 失败: 原因7");          /* repeat: not stored twice */
                 tui_type(&tcc, "/why");
                 ok = ok && tcc.why.n == 7 && zs_find(tcc.log[tcc.nlog - 5], "原因3") && zs_find(tcc.log[tcc.nlog - 1], "原因7")
                     && !zs_find(tcc.log[tcc.nlog - 5], "原因2");
                 tui_type(&tcc, "/why");
                 ok = ok && tcc.why.n == 7 && zs_find(tcc.log[tcc.nlog - 5], "原因3");
-                if (!ok) { printf("FAIL /why n=%d\n", tcc.why.n); failures++; }
-                else printf("  ok   /why lists the last 5 reasons, listing adds none\n");
+                if (!ok) { sy_printf("FAIL /why n=%d\n", tcc.why.n); failures++; }
+                else sy_printf("  ok   /why lists the last 5 reasons, listing adds none\n");
             }
             {
                 char tp[128];
                 char *oldt = sy_env("CSIH_TRANSCRIPT") ? mm_strdup(sy_env("CSIH_TRANSCRIPT")) : NULL;
-                snprintf(tp, sizeof tp, "/tmp/csih-ctx-%d.jsonl", (int)sy_pid());
+                tx_snprintf(tp, sizeof tp, "/tmp/csih-ctx-%d.jsonl", (int)sy_pid());
                 f = tui_fopen(tp, "w");
                 if (f) { fio_puts("{\"role\":\"user\",\"text\":\"a\"}\n{\"role\":\"assistant\",\"text\":\"b\"}\n{\"role\":\"user\",\"text\":\"c\"}\n", f); fio_close(f); }
                 sy_setenv("CSIH_TRANSCRIPT", tp, 1);
@@ -5528,12 +5529,12 @@ int tui_entry(int argc, char **argv) {
                 ok = ok && zs_find(tcc.log[tcc.nlog - 2], "没有对话记录");
                 if (oldt) { sy_setenv("CSIH_TRANSCRIPT", oldt, 1); mm_free(oldt); } else sy_unsetenv("CSIH_TRANSCRIPT");
                 if (tui_selftest_rm(tp, 0)) failures++;
-                if (!ok) { printf("FAIL /context\n"); failures++; }
-                else printf("  ok   /context reports records, size and the trim rule\n");
+                if (!ok) { sy_printf("FAIL /context\n"); failures++; }
+                else sy_printf("  ok   /context reports records, size and the trim rule\n");
             }
         }
 
-        printf("%s\n", failures ? "SELFTEST FAILED" : "selftest ok");
+        sy_printf("%s\n", failures ? "SELFTEST FAILED" : "selftest ok");
         return failures == 0 ? 0 : 1;
     }
 
@@ -5545,7 +5546,7 @@ int tui_entry(int argc, char **argv) {
         int i, cols = 40;
         tui_state_init(&st, NULL);
         f = tui_render_state(&st, cols);
-        for (i = 0; i < f.n; i++) printf("%s|\n", f.lines[i]);
+        for (i = 0; i < f.n; i++) sy_printf("%s|\n", f.lines[i]);
         return 0;
     }
 
@@ -5557,22 +5558,22 @@ int tui_entry(int argc, char **argv) {
         char why[256];
         char *packet = NULL;
         if (argc != 5) {
-            printf("usage: context-index DIR SESSION HASH\n");
+            sy_printf("usage: context-index DIR SESSION HASH\n");
             return 64;
         }
         if (tui_owned_start(&st, argv[2], argv[3], argv[4], NULL, NULL, &token, why, sizeof why) != 0) {
-            printf("owned startup refused: %s\n", why);
+            sy_printf("owned startup refused: %s\n", why);
             return 1;
         }
         if (!context_index_packet(st.owned,st.owned_dir,&packet) || !packet) {
-            printf("context index failed\n");
+            sy_printf("context index failed\n");
             tui_owned_close(&st, why, sizeof why);
             return 1;
         }
-        printf("%s\n", packet);
+        sy_printf("%s\n", packet);
         mm_free(packet);
         if (tui_owned_close(&st, why, sizeof why) != 0) {
-            printf("ownership return not confirmed: %s\n", why);
+            sy_printf("ownership return not confirmed: %s\n", why);
             return 1;
         }
         return 0;
@@ -5595,12 +5596,12 @@ int tui_entry(int argc, char **argv) {
         int agent_mode = zs_cmp(cmd, "run") != 0;
         if ((owned_mode && !resume_mode && !managed_mode && argc != 5) || (resume_mode && argc != 7) ||
             (managed_mode && argc != (standby_mode ? 7 : 6))) {
-            printf("usage: agent-owned DIR SESSION HASH | resume-agent DIR STATE SESSION HANDOFF HASH\n");
+            sy_printf("usage: agent-owned DIR SESSION HASH | resume-agent DIR STATE SESSION HANDOFF HASH\n");
             return 64;
         }
 
-        if (!isatty(0) || !isatty(1)) {
-            printf("tui %s needs a terminal (stdin and stdout must be ttys)\n", cmd);
+        if (!sy_isatty(0) || !sy_isatty(1)) {
+            sy_printf("tui %s needs a terminal (stdin and stdout must be ttys)\n", cmd);
             return 64;
         }
         /* `tui run [spill] [transcript]` / `tui agent [spill] [transcript]`.
@@ -5619,21 +5620,21 @@ int tui_entry(int argc, char **argv) {
             /* Plain agent/run sessions share one input history across restarts. */
             if (!owned_mode && tui_env_has("HOME")) {
                 char hf[600];
-                snprintf(hf, sizeof hf, "%s/.csih", sy_env("HOME")); tui_mkdir(hf, 0750);
-                snprintf(hf, sizeof hf, "%s/.csih/history", sy_env("HOME"));
+                tx_snprintf(hf, sizeof hf, "%s/.csih", sy_env("HOME")); tui_mkdir(hf, 0750);
+                tx_snprintf(hf, sizeof hf, "%s/.csih/history", sy_env("HOME"));
                 tui_history_load(&st, hf);
             }
         }
         if (managed_mode && tui_managed_init(argv[2], argv[3], standby_mode ? argv[4] : "initial",
                 standby_mode ? argv[5] : argv[4], standby_mode ? argv[6] : argv[5], standby_mode) != 0) {
-            printf("managed startup refused\n"); return 1;
+            sy_printf("managed startup refused\n"); return 1;
         }
         if (owned_mode && !standby_mode && tui_owned_start(&st, argv[2], resume_mode ? argv[4] : argv[3],
                  resume_mode ? argv[6] : argv[4], resume_mode ? argv[3] : NULL,
                  resume_mode ? argv[5] : NULL, &resume_token, owned_why, sizeof owned_why) != 0) {
-            printf("owned startup refused: %s\n", owned_why);
+            sy_printf("owned startup refused: %s\n", owned_why);
             if (tui_owned_close(&st, owned_why, sizeof owned_why) != 0)
-                printf("ownership return not confirmed: %s\n", owned_why);
+                sy_printf("ownership return not confirmed: %s\n", owned_why);
             return 1;
         }
         st.mode = agent_mode ? 1 : 0;
@@ -5651,18 +5652,18 @@ int tui_entry(int argc, char **argv) {
         r_frame_init(&tui_prev);
         term_install_exit_handler(term_on_signal);
         if (!standby_mode && term_raw_enter() != 0) {
-            printf("cannot enter raw mode\n");
+            sy_printf("cannot enter raw mode\n");
             if (tui_owned_close(&st, owned_why, sizeof owned_why) != 0)
-                printf("ownership return not confirmed: %s\n", owned_why);
+                sy_printf("ownership return not confirmed: %s\n", owned_why);
             return 1;
         }
         /* Commit point: validated UI/context applied, ownership held, raw TTY
          * ready. Consume exactly once; cleanup failure is not a second apply. */
         if (resume_mode && reload_io_consume(argv[3], &resume_token, owned_why, sizeof owned_why) != 0) {
             term_raw_leave();
-            printf("restore committed; state cleanup failed: %s; do not reapply\n", owned_why);
+            sy_printf("restore committed; state cleanup failed: %s; do not reapply\n", owned_why);
             if (tui_owned_close(&st, owned_why, sizeof owned_why) != 0)
-                printf("ownership return not confirmed: %s\n", owned_why);
+                sy_printf("ownership return not confirmed: %s\n", owned_why);
             return 1;
         }
         if (managed_mode) {
@@ -5758,18 +5759,18 @@ int tui_entry(int argc, char **argv) {
             static const char restore[] = "\x1b[?25h\x1b[0m\n";
             tui_write_all(restore, sizeof restore - 1);
             /* One line left in the terminal: what this session cost and changed. */
-            if (!managed_mode && tui_session_summary(sum, sizeof sum)) printf("%s\n", sum);
+            if (!managed_mode && tui_session_summary(sum, sizeof sum)) sy_printf("%s\n", sum);
         }
         if (managed_mode) sy_close(tui_managed.fd);
         /* Successful retirement must not restore TTY state over the new actor. */
         /* show cursor, reset, newline */
         if (tui_owned_close(&st, owned_why, sizeof owned_why) != 0) {
-            printf("ownership return not confirmed: %s\n", owned_why); return 1;
+            sy_printf("ownership return not confirmed: %s\n", owned_why); return 1;
         }
         return 0;
     }
 
-    printf("usage: tui selftest | once | run | agent | agent-owned DIR SESSION HASH | resume-agent DIR STATE SESSION HANDOFF HASH\n");
+    sy_printf("usage: tui selftest | once | run | agent | agent-owned DIR SESSION HASH | resume-agent DIR STATE SESSION HANDOFF HASH\n");
     return 64;
 }
 

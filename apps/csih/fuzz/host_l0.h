@@ -31,4 +31,10 @@ void *mm_zalloc(long n);
 void *mm_grow(void *p, long n);
 void mm_free(void *p);
 char *mm_strdup(const char *s);
+int tx_vsnprintf(char *dst, size_t cap, const char *fmt, va_list ap);
+int tx_snprintf(char *dst, size_t cap, const char *fmt, ...);
+long tx_atol(const char *s);
+long tx_strtol(const char *s, char **end, int base);
+unsigned long tx_strtoul(const char *s, char **end, int base);
+double tx_strtod(const char *s, char **end);
 #endif

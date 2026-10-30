@@ -56,9 +56,11 @@ CXINC="-include $R/include/cx.h"
 L0INC="-include $R/apps/csih/fuzz/host_l0.h"
 # the fuzz drivers carry no #include (tests/cxinclude): their host headers come from here
 DRVINC="-include stdio.h -include stdlib.h -include string.h"
-L0OBJ="$TMP/zstr.o $TMP/text.o $TMP/bytes.o $TMP/heap.o"
+L0OBJ="$TMP/zstr.o $TMP/text.o $TMP/bytes.o $TMP/heap.o $TMP/fmt.o $TMP/num.o"
 if cp zstr.cx "$TMP/zstr.c" && cp text/text.cx "$TMP/text.c" && cp mem/bytes.cx "$TMP/bytes.c" \
-   && cp mem/heap.cx "$TMP/heap.c" \
+   && cp mem/heap.cx "$TMP/heap.c" && cp text/fmt.cx "$TMP/fmt.c" && cp text/num.cx "$TMP/num.c" \
+   && cc $CFLAGS $CXINC -c -o "$TMP/fmt.o" "$TMP/fmt.c" \
+   && cc $CFLAGS $CXINC -c -o "$TMP/num.o" "$TMP/num.c" \
    && cc $CFLAGS $CXINC -c -o "$TMP/text.o" "$TMP/text.c" \
    && cc $CFLAGS $CXINC -c -o "$TMP/bytes.o" "$TMP/bytes.c" \
    && cc $CFLAGS $CXINC -c -o "$TMP/heap.o" "$TMP/heap.c" \
